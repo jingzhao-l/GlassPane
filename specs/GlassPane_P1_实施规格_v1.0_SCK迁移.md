@@ -48,6 +48,13 @@ SCK 在 macOS 13 只有异步流式 API（`SCStream`+delegate）；macOS 14 新�
 > 2. 隔离实验确认 `SCScreenshotManager.captureImage` 严格尊重 `configuration.sourceRect`/`width`/`height`（配置 100×100 输出恰为 100×100，`pointPixelScale=2.0`），即裁剪链路无配置被忽略。
 > 3. **daemon 进程的 TCC 授权是独立席位**：XCTest runner 与 `glasspaned --check-screen-permission` 均 `granted`，但 daemon 进程 act 时上报 `circuitBreaker.level=1 / screen-recording-denied`（captureBefore=nil）。结论：系统按「每个二进制/进程上下文」分别记录屏幕录制授权；daemon 需用户额外放行。此即 `--guide-screen-permission` 的落地场景，降级路径与 P0 §8 完全一致（T3 仍可用、T6 INCONCLUSIVE）。
 
+> **实施记录（路径 B 落地，2026-09-16）**：`SCKCapturer.captureViaStream` + `snapViaStream` 已完成并编译通过（macOS 26 SDK）。
+> 1. **异步启动桥 `awaitStreamStart(of:)`**：`SCStream.startCapture()` 的 async 重载与 completion 版在同步帧内存在解析歧义（编译报 "async call in a function that does not support concurrency"），落地为「Task 内 `try await stream.startCapture()` + 外部 `DispatchSemaphore` 等待 + `AsyncBox` 传值」模式（与路径 A 的 `awaitGuardedNextImage` 同构），统一复用 `captureTimeoutSeconds` 5s 总预算。
+> 2. **首帧桥 `StreamFrameBridge`**（`NSObject, SCStreamOutput, SCStreamDelegate`）：`outputSampleBuffer` 首次回调收到 `CVPixelBuffer` 即 `signal`；`didStopWithError` 同样 `signal` 防永久阻塞；NSLock 保证线程安全。
+> 3. **缓冲生命周期**：锁定 base address 后经 `CGContext(data:nil)` + 逐行 `memcpy` 生成独立生命周期的 CGImage，不持有流内部缓冲；`defer { stream.stopCapture(completionHandler:) }` 保证超时/失败路径也释放流资源。
+> 4. **倍率来源**：macOS 13 无 `pointPixelScale`，回退 `NSScreen.backingScaleFactor`（AppKit 与 SCK 逻辑坐标系一致，P1-A2 已验证两坐标系等价）；找不到屏幕时保守 2x。
+> 5. **边界**：本机为 macOS 26，路径 B 仅编译保证，真机首帧行为延后到有 macOS 13 环境时验证（见 §5.2/§4 注）。
+
 ---
 
 ## 3. 权限检测与 onboarding
@@ -85,14 +92,14 @@ daemon 新增 `--check-screen-permission`（只读检测输出三态）与 `--gu
 | P1-A3 | 权限三态命令 | `--check-screen-permission` 输出合法枚举；`--guide-screen-permission` 在已授权态 no-op |
 | P1-A4 | 降级保持 | 无权限时 `captureWindow` 抛 `pixelCaptureDenied`，evidence 的 `pixelDiff==null` + `circuitBreaker.level==1` |
 | P1-A5 | 纯逻辑单测回归 | 既有 96 用例全绿；新增权限状态解析单测（注入 fake） |
-| P1-A6 | CI 兼容 | engine 在 macos-latest（macOS 13 runner）能 `swift build`（路径 B 编译分支存在） |
+| P1-A6 | CI 兼容 | engine 在 macos-latest（macOS 13 runner）能 `swift build`（路径 B 编译分支存在） | ✓ 路径 B 分支已实现并编译通过（2026-09-16） |
 
-> 注：macos-latest runner 现为 macOS 14+，路径 A 编译；macOS 13 的路径 B 分支无法在本机真机验证，以编译通过 + `#if os`/`#available` 保证兼容，真机验证延后至有 13 环境的 P1 批次（如实记录此边界）。
+> 注：macos-latest runner 现为 macOS 14+，路径 A 编译；macOS 13 的路径 B 分支已编译保证（`SCKCapturer.captureViaStream`/`snapViaStream`/`StreamFrameBridge` 全链路落地），真机首帧验证延后至有 13 环境的 P1 批次（如实记录此边界）。
 
 ---
 
 ## 5. 风险与边界（诚实声明）
 
 1. **CG 三态限制**：`notDetermined` 与 `denied` 无法由 CG 精确区分，P1 已声明降级为布尔模型；若后续需精确态，改用 `SCShareableContent` 自捕获空 + `TCC` 工作区检测（列后续）。
-2. **路径 B 未真机验证**：macOS 13 分支仅编译保证（见 P1-A6 注）。
+2. **路径 B 未真机验证**：macOS 13 分支已实现（路径 B 桥：`SCStream` + `StreamFrameBridge` + `DispatchSemaphore`），编译保证已通过（P1-A6 ✓）；但本机为 macOS 26，首帧真机行为未验证。风险点：SCStream 首帧经 IOSurface 传递，像素格式/方向/耗时与 macOS 13 实际运行环境强相关，若 macOS 13 上首帧延迟或回调时序不同，归 `pixelCaptureDenied` 降级（与 P0 一致，不破坏通道契约）。真机验证延后至有 13 环境的 P1 批次。
 3. **窗口裁剪漂移**：窗口缩放/最小化期间 SCK frame 可能滞后；捕获失败（如窗口离屏）归 `pixelCaptureDenied` 降级，与 P0 一致。
