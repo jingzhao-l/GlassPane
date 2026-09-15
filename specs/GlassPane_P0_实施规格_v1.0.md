@@ -103,7 +103,7 @@ GlassPane/
 | `attach` | `{bundleId?: string, pid?: integer}`（二选一） | `{pid, bundleId?, appName}` | GP_E_BAD_PARAMS / GP_E_APP_NOT_FOUND / GP_E_AX_UNAVAILABLE |
 | `act` | `{selector: {role: string, title?: string, identifier?: string}, action: "press"\|"increment"\|"decrement"\|"showMenu"\|"confirm"\|"cancel"\|"pick"}` | `{operationId, actConfirmed, axChanged, pixelChanged, latencyMs, evidenceId}` | GP_E_NOT_ATTACHED / GP_E_BAD_PARAMS / GP_E_ACT_FAILED / GP_E_AX_UNAVAILABLE |
 | `observe` | `{maxDepth?: integer(1–10, 默认 6), role?: string}` | `{axTree, nodeCount, digest, latencyMs}` | GP_E_NOT_ATTACHED / GP_E_BAD_PARAMS / GP_E_AX_UNAVAILABLE |
-| `assert_element` | `{selector, property: "title"\|"value"\|"role"\|"enabled"\|"focused", expected: string\|boolean}` | `{passed, actual, operationId, evidenceId}` | GP_E_NOT_ATTACHED / GP_E_BAD_PARAMS / GP_E_ASSERT_TARGET_NOT_FOUND / GP_E_AX_UNAVAILABLE |
+| `assert_element` | `{selector, property: "title"\|"value"\|"role"\|"enabled"\|"focused", expected: string\|boolean}` | `{passed, actual, operationId, evidenceId}` | GP_E_NOT_ATTACHED / GP_E_BAD_PARAMS / GP_E_ASSERT_TARGET_NOT_FOUND / GP_E_AX_UNAVAILABLE / GP_E_NO_OPERATION（无最近 op 可复用信号上下文；assert 证据的 signals 复用最近一次 act 的信号） |
 | `diagnose` | `{operationId?: string(缺省=最近一次 act)}` | `{class, report: {path, anomaly, evidence, next}}` | GP_E_NOT_ATTACHED / GP_E_BAD_PARAMS / GP_E_NO_OPERATION |
 | `last_evidence` | `{operationId?: string}` | `{evidencePack}`（完整 evidence 包 JSON） | GP_E_BAD_PARAMS / GP_E_NO_OPERATION |
 | `shutdown` | `{}` | `{bye: true}`（随后 daemon 退出） | — |
