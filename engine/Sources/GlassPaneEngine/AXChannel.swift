@@ -142,16 +142,12 @@ public final class AXChannel: RuntimeChannel {
                 reason: "no on-screen window owned by pid \(attached.pid)"
             )
         }
-        guard let image = CGWindowListCreateImage(
-            bounds,
-            [.optionOnScreenOnly],
-            CGWindowID(windowId),
-            [.bestResolution]
-        ) else {
-            throw ChannelError.pixelCaptureDenied(
-                reason: "window capture returned no image (screen recording permission?)"
-            )
-        }
+        // P1: pixel capture migrated from deprecated CGWindowListCreateImage
+        // to ScreenCaptureKit (GlassPane_P1_实施规格_v1.0_SCK迁移.md §2).
+        let image = try SCKCapturer.captureWindow(
+            ownerPid: attached.pid,
+            windowId: windowId
+        )
         return WindowCapture(
             windowId: windowId,
             bounds: Bounds(x: bounds.minX, y: bounds.minY, width: bounds.width, height: bounds.height),

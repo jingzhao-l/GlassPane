@@ -8,12 +8,16 @@ import GlassPaneEngine
 /// Usage:
 ///   glasspaned [--socket-path <path>] [--verbose]
 ///   glasspaned --grant-accessibility
+///   glasspaned --check-screen-permission
+///   glasspaned --guide-screen-permission
 ///   glasspaned --help
 
 private struct Options {
     var socketPath: String?
     var verbose = false
     var grantAccessibility = false
+    var checkScreenPermission = false
+    var guideScreenPermission = false
 }
 
 private enum ParseResult {
@@ -34,6 +38,10 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             options.verbose = true
         case "--grant-accessibility":
             options.grantAccessibility = true
+        case "--check-screen-permission":
+            options.checkScreenPermission = true
+        case "--guide-screen-permission":
+            options.guideScreenPermission = true
         case "--socket-path":
             guard index + 1 < arguments.count else {
                 return .error("--socket-path requires a value")
@@ -63,11 +71,17 @@ private func printUsage() {
     USAGE:
         glasspaned [--socket-path <path>] [--verbose]
         glasspaned --grant-accessibility
+        glasspaned --check-screen-permission
+        glasspaned --guide-screen-permission
 
     OPTIONS:
         --socket-path <path>   Unix socket path (default: ~/.glasspane/engine.sock)
         --verbose             Log frames and state transitions to stderr
         --grant-accessibility  Onboarding: prompt for accessibility permission
+        --check-screen-permission   Print screen recording permission state
+                                 (granted | denied | notDetermined) and exit
+        --guide-screen-permission   Prompt for screen recording permission
+                                 (no-op when already granted) and exit
         --help, -h            Show this help
 
     PROTOCOL:
@@ -124,6 +138,43 @@ private func openPrivacyPane() {
     }
 }
 
+// MARK: - Onboarding (P1 §3: screen recording permission)
+
+private func openScreenRecordingPane() {
+    let paneURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    process.arguments = [paneURL]
+    do {
+        try process.run()
+    } catch {
+        // Best-effort; the system authorization dialog is the primary path.
+    }
+}
+
+private func runCheckScreenPermission(_ probe: ScreenCapturePermissionProbe) {
+    print(probe.state.rawValue)
+}
+
+private func runGuideScreenPermission(_ probe: ScreenCapturePermissionProbe) {
+    switch probe.state {
+    case .granted:
+        print("screen recording permission already granted — no action needed.")
+    case .notDetermined:
+        print("Screen recording permission has not been granted yet. A system authorization dialog is being requested now.")
+        let outcome = probe.guideAccess()
+        openScreenRecordingPane()
+        if outcome == .granted {
+            print("Screen recording permission granted.")
+        } else {
+            print("Permission still denied after the request. Enable the entry for this app under System Settings > Privacy & Security > Screen Recording, then re-run: glasspaned --check-screen-permission")
+        }
+    case .denied:
+        print("Screen recording permission is denied. Open System Settings > Privacy & Security > Screen Recording and enable the entry for this app, then re-run: glasspaned --check-screen-permission")
+        openScreenRecordingPane()
+    }
+}
+
 // MARK: - Signals
 
 private func installSignalHandlers(_ server: SocketServer) {
@@ -161,6 +212,18 @@ case .parsed(let parsed):
 
 if options.grantAccessibility {
     runGrantAccessibilityFlow()
+    exit(0)
+}
+
+if options.checkScreenPermission || options.guideScreenPermission {
+    // P1 §3: 屏幕录制权限探针复用单例，保证两命令在同一进程内状态一致。
+    let probe = ScreenCapturePermissionProbe()
+    if options.checkScreenPermission {
+        runCheckScreenPermission(probe)
+    }
+    if options.guideScreenPermission {
+        runGuideScreenPermission(probe)
+    }
     exit(0)
 }
 
