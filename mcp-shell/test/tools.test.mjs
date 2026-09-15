@@ -5,7 +5,7 @@ import { TOOL_SPECS, TOOL_BY_NAME, executeTool } from "../dist/tools.js";
 import { canonicalJson } from "../dist/canonical.js";
 import { makeEngine } from "./helpers.mjs";
 
-test("tools/list shape: six tools with expected names and methods", () => {
+test("tools/list shape: eight tools with expected names and methods", () => {
   const names = TOOL_SPECS.map((spec) => spec.name);
   assert.deepEqual(names, [
     "gp_attach",
@@ -14,11 +14,13 @@ test("tools/list shape: six tools with expected names and methods", () => {
     "gp_assert_element",
     "gp_diagnose",
     "gp_last_evidence",
+    "gp_snapshot",
+    "gp_restore",
   ]);
-  assert.equal(TOOL_BY_NAME.size, 6);
+  assert.equal(TOOL_BY_NAME.size, 8);
   assert.deepEqual(
     TOOL_SPECS.map((s) => s.engineMethod),
-    ["attach", "observe", "act", "assert_element", "diagnose", "last_evidence"],
+    ["attach", "observe", "act", "assert_element", "diagnose", "last_evidence", "snapshot", "restore"],
   );
   assert.equal(TOOL_SPECS.every((s) => s.name.startsWith("gp_")), true);
 });
@@ -116,4 +118,64 @@ test("last_evidence rejects a malformed frame (no evidencePack) as isError", asy
   const outcome = await promise;
   assert.equal(outcome.isError, true);
   assert.ok(outcome.content[0].text.startsWith("GP_E_INTERNAL"));
+});
+
+test("gp_snapshot forwards maxDepth and returns the snapshot result", async () => {
+  const { engine, io } = makeEngine();
+  const snap = TOOL_BY_NAME.get("gp_snapshot");
+  const result = { snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS", treeDigest: "d".repeat(32), nodeCount: 12, capturedAt: "2026-09-16T00:00:00.000Z", latencyMs: 3 };
+  const promise = executeTool(snap, { maxDepth: 4 }, engine);
+  const frame = io.lastFrame();
+  assert.equal(frame.method, "snapshot");
+  assert.equal(frame.params.maxDepth, 4);
+  io.respond(result);
+  const outcome = await promise;
+  assert.equal(outcome.isError, false);
+  assert.equal(outcome.content[0].text, canonicalJson(result));
+});
+
+test("gp_snapshot rejects out-of-range maxDepth as GP_E_BAD_PARAMS", async () => {
+  const { engine, io } = makeEngine();
+  const snap = TOOL_BY_NAME.get("gp_snapshot");
+  const outcome = await executeTool(snap, { maxDepth: 11 }, engine);
+  assert.equal(outcome.isError, true);
+  assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"));
+  assert.equal(engine.io.sent.length, 0);
+});
+
+test("gp_restore forwards snapshotId, steps and mode, returning restore result", async () => {
+  const { engine, io } = makeEngine();
+  const restore = TOOL_BY_NAME.get("gp_restore");
+  const result = { snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS", baselineTreeDigest: "d".repeat(32), steps: [{ selector: { role: "AXButton" }, action: "press", actConfirmed: true, operationId: "op_0123456789ABCDEFGHJKMNPQRS" }], confirmed: 1, total: 1 };
+  const promise = executeTool(restore, {
+    snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS",
+    steps: [{ selector: { role: "AXButton" }, action: "press" }],
+  }, engine);
+  const frame = io.lastFrame();
+  assert.equal(frame.method, "restore");
+  assert.equal(frame.params.snapshotId, "snap_0123456789ABCDEFGHJKMNPQRS");
+  assert.equal(frame.params.steps.length, 1);
+  io.respond(result);
+  const outcome = await promise;
+  assert.equal(outcome.isError, false);
+  assert.equal(outcome.content[0].text, canonicalJson(result));
+});
+
+test("gp_restore rejects a malformed snapshotId as GP_E_BAD_PARAMS", async () => {
+  const { engine, io } = makeEngine();
+  const restore = TOOL_BY_NAME.get("gp_restore");
+  const outcome = await executeTool(restore, { snapshotId: "op_0123456789ABCDEFGHJKMNPQRS" }, engine);
+  assert.equal(outcome.isError, true);
+  assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"));
+  assert.equal(engine.io.sent.length, 0);
+});
+
+test("gp_restore rejects steps beyond 64 entries as GP_E_BAD_PARAMS", async () => {
+  const { engine, io } = makeEngine();
+  const restore = TOOL_BY_NAME.get("gp_restore");
+  const steps = Array.from({ length: 65 }, () => ({ selector: { role: "AXButton" }, action: "press" }));
+  const outcome = await executeTool(restore, { snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS", steps }, engine);
+  assert.equal(outcome.isError, true);
+  assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"));
+  assert.equal(engine.io.sent.length, 0);
 });

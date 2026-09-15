@@ -61,6 +61,10 @@ public final class Dispatcher {
             return try handleDiagnose(request.params)
         case .lastEvidence:
             return try handleLastEvidence(request.params)
+        case .snapshot:
+            return try handleSnapshot(request.params)
+        case .restore:
+            return try handleRestore(request.params)
         case .shutdown:
             return core.shutdown()
         }
@@ -109,6 +113,22 @@ public final class Dispatcher {
         let data = try pack.jsonData()
         let object = try JSONSerialization.jsonObject(with: data)
         return ["evidencePack": object]
+    }
+
+    private func handleSnapshot(_ params: [String: Any]) throws -> [String: Any] {
+        let maxDepth = try ParamValidation.optInt(
+            params,
+            "maxDepth",
+            range: ParamValidation.observeMaxDepthLower...ParamValidation.observeMaxDepthUpper
+        ) ?? EngineCore.defaultObserveDepth
+        return try core.snapshot(maxDepth: maxDepth)
+    }
+
+    private func handleRestore(_ params: [String: Any]) throws -> [String: Any] {
+        let snapshotId = try ParamValidation.requireSnapshotId(params)
+        let steps = try ParamValidation.optSteps(params)
+        let mode = try ParamValidation.optString(params, "mode", maxLength: 32)
+        return try core.restore(snapshotId: snapshotId, steps: steps, mode: mode)
     }
 
     // MARK: - Response encoding

@@ -43,6 +43,23 @@ public struct WindowCapture {
     }
 }
 
+/// An in-memory baseline of the attached app's observable state
+/// (P1 spec v1.1 §1.5). Kept digest-only — no tree copy — so the retention
+/// cap stays bounded.
+public struct AppStateSnapshot: Equatable {
+    public let snapshotId: String
+    public let treeDigest: String
+    public let nodeCount: Int
+    public let capturedAt: String
+
+    public init(snapshotId: String, treeDigest: String, nodeCount: Int, capturedAt: String) {
+        self.snapshotId = snapshotId
+        self.treeDigest = treeDigest
+        self.nodeCount = nodeCount
+        self.capturedAt = capturedAt
+    }
+}
+
 public enum ChannelError: Error, Equatable {
     /// AX API unavailable — typically missing accessibility permission.
     case axUnavailable(reason: String)

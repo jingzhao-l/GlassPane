@@ -14,6 +14,9 @@ public enum GPErrorCode: String, Codable {
     case actFailed = "GP_E_ACT_FAILED"
     case assertTargetNotFound = "GP_E_ASSERT_TARGET_NOT_FOUND"
     case noOperation = "GP_E_NO_OPERATION"
+    case noSnapshot = "GP_E_NO_SNAPSHOT"
+    case restoreUnsupported = "GP_E_RESTORE_UNSUPPORTED"
+    case restoreStepFailed = "GP_E_RESTORE_STEP_FAILED"
     case internalError = "GP_E_INTERNAL"
 }
 
@@ -42,7 +45,7 @@ public struct GPError: Error {
         case .payloadTooLarge:
             return "reduce observe maxDepth or narrow the selector scope"
         case .methodNotFound:
-            return "use a method from the protocol method table (hello/attach/act/observe/assert_element/diagnose/last_evidence/shutdown)"
+            return "use a method from the protocol method table (hello/attach/act/observe/assert_element/diagnose/last_evidence/snapshot/restore/shutdown)"
         case .badParams:
             return "fix the parameters according to the method table"
         case .notAttached:
@@ -57,6 +60,12 @@ public struct GPError: Error {
             return "verify the selector or run observe first to inspect the tree"
         case .noOperation:
             return "run act or assert_element first"
+        case .noSnapshot:
+            return "run gp_snapshot first, then restore with that snapshotId"
+        case .restoreUnsupported:
+            return "use tier-2 ffwd (pass steps) or wait for the Z5 snapshot batch"
+        case .restoreStepFailed:
+            return "fix the failing step in the steps array (see the failed step index), then retry restore"
         case .internalError:
             return "check the daemon log (stderr) and retry"
         }

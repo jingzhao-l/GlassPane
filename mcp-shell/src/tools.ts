@@ -28,6 +28,16 @@ const OptionalOperationIdSchema = z.string().regex(/^op_[0-9A-HJKMNP-TV-Z]{26}$/
 
 const ExpectSchema = z.union([z.string().max(512), z.boolean()]);
 
+/** Crockford base32 body shared by op_/snap_ ids (P0 §4.1 / P1 v1.1 §1.2). */
+const SnapshotIdSchema = z.string().regex(/^snap_[0-9A-HJKMNP-TV-Z]{26}$/);
+
+const ActStepSchema = z.strictObject({
+  selector: SelectorSchema,
+  action: ActionSchema,
+});
+const RestoreStepsSchema = z.array(ActStepSchema).min(1).max(64).optional();
+const RestoreModeSchema = z.string().max(32).optional();
+
 export const AttachArgs = z.strictObject({
   bundleId: OptionalBundleIdSchema,
   pid: OptionalUintSchema,
@@ -64,6 +74,18 @@ export const LastEvidenceArgs = z.strictObject({
   operationId: OptionalOperationIdSchema,
 });
 export type LastEvidenceArgs = z.infer<typeof LastEvidenceArgs>;
+
+export const SnapshotArgs = z.strictObject({
+  maxDepth: OptionalDepthSchema,
+});
+export type SnapshotArgs = z.infer<typeof SnapshotArgs>;
+
+export const RestoreArgs = z.strictObject({
+  snapshotId: SnapshotIdSchema,
+  steps: RestoreStepsSchema,
+  mode: RestoreModeSchema,
+});
+export type RestoreArgs = z.infer<typeof RestoreArgs>;
 
 /* ------------------------------------------------------------------ *
  * Tool table (spec §6.2). Each tool maps to one engine method and passes
@@ -205,6 +227,51 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
     },
     validate: zodBridge(LastEvidenceArgs),
+  },
+  {
+    name: "gp_snapshot",
+    description: "Capture a digest-only baseline of the attached app's AX tree for later restore.",
+    engineMethod: "snapshot",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        maxDepth: { type: "integer", minimum: 1, maximum: 10 },
+      },
+    },
+    validate: zodBridge(SnapshotArgs),
+  },
+  {
+    name: "gp_restore",
+    description: "Restore from a snapshot: replay act steps over the baseline (tier-2 ffwd), or compare the current tree against it when steps are omitted.",
+    engineMethod: "restore",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        snapshotId: { type: "string", pattern: "^snap_[0-9A-HJKMNP-TV-Z]{26}$" },
+        steps: {
+          type: "array",
+          minItems: 1,
+          maxItems: 64,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              selector: selectorJsonSchema,
+              action: {
+                type: "string",
+                enum: ["press", "increment", "decrement", "showMenu", "confirm", "cancel", "pick"],
+              },
+            },
+            required: ["selector", "action"],
+          },
+        },
+        mode: { type: "string", maxLength: 32 },
+      },
+      required: ["snapshotId"],
+    },
+    validate: zodBridge(RestoreArgs),
   },
 ];
 

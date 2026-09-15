@@ -12,6 +12,12 @@ public final class EngineCore {
     public static let pingTimeoutMs: Double = 2000
     /// Evidence packs kept in memory (P0: recent entries only, never on disk).
     public static let historyLimit = 64
+    /// Performance circuit-breaker budget (P1 spec v1.1 §2.2): an act whose
+    /// full pipeline exceeds this wall-clock budget is flagged so diagnosis
+    /// can separate "channel slow" from "channel broken".
+    public static let performanceLatencyBudgetMs: Double = 10_000
+    /// In-memory snapshot retention cap (P1 spec v1.1 §1.5).
+    public static let snapshotHistoryLimit = 8
 
     public let version = "0.1.0"
     public let protocolVersion = "0"
@@ -22,6 +28,8 @@ public final class EngineCore {
     private let clock: () -> Date
     private let settle: () -> Void
     private var history: [EvidencePack] = []
+    /// Recent app-state snapshots (P1 spec v1.1 §1.5); FIFO-evicted.
+    private var snapshots: [AppStateSnapshot] = []
 
     public init(
         channel: RuntimeChannel,
@@ -55,7 +63,7 @@ public final class EngineCore {
             "version": version,
             "protocolVersion": protocolVersion,
             "pid": Int(ProcessInfo.processInfo.processIdentifier),
-            "capabilities": ["act", "observe", "assert_element", "diagnose"]
+            "capabilities": ["act", "observe", "assert_element", "diagnose", "snapshot", "restore"]
         ]
     }
 
@@ -197,12 +205,26 @@ public final class EngineCore {
             level = .normal
         }
 
+        // Performance circuit breaker (P1 spec v1.1 §2): an act that exceeded
+        // the wall-clock budget is flagged. Escalation only — never lowers an
+        // existing channel-fault level, and level 2/3 are untouched by max.
+        let finalLevel: CircuitBreakerLevel
+        let finalReason: String?
+        if latencyMs > Self.performanceLatencyBudgetMs {
+            finalLevel = CircuitBreakerLevel(rawValue: max(level.rawValue, CircuitBreakerLevel.degraded.rawValue)) ?? level
+            let perfReason = "performance-act-latency-over-budget: \(Int(latencyMs.rounded()))ms > \(Int(Self.performanceLatencyBudgetMs))ms"
+            finalReason = reason.map { "performance|" + $0 } ?? perfReason
+        } else {
+            finalLevel = level
+            finalReason = reason
+        }
+
         let operationId = OperationID.generateLive()
         let pack = EvidencePack(
             operationId: operationId,
             createdAt: nowISO(),
             attribution: Attribution(level: .soft, contaminated: false),
-            circuitBreaker: CircuitBreaker(level: level, reason: reason),
+            circuitBreaker: CircuitBreaker(level: finalLevel, reason: finalReason),
             signals: Signals(
                 act: ActSignal(selector: selector, action: action, actConfirmed: actConfirmed),
                 axEvent: axEvent,
@@ -348,6 +370,136 @@ public final class EngineCore {
     public func shutdown() -> [String: Any] {
         shutdownRequested = true
         return ["bye": true]
+    }
+
+    // MARK: - P1 snapshot/restore (spec v1.1 §1)
+
+    /// Captures a digest-only baseline of the attached app's AX tree and
+    /// stores it in the bounded in-memory snapshot store (§1.2 snapshot).
+    public func snapshot(maxDepth: Int) throws -> [String: Any] {
+        guard attachedApp != nil else {
+            throw GPError(code: .notAttached, message: "no app attached")
+        }
+        let started = clock()
+        let tree: AxTreeSnapshot
+        do {
+            tree = try channel.treeSnapshot(maxDepth: maxDepth)
+        } catch let error as ChannelError {
+            throw EngineCore.map(error)
+        }
+        let snapshot = AppStateSnapshot(
+            snapshotId: OperationID.generateSnapshotLive(),
+            treeDigest: tree.digest,
+            nodeCount: tree.nodeCount,
+            capturedAt: nowISO()
+        )
+        storeSnapshot(snapshot)
+        let latencyMs = clock().timeIntervalSince(started) * 1000
+        return [
+            "snapshotId": snapshot.snapshotId,
+            "treeDigest": snapshot.treeDigest,
+            "nodeCount": snapshot.nodeCount,
+            "capturedAt": snapshot.capturedAt,
+            "latencyMs": latencyMs
+        ]
+    }
+
+    /// Restores from a stored snapshot. With `steps`, replays them via the
+    /// standard act pipeline (tier-2 ffwd); without steps, compares the
+    /// current tree digest against the baseline. Tier-1 full snapshot
+    /// restore requires the Z5 probe SDK and is rejected by design (§1.2).
+    public func restore(
+        snapshotId: String,
+        steps: [(Selector, Action)]?,
+        mode: String? = nil
+    ) throws -> [String: Any] {
+        guard attachedApp != nil else {
+            throw GPError(code: .notAttached, message: "no app attached")
+        }
+        if mode == "restore_snapshot" {
+            // Tier-1 full-snapshot restore depends on the Z5 probe SDK
+            // (综述 §5.7 不可快照区). Not entered in P1 — surface the honest
+            // boundary as a structured error with a concrete remedy.
+            throw GPError(
+                code: .restoreUnsupported,
+                message: "mode 'restore_snapshot' (tier-1 full snapshot restore) requires the Z5 probe SDK, which is not in P1"
+            )
+        }
+        guard let snapshot = snapshot(withId: snapshotId) else {
+            throw GPError(code: .noSnapshot, message: "unknown snapshotId \(snapshotId)")
+        }
+
+        guard let steps else {
+            // Baseline-consistency form: compare current tree against the
+            // snapshot digest. confirmed/total stay 0 — no step ran.
+            let tree = try currentTreeDigest()
+            let consistent = tree.digest == snapshot.treeDigest
+            return [
+                "snapshotId": snapshot.snapshotId,
+                "baselineTreeDigest": snapshot.treeDigest,
+                "steps": [],
+                "confirmed": 0,
+                "total": 0,
+                "targetDigest": tree.digest,
+                "consistent": consistent
+            ]
+        }
+
+        var stepResults: [[String: Any]] = []
+        stepResults.reserveCapacity(steps.count)
+        for (index, step) in steps.enumerated() {
+            do {
+                let outcome = try act(selector: step.0, action: step.1)
+                // act() throws GP_E_ACT_FAILED on rejection; reaching here
+                // means the step was confirmed.
+                stepResults.append([
+                    "selector": ["role": step.0.role, "title": step.0.title ?? "", "identifier": step.0.identifier ?? ""],
+                    "action": step.1.rawValue,
+                    "actConfirmed": true,
+                    "operationId": outcome["operationId"] as? String ?? ""
+                ])
+            } catch {
+                throw GPError(
+                    code: .restoreStepFailed,
+                    message: "ffwd step \(index) failed: \(error.localizedDescription)"
+                )
+            }
+        }
+
+        // Post-roll-forward target tree for the consistency reference.
+        let target = try? currentTreeDigest()
+        return [
+            "snapshotId": snapshot.snapshotId,
+            "baselineTreeDigest": snapshot.treeDigest,
+            "steps": stepResults,
+            "confirmed": stepResults.count,
+            "total": steps.count,
+            "targetDigest": target?.digest as Any,
+            "consistent": target.map { $0.digest == snapshot.treeDigest } ?? false
+        ]
+    }
+
+    // MARK: - P1 snapshot/restore internals
+
+    private func snapshot(withId snapshotId: String) -> AppStateSnapshot? {
+        snapshots.first { $0.snapshotId == snapshotId }
+    }
+
+    private func storeSnapshot(_ snapshot: AppStateSnapshot) {
+        snapshots.append(snapshot)
+        if snapshots.count > EngineCore.snapshotHistoryLimit {
+            snapshots.removeFirst(snapshots.count - EngineCore.snapshotHistoryLimit)
+        }
+    }
+
+    private func currentTreeDigest() throws -> AxTreeSnapshot {
+        // Tree capture failures surface as GP_E_AX_UNAVAILABLE, matching
+        // observe's error vocabulary (§1.2 restore error codes).
+        do {
+            return try channel.treeSnapshot(maxDepth: Self.defaultObserveDepth)
+        } catch let error as ChannelError {
+            throw EngineCore.map(error)
+        }
     }
 
     // MARK: - Internals

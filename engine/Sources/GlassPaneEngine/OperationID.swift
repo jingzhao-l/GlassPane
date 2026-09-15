@@ -7,11 +7,17 @@ import Security
 public enum OperationID {
     public static let crockfordAlphabet: [Character] = Array("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
     public static let prefix = "op_"
+    public static let snapshotPrefix = "snap_"
     public static let totalLength = 26
 
     /// Deterministic construction from a millisecond timestamp and 80 bits of
     /// entropy (10 bytes). Pure function — unit-testable.
     public static func generate(milliseconds: UInt64, entropy: [UInt8]) -> String {
+        generate(milliseconds: milliseconds, entropy: entropy, prefix: prefix)
+    }
+
+    /// Deterministic construction with an explicit id prefix (op_/snap_).
+    public static func generate(milliseconds: UInt64, entropy: [UInt8], prefix: String) -> String {
         precondition(entropy.count == 10, "entropy must be exactly 10 bytes (80 bits)")
         // 128-bit big-endian value: 48-bit timestamp high part + 80-bit entropy.
         var bytes: [UInt8] = [
@@ -45,6 +51,16 @@ public enum OperationID {
 
     /// Live generation: current time + cryptographically secure entropy.
     public static func generateLive() -> String {
+        generateLive(prefix: prefix)
+    }
+
+    /// Live snapshot identifier: same 26-char body, `snap_` prefix
+    /// (P1 spec §1.2 snapshotId pattern).
+    public static func generateSnapshotLive() -> String {
+        generateLive(prefix: snapshotPrefix)
+    }
+
+    private static func generateLive(prefix: String) -> String {
         let milliseconds = UInt64(Date().timeIntervalSince1970 * 1000)
         var entropy = [UInt8](repeating: 0, count: 10)
         let status = SecRandomCopyBytes(kSecRandomDefault, entropy.count, &entropy)
@@ -59,7 +75,7 @@ public enum OperationID {
                 entropy[index] = UInt8(truncatingIfNeeded: state >> 33)
             }
         }
-        return generate(milliseconds: milliseconds, entropy: entropy)
+        return generate(milliseconds: milliseconds, entropy: entropy, prefix: prefix)
     }
 
     /// Bit at `index` (0 = most significant bit of the 128-bit value).
