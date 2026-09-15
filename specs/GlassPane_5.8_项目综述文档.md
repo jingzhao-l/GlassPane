@@ -457,7 +457,7 @@ P-1 产出：Go/No-Go 决策 + 修正后的断言阈值与降级路径。
 
 **5.8 增补条目**：
 
-- **P0 实施启动（5.8 新增，R41–R45）**：P0 walking skeleton 进入实施。工具链与结构决策：Engine=SwiftPM（swift-tools-version 5.9，macOS 13+），kernel/mcp-shell=TypeScript（node ≥18，精确版本钉扎：zod 3.25.76 / ajv 8.17.1 / typescript 5.9.3，许可证均为 MIT，符合宽松许可证准入）；仓库结构=monorepo（engine/ kernel/ mcp-shell/ specs/）；实施级契约（socket 协议方法表、GP_E 错误码表、MCP 工具契约、schema 字段表）见《GlassPane P0 实施规格》与 §18 索引。
+- **P0 实施启动（5.8 新增，R41–R45）**：P0 walking skeleton 进入实施。工具链与结构决策：Engine=SwiftPM（swift-tools-version 5.9，macOS 13+），kernel/mcp-shell=TypeScript（node ≥18，精确版本钉扎：zod 3.25.76 / ajv 8.20.0 / typescript 5.9.3，许可证均为 MIT，符合宽松许可证准入）；仓库结构=monorepo（engine/ kernel/ mcp-shell/ specs/）；实施级契约（socket 协议方法表、GP_E 错误码表、MCP 工具契约、schema 字段表）见《GlassPane P0 实施规格》与 §18 索引。
 - **P0 验收的可测性口径（5.8 R45）**：纯逻辑单测（协议编解码/九分类判定/tree digest/pixel diff/evidence codec）在无 GUI 权限环境 100% 可跑（CI 兼容）；AX 适配层以真机冒烟脚本验收（需辅助功能权限）；C35 两侧测试套件对同一组真值 fixtures 独立 roundtrip（kernel 侧 + engine 侧），跨语言一致性由此持续成立。
 
 ### 10.3 决策门重试预算

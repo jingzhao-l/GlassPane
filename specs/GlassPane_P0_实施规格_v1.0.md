@@ -51,7 +51,7 @@ GlassPane/
 | 包 | 精确版本 | 用途 | 许可证 |
 |---|---|---|---|
 | zod | 3.25.76 | kernel TS 绑定 | MIT |
-| ajv | 8.17.1 | JSON Schema 真值校验（draft 2020-12） | MIT |
+| ajv | 8.20.0 | JSON Schema 真值校验（draft 2020-12） | MIT |
 | typescript | 5.9.3 | devDep，类型检查与编译 | Apache-2.0 |
 | @types/node | 与 node 26 对应的已发布版本 | devDep，类型 | MIT |
 
