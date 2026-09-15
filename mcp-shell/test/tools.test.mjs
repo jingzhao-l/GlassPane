@@ -68,3 +68,52 @@ test("executeTool maps an engine error frame to isError with GP_E prefix", async
   assert.ok(outcome.content[0].text.startsWith("GP_E_NOT_ATTACHED"));
   assert.ok(outcome.content[0].text.includes("| remedy: call attach first"));
 });
+
+test("last_evidence passes through a valid evidence pack (spec §6.3)", async () => {
+  const { engine, io } = makeEngine();
+  const lv = TOOL_BY_NAME.get("gp_last_evidence");
+  const promise = executeTool(lv, {}, engine);
+  io.respond({
+    evidencePack: {
+      schemaVersion: "glasspane.evidence/0.1-draft",
+      operationId: "op_0123456789ABCDEFGHJKMNPQRS",
+      createdAt: "2026-09-15T00:00:00.000Z",
+      attribution: { level: "soft", contaminated: false },
+      circuitBreaker: { level: 0 },
+      signals: {
+        act: { selector: { role: "AXButton" }, action: "press", actConfirmed: true },
+        axEvent: { axChanged: false, latencyMs: 9, nodeCount: 42,
+          treeDigestBefore: "a".repeat(32), treeDigestAfter: "b".repeat(32) },
+        handlerProbe: null,
+        stateDiff: null,
+      },
+      assertion: null,
+      diagnosis: null,
+    },
+  });
+  const outcome = await promise;
+  assert.equal(outcome.isError, false);
+  assert.equal(outcome.content.length, 1);
+});
+
+test("last_evidence rejects a schema-violating pack as isError (spec §6.3)", async () => {
+  const { engine, io } = makeEngine();
+  const lv = TOOL_BY_NAME.get("gp_last_evidence");
+  const promise = executeTool(lv, {}, engine);
+  // operationId violates the op_ pattern and createdAt is not ISO-8601 UTC.
+  io.respond({ evidencePack: { schemaVersion: "nope", operationId: "bad", createdAt: "x", attribution: {}, circuitBreaker: {}, signals: {} } });
+  const outcome = await promise;
+  assert.equal(outcome.isError, true);
+  assert.ok(outcome.content[0].text.startsWith("GP_E_INTERNAL"));
+  assert.ok(outcome.content[0].text.includes("invalid evidence pack"));
+});
+
+test("last_evidence rejects a malformed frame (no evidencePack) as isError", async () => {
+  const { engine, io } = makeEngine();
+  const lv = TOOL_BY_NAME.get("gp_last_evidence");
+  const promise = executeTool(lv, {}, engine);
+  io.respond({ unexpected: true });
+  const outcome = await promise;
+  assert.equal(outcome.isError, true);
+  assert.ok(outcome.content[0].text.startsWith("GP_E_INTERNAL"));
+});

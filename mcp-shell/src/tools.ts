@@ -3,6 +3,8 @@ import {
   SelectorSchema,
   ActionSchema,
   AssertionPropertySchema,
+  parseEvidencePack,
+  KernelSchemaError,
   type Selector,
   type Action,
   type AssertionProperty,
@@ -244,6 +246,12 @@ export async function executeTool(
 
   try {
     const raw = await engine.call(spec.engineMethod, checked.value);
+    // Spec §6.3: evidence packs are passed through a strong validation via
+    // the kernel schema before surfacing to the agent, so a Swift↔TS drift
+    // (assertion C35) fails here as a tool error instead of corrupt JSON.
+    if (spec.engineMethod === "last_evidence") {
+      assertEvidencePack(raw);
+    }
     return {
       content: [{ type: "text", text: canonicalJson(raw) }],
       isError: false,
@@ -252,6 +260,16 @@ export async function executeTool(
     if (error instanceof EngineCallError) {
       return {
         content: [{ type: "text", text: formatToolErrorShape(error.toBody()) }],
+        isError: true,
+      };
+    }
+    if (error instanceof KernelSchemaError) {
+      return {
+        content: [{ type: "text", text: formatToolError(
+          GP_E_INTERNAL,
+          `engine returned an invalid evidence pack: ${error.message}`,
+          "engine and kernel schema drifted; fix the common fixtures (assertion C35)",
+        ) }],
         isError: true,
       };
     }
@@ -264,6 +282,28 @@ export async function executeTool(
       isError: true,
     };
   }
+}
+
+/**
+ * Enforces KernelSchemaError.subclass on the engine's last_evidence result.
+ * The engine frame is `{evidencePack: {…}}`; the kernel validator consumes
+ * the pack body directly and throws on any schema violation.
+ */
+function assertEvidencePack(raw: unknown): void {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new KernelSchemaError("evidence pack", [{
+      path: "evidencePack",
+      message: "expected an object frame with a nested evidencePack field",
+    }]);
+  }
+  const frame = raw as Record<string, unknown>;
+  if (typeof frame.evidencePack !== "object" || frame.evidencePack === null) {
+    throw new KernelSchemaError("evidence pack", [{
+      path: "evidencePack",
+      message: "missing evidencePack field in last_evidence result",
+    }]);
+  }
+  parseEvidencePack(frame.evidencePack);
 }
 
 // Re-exported types for dispatch/tests.
