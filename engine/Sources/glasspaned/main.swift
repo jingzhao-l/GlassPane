@@ -127,6 +127,11 @@ private func openPrivacyPane() {
 // MARK: - Signals
 
 private func installSignalHandlers(_ server: SocketServer) {
+    // Writes to a socket whose peer has closed raise SIGPIPE by default and
+    // would kill the daemon. Ignore it so write() returns EPIPE and the
+    // connection is torn down cleanly (seen on real devices when a client
+    // disconnects mid-operation).
+    _ = signal(SIGPIPE, SIG_IGN)
     for signalNumber in [SIGINT, SIGTERM] {
         signal(signalNumber, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
