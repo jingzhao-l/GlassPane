@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  swift:
+    name: engine (Swift)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build engine
+        working-directory: engine
+        run: swift build
+      - name: Test engine (pure-logic suite, no GUI permission needed)
+        working-directory: engine
+        run: swift test
+
+  kernel:
+    name: kernel (TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: kernel/package-lock.json
+      - name: Install kernel deps
+        working-directory: kernel
+        run: npm ci
+      - name: Build + test kernel (C35 roundtrip vs fixtures)
+        working-directory: kernel
+        run: npm test
+
+  mcp-shell:
+    name: mcp-shell (TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: mcp-shell/package-lock.json
+      - name: Install kernel (local file: dep)
+        working-directory: kernel
+        run: npm ci
+      - name: Install mcp-shell deps
+        working-directory: mcp-shell
+        run: npm ci
+      - name: Test mcp-shell (dispatch + tools + engine client)
+        working-directory: mcp-shell
+        run: npm test
