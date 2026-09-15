@@ -8,7 +8,8 @@ let package = Package(
     ],
     products: [
         .library(name: "GlassPaneEngine", targets: ["GlassPaneEngine"]),
-        .executable(name: "glasspaned", targets: ["glasspaned"])
+        .executable(name: "glasspaned", targets: ["glasspaned"]),
+        .executable(name: "glasspane-settings", targets: ["glasspane-settings"])
     ],
     targets: [
         .target(
@@ -19,6 +20,11 @@ let package = Package(
             name: "glasspaned",
             dependencies: ["GlassPaneEngine"],
             path: "Sources/glasspaned"
+        ),
+        .executableTarget(
+            name: "glasspane-settings",
+            dependencies: ["GlassPaneEngine"],
+            path: "Sources/glasspane-settings"
         ),
         .testTarget(
             name: "GlassPaneEngineTests",
