@@ -1,0 +1,30 @@
+{
+  "name": "@glasspane/mcp-shell",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GlassPane MCP stdio shell: JSON-RPC 2.0 over stdio bridging an AI agent to the glasspane engine daemon",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"test/*.test.mjs\""
+  },
+  "dependencies": {
+    "@iterate/kernel": "file:../kernel",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "26.5.1",
+    "typescript": "5.9.3"
+  }
+}
