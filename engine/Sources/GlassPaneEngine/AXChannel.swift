@@ -12,6 +12,10 @@ public final class AXChannel: RuntimeChannel {
 
     /// AX messaging timeout in seconds — mirrors EngineCore.pingTimeoutMs.
     private static let messagingTimeoutSeconds: CFTimeInterval = 2.0
+    /// Total wall-clock budget for one treeSnapshot before it aborts. A hung
+    /// app can stall every child read up to messagingTimeout, so without a
+    /// cumulative budget observe would block for minutes (seen on real apps).
+    private static let treeTimeoutSeconds: CFTimeInterval = 10.0
     /// Selector searches walk the full AX hierarchy but never deeper than
     /// this guard (observe is separately bounded by maxDepth).
     private static let searchMaxDepth = 24
@@ -65,7 +69,10 @@ public final class AXChannel: RuntimeChannel {
     public func treeSnapshot(maxDepth: Int) throws -> AxTreeSnapshot {
         let element = try requireAppElement()
         let started = CFAbsoluteTimeGetCurrent()
-        let root = try buildNode(for: element, depth: 0, maxDepth: maxDepth)
+        // Abort the whole walk if cumulative AX reads exceed the budget,
+        // so observe can never block past treeTimeout even on a hung app.
+        let deadline = started + Self.treeTimeoutSeconds
+        let root = try buildNode(for: element, depth: 0, maxDepth: maxDepth, deadline: deadline)
         let roots = [root]
         let latencyMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
         return AxTreeSnapshot(
@@ -183,14 +190,25 @@ public final class AXChannel: RuntimeChannel {
 
     /// Recursive depth-bounded assembly. maxDepth is protocol-limited to
     /// 1–10 (ParamValidation), so recursion depth is bounded by construction.
-    private func buildNode(for element: AXUIElement, depth: Int, maxDepth: Int) throws -> AxNode {
+    /// The wall-clock deadline caps cumulative AX reads across the whole walk.
+    private func buildNode(
+        for element: AXUIElement,
+        depth: Int,
+        maxDepth: Int,
+        deadline: CFTimeInterval
+    ) throws -> AxNode {
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            throw ChannelError.treeCaptureFailed(
+                reason: "tree capture exceeded the total \(Self.treeTimeoutSeconds)s budget"
+            )
+        }
         let role = attributeString(element, kAXRoleAttribute) ?? ""
         let title = attributeString(element, kAXTitleAttribute)
         let identifier = attributeString(element, kAXIdentifierAttribute)
         var children: [AxNode] = []
         if depth < maxDepth, let childElements = try childElements(of: element) {
             children = try childElements.map {
-                try buildNode(for: $0, depth: depth + 1, maxDepth: maxDepth)
+                try buildNode(for: $0, depth: depth + 1, maxDepth: maxDepth, deadline: deadline)
             }
         }
         return AxNode(role: role, title: title, identifier: identifier, children: children)
