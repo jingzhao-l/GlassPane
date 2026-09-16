@@ -8,6 +8,7 @@ public enum OperationID {
     public static let crockfordAlphabet: [Character] = Array("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
     public static let prefix = "op_"
     public static let snapshotPrefix = "snap_"
+    public static let projectPrefix = "prj_"
     public static let totalLength = 26
 
     /// Deterministic construction from a millisecond timestamp and 80 bits of
@@ -58,6 +59,12 @@ public enum OperationID {
     /// (P1 spec §1.2 snapshotId pattern).
     public static func generateSnapshotLive() -> String {
         generateLive(prefix: snapshotPrefix)
+    }
+
+    /// Live project identifier: same 26-char body, `prj_` prefix
+    /// (P1 spec v1.4 §1.1 projectId pattern).
+    public static func generateProjectLive() -> String {
+        generateLive(prefix: projectPrefix)
     }
 
     private static func generateLive(prefix: String) -> String {

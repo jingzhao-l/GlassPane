@@ -18,6 +18,8 @@ public enum GPErrorCode: String, Codable {
     case noSnapshot = "GP_E_NO_SNAPSHOT"
     case restoreUnsupported = "GP_E_RESTORE_UNSUPPORTED"
     case restoreStepFailed = "GP_E_RESTORE_STEP_FAILED"
+    case projectLimit = "GP_E_PROJECT_LIMIT"
+    case notFound = "GP_E_NOT_FOUND"
     case internalError = "GP_E_INTERNAL"
 }
 
@@ -69,6 +71,10 @@ public struct GPError: Error {
             return "use tier-2 ffwd (pass steps) or wait for the Z5 snapshot batch"
         case .restoreStepFailed:
             return "fix the failing step in the steps array (see the failed step index), then retry restore"
+        case .projectLimit:
+            return "delete unused projects first (glasspaned --list-projects), then retry"
+        case .notFound:
+            return "check the projectId; use gp_project_list to view available projects"
         case .internalError:
             return "check the daemon log (stderr) and retry"
         }

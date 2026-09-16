@@ -13,9 +13,18 @@ import {
 
 import { canonicalJson } from "./canonical.js";
 import { EngineCallError, EngineJsonRpcClient } from "./engine-client.js";
-import { formatToolError, formatToolErrorShape, GP_E_BAD_PARAMS, GP_E_INTERNAL, GP_E_NO_EVIDENCE } from "./errors.js";
+import { formatToolError, formatToolErrorShape, GP_E_BAD_PARAMS, GP_E_INTERNAL, GP_E_NO_EVIDENCE, GP_E_NOT_FOUND, GP_E_PROJECT_LIMIT } from "./errors.js";
 import { EvidenceAuditSession } from "./audit-session.js";
 import { renderHTML, renderMarkdown, escapeHTML } from "./evidence-report.js";
+import {
+  ProjectListArgs,
+  ProjectSetArgs,
+  ProjectGetArgs,
+  projectList,
+  projectSet,
+  projectGet,
+  ProjectRegistryError,
+} from "./project-registry.js";
 
 /* ------------------------------------------------------------------ *
  * Tool‑argument validation schemas (spec §6.2). The engine validates
@@ -28,6 +37,7 @@ const OptionalDepthSchema = z.number().int().min(1).max(10).optional();
 const OptionalRoleSchema = z.string().max(128).optional();
 const OptionalBundleIdSchema = z.string().max(256).optional();
 const OptionalOperationIdSchema = z.string().regex(/^op_[0-9A-HJKMNP-TV-Z]{26}$/).optional();
+const OptionalProjectIdSchema = z.string().regex(/^prj_[0-9A-HJKMNP-TV-Z]{26}$/).optional();
 
 const ExpectSchema = z.union([z.string().max(512), z.boolean()]);
 
@@ -44,6 +54,7 @@ const RestoreModeSchema = z.string().max(32).optional();
 export const AttachArgs = z.strictObject({
   bundleId: OptionalBundleIdSchema,
   pid: OptionalUintSchema,
+  projectId: OptionalProjectIdSchema,
 }).refine((v) => v.bundleId !== undefined || v.pid !== undefined, {
   message: "attach requires either bundleId or pid",
 });
@@ -182,6 +193,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       properties: {
         bundleId: { type: "string", maxLength: 256 },
         pid: { type: "integer", minimum: 0 },
+        projectId: { type: "string", pattern: "^prj_[0-9A-HJKMNP-TV-Z]{26}$" },
       },
       oneOf: [
         { required: ["bundleId"] },
@@ -340,6 +352,58 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     validate: zodBridge(RecentReportsArgs),
     execute: recentReports,
   },
+  {
+    name: "gp_project_list",
+    description: "List all registered GlassPane projects (P1 spec v1.4).",
+    engineMethod: "project_list",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+    },
+    validate: zodBridge(ProjectListArgs),
+    execute: projectListTool,
+  },
+  {
+    name: "gp_project_set",
+    description: "Create or update a GlassPane project. Omit projectId to register a new project; include it to update an existing one.",
+    engineMethod: "project_set",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", pattern: "^prj_[0-9A-HJKMNP-TV-Z]{26}$" },
+        displayName: { type: "string", minLength: 1, maxLength: 256 },
+        bundleId: { type: "string", maxLength: 256 },
+        pid: { type: "integer", minimum: 0 },
+        recipeConfigPath: { type: "string", maxLength: 1024 },
+        calibrationAssetsPath: { type: "string", maxLength: 1024 },
+        evidenceStoragePath: { type: "string", maxLength: 1024 },
+      },
+      required: ["displayName"],
+      oneOf: [
+        { required: ["bundleId"] },
+        { required: ["pid"] },
+      ],
+    },
+    validate: zodBridge(ProjectSetArgs),
+    execute: projectSetTool,
+  },
+  {
+    name: "gp_project_get",
+    description: "Fetch one GlassPane project by its project ID.",
+    engineMethod: "project_get",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        projectId: { type: "string", pattern: "^prj_[0-9A-HJKMNP-TV-Z]{26}$" },
+      },
+      required: ["projectId"],
+    },
+    validate: zodBridge(ProjectGetArgs),
+    execute: projectGetTool,
+  },
 ];
 
 export const TOOL_BY_NAME: ReadonlyMap<string, ToolSpec> = new Map(
@@ -444,6 +508,69 @@ function parseEvidenceFrame(raw: unknown): EvidencePack {
     }]);
   }
   return parseEvidencePack(frame.evidencePack);
+}
+
+/* ------------------------------------------------------------------ *
+ * Project tools (spec v1.4 §4): operate on the shared projects.json at
+ * the MCP layer — no socket methods are added ("不改变 socket 协议方法表").
+ * ------------------------------------------------------------------ */
+
+async function projectListTool(): Promise<ToolResult> {
+  const projects = projectList();
+  return {
+    content: [{ type: "text", text: canonicalJson({ projects }) }],
+    isError: false,
+  };
+}
+
+async function projectSetTool(args: Record<string, unknown>): Promise<ToolResult> {
+  try {
+    const entry = projectSet(args as ProjectSetArgs);
+    return { content: [{ type: "text", text: canonicalJson({ project: entry }) }], isError: false };
+  } catch (error) {
+    return mapProjectError(error);
+  }
+}
+
+async function projectGetTool(args: Record<string, unknown>): Promise<ToolResult> {
+  const argv = args as ProjectGetArgs;
+  const entry = projectGet(argv.projectId);
+  if (entry === undefined) {
+    return {
+      content: [{ type: "text", text: formatToolError(
+        "GP_E_NOT_FOUND",
+        `unknown project ${argv.projectId}`,
+        "check the projectId; use gp_project_list to view available projects",
+      ) }],
+      isError: true,
+    };
+  }
+  return { content: [{ type: "text", text: canonicalJson({ project: entry }) }], isError: false };
+}
+
+function mapProjectError(error: unknown): ToolResult {
+  if (error instanceof ProjectRegistryError) {
+    return {
+      content: [{ type: "text", text: formatToolError(
+        error.code,
+        error.message,
+        error.code === GP_E_PROJECT_LIMIT
+          ? "delete unused projects first, then retry"
+          : error.code === GP_E_NOT_FOUND
+            ? "check the projectId; use gp_project_list to view available projects"
+            : "check the tool's input schema and retry",
+      ) }],
+      isError: true,
+    };
+  }
+  return {
+    content: [{ type: "text", text: formatToolError(
+      GP_E_INTERNAL,
+      `internal shell error in project registry: ${String(error)}`,
+      "see the MCP server logs and retry",
+    ) }],
+    isError: true,
+  };
 }
 
 /* ------------------------------------------------------------------ *

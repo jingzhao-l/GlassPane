@@ -7,6 +7,8 @@ export const GP_E_ENGINE_UNREACHABLE = "GP_E_ENGINE_UNREACHABLE";
 export const GP_E_BAD_PARAMS = "GP_E_BAD_PARAMS";
 export const GP_E_NO_EVIDENCE = "GP_E_NO_EVIDENCE";
 export const GP_E_INTERNAL = "GP_E_INTERNAL";
+export const GP_E_PROJECT_LIMIT = "GP_E_PROJECT_LIMIT";
+export const GP_E_NOT_FOUND = "GP_E_NOT_FOUND";
 
 export interface ToolErrorText {
   code: string;

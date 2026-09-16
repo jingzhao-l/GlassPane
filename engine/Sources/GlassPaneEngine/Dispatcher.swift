@@ -76,7 +76,8 @@ public final class Dispatcher {
         guard (bundleId == nil) != (pid == nil) else {
             throw GPError(code: .badParams, message: "exactly one of bundleId or pid is required")
         }
-        return try core.attach(bundleId: bundleId, pid: pid.map { pid_t($0) })
+        let projectId = try ParamValidation.optString(params, "projectId", maxLength: 64)
+        return try core.attach(bundleId: bundleId, pid: pid.map { pid_t($0) }, projectId: projectId)
     }
 
     private func handleAct(_ params: [String: Any]) throws -> [String: Any] {

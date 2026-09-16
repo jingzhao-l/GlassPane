@@ -1,12 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 
 import { TOOL_SPECS, TOOL_BY_NAME, executeTool } from "../dist/tools.js";
 import { EvidenceAuditSession } from "../dist/audit-session.js";
 import { canonicalJson } from "../dist/canonical.js";
 import { makeEngine } from "./helpers.mjs";
 
-test("tools/list shape: ten tools with expected names and methods", () => {
+test("tools/list shape: eleven tools with expected names and methods", () => {
   const names = TOOL_SPECS.map((spec) => spec.name);
   assert.deepEqual(names, [
     "gp_attach",
@@ -19,11 +20,14 @@ test("tools/list shape: ten tools with expected names and methods", () => {
     "gp_restore",
     "gp_export_evidence",
     "gp_recent_reports",
+    "gp_project_list",
+    "gp_project_set",
+    "gp_project_get",
   ]);
-  assert.equal(TOOL_BY_NAME.size, 10);
+  assert.equal(TOOL_BY_NAME.size, 13);
   assert.deepEqual(
     TOOL_SPECS.map((s) => s.engineMethod),
-    ["attach", "observe", "act", "assert_element", "diagnose", "last_evidence", "snapshot", "restore", "export_evidence", "recent_reports"],
+    ["attach", "observe", "act", "assert_element", "diagnose", "last_evidence", "snapshot", "restore", "export_evidence", "recent_reports", "project_list", "project_set", "project_get"],
   );
   assert.equal(TOOL_SPECS.every((s) => s.name.startsWith("gp_")), true);
 });
@@ -402,4 +406,112 @@ test("gp_recent_reports renders HTML aggregation when format=html", async () => 
   assert.ok(text.includes("<h1>GlassPane recent reports (2)</h1>"));
   assert.ok(text.includes("<hr>"));
   assert.ok(text.includes(`<h1>${OP_A} · T3 · normal</h1>`));
+});
+
+/* ------------------------------------------------------------------ *
+ * P1 batch 5 project tools (spec v1.4 §4): file-level registry access.
+ * ------------------------------------------------------------------ */
+
+function withProjectsFile(t) {
+  const tmp = new URL(`./tmp-project-${process.pid}.json`, import.meta.url).pathname;
+  process.env.GLASSPANE_PROJECTS_FILE = tmp;
+  return Promise.resolve(t()).finally(() => {
+    delete process.env.GLASSPANE_PROJECTS_FILE;
+    try { fs.unlinkSync(tmp); } catch { /* already gone */ }
+  });
+}
+
+test("gp_project_list returns an empty registry", async () => {
+  const { engine } = makeEngine();
+  await withProjectsFile(async () => {
+    const tool = TOOL_BY_NAME.get("gp_project_list");
+    const outcome = await executeTool(tool, {}, engine);
+    assert.equal(outcome.isError, false);
+    const parsed = JSON.parse(outcome.content[0].text);
+    assert.deepEqual(parsed.projects, []);
+    // file-level tool: nothing forwarded to the engine
+    assert.equal(engine.io.sent.length, 0);
+  });
+});
+
+test("gp_project_set creates a project and gp_project_get / list read it back", async () => {
+  const { engine } = makeEngine();
+  await withProjectsFile(async () => {
+    const setTool = TOOL_BY_NAME.get("gp_project_set");
+    const setOutcome = await executeTool(setTool, { displayName: "Notes", bundleId: "com.notes" }, engine);
+    assert.equal(setOutcome.isError, false);
+    const setParsed = JSON.parse(setOutcome.content[0].text);
+    const project = setParsed.project;
+    assert.match(project.projectId, /^prj_[0-9A-HJKMNP-TV-Z]{26}$/);
+
+    const getTool = TOOL_BY_NAME.get("gp_project_get");
+    const getOutcome = await executeTool(getTool, { projectId: project.projectId }, engine);
+    assert.equal(getOutcome.isError, false);
+    const getParsed = JSON.parse(getOutcome.content[0].text);
+    assert.equal(getParsed.project.displayName, "Notes");
+    assert.equal(getParsed.project.bundleId, "com.notes");
+
+    const listOutcome = await executeTool(TOOL_BY_NAME.get("gp_project_list"), {}, engine);
+    const listParsed = JSON.parse(listOutcome.content[0].text);
+    assert.equal(listParsed.projects.length, 1);
+  });
+});
+
+test("gp_project_set updates an existing project by projectId", async () => {
+  const { engine } = makeEngine();
+  await withProjectsFile(async () => {
+    const setTool = TOOL_BY_NAME.get("gp_project_set");
+    const created = await executeTool(setTool, { displayName: "A", pid: 111 }, engine);
+    const { projectId } = JSON.parse(created.content[0].text).project;
+
+    const updated = await executeTool(setTool, { projectId, displayName: "A2", pid: 222 }, engine);
+    const updatedProject = JSON.parse(updated.content[0].text).project;
+    assert.equal(updatedProject.displayName, "A2");
+    assert.equal(updatedProject.pid, 222);
+
+    const get = await executeTool(TOOL_BY_NAME.get("gp_project_get"), { projectId }, engine);
+    assert.equal(JSON.parse(get.content[0].text).project.displayName, "A2");
+  });
+});
+
+test("gp_project_get unknown id maps to GP_E_NOT_FOUND", async () => {
+  const { engine } = makeEngine();
+  await withProjectsFile(async () => {
+    const getTool = TOOL_BY_NAME.get("gp_project_get");
+    const outcome = await executeTool(getTool, { projectId: "prj_99999999999999999999999999" }, engine);
+    assert.equal(outcome.isError, true);
+    assert.ok(outcome.content[0].text.startsWith("GP_E_NOT_FOUND"));
+  });
+});
+
+test("gp_project_set rejects missing bundleId/pid as GP_E_BAD_PARAMS", async () => {
+  const { engine } = makeEngine();
+  await withProjectsFile(async () => {
+    const setTool = TOOL_BY_NAME.get("gp_project_set");
+    const outcome = await executeTool(setTool, { displayName: "No Target" }, engine);
+    assert.equal(outcome.isError, true);
+    assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"));
+    assert.equal(engine.io.sent.length, 0);
+  });
+});
+
+test("gp_project_set rejects empty displayName as GP_E_BAD_PARAMS", async () => {
+  const { engine } = makeEngine();
+  await withProjectsFile(async () => {
+    const setTool = TOOL_BY_NAME.get("gp_project_set");
+    const outcome = await executeTool(setTool, { displayName: "", bundleId: "com.x" }, engine);
+    assert.equal(outcome.isError, true);
+    assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"));
+  });
+});
+
+test("gp_project_get rejects malformed projectId as GP_E_BAD_PARAMS", async () => {
+  const { engine } = makeEngine();
+  await withProjectsFile(async () => {
+    const getTool = TOOL_BY_NAME.get("gp_project_get");
+    const outcome = await executeTool(getTool, { projectId: "op_0123456789ABCDEFGHJKMNPQRS" }, engine);
+    assert.equal(outcome.isError, true);
+    assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"));
+    assert.equal(engine.io.sent.length, 0);
+  });
 });

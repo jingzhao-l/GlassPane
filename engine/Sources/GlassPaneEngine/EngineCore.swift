@@ -22,6 +22,8 @@ public final class EngineCore {
     public let version = "0.1.0"
     public let protocolVersion = "0"
     public private(set) var attachedApp: AttachedApp?
+    /// Currently active project (P1 spec v1.4 §1.3). Set via attach with projectId.
+    public private(set) var activeProjectId: String?
     public private(set) var shutdownRequested = false
 
     private let channel: RuntimeChannel
@@ -30,15 +32,19 @@ public final class EngineCore {
     private var history: [EvidencePack] = []
     /// Recent app-state snapshots (P1 spec v1.1 §1.5); FIFO-evicted.
     private var snapshots: [AppStateSnapshot] = []
+    /// Project registry (P1 spec v1.4 §1).
+    public let projectRegistry: ProjectRegistry
 
     public init(
         channel: RuntimeChannel,
         clock: @escaping () -> Date = { Date() },
-        settle: (() -> Void)? = nil
+        settle: (() -> Void)? = nil,
+        projectRegistry: ProjectRegistry? = nil
     ) {
         self.channel = channel
         self.clock = clock
         self.settle = settle ?? { Thread.sleep(forTimeInterval: EngineCore.actSettleInterval) }
+        self.projectRegistry = projectRegistry ?? ProjectRegistry()
     }
 
     // MARK: - ISO-8601 timestamp
@@ -67,9 +73,33 @@ public final class EngineCore {
         ]
     }
 
-    public func attach(bundleId: String?, pid: pid_t?) throws -> [String: Any] {
+    public func attach(bundleId: String?, pid: pid_t?, projectId: String? = nil) throws -> [String: Any] {
         do {
             let app = try channel.attach(bundleId: bundleId, pid: pid)
+            // Validate projectId against registry if provided (spec v1.4 §1.3):
+            // the registry entry's bundleId or pid must match the attached app.
+            if let projectId {
+                guard let entry = projectRegistry.get(projectId) else {
+                    throw GPError(code: .notFound, message: "unknown projectId \(projectId)")
+                }
+                if let expectedBundleId = entry.bundleId {
+                    guard expectedBundleId == app.bundleId else {
+                        throw GPError(
+                            code: .badParams,
+                            message: "projectId \(projectId) expects bundleId '\(expectedBundleId)' but attached '\(app.bundleId ?? "nil")'"
+                        )
+                    }
+                }
+                if let expectedPid = entry.pid {
+                    guard expectedPid == app.pid else {
+                        throw GPError(
+                            code: .badParams,
+                            message: "projectId \(projectId) expects pid \(expectedPid) but attached \(app.pid)"
+                        )
+                    }
+                }
+                activeProjectId = projectId
+            }
             // Re-attach to the same app is idempotent; a different app
             // invalidates the evidence history.
             if attachedApp != app {
@@ -372,6 +402,91 @@ public final class EngineCore {
     public func shutdown() -> [String: Any] {
         shutdownRequested = true
         return ["bye": true]
+    }
+
+    // MARK: - P1 project registry (spec v1.4 §1)
+
+    /// List all registered projects.
+    public func projectList() -> [String: Any] {
+        let entries: [[String: Any]] = projectRegistry.all.map { entry in
+            var dict: [String: Any] = [
+                "projectId": entry.projectId,
+                "displayName": entry.displayName,
+                "createdAt": entry.createdAt
+            ]
+            if let bundleId = entry.bundleId { dict["bundleId"] = bundleId }
+            if let pid = entry.pid { dict["pid"] = Int(pid) }
+            if let v = entry.recipeConfigPath { dict["recipeConfigPath"] = v }
+            if let v = entry.calibrationAssetsPath { dict["calibrationAssetsPath"] = v }
+            if let v = entry.evidenceStoragePath { dict["evidenceStoragePath"] = v }
+            return dict
+        }
+        return ["projects": entries]
+    }
+
+    /// Register or update a project.
+    public func projectSet(
+        projectId: String?,
+        displayName: String,
+        bundleId: String?,
+        pid: Int32?,
+        recipeConfigPath: String?,
+        calibrationAssetsPath: String?,
+        evidenceStoragePath: String?
+    ) throws -> [String: Any] {
+        let entry: ProjectEntry
+        if let projectId {
+            // Update existing.
+            entry = try projectRegistry.update(
+                projectId: projectId,
+                displayName: displayName,
+                bundleId: bundleId,
+                pid: pid,
+                recipeConfigPath: recipeConfigPath,
+                calibrationAssetsPath: calibrationAssetsPath,
+                evidenceStoragePath: evidenceStoragePath
+            )
+        } else {
+            // Create new.
+            entry = try projectRegistry.create(
+                displayName: displayName,
+                bundleId: bundleId,
+                pid: pid,
+                recipeConfigPath: recipeConfigPath,
+                calibrationAssetsPath: calibrationAssetsPath,
+                evidenceStoragePath: evidenceStoragePath,
+                now: clock
+            )
+        }
+        var dict: [String: Any] = [
+            "projectId": entry.projectId,
+            "displayName": entry.displayName,
+            "createdAt": entry.createdAt
+        ]
+        if let bundleId = entry.bundleId { dict["bundleId"] = bundleId }
+        if let pid = entry.pid { dict["pid"] = Int(pid) }
+        if let v = entry.recipeConfigPath { dict["recipeConfigPath"] = v }
+        if let v = entry.calibrationAssetsPath { dict["calibrationAssetsPath"] = v }
+        if let v = entry.evidenceStoragePath { dict["evidenceStoragePath"] = v }
+        return ["project": dict]
+    }
+
+    /// Get a project by ID.
+    public func projectGet(projectId: String) throws -> [String: Any] {
+        guard let entry = projectRegistry.get(projectId) else {
+            throw GPError(code: .notFound, message: "unknown projectId \(projectId)")
+        }
+        var dict: [String: Any] = [
+            "projectId": entry.projectId,
+            "displayName": entry.displayName,
+            "createdAt": entry.createdAt
+        ]
+        if let bundleId = entry.bundleId { dict["bundleId"] = bundleId }
+        if let pid = entry.pid { dict["pid"] = Int(pid) }
+        if let v = entry.recipeConfigPath { dict["recipeConfigPath"] = v }
+        if let v = entry.calibrationAssetsPath { dict["calibrationAssetsPath"] = v }
+        if let v = entry.evidenceStoragePath { dict["evidenceStoragePath"] = v }
+        return ["project": dict]
     }
 
     // MARK: - P1 snapshot/restore (spec v1.1 §1)

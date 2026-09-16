@@ -18,6 +18,9 @@ private struct Options {
     var grantAccessibility = false
     var checkScreenPermission = false
     var guideScreenPermission = false
+    var listProjects = false
+    var activeProjectId: String?
+    var recipeValidate: String?
 }
 
 private enum ParseResult {
@@ -42,6 +45,20 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             options.checkScreenPermission = true
         case "--guide-screen-permission":
             options.guideScreenPermission = true
+        case "--list-projects":
+            options.listProjects = true
+        case "--active-project":
+            guard index + 1 < arguments.count else {
+                return .error("--active-project requires a project ID")
+            }
+            index += 1
+            options.activeProjectId = arguments[index]
+        case "--recipe-validate":
+            guard index + 1 < arguments.count else {
+                return .error("--recipe-validate requires a file path")
+            }
+            index += 1
+            options.recipeValidate = arguments[index]
         case "--socket-path":
             guard index + 1 < arguments.count else {
                 return .error("--socket-path requires a value")
@@ -73,6 +90,9 @@ private func printUsage() {
         glasspaned --grant-accessibility
         glasspaned --check-screen-permission
         glasspaned --guide-screen-permission
+        glasspaned --list-projects
+        glasspaned --active-project <project-id>
+        glasspaned --recipe-validate <path>
 
     OPTIONS:
         --socket-path <path>   Unix socket path (default: ~/.glasspane/engine.sock)
@@ -82,6 +102,9 @@ private func printUsage() {
                                  (granted | denied | notDetermined) and exit
         --guide-screen-permission   Prompt for screen recording permission
                                  (no-op when already granted) and exit
+        --list-projects        List all registered projects (JSON) and exit
+        --active-project <id>  Set the active project ID and exit
+        --recipe-validate <path>  Validate a recipe YAML file and exit
         --help, -h            Show this help
 
     PROTOCOL:
@@ -225,6 +248,60 @@ if options.checkScreenPermission || options.guideScreenPermission {
         runGuideScreenPermission(probe)
     }
     exit(0)
+}
+
+// MARK: - P1 project management commands (spec v1.4 §3)
+
+if options.listProjects {
+    let registry = ProjectRegistry()
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    if let data = try? encoder.encode(registry.all) {
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data("\n".utf8))
+    } else {
+        FileHandle.standardOutput.write(Data("[]\n".utf8))
+    }
+    exit(0)
+}
+
+if let activeId = options.activeProjectId {
+    let registry = ProjectRegistry()
+    if let entry = registry.get(activeId) {
+        FileHandle.standardOutput.write(
+            Data("active project: \(entry.projectId) (\(entry.displayName))\n".utf8)
+        )
+    } else {
+        FileHandle.standardError.write(
+            Data("error: unknown project \(activeId)\n".utf8)
+        )
+        exit(1)
+    }
+    exit(0)
+}
+
+if let recipePath = options.recipeValidate {
+    let fm = FileManager.default
+    guard fm.fileExists(atPath: recipePath) else {
+        FileHandle.standardError.write(
+            Data("{\"valid\":false,\"errors\":[\"file not found: \(recipePath)\"]}\n".utf8)
+        )
+        exit(2)
+    }
+    guard let data = fm.contents(atPath: recipePath) else {
+        FileHandle.standardError.write(
+            Data("{\"valid\":false,\"errors\":[\"cannot read: \(recipePath)\"]}\n".utf8)
+        )
+        exit(2)
+    }
+    let result = RecipeLoader.validate(data)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    if let resultData = try? encoder.encode(result) {
+        FileHandle.standardOutput.write(resultData)
+        FileHandle.standardOutput.write(Data("\n".utf8))
+    }
+    exit(result.valid ? 0 : 1)
 }
 
 let socketPath = options.socketPath ?? defaultSocketPath()
