@@ -357,12 +357,14 @@ public final class EngineCore {
     public func lastEvidence(operationId: String?) throws -> EvidencePack {
         if let operationId {
             guard let found = pack(withId: operationId) else {
-                throw GPError(code: .noOperation, message: "unknown operationId \(operationId)")
+                // P1 v1.3: a lookup miss means "no such evidence in the bounded
+                // history" — a distinct code from "no operation to diagnose".
+                throw GPError(code: .noEvidence, message: "unknown operationId \(operationId)")
             }
             return found
         }
         guard let latest = latestPack() else {
-            throw GPError(code: .noOperation, message: "no evidence recorded yet")
+            throw GPError(code: .noEvidence, message: "no evidence recorded yet")
         }
         return latest
     }

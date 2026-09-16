@@ -14,6 +14,7 @@ public enum GPErrorCode: String, Codable {
     case actFailed = "GP_E_ACT_FAILED"
     case assertTargetNotFound = "GP_E_ASSERT_TARGET_NOT_FOUND"
     case noOperation = "GP_E_NO_OPERATION"
+    case noEvidence = "GP_E_NO_EVIDENCE"
     case noSnapshot = "GP_E_NO_SNAPSHOT"
     case restoreUnsupported = "GP_E_RESTORE_UNSUPPORTED"
     case restoreStepFailed = "GP_E_RESTORE_STEP_FAILED"
@@ -60,6 +61,8 @@ public struct GPError: Error {
             return "verify the selector or run observe first to inspect the tree"
         case .noOperation:
             return "run act or assert_element first"
+        case .noEvidence:
+            return "produce evidence first (act/assert_element/diagnose), or check the operationId matches a recorded operation"
         case .noSnapshot:
             return "run gp_snapshot first, then restore with that snapshotId"
         case .restoreUnsupported:

@@ -1,5 +1,6 @@
 import { EngineJsonRpcClient } from "./engine-client.js";
 import { executeTool, TOOL_SPECS, ToolSpec } from "./tools.js";
+import { EvidenceAuditSession } from "./audit-session.js";
 
 /* ------------------------------------------------------------------ *
  * JSON-RPC 2.0 message shapes (spec §6.1).
@@ -42,13 +43,17 @@ interface IncomingRequest {
 export interface McpServerDeps {
   engine: EngineJsonRpcClient;
   specs?: readonly ToolSpec[];
+  /** Overridable audit session (per-server operationId trail, spec v1.3 §10.3). */
+  session?: EvidenceAuditSession;
 }
 
 export class McpServer {
   private readonly specs: readonly ToolSpec[];
+  private readonly session: EvidenceAuditSession;
 
   constructor(private readonly deps: McpServerDeps) {
     this.specs = deps.specs ?? TOOL_SPECS;
+    this.session = deps.session ?? new EvidenceAuditSession();
   }
 
   /** Handle a single newline-delimited frame; returns a response or null. */
@@ -133,7 +138,7 @@ export class McpServer {
       return this.error(INVALID_PARAMS, `Unknown tool: ${name}`, id);
     }
 
-    const outcome = await executeTool(spec, params.arguments, this.deps.engine);
+    const outcome = await executeTool(spec, params.arguments, this.deps.engine, this.session);
     return this.result(id, { content: outcome.content, isError: outcome.isError });
   }
 

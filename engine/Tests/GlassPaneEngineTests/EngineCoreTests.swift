@@ -52,7 +52,7 @@ final class EngineCoreTests: XCTestCase {
         XCTAssertNoThrow(try core.act(selector: submitSelector, action: .press))
         channel.app = AttachedApp(pid: 9999, bundleId: "com.other.app", appName: "Other")
         _ = try core.attach(bundleId: "com.other.app", pid: nil)
-        XCTAssertThrowsGPError(.noOperation) {
+        XCTAssertThrowsGPError(.noEvidence) {
             try core.lastEvidence(operationId: nil)
         }
     }
@@ -271,7 +271,7 @@ final class EngineCoreTests: XCTestCase {
             }
         }
         XCTAssertNoThrow(try core.lastEvidence(operationId: nil))
-        XCTAssertThrowsGPError(.noOperation) {
+        XCTAssertThrowsGPError(.noEvidence) {
             _ = try core.lastEvidence(operationId: firstOperationId)
         }
     }

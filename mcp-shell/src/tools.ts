@@ -8,11 +8,14 @@ import {
   type Selector,
   type Action,
   type AssertionProperty,
+  type EvidencePack,
 } from "@iterate/kernel";
 
 import { canonicalJson } from "./canonical.js";
 import { EngineCallError, EngineJsonRpcClient } from "./engine-client.js";
-import { formatToolError, formatToolErrorShape, GP_E_BAD_PARAMS, GP_E_INTERNAL } from "./errors.js";
+import { formatToolError, formatToolErrorShape, GP_E_BAD_PARAMS, GP_E_INTERNAL, GP_E_NO_EVIDENCE } from "./errors.js";
+import { EvidenceAuditSession } from "./audit-session.js";
+import { renderHTML, renderMarkdown, escapeHTML } from "./evidence-report.js";
 
 /* ------------------------------------------------------------------ *
  * Tool‑argument validation schemas (spec §6.2). The engine validates
@@ -87,6 +90,21 @@ export const RestoreArgs = z.strictObject({
 });
 export type RestoreArgs = z.infer<typeof RestoreArgs>;
 
+/** Report format selector shared by the two audit tools (spec v1.3 §10.3). */
+const ReportFormatSchema = z.enum(["html", "markdown"]).default("markdown");
+
+export const ExportEvidenceArgs = z.strictObject({
+  operationId: z.string().regex(/^op_[0-9A-HJKMNP-TV-Z]{26}$/),
+  format: ReportFormatSchema,
+});
+export type ExportEvidenceArgs = z.infer<typeof ExportEvidenceArgs>;
+
+export const RecentReportsArgs = z.strictObject({
+  limit: z.number().int().min(1).max(20).default(5),
+  format: ReportFormatSchema,
+});
+export type RecentReportsArgs = z.infer<typeof RecentReportsArgs>;
+
 /* ------------------------------------------------------------------ *
  * Tool table (spec §6.2). Each tool maps to one engine method and passes
  * its validated arguments straight through as engine params.
@@ -95,6 +113,7 @@ export type RestoreArgs = z.infer<typeof RestoreArgs>;
 export interface ToolSpec {
   name: string;
   description: string;
+  /** Engine method forwarded after validation; pseudo-method for orchestrated tools. */
   engineMethod: string;
   /** JSON Schema emitted by tools/list (hand-written contract, spec §6.2). */
   inputSchema: Record<string, unknown>;
@@ -102,6 +121,23 @@ export interface ToolSpec {
     ok: false;
     issues: string;
   };
+  /**
+   * Orchestrated tools (spec v1.3 §10.3) run their own logic instead of the
+   * default forward-then-relay path — e.g. the audit tools fetch evidence
+   * packs and render them through the report generator.
+   */
+  execute?: (args: Record<string, unknown>, context: ToolExecuteContext) => Promise<ToolResult>;
+}
+
+export interface ToolExecuteContext {
+  engine: EngineJsonRpcClient;
+  session: EvidenceAuditSession;
+}
+
+/** Tool result shape shared by the default path and custom executors. */
+export interface ToolResult {
+  content: Array<{ type: "text"; text: string }>;
+  isError: boolean;
 }
 
 function zodIssueText(error: z.ZodError): string {
@@ -273,6 +309,37 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     validate: zodBridge(RestoreArgs),
   },
+  {
+    name: "gp_export_evidence",
+    description: "Render one operation's evidence pack as a human-readable report (HTML or Markdown) for the developer audit view.",
+    engineMethod: "export_evidence",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        operationId: { type: "string", pattern: "^op_[0-9A-HJKMNP-TV-Z]{26}$" },
+        format: { type: "string", enum: ["html", "markdown"] },
+      },
+      required: ["operationId"],
+    },
+    validate: zodBridge(ExportEvidenceArgs),
+    execute: exportEvidence,
+  },
+  {
+    name: "gp_recent_reports",
+    description: "Aggregate the most recent operations' four-section reports (HTML or Markdown) into one audit view.",
+    engineMethod: "recent_reports",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        limit: { type: "integer", minimum: 1, maximum: 20 },
+        format: { type: "string", enum: ["html", "markdown"] },
+      },
+    },
+    validate: zodBridge(RecentReportsArgs),
+    execute: recentReports,
+  },
 ];
 
 export const TOOL_BY_NAME: ReadonlyMap<string, ToolSpec> = new Map(
@@ -283,21 +350,17 @@ export const TOOL_BY_NAME: ReadonlyMap<string, ToolSpec> = new Map(
  * Tools/call execution (spec §6.2): pre-validate -> forward -> map error.
  * ------------------------------------------------------------------ */
 
-export interface ToolResult {
-  content: Array<{ type: "text"; text: string }>;
-  isError: boolean;
-}
-
 /**
  * Execute a tool against the engine client. Validates arguments against
- * the tool's zod schema (isError + GP_E_BAD_PARAMS on failure), forwards
- * to the engine method, and maps engine/connection errors to agent-facing
- * tool errors.
+ * the tool's zod schema (isError + GP_E_BAD_PARAMS on failure), then either
+ * runs the tool's own `execute` (orchestrated tools) or forwards the method
+ * to the engine and maps engine/connection errors to agent-facing errors.
  */
 export async function executeTool(
   spec: ToolSpec,
   args: unknown,
   engine: EngineJsonRpcClient,
+  session: EvidenceAuditSession = new EvidenceAuditSession(),
 ): Promise<ToolResult> {
   const checked = spec.validate(args);
   if (!checked.ok) {
@@ -311,14 +374,24 @@ export async function executeTool(
     };
   }
 
+  if (spec.execute !== undefined) {
+    return spec.execute(checked.value, { engine, session });
+  }
+
   try {
     const raw = await engine.call(spec.engineMethod, checked.value);
+    if (spec.name === "gp_attach") {
+      // A successful attach invalidates the daemon's evidence history, so
+      // the session trail starts fresh (spec v1.3 §10.3).
+      session.reset();
+    }
     // Spec §6.3: evidence packs are passed through a strong validation via
     // the kernel schema before surfacing to the agent, so a Swift↔TS drift
     // (assertion C35) fails here as a tool error instead of corrupt JSON.
     if (spec.engineMethod === "last_evidence") {
-      assertEvidencePack(raw);
+      parseEvidenceFrame(raw);
     }
+    session.record(raw);
     return {
       content: [{ type: "text", text: canonicalJson(raw) }],
       isError: false,
@@ -352,11 +425,11 @@ export async function executeTool(
 }
 
 /**
- * Enforces KernelSchemaError.subclass on the engine's last_evidence result.
- * The engine frame is `{evidencePack: {…}}`; the kernel validator consumes
- * the pack body directly and throws on any schema violation.
+ * Strongly validates the engine's last_evidence result (§6.3) and returns
+ * the parsed pack. The engine frame is `{evidencePack: {…}}`; the kernel
+ * validator consumes the pack body directly and throws on any violation.
  */
-function assertEvidencePack(raw: unknown): void {
+function parseEvidenceFrame(raw: unknown): EvidencePack {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new KernelSchemaError("evidence pack", [{
       path: "evidencePack",
@@ -370,7 +443,122 @@ function assertEvidencePack(raw: unknown): void {
       message: "missing evidencePack field in last_evidence result",
     }]);
   }
-  parseEvidencePack(frame.evidencePack);
+  return parseEvidencePack(frame.evidencePack);
+}
+
+/* ------------------------------------------------------------------ *
+ * Audit tools (spec v1.3 §10.3): fetch-centred renderers over the frozen
+ * daemon method table — `last_evidence {operationId}` (no new daemon method,
+ * no schema change). Shared rendering with the Swift engine mirror keeps the
+ * HTML/Markdown contract under one golden test set.
+ * ------------------------------------------------------------------ */
+
+async function exportEvidence(
+  args: Record<string, unknown>,
+  context: ToolExecuteContext,
+): Promise<ToolResult> {
+  const argv = args as ExportEvidenceArgs;
+  const render = argv.format === "html" ? renderHTML : renderMarkdown;
+  try {
+    const raw = await context.engine.call("last_evidence", { operationId: argv.operationId });
+    const pack = parseEvidenceFrame(raw);
+    context.session.record(raw);
+    return { content: [{ type: "text", text: render(pack, undefined) }], isError: false };
+  } catch (error) {
+    return mapAuditError(error);
+  }
+}
+
+async function recentReports(
+  args: Record<string, unknown>,
+  context: ToolExecuteContext,
+): Promise<ToolResult> {
+  const argv = args as RecentReportsArgs;
+  const ids = context.session.recentIds(argv.limit);
+  if (ids.length === 0) {
+    return {
+      content: [{ type: "text", text: formatToolError(
+        GP_E_NO_EVIDENCE,
+        "no operations recorded in this session",
+        "run gp_act / gp_assert_element first, then retry gp_recent_reports",
+      ) }],
+      isError: true,
+    };
+  }
+
+  // Fetch each trail id; the daemon's bounded history may have evicted it or
+  // the engine may have restarted, so per-item misses are skipped with a
+  // note instead of failing the whole report.
+  const packs: Array<{ id: string; pack: EvidencePack }> = [];
+  const skipped: string[] = [];
+  for (const id of ids) {
+    try {
+      const raw = await context.engine.call("last_evidence", { operationId: id });
+      packs.push({ id, pack: parseEvidenceFrame(raw) });
+    } catch (error) {
+      if (error instanceof EngineCallError && error.code === GP_E_NO_EVIDENCE) {
+        skipped.push(id);
+      } else {
+        return mapAuditError(error);
+      }
+    }
+  }
+
+  if (packs.length === 0) {
+    return {
+      content: [{ type: "text", text: formatToolError(
+        GP_E_NO_EVIDENCE,
+        "no recent evidence is reachable in the daemon history",
+        "the engine may have restarted; re-run gp_act / gp_assert_element to regenerate evidence",
+      ) }],
+      isError: true,
+    };
+  }
+
+  const render = argv.format === "html" ? renderHTML : renderMarkdown;
+  const header = argv.format === "html"
+    ? `<h1>GlassPane recent reports (${packs.length})</h1>`
+    : `# GlassPane recent reports (${packs.length})`;
+  const skipNote = skipped.length === 0 ? "" : argv.format === "html"
+    ? `<p class="gp-skipped">skipped ${skipped.length} unreachable ${skipped.length === 1 ? "entry" : "entries"}: ${escapeHTML(skipped.join(", "))}</p>`
+    : `> skipped ${skipped.length} unreachable ${skipped.length === 1 ? "entry" : "entries"}: ${skipped.join(", ")}`;
+  const separator = argv.format === "html" ? "\n<hr>\n" : "\n\n---\n";
+  const body = packs.map(({ pack }) => render(pack, undefined)).join(separator);
+
+  const sections: string[] = [header];
+  if (skipNote !== "") {
+    sections.push(skipNote);
+  }
+  sections.push(body);
+  return { content: [{ type: "text", text: sections.join("\n") }], isError: false };
+}
+
+/** Error mapping shared by the audit tools (spec v1.3 §10.3 / P0 §3.4). */
+function mapAuditError(error: unknown): ToolResult {
+  if (error instanceof EngineCallError) {
+    return {
+      content: [{ type: "text", text: formatToolErrorShape(error.toBody()) }],
+      isError: true,
+    };
+  }
+  if (error instanceof KernelSchemaError) {
+    return {
+      content: [{ type: "text", text: formatToolError(
+        GP_E_INTERNAL,
+        `engine returned an invalid evidence pack: ${error.message}`,
+        "engine and kernel schema drifted; fix the common fixtures (assertion C35)",
+      ) }],
+      isError: true,
+    };
+  }
+  return {
+    content: [{ type: "text", text: formatToolError(
+      GP_E_INTERNAL,
+      `internal shell error: ${String(error)}`,
+      "see the MCP server logs and retry",
+    ) }],
+    isError: true,
+  };
 }
 
 // Re-exported types for dispatch/tests.
