@@ -459,7 +459,8 @@ let core = EngineCore(
     channel: channel,
     evidenceStore: EvidenceStore(),
     degradationTracker: DegradationTracker(),
-    metricsProbe: ProcessMetricsProbe()
+    metricsProbe: ProcessMetricsProbe(),
+    approvalGate: ApprovalGate()
 )
 let dispatcher = Dispatcher(core: core, log: log)
 let server = SocketServer(socketPath: socketPath, dispatcher: dispatcher, log: log)
