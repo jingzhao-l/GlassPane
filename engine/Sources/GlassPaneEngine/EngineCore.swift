@@ -41,6 +41,13 @@ public final class EngineCore {
     /// Concurrency attribution guard (P2 spec v2.0 §15.4). Nil disables C33 —
     /// act() then behaves exactly like v1.6.
     private let attributionGuard: AttributionGuard?
+    /// Progressive degradation tracker (P2 spec v2.1 §18.3). Nil disables T9 —
+    /// act() then behaves exactly like v2.0.
+    private let degradationTracker: DegradationTracker?
+    /// Process metrics adapter feeding memory/handle signals into the tracker.
+    /// Nil means those signals are absent: the joint verdict can then never
+    /// reach .degrading (honest degradation instead of fake slopes).
+    private let metricsProbe: ProcessMetricsProviding?
     /// Busy-input retry budget before surfacing GP_E_BUSY_INPUT.
     public static let idleRetryCount = 5
     /// Interval between busy-input retries.
@@ -52,7 +59,9 @@ public final class EngineCore {
         settle: (() -> Void)? = nil,
         projectRegistry: ProjectRegistry? = nil,
         evidenceStore: EvidenceStore? = nil,
-        attributionGuard: AttributionGuard? = nil
+        attributionGuard: AttributionGuard? = nil,
+        degradationTracker: DegradationTracker? = nil,
+        metricsProbe: ProcessMetricsProviding? = nil
     ) {
         self.channel = channel
         self.clock = clock
@@ -60,6 +69,8 @@ public final class EngineCore {
         self.projectRegistry = projectRegistry ?? ProjectRegistry()
         self.evidenceStore = evidenceStore
         self.attributionGuard = attributionGuard
+        self.degradationTracker = degradationTracker
+        self.metricsProbe = metricsProbe
     }
 
     // MARK: - ISO-8601 timestamp
@@ -123,10 +134,12 @@ public final class EngineCore {
                 }
             }
             // Re-attach to the same app is idempotent; a different app
-            // invalidates the evidence history.
+            // invalidates the evidence history and the degradation window
+            // (T9 traces are scoped to the app-under-test session, §18.3).
             if attachedApp != app {
                 attachedApp = app
                 history.removeAll()
+                degradationTracker?.reset()
             }
             return attachResult(app)
         } catch let error as ChannelError {
@@ -292,8 +305,8 @@ public final class EngineCore {
         // Performance circuit breaker (P1 spec v1.1 §2): an act that exceeded
         // the wall-clock budget is flagged. Escalation only — never lowers an
         // existing channel-fault level, and level 2/3 are untouched by max.
-        let finalLevel: CircuitBreakerLevel
-        let finalReason: String?
+        var finalLevel: CircuitBreakerLevel
+        var finalReason: String?
         if latencyMs > Self.performanceLatencyBudgetMs {
             finalLevel = CircuitBreakerLevel(rawValue: max(level.rawValue, CircuitBreakerLevel.degraded.rawValue)) ?? level
             let perfReason = "performance-act-latency-over-budget: \(Int(latencyMs.rounded()))ms > \(Int(Self.performanceLatencyBudgetMs))ms"
@@ -301,6 +314,30 @@ public final class EngineCore {
         } else {
             finalLevel = level
             finalReason = reason
+        }
+
+        // T9 progressive degradation (P2 spec v2.1 §18.3): record a sample,
+        // then let the joint verdict escalate the circuit breaker level —
+        // escalation only, never lowering an existing channel-fault level.
+        if let degradationTracker, let attached = attachedApp {
+            let probeMetrics = metricsProbe?.metrics(for: attached.pid)
+            degradationTracker.record(
+                DegradationSample(
+                    timestamp: clock().timeIntervalSince1970,
+                    pingMs: responsiveness.responsive ? responsiveness.pingMs : nil,
+                    memoryBytes: probeMetrics?.memoryBytes,
+                    handleCount: probeMetrics?.handleCount
+                )
+            )
+            let t9Verdict = degradationTracker.verdict()
+            if t9Verdict.tier == .degrading {
+                finalLevel = CircuitBreakerLevel(
+                    rawValue: max(finalLevel.rawValue, CircuitBreakerLevel.degraded.rawValue)
+                ) ?? finalLevel
+                let degradation = "degradation|" + t9Verdict.drivers.joined(separator: "+")
+                    + "; longSession=\(t9Verdict.longSession)"
+                finalReason = finalReason.map { degradation + "; " + $0 } ?? degradation
+            }
         }
 
         let operationId = OperationID.generateLive()

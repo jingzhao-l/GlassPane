@@ -37,6 +37,17 @@ public enum Classifier {
                 next: "verify the selector targets an element supporting action '\(pack.signals.act.action.rawValue)'; try observe to confirm the element exists")
         }
 
+        // T9 progressive degradation (P2 spec v2.1 §18.4): the joint verdict
+        // marked this evidence with a `degradation|` reason prefix (≥2 of
+        // ping/memory/handles trending positive). This must precede the
+        // T3/T6 branches so a slowly degrading session is not misread as a
+        // dead click or a render-layer defect.
+        if pack.circuitBreaker.reason?.hasPrefix("degradation|") == true {
+            return outcome(.t9, path: path, evidence: evidenceSummary,
+                anomaly: "progressive degradation: ≥2 signals (main-thread ping latency / resident memory / handle count) trend persistently positive; joint T9 verdict",
+                next: "inspect the app for resource leaks (memory growth, fd/handle growth, main-thread latency drift); fix the leak or end the long session, then re-attach and resume")
+        }
+
         guard let axEvent = pack.signals.axEvent else {
             return outcome(.inconclusive, path: path, evidence: evidenceSummary,
                 anomaly: "AX tree signal unavailable (tree capture failed); classification requires probe signals (P1)",

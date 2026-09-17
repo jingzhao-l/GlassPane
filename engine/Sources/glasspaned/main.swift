@@ -307,7 +307,15 @@ if let recipePath = options.recipeValidate {
 let socketPath = options.socketPath ?? defaultSocketPath()
 let log = EngineLog(quiet: !options.verbose)
 let channel = AXChannel()
-let core = EngineCore(channel: channel, evidenceStore: EvidenceStore())
+// T9 progressive degradation is on by default: it needs no TCC permission
+// (proc_pidinfo is same-user process inspection), unlike C33 whose CGEvent
+// input monitoring stays opt-in until the operator grants input monitoring.
+let core = EngineCore(
+    channel: channel,
+    evidenceStore: EvidenceStore(),
+    degradationTracker: DegradationTracker(),
+    metricsProbe: ProcessMetricsProbe()
+)
 let dispatcher = Dispatcher(core: core, log: log)
 let server = SocketServer(socketPath: socketPath, dispatcher: dispatcher, log: log)
 installSignalHandlers(server)
