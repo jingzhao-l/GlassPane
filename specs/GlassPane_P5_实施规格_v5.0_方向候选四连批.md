@@ -96,12 +96,12 @@ public struct ApprovalRecord: Codable, Equatable {
 
 | 编号 | 验收项 | 通过标准 | 状态 |
 |---|---|---|---|
-| P5-A1 | 创世与链式哈希 | 创世 prevHash 为空串；每条 hash 为其规范内容（含链尾 hash）的完整 SHA-256 64 hex | 待实现 |
-| P5-A2 | 链完整性校验 | 完整链 verify 通过；篡改任意记录字段 / prevHash / 截断 → invalid 且 firstBrokenIndex 正确 | 待实现 |
-| P5-A3 | 持久化 roundtrip | 原子写 + 重载一致性；损坏文件加载为空台账不静默待有效；写失败不中断内存链 | 待实现 |
-| P5-A4 | EngineCore 登记 | restore 执行时登记 high 风险记录；gate nil 时零回归 | 待实现 |
-| P5-A5 | CLI 维护命令 | --approval-audit / --approval-verify 输出与退出码符合 §3.6 | 待实现 |
-| P5-A6 | 全量回归 | 既有用例不回归（engine/mcp-shell） | 待实现 |
+| P5-A1 | 创世与链式哈希 | 创世 prevHash 为空串；每条 hash 为其规范内容（含链尾 hash）的完整 SHA-256 64 hex | ✓ |
+| P5-A2 | 链完整性校验 | 完整链 verify 通过；篡改任意记录字段 / prevHash / 截断 → invalid 且 firstBrokenIndex 正确 | ✓ |
+| P5-A3 | 持久化 roundtrip | 原子写 + 重载一致性；损坏文件加载为空台账不静默待有效；写失败不中断内存链 | ✓ |
+| P5-A4 | EngineCore 登记 | restore 执行时登记 high 风险记录；gate nil 时零回归 | ✓ |
+| P5-A5 | CLI 维护命令 | --approval-audit / --approval-verify 输出与退出码符合 §3.6 | ✓ |
+| P5-A6 | 全量回归 | 既有用例不回归（engine/mcp-shell） | ✓ |
 
 ### 3.8 风险与边界（诚实声明）
 
@@ -187,12 +187,12 @@ public struct RestorePlan: Equatable {
 
 | 编号 | 验收项 | 通过标准 | 状态 |
 |---|---|---|---|
-| P5-B1 | 探针接入点 | snapshotProbe 注入槽存在；缺省 nil；快照捕获可携带合成探针负载 | 待实现 |
-| P5-B2 | 计划构建 | 先决链排序 + 无先决域字典序稳定；cyclic 依赖返回 nil | 待实现 |
-| P5-B3 | 计划校验 | 域集合/重复/checkpointRef/先决/digest 一致性逐项列 issues；干净计划 valid | 待实现 |
-| P5-B4 | 防篡改校验 | 探针 stateDigest 与计划期望不一致 → 校验失败 | 待实现 |
-| P5-B5 | tier-1 三分支 | 无探针负载 → GP_E_RESTORE_UNSUPPORTED；有负载 → planValid+rollbackExecuted:false+executionSurface；noSnapshot 先决 | 待实现 |
-| P5-B6 | 既有形态回归 | ffwd/compare/restore_snapshot 拒绝行为与批二起各用例一致 | 待实现 |
+| P5-B1 | 探针接入点 | snapshotProbe 注入槽存在；缺省 nil；快照捕获可携带合成探针负载 | ✓ |
+| P5-B2 | 计划构建 | 先决链排序 + 无先决域字典序稳定；cyclic 依赖返回 nil | ✓ |
+| P5-B3 | 计划校验 | 域集合/重复/checkpointRef/先决/digest 一致性逐项列 issues；干净计划 valid | ✓ |
+| P5-B4 | 防篡改校验 | 探针 stateDigest 与计划期望不一致 → 校验失败 | ✓ |
+| P5-B5 | tier-1 三分支 | 无探针负载 → GP_E_RESTORE_UNSUPPORTED；有负载 → planValid+rollbackExecuted:false+executionSurface；noSnapshot 先决 | ✓ |
+| P5-B6 | 既有形态回归 | ffwd/compare/restore_snapshot 拒绝行为与批二起各用例一致 | ✓ |
 
 ### 6.6 风险与边界（诚实声明）
 
@@ -245,12 +245,12 @@ public struct RestorePlan: Equatable {
 
 | 编号 | 验收项 | 通过标准 | 状态 |
 |---|---|---|---|
-| P5-C1 | TTL 修剪 | 超龄条目删除、未到期保留；删除数正确 | 待实现 |
-| P5-C2 | 钳制 | maxAgeDays 0/负 → 禁用（改为 nil），不"写即删" | 待实现 |
-| P5-C3 | 过期依据 | createdAt 优先；损坏条目按 mtime 回退；注入时钟可测 | 待实现 |
-| P5-C4 | 写时修剪 | TTL 配置下 write 后自动清过期条目；默认 nil 不触发 | 待实现 |
-| P5-C5 | 项目维度 | pruneEvidence(projectId:) 作用于该项目目录且不波及他项目；未知项目 GP_E_NOT_FOUND；nil 走默认 | 待实现 |
-| P5-C6 | 回归 | 既有 maxFiles FIFO / stats / clear 用例不回归 | 待实现 |
+| P5-C1 | TTL 修剪 | 超龄条目删除、未到期保留；删除数正确 | ✓ |
+| P5-C2 | 钳制 | maxAgeDays 0/负 → 禁用（改为 nil），不"写即删" | ✓ |
+| P5-C3 | 过期依据 | createdAt 优先；损坏条目按 mtime 回退；注入时钟可测 | ✓ |
+| P5-C4 | 写时修剪 | TTL 配置下 write 后自动清过期条目；默认 nil 不触发 | ✓ |
+| P5-C5 | 项目维度 | pruneEvidence(projectId:) 作用于该项目目录且不波及他项目；未知项目 GP_E_NOT_FOUND；nil 走默认 | ✓ |
+| P5-C6 | 回归 | 既有 maxFiles FIFO / stats / clear 用例不回归 | ✓ |
 
 ### 9.6 风险与边界（诚实声明）
 
@@ -292,11 +292,11 @@ public struct RestorePlan: Equatable {
 
 | 编号 | 验收项 | 通过标准 | 状态 |
 |---|---|---|---|
-| P5-D1 | --prune-evidence | 按天数修剪并输出 JSON；dry-run 只统计不删除且判定与真实同源；default 30 天 | 待实现 |
-| P5-D2 | 项目维度 | --project 指定目录执行；未知项目退出码 1 | 待实现 |
-| P5-D3 | --evidence-stats | count/totalBytes/project/dir 输出正确 | 待实现 |
-| P5-D4 | 参数校验 | --older-than 非数字/≤0 → 退出码 2；帮助文本完整 | 待实现 |
-| P5-D5 | 零帧约束 | 无 socket 方法表/错误码变更；clear 不设 CLI | 待实现 |
+| P5-D1 | --prune-evidence | 按天数修剪并输出 JSON；dry-run 只统计不删除且判定与真实同源；default 30 天 | ✓ |
+| P5-D2 | 项目维度 | --project 指定目录执行；未知项目退出码 1 | ✓ |
+| P5-D3 | --evidence-stats | count/totalBytes/project/dir 输出正确 | ✓ |
+| P5-D4 | 参数校验 | --older-than 非数字/≤0 → 退出码 2；帮助文本完整 | ✓ |
+| P5-D5 | 零帧约束 | 无 socket 方法表/错误码变更；clear 不设 CLI | ✓ |
 
 ### 12.5 风险与边界（诚实声明）
 
@@ -309,14 +309,15 @@ public struct RestorePlan: Equatable {
 ## 15. 全量回归与系列收口验收（P5 总表）
 
 - 四批全部落地后执行**全量回归**：engine `swift test` + mcp-shell `npm test`（kernel 不受本系列触及，按基线核验）；基线 engine 234 / mcp-shell 65 / kernel 47，本系列新增用例数如实记账于总表。
+- **用例记账（2026-09-18 实测收口）**：engine 234→284（+50：批一 ApprovalGate 17、批二 RestorePipeline 20、批三 EvidenceStore TTL 13）；mcp-shell 65 不变；kernel 47 基线核验不变。三面全绿。
 - 系列版本管理：P5 系列从 v5.0 起（若后续批次，逐版追加不删减）；P4 v4.0 §30.6 的"新系列另起"规定已由本文件兑现。
 
 | 编号 | 验收项 | 通过标准 | 状态 |
 |---|---|---|---|
-| P5-E1 | 全量回归 | engine + mcp-shell 全用例绿；kernel 基线核验 | 待实现 |
-| P5-E2 | 铁约束复核 | 四批零新 socket 帧/零新错误码/零 kernel 改动/零新依赖 | 待实现 |
-| P5-E3 | 规格-实现一致性 | 本规格 §3–§14 每项验收（P5-A/B/C/D 系）逐项 ✓ | 待实现 |
-| P5-E4 | 真机冒烟（可选） | CLI 维护命令/审批审计命令在真实环境执行观察 | 待办（可选人工项） |
+| P5-E1 | 全量回归 | engine + mcp-shell 全用例绿；kernel 基线核验 | ✓ |
+| P5-E2 | 铁约束复核 | 四批零新 socket 帧/零新错误码/零 kernel 改动/零新依赖 | ✓ |
+| P5-E3 | 规格-实现一致性 | 本规格 §3–§14 每项验收（P5-A/B/C/D 系）逐项 ✓ | ✓ |
+| P5-E4 | 真机冒烟（可选） | CLI 维护命令/审批审计命令在真实环境执行观察 | ✓（已执行真实环境观察） |
 
 ---
 
