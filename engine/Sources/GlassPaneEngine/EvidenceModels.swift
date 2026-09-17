@@ -444,3 +444,106 @@ public extension EvidencePack {
         try Self.encoder.encode(self)
     }
 }
+
+// MARK: - Decision log entry (C35 dual-binding, spec v3.0 §21.3)
+
+public enum DecisionOutcome: String, Codable {
+    case pass, fail, blocked, inconclusive
+}
+
+public struct DecisionLogEntry: Codable, Equatable {
+    public static let summaryMaxLength = 2048
+
+    public let entryId: String        // ^dl_[0-9A-HJKMNP-TV-Z]{26}$
+    public let sequence: Int          // ≥ 0
+    public let prevEntryHash: String  // ^([0-9a-f]{64})?$（创世条目为空串）
+    public let operationId: String?   // 可选，^op_[0-9A-HJKMNP-TV-Z]{26}$；编码时省略而非写 null
+    public let summary: String        // ≤ summaryMaxLength
+    public let outcome: DecisionOutcome
+    public let createdAt: String      // ISO-8601 毫秒 UTC
+
+    public init(
+        entryId: String,
+        sequence: Int,
+        prevEntryHash: String,
+        operationId: String? = nil,
+        summary: String,
+        outcome: DecisionOutcome,
+        createdAt: String
+    ) {
+        self.entryId = entryId
+        self.sequence = sequence
+        self.prevEntryHash = prevEntryHash
+        self.operationId = operationId
+        self.summary = summary
+        self.outcome = outcome
+        self.createdAt = createdAt
+    }
+}
+
+// MARK: - Decision log entry invariants (patterns Codable cannot express)
+
+public enum DecisionLogEntryError: Error, Equatable {
+    case badEntryId(String)
+    case badPrevEntryHash(String)
+    case badOperationId(String)
+    case badCreatedAt(String)
+    case badSequence(Int)
+    case summaryTooLong(Int)
+}
+
+public extension DecisionLogEntry {
+    private static let entryIdRegex = try! NSRegularExpression(
+        pattern: "^dl_[0-9A-HJKMNP-TV-Z]{26}$"
+    )
+    private static let prevEntryHashRegex = try! NSRegularExpression(
+        pattern: "^([0-9a-f]{64})?$"
+    )
+    private static let operationIdRegex = try! NSRegularExpression(
+        pattern: "^op_[0-9A-HJKMNP-TV-Z]{26}$"
+    )
+    private static let createdAtRegex = try! NSRegularExpression(
+        pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    )
+
+    /// Validates the pattern/const invariants the JSON Schema enforces on the
+    /// TS side (mirror of `kernel/schemas/decision-log-entry.schema.json`).
+    /// Call after any decode of untrusted JSON.
+    func validateInvariants() throws {
+        guard Self.matches(Self.entryIdRegex, entryId) else {
+            throw DecisionLogEntryError.badEntryId(entryId)
+        }
+        guard sequence >= 0 else {
+            throw DecisionLogEntryError.badSequence(sequence)
+        }
+        guard Self.matches(Self.prevEntryHashRegex, prevEntryHash) else {
+            throw DecisionLogEntryError.badPrevEntryHash(prevEntryHash)
+        }
+        if let operationId {
+            guard Self.matches(Self.operationIdRegex, operationId) else {
+                throw DecisionLogEntryError.badOperationId(operationId)
+            }
+        }
+        guard summary.count <= Self.summaryMaxLength else {
+            throw DecisionLogEntryError.summaryTooLong(summary.count)
+        }
+        guard Self.matches(Self.createdAtRegex, createdAt) else {
+            throw DecisionLogEntryError.badCreatedAt(createdAt)
+        }
+    }
+
+    private static func matches(_ regex: NSRegularExpression, _ value: String) -> Bool {
+        let range = NSRange(value.startIndex..., in: value)
+        return regex.firstMatch(in: value, range: range) != nil
+    }
+
+    static func decodeAndValidate(_ data: Data) throws -> DecisionLogEntry {
+        let entry = try JSONDecoder().decode(DecisionLogEntry.self, from: data)
+        try entry.validateInvariants()
+        return entry
+    }
+
+    func jsonData() throws -> Data {
+        try EvidencePack.encoder.encode(self)
+    }
+}

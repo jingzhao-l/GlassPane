@@ -108,4 +108,109 @@ final class EvidenceRoundtripTests: XCTestCase {
         let mutated = try JSONSerialization.data(withJSONObject: object)
         XCTAssertThrowsError(try EvidencePack.decodeAndValidate(mutated))
     }
+
+    // MARK: - decision-log-entry binding (spec v3.0 §21.3: C35 Swift-side leg)
+
+    private func decisionLogObject() throws -> [String: Any] {
+        let fixture = try KernelFixtures.data("decision-log-entry.ok-01.json")
+        return try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: fixture) as? [String: Any]
+        )
+    }
+
+    private func decisionLogJSON(_ object: [String: Any]) throws -> Data {
+        try JSONSerialization.data(withJSONObject: object)
+    }
+
+    func testDecisionLogFixtureRoundtripsThroughCanonicalJSON() throws {
+        let fixture = try KernelFixtures.data("decision-log-entry.ok-01.json")
+        let entry = try DecisionLogEntry.decodeAndValidate(fixture)
+        let reencoded = try entry.jsonData()
+        XCTAssertEqual(
+            try canonicalJSON(reencoded),
+            try canonicalJSON(fixture),
+            "canonical form drifted for decision-log-entry.ok-01.json"
+        )
+    }
+
+    func testDecisionLogFixtureReencodesToEqualValue() throws {
+        let data = try KernelFixtures.data("decision-log-entry.ok-01.json")
+        let entry = try DecisionLogEntry.decodeAndValidate(data)
+        let redecoded = try DecisionLogEntry.decodeAndValidate(try entry.jsonData())
+        XCTAssertEqual(entry, redecoded, "value drifted after re-encode")
+    }
+
+    func testDecisionLogFixtureShape() throws {
+        let entry = try DecisionLogEntry.decodeAndValidate(
+            try KernelFixtures.data("decision-log-entry.ok-01.json")
+        )
+        XCTAssertEqual(entry.entryId, "dl_0123456789ABCDEFGHJKMNPQRS")
+        XCTAssertEqual(entry.sequence, 0)
+        XCTAssertEqual(entry.prevEntryHash, "")
+        XCTAssertEqual(entry.operationId, "op_0123456789ABCDEFGHJKMNPQRS")
+        XCTAssertEqual(entry.outcome, .pass)
+        XCTAssertEqual(entry.createdAt, "2026-09-14T12:34:56.789Z")
+        XCTAssertLessThanOrEqual(entry.summary.count, DecisionLogEntry.summaryMaxLength)
+    }
+
+    func testDecisionLogRejectsBadEntryId() throws {
+        var object = try decisionLogObject()
+        object["entryId"] = "dl_short"
+        XCTAssertThrowsError(try DecisionLogEntry.decodeAndValidate(try decisionLogJSON(object))) { error in
+            XCTAssertEqual(error as? DecisionLogEntryError, .badEntryId("dl_short"))
+        }
+    }
+
+    func testDecisionLogRejectsBadPrevEntryHash() throws {
+        var object = try decisionLogObject()
+        object["prevEntryHash"] = "zz-not-hex"
+        XCTAssertThrowsError(try DecisionLogEntry.decodeAndValidate(try decisionLogJSON(object))) { error in
+            XCTAssertEqual(error as? DecisionLogEntryError, .badPrevEntryHash("zz-not-hex"))
+        }
+    }
+
+    func testDecisionLogRejectsNegativeSequence() throws {
+        var object = try decisionLogObject()
+        object["sequence"] = -1
+        XCTAssertThrowsError(try DecisionLogEntry.decodeAndValidate(try decisionLogJSON(object))) { error in
+            XCTAssertEqual(error as? DecisionLogEntryError, .badSequence(-1))
+        }
+    }
+
+    func testDecisionLogRejectsUnknownOutcome() throws {
+        var object = try decisionLogObject()
+        object["outcome"] = "maybe"
+        XCTAssertThrowsError(try DecisionLogEntry.decodeAndValidate(try decisionLogJSON(object)))
+    }
+
+    func testDecisionLogRejectsBadOperationId() throws {
+        var object = try decisionLogObject()
+        object["operationId"] = "nope"
+        XCTAssertThrowsError(try DecisionLogEntry.decodeAndValidate(try decisionLogJSON(object))) { error in
+            XCTAssertEqual(error as? DecisionLogEntryError, .badOperationId("nope"))
+        }
+    }
+
+    func testDecisionLogRejectsBadCreatedAt() throws {
+        var object = try decisionLogObject()
+        object["createdAt"] = "2026/09/14 12:00:00"
+        XCTAssertThrowsError(try DecisionLogEntry.decodeAndValidate(try decisionLogJSON(object))) { error in
+            XCTAssertEqual(error as? DecisionLogEntryError, .badCreatedAt("2026/09/14 12:00:00"))
+        }
+    }
+
+    func testDecisionLogRejectsMissingRequiredField() throws {
+        var object = try decisionLogObject()
+        object.removeValue(forKey: "prevEntryHash")
+        XCTAssertThrowsError(try DecisionLogEntry.decodeAndValidate(try decisionLogJSON(object)))
+    }
+
+    func testDecisionLogRejectsOverlongSummary() throws {
+        var object = try decisionLogObject()
+        let overlong = DecisionLogEntry.summaryMaxLength + 1
+        object["summary"] = String(repeating: "a", count: overlong)
+        XCTAssertThrowsError(try DecisionLogEntry.decodeAndValidate(try decisionLogJSON(object))) { error in
+            XCTAssertEqual(error as? DecisionLogEntryError, .summaryTooLong(overlong))
+        }
+    }
 }
