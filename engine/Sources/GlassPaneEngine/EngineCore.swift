@@ -38,19 +38,28 @@ public final class EngineCore {
     /// when `nil` is injected — used to disable persistence in tests that
     /// assert pure in-memory behavior.
     private let evidenceStore: EvidenceStore?
+    /// Concurrency attribution guard (P2 spec v2.0 §15.4). Nil disables C33 —
+    /// act() then behaves exactly like v1.6.
+    private let attributionGuard: AttributionGuard?
+    /// Busy-input retry budget before surfacing GP_E_BUSY_INPUT.
+    public static let idleRetryCount = 5
+    /// Interval between busy-input retries.
+    public static let idleRetryInterval: Double = 0.05
 
     public init(
         channel: RuntimeChannel,
         clock: @escaping () -> Date = { Date() },
         settle: (() -> Void)? = nil,
         projectRegistry: ProjectRegistry? = nil,
-        evidenceStore: EvidenceStore? = nil
+        evidenceStore: EvidenceStore? = nil,
+        attributionGuard: AttributionGuard? = nil
     ) {
         self.channel = channel
         self.clock = clock
         self.settle = settle ?? { Thread.sleep(forTimeInterval: EngineCore.actSettleInterval) }
         self.projectRegistry = projectRegistry ?? ProjectRegistry()
         self.evidenceStore = evidenceStore
+        self.attributionGuard = attributionGuard
     }
 
     // MARK: - ISO-8601 timestamp
@@ -129,6 +138,38 @@ public final class EngineCore {
         guard attachedApp != nil else {
             throw GPError(code: .notAttached, message: "no app attached")
         }
+        // C33 concurrency attribution protection (P2 spec v2.0 §15.4): the
+        // daemon must hold the operation right before acting. If real user
+        // input keeps the input window busy, retry a bounded number of times
+        // then surface GP_E_BUSY_INPUT instead of silently running polluted.
+        var contaminationVerdict: OperationRightVerdict?
+        if let attributionGuard {
+            var acquisition: OperationRightAcquisition = .idleNotMet
+            var attempts = 0
+            while attributionGuard.isHolding == false {
+                acquisition = attributionGuard.acquireOperationRight()
+                if acquisition == .acquired {
+                    break
+                }
+                attempts += 1
+                guard attempts < EngineCore.idleRetryCount else { break }
+                Thread.sleep(forTimeInterval: EngineCore.idleRetryInterval)
+                acquisition = .idleNotMet
+            }
+            guard acquisition == .acquired else {
+                throw GPError(
+                    code: .busyInput,
+                    message: "input window stayed busy for \(attempts) retries; refusing a possibly contaminated act"
+                )
+            }
+        }
+        // Safety net: any throw path below still releases the operation right.
+        defer {
+            if let attributionGuard, attributionGuard.isHolding {
+                _ = attributionGuard.releaseOperationRight()
+            }
+        }
+
         let started = clock()
 
         let aliveBefore = channel.isProcessAlive()
@@ -263,10 +304,22 @@ public final class EngineCore {
         }
 
         let operationId = OperationID.generateLive()
+        // C33 verdict: scan the input stream for the whole operation window,
+        // then release the operation right. Contamination downgrades the
+        // attribution to weak + contaminated=true (spec v2.0 §15.4).
+        if let attributionGuard {
+            attributionGuard.monitorInput()
+            contaminationVerdict = attributionGuard.releaseOperationRight()
+        }
+        let contaminated = contaminationVerdict?.contaminated ?? false
+        let attribution = Attribution(
+            level: contaminated ? .weak : .soft,
+            contaminated: contaminated
+        )
         let pack = EvidencePack(
             operationId: operationId,
             createdAt: nowISO(),
-            attribution: Attribution(level: .soft, contaminated: false),
+            attribution: attribution,
             circuitBreaker: CircuitBreaker(level: finalLevel, reason: finalReason),
             signals: Signals(
                 act: ActSignal(selector: selector, action: action, actConfirmed: actConfirmed),

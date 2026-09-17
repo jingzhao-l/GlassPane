@@ -20,6 +20,7 @@ public enum GPErrorCode: String, Codable {
     case restoreStepFailed = "GP_E_RESTORE_STEP_FAILED"
     case projectLimit = "GP_E_PROJECT_LIMIT"
     case notFound = "GP_E_NOT_FOUND"
+    case busyInput = "GP_E_BUSY_INPUT"
     case internalError = "GP_E_INTERNAL"
 }
 
@@ -75,6 +76,8 @@ public struct GPError: Error {
             return "delete unused projects first (glasspaned --list-projects), then retry"
         case .notFound:
             return "check the projectId; use gp_project_list to view available projects"
+        case .busyInput:
+            return "pause the agent and wait for the user to stop interacting, then retry act; or proceed in degrade mode (attribution weak + contaminated=true)"
         case .internalError:
             return "check the daemon log (stderr) and retry"
         }

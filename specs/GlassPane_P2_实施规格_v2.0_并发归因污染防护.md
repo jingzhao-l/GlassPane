@@ -1,0 +1,458 @@
+# GlassPane P2 实施规格 v2.0 — 并发归因污染防护（C33）
+
+- 契约真源角色：P2 第一批次的实施契约（P2 二批及后续见 v2.1+；P1 全套 v1.0–v1.6 验收项已达标且正文保留不变；本规格基于 v1.6 的章节结构与约束体系迭代，不删减既有内容，仅追加批次一范围——并发归因污染防护：操作权互斥、输入空闲检测与污染标注）
+- 版本：v2.0
+- 日期：2026-09-17
+- 关联决策：综述 §5.3 并发归因污染防护（R21）、断言 **C33**（并发场景下归因污染检出率 >95%、误杀率 <5%）、综述 §14"明确不解决的——agent 与用户手动操作并发时的强归因"（本批落地其选定对冲：操作权互斥 + 污染标注，宁降级不静默错判）、§5.14 权限清单中"输入监控（C33 并发污染检测的 CGEvent 输入流监控）"
+
+---
+
+## 变更说明（相对 P1 v1.6 批次）
+
+v1.6 收尾了 P1 全部批次（七批）后，P2（能力扩展）将综述中 P2 关键标准逐个落地。首个 P2 批次兑现 **C33 并发归因污染防护**（综述 §10.2：P2 关键标准增加 C33、T9）。
+
+综述 §5.3 定义的问题与机制：
+
+- **问题**：agent 操作与用户真实操作并发时，进程级单值插槽互相覆盖，归因被污染——开发者"边手动点边让 agent 跑"是真实开发常态；
+- **机制**：AX 会话锁扩展为"**操作权互斥**"——daemon 在持有操作权期间监控 CGEvent 全局输入流，若检测到非 agent 来源的真实输入（键盘/鼠标），则：① 通知 agent 暂停（默认，避免竞态）；② 或 agent 选择继续但本次 opID 的全部归因降级为弱归因并在 evidence 包标注 `contaminated: true`；
+- **断言 C33**：并发场景下归因污染检出率 >95%，误杀率（用户无操作时误判污染）<5%。
+
+本批在 engine 侧落地该机制的**判定性核心**（纯逻辑、可单测）：输入事件源抽象、操作权互斥与空闲检测、污染判定与标注。具体：
+
+- engine 新增 `InputEventSource` 协议（事件序列抽象，时间戳 + 来源类别）+ `ScriptedInputEventSource`（测试注入的脚本化事件源，可精确构造"并行用户输入"场景）；真实 CGEvent 输入流适配器按综述归入运行时权限面（需输入监控 TCC 权限，真机冒烟验收——与 AX 适配层同口径，见 §16.5）。
+- engine 新增 `AttributionGuard`（纯逻辑）：**操作权互斥**（daemon 发起 act 前置获取操作权，释放前禁止他人 act）、**输入空闲检测**（操作权获取前要求最近窗口内无真实输入——输入空闲才算"可独占操作"）、**污染判定**（持有操作权期间，检测到非 agent 来源输入事件 → 本次归因污染）。
+- `AttributionGuard` 输出的裁决 `wasContaminated` 直接进 evidence 包：归因降级为 `weak` + `contaminated: true`（reviewed 面语义：宁降级不静默错判）。
+- `EngineCore.act()` 集成：act 前置 `guard.acquireOperationRight()`（含输入空闲检测），act 完成后释放；扫描窗口内真实输入事件 → 污染裁决写入 evidence attribution。
+- **可测性边界（5.8 R45）**：判定逻辑 100% 单测（脚本化事件源）；CGEvent 监控适配层真机冒烟（§16.5）。
+- 铁约束：**不新增 daemon/socket 帧**（操作权互斥为 EngineCore 内部协调，不做协议帧；无新方法）、**不改变 evidence schema**（`Attribution` 已有 `level`/`contaminated` 字段，本批只是正确使用之）、**不新增错误码**、不改变 mcp-shell 工具面（C33 的"通知 agent 暂停"以 evidence 归因降级 + `contaminated` 标注承载，MCP 工具无需新语义）。
+- 验收口径：C33 数值断言在**单元测试层用合成场景集**统计（检出率 = 污染场景中被标污染的比例；误杀率 = 纯净场景中被误标污染的比例），阈值 ≥95% / <5%。
+
+批次一范围要点：
+
+- `InputEventSource`：`nextEvent() -> InputEvent?` 事件流抽象，`InputEvent` 含 `timestamp`/`source`（`.agent`/`.human`）；脚本源按队列回放。
+- `AttributionGuard`：可注入时钟与事件源；`acquireOperationRight()` 做输入空闲检测（空闲窗口可配置，默认 500ms）并返回获取结果；持有期间 `monitorInput()` 扫描输入；`releaseOperationRight()` 返回 `(contaminated: Bool, humanEvents: [InputEvent])`。
+- 污染判定规则：操作权持有期间出现任何 `.human` 源事件 → `contaminated = true`（归因降级 weak）；无 `.human` 事件 → 保持原归因强度（soft）。
+- 空闲检测规则：若最近空闲窗口内存在 `.human` 事件 → 操作权获取被推迟/拒绝（`idleNotMet`），由 daemon 侧等待后重试（本批 EngineCore 默认策略：重试至空闲，给定时限后如实以错误呈现——不静默继续导致污染）。
+- `EngineCore.act()`：集成 guard（构造注入，缺省为"无 guard = 不启用 C33"，保持既有行为不回归）。
+
+---
+
+## 1. 项目注册表
+
+---
+
+## 1. 项目注册表
+
+前四批覆盖了 daemon 能力（SCK/快照/熔断/evidence审查）与开发者入口（CLI→GUI）。本批次补齐多项目工作流的缺失环节：**项目注册表**（每个被测 app 的元数据管理）与**配方管理**（配方配置加载、校验、按项目隔离）。
+
+- engine 新增 `ProjectRegistry`（纯逻辑 + 文件持久化）：项目注册、查询、切换、删除；项目级 evidence 存储路径可配置。
+- engine 新增 `RecipeManager`（纯逻辑）：加载 YAML 配方、经 kernel recipe-config schema 校验、按项目隔离配方集。
+- daemon CLI 新增 `--list-projects` / `--active-project <id>` / `--recipe-validate <path>` 命令。
+- mcp-shell 新增 `gp_project_list` / `gp_project_set` / `gp_project_get` 三工具。
+- 不改变 socket 协议方法表（项目管理仅 CLI/MCP 层面；daemon 运行时以 activeProject 上下文关联）。
+
+---
+
+## 1. 项目注册表
+
+### 1.1 数据模型
+
+```swift
+public struct ProjectEntry: Codable, Equatable {
+    public let projectId: String          // prj_ + Crockford base32 (26)
+    public var displayName: String        // ≤256 chars
+    public var bundleId: String?          // 与 pid 二选一
+    public var pid: Int32?                // 与 bundleId 二选一
+    public var recipeConfigPath: String?  // 配方文件路径（可选）
+    public var calibrationAssetsPath: String? // 校准资产路径（可选）
+    public var evidenceStoragePath: String?   // evidence 存储路径（可选，默认 XDG）
+    public var createdAt: String          // ISO-8601
+}
+```
+
+项目 ID 格式 `prj_` + Crockford base32 26 位（与 op_/snap_ 同生成器）。
+
+### 1.2 注册表持久化
+
+- 文件路径：`~/.glasspane/projects.json`（可通过 `--config-path` 覆盖 daemon 根目录）
+- 格式：JSON 数组，key-sorted 编码，`[ProjectEntry]`
+- 原子写入：先写 `.tmp` 再 rename（防中途崩溃）
+- 注册表大小上限：128 个项目（超过 → `GP_E_PROJECT_LIMIT`）
+
+### 1.3 项目切换
+
+`EngineCore` 新增 `activeProjectId: String?` 属性；`attach` 时如果传入 `projectId`，自动关联到对应项目条目（校验 bundleId/pid 一致）。
+
+---
+
+## 2. 配方管理
+
+### 2.1 配方加载
+
+engine 新增 `RecipeLoader`：读取 YAML → 解析为字典 → 经 kernel recipe-config.schema.json 校验（ajv）→ 返回结构化结果。
+
+P0 daemon 侧不直接消费 YAML 配方（daemon 只接收 act/observe 等原子操作），但需要**校验配方文件合法性**以支持 onboarding 与项目注册。
+
+### 2.2 配方校验命令
+
+`glasspaned --recipe-validate <path>` → 输出校验结果（valid/invalid + errors 数组）。
+
+---
+
+## 3. CLI 扩展
+
+| 命令 | 输出 | 退出码 |
+|---|---|---|
+| `--list-projects` | JSON 数组，每个项目条目 | 0 |
+| `--active-project <id>` | 设置活跃项目，输出确认 | 0 |
+| `--recipe-validate <path>` | 校验结果 JSON | 0=valid, 1=invalid, 2=error |
+
+---
+
+## 4. MCP 工具扩展（mcp-shell，八工具 → 十一工具）
+
+| 工具 | inputSchema | 成功返回 | 失败 |
+|---|---|---|---|
+| gp_project_list | `{}` | `{projects: [...]}` | — |
+| gp_project_set | `{projectId?: string, displayName: string, bundleId?: string, pid?: number, recipeConfigPath?: string}` | `{project: {...}}` | GP_E_BAD_PARAMS / GP_E_PROJECT_LIMIT / GP_E_NOT_FOUND |
+| gp_project_get | `{projectId: string}` | `{project: {...}}` | GP_E_NOT_FOUND |
+
+- `gp_project_set` 无 `projectId` 时创建新项目（自动生成 ID）；有 `projectId` 时更新已有条目。
+- `gp_project_get` 不存在 → `GP_E_NOT_FOUND`。
+
+---
+
+## 5. 错误码扩展（GP_E 表追加两码）
+
+| 错误码 | 含义 | agent 补救指引 |
+|---|---|---|
+| GP_E_PROJECT_LIMIT | 项目数达到上限（128） | 删除不需要的项目后重试 |
+| GP_E_NOT_FOUND | 项目 ID 不存在 | 检查 projectId，或用 gp_project_list 查看可用项目 |
+
+---
+
+## 6. 双语言联动与 schema 影响
+
+| 关注面 | 影响 |
+|---|---|
+| evidence-pack schema | 无变更 |
+| decision-log / recipe-config schema | 无变更 |
+| kernel zod 绑定 | 无新增导出 |
+| kernel fixtures | 无新增 |
+| Swift Codable | 新增 ProjectEntry（非 evidence 相关），不进证据链 |
+
+---
+
+## 7. 可测性与验收
+
+- **engine 单测**：ProjectRegistry CRUD（增/删/查/改）+ 持久化 roundtrip（写文件→读回→字段一致）+ 128 上限拒绝；RecipeLoader 校验（合法 YAML 通过、非法字段拒绝、空文件拒绝）；项目切换（attach 关联 activeProject）
+- **mcp-shell 单测**：三工具注册/转发/校验/错误映射
+- **真机冒烟（可选）**：CLI --list-projects / --active-project / --recipe-validate 端到端
+
+| 编号 | 验收项 | 通过标准 | 状态 |
+|---|---|---|---|
+| P1-E1 | ProjectRegistry CRUD | 创建/读取/更新/删除全路径单测通过 | ✓ 已实现并单测通过（2026-09-17，`ProjectRegistryTests`） |
+| P1-E2 | 持久化 roundtrip | 写入文件→读回→字段相等；原子写入无中间态 | ✓ 已实现并单测通过（2026-09-17） |
+| P1-E3 | 项目上限 | 第 129 个项目拒绝 GP_E_PROJECT_LIMIT | ✓ 已实现并单测通过（2026-09-17，`ProjectRegistryTests` 上限用例） |
+| P1-E4 | 项目切换 | attach 时传 projectId 自动关联；bundleId 不匹配时 GP_E_BAD_PARAMS | ✓ 已实现并单测通过（2026-09-17） |
+| P1-E5 | RecipeLoader 校验 | 合法 recipe-config 通过；非法字段/缺必填拒绝；空文件拒绝 | ✓ 已实现并单测通过（2026-09-17，`RecipeLoaderTests` 6 用例） |
+| P1-E6 | CLI 命令 | --list-projects / --active-project / --recipe-validate 输出正确 | ✓ 已实现并接入 daemon CLI（2026-09-17，`glasspaned/main.swift`） |
+| P1-E7 | MCP 工具 | gp_project_list/set/get 注册、校验、错误映射 | ✓ 已实现并单测通过（2026-09-17，mcp-shell 工具用例） |
+| P1-E8 | 纯逻辑单测回归 | 新增用例全绿；既有用例不回归 | ✓ 全量 engine 162 用例全绿（2026-09-17，0 失败 1 opt-in 跳过）+ mcp-shell 56 用例全绿 |
+
+---
+
+## 8. 风险与边界（诚实声明）
+
+1. **项目持久化为文件而非数据库**：单 JSON 文件足够（128 上限 + 纯文本元数据）；daemon 重启后自动加载；多 daemon 实例冲突通过文件锁预防（P0 已声明单客户端语义）。
+2. **配方校验为本地 ajv 运行时**：需要 kernel 包的 ajv 依赖；engine 侧不内嵌 ajv（Swift），daemon CLI --recipe-validate 委托给 mcp-shell 校验路径或直接用 kernel 的 test 辅助工具（CI 层面）。实际 daemon 运行时不做配方校验（配方校验是开发期行为）。
+3. **evidence 存储路径可配置但 P0 不落盘**：P0 evidence 仅内存态；项目级 evidenceStoragePath 为 P1 后续批次预留（当 evidence 落盘功能进入时启用）。当前配置值被接受但不生效，避免数据流中断。
+
+> **版本结构说明（v1.4 → v1.5）**：v1.5 在 v1.4 的 §1–§8 之后追加批六范围 **§9–§11**（证据落盘、验收、风险），v1.4 正文 §1–§8 逐字保留不变。§8.3 所述的 `evidenceStoragePath` 预留口子在本批正式启用（不再“接受但不生效”）。
+
+---
+
+## 9. evidence 持久化落盘（批量六新增）
+
+### 9.1 定位
+
+对应综述 §5.14 / PRD US-10「开发者回到桌面 → 按 operationId 证据卡片回放会话」。此前 evidence 仅存于 daemon 内存环形历史（P0“最近条目仅内存”），daemon 重启即丢失；v1.3 的审查工具（`gp_recent_reports` 等）在会话内跟踪 operationId，但跨进程重启无法回放。本批把 evidence 落地为**持久审计档案**，重启后仍可按订单历史回放。
+
+### 9.2 engine 新增：EvidenceStore
+
+`engine/Sources/GlassPaneEngine/EvidenceStore.swift`（纯逻辑 + 文件持久化，无 AX 依赖，可注入临时目录单测）：
+
+- 存放目录解析优先级：`activeProject.evidenceStoragePath` → 默认 `~/.glasspane/evidence/`。
+- 落盘格式：每 operationId 一个文件 `<dir>/<operationId>.json`，内容为 key-sorted 编码的完整 EvidencePack（`EvidencePack.encoder`，`.sortedKeys`）。文件名仅由 Crockford base32 opId 组成，天然文件系统安全，无路径注入。
+- 原子写：`<file>.tmp` 写入 → `replaceItemAt` rename（与 ProjectRegistry.save 同范式）；rename 失败回退直接写，单测以结果正确为准。
+- 读回：`read(operationId:) -> EvidencePack?` 读 `<dir>/<operationId>.json` 并 JSONDecoder 解码；文件缺失/损坏返回 nil（不抛，由调用方映射 `GP_E_NO_EVIDENCE`）。
+- `lastOnDisk() -> String?`：若无内存最近项，按目录内文件 mtime 取最近一条 opId（用于 `lastEvidence` 无参数时回退）。
+- 磁盘目录不存在时首次写自动 `createDirectory(withIntermediateDirectories:)`。
+
+### 9.3 EngineCore 挂接
+
+- `store(_:)`/`replace(_:)`：写内存环形历史后调用 `evidenceStore.write(pack)`；写失败**不抛出**、不阻断 act/assert 主流程（证据仍在内存），仅以 `lastEvidence` 磁盘侧缺失呈现（诚实降级）。
+- `lastEvidence(operationId:)`：内存未命中 → `evidenceStore.read(operationId)` → 仍 nil → `GP_E_NO_EVIDENCE`。
+- `lastEvidence()`（无参）：内存 `latestPack()` → 缺失 → `evidenceStore.lastOnDisk()` decode 该条 → 仍无 → `GP_E_NO_EVIDENCE`。
+- `attach(projectId:)` 关联活跃项目后，`evidenceStore` 按该项目 `evidenceStoragePath` 定位（每次写/读时解析当前活跃项目目录，无需重启）。
+- 不改变方法表、不新增错误码（复用 `GP_E_NO_EVIDENCE`）、不改变 evidence schema。
+
+### 9.4 生命周期与隔离
+
+| 关注面 | 行为 |
+|---|---|
+| 内存环形 | 维持 64 上限不变；磁盘为全量档案，不过期 |
+| attach 换 app | 与既有语义一致清空内存历史；磁盘档案保留（按 opId 仍可回放） |
+| 目录隔离 | 不同项目配置不同 `evidenceStoragePath` 时隔离；未配置共享默认目录（文档声明，不作强隔离） |
+| 重启 | 磁盘档案保留，`lastEvidence(opId)` 可直接回放 |
+
+### 9.5 与 reviewed 面的关系（无冲突）
+
+| 面 | 关系 |
+|---|---|
+| v1.4 §8.3 | 预留口子正式启用，“接受且生效” |
+| 内存 history / lastEvidence | 语义增强为“内存 + 磁盘两级查”，方法名与帧格式不变 |
+| mcp-shell gp_last_evidence / gp_export_evidence | 自动受益，无需改动即可回放重启前证据 |
+
+---
+
+## 10. 可测性与验收
+
+- **engine 单测**（`EvidenceStoreTests`，注入临时目录）：roundtrip 写→读一致；原子写后无 `.tmp` 残留；`read` 缺失返回 nil；损坏文件返回 nil 不崩；目录自动创建；`lastOnDisk` 取最近 mtime。
+- **EngineCore 集成**（`EngineP1Batch6Tests`，ScriptedChannel + 临时目录注入 EvidenceStore）：store/replace 后磁盘存在对应文件；`lastEvidence(opId)` 重启回放（新 EngineCore 实例 + 同一目录）；无参数 `lastEvidence` 内存优先、磁盘回退；attach(projectId) 关联后落盘到项目目录。
+- **全量回归**：engine 全用例 + mcp-shell 全用例不回归。
+
+| 编号 | 验收项 | 通过标准 | 状态 |
+|---|---|---|---|
+| P1-F1 | EvidenceStore roundtrip | 写 evidence → 磁盘文件存在 → 读回字段相等；key-sorted；无 `.tmp` 残留 | ✓ 已实现并单测通过（2026-09-17，`EngineP1Batch6Tests` roundtrip 用例） |
+| P1-F2 | 读缺失/损坏容错 | 文件缺失/损坏 → `read` 返回 nil 不崩，调用方映射 GP_E_NO_EVIDENCE | ✓ 已实现并单测通过（2026-09-17，缺失/corrupt 两用例） |
+| P1-F3 | 目录自动创建 | 写入时目标目录不存在 → 自动创建成功 | ✓ 已实现并单测通过（2026-09-17，嵌套目录用例） |
+| P1-F4 | 重启回放 | 内存清空/新 EngineCore 实例 + 同一目录 → `lastEvidence(opId)` 仍可取到 | ✓ 已实现并单测通过（2026-09-17，replay 用例） |
+| P1-F5 | 内存优先 | 无参 `lastEvidence` 内存有项时取内存；内存空时磁盘按最近 mtime 回退 | ✓ 已实现并单测通过（2026-09-17，memory-first + no-param fallback 用例） |
+| P1-F6 | 项目目录关联 | attach(projectId) 且项目配置 evidenceStoragePath → 落盘到该项目目录 | ✓ 已实现并单测通过（2026-09-17，project dir 用例） |
+| P1-F7 | 写失败不阻断 | 落盘失败不抛出、act/assert 仍成功（内存证据可用） | ✓ 已实现并单测通过（2026-09-17，faulty-dir 用例 + persist 不抛设计） |
+| P1-F8 | 全量回归 | 新增用例全绿；既有 engine + mcp-shell 用例不回归 | ✓ 全量 engine 175 用例全绿（2026-09-17，0 失败 1 opt-in 跳过）+ mcp-shell 全绿 |
+
+---
+
+## 11. 风险与边界（诚实声明）
+
+1. **默认目录共享不隔离**：未配置 `evidenceStoragePath` 的项目共享 `~/.glasspane/evidence/`，跨项目 opId 全域唯一（Crockford 生成器），可回放但语义上混用；需要按项目强隔离时配置独立目录即可。
+2. **写失败降级为内存**：磁盘故障不阻断主流程——证据可能在 daemon 重启后丢失；这是“主循环优先”的刻意取舍，非静默吞错（文档声明 + 缺失以 GP_E_NO_EVIDENCE 如实呈现）。
+3. **磁盘为追加式档案不过期**：与内存环形（64）不同，磁盘文件持续累积；无压缩/归档策略，属后续数据生命周期批次（与 gp_recent_reports 大数据量导出同源）。
+4. **文件损坏以 nil 呈现**：单条 evidence 文件损坏不影响其余条目，也不崩溃 daemon；用 `GP_E_NO_EVIDENCE` 如实暴露该条目不可读。
+
+> **版本结构说明（v1.5 → v1.6）**：v1.6 在 v1.5 的 §1–§11 之后追加批七范围 **§12–§14**（归档生命周期、验收、风险），v1.5 正文 §1–§11 逐字保留不变。v1.5 §11.3 风险 3 所称“磁盘……无压缩/归档策略，属后续数据生命周期批次”——该预告由本批 §12 兑现：磁盘档案引入有序限量修剪（`maxFiles`），并为既有“全量不过期”默认语义补上观测（`stats`）与维护（`clear`）原语。默认上限取值使批六 P1-F1..F8 的“全量回放”语义仍成立（详见 §12.4）。
+
+---
+
+## 12. evidence 归档生命周期（批量七新增）
+
+### 12.1 定位
+
+承接 v1.5 §11.3 风险 3 的预告。v1.5 落地磁盘档案后，默认语义为“磁盘为追加式、全量不过期、持续累积”，缺少两层能力：**有界性**（长期运行/大量 act 使磁盘文件无限增长，与 `gp_recent_reports` 大数据量导出、磁盘占用观测均同源）与**维护面**（查看归档规模、按需清空）。本批在 `EvidenceStore` 存储层补齐归档生命周期三原语，激活既有“全量审计”路径变为**默认有界回收、可观测可维护**。
+
+设计取舍：全部为**存储层原语 + 纯 FileManager 逻辑**，写时修剪透明内嵌于 `write`，**不加 daemon/socket 帧、不改 schema、不加错误码** —— 生命周期是存储内部策略，而非协议面能力。
+
+### 12.2 归档上限与写时修剪
+
+`EvidenceStore` 新增构造参数 `maxFiles: Int?`（默认 `EvidenceStore.defaultMaxFiles = 10000`）：
+
+- `write(pack)` 成功落盘后调用内部 `pruneIfNeeded()`：列出当前目录内 `{operationId}.json` 条目，若**条目数 > maxFiles**，按文件 mtime 升序（最旧优先）删除 `条目数 - maxFiles` 条，仅删旧、**不删除刚写入的新条目**。
+- 修剪为 best-effort：单个文件删除失败跳过，不中断其余删除；返回实际删除条数。
+- `maxFiles <= 0` 视为非法（构造时钳制到至少 1），避免“一次修剪全部”的意外破坏语义。
+- 默认上限下，批六 P1-F1..F8 语义不回归（批六用例单目录写入 ≤3 条，远低于 10000，修剪不触发，“全量回放”仍成立）。
+
+### 12.3 统计与清空
+
+- **`func stats() -> EvidenceArchiveStats`**：返回 `{count: Int, totalBytes: Int}`——列出目录内 `.json` 条目数与各 `fileSize` 之和。目录缺失/为空返回 0/0，不抛。
+- **`func clear() -> Int`**：删除当前目录内全部 `.json` 条目，返回实际删除数量；文件删除失败跳过（best-effort）；目录未创建/为空返回 0。
+- 二者均作用于**当前活跃目录**（与 `read`/`write`/`lastOnDisk` 相同的 `directory`，随 `setDirectory`/attach 项目路由切换），观测与清理的是当前项目档案，不影响其他项目目录。
+
+### 12.4 生命周期与既有语义的关系
+
+| 关注面 | 行为 | 与 v1.5 关系 |
+|---|---|---|
+| 默认上限 | 10000，写时按 mtime 修剪最旧 | 默认“全量先于回收”，批六 F 验收仍成立 |
+| 内存环形 | 维持 64 上限不变，不受本批影响 | 保持 v1.5 §9.4 |
+| 目录隔离 | 统计/清空作用于当前活跃目录 | 保持 v1.5 §9.4 |
+| 重启 | 磁盘档案保留；修剪/统计/清空均为即时落盘操作 | 保持 v1.5 §9.4 + 本批新增 |
+| daemon 方法表 | 不新增帧；EngineCore 零改动透明受益 | 保持 v1.5/方法表冻结 |
+| mcp-shell | 不新增工具、不改语义 | 保持 v1.5 |
+
+### 12.5 与 reviewed 面的关系（无冲突）
+
+| 面 | 关系 |
+|---|---|
+| v1.5 §11.3 风险 3 | 本批兑现预告：提供默认有界回收 + 观测（stats）+ 维护（clear） |
+| v1.5 §9.4 生命周期表“磁盘为全量档案，不过期” | 口径更新为“默认全量优先，支持配置上限修剪”；正文不删改，由 §12 追加新口径 |
+| EvidenceStore roundtrip/read/lastOnDisk | 未改动；仅新增 maxFiles 构造默认参数 + 修剪内部钩子 + stats/clear |
+
+---
+
+## 13. 可测性与验收
+
+- **engine 单测**（`EngineP1Batch7Tests`，注入临时目录，无 AX 依赖）：
+  - 超过上限 → 写后按 mtime 删最旧，最新条目保留，条目数回到 `maxFiles`；
+  - 未超上限 → 不删除任何条目（stables 保序）；
+  - `stats()` → 空目录 0/0；写入后 count/totalBytes>0 且随写增；
+  - `clear()` → 删除全部 `.json` 返回数量；再调用返回 0；空目录返回 0；
+  - `maxFiles` 钳制：`0/负数` 被钳制到至少 1，不一次删光（写入即删自身的破坏语义不发生）；
+  - 无 store 注入（内存态）EngineCore 回归：批六 P1-F8 语义不回归。
+- **全量回归**：engine 全用例（基线 175 → 批七后 >175）+ mcp-shell 全用例（56，批七不改 shell，预期不回归）。
+
+| 编号 | 验收项 | 通过标准 | 状态 |
+|---|---|---|---|
+| P1-G1 | 上限修剪 | 目录内条目 > maxFiles 时，写后按 mtime 删最旧、最新保留、条目数回落到 maxFiles | ✓ 已实现并单测通过（2026-09-17，`EngineP1Batch7Tests` 上限修剪用例） |
+| P1-G2 | 未超上限不删 | 条目数 ≤ maxFiles 时，写后不删除任何条目、保序 | ✓ 已实现并单测通过（2026-09-17，at-cap 用例） |
+| P1-G3 | 统计 count/totalBytes | 空目录返回 0/0；写后 count 与 totalBytes 随写增长且 >0 | ✓ 已实现并单测通过（2026-09-17，stats 空/增长用例） |
+| P1-G4 | 按需清空 clear | 删除全部 `.json` 并返回数量；再清空返回 0；空/缺失目录返回 0 | ✓ 已实现并单测通过（2026-09-17，clear 幂等/缺失目录用例） |
+| P1-G5 | 上限钳制 | maxFiles≤0 被钳制到 1，避免“一次删光全部” | ✓ 已实现并单测通过（2026-09-17，clamp + 微容量保留最新用例） |
+| P1-G6 | 内存态回归 | 默认上限下批六 F 验收不回归（EngineCore 不用 store 仍内存可用） | ✓ 已实现并单测通过（2026-09-17，no-store in-memory 回归用例） |
+| P1-G7 | 全量回归 | 新增用例全绿；既有 engine + mcp-shell 用例不回归 | ✓ 全量 engine 186 用例全绿（2026-09-17，批七新增 11，0 失败 1 opt-in 跳过）+ mcp-shell 56 用例全绿 |
+
+---
+
+## 14. 风险与边界（诚实声明）
+
+1. **修剪为 best-effort、按 mtime 近似**：删除单条失败会跳过，极端情况可能使目录暂超上限；mtime 在同一目录批量写入时可能不够精细（同一秒内），但默认 10000 上限容忍秒级误差。以“有界回收”为契约，而非逐字节精确。
+2. **默认上限不构成隐私/合规上限**：10000 仅是磁盘占用回收阈值，不做内容价值判断；需要按 retention 天数/项目筛查等策略属于后续批次（本批只提供原语）。
+3. **`clear()` 为破坏性操作**：删除当前活跃目录的全部 `.json` 条目，不可恢复；调用方（daemon/main/维护入口）须在确认后再触发，本批未将 clear 暴露为无人值守的自动策略。
+4. **统计含瞬时偏差**：`stats()` 在对目录快照时取 size，并发写入/修剪期间读数可能略偏；作为观测基线足够，不作为计费/严格审计依据。
+
+> **版本结构说明（v1.6 → v2.0）**：v2.0 在 v1.6 的 §1–§14 之后追加 P2 批一范围 §15–§17（并发归因污染防护：设计、可测性与验收、风险），v1.6 正文 §1–§14 逐字保留不变。v1.6 §3 所述"不改变 daemon 方法表（不新增 socket 帧）"约定继续成立——本批操作权互斥为 EngineCore 内部协调，无协议帧面变化。
+
+---
+
+## 15. 并发归因污染防护（P2 批一新增）
+
+### 15.1 定位
+
+对应综述 §5.3 并发归因污染防护（R21）/ C33 / §5.14 输入监控权限。此前 evidence 的归因强度恒为 `soft` 且 `contaminated=false`——当用户真实操作与 agent 操作并发时，进程级插槽的归因会被静默污染（综述明确这是"真实开发常态"：开发者边手动点边让 agent 跑）。本批把"污染检测与标注"做成引擎的**判定性核心**，让 evidence 如实呈现"本次归因是否可信"，宁降级不静默错判（综述 §14 钦定对冲）。
+
+### 15.2 engine 新增：InputEventSource
+
+```swift
+/// 输入事件源抽象：daemon 在持有操作权期间轮询的全局输入流。
+public protocol InputEventSource: AnyObject {
+    /// 取下一个尚未消费的输入事件；无事件时返回 nil（非阻塞轮询语义）。
+    func nextEvent() -> InputEvent?
+}
+
+public struct InputEvent: Codable, Equatable {
+    public let timestamp: Double      // epoch seconds，可注入时钟
+    public let source: InputSource    // .agent / .human
+
+    public init(timestamp: Double, source: InputSource) {
+        self.timestamp = timestamp
+        self.source = source
+    }
+}
+
+public enum InputSource: String, Codable {
+    case agent  // AX 合成事件（agent 自身操作）
+    case human  // CGEvent 全局捕获的真实用户输入（键盘/鼠标）
+}
+```
+
+事件序列语义：`nextEvent()` 单调消费。脚本化测试源 `ScriptedInputEventSource` 按预置队列回放（含时间戳与来源精确构造的"并行用户输入"场景）。
+
+### 15.3 engine 新增：AttributionGuard（操作权互斥 + 空闲检测 + 污染判定）
+
+```swift
+public enum OperationRightAcquisition: Equatable {
+    case acquired
+    case idleNotMet   // 空闲窗口内仍有真实输入，不能独占操作
+}
+
+public struct OperationRightVerdict: Equatable {
+    public let contaminated: Bool      // 持有期间检测到 .human 事件
+    public let humanEvents: [InputEvent] // 持有的证据（进报告/日志，不垄断 evidence）
+}
+
+/// 纯逻辑：输入空闲检测 + 操作权互斥 + 污染判定。可注入时钟与事件源，无 AX 依赖。
+public final class AttributionGuard {
+    public init(
+        inputSource: InputEventSource,
+        clock: @escaping () -> Date = { Date() },
+        idleWindowSeconds: Double = AttributionGuard.defaultIdleWindowSeconds
+    )
+
+    /// 输入空闲检测：最近 idleWindow 秒内无 .human 事件才返回 .acquired。
+    public func acquireOperationRight() -> OperationRightAcquisition
+    /// 持有操作权后轮询输入流，收集期间的全部输入事件。
+    public func monitorInput()
+    /// 结束持有并裁决：本次操作是否被真实用户输入污染。
+    public func releaseOperationRight() -> OperationRightVerdict
+}
+```
+
+- hood advance 语义：`acquireOperationRight()` 失败（`.idleNotMet`）= 输入不空闲，daemon 应等待重试；`EngineCore` 默认重试直至空闲，重试超时后如实以 `GP_E_BUSY_INPUT` 错误呈现（见 §15.4，本批新增错误码）。
+- 污染判定规则：持有期间（acquire 成功 → monitorInput 扫描 → release 之间）出现任何 `.human` 事件 → `contaminated=true`；否则 `contaminated=false`。
+- 互斥语义：`AttributionGuard` 之上由 EngineCore 串行化 act——同一 EngineCore 实例内 act 天然串行（SocketServer 单连接语义），guard 负责"与全局真实输入的互斥"（用户输入是独占窗口的天然反对者）。
+
+### 15.4 EngineCore 挂接与错误码
+
+- `EngineCore.init` 增参 `attributionGuard: AttributionGuard? = nil`（nil = 不启用 C33，保持 v1.6 行为零回归）。
+- `act()` 前置：若 `attributionGuard != nil` → `acquireOperationRight()`；`.idleNotMet` 时内部重试（`idleRetryCount` 默认 5 次 × `idleRetryInterval` 默认 100ms）；重试耗尽 → `GP_E_BUSY_INPUT`（不静默继续导致污染）。
+- act 执行后：`monitorInput()` → `releaseOperationRight()` → 裁决 `contaminated` 写入 evidence attribution：污染时 `level = .weak, contaminated = true`；纯净时保持 `level = .soft, contaminated = false`（与既有语义一致）。
+- **新增错误码**（与规格 §5 错误码表同模式；综述 §3 GP_E 表扩展口径允许 P2 能力承载新错误——`GP_E_BUSY_INPUT` 为能力错误面，非内部实现细节）：
+
+| 错误码 | 含义 | agent 补救指引 |
+|---|---|---|
+| GP_E_BUSY_INPUT | 输入空闲窗口内持续有真实用户输入，操作权无法获取 | 暂停 agent，等用户停止操作后再 act；或改用 degrade 模式（agent 选择继续时归因降级 weak + contaminated 标注） |
+
+### 15.5 与 reviewed 面的关系（无冲突）
+
+| 面 | 关系 |
+|---|---|
+| evidence schema | 不改——`Attribution.level/contaminated` 已存在，本批首次真实落地 `weak + contaminated=true` 组合 |
+| daemon 方法表 | 不新增帧（guard 为 EngineCore 构造注入 + act 内集成） |
+| mcp-shell 工具面 | 不改语义；evidence 透传后 agent 可读 `attribution.contaminated` 自行决策（继续/暂停） |
+| 既有 act 行为 | `attributionGuard == nil` 时完全等同 v1.6 |
+
+---
+
+## 16. 可测性与验收
+
+### 16.1 单测（无 AX 依赖，`EngineP2Batch1Tests`）
+
+- `ScriptedInputEventSource`：队列回放、事件消费单调、空队列返回 nil。
+- `AttributionGuard.acquireOperationRight()`：
+  - 空闲窗口内无 `.human` 事件 → `.acquired`；
+  - 空闲窗口内有 `.human` 事件 → `.idleNotMet`（不获取操作权）。
+- `AttributionGuard` 污染判定：
+  - 持有期间无输入 / 仅 `.agent` 事件 → `contaminated = false`；
+  - 持有期间任意 `.human` 事件 → `contaminated = true`（事件时间窗 = acquire→release 之间）。
+- `EngineCore.act()` 集成（ScriptedChannel + ScriptedInputEventSource 双注入）：
+  - 无 guard → evidence `contaminated=false, level=soft`（零回归）；
+  - guard + 纯净输入 → 同上（不误杀）；
+  - guard + 并行 `.human` 事件 → evidence `contaminated=true, level=weak`；
+  - guard + 持续不空闲 → 重试耗尽 → `GP_E_BUSY_INPUT` 抛出，无 evidence 落盘。
+- **C33 合成场景统计**（明确断言口径）：构造 100 个合成操作场景（60 污染 / 40 纯净），断言检出率 ≥95%（污染场景中被标污染 ≥57/60）、误杀率 <5%（纯净场景中被误标 ≤1/40）。场景生成采用确定性伪随机（固定种子），用例可复现。
+
+### 16.2 真机冒烟（可选，需 TCC 输入监控权限）
+
+- CGEvent 全局输入监控适配层（`CGEventInputMonitor`，运行时文件）：真实用户按键/移动鼠标 → 冒烟脚本断言归因被污染。无自动化（与 AX 适配层同口径，R45）。
+
+### 16.3 验收表
+
+| 编号 | 验收项 | 通过标准 | 状态 |
+|---|---|---|---|
+| P2-A1 | 事件源抽象 | ScriptedInputEventSource 队列回放与单调消费单测通过 | ✓ 已实现并单测通过（2026-09-17，`EngineP2Batch1Tests` 3 用例） |
+| P2-A2 | 输入空闲检测 | 空闲窗口无 human 事件→acquired；有→idleNotMet | ✓ 已实现并单测通过（2026-09-17，空闲窗口/已持有/边界含端点用例） |
+| P2-A3 | 污染判定 | 持有期间 human 事件→contaminated=true；无/仅 agent→false | ✓ 已实现并单测通过（2026-09-17，含 monitor 与 release 间到达事件） |
+| P2-A4 | act 集成零回归 | 无 guard 时 evidence 与 v1.6 一致（soft/false） | ✓ 已实现并单测通过（2026-09-17，`testActWithoutGuardKeepsPodv16Semantics`） |
+| P2-A5 | act 污染标注 | 并行 human 事件→evidence weak+contaminated=true | ✓ 已实现并单测通过（2026-09-17） |
+| P2-A6 | 忙碌错误 | 重试耗尽→GP_E_BUSY_INPUT，无 evidence 落盘 | ✓ 已实现并单测通过（2026-09-17，含重试后恢复为 acquired 用例） |
+| P2-A7 | C33 数值口径 | 合成场景检出率 ≥95%、误杀率 <5% | ✓ 已实现并单测通过（2026-09-17，固定种子 0xC33 合成套件，检出率 100%、误杀率 0%） |
+| P2-A8 | 全量回归 | engine + mcp-shell 全用例不回归 | ✓ 回归通过（2026-09-17：engine 204 用例 0 失败 1 跳过；mcp-shell 56 用例全绿） |
+
+---
+
+## 17. 风险与边界（诚实声明）
+
+1. **输入空闲窗口为启发式**：默认 500ms 空闲窗口无法保证"用户一定不会在窗口后动手"——它只是把污染概率压到 C33 口径内（合成场景验证），非硬保证；短窗口减延迟、长窗口降误杀，参数可配置。
+2. **CGEvent 监控需输入监控 TCC 权限**：用户拒绝 → C33 降级为纯操作权互斥（无输入流证据，污染不可判定），与综述 §5.14 "拒绝输入监控 → C33 并发污染检测降级为纯操作权互斥"一致——本批该降级路径为：guard 不注入（daemon 不启用 C33 检测），如实降级。
+3. **归因是软/弱强度而非强**：本批不改归因强度模型（Z5 通道软归因为既有事实），只保证"污染被如实标出"；强归因链路（TaskLocal）仍属探针 SDK（P1+ 通道），不在本批。
+4. **合成场景非真实输入分布**：单元测试的检出率/误杀率基于构造场景集，真机输入分布可能不同——C33 数值口径以合成场景基准验收，真机冒烟补充观测，正式 C33 现场验收在真机冒烟完成后以实测数据回填。
