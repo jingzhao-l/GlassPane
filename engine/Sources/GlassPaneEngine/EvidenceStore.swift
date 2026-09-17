@@ -52,20 +52,47 @@ public final class EvidenceStore {
     /// (by mtime) so the active directory stays bounded (spec v1.6 §12.2).
     public private(set) var maxFiles: Int
 
+    /// Age-based TTL retention (P5 spec v5.0 §9.2). nil = never expire by age
+    /// (default — legacy "full archive, no expiry" semantics unchanged).
+    /// Non-nil values below 1 are clamped to nil (disabled): "expire after 0
+    /// days = delete on write" is a misconfiguration, mirrored reversed from
+    /// the maxFiles clamp (≥1).
+    public private(set) var maxAgeDays: Int?
+
+    /// Injectable "now" for age computation (P5 §9.2): tests pin a fixed clock
+    /// so TTL pruning is deterministic without sleeping.
+    private let now: () -> Date
+
     /// - Parameters:
     ///   - directory: evidence storage directory (defaults to `defaultDirectory`).
     ///   - maxFiles: retention cap; values ≤ 0 are clamped up to 1 so a caller
     ///     can never accidentally configure "delete everything on every write".
-    public init(directory: String? = nil, maxFiles: Int? = nil) {
+    ///   - maxAgeDays: age-based TTL; nil disables ageing. Values < 1 are
+    ///     clamped to nil (disabled) rather than "delete on write".
+    ///   - now: clock for age computation (defaults to the wall clock).
+    public init(
+        directory: String? = nil,
+        maxFiles: Int? = nil,
+        maxAgeDays: Int? = nil,
+        now: @escaping () -> Date = { Date() }
+    ) {
         self.directory = directory ?? EvidenceStore.defaultDirectory
         let requested = maxFiles ?? EvidenceStore.defaultMaxFiles
         self.maxFiles = max(requested, 1)
+        self.maxAgeDays = maxAgeDays.map { $0 >= 1 ? $0 : nil } ?? nil
+        self.now = now
     }
 
     /// Update the active store directory (called when the active project
     /// changes on attach; spec v1.5 §9.3).
     public func setDirectory(_ dir: String) {
         directory = dir
+    }
+
+    /// Update the age-based TTL retention (P5 §9.2). Values < 1 are clamped
+    /// to a disabled state (nil) — never "delete on write".
+    public func setRetention(maxAgeDays: Int?) {
+        self.maxAgeDays = maxAgeDays.map { $0 >= 1 ? $0 : nil } ?? nil
     }
 
     // MARK: - Persistence
@@ -98,12 +125,14 @@ public final class EvidenceStore {
             // Best-effort cleanup if rename succeeded but the tmp lingers.
             try? FileManager.default.removeItem(atPath: tmpPath)
             pruneIfNeeded()
+            pruneExpiredIfNeeded()
             return true
         } catch {
             // Fallback: direct write (see ProjectRegistry.save).
             do {
                 try data.write(to: URL(fileURLWithPath: filePath), options: .atomic)
                 pruneIfNeeded()
+                pruneExpiredIfNeeded()
                 return true
             } catch {
                 return false
@@ -188,6 +217,89 @@ public final class EvidenceStore {
             }
         }
         return removed
+    }
+
+    // MARK: - Age-based TTL retention (P5 spec v5.0 §9.2)
+
+    /// Expiry threshold window, in seconds, for `maxAgeDays` days.
+    private static let secondsPerDay: TimeInterval = 86_400
+
+    /// ISO-8601 (millisecond, UTC) parser matching `EvidencePack.createdAt`.
+    static let isoDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter
+    }()
+
+    /// Parse an evidence createdAt string to a `Date`; nil when malformed.
+    static func isoDate(_ string: String) -> Date? {
+        isoDateFormatter.date(from: string)
+    }
+
+    /// Remove entries older than the configured `maxAgeDays` (write-time
+    /// pruning, §9.2). Disabled (nil) TTL is a no-op.
+    @discardableResult
+    private func pruneExpiredIfNeeded() -> Int {
+        removeExpired(effectiveMaxAgeDays: maxAgeDays, now: now())
+    }
+
+    /// One-shot age prune at an explicit day threshold — the maintenance and
+    /// project-dimension entry point (CLI batch four). Values below 1 clamp to
+    /// a no-op: "prune after 0 days" must never mean "delete everything".
+    @discardableResult
+    public func prune(olderThanDays: Int) -> Int {
+        guard olderThanDays >= 1 else { return 0 }
+        return removeExpired(effectiveMaxAgeDays: olderThanDays, now: now())
+    }
+
+    /// How many entries `prune(olderThanDays:)` *would* remove, using the
+    /// identical judgment path with deletion skipped — backs the CLI --dry-run
+    /// contract (P5 §12.2: same-source count, not an estimate).
+    public func countExpired(olderThanDays: Int) -> Int {
+        guard olderThanDays >= 1 else { return 0 }
+        let current = now()
+        return jsonFileURLs(keys: [.contentModificationDateKey]).filter {
+            isExpired(url: $0, maxAgeDays: olderThanDays, now: current)
+        }.count
+    }
+
+    /// Actual deletion pass over every entry older than the effective TTL.
+    private func removeExpired(effectiveMaxAgeDays: Int?, now: Date) -> Int {
+        guard let effectiveMaxAgeDays else { return 0 }
+        let urls = jsonFileURLs(keys: [.contentModificationDateKey])
+        guard !urls.isEmpty else { return 0 }
+        var removed = 0
+        for url in urls {
+            if isExpired(url: url, maxAgeDays: effectiveMaxAgeDays, now: now),
+               (try? FileManager.default.removeItem(at: url)) != nil {
+                removed += 1
+            }
+        }
+        return removed
+    }
+
+    /// Age judgment (P5 §9.2): expiry = created/reference date is more than
+    /// `maxAgeDays` before `now`. Prefers the entry's own `createdAt`; corrupt
+    /// entries fall back to the file mtime (same basis as FIFO pruning).
+    private func isExpired(url: URL, maxAgeDays: Int, now: Date) -> Bool {
+        let cutoffSeconds = TimeInterval(maxAgeDays) * Self.secondsPerDay
+        let reference = createdDate(url: url) ?? fallbackModificationDate(url: url)
+        return now.timeIntervalSince(reference) > cutoffSeconds
+    }
+
+    /// Preferred age source: the pack's own createdAt (ISO-8601, UTC).
+    /// Malformed/corrupt entries decode to nil (honest fallback to mtime).
+    private func createdDate(url: URL) -> Date? {
+        let operationId = url.deletingPathExtension().lastPathComponent
+        guard let pack = read(operationId: operationId) else { return nil }
+        return Self.isoDate(pack.createdAt)
+    }
+
+    private func fallbackModificationDate(url: URL) -> Date {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+            ?? .distantPast
     }
 
     // MARK: - Helpers

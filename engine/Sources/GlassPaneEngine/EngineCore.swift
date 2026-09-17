@@ -617,6 +617,29 @@ public final class EngineCore {
         return ["project": dict]
     }
 
+    // MARK: - P5 evidence maintenance (spec v5.0 §9.3)
+
+    /// Age-prune evidence, either on the active store's directory (nil
+    /// projectId) or on a registered project's evidenceStoragePath directory.
+    /// Returns the number of entries removed; a missing directory counts 0.
+    /// Storage-layer primitive — no socket frame, no method-table change.
+    public func pruneEvidence(projectId: String?, olderThanDays: Int) throws -> Int {
+        let dir: String
+        if let projectId {
+            guard let entry = projectRegistry.get(projectId) else {
+                throw GPError(code: .notFound, message: "unknown projectId \(projectId)")
+            }
+            dir = entry.evidenceStoragePath ?? EvidenceStore.defaultDirectory
+        } else {
+            dir = evidenceStore?.directory ?? EvidenceStore.defaultDirectory
+        }
+        // A temporary store over the resolved directory — never mutates the
+        // active store's own directory/retention state (P5 §9.3). The engine's
+        // injected clock drives age judgment, keeping TTL deterministic in
+        // tests that pin `now`.
+        return EvidenceStore(directory: dir, now: clock).prune(olderThanDays: olderThanDays)
+    }
+
     // MARK: - P1 snapshot/restore (spec v1.1 §1)
 
     /// Captures a digest-only baseline of the attached app's AX tree and
