@@ -23,12 +23,18 @@ private struct Options {
     var recipeValidate: String?
     var approvalAudit = false
     var approvalVerify = false
+    var pruneEvidence = false
+    var pruneOlderThanDays = 30
+    var maintenanceProjectId: String?
+    var pruneDryRun = false
+    var evidenceStats = false
 }
 
 private enum ParseResult {
     case parsed(Options)
     case help
     case error(String)
+    case errorCode(String, Int32)
 }
 
 private func parseArguments(_ arguments: [String]) -> ParseResult {
@@ -65,6 +71,27 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             options.approvalAudit = true
         case "--approval-verify":
             options.approvalVerify = true
+        case "--prune-evidence":
+            options.pruneEvidence = true
+        case "--evidence-stats":
+            options.evidenceStats = true
+        case "--older-than":
+            guard index + 1 < arguments.count else {
+                return .errorCode("--older-than requires a day count", 2)
+            }
+            index += 1
+            guard let days = Int(arguments[index]), days >= 1 else {
+                return .errorCode("--older-than requires a positive integer (days), got: \(arguments[index])", 2)
+            }
+            options.pruneOlderThanDays = days
+        case "--project":
+            guard index + 1 < arguments.count else {
+                return .error("--project requires a project ID")
+            }
+            index += 1
+            options.maintenanceProjectId = arguments[index]
+        case "--dry-run":
+            options.pruneDryRun = true
         case "--socket-path":
             guard index + 1 < arguments.count else {
                 return .error("--socket-path requires a value")
@@ -101,6 +128,8 @@ private func printUsage() {
         glasspaned --recipe-validate <path>
         glasspaned --approval-audit
         glasspaned --approval-verify
+        glasspaned --prune-evidence [--older-than <days>] [--project <id>] [--dry-run]
+        glasspaned --evidence-stats [--project <id>]
 
     OPTIONS:
         --socket-path <path>   Unix socket path (default: ~/.glasspane/engine.sock)
@@ -115,6 +144,11 @@ private func printUsage() {
         --recipe-validate <path>  Validate a recipe YAML file and exit
         --approval-audit        Dump the approval ledger (JSON array) and exit
         --approval-verify       Verify the approval hash chain and exit
+        --prune-evidence        Prune expired evidence entries and exit
+        --older-than <days>     Expiry threshold in days (default: 30; --prune-evidence only)
+        --project <id>          Scope maintenance to a project's evidence directory
+        --dry-run               Report what pruning would remove without deleting
+        --evidence-stats        Print evidence archive stats (JSON) and exit
         --help, -h            Show this help
 
     PROTOCOL:
@@ -236,9 +270,12 @@ case .help:
     printUsage()
     exit(0)
 case .error(let message):
-    FileHandle.standardError.write(Data("glasspaned: \(message)\n".utf8))
-    printUsage()
-    exit(64)
+        FileHandle.standardError.write(Data("glasspaned: \(message)\n".utf8))
+        printUsage()
+        exit(64)
+case .errorCode(let message, let code):
+        FileHandle.standardError.write(Data("glasspaned: \(message)\n".utf8))
+        exit(code)
 case .parsed(let parsed):
     options = parsed
 }
@@ -348,6 +385,63 @@ if options.approvalAudit || options.approvalVerify {
             exit(1)
         }
         if let data = gate.auditJSON() {
+            FileHandle.standardOutput.write(data)
+            FileHandle.standardOutput.write(Data("\n".utf8))
+        }
+        exit(0)
+    }
+}
+
+// MARK: - P5 evidence maintenance CLI (spec v5.0 §12)
+
+if options.pruneEvidence || options.evidenceStats {
+    // 目录解析与批三 pruneEvidence 同口径：项目维度查 registry →
+    // evidenceStoragePath → 默认目录；无项目维度 → 默认证据目录。
+    let dir: String
+    if let projectId = options.maintenanceProjectId {
+        let registry = ProjectRegistry()
+        guard let entry = registry.get(projectId) else {
+            FileHandle.standardError.write(
+                Data("{\"error\": \"unknown project \(projectId)\"}\n".utf8)
+            )
+            exit(1)
+        }
+        dir = entry.evidenceStoragePath ?? EvidenceStore.defaultDirectory
+    } else {
+        dir = EvidenceStore.defaultDirectory
+    }
+    if options.pruneEvidence {
+        let store = EvidenceStore(directory: dir)
+        // --dry-run 与真实修剪共享同一判定路径（countExpired 与 prune 同源，
+        // P5 §12.2 诚实口径：输出=真实会删除的数量，非估算）。
+        let removed = options.pruneDryRun
+            ? store.countExpired(olderThanDays: options.pruneOlderThanDays)
+            : store.prune(olderThanDays: options.pruneOlderThanDays)
+        let payload: [String: Any] = [
+            "pruned": removed,
+            "dryRun": options.pruneDryRun,
+            "project": options.maintenanceProjectId ?? NSNull(),
+            "dir": dir
+        ]
+        if let data = try? JSONSerialization.data(
+            withJSONObject: payload, options: [.sortedKeys]
+        ) {
+            FileHandle.standardOutput.write(data)
+            FileHandle.standardOutput.write(Data("\n".utf8))
+        }
+        exit(0)
+    }
+    if options.evidenceStats {
+        let stats = EvidenceStore(directory: dir).stats()
+        let payload: [String: Any] = [
+            "count": stats.count,
+            "totalBytes": stats.totalBytes,
+            "project": options.maintenanceProjectId ?? NSNull(),
+            "dir": dir
+        ]
+        if let data = try? JSONSerialization.data(
+            withJSONObject: payload, options: [.sortedKeys]
+        ) {
             FileHandle.standardOutput.write(data)
             FileHandle.standardOutput.write(Data("\n".utf8))
         }
