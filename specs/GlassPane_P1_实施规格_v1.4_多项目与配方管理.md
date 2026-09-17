@@ -117,14 +117,14 @@ P0 daemon 侧不直接消费 YAML 配方（daemon 只接收 act/observe 等原�
 
 | 编号 | 验收项 | 通过标准 | 状态 |
 |---|---|---|---|
-| P1-E1 | ProjectRegistry CRUD | 创建/读取/更新/删除全路径单测通过 | 待实施 |
-| P1-E2 | 持久化 roundtrip | 写入文件→读回→字段相等；原子写入无中间态 | 待实施 |
-| P1-E3 | 项目上限 | 第 129 个项目拒绝 GP_E_PROJECT_LIMIT | 待实施 |
-| P1-E4 | 项目切换 | attach 时传 projectId 自动关联；bundleId 不匹配时 GP_E_BAD_PARAMS | 待实施 |
-| P1-E5 | RecipeLoader 校验 | 合法 recipe-config 通过；非法字段/缺必填拒绝；空文件拒绝 | 待实施 |
-| P1-E6 | CLI 命令 | --list-projects / --active-project / --recipe-validate 输出正确 | 待实施 |
-| P1-E7 | MCP 工具 | gp_project_list/set/get 注册、校验、错误映射 | 待实施 |
-| P1-E8 | 纯逻辑单测回归 | 新增用例全绿；既有用例不回归 | 待实施 |
+| P1-E1 | ProjectRegistry CRUD | 创建/读取/更新/删除全路径单测通过 | ✓ 已实现并单测通过（2026-09-17，`ProjectRegistryTests`） |
+| P1-E2 | 持久化 roundtrip | 写入文件→读回→字段相等；原子写入无中间态 | ✓ 已实现并单测通过（2026-09-17） |
+| P1-E3 | 项目上限 | 第 129 个项目拒绝 GP_E_PROJECT_LIMIT | ✓ 已实现并单测通过（2026-09-17，`ProjectRegistryTests` 上限用例） |
+| P1-E4 | 项目切换 | attach 时传 projectId 自动关联；bundleId 不匹配时 GP_E_BAD_PARAMS | ✓ 已实现并单测通过（2026-09-17） |
+| P1-E5 | RecipeLoader 校验 | 合法 recipe-config 通过；非法字段/缺必填拒绝；空文件拒绝 | ✓ 已实现并单测通过（2026-09-17，`RecipeLoaderTests` 6 用例） |
+| P1-E6 | CLI 命令 | --list-projects / --active-project / --recipe-validate 输出正确 | ✓ 已实现并接入 daemon CLI（2026-09-17，`glasspaned/main.swift`） |
+| P1-E7 | MCP 工具 | gp_project_list/set/get 注册、校验、错误映射 | ✓ 已实现并单测通过（2026-09-17，mcp-shell 工具用例） |
+| P1-E8 | 纯逻辑单测回归 | 新增用例全绿；既有用例不回归 | ✓ 全量 engine 162 用例全绿（2026-09-17，0 失败 1 opt-in 跳过）+ mcp-shell 56 用例全绿 |
 
 ---
 
