@@ -307,7 +307,7 @@ if let recipePath = options.recipeValidate {
 let socketPath = options.socketPath ?? defaultSocketPath()
 let log = EngineLog(quiet: !options.verbose)
 let channel = AXChannel()
-let core = EngineCore(channel: channel)
+let core = EngineCore(channel: channel, evidenceStore: EvidenceStore())
 let dispatcher = Dispatcher(core: core, log: log)
 let server = SocketServer(socketPath: socketPath, dispatcher: dispatcher, log: log)
 installSignalHandlers(server)

@@ -34,17 +34,23 @@ public final class EngineCore {
     private var snapshots: [AppStateSnapshot] = []
     /// Project registry (P1 spec v1.4 §1).
     public let projectRegistry: ProjectRegistry
+    /// File-persisted evidence archive (P1 spec v1.5 §9). Empty disk side
+    /// when `nil` is injected — used to disable persistence in tests that
+    /// assert pure in-memory behavior.
+    private let evidenceStore: EvidenceStore?
 
     public init(
         channel: RuntimeChannel,
         clock: @escaping () -> Date = { Date() },
         settle: (() -> Void)? = nil,
-        projectRegistry: ProjectRegistry? = nil
+        projectRegistry: ProjectRegistry? = nil,
+        evidenceStore: EvidenceStore? = nil
     ) {
         self.channel = channel
         self.clock = clock
         self.settle = settle ?? { Thread.sleep(forTimeInterval: EngineCore.actSettleInterval) }
         self.projectRegistry = projectRegistry ?? ProjectRegistry()
+        self.evidenceStore = evidenceStore
     }
 
     // MARK: - ISO-8601 timestamp
@@ -99,6 +105,13 @@ public final class EngineCore {
                     }
                 }
                 activeProjectId = projectId
+                // Point the archive at the active project's storage dir; a
+                // project without evidenceStoragePath falls back to the
+                // store default (spec v1.5 §9.3).
+                if let evidenceStore,
+                   let dir = entry.evidenceStoragePath {
+                    evidenceStore.setDirectory(dir)
+                }
             }
             // Re-attach to the same app is idempotent; a different app
             // invalidates the evidence history.
@@ -386,17 +399,29 @@ public final class EngineCore {
 
     public func lastEvidence(operationId: String?) throws -> EvidencePack {
         if let operationId {
-            guard let found = pack(withId: operationId) else {
-                // P1 v1.3: a lookup miss means "no such evidence in the bounded
-                // history" — a distinct code from "no operation to diagnose".
-                throw GPError(code: .noEvidence, message: "unknown operationId \(operationId)")
+            // Two-level lookup: in-memory ring first, then the on-disk archive
+            // so a daemon restart can still replay past evidence (spec v1.5 §9.3).
+            if let found = pack(withId: operationId) {
+                return found
             }
-            return found
+            if let onDisk = evidenceStore?.read(operationId: operationId) {
+                return onDisk
+            }
+            // P1 v1.3: a lookup miss means "no such evidence in the bounded
+            // history" — a distinct code from "no operation to diagnose".
+            throw GPError(code: .noEvidence, message: "unknown operationId \(operationId)")
         }
-        guard let latest = latestPack() else {
-            throw GPError(code: .noEvidence, message: "no evidence recorded yet")
+        if let latest = latestPack() {
+            return latest
         }
-        return latest
+        // Memory is empty (fresh daemon / history evicted): fall back to the
+        // most recently written archive entry so the audit trail survives.
+        if let evidenceStore,
+           let newestId = evidenceStore.lastOnDisk(),
+           let newest = evidenceStore.read(operationId: newestId) {
+            return newest
+        }
+        throw GPError(code: .noEvidence, message: "no evidence recorded yet")
     }
 
     public func shutdown() -> [String: Any] {
@@ -647,6 +672,7 @@ public final class EngineCore {
         if history.count > EngineCore.historyLimit {
             history.removeFirst(history.count - EngineCore.historyLimit)
         }
+        persist(pack)
     }
 
     private func replace(_ pack: EvidencePack) {
@@ -655,6 +681,14 @@ public final class EngineCore {
         } else {
             history.append(pack)
         }
+        persist(pack)
+    }
+
+    /// Best-effort archive write (spec v1.5 §9.3): never throws so a disk
+    /// fault cannot break the main pipeline. When persistence is disabled
+    /// (evidenceStore == nil) this is a no-op.
+    private func persist(_ pack: EvidencePack) {
+        evidenceStore?.write(pack)
     }
 
     private static func axChanged(before: AxTreeSnapshot?, after: AxTreeSnapshot?) -> Bool {
