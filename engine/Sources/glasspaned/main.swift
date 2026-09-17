@@ -21,6 +21,8 @@ private struct Options {
     var listProjects = false
     var activeProjectId: String?
     var recipeValidate: String?
+    var approvalAudit = false
+    var approvalVerify = false
 }
 
 private enum ParseResult {
@@ -59,6 +61,10 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             }
             index += 1
             options.recipeValidate = arguments[index]
+        case "--approval-audit":
+            options.approvalAudit = true
+        case "--approval-verify":
+            options.approvalVerify = true
         case "--socket-path":
             guard index + 1 < arguments.count else {
                 return .error("--socket-path requires a value")
@@ -93,6 +99,8 @@ private func printUsage() {
         glasspaned --list-projects
         glasspaned --active-project <project-id>
         glasspaned --recipe-validate <path>
+        glasspaned --approval-audit
+        glasspaned --approval-verify
 
     OPTIONS:
         --socket-path <path>   Unix socket path (default: ~/.glasspane/engine.sock)
@@ -105,6 +113,8 @@ private func printUsage() {
         --list-projects        List all registered projects (JSON) and exit
         --active-project <id>  Set the active project ID and exit
         --recipe-validate <path>  Validate a recipe YAML file and exit
+        --approval-audit        Dump the approval ledger (JSON array) and exit
+        --approval-verify       Verify the approval hash chain and exit
         --help, -h            Show this help
 
     PROTOCOL:
@@ -302,6 +312,47 @@ if let recipePath = options.recipeValidate {
         FileHandle.standardOutput.write(Data("\n".utf8))
     }
     exit(result.valid ? 0 : 1)
+}
+
+// MARK: - P5 approval-ledger maintenance (spec v5.0 §3.6)
+
+if options.approvalAudit || options.approvalVerify {
+    let gate = ApprovalGate(path: ApprovalGate.defaultPath)
+    if options.approvalVerify {
+        let verdict = gate.verifyChain()
+        let payload: [String: Any] = [
+            "valid": verdict.valid,
+            "count": gate.count,
+            "firstBrokenIndex": verdict.firstBrokenIndex.map { $0 as Any } ?? NSNull(),
+            "loadFailed": gate.loadFailed
+        ]
+        if let data = try? JSONSerialization.data(
+            withJSONObject: payload, options: [.sortedKeys]
+        ) {
+            FileHandle.standardOutput.write(data)
+            FileHandle.standardOutput.write(Data("\n".utf8))
+        }
+        let ok = verdict.valid && !gate.loadFailed
+        if !ok && gate.loadFailed {
+            FileHandle.standardError.write(
+                Data("warning: ledger file exists but is corrupt; verify cannot pass\n".utf8)
+            )
+        }
+        exit(ok ? 0 : 1)
+    }
+    if options.approvalAudit {
+        if gate.loadFailed {
+            FileHandle.standardError.write(
+                Data("error: approval ledger exists but is corrupt — audit unavailable\n".utf8)
+            )
+            exit(1)
+        }
+        if let data = gate.auditJSON() {
+            FileHandle.standardOutput.write(data)
+            FileHandle.standardOutput.write(Data("\n".utf8))
+        }
+        exit(0)
+    }
 }
 
 let socketPath = options.socketPath ?? defaultSocketPath()

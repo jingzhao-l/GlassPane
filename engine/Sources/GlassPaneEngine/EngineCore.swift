@@ -48,6 +48,10 @@ public final class EngineCore {
     /// Nil means those signals are absent: the joint verdict can then never
     /// reach .degrading (honest degradation instead of fake slopes).
     private let metricsProbe: ProcessMetricsProviding?
+    /// Approval ledger (P5 spec v5.0 §3.5): nil disables registration and
+    /// restore behaves exactly as before. Non-nil registers a high-risk record
+    /// before each executed restore.
+    private let approvalGate: ApprovalGate?
     /// Busy-input retry budget before surfacing GP_E_BUSY_INPUT.
     public static let idleRetryCount = 5
     /// Interval between busy-input retries.
@@ -61,7 +65,8 @@ public final class EngineCore {
         evidenceStore: EvidenceStore? = nil,
         attributionGuard: AttributionGuard? = nil,
         degradationTracker: DegradationTracker? = nil,
-        metricsProbe: ProcessMetricsProviding? = nil
+        metricsProbe: ProcessMetricsProviding? = nil,
+        approvalGate: ApprovalGate? = nil
     ) {
         self.channel = channel
         self.clock = clock
@@ -71,6 +76,7 @@ public final class EngineCore {
         self.attributionGuard = attributionGuard
         self.degradationTracker = degradationTracker
         self.metricsProbe = metricsProbe
+        self.approvalGate = approvalGate
     }
 
     // MARK: - ISO-8601 timestamp
@@ -661,6 +667,12 @@ public final class EngineCore {
             throw GPError(code: .noSnapshot, message: "unknown snapshotId \(snapshotId)")
         }
 
+        // P5 §3.5: high-risk approval registration before every executed
+        // restore form (compare / ffwd / rollback_full). Registration is
+        // best-effort — the ledger is an audit surface, never a gate: a write
+        // failure or rejected reason must not change restore semantics.
+        registerRestoreApproval(snapshotId: snapshotId, mode: mode, hasSteps: steps != nil)
+
         guard let steps else {
             // Baseline-consistency form: compare current tree against the
             // snapshot digest. confirmed/total stay 0 — no step ran.
@@ -712,6 +724,20 @@ public final class EngineCore {
     }
 
     // MARK: - P1 snapshot/restore internals
+
+    /// P5 §3.5: registers one high-risk approval record for an executed
+    /// restore. Best-effort and non-blocking by design.
+    private func registerRestoreApproval(snapshotId: String, mode: String?, hasSteps: Bool) {
+        let label = mode ?? (hasSteps ? "ffwd" : "compare")
+        approvalGate?.append(
+            operationRef: snapshotId,
+            operationType: "restore",
+            riskTier: .high,
+            decision: .approve,
+            approvedBy: "daemon:auto",
+            reason: "restore executed: \(label)"
+        )
+    }
 
     private func snapshot(withId snapshotId: String) -> AppStateSnapshot? {
         snapshots.first { $0.snapshotId == snapshotId }

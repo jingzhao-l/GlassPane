@@ -9,6 +9,7 @@ public enum OperationID {
     public static let prefix = "op_"
     public static let snapshotPrefix = "snap_"
     public static let projectPrefix = "prj_"
+    public static let approvalPrefix = "appr_"
     public static let totalLength = 26
 
     /// Deterministic construction from a millisecond timestamp and 80 bits of
@@ -65,6 +66,12 @@ public enum OperationID {
     /// (P1 spec v1.4 §1.1 projectId pattern).
     public static func generateProjectLive() -> String {
         generateLive(prefix: projectPrefix)
+    }
+
+    /// Live approval identifier: same 26-char body, `appr_` prefix
+    /// (P5 spec v5.0 §3.2 approvalId pattern).
+    public static func generateApprovalLive() -> String {
+        generateLive(prefix: approvalPrefix)
     }
 
     private static func generateLive(prefix: String) -> String {
