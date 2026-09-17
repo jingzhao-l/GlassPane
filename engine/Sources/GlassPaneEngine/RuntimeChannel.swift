@@ -51,12 +51,23 @@ public struct AppStateSnapshot: Equatable {
     public let treeDigest: String
     public let nodeCount: Int
     public let capturedAt: String
+    /// Z5 probe payload captured alongside the tree baseline (P5 v5.0 §6.2).
+    /// Nil for snapshots taken without a probe; engine-internal shape — never
+    /// written into an evidence schema.
+    public let probeInfo: SnapshotProbeInfo?
 
-    public init(snapshotId: String, treeDigest: String, nodeCount: Int, capturedAt: String) {
+    public init(
+        snapshotId: String,
+        treeDigest: String,
+        nodeCount: Int,
+        capturedAt: String,
+        probeInfo: SnapshotProbeInfo? = nil
+    ) {
         self.snapshotId = snapshotId
         self.treeDigest = treeDigest
         self.nodeCount = nodeCount
         self.capturedAt = capturedAt
+        self.probeInfo = probeInfo
     }
 }
 

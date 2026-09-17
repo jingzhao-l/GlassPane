@@ -52,6 +52,11 @@ public final class EngineCore {
     /// restore behaves exactly as before. Non-nil registers a high-risk record
     /// before each executed restore.
     private let approvalGate: ApprovalGate?
+    /// Tier-1 probe signal slot (P5 spec v5.0 §6.4): invoked at every snapshot
+    /// capture to attach a `SnapshotProbeInfo` payload. The daemon does not
+    /// inject a probe (this repo ships none), so it yields nil; tests inject
+    /// scripted payloads to exercise the rollback_full pipeline.
+    private let snapshotProbe: (() -> SnapshotProbeInfo?)?
     /// Busy-input retry budget before surfacing GP_E_BUSY_INPUT.
     public static let idleRetryCount = 5
     /// Interval between busy-input retries.
@@ -66,7 +71,8 @@ public final class EngineCore {
         attributionGuard: AttributionGuard? = nil,
         degradationTracker: DegradationTracker? = nil,
         metricsProbe: ProcessMetricsProviding? = nil,
-        approvalGate: ApprovalGate? = nil
+        approvalGate: ApprovalGate? = nil,
+        snapshotProbe: (() -> SnapshotProbeInfo?)? = nil
     ) {
         self.channel = channel
         self.clock = clock
@@ -77,6 +83,7 @@ public final class EngineCore {
         self.degradationTracker = degradationTracker
         self.metricsProbe = metricsProbe
         self.approvalGate = approvalGate
+        self.snapshotProbe = snapshotProbe
     }
 
     // MARK: - ISO-8601 timestamp
@@ -629,7 +636,8 @@ public final class EngineCore {
             snapshotId: OperationID.generateSnapshotLive(),
             treeDigest: tree.digest,
             nodeCount: tree.nodeCount,
-            capturedAt: nowISO()
+            capturedAt: nowISO(),
+            probeInfo: snapshotProbe?()
         )
         storeSnapshot(snapshot)
         let latencyMs = clock().timeIntervalSince(started) * 1000
@@ -662,6 +670,58 @@ public final class EngineCore {
                 code: .restoreUnsupported,
                 message: "mode 'restore_snapshot' (tier-1 full snapshot restore) requires the Z5 probe SDK, which is not in P1"
             )
+        }
+        if mode == "rollback_full" {
+            // P5 v5.0 §6.4 tier-1 pipeline: noSnapshot invariant first, then
+            // no-probe → structured refusal (same code/semantics as the P1
+            // tier-1 boundary), probe present → plan + validate. A returned
+            // plan carries rollbackExecuted: false — the rollback execution
+            // surface is the probe runtime, which this daemon does not ship.
+            guard let snapshot = snapshot(withId: snapshotId) else {
+                throw GPError(code: .noSnapshot, message: "unknown snapshotId \(snapshotId)")
+            }
+            guard let probe = snapshot.probeInfo else {
+                throw GPError(
+                    code: .restoreUnsupported,
+                    message: "tier-1 restore requires a Z5 probe payload; snapshot '\(snapshotId)' has none — attach the probe and re-snapshot"
+                )
+            }
+            guard let plan = RestorePipeline.plan(snapshot: snapshot) else {
+                throw GPError(
+                    code: .restoreUnsupported,
+                    message: "tier-1 restore plan unbuildable for snapshot '\(snapshotId)' (cyclic or inconsistent probe domains)"
+                )
+            }
+            let validation = RestorePipeline.validate(plan: plan, snapshot: snapshot)
+            guard validation.valid else {
+                throw GPError(
+                    code: .restoreUnsupported,
+                    message: "tier-1 restore plan invalid for snapshot '\(snapshotId)': \(validation.issues.joined(separator: "; "))"
+                )
+            }
+            registerRestoreApproval(snapshotId: snapshotId, mode: "rollback_full", hasSteps: false)
+            return [
+                "snapshotId": snapshot.snapshotId,
+                "baselineTreeDigest": snapshot.treeDigest,
+                "plan": [
+                    "domains": plan.domains,
+                    "steps": plan.steps.map { step -> [String: Any] in
+                        [
+                            "domain": step.domain,
+                            "checkpointRef": step.checkpointRef,
+                            "action": step.action,
+                            "preconditions": step.preconditions
+                        ]
+                    },
+                    "expectedStateDigest": plan.expectedStateDigest,
+                    "domainCount": plan.domainCount
+                ],
+                "planValid": true,
+                "rollbackExecuted": false,
+                "executionSurface": "z5-probe-runtime",
+                "probeVersion": probe.probeVersion,
+                "consistent": true
+            ]
         }
         guard let snapshot = snapshot(withId: snapshotId) else {
             throw GPError(code: .noSnapshot, message: "unknown snapshotId \(snapshotId)")
