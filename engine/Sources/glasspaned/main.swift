@@ -460,7 +460,7 @@ let core = EngineCore(
     evidenceStore: EvidenceStore(),
     degradationTracker: DegradationTracker(),
     metricsProbe: ProcessMetricsProbe(),
-    approvalGate: ApprovalGate()
+    approvalGate: ApprovalGate(path: ApprovalGate.defaultPath)
 )
 let dispatcher = Dispatcher(core: core, log: log)
 let server = SocketServer(socketPath: socketPath, dispatcher: dispatcher, log: log)
