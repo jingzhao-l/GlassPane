@@ -28,6 +28,10 @@ final class SettingsModel: ObservableObject {
     @Published var daemon: DaemonEntry
     @Published var isRefreshing = false
     @Published var lastRefreshError: String?
+    /// 拖拽引导状态：最近一次落点的权限类别（nil = 无进行中的引导）。
+    @Published var pendingGuideKind: PermissionKind?
+    /// 拖拽引导文案（`PermissionGuide.instruction` 或手动按钮引导文案）。
+    @Published var pendingGuideText: String?
 
     private let accessibilityProbe: AccessibilityPermissionProbe
     private let inputMonitoringProbe: InputMonitoringPermissionProbe
@@ -56,18 +60,23 @@ final class SettingsModel: ObservableObject {
         }
     }
 
-    /// 触发引导动作（spec §6.2 按钮语义）：notDetermined → 系统授权+pane；
-    /// denied → 仅 openPane；granted → no-op。触发后立即重查刷新状态。
+    /// 手动按钮引导（保持卡片按钮语义）：notDetermined → 系统授权+pane；
+    /// denied → 仅打开 pane；granted → no-op。触发后立即重查刷新状态。
     func guideAccessibility() {
-        guard !accessibilityProbe.isTrusted() else { return }
+        guard !accessibilityProbe.isTrusted() else {
+            pendingGuideKind = nil
+            pendingGuideText = nil
+            return
+        }
+        setPendingGuide(.accessibility, droppedName: nil)
         accessibilityProbe.promptAndOpenPane()
-        Task { await Task.yield() }
-        refresh()
+        refreshEntriesOnly()
     }
 
     func guideInputMonitoring() {
+        setPendingGuide(.inputMonitoring, droppedName: nil)
         _ = inputMonitoringProbe.requestAccess()
-        refresh()
+        refreshEntriesOnly()
     }
 
     func guideScreenRecording() {
@@ -75,13 +84,80 @@ final class SettingsModel: ObservableObject {
         case .granted:
             break
         case .notDetermined, .denied:
+            setPendingGuide(.screenRecording, droppedName: nil)
             _ = screenRecordingProbe.guideAccess()
-            refresh()
+            let paneURL = PermissionGuide.systemPaneURL(for: .screenRecording)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            process.arguments = [paneURL]
+            try? process.run()
+            refreshEntriesOnly()
         }
     }
 
     func guideDeveloperTools() {
+        setPendingGuide(.developerTools, droppedName: nil)
         developerToolsProbe.openPane()
+    }
+
+    /// 拖拽落点入口：被拖入 bundle 的名称（缺失时缺省）→ 打开对应系统面板
+    /// 并记录引导状态；状态检测交给周期性 `pollPermissions()`（自动点亮）。
+    /// 返回引导文案供 UI 展示。`droppedName` 从 bundle URL 解析，nil 表示
+    /// 未识别到名称（此时用缺省 GlassPane）。
+    @discardableResult
+    func handleDrop(kind: PermissionKind, droppedName: String?) -> String {
+        let name = droppedName?.isEmpty == false ? droppedName! : "GlassPane"
+        setPendingGuide(kind, droppedName: name)
+        switch kind {
+        case .accessibility:
+            accessibilityProbe.promptAndOpenPane()
+        case .inputMonitoring:
+            _ = inputMonitoringProbe.requestAccess()
+        case .screenRecording:
+            _ = screenRecordingProbe.guideAccess()
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            process.arguments = [PermissionGuide.systemPaneURL(for: .screenRecording)]
+            try? process.run()
+        case .developerTools:
+            developerToolsProbe.openPane()
+        }
+        refreshEntriesOnly()
+        return PermissionGuide.instruction(for: kind, droppedName: name)
+    }
+
+    /// 周期性权限状态检测（拖拽后自动点亮）：只重查四类权限，不做 daemon
+    /// 探测（socket hello 有 3s 超时，不能在轮询里阻塞）。所有权限达成
+    /// granted/unverifiable 时返回 true，供 UI 停表。
+    func pollPermissions() -> Bool {
+        refreshEntriesOnly()
+        return entries.allSatisfy { $0.status == .granted || $0.status == .unverifiable }
+    }
+
+    /// 仅重查权限条目（同步、轻量；AX trust/preflight 均为廉价的本地查询）。
+    /// 直接取实测状态，不粘滞历史值——用户在中途撤销授权也应如实反映。
+    private func refreshEntriesOnly() {
+        let accessibility = accessibilityProbe.isTrusted()
+        let inputMonitoring = inputMonitoringProbe.state
+        let screenRecording = screenRecordingProbe.state.panelStatus
+        let developerTools = developerToolsProbe.status
+        for index in entries.indices {
+            switch entries[index].kind {
+            case .accessibility:
+                entries[index].status = accessibility ? .granted : .notDetermined
+            case .inputMonitoring:
+                entries[index].status = inputMonitoring
+            case .screenRecording:
+                entries[index].status = screenRecording
+            case .developerTools:
+                entries[index].status = developerTools
+            }
+        }
+    }
+
+    private func setPendingGuide(_ kind: PermissionKind, droppedName: String?) {
+        pendingGuideKind = kind
+        pendingGuideText = PermissionGuide.instruction(for: kind, droppedName: droppedName ?? "GlassPane")
     }
 
     /// 重查全部权限与 daemon 状态（耗时探测放后台，不阻塞主线程）。
