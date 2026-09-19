@@ -179,6 +179,17 @@ printf '%s\n' \
 - 单测面：engine 新增 23 用例（`PermissionSubjectTests`），当时全量 317 用例 0 失败；
   installer 新增 16 用例，全量 37 用例 0 失败。
 
+- **同一 bundle、两种起法的自报对照（关键发现）**：由安装器经 `open -g -n -a` 起的实例
+  自报 `accessibility=granted / inputMonitoring=granted / screenRecording=notDetermined`；
+  随后 `launchctl kickstart -k` 起的实例自报 `accessibility=notDetermined /
+  inputMonitoring=notDetermined / screenRecording=granted`。用户在系统设置里为
+  「GlassPane Daemon」真实勾选的是屏幕录制一项——前一个实例的两项 granted 是**从启动者
+  （终端侧 app）借来的**。含义：`hello` 自报只在 daemon 由 launchd/登录项拉起时才等于真实
+  席位；面板与安装器文案都必须按这一口径声明，不能因为读到 granted 就断言已授权。
+- 另发现：**daemon 不响应 SIGTERM**（`signal(SIGTERM, SIG_IGN)` 后 handler 依赖主 runloop
+  被泵，实测两实例收 TERM 后仍存活），故 `--replace-daemon` 必须有 SIGKILL 兜底；这一条
+  属运行时面缺陷（P4 §36 同族），本轮仅在安装器侧兜底，未改 daemon 信号处理。
+
 **如实边界与待办（P1-S8）**：新 bundle 身份是全新 TCC 客户端，旧的 `glasspaned` 席位不
 继承——需用户在系统设置里为「GlassPane Daemon」重新勾选一次，并目视确认条目名与图标、
 确认重编译后授权仍在（DR 不含 cdhash 的预期收益）。本轮未做该人工勾选，故 §11 的

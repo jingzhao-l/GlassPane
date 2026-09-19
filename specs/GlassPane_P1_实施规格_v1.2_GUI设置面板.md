@@ -281,7 +281,15 @@ P1 首批覆盖 SCK 迁移+屏幕录制权限 onboarding（CLI 形态），批�
 | 2 | **无 bundle 身份的进程会继承父 app 的判定**：同一未授权副本，从已授权终端启动报 `granted`，改由 `launchctl submit` 起（父=launchd）报 `notDetermined` | 同副本双上下文对照 | 终端里跑 `--guide-screen-permission` 会把席位记到终端头上；面板/CLI 显示的"已授权"可能是借来的 |
 | 3 | **只 `cp` 不重签的 .app 不成立 TCC 客户端**：旧 `make-app.sh` 产物 `codesign --verify` 报 `code has no resources but signature indicates they must be present`，`Identifier=glasspane-settings ≠ CFBundleIdentifier`、`Info.plist=not bound` | `codesign -dvvv` / `--verify --strict` | 点授权后系统设置里什么都不出现；「+」选择器亦不认该 bundle |
 
-推论（据此设计）：权限列表要出现**带名字带图标**的可选条目，daemon 必须是"签名有效的
+| 4 | **同一个 bundle 身份，起法不同 → 自报读数不同**：由 `open`（责任链落在终端 app）
+  起的 daemon 自报 `accessibility=granted / inputMonitoring=granted / screenRecording=notDetermined`；
+  同一 bundle 由 `launchctl kickstart` 起的 daemon 自报 `accessibility=notDetermined /
+  inputMonitoring=notDetermined / screenRecording=granted`（用户为「GlassPane Daemon」
+  真实勾选的只有屏幕录制） | `hello` 对照（见 smoke.md） |
+
+推论（据此设计）：`hello` 的自报只在 **daemon 的责任上下文是它自己**时才等于真实席位，
+因此交付形态必须是 launchd/登录项拉起；终端或从 GUI 手动起 daemon 时，面板读数可能仍是
+借来的（安装器文案须声明这一点）。权限列表要出现**带名字带图标**的可选条目，daemon 必须是"签名有效的
 bundle 主可执行"；`identifier` 形态的 designated requirement（不含 cdhash）才能让授权
 跨重编译存活——`codesign --force --sign - --identifier <id> -r='designated =>
 identifier "<id>"'` 实测可通过 `--verify --strict`。

@@ -585,6 +585,8 @@ export function nextStepsText({
       ? '   面板已打开：点权限卡「授权」会让 daemon 以自身身份发起申请并跳转到对应系统面板。'
       : `   打开面板：open "${settingsAppHint}"（点权限卡「授权」即由 daemon 自身发起申请）。`,
     `   验证 daemon 自报的席位与主体：${daemon.path ?? path.join(rootDir, 'engine', '.build', 'release', DAEMON_EXE_NAME)} --permissions`,
+    '   口径提醒：daemon 必须由 launchd/登录项拉起，权限自报才等于真实席位；从终端或',
+    '   GUI 手动起的实例会继承启动者 app 的判定（真机实测：同 bundle 两种起法读数不同）。',
     '3. daemon 已注册 launchd 开机自启（--no-launchd 可跳过）；维护命令：',
     '   glasspaned --approval-audit / --approval-verify / --prune-evidence / --evidence-stats',
     `4. entryName 核对：设置面板「Daemon 状态 → 主体」应与上面「${entryName}」一致；不一致说明连到了别的构建实例。`,
