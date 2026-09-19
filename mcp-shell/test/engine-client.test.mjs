@@ -59,3 +59,8 @@ test("frames with mismatched ids are dropped, later frames still resolve", async
   const result = await promise;
   assert.equal(result.engine, "glasspaned");
 });
+test("unreachable-daemon remedy is an executable restore command (P6 §11 audit 4)", async () => {
+  const { daemonUnreachableRemedy } = await import("../dist/engine-client.js");
+  const remedy = daemonUnreachableRemedy();
+  assert.match(remedy, /--restore-launchd/, "remedy must name the machine-verified restore command, not prose");
+});

@@ -1,9 +1,28 @@
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { LineIo, StreamLineIo } from "./io.js";
 import { GP_E_ENGINE_UNREACHABLE } from "./errors.js";
+
+/**
+ * Agent-actionable remedy for an unreachable daemon (P6 §11 audit items ④/⑥:
+ * a remedy must be an executable command, not a prose hint). When the repo
+ * installer is present next to this build, hand over the machine-verified
+ * restore command: it detects a boot-out'd launchd job, bootstraps it, and
+ * verifies the daemon's hello self-report — the only remaining human action
+ * (TCC checkbox) stays honest. Falls back to generic wording otherwise.
+ */
+export function daemonUnreachableRemedy(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const installerCli = path.resolve(here, "..", "..", "installer", "cli.js");
+  if (fs.existsSync(installerCli)) {
+    return `run "node ${installerCli} --restore-launchd" (auto-restores and verifies the launchd-managed daemon), then retry`;
+  }
+  return "ensure the glasspane daemon is running (launchd job com.glasspane.daemon; in a repo checkout run `node installer/cli.js --restore-launchd`), then retry";
+}
 
 /** Env override for the daemon socket path (default below). */
 export const ENGINE_SOCKET_ENV = "GLASSPANE_ENGINE_SOCK";
@@ -68,12 +87,12 @@ export class EngineJsonRpcClient {
     this.io.onError((error) => this.failAll(new EngineCallError(
       GP_E_ENGINE_UNREACHABLE,
       `engine transport error: ${error.message}`,
-      "ensure the glasspane daemon is running, then retry",
+      daemonUnreachableRemedy(),
     )));
     this.io.onClose(() => this.failAll(new EngineCallError(
       GP_E_ENGINE_UNREACHABLE,
       "engine transport closed",
-      "restart the glasspane daemon and reconnect",
+      daemonUnreachableRemedy(),
     )));
   }
 
@@ -88,7 +107,7 @@ export class EngineJsonRpcClient {
         reject(new EngineCallError(
           GP_E_ENGINE_UNREACHABLE,
           `engine request timed out after ${this.timeoutMs}ms (method ${method})`,
-          "check the daemon socket and retry",
+          daemonUnreachableRemedy(),
         ));
       }, this.timeoutMs);
       timer.unref();

@@ -75,6 +75,7 @@ export function parseArgs(argv) {
     launchd: true,
     replaceDaemon: false,
     skipBuild: false,
+    restoreLaunchd: false,
     help: false,
   }
   const opts = { ...defaults }
@@ -113,6 +114,9 @@ export function parseArgs(argv) {
         break
       case '--skip-build':
         opts.skipBuild = true
+        break
+      case '--restore-launchd':
+        opts.restoreLaunchd = true
         break
       default:
         return { options: defaults, error: `未知参数：${arg}（--help 查看用法）` }
@@ -423,6 +427,128 @@ export function launchctlBootstrap(label, plistPath) {
   }
 }
 
+/** 以 daemon 自身席位重启已加载的 launchd 作业（`kickstart -k`）。恢复流程里
+ *  只在"作业已加载但自报非 granted"时调用——此时 daemon 本就不可用，中断
+ *  面为零；TCC 判定按进程缓存，勾选授权后必须新进程才看得到（P1 v1.2 §11）。 */
+export function launchctlKickstart(label) {
+  const uid = spawnSync('id', ['-u'], { encoding: 'utf8' }).stdout.trim()
+  if (!uid) {
+    return { ok: false, message: '无法解析当前 uid（id -u 失败），跳过 kickstart' }
+  }
+  const kick = spawnSync('launchctl', ['kickstart', '-k', `gui/${uid}/${label}`], { encoding: 'utf8' })
+  const stderr = (kick.stderr ?? '').trim()
+  if (kick.status === 0) {
+    return { ok: true, message: `launchd 已重启作业（gui/${uid}/${label}）` }
+  }
+  return { ok: false, message: stderr || `launchctl kickstart 失败，退出码 ${kick.status}` }
+}
+
+/** 向 daemon socket 发一行 hello（NDJSON 单行协议，与 FrameCodec 对齐），返回
+ *  解析后的 result；不可达/超时/坏响应一律 null——恢复判定必须把"拿不到"
+ *  如实降级为未验证，不得冒充 granted。 */
+export function socketHello(
+  socketPath,
+  { timeoutMs = 3000, connect = (opts, onData) => { const c = net.createConnection(opts); c.on('data', onData); return c } } = {},
+) {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (value) => { if (!settled) { settled = true; try { client.destroy() } catch {} ; resolve(value) } }
+    let buffer = ''
+    const client = connect({ path: socketPath }, (chunk) => {
+      buffer += chunk.toString('utf8')
+      const newline = buffer.indexOf('\n')
+      if (newline < 0) return
+      try {
+        const frame = JSON.parse(buffer.slice(0, newline))
+        finish(frame.result ?? null)
+      } catch {
+        finish(null)
+      }
+    })
+    client.setTimeout(timeoutMs, () => finish(null))
+    client.on('error', () => finish(null))
+    client.on('connect', () => {
+      client.write('{"id":1,"method":"hello"}\n')
+    })
+  })
+}
+
+/**
+ * 审计项④（launchd 恢复靠人 → 机器化）：检测 + 恢复 + 校验一条龙，用户剩余
+ * 唯一动作 = 在系统设置里勾选（TCC 无程序化路径，P1 v1.2 §10.1）。
+ *
+ * 状态机（对 agent 可执行、对结果不撒谎）：
+ *  - plist 缺失 → 不猜，指回完整安装；
+ *  - 作业未加载（booted-out，等授权期间常发生）→ bootstrap，新起的 daemon
+ *    自报即真值；
+ *  - 作业已加载且自报 granted → 无需任何动作，如实报告；
+ *  - 已加载但自报非 granted（含 permissions 缺失）→ TCC 按进程缓存，
+ *    kickstart -k 换一个新判定进程再验——勾完框重跑本命令即可闭环。
+ */
+export async function restoreLaunchd({
+  label = LAUNCHD_LABEL,
+  plistPath = path.join(process.env.HOME ?? '', ...LAUNCHD_DIR_NAME.split('/'), LAUNCHD_FILE_NAME),
+  socketPath = path.join(process.env.HOME ?? '', SOCKET_DIR_NAME, SOCKET_FILE_NAME),
+  bootstrapFn = launchctlBootstrap,
+  kickstartFn = launchctlKickstart,
+  waitFn = waitForSocket,
+  helloFn = socketHello,
+  existsFn = (p) => fs.existsSync(p),
+  serveTimeoutMs = 10000,
+} = {}) {
+  if (!existsFn(plistPath)) {
+    return {
+      ok: false,
+      action: 'missing-plist',
+      message: `launchd plist 不存在（${plistPath}）：从未安装或已被删除，请重跑 install.sh 完整安装`,
+    }
+  }
+  const boot = bootstrapFn(label, plistPath)
+  if (!boot.ok) {
+    return { ok: false, action: 'bootstrap-failed', message: `bootstrap 失败：${boot.message}` }
+  }
+  const verify = async () => {
+    if (!(await waitFn(socketPath, { timeoutMs: serveTimeoutMs }))) {
+      return { reachable: false, accessibility: null, pid: null, version: null }
+    }
+    const result = await helloFn(socketPath)
+    return {
+      reachable: result != null,
+      accessibility: result?.permissions?.accessibility ?? null,
+      pid: result?.pid ?? null,
+      version: result?.version ?? null,
+    }
+  }
+  let checked = await verify()
+  if (!checked.reachable) {
+    return {
+      ok: false,
+      action: boot.already ? 'already-loaded' : 'bootstrapped',
+      verified: checked,
+      message: `launchd 作业就位（${boot.message}），但 ${serveTimeoutMs}ms 内 daemon socket 未服务/未回 hello（${socketPath}）`,
+    }
+  }
+  let restarted = false
+  if (checked.accessibility !== 'granted' && boot.already) {
+    // 已加载 + 非 granted：可能刚勾完框但旧进程缓存着未授权判定——换新进程再验。
+    const kick = kickstartFn(label)
+    if (kick.ok) {
+      restarted = true
+      checked = await verify()
+    }
+  }
+  const granted = checked.accessibility === 'granted'
+  const action = restarted ? 'restarted-for-grant' : boot.already ? 'already-loaded' : 'bootstrapped'
+  return {
+    ok: true,
+    action,
+    verified: checked,
+    message: granted
+      ? `daemon 已由 launchd 服务且自报辅助功能 granted（pid ${checked.pid}，version ${checked.version}）——无人工动作剩余`
+      : `daemon 已就位，自报辅助功能为 ${checked.accessibility ?? 'unknown'}；唯一剩余人工动作 = 系统设置>隐私与安全性>辅助功能 勾选 daemon，然后重跑本命令复验（届时会自动换进程取新判定）`,
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 执行层
 // ---------------------------------------------------------------------------
@@ -530,6 +656,8 @@ export function usageText() {
     '  --no-app           不打包/安置 .app（仅裸二进制产物；权限条目将只显示文件',
     '                     名且无图标，见 P1 v1.2 §11.1）',
     '  --no-launchd       不注册开机自启（launchd bootstrap）',
+    '  --restore-launchd  只做 launchd 恢复：检测作业被 bootout → bootstrap → hello',
+    '                     校验 daemon 自报席位（勾完 TCC 框后重跑即自动换进程复验）',
     '  --skip-build       跳过 npm/tsc/swift 编译（已构建过时使用）',
     '  -h, --help         显示本帮助',
     '',
@@ -589,6 +717,9 @@ export function nextStepsText({
     '   GUI 手动起的实例会继承启动者 app 的判定（真机实测：同 bundle 两种起法读数不同）。',
     '3. daemon 已注册 launchd 开机自启（--no-launchd 可跳过）；维护命令：',
     '   glasspaned --approval-audit / --approval-verify / --prune-evidence / --evidence-stats',
+    `   作业被 bootout（等授权期间常发生）后的恢复**不需要手敲 launchctl**：`,
+    `   node "${path.join(rootDir, 'installer', 'cli.js')}" --restore-launchd`,
+    `   （检测→bootstrap→hello 校验自报席位；勾完 TCC 框重跑即自动换进程复验）`,
     `4. entryName 核对：设置面板「Daemon 状态 → 主体」应与上面「${entryName}」一致；不一致说明连到了别的构建实例。`,
     '5. registry 发布形态（npx glasspane-mcp）挂 kernel Phase B（P4 §33.2 决策链），当前以本仓库产物为准。',
     '',
@@ -788,6 +919,14 @@ if (isMain) {
   if (options.help) {
     process.stdout.write(usageText())
     process.exit(0)
+  }
+
+  if (options.restoreLaunchd) {
+    // 审计项④：恢复 + 校验全机器化，退出码即判定（0=daemon 就位且已按实际
+    // 自报如实报告；1=作业/服务面失败），agent 可直接执行并按 message 续办。
+    const result = await restoreLaunchd()
+    process.stdout.write(`${result.message}\n`)
+    process.exit(result.ok ? 0 : 1)
   }
 
   const env = checkEnvironment()

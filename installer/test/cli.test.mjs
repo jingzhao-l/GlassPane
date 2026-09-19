@@ -146,3 +146,106 @@ test('launchdPlistString: 特殊字符路径 XML 转义（防路径注入）', (
   assert.ok(plist.includes('/tmp/x&lt;y&gt;.sock'))
   assert.ok(plist.includes('/tmp/l&gt;og.log'))
 })
+// ---------------------------------------------------------------------------
+// restoreLaunchd（P6 §11 审计项④：launchd 恢复机器化）
+// ---------------------------------------------------------------------------
+
+import { restoreLaunchd } from '../cli.js'
+
+function makeRestoreDeps({ already = false, bootOk = true, reachable = true, hello = null, kickOk = true } = {}) {
+  const calls = { kickstart: 0, bootstrap: 0 }
+  let helloReturns = hello
+  const deps = {
+    plistPath: '/fake/com.glasspane.daemon.plist',
+    socketPath: '/fake/engine.sock',
+    existsFn: () => true,
+    bootstrapFn: () => {
+      calls.bootstrap += 1
+      return { ok: bootOk, already, message: bootOk ? (already ? 'already loaded' : 'bootstrapped') : 'boom' }
+    },
+    kickstartFn: () => {
+      calls.kickstart += 1
+      return { ok: kickOk, message: 'kicked' }
+    },
+    waitFn: async () => reachable,
+    helloFn: async () => helloReturns,
+  }
+  return { deps, calls }
+}
+
+test('restoreLaunchd: --restore-launchd 参数被解析且默认关闭', () => {
+  assert.equal(parseArgs([]).options.restoreLaunchd, false)
+  assert.equal(parseArgs(['--restore-launchd']).options.restoreLaunchd, true)
+})
+
+test('restoreLaunchd: plist 缺失 → 不猜，指回完整安装', async () => {
+  const { deps } = makeRestoreDeps()
+  const result = await restoreLaunchd({ ...deps, existsFn: () => false })
+  assert.equal(result.ok, false)
+  assert.equal(result.action, 'missing-plist')
+  assert.match(result.message, /install\.sh/)
+})
+
+test('restoreLaunchd: bootstrap 失败如实上报，不进入校验', async () => {
+  const { deps, calls } = makeRestoreDeps({ bootOk: false })
+  const result = await restoreLaunchd(deps)
+  assert.equal(result.ok, false)
+  assert.equal(result.action, 'bootstrap-failed')
+  assert.equal(calls.bootstrap, 1)
+})
+
+test('restoreLaunchd: bootout 恢复 + hello 自报 granted → 零人工动作', async () => {
+  const { deps, calls } = makeRestoreDeps({
+    already: false,
+    hello: { pid: 123, version: '0.1.0', permissions: { accessibility: 'granted' } },
+  })
+  const result = await restoreLaunchd(deps)
+  assert.equal(result.ok, true)
+  assert.equal(result.action, 'bootstrapped')
+  assert.equal(result.verified.accessibility, 'granted')
+  assert.match(result.message, /无人工动作/)
+  assert.equal(calls.kickstart, 0, '新 bootstrap 的进程判定本就是新的，不得多余 kickstart')
+})
+
+test('restoreLaunchd: 已加载但自报未授权 → kickstart 换进程复验（勾框后的闭环）', async () => {
+  const { deps, calls } = makeRestoreDeps({ already: true, hello: { pid: 1, version: 'v', permissions: { accessibility: 'notGranted' } } })
+  // 第一次 hello 未授权；kickstart 后的第二次 hello 授权（模拟用户刚勾完框）。
+  let n = 0
+  deps.helloFn = async () => {
+    n += 1
+    return n === 1
+      ? { pid: 1, version: 'v', permissions: { accessibility: 'notGranted' } }
+      : { pid: 2, version: 'v', permissions: { accessibility: 'granted' } }
+  }
+  const result = await restoreLaunchd(deps)
+  assert.equal(result.ok, true)
+  assert.equal(calls.kickstart, 1)
+  assert.equal(result.action, 'restarted-for-grant')
+  assert.equal(result.verified.accessibility, 'granted')
+})
+
+test('restoreLaunchd: 新 bootstrap 但未授权 → 指路唯一人工动作，不乱 kickstart', async () => {
+  const { deps, calls } = makeRestoreDeps({
+    already: false,
+    hello: { pid: 7, version: 'v', permissions: { accessibility: 'notDetermined' } },
+  })
+  const result = await restoreLaunchd(deps)
+  assert.equal(result.ok, true)
+  assert.equal(result.action, 'bootstrapped')
+  assert.match(result.message, /勾选/)
+  assert.equal(calls.kickstart, 0)
+})
+
+test('restoreLaunchd: hello 缺 permissions → 如实 unknown，绝不冒充 granted', async () => {
+  const { deps } = makeRestoreDeps({ already: false, hello: { pid: 9, version: 'v' } })
+  const result = await restoreLaunchd(deps)
+  assert.equal(result.verified.accessibility, null)
+  assert.match(result.message, /unknown/)
+})
+
+test('restoreLaunchd: socket 不可达 → ok=false，报告未服务', async () => {
+  const { deps } = makeRestoreDeps({ already: false, reachable: false })
+  const result = await restoreLaunchd(deps)
+  assert.equal(result.ok, false)
+  assert.match(result.message, /未服务/)
+})
