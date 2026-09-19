@@ -54,6 +54,15 @@ final class SettingsModel: ObservableObject {
     let panelSubject: PermissionSubject
     /// hello 往返在途标记（1s 轮询不得叠加 3s 超时的 socket 会话）。
     private var helloInFlight = false
+    /// 同一身份新进程的重探结果（用于区分"系统里没授权"与"授权了但 daemon
+    /// 需重启才生效"，P1 v1.2 §11.4）。
+    @Published var reprobed: PermissionReprobe.Result?
+    private var reprobeInFlight = false
+    private var lastReprobeAt = Date.distantPast
+    /// 重探节流：只在有必备权限未达成且距上次超过该间隔时才发起。
+    static let reprobeInterval: TimeInterval = 4
+    /// launchd 作业标签（安装器写入的同名 plist）。
+    static let launchdLabel = "com.glasspane.daemon"
 
     /// daemon 未运行 / 旧 daemon 不上报时的卡片注记。
     static let noDaemonReportNote = "未取到 daemon 自报席位（daemon 未运行或版本过旧）"
@@ -185,6 +194,10 @@ final class SettingsModel: ObservableObject {
         if let summary = await helloSummary() {
             applyDaemonSummary(summary)
         }
+        if !essentialPermissionsGranted {
+            // 运行实例没达成：先分清"系统里真没授权"还是"授权了没重启"。
+            await reprobeSeats()
+        }
         return essentialPermissionsGranted
     }
 
@@ -196,6 +209,106 @@ final class SettingsModel: ObservableObject {
 
     func status(of kind: PermissionKind) -> PermissionStatus {
         entries.first { $0.kind == kind }?.status ?? .unverifiable
+    }
+
+    /// 系统里已授权、但运行中的 daemon 还读不到的权限（需重启生效）。
+    var kindsNeedingRestart: [PermissionKind] {
+        PermissionReprobe.kindsNeedingRestart(running: daemonReportedStatuses, reprobed: reprobed)
+    }
+
+    var restartHint: String {
+        let kinds = kindsNeedingRestart
+        return kinds.isEmpty ? "" : PermissionGuide.restartNeededText(kinds)
+    }
+
+    /// daemon 自报的席位（重探/重启后需要重算注记，单独留一份）。
+    private var daemonReportedStatuses: [PermissionKind: PermissionStatus] = [:]
+
+    /// 用 daemon 自己的二进制重跑一次 `--permissions`（launchd 一次性任务，
+    /// 责任上下文是 daemon 本身）：拿到"同一身份的新进程"看到的席位。
+    func reprobeSeats(force: Bool = false) async -> PermissionReprobe.Result? {
+        guard let binaryPath = daemon.subject?.binaryPath else { return nil }
+        guard !reprobeInFlight else { return reprobed }
+        if !force && Date().timeIntervalSince(lastReprobeAt) < Self.reprobeInterval { return reprobed }
+        reprobeInFlight = true
+        lastReprobeAt = Date()
+        defer { reprobeInFlight = false }
+        let nonce = "\(Int(Date().timeIntervalSince1970))"
+        let directory = NSTemporaryDirectory()
+        let scriptPath = directory + "glasspane-reprobe-\(nonce).zsh"
+        let outputPath = directory + "glasspane-reprobe-\(nonce).json"
+        let script = PermissionReprobe.script(daemonBinaryPath: binaryPath, outputPath: outputPath)
+        let command = PermissionReprobe.submitCommand(scriptPath: scriptPath, nonce: nonce)
+        let result = await withCheckedContinuation { (continuation: CheckedContinuation<PermissionReprobe.Result?, Never>) in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(returning: Self.runReprobe(
+                    script: script, scriptPath: scriptPath,
+                    outputPath: outputPath, command: command
+                ))
+            }
+        }
+        if let result {
+            reprobed = result
+            rebuildEntries()
+        }
+        return result
+    }
+
+    /// 重启 launchd 托管的 daemon 让授权生效。会打断正在进行的 act，
+    /// 因此只作为用户显式点击的动作提供，绝不自动执行。
+    func restartDaemon() {
+        let command = PermissionGuide.daemonRestartCommand(label: Self.launchdLabel, uid: Int(getuid()))
+        runSystemBinary(command.launchPath, arguments: command.arguments)
+        reprobed = nil
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if let summary = await helloSummary() {
+                applyDaemonSummary(summary)
+            }
+        }
+    }
+
+    /// 重探的执行面（后台队列）：落脚本 → submit → 轮询读结果 → 清理。
+    nonisolated private static func runReprobe(
+        script: String,
+        scriptPath: String,
+        outputPath: String,
+        command: PermissionGuide.PermissionRequestCommand
+    ) -> PermissionReprobe.Result? {
+        let url = URL(fileURLWithPath: scriptPath)
+        do {
+            try script.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath)
+        } catch {
+            return nil
+        }
+        try? FileManager.default.removeItem(atPath: outputPath)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: command.launchPath)
+        process.arguments = command.arguments
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        var result: PermissionReprobe.Result?
+        let deadline = Date().addingTimeInterval(6)
+        while Date() < deadline {
+            if let text = try? String(contentsOfFile: outputPath, encoding: .utf8),
+               let parsed = PermissionReprobe.parse(text) {
+                result = parsed
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        let cleanup = PermissionGuide.daemonRequestCleanupCommand(jobLabel: command.jobLabel)
+        let remover = Process()
+        remover.executableURL = URL(fileURLWithPath: cleanup.launchPath)
+        remover.arguments = cleanup.arguments
+        try? remover.run()
+        try? FileManager.default.removeItem(atPath: scriptPath)
+        try? FileManager.default.removeItem(atPath: outputPath)
+        return result
     }
 
     /// 重查全部权限与 daemon 状态（hello 会话 3s 超时，放后台不阻塞主线程）。
@@ -245,7 +358,14 @@ final class SettingsModel: ObservableObject {
             daemon.reachable = true
         }
         daemon.subject = summary?.subject
-        let reported = summary?.permissions ?? [:]
+        daemonReportedStatuses = summary?.permissions ?? [:]
+        rebuildEntries()
+    }
+
+    /// 由 daemon 自报席位 + 重探结果重算卡片状态与注记。
+    private func rebuildEntries() {
+        let reported = daemonReportedStatuses
+        let restartKinds = Set(kindsNeedingRestart)
         for index in entries.indices {
             let kind = entries[index].kind
             if kind == .developerTools {
@@ -255,7 +375,9 @@ final class SettingsModel: ObservableObject {
             }
             if let status = reported[kind] {
                 entries[index].status = status
-                entries[index].statusNote = nil
+                entries[index].statusNote = restartKinds.contains(kind)
+                    ? "系统里已授权，重启 daemon 后生效"
+                    : nil
             } else {
                 entries[index].status = .unverifiable
                 entries[index].statusNote = Self.noDaemonReportNote

@@ -1,5 +1,6 @@
 import Foundation
 import ApplicationServices
+import CoreGraphics
 
 // MARK: - TCC 授权主体（P1 v1.2 §11 权限主体修正）
 
@@ -124,6 +125,34 @@ public struct DaemonPermissionSnapshot: Equatable, Sendable {
     }
 }
 
+// MARK: - 输入监控条目登记探针
+
+/// `CGRequestListenEventAccess()` 只会弹询问，**不会**让「输入监控」列表出现
+/// 条目（真机对照：辅助功能申请后条目直接出现，输入监控不会，只能手动把
+/// `.app` 拖进列表）。真正登记该 client 的动作是创建 event tap——与 P4 §36
+/// "tap 创建即权限如实探测"同源。这里用 `.listenOnly` 被动 tap（不改写事件流、
+/// 不进 C33 数据面），创建成功即销毁，只为把条目登记出来。
+public enum ListenEventTapProbe {
+    public typealias Create = () -> Bool
+
+    public static let createOnce: Create = {
+        let callback: CGEventTapCallBack = { _, _, event, _ in Unmanaged.passUnretained(event) }
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: CGEventMask(1 << CGEventType.keyDown.rawValue),
+            callback: callback,
+            userInfo: nil
+        ) else {
+            return false
+        }
+        CGEvent.tapEnable(tap: tap, enable: false)
+        CFMachPortInvalidate(tap)
+        return true
+    }
+}
+
 /// 权限探针聚合器：把四类探针折叠成一份快照，并提供"以本进程身份发起申请"
 /// 的统一入口（daemon 侧 `--request-permission <kind>` 与单测共用）。
 public final class PermissionProbeSet {
@@ -131,6 +160,8 @@ public final class PermissionProbeSet {
     public let inputMonitoring: InputMonitoringPermissionProbe
     public let screenRecording: ScreenCapturePermissionProbe
     public let developerTools: DeveloperToolsPermissionProbe
+    /// 输入监控条目登记动作（创建即销毁的被动 tap）；注入式便于单测。
+    private let inputTapProbe: ListenEventTapProbe.Create
     private let subjectProvider: () -> PermissionSubject
 
     public init(
@@ -138,12 +169,14 @@ public final class PermissionProbeSet {
         inputMonitoring: InputMonitoringPermissionProbe = InputMonitoringPermissionProbe(),
         screenRecording: ScreenCapturePermissionProbe = ScreenCapturePermissionProbe(),
         developerTools: DeveloperToolsPermissionProbe = DeveloperToolsPermissionProbe(),
+        inputTapProbe: @escaping ListenEventTapProbe.Create = ListenEventTapProbe.createOnce,
         subjectProvider: @escaping () -> PermissionSubject = { PermissionSubject.current() }
     ) {
         self.accessibility = accessibility
         self.inputMonitoring = inputMonitoring
         self.screenRecording = screenRecording
         self.developerTools = developerTools
+        self.inputTapProbe = inputTapProbe
         self.subjectProvider = subjectProvider
     }
 
@@ -171,7 +204,12 @@ public final class PermissionProbeSet {
             accessibility.requestPrompt()
             return accessibility.displayStatus()
         case .inputMonitoring:
-            inputMonitoring.requestOnly()
+            if inputMonitoring.state != .granted {
+                inputMonitoring.requestOnly()
+                // 询问之外还要真正登记一次 tap，否则「输入监控」列表里不会出现
+                // 该主体（用户就只能手动拖 .app 进去）。
+                inputTapProbe()
+            }
             return inputMonitoring.state
         case .screenRecording:
             screenRecording.requestOnly()

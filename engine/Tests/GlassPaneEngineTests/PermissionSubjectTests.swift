@@ -143,7 +143,7 @@ final class PermissionSubjectTests: XCTestCase {
 
     func testDeveloperToolsInstructionStaysHonest() {
         let text = PermissionGuide.instruction(for: .developerTools, subjectName: "glasspaned", hasBundleIdentity: false)
-        XCTAssertTrue(text.contains("无系统总开关"))
+        XCTAssertTrue(text.contains("未验证"), "开发者工具仍不得伪造授权态")
     }
 
     // MARK: - §11.2 席位快照与线上往返
@@ -250,6 +250,107 @@ final class PermissionSubjectTests: XCTestCase {
         XCTAssertEqual(set.request(.screenRecording), .granted)
         XCTAssertEqual(recorder.inputRequestCalls, 0, "已授权时不得重复弹申请")
         XCTAssertEqual(recorder.screenRequestCalls, 0)
+    }
+
+    // MARK: - §11.4 席位重探（区分"没授权"与"授权了没重启"）
+
+    func testReprobeScriptCallsDaemonBinaryAndWritesJSON() {
+        let script = PermissionReprobe.script(
+            daemonBinaryPath: "/Users/dev/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned",
+            outputPath: "/tmp/out.json"
+        )
+        XCTAssertTrue(script.contains("#!/bin/zsh"))
+        XCTAssertTrue(script.contains("\"/Users/dev/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned\" --permissions"))
+        XCTAssertTrue(script.contains("> \"/tmp/out.json\""), "带空格路径必须整体加引号")
+    }
+
+    func testReprobeSubmitCommandGoesThroughLaunchd() {
+        let command = PermissionReprobe.submitCommand(scriptPath: "/tmp/gp.zsh", nonce: "42")
+        XCTAssertEqual(command.launchPath, "/usr/bin/launchctl")
+        XCTAssertEqual(command.arguments, ["submit", "-l", "com.glasspane.reprobe.42", "--", "/tmp/gp.zsh"])
+    }
+
+    func testReprobeParseReadsSubjectAndStatuses() {
+        let text = "{\"subject\":{\"binaryPath\":\"/x/GlassPane Daemon.app/Contents/MacOS/glasspaned\",\"bundleIdentifier\":\"com.glasspane.daemon\",\"bundlePath\":\"/x/GlassPane Daemon.app\",\"hasBundleIdentity\":true},\"permissions\":{\"accessibility\":\"granted\",\"inputMonitoring\":\"granted\",\"screenRecording\":\"notDetermined\"}}"
+        let result = PermissionReprobe.parse(text)
+        XCTAssertEqual(result?.subject.tccEntryName, "GlassPane Daemon")
+        XCTAssertEqual(result?.statuses[.accessibility], .granted)
+        XCTAssertNil(PermissionReprobe.parse("not json"))
+        XCTAssertNil(PermissionReprobe.parse("{\"permissions\":{\"accessibility\":\"granted\"}}"), "缺 subject 不猜身份")
+        XCTAssertNil(PermissionReprobe.parse("{\"subject\":{\"binaryPath\":\"/x\"}}"), "无席位数据 → nil")
+    }
+
+    func testKindsNeedingRestartIsolatesGrantedElsewhereButNotYetVisible() {
+        let reprobed = PermissionReprobe.Result(
+            subject: PermissionSubject(binaryPath: "/x/glasspaned"),
+            statuses: [.accessibility: .granted, .inputMonitoring: .granted, .screenRecording: .notDetermined]
+        )
+        let running: [PermissionKind: PermissionStatus] = [
+            .accessibility: .notDetermined,
+            .inputMonitoring: .notDetermined,
+            .screenRecording: .notDetermined,
+            .developerTools: .unverifiable,
+        ]
+        XCTAssertEqual(
+            PermissionReprobe.kindsNeedingRestart(running: running, reprobed: reprobed),
+            [.accessibility, .inputMonitoring]
+        )
+        XCTAssertTrue(PermissionReprobe.kindsNeedingRestart(running: running, reprobed: nil).isEmpty,
+                      "重探失败时不得假称待重启")
+        let allGranted: [PermissionKind: PermissionStatus] = [.accessibility: .granted, .inputMonitoring: .granted]
+        XCTAssertTrue(PermissionReprobe.kindsNeedingRestart(running: allGranted, reprobed: PermissionReprobe.Result(
+            subject: PermissionSubject(binaryPath: "/x/glasspaned"), statuses: allGranted
+        )).isEmpty)
+    }
+
+    func testRestartCommandIsKickstartForLaunchdJob() {
+        let command = PermissionGuide.daemonRestartCommand(uid: 501)
+        XCTAssertEqual(command.launchPath, "/usr/bin/launchctl")
+        XCTAssertEqual(command.arguments, ["kickstart", "-k", "gui/501/com.glasspane.daemon"])
+    }
+
+    func testRestartTextNamesThePendingPermissions() {
+        let text = PermissionGuide.restartNeededText([.accessibility, .screenRecording])
+        XCTAssertTrue(text.contains("辅助功能"))
+        XCTAssertTrue(text.contains("屏幕录制"))
+        XCTAssertTrue(text.contains("重启 daemon"))
+    }
+
+    func testSubjectInstructionDeclaresRestartSemantics() {
+        // 真机实测：已运行的 daemon 读的是它启动时的 TCC 判定，因此三类权限的
+        // 文案都必须声明"需重启生效"，不能承诺"开启后即变绿"。
+        for kind in [PermissionKind.accessibility, .inputMonitoring, .screenRecording] {
+            let text = PermissionGuide.instruction(for: kind, subjectName: "GlassPane Daemon", hasBundleIdentity: true)
+            XCTAssertTrue(text.contains("重启 daemon"), "\(kind) 文案应声明重启才生效")
+        }
+    }
+
+    // MARK: - 输入监控条目登记（申请 ≠ 列表出现条目）
+
+    func testInputMonitoringRequestAlsoRegistersViaTapProbe() {
+        var tapCalls = 0
+        let set = PermissionProbeSet(
+            inputMonitoring: InputMonitoringPermissionProbe(
+                preflight: { false },
+                requestAccess: { },
+                openPane: { }
+            ),
+            inputTapProbe: { tapCalls += 1; return false },
+            subjectProvider: { PermissionSubject(binaryPath: "/x/glasspaned") }
+        )
+        XCTAssertEqual(set.request(.inputMonitoring), .denied)
+        XCTAssertEqual(tapCalls, 1, "必须尝试创建一次 tap，否则列表里不会出现该主体")
+    }
+
+    func testInputMonitoringTapProbeSkippedWhenAlreadyGranted() {
+        var tapCalls = 0
+        let set = PermissionProbeSet(
+            inputMonitoring: InputMonitoringPermissionProbe(preflight: { true }, requestAccess: { }, openPane: { }),
+            inputTapProbe: { tapCalls += 1; return true },
+            subjectProvider: { PermissionSubject(binaryPath: "/x/glasspaned") }
+        )
+        XCTAssertEqual(set.request(.inputMonitoring), .granted)
+        XCTAssertEqual(tapCalls, 0, "已授权时不再建 tap（避免无谓的会话级监听）")
     }
 
     // MARK: - DaemonProbe 解析增量字段（向后兼容）

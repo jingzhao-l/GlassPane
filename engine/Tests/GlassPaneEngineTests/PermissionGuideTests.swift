@@ -32,7 +32,7 @@ final class PermissionGuideTests: XCTestCase {
         // Automation 专属面板：仅适用于 Apple Events，体系里不可枚举 UI 状态。
         XCTAssertEqual(
             PermissionGuide.systemPaneURL(for: .developerTools),
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_DeveloperTools"
         )
     }
 
@@ -56,12 +56,16 @@ final class PermissionGuideTests: XCTestCase {
     }
 
     func testDeveloperToolsInstructionIsHonest() {
-        // 诚实边界：开发者工具无系统总开关，文案必须说明触发动作即自动弹窗，
+        // 诚实边界（2026-09-19 真机核对修正）：开发者工具面板存在且可勾选，但
+        // 状态无公开查询接口，文案必须声明"恒未验证、不伪造已授权"，
         // 不得声称可以打开开关或在 UI 点亮。
         let instruction = PermissionGuide.instruction(for: .developerTools)
-        XCTAssertTrue(instruction.contains("无系统总开关"))
-        XCTAssertTrue(instruction.contains("Apple Events"))
-        XCTAssertTrue(instruction.contains("允许"))
+        XCTAssertTrue(instruction.contains("开发者工具"))
+        XCTAssertTrue(instruction.contains("未验证"), "必须声明状态不可查询，不伪造已授权")
+        // 修正后的真值：这是 LLDB attach 的权限入口（Apple Events 是另一主体），
+        // 文案必须落到"去开发者工具面板勾选 + 本卡不伪造状态"。
+        XCTAssertTrue(instruction.contains("LLDB"))
+        XCTAssertTrue(instruction.contains("打开开关"))
         XCTAssertFalse(instruction.contains("变绿"), "developerTools 永远不可自动点亮，文案不应暗示变色")
     }
 

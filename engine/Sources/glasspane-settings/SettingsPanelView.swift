@@ -58,6 +58,22 @@ struct SettingsPanelView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
+            // 授权已落但运行实例读不到（TCC 判定按进程缓存，§11.4）→ 给出重启入口。
+            // 不自动重启：那会中断正在进行的 act，必须由用户点。
+            if !model.kindsNeedingRestart.isEmpty {
+                HStack(alignment: .top, spacing: 8) {
+                    Text(model.restartHint)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Spacer()
+                    Button("重启 daemon") { model.restartDaemon() }
+                        .controlSize(.small)
+                        .help("launchctl kickstart -k \(SettingsModel.launchdLabel)：会中断正在进行的 act")
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
             ForEach(model.entries) { entry in
                 PermissionCardView(
                     entry: entry,

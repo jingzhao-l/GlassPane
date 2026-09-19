@@ -190,6 +190,17 @@ printf '%s\n' \
   被泵，实测两实例收 TERM 后仍存活），故 `--replace-daemon` 必须有 SIGKILL 兜底；这一条
   属运行时面缺陷（P4 §36 同族），本轮仅在安装器侧兜底，未改 daemon 信号处理。
 
+- **辅助功能条目自动出现（用户实测 19:0x）**：点面板「授权」→ 系统设置「辅助功能」列表
+  里直接出现带图标的「GlassPane Daemon」，开关可用；输入监控则**不会**自动出现条目，
+  用户只能把顶部拖拽栏（此时提供的是 daemon 真身 `.app` 的 fileURL）手动拖进列表才添加
+  → 说明"申请"与"登记条目"是两件事，登记动作是创建 event tap（已按 §11.5 修入
+  `--request-permission input-monitoring`）。
+- **勾选后卡片没变绿的真实原因（关键）**：同一 bundle 身份下，运行中的 daemon 自报
+  `accessibility=notDetermined / inputMonitoring=notDetermined`，而 launchd 一次性任务
+  跑的**新进程**自报三项全 `granted`——TCC 判定按进程缓存，用户勾的确实生效了，只是
+  老进程读不到旧答案。据此新增 §11.4 席位重探 + 「重启 daemon」按钮（不自动重启，
+  因为 kickstart 会中断正在进行的 act）。
+
 **如实边界与待办（P1-S8）**：新 bundle 身份是全新 TCC 客户端，旧的 `glasspaned` 席位不
 继承——需用户在系统设置里为「GlassPane Daemon」重新勾选一次，并目视确认条目名与图标、
 确认重编译后授权仍在（DR 不含 cdhash 的预期收益）。本轮未做该人工勾选，故 §11 的
