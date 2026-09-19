@@ -108,3 +108,21 @@ printf '%s\n' \
 8. **多 daemon 实例并存观察**：历史调试遗留的 debug 版 glasspaned 进程（PID 69768/69479）
    仍在，安装器不主动 pkill（仅 socket 探测，避免误杀用户手工进程），release 新 daemon
    成功绑定 socket —— 与 P4 §34.4 边界声明一致。
+
+### C33/T9 真机冒烟（2026-09-19，P2 v2.0 §16.2 / v2.1 §19.2 / P4 v4.0 §34.5）
+
+| 环节 | 脚本 | 结果 |
+|---|---|---|
+| C33（P2 v2.0 §16.2）输入监控真机冒烟 | `engine/.c33_smoke.py` | C33 SMOKE OK：`glasspaned --check-input-permission`=granted（新增 CLI flag，granted/denied/notDetermined 三态如实输出）→ 自动发现 settings GUI → attach → observe（220 节点）→ act（role-only AXButton，operationId 落盘）→ `last_evidence` 归因面如实呈现（attribution.level=soft、contaminated=false、circuitBreaker.level=1）。按 spec v2.0 §17.2 降级口径：输入流污染判定待 daemon 注入 AttributionGuard 后验证（当前为纯操作权互斥形态），本冒烟覆盖授权环境下完整操作回路与归因面观测 |
+| T9（P2 v2.1 §19.2）渐进退化泄漏注入冒烟 | `engine/.t9_smoke.py` | T9 SMOKE OK：脚本自编译泄漏金丝雀（AppKit，每次点击保留 8MB 内存 + 1 个 fd），daemon 驱动 act 至第 16/24 轮 → evidence 熔断升级 degraded、reason 携带 `degradation|memory+handles; longSession=false; screen-recording-denied` → `diagnose.class=T9` |
+
+真机观察补充：
+
+9. **设置窗口关闭时 observe 只见菜单栏**：glasspane-settings 进程存活但窗口已关时，
+   observe（maxDepth 10）返回 149 节点全为 AXMenuBar/AXMenuItem、无任何 AXButton——
+   C33 脚本因此自动发现全部实例并逐个 attach，取第一个树中有按钮者（裸二进制旧实例
+   被如实跳过、.app 新实例命中；顺带多实例并存场景验证）。窗口未开时脚本以明确
+   失败信息引导先打开设置面板，不伪造目标。
+10. **T9 真机可达性**：8MB+1fd/轮 的注入强度下 16 轮（约 16s 节奏）触发双信号正斜率
+    联合裁决；`screen-recording-denied` 以 R45 预期降级形态共存于 reason，不阻碍
+    T9 判定（内存+句柄两信号即满足联合判定）。

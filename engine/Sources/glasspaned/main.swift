@@ -18,6 +18,7 @@ private struct Options {
     var grantAccessibility = false
     var checkScreenPermission = false
     var guideScreenPermission = false
+    var checkInputPermission = false
     var listProjects = false
     var activeProjectId: String?
     var recipeValidate: String?
@@ -53,6 +54,8 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             options.checkScreenPermission = true
         case "--guide-screen-permission":
             options.guideScreenPermission = true
+        case "--check-input-permission":
+            options.checkInputPermission = true
         case "--list-projects":
             options.listProjects = true
         case "--active-project":
@@ -123,6 +126,7 @@ private func printUsage() {
         glasspaned --grant-accessibility
         glasspaned --check-screen-permission
         glasspaned --guide-screen-permission
+        glasspaned --check-input-permission
         glasspaned --list-projects
         glasspaned --active-project <project-id>
         glasspaned --recipe-validate <path>
@@ -139,6 +143,8 @@ private func printUsage() {
                                  (granted | denied | notDetermined) and exit
         --guide-screen-permission   Prompt for screen recording permission
                                  (no-op when already granted) and exit
+        --check-input-permission    Print input monitoring permission state
+                                 (granted | denied | notDetermined) and exit
         --list-projects        List all registered projects (JSON) and exit
         --active-project <id>  Set the active project ID and exit
         --recipe-validate <path>  Validate a recipe YAML file and exit
@@ -294,6 +300,14 @@ if options.checkScreenPermission || options.guideScreenPermission {
     if options.guideScreenPermission {
         runGuideScreenPermission(probe)
     }
+    exit(0)
+}
+
+if options.checkInputPermission {
+    // P2 §17.2 真机冒烟前置：C33 输入监控 TCC 状态对外如实输出
+    // （granted | denied | notDetermined），供冒烟脚本判断可否观察输入流。
+    let probe = InputMonitoringPermissionProbe()
+    print(probe.state.rawValue)
     exit(0)
 }
 

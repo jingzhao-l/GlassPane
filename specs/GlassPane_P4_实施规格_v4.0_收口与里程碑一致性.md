@@ -1090,3 +1090,14 @@ public struct DecisionLogEntry: Codable, Equatable {
 - 现版本为仓库内安装器（私有仓库、无 npm token、不进 registry）；将来开放分发时 `bin: glasspane-install` 已就位，直接发布即可获得 `npx @glasspane/installer` 形态，用户侧无需改命令。
 - daemon 多实例：安装器不主动 `pkill` 旧 daemon（避免误杀用户手工进程），仅做 socket 占用探测；若历史调试 daemon 占用 socket，安装器会如实报"已监听"跳过启动。
 - 拖拽仅实现"精确导航 + 自动点亮"；TCC 勾选必须人工完成，无任何程序化授权路径（P1 v1.2 §10.1 诚实边界）。
+
+### 34.5 C33/T9 真机冒烟脚本（2026-09-19，兑现 P2 v2.0 §16.2 / v2.1 §19.2"待授权"项）
+
+P2 两批判定逻辑均有合成单测，真机冒烟口径（R45）此前停留在"待人工/待授权"。本项把两条冒烟做成可重复脚本并已真机跑通（详细结果与如实边界留档 `engine/smoke.md`）：
+
+| 脚本 | 覆盖 | 前置 | 状态 |
+|---|---|---|---|
+| `engine/.c33_smoke.py` | 输入监控 TCC 三态如实探测（`glasspaned --check-input-permission`，本批随带新增该 CLI flag）→ 自动发现/指定目标 → attach/observe/act/last_evidence 完整回路与归因面观测；未授权时 SKIP（exit 0）并给授权指引 | 输入监控 TCC（本机 2026-09-19 实测已 granted）+ daemon 运行 | ✓ C33 SMOKE OK（2026-09-19）；污染判定注入验证待 AttributionGuard 注入（§17.2 降级口径），非脚本缺口 |
+| `engine/.t9_smoke.py` | 自编译泄漏金丝雀（8MB 内存 + 1 fd/次点击保留）→ daemon 驱动 ≤24 轮 act → evidence 熔断升级 `.degraded` + `degradation\|` reason → `diagnose.class=T9` | 无 TCC 依赖（proc_pidinfo 采样）；daemon 运行 | ✓ T9 SMOKE OK（2026-09-19，第 16/24 轮触发） |
+
+脚本约定：socket/目标/轮数为位置参数可覆盖；退出语义 0=PASS/SKIP、1=FAIL；目标发现不伪造（全部实例 AX 树无按钮时明确报错引导开窗口）。

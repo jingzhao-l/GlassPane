@@ -452,6 +452,7 @@ public final class AttributionGuard {
 ### 16.2 真机冒烟（可选，需 TCC 输入监控权限）
 
 - CGEvent 全局输入监控适配层（`CGEventInputMonitor`，运行时文件）：真实用户按键/移动鼠标 → 冒烟脚本断言归因被污染。无自动化（与 AX 适配层同口径，R45）。
+- ✓ 2026-09-19 真机冒烟通过（`engine/.c33_smoke.py`，输入监控 TCC=granted）：`glasspaned --check-input-permission` 三态如实探测 → 自动发现 settings GUI → attach/observe/act/last_evidence 完整回路 + 归因面真实落盘，留档 `engine/smoke.md`。如实边界：输入流污染判定的注入验证待 daemon 注入 AttributionGuard 后进行（§17.2 降级口径）。
 
 ### 16.3 验收表
 
@@ -554,6 +555,7 @@ public struct DegradationVerdict: Equatable {
 ### 19.2 真机冒烟（可选）
 
 - daemon 长跑对同一金丝雀 app 持续 act，注入内存泄漏的对照组 → `gp_recent_reports`/`last_evidence` 可见 `.degraded` + `degradation|` reason 的 evidence，`gp_diagnose` 输出类 T9（与 C33 冒烟同口径：真机补充观测，正式 T9 现场验收以实测数据回填）。
+- ✓ 2026-09-19 真机冒烟通过（`engine/.t9_smoke.py`）：脚本自编译泄漏金丝雀（AppKit，8MB 内存 + 1 fd/次点击保留），daemon 驱动 act 至第 16/24 轮 → `last_evidence` 熔断升级 `.degraded`、reason=`degradation|memory+handles; longSession=false; screen-recording-denied` → `diagnose.class=T9`，留档 `engine/smoke.md`。
 
 ### 19.3 验收表
 
