@@ -227,3 +227,41 @@ P1 首批覆盖 SCK 迁移+屏幕录制权限 onboarding（CLI 形态），批�
 2. **DaemonProbe 为只读探测**：hello 会话一次性建立并于 3s 超时后关闭；不占用连接（SocketServer 单客户端语义不变），面板因此不以"常驻连接"呈现 daemon 状态——显示的是检测瞬间的快照，用户可手动刷新。
 3. **SwiftUI 壳不做逻辑单测**：状态判定全在 engine 库探针层，壳仅渲染；因此 CI 无 GUI 会话也能保证逻辑正确（综述 §5.13）。
 4. **面板不持久化配置**：权限状态实时检测，daemon 重启/授权状态变化后面板自动反映（刷新按钮 + 菜单栏项触发重查）；不做"记住上次状态"缓存，避免 TCC 状态漂移误导。
+
+---
+
+## 10. 拖拽引导（v1.2 追加，2026-09-19）
+
+### 10.1 目标与诚实边界
+
+在设置面板打开后直接呈现**拖拽引导**：窗口顶部一张可拖动的 GlassPane app 图标横幅，用户把图标拖到下方对应权限卡，面板即**精确打开该权限的系统设置面板深链**，并给出下一步文案；用户完成开关后，面板以 1s 轮询实测 TCC 状态，**授权即自动点亮**。
+
+诚实边界（不可规避，仅声明与引导）：
+
+- TCC 授权**只能由用户在系统设置里手动完成**，任何程序都不能替你勾选开关。拖拽的语义是"替你精确导航到正确面板"，不是"替你授权"。
+- **开发者工具（Automation）无系统总开关**，由触发动作自动弹窗询问；UI 恒为 unverifiable，不做假点亮。
+- 拖拽源在二进制直跑（非 .app bundle）时只提供纯文本 "GlassPane"；落点同时接受 fileURL（.app bundle，读 Info.plist 可读名）与纯文本两种 provider，名称解析失败时缺省 GlassPane。
+
+### 10.2 落点 → 面板映射（单一真源）
+
+| 权限 | 系统面板深链（x-apple.systempreferences） | 说明 |
+|---|---|---|
+| 辅助功能 | `com.apple.preference.security?Privacy_Accessibility` | 开关 + 白名单 |
+| 输入监控 | `com.apple.preference.security?Privacy_ListenEvent` | 首次打开开关需重启 app 生效（文案声明） |
+| 屏幕录制 | `com.apple.preference.security?Privacy_ScreenCapture` | 三态可查 |
+| 开发者工具 | `com.apple.preference.security?Privacy_Automation` | 仅 Apple Events 的询问面板，不可枚举 |
+
+映射与文案集中在 `engine/Sources/GlassPaneEngine/PermissionStatus.swift → PermissionGuide`（纯函数，无系统 API 依赖，可单测）；`SettingsModel`（SwiftUI 壳）仅做编排（`handleDrop`、`pollPermissions`、`pendingGuide*` 状态）。
+
+### 10.3 验收项
+
+| 编号 | 验收项 | 通过标准 | 状态 |
+|---|---|---|---|
+| P1-G1 | 面板深链映射单测 | `systemPaneURL(for:)` 四类返回既定的深链且互不重复；`instruction(for:droppedName:)` 含被拖入名、developerTools 文案含"无系统总开关"且无"变绿"暗示 | ✓ 已实现并单测通过（2026-09-19，`PermissionGuideTests` 10 用例） |
+| P1-G2 | 拖拽落点 | 顶部横幅可拖（.onDrag 纯文本 GlassPane）；四张权限卡整卡接受 fileURL 与 plainText，落点悬停高亮；落下即打开对应系统面板 + 展示引导横幅 | ✓ 已实现；真机人工冒烟见 smoke.md（自动模拟拖拽不可行，人工目视确认） |
+| P1-G3 | 轮询自动点亮 | 面板 onAppear 起 1s 轮询 `pollPermissions()`，权限全部 granted/unverifiable 自停；中途撤销授权如实回退 | ✓ 已实现（AX trust / CG preflight 均为廉价本地查询，1s 不构成负担）；人工授权冒烟见 smoke.md |
+| P1-G4 | 壳编译与回归 | `swift build` 0 error；engine 单测全绿（新增 10 用例，全量 294 用例 0 失败 1 opt-in 跳过） | ✓ 2026-09-19 |
+
+### 10.4 与安装器联动
+
+拖拽引导是 `npm` 一键安装流程（P4 §34）的最后一步：安装器编译完成后自动启动 daemon 并打开 glasspane-settings GUI，用户直接面对拖拽引导横幅，无需理解路径/命令细节。

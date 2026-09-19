@@ -1054,3 +1054,39 @@ public struct DecisionLogEntry: Codable, Equatable {
 
 - **fix 8e9b776（2026-09-19）**：daemon 注入 `ApprovalGate()` 时 path 默认 nil（纯内存台账），真机冒烟发现 restore 执行成功但 `~/.glasspane/approvals.json` 不落盘、`--approval-verify` 恒 count 0；改为显式 `ApprovalGate(path: ApprovalGate.defaultPath)` 后落盘验证通过（哈希链 verify 全绿）。该修复使 §33.1 B7 的审批落盘断言成立。
 - **test 71eee50（2026-09-19）**：B7/C6/D6 三个真机冒烟客户端脚本入库（可复现证据链）。
+
+---
+
+## 34. 一键安装与拖拽引导（v4.0 追加，2026-09-19）
+
+### 34.1 分发形态决策（承接 §33.2）
+
+§33.2 已定保送混合形态：mcp-shell（TS）发 npm 包、daemon（glasspaned）源码 + 一键编译脚本，规避现阶段开发者账号公证门槛。本追加把"一键编译脚本"落成**仓库内 `@glasspane/installer`（installer/cli.js，纯 Node ESM、零第三方依赖、Node >= 18）**，并将 §33.2 的"打开设置 GUI 授权引导"明确为安装流程的**最后一步**。
+
+### 34.2 安装流程（端到端）
+
+`npm` 之后（当前为仓库内 `node installer/cli.js`，将来发布 `npx @glasspane/installer`）触发的 onboarding 全流程：
+
+1. **横幅 + 参数解析**：`--repo <目录>`（缺省自动向上查根）、`--no-prompt`、`--no-daemon`、`--no-gui`、`--skip-build`、`--help`（`parseArgs` 可单测）。
+2. **环境预检**（真实探测，不伪造）：node >= 18（解析 `node --version`）、npm、swift、git、open（open 不支持 `--version`，退化为 `/usr/bin/open` 可执行性检查）。缺项逐条列出并退出码 1，修好重跑即可。
+3. **定位根目录**：`resolveProjectRoot(cwd)` 自当前目录逐级向上，命中同时含 `engine/Package.swift` 与 `mcp-shell/package.json` 的层即视为根；支持 `GLASSPANE_REPO` 环境变量。
+4. **npm install**（根 workspace：kernel / mcp-shell / installer）→ **编译 kernel** → **编译 mcp-shell**（均 `tsc`）。
+5. **swift build -c release**（engine：glasspaned + glasspane-settings）。
+6. **启动 daemon**：先以 unix socket 连接探测 `~/.glasspane/engine.sock`（800ms 超时），已监听则跳过；否则分离态后台启动，输出与日志追加 `~/.glasspane/installer-daemon.log`，返回 PID。
+7. **打开设置 GUI**（glasspane-settings）→ 用户直接面对 **P1 v1.2 §10 拖拽引导**（拖图标到权限卡 → 精确跳系统面板 → 轮询自动点亮）。
+8. 打印后续使用说明（mcp-shell 调用方式等）。
+
+### 34.3 验收项
+
+| 编号 | 验收项 | 通过标准 | 状态 |
+|---|---|---|---|
+| P4-I1 | 纯逻辑单测 | `parseArgs`（默认/开关/缺参/未知参数）、`resolveProjectRoot`（根扫描/深层寻根/无结构返回 null）、`nodeMajorVersion`、`commandAvailable`、`preflightIssues` 11 用例全绿 | ✓ 2026-09-19（`installer/test/cli.test.mjs`） |
+| P4-I2 | 端到端真机 | `node installer/cli.js --no-prompt` 在仓库根完整走通：npm install → kernel/mcp-shell 编译 → swift release 编译（21.47s）→ daemon 后台启动（PID 82922，`~/.glasspane/engine.sock` 监听、日志确认 "glasspaned 0.1.0 listening"）→ GUI 打开（PID 82923） | ✓ 2026-09-19 |
+| P4-I3 | 全量回归 | engine 294 用例 0 失败 1 opt-in 跳过；kernel 47 / mcp-shell 65 / installer 11 全绿（根 workspace `npm test --workspaces`） | ✓ 2026-09-19 |
+| P4-I4 | 拖拽引导人工冒烟（可选，需 GUI + TCC） | 拖顶部图标至四张卡：分别跳转辅助功能/输入监控/屏幕录制/开发者工具面板；授权后 1s 内卡片变绿；developerTools 卡显示"未验证"不假点亮 | 待 GUI 人工目视（拖拽无法自动化模拟；GUI 已随安装流程打开） |
+
+### 34.4 边界与后续
+
+- 现版本为仓库内安装器（私有仓库、无 npm token、不进 registry）；将来开放分发时 `bin: glasspane-install` 已就位，直接发布即可获得 `npx @glasspane/installer` 形态，用户侧无需改命令。
+- daemon 多实例：安装器不主动 `pkill` 旧 daemon（避免误杀用户手工进程），仅做 socket 占用探测；若历史调试 daemon 占用 socket，安装器会如实报"已监听"跳过启动。
+- 拖拽仅实现"精确导航 + 自动点亮"；TCC 勾选必须人工完成，无任何程序化授权路径（P1 v1.2 §10.1 诚实边界）。

@@ -92,3 +92,19 @@ printf '%s\n' \
 5. **attach by pid 与 bundleId 双路径**真机均可用（C6 补验 pid 路径）。
 6. **全屏截图可被前台第三方 app 抢占**（本机曾误截 Notes/Qoder），GUI 真机验收以
    AX 结构断言为主、截图人工核对为辅。
+
+### 安装器 + 拖拽引导真机记录（2026-09-19，P4 v4.0 §34 / P1 v1.2 §10）
+
+| 环节 | 方式 | 结果 |
+|---|---|---|
+| 一键安装端到端 | `node installer/cli.js --no-prompt`（仓库根） | 走通：npm install（workspaces）→ kernel/mcp-shell tsc → swift release（21.47s）→ daemon 后台启动（PID 82922）→ GUI 打开（PID 82923） |
+| daemon 监听 | `~/.glasspane/engine.sock` + 日志 `installer-daemon.log` | "glasspaned 0.1.0 listening on …/engine.sock"，srw------- 0600 socket 就位 |
+| 拖拽引导 | 人工目视（自动模拟拖拽不可行） | 已随安装流程打开 GUI：顶部拖拽横幅（.onDrag 纯文本 GlassPane）+ 四权限卡落点（fileURL 读 Info.plist 可读名 / plainText）+ 落点悬停高亮 + 引导横幅 + 1s 轮询 auto-light；授权点亮与 developerTools"未验证"不假点亮为 P4-I4 待人工项 |
+
+真机观察补充：
+
+7. **open 命令不支持 `--version`**：`checkEnvironment` 对该命令先试 `--version`、失败退化为
+   `/usr/bin/open` X_OK 探测，避免误报"未找到 open"。
+8. **多 daemon 实例并存观察**：历史调试遗留的 debug 版 glasspaned 进程（PID 69768/69479）
+   仍在，安装器不主动 pkill（仅 socket 探测，避免误杀用户手工进程），release 新 daemon
+   成功绑定 socket —— 与 P4 §34.4 边界声明一致。
