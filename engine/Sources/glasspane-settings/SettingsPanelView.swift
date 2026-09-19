@@ -77,6 +77,11 @@ struct SettingsPanelView: View {
             ForEach(model.entries) { entry in
                 PermissionCardView(
                     entry: entry,
+                    capabilityLine: capabilityLine(for: entry.kind),
+                    onVerifyCapability: entry.kind == .developerTools
+                        ? { Task { await model.verifyDeveloperTools() } }
+                        : nil,
+                    capabilityBusy: model.isProbingDeveloperTools,
                     onGuide: { kind in runGuide(for: kind) },
                     onDropApp: { kind, droppedName in
                         model.handleDrop(kind: kind, droppedName: droppedName)
@@ -84,6 +89,16 @@ struct SettingsPanelView: View {
                 )
             }
         }
+    }
+
+    /// 开发者工具卡下方的机器探测行（其余权限卡无此项）。
+    private func capabilityLine(for kind: PermissionKind) -> String? {
+        guard kind == .developerTools else { return nil }
+        if model.isProbingDeveloperTools {
+            return "调试能力探测中：真跑一次 xcrun lldb（冷启动预算分钟级），完成前状态栏保持\"未验证\"…"
+        }
+        if let error = model.developerToolsProbeError { return error }
+        return model.developerToolsCapability?.summaryText()
     }
 
     /// 授权主体一行话：daemon 自报身份（含是否 bundle 身份）+ 面板主体免责。
@@ -292,6 +307,12 @@ struct GuideBannerView: View {
 /// 状态）。落点悬停时高亮描边。
 struct PermissionCardView: View {
     let entry: SettingsModel.PermissionEntry
+    /// 机器探测行（仅开发者工具卡使用：P6 §7 的受限 lldb 探测结论）。
+    var capabilityLine: String? = nil
+    /// 「验证调试能力」动作；nil 表示该卡不提供机器探测。
+    var onVerifyCapability: (() -> Void)? = nil
+    /// 探测在途：按钮禁点，避免叠加 launchd 任务。
+    var capabilityBusy: Bool = false
     let onGuide: (PermissionKind) -> Void
     let onDropApp: (PermissionKind, String?) -> Void
 
@@ -336,6 +357,12 @@ struct PermissionCardView: View {
         }
     }
 
+    /// 探测按钮标题：未探过 = 验证；已探过 = 重新验证。
+    private var modelButtonTitle: String {
+        // 结构体内不便取模型状态，标题以"是否已有结论行"为准。
+        capabilityLine == nil ? "验证调试能力" : "重新验证"
+    }
+
     private var buttonTitle: String {
         switch entry.status {
         case .granted:
@@ -366,6 +393,13 @@ struct PermissionCardView: View {
                 Text(entry.descriptor.purposeText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let capabilityLine {
+                    // 带时刻的探测结论，与"实时席位"分列，不互相冒充。
+                    Text(capabilityLine)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
                 if let statusNote = entry.statusNote {
                     // 状态来源注记：daemon 未上报席位时如实说明，不冒充已测。
                     Text(statusNote)
@@ -376,12 +410,21 @@ struct PermissionCardView: View {
 
             Spacer()
 
-            Button(buttonTitle) {
-                onGuide(entry.kind)
+            HStack(spacing: 6) {
+                if onVerifyCapability != nil {
+                    Button(modelButtonTitle) {
+                        onVerifyCapability?()
+                    }
+                    .controlSize(.small)
+                    .disabled(capabilityBusy)
+                }
+                Button(buttonTitle) {
+                    onGuide(entry.kind)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(entry.status == .granted)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-            .disabled(entry.status == .granted)
         }
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor))

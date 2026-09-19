@@ -224,6 +224,16 @@ final class SettingsModel: ObservableObject {
     /// daemon 自报的席位（重探/重启后需要重算注记，单独留一份）。
     private var daemonReportedStatuses: [PermissionKind: PermissionStatus] = [:]
 
+    /// 最近一次"调试能力"机器探测结果（P6 §7 的 `--check-developer-tools`，
+    /// 由 daemon 自己的二进制在 launchd 上下文中跑）。显式触发、带时刻，
+    /// 不作为实时席位。
+    @Published var developerToolsCapability: DeveloperToolsCapability.Report?
+    @Published var isProbingDeveloperTools = false
+    @Published var developerToolsProbeError: String?
+    private var capabilityInFlight = false
+    /// 调试能力探测含真实 lldb 冷启动（P6 §0 F5 预算 120s × 两侧），等待窗要宽。
+    static let capabilityProbeTimeout: TimeInterval = 260
+
     /// 用 daemon 自己的二进制重跑一次 `--permissions`（launchd 一次性任务，
     /// 责任上下文是 daemon 本身）：拿到"同一身份的新进程"看到的席位。
     func reprobeSeats(force: Bool = false) async -> PermissionReprobe.Result? {
@@ -239,19 +249,51 @@ final class SettingsModel: ObservableObject {
         let outputPath = directory + "glasspane-reprobe-\(nonce).json"
         let script = PermissionReprobe.script(daemonBinaryPath: binaryPath, outputPath: outputPath)
         let command = PermissionReprobe.submitCommand(scriptPath: scriptPath, nonce: nonce)
-        let result = await withCheckedContinuation { (continuation: CheckedContinuation<PermissionReprobe.Result?, Never>) in
-            DispatchQueue.global(qos: .utility).async {
-                continuation.resume(returning: Self.runReprobe(
-                    script: script, scriptPath: scriptPath,
-                    outputPath: outputPath, command: command
-                ))
-            }
-        }
+        let text = await Self.runOneShot(script: script, scriptPath: scriptPath, outputPath: outputPath, command: command)
+        let result = text.flatMap { PermissionReprobe.parse($0) }
         if let result {
             reprobed = result
             rebuildEntries()
         }
         return result
+    }
+
+    /// 显式验证 daemon 的调试能力（开发者工具席位）。探测本身是受限的真
+    /// `xcrun lldb` 运行（P6 §7），代价高，因此只由用户点击触发，结果带时刻
+    /// 呈现；`hello.permissions.developerTools` 仍是 `unverifiable`（TCC 无公开
+    /// 查询接口这一事实不变）。
+    func verifyDeveloperTools() async {
+        guard let binaryPath = daemon.subject?.binaryPath else {
+            developerToolsProbeError = "未取到 daemon 身份，无法以它自己的上下文探测"
+            return
+        }
+        guard !capabilityInFlight else { return }
+        capabilityInFlight = true
+        isProbingDeveloperTools = true
+        developerToolsProbeError = nil
+        defer { capabilityInFlight = false; isProbingDeveloperTools = false }
+        let nonce = "\(Int(Date().timeIntervalSince1970))"
+        let directory = NSTemporaryDirectory()
+        let scriptPath = directory + "glasspane-devtools-\(nonce).zsh"
+        let outputPath = directory + "glasspane-devtools-\(nonce).json"
+        let script = PermissionReprobe.script(
+            daemonBinaryPath: binaryPath,
+            outputPath: outputPath,
+            arguments: PermissionReprobe.developerToolsArguments
+        )
+        let command = PermissionReprobe.submitCommand(scriptPath: scriptPath, nonce: nonce)
+        let text = await Self.runOneShot(
+            script: script, scriptPath: scriptPath, outputPath: outputPath, command: command,
+            timeoutSeconds: Self.capabilityProbeTimeout
+        )
+        if let text, let report = DeveloperToolsCapability.parse(text, observedAt: Date()) {
+            developerToolsCapability = report
+            setPendingGuide(.developerTools)
+        } else {
+            developerToolsProbeError = text == nil
+                ? "探测未在时限内回产物（真实 lldb 冷启动可能更久）；保持\"未验证\"，不猜结论"
+                : "探测输出不合预期结构；保持\"未验证\"，不猜结论"
+        }
     }
 
     /// 重启 launchd 托管的 daemon 让授权生效。会打断正在进行的 act，
@@ -268,13 +310,15 @@ final class SettingsModel: ObservableObject {
         }
     }
 
-    /// 重探的执行面（后台队列）：落脚本 → submit → 轮询读结果 → 清理。
-    nonisolated private static func runReprobe(
+    /// 一次性 launchd 任务的执行面（后台队列）：落脚本 → submit → 轮询读回
+    /// 原始输出 → 清理任务标签与临时文件。返回文件内容文本（失败 nil）。
+    nonisolated private static func runOneShot(
         script: String,
         scriptPath: String,
         outputPath: String,
-        command: PermissionGuide.PermissionRequestCommand
-    ) -> PermissionReprobe.Result? {
+        command: PermissionGuide.PermissionRequestCommand,
+        timeoutSeconds: TimeInterval = 6
+    ) -> String? {
         let url = URL(fileURLWithPath: scriptPath)
         do {
             try script.write(to: url, atomically: true, encoding: .utf8)
@@ -291,12 +335,12 @@ final class SettingsModel: ObservableObject {
         } catch {
             return nil
         }
-        var result: PermissionReprobe.Result?
-        let deadline = Date().addingTimeInterval(6)
+        var result: String?
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
         while Date() < deadline {
             if let text = try? String(contentsOfFile: outputPath, encoding: .utf8),
-               let parsed = PermissionReprobe.parse(text) {
-                result = parsed
+               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                result = text
                 break
             }
             Thread.sleep(forTimeInterval: 0.25)

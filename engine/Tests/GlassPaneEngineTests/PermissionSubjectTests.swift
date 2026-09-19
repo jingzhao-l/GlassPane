@@ -143,7 +143,8 @@ final class PermissionSubjectTests: XCTestCase {
 
     func testDeveloperToolsInstructionStaysHonest() {
         let text = PermissionGuide.instruction(for: .developerTools, subjectName: "glasspaned", hasBundleIdentity: false)
-        XCTAssertTrue(text.contains("未验证"), "开发者工具仍不得伪造授权态")
+        XCTAssertTrue(text.contains("不伪造"), "开发者工具仍不得伪造授权态")
+        XCTAssertTrue(text.contains("TCC 无公开查询接口"), "口径：状态栏不是实时席位，而是无接口可查")
     }
 
     // MARK: - §11.2 席位快照与线上往返
@@ -351,6 +352,66 @@ final class PermissionSubjectTests: XCTestCase {
         )
         XCTAssertEqual(set.request(.inputMonitoring), .granted)
         XCTAssertEqual(tapCalls, 0, "已授权时不再建 tap（避免无谓的会话级监听）")
+    }
+
+    // MARK: - §11.5 开发者工具席位的机器探测呈现
+
+    private let capabilityJSON = """
+        {"capability":"developer-tools-debug","launch":{"state":"ok"},"attach":{"state":"spawnFailed"},
+         "granted":true,"note":"..."}
+        """
+
+    func testCapabilityReportMapsThreeStates() {
+        let at = Date(timeIntervalSince1970: 1_700_000_000)
+        let report = DeveloperToolsCapability.parse(capabilityJSON, observedAt: at)
+        XCTAssertEqual(report?.status, .granted, "任一侧 ok 即 granted（与 P6 Snapshot.granted 同口径）")
+        XCTAssertEqual(report?.launch, "ok")
+        XCTAssertEqual(report?.attach, "spawnFailed")
+
+        let denied = DeveloperToolsCapability.Report(launch: "denied", attach: "denied", granted: false, observedAt: at)
+        XCTAssertEqual(denied.status, .denied)
+
+        let unknown = DeveloperToolsCapability.Report(launch: "timeout", attach: "spawnFailed", granted: false, observedAt: at)
+        XCTAssertEqual(unknown.status, .unverifiable, "未知失败绝不折算成权限结论（P6 口径）")
+    }
+
+    func testCapabilityParseRejectsForeignShapes() {
+        let at = Date(timeIntervalSince1970: 1_700_000_000)
+        XCTAssertNil(DeveloperToolsCapability.parse("not json", observedAt: at))
+        XCTAssertNil(DeveloperToolsCapability.parse(
+            "{\"permissions\":{\"accessibility\":\"granted\"}}", observedAt: at), "席位 JSON 不得被当能力 JSON")
+        XCTAssertNil(DeveloperToolsCapability.parse(
+            "{\"capability\":\"developer-tools-debug\",\"launch\":{\"state\":\"ok\"}}", observedAt: at),
+            "缺 attach/granted 不猜")
+    }
+
+    func testCapabilitySummaryNeverClaimsRealtime() {
+        let report = DeveloperToolsCapability.Report(
+            launch: "ok", attach: "denied", granted: true, observedAt: Date(timeIntervalSince1970: 1_700_000_000))
+        let text = report.summaryText()
+        XCTAssertTrue(text.contains("非实时读数"), "必须声明这是带时刻的一次验证")
+        XCTAssertTrue(text.contains("launch=ok"))
+        XCTAssertTrue(text.contains("attach=denied"))
+    }
+
+    func testReprobeScriptCarriesDeveloperToolsArguments() {
+        let script = PermissionReprobe.script(
+            daemonBinaryPath: "/x/GlassPane Daemon.app/Contents/MacOS/glasspaned",
+            outputPath: "/tmp/out.json",
+            arguments: PermissionReprobe.developerToolsArguments
+        )
+        XCTAssertTrue(script.contains("--check-developer-tools"), "能力探测走 P6 的 CLI，不在面板进程里跑 lldb")
+        XCTAssertFalse(script.contains("--permissions"), "参数被替换而非追加，避免一次任务跑两件事")
+        // 默认参数仍是席位快照（回归保护）。
+        XCTAssertTrue(PermissionReprobe.script(daemonBinaryPath: "/x/glasspaned", outputPath: "/tmp/o.json")
+            .contains("--permissions"))
+    }
+
+    func testDeveloperToolsInstructionOffersMachineVerification() {
+        let text = PermissionGuide.instruction(
+            for: .developerTools, subjectName: "GlassPane Daemon", hasBundleIdentity: true)
+        XCTAssertTrue(text.contains("验证调试能力"))
+        XCTAssertFalse(text.contains("无系统总开关"), "旧断言已按真机核对废止")
     }
 
     // MARK: - DaemonProbe 解析增量字段（向后兼容）

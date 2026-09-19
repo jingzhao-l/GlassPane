@@ -151,7 +151,7 @@ public enum PermissionGuide {
         case .developerTools:
             // 2026-09-19 真机核对：「隐私与安全性 > 开发者工具」面板确实存在且可勾选，
             // 旧文案"无系统总开关"不成立；诚实边界只保留"状态无公开查询接口"。
-            return "已打开「开发者工具」面板：请为 \(droppedName) 打开开关（LLDB attach 需要它）。该权限无公开查询接口，本卡恒显示\"未验证\"，不伪造已授权。"
+            return "已打开「开发者工具」面板：请为 \(droppedName) 打开开关（LLDB attach 需要它）。TCC 无公开查询接口，状态栏保持\"未验证\"；要确认 daemon 能否真调试，点卡片上的「验证调试能力」跑一次受限探测（结果带时刻，不是实时读数）。"
         }
     }
 
@@ -211,7 +211,7 @@ public enum PermissionGuide {
                 + "本卡片会在检测到差异时给出「重启 daemon」按钮。"
         case .developerTools:
             action = "已打开「开发者工具」面板：请为 \(subjectName) 打开开关（LLDB attach 需要它）。"
-                + "该权限没有可查询的公开接口，本卡恒如实显示\"未验证\"，不伪造已授权/已拒绝。"
+                + "TCC 无公开查询接口，状态栏不伪造已授权/已拒绝；点「验证调试能力」可由 daemon 自身跑一次受限 lldb 探测（P6 §7）给出带时刻的结论。"
         }
         return identityNote.isEmpty ? action : action + " " + identityNote
     }
@@ -279,13 +279,20 @@ public enum PermissionReprobe {
     /// 一次性任务脚本正文：调用 daemon 二进制并把 JSON 写到指定路径。
     /// 路径全部由调用方给（面板把 daemon 自报的 binaryPath 传进来），因此
     /// 重探的主体恒等于被探测的那个 daemon。
-    public static func script(daemonBinaryPath: String, outputPath: String) -> String {
+    public static func script(
+        daemonBinaryPath: String,
+        outputPath: String,
+        arguments: [String] = ["--permissions"]
+    ) -> String {
         [
             "#!/bin/zsh",
-            "\"\(daemonBinaryPath)\" --permissions > \"\(outputPath)\" 2>&1",
+            "\"\(daemonBinaryPath)\" \(arguments.joined(separator: " ")) > \"\(outputPath)\" 2>&1",
             "",
         ].joined(separator: "\n")
     }
+
+    /// 调试能力探测的重探参数（P6 §7 的 `--check-developer-tools`）。
+    public static let developerToolsArguments = ["--check-developer-tools"]
 
     /// 提交重探任务（与申请同一条路径：走 launchd，避免面板成为责任父进程）。
     public static func submitCommand(scriptPath: String, nonce: String) -> PermissionGuide.PermissionRequestCommand {
@@ -343,4 +350,69 @@ extension PermissionGuide {
 
     /// daemon 非 launchd 托管时的手动重启指引。
     public static let manualRestartHint = "该 daemon 不是 launchd 拉起（无 com.glasspane.daemon 作业）：需手动结束再启动，例如 kill <pid> 后 open \"GlassPane Daemon.app\""
+}
+
+// MARK: - 开发者工具席位的机器探测（P1 v1.2 §11.5 × P6 §7）
+
+/// `DebugCapabilityProbe`（P6 §7）的三态结果在**权限面板**里的呈现形态。
+///
+/// 为什么要经 launchd 一次性任务、由 daemon 自己的二进制去跑：调试能力属于
+/// **daemon 进程**的席位，而 TCC 判定会沿责任进程链继承（§11.1 结论 2）——
+/// 面板自己跑 `xcrun lldb` 测的是面板 app 的能力，不是 daemon 的。
+///
+/// 诚实边界：真实 lldb 探测代价高（冷启动预算 120s），所以它**不**进 `hello`
+/// 的实时席位（那一栏仍为 `unverifiable`：TCC 无公开查询接口这一事实没变），
+/// 只作为"最近一次显式验证"的带时间戳陈述呈现。
+public enum DeveloperToolsCapability {
+    public struct Report: Equatable, Sendable {
+        public let launch: String
+        public let attach: String
+        public let granted: Bool
+        /// 观测时刻（由调用方注入，保证纯解析可单测）。
+        public let observedAt: Date
+
+        public init(launch: String, attach: String, granted: Bool, observedAt: Date) {
+            self.launch = launch
+            self.attach = attach
+            self.granted = granted
+            self.observedAt = observedAt
+        }
+
+        /// granted → 已授权；被系统明确拒绝 → 已拒绝；timeout / spawnFailed 等
+        /// 未知失败 → 不可判定（绝不折算成任一权限结论，与 P6 的口径一致）。
+        public var status: PermissionStatus {
+            if granted { return .granted }
+            if launch == "denied" || attach == "denied" { return .denied }
+            return .unverifiable
+        }
+
+        /// 卡片上的一行话：状态 + 两侧探测 + 时刻（不冒充实时读数）。
+        public func summaryText(at now: Date = Date()) -> String {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "HH:mm:ss"
+            let verdict: String
+            switch status {
+            case .granted: verdict = "调试能力可用"
+            case .denied: verdict = "系统已拒绝调试"
+            default: verdict = "不可判定（探测超时或未能起进程，不折算权限）"
+            }
+            return "\(verdict)：launch=\(launch) / attach=\(attach)，验证于 \(formatter.string(from: observedAt))（非实时读数）"
+        }
+    }
+
+    /// 解析 `--check-developer-tools` 的 JSON；结构不符即 nil（调用方保持
+    /// "未验证"，不猜）。
+    public static func parse(_ text: String, observedAt: Date) -> Report? {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              (object["capability"] as? String) == "developer-tools-debug",
+              let launch = (object["launch"] as? [String: Any])?["state"] as? String,
+              let attach = (object["attach"] as? [String: Any])?["state"] as? String,
+              let granted = object["granted"] as? Bool
+        else {
+            return nil
+        }
+        return Report(launch: launch, attach: attach, granted: granted, observedAt: observedAt)
+    }
 }

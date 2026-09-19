@@ -201,6 +201,31 @@ printf '%s\n' \
   老进程读不到旧答案。据此新增 §11.4 席位重探 + 「重启 daemon」按钮（不自动重启，
   因为 kickstart 会中断正在进行的 act）。
 
+### 合并后权限面复验（2026-09-19 22:4x–23:2x，P1 v1.2 §11.6 / §11.7）
+
+- **调试能力机器验证通道跑通**：按 `PermissionReprobe.script(arguments:
+  ["--check-developer-tools"])` 生成一次性 zsh、`launchctl submit` 用 daemon 自己的
+  二进制执行，回物 `{"capability":"developer-tools-debug","launch":{"state":"ok"},
+  "attach":{"state":"spawnFailed"},"granted":true}` → 面板侧映射为"调试能力可用"并附
+  观测时刻；`attach` 侧未知失败保持 `spawnFailed` 不折算权限（与 P6 §7 同口径）。
+- **授权跨重编译/重签不丢（P1-S8 后半实证）**：`make-app.sh` 重新编译并重新签名两个
+  bundle（cdhash 变了）后，launchd 形态 daemon 仍自报 `accessibility / inputMonitoring /
+  screenRecording = granted`——不含 cdhash 的 designated requirement 收益成立。
+- **daemon 不响应 SIGTERM 第三次复现**：`--replace-daemon` 对 PID 40862 发 TERM 无效，
+  1s 后 SIGKILL 才收拢（本轮实现已按此设计兜底）。
+- 设置面板本身已是可识别主体：`attach {pid: glasspane-settings}` 回
+  `appName=GlassPane / bundleId=com.glasspane.settings`（旧裸二进制形态做不到）。
+- **两条本轮做不到的核验（如实挂账）**：
+  1. `screencapture -x -o` → `could not create image from display`：本会话责任上下文没有
+     屏幕录制席位（正是 §11.1 结论 2 的表现），故无法用截图目视面板文案。
+  2. 想用引擎自己的通道读面板文案（`assert_element` 取按钮标题）也失败：对**确实存在**的
+     元素（`observe` 树里可见 `AXImage identifier=hammer`）断言，同样回
+     `GP_E_NO_OPERATION — no prior operation to reuse signal context from`，而 remedy 又写
+     "run act or assert_element first"，形成循环。根因是 `EngineCore.assertElement`
+     以 `latestPack()` 作为前置条件（P0 §3.3 的"信号上下文复用"被套成了硬性门槛），
+     使 assert 无法作为该会话的第一个操作。**记为缺陷，未自行改**（属 P0/P6 语义，
+     改前需确认预期）。
+
 **如实边界与待办（P1-S8）**：新 bundle 身份是全新 TCC 客户端，旧的 `glasspaned` 席位不
 继承——需用户在系统设置里为「GlassPane Daemon」重新勾选一次，并目视确认条目名与图标、
 确认重编译后授权仍在（DR 不含 cdhash 的预期收益）。本轮未做该人工勾选，故 §11 的

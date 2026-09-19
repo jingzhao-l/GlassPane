@@ -355,7 +355,21 @@ identifier "<id>"'` 实测可通过 `--verify --strict`。
 `ListenEventTapProbe` 尝试创建一个 `.listenOnly` 被动 tap（创建成功即销毁，不进 C33
 数据面、不改写事件流），把条目登记出来；已授权时跳过，不做无谓的会话级监听。
 
-### 11.6 验收项
+### 11.6 开发者工具席位：无查询接口 ≠ 不可验证
+
+`hello.permissions.developerTools` 仍为 `unverifiable`（TCC 无公开查询接口这一事实未变），
+但卡片不得因此把"能不能调试"这件事甩回给用户猜。P6 §7 已把该判定机器化
+（`DebugCapabilityProbe` → `glasspaned --check-developer-tools`，真实受限 lldb 探测，
+launch/attach 各出三态）。本规格据此补一条**显式验证**通道，并守住两条边界：
+
+| 边界 | 口径 |
+|---|---|
+| 由谁跑 | **必须**用 daemon 自报的 `binaryPath`、经 `launchctl submit` 一次性任务跑；面板自己 `xcrun lldb` 测的是面板 app 的能力（§11.1 结论 2 的继承陷阱） |
+| 何时跑 | 只在用户点「验证调试能力」时。探测含真实冷启动（P6 F5 预算 120s×两侧），绝不进 1s 轮询、绝不写进实时席位字段 |
+| 怎么显示 | 结论行带观测时刻与"非实时读数"声明；`granted=true` → 调试能力可用；任一侧 `denied` → 系统已拒绝；`timeout`/`spawnFailed` → 不可判定，**不折算成任何权限结论**（与 P6 同口径） |
+| 解析失败 | 保持"未验证"并给错误行，不猜 |
+
+### 11.7 验收项
 
 | 编号 | 验收项 | 通过标准 | 状态 |
 |---|---|---|---|
@@ -370,3 +384,5 @@ identifier "<id>"'` 实测可通过 `--verify --strict`。
 | P1-S9 | 席位重探 | `PermissionReprobe.script/submitCommand/parse/kindsNeedingRestart` 纯函数用例：带空格路径加引号、缺 subject 不猜、重探失败不假称待重启；重启命令为 `kickstart -k` 且仅由用户点击触发 | ✓ `PermissionSubjectTests`（2026-09-19，engine 全量 326 用例 0 失败） |
 | P1-S10 | 输入监控条目登记 | `request(.inputMonitoring)` 在未授权时调用一次 tap 登记探针、已授权时跳过（注入式断言，不建真 tap） | ✓ 同上 |
 | P1-S11 | 开发者工具入口修正 | 深链指向 `Privacy_DeveloperTools`，文案不再声称"无系统总开关"、仍声明"状态未验证不伪造" | ✓ `PermissionGuideTests` 2026-09-19 真机核对修正 |
+| P1-S12 | 调试能力机器验证 | `PermissionReprobe.script(arguments:)` 可切 `--check-developer-tools`；`DeveloperToolsCapability.parse` 只认 `capability="developer-tools-debug"` 结构，缺字段即 nil；状态映射 ok→granted / denied→denied / timeout·spawnFailed→unverifiable；结论文案含"非实时读数" | ✓ `PermissionSubjectTests`（2026-09-19，engine 全量 358 用例 0 失败）；本机真探测回 `launch=ok / attach=spawnFailed / granted=true` |
+| P1-S13 | 面板渲染目视 | 三张必备卡显示"已授权"、开发者工具卡显示带时刻的探测结论行 | ⏳ 仍未闭环：本会话上下文无屏幕录制席位（`screencapture` → could not create image from display），且 `assert_element` 在无先前操作时对确实存在的元素也回 `GP_E_NO_OPERATION`（见 smoke.md 缺陷记录），故需人工目视一次 |

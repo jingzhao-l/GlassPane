@@ -139,6 +139,10 @@ daemon → 探针：`op_begin {}` / `op_end {}` / `checkpoint_export {domains}` 
 ### 7.5 冒烟结果（实施回填，2026-09-19）
 - **通过**：`xcrun lldb --batch -o "command script import bridge/glasspane_bridge.py" -o "gp-queue"` → 四命令注册成功、gp-queue 输出 §6.1 形态 JSON（本机真机）；`test_bridge.py` 17 用例全绿（队列/截断/sentinel/argv/socket 回传）。
 - **挂账（如实，不假过）**：capture/trace 的**执行面**——attach 现成进程被拒（F2）、`--batch run` launch 控制在当前会话上下文 >5min 无输出挂死（F5 复测）；桥的 CLI 路径对此给出**结构化失败**（timeout → status=failed + 授权指引），不再挂死。解锁条件 = 用户侧环境排查：系统设置 > 隐私与安全性 > 开发者工具授予调用方，或已授权的 Terminal 会话内复跑（`python3 bridge/glasspane_bridge.py capture --exe <crashcanary>` 一条命令即可验证）。
+- **夹具债（登记，未处理）**：`bridge/crashcanary` 是已入库的 Mach-O 二进制（54KB，arm64），
+  但其源不在仓库内——调试信息里的路径是临时目录的 `crashme/crashme.swift`。本次合并核对时
+  评估过"把二进制移出 git"，结论是**不动**：它没有仓库内可复现的生成方式，移除会直接废掉上面
+  那条唯一的手工验证命令。应做的是把夹具源纳入仓库（小改动，与 §7 授权指引同批处理为宜）。
 
 ## §8 P-1/C2 spike 落地（六项假设 + R29 全量首次实测）
 
