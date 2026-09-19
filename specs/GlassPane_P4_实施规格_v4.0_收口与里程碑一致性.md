@@ -1094,7 +1094,7 @@ public struct DecisionLogEntry: Codable, Equatable {
 | P4-I1 | 纯逻辑单测 | `parseArgs`（默认/开关/缺参/未知参数）、`resolveProjectRoot`（根扫描/深层寻根/无结构返回 null）、`nodeMajorVersion`、`commandAvailable`、`preflightIssues` 11 用例全绿 | ✓ 2026-09-19（`installer/test/cli.test.mjs`） |
 | P4-I2 | 端到端真机 | `node installer/cli.js --no-prompt` 在仓库根完整走通：npm install → kernel/mcp-shell 编译 → swift release 编译（21.47s）→ daemon 后台启动（PID 82922，`~/.glasspane/engine.sock` 监听、日志确认 "glasspaned 0.1.0 listening"）→ GUI 打开（PID 82923） | ✓ 2026-09-19 |
 | P4-I3 | 全量回归 | engine 294 用例 0 失败 1 opt-in 跳过；kernel 47 / mcp-shell 65 / installer 11 全绿（根 workspace `npm test --workspaces`） | ✓ 2026-09-19 |
-| P4-I4 | 拖拽引导人工冒烟（可选，需 GUI + TCC） | 拖顶部图标至四张卡：分别跳转辅助功能/输入监控/屏幕录制/开发者工具面板；授权后 1s 内卡片变绿；developerTools 卡显示"未验证"不假点亮 | 待 GUI 人工目视（拖拽无法自动化模拟；GUI 已随安装流程打开） |
+| P4-I4 | 拖拽引导冒烟（原"人工目视"） | 拖顶部图标至四张卡：分别跳转辅助功能/输入监控/屏幕录制/开发者工具面板；授权后 1s 内卡片变绿；developerTools 卡显示"未验证"不假点亮 | **自动化销账（P6 §11 审计项⑤，2026-09-20）**：`engine/.p4i4_smoke.py` 机器化断言逐卡引导路由（kind 专属文案+系统设置前台）与 dev 卡恒未验证，真机 PASS。拖拽手势本体经三种拟真形态 6+ 次实测**不可合成启动** `.onDrag` 会话（真机发现 F10，点击可合成而拖拽会话不可），且落点无独立授权语义（handleDrop 恒委托 guide()）——"无法自动化模拟"断言精确化为手势维度，人工目视项撤除 |
 
 ### 34.4 边界与后续
 
@@ -1172,4 +1172,4 @@ install.sh 提供 `GLASSPANE_INSTALL_DRY_RUN=1`：只报告分支决策（定位
 
 ### 36.3 遗留（本批新发现，如实挂账）
 
-- **launchd 自启形态的辅助功能授权未闭环**：同路径二进制终端子进程可 attach、launchd 拉起报 `GP_E_AX_UNAVAILABLE`（TCC 随责任进程归属）。用户动作面：把 glasspaned 加入系统设置>辅助功能（设置面板拖拽引导即为此设计）后恢复 bootstrap；仓库动作面无欠账——注入逻辑与探测均已完成，属 §32-3"无头/权限运行边界"同族的真机授权事项。
+- **launchd 自启形态的辅助功能授权未闭环**：同路径二进制终端子进程可 attach、launchd 拉起报 `GP_E_AX_UNAVAILABLE`（TCC 随责任进程归属）。用户动作面收敛为**仅勾选**：授权后（或作业在等待期被 bootout 后）恢复不再手敲 launchctl——`node installer/cli.js --restore-launchd` 一条命令完成检测→bootstrap→hello 自报校验，已加载未授权时自动 kickstart 换新判定进程复验（P6 §11 审计项④）；仓库动作面无欠账——注入逻辑与探测均已完成，属 §32-3"无头/权限运行边界"同族的真机授权事项。

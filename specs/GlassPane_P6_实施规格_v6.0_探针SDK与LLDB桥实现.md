@@ -183,3 +183,24 @@ daemon → 探针：`op_begin {}` / `op_end {}` / `checkpoint_export {domains}` 
 | P6-E | 真机冒烟（合成对照 app） | probe-demo：act→last_evidence 带 handlerProbe/stateDiff 真值 + attribution=strong；五类金丝雀（T3/T4/T5/T7/T8）各检出一次；checkpoint export→snapshot→rollback_full 执行面回传 rollbackExecuted=true + consistent=true | ✓ 2026-09-19（`engine/.p6_smoke.py` P6 SMOKE OK：strong/真值信号/T3..T8 全中、lateCount=1 落盘、档 1 执行面 consistent=true；NO_ANOMALY 金丝雀在屏幕录制未授予环境按 §3.2 落 INCONCLUSIVE，脚本如实分支） |
 | P6-F | spike 全表 | §8 H1–H7 实数据入 spike/results.md，含无法达成项的如实边界（如 H4 合成替代标注） | ✓ 2026-09-19（FineTune 真 app 注入编译+探针注册通；H3 严 17.4%✓；H7 超阈→C1 opt-in 落地；H4 降基线通道；H1 真实比率挂 Phase B 复测配方已给；schema 冻结评估=仅剩该项，维持 draft 不冻结） |
 | P6-G | 全量回归 | engine 既有 294+新增 0 失败；kernel/mcp-shell/installer 全绿；C33/T9 冒烟脚本对 §36 守护形态零回归 | ✓ 2026-09-19（worktree 隔离基线 **321 用例 0 失败** 1 opt-in 跳过 =294 基线+27 新增；kernel 51/mcp-shell 67/bridge 17/probe 10 全绿；.p6_smoke.py 对 worktree 二进制复跑 P6 SMOKE OK 零回归；installer 面由并行会话持有、不属本批变更面） |
+
+## §11 人工介入最小化落实（2026-09-19/20 审计批次，branch fix/human-intervention-audit）
+
+审计口径（用户产品原则）：作为给 AI 的 MCP 工具，用户剩余动作必须收敛到**物理性
+不可约**操作（TCC 勾选/付款/发布授权）；检测/验证/恢复一律机器化，remedy 必须
+agent 可执行、不得许诺不存在的能力。八项发现的逐项落点：
+
+| # | 发现 | 落实 | 验证 |
+|---|---|---|---|
+| ① | `GP_E_BUSY_INPUT` remedy 幻影承诺 "degrade mode" | act 全链新增真参数 `degrade: Bool`：AttributionGuard `acquireOperationRight(degradeOnBusy:)`（忙碌窗放行 + holdStart 回拨 idle 窗，把忙碌事件如实记入污染裁决）→ EngineCore.act(degrade:) → Dispatcher optBool → mcp-shell gp_act inputSchema+zod+工具描述；remedy 改为指向该参数（"never silently clean" 语义不变：degrade 只改变受理，不改变判定） | HumanInterventionAuditTests 7 用例（守护级/act 级 weak+contaminated/缺省仍拒/Dispatcher 路由与非布尔拒绝）+ mcp-shell 3 用例（schema 暴露、转发、zod 拒非布尔） |
+| ② | `--grant-accessibility` CLI 文案导向"给终端勾选"（借来席位=假绿灯，§11.4 冲突） | 文案改列 daemon 二进制真实路径 + 明示终端席位借用陷阱 + 指路 `--request-permission accessibility`（daemon 自身身份发起） | 文案审读（CLI 输出面，无逻辑变更） |
+| ③ | developerTools 卡恒"未验证"探针未接线 | 并行会话 801aaac 已闭环（按钮触发 DebugCapabilityProbe 受限真探测，带时刻结论不冒充实时席位）——本批复验认可，不重复实现 | 其实现自带单测 |
+| ④ | launchd 作业被 bootout 后恢复靠人手敲 `launchctl bootstrap` | installer `--restore-launchd`：plist 缺失→指回安装；未加载→bootstrap；已加载且自报 granted→如实零动作；已加载但非 granted→`kickstart -k` 换新判定进程再验（勾框后重跑一条命令即闭环）。hello 自报口径判定，拿不到一律不冒充。mcp-shell `GP_E_ENGINE_UNREACHABLE` remedy 同步换成该可执行命令（仓库内构建时给绝对路径） | installer 8 用例（全分支注入假件）+ mcp-shell remedy 用例；退出码即判定供 agent 消费 |
+| ⑤ | P4-I4"拖拽无法自动模拟→待人工目视" | 拆开验证：**真机发现 F10**——CGEvent 合成点击能驱动 macOS UI（标题栏双击 zoom 实测生效），但三种拟真形态（session/hid tap、combinedSessionState+按钮 flags+微抖起步、慢拖 1.2s）共 6+ 次均无法启动 SwiftUI `.onDrag` 拖拽会话：拖拽手势是系统级不可合成维度。而该手势**无独立授权语义**（handleDrop 恒委托 guide(kind)，droppedName 仅进回落文案），故 `engine/.p4i4_smoke.py` 以零坐标 AXPress 路径机器化全部可断言面：逐卡引导按钮→kind 专属文案+系统设置前台、dev 卡恒未验证；合成拖拽降级为如实报告维度 | 真机 PASS：四卡断言全过（三卡 granted steady-state 如实 + developerTools press→路由→front=systempreferences→badge=未验证）；F10 记录 |
+| ⑥ | SIGTERM 哑火（kill -9 才肯退） | 上一轮"挪队列"修复被真机证伪：DispatchSource 信号源在主线程阻塞 accept() 期间于**任意队列**都不派发（最小复现 2/2 挂死；global 队列同样哑火，main-queue+runloop 形态才活）。改 POSIX 正解：入口早期 `pthread_sigmask(SIG_BLOCK,{INT,TERM})`（先于一切线程创建，全线程继承遮罩）+ 专用 `sigwait` 线程消费 pending → cleanup()+exit(0) 以普通上下文执行；disposition 保持默认，绝不 SIG_IGN（否则不进 pending 队列） | 真机 e2e：SIGTERM 0.2s 内干净退出+socket unlink；SIGINT 同（需重置继承 IGN 的 shell 产物）；遮罩后/waiter 前到达的 TERM 以 pending 入账不丢；--check-*/--grant-* 即时路径不受遮罩影响 Ctrl-C 语义不变 |
+| ⑦ | H1 复测配方是给人看的说明文 | `spike/run_h1_retest.py` 四步全机器化：fetch（codeload 缓存）→ SPM 壳+等价插桩编辑（幂等，锚点缺失即 SKIP 不猜）→ debug 构建（release WMO 本机 swift 前端 signal 11，已知绕行）→ .app 打包（LSUIElement+bundleId+Sparkle 内嵌+rpath+ad-hoc 签名，消除裸可执行启动期 AX 超时根因）→ 隔离 daemon 驱动 ≥20 act + popover 4 act → `spike/h1-retest-result.json` + results.md 表格行 | 真机 PASS：**24/24 strong=100%**（threshold 80%），stateSource=z2-mirror，handler-lane hitCount=0 如实记录（设置/弹层滑杆经 AX 值写入 Z2 通道，未走 setVolume 双写——不掩饰） |
+| ⑧ | main 上 §7.5 旧挂账文 | 随 d5738eb 合并自动消解（修正文已在分支），复验无残留 | ✓ |
+
+**§10 P6-F/P6-G 行的增量影响**：H1"真实比率挂 Phase B"由⑦闭环（见
+`spike/h1-retest-result.json`）；schema 冻结前置的"仅剩 H1 真实比率"自此数据侧
+齐备，冻结判定的剩余考量仅 hitCount-lane 的真实覆盖（⑦如实记录）。

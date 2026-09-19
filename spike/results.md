@@ -25,3 +25,20 @@ KeyboardShortcuts 2.4.0 / Sparkle 2.8.1 / FluidMenuBarExtra 1.5.1）。
 - **schema 冻结判定**：draft→v0.1 冻结的**全部前置中仅剩 H1/H5 真实比率一项未闭环**
   （机制与合成分全绿）→ 维持 "glasspane.evidence/0.1-draft" 不冻结，冻结列为
   Phase B 入口第 0 步（Phase B 执行仍需用户授权发布，本批不代决）。
+
+## H1 复测（2026-09-20，P6 §11 审计项⑦：配方→脚本 `run_h1_retest.py`）
+
+复测配方四步全部机器化后实采（脚本自带隔离 daemon 与 .app 打包，一条命令复跑）：
+
+| 指标 | 通过线 | 实测 | 判定 |
+|---|---|---|---|
+| 真实 app 强归因率（FineTune main @ codeload，Z1 手动标注 + registerMirrorRoot，.app/LSUIElement 形态） | ≥80%；真实 ≥ 合成−10pp | **24/24 act strong = 100%**（settings-audio-slider 20 + popover 4；合成对照 ok-press 1/1=100%） | **✓ 达标**（明细 `spike/h1-retest-result.json`） |
+
+通道构成如实记录：全部 strong 由 **z2-mirror**（mirror-root diff）驱动；`hitCount=0`
+——设置/弹层滑杆经 AX 值写入，不走已标注的 `VolumeState.setVolume` 处理器 lane
+（Z1 handler 双写面由合成金丝雀 lane 单独证明，两通道不互相冒充）。H1 曾记录的
+"裸可执行启动期 AX ping 超时 + MenuBarExtra 无窗口"两障碍被 .app 打包形态消除
+（本脚本第 bundle 步骤），无需换目标。
+
+**schema 冻结前置更新**：H1 真实比率已闭环；剩余仅 H5 真实分布（Lazy 容器样本）
+与 hitCount-lane 的真实覆盖，冻结判定维持 §"schema 冻结"结论（draft→Phase B 第 0 步）。

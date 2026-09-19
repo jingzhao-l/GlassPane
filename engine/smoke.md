@@ -259,3 +259,36 @@ GLASSPANE_PROBE_SOCK 指向隔离探针口）。结果：**P6 SMOKE OK**——
     时刻而非固定毫秒数——canary 首版 0.4s 落进窗内被真判成 T5，改 1.2s 后稳定。
 16. **屏幕录制对 /tmp 隔离 daemon 子进程未授予**：pixelDiff 缺席时 NO_ANOMALY
     金丝雀按 P6 §3.2 落 INCONCLUSIVE（T6 不可排除），脚本如实分支不假过。
+
+---
+
+## 人工介入最小化批次冒烟（2026-09-19/20，P6 spec §11）
+
+脚本与操作面：
+
+17. **`.p4i4_smoke.py`（P4-I4 自动化销账）**：零坐标 AXPress 逐卡引导按钮→kind 专属
+    文案→系统设置前台；developerTools 卡恒「未验证」硬断言。真机 PASS（三卡 granted
+    steady-state + dev 卡全链路过）。合成拖拽为如实报告维度。
+18. **`installer --restore-launchd`**：bootout→bootstrap→hello 自报校验→（已加载未
+    授权时）kickstart 换进程复验；退出码即判定，`GP_E_ENGINE_UNREACHABLE` remedy 已
+    指向该命令。分支单测 8 例（注入假件，不碰真 launchctl）。
+19. **SIGTERM/SIGINT e2e（§11 ⑥ 的验证面，无法单测所以入冒烟）**：
+    `glasspaned --socket-path <tmp> &` → `kill -TERM` → 0.2s 内退出且 socket unlink；
+    SIGINT 同（注意非交互 shell 会给后台任务继承 SIG_IGN，测前 `trap - INT` 重置）；
+    遮罩后、waiter 线程启动前到达的信号以 pending 入账不丢。
+20. **`spike/run_h1_retest.py`**：H1 真实 app 强归因率复测一条命令（fetch→壳→构建→
+    .app→隔离 daemon→≥20 act→JSON）；真机 24/24 strong=100%，stateSource=z2-mirror，
+    hitCount=0 如实记录。
+
+真机观察：
+
+17. **F10（P6 §11 ⑤）合成事件可点击、不可起拖**：CGEvent 左键 down/dragged/up 序列
+    三种拟真形态 6+ 次，SwiftUI `.onDrag` 拖拽会话均不启动；而标题栏双击 zoom 生效
+    证明点击通路真实。另实测：macOS 14 起 `activateIgnoringOtherApps` 无效、裸二进制
+    `NSRunningApplication.activate()` 返回 ok 但 NSWorkspace/lsappinfo 前台读数不变
+    （AXFrontmost 却为 true）——坐标级冒烟必须以 CGWindowList 逐点遮挡反查为守卫，
+    不能信前台断言。
+18. **swift 6.2 前端对 FineTune 全树 release WMO 编译 signal 11**（debug 批模式正常）：
+    H1 复测壳固定 `-c debug`；与本仓无关，上游复现者注意。
+19. **`open` 不传自定义 env**（LS 语义）：探针 sock 环境变量注入必须直接拉起 bundle 内
+    可执行 + `open -a` 仅做激活；两次启动去重依赖 LS 对同 bundle 路径的行为。
