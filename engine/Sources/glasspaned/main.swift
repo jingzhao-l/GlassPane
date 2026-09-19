@@ -30,6 +30,7 @@ private struct Options {
     var pruneDryRun = false
     var evidenceStats = false
     var c33Enabled = true
+    var checkDeveloperTools = false
     var probeSocketPath: String?
     var probeEnabled = true
 }
@@ -59,6 +60,8 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             options.guideScreenPermission = true
         case "--check-input-permission":
             options.checkInputPermission = true
+        case "--check-developer-tools":
+            options.checkDeveloperTools = true
         case "--no-c33":
             options.c33Enabled = false
         case "--no-probe":
@@ -158,6 +161,10 @@ private func printUsage() {
                                  (no-op when already granted) and exit
         --check-input-permission    Print input monitoring permission state
                                  (granted | denied | notDetermined) and exit
+        --check-developer-tools     Probe debugger capability (launch/attach
+                                 three-state JSON, P6 §7); exit 0 = granted.
+                                 The only human step is the System Settings
+                                 checkbox; verification is machine-owned.
         --no-c33             Disable C33 input monitoring (degrade to pure
                                  operation-right mutex; act never blocks on user input)
         --no-probe           Disable the P6 probe socket (Z5 black-box only;
@@ -321,6 +328,17 @@ if options.checkScreenPermission || options.guideScreenPermission {
     exit(0)
 }
 
+if options.checkDeveloperTools {
+    // P6 §7 修订：开发者工具/调试能力的三态**受限真探测**——用户唯一的动作是
+    // 勾选系统面板，检测/复验/机器消费全部由此命令承担。
+    let probe = DebugCapabilityProbe()
+    let payload = probe.jsonPayload()
+    if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) {
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data("\n".utf8))
+    }
+    exit((payload["granted"] as? Bool) == true ? 0 : 1)
+}
 if options.checkInputPermission {
     // P2 §17.2 真机冒烟前置：C33 输入监控 TCC 状态对外如实输出
     // （granted | denied | notDetermined），供冒烟脚本判断可否观察输入流。
