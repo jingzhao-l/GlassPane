@@ -1041,11 +1041,13 @@ public struct DecisionLogEntry: Codable, Equatable {
 - **glasspaned daemon（Swift）**：源码编译分发（安装脚本一键 clone + swift build + 权限引导）为现阶段默认；本地编译产物免签名/公证即可运行。二进制分发（免装 Xcode CLT）需 Developer ID + 公证（付费账号）+ 双架构维护，待用户规模或商业分发需求出现后再启用，评估权保留。
 - 结论：**源码编译 + npm 包混合形态**，公证合规留给发布批次（与 §32-2"发布流程事项"判定一致）。
 
+**mcp-shell npm 发布核对（2026-09-19 更新）**：仓库侧发布形态已就位——`files: ["dist"]` 白名单、`bin: glasspane-mcp`（src 顶部 shebang，tsc 保留；bin 值不带 `./` 前缀以过 npm normalize）、`npm publish --dry-run` 零警告、tarball 仅含 dist + package.json（41 文件 / 30.8 kB）。但发布动作经核对存在两个仓库外前置，**用户决定暂缓发布**：① npm registry 上 `@glasspane` 与 `@iterate` org 均不存在（API 实测），org 创建仅网页端可行；② 运行时依赖 `@iterate/kernel` 为 `file:../kernel` 且 private——registry 消费者无法解析，发布前需先定 kernel 分发形态（单独发布 vs bundle 进壳，后者与综述 5.8"MCP 壳零依赖"决策一致）。解除前维持仓库内 workspace 形态。
+
 ### 33.3 §32-3/4/5/6 其余遗留核对（2026-09-19）
 
 | §32 条目 | 状态 | 说明 |
 |---|---|---|
-| 3（无头环境运行边界 R23/R45） | 维持待办 | AX/CGEvent/LLDB attach 在无 GUI runner 下不可用，真机面已完成主体（B7/C6/D6），剩余 C33 输入监控/ T9 泄漏注入类真机冒烟须在真实输入监控 TCC 授予后补做，不以模拟数据充验收 |
+| 3（无头环境运行边界 R23/R45） | ✓ 真机面收口（2026-09-19） | AX/CGEvent/LLDB attach 在无 GUI runner 下不可用，真机面已完成主体（B7/C6/D6）；C33 输入监控与 T9 泄漏注入两条真机冒烟已于输入监控 TCC=granted 环境跑通（§34.5，`engine/.c33_smoke.py`/`engine/.t9_smoke.py`，留档 `engine/smoke.md`），无模拟数据充验收 |
 | 4（kernel Phase B 迁移 iterate monorepo） | 未触发 | Phase B 两壳消费前提未到，kernel 保持暂宿本仓库；迁移时按"保留 git 历史"执行（R43），触发后另起规格 |
 | 5（R44 官方 TS SDK 评估） | 评估权保留 | 工具面 13 已达，是否切换属独立决策批次，随 v3.1 记录在案 |
 | 6（综述不改写） | 维持禁令 | 本落实记录权威载体即本节（v4.0 §33）；综述正文保持历史快照原状 |
