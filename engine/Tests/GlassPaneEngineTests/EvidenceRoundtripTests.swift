@@ -8,6 +8,7 @@ final class EvidenceRoundtripTests: XCTestCase {
     private let evidenceFixtureNames = [
         "evidence-pack.ok-01.json",
         "evidence-pack.ok-02.json",
+        "evidence-pack.ok-03.json", // P6 §3.1: probe-carrying pack (null→object)
     ]
 
     func testFixturesRoundtripThroughCanonicalJSON() throws {

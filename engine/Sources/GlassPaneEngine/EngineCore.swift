@@ -57,10 +57,16 @@ public final class EngineCore {
     /// inject a probe (this repo ships none), so it yields nil; tests inject
     /// scripted payloads to exercise the rollback_full pipeline.
     private let snapshotProbe: (() -> SnapshotProbeInfo?)?
+    /// Probe inbox (P6 spec v6.0 §5.2). Nil or connection-less means the
+    /// Z5-only black-box form: handlerProbe/stateDiff stay null and act()
+    /// behaves exactly like v5.0 — the honest absence is preserved verbatim.
+    private let probeInbox: ProbeInbox?
     /// Busy-input retry budget before surfacing GP_E_BUSY_INPUT.
     public static let idleRetryCount = 5
     /// Interval between busy-input retries.
     public static let idleRetryInterval: Double = 0.05
+    /// op_end → window-close drain slack for probe-delivered state diffs.
+    public static let probeEndDrainSeconds: TimeInterval = 0.06
 
     public init(
         channel: RuntimeChannel,
@@ -72,7 +78,8 @@ public final class EngineCore {
         degradationTracker: DegradationTracker? = nil,
         metricsProbe: ProcessMetricsProviding? = nil,
         approvalGate: ApprovalGate? = nil,
-        snapshotProbe: (() -> SnapshotProbeInfo?)? = nil
+        snapshotProbe: (() -> SnapshotProbeInfo?)? = nil,
+        probeInbox: ProbeInbox? = nil
     ) {
         self.channel = channel
         self.clock = clock
@@ -84,6 +91,7 @@ public final class EngineCore {
         self.metricsProbe = metricsProbe
         self.approvalGate = approvalGate
         self.snapshotProbe = snapshotProbe
+        self.probeInbox = probeInbox
     }
 
     // MARK: - ISO-8601 timestamp
@@ -108,7 +116,7 @@ public final class EngineCore {
             "version": version,
             "protocolVersion": protocolVersion,
             "pid": Int(ProcessInfo.processInfo.processIdentifier),
-            "capabilities": ["act", "observe", "assert_element", "diagnose", "snapshot", "restore"]
+            "capabilities": ["act", "observe", "assert_element", "diagnose", "snapshot", "restore", "probe"]
         ]
     }
 
@@ -197,6 +205,9 @@ public final class EngineCore {
         }
 
         let started = clock()
+        // P6 §2.3: the operationId is generated up-front so probe events can
+        // be windowed against it. Still a fresh ULID per act, same contract.
+        let operationId = OperationID.generateLive()
 
         let aliveBefore = channel.isProcessAlive()
 
@@ -224,6 +235,19 @@ public final class EngineCore {
             do {
                 captureBefore = try channel.captureWindow()
             } catch { captureBefore = nil }
+        }
+
+        // P6 §5.2: open the probe attribution window right before the action
+        // is performed. A window only exists for a live probe connection to
+        // the attached pid; otherwise the Z5-only form proceeds untouched.
+        let probePid: Int32? = {
+            guard let inbox = probeInbox, let app = attachedApp,
+                  inbox.connection(for: app.pid) != nil else { return nil }
+            return app.pid
+        }()
+        if let inbox = probeInbox, let pid = probePid {
+            inbox.beginWindow(pid: pid, opId: operationId)
+            inbox.sendCommand("op_begin", to: pid)
         }
 
         // Perform the action.
@@ -254,6 +278,19 @@ public final class EngineCore {
         var captureAfter: WindowCapture?
         if captureBefore != nil, aliveBefore {
             captureAfter = try? channel.captureWindow()
+        }
+
+        // P6 §2.3: close the probe window after the post-captures (t1) and
+        // pull the [t0, t1] handler/state signals out of the inbox.
+        var probeSignals: (handlerProbe: HandlerProbeSignal?, stateDiff: StateDiffSignal?)?
+        if let inbox = probeInbox, let pid = probePid {
+            inbox.sendCommand("op_end", to: pid)
+            // Drain slack: the probe emits its op_end-baseline mirror diff
+            // synchronously on command handling; 60 ms covers loopback
+            // delivery before the window closes (P6 §2.3, probe-connected
+            // acts only — Z5-only acts pay nothing).
+            Thread.sleep(forTimeInterval: EngineCore.probeEndDrainSeconds)
+            probeSignals = inbox.endWindow(pid: pid, opId: operationId)
         }
 
         let latencyMs = clock().timeIntervalSince(started) * 1000
@@ -353,7 +390,6 @@ public final class EngineCore {
             }
         }
 
-        let operationId = OperationID.generateLive()
         // C33 verdict: scan the input stream for the whole operation window,
         // then release the operation right. Contamination downgrades the
         // attribution to weak + contaminated=true (spec v2.0 §15.4).
@@ -362,8 +398,14 @@ public final class EngineCore {
             contaminationVerdict = attributionGuard.releaseOperationRight()
         }
         let contaminated = contaminationVerdict?.contaminated ?? false
+        // P6 §2.3: an in-window probe hit upgrades soft → strong (first hard
+        // attribution surface); contamination still dominates → weak.
+        var attributionLevel: AttributionLevel = contaminated ? .weak : .soft
+        if !contaminated, (probeSignals?.handlerProbe?.hitCount ?? 0) > 0 {
+            attributionLevel = .strong
+        }
         let attribution = Attribution(
-            level: contaminated ? .weak : .soft,
+            level: attributionLevel,
             contaminated: contaminated
         )
         let pack = EvidencePack(
@@ -374,6 +416,8 @@ public final class EngineCore {
             signals: Signals(
                 act: ActSignal(selector: selector, action: action, actConfirmed: actConfirmed),
                 axEvent: axEvent,
+                handlerProbe: probeSignals?.handlerProbe,
+                stateDiff: probeSignals?.stateDiff,
                 pixelDiff: pixelDiff,
                 responsiveness: responsiveness,
                 crash: CrashSignal(processAliveBefore: aliveBefore, processAliveAfter: channel.isProcessAlive())
@@ -473,7 +517,7 @@ public final class EngineCore {
         guard attachedApp != nil else {
             throw GPError(code: .notAttached, message: "no app attached")
         }
-        let target: EvidencePack
+        var target: EvidencePack
         if let operationId {
             guard let found = pack(withId: operationId) else {
                 throw GPError(code: .noOperation, message: "unknown operationId \(operationId)")
@@ -484,6 +528,13 @@ public final class EngineCore {
                 throw GPError(code: .noOperation, message: "no operation to diagnose")
             }
             target = latest
+        }
+        // P6 §3.1: late probe arrivals (async handlers finishing after the
+        // act window) only become visible by diagnose time — refresh the
+        // stored signal before classifying so T8 is decidable, then persist.
+        if let inbox = probeInbox, let refreshed = inbox.refreshedHandlerProbe(for: target) {
+            target.signals.handlerProbe = refreshed
+            replace(target)
         }
         let (diagnosisClass, report) = Classifier.classify(target)
         var updated = target
@@ -498,6 +549,18 @@ public final class EngineCore {
                 "next": report.next
             ]
         ]
+    }
+
+    /// P6 §5.4: probe connectivity snapshot. Agents use this to learn whether
+    /// T4/T5/T7/T8 verdicts are decidable for the attached app *before*
+    /// spending a cycle, and to surface the GP_E_PROBE_UNAVAILABLE remedy.
+    public func probeStatus() -> [String: Any] {
+        let probes = probeInbox?.statusJSON() ?? []
+        var attachedHasProbe = false
+        if let inbox = probeInbox, let app = attachedApp, inbox.connection(for: app.pid) != nil {
+            attachedHasProbe = true
+        }
+        return ["probes": probes, "attachedHasProbe": attachedHasProbe]
     }
 
     public func lastEvidence(operationId: String?) throws -> EvidencePack {
@@ -655,12 +718,31 @@ public final class EngineCore {
         } catch let error as ChannelError {
             throw EngineCore.map(error)
         }
+        // P6 §5.5: probe checkpoint export gives snapshots a *real* tier-1
+        // probe payload (gpz1-json-v1). The P5 scripted `snapshotProbe` hook
+        // keeps priority so existing unit tests stay verbatim; daemon ships it
+        // nil. Export failure (no connection / no capability / digest mismatch
+        // / timeout) keeps probeInfo nil — rollback_full then refuses honestly.
+        let snapshotId = OperationID.generateSnapshotLive()
+        var probeInfo = snapshotProbe?()
+        if probeInfo == nil, let inbox = probeInbox, let pid = attachedApp?.pid,
+           let connection = inbox.connection(for: pid),
+           connection.hello.capabilities.contains("checkpoint"),
+           let exported = inbox.checkpointExport(pid: pid, ref: snapshotId) {
+            probeInfo = SnapshotProbeInfo(
+                probeVersion: connection.hello.probeVersion,
+                exportedDomains: exported.domains.keys.sorted(),
+                stateDigest: exported.digest,
+                checkpointFormat: "gpz1-json-v1",
+                capturedAt: nowISO()
+            )
+        }
         let snapshot = AppStateSnapshot(
-            snapshotId: OperationID.generateSnapshotLive(),
+            snapshotId: snapshotId,
             treeDigest: tree.digest,
             nodeCount: tree.nodeCount,
             capturedAt: nowISO(),
-            probeInfo: snapshotProbe?()
+            probeInfo: probeInfo
         )
         storeSnapshot(snapshot)
         let latencyMs = clock().timeIntervalSince(started) * 1000
@@ -723,6 +805,31 @@ public final class EngineCore {
                 )
             }
             registerRestoreApproval(snapshotId: snapshotId, mode: "rollback_full", hasSteps: false)
+
+            // P6 §5.5: gpz1 checkpoints have a live execution surface — the
+            // probe retained the export under this snapshot's ref, so the
+            // daemon can command a rewrite and verify the post-restore digest
+            // against the plan. Any other format keeps the P5 plan-only answer.
+            if probe.checkpointFormat == "gpz1-json-v1",
+               let inbox = probeInbox, let pid = attachedApp?.pid,
+               inbox.connection(for: pid) != nil {
+                if let post = inbox.checkpointRestore(pid: pid, ref: snapshot.snapshotId, domains: plan.domains) {
+                    return [
+                        "snapshotId": snapshot.snapshotId,
+                        "baselineTreeDigest": snapshot.treeDigest,
+                        "domains": plan.domains,
+                        "postStateDigest": post,
+                        "rollbackExecuted": true,
+                        "executionSurface": "gp-probe",
+                        "probeVersion": probe.probeVersion,
+                        "consistent": post == plan.expectedStateDigest
+                    ]
+                }
+                throw GPError(
+                    code: .restoreUnsupported,
+                    message: "tier-1 restore execution refused by probe: \(inbox.lastResultError ?? "no result")"
+                )
+            }
             return [
                 "snapshotId": snapshot.snapshotId,
                 "baselineTreeDigest": snapshot.treeDigest,

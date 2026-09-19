@@ -30,6 +30,8 @@ private struct Options {
     var pruneDryRun = false
     var evidenceStats = false
     var c33Enabled = true
+    var probeSocketPath: String?
+    var probeEnabled = true
 }
 
 private enum ParseResult {
@@ -59,6 +61,14 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             options.checkInputPermission = true
         case "--no-c33":
             options.c33Enabled = false
+        case "--no-probe":
+            options.probeEnabled = false
+        case "--probe-socket-path":
+            guard index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") else {
+                return .error("--probe-socket-path requires a file path")
+            }
+            index += 1
+            options.probeSocketPath = arguments[index]
         case "--list-projects":
             options.listProjects = true
         case "--active-project":
@@ -150,6 +160,9 @@ private func printUsage() {
                                  (granted | denied | notDetermined) and exit
         --no-c33             Disable C33 input monitoring (degrade to pure
                                  operation-right mutex; act never blocks on user input)
+        --no-probe           Disable the P6 probe socket (Z5 black-box only;
+                                 handlerProbe/stateDiff signals stay null)
+        --probe-socket-path <path>  Probe listener path (default ~/.glasspane/probe.sock)
         --list-projects        List all registered projects (JSON) and exit
         --active-project <id>  Set the active project ID and exit
         --recipe-validate <path>  Validate a recipe YAML file and exit
@@ -489,13 +502,34 @@ if options.c33Enabled {
 } else {
     log.info("C33 disabled via --no-c33 (pure no-guard form)")
 }
+// P6 spec v6.0 §5: the probe listener is on by default and self-degrades —
+// without probe.sock nothing connects, so every act keeps the Z5 black-box
+// form (handlerProbe/stateDiff null). --no-probe skips the listener entirely.
+var probeInbox: ProbeInbox?
+var probeServer: ProbeSocketServer?
+if options.probeEnabled {
+    let probeSocketPath = options.probeSocketPath
+        ?? NSHomeDirectory() + "/.glasspane/probe.sock"
+    let inbox = ProbeInbox()
+    let server = ProbeSocketServer(socketPath: probeSocketPath, inbox: inbox, log: log)
+    do {
+        try server.start()
+        probeInbox = inbox
+        probeServer = server
+    } catch {
+        log.error("probe socket unavailable (\(error)) — continuing Z5-only, signals stay null")
+    }
+} else {
+    log.info("probe listener disabled via --no-probe (Z5 black-box only)")
+}
 let core = EngineCore(
     channel: channel,
     evidenceStore: EvidenceStore(),
     attributionGuard: attributionGuard,
     degradationTracker: DegradationTracker(),
     metricsProbe: ProcessMetricsProbe(),
-    approvalGate: ApprovalGate(path: ApprovalGate.defaultPath)
+    approvalGate: ApprovalGate(path: ApprovalGate.defaultPath),
+    probeInbox: probeInbox
 )
 let dispatcher = Dispatcher(core: core, log: log)
 let server = SocketServer(socketPath: socketPath, dispatcher: dispatcher, log: log)
@@ -507,9 +541,11 @@ FileHandle.standardOutput.write(
 
 do {
     try server.run()
+    probeServer?.stop()
     exit(0)
 } catch {
     log.error("fatal: \(error)")
+    probeServer?.stop()
     server.cleanup()
     exit(1)
 }

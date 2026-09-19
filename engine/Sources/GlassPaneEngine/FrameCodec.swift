@@ -62,6 +62,7 @@ public enum EngineMethod: String, CaseIterable {
     case assertElement = "assert_element"
     case diagnose, lastEvidence = "last_evidence"
     case snapshot, restore
+    case probeStatus = "probe_status" // P6 spec v6.0 §5.4
     case shutdown
 }
 

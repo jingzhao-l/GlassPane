@@ -38,7 +38,8 @@ final class DispatcherTests: XCTestCase {
         let result = try XCTUnwrap(response["result"] as? [String: Any])
         XCTAssertEqual(result["engine"] as? String, "glasspaned")
         XCTAssertEqual(result["protocolVersion"] as? String, "0")
-        XCTAssertEqual((result["capabilities"] as? [String])?.count, 6)
+        // P6 §5.3: capabilities gained "probe" (6 → 7).
+        XCTAssertEqual((result["capabilities"] as? [String])?.count, 7)
     }
 
     func testAttachWithBothBundleIdAndPidFails() throws {

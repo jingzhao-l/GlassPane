@@ -175,6 +175,72 @@ public struct CrashSignal: Codable, Equatable {
     }
 }
 
+// MARK: - Probe signals (P6 spec v6.0 §3.1, Z1–Z4.5 channel)
+
+/// One handler hit localized by source location (Z1 macro instrumentation).
+public struct HandlerRef: Codable, Equatable {
+    public let file: String
+    public let line: Int
+
+    public init(file: String, line: Int) {
+        self.file = file
+        self.line = line
+    }
+}
+
+/// Handler-probe signal: present when a GlassPaneProbe connection was alive
+/// for the act window (§2/§3). `lateCount` is refreshed at diagnose time
+/// (async arrivals within the 2s grace window, T8 evidence).
+public struct HandlerProbeSignal: Codable, Equatable {
+    public static let maxHandlers = 32
+
+    public let probeVersion: String
+    public let hitCount: Int
+    public let handlers: [HandlerRef]
+    public let lateCount: Int
+
+    public init(probeVersion: String, hitCount: Int, handlers: [HandlerRef], lateCount: Int = 0) {
+        self.probeVersion = probeVersion
+        self.hitCount = hitCount
+        self.handlers = Array(handlers.prefix(Self.maxHandlers))
+        self.lateCount = lateCount
+    }
+}
+
+public enum StateDiffSource: String, Codable {
+    case z1Macro = "z1-macro"
+    case z2Mirror = "z2-mirror"
+    case z3KVC = "z3-kvc"
+}
+
+/// One before/after pair; values are canonical strings (≤1 KiB truncated by
+/// the probe side).
+public struct StateEntry: Codable, Equatable {
+    public let key: String
+    public let before: String
+    public let after: String
+
+    public init(key: String, before: String, after: String) {
+        self.key = key
+        self.before = before
+        self.after = after
+    }
+}
+
+public struct StateDiffSignal: Codable, Equatable {
+    public static let maxEntries = 64
+
+    public let source: StateDiffSource
+    public let changed: Bool
+    public let entries: [StateEntry]
+
+    public init(source: StateDiffSource, changed: Bool, entries: [StateEntry]) {
+        self.source = source
+        self.changed = changed
+        self.entries = Array(entries.sorted { $0.key < $1.key }.prefix(Self.maxEntries))
+    }
+}
+
 /// Decodes a strictly-optional object signal: absent key -> nil;
 /// present-but-null or wrong shape -> throws (mirrors the JSON Schema which
 /// allows absence but not null for object signals).
@@ -188,8 +254,10 @@ extension KeyedDecodingContainer {
 public struct Signals: Codable, Equatable {
     public var act: ActSignal
     public var axEvent: AxEventSignal?
-    public var handlerProbe: JSONNull
-    public var stateDiff: JSONNull
+    /// P6 §3.1: `null | object`. The key is always present; null remains the
+    /// honest absence marker when no probe connection served the window.
+    public var handlerProbe: HandlerProbeSignal?
+    public var stateDiff: StateDiffSignal?
     public var pixelDiff: PixelDiffSignal?
     public var responsiveness: ResponsivenessSignal?
     public var crash: CrashSignal?
@@ -197,8 +265,8 @@ public struct Signals: Codable, Equatable {
     public init(
         act: ActSignal,
         axEvent: AxEventSignal? = nil,
-        handlerProbe: JSONNull = JSONNull(),
-        stateDiff: JSONNull = JSONNull(),
+        handlerProbe: HandlerProbeSignal? = nil,
+        stateDiff: StateDiffSignal? = nil,
         pixelDiff: PixelDiffSignal? = nil,
         responsiveness: ResponsivenessSignal? = nil,
         crash: CrashSignal? = nil
@@ -220,8 +288,23 @@ public struct Signals: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         act = try container.decode(ActSignal.self, forKey: .act)
         axEvent = try container.decodePresent(AxEventSignal.self, forKey: .axEvent)
-        handlerProbe = try container.decode(JSONNull.self, forKey: .handlerProbe)
-        stateDiff = try container.decode(JSONNull.self, forKey: .stateDiff)
+        // Required keys, nullable values: JSON null -> nil, object -> decoded,
+        // wrong shape -> throws (mirrors the JSON Schema oneOf [null, object]).
+        // Absence is a decode error: the keys stay required (§3.1).
+        guard container.contains(.handlerProbe) else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.handlerProbe,
+                .init(codingPath: container.codingPath, debugDescription: "handlerProbe is required (null allowed)")
+            )
+        }
+        guard container.contains(.stateDiff) else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.stateDiff,
+                .init(codingPath: container.codingPath, debugDescription: "stateDiff is required (null allowed)")
+            )
+        }
+        handlerProbe = try container.decodeIfPresent(HandlerProbeSignal.self, forKey: .handlerProbe)
+        stateDiff = try container.decodeIfPresent(StateDiffSignal.self, forKey: .stateDiff)
         pixelDiff = try container.decodePresent(PixelDiffSignal.self, forKey: .pixelDiff)
         responsiveness = try container.decodePresent(ResponsivenessSignal.self, forKey: .responsiveness)
         crash = try container.decodePresent(CrashSignal.self, forKey: .crash)
@@ -231,8 +314,16 @@ public struct Signals: Codable, Equatable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(act, forKey: .act)
         try container.encodeIfPresent(axEvent, forKey: .axEvent)
-        try container.encode(handlerProbe, forKey: .handlerProbe)
-        try container.encode(stateDiff, forKey: .stateDiff)
+        if let handlerProbe {
+            try container.encode(handlerProbe, forKey: .handlerProbe)
+        } else {
+            try container.encodeNil(forKey: .handlerProbe)
+        }
+        if let stateDiff {
+            try container.encode(stateDiff, forKey: .stateDiff)
+        } else {
+            try container.encodeNil(forKey: .stateDiff)
+        }
         try container.encodeIfPresent(pixelDiff, forKey: .pixelDiff)
         try container.encodeIfPresent(responsiveness, forKey: .responsiveness)
         try container.encodeIfPresent(crash, forKey: .crash)

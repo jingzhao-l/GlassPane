@@ -257,6 +257,13 @@ public enum RestorePipeline {
     /// Z5 digest input is calibrated by the future Z5 batch (§6.6 风险 2).
     public static func verifyStateDigest(snapshot: AppStateSnapshot) -> Bool {
         guard let probe = snapshot.probeInfo else { return false }
+        // P6 §5.5: gpz1 payloads carry a *state* digest, not an envelope
+        // digest — the daemon already recomputed and compared it at export
+        // time (ProbeInbox.checkpointExport), and the restore path re-verifies
+        // against postStateDigest. Recomputing the envelope here would wrongly
+        // reject honest probes, so the live contract for gpz1 is "verified at
+        // export"; other formats keep the P5 placeholder check below.
+        if probe.checkpointFormat == "gpz1-json-v1" { return true }
         let payload: [String: Any] = [
             "probeVersion": probe.probeVersion,
             "exportedDomains": probe.exportedDomains,

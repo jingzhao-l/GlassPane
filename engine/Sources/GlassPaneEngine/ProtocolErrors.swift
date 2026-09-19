@@ -21,6 +21,7 @@ public enum GPErrorCode: String, Codable {
     case projectLimit = "GP_E_PROJECT_LIMIT"
     case notFound = "GP_E_NOT_FOUND"
     case busyInput = "GP_E_BUSY_INPUT"
+    case probeUnavailable = "GP_E_PROBE_UNAVAILABLE" // P6 spec v6.0 §1/§5.4
     case internalError = "GP_E_INTERNAL"
 }
 
@@ -49,7 +50,7 @@ public struct GPError: Error {
         case .payloadTooLarge:
             return "reduce observe maxDepth or narrow the selector scope"
         case .methodNotFound:
-            return "use a method from the protocol method table (hello/attach/act/observe/assert_element/diagnose/last_evidence/snapshot/restore/shutdown)"
+            return "use a method from the protocol method table (hello/attach/act/observe/assert_element/diagnose/last_evidence/snapshot/restore/probe_status/shutdown)"
         case .badParams:
             return "fix the parameters according to the method table"
         case .notAttached:
@@ -69,7 +70,7 @@ public struct GPError: Error {
         case .noSnapshot:
             return "run gp_snapshot first, then restore with that snapshotId"
         case .restoreUnsupported:
-            return "use tier-2 ffwd (pass steps) or wait for the Z5 snapshot batch"
+            return "tier-1 restore needs a probe checkpoint: integrate GlassPaneProbe (GP.start() + registerCheckpoint), re-snapshot, then restore; or use tier-2 ffwd (pass steps)"
         case .restoreStepFailed:
             return "fix the failing step in the steps array (see the failed step index), then retry restore"
         case .projectLimit:
@@ -78,6 +79,8 @@ public struct GPError: Error {
             return "check the projectId; use gp_project_list to view available projects"
         case .busyInput:
             return "pause the agent and wait for the user to stop interacting, then retry act; or proceed in degrade mode (attribution weak + contaminated=true)"
+        case .probeUnavailable:
+            return "integrate GlassPaneProbe into the target app (GP.start()) and confirm it is running; probe presence is required for T4/T5/T7/T8 verdicts — without it diagnosis stays INCONCLUSIVE, do not guess"
         case .internalError:
             return "check the daemon log (stderr) and retry"
         }

@@ -10,7 +10,9 @@ public enum Classifier {
 
     public static func classify(_ pack: EvidencePack) -> (class: DiagnosisClass, report: DiagnosisReport) {
         let evidenceSummary = evidenceLine(pack)
-        let path = "act.\(pack.signals.act.action.rawValue) -> ax-confirm -> tree-digest -> pixel-diff"
+        let path = pack.signals.handlerProbe != nil
+            ? "act.\(pack.signals.act.action.rawValue) -> probe-window -> handler/state -> ax-digest -> pixel-diff"
+            : "act.\(pack.signals.act.action.rawValue) -> ax-confirm -> tree-digest -> pixel-diff"
 
         // Ordered rules; the first match wins.
         if pack.signals.crash?.processAliveAfter == false {
@@ -54,6 +56,51 @@ public enum Classifier {
                 next: "retry the act; if the AX channel is degraded see the circuitBreaker reason field")
         }
 
+        // P6 spec v6.0 §3.2: probe-signal branches, inserted after T9 and
+        // before the black-box T3/T6 paths. They only fire when the pack
+        // carries a handlerProbe (§3.1 presence = probe connection served the
+        // window); without it every rule below stays byte-identical to P0 and
+        // the requires-probe-signals INCONCLUSIVE boundary is preserved.
+        if let handlerProbe = pack.signals.handlerProbe {
+            let axChanged = axEvent.axChanged
+            let pixelChanged = (pack.signals.pixelDiff?.changedPixelRatio ?? 0) > 0
+            let stateChanged = pack.signals.stateDiff.map { $0.changed }
+
+            // T8: the window stayed silent but events landed late (async timing).
+            if handlerProbe.hitCount == 0 && (stateChanged ?? false) == false && handlerProbe.lateCount > 0 {
+                return outcome(.t8, path: path, evidence: evidenceSummary,
+                    anomaly: "async timing: no probe signal inside the act window but \(handlerProbe.lateCount) late handler arrival(s) followed (windowed attribution §2.3)",
+                    next: "inspect the handler for async dispatch (\(handlerProbeSummary(handlerProbe))); shorten the settle interval or await the async continuation before asserting")
+            }
+            // T4 needs a decidable state channel; without stateDiff it is not
+            // claimed (silence ≠ no-change for state-incapable probes).
+            if handlerProbe.hitCount > 0 && stateChanged == false && !axChanged && !pixelChanged {
+                return outcome(.t4, path: path, evidence: evidenceSummary,
+                    anomaly: "logic bug: \(handlerProbe.hitCount) handler hit(s) (\(handlerProbeSummary(handlerProbe))) but state, AX tree and pixels all silent",
+                    next: "inspect the handler body between hit locations \(handlerProbeSummary(handlerProbe)) — the bound effect is missing or writes a stale key")
+            }
+            // T5: state moved but neither view channel followed (dependency loss).
+            if handlerProbe.hitCount > 0 && stateChanged == true && !axChanged && !pixelChanged {
+                return outcome(.t5, path: path, evidence: evidenceSummary,
+                    anomaly: "SwiftUI dependency loss: handler hit and state changed (\(stateDiffSummary(pack))) but AX tree and pixels stayed silent",
+                    next: "check the view's observation of the changed key (Z1b-style direct @State writes and missing @Observable registration are the usual roots); re-bind or route through the observed model")
+            }
+            // T7: view channels moved while the observed state stayed put.
+            if handlerProbe.hitCount > 0 && stateChanged == false && (axChanged || pixelChanged) {
+                return outcome(.t7, path: path, evidence: evidenceSummary,
+                    anomaly: "view-model decoupling: AX/pixels changed while observed state did not (handler hit \(handlerProbe.hitCount), stateDiff.changed=false)",
+                    next: "locate the direct UI mutation bypassing the state layer; assert against the state channel (stateDiff entries) rather than pixels")
+            }
+            // Honest gap: the handler ran but the probe carries no state
+            // channel — T4/T5/T7 are undecidable and the black-box T3 verdict
+            // ("dead click") would contradict the probe. Do not guess.
+            if handlerProbe.hitCount > 0 && stateChanged == nil && !axChanged && !pixelChanged {
+                return outcome(.inconclusive, path: path, evidence: evidenceSummary,
+                    anomaly: "handler ran (\(handlerProbeSummary(handlerProbe))) but the probe has no state channel and AX/pixels are silent — T4 vs no-anomaly needs a state source (z2/z3)",
+                    next: "register state observation in the probe (GP.registerMirrorRoot or GP.registerKVCObject), then re-run the act; do not conclude binding loss while the probe says the handler executed")
+            }
+        }
+
         if axEvent.axChanged {
             guard let pixelDiff = pack.signals.pixelDiff else {
                 // P0 spec §9: with the pixel signal unavailable, a changed
@@ -93,6 +140,17 @@ public enum Classifier {
 
     // MARK: - Internals
 
+    private static func handlerProbeSummary(_ handlerProbe: HandlerProbeSignal) -> String {
+        let refs = handlerProbe.handlers.prefix(4).map { "\($0.file):\($0.line)" }.joined(separator: ", ")
+        return refs.isEmpty ? "no localized hits" : refs
+    }
+
+    private static func stateDiffSummary(_ pack: EvidencePack) -> String {
+        guard let stateDiff = pack.signals.stateDiff else { return "stateDiff=unavailable" }
+        let keys = stateDiff.entries.prefix(4).map(\.key).joined(separator: ", ")
+        return "source=\(stateDiff.source.rawValue), changed=\(stateDiff.changed), keys=[\(keys)]"
+    }
+
     private static func outcome(
         _ `class`: DiagnosisClass,
         path: String,
@@ -122,6 +180,12 @@ public enum Classifier {
         }
         if let crash = pack.signals.crash {
             parts.append("alive \(String(crash.processAliveBefore)) -> \(String(crash.processAliveAfter))")
+        }
+        if let handlerProbe = pack.signals.handlerProbe {
+            parts.append("handlerProbe hitCount=\(handlerProbe.hitCount) late=\(handlerProbe.lateCount) [\(handlerProbeSummary(handlerProbe))]")
+        }
+        if let stateDiff = pack.signals.stateDiff {
+            parts.append(stateDiffSummary(pack))
         }
         parts.append("circuitBreaker=\(pack.circuitBreaker.level.rawValue)")
         return parts.joined(separator: "; ")

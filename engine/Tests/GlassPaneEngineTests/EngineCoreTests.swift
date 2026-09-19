@@ -33,7 +33,7 @@ final class EngineCoreTests: XCTestCase {
         XCTAssertNotNil(result["pid"] as? Int)
         XCTAssertEqual(
             result["capabilities"] as? [String],
-            ["act", "observe", "assert_element", "diagnose", "snapshot", "restore"]
+            ["act", "observe", "assert_element", "diagnose", "snapshot", "restore", "probe"]
         )
     }
 

@@ -65,6 +65,8 @@ public final class Dispatcher {
             return try handleSnapshot(request.params)
         case .restore:
             return try handleRestore(request.params)
+        case .probeStatus:
+            return core.probeStatus()
         case .shutdown:
             return core.shutdown()
         }
