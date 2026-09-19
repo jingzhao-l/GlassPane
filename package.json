@@ -1,0 +1,20 @@
+{
+  "name": "@glasspane/monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GlassPane monorepo: TS mcp-shell + iterate kernel + macOS Swift engine (daemon + settings GUI) + one-command installer",
+  "workspaces": [
+    "kernel",
+    "mcp-shell",
+    "installer"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "npm run build --workspace @iterate/kernel && npm run build --workspace @glasspane/mcp-shell",
+    "test": "npm run build && npm run test --workspaces --if-present",
+    "install:engine": "node installer/cli.js",
+    "install:engine:silent": "node installer/cli.js --no-prompt --no-gui"
+  }
+}

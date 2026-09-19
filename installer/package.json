@@ -1,0 +1,17 @@
+{
+  "name": "@glasspane/installer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GlassPane one-command installer: terminal onboarding → install deps → build TS + Swift engine → start daemon → open settings GUI for permission guide",
+  "type": "module",
+  "main": "./cli.js",
+  "bin": {
+    "glasspane-install": "./cli.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}
