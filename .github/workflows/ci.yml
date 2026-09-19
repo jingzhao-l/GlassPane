@@ -55,3 +55,24 @@ jobs:
       - name: Test mcp-shell (dispatch + tools + engine client)
         working-directory: mcp-shell
         run: npm test
+
+  # 根 workspace 全绿守护：installer + kernel + mcp-shell 从仓库根统一安装/构建/测试，
+  # 防止"单包绿但根布局/workspaces 依赖漂移"漏出——发布形态以根为准。
+  install-gate:
+    name: root workspace gate (installer + all workspaces)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install workspace deps from root
+        run: npm ci
+      - name: Installer unit tests (parse/env/plist/app args)
+        run: npm test --workspace @glasspane/installer
+      - name: Build all TS workspaces (kernel → mcp-shell)
+        run: npm run build
+      - name: Test all workspaces (kernel + mcp-shell)
+        run: npm run test --workspaces --if-present
