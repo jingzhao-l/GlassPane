@@ -14,7 +14,7 @@ public final class DebugCapabilityProbe {
         case ok          // debugger actually captured/launched the process
         case denied      // OS refused the debug permission (explicit, fast)
         case timeout     // hung past the budget (blocked prompt, cold start)
-        case spawnFailed(String)
+        case spawnFailed
     }
 
     public struct Snapshot: Codable, Equatable {
@@ -113,7 +113,7 @@ public final class DebugCapabilityProbe {
     public func probeAttach() -> Outcome {
         guard let pidText = runner.spawnVictim(seconds: Self.attachVictimSeconds),
               let pid = Int32(pidText) else {
-            return .spawnFailed("victim spawn failed")
+            return .spawnFailed
         }
         defer { runner.killVictim(pid) }
         let result = runner.run(
@@ -137,8 +137,8 @@ public final class DebugCapabilityProbe {
         if text.contains("Not allowed to attach") || text.contains("attach failed")
             || text.contains("not permitted") { return .denied }
         if run.timedOut { return .timeout }
-        if run.exit == nil { return .spawnFailed(trimmed(text)) }
-        return .spawnFailed("exit \(run.exit ?? -1): \(trimmed(text))")
+        if run.exit == nil { return .spawnFailed }
+        return .spawnFailed
     }
 
     private static func trimmed(_ text: String) -> String {
@@ -152,7 +152,7 @@ public final class DebugCapabilityProbe {
             case .ok: return ["state": "ok"]
             case .denied: return ["state": "denied"]
             case .timeout: return ["state": "timeout"]
-            case .spawnFailed(let detail): return ["state": "spawnFailed", "detail": detail]
+            case .spawnFailed: return ["state": "spawnFailed"]
             }
         }
         return [
