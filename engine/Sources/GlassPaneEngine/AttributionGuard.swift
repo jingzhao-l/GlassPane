@@ -61,19 +61,26 @@ public final class AttributionGuard {
     /// 已被持有期间重复调用返回 `.idleNotMet`。
     /// 注意：空闲检测不消费事件——时间戳在未来（act 进行中才到达）的事件会保留
     /// 在队列中，供 monitorInput/release 消费并如实计入污染裁决。
-    public func acquireOperationRight() -> OperationRightAcquisition {
+    ///
+    /// `degradeOnBusy`（R21 可声明降级，P6 §11 审计落实）：窗口忙时**照样**
+    /// 获取操作权并放行，但把持有起点回拨到空闲窗口起点——触发忙碌的那批
+    /// human 事件在 release 时如实体现在污染裁决里（weak + contaminated=true），
+    /// 绝不静默冒充干净。
+    public func acquireOperationRight(degradeOnBusy: Bool = false) -> OperationRightAcquisition {
         guard !holding else { return .idleNotMet }
         let now = clock().timeIntervalSince1970
         let pending = inputSource.peekAvailable()
-        let busy = pending.contains { event in
+        let busyEvents = pending.filter { event in
             guard event.source == .human else { return false }
             return event.timestamp <= now && event.timestamp >= now - idleWindowSeconds
         }
-        if busy {
+        if !busyEvents.isEmpty && !degradeOnBusy {
             return .idleNotMet
         }
         holding = true
-        holdStartTimestamp = now
+        // Clean acquisition starts the hold now; a degraded one backdates to the
+        // window start so the busy human events are charged into the verdict.
+        holdStartTimestamp = busyEvents.isEmpty ? now : now - idleWindowSeconds
         collectedEvents.removeAll()
         return .acquired
     }

@@ -69,6 +69,7 @@ export type ObserveArgs = z.infer<typeof ObserveArgs>;
 export const ActArgs = z.strictObject({
   selector: SelectorSchema,
   action: ActionSchema,
+  degrade: z.boolean().optional(),
 });
 export type ActArgs = z.infer<typeof ActArgs>;
 
@@ -222,7 +223,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: "gp_act",
-    description: "Perform a UI action on the attached app and confirm it.",
+    description:
+      "Perform a UI action on the attached app and confirm it. " +
+      "If the daemon reports GP_E_BUSY_INPUT (real user input is contaminating the window), retry later, " +
+      "or set degrade: true to proceed immediately with the contamination recorded in evidence " +
+      "(attribution becomes weak + contaminated=true) — never silently clean.",
     engineMethod: "act",
     inputSchema: {
       type: "object",
@@ -233,6 +238,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           type: "string",
           enum: ["press", "increment", "decrement", "showMenu", "confirm", "cancel", "pick"],
         },
+        degrade: { type: "boolean" },
       },
       required: ["selector", "action"],
     },

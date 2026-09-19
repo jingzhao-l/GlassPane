@@ -78,7 +78,7 @@ public struct GPError: Error {
         case .notFound:
             return "check the projectId; use gp_project_list to view available projects"
         case .busyInput:
-            return "pause the agent and wait for the user to stop interacting, then retry act; or proceed in degrade mode (attribution weak + contaminated=true)"
+            return "wait for the user to stop interacting, then retry act; or re-issue act with \"degrade\": true to proceed now with the contamination recorded in evidence (attribution weak + contaminated=true) — never silently clean"
         case .probeUnavailable:
             return "integrate GlassPaneProbe into the target app (GP.start()) and confirm it is running; probe presence is required for T4/T5/T7/T8 verdicts — without it diagnosis stays INCONCLUSIVE, do not guess"
         case .internalError:

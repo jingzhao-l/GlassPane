@@ -41,6 +41,34 @@ test("input schemas expose required fields in JSON-Schema form", () => {
   assert.ok(attach.oneOf);
 });
 
+test("gp_act exposes the degrade option its remedy promises", () => {
+  const act = TOOL_BY_NAME.get("gp_act").inputSchema;
+  assert.deepEqual(act.properties.degrade, { type: "boolean" });
+  assert.ok(!act.required.includes("degrade"), "degrade must stay optional");
+});
+
+test("gp_act forwards degrade and rejects a non-boolean value", async () => {
+  const { engine, io } = makeEngine();
+  const act = TOOL_BY_NAME.get("gp_act");
+  const promise = executeTool(
+    act,
+    { selector: { role: "button", title: "Submit" }, action: "press", degrade: true },
+    engine
+  );
+  const frame = io.lastFrame();
+  assert.equal(frame.params.degrade, true);
+  io.respond({ operationId: "op_0123456789ABCDEFGHJKMNPQRS", actConfirmed: true });
+  assert.equal((await promise).isError, false);
+
+  const bad = await executeTool(
+    act,
+    { selector: { role: "button" }, action: "press", degrade: "yes" },
+    engine
+  );
+  assert.equal(bad.isError, true);
+  assert.ok(bad.content[0].text.startsWith("GP_E_BAD_PARAMS"));
+});
+
 test("executeTool rejects invalid arguments as GP_E_BAD_PARAMS isError", async () => {
   const { engine } = makeEngine();
   const act = TOOL_BY_NAME.get("gp_act");

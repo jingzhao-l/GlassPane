@@ -101,7 +101,7 @@ GlassPane/
 |---|---|---|---|
 | `hello` | `{}` | `{engine:"glasspaned", version, protocolVersion:"0", pid, capabilities:["act","observe","assert_element","diagnose"]}` | — |
 | `attach` | `{bundleId?: string, pid?: integer}`（二选一） | `{pid, bundleId?, appName}` | GP_E_BAD_PARAMS / GP_E_APP_NOT_FOUND / GP_E_AX_UNAVAILABLE |
-| `act` | `{selector: {role: string, title?: string, identifier?: string}, action: "press"\|"increment"\|"decrement"\|"showMenu"\|"confirm"\|"cancel"\|"pick"}` | `{operationId, actConfirmed, axChanged, pixelChanged, latencyMs, evidenceId}` | GP_E_NOT_ATTACHED / GP_E_BAD_PARAMS / GP_E_ACT_FAILED / GP_E_AX_UNAVAILABLE |
+| `act` | `{selector: {role: string, title?: string, identifier?: string}, action: "press"\|"increment"\|"decrement"\|"showMenu"\|"confirm"\|"cancel"\|"pick", degrade?: boolean（P6 §11 ①：输入窗忙时受理并把污染如实记入 evidence，判定不放松）}` | `{operationId, actConfirmed, axChanged, pixelChanged, latencyMs, evidenceId}` | GP_E_NOT_ATTACHED / GP_E_BAD_PARAMS / GP_E_ACT_FAILED / GP_E_AX_UNAVAILABLE |
 | `observe` | `{maxDepth?: integer(1–10, 默认 6), role?: string}` | `{axTree, nodeCount, digest, latencyMs}` | GP_E_NOT_ATTACHED / GP_E_BAD_PARAMS / GP_E_AX_UNAVAILABLE |
 | `assert_element` | `{selector, property: "title"\|"value"\|"role"\|"enabled"\|"focused", expected: string\|boolean}` | `{passed, actual, operationId, evidenceId}` | GP_E_NOT_ATTACHED / GP_E_BAD_PARAMS / GP_E_ASSERT_TARGET_NOT_FOUND / GP_E_AX_UNAVAILABLE / GP_E_NO_OPERATION（无最近 op 可复用信号上下文；assert 证据的 signals 复用最近一次 act 的信号） |
 | `diagnose` | `{operationId?: string(缺省=最近一次 act)}` | `{class, report: {path, anomaly, evidence, next}}` | GP_E_NOT_ATTACHED / GP_E_BAD_PARAMS / GP_E_NO_OPERATION |
@@ -230,7 +230,7 @@ KernelSchemaError { code: "KERNEL_E_SCHEMA", issues: [{path, message}] }
 |---|---|---|---|
 | gp_attach | `{bundleId?: string, pid?: number}` | attach result | GP_E_* 原码+补救指引文本 |
 | gp_observe | `{maxDepth?: number, role?: string}` | observe result（axTree 按原样透传） | 同上 |
-| gp_act | `{selector: {role, title?, identifier?}, action: enum}` | act result | 同上 |
+| gp_act | `{selector: {role, title?, identifier?}, action: enum, degrade?: boolean}` | act result | 同上 |
 | gp_assert_element | `{selector, property: enum, expected}` | assert result | 同上 |
 | gp_diagnose | `{operationId?: string}` | diagnose result | 同上 |
 | gp_last_evidence | `{operationId?: string}` | evidence pack | 同上 |

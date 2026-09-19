@@ -85,7 +85,10 @@ public final class Dispatcher {
     private func handleAct(_ params: [String: Any]) throws -> [String: Any] {
         let selector = try ParamValidation.requireSelector(params)
         let action = try ParamValidation.requireAction(params)
-        return try core.act(selector: selector, action: action)
+        // P6 §11: declared degradation — busy input admits the act with
+        // weak + contaminated evidence instead of bouncing it to a human.
+        let degrade = (try ParamValidation.optBool(params, "degrade")) ?? false
+        return try core.act(selector: selector, action: action, degrade: degrade)
     }
 
     private func handleObserve(_ params: [String: Any]) throws -> [String: Any] {

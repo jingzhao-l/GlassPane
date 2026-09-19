@@ -182,20 +182,25 @@ public final class EngineCore {
         }
     }
 
-    public func act(selector: Selector, action: Action) throws -> [String: Any] {
+    /// `degrade`（P6 §11 / R21）：输入窗口忙时不再抛 GP_E_BUSY_INPUT，而是
+    /// 放行并把本次证据如实标注 weak + contaminated=true——remedy 里承诺的
+    /// "proceed in degrade mode" 从此是真参数。缺省 false：既有语义逐字不变。
+    public func act(selector: Selector, action: Action, degrade: Bool = false) throws -> [String: Any] {
         guard attachedApp != nil else {
             throw GPError(code: .notAttached, message: "no app attached")
         }
         // C33 concurrency attribution protection (P2 spec v2.0 §15.4): the
         // daemon must hold the operation right before acting. If real user
         // input keeps the input window busy, retry a bounded number of times
-        // then surface GP_E_BUSY_INPUT instead of silently running polluted.
+        // then surface GP_E_BUSY_INPUT instead of silently running polluted —
+        // unless the caller declared `degrade`, which admits the act with the
+        // contamination charged into evidence (never silently clean).
         var contaminationVerdict: OperationRightVerdict?
         if let attributionGuard {
             var acquisition: OperationRightAcquisition = .idleNotMet
             var attempts = 0
             while attributionGuard.isHolding == false {
-                acquisition = attributionGuard.acquireOperationRight()
+                acquisition = attributionGuard.acquireOperationRight(degradeOnBusy: degrade)
                 if acquisition == .acquired {
                     break
                 }
