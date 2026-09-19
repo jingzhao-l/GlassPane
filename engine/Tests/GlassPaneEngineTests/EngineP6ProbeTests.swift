@@ -114,15 +114,28 @@ final class P6ProbeInboxTests: XCTestCase {
         XCTAssertEqual(stateDiff.entries, [StateEntry(key: "model.count", before: "3", after: "5")])
     }
 
-    func testStateIncapableProbeKeepsStateDiffNull() throws {
+    func testStateIncapableProbeWithoutEventsKeepsStateDiffNull() throws {
         let time = P6TimeBox()
         let inbox = ProbeInbox(now: { time.now })
         inbox.register(p6Hello(capabilities: ["z1"]))
         inbox.beginWindow(pid: 4242, opId: "op_window2")
-        inbox.ingest(pid: 4242, frame: .state(key: "k", before: "1", after: "2", source: "z3-kvc", ts: 0))
         guard let signals = inbox.endWindow(pid: 4242, opId: "op_window2") else { return XCTFail("window must exist") }
         XCTAssertNotNil(signals.handlerProbe)
         XCTAssertNil(signals.stateDiff, "silence from a state-incapable probe must not become changed=false")
+    }
+
+    func testManualZ1StateEventsConstituteAChannel() throws {
+        // H7 opt-in form: probe declares only z1 but reports state manually
+        // (§8/§4 recordState). Real events override the capability gate.
+        let time = P6TimeBox()
+        let inbox = ProbeInbox(now: { time.now })
+        inbox.register(p6Hello(capabilities: ["z1"]))
+        inbox.beginWindow(pid: 4242, opId: "op_manual")
+        inbox.ingest(pid: 4242, frame: .state(key: "volume.42", before: "0.5", after: "0.6", source: "z1-macro", ts: 0))
+        guard let signals = inbox.endWindow(pid: 4242, opId: "op_manual") else { return XCTFail("window must exist") }
+        let stateDiff = try XCTUnwrap(signals.stateDiff)
+        XCTAssertEqual(stateDiff.source, .z1Macro)
+        XCTAssertTrue(stateDiff.changed)
     }
 
     func testLateCountWithinGraceAndNotAfter() throws {

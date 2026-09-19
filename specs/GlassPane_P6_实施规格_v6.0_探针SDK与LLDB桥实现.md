@@ -31,12 +31,12 @@
 
 | 级 | 名称 | 本批落地形态 | 开销/反射 | 诚实边界 |
 |---|---|---|---|---|
-| Z1 | 宏插桩 | `#gpHandler(<expr>)` freestanding ExpressionMacro（swift-syntax 603.x）：展开为 `GPHooks.instrument(fileID:#fileID, line:#line) { <expr> }`，记录 handler 进入/退出与耗时；由目标 app 在按钮 action / onChange 闭包处标注 | 编译期展开，运行时一次 lock + O(1) append；无反射 | 构建膨胀受 C1 约束（增量 <30% / 全量 <50%，超标走 opt-in build phase，实测见 §8 H7） |
+| Z1 | 宏插桩 | `#gpHandler(<expr>)` freestanding ExpressionMacro（swift-syntax 603.x）：展开为 `GPHooks.instrument(fileID:#fileID, line:#line) { <expr> }`，记录 handler 进入/退出与耗时；由目标 app 在按钮 action / onChange 闭包处标注。**opt-in 修正（§8 H7 实测）**：宏在小型 app 冷全量 +720%/增量 +102%（swift-syntax 插件构建主导 + 展开编译），超 C1 预算 → 宏默认不启用；同级手动形态 `GP.recordHandler()` / `GP.recordState(key:before:after:)` 承担 Z1 显式插桩语义（同为作者标注、证据强度同级，wire source 保持 "z1-macro" 道） | 手动形态运行时一次 lock + O(1)；宏形态另有插件构建成本 | 构建膨胀实测超阈（C1 失败动作兑现：可选 build phase + opt-in）；H7 数据见 spike/results.md |
 | Z1b | @State 直写不可插桩 | 不实现（刚性边界照录）：`@State` 投影 setter 直写不经用户代码，宏无法观测；SDK 提供注册面而非自动面 | — | 占比实测为 spike H3（直写 <20% 才有全局可插桩承诺），门 B 验收加入此约束 |
 | Z2 | Mirror | `GP.registerMirrorRoot(label:_:)`：daemon 命令触发时对注册根做有界 Mirror 遍历（深度 ≤8、节点 ≤4000），产出 `key → 值字符串` 表；用于 state diff 采集与 checkpoint 导出 | 仅导出时反射，act 热路径零反射 | Mirror 只读——恢复需 Z3 或显式注册 setter（§6.4） |
 | Z3 | KVC | `GP.registerKVCObject(_:keys:)`：NSObject 模型经 `observeValueForKeyPath` 出 state 事件（willChange 语义），恢复经 `setValue:forKey:` | KVO 转发开销，O(键数) | 仅 NSObject/KVC-compatible 键；Swift-only 存储不可用 |
 | Z4 | watchpoint | LLDB 桥面（§7）：`gp-watch add <addr|expr>` 经 SB API 设硬件观察点；arm64 硬件槽限 4，超额入 FIFO 队列（深度 ≤64），命中回传含槽/队列状态 | 调试期开销，非交付态 | 硬件槽耗尽时拒绝而非软件模拟（不做假 watchpoint） |
-| Z4.5 | MTLCaptureManager | `GP.beginMetalCapture() / endMetalCapture()`：默认设备 `makeCaptureScope(bounds: .manualInDevice)`，start/stopCapture → `.gputrace` 文件路径回传 evidence note | 仅显式调用时 | 无 Metal 视图/无 capture 权限时返回结构化失败码，不伪造产物 |
+| Z4.5 | MTLCaptureManager | `GP.beginMetalCapture(destinationURL:) / endMetalCapture()`：`MTLCaptureDescriptor`（captureObject=默认设备，destination=.gpuTraceDocument，outputURL 落 tmp）经 `MTLCaptureManager.startCapture(with:)` 编程式捕获，产物路径以 capture 帧回传 | 仅显式调用时 | 设备不支持/无 Metal 时返回结构化失败帧，不伪造产物（macOS 上 makeCaptureScope 系 API 不存在，实施期校正为描述符形态——§0 精神：以真机 SDK 为准） |
 | Z5 | 纯 AX+像素 | 已在 P0 全量交付，零变更 | — | — |
 
 探针安装失败的结构化错误面：daemon 侧新错误码 `GP_E_PROBE_UNAVAILABLE`（§5.4），消息含目标 pid 与缺失 capability；remedy 给 agent 可执行步骤（综述 §13"失败模式 agent 指引"对"探针安装失败"的点名要求，本批为仓库内首次落地）。
@@ -81,7 +81,7 @@ daemon → 探针：`op_begin {}` / `op_end {}` / `checkpoint_export {domains}` 
 ### 3.1 形状
 - `signals.handlerProbe`: `null | { probeVersion: string, hitCount: int≥0, handlers: [{file: string, line: int}]（≤32，首见序）, lateCount: int≥0 }`
 - `signals.stateDiff`: `null | { source: "z1-macro"|"z2-mirror"|"z3-kvc", changed: bool, entries: [{key,before,after}]（≤64，键升序）}`
-- 必填键位不变（handlerProbe/stateDiff 仍必存在，只是允许对象）；`schemaVersion` 保持 `"glasspane.evidence/0.1-draft"` 不动——draft 期修订合法；**冻结（→ "glasspane.evidence/0.1"）是 §9 门表中的 Phase B 入口动作**，前置 = 本批 P6 全验收 + spike H1–H7 回填完成。
+- 必填键位不变（handlerProbe/stateDiff 仍必存在，只是允许对象）；**stateDiff 在场规则**（实施修正，随 H7）：探针声明 z2/z3 通道 **或** 本窗口真实上报过 state 事件（手动 `GP.recordState`，source=z1-macro）才产出对象；"无通道且无事件"维持诚实 null，绝不把静默当 changed=false。`schemaVersion` 保持 `"glasspane.evidence/0.1-draft"` 不动——draft 期修订合法；**冻结（→ "glasspane.evidence/0.1"）是 §9 门表中的 Phase B 入口动作**，前置 = 本批 P6 全验收 + spike H1–H7 回填完成。
 - 三点同步：kernel JSON Schema、kernel zod（`z.null() → z.union([...])`）、Swift Codable（`JSONNull → ProbeSignalsUnion`）；fixtures：ok-01/ok-02（null 形态）必须仍全绿，新增 ok-03（带值形态）；Swift 镜像 roundtrip 测试对 ok-03 运行。
 
 ### 3.2 分类器接入（插入点：T9 分支后、T3/T6 前——探针信号在场时优先，缺场时既有 INCONCLUSIVE 一条不放宽）

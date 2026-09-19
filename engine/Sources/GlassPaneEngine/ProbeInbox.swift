@@ -202,8 +202,12 @@ public final class ProbeInbox {
             handlers: window.handlers,
             lateCount: 0
         )
+        // §3.1 presence rule: a state channel exists when the probe declared
+        // one (z2/z3) OR when it actually reported state events in this
+        // window (manual GP.recordState on the z1 lane — P6 §8 H7 opt-in
+        // form). Silence with no channel stays honest null, never false.
         var stateDiff: StateDiffSignal?
-        if hasStateCapability(connectionCapabilities(pid)) {
+        if !entries.isEmpty || hasStateCapability(connectionCapabilities(pid)) {
             let resolvedSource = window.stateSource ?? .z2Mirror
             let list = entries.values.sorted { $0.key < $1.key }
             stateDiff = StateDiffSignal(source: resolvedSource, changed: !list.isEmpty, entries: list)

@@ -28,6 +28,15 @@ public enum GP {
         runtime.emitHandler(file: file, line: line, durationNs: nil)
     }
 
+    /// Z1 manual state report — explicit instrumentation without reflection
+    /// (P6 §1: Z1 means "author-annotated"; the macro is its syntactic
+    /// sugar, this is its no-plugin-cost form — the C1 opt-in path when the
+    /// macro build inflation exceeds threshold, P6 §8 H7). `source` stays in
+    /// the schema's z1-macro lane: same author-declared evidence strength.
+    public static func recordState(key: String, before: String, after: String) {
+        runtime.emitState(key: key, before: before, after: after, source: "z1-macro")
+    }
+
     /// Wrap an expression: record entry, evaluate, record duration (>1ms).
     public static func instrument<T>(file: String, line: Int, body: () throws -> T) rethrows -> T {
         let started = DispatchTime.now().uptimeNanoseconds
