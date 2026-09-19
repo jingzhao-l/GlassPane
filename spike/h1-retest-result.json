@@ -1,0 +1,270 @@
+{
+  "assumption": "H1",
+  "metric": "real-app strong-attribution rate",
+  "threshold": 0.8,
+  "app": {
+    "name": "FineTune",
+    "bundleId": "com.glasspane.h1retest.finetune",
+    "form": ".app (LSUIElement)",
+    "probeCapabilities": [
+      "z1"
+    ]
+  },
+  "daemon": {
+    "bin": "/private/tmp/gp-audit/engine/.build/debug/glasspaned",
+    "c33": false,
+    "socket": "/tmp/glasspane-h1/run/engine.sock"
+  },
+  "lane": "settings-audio-slider",
+  "passedLine": "strong >= 80%",
+  "total": 24,
+  "strong": 24,
+  "rate": 1.0,
+  "handlerHitActs": 0,
+  "verdict": "PASS",
+  "timestamp": "2026-09-20T00:40:50+0800",
+  "acts": [
+    {
+      "operationId": "op_01M2X8MZ34SZKAAX3WV6EDQZVH",
+      "label": "settings-audio-slider/increment",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8MZMV4HBDBGJC9J9GE5Y9",
+      "label": "settings-audio-slider/decrement",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N072TX39AHFAXQXNYW58",
+      "label": "settings-audio-slider/increment",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N0S90CH6JT7YQB86Q6DW",
+      "label": "settings-audio-slider/decrement",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N1BFSP4KFGZYA01JM7PP",
+      "label": "settings-audio-slider/increment",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N1XMBKVPXD37KNKZG81M",
+      "label": "settings-audio-slider/decrement",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N2FFC0CR48E25RH273Z0",
+      "label": "settings-audio-slider/increment",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N31PDASCKQ5F04BSAB44",
+      "label": "settings-audio-slider/decrement",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N3KW4M9DJP13S75QZTC1",
+      "label": "settings-audio-slider/increment",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N4620C30S1MA5WEMXVFY",
+      "label": "settings-audio-slider/decrement",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N4RC9GM4E7V4BP35PKFX",
+      "label": "settings-audio-slider/increment",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N5B2MN0DTN2VCSY2FT2Y",
+      "label": "settings-audio-slider/decrement",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N5XB8FT3M3DKCPQ3M5ZH",
+      "label": "settings-audio-slider/increment",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N6FHF3SJAGJBC7AGWFVJ",
+      "label": "settings-audio-slider/decrement",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N71T3BAF5R3TV86NN2V9",
+      "label": "settings-audio-slider/increment",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N7M3R5DPMPXF81PJ7EXD",
+      "label": "settings-audio-slider/decrement",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N85RX4WGXQTM26MH727S",
+      "label": "settings-audio-slider/increment",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N8QDF9Y79TS0H6TKYKM6",
+      "label": "settings-audio-slider/decrement",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N99PVP0H9B8GQEXJXE6F",
+      "label": "settings-audio-slider/increment",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8N9VWK1Q0SNTGPAN2T6MQ",
+      "label": "settings-audio-slider/decrement",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    }
+  ],
+  "popoverActs": [
+    {
+      "operationId": "op_01M2X8NDKPK6CNZ4P5PH4RSWGR",
+      "label": "popover/increment",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8NE5EP2EVKFDGT91HW18H",
+      "label": "popover/decrement",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8NERTNM1MZWVFPW1GYV8G",
+      "label": "popover/increment",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M2X8NFBA7ZM0PV9ME7YK6QV3",
+      "label": "popover/decrement",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    }
+  ]
+}
