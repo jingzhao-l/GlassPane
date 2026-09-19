@@ -29,6 +29,7 @@ private struct Options {
     var maintenanceProjectId: String?
     var pruneDryRun = false
     var evidenceStats = false
+    var c33Enabled = true
 }
 
 private enum ParseResult {
@@ -56,6 +57,8 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             options.guideScreenPermission = true
         case "--check-input-permission":
             options.checkInputPermission = true
+        case "--no-c33":
+            options.c33Enabled = false
         case "--list-projects":
             options.listProjects = true
         case "--active-project":
@@ -145,6 +148,8 @@ private func printUsage() {
                                  (no-op when already granted) and exit
         --check-input-permission    Print input monitoring permission state
                                  (granted | denied | notDetermined) and exit
+        --no-c33             Disable C33 input monitoring (degrade to pure
+                                 operation-right mutex; act never blocks on user input)
         --list-projects        List all registered projects (JSON) and exit
         --active-project <id>  Set the active project ID and exit
         --recipe-validate <path>  Validate a recipe YAML file and exit
@@ -467,11 +472,27 @@ let socketPath = options.socketPath ?? defaultSocketPath()
 let log = EngineLog(quiet: !options.verbose)
 let channel = AXChannel()
 // T9 progressive degradation is on by default: it needs no TCC permission
-// (proc_pidinfo is same-user process inspection), unlike C33 whose CGEvent
-// input monitoring stays opt-in until the operator grants input monitoring.
+// (proc_pidinfo is same-user process inspection). C33 is injected by default
+// since 2026-09-19 (P4 §36): the CGEvent tap creation itself is the honest
+// permission probe — denied TCC means tapCreate fails and we degrade to the
+// pure operation-right mutex form documented in P2 spec v2.0 §17.2.
+// --no-c33 opts out explicitly (act never waits on user input).
+var attributionGuard: AttributionGuard?
+if options.c33Enabled {
+    let inputMonitor = CGEventInputMonitor()
+    if inputMonitor.startOnBackgroundRunLoop() {
+        attributionGuard = AttributionGuard(inputSource: inputMonitor)
+        log.info("C33 active: CGEvent input tap installed (AttributionGuard injected)")
+    } else {
+        log.info("C33 degraded: input tap unavailable (Input Monitoring TCC not granted?) — contamination undecidable, operation-right mutex only")
+    }
+} else {
+    log.info("C33 disabled via --no-c33 (pure no-guard form)")
+}
 let core = EngineCore(
     channel: channel,
     evidenceStore: EvidenceStore(),
+    attributionGuard: attributionGuard,
     degradationTracker: DegradationTracker(),
     metricsProbe: ProcessMetricsProbe(),
     approvalGate: ApprovalGate(path: ApprovalGate.defaultPath)

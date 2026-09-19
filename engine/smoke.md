@@ -126,3 +126,26 @@ printf '%s\n' \
 10. **T9 真机可达性**：8MB+1fd/轮 的注入强度下 16 轮（约 16s 节奏）触发双信号正斜率
     联合裁决；`screen-recording-denied` 以 R45 预期降级形态共存于 reason，不阻碍
     T9 判定（内存+句柄两信号即满足联合判定）。
+
+### C33 三阶段完整判定冒烟（2026-09-19，daemon 注入 AttributionGuard 后，P4 v4.0 §36）
+
+| 环节 | 脚本 | 结果 |
+|---|---|---|
+| C33 阶段一 操作权互斥 | `engine/.c33_smoke.py` | PASS：注入器连发 otherMouseDown（未占用键 29，(5,5) 角落，无交互副作用）期间 act 如实得 `GP_E_BUSY_INPUT`（5 次重试×50ms 预算耗尽） |
+| C33 阶段二 污染检出 | 同上 | PASS（第 1 次尝试）：注入事件落入操作持有窗 → evidence `attribution.contaminated=true`、`level=weak`（归因如实降级） |
+| C33 阶段三 无误杀 | 同上 | PASS：输入静默后 act `contaminated=false`、`level=soft` |
+| T9/基础回路回归 | `.t9_smoke.py` / `.c33_smoke.py` 头部 | guard 注入后 T9 SMOKE OK（第 16/24 轮触发，busy 零误伤）、完整操作回路 + 归因面如实落盘不回归 |
+
+真机观察补充：
+
+11. **CGEvent 注入→tap 回调存在百毫秒级投递延迟**：阶段一最初以"注入器启动后 0.3s 即
+    act"编排，acquire 时事件尚未入队 → act 未被拒。改为静候 1s 后三阶段稳定全过。
+    污染/忙碌判定面对的是真实时序，冒烟编排必须给投递留余量——这是真机面与单测面的
+    实质差异之一，如实留档。
+12. **launchd 拉起的 daemon 无辅助功能权限（发现，未闭环）**：同一路径二进制，终端子进程
+    形态 glasspaned 可 attach（权限随终端责任链生效），`launchctl kickstart`/开机自启形态
+    报 `GP_E_AX_UNAVAILABLE`。含义：**开机自启要真正可用，需用户把 glasspaned 二进制自身
+    加入 系统设置>隐私与安全性>辅助功能**（设置面板拖拽引导可完成）。本仓库现网处置：
+    launchd 作业暂时 bootout、以终端子进程运行冒烟；用户授权后 `launchctl bootstrap
+    gui/$(id -u) ~/Library/LaunchAgents/com.glasspane.daemon.plist` 恢复自启即两全。
+    （与 §33.1 观察 3"屏幕录制 TCC 不继承"同族：TCC 以责任进程归属，非常驻身份归属。）

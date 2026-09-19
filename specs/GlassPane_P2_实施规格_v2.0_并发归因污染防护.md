@@ -434,7 +434,8 @@ public final class AttributionGuard {
 ### 16.2 真机冒烟（可选，需 TCC 输入监控权限）
 
 - CGEvent 全局输入监控适配层（`CGEventInputMonitor`，运行时文件）：真实用户按键/移动鼠标 → 冒烟脚本断言归因被污染。无自动化（与 AX 适配层同口径，R45）。
-- ✓ 2026-09-19 真机冒烟通过（`engine/.c33_smoke.py`，输入监控 TCC=granted）：`glasspaned --check-input-permission` 三态如实探测 → 自动发现 settings GUI → attach/observe/act/last_evidence 完整回路 + 归因面（soft/contaminated=false/熔断 level=1）真实落盘，留档 `engine/smoke.md`。如实边界：输入流污染判定的注入验证待 daemon 注入 AttributionGuard 后进行（§17.2 降级口径，当前为纯操作权互斥形态）。
+- ✓ 2026-09-19 真机冒烟通过（`engine/.c33_smoke.py`，输入监控 TCC=granted）：`glasspaned --check-input-permission` 三态如实探测 → 自动发现 settings GUI → attach/observe/act/last_evidence 完整回路 + 归因面（soft/contaminated=false/熔断 level=1）真实落盘，留档 `engine/smoke.md`。当时如实边界：输入流污染判定的注入验证待 daemon 注入 AttributionGuard 后进行（§17.2 降级口径，当时为纯操作权互斥形态）。
+- ✓ 2026-09-19（同日收口，P4 v4.0 §36）daemon 默认注入 AttributionGuard 后三阶段冒烟全过：持续注入期 act 得 `GP_E_BUSY_INPUT`（操作权互斥）；注入事件落入持有窗 → `contaminated=true` + 归因降 `weak`（污染检出）；输入静默后 `contaminated=false` + `soft`（无误杀）。上条"待注入"边界就此闭环，留档 `engine/smoke.md`"C33 三阶段完整判定冒烟"。
 
 ### 16.3 验收表
 

@@ -57,6 +57,10 @@ public final class CGEventInputMonitor: InputEventSource {
         eventsBuffer.pop()
     }
 
+    public func peekAvailable() -> [InputEvent] {
+        eventsBuffer.snapshot()
+    }
+
     // MARK: - Lifecycle
 
     /// Starts the tap on the calling run loop (dispatch to an event queue).
@@ -66,12 +70,39 @@ public final class CGEventInputMonitor: InputEventSource {
         installTap()
     }
 
-    public func stop() {
-        if let runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+    /// Installs the tap on a dedicated background thread with its own run
+    /// loop and keeps that loop pumped. The daemon main thread blocks in
+    /// `server.run()`, so tapping the *current* loop there would silently
+    /// deliver zero events — this is the shape the daemon must use.
+    /// Returns false when the tap cannot be created (Input Monitoring TCC
+    /// not granted): the caller degrades to operation-right mutex only.
+    public func startOnBackgroundRunLoop() -> Bool {
+        let ready = DispatchSemaphore(value: 0)
+        var installed = false
+        let thread = Thread { [weak self] in
+            guard let self else {
+                ready.signal()
+                return
+            }
+            installed = self.installTap()
+            ready.signal()
+            if installed {
+                RunLoop.current.run()
+            }
         }
+        thread.name = "glasspane.c33.input-monitor"
+        thread.start()
+        ready.wait()
+        return installed
+    }
+
+    public func stop() {
+        // Tap delivery runs on the background thread's loop; invalidating the
+        // mach port from any thread stops callbacks (CFMachPort is
+        // thread-safe for invalidation).
         if let eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
+            CFMachPortInvalidate(eventTap)
         }
         eventTap = nil
         runLoopSource = nil
@@ -108,5 +139,11 @@ final class LockedEventBuffer {
         defer { lock.unlock() }
         guard !buffer.isEmpty else { return nil }
         return buffer.removeFirst()
+    }
+
+    func snapshot() -> [InputEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return buffer
     }
 }

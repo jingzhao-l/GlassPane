@@ -1108,7 +1108,7 @@ P2 两批判定逻辑均有合成单测，真机冒烟口径（R45）此前停�
 
 | 脚本 | 覆盖 | 前置 | 状态 |
 |---|---|---|---|
-| `engine/.c33_smoke.py` | 输入监控 TCC 三态如实探测（`glasspaned --check-input-permission`，本批随带新增该 CLI flag）→ 自动发现/指定目标 → attach/observe/act/last_evidence 完整回路与归因面观测；未授权时 SKIP（exit 0）并给授权指引 | 输入监控 TCC（本机 2026-09-19 实测已 granted）+ daemon 运行 | ✓ C33 SMOKE OK（2026-09-19）；污染判定注入验证待 AttributionGuard 注入（§17.2 降级口径），非脚本缺口 |
+| `engine/.c33_smoke.py` | 输入监控 TCC 三态如实探测（`glasspaned --check-input-permission`，本批随带新增该 CLI flag）→ 自动发现/指定目标 → attach/observe/act/last_evidence 完整回路与归因面观测；未授权时 SKIP（exit 0）并给授权指引 | 输入监控 TCC（本机 2026-09-19 实测已 granted）+ daemon 运行 | ✓ C33 SMOKE OK（2026-09-19）；污染判定注入验证已于同日随 §36 daemon 注入 AttributionGuard 收口（本行当时为纯操作权互斥形态的边界，现三阶段全过） |
 | `engine/.t9_smoke.py` | 自编译泄漏金丝雀（8MB 内存 + 1 fd/次点击保留）→ daemon 驱动 ≤24 轮 act → evidence 熔断升级 `.degraded` + `degradation\|` reason → `diagnose.class=T9` | 无 TCC 依赖（proc_pidinfo 采样）；daemon 运行 | ✓ T9 SMOKE OK（2026-09-19，第 16/24 轮触发） |
 
 脚本约定：socket/目标/轮数为位置参数可覆盖；退出语义 0=PASS/SKIP、1=FAIL；目标发现不伪造（全部实例 AX 树无按钮时明确报错引导开窗口）。
@@ -1145,3 +1145,31 @@ install.sh 提供 `GLASSPANE_INSTALL_DRY_RUN=1`：只报告分支决策（定位
 2. **TCC 授权不在一键能力内**：install.sh 的尽头是"把 GUI 引导送到人面前"（§33.2 决策链条目 5 的诚实边界重申），无任何程序化授权路径。
 3. **clone 内容 = main 分支源码**：与 registry 发布（挂 Phase B）无关——install.sh 是 §33.2 判定的一等分发渠道本身；`GLASSPANE_REPO_URL` 覆盖能力保留给镜像/内网场景。
 4. **非 TTY 自动 `--no-prompt`**：`curl | sh` 管道场景 stdin 非终端，逐步确认会挂死或误跳过——脚本检测 `[ -t 0 ]` 后自动静默放行，属既定语义而非缺陷；带交互终端直接运行 `sh install.sh` 仍逐步确认。
+
+---
+
+## 36. daemon 默认注入 AttributionGuard——C33 真机全判定收口（v4.0 追加，2026-09-19）
+
+> **追加依据**：P2 v2.0 §16.2/§17.2 的既有待办面（"污染判定注入验证待 daemon 注入 AttributionGuard"）。guard 判定逻辑、EngineCore 集成与 CGEvent 适配层早已入库且有单测，缺的只是 main.swift 的构造注入一环；输入监控 TCC 实测 granted（§34.5）后该注入不再有任何外部前置——属"能做的现在就做"批次，非新需求。
+
+### 36.1 实现
+
+- `main.swift`：daemon 启动时构造 `CGEventInputMonitor` 并 `startOnBackgroundRunLoop()`——**tap 创建成功与否即权限的如实探测**：成功 → `AttributionGuard(inputSource: monitor)` 注入 EngineCore（日志 `C33 active`）；失败（TCC 未授权）→ 不注入 + 日志 `C33 degraded`，行为回到 §17.2 既定的纯操作权互斥形态，不谎称启用；`--no-c33` 显式关闭（维护/排障面）；
+- `CGEventInputMonitor` 两处补齐（运行时适配层，R45 真机面验收）：① `startOnBackgroundRunLoop()`——tap 装进专用后台线程并泵其 RunLoop（daemon 主线程阻塞在 `server.run()`，装在"当前 RunLoop"会静默零事件——实现期真机发现，如实留档）；② `peekAvailable()`（buffer 加锁快照）使 acquire 的空闲检测对真实事件源生效（此前落到协议默认"保守放行"）；`stop()` 改经 `CFMachPortInvalidate` 线程安全停递送；
+- **零协议变更**：方法表/错误码/帧格式不动（`GP_E_BUSY_INPUT` 为 v1.4 冻结表既有条目）；kernel/mcp-shell 零触及。
+
+### 36.2 真机验收（三阶段，脚本 `engine/.c33_smoke.py`，留档 `engine/smoke.md`）
+
+| 编号 | 验收项 | 通过标准 | 状态 |
+|---|---|---|---|
+| P4-K1 | 操作权互斥 | 持续注入窗（30×100ms）内 act → `GP_E_BUSY_INPUT`（5×50ms 重试预算耗尽，拒绝执行不谎报干净） | ✓ 2026-09-19 |
+| P4-K2 | 污染检出 | 注入事件落入操作持有窗 → evidence `contaminated=true` + 归因降 `weak` | ✓ 2026-09-19（第 1 次尝试即检出） |
+| P4-K3 | 无误杀 | 输入静默后 act → `contaminated=false` + `level=soft` | ✓ 2026-09-19 |
+| P4-K4 | 不回归 | engine 单测 294 全绿；T9 冒烟与基础操作回路在 guard-on daemon 上复跑通过 | ✓ 2026-09-19 |
+| P4-K5 | 降级路径如实 | tap 创建失败（无 TCC）→ 不注入 + degraded 日志；`--no-c33` 显式关 | ✓ 代码路径与日志就位；本机 granted，未授权形态以日志语义为准 |
+
+注入器语义（诚实声明）：冒烟以未占用鼠标键（button 29、角落坐标）合成 otherMouseDown/Up——daemon 视角凡非 AX 通道入 tap 者一律 `.human`，合成即足以复现判定面，对被测系统零交互副作用。真机观察（投递延迟需留 1s 余量、launchd 形态 daemon 的 TCC 责任进程问题）见 `engine/smoke.md` 观察 11/12。
+
+### 36.3 遗留（本批新发现，如实挂账）
+
+- **launchd 自启形态的辅助功能授权未闭环**：同路径二进制终端子进程可 attach、launchd 拉起报 `GP_E_AX_UNAVAILABLE`（TCC 随责任进程归属）。用户动作面：把 glasspaned 加入系统设置>辅助功能（设置面板拖拽引导即为此设计）后恢复 bootstrap；仓库动作面无欠账——注入逻辑与探测均已完成，属 §32-3"无头/权限运行边界"同族的真机授权事项。
