@@ -1,0 +1,85 @@
+--- FineTune/FineTune/FineTuneApp.swift	2026-07-09 15:54:55
++++ fine-spm/Sources/FineTune/FineTuneApp.swift	2026-09-19 21:06:27
+@@ -4,6 +4,7 @@
+ import FluidMenuBarExtra
+ import AppKit
+ import os
++import GlassPaneProbe
+ 
+ private let logger = Logger(subsystem: "com.finetuneapp.FineTune", category: "App")
+ 
+@@ -101,12 +102,14 @@
+     }
+ 
+     init() {
++        GP.start(appName: "FineTune")
+         // Install crash handler to clean up aggregate devices on abnormal exit
+         CrashGuard.install()
+         // Destroy any orphaned aggregate devices from previous crashes
+         OrphanedTapCleanup.destroyOrphanedDevices()
+ 
+         let settings = SettingsManager()
++        GP.registerMirrorRoot(label: "settings", object: settings)
+         let profileManager = AutoEQProfileManager()
+         let permission = AudioRecordingPermission()
+         let engine = AudioEngine(permission: permission, settingsManager: settings, autoEQProfileManager: profileManager)
+@@ -233,10 +236,10 @@
+         // This ensures proper initialization order: deviceMonitor.start() -> deviceVolumeMonitor.start()
+ 
+         // Set delegate before requesting authorization so willPresent is called
+-        UNUserNotificationCenter.current().delegate = _appDelegate.wrappedValue
++        SpikeNotifications.center?.delegate = _appDelegate.wrappedValue
+ 
+         // Request notification authorization (for device disconnect alerts)
+-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { granted, error in
++        SpikeNotifications.center?.requestAuthorization(options: [.alert]) { granted, error in
+             if let error {
+                 logger.error("Notification authorization error: \(error.localizedDescription)")
+             }
+--- FineTune/FineTune/Models/VolumeState.swift	2026-07-09 15:54:55
++++ fine-spm/Sources/FineTune/Models/VolumeState.swift	2026-09-19 20:23:56
+@@ -1,5 +1,6 @@
+ // FineTune/Models/VolumeState.swift
+ import Foundation
++import GlassPaneProbe
+ 
+ /// Device selection mode for an app's audio output
+ enum DeviceSelectionMode: String, Codable, Equatable {
+@@ -35,6 +36,8 @@
+     }
+ 
+     func setVolume(for pid: pid_t, to volume: Float, identifier: String? = nil) {
++        GP.recordHandler()
++        GP.recordState(key: "volume.\(pid)", before: states[pid].map { String($0.volume) } ?? "∅", after: String(volume))
+         if var state = states[pid] {
+             state.volume = volume
+             if let identifier = identifier {
+--- FineTune/FineTune/Audio/Engine/AudioEngine.swift	2026-07-09 15:54:55
++++ fine-spm/Sources/FineTune/Audio/Engine/AudioEngine.swift	2026-09-19 20:41:28
+@@ -1649,7 +1649,7 @@
+             trigger: nil
+         )
+ 
+-        UNUserNotificationCenter.current().add(request) { [weak self] error in
++        SpikeNotifications.center?.add(request) { [weak self] error in
+             if let error {
+                 self?.logger.error("Failed to show notification: \(error.localizedDescription)")
+             }
+@@ -1668,7 +1668,7 @@
+             trigger: nil
+         )
+ 
+-        UNUserNotificationCenter.current().add(request) { [weak self] error in
++        SpikeNotifications.center?.add(request) { [weak self] error in
+             if let error {
+                 self?.logger.error("Failed to show notification: \(error.localizedDescription)")
+             }
+@@ -1784,7 +1784,7 @@
+             trigger: nil
+         )
+ 
+-        UNUserNotificationCenter.current().add(request) { [weak self] error in
++        SpikeNotifications.center?.add(request) { [weak self] error in
+             if let error {
+                 self?.logger.error("Failed to show notification: \(error.localizedDescription)")
+             }

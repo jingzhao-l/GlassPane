@@ -72,7 +72,7 @@ daemon → 探针：`op_begin {}` / `op_end {}` / `checkpoint_export {domains}` 
 - 探针事件**不自带 opId**；daemon 以 act 窗口 `[t0, t1]`（t0=performAction 前、t1=settle 后采集位）对事件按 wall-clock 区间归属——同一挂钟域，无需时钟同步；窗口独占性由 C33 操作权互斥担保（P2 v2.0 已闭环，§36）。
 - op_begin/op_end 通知探针开窗/闭窗：**op_end 兼作 Z2 基线差分触发点**（探针在命令处理内同步出 diff 事件），daemon 在 op_end 后以 `probeEndDrainSeconds = 0.06s` 排空窗再闭合（`endWindow`），覆盖回环投递竞速；探针在场的事件流本身不需要该等待（Z3 KVO 实时推）。
 - 迟到归属：op_end 后 ≤2s 宽限窗内的 handler 事件计入该 op 的 `lateCount`（探针不区分同/异 file:line——"延迟反应"的定义就是操作后迟到的信号；act 由 dispatcher 串行化，无歧义归属）。异步续体在窗口内落地的不算迟到（真机校准见 §0 F8）。
-- 归因升级：窗口内存在 ≥1 条探针事件且 actConfirmed 且未污染 → `attribution.level = strong`（本仓库首次出现 strong；C2 强归因覆盖率 = strong pack / 有探针的 pack）。污染 → weak、无探针 → soft，既有语义零变更。
+- 归因升级：窗口内存在 ≥1 条探针事件（**handler 命中或 state 变更任一**——state-only 覆盖 SwiftUI `$binding` 框架内写这条 Z1b 真实路径：作者无法标注、但状态变更本身同窗可归因，§8 H1/H3 实施期定形）且 actConfirmed 且未污染 → `attribution.level = strong`（本仓库首次出现 strong；C2 强归因覆盖率 = strong pack / 有探针的 pack）。污染 → weak、无探针 → soft，既有语义零变更。
 
 ---
 
@@ -172,9 +172,9 @@ daemon → 探针：`op_begin {}` / `op_end {}` / `checkpoint_export {domains}` 
 | 编号 | 验收项 | 通过标准 | 状态 |
 |---|---|---|---|
 | P6-A | 探针 SDK 单测 | GPHooks 事件环、Mirror 有界遍历（深度/节点上限生效）、KVC 观测、checkpoint 导出/写回 roundtrip、重连退避、宏展开等价（表达式求值一次且结果透传） | ✓ 2026-09-19（engine/probe 10 用例；含宏展开 fileID:line 定位、evicted/setter-missing 两路诚实拒绝） |
-| P6-B | daemon 侧单测 | ProbeWire 帧编解码、ProbeInbox 窗口归属/lateCount、probe_status、GP_E_PROBE_UNAVAILABLE remedy、分类器 T4/T5/T7/T8 四分支 + strong 升档 + 无探针零回归 | ✓ 2026-09-19（EngineP6ProbeTests 25 用例；含篡改 digest 拒绝、档 1 分歧一致=false、双关窗防重） |
+| P6-B | daemon 侧单测 | ProbeWire 帧编解码、ProbeInbox 窗口归属/lateCount、probe_status、GP_E_PROBE_UNAVAILABLE remedy、分类器 T4/T5/T7/T8 四分支 + strong 升档 + 无探针零回归 | ✓ 2026-09-19（EngineP6ProbeTests 27 用例；含篡改 digest 拒绝、档 1 分歧一致=false、双关窗防重、state-only 升 strong） |
 | P6-C | schema 双侧同步 | kernel zod + JSON Schema + Swift Codable 三点一致；ok-01/02 仍绿、ok-03 带值 fixture 双语言 roundtrip 100%（C35 通道） | ✓ 2026-09-19（kernel 51、mcp-shell 67、engine roundtrip 列表含 ok-03；三条新负例守 shape） |
 | P6-D | 桥测试 | test_bridge.py 纯函数全绿（JSON 组装/截断/FIFO 队列）；SB API 冒烟按 §7.5 实验结论 | ✓ 纯函数 17/17 + lldb 内 import/命令注册/gp-queue JSON 真机 ✓；capture 执行面挂账 §7.5（权限/环境，非代码缺口） |
 | P6-E | 真机冒烟（合成对照 app） | probe-demo：act→last_evidence 带 handlerProbe/stateDiff 真值 + attribution=strong；五类金丝雀（T3/T4/T5/T7/T8）各检出一次；checkpoint export→snapshot→rollback_full 执行面回传 rollbackExecuted=true + consistent=true | ✓ 2026-09-19（`engine/.p6_smoke.py` P6 SMOKE OK：strong/真值信号/T3..T8 全中、lateCount=1 落盘、档 1 执行面 consistent=true；NO_ANOMALY 金丝雀在屏幕录制未授予环境按 §3.2 落 INCONCLUSIVE，脚本如实分支） |
-| P6-F | spike 全表 | §8 H1–H7 实数据入 spike/results.md，含无法达成项的如实边界（如 H4 合成替代标注） | （实施回填） |
-| P6-G | 全量回归 | engine 既有 294+新增 0 失败；kernel/mcp-shell/installer 全绿；C33/T9 冒烟脚本对 §36 守护形态零回归 | ✓ 2026-09-19（worktree 隔离基线 319 用例 0 失败 1 opt-in 跳过；installer 面由并行批次持有，不属本批变更面） |
+| P6-F | spike 全表 | §8 H1–H7 实数据入 spike/results.md，含无法达成项的如实边界（如 H4 合成替代标注） | ✓ 2026-09-19（FineTune 真 app 注入编译+探针注册通；H3 严 17.4%✓；H7 超阈→C1 opt-in 落地；H4 降基线通道；H1 真实比率挂 Phase B 复测配方已给；schema 冻结评估=仅剩该项，维持 draft 不冻结） |
+| P6-G | 全量回归 | engine 既有 294+新增 0 失败；kernel/mcp-shell/installer 全绿；C33/T9 冒烟脚本对 §36 守护形态零回归 | ✓ 2026-09-19（worktree 隔离基线 **321 用例 0 失败** 1 opt-in 跳过 =294 基线+27 新增；kernel 51/mcp-shell 67/bridge 17/probe 10 全绿；.p6_smoke.py 对 worktree 二进制复跑 P6 SMOKE OK 零回归；installer 面由并行会话持有、不属本批变更面） |

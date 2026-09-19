@@ -398,10 +398,15 @@ public final class EngineCore {
             contaminationVerdict = attributionGuard.releaseOperationRight()
         }
         let contaminated = contaminationVerdict?.contaminated ?? false
-        // P6 §2.3: an in-window probe hit upgrades soft → strong (first hard
-        // attribution surface); contamination still dominates → weak.
+        // P6 §2.3: an in-window probe event (handler hit OR state change)
+        // upgrades soft → strong (first hard attribution surface);
+        // contamination still dominates → weak. State-only strong covers the
+        // real-world binding-write paths (SwiftUI `$state` writes the author
+        // cannot annotate — Z1b), where the state channel is the only, yet
+        // genuinely operation-attributable, evidence (P6 §8 H1/H3 refinement).
         var attributionLevel: AttributionLevel = contaminated ? .weak : .soft
-        if !contaminated, (probeSignals?.handlerProbe?.hitCount ?? 0) > 0 {
+        if !contaminated, let signals = probeSignals,
+           (signals.handlerProbe?.hitCount ?? 0) > 0 || (signals.stateDiff?.changed ?? false) {
             attributionLevel = .strong
         }
         let attribution = Attribution(

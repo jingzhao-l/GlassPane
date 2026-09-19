@@ -210,6 +210,22 @@ final class P6EngineCoreProbeTests: XCTestCase {
         )
     }
 
+    func testStateOnlyProbeEventsAlsoGrantStrong() throws {
+        // Z1b real-world path: binding writes produce no handler events, yet
+        // an in-window state change is operation-attributable evidence (§2.3).
+        let time = P6TimeBox()
+        let inbox = ProbeInbox(now: { time.now })
+        inbox.register(p6Hello(capabilities: ["z2"]))
+        let core = makeCore(time: time, inbox: inbox)
+        _ = try core.attach(bundleId: "com.example.app", pid: nil)
+        inbox.ingest(pid: 4242, frame: .state(key: "settings.unit", before: "db", after: "percent", source: "z2-mirror", ts: 0))
+        let result = try core.act(selector: Selector(role: "AXButton", title: "Submit"), action: .press)
+        let pack = try core.lastEvidence(operationId: result["operationId"] as? String)
+        XCTAssertEqual(pack.attribution.level, .strong)
+        XCTAssertEqual(pack.signals.handlerProbe?.hitCount, 0)
+        XCTAssertEqual(pack.signals.stateDiff?.changed, true)
+    }
+
     func testActWithProbeYieldsStrongAttributionAndRealSignals() throws {
         let time = P6TimeBox()
         let inbox = ProbeInbox(now: { time.now })
