@@ -5,7 +5,8 @@
  * 流程：terminal onboarding 横幅 → 环境预检（node/swift/git/open）→ 定位项目
  * 根目录 → npm install（workspaces）→ 编译 TS（kernel → mcp-shell）→ swift
  * build -c release（engine）→ 启动 glasspaned（已运行则跳过）→ 打开
- * glasspane-settings GUI 进入权限拖拽引导 → 打印后续使用说明。
+ * glasspane-settings GUI 进入权限拖拽引导 → 打印后续使用说明（含 MCP 客户端
+ * 接入配置片段）。用户侧一键入口为仓库根 install.sh（源码定位/clone 后委托本文件）。
  *
  * 所有辅助函数均具名导出，供 node:test 单测（test/cli.test.mjs），主流程通过
  * import.meta.url 守卫隔离，测试导入不会触发安装动作。
@@ -26,6 +27,12 @@ export const DAEMON_LOG_NAME = 'installer-daemon.log'
 export const LAUNCHD_LABEL = 'com.glasspane.daemon'
 export const LAUNCHD_DIR_NAME = 'Library/LaunchAgents'
 export const LAUNCHD_FILE_NAME = `${LAUNCHD_LABEL}.plist`
+
+/** 源码仓库公共地址（install.sh  clone 与"未找到仓库"指引共用同一真源）。 */
+export const REPO_URL = 'https://github.com/jingzhao-l/GlassPane.git'
+/** 一键安装入口脚本的 raw 地址（用户侧 curl 指引真源）。 */
+export const INSTALL_SH_URL =
+  'https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh'
 
 const ANSI = {
   reset: '\x1b[0m',
@@ -341,6 +348,56 @@ export function usageText() {
   ].join('\n')
 }
 
+/** 生成 MCP 客户端接入配置片段（纯函数）：mcp-shell 以仓库内构建产物直连，
+ *  与 §33.2 决策链一致——npx 发布形态挂 Phase B，本地安装即所得。
+ *  socketPath 为 daemon 默认路径时仍显式写入 env，避免读者误以为不可配置。 */
+export function mcpClientConfigSnippet({ rootDir, socketPath }) {
+  return JSON.stringify(
+    {
+      mcpServers: {
+        glasspane: {
+          command: 'node',
+          args: [path.join(rootDir, 'mcp-shell', 'dist', 'index.js')],
+          env: { GLASSPANE_ENGINE_SOCK: socketPath },
+        },
+      },
+    },
+    null,
+    2,
+  )
+}
+
+/** 安装完成后的使用说明（§34.2 步骤 8：mcp-shell 接入 + 授权/维护提示）。 */
+export function nextStepsText({ rootDir, socketPath, guiOpened }) {
+  return [
+    paint('后续使用说明', 'bold'),
+    '',
+    '1. MCP 客户端（Claude Desktop / Cursor / 任意 MCP host）接入配置片段：',
+    '',
+    mcpClientConfigSnippet({ rootDir, socketPath }),
+    '',
+    '2. TCC 权限（辅助功能/输入监控/屏幕录制/开发者工具）——授权勾选必须人工，无程序化路径（P1 v1.2 §10.1）。',
+    guiOpened
+      ? '   面板已打开：拖拽图标到对应权限卡即跳转系统设置面板。'
+      : '   打开面板：open "' + path.join(rootDir, 'engine', '.build', 'release', 'GlassPane.app') + '"（拖拽图标即跳转系统设置面板）。',
+    '3. daemon 已注册 launchd 开机自启（--no-launchd 可跳过）；维护命令：',
+    '   glasspaned --approval-audit / --approval-verify / --prune-evidence / --evidence-stats',
+    '4. registry 发布形态（npx glasspane-mcp）挂 kernel Phase B（P4 §33.2 决策链），当前以本仓库产物为准。',
+    '',
+  ].join('\n')
+}
+
+/** 未定位到仓库时的指引文本（纯函数，可单测）。 */
+export function repoMissingText() {
+  return [
+    '未定位到 GlassPane 项目根目录（需同时包含 engine/Package.swift 与 mcp-shell/package.json）。',
+    '可选路径：',
+    `  a) 一键安装（自动 clone 源码后进入本流程）：curl -fsSL ${INSTALL_SH_URL} | sh`,
+    `  b) 手工 clone：git clone ${REPO_URL} && cd GlassPane && node installer/cli.js`,
+    '  c) 已在本仓库其他位置：--repo <目录> 或 GLASSPANE_REPO 环境变量指定根目录。',
+  ].join('\n')
+}
+
 /** 主安装流程；所有副作用步骤均记录真实执行结果，失败即抛错终止。 */
 export async function install({ options = parseArgs([]).options, env = process.env } = {}) {
   const explicitRoot = options.repoDir ? path.resolve(options.repoDir) : null
@@ -348,10 +405,7 @@ export async function install({ options = parseArgs([]).options, env = process.e
   const rootDir = explicitRoot ?? envRoot ?? resolveProjectRoot()
 
   if (!rootDir || !fs.existsSync(rootDir)) {
-    throw new Error([
-      '未定位到 GlassPane 项目根目录（需同时包含 engine/Package.swift 与 mcp-shell/package.json）。',
-      '请在仓库目录内运行本安装器，或使用 --repo <目录> 指定。',
-    ].join('\n'))
+    throw new Error(repoMissingText())
   }
 
   const engineDir = path.join(rootDir, 'engine')
@@ -425,15 +479,18 @@ export async function install({ options = parseArgs([]).options, env = process.e
     }
   }
 
+  let guiOpened = false
   if (options.gui) {
     if (!fs.existsSync(settingsBin)) {
       throw new Error(`设置面板产物不存在：${settingsBin}`)
     }
     printStep(`打开 glasspane-settings 设置面板（权限拖拽引导）……`)
     startDetached(settingsBin, [], daemonLog)
+    guiOpened = true
   }
 
-  printStep('安装完成。', true)
+  printStep('安装完成。')
+  process.stdout.write(`\n${nextStepsText({ rootDir, socketPath, guiOpened })}\n`)
 }
 
 /** 入口守卫：直接用 node 运行本文件时才走安装流程（测试导入仅取函数）。 */

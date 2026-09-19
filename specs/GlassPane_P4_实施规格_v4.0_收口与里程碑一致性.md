@@ -1043,6 +1043,15 @@ public struct DecisionLogEntry: Codable, Equatable {
 
 **mcp-shell npm 发布核对（2026-09-19 更新）**：仓库侧发布形态已就位——`files: ["dist"]` 白名单、`bin: glasspane-mcp`（src 顶部 shebang，tsc 保留；bin 值不带 `./` 前缀以过 npm normalize）、`npm publish --dry-run` 零警告、tarball 仅含 dist + package.json（41 文件 / 30.8 kB）。但发布动作经核对存在两个仓库外前置，**用户决定暂缓发布**：① npm registry 上 `@glasspane` 与 `@iterate` org 均不存在（API 实测），org 创建仅网页端可行；② 运行时依赖 `@iterate/kernel` 为 `file:../kernel` 且 private——registry 消费者无法解析，发布前需先定 kernel 分发形态（单独发布 vs bundle 进壳，后者与综述 5.8"MCP 壳零依赖"决策一致）。解除前维持仓库内 workspace 形态。
 
+**发布决策链全记录（2026-09-19 复审定稿，取代上文与 §34.4 中的 scoped 名称口径）**：
+
+1. **发布时点 → 挂 Phase B 门控链**。mcp-shell/kernel 的 registry 发布不作为独立动作执行，统一后移至 kernel Phase B（综述 §8.5 门控：GlassPane P1 出口 + C28/C35 达标 + **C2 spike 真实 app 数据回填、schema draft→freeze**）。理由：kernel 与 mcp-shell 的发布形态由 iterate 生态共同决定（Phase B 后 kernel 迁入 iterate monorepo，其发布跟随 monorepo 策略），先单独发布再改是双向 breaking change；且 §33.2 判定 npx 从未是独立分发渠道——daemon 必由安装器送达，MCP 壳随安装产物就地可用。
+2. **org / scoped 名称 → 出局（实测证据）**。`@glasspane` 不可注册：registry 上 `glasspane` 包名为 2025-05-14 发布后 3 分钟内撤下的**墓碑占位**（unpublished 名称永久不可复用），org 名不得与现存包（含墓碑）冲突；`@iterate` 不可注册：为活跃包（维护者 mmkale 等 4 人，0.2.7，与本项目无关）；GitHub 同名组织亦已被占。两路均无绕过手段（npm 争议表单仅适用商标抢注申诉，不适用墓碑）。
+3. **名称映射 → 裸名（unscoped），与用户 iterate 生态既有惯例一致**。实测用户在 npm 上的 3 个 iterate 生态包全部为裸名（无 scope）。据此约定（届时"顺手提交发布"，不作为前置依赖）：**mcp-shell → `glasspane-mcp`**（名称可用性 404 实测）、**installer → `glasspane-install`**（404 实测，`bin: glasspane-install` 已就位）、**kernel → `iterate-kernel`**（404 实测；最终命名决定权留给 Phase B 迁入 iterate monorepo 时，见下条裁决）。
+4. **kernel 命名裁决：维持 iterate 定位，不改为 glasspane-kernel（记录双方取舍，不锁死）**。反改理由：① §8.5 铁律"Swift Engine Core 不进 kernel"，命名 glasspane-kernel 会诱导消费者把 daemon 判定逻辑误认为可入 kernel；② kernel 的路线主语是 iterate 生态（fork→kernel 单向依赖、四消费者矩阵），GlassPane 只是首个消费者，名字应随所有权；③ Phase B 迁移后名称随 iterate monorepo 策略，现在改名只存活一个阶段。若用户后续裁决改名，成本为文档叙事层（package.json name 一行 + 综述引用），无代码耦合。
+5. **installer 升为一等分发渠道 + install.sh 一键路线**。用户侧完整一键路径定为 `curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh | sh`：install.sh 承担工具链预检（Xcode CLT / Node ≥18 / git）与**源码获取**（无仓库时 clone 到 `~/glasspane`，有仓库时直接进入），随后委托既有 `installer/cli.js` 全流程；编译维持源码产物（本机 ad-hoc 签名免公证，与 §33.2 判定一致）。诚实边界：TCC 授权点击仍必须人工（P1 v1.2 §10.1），一键的尽头是"引导到人"。落地详见 §35。
+6. **备份渠道评估存档**：个人 scope（`@jingzhao-l/*`）技术上即刻可得但引入与生态惯例不一致的双轨命名；GitHub Packages 对公开包安装仍需鉴权（匿名 curl 实测 401），不适配免登录分发；Homebrew 需同名 tap 维护且与 npm 惯例分叉。均不采用。
+
 ### 33.3 §32-3/4/5/6 其余遗留核对（2026-09-19）
 
 | §32 条目 | 状态 | 说明 |
@@ -1067,7 +1076,7 @@ public struct DecisionLogEntry: Codable, Equatable {
 
 ### 34.2 安装流程（端到端）
 
-`npm` 之后（当前为仓库内 `node installer/cli.js`，将来发布 `npx @glasspane/installer`）触发的 onboarding 全流程：
+`npm` 之后（当前为仓库内 `node installer/cli.js`；将来一键形态见 §35 install.sh，registry 发布挂 Phase B 且按 §33.2 决策链改用裸名 `glasspane-install`——本节原写 `npx @glasspane/installer` 的 scoped 口径已被 §33.2 决策链取代）触发的 onboarding 全流程：
 
 1. **横幅 + 参数解析**：`--repo <目录>`（缺省自动向上查根）、`--no-prompt`、`--no-daemon`、`--no-gui`、`--skip-build`、`--help`（`parseArgs` 可单测）。
 2. **环境预检**（真实探测，不伪造）：node >= 18（解析 `node --version`）、npm、swift、git、open（open 不支持 `--version`，退化为 `/usr/bin/open` 可执行性检查）。缺项逐条列出并退出码 1，修好重跑即可。
@@ -1089,7 +1098,7 @@ public struct DecisionLogEntry: Codable, Equatable {
 
 ### 34.4 边界与后续
 
-- 现版本为仓库内安装器（私有仓库、无 npm token、不进 registry）；将来开放分发时 `bin: glasspane-install` 已就位，直接发布即可获得 `npx @glasspane/installer` 形态，用户侧无需改命令。
+- 现版本为仓库内安装器（私有仓库、无 npm token、不进 registry）；将来开放分发时 `bin: glasspane-install` 已就位，按 §33.2 决策链以**裸名 `glasspane-install`** 发布即可获得 `npx glasspane-install` 形态（原 `@glasspane/installer` scoped 口径出局），用户侧无需改命令；发布时点挂 Phase B，非前置依赖。
 - daemon 多实例：安装器不主动 `pkill` 旧 daemon（避免误杀用户手工进程），仅做 socket 占用探测；若历史调试 daemon 占用 socket，安装器会如实报"已监听"跳过启动。
 - 拖拽仅实现"精确导航 + 自动点亮"；TCC 勾选必须人工完成，无任何程序化授权路径（P1 v1.2 §10.1 诚实边界）。
 
@@ -1103,3 +1112,36 @@ P2 两批判定逻辑均有合成单测，真机冒烟口径（R45）此前停�
 | `engine/.t9_smoke.py` | 自编译泄漏金丝雀（8MB 内存 + 1 fd/次点击保留）→ daemon 驱动 ≤24 轮 act → evidence 熔断升级 `.degraded` + `degradation\|` reason → `diagnose.class=T9` | 无 TCC 依赖（proc_pidinfo 采样）；daemon 运行 | ✓ T9 SMOKE OK（2026-09-19，第 16/24 轮触发） |
 
 脚本约定：socket/目标/轮数为位置参数可覆盖；退出语义 0=PASS/SKIP、1=FAIL；目标发现不伪造（全部实例 AX 树无按钮时明确报错引导开窗口）。
+
+---
+
+## 35. install.sh 一键安装入口与 MCP 配置输出（v4.0 追加，2026-09-19）
+
+> **追加依据**：§33.2 决策链条目 5（installer 一等分发渠道 + install.sh 一键路线）与 §34.2 步骤 8（"打印后续使用说明"，§34 落地时未兑现）的既有决策兑现，非新需求——延续 §33/§34"落实记录不开启新规格系列"口径。
+
+### 35.1 职责切分
+
+- **`install.sh`（仓库根，POSIX sh，零 bashism）**：只做三件事——① 源码定位（`GLASSPANE_REPO` 环境变量 → 当前目录 → `~/glasspane` 既有 clone → 自动 `git clone`，clone URL/目标目录均可环境变量覆盖）；② Node ≥18 硬预检（installer 本体是 Node ESM，缺它无从委托；swift/Xcode CLT 等其余依赖的预检留在 installer 单一真源，不重复实现）；③ 委托 `node <repo>/installer/cli.js` 并透传全部参数（非 TTY 自动补 `--no-prompt`，`curl | sh` 场景 stdin 非终端即走静默确认，不阻塞）。
+- **`installer/cli.js` 增量**：① `mcpClientConfigSnippet`（纯函数）——安装完成即输出 MCP 客户端（Claude Desktop/Cursor 等）可直接粘贴的 `mcpServers.glasspane` 配置片段（command=node + 仓库内 `mcp-shell/dist/index.js` + `GLASSPANE_ENGINE_SOCK` env），兑现 §34.2 步骤 8；② `nextStepsText`——MCP 接入 + TCC 人工边界（P1 v1.2 §10.1）+ launchd/维护命令 + "registry 发布挂 Phase B"口径四段使用说明；③ `repoMissingText`——无仓库时的三条路径指引（curl 一键 / git clone / --repo），与 install.sh 共用 `REPO_URL`/`INSTALL_SH_URL` 常量真源。
+
+### 35.2 可测性设计
+
+install.sh 提供 `GLASSPANE_INSTALL_DRY_RUN=1`：只报告分支决策（定位结果、将执行的 clone/委托命令）不执行任何副作用——CI（ubuntu，无 swift/open/网络仓库）因此可全分支单测：语法检查（`sh -n`）、三条定位分支、clone 规划不落盘、参数透传。installer 测试套件 11→21 用例（新增 install.sh 5 + cli.js 纯函数 3 + 既有修订）。
+
+### 35.3 验收项
+
+| 编号 | 验收项 | 通过标准 | 状态 |
+|---|---|---|---|
+| P4-J1 | install.sh 分支单测 | `sh -n` 通过；GLASSPANE_REPO/cwd/既有 clone 三定位分支 + dry-run clone 规划（不落盘、URL 可覆盖）+ 参数透传 6 用例全绿 | ✓ 2026-09-19 |
+| P4-J2 | 真机端到端（cwd 分支） | `sh install.sh --no-prompt --no-gui` 从仓库根走通：定位→Node 26 预检→委托 installer→增量构建（8.7s）→launchd 幂等→完成说明输出 | ✓ 2026-09-19 |
+| P4-J3 | 真机端到端（clone 分支） | 空目录下 `GLASSPANE_REPO_URL=<本地仓库路径>` 实 clone → 预检 → 委托执行成功（离线可复现，不依赖网络仓库） | ✓ 2026-09-19 |
+| P4-J4 | MCP 配置片段 | 安装尾部输出合法 JSON（node + dist/index.js + GLASSPANE_ENGINE_SOCK），指向本机真实构建产物路径 | ✓ 2026-09-19 |
+| P4-J5 | 无仓库指引 | installer 在 repo 外运行时报错文本含三条路径与两个 URL 常量 | ✓ 2026-09-19（单测 + 直调验证） |
+| P4-J6 | 全量回归 | kernel 47 / mcp-shell 65 / installer 21 全绿；engine 零触及（无 Swift 改动） | ✓ 2026-09-19 |
+
+### 35.4 边界与后续（诚实声明）
+
+1. **`curl | sh` 通道对外的前置是 push**：install.sh 引用的 raw 地址指向 GitHub `main` 分支，而本批次提交尚未推送（本地 ahead）——推送前该命令仅对仓库内/手工 clone 用户生效。推送属外发操作，等用户明示。
+2. **TCC 授权不在一键能力内**：install.sh 的尽头是"把 GUI 引导送到人面前"（§33.2 决策链条目 5 的诚实边界重申），无任何程序化授权路径。
+3. **clone 内容 = main 分支源码**：与 registry 发布（挂 Phase B）无关——install.sh 是 §33.2 判定的一等分发渠道本身；`GLASSPANE_REPO_URL` 覆盖能力保留给镜像/内网场景。
+4. **非 TTY 自动 `--no-prompt`**：`curl | sh` 管道场景 stdin 非终端，逐步确认会挂死或误跳过——脚本检测 `[ -t 0 ]` 后自动静默放行，属既定语义而非缺陷；带交互终端直接运行 `sh install.sh` 仍逐步确认。
