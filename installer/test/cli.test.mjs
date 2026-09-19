@@ -31,15 +31,19 @@ test('parseArgs: 默认值（全开、无 repo）', () => {
   assert.equal(options.prompt, true)
   assert.equal(options.gui, true)
   assert.equal(options.daemon, true)
+  assert.equal(options.app, true)
+  assert.equal(options.launchd, true)
   assert.equal(options.skipBuild, false)
 })
 
 test('parseArgs: 显式开关与 repo 目录', () => {
-  const { options, error } = parseArgs(['--repo', '/tmp/x', '--no-gui', '--no-prompt', '--skip-build'])
+  const { options, error } = parseArgs(['--repo', '/tmp/x', '--no-gui', '--no-prompt', '--no-app', '--no-launchd', '--skip-build'])
   assert.equal(error, null)
   assert.equal(options.repoDir, '/tmp/x')
   assert.equal(options.gui, false)
   assert.equal(options.prompt, false)
+  assert.equal(options.app, false)
+  assert.equal(options.launchd, false)
   assert.equal(options.skipBuild, true)
 })
 

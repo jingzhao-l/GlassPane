@@ -50,6 +50,8 @@ export function parseArgs(argv) {
     prompt: true,
     gui: true,
     daemon: true,
+    app: true,
+    launchd: true,
     skipBuild: false,
     help: false,
   }
@@ -74,6 +76,12 @@ export function parseArgs(argv) {
         break
       case '--no-gui':
         opts.gui = false
+        break
+      case '--no-app':
+        opts.app = false
+        break
+      case '--no-launchd':
+        opts.launchd = false
         break
       case '--no-daemon':
         opts.daemon = false
@@ -255,6 +263,8 @@ export function usageText() {
     '  --no-prompt        跳过每步确认（脚本/自动化场景）',
     '  --no-daemon        不启动 glasspaned',
     '  --no-gui           不打开 glasspane-settings GUI',
+    '  --no-app           不打包 GlassPane.app（仅裸二进制产物）',
+    '  --no-launchd       不注册开机自启（launchd bootstrap）',
     '  --skip-build       跳过 npm/tsc/swift 编译（已构建过时使用）',
     '  -h, --help         显示本帮助',
     '',
@@ -294,6 +304,19 @@ export async function install({ options = parseArgs([]).options, env = process.e
 
     printStep('编译 Swift engine（glasspaned + glasspane-settings，release）……')
     await run('swift', ['build', '-c', 'release'], { cwd: engineDir })
+  }
+
+  if (options.app) {
+    const makeAppScript = path.join(engineDir, 'scripts', 'make-app.sh')
+    if (!fs.existsSync(makeAppScript)) {
+      throw new Error(`.app 打包脚本缺失：${makeAppScript}（仓库结构不完整）`)
+    }
+    if (!fs.existsSync(settingsBin)) {
+      throw new Error(`设置面板产物不存在：${settingsBin}（可用 --no-app 跳过 .app 打包）`)
+    }
+    printStep('打包 GlassPane.app（.build/release/GlassPane.app）……')
+    await run('/bin/bash', [makeAppScript, settingsBin], { cwd: engineDir })
+    printStep(`GlassPane.app 就绪：${path.join(engineDir, '.build', 'release', 'GlassPane.app')}`)
   }
 
   if (options.daemon) {
