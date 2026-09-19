@@ -9,6 +9,8 @@ import {
   nodeMajorVersion,
   commandAvailable,
   preflightIssues,
+  launchdPlistString,
+  LAUNCHD_LABEL,
 } from '../cli.js'
 
 function makeFakeRoot() {
@@ -104,4 +106,43 @@ test('preflightIssues: 缺项逐条列出，全绿为空', () => {
   assert.ok(broken.some((item) => item.includes('Node.js')))
   const healthy = preflightIssues({ nodeMajor: 20, nodeOk: true, npm: true, swift: true, git: true, open: true })
   assert.deepEqual(healthy, [])
+})
+
+// ---------------------------------------------------------------------------
+// launchd plist 生成器（纯函数）
+// ---------------------------------------------------------------------------
+
+test('launchdPlistString: 关键键值齐全、参数顺序正确、XML 转义生效', () => {
+  const plist = launchdPlistString({
+    label: LAUNCHD_LABEL,
+    daemonBin: '/repo/engine/.build/release/glasspaned',
+    socketPath: '/Users/ethanlin/.glasspane/engine.sock',
+    logPath: '/Users/ethanlin/.glasspane/installer-daemon.log',
+  })
+  assert.match(plist, /<key>Label<\/key>\s*<string>com\.glasspane\.daemon<\/string>/)
+  // ProgramArguments 严格顺序：二进制 → --socket-path → socket 路径
+  const argumentsBlock = plist.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/)
+  assert.ok(argumentsBlock, 'ProgramArguments 必须存在')
+  const argStrings = [...argumentsBlock[1].matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1])
+  assert.deepEqual(argStrings, [
+    '/repo/engine/.build/release/glasspaned',
+    '--socket-path',
+    '/Users/ethanlin/.glasspane/engine.sock',
+  ])
+  assert.match(plist, /<key>RunAtLoad<\/key>\s*<true\/>/)
+  assert.match(plist, /<key>KeepAlive<\/key>\s*<dict>\s*<key>SuccessfulExit<\/key>\s*<false\/>/)
+  assert.match(plist, /<key>StandardErrorPath<\/key>/)
+  assert.doesNotMatch(plist, /&(?!amp;|lt;|gt;)/, '路径中的 & 必须被转义')
+})
+
+test('launchdPlistString: 特殊字符路径 XML 转义（防路径注入）', () => {
+  const plist = launchdPlistString({
+    label: LAUNCHD_LABEL,
+    daemonBin: '/tmp/a&b/glasspaned',
+    socketPath: '/tmp/x<y>.sock',
+    logPath: '/tmp/l>og.log',
+  })
+  assert.ok(plist.includes('/tmp/a&amp;b/glasspaned'))
+  assert.ok(plist.includes('/tmp/x&lt;y&gt;.sock'))
+  assert.ok(plist.includes('/tmp/l&gt;og.log'))
 })

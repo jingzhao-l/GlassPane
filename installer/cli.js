@@ -23,6 +23,9 @@ export const MIN_NODE_MAJOR = 18
 export const SOCKET_DIR_NAME = '.glasspane'
 export const SOCKET_FILE_NAME = 'engine.sock'
 export const DAEMON_LOG_NAME = 'installer-daemon.log'
+export const LAUNCHD_LABEL = 'com.glasspane.daemon'
+export const LAUNCHD_DIR_NAME = 'Library/LaunchAgents'
+export const LAUNCHD_FILE_NAME = `${LAUNCHD_LABEL}.plist`
 
 const ANSI = {
   reset: '\x1b[0m',
@@ -201,6 +204,73 @@ export function socketReachable(socketPath) {
   })
 }
 
+/** 生成 launchd 用户代理 plist（纯函数，零副作用；XML 转义防路径注入）。
+ *  KeepAlive 采用 SuccessfulExit=false：仅异常退出时由 launchd 重启，
+ *  避免正常 shutdown 也被反复拉起。 */
+export function launchdPlistString({ label, daemonBin, socketPath, logPath }) {
+  const escapeXml = (value) =>
+    value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const argumentNode = (value) => `      <string>${escapeXml(value)}</string>`
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    '  <dict>',
+    `    <key>Label</key>`,
+    `    <string>${escapeXml(label)}</string>`,
+    '    <key>ProgramArguments</key>',
+    '    <array>',
+    argumentNode(daemonBin),
+    argumentNode('--socket-path'),
+    argumentNode(socketPath),
+    '    </array>',
+    '    <key>RunAtLoad</key>',
+    '    <true/>',
+    '    <key>KeepAlive</key>',
+    '    <dict>',
+    '      <key>SuccessfulExit</key>',
+    '      <false/>',
+    '    </dict>',
+    '    <key>ThrottleInterval</key>',
+    '    <integer>5</integer>',
+    '    <key>StandardOutPath</key>',
+    `    <string>${escapeXml(logPath)}</string>`,
+    '    <key>StandardErrorPath</key>',
+    `    <string>${escapeXml(logPath)}</string>`,
+    '  </dict>',
+    '</plist>',
+    '',
+  ].join('\n')
+}
+
+/** 注册 launchd 用户代理（幂等）：已加载则跳过，未加载则 bootstrap
+ *  gui/<uid>。返回 { ok, already, message }，失败携带真实 stderr。 */
+export function launchctlBootstrap(label, plistPath) {
+  const uid = spawnSync('id', ['-u'], { encoding: 'utf8' }).stdout.trim()
+  if (!uid) {
+    return { ok: false, already: false, message: '无法解析当前 uid（id -u 失败），跳过 launchd 注册' }
+  }
+  const probe = spawnSync('launchctl', ['print', `gui/${uid}/${label}`], { encoding: 'utf8' })
+  if (probe.status === 0) {
+    return { ok: true, already: true, message: `launchd 已加载 ${label}（gui/${uid}），跳过 bootstrap` }
+  }
+  const boot = spawnSync('launchctl', ['bootstrap', `gui/${uid}`, plistPath], { encoding: 'utf8' })
+  const stderr = (boot.stderr ?? '').trim()
+  const status = boot.status
+  if (status === 0 || status === 5 || /already/i.test(stderr)) {
+    return {
+      ok: true,
+      already: status !== 0,
+      message: stderr || `launchctl bootstrap 完成（gui/${uid}/${label}）`,
+    }
+  }
+  return {
+    ok: false,
+    already: false,
+    message: stderr || `launchctl bootstrap 失败，退出码 ${status}（gui/${uid}/${label}）`,
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 执行层
 // ---------------------------------------------------------------------------
@@ -317,6 +387,29 @@ export async function install({ options = parseArgs([]).options, env = process.e
     printStep('打包 GlassPane.app（.build/release/GlassPane.app）……')
     await run('/bin/bash', [makeAppScript, settingsBin], { cwd: engineDir })
     printStep(`GlassPane.app 就绪：${path.join(engineDir, '.build', 'release', 'GlassPane.app')}`)
+  }
+
+  // 开机自启先于手工启动注册：bootstrap 触发 RunAtLoad 会立即拉起 daemon，
+  // 随后手工启动步骤发现 socket 已可达即跳过——避免两个实例抢 socket。
+  if (options.launchd) {
+    const launchAgentsDir = path.join(process.env.HOME ?? '', ...LAUNCHD_DIR_NAME.split('/'))
+    const plistPath = path.join(launchAgentsDir, LAUNCHD_FILE_NAME)
+    fs.mkdirSync(launchAgentsDir, { recursive: true })
+    if (!fs.existsSync(daemonBin)) {
+      throw new Error(`daemon 产物不存在：${daemonBin}（开机自启指向的二进制缺失）`)
+    }
+    const plistXml = launchdPlistString({
+      label: LAUNCHD_LABEL,
+      daemonBin,
+      socketPath,
+      logPath: daemonLog,
+    })
+    fs.writeFileSync(plistPath, plistXml, { mode: 0o644 })
+    const bootstrapResult = launchctlBootstrap(LAUNCHD_LABEL, plistPath)
+    if (!bootstrapResult.ok) {
+      throw new Error(`launchd 注册失败：${bootstrapResult.message}`)
+    }
+    printStep(bootstrapResult.already ? bootstrapResult.message : `开机自启已注册（${plistPath}）`)
   }
 
   if (options.daemon) {
