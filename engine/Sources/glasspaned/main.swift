@@ -267,7 +267,12 @@ private func runGrantAccessibilityFlow() {
     _ = AXIsProcessTrustedWithOptions(promptOptions)
     openPrivacyPane()
     print("Waiting for accessibility permission (System Settings > Privacy & Security > Accessibility)...")
-    print("Enable the entry for the terminal running glasspaned, then switch back here.")
+    // §11.4 教训写进文案：勾"终端"= 借来的席位，launchd/开机形态会失效。
+    // 本命令在 daemon 自身上下文运行，列表里那条 glasspaned 才是正主。
+    let selfPath = Bundle.main.executablePath ?? CommandLine.arguments[0]
+    print("Enable the entry for the **daemon binary itself** — \(selfPath)")
+    print("(do NOT enable the terminal instead: that seat is borrowed from the launcher and breaks under launchd — P1 v1.2 §11.4;")
+    print(" if the entry is absent, run: glasspaned --request-permission accessibility, which lands the grant on the daemon identity)")
     let pollIntervalSeconds: UInt32 = 1
     let timeoutSeconds = 300
     var waited = 0
@@ -336,20 +341,46 @@ private func runGuideScreenPermission(_ probe: ScreenCapturePermissionProbe) {
 
 // MARK: - Signals
 
-private func installSignalHandlers(_ server: SocketServer) {
+/// SIGINT/SIGTERM 的等待集。在主线程、任何 daemon 线程创建**之前**用它做一次
+/// pthread_sigmask(SIG_BLOCK)（见入口处的遮罩点），此后所有线程（CGEvent 后台
+/// runloop、probe accept、per-client、GCD worker）都继承屏蔽，信号在进程内
+/// 只会以 pending 形式存在——唯一的消费点就是下面的 sigwait 线程，送达是
+/// 确定性的。注意：绝不能对这些信号设 SIG_IGN 或装 sigaction handler，
+/// 否则 sigwait 永远收不到（POSIX：ignored disposition 不进 pending 队列）。
+var shutdownSignalSet: sigset_t = {
+    var set = sigset_t()
+    sigemptyset(&set)
+    sigaddset(&set, SIGINT)
+    sigaddset(&set, SIGTERM)
+    return set
+}()
+
+private func blockShutdownSignalsEarly() {
     // Writes to a socket whose peer has closed raise SIGPIPE by default and
     // would kill the daemon. Ignore it so write() returns EPIPE and the
     // connection is torn down cleanly (seen on real devices when a client
     // disconnects mid-operation).
     _ = signal(SIGPIPE, SIG_IGN)
-    for signalNumber in [SIGINT, SIGTERM] {
-        signal(signalNumber, SIG_IGN)
-        let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
-        source.setEventHandler {
+    pthread_sigmask(SIG_BLOCK, &shutdownSignalSet, nil)
+}
+
+private func startShutdownWaiter(_ server: SocketServer) {
+    // P6 §11 audit item 6（SIGTERM 哑火的真修复）。两个已证伪的形态：
+    // (a) c197836 原始缺陷——handler 挂 DispatchQueue.main，主线程阻塞在
+    //     accept() 后台队列永不排空；
+    // (b) 上一轮的"改一个队列"——DispatchSource 挂专用队列，本机实测同样
+    //     哑火（accept 阻塞期间 SIGTERM 送达后 handler 从不执行；独立最小
+    //     复现 2/2 挂死，而裸 signal() 与 sigwait 均即时触发）。
+    // sigwait 线程继承遮罩、以普通（非 async-signal）上下文执行收尾：
+    // unlink socket、关监听 fd、exit(0)，运维不再需要 kill -9。
+    Thread.detachNewThread {
+        var signalNumber: Int32 = 0
+        while true {
+            let code = sigwait(&shutdownSignalSet, &signalNumber)
+            guard code == 0 else { continue }
             server.cleanup()
             exit(0)
         }
-        source.resume()
     }
 }
 
@@ -585,6 +616,11 @@ if options.pruneEvidence || options.evidenceStats {
 
 let socketPath = options.socketPath ?? defaultSocketPath()
 let log = EngineLog(quiet: !options.verbose)
+// 遮罩点必须早于本文件后续创建的任何线程（C33 runloop、probe accept、
+// per-client、GCD worker）——线程继承创建者的信号遮罩，这是 sigwait
+// 送达确定性的前提。--check-*/--grant-* 等即时 CLI 路径在此之前已 exit，
+// Ctrl-C 语义不受影响。
+blockShutdownSignalsEarly()
 
 // 单实例护栏（P1 v1.2 §11.1）：socket 已由活着的 daemon 在服务时拒绝启动。
 // 绑定的 unlink+bind 语义会抢占文件，留下一个"没人连得到"的孤儿实例——而
@@ -654,7 +690,7 @@ let core = EngineCore(
 )
 let dispatcher = Dispatcher(core: core, log: log)
 let server = SocketServer(socketPath: socketPath, dispatcher: dispatcher, log: log)
-installSignalHandlers(server)
+startShutdownWaiter(server)
 
 FileHandle.standardOutput.write(
     Data("glasspaned \(core.version) listening on \(socketPath)\n".utf8)
