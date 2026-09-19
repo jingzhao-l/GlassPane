@@ -150,6 +150,64 @@ printf '%s\n' \
     gui/$(id -u) ~/Library/LaunchAgents/com.glasspane.daemon.plist` 恢复自启即两全。
     （与 §33.1 观察 3"屏幕录制 TCC 不继承"同族：TCC 以责任进程归属，非常驻身份归属。）
 
+### 权限主体修正真机记录（2026-09-19，P1 v1.2 §11）
+
+现场问题：设置面板点「授权」后，系统设置的权限列表里**没有 GlassPane 条目**，且因为
+不是打包应用而无法用「+」手动添加。逐条实测（全部本机可复现）：
+
+| # | 观测 | 手段 |
+|---|---|---|
+| 1 | 裸二进制席位按**路径**记账：原路径 `glasspaned --check-input-permission`=granted，同内容拷到 `/tmp` 后=notDetermined | 双路径对照 |
+| 2 | 无 bundle 身份时**继承父 app 判定**：同一 `/tmp` 副本，终端子进程=granted，`launchctl submit`（父=launchd）=notDetermined；重签改 cdhash 不改变这一结果 | 双上下文对照 |
+| 3 | 旧 `make-app.sh` 的 `GlassPane.app` 是坏签名：`codesign --verify` → `code has no resources but signature indicates they must be present`；`Identifier=glasspane-settings` 与 `CFBundleIdentifier=com.glasspane.settings` 不一致、`Info.plist=not bound`；且 installer 打包完仍直接起裸二进制（bundle 从未成为运行主体） | `codesign -dvvv` / `--verify --strict` / `ps` |
+| 4 | 面板旧版把**面板进程**的 `AXIsProcessTrusted()` 当作 daemon 状态显示（配合观测 2 即"假绿灯"）；`SettingsModel.refreshEntriesOnly()` 为证据 | 代码 + 上下文对照 |
+| 5 | 现场并存 3 个 daemon 实例（含 2 个不响应 SIGTERM 的旧构建，socket 被 unlink+bind 抢走留下孤儿）→ 系统设置里的条目与实际服务实例对不上 | `ps` + `hello` 的 pid |
+
+据此落地的修正与验证结果：
+
+- `hello` 新增 `identity`+`permissions`（不新增方法名），面板改读 daemon 自报席位，读不到
+  即 `unverifiable` +「本卡不代替其状态」；申请动作改由 `launchctl submit` 让 daemon 以
+  **自身身份**发起（`glasspaned --request-permission <kind>`）。
+- `make-app.sh` 产出并**整包重签**两个 bundle，DR 为 `designated => identifier "<id>"`
+  （不含 cdhash，重编译不丢授权）；`codesign --verify --strict` 两个 bundle 均通过。
+- installer 安置到 `~/Applications`、launchd 与 GUI 改走 bundle、新增 `--replace-daemon`
+  （SIGTERM 无效者补 SIGKILL）+ launchd 重拉等待 + daemon 单实例护栏（`--force-socket` 抢占）。
+- 端到端实测：`hello` 自报 `entryName="GlassPane Daemon"`、`hasBundleIdentity=true`、
+  `binaryPath=/Users/ethanlin/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned`，
+  三态如实输出 `accessibility=notDetermined / inputMonitoring=notDetermined /
+  screenRecording=notDetermined / developerTools=unverifiable`。
+- 单测面：engine 新增 23 用例（`PermissionSubjectTests`），当时全量 317 用例 0 失败；
+  installer 新增 16 用例，全量 37 用例 0 失败。
+
+- **同一 bundle、两种起法的自报对照（关键发现）**：由安装器经 `open -g -n -a` 起的实例
+  自报 `accessibility=granted / inputMonitoring=granted / screenRecording=notDetermined`；
+  随后 `launchctl kickstart -k` 起的实例自报 `accessibility=notDetermined /
+  inputMonitoring=notDetermined / screenRecording=granted`。用户在系统设置里为
+  「GlassPane Daemon」真实勾选的是屏幕录制一项——前一个实例的两项 granted 是**从启动者
+  （终端侧 app）借来的**。含义：`hello` 自报只在 daemon 由 launchd/登录项拉起时才等于真实
+  席位；面板与安装器文案都必须按这一口径声明，不能因为读到 granted 就断言已授权。
+- 另发现：**daemon 不响应 SIGTERM**（`signal(SIGTERM, SIG_IGN)` 后 handler 依赖主 runloop
+  被泵，实测两实例收 TERM 后仍存活），故 `--replace-daemon` 必须有 SIGKILL 兜底；这一条
+  属运行时面缺陷（P4 §36 同族），本轮仅在安装器侧兜底，未改 daemon 信号处理。
+
+- **辅助功能条目自动出现（用户实测 19:0x）**：点面板「授权」→ 系统设置「辅助功能」列表
+  里直接出现带图标的「GlassPane Daemon」，开关可用；输入监控则**不会**自动出现条目，
+  用户只能把顶部拖拽栏（此时提供的是 daemon 真身 `.app` 的 fileURL）手动拖进列表才添加
+  → 说明"申请"与"登记条目"是两件事，登记动作是创建 event tap（已按 §11.5 修入
+  `--request-permission input-monitoring`）。
+- **勾选后卡片没变绿的真实原因（关键）**：同一 bundle 身份下，运行中的 daemon 自报
+  `accessibility=notDetermined / inputMonitoring=notDetermined`，而 launchd 一次性任务
+  跑的**新进程**自报三项全 `granted`——TCC 判定按进程缓存，用户勾的确实生效了，只是
+  老进程读不到旧答案。据此新增 §11.4 席位重探 + 「重启 daemon」按钮（不自动重启，
+  因为 kickstart 会中断正在进行的 act）。
+
+**如实边界与待办（P1-S8）**：新 bundle 身份是全新 TCC 客户端，旧的 `glasspaned` 席位不
+继承——需用户在系统设置里为「GlassPane Daemon」重新勾选一次，并目视确认条目名与图标、
+确认重编译后授权仍在（DR 不含 cdhash 的预期收益）。本轮未做该人工勾选，故 §11 的
+"图标真的出现了"仅到协议面自证为止，不以推断充验收。另：本节观测 1/2 即 §36.3
+"launchd 拉起的 daemon 无辅助功能权限"的机理——bundle 身份 + 由 daemon 自身申请后，该
+待闭环项的解法已具备，验证随 P1-S8 一并收口。
+
 ---
 
 ## P6 探针 SDK 三层端到端冒烟（2026-09-19，P6 spec v6.0 §10 P6-E）

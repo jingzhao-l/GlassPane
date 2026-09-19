@@ -239,7 +239,10 @@ P1 首批覆盖 SCK 迁移+屏幕录制权限 onboarding（CLI 形态），批�
 诚实边界（不可规避，仅声明与引导）：
 
 - TCC 授权**只能由用户在系统设置里手动完成**，任何程序都不能替你勾选开关。拖拽的语义是"替你精确导航到正确面板"，不是"替你授权"。
-- **开发者工具（Automation）无系统总开关**，由触发动作自动弹窗询问；UI 恒为 unverifiable，不做假点亮。
+- **开发者工具**：~~无系统总开关~~（2026-09-19 真机核对修正——「隐私与安全性 > 开发者工具」
+  面板存在且可勾选，LLDB attach 的授权就落在这里；旧版把它与 Apple Events 的 Automation
+  面板混为一谈）。修正后仍成立的诚实边界是：**该权限的状态无公开查询接口**，UI 恒为
+  unverifiable，不做假点亮。
 - 拖拽源在二进制直跑（非 .app bundle）时只提供纯文本 "GlassPane"；落点同时接受 fileURL（.app bundle，读 Info.plist 可读名）与纯文本两种 provider，名称解析失败时缺省 GlassPane。
 
 ### 10.2 落点 → 面板映射（单一真源）
@@ -249,7 +252,7 @@ P1 首批覆盖 SCK 迁移+屏幕录制权限 onboarding（CLI 形态），批�
 | 辅助功能 | `com.apple.preference.security?Privacy_Accessibility` | 开关 + 白名单 |
 | 输入监控 | `com.apple.preference.security?Privacy_ListenEvent` | 首次打开开关需重启 app 生效（文案声明） |
 | 屏幕录制 | `com.apple.preference.security?Privacy_ScreenCapture` | 三态可查 |
-| 开发者工具 | `com.apple.preference.security?Privacy_Automation` | 仅 Apple Events 的询问面板，不可枚举 |
+| 开发者工具 | `com.apple.preference.security?Privacy_DeveloperTools` | 真机核对修正：LLDB attach 的入口（`Privacy_Automation` 是 Apple Events，另一主体）；状态仍不可枚举 |
 
 映射与文案集中在 `engine/Sources/GlassPaneEngine/PermissionStatus.swift → PermissionGuide`（纯函数，无系统 API 依赖，可单测）；`SettingsModel`（SwiftUI 壳）仅做编排（`handleDrop`、`pollPermissions`、`pendingGuide*` 状态）。
 
@@ -257,7 +260,7 @@ P1 首批覆盖 SCK 迁移+屏幕录制权限 onboarding（CLI 形态），批�
 
 | 编号 | 验收项 | 通过标准 | 状态 |
 |---|---|---|---|
-| P1-G1 | 面板深链映射单测 | `systemPaneURL(for:)` 四类返回既定的深链且互不重复；`instruction(for:droppedName:)` 含被拖入名、developerTools 文案含"无系统总开关"且无"变绿"暗示 | ✓ 已实现并单测通过（2026-09-19，`PermissionGuideTests` 10 用例） |
+| P1-G1 | 面板深链映射单测 | `systemPaneURL(for:)` 四类返回既定的深链且互不重复；`instruction(for:droppedName:)` 含被拖入名、developerTools 文案声明"状态未验证不伪造"且无"变绿"暗示 | ✓ 已实现并单测通过（2026-09-19，`PermissionGuideTests` 10 用例；同日按 §11.5 真机核对把 developerTools 深链与文案从 Automation 改为开发者工具面板） |
 | P1-G2 | 拖拽落点 | 顶部横幅可拖（.onDrag 纯文本 GlassPane）；四张权限卡整卡接受 fileURL 与 plainText，落点悬停高亮；落下即打开对应系统面板 + 展示引导横幅 | ✓ 已实现；真机人工冒烟见 smoke.md（自动模拟拖拽不可行，人工目视确认） |
 | P1-G3 | 轮询自动点亮 | 面板 onAppear 起 1s 轮询 `pollPermissions()`，权限全部 granted/unverifiable 自停；中途撤销授权如实回退 | ✓ 已实现（AX trust / CG preflight 均为廉价本地查询，1s 不构成负担）；人工授权冒烟见 smoke.md |
 | P1-G4 | 壳编译与回归 | `swift build` 0 error；engine 单测全绿（新增 10 用例，全量 294 用例 0 失败 1 opt-in 跳过） | ✓ 2026-09-19 |
@@ -265,3 +268,105 @@ P1 首批覆盖 SCK 迁移+屏幕录制权限 onboarding（CLI 形态），批�
 ### 10.4 与安装器联动
 
 拖拽引导是 `npm` 一键安装流程（P4 §34）的最后一步：安装器编译完成后自动启动 daemon 并打开 glasspane-settings GUI，用户直接面对拖拽引导横幅，无需理解路径/命令细节。
+---
+
+## 11. 权限主体与产物身份（v1.2 追加，2026-09-19）
+
+§10 的拖拽引导在真机上不成立：用户在系统设置的权限列表里**找不到 GlassPane 这一行**，
+也无法用「+」手动添加。根因不在跳转，而在"谁在申请权限"与"以什么身份申请"。本节把
+实测到的三条机制固化为规格，并据此重设权限卡的状态真源与申请路径。
+
+### 11.1 TCC 主体机制（真机实测，非推测）
+
+| # | 结论 | 实测方法 | 后果 |
+|---|---|---|---|
+| 1 | **席位按进程身份记账**，裸二进制的身份即其路径：`/Volumes/…/.build/release/glasspaned` 的输入监控席位在 launchd 上下文下为 `granted`，同内容副本放 `/tmp` 则为 `notDetermined` | `glasspaned --check-input-permission` 分别在原路径与副本路径执行 | 换路径/清 `.build` = 授权蒸发；同路径重编译不受影响 |
+| 2 | **无 bundle 身份的进程会继承父 app 的判定**：同一未授权副本，从已授权终端启动报 `granted`，改由 `launchctl submit` 起（父=launchd）报 `notDetermined` | 同副本双上下文对照 | 终端里跑 `--guide-screen-permission` 会把席位记到终端头上；面板/CLI 显示的"已授权"可能是借来的 |
+| 3 | **只 `cp` 不重签的 .app 不成立 TCC 客户端**：旧 `make-app.sh` 产物 `codesign --verify` 报 `code has no resources but signature indicates they must be present`，`Identifier=glasspane-settings ≠ CFBundleIdentifier`、`Info.plist=not bound` | `codesign -dvvv` / `--verify --strict` | 点授权后系统设置里什么都不出现；「+」选择器亦不认该 bundle |
+
+| 4 | **同一个 bundle 身份，起法不同 → 自报读数不同**：由 `open`（责任链落在终端 app）
+  起的 daemon 自报 `accessibility=granted / inputMonitoring=granted / screenRecording=notDetermined`；
+  同一 bundle 由 `launchctl kickstart` 起的 daemon 自报 `accessibility=notDetermined /
+  inputMonitoring=notDetermined / screenRecording=granted`（用户为「GlassPane Daemon」
+  真实勾选的只有屏幕录制） | `hello` 对照（见 smoke.md） |
+
+推论（据此设计）：`hello` 的自报只在 **daemon 的责任上下文是它自己**时才等于真实席位，
+因此交付形态必须是 launchd/登录项拉起；终端或从 GUI 手动起 daemon 时，面板读数可能仍是
+借来的（安装器文案须声明这一点）。权限列表要出现**带名字带图标**的可选条目，daemon 必须是"签名有效的
+bundle 主可执行"；`identifier` 形态的 designated requirement（不含 cdhash）才能让授权
+跨重编译存活——`codesign --force --sign - --identifier <id> -r='designated =>
+identifier "<id>"'` 实测可通过 `--verify --strict`。
+
+### 11.2 状态真源与申请路径的重新分工
+
+| 面 | v1.2 §6 原设计 | §11 修正 |
+|---|---|---|
+| 卡片状态 | 面板进程内调 `AXIsProcessTrusted()` / `CGPreflight*` | **daemon 自报**：`hello` 结果新增 `identity` + `permissions`（增量字段，不新增方法名、不动方法表白名单，§6.5 约束不破）；面板读不到即 `unverifiable` + 注记，绝不代测 |
+| 申请动作 | 面板进程 `AXIsProcessTrustedWithOptions(prompt)` / `CGRequest*Access()` | **daemon 以自身身份发起**：面板执行 `launchctl submit -l com.glasspane.guide.<kind>.<nonce> -- <daemon 自报 binaryPath> --request-permission <kind>`（直接 spawn 会落回结论 2 的继承陷阱），5s 后 `launchctl remove` 清理 |
+| 跳转 | 面板深链 | 不变（申请与跳转分离：daemon 只申请，面板只导航） |
+| daemon 未运行 | 仍显示面板自己的状态 | 三张必备卡 `unverifiable` + `daemon 未运行…本卡不代替其状态`，轮询不停表 |
+
+`PermissionKind.cliValue`（`accessibility` / `input-monitoring` / `screen-recording` /
+`developer-tools`）是 daemon CLI 与面板之间的取值真源；新增探针一律注入式（无 TCC
+环境可单测）。daemon 侧新增 `--permissions`（快照 JSON）、`--request-permission <kind>`
+（不跳转、不等待、即起即停）、`--check-accessibility`（AX 仅两态，如实）。
+
+### 11.3 产物身份与拖拽源
+
+- `engine/scripts/make-app.sh` 产出**两个** bundle 并整包重签：`GlassPane.app`
+  （`com.glasspane.settings`）与 `GlassPane Daemon.app`（`com.glasspane.daemon`，
+  `LSUIElement`，daemon 主可执行）；签名自查失败即非零退出（坏签名的 bundle 只会让用户白跑一趟）。
+- 安装器把两者安置到 `~/Applications`（可见、稳定、非隐藏目录——`.build` 里的产物
+  「+」选择器看不到），launchd 与 GUI 启动一律走 bundle 内可执行；`--no-app` 显式回退
+  裸二进制并在文案里如实说明"条目只显示文件名"。
+- 拖拽源由 `PermissionGuide.dragSource(for:)` 决定：daemon 自报 bundle 身份 → 提供
+  **daemon 真身 `.app` 的 fileURL**（可拖进系统设置列表，条目带图标）；否则退回纯文本
+  导航。设置面板自己的 `.app` 不得作为拖拽源——那会授权错主体。
+- 单实例护栏：`glasspaned` 启动时若 socket 已被活着的 daemon 服务则拒绝启动（exit 65，
+  `--force-socket` 显式抢占、`--socket-path` 起并行实例）。多实例并存时"系统设置里看到的
+  条目"与"实际服务实例"可能不是同一身份，正是本节要修的坑；安装器 `--replace-daemon`
+  负责收拢旧实例（SIGTERM 未生效者 1s 后补 SIGKILL），并等 launchd 按新 plist 重拉后再决定
+  是否手动启动，避免抢 socket 造成双身份。
+
+### 11.4 授权生效的重启语义与席位重探
+
+真机核对（同一 bundle 身份、两种上下文）：用户为「GlassPane Daemon」勾上辅助功能与输入
+监控后，**运行中的实例仍报 `notDetermined`**，而同一身份的**新进程**报 `granted`——TCC
+判定按进程缓存，面板因此不能把"没绿"直接解释成"没授权"。口径：
+
+| 观测 | 判定 | 面板呈现 |
+|---|---|---|
+| daemon 自报 granted | 已生效 | 绿 |
+| daemon 自报非 granted，重探（同身份新进程）granted | **待重启生效** | 保持未达成 + 注记「系统里已授权，重启 daemon 后生效」+「重启 daemon」按钮（`launchctl kickstart -k gui/<uid>/com.glasspane.daemon`，**只在用户点击时执行**——重启会中断正在进行的 act） |
+| 两者都非 granted | 系统里确实没授权 | 未请求/已拒绝 + 申请引导 |
+| 重探失败（脚本/任务不可用） | 不可知 | 保持旧读数，绝不假称待重启或已授权 |
+
+重探实现：面板把 daemon 自报的 `binaryPath` 写进一次性 zsh 脚本，经 `launchctl submit`
+执行（责任上下文是 daemon 自身，不继承面板 app），读回 `--permissions` 的 JSON 后清理
+临时文件与任务标签。三类权限的引导文案统一声明"开启后需重启 daemon 生效"，不再承诺
+"开启即变绿"。
+
+### 11.5 输入监控：申请 ≠ 条目出现
+
+真机核对：辅助功能申请后条目**直接出现**在列表里，输入监控则不会——用户只能手动把
+`.app` 拖进列表才看得到条目。原因是登记该 client 的动作是**创建 event tap**（与 P4 §36
+"tap 创建即权限如实探测"同源），`CGRequestListenEventAccess()` 只负责弹询问。故
+`PermissionProbeSet.request(.inputMonitoring)` 在未授权时除发起询问外，还用
+`ListenEventTapProbe` 尝试创建一个 `.listenOnly` 被动 tap（创建成功即销毁，不进 C33
+数据面、不改写事件流），把条目登记出来；已授权时跳过，不做无谓的会话级监听。
+
+### 11.6 验收项
+
+| 编号 | 验收项 | 通过标准 | 状态 |
+|---|---|---|---|
+| P1-S1 | 主体身份纯逻辑 | `PermissionSubject`：裸二进制 → `hasBundleIdentity=false`、`tccEntryName` 取文件名；bundle → 取 bundle 目录名；`wireValue` 省略 nil 字段；roundtrip 保真 | ✓ `PermissionSubjectTests`（2026-09-19） |
+| P1-S2 | 席位快照与线上往返 | `PermissionProbeSet.snapshot()` 四类齐；`request(kind)` 只触发申请钩子、不触发面板跳转钩子，已授权时不重复弹；`hello` 带 `identity`+`permissions`，未注入钩子时整段省略；旧 daemon 无字段 → `subject=nil`/`permissions=[:]` | ✓ 同上（`DaemonProbe.parseHelloResponse` 向后兼容用例） |
+| P1-S3 | 申请命令构造 | `daemonRequestCommand` 走 `/usr/bin/launchctl submit`，label 前缀 `com.glasspane.guide.<kind>.` 且随 nonce 唯一；`--request-permission` 取值与 `cliValue` 一致；清理命令为 `launchctl remove` | ✓ 同上 |
+| P1-S4 | 拖拽源选择 | bundle 身份 → `.bundleURL(daemon bundlePath)`；daemon 未上报/裸二进制 → `.plainText("GlassPane")` | ✓ 同上 |
+| P1-S5 | 打包与签名 | 两个 bundle `codesign --verify --strict` 通过，DR 为 `designated => identifier "<id>"`（不含 cdhash），`Info.plist` 已绑定，`CFBundleIdentifier` 与签名 identifier 一致 | ✓ 2026-09-19 实测（debug 与 release 产物各一轮） |
+| P1-S6 | 安装器接线 | `bundlePlan`/`daemonLaunchPath`/`settingsLaunchPath`/`installBundles`/`bundleLaunchArgs`/`pidsFromPs`/`terminatePids`/`waitForSocket` 纯函数用例全绿；`nextStepsText` 按形态给出真实条目名 | ✓ installer 37 用例（2026-09-19，原 21 + 新增 16） |
+| P1-S7 | 端到端 | daemon 以 bundle 身份服务 socket，`hello` 自报 `entryName="GlassPane Daemon"`、`hasBundleIdentity=true`，未授权席位如实 `notDetermined` | ✓ 2026-09-19（留档 `engine/smoke.md`） |
+| P1-S8 | 真机目视 | 系统设置「辅助功能/输入监控/屏幕录制」列表出现带图标的「GlassPane Daemon」，勾选后可点亮；授权跨 `swift build -c release` 重编译不丢 | ◐ 部分完成（2026-09-19 用户实测：辅助功能条目**自动出现且可勾选**；输入监控需手动拖入→由 S10 修掉；重编译回归待做） |
+| P1-S9 | 席位重探 | `PermissionReprobe.script/submitCommand/parse/kindsNeedingRestart` 纯函数用例：带空格路径加引号、缺 subject 不猜、重探失败不假称待重启；重启命令为 `kickstart -k` 且仅由用户点击触发 | ✓ `PermissionSubjectTests`（2026-09-19，engine 全量 326 用例 0 失败） |
+| P1-S10 | 输入监控条目登记 | `request(.inputMonitoring)` 在未授权时调用一次 tap 登记探针、已授权时跳过（注入式断言，不建真 tap） | ✓ 同上 |
+| P1-S11 | 开发者工具入口修正 | 深链指向 `Privacy_DeveloperTools`，文案不再声称"无系统总开关"、仍声明"状态未验证不伪造" | ✓ `PermissionGuideTests` 2026-09-19 真机核对修正 |

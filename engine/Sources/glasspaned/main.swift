@@ -10,6 +10,8 @@ import GlassPaneEngine
 ///   glasspaned --grant-accessibility
 ///   glasspaned --check-screen-permission
 ///   glasspaned --guide-screen-permission
+///   glasspaned --permissions
+///   glasspaned --request-permission <kind>
 ///   glasspaned --help
 
 private struct Options {
@@ -19,6 +21,10 @@ private struct Options {
     var checkScreenPermission = false
     var guideScreenPermission = false
     var checkInputPermission = false
+    var checkAccessibility = false
+    var permissionsJSON = false
+    var requestPermission: PermissionKind?
+    var forceSocket = false
     var listProjects = false
     var activeProjectId: String?
     var recipeValidate: String?
@@ -59,6 +65,19 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             options.guideScreenPermission = true
         case "--check-input-permission":
             options.checkInputPermission = true
+        case "--check-accessibility":
+            options.checkAccessibility = true
+        case "--permissions":
+            options.permissionsJSON = true
+        case "--request-permission":
+            guard index + 1 < arguments.count else {
+                return .errorCode("--request-permission requires one of: accessibility | input-monitoring | screen-recording | developer-tools", 64)
+            }
+            index += 1
+            guard let kind = PermissionKind.from(cliValue: arguments[index]) else {
+                return .errorCode("--request-permission unknown kind: \(arguments[index])", 64)
+            }
+            options.requestPermission = kind
         case "--no-c33":
             options.c33Enabled = false
         case "--no-probe":
@@ -69,6 +88,8 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             }
             index += 1
             options.probeSocketPath = arguments[index]
+        case "--force-socket":
+            options.forceSocket = true
         case "--list-projects":
             options.listProjects = true
         case "--active-project":
@@ -140,6 +161,9 @@ private func printUsage() {
         glasspaned --check-screen-permission
         glasspaned --guide-screen-permission
         glasspaned --check-input-permission
+        glasspaned --check-accessibility
+        glasspaned --permissions
+        glasspaned --request-permission <kind>
         glasspaned --list-projects
         glasspaned --active-project <project-id>
         glasspaned --recipe-validate <path>
@@ -158,11 +182,25 @@ private func printUsage() {
                                  (no-op when already granted) and exit
         --check-input-permission    Print input monitoring permission state
                                  (granted | denied | notDetermined) and exit
+        --check-accessibility      Print this process's accessibility seat
+                                 (granted | notDetermined — AX exposes no
+                                 denied visibility) and exit
+        --permissions              Print the daemon's own permission snapshot
+                                 as JSON: {"subject":…,"permissions":…} and exit
+        --request-permission <kind>  Ask for <kind> TCC access **as this very
+                                 process** (no pane navigation, no waiting) and
+                                 print the resulting JSON. Kinds: accessibility |
+                                 input-monitoring | screen-recording | developer-tools.
+                                 The Settings panel invokes this through
+                                 `launchctl submit` so the grant lands on the
+                                 daemon's own identity instead of its launcher's.
         --no-c33             Disable C33 input monitoring (degrade to pure
                                  operation-right mutex; act never blocks on user input)
         --no-probe           Disable the P6 probe socket (Z5 black-box only;
                                  handlerProbe/stateDiff signals stay null)
         --probe-socket-path <path>  Probe listener path (default ~/.glasspane/probe.sock)
+        --force-socket       Take over the socket even when a live daemon is
+                                 already serving it (default: refuse and exit 65)
         --list-projects        List all registered projects (JSON) and exit
         --active-project <id>  Set the active project ID and exit
         --recipe-validate <path>  Validate a recipe YAML file and exit
@@ -184,6 +222,29 @@ private func printUsage() {
 
 private func defaultSocketPath() -> String {
     NSHomeDirectory() + "/.glasspane/engine.sock"
+}
+
+// MARK: - Permission subject surface (P1 spec v1.2 §11.2)
+
+/// 本进程的权限探针集合：daemon 是四类 TCC 席位的**唯一合法主体**，因此
+/// 席位由这里求值，并随 `hello` 自报给设置面板（面板不得代测）。
+private let permissionProbes = PermissionProbeSet()
+
+/// 权限快照的对外 JSON 形态（CLI `--permissions` / `--request-permission` 共用）。
+private func permissionSnapshotJSON(_ snapshot: DaemonPermissionSnapshot) -> [String: Any] {
+    let subject = snapshot.subject.wireValue.merging(
+        ["entryName": snapshot.subject.tccEntryName],
+        uniquingKeysWith: { _, new in new }
+    )
+    return ["subject": subject, "permissions": snapshot.permissionsWire]
+}
+
+private func writeJSON(_ object: [String: Any]) {
+    guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+          let text = String(data: data, encoding: .utf8) else {
+        return
+    }
+    FileHandle.standardOutput.write(Data((text + "\n").utf8))
 }
 
 // MARK: - Onboarding (R36: permission guidance)
@@ -326,6 +387,29 @@ if options.checkInputPermission {
     // （granted | denied | notDetermined），供冒烟脚本判断可否观察输入流。
     let probe = InputMonitoringPermissionProbe()
     print(probe.state.rawValue)
+    exit(0)
+}
+
+if options.checkAccessibility {
+    // AX 只有布尔可见性（无 denied 查询接口），如实输出两态。
+    print(permissionProbes.accessibility.displayStatus().rawValue)
+    exit(0)
+}
+
+if options.permissionsJSON {
+    writeJSON(permissionSnapshotJSON(permissionProbes.snapshot()))
+    exit(0)
+}
+
+if let kind = options.requestPermission {
+    // 以**本进程身份**申请：调用方（设置面板）经 launchctl submit 起一次性
+    // 任务，避免面板成为责任父进程、把席位记到面板 app 头上（P1 v1.2 §11.2）。
+    let status = permissionProbes.request(kind)
+    let snapshot = permissionProbes.snapshot()
+    var payload = permissionSnapshotJSON(snapshot)
+    payload["requested"] = kind.cliValue
+    payload["requestedStatus"] = status.rawValue
+    writeJSON(payload)
     exit(0)
 }
 
@@ -483,6 +567,24 @@ if options.pruneEvidence || options.evidenceStats {
 
 let socketPath = options.socketPath ?? defaultSocketPath()
 let log = EngineLog(quiet: !options.verbose)
+
+// 单实例护栏（P1 v1.2 §11.1）：socket 已由活着的 daemon 在服务时拒绝启动。
+// 绑定的 unlink+bind 语义会抢占文件，留下一个"没人连得到"的孤儿实例——而
+// TCC 授权条目按进程身份记账，多实例并存时用户在系统设置里看到的条目与真正
+// 服务请求的实例可能对不上，这正是本次修的坑。`--force-socket` 显式抢占，
+// `--socket-path` 起并行实例（不同 socket 即不同主体）。
+if !options.forceSocket {
+    if let incumbent = DaemonProbe().helloSummary(socketPath: socketPath) {
+        let message = """
+        glasspaned: a daemon is already serving \(socketPath) (pid \(incumbent.pid), version \(incumbent.version)).
+          - attach to it instead of starting a second instance, or
+          - use --socket-path <other> for a parallel instance, or
+          - use --force-socket to take over this socket (the old instance keeps running but loses the socket).
+        """
+        FileHandle.standardError.write(Data((message + "\n").utf8))
+        exit(65)
+    }
+}
 let channel = AXChannel()
 // T9 progressive degradation is on by default: it needs no TCC permission
 // (proc_pidinfo is same-user process inspection). C33 is injected by default
@@ -529,7 +631,8 @@ let core = EngineCore(
     degradationTracker: DegradationTracker(),
     metricsProbe: ProcessMetricsProbe(),
     approvalGate: ApprovalGate(path: ApprovalGate.defaultPath),
-    probeInbox: probeInbox
+    probeInbox: probeInbox,
+    permissionsReport: { permissionProbes.snapshot() }
 )
 let dispatcher = Dispatcher(core: core, log: log)
 let server = SocketServer(socketPath: socketPath, dispatcher: dispatcher, log: log)

@@ -40,6 +40,13 @@ public final class AccessibilityPermissionProbe {
         openPane()
     }
 
+    /// 只唤起系统授权提示（不跳面板）。面板已由调用方打开时使用——关键是
+    /// 它**以当前进程身份**登记 TCC 席位（P1 v1.2 §11.2：daemon 自己申请，
+    /// 不由设置面板代申请）。
+    public func requestPrompt() {
+        prompt()
+    }
+
     /// 由面板状态推导出的展示态（AX 仅有布尔可见性，无三态）。
     public func displayStatus() -> PermissionStatus {
         isTrusted() ? .granted : .notDetermined

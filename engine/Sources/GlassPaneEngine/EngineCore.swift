@@ -61,6 +61,11 @@ public final class EngineCore {
     /// Z5-only black-box form: handlerProbe/stateDiff stay null and act()
     /// behaves exactly like v5.0 — the honest absence is preserved verbatim.
     private let probeInbox: ProbeInbox?
+    /// TCC 席位自报钩子（P1 spec v1.2 §11.2）：daemon 注入自身探针，`hello`
+    /// 因此带上 `identity` + `permissions`，让设置面板读到的是**授权主体
+    /// （daemon 进程）**的状态而非面板进程的。缺省 nil 表示不上报（旧行为，
+    /// 面板据此如实降级为"未验证"，不猜测）。
+    private let permissionsReport: (() -> DaemonPermissionSnapshot?)?
     /// Busy-input retry budget before surfacing GP_E_BUSY_INPUT.
     public static let idleRetryCount = 5
     /// Interval between busy-input retries.
@@ -79,7 +84,8 @@ public final class EngineCore {
         metricsProbe: ProcessMetricsProviding? = nil,
         approvalGate: ApprovalGate? = nil,
         snapshotProbe: (() -> SnapshotProbeInfo?)? = nil,
-        probeInbox: ProbeInbox? = nil
+        probeInbox: ProbeInbox? = nil,
+        permissionsReport: (() -> DaemonPermissionSnapshot?)? = nil
     ) {
         self.channel = channel
         self.clock = clock
@@ -92,6 +98,7 @@ public final class EngineCore {
         self.approvalGate = approvalGate
         self.snapshotProbe = snapshotProbe
         self.probeInbox = probeInbox
+        self.permissionsReport = permissionsReport
     }
 
     // MARK: - ISO-8601 timestamp
@@ -111,13 +118,20 @@ public final class EngineCore {
     // MARK: - Methods (P0 spec §3.3)
 
     public func hello() -> [String: Any] {
-        [
+        var payload: [String: Any] = [
             "engine": "glasspaned",
             "version": version,
             "protocolVersion": protocolVersion,
             "pid": Int(ProcessInfo.processInfo.processIdentifier),
             "capabilities": ["act", "observe", "assert_element", "diagnose", "snapshot", "restore", "probe"]
         ]
+        // P1 v1.2 §11.2：带上 daemon 自身的授权主体与四类席位（未注入钩子时
+        // 整段省略——面板据此如实显示"未验证"，不以面板进程的权限冒充）。
+        if let snapshot = permissionsReport?() {
+            payload["identity"] = snapshot.subject.wireValue
+            payload["permissions"] = snapshot.permissionsWire
+        }
+        return payload
     }
 
     public func attach(bundleId: String?, pid: pid_t?, projectId: String? = nil) throws -> [String: Any] {

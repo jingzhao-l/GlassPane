@@ -51,6 +51,14 @@ public final class InputMonitoringPermissionProbe {
         return preflight() ? .granted : .denied
     }
 
+    /// 只发起系统授权请求（不跳面板），并记录"本次运行已请求过"用于三态近似
+    /// （P1 v1.2 §11.2：daemon 以自身身份申请时用它，面板跳转由 GUI 侧负责）。
+    public func requestOnly() {
+        guard !preflight() else { return }
+        hasRequestedThisRun = true
+        requestAction()
+    }
+
     /// 打开系统设置输入监控面板深链。
     public static func openSystemPane() {
         let paneURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
