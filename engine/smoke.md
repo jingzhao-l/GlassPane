@@ -149,3 +149,30 @@ printf '%s\n' \
     launchd 作业暂时 bootout、以终端子进程运行冒烟；用户授权后 `launchctl bootstrap
     gui/$(id -u) ~/Library/LaunchAgents/com.glasspane.daemon.plist` 恢复自启即两全。
     （与 §33.1 观察 3"屏幕录制 TCC 不继承"同族：TCC 以责任进程归属，非常驻身份归属。）
+
+---
+
+## P6 探针 SDK 三层端到端冒烟（2026-09-19，P6 spec v6.0 §10 P6-E）
+
+脚本：`engine/.p6_smoke.py`（自带隔离 daemon：/tmp 专用 engine.sock + probe.sock，
+--no-c33，不触碰用户现网 daemon；拉起 `engine/probe` 的合成对照 app probe-demo，
+GLASSPANE_PROBE_SOCK 指向隔离探针口）。结果：**P6 SMOKE OK**——
+
+| 断言面 | 实测 |
+|---|---|
+| 注册/能力 | probe hello `gp-probe/0.1.0`，caps=[z1,z3,checkpoint]，attachedHasProbe=true |
+| evidence 真值 | handlerProbe `{hitCount:1, handlers:[probe_demo/ProbeDemoApp.swift:76]}` + stateDiff.changed=true 落盘；attribution=**strong**（本仓库首次） |
+| 金丝雀 | T4/T5/T7/T8/T3 各检出一次；T8 lateCount=1 由 diagnose 时刷新入账（迟到宽限窗内） |
+| 档 1 | snapshot 带真实 gpz1 payload → rollback_full **执行面**回传 rollbackExecuted=true、surface=gp-probe、postStateDigest==expected（consistent=true），恢复后 UI 结构回写可见 |
+
+观察留档（详见 P6 §0 F6–F8）：
+13. **SwiftUI Text 内容不进树 digest**：observe 的 AxNode 只有 role/title/identifier，
+    Text 文案在 AXValue——纯文本改写对 Z5 树通道不可见。"UI 变了"类 canary 必须用
+    结构变化（节点增删）表达；demo 已改 Image 计数行。这是通道可见性边界，不是缺陷。
+14. **系统 Apple 菜单徽标是树 digest 噪声源**：全 app 树含"App Store…, N 项更新"类
+    菜单项，其自发跳变可翻转 axChanged。冒烟 canary 因此采用"≤4 次重试 + 明示噪声"
+    口径（判定语义由单测确定化，真机只证端到端通路存在）。
+15. **act 全窗 latency 实测 ~463ms（171 节点树）**：T8 的"延迟"必须大于窗口闭合
+    时刻而非固定毫秒数——canary 首版 0.4s 落进窗内被真判成 T5，改 1.2s 后稳定。
+16. **屏幕录制对 /tmp 隔离 daemon 子进程未授予**：pixelDiff 缺席时 NO_ANOMALY
+    金丝雀按 P6 §3.2 落 INCONCLUSIVE（T6 不可排除），脚本如实分支不假过。
