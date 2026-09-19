@@ -166,8 +166,14 @@ def build_lldb_argv(bridge_path, mode, pid=None, exe=None, exe_args=None,
         argv += ["-o", extra_script]
     if mode == "capture":
         if exe and pid is None:
-            argv += ["-o", "run"]
-        argv += ["-o", "gp-capture"]
+            # SB-API driver: batch would end the session at the crash stop,
+            # so one script command does launch+wait+collect+emit.
+            spec = json.dumps({"exe": exe, "args": exe_args, "mode": "capture",
+                               "budget_s": max(30.0, float(os.environ.get("GPBRIDGE_BUDGET", "60")))},
+                              ensure_ascii=False)
+            argv += ["-o", "script glasspane_bridge.run_capture_cli(%s)" % shlex.quote(spec)]
+        else:
+            argv += ["-o", "gp-capture"]
     elif mode == "trace":
         argv += ["-o", "gp-trace --samples %d" % samples]
     elif mode == "interactive":
@@ -177,8 +183,6 @@ def build_lldb_argv(bridge_path, mode, pid=None, exe=None, exe_args=None,
     if pid is not None:
         argv += ["-o", "detach"]
     argv += ["-o", "quit"]
-    if exe and exe_args:
-        argv += ["--"] + list(exe_args)
     return argv
 
 
@@ -263,6 +267,10 @@ def run_outer(args):
 
 _WATCH_QUEUE = WatchQueue()
 
+# Captured at `command script import` time — __lldb_init_module receives the
+# live SBDebugger (SBDebugger.GetDefault() does not exist in this binding).
+_LIVE_DEBUGGER = None
+
 
 def _is_running_under_lldb():
     try:
@@ -291,14 +299,36 @@ def _describe_stop(thread):
 
 def _collect_locals(frame):
     variables = []
-    for i in range(frame.GetNumVariables()):
-        value = frame.GetVariableAtIndex(i)
+    try:
+        values = frame.GetVariables(True, True, False, True)
+    except Exception:
+        return variables
+    for value in values or []:
         if not value or not value.IsValid():
             continue
         name = value.GetName() or "?"
         displayed = value.GetValue() or value.GetSummary() or ""
         variables.append((name, displayed))
     return variables
+
+
+def _module_name(module):
+    for attr in ("GetFileSpec", "GetFile"):
+        getter = getattr(module, attr, None)
+        if getter:
+            spec = getter()
+            if spec and spec.IsValid() and spec.GetFilename():
+                return spec.GetFilename()
+    return "?"
+
+
+def _line_file(line_entry):
+    if not line_entry or not line_entry.IsValid():
+        return None
+    spec = line_entry.GetFileSpec()
+    if spec and spec.IsValid():
+        return spec.GetFilename()
+    return None
 
 
 def _collect_frames(thread, max_frames=MAX_FRAMES):
@@ -313,9 +343,9 @@ def _collect_frames(thread, max_frames=MAX_FRAMES):
         address = "0x%x" % frame.GetPC() if frame.GetPC() is not None else "?"
         frames.append(frame_record(
             index=i,
-            module=module.GetFile() and os.path.basename(module.GetFile().GetFilespec()) or "?",
+            module=_module_name(module) if module and module.IsValid() else "?",
             address=address,
-            file=line_entry.GetFile().GetFilename() if line_entry and line_entry.GetFile().IsValid() else None,
+            file=_line_file(line_entry),
             line=line_entry.GetLine() if line_entry and line_entry.IsValid() else None,
             function=symbol.GetName() if symbol and symbol.IsValid() else None,
             locals_=_collect_locals(frame) if i == 0 else None,
@@ -328,16 +358,25 @@ def _collect_registers(thread):
     if thread.GetNumFrames() == 0:
         return registers
     frame = thread.GetFrameAtIndex(0)
-    for i in range(frame.GetNumRegisters()):
-        value = frame.GetRegisterAtIndex(i)
-        if value and value.IsValid():
-            registers[value.GetName()] = truncate(value.GetValue())[0]
+    try:
+        root = frame.GetRegisters()
+    except Exception:
+        return registers
+    for group in root or []:
+        for reg in group or []:
+            try:
+                name = reg.GetName()
+                value = reg.GetValue()
+            except Exception:
+                continue
+            if name:
+                registers[name] = truncate(value or "")[0]
     return registers
 
 
-def _payload_from_process(debugger, mode, errors=None, samples=None):
-    process = _process_of(debugger)
-    if process is None:
+def _payload_from_process(process, mode, errors=None, samples=None):
+    import lldb
+    if process is None or not process.IsValid():
         return assemble_result(mode=mode, target={"pid": None}, status="no-process",
                                threads=[], errors=errors or ["no live process to capture"])
     threads = []
@@ -377,8 +416,77 @@ def _payload_from_process(debugger, mode, errors=None, samples=None):
     return result
 
 
+def _payload_via_debugger(debugger, mode, errors=None, samples=None):
+    process = _process_of(debugger)
+    return _payload_from_process(process, mode, errors=errors, samples=samples)
+
+
+def run_capture_cli(spec_json):
+    """SB-API driven capture for `lldb --batch -o script ...` invocation.
+
+    Necessary because batch mode ENDS the session when `run` stops on a
+    crash — subsequent `-o` commands never execute (2026-09-19 真机实证).
+    So launch, event-wait, collect and emit happen inside this single call.
+    """
+    import lldb
+    spec = json.loads(spec_json)
+    debugger = _LIVE_DEBUGGER
+    if debugger is None:
+        print(_sentinel(assemble_result(mode="capture", target={"exe": spec.get("exe")},
+                                        status="failed", threads=[],
+                                        errors=["bridge imported without a debugger handle"])))
+        return
+    debugger.SetAsync(False)
+    target = debugger.CreateTarget(spec.get("exe") or "")
+    if not target.IsValid():
+        print(_sentinel(assemble_result(mode="capture", target={"exe": spec.get("exe")},
+                                        status="failed", threads=[], errors=["invalid executable"])))
+        return
+    listener = lldb.SBListener("glasspane.bridge")
+    process = target.LaunchSimple(spec.get("args") or None, None,
+                                  os.path.dirname(spec.get("exe") or "/") or "/")
+    if not process.IsValid():
+        print(_sentinel(assemble_result(mode="capture", target={"exe": spec.get("exe")},
+                                        status="failed", threads=[],
+                                        errors=["launch failed (LaunchSimple returned invalid process)"])))
+        return
+    # Wait for the first stop (crash) or exit within the budget.
+    budget = float(spec.get("budget_s", 60))
+    stopped = False
+    exited = False
+    event = lldb.SBEvent()
+    deadline = _now() + budget
+    while _now() < deadline:
+        state = process.GetState()
+        if state == lldb.eStateStopped:
+            stopped = True
+            break
+        if state in (lldb.eStateExited, lldb.eStateCrashed, lldb.eStateDetached):
+            exited = True
+            break
+        if listener.WaitForEvent(0.25, event):
+            continue
+    payload = _payload_from_process(process, spec.get("mode", "capture"))
+    if exited and not stopped:
+        payload["status"] = "exited-before-stop"
+    print(_sentinel(payload))
+    try:
+        process.Kill()
+    except Exception:
+        pass
+
+
+def _sentinel(payload):
+    return "%s%s%s" % (SENTINEL_BEGIN, render_json(payload), SENTINEL_END)
+
+
+def _now():
+    import time
+    return time.monotonic()
+
+
 def cmd_capture(debugger, command, result, internal_dict):
-    payload = _payload_from_process(debugger, mode="capture")
+    payload = _payload_via_debugger(debugger, mode="capture")
     text = render_json(payload)
     print("%s%s%s" % (SENTINEL_BEGIN, text, SENTINEL_END))
 
@@ -392,7 +500,7 @@ def cmd_trace(debugger, command, result, internal_dict):
         samples = int(argv[argv.index("--samples") + 1])
     timeline = []
     for index in range(samples):
-        payload = _payload_from_process(debugger, mode="trace")
+        payload = _payload_via_debugger(debugger, mode="trace")
         main_thread = payload["threads"][0] if payload["threads"] else None
         timeline.append({
             "sample": index,
@@ -402,7 +510,7 @@ def cmd_trace(debugger, command, result, internal_dict):
         })
         if index + 1 < samples:
             time.sleep(TRACE_INTERVAL_S)
-    payload = _payload_from_process(debugger, mode="trace")
+    payload = _payload_via_debugger(debugger, mode="trace")
     payload["timeline"] = timeline
     text = render_json(payload)
     print("%s%s%s" % (SENTINEL_BEGIN, text, SENTINEL_END))
@@ -440,6 +548,8 @@ def cmd_queue(debugger, command, result, internal_dict):
 
 
 def __lldb_init_module(debugger, internal_dict):
+    global _LIVE_DEBUGGER
+    _LIVE_DEBUGGER = debugger
     debugger.HandleCommand("command script add -f glasspane_bridge.cmd_capture gp-capture")
     debugger.HandleCommand("command script add -f glasspane_bridge.cmd_trace gp-trace")
     debugger.HandleCommand("command script add -f glasspane_bridge.cmd_watch gp-watch")
@@ -459,7 +569,8 @@ def main(argv=None):
                         help="arguments forwarded to --exe")
     parser.add_argument("--samples", type=int, default=TRACE_SAMPLES, help="trace sample count (T2)")
     parser.add_argument("--setup", help="extra lldb command run after script import")
-    parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--timeout", type=float, default=600.0,
+                        help="budget incl. first debugserver cold start on a machine (F5: >5 min, one-time)")
     parser.add_argument("--out", help="also write the payload JSON to this file")
     parser.add_argument("--send-sock", help="also send one NDJSON frame to this unix socket (R30回传)")
     args = parser.parse_args(argv)

@@ -16,7 +16,8 @@
 | F2 | `xcrun lldb --batch -o "process attach --pid …"` → "Not allowed to attach to process" | 真机复跑 | 同上；与 F1 同族（TCC 开发者工具 / 调试权限门控，P1 v1.3 §6.1"无公开查询 API"口径维持） |
 | F3 | lldb 内嵌 Python 的 `import lldb; lldb.SBDebugger` 可用 | `--batch -o script` | SB API 通道成立，桥语言边界（刚性 Python）零障碍 |
 | F4 | swift-syntax 发布含 603.0.x 标签（与 Swift 6.3.3 工具链匹配），github 可达 | git ls-remote --tags | Z1 宏（ExpressionMacro 插件）可实现；构建膨胀按 C1 阈值实测 |
-| F5 | `lldb --batch` 冷启动在本机 >5min（首跑 debugserver 相关，含 crash 场景 launch 控制） | 后台计时实验 | 桥冒烟必须异步/长超时设计，CI 口径记录冷启动惩罚 |
+| F5 | `lldb --batch` **首次** debugserver 冷启动在本机 >5min（一次性）；预热后同场景秒级完成 | 后台计时 + 后续多次复跑（capture 端到端 EXIT=0） | 桥 CLI 超时预算默认 600s 并在超时时给结构化失败；冒烟/CI 先预热一次 |
+| F9 | lldb `--batch` 在进程 crash stop 后**直接终止会话**，后续 `-o` 命令不再执行（MARKER 实证） | /tmp 判别实验 | 桥 launch 场景必须走 SB API 单命令驱动（launch+等待+采集+回显一体，`run_capture_cli`）；本绑定 `SBDebugger.GetDefault()` 不存在，debugger 句柄在 `__lldb_init_module` 捕获 |
 | F6 | SwiftUI `Text` 内容经 **AXValue** 暴露，而 observe/digest 树只取 role/title/identifier——纯文本改写不翻转树 digest | probe-demo 真机 dump（2026-09-19） | "UI 变了"的 canary 必须用**结构变化**表达（节点增删），demo 改用 Image 计数行；此为 Z5 树通道的固有可见性边界，写入 §8 H5 失效率样本口径 |
 | F7 | app-wide AX 树含系统 Apple 菜单（App Store"3项更新"类徽标），其自发跳变让全树 digest 偶发噪声翻转 axChanged | 两次连续 observe 直测不等 | 分类语义以单测为准确定；真机 canary 断言按"重试 ≤4 次 + 明示噪声口径"设计（.p6_smoke.py run_canary），不掩盖也不假过 |
 | F8 | act 管线全窗（perform→settle→双树捕获→双像素捕获→drain）实测 latency ≈ 463ms（171 节点树） | T8 金丝雀首版 0.4s 延迟落进窗内被真判成 T5 的定位实验 | T8 金丝雀延迟改 1.2s（> 最坏窗、< 2s 迟到宽限）；"延迟反应"阈值语义以窗口闭合时刻为准，非固定毫秒数 |
