@@ -101,6 +101,10 @@ export const RestoreArgs = z.strictObject({
 });
 export type RestoreArgs = z.infer<typeof RestoreArgs>;
 
+/** P6 §5.4: probe connectivity query takes no arguments. */
+export const ProbeStatusArgs = z.strictObject({});
+export type ProbeStatusArgs = z.infer<typeof ProbeStatusArgs>;
+
 /** Report format selector shared by the two audit tools (spec v1.3 §10.3). */
 const ReportFormatSchema = z.enum(["html", "markdown"]).default("markdown");
 
@@ -320,6 +324,17 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       required: ["snapshotId"],
     },
     validate: zodBridge(RestoreArgs),
+  },
+  {
+    name: "gp_probe_status",
+    description: "List GlassPaneProbe connections (pid, capabilities, events seen) and whether the attached app has a live probe — probe presence is what makes T4/T5/T7/T8 verdicts and tier-1 checkpoint restores decidable.",
+    engineMethod: "probe_status",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+    },
+    validate: zodBridge(ProbeStatusArgs),
   },
   {
     name: "gp_export_evidence",

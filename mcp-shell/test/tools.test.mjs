@@ -18,16 +18,17 @@ test("tools/list shape: eleven tools with expected names and methods", () => {
     "gp_last_evidence",
     "gp_snapshot",
     "gp_restore",
+    "gp_probe_status",
     "gp_export_evidence",
     "gp_recent_reports",
     "gp_project_list",
     "gp_project_set",
     "gp_project_get",
   ]);
-  assert.equal(TOOL_BY_NAME.size, 13);
+  assert.equal(TOOL_BY_NAME.size, 14);
   assert.deepEqual(
     TOOL_SPECS.map((s) => s.engineMethod),
-    ["attach", "observe", "act", "assert_element", "diagnose", "last_evidence", "snapshot", "restore", "export_evidence", "recent_reports", "project_list", "project_set", "project_get"],
+    ["attach", "observe", "act", "assert_element", "diagnose", "last_evidence", "snapshot", "restore", "probe_status", "export_evidence", "recent_reports", "project_list", "project_set", "project_get"],
   );
   assert.equal(TOOL_SPECS.every((s) => s.name.startsWith("gp_")), true);
 });
@@ -103,6 +104,48 @@ test("last_evidence passes through a valid evidence pack (spec §6.3)", async ()
   const outcome = await promise;
   assert.equal(outcome.isError, false);
   assert.equal(outcome.content.length, 1);
+});
+
+test("last_evidence passes through a probe-carrying pack (P6 §3.1 null→object)", async () => {
+  const { engine, io } = makeEngine();
+  const lv = TOOL_BY_NAME.get("gp_last_evidence");
+  const promise = executeTool(lv, {}, engine);
+  io.respond({
+    evidencePack: {
+      schemaVersion: "glasspane.evidence/0.1-draft",
+      operationId: "op_0123456789ABCDEFGHJKMNPQRS",
+      createdAt: "2026-09-19T00:00:00.000Z",
+      attribution: { level: "strong", contaminated: false },
+      circuitBreaker: { level: 0 },
+      signals: {
+        act: { selector: { role: "AXButton" }, action: "press", actConfirmed: true },
+        handlerProbe: {
+          probeVersion: "gp-probe/0.1.0",
+          hitCount: 1,
+          handlers: [{ file: "probe-demo/ProbeDemoApp.swift", line: 64 }],
+          lateCount: 0,
+        },
+        stateDiff: { source: "z3-kvc", changed: true, entries: [{ key: "demo.count", before: "0", after: "1" }] },
+      },
+      assertion: null,
+      diagnosis: null,
+    },
+  });
+  const outcome = await promise;
+  assert.equal(outcome.isError, false);
+  assert.ok(outcome.content[0].text.includes("gp-probe/0.1.0"));
+});
+
+test("gp_probe_status forwards an argument-less probe_status call (P6 §5.4)", async () => {
+  const { engine, io } = makeEngine();
+  const tool = TOOL_BY_NAME.get("gp_probe_status");
+  const promise = executeTool(tool, {}, engine);
+  const frame = io.lastFrame();
+  assert.equal(frame.method, "probe_status");
+  io.respond({ probes: [{ pid: 4242, appName: "probe-demo", probeVersion: "gp-probe/0.1.0", capabilities: ["z1", "z3", "checkpoint"], eventsSeen: 7 }], attachedHasProbe: true });
+  const outcome = await promise;
+  assert.equal(outcome.isError, false);
+  assert.ok(outcome.content[0].text.includes("attachedHasProbe"));
 });
 
 test("last_evidence rejects a schema-violating pack as isError (spec §6.3)", async () => {

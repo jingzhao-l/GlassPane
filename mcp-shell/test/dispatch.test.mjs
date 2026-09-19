@@ -39,14 +39,15 @@ test("ping returns empty result", async () => {
   assert.deepEqual(response.result, {});
 });
 
-test("tools/list returns the thirteen tools", async () => {
+test("tools/list returns the fourteen tools", async () => {
   const { server } = makeServer();
   const response = await server.handleLine(enq({ jsonrpc: "2.0", id: 3, method: "tools/list" }));
   const names = response.result.tools.map((tool) => tool.name);
-  assert.equal(names.length, 13);
+  assert.equal(names.length, 14);
   assert.ok(names.includes("gp_attach"));
   assert.ok(names.includes("gp_snapshot"));
   assert.ok(names.includes("gp_restore"));
+  assert.ok(names.includes("gp_probe_status"));
   assert.ok(names.includes("gp_export_evidence"));
   assert.ok(names.includes("gp_recent_reports"));
   assert.ok(names.includes("gp_project_list"));
