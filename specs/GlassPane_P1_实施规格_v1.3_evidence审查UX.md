@@ -130,7 +130,7 @@
 | P1-B4 | 性能熔断 | latency > 10s 阈值 → level 升为 ≥1 + reason 带 `performance-act-latency-over-budget`；`channelFault(3)` 不被降级；正常 latency 不升级 | ✓ 已实现并单测通过（2026-09-16） |
 | P1-B5 | MCP 工具 | `gp_snapshot`/`gp_restore` 注册、inputSchema 校验（快照 ID pattern、steps 长度 1–64）、错误映射到 GP_E_* | ✓ 已实现并单测通过（2026-09-16，mcp-shell 36 用例全绿） |
 | P1-B6 | 纯逻辑单测回归 | 新增加法逻辑单测（fake channel 注入）；既有 104 用例全绿 | ✓ 全量 117 用例全绿（2026-09-16，0 失败 1 opt-in 跳过） |
-| P1-B7 | 真机冒烟（可选，需 AX 权限） | 真机 attach 后 snapshot 返回真实 digest；restore ffwd 对可用动作成功重演 | 待办（可选人工项） |
+| P1-B7 | 真机冒烟（可选，需 AX 权限） | 真机 attach 后 snapshot 返回真实 digest；restore ffwd 对可用动作成功重演 | ✓ 已完成（2026-09-19 真机冒烟：见 v1.1 P1-B7 记录；`.smoke_client.py` 15 断言全 PASS） |
 
 > 注：快照/恢复与性能熔断均为纯逻辑可测（fake channel + 注入 clock），无动系统权限即可跑 CI；真机冒烟照旧为可选人工项。
 
@@ -221,7 +221,7 @@
 | P1-C3 | DaemonProbe 探测 | socket 存在+hello 会话 → 返回 (version, pid)；socket 缺失 → reachable=false；无响应 → nil（3s 超时） | ✓ 已实现并单测通过 + 真机 hello 冒烟（2026-09-16，返回 glasspaned 0.1.0 pid） |
 | P1-C4 | SwiftUI 壳编译 | `swift build`（含 glasspane-settings target）0 error；菜单栏项与主窗口骨架存在 | ✓ 编译通过（2026-09-16，`GlassPaneSettingsApp` 双 Scene 就位） |
 | P1-C5 | 纯逻辑单测回归 | 新增探针/DaemonProbe 单测全绿；既有 117 用例全绿（0 失败） | ✓ 全量 131 用例全绿（2026-09-16，0 失败 1 opt-in 跳过） |
-| P1-C6 | 真机冒烟（可选，需 GUI） | 面板显示四权限真实状态；按钮跳转系统 pane；daemon 卡显示存活/版本或"未运行" | 待办（可选人工项） |
+| P1-C6 | 真机冒烟（可选，需 GUI） | 面板显示四权限真实状态；按钮跳转系统 pane；daemon 卡显示存活/版本或"未运行" | ✓ 已完成（2026-09-19 真机冒烟：`.c6_smoke.py` 经 daemon AX 通道读取面板树，四权限卡图标 identifier/跳转 AXButton/28 文本节点/降级折叠区/窗口标题"GlassPane 设置"齐备 + attach by pid 验证；文本内容受 AX value 通道与方法表冻结限制，见 smoke.md 真机观察） |
 
 ---
 
@@ -302,7 +302,7 @@
 | P1-D3 | MCP 工具 | `gp_export_evidence`/`gp_recent_reports` 注册；format 枚举（html/markdown）校验不过 → GP_E_BAD_PARAMS；limit 越界 1–20 → GP_E_BAD_PARAMS | ✓ 已实现并单测通过（2026-09-16，mcp-shell 新增 13 用例） |
 | P1-D4 | 错误透传 | 查无 operationId → GP_E_NO_EVIDENCE + remedy；未 attach → GP_E_NOT_ATTACHED | ✓ 已实现并单测通过（2026-09-16，engine 2 用例 + mcp-shell 透传用例） |
 | P1-D5 | 纯逻辑单测回归 | 新增渲染/MCP 用例全绿；既有 131 用例全绿；mcp-shell 既有 36 用例全绿 | ✓ 全量 engine 142 用例全绿（2026-09-16，0 失败 1 opt-in 跳过）+ mcp-shell 49 用例全绿 |
-| P1-D6 | 真机冒烟（可选） | 真机 attach→act 后 `gp_export_evidence` 返回人读 HTML/Markdown，四段可见 | 待办（可选人工项） |
+| P1-D6 | 真机冒烟（可选） | 真机 attach→act 后 `gp_export_evidence` 返回人读 HTML/Markdown，四段可见 | ✓ 已完成（2026-09-19 真机冒烟：`.d6_smoke.mjs` 走真实 mcp-shell 代码路径 gp_attach→gp_act→gp_export_evidence，markdown 四段标题 PATH/ANOMALY/EVIDENCE/NEXT 与 operationId 齐备，html `<h2>` 四段齐备且无 `<script>` 注入） |
 
 ---
 

@@ -61,3 +61,34 @@ printf '%s\n' \
 | `GP_E_APP_NOT_FOUND` | 被测 app 未启动，或 bundleId 拼写错误 |
 | `GP_E_ACT_FAILED` | selector 不匹配或元素不支持该 action：先 observe 核对 role/title |
 | act 成功但 diagnose 为 INCONCLUSIVE + pixelDiff null | 屏幕录制权限缺失（降级形态，非 bug） |
+
+## 真机冒烟记录与观察（2026-09-18/19）
+
+> 对应 P4 v4.0 §33（遗留项落实记录）。真机 = 开发者本机（AX 权限已授予）。
+
+### 已落实环节（脚本已入库，提交 71eee50）
+
+| 环节 | 脚本 | 结果 |
+|---|---|---|
+| B7（P1 v1.1 §1）attach→snapshot→restore 全链 | `engine/.smoke_client.py` | SMOKE OK：15 断言全 PASS（真实 Notes attach、snapshot 真实 digest、restore ffwd confirmed=1/total=1），restore 后审批台账落盘 + `--approval-verify` count=1 valid |
+| C6（P1 v1.2 §6）GUI 面板冒烟 | `engine/.c6_smoke.py` | C6 SMOKE OK：四权限卡/跳转 AXButton/28 文本节点/降级折叠区/窗口标题齐备；attach by pid 验证通过 |
+| D6（P1 v1.3 §10）evidence 审查导出 | `mcp-shell/.d6_smoke.mjs` | D6 SMOKE OK：真实 mcp-shell 代码路径导出 markdown/html 四段（PATH/ANOMALY/EVIDENCE/NEXT） |
+
+### 真机观察（如实留档）
+
+1. **AX 菜单栏 item press 挂起**：真实 AXUIElementPerformAction 对菜单项 press 会阻塞（
+   冒烟中 30s 超时），此后冒烟一律避开菜单项，改用 role-only AXButton（Notes toolbar
+   按钮无 title/identifier，role 即可命中）。
+2. **SwiftUI 静态文本走 AX value 通道**：daemon observe/selector 方法表冻结在
+   role/title/identifier 三字段（P0 §3），设置面板 body 文本（如"已授予"）不暴露在
+   title，无法经 AX 树断言 → C6 冒烟采用结构断言（卡图标 identifier + 同轴按钮 +
+   文本行数），此为方法表冻结的既定边界而非缺陷。
+3. **daemon 后台进程屏幕录制 TCC 不继承**：circuitBreaker.reason="screen-recording-denied"、
+   level=1 降级形态（spec R45 预期降级，非故障）。
+4. **ApprovalGate 持久化陷阱**：`ApprovalGate()` 的 path 默认 nil = 纯内存台账；daemon
+   曾注入默认构造导致 restore 执行成功但 approvals.json 不落盘（--approval-verify 恒
+   count 0）。显式传 `ApprovalGate(path: ApprovalGate.defaultPath)` 后落盘 + 哈希链
+   verify 全绿（fix 8e9b776）。
+5. **attach by pid 与 bundleId 双路径**真机均可用（C6 补验 pid 路径）。
+6. **全屏截图可被前台第三方 app 抢占**（本机曾误截 Notes/Qoder），GUI 真机验收以
+   AX 结构断言为主、截图人工核对为辅。

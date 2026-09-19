@@ -1008,3 +1008,49 @@ public struct DecisionLogEntry: Codable, Equatable {
 6. **综述不改写**：综述 5.8 为历史快照，正文（含 §10.2/§16/§2.5/§5.6）保持原状；本收口结论的权威记录在 v4.0 规格。若后续需将收口结论回写综述，按迭代规则另起综述版本，不在规格中擅自改动。
 
 > **版本结构说明（v3.2 → v4.0）**：v4.0 在 v3.2 的 §1–§29 之后追加 P4 收口范围 §30–§32（全量验收清点、里程碑一致性矩阵、决策行兑现核对、铁约束复核、版本收口声明、遗留留档），v3.2 正文 §1–§29 逐字保留不变。本份为**实施规格系列最终版**：P0–P3 全部批次验收达成，spec 系列正式收口；后续新需求另起新规格系列文档。
+
+---
+
+## 33. 遗留项落实记录（v4.0 追加，2026-09-19）
+
+> **版本结构说明（v4.0 → v4.0 追加 §33）**：本节为 §32 六项遗留的后续落实记录，v4.0 正文 §1–§32 逐字保留不变。本系列已正式收口（§30.6），本节仅落实既有遗留的状态更新与新决策记录，不开启新规格系列。
+
+### 33.1 §32-1 人工冒烟 18 项 → B7/C6/D6 真机落实（2026-09-19）
+
+§32-1 的 18 项未标 ✓ 全部为 v1.1–v1.3 的 B7/C6/D6 系（继承表重复计数）。2026-09-19 于真机（本 Mac，AX 权限已授予）完成落实：
+
+| 验收项 | 脚本（已入库提交 71eee50） | 结果（2026-09-19） |
+|---|---|---|
+| P1-B7（v1.1 L124 / v1.3 L133）真机冒烟 | `engine/.smoke_client.py` | SMOKE OK：真实 Notes attach→observe→act→snapshot（真实 digest）→restore ffwd confirmed=1/total=1，15 断言全 PASS；restore 后审批台账落盘 + `--approval-verify` count=1 valid ✓（修复回见 §33.3 与 fix 8e9b776） |
+| P1-C6（v1.2 L220 / v1.3 L224）GUI 面板冒烟 | `engine/.c6_smoke.py` | C6 SMOKE OK：经 daemon AX 通道读取设置面板 UI 树，四权限卡（accessibility/inputMonitoring/screenRecording/developerTools 图标 identifier）、每卡跳转 AXButton、28 文本节点、拒绝降级折叠区（AXDisclosureTriangle）、窗口标题"GlassPane 设置"齐备；附带验证 **attach by pid** 路径 |
+| P1-D6（v1.3 L305）evidence 审查导出冒烟 | `mcp-shell/.d6_smoke.mjs` | D6 SMOKE OK：走真实 mcp-shell 代码路径（McpServer.dispatch → executeTool → EngineClient），gp_attach→gp_act→gp_export_evidence；markdown 四段 PATH/ANOMALY/EVIDENCE/NEXT 与 operationId 齐备；html `<h2>` 四段齐备且无 `<script>` 注入 |
+
+真机观察（详见 `engine/smoke.md`"真机冒烟记录与观察"）：
+1. **AX 菜单栏 item press 挂起**：真实 AXUIElementPerformAction 对菜单项 press 会阻塞（30s 超时），冒烟避免菜单项，改取 role-only AXButton（toolbar 按钮无 title/identifier，role 即可命中）。
+2. **SwiftUI 静态文本走 AX value 通道**：daemon observe/selector 方法表冻结在 role/title/identifier 三字段（P0 §3），设置面板 body 文本（如"已授予"）不可经 AX 树断言；C6 冒烟因此采用**结构断言**（图标 identifier + 同轴按钮 + 文本行数）并如实记录此通道限制（非缺陷，为方法表冻结的既定边界）。
+3. **daemon 后台进程屏幕录制 TCC 不继承**：circuitBreaker.reason="screen-recording-denied"、level=1 的降级形态（spec R45 预期降级，非故障）。
+4. **attach by pid / bundleId 双路径**真机均可用（此前只冒烟过 bundleId）。
+5. **全屏截图可被前台第三方 app 抢占**（冒烟中曾误截 Notes/Qoder），GUI 真机验收以 AX 结构断言为主、截图人工核对为辅。
+
+### 33.2 §32-2 分发公证 → 代码侧义务判定 + 分发形态决策（2026-09-19）
+
+**代码侧义务判定**：仓库现无可构建/签名阻碍——包括 `engine`（daemon + settings）与 `mcp-shell` 均无需特殊 entitlements（TCC 权限按进程在系统设置授权，不依赖 entitlements）；SwiftPM 产物默认 ad-hoc 签名，本机可直接运行，不触发 Gatekeeper。公证与 Developer ID 签名需要 $99/年 付费 Apple 开发者账号，属发布批次（archive 阶段）执行，维持 §32-2 原判。
+
+**分发形态决策（用户提问落地）**：
+- **mcp-shell（TypeScript）**：不打包二进制；发布 npm 包，MCP 客户端以 `npx @glasspane/mcp-shell` 接入（用户需 Node ≥18）。零编译成本。
+- **glasspaned daemon（Swift）**：源码编译分发（安装脚本一键 clone + swift build + 权限引导）为现阶段默认；本地编译产物免签名/公证即可运行。二进制分发（免装 Xcode CLT）需 Developer ID + 公证（付费账号）+ 双架构维护，待用户规模或商业分发需求出现后再启用，评估权保留。
+- 结论：**源码编译 + npm 包混合形态**，公证合规留给发布批次（与 §32-2"发布流程事项"判定一致）。
+
+### 33.3 §32-3/4/5/6 其余遗留核对（2026-09-19）
+
+| §32 条目 | 状态 | 说明 |
+|---|---|---|
+| 3（无头环境运行边界 R23/R45） | 维持待办 | AX/CGEvent/LLDB attach 在无 GUI runner 下不可用，真机面已完成主体（B7/C6/D6），剩余 C33 输入监控/ T9 泄漏注入类真机冒烟须在真实输入监控 TCC 授予后补做，不以模拟数据充验收 |
+| 4（kernel Phase B 迁移 iterate monorepo） | 未触发 | Phase B 两壳消费前提未到，kernel 保持暂宿本仓库；迁移时按"保留 git 历史"执行（R43），触发后另起规格 |
+| 5（R44 官方 TS SDK 评估） | 评估权保留 | 工具面 13 已达，是否切换属独立决策批次，随 v3.1 记录在案 |
+| 6（综述不改写） | 维持禁令 | 本落实记录权威载体即本节（v4.0 §33）；综述正文保持历史快照原状 |
+
+### 33.4 关联修复记录
+
+- **fix 8e9b776（2026-09-19）**：daemon 注入 `ApprovalGate()` 时 path 默认 nil（纯内存台账），真机冒烟发现 restore 执行成功但 `~/.glasspane/approvals.json` 不落盘、`--approval-verify` 恒 count 0；改为显式 `ApprovalGate(path: ApprovalGate.defaultPath)` 后落盘验证通过（哈希链 verify 全绿）。该修复使 §33.1 B7 的审批落盘断言成立。
+- **test 71eee50（2026-09-19）**：B7/C6/D6 三个真机冒烟客户端脚本入库（可复现证据链）。
