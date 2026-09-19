@@ -115,15 +115,15 @@ class SentinelExtraction(unittest.TestCase):
 
 
 class ArgvComposition(unittest.TestCase):
-    def test_launch_capture_runs_then_captures(self):
+    def test_launch_capture_uses_sb_driver_script(self):
         argv = gb.build_lldb_argv("/abs/bridge.py", mode="capture", exe="/tmp/crashme")
         self.assertEqual(argv[:2], ["xcrun", "lldb"])
         self.assertIn("--file", argv)
-        script_index = argv.index("-o")
-        self.assertIn("command script import /abs/bridge.py", argv[script_index + 1])
         commands = [argv[i + 1] for i, token in enumerate(argv) if token == "-o"]
-        self.assertEqual(commands[1], "run")
-        self.assertEqual(commands[2], "gp-capture")
+        self.assertIn("command script import /abs/bridge.py", commands[0])
+        # Batch would end at the crash stop → one script command drives it all.
+        self.assertTrue(any("run_capture_cli" in c for c in commands))
+        self.assertNotIn("run", commands)
 
     def test_attach_capture_uses_pid_and_detaches(self):
         argv = gb.build_lldb_argv("/b.py", mode="capture", pid=4242)
