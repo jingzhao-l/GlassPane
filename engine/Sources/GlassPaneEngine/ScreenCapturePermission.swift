@@ -56,4 +56,12 @@ public final class ScreenCapturePermissionProbe {
         requestAccess()
         return preflight() ? .granted : .denied
     }
+
+    /// 只发起系统授权请求（不跳面板、不改观测语义），供 daemon 以自身身份
+    /// 登记 TCC 席位使用（P1 v1.2 §11.2）。
+    public func requestOnly() {
+        guard !preflight() else { return }
+        hasRequestedThisRun = true
+        requestAccess()
+    }
 }

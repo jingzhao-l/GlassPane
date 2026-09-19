@@ -149,3 +149,39 @@ printf '%s\n' \
     launchd 作业暂时 bootout、以终端子进程运行冒烟；用户授权后 `launchctl bootstrap
     gui/$(id -u) ~/Library/LaunchAgents/com.glasspane.daemon.plist` 恢复自启即两全。
     （与 §33.1 观察 3"屏幕录制 TCC 不继承"同族：TCC 以责任进程归属，非常驻身份归属。）
+
+### 权限主体修正真机记录（2026-09-19，P1 v1.2 §11）
+
+现场问题：设置面板点「授权」后，系统设置的权限列表里**没有 GlassPane 条目**，且因为
+不是打包应用而无法用「+」手动添加。逐条实测（全部本机可复现）：
+
+| # | 观测 | 手段 |
+|---|---|---|
+| 1 | 裸二进制席位按**路径**记账：原路径 `glasspaned --check-input-permission`=granted，同内容拷到 `/tmp` 后=notDetermined | 双路径对照 |
+| 2 | 无 bundle 身份时**继承父 app 判定**：同一 `/tmp` 副本，终端子进程=granted，`launchctl submit`（父=launchd）=notDetermined；重签改 cdhash 不改变这一结果 | 双上下文对照 |
+| 3 | 旧 `make-app.sh` 的 `GlassPane.app` 是坏签名：`codesign --verify` → `code has no resources but signature indicates they must be present`；`Identifier=glasspane-settings` 与 `CFBundleIdentifier=com.glasspane.settings` 不一致、`Info.plist=not bound`；且 installer 打包完仍直接起裸二进制（bundle 从未成为运行主体） | `codesign -dvvv` / `--verify --strict` / `ps` |
+| 4 | 面板旧版把**面板进程**的 `AXIsProcessTrusted()` 当作 daemon 状态显示（配合观测 2 即"假绿灯"）；`SettingsModel.refreshEntriesOnly()` 为证据 | 代码 + 上下文对照 |
+| 5 | 现场并存 3 个 daemon 实例（含 2 个不响应 SIGTERM 的旧构建，socket 被 unlink+bind 抢走留下孤儿）→ 系统设置里的条目与实际服务实例对不上 | `ps` + `hello` 的 pid |
+
+据此落地的修正与验证结果：
+
+- `hello` 新增 `identity`+`permissions`（不新增方法名），面板改读 daemon 自报席位，读不到
+  即 `unverifiable` +「本卡不代替其状态」；申请动作改由 `launchctl submit` 让 daemon 以
+  **自身身份**发起（`glasspaned --request-permission <kind>`）。
+- `make-app.sh` 产出并**整包重签**两个 bundle，DR 为 `designated => identifier "<id>"`
+  （不含 cdhash，重编译不丢授权）；`codesign --verify --strict` 两个 bundle 均通过。
+- installer 安置到 `~/Applications`、launchd 与 GUI 改走 bundle、新增 `--replace-daemon`
+  （SIGTERM 无效者补 SIGKILL）+ launchd 重拉等待 + daemon 单实例护栏（`--force-socket` 抢占）。
+- 端到端实测：`hello` 自报 `entryName="GlassPane Daemon"`、`hasBundleIdentity=true`、
+  `binaryPath=/Users/ethanlin/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned`，
+  三态如实输出 `accessibility=notDetermined / inputMonitoring=notDetermined /
+  screenRecording=notDetermined / developerTools=unverifiable`。
+- 单测面：engine 新增 23 用例（`PermissionSubjectTests`），当时全量 317 用例 0 失败；
+  installer 新增 16 用例，全量 37 用例 0 失败。
+
+**如实边界与待办（P1-S8）**：新 bundle 身份是全新 TCC 客户端，旧的 `glasspaned` 席位不
+继承——需用户在系统设置里为「GlassPane Daemon」重新勾选一次，并目视确认条目名与图标、
+确认重编译后授权仍在（DR 不含 cdhash 的预期收益）。本轮未做该人工勾选，故 §11 的
+"图标真的出现了"仅到协议面自证为止，不以推断充验收。另：本节观测 1/2 即 §36.3
+"launchd 拉起的 daemon 无辅助功能权限"的机理——bundle 身份 + 由 daemon 自身申请后，该
+待闭环项的解法已具备，验证随 P1-S8 一并收口。

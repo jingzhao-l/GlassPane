@@ -49,7 +49,15 @@ struct SettingsPanelView: View {
 
     private var permissionSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("权限").font(.headline)
+            HStack(spacing: 8) {
+                Text("权限").font(.headline)
+                Spacer()
+            }
+            // 主体声明（P1 v1.2 §11.2）：状态真源是 daemon 自报席位，面板不代测。
+            Text(subjectLine)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
             ForEach(model.entries) { entry in
                 PermissionCardView(
                     entry: entry,
@@ -60,6 +68,15 @@ struct SettingsPanelView: View {
                 )
             }
         }
+    }
+
+    /// 授权主体一行话：daemon 自报身份（含是否 bundle 身份）+ 面板主体免责。
+    private var subjectLine: String {
+        guard let subject = model.daemon.subject else {
+            return PermissionGuide.daemonOfflineText + "；" + PermissionGuide.panelSubjectDisclaimer
+        }
+        let identity = subject.hasBundleIdentity ? "bundle 身份" : "裸二进制（列表内只显示文件名）"
+        return "授权主体：\(subject.tccEntryName)（\(identity)）· \(subject.binaryPath)"
     }
 
     private var daemonSection: some View {
@@ -84,6 +101,10 @@ struct SettingsPanelView: View {
                 }
                 if let pid = model.daemon.pid {
                     statusRow("PID", "\(pid)")
+                }
+                if let subject = model.daemon.subject {
+                    statusRow("主体", subject.tccEntryName)
+                    statusRow("主体路径", subject.hasBundleIdentity ? (subject.bundlePath ?? subject.binaryPath) : subject.binaryPath)
                 }
                 if let error = model.lastRefreshError {
                     Text(error).font(.caption).foregroundStyle(.red)
@@ -145,14 +166,14 @@ struct SettingsPanelView: View {
         }
     }
 
-    /// 启动 1s 权限轮询：拖拽只负责导航，是否授权由用户在系统面板完成，
-    /// UI 通过轮询实测状态自动点亮。全部权限达成（granted 或 unverifiable）
-    /// 即自停。AX trust / preflight 均为廉价本地查询，1s 间隔不构成负担。
+    /// 启动 1s 权限轮询：拖拽/按钮只负责导航与"让 daemon 自己申请"，是否授权
+    /// 由用户在系统面板完成，UI 通过向 daemon 打 `hello` 读它自报的席位自动点亮
+    /// （必备三类全部 granted 才停表；daemon 不可达不停表——见 P1 v1.2 §11.2）。
     private func startPolling() {
         stopPolling()
         let timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
             Task { @MainActor in
-                if model.pollPermissions() {
+                if await model.pollPermissions() {
                     stopPolling()
                 }
             }
@@ -167,9 +188,12 @@ struct SettingsPanelView: View {
 }
 
 /// 拖拽引导条：顶部可拖动的 app 图标 + 说明（拖 → 打开系统面板 → 授权后自动
-/// 点亮）。整个横幅都可作为拖拽源，provider 提供纯文本 "GlassPane"（二进制
-/// 直跑时无 .app bundle 路径，落点按文本名识别）。
+/// 点亮）。拖拽源由 `PermissionGuide.dragSource(for:)` 决定（P1 v1.2 §11.3）：
+/// daemon 有 bundle 身份时提供 **daemon 真身 .app 的 fileURL**（可直接拖进系统
+/// 设置权限列表，条目带可读名与图标）；裸二进制形态下只能提供纯文本导航。
 struct DragGuideBannerView: View {
+    @EnvironmentObject private var model: SettingsModel
+
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: "app")
@@ -182,7 +206,7 @@ struct DragGuideBannerView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(PermissionGuide.bannerTitle)
                     .font(.callout.bold())
-                Text(PermissionGuide.bannerHint)
+                Text(model.dragSourceHint)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -197,7 +221,13 @@ struct DragGuideBannerView: View {
                 .stroke(Color.accentColor.opacity(0.35), lineWidth: 1)
         )
         .onDrag {
-            NSItemProvider(object: "GlassPane" as NSString)
+            switch model.dragSource {
+            case .bundleURL(let bundlePath):
+                return NSItemProvider(item: URL(fileURLWithPath: bundlePath) as NSURL,
+                                      typeIdentifier: UTType.fileURL.identifier)
+            case .plainText(let name):
+                return NSItemProvider(object: name as NSString)
+            }
         }
     }
 }
@@ -299,7 +329,9 @@ struct PermissionCardView: View {
         case .notDetermined:
             return "授权"
         case .unverifiable:
-            return "打开系统设置"
+            // 必备权限取不到 daemon 自报席位时按钮仍有效：点击即让 daemon 重新
+            // 申请并跳转面板；开发者工具无申请接口，只跳面板。
+            return entry.kind == .developerTools ? "打开系统设置" : "授权"
         }
     }
 
@@ -318,6 +350,12 @@ struct PermissionCardView: View {
                 Text(entry.descriptor.purposeText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let statusNote = entry.statusNote {
+                    // 状态来源注记：daemon 未上报席位时如实说明，不冒充已测。
+                    Text(statusNote)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
             }
 
             Spacer()

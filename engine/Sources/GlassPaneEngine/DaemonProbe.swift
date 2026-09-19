@@ -4,7 +4,10 @@ import Foundation
 ///
 /// 面板对 daemon 的唯一协议调用是 `hello`（已存在于方法表），一次性会话、
 /// 3s 超时后关闭，不占用连接（SocketServer 单客户端语义不变）。
-public final class DaemonProbe {
+///
+/// `@unchecked Sendable` 依据：init 后全部属性不可变（注入闭包与常量），
+/// 探测过程不持有跨调用状态，可安全在后台队列复用同一实例。
+public final class DaemonProbe: @unchecked Sendable {
 
     /// 传输注入点：把请求字节发给 daemon 并返回完整响应数据；失败/超时返回 nil。
     public typealias Transport = (_ socketPath: String, _ request: Data) -> Data?
@@ -14,6 +17,25 @@ public final class DaemonProbe {
         public let version: String
         public let protocolVersion: String
         public let pid: Int
+        /// daemon 自报的授权主体（`hello.identity`）；旧 daemon 不上报时为 nil
+        /// ——面板据此显示"未验证"，不猜测（P1 v1.2 §11.2）。
+        public let subject: PermissionSubject?
+        /// daemon 自身的四类席位（`hello.permissions`）；缺失即空字典。
+        public let permissions: [PermissionKind: PermissionStatus]
+
+        public init(
+            version: String,
+            protocolVersion: String,
+            pid: Int,
+            subject: PermissionSubject? = nil,
+            permissions: [PermissionKind: PermissionStatus] = [:]
+        ) {
+            self.version = version
+            self.protocolVersion = protocolVersion
+            self.pid = pid
+            self.subject = subject
+            self.permissions = permissions
+        }
     }
 
     /// 3 秒超时（P1 spec v1.2 §6.3 / §9.2）。
@@ -45,6 +67,13 @@ public final class DaemonProbe {
     }
 
     /// 解析 `{"result":{...},"id":0}` 形态的 hello 响应（纯逻辑，独立可测）。
+    ///
+    /// 与既有口径一致，解析层只认字段形状（`engine` 名不在此层硬校验，见
+    /// `EngineP1Batch3Tests.testDaemonProbeHelloSummaryRejectsWrongEngine`）。
+    ///
+    /// `identity` / `permissions` 为 P1 v1.2 §11.2 的增量字段：旧 daemon 不带
+    /// 这两个字段时仍解析成功（subject=nil、permissions=[:]），面板据此显示
+    /// "未验证"，绝不以面板进程自身的权限冒充 daemon 的席位。
     public static func parseHelloResponse(_ data: Data) -> Summary? {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let result = object["result"] as? [String: Any],
@@ -54,7 +83,13 @@ public final class DaemonProbe {
         else {
             return nil
         }
-        return Summary(version: version, protocolVersion: protocolVersion, pid: pid)
+        return Summary(
+            version: version,
+            protocolVersion: protocolVersion,
+            pid: pid,
+            subject: PermissionSubject.from(wireValue: result["identity"] as? [String: Any]),
+            permissions: DaemonPermissionSnapshot.statuses(from: result["permissions"] as? [String: Any])
+        )
     }
 
     // MARK: - Default transport (POSIX Unix domain socket)
