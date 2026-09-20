@@ -65,7 +65,7 @@ final class SettingsModel: ObservableObject {
     static let launchdLabel = "com.glasspane.daemon"
 
     /// daemon 未运行 / 旧 daemon 不上报时的卡片注记。
-    static let noDaemonReportNote = "未取到 daemon 自报席位（daemon 未运行或版本过旧）"
+    static let noDaemonReportNote = "后台服务未在运行或版本过旧，暂时读不到它的授权状态"
 
     /// 顶部图标的拖拽源：daemon 有 bundle 身份时提供 **daemon 真身 .app**
     /// 的 fileURL（可直接拖进系统设置列表并显示图标）；daemon 未上报身份时
@@ -78,9 +78,9 @@ final class SettingsModel: ObservableObject {
     var dragSourceHint: String {
         switch dragSource {
         case .bundleURL(let bundlePath):
-            return "顶部图标即 daemon 真身（\(bundlePath)）：可直接拖进系统设置的权限列表"
+            return "顶部图标就是后台服务本体（\(bundlePath)）：拖到下方卡片可直接打开对应授权面板"
         case .plainText:
-            return "daemon 当前以裸二进制运行：拖拽仅用于精确跳转，列表里需认文件名（可点「刷新」在 daemon 打包后更新）"
+            return "后台服务当前是未打包形态，系统设置列表里只显示文件名：拖拽仅用于跳转，重新安装打包版本后点「刷新」"
         }
     }
 
@@ -228,6 +228,9 @@ final class SettingsModel: ObservableObject {
     /// 由 daemon 自己的二进制在 launchd 上下文中跑）。显式触发、带时刻，
     /// 不作为实时席位。
     @Published var developerToolsCapability: DeveloperToolsCapability.Report?
+    /// developerToolsCapability 是在哪个 daemon 进程上测得；pid 变了必须作废
+    /// （旧结论不能冒充新进程的状态）。
+    @Published var developerToolsProbePid: Int?
     @Published var isProbingDeveloperTools = false
     @Published var developerToolsProbeError: String?
     private var capabilityInFlight = false
@@ -249,7 +252,11 @@ final class SettingsModel: ObservableObject {
         let outputPath = directory + "glasspane-reprobe-\(nonce).json"
         let script = PermissionReprobe.script(daemonBinaryPath: binaryPath, outputPath: outputPath)
         let command = PermissionReprobe.submitCommand(scriptPath: scriptPath, nonce: nonce)
-        let text = await Self.runOneShot(script: script, scriptPath: scriptPath, outputPath: outputPath, command: command)
+        // 一次性任务轮询是阻塞调用——必须在主 actor 之外执行，否则面板整窗
+        // 冻结（launchd 挂起 UI 进程会被看门狗杀掉，用户侧症状就是"点了没反应"）。
+        let text = await Task.detached(priority: .utility) {
+            Self.runOneShot(script: script, scriptPath: scriptPath, outputPath: outputPath, command: command)
+        }.value
         let result = text.flatMap { PermissionReprobe.parse($0) }
         if let result {
             reprobed = result
@@ -264,7 +271,7 @@ final class SettingsModel: ObservableObject {
     /// 查询接口这一事实不变）。
     func verifyDeveloperTools() async {
         guard let binaryPath = daemon.subject?.binaryPath else {
-            developerToolsProbeError = "未取到 daemon 身份，无法以它自己的上下文探测"
+            developerToolsProbeError = "还没连上后台服务：调试能力要由它自己实测。点「刷新」恢复连接后重试。"
             return
         }
         guard !capabilityInFlight else { return }
@@ -282,17 +289,22 @@ final class SettingsModel: ObservableObject {
             arguments: PermissionReprobe.developerToolsArguments
         )
         let command = PermissionReprobe.submitCommand(scriptPath: scriptPath, nonce: nonce)
-        let text = await Self.runOneShot(
-            script: script, scriptPath: scriptPath, outputPath: outputPath, command: command,
-            timeoutSeconds: Self.capabilityProbeTimeout
-        )
+        // 同 reprobeSeats：分钟级的实测等待绝不占用主线程。
+        let timeout = Self.capabilityProbeTimeout
+        let text = await Task.detached(priority: .utility) {
+            Self.runOneShot(
+                script: script, scriptPath: scriptPath, outputPath: outputPath, command: command,
+                timeoutSeconds: timeout
+            )
+        }.value
         if let text, let report = DeveloperToolsCapability.parse(text, observedAt: Date()) {
             developerToolsCapability = report
+            developerToolsProbePid = daemon.pid
             setPendingGuide(.developerTools)
         } else {
             developerToolsProbeError = text == nil
-                ? "探测未在时限内回产物（真实 lldb 冷启动可能更久）；保持\"未验证\"，不猜结论"
-                : "探测输出不合预期结构；保持\"未验证\"，不猜结论"
+                ? "这次验证等得有点久，没有回音（首次启动调试器可能要好几分钟）。再点一次「验证调试能力」试试。"
+                : "这次验证返回了读不懂的结果，状态保持\"未验证\"。稍后再试一次，或联系维护者附上下方时间行。"
         }
     }
 
@@ -321,9 +333,15 @@ final class SettingsModel: ObservableObject {
     ) -> String? {
         let url = URL(fileURLWithPath: scriptPath)
         do {
+            // NSTemporaryDirectory() 对非 sandbox 进程可能指向尚未创建的目录，
+            // 不先 mkdir 时原子写直接抛错、一次性任务从未提交（面板侧表现为
+            // "点了没反应"）。目录不存在就必须先建。
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try script.write(to: url, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath)
         } catch {
+            FileHandle.standardError.write(Data("runOneShot script-write failed: \(error) path=\(scriptPath)\n".utf8))
             return nil
         }
         try? FileManager.default.removeItem(atPath: outputPath)
@@ -333,6 +351,7 @@ final class SettingsModel: ObservableObject {
         do {
             try process.run()
         } catch {
+            FileHandle.standardError.write(Data("runOneShot launchctl submit failed: \(error)\n".utf8))
             return nil
         }
         var result: String?
@@ -392,6 +411,12 @@ final class SettingsModel: ObservableObject {
             daemon.version = summary.version
             daemon.protocolVersion = summary.protocolVersion
             daemon.pid = summary.pid
+            if let probePid = developerToolsProbePid, probePid != summary.pid {
+                // daemon 换过进程：上一次"验证调试能力"的结论不再代表现状。
+                developerToolsCapability = nil
+                developerToolsProbeError = nil
+                developerToolsProbePid = nil
+            }
         }
         if let reachable {
             daemon.reachable = reachable
@@ -420,7 +445,7 @@ final class SettingsModel: ObservableObject {
             if let status = reported[kind] {
                 entries[index].status = status
                 entries[index].statusNote = restartKinds.contains(kind)
-                    ? "系统里已授权，重启 daemon 后生效"
+                    ? "系统设置里已勾选，重启后台服务后生效"
                     : nil
             } else {
                 entries[index].status = .unverifiable
@@ -439,7 +464,7 @@ final class SettingsModel: ObservableObject {
             text = PermissionGuide.daemonRequiredText + " " + text
         }
         if let droppedName, !droppedName.isEmpty {
-            text += "（拖入的『\(droppedName)』只是导航入口，授权对象是 daemon）"
+            text += "（拖入的『\(droppedName)』只是帮你跳转；真正要勾选的是后台服务本身）"
         }
         pendingGuideText = text
     }

@@ -70,7 +70,7 @@ final class PermissionSubjectTests: XCTestCase {
             daemonBinaryPath: "/Users/dev/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned",
             nonce: "1700-42"
         )
-        XCTAssertEqual(command.launchPath, "/usr/bin/launchctl")
+        XCTAssertEqual(command.launchPath, Launchctl.path)
         XCTAssertEqual(
             command.arguments,
             [
@@ -98,7 +98,7 @@ final class PermissionSubjectTests: XCTestCase {
 
     func testDaemonRequestCleanupUsesRemove() {
         let command = PermissionGuide.daemonRequestCleanupCommand(jobLabel: "com.glasspane.guide.accessibility.1-2")
-        XCTAssertEqual(command.launchPath, "/usr/bin/launchctl")
+        XCTAssertEqual(command.launchPath, Launchctl.path)
         XCTAssertEqual(command.arguments, ["remove", "com.glasspane.guide.accessibility.1-2"])
     }
 
@@ -134,17 +134,18 @@ final class PermissionSubjectTests: XCTestCase {
     func testInstructionNamesTheDaemonSubject() {
         let bundled = PermissionGuide.instruction(for: .accessibility, subjectName: "GlassPane Daemon", hasBundleIdentity: true)
         XCTAssertTrue(bundled.contains("GlassPane Daemon"))
-        XCTAssertFalse(bundled.contains("裸二进制"), "bundle 身份不该出现裸二进制告警")
+        XCTAssertFalse(bundled.contains("未打包"), "bundle 身份不该出现未打包告警")
 
         let bare = PermissionGuide.instruction(for: .screenRecording, subjectName: "glasspaned", hasBundleIdentity: false)
         XCTAssertTrue(bare.contains("glasspaned"))
-        XCTAssertTrue(bare.contains("裸二进制"), "裸二进制形态必须如实告知条目只显示文件名/无图标")
+        XCTAssertTrue(bare.contains("未打包"), "未打包形态必须告知条目只显示文件名")
+        XCTAssertTrue(bare.contains("只显示文件名"))
     }
 
     func testDeveloperToolsInstructionStaysHonest() {
         let text = PermissionGuide.instruction(for: .developerTools, subjectName: "glasspaned", hasBundleIdentity: false)
-        XCTAssertTrue(text.contains("不伪造"), "开发者工具仍不得伪造授权态")
-        XCTAssertTrue(text.contains("TCC 无公开查询接口"), "口径：状态栏不是实时席位，而是无接口可查")
+        XCTAssertTrue(text.contains("不提供查询"), "开发者工具状态无查询接口这一事实必须告知用户")
+        XCTAssertTrue(text.contains("未验证"), "卡片必须默认如实显示未验证")
     }
 
     // MARK: - §11.2 席位快照与线上往返
@@ -267,7 +268,7 @@ final class PermissionSubjectTests: XCTestCase {
 
     func testReprobeSubmitCommandGoesThroughLaunchd() {
         let command = PermissionReprobe.submitCommand(scriptPath: "/tmp/gp.zsh", nonce: "42")
-        XCTAssertEqual(command.launchPath, "/usr/bin/launchctl")
+        XCTAssertEqual(command.launchPath, Launchctl.path)
         XCTAssertEqual(command.arguments, ["submit", "-l", "com.glasspane.reprobe.42", "--", "/tmp/gp.zsh"])
     }
 
@@ -306,7 +307,7 @@ final class PermissionSubjectTests: XCTestCase {
 
     func testRestartCommandIsKickstartForLaunchdJob() {
         let command = PermissionGuide.daemonRestartCommand(uid: 501)
-        XCTAssertEqual(command.launchPath, "/usr/bin/launchctl")
+        XCTAssertEqual(command.launchPath, Launchctl.path)
         XCTAssertEqual(command.arguments, ["kickstart", "-k", "gui/501/com.glasspane.daemon"])
     }
 
@@ -314,7 +315,7 @@ final class PermissionSubjectTests: XCTestCase {
         let text = PermissionGuide.restartNeededText([.accessibility, .screenRecording])
         XCTAssertTrue(text.contains("辅助功能"))
         XCTAssertTrue(text.contains("屏幕录制"))
-        XCTAssertTrue(text.contains("重启 daemon"))
+        XCTAssertTrue(text.contains("重启后台服务"))
     }
 
     func testSubjectInstructionDeclaresRestartSemantics() {
@@ -322,7 +323,7 @@ final class PermissionSubjectTests: XCTestCase {
         // 文案都必须声明"需重启生效"，不能承诺"开启后即变绿"。
         for kind in [PermissionKind.accessibility, .inputMonitoring, .screenRecording] {
             let text = PermissionGuide.instruction(for: kind, subjectName: "GlassPane Daemon", hasBundleIdentity: true)
-            XCTAssertTrue(text.contains("重启 daemon"), "\(kind) 文案应声明重启才生效")
+            XCTAssertTrue(text.contains("重启后台服务"), "\(kind) 文案应声明重启才生效")
         }
     }
 
@@ -389,9 +390,9 @@ final class PermissionSubjectTests: XCTestCase {
         let report = DeveloperToolsCapability.Report(
             launch: "ok", attach: "denied", granted: true, observedAt: Date(timeIntervalSince1970: 1_700_000_000))
         let text = report.summaryText()
-        XCTAssertTrue(text.contains("非实时读数"), "必须声明这是带时刻的一次验证")
-        XCTAssertTrue(text.contains("launch=ok"))
-        XCTAssertTrue(text.contains("attach=denied"))
+        XCTAssertTrue(text.contains("一次性验证结果"), "必须声明这是带时刻的一次验证")
+        XCTAssertTrue(text.contains("启动调试器 成功"))
+        XCTAssertTrue(text.contains("附加进程 被系统拒绝"))
     }
 
     func testReprobeScriptCarriesDeveloperToolsArguments() {
@@ -482,4 +483,16 @@ final class PermissionSubjectTests: XCTestCase {
         XCTAssertNil(payload["permissions"])
         XCTAssertNil(payload["identity"])
     }
+    func testLaunchctlPathResolvesToRealBinary() {
+        // 面板全部 launchd 动作共享同一条已验证存在的路径（/usr/bin 假路径曾致
+        // 静默全失败——此测试把"不许硬编码猜路径"钉死）。
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: Launchctl.path))
+        let req = PermissionGuide.daemonRequestCommand(for: .accessibility, daemonBinaryPath: "/tmp/x", nonce: "n")
+        XCTAssertEqual(req.launchPath, Launchctl.path)
+        let cleanup = PermissionGuide.daemonRequestCleanupCommand(jobLabel: req.jobLabel)
+        XCTAssertEqual(cleanup.launchPath, Launchctl.path)
+        let restart = PermissionGuide.daemonRestartCommand(uid: 501)
+        XCTAssertEqual(restart.launchPath, Launchctl.path)
+    }
+
 }

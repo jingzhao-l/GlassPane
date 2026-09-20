@@ -62,9 +62,9 @@ final class PermissionGuideTests: XCTestCase {
         let instruction = PermissionGuide.instruction(for: .developerTools)
         XCTAssertTrue(instruction.contains("开发者工具"))
         XCTAssertTrue(instruction.contains("未验证"), "必须声明状态不可查询，不伪造已授权")
-        // 修正后的真值：这是 LLDB attach 的权限入口（Apple Events 是另一主体），
-        // 文案必须落到"去开发者工具面板勾选 + 本卡不伪造状态"。
-        XCTAssertTrue(instruction.contains("LLDB"))
+        // 修正后的真值：这是调试器附加进程的权限入口，文案必须落到
+        // "去开发者工具面板勾选 + 本卡不假装能实时读出状态"。
+        XCTAssertTrue(instruction.contains("调试器"))
         XCTAssertTrue(instruction.contains("打开开关"))
         XCTAssertFalse(instruction.contains("变绿"), "developerTools 永远不可自动点亮，文案不应暗示变色")
     }

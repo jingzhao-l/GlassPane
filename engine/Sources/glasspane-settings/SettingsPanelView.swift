@@ -41,7 +41,7 @@ struct SettingsPanelView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text("GlassPane 设置")
                 .font(.title2.bold())
-            Text("首次运行权限引导，逐项声明用途与拒绝降级形态。所有状态实时检测，修改后点击刷新。")
+            Text("这些权限需要你在系统设置里勾选。每张卡说明它的用途和缺少时的表现；状态自动检测，改动后点「刷新」。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -66,9 +66,9 @@ struct SettingsPanelView: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                     Spacer()
-                    Button("重启 daemon") { model.restartDaemon() }
+                    Button("重启后台服务") { model.restartDaemon() }
                         .controlSize(.small)
-                        .help("launchctl kickstart -k \(SettingsModel.launchdLabel)：会中断正在进行的 act")
+                        .help("立即重启后台服务（会打断正在执行的操作）")
                 }
                 .padding(10)
                 .background(Color.orange.opacity(0.08))
@@ -78,6 +78,9 @@ struct SettingsPanelView: View {
                 PermissionCardView(
                     entry: entry,
                     capabilityLine: capabilityLine(for: entry.kind),
+                    verifiedStatus: entry.kind == .developerTools
+                        ? model.developerToolsCapability?.status
+                        : nil,
                     onVerifyCapability: entry.kind == .developerTools
                         ? { Task { await model.verifyDeveloperTools() } }
                         : nil,
@@ -95,7 +98,7 @@ struct SettingsPanelView: View {
     private func capabilityLine(for kind: PermissionKind) -> String? {
         guard kind == .developerTools else { return nil }
         if model.isProbingDeveloperTools {
-            return "调试能力探测中：真跑一次 xcrun lldb（冷启动预算分钟级），完成前状态栏保持\"未验证\"…"
+            return "正在实测调试能力……通常约 1 分钟，首次启动调试器可能更久"
         }
         if let error = model.developerToolsProbeError { return error }
         return model.developerToolsCapability?.summaryText()
@@ -106,7 +109,7 @@ struct SettingsPanelView: View {
         guard let subject = model.daemon.subject else {
             return PermissionGuide.daemonOfflineText + "；" + PermissionGuide.panelSubjectDisclaimer
         }
-        let identity = subject.hasBundleIdentity ? "bundle 身份" : "裸二进制（列表内只显示文件名）"
+        let identity = subject.hasBundleIdentity ? "已打包应用" : "未打包（系统设置列表内只显示文件名）"
         return "授权主体：\(subject.tccEntryName)（\(identity)）· \(subject.binaryPath)"
     }
 
@@ -164,7 +167,7 @@ struct SettingsPanelView: View {
                 }
                 .padding(.top, 8)
             } label: {
-                Text("权限被拒绝后的行为遵循综述 §5.14 降级口径")
+                Text("下面的每一项都标了缺少该权限时的实际表现，便于你决定勾或不勾。")
                     .font(.callout)
             }
         }
@@ -307,8 +310,10 @@ struct GuideBannerView: View {
 /// 状态）。落点悬停时高亮描边。
 struct PermissionCardView: View {
     let entry: SettingsModel.PermissionEntry
-    /// 机器探测行（仅开发者工具卡使用：P6 §7 的受限 lldb 探测结论）。
+    /// 机器探测行（仅开发者工具卡使用：受限 lldb 实测结论）。
     var capabilityLine: String? = nil
+    /// 实测结论折算的状态（仅开发者工具卡；有值时徽标按实测状态显示）。
+    var verifiedStatus: PermissionStatus? = nil
     /// 「验证调试能力」动作；nil 表示该卡不提供机器探测。
     var onVerifyCapability: (() -> Void)? = nil
     /// 探测在途：按钮禁点，避免叠加 launchd 任务。
@@ -318,8 +323,13 @@ struct PermissionCardView: View {
 
     @State private var isDropTargeted = false
 
+    /// 开发者工具卡：一旦有"验证调试能力"的实测结论，徽标改按实测状态显示
+    /// （系统没有查询接口 ≠ 不能实测；实测结论必须让用户看得见，而不是永远
+    /// 灰在"未验证"）。其余卡恒按 daemon 自报席位。
+    private var displayStatus: PermissionStatus { verifiedStatus ?? entry.status }
+
     private var badgeColor: Color {
-        switch entry.status {
+        switch displayStatus {
         case .granted:
             return .green
         case .denied:
@@ -332,11 +342,11 @@ struct PermissionCardView: View {
     }
 
     private var badgeText: String {
-        switch entry.status {
+        switch displayStatus {
         case .granted:
-            return "已授权"
+            return verifiedStatus != nil ? "可用（实测）" : "已授权"
         case .denied:
-            return "已拒绝"
+            return verifiedStatus != nil ? "被拒绝（实测）" : "已拒绝"
         case .notDetermined:
             return "未请求"
         case .unverifiable:
