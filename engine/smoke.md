@@ -201,6 +201,12 @@ printf '%s\n' \
   老进程读不到旧答案。据此新增 §11.4 席位重探 + 「重启 daemon」按钮（不自动重启，
   因为 kickstart 会中断正在进行的 act）。
 
+> 操作提醒：`engine/.c6_smoke.py` 会走完整的 attach/act 回路并在结束时让 daemon
+> 收尾（脚本第 2 参数接受任意 socket 路径）。**必须指向它自己起的隔离 socket**，
+> 不要把现网 `~/.glasspane/engine.sock` 传进去——真机踩过一次：跑完现网 daemon 直接
+> 退出，因 `KeepAlive(SuccessfulExit=false)` 不会被 launchd 复活，需手动
+> `launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon` 恢复。
+
 ### 合并后权限面复验（2026-09-19 22:4x–23:2x，P1 v1.2 §11.6 / §11.10）
 
 - **调试能力机器验证通道跑通**：按 `PermissionReprobe.script(arguments:
