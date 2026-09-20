@@ -218,13 +218,12 @@ printf '%s\n' \
 - **两条本轮做不到的核验（如实挂账）**：
   1. `screencapture -x -o` → `could not create image from display`：本会话责任上下文没有
      屏幕录制席位（正是 §11.1 结论 2 的表现），故无法用截图目视面板文案。
-  2. 想用引擎自己的通道读面板文案（`assert_element` 取按钮标题）也失败：对**确实存在**的
-     元素（`observe` 树里可见 `AXImage identifier=hammer`）断言，同样回
-     `GP_E_NO_OPERATION — no prior operation to reuse signal context from`，而 remedy 又写
-     "run act or assert_element first"，形成循环。根因是 `EngineCore.assertElement`
-     以 `latestPack()` 作为前置条件（P0 §3.3 的"信号上下文复用"被套成了硬性门槛），
-     使 assert 无法作为该会话的第一个操作。**记为缺陷，未自行改**（属 P0/P6 语义，
-     改前需确认预期）。
+  2. 改用 `assert_element` 读面板按钮标题同样拿不到结论——但**更正我上一轮的判断**：
+     `GP_E_NO_OPERATION` 不是实现缺陷，P0 §3.3 方法表写明"assert 证据的 signals 复用
+     最近一次 act 的信号，无最近 op 时报此码"。真正的缺陷只在 remedy 文案
+     （"run act or assert_element first"）对这条路径自指，照做会死循环。已按
+     "码不动、语义不动、remedy 可执行"修（P1-S14），并在 §11.6b 另开一条不依赖
+     assert 的渲染核验通道。
 
 **如实边界与待办（P1-S8）**：新 bundle 身份是全新 TCC 客户端，旧的 `glasspaned` 席位不
 继承——需用户在系统设置里为「GlassPane Daemon」重新勾选一次，并目视确认条目名与图标、
@@ -260,6 +259,79 @@ GLASSPANE_PROBE_SOCK 指向隔离探针口）。结果：**P6 SMOKE OK**——
 16. **屏幕录制对 /tmp 隔离 daemon 子进程未授予**：pixelDiff 缺席时 NO_ANOMALY
     金丝雀按 P6 §3.2 落 INCONCLUSIVE（T6 不可排除），脚本如实分支不假过。
 
+### 面板渲染状态机器核验闭环（2026-09-20 20:2x，P1 v1.2 §11.6b / P1-S13）
+
+不再依赖截图与人眼：每张权限卡的状态图标带专用无障碍标识
+（`PermissionGuide.statusIdentifier`），经产品自身的 socket 通道即可判定渲染结果。
+实测（`attach {pid: glasspane-settings}` → `observe maxDepth=10`，nodeCount=207）：
+
+```
+gp-perm-accessibility-granted
+gp-perm-input-monitoring-granted
+gp-perm-screen-recording-granted
+gp-perm-developer-tools-unverifiable
+```
+
+即：必备三卡在 UI 上确为"已授权"，开发者工具卡如实保持"未验证"（其调试能力另有带时刻
+的机器探测行，见 §11.6）。同轮复验：bundle 重新编译重签（cdhash 变）+ daemon 重启后
+三项席位仍 `granted`；`--replace-daemon` 第四次遇到 SIGTERM 哑火（PID 1814），
+SIGKILL 兜底生效。设置面板自身身份也可被 attach 识别
+（`appName=GlassPane / bundleId=com.glasspane.settings`）。
+
+### SIGTERM 哑火根因修复与回归闸（2026-09-20 20:4x，P1 v1.2 §11.7 S15）
+
+前三次记录都只写"daemon 不响应 SIGTERM，安装器靠 SIGKILL 兜底"，本轮查到根因并修：
+`installSignalHandlers` 里两处叠加——(1) 信号源只是局部变量，函数返回即被 ARC 释放；
+(2) handler 挂在 `.main` 队列，而 `SocketServer.run()` 的 `accept()` 阻塞主线程，
+主队列永远不泵。两者叠加使 SIGINT/SIGTERM 彻底哑火（`signal(..., SIG_IGN)` 又把默认
+处置改成忽略，于是连"被信号杀掉"都不会发生）。修法：信号源显式持有 + 挂专用队列，
+收尾改为 `unlink(engine.sock, probe.sock)` 后 `exit(0)`——**不**调 `server.cleanup()`，
+因为它会 close 正被 `accept()` 使用的 fd（跨线程 close 有 fd 复用竞态）。
+
+确定性对照（同一脚本 `engine/.signal_smoke.py`，隔离 socket，不碰现网）：
+
+| 被测二进制 | SIGTERM | SIGINT |
+|---|---|---|
+| 修复前（已安装的 bundle 旧产物） | 6s 内未退出 → 需 KILL | 6s 内未退出 → 需 KILL |
+| 修复后（本次 debug 与 release 产物） | 退出码 0，两个 socket 均 unlink | 退出码 0，两个 socket 均 unlink |
+
+连带后果（同轮查明并修）：`KeepAlive SuccessfulExit=false` 的语义是"只有异常退出才
+重启"，TERM 修好后 daemon 是 clean exit 0 → **launchd 本就不该复活它**，此前看到的
+"KILL 后自动重生"其实是哑火的副产物。所以安装器收拢旧实例后必须显式
+`launchctl kickstart -k gui/<uid>/com.glasspane.daemon` 才能拿到 launchd 托管形态
+（实测：接管成功 → `launchctl print` = `state = running`、单一实例、日志里再无 KILL 兜底）。
+
+### 陈旧作业定义让 launchd 永远起不来（EX_CONFIG，2026-09-20 20:5x）
+
+第二层坑：安装器原地重写 plist 后，**launchd 用的是 bootstrap 时缓存的作业定义**，
+新路径不生效——`launchctl print` 表现为 `last exit code = 78: EX_CONFIG` +
+`state = spawn scheduled`，kickstart 也永远不起（socket 自然轮不到 launchd 接管，
+安装器只能退回手动启动，开机自启形同虚设）。真机还看到过 `last exit code = 65`——
+那正是本次新增的单实例护栏在拒绝"已有实例在服务 socket"，说明护栏与 launchd 重试
+互相看得见（不是缺陷，但读日志时要认得这两个码）。
+
+修法：重新注册的判据从"plist 文本是否变化"改成**"已加载作业的 `program` 是否等于本次
+要安装的路径"**（`loadedLaunchdProgram` + `launchdNeedsReregister`，纯函数可测），不等就
+`bootout` + `bootstrap`；读不到定义也一律重来。实测前后：接管前 `--replace-daemon` 报
+"launchd 未在时限内接管，改由安装器直接启动"，接管后报
+"launchd 已按新配置接管 daemon（kickstart）"、`launchctl print` = `state = running`。
+
+### 登录路径、信号语义与 remedy 准确性（2026-09-20 21:3x）
+
+- **登录时加载等价实测**：`launchctl bootout` → `bootstrap`（RunAtLoad 与登录加载同一入口）
+  → `state = running`、新 pid、`hello` 四项席位读数与重载前一致（授权跨完整重载保持，
+  这是"重编译/重签/重启都不丢授权"的最强一次证明）。
+- **TERM 语义核对**：对该实例 `kill -TERM` → `last exit code = 0`、`state = not running`，
+  launchd 依 `KeepAlive(SuccessfulExit=false)` **不再复活**（修复前 TERM 完全无效、只能
+  KILL，而 KILL 属异常退出会被立刻重拉——即"杀不掉又重生"）。维护路径因此必须显式
+  kickstart，安装器已按此实现。
+- **幻影 remedy 复现并修**：对设置面板 `observe {role: AXButton}` 撞到
+  `tree capture exceeded the total 10.0s budget`，而回的是 `GP_E_AX_UNAVAILABLE` +
+  "run onboarding: glasspaned --grant-accessibility"——但辅助功能当时是 `granted`
+  （同一实例 `--check-accessibility` 可自证）。按"码不动、remedy 与成因一致"修：
+  预算/超时类给出 `maxDepth`/selector 缩小动作 + 自查命令并明确"不要重新授权"；
+  窗口捕获类指向屏幕录制席位与降级形态（P1 v1.0 §5）。
+
 ---
 
 ## 人工介入最小化批次冒烟（2026-09-19/20，P6 spec §11）
@@ -272,9 +344,11 @@ GLASSPANE_PROBE_SOCK 指向隔离探针口）。结果：**P6 SMOKE OK**——
 18. **`installer --restore-launchd`**：bootout→bootstrap→hello 自报校验→（已加载未
     授权时）kickstart 换进程复验；退出码即判定，`GP_E_ENGINE_UNREACHABLE` remedy 已
     指向该命令。分支单测 8 例（注入假件，不碰真 launchctl）。
-19. **SIGTERM/SIGINT e2e（§11 ⑥ 的验证面，无法单测所以入冒烟）**：
+19. **SIGTERM/SIGINT e2e（§11 ⑥ 验证面，合流后机制为 sigwait+早期遮罩；根因
+    归属见上一节 S15：信号源未持有被 ARC 释放 + 主队列不泵）**：
     `glasspaned --socket-path <tmp> &` → `kill -TERM` → 0.2s 内退出且 socket unlink；
-    SIGINT 同（注意非交互 shell 会给后台任务继承 SIG_IGN，测前 `trap - INT` 重置）；
+    SIGINT 同（bash 后台任务强制忽略 SIGINT、`trap - INT` 在 bash 下不可靠——
+    用 python `start_new_session` 干净起进程再发信号；权威闸为 `engine/.signal_smoke.py`）；
     遮罩后、waiter 线程启动前到达的信号以 pending 入账不丢。
 20. **`spike/run_h1_retest.py`**：H1 真实 app 强归因率复测一条命令（fetch→壳→构建→
     .app→隔离 daemon→≥20 act→JSON）；真机 24/24 strong=100%，stateSource=z2-mirror，

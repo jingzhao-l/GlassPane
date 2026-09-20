@@ -369,6 +369,15 @@ launch/attach 各出三态）。本规格据此补一条**显式验证**通道�
 | 怎么显示 | 结论行带观测时刻与"非实时读数"声明；`granted=true` → 调试能力可用；任一侧 `denied` → 系统已拒绝；`timeout`/`spawnFailed` → 不可判定，**不折算成任何权限结论**（与 P6 同口径） |
 | 解析失败 | 保持"未验证"并给错误行，不猜 |
 
+### 11.6b 渲染状态的可核验化
+
+面板是 SwiftUI：`Text` 的内容不进 `AXTitle`（P6 §0 F6），截图又受屏幕录制席位限制，
+所以"卡片到底绿没绿"不能只留给人眼。做法是给每张卡的**状态图标**一个专用无障碍标识
+`PermissionGuide.statusIdentifier(kind:status:)`（形如 `gp-perm-input-monitoring-granted`），
+待重启标记另用 `restartPendingIdentifier`。三条约束：不改四类权限图标既有的 identifier
+（P1-C6 冒烟依赖它）；状态由"形状 + identifier"双表达，不依赖颜色（色盲可用）；标识串
+由 engine 侧纯函数作唯一真源，面板与单测共用同一函数。
+
 ### 11.7 验收项
 
 | 编号 | 验收项 | 通过标准 | 状态 |
@@ -385,4 +394,8 @@ launch/attach 各出三态）。本规格据此补一条**显式验证**通道�
 | P1-S10 | 输入监控条目登记 | `request(.inputMonitoring)` 在未授权时调用一次 tap 登记探针、已授权时跳过（注入式断言，不建真 tap） | ✓ 同上 |
 | P1-S11 | 开发者工具入口修正 | 深链指向 `Privacy_DeveloperTools`，文案不再声称"无系统总开关"、仍声明"状态未验证不伪造" | ✓ `PermissionGuideTests` 2026-09-19 真机核对修正 |
 | P1-S12 | 调试能力机器验证 | `PermissionReprobe.script(arguments:)` 可切 `--check-developer-tools`；`DeveloperToolsCapability.parse` 只认 `capability="developer-tools-debug"` 结构，缺字段即 nil；状态映射 ok→granted / denied→denied / timeout·spawnFailed→unverifiable；结论文案含"非实时读数" | ✓ `PermissionSubjectTests`（2026-09-19，engine 全量 358 用例 0 失败）；本机真探测回 `launch=ok / attach=spawnFailed / granted=true` |
-| P1-S13 | 面板渲染目视 | 三张必备卡显示"已授权"、开发者工具卡显示带时刻的探测结论行 | ⏳ 仍未闭环：本会话上下文无屏幕录制席位（`screencapture` → could not create image from display），且 `assert_element` 在无先前操作时对确实存在的元素也回 `GP_E_NO_OPERATION`（见 smoke.md 缺陷记录），故需人工目视一次 |
+| P1-S13 | 面板渲染机器核验 | 每张卡的状态以稳定 `identifier` 出现在 `observe` 树里（`PermissionGuide.statusIdentifier`）：必备三卡 `gp-perm-*-granted`，开发者工具卡 `gp-perm-developer-tools-unverifiable` | ✓ 2026-09-20 机器闭环（经产品自身通道 attach 面板 pid → `observe` 读到全部四条，不依赖截图与人工目视）；`screencapture` 仍受屏幕录制席位限制，见 smoke.md |
+| P1-S15 | 信号收尾可用 | `glasspaned` 收到 SIGTERM/SIGINT 后自行退出（码 0）并 unlink engine/probe 两个 socket；回归闸 `engine/.signal_smoke.py` | ✓ 2026-09-20（修复前两案均 6s 不退出，修复后全过；`--replace-daemon` 不再需要 SIGKILL 兜底） |
+| P1-S16 | 开机自启真生效 | 安装器收拢旧实例后由 launchd 接管（`kickstart -k`），`launchctl print` 为 `state = running` 且机面上只有一个 daemon；plist 已加载定义（`program`）与本次安装路径不一致时 `bootout` + `bootstrap` 重新注册 | ✓ 2026-09-20（`loadedLaunchdProgram`/`launchdNeedsReregister` 纯函数 + 真机接管复跑）；登录路径同轮实测：`bootout` → `bootstrap`（RunAtLoad 即登录时加载的同一入口）→ `state = running`，四项席位读数不变（授权跨完整重载保持）；随后 `kill -TERM` → `last exit code = 0`、`state = not running` 且 launchd **不复活**，与 `KeepAlive(SuccessfulExit=false)` 语义一致（修复前 TERM 完全无效，只能 KILL → 会被立刻重拉） |
+| P1-S17 | remedy 与成因一致 | 通道存活类失败（`treeCaptureFailed` 预算/超时）不再把用户支去 `--grant-accessibility`，而是给出缩小范围动作 + 自查命令；窗口捕获失败指向屏幕录制席位并说明降级形态；错误码一律不动（码表冻结） | ✓ 2026-09-20（`EngineCore.map` 的 per-instance remedy，3 条单测：预算类 / 非预算类回落授权引导 / 屏幕录制类） |
+| P1-S14 | 错误 remedy 可执行 | `assert_element` 缺信号上下文时仍回 `GP_E_NO_OPERATION`（码表与 P0 §3.3 语义不动），但 remedy 改为可执行的 "run act first"，消除自指循环 | ✓ 2026-09-20（走 `GPError` 的 per-instance remedy 通道） |

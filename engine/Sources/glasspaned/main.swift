@@ -343,10 +343,10 @@ private func runGuideScreenPermission(_ probe: ScreenCapturePermissionProbe) {
 
 /// SIGINT/SIGTERM 的等待集。在主线程、任何 daemon 线程创建**之前**用它做一次
 /// pthread_sigmask(SIG_BLOCK)（见入口处的遮罩点），此后所有线程（CGEvent 后台
-/// runloop、probe accept、per-client、GCD worker）都继承屏蔽，信号在进程内
-/// 只会以 pending 形式存在——唯一的消费点就是下面的 sigwait 线程，送达是
-/// 确定性的。注意：绝不能对这些信号设 SIG_IGN 或装 sigaction handler，
-/// 否则 sigwait 永远收不到（POSIX：ignored disposition 不进 pending 队列）。
+/// runloop、probe accept、per-client、GCD worker）都继承屏蔽，信号在进程内只会
+/// 以 pending 形式存在——唯一的消费点就是 sigwait 线程，送达是确定性的；
+/// waiter 启动前到达的信号同样不丢。注意：不能对这些信号设 SIG_IGN，忽略的
+/// disposition 不进 pending 队列，sigwait 将永远收不到。
 var shutdownSignalSet: sigset_t = {
     var set = sigset_t()
     sigemptyset(&set)
@@ -364,21 +364,21 @@ private func blockShutdownSignalsEarly() {
     pthread_sigmask(SIG_BLOCK, &shutdownSignalSet, nil)
 }
 
-private func startShutdownWaiter(_ server: SocketServer) {
-    // P6 §11 audit item 6（SIGTERM 哑火的真修复）。两个已证伪的形态：
-    // (a) c197836 原始缺陷——handler 挂 DispatchQueue.main，主线程阻塞在
-    //     accept() 后台队列永不排空；
-    // (b) 上一轮的"改一个队列"——DispatchSource 挂专用队列，本机实测同样
-    //     哑火（accept 阻塞期间 SIGTERM 送达后 handler 从不执行；独立最小
-    //     复现 2/2 挂死，而裸 signal() 与 sigwait 均即时触发）。
-    // sigwait 线程继承遮罩、以普通（非 async-signal）上下文执行收尾：
-    // unlink socket、关监听 fd、exit(0)，运维不再需要 kill -9。
+/// SIGTERM/SIGINT 收尾（P6 §11 项⑥ + §11.1 归因修正）。DispatchSource 形态的
+/// 三个真机坑：(1) 信号源不作显式持有，安装完即被 ARC 释放、handler 永不触发
+/// ——此前本机"换专用队列仍哑火"的最小复现正是栽在这一条上，"任意队列都失效"
+/// 的归因不成立，特此更正；(2) 挂 `.main` 队列时 accept() 阻塞主线程、主队列
+/// 永不泵；(3) 收尾若调 `server.cleanup()`，它会 close 正被 accept() 使用的
+/// fd——跨线程 close 有 fd 复用竞态。sigwait 形态三条全免疫：遮罩继承送达确
+/// 定、收尾跑在普通线程上下文；这里只 unlink socket 文件、不关在用的 fd，
+/// 与正常退出留下的现场一致。运维不再需要 kill -9。
+private func startShutdownWaiter(socketPaths: [String]) {
     Thread.detachNewThread {
         var signalNumber: Int32 = 0
         while true {
             let code = sigwait(&shutdownSignalSet, &signalNumber)
             guard code == 0 else { continue }
-            server.cleanup()
+            for path in socketPaths { unlink(path) }
             exit(0)
         }
     }
@@ -690,7 +690,7 @@ let core = EngineCore(
 )
 let dispatcher = Dispatcher(core: core, log: log)
 let server = SocketServer(socketPath: socketPath, dispatcher: dispatcher, log: log)
-startShutdownWaiter(server)
+startShutdownWaiter(socketPaths: [server.socketPath] + (probeServer.map { [$0.socketPath] } ?? []))
 
 FileHandle.standardOutput.write(
     Data("glasspaned \(core.version) listening on \(socketPath)\n".utf8)

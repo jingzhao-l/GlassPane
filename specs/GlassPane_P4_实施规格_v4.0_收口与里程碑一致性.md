@@ -1109,6 +1109,7 @@ P2 两批判定逻辑均有合成单测，真机冒烟口径（R45）此前停�
 | 脚本 | 覆盖 | 前置 | 状态 |
 |---|---|---|---|
 | `engine/.c33_smoke.py` | 输入监控 TCC 三态如实探测（`glasspaned --check-input-permission`，本批随带新增该 CLI flag）→ 自动发现/指定目标 → attach/observe/act/last_evidence 完整回路与归因面观测；未授权时 SKIP（exit 0）并给授权指引 | 输入监控 TCC（本机 2026-09-19 实测已 granted）+ daemon 运行 | ✓ C33 SMOKE OK（2026-09-19）；污染判定注入验证已于同日随 §36 daemon 注入 AttributionGuard 收口（本行当时为纯操作权互斥形态的边界，现三阶段全过） |
+| `engine/.signal_smoke.py` | 信号收尾回归闸（P1 v1.2 §11.7）：起隔离 daemon（独立 engine/probe socket，`--no-c33`）→ 发 SIGTERM 与 SIGINT → 要求**自行退出且退出码 0、两个 socket 文件被 unlink**；产物缺失 SKIP（exit 0） | 无 TCC 依赖 | ✓ SIGNAL SMOKE OK（2026-09-20 修复后）；对照复跑旧构建两案均"6s 内未退出"，即此前四次 SIGTERM 哑火的确定性复现 |
 | `engine/.t9_smoke.py` | 自编译泄漏金丝雀（8MB 内存 + 1 fd/次点击保留）→ daemon 驱动 ≤24 轮 act → evidence 熔断升级 `.degraded` + `degradation\|` reason → `diagnose.class=T9` | 无 TCC 依赖（proc_pidinfo 采样）；daemon 运行 | ✓ T9 SMOKE OK（2026-09-19，第 16/24 轮触发） |
 
 脚本约定：socket/目标/轮数为位置参数可覆盖；退出语义 0=PASS/SKIP、1=FAIL；目标发现不伪造（全部实例 AX 树无按钮时明确报错引导开窗口）。

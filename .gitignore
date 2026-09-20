@@ -5,3 +5,6 @@ dist/
 .build/
 __pycache__/
 .pytest_cache/
+
+# spike/冒烟在仓库根构建出来的 app 产物（如 FineTuneRetest.app）不入库
+/*.app/

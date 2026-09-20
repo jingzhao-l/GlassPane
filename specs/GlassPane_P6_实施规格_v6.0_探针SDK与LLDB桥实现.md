@@ -139,10 +139,19 @@ daemon → 探针：`op_begin {}` / `op_end {}` / `checkpoint_export {domains}` 
 ### 7.5 冒烟结果（实施回填，2026-09-19）
 - **通过**：`xcrun lldb --batch -o "command script import bridge/glasspane_bridge.py" -o "gp-queue"` → 四命令注册成功、gp-queue 输出 §6.1 形态 JSON（本机真机）；`test_bridge.py` 17 用例全绿（队列/截断/sentinel/argv/socket 回传）。
 - **挂账（如实，不假过）**：capture/trace 的**执行面**——attach 现成进程被拒（F2）、`--batch run` launch 控制在当前会话上下文 >5min 无输出挂死（F5 复测）；桥的 CLI 路径对此给出**结构化失败**（timeout → status=failed + 授权指引），不再挂死。解锁条件 = 用户侧环境排查：系统设置 > 隐私与安全性 > 开发者工具授予调用方，或已授权的 Terminal 会话内复跑（`python3 bridge/glasspane_bridge.py capture --exe <crashcanary>` 一条命令即可验证）。
-- **夹具债（登记，未处理）**：`bridge/crashcanary` 是已入库的 Mach-O 二进制（54KB，arm64），
-  但其源不在仓库内——调试信息里的路径是临时目录的 `crashme/crashme.swift`。本次合并核对时
-  评估过"把二进制移出 git"，结论是**不动**：它没有仓库内可复现的生成方式，移除会直接废掉上面
-  那条唯一的手工验证命令。应做的是把夹具源纳入仓库（小改动，与 §7 授权指引同批处理为宜）。
+- **夹具债（已闭环，2026-09-20）**：`bridge/crashcanary` 是已入库的 Mach-O 二进制，但其源
+  不在仓库内（调试信息指向临时目录的 `crashme/crashme.swift`）——夹具不可复现意味着任何一次
+  capture 回归失败都无从判断是桥坏了还是夹具坏了。评估过"把二进制移出 git"，结论是**不动它**
+  （`bridge/capture-sample.json` 是按它采样的留档数据，且移出会废掉上面那条手工验证命令），
+  改为把源补进仓库：`bridge/crashcanary.swift` + 文件头里的重建/自检命令。
+  实测：`swiftc -g` 编译通过（55KB，与入库那份同量级）；独立运行为 `armed` 日志后
+  250ms 崩溃、退出 133（SIGTRAP），二进制含可辨认帧符号 `main.raiseCanaryCrash()`
+  ——即"调试器就位后才崩 + 非 libc 噪声帧"两项形态要求都满足。
+  **如实边界**：本次未从当前会话上下文复跑桥的 capture 采证——`glasspane_bridge.py capture`
+  回 `lldb did not produce a capture within 150.0s … grant Developer Tools to the calling
+  process`（§7.5 权限门限的又一复现：调试席位按进程记账，本会话上下文没有它）。该失败路径的
+  remedy 是可执行的（指向具体面板 + 替代路径），故不另改；桥采证本身仍以 §34.5/`capture-sample.json`
+  那轮真机结果为准。
 
 ## §8 P-1/C2 spike 落地（六项假设 + R29 全量首次实测）
 
@@ -197,7 +206,7 @@ agent 可执行、不得许诺不存在的能力。八项发现的逐项落点�
 | ③ | developerTools 卡恒"未验证"探针未接线 | 并行会话 801aaac 已闭环（按钮触发 DebugCapabilityProbe 受限真探测，带时刻结论不冒充实时席位）——本批复验认可，不重复实现 | 其实现自带单测 |
 | ④ | launchd 作业被 bootout 后恢复靠人手敲 `launchctl bootstrap` | installer `--restore-launchd`：plist 缺失→指回安装；未加载→bootstrap；已加载且自报 granted→如实零动作；已加载但非 granted→`kickstart -k` 换新判定进程再验（勾框后重跑一条命令即闭环）。hello 自报口径判定，拿不到一律不冒充。mcp-shell `GP_E_ENGINE_UNREACHABLE` remedy 同步换成该可执行命令（仓库内构建时给绝对路径） | installer 8 用例（全分支注入假件）+ mcp-shell remedy 用例；退出码即判定供 agent 消费 |
 | ⑤ | P4-I4"拖拽无法自动模拟→待人工目视" | 拆开验证：**真机发现 F10**——CGEvent 合成点击能驱动 macOS UI（标题栏双击 zoom 实测生效），但三种拟真形态（session/hid tap、combinedSessionState+按钮 flags+微抖起步、慢拖 1.2s）共 6+ 次均无法启动 SwiftUI `.onDrag` 拖拽会话：拖拽手势是系统级不可合成维度。而该手势**无独立授权语义**（handleDrop 恒委托 guide(kind)，droppedName 仅进回落文案），故 `engine/.p4i4_smoke.py` 以零坐标 AXPress 路径机器化全部可断言面：逐卡引导按钮→kind 专属文案+系统设置前台、dev 卡恒未验证；合成拖拽降级为如实报告维度 | 真机 PASS：四卡断言全过（三卡 granted steady-state 如实 + developerTools press→路由→front=systempreferences→badge=未验证）；F10 记录 |
-| ⑥ | SIGTERM 哑火（kill -9 才肯退） | 上一轮"挪队列"修复被真机证伪：DispatchSource 信号源在主线程阻塞 accept() 期间于**任意队列**都不派发（最小复现 2/2 挂死；global 队列同样哑火，main-queue+runloop 形态才活）。改 POSIX 正解：入口早期 `pthread_sigmask(SIG_BLOCK,{INT,TERM})`（先于一切线程创建，全线程继承遮罩）+ 专用 `sigwait` 线程消费 pending → cleanup()+exit(0) 以普通上下文执行；disposition 保持默认，绝不 SIG_IGN（否则不进 pending 队列） | 真机 e2e：SIGTERM 0.2s 内干净退出+socket unlink；SIGINT 同（需重置继承 IGN 的 shell 产物）；遮罩后/waiter 前到达的 TERM 以 pending 入账不丢；--check-*/--grant-* 即时路径不受遮罩影响 Ctrl-C 语义不变 |
+| ⑥ | SIGTERM 哑火（真机缺陷） | 合流终版（90f04d4 根因 + 本分支机制）：根因是**信号源未显式持有被 ARC 释放** + `.main` 队列在 accept() 阻塞期永不泵，叠加 `SIG_IGN` 彻底吞信号——上一轮"任意队列都失效"的归因不成立（本最小复现同样栽在 ARC 上），此处更正。机制取 POSIX 正解：入口早期 `pthread_sigmask(SIG_BLOCK,{INT,TERM})`（先于一切线程创建）+ 专用 `sigwait` 线程消费 pending → **unlink engine.sock 与 probe.sock 后 exit(0)**（不调 `server.cleanup()`：close 正被 accept() 使用的 fd 有跨线程复用竞态——采纳 S15 结论）。disposition 保持默认，绝不 SIG_IGN。 |
 | ⑦ | H1 复测配方是给人看的说明文 | `spike/run_h1_retest.py` 四步全机器化：fetch（codeload 缓存）→ SPM 壳+等价插桩编辑（幂等，锚点缺失即 SKIP 不猜）→ debug 构建（release WMO 本机 swift 前端 signal 11，已知绕行）→ .app 打包（LSUIElement+bundleId+Sparkle 内嵌+rpath+ad-hoc 签名，消除裸可执行启动期 AX 超时根因）→ 隔离 daemon 驱动 ≥20 act + popover 4 act → `spike/h1-retest-result.json` + results.md 表格行 | 真机 PASS：**24/24 strong=100%**（threshold 80%），stateSource=z2-mirror，handler-lane hitCount=0 如实记录（设置/弹层滑杆经 AX 值写入 Z2 通道，未走 setVolume 双写——不掩饰） |
 | ⑧ | main 上 §7.5 旧挂账文 | 随 d5738eb 合并自动消解（修正文已在分支），复验无残留 | ✓ |
 
