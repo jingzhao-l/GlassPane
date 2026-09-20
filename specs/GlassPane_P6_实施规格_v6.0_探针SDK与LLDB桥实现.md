@@ -243,3 +243,8 @@ agent 可执行、不得许诺不存在的能力。八项发现的逐项落点�
 （gp-perm-* identifier、SF Symbol 图标）不动。真机端到端验收：点「验证调试能力」
 → UI 全程响应 → 徽标在约 1 分钟到「可用（实测）」+「一次性验证结果」时刻行；
 `.p4i4_smoke.py` 四卡全 PASS；engine 366/366。
+
+**合流说明（main 90f04d4）**：§11.7 S15 查明的信号哑火根因（ARC 释放未持有源 +
+主队列不泵 + SIG_IGN 吞默认处置）与本分支的 sigwait 机制合并为单一实现：sigwait
+线程收尾只 unlink engine/probe 两 socket、不 close 在用 fd（采纳 S15 结论）；
+`.signal_smoke.py` 成为该面的权威回归闸（合并态 release 二进制 SIGTERM/SIGINT 全绿）。
