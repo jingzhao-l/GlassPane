@@ -33,6 +33,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Install pytest (the bridge suite has no other third-party dep)
+        run: python3 -m pip install --quiet pytest
       - name: Test bridge (queue/truncation/sentinel/argv/socket loopback)
         run: python3 -m pytest -q
         working-directory: bridge
@@ -70,6 +72,9 @@ jobs:
       - name: Install mcp-shell deps
         working-directory: mcp-shell
         run: npm ci
+      - name: Build kernel first (mcp-shell imports it via file:../kernel)
+        working-directory: kernel
+        run: npm run build
       - name: Test mcp-shell (dispatch + tools + engine client)
         working-directory: mcp-shell
         run: npm test

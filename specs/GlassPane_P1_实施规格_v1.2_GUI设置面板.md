@@ -408,6 +408,15 @@ launch/attach 各出三态）。本规格据此补一条**显式验证**通道�
 命令在本地逐条跑绿 —— engine 373 / probe 10 / bridge 17 / kernel 51 / mcp-shell 67 /
 installer 40，加 `.c6_smoke.py` 与 `.signal_smoke.py` 两套真机冒烟。
 
+**CI 第一次真跑又挖出三处潜伏缺陷（2026-09-21，均已修）**：CI 常年不跑，等于这三条
+从未被任何闸门检查过——
+
+| 缺陷 | 症状 | 修法 |
+|---|---|---|
+| `node --test "test/*.test.mjs"` 的 glob 带引号 | Node 20 不展开引号内的 glob → `Could not find .../test/*.test.mjs`；本地 Node 26 支持，故只在 CI 暴露（kernel/mcp-shell/installer 三处脚本同病） | 三处脚本改成不带引号，由 shell 展开；顺带把"能跑测试"的 Node 下限拉回 engines 声明的 18 |
+| mcp-shell 的 TS 编译 | `Cannot find module '@iterate/kernel'` + 连带两条 `'error' is of type 'unknown'`（`KernelSchemaError` 因模块缺失退化成 any，`instanceof` 后仍收窄失败）——不是代码缺陷，是该 job 没先构建 `file:../kernel` 依赖 | job 内加 `Build kernel first` 步骤；根 workspace gate 因先 `npm run build` 不受影响 |
+| bridge job | `No module named pytest` | 加 `python3 -m pip install --quiet pytest`（该套件除 stdlib 外无第三方依赖） |
+
 ### 11.10 验收项
 
 | 编号 | 验收项 | 通过标准 | 状态 |
