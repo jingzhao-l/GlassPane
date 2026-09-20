@@ -417,6 +417,22 @@ installer 40，加 `.c6_smoke.py` 与 `.signal_smoke.py` 两套真机冒烟。
 | mcp-shell 的 TS 编译 | `Cannot find module '@iterate/kernel'` + 连带两条 `'error' is of type 'unknown'`（`KernelSchemaError` 因模块缺失退化成 any，`instanceof` 后仍收窄失败）——不是代码缺陷，是该 job 没先构建 `file:../kernel` 依赖 | job 内加 `Build kernel first` 步骤；根 workspace gate 因先 `npm run build` 不受影响 |
 | bridge job | `No module named pytest` | 加 `python3 -m pip install --quiet pytest`（该套件除 stdlib 外无第三方依赖） |
 
+**CI 第二次真跑又挖出第四处（2026-09-21，已修）**：上表三处修好后 CI 才第一次跑完全部
+job，随即 mcp-shell 与根 workspace gate 同时报 3 个 `cancelledByParent`——
+`Promise resolution is still pending but the event loop has already resolved`。根因是
+`mcp-shell/src/engine-client.ts` 里请求超时定时器调了 `timer.unref()`（自 fa537b4 首个
+mcp-shell 提交就在）：unref 的定时器不维持事件循环，当"等一个 daemon 回应"是进程里唯一
+剩余工作时 Node 直接退出，**超时永远不交付**——调用方等到的是进程死亡，不是
+`GP_E_ENGINE_UNREACHABLE` 与 remedy。这与本节 §11.8 的 launchctl 案同构：一条失败路径
+静默无输出，比报错更难查。本地 Node 26 看不见它（测试运行器自己的 handle 仍把循环撑住），
+只有 CI 的 Node 20 暴露——再次印证 §11.9 主结论：闸门没跑过的路径等于没有路径。
+
+修法：删掉 `unref()`（定时器要么触发、要么被回应/关闭路径 `clearTimeout`，不会把进程多
+留过 `timeoutMs`），并补一条**在裸进程里**验证的回归用例 `test/fixtures/timeout-loop.mjs`
+（`spawnSync` 子进程，除该 Promise 外无任何 handle；缺陷复现时子进程 exit 13 且 stdout
+为空，修后 exit 0 且打印 `REJECTED GP_E_ENGINE_UNREACHABLE`）。同文件内的旧超时用例保留
+但不足以证明此病——它跑在测试运行器的循环里，正是本地假绿的原因。
+
 ### 11.10 验收项
 
 | 编号 | 验收项 | 通过标准 | 状态 |
@@ -441,3 +457,4 @@ installer 40，加 `.c6_smoke.py` 与 `.signal_smoke.py` 两套真机冒烟。
 | P1-S19 | 失败阶段可判读 | 一次性任务结局 `text / writeFailed / spawnFailed / timedOut`，面板据此给出 8 个互不冒充的标识（在途 1 + 失败 4 + 结论 3），失败文案一律落回"未验证" | ✓ 2026-09-20（`testCapabilityMarkersNeverImpersonateEachOther`；本批靠它一次点击定位到 spawn 失败） |
 | P1-S20 | 面板文案面向用户 | UI 字符串不写规格编号、不写实现自辩；可操作控件带稳定 identifier 以便自动化定位 | ✓ 2026-09-20（`gp-guide-*`/`gp-verify-*`/`gp-restart-daemon`/`gp-refresh`；测试断言不含 §） |
 | P1-S14 | 错误 remedy 可执行 | `assert_element` 缺信号上下文时仍回 `GP_E_NO_OPERATION`（码表与 P0 §3.3 语义不动），但 remedy 改为可执行的 "run act first"，消除自指循环 | ✓ 2026-09-20（走 `GPError` 的 per-instance remedy 通道） |
+| P1-S21 | 请求超时必然交付 | `EngineJsonRpcClient.call` 的超时定时器不得 `unref()`；回归在**裸子进程**里跑（除该 Promise 外无 handle）：缺陷态 exit 13/无输出，修后 exit 0 + `REJECTED GP_E_ENGINE_UNREACHABLE` | ✓ 2026-09-21（CI 第二次真跑暴露；`mcp-shell/test/fixtures/timeout-loop.mjs`，本地 mcp-shell 71 用例全绿） |

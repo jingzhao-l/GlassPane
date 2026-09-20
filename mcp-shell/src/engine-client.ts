@@ -110,7 +110,14 @@ export class EngineJsonRpcClient {
           daemonUnreachableRemedy(),
         ));
       }, this.timeoutMs);
-      timer.unref();
+      // Deliberately NOT `timer.unref()`. An unreferenced timer does not keep
+      // the event loop alive, so when a pending call is the only outstanding
+      // work Node exits and the timeout is never delivered — the caller waits
+      // on a promise that is settled by process death, not by a diagnosis.
+      // The timeout is this client's only guarantee that every request settles,
+      // so it must be a ref'd handle. It can never hold the loop past
+      // `timeoutMs`: it either fires (and settles the call) or is cleared by
+      // the response / transport-close path below.
 
       this.pending.set(id, {
         resolve,

@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import { EngineJsonRpcClient, engineClientOver } from "../dist/engine-client.js";
 import { FakeLineIo } from "./helpers.mjs";
@@ -63,4 +65,24 @@ test("unreachable-daemon remedy is an executable restore command (P6 §11 audit 
   const { daemonUnreachableRemedy } = await import("../dist/engine-client.js");
   const remedy = daemonUnreachableRemedy();
   assert.match(remedy, /--restore-launchd/, "remedy must name the machine-verified restore command, not prose");
+});
+
+/**
+ * The in-process timeout test above cannot see the real defect: the test
+ * runner keeps its own handles alive, so an unreferenced timer still fires.
+ * In a bare process the opposite happens — the loop drains, Node exits with
+ * an unsettled promise, and the caller never gets a GP_E_ENGINE_UNREACHABLE.
+ * CI's first real run (Node 20) cancelled exactly these tests; this proves
+ * the settle guarantee in the only environment where it can be observed.
+ */
+test("a pending call's timeout is delivered even when nothing else keeps the event loop alive", () => {
+  const probe = fileURLToPath(new URL("./fixtures/timeout-loop.mjs", import.meta.url));
+  const result = spawnSync(process.execPath, [probe], { encoding: "utf8", timeout: 15_000 });
+  const stdout = (result.stdout ?? "").trim();
+  assert.equal(
+    stdout,
+    "REJECTED GP_E_ENGINE_UNREACHABLE",
+    `timeout must settle the call in its own process (exit=${result.status} stderr=${(result.stderr ?? "").trim()})`,
+  );
+  assert.equal(result.status, 0);
 });
