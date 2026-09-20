@@ -18,6 +18,24 @@ jobs:
       - name: Test engine (pure-logic suite, no GUI permission needed)
         working-directory: engine
         run: swift test
+      - name: Test probe SDK package (GlassPaneProbe SPM target)
+        working-directory: engine/probe
+        run: swift test
+      - name: Signal teardown gate (SIGTERM/SIGINT clean exit + socket unlink)
+        working-directory: engine
+        run: python3 .signal_smoke.py .build/debug/glasspaned
+
+  bridge:
+    name: LLDB bridge (Python, pure-logic suite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Test bridge (queue/truncation/sentinel/argv/socket loopback)
+        run: python3 -m pytest -q
+        working-directory: bridge
 
   kernel:
     name: kernel (TypeScript)
@@ -46,7 +64,7 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: mcp-shell/package-lock.json
-      - name: Install kernel (local file: dep)
+      - name: "Install kernel (local file: dep)"
         working-directory: kernel
         run: npm ci
       - name: Install mcp-shell deps

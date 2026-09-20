@@ -201,7 +201,7 @@ printf '%s\n' \
   老进程读不到旧答案。据此新增 §11.4 席位重探 + 「重启 daemon」按钮（不自动重启，
   因为 kickstart 会中断正在进行的 act）。
 
-### 合并后权限面复验（2026-09-19 22:4x–23:2x，P1 v1.2 §11.6 / §11.7）
+### 合并后权限面复验（2026-09-19 22:4x–23:2x，P1 v1.2 §11.6 / §11.10）
 
 - **调试能力机器验证通道跑通**：按 `PermissionReprobe.script(arguments:
   ["--check-developer-tools"])` 生成一次性 zsh、`launchctl submit` 用 daemon 自己的
@@ -222,7 +222,7 @@ printf '%s\n' \
      `GP_E_NO_OPERATION` 不是实现缺陷，P0 §3.3 方法表写明"assert 证据的 signals 复用
      最近一次 act 的信号，无最近 op 时报此码"。真正的缺陷只在 remedy 文案
      （"run act or assert_element first"）对这条路径自指，照做会死循环。已按
-     "码不动、语义不动、remedy 可执行"修（P1-S14），并在 §11.6b 另开一条不依赖
+     "码不动、语义不动、remedy 可执行"修（P1-S14），并在 §11.7 另开一条不依赖
      assert 的渲染核验通道。
 
 **如实边界与待办（P1-S8）**：新 bundle 身份是全新 TCC 客户端，旧的 `glasspaned` 席位不
@@ -259,7 +259,7 @@ GLASSPANE_PROBE_SOCK 指向隔离探针口）。结果：**P6 SMOKE OK**——
 16. **屏幕录制对 /tmp 隔离 daemon 子进程未授予**：pixelDiff 缺席时 NO_ANOMALY
     金丝雀按 P6 §3.2 落 INCONCLUSIVE（T6 不可排除），脚本如实分支不假过。
 
-### 面板渲染状态机器核验闭环（2026-09-20 20:2x，P1 v1.2 §11.6b / P1-S13）
+### 面板渲染状态机器核验闭环（2026-09-20 20:2x，P1 v1.2 §11.7 / P1-S13）
 
 不再依赖截图与人眼：每张权限卡的状态图标带专用无障碍标识
 （`PermissionGuide.statusIdentifier`），经产品自身的 socket 通道即可判定渲染结果。
@@ -278,7 +278,7 @@ gp-perm-developer-tools-unverifiable
 SIGKILL 兜底生效。设置面板自身身份也可被 attach 识别
 （`appName=GlassPane / bundleId=com.glasspane.settings`）。
 
-### SIGTERM 哑火根因修复与回归闸（2026-09-20 20:4x，P1 v1.2 §11.7 S15）
+### SIGTERM 哑火根因修复与回归闸（2026-09-20 20:4x，P1 v1.2 §11.10 S15）
 
 前三次记录都只写"daemon 不响应 SIGTERM，安装器靠 SIGKILL 兜底"，本轮查到根因并修：
 `installSignalHandlers` 里两处叠加——(1) 信号源只是局部变量，函数返回即被 ARC 释放；
@@ -315,6 +315,23 @@ SIGKILL 兜底生效。设置面板自身身份也可被 attach 识别
 `bootout` + `bootstrap`；读不到定义也一律重来。实测前后：接管前 `--replace-daemon` 报
 "launchd 未在时限内接管，改由安装器直接启动"，接管后报
 "launchd 已按新配置接管 daemon（kickstart）"、`launchctl print` = `state = running`。
+
+### 「点授权没反应」的第二层根因：launchctl 路径写错（2026-09-20 23:2x）
+
+面板的"让 daemon 以自身身份申请/重探/重启"都经 `Process("/usr/bin/launchctl")`，而 macOS
+上它是 **`/bin/launchctl`**——`try? process.run()` 静默吞掉抛错，所以申请动作从未发生，
+用户只在系统设置页里看到一个空列表，最后靠手动拖 .app 才添加上（正是本轮最初那条反馈的
+现场）。修：路径常量化 + 单测把住可执行性；一次性任务结局拆成
+`write/spawn/timeout/unreadable`，面板把它们编进标识（`gp-devtools-failed-spawn` 这类），
+不再出现"读不出卡在哪一步"。同轮把面板文案改成用户语言（去掉规格编号与实现自辩）、给
+可操作控件加稳定 identifier（SwiftUI 按钮标题不进 AXTitle，按标题 `act` 选不中），
+并端到端复验：`act gp-verify-developer-tools` → 一次性任务实跑 → `observe` 读到
+`gp-devtools-granted`，全程零人工。
+
+另：`.github/workflows/ci.yml` 因步骤名里含裸 `": "` 而整份 YAML 解析失败——**CI 从来没
+跑过**（GitHub 上每个 run 都是 0s failure、无 job 无日志，含另一会话分支上的 run）。
+修好并把 `engine/probe`(10) 与 `bridge`(17) 两套测试和信号闸挂进 CI；本地逐 job 复跑：
+engine 366、probe 10、bridge 17、kernel 51、mcp-shell 67、installer 40 全绿。
 
 ### 登录路径、信号语义与 remedy 准确性（2026-09-20 21:3x）
 

@@ -61,6 +61,10 @@ final class SettingsModel: ObservableObject {
     private var lastReprobeAt = Date.distantPast
     /// 重探节流：只在有必备权限未达成且距上次超过该间隔时才发起。
     static let reprobeInterval: TimeInterval = 4
+    /// 重探节流上限：面板长期开着又未授权时，不该每 4s 起一个一次性任务。
+    static let reprobeIntervalCap: TimeInterval = 60
+    /// 当前节流间隔（指数退避；必备权限达成或重启后复位）。
+    private var reprobeIntervalNow: TimeInterval = SettingsModel.reprobeInterval
     /// launchd 作业标签（安装器写入的同名 plist）。
     static let launchdLabel = "com.glasspane.daemon"
 
@@ -233,6 +237,8 @@ final class SettingsModel: ObservableObject {
     @Published var developerToolsProbePid: Int?
     @Published var isProbingDeveloperTools = false
     @Published var developerToolsProbeError: String?
+    /// 失败在哪一步（供标识与自动化判读；文案仍走 developerToolsProbeError）。
+    @Published var developerToolsProbeFailure: CapabilityFailure?
     private var capabilityInFlight = false
     /// 调试能力探测含真实 lldb 冷启动（P6 §0 F5 预算 120s × 两侧），等待窗要宽。
     static let capabilityProbeTimeout: TimeInterval = 260
@@ -242,8 +248,9 @@ final class SettingsModel: ObservableObject {
     func reprobeSeats(force: Bool = false) async -> PermissionReprobe.Result? {
         guard let binaryPath = daemon.subject?.binaryPath else { return nil }
         guard !reprobeInFlight else { return reprobed }
-        if !force && Date().timeIntervalSince(lastReprobeAt) < Self.reprobeInterval { return reprobed }
+        if !force && Date().timeIntervalSince(lastReprobeAt) < reprobeIntervalNow { return reprobed }
         reprobeInFlight = true
+        reprobeIntervalNow = min(reprobeIntervalNow * 2, Self.reprobeIntervalCap)
         lastReprobeAt = Date()
         defer { reprobeInFlight = false }
         let nonce = "\(Int(Date().timeIntervalSince1970))"
@@ -254,10 +261,11 @@ final class SettingsModel: ObservableObject {
         let command = PermissionReprobe.submitCommand(scriptPath: scriptPath, nonce: nonce)
         // 一次性任务轮询是阻塞调用——必须在主 actor 之外执行，否则面板整窗
         // 冻结（launchd 挂起 UI 进程会被看门狗杀掉，用户侧症状就是"点了没反应"）。
-        let text = await Task.detached(priority: .utility) {
+        let outcome = await Task.detached(priority: .utility) {
             Self.runOneShot(script: script, scriptPath: scriptPath, outputPath: outputPath, command: command)
         }.value
-        let result = text.flatMap { PermissionReprobe.parse($0) }
+        let result: PermissionReprobe.Result?
+        if case .text(let text) = outcome { result = PermissionReprobe.parse(text) } else { result = nil }
         if let result {
             reprobed = result
             rebuildEntries()
@@ -271,7 +279,7 @@ final class SettingsModel: ObservableObject {
     /// 查询接口这一事实不变）。
     func verifyDeveloperTools() async {
         guard let binaryPath = daemon.subject?.binaryPath else {
-            developerToolsProbeError = "还没连上后台服务：调试能力要由它自己实测。点「刷新」恢复连接后重试。"
+            recordProbeFailure(.unreadable, "还没连上后台服务：调试能力要由它自己实测。点「刷新」恢复连接后重试。")
             return
         }
         guard !capabilityInFlight else { return }
@@ -291,21 +299,44 @@ final class SettingsModel: ObservableObject {
         let command = PermissionReprobe.submitCommand(scriptPath: scriptPath, nonce: nonce)
         // 同 reprobeSeats：分钟级的实测等待绝不占用主线程。
         let timeout = Self.capabilityProbeTimeout
-        let text = await Task.detached(priority: .utility) {
+        let outcome = await Task.detached(priority: .utility) {
             Self.runOneShot(
                 script: script, scriptPath: scriptPath, outputPath: outputPath, command: command,
                 timeoutSeconds: timeout
             )
         }.value
-        if let text, let report = DeveloperToolsCapability.parse(text, observedAt: Date()) {
-            developerToolsCapability = report
-            developerToolsProbePid = daemon.pid
-            setPendingGuide(.developerTools)
-        } else {
-            developerToolsProbeError = text == nil
-                ? "这次验证等得有点久，没有回音（首次启动调试器可能要好几分钟）。再点一次「验证调试能力」试试。"
-                : "这次验证返回了读不懂的结果，状态保持\"未验证\"。稍后再试一次，或联系维护者附上下方时间行。"
+        switch outcome {
+        case .text(let text):
+            if let report = DeveloperToolsCapability.parse(text, observedAt: Date()) {
+                developerToolsCapability = report
+                developerToolsProbePid = daemon.pid
+                developerToolsProbeError = nil
+                developerToolsProbeFailure = nil
+                setPendingGuide(.developerTools)
+            } else {
+                recordProbeFailure(.unreadable)
+            }
+        case .writeFailed:
+            recordProbeFailure(.writeFailed)
+        case .spawnFailed:
+            recordProbeFailure(.spawnFailed)
+        case .timedOut:
+            recordProbeFailure(.timedOut)
         }
+    }
+
+    /// 记录一次验证失败：文案（可覆盖为上下文更贴切的说法）+ 可判读的失败阶段。
+    private func recordProbeFailure(_ failure: CapabilityFailure, _ text: String? = nil) {
+        developerToolsProbeFailure = failure
+        developerToolsProbeError = text ?? failure.fallbackText
+    }
+
+    /// 结论行的状态标记：在途 / 失败(在哪一步) / 已出结论；nil = 整行不渲染。
+    var capabilityMarker: PermissionGuide.CapabilityMarker? {
+        if isProbingDeveloperTools { return .pending }
+        if let report = developerToolsCapability { return .concluded(report.status) }
+        if let failure = developerToolsProbeFailure { return .failed(failure) }
+        return nil
     }
 
     /// 重启 launchd 托管的 daemon 让授权生效。会打断正在进行的 act，
@@ -314,6 +345,7 @@ final class SettingsModel: ObservableObject {
         let command = PermissionGuide.daemonRestartCommand(label: Self.launchdLabel, uid: Int(getuid()))
         runSystemBinary(command.launchPath, arguments: command.arguments)
         reprobed = nil
+        reprobeIntervalNow = Self.reprobeInterval
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             if let summary = await helloSummary() {
@@ -322,15 +354,24 @@ final class SettingsModel: ObservableObject {
         }
     }
 
+    /// 一次性任务的结局：文本，或失败在哪一步。两者必须分开——面板曾在
+    /// "启动器路径不存在"与"实测超时"共用一个 nil 的状态里摸黑排查。
+    enum OneShotOutcome {
+        case text(String)
+        case writeFailed
+        case spawnFailed
+        case timedOut
+    }
+
     /// 一次性 launchd 任务的执行面（后台队列）：落脚本 → submit → 轮询读回
-    /// 原始输出 → 清理任务标签与临时文件。返回文件内容文本（失败 nil）。
+    /// 原始输出 → 清理任务标签与临时文件。
     nonisolated private static func runOneShot(
         script: String,
         scriptPath: String,
         outputPath: String,
         command: PermissionGuide.PermissionRequestCommand,
         timeoutSeconds: TimeInterval = 6
-    ) -> String? {
+    ) -> OneShotOutcome {
         let url = URL(fileURLWithPath: scriptPath)
         do {
             // NSTemporaryDirectory() 对非 sandbox 进程可能指向尚未创建的目录，
@@ -342,7 +383,7 @@ final class SettingsModel: ObservableObject {
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath)
         } catch {
             FileHandle.standardError.write(Data("runOneShot script-write failed: \(error) path=\(scriptPath)\n".utf8))
-            return nil
+            return .writeFailed
         }
         try? FileManager.default.removeItem(atPath: outputPath)
         let process = Process()
@@ -352,14 +393,14 @@ final class SettingsModel: ObservableObject {
             try process.run()
         } catch {
             FileHandle.standardError.write(Data("runOneShot launchctl submit failed: \(error)\n".utf8))
-            return nil
+            return .spawnFailed
         }
-        var result: String?
+        var result: OneShotOutcome = .timedOut
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while Date() < deadline {
             if let text = try? String(contentsOfFile: outputPath, encoding: .utf8),
                !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                result = text
+                result = .text(text)
                 break
             }
             Thread.sleep(forTimeInterval: 0.25)

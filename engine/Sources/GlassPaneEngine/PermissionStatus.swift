@@ -11,6 +11,30 @@ public enum PermissionStatus: String, Equatable, Sendable, CaseIterable {
     case unverifiable
 }
 
+/// 一次性任务失败在哪一步。"失败了"这种笼统说法读不出卡在哪一步，机器就无法
+/// 决定下一步动作——本面板曾在 `/usr/bin/launchctl` 不存在时静默失效数日，
+/// 就是因为启动失败与超时共用一个 nil。
+public enum CapabilityFailure: String, Equatable, Sendable, CaseIterable {
+    case writeFailed = "write"
+    case spawnFailed = "spawn"
+    case timedOut = "timeout"
+    case unreadable = "unreadable"
+
+    /// 面向用户的一句话（诚实边界：一律落回"仍显示未验证"，不猜状态）。
+    public var fallbackText: String {
+        switch self {
+        case .writeFailed:
+            return "这次验证没能准备起来（临时文件写不了），状态保持\"未验证\"。"
+        case .spawnFailed:
+            return "这次验证没能启动（launchctl 不可用？），状态保持\"未验证\"。"
+        case .timedOut:
+            return "这次验证等得有点久，没有回音（首次启动调试器可能要好几分钟），状态保持\"未验证\"。再点一次「验证调试能力」试试。"
+        case .unreadable:
+            return "这次验证返回了读不懂的结果，状态保持\"未验证\"。稍后再试一次。"
+        }
+    }
+}
+
 /// 权限类别（P1 spec v1.2 §6.1 权限清单的单一真源）。
 /// launchctl 的真实位置随 macOS 版本不同（本机实测：/bin/launchctl 存在而
 /// /usr/bin/launchctl 不存在）。硬编码绝对路径曾让面板的全部 launchd 动作
@@ -256,6 +280,35 @@ public enum PermissionGuide {
     }
 
     /// 权限中文展示名（文案拼装用，与 `PermissionDescriptor.displayName` 同源）。
+    /// 结论行的状态标记：在途 / 失败(在哪一步) / 已出结论。
+    public enum CapabilityMarker: Equatable, Sendable {
+        case pending
+        case failed(CapabilityFailure)
+        case concluded(PermissionStatus)
+    }
+
+    /// 结论行标识：在途/各类失败/各类结论各自独立，禁止互相冒充。
+    public static func capabilityIdentifier(_ marker: CapabilityMarker) -> String {
+        switch marker {
+        case .pending:
+            return "gp-devtools-pending"
+        case .failed(let failure):
+            return "gp-devtools-failed-\(failure.rawValue)"
+        case .concluded(let status):
+            return "gp-devtools-\(status.rawValue)"
+        }
+    }
+
+    /// 可操作控件的稳定标识：SwiftUI 按钮标题不进 AXTitle，真机按标题 `act`
+    /// 选不中元素——自动化与冒烟只能靠 identifier 定位。
+    public static func guideIdentifier(for kind: PermissionKind) -> String {
+        "gp-guide-\(kind.cliValue)"
+    }
+
+    public static let verifyCapabilityIdentifier = "gp-verify-developer-tools"
+    public static let restartDaemonIdentifier = "gp-restart-daemon"
+    public static let refreshIdentifier = "gp-refresh"
+
     public static func descriptorName(for kind: PermissionKind) -> String {
         PermissionDescriptor.descriptor(for: kind).displayName
     }

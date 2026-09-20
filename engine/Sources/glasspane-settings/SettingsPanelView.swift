@@ -68,6 +68,7 @@ struct SettingsPanelView: View {
                     Spacer()
                     Button("重启后台服务") { model.restartDaemon() }
                         .controlSize(.small)
+                        .accessibilityIdentifier(PermissionGuide.restartDaemonIdentifier)
                         .help("立即重启后台服务（会打断正在执行的操作）")
                 }
                 .padding(10)
@@ -85,6 +86,7 @@ struct SettingsPanelView: View {
                         ? { Task { await model.verifyDeveloperTools() } }
                         : nil,
                     capabilityBusy: model.isProbingDeveloperTools,
+                    capabilityMarker: model.capabilityMarker,
                     onGuide: { kind in runGuide(for: kind) },
                     onDropApp: { kind, droppedName in
                         model.handleDrop(kind: kind, droppedName: droppedName)
@@ -121,7 +123,9 @@ struct SettingsPanelView: View {
                 if model.isRefreshing {
                     ProgressView().controlSize(.small)
                 } else {
-                    Button("刷新") { model.refresh() }.controlSize(.small)
+                    Button("刷新") { model.refresh() }
+                        .controlSize(.small)
+                        .accessibilityIdentifier(PermissionGuide.refreshIdentifier)
                 }
             }
             VStack(alignment: .leading, spacing: 6) {
@@ -318,6 +322,8 @@ struct PermissionCardView: View {
     var onVerifyCapability: (() -> Void)? = nil
     /// 探测在途：按钮禁点，避免叠加 launchd 任务。
     var capabilityBusy: Bool = false
+    /// 结论行的状态标记（在途/失败阶段/已出结论；nil = 尚无标记）。
+    var capabilityMarker: PermissionGuide.CapabilityMarker? = nil
     let onGuide: (PermissionKind) -> Void
     let onDropApp: (PermissionKind, String?) -> Void
 
@@ -373,6 +379,26 @@ struct PermissionCardView: View {
         capabilityLine == nil ? "验证调试能力" : "重新验证"
     }
 
+    /// 结论行是否失败态（失败阶段进 identifier，形状与颜色一致）。
+    private var capabilityIsFailure: Bool {
+        if case .failed = capabilityMarker { return true }
+        return false
+    }
+
+    /// 结论行的形状：在途沙漏、失败告警、有结论用对应状态图标。
+    private var capabilityIconName: String {
+        switch capabilityMarker {
+        case .pending:
+            return "hourglass"
+        case .failed:
+            return "exclamationmark.triangle"
+        case .concluded(let status):
+            return PermissionGuide.statusIcon(for: status)
+        case nil:
+            return "circle"
+        }
+    }
+
     private var buttonTitle: String {
         switch entry.status {
         case .granted:
@@ -419,11 +445,21 @@ struct PermissionCardView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if let capabilityLine {
-                    // 带时刻的探测结论，与"实时席位"分列，不互相冒充。
-                    Text(capabilityLine)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
+                    // 带时刻的探测结论，与实时席位分列，不互相冒充。结论旁边放一枚
+                    // 带标识的图标：Text 内容不进 AXTitle（P6 §0 F6），"到底渲染成
+                    // 什么"只有靠 identifier 才机器可读。
+                    HStack(spacing: 4) {
+                        Image(systemName: capabilityIconName)
+                            .font(.caption2)
+                            .foregroundStyle(capabilityIsFailure ? Color.orange : Color.secondary)
+                            .accessibilityIdentifier(PermissionGuide.capabilityIdentifier(
+                                capabilityMarker ?? .concluded(.unverifiable)
+                            ))
+                        Text(capabilityLine)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
                 }
                 if let statusNote = entry.statusNote {
                     // 状态来源注记：daemon 未上报席位时如实说明，不冒充已测。
@@ -441,6 +477,7 @@ struct PermissionCardView: View {
                         onVerifyCapability?()
                     }
                     .controlSize(.small)
+                    .accessibilityIdentifier(PermissionGuide.verifyCapabilityIdentifier)
                     .disabled(capabilityBusy)
                 }
                 Button(buttonTitle) {
@@ -448,6 +485,8 @@ struct PermissionCardView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
+                // 控件标识：按钮标题不进 AXTitle，按标题 act 选不中元素。
+                .accessibilityIdentifier(PermissionGuide.guideIdentifier(for: entry.kind))
                 .disabled(entry.status == .granted)
             }
         }

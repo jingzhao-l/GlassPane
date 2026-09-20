@@ -533,6 +533,33 @@ final class PermissionSubjectTests: XCTestCase {
         XCTAssertNil(payload["permissions"])
         XCTAssertNil(payload["identity"])
     }
+    func testControlIdentifiersLetAutomationPressButtons() {
+        XCTAssertEqual(PermissionGuide.guideIdentifier(for: .accessibility), "gp-guide-accessibility")
+        XCTAssertEqual(PermissionGuide.guideIdentifier(for: .inputMonitoring), "gp-guide-input-monitoring")
+        XCTAssertEqual(Set(PermissionKind.allCases.map { PermissionGuide.guideIdentifier(for: $0) }).count,
+                     PermissionKind.allCases.count, "每张卡的控件标识必须互不相同")
+        XCTAssertEqual(PermissionGuide.verifyCapabilityIdentifier, "gp-verify-developer-tools")
+        XCTAssertEqual(PermissionGuide.restartDaemonIdentifier, "gp-restart-daemon")
+        XCTAssertEqual(PermissionGuide.refreshIdentifier, "gp-refresh")
+    }
+
+    func testCapabilityMarkersNeverImpersonateEachOther() {
+        XCTAssertEqual(PermissionGuide.capabilityIdentifier(.pending), "gp-devtools-pending")
+        XCTAssertEqual(PermissionGuide.capabilityIdentifier(.failed(.spawnFailed)), "gp-devtools-failed-spawn")
+        XCTAssertEqual(PermissionGuide.capabilityIdentifier(.concluded(.granted)), "gp-devtools-granted")
+        var distinct = Set([
+            PermissionGuide.capabilityIdentifier(.pending),
+            PermissionGuide.capabilityIdentifier(.concluded(.granted)),
+            PermissionGuide.capabilityIdentifier(.concluded(.denied)),
+            PermissionGuide.capabilityIdentifier(.concluded(.unverifiable)),
+        ])
+        for failure in CapabilityFailure.allCases {
+            distinct.insert(PermissionGuide.capabilityIdentifier(.failed(failure)))
+            XCTAssertTrue(failure.fallbackText.contains("未验证"), "失败说明必须落回不伪造状态")
+        }
+        XCTAssertEqual(distinct.count, 8, "在途/四类失败/四类结论共 8 个标识，不得有任何两个互相冒充")
+    }
+
     func testLaunchctlPathResolvesToRealBinary() {
         // 面板全部 launchd 动作共享同一条已验证存在的路径（/usr/bin 假路径曾致
         // 静默全失败——此测试把"不许硬编码猜路径"钉死）。
