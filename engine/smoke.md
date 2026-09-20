@@ -292,3 +292,12 @@ GLASSPANE_PROBE_SOCK 指向隔离探针口）。结果：**P6 SMOKE OK**——
     H1 复测壳固定 `-c debug`；与本仓无关，上游复现者注意。
 19. **`open` 不传自定义 env**（LS 语义）：探针 sock 环境变量注入必须直接拉起 bundle 内
     可执行 + `open -a` 仅做激活；两次启动去重依赖 LS 对同 bundle 路径的行为。
+
+20. **F11 launchctl 真身在本仓假设之外**：面板四类 launchd 动作曾硬编码
+    `/usr/bin/launchctl`（本机实际 `/bin/launchctl`），`Process.run` 抛错被
+    `return nil` 吞掉——用户症状"点了没反应"。路径解析必须 `Launchctl.path`
+    单点（单测钉死），一次性任务的 stderr 诊断保留在 runOneShot 两个失败分支。
+21. **面板主线程禁跑分钟级等待**：调试能力验证（260s 预算）与席位重探（6s）
+    必须 `Task.detached`；`NSTemporaryDirectory()` 对非 sandbox 进程可能不
+    存在，一次性任务脚本写前须 mkdir 守卫。验收锚（新文案）：徽标「可用
+    （实测）」、caption「…一次性验证结果」、按钮「重新验证」。

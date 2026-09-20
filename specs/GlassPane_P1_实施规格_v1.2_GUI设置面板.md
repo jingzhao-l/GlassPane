@@ -375,7 +375,7 @@ launch/attach 各出三态）。本规格据此补一条**显式验证**通道�
 |---|---|---|---|
 | P1-S1 | 主体身份纯逻辑 | `PermissionSubject`：裸二进制 → `hasBundleIdentity=false`、`tccEntryName` 取文件名；bundle → 取 bundle 目录名；`wireValue` 省略 nil 字段；roundtrip 保真 | ✓ `PermissionSubjectTests`（2026-09-19） |
 | P1-S2 | 席位快照与线上往返 | `PermissionProbeSet.snapshot()` 四类齐；`request(kind)` 只触发申请钩子、不触发面板跳转钩子，已授权时不重复弹；`hello` 带 `identity`+`permissions`，未注入钩子时整段省略；旧 daemon 无字段 → `subject=nil`/`permissions=[:]` | ✓ 同上（`DaemonProbe.parseHelloResponse` 向后兼容用例） |
-| P1-S3 | 申请命令构造 | `daemonRequestCommand` 走 `/usr/bin/launchctl submit`，label 前缀 `com.glasspane.guide.<kind>.` 且随 nonce 唯一；`--request-permission` 取值与 `cliValue` 一致；清理命令为 `launchctl remove` | ✓ 同上 |
+| P1-S3 | 申请命令构造 | `daemonRequestCommand` 走 `Launchctl.path` 解析出的 launchctl submit（2026-09-20 真机勘误：本机只有 `/bin/launchctl`，硬编码 `/usr/bin` 曾使全部 launchd 动作静默失败，见 P6 §11 补录），label 前缀 `com.glasspane.guide.<kind>.` 且随 nonce 唯一；`--request-permission` 取值与 `cliValue` 一致；清理命令为 `launchctl remove` | ✓ 同上 |
 | P1-S4 | 拖拽源选择 | bundle 身份 → `.bundleURL(daemon bundlePath)`；daemon 未上报/裸二进制 → `.plainText("GlassPane")` | ✓ 同上 |
 | P1-S5 | 打包与签名 | 两个 bundle `codesign --verify --strict` 通过，DR 为 `designated => identifier "<id>"`（不含 cdhash），`Info.plist` 已绑定，`CFBundleIdentifier` 与签名 identifier 一致 | ✓ 2026-09-19 实测（debug 与 release 产物各一轮） |
 | P1-S6 | 安装器接线 | `bundlePlan`/`daemonLaunchPath`/`settingsLaunchPath`/`installBundles`/`bundleLaunchArgs`/`pidsFromPs`/`terminatePids`/`waitForSocket` 纯函数用例全绿；`nextStepsText` 按形态给出真实条目名 | ✓ installer 37 用例（2026-09-19，原 21 + 新增 16） |

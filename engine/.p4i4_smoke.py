@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import tempfile
 import time
 
@@ -203,12 +204,14 @@ default:
 KINDS = [
     # (key, 卡片显示名, 引导落点文案正则) —— 文案单一真源：
     # engine/Sources/GlassPaneEngine/PermissionStatus.swift PermissionGuide.instruction
-    ("accessibility", "辅助功能", r"申请「辅助功能」|已打开「辅助功能」面板"),
-    ("inputMonitoring", "输入监控", r"申请「输入监控」|已打开「输入监控」面板"),
-    ("screenRecording", "屏幕录制", r"申请「屏幕录制」|已打开「屏幕录制」面板"),
+    ("accessibility", "辅助功能", r"申请「辅助功能」|已请求「辅助功能」|已打开「辅助功能」面板"),
+    ("inputMonitoring", "输入监控", r"申请「输入监控」|已请求「输入监控」|已打开「输入监控」面板"),
+    ("screenRecording", "屏幕录制", r"申请「屏幕录制」|已请求「屏幕录制」|已打开「屏幕录制」面板"),
     ("developerTools", "开发者工具", r"已打开「开发者工具」面板"),
 ]
 GUIDE_BUTTON_TITLES = {"授权", "打开系统设置"}
+# 开发者工具卡合法徽标：无实测时=未验证；实测后允许带时刻结论（P6 §11 补录）。
+DEV_BADGES = {"未验证", "可用（实测）", "被拒绝（实测）"}
 BANNER_NEEDLE = "拖拽引导"
 SETTINGS_BUNDLE = "com.apple.systempreferences"
 
@@ -388,17 +391,32 @@ def main():
         if run(helper, "pressat", panel_pid, point[0], point[1]).returncode != 0:
             failures.append(f"{key}: AXPress 引导按钮失败（pid {panel_pid}）")
             continue
+        # 前台采样并入轮询：面板深链让 System Settings 上台的瞬间即算数；
+        # 之后再被 IDE/用户切走不算失败（我们验证的是"跳转发生了"）。
+        stop_watch = threading.Event()
+        front_seen = {"ok": False}
+
+        def watch_front():
+            while not stop_watch.is_set():
+                if run(helper, "front").stdout.strip() == SETTINGS_BUNDLE:
+                    front_seen["ok"] = True
+                stop_watch.wait(0.5)
+
+        watcher = threading.Thread(target=watch_front, daemon=True)
+        watcher.start()
         landed = wait_for_pattern(helper, panel_pid, re.compile(pattern))
+        stop_watch.set()
+        watcher.join(timeout=2)
         front = run(helper, "front").stdout.strip()
         if not landed:
             failures.append(f"{key}: 按下引导按钮后 6s 未出现该 kind 专属文案（front={front}）")
             continue
-        if front != SETTINGS_BUNDLE:
-            failures.append(f"{key}: 引导后 System Settings 未成为前台（front={front}）")
+        if not front_seen["ok"]:
+            failures.append(f"{key}: 引导后未观测到 System Settings 成为前台（front={front}）")
             continue
         report.append(f"PASS guide-{key}: kind 路由 + 面板跳转（badge={badge or 'n/a'}）")
-        if key == "developerTools" and badge and badge != "未验证":
-            failures.append(f"developerTools: 徽标「{badge}」违反恒未验证（P4-I4）")
+        if key == "developerTools" and badge and badge not in DEV_BADGES:
+            failures.append(f"developerTools: 徽标「{badge}」既非未验证也非实测结论（P4-I4）")
 
     # F10 维度：合成拖拽如实探测（不强断言；坐标级操作，逐点遮挡守卫）。
     drag_landed = None
