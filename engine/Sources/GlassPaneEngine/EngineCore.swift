@@ -498,7 +498,15 @@ public final class EngineCore {
             throw GPError(code: .notAttached, message: "no app attached")
         }
         guard let context = latestPack() else {
-            throw GPError(code: .noOperation, message: "no prior operation to reuse signal context from")
+            // P0 §3.3：assert 证据的 signals 复用最近一次 act 的上下文，因此它不能
+            // 成为会话的第一个操作。错误码保持 GP_E_NO_OPERATION（错误码表冻结），
+            // 但 remedy 必须可执行——原文案"run act or assert_element first"对这条
+            // 路径是自指的（真机踩过：用它核验设置面板时循环无解）。
+            throw GPError(
+                code: .noOperation,
+                message: "no prior operation to reuse signal context from",
+                remedy: "run act first — assert_element reuses the most recent act's signal context (P0 spec §3.3)"
+            )
         }
         let actual: StringOrBool
         do {

@@ -354,6 +354,33 @@ final class PermissionSubjectTests: XCTestCase {
         XCTAssertEqual(tapCalls, 0, "已授权时不再建 tap（避免无谓的会话级监听）")
     }
 
+    // MARK: - §11.7 面板渲染的机器核验面（identifier 真源）
+
+    func testStatusIdentifiersAreStableAndUnique() {
+        var seen = Set<String>()
+        for kind in PermissionKind.allCases {
+            for status in PermissionStatus.allCases {
+                let id = PermissionGuide.statusIdentifier(kind: kind, status: status)
+                XCTAssertTrue(id.hasPrefix("gp-perm-\(kind.cliValue)-"), id)
+                XCTAssertTrue(id.hasSuffix("-\(status.rawValue)"), id)
+                XCTAssertTrue(seen.insert(id).inserted, "标识必须逐卡逐态唯一: \(id)")
+            }
+        }
+        XCTAssertEqual(
+            PermissionGuide.statusIdentifier(kind: .inputMonitoring, status: .granted),
+            "gp-perm-input-monitoring-granted"
+        )
+        XCTAssertEqual(
+            PermissionGuide.restartPendingIdentifier(kind: .accessibility),
+            "gp-perm-accessibility-restart-pending"
+        )
+    }
+
+    func testStatusIconsAreDistinctPerStatus() {
+        let icons = Set(PermissionStatus.allCases.map { PermissionGuide.statusIcon(for: $0) })
+        XCTAssertEqual(icons.count, PermissionStatus.allCases.count, "四种状态各自的形状不得相同")
+    }
+
     // MARK: - §11.5 开发者工具席位的机器探测呈现
 
     private let capabilityJSON = """

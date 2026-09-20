@@ -332,6 +332,35 @@ public enum PermissionReprobe {
 }
 
 extension PermissionGuide {
+    /// 权限卡状态标记的无障碍标识（P1 v1.2 §11.7 的机器核验面）。
+    ///
+    /// 为什么走 identifier：SwiftUI 的 `Text` 内容不进 AXTitle（P6 §0 F6），面板
+    /// 渲染状态在 `observe` 树里唯一稳定可读的就是节点的 identifier（图标即如此）；
+    /// 因此给状态图标一个专用标识，既不改四类权限图标既有的 identifier（C6 冒烟
+    /// 依赖它），又能被 `observe` 直接判定。
+    public static func statusIdentifier(kind: PermissionKind, status: PermissionStatus) -> String {
+        "gp-perm-\(kind.cliValue)-\(status.rawValue)"
+    }
+
+    /// "系统已授权、daemon 待重启"标记的标识（与状态标识并列，不替换）。
+    public static func restartPendingIdentifier(kind: PermissionKind) -> String {
+        "gp-perm-\(kind.cliValue)-restart-pending"
+    }
+
+    /// 状态图标（SF Symbol 名）：形状本身也表达状态，不依赖颜色（色盲可用）。
+    public static func statusIcon(for status: PermissionStatus) -> String {
+        switch status {
+        case .granted:
+            return "checkmark.circle.fill"
+        case .denied:
+            return "xmark.circle.fill"
+        case .notDetermined:
+            return "circle.dashed"
+        case .unverifiable:
+            return "questionmark.circle"
+        }
+    }
+
     /// 重启 launchd 托管的 daemon（`kickstart -k` 先杀再起，读新席位）。
     /// 不自动执行——重启会打断正在进行的 act，必须由用户点。
     public static func daemonRestartCommand(label: String = "com.glasspane.daemon", uid: Int) -> PermissionRequestCommand {

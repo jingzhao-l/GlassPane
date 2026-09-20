@@ -389,6 +389,21 @@ struct PermissionCardView: View {
                 HStack(spacing: 8) {
                     Text(entry.descriptor.displayName).font(.callout.bold())
                     BadgeView(text: badgeText, color: badgeColor)
+                    // 机器核验面：observe 读到该 identifier 即证明卡片确实按此状态
+                    // 渲染（形状本身表达状态，不靠颜色）。
+                    Image(systemName: PermissionGuide.statusIcon(for: entry.status))
+                        .font(.caption)
+                        .foregroundStyle(badgeColor)
+                        .accessibilityIdentifier(
+                            PermissionGuide.statusIdentifier(kind: entry.kind, status: entry.status)
+                        )
+                    if entry.statusNote != nil {
+                        Image(systemName: "arrow.clockwise.circle")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .accessibilityIdentifier(PermissionGuide.restartPendingIdentifier(kind: entry.kind))
+                            .help("系统里已授权，重启 daemon 后生效")
+                    }
                 }
                 Text(entry.descriptor.purposeText)
                     .font(.caption)

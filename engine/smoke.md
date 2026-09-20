@@ -218,13 +218,12 @@ printf '%s\n' \
 - **两条本轮做不到的核验（如实挂账）**：
   1. `screencapture -x -o` → `could not create image from display`：本会话责任上下文没有
      屏幕录制席位（正是 §11.1 结论 2 的表现），故无法用截图目视面板文案。
-  2. 想用引擎自己的通道读面板文案（`assert_element` 取按钮标题）也失败：对**确实存在**的
-     元素（`observe` 树里可见 `AXImage identifier=hammer`）断言，同样回
-     `GP_E_NO_OPERATION — no prior operation to reuse signal context from`，而 remedy 又写
-     "run act or assert_element first"，形成循环。根因是 `EngineCore.assertElement`
-     以 `latestPack()` 作为前置条件（P0 §3.3 的"信号上下文复用"被套成了硬性门槛），
-     使 assert 无法作为该会话的第一个操作。**记为缺陷，未自行改**（属 P0/P6 语义，
-     改前需确认预期）。
+  2. 改用 `assert_element` 读面板按钮标题同样拿不到结论——但**更正我上一轮的判断**：
+     `GP_E_NO_OPERATION` 不是实现缺陷，P0 §3.3 方法表写明"assert 证据的 signals 复用
+     最近一次 act 的信号，无最近 op 时报此码"。真正的缺陷只在 remedy 文案
+     （"run act or assert_element first"）对这条路径自指，照做会死循环。已按
+     "码不动、语义不动、remedy 可执行"修（P1-S14），并在 §11.6b 另开一条不依赖
+     assert 的渲染核验通道。
 
 **如实边界与待办（P1-S8）**：新 bundle 身份是全新 TCC 客户端，旧的 `glasspaned` 席位不
 继承——需用户在系统设置里为「GlassPane Daemon」重新勾选一次，并目视确认条目名与图标、
@@ -259,3 +258,22 @@ GLASSPANE_PROBE_SOCK 指向隔离探针口）。结果：**P6 SMOKE OK**——
     时刻而非固定毫秒数——canary 首版 0.4s 落进窗内被真判成 T5，改 1.2s 后稳定。
 16. **屏幕录制对 /tmp 隔离 daemon 子进程未授予**：pixelDiff 缺席时 NO_ANOMALY
     金丝雀按 P6 §3.2 落 INCONCLUSIVE（T6 不可排除），脚本如实分支不假过。
+
+### 面板渲染状态机器核验闭环（2026-09-20 20:2x，P1 v1.2 §11.6b / P1-S13）
+
+不再依赖截图与人眼：每张权限卡的状态图标带专用无障碍标识
+（`PermissionGuide.statusIdentifier`），经产品自身的 socket 通道即可判定渲染结果。
+实测（`attach {pid: glasspane-settings}` → `observe maxDepth=10`，nodeCount=207）：
+
+```
+gp-perm-accessibility-granted
+gp-perm-input-monitoring-granted
+gp-perm-screen-recording-granted
+gp-perm-developer-tools-unverifiable
+```
+
+即：必备三卡在 UI 上确为"已授权"，开发者工具卡如实保持"未验证"（其调试能力另有带时刻
+的机器探测行，见 §11.6）。同轮复验：bundle 重新编译重签（cdhash 变）+ daemon 重启后
+三项席位仍 `granted`；`--replace-daemon` 第四次遇到 SIGTERM 哑火（PID 1814），
+SIGKILL 兜底生效。设置面板自身身份也可被 attach 识别
+（`appName=GlassPane / bundleId=com.glasspane.settings`）。
