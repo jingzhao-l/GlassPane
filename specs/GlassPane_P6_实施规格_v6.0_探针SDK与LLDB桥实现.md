@@ -139,10 +139,19 @@ daemon → 探针：`op_begin {}` / `op_end {}` / `checkpoint_export {domains}` 
 ### 7.5 冒烟结果（实施回填，2026-09-19）
 - **通过**：`xcrun lldb --batch -o "command script import bridge/glasspane_bridge.py" -o "gp-queue"` → 四命令注册成功、gp-queue 输出 §6.1 形态 JSON（本机真机）；`test_bridge.py` 17 用例全绿（队列/截断/sentinel/argv/socket 回传）。
 - **挂账（如实，不假过）**：capture/trace 的**执行面**——attach 现成进程被拒（F2）、`--batch run` launch 控制在当前会话上下文 >5min 无输出挂死（F5 复测）；桥的 CLI 路径对此给出**结构化失败**（timeout → status=failed + 授权指引），不再挂死。解锁条件 = 用户侧环境排查：系统设置 > 隐私与安全性 > 开发者工具授予调用方，或已授权的 Terminal 会话内复跑（`python3 bridge/glasspane_bridge.py capture --exe <crashcanary>` 一条命令即可验证）。
-- **夹具债（登记，未处理）**：`bridge/crashcanary` 是已入库的 Mach-O 二进制（54KB，arm64），
-  但其源不在仓库内——调试信息里的路径是临时目录的 `crashme/crashme.swift`。本次合并核对时
-  评估过"把二进制移出 git"，结论是**不动**：它没有仓库内可复现的生成方式，移除会直接废掉上面
-  那条唯一的手工验证命令。应做的是把夹具源纳入仓库（小改动，与 §7 授权指引同批处理为宜）。
+- **夹具债（已闭环，2026-09-20）**：`bridge/crashcanary` 是已入库的 Mach-O 二进制，但其源
+  不在仓库内（调试信息指向临时目录的 `crashme/crashme.swift`）——夹具不可复现意味着任何一次
+  capture 回归失败都无从判断是桥坏了还是夹具坏了。评估过"把二进制移出 git"，结论是**不动它**
+  （`bridge/capture-sample.json` 是按它采样的留档数据，且移出会废掉上面那条手工验证命令），
+  改为把源补进仓库：`bridge/crashcanary.swift` + 文件头里的重建/自检命令。
+  实测：`swiftc -g` 编译通过（55KB，与入库那份同量级）；独立运行为 `armed` 日志后
+  250ms 崩溃、退出 133（SIGTRAP），二进制含可辨认帧符号 `main.raiseCanaryCrash()`
+  ——即"调试器就位后才崩 + 非 libc 噪声帧"两项形态要求都满足。
+  **如实边界**：本次未从当前会话上下文复跑桥的 capture 采证——`glasspane_bridge.py capture`
+  回 `lldb did not produce a capture within 150.0s … grant Developer Tools to the calling
+  process`（§7.5 权限门限的又一复现：调试席位按进程记账，本会话上下文没有它）。该失败路径的
+  remedy 是可执行的（指向具体面板 + 替代路径），故不另改；桥采证本身仍以 §34.5/`capture-sample.json`
+  那轮真机结果为准。
 
 ## §8 P-1/C2 spike 落地（六项假设 + R29 全量首次实测）
 
