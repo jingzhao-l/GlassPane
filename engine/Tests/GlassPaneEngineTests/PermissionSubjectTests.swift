@@ -354,6 +354,29 @@ final class PermissionSubjectTests: XCTestCase {
         XCTAssertEqual(tapCalls, 0, "已授权时不再建 tap（避免无谓的会话级监听）")
     }
 
+    // MARK: - remedy 与成因一致（错误码不动）
+
+    func testTreeCaptureBudgetFailureRemedyIsNotPermissionAdvice() {
+        let mapped = EngineCore.map(.treeCaptureFailed(reason: "tree capture exceeded the total 10.0s budget"))
+        XCTAssertEqual(mapped.code, .axUnavailable, "码表冻结：错误码不变")
+        XCTAssertTrue(mapped.remedy.contains("maxDepth"), "remedy 必须指向可执行的缩小范围动作")
+        XCTAssertFalse(mapped.remedy.contains("--grant-accessibility"),
+                       "通道存活时不得把用户支去重新授予辅助功能（幻影 remedy）")
+        XCTAssertTrue(mapped.remedy.contains("--check-accessibility"), "给出自查手段而非盲动")
+    }
+
+    func testTreeCapturePermissionFailureKeepsOnboardingRemedy() {
+        let mapped = EngineCore.map(.treeCaptureFailed(reason: "AX element is disabled: api disabled"))
+        XCTAssertTrue(mapped.remedy.contains("--grant-accessibility"), "非预算类失败沿用授权引导")
+    }
+
+    func testPixelCaptureDeniedRemedyPointsAtScreenRecording() {
+        let mapped = EngineCore.map(.pixelCaptureDenied(reason: "no window on screen"))
+        XCTAssertTrue(mapped.remedy.contains("Screen Recording"))
+        XCTAssertTrue(mapped.remedy.contains("--check-screen-permission"))
+        XCTAssertTrue(mapped.remedy.contains("INCONCLUSIVE"), "同时说明降级形态（P1 v1.0 §5）")
+    }
+
     // MARK: - §11.7 面板渲染的机器核验面（identifier 真源）
 
     func testStatusIdentifiersAreStableAndUnique() {

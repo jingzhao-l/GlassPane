@@ -1050,12 +1050,35 @@ public final class EngineCore {
         case .attributeUnavailable(let reason):
             return GPError(code: .assertTargetNotFound, message: reason)
         case .treeCaptureFailed(let reason):
+            // 错误码保持 GP_E_AX_UNAVAILABLE（码表冻结），但 remedy 必须与**成因**
+            // 一致：`treeCaptureFailed` 按定义是"通道活着、树抓取部分失败/超时"
+            // （RuntimeChannel 注释），此时叫用户去授予辅助功能既是幻影指引又会
+            // 把人引向死路（真机踩到：辅助功能已 granted 却被告知去 --grant-accessibility）。
+            if Self.isBudgetFailure(reason) {
+                return GPError(
+                    code: .axUnavailable,
+                    message: "tree capture failed: \(reason)",
+                    remedy: "narrow the scope: retry observe/snapshot with a smaller maxDepth (1...10) or a more specific selector; the AX channel is alive — only this capture hit its time budget. Do not re-grant Accessibility: verify the seat with `glasspaned --check-accessibility`"
+                )
+            }
             return GPError(code: .axUnavailable, message: "tree capture failed: \(reason)")
         case .pixelCaptureDenied:
-            return GPError(code: .axUnavailable, message: "window capture unavailable")
+            // 窗口捕获失败的成因是屏幕录制席位（或窗口不在屏），不是辅助功能。
+            return GPError(
+                code: .axUnavailable,
+                message: "window capture unavailable",
+                remedy: "grant Screen Recording to the daemon (System Settings > Privacy & Security > Screen Recording), then restart the daemon to pick it up; verify with `glasspaned --check-screen-permission`. Until then pixelDiff stays null and T6 degrades to INCONCLUSIVE (P1 v1.0 §5)"
+            )
         case .pingTimeout:
             return GPError(code: .actFailed, message: "app unresponsive (AX ping timeout)")
         }
+    }
+
+    /// 是否为"时间预算耗尽"类失败（而非权限缺失）。按 reason 文本判定，与
+    /// `AXChannel` 的预算措辞同源；未知形态保守回落默认 remedy（不硬猜）。
+    static func isBudgetFailure(_ reason: String) -> Bool {
+        let lowered = reason.lowercased()
+        return lowered.contains("budget") || lowered.contains("timeout") || lowered.contains("timed out")
     }
 
     /// Keeps subtrees rooted at nodes whose role matches (observe role filter).

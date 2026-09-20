@@ -315,3 +315,19 @@ SIGKILL 兜底生效。设置面板自身身份也可被 attach 识别
 `bootout` + `bootstrap`；读不到定义也一律重来。实测前后：接管前 `--replace-daemon` 报
 "launchd 未在时限内接管，改由安装器直接启动"，接管后报
 "launchd 已按新配置接管 daemon（kickstart）"、`launchctl print` = `state = running`。
+
+### 登录路径、信号语义与 remedy 准确性（2026-09-20 21:3x）
+
+- **登录时加载等价实测**：`launchctl bootout` → `bootstrap`（RunAtLoad 与登录加载同一入口）
+  → `state = running`、新 pid、`hello` 四项席位读数与重载前一致（授权跨完整重载保持，
+  这是"重编译/重签/重启都不丢授权"的最强一次证明）。
+- **TERM 语义核对**：对该实例 `kill -TERM` → `last exit code = 0`、`state = not running`，
+  launchd 依 `KeepAlive(SuccessfulExit=false)` **不再复活**（修复前 TERM 完全无效、只能
+  KILL，而 KILL 属异常退出会被立刻重拉——即"杀不掉又重生"）。维护路径因此必须显式
+  kickstart，安装器已按此实现。
+- **幻影 remedy 复现并修**：对设置面板 `observe {role: AXButton}` 撞到
+  `tree capture exceeded the total 10.0s budget`，而回的是 `GP_E_AX_UNAVAILABLE` +
+  "run onboarding: glasspaned --grant-accessibility"——但辅助功能当时是 `granted`
+  （同一实例 `--check-accessibility` 可自证）。按"码不动、remedy 与成因一致"修：
+  预算/超时类给出 `maxDepth`/selector 缩小动作 + 自查命令并明确"不要重新授权"；
+  窗口捕获类指向屏幕录制席位与降级形态（P1 v1.0 §5）。
