@@ -369,7 +369,7 @@ launch/attach 各出三态）。本规格据此补一条**显式验证**通道�
 | 怎么显示 | 结论行带观测时刻与"非实时读数"声明；`granted=true` → 调试能力可用；任一侧 `denied` → 系统已拒绝；`timeout`/`spawnFailed` → 不可判定，**不折算成任何权限结论**（与 P6 同口径） |
 | 解析失败 | 保持"未验证"并给错误行，不猜 |
 
-### 11.6b 渲染状态的可核验化
+### 11.7 渲染状态的可核验化
 
 面板是 SwiftUI：`Text` 的内容不进 `AXTitle`（P6 §0 F6），截图又受屏幕录制席位限制，
 所以"卡片到底绿没绿"不能只留给人眼。做法是给每张卡的**状态图标**一个专用无障碍标识
@@ -378,7 +378,40 @@ launch/attach 各出三态）。本规格据此补一条**显式验证**通道�
 （P1-C6 冒烟依赖它）；状态由"形状 + identifier"双表达，不依赖颜色（色盲可用）；标识串
 由 engine 侧纯函数作唯一真源，面板与单测共用同一函数。
 
-### 11.7 验收项
+### 11.8 一次真实失效的复盘：`/usr/bin/launchctl` 不存在
+
+用户报"点授权后系统设置里没有条目、只能手动拖进去"。除了 §11.1 的主体/签名问题，
+还有第二层原因：面板的申请与重探动作走 `Process("/usr/bin/launchctl")`，而 macOS 的
+`launchctl` 在 **`/bin/launchctl`**；`try? process.run()` 把抛错吞掉，于是"发起申请"
+这一步静默不发生，只剩跳转设置页——列表里自然什么都没有。现在：
+
+- 路径常量化 `PermissionGuide.launchctlPath = "/bin/launchctl"`，并由单测把住
+  （`isExecutableFile` 断言 + 常量值），杜绝同类静默失效；
+- 失败必须可判读：`PermissionReprobe` 的一次性任务返回 `OneShotOutcome`
+  （`text / writeFailed / spawnFailed / timedOut`），面板把它编成标识
+  `gp-devtools-failed-{write|spawn|timeout|unreadable}`，在途用 `gp-devtools-pending`；
+- 文案改用户语言：面板字符串不再写规格编号与实现自辩（"按进程记账"一类），实现理由
+  留在规格与本文件；诚实由"该显示什么就显示什么"保证，例如调试能力行仍明确
+  「系统不提供状态查询，这里会一直显示未验证」+「验证调试能力」实测入口；
+- 可操作控件加稳定标识（`gp-guide-<kind>` / `gp-verify-developer-tools` /
+  `gp-restart-daemon` / `gp-refresh`）：SwiftUI 按钮标题不进 AXTitle，真机 `act`
+  按标题选不中元素，按标识才点得动。
+
+端到端复验（2026-09-20 23:2x，全程无人工）：`act` 按标识按下「验证调试能力」→
+一次性任务用 daemon 自己的二进制跑探测 → 面板渲染结论 → `observe` 读到
+`gp-devtools-granted`。
+
+### 11.9 CI 与真机闸的接线缺陷
+
+`.github/workflows/ci.yml` 的 mcp-shell 步骤名 `Install kernel (local file: dep)` 里
+含裸 `": "` → 整个 workflow 无法被 YAML 解析，**CI 从未真正跑过**（GitHub 上每个 run
+都是 0s failure、无 job、无日志）。已加引号修好，并把此前漏在 CI 外的两套真实套件挂上：
+`engine/probe` 的 SPM 测试与 `bridge` 的 pytest（后者纯函数、不依赖 lldb）。
+`engine/.signal_smoke.py`（§11.10 S15）也进 swift job。所有 job 的命令此前已在本地逐条
+跑绿：engine 366 / probe 10 / bridge 17 / kernel 51 / mcp-shell 67 / installer 40 +
+信号闸 OK。
+
+### 11.10 验收项
 
 | 编号 | 验收项 | 通过标准 | 状态 |
 |---|---|---|---|
@@ -397,5 +430,8 @@ launch/attach 各出三态）。本规格据此补一条**显式验证**通道�
 | P1-S13 | 面板渲染机器核验 | 每张卡的状态以稳定 `identifier` 出现在 `observe` 树里（`PermissionGuide.statusIdentifier`）：必备三卡 `gp-perm-*-granted`，开发者工具卡 `gp-perm-developer-tools-unverifiable` | ✓ 2026-09-20 机器闭环（经产品自身通道 attach 面板 pid → `observe` 读到全部四条，不依赖截图与人工目视）；`screencapture` 仍受屏幕录制席位限制，见 smoke.md |
 | P1-S15 | 信号收尾可用 | `glasspaned` 收到 SIGTERM/SIGINT 后自行退出（码 0）并 unlink engine/probe 两个 socket；回归闸 `engine/.signal_smoke.py` | ✓ 2026-09-20（修复前两案均 6s 不退出，修复后全过；`--replace-daemon` 不再需要 SIGKILL 兜底） |
 | P1-S16 | 开机自启真生效 | 安装器收拢旧实例后由 launchd 接管（`kickstart -k`），`launchctl print` 为 `state = running` 且机面上只有一个 daemon；plist 已加载定义（`program`）与本次安装路径不一致时 `bootout` + `bootstrap` 重新注册 | ✓ 2026-09-20（`loadedLaunchdProgram`/`launchdNeedsReregister` 纯函数 + 真机接管复跑）；登录路径同轮实测：`bootout` → `bootstrap`（RunAtLoad 即登录时加载的同一入口）→ `state = running`，四项席位读数不变（授权跨完整重载保持）；随后 `kill -TERM` → `last exit code = 0`、`state = not running` 且 launchd **不复活**，与 `KeepAlive(SuccessfulExit=false)` 语义一致（修复前 TERM 完全无效，只能 KILL → 会被立刻重拉） |
+| P1-S18 | 启动器路径可执行 | `PermissionGuide.launchctlPath` 必须是真实可执行文件（`/bin/launchctl`；`/usr/bin/launchctl` 不存在），面板的授权申请/重探/kickstart 都走它 | ✓ 2026-09-20 单测断言 `isExecutableFile` + 常量值；同轮修前面板路径全部静默失效、修后端到端跑通 |
+| P1-S19 | 失败阶段可判读 | 一次性任务结局分 `pending / failed-write / failed-spawn / failed-timeout / failed-unreadable / <结论>`，每种一个标识，禁止互相冒充 | ✓ 2026-09-20（`PermissionSubjectTests`：五类标识互不相同 + 失败文案落回"未验证"） |
+| P1-S20 | 面板文案面向用户 | UI 字符串不写规格编号、不写实现自辩；可操作控件带稳定 identifier 以便自动化定位 | ✓ 2026-09-20（`gp-guide-*`/`gp-verify-*`/`gp-restart-daemon`/`gp-refresh`；测试断言不含 §） |
 | P1-S17 | remedy 与成因一致 | 通道存活类失败（`treeCaptureFailed` 预算/超时）不再把用户支去 `--grant-accessibility`，而是给出缩小范围动作 + 自查命令；窗口捕获失败指向屏幕录制席位并说明降级形态；错误码一律不动（码表冻结） | ✓ 2026-09-20（`EngineCore.map` 的 per-instance remedy，3 条单测：预算类 / 非预算类回落授权引导 / 屏幕录制类） |
 | P1-S14 | 错误 remedy 可执行 | `assert_element` 缺信号上下文时仍回 `GP_E_NO_OPERATION`（码表与 P0 §3.3 语义不动），但 remedy 改为可执行的 "run act first"，消除自指循环 | ✓ 2026-09-20（走 `GPError` 的 per-instance remedy 通道） |

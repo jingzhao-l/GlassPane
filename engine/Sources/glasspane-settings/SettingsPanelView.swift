@@ -66,8 +66,9 @@ struct SettingsPanelView: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                     Spacer()
-                    Button("重启 daemon") { model.restartDaemon() }
+                    Button("重启后台服务") { model.restartDaemon() }
                         .controlSize(.small)
+                        .accessibilityIdentifier(PermissionGuide.restartDaemonIdentifier)
                         .help("launchctl kickstart -k \(SettingsModel.launchdLabel)：会中断正在进行的 act")
                 }
                 .padding(10)
@@ -81,6 +82,7 @@ struct SettingsPanelView: View {
                     onVerifyCapability: entry.kind == .developerTools
                         ? { Task { await model.verifyDeveloperTools() } }
                         : nil,
+                    capabilityMarker: model.capabilityMarker,
                     capabilityBusy: model.isProbingDeveloperTools,
                     onGuide: { kind in runGuide(for: kind) },
                     onDropApp: { kind, droppedName in
@@ -95,9 +97,9 @@ struct SettingsPanelView: View {
     private func capabilityLine(for kind: PermissionKind) -> String? {
         guard kind == .developerTools else { return nil }
         if model.isProbingDeveloperTools {
-            return "调试能力探测中：真跑一次 xcrun lldb（冷启动预算分钟级），完成前状态栏保持\"未验证\"…"
+            return "正在验证调试能力，可能需要几分钟…"
         }
-        if let error = model.developerToolsProbeError { return error }
+        if let failure = model.developerToolsProbeFailure { return failure.userText }
         return model.developerToolsCapability?.summaryText()
     }
 
@@ -106,8 +108,8 @@ struct SettingsPanelView: View {
         guard let subject = model.daemon.subject else {
             return PermissionGuide.daemonOfflineText + "；" + PermissionGuide.panelSubjectDisclaimer
         }
-        let identity = subject.hasBundleIdentity ? "bundle 身份" : "裸二进制（列表内只显示文件名）"
-        return "授权主体：\(subject.tccEntryName)（\(identity)）· \(subject.binaryPath)"
+        let identity = subject.hasBundleIdentity ? "打包安装" : "直接运行，系统列表里显示为文件名"
+        return "授权对象：\(subject.tccEntryName)（\(identity)）\n\(subject.binaryPath)"
     }
 
     private var daemonSection: some View {
@@ -118,7 +120,9 @@ struct SettingsPanelView: View {
                 if model.isRefreshing {
                     ProgressView().controlSize(.small)
                 } else {
-                    Button("刷新") { model.refresh() }.controlSize(.small)
+                    Button("刷新") { model.refresh() }
+                    .controlSize(.small)
+                    .accessibilityIdentifier(PermissionGuide.refreshIdentifier)
                 }
             }
             VStack(alignment: .leading, spacing: 6) {
@@ -311,6 +315,8 @@ struct PermissionCardView: View {
     var capabilityLine: String? = nil
     /// 「验证调试能力」动作；nil 表示该卡不提供机器探测。
     var onVerifyCapability: (() -> Void)? = nil
+    /// 结论行的状态标记（在途/失败/已出结论；nil = 整行不渲染）。
+    var capabilityMarker: PermissionGuide.CapabilityMarker? = nil
     /// 探测在途：按钮禁点，避免叠加 launchd 任务。
     var capabilityBusy: Bool = false
     let onGuide: (PermissionKind) -> Void
@@ -354,6 +360,26 @@ struct PermissionCardView: View {
             return "rectangle.on.rectangle"
         case .developerTools:
             return "hammer"
+        }
+    }
+
+    /// 结论行是否失败态（原因不同，形状一致；原因进 identifier 与文案）。
+    private var capabilityIsFailure: Bool {
+        if case .failed = capabilityMarker { return true }
+        return false
+    }
+
+    /// 结论行的形状：在途沙漏、失败告警、有结论用对应状态图标。
+    private var capabilityIconName: String {
+        switch capabilityMarker {
+        case .pending:
+            return "hourglass"
+        case .failed:
+            return "exclamationmark.triangle"
+        case .concluded(let status):
+            return PermissionGuide.statusIcon(for: status)
+        case nil:
+            return "circle"
         }
     }
 
@@ -402,18 +428,29 @@ struct PermissionCardView: View {
                             .font(.caption)
                             .foregroundStyle(.orange)
                             .accessibilityIdentifier(PermissionGuide.restartPendingIdentifier(kind: entry.kind))
-                            .help("系统里已授权，重启 daemon 后生效")
+                            .help("已授权，重启后台服务后生效")
                     }
                 }
                 Text(entry.descriptor.purposeText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if let capabilityLine {
-                    // 带时刻的探测结论，与"实时席位"分列，不互相冒充。
-                    Text(capabilityLine)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
+                    // 带时刻的探测结论，与实时席位分列，不互相冒充；结论旁边放一枚带
+                    // 标识的图标——SwiftUI Text 的内容不进 AXTitle（P6 §0 F6），
+                    // 所以"结论是否真渲染"由 identifier 判定（P1 §11.6）。
+                    HStack(spacing: 4) {
+                        Image(systemName: capabilityIconName)
+                            .font(.caption2)
+                            .foregroundStyle(capabilityIsFailure ? Color.orange : Color.secondary)
+                            .accessibilityIdentifier(PermissionGuide.capabilityIdentifier(
+                                capabilityMarker ?? .concluded(.unverifiable)
+                            ))
+                        Text(capabilityLine)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .help(PermissionGuide.capabilityFootnote)
+                    }
                 }
                 if let statusNote = entry.statusNote {
                     // 状态来源注记：daemon 未上报席位时如实说明，不冒充已测。
@@ -431,6 +468,7 @@ struct PermissionCardView: View {
                         onVerifyCapability?()
                     }
                     .controlSize(.small)
+                    .accessibilityIdentifier(PermissionGuide.verifyCapabilityIdentifier)
                     .disabled(capabilityBusy)
                 }
                 Button(buttonTitle) {
@@ -438,6 +476,8 @@ struct PermissionCardView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
+                // 控件标识：SwiftUI 按钮标题不进 AXTitle，自动化/冒烟按标识定位。
+                .accessibilityIdentifier(PermissionGuide.guideIdentifier(for: entry.kind))
                 .disabled(entry.status == .granted)
             }
         }
