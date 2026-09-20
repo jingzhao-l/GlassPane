@@ -277,3 +277,41 @@ gp-perm-developer-tools-unverifiable
 三项席位仍 `granted`；`--replace-daemon` 第四次遇到 SIGTERM 哑火（PID 1814），
 SIGKILL 兜底生效。设置面板自身身份也可被 attach 识别
 （`appName=GlassPane / bundleId=com.glasspane.settings`）。
+
+### SIGTERM 哑火根因修复与回归闸（2026-09-20 20:4x，P1 v1.2 §11.7 S15）
+
+前三次记录都只写"daemon 不响应 SIGTERM，安装器靠 SIGKILL 兜底"，本轮查到根因并修：
+`installSignalHandlers` 里两处叠加——(1) 信号源只是局部变量，函数返回即被 ARC 释放；
+(2) handler 挂在 `.main` 队列，而 `SocketServer.run()` 的 `accept()` 阻塞主线程，
+主队列永远不泵。两者叠加使 SIGINT/SIGTERM 彻底哑火（`signal(..., SIG_IGN)` 又把默认
+处置改成忽略，于是连"被信号杀掉"都不会发生）。修法：信号源显式持有 + 挂专用队列，
+收尾改为 `unlink(engine.sock, probe.sock)` 后 `exit(0)`——**不**调 `server.cleanup()`，
+因为它会 close 正被 `accept()` 使用的 fd（跨线程 close 有 fd 复用竞态）。
+
+确定性对照（同一脚本 `engine/.signal_smoke.py`，隔离 socket，不碰现网）：
+
+| 被测二进制 | SIGTERM | SIGINT |
+|---|---|---|
+| 修复前（已安装的 bundle 旧产物） | 6s 内未退出 → 需 KILL | 6s 内未退出 → 需 KILL |
+| 修复后（本次 debug 与 release 产物） | 退出码 0，两个 socket 均 unlink | 退出码 0，两个 socket 均 unlink |
+
+连带后果（同轮查明并修）：`KeepAlive SuccessfulExit=false` 的语义是"只有异常退出才
+重启"，TERM 修好后 daemon 是 clean exit 0 → **launchd 本就不该复活它**，此前看到的
+"KILL 后自动重生"其实是哑火的副产物。所以安装器收拢旧实例后必须显式
+`launchctl kickstart -k gui/<uid>/com.glasspane.daemon` 才能拿到 launchd 托管形态
+（实测：接管成功 → `launchctl print` = `state = running`、单一实例、日志里再无 KILL 兜底）。
+
+### 陈旧作业定义让 launchd 永远起不来（EX_CONFIG，2026-09-20 20:5x）
+
+第二层坑：安装器原地重写 plist 后，**launchd 用的是 bootstrap 时缓存的作业定义**，
+新路径不生效——`launchctl print` 表现为 `last exit code = 78: EX_CONFIG` +
+`state = spawn scheduled`，kickstart 也永远不起（socket 自然轮不到 launchd 接管，
+安装器只能退回手动启动，开机自启形同虚设）。真机还看到过 `last exit code = 65`——
+那正是本次新增的单实例护栏在拒绝"已有实例在服务 socket"，说明护栏与 launchd 重试
+互相看得见（不是缺陷，但读日志时要认得这两个码）。
+
+修法：重新注册的判据从"plist 文本是否变化"改成**"已加载作业的 `program` 是否等于本次
+要安装的路径"**（`loadedLaunchdProgram` + `launchdNeedsReregister`，纯函数可测），不等就
+`bootout` + `bootstrap`；读不到定义也一律重来。实测前后：接管前 `--replace-daemon` 报
+"launchd 未在时限内接管，改由安装器直接启动"，接管后报
+"launchd 已按新配置接管 daemon（kickstart）"、`launchctl print` = `state = running`。

@@ -230,7 +230,8 @@ export function socketReachable(socketPath) {
  *  超时返回 false，调用方按"未接管"继续走手动启动分支。 */
 export async function waitForSocket(
   socketPath,
-  { timeoutMs = 8000, intervalMs = 500, probe = socketReachable, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {},
+  // 覆盖 launchd 起栈时间（kickstart 后仍需等 socket 真的可用）。
+  { timeoutMs = 12000, intervalMs = 500, probe = socketReachable, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {},
 ) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -319,6 +320,15 @@ export function listRunningPids(exeName, { spawn = spawnSync } = {}) {
   return pidsFromPs(result.stdout, { exeName })
 }
 
+/** launchd 主动接管（重启）已注册作业的参数（纯函数）。
+ *  为什么需要它而不是等 launchd 自动重拉：KeepAlive 采用 SuccessfulExit=false，
+ *  即"只有异常退出才重启"；daemon 修好 SIGTERM 收尾后是 clean exit 0（P1-S15），
+ *  按该语义 launchd 本就不该复活它——收拢旧实例后要拿到 launchd 托管形态，
+ *  必须显式 kickstart。 */
+export function launchdKickstartArgs({ label, uid }) {
+  return ['kickstart', '-k', `gui/${uid}/${label}`]
+}
+
 /** 向指定 PID 发 SIGTERM（daemon 侧装有信号处理 → 清理 socket 后退出；
  *  launchd 托管时异常退出会按新 plist 重新拉起）。1s 后仍存活的补 SIGKILL：
  *  实测存在收不到/不响应 SIGTERM 的旧 daemon 实例（主循环未跑起来时
@@ -395,16 +405,45 @@ export function launchdPlistString({ label, daemonBin, socketPath, logPath }) {
   ].join('\n')
 }
 
+/** 从 `launchctl print` 输出里取已加载作业的 `program`（纯函数，解析友好）。 */
+export function loadedLaunchdProgram(printOutput) {
+  const match = /(?:^|\n)\s*program = (.*)/.exec(String(printOutput ?? ''))
+  return match ? match[1].trim() : null
+}
+
+/** 是否需要重新注册（bootout + bootstrap）——比的是**已加载的作业定义**与本次要
+ *  安装的程序路径，而不是 plist 文件文本。
+ *  launchd 缓存的是 **bootstrap 时读到的作业定义**：原地重写 plist（例如 daemon 从
+ *  裸二进制换成 bundle 内可执行）后，已加载作业仍按旧定义 spawn——真机表现为
+ *  `launchctl print` 里 `last exit code = 78: EX_CONFIG`，kickstart 也永远起不来
+ *  （socket 因此轮不到 launchd 接管）。只比 plist 文本不够：上一轮安装留下的陈旧
+ *  定义对本轮而言文本可能完全一致。因此比 `program` 路径，且读不到定义时一律重来。 */
+export function launchdNeedsReregister({ alreadyLoaded, loadedProgram = null, desiredProgram }) {
+  if (!alreadyLoaded) return false
+  if (!loadedProgram) return true
+  return loadedProgram !== String(desiredProgram ?? '')
+}
+
 /** 注册 launchd 用户代理（幂等）：已加载则跳过，未加载则 bootstrap
  *  gui/<uid>。返回 { ok, already, message }，失败携带真实 stderr。 */
-export function launchctlBootstrap(label, plistPath) {
+export function launchctlBootstrap(label, plistPath, { desiredProgram = null } = {}) {
   const uid = spawnSync('id', ['-u'], { encoding: 'utf8' }).stdout.trim()
   if (!uid) {
     return { ok: false, already: false, message: '无法解析当前 uid（id -u 失败），跳过 launchd 注册' }
   }
-  const probe = spawnSync('launchctl', ['print', `gui/${uid}/${label}`], { encoding: 'utf8' })
+  const domain = `gui/${uid}`
+  const probe = spawnSync('launchctl', ['print', domain + '/' + label], { encoding: 'utf8' })
+  const needsReregister = launchdNeedsReregister({
+    alreadyLoaded: probe.status === 0,
+    loadedProgram: loadedLaunchdProgram(probe.stdout),
+    desiredProgram,
+  })
+  if (probe.status === 0 && !needsReregister) {
+    return { ok: true, already: true, message: `launchd 已加载 ${label}（${domain}），跳过 bootstrap` }
+  }
   if (probe.status === 0) {
-    return { ok: true, already: true, message: `launchd 已加载 ${label}（gui/${uid}），跳过 bootstrap` }
+    // 定义变了：先卸掉旧作业，否则新 plist 不生效（真机 EX_CONFIG 的来路）。
+    spawnSync('launchctl', ['bootout', domain + '/' + label])
   }
   const boot = spawnSync('launchctl', ['bootstrap', `gui/${uid}`, plistPath], { encoding: 'utf8' })
   const stderr = (boot.stderr ?? '').trim()
@@ -701,7 +740,9 @@ export async function install({ options = parseArgs([]).options, env = process.e
       logPath: daemonLog,
     })
     fs.writeFileSync(plistPath, plistXml, { mode: 0o644 })
-    const bootstrapResult = launchctlBootstrap(LAUNCHD_LABEL, plistPath)
+    const bootstrapResult = launchctlBootstrap(LAUNCHD_LABEL, plistPath, {
+      desiredProgram: daemonLaunch.path,
+    })
     if (!bootstrapResult.ok) {
       throw new Error(`launchd 注册失败：${bootstrapResult.message}`)
     }
@@ -724,13 +765,17 @@ export async function install({ options = parseArgs([]).options, env = process.e
             ? `既有实例已收拢（SIGTERM 未生效、已强杀：${result.forced.join(', ')}）`
             : `已结束既有实例：${result.terminated.join(', ')}`,
         )
-        // launchd 托管时异常退出会按新 plist 重拉（ThrottleInterval 最长 5s）。
-        // 必须等它把 socket 接回去再决定要不要手动起——否则会同时存在两个
-        // daemon 身份（真机踩过：launchd 实例与被抢走 socket 的手动实例并存）。
+        // 收拢旧实例后主动让 launchd 接管：TERM 现在是 clean exit 0，KeepAlive
+        // (SuccessfulExit=false) 语义下 launchd 不会自动复活，必须 kickstart。
+        // 不这么做就会退化成"手动实例持有 socket"，开机自启那份配置形同虚设。
         if (staleDaemons.length > 0 && options.launchd) {
-          relaunchedByLaunchd = await waitForSocket(socketPath)
-          if (relaunchedByLaunchd) {
-            printStep('launchd 已按新配置重新拉起 daemon')
+          const uid = String(spawnSync('id', ['-u'], { encoding: 'utf8' }).stdout.trim())
+          if (uid) {
+            spawnSync('launchctl', launchdKickstartArgs({ label: LAUNCHD_LABEL, uid }))
+            relaunchedByLaunchd = await waitForSocket(socketPath)
+            printStep(relaunchedByLaunchd
+              ? 'launchd 已按新配置接管 daemon（kickstart）'
+              : 'launchd 未在时限内接管，改由安装器直接启动')
           }
         }
       } else {

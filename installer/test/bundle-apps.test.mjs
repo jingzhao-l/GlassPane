@@ -13,6 +13,9 @@ import {
   listRunningPids,
   terminatePids,
   waitForSocket,
+  launchdKickstartArgs,
+  launchdNeedsReregister,
+  loadedLaunchdProgram,
   bundleLaunchArgs,
   daemonStartCommand,
   guiStartCommand,
@@ -276,4 +279,35 @@ test('daemonStartCommand / guiStartCommand: bundle 经 open，裸二进制直接
   assert.deepEqual(guiBundled, { launchPath: '/usr/bin/open', args: ['-g', '-n', '-a', plan.settingsApp] })
   const guiBare = guiStartCommand({ guiLaunch: { path: '/build/glasspane-settings', viaBundle: false } })
   assert.deepEqual(guiBare, { launchPath: '/build/glasspane-settings', args: [] })
+})
+
+test('launchdKickstartArgs：收拢旧实例后由 launchd 接管（不靠 KeepAlive 自动复活）', () => {
+  assert.deepEqual(
+    launchdKickstartArgs({ label: 'com.glasspane.daemon', uid: '501' }),
+    ['kickstart', '-k', 'gui/501/com.glasspane.daemon'],
+  )
+})
+
+test('loadedLaunchdProgram：从 launchctl print 取已加载作业路径', () => {
+  const sample = [
+    '\t\tpath = /Users/dev/Library/LaunchAgents/com.glasspane.daemon.plist',
+    '\t\tstate = spawn scheduled',
+    '\t\tprogram = /Users/dev/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned',
+    '\t\tlast exit code = 78: EX_CONFIG',
+  ].join('\n')
+  assert.equal(loadedLaunchdProgram(sample),
+    '/Users/dev/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned')
+  assert.equal(loadedLaunchdProgram(''), null)
+  assert.equal(loadedLaunchdProgram(undefined), null)
+})
+
+test('launchdNeedsReregister：比对已加载 program，而非 plist 文本', () => {
+  assert.equal(launchdNeedsReregister({ alreadyLoaded: false, loadedProgram: null, desiredProgram: '/a' }), false,
+    '未加载时走常规 bootstrap')
+  assert.equal(launchdNeedsReregister({ alreadyLoaded: true, loadedProgram: '/a', desiredProgram: '/a' }), false,
+    '定义一致就别动已加载作业')
+  assert.equal(launchdNeedsReregister({ alreadyLoaded: true, loadedProgram: '/old/glasspaned', desiredProgram: '/a' }), true,
+    '换 bundle 路径必须 bootout + bootstrap')
+  assert.equal(launchdNeedsReregister({ alreadyLoaded: true, loadedProgram: null, desiredProgram: '/a' }), true,
+    '读不到定义一律重来（陈旧定义的真机形态：EX_CONFIG）')
 })

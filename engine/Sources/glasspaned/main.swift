@@ -336,20 +336,32 @@ private func runGuideScreenPermission(_ probe: ScreenCapturePermissionProbe) {
 
 // MARK: - Signals
 
-private func installSignalHandlers(_ server: SocketServer) {
+/// 信号收尾要 unlink 的 socket 集合（引擎 socket + 探针 socket）。
+private var retainedSignalSources: [DispatchSourceSignal] = []
+
+/// SIGTERM/SIGINT 收尾。三条都是真机踩出来的（`--replace-daemon` 四次遇到"TERM 发出去
+/// 进程还在"，只能靠 SIGKILL 兜底）：
+///  1. 信号源必须**显式持有**——只作局部变量则安装完即被 ARC 释放，handler 永不触发；
+///  2. 不能挂在 `.main` 队列——`SocketServer.run()` 的 `accept()` 阻塞主线程，主队列
+///     不泵，handler 同样永不触发；
+///  3. 收尾不调 `server.cleanup()`——它会 close 正被 `accept()` 使用的 fd，跨线程 close
+///     有 fd 复用竞态；改为 unlink socket 文件后 `exit(0)`，与正常退出留下的现场一致。
+private func installSignalHandlers(socketPaths: [String]) {
     // Writes to a socket whose peer has closed raise SIGPIPE by default and
     // would kill the daemon. Ignore it so write() returns EPIPE and the
     // connection is torn down cleanly (seen on real devices when a client
     // disconnects mid-operation).
     _ = signal(SIGPIPE, SIG_IGN)
+    let queue = DispatchQueue(label: "com.glasspane.daemon.signals")
     for signalNumber in [SIGINT, SIGTERM] {
         signal(signalNumber, SIG_IGN)
-        let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
+        let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: queue)
         source.setEventHandler {
-            server.cleanup()
+            for path in socketPaths { unlink(path) }
             exit(0)
         }
         source.resume()
+        retainedSignalSources.append(source)
     }
 }
 
@@ -654,7 +666,7 @@ let core = EngineCore(
 )
 let dispatcher = Dispatcher(core: core, log: log)
 let server = SocketServer(socketPath: socketPath, dispatcher: dispatcher, log: log)
-installSignalHandlers(server)
+installSignalHandlers(socketPaths: [server.socketPath] + (probeServer.map { [$0.socketPath] } ?? []))
 
 FileHandle.standardOutput.write(
     Data("glasspaned \(core.version) listening on \(socketPath)\n".utf8)
