@@ -71,6 +71,10 @@ public enum GP {
         runtime.registerCheckpoint(domain: domain, get: get, set: set)
     }
 
+    /// Z4.5 capture 结果监听（进程内自动化用：帧照常发往 daemon，钩子让
+    /// spike/冒烟能在 app 侧记录 path/error，无需第二个 daemon 方法面）。
+    public static var onMetalCaptureResult: ((String?, String?) -> Void)?
+
     /// Z4.5: programmatic Metal capture via MTLCaptureManager.
     public static func beginMetalCapture(destinationURL: URL? = nil) {
         runtime.beginMetalCapture(destinationURL: destinationURL)
@@ -445,15 +449,24 @@ final class ProbeRuntime: @unchecked Sendable {
     /// Active capture file path, reported back on capture_end (nil = none).
     private var metalCaptureURL: URL?
 
+    private func emitCapture(path: String?, error: String?) {
+        let hook = GP.onMetalCaptureResult
+        var frame: [String: Any] = ["t": "capture"]
+        frame["path"] = path ?? NSNull()
+        frame["error"] = error ?? NSNull()
+        writeFrame(frame)
+        hook?(path, error)
+    }
+
     func beginMetalCapture(destinationURL: URL?) {
         #if canImport(Metal)
         let manager = MTLCaptureManager.shared()
         guard let device = MTLCreateSystemDefaultDevice() else {
-            writeFrame(["t": "capture", "path": NSNull(), "error": "no Metal device on this machine"])
+            emitCapture(path: nil, error: "no Metal device on this machine")
             return
         }
         guard manager.supportsDestination(.gpuTraceDocument) else {
-            writeFrame(["t": "capture", "path": NSNull(), "error": "GPU capture unsupported (enable Metal capture in Graphics Inspector / device limitation)"])
+            emitCapture(path: nil, error: "GPU capture unsupported (enable Metal capture in Graphics Inspector / device limitation)")
             return
         }
         let url = destinationURL
@@ -468,12 +481,12 @@ final class ProbeRuntime: @unchecked Sendable {
             lock.lock()
             metalCaptureURL = url
             lock.unlock()
-            writeFrame(["t": "capture", "path": url.path, "error": NSNull()])
+            emitCapture(path: url.path, error: nil)
         } catch {
-            writeFrame(["t": "capture", "path": NSNull(), "error": "startCapture failed: \(error.localizedDescription)"])
+            emitCapture(path: nil, error: "startCapture failed: \(error.localizedDescription)")
         }
         #else
-        writeFrame(["t": "capture", "path": NSNull(), "error": "Metal unavailable in this build"])
+        emitCapture(path: nil, error: "Metal unavailable in this build")
         #endif
     }
 
@@ -484,13 +497,13 @@ final class ProbeRuntime: @unchecked Sendable {
         metalCaptureURL = nil
         lock.unlock()
         guard url != nil else {
-            writeFrame(["t": "capture", "path": NSNull(), "error": "no capture in progress"])
+            emitCapture(path: nil, error: "no capture in progress")
             return
         }
         MTLCaptureManager.shared().stopCapture()
-        writeFrame(["t": "capture", "path": url?.path ?? "", "error": NSNull()])
+        emitCapture(path: url?.path, error: nil)
         #else
-        writeFrame(["t": "capture", "path": NSNull(), "error": "Metal unavailable in this build"])
+        emitCapture(path: nil, error: "Metal unavailable in this build")
         #endif
     }
 }

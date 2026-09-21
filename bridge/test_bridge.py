@@ -127,7 +127,8 @@ class ArgvComposition(unittest.TestCase):
 
     def test_attach_capture_uses_pid_and_detaches(self):
         argv = gb.build_lldb_argv("/b.py", mode="capture", pid=4242)
-        self.assertIn("--attach", argv)
+        self.assertIn("-p", argv)
+        self.assertNotIn("--attach", argv)  # lldb 无此选项：unknown-option 伪装成权限失败的真机教训
         self.assertIn("4242", argv)
         self.assertIn("detach", argv)
         self.assertNotIn("run", argv)  # attach must never relaunch

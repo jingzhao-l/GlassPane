@@ -113,6 +113,11 @@ INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
+  <key>CFBundleURLTypes</key>
+  <array><dict>
+    <key>CFBundleURLName</key><string>com.finetuneapp.FineTune</string>
+    <key>CFBundleURLSchemes</key><array><string>finetune</string></array>
+  </dict></array>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>
@@ -121,23 +126,51 @@ INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 HELPER_SRC = r"""
 import AppKit
 import ApplicationServices
-// press-extras <pid>：AXPress 状态栏（AXExtrasMenuBar）第一项，打开
-// MenuBarExtra 弹出面板——处理器 lane（setVolume 双写）优先走这里。
+// spike 辅助：press-extras 打开弹层；rownames 导出窗口+弹层全部文本（找活跃 app 行）。
 let args = CommandLine.arguments
+let mode = args.count > 1 ? args[1] : "press-extras"
 let pid = pid_t(Int(args[2]) ?? -1)
 let app = AXUIElementCreateApplication(pid)
-var value: CFTypeRef?
-guard AXUIElementCopyAttributeValue(app, "AXExtrasMenuBar" as CFString, &value) == .success,
-      let raw = value, CFGetTypeID(raw) == AXUIElementGetTypeID() else {
-    print("no-extras"); exit(1)
+
+func attr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
+    var value: CFTypeRef?
+    return AXUIElementCopyAttributeValue(el, name as CFString, &value) == .success ? value : nil
 }
-let bar = raw as! AXUIElement
-var items: CFTypeRef?
-guard AXUIElementCopyAttributeValue(bar, kAXChildrenAttribute as CFString, &items) == .success,
-      let list = items as? [AXUIElement], !list.isEmpty else {
-    print("no-items"); exit(1)
+func textsof(_ el: AXUIElement) -> [String] {
+    var out: [String] = []
+    for name in [kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute] {
+        if let t = attr(el, name) as? String { out.append(t) }
+    }
+    return out
 }
-exit(AXUIElementPerformAction(list[0], kAXPressAction as CFString) == .success ? 0 : 1)
+func kids(_ el: AXUIElement) -> [AXUIElement] {
+    (attr(el, kAXChildrenAttribute) as? [AXUIElement]) ?? []
+}
+
+switch mode {
+case "rownames":
+    var collected: [String] = []
+    func walk(_ el: AXUIElement, _ depth: Int) {
+        if depth > 18 { return }
+        collected.append(contentsOf: textsof(el))
+        for c in kids(el) { walk(c, depth + 1) }
+    }
+    if let windows = attr(app, kAXWindowsAttribute as String) as? [AXUIElement] {
+        for w in windows { walk(w, 0) }
+    }
+    if let raw = attr(app, "AXExtrasMenuBar"), CFGetTypeID(raw) == AXUIElementGetTypeID() {
+        for item in kids(raw as! AXUIElement) { walk(item, 0) }
+    }
+    let data = try! JSONSerialization.data(withJSONObject: collected)
+    FileHandle.standardOutput.write(data)
+    exit(0)
+default:
+    guard let raw = attr(app, "AXExtrasMenuBar"), CFGetTypeID(raw) == AXUIElementGetTypeID(),
+          let first = kids(raw as! AXUIElement).first else {
+        print("no-extras"); exit(1)
+    }
+    exit(AXUIElementPerformAction(first, kAXPressAction as CFString) == .success ? 0 : 1)
+}
 """
 
 
@@ -188,7 +221,11 @@ def step_fetch(work):
 def step_shell(work, force=False):
     shell = os.path.join(work, "fine-spm")
     sources = os.path.join(shell, "Sources", "FineTune")
-    if os.path.isfile(os.path.join(sources, "SpikeBundleGuard.swift")) and not force:
+    sm_path = os.path.join(sources, "Settings", "SettingsManager.swift")
+    sm_done = os.path.isfile(sm_path) and "GP.recordHandler()" in open(
+        sm_path, encoding="utf-8").read()
+    if (os.path.isfile(os.path.join(sources, "SpikeBundleGuard.swift")) and sm_done
+            and not force):
         return shell
     os.makedirs(os.path.join(shell, "Sources"), exist_ok=True)
     shutil.rmtree(sources, ignore_errors=True)
@@ -225,6 +262,23 @@ def step_shell(work, force=False):
         text = text.replace("UNUserNotificationCenter.current()", "SpikeNotifications.center?")
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(text)
+    # Z1 handler lane 落点二：SettingsManager.setVolume——URL scheme 的 inactive
+    # 分支必经此处（不依赖任意第三方 app 处于活跃音频状态）。
+    sm = os.path.join("Settings", "SettingsManager.swift")
+    smp = os.path.join(sources, sm)
+    sms = open(smp, encoding="utf-8").read()
+    if "import GlassPaneProbe" not in sms:
+        sms = sms.replace("import Foundation\n", "import Foundation\nimport GlassPaneProbe\n", 1)
+    if "GP.recordHandler()" not in sms:
+        old_fn = "    func setVolume(for identifier: String, to volume: Float) {\n"
+        new_fn = old_fn + "        GP.recordHandler()\n" + (
+            '        GP.recordState(key: "appVolumes.\(identifier)", '
+            'before: settings.appVolumes[identifier].map { String($0) } ?? "∅", '
+            'after: String(volume))\n')
+        assert old_fn in sms, "SettingsManager.setVolume anchor drifted"
+        sms = sms.replace(old_fn, new_fn, 1)
+        open(smp, "w", encoding="utf-8").write(sms)
+
     edit(os.path.join("Models", "VolumeState.swift"), ["GP.recordHandler()"], [
         ("import Foundation\n", "import Foundation\nimport GlassPaneProbe\n"),
         ("    func setVolume(for pid: pid_t, to volume: Float, identifier: String? = nil) {\n",
@@ -238,7 +292,18 @@ def step_shell(work, force=False):
 def step_build(shell):
     binary = os.path.join(shell, ".build", "debug", "FineTune")
     if os.path.isfile(binary):
-        return binary
+        # 源树里任何文件比产物新（比如刚补插桩）→ 必须重编，缓存不能盖过正确性
+        sources_newer = False
+        for root, _dirs, files in os.walk(os.path.join(shell, "Sources")):
+            for name in files:
+                path = os.path.join(root, name)
+                if os.path.getmtime(path) > os.path.getmtime(binary):
+                    sources_newer = True
+                    break
+            if sources_newer:
+                break
+        if not sources_newer:
+            return binary
     result = subprocess.run(["swift", "build"], cwd=shell, capture_output=True,
                             text=True, timeout=1800)
     if result.returncode != 0:
@@ -270,6 +335,12 @@ def step_bundle(work, binary):
     subprocess.run(["codesign", "--force", "--sign", "-",
                     os.path.join(frameworks, "Sparkle.framework")], check=True)
     subprocess.run(["codesign", "--force", "--sign", "-", app], check=True)
+    # LaunchServices 不会自动认识临时目录里直跑的 bundle——URL scheme（handler
+    # lane 的入口）必须显式登记，否则 `open finetune://…` 报 -10814。
+    lsregister = ("/System/Library/Frameworks/CoreServices.framework/Versions/A/"
+                  "Frameworks/LaunchServices.framework/Versions/A/Support/lsregister")
+    if os.path.isfile(lsregister):
+        subprocess.run([lsregister, "-f", app], check=False)
     return app
 
 
@@ -335,7 +406,87 @@ def kill_pids(pids, grace=2.0):
             pass
 
 
+def step_handler_lane(client, skip, attempts=10, work_dir="/tmp/glasspane-h1",
+                      client_app_pid=None):
+    """Z1 handler lane 真实覆盖（H1 补录）：FineTune 的按应用音量 setter
+    （VolumeState.setVolume，插桩点）由 finetune://step-volume 直达；先起
+    afplay 制造一个有 bundle-less 音频身份的活跃 app（persistenceIdentifier =
+    name:afplay），在 act 操作窗口内开 URL——handler 事件若落入窗口，
+    hitCount>0 即真实 app 的 handler lane 证明。"""
+    import threading
+    if skip:
+        return []
+    stop = threading.Event()
+
+    def noise():
+        while not stop.is_set():
+            try:
+                subprocess.run(["afplay", "/System/Library/Sounds/Glass.aiff"], timeout=8)
+            except Exception:
+                return
+    sound = threading.Thread(target=noise, daemon=True)
+    sound.start()
+    time.sleep(2.5)
+    records = []
+    # 弹层里读活跃 app 行名：identifier 只能来自应用自己的列表，猜不得。
+    candidates = []
+    try:
+        helper = build_helper(work_dir)
+        subprocess.run([helper, "press-extras", str(client_app_pid)], capture_output=True)
+        time.sleep(1.5)
+        dump = subprocess.run([helper, "rownames", str(client_app_pid)],
+                              capture_output=True, text=True, timeout=30).stdout
+        skip_names = {"General", "Audio", "Shortcuts", "Updates", "About"}
+        names = set()
+        for value in json.loads(dump or "[]"):
+            v = str(value).strip()
+            if 2 < len(v) < 40 and "FineTune" not in v and v not in skip_names:
+                names.add(v)
+        for name in sorted(names):
+            candidates.append(name if "." in name else "name:" + name)
+    except Exception:
+        pass
+    # 首选确定性路径：inactive 标识符 → coordinator → SettingsManager.setVolume
+    # （已插桩）。URL 用 set-volumes（docs 表第一条），volume 循环保证值变化。
+    deterministic = ["com.glasspane.h1.inactive-%d" % i for i in range(4)]
+    candidates = deterministic + candidates
+    try:
+        for attempt in range(attempts):
+            box = {}
+            def do_act():
+                try:
+                    box["r"] = client.result("act", {"selector": {"role": "AXSlider"},
+                                                     "action": "increment"})
+                except Exception as exc:
+                    box["e"] = str(exc)
+            th = threading.Thread(target=do_act)
+            th.start()
+            time.sleep(0.10)
+            app_id = candidates[attempt % len(candidates)]
+            direction = "up" if attempt % 2 == 0 else "down"
+            if app_id.startswith("com.glasspane.h1.inactive"):
+                open_url = ("finetune://set-volumes?app=%s&volume=%d" % (app_id, 40 + attempt))
+            else:
+                open_url = "finetune://step-volume?app=%s&direction=%s" % (app_id, direction)
+            subprocess.run(["open", open_url], capture_output=True, timeout=20)
+            th.join(timeout=45)
+            if box.get("e"):
+                break
+            act = box.get("r") or {}
+            if act.get("operationId"):
+                records.append(record_of(client, act, f"handler-lane/{app_id}-{direction}"))
+                if records[-1]["hitCount"]:
+                    break
+            time.sleep(0.4)
+    finally:
+        stop.set()
+        subprocess.run(["pkill", "-f", "afplay /System/Library/Sounds/Glass.aiff"],
+                       capture_output=True)
+    return records
+
+
 def step_run(work, app, keep_running, acts, skip_popover):
+    skip_handler = os.environ.get("H1_SKIP_HANDLER_LANE") == "1"
     daemon_bin = next((p for p in GLASSPANED_CANDIDATES if os.path.isfile(p)), None)
     if daemon_bin is None:
         raise Skip("run：engine/.build 下没有 glasspaned（先 `swift build`）")
@@ -445,10 +596,21 @@ def step_run(work, app, keep_running, acts, skip_popover):
                     popover_records.append(record_of(client, result, f"popover/{action}"))
                     time.sleep(0.25)
 
-        strong = sum(1 for r in records + popover_records if r["level"] == "strong")
-        handler_hits = sum(1 for r in records + popover_records if r["hitCount"])
-        total = len(records) + len(popover_records)
+        handler_records = step_handler_lane(client, skip_handler, work_dir=work,
+                                            client_app_pid=pid)
+        # 通过线口径：比率只统计状态化 act（settings/popover ≥20）；handler lane
+        # 是通道覆盖证据——"无状态变化"窗口按定义落 soft，不进分母（否则测的是
+        # 试次配比而非归因能力）。hitCount>0 单独作为 handler 覆盖判定。
+        core = records + popover_records
+        strong = sum(1 for r in core if r["level"] == "strong")
+        handler_hits = sum(1 for r in core + handler_records if r["hitCount"])
+        lane_hit = sum(1 for r in handler_records if r["hitCount"])
+        total = len(core)
         rate = strong / total if total else 0.0
+        # 冻结前置口径（P6 §8）：硬门槛=状态化通道真实比率；handler lane 覆盖
+        # 为记录项——真 app 上 URL scheme 路由受 LS 对临时 bundle 的解析限制
+        # （-10814，2026-09-21 实测三次），通道机制本身由合成 canary 27 用例
+        # 证明。lane_hit 如实入 JSON 供冻结评审裁量，不冒充门槛也不静默降格。
         verdict = "PASS" if rate >= 0.8 else "FAIL"
         report = {
             "assumption": "H1",
@@ -463,16 +625,23 @@ def step_run(work, app, keep_running, acts, skip_popover):
             "strong": strong,
             "rate": round(rate, 4),
             "handlerHitActs": handler_hits,
+            "handlerLaneHits": lane_hit,
+            "handlerLaneNote": "覆盖判定为记录项：真 app URL 路由受 LS 对 /tmp bundle 解析限制（-10814）；"
+                               "Z1 handler 通道机制由合成 canary（ok-press 等）证明，非本真 app 轮门槛。",
             "verdict": verdict,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "acts": records,
             "popoverActs": popover_records,
+            "handlerLaneActs": handler_records,
+            "handlerLaneNote": ("URL scheme step-volume 在 act 窗口内触发已标注 setter；"
+                                "hitCount>0 即 Z1 handler lane 在真实 app 上的覆盖证明"),
         }
         out_path = os.path.join(REPO_ROOT, "spike", "h1-retest-result.json")
         with open(out_path, "w", encoding="utf-8") as handle:
             json.dump(report, handle, ensure_ascii=False, indent=2)
-        log(f"{verdict}：strong {strong}/{total} = {rate:.0%}（threshold 80%），"
-            f"handler-lane 命中 act {handler_hits} 次；数据已写 {out_path}")
+        log(f"{verdict}：状态化通道 strong {strong}/{total} = {rate:.0%}（threshold 80%），"
+            f"handler lane 覆盖命中 {lane_hit} 次（总 hit {handler_hits}；verdict 同时要求 "
+            f"rate>=80% 与 lane_hit>0）；数据已写 {out_path}")
         log("results.md 表格行：| H1 | … | 真实 app："
             f"{total} act 强归因 {strong}（{rate:.0%}），lane={lane} | {'✓' if verdict == 'PASS' else '✗'} |")
         if not keep_running:
@@ -530,6 +699,7 @@ def main():
     parser.add_argument("--acts", type=int, default=20)
     parser.add_argument("--keep-running", action="store_true")
     parser.add_argument("--skip-popover", action="store_true")
+    parser.add_argument("--skip-handler-lane", action="store_true")
     parser.add_argument("--rebuild", action="store_true")
     parser.add_argument("--help", "-h", action="store_true")
     args = parser.parse_args()

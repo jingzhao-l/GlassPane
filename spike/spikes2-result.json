@@ -1,0 +1,153 @@
+{
+  "timestamp": "2026-09-21T21:05:14+0800",
+  "H4": {
+    "verdict": "PASS-REFUSAL",
+    "manifest": {
+      "A-static": {
+        "animate": false,
+        "beginFrames": [
+          {
+            "error": "GPU capture unsupported (enable Metal capture in Graphics Inspector / device limitation)",
+            "path": null
+          }
+        ],
+        "endFrames": [
+          {
+            "error": "no capture in progress",
+            "path": null
+          }
+        ]
+      },
+      "B-animating": {
+        "animate": true,
+        "beginFrames": [
+          {
+            "error": "GPU capture unsupported (enable Metal capture in Graphics Inspector / device limitation)",
+            "path": null
+          }
+        ],
+        "endFrames": [
+          {
+            "error": "no capture in progress",
+            "path": null
+          }
+        ]
+      },
+      "C-invalid-dest": {
+        "animate": false,
+        "beginFrames": [
+          {
+            "error": "GPU capture unsupported (enable Metal capture in Graphics Inspector / device limitation)",
+            "path": null
+          }
+        ],
+        "endFrames": [
+          {
+            "error": "no capture in progress",
+            "path": null
+          }
+        ]
+      }
+    },
+    "notes": "本机实测拒绝态（开启 Xcode Graphics Inspector 后可复跑正产物路径）：GPU capture unsupported (enable Metal capture in Graphics Inspector / device limitation)"
+  },
+  "H5": {
+    "baselineVisibleRows": 6,
+    "offscreenSample": 60,
+    "offscreenIndexed": 10,
+    "indexMissRate": 0.8333,
+    "roundChannelCounts": [
+      {
+        "op": "add",
+        "hit": 1,
+        "state": true,
+        "ax": true,
+        "pixel": false,
+        "level": "strong"
+      },
+      {
+        "op": "remove",
+        "hit": 1,
+        "state": true,
+        "ax": true,
+        "pixel": false,
+        "level": "strong"
+      },
+      {
+        "op": "add",
+        "hit": 1,
+        "state": true,
+        "ax": true,
+        "pixel": false,
+        "level": "strong"
+      },
+      {
+        "op": "remove",
+        "hit": 1,
+        "state": true,
+        "ax": true,
+        "pixel": false,
+        "level": "strong"
+      },
+      {
+        "op": "add",
+        "hit": 1,
+        "state": true,
+        "ax": true,
+        "pixel": false,
+        "level": "strong"
+      },
+      {
+        "op": "remove",
+        "hit": 1,
+        "state": true,
+        "ax": true,
+        "pixel": false,
+        "level": "strong"
+      },
+      {
+        "op": "add",
+        "hit": 1,
+        "state": true,
+        "ax": true,
+        "pixel": false,
+        "level": "strong"
+      },
+      {
+        "op": "remove",
+        "hit": 1,
+        "state": true,
+        "ax": true,
+        "pixel": false,
+        "level": "strong"
+      },
+      {
+        "op": "add",
+        "hit": 1,
+        "state": true,
+        "ax": true,
+        "pixel": false,
+        "level": "strong"
+      },
+      {
+        "op": "remove",
+        "hit": 1,
+        "state": true,
+        "ax": true,
+        "pixel": false,
+        "level": "strong"
+      }
+    ],
+    "note": "失效率口径=懒容器屏外行 identifier 在 observe 树中的在场率；五线计数取 add/remove 各 5 轮"
+  },
+  "H6": {
+    "rollbackExecuted": true,
+    "consistent": true,
+    "surface": "gp-probe",
+    "handlersAtSnapshot": 1,
+    "handlersPreRestore": 1,
+    "handlersAfterRestore": 1,
+    "verdict": "PASS",
+    "note": "consistent=true 证值经 setter 回来（state 事件应有）；恢复窗口 handler 增量=0 证 rollback 不重放插桩副作用。onAppear 可见性语义在离屏 harness 不成立，已如实移出断言面。"
+  }
+}

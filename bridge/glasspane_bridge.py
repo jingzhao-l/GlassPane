@@ -158,7 +158,10 @@ def build_lldb_argv(bridge_path, mode, pid=None, exe=None, exe_args=None,
     """Compose the `xcrun lldb --batch` invocation (pure; unit-tested)."""
     argv = ["xcrun", "lldb", "--batch"]
     if pid is not None:
-        argv += ["--attach", str(pid)]
+        # lldb 的 attach 形态是 -p <pid>（--attach 不存在——2026-09-21 真机
+        # 复验抓到这个参数缺陷：attach 面从未真正试过内核，报的是 unknown
+        # option 的伪装失败）。
+        argv += ["-p", str(pid)]
     if exe:
         argv += ["--file", exe]
     argv += ["-o", "command script import %s" % bridge_path]

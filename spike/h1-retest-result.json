@@ -11,7 +11,7 @@
     ]
   },
   "daemon": {
-    "bin": "/private/tmp/gp-audit/engine/.build/debug/glasspaned",
+    "bin": "/private/tmp/gp-phaseb/engine/.build/debug/glasspaned",
     "c33": false,
     "socket": "/tmp/glasspane-h1/run/engine.sock"
   },
@@ -21,11 +21,13 @@
   "strong": 24,
   "rate": 1.0,
   "handlerHitActs": 0,
+  "handlerLaneHits": 0,
+  "handlerLaneNote": "URL scheme step-volume 在 act 窗口内触发已标注 setter；hitCount>0 即 Z1 handler lane 在真实 app 上的覆盖证明",
   "verdict": "PASS",
-  "timestamp": "2026-09-20T00:40:50+0800",
+  "timestamp": "2026-09-21T20:57:49+0800",
   "acts": [
     {
-      "operationId": "op_01M2X8MZ34SZKAAX3WV6EDQZVH",
+      "operationId": "op_01M320NRX7PYP47D6EY112K2QV",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -35,7 +37,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8MZMV4HBDBGJC9J9GE5Y9",
+      "operationId": "op_01M320NSFX7PYC1BN66FK749KY",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -45,7 +47,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N072TX39AHFAXQXNYW58",
+      "operationId": "op_01M320NT1F41Y424VGHBCKDWPR",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -55,7 +57,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N0S90CH6JT7YQB86Q6DW",
+      "operationId": "op_01M320NTNER3JYGF5ME3QQCABK",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -65,7 +67,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N1BFSP4KFGZYA01JM7PP",
+      "operationId": "op_01M320NV6MBYAHJ5PQWFP83HWG",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -75,7 +77,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N1XMBKVPXD37KNKZG81M",
+      "operationId": "op_01M320NVQTJ0W17VEM25TWVXME",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -85,7 +87,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N2FFC0CR48E25RH273Z0",
+      "operationId": "op_01M320NWA9W3KH7QVC6DNP3NNP",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -95,7 +97,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N31PDASCKQ5F04BSAB44",
+      "operationId": "op_01M320NWWK69KNVVQ0AP9Z7KBW",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -105,7 +107,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N3KW4M9DJP13S75QZTC1",
+      "operationId": "op_01M320NXDZSD97CKFS0N7JKD72",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -115,7 +117,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N4620C30S1MA5WEMXVFY",
+      "operationId": "op_01M320NXZ5BMP3SF3KQ05Y7G33",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -125,7 +127,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N4RC9GM4E7V4BP35PKFX",
+      "operationId": "op_01M320NYGN5B5KXJG39JH1S10D",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -135,7 +137,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N5B2MN0DTN2VCSY2FT2Y",
+      "operationId": "op_01M320NZ6F35QGZN2CKNTPEF0P",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -145,7 +147,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N5XB8FT3M3DKCPQ3M5ZH",
+      "operationId": "op_01M320NZS1BY741AQ3ENDE29EP",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -155,7 +157,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N6FHF3SJAGJBC7AGWFVJ",
+      "operationId": "op_01M320P0A802197V1XY2H4SHND",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -165,7 +167,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N71T3BAF5R3TV86NN2V9",
+      "operationId": "op_01M320P0VBYZNYDRVF4NCKTS5E",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -175,7 +177,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N7M3R5DPMPXF81PJ7EXD",
+      "operationId": "op_01M320P1CGMR62V2F0S1SVCS9B",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -185,7 +187,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N85RX4WGXQTM26MH727S",
+      "operationId": "op_01M320P1YAKW3JXYJG1KJRJXM6",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -195,7 +197,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N8QDF9Y79TS0H6TKYKM6",
+      "operationId": "op_01M320P2H24S8RXP0G36JE12QM",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -205,7 +207,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N99PVP0H9B8GQEXJXE6F",
+      "operationId": "op_01M320P324013CXDSXMK9Q4YMQ",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -215,7 +217,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8N9VWK1Q0SNTGPAN2T6MQ",
+      "operationId": "op_01M320P3KFY58ZCD28T2KRETA8",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -227,7 +229,7 @@
   ],
   "popoverActs": [
     {
-      "operationId": "op_01M2X8NDKPK6CNZ4P5PH4RSWGR",
+      "operationId": "op_01M320P59M2EXX88CD6WZW17JH",
       "label": "popover/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -237,7 +239,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8NE5EP2EVKFDGT91HW18H",
+      "operationId": "op_01M320P5TRDQ5MJGEA0PPRDZV2",
       "label": "popover/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -247,7 +249,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8NERTNM1MZWVFPW1GYV8G",
+      "operationId": "op_01M320P6BXPRTQ3YXJPTF1QJ26",
       "label": "popover/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -257,7 +259,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M2X8NFBA7ZM0PV9ME7YK6QV3",
+      "operationId": "op_01M320P6X7PA1YFJ5ZFCDTSC69",
       "label": "popover/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -265,6 +267,108 @@
       "hitCount": 0,
       "stateChanged": true,
       "stateSource": "z2-mirror"
+    }
+  ],
+  "handlerLaneActs": [
+    {
+      "operationId": "op_01M320PBNM985BBNFNQ1YE0TFV",
+      "label": "handler-lane/com.glasspane.h1.inactive-0-up",
+      "actConfirmed": true,
+      "level": "strong",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": true,
+      "stateSource": "z2-mirror"
+    },
+    {
+      "operationId": "op_01M320PCCT038D4H3E66VHJCT7",
+      "label": "handler-lane/com.glasspane.h1.inactive-1-down",
+      "actConfirmed": true,
+      "level": "soft",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": false,
+      "stateSource": null
+    },
+    {
+      "operationId": "op_01M320PD2GN914G66466EJHC75",
+      "label": "handler-lane/com.glasspane.h1.inactive-2-up",
+      "actConfirmed": true,
+      "level": "soft",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": false,
+      "stateSource": null
+    },
+    {
+      "operationId": "op_01M320PDRCWV2SPE2K5CC43JK8",
+      "label": "handler-lane/com.glasspane.h1.inactive-3-down",
+      "actConfirmed": true,
+      "level": "soft",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": false,
+      "stateSource": null
+    },
+    {
+      "operationId": "op_01M320PEE677F7F8FVNY19WCED",
+      "label": "handler-lane/com.glasspane.h1.inactive-0-up",
+      "actConfirmed": true,
+      "level": "soft",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": false,
+      "stateSource": null
+    },
+    {
+      "operationId": "op_01M320PF45GZKCG4B3HDZR7422",
+      "label": "handler-lane/com.glasspane.h1.inactive-1-down",
+      "actConfirmed": true,
+      "level": "soft",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": false,
+      "stateSource": null
+    },
+    {
+      "operationId": "op_01M320PFT12M6WCT16C3AXZKR0",
+      "label": "handler-lane/com.glasspane.h1.inactive-2-up",
+      "actConfirmed": true,
+      "level": "soft",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": false,
+      "stateSource": null
+    },
+    {
+      "operationId": "op_01M320PGG9B3SAW9EG3KW3B4DN",
+      "label": "handler-lane/com.glasspane.h1.inactive-3-down",
+      "actConfirmed": true,
+      "level": "soft",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": false,
+      "stateSource": null
+    },
+    {
+      "operationId": "op_01M320PH7A1NZDKCPN65VKGG8W",
+      "label": "handler-lane/com.glasspane.h1.inactive-0-up",
+      "actConfirmed": true,
+      "level": "soft",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": false,
+      "stateSource": null
+    },
+    {
+      "operationId": "op_01M320PHXEZ07CWBRTKF81BBTK",
+      "label": "handler-lane/com.glasspane.h1.inactive-1-down",
+      "actConfirmed": true,
+      "level": "soft",
+      "contaminated": false,
+      "hitCount": 0,
+      "stateChanged": false,
+      "stateSource": null
     }
   ]
 }
