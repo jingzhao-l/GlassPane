@@ -4,6 +4,22 @@ import XCTest
 /// A3 (engine side): C35 dual-binding roundtrip against the kernel fixtures
 /// — the same truth set the TypeScript suite consumes (P0 spec §7.2).
 final class EvidenceRoundtripTests: XCTestCase {
+    /// 冻结读取兼容：draft 期落盘的包（schemaVersion 为 legacy 字符串）必须仍能
+    /// 解码并通过校验；写侧恒 stamp v0.1（store 里历史包不因冻结自毁）。
+    func testLegacyDraftVersionStillValidatesOnRead() throws {
+        let fresh = try KernelFixtures.data("evidence-pack.ok-01.json")
+        var text = String(data: fresh, encoding: .utf8)!
+        text = text.replacingOccurrences(
+            of: "\"glasspane.evidence/0.1\"",
+            with: "\"glasspane.evidence/0.1-draft\"")
+        let legacy = text.data(using: .utf8)!
+        let pack = try EvidencePack.decodeAndValidate(legacy)
+        XCTAssertEqual(pack.schemaVersion, "glasspane.evidence/0.1-draft")
+        let reencoded = try pack.jsonData()
+        XCTAssertTrue(String(data: reencoded, encoding: .utf8)!.contains("0.1-draft"),
+                      "值保真：读 legacy 不悄悄改写（改写只发生在下次新建）")
+    }
+
 
     private let evidenceFixtureNames = [
         "evidence-pack.ok-01.json",
@@ -36,7 +52,7 @@ final class EvidenceRoundtripTests: XCTestCase {
         let pack = try EvidencePack.decodeAndValidate(
             try KernelFixtures.data("evidence-pack.ok-01.json")
         )
-        XCTAssertEqual(pack.schemaVersion, "glasspane.evidence/0.1-draft")
+        XCTAssertEqual(pack.schemaVersion, "glasspane.evidence/0.1")
         XCTAssertEqual(pack.attribution.level, .soft)
         XCTAssertEqual(pack.circuitBreaker.level, .normal)
         XCTAssertNotNil(pack.signals.axEvent)

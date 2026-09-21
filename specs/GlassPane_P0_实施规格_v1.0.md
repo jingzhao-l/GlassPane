@@ -140,13 +140,13 @@ GlassPane/
 
 ## 4. evidence 包 schema v0.1-draft（C35 真源）
 
-JSON Schema 真源：`kernel/schemas/evidence-pack.schema.json`（$id: `https://schemas.iterate.dev/evidence-pack-0.1-draft.json`）。生命周期：**draft**（Phase A）→ C2 spike 真实 app 数据回填修订 → v0.1 冻结（Phase B 入口）。
+JSON Schema 真源：`kernel/schemas/evidence-pack.schema.json`（$id: `https://schemas.iterate.dev/evidence-pack-0.1.json`（2026-09-21 冻结定版））。生命周期：**draft**（Phase A）→ C2 spike 真实 app 数据回填修订 → **v0.1 冻结已执行（2026-09-21，Phase B 入口第 0 步；`glasspane.evidence/0.1`，读侧保留 draft 兼容，回填明细见 spike/results.md「Phase B 入口补数轮」）**。
 
 ### 4.1 字段表
 
 | 字段 | 类型 | 必填 | 约束 |
 |---|---|---|---|
-| schemaVersion | string | ✓ | const `"glasspane.evidence/0.1-draft"` |
+| schemaVersion | string | ✓ | const `"glasspane.evidence/0.1"`（冻结前历史值 `0.1-draft` 只读兼容） |
 | operationId | string | ✓ | pattern `^op_[0-9A-HJKMNP-TV-Z]{26}$`（Crockford base32，时间戳前 10 位+随机 16 位） |
 | createdAt | string | ✓ | ISO-8601 UTC（`yyyy-MM-dd'T'HH:mm:ss.SSS'Z'`，pattern 校验） |
 | attribution | object | ✓ | `{level: enum[soft,strong,weak], contaminated: boolean}`，两字段均必填 |

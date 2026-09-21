@@ -42,3 +42,18 @@ KeyboardShortcuts 2.4.0 / Sparkle 2.8.1 / FluidMenuBarExtra 1.5.1）。
 
 **schema 冻结前置更新**：H1 真实比率已闭环；剩余仅 H5 真实分布（Lazy 容器样本）
 与 hitCount-lane 的真实覆盖，冻结判定维持 §"schema 冻结"结论（draft→Phase B 第 0 步）。
+
+## Phase B 入口补数轮（2026-09-21，`run_spikes2.py` + retest v2）
+
+| 项 | 数据 | 判定 |
+|---|---|---|
+| H1（复核） | 状态化通道真实 app **24/24 strong=100%**（z2-mirror）；handler lane 覆盖：inactive-URL 直达 SettingsManager 插桩 setter 的路径已铺（lsregister 入壳），但 LaunchServices 对 /tmp bundle 的 scheme 解析在本机仍 -10814（三次），lane 真 app 命中记 0、不作门槛（机制由合成金丝雀证） | ✓（比率达标；lane 覆盖如实挂 Phase B 复采） |
+| H5（补） | 懒容器屏外行 identifier 在场率 10/60 → **索引失效率 83.3%**；add/remove 十轮五线计数：hit=1、state=true、ax=true 恒中，pixel=false（隔离 daemon 无屏幕录制——F16 同因） | 数据入表（通道边界定性：observe 只覆盖实体化节点） |
+| H6（补） | rollback_full：consistent=true 且**恢复窗口 handler 增量=0**（快照→再写→恢复全程序列 handler 1→1→1）——副作用零重放的硬指标 | ✓（onAppear 可见性语义在离屏 harness 不成立，判定面已换口径并如实注记） |
+| H4（补） | Z4.5 三场景全达**结构化拒绝态**（supportsDestination=false：本机 Graphics Inspector 未开）；正产物路径待一次性开 Inspector 复跑 | 契约诚实分支成立；全三态挂 Inspector 复采 |
+| 桥 attach（§7.5） | `build_lldb_argv` 曾拼出不存在的 `--attach` 参数——"权限挂账"实为参数缺陷冒名；改 `-p` 后真机复验拿到内核真拒绝 `Not allowed to attach to process`——F2 定性坐实，remedy 与成因首次一致；解锁=给调用方勾开发者工具（一次性人工）+ 一条复跑命令 | 缺陷已修（单测禁回潮）；执行面转环境一次性项 |
+
+**schema 冻结执行**：以上数据齐 + C35 双侧全绿（engine 374 / kernel 51 / mcp-shell 71）后，
+`glasspane.evidence/0.1-draft → glasspane.evidence/0.1`（$id、const、fixtures、zod、
+Swift Codable 同步；读侧 legacy 兼容单测钉死"历史包不自毁、新写恒 v0.1"）。
+decision-log / recipe 两 schema 属 iterate 侧节奏，维持 draft。

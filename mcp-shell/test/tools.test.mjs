@@ -113,7 +113,7 @@ test("last_evidence passes through a valid evidence pack (spec §6.3)", async ()
   const promise = executeTool(lv, {}, engine);
   io.respond({
     evidencePack: {
-      schemaVersion: "glasspane.evidence/0.1-draft",
+      schemaVersion: "glasspane.evidence/0.1",
       operationId: "op_0123456789ABCDEFGHJKMNPQRS",
       createdAt: "2026-09-15T00:00:00.000Z",
       attribution: { level: "soft", contaminated: false },
@@ -140,7 +140,7 @@ test("last_evidence passes through a probe-carrying pack (P6 §3.1 null→object
   const promise = executeTool(lv, {}, engine);
   io.respond({
     evidencePack: {
-      schemaVersion: "glasspane.evidence/0.1-draft",
+      schemaVersion: "glasspane.evidence/0.1",
       operationId: "op_0123456789ABCDEFGHJKMNPQRS",
       createdAt: "2026-09-19T00:00:00.000Z",
       attribution: { level: "strong", contaminated: false },
@@ -269,7 +269,7 @@ const OP_B = "op_123456789ABCDEFGHJKMNPQRST";
 function evidenceFrame(operationId, diagnosis = null) {
   return {
     evidencePack: {
-      schemaVersion: "glasspane.evidence/0.1-draft",
+      schemaVersion: "glasspane.evidence/0.1",
       operationId,
       createdAt: "2026-09-15T00:00:00.000Z",
       attribution: { level: "soft", contaminated: false },

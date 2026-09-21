@@ -111,7 +111,7 @@ def main():
 
     frame = send(sock, nid(), "last_evidence", {})
     pack = frame.get("evidencePack", frame)
-    require(pack.get("schemaVersion") == "glasspane.evidence/0.1-draft", "evidence schemaVersion", frame)
+    require(pack.get("schemaVersion") == "glasspane.evidence/0.1", "evidence schemaVersion", frame)
     require(str(pack.get("operationId", "")).startswith("op_"), "evidence operationId", frame)
 
     frame = send(sock, nid(), "restore", {

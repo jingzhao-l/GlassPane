@@ -420,7 +420,10 @@ public struct Diagnosis: Codable, Equatable {
 // MARK: - Evidence pack
 
 public struct EvidencePack: Codable, Equatable {
-    public static let schemaVersionConst = "glasspane.evidence/0.1-draft"
+    public static let schemaVersionConst = "glasspane.evidence/0.1"
+    /// 冻结（Phase B 入口第 0 步）读取兼容：draft 期落盘的历史包仍可解码，
+    /// 新写入恒用 v0.1。draft 字符串自此只读不写。
+    public static let legacySchemaVersions: Set<String> = ["glasspane.evidence/0.1-draft"]
 
     public let schemaVersion: String
     public let operationId: String
@@ -502,7 +505,8 @@ public extension EvidencePack {
     /// Validates the pattern/const invariants the JSON Schema enforces on
     /// the TS side. Call after any decode of untrusted JSON.
     func validateInvariants() throws {
-        guard schemaVersion == Self.schemaVersionConst else {
+        guard schemaVersion == Self.schemaVersionConst
+            || Self.legacySchemaVersions.contains(schemaVersion) else {
             throw EvidencePackError.badSchemaVersion(schemaVersion)
         }
         let opRange = NSRange(operationId.startIndex..., in: operationId)

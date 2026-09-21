@@ -248,3 +248,23 @@ agent 可执行、不得许诺不存在的能力。八项发现的逐项落点�
 主队列不泵 + SIG_IGN 吞默认处置）与本分支的 sigwait 机制合并为单一实现：sigwait
 线程收尾只 unlink engine/probe 两 socket、不 close 在用 fd（采纳 S15 结论）；
 `.signal_smoke.py` 成为该面的权威回归闸（合并态 release 二进制 SIGTERM/SIGINT 全绿）。
+
+## §12 Phase B 入口第 0 步：schema 冻结执行记录（2026-09-21）
+
+- **前置核对**：H1 真实比率 24/24=100%（z2 通道，`spike/h1-retest-result.json`）；H5 真实
+  失效率 83.3%（懒容器实体化边界，`spike/spikes2-result.json`）；H6 恢复窗口 handler
+  增量=0（副作用零重放）；H4 达结构化拒绝态（正产物路径待 Graphics Inspector 一次性
+  开启后复采，不参与生死断言的定性不变）；C35 双侧全绿（engine 374 / kernel 51 /
+  mcp-shell 71 / installer 48 / probe 10）。
+- **冻结动作**：evidence pack `0.1-draft → 0.1` 全绑定同步（$id / JSON Schema const /
+  zod literal / Swift `schemaVersionConst` / fixtures ok-01…03 / 测试断言）。读侧
+  `legacySchemaVersions` 兼容（draft 期历史包可解码可校验，写侧恒 stamp v0.1），
+  单测 `testLegacyDraftVersionStillValidatesOnRead` 钉死。decision-log / recipe 两
+  schema 属 iterate 侧迭代节奏，维持 draft 不动。
+- **挂 Phase B 复采两件（不阻断发布，逐条带解锁动作）**：① handler lane 真 app 命中——
+  路径已铺（inactive-URL→SettingsManager 插桩 setter + lsregister），本机 LS 对 /tmp
+  bundle scheme 解析 -10814，换安装形态或换机即采；② Z4.5 正产物三态——开 Graphics
+  Inspector 重跑 `run_spikes2.py` 即回 PASS。
+- **桥 attach 面更正入档**：既往"权限挂账"中混有一条实现缺陷（lldb 无 `--attach` 选项，
+  已改 `-p` 并单测禁回潮）；修复后复验为内核拒绝 `Not allowed to attach`——§7.5 挂账
+  收窄为纯环境项（调用方勾选开发者工具，一次性人工 + 一条复跑命令）。

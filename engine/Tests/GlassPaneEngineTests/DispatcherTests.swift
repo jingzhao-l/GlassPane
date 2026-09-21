@@ -131,7 +131,7 @@ final class DispatcherTests: XCTestCase {
         let evidenceResult = try XCTUnwrap(evidenceResponse["result"] as? [String: Any])
         let pack = try XCTUnwrap(evidenceResult["evidencePack"] as? [String: Any])
         XCTAssertEqual(pack["operationId"] as? String, operationId)
-        XCTAssertEqual(pack["schemaVersion"] as? String, "glasspane.evidence/0.1-draft")
+        XCTAssertEqual(pack["schemaVersion"] as? String, "glasspane.evidence/0.1")
     }
 
     func testUnknownMethodReturnsMethodNotFoundWithId() throws {
