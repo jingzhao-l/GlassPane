@@ -1,15 +1,26 @@
 {
-  "name": "@glasspane/installer",
+  "name": "glasspane-install",
   "version": "1.0.0",
-  "private": true,
   "description": "GlassPane one-command installer: terminal onboarding → install deps → build TS + Swift engine → start daemon → open settings GUI for permission guide",
   "type": "module",
+  "license": "MIT",
+  "author": "jingzhao-l",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jingzhao-l/GlassPane.git",
+    "directory": "installer"
+  },
+  "bugs": { "url": "https://github.com/jingzhao-l/GlassPane/issues" },
+  "homepage": "https://github.com/jingzhao-l/GlassPane/tree/main/installer#readme",
+  "keywords": ["macos", "installer", "glasspane", "cli"],
   "main": "./cli.js",
   "bin": {
     "glasspane-install": "./cli.js"
   },
   "files": [
-    "cli.js"
+    "cli.js",
+    "LICENSE",
+    "README.md"
   ],
   "engines": {
     "node": ">=18"

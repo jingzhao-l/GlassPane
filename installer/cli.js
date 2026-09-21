@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * @glasspane/installer — 一键安装 CLI（零第三方依赖，Node >= 18）。
+ * glasspane-install — 一键安装 CLI（零第三方依赖，Node >= 18）。
  *
  * 流程：terminal onboarding 横幅 → 环境预检（node/swift/git/open）→ 定位项目
  * 根目录 → npm install（workspaces）→ 编译 TS（kernel → mcp-shell）→ swift
@@ -810,7 +810,7 @@ export async function install({ options = parseArgs([]).options, env = process.e
     await run('npm', ['run', 'build', '--workspace', '@iterate/kernel'], { cwd: rootDir })
 
     printStep('编译 mcp-shell……')
-    await run('npm', ['run', 'build', '--workspace', '@glasspane/mcp-shell'], { cwd: rootDir })
+    await run('npm', ['run', 'build', '--workspace', 'glasspane-mcp'], { cwd: rootDir })
 
     printStep('编译 Swift engine（glasspaned + glasspane-settings，release）……')
     await run('swift', ['build', '-c', 'release'], { cwd: engineDir })

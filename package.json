@@ -12,7 +12,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "npm run build --workspace @iterate/kernel && npm run build --workspace @glasspane/mcp-shell",
+    "build": "npm run build --workspace @iterate/kernel && npm run build --workspace glasspane-mcp",
     "test": "npm run build && npm run test --workspaces --if-present",
     "install:engine": "node installer/cli.js",
     "install:engine:silent": "node installer/cli.js --no-prompt --no-gui"

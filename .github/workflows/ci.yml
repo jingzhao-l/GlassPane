@@ -94,7 +94,7 @@ jobs:
       - name: Install workspace deps from root
         run: npm ci
       - name: Installer unit tests (parse/env/plist/app args)
-        run: npm test --workspace @glasspane/installer
+        run: npm test --workspace glasspane-install
       - name: Build all TS workspaces (kernel → mcp-shell)
         run: npm run build
       - name: Test all workspaces (kernel + mcp-shell)

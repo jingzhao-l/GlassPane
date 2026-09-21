@@ -1,7 +1,6 @@
 {
-  "name": "@glasspane/mcp-shell",
+  "name": "glasspane-mcp",
   "version": "0.1.0",
-  "private": true,
   "description": "GlassPane MCP stdio shell: JSON-RPC 2.0 over stdio bridging an AI agent to the glasspane engine daemon",
   "type": "module",
   "main": "./dist/index.js",
@@ -10,7 +9,10 @@
     "glasspane-mcp": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "schemas",
+    "LICENSE",
+    "README.md"
   ],
   "exports": {
     ".": {
@@ -23,14 +25,27 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test test/*.test.mjs"
+    "bundle": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node18 --external:zod --outfile=dist/index.js && cp -R ../kernel/schemas schemas",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "prepublishOnly": "npm run build && npm run bundle"
   },
+  "license": "MIT",
+  "author": "jingzhao-l",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jingzhao-l/GlassPane.git",
+    "directory": "mcp-shell"
+  },
+  "bugs": { "url": "https://github.com/jingzhao-l/GlassPane/issues" },
+  "homepage": "https://github.com/jingzhao-l/GlassPane/tree/main/mcp-shell#readme",
+  "keywords": ["mcp", "model-context-protocol", "macos", "accessibility", "verification", "ai-agents"],
   "dependencies": {
-    "@iterate/kernel": "file:../kernel",
     "zod": "3.25.76"
   },
   "devDependencies": {
+    "@iterate/kernel": "file:../kernel",
     "@types/node": "26.5.1",
+    "esbuild": "^0.28.2",
     "typescript": "5.9.3"
   }
 }
