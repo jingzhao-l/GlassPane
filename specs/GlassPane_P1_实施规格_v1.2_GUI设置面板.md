@@ -297,6 +297,11 @@ bundle 主可执行"；`identifier` 形态的 designated requirement（不含 cd
 跨重编译存活——`codesign --force --sign - --identifier <id> -r='designated =>
 identifier "<id>"'` 实测可通过 `--verify --strict`。
 
+**该推论已于 2026-09-21 真机证实**（原为 P1-S8 的未完成半项）：把现网 daemon 换成
+cdhash 已变（`f967598c… → 75812885…`）、identifier 与 DR 未变的 bundle 并 `kickstart` 重启，
+三个已授权席位仍全部 `granted`；恢复原产物后再验一次读数不变。回归闸为
+`engine/.rebuild_survival_smoke.py`（自备份、自恢复、空测自警；细节见 smoke.md 脚本 21 / 观察 22）。
+
 ### 11.2 状态真源与申请路径的重新分工
 
 | 面 | v1.2 §6 原设计 | §11 修正 |

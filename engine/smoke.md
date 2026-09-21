@@ -376,6 +376,15 @@ engine 366、probe 10、bridge 17、kernel 51、mcp-shell 67、installer 40 全�
 20. **`spike/run_h1_retest.py`**：H1 真实 app 强归因率复测一条命令（fetch→壳→构建→
     .app→隔离 daemon→≥20 act→JSON）；真机 24/24 strong=100%，stateSource=z2-mirror，
     hitCount=0 如实记录。
+21. **`.rebuild_survival_smoke.py`（P1-S8 重编译存活回归闸）**：把现网
+    `~/Applications/GlassPane Daemon.app` 备份后换成**cdhash 已变、identifier 与 DR 未变**
+    的产物（`install_name_tool -add_rpath` 造内容差 → `codesign --force --sign -
+    -r='designated => identifier "<id>"'` 重签）→ `launchctl kickstart -k` 重启 → 只读
+    `hello` 比对席位 → 无论判定如何都恢复原产物并再验一次。断言三条：换装产物 cdhash 必须
+    真的变了（否则空测）、换装前已授权的席位换装后仍 `granted`、恢复后 cdhash 与初始一致且
+    授权不丢。前置不满足（非 macOS / bundle 未装 / daemon 不应答 / DR 含 cdhash / 一席都没
+    授）SKIP 且 exit 0；两条 FAIL 分支（空测、授权丢）为防御性判定，本机跑不出反例故**未
+    实测触发过**，只证过 SKIP 两分支。改真实安装 + 重启现网作业，故不进 CI。
 
 真机观察：
 
@@ -398,3 +407,10 @@ engine 366、probe 10、bridge 17、kernel 51、mcp-shell 67、installer 40 全�
     必须 `Task.detached`；`NSTemporaryDirectory()` 对非 sandbox 进程可能不
     存在，一次性任务脚本写前须 mkdir 守卫。验收锚（新文案）：徽标「可用
     （实测）」、caption「…一次性验证结果」、按钮「重新验证」。
+22. **授权确实跨 cdhash 变化存活**（2026-09-21，`.rebuild_survival_smoke.py` 真机三段）：
+    现网 daemon `f967598c…`（pid 67275）→ 换装 `75812885…`（新 pid 67684，同一
+    `com.glasspane.daemon` + `designated => identifier "com.glasspane.daemon"`）→
+    accessibility / inputMonitoring / screenRecording 三项**仍全部 granted**、
+    developerTools 仍如实 unverifiable → 恢复 `f967598c…`（pid 67696）读数不变。
+    即 §11.1 结论 3 的推论成立：重编译/重签不需要回系统设置重勾。手工对照轮还另测过
+    `693b54ac…` 一次，同结论。
