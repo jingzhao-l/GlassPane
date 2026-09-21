@@ -268,3 +268,23 @@ agent 可执行、不得许诺不存在的能力。八项发现的逐项落点�
 - **桥 attach 面更正入档**：既往"权限挂账"中混有一条实现缺陷（lldb 无 `--attach` 选项，
   已改 `-p` 并单测禁回潮）；修复后复验为内核拒绝 `Not allowed to attach`——§7.5 挂账
   收窄为纯环境项（调用方勾选开发者工具，一次性人工 + 一条复跑命令）。
+
+## §13 公开发布执行记录（2026-09-21，Phase B 首批交付）
+
+- **npm 公开发布已执行**（用户口令：正式发布公开）：`glasspane-mcp@0.1.0`、
+  `glasspane-install@1.0.0`（§33.2 裸名口径兑现；MIT；bin `glasspane-mcp`）。
+  kernel 不单独发布（iterate monorepo 迁移前随 mcp-shell 捆绑内联——
+  file: 依赖出包即失联，prepublishOnly 强制 bundle）。注册表验证：干净目录
+  `npm i glasspane-mcp` 后 initialize 握手成功（registry 拉取，非本地路径）。
+- **GitHub 仓库转公开**：`jingzhao-l/GlassPane` public（用户确认与 npm 同步，
+  install.sh 的 curl 一键分发通道自此对外成立）。
+- **公证（notarization）决策单（不代买，需用户 Apple Developer Program $99/年）**：
+  当前分发形态 = ad-hoc 签名 + 本机安装（TCC 席位靠 identifier 型 DR 已验证跨
+  重签存活）；对外分发的增量收益 = Gatekeeper 首启不拦"未识别开发者"。
+  启用条件：付费账号 → make-app.sh 的 `--sign -` 换 Developer ID
+  `--options runtime` + `xcrun notarytool submit` + staple 三步，脚本面约半天。
+  未启用前 README 的一键安装口径对外部用户如实标注"首次需在系统设置里允许"。
+- **发布后遗留（都不阻断）**：handler lane 真 app 命中复采（§12）、Z4.5 正产物
+  三态（开 Graphics Inspector 重跑 run_spikes2）、桥 attach 调用方勾选复跑、
+  CI 增 `npm publish --provenance` 的 workflow_dispatch 通道（本机发布未带
+  provenance 标记——下次发布建议走 CI）。
