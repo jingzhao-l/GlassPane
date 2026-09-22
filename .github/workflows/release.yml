@@ -86,6 +86,8 @@ jobs:
           # target 显式钉在被 checkout 的 commit 上：gh 默认会写成分支名，
           # 那样 Release 的 target 就与 tag 内容脱钩，可复现性锚点只剩资产本身。
           TARGET_SHA=$(git rev-parse HEAD)
+          # 用默认 GITHUB_TOKEN 建的 Release 会落为 draft（GitHub 对 Actions
+          # 身份建的发布默认不直接对外），不显式取消就永远只挂在 /releases 草稿区。
           if gh release view "$REF_NAME" >/dev/null 2>&1; then
             gh release upload "$REF_NAME" "GlassPane-${VERSION}.tar.gz" "SHA256SUMS-${VERSION}.txt" --clobber
             gh release edit "$REF_NAME" --notes "$NOTES" --target "$TARGET_SHA"
@@ -94,6 +96,9 @@ jobs:
               "GlassPane-${VERSION}.tar.gz" "SHA256SUMS-${VERSION}.txt" \
               --title "GlassPane ${VERSION}" --notes "$NOTES" --target "$TARGET_SHA"
           fi
+          gh release edit "$REF_NAME" --draft=false --latest
+          gh release view "$REF_NAME" --json tagName,isDraft,targetCommitish \
+            --jq '"release \(.tagName) 已对外：draft=\(.isDraft)，target=\(.targetCommitish)"'
 
   npm-publish:
     name: publish bare names with provenance
