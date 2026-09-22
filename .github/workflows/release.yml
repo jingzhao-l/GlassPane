@@ -57,7 +57,12 @@ jobs:
           esac
           VERSION="${REF_NAME#v}"
           node scripts/check-version.mjs "$VERSION"
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          # 后续步骤各自独立 shell：校验过的值经 GITHUB_ENV 传下去，
+          # 不在下游重新读事件字段（set -u 下也是这一步失败过一次的原因）。
+          {
+            echo "REF_NAME=$REF_NAME"
+            echo "VERSION=$VERSION"
+          } >> "$GITHUB_ENV"
       - name: Build deterministic source archive
         run: |
           set -euo pipefail
