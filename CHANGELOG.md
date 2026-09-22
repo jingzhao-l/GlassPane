@@ -23,7 +23,10 @@
   在定位不到仓库时直接 `throw new Error(repoMissingText())`——源码树必须先存在。现在安装器自举：定位不到仓库时
   clone 钉住的 tag 到 `~/glasspane` 并继续，与 `install.sh` 同一策略。
 - **发布自动化**。`.github/workflows/release.yml` 新增 tag 触发的 GitHub Release job，产出确定性 source tarball +
-  `SHA256SUMS.txt`；既有手动 `workflow_dispatch` job 继续以 `npm publish --provenance` 发布两个包。
+  `SHA256SUMS.txt`（v1.1.0 的 Release 即由它生成，校验和经下载侧 `sha256sum -c` 独立复核）；手动 `workflow_dispatch`
+  job 以 `npm publish --provenance` 发两个裸名包，直发被拒时自动回落 `npm stage publish`（Trusted Publishing 配成
+  staged-only，"是否存在"最后一步 `npm stage approve` 留在 owner 手里）。dry 分支改用 `npm pack --dry-run`——npm 11
+  的 `publish --dry-run` 不再纯本地，会查 registry 撞已发版本。
 - **文档门面**。`README.md` 重写为英文主入口 + 新增 `README.zh-CN.md`；新增 `CONTRIBUTING.md`、`SECURITY.md`、`.github/CODEOWNERS` 与 issue / PR 模板。
 
 ### Changed
@@ -44,9 +47,9 @@
   [P6 §13](specs/GlassPane_P6_实施规格_v6.0_探针SDK与LLDB桥实现.md) 的决策单，前置是一次付费的 Apple Developer
   Program（$99/年）。外部用户首次启动因此会被 Gatekeeper 拦下，需在系统设置里手动允许；此前 README 承诺"一键安装"却
   未带这条限定，与项目自陈的原则冲突（"拿不到数据就显示未验证，永远不会为了好看而点亮"）。
-- **1.1.0 可能先在 GitHub 存在、后在 npm 存在**。`npm publish --provenance` 需 owner 在 npmjs.com 一次性开启
-  Trusted Publishing（或配 `NPM_TOKEN` secret），见 [release.yml](.github/workflows/release.yml) 头部注释与
-  P6 §13 的"发布后遗留"。该前置未解除前，npm 上不会自动出现 1.1.0。
+- **1.1.0 先在 GitHub 存在**。GitHub Release 与源码 tarball 已随 tag 产出；registry 上仍是 `glasspane-mcp@0.1.0`
+  与 `glasspane-install@1.0.0`，直到 owner 跑一次 `mode=publish` 并 `npm stage approve`（发布不可逆，这最后一步刻意
+  不自动化，见 [release.yml](.github/workflows/release.yml) 头部口径）。
 
 ## [0.1.0] — 2026-09-21 … 2026-09-22
 

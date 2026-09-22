@@ -1,27 +1,23 @@
 name: Release
-# 发布通道（P6 §13 遗留项兑现 + 2026-09-22 基础设施审计补齐 Release 资产）。
-#
 # 两条独立的发布动作，故意**不**串在一起：
 #   1) GitHub Release（打 tag 即触发，自动）：确定性源码 tarball + SHA256SUMS.txt。
 #      install.sh / npx 钉的就是这个 tag，用户据此可复现同一份源码。
-#   2) npm publish（手动 workflow_dispatch，默认 dry-run）：两个裸名包带 provenance。
-#      不挂在 tag 事件上，因为"发了 tag"不等于"决定对外发版"——发布是不可逆动作，
+#   2) npm publish（手动 workflow_dispatch，默认 dry）：两个裸名包带 provenance。
+#      不挂在 tag 事件上，因为"发了 tag"不等于"决定对外发版"——发布不可逆，
 #      必须是一次显式操作。
 #
-# 一次性前置（任选其一，owner 在 npm/GitHub 网页侧操作，均无需改本文件）：
-#   A. npm Trusted Publishing（推荐，免 secret）：npmjs.com → 对应包 →
-#      Publishing → Trusted accesses → GitHub Actions，仓库
-#      jingzhao-l/GlassPane、工作流 release.yml、环境 release。
-#   B. 或仓库 Secrets 配 NPM_TOKEN（automation token，读+发布范围）。
-# provenance 声明要求 id-token: write（已配）。两个包各自 prepublishOnly
-# 完成 tsc + esbuild 捆绑，CI 不重复构建细节。
-#
-# 合并提示（2026-09-22，v1.1.0 起）：分支 kernel-migration 上的本文件另有一处
-# 演进——node 22 + npm@11 + `npm publish` 被拒时回落 `npm stage publish`
-# （Trusted Publishing 为 staged-only，owner 用 `npm stage approve` 兑现）。
-# 两者不冲突，合并时都要保留：github-release 任务（tag 触发，源码 tarball +
-# SHA256SUMS，v1.1.0 的 Release 就是它产的）+ npm-publish 任务的 stage 回落。
-# 别用 --theirs/--ours 整文件覆盖。
+# 前置已于 2026-09-22 满足：两个包（glasspane-mcp / glasspane-install）在
+# npmjs.com 各配了一条 GitHub Actions Trusted Publisher，仓库
+# jingzhao-l/GlassPane、工作流 release.yml、环境 release；**"publish
+# directly" 未勾（staged only）**——发布授权按产品原则留在人手里：
+#   · CI 先试直发；被拒即自动回落 `npm stage publish --provenance`，
+#     产出暂存件（不进 registry，装不到）。
+#   · owner 事后一条命令兑现存在：`npm stage approve <stage-id>`（2FA）。
+#     stage-id 见本工作流日志的 notice 行，或本地 `npm stage list`。
+# npm CLI ≥ 11.15 才有 stage 子命令，故先全局升 npm@11；不配 NPM_TOKEN
+# （空 token 会被 setup-node 写进 .npmrc，反而挡住 OIDC）。
+# npm 11 行为变化：`npm publish --dry-run` 不再纯本地、会查 registry 撞已发
+# 版本，所以 dry 分支一律用 `npm pack --dry-run`。
 on:
   push:
     tags:
@@ -29,7 +25,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "publish 前先校验？"
+        description: "publish 前先只做打包校验？"
         type: choice
         required: true
         default: dry
@@ -65,7 +61,7 @@ jobs:
           VERSION="${REF_NAME#v}"
           node scripts/check-version.mjs "$VERSION"
           # 后续步骤各自独立 shell：校验过的值经 GITHUB_ENV 传下去，
-          # 不在下游重新读事件字段（set -u 下也是这一步失败过一次的原因）。
+          # 不在下游重新读事件字段（set -u 下 v1.1.0 首跑就是栽在这）。
           {
             echo "REF_NAME=$REF_NAME"
             echo "VERSION=$VERSION"
@@ -105,35 +101,44 @@ jobs:
       id-token: write
     env:
       MODE: ${{ github.event.inputs.mode }}
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
+      - name: Upgrade npm (staged publishing needs >= 11.15)
+        run: npm install -g npm@11
       - name: Install workspaces from root lockfile
         run: npm ci
       - name: Build all TS workspaces (kernel first; mcp-shell imports it)
         run: npm run build
       - name: Version line must be self-consistent before publishing
         run: node scripts/check-version.mjs
-      - name: Publish (or dry-run) glasspane-mcp
+      - name: Publish (or pack-check) glasspane-mcp
         working-directory: mcp-shell
         run: |
           set -euo pipefail
+          npm run bundle
           if [ "$MODE" = "dry" ]; then
-            npm run bundle
-            npm publish --dry-run
+            npm pack --dry-run
           else
-            npm publish --provenance
+            npm publish --provenance || {
+              echo "::notice::direct publish refused (staged-only trusted publisher)"
+              npm stage publish . --provenance
+              echo "::notice::staged publish created — owner approves with: npm stage approve <stage-id> (see npm stage list)"
+            }
           fi
-      - name: Publish (or dry-run) glasspane-install
+      - name: Publish (or pack-check) glasspane-install
         working-directory: installer
         run: |
           set -euo pipefail
           if [ "$MODE" = "dry" ]; then
-            npm publish --dry-run
+            npm pack --dry-run
           else
-            npm publish --provenance
+            npm publish --provenance || {
+              echo "::notice::direct publish refused (staged-only trusted publisher)"
+              npm stage publish . --provenance
+              echo "::notice::staged publish created — owner approves with: npm stage approve <stage-id> (see npm stage list)"
+            }
           fi
