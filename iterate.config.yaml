@@ -1,0 +1,166 @@
+# GlassPane 项目级 iterate 配置（覆盖 skill 默认值 / overrides master config）
+# 生成：2026-09-22 AI onboarding（基线 origin/main，gate 命令镜像 .github/workflows/ci.yml）
+
+goal: "全面审查并迭代本项目目前所有代码实现（已提交状态，6 维 × 3 轮，收敛 0 finding）"
+
+max_rounds: 3
+language: zh
+mode: iterate
+
+# 本轮启用维度（用户选定：核心 6 维；performance / style-tests / ui-ux 留下一轮）
+dimensions:
+  - correctness
+  - security
+  - architecture
+  - spec-compliance
+  - frontend-backend
+  - tech-debt
+
+review:
+  scope: full
+
+atomic:
+  max_lines: 20
+  max_adjacent_methods: 3
+
+git:
+  target_branch: main
+  use_worktree: true
+  push_per_round: false
+  auto_merge: false
+
+validation:
+  command_whitelist:
+    - "swift"
+    - "npm"
+    - "python3"
+    - "pytest"
+  # 唯一运行时权威：只在下列模块的精确命令中执行。
+  # 工作目录约定见 ITERATE.md §3（engine 类命令在 engine/ 下跑，probe 在 engine/probe/ 下跑，以此类推）。
+  commands:
+    engine:
+      - "swift build"
+      - "swift test"
+    engine-probe:
+      - "swift test"
+    engine-signal-smoke:
+      - "python3 .signal_smoke.py .build/debug/glasspaned"
+    bridge:
+      - "python3 -m pytest -q"
+    kernel:
+      - "npm test"
+    mcp-shell:
+      - "npm test"
+    installer:
+      - "npm test"
+    root:
+      - "npm run build"
+      - "npm run test --workspaces --if-present"
+
+invariants:
+  ensure:
+    - "README.md"
+    - "LICENSE"
+    - "specs"
+    - "kernel/schemas/evidence-pack.schema.json"
+  commands:
+    engine:
+      - "swift build"
+      - "swift test"
+    bridge:
+      - "python3 -m pytest -q"
+    kernel:
+      - "npm test"
+    mcp-shell:
+      - "npm test"
+
+reviewer:
+  output_schema_validation: true
+  evidence_validation: true
+  coverage_validation: true
+  scope_chunk_size: 25
+
+onboarding:
+  version: "1.0"
+  completed_at: "2026-09-22T21:20:00+08:00"
+  channel: "ai"
+  drift_check: true
+  drift_ignore:
+    - "package-lock.json"
+    - "kernel/package-lock.json"
+    - "mcp-shell/package-lock.json"
+  fingerprints:
+    - path: "package.json"
+      sha256: "f767ed21731facf65ec06f90a726f4ae5bcba32a9fe949f818de7738cd3a4003"
+    - path: "engine/Package.swift"
+      sha256: "0cd2c203c4e654bc6f151b79518d865ac9f03d45558eba6ef103428e9c94854c"
+    - path: "kernel/package.json"
+      sha256: "ec60190f89d59248308d470cb76b996ea1ee1a8dcb9cb92573709c797a1ca0ba"
+    - path: "mcp-shell/package.json"
+      sha256: "a994cd2931286fa18fbd932350253951955d5e617d132a7fe81a00c59e31cb40"
+    - path: "installer/package.json"
+      sha256: "61ed367694f951ec8702bf3c389e8c8884104b97ab201c48556b1eecc432cd9b"
+
+personalization:
+  version: "1.0"
+
+  # 禁区：契约真源与法律文件，本轮只报不改
+  protected_paths:
+    - "LICENSE"
+    - "kernel/schemas/**"
+
+  # 风险区：另一会话正在改的面上（2026-09-22 21:00–21:16 的 8 笔提交足迹），改动需与用户合流
+  risk_areas:
+    - path: "installer/"
+      reason: "并行会话刚改过 cli.js/package.json/test（v1.1.0 统一版本线），此处改动合并冲突概率高"
+    - path: "install.sh"
+      reason: "同上（发布 tag 钉版 + npx 自举兑现）"
+    - path: ".github/"
+      reason: "并行会话刚改过 ci.yml/release.yml"
+    - path: "README.md"
+      reason: "并行会话刚重写为英文主入口 + zh-CN 镜像"
+
+  # 已知意图（抑制误报）
+  known_intentional:
+    - file: "engine/Sources/GlassPaneEngine/ApprovalGate.swift"
+      line: 0
+      dimension: "correctness"
+      reason: "方法表冻结导致无人类审批入口，daemon:auto 自批是既成规格决定（结构性缺口 B1，需规格级决策）"
+    - file: "spike/"
+      line: 0
+      dimension: "tech-debt"
+      reason: "一次性实验脚本，非交付面，不计技术债"
+    - file: "engine/Sources/GlassPaneEngine/EvidenceStore.swift"
+      line: 0
+      dimension: "performance"
+      reason: "每次 write 全量列目录属已知 B-18，性能维度本轮未启用，不重复报"
+
+  dimension_focus:
+    - dimension: "correctness"
+      focus: "优先「未测量即上报」类诚实性破口：try? 吞错后仍给结论、硬编码布尔、超时当负例、并发读写裸 var、fd/编号复用后写错对象"
+    - dimension: "security"
+      focus: "路径参数是否可被 agent 控成任意目录（写入/删除）、拼进 shell 脚本的字符串是否转义、socket 单实例与 unlink+bind 竞态、损坏文件是否被降级成空表后覆写"
+    - dimension: "spec-compliance"
+      focus: "对照 specs/GlassPane_P0…P6 中文规格逐条核：协议方法表、§11.7 可核验化、§6.5 冻结面、P5 证据/回滚口径、P4 发布形态"
+    - dimension: "frontend-backend"
+      focus: "mcp-shell(TS) ↔ engine(Swift daemon) 契约一致性：错误码/字段/校验强度双侧是否等价，evidence schema 读侧 legacy 是否两侧放行一致"
+    - dimension: "architecture"
+      focus: "同一判据/同一路径在 daemon、一次性 CLI、面板三处各写一份的漂移；纯函数是否被测试绕过而生产不可达；新增呈现逻辑是否下沉到 engine 库"
+    - dimension: "tech-debt"
+      focus: "注释自称的行为与代码实际不符（撒谎的注释）、开关无触发路径（fail-closed 死功能）、bundle 产物非幂等、被规格淘汰但仍被引用的不变量"
+
+  fix_priority_order:
+    - security
+    - correctness
+    - spec-compliance
+    - frontend-backend
+    - architecture
+    - tech-debt
+
+  forbidden_fixes:
+    - "try? / catch 吞错式修复（用 nil 或默认值掩盖失败）"
+    - "// @ts-ignore / as any 绕过类型"
+    - "# noqa / type: ignore 绕过 Python 检查"
+    - "把断言改成迁就现有实现而不标注意图"
+    - "为通过 gate 而放宽/删除既有测试"
+    - "在面板文案里写 §规格引用或实现自辩话术"
