@@ -83,13 +83,16 @@ jobs:
           NOTES="Release ${VERSION}. Source archive checksum: see \`SHA256SUMS-${VERSION}.txt\`."
           NOTES="$NOTES"$'\n\n'"Install (one command, clones this tag): \`curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh | sh\`"
           NOTES="$NOTES"$'\n\n'"See [CHANGELOG.md](https://github.com/jingzhao-l/GlassPane/blob/${REF_NAME}/CHANGELOG.md) for what changed."
+          # target 显式钉在被 checkout 的 commit 上：gh 默认会写成分支名，
+          # 那样 Release 的 target 就与 tag 内容脱钩，可复现性锚点只剩资产本身。
+          TARGET_SHA=$(git rev-parse HEAD)
           if gh release view "$REF_NAME" >/dev/null 2>&1; then
             gh release upload "$REF_NAME" "GlassPane-${VERSION}.tar.gz" "SHA256SUMS-${VERSION}.txt" --clobber
-            gh release edit "$REF_NAME" --notes "$NOTES"
+            gh release edit "$REF_NAME" --notes "$NOTES" --target "$TARGET_SHA"
           else
             gh release create "$REF_NAME" \
               "GlassPane-${VERSION}.tar.gz" "SHA256SUMS-${VERSION}.txt" \
-              --title "GlassPane ${VERSION}" --notes "$NOTES"
+              --title "GlassPane ${VERSION}" --notes "$NOTES" --target "$TARGET_SHA"
           fi
 
   npm-publish:
