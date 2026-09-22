@@ -5,14 +5,18 @@ import Foundation
 /// Deterministic human-readable renderer for `EvidencePack` (综述 §5.14 /
 /// PRD US-10 evidence 审查 UX). Pure functions: the same pack in, the same
 /// string out — no timestamps are synthesized (capturedAt is echoed as-is),
-/// no randomness, no state. All pack-owned values are rendered verbatim;
-/// missing optional fields degrade to the "—" placeholder instead of
-/// throwing (spec v1.3 §10.5 缺省安全性).
+/// no randomness, no state. All pack-owned values are rendered verbatim; an
+/// absent optional field renders as the "—" placeholder, a channel that was
+/// never measured as a named "not measured" line (spec v1.3 §10.2 缺省安全性,
+/// §13.1 如实声明).
 ///
-/// The mcp-shell side keeps a type-mirrored implementation
-/// (`mcp-shell/src/evidence-report.ts`) with the same structural contract;
-/// both are tested against the same golden expectations (spec v1.3 §12.1)
-/// so a future change must be applied to both sides in the same commit.
+/// The mcp-shell type mirror (`mcp-shell/src/evidence-report.ts`) is checked
+/// by a real shared golden, not by this comment: `kernel/fixtures/
+/// report.ok-01.md` / `.html` hold the byte-exact output for the pack both
+/// suites call `goldenPack()` (`evidence-pack.ok-03.json` plus the overrides
+/// that helper names). `EngineP1Batch4Tests` compares this renderer against
+/// those files, `test/evidence-report.test.mjs` the TS one, so a one-sided
+/// change fails a golden (spec v1.3 §12 P1-D1, §13.5 双语言渲染镜像防漂移).
 public enum EvidenceReportGenerator {
 
     /// `operationId · measure · level`, the one-line audit title. `measure`
@@ -24,8 +28,10 @@ public enum EvidenceReportGenerator {
         return "\(pack.operationId) · \(measure) · \(level)"
     }
 
-    /// Attribution / contamination / circuit-breaker / signal summary lines.
-    /// Shared verbatim by the HTML and Markdown views so the two can't drift.
+    /// Attribution / contamination / circuit-breaker / signal summary lines,
+    /// in the order attribution, breaker, assertion, act, axEvent,
+    /// handlerProbe, stateDiff, pixelDiff, responsiveness, crash. Shared
+    /// verbatim by both views here, and line-for-line by the TS mirror.
     public static func evidenceSummaryLines(pack: EvidencePack) -> [String] {
         var lines: [String] = []
         lines.append(
@@ -49,6 +55,20 @@ public enum EvidenceReportGenerator {
             lines.append(
                 "axEvent: changed=\(axEvent.axChanged) nodes=\(axEvent.nodeCount) latencyMs=\(doubleText(axEvent.latencyMs))"
             )
+        }
+        // P6 §3.1 promotes both probe channels to first-class signals, and
+        // T4/T5/T7/T8 rest on them: a report that stops at the black-box
+        // signals cannot justify `attribution: strong`. A null channel renders
+        // a "not measured" line, never a gap that reads as "nothing happened".
+        if let handlerProbe = pack.signals.handlerProbe {
+            lines.append(handlerProbeText(handlerProbe))
+        } else {
+            lines.append(handlerProbeNotMeasured)
+        }
+        if let stateDiff = pack.signals.stateDiff {
+            lines.append(stateDiffText(stateDiff))
+        } else {
+            lines.append(stateDiffNotMeasured)
         }
         if let pixelDiff = pack.signals.pixelDiff {
             var line = "pixelDiff: changedRatio=\(doubleText(pixelDiff.changedPixelRatio)) windowId=\(pixelDiff.windowId)"
@@ -92,7 +112,7 @@ public enum EvidenceReportGenerator {
 
     /// Full HTML view: `<div id="<operationId>">` anchor, summary `<dl>`,
     /// and the four diagnosis `<section>`s. All values HTML-escaped (spec
-    /// v1.3 §10.5, no injection); no script is emitted.
+    /// v1.3 §13.4, the five-character escape set); no script is emitted.
     public static func renderHTML(pack: EvidencePack, diagnostics: String?) -> String {
         var out: [String] = []
         out.append("<div class=\"gp-evidence\" id=\"\(escapeHTML(pack.operationId))\">")
@@ -137,38 +157,80 @@ public enum EvidenceReportGenerator {
 
     private static let placeholder = "—"
 
-    /// The four diagnosis sections (PATH/ANOMALY/EVIDENCE/NEXT, FR-04).
-    /// Source of truth is `pack.diagnosis?.report`; when the pack has no
-    /// embedded diagnosis, a caller-supplied `diagnostics` string is shown
-    /// in the EVIDENCE section as a preformatted block (honest fallback),
-    /// and every other section degrades to the "—" placeholder.
+    /// Two absences a reader must be able to tell apart (spec v1.3 §13.1
+    /// 如实声明): an empty section of a diagnosis that ran keeps the `—`
+    /// placeholder of §10.2; a pack that carries no diagnosis at all says so
+    /// and names the tool — `gp_export_evidence` only fetches evidence, so
+    /// `act → export` lands here, and four bare `—` read as a clean run.
+    private static let noDiagnosisText =
+        "— (no diagnosis recorded: this pack carries none; run gp_diagnose for this operationId, then gp_export_evidence again)"
+
+    /// Null probe channels: named absence, not silence (P6 §3.1).
+    private static let handlerProbeNotMeasured =
+        "handlerProbe: not measured (no probe connection served this act window)"
+    private static let stateDiffNotMeasured =
+        "stateDiff: not measured (the probe reported no state channel)"
+
+    /// Render caps: a pack may legally carry 32 handlers / 64 state entries.
+    private static let maxHandlersShown = 8
+    private static let maxEntriesShown = 8
+
+    /// The four diagnosis sections (PATH/ANOMALY/EVIDENCE/NEXT, FR-04) come
+    /// from `pack.diagnosis?.report`; a caller-supplied `diagnostics` string
+    /// is the preformatted EVIDENCE fallback when the report is absent
+    /// (§10.2 设计缺口补述 2).
     private static func sections(pack: EvidencePack, diagnostics: String?) -> [ReportSection] {
         let report = pack.diagnosis?.report
-        let hasDiagnosticsText = !(diagnostics ?? "").isEmpty
-
-        let path = report?.path.nonEmpty ?? placeholder
-        let anomaly = report?.anomaly.nonEmpty ?? placeholder
-        let next = report?.next.nonEmpty ?? placeholder
+        let absent = pack.diagnosis == nil ? noDiagnosisText : placeholder
 
         let evidence: String
         let evidencePreformatted: Bool
         if let reportEvidence = report?.evidence.nonEmpty {
             evidence = reportEvidence
             evidencePreformatted = false
-        } else if hasDiagnosticsText, let diagnostics {
+        } else if let diagnostics, !diagnostics.isEmpty {
             evidence = diagnostics
             evidencePreformatted = true
         } else {
-            evidence = placeholder
+            evidence = absent
             evidencePreformatted = false
         }
 
         return [
-            ReportSection(title: "PATH", body: path),
-            ReportSection(title: "ANOMALY", body: anomaly),
+            ReportSection(title: "PATH", body: report?.path.nonEmpty ?? absent),
+            ReportSection(title: "ANOMALY", body: report?.anomaly.nonEmpty ?? absent),
             ReportSection(title: "EVIDENCE", body: evidence, preformatted: evidencePreformatted),
-            ReportSection(title: "NEXT", body: next),
+            ReportSection(title: "NEXT", body: report?.next.nonEmpty ?? absent),
         ]
+    }
+
+    /// Mirrors the Classifier's own channel wording (`handlerProbe hitCount=N
+    /// late=M [file:line, …]`, empty list reading "no localized hits") so the
+    /// two views of one pack cannot describe the probe differently.
+    private static func handlerProbeText(_ handlerProbe: HandlerProbeSignal) -> String {
+        var refs = handlerProbe.handlers.prefix(maxHandlersShown).map { "\($0.file):\($0.line)" }
+        let hidden = handlerProbe.handlers.count - refs.count
+        if hidden > 0 {
+            refs.append("+\(hidden) more")
+        }
+        let list = refs.isEmpty ? "no localized hits" : refs.joined(separator: ", ")
+        return "handlerProbe: probeVersion=\(handlerProbe.probeVersion)"
+            + " hitCount=\(handlerProbe.hitCount) late=\(handlerProbe.lateCount) handlers=[\(list)]"
+    }
+
+    /// The state channel in the same shape, with `key "before" -> "after"`
+    /// entries bounded to `maxEntriesShown` and the elided count spelled out.
+    private static func stateDiffText(_ stateDiff: StateDiffSignal) -> String {
+        var rendered = stateDiff.entries.prefix(maxEntriesShown).map {
+            "\($0.key) \"\($0.before)\" -> \"\($0.after)\""
+        }
+        let hidden = stateDiff.entries.count - rendered.count
+        if hidden > 0 {
+            rendered.append("+\(hidden) more")
+        }
+        let list = rendered.isEmpty ? "no key changes" : rendered.joined(separator: ", ")
+        return "stateDiff: source=\(stateDiff.source.rawValue)"
+            + " changed=\(stateDiff.changed) entries=[\(list)]"
     }
 
     private static func measureLabel(_ pack: EvidencePack) -> String {
@@ -208,13 +270,16 @@ public enum EvidenceReportGenerator {
         }
     }
 
-    /// IEEE doubles rendered without a spurious ".0" (9 → "9", 0.25 → "0.25"),
-    /// keeping the two-language mirrors byte-compatible for golden tests.
+    /// The number rule both languages share: `%g` with its default six
+    /// significant digits (spec v1.3 §10.2), so 9 → "9", 0.25 → "0.25",
+    /// 1234.5678 → "1234.57", 1234567 → "1.23457e+06". The TS mirror
+    /// re-implements this rule rather than `String(n)`, which keeps up to 17
+    /// digits and would print "1234.5678" where the panel prints "1234.57".
     private static func doubleText(_ value: Double) -> String {
         String(format: "%g", value)
     }
 
-    /// HTML-escapes every value that crosses into a report (spec v1.3 §10.5).
+    /// HTML-escapes every value that crosses into a report (spec v1.3 §13.4).
     private static func escapeHTML(_ value: String) -> String {
         var out = ""
         out.reserveCapacity(value.unicodeScalars.count)

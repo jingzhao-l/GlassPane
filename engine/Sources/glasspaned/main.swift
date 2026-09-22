@@ -25,6 +25,7 @@ private struct Options {
     var permissionsJSON = false
     var requestPermission: PermissionKind?
     var forceSocket = false
+    var forceProbeSocket = false
     var listProjects = false
     var activeProjectId: String?
     var recipeValidate: String?
@@ -93,6 +94,8 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             options.probeSocketPath = arguments[index]
         case "--force-socket":
             options.forceSocket = true
+        case "--force-probe-socket":
+            options.forceProbeSocket = true
         case "--list-projects":
             options.listProjects = true
         case "--active-project":
@@ -206,10 +209,20 @@ private func printUsage() {
         --no-probe           Disable the P6 probe socket (Z5 black-box only;
                                  handlerProbe/stateDiff signals stay null)
         --probe-socket-path <path>  Probe listener path (default ~/.glasspane/probe.sock)
-        --force-socket       Take over the socket even when a live daemon is
-                                 already serving it (default: refuse and exit 65)
+        --force-socket       Take over the engine socket even when a live daemon
+                                 is already serving it (default: refuse and exit 65)
+        --force-probe-socket Take over probe.sock even when another listener owns
+                                 it (default: start without a probe listener and
+                                 keep the Z5 black-box form; the probe listener
+                                 never answers hello, so "a connection can be
+                                 established" is how its owner is detected)
         --list-projects        List all registered projects (JSON) and exit
-        --active-project <id>  Set the active project ID and exit
+        --active-project <id>  Report whether <id> is a registered project (JSON)
+                                 and exit. **This command changes nothing**: the
+                                 registry has no active-project field and no
+                                 protocol method accepts one, so the payload says
+                                 stateChanged=false. To make a project active,
+                                 call gp_attach with its projectId.
         --recipe-validate <path>  Validate a recipe YAML file and exit
         --approval-audit        Dump the approval ledger (JSON array) and exit
         --approval-verify       Verify the approval hash chain and exit
@@ -246,12 +259,13 @@ private func permissionSnapshotJSON(_ snapshot: DaemonPermissionSnapshot) -> [St
     return ["subject": subject, "permissions": snapshot.permissionsWire]
 }
 
-private func writeJSON(_ object: [String: Any]) {
-    guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
-          let text = String(data: data, encoding: .utf8) else {
-        return
-    }
-    FileHandle.standardOutput.write(Data((text + "\n").utf8))
+/// CLI 的机器可读出口：任何一行都经过 JSON 转义（R5-03）。历史上这几处是字符串
+/// 插值拼 JSON / 直接原文打印，把 agent 自撰的 `displayName` 与路径原样送上终端
+/// （OSC-52 复制序列、ANSI 光标移动都可执行）。转义口径与 `--list-projects` 的
+/// JSONEncoder 一致：<0x20 控制字符、引号、反斜杠一律转义，斜杠不转义。
+private func writeJSON(_ object: [String: Any], to handle: FileHandle = .standardOutput) {
+    guard let line = AgentText.jsonLine(object) else { return }
+    handle.write(Data(line.utf8))
 }
 
 // MARK: - Onboarding (R36: permission guidance)
@@ -425,10 +439,7 @@ if options.checkDeveloperTools {
     // 勾选系统面板，检测/复验/机器消费全部由此命令承担。
     let probe = DebugCapabilityProbe()
     let payload = probe.jsonPayload()
-    if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) {
-        FileHandle.standardOutput.write(data)
-        FileHandle.standardOutput.write(Data("\n".utf8))
-    }
+    writeJSON(payload)
     exit((payload["granted"] as? Bool) == true ? 0 : 1)
 }
 if options.checkInputPermission {
@@ -479,30 +490,53 @@ if options.listProjects {
 
 if let activeId = options.activeProjectId {
     let registry = ProjectRegistry()
-    if let entry = registry.get(activeId) {
-        FileHandle.standardOutput.write(
-            Data("active project: \(entry.projectId) (\(entry.displayName))\n".utf8)
-        )
-    } else {
-        FileHandle.standardError.write(
-            Data("error: unknown project \(activeId)\n".utf8)
-        )
+    // R2-16 / R6-06：这条命令从来没有写过任何状态——ProjectRegistry 没有 active
+    // 字段，冻结的协议方法表里也没有"设置活跃项目"的方法。旧输出把 projectId 与
+    // displayName 原文拼成一行确认 + 退出码 0，读起来像一次成功的状态变更（P6 §11
+    // 专门审过的幻影控制形状），所以这里如实输出**核验报告**并显式
+    // stateChanged=false；displayName 是 agent 自撰内容，只能经 JSON 转义出口离开
+    // 进程（R5-03）。
+    guard let entry = registry.get(activeId) else {
+        writeJSON([
+            "command": "--active-project",
+            "found": false,
+            "stateChanged": false,
+            "projectId": activeId,
+            "registryPath": registry.filePath,
+            "error": "no project \(activeId) is registered",
+            "next": "glasspaned --list-projects"
+        ], to: .standardError)
         exit(1)
     }
+    writeJSON([
+        "command": "--active-project",
+        "found": true,
+        "stateChanged": false,
+        "projectId": entry.projectId,
+        "displayName": entry.displayName,
+        "bundleId": entry.bundleId ?? NSNull(),
+        "evidenceStoragePath": entry.evidenceStoragePath ?? NSNull(),
+        "registryPath": registry.filePath,
+        "note": "this command only verified that the projectId is registered; glasspaned keeps no active-project state, so nothing was selected or written. To archive subsequent operations under this project, call attach/gp_attach with projectId=\(entry.projectId)."
+    ])
     exit(0)
 }
 
 if let recipePath = options.recipeValidate {
     let fm = FileManager.default
     guard fm.fileExists(atPath: recipePath) else {
-        FileHandle.standardError.write(
-            Data("{\"valid\":false,\"errors\":[\"file not found: \(recipePath)\"]}\n".utf8)
+        // 手拼 JSON 的旧形状会把未转义的路径直接吐出去，口径改走同一转义出口
+        // （R5-03）；{"valid":…,"errors":[…]} 的对外形状与退出码不变。
+        writeJSON(
+            ["valid": false, "errors": ["file not found: \(recipePath)"], "path": recipePath],
+            to: .standardError
         )
         exit(2)
     }
     guard let data = fm.contents(atPath: recipePath) else {
-        FileHandle.standardError.write(
-            Data("{\"valid\":false,\"errors\":[\"cannot read: \(recipePath)\"]}\n".utf8)
+        writeJSON(
+            ["valid": false, "errors": ["cannot read: \(recipePath)"], "path": recipePath],
+            to: .standardError
         )
         exit(2)
     }
@@ -528,12 +562,7 @@ if options.approvalAudit || options.approvalVerify {
             "firstBrokenIndex": verdict.firstBrokenIndex.map { $0 as Any } ?? NSNull(),
             "loadFailed": gate.loadFailed
         ]
-        if let data = try? JSONSerialization.data(
-            withJSONObject: payload, options: [.sortedKeys]
-        ) {
-            FileHandle.standardOutput.write(data)
-            FileHandle.standardOutput.write(Data("\n".utf8))
-        }
+        writeJSON(payload)
         let ok = verdict.valid && !gate.loadFailed
         if !ok && gate.loadFailed {
             FileHandle.standardError.write(
@@ -566,8 +595,14 @@ if options.pruneEvidence || options.evidenceStats {
     if let projectId = options.maintenanceProjectId {
         let registry = ProjectRegistry()
         guard let entry = registry.get(projectId) else {
-            FileHandle.standardError.write(
-                Data("{\"error\": \"unknown project \(projectId)\"}\n".utf8)
+            writeJSON(
+                [
+                    "error": "unknown project \(projectId)",
+                    "project": projectId,
+                    "stateChanged": false,
+                    "next": "glasspaned --list-projects"
+                ],
+                to: .standardError
             )
             exit(1)
         }
@@ -588,12 +623,7 @@ if options.pruneEvidence || options.evidenceStats {
             "project": options.maintenanceProjectId ?? NSNull(),
             "dir": dir
         ]
-        if let data = try? JSONSerialization.data(
-            withJSONObject: payload, options: [.sortedKeys]
-        ) {
-            FileHandle.standardOutput.write(data)
-            FileHandle.standardOutput.write(Data("\n".utf8))
-        }
+        writeJSON(payload)
         exit(0)
     }
     if options.evidenceStats {
@@ -604,41 +634,76 @@ if options.pruneEvidence || options.evidenceStats {
             "project": options.maintenanceProjectId ?? NSNull(),
             "dir": dir
         ]
-        if let data = try? JSONSerialization.data(
-            withJSONObject: payload, options: [.sortedKeys]
-        ) {
-            FileHandle.standardOutput.write(data)
-            FileHandle.standardOutput.write(Data("\n".utf8))
-        }
+        writeJSON(payload)
         exit(0)
     }
 }
 
 let socketPath = options.socketPath ?? defaultSocketPath()
+let probeSocketPath = options.probeSocketPath
+    ?? NSHomeDirectory() + "/.glasspane/probe.sock"
 let log = EngineLog(quiet: !options.verbose)
-// 遮罩点必须早于本文件后续创建的任何线程（C33 runloop、probe accept、
-// per-client、GCD worker）——线程继承创建者的信号遮罩，这是 sigwait
-// 送达确定性的前提。--check-*/--grant-* 等即时 CLI 路径在此之前已 exit，
-// Ctrl-C 语义不受影响。
-blockShutdownSignalsEarly()
 
-// 单实例护栏（P1 v1.2 §11.1）：socket 已由活着的 daemon 在服务时拒绝启动。
-// 绑定的 unlink+bind 语义会抢占文件，留下一个"没人连得到"的孤儿实例——而
-// TCC 授权条目按进程身份记账，多实例并存时用户在系统设置里看到的条目与真正
-// 服务请求的实例可能对不上，这正是本次修的坑。`--force-socket` 显式抢占，
-// `--socket-path` 起并行实例（不同 socket 即不同主体）。
-if !options.forceSocket {
-    if let incumbent = DaemonProbe().helloSummary(socketPath: socketPath) {
-        let message = """
-        glasspaned: a daemon is already serving \(socketPath) (pid \(incumbent.pid), version \(incumbent.version)).
-          - attach to it instead of starting a second instance, or
-          - use --socket-path <other> for a parallel instance, or
-          - use --force-socket to take over this socket (the old instance keeps running but loses the socket).
-        """
-        FileHandle.standardError.write(Data((message + "\n").utf8))
-        exit(65)
+// 单实例护栏（P1 v1.2 §11.1 + R2-02/A-18）：判定必须三态分开——「回了 hello」
+// 「名字后面没有监听者（残留文件）」「有监听者但不开口」。旧实现用 helloSummary，
+// 把后两种连同「3s 没回音」一起当成"没有 daemon"，随后无条件 unlink+bind，负载下
+// 直接覆盖一个只是暂时没回话的活实例，留下没人连得上的孤儿；TCC 席位按进程身份
+// 记账，用户在系统设置里看到的条目与真正服务请求的实例就可能对不上。
+// `--force-socket` 才是显式抢占，`--socket-path` 起并行实例（不同 socket 即不同主体）。
+//
+// R5-07：护栏**必须在 `blockShutdownSignalsEarly()` 之前**跑完。旧顺序是先装遮罩再
+// 护栏、而 sigwait 线程要到 `startShutdownWaiter` 才存在——那段窗口里 SIGTERM/SIGINT
+// 被屏蔽却无人消费，配上无界的 DaemonProbe 读环就成了不可杀的启动。此刻信号还是
+// 默认处置，Ctrl-C / kill 立刻生效；探测本身也已换成绝对时限 + 字节上限的有界会话。
+let socketProbe = DaemonProbe()
+let engineLiveness = socketProbe.liveness(socketPath: socketPath)
+switch DaemonProbe.takeoverDecision(engineLiveness, force: options.forceSocket) {
+case .refuse(let incumbent):
+    let message = """
+    glasspaned: \(socketPath) is already owned (\(incumbent)).
+      - attach to that instance instead of starting a second one, or
+      - use --socket-path <other> for a parallel instance, or
+      - use --force-socket to take this name over (the old instance keeps running but loses the socket).
+    """
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+    exit(65)
+case .preempt(let incumbent):
+    log.error("--force-socket: taking \(socketPath) over from \(incumbent); the previous instance keeps running but loses the socket")
+case .bind:
+    if case .noListener(let reason) = engineLiveness {
+        log.info("nothing listens on \(socketPath) (\(reason)) — binding it")
     }
 }
+
+// A-18：engine.sock 有 §11.1 护栏，probe.sock 过去**一个都没有**——第二个 daemon
+// 静默 unlink+bind 抢走探针名字，旧实例继续服务 engine.sock，归因面就此裂到两个进程
+// 上（探针事件进 B、操作与证据记在 A）。探针监听者按协议永不回 hello，所以"连接能不
+// 能建立"才是它的存活判据（waitForHello: false，不白等 3s）。默认行为不变：名字有主
+// 就少开一个监听者并如实报降级，而不是抢；抢占要显式 --force-probe-socket。
+// 判定必须在遮罩之前（同上），真正 start() 在遮罩之后——accept 线程要继承遮罩。
+var probeListenerAllowed = options.probeEnabled
+if options.probeEnabled {
+    let probeLiveness = socketProbe.liveness(socketPath: probeSocketPath, waitForHello: false)
+    switch DaemonProbe.takeoverDecision(probeLiveness, force: options.forceProbeSocket) {
+    case .refuse(let incumbent):
+        probeListenerAllowed = false
+        // 不经 EngineLog（quiet 模式会被吞）：静默少一个监听者正是 A-18 要消灭的形状。
+        FileHandle.standardError.write(Data(("""
+        glasspaned: probe name \(probeSocketPath) is already owned (\(incumbent)).
+          Starting WITHOUT a probe listener: Z5 black-box only, handlerProbe/stateDiff stay null.
+          - use --force-probe-socket to take the name over, or
+          - use --probe-socket-path <other> for this instance's own listener.
+        """ + "\n").utf8))
+    case .preempt(let incumbent):
+        log.error("--force-probe-socket: taking \(probeSocketPath) over from \(incumbent); the previous listener keeps its engine.sock but loses the probe stream.")
+    case .bind:
+        break
+    }
+}
+// 遮罩点必须早于本文件后续创建的任何线程（C33 runloop、probe accept、per-client、
+// GCD worker）——线程继承创建者的信号遮罩，这是 sigwait 送达确定性的前提。
+// 它也必须晚于上面两条护栏（见上），否则屏蔽期内无人消费信号 = 不可杀。
+blockShutdownSignalsEarly()
 let channel = AXChannel()
 // T9 progressive degradation is on by default: it needs no TCC permission
 // (proc_pidinfo is same-user process inspection). C33 is injected by default
@@ -663,17 +728,28 @@ if options.c33Enabled {
 // form (handlerProbe/stateDiff null). --no-probe skips the listener entirely.
 var probeInbox: ProbeInbox?
 var probeServer: ProbeSocketServer?
-if options.probeEnabled {
-    let probeSocketPath = options.probeSocketPath
-        ?? NSHomeDirectory() + "/.glasspane/probe.sock"
+if options.probeEnabled, probeListenerAllowed {
     let inbox = ProbeInbox()
-    let server = ProbeSocketServer(socketPath: probeSocketPath, inbox: inbox, log: log)
+    let server = ProbeSocketServer(
+        socketPath: probeSocketPath,
+        inbox: inbox,
+        log: log,
+        preemptsExistingSocket: options.forceProbeSocket
+    )
     do {
         try server.start()
         probeInbox = inbox
         probeServer = server
     } catch {
+        // start() 自带同一套 bind→三态判定→只清无主名字的纪律（A-18），护栏到这里
+        // 之间若被别的实例抢了名字，它会拒绝并如实抛 nameOccupied；其余是
+        // bind/chmod/listen 一类 errno。降级口径不变：Z5 黑箱继续。
+        // 与上面护栏同一诚实口径：不经 EngineLog（quiet 会把"少一个监听者"整个
+        // 吞掉，而那正是 A-18 要消灭的形状）。
         log.error("probe socket unavailable (\(error)) — continuing Z5-only, signals stay null")
+        FileHandle.standardError.write(Data(
+            "glasspaned: probe socket unavailable (\(error)) — this instance stays Z5-only; handlerProbe/stateDiff stay null\n".utf8
+        ))
     }
 } else {
     log.info("probe listener disabled via --no-probe (Z5 black-box only)")
@@ -689,7 +765,13 @@ let core = EngineCore(
     permissionsReport: { permissionProbes.snapshot() }
 )
 let dispatcher = Dispatcher(core: core, log: log)
-let server = SocketServer(socketPath: socketPath, dispatcher: dispatcher, log: log)
+let server = SocketServer(
+    socketPath: socketPath,
+    dispatcher: dispatcher,
+    log: log,
+    preemptsExistingSocket: options.forceSocket
+)
+// 遮罩已装、所有会创建线程的初始化都已完成，此刻起信号只会被这里消费。
 startShutdownWaiter(socketPaths: [server.socketPath] + (probeServer.map { [$0.socketPath] } ?? []))
 
 FileHandle.standardOutput.write(

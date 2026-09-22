@@ -7,12 +7,16 @@ probe-demo control app, then asserts the full probe surface:
   1. probe_status: hello registration, capabilities, attachedHasProbe
   2. five canaries: NO_ANOMALY/strong, T4, T5, T7, T8, T3 — each detected once
   3. tier-1 checkpoint: snapshot carries a real gpz1 payload; rollback_full
-     executes through the probe (rollbackExecuted=true, consistent=true)
+     executes through the probe (rollbackExecuted=true, consistent=true) and
+     the count-marker-row structurally returns to the snapshot value (0).
 
 Usage: python3 .p6_smoke.py [daemon-bin] [demo-bin]
-  daemon-bin default /tmp/glasspane-p6/engine/.build/debug/glasspaned
-  demo-bin   default .build/debug/probe-demo (this repo's probe package)
-Exit codes: 0 = PASS (or SKIP when preconditions absent), 1 = FAIL.
+  daemon-bin 定位顺序：argv > env GLASSPANE_DAEMON_BIN > 仓库相对
+             .build/{debug,release}/glasspaned > 历史 /tmp 默认值
+  demo-bin   定位顺序：argv > env GLASSPANE_DEMO_BIN > probe/.build/{debug,release}
+             >/Volumes/Eng-Dev/GlassPane/engine/probe/.build/debug/probe-demo
+Exit codes: 0 = PASS（全部断言真实执行）, 1 = FAIL,
+  2 = NOT RUN（前置二进制缺失，一条断言都没跑——NOT RUN 绝不等于通过）。
 """
 
 import json
@@ -23,11 +27,34 @@ import tempfile
 import time
 import uuid
 
-DEFAULT_DAEMON = "/tmp/glasspane-p6/engine/.build/debug/glasspaned"
-DEFAULT_DEMO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "probe", ".build", "debug", "probe-demo")
-REPO_ENGINE = "/Volumes/Eng-Dev/GlassPane/engine/probe/.build/debug/probe-demo"
+HERE = os.path.dirname(os.path.abspath(__file__))
+# 二进制定位：优先脚本自身的仓库相对构建产物（worktree 里 swift build 即可产出，
+# AI agent 可执行），机器特定的历史默认值只作最后兜底——缺失即 NOT RUN，不猜。
+DAEMON_CANDIDATES = [
+    os.path.join(HERE, ".build", "debug", "glasspaned"),
+    os.path.join(HERE, ".build", "release", "glasspaned"),
+    "/tmp/glasspane-p6/engine/.build/debug/glasspaned",
+]
+DEMO_CANDIDATES = [
+    os.path.join(HERE, "probe", ".build", "debug", "probe-demo"),
+    os.path.join(HERE, "probe", ".build", "release", "probe-demo"),
+    "/Volumes/Eng-Dev/GlassPane/engine/probe/.build/debug/probe-demo",
+]
 
 PASS = []
+
+
+def resolve_binary(explicit, env_var, candidates):
+    """argv > env > first existing candidate > last candidate（仅用于报错展示）。"""
+    if explicit:
+        return explicit
+    from_env = os.environ.get(env_var)
+    if from_env:
+        return from_env
+    for cand in candidates:
+        if os.path.exists(cand):
+            return cand
+    return candidates[-1]
 
 
 def check(label, condition, detail=""):
@@ -112,6 +139,29 @@ def evidence_of(client, operation_id):
     return frame.get("evidencePack", frame)
 
 
+def marker_nodes(client):
+    """count 驱动的可见结构节点数（probe-demo 的 count-marker-row 行数）。
+
+    observe 方法表冻结在 role/title/identifier（P0 §3，真机观察 13：SwiftUI Text
+    文案在 AXValue 通道，daemon 不序列化），"count: N" 字符串读不到，而
+    count-label 又无条件在场——它的存在不随恢复值变化，不构成 UI 佐证。
+    demo 为此把 count 具象成 Image 行数（ProbeDemoApp.swift 的结构性标记）。
+    这里数全树"无 identifier 的 AXImage"：press→restore 窗口内 drift-marker-row
+    与 lazy 行恒常（没有按钮能改它们），差值只可能来自 count 回写。
+    """
+    tree = client.call("observe", {"maxDepth": 10})
+    total = [0]
+
+    def walk(nodes):
+        for node in nodes:
+            if node.get("role") == "AXImage" and not node.get("identifier"):
+                total[0] += 1
+            walk(node.get("children") or [])
+
+    walk(tree.get("axTree") or [])
+    return total[0]
+
+
 def run_canary(client, identifier, accepted, label, pre_wait=0.0, post_wait=0.0, attempts=4):
     """Press → (optionally wait) → diagnose; retry while the verdict misses.
 
@@ -144,16 +194,20 @@ def run_canary(client, identifier, accepted, label, pre_wait=0.0, post_wait=0.0,
 
 
 def main():
-    daemon_bin = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_DAEMON
-    demo_bin = sys.argv[2] if len(sys.argv) > 2 else (
-        DEFAULT_DEMO if os.path.exists(DEFAULT_DEMO) else REPO_ENGINE
-    )
-    if not os.path.exists(daemon_bin):
-        print(f"SKIP daemon 二进制缺失：{daemon_bin}（先构建 worktree debug 产物）")
-        sys.exit(0)
-    if not os.path.exists(demo_bin):
-        print(f"SKIP probe-demo 二进制缺失：{demo_bin}（cd engine/probe && swift build）")
-        sys.exit(0)
+    daemon_bin = resolve_binary(sys.argv[1] if len(sys.argv) > 1 else None,
+                                "GLASSPANE_DAEMON_BIN", DAEMON_CANDIDATES)
+    demo_bin = resolve_binary(sys.argv[2] if len(sys.argv) > 2 else None,
+                              "GLASSPANE_DEMO_BIN", DEMO_CANDIDATES)
+    missing = [p for p in (daemon_bin, demo_bin) if not os.path.exists(p)]
+    if missing:
+        # 本文件头部定义 exit 0 = PASS：前置缺失绝不能以 0 离场冒充绿——
+        # 用独立退出码 2（NOT RUN），并点名缺失产物与可执行的补救命令。
+        print("NOT RUN — 前置产物缺失，本轮未执行任何断言（NOT RUN ≠ PASS）：")
+        for path in missing:
+            print(f"  missing artifact: {path}")
+        print("REMEDY: cd engine && swift build && (cd probe && swift build)；"
+              "或以位置参数/env（GLASSPANE_DAEMON_BIN、GLASSPANE_DEMO_BIN）显式给出二进制路径")
+        sys.exit(2)
 
     workdir = tempfile.mkdtemp(prefix="glasspane-p6-smoke-")
     engine_sock = os.path.join(workdir, "engine.sock")
@@ -214,6 +268,12 @@ def main():
               and "checkpoint" in probe_info["capabilities"],
               f"caps={probe_info['capabilities']} version={probe_info['probeVersion']}")
 
+        # tier-1 快照提前拍在任何 count 自增加压之前（此刻 count=0，gpz1 payload
+        # 真实为 {"count":"0"}）：回滚目标 0 与金丝雀段累积出的结构标记行数
+        # （≥4，饱和上限 6）在 observe 树上可区分——档 1 的 UI 回写核验就靠这个差值。
+        snapshot = client.call("snapshot", {"maxDepth": 6})
+        snapshot_id = snapshot["snapshotId"]
+
         # ---- canary 1: NO_ANOMALY + strong attribution -------------------
         outcome = press(client, "ok-press")
         pack = evidence_of(client, outcome["operationId"])
@@ -247,11 +307,10 @@ def main():
               f"lateCount={pack['signals']['handlerProbe']['lateCount']}")
 
         # lateCount 真值复核（T8 的判据字段必须已落进 evidence）
-        # ---- tier-1 checkpoint: snapshot + executed rollback ---------------
-        snapshot = client.call("snapshot", {"maxDepth": 6})
-        snapshot_id = snapshot["snapshotId"]
+        # ---- tier-1 checkpoint: executed rollback + UI 结构回写核验 ---------
         # push further, then roll the checkpoint back through the probe
         press(client, "ok-press")
+        markers_before = marker_nodes(client)
         restore = client.call("restore", {"snapshotId": snapshot_id, "mode": "rollback_full"})
         check("档 1 执行面：rollbackExecuted=true + consistent=true（§5.5/C34 语义）",
               restore.get("rollbackExecuted") is True and restore.get("consistent") is True
@@ -261,6 +320,21 @@ def main():
         tree = client.call("observe", {"maxDepth": 10})
         text = json.dumps(tree.get("axTree"))
         check("恢复后 UI 回写可见（count 标签存在）", "count-label" in text)
+        # 值敏感的 UI 回写核验（弱断言"标签存在即过"保留，但不再由它充数）：
+        # before/after 两点观察窗口内 drift 行与 lazy 行数恒定，无 identifier
+        # AXImage 总数的差值只可能来自 count 标记行：回滚目标为快照值 count=0，
+        # 回滚前 count=C+1≥4（初始 ok-press + NO_ANOMALY 金丝雀 + delayed +
+        # 本轮加压，行渲染 min(count,6)）→ 差值必须落在 [4,6]。
+        # 证明：探针写回的数值确实驱动 demo UI 结构回退，且回退量与快照值一致
+        #       （没回滚 → 差 0；只回退一步 → 差 ≤1；都判 FAIL）。
+        # 不证明：具体数字文案 "count: 0"——AXValue 不在 observe 方法表内
+        #       （P6 §0 F6），结构行数即该通道能取到的最强可观测证物，如实到顶。
+        time.sleep(0.8)  # 给 SwiftUI 一次重渲周期再读树
+        markers_after = marker_nodes(client)
+        markers_delta = markers_before - markers_after
+        check("恢复后 UI 结构回写：count 标记行随快照值 0 清空（差值∈[4,6]）",
+              4 <= markers_delta <= 6,
+              f"delta={markers_delta} before={markers_before} after={markers_after}")
 
         print(f"C34 参考：restore digest {str(restore.get('postStateDigest'))[:8]}… 一致性已验")
         client.call("shutdown")

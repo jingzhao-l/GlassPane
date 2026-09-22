@@ -189,6 +189,113 @@ enum TestImages {
     }
 }
 
+// MARK: - State-file isolation (P8: R7-02 + B2)
+
+/// The only sanctioned source of paths for the three file-backed state objects
+/// of this target (project registry, evidence archive, approval ledger).
+///
+/// This is not a style rule. Each of those types falls back to a production
+/// location when it is constructed without one, and that location is the
+/// projects/approvals/evidence state under the home directory. The home
+/// lookup behind those defaults does not honour a `HOME` override, so
+/// pointing `HOME` at a sandbox before running the suite protects nothing:
+/// on 2026-09-23 a `swift test` run replaced the developer's real
+/// `projects.json` (71 entries) with the two synthetic entries a test creates
+/// and wrote packs into the real evidence archive. An after-the-fact check is
+/// worthless here — detection after destruction is not isolation — so the
+/// rule is structural: no test may build a state object with a production
+/// default. `TestIsolationGateTests` fails the target when such a
+/// construction reappears in test source; everything below is checked at
+/// runtime by `assertIsolated`.
+enum TestSandbox {
+
+    /// Process-scoped root under the system temp directory. `swift test` runs
+    /// the whole target in one process, so tests never share a path with each
+    /// other and never reuse a leftover directory.
+    static let root = NSTemporaryDirectory() + "gp-t\(ProcessInfo.processInfo.processIdentifier)"
+
+    /// A unique directory for one purpose, created on demand. A sandbox that
+    /// could not be created is reported as such — every later assertion of the
+    /// test would otherwise read as a defect in the code under test.
+    static func directory(_ label: String = "state") -> String {
+        let path = "\(root)/\(token(label))-\(UUID().uuidString.prefix(8))"
+        assertIsolated(path, label: label)
+        do {
+            try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+        } catch {
+            XCTFail("test sandbox could not create \(path): \(error)")
+        }
+        return path
+    }
+
+    /// A unique path for single-file state (the registry table, the approval
+    /// ledger). The parent directory is created here; the file is not —
+    /// neither type treats a missing file as damage.
+    static func filePath(_ label: String = "state") -> String {
+        directory(label) + "/\(token(label)).json"
+    }
+
+    /// A registry over an empty file in the temp directory. Hand one to every
+    /// `EngineCore` a test builds: without a `projectRegistry:` argument the
+    /// engine initializer creates its own, and that one reads the real state
+    /// file, so a test's project lookups would depend on this machine.
+    static func projectRegistry(_ label: String = "registry") -> ProjectRegistry {
+        ProjectRegistry(filePath: filePath(label))
+    }
+
+    /// An archive bound to a fresh temp directory. The route new tests should
+    /// take: the parameter is a non-optional `String`, so no caller can
+    /// forward a nil default into the archive location, and the path is
+    /// checked by `assertIsolated` before the store is built.
+    static func evidenceStore(at directory: String, maxFiles: Int? = nil) -> EvidenceStore {
+        assertIsolated(directory, label: "evidence")
+        return EvidenceStore(directory: directory, maxFiles: maxFiles)
+    }
+
+    /// A file-persisted approval ledger at a fresh temp path, plus that path
+    /// (the type keeps its own path private, and the isolation contract is
+    /// only checkable from outside). Exists so a test that needs a *persisted*
+    /// ledger has a safe route: a bare `ApprovalGate()` is in-memory only,
+    /// while the production ledger path must never be appended to by a test.
+    static func approvalLedger(
+        _ label: String = "approvals"
+    ) -> (gate: ApprovalGate, path: String) {
+        let path = filePath(label)
+        return (ApprovalGate(path: path), path)
+    }
+
+    /// The runtime half of the isolation gate (design (b)): a state path must
+    /// sit inside the system temp directory and must never carry a component
+    /// of the production state folder. Called on every path handed out above.
+    static func assertIsolated(
+        _ path: String,
+        label: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertTrue(
+            path.hasPrefix(NSTemporaryDirectory()),
+            "test state path \(path) for \(label) is outside NSTemporaryDirectory(); "
+                + "it can reach the real per-user state",
+            file: file,
+            line: line
+        )
+        XCTAssertFalse(
+            // Spelled in pieces on purpose: the source gate of
+            // `TestIsolationGateTests` reads this file too.
+            path.contains("/." + "glasspane"),
+            "test state path \(path) for \(label) names the production state folder",
+            file: file,
+            line: line
+        )
+    }
+
+    /// A filesystem-safe fragment of a test label.
+    private static func token(_ label: String) -> String {
+        String(label.filter { $0.isLetter || $0.isNumber }.prefix(12)).lowercased()
+    }
+}
+
 // MARK: - Kernel fixtures (C35 shared truth set)
 
 enum KernelFixtures {

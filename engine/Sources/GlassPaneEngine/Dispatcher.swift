@@ -74,7 +74,13 @@ public final class Dispatcher {
 
     private func handleAttach(_ params: [String: Any]) throws -> [String: Any] {
         let bundleId = try ParamValidation.optString(params, "bundleId", maxLength: 512)
-        let pid = try ParamValidation.optInt(params, "pid")
+        // Range-checked because `pid` is narrowed to `pid_t` (Int32) below:
+        // an unbounded integral frame must answer GP_E_BAD_PARAMS, not trap.
+        let pid = try ParamValidation.optInt(
+            params,
+            "pid",
+            range: ParamValidation.pidLower...ParamValidation.pidUpper
+        )
         guard (bundleId == nil) != (pid == nil) else {
             throw GPError(code: .badParams, message: "exactly one of bundleId or pid is required")
         }
@@ -109,12 +115,14 @@ public final class Dispatcher {
     }
 
     private func handleDiagnose(_ params: [String: Any]) throws -> [String: Any] {
-        let operationId = try ParamValidation.optString(params, "operationId", maxLength: 64)
+        let operationId = try ParamValidation.optOperationId(params)
         return try core.diagnose(operationId: operationId)
     }
 
     private func handleLastEvidence(_ params: [String: Any]) throws -> [String: Any] {
-        let operationId = try ParamValidation.optString(params, "operationId", maxLength: 64)
+        // `operationId` keys an on-disk file name downstream, so it is
+        // pattern-checked here rather than length-checked.
+        let operationId = try ParamValidation.optOperationId(params)
         let pack = try core.lastEvidence(operationId: operationId)
         let data = try pack.jsonData()
         let object = try JSONSerialization.jsonObject(with: data)
@@ -133,7 +141,9 @@ public final class Dispatcher {
     private func handleRestore(_ params: [String: Any]) throws -> [String: Any] {
         let snapshotId = try ParamValidation.requireSnapshotId(params)
         let steps = try ParamValidation.optSteps(params)
-        let mode = try ParamValidation.optString(params, "mode", maxLength: 32)
+        // Closed set: `mode` is written verbatim into the hash-chained
+        // approval ledger, so free text must never reach EngineCore.
+        let mode = try ParamValidation.optRestoreMode(params)
         return try core.restore(snapshotId: snapshotId, steps: steps, mode: mode)
     }
 
@@ -146,7 +156,7 @@ public final class Dispatcher {
         } else {
             frame["id"] = NSNull()
         }
-        return encode(frame)
+        return encode(frame, id: id)
     }
 
     private func response(id: Int64?, error: GPError) -> Data {
@@ -162,10 +172,15 @@ public final class Dispatcher {
         } else {
             frame["id"] = NSNull()
         }
-        return encode(frame)
+        return encode(frame, id: id)
     }
 
-    private func encode(_ frame: [String: Any]) -> Data {
+    /// Serializes one outbound frame under the same 4 MiB cap the inbound
+    /// codec enforces (P0 §3.1: the limit applies to both directions). An
+    /// over-cap line would desynchronize the shell's reader, so the caller
+    /// gets the spec'd structured error instead — carrying the real request
+    /// id, so the answer still matches the pending call.
+    private func encode(_ frame: [String: Any], id: Int64?) -> Data {
         guard let data = try? JSONSerialization.data(
             withJSONObject: frame,
             options: [.sortedKeys, .withoutEscapingSlashes]
@@ -173,20 +188,44 @@ public final class Dispatcher {
             // Result objects are built from JSON-serializable values only;
             // if serialization still fails, answer with a structured internal
             // error rather than dropping the response.
-            let fallback: [String: Any] = [
-                "id": NSNull(),
-                "error": [
-                    "code": GPErrorCode.internalError.rawValue,
-                    "message": "response serialization failed; reduce observe maxDepth",
-                    "remedy": GPError.remedy(for: .internalError)
-                ]
-            ]
-            let fallbackData = (try? JSONSerialization.data(
-                withJSONObject: fallback,
-                options: [.sortedKeys, .withoutEscapingSlashes]
-            )) ?? Data("{\"id\":null,\"error\":{\"code\":\"GP_E_INTERNAL\"}}".utf8)
-            return fallbackData + Data([0x0A])
+            return structuredError(
+                id: id,
+                code: .internalError,
+                message: "response serialization failed; "
+                    + "reduce observe maxDepth (\(ParamValidation.observeMaxDepthLower)–\(ParamValidation.observeMaxDepthUpper)) and retry"
+            )
         }
+        guard data.count + 1 <= FrameCodec.maxFrameBytes else {
+            return structuredError(
+                id: id,
+                code: .payloadTooLarge,
+                message: "response of \(data.count) bytes exceeds \(FrameCodec.maxFrameBytes) byte frame cap; "
+                    + "reduce observe maxDepth (\(ParamValidation.observeMaxDepthLower)–\(ParamValidation.observeMaxDepthUpper)) or narrow the selector scope"
+            )
+        }
+        return data + Data([0x0A])
+    }
+
+    /// Builds a small always-serializable error frame for the two cases where
+    /// the caller's payload cannot be used. The text is engine-authored and
+    /// bounded, so this path can neither overflow the cap nor recurse.
+    private func structuredError(id: Int64?, code: GPErrorCode, message: String) -> Data {
+        var frame: [String: Any] = [
+            "error": [
+                "code": code.rawValue,
+                "message": message,
+                "remedy": GPError.remedy(for: code)
+            ]
+        ]
+        if let id {
+            frame["id"] = NSNumber(value: id)
+        } else {
+            frame["id"] = NSNull()
+        }
+        let data = (try? JSONSerialization.data(
+            withJSONObject: frame,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )) ?? Data("{\"id\":null,\"error\":{\"code\":\"GP_E_INTERNAL\"}}".utf8)
         return data + Data([0x0A])
     }
 }

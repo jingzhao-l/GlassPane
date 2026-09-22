@@ -9,8 +9,20 @@ import Metal
 // Lives inside the app under test. Speaks the §2 wire format to the daemon's
 // probe socket: registers on connect, streams Z1 handler / Z2+Z3 state
 // events, answers checkpoint and Metal-capture commands. Event emission is a
-// lock + O(1) socket write — no reflection on the hot path (reflection work
-// happens only on daemon-pulled commands, op_end mirror diffs included).
+// lock + O(1) hand-off to the probe's own serial write queue — no reflection on
+// the hot path (reflection work happens only on daemon-pulled commands, op_end
+// mirror diffs included) — and nothing on it may hurt the host:
+//   * descriptors are created with SO_NOSIGPIPE, so a write after the daemon
+//     vanished cannot raise SIGPIPE in the app under test (the daemon may
+//     afford `signal(SIGPIPE, SIG_IGN)` for itself; a library that changes the
+//     signal disposition of somebody else's process may not);
+//   * the descriptor is non-blocking and every write waits on POLLOUT inside a
+//     bounded budget, so a daemon that stopped draining costs one counted drop
+//     instead of a hung thread (SO_SNDTIMEO/SO_RCVTIMEO are not assumed to be
+//     implemented);
+// Losses stay observable (GP.droppedEventCount / GP.droppedWriteCount) and are
+// announced in `hello`, so "the handler did not run" can be told apart from
+// "the probe could not deliver".
 
 public enum GP {
     static let runtime = ProbeRuntime()
@@ -18,7 +30,10 @@ public enum GP {
     /// Connect to the daemon probe socket and start the reader thread.
     /// Safe to call twice (second call is a no-op). Never throws: a missing
     /// daemon degrades to local buffering — the app runs untouched (Z1 hits
-    /// still count, delivery resumes on the next `start()` retry window).
+    /// still count). The connection thread keeps re-arming with a bounded
+    /// backoff for the life of the process, so an app that started before the
+    /// daemon is served as soon as it appears; buffered frames drain onto the
+    /// new connection, and what did not fit shows up in `droppedEventCount`.
     public static func start(socketPath: String? = nil, appName: String? = nil) {
         runtime.start(socketPath: socketPath, appName: appName)
     }
@@ -51,14 +66,27 @@ public enum GP {
 
     /// Z2: register an object for Mirror export (checkpoint domains and
     /// op-window state diffs). Read-only unless a checkpoint setter exists.
+    /// The probe holds it *weakly*: exporting the state of an object the app
+    /// already released would attribute a diff to dead state.
     public static func registerMirrorRoot(label: String, object: AnyObject) {
         runtime.registerMirrorRoot(label: label, object: object)
     }
 
     /// Z3: register an NSObject subclass with @objc dynamic keys for live
-    /// KVO state events (and optional KVC write-back checkpoints).
+    /// KVO state events (and optional KVC write-back checkpoints). Held
+    /// weakly — see `detachKVCObject`.
     public static func registerKVCObject(_ object: NSObject, label: String, keys: [String]) {
         runtime.registerKVCObject(object, label: label, keys: keys)
+    }
+
+    /// Stop observing an object registered through `registerKVCObject` and
+    /// release the probe's reference to it (removes the KVO observers). false =
+    /// never registered. Detach before letting go of a registered model:
+    /// releasing an object that is still observed relies on Foundation tearing
+    /// the registration down with it.
+    @discardableResult
+    public static func detachKVCObject(_ object: NSObject) -> Bool {
+        runtime.detachKVCObject(object)
     }
 
     /// Tier-1 checkpoint domain (P6 §6.4): `get` exports string state,
@@ -69,6 +97,13 @@ public enum GP {
         set: (([String: String]) -> Void)?
     ) {
         runtime.registerCheckpoint(domain: domain, get: get, set: set)
+    }
+
+    /// Forget a checkpoint domain (its `get`/`set` closures keep whatever they
+    /// capture, so this is the only way to release them). false = not registered.
+    @discardableResult
+    public static func detachCheckpoint(domain: String) -> Bool {
+        runtime.detachCheckpoint(domain: domain)
     }
 
     /// Z4.5 capture 结果监听（进程内自动化用：帧照常发往 daemon，钩子让
@@ -84,8 +119,21 @@ public enum GP {
         runtime.endMetalCapture()
     }
 
-    /// Test/smoke hook: current drop counter (frames lost while offline).
+    /// Test/smoke hook: frames lost while offline, i.e. the local buffer hit
+    /// its cap before the daemon came back.
     public static var droppedEventCount: Int { runtime.droppedEventCount }
+
+    /// Frames handed to the socket that never arrived: a write that timed out
+    /// or came back short, and frames refused because the probe's write queue
+    /// was full. Delivery losses, never an error thrown into the host.
+    public static var droppedWriteCount: Int { runtime.droppedWriteCount }
+
+    /// Frames still waiting in the offline buffer for the next connection.
+    public static var bufferedEventCount: Int { runtime.bufferedEventCount }
+
+    /// Whether a live daemon connection backs the probe right now — with the
+    /// two drop counters, what separates "no hits" from "could not report".
+    public static var isConnected: Bool { runtime.isConnected }
 }
 
 // MARK: - Runtime
@@ -97,24 +145,71 @@ final class ProbeRuntime: @unchecked Sendable {
     static let probeVersion = "gp-probe/0.1.0"
     static let reconnectAttempts = 3
     static let reconnectIntervalMs = 1000
+    /// Wait after a *whole* failed cycle. P6 §2.1 fixes the per-attempt backoff
+    /// (1s×3) but cannot mean "latch the probe off", since "app started before
+    /// daemon" is the ordinary case — so the cycle repeats after this gap.
+    static let reconnectCycleIntervalMs = 30_000
     static let offlineBufferLimit = 256
+    /// Serial write queue cap — larger than the offline buffer, so a reconnect
+    /// drain is never itself the overflow.
+    static let queuedWriteLimit = 512
+    /// Per-frame write budget (POLLOUT waits + writes must finish inside it).
+    static let sendTimeoutMs = 250
+    /// How long the reader waits in poll() before re-checking the connection.
+    static let receiveTimeoutMs = 2_000
     static let checkpointRetention = 8
 
+    /// Backoff after a failed attempt inside one cycle (P6 §2.1: 1s, 2s, 3s).
+    static func attemptBackoffMs(afterFailedAttempt attempt: Int) -> Int {
+        max(1, attempt + 1) * reconnectIntervalMs
+    }
+
+    /// Weak slot wrapper: a struct cannot hold a `weak` member, and the probe
+    /// must not keep the app's model objects alive.
+    private final class MirrorRoot {
+        let label: String
+        weak var object: AnyObject?
+
+        init(label: String, object: AnyObject) {
+            self.label = label
+            self.object = object
+        }
+    }
+
     private let lock = NSLock()
+    /// Every socket write serializes here: the emitting thread (any thread of
+    /// the app under test) only enqueues, so a daemon that stopped draining can
+    /// neither hang the host nor interleave two half-written frames.
+    private let writeQueue = DispatchQueue(label: "glasspane.probe.write", qos: .utility)
+    private var connectionThread: Thread?
     private var fd: Int32 = -1
     private var started = false
+    private var stopped = false
+    private var connectionGeneration = 0
+    private var failedCycles = 0
+    private var queuedWrites = 0
     private var appNameValue = ""
     private var bundleIdValue: String?
     private var offlineBuffer: [[String: Any]] = []
     private var dropped = 0
+    private var droppedWrites = 0
     private var readerRunning = false
+    private var advertisedCapabilities: [String] = []
 
     // Registration surfaces.
-    private var mirrorRoots: [(label: String, object: AnyObject)] = []
+    private var mirrorRoots: [MirrorRoot] = []
     private var kvObserver: KVCObserver?
     private var checkpoints: [(domain: String, get: () -> [String: String], set: (([String: String]) -> Void)?)] = []
     private var retainedCheckpoints: [(ref: String, domains: [String: [String: String]])] = []
     private var lastMirrorExport: [String: String] = [:]
+
+    /// Test/smoke seam: shrinks both backoff waits so a re-arm can be observed
+    /// without sleeping the real 1s×3 + 30s schedule.
+    var backoffOverrideMs: Int? {
+        get { lock.lock(); defer { lock.unlock() }; return backoffOverrideStorage }
+        set { lock.lock(); backoffOverrideStorage = newValue; lock.unlock() }
+    }
+    private var backoffOverrideStorage: Int?
 
     init() {}
 
@@ -123,105 +218,219 @@ final class ProbeRuntime: @unchecked Sendable {
         return dropped
     }
 
+    var droppedWriteCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return droppedWrites
+    }
+
+    var bufferedEventCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return offlineBuffer.count
+    }
+
+    var isConnected: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return fd >= 0
+    }
     // MARK: Connection
 
     func start(socketPath: String?, appName: String?) {
         lock.lock()
         guard !started else { lock.unlock(); return }
         started = true
-        lock.unlock()
-
+        stopped = false
+        connectionGeneration += 1
+        let generation = connectionGeneration
         appNameValue = appName ?? ProcessInfo.processInfo.processName
         bundleIdValue = Bundle.main.bundleIdentifier
+        lock.unlock()
+
         let path = socketPath
             ?? ProcessInfo.processInfo.environment["GLASSPANE_PROBE_SOCK"]
             ?? (NSHomeDirectory() + "/.glasspane/probe.sock")
 
-        connectAndServe(path: path)
+        let thread = Thread { [weak self] in self?.serveConnections(path: path, generation: generation) }
+        thread.name = "glasspane.probe.connection"
+        lock.lock()
+        connectionThread = thread
+        lock.unlock()
+        thread.start()
     }
 
-    private func connectAndServe(path: String) {
-        // Connect with bounded retries; the reader thread keeps serving on
-        // the same connection and re-connects (once per dropout) thereafter.
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self else { return }
-            for attempt in 0..<ProbeRuntime.reconnectAttempts {
-                let descriptor = connect(to: path)
-                if descriptor >= 0 {
-                    self.lock.lock()
-                    self.fd = descriptor
-                    self.lock.unlock()
-                    self.sendHello()
-                    self.drainOfflineBuffer()
-                    self.readLoop(path: path)
-                    return
-                }
-                Thread.sleep(forTimeInterval: Double(ProbeRuntime.reconnectIntervalMs) / 1000.0 * Double(attempt + 1))
+    /// connect → hello → drain → read, for the life of the process. Every exit
+    /// from a connection comes back through here, so a reconnect always
+    /// re-announces, re-drains and starts from an empty read buffer — the
+    /// mid-session shortcut that stranded buffered evidence is gone by
+    /// construction.
+    private func serveConnections(path: String, generation: Int) {
+        while !isSuperseded(generation) {
+            let descriptor = connectWithBackoff(path: path, generation: generation)
+            guard descriptor >= 0 else { continue }
+            lock.lock()
+            if stopped || generation != connectionGeneration {
+                lock.unlock()
+                close(descriptor) // freshly created: nobody else can reference it
+                return
             }
-            // Offline: Z1 hits still buffer locally up to the cap, then drop
-            // with a counter — never a crash, never a fake "delivered".
-            self.lock.lock()
-            self.fd = -1
-            self.lock.unlock()
+            fd = descriptor
+            lock.unlock()
+
+            sendHello()
+            drainOfflineBuffer()
+            readLoop(descriptor: descriptor)
+            teardown(descriptor)
         }
     }
 
+    private func isSuperseded(_ generation: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return stopped || generation != connectionGeneration
+    }
+
+    /// Bounded connect attempts per P6 §2.1; -1 means "this whole cycle failed",
+    /// and the caller re-arms rather than giving up.
+    private func connectWithBackoff(path: String, generation: Int) -> Int32 {
+        for attempt in 0..<ProbeRuntime.reconnectAttempts {
+            if isSuperseded(generation) { return -1 }
+            let descriptor = connect(to: path)
+            if descriptor >= 0 { return descriptor }
+            Thread.sleep(forTimeInterval: TimeInterval(backoffMs(attempt: attempt)) / 1000.0)
+        }
+        lock.lock()
+        failedCycles += 1
+        lock.unlock()
+        Thread.sleep(forTimeInterval: TimeInterval(cycleBackoffMs) / 1000.0)
+        return -1
+    }
+
+    private func backoffMs(attempt: Int) -> Int {
+        lock.lock(); let override = backoffOverrideStorage; lock.unlock()
+        return override ?? ProbeRuntime.attemptBackoffMs(afterFailedAttempt: attempt)
+    }
+
+    private var cycleBackoffMs: Int {
+        lock.lock(); defer { lock.unlock() }
+        return backoffOverrideStorage ?? ProbeRuntime.reconnectCycleIntervalMs
+    }
+
+    /// Retire one connection: the shared descriptor goes first (later writes
+    /// then fall back to the offline buffer), and the close is sequenced *on
+    /// the write queue* so the number can never be recycled under a write that
+    /// is still in flight on it.
+    private func teardown(_ descriptor: Int32) {
+        lock.lock()
+        let owns = fd == descriptor
+        if owns { fd = -1 }
+        readerRunning = false
+        lock.unlock()
+        if owns { closeDeferred(descriptor) }
+    }
+
+    private func closeDeferred(_ descriptor: Int32) {
+        writeQueue.async { close(descriptor) }
+    }
+
     private func sendHello() {
+        lock.lock()
+        let capabilities = currentCapabilitiesLocked()
+        let offlineDropped = dropped
+        let writeDropped = droppedWrites
+        let appName = appNameValue
+        let bundleId = bundleIdValue
+        advertisedCapabilities = capabilities
+        lock.unlock()
+
         var payload: [String: Any] = [
             "t": "hello",
             "pid": Int(ProcessInfo.processInfo.processIdentifier),
-            "appName": appNameValue,
+            "appName": appName,
             "probeVersion": ProbeRuntime.probeVersion,
-            "capabilities": currentCapabilities()
+            "capabilities": capabilities,
+            // §2.2 registration lane, optional keys (the daemon's decoder
+            // tolerates unknown fields): they are what lets a daemon-side
+            // "0 handler hits" be read as "0 hits" instead of "N frames never
+            // delivered".
+            "droppedEvents": offlineDropped,
+            "droppedWrites": writeDropped
         ]
-        if let bundleIdValue { payload["bundleId"] = bundleIdValue }
+        if let bundleId { payload["bundleId"] = bundleId }
         writeFrame(payload)
     }
 
-    private func currentCapabilities() -> [String] {
-        lock.lock(); defer { lock.unlock() }
+    /// Capabilities only travel in `hello`, so anything registered after the
+    /// connection was accepted has to re-announce itself or the daemon keeps
+    /// serving against a stale set (P6 §2.2: a repeated hello replaces the
+    /// registration). Only a *changed* set is re-sent: a registration burst
+    /// costs one frame, and the daemon's per-pid event ring is not replaced for
+    /// nothing.
+    private func advertiseCapabilities() {
+        lock.lock()
+        let changed = fd >= 0 && currentCapabilitiesLocked() != advertisedCapabilities
+        lock.unlock()
+        guard changed else { return }
+        sendHello()
+    }
+
+    private func currentCapabilitiesLocked() -> [String] {
         var capabilities = ["z1"]
-        if !mirrorRoots.isEmpty { capabilities.append("z2") }
-        if kvObserver != nil { capabilities.append("z3") }
-        if checkpoints.contains(where: { $0.set != nil }) || kvObserver != nil { capabilities.append("checkpoint") }
+        if mirrorRoots.contains(where: { $0.object != nil }) { capabilities.append("z2") }
+        let observesLiveObjects = kvObserver?.hasLiveTargets == true
+        if observesLiveObjects { capabilities.append("z3") }
+        if checkpoints.contains(where: { $0.set != nil }) || observesLiveObjects {
+            capabilities.append("checkpoint")
+        }
         return capabilities
     }
 
-    private func readLoop(path: String) {
+    /// Reads daemon commands until this connection is gone. The wait is bounded
+    /// by `receiveTimeoutMs`, so a descriptor the write side already retired is
+    /// noticed here instead of parking the connection thread forever.
+    private func readLoop(descriptor: Int32) {
+        lock.lock()
         readerRunning = true
-        let buffer = UnsafeMutableRawPointer.allocate(byteCount: 64 * 1024, alignment: 16)
+        lock.unlock()
+        defer {
+            lock.lock()
+            readerRunning = false
+            lock.unlock()
+        }
+        let capacity = 64 * 1024
+        let buffer = UnsafeMutableRawPointer.allocate(byteCount: capacity, alignment: 16)
         defer { buffer.deallocate() }
+        // Per connection, never carried over: leftover bytes of the old stream
+        // must not be glued onto the front of the new one.
         var partial = Data()
+        let readInterval = Double(ProbeRuntime.receiveTimeoutMs) / 1000.0
         while true {
             lock.lock()
             let currentFD = fd
             lock.unlock()
-            guard currentFD >= 0 else { return }
-            let received = read(currentFD, buffer, 64 * 1024)
-            if received <= 0 {
-                // Daemon restarted or connection lost: try once to reconnect.
-                let next = connect(to: path)
-                if next >= 0 {
-                    lock.lock()
-                    fd = next
-                    lock.unlock()
-                    sendHello()
-                    continue
-                }
-                lock.lock()
-                fd = -1
-                lock.unlock()
-                return
+            if currentFD != descriptor { return }
+            // The descriptor is non-blocking, so the wait is explicit — and
+            // waking on an interval is what lets a descriptor the write side
+            // already retired be noticed instead of parking the reader.
+            guard let revents = waitReady(descriptor, events: Int16(POLLIN),
+                                          deadline: Date().addingTimeInterval(readInterval)) else {
+                continue // quiet daemon: staleness re-checked at the loop top
             }
-            partial.append(Data(bytes: buffer, count: received))
-            while let newline = partial.firstIndex(of: UInt8(ascii: "\n")) {
-                let line = partial[partial.startIndex..<newline]
-                partial.removeSubrange(partial.startIndex...newline)
-                if let object = try? JSONSerialization.jsonObject(with: Data(line)),
-                   let dict = object as? [String: Any] {
-                    handleCommand(dict)
+            if revents & Int16(POLLIN) == 0 { return } // POLLHUP/POLLERR: daemon restarted or gone
+            let received = read(descriptor, buffer, capacity)
+            if received > 0 {
+                partial.append(Data(bytes: buffer, count: received))
+                while let newline = partial.firstIndex(of: UInt8(ascii: "\n")) {
+                    let line = partial[partial.startIndex..<newline]
+                    partial.removeSubrange(partial.startIndex...newline)
+                    if let object = try? JSONSerialization.jsonObject(with: Data(line)),
+                       let dict = object as? [String: Any] {
+                        handleCommand(dict)
+                    }
                 }
+                continue
             }
+            if received < 0, errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR {
+                continue
+            }
+            return // EOF or a real read error
         }
     }
 
@@ -313,8 +522,10 @@ final class ProbeRuntime: @unchecked Sendable {
 
     func registerMirrorRoot(label: String, object: AnyObject) {
         lock.lock()
-        mirrorRoots.append((label, object))
+        mirrorRoots.removeAll { $0.object == nil }
+        mirrorRoots.append(MirrorRoot(label: label, object: object))
         lock.unlock()
+        advertiseCapabilities()
     }
 
     func registerKVCObject(_ object: NSObject, label: String, keys: [String]) {
@@ -330,6 +541,20 @@ final class ProbeRuntime: @unchecked Sendable {
         }
         lock.unlock()
         observer.attach(object, label: label, keys: keys)
+        advertiseCapabilities()
+    }
+
+    @discardableResult
+    func detachKVCObject(_ object: NSObject) -> Bool {
+        lock.lock()
+        let observer = kvObserver
+        lock.unlock()
+        guard let observer, observer.detach(object) else { return false }
+        lock.lock()
+        if kvObserver?.hasLiveTargets != true { kvObserver = nil }
+        lock.unlock()
+        advertiseCapabilities()
+        return true
     }
 
     func registerCheckpoint(domain: String, get: @escaping () -> [String: String], set: (([String: String]) -> Void)?) {
@@ -337,18 +562,32 @@ final class ProbeRuntime: @unchecked Sendable {
         checkpoints.removeAll { $0.domain == domain }
         checkpoints.append((domain, get, set))
         lock.unlock()
+        advertiseCapabilities()
+    }
+
+    @discardableResult
+    func detachCheckpoint(domain: String) -> Bool {
+        lock.lock()
+        let registered = checkpoints.contains { $0.domain == domain }
+        checkpoints.removeAll { $0.domain == domain }
+        lock.unlock()
+        if registered { advertiseCapabilities() }
+        return registered
     }
 
     // MARK: State export (Z2 Mirror walk, bounded §1)
 
     func exportMirrorState() -> [String: String] {
         lock.lock()
-        let roots = mirrorRoots
+        let roots = mirrorRoots.compactMap { entry -> (label: String, object: AnyObject)? in
+            guard let object = entry.object else { return nil }
+            return (entry.label, object)
+        }
         let checkpointGets = checkpoints
         lock.unlock()
         var exported: [String: String] = [:]
-        for (label, object) in roots {
-            MirrorWalk.flatten(object, label: label, maxDepth: 8, maxNodes: 4000, into: &exported)
+        for root in roots {
+            MirrorWalk.flatten(root.object, label: root.label, maxDepth: 8, maxNodes: 4000, into: &exported)
         }
         for checkpoint in checkpointGets {
             for (key, value) in checkpoint.get() {
@@ -388,6 +627,9 @@ final class ProbeRuntime: @unchecked Sendable {
         ])
     }
 
+    /// Hand the frame to the probe's write queue. The emitting thread never
+    /// touches the socket: it either appends to the offline buffer, enqueues a
+    /// bounded write, or counts a drop — O(1), non-blocking, throw-free.
     private func writeFrame(_ frame: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: frame, options: [.sortedKeys]) else { return }
         var line = data
@@ -403,17 +645,84 @@ final class ProbeRuntime: @unchecked Sendable {
             lock.unlock()
             return
         }
-        lock.unlock()
-        let written = line.withUnsafeBytes { raw in
-            write(currentFD, raw.baseAddress, raw.count)
-        }
-        if written <= 0 {
-            lock.lock()
-            fd = -1 // treat as dropout; reader thread handles reconnect once
+        if queuedWrites >= ProbeRuntime.queuedWriteLimit {
+            droppedWrites += 1
             lock.unlock()
+            return
+        }
+        queuedWrites += 1
+        lock.unlock()
+        writeQueue.async { [weak self] in
+            self?.deliver(line: line, snapshotFD: currentFD)
         }
     }
 
+    /// Serialized socket write, off the host's thread and bounded by
+    /// `sendTimeoutMs` (the descriptor is non-blocking; POLLOUT carries the
+    /// wait). A line that cannot be written whole is a drop *and* a broken
+    /// stream — half a newline-delimited frame can never be trusted again — so
+    /// the descriptor is retired here and the connection thread reconnects (and
+    /// re-drains) on its next pass. Never an exception into the app under test.
+    private func deliver(line: Data, snapshotFD: Int32) {
+        defer {
+            lock.lock()
+            queuedWrites -= 1
+            lock.unlock()
+        }
+        lock.lock()
+        let live = fd == snapshotFD
+        lock.unlock()
+        guard live else {
+            countDroppedWrite()
+            return
+        }
+        let deadline = Date().addingTimeInterval(Double(ProbeRuntime.sendTimeoutMs) / 1000.0)
+        let delivered = line.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
+            guard let base = raw.baseAddress else { return false }
+            var offset = 0
+            while offset < raw.count {
+                let room = raw.count - offset
+                let revents = waitReady(snapshotFD, events: Int16(POLLOUT), deadline: deadline) ?? 0
+                guard revents & Int16(POLLOUT) != 0 else { return false } // daemon stopped draining: bounded, not hung
+                let written = Darwin.write(snapshotFD, base.advanced(by: offset), room)
+                if written > 0 { offset += written; continue }
+                if written < 0, errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR { continue }
+                return false // EPIPE / EBADF: peer gone — and no SIGPIPE, thanks to SO_NOSIGPIPE
+            }
+            return true
+        }
+        guard delivered else {
+            countDroppedWrite()
+            lock.lock()
+            if fd == snapshotFD { fd = -1 }
+            lock.unlock()
+            return
+        }
+    }
+
+    private func countDroppedWrite() {
+        lock.lock()
+        droppedWrites += 1
+        lock.unlock()
+    }
+
+    /// Waits until the descriptor is ready for `events`, never past `deadline`.
+    /// nil means "not yet" (the caller re-checks its own state and tries again);
+    /// a poll failure comes back as POLLERR so a reader can tell quiet from gone.
+    private func waitReady(_ descriptor: Int32, events: Int16, deadline: Date) -> Int16? {
+        let remaining = Int32(max(0, deadline.timeIntervalSinceNow * 1000))
+        guard remaining > 0 else { return nil }
+        var slot = pollfd(fd: descriptor, events: events, revents: 0)
+        let ready = poll(&slot, 1, remaining)
+        if ready > 0 { return slot.revents }
+        if ready < 0, errno != EINTR { return Int16(POLLERR) }
+        return nil
+    }
+
+    /// Called by the connection thread right after `hello`, on *every* connect —
+    /// first one and reconnect alike. Buffered evidence has to reach the daemon
+    /// or it must show up as a drop; silently ageing out at the buffer cap is
+    /// what turned "the probe could not deliver" into "the handler did not run".
     private func drainOfflineBuffer() {
         lock.lock()
         let buffered = offlineBuffer
@@ -431,17 +740,69 @@ final class ProbeRuntime: @unchecked Sendable {
         return offlineBuffer
     }
 
-    internal func resetForTests() {
+    internal var debugIsReaderRunning: Bool {
         lock.lock(); defer { lock.unlock() }
+        return readerRunning
+    }
+
+    internal var debugFailedCycleCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return failedCycles
+    }
+
+    internal var debugCapabilities: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return currentCapabilitiesLocked()
+    }
+
+    internal var debugKVCRegisteredCount: Int {
+        kvObserver?.debugTargetCount ?? 0
+    }
+
+    /// Test hook: adopt an already-connected descriptor (a socketpair end) so
+    /// the delivery path can be watched without a daemon. Configured exactly
+    /// like a connected socket, so an unprotected descriptor cannot sneak
+    /// through the tests. Returns false when the probe's own socket options
+    /// are refused.
+    @discardableResult
+    internal func attachSocketForTests(_ descriptor: Int32) -> Bool {
+        guard configureSocket(descriptor) else {
+            close(descriptor)
+            return false
+        }
+        lock.lock()
+        fd = descriptor
+        lock.unlock()
+        return true
+    }
+
+    internal func resetForTests() {
+        lock.lock()
+        // Invalidate any running connection thread first: it must not come back
+        // to life under a later test and drain that test's offline buffer.
+        stopped = true
+        connectionGeneration += 1
+        let descriptor = fd
         fd = -1
         started = false
+        queuedWrites = 0
         offlineBuffer = []
         dropped = 0
-        mirrorRoots = []
+        droppedWrites = 0
+        advertisedCapabilities = []
+        backoffOverrideStorage = nil
+        let observer = kvObserver
         kvObserver = nil
+        mirrorRoots = []
         checkpoints = []
         retainedCheckpoints = []
         lastMirrorExport = [:]
+        lock.unlock()
+        // Detach rather than orphan: dropping the reference leaves the KVO
+        // registrations alive on live objects, and the orphan keeps emitting
+        // state frames into whichever runtime comes next.
+        observer?.detachAll()
+        if descriptor >= 0 { closeDeferred(descriptor) }
     }
 
     // MARK: Metal (Z4.5)
@@ -510,11 +871,24 @@ final class ProbeRuntime: @unchecked Sendable {
 
 // MARK: - KVC observer (Z3)
 
+/// Observes registered objects without owning them: the app under test must be
+/// able to release a document/window model while it is still nominally
+/// "instrumented", or every object ever registered stays alive forever and the
+/// daemon's per-pid event ring fills with state from objects the app has
+/// already thrown away.
 final class KVCObserver: NSObject {
-    private struct Target {
-        let object: NSObject
+    /// Weak slot wrapper (a struct cannot hold a `weak` member): the observed
+    /// object belongs to the app under test, not to the probe.
+    private final class Target {
+        weak var object: NSObject?
         let label: String
         let keys: [String]
+
+        init(object: NSObject, label: String, keys: [String]) {
+            self.object = object
+            self.label = label
+            self.keys = keys
+        }
     }
     private var targets: [Target] = []
     private let emit: (_ key: String, _ before: String, _ after: String) -> Void
@@ -524,16 +898,88 @@ final class KVCObserver: NSObject {
         self.emit = emit
     }
 
+    deinit {
+        emitLock.lock()
+        let live = targets.compactMap { entry -> (object: NSObject, keys: [String])? in
+            guard let object = entry.object else { return nil }
+            return (object, entry.keys)
+        }
+        targets = []
+        emitLock.unlock()
+        for entry in live {
+            for key in entry.keys { entry.object.removeObserver(self, forKeyPath: key) }
+        }
+    }
+
+    /// Drops slots whose object has since been released. Caller holds `emitLock`.
+    private func pruneLocked() {
+        targets.removeAll { $0.object == nil }
+    }
+
+    var hasLiveTargets: Bool {
+        emitLock.lock(); defer { emitLock.unlock() }
+        pruneLocked()
+        return !targets.isEmpty
+    }
+
+    var debugTargetCount: Int {
+        emitLock.lock(); defer { emitLock.unlock() }
+        pruneLocked()
+        return targets.count
+    }
+
     func attach(_ object: NSObject, label: String, keys: [String]) {
         emitLock.lock()
+        pruneLocked()
+        var replacedKeys: [String] = []
+        if let index = targets.firstIndex(where: { $0.object === object }) {
+            // Re-registering the same object replaces its key set: KVO raises
+            // when the same keyPath is registered twice on one subject, and a
+            // crash inside the app under test is the one thing this SDK
+            // promises not to do.
+            replacedKeys = targets[index].keys
+            targets.remove(at: index)
+        }
         targets.append(Target(object: object, label: label, keys: keys))
         emitLock.unlock()
-        for key in keys {
-            object.addObserver(
-                self, forKeyPath: key,
-                options: [.old, .new],
-                context: nil
-            )
+        for key in replacedKeys where !keys.contains(key) {
+            object.removeObserver(self, forKeyPath: key)
+        }
+        for key in keys where !replacedKeys.contains(key) {
+            object.addObserver(self, forKeyPath: key, options: [.old, .new], context: nil)
+        }
+    }
+
+    /// Removes this object's observers and its slot. Returns false when the
+    /// object is not registered (including "already released by the app" — its
+    /// weak slot simply disappears).
+    @discardableResult
+    func detach(_ object: NSObject) -> Bool {
+        emitLock.lock()
+        pruneLocked()
+        guard let index = targets.firstIndex(where: { $0.object === object }) else {
+            emitLock.unlock()
+            return false
+        }
+        let keys = targets[index].keys
+        targets.remove(at: index)
+        emitLock.unlock()
+        for key in keys { object.removeObserver(self, forKeyPath: key) }
+        return true
+    }
+
+    /// Detaches everything still observable (test reset: never orphan an
+    /// observer onto live objects).
+    func detachAll() {
+        emitLock.lock()
+        let live = targets.compactMap { entry -> (object: NSObject, keys: [String])? in
+            guard let object = entry.object else { return nil }
+            return (object, entry.keys)
+        }
+        targets = []
+        emitLock.unlock()
+        for entry in live {
+            for key in entry.keys { entry.object.removeObserver(self, forKeyPath: key) }
         }
     }
 
@@ -647,6 +1093,29 @@ enum ProbeCanonical {
     }
 }
 
+/// Per-socket safety options, installed before a descriptor reaches the
+/// runtime; false means the descriptor is closed rather than kept, because an
+/// unprotected socket is exactly the "probe killed the host" failure this file
+/// promises against.
+///
+/// * `SO_NOSIGPIPE`: a write to a peer that vanished must not raise SIGPIPE in
+///   the app under test. The daemon can afford `signal(SIGPIPE, SIG_IGN)` for
+///   itself (it owns that process); an SDK embedded in somebody else's app may
+///   not change the host's signal dispositions, so the protection is per
+///   socket.
+/// * `O_NONBLOCK`: makes the send and receive bounds explicit instead of
+///   trusting `SO_SNDTIMEO`/`SO_RCVTIMEO` support (the writer waits on POLLOUT
+///   up to `sendTimeoutMs`, the reader waits on POLLIN up to
+///   `receiveTimeoutMs` and re-checks the connection in between).
+internal func configureSocket(_ descriptor: Int32) -> Bool {
+    var noSigpipe = Int32(1)
+    guard setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, socklen_t(MemoryLayout<Int32>.size)) == 0
+    else { return false }
+    let flags = fcntl(descriptor, F_GETFL)
+    guard flags >= 0, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0 else { return false }
+    return true
+}
+
 private func connect(to path: String) -> Int32 {
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
     guard fd >= 0 else { return -1 }
@@ -667,6 +1136,10 @@ private func connect(to path: String) -> Int32 {
         }
     }
     if result != 0 {
+        close(fd)
+        return -1
+    }
+    guard configureSocket(fd) else {
         close(fd)
         return -1
     }

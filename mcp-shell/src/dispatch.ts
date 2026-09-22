@@ -7,8 +7,17 @@ import { EvidenceAuditSession } from "./audit-session.js";
  * ------------------------------------------------------------------ */
 
 export const JSONRPC = "2.0" as const;
-/** MCP protocol version echoed on initialize (spec §6.1). */
+/**
+ * This shell's own MCP protocol version — the fallback answer on initialize
+ * when the client asks for a version we do not implement (spec §6.1).
+ */
 export const MCP_PROTOCOL_VERSION = "2025-06-18" as const;
+/**
+ * Versions this shell implements out of the box, i.e. the ones initialize echoes
+ * back. Anything else the client names falls back to MCP_PROTOCOL_VERSION
+ * (spec §6.1: 回显客户端版本，不识别时回落本常量).
+ */
+export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = [MCP_PROTOCOL_VERSION];
 export const SERVER_INFO = { name: "glasspane-mcp", version: "1.1.0" } as const;
 
 export const PARSE_ERROR = -32700;
@@ -45,15 +54,20 @@ export interface McpServerDeps {
   specs?: readonly ToolSpec[];
   /** Overridable audit session (per-server operationId trail, spec v1.3 §10.3). */
   session?: EvidenceAuditSession;
+  /** Overridable echoable MCP versions (spec §6.1); defaults to the shipped set. */
+  supportedProtocolVersions?: readonly string[];
 }
 
 export class McpServer {
   private readonly specs: readonly ToolSpec[];
   private readonly session: EvidenceAuditSession;
+  private readonly supportedProtocolVersions: readonly string[];
 
   constructor(private readonly deps: McpServerDeps) {
     this.specs = deps.specs ?? TOOL_SPECS;
     this.session = deps.session ?? new EvidenceAuditSession();
+    this.supportedProtocolVersions =
+      deps.supportedProtocolVersions ?? SUPPORTED_PROTOCOL_VERSIONS;
   }
 
   /** Handle a single newline-delimited frame; returns a response or null. */
@@ -103,7 +117,7 @@ export class McpServer {
     switch (request.method) {
       case "initialize":
         return this.result(id, {
-          protocolVersion: MCP_PROTOCOL_VERSION,
+          protocolVersion: this.negotiateProtocolVersion(request.params),
           capabilities: { tools: { listChanged: false } },
           serverInfo: SERVER_INFO,
         });
@@ -122,6 +136,22 @@ export class McpServer {
       default:
         return this.error(METHOD_NOT_FOUND, `Method not found: ${request.method}`, id);
     }
+  }
+
+  /**
+   * Spec §6.1: echo the client's protocolVersion when this server implements it,
+   * otherwise fall back to MCP_PROTOCOL_VERSION. A missing or non-string version
+   * is just "not recognized" — it falls back too, and never throws.
+   */
+  private negotiateProtocolVersion(rawParams: unknown): string {
+    if (typeof rawParams !== "object" || rawParams === null || Array.isArray(rawParams)) {
+      return MCP_PROTOCOL_VERSION;
+    }
+    const requested: unknown = (rawParams as Record<string, unknown>).protocolVersion;
+    if (typeof requested !== "string") {
+      return MCP_PROTOCOL_VERSION;
+    }
+    return this.supportedProtocolVersions.includes(requested) ? requested : MCP_PROTOCOL_VERSION;
   }
 
   private async callTool(id: number | string, rawParams: unknown): Promise<RpcResponse> {

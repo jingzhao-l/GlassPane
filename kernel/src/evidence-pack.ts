@@ -13,6 +13,16 @@ export const SELECTOR_MAX_LENGTH = 512;
 
 export const EVIDENCE_SCHEMA_VERSION = "glasspane.evidence/0.1" as const;
 
+/**
+ * The schema label used before the Phase B freeze. P0 spec §4 keeps it
+ * read-compatible for ever ("冻结前历史值 0.1-draft 只读兼容"): packs archived
+ * under it carry the frozen body field for field — the frozen schema's own
+ * description still calls itself "schema v0.1-draft" — so the read path folds
+ * this label onto the frozen const instead of refusing them. Nothing on the
+ * write side may ever stamp it again.
+ */
+export const LEGACY_EVIDENCE_SCHEMA_VERSION = "glasspane.evidence/0.1-draft" as const;
+
 export const AttributionLevelSchema = z.enum(["soft", "strong", "weak"]);
 export type AttributionLevel = z.infer<typeof AttributionLevelSchema>;
 
@@ -198,3 +208,61 @@ export const EvidencePackSchema = z.strictObject({
   diagnosis: z.union([DiagnosisSchema, z.null()]).optional()
 });
 export type EvidencePack = z.infer<typeof EvidencePackSchema>;
+
+/* ------------------------------------------------------------------ *
+ * READ side only. The strict schema above stays the single write
+ * contract (nothing may be archived in a legacy shape), but a reader that
+ * applies it to the archives on a real machine refuses packs the engine
+ * itself produced, which makes the audit trail unreadable. Two shapes are
+ * tolerated here, and only these two — every other rule (required keys,
+ * patterns, ranges, strictness) is still enforced by EvidencePackSchema:
+ *
+ *   1. `schemaVersion: "glasspane.evidence/0.1-draft"` — pre-freeze packs.
+ *   2. `signals.pixelDiff` without a `bounds` key. The frozen contract keeps
+ *      that key and allows null (§4.2), but the daemon's synthesized Swift
+ *      encoder dropped the key whenever bounds was nil, which is the
+ *      commonest outcome of all ("no pixel changed"). The engine now encodes
+ *      explicit null; archives written before that still have to read.
+ * ------------------------------------------------------------------ */
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Brings a legacy-shaped pack into the frozen contract's shape so the strict
+ * schema can validate it unchanged. Pure: the caller's value is never mutated,
+ * and a pack that needs no repair is returned as-is.
+ */
+function normalizeEvidencePackForRead(input: unknown): unknown {
+  if (!isObjectRecord(input)) {
+    return input;
+  }
+  const foldsLegacyVersion = input.schemaVersion === LEGACY_EVIDENCE_SCHEMA_VERSION;
+  const signals = isObjectRecord(input.signals) ? input.signals : undefined;
+  const pixelDiff = signals === undefined ? undefined : signals.pixelDiff;
+  const fillsBounds =
+    isObjectRecord(pixelDiff) && signals !== undefined && !("bounds" in pixelDiff);
+  if (!foldsLegacyVersion && !fillsBounds) {
+    return input;
+  }
+  const next: Record<string, unknown> = { ...input };
+  if (foldsLegacyVersion) {
+    next.schemaVersion = EVIDENCE_SCHEMA_VERSION;
+  }
+  if (fillsBounds && signals !== undefined && isObjectRecord(pixelDiff)) {
+    next.signals = { ...signals, pixelDiff: { ...pixelDiff, bounds: null } };
+  }
+  return next;
+}
+
+/**
+ * Read-side contract: `EvidencePackSchema` behind the two documented legacy
+ * normalisations. The parsed value always matches the write-side shape, so
+ * consumers (report renderers, comparators) never have to model the historical
+ * encodings. Never use this to write a pack — use `EvidencePackSchema`.
+ */
+export const EvidencePackReadSchema = z.preprocess(
+  normalizeEvidencePackForRead,
+  EvidencePackSchema
+);

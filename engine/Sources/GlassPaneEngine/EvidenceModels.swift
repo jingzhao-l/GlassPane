@@ -153,6 +153,27 @@ public struct PixelDiffSignal: Codable, Equatable {
         self.bounds = bounds
         self.windowId = windowId
     }
+
+    enum CodingKeys: String, CodingKey {
+        case changedPixelRatio, bounds, windowId
+    }
+
+    /// `bounds` stays a required, nullable key (P0 §4.2): a nil bounds is the
+    /// measured answer "no pixel changed", not an unknown field. The synthesized
+    /// encoder omitted the key whenever bounds was nil, which made every
+    /// zero-diff pack fail the frozen schema's required list on read; absence is
+    /// therefore written as explicit null, the same way `Signals` writes
+    /// `handlerProbe`/`stateDiff`.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(changedPixelRatio, forKey: .changedPixelRatio)
+        if let bounds {
+            try container.encode(bounds, forKey: .bounds)
+        } else {
+            try container.encodeNil(forKey: .bounds)
+        }
+        try container.encode(windowId, forKey: .windowId)
+    }
 }
 
 public struct ResponsivenessSignal: Codable, Equatable {

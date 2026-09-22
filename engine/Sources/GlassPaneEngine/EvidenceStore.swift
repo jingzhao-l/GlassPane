@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - Evidence persistent store (P1 spec v1.5 §9, archive lifecycle v1.6 §12)
 
-/// Aggregate archive size snapshot (spec v1.6 §12.3): number of `.json`
+/// Aggregate archive size snapshot (spec v1.6 §12.3): number of evidence
 /// entries and their total on-disk bytes in the active directory.
 public struct EvidenceArchiveStats: Equatable {
     public let count: Int
@@ -21,13 +21,23 @@ public struct EvidenceArchiveStats: Equatable {
 /// - one file per operationId, key-sorted JSON via `EvidencePack.encoder`;
 /// - atomic write via tmp + rename (same pattern as `ProjectRegistry.save`);
 /// - `read` decodes and validates; missing/corrupt returns nil (never throws);
-/// - directory is created on first write.
+/// - directory is created on first write, and is brought to (or proven) 0700
+///   before any pack lands in it — an archive that cannot be made private to
+///   this account refuses writes instead (R5-04).
 ///
 /// Archive lifecycle (spec v1.6 §12.2–§12.3):
 /// - writes prune the oldest entries by mtime when the archive exceeds
 ///   `maxFiles`, keeping the active directory bounded;
 /// - `stats()` exposes `{count, totalBytes}` for observation;
 /// - `clear()` removes every entry in the active directory on demand.
+///
+/// Deletion radius (P0 §8.1 blast-radius review): the archive directory is
+/// configurable per project, so every destructive pass below is limited to
+/// entries this store actually created — a regular, non-symlink file named
+/// exactly `<opId>.json`. A directory that happens to end in `.json`, a
+/// foreign `settings.json`, or a link out of the archive is therefore never a
+/// deletion candidate, because `FileManager.removeItem` recurses. An entry
+/// whose age cannot be measured is likewise never treated as expired.
 ///
 /// This is pure logic + local file I/O with no AX dependency, so it is fully
 /// unit-testable against an injected temporary directory.
@@ -46,6 +56,46 @@ public final class EvidenceStore {
     /// names derived solely from opId are filesystem-safe with no path risk.
     public static let fileExtension = "json"
 
+    /// The name shape of an archive entry, i.e. exactly what `write(_:)`
+    /// creates: `op_` + 26 Crockford characters + `.json`. The prefix,
+    /// alphabet and length are read from `OperationID` (the only generator of
+    /// these ids) rather than restated here, so the deletion scope cannot drift
+    /// away from the write path.
+    static let entryNamePattern =
+        "^" + OperationID.prefix
+        + "[\(String(OperationID.crockfordAlphabet))]"
+        + "{\(OperationID.totalLength)}\\." + fileExtension + "$"
+
+    private static let entryNameRegex = try! NSRegularExpression(pattern: entryNamePattern)
+
+    /// Exact UTF-16 length of a conforming entry name: `op_` + 26 characters
+    /// + `.` + `json`. Checked before the regex because `$` in an
+    /// `NSRegularExpression` pattern also matches before a trailing newline.
+    private static let entryNameLength =
+        OperationID.prefix.utf16.count + OperationID.totalLength + fileExtension.utf16.count + 1
+
+    /// Whether `name` is the file name this store writes for an evidence pack.
+    static func isEntryName(_ name: String) -> Bool {
+        guard name.utf16.count == entryNameLength else { return false }
+        let range = NSRange(name.startIndex..., in: name)
+        return entryNameRegex.firstMatch(in: name, range: range) != nil
+    }
+
+    /// Deletion identity for every destructive pass: an entry this store owns
+    /// is a *regular, non-symlink file* whose name matches `entryNamePattern`.
+    /// Anything that cannot be measured (stat failed, entry vanished mid-list)
+    /// is reported as not deletable — this store never deletes on a guess,
+    /// since removing a directory removes its contents with it.
+    static func isDeletableEntry(_ url: URL) -> Bool {
+        guard isEntryName(url.lastPathComponent) else { return false }
+        guard let values = try? url.resourceValues(
+            forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+        ) else {
+            return false
+        }
+        return values.isRegularFile == true && values.isSymbolicLink != true
+    }
+
     private(set) var directory: String
 
     /// Archive retention cap. Writes exceeding this prune the oldest entries
@@ -63,6 +113,17 @@ public final class EvidenceStore {
     /// so TTL pruning is deterministic without sleeping.
     private let now: () -> Date
 
+    /// Where isolation failures and out-of-home gaps are reported. Defaults to
+    /// non-quiet: a refused write must never become the silent kind (R5-04).
+    private let log: EngineLog
+
+    /// Directory value whose isolation verdict (0700 established, or the
+    /// honest out-of-home gap) was last recorded. Cached per directory so a
+    /// long-running daemon chmods/stat-checks once, not per
+    /// pack; failures are never cached, so every write re-measures until the
+    /// operator fixes the permission.
+    private var isolatedDirectory: String?
+
     /// - Parameters:
     ///   - directory: evidence storage directory (defaults to `defaultDirectory`).
     ///   - maxFiles: retention cap; values ≤ 0 are clamped up to 1 so a caller
@@ -70,23 +131,29 @@ public final class EvidenceStore {
     ///   - maxAgeDays: age-based TTL; nil disables ageing. Values < 1 are
     ///     clamped to nil (disabled) rather than "delete on write".
     ///   - now: clock for age computation (defaults to the wall clock).
+    ///   - log: sink for the isolation verdicts (R5-04).
     public init(
         directory: String? = nil,
         maxFiles: Int? = nil,
         maxAgeDays: Int? = nil,
-        now: @escaping () -> Date = { Date() }
+        now: @escaping () -> Date = { Date() },
+        log: EngineLog = EngineLog(quiet: false)
     ) {
         self.directory = directory ?? EvidenceStore.defaultDirectory
         let requested = maxFiles ?? EvidenceStore.defaultMaxFiles
         self.maxFiles = max(requested, 1)
         self.maxAgeDays = maxAgeDays.map { $0 >= 1 ? $0 : nil } ?? nil
         self.now = now
+        self.log = log
     }
 
     /// Update the active store directory (called when the active project
-    /// changes on attach; spec v1.5 §9.3).
+    /// changes on attach; spec v1.5 §9.3). The isolation verdict is dropped
+    /// with the old directory so the new one is re-measured before its first
+    /// write (R5-04).
     public func setDirectory(_ dir: String) {
         directory = dir
+        isolatedDirectory = nil
     }
 
     /// Update the age-based TTL retention (P5 §9.2). Values < 1 are clamped
@@ -98,22 +165,16 @@ public final class EvidenceStore {
     // MARK: - Persistence
 
     /// Write a pack atomically to `<dir>/<operationId>.json`. The directory is
-    /// created on demand. `write` does not throw: callers must not let a disk
-    /// fault break the main act/assert pipeline (spec v1.5 §11.2). Returns
-    /// whether the write actually landed, so tests can assert on failure path.
+    /// created on demand and must first be brought to 0700 (R5-04, see
+    /// `ensureIsolatedDirectory`). `write` does not throw: callers must not let
+    /// a disk fault break the main act/assert pipeline (spec v1.5 §11.2).
+    /// Returns whether the write actually landed, so tests can assert on
+    /// failure path — a directory that cannot be proven private reports a
+    /// measured failure (false) instead of writing readable-by-everyone packs.
     @discardableResult
     public func write(_ pack: EvidencePack) -> Bool {
         guard let data = try? pack.jsonData() else { return false }
-        if !dirExists() {
-            do {
-                try FileManager.default.createDirectory(
-                    atPath: directory,
-                    withIntermediateDirectories: true
-                )
-            } catch {
-                return false
-            }
-        }
+        guard ensureIsolatedDirectory() else { return false }
         let filePath = path(for: pack.operationId)
         let tmpPath = filePath + ".tmp"
         do {
@@ -154,11 +215,9 @@ public final class EvidenceStore {
     /// OperationId of the most recently written file, by file modification
     /// time. Returns nil when the directory is empty or missing.
     public func lastOnDisk() -> String? {
-        let urls = jsonFileURLs(keys: [.contentModificationDateKey])
+        let urls = archiveEntryURLs(keys: [.contentModificationDateKey])
         let newest = urls.max { a, b in
-            let dateA = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            let dateB = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            return dateA < dateB
+            (modificationDate(of: a) ?? .distantPast) < (modificationDate(of: b) ?? .distantPast)
         }
         guard let newest else { return nil }
         return newest.deletingPathExtension().lastPathComponent
@@ -166,10 +225,10 @@ public final class EvidenceStore {
 
     // MARK: - Archive lifecycle (spec v1.6 §12)
 
-    /// Aggregate size of the active archive: `.json` entry count and total
+    /// Aggregate size of the active archive: evidence entry count and total
     /// on-disk bytes. Missing/empty directories report 0/0 and never throw.
     public func stats() -> EvidenceArchiveStats {
-        let urls = jsonFileURLs(keys: [.fileSizeKey])
+        let urls = archiveEntryURLs(keys: [.fileSizeKey])
         var totalBytes = 0
         for url in urls {
             if let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) {
@@ -179,13 +238,16 @@ public final class EvidenceStore {
         return EvidenceArchiveStats(count: urls.count, totalBytes: totalBytes)
     }
 
-    /// Remove every `.json` entry in the active directory, returning the
-    /// number actually removed (spec v1.6 §12.3). Best-effort: a single file
-    /// that cannot be removed is skipped without aborting the rest; a never-
-    /// created or already-empty directory returns 0.
+    /// Remove every evidence entry in the active directory, returning the
+    /// number actually removed (spec v1.6 §12.3). Scope is `isDeletableEntry`:
+    /// only files this store wrote under its own naming convention go, so a
+    /// `.json`-named directory or a foreign config file in the same directory
+    /// is left in place. Best-effort: a single file that cannot be removed is
+    /// skipped without aborting the rest; a never-created or already-empty
+    /// directory returns 0.
     @discardableResult
     public func clear() -> Int {
-        let urls = jsonFileURLs(keys: [])
+        let urls = archiveEntryURLs(keys: [])
         var removed = 0
         for url in urls {
             if (try? FileManager.default.removeItem(at: url)) != nil {
@@ -195,19 +257,20 @@ public final class EvidenceStore {
         return removed
     }
 
-    /// Enforce the archive cap: when the `.json` entry count exceeds
+    /// Enforce the archive cap: when the evidence entry count exceeds
     /// `maxFiles`, delete the oldest `count - maxFiles` entries by mtime
     /// (FIFO-by-mtime, spec v1.6 §12.2). Best-effort; returns how many were
     /// actually removed. The just-written entry is never a victim because the
-    /// victims are chosen strictly from the oldest excess.
+    /// victims are chosen strictly from the oldest excess, and an entry whose
+    /// mtime cannot be read sorts as newest so it is never picked as old.
     @discardableResult
     private func pruneIfNeeded() -> Int {
-        let urls = jsonFileURLs(keys: [.contentModificationDateKey])
+        let urls = archiveEntryURLs(keys: [.contentModificationDateKey])
         let excess = urls.count - maxFiles
         guard excess > 0 else { return 0 }
         let oldestFirst = urls.sorted { a, b in
-            let dateA = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantFuture
-            let dateB = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantFuture
+            let dateA = modificationDate(of: a) ?? .distantFuture
+            let dateB = modificationDate(of: b) ?? .distantFuture
             return dateA < dateB
         }
         var removed = 0
@@ -260,7 +323,7 @@ public final class EvidenceStore {
     public func countExpired(olderThanDays: Int) -> Int {
         guard olderThanDays >= 1 else { return 0 }
         let current = now()
-        return jsonFileURLs(keys: [.contentModificationDateKey]).filter {
+        return archiveEntryURLs(keys: [.contentModificationDateKey]).filter {
             isExpired(url: $0, maxAgeDays: olderThanDays, now: current)
         }.count
     }
@@ -268,7 +331,7 @@ public final class EvidenceStore {
     /// Actual deletion pass over every entry older than the effective TTL.
     private func removeExpired(effectiveMaxAgeDays: Int?, now: Date) -> Int {
         guard let effectiveMaxAgeDays else { return 0 }
-        let urls = jsonFileURLs(keys: [.contentModificationDateKey])
+        let urls = archiveEntryURLs(keys: [.contentModificationDateKey])
         guard !urls.isEmpty else { return 0 }
         var removed = 0
         for url in urls {
@@ -283,9 +346,15 @@ public final class EvidenceStore {
     /// Age judgment (P5 §9.2): expiry = created/reference date is more than
     /// `maxAgeDays` before `now`. Prefers the entry's own `createdAt`; corrupt
     /// entries fall back to the file mtime (same basis as FIFO pruning).
-    private func isExpired(url: URL, maxAgeDays: Int, now: Date) -> Bool {
+    /// When *neither* can be read the entry is kept: an age that was never
+    /// measured must not be folded into "infinitely old" and deleted.
+    /// Internal so the unmeasurable-age branch is unit-testable without racing
+    /// the file against its own enumeration.
+    func isExpired(url: URL, maxAgeDays: Int, now: Date) -> Bool {
         let cutoffSeconds = TimeInterval(maxAgeDays) * Self.secondsPerDay
-        let reference = createdDate(url: url) ?? fallbackModificationDate(url: url)
+        guard let reference = createdDate(url: url) ?? modificationDate(of: url) else {
+            return false
+        }
         return now.timeIntervalSince(reference) > cutoffSeconds
     }
 
@@ -297,33 +366,110 @@ public final class EvidenceStore {
         return Self.isoDate(pack.createdAt)
     }
 
-    private func fallbackModificationDate(url: URL) -> Date {
-        (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
-            ?? .distantPast
+    /// File mtime, or nil when it cannot be read. Callers must handle nil as
+    /// "age unknown", never as a specific point in the past.
+    private func modificationDate(of url: URL) -> Date? {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+            .contentModificationDate
     }
 
     // MARK: - Helpers
 
-    /// List the `.json` evidence files in the active directory, requesting the
-    /// given resource keys. Returns `[]` when the directory is missing (never
+    /// List the archive's entries in the active directory, requesting the given
+    /// resource keys. An entry is a file this store created — see
+    /// `isDeletableEntry` — so foreign `.json` files and `.json`-named
+    /// directories are excluded here once, for every consumer (observation and
+    /// deletion alike). Returns `[]` when the directory is missing (never
     /// throws), so iterative listing is safe on a never-created archive.
-    private func jsonFileURLs(keys: [URLResourceKey]) -> [URL] {
+    private func archiveEntryURLs(keys: [URLResourceKey]) -> [URL] {
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: URL(fileURLWithPath: directory),
-            includingPropertiesForKeys: keys,
+            includingPropertiesForKeys: keys + [.isRegularFileKey, .isSymbolicLinkKey],
             options: [.skipsHiddenFiles]
         ) else {
             return []
         }
-        return urls.filter { $0.pathExtension == EvidenceStore.fileExtension }
+        return urls.filter { Self.isDeletableEntry($0) }
+    }
+
+    // MARK: - Directory isolation (R5-04)
+
+    /// Enforce the 0700 isolation this archive requires, mirroring
+    /// `SocketServer.prepareSocketDirectory` (same rule, same enforcement
+    /// scope, same honest gap reporting).
+    ///
+    /// `createDirectory(attributes:)` only applies to directories **this call
+    /// creates** — `~/.glasspane` and `~/.glasspane/evidence` are normally
+    /// already there (the mcp-shell registry creates them with the default
+    /// mode), so without a chmod-after-create the documented isolation is
+    /// silently false and every other local account can read the evidence
+    /// packs. Enforcement is scoped to directories under the user's home;
+    /// outside home (isolated smoke runs in /var/folders or /tmp) tightening a
+    /// directory we do not own is not ours to do, so that case logs the gap
+    /// instead of pretending the invariant holds.
+    ///
+    /// When isolation cannot be established the write is **refused** (returns
+    /// false — the failure mode `EngineCore` already surfaces as a degraded
+    /// `evidenceId` warning). Refusal is the non-destructive failure shape:
+    /// nothing on this path ever deletes, rewrites or "recreates" what is
+    /// already in the archive; the daemon simply does not add world-readable
+    /// packs to it.
+    private func ensureIsolatedDirectory() -> Bool {
+        let probe = directory
+        if isolatedDirectory == probe { return true }
+        let path = URL(fileURLWithPath: directory).path // drops the trailing slash
+        if !FileManager.default.fileExists(atPath: path) {
+            do {
+                try FileManager.default.createDirectory(
+                    atPath: path,
+                    withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700]
+                )
+            } catch {
+                log.error("evidence directory \(path) cannot be created: \(error.localizedDescription) — refusing to write; nothing existing was touched")
+                return false
+            }
+        }
+        let home = NSHomeDirectory()
+        guard path != home, path.hasPrefix(home + "/") else {
+            log.error("evidence directory \(path) is outside \(home) — per-user isolation (0700) is NOT enforced for this path")
+            isolatedDirectory = probe
+            return true
+        }
+        guard chmod(path, 0o700) == 0 else {
+            log.error("chmod(0700) \(path) failed: \(String(cString: strerror(errno))) — refusing to write evidence other accounts could read")
+            return false
+        }
+        let attributes = (try? FileManager.default.attributesOfItem(atPath: path)) ?? [:]
+        guard !attributes.isEmpty else {
+            log.error("evidence directory \(path): attributes unreadable after chmod — refusing to write")
+            return false
+        }
+        guard attributes[.type] as? FileAttributeType == .typeDirectory else {
+            log.error("evidence directory \(path) is not a directory — refusing to write")
+            return false
+        }
+        let owner = attributes[.ownerAccountName] as? String ?? "an unknown account"
+        guard owner == NSUserName() else {
+            // Someone else planted the directory we are about to archive into.
+            log.error("evidence directory \(path) is owned by \(owner), not \(NSUserName()) — refusing to write")
+            return false
+        }
+        let mode = (attributes[.posixPermissions] as? NSNumber)?.int16Value ?? -1
+        guard mode == 0o700 else {
+            // chmod claimed success yet the directory is still reachable by
+            // group/other (read-only volume, immutable flag, ACL override):
+            // continuing to archive into it would publish every pack to other
+            // accounts. Refusing writes is the non-destructive failure: an
+            // existing archive under this path stays untouched on disk.
+            log.error("evidence directory \(path) permission is \(String(format: "%04o", Int(mode))) and cannot be set to 0700 — refusing to write; existing entries were left untouched")
+            return false
+        }
+        isolatedDirectory = probe
+        return true
     }
 
     private func path(for operationId: String) -> String {
         directory + "/" + operationId + "." + EvidenceStore.fileExtension
-    }
-
-    private func dirExists() -> Bool {
-        var isDir: ObjCBool = false
-        return FileManager.default.fileExists(atPath: directory, isDirectory: &isDir) && isDir.boolValue
     }
 }

@@ -10,12 +10,24 @@ import ApplicationServices
 /// pixelCaptureDenied (P0 spec §8).
 public final class AXChannel: RuntimeChannel {
 
+    // The budget constants are internal (not private) so the unit tests can
+    // pin the arithmetic without a live AX target.
+
     /// AX messaging timeout in seconds — mirrors EngineCore.pingTimeoutMs.
-    private static let messagingTimeoutSeconds: CFTimeInterval = 2.0
-    /// Total wall-clock budget for one treeSnapshot before it aborts. A hung
-    /// app can stall every child read up to messagingTimeout, so without a
+    static let messagingTimeoutSeconds: CFTimeInterval = 2.0
+    /// Total wall-clock budget for one tree walk (`treeSnapshot`) or one
+    /// selector search (`performAction`/`readProperty`). A hung app can stall
+    /// every attribute read up to the messaging timeout, so without a
     /// cumulative budget observe would block for minutes (seen on real apps).
-    private static let treeTimeoutSeconds: CFTimeInterval = 10.0
+    /// The budget is a *hard* bound: every AX call issued inside a walk gets a
+    /// timeout scaled down to what is left (`messagingTimeout(remaining:)`),
+    /// so the walk cannot overshoot it (R2-19).
+    static let treeTimeoutSeconds: CFTimeInterval = 10.0
+    /// Shortest per-call timeout still worth issuing a call with. Below this
+    /// the remaining budget counts as spent — and a zero timeout must never
+    /// reach `AXUIElementSetMessagingTimeout`, where it means "restore the
+    /// system default" and would silently break the bound above.
+    static let minMessagingTimeoutSeconds: CFTimeInterval = 0.1
     /// Selector searches walk the full AX hierarchy but never deeper than
     /// this guard (observe is separately bounded by maxDepth).
     private static let searchMaxDepth = 24
@@ -58,7 +70,9 @@ public final class AXChannel: RuntimeChannel {
             // serving requests within the messaging timeout.
             return elapsedMs
         case .cannotComplete:
-            throw Self.permissionOrPingTimeout(action: "ping")
+            throw Self.permissionOrPingTimeout(
+                action: "ping", processTrusted: AXIsProcessTrusted()
+            )
         case .apiDisabled:
             throw ChannelError.axUnavailable(reason: "AX API is disabled")
         default:
@@ -72,6 +86,10 @@ public final class AXChannel: RuntimeChannel {
         // Abort the whole walk if cumulative AX reads exceed the budget,
         // so observe can never block past treeTimeout even on a hung app.
         let deadline = started + Self.treeTimeoutSeconds
+        // 预算闸会逐次改写元素的 messaging timeout（见 `enforceBudget`）；app 元素
+        // 是跨调用保留的，所以走完树必须把它调回默认值，否则下一次 ping/act 会继承
+        // 一次中止遍历时的残余小超时。
+        defer { AXUIElementSetMessagingTimeout(element, Float(Self.messagingTimeoutSeconds)) }
         let root = try buildNode(for: element, depth: 0, maxDepth: maxDepth, deadline: deadline)
         let roots = [root]
         let latencyMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
@@ -85,10 +103,19 @@ public final class AXChannel: RuntimeChannel {
 
     public func performAction(selector: Selector, action: Action) throws {
         let element = try requireAppElement()
-        guard let target = try findElement(matching: selector, root: element) else {
+        // 选择器搜索同样受墙钟预算约束（R2-19）：搜索里的每一次属性读取
+        // 与每一次 AXChildren 读取都带自己的超时，无上界时一次 act 可以挂几分钟。
+        let deadline = CFAbsoluteTimeGetCurrent() + Self.treeTimeoutSeconds
+        defer { AXUIElementSetMessagingTimeout(element, Float(Self.messagingTimeoutSeconds)) }
+        // findElement 抛错时上抛（"我没读到" ≠ "界面上没有"，R2-06）；返回 nil
+        // 现在只有一个含义：整棵树被完整读完且确实没有匹配项。
+        guard let target = try findElement(
+            matching: selector, root: element, deadline: deadline
+        ) else {
             throw ChannelError.actRejected(reason: "no element matches the selector")
         }
         let actionName = Self.axActionName(for: action)
+        try Self.enforceBudget(on: target, deadline: deadline, what: "performing '\(actionName)'")
         let error = AXUIElementPerformAction(target, actionName as CFString)
         guard error == .success else {
             throw ChannelError.actRejected(
@@ -99,26 +126,34 @@ public final class AXChannel: RuntimeChannel {
 
     public func readProperty(selector: Selector, property: AssertionProperty) throws -> StringOrBool {
         let element = try requireAppElement()
-        guard let target = try findElement(matching: selector, root: element) else {
+        let deadline = CFAbsoluteTimeGetCurrent() + Self.treeTimeoutSeconds
+        defer { AXUIElementSetMessagingTimeout(element, Float(Self.messagingTimeoutSeconds)) }
+        guard let target = try findElement(
+            matching: selector, root: element, deadline: deadline
+        ) else {
             throw ChannelError.assertTargetNotFound
         }
         let attribute = Self.axAttribute(for: property)
+        try Self.enforceBudget(on: target, deadline: deadline, what: "reading \(attribute)")
         var value: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(target, attribute as CFString, &value)
         switch error {
         case .success:
-            return Self.stringOrBool(from: value, property: property)
+            // 读到了什么就报什么；读不出可比对的值时上抛，不替界面造一个
+            // "false"/""（R2-15）—— 那会让 expected:false 的断言在一次失败的读上判过。
+            return try Self.stringOrBool(from: value, attribute: attribute, property: property)
         case .noValue:
-            // An absent value is an honest empty string for text properties,
-            // but cannot be invented for booleans.
-            if property == .value || property == .title {
-                return .string("")
-            }
-            throw ChannelError.attributeUnavailable(reason: "element does not expose \(attribute)")
+            // 空值就是空值：属性存在但元素没有值，这是一次**未观测**，
+            // 不能折成任何可判定的字符串（与 stringOrBool 的 nil 分支同口径）。
+            throw ChannelError.attributeUnavailable(
+                reason: "element does not expose \(attribute) (no value)"
+            )
         case .attributeUnsupported, .notImplemented:
             throw ChannelError.attributeUnavailable(reason: "element does not expose \(attribute)")
         case .cannotComplete:
-            throw Self.permissionOrPingTimeout(action: "read \(attribute)")
+            throw Self.permissionOrPingTimeout(
+                action: "read \(attribute)", processTrusted: AXIsProcessTrusted()
+            )
         case .apiDisabled:
             throw ChannelError.axUnavailable(reason: "AX API is disabled")
         default:
@@ -186,23 +221,21 @@ public final class AXChannel: RuntimeChannel {
 
     /// Recursive depth-bounded assembly. maxDepth is protocol-limited to
     /// 1–10 (ParamValidation), so recursion depth is bounded by construction.
-    /// The wall-clock deadline caps cumulative AX reads across the whole walk.
+    /// Every AX call inside the walk passes the `deadline` through
+    /// `enforceBudget`, which caps that call's messaging timeout at the time
+    /// left — that is what makes `treeTimeoutSeconds` an actual wall-clock
+    /// bound instead of a per-node suggestion (R2-19).
     private func buildNode(
         for element: AXUIElement,
         depth: Int,
         maxDepth: Int,
         deadline: CFTimeInterval
     ) throws -> AxNode {
-        if CFAbsoluteTimeGetCurrent() > deadline {
-            throw ChannelError.treeCaptureFailed(
-                reason: "tree capture exceeded the total \(Self.treeTimeoutSeconds)s budget"
-            )
-        }
-        let role = attributeString(element, kAXRoleAttribute) ?? ""
-        let title = attributeString(element, kAXTitleAttribute)
-        let identifier = attributeString(element, kAXIdentifierAttribute)
+        let role = try attributeString(element, kAXRoleAttribute, deadline: deadline) ?? ""
+        let title = try attributeString(element, kAXTitleAttribute, deadline: deadline)
+        let identifier = try attributeString(element, kAXIdentifierAttribute, deadline: deadline)
         var children: [AxNode] = []
-        if depth < maxDepth, let childElements = try childElements(of: element) {
+        if depth < maxDepth, let childElements = try childElements(of: element, deadline: deadline) {
             children = try childElements.map {
                 try buildNode(for: $0, depth: depth + 1, maxDepth: maxDepth, deadline: deadline)
             }
@@ -210,69 +243,198 @@ public final class AXChannel: RuntimeChannel {
         return AxNode(role: role, title: title, identifier: identifier, children: children)
     }
 
-    /// Reads AXChildren; nil means "leaf or attribute unsupported".
-    private func childElements(of element: AXUIElement) throws -> [AXUIElement]? {
+    /// Reads AXChildren. nil means "this element says it has no children
+    /// attribute" — a definitive answer. A read that never completed throws
+    /// through the same classifier as every other attribute read, so the tree
+    /// walk and the selector search cannot disagree about one failure
+    /// (R2-06: they used to, and `observe` reported "leaf" where it should
+    /// have reported "unread").
+    private func childElements(
+        of element: AXUIElement,
+        deadline: CFTimeInterval
+    ) throws -> [AXUIElement]? {
+        try Self.enforceBudget(on: element, deadline: deadline, what: "reading \(kAXChildrenAttribute)")
         var value: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(
             element, kAXChildrenAttribute as CFString, &value
         )
-        guard error == .success, let value else {
-            switch error {
-            case .cannotComplete:
-                throw Self.permissionOrPingTimeout(action: "walk children")
-            case .apiDisabled:
-                throw ChannelError.axUnavailable(reason: "AX API is disabled")
-            default:
-                return nil
-            }
+        switch Self.classifyAttributeRead(
+            error: error,
+            hasValue: value != nil,
+            processTrusted: AXIsProcessTrusted(),
+            action: "walking children"
+        ) {
+        case .answered:
+            // 分档已保证 `.answered` 只在拿到值时出现；这里只做类型收窄。
+            guard let read = value else { return nil }
+            return (read as? [AXUIElement]) ?? []
+        case .noAnswer:
+            return nil
+        case .unreadable(let channelError):
+            throw channelError
         }
-        return (value as? [AXUIElement]) ?? []
     }
 
-    /// Iterative selector search; the first match wins.
-    private func findElement(matching selector: Selector, root: AXUIElement) throws -> AXUIElement? {
+    /// Iterative selector search; the first match wins. nil means "the whole
+    /// tree was read and nothing matched" — a failed read throws instead
+    /// (R2-06), otherwise a busy main thread turns into the false statement
+    /// "no element matches the selector" and the search can also skip the real
+    /// target and hand back a later node with the same role.
+    private func findElement(
+        matching selector: Selector,
+        root: AXUIElement,
+        deadline: CFTimeInterval
+    ) throws -> AXUIElement? {
         var stack: [(element: AXUIElement, depth: Int)] = [(root, 0)]
         while let (current, depth) = stack.popLast() {
-            if depth > 0 && elementMatches(selector, current) {
-                return current
+            // depth 0 是 app 元素本身，不参与匹配：选择器打的是界面里的控件。
+            if depth > 0 {
+                let matched = try elementMatches(selector, current, deadline: deadline)
+                if matched { return current }
             }
-            if depth < Self.searchMaxDepth, let children = try childElements(of: current) {
+            if depth < Self.searchMaxDepth,
+               let children = try childElements(of: current, deadline: deadline) {
                 stack.append(contentsOf: children.reversed().map { ($0, depth + 1) })
             }
         }
         return nil
     }
 
-    private func elementMatches(_ selector: Selector, _ element: AXUIElement) -> Bool {
-        guard let role = attributeString(element, kAXRoleAttribute),
-              Self.roleMatches(selectorRole: selector.role, axRole: role) else {
+    private func elementMatches(
+        _ selector: Selector,
+        _ element: AXUIElement,
+        deadline: CFTimeInterval
+    ) throws -> Bool {
+        guard let role = try attributeString(element, kAXRoleAttribute, deadline: deadline) else {
             return false
         }
-        if let wantedTitle = selector.title,
-           attributeString(element, kAXTitleAttribute) != wantedTitle {
+        if !Self.roleMatches(selectorRole: selector.role, axRole: role) {
             return false
         }
-        if let wantedIdentifier = selector.identifier,
-           attributeString(element, kAXIdentifierAttribute) != wantedIdentifier {
-            return false
+        if let wantedTitle = selector.title {
+            let title = try attributeString(element, kAXTitleAttribute, deadline: deadline)
+            if title != wantedTitle { return false }
+        }
+        if let wantedIdentifier = selector.identifier {
+            let identifier = try attributeString(
+                element, kAXIdentifierAttribute, deadline: deadline
+            )
+            if identifier != wantedIdentifier { return false }
         }
         return true
     }
 
     // MARK: - Attribute helpers
 
-    /// Single-attribute string read. nil = missing / unsupported / non-string.
-    private func attributeString(_ element: AXUIElement, _ attribute: String) -> String? {
+    /// Single-attribute string read used by every walk. `nil` now means only
+    /// "the element definitively has no string value for this attribute"
+    /// (unsupported / no value / a non-string answer); every other outcome —
+    /// timeout, API disabled, stale element — throws (R2-06). Those were
+    /// previously folded into "does not match", which is what turned an
+    /// unreadable app into a reported-absent element and a dead click.
+    private func attributeString(
+        _ element: AXUIElement,
+        _ attribute: String,
+        deadline: CFTimeInterval
+    ) throws -> String? {
+        try Self.enforceBudget(on: element, deadline: deadline, what: "reading \(attribute)")
         var value: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
-        guard error == .success, let value else { return nil }
-        return value as? String
+        switch Self.classifyAttributeRead(
+            error: error,
+            hasValue: value != nil,
+            processTrusted: AXIsProcessTrusted(),
+            action: "reading \(attribute)"
+        ) {
+        case .answered:
+            guard let read = value else { return nil }
+            // 值读到了但不是字符串 —— 那是"这个属性没有字符串答案"的确定事实。
+            return read as? String
+        case .noAnswer:
+            return nil
+        case .unreadable(let channelError):
+            throw channelError
+        }
+    }
+
+    /// 一次属性读取的三种结局。区分它们是本文件的存在理由：前两种是关于
+    /// **目标界面**的事实，第三种是关于**我们这次读**的事实，绝不能互相冒充。
+    enum AttributeReadOutcome: Equatable {
+        /// 读到了一个值（类型是否可用由调用方判）。
+        case answered
+        /// 元素明确不回答这个属性：不支持、无值、或该属性根本未实现。
+        /// 这是"界面上没有"的确定答案，可以当不匹配/空处理。
+        case noAnswer
+        /// 读取本身失败了（超时、API 被关闭、元素已失效……）——
+        /// 关于界面什么都没测到，必须作为错误传播。
+        case unreadable(ChannelError)
+    }
+
+    /// 纯分档函数（`processTrusted` 注入，可在无 AX 目标下单测）。
+    /// 只有 `attributeUnsupported` / `noValue` / `notImplemented` 是确定答案；
+    /// 其余一律 `unreadable`，并与本文件既有的抛错口径一致。
+    static func classifyAttributeRead(
+        error: AXError,
+        hasValue: Bool,
+        processTrusted: Bool,
+        action: String
+    ) -> AttributeReadOutcome {
+        switch error {
+        case .success:
+            return hasValue ? .answered : .noAnswer
+        case .attributeUnsupported, .noValue, .notImplemented:
+            return .noAnswer
+        case .cannotComplete:
+            return .unreadable(
+                permissionOrPingTimeout(action: action, processTrusted: processTrusted)
+            )
+        case .apiDisabled:
+            return .unreadable(ChannelError.axUnavailable(reason: "AX API is disabled"))
+        case .invalidUIElement:
+            return .unreadable(ChannelError.axUnavailable(
+                reason: "the element went away while trying to \(action); re-attach and retry"
+            ))
+        default:
+            return .unreadable(ChannelError.axUnavailable(
+                reason: "trying to \(action) failed (kAXError \(error.rawValue))"
+            ))
+        }
+    }
+
+    /// 预算闸 + 逐调用超时缩放（R2-19）：在**每一次** AX 调用之前查剩余预算，
+    /// 并把该次调用的 messaging timeout 压进剩余时间里。因为"第 k 次调用的超时
+    /// ≤ 第 k 次开始时的剩余"，整次遍历的累计耗时不可能超过预算；旧实现只在节点
+    /// 入口查一次，而同一个节点要发 3 次属性读 + 1 次 children 读，各带自己的
+    /// 超时（子元素还从未继承 attach 时设的值），所以宣称的硬上界可以超好几倍。
+    static func enforceBudget(
+        on element: AXUIElement,
+        deadline: CFTimeInterval,
+        what: String
+    ) throws {
+        let remaining = deadline - CFAbsoluteTimeGetCurrent()
+        guard let timeout = messagingTimeout(remaining: remaining) else {
+            throw ChannelError.treeCaptureFailed(
+                reason: "the \(treeTimeoutSeconds)s accessibility budget ran out before \(what)"
+            )
+        }
+        // 返回值不检查：设置超时失败最常见的原因是元素已失效，
+        // 而那会紧接着被下一次读取以 kAXError 形态报出来（不会静默）。
+        AXUIElementSetMessagingTimeout(element, timeout)
+    }
+
+    /// 纯函数：剩余预算 → 下一次 AX 调用允许的 messaging timeout（秒）。
+    /// nil = 剩余不足以再发一次调用，调用方必须中止，而不是"顺手再读一次"。
+    /// 上限是 `messagingTimeoutSeconds`；下限是 `minMessagingTimeoutSeconds`
+    /// （低于它就不发，避免把 0 交给 API —— 0 的语义是"恢复系统默认超时"）。
+    static func messagingTimeout(remaining: CFTimeInterval) -> Float? {
+        guard remaining >= minMessagingTimeoutSeconds else { return nil }
+        return Float(min(remaining, messagingTimeoutSeconds))
     }
 
     /// Distinguishes "app hung" from "permission revoked mid-session" for
     /// kAXErrorCannotComplete, which can mean both.
-    private static func permissionOrPingTimeout(action: String) -> ChannelError {
-        guard AXIsProcessTrusted() else {
+    static func permissionOrPingTimeout(action: String, processTrusted: Bool) -> ChannelError {
+        guard processTrusted else {
             return ChannelError.axUnavailable(
                 reason: "accessibility permission revoked while trying to \(action)"
             )
@@ -309,19 +471,39 @@ public final class AXChannel: RuntimeChannel {
         }
     }
 
-    private static func stringOrBool(from value: CFTypeRef?, property: AssertionProperty) -> StringOrBool {
-        guard let value else { return .string("") }
+    /// Converts a value that *was* read into the comparable assertion shape.
+    /// Nothing is ever synthesised: no value, or a value whose type cannot
+    /// answer the asked-for property, throws (R2-15). The old form handed back
+    /// `.string("")` for a NULL boolean attribute and `.bool(false)` for
+    /// anything non-boolean, so an assertion of `expected: false` could PASS on
+    /// an attribute that never answered — an observation invented out of a
+    /// failed read.
+    static func stringOrBool(
+        from value: CFTypeRef?,
+        attribute: String,
+        property: AssertionProperty
+    ) throws -> StringOrBool {
+        // 读不出可比对答案时的统一措辞：缺失就表达为缺失，绝不给一个空串或 false。
+        func unobservable(_ because: String) -> ChannelError {
+            ChannelError.attributeUnavailable(
+                reason: "element's \(attribute) gave no \(property.rawValue) answer (\(because))"
+            )
+        }
+        guard let value else {
+            throw unobservable("the attribute answered with no value")
+        }
         switch property {
         case .role, .title:
-            return .string((value as? String) ?? "")
+            if let string = value as? String { return .string(string) }
+            throw unobservable("answer is \(type(of: value)), not text")
         case .value:
             if let string = value as? String { return .string(string) }
             if let number = value as? NSNumber { return .string(number.stringValue) }
-            return .string("")
+            throw unobservable("answer is \(type(of: value)), neither text nor number")
         case .enabled, .focused:
             if let bool = value as? Bool { return .bool(bool) }
             if let number = value as? NSNumber { return .bool(number.boolValue) }
-            return .bool(false)
+            throw unobservable("answer is \(type(of: value)), not a boolean")
         }
     }
 

@@ -3,7 +3,9 @@ import Foundation
 /// Structured error surface of the engine protocol (P0 spec §3.4).
 /// `remedy` mirrors the spec table's agent-executable guidance verbatim so
 /// MCP-shell consumers can surface identical hints without knowing the engine.
-public enum GPErrorCode: String, Codable {
+/// `CaseIterable` exists so the remedy table can be swept by a test that checks
+/// every command it names is a command the daemon/installer really parses.
+public enum GPErrorCode: String, Codable, CaseIterable {
     case badRequest = "GP_E_BAD_REQUEST"
     case payloadTooLarge = "GP_E_PAYLOAD_TOO_LARGE"
     case methodNotFound = "GP_E_METHOD_NOT_FOUND"
@@ -43,6 +45,8 @@ public struct GPError: Error {
     }
 
     /// Remedy text per P0 spec §3.4 (kept in sync with the spec table).
+    /// Every command named here must exist in `glasspaned`'s argument parser or
+    /// in `installer/cli.js` — see `HumanInterventionAuditTests` for the gate.
     public static func remedy(for code: GPErrorCode) -> String {
         switch code {
         case .badRequest:
@@ -58,7 +62,13 @@ public struct GPError: Error {
         case .appNotFound:
             return "confirm the target app is running, then attach again"
         case .axUnavailable:
-            return "run onboarding: glasspaned --grant-accessibility (opens System Settings > Privacy & Security > Accessibility)"
+            // R2-13：旧文案把人支去 `glasspaned --grant-accessibility`，而那条命令
+            // 申请的是**运行它的进程**的席位（终端），阻塞至多 300s，还会打印
+            // "already granted" 并退出 0 —— daemon 的席位一点没变，却报成成功。
+            // TCC 按责任进程身份记账，所以 remedy 必须指向真正作用在 daemon 身份上
+            // 的路径（installer --restore-launchd 会 bootstrap、用 hello 读 daemon
+            // 自报的席位，必要时 `launchctl kickstart -k` 换新判定进程复验）。
+            return "the Accessibility seat that is missing belongs to the **daemon process**, not to you — GP_E_AX_UNAVAILABLE is always reported by the daemon. Run `node installer/cli.js --restore-launchd`: it bootstraps the launchd job if needed, reads `hello` from the running daemon to see the seat *it* reports, and restarts it with `launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon` so a fresh process re-reads TCC. The only physical step left to a human is ticking the daemon's own entry under System Settings > Privacy & Security > Accessibility, then re-running the same command. If that entry is not in the list yet, the way to make the daemon register itself is `launchctl submit -l <one-shot label> -- <daemon binary> --request-permission accessibility` — the daemon binary's own path, because that flag grants the seat of whichever process runs it. Do NOT try to fix a running daemon with `glasspaned --grant-accessibility` (nor with `--check-accessibility` / `--permissions`): those act on the caller's process, so they grant your shell's seat — `--grant-accessibility` additionally blocks up to 300s and exits 0 while the daemon stays exactly as denied as before. Until the daemon's own seat exists, observe/act are genuinely unavailable: report INCONCLUSIVE with this reason, do not retry blindly and do not re-attach hoping for a different answer."
         case .actFailed:
             return "try another action or verify the selector matches an existing element"
         case .assertTargetNotFound:
@@ -84,5 +94,35 @@ public struct GPError: Error {
         case .internalError:
             return "check the daemon log (stderr) and retry"
         }
+    }
+}
+
+/// Agent-facing text surface shared by the daemon and the `glasspaned` CLI.
+///
+/// Anything this process did not author — an agent-supplied `displayName`, a
+/// caller-supplied path, a peer's error string — must leave through JSON
+/// escaping, otherwise control characters reach the terminal and act on it
+/// (R5-03: `--active-project` used to interpolate the registry's `displayName`
+/// raw, so an OSC-52 clipboard sequence or an ANSI cursor move typed straight
+/// through). `JSONSerialization` escapes the same set that matters here as
+/// `JSONEncoder` does — `< 0x20`, `"` and `\` — and leaves `/` unescaped, so the
+/// escaping properties match `--list-projects`.
+public enum AgentText {
+
+    /// One JSON line (trailing newline included), or nil when the payload could
+    /// not be encoded. There is no raw-text fallback: no line beats a lie.
+    public static func jsonLine(_ object: [String: Any]) -> String? {
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: object, options: [.sortedKeys]
+        ) else {
+            return nil
+        }
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        return text + "\n"
+    }
+
+    /// True when `text` would move the terminal instead of merely printing to it.
+    public static func containsTerminalControlText(_ text: String) -> Bool {
+        text.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7f }
     }
 }

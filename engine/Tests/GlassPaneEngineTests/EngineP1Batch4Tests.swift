@@ -5,6 +5,9 @@ import CoreGraphics
 /// P1 batch 4 (spec v1.3 §12): evidence review UX — the deterministic
 /// report renderer (HTML/Markdown goldens,缺省容错, injection escaping) and
 /// the GP_E_NO_EVIDENCE lookup contract. All pure logic; no GUI permission.
+/// The `testSharedGolden*` cases are the cross-language half of §13.5: they
+/// compare this renderer against `kernel/fixtures/report.ok-01.md` / `.html`,
+/// the same files `mcp-shell/test/evidence-report.test.mjs` uses.
 final class EngineP1Batch4Tests: XCTestCase {
 
     private static let fixtureOperationId = "op_0123456789ABCDEFGHJKMNPQRS"
@@ -256,6 +259,156 @@ final class EngineP1Batch4Tests: XCTestCase {
         XCTAssertTrue(html.contains("alert(&quot;x&amp;y&quot;)"))
         XCTAssertTrue(html.contains("a&amp;b&quot;c&#39;d&lt;e&gt;"))
         XCTAssertTrue(html.contains("p &lt;q&gt; &amp; &quot;r&quot; &#39;s&#39;"))
+    }
+
+    // MARK: - Shared cross-language golden (spec v1.3 §12 P1-D1, §13.5)
+
+    /// The pack behind `kernel/fixtures/report.ok-01.md` / `.html`: the P6
+    /// probe fixture `evidence-pack.ok-03.json` with the same four overrides
+    /// the TS suite applies. Both suites compare their own renderer against
+    /// those two files, so the "same golden" claim in both renderer headers
+    /// is checked rather than asserted.
+    private static func goldenPack(latencyMs: Double = 1234.5678) throws -> EvidencePack {
+        var pack = try EvidencePack.decodeAndValidate(
+            try KernelFixtures.data("evidence-pack.ok-03.json")
+        )
+        pack.signals.axEvent = pack.signals.axEvent.map {
+            AxEventSignal(
+                treeDigestBefore: $0.treeDigestBefore, treeDigestAfter: $0.treeDigestAfter,
+                nodeCount: $0.nodeCount, axChanged: $0.axChanged, latencyMs: latencyMs
+            )
+        }
+        pack.signals.handlerProbe = pack.signals.handlerProbe.map {
+            HandlerProbeSignal(
+                probeVersion: $0.probeVersion, hitCount: $0.hitCount,
+                handlers: $0.handlers, lateCount: 1
+            )
+        }
+        pack.signals.stateDiff = pack.signals.stateDiff.map {
+            StateDiffSignal(
+                source: $0.source, changed: $0.changed,
+                entries: $0.entries + [StateEntry(key: "demo.label", before: "idle", after: "pressed")]
+            )
+        }
+        pack.signals.pixelDiff = pack.signals.pixelDiff.map {
+            PixelDiffSignal(changedPixelRatio: 0.1234567, bounds: $0.bounds, windowId: $0.windowId)
+        }
+        // Fail here, not inside a golden diff, if the shipped fixture stops
+        // carrying the shape this golden is derived from.
+        XCTAssertEqual(pack.signals.axEvent?.latencyMs, latencyMs)
+        XCTAssertEqual(pack.signals.handlerProbe?.lateCount, 1)
+        XCTAssertEqual(pack.signals.stateDiff?.entries.map(\.key), ["demo.count", "demo.label"])
+        XCTAssertEqual(pack.signals.pixelDiff?.changedPixelRatio, 0.1234567)
+        return pack
+    }
+
+    /// ok-02: required members only, explicit null probe channels, no diagnosis.
+    private static func z5Pack() throws -> EvidencePack {
+        try EvidencePack.decodeAndValidate(try KernelFixtures.data("evidence-pack.ok-02.json"))
+    }
+
+    private static func kernelGolden(_ name: String) throws -> String {
+        try XCTUnwrap(
+            String(data: KernelFixtures.data(name), encoding: .utf8),
+            "kernel/fixtures/\(name) is not readable UTF-8"
+        )
+    }
+
+    /// The single summary line a channel renders to, or nil when none matches.
+    private static func summaryLine(_ pack: EvidencePack, _ prefix: String) -> String? {
+        EvidenceReportGenerator.evidenceSummaryLines(pack: pack).first { $0.hasPrefix(prefix) }
+    }
+
+    func testSharedGoldenMarkdown() throws {
+        XCTAssertEqual(
+            EvidenceReportGenerator.renderMarkdown(pack: try Self.goldenPack(), diagnostics: nil),
+            try Self.kernelGolden("report.ok-01.md"),
+            "the Swift renderer drifted from kernel/fixtures/report.ok-01.md"
+        )
+    }
+
+    func testSharedGoldenHTML() throws {
+        XCTAssertEqual(
+            EvidenceReportGenerator.renderHTML(pack: try Self.goldenPack(), diagnostics: nil),
+            try Self.kernelGolden("report.ok-01.html"),
+            "the Swift renderer drifted from kernel/fixtures/report.ok-01.html"
+        )
+    }
+
+    /// R4-10 / R6-16: a null probe channel names the missing measurement. The
+    /// populated lines (and their position) are pinned byte-for-byte by the
+    /// golden above.
+    func testNullProbeChannelsNameTheirAbsence() throws {
+        let z5Lines = EvidenceReportGenerator.evidenceSummaryLines(pack: try Self.z5Pack())
+        XCTAssertTrue(z5Lines.contains(
+            "handlerProbe: not measured (no probe connection served this act window)"
+        ), "\(z5Lines)")
+        XCTAssertTrue(z5Lines.contains(
+            "stateDiff: not measured (the probe reported no state channel)"
+        ), "\(z5Lines)")
+    }
+
+    /// Empty lists say so; long ones are bounded with the elided count.
+    func testProbeListsAreBoundedAndEmptyListsAreNamed() throws {
+        var pack = try Self.goldenPack()
+        pack.signals.handlerProbe = HandlerProbeSignal(
+            probeVersion: "gp-probe/0.1.0", hitCount: 9,
+            handlers: (0..<9).map { HandlerRef(file: "lane\($0).swift", line: $0 + 1) },
+            lateCount: 0
+        )
+        pack.signals.stateDiff = StateDiffSignal(
+            source: .z3KVC, changed: true,
+            entries: (0..<9).map { StateEntry(key: "k\($0)", before: "0", after: "1") }
+        )
+        XCTAssertTrue((Self.summaryLine(pack, "handlerProbe:") ?? "").hasSuffix("lane7.swift:8, +1 more]"))
+        XCTAssertFalse((Self.summaryLine(pack, "handlerProbe:") ?? "").contains("lane8"))
+        XCTAssertTrue((Self.summaryLine(pack, "stateDiff:") ?? "").hasSuffix("k7 \"0\" -> \"1\", +1 more]"))
+        XCTAssertFalse((Self.summaryLine(pack, "stateDiff:") ?? "").contains("k8"))
+
+        pack.signals.handlerProbe = HandlerProbeSignal(
+            probeVersion: "gp-probe/0.1.0", hitCount: 0, handlers: [], lateCount: 0
+        )
+        pack.signals.stateDiff = StateDiffSignal(source: .z2Mirror, changed: false, entries: [])
+        XCTAssertTrue((Self.summaryLine(pack, "handlerProbe:") ?? "").hasSuffix("handlers=[no localized hits]"))
+        XCTAssertTrue((Self.summaryLine(pack, "stateDiff:") ?? "").hasSuffix("entries=[no key changes]"))
+    }
+
+    /// B-9: the number rule is `%g` (six significant digits), shared with the
+    /// TS mirror — whose table marks which of these rows the two rules disagree
+    /// on. The last assertion pins the disagreement for Swift's plain print.
+    func testDoublesFollowThePercentGRule() throws {
+        let rows: [(Double, String)] = [
+            (42, "42"), (0.25, "0.25"), (0.014, "0.014"), (1e21, "1e+21"),
+            (1234.5678, "1234.57"), (0.1234567, "0.123457"), (123456.7, "123457"),
+            (999999.5, "1e+06"), (1234567, "1.23457e+06"), (0.00001234567, "1.23457e-05"),
+        ]
+        for (value, expected) in rows {
+            let line = Self.summaryLine(try Self.goldenPack(latencyMs: value), "axEvent:") ?? ""
+            XCTAssertEqual(line, "axEvent: changed=true nodes=24 latencyMs=\(expected)", "%g for \(value)")
+        }
+        XCTAssertNotEqual("\(1234.5678)", "1234.57", "%g is a different rule from plain print")
+    }
+
+    /// R4-14: "no diagnosis" and "diagnosis with an empty section" must not
+    /// read the same — four bare `—` look like a clean run.
+    func testMissingDiagnosisIsSpelledOutNotEmptySectionIsNot() throws {
+        let markdown = EvidenceReportGenerator.renderMarkdown(pack: try Self.z5Pack(), diagnostics: nil)
+        for title in ["PATH", "ANOMALY", "EVIDENCE", "NEXT"] {
+            XCTAssertTrue(
+                markdown.contains("## \(title)\n\n— (no diagnosis recorded:"),
+                "\(title) must name the missing diagnosis"
+            )
+        }
+        XCTAssertTrue(markdown.contains("run gp_diagnose for this operationId"))
+
+        var emptyReport = try Self.z5Pack()
+        emptyReport.diagnosis = Diagnosis(
+            class: .inconclusive,
+            report: DiagnosisReport(path: "", anomaly: "", evidence: "", next: "")
+        )
+        let emptied = EvidenceReportGenerator.renderMarkdown(pack: emptyReport, diagnostics: nil)
+        XCTAssertTrue(emptied.contains("## PATH\n\n—\n"))
+        XCTAssertFalse(emptied.contains("no diagnosis recorded"))
     }
 
     // MARK: - P1-D4: GP_E_NO_EVIDENCE lookup contract

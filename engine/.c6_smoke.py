@@ -10,6 +10,10 @@ glasspane-settings 面板的 UI 树，从结构断言四权限卡、跳转按钮
 限制，详见 smoke.md。
 
 附带验证 attach by pid（此前只冒烟过 bundleId）。
+
+2026-09-22 补强（P1 v1.2 §11.7 渲染状态契约）：不再只数装饰性图标与文本总数，
+改断 PermissionGuide 的机器可读标识族（gp-perm-<kind>-<state> / gp-guide-<kind> /
+gp-refresh / gp-verify-developer-tools），并把文本行计数收口到每卡容器。
 """
 import json
 import socket
@@ -25,6 +29,28 @@ EXPECTED_CARD_ICONS = [
     "rectangle.on.rectangle", # 屏幕录制
     "hammer",                 # 开发者工具
 ]
+
+# PermissionKind.cliValue → 卡图标（PermissionCardView.iconName）。标识符里的
+# kind 一律取 cliValue（PermissionStatus.swift 单一真源）：带连字符，
+# 不是 Swift rawValue——如 gp-perm-input-monitoring-granted。
+KIND_ICON = {
+    "accessibility": "accessibility",
+    "input-monitoring": "cursorarrow.click.2",
+    "screen-recording": "rectangle.on.rectangle",
+    "developer-tools": "hammer",
+}
+
+# PermissionStatus.rawValue —— statusIdentifier 的状态后缀集。
+PERM_STATES = {"granted", "denied", "notDetermined", "unverifiable"}
+
+
+def subtree_nodes(root):
+    out, stack = [], [root]
+    while stack:
+        node = stack.pop()
+        out.append(node)
+        stack.extend(node.get("children") or [])
+    return out
 
 
 def recv_frame(sock):
@@ -125,6 +151,73 @@ def main():
         if not any(n.get("role") == "AXStaticText" for n in parent.get("children", [])):
             fail(f"{icon_names[icon]} missing text rows")
         print(f"PASS {icon_names[icon]} jump button + text rows present")
+
+    # ---- 渲染状态契约（P1 v1.2 §11.7；PermissionGuide 标识族单一真源）----
+    by_ident = {}
+    for n in nodes:
+        if n.get("identifier"):
+            by_ident.setdefault(n["identifier"], []).append(n)
+
+    # 每卡必须恰好一枚状态标记 gp-perm-<kind>-<state>（Image 上的专用
+    # identifier，PermissionGuide.statusIdentifier）：证明确实"按该状态渲染"，
+    # 而不是四张卡恒亮同一标记。restart-pending 后缀与状态并列，不混入。
+    for kind in KIND_ICON:
+        prefix = f"gp-perm-{kind}-"
+        states = [i[len(prefix):] for i in by_ident
+                  if i.startswith(prefix) and i[len(prefix):] in PERM_STATES]
+        if len(states) != 1:
+            fail(f"render-state contract broken for {kind}: {len(states)} 枚 "
+                 "gp-perm-<kind>-(granted|denied|notDetermined|unverifiable)，期望恰好 1 枚")
+        print(f"PASS render-state {kind} = {states[0]}")
+
+    # 每卡的引导按钮（guideIdentifier，恒渲染；granted 态只是 disabled，不消失）。
+    for kind in KIND_ICON:
+        gid = f"gp-guide-{kind}"
+        if not any(n.get("role") == "AXButton" for n in by_ident.get(gid, [])):
+            fail(f"guide AXButton missing: {gid}")
+        print(f"PASS guide button: {gid}")
+
+    # 恒定可操作控件：刷新（Daemon 状态区，非刷新在途时恒在）与
+    # 验证调试能力（仅开发者工具卡，onVerifyCapability 只对它是非 nil）。
+    for cid in ("gp-refresh", "gp-verify-developer-tools"):
+        if not any(n.get("role") == "AXButton" for n in by_ident.get(cid, [])):
+            fail(f"control AXButton missing: {cid}")
+        print(f"PASS control button: {cid}")
+
+    # gp-restart-daemon 只在"系统已授权、运行 daemon 待重启"态渲染
+    # （SettingsPanelView `if !model.kindsNeedingRestart.isEmpty`）——健康系统里
+    # 它合法缺席，硬断存在会造出永远红闸；断蕴含式：restart-pending 标记出现
+    # （gp-perm-<kind>-restart-pending）时该按钮必须已渲染。
+    pending = [k for k in KIND_ICON if f"gp-perm-{k}-restart-pending" in by_ident]
+    if pending and "gp-restart-daemon" not in by_ident:
+        fail(f"restart-pending 标记 {pending} 在树中，但 gp-restart-daemon 按钮缺失")
+    print(f"PASS restart-pending→gp-restart-daemon 蕴含一致"
+          f"（pending={pending or '无，按钮合法缺席'}）")
+
+    # 文本行计数从"全窗"收口到"每卡容器"：卡容器 = 卡图标与 gp-guide-<kind>
+    # 按钮的最小公共祖先；每卡容器内 ≥3 个 AXStaticText
+    # （displayName / 徽标文案 / purposeText）。全窗口总数断言保留在下方不放松。
+    def ancestors(node):
+        chain = []
+        cur = parents.get(id(node))
+        while cur is not None:
+            chain.append(cur)
+            cur = parents.get(id(cur))
+        return chain
+
+    for kind, icon in KIND_ICON.items():
+        card_icon = next(n for n in nodes if n.get("identifier") == icon)
+        guide = next(n for n in by_ident[f"gp-guide-{kind}"]
+                     if n.get("role") == "AXButton")
+        container = next((a for a in ancestors(card_icon)
+                          if any(d is guide for d in subtree_nodes(a))), None)
+        if container is None:
+            fail(f"{kind} 卡：图标与 gp-guide-{kind} 按钮不在同一容器（卡片结构不成立）")
+        card_texts = [d for d in subtree_nodes(container)
+                      if d.get("role") == "AXStaticText"]
+        if len(card_texts) < 3:
+            fail(f"{kind} 卡容器内文本节点 <3（displayName/徽标/用途）：{len(card_texts)}")
+        print(f"PASS {kind} 卡容器文本行 {len(card_texts)}（≥3）")
 
     # 卡片主体文本节点（displayName/purpose/degradation 三行）按数量断言：
     # 4 卡 × 3 行 = 12 个最少；daemon 卡与折叠区文本未计入 title（value 通道）。

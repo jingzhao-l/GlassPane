@@ -1,7 +1,8 @@
 import XCTest
 @testable import GlassPaneEngine
 
-// P6 spec v6.0 batch tests: probe wire codec, inbox windowing, EngineCore
+// P6 spec v6.0 batch tests: probe wire codec, inbox windowing, peer-credential
+// authentication of the probe listener, command delivery reporting, EngineCore
 // act/diagnose/snapshot/restore integration, classifier T4/T5/T7/T8, and the
 // probe_status method surface.
 
@@ -13,16 +14,18 @@ private final class P6TimeBox {
 }
 
 /// Scripted probe reply: parses the daemon command line and answers through
-/// `ingest`, mirroring what a live GlassPaneProbe does over the socket.
+/// `ingest`, mirroring what a live GlassPaneProbe does over the socket. The
+/// Bool the sender returns is delivery, not reply: true means the bytes left
+/// the daemon.
 private func scriptedProbeReplies(
     inbox: ProbeInbox,
     domains: [String: [String: String]],
     digest: String? = nil,
     restoreDigest: String? = nil
 ) {
-    inbox.sender = { pid, data in
+    let reply: (Int32, Data) -> Bool = { pid, data in
         let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        guard let type = object?["t"] as? String else { return }
+        guard let type = object?["t"] as? String else { return true }
         switch type {
         case "checkpoint_export":
             let ref = object?["ref"] as? String ?? ""
@@ -32,14 +35,16 @@ private func scriptedProbeReplies(
             let post = restoreDigest ?? digest ?? ProbeWire.sha256Hex(ProbeWire.checkpointCanonical(domains))
             inbox.ingest(pid: pid, frame: .result(ok: true, postStateDigest: post, error: nil))
         default:
-            break // op_begin / op_end / hello_ack need no reply in tests
+            break // op_begin / op_end need no reply in tests
         }
+        return true
     }
+    inbox.sender = reply
 }
 
-private func p6Hello(capabilities: [String]) -> ProbeHello {
+private func p6Hello(pid: Int32 = 4242, capabilities: [String]) -> ProbeHello {
     ProbeHello(
-        pid: 4242, bundleId: "com.example.app", appName: "Example",
+        pid: pid, bundleId: "com.example.app", appName: "Example",
         probeVersion: "gp-probe/0.1.0", capabilities: capabilities
     )
 }
@@ -93,6 +98,10 @@ final class P6ProbeWireTests: XCTestCase {
 
 final class P6ProbeInboxTests: XCTestCase {
 
+    /// ISO-8601 with exactly three fractional digits and a literal Z (kernel
+    /// ISO_MILLIS_PATTERN's shape).
+    static let isoMillisPattern = #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"#
+
     func testWindowCollectsHandlerAndStateSignals() throws {
         let time = P6TimeBox()
         let inbox = ProbeInbox(now: { time.now })
@@ -112,6 +121,54 @@ final class P6ProbeInboxTests: XCTestCase {
         XCTAssertTrue(stateDiff.changed)
         // First-before / last-after collapse per key (§3.1).
         XCTAssertEqual(stateDiff.entries, [StateEntry(key: "model.count", before: "3", after: "5")])
+    }
+
+    /// X-1: the SDK re-sends `hello` every time its capability set changes, and a
+    /// reconnect of the same process also arrives as a hello for the same pid. That
+    /// must NOT reset the per-pid event ring — if it did, the in-flight window would
+    /// lose the handlers it had already collected and the pack would report
+    /// `hitCount: 0` for an act whose handlers really ran (a "not sampled" rendered
+    /// as "no hit").
+    func testCapabilityReAdvertisementPreservesInFlightWindow() throws {
+        let time = P6TimeBox()
+        let inbox = ProbeInbox(now: { time.now })
+        inbox.register(p6Hello(capabilities: ["z1"]))
+        inbox.beginWindow(pid: 4242, opId: "op_readvertise")
+        inbox.ingest(pid: 4242, frame: .handler(file: "Before.swift", line: 7, ts: 0, durationNs: nil))
+
+        // The app registers a mirror root mid-session: same pid, wider capability set.
+        XCTAssertTrue(inbox.register(p6Hello(capabilities: ["z1", "z2"])))
+        inbox.ingest(pid: 4242, frame: .handler(file: "After.swift", line: 9, ts: 0, durationNs: nil))
+        inbox.ingest(pid: 4242, frame: .state(key: "model.count", before: "1", after: "2", source: "z2-mirror", ts: 0))
+
+        guard let signals = inbox.endWindow(pid: 4242, opId: "op_readvertise") else {
+            return XCTFail("window must survive a capability re-advertisement")
+        }
+        let handlerProbe = try XCTUnwrap(signals.handlerProbe)
+        XCTAssertEqual(handlerProbe.hitCount, 2, "handler seen before the re-hello must not be erased")
+        XCTAssertEqual(handlerProbe.handlers, [
+            HandlerRef(file: "Before.swift", line: 7),
+            HandlerRef(file: "After.swift", line: 9),
+        ])
+        XCTAssertNotNil(signals.stateDiff, "the newly advertised z2 channel must be honoured")
+    }
+
+    /// A pid that genuinely went away is disconnected first, and `disconnect` clears
+    /// the ring — so a later hello from a recycled pid starts clean rather than
+    /// inheriting another process's events.
+    func testDisconnectThenReRegisterStartsFromEmptyRing() throws {
+        let time = P6TimeBox()
+        let inbox = ProbeInbox(now: { time.now })
+        inbox.register(p6Hello(capabilities: ["z1"]))
+        inbox.beginWindow(pid: 4242, opId: "op_gone")
+        inbox.ingest(pid: 4242, frame: .handler(file: "Old.swift", line: 1, ts: 0, durationNs: nil))
+        inbox.disconnect(pid: 4242, reason: "connection closed")
+        inbox.register(p6Hello(capabilities: ["z1"]))
+        inbox.beginWindow(pid: 4242, opId: "op_new")
+        inbox.ingest(pid: 4242, frame: .handler(file: "Fresh.swift", line: 2, ts: 0, durationNs: nil))
+        let signals = try XCTUnwrap(inbox.endWindow(pid: 4242, opId: "op_new"))
+        XCTAssertEqual(signals.handlerProbe?.handlers, [HandlerRef(file: "Fresh.swift", line: 2)],
+                       "a re-registered pid must not inherit the previous process's events")
     }
 
     func testStateIncapableProbeWithoutEventsKeepsStateDiffNull() throws {
@@ -163,7 +220,7 @@ final class P6ProbeInboxTests: XCTestCase {
         XCTAssertNil(inbox.endWindow(pid: 4242, opId: "op_open"), "double close must not resurface the window")
     }
 
-    func testStatusJSONAndDisconnect() throws {
+    func testStatusJSONCarriesConnectedAtAndDropCause() throws {
         let time = P6TimeBox()
         let inbox = ProbeInbox(now: { time.now })
         inbox.register(p6Hello(capabilities: ["z1", "z2", "checkpoint"]))
@@ -175,10 +232,44 @@ final class P6ProbeInboxTests: XCTestCase {
         XCTAssertEqual(entry["appName"] as? String, "Example")
         XCTAssertEqual(entry["eventsSeen"] as? Int, 1)
         XCTAssertEqual(entry["bundleId"] as? String, "com.example.app")
+        XCTAssertEqual(entry["connected"] as? Bool, true)
         XCTAssertNotNil(inbox.connection(for: 4242))
-        inbox.disconnect(pid: 4242)
-        XCTAssertNil(inbox.connection(for: 4242))
-        XCTAssertTrue(inbox.statusJSON().isEmpty)
+        // §5.3(3) names connectedAt; without it "just reconnected" and
+        // "connected since attach" were the same row (R6-04).
+        let connectedAt = try XCTUnwrap(entry["connectedAt"] as? String)
+        XCTAssertEqual(connectedAt, ProbeInbox.iso8601(p6ClockStart))
+        XCTAssertNotNil(
+            connectedAt.range(of: Self.isoMillisPattern, options: .regularExpression),
+            "connectedAt must be ISO-8601 with milliseconds in UTC, the shape every other engine timestamp uses"
+        )
+
+        inbox.disconnect(pid: 4242, reason: "read failed: errno 54 (Connection reset by peer)")
+        XCTAssertNil(inbox.connection(for: 4242), "a dropped probe is not a live connection")
+        XCTAssertFalse(inbox.isStateCapable(pid: 4242))
+        // The row survives on purpose: an empty list used to read as "never
+        // integrated" even for a probe that had just been connected (R2-18).
+        let dropped = try XCTUnwrap(inbox.statusJSON().first)
+        XCTAssertEqual(dropped["connected"] as? Bool, false)
+        XCTAssertEqual(dropped["eventsSeen"] as? Int, 1)
+        XCTAssertEqual(dropped["drops"] as? Int, 1)
+        XCTAssertEqual((dropped["disconnectReason"] as? String)?.contains("errno 54"), true)
+        XCTAssertNotNil(dropped["disconnectedAt"] as? String)
+        XCTAssertEqual(inbox.recordedDisconnectionCount, 1)
+        inbox.beginWindow(pid: 4242, opId: "op_after_drop")
+        XCTAssertNil(
+            inbox.endWindow(pid: 4242, opId: "op_after_drop"),
+            "a dropped probe cannot open an act window: the row is history, not connectivity"
+        )
+    }
+
+    func testStatusJSONIsEmptyForNeverRegisteredProbes() {
+        let time = P6TimeBox()
+        let inbox = ProbeInbox(now: { time.now })
+        XCTAssertTrue(
+            inbox.statusJSON().isEmpty,
+            "no hello ever sent => no row at all; absence must stay absence"
+        )
+        XCTAssertEqual(inbox.recordedDisconnectionCount, 0)
     }
 
     func testCheckpointExportRejectsTamperedDigest() throws {
@@ -192,6 +283,230 @@ final class P6ProbeInboxTests: XCTestCase {
         )
         XCTAssertNil(inbox.checkpointExport(pid: 4242, ref: "snap_x", timeout: 0.1))
         XCTAssertTrue(inbox.lastCheckpointError?.contains("digest mismatch") ?? false)
+    }
+
+    // MARK: Z1 entry/duration aggregation (P6 §2.2, R6-05)
+
+    func testSlowHandlerDurationFollowUpIsNotCountedTwice() throws {
+        let time = P6TimeBox()
+        let inbox = ProbeInbox(now: { time.now })
+        inbox.register(p6Hello(capabilities: ["z1", "z2"]))
+        inbox.beginWindow(pid: 4242, opId: "op_slow")
+        inbox.ingest(pid: 4242, frame: .handler(file: "View.swift", line: 44, ts: 0, durationNs: nil))
+        inbox.ingest(pid: 4242, frame: .handler(file: "View.swift", line: 44, ts: 0, durationNs: 2_400_000))
+        let signals = try XCTUnwrap(inbox.endWindow(pid: 4242, opId: "op_slow"))
+        let handlerProbe = try XCTUnwrap(signals.handlerProbe)
+        XCTAssertEqual(
+            handlerProbe.hitCount, 1,
+            "the >1ms exit frame is the same invocation as the entry frame, not a second hit"
+        )
+        XCTAssertEqual(handlerProbe.handlers, [HandlerRef(file: "View.swift", line: 44)])
+    }
+
+    func testRepeatedSlowHandlerCountsInvocationsNotFrames() throws {
+        let time = P6TimeBox()
+        let inbox = ProbeInbox(now: { time.now })
+        inbox.register(p6Hello(capabilities: ["z1", "z2"]))
+        inbox.beginWindow(pid: 4242, opId: "op_twice")
+        for _ in 0..<2 {
+            inbox.ingest(pid: 4242, frame: .handler(file: "View.swift", line: 7, ts: 0, durationNs: nil))
+            inbox.ingest(pid: 4242, frame: .handler(file: "View.swift", line: 7, ts: 0, durationNs: 5_000_000))
+        }
+        inbox.ingest(pid: 4242, frame: .handler(file: "Other.swift", line: 3, ts: 0, durationNs: 7_000_000))
+        let handlerProbe = try XCTUnwrap(inbox.endWindow(pid: 4242, opId: "op_twice")?.handlerProbe)
+        XCTAssertEqual(handlerProbe.hitCount, 3, "two slow invocations of one site plus one orphan duration frame")
+        XCTAssertEqual(handlerProbe.handlers.count, 2)
+    }
+
+    func testLateDurationFollowUpIsNotCountedTwice() throws {
+        let time = P6TimeBox()
+        let inbox = ProbeInbox(now: { time.now })
+        inbox.register(p6Hello(capabilities: ["z1", "z2"]))
+        inbox.beginWindow(pid: 4242, opId: "op_late_pair")
+        XCTAssertNotNil(inbox.endWindow(pid: 4242, opId: "op_late_pair"))
+        time.now = time.now.addingTimeInterval(0.4)
+        inbox.ingest(pid: 4242, frame: .handler(file: "View.swift", line: 88, ts: 0, durationNs: nil))
+        inbox.ingest(pid: 4242, frame: .handler(file: "View.swift", line: 88, ts: 0, durationNs: 3_000_000))
+        XCTAssertEqual(inbox.lateCount(opId: "op_late_pair"), 1, "one late invocation, two late frames")
+    }
+
+    func testCountsAsInvocationRule() {
+        XCTAssertTrue(
+            ProbeInbox.countsAsInvocation(file: "a.swift", line: 1, durationNs: nil, seenKeys: ["a.swift:1"]),
+            "an entry frame is always an invocation"
+        )
+        XCTAssertFalse(
+            ProbeInbox.countsAsInvocation(file: "a.swift", line: 1, durationNs: 4, seenKeys: ["a.swift:1"]),
+            "a duration frame for an already-counted site is the same invocation"
+        )
+        XCTAssertTrue(
+            ProbeInbox.countsAsInvocation(file: "a.swift", line: 1, durationNs: 4, seenKeys: []),
+            "a duration frame with no entry in the window still proves one run"
+        )
+    }
+
+    // MARK: stateDiff source derivation (P6 §3.1, R6-15)
+
+    func testZ3OnlyProbeWithoutStateEventsNamesZ3() throws {
+        let time = P6TimeBox()
+        let inbox = ProbeInbox(now: { time.now })
+        inbox.register(p6Hello(capabilities: ["z1", "z3", "checkpoint"]))
+        inbox.beginWindow(pid: 4242, opId: "op_z3")
+        let signals = try XCTUnwrap(inbox.endWindow(pid: 4242, opId: "op_z3"))
+        let stateDiff = try XCTUnwrap(signals.stateDiff)
+        XCTAssertEqual(
+            stateDiff.source, .z3KVC,
+            "the channel must come from what the probe declared; z2-mirror was invented"
+        )
+        XCTAssertFalse(stateDiff.changed)
+        XCTAssertTrue(stateDiff.entries.isEmpty)
+    }
+
+    func testSourceDerivationPrefersObservedFramesAndNeverInvents() {
+        XCTAssertEqual(ProbeInbox.stateDiffSource(observed: .z1Macro, capabilities: ["z1", "z3"]), .z1Macro)
+        XCTAssertEqual(ProbeInbox.stateDiffSource(observed: nil, capabilities: ["z1", "z2"]), .z2Mirror)
+        XCTAssertEqual(ProbeInbox.stateDiffSource(observed: nil, capabilities: ["z3"]), .z3KVC)
+        XCTAssertNil(ProbeInbox.stateDiffSource(observed: nil, capabilities: ["z1"]))
+        XCTAssertNil(ProbeInbox.stateDiffSource(observed: nil, capabilities: ["z1", "checkpoint"]))
+        XCTAssertNil(ProbeInbox.declaredStateSource(capabilities: ["z1", "checkpoint"]))
+    }
+
+    // MARK: command delivery (R2-07)
+
+    func testSendCommandReportsDeliveryBothWays() throws {
+        let inbox = ProbeInbox(now: { Date() })
+        inbox.register(p6Hello(capabilities: ["z1"]))
+        XCTAssertFalse(inbox.sendCommand("op_begin", to: 4242), "no sender means nothing can be delivered")
+        XCTAssertTrue(inbox.lastDeliveryError?.contains("no probe socket") ?? false)
+
+        var seen: [String] = []
+        let recorder: (Int32, Data) -> Bool = { _, data in
+            seen.append(String(data: data, encoding: .utf8) ?? "")
+            return true
+        }
+        inbox.sender = recorder
+        XCTAssertTrue(inbox.sendCommand("op_end", to: 4242))
+        XCTAssertNil(inbox.lastDeliveryError)
+        XCTAssertEqual(seen.count, 1)
+
+        inbox.sender = { _, _ in false }
+        XCTAssertFalse(inbox.sendCommand("op_begin", to: 4242))
+        XCTAssertTrue(inbox.lastDeliveryError?.contains("not delivered") ?? false)
+    }
+
+    func testUndeliveredCheckpointExportIsNotReportedAsTimeout() throws {
+        let inbox = ProbeInbox(now: { Date() })
+        inbox.register(p6Hello(capabilities: ["z1", "z2", "checkpoint"]))
+        inbox.sender = { _, _ in false }
+        let started = Date()
+        XCTAssertNil(inbox.checkpointExport(pid: 4242, ref: "snap_d", timeout: 5.0))
+        let error = try XCTUnwrap(inbox.lastCheckpointError)
+        XCTAssertTrue(error.contains("not delivered"), error)
+        XCTAssertFalse(error.contains("timed out"), "a command that never left must not become the probe's silence: \(error)")
+        XCTAssertLessThan(
+            Date().timeIntervalSince(started), 1.0,
+            "delivery failure returns at once instead of burning the whole timeout budget"
+        )
+    }
+
+    func testUndeliveredCheckpointRestoreIsNotReportedAsRefusal() throws {
+        let inbox = ProbeInbox(now: { Date() })
+        inbox.register(p6Hello(capabilities: ["z1", "checkpoint"]))
+        inbox.sender = { _, _ in false }
+        XCTAssertNil(inbox.checkpointRestore(pid: 4242, ref: "snap_r", domains: ["counter"], timeout: 5.0))
+        let error = try XCTUnwrap(inbox.lastResultError)
+        XCTAssertTrue(error.contains("not delivered"), error)
+        XCTAssertFalse(error.contains("refused"), "the probe never heard about the restore: \(error)")
+    }
+
+    // MARK: registration bounds (R5-06)
+
+    func testRegisteredPidCapacityIsEnforced() {
+        let inbox = ProbeInbox(now: { Date() })
+        for pid in 1...Int32(ProbeInbox.maxRegisteredProbes) {
+            XCTAssertTrue(inbox.register(p6Hello(pid: pid, capabilities: ["z1"])), "pid \(pid) fits under the cap")
+        }
+        XCTAssertFalse(
+            inbox.register(p6Hello(pid: 9999, capabilities: ["z1"])),
+            "distinct pids are bounded, so streaming hellos cannot grow the table"
+        )
+        XCTAssertTrue(
+            inbox.register(p6Hello(pid: 1, capabilities: ["z1"])),
+            "a re-hello for a registered pid replaces its entry (§2.2) and stays admitted"
+        )
+        XCTAssertEqual(inbox.statusJSON().count, ProbeInbox.maxRegisteredProbes)
+    }
+}
+
+// MARK: - Probe listener peer credentials (P6 §2.1, R5-01)
+
+final class P6ProbePeerCredentialTests: XCTestCase {
+
+    private func identity(
+        pid: Int32?, uid: uid_t?, pidErrno: Int32? = nil, uidErrno: Int32? = nil
+    ) -> ProbeSocketServer.PeerIdentity {
+        ProbeSocketServer.PeerIdentity(pid: pid, uid: uid, pidErrno: pidErrno, uidErrno: uidErrno)
+    }
+
+    func testMatchingPeerIsAdmitted() {
+        XCTAssertNil(
+            ProbeSocketServer.helloRejectionReason(
+                claimedPID: 4242,
+                peer: identity(pid: 4242, uid: ProbeSocketServer.daemonUID),
+                daemonUID: ProbeSocketServer.daemonUID
+            ),
+            "a hello whose declared pid and uid match the kernel's peer is the normal case"
+        )
+    }
+
+    func testForgedPidIsRejected() throws {
+        let reason = try XCTUnwrap(ProbeSocketServer.helloRejectionReason(
+            claimedPID: 4242,
+            peer: identity(pid: 999, uid: ProbeSocketServer.daemonUID),
+            daemonUID: ProbeSocketServer.daemonUID
+        ))
+        XCTAssertTrue(reason.contains("4242"), reason)
+        XCTAssertTrue(reason.contains("999"), reason)
+    }
+
+    func testOtherUsersPeerIsRejected() throws {
+        let foreignUID: uid_t = ProbeSocketServer.daemonUID == 0 ? 501 : 0
+        let reason = try XCTUnwrap(ProbeSocketServer.helloRejectionReason(
+            claimedPID: 4242, peer: identity(pid: 4242, uid: foreignUID),
+            daemonUID: ProbeSocketServer.daemonUID
+        ))
+        XCTAssertTrue(reason.contains("uid"), reason)
+    }
+
+    func testUnreadablePidFailsClosed() throws {
+        // No "trust the self-declared pid" fallback: unverified means unregistered.
+        let reason = try XCTUnwrap(ProbeSocketServer.helloRejectionReason(
+            claimedPID: 4242,
+            peer: identity(pid: nil, uid: ProbeSocketServer.daemonUID, pidErrno: ENOPROTOOPT),
+            daemonUID: ProbeSocketServer.daemonUID
+        ))
+        XCTAssertTrue(reason.contains("pid"), reason)
+        XCTAssertTrue(reason.contains("unreadable"), reason)
+    }
+
+    func testUnreadableUidFailsClosedBeforePidIsConsulted() throws {
+        let reason = try XCTUnwrap(ProbeSocketServer.helloRejectionReason(
+            claimedPID: 4242,
+            peer: identity(pid: 4242, uid: nil, uidErrno: EBADF),
+            daemonUID: ProbeSocketServer.daemonUID
+        ))
+        XCTAssertTrue(reason.contains("getpeereid"), reason)
+    }
+
+    func testListenerBoundsStayInsideInboxCapacity() {
+        // Refusing a connection is only honest if the inbox could have kept it:
+        // the connection cap must not exceed the distinct-pid cap.
+        XCTAssertLessThanOrEqual(
+            ProbeSocketServer.maxConcurrentClients, ProbeInbox.maxRegisteredProbes
+        )
+        XCTAssertGreaterThan(ProbeSocketServer.preHelloReadTimeoutSeconds, 0)
+        XCTAssertGreaterThan(ProbeSocketServer.idleReadTimeoutSeconds, 0)
+        XCTAssertGreaterThan(ProbeSocketServer.commandWriteTimeoutSeconds, 0)
     }
 }
 
@@ -316,7 +631,7 @@ final class P6EngineCoreProbeTests: XCTestCase {
         let time = P6TimeBox()
         let inbox = ProbeInbox(now: { time.now })
         inbox.register(p6Hello(capabilities: ["z1"]))
-        inbox.sender = { _, _ in } // would answer nothing even if consulted
+        inbox.sender = { _, _ in false } // no socket layer behind it: nothing is delivered
         let core = makeCore(time: time, inbox: inbox)
         _ = try core.attach(bundleId: "com.example.app", pid: nil)
         let snapshot = try core.snapshot(maxDepth: 4)
@@ -470,6 +785,9 @@ final class P6DispatcherProbeTests: XCTestCase {
         let probes = try XCTUnwrap(result["probes"] as? [[String: Any]])
         XCTAssertEqual(probes.first?["pid"] as? Int, 4242)
         XCTAssertEqual(probes.first?["probeVersion"] as? String, "gp-probe/0.1.0")
+        // §5.3(3) fields must reach the method surface, not just the inbox.
+        XCTAssertNotNil(probes.first?["connectedAt"] as? String)
+        XCTAssertEqual(probes.first?["connected"] as? Bool, true)
     }
 
     func testProbeStatusWithoutInboxIsHonestEmpty() throws {

@@ -301,6 +301,16 @@ SIGKILL 兜底生效。设置面板自身身份也可被 attach 识别
 | 修复前（已安装的 bundle 旧产物） | 6s 内未退出 → 需 KILL | 6s 内未退出 → 需 KILL |
 | 修复后（本次 debug 与 release 产物） | 退出码 0，两个 socket 均 unlink | 退出码 0，两个 socket 均 unlink |
 
+**闸门退出码契约（2026-09-22 收紧）**：`engine/.signal_smoke.py` 是当前**唯一**接进 CI 的
+冒烟（ci.yml `swift` job：`swift build` → `python3 .signal_smoke.py .build/debug/glasspaned`），
+此前"产物不存在 → 打一行 SKIP 并 exit 0"的口径已作废——构建步骤或产物一改名，那条
+SIGTERM/socket-unlink 闸门就会静默变成永久绿、什么都不证明。现契约：
+`0 = PASS`（两路断言真实跑过）、`1 = FAIL`（断言不过）、`2 = NOT RUN`（被测二进制缺失/不是
+文件/没有可执行位，一条断言都没跑，报文点名期望路径与 `swift build` 产出命令）。
+确实要在无产物的机器上放过这一步，只认显式开关 `GLASSPANE_SMOKE_ALLOW_SKIP=1`
+（本机机会式跑商用，CI 里勿设）；argv 之外的第二定位通道是 env `GLASSPANE_DAEMON_BIN`。
+同口径也适用于 `.p6_smoke.py` / `.t9_smoke.py`（各自已用 exit 2 表达 NOT RUN）。
+
 连带后果（同轮查明并修）：`KeepAlive SuccessfulExit=false` 的语义是"只有异常退出才
 重启"，TERM 修好后 daemon 是 clean exit 0 → **launchd 本就不该复活它**，此前看到的
 "KILL 后自动重生"其实是哑火的副产物。所以安装器收拢旧实例后必须显式

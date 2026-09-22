@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import path from "node:path";
 
 import { TOOL_SPECS, TOOL_BY_NAME, executeTool } from "../dist/tools.js";
 import { EvidenceAuditSession } from "../dist/audit-session.js";
 import { canonicalJson } from "../dist/canonical.js";
+import { FORCE_OVERWRITE_ENV } from "../dist/project-registry.js";
 import { makeEngine } from "./helpers.mjs";
 
 test("tools/list shape: eleven tools with expected names and methods", () => {
@@ -586,3 +588,94 @@ test("gp_project_get rejects malformed projectId as GP_E_BAD_PARAMS", async () =
     assert.equal(engine.io.sent.length, 0);
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * Unreadable registry through the tool surface (B-1 shell half).
+ *
+ * `projectList()`/`projectGet()` now throw instead of answering "0 projects"
+ * when projects.json cannot be read or decoded. Both handlers used to have no
+ * try/catch, and a tool's `execute` runs *outside* `executeTool`'s own
+ * try/catch, so the throw escaped as a rejected promise → JSON-RPC -32603
+ * "internal error" with no GP_E_ code, no cause and no remedy.
+ * ------------------------------------------------------------------ */
+
+const CORRUPT_REGISTRY = '[{"projectId":"prj_0123456789ABCDEFGHJKMNPQRS","displayName":"A","pid":not-a-number}]\n';
+
+function withCorruptRegistry(t) {
+  const tmp = new URL(`./tmp-corrupt-${process.pid}.json`, import.meta.url).pathname;
+  fs.writeFileSync(tmp, CORRUPT_REGISTRY, "utf8");
+  const previousForce = process.env[FORCE_OVERWRITE_ENV];
+  delete process.env[FORCE_OVERWRITE_ENV]; // the refusal under test needs no escape hatch
+  process.env.GLASSPANE_PROJECTS_FILE = tmp;
+  return Promise.resolve(t(tmp)).finally(() => {
+    delete process.env.GLASSPANE_PROJECTS_FILE;
+    if (previousForce !== undefined) process.env[FORCE_OVERWRITE_ENV] = previousForce;
+    try { fs.unlinkSync(tmp); } catch { /* already gone */ }
+  });
+}
+
+test("gp_project_list answers an unreadable registry as a structured GP_E_INTERNAL", async () => {
+  const { engine } = makeEngine();
+  await withCorruptRegistry(async (tmp) => {
+    const outcome = await executeTool(TOOL_BY_NAME.get("gp_project_list"), {}, engine);
+    assert.equal(outcome.isError, true, "the tool must answer, never reject");
+    const text = outcome.content[0].text;
+    assert.ok(text.startsWith("GP_E_INTERNAL"), text);
+    assert.ok(text.includes(tmp), `the message must name the damaged file: ${text}`);
+    assert.match(text, /is not valid JSON|cannot be read/, "the cause is the file, not the arguments");
+    assert.ok(!text.includes('"projects"'), "an unreadable registry is never listed as zero projects");
+    assert.equal(engine.io.sent.length, 0, "a file-level tool never touches the engine");
+  });
+});
+
+test("the list remedy repairs the file instead of sending the agent to the logs", async () => {
+  const { engine } = makeEngine();
+  await withCorruptRegistry(async (tmp) => {
+    const text = (await executeTool(TOOL_BY_NAME.get("gp_project_list"), {}, engine)).content[0].text;
+    const remedy = text.slice(text.indexOf("| remedy:"));
+    assert.ok(remedy.includes("python3 -m json.tool"), remedy);
+    assert.ok(remedy.includes(FORCE_OVERWRITE_ENV), `the documented escape hatch must be named: ${remedy}`);
+    assert.ok(!remedy.includes("MCP server logs"), `the old default remedy points away from the damage: ${remedy}`);
+    assert.ok(!remedy.includes("input schema"), `a read failure is not a parameter problem: ${remedy}`);
+  });
+});
+
+test("gp_project_get maps the unreadable registry the same way", async () => {
+  const { engine } = makeEngine();
+  await withCorruptRegistry(async () => {
+    const outcome = await executeTool(
+      TOOL_BY_NAME.get("gp_project_get"),
+      { projectId: "prj_0123456789ABCDEFGHJKMNPQRS" },
+      engine,
+    );
+    assert.equal(outcome.isError, true);
+    const text = outcome.content[0].text;
+    assert.ok(text.startsWith("GP_E_INTERNAL"), text);
+    assert.ok(!text.startsWith("GP_E_NOT_FOUND"), "an unreadable file must not read as an absent project");
+  });
+});
+
+test("gp_project_set refuses the overwrite through the tool surface and leaves the file intact", async () => {
+  const { engine } = makeEngine();
+  await withCorruptRegistry(async (tmp) => {
+    const outcome = await executeTool(
+      TOOL_BY_NAME.get("gp_project_set"),
+      { displayName: "Notes", bundleId: "com.notes" },
+      engine,
+    );
+    assert.equal(outcome.isError, true);
+    assert.ok(outcome.content[0].text.startsWith("GP_E_INTERNAL"), outcome.content[0].text);
+    assert.equal(
+      fs.readFileSync(tmp, "utf8"),
+      CORRUPT_REGISTRY,
+      "nothing was written while the registry is unreadable (and no escape hatch was set)",
+    );
+    assert.deepEqual(siblingsOf(tmp, ".unreadable-"), [], "the file is not moved aside without the flag");
+  });
+});
+
+function siblingsOf(filePath, suffix) {
+  const dir = path.dirname(filePath);
+  const base = path.basename(filePath);
+  return fs.readdirSync(dir).filter((name) => name.startsWith(`${base}${suffix}`));
+}

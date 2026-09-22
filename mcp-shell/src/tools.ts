@@ -3,7 +3,7 @@ import {
   SelectorSchema,
   ActionSchema,
   AssertionPropertySchema,
-  parseEvidencePack,
+  parseEvidencePackRead,
   KernelSchemaError,
   type Selector,
   type Action,
@@ -12,7 +12,7 @@ import {
 } from "@iterate/kernel";
 
 import { canonicalJson } from "./canonical.js";
-import { EngineCallError, EngineJsonRpcClient } from "./engine-client.js";
+import { daemonUnreachableRemedy, EngineCallError, EngineJsonRpcClient } from "./engine-client.js";
 import { formatToolError, formatToolErrorShape, GP_E_BAD_PARAMS, GP_E_INTERNAL, GP_E_NO_EVIDENCE, GP_E_NOT_FOUND, GP_E_PROJECT_LIMIT } from "./errors.js";
 import { EvidenceAuditSession } from "./audit-session.js";
 import { renderHTML, renderMarkdown, escapeHTML } from "./evidence-report.js";
@@ -24,6 +24,7 @@ import {
   projectSet,
   projectGet,
   ProjectRegistryError,
+  FORCE_OVERWRITE_ENV,
 } from "./project-registry.js";
 
 /* ------------------------------------------------------------------ *
@@ -32,7 +33,14 @@ import {
  * isError without touching the engine. <selector> reuses kernel rule.
  * ------------------------------------------------------------------ */
 
-const OptionalUintSchema = z.number().int().nonnegative().optional();
+/* `pid` crosses the socket as `pid_t` (Int32): the daemon's own range check
+ * (ParamValidation.pidLower/pidUpper) rejects anything else, and a value that
+ * reached `pid_t(...)` out of range trapped the daemon while it was decoding
+ * the frame — one frame killed the service. Bound it to that domain here, and
+ * keep pid 0 out: it is the process-group sentinel, never an attach target.
+ * The advertised JSON Schemas below must keep matching these bounds. */
+const PID_INT32_MAX = 2_147_483_647;
+const OptionalPidSchema = z.number().int().min(1).max(PID_INT32_MAX).optional();
 const OptionalDepthSchema = z.number().int().min(1).max(10).optional();
 const OptionalRoleSchema = z.string().max(128).optional();
 const OptionalBundleIdSchema = z.string().max(256).optional();
@@ -53,7 +61,7 @@ const RestoreModeSchema = z.string().max(32).optional();
 
 export const AttachArgs = z.strictObject({
   bundleId: OptionalBundleIdSchema,
-  pid: OptionalUintSchema,
+  pid: OptionalPidSchema,
   projectId: OptionalProjectIdSchema,
 }).refine((v) => v.bundleId !== undefined || v.pid !== undefined, {
   message: "attach requires either bundleId or pid",
@@ -197,7 +205,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       additionalProperties: false,
       properties: {
         bundleId: { type: "string", maxLength: 256 },
-        pid: { type: "integer", minimum: 0 },
+        pid: { type: "integer", minimum: 1, maximum: PID_INT32_MAX },
         projectId: { type: "string", pattern: "^prj_[0-9A-HJKMNP-TV-Z]{26}$" },
       },
       oneOf: [
@@ -396,7 +404,10 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         projectId: { type: "string", pattern: "^prj_[0-9A-HJKMNP-TV-Z]{26}$" },
         displayName: { type: "string", minLength: 1, maxLength: 256 },
         bundleId: { type: "string", maxLength: 256 },
-        pid: { type: "integer", minimum: 0 },
+        // Matches ProjectSetArgs.pid, which is bounded to the same Int32 domain
+        // the daemon stores (an out-of-range pid made Swift fail to decode the
+        // whole registry file, which then got rewritten as an empty table).
+        pid: { type: "integer", minimum: 1, maximum: PID_INT32_MAX },
         recipeConfigPath: { type: "string", maxLength: 1024 },
         calibrationAssetsPath: { type: "string", maxLength: 1024 },
         evidenceStoragePath: { type: "string", maxLength: 1024 },
@@ -470,9 +481,10 @@ export async function executeTool(
       // the session trail starts fresh (spec v1.3 §10.3).
       session.reset();
     }
-    // Spec §6.3: evidence packs are passed through a strong validation via
-    // the kernel schema before surfacing to the agent, so a Swift↔TS drift
-    // (assertion C35) fails here as a tool error instead of corrupt JSON.
+    // Spec §6.3: evidence packs are passed through a strong read-side
+    // validation (kernel parseEvidencePackRead) before surfacing to the agent,
+    // so a Swift↔TS drift (assertion C35) fails here as a tool error instead of
+    // corrupt JSON — while a pack the engine legitimately wrote stays readable.
     if (spec.engineMethod === "last_evidence") {
       parseEvidenceFrame(raw);
     }
@@ -488,15 +500,9 @@ export async function executeTool(
         isError: true,
       };
     }
-    if (error instanceof KernelSchemaError) {
-      return {
-        content: [{ type: "text", text: formatToolError(
-          GP_E_INTERNAL,
-          `engine returned an invalid evidence pack: ${error.message}`,
-          "engine and kernel schema drifted; fix the common fixtures (assertion C35)",
-        ) }],
-        isError: true,
-      };
+    const evidenceFailure = mapEvidenceReadError(error);
+    if (evidenceFailure !== undefined) {
+      return evidenceFailure;
     }
     return {
       content: [{ type: "text", text: formatToolError(
@@ -510,25 +516,71 @@ export async function executeTool(
 }
 
 /**
- * Strongly validates the engine's last_evidence result (§6.3) and returns
- * the parsed pack. The engine frame is `{evidencePack: {…}}`; the kernel
- * validator consumes the pack body directly and throws on any violation.
+ * Raised when the engine's `last_evidence` *envelope* is not the contract
+ * frame — no `{evidencePack: {…}}` object to read. That is a transport/peer
+ * problem, not a pack-body violation, so it must never carry the C35
+ * "fixtures drifted" remedy: the shared fixtures were not involved, and an
+ * agent following that remedy edits truth files while the real cause (a daemon
+ * that did not answer with a pack) survives untouched (R4-16).
+ */
+class EvidenceFrameShapeError extends Error {
+  constructor(detail: string) {
+    super(`engine returned a last_evidence frame without an evidencePack object: ${detail}`);
+    this.name = "EvidenceFrameShapeError";
+  }
+}
+
+/**
+ * Strongly validates the engine's last_evidence result (§6.3) and returns the
+ * parsed pack. The engine frame is `{evidencePack: {…}}`; the envelope is
+ * checked here and the pack body goes to the kernel's read-side parser, which
+ * still accepts archives the engine legitimately wrote before the schema froze
+ * (legacy `0.1-draft` label, `pixelDiff.bounds` omitted instead of null).
+ * The parser reports the frozen const for both labels, so a rendered report
+ * names the contract the pack satisfies; the archive text an agent reads back
+ * through gp_last_evidence is the daemon's frame, untouched.
  */
 function parseEvidenceFrame(raw: unknown): EvidencePack {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw new KernelSchemaError("evidence pack", [{
-      path: "evidencePack",
-      message: "expected an object frame with a nested evidencePack field",
-    }]);
+    throw new EvidenceFrameShapeError("result frame is not an object");
   }
-  const frame = raw as Record<string, unknown>;
-  if (typeof frame.evidencePack !== "object" || frame.evidencePack === null) {
-    throw new KernelSchemaError("evidence pack", [{
-      path: "evidencePack",
-      message: "missing evidencePack field in last_evidence result",
-    }]);
+  const body = (raw as Record<string, unknown>).evidencePack;
+  if (body === undefined) {
+    throw new EvidenceFrameShapeError("missing evidencePack field in last_evidence result");
   }
-  return parseEvidencePack(frame.evidencePack);
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new EvidenceFrameShapeError("evidencePack field is not an object");
+  }
+  return parseEvidencePackRead(body);
+}
+
+/**
+ * The two evidence-read failure classes, each with the remedy that matches its
+ * cause. Shared by the default tool path and the orchestrated audit tools so
+ * one defect cannot be reported with the other's remedy.
+ */
+function mapEvidenceReadError(error: unknown): ToolResult | undefined {
+  if (error instanceof EvidenceFrameShapeError) {
+    return {
+      content: [{ type: "text", text: formatToolError(
+        GP_E_INTERNAL,
+        error.message,
+        `retry gp_last_evidence for the same operationId; if the answer still carries no evidencePack object then whatever is listening on this socket does not speak the engine contract — ${daemonUnreachableRemedy()}`,
+      ) }],
+      isError: true,
+    };
+  }
+  if (error instanceof KernelSchemaError) {
+    return {
+      content: [{ type: "text", text: formatToolError(
+        GP_E_INTERNAL,
+        `engine returned an invalid evidence pack: ${error.message}`,
+        "engine and kernel schema drifted; fix the common fixtures (assertion C35)",
+      ) }],
+      isError: true,
+    };
+  }
+  return undefined;
 }
 
 /* ------------------------------------------------------------------ *
@@ -537,11 +589,15 @@ function parseEvidenceFrame(raw: unknown): EvidencePack {
  * ------------------------------------------------------------------ */
 
 async function projectListTool(): Promise<ToolResult> {
-  const projects = projectList();
-  return {
-    content: [{ type: "text", text: canonicalJson({ projects }) }],
-    isError: false,
-  };
+  try {
+    const projects = projectList();
+    return {
+      content: [{ type: "text", text: canonicalJson({ projects }) }],
+      isError: false,
+    };
+  } catch (error) {
+    return mapProjectError(error);
+  }
 }
 
 async function projectSetTool(args: Record<string, unknown>): Promise<ToolResult> {
@@ -555,31 +611,39 @@ async function projectSetTool(args: Record<string, unknown>): Promise<ToolResult
 
 async function projectGetTool(args: Record<string, unknown>): Promise<ToolResult> {
   const argv = args as ProjectGetArgs;
-  const entry = projectGet(argv.projectId);
-  if (entry === undefined) {
-    return {
-      content: [{ type: "text", text: formatToolError(
-        "GP_E_NOT_FOUND",
-        `unknown project ${argv.projectId}`,
-        "check the projectId; use gp_project_list to view available projects",
-      ) }],
-      isError: true,
-    };
+  try {
+    const entry = projectGet(argv.projectId);
+    if (entry === undefined) {
+      return {
+        content: [{ type: "text", text: formatToolError(
+          "GP_E_NOT_FOUND",
+          `unknown project ${argv.projectId}`,
+          "check the projectId; use gp_project_list to view available projects",
+        ) }],
+        isError: true,
+      };
+    }
+    return { content: [{ type: "text", text: canonicalJson({ project: entry }) }], isError: false };
+  } catch (error) {
+    return mapProjectError(error);
   }
-  return { content: [{ type: "text", text: canonicalJson({ project: entry }) }], isError: false };
 }
 
+/**
+ * The single error mapper for all three project tools. `projectList()` and
+ * `projectGet()` used to have no handler at all, so the registry's honest
+ * "this file is unreadable" throw escaped `executeTool` entirely (custom
+ * executors run outside its try/catch) and the agent saw a bare JSON-RPC
+ * -32603 with no code and no remedy — the exact shape the registry was changed
+ * to avoid producing (R4-03/A-15 family).
+ */
 function mapProjectError(error: unknown): ToolResult {
   if (error instanceof ProjectRegistryError) {
     return {
       content: [{ type: "text", text: formatToolError(
         error.code,
         error.message,
-        error.code === GP_E_PROJECT_LIMIT
-          ? "delete unused projects first, then retry"
-          : error.code === GP_E_NOT_FOUND
-            ? "check the projectId; use gp_project_list to view available projects"
-            : "check the tool's input schema and retry",
+        projectErrorRemedy(error.code),
       ) }],
       isError: true,
     };
@@ -588,10 +652,31 @@ function mapProjectError(error: unknown): ToolResult {
     content: [{ type: "text", text: formatToolError(
       GP_E_INTERNAL,
       `internal shell error in project registry: ${String(error)}`,
-      "see the MCP server logs and retry",
+      projectErrorRemedy(GP_E_INTERNAL),
     ) }],
     isError: true,
   };
+}
+
+/**
+ * Remedy per registry failure code. `GP_E_INTERNAL` here means one specific
+ * thing — the projects file cannot be read or decoded — so the guidance has to
+ * be about that file: "see the MCP server logs" (the old shell-wide default)
+ * sends the agent to look at something that never touched the damage, and
+ * "check the tool's input schema" (the old non-limit default) states a cause
+ * the message already ruled out.
+ */
+function projectErrorRemedy(code: string): string {
+  if (code === GP_E_PROJECT_LIMIT) {
+    return "delete unused projects first (`glasspaned --list-projects` prints the registered set), then retry";
+  }
+  if (code === GP_E_NOT_FOUND) {
+    return "check the projectId; use gp_project_list to view available projects";
+  }
+  if (code === GP_E_INTERNAL) {
+    return `the projects file is the problem, not your arguments: the message above names its path, so read it with \`python3 -m json.tool <that path>\`, repair or restore the damaged entry, and retry — or set ${FORCE_OVERWRITE_ENV}=1 and call gp_project_set to rebuild the registry from scratch (the unloadable file is moved aside as <path>.unreadable-<id>, never deleted, and every entry still in it is lost). Do not retry the same read-only call unchanged: it will keep failing.`;
+  }
+  return "check the tool's input schema and retry";
 }
 
 /* ------------------------------------------------------------------ *
@@ -689,15 +774,9 @@ function mapAuditError(error: unknown): ToolResult {
       isError: true,
     };
   }
-  if (error instanceof KernelSchemaError) {
-    return {
-      content: [{ type: "text", text: formatToolError(
-        GP_E_INTERNAL,
-        `engine returned an invalid evidence pack: ${error.message}`,
-        "engine and kernel schema drifted; fix the common fixtures (assertion C35)",
-      ) }],
-      isError: true,
-    };
+  const evidenceFailure = mapEvidenceReadError(error);
+  if (evidenceFailure !== undefined) {
+    return evidenceFailure;
   }
   return {
     content: [{ type: "text", text: formatToolError(

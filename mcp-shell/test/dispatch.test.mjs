@@ -1,7 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { McpServer, MCP_PROTOCOL_VERSION, SERVER_INFO } from "../dist/dispatch.js";
+import {
+  McpServer,
+  MCP_PROTOCOL_VERSION,
+  SERVER_INFO,
+  SUPPORTED_PROTOCOL_VERSIONS,
+} from "../dist/dispatch.js";
 import { makeEngine } from "./helpers.mjs";
 
 const enq = (obj) => JSON.stringify(obj);
@@ -10,6 +15,36 @@ function makeServer(timeoutMs = 500) {
   const { engine, io } = makeEngine({ timeoutMs });
   const server = new McpServer({ engine });
   return { server, engine, io };
+}
+
+/**
+ * Server for the initialize version negotiation (spec P0 §6.1). Passing
+ * `supportedVersions` injects a version set that differs from the shipped one —
+ * without that seam an "echo" assertion would be indistinguishable from the
+ * always-answer-our-own-constant behaviour this fix removed.
+ */
+function makeVersionServer(supportedVersions) {
+  const { engine } = makeEngine({ timeoutMs: 500 });
+  const deps = { engine };
+  if (supportedVersions !== undefined) {
+    deps.supportedProtocolVersions = supportedVersions;
+  }
+  return new McpServer(deps);
+}
+
+/** One initialize frame; `params === undefined` omits params entirely. */
+async function initialize(server, params, id = 1) {
+  const frame = { jsonrpc: "2.0", id, method: "initialize" };
+  if (params !== undefined) {
+    frame.params = params;
+  }
+  return server.handleLine(enq(frame));
+}
+
+/** The handshake fields that version negotiation must never touch. */
+function assertHandshakeShape(result) {
+  assert.deepEqual(result.capabilities, { tools: { listChanged: false } });
+  assert.deepEqual(result.serverInfo, SERVER_INFO);
 }
 
 test("initialize handshake returns capabilities and server info", async () => {
@@ -25,6 +60,76 @@ test("initialize handshake returns capabilities and server info", async () => {
   assert.equal(response.result.protocolVersion, MCP_PROTOCOL_VERSION);
   assert.deepEqual(response.result.capabilities, { tools: { listChanged: false } });
   assert.deepEqual(response.result.serverInfo, SERVER_INFO);
+});
+
+// Spec P0 §6.1 版本协商：回显客户端版本，不识别时回落本常量。
+test("initialize echoes a client protocolVersion this server implements", async () => {
+  const server = makeVersionServer(["2024-11-05", MCP_PROTOCOL_VERSION]);
+  const response = await initialize(server, {
+    protocolVersion: "2024-11-05",
+    capabilities: {},
+    clientInfo: { name: "t", version: "1" },
+  });
+  assert.equal(response.error, undefined);
+  assert.equal(response.id, 1);
+  // 回显的是客户端那一个，不是本 shell 的常量
+  assert.equal(response.result.protocolVersion, "2024-11-05");
+  assertHandshakeShape(response.result);
+});
+
+test("initialize echoes its own constant when the client asks for exactly that", async () => {
+  const server = makeVersionServer(); // shipped default set, no injection
+  assert.ok(SUPPORTED_PROTOCOL_VERSIONS.includes(MCP_PROTOCOL_VERSION));
+  const response = await initialize(server, { protocolVersion: MCP_PROTOCOL_VERSION });
+  assert.equal(response.error, undefined);
+  assert.equal(response.result.protocolVersion, MCP_PROTOCOL_VERSION);
+  assertHandshakeShape(response.result);
+});
+
+test("initialize falls back to its own constant on an unimplemented client version", async () => {
+  const server = makeVersionServer(); // ships only MCP_PROTOCOL_VERSION
+  const response = await initialize(server, {
+    protocolVersion: "2024-11-05",
+    capabilities: {},
+    clientInfo: { name: "t", version: "1" },
+  });
+  assert.equal(response.error, undefined);
+  assert.notEqual(response.result.protocolVersion, "2024-11-05");
+  assert.equal(response.result.protocolVersion, MCP_PROTOCOL_VERSION);
+  assertHandshakeShape(response.result);
+});
+
+test("initialize answers a version-less handshake instead of crashing", async () => {
+  const server = makeVersionServer();
+  const response = await initialize(server, { capabilities: {}, clientInfo: { name: "t", version: "1" } });
+  assert.equal(response.error, undefined);
+  assert.equal(response.result.protocolVersion, MCP_PROTOCOL_VERSION);
+  assertHandshakeShape(response.result);
+});
+
+test("initialize never rejects a garbage protocolVersion, it falls back", async () => {
+  const server = makeVersionServer();
+  const malformed = [
+    undefined, // params 整体省略 —— 合法 MCP 形状
+    null, // params 为 null
+    {}, // 有 params 但没有 protocolVersion
+    { protocolVersion: null },
+    { protocolVersion: 20250618 }, // 非字符串
+    { protocolVersion: true },
+    { protocolVersion: ["2025-06-18"] },
+    { protocolVersion: { version: "2025-06-18" } },
+    { protocolVersion: "" }, // 字符串但没人实现它
+    "2025-06-18", // params 根本不是对象
+    [], // 也不是
+  ];
+  for (const params of malformed) {
+    const response = await initialize(server, params);
+    const label = JSON.stringify(params) ?? "omitted params";
+    assert.equal(response.error, undefined, `handshake must not be rejected: ${label}`);
+    assert.equal(response.id, 1);
+    assert.equal(response.result.protocolVersion, MCP_PROTOCOL_VERSION, `fallback expected: ${label}`);
+    assertHandshakeShape(response.result);
+  }
 });
 
 test("notifications/initialized yields no response", async () => {
