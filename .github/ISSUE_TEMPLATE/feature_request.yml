@@ -1,0 +1,98 @@
+name: 功能请求（Feature Request）
+description: 提出新工具、新信号、新降级形态或体验改进
+title: "[Feat] "
+labels:
+  - enhancement
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本项目的功能先在设计真值里被规格化、被验收，代码只是它的一种实现：
+        [specs/](https://github.com/jingzhao-l/GlassPane/tree/main/specs) 下的 PRD 与 P0–P6 实施规格。
+        写请求时请顺手回答「它属于哪份文档」和「怎么证明它真的被验证过」——这两个空答不上来的请求，
+        通常会被要求先补规格而不是先写代码。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决的问题
+      description: 现在做不到什么 / 哪里的判断不够准 / 哪里的成本过高。请给具体场景，不要只给方案。
+      value: |
+        场景：
+        现状与痛点：
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的行为
+      description: 希望哪个 `gp_*` 工具或面板出现什么变化；输入输出大致长什么样
+    validations:
+      required: true
+  - type: dropdown
+    id: verification-semantics
+    attributes:
+      label: 是否触及验证语义
+      description: |
+        「验证语义」＝归因结论（attribution）、检查点与回滚（checkpoint/restore）、证据包内容或生命周期
+        （evidence）、权限席位的实测与呈现。触及这些的请求必须同时给出「拿不到数据时如何如实降级」。
+      options:
+        - 触及归因（attribution level / 污染判定 / 信号优先级）
+        - 触及检查点或回滚（snapshot / restore）
+        - 触及证据包（新增字段、导出形态、归档与清理）
+        - 触及权限实测与呈现（TCC 席位、面板状态、重探与重启语义）
+        - 不触及验证语义（纯工程/文档/安装体验改进）
+        - 不确定，请维护者判定
+    validations:
+      required: true
+  - type: input
+    id: spec-doc
+    attributes:
+      label: 应归属的 specs 文档
+      description: |
+        例如 `specs/GlassPane_P1_实施规格_v1.5_evidence落盘.md`（证据落盘）、
+        `..._P2_实施规格_v2.0_并发归因污染防护.md`（归因与污染）、
+        `..._P6_实施规格_v6.0_探针SDK与LLDB桥实现.md`（探针与桥）、
+        `..._PRD_v1.0.md`（新方向）。也可能是新建一份批次文档，请说明理由。
+      placeholder: "specs/GlassPane_P5_实施规格_v5.0_方向候选四连批.md"
+    validations:
+      required: true
+  - type: textarea
+    id: layers
+    attributes:
+      label: 会牵动哪些层
+      description: |
+        新 `gp_*` 工具通常需要三处同步：kernel 的 JSON Schema 真值（`kernel/schemas/`）、daemon 的方法与
+        分类器（`engine/Sources/`）、mcp-shell 的工具表（`mcp-shell/src/tools.ts`）。请勾出你预计要改的层。
+      value: |
+        - [ ] kernel/schemas（JSON Schema 真值）
+        - [ ] engine daemon（GlassPaneEngine / glasspaned）
+        - [ ] engine settings（glasspane-settings）
+        - [ ] mcp-shell（gp_* 工具表）
+        - [ ] engine/probe（探针 SDK）
+        - [ ] bridge（LLDB 桥）
+        - [ ] installer / install.sh
+        - [ ] specs 文档
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收怎么做
+      description: |
+        纯逻辑部分能进 CI（swift test / pytest / npm test / publish-shape 守卫）；依赖真实 GUI 会话、真实
+        TCC 席位或真实被测 app 的部分只能真机冒烟，请说明人工验收步骤并准备把它写进
+        `engine/smoke.md` 留档。**不要用「CI 绿了」代替「真机验过了」。**
+    validations:
+      required: true
+  - type: checkboxes
+    id: honesty
+    attributes:
+      label: 诚实性自检
+      options:
+        - label: 这个功能在拿不到真实测量数据时，会如实报「未验证」而不是让指示变绿
+          required: true
+        - label: 我不会要求用 mock / 放宽阈值 / 跳过断言来制造通过
+          required: true
+        - label: 愿意先补一份 specs 段落，再谈实现
+          required: false

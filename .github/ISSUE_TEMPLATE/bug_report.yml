@@ -1,0 +1,128 @@
+name: 缺陷报告（Bug Report）
+description: 报告 GlassPane 任一层（MCP 客户端 / mcp-shell / daemon / 设置面板 / LLDB 桥）的缺陷
+title: "[Bug] "
+labels:
+  - bug
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先说清楚一件事：**「权限要人工在系统设置里勾选」不是缺陷**，这是 TCC 的设计边界
+        （授权对象必须是 daemon 本身，程序无法代勾）。同样地，**权限卡显示「未验证」不一定是 bug**——
+        开发者工具席位没有公开查询接口，产品按设计宁可报未验证也不假点亮。
+        请先读 [SECURITY.md](https://github.com/jingzhao-l/GlassPane/blob/main/SECURITY.md) 的「这些不是安全问题」，
+        以及 [engine/smoke.md](https://github.com/jingzhao-l/GlassPane/blob/main/engine/smoke.md) 的「常见失败形态」。
+        涉及令牌、日志原文、证据包内容的安全问题请走私密安全通告，不要开公开 issue。
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS 版本
+      description: 贴 `sw_vers -productVersion`（必要时补 `sw_vers -buildVersion`）的输出
+      placeholder: "14.5"
+    validations:
+      required: true
+  - type: input
+    id: glasspane-version
+    attributes:
+      label: GlassPane 版本 / git ref
+      description: npm 包版本（`glasspane-mcp` / `glasspane-install`）或源码安装的 commit（`git rev-parse --short HEAD`）
+      placeholder: "1.1.0 / a1b2c3d"
+    validations:
+      required: true
+  - type: dropdown
+    id: layer
+    attributes:
+      label: 失败发生在哪一层
+      description: 按最能定位的那一层选；不确定就选「不确定」并多写现象
+      options:
+        - MCP 客户端（Claude / Cursor / 其他 host）
+        - mcp-shell（gp_* 工具与 JSON-RPC 层）
+        - daemon（glasspaned：AX / 输入监控 / 屏幕录制 / 证据）
+        - 设置面板（glasspane-settings GUI）
+        - LLDB 桥（bridge/glasspane_bridge.py）
+        - 探针 SDK（engine/probe，GlassPaneProbe）
+        - 安装器（install.sh / installer/cli.js / launchd 注册）
+        - 不确定
+    validations:
+      required: true
+  - type: textarea
+    id: tool-call
+    attributes:
+      label: 出错的 gp_* 调用与结构化错误
+      description: |
+        写清工具名与入参，并**原样贴出错误帧里的 code / message / remedy 三段**
+        （形如 `GP_E_XXX: message | remedy: ...`）。remedy 文案本身不准确也属于缺陷，请一并说明。
+      render: text
+      placeholder: |
+        gp_act {"selector":{"role":"AXButton","title":"新建备忘录"},"action":"press"}
+        GP_E_AX_UNAVAILABLE: accessibility not granted | remedy: run `glasspaned --grant-accessibility`
+    validations:
+      required: true
+  - type: dropdown
+    id: permission-cards
+    attributes:
+      label: 设置面板的权限卡当时显示什么
+      description: 面板读数与 daemon 自报席位是否一致，是本项目最常见的根因分岔点
+      options:
+        - 全部显示已授权
+        - 辅助功能显示「未验证」
+        - 输入监控显示「未验证」
+        - 屏幕录制显示「未验证」
+        - 开发者工具显示「未验证」
+        - Daemon 状态里的「主体」与实际二进制不一致
+        - 面板打不开 / 没到权限页
+        - 与本问题无关
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: daemon 与 launchd 日志摘录
+      description: |
+        取这几处，各贴 20–50 行上下文：`~/.glasspane/installer-daemon.log`（launchd 的 stdout 与 stderr
+        都写在这里）、`launchctl print gui/$(id -u)/com.glasspane.daemon` 的输出、以及 `--verbose` 起
+        daemon 时的 stderr。
+        ⚠️ **贴之前请先删除屏幕内容**：日志与证据里可能含被测 app 界面上的账号、姓名、邮件、Token 等
+        他人或敏感文本。宁可少贴，也不要贴未脱敏原文。
+      render: text
+      placeholder: "（已脱敏后粘贴）"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 如何复现
+      description: |
+        从干净状态起的最小步骤：attach 的 app（bundleId）、调用顺序、期望结果 vs 实际结果。
+        涉及归因/证据包的，请给出 `operationId`（`op_...`）与期望的归因等级。
+      value: |
+        1.
+        2.
+        3.
+        期望：
+        实际：
+    validations:
+      required: true
+  - type: textarea
+    id: evidence-surface
+    attributes:
+      label: 证据面观察（可选但很有用）
+      description: |
+        `glasspaned --permissions` 的 JSON、`glasspaned --evidence-stats` 的输出、以及对应
+        `~/.glasspane/evidence/<operationId>.json` 里的 `attribution.level` / `circuitBreaker.level` /
+        `signals` 字段（**去掉界面文本后再贴**）。
+      render: json
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 已搜索过 open/closed issue，确认不是重复
+          required: true
+        - label: 这不是「TCC 权限必须人工勾选」本身（那是设计边界）
+          required: true
+        - label: 日志、证据、截图中不含令牌、密码与他人界面内容
+          required: true
+        - label: 如按真机冒烟流程（engine/smoke.md）执行过，结果与文档描述不一致
+          required: false
