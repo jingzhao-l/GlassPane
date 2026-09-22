@@ -15,6 +15,13 @@ name: Release
 #   B. 或仓库 Secrets 配 NPM_TOKEN（automation token，读+发布范围）。
 # provenance 声明要求 id-token: write（已配）。两个包各自 prepublishOnly
 # 完成 tsc + esbuild 捆绑，CI 不重复构建细节。
+#
+# 合并提示（2026-09-22，v1.1.0 起）：分支 kernel-migration 上的本文件另有一处
+# 演进——node 22 + npm@11 + `npm publish` 被拒时回落 `npm stage publish`
+# （Trusted Publishing 为 staged-only，owner 用 `npm stage approve` 兑现）。
+# 两者不冲突，合并时都要保留：github-release 任务（tag 触发，源码 tarball +
+# SHA256SUMS，v1.1.0 的 Release 就是它产的）+ npm-publish 任务的 stage 回落。
+# 别用 --theirs/--ours 整文件覆盖。
 on:
   push:
     tags:
