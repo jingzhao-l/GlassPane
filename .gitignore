@@ -11,3 +11,6 @@ __pycache__/
 
 # 打包时从 kernel 复制的 schema 真源（bundle 步骤产物）
 /mcp-shell/schemas/
+
+# npm pack 产物（发布用，不入库；历史上误提过一枚 glasspane-mcp-shell-0.1.0.tgz）
+*.tgz
