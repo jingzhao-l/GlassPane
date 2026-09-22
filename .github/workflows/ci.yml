@@ -122,3 +122,17 @@ jobs:
         run: npm run build
       - name: Test all workspaces (kernel + mcp-shell)
         run: npm run test --workspaces --if-present
+
+  # 版本线守卫：根 workspace / 两个 npm 包 / kernel / MCP 自报 / daemon 自报 /
+  # .app bundle / install.sh 钉的 tag / lockfile 必须是同一个数字。漂移的后果不是
+  # 难看而是危险：用户按 tag 装到的源码，和 registry 上的包、面板里显示的版本对不上。
+  version-line:
+    name: version line (single source of truth)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Check every derived site agrees with root package.json
+        run: node scripts/check-version.mjs

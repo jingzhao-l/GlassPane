@@ -9,7 +9,7 @@ import { EvidenceAuditSession } from "./audit-session.js";
 export const JSONRPC = "2.0" as const;
 /** MCP protocol version echoed on initialize (spec §6.1). */
 export const MCP_PROTOCOL_VERSION = "2025-06-18" as const;
-export const SERVER_INFO = { name: "glasspane-mcp", version: "0.1.0" } as const;
+export const SERVER_INFO = { name: "glasspane-mcp", version: "1.1.0" } as const;
 
 export const PARSE_ERROR = -32700;
 export const INVALID_REQUEST = -32600;

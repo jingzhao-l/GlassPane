@@ -1,6 +1,6 @@
 {
   "name": "glasspane-install",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "GlassPane one-command installer: terminal onboarding → install deps → build TS + Swift engine → start daemon → open settings GUI for permission guide",
   "type": "module",
   "license": "MIT",
