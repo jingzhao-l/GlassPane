@@ -20,14 +20,14 @@
   "total": 24,
   "strong": 24,
   "rate": 1.0,
-  "handlerHitActs": 0,
-  "handlerLaneHits": 0,
+  "handlerHitActs": 1,
+  "handlerLaneHits": 1,
   "handlerLaneNote": "URL scheme step-volume 在 act 窗口内触发已标注 setter；hitCount>0 即 Z1 handler lane 在真实 app 上的覆盖证明",
   "verdict": "PASS",
-  "timestamp": "2026-09-21T20:57:49+0800",
+  "timestamp": "2026-09-22T19:48:29+0800",
   "acts": [
     {
-      "operationId": "op_01M320NRX7PYP47D6EY112K2QV",
+      "operationId": "op_01M34F3RFHZ5481TAY9SH3BNB6",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -37,7 +37,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320NSFX7PYC1BN66FK749KY",
+      "operationId": "op_01M34F3S0MRD066CC8TDC3DE8S",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -47,7 +47,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320NT1F41Y424VGHBCKDWPR",
+      "operationId": "op_01M34F3SHSE7WESPQ0TJMDVDQ2",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -57,7 +57,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320NTNER3JYGF5ME3QQCABK",
+      "operationId": "op_01M34F3T2YTJWVTJ82TET754HM",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -67,7 +67,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320NV6MBYAHJ5PQWFP83HWG",
+      "operationId": "op_01M34F3TM6BA43WH1HK379641C",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -77,7 +77,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320NVQTJ0W17VEM25TWVXME",
+      "operationId": "op_01M34F3V5ATW671B9D901QXJBR",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -87,7 +87,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320NWA9W3KH7QVC6DNP3NNP",
+      "operationId": "op_01M34F3VPM19PFJNBC99CTS6KN",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -97,7 +97,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320NWWK69KNVVQ0AP9Z7KBW",
+      "operationId": "op_01M34F3W7W1SNPTSYW625077FN",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -107,7 +107,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320NXDZSD97CKFS0N7JKD72",
+      "operationId": "op_01M34F3WRZMQ7EZJ6DY3GV4YN4",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -117,7 +117,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320NXZ5BMP3SF3KQ05Y7G33",
+      "operationId": "op_01M34F3XAMREB7HR37FT1THG9Q",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -127,7 +127,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320NYGN5B5KXJG39JH1S10D",
+      "operationId": "op_01M34F3XWMY3025W6S0FWHD0C8",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -137,7 +137,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320NZ6F35QGZN2CKNTPEF0P",
+      "operationId": "op_01M34F3YEDE5E0HK6ZZDNM9TG8",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -147,7 +147,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320NZS1BY741AQ3ENDE29EP",
+      "operationId": "op_01M34F3Z005079N9VPEG2T0443",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -157,7 +157,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320P0A802197V1XY2H4SHND",
+      "operationId": "op_01M34F3ZH452GNADE9EW6G98QQ",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -167,7 +167,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320P0VBYZNYDRVF4NCKTS5E",
+      "operationId": "op_01M34F4037ZSEHZETFZVYJY325",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -177,7 +177,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320P1CGMR62V2F0S1SVCS9B",
+      "operationId": "op_01M34F40MGHM160KP7040T11YC",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -187,7 +187,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320P1YAKW3JXYJG1KJRJXM6",
+      "operationId": "op_01M34F416H6ZFEFF0XZQJ9YCEB",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -197,7 +197,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320P2H24S8RXP0G36JE12QM",
+      "operationId": "op_01M34F41QV0SX0V391J42VPC80",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -207,7 +207,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320P324013CXDSXMK9Q4YMQ",
+      "operationId": "op_01M34F429242P8V3M49BAX6R6Y",
       "label": "settings-audio-slider/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -217,7 +217,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320P3KFY58ZCD28T2KRETA8",
+      "operationId": "op_01M34F42T6HFN2FX4T6S28GQBR",
       "label": "settings-audio-slider/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -229,7 +229,7 @@
   ],
   "popoverActs": [
     {
-      "operationId": "op_01M320P59M2EXX88CD6WZW17JH",
+      "operationId": "op_01M34F44GW58Z1PMY84VSRYMDA",
       "label": "popover/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -239,7 +239,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320P5TRDQ5MJGEA0PPRDZV2",
+      "operationId": "op_01M34F4522JQKNX4DKF2F6H8CF",
       "label": "popover/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -249,7 +249,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320P6BXPRTQ3YXJPTF1QJ26",
+      "operationId": "op_01M34F45K8909H4S2ASQ2MMG9J",
       "label": "popover/increment",
       "actConfirmed": true,
       "level": "strong",
@@ -259,7 +259,7 @@
       "stateSource": "z2-mirror"
     },
     {
-      "operationId": "op_01M320P6X7PA1YFJ5ZFCDTSC69",
+      "operationId": "op_01M34F464CZAM022SSZE6CN1YB",
       "label": "popover/decrement",
       "actConfirmed": true,
       "level": "strong",
@@ -271,104 +271,14 @@
   ],
   "handlerLaneActs": [
     {
-      "operationId": "op_01M320PBNM985BBNFNQ1YE0TFV",
+      "operationId": "op_01M34F4AW80S0QNQ7XKHS0010B",
       "label": "handler-lane/com.glasspane.h1.inactive-0-up",
       "actConfirmed": true,
       "level": "strong",
       "contaminated": false,
-      "hitCount": 0,
+      "hitCount": 1,
       "stateChanged": true,
-      "stateSource": "z2-mirror"
-    },
-    {
-      "operationId": "op_01M320PCCT038D4H3E66VHJCT7",
-      "label": "handler-lane/com.glasspane.h1.inactive-1-down",
-      "actConfirmed": true,
-      "level": "soft",
-      "contaminated": false,
-      "hitCount": 0,
-      "stateChanged": false,
-      "stateSource": null
-    },
-    {
-      "operationId": "op_01M320PD2GN914G66466EJHC75",
-      "label": "handler-lane/com.glasspane.h1.inactive-2-up",
-      "actConfirmed": true,
-      "level": "soft",
-      "contaminated": false,
-      "hitCount": 0,
-      "stateChanged": false,
-      "stateSource": null
-    },
-    {
-      "operationId": "op_01M320PDRCWV2SPE2K5CC43JK8",
-      "label": "handler-lane/com.glasspane.h1.inactive-3-down",
-      "actConfirmed": true,
-      "level": "soft",
-      "contaminated": false,
-      "hitCount": 0,
-      "stateChanged": false,
-      "stateSource": null
-    },
-    {
-      "operationId": "op_01M320PEE677F7F8FVNY19WCED",
-      "label": "handler-lane/com.glasspane.h1.inactive-0-up",
-      "actConfirmed": true,
-      "level": "soft",
-      "contaminated": false,
-      "hitCount": 0,
-      "stateChanged": false,
-      "stateSource": null
-    },
-    {
-      "operationId": "op_01M320PF45GZKCG4B3HDZR7422",
-      "label": "handler-lane/com.glasspane.h1.inactive-1-down",
-      "actConfirmed": true,
-      "level": "soft",
-      "contaminated": false,
-      "hitCount": 0,
-      "stateChanged": false,
-      "stateSource": null
-    },
-    {
-      "operationId": "op_01M320PFT12M6WCT16C3AXZKR0",
-      "label": "handler-lane/com.glasspane.h1.inactive-2-up",
-      "actConfirmed": true,
-      "level": "soft",
-      "contaminated": false,
-      "hitCount": 0,
-      "stateChanged": false,
-      "stateSource": null
-    },
-    {
-      "operationId": "op_01M320PGG9B3SAW9EG3KW3B4DN",
-      "label": "handler-lane/com.glasspane.h1.inactive-3-down",
-      "actConfirmed": true,
-      "level": "soft",
-      "contaminated": false,
-      "hitCount": 0,
-      "stateChanged": false,
-      "stateSource": null
-    },
-    {
-      "operationId": "op_01M320PH7A1NZDKCPN65VKGG8W",
-      "label": "handler-lane/com.glasspane.h1.inactive-0-up",
-      "actConfirmed": true,
-      "level": "soft",
-      "contaminated": false,
-      "hitCount": 0,
-      "stateChanged": false,
-      "stateSource": null
-    },
-    {
-      "operationId": "op_01M320PHXEZ07CWBRTKF81BBTK",
-      "label": "handler-lane/com.glasspane.h1.inactive-1-down",
-      "actConfirmed": true,
-      "level": "soft",
-      "contaminated": false,
-      "hitCount": 0,
-      "stateChanged": false,
-      "stateSource": null
+      "stateSource": "z1-macro"
     }
   ]
 }

@@ -315,7 +315,10 @@ def step_build(shell):
 
 
 def step_bundle(work, binary):
-    app = os.path.join(work, "FineTuneRetest.app")
+    # H1_BUNDLE_DIR：bundle 落点覆盖（默认 work 下；handler lane 复采需 LS 稳定位置）
+    app_dir = os.environ.get("H1_BUNDLE_DIR") or work
+    os.makedirs(app_dir, exist_ok=True)
+    app = os.path.join(app_dir, "FineTuneRetest.app")
     contents = os.path.join(app, "Contents")
     os.makedirs(os.path.join(contents, "MacOS"), exist_ok=True)
     os.makedirs(os.path.join(contents, "Resources"), exist_ok=True)
@@ -495,7 +498,7 @@ def step_run(work, app, keep_running, acts, skip_popover):
     engine_sock = os.path.join(run, "engine.sock")
     probe_sock = os.path.join(run, "probe.sock")
     app_exec = os.path.join(app, "Contents", "MacOS", "FineTune")
-    # 只清理"本脚本自己的"实例（路径都在 work-dir 下），绝不触碰用户部署。
+    # 只清理"本脚本自己的"实例（按 bundle 精确路径匹配），绝不触碰用户部署。
     kill_pids(pgrep_pids(re.escape(app_exec)))
     kill_pids(pgrep_pids(f"socket-path {re.escape(engine_sock)}"))
     for sock in (engine_sock, probe_sock):
@@ -640,8 +643,8 @@ def step_run(work, app, keep_running, acts, skip_popover):
         with open(out_path, "w", encoding="utf-8") as handle:
             json.dump(report, handle, ensure_ascii=False, indent=2)
         log(f"{verdict}：状态化通道 strong {strong}/{total} = {rate:.0%}（threshold 80%），"
-            f"handler lane 覆盖命中 {lane_hit} 次（总 hit {handler_hits}；verdict 同时要求 "
-            f"rate>=80% 与 lane_hit>0）；数据已写 {out_path}")
+            f"handler lane 覆盖命中 {lane_hit} 次（总 hit {handler_hits}；verdict 门槛=rate，"
+            f"lane 覆盖为冻结评审输入项）；数据已写 {out_path}")
         log("results.md 表格行：| H1 | … | 真实 app："
             f"{total} act 强归因 {strong}（{rate:.0%}），lane={lane} | {'✓' if verdict == 'PASS' else '✗'} |")
         if not keep_running:

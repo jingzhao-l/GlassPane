@@ -47,7 +47,7 @@ KeyboardShortcuts 2.4.0 / Sparkle 2.8.1 / FluidMenuBarExtra 1.5.1）。
 
 | 项 | 数据 | 判定 |
 |---|---|---|
-| H1（复核） | 状态化通道真实 app **24/24 strong=100%**（z2-mirror）；handler lane 覆盖：inactive-URL 直达 SettingsManager 插桩 setter 的路径已铺（lsregister 入壳），但 LaunchServices 对 /tmp bundle 的 scheme 解析在本机仍 -10814（三次），lane 真 app 命中记 0、不作门槛（机制由合成金丝雀证） | ✓（比率达标；lane 覆盖如实挂 Phase B 复采） |
+| H1（复核+终采） | 状态化通道真实 app **24/24 strong=100%**（z2-mirror）；handler lane：inactive-URL 直达 SettingsManager 插桩 setter——/tmp bundle 的 scheme 解析实测 -10814（LS 对临时目录不可靠），bundle 落 `~/Applications`（`H1_BUNDLE_DIR` 覆盖）后 **hitCount=1、level=strong 真实命中**。Z1 双写通道自此在真 app 上有一手证据 | ✓✓（比率与 lane 覆盖双达标；冻结数据面无欠账） |
 | H5（补） | 懒容器屏外行 identifier 在场率 10/60 → **索引失效率 83.3%**；add/remove 十轮五线计数：hit=1、state=true、ax=true 恒中，pixel=false（隔离 daemon 无屏幕录制——F16 同因） | 数据入表（通道边界定性：observe 只覆盖实体化节点） |
 | H6（补） | rollback_full：consistent=true 且**恢复窗口 handler 增量=0**（快照→再写→恢复全程序列 handler 1→1→1）——副作用零重放的硬指标 | ✓（onAppear 可见性语义在离屏 harness 不成立，判定面已换口径并如实注记） |
 | H4（补） | Z4.5 三场景全达**结构化拒绝态**（supportsDestination=false：本机 Graphics Inspector 未开）；正产物路径待一次性开 Inspector 复跑 | 契约诚实分支成立；全三态挂 Inspector 复采 |

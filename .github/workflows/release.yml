@@ -1,0 +1,63 @@
+name: Release
+# 发布通道（P6 §13 遗留项兑现）：手动触发，默认 dry-run。
+# 一次性前置（任选其一，owner 在 npm/GitHub 网页侧操作，均无需改本文件）：
+#   A. npm Trusted Publishing（推荐，免 secret）：npmjs.com → 对应包 →
+#      Publishing → Trusted accesses → GitHub Actions，仓库
+#      jingzhao-l/GlassPane、工作流 release.yml、环境 release。
+#   B. 或仓库 Secrets 配 NPM_TOKEN（automation token，读+发布范围）。
+# provenance 声明要求 id-token: write（已配）。两个包各自 prepublishOnly
+# 完成 tsc + esbuild 捆绑，CI 不重复构建细节。
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "publish 前先行校验？"
+        type: choice
+        required: true
+        default: dry
+        options:
+          - dry
+          - publish
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: publish bare names with provenance
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    env:
+      MODE: ${{ github.event.inputs.mode }}
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - name: Install workspaces from root lockfile
+        run: npm ci
+      - name: Build all TS workspaces (kernel first; mcp-shell imports it)
+        run: npm run build
+      - name: Publish (or dry-run) glasspane-mcp
+        working-directory: mcp-shell
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = "dry" ]; then
+            npm run bundle
+            npm publish --dry-run
+          else
+            npm publish --provenance
+          fi
+      - name: Publish (or dry-run) glasspane-install
+        working-directory: installer
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = "dry" ]; then
+            npm publish --dry-run
+          else
+            npm publish --provenance
+          fi

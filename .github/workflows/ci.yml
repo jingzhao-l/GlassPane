@@ -78,6 +78,29 @@ jobs:
       - name: Test mcp-shell (dispatch + tools + engine client)
         working-directory: mcp-shell
         run: npm test
+      - name: Publish-shape guard (bundle + npm pack + clean-room initialize)
+        # 守的是发布形态本身：prepublishOnly 的捆绑产物在干净环境必须能装上并
+        # 完成 MCP initialize 握手（file: 依赖泄漏、schemas 缺文件都在这一步现形）。
+        working-directory: mcp-shell
+        run: |
+          npm run bundle
+          PKG=$(npm pack --silent | tail -1)
+          rm -rf /tmp/gp-packtest && mkdir -p /tmp/gp-packtest
+          cd /tmp/gp-packtest
+          printf '{"name":"t","private":true}\n' > package.json
+          npm install --no-audit --no-fund "$GITHUB_WORKSPACE/mcp-shell/$PKG"
+          python3 - <<'PYEOF'
+          import json, subprocess
+          p = subprocess.Popen(["node_modules/.bin/glasspane-mcp"], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                               cwd="/tmp/gp-packtest")
+          req = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+              "protocolVersion": "2024-11-05", "capabilities": {},
+              "clientInfo": {"name": "ci", "version": "1"}}}
+          out, err = p.communicate(json.dumps(req) + "\n", timeout=15)
+          assert "glasspane-mcp" in out, ("initialize handshake failed", out[:200], err[:200])
+          print("publish-shape guard OK")
+          PYEOF
 
   # 根 workspace 全绿守护：installer + kernel + mcp-shell 从仓库根统一安装/构建/测试，
   # 防止"单包绿但根布局/workspaces 依赖漂移"漏出——发布形态以根为准。

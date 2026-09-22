@@ -261,10 +261,12 @@ agent 可执行、不得许诺不存在的能力。八项发现的逐项落点�
   `legacySchemaVersions` 兼容（draft 期历史包可解码可校验，写侧恒 stamp v0.1），
   单测 `testLegacyDraftVersionStillValidatesOnRead` 钉死。decision-log / recipe 两
   schema 属 iterate 侧迭代节奏，维持 draft 不动。
-- **挂 Phase B 复采两件（不阻断发布，逐条带解锁动作）**：① handler lane 真 app 命中——
-  路径已铺（inactive-URL→SettingsManager 插桩 setter + lsregister），本机 LS 对 /tmp
-  bundle scheme 解析 -10814，换安装形态或换机即采；② Z4.5 正产物三态——开 Graphics
-  Inspector 重跑 `run_spikes2.py` 即回 PASS。
+- **挂 Phase B 复采**：① handler lane 真 app 命中——**已于同日闭环**：bundle 落
+  `~/Applications`（`H1_BUNDLE_DIR` 覆盖）绕开 LS 对 /tmp 的解析限制，实测
+  `hitCount=1、level=strong` 入 `spike/h1-retest-result.json`——Z1 双写通道在真 app
+  上有一手证据，冻结数据面无欠账；教训入档：真机脚本的 bundle 落点本身是被测环境
+  的一部分。② Z4.5 正产物三态——开 Graphics Inspector 重跑 `run_spikes2.py` 即回
+  PASS（仍挂，不阻断）。
 - **桥 attach 面更正入档**：既往"权限挂账"中混有一条实现缺陷（lldb 无 `--attach` 选项，
   已改 `-p` 并单测禁回潮）；修复后复验为内核拒绝 `Not allowed to attach`——§7.5 挂账
   收窄为纯环境项（调用方勾选开发者工具，一次性人工 + 一条复跑命令）。
@@ -284,7 +286,9 @@ agent 可执行、不得许诺不存在的能力。八项发现的逐项落点�
   启用条件：付费账号 → make-app.sh 的 `--sign -` 换 Developer ID
   `--options runtime` + `xcrun notarytool submit` + staple 三步，脚本面约半天。
   未启用前 README 的一键安装口径对外部用户如实标注"首次需在系统设置里允许"。
-- **发布后遗留（都不阻断）**：handler lane 真 app 命中复采（§12）、Z4.5 正产物
-  三态（开 Graphics Inspector 重跑 run_spikes2）、桥 attach 调用方勾选复跑、
-  CI 增 `npm publish --provenance` 的 workflow_dispatch 通道（本机发布未带
-  provenance 标记——下次发布建议走 CI）。
+- **发布后遗留（都不阻断）**：Z4.5 正产物三态（开 Graphics Inspector 重跑
+  run_spikes2）、桥 attach 调用方勾选复跑；CI 的 `release.yml`
+  （workflow_dispatch + `npm publish --provenance`）与 mcp-shell 的
+  publish-shape guard（bundle+pack+干净环境 initialize 握手）已随本轮落地，
+  剩一次性前置：npm 侧 Trusted publisher 或 NPM_TOKEN secret（owner 网页操作）。
+  handler lane 真 app 命中复采已于同日闭环（见 §12）。
