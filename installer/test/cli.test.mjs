@@ -11,6 +11,10 @@ import {
   preflightIssues,
   launchdPlistString,
   LAUNCHD_LABEL,
+  bootstrapPlan,
+  repoMissingText,
+  RELEASE_VERSION,
+  REPO_URL,
 } from '../cli.js'
 
 function makeFakeRoot() {
@@ -248,4 +252,73 @@ test('restoreLaunchd: socket 不可达 → ok=false，报告未服务', async ()
   const result = await restoreLaunchd(deps)
   assert.equal(result.ok, false)
   assert.match(result.message, /未服务/)
+})
+
+// ---------------------------------------------------------------------------
+// 源码引导（npx 一等渠道兑现，2026-09-22 基础设施审计）
+// ---------------------------------------------------------------------------
+
+test('bootstrapPlan: 默认把发布 tag clone 到 ~/glasspane', () => {
+  const plan = bootstrapPlan({ homeDir: '/Users/tester' })
+  assert.equal(plan.error, undefined)
+  assert.equal(plan.targetDir, path.join('/Users/tester', 'glasspane'))
+  assert.equal(plan.ref, `v${RELEASE_VERSION}`)
+  assert.deepEqual(plan.gitArgs, [
+    'clone', '--branch', `v${RELEASE_VERSION}`, '--depth', '1',
+    REPO_URL, path.join('/Users/tester', 'glasspane'),
+  ])
+})
+
+test('bootstrapPlan: GLASSPANE_REF/installDir 覆盖生效（钉 main 可追主干）', () => {
+  const plan = bootstrapPlan({ homeDir: '/Users/tester', installDir: '/tmp/gp', ref: 'main' })
+  assert.equal(plan.targetDir, '/tmp/gp')
+  assert.equal(plan.ref, 'main')
+  assert.equal(plan.gitArgs[2], 'main')
+})
+
+test('bootstrapPlan: HOME 为空不猜目标目录，直接给错', () => {
+  const plan = bootstrapPlan({ homeDir: '' })
+  assert.match(plan.error, /HOME/)
+})
+
+test('bootstrapPlan: 目标已存在且不是仓库 → 拒绝，绝不覆盖用户目录', () => {
+  const outer = fs.mkdtempSync(path.join(os.tmpdir(), 'glasspane-bootstrap-'))
+  const busy = path.join(outer, 'occupied')
+  fs.mkdirSync(busy)
+  fs.writeFileSync(path.join(busy, 'keep-me.txt'), 'x')
+  const plan = bootstrapPlan({ homeDir: outer, installDir: busy })
+  assert.match(plan.error, /已存在且不是 GlassPane 仓库/)
+  assert.equal(fs.existsSync(path.join(busy, 'keep-me.txt')), true)
+})
+
+test('bootstrapPlan: 目标已是 GlassPane 结构 → 复用，不重复 clone', () => {
+  const outer = fs.mkdtempSync(path.join(os.tmpdir(), 'glasspane-bootstrap-'))
+  const repo = path.join(outer, 'glasspane')
+  fs.mkdirSync(path.join(repo, 'engine'), { recursive: true })
+  fs.mkdirSync(path.join(repo, 'mcp-shell'), { recursive: true })
+  fs.writeFileSync(path.join(repo, 'engine', 'Package.swift'), '//\n')
+  fs.writeFileSync(path.join(repo, 'mcp-shell', 'package.json'), '{}')
+  const plan = bootstrapPlan({ homeDir: outer, installDir: repo })
+  assert.equal(plan.error, undefined)
+  assert.equal(plan.targetDir, repo)
+})
+
+test('parseArgs: bootstrap 默认开，--no-bootstrap 关闭', () => {
+  assert.equal(parseArgs([]).options.bootstrap, true)
+  assert.equal(parseArgs(['--no-bootstrap']).options.bootstrap, false)
+})
+
+test('parseArgs: --no-bootstrap 不影响其它开关默认值', () => {
+  const { options, error } = parseArgs(['--no-bootstrap'])
+  assert.equal(error, null)
+  assert.equal(options.skipBuild, false)
+  assert.equal(options.app, true)
+  assert.equal(options.launchd, true)
+})
+
+test('repoMissingText: 指引里的 ref 与 --no-bootstrap 文案口径一致', () => {
+  const text = repoMissingText()
+  assert.match(text, new RegExp(`--branch v${RELEASE_VERSION}`))
+  assert.match(text, /install\.sh \| sh/)
+  assert.match(text, /GLASSPANE_REF=main/)
 })

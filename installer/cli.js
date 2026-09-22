@@ -44,6 +44,12 @@ export const REPO_URL = 'https://github.com/jingzhao-l/GlassPane.git'
 /** 一键安装入口脚本的 raw 地址（用户侧 curl 指引真源）。 */
 export const INSTALL_SH_URL =
   'https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh'
+/** 发布线锚点（版本真源 = 根 package.json，由 scripts/set-version.mjs 统一改写，
+ *  勿手改）：npx 形态下本地没有仓库时，引导 clone 的就是这个 tag，与 install.sh
+ *  的 `GLASSPANE_RELEASE` 同值——两条一键入口必须拿到同一份源码。 */
+export const RELEASE_VERSION = '1.1.0'
+/** 发布 ref（tag 名）。GLASSPANE_REF 环境变量可覆盖（追主干用 `main`）。 */
+export const REPO_REF = `v${RELEASE_VERSION}`
 
 const ANSI = {
   reset: '\x1b[0m',
@@ -76,6 +82,7 @@ export function parseArgs(argv) {
     replaceDaemon: false,
     skipBuild: false,
     restoreLaunchd: false,
+    bootstrap: true,
     help: false,
   }
   const opts = { ...defaults }
@@ -114,6 +121,10 @@ export function parseArgs(argv) {
         break
       case '--skip-build':
         opts.skipBuild = true
+        break
+      case '--no-bootstrap':
+        // 无仓库时不自动 clone，直接给三条路径指引（离线/内网场景）。
+        opts.bootstrap = false
         break
       case '--restore-launchd':
         opts.restoreLaunchd = true
@@ -698,6 +709,7 @@ export function usageText() {
     '  --restore-launchd  只做 launchd 恢复：检测作业被 bootout → bootstrap → hello',
     '                     校验 daemon 自报席位（勾完 TCC 框后重跑即自动换进程复验）',
     '  --skip-build       跳过 npm/tsc/swift 编译（已构建过时使用）',
+    '  --no-bootstrap     本地找不到仓库时不自动 clone，改为打印定位指引',
     '  -h, --help         显示本帮助',
     '',
   ].join('\n')
@@ -760,19 +772,50 @@ export function nextStepsText({
     `   node "${path.join(rootDir, 'installer', 'cli.js')}" --restore-launchd`,
     `   （检测→bootstrap→hello 校验自报席位；勾完 TCC 框重跑即自动换进程复验）`,
     `4. entryName 核对：设置面板「Daemon 状态 → 主体」应与上面「${entryName}」一致；不一致说明连到了别的构建实例。`,
-    '5. registry 发布形态（npx glasspane-mcp）挂 kernel Phase B（P4 §33.2 决策链），当前以本仓库产物为准。',
+    '5. registry 发布形态：MCP 服务器已可独立安装（`npm i -g glasspane-mcp`，命令名',
+    '   glasspane-mcp）；但它只是转发层，daemon 与权限仍由本次安装产出，缺 daemon 时',
+    '   工具调用会返回带补救步骤的结构化错误。',
     '',
   ].join('\n')
+}
+
+/**
+ * 无本地仓库时的源码引导计划（纯函数，可单测）。与 install.sh 的源码定位策略
+ * 同构：clone 发布 tag 到 ~/glasspane，两条一键入口拿到同一份源码。
+ * npx glasspane-install 靠它兑现"一条命令完整安装"的承诺——此前该命令在没有
+ * 仓库时直接报错，README 却写着"完整安装"。
+ */
+export function bootstrapPlan({
+  homeDir = '',
+  repoUrl = REPO_URL,
+  ref = REPO_REF,
+  installDir = null,
+} = {}) {
+  if (!homeDir) {
+    return { error: '无法确定用户主目录（HOME 为空），不知道把源码 clone 到哪里' }
+  }
+  const targetDir = installDir || path.join(homeDir, 'glasspane')
+  if (fs.existsSync(targetDir) && resolveProjectRoot(targetDir) === null) {
+    return {
+      error: `目标目录已存在且不是 GlassPane 仓库：${targetDir}（用 --repo 指定仓库，或清理该目录后重试）`,
+    }
+  }
+  return {
+    targetDir,
+    ref,
+    gitArgs: ['clone', '--branch', ref, '--depth', '1', repoUrl, targetDir],
+  }
 }
 
 /** 未定位到仓库时的指引文本（纯函数，可单测）。 */
 export function repoMissingText() {
   return [
     '未定位到 GlassPane 项目根目录（需同时包含 engine/Package.swift 与 mcp-shell/package.json）。',
-    '可选路径：',
+    `本应自动引导 clone 源码（ref: ${REPO_REF}），但该路径不可用。可选路径：`,
     `  a) 一键安装（自动 clone 源码后进入本流程）：curl -fsSL ${INSTALL_SH_URL} | sh`,
-    `  b) 手工 clone：git clone ${REPO_URL} && cd GlassPane && node installer/cli.js`,
+    `  b) 手工 clone：git clone --branch ${REPO_REF} ${REPO_URL} && cd GlassPane && node installer/cli.js`,
     '  c) 已在本仓库其他位置：--repo <目录> 或 GLASSPANE_REPO 环境变量指定根目录。',
+    `  d) 追主干而非发布版：GLASSPANE_REF=main 重跑（不推荐，主干非固定产物）。`,
   ].join('\n')
 }
 
@@ -780,10 +823,32 @@ export function repoMissingText() {
 export async function install({ options = parseArgs([]).options, env = process.env } = {}) {
   const explicitRoot = options.repoDir ? path.resolve(options.repoDir) : null
   const envRoot = env.GLASSPANE_REPO ? path.resolve(env.GLASSPANE_REPO) : null
-  const rootDir = explicitRoot ?? envRoot ?? resolveProjectRoot()
+  let rootDir = explicitRoot ?? envRoot ?? resolveProjectRoot()
 
   if (!rootDir || !fs.existsSync(rootDir)) {
-    throw new Error(repoMissingText())
+    if (options.bootstrap === false) {
+      throw new Error(repoMissingText())
+    }
+    const plan = bootstrapPlan({
+      homeDir: env.HOME ?? process.env.HOME ?? '',
+      installDir: env.GLASSPANE_INSTALL_DIR ?? null,
+      ref: env.GLASSPANE_REF || REPO_REF,
+    })
+    if (plan.error) {
+      throw new Error(`${plan.error}\n\n${repoMissingText()}`)
+    }
+    printStep(`未定位到本地仓库，引导 clone：${plan.targetDir}（ref: ${plan.ref}）……`)
+    const clone = spawnSync('git', plan.gitArgs, { stdio: 'inherit' })
+    if (clone.status !== 0) {
+      throw new Error(
+        `git clone 失败（ref '${plan.ref}'，退出码 ${clone.status ?? 'null'}）：`
+        + '网络不可达或该发布 tag 不存在。\n\n' + repoMissingText(),
+      )
+    }
+    if (resolveProjectRoot(plan.targetDir) === null) {
+      throw new Error(`clone 完成但目录结构不完整：${plan.targetDir}\n\n${repoMissingText()}`)
+    }
+    rootDir = plan.targetDir
   }
 
   const engineDir = path.join(rootDir, 'engine')
