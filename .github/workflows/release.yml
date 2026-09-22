@@ -1,5 +1,13 @@
 name: Release
-# 发布通道（P6 §13 遗留项兑现）：手动触发，默认 dry-run。
+# 发布通道（P6 §13 遗留项兑现 + 2026-09-22 基础设施审计补齐 Release 资产）。
+#
+# 两条独立的发布动作，故意**不**串在一起：
+#   1) GitHub Release（打 tag 即触发，自动）：确定性源码 tarball + SHA256SUMS.txt。
+#      install.sh / npx 钉的就是这个 tag，用户据此可复现同一份源码。
+#   2) npm publish（手动 workflow_dispatch，默认 dry-run）：两个裸名包带 provenance。
+#      不挂在 tag 事件上，因为"发了 tag"不等于"决定对外发版"——发布是不可逆动作，
+#      必须是一次显式操作。
+#
 # 一次性前置（任选其一，owner 在 npm/GitHub 网页侧操作，均无需改本文件）：
 #   A. npm Trusted Publishing（推荐，免 secret）：npmjs.com → 对应包 →
 #      Publishing → Trusted accesses → GitHub Actions，仓库
@@ -8,10 +16,13 @@ name: Release
 # provenance 声明要求 id-token: write（已配）。两个包各自 prepublishOnly
 # 完成 tsc + esbuild 捆绑，CI 不重复构建细节。
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       mode:
-        description: "publish 前先行校验？"
+        description: "publish 前先校验？"
         type: choice
         required: true
         default: dry
@@ -23,8 +34,59 @@ permissions:
   contents: read
 
 jobs:
-  release:
+  github-release:
+    name: source tarball + SHA256SUMS
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Validate tag and version line
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # ref 来自事件字段：先按 semver tag 形状校验，再使用（不直接插进 shell）。
+          case "$REF_NAME" in
+            v[0-9]*) ;;
+            *) echo "::error::tag 形状不是 vX.Y.Z：$REF_NAME"; exit 1 ;;
+          esac
+          VERSION="${REF_NAME#v}"
+          node scripts/check-version.mjs "$VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+      - name: Build deterministic source archive
+        run: |
+          set -euo pipefail
+          # 从被 tag 的树自己打包，而不是依赖 GitHub 自动生成的 tarball——
+          # 只有自己生成的才配得上同时发布的 SHA256SUMS.txt。
+          git archive --format=tar.gz --prefix="GlassPane-${VERSION}/" \
+            -o "GlassPane-${VERSION}.tar.gz" HEAD
+          sha256sum "GlassPane-${VERSION}.tar.gz" > "SHA256SUMS-${VERSION}.txt"
+          cat "SHA256SUMS-${VERSION}.txt"
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          NOTES="Release ${VERSION}. Source archive checksum: see \`SHA256SUMS-${VERSION}.txt\`."
+          NOTES="$NOTES"$'\n\n'"Install (one command, clones this tag): \`curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh | sh\`"
+          NOTES="$NOTES"$'\n\n'"See [CHANGELOG.md](https://github.com/jingzhao-l/GlassPane/blob/${REF_NAME}/CHANGELOG.md) for what changed."
+          if gh release view "$REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$REF_NAME" "GlassPane-${VERSION}.tar.gz" "SHA256SUMS-${VERSION}.txt" --clobber
+            gh release edit "$REF_NAME" --notes "$NOTES"
+          else
+            gh release create "$REF_NAME" \
+              "GlassPane-${VERSION}.tar.gz" "SHA256SUMS-${VERSION}.txt" \
+              --title "GlassPane ${VERSION}" --notes "$NOTES"
+          fi
+
+  npm-publish:
     name: publish bare names with provenance
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -42,6 +104,8 @@ jobs:
         run: npm ci
       - name: Build all TS workspaces (kernel first; mcp-shell imports it)
         run: npm run build
+      - name: Version line must be self-consistent before publishing
+        run: node scripts/check-version.mjs
       - name: Publish (or dry-run) glasspane-mcp
         working-directory: mcp-shell
         run: |
