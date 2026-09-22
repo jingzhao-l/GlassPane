@@ -1,5 +1,10 @@
 # GlassPane
 
+[![npm: glasspane-mcp](https://img.shields.io/npm/v/glasspane-mcp)](https://www.npmjs.com/package/glasspane-mcp)
+[![npm: glasspane-install](https://img.shields.io/npm/v/glasspane-install)](https://www.npmjs.com/package/glasspane-install)
+![license: MIT](https://img.shields.io/badge/license-MIT-green)
+[![CI](https://github.com/jingzhao-l/GlassPane/actions/workflows/ci.yml/badge.svg)](https://github.com/jingzhao-l/GlassPane/actions/workflows/ci.yml)
+
 > 让 AI 代理在 macOS 上"说到做到"的运行时验证引擎 — a runtime verification engine that makes AI agents on macOS prove what they claim.
 
 GlassPane 给 AI 代理（Claude、Cursor 等任意 MCP 客户端）提供一组 `gp_*` 工具：
