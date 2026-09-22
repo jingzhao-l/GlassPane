@@ -286,9 +286,18 @@ agent 可执行、不得许诺不存在的能力。八项发现的逐项落点�
   启用条件：付费账号 → make-app.sh 的 `--sign -` 换 Developer ID
   `--options runtime` + `xcrun notarytool submit` + staple 三步，脚本面约半天。
   未启用前 README 的一键安装口径对外部用户如实标注"首次需在系统设置里允许"。
+  **2026-09-22 用户拍板：暂不搞**（决策单继续挂档，启用条件不变）。
 - **发布后遗留（都不阻断）**：Z4.5 正产物三态（开 Graphics Inspector 重跑
   run_spikes2）、桥 attach 调用方勾选复跑；CI 的 `release.yml`
   （workflow_dispatch + `npm publish --provenance`）与 mcp-shell 的
   publish-shape guard（bundle+pack+干净环境 initialize 握手）已随本轮落地，
   剩一次性前置：npm 侧 Trusted publisher 或 NPM_TOKEN secret（owner 网页操作）。
   handler lane 真 app 命中复采已于同日闭环（见 §12）。
+- **attach 复验（2026-09-22，授权后）**：用户已在系统设置把 Qoder 的开发者工具
+  开关打开；本会话复跑 `xcrun lldb --batch -o "process attach --pid <自起子进程>"`
+  仍回 `Not allowed to attach to process`。成因坐实为**责任进程快照**：Qoder 进程
+  启动（9-21 19:44）早于授权时刻（9-22 上午），长驻宿主持授权前旧判定——与
+  §7.5"调试席位按进程记账"口径一致，非产品缺陷。解锁动作 = **重启 Qoder**
+  （物理性一次），新会话内复跑本条命令 + `python3 bridge/glasspane_bridge.py
+  capture --exe bridge/crashcanary` 双验证；过线后 §0 F1/F2 与 §7.1 翻正、
+  面板 developerTools 徽标应转"可用（实测）"。

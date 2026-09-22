@@ -212,6 +212,8 @@ KernelSchemaError { code: "KERNEL_E_SCHEMA", issues: [{path, message}] }
 
 暂宿 GlassPane 仓库 `kernel/`（R43）。mcp-shell 经 `file:../kernel` 消费（模拟未来 npm 依赖形态）。迁入 iterate monorepo 的触发条件：Phase B 两壳消费前；迁移保留 git 历史（filter-repo/subtree，届时按 iterate monorepo 结构选定）。
 
+**迁移执行记录（2026-09-22，用户拍板：主仓库 + subtree）**：目标 = `jingzhao-l/iterate-skill` 主仓库顶层 `kernel/`，**主仓库自有目录，不是第四个 subtree 子仓库**——kernel 是生态契约层（两壳 + GlassPane 三方共费），挂任一消费者仓库都会让其余方跨仓依赖；harness/plugin 用独立子仓是因为它们各自独立演进发布，kernel 契约级低频变更不值得多养一仓；将来若需独立发 `@iterate/kernel` npm 包，再对主仓内 `kernel/` 做一次 subtree split 即可升格，历史不丢。方式 = `git subtree split --prefix=kernel`（6 笔史）→ iterate-skill 侧 `git subtree add`（不 squash，保历史）。**迁移后归属约定**：iterate-skill 为 kernel 唯一编辑入口（canonical）；GlassPane `kernel/` 降为镜像，经 `tools/sync-kernel.sh` 单向同步，提交信息固定 `sync(kernel): iterate-skill@<sha>` 保溯源；两侧 CI 各自继续跑自身测试面（C35 双绑定不因迁移放松）。
+
 ---
 
 ## 6. MCP 工具契约（P0 子集，工具面 A）
