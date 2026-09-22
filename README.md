@@ -301,6 +301,8 @@ GlassPane/
 ├── spike/              feasibility experiments and their recorded results
 ├── scripts/            set-version / check-version — the single version line
 ├── specs/              implementation specs + acceptance records (P0–P6, PRD)
+├── ITERATE.md          project knowledge base for the iterate skill (dogfooded)
+├── iterate.config.yaml review dimensions, validation commands, protected areas
 └── .github/workflows/  ci.yml (5 lanes + publish-shape guard), release.yml
 ```
 
@@ -355,6 +357,11 @@ shell, with dual-language bindings checked against shared fixtures. GlassPane is
 verification half of that pair — iterate reviews whether code is right; GlassPane proves whether an
 agent's claimed UI effect actually happened. At publish time the kernel is bundled into
 `glasspane-mcp`, so the npm package carries no `file:` dependency back to this repository.
+
+This repository also dogfoods the other half: [ITERATE.md](ITERATE.md) and
+[iterate.config.yaml](iterate.config.yaml) are this project's own onboarding artifacts, so an
+`/iterate` run here reviews code against the same validation commands CI enforces. Verified with
+`iterate doctor` (18 checks pass) and `iterate fingerprint` (no drift) on 2026-09-22.
 
 ## Disclaimer
 

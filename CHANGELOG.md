@@ -29,6 +29,11 @@
   的 `publish --dry-run` 不再纯本地，会查 registry 撞已发版本。
 - **文档门面**。`README.md` 重写为英文主入口 + 新增 `README.zh-CN.md`；新增 `CONTRIBUTING.md`、`SECURITY.md`、`.github/CODEOWNERS` 与 issue / PR 模板。
 
+- **自我 dogfood**。新增 `ITERATE.md` + `iterate.config.yaml`（本项目的 iterate onboarding 产物，AI 通道生成）：
+  审查维度按层分 6 套蓝图，`validation.commands` 逐字收录从仓库根实测通过的 7 条门禁命令（与 `ci.yml` 各 lane 同源），
+  并把 `specs/**` 与 `kernel/schemas/**` 设为禁区、归因核心与发布工作流设为需架构审批。
+  验证：`iterate doctor` 18 项全通过、`iterate fingerprint` 无漂移、`scripts/validate.py config` 通过。
+
 ### Changed
 
 - 四个包版本统一到 `1.1.0`。`1.1.0` 是两个已发布包都从未用过的号，不覆盖任何已发布产物（registry 实测：

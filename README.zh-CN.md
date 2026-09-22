@@ -267,6 +267,8 @@ GlassPane/
 ├── spike/              可行性实验与留档结果
 ├── scripts/            set-version / check-version —— 单一版本线
 ├── specs/              实施规格与验收记录（P0–P6、PRD）
+├── ITERATE.md          iterate 技能的项目知识库（本仓自吃狗粮）
+├── iterate.config.yaml 审查维度、可信门禁命令、禁区与风险区
 └── .github/workflows/  ci.yml（5 条 lane + 发布形态守卫）、release.yml
 ```
 
@@ -315,6 +317,10 @@ CI 除这些通道外还跑**发布形态守卫**：打包 `glasspane-mcp` → �
 双语绑定用共享 fixture 校验。GlassPane 是这对搭档里的运行时验证半边——
 iterate 审"代码写得对不对"，GlassPane 证"代理说的界面效果真的发生了没有"。
 发布时 kernel 被捆绑进 `glasspane-mcp`，npm 包不会带着指回本仓库的 `file:` 依赖。
+
+本仓库同时吃自己的狗粮：[ITERATE.md](ITERATE.md) 与 [iterate.config.yaml](iterate.config.yaml)
+就是本项目的 onboarding 产物，`/iterate` 在这里审查时用的门禁命令与 CI 强制的完全一致。
+2026-09-22 实测：`iterate doctor` 18 项全部通过、`iterate fingerprint` 无漂移。
 
 ## 免责声明
 
