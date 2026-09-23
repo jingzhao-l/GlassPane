@@ -51,15 +51,17 @@ final class EvidenceArchiveSafetyTests: XCTestCase {
         )
     }
 
-    private func makeTempDir(_ name: String) throws -> String {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("evidence-archive-safety-\(name)-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.path
+    /// Every directory this file builds an archive on comes from the shared
+    /// sandbox, so the path is asserted isolated *before* a store exists to
+    /// write to it (C-05: a file-local temp helper passed both halves of the
+    /// isolation gate, because nothing checked the path it handed out).
+    private func makeTempDir(_ name: String) -> String {
+        TestSandbox.directory(name)
     }
 
     private func makeStore(dir: String, maxFiles: Int? = nil) -> EvidenceStore {
-        EvidenceStore(directory: dir, maxFiles: maxFiles, now: { self.injectedNow })
+        TestSandbox.assertIsolated(dir, label: "archive")
+        return EvidenceStore(directory: dir, maxFiles: maxFiles, now: { self.injectedNow })
     }
 
     @discardableResult
@@ -165,7 +167,7 @@ final class EvidenceArchiveSafetyTests: XCTestCase {
     // MARK: - clear()
 
     func testClearRemovesOnlyEvidenceEntries() throws {
-        let dir = try makeTempDir("clear")
+        let dir = makeTempDir("clear")
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let store = makeStore(dir: dir)
         XCTAssertTrue(store.write(pack(seed: 1, createdAt: daysAgo(1))))
@@ -180,7 +182,7 @@ final class EvidenceArchiveSafetyTests: XCTestCase {
     // MARK: - Age (TTL) pruning
 
     func testPruneByAgeKeepsForeignAndUnmeasurableEntries() throws {
-        let dir = try makeTempDir("ttl")
+        let dir = makeTempDir("ttl")
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let store = makeStore(dir: dir)
         // Two real entries that ARE past the TTL, by their own createdAt.
@@ -201,7 +203,7 @@ final class EvidenceArchiveSafetyTests: XCTestCase {
     /// way an enumerated entry loses its mtime mid-pass is to vanish, which a
     /// test cannot race deterministically.
     func testUnmeasurableAgeNeverExpires() throws {
-        let dir = try makeTempDir("unmeasurable")
+        let dir = makeTempDir("unmeasurable")
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let store = makeStore(dir: dir)
         let ghost = URL(fileURLWithPath: dir)
@@ -222,7 +224,7 @@ final class EvidenceArchiveSafetyTests: XCTestCase {
     // MARK: - FIFO (maxFiles) pruning
 
     func testFifoPruneCountsAndDeletesOnlyEvidenceEntries() throws {
-        let dir = try makeTempDir("fifo")
+        let dir = makeTempDir("fifo")
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let store = makeStore(dir: dir, maxFiles: 2)
         let decoys = try plantDecoys(in: dir)
@@ -248,7 +250,7 @@ final class EvidenceArchiveSafetyTests: XCTestCase {
     // MARK: - Observation identity
 
     func testStatsIgnoreNonEvidenceFiles() throws {
-        let dir = try makeTempDir("stats")
+        let dir = makeTempDir("stats")
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let store = makeStore(dir: dir)
         XCTAssertTrue(store.write(pack(seed: 31, createdAt: daysAgo(1))))

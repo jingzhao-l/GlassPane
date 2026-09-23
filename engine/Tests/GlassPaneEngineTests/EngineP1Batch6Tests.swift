@@ -28,11 +28,13 @@ final class EngineP1Batch6Tests: XCTestCase {
     /// An EngineCore normalised to a writable temp archive + scripted channel.
     ///
     /// `directory` is mandatory. The old `String? = nil` default was forwarded
-    /// straight into `EvidenceStore(directory:)`, and a nil there means the
+    /// straight into `EvidenceStore(directory:)`, and a nil there meant the
     /// production archive — so every `makeCore()` call site wrote evidence
     /// into the developer's own state (R7-02). `registry` likewise defaults to
-    /// an isolated temp registry instead of being omitted, because `EngineCore`
-    /// builds a production-path registry when none is injected.
+    /// an isolated temp registry instead of being omitted: `EngineCore` no
+    /// longer builds one over the real projects file (C-03 — it now has *no*
+    /// registry, which is right for this file's tests but not the shape a
+    /// project-routing test wants to be asserting).
     /// `archive: false` hands the engine no store at all: history stays
     /// in-memory while the injected directory is kept for the caller to prove
     /// nothing was persisted into it.

@@ -229,6 +229,8 @@ private func printUsage() {
         --prune-evidence        Prune expired evidence entries and exit
         --older-than <days>     Expiry threshold in days (default: 30; --prune-evidence only)
         --project <id>          Scope maintenance to a project's evidence directory
+                                 (a directory the daemon would refuse to archive
+                                 into is refused here too: exit 1, stateChanged=false)
         --dry-run               Report what pruning would remove without deleting
         --evidence-stats        Print evidence archive stats (JSON) and exit
         --help, -h            Show this help
@@ -591,6 +593,14 @@ if options.approvalAudit || options.approvalVerify {
 if options.pruneEvidence || options.evidenceStats {
     // 目录解析与批三 pruneEvidence 同口径：项目维度查 registry →
     // evidenceStoragePath → 默认目录；无项目维度 → 默认证据目录。
+    //
+    // A-07/C-06: the project dimension used to hand the stored
+    // `evidenceStoragePath` straight to the store that deletes from it, while
+    // `attach` had already started refusing that same stored value. Both
+    // commands now go through `EngineCore.projectArchiveDirectory`, the one
+    // resolver the engine uses: nothing is deleted or measured in a directory
+    // the daemon would refuse to archive into, and a project that named no
+    // directory of its own never gets the shared archive touched in its place.
     let dir: String
     if let projectId = options.maintenanceProjectId {
         let registry = ProjectRegistry()
@@ -606,7 +616,23 @@ if options.pruneEvidence || options.evidenceStats {
             )
             exit(1)
         }
-        dir = entry.evidenceStoragePath ?? EvidenceStore.defaultDirectory
+        switch EngineCore.projectArchiveDirectory(projectId: projectId, entry: entry) {
+        case .failure(let refusal):
+            writeJSON(
+                [
+                    "error": refusal.message,
+                    "remedy": refusal.remedy,
+                    "code": refusal.code.rawValue,
+                    "project": projectId,
+                    "registryPath": registry.filePath,
+                    "stateChanged": false
+                ],
+                to: .standardError
+            )
+            exit(1)
+        case .success(let stored):
+            dir = stored
+        }
     } else {
         dir = EvidenceStore.defaultDirectory
     }
@@ -712,15 +738,21 @@ let channel = AXChannel()
 // pure operation-right mutex form documented in P2 spec v2.0 §17.2.
 // --no-c33 opts out explicitly (act never waits on user input).
 var attributionGuard: AttributionGuard?
+// A-08: whichever branch leaves the guard out has to say why, because the
+// engine records "contamination not measured" from that statement — an
+// unexplained absence would go back to reading as a clean window.
+var inputMonitorAbsenceReason: String?
 if options.c33Enabled {
     let inputMonitor = CGEventInputMonitor()
     if inputMonitor.startOnBackgroundRunLoop() {
         attributionGuard = AttributionGuard(inputSource: inputMonitor)
         log.info("C33 active: CGEvent input tap installed (AttributionGuard injected)")
     } else {
+        inputMonitorAbsenceReason = "the CGEvent input tap could not be created by this daemon (Input Monitoring TCC not granted?)"
         log.info("C33 degraded: input tap unavailable (Input Monitoring TCC not granted?) — contamination undecidable, operation-right mutex only")
     }
 } else {
+    inputMonitorAbsenceReason = "C33 was declined at startup by the --no-c33 flag"
     log.info("C33 disabled via --no-c33 (pure no-guard form)")
 }
 // P6 spec v6.0 §5: the probe listener is on by default and self-degrades —
@@ -756,13 +788,17 @@ if options.probeEnabled, probeListenerAllowed {
 }
 let core = EngineCore(
     channel: channel,
-    evidenceStore: EvidenceStore(),
+    // C-02/C-03: this process is the one that owns `~/.glasspane`, so it names
+    // both locations out loud instead of letting an omitted argument decide.
+    projectRegistry: ProjectRegistry(),
+    evidenceStore: EvidenceStore.atProductionDefault(),
     attributionGuard: attributionGuard,
     degradationTracker: DegradationTracker(),
     metricsProbe: ProcessMetricsProbe(),
     approvalGate: ApprovalGate(path: ApprovalGate.defaultPath),
     probeInbox: probeInbox,
-    permissionsReport: { permissionProbes.snapshot() }
+    permissionsReport: { permissionProbes.snapshot() },
+    inputMonitorAbsenceReason: inputMonitorAbsenceReason
 )
 let dispatcher = Dispatcher(core: core, log: log)
 let server = SocketServer(

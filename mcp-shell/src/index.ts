@@ -123,18 +123,22 @@ function main(): void {
 
   const server = new McpServer({ engine });
 
+  /** One framed reply on stdout; a notification/blank line has none to write. */
   const writeResponse = async (response: unknown): Promise<void> => {
+    if (response === null) {
+      return;
+    }
     await replies.write(canonicalJson(response) + "\n");
   };
 
   const reader = new LineReader({
     onLine: (line) => {
-      queue.push(async () => {
-        const response = await server.handleLine(line);
-        if (response !== null) {
-          await writeResponse(response);
-        }
-      });
+      // B-02: `handleLine` is started here, not inside the queue, so a request
+      // that awaits the daemon cannot stop `ping`, `tools/list` or
+      // `gp_probe_status` from being served. `pushDelivery` serialises only the
+      // write of each finished frame — one frame at a time on the byte stream,
+      // replies in completion order, paired by the JSON-RPC id each carries.
+      queue.pushDelivery(server.handleLine(line), writeResponse);
     },
     onOversize: (bytes, prefix) => {
       // An oversize frame keeps the connection open (spec §3.1), and the
@@ -154,6 +158,9 @@ function main(): void {
     logNote(`stdin failed: ${error.message}`);
     shutdown();
   });
+  // The queue now orders writes only, so an in-flight request is not part of
+  // this chain: stdin closing tears the session down while the daemon may still
+  // be working on a request whose client has already gone away.
   process.stdin.on("close", () => queue.push(async () => shutdown()));
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);

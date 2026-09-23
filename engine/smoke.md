@@ -83,8 +83,11 @@ printf '%s\n' \
    role/title/identifier 三字段（P0 §3），设置面板 body 文本（如"已授予"）不暴露在
    title，无法经 AX 树断言 → C6 冒烟采用结构断言（卡图标 identifier + 同轴按钮 +
    文本行数），此为方法表冻结的既定边界而非缺陷。
-3. **daemon 后台进程屏幕录制 TCC 不继承**：circuitBreaker.reason="screen-recording-denied"、
-   level=1 降级形态（spec R45 预期降级，非故障）。
+3. **daemon 后台进程屏幕录制 TCC 不继承**：circuitBreaker.reason 含
+   `screen-recording-denied` 段、level=1 降级形态（spec R45 预期降级，非故障）。
+   现行字面形态由 X-6 决定：该段渲染为 `screen-recording-denied: <捕获原文>`，而整串
+   reason 又是 `"; "` 拼的多段（还可带 `performance|` / `degradation|` 前缀），所以
+   对 reason 的**全等**比较必然不成立——`.p6_smoke.py` 按段匹配（A-02）。
 4. **ApprovalGate 持久化陷阱**：`ApprovalGate()` 的 path 默认 nil = 纯内存台账；daemon
    曾注入默认构造导致 restore 执行成功但 approvals.json 不落盘（--approval-verify 恒
    count 0）。显式传 `ApprovalGate(path: ApprovalGate.defaultPath)` 后落盘 + 哈希链
@@ -114,7 +117,7 @@ printf '%s\n' \
 | 环节 | 脚本 | 结果 |
 |---|---|---|
 | C33（P2 v2.0 §16.2）输入监控真机冒烟 | `engine/.c33_smoke.py` | C33 SMOKE OK：`glasspaned --check-input-permission`=granted（新增 CLI flag，granted/denied/notDetermined 三态如实输出）→ 自动发现 settings GUI → attach → observe（220 节点）→ act（role-only AXButton，operationId 落盘）→ `last_evidence` 归因面如实呈现（attribution.level=soft、contaminated=false、circuitBreaker.level=1）。按 spec v2.0 §17.2 降级口径：输入流污染判定待 daemon 注入 AttributionGuard 后验证（当前为纯操作权互斥形态），本冒烟覆盖授权环境下完整操作回路与归因面观测 |
-| T9（P2 v2.1 §19.2）渐进退化泄漏注入冒烟 | `engine/.t9_smoke.py` | T9 SMOKE OK：脚本自编译泄漏金丝雀（AppKit，每次点击保留 8MB 内存 + 1 个 fd），daemon 驱动 act 至第 16/24 轮 → evidence 熔断升级 degraded、reason 携带 `degradation|memory+handles; longSession=false; screen-recording-denied` → `diagnose.class=T9` |
+| T9（P2 v2.1 §19.2）渐进退化泄漏注入冒烟 | `engine/.t9_smoke.py` | T9 SMOKE OK：脚本自编译泄漏金丝雀（AppKit，每次点击保留 8MB 内存 + 1 个 fd），daemon 驱动 act 至第 16/24 轮 → evidence 熔断升级 degraded、reason 携带 `degradation|memory+handles; longSession=false; screen-recording-denied`（当日实测原样；X-6 起末段为 `screen-recording-denied: <捕获原文>`） → `diagnose.class=T9` |
 
 真机观察补充：
 
@@ -124,7 +127,8 @@ printf '%s\n' \
    被如实跳过、.app 新实例命中；顺带多实例并存场景验证）。窗口未开时脚本以明确
    失败信息引导先打开设置面板，不伪造目标。
 10. **T9 真机可达性**：8MB+1fd/轮 的注入强度下 16 轮（约 16s 节奏）触发双信号正斜率
-    联合裁决；`screen-recording-denied` 以 R45 预期降级形态共存于 reason，不阻碍
+    联合裁决；`screen-recording-denied` 段（X-6 后带 `: <捕获原文>` 尾巴，判定按段
+    匹配）以 R45 预期降级形态共存于 reason，不阻碍
     T9 判定（内存+句柄两信号即满足联合判定）。
 
 ### C33 三阶段完整判定冒烟（2026-09-19，daemon 注入 AttributionGuard 后，P4 v4.0 §36）
@@ -242,9 +246,12 @@ printf '%s\n' \
 
 ## P6 探针 SDK 三层端到端冒烟（2026-09-19，P6 spec v6.0 §10 P6-E）
 
-脚本：`engine/.p6_smoke.py`（自带隔离 daemon：/tmp 专用 engine.sock + probe.sock，
---no-c33，不触碰用户现网 daemon；拉起 `engine/probe` 的合成对照 app probe-demo，
-GLASSPANE_PROBE_SOCK 指向隔离探针口）。结果：**P6 SMOKE OK**——
+脚本：`engine/.p6_smoke.py`（自起专用 daemon：临时目录里一对 engine.sock +
+probe.sock、--no-c33，不连用户现网 daemon；拉起 `engine/probe` 的合成对照 app
+probe-demo，GLASSPANE_PROBE_SOCK 指向该探针口。**socket 隔离 ≠ 状态根隔离**：
+evidence 归档与 approvals.json 走 NSHomeDirectory()，见文末「冒烟状态根隔离与
+熔断标签分段匹配（2026-09-23，B-01/A-02）」一节）。
+结果：**P6 SMOKE OK**——
 
 | 断言面 | 实测 |
 |---|---|
@@ -262,8 +269,10 @@ GLASSPANE_PROBE_SOCK 指向隔离探针口）。结果：**P6 SMOKE OK**——
     口径（判定语义由单测确定化，真机只证端到端通路存在）。
 15. **act 全窗 latency 实测 ~463ms（171 节点树）**：T8 的"延迟"必须大于窗口闭合
     时刻而非固定毫秒数——canary 首版 0.4s 落进窗内被真判成 T5，改 1.2s 后稳定。
-16. **屏幕录制对 /tmp 隔离 daemon 子进程未授予**：pixelDiff 缺席时 NO_ANOMALY
+16. **屏幕录制对临时目录 daemon 子进程未授予**：pixelDiff 缺席时 NO_ANOMALY
     金丝雀按 P6 §3.2 落 INCONCLUSIVE（T6 不可排除），脚本如实分支不假过。
+    该分支的判据自 A-02 起按**段**读 reason 里的 `screen-recording-denied` 标签
+    （旧的全等比较在 X-6 之后必然落空 → 无席位机器上永久红，把常态判成失败）。
 
 ### 面板渲染状态机器核验闭环（2026-09-20 20:2x，P1 v1.2 §11.7 / P1-S13）
 
@@ -424,3 +433,58 @@ engine 366、probe 10、bridge 17、kernel 51、mcp-shell 67、installer 40 全�
     developerTools 仍如实 unverifiable → 恢复 `f967598c…`（pid 67696）读数不变。
     即 §11.1 结论 3 的推论成立：重编译/重签不需要回系统设置重勾。手工对照轮还另测过
     `693b54ac…` 一次，同结论。
+
+---
+
+## 冒烟状态根隔离与熔断标签分段匹配（2026-09-23，B-01/A-02）
+
+### B-01 状态根隔离：从"自称隔离"改成"实测后才放行"
+
+自起 daemon 的两个冒烟脚本（`engine/.p6_smoke.py`、`engine/.t9_smoke.py`）共用同一套
+隔离助手（同名函数段在两个文件里逐字一致——冒烟脚本按本仓惯例各自自包含，不做跨脚本
+import）：
+
+1. **daemon 的写入面有三个**，全部由 `NSHomeDirectory()` 解析：
+   `EvidenceStore.defaultDirectory`（evidence 归档）、`ApprovalGate.defaultPath`
+   （哈希链 approvals.json）、`ProjectRegistry.defaultProjectsPath`（projects.json）。
+   `glasspaned` 的 `parseArguments` 里**没有**任何能重定向这个根的 flag
+   （`--socket-path` / `--probe-socket-path` 只挪 socket）。
+2. **前置闸（起 daemon 之前）**：用被测二进制自己的只读 CLI 问出它实际解析到的状态根
+   ——`--evidence-stats` 的 `dir`（`stats()` 只枚举目录）与
+   `--active-project <假 id>` 拒绝分支的 `registryPath`（该分支按 R2-16/R6-06
+   `stateChanged=false`，从不写状态）。落在沙箱内才起 daemon；问不出结果或落在沙箱外
+   即 **NOT RUN(2)**，一条断言都不跑。`.t9_smoke.py` 旧头部把"HOME 重定向"称作唯一
+   可行的隔离通道，那是未经测量的断言（round-2 编排者在本机实测：`NSHomeDirectory()`
+   不跟随 `$HOME`）；`.p6_smoke.py` 则一直用继承环境起 daemon，等于把 evidence 档案与
+   restore 审批行直接写进开发者真实 `~/.glasspane`。两个方向都收在同一判据下：
+   **放行者是测量，不是环境变量名**——两脚本对同一件事不再各说一套。
+3. **第二道闸（daemon 退出之后）**：对继承环境下问出的真实写入面做前后指纹
+   （文件取 size+mtime_ns、归档目录取文件数+总字节）。前置闸放行后指纹仍变化 →
+   该轮按 **NOT RUN(2)** 离场（PASS/FAIL 都不可信），报文点名是哪个文件动了，并列出
+   两条可自查的可能：未被探测覆盖的状态面（报台账 X-22）／现网 launchd daemon 并行
+   写入（`pgrep -fl glasspaned`、`launchctl print gui/$(id -u)/com.glasspane.daemon`）。
+   事后指纹**不是**隔离证明，所以它只能作为第二道闸，不可代替前置探测。
+4. **今天的实测结论（如实记录，不粉饰）**：本仓 daemon 既无状态根 flag，`$HOME` 又
+   不被采纳，所以两脚本在真机（含本编排机）上会以 NOT RUN(2) 拒跑。这是**死闸**，
+   满足者只能是 daemon 侧的台账 **X-22**（`glasspaned --state-dir <path>`：
+   EvidenceStore/ApprovalGate/ProjectRegistry 改走注入路径、删掉解析到活状态的缺省）；
+   flag 落地后把两个脚本的 `daemon_state_dir_args()` 各改一行返回 `["--state-dir", root]`
+   即自动转绿。在此之前不得用任何"看起来隔离"的环境变量把这两个闸门蒙成绿——缺失
+   就表达为缺失。`.t9_smoke.py` 的显式 socket 旧契约保留：那条路径连的是调用方自己的
+   daemon，其状态根不在本脚本掌控内，脚本改为一律打 NOTE 说明，不再自称隔离。
+
+### A-02 熔断 reason 按段匹配
+
+X-6 把未测通道改写成 `"标签: 原文"`，且整串 reason 是 `"; "` 拼的多段（可再带
+`performance|` / `degradation|` 前缀）。`.p6_smoke.py` 原先的
+`reason == "screen-recording-denied"` 全等比较因此必然落空——在无屏幕录制席位的机器
+（本文真机观察 3 与 P6 记录 16 的常态）上把唯一端到端探针闸永久钉红。现行判据
+`breaker_reason_has_label()`：剥掉前缀标记后逐段比较，**段等于标签或以 `"标签:"` 开头**
+才算"屏幕录制席位缺失"；标签以子串形式出现在别的段原文里不算（那读不出正确成因），
+判定强度没有放宽成"任意 reason"。仍写裸字面量的规格文件（specs 为受保护面，本轮未动，
+待编排者提规格修正案）：`specs/GlassPane_P1_实施规格_v1.0_SCK迁移.md` §2
+「实施记录（P1-A2 真机验证）」项 3、
+`specs/GlassPane_P2_实施规格_v2.1_渐进退化检测.md` §19.2 真机冒烟记录、
+`specs/GlassPane_P4_实施规格_v4.0_收口与里程碑一致性.md` §33.1 观察 3；
+另 `kernel/fixtures/evidence-pack.ok-02.json` 的 `circuitBreaker.reason` 也是裸字面量
+（冻结 schema 的 golden 档案，同样只报不改）。

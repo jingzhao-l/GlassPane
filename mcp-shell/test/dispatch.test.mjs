@@ -7,6 +7,7 @@ import {
   SERVER_INFO,
   SUPPORTED_PROTOCOL_VERSIONS,
 } from "../dist/dispatch.js";
+import { OrderedReplyQueue } from "../dist/io.js";
 import { makeEngine } from "./helpers.mjs";
 
 const enq = (obj) => JSON.stringify(obj);
@@ -18,21 +19,11 @@ function makeServer(timeoutMs = 500) {
 }
 
 /**
- * Server for the initialize version negotiation (spec P0 §6.1). Passing
- * `supportedVersions` injects a version set that differs from the shipped one —
- * without that seam an "echo" assertion would be indistinguishable from the
- * always-answer-our-own-constant behaviour this fix removed.
+ * One initialize frame; `params === undefined` omits params entirely. There is
+ * deliberately no seam for injecting a version list: B-08 removed it, so an
+ * echo can only pass by the shipped `SUPPORTED_PROTOCOL_VERSIONS` actually
+ * implementing the version it returns.
  */
-function makeVersionServer(supportedVersions) {
-  const { engine } = makeEngine({ timeoutMs: 500 });
-  const deps = { engine };
-  if (supportedVersions !== undefined) {
-    deps.supportedProtocolVersions = supportedVersions;
-  }
-  return new McpServer(deps);
-}
-
-/** One initialize frame; `params === undefined` omits params entirely. */
 async function initialize(server, params, id = 1) {
   const frame = { jsonrpc: "2.0", id, method: "initialize" };
   if (params !== undefined) {
@@ -63,8 +54,18 @@ test("initialize handshake returns capabilities and server info", async () => {
 });
 
 // Spec P0 §6.1 版本协商：回显客户端版本，不识别时回落本常量。
-test("initialize echoes a client protocolVersion this server implements", async () => {
-  const server = makeVersionServer(["2024-11-05", MCP_PROTOCOL_VERSION]);
+test("the shipped list holds more than the fallback, so negotiation can answer", () => {
+  // The set used to be `[MCP_PROTOCOL_VERSION]`, which made the echo a tautology.
+  assert.ok(SUPPORTED_PROTOCOL_VERSIONS.length > 1, SUPPORTED_PROTOCOL_VERSIONS.join(","));
+  assert.ok(SUPPORTED_PROTOCOL_VERSIONS.includes(MCP_PROTOCOL_VERSION));
+  for (const version of SUPPORTED_PROTOCOL_VERSIONS) {
+    // Nothing newer than this shell's own revision is claimed.
+    assert.ok(version <= MCP_PROTOCOL_VERSION, `newer than the fallback: ${version}`);
+  }
+});
+
+test("initialize echoes an older client protocolVersion this server implements", async () => {
+  const { server } = makeServer();
   const response = await initialize(server, {
     protocolVersion: "2024-11-05",
     capabilities: {},
@@ -73,13 +74,13 @@ test("initialize echoes a client protocolVersion this server implements", async 
   assert.equal(response.error, undefined);
   assert.equal(response.id, 1);
   // 回显的是客户端那一个，不是本 shell 的常量
+  assert.notEqual(response.result.protocolVersion, MCP_PROTOCOL_VERSION);
   assert.equal(response.result.protocolVersion, "2024-11-05");
   assertHandshakeShape(response.result);
 });
 
 test("initialize echoes its own constant when the client asks for exactly that", async () => {
-  const server = makeVersionServer(); // shipped default set, no injection
-  assert.ok(SUPPORTED_PROTOCOL_VERSIONS.includes(MCP_PROTOCOL_VERSION));
+  const { server } = makeServer();
   const response = await initialize(server, { protocolVersion: MCP_PROTOCOL_VERSION });
   assert.equal(response.error, undefined);
   assert.equal(response.result.protocolVersion, MCP_PROTOCOL_VERSION);
@@ -87,20 +88,22 @@ test("initialize echoes its own constant when the client asks for exactly that",
 });
 
 test("initialize falls back to its own constant on an unimplemented client version", async () => {
-  const server = makeVersionServer(); // ships only MCP_PROTOCOL_VERSION
+  const { server } = makeServer();
+  // A revision newer than anything the shell claims; "2024-11-05" moved into the
+  // implemented set with B-08, which is what the test above now pins.
   const response = await initialize(server, {
-    protocolVersion: "2024-11-05",
+    protocolVersion: "2025-11-25",
     capabilities: {},
     clientInfo: { name: "t", version: "1" },
   });
   assert.equal(response.error, undefined);
-  assert.notEqual(response.result.protocolVersion, "2024-11-05");
+  assert.notEqual(response.result.protocolVersion, "2025-11-25");
   assert.equal(response.result.protocolVersion, MCP_PROTOCOL_VERSION);
   assertHandshakeShape(response.result);
 });
 
 test("initialize answers a version-less handshake instead of crashing", async () => {
-  const server = makeVersionServer();
+  const { server } = makeServer();
   const response = await initialize(server, { capabilities: {}, clientInfo: { name: "t", version: "1" } });
   assert.equal(response.error, undefined);
   assert.equal(response.result.protocolVersion, MCP_PROTOCOL_VERSION);
@@ -108,7 +111,7 @@ test("initialize answers a version-less handshake instead of crashing", async ()
 });
 
 test("initialize never rejects a garbage protocolVersion, it falls back", async () => {
-  const server = makeVersionServer();
+  const { server } = makeServer();
   const malformed = [
     undefined, // params 整体省略 —— 合法 MCP 形状
     null, // params 为 null
@@ -255,4 +258,82 @@ test("blank line yields no response", async () => {
   const { server } = makeServer();
   assert.equal(await server.handleLine(""), null);
   assert.equal(await server.handleLine("   "), null);
+});
+
+/* ------------------------------------------------------------------ *
+ * B-02 — an outstanding engine call must not stop the shell from serving
+ * anything else. index.ts wires the server with `queue.pushDelivery(
+ * server.handleLine(line), writeResponse)` (reproduced below, because index.ts
+ * runs main() at import time): the request starts at once and only the write of
+ * its finished frame joins the serial chain.
+ * ------------------------------------------------------------------ */
+
+/**
+ * Await the queue until nothing is queued *or* about to be queued: a delivery
+ * step joins the chain one microtask after its request resolves, and each write
+ * below yields a macrotask, so a single `drained()` can return too early.
+ */
+async function drainAll(queue) {
+  for (let round = 0; round < 6; round++) {
+    await queue.drained();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+test("an outstanding gp_act does not hold back ping or tools/list", async () => {
+  const { server, io } = makeServer();
+  const written = [];
+  const reported = [];
+  const queue = new OrderedReplyQueue((error) => reported.push(error));
+  let writesInFlight = 0;
+  let writesMostInFlight = 0;
+  const write = async (response) => {
+    writesInFlight += 1;
+    writesMostInFlight = Math.max(writesMostInFlight, writesInFlight);
+    await new Promise((resolve) => setImmediate(resolve)); // a blocked stdout
+    writesInFlight -= 1;
+    if (response !== null) {
+      written.push(response);
+    }
+  };
+  const ask = (frame) => queue.pushDelivery(server.handleLine(enq(frame)), write);
+
+  ask({
+    jsonrpc: "2.0",
+    id: 100,
+    method: "tools/call",
+    params: { name: "gp_act", arguments: { selector: { role: "button" }, action: "press" } },
+  });
+  assert.equal(io.sent.length, 1, "the act reaches the engine at once");
+  assert.deepEqual(written, [], "and nothing is answerable yet");
+
+  ask({ jsonrpc: "2.0", id: 101, method: "ping" });
+  ask({ jsonrpc: "2.0", id: 102, method: "tools/list" });
+  await drainAll(queue);
+  assert.deepEqual(written.map((r) => r.id), [101, 102],
+    "ping and tools/list are answered while the act is still outstanding");
+  assert.equal(written[1].result.tools.length, 14);
+  assert.equal(writesMostInFlight, 1, "frames still go out one at a time");
+
+  io.respond({ operationId: "op_0123456789ABCDEFGHJKMNPQRS", actConfirmed: true });
+  await drainAll(queue);
+  assert.deepEqual(written.map((r) => r.id), [101, 102, 100], "the outrun reply is not lost");
+  assert.equal(written[2].result.isError, false);
+  assert.deepEqual(reported, [], "no reply failed on the way out");
+
+  // A request that rejects is reported through the queue (never an unhandled
+  // rejection while the chain is busy), and a failing write cannot poison it.
+  queue.pushDelivery(Promise.reject(new Error("handleLine blew up")), async () => {
+    throw new Error("must not run: there is no value");
+  });
+  queue.pushDelivery(Promise.resolve({ jsonrpc: "2.0", id: 7, result: {} }), async () => {
+    throw new Error("stdout rejected");
+  });
+  let reached = false;
+  queue.push(async () => {
+    reached = true;
+  });
+  await drainAll(queue);
+  assert.deepEqual(reported.map((e) => e.message), ["handleLine blew up", "stdout rejected"]);
+  assert.equal(reached, true, "a poisoned chain would stop every later reply");
 });

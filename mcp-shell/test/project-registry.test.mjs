@@ -6,7 +6,10 @@ import path from "node:path";
 
 import {
   FORCE_OVERWRITE_ENV,
+  PROJECTS_FILE_ENV,
   ProjectRegistryError,
+  daemonProjectsPath,
+  daemonRestartNotice,
   projectGet,
   projectList,
   projectSet,
@@ -159,20 +162,41 @@ test("projectSet refuses a symlinked hop into a protected root", () => {
       "GP_E_BAD_PARAMS",
       "symlink into home",
     );
-    assert.match(message, /resolves to/);
+    assert.ok(
+      message.includes(`resolves to ${os.homedir()},`),
+      `the refusal must name the link target it judged, not the link: ${message}`,
+    );
     assert.match(message, /home directory/);
+    assert.ok(message.includes(`(given: "${link}")`), "the caller's own string stays visible");
     assert.equal(fs.existsSync(reg.filePath), false);
 
     // A symlink in the middle of the path is caught the same way: the literal
     // string is under the temp dir, only resolution reaches the system tree.
     const etcLink = path.join(reg.root, "etc-link");
     fs.symlinkSync("/private/etc", etcLink, "dir");
+    const hop = path.join(etcLink, "ssh");
     const nested = expectRegistryError(
-      () => projectSet({ ...baseArgs, evidenceStoragePath: path.join(etcLink, "ssh") }),
+      () => projectSet({ ...baseArgs, evidenceStoragePath: hop }),
       "GP_E_BAD_PARAMS",
       "symlinked ancestor into a system tree",
     );
-    assert.match(nested, /inside the system-owned tree/);
+    // Two halves of one honest diagnosis: the location that was actually judged
+    // (/private/etc/ssh, not the temp-dir literal), and the reason that survives
+    // any re-picking. The ownership check fires here too — that tree belongs to
+    // uid 0 — but it is the weaker sentence, and printing it instead would blame
+    // the temp directory for a hop the caller can never fix by moving.
+    assert.ok(
+      nested.includes(
+        "resolves to /private/etc/ssh, which is inside the system-owned tree /private/etc",
+      ),
+      `real destination + named-tree reason: ${nested}`,
+    );
+    assert.equal(
+      nested.includes(`resolves to ${hop}`),
+      false,
+      `the unresolved literal must not be printed as the resolved location: ${nested}`,
+    );
+    assert.ok(nested.includes(`(given: "${hop}")`), "the caller's own string stays visible");
     assert.equal(fs.existsSync(reg.filePath), false);
   } finally {
     reg.dispose();
@@ -306,7 +330,7 @@ test("writes use a unique temp name and never reuse a fixed .tmp", () => {
   }
 });
 
-// ----- Daemon-restart honesty (R4-03) -----
+// ----- Daemon-restart honesty (R4-03 / B-10) -----
 
 test("projectSet result states that the running daemon has not seen the entry", () => {
   const reg = useRegistry();
@@ -317,9 +341,40 @@ test("projectSet result states that the running daemon has not seen the entry", 
     assert.match(entry.daemonRestartNotice, /restart/i);
     assert.match(entry.daemonRestartNotice, /GP_E_NOT_FOUND/);
     assert.match(entry.daemonRestartNotice, /launchctl kickstart -k gui\/\d+\/com\.glasspane\.daemon/);
+    assert.ok(entry.daemonRestartNotice.includes(reg.filePath), "it names the file that was written");
   } finally {
     reg.dispose();
   }
+});
+
+/**
+ * B-10: that notice used to be one unconditional sentence, which claimed a
+ * restart would surface a file the daemon never loads (the daemon reads only
+ * `~/.glasspane/projects.json`; `GLASSPANE_PROJECTS_FILE` is shell-only) and
+ * prescribed a kickstart that cannot work for a job that was never bootstrapped.
+ * The default-path branch is asserted through the pure builder below rather than
+ * by writing to ~/.glasspane, which this suite must never do.
+ */
+test("the notice for a file the daemon cannot load says a restart will not help", () => {
+  const reg = useRegistry();
+  try {
+    const notice = daemonRestartNotice(reg.filePath);
+    assert.match(notice, /never reads that file/);
+    assert.ok(notice.includes(daemonProjectsPath()), "it names the file the daemon loads");
+    assert.match(notice, new RegExp(PROJECTS_FILE_ENV));
+    assert.match(notice, /restarting the service will not help/);
+    assert.equal(notice.includes("until the service restarts"), false);
+  } finally {
+    reg.dispose();
+  }
+});
+
+test("the notice for the daemon's own file states the restart, with the un-bootstrapped fallback", () => {
+  const notice = daemonRestartNotice(daemonProjectsPath());
+  assert.match(notice, /running background service loaded that file once/);
+  assert.match(notice, new RegExp(`launchctl kickstart -k gui/${process.getuid()}/com\\.glasspane\\.daemon`));
+  assert.match(notice, /never bootstrapped/); // the helper's case, named not assumed
+  assert.match(notice, /--restore-launchd/);
 });
 
 test("gp_project_set surfaces the restart requirement in the tool result", async () => {
@@ -351,6 +406,129 @@ test("gp_project_set surfaces the restart requirement in the tool result", async
     assert.equal(overflow.isError, true);
     assert.ok(overflow.content[0].text.startsWith("GP_E_BAD_PARAMS"), overflow.content[0].text);
     assert.equal(read(reg.filePath), storedAfterCreate, "an un-storable pid never reaches the file");
+  } finally {
+    reg.dispose();
+  }
+});
+
+// ----- One identity per entry, and a way to clear a field (B-11) -----
+
+test("an entry can never carry both identities, on create or after a merge", () => {
+  const reg = useRegistry();
+  try {
+    const both = expectRegistryError(
+      () => projectSet({ displayName: "Both", bundleId: "com.example.notes", pid: 4242 }),
+      "GP_E_BAD_PARAMS",
+      "create with two identities",
+    );
+    assert.match(both, /bundleId .*and pid .* are both set/);
+    assert.equal(fs.existsSync(reg.filePath), false, "a refused identity never creates the registry");
+
+    const created = projectSet(baseArgs); // bundleId only
+    const before = read(reg.filePath);
+    // The shape the old merge could produce: an update that *adds* pid to a
+    // stored bundleId, which neither write path ever creates.
+    const merged = expectRegistryError(
+      () => projectSet({ projectId: created.projectId, displayName: "Notes", pid: 4242 }),
+      "GP_E_BAD_PARAMS",
+      "update adding a second identity",
+    );
+    assert.match(merged, /both set/);
+    assert.match(merged, /com\.example\.notes/, "the message names the values it found");
+    assert.match(merged, /4242/);
+    assert.equal(read(reg.filePath), before, "a refused update leaves the stored entry intact");
+
+    const neither = expectRegistryError(
+      () => projectSet({ projectId: created.projectId, displayName: "Notes", bundleId: null, pid: null }),
+      "GP_E_BAD_PARAMS",
+      "update clearing both identities",
+    );
+    assert.match(neither, /neither bundleId nor pid/);
+    assert.equal(read(reg.filePath), before);
+  } finally {
+    reg.dispose();
+  }
+});
+
+test("an explicit null switches the identity and clears a path field; omitting keeps it", async () => {
+  const reg = useRegistry();
+  try {
+    const { engine } = makeEngine();
+    const recipe = `${reg.root}/proj/recipe.json`;
+    const created = await executeTool(
+      TOOL_BY_NAME.get("gp_project_set"),
+      { ...baseArgs, evidenceStoragePath: reg.storageDir, recipeConfigPath: recipe },
+      engine,
+    );
+    assert.equal(created.isError, false, created.content[0].text);
+    const projectId = JSON.parse(created.content[0].text).project.projectId;
+
+    // Through the tool surface, so the explicit null has to survive zod too.
+    const switched = await executeTool(
+      TOOL_BY_NAME.get("gp_project_set"),
+      { projectId, displayName: "Notes", bundleId: null, pid: 4242 },
+      engine,
+    );
+    assert.equal(switched.isError, false, switched.content[0].text);
+    const entry = JSON.parse(switched.content[0].text).project;
+    assert.equal(entry.pid, 4242);
+    assert.equal("bundleId" in entry, false, "the cleared field is absent, not null");
+
+    const kept = projectSet({ projectId, displayName: "Renamed" });
+    assert.equal(kept.evidenceStoragePath, reg.storageDir, "omitting a path field keeps what is stored");
+
+    const cleared = projectSet({ projectId, displayName: "Renamed", evidenceStoragePath: null });
+    assert.equal(cleared.evidenceStoragePath, undefined);
+    assert.equal(cleared.recipeConfigPath, recipe, "the other fields survive");
+    const stored = JSON.parse(read(reg.filePath))[0];
+    assert.deepEqual(Object.keys(stored).sort(),
+      ["createdAt", "displayName", "pid", "projectId", "recipeConfigPath"],
+      "a cleared field is gone from the file, in the key set the daemon decodes");
+  } finally {
+    reg.dispose();
+  }
+});
+
+// ----- Storage root must sit under a directory this user owns (B-13) -----
+
+test("a storage root in a shared or foreign tree is refused by the ownership rule", () => {
+  const reg = useRegistry();
+  try {
+    // Owned by this user but world-writable: the case a deny list of named
+    // subtrees cannot cover, closed by the positive shape rule.
+    const open = path.join(reg.root, "open-to-all");
+    fs.mkdirSync(open);
+    fs.chmodSync(open, 0o777);
+
+    const refused = [
+      ["/Users/Shared/notes-app/.glasspane/evidence", /owned by the current user/],
+      ["/Users/somebody-else/work/notes/.glasspane/evidence", /owned by the current user/],
+      ["/var/folders/none/T/notes/.glasspane/evidence", /owned by the current user/],
+      [path.join(open, "evidence"), /world-writable/],
+    ];
+    for (const [value, reason] of refused) {
+      const message = expectRegistryError(
+        () => projectSet({ ...baseArgs, evidenceStoragePath: value }),
+        "GP_E_BAD_PARAMS",
+        value,
+      );
+      assert.match(message, /An acceptable value is a project-owned directory/);
+      assert.match(message, reason, `refused for the wrong reason: ${message}`);
+    }
+    assert.equal(fs.existsSync(reg.filePath), false, "none of them created a registry");
+  } finally {
+    reg.dispose();
+  }
+});
+
+test("a private ancestor the current user owns is what makes a deep root acceptable", () => {
+  const reg = useRegistry();
+  try {
+    const parent = path.join(reg.root, "notes-app");
+    fs.mkdirSync(parent);
+    fs.chmodSync(parent, 0o750);
+    const target = path.join(parent, ".glasspane", "evidence");
+    assert.equal(projectSet({ ...baseArgs, evidenceStoragePath: target }).evidenceStoragePath, target);
   } finally {
     reg.dispose();
   }

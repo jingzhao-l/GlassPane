@@ -223,6 +223,27 @@ export class OrderedReplyQueue {
     });
   }
 
+  /**
+   * Order the *writing* of a reply that is produced elsewhere. `push()` above
+   * serialises everything its callback does, so a request awaiting the daemon
+   * also stops every later request from starting: an outstanding `act` swallowed
+   * `ping`, `tools/list` and the `gp_probe_status` the timeout remedy tells the
+   * agent to call, the client's own timeout fired first, and the agent re-issued
+   * the click (B-02). This variant runs `inFlight` immediately and joins the
+   * chain when the value exists — one frame on the byte stream at a time,
+   * replies in completion order, paired by the JSON-RPC `id` each carries.
+   *
+   * Both outcomes are taken at call time, so a request that fails while earlier
+   * replies are still being written is reported here instead of surfacing as an
+   * unhandled rejection.
+   */
+  pushDelivery<T>(inFlight: Promise<T>, deliver: (value: T) => Promise<void>): void {
+    inFlight.then(
+      (value) => this.push(() => deliver(value)),
+      (error: unknown) => this.report(error),
+    );
+  }
+
   /** Resolves once everything queued so far has been attempted. */
   drained(): Promise<void> {
     return this.tail;

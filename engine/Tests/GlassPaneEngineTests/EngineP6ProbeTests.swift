@@ -246,9 +246,20 @@ final class P6ProbeInboxTests: XCTestCase {
         inbox.disconnect(pid: 4242, reason: "read failed: errno 54 (Connection reset by peer)")
         XCTAssertNil(inbox.connection(for: 4242), "a dropped probe is not a live connection")
         XCTAssertFalse(inbox.isStateCapable(pid: 4242))
-        // The row survives on purpose: an empty list used to read as "never
-        // integrated" even for a probe that had just been connected (R2-18).
-        let dropped = try XCTUnwrap(inbox.statusJSON().first)
+        // A-10: the dropped probe leaves `probes` altogether. Every reader of
+        // that array — `spike/run_h1_retest.py`, `spike/run_spikes2.py` and the
+        // agent mental model they encode — treats "the pid is in `probes`" as
+        // "the pid has a live probe", so a row for a dead probe made a dropped
+        // probe read as an attached one and an act spent against it reported
+        // `hitCount: 0` as measurement.
+        XCTAssertTrue(
+            inbox.statusJSON().isEmpty,
+            "probes must mean live registrations: A-10's whole contract"
+        )
+        // The row survives on purpose, in its own array: an empty list used to
+        // read as "never integrated" even for a probe that had just been
+        // connected (R2-18).
+        let dropped = try XCTUnwrap(inbox.recentDisconnectionsJSON().first)
         XCTAssertEqual(dropped["connected"] as? Bool, false)
         XCTAssertEqual(dropped["eventsSeen"] as? Int, 1)
         XCTAssertEqual(dropped["drops"] as? Int, 1)
@@ -261,6 +272,79 @@ final class P6ProbeInboxTests: XCTestCase {
             "a dropped probe cannot open an act window: the row is history, not connectivity"
         )
     }
+
+    /// A-10: the two arrays are disjoint by construction — a pid that
+    /// re-registered is a live row and its older drop stays out of both.
+    func testRecentDisconnectionsNeverAppearInTheLiveProbesArray() throws {
+        let inbox = ProbeInbox(now: { Date() })
+        inbox.register(p6Hello(pid: 4242, capabilities: ["z1"]))
+        inbox.disconnect(pid: 4242, reason: "peer closed the connection (EOF)")
+        inbox.register(p6Hello(pid: 4242, capabilities: ["z1", "z3"]))
+        let live = inbox.statusJSON()
+        XCTAssertEqual(live.count, 1)
+        XCTAssertEqual(live.first?["capabilities"] as? [String], ["z1", "z3"], "the re-hello's capabilities are authoritative")
+        XCTAssertFalse(
+            live.contains { ($0["connected"] as? Bool) == false },
+            "no row of `probes` may say connected:false (A-10)"
+        )
+        XCTAssertTrue(
+            inbox.recentDisconnectionsJSON().isEmpty,
+            "the pid is live again: its history is not a disconnection now"
+        )
+        XCTAssertEqual(inbox.recordedDisconnectionCount, 1, "the drop still happened")
+    }
+
+    /// A-05: `ingest` must not be a second door into the connection table. The
+    /// hello branch there cleared the pid's event ring, enforced neither
+    /// `maxRegisteredProbes` nor the peer-credential decision the socket layer
+    /// makes, and is no longer reachable from the daemon at all.
+    func testHelloFrameThroughIngestRegistersNothingAndErasesNothing() throws {
+        let time = P6TimeBox()
+        let inbox = ProbeInbox(now: { time.now })
+
+        // An unknown pid cannot become a registration by pushing a hello frame.
+        inbox.ingest(pid: 9999, frame: .hello(p6Hello(pid: 9999, capabilities: ["z1", "z2"])))
+        XCTAssertNil(inbox.connection(for: 9999), "ingest is not an admission path (A-05)")
+        XCTAssertTrue(inbox.statusJSON().isEmpty, "a forged hello frame must not show up as a live probe")
+        XCTAssertEqual(inbox.recordedDisconnectionCount, 0)
+        inbox.beginWindow(pid: 9999, opId: "op_forged")
+        XCTAssertNil(inbox.endWindow(pid: 9999, opId: "op_forged"))
+
+        // A hello for a pid that IS registered must not touch its entry or ring.
+        inbox.register(p6Hello(capabilities: ["z1", "z2"]))
+        inbox.beginWindow(pid: 4242, opId: "op_ingest_hello")
+        inbox.ingest(pid: 4242, frame: .handler(file: "Keep.swift", line: 5, ts: 0, durationNs: nil))
+        let before = try XCTUnwrap(inbox.connection(for: 4242))
+        inbox.ingest(pid: 4242, frame: .hello(ProbeHello(
+            pid: 4242, bundleId: "com.example.app", appName: "Example",
+            probeVersion: "gp-probe/0.9.9", capabilities: []
+        )))
+        let after = try XCTUnwrap(inbox.connection(for: 4242))
+        XCTAssertEqual(after, before, "only `register` may replace a registration")
+        let signals = try XCTUnwrap(inbox.endWindow(pid: 4242, opId: "op_ingest_hello"))
+        XCTAssertEqual(
+            signals.handlerProbe?.handlers, [HandlerRef(file: "Keep.swift", line: 5)],
+            "the old hello branch wiped the ring; that is the X-1 false negative"
+        )
+    }
+
+    /// Residual (A-1's second door): a disconnect for a pid that is not
+    /// registered is a no-op, ordered like `register` checks. The reachable
+    /// half of that contract is that it invents no record; the event-ring half
+    /// has no reader from outside the inbox (`lateCount` needs a window, and a
+    /// window needs a registration), so it is pinned by ordering, not by a
+    /// probe — see the comment on `disconnect(pid:reason:)`.
+    func testDisconnectOfUnregisteredPidRecordsNothing() {
+        let inbox = ProbeInbox(now: { Date() })
+        inbox.register(p6Hello(capabilities: ["z1"]))
+        inbox.disconnect(pid: 9999, reason: "stray teardown")
+        inbox.disconnect(pid: 9999, reason: "stray teardown again")
+        XCTAssertEqual(inbox.recordedDisconnectionCount, 0, "an unregistered pid never dropped")
+        XCTAssertEqual(inbox.recentDisconnectionsJSON().count, 0)
+        XCTAssertEqual(inbox.statusJSON().count, 1, "the live registration is untouched")
+        XCTAssertEqual(inbox.statusJSON().first?["pid"] as? Int, 4242)
+    }
+
 
     func testStatusJSONIsEmptyForNeverRegisteredProbes() {
         let time = P6TimeBox()
@@ -371,6 +455,71 @@ final class P6ProbeInboxTests: XCTestCase {
         XCTAssertNil(ProbeInbox.declaredStateSource(capabilities: ["z1", "checkpoint"]))
     }
 
+    /// A-09 (the survivable half): a probe that reported before/after frames
+    /// whose `source` token this daemon cannot read is still credited to the
+    /// channel its *hello* declared — the declaration is kernel-verified, the
+    /// token is not, and throwing the pair away silently downgraded strong
+    /// attribution to soft with no trace.
+    func testUnreadableStateSourceFallsBackToTheDeclaredChannelNotToSilence() throws {
+        let inbox = ProbeInbox(now: { Date() })
+        inbox.register(p6Hello(capabilities: ["z1", "z2"]))
+        inbox.beginWindow(pid: 4242, opId: "op_unknown_src")
+        inbox.ingest(pid: 4242, frame: .state(
+            key: "model.count", before: "3", after: "4", source: "z4-teleprompter", ts: 0
+        ))
+        let signals = try XCTUnwrap(inbox.endWindow(pid: 4242, opId: "op_unknown_src"))
+        let stateDiff = try XCTUnwrap(signals.stateDiff, "the observation is real; only the token is unreadable")
+        XCTAssertEqual(stateDiff.source, .z2Mirror, "named from the hello, never from the unmapable frame")
+        XCTAssertTrue(stateDiff.changed)
+        XCTAssertEqual(stateDiff.entries, [StateEntry(key: "model.count", before: "3", after: "4")])
+        XCTAssertEqual(inbox.unmapableStateFrameCount, 1, "and the unreadable token is counted, not swallowed")
+        XCTAssertEqual(inbox.statusJSON().first?["stateFramesUnmappedSource"] as? Int, 1)
+    }
+
+    /// A-09 (the un-survivable half) + R6-15: with no declared channel either,
+    /// `stateDiff` stays absent — a fabricated default must not come back — but
+    /// the absence is attributable: the frames are counted per pid and in total,
+    /// so "this probe has no state channel" can be told apart from "state frames
+    /// arrived through a channel this daemon cannot read".
+    func testUnreadableStateSourceWithoutDeclaredChannelIsCountedNotInvented() throws {
+        let inbox = ProbeInbox(now: { Date() })
+        inbox.register(p6Hello(capabilities: ["z1"]))
+        inbox.beginWindow(pid: 4242, opId: "op_unnameable")
+        inbox.ingest(pid: 4242, frame: .state(
+            key: "volume.42", before: "0.5", after: "0.6", source: "z9-mystery", ts: 0
+        ))
+        inbox.ingest(pid: 4242, frame: .state(
+            key: "volume.42", before: "0.6", after: "0.7", source: "z9-mystery", ts: 0
+        ))
+        let signals = try XCTUnwrap(inbox.endWindow(pid: 4242, opId: "op_unnameable"))
+        XCTAssertNotNil(signals.handlerProbe, "the handler signal is unaffected by the state-channel question")
+        XCTAssertNil(signals.stateDiff, "no channel may be invented for a probe that never declared one (R6-15)")
+        XCTAssertEqual(inbox.unmapableStateFrameCount, 2)
+        XCTAssertEqual(inbox.statusJSON().first?["stateFramesUnmappedSource"] as? Int, 2)
+        XCTAssertFalse(inbox.isStateCapable(pid: 4242), "capability still means *declared*, not *observed but unreadable*")
+
+        // A drop-off takes the per-pid tally with it; the monotonic total stays.
+        inbox.disconnect(pid: 4242, reason: "peer closed the connection (EOF)")
+        XCTAssertEqual(inbox.unmapableStateFrameCount, 2)
+        inbox.register(p6Hello(pid: 4242, capabilities: ["z1"]))
+        XCTAssertNil(
+            inbox.statusJSON().first?["stateFramesUnmappedSource"],
+            "a fresh registration of a recycled pid starts clean"
+        )
+    }
+
+    /// A pid that sends nothing unmapable gets no `stateFramesUnmappedSource`
+    /// key: absence means zero measured, never a default.
+    func testLiveProbeRowOmitsTheUnmappedTallyWhenNothingFellThrough() throws {
+        let inbox = ProbeInbox(now: { Date() })
+        inbox.register(p6Hello(capabilities: ["z1", "z2"]))
+        inbox.ingest(pid: 4242, frame: .state(key: "k", before: "1", after: "2", source: "z2-mirror", ts: 0))
+        let row = try XCTUnwrap(inbox.statusJSON().first)
+        XCTAssertNil(row["stateFramesUnmappedSource"])
+        XCTAssertEqual(inbox.unmapableStateFrameCount, 0)
+        XCTAssertEqual(row["eventsSeen"] as? Int, 1, "the frame itself is still counted as seen")
+    }
+
     // MARK: command delivery (R2-07)
 
     func testSendCommandReportsDeliveryBothWays() throws {
@@ -419,8 +568,14 @@ final class P6ProbeInboxTests: XCTestCase {
         XCTAssertFalse(error.contains("refused"), "the probe never heard about the restore: \(error)")
     }
 
-    // MARK: registration bounds (R5-06)
-
+    // MARK: registration bounds (R5-06, A-11)
+    /// What this pins is the **inbox-side backstop**, reached by calling
+    /// `register` directly. A-11: it is *not* the daemon's live gate —
+    /// `ProbeSocketServer` admits at most `maxConcurrentClients` (8) connections
+    /// and one connection can register exactly one pid, so a socket-served probe
+    /// face can never grow the table to 16. `testClientCapCountsClientsNotTheListener`
+    /// pins the live gate, and `testListenerBoundsStayInsideInboxCapacity` keeps
+    /// the two numbers in the honest order.
     func testRegisteredPidCapacityIsEnforced() {
         let inbox = ProbeInbox(now: { Date() })
         for pid in 1...Int32(ProbeInbox.maxRegisteredProbes) {
@@ -435,6 +590,12 @@ final class P6ProbeInboxTests: XCTestCase {
             "a re-hello for a registered pid replaces its entry (§2.2) and stays admitted"
         )
         XCTAssertEqual(inbox.statusJSON().count, ProbeInbox.maxRegisteredProbes)
+        XCTAssertGreaterThan(
+            ProbeInbox.maxRegisteredProbes, ProbeSocketServer.maxConcurrentClients,
+            "the inbox cap has to stay looser than the connection cap or the socket layer would "
+                + "refuse connections the inbox could have kept and the refusal branch here would "
+                + "not be the backstop the comment says it is"
+        )
     }
 }
 
@@ -507,6 +668,390 @@ final class P6ProbePeerCredentialTests: XCTestCase {
         XCTAssertGreaterThan(ProbeSocketServer.preHelloReadTimeoutSeconds, 0)
         XCTAssertGreaterThan(ProbeSocketServer.idleReadTimeoutSeconds, 0)
         XCTAssertGreaterThan(ProbeSocketServer.commandWriteTimeoutSeconds, 0)
+    }
+}
+
+// MARK: - Live probe socket face (A-06, A-11, A-17)
+
+/// These three drive a real `ProbeSocketServer` with real client sockets (see
+/// `P6SocketFaceFixture`), because the facts they pin are only observable
+/// through a live descriptor: which lock a write holds, how many clients fit
+/// under the cap, and whether a closed descriptor can still be written to.
+final class P6ProbeSocketFaceTests: XCTestCase {
+
+    /// A-06: the shared state lock must never be held across a bounded command
+    /// write, because every probe reader thread and the accept loop take it on
+    /// each iteration. The assertion is on the *face*, not on the lock: one peer
+    /// that stops draining may cost its own connection its own write budget, and
+    /// nothing else — not another app's command, not a new app's hello. With the
+    /// pre-A-06 code both measurements come out at the ~2 s write budget.
+    ///
+    /// The condition has to be *produced*, not assumed. A peer that merely never
+    /// reads can absorb a whole command line in kernel buffers, and macOS
+    /// auto-tunes a unix socket towards `kern.ipc.maxsockbuf`, which on current
+    /// releases is far above any payload a test may reasonably build (an earlier
+    /// build of this case pushed 8 MiB through in ~0 s and reported *delivered* —
+    /// a green run that measured nothing). So: shrink the stalled peer's receive
+    /// buffer, push bounded chunks until one send cannot go out, then keep that
+    /// connection inside a blocked write for as long as the measurements run. The
+    /// recorded per-send timing is what distinguishes "back-pressure happened"
+    /// from "the connection was gone", and a platform that cannot be filled skips
+    /// with its numbers instead of passing vacuously.
+    func testStalledPeerDoesNotDelayAnotherPeersCommandOrTheAcceptLoop() throws {
+        let fixture = try P6SocketFaceFixture.open(requireVerifiedPeer: false)
+        defer { fixture.teardown() }
+
+        let chunkBytes = 64 * 1024
+        let stalledPeer = try XCTUnwrap(
+            fixture.connectAndHello(pid: 9101), "first client must be registered"
+        )
+        XCTAssertNotNil(fixture.connectAndHello(pid: 9102), "second client must be registered")
+        // The peer that stalls is an accepted socket that never reads a byte, and
+        // the space the daemon has to write into is *that socket's* receive
+        // buffer — so shrinking it is what makes back-pressure reachable in
+        // kilobytes instead of megabytes. A refused request is not a failure of
+        // the test: the push budget covers it, and the skip text reports which of
+        // the two happened.
+        let grantedBuffer = fixture.shrinkReceiveBuffer(stalledPeer, to: chunkBytes)
+        let chunk = String(repeating: "x", count: chunkBytes)
+
+        let filled = DispatchSemaphore(value: 0)
+        let measured = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue(label: "p6.stalled-writer").async {
+            // Fill. Nothing drains this peer, so the successful sends queue up
+            // until one of them cannot go out at all.
+            while fixture.stall.sends < P6SocketFaceFixture.stallPushLimit {
+                let started = Date()
+                let delivered = fixture.inbox.sendCommand("op_begin", ["pad": chunk], to: 9101)
+                fixture.recordSend(
+                    delivered: delivered, bytes: chunkBytes,
+                    seconds: Date().timeIntervalSince(started)
+                )
+                if !delivered { break }
+            }
+            // Hold. The buffer is full and stays full — nobody reads this socket —
+            // so every write now costs its whole budget. Issuing the next one
+            // immediately and only then telling the main thread to measure is what
+            // makes the two overlap a property of the design rather than a raced
+            // `Thread.sleep`: the stall repeats until it is released.
+            filled.signal()
+            while fixture.stall.sends < P6SocketFaceFixture.stallPushLimit,
+                  measured.wait(timeout: .now()) == .timedOut {
+                let started = Date()
+                let delivered = fixture.inbox.sendCommand("op_begin", ["pad": chunk], to: 9101)
+                fixture.recordSend(
+                    delivered: delivered, bytes: chunkBytes,
+                    seconds: Date().timeIntervalSince(started)
+                )
+            }
+            finished.signal()
+        }
+
+        XCTAssertEqual(
+            filled.wait(timeout: .now() + 30), .success,
+            "the fill phase never ended: a command to a peer that stopped draining did not return within"
+                + " \(ProbeSocketServer.commandWriteTimeoutSeconds)s — the write budget is not enforced on this"
+                + " socket, which is exactly what A-06 promises"
+        )
+        // One blocked write lasts the whole `commandWriteTimeoutSeconds` budget,
+        // so a short margin is enough to land the measurements inside it — and the
+        // margin cannot make the case vacuous, because `stall.blockedSeconds` below
+        // is the proof that a write really did wait.
+        Thread.sleep(forTimeInterval: 0.2)
+        let commandAt = Date()
+        XCTAssertTrue(
+            fixture.inbox.sendCommand("op_end", to: 9102),
+            "a healthy peer must still receive its command while another peer is stalling"
+        )
+        let healthyWriteSeconds = Date().timeIntervalSince(commandAt)
+
+        let acceptAt = Date()
+        XCTAssertNotNil(
+            fixture.connectAndHello(pid: 9103),
+            "a new app must still get admitted while one peer stalls"
+        )
+        let acceptSeconds = Date().timeIntervalSince(acceptAt)
+        measured.signal() // release the hold loop
+
+        guard finished.wait(timeout: .now() + 30) == .success else {
+            XCTFail(
+                "the stalled write never returned, although the release was asked for: one command to one"
+                    + " non-draining peer costs more than its \(ProbeSocketServer.commandWriteTimeoutSeconds)s"
+                    + " budget, so the send gate — and the close waiting on it — can be held indefinitely"
+            )
+            return
+        }
+        // Only now may the writer's numbers be read: the semaphore is what orders
+        // them against its writes.
+        let stall = fixture.stall
+        if !stall.backPressureSeen {
+            let granted = grantedBuffer.map { "\($0)" } ?? "nothing (setsockopt refused)"
+            throw XCTSkip(
+                "back-pressure cannot be induced on this machine: \(stall.sends) commands of"
+                    + " \(chunkBytes) bytes (\(stall.bytesPushed) bytes in total) went to a peer that never"
+                    + " read a single byte without one write blocking. The client asked for a"
+                    + " \(chunkBytes)-byte receive buffer and got \(granted); compare"
+                    + " `sysctl kern.ipc.maxsockbuf` with the"
+                    + " \(P6SocketFaceFixture.stallPushLimit)-command budget this test is willing to spend"
+            )
+        }
+        XCTAssertFalse(
+            stall.delivered,
+            "a write that cannot complete must be reported as undelivered, never counted as sent"
+        )
+        let budget = Double(ProbeSocketServer.commandWriteTimeoutSeconds)
+        XCTAssertGreaterThanOrEqual(
+            stall.blockedSeconds, budget * 0.5,
+            "the failed write has to have *blocked* for this to mean anything: the longest send gave up after"
+                + " \(stall.blockedSeconds)s of a \(budget)s budget — an instant `false` means the connection was"
+                + " gone or unrouted (A-17's case), which is not a stalled peer"
+        )
+        XCTAssertLessThanOrEqual(
+            stall.blockedSeconds, budget + 3.0,
+            "A-06: one stalled peer must cost its own write budget, not the kernel's unbounded send timeout"
+        )
+        XCTAssertLessThan(
+            healthyWriteSeconds, 1.0,
+            "A-06 regression: another app's command waited \(healthyWriteSeconds)s behind one stalled peer"
+        )
+        XCTAssertLessThan(
+            acceptSeconds, 1.0,
+            "A-06 regression: the accept loop waited \(acceptSeconds)s behind one stalled peer"
+        )
+        XCTAssertEqual(
+            fixture.inbox.statusJSON().count, 3,
+            "no probe was evicted to make room, and none was lost to the stall"
+        )
+    }
+
+    /// A-11: `maxConcurrentClients` bounds *clients*. Counting the listening
+    /// descriptor inside the owned set made the real cap one smaller than the
+    /// number the refusal message reported.
+    func testClientCapCountsClientsNotTheListener() throws {
+        let fixture = try P6SocketFaceFixture.open(requireVerifiedPeer: false)
+        defer { fixture.teardown() }
+        var served: [Int32] = []
+        for index in 1...Int32(ProbeSocketServer.maxConcurrentClients) {
+            let pid = 9200 + index
+            XCTAssertNotNil(
+                fixture.connectAndHello(pid: pid),
+                "client \(index) of \(ProbeSocketServer.maxConcurrentClients) must be admitted (A-11 off-by-one)"
+            )
+            served.append(pid)
+        }
+        XCTAssertEqual(fixture.inbox.statusJSON().count, served.count)
+
+        // One over the cap: refused without a reader thread, and without
+        // evicting an established probe (R5-06).
+        let refused = try XCTUnwrap(fixture.rawConnect(), "connecting one past the cap must still be possible")
+        fixture.sendHello(pid: 9999, to: refused)
+        XCTAssertTrue(
+            fixture.closedByDaemon(refused, within: 3),
+            "the over-cap connection must be closed unread by the daemon (A-11: the cap counts clients, so this one is the 9th)"
+        )
+        XCTAssertNil(fixture.inbox.connection(for: 9999), "a refused connection registers nothing")
+        XCTAssertEqual(
+            fixture.inbox.statusJSON().count, served.count,
+            "refusal must not destroy a live probe's act window"
+        )
+    }
+
+    /// A-17 must survive the lock split: once the daemon's reader thread has
+    /// closed a descriptor, a command to that pid is reported as *not
+    /// delivered*, never written into a descriptor that may already have been
+    /// recycled to somebody else.
+    func testCommandAfterTheConnectionClosedIsRefusedNotSentToAFD() throws {
+        let fixture = try P6SocketFaceFixture.open(requireVerifiedPeer: false)
+        defer { fixture.teardown() }
+        let client = try XCTUnwrap(fixture.connectAndHello(pid: 9301))
+        fixture.disconnectClient(client)
+        XCTAssertTrue(
+            fixture.wait(9301, timeout: 3, forRegistration: false),
+            "the reader thread must unregister the pid it dropped"
+        )
+        XCTAssertFalse(
+            fixture.inbox.sendCommand("op_begin", to: 9301),
+            "no route means no delivery, and the caller must be told so"
+        )
+        XCTAssertTrue(fixture.inbox.lastDeliveryError?.contains("not delivered") ?? false,
+                      "\(fixture.inbox.lastDeliveryError ?? "nil")")
+        // And the daemon itself stays usable: a fresh connection for the same pid
+        // registers normally after the old descriptor was reaped once.
+        XCTAssertNotNil(fixture.connectAndHello(pid: 9301), "the descriptor was closed exactly once (R2-04)")
+    }
+}
+
+// MARK: - Socket-face fixture
+
+/// A real `ProbeSocketServer` on a temp-dir socket with real client sockets, so
+/// the lock layering and the connection cap are measured instead of asserted
+/// about. `requireVerifiedPeer: false` is the documented opt-out seam, and these
+/// tests are why it exists as a parameter rather than a silent fallback: every
+/// connection from one process carries the same `LOCAL_PEERPID`, so distinct
+/// pids cannot be peer-authenticated from inside the test binary. Paths come
+/// from `TestSandbox`, which proves isolation at runtime.
+private final class P6SocketFaceFixture {
+    let server: ProbeSocketServer
+    let inbox: ProbeInbox
+    let path: String
+    /// What the stalled-writer thread observed. Written only on that queue and
+    /// read after its `finished` semaphore fires, which is the ordering point.
+    struct Stall {
+        /// Whether the last send went out. `true` is also the initial value, so a
+        /// writer that never ran fails the test instead of passing it.
+        var delivered = true
+        /// Set by the first send that could not be written at all: without it the
+        /// test cannot tell "back-pressure" from "the socket was huge".
+        var backPressureSeen = false
+        var sends = 0
+        var bytesPushed = 0
+        /// The longest *failed* send. A write a peer stopped draining costs its
+        /// whole `commandWriteTimeoutSeconds` budget, so this is the measurement
+        /// that says the SendGate path ran rather than being skipped past.
+        var blockedSeconds = 0.0
+    }
+    var stall = Stall()
+    /// Ceiling over both phases: `stallPushLimit` x 64 KiB commands, far above the
+    /// `kern.ipc.maxsockbuf` any macOS host ships with, so a machine that reaches
+    /// it cannot be made to block and says so instead of passing.
+    static let stallPushLimit = 1024
+
+    func recordSend(delivered: Bool, bytes: Int, seconds: TimeInterval) {
+        stall.delivered = delivered
+        stall.sends += 1
+        stall.bytesPushed += bytes
+        if !delivered {
+            stall.backPressureSeen = true
+            stall.blockedSeconds = max(stall.blockedSeconds, seconds)
+        }
+    }
+
+    /// Ask for a small receive buffer on a client socket and report the size the
+    /// kernel actually granted (nil when the request itself failed). For AF_UNIX
+    /// stream sockets the space a writer has *is* the peer's receive buffer, so
+    /// this is the only knob that makes "the peer stopped draining" reachable
+    /// without building a payload as large as the platform default.
+    func shrinkReceiveBuffer(_ fd: Int32, to bytes: Int) -> Int? {
+        var request = Int32(bytes)
+        guard setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &request, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            return nil
+        }
+        var granted = Int32(0)
+        var length = socklen_t(MemoryLayout<Int32>.size)
+        guard getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &granted, &length) == 0 else { return nil }
+        return Int(granted)
+    }
+
+    private let directory: String
+    private var clients: [Int32] = []
+
+    static func open(requireVerifiedPeer: Bool) throws -> P6SocketFaceFixture {
+        let directory = TestSandbox.directory("sock")
+        let path = directory + "/s"
+        let inbox = ProbeInbox(now: { Date() })
+        let server = ProbeSocketServer(
+            socketPath: path, inbox: inbox,
+            log: EngineLog(quiet: true), requireVerifiedPeer: requireVerifiedPeer
+        )
+        try server.start()
+        return P6SocketFaceFixture(server: server, inbox: inbox, path: path, directory: directory)
+    }
+
+    private init(server: ProbeSocketServer, inbox: ProbeInbox, path: String, directory: String) {
+        self.server = server
+        self.inbox = inbox
+        self.path = path
+        self.directory = directory
+    }
+
+    func teardown() {
+        server.stop()
+        for fd in clients { close(fd) }
+        clients.removeAll()
+        try? FileManager.default.removeItem(atPath: directory)
+    }
+
+    /// A client socket connected to the listener, without saying hello.
+    func rawConnect() -> Int32? {
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        let copied = path.withCString { source in
+            withUnsafeMutableBytes(of: &address.sun_path) { destination in
+                guard let base = destination.baseAddress else { return false }
+                _ = strncpy(base.assumingMemoryBound(to: CChar.self), source, destination.count)
+                return true
+            }
+        }
+        guard copied else { return nil }
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        let connected = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { rebound in
+                Darwin.connect(fd, rebound, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard connected == 0 else { close(fd); return nil }
+        clients.append(fd)
+        return fd
+    }
+
+    /// One hello line, in the §2.2 shape `ProbeWire.decode` reads.
+    func sendHello(pid: Int32, to fd: Int32) {
+        let line = "{\"t\":\"hello\",\"pid\":\(pid),\"appName\":\"Example\","
+            + "\"probeVersion\":\"gp-probe/0.1.0\",\"capabilities\":[\"z1\"]}\n"
+        line.withCString { pointer in
+            _ = Darwin.write(fd, pointer, strlen(pointer))
+        }
+    }
+
+    /// Connect, hello, and wait until the daemon's inbox really has the pid —
+    /// nil when the peer never got admitted, so a refusal is a fact and not a
+    /// hang.
+    func connectAndHello(pid: Int32) -> Int32? {
+        guard let fd = rawConnect() else { return nil }
+        sendHello(pid: pid, to: fd)
+        return wait(pid, timeout: 3, forRegistration: true) ? fd : nil
+    }
+
+    /// Hang up the way a dying app does, so the daemon's reader thread runs its
+    /// own close path.
+    func disconnectClient(_ fd: Int32) {
+        clients.removeAll { $0 == fd }
+        shutdown(fd, SHUT_RDWR)
+        close(fd)
+    }
+
+    /// True when the daemon ended the connection (EOF or a hard read error)
+    /// within `timeout`. `SO_RCVTIMEO` bounds each read so a daemon that *keeps*
+    /// the connection — the failure this probes for — costs a timeout instead of
+    /// hanging the run, and an expired deadline (`EAGAIN`) is deliberately not
+    /// read as a close.
+    func closedByDaemon(_ fd: Int32, within timeout: TimeInterval) -> Bool {
+        var deadlineInterval = timeval(tv_sec: 1, tv_usec: 0)
+        setsockopt(
+            fd, SOL_SOCKET, SO_RCVTIMEO, &deadlineInterval, socklen_t(MemoryLayout<timeval>.size)
+        )
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            var byte: UInt8 = 0
+            let got = Darwin.read(fd, &byte, 1)
+            if got == 0 { return true }
+            if got < 0, errno != EAGAIN, errno != EWOULDBLOCK, errno != EINTR { return true }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        return false
+    }
+
+    /// Polls until the pid's registration is (or is no longer) there.
+    func wait(_ pid: Int32, timeout: TimeInterval, forRegistration: Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if (inbox.connection(for: pid) != nil) == forRegistration { return true }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        return (inbox.connection(for: pid) != nil) == forRegistration
     }
 }
 

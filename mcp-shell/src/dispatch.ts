@@ -13,11 +13,26 @@ export const JSONRPC = "2.0" as const;
  */
 export const MCP_PROTOCOL_VERSION = "2025-06-18" as const;
 /**
- * Versions this shell implements out of the box, i.e. the ones initialize echoes
- * back. Anything else the client names falls back to MCP_PROTOCOL_VERSION
- * (spec §6.1: 回显客户端版本，不识别时回落本常量).
+ * MCP revisions this shell genuinely interoperates with, i.e. the ones
+ * initialize echoes back. A version is listed only when everything the shell
+ * answers is part of that revision's own dialect: it implements
+ * `initialize`/`ping`/`tools/list`/`tools/call` over newline-delimited JSON-RPC
+ * 2.0 on stdio, advertises the `tools` capability alone with
+ * `listChanged: false`, sends no batch request and no notification it has not
+ * been asked for, and returns `content` text without `structuredContent`,
+ * `outputSchema`, sampling, roots, elicitation or streaming. All of that is
+ * inside the oldest revision below, so echoing it back promises nothing the
+ * shell cannot deliver (spec §6.1: 回显客户端版本，不识别时回落本常量).
+ *
+ * Anything newer or otherwise unknown falls back to {@link
+ * MCP_PROTOCOL_VERSION} — including a *newer* revision: this shell has not been
+ * shown against it, so it does not claim it.
  */
-export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = [MCP_PROTOCOL_VERSION];
+export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = [
+  "2024-11-05",
+  "2025-03-26",
+  MCP_PROTOCOL_VERSION,
+] as const;
 export const SERVER_INFO = { name: "glasspane-mcp", version: "1.1.0" } as const;
 
 export const PARSE_ERROR = -32700;
@@ -54,20 +69,15 @@ export interface McpServerDeps {
   specs?: readonly ToolSpec[];
   /** Overridable audit session (per-server operationId trail, spec v1.3 §10.3). */
   session?: EvidenceAuditSession;
-  /** Overridable echoable MCP versions (spec §6.1); defaults to the shipped set. */
-  supportedProtocolVersions?: readonly string[];
 }
 
 export class McpServer {
   private readonly specs: readonly ToolSpec[];
   private readonly session: EvidenceAuditSession;
-  private readonly supportedProtocolVersions: readonly string[];
 
   constructor(private readonly deps: McpServerDeps) {
     this.specs = deps.specs ?? TOOL_SPECS;
     this.session = deps.session ?? new EvidenceAuditSession();
-    this.supportedProtocolVersions =
-      deps.supportedProtocolVersions ?? SUPPORTED_PROTOCOL_VERSIONS;
   }
 
   /** Handle a single newline-delimited frame; returns a response or null. */
@@ -139,9 +149,11 @@ export class McpServer {
   }
 
   /**
-   * Spec §6.1: echo the client's protocolVersion when this server implements it,
-   * otherwise fall back to MCP_PROTOCOL_VERSION. A missing or non-string version
-   * is just "not recognized" — it falls back too, and never throws.
+   * Spec §6.1: echo the client's protocolVersion when this server implements it
+   * (the shipped {@link SUPPORTED_PROTOCOL_VERSIONS}; see that list for what
+   * "implements" means here), otherwise fall back to MCP_PROTOCOL_VERSION. A
+   * missing or non-string version is just "not recognized" — it falls back too,
+   * and never throws.
    */
   private negotiateProtocolVersion(rawParams: unknown): string {
     if (typeof rawParams !== "object" || rawParams === null || Array.isArray(rawParams)) {
@@ -151,7 +163,7 @@ export class McpServer {
     if (typeof requested !== "string") {
       return MCP_PROTOCOL_VERSION;
     }
-    return this.supportedProtocolVersions.includes(requested) ? requested : MCP_PROTOCOL_VERSION;
+    return SUPPORTED_PROTOCOL_VERSIONS.includes(requested) ? requested : MCP_PROTOCOL_VERSION;
   }
 
   private async callTool(id: number | string, rawParams: unknown): Promise<RpcResponse> {

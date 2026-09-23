@@ -16,6 +16,7 @@ import { daemonUnreachableRemedy, EngineCallError, EngineJsonRpcClient } from ".
 import { formatToolError, formatToolErrorShape, GP_E_BAD_PARAMS, GP_E_INTERNAL, GP_E_NO_EVIDENCE, GP_E_NOT_FOUND, GP_E_PROJECT_LIMIT } from "./errors.js";
 import { EvidenceAuditSession } from "./audit-session.js";
 import { renderHTML, renderMarkdown, escapeHTML } from "./evidence-report.js";
+import type { EvidencePackReportView } from "./evidence-report.js";
 import {
   ProjectListArgs,
   ProjectSetArgs,
@@ -57,7 +58,22 @@ const ActStepSchema = z.strictObject({
   action: ActionSchema,
 });
 const RestoreStepsSchema = z.array(ActStepSchema).min(1).max(64).optional();
-const RestoreModeSchema = z.string().max(32).optional();
+
+/**
+ * The closed set `restore.mode` accepts, mirrored from the daemon's
+ * `ParamValidation.restoreModes` (the two literals EngineCore branches on plus
+ * the two documented names of the forms it runs when `mode` is omitted). The
+ * daemon answers anything else with GP_E_BAD_PARAMS, so advertising free text
+ * here advertised a shape the service always refuses; the consumer-consistency
+ * test reads that Swift declaration and fails if the two lists drift.
+ */
+export const RESTORE_MODES = [
+  "compare",
+  "ffwd",
+  "restore_snapshot",
+  "rollback_full",
+] as const;
+const RestoreModeSchema = z.enum(RESTORE_MODES).optional();
 
 export const AttachArgs = z.strictObject({
   bundleId: OptionalBundleIdSchema,
@@ -333,7 +349,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
             required: ["selector", "action"],
           },
         },
-        mode: { type: "string", maxLength: 32 },
+        mode: { type: "string", enum: [...RESTORE_MODES] },
       },
       required: ["snapshotId"],
     },
@@ -395,7 +411,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: "gp_project_set",
-    description: "Create or update a GlassPane project. Omit projectId to register a new project; include it to update an existing one.",
+    description: "Create or update a GlassPane project. Omit projectId to register a new project; include it to update an existing one. Exactly one of bundleId or pid identifies the app: passing both is refused, and on update omitting both keeps the stored identity. Passing null for bundleId, pid or a path field clears it; omitting a field leaves it as stored.",
     engineMethod: "project_set",
     inputSchema: {
       type: "object",
@@ -403,19 +419,27 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       properties: {
         projectId: { type: "string", pattern: "^prj_[0-9A-HJKMNP-TV-Z]{26}$" },
         displayName: { type: "string", minLength: 1, maxLength: 256 },
-        bundleId: { type: "string", maxLength: 256 },
+        // `null` clears the field on update, so these mirror
+        // ProjectSetArgs' `.nullish()` rather than the old optional-string form.
+        bundleId: { type: ["string", "null"], maxLength: 256 },
         // Matches ProjectSetArgs.pid, which is bounded to the same Int32 domain
         // the daemon stores (an out-of-range pid made Swift fail to decode the
         // whole registry file, which then got rewritten as an empty table).
-        pid: { type: "integer", minimum: 1, maximum: PID_INT32_MAX },
-        recipeConfigPath: { type: "string", maxLength: 1024 },
-        calibrationAssetsPath: { type: "string", maxLength: 1024 },
-        evidenceStoragePath: { type: "string", maxLength: 1024 },
+        pid: { type: ["integer", "null"], minimum: 1, maximum: PID_INT32_MAX },
+        recipeConfigPath: { type: ["string", "null"], maxLength: 1024 },
+        calibrationAssetsPath: { type: ["string", "null"], maxLength: 1024 },
+        evidenceStoragePath: { type: ["string", "null"], maxLength: 1024 },
       },
       required: ["displayName"],
-      oneOf: [
+      // Exactly one of bundleId/pid must identify the app *after* an update is
+      // merged with the stored entry, which a schema for one call cannot state
+      // over a shared file: `projectId` alone means "keep the stored identity".
+      // The authoritative rule runs on the merged entry in project-registry's
+      // assertSingleIdentity, whose message names both fields.
+      anyOf: [
         { required: ["bundleId"] },
         { required: ["pid"] },
+        { required: ["projectId"] },
       ],
     },
     validate: zodBridge(ProjectSetArgs),
@@ -532,15 +556,20 @@ class EvidenceFrameShapeError extends Error {
 
 /**
  * Strongly validates the engine's last_evidence result (§6.3) and returns the
- * parsed pack. The engine frame is `{evidencePack: {…}}`; the envelope is
- * checked here and the pack body goes to the kernel's read-side parser, which
- * still accepts archives the engine legitimately wrote before the schema froze
- * (legacy `0.1-draft` label, `pixelDiff.bounds` omitted instead of null).
- * The parser reports the frozen const for both labels, so a rendered report
- * names the contract the pack satisfies; the archive text an agent reads back
- * through gp_last_evidence is the daemon's frame, untouched.
+ * parsed pack together with the schema label the archive *carried*. The engine
+ * frame is `{evidencePack: {…}}`; the envelope is checked here and the pack body
+ * goes to the kernel's read-side parser, which still accepts archives the engine
+ * legitimately wrote before the schema froze (legacy `0.1-draft` label,
+ * `pixelDiff.bounds` omitted instead of null).
+ *
+ * The fold is a *validation* step, so the measured label is reported separately
+ * rather than hidden: a report that printed only the frozen const would assert a
+ * conformance the bytes do not have, and the panel (which prints the label it
+ * decoded) would then state a different contract than this report for one and
+ * the same archive (B-09). The archive text an agent reads back through
+ * gp_last_evidence is the daemon's frame, untouched.
  */
-function parseEvidenceFrame(raw: unknown): EvidencePack {
+function parseEvidenceFrame(raw: unknown): { pack: EvidencePack; measuredSchemaVersion: string } {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new EvidenceFrameShapeError("result frame is not an object");
   }
@@ -551,7 +580,32 @@ function parseEvidenceFrame(raw: unknown): EvidencePack {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     throw new EvidenceFrameShapeError("evidencePack field is not an object");
   }
-  return parseEvidencePackRead(body);
+  const pack = parseEvidencePackRead(body);
+  const measured: unknown = (body as Record<string, unknown>).schemaVersion;
+  return {
+    pack,
+    measuredSchemaVersion: typeof measured === "string" ? measured : pack.schemaVersion,
+  };
+}
+
+/**
+ * The pack as a report prints it: `schemaVersion` states the label measured in
+ * the archive *and* the contract the read path resolved it against —
+ * `glasspane.evidence/0.1-draft (read as glasspane.evidence/0.1)` — so the
+ * agent-facing report can never claim more than the bytes carry. A pack that
+ * needed no fold is returned unchanged, which keeps the common report
+ * byte-identical to the shared golden.
+ */
+function packForReport(pack: EvidencePack, measuredSchemaVersion: string): EvidencePackReportView {
+  if (measuredSchemaVersion === pack.schemaVersion) {
+    return pack;
+  }
+  // One literal-typed field widened to carry its provenance. The renderers
+  // print `schemaVersion` verbatim and read nothing else off it
+  // (`evidence-report.ts` markdown/HTML summary lines), and the validated pack
+  // above still holds the contract value, so no consumer of `EvidencePack`
+  // receives this: it is a presentation form for one line of text.
+  return { ...pack, schemaVersion: `${measuredSchemaVersion} (read as ${pack.schemaVersion})` };
 }
 
 /**
@@ -694,9 +748,9 @@ async function exportEvidence(
   const render = argv.format === "html" ? renderHTML : renderMarkdown;
   try {
     const raw = await context.engine.call("last_evidence", { operationId: argv.operationId });
-    const pack = parseEvidenceFrame(raw);
+    const { pack, measuredSchemaVersion } = parseEvidenceFrame(raw);
     context.session.record(raw);
-    return { content: [{ type: "text", text: render(pack, undefined) }], isError: false };
+    return { content: [{ type: "text", text: render(packForReport(pack, measuredSchemaVersion), undefined) }], isError: false };
   } catch (error) {
     return mapAuditError(error);
   }
@@ -722,12 +776,13 @@ async function recentReports(
   // Fetch each trail id; the daemon's bounded history may have evicted it or
   // the engine may have restarted, so per-item misses are skipped with a
   // note instead of failing the whole report.
-  const packs: Array<{ id: string; pack: EvidencePack }> = [];
+  const packs: Array<{ id: string; pack: EvidencePackReportView }> = [];
   const skipped: string[] = [];
   for (const id of ids) {
     try {
       const raw = await context.engine.call("last_evidence", { operationId: id });
-      packs.push({ id, pack: parseEvidenceFrame(raw) });
+      const parsed = parseEvidenceFrame(raw);
+      packs.push({ id, pack: packForReport(parsed.pack, parsed.measuredSchemaVersion) });
     } catch (error) {
       if (error instanceof EngineCallError && error.code === GP_E_NO_EVIDENCE) {
         skipped.push(id);

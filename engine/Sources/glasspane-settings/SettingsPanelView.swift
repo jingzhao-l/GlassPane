@@ -35,6 +35,10 @@ struct SettingsPanelView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear(perform: startPolling)
         .onDisappear(perform: stopPolling)
+        // 动作之后重新起表：重启/授权改的是 daemon 的状态，面板只能靠**继续测**
+        // 才知道它有没有回来。全部达成时轮询会自己停表，模型加一次计数就是
+        // "该再测下去了"（`SettingsModel.pollingRestartToken`）。
+        .onChange(of: model.pollingRestartToken) { _ in startPolling() }
     }
 
     private var header: some View {
@@ -58,20 +62,32 @@ struct SettingsPanelView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
-            // 需要用户动手重启的两种成因共用这一个控件：授权已落但运行实例读不到；
-            // 后台服务压根没应答（这时"待重启席位"恒为空，旧实现把按钮只挂在那个
-            // 集合上，结果 daemon 一死面板里连一个能自救的按钮都没有）。
-            // 不自动重启：那会中断正在进行的 act，必须由用户点。
-            if let attention = model.daemonAttentionText {
+            // 需要注意的横幅：文案与按钮同源（`daemonAttentionBanner`）。
+            // 「重启后台服务」是破坏性控件（`kickstart -k` 会打断正在执行的操作），
+            // 只在测量支撑得起"该重启"时才出现：要么实测到"系统已授权、运行实例
+            // 读不到"，要么后台服务根本没有服务在监听，要么就是不答话连续重复到
+            // 了能排除"它只是正在忙别的客户端"的程度。
+            // 单次不答话只给非破坏性的「刷新」——它既不会打断任何东西，也是这一
+            // 状态唯一诚实的下一步。不自动重启：那会中断正在进行的 act。
+            if let attention = model.daemonAttentionBanner {
                 HStack(alignment: .top, spacing: 8) {
-                    Text(attention)
+                    Text(attention.text)
                         .font(.caption)
                         .foregroundStyle(.orange)
                     Spacer()
-                    Button("重启后台服务") { model.restartDaemon() }
-                        .controlSize(.small)
-                        .accessibilityIdentifier(PermissionGuide.restartDaemonIdentifier)
-                        .help("立即重启后台服务（会打断正在执行的操作）")
+                    if attention.offersRestart {
+                        Button("重启后台服务") { model.restartDaemon() }
+                            .controlSize(.small)
+                            .accessibilityIdentifier(PermissionGuide.restartDaemonIdentifier)
+                            .help("立即重启后台服务（会打断正在执行的操作）")
+                    } else {
+                        // 与 Daemon 状态区那个「刷新」同一个动作、同一个标识：
+                        // 自动化按 gp-refresh 找到的都是"再问一次后台服务"。
+                        Button("刷新") { model.refresh() }
+                            .controlSize(.small)
+                            .accessibilityIdentifier(PermissionGuide.refreshIdentifier)
+                            .help("再问一次后台服务（不重启它，不会打断任何操作）")
+                    }
                 }
                 .padding(10)
                 .background(Color.orange.opacity(0.08))
@@ -489,7 +505,12 @@ struct PermissionCardView: View {
                         .accessibilityIdentifier(
                             PermissionGuide.statusIdentifier(kind: entry.kind, status: displayStatus)
                         )
-                    if entry.statusNote != nil {
+                    if entry.restartPending {
+                        // 待重启标记：只说一件事——"系统里已授权、运行中的 daemon
+                        // 还没读到，确实欠一次重启"。它挂在 `restartPending` 上而
+                        // 不是 `statusNote != nil` 上：注记还兼着"这次没读到它的
+                        // 上报"，用后者当判据会让沉默的 daemon 在三个标识上同时
+                        // 发布"已授权待重启"，而旁边的中文说的是另一回事。
                         Image(systemName: "arrow.clockwise.circle")
                             .font(.caption)
                             .foregroundStyle(.orange)

@@ -29,10 +29,23 @@ import AppKit
 /// frame coordinates match SCK's display-logical space).
 public enum SCKCapturer {
 
-    /// Total wall-clock budget for one capture, mirroring the defensive
-    /// timeout discipline introduced for AX tree reads in P1.
-    /// Enforced across the content query, the screenshot manager call and the
-    /// SCStream first-frame wait.
+    /// Wall-clock budget for ONE stage of one capture, not for the capture as a
+    /// whole (A-13 — the comment used to claim "total", which no code enforced).
+    /// Same shape as the defensive per-call discipline P1 introduced for AX tree
+    /// reads: each stage ends a different async call and nothing can be cancelled
+    /// mid-stage, so each gets its own fresh budget — the
+    /// `SCShareableContent` query, the `SCScreenshotManager` call or the
+    /// `SCStream` start, and on the macOS 13 path the first-frame wait as well.
+    /// The constant keeps its name because P1 spec §2 cites `captureTimeoutSeconds`
+    /// as this 5 s figure; only the budget's stated scope was wrong.
+    ///
+    /// Worst case is therefore 10 s on the macOS 14 path (query + capture) and
+    /// 15 s on the macOS 13 path (query + stream start + first frame). A capture
+    /// that burns the full budget on a wedged window server can on its own
+    /// exceed `EngineCore.performanceLatencyBudgetMs` (10 s) and trip the act's
+    /// performance circuit breaker — that is the honest reading of what the
+    /// channel did, and shortening the per-stage budget to hide it would turn a
+    /// slow-but-real capture into `pixelCaptureDenied` on healthy machines.
     private static let captureTimeoutSeconds: TimeInterval = 5.0
 
     /// Captures the frontmost on-screen window owned by `pid`, cropped to

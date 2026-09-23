@@ -10,7 +10,8 @@ import {
 } from "@iterate/kernel";
 
 import { canonicalJson } from "../dist/canonical.js";
-import { TOOL_BY_NAME, executeTool } from "../dist/tools.js";
+import { EvidenceAuditSession } from "../dist/audit-session.js";
+import { RESTORE_MODES, TOOL_BY_NAME, executeTool } from "../dist/tools.js";
 import { makeEngine } from "./helpers.mjs";
 
 /**
@@ -192,13 +193,19 @@ test("consumer-glue gp_export_evidence renders a pack whose pixelDiff has no bou
   assert.equal(outcome.isError, false);
   assert.ok(outcome.content[0].text.includes("pixelDiff: changedRatio=0 windowId=12"));
   assert.ok(!outcome.content[0].text.includes("bounds="));
-  assert.ok(outcome.content[0].text.includes("**schemaVersion**: glasspane.evidence/0.1"));
+  assert.ok(outcome.content[0].text.includes("**schemaVersion**: glasspane.evidence/0.1\n"));
+  // A pack that carries the frozen label needs no provenance note; only a fold
+  // is annotated (asserted on the legacy fixture below).
+  assert.ok(!outcome.content[0].text.includes("read as"));
 });
 
-test("a legacy pack renders, and its report names the frozen const it satisfies", async () => {
-  // The read path folds the pre-freeze label onto the frozen const, so a
-  // derived report says which contract the pack meets; the archive itself keeps
-  // its own label (asserted above through gp_last_evidence).
+test("a legacy pack's report states the measured label and what it was read as", async () => {
+  // B-09: this test asserted the opposite before — that the report must not
+  // contain `0.1-draft`. That pinned the contradiction being fixed: the panel
+  // prints the label it decoded (`EvidenceReportGenerator.swift` renders
+  // `pack.schemaVersion`, and Swift's decoder keeps legacy labels), so one
+  // archive produced two different contract statements and the agent-facing one
+  // claimed a conformance the bytes do not carry.
   const { engine, io } = makeEngine();
   const value = fixture("evidence-pack.ok-04-legacy-draft.json");
   const promise = executeTool(
@@ -209,8 +216,34 @@ test("a legacy pack renders, and its report names the frozen const it satisfies"
   io.respond({ evidencePack: value });
   const outcome = await promise;
   assert.equal(outcome.isError, false);
-  assert.ok(outcome.content[0].text.includes("**schemaVersion**: glasspane.evidence/0.1\n"));
-  assert.ok(!outcome.content[0].text.includes("0.1-draft"));
+  assert.ok(
+    outcome.content[0].text.includes(
+      "**schemaVersion**: glasspane.evidence/0.1-draft (read as glasspane.evidence/0.1)\n",
+    ),
+    outcome.content[0].text.slice(0, 400),
+  );
+  // The reading is still stated, so a consumer comparing against the frozen
+  // const can see which contract the pack was validated against.
+  assert.ok(outcome.content[0].text.includes("(read as glasspane.evidence/0.1)"));
+  assert.equal(value.schemaVersion, "glasspane.evidence/0.1-draft");
+});
+
+test("gp_recent_reports annotates a folded pack the same way as a single export", async () => {
+  // The provenance fold has two render call sites (`gp_export_evidence` and the
+  // aggregate); fixing one and leaving the other to print the bare const would
+  // put two of this shell's own reports in the contradiction B-02/B-09 removed.
+  const { engine, io } = makeEngine();
+  const value = fixture("evidence-pack.ok-04-legacy-draft.json");
+  const session = new EvidenceAuditSession();
+  session.record({ operationId: value.operationId });
+  const promise = executeTool(TOOL_BY_NAME.get("gp_recent_reports"), { limit: 1 }, engine, session);
+  io.respond({ evidencePack: value });
+  const outcome = await promise;
+  assert.equal(outcome.isError, false);
+  assert.ok(
+    outcome.content[0].text.includes("glasspane.evidence/0.1-draft (read as glasspane.evidence/0.1)"),
+    outcome.content[0].text.slice(0, 400),
+  );
 });
 
 test("failure/fixture-upstream: an unreadable fixture surfaces as an upstream read error", () => {
@@ -255,8 +288,72 @@ test("gp_attach accepts the boundary pids the daemon can hold", async () => {
 });
 
 test("the advertised pid schemas state the domain the validators enforce", () => {
-  for (const toolName of ["gp_attach", "gp_project_set"]) {
-    const properties = TOOL_BY_NAME.get(toolName).inputSchema.properties;
-    assert.deepEqual(properties.pid, { type: "integer", minimum: 1, maximum: PID_INT32_MAX });
+  // gp_attach forwards to the daemon's `pid_t` narrowing and gp_project_set
+  // stores the value as a Swift `Int32?`: same domain (R4-01). The registry's
+  // own fields are additionally patch-shaped, so `null` — "clear it" (B-11) — is
+  // part of what its advertised type has to state.
+  assert.deepEqual(TOOL_BY_NAME.get("gp_attach").inputSchema.properties.pid, {
+    type: "integer",
+    minimum: 1,
+    maximum: PID_INT32_MAX,
+  });
+  const project = TOOL_BY_NAME.get("gp_project_set").inputSchema.properties;
+  assert.deepEqual(project.pid, { type: ["integer", "null"], minimum: 1, maximum: PID_INT32_MAX });
+  assert.deepEqual(project.bundleId, { type: ["string", "null"], maxLength: 256 });
+  for (const field of ["recipeConfigPath", "calibrationAssetsPath", "evidenceStoragePath"]) {
+    assert.deepEqual(project[field], { type: ["string", "null"], maxLength: 1024 });
+  }
+});
+
+/**
+ * The daemon's authoritative `restore.mode` set, read out of the Swift source
+ * that declares it. B-06: `tools/list` still advertised free text ≤32 after
+ * `ParamValidation.optRestoreMode` closed the set, so the shell offered a shape
+ * the service always refuses. Comparing the advertisement against this file's
+ * own mirror could never notice that — both sides of it live here.
+ */
+function daemonRestoreModes() {
+  const swift = readFileSync(
+    new URL("../../engine/Sources/GlassPaneEngine/ParamValidation.swift", import.meta.url),
+    "utf8",
+  );
+  const declared = /static let restoreModes: \[String\] = \[([\s\S]*?)\]/.exec(swift);
+  assert.ok(declared, "ParamValidation.restoreModes must exist for this assertion to have a source");
+  return [...declared[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+}
+
+test("restore.mode is advertised as the daemon's closed set, not free text", () => {
+  const modes = daemonRestoreModes();
+  assert.ok(modes.length > 0);
+  assert.deepEqual([...RESTORE_MODES], modes, "the shell's mirror of ParamValidation.restoreModes drifted");
+  assert.deepEqual(
+    TOOL_BY_NAME.get("gp_restore").inputSchema.properties.mode,
+    { type: "string", enum: modes },
+  );
+});
+
+test("gp_restore refuses a mode the daemon does not accept, without sending a frame", async () => {
+  const spec = TOOL_BY_NAME.get("gp_restore");
+  const snapshotId = "snap_0123456789ABCDEFGHJKMNPQRS";
+  for (const mode of ["restore executed: everything", "FFWD", "rollback", "compare ", ""]) {
+    const { engine, io } = makeEngine();
+    const outcome = await executeTool(spec, { snapshotId, mode }, engine);
+    assert.equal(outcome.isError, true, `mode ${JSON.stringify(mode)} must not reach the daemon`);
+    assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"), outcome.content[0].text);
+    assert.equal(io.sent.length, 0, "a refused mode never touches the socket");
+  }
+});
+
+test("every advertised restore mode passes the validator and is forwarded verbatim", async () => {
+  const spec = TOOL_BY_NAME.get("gp_restore");
+  const snapshotId = "snap_0123456789ABCDEFGHJKMNPQRS";
+  for (const mode of daemonRestoreModes()) {
+    const { engine, io } = makeEngine();
+    const promise = executeTool(spec, { snapshotId, mode }, engine);
+    const frame = io.lastFrame();
+    assert.equal(frame.method, "restore");
+    assert.equal(frame.params.mode, mode);
+    io.respond({ snapshotId, confirmed: 0, total: 0 });
+    assert.equal((await promise).isError, false, `${mode} is a mode the daemon documents`);
   }
 });

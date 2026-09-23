@@ -19,7 +19,9 @@ Z4 watchpoints (§6.5): hardware slots capped at 4 (arm64 debug registers);
 over-cap requests FIFO-queue (depth ≤64); exhaustion is reported honestly —
 no software emulation of a hardware watchpoint. Arming is one-shot: a stop on an
 armed watchpoint records its hit, releases its slot and arms the queue head, so a
-queued request is only "pending", never silently counted as never-fired.
+queued request is only "pending", never silently counted as never-fired. A hit
+belongs to the ledger entry that was armed when it was taken, so re-arming an
+address — the normal workflow — never inherits the previous generation's count.
 
 Division of testing (v3.2 acceptance口径): the decidable core — queue policy,
 JSON assembly, truncation, sentinel extraction, argv building — is pure and
@@ -64,6 +66,11 @@ class WatchQueue:
     keeps three phases (armed / queued / spent) and says which one each request
     is in, so an empty ``hits`` list can never read as "never fired" when the
     truth is "never armed".
+
+    Counts belong to a request generation, keyed ``(addr, seq)``: an address that
+    is armed, spent and armed again is a *new* request with zero hits, and a stop
+    that matches nothing armed is counted as unattributed rather than credited to
+    whoever happens to hold the address.
     """
 
     PHASE_ARMED = "armed"
@@ -82,7 +89,8 @@ class WatchQueue:
         self.queued = []         # FIFO of entries waiting for a slot
         self.spent = []          # entries whose hit was recorded, slot released
         self.rejected = 0
-        self.hits = {}           # addr -> hit count
+        self.hits = {}           # (addr, seq) -> hits credited to that ledger entry
+        self.unattributed = {}   # addr -> stops that matched no armed entry
         self.stops_observed = 0  # watchpoint stops this session reconciled
         self.notes = []          # caveats that belong in every payload's errors[]
         self.notes_dropped = 0
@@ -129,6 +137,16 @@ class WatchQueue:
                 return entry
         return None
 
+    def armed_entry(self, addr):
+        """The one entry a hit at ``addr`` can belong to: armed, and this generation."""
+        for entry in self.armed:
+            if entry["addr"] == addr:
+                return entry
+        return None
+
+    def hit_count(self, entry):
+        return self.hits.get((entry["addr"], entry["seq"]), 0)
+
     def mark_live(self, addr, live=True):
         """The debugger confirmed (or revoked) the hardware watchpoint itself."""
         entry = self.entry_for_addr(addr)
@@ -142,6 +160,9 @@ class WatchQueue:
             return ("rejected", "watchpoint spec carries no address")
         # One ledger slot per address: a duplicate request would otherwise put two
         # armed entries on one address whose debugger handle only tracks the last.
+        # Re-arming an address whose request already *spent* is the intended
+        # one-shot workflow, and _stamp() gives it a fresh sequence — the new
+        # generation's hit count starts at zero, not at the old one's.
         for entry in self.armed + self.queued:
             if entry["addr"] == spec["addr"]:
                 return ("duplicate", "already requested (phase %s, slot %r)"
@@ -219,7 +240,30 @@ class WatchQueue:
         return (None, None)
 
     def record_hit(self, addr):
-        self.hits[addr] = self.hits.get(addr, 0) + 1
+        """Credit a watchpoint stop to the entry armed at ``addr``; returns its seq.
+
+        Nothing armed means nothing to credit: the stop is counted as
+        unattributed (and noted) instead of being laid on whatever generation
+        holds the address, which would manufacture "armed and already fired".
+        An entry the ledger never confirmed as hardware is still credited — the
+        stop is the observation, the contradiction is the note.
+        """
+        entry = self.armed_entry(addr)
+        if entry is None:
+            first = self.unattributed.get(addr, 0) == 0
+            self.unattributed[addr] = self.unattributed.get(addr, 0) + 1
+            if first:
+                detail = "queued" if any(e["addr"] == addr for e in self.queued) else \
+                    ("spent (one-shot arming; nothing re-armed at it)"
+                     if any(e["addr"] == addr for e in self.spent) else "not in the ledger")
+                self.note("watchpoint stop at %s credits no ledger entry: %s, so no hit "
+                          "was counted for it" % (addr, detail))
+            return None
+        self.hits[(addr, entry["seq"])] = self.hit_count(entry) + 1
+        if not entry.get("live"):
+            self.note("watchpoint stop at %s was credited to ledger entry #%d, which the "
+                      "ledger has not confirmed as a hardware watchpoint" % (addr, entry["seq"]))
+        return entry["seq"]
 
     def note_stop_observed(self):
         self.stops_observed += 1
@@ -232,16 +276,21 @@ class WatchQueue:
             return self.QUEUED_REASON
         if entry.get("phase") == self.PHASE_SPENT:
             return ("hit recorded (%d); slot %r released for the queued head "
-                    "(one-shot arming)" % (self.hits.get(entry["addr"], 0), entry.get("hwSlot")))
+                    "(one-shot arming)" % (self.hit_count(entry), entry.get("hwSlot")))
         return self.RESERVED_REASON
 
     def records(self):
-        """§6.4 ``watchpoints`` array: one record per request, in request order."""
+        """§6.4 ``watchpoints`` array: one record per request, in request order.
+
+        ``hitCount`` is the count of *this* ledger generation: an address armed
+        twice shows the spent request with its own hits and the fresh request with
+        zero, so an armed row can never read as a fired one.
+        """
         return [{
             "addr": entry["addr"],
             "hwSlot": entry.get("hwSlot"),
             "queued": entry.get("phase") == self.PHASE_QUEUED,
-            "hitCount": self.hits.get(entry["addr"], 0),
+            "hitCount": self.hit_count(entry),
             "armed": bool(entry.get("live")),
             "reason": self._reason_for(entry),
         } for entry in sorted(self.entries(), key=lambda e: e["seq"])]
@@ -252,7 +301,10 @@ class WatchQueue:
             "queued": self.queued,
             "spent": self.spent,
             "rejected": self.rejected,
-            "hits": [{"addr": addr, "hitCount": count} for addr, count in sorted(self.hits.items())],
+            "hits": [{"addr": addr, "seq": seq, "hitCount": count}
+                     for (addr, seq), count in sorted(self.hits.items())],
+            "unattributedHits": [{"addr": addr, "stopCount": count}
+                                 for addr, count in sorted(self.unattributed.items())],
             "watchpointStopsObserved": self.stops_observed,
             "rearmLive": self.rearm_live,
             "rearmDetail": self.rearm_detail,
@@ -265,7 +317,7 @@ class WatchQueue:
         Silent unless somebody actually requested a watchpoint (or a caveat was
         recorded): a plain crash capture must not inherit watchpoint noise.
         """
-        if not self.entries() and not self.notes and not self.rejected:
+        if not self.entries() and not self.notes and not self.rejected and not self.unattributed:
             return []
         out = []
         armed = [e for e in self.armed if e.get("live")]
@@ -285,6 +337,13 @@ class WatchQueue:
                 out.append("%d watchpoint stop(s) observed but none matched an armed "
                            "address (%s)" % (self.stops_observed,
                                              ", ".join(e["addr"] for e in armed)))
+        if self.unattributed:
+            out.append("%d watchpoint stop(s) matched no armed ledger entry and were not "
+                       "counted as hits (%s): arm the address again with "
+                       "'gp-watch add <hex-addr>' if a further hit is wanted"
+                       % (sum(self.unattributed.values()),
+                          ", ".join("%s x%d" % (addr, n)
+                                    for addr, n in sorted(self.unattributed.items()))))
         if self.rejected:
             out.append("%d watchpoint request(s) rejected: hardware-slot FIFO is full "
                        "(limit %d)" % (self.rejected, self.queue_limit))
@@ -892,7 +951,18 @@ def reconcile_watchpoint_stops(debugger, process=None):
                 _WATCH_QUEUE.note(note)
                 report["notes"].append(note)
                 continue
-            _WATCH_QUEUE.record_hit(addr)
+            seq = _WATCH_QUEUE.record_hit(addr)
+            if seq is None:
+                # Nothing armed at that address: the stop is already counted as
+                # unattributed, so no slot is released and nothing is promoted
+                # (the ledger holds none to free). The debugger-side watchpoint
+                # is still disabled — it exists and would keep stopping the target.
+                ok, detail = _disarm_watchpoint(addr)
+                if not ok:
+                    _WATCH_QUEUE.note("watchpoint stop at %s credited no ledger entry and "
+                                      "its watchpoint could not be confirmed disabled (%s)"
+                                      % (addr, detail))
+                continue
             freed = _WATCH_QUEUE.release(addr)
             ok, detail = _disarm_watchpoint(addr)
             if not ok:

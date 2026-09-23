@@ -318,17 +318,16 @@ final class EngineCoreRound1Tests: XCTestCase {
         Selector(role: "AXButton", title: "Submit")
     }
 
+    /// C-05: this used to compose its own path from `NSTemporaryDirectory()`,
+    /// which the runtime half of the isolation gate never saw. Everything a
+    /// state object is built on now comes from `TestSandbox`, whose paths are
+    /// asserted isolated before they are handed out.
     private func tempDirectory(_ prefix: String) -> String {
-        let dir = NSTemporaryDirectory() + prefix + "-" + UUID().uuidString
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        cleanupPaths.append(dir)
-        return dir
+        TestSandbox.directory(prefix)
     }
 
     private func tempRegistry() -> ProjectRegistry {
-        let path = NSTemporaryDirectory() + "gp-r1-\(UUID().uuidString).json"
-        cleanupPaths.append(path)
-        return ProjectRegistry(filePath: path)
+        TestSandbox.projectRegistry("r1")
     }
 
     // MARK: - R1-01: attach() is atomic
@@ -520,7 +519,7 @@ final class EngineCoreRound1Tests: XCTestCase {
     func testDiagnoseResolvesWhatLastEvidenceResolves() throws {
         let dir = tempDirectory("gp-r1-archive")
         let writer = EngineCore(
-            channel: makeChannel(), settle: {}, evidenceStore: EvidenceStore(directory: dir)
+            channel: makeChannel(), settle: {}, evidenceStore: TestSandbox.evidenceStore(at: dir)
         )
         _ = try writer.attach(bundleId: "com.example.app", pid: nil)
         let operationId = try XCTUnwrap(
@@ -529,7 +528,7 @@ final class EngineCoreRound1Tests: XCTestCase {
 
         // Fresh daemon: same archive, empty in-memory ring.
         let reader = EngineCore(
-            channel: makeChannel(), settle: {}, evidenceStore: EvidenceStore(directory: dir)
+            channel: makeChannel(), settle: {}, evidenceStore: TestSandbox.evidenceStore(at: dir)
         )
         _ = try reader.attach(bundleId: "com.example.app", pid: nil)
         XCTAssertNoThrow(try reader.lastEvidence(operationId: operationId))
@@ -556,7 +555,7 @@ final class EngineCoreRound1Tests: XCTestCase {
         try "x".write(toFile: base, atomically: true, encoding: .utf8)
         let core = EngineCore(
             channel: makeChannel(), settle: {},
-            evidenceStore: EvidenceStore(directory: base + "/child")
+            evidenceStore: TestSandbox.evidenceStore(at: base + "/child")
         )
         _ = try core.attach(bundleId: "com.example.app", pid: nil)
         let result = try core.act(selector: submitSelector, action: .press)
@@ -577,7 +576,7 @@ final class EngineCoreRound1Tests: XCTestCase {
     func testSuccessfulAndUnconfiguredArchiveReportTheirOwnVerdicts() throws {
         let core = EngineCore(
             channel: makeChannel(), settle: {},
-            evidenceStore: EvidenceStore(directory: tempDirectory("gp-r1-ok"))
+            evidenceStore: TestSandbox.evidenceStore(at: tempDirectory("gp-r1-ok"))
         )
         _ = try core.attach(bundleId: "com.example.app", pid: nil)
         let result = try core.act(selector: submitSelector, action: .press)
@@ -704,16 +703,11 @@ final class EngineCoreWaveThreeMappingTests: XCTestCase {
     }
 
     private func tempDirectory(_ prefix: String) -> String {
-        let dir = NSTemporaryDirectory() + prefix + "-" + UUID().uuidString
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        cleanupPaths.append(dir)
-        return dir
+        TestSandbox.directory(prefix)
     }
 
     private func tempRegistryPath() -> String {
-        let path = NSTemporaryDirectory() + "gp-w3-\(UUID().uuidString).json"
-        cleanupPaths.append(path)
-        return path
+        TestSandbox.filePath("w3-registry")
     }
 
     private func hello(capabilities: [String]) -> ProbeHello {
@@ -807,9 +801,21 @@ final class EngineCoreWaveThreeMappingTests: XCTestCase {
                 return XCTFail("expected a GPError, got \(error)")
             }
             XCTAssertEqual(gpError.code, .actFailed, "the frozen code stays")
-            XCTAssertTrue(gpError.message.contains("did not answer the accessibility call within 2.0s"), gpError.message)
+            // A-14 changed this wording on purpose: the old text quoted the one
+            // per-call timeout (`2.0s`) and told the agent the search had
+            // finished, and since R2-19 a `pingTimeout` is also what an aborted
+            // mid-tree search reports, with the per-call budget shrunk towards
+            // `AXChannel.minMessagingTimeoutSeconds`. The assertion now pins the
+            // budget *range*, which is all the daemon is entitled to claim.
+            XCTAssertTrue(
+                gpError.message.contains("did not answer within its budget"), gpError.message
+            )
+            XCTAssertTrue(gpError.message.contains("0.1s"), gpError.message)
+            XCTAssertTrue(gpError.message.contains("10.0s"), gpError.message)
+            XCTAssertFalse(gpError.message.contains("within 2.0s"), gpError.message)
             XCTAssertNotEqual(gpError.remedy, GPError.remedy(for: .actFailed), "the default advice is wrong for a hang")
             XCTAssertTrue(gpError.remedy.contains("sample <pid>"), gpError.remedy)
+            XCTAssertFalse(gpError.remedy.contains("the search finished"), gpError.remedy)
         }
         let rejectedPack = try core.lastEvidence(operationId: nil)
         let rejectedReason = try XCTUnwrap(rejectedPack.circuitBreaker.reason)
@@ -908,8 +914,11 @@ final class EngineCoreWaveThreeMappingTests: XCTestCase {
         let status = core.probeStatus()
         XCTAssertEqual(status["disconnections"] as? Int, 1)
         XCTAssertEqual(status["attachedHasProbe"] as? Bool, false)
-        let rows = try XCTUnwrap(status["probes"] as? [[String: Any]])
-        XCTAssertEqual(rows.first?["disconnectReason"] as? String, "connection closed")
+        let rows = try XCTUnwrap(status["recentDisconnections"] as? [[String: Any]])
+        XCTAssertEqual(rows.first?["disconnectReason"] as? String, "connection closed",
+                       "A-10: a dropped probe is reported under its own key…")
+        XCTAssertTrue(((status["probes"] as? [[String: Any]]) ?? []).isEmpty,
+                      "…and never inside `probes`, whose meaning is \"live registrations\"")
     }
 
     func testProbeStatusOmitsTheCountWhenNoInboxIsWired() {
@@ -1019,7 +1028,7 @@ final class EngineCoreWaveThreeMappingTests: XCTestCase {
             evidenceStoragePath: "/Users/Shared/../../System/Everything"
         )
         let channel = makeChannel()
-        let store = EvidenceStore(directory: tempDirectory("gp-w3-archive"))
+        let store = TestSandbox.evidenceStore(at: tempDirectory("gp-w3-archive"))
         let untouchedDirectory = store.directory
         let core = EngineCore(
             channel: channel, settle: {}, projectRegistry: registry, evidenceStore: store
@@ -1133,6 +1142,425 @@ final class EngineCoreWaveThreeMappingTests: XCTestCase {
 private final class Box {
     var now: Date
     init(_ now: Date) { self.now = now }
+}
+
+// MARK: - Round-2 wave-β: registry-less engine, shared archive validator, export reason
+
+/// C-02/C-03 (no path-shaped default left for a test to fall into), A-07/C-06
+/// (the half that deletes now uses the validator the adopting half already had),
+/// A-01 (a checkpoint export that failed is not "no probe attached"), A-08 (the
+/// archive agrees with the response about an unmeasured window) and A-14 (a
+/// `pingTimeout` no longer reports a search it may never have finished).
+final class EngineCoreWaveTwoBetaTests: XCTestCase {
+
+    private func makeChannel() -> ScriptedChannel {
+        let channel = ScriptedChannel(fallbackTree: TestTrees.standard)
+        channel.fallbackCapture = TestImages.solid(100)
+        return channel
+    }
+
+    private var submitSelector: Selector {
+        Selector(role: "AXButton", title: "Submit")
+    }
+
+    private func hello(capabilities: [String]) -> ProbeHello {
+        ProbeHello(
+            pid: 4242, bundleId: "com.example.app", appName: "Example",
+            probeVersion: "gp-probe/0.1.0", capabilities: capabilities
+        )
+    }
+
+    /// The daemon's own sources are executable targets, so the contract on the
+    /// CLI half is checked the way `HumanInterventionAuditTests` checks it: the
+    /// source text is the shipped shape (`main.swift:481` region).
+    private func repoSource(_ relativePath: String) throws -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // Tests/GlassPaneEngineTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // engine
+            .deletingLastPathComponent()   // repo root
+            .appendingPathComponent(relativePath)
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    // MARK: - C-03: `nil` is "no registry", never "the developer's file"
+
+    func testEngineWithoutARegistryRefusesLookupsInsteadOfOpeningTheProjectsFile() throws {
+        let channel = makeChannel()
+        let core = EngineCore(channel: channel, settle: {})
+        XCTAssertNil(core.projectRegistry, "the initializer creates no registry of its own")
+
+        do {
+            _ = try core.attach(
+                bundleId: "com.example.app", pid: nil, projectId: "prj_0123456789ABCDEFGHJKMNPQRS"
+            )
+            return XCTFail("a registry-less engine must refuse, not answer \"unknown project\"")
+        } catch let error as GPError {
+            XCTAssertEqual(error.code, .notFound, "the honest code, unchanged vocabulary")
+            XCTAssertTrue(
+                error.message.contains("no project registry is configured"), error.message
+            )
+            XCTAssertFalse(
+                error.message.contains("unknown projectId"),
+                "\"not registered\" is a verdict this engine never measured; got \(error.message)"
+            )
+        }
+        XCTAssertEqual(channel.attachCallCount, 0, "the refusal happens before any rebind (R1-01)")
+        XCTAssertNil(core.activeProjectId)
+
+        XCTAssertThrowsGPError(.notFound) {
+            _ = try core.projectGet(projectId: "prj_0123456789ABCDEFGHJKMNPQRS")
+        }
+        XCTAssertThrowsGPError(.notFound) {
+            _ = try core.pruneEvidence(projectId: "prj_0123456789ABCDEFGHJKMNPQRS", olderThanDays: 30)
+        }
+        XCTAssertThrowsGPError(.notFound) {
+            _ = try core.projectSet(
+                projectId: nil, displayName: "Would-be", bundleId: "com.x", pid: nil,
+                recipeConfigPath: nil, calibrationAssetsPath: nil, evidenceStoragePath: nil
+            )
+        }
+
+        // Listing says what it is: no registry, not "nothing registered".
+        let list = core.projectList()
+        XCTAssertEqual((list["projects"] as? [[String: Any]])?.count, 0)
+        XCTAssertEqual(list["registryConfigured"] as? Bool, false)
+        XCTAssertNotNil(list["registryFailure"] as? String)
+
+        // The registry-less engine still attaches and still acts.
+        XCTAssertNoThrow(try core.attach(bundleId: "com.example.app", pid: nil))
+        XCTAssertNoThrow(try core.act(selector: submitSelector, action: .press))
+    }
+
+    // MARK: - A-07 / C-06: one validator for adopting and for deleting
+
+    func testProjectArchiveDirectoryRefusesWhatAttachRefuses() throws {
+        let registry = TestSandbox.projectRegistry("beta-archive")
+        let doomed = try registry.create(
+            displayName: "Legacy", bundleId: "com.a", evidenceStoragePath: "/System/Library/Java"
+        )
+        let homeless = try registry.create(displayName: "NoPath", bundleId: "com.b")
+        let ownedDirectory = TestSandbox.directory("beta-owned")
+        let owned = try registry.create(
+            displayName: "Owned", bundleId: "com.c", evidenceStoragePath: ownedDirectory
+        )
+
+        switch EngineCore.projectArchiveDirectory(projectId: doomed.projectId, entry: doomed) {
+        case .success:
+            XCTFail("a system-owned tree must never be adopted as an archive")
+        case .failure(let refusal):
+            XCTAssertEqual(refusal.code, .badParams, "the frozen code of the attach refusal")
+            XCTAssertTrue(refusal.message.contains("/System/Library/Java"), refusal.message)
+            XCTAssertEqual(
+                refusal.remedy, EngineCore.evidenceStorageRemedy,
+                "one remedy text, so the deleting half cannot advise differently"
+            )
+        }
+        switch EngineCore.projectArchiveDirectory(projectId: homeless.projectId, entry: homeless) {
+        case .success:
+            XCTFail("a project that named no directory owns no archive")
+        case .failure(let refusal):
+            XCTAssertTrue(refusal.message.contains("nothing was deleted"), refusal.message)
+        }
+        XCTAssertEqual(
+            try EngineCore.projectArchiveDirectory(projectId: owned.projectId, entry: owned).get(),
+            ownedDirectory
+        )
+
+        // The engine method and the CLI read the same words for the same case.
+        let core = EngineCore(channel: makeChannel(), settle: {}, projectRegistry: registry)
+        XCTAssertThrowsError(
+            try core.pruneEvidence(projectId: homeless.projectId, olderThanDays: 30)
+        ) { error in
+            XCTAssertEqual(
+                (error as? GPError)?.message,
+                EngineCore.noArchiveRefusal(projectId: homeless.projectId).message,
+                "the daemon-side refusal and the shared resolver must not drift apart"
+            )
+        }
+    }
+
+    func testMaintenanceCliRoutesThroughTheSharedValidator() throws {
+        let source = try repoSource("engine/Sources/glasspaned/main.swift")
+        let start = try XCTUnwrap(
+            source.range(of: "if options.pruneEvidence || options.evidenceStats"),
+            "the evidence maintenance branch is gone"
+        )
+        let end = try XCTUnwrap(
+            source.range(of: "let socketPath = options.socketPath"),
+            "the slice anchor (daemon entry) is gone"
+        )
+        let block = source[start.lowerBound..<end.lowerBound]
+        XCTAssertTrue(
+            block.contains("EngineCore.projectArchiveDirectory"),
+            "the deleting CLI must resolve a project's archive through the engine's own validator"
+        )
+        XCTAssertTrue(
+            block.contains("\"stateChanged\": false"),
+            "a refusal must not read as a completed maintenance run"
+        )
+        XCTAssertTrue(block.contains("exit(1)"), "a refusal exits non-zero")
+        XCTAssertFalse(
+            block.contains("evidenceStoragePath ?? EvidenceStore.default"),
+            "substituting the shared archive for a project that named none is the defect"
+        )
+    }
+
+    func testDaemonNamesBothProductionLocationsInsteadOfDefaultingIntoThem() throws {
+        let source = try repoSource("engine/Sources/glasspaned/main.swift")
+        XCTAssertTrue(
+            source.contains("EvidenceStore.atProduction"),
+            "the daemon reaches the real archive by name only"
+        )
+        XCTAssertFalse(
+            source.contains("let store = EvidenceStore" + "()")
+                || source.contains("evidenceStore: EvidenceStore" + "()"),
+            "a bare archive constructor is the shape C-02 removed"
+        )
+        XCTAssertTrue(
+            source.contains("projectRegistry: ProjectRegistry"),
+            "the daemon injects its registry instead of letting the initializer decide"
+        )
+    }
+
+    // MARK: - A-01: an export that failed is not "no probe"
+
+    func testFailedCheckpointExportSurvivesIntoTheRollbackRefusal() throws {
+        let time = Box(Date(timeIntervalSince1970: 1_800_000_000))
+        let inbox = ProbeInbox(now: { time.now })
+        inbox.register(hello(capabilities: ["z1", "checkpoint"]))
+        inbox.sender = { pid, data in
+            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            if object?["t"] as? String == "checkpoint_export" {
+                inbox.ingest(pid: pid, frame: .checkpoint(
+                    ref: object?["ref"] as? String ?? "",
+                    domains: ["counter": ["value": "3"]],
+                    digest: "digest-the-daemon-will-not-recompute",
+                    error: nil
+                ))
+            }
+            return true
+        }
+        let core = EngineCore(
+            channel: makeChannel(), clock: { time.now }, settle: {}, probeInbox: inbox
+        )
+        _ = try core.attach(bundleId: "com.example.app", pid: nil)
+        let snapshot = try core.snapshot(maxDepth: 4)
+        let reported = try XCTUnwrap(
+            snapshot["checkpointExportError"] as? String,
+            "a probe that answered with a bad digest must not be reported as silence"
+        )
+        XCTAssertTrue(reported.contains("digest mismatch"), reported)
+        let snapshotId = try XCTUnwrap(snapshot["snapshotId"] as? String)
+
+        XCTAssertThrowsError(
+            try core.restore(snapshotId: snapshotId, steps: nil, mode: "rollback_full")
+        ) { error in
+            guard let gpError = error as? GPError else {
+                return XCTFail("expected a GPError, got \(error)")
+            }
+            XCTAssertEqual(gpError.code, .restoreUnsupported, "the frozen code stays")
+            XCTAssertTrue(gpError.message.contains("export attempted and failed"), gpError.message)
+            XCTAssertTrue(gpError.message.contains("digest mismatch"), gpError.message)
+            XCTAssertFalse(
+                gpError.message.contains("attach the probe"),
+                "the probe IS attached; telling the agent to attach one restarts the loop; got \(gpError.message)"
+            )
+            XCTAssertTrue(gpError.remedy.contains("gp_probe_status"), gpError.remedy)
+        }
+    }
+
+    func testProbeWithoutTheCheckpointCapabilityIsNamedAsTheCause() throws {
+        let inbox = ProbeInbox()
+        inbox.register(hello(capabilities: ["z1"]))
+        let core = EngineCore(
+            channel: makeChannel(), settle: {}, probeInbox: inbox
+        )
+        _ = try core.attach(bundleId: "com.example.app", pid: nil)
+        let snapshot = try core.snapshot(maxDepth: 4)
+        let reported = try XCTUnwrap(snapshot["checkpointExportError"] as? String)
+        XCTAssertTrue(reported.contains("does not advertise"), reported)
+    }
+
+    func testRollbackWithoutAnyProbeKeepsTheAttachTheProbeAdvice() throws {
+        let core = EngineCore(channel: makeChannel(), settle: {})
+        _ = try core.attach(bundleId: "com.example.app", pid: nil)
+        let snapshot = try core.snapshot(maxDepth: 4)
+        XCTAssertNil(
+            snapshot["checkpointExportError"],
+            "no probe connection is the absence of the surface, not a failed export"
+        )
+        let snapshotId = try XCTUnwrap(snapshot["snapshotId"] as? String)
+        XCTAssertThrowsError(
+            try core.restore(snapshotId: snapshotId, steps: nil, mode: "rollback_full")
+        ) { error in
+            XCTAssertTrue(
+                (error as? GPError)?.message.contains("attach the probe and re-snapshot") == true,
+                "the one case where that advice is true must keep its wording; got \(error)"
+            )
+        }
+    }
+
+    // MARK: - A-08: the artifact carries the unmeasured verdict too
+
+    func testStatedMonitorAbsenceIsRecordedInTheArchive() throws {
+        let core = EngineCore(
+            channel: makeChannel(), settle: {},
+            inputMonitorAbsenceReason: "the CGEvent input tap could not be created"
+        )
+        _ = try core.attach(bundleId: "com.example.app", pid: nil)
+        let result = try core.act(selector: submitSelector, action: .press)
+        XCTAssertEqual(result["contaminationMonitored"] as? Bool, false)
+        let basis = try XCTUnwrap(result["contaminationBasis"] as? String)
+        XCTAssertTrue(basis.contains("the CGEvent input tap could not be created"), basis)
+
+        let pack = try core.lastEvidence(operationId: nil)
+        XCTAssertTrue(
+            pack.attribution.contaminated,
+            "an unwatched window is archived as unobservable, exactly as the response reads"
+        )
+        XCTAssertEqual(pack.attribution.level, .weak)
+        let reason = try XCTUnwrap(pack.circuitBreaker.reason)
+        XCTAssertTrue(
+            reason.contains("input-contamination-not-monitored: the CGEvent input tap could not be created"),
+            reason
+        )
+        XCTAssertNotNil(
+            try EvidencePack.decodeAndValidate(pack.jsonData()),
+            "the basis rides an existing field, so the frozen schema still holds"
+        )
+    }
+
+    func testMonitorAbsenceWithoutAStatedReasonChangesNoArchivedVerdict() throws {
+        // The route every existing unit test takes: nothing installed and
+        // nothing claimed. The response still refuses to call it clean, and the
+        // pack keeps the words it has always had — inventing a reason here would
+        // be the fabricated default this round is removing elsewhere.
+        let core = EngineCore(channel: makeChannel(), settle: {})
+        _ = try core.attach(bundleId: "com.example.app", pid: nil)
+        let result = try core.act(selector: submitSelector, action: .press)
+        XCTAssertEqual(result["contaminationMonitored"] as? Bool, false)
+        XCTAssertTrue(
+            (try XCTUnwrap(result["contaminationBasis"] as? String)).contains("no reason")
+        )
+        let pack = try core.lastEvidence(operationId: nil)
+        XCTAssertEqual(pack.attribution.level, .soft)
+        XCTAssertFalse(pack.attribution.contaminated)
+        XCTAssertNil(pack.circuitBreaker.reason, "no channel fault was measured either")
+    }
+
+    func testTapFaultRecordsTheSameVerdictAsNoMonitorWithAReason() throws {
+        let faulted = ScriptedMonitoringSource(fault: "tap disabled mid-window")
+        let guard_ = AttributionGuard(inputSource: faulted)
+        let withGuard = EngineCore(
+            channel: makeChannel(), settle: {}, attributionGuard: guard_
+        )
+        _ = try withGuard.attach(bundleId: "com.example.app", pid: nil)
+        let siblingResponse = try withGuard.act(selector: submitSelector, action: .press)
+        let sibling = try withGuard.lastEvidence(operationId: nil)
+
+        let withoutGuard = EngineCore(
+            channel: makeChannel(), settle: {},
+            inputMonitorAbsenceReason: "the CGEvent input tap could not be created"
+        )
+        _ = try withoutGuard.attach(bundleId: "com.example.app", pid: nil)
+        let thisResponse = try withoutGuard.act(selector: submitSelector, action: .press)
+        let thisOne = try withoutGuard.lastEvidence(operationId: nil)
+
+        XCTAssertEqual(
+            thisOne.attribution, sibling.attribution,
+            "one rule for \"not measured\": the two not-measured shapes must not disagree"
+        )
+        // Equality on its own would also be satisfied by two copies of the old
+        // optimistic answer, so pin *which* verdict the one rule produces: the
+        // conservative one, on both sides, and both responses still say
+        // "nothing watched this window" — pack and response cannot disagree.
+        XCTAssertEqual(thisOne.attribution, Attribution(level: .weak, contaminated: true))
+        XCTAssertEqual(siblingResponse["contaminationMonitored"] as? Bool, false)
+        XCTAssertEqual(thisResponse["contaminationMonitored"] as? Bool, false)
+        let siblingBasis = try XCTUnwrap(siblingResponse["contaminationBasis"] as? String)
+        XCTAssertTrue(siblingBasis.contains("tap disabled mid-window"), siblingBasis)
+        // The verdicts agree; the causes do not collapse into one another. A
+        // monitor that died mid-window is a channel fault, a monitor that was
+        // never installed is a declared startup state (`--no-c33`, or no Input
+        // Monitoring grant) — P2 v2.0 §17.2 gives both the same degradation, so
+        // the distinction lives in the reason text, not in a second verdict.
+        let lostReason = try XCTUnwrap(sibling.circuitBreaker.reason)
+        XCTAssertTrue(
+            lostReason.contains("input-contamination-monitor-lost: tap disabled mid-window"),
+            lostReason
+        )
+        let declinedReason = try XCTUnwrap(thisOne.circuitBreaker.reason)
+        XCTAssertTrue(
+            declinedReason.contains(
+                "input-contamination-not-monitored: the CGEvent input tap could not be created"
+            ),
+            declinedReason
+        )
+        XCTAssertFalse(declinedReason.contains("monitor-lost"), declinedReason)
+        XCTAssertFalse(lostReason.contains("not-monitored"), lostReason)
+        // `attribution` and `signals` are frozen (`additionalProperties: false`),
+        // so the extra truth rides a field the pack already has and both packs
+        // still have to validate against the shipped schema.
+        XCTAssertNotNil(try EvidencePack.decodeAndValidate(sibling.jsonData()))
+        XCTAssertNotNil(try EvidencePack.decodeAndValidate(thisOne.jsonData()))
+    }
+
+    // MARK: - A-14: a pingTimeout no longer reports a completed search
+
+    func testPingTimeoutAdviceReportsAnUnfinishedSearchAndItsRealBudget() throws {
+        let rejection = EngineCore.actRejection(for: .pingTimeout)
+        XCTAssertFalse(
+            rejection.reason.contains("within \(AXChannel.messagingTimeoutSeconds)s"),
+            "one fixed duration cannot be quoted: the budget shrinks per call; got \(rejection.reason)"
+        )
+        XCTAssertTrue(
+            rejection.reason.contains("\(AXChannel.minMessagingTimeoutSeconds)s"),
+            "the effective floor has to be quoted; got \(rejection.reason)"
+        )
+        XCTAssertTrue(
+            rejection.reason.contains("\(AXChannel.treeTimeoutSeconds)s"), rejection.reason
+        )
+        let remedy = try XCTUnwrap(rejection.remedy)
+        XCTAssertFalse(remedy.contains("the search finished"), remedy)
+        XCTAssertFalse(remedy.contains("Do not change the selector"), remedy)
+        XCTAssertTrue(remedy.contains("mid-tree"), remedy)
+        XCTAssertTrue(remedy.contains("sample <pid>"), remedy)
+        XCTAssertTrue(remedy.contains("--check-accessibility"), remedy)
+    }
+
+    func testActStillThrowsTheHonestPingTimeoutReasonIntoTheEvidence() throws {
+        let channel = makeChannel()
+        let core = EngineCore(channel: channel, settle: {})
+        _ = try core.attach(bundleId: "com.example.app", pid: nil)
+        channel.actionError = .pingTimeout
+        XCTAssertThrowsGPError(.actFailed) {
+            _ = try core.act(selector: submitSelector, action: .press)
+        }
+        let pack = try core.lastEvidence(operationId: nil)
+        let reason = try XCTUnwrap(pack.circuitBreaker.reason)
+        XCTAssertTrue(reason.contains("did not answer within its budget") || reason.contains("did not answer"), reason)
+        XCTAssertFalse(reason.contains("the search finished"), reason)
+    }
+}
+
+/// A source that reports its own death, so the guard's `monitoringFault` branch
+/// is reachable from an `act()` (C33's conservative path). The contract is
+/// `InputSourceMonitoring`'s own: `inputMonitoringFault` is non-nil **only
+/// while `isMonitoringInput` is false** — `CGEventInputMonitor` implements it as
+/// `tapAlive ? nil : lastFault` — so a faulted source has to report "not
+/// measuring", never "measuring, and here is a fault".
+private final class ScriptedMonitoringSource: InputEventSource, InputSourceMonitoring {
+    var fault: String?
+    var isMonitoringInput: Bool { fault == nil }
+    var inputMonitoringFault: String? { fault }
+
+    init(fault: String?) {
+        self.fault = fault
+    }
+
+    func nextEvent() -> InputEvent? { nil }
+    func peekAvailable() -> [InputEvent] { [] }
 }
 
 // MARK: - GPError assertion helper

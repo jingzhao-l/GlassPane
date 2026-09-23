@@ -56,6 +56,11 @@ export const ENGINE_TIMEOUT_MS = 10_000;
  * 10 s deadline diagnoses a slow-but-healthy daemon as "unreachable, restart
  * it" and then throws away the reply that lands later, so every value here is
  * strictly larger than the daemon's own worst case for that method.
+ *
+ * What these numbers do after B-02: they are still the caller's wait for every
+ * method below the ceiling, and above it they are the daemon-side worst case
+ * the timeout text quotes — the caller answered at the ceiling, while the
+ * request stays registered so the real reply is attributed when it lands.
  */
 export const ENGINE_DEADLINES_MS = {
   hello: 15_000,
@@ -72,6 +77,32 @@ export const ENGINE_DEADLINES_MS = {
 
 /** Fixed part of an ffwd restore deadline (per-step cost is `act` above). */
 export const RESTORE_BASE_DEADLINE_MS = 30_000;
+
+/**
+ * B-02: how long a *caller* may be kept waiting for any method, whatever the
+ * daemon's own worst case is.
+ *
+ * A real MCP client times a single request out at around 60 s, stops waiting,
+ * and the agent — holding no answer, no code and no remedy — re-issues the
+ * call. On `act` that re-issue performs the same click on the user's screen a
+ * second time, which is precisely the harm a deadline is meant to remove. So
+ * the ceiling sits below a client's patience: the shell answers at 50 s with
+ * `GP_E_ENGINE_TIMEOUT` and the no-replay remedy, and the request stays
+ * registered, so the reply that arrives later is still attributed and written
+ * to the log (`onDeadline` -> `reportLateReply`). Nothing is discarded by
+ * answering early, which is what makes the multi-minute deadlines above safe to
+ * cap: they describe the daemon, not the caller's wait.
+ */
+export const CALLER_VISIBLE_CEILING_MS = 50_000;
+
+/** When the caller gets its answer for `method`: its deadline, capped. */
+export function callerDeadlineMs(
+  method: string,
+  params?: Record<string, unknown>,
+  ceilingMs: number = CALLER_VISIBLE_CEILING_MS,
+): number {
+  return Math.min(engineDeadlineMs(method, params), ceilingMs);
+}
 
 /** Methods whose reply is a user-visible action: replaying them is unsafe. */
 const REPLAY_UNSAFE_METHODS = new Set(["act", "restore"]);
@@ -135,9 +166,9 @@ export class EngineCallError extends Error {
 
 /** Remedy for a deadline overrun: wait and measure, never restart or replay. */
 export function slowEngineRemedy(method: string): string {
-  const poll = "confirm the daemon is alive with a cheap call instead — gp_probe_status answers in milliseconds";
+  const poll = "confirm the daemon is alive with a cheap call instead — gp_probe_status goes out immediately while this request is still outstanding (the shell no longer queues one MCP request behind another) and is answered as soon as the daemon is free of it";
   if (REPLAY_UNSAFE_METHODS.has(method)) {
-    return `${poll}. The daemon serves one request at a time and is still working on this one, so wait for it; do NOT re-issue ${method}, because the original action can still take effect on the user's screen. Restart only if gp_probe_status times out too — then ${daemonUnreachableRemedy()}`;
+    return `${poll}. The daemon serves one request at a time and is still working on this one, so wait for it; do NOT re-issue ${method}, because the original action can still take effect on the user's screen — the original reply is written to this server's log (stderr) when it lands, which is where the answer is. Restart only if gp_probe_status times out too — then ${daemonUnreachableRemedy()}`;
   }
   return `${poll}. The daemon serves one request at a time and is still working on this one, so wait, then retry this read narrower (smaller maxDepth / a tighter selector); if gp_probe_status times out as well, ${daemonUnreachableRemedy()}`;
 }
@@ -156,11 +187,16 @@ interface CallFrame {
  * One outstanding request. `settled` means the caller already has its answer;
  * one settled *by timeout* stays registered so the real reply is still
  * attributed and surfaced instead of discarded.
+ *
+ * `deadlineMs` is when the caller is answered (the method's deadline, capped at
+ * the client-safe ceiling); `methodDeadlineMs` is the daemon's own worst case
+ * for the method, quoted whenever the cap is what ended the wait.
  */
 type Pending = {
   id: number;
   method: string;
   deadlineMs: number;
+  methodDeadlineMs: number;
   timer: ReturnType<typeof setTimeout> | null;
   settled: boolean;
   deliver: (value: unknown) => void;
@@ -188,6 +224,13 @@ export class EngineJsonRpcClient {
     private readonly io: LineIo,
     private readonly timeoutMs?: number,
     private readonly identity: EngineIdentityExpectation | null = null,
+    /**
+     * Ceiling on the caller's wait (B-02). Injectable because a test cannot
+     * wait 50 s, and because the ceiling is a property of *who is asking* — a
+     * caller with a longer patience gets a longer wait, never a longer
+     * registration.
+     */
+    private readonly callerCeilingMs: number = CALLER_VISIBLE_CEILING_MS,
   ) {
     this.io.onMessage((line) => this.handleMessage(line));
     this.io.onError((error) => {
@@ -225,13 +268,18 @@ export class EngineJsonRpcClient {
   call(method: string, params?: Record<string, unknown>): Promise<unknown> {
     const id = this.nextId++;
     const frame = { id, method, ...(params === undefined ? {} : { params }) };
-    const deadlineMs = this.timeoutMs ?? engineDeadlineMs(method, params);
+    // An injected `timeoutMs` is the caller's own bound (tests, explicit
+    // overrides) and is never re-capped; otherwise the caller waits the
+    // daemon's worst case for this method, up to the client-safe ceiling.
+    const methodDeadlineMs = this.timeoutMs ?? engineDeadlineMs(method, params);
+    const deadlineMs = this.timeoutMs ?? callerDeadlineMs(method, params, this.callerCeilingMs);
 
     return new Promise<unknown>((resolve, reject) => {
       const entry: Pending = {
         id,
         method,
         deadlineMs,
+        methodDeadlineMs,
         timer: null,
         settled: false,
         deliver: resolve,
@@ -278,10 +326,14 @@ export class EngineJsonRpcClient {
     this.report(
       `engine has not answered '${entry.method}' (id ${entry.id}) within ${entry.deadlineMs}ms — still in flight`,
     );
+    const capped = entry.methodDeadlineMs > entry.deadlineMs
+      ? ` This shell stops waiting for an MCP client's sake at ${entry.deadlineMs}ms while the daemon gets up to ${entry.methodDeadlineMs}ms for '${entry.method}', because a client that is left hanging retries on its own and a retried '${entry.method}' runs twice.`
+      : "";
     this.reject(entry, new EngineCallError(
       GP_E_ENGINE_TIMEOUT,
       `engine is still working on '${entry.method}': no reply after ${entry.deadlineMs}ms. `
-      + "The request stays registered — a late reply is written to the server log — so this is a busy or slow daemon, not an unreachable one.",
+      + "The request stays registered — a late reply is written to the server log — so this is a busy or slow daemon, not an unreachable one."
+      + capped,
       slowEngineRemedy(entry.method),
     ));
     this.retainForLateReply();
@@ -618,7 +670,11 @@ class ReconnectingSocketIo implements LineIo {
  */
 export function unixSocketEngineClient(
   socketPath: string,
-  options: { identity?: EngineIdentityExpectation; open?: EngineTransportOpener } = {},
+  options: {
+    identity?: EngineIdentityExpectation;
+    open?: EngineTransportOpener;
+    callerCeilingMs?: number;
+  } = {},
 ): EngineJsonRpcClient {
   const open: EngineTransportOpener = options.open
     ?? ((target) => net.createConnection(target));
@@ -626,6 +682,7 @@ export function unixSocketEngineClient(
     new ReconnectingSocketIo(socketPath, open),
     undefined,
     options.identity ?? null,
+    options.callerCeilingMs ?? CALLER_VISIBLE_CEILING_MS,
   );
 }
 

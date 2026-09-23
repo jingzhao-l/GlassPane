@@ -37,8 +37,14 @@ public final class EngineCore {
     private var history: [EvidencePack] = []
     /// Recent app-state snapshots (P1 spec v1.1 §1.5); FIFO-evicted.
     private var snapshots: [AppStateSnapshot] = []
-    /// Project registry (P1 spec v1.4 §1).
-    public let projectRegistry: ProjectRegistry
+    /// Project registry (P1 spec v1.4 §1). `nil` means **this engine instance
+    /// has no registry at all** — it does not open a file. C-03: the initializer
+    /// used to fold `nil` into `ProjectRegistry()`, i.e. the developer's own
+    /// `~/.glasspane/projects.json`, and 47 of the test call sites never passed
+    /// the argument, which is how a `swift test` run replaced 71 real
+    /// registrations with two fixtures. A registry-less engine answers every
+    /// project lookup with `GP_E_NOT_FOUND` and says that in the message.
+    public let projectRegistry: ProjectRegistry?
     /// File-persisted evidence archive (P1 spec v1.5 §9). Empty disk side
     /// when `nil` is injected — used to disable persistence in tests that
     /// assert pure in-memory behavior.
@@ -71,6 +77,23 @@ public final class EngineCore {
     /// （daemon 进程）**的状态而非面板进程的。缺省 nil 表示不上报（旧行为，
     /// 面板据此如实降级为"未验证"，不猜测）。
     private let permissionsReport: (() -> DaemonPermissionSnapshot?)?
+    /// A-08: why this instance has **no** `attributionGuard`, stated by the
+    /// daemon that built it (`--no-c33`, or the event tap could not be created).
+    ///
+    /// Without a guard the contamination of an act window is not measured, and
+    /// the archive used to record that as `contaminated: false` + `.soft` while
+    /// the sibling path — a tap that stops mid-window — records the conservative
+    /// `true` + `.weak`. One state, two conclusions, and the lying one was the
+    /// artifact. With a reason supplied both paths now answer the same way;
+    /// `nil` stays only where no daemon made the claim (an engine built by a
+    /// test), and the act response says so instead of inventing a cause.
+    private let inputMonitorAbsenceReason: String?
+    /// A-01: per-snapshot record of a checkpoint export that **ran and failed**,
+    /// keyed by snapshotId, so `restore(mode: rollback_full)` can distinguish
+    /// "this snapshot has no probe payload because nothing was exported" from
+    /// "the probe answered and the answer was unusable". Bounded with the
+    /// snapshot ring it belongs to.
+    private var checkpointExportFailures: [String: String] = [:]
     /// 上一次证据**落盘失败**（R1-07）。`EvidenceStore.write` 返回 Bool，`persist()`
     /// 过去把它丢掉：档案没落盘时响应照旧带 `evidenceId`，整段审计只在内存 64
     /// 环里、重启即蒸发。写盘仍按规范不抛（v1.5 §11.2），失败改由这个面表达。
@@ -109,12 +132,13 @@ public final class EngineCore {
         approvalGate: ApprovalGate? = nil,
         snapshotProbe: (() -> SnapshotProbeInfo?)? = nil,
         probeInbox: ProbeInbox? = nil,
-        permissionsReport: (() -> DaemonPermissionSnapshot?)? = nil
+        permissionsReport: (() -> DaemonPermissionSnapshot?)? = nil,
+        inputMonitorAbsenceReason: String? = nil
     ) {
         self.channel = channel
         self.clock = clock
         self.settle = settle ?? { Thread.sleep(forTimeInterval: EngineCore.actSettleInterval) }
-        self.projectRegistry = projectRegistry ?? ProjectRegistry()
+        self.projectRegistry = projectRegistry
         self.evidenceStore = evidenceStore
         self.attributionGuard = attributionGuard
         self.degradationTracker = degradationTracker
@@ -123,6 +147,7 @@ public final class EngineCore {
         self.snapshotProbe = snapshotProbe
         self.probeInbox = probeInbox
         self.permissionsReport = permissionsReport
+        self.inputMonitorAbsenceReason = inputMonitorAbsenceReason
     }
 
     // MARK: - ISO-8601 timestamp
@@ -157,9 +182,14 @@ public final class EngineCore {
         }
         // R1-07 / R1-09：两个"已经测到但冻结证据 schema 装不下"的事实走同一
         // 先例（hello 的增量可选键，方法表未变，旧客户端忽略即可）。
-        // 读取者：`hello` 的任一 socket 对端——面板（DaemonProbe.helloSummary
-        // 只挑字段解析，多键不影响）、`glasspaned` CLI，以及 act 响应的直接
-        // 消费者 gp_act。
+        // 读者现状，如实记录（A-12）：本仓库里**没有**这两个键的消费者。面板走
+        // `DaemonProbe.parseHelloResponse`，它只挑 version/protocolVersion/pid/
+        // identity/permissions 五个字段；协议方法表里也没有 `gp_hello` 工具，
+        // 所以面板与 gp_act 都读不到它们。两键的同一事实另有两条**有读者**的
+        // 出口：act 响应的 `evidencePersisted` / `humanInputEvents`，以及
+        // `lastEvidencePersistenceFailure` / `lastContamination`（本类属性）。
+        // 保留键本身不是为了兼容既有读者，而是给任何直接读 socket 帧的对端；
+        // 接线一个真读者属于后续批次。
         if let failure = lastEvidencePersistenceFailure {
             payload["evidencePersistenceError"] = [
                 "operationId": failure.operationId,
@@ -191,8 +221,8 @@ public final class EngineCore {
         // recorded for A.
         let entry: ProjectEntry?
         if let projectId {
-            try requireRegistryReadable()
-            guard let found = projectRegistry.get(projectId) else {
+            let registry = try requireRegistry()
+            guard let found = registry.get(projectId) else {
                 throw GPError(code: .notFound, message: "unknown projectId \(projectId)")
             }
             if let mismatch = Self.projectTargetMismatch(
@@ -251,18 +281,37 @@ public final class EngineCore {
         return attachResult(app)
     }
 
+    /// Every project surface goes through here, so "no registry" and "registry
+    /// unreadable" are both answered instead of being silently treated as an
+    /// empty table.
+    ///
     /// B-1 read half: a registry that could not be loaded reads as an empty
     /// table, so answering "unknown projectId" from it would be a fabricated
     /// negative — the registration may exist and be perfectly attachable. The
     /// refusal says what was measured instead (nothing), with the repair path.
-    private func requireRegistryReadable() throws {
-        guard projectRegistry.loadFailed else { return }
-        throw GPError(
-            code: .internalError,
-            message: "the daemon cannot answer any project lookup: \(projectRegistry.unreadableReport ?? "projects.json is unreadable"), so the \(projectRegistry.count) entries it holds are not the registered set",
-            remedy: projectRegistry.unreadableRemedy
-        )
+    /// C-03 adds the other absence: an engine built without a registry has no
+    /// file to be wrong about, and says that rather than opening one.
+    private func requireRegistry() throws -> ProjectRegistry {
+        guard let projectRegistry else {
+            throw GPError(
+                code: .notFound,
+                message: "no project registry is configured for this engine instance, so no projectId can be resolved and nothing can be registered — this is not an answer about \(ProjectRegistry.defaultProjectsPath): nothing was read and nothing was written",
+                remedy: Self.noRegistryRemedy
+            )
+        }
+        guard !projectRegistry.loadFailed else {
+            throw GPError(
+                code: .internalError,
+                message: "the daemon cannot answer any project lookup: \(projectRegistry.unreadableReport ?? "projects.json is unreadable"), so the \(projectRegistry.count) entries it holds are not the registered set",
+                remedy: projectRegistry.unreadableRemedy
+            )
+        }
+        return projectRegistry
     }
+
+    /// The one answer every surface gives for a registry-less engine, so the
+    /// lookup refusal and the list note cannot drift apart.
+    static let noRegistryRemedy = "call the daemon started by `glasspaned` (it always configures a registry) and check what it sees with `glasspaned --list-projects`; attaching without projectId also works — that path needs no registry at all"
 
     // MARK: - Evidence archive location (A-14: the daemon is the last line)
 
@@ -356,7 +405,9 @@ public final class EngineCore {
     }
 
     /// Everything wrong with a stored `evidenceStoragePath` (nil = adoptable).
-    static func evidenceStoragePathDefect(_ stored: String) -> String? {
+    /// Public because the `glasspaned` maintenance CLI is a second *deleting*
+    /// reader of the same stored value and must apply this exact rule (A-07).
+    public static func evidenceStoragePathDefect(_ stored: String) -> String? {
         if let shape = storedPathShapeDefect(stored) { return shape }
         guard let resolved = resolveStoragePath(stored) else {
             return "cannot be located (`realpath` failed all the way up its path), and the daemon will not archive into or prune a directory it cannot resolve"
@@ -366,7 +417,7 @@ public final class EngineCore {
 
     /// The refusal, worded so the caller sees both honest options: fix the
     /// registration, or attach without a project.
-    static func evidenceStorageRefusal(projectId: String, entry: ProjectEntry) -> GPError? {
+    public static func evidenceStorageRefusal(projectId: String, entry: ProjectEntry) -> GPError? {
         guard let stored = entry.evidenceStoragePath else { return nil }
         guard let defect = evidenceStoragePathDefect(stored) else { return nil }
         return GPError(
@@ -376,9 +427,38 @@ public final class EngineCore {
         )
     }
 
+    /// A project that never named a directory owns no archive. Pruning
+    /// `EvidenceStore.defaultDirectory` in its place would delete from an
+    /// archive the caller never pointed at.
+    public static func noArchiveRefusal(projectId: String) -> GPError {
+        GPError(
+            code: .badParams,
+            message: "project \(projectId) has no evidenceStoragePath, so it owns no evidence archive of its own; the shared default directory (\(EvidenceStore.defaultDirectory)) is not its substitute and nothing was deleted",
+            remedy: "prune the shared archive by leaving projectId out of the call, or register the project's own directory first: gp_project_set with \"evidenceStoragePath\": \"\(evidenceStorageExample)\" and then restart the background service (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`) so it reloads projects.json"
+        )
+    }
+
+    /// The single resolution of "which archive directory does this project
+    /// own", or the refusal that says why none may be touched. Shared by
+    /// `pruneEvidence` (engine method) and `glasspaned --prune-evidence` /
+    /// `--evidence-stats --project` (A-07/C-06): the half that deletes used to
+    /// hand the stored value straight to `EvidenceStore` while `attach` refused
+    /// to adopt the same value.
+    public static func projectArchiveDirectory(
+        projectId: String, entry: ProjectEntry
+    ) -> Result<String, GPError> {
+        if let refusal = evidenceStorageRefusal(projectId: projectId, entry: entry) {
+            return .failure(refusal)
+        }
+        guard let stored = entry.evidenceStoragePath else {
+            return .failure(noArchiveRefusal(projectId: projectId))
+        }
+        return .success(stored)
+    }
+
     static let evidenceStorageExample = "/Users/you/work/notes-app/.glasspane/evidence"
 
-    static let evidenceStorageRemedy = "re-point the registration at a project-owned directory and reload: gp_project_set with {\"projectId\": \"<that prj_…>\", \"displayName\": …, \"bundleId\" or \"pid\": …, \"evidenceStoragePath\": \"\(evidenceStorageExample)\"} (repeat the project's other fields — the update replaces them), then restart the background service, which read projects.json once at startup: `launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`. Attaching without projectId is the other honest choice: the daemon then keeps its own archive directory instead of adopting this project's."
+    public static let evidenceStorageRemedy = "re-point the registration at a project-owned directory and reload: gp_project_set with {\"projectId\": \"<that prj_…>\", \"displayName\": …, \"bundleId\" or \"pid\": …, \"evidenceStoragePath\": \"\(evidenceStorageExample)\"} (repeat the project's other fields — the update replaces them), then restart the background service, which read projects.json once at startup: `launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`. Attaching without projectId is the other honest choice: the daemon then keeps its own archive directory instead of adopting this project's."
 
     /// 注册表条目与**请求参数**的对照（`channel.attach` 之前，R1-01）。
     /// 只能判断两侧都给出了同一个字段的情形；跨字段（attach by pid vs
@@ -781,24 +861,59 @@ public final class EngineCore {
             attributionGuard.monitorInput()
             contaminationVerdict = attributionGuard.releaseOperationRight()
         }
-        // X-17: `contaminated == false` means two opposite things depending on
-        // whether anything was watching the input stream. With no guard the window
-        // was never monitored (C33 disabled by flag, or the event tap could not be
-        // created — main.swift logs that and starts without a guard), so the
-        // negative is an absence of measurement, not evidence that nobody touched
-        // the machine. The frozen `Attribution` schema is `additionalProperties:
-        // false`, so the distinction cannot join the pack; it rides the act
-        // response instead, and is never omitted.
+        // X-17 + A-08: `contaminated == false` means two opposite things
+        // depending on whether anything was watching the input stream, and the
+        // archive used to carry the *optimistic* one whenever no guard existed
+        // (`false` + `.soft`) while a tap that dropped mid-window produced the
+        // conservative one (`true` + `.weak`). Same unmeasured state, two
+        // conclusions, and the artifact — what diagnosis and export actually
+        // read — was the lying side. One rule now: **not measured is not
+        // observable**, so every window nobody watched records the conservative
+        // verdict, and the reason travels in `circuitBreaker.reason`, the field
+        // this pack already has for "a measurement channel that did not run"
+        // (the frozen `Attribution` schema is `additionalProperties: false`, and
+        // `circuitBreaker.reason` is an unconstrained string inside it).
+        //
+        // One rule, two causes. A monitor that existed and stopped reporting
+        // mid-window is a channel fault; no monitor at all is a *declared*
+        // startup state — the operator opted out with `--no-c33` (P4 v4.0 §33.1:
+        // an explicit maintenance switch, act never waits on user input) or the
+        // tap could not be created for lack of Input Monitoring. P2 v2.0 §17.2
+        // folds every one of those into the same pure-operation-right-mutex
+        // form, so they share the verdict and differ only in the reason text —
+        // which is why they carry different labels rather than different
+        // attributions: "somebody turned this off" and "it broke" must stay
+        // tellable apart from the archive alone, without a second evidence shape.
+        // Which of the two startup forms it was stays in the daemon's own words,
+        // because the string below is the only thing it hands over.
         let contaminationMonitored = contaminationVerdict?.monitored ?? false
+        let monitorWasLost = contaminationVerdict?.monitored == false
+        let monitorFault: String? = {
+            if let contaminationVerdict {
+                guard !contaminationVerdict.monitored else { return nil }
+                return contaminationVerdict.monitoringFault
+                    ?? "the input monitor stopped reporting mid-window and named no reason"
+            }
+            return inputMonitorAbsenceReason
+        }()
+        let contaminated = contaminationVerdict?.contaminated ?? (monitorFault != nil)
         let contaminationBasis: String
-        if let fault = contaminationVerdict?.monitoringFault {
-            contaminationBasis = "not monitored: \(fault) — the contaminated=true verdict is a channel fault, not an observed input"
-        } else if contaminationMonitored {
+        if contaminationMonitored {
             contaminationBasis = "the input stream was watched for the whole operation window"
+        } else if monitorWasLost, let monitorFault {
+            contaminationBasis = "the input monitor stopped reporting inside this window: \(monitorFault) — the contaminated=true verdict is the absence of a watching channel, not an observed input"
+        } else if let monitorFault {
+            contaminationBasis = "no input monitor was installed for this window: \(monitorFault) — the contaminated=true verdict is the absence of a monitor, not an observed input"
         } else {
-            contaminationBasis = "no input monitor is installed (C33 disabled by flag, or the event tap could not be created); contamination was not measured, so \"false\" here is not an observation"
+            contaminationBasis = "no input monitor is installed and this engine instance reported no reason for it; contamination was not measured, so \"false\" here is not an observation"
         }
-        let contaminated = contaminationVerdict?.contaminated ?? false
+        if let monitorFault {
+            let label = monitorWasLost
+                ? "input-contamination-monitor-lost"
+                : "input-contamination-not-monitored"
+            let basis = "\(label): \(monitorFault)"
+            finalReason = finalReason.map { $0 + "; " + basis } ?? basis
+        }
         // R1-09: AttributionGuard already measured *which* human inputs
         // contaminated this window; dropping them left a disputed attribution
         // unable to tell a real click from a stray one. The frozen evidence
@@ -1021,6 +1136,10 @@ public final class EngineCore {
         // of the surface, not a measured zero.
         if let inbox = probeInbox {
             payload["disconnections"] = inbox.recordedDisconnectionCount
+            // A-10: `probes` keeps its frozen meaning ("live registrations") so a
+            // reader cannot treat a dropped probe as an attached one; the drop
+            // history — with its reason and per-pid counts — rides its own key.
+            payload["recentDisconnections"] = inbox.recentDisconnectionsJSON()
         }
         return payload
     }
@@ -1050,6 +1169,17 @@ public final class EngineCore {
 
     /// List all registered projects.
     public func projectList() -> [String: Any] {
+        guard let projectRegistry else {
+            // C-03: zero rows from an engine with no registry is not "nothing is
+            // registered" — the same honesty rule B-1 established for an
+            // unreadable file.
+            return [
+                "projects": [[String: Any]](),
+                "registryConfigured": false,
+                "registryFailure": "this engine instance has no project registry configured",
+                "remedy": Self.noRegistryRemedy,
+            ]
+        }
         let entries: [[String: Any]] = projectRegistry.all.map { entry in
             var dict: [String: Any] = [
                 "projectId": entry.projectId,
@@ -1096,10 +1226,14 @@ public final class EngineCore {
                 remedy: "use a project-owned directory at least two levels deep, e.g. \"\(Self.evidenceStorageExample)\": absolute, with no \".\" or \"..\" component, and neither the filesystem root, a top-level directory, a mounted volume root, your home directory, anything inside ~/Library, nor a system-owned tree (\(Self.systemOwnedStorageTrees.joined(separator: ", "))) — the daemon writes evidence into this directory and deletes expired entries from it"
             )
         }
+        // C-03: with no registry there is nothing to write into, and creating a
+        // file under the home directory as a side effect of a registration call
+        // is exactly the shape this round removed.
+        let registry = try requireRegistry()
         let entry: ProjectEntry
         if let projectId {
             // Update existing.
-            entry = try projectRegistry.update(
+            entry = try registry.update(
                 projectId: projectId,
                 displayName: displayName,
                 bundleId: bundleId,
@@ -1110,7 +1244,7 @@ public final class EngineCore {
             )
         } else {
             // Create new.
-            entry = try projectRegistry.create(
+            entry = try registry.create(
                 displayName: displayName,
                 bundleId: bundleId,
                 pid: pid,
@@ -1135,8 +1269,7 @@ public final class EngineCore {
 
     /// Get a project by ID.
     public func projectGet(projectId: String) throws -> [String: Any] {
-        try requireRegistryReadable()
-        guard let entry = projectRegistry.get(projectId) else {
+        guard let entry = try requireRegistry().get(projectId) else {
             throw GPError(code: .notFound, message: "unknown projectId \(projectId)")
         }
         var dict: [String: Any] = [
@@ -1161,25 +1294,17 @@ public final class EngineCore {
     public func pruneEvidence(projectId: String?, olderThanDays: Int) throws -> Int {
         let dir: String
         if let projectId {
-            try requireRegistryReadable()
-            guard let entry = projectRegistry.get(projectId) else {
+            guard let entry = try requireRegistry().get(projectId) else {
                 throw GPError(code: .notFound, message: "unknown projectId \(projectId)")
             }
             // Second adoption site, and the destructive one: pruning deletes.
-            if let refusal = Self.evidenceStorageRefusal(projectId: projectId, entry: entry) {
+            // Same resolver the CLI maintenance branch uses (A-07).
+            switch Self.projectArchiveDirectory(projectId: projectId, entry: entry) {
+            case .success(let stored):
+                dir = stored
+            case .failure(let refusal):
                 throw refusal
             }
-            // A project that never named a directory owns no archive. Pruning
-            // `EvidenceStore.defaultDirectory` in its place would delete from
-            // an archive the caller never pointed at.
-            guard let stored = entry.evidenceStoragePath else {
-                throw GPError(
-                    code: .badParams,
-                    message: "project \(projectId) has no evidenceStoragePath, so it owns no evidence archive of its own; the shared default directory (\(EvidenceStore.defaultDirectory)) is not its substitute and nothing was deleted",
-                    remedy: "prune the shared archive by leaving projectId out of the call, or register the project's own directory first: gp_project_set with \"evidenceStoragePath\": \"\(Self.evidenceStorageExample)\" and then restart the background service (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`) so it reloads projects.json"
-                )
-            }
-            dir = stored
         } else {
             dir = evidenceStore?.directory ?? EvidenceStore.defaultDirectory
         }
@@ -1208,21 +1333,32 @@ public final class EngineCore {
         // P6 §5.5: probe checkpoint export gives snapshots a *real* tier-1
         // probe payload (gpz1-json-v1). The P5 scripted `snapshotProbe` hook
         // keeps priority so existing unit tests stay verbatim; daemon ships it
-        // nil. Export failure (no connection / no capability / digest mismatch
-        // / timeout) keeps probeInfo nil — rollback_full then refuses honestly.
+        // nil.
+        //
+        // A-01: an export that ran and was refused used to vanish here and then
+        // get reported by `rollback_full` as "the snapshot has none — attach the
+        // probe and re-snapshot", i.e. a live probe answering with a digest
+        // mismatch was laundered into "no probe", and the agent looped on
+        // re-snapshotting a probe that was there all along. The reason is now
+        // kept with the snapshot and named on both faces.
         let snapshotId = OperationID.generateSnapshotLive()
         var probeInfo = snapshotProbe?()
+        var exportFailure: String?
         if probeInfo == nil, let inbox = probeInbox, let pid = attachedApp?.pid,
-           let connection = inbox.connection(for: pid),
-           connection.hello.capabilities.contains("checkpoint"),
-           let exported = inbox.checkpointExport(pid: pid, ref: snapshotId) {
-            probeInfo = SnapshotProbeInfo(
-                probeVersion: connection.hello.probeVersion,
-                exportedDomains: exported.domains.keys.sorted(),
-                stateDigest: exported.digest,
-                checkpointFormat: "gpz1-json-v1",
-                capturedAt: nowISO()
-            )
+           let connection = inbox.connection(for: pid) {
+            if !connection.hello.capabilities.contains("checkpoint") {
+                exportFailure = "no export was attempted: the probe attached to pid \(pid) (\(connection.hello.probeVersion)) does not advertise the `checkpoint` capability"
+            } else if let exported = inbox.checkpointExport(pid: pid, ref: snapshotId) {
+                probeInfo = SnapshotProbeInfo(
+                    probeVersion: connection.hello.probeVersion,
+                    exportedDomains: exported.domains.keys.sorted(),
+                    stateDigest: exported.digest,
+                    checkpointFormat: "gpz1-json-v1",
+                    capturedAt: nowISO()
+                )
+            } else {
+                exportFailure = "export attempted and failed: \(inbox.lastCheckpointError ?? "the probe returned nothing and named no reason")"
+            }
         }
         let snapshot = AppStateSnapshot(
             snapshotId: snapshotId,
@@ -1233,13 +1369,18 @@ public final class EngineCore {
         )
         storeSnapshot(snapshot)
         let latencyMs = clock().timeIntervalSince(started) * 1000
-        return [
+        var result: [String: Any] = [
             "snapshotId": snapshot.snapshotId,
             "treeDigest": snapshot.treeDigest,
             "nodeCount": snapshot.nodeCount,
             "capturedAt": snapshot.capturedAt,
             "latencyMs": latencyMs
         ]
+        if let exportFailure {
+            result["checkpointExportError"] = exportFailure
+            checkpointExportFailures[snapshot.snapshotId] = exportFailure
+        }
+        return result
     }
 
     /// Restores from a stored snapshot. With `steps`, replays them via the
@@ -1273,6 +1414,16 @@ public final class EngineCore {
                 throw GPError(code: .noSnapshot, message: "unknown snapshotId \(snapshotId)")
             }
             guard let probe = snapshot.probeInfo else {
+                // A-01: "nothing was attached" and "the probe answered and the
+                // answer was unusable" are different facts, and only the first
+                // one is fixed by attaching a probe.
+                if let reason = checkpointExportFailures[snapshotId] {
+                    throw GPError(
+                        code: .restoreUnsupported,
+                        message: "tier-1 restore requires a Z5 probe payload; snapshot '\(snapshotId)' has none because the export never produced one — \(reason)",
+                        remedy: "the probe is attached; re-snapshotting alone changes nothing until the reported cause is fixed. For a digest mismatch the state moved underneath the export, so take the snapshot again while the app is quiet. For a delivery/timeout reason run gp_probe_status and read `disconnections` plus each row's `connected` flag, then re-establish the probe (GP.start() in the app) or restart the background service with `launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`. For a missing `checkpoint` capability the attached probe SDK predates checkpoint export: update the app's SDK. Tier-2 ffwd needs none of that — pass `steps` and the rollback runs on the UI"
+                    )
+                }
                 throw GPError(
                     code: .restoreUnsupported,
                     message: "tier-1 restore requires a Z5 probe payload; snapshot '\(snapshotId)' has none — attach the probe and re-snapshot"
@@ -1456,6 +1607,10 @@ public final class EngineCore {
         if snapshots.count > EngineCore.snapshotHistoryLimit {
             snapshots.removeFirst(snapshots.count - EngineCore.snapshotHistoryLimit)
         }
+        // A-01: an export failure is only ever asked about alongside its
+        // snapshot, so it ages out with it instead of accumulating per id.
+        let live = Set(snapshots.map { $0.snapshotId })
+        checkpointExportFailures = checkpointExportFailures.filter { live.contains($0.key) }
     }
 
     private func currentTreeDigest() throws -> AxTreeSnapshot {
@@ -1599,9 +1754,15 @@ public final class EngineCore {
         case .actRejected(let reason):
             return ("action rejected: \(reason)", nil)
         case .pingTimeout:
+            // A-14: since R2-19 the selector search inside `performAction` runs
+            // under its own wall-clock budget and every AX call in it is capped
+            // at what is left of that budget, so a `pingTimeout` here can be the
+            // *search* aborting mid-tree. The old wording asserted the opposite
+            // ("the search finished", one fixed duration) and sent the agent to
+            // wait on an app that may never have been asked to click.
             return (
-                "action not performed: the app did not answer the accessibility call within \(AXChannel.messagingTimeoutSeconds)s",
-                "the target app's main thread is blocked, so the click never reached an element: sample it (`sample <pid>`) or wait for it to drain, then repeat the act. Do not change the selector — the search finished and the app is what did not answer. Until it responds the outcome is unmeasured, so report diagnose's T2 rather than a dead click"
+                "action not performed: an accessibility call did not answer within its budget (per-call timeout anywhere between \(AXChannel.minMessagingTimeoutSeconds)s and \(AXChannel.messagingTimeoutSeconds)s, inside a search bounded by \(AXChannel.treeTimeoutSeconds)s)",
+                "the app did not answer an accessibility call, and this engine cannot tell whether the selector search had already finished: a pingTimeout is also what a search aborted mid-tree reports, so treat the element as never located rather than as clicked-or-ruled-out. Sample the app to see whether its main thread is blocked (`sample <pid>`), and confirm the seat with `glasspaned --check-accessibility` before changing anything. If the app answers, repeat the act; narrow the selector (title/identifier) or lower maxDepth only when the reason names the accessibility time budget running out, which is the search itself. Until an answer arrives the outcome is unmeasured, so report diagnose's T2 rather than a dead click"
             )
         case .treeCaptureFailed(let reason):
             return (

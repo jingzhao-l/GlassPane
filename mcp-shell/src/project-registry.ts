@@ -10,6 +10,7 @@ import {
   GP_E_NOT_FOUND,
   GP_E_PROJECT_LIMIT,
 } from "./errors.js";
+import { daemonUnreachableRemedy } from "./engine-client.js";
 
 /* ------------------------------------------------------------------ *
  * Project Registry — MCP-layer access (P1 spec v1.4 §4)
@@ -65,6 +66,15 @@ const PROTECTED_SUBTREES: readonly string[] = [
 ];
 
 /**
+ * The file the *daemon* reads — `ProjectRegistry.defaultProjectsPath` in Swift.
+ * It has no override of its own: {@link PROJECTS_FILE_ENV} is parsed by this
+ * shell alone (R7-14), so a write aimed elsewhere is a write nothing loads.
+ */
+export function daemonProjectsPath(): string {
+  return path.join(os.homedir(), ".glasspane", "projects.json");
+}
+
+/**
  * APFS firmlink: on a boot-volume-relative resolve, `/Users`, `/Applications`
  * and `/Volumes` come back as `/System/Volumes/Data/...`. Un-map that first,
  * or every real home-directory path would read as "inside /System".
@@ -73,6 +83,9 @@ const FIRMLINK_PREFIX = "/System/Volumes/Data";
 
 /** Escape hatch for the corrupt-registry case; see `unreadableMessage`. */
 export const FORCE_OVERWRITE_ENV = "GLASSPANE_PROJECTS_FORCE_OVERWRITE";
+
+/** Shell-only override of the projects file: the daemon never reads it (R7-14). */
+export const PROJECTS_FILE_ENV = "GLASSPANE_PROJECTS_FILE";
 
 export interface ProjectEntry {
   projectId: string;
@@ -93,7 +106,9 @@ export interface ProjectEntry {
  * restarts — the same "written, but the running instance read it once at
  * startup" distinction the settings panel makes for permissions that need a
  * restart. Surfacing it here is what keeps a successful-looking write from
- * being followed by an unexplained GP_E_NOT_FOUND.
+ * being followed by an unexplained GP_E_NOT_FOUND. See {@link
+ * daemonRestartNotice}: when this shell wrote a file other than the one the
+ * daemon loads, a restart is required but not sufficient.
  */
 export interface ProjectSetResult extends ProjectEntry {
   requiresDaemonRestart: true;
@@ -115,23 +130,25 @@ export type ProjectGetArgs = z.infer<typeof ProjectGetArgs>;
 export const ProjectSetArgs = z.strictObject({
   projectId: z.string().regex(PROJECT_ID_RE).optional(),
   displayName: z.string().min(1).max(MAX_DISPLAY_NAME_LENGTH),
-  bundleId: z.string().max(256).optional(),
-  pid: z.number().int().min(PID_RANGE[0]).max(PID_RANGE[1]).optional(),
-  recipeConfigPath: z.string().max(MAX_FIELD_LENGTH).optional(),
-  calibrationAssetsPath: z.string().max(MAX_FIELD_LENGTH).optional(),
-  evidenceStoragePath: z.string().max(MAX_FIELD_LENGTH).optional(),
-}).refine(
-  (v) => (v.bundleId !== undefined) !== (v.pid !== undefined),
-  { message: "exactly one of bundleId or pid is required" },
-);
+  // An optional field is *patch*-shaped (B-11): `undefined` keeps what is
+  // stored, `null` clears it, a value replaces it. The exactly-one-of identity
+  // rule deliberately is not a check on this object — it holds of the MERGED
+  // entry, and an update that clears one field while setting the other only
+  // becomes legal after the merge (`assertSingleIdentity`).
+  bundleId: z.string().max(256).nullish(),
+  pid: z.number().int().min(PID_RANGE[0]).max(PID_RANGE[1]).nullish(),
+  recipeConfigPath: z.string().max(MAX_FIELD_LENGTH).nullish(),
+  calibrationAssetsPath: z.string().max(MAX_FIELD_LENGTH).nullish(),
+  evidenceStoragePath: z.string().max(MAX_FIELD_LENGTH).nullish(),
+});
 export type ProjectSetArgs = z.infer<typeof ProjectSetArgs>;
 
 // ----- File access -----
 
 function projectsPath(): string {
-  const envPath = process.env["GLASSPANE_PROJECTS_FILE"];
+  const envPath = process.env[PROJECTS_FILE_ENV];
   if (envPath) return envPath;
-  return path.join(os.homedir(), ".glasspane", "projects.json");
+  return daemonProjectsPath();
 }
 
 /**
@@ -298,13 +315,14 @@ export function projectGet(projectId: string): ProjectEntry | undefined {
 /**
  * Create or update a project.  If `projectId` is undefined, a new entry is
  * created; otherwise the existing entry is updated (GP_E_NOT_FOUND on miss).
- * Path fields are validated before anything is written, and the result states
- * explicitly that the running daemon has not seen the change yet.
+ * Fields are patched: omitted keeps the stored value, explicit null clears it.
+ * Path fields and the identity rule are validated on the *merged* entry before
+ * anything is written, and the result states explicitly what the running daemon
+ * can and cannot see yet.
  */
 export function projectSet(args: ProjectSetArgs): ProjectSetResult {
   const filePath = projectsPath();
   assertStorablePid(args.pid);
-  const patch = validatedPathFields(args);
   const snapshot = loadRegistry(filePath);
   const { projects, discarded } = requireUsableRegistry(filePath, snapshot);
 
@@ -312,34 +330,28 @@ export function projectSet(args: ProjectSetArgs): ProjectSetResult {
   const projectId = args.projectId;
 
   if (projectId) {
-    // Update.
-    const idx = projects.findIndex((p) => p.projectId === projectId);
-    if (idx === -1) {
+    // Update: the patch is applied to the stored entry, never to a blank one.
+    const existing = projects.find((p) => p.projectId === projectId);
+    if (existing === undefined) {
       throw new ProjectRegistryError(GP_E_NOT_FOUND, `unknown projectId ${projectId}`);
     }
-    const existing = projects[idx];
-    entry = {
-      ...existing,
-      displayName: args.displayName,
-      ...(args.bundleId !== undefined ? { bundleId: args.bundleId } : {}),
-      ...(args.pid !== undefined ? { pid: args.pid } : {}),
-      ...patch,
-    } as ProjectEntry;
-    projects[idx] = entry;
+    entry = applyPatch(existing, args);
+    assertSingleIdentity(entry);
+    projects[projects.indexOf(existing)] = entry;
   } else {
     // Create.
     if (projects.length >= MAX_PROJECTS) {
       throw new ProjectRegistryError(GP_E_PROJECT_LIMIT, `project limit reached (${MAX_PROJECTS})`);
     }
-    const created = generateProjectId();
-    entry = {
-      projectId: created,
-      displayName: args.displayName,
-      bundleId: args.bundleId,
-      pid: args.pid,
-      ...patch,
-      createdAt: new Date().toISOString(),
-    };
+    entry = applyPatch(
+      {
+        projectId: generateProjectId(),
+        displayName: args.displayName,
+        createdAt: new Date().toISOString(),
+      },
+      args,
+    );
+    assertSingleIdentity(entry);
     projects.push(entry);
   }
 
@@ -353,13 +365,88 @@ export function projectSet(args: ProjectSetArgs): ProjectSetResult {
 }
 
 /**
+ * Apply one call's fields to a stored entry: value validation happens here, the
+ * rule about the *combination* of fields on the result (that is the entry the
+ * daemon will decode).
+ */
+function applyPatch(base: ProjectEntry, args: ProjectSetArgs): ProjectEntry {
+  const next: ProjectEntry = { ...base, displayName: args.displayName };
+  if (args.bundleId !== undefined) {
+    if (args.bundleId === null) delete next.bundleId;
+    else next.bundleId = args.bundleId;
+  }
+  if (args.pid !== undefined) {
+    if (args.pid === null) delete next.pid;
+    else next.pid = args.pid;
+  }
+  for (const field of PATH_FIELDS) {
+    applyPathField(next, field, args[field]);
+  }
+  return next;
+}
+
+/** One storage-root field: keep (undefined), clear (null), or replace. */
+function applyPathField(target: ProjectEntry, field: PathField, value: string | null | undefined): void {
+  if (value === undefined) return;
+  if (value === null) {
+    delete target[field];
+    return;
+  }
+  target[field] = checkAgentPath(field, value);
+}
+
+/**
+ * Exactly one of `bundleId` / `pid` identifies the app: the daemon's `create()`
+ * refuses any other combination and its `update()` only adds the field named, so
+ * an entry carrying both is a shape no write path produces — and
+ * `EngineCore.projectMismatch` would then compare both halves against one
+ * attach, making one projectId mean two apps. Runs on the MERGED entry (B-11):
+ * an update may name neither field, and clearing one with an explicit null is
+ * only correct once the other is known to remain. The message names both fields.
+ */
+function assertSingleIdentity(entry: ProjectEntry): void {
+  const hasBundleId = entry.bundleId !== undefined;
+  const hasPid = entry.pid !== undefined;
+  if (hasBundleId && hasPid) {
+    throw new ProjectRegistryError(
+      GP_E_BAD_PARAMS,
+      `bundleId (${entry.bundleId}) and pid (${entry.pid}) are both set on projectId ${entry.projectId} — exactly one of bundleId or pid may identify the app. Pass null for the one to drop (bundleId: null keeps pid, pid: null keeps bundleId); omitting a field keeps whatever is already stored.`,
+    );
+  }
+  if (!hasBundleId && !hasPid) {
+    throw new ProjectRegistryError(
+      GP_E_BAD_PARAMS,
+      `projectId ${entry.projectId} would be left with neither bundleId nor pid — exactly one of bundleId or pid must identify the app (this call cleared the one that was stored). Set bundleId or pid instead of nulling it.`,
+    );
+  }
+}
+
+/**
  * One user-facing sentence for the tool result. The panel already keeps "the
  * file is written" apart from "the running service can act on it"; the MCP
  * surface needs the same distinction because gp_attach is answered by the
  * daemon's in-memory copy of this file.
+ *
+ * B-10: computed from the facts instead of asserted blindly, because the old
+ * text was wrong in two ways. It promised that a restart makes the entry
+ * visible for *any* path this shell had just written, while the daemon only
+ * ever loads {@link daemonProjectsPath} — under {@link PROJECTS_FILE_ENV} the
+ * shell is writing a file nothing reads, and no restart fixes that. And it
+ * prescribed a raw `launchctl kickstart`, which cannot work for a job that was
+ * never bootstrapped; the shell already has a helper that hands over a restore
+ * command covering that case, so the notice defers to it.
  */
-function daemonRestartNotice(filePath: string): string {
-  return `Saved in ${filePath}, but the running background service loaded that file once when it started, so gp_attach will keep returning GP_E_NOT_FOUND for this projectId until the service restarts — run \`launchctl kickstart -k gui/${currentUid()}/com.glasspane.daemon\` (or the settings panel's restart control) first.`;
+export function daemonRestartNotice(filePath: string): string {
+  const daemonPath = daemonProjectsPath();
+  if (path.resolve(filePath) !== path.resolve(daemonPath)) {
+    return `Saved in ${filePath}, but the background service never reads that file: it loads ${daemonPath} once when it starts (${PROJECTS_FILE_ENV} is honoured by this MCP shell only, not by the daemon), so gp_attach will keep returning GP_E_NOT_FOUND for this projectId and restarting the service will not help. Repeat the registration against ${daemonPath} — unset ${PROJECTS_FILE_ENV} for the shell, or write the entry where the daemon looks — and only then restart the background service so it reloads: ${restartCommand()}`;
+  }
+  return `Saved in ${filePath}, but the running background service loaded that file once when it started, so gp_attach will keep returning GP_E_NOT_FOUND for this projectId until the service restarts: ${restartCommand()}`;
+}
+
+/** The restart instruction, including the case where kickstart cannot work. */
+function restartCommand(): string {
+  return `run \`launchctl kickstart -k gui/${currentUid()}/com.glasspane.daemon\` — if that reports the service was not found, the launchd job was never bootstrapped, so ${daemonUnreachableRemedy()}`;
 }
 
 function currentUid(): number {
@@ -373,10 +460,11 @@ function currentUid(): number {
  * `Int32?`, so writing an out-of-range number does not fail that one entry, it
  * makes the daemon reject the whole file at load (see `inspectStoredEntry`).
  * A value that cannot be stored is refused here rather than surfacing later as
- * a registry that "has no projects".
+ * a registry that "has no projects". `null` is the explicit clear (B-11) and
+ * stores nothing, so it has no range to check.
  */
-function assertStorablePid(pid: number | undefined): void {
-  if (pid === undefined) return;
+function assertStorablePid(pid: number | null | undefined): void {
+  if (pid === undefined || pid === null) return;
   if (!Number.isInteger(pid) || pid < PID_RANGE[0] || pid > PID_RANGE[1]) {
     throw new ProjectRegistryError(
       GP_E_BAD_PARAMS,
@@ -386,21 +474,20 @@ function assertStorablePid(pid: number | undefined): void {
 }
 
 /**
- * Validate + normalize the three directory-naming fields. These are stored
- * verbatim into projects.json and become the daemon's evidence archive, where
- * it writes new packs and deletes expired ones, so "absolute, traversal-free,
- * and not somebody else's tree" is checked at this boundary rather than
- * assumed downstream. Errors name the accepted shape.
+ * Validate + normalize one directory-naming field. These are stored verbatim
+ * into projects.json and become the daemon's evidence archive, where it writes
+ * new packs and deletes expired ones, so "absolute, traversal-free, and not
+ * somebody else's tree" is checked at this boundary rather than assumed
+ * downstream. Errors name the accepted shape.
+ *
+ * The *check* runs on both locations — the path as given and the path it
+ * resolves to — so no link above the archive can be walked around. The
+ * *diagnosis* is read off the resolved location whenever it has one: an agent
+ * told "the temp directory you passed belongs to uid 0" is sent to the wrong
+ * fact when the real reason is that a symlink inside it lands in
+ * `/private/etc/ssh`. The caller's own string is still shown, in the
+ * `(given: "…")` clause that {@link badPath} appends.
  */
-function validatedPathFields(args: ProjectSetArgs): Partial<ProjectEntry> {
-  const out: Partial<ProjectEntry> = {};
-  for (const field of PATH_FIELDS) {
-    const value = args[field];
-    if (value !== undefined) out[field] = checkAgentPath(field, value);
-  }
-  return out;
-}
-
 function checkAgentPath(field: PathField, value: string): string {
   if (!value.startsWith("/")) {
     throw badPath(field, value, `must be an absolute path (got "${value}")`);
@@ -411,14 +498,74 @@ function checkAgentPath(field: PathField, value: string): string {
     }
   }
   const logical = path.posix.normalize(value);
-  const candidates = new Set([stripFirmlink(logical), stripFirmlink(resolveExistingAncestor(logical))]);
-  for (const candidate of candidates) {
-    const refusal = refuseProtected(candidate);
-    if (refusal !== null) {
-      throw badPath(field, value, `resolves to ${candidate}, which is ${refusal}`);
-    }
+  const given = stripFirmlink(logical);
+  const resolved = stripFirmlink(resolveExistingAncestor(logical));
+  const refusal = strongestRefusal(given === resolved ? [resolved] : [resolved, given], resolved);
+  if (refusal !== null) {
+    throw badPath(field, value, refusalPhrase(refusal, resolved));
   }
   return logical;
+}
+
+/** Why a location is unusable, plus which half of the rule found it. */
+interface PathRefusal {
+  /**
+   * `named` = one of the explicit roots, subtrees and shapes {@link
+   * refuseCandidate} lists by hand; `ownership` = the generic
+   * nearest-existing-directory argument. Both refuse the call — the source only
+   * picks which reason gets reported, see {@link strongestRefusal}.
+   */
+  readonly source: "named" | "ownership";
+  readonly reason: string;
+}
+
+/** A refusal plus the location it was read off, and its reporting priority. */
+interface LocatedRefusal {
+  readonly target: string;
+  readonly reason: string;
+  /** Higher wins when several apply; see {@link strongestRefusal}. */
+  readonly rank: number;
+}
+
+/**
+ * The most diagnostic of the refusals that apply. A named-rule reason is
+ * printed ahead of the generic ownership argument because the two facts have
+ * different remedies: the ownership complaint disappears when the caller points
+ * the archive at a directory they own, a system-owned tree never becomes
+ * usable. Between equal sources the resolved location wins, because that is the
+ * directory the daemon would actually write into. Ranking selects wording only
+ * — any refusal at all still refuses.
+ */
+function strongestRefusal(targets: readonly string[], resolved: string): LocatedRefusal | null {
+  let best: LocatedRefusal | null = null;
+  for (const target of targets) {
+    const refusal = refuseCandidate(target);
+    if (refusal === null) continue;
+    const ranked: LocatedRefusal = {
+      target,
+      reason: refusal.reason,
+      rank: (refusal.source === "named" ? 2 : 0) + (target === resolved ? 1 : 0),
+    };
+    if (best === null || ranked.rank > best.rank) {
+      best = ranked;
+    }
+  }
+  return best;
+}
+
+/**
+ * Say where the judged location is. "resolves to X" is only a true sentence
+ * when X is the resolution, so a refusal that came from the literal string (a
+ * shape rule the resolved path does not share) names both instead of
+ * mislabelling the given path as if it had been resolved. Both paths are the
+ * firmlink-un-mapped form the rules themselves are stated in, so what the
+ * caller sees is the string the verdict was made from.
+ */
+function refusalPhrase(refusal: LocatedRefusal, resolved: string): string {
+  if (refusal.target === resolved) {
+    return `resolves to ${resolved}, which is ${refusal.reason}`;
+  }
+  return `is ${refusal.target}, which is ${refusal.reason}; that path resolves to ${resolved}`;
 }
 
 function badPath(field: PathField, value: string, problem: string): ProjectRegistryError {
@@ -431,27 +578,98 @@ function badPath(field: PathField, value: string, problem: string): ProjectRegis
 const PATH_SHAPE_HINT =
   "An acceptable value is a project-owned directory at least two levels deep, "
   + "e.g. \"/Users/you/work/notes-app/.glasspane/evidence\": absolute, with no \".\" or "
-  + "\"..\" components, and not the filesystem root, a top-level directory (/private, "
-  + "/tmp, /Volumes...), a mounted volume root, your home directory, anything under "
+  + "\"..\" components, not world-writable, with its nearest existing directory owned by "
+  + "the user running this shell (never a shared tree such as /Users/Shared, another "
+  + "user's home, /private/tmp, or a top-level directory of the boot volume), and not the "
+  + "filesystem root, a mounted volume root, your home directory, anything under "
   + "~/Library, or a system-owned tree (/Applications, /System, /Library, /private/etc) "
   + "— the daemon writes evidence into this directory and deletes expired entries from it";
 
-/** Why `target` (already firmlink-normalized) is unusable, or null if fine. */
-function refuseProtected(target: string): string | null {
+/**
+ * Why `target` (already firmlink-normalized) is unusable, or null if fine.
+ *
+ * The named roots and subtrees below are a *deny* list; B-13 adds the positive
+ * rule, because the deny list only ever covered four first-level subtrees and
+ * a shared tree simply not on it passed — `/Users/Shared/...`, another user's
+ * home, `/var/folders/...` — and each of those is a directory where a
+ * different user can put a file (or a symlink) that the daemon would then
+ * write into and prune. The rule that states the actual trust boundary is:
+ * the nearest existing directory on the path must be owned by the uid running
+ * this shell and must not be world-writable.
+ *
+ * The named list is kept rather than folded into that rule for the case the
+ * ownership test cannot see: this shell running as uid 0 owns everything, and a
+ * system tree is still somebody else's data root.
+ *
+ * The two halves answer differently, so each tags its reason (see {@link
+ * PathRefusal}): the named rules are marked `named` and the ownership fallback
+ * `ownership`. The system-tree loop deliberately sits *above* the ownership
+ * call rather than beside it — when a symlink hop lands inside `/private/etc`,
+ * the ownership check also fires (that tree belongs to uid 0) and would report
+ * the weaker, fixable-sounding reason first.
+ */
+function refuseCandidate(target: string): PathRefusal | null {
   const home = stripFirmlink(path.posix.normalize(os.homedir()));
-  if (target === home) return "the current user's home directory";
-  if (isInside(`${home}/Library`, target)) return "inside the current user's Library folder";
-  if (isProtectedRoot(target)) return "a protected system root";
+  if (target === home) return named("the current user's home directory");
+  if (isInside(`${home}/Library`, target)) return named("inside the current user's Library folder");
+  if (isProtectedRoot(target)) return named("a protected system root");
   const components = target.split("/").filter((c) => c !== "");
-  if (components.length === 0) return "the filesystem root";
+  if (components.length === 0) return named("the filesystem root");
   if (components[0] === "Volumes" && components.length === 2) {
-    return "a top-level mounted volume root";
+    return named("a top-level mounted volume root");
   }
-  if (components.length === 1) return "a top-level directory of the boot volume";
+  if (components.length === 1) return named("a top-level directory of the boot volume");
   for (const tree of PROTECTED_SUBTREES) {
-    if (isInside(tree, target)) return `inside the system-owned tree ${tree}`;
+    if (isInside(tree, target)) return named(`inside the system-owned tree ${tree}`);
+  }
+  const unowned = refuseUnownedTree(target);
+  return unowned === null ? null : { source: "ownership", reason: unowned };
+}
+
+/** One of the explicitly named roots, subtrees and shapes. */
+function named(reason: string): PathRefusal {
+  return { source: "named", reason };
+}
+
+/** Allow-by-shape ownership rule; see {@link refuseCandidate}. */
+function refuseUnownedTree(target: string): string | null {
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  const ancestor = nearestExistingAncestor(target);
+  if (uid === null) {
+    // Refuse, never assume: an unchecked owner is exactly the hole this rule
+    // exists to close.
+    return `on a platform where this shell has no user id to compare against, so the owner of its nearest existing directory ${ancestor} cannot be checked`;
+  }
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(ancestor);
+  } catch (error) {
+    return `under a nearest existing directory ${ancestor} that cannot be inspected (${describeError(error)})`;
+  }
+  if (stat.uid !== uid) {
+    return `not under a directory owned by the current user: its nearest existing directory ${ancestor} belongs to uid ${stat.uid}, not uid ${uid}`;
+  }
+  if ((stat.mode & 0o022) !== 0) {
+    return `under the world-writable directory ${ancestor} (mode ${(stat.mode & 0o777).toString(8)}), where any user can place a file or a link that this archive would then be written into and pruned from`;
   }
   return null;
+}
+
+/**
+ * The deepest directory on `target` that exists, `"/"` if nothing above it
+ * does. The ownership rule needs the *parent* the filesystem will actually
+ * honour, not the not-yet-created archive directory named in the call.
+ */
+function nearestExistingAncestor(target: string): string {
+  let cursor = target;
+  for (;;) {
+    if (fs.existsSync(cursor)) {
+      return cursor;
+    }
+    const parent = path.posix.dirname(cursor);
+    if (parent === cursor) return parent;
+    cursor = parent;
+  }
 }
 
 function isProtectedRoot(target: string): boolean {

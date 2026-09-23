@@ -53,11 +53,17 @@ public final class ProbeInbox {
     public static let lateGraceSeconds: TimeInterval = 2.0
     public static let eventRingCapacity = 512
     public static let windowHistoryLimit = 16
-    /// Distinct pids that may hold a registration at once (R5-06). The socket
-    /// layer bounds connections too; this is the inbox-side cap so no caller
-    /// can grow the connection table by streaming hellos.
+    /// Distinct pids that may hold a registration at once (R5-06). This is the
+    /// inbox-side backstop so no caller can grow the connection table by
+    /// streaming hellos. A-11 states the honest division of labour: through
+    /// `ProbeSocketServer` it is a *looser* bound than the live one — the accept
+    /// loop admits at most `ProbeSocketServer.maxConcurrentClients` clients and
+    /// each may register exactly one pid, so a daemon-served socket registers at
+    /// most 8 pids and never reaches this number. It binds callers that reach
+    /// `register` directly (tests today; an in-process producer later).
     public static let maxRegisteredProbes = 16
-    /// How many dropped probes stay visible in `probe_status` (R2-18).
+    /// How many dropped probes stay visible in `probe_status`'s
+    /// `recentDisconnections` array (R2-18).
     public static let recentDisconnectionsLimit = 8
 
     /// Test/daemon hook that writes an encoded command line to one probe.
@@ -71,6 +77,20 @@ public final class ProbeInbox {
     private var disconnections: [Disconnection] = []
     private var disconnectionTotal = 0
     private var events: [Int32: [Event]] = [:]
+    /// A-09: per-pid tally of state frames whose `source` token maps to none of
+    /// the schema's channels, plus the monotonic total. Guarded by `lock` like
+    /// everything else here; published on the live `probes` row and through
+    /// `unmapableStateFrameCount`.
+    private var unmappedStateSources: [Int32: Int] = [:]
+    private var unmapableStateFrameTotal = 0
+    /// Per-command failure reasons. They are inbox state and sit behind `lock`
+    /// with everything else: the dispatcher thread writes them while probe
+    /// reader threads write the frames those errors explain, and plain storage
+    /// was a data race on String (residual from the round-2 ledger). See the
+    /// accessors in the "Command dispatch" section.
+    private var errorDelivery: String?
+    private var errorCheckpoint: String?
+    private var errorResult: String?
     private var windows: [Window] = []
     // Response tracking uses monotonic sequence counters, not wall clocks:
     // a scripted unit test freezes `now` and pre-ingests replies, so "newer
@@ -87,6 +107,13 @@ public final class ProbeInbox {
 
     // MARK: - Connection lifecycle
 
+    /// The one admission path (A-05). Nothing else in this type may create or
+    /// replace a registration: `ingest` deliberately refuses to, because
+    /// admitting a hello there would skip both the peer-credential verdict and
+    /// this method's cap. `ProbeSocketServer.acceptHello` calls it *after*
+    /// `getpeereid`/`LOCAL_PEERPID` matched the claimed pid, and drops the
+    /// connection when this returns false.
+    ///
     /// Admit a hello. Returns false when the registration is refused because
     /// the distinct-pid capacity is reached — the socket layer then drops that
     /// connection instead of growing the table (R5-06). A re-hello for a pid
@@ -113,6 +140,9 @@ public final class ProbeInbox {
         }
         connections[hello.pid] = Connection(hello: hello, connectedAt: now(), eventsSeen: 0)
         events[hello.pid] = []
+        // A fresh pid gets a fresh A-09 tally too; the re-hello branch above
+        // deliberately keeps the old one, because it is the same process.
+        unmappedStateSources[hello.pid] = 0
         return true
     }
 
@@ -125,8 +155,17 @@ public final class ProbeInbox {
     /// that was not registered leaves no record — nothing is invented.
     public func disconnect(pid: Int32, reason: String) {
         lock.lock(); defer { lock.unlock() }
-        events.removeValue(forKey: pid)
+        // The registration is checked *before* anything is deleted (residual
+        // A-1 door, ordered like `register`): an unregistered pid's event ring
+        // belongs to whatever still holds it, and a stray disconnect must not
+        // wipe an in-flight window's hits the way the old re-hello path did.
         guard let connection = connections.removeValue(forKey: pid) else { return }
+        // A genuinely gone process takes its ring with it, so a recycled pid
+        // number cannot inherit another app's handler hits. The A-09 tally goes
+        // the same way (the monotonic `unmapableStateFrameTotal` keeps the
+        // history); `register` starts a fresh pid clean.
+        events.removeValue(forKey: pid)
+        unmappedStateSources.removeValue(forKey: pid)
         let previousDrops = disconnections.first(where: { $0.pid == pid })?.drops ?? 0
         disconnections.removeAll(where: { $0.pid == pid })
         disconnections.append(Disconnection(
@@ -168,6 +207,16 @@ public final class ProbeInbox {
 
     // MARK: - Ingest
 
+    /// Feed one authenticated inbound frame for `pid` into the event ring and
+    /// the response slots. `pid` is the identity the socket layer verified
+    /// against the kernel's peer credentials, never anything the frame claims.
+    ///
+    /// A-05: this is *not* an admission path. A `.hello` frame here is ignored
+    /// on purpose — registering from it would skip the peer-credential verdict
+    /// and `maxRegisteredProbes`, and used to clear the pid's event ring on
+    /// every hello (the X-1 wipe). `ProbeSocketServer` authenticates and calls
+    /// `register` before a connection is allowed to stream anything else, so no
+    /// producer hands a hello to this method.
     public func ingest(pid: Int32, frame: ProbeInboundFrame) {
         lock.lock(); defer { lock.unlock() }
         switch frame {
@@ -175,10 +224,19 @@ public final class ProbeInbox {
             events[pid, default: []].append(Event(receivedAt: now(), frame: frame))
             trimEvents(&events[pid])
             connections[pid]?.eventsSeen += 1
-        case .state:
+        case .state(_, _, _, let source, _):
             events[pid, default: []].append(Event(receivedAt: now(), frame: frame))
             trimEvents(&events[pid])
             connections[pid]?.eventsSeen += 1
+            // A-09: a state frame whose `source` token the daemon cannot map is
+            // still a real observation, and its loss must be attributable. Count
+            // it per pid; `ProbeSocketServer` logs the token itself (it is the
+            // only place the raw string survives) and `statusJSON` publishes the
+            // tally next to `eventsSeen`.
+            if StateDiffSource(rawValue: source) == nil {
+                unmappedStateSources[pid, default: 0] += 1
+                unmapableStateFrameTotal += 1
+            }
         case .checkpoint(let ref, let domains, let digest, let error):
             responseSequence += 1
             latestCheckpoint = (responseSequence, pid, ref, domains, digest, error)
@@ -188,10 +246,8 @@ public final class ProbeInbox {
         case .capture(let path, let error):
             responseSequence += 1
             latestCapture = (responseSequence, pid, path, error)
-        case .hello(let hello):
-            // Re-hello on the same connection = replacement registration.
-            connections[hello.pid] = Connection(hello: hello, connectedAt: now(), eventsSeen: 0)
-            events[hello.pid] = []
+        case .hello:
+            break // never an admission path; see the method comment above
         case .malformed:
             break // logged by the socket layer
         }
@@ -214,25 +270,70 @@ public final class ProbeInbox {
     public func sendCommand(_ name: String, _ fields: [String: Any] = [:], to pid: Int32) -> Bool {
         let data = ProbeWire.command(name, fields)
         if data.isEmpty {
-            lastDeliveryError = "\(name): command frame could not be encoded"
+            setLastDeliveryError("\(name): command frame could not be encoded")
             return false
         }
         guard let sender = sender else {
-            lastDeliveryError = "\(name): no probe socket is attached (pid \(pid))"
+            setLastDeliveryError("\(name): no probe socket is attached (pid \(pid))")
             return false
         }
         // Deliberately outside any inbox lock: the socket layer takes its own
-        // descriptor lock here and must never re-enter this one.
+        // per-connection send lock here and must never re-enter this one.
         guard sender(pid, data) else {
-            lastDeliveryError = "\(name): not delivered to pid \(pid)"
+            setLastDeliveryError("\(name): not delivered to pid \(pid)")
             return false
         }
-        lastDeliveryError = nil
+        setLastDeliveryError(nil)
         return true
     }
 
+    // MARK: Per-command failure reasons
+    //
+    // `lastDeliveryError`/`lastCheckpointError`/`lastResultError` used to be
+    // plain `public private(set) var` written outside `lock` while reader
+    // threads were writing the frames those errors explain — a data race on
+    // String storage, and Swift String is not benign under concurrent write.
+    // They now live behind the same lock as the rest of the inbox (storage
+    // declared with the other inbox state), with the assignments funnelled
+    // through setters that require the lock to be free (`lock` is not
+    // recursive). Every call site satisfies that: the checkpoint/restore paths
+    // touch these only outside their polling regions, and `sendCommand` never
+    // runs under `lock`.
+
     /// Reason the last `sendCommand` failed, nil when it went out.
-    public private(set) var lastDeliveryError: String?
+    public var lastDeliveryError: String? {
+        lock.lock(); defer { lock.unlock() }
+        return errorDelivery
+    }
+
+    private func setLastDeliveryError(_ value: String?) {
+        lock.lock(); defer { lock.unlock() }
+        errorDelivery = value
+    }
+
+    /// Why the last `checkpointExport` produced no checkpoint: a delivery
+    /// failure, a probe-reported error, a digest mismatch or a timeout — four
+    /// different facts, kept apart by the writers below (A-01's basis).
+    public var lastCheckpointError: String? {
+        lock.lock(); defer { lock.unlock() }
+        return errorCheckpoint
+    }
+
+    private func setLastCheckpointError(_ value: String?) {
+        lock.lock(); defer { lock.unlock() }
+        errorCheckpoint = value
+    }
+
+    /// Why the last `checkpointRestore` did not complete.
+    public var lastResultError: String? {
+        lock.lock(); defer { lock.unlock() }
+        return errorResult
+    }
+
+    private func setLastResultError(_ value: String?) {
+        lock.lock(); defer { lock.unlock() }
+        errorResult = value
+    }
 
     /// Z1 emits a handler frame on *entry* (no `durationNs`) and, when the call
     /// took longer than 1 ms, a second frame carrying `durationNs` for the same
@@ -250,10 +351,14 @@ public final class ProbeInbox {
     }
 
     /// `stateDiff.source` names the channel the observation really came from:
-    /// the source carried by in-window state frames when there were any,
-    /// otherwise the channel the probe *declared* in its hello. No channel and
-    /// no events yields nil — absence, never a channel name the probe never
-    /// had (R6-15; §3.1 presence rule).
+    /// the source carried by in-window state frames when at least one of them
+    /// named a channel this daemon knows, otherwise the channel the probe
+    /// *declared* in its hello. Neither available yields nil — absence, never a
+    /// channel name the probe never had (R6-15; §3.1 presence rule). A-09 is the
+    /// case that falls through here: frames arrived, their `source` token mapped
+    /// to nothing, and no channel was declared. Those frames are counted
+    /// (`unmapableStateFrameCount`) and logged by the socket layer instead of
+    /// being given a name they did not claim.
     static func stateDiffSource(
         observed: StateDiffSource?, capabilities: [String]
     ) -> StateDiffSource? {
@@ -334,13 +439,28 @@ public final class ProbeInbox {
             handlers: window.handlers,
             lateCount: 0
         )
-        // §3.1 presence rule: a state channel exists when the probe declared
-        // one (z2/z3) OR when it actually reported state events in this
-        // window (manual GP.recordState on the z1 lane — P6 §8 H7 opt-in
-        // form). Silence with no channel stays honest null, never false. The
-        // channel *name* comes from those two observations only: no default,
-        // because a probe that never had the channel must not be credited one
-        // (R6-15).
+        // §3.1 presence rule as implemented: `stateDiff` needs a *nameable*
+        // channel, and there are exactly two honest names for it — the source
+        // token the in-window state frames carried, or the channel the probe
+        // declared in its hello (z2/z3; manual GP.recordState on the z1 lane is
+        // the first kind, P6 §8 H7 opt-in form). Nothing else, and no third:
+        // silence from a probe with no channel stays an absent signal rather
+        // than `changed: false`, and a probe that never had a channel is never
+        // credited one (R6-15). Note that an *empty* entry list with a real
+        // channel does produce a signal (`changed: false`) — "asked and silent"
+        // is a measurement, so this branch deliberately does not test
+        // `entries.isEmpty`.
+        //
+        // A-09 residue: a probe that really reported before/after frames whose
+        // `source` token maps to none of the schema's three channels and whose
+        // hello declared no channel has those entries collected above and then
+        // nowhere to publish them, because `StateDiffSignal.source` is a closed
+        // enum and inventing a lane name is the fabricated default again. The
+        // window reports no stateDiff, but the absence is attributable from both
+        // ends: the socket layer logs the offending token per connection, and
+        // `unmapableStateFrameCount` plus the per-pid
+        // `stateFramesUnmappedSource` on the live `probes` row distinguish "frames
+        // arrived, channel unreadable" from "this probe has no state channel".
         var stateDiff: StateDiffSignal?
         if let resolvedSource = ProbeInbox.stateDiffSource(
             observed: source, capabilities: connectionCapabilities(pid)
@@ -418,7 +538,7 @@ public final class ProbeInbox {
         let issuedSeq = responseSequence
         lock.unlock()
         guard sendCommand("checkpoint_export", ["ref": ref], to: pid) else {
-            lastCheckpointError = lastDeliveryError ?? "checkpoint_export not delivered to pid \(pid)"
+            setLastCheckpointError(lastDeliveryError ?? "checkpoint_export not delivered to pid \(pid)")
             return nil
         }
         var attempts = Int(timeout / 0.02) + 1
@@ -434,29 +554,27 @@ public final class ProbeInbox {
             lock.unlock()
             if let entry {
                 if let error = entry.error {
-                    lastCheckpointError = error
+                    setLastCheckpointError(error)
                     return nil
                 }
                 if let domains = entry.domains, let reported = entry.digest {
                     let computed = ProbeWire.sha256Hex(ProbeWire.checkpointCanonical(domains))
                     if computed == reported {
-                        lastCheckpointError = nil
+                        setLastCheckpointError(nil)
                         return (domains, computed)
                     }
-                    lastCheckpointError = "digest mismatch: probe reported \(reported), daemon recomputed \(computed)"
+                    setLastCheckpointError("digest mismatch: probe reported \(reported), daemon recomputed \(computed)")
                     return nil
                 }
-                lastCheckpointError = "empty checkpoint payload"
+                setLastCheckpointError("empty checkpoint payload")
                 return nil
             }
             attempts -= 1
             Thread.sleep(forTimeInterval: 0.02)
         }
-        lastCheckpointError = "checkpoint_export timed out after \(timeout)s"
+        setLastCheckpointError("checkpoint_export timed out after \(timeout)s")
         return nil
     }
-
-    public private(set) var lastCheckpointError: String?
 
     /// Ask a probe to rewrite the retained checkpoint for `ref` and report the
     /// post-restore digest over the same domain set.
@@ -466,9 +584,9 @@ public final class ProbeInbox {
         responseSequence += 1
         let issuedSeq = responseSequence
         lock.unlock()
-        lastResultError = nil
+        setLastResultError(nil)
         guard sendCommand("checkpoint_restore", ["ref": ref, "domains": domains], to: pid) else {
-            lastResultError = lastDeliveryError ?? "checkpoint_restore not delivered to pid \(pid)"
+            setLastResultError(lastDeliveryError ?? "checkpoint_restore not delivered to pid \(pid)")
             return nil
         }
         var attempts = Int(timeout / 0.02) + 1
@@ -484,11 +602,11 @@ public final class ProbeInbox {
             lock.unlock()
             if let entry {
                 if !entry.ok {
-                    lastResultError = entry.error ?? "probe refused restore"
+                    setLastResultError(entry.error ?? "probe refused restore")
                     return nil
                 }
                 guard let digest = entry.postStateDigest else {
-                    lastResultError = "restore result missing postStateDigest"
+                    setLastResultError("restore result missing postStateDigest")
                     return nil
                 }
                 return digest
@@ -496,22 +614,34 @@ public final class ProbeInbox {
             attempts -= 1
             Thread.sleep(forTimeInterval: 0.02)
         }
-        lastResultError = "checkpoint_restore timed out after \(timeout)s"
+        setLastResultError("checkpoint_restore timed out after \(timeout)s")
         return nil
     }
 
-    public private(set) var lastResultError: String?
-
     // MARK: - Status (probe_status method, §5.4)
 
-    /// Live probes first (each row carries `connected: true`), then the
-    /// recently dropped ones — with `connectedAt`, `disconnectedAt`,
-    /// `disconnectReason` and a per-pid `drops` count — so an agent reading
-    /// `probe_status` can tell "never integrated" from "was connected, now
-    /// dropped" instead of seeing an empty list (R2-18, §5.3(3)).
+    /// Live registrations only — the rows the frozen §5.4(3) shape describes,
+    /// each carrying `connected: true`.
+    ///
+    /// A-10: the disconnection history used to be appended into this same array
+    /// with `connected: false`, and every existing reader of `probes` treats "the
+    /// pid is in here" as "the pid has a live probe" — both
+    /// `spike/run_h1_retest.py` and `spike/run_spikes2.py` poll it that way,
+    /// which is the agent's mental model of the method. A dropped probe was
+    /// therefore read as an attached one: an act got spent against a dead socket
+    /// and its `hitCount: 0` was reported as measurement. Dropped pids now live
+    /// in `recentDisconnectionsJSON()`, which `EngineCore.probeStatus()` has to
+    /// publish as its own top-level `recentDisconnections` key for the history
+    /// to reach an agent again (that forwarding is EngineCore's side of A-10 and
+    /// is not in this file).
+    ///
+    /// A row adds `stateFramesUnmappedSource` when that pid sent state frames
+    /// whose `source` token the daemon could not map (A-09); absence means zero,
+    /// which is what distinguishes "no state channel" from "state reported
+    /// through a channel this daemon cannot read".
     public func statusJSON() -> [[String: Any]] {
         lock.lock(); defer { lock.unlock() }
-        var rows = connections.values.sorted { $0.hello.pid < $1.hello.pid }.map { connection -> [String: Any] in
+        return connections.values.sorted { $0.hello.pid < $1.hello.pid }.map { connection -> [String: Any] in
             var entry: [String: Any] = [
                 "pid": Int(connection.hello.pid),
                 "appName": connection.hello.appName,
@@ -522,26 +652,53 @@ public final class ProbeInbox {
                 "connected": true
             ]
             if let bundleId = connection.hello.bundleId { entry["bundleId"] = bundleId }
+            if let unmapped = unmappedStateSources[connection.hello.pid], unmapped > 0 {
+                entry["stateFramesUnmappedSource"] = unmapped
+            }
             return entry
         }
-        let dropped = disconnections
+    }
+
+    /// Recently dropped registrations, newest first, each with `connectedAt`,
+    /// `disconnectedAt`, `disconnectReason` and a per-pid `drops` count, so an
+    /// agent reading `probe_status` can tell "never integrated" from "was
+    /// connected, now dropped" instead of seeing an empty list (R2-18, §5.3(3))
+    /// — without that history ever reading as a live probe (A-10). A pid that has
+    /// re-registered is a live row in `statusJSON()` and is not repeated here.
+    /// Production consumer: `EngineCore.probeStatus()`, which must forward this
+    /// as the response's top-level `recentDisconnections` key; until that line
+    /// exists in EngineCore the array is only reachable from these tests, and the
+    /// daemon log stays the production trace of a drop (R2-18).
+    public func recentDisconnectionsJSON() -> [[String: Any]] {
+        lock.lock(); defer { lock.unlock() }
+        return disconnections
             .filter { connections[$0.pid] == nil }
             .sorted { $0.disconnectedAt > $1.disconnectedAt }
-        rows.append(contentsOf: dropped.map { drop -> [String: Any] in
-            [
-                "pid": Int(drop.pid),
-                "appName": drop.appName,
-                "probeVersion": drop.probeVersion,
-                "capabilities": drop.capabilities,
-                "connectedAt": ProbeInbox.iso8601(drop.connectedAt),
-                "eventsSeen": drop.eventsSeen,
-                "connected": false,
-                "disconnectedAt": ProbeInbox.iso8601(drop.disconnectedAt),
-                "disconnectReason": drop.reason,
-                "drops": drop.drops
-            ]
-        })
-        return rows
+            .map { drop -> [String: Any] in
+                [
+                    "pid": Int(drop.pid),
+                    "appName": drop.appName,
+                    "probeVersion": drop.probeVersion,
+                    "capabilities": drop.capabilities,
+                    "connectedAt": ProbeInbox.iso8601(drop.connectedAt),
+                    "eventsSeen": drop.eventsSeen,
+                    "connected": false,
+                    "disconnectedAt": ProbeInbox.iso8601(drop.disconnectedAt),
+                    "disconnectReason": drop.reason,
+                    "drops": drop.drops
+                ]
+            }
+    }
+
+    /// State frames received since start whose `source` token maps to none of
+    /// the schema's channels (A-09). The *per-pid* tally is what reaches an
+    /// agent, on the live `probes` row as `stateFramesUnmappedSource`; this
+    /// monotonic total has no daemon-surface reader yet, so it exists for tests
+    /// and for whichever status surface wants a process-wide figure later. The
+    /// socket layer logs the first token it could not map per connection.
+    public var unmapableStateFrameCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return unmapableStateFrameTotal
     }
 
     // MARK: - Timestamps

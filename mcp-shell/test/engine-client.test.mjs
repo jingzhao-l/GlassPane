@@ -5,8 +5,10 @@ import { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import {
+  CALLER_VISIBLE_CEILING_MS,
   ENGINE_DEADLINES_MS,
   EngineJsonRpcClient,
+  callerDeadlineMs,
   engineClientOver,
   engineDeadlineMs,
   RESTORE_BASE_DEADLINE_MS,
@@ -305,10 +307,11 @@ class FakeEngineSocket extends Duplex {
   }
 }
 
-function socketBackedClient(identity) {
+function socketBackedClient(identity, callerCeilingMs) {
   const sockets = [];
   const client = unixSocketEngineClient("/tmp/glasspane-fake-engine.sock", {
     identity,
+    ...(callerCeilingMs === undefined ? {} : { callerCeilingMs }),
     open: () => {
       const socket = new FakeEngineSocket();
       sockets.push(socket);
@@ -363,6 +366,78 @@ test("a refused connection settles its waiter and is retried on the next call", 
   assert.equal(sockets.length, 2);
   sockets[1].deliver({ id: sockets[1].frames()[0].id, result: { attached: true } });
   assert.deepEqual(await retry, { attached: true });
+  client.close();
+});
+
+/* ------------------------------- B-02 ------------------------------- */
+
+/**
+ * The R4-04 deadlines were written against the *daemon's* worst case, which is
+ * longer than an MCP client's own request timeout: the client gave up, the agent
+ * got no code and no remedy, and it re-issued the act — the same click on the
+ * user's screen a second time. The caller's wait is capped, and the entry stays
+ * registered so the real reply is still reported.
+ */
+test("the caller's wait is capped below a client's patience for every method", () => {
+  assert.ok(
+    CALLER_VISIBLE_CEILING_MS >= 45_000 && CALLER_VISIBLE_CEILING_MS <= 55_000,
+    `ceiling ${CALLER_VISIBLE_CEILING_MS}ms must sit inside a client-safe 45–55 s`,
+  );
+  assert.ok(
+    ENGINE_DEADLINES_MS.act > CALLER_VISIBLE_CEILING_MS,
+    "act's own deadline is the case the ceiling exists to cap",
+  );
+  assert.equal(callerDeadlineMs("act"), CALLER_VISIBLE_CEILING_MS);
+  assert.equal(
+    callerDeadlineMs("restore", { steps: new Array(64).fill({}) }),
+    CALLER_VISIBLE_CEILING_MS,
+    "a 64-step ffwd restore must not hold a client for two hours",
+  );
+  assert.equal(
+    callerDeadlineMs("probe_status"),
+    ENGINE_DEADLINES_MS.probe_status,
+    "a method already inside the ceiling keeps its own deadline",
+  );
+  assert.ok(callerDeadlineMs("recent_reports") <= CALLER_VISIBLE_CEILING_MS, "unlisted methods are capped too");
+  for (const method of Object.keys(ENGINE_DEADLINES_MS)) {
+    assert.ok(callerDeadlineMs(method) <= CALLER_VISIBLE_CEILING_MS, `${method} exceeds the ceiling`);
+  }
+});
+
+test("an act that outlives the ceiling is answered with the timeout code and remedy, and stays tracked", async () => {
+  const { client, sockets } = socketBackedClient(undefined, 30); // 30 ms ceiling
+  const notes = [];
+  client.onEngineNote((note) => notes.push(note));
+
+  await assert.rejects(
+    client.call("act", { selector: { role: "AXButton" }, action: "press" }),
+    (err) => {
+      assert.equal(err.code, "GP_E_ENGINE_TIMEOUT");
+      assert.match(err.message, /no reply after 30ms/);
+      // The daemon's own worst case is still stated: the request was not
+      // abandoned, only the caller's wait was ended.
+      assert.match(err.message, /30ms while the daemon gets up to 120000ms for 'act'/);
+      assert.match(err.remedy, /do NOT re-issue act/);
+      assert.match(err.remedy, /gp_probe_status/);
+      return true;
+    },
+  );
+  assert.ok(notes.some((note) => /still in flight/.test(note)), notes.join(" | "));
+
+  // Answering early must not throw the reply away — this is where an agent (or
+  // a human reading the log) finds out what the click actually did.
+  const actFrame = sockets[0].frames()[0];
+  sockets[0].deliver({ id: actFrame.id, result: { operationId: "op_X", actConfirmed: true } });
+  const late = notes.find((note) => /late engine reply for 'act'/.test(note));
+  assert.ok(late, `expected a late-reply note, saw: ${notes.join(" | ")}`);
+  assert.match(late, /actConfirmed/);
+
+  // And the same client keeps serving cheap calls after the capped one settled.
+  const status = client.call("probe_status");
+  const statusFrame = sockets[0].frames()[1];
+  assert.equal(statusFrame.method, "probe_status");
+  sockets[0].deliver({ id: statusFrame.id, result: { connected: true } });
+  assert.deepEqual(await status, { connected: true });
   client.close();
 });
 

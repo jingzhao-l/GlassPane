@@ -43,7 +43,9 @@ public struct EvidenceArchiveStats: Equatable {
 /// unit-testable against an injected temporary directory.
 public final class EvidenceStore {
 
-    /// Default evidence root when no project path is configured (spec v1.5 §9.2).
+    /// The per-user archive location (spec v1.5 §9.2). A *value*, not an
+    /// initializer default: no construction resolves to it unless a caller
+    /// names it (`atProductionDefault()`) or passes it as `directory`.
     public static let defaultDirectory =
         NSHomeDirectory() + "/.glasspane/evidence/"
 
@@ -124,8 +126,15 @@ public final class EvidenceStore {
     /// operator fixes the permission.
     private var isolatedDirectory: String?
 
+    /// The archive lives where the caller says it lives — there is no default.
+    ///
     /// - Parameters:
-    ///   - directory: evidence storage directory (defaults to `defaultDirectory`).
+    ///   - directory: evidence storage directory, **required**. C-02/C-03: this
+    ///     used to be `String? = nil` folded into `defaultDirectory`, so every
+    ///     caller that named no location — including every test helper that
+    ///     forwarded its own optional — got the developer's real archive. The
+    ///     production location is now reachable only by name, through
+    ///     `atProductionDefault()`.
     ///   - maxFiles: retention cap; values ≤ 0 are clamped up to 1 so a caller
     ///     can never accidentally configure "delete everything on every write".
     ///   - maxAgeDays: age-based TTL; nil disables ageing. Values < 1 are
@@ -133,18 +142,41 @@ public final class EvidenceStore {
     ///   - now: clock for age computation (defaults to the wall clock).
     ///   - log: sink for the isolation verdicts (R5-04).
     public init(
-        directory: String? = nil,
+        directory: String,
         maxFiles: Int? = nil,
         maxAgeDays: Int? = nil,
         now: @escaping () -> Date = { Date() },
         log: EngineLog = EngineLog(quiet: false)
     ) {
-        self.directory = directory ?? EvidenceStore.defaultDirectory
+        self.directory = directory
         let requested = maxFiles ?? EvidenceStore.defaultMaxFiles
         self.maxFiles = max(requested, 1)
         self.maxAgeDays = maxAgeDays.map { $0 >= 1 ? $0 : nil } ?? nil
         self.now = now
         self.log = log
+    }
+
+    /// The **only** way to bind a store to `defaultDirectory`. Named on purpose:
+    /// reaching the per-user archive is a decision a reader must see in the
+    /// call site, not a side effect of leaving an argument out.
+    ///
+    /// Production has exactly one caller (`glasspaned`, which is the process
+    /// that owns `~/.glasspane`). Tests have none — `TestIsolationGateTests`
+    /// rejects this name anywhere under `engine/Tests`, so a test that really
+    /// needs the live archive has to delete that guard first and say why.
+    public static func atProductionDefault(
+        maxFiles: Int? = nil,
+        maxAgeDays: Int? = nil,
+        now: @escaping () -> Date = { Date() },
+        log: EngineLog = EngineLog(quiet: false)
+    ) -> EvidenceStore {
+        EvidenceStore(
+            directory: defaultDirectory,
+            maxFiles: maxFiles,
+            maxAgeDays: maxAgeDays,
+            now: now,
+            log: log
+        )
     }
 
     /// Update the active store directory (called when the active project

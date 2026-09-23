@@ -1,11 +1,12 @@
 import XCTest
 @testable import GlassPaneEngine
 
-/// B2 (audit register) + R7-02: the source-level test-isolation gate.
+/// B2 (audit register) + R7-02 + C-02/C-03/C-05: the source-level test-isolation
+/// gate.
 ///
 /// The defect it guards is destruction, not tidiness: a state object built
-/// without an injected location resolves that location under the home
-/// directory, so a `swift test` run on a developer machine rewrites real
+/// without an injected location resolved that location under the home
+/// directory, so a `swift test` run on a developer machine rewrote real
 /// state with test fixtures — it did, replacing the real project
 /// registrations with the two synthetic entries one test creates. Pointing
 /// `HOME` at a sandbox for the run does not help, because the home lookup
@@ -13,23 +14,35 @@ import XCTest
 /// structural: no test in this target may build a state object with its
 /// production default at all.
 ///
-/// Two halves, per the register:
-///   (a) this scan — forbidden textual shapes over every `.swift` file of the
-///       engine test tree, so the pattern cannot come back unnoticed;
-///   (b) `TestSandbox` — every path a test uses comes from the temp directory
+/// Three halves:
+///   (a) production has no path-shaped default left to reach — the archive's
+///       `directory:` is required, and an engine without `projectRegistry:`
+///       has no registry rather than the developer's. That is what makes the
+///       47 test call sites that pass neither argument harmless, and it is
+///       why the rules below can be textual: they exist to keep the *escaped*
+///       routes (named factories, optional values folded into a location)
+///       from creeping back in;
+///   (b) this scan — forbidden shapes matched over the **whole text** of every
+///       `.swift` file of the engine test tree, so a construct split across
+///       lines is caught as the same shape as one written on a single line
+///       (C-05: the old line-local scan called an archive built from a nil
+///       location on the next line, and a two-line home composition, clean);
+///   (c) `TestSandbox` — every path a test uses comes from the temp directory
 ///       and is checked at runtime by `assertIsolated`; the last case below
-///       proves (b) holds for the paths those helpers hand out.
+///       proves (c) holds for the paths those helpers hand out.
 ///
 /// Self-proof obligation: a guard whose refusing branch cannot run is not a
-/// guard, so `testScannerRejectsTheForbiddenShapes` feeds every shape back
-/// through the same matching code and requires it to be reported.
+/// guard, so `testScannerRejectsTheForbiddenShapes` feeds every shape — one-line
+/// and multi-line — back through the same matching code and requires it to be
+/// reported, and requires the compliant shapes this round introduced to pass.
 ///
-/// Why this file never reports itself: each searched-for fragment is joined
-/// at runtime from two or more string pieces (`needle`), so no line of this
-/// source contains the contiguous text — or both tokens of a token pair — a
-/// rule looks for. Comments are deliberately *not* stripped before matching:
-/// the tree was checked for shapes appearing only in prose, and a stripper
-/// would also silence a violation hidden behind a `//` inside a raw string.
+/// Why this file never reports itself: each searched-for fragment is joined at
+/// runtime from two or more string pieces (`needle`), so no run of this source
+/// contains the contiguous text a rule looks for — which now matters across
+/// whole files, not just per line. Comments are deliberately *not* stripped
+/// before matching: the tree was checked for shapes appearing only in prose,
+/// and a stripper would also silence a violation hidden behind a `//` inside a
+/// raw string.
 final class TestIsolationGateTests: XCTestCase {
 
     // MARK: - Needles
@@ -39,25 +52,80 @@ final class TestIsolationGateTests: XCTestCase {
 
     private struct Rule {
         var name: String
-        var regex: NSRegularExpression?
-        var tokens: [String] = []
+        /// Locations (NSString offsets) in the **whole file text** where this
+        /// shape occurs. Whole text, not per line: C-05 caught the old scanner
+        /// matching line-locally, which let an archive built from a nil
+        /// location written on the following line, and a home path composed
+        /// over two lines, slip through unreported.
+        var find: (String) -> [Int]
+    }
 
-        func reports(_ line: String) -> Bool {
-            if let regex,
-               regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil {
-                return true
-            }
-            guard !tokens.isEmpty else { return false }
-            return tokens.allSatisfy { line.contains($0) }
+    /// A shape matched across the entire file text. `\s` in these patterns
+    /// already spans newlines, so a construct broken over several lines is the
+    /// same shape written on one.
+    private func rule(_ name: String, _ pattern: String) throws -> Rule {
+        let regex = try NSRegularExpression(pattern: pattern)
+        return Rule(name: name) { text in
+            let full = NSRange(text.startIndex..., in: text)
+            return regex.matches(in: text, range: full).map { $0.range.location }
         }
     }
 
-    private func rule(_ name: String, _ pattern: String) throws -> Rule {
-        Rule(name: name, regex: try NSRegularExpression(pattern: pattern))
+    /// `head` … `tail` within `gap` characters of each other. For the shapes
+    /// that are two *separate* literals, e.g. a home lookup and a state-folder
+    /// literal that only become a production path when composed — the window is
+    /// what keeps a file mentioning both 20 lines apart out of the findings.
+    private func pairRule(_ name: String, head: String, tail: String, gap: Int = 120) -> Rule {
+        Rule(name: name) { text in
+            let ns = text as NSString
+            var hits: [Int] = []
+            var cursor = 0
+            while cursor < ns.length {
+                let window = NSMakeRange(cursor, ns.length - cursor)
+                let found = ns.range(of: head, options: [], range: window)
+                guard found.location != NSNotFound else { break }
+                let reach = NSMakeRange(
+                    found.location,
+                    Swift.min(gap, ns.length - found.location)
+                )
+                if ns.range(of: tail, options: [], range: reach).location != NSNotFound {
+                    hits.append(found.location)
+                }
+                cursor = found.location + head.count
+            }
+            return hits
+        }
     }
 
-    private func pairRule(_ name: String, _ tokens: [String]) -> Rule {
-        Rule(name: name, regex: nil, tokens: tokens)
+    /// The C-02/C-03 root shape: a path/state argument whose value is a **bare
+    /// identifier** that this same file declares with an optional type. Such a
+    /// call site has a nil case, and nil is a location nobody chose — which is
+    /// exactly how the real archive got written to. A call that supplies a
+    /// fallback (`registry ?? …`) or an expression (`directory: dir.json`) is
+    /// not this shape.
+    private func forwardedOptionalRule(
+        _ name: String, argument: String, declaredAs: String
+    ) throws -> Rule {
+        let forward = try NSRegularExpression(
+            pattern: argument + "\\s*:\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*[,)]"
+        )
+        return Rule(name: name) { text in
+            let ns = text as NSString
+            let full = NSRange(text.startIndex..., in: text)
+            var hits: [Int] = []
+            for match in forward.matches(in: text, range: full) {
+                let identifier = ns.substring(with: match.range(at: 1))
+                guard identifier != "nil" else { continue }
+                let declared = try? NSRegularExpression(
+                    pattern: "\\b" + NSRegularExpression.escapedPattern(for: identifier)
+                        + "\\s*:\\s*" + declaredAs + "\\s*\\?"
+                )
+                if declared?.matches(in: text, range: full).isEmpty == false {
+                    hits.append(match.range.location)
+                }
+            }
+            return hits
+        }
     }
 
     /// The forbidden shapes. `registry`, `store` and `gate` are the three
@@ -67,6 +135,10 @@ final class TestIsolationGateTests: XCTestCase {
         let registry = needle("Project", "Registry")
         let store = needle("Evidence", "Store")
         let gate = needle("Approval", "Gate")
+        // The labels of the path/state arguments, joined at runtime.
+        let directory = needle("directory")
+        let filePath = needle("filePath")
+        let projectRegistry = needle("project", "Registry")
         return [
             try rule(
                 "bare registry constructor (production projects file)",
@@ -78,13 +150,35 @@ final class TestIsolationGateTests: XCTestCase {
             ),
             try rule(
                 // The R7-02 root cause: a shared helper whose optional
-                // directory forwarded nil into the archive location.
-                "optional directory parameter with a nil default",
-                needle("directory", "\\s*:\\s*String\\?\\s*=\\s*nil")
+                // directory forwarded nil into the archive location. Extended
+                // to the registry path label, which carries the same weight.
+                "optional path parameter with a nil default",
+                needle("(", directory, "|", filePath, ")", "\\s*:\\s*String\\s*\\?\\s*=\\s*nil")
             ),
             try rule(
-                "nil forwarded as an archive location",
-                needle("directory", "\\s*:\\s*nil")
+                "nil forwarded as an archive or registry location",
+                needle("(", directory, "|", filePath, ")", "\\s*:\\s*nil")
+            ),
+            try rule(
+                "nil folded into a state object (its production default)",
+                needle("\\?\\?\\s*(", "Project", "Registry", "|", "Evidence", "Store", "|", "Approval", "Gate", ")\\s*\\(")
+            ),
+            try forwardedOptionalRule(
+                "optional path value forwarded into a state object",
+                // Non-capturing, so group 1 of the forwarder is the identifier.
+                argument: needle("(?:", directory, "|", filePath, ")"),
+                declaredAs: "String"
+            ),
+            try forwardedOptionalRule(
+                "optional registry forwarded as an engine's project state",
+                argument: projectRegistry,
+                declaredAs: registry
+            ),
+            try rule(
+                // The named escape route: production archive, reachable only by
+                // spelling this out. No test helper may call it.
+                "production archive factory named in a test",
+                store + needle("\\.at", "Production", "Default")
             ),
             try rule(
                 "production projects path referenced",
@@ -100,7 +194,8 @@ final class TestIsolationGateTests: XCTestCase {
             ),
             pairRule(
                 "home directory composed with the state folder",
-                [needle("NSHome", "Directory"), needle(".", "glasspane")]
+                head: needle("NSHome", "Directory"),
+                tail: needle("/.", "glasspane")
             ),
             try rule(
                 "hardcoded path handed to the registry",
@@ -142,17 +237,26 @@ final class TestIsolationGateTests: XCTestCase {
         return found.sorted { $0.path < $1.path }
     }
 
-    /// Every rule × line hit in one text, as `name:line [rule] source`.
+    /// Every rule hit in one text, as `name:line [rule] source`. The line is
+    /// where the *shape* begins, which for a multi-line construct is its first
+    /// line; a rule that hits several times reports each one.
     private func findings(in text: String, rules: [Rule], prefix: String) -> [String] {
+        let ns = text as NSString
+        let lines = text.components(separatedBy: "\n")
         var hits: [String] = []
-        for (index, line) in text.components(separatedBy: "\n").enumerated() {
-            let matched = rules.filter { $0.reports(line) }
-            guard !matched.isEmpty else { continue }
-            let source = line.trimmingCharacters(in: .whitespaces)
-            hits += matched.map { "\(prefix):\(index + 1) [\($0.name)] \(source)" }
+        for rule in rules {
+            for offset in rule.find(text) {
+                let index = ns.substring(to: Swift.min(offset, ns.length))
+                    .components(separatedBy: "\n").count - 1
+                let source = index < lines.count
+                    ? lines[index].trimmingCharacters(in: .whitespaces)
+                    : ""
+                hits.append("\(prefix):\(index + 1) [\(rule.name)] \(source)")
+            }
         }
-        return hits
+        return hits.sorted()
     }
+
 
     // MARK: - Cases
 
@@ -192,26 +296,42 @@ final class TestIsolationGateTests: XCTestCase {
     }
 
     /// The refusing branch has to be reachable, or this file is decoration:
-    /// every rule is fed the shape it exists to catch, and the shapes the fix
-    /// introduced have to pass.
+    /// every rule is fed the shape it exists to catch — including the shapes
+    /// written across several lines, which is what the old line-local scanner
+    /// reported as clean — and the shapes the fix introduced have to pass.
     func testScannerRejectsTheForbiddenShapes() throws {
-        let offenders: [(name: String, line: String)] = [
+        let offenders: [(name: String, text: String)] = [
             (needle("bare", "Project", "Registry"),
              needle("let r = Project", "Registry", "()")),
             (needle("bare", "Evidence", "Store"),
              needle("let s = Evidence", "Store", "()")),
             (needle("optional", "directory"),
              needle("func make(directory", ": String? = nil", ", channel: X)")),
+            (needle("optional", "filePath"),
+             needle("func make(filePath", ": String? = nil", ", clock: C)")),
             (needle("nil", "directory"),
              needle("Evidence", "Store", "(directory", ": nil)")),
+            (needle("nil-folded registry"),
+             needle("self.registry = project", "Registry", " ?? Project", "Registry", "()")),
+            (needle("forwarded optional path"),
+             needle("let dir: String? = nil\n",
+                    "let s = Evidence", "Store", "(\n  directory", ": dir,\n  maxFiles: nil\n)")),
+            (needle("forwarded optional registry"),
+             needle("var reg: Project", "Registry", "? = nil\n",
+                    "let c = Engine", "Core", "(channel: ch,\n  project", "Registry", ": reg)")),
+            (needle("production factory"),
+             needle("let s = Evidence", "Store", ".", "atProduction", "Default", "()")),
             (needle("projects", "constant"),
              needle("Project", "Registry", ".", "defaultProjectsPath")),
             (needle("evidence", "constant"),
              needle("Evidence", "Store", ".", "defaultDirectory")),
             (needle("approvals", "constant"),
              needle("Approval", "Gate", ".", "defaultPath")),
-            (needle("home", "composition"),
+            (needle("home", "composition, one line"),
              needle("let p = NSHome", "Directory", "() + \"", "/.glasspane", "/projects.json\"")),
+            (needle("home", "composition, two lines"),
+             needle("let home = NSHome", "Directory", "()\n",
+                    "let p = home + \"", "/.glasspane", "/evidence\"")),
             (needle("hardcoded", "registry"),
              needle("Project", "Registry", "(filePath", ": \"/tmp/p.json\")")),
             (needle("hardcoded", "store"),
@@ -222,23 +342,38 @@ final class TestIsolationGateTests: XCTestCase {
         let rules = try rules()
         for offender in offenders {
             XCTAssertFalse(
-                findings(in: offender.line, rules: rules, prefix: "snippet").isEmpty,
-                "rule gap: nothing reported the \(offender.name) line \"\(offender.line)\""
+                findings(in: offender.text, rules: rules, prefix: "snippet").isEmpty,
+                "rule gap: nothing reported the \(offender.name) shape\n\(offender.text)"
             )
         }
-        let sanctioned = [
+        let sanctioned: [String] = [
             needle("let r = Project", "Registry", "(filePath: TestSandbox.filePath(\"x\"))"),
-            needle("let s = Evidence", "Store", "(directory: dir, maxFiles: nil)"),
+            // C-05: this file used to list an archive built from a local `dir`
+            // that could hold nil as the compliant shape. An archive location is
+            // a required `String` now, so the compliant route is the sandbox,
+            // and the optional local above is an offender.
+            needle("let s = Evidence", "Store", "(directory: TestSandbox.directory(\"x\"))"),
+            needle("let dir = TestSandbox.directory(\"x\")\n",
+                   "let s = Evidence", "Store", "(\n  directory", ": dir,\n  maxFiles: nil\n)"),
+            needle("let c = Engine", "Core", "(channel: ch, project", "Registry", ": reg ?? TestSandbox.projectRegistry(\"x\"))"),
             needle("let g = Approval", "Gate", "()"),
             needle("let h = NSHome", "Directory", "()  // not composed with the state folder"),
+            // The window is what makes the two-line composition rule safe: the
+            // same two literals far apart in one file are not a composed path.
+            needle("let far = NSHome", "Directory", "()\n",
+                   "// a prose note, deliberately long so that it sits outside the composition window:",
+                   " the developer keeps their own state under a folder whose name appears here as /.",
+                   "glasspane, in prose only; it is never joined to the home lookup above, and that is",
+                   " the difference this window is for.\n"),
         ]
-        for line in sanctioned {
-            XCTAssertEqual(findings(in: line, rules: rules, prefix: "snippet"), [String](), line)
+        for text in sanctioned {
+            XCTAssertEqual(findings(in: text, rules: rules, prefix: "snippet"), [String](), text)
         }
     }
 
-    /// Half (b): the paths the shared helpers hand out are unique, inside the
-    /// temp directory, and never the production state folder.
+    /// Half (c): the paths the shared helpers hand out are unique, inside the
+    /// temp directory, and never the production state folder — and the runtime
+    /// predicate behind those assertions refuses what it claims to refuse.
     func testSandboxPathsAreTemporaryAndNotTheStateFolder() throws {
         let temp = NSTemporaryDirectory()
         let directory = TestSandbox.directory("gate")
@@ -275,5 +410,28 @@ final class TestIsolationGateTests: XCTestCase {
         )
         // A sandbox registry is empty even on a machine with registrations.
         XCTAssertEqual(TestSandbox.projectRegistry("gate").count, 0)
+
+        // C-05: the runtime half must be able to refuse — one case per branch,
+        // so a helper that ever hands out a path outside the temp directory, or
+        // one inside the state folder, fails at the moment the path is created.
+        let stateFolder = needle("/.", "glasspane")
+        XCTAssertEqual(
+            TestSandbox.isolationDefect("/Use" + "rs/someone" + stateFolder + "/evidence")?
+                .contains("outside NSTemporaryDirectory"), true,
+            "a path outside the temp directory must be refused before anything else"
+        )
+        XCTAssertEqual(
+            TestSandbox.isolationDefect(temp + stateFolder + "/evidence")?
+                .contains("production state folder"), true,
+            "a temp-prefixed path that names the state folder must be refused too"
+        )
+        XCTAssertNotNil(
+            TestSandbox.isolationDefect("/Some" + "where/else/T/gate-run"),
+            "any other location must be refused"
+        )
+        XCTAssertNil(
+            TestSandbox.isolationDefect(TestSandbox.directory("gate-ok")),
+            "the sandbox route must pass its own check"
+        )
     }
 }

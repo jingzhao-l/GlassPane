@@ -53,11 +53,43 @@ class WatchQueuePolicy(unittest.TestCase):
         self.assertIn("full", reason)
         self.assertEqual(queue.snapshot()["rejected"], 1)
 
-    def test_hit_counts_recorded(self):
+    def test_a_hit_is_credited_to_the_ledger_generation_that_was_armed(self):
         queue = gb.WatchQueue()
+        queue.add({"addr": "0xabc"})
+        queue.mark_live("0xabc")
+        self.assertEqual(queue.armed[0]["seq"], queue.record_hit("0xabc"))
         queue.record_hit("0xabc")
+        self.assertEqual(queue.snapshot()["hits"],
+                         [{"addr": "0xabc", "seq": queue.armed[0]["seq"], "hitCount": 2}])
+        self.assertEqual(2, queue.records()[0]["hitCount"])
+
+    def test_a_hit_for_an_address_with_nothing_armed_credits_no_entry(self):
+        """B-05: the ledger used to accept a hit for any address at all, which put
+        a number on whatever entry happened to hold that address."""
+        queue = gb.WatchQueue()
+        queue.add({"addr": "0xabc"})
+        queue.mark_live("0xabc")
+        self.assertIsNone(queue.record_hit("0xdead"))
+        self.assertIsNone(queue.record_hit("0xdead"))
+        self.assertEqual([], queue.snapshot()["hits"])
+        self.assertEqual([{"addr": "0xdead", "stopCount": 2}],
+                         queue.snapshot()["unattributedHits"])
+        self.assertEqual(0, queue.records()[0]["hitCount"])
+        self.assertTrue(any("credits no ledger entry" in note for note in queue.notes),
+                        queue.notes)
+        self.assertIn("matched no armed ledger entry", "\n".join(queue.integrity_notes()))
+
+    def test_a_stop_at_a_spent_address_is_not_charged_to_a_later_entry(self):
+        queue = gb.WatchQueue(slots=1, limit=4)
+        queue.add({"addr": "0xabc"})
+        queue.mark_live("0xabc")
         queue.record_hit("0xabc")
-        self.assertEqual(queue.snapshot()["hits"], [{"addr": "0xabc", "hitCount": 2}])
+        queue.release("0xabc")
+        self.assertIsNone(queue.record_hit("0xabc"))
+        self.assertEqual(1, queue.records()[0]["hitCount"])
+        self.assertEqual([{"addr": "0xabc", "stopCount": 1}],
+                         queue.snapshot()["unattributedHits"])
+        self.assertIn("spent", "\n".join(queue.notes))
 
 
 class Truncation(unittest.TestCase):
@@ -304,6 +336,38 @@ class WatchQueueReArmLoop(unittest.TestCase):
         self.assertTrue(by_addr["0x2000"]["armed"])
         self.assertIsNone(by_addr["0x2000"]["reason"])
 
+    def test_re_arming_an_address_starts_at_zero_and_not_at_the_old_generation_count(self):
+        """B-05: re-arming is the intended workflow, so a fresh watchpoint used to
+        inherit the spent one's count and render as "armed and already fired once".
+        """
+        queue = gb.WatchQueue(slots=1, limit=4)
+        queue.add({"addr": "0x4000", "size": 8, "mode": "w"})
+        queue.mark_live("0x4000")
+        queue.note_stop_observed()
+        queue.record_hit("0x4000")
+        self.assertEqual(0, queue.release("0x4000"))
+        self.assertEqual(("armed", 0), queue.add({"addr": "0x4000", "size": 8, "mode": "w"}))
+        queue.mark_live("0x4000")
+        spent, fresh = queue.records()  # request order: the spent generation comes first
+        self.assertEqual(1, spent["hitCount"])
+        self.assertFalse(spent["armed"])
+        self.assertIn("hit recorded (1)", spent["reason"])
+        self.assertEqual(0, fresh["hitCount"])
+        self.assertTrue(fresh["armed"])
+        self.assertIsNone(fresh["reason"])
+        # The exact bytes a payload carries for a freshly armed watchpoint must not
+        # be the byte pattern of one that already stopped the target once.
+        self.assertEqual('{"addr":"0x4000","armed":true,"hitCount":0,"hwSlot":0,'
+                         '"queued":false,"reason":null}', gb.render_json(fresh))
+        self.assertNotEqual(gb.render_json(spent), gb.render_json(fresh))
+        # The address-level roll-up keeps the real observation and says which
+        # generation earned it: one hit happened, on the retired entry.
+        self.assertEqual([{"addr": "0x4000", "seq": queue.spent[0]["seq"], "hitCount": 1}],
+                         queue.snapshot()["hits"])
+        self.assertNotEqual(queue.spent[0]["seq"], queue.armed[0]["seq"])
+        self.assertEqual(1, sum(row["hitCount"] for row in queue.snapshot()["hits"]))
+        self.assertEqual(2, len(queue.records()))
+
     def test_take_slot_on_an_occupied_slot_records_a_note_instead_of_quietly_double_booking(self):
         queue = self.armed_queue(extra=1)
         armed = queue.take_slot(freed_index=2)  # slot 2 was never released
@@ -322,6 +386,16 @@ class WatchQueueReArmLoop(unittest.TestCase):
         self.assertIn("queued and NOT armed", notes)
         self.assertIn("observed no watchpoint stop", notes)
         self.assertEqual(0, queue.snapshot()["watchpointStopsObserved"])
+
+    def test_a_stop_at_a_queued_address_never_credits_the_pending_request(self):
+        """A queued request is a promise, not an arm: it cannot take a hit either."""
+        queue = self.armed_queue(extra=1)
+        self.assertIsNone(queue.record_hit("0x2000"))
+        self.assertEqual([], queue.snapshot()["hits"])
+        self.assertEqual([{"addr": "0x2000", "stopCount": 1}],
+                         queue.snapshot()["unattributedHits"])
+        self.assertEqual(0, [r for r in queue.records() if r["queued"]][0]["hitCount"])
+        self.assertIn("queued", "\n".join(queue.notes))
 
     def test_a_duplicate_request_takes_no_second_slot(self):
         queue = self.armed_queue()

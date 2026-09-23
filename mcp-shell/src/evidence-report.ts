@@ -1,6 +1,17 @@
 import type { EvidencePack, HandlerProbeSignal, StateDiffSignal } from "@iterate/kernel";
 
 /**
+ * What a report may be handed: a validated pack, or the same structure with
+ * `schemaVersion` widened so it can carry provenance text
+ * (`glasspane.evidence/0.1-draft (read as glasspane.evidence/0.1)`). Every
+ * `EvidencePack` is assignable here; only the renderer's own first line reads
+ * the widened field, so no consumer of the strict type sees this shape.
+ */
+export type EvidencePackReportView = Omit<EvidencePack, "schemaVersion"> & {
+  schemaVersion: string;
+};
+
+/**
  * Type-mirrored renderer of the engine's `EvidenceReportGenerator`
  * (engine/Sources/GlassPaneEngine/EvidenceReportGenerator.swift): same title,
  * same summary-line order (attribution / breaker / assert / act / axEvent /
@@ -24,12 +35,12 @@ export const PLACEHOLDER = "—";
 export const SECTION_TITLES = ["PATH", "ANOMALY", "EVIDENCE", "NEXT"] as const;
 
 /** `operationId · measure · level`, mirroring the engine's reportTitle. */
-export function reportTitle(pack: EvidencePack): string {
+export function reportTitle(pack: EvidencePackReportView): string {
   return `${pack.operationId} · ${measureLabel(pack)} · ${levelLabel(pack.circuitBreaker.level)}`;
 }
 
 /** Attribution / contamination / circuit-breaker / signal summary lines. */
-export function evidenceSummaryLines(pack: EvidencePack): string[] {
+export function evidenceSummaryLines(pack: EvidencePackReportView): string[] {
   const lines: string[] = [];
   lines.push(`attribution: ${pack.attribution.level} | contaminated=${pack.attribution.contaminated}`);
   const reason = pack.circuitBreaker.reason === undefined ? "" : ` | reason: ${pack.circuitBreaker.reason}`;
@@ -81,7 +92,7 @@ export function evidenceSummaryLines(pack: EvidencePack): string[] {
 }
 
 /** Compact Markdown view (terminal / dialog friendly). */
-export function renderMarkdown(pack: EvidencePack, diagnostics: string | undefined): string {
+export function renderMarkdown(pack: EvidencePackReportView, diagnostics: string | undefined): string {
   const out: string[] = [];
   out.push(`# ${reportTitle(pack)}`);
   out.push("");
@@ -102,7 +113,7 @@ export function renderMarkdown(pack: EvidencePack, diagnostics: string | undefin
 }
 
 /** Full HTML view with an operationId anchor; all values escaped. */
-export function renderHTML(pack: EvidencePack, diagnostics: string | undefined): string {
+export function renderHTML(pack: EvidencePackReportView, diagnostics: string | undefined): string {
   const out: string[] = [];
   out.push(`<div class="gp-evidence" id="${escapeHTML(pack.operationId)}">`);
   out.push(`<h1>${escapeHTML(reportTitle(pack))}</h1>`);
@@ -163,7 +174,7 @@ const MAX_ENTRIES_SHOWN = 8;
  * caller-supplied `diagnostics` string is the preformatted EVIDENCE fallback
  * when the report is absent (§10.2 设计缺口补述 2).
  */
-function sections(pack: EvidencePack, diagnostics: string | undefined): ReportSection[] {
+function sections(pack: EvidencePackReportView, diagnostics: string | undefined): ReportSection[] {
   const report = pack.diagnosis?.report;
   const hasDiagnosticsText = diagnostics !== undefined && diagnostics !== "";
   const reportEvidence = nonEmpty(report?.evidence);
@@ -218,7 +229,7 @@ function nonEmpty(value: string | undefined): string | undefined {
   return value !== undefined && value !== "" ? value : undefined;
 }
 
-function measureLabel(pack: EvidencePack): string {
+function measureLabel(pack: EvidencePackReportView): string {
   if (pack.diagnosis !== null && pack.diagnosis !== undefined) {
     return pack.diagnosis.class;
   }

@@ -271,6 +271,80 @@ final class ProbeRuntimeTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(FrameReader(client).nextJSON())["t"] as? String, "hello")
     }
 
+    func testWriterDetectedDropoutHandsTheDescriptorToTheConnectionThreadThatClosesIt() throws {
+        let path = scratchSocketPath("retire")
+        var listener = makeListener(path: path)
+        var client: Int32 = -1
+        defer {
+            if client >= 0 { close(client) }
+            if listener >= 0 { close(listener) }
+            unlink(path)
+        }
+        // Deliberately no `backoffOverrideMs`: the first connect attempt is
+        // immediate anyway, and once the socket is unlinked below the probe
+        // retries on the real 1s/2s/3s rhythm — so its transient `socket()`
+        // allocations cannot keep stealing the descriptor number that the last
+        // proof here looks for.
+        GP.start(socketPath: path, appName: "unit-test")
+        defer { GP.runtime.resetForTests() }
+
+        client = acceptConnection(listener, within: 5)
+        XCTAssertGreaterThanOrEqual(client, 0, "the probe must connect to a listening daemon")
+        XCTAssertTrue(waitUntil(5) { GP.runtime.debugConnectionDescriptor >= 0 }, "the probe must adopt the accepted connection")
+
+        let adopted = GP.runtime.debugConnectionDescriptor
+
+        // The daemon end is never read from *and stays open*: the reader parks in
+        // poll() on its descriptor while the writer is the one that discovers the
+        // connection is dead. That split is what used to leave the socket with no
+        // owner — the writer only cleared `fd`, the reader exited as "not the
+        // owner", and teardown closed nothing.
+        for index in 0..<(ProbeRuntime.queuedWriteLimit * 2) {
+            GP.recordHandler(file: "retire", line: index)
+        }
+        XCTAssertTrue(
+            waitUntil(5) { GP.runtime.debugConnectionDescriptor == -1 },
+            "a write that cannot complete must retire the connection"
+        )
+        XCTAssertEqual(
+            GP.runtime.debugDescriptorAwaitingClose, adopted,
+            "the retiring side must hand the close to a named owner instead of dropping it"
+        )
+        XCTAssertGreaterThan(GP.droppedWriteCount, 0, "retirement stays a counted drop, not an error")
+
+        // Now the daemon goes away for real: the reader wakes on POLLHUP and its
+        // teardown is the owner of that descriptor. Unlink first, or the probe's
+        // next connect would take the number back and the proof below would mean
+        // nothing.
+        close(client)
+        client = -1
+        close(listener)
+        listener = -1
+        unlink(path)
+        XCTAssertTrue(
+            waitUntil(5) { GP.runtime.debugDescriptorAwaitingClose == -1 && fcntl(adopted, F_GETFD) == -1 },
+            "the connection thread must close the retired descriptor exactly once — one leaked unix socket per daemon restart ends in socket() failing and the probe going quiet"
+        )
+    }
+
+    func testStalledPeerCyclesDoNotAccumulateDescriptorsInTheHostProcess() throws {
+        guard let baseline = openDescriptorCount() else {
+            throw XCTSkip(
+                "/dev/fd is unreadable here, so accumulation cannot be *counted* on this machine — "
+                    + "runStalledPeerCycle still asserts the ownership state (and that the descriptor "
+                    + "ends closed) for every cycle, which is the portable half of the same proof."
+            )
+        }
+        for cycle in 0..<4 {
+            runStalledPeerCycle("cycle \(cycle)")
+        }
+        let after = try XCTUnwrap(openDescriptorCount(), "the descriptor table disappeared mid-test")
+        XCTAssertLessThanOrEqual(
+            after - baseline, 1,
+            "4 stalled-peer cycles took \(after - baseline) descriptors with them: each daemon restart that the writer notices first used to leak one unix socket (plus its kernel buffers) into the app under test, until socket() fails and the probe silently stops reporting. Slack of 1 covers unrelated fd churn in the test process."
+        )
+    }
+
     func testRegistrationDoesNotKeepRegisteredObjectsAlive() throws {
         final class Model: NSObject { @objc dynamic var count = 0 }
         var model: Model? = Model()
@@ -303,6 +377,158 @@ final class ProbeRuntimeTests: XCTestCase {
         XCTAssertTrue(GP.detachCheckpoint(domain: "box"))
         XCTAssertFalse(GP.detachCheckpoint(domain: "box"))
         XCTAssertTrue(GP.runtime.exportCheckpointDomains().isEmpty)
+    }
+
+    // MARK: Z3 registration cannot raise inside the host app
+
+    func testRepeatedKeyPathInOneCallIsNormalisedInsteadOfRegisteringTwice() {
+        let model = ProbeKVCModel()
+        // The shape that used to kill the app under test: two key lists
+        // concatenated into one call. Registering the same keyPath twice makes
+        // Foundation throw an Objective-C exception — from a library call, on
+        // the app's own thread.
+        GP.registerKVCObject(model, label: "demo", keys: ["count", "count"])
+        XCTAssertEqual(GP.rejectedKeyCount, 0, "a repeat inside one call is collapsed, not refused: the key is observed once")
+        XCTAssertEqual(GP.kvcRejections, [])
+        model.count = 5
+        XCTAssertEqual(stateFrames().count, 1, "exactly one observation for 'count', so exactly one frame")
+        XCTAssertEqual(stateFrames().first?["key"] as? String, "demo.count")
+
+        // Re-registering with an overlapping set neither duplicates nor loses the
+        // observation, and the malformed entries are what get reported.
+        GP.registerKVCObject(model, label: "demo", keys: ["count", "  ", "hidden"])
+        XCTAssertEqual(GP.rejectedKeyCount, 2)
+        XCTAssertEqual(GP.kvcRejections.count, 2)
+        XCTAssertTrue(
+            GP.kvcRejections.contains { $0.contains("demo.∅") && $0.contains("empty keyPath") },
+            "an empty/whitespace entry is refused visibly: \(GP.kvcRejections)"
+        )
+        XCTAssertTrue(
+            GP.kvcRejections.contains { $0.contains("'hidden'") && $0.contains("is not an observable KVC key on") },
+            "a typo names the key and says what to do about it: \(GP.kvcRejections)"
+        )
+        model.count = 9
+        XCTAssertEqual(stateFrames().count, 2, "the accepted key survived the re-registration exactly once")
+        XCTAssertEqual(GP.runtime.debugCapabilities, ["z1", "z3", "checkpoint"], "the refusals must not cost the real channel")
+    }
+
+    func testUnresolvableKeyPathsAreRefusedWithAReasonAndDetachUndoesTheBookkeeping() {
+        let model = ProbeKVCModel()
+        GP.registerKVCObject(model, label: "demo", keys: [
+            "hidden",           // the plain typo
+            "totallyAbsentKey", // nothing answers it, as an accessor or otherwise
+            "child.title",      // valid shape, but `child` is nil right now: nothing to check the tail against
+            "items.upper",      // steps through a to-many
+            "@count"            // collection operator: element type unknown without evaluating the chain
+        ])
+        XCTAssertEqual(GP.rejectedKeyCount, 5, "not one of these may reach KVO")
+        let expectations: [(key: String, needle: String)] = [
+            ("hidden", "is not an observable KVC key on"),
+            ("totallyAbsentKey", "is not an observable KVC key on"),
+            ("child.title", "nil on this object"),
+            ("items.upper", "steps through the to-many"),
+            ("@count", "is a KVC collection operator")
+        ]
+        for expectation in expectations {
+            let quoted = "'\(expectation.key)'"
+            XCTAssertTrue(
+                GP.kvcRejections.contains { $0.contains(quoted) && $0.contains(expectation.needle) },
+                "no note explains \(quoted) (\(expectation.needle)): \(GP.kvcRejections)"
+            )
+        }
+        XCTAssertEqual(GP.runtime.debugCapabilities, ["z1"], "an object with no observable key is not a z3 channel")
+        XCTAssertTrue(GP.detachKVCObject(model), "a refused registration is still a registration, so detach must undo it")
+        XCTAssertEqual(GP.kvcRejections, [], "detach drops the refusal notes it inherited from that object")
+        XCTAssertEqual(GP.rejectedKeyCount, 5, "the lifetime count does not forget what was refused")
+    }
+
+    func testSwiftOnlyStorageIsRefusedInsteadOfBecomingADeadChannel() {
+        let model = ProbeKVCLimitModel()
+        GP.registerKVCObject(model, label: "limits", keys: ["swiftOnly", "observable"])
+        XCTAssertEqual(
+            GP.rejectedKeyCount, 1,
+            "KVC can read a Swift-only stored property through its ivar, but KVO cannot instrument it: taking it would have promised a state channel that can never fire"
+        )
+        XCTAssertTrue(
+            GP.kvcRejections.contains { $0.contains("'swiftOnly'") && $0.contains("is not an observable KVC key on") },
+            "\(GP.kvcRejections)"
+        )
+        model.observable = 1
+        let frames = stateFrames()
+        XCTAssertEqual(frames.count, 1, "the key that is observable still is")
+        XCTAssertEqual(frames.first?["key"] as? String, "limits.observable")
+    }
+
+    func testNestedKeyPathIsObservedOnceItsObjectGraphIsPopulated() {
+        let model = ProbeKVCModel()
+        model.child = ProbeKVCChild()
+        GP.registerKVCObject(model, label: "demo", keys: ["child.title"])
+        XCTAssertEqual(GP.rejectedKeyCount, 0, "the same keyPath validates once the intermediate exists")
+        XCTAssertEqual(GP.runtime.debugCapabilities, ["z1", "z3", "checkpoint"])
+        model.child?.title = "b"
+        let frames = stateFrames()
+        XCTAssertEqual(frames.count, 1)
+        XCTAssertEqual(
+            frames.first?["key"] as? String, "demo.child.title",
+            "a nested notification arrives from the tail object; the label still has to come from the registered model"
+        )
+        XCTAssertEqual(frames.first?["before"] as? String, "a")
+        XCTAssertEqual(frames.first?["after"] as? String, "b")
+        XCTAssertEqual(frames.first?["source"] as? String, "z3-kvc")
+        XCTAssertTrue(GP.detachKVCObject(model))
+        model.child?.title = "c"
+        XCTAssertEqual(stateFrames().count, 1, "detach removed the nested observation too")
+    }
+
+    // MARK: Fixtures
+
+    private func stateFrames() -> [[String: Any]] {
+        GP.runtime.debugOfflineSnapshot().filter { $0["t"] as? String == "state" }
+    }
+
+    /// Descriptors open in this process, read off the fd table the kernel exposes
+    /// at `/dev/fd`. nil means "not measurable here", which the counting test
+    /// reports as a skip instead of pretending the property held.
+    private func openDescriptorCount() -> Int? {
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd") else { return nil }
+        let numbered = entries.filter { Int($0) != nil }
+        return numbered.isEmpty ? nil : numbered.count
+    }
+
+    /// One stalled-peer cycle on the socketpair seam: adopt a socket whose peer is
+    /// already gone, turn writes into counted drops until the writer retires the
+    /// connection, then let the reset act as the closer (this seam has no
+    /// connection thread, so the reset owns the descriptor here). Asserts the
+    /// whole retirement contract, including that the number is free again at the
+    /// end — which is what keeps the per-cycle descriptor count flat.
+    @discardableResult
+    private func runStalledPeerCycle(_ context: String) -> Int32 {
+        var pair = [Int32](repeating: -1, count: 2)
+        XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair), 0, context)
+        XCTAssertTrue(GP.runtime.attachSocketForTests(pair[1]), context)
+        XCTAssertEqual(
+            GP.runtime.debugDescriptorAwaitingClose, -1,
+            "\(context): a previous cycle must not have left a descriptor owed to someone"
+        )
+        close(pair[0]) // the peer that vanished: every write from here on is a failure
+        for index in 0..<(ProbeRuntime.queuedWriteLimit * 2) {
+            GP.recordHandler(file: "stalled-cycle", line: index)
+        }
+        XCTAssertTrue(
+            waitUntil(5) { !GP.isConnected },
+            "\(context): a write that cannot complete must retire the connection"
+        )
+        XCTAssertEqual(
+            GP.runtime.debugDescriptorAwaitingClose, pair[1],
+            "\(context): retirement hands the descriptor to its closer instead of forgetting it"
+        )
+        GP.runtime.resetForTests()
+        XCTAssertEqual(GP.runtime.debugDescriptorAwaitingClose, -1, "\(context): the closer took ownership")
+        XCTAssertTrue(
+            waitUntil(5) { fcntl(pair[1], F_GETFD) == -1 },
+            "\(context): the cycle's socket is still open in the host process — a leaked descriptor"
+        )
+        return pair[1]
     }
 
     // MARK: Socket fixtures
@@ -353,6 +579,27 @@ final class ProbeRuntimeTests: XCTestCase {
         }
         return -1
     }
+}
+
+/// Z3 fixtures: the shapes `registerKVCObject` has to tell apart — a plain
+/// observable key, a nil-able one-to-one child, and a to-many.
+private final class ProbeKVCChild: NSObject {
+    @objc dynamic var title = "a"
+}
+
+private final class ProbeKVCModel: NSObject {
+    @objc dynamic var count = 0
+    @objc dynamic var child: ProbeKVCChild?
+    @objc dynamic var items = ["row-1", "row-2"]
+}
+
+/// The documented limit of Z3 (P6 §4: "仅 NSObject/KVC-compatible 键；
+/// Swift-only 存储不可用"): a Swift-only stored property has no accessor for
+/// the ObjC runtime to instrument, so the probe must refuse it out loud instead
+/// of registering a channel that can never fire.
+private final class ProbeKVCLimitModel: NSObject {
+    var swiftOnly = 0
+    @objc dynamic var observable = 0
 }
 
 /// Reads the probe's NDJSON off a socket, keeping a torn tail buffered exactly

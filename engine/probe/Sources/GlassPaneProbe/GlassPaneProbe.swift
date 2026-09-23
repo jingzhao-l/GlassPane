@@ -20,6 +20,17 @@ import Metal
 //     bounded budget, so a daemon that stopped draining costs one counted drop
 //     instead of a hung thread (SO_SNDTIMEO/SO_RCVTIMEO are not assumed to be
 //     implemented);
+//   * a retired descriptor has exactly one owner from the moment it is retired
+//     until the moment it is closed — the side that clears `fd` never closes
+//     (the connection thread may still be polling that number), and it hands
+//     the close to the teardown that does. An unowned socket is a leaked
+//     socket, and enough leaked sockets end in `socket()` failing, i.e. a probe
+//     that stops reporting without saying so;
+//   * a keyPath that KVO would raise on never reaches KVO: registration
+//     normalises the caller's key list and resolves each keyPath against the
+//     object first, and what it refuses comes back as a counted note
+//     (`GP.rejectedKeyCount`) instead of an Objective-C exception on the host's
+//     thread;
 // Losses stay observable (GP.droppedEventCount / GP.droppedWriteCount) and are
 // announced in `hello`, so "the handler did not run" can be told apart from
 // "the probe could not deliver".
@@ -75,6 +86,14 @@ public enum GP {
     /// Z3: register an NSObject subclass with @objc dynamic keys for live
     /// KVO state events (and optional KVC write-back checkpoints). Held
     /// weakly — see `detachKVCObject`.
+    ///
+    /// The key list is normalised before anything is registered: empty and
+    /// whitespace-only entries are dropped, repeats inside one call collapse to
+    /// a single observation (registering the same keyPath twice is what makes
+    /// Foundation raise), and every keyPath is resolved against *this object*
+    /// first. A keyPath that cannot be resolved is refused — never observed
+    /// silently, and never an exception — and shows up in `rejectedKeyCount`
+    /// with its reason in `kvcRejections`.
     public static func registerKVCObject(_ object: NSObject, label: String, keys: [String]) {
         runtime.registerKVCObject(object, label: label, keys: keys)
     }
@@ -84,6 +103,10 @@ public enum GP {
     /// never registered. Detach before letting go of a registered model:
     /// releasing an object that is still observed relies on Foundation tearing
     /// the registration down with it.
+    ///
+    /// Symmetrical with registration: every observation *and* every refusal
+    /// recorded for that object goes with it (`rejectedKeyCount` stays — it is
+    /// a lifetime counter, not a gauge).
     @discardableResult
     public static func detachKVCObject(_ object: NSObject) -> Bool {
         runtime.detachKVCObject(object)
@@ -128,6 +151,21 @@ public enum GP {
     /// was full. Delivery losses, never an error thrown into the host.
     public static var droppedWriteCount: Int { runtime.droppedWriteCount }
 
+    /// keyPaths `registerKVCObject` was asked for and refused to observe
+    /// (unresolvable, empty, or a shape the probe cannot validate). Registration
+    /// is the only place this can be detected, so the count is how a missing
+    /// state channel survives into the report: "no state events" plus a non-zero
+    /// `rejectedKeyCount` means the instrumentation was refused, not that the
+    /// state never changed. Nothing was lost that was ever observable — a
+    /// refused key would have thrown instead.
+    public static var rejectedKeyCount: Int { runtime.rejectedKeyCount }
+
+    /// The refusal notes behind `rejectedKeyCount`, oldest first, bounded to
+    /// `ProbeRuntime.rejectionNoteLimit` entries (the count keeps the total):
+    /// `"demo.ope: 'ope' is not a KVC key of DemoModel …"`. Notes describe the
+    /// *current* registrations, so detaching an object drops its notes.
+    public static var kvcRejections: [String] { runtime.kvcRejections }
+
     /// Frames still waiting in the offline buffer for the next connection.
     public static var bufferedEventCount: Int { runtime.bufferedEventCount }
 
@@ -158,6 +196,10 @@ final class ProbeRuntime: @unchecked Sendable {
     /// How long the reader waits in poll() before re-checking the connection.
     static let receiveTimeoutMs = 2_000
     static let checkpointRetention = 8
+    /// How many refusal notes stay readable through `GP.kvcRejections`. Bounded:
+    /// a host that registers bad keys in a loop must not be able to grow the
+    /// probe's memory. `rejectedKeyCount` keeps the whole total either way.
+    static let rejectionNoteLimit = 16
 
     /// Backoff after a failed attempt inside one cycle (P6 §2.1: 1s, 2s, 3s).
     static func attemptBackoffMs(afterFailedAttempt attempt: Int) -> Int {
@@ -183,6 +225,19 @@ final class ProbeRuntime: @unchecked Sendable {
     private let writeQueue = DispatchQueue(label: "glasspane.probe.write", qos: .utility)
     private var connectionThread: Thread?
     private var fd: Int32 = -1
+    /// Descriptor the *writer* retired (`fd` already moved to -1 for it) and
+    /// whose close is still owed: to the connection thread's teardown for a real
+    /// connection, or to the next reset / next adoption for the socketpair test
+    /// seam (which has no connection thread). -1 = nobody is owed a close.
+    ///
+    /// One slot is enough because it can never be overwritten while occupied:
+    /// only the writer that still holds `fd` can fill it, the production
+    /// connection thread cannot adopt the next descriptor before it has run the
+    /// previous one's teardown (which empties the slot), and `attachSocketForTests`
+    /// closes what it finds here before adopting anything new. An entry that fell
+    /// out of this state un-closed would be exactly the leaked unix socket the
+    /// hand-off exists to prevent.
+    private var awaitingCloseFD: Int32 = -1
     private var started = false
     private var stopped = false
     private var connectionGeneration = 0
@@ -193,6 +248,11 @@ final class ProbeRuntime: @unchecked Sendable {
     private var offlineBuffer: [[String: Any]] = []
     private var dropped = 0
     private var droppedWrites = 0
+    /// keyPaths refused at registration, lifetime total for this runtime.
+    private var rejectedKeys = 0
+    /// Their notes, tagged with the object they were refused *for* so `detach`
+    /// can undo the bookkeeping symmetrically with the registration.
+    private var kvcRejectionNotes: [(subject: ObjectIdentifier, note: String)] = []
     private var readerRunning = false
     private var advertisedCapabilities: [String] = []
 
@@ -221,6 +281,16 @@ final class ProbeRuntime: @unchecked Sendable {
     var droppedWriteCount: Int {
         lock.lock(); defer { lock.unlock() }
         return droppedWrites
+    }
+
+    var rejectedKeyCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return rejectedKeys
+    }
+
+    var kvcRejections: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return kvcRejectionNotes.map { $0.note }
     }
 
     var bufferedEventCount: Int {
@@ -317,13 +387,40 @@ final class ProbeRuntime: @unchecked Sendable {
     /// then fall back to the offline buffer), and the close is sequenced *on
     /// the write queue* so the number can never be recycled under a write that
     /// is still in flight on it.
+    ///
+    /// Two paths reach here and exactly one of them owns the close: the reader
+    /// noticing a dead peer (`fd` still names this descriptor), or the writer
+    /// having retired the connection first and handed the close over through
+    /// `awaitingCloseFD`. Neither may skip it — a descriptor nobody owns is a
+    /// socket that stays open in the host app for the rest of the process.
     private func teardown(_ descriptor: Int32) {
         lock.lock()
-        let owns = fd == descriptor
-        if owns { fd = -1 }
+        let ownedByReader = fd == descriptor
+        let handedOverByWriter = awaitingCloseFD == descriptor
+        if ownedByReader { fd = -1 }
+        if handedOverByWriter { awaitingCloseFD = -1 }
         readerRunning = false
         lock.unlock()
-        if owns { closeDeferred(descriptor) }
+        if ownedByReader || handedOverByWriter { closeDeferred(descriptor) }
+    }
+
+    /// Writer-side retirement of a connection whose writes stopped making
+    /// sense: `fd` goes to -1 so later frames take the offline buffer, and the
+    /// close goes to the connection thread's teardown because the reader may be
+    /// inside `poll()` on this very number right now. Idempotent — only the
+    /// first caller over the current descriptor hands anything over.
+    private func retireByWriter(_ descriptor: Int32) {
+        lock.lock()
+        guard fd == descriptor else {
+            // Someone already retired it (another write, or the reader's
+            // teardown): the ownership already moved, and closing here would
+            // double-close or pull the number out from under that owner.
+            lock.unlock()
+            return
+        }
+        fd = -1
+        awaitingCloseFD = descriptor
+        lock.unlock()
     }
 
     private func closeDeferred(_ descriptor: Int32) {
@@ -540,14 +637,48 @@ final class ProbeRuntime: @unchecked Sendable {
             kvObserver = observer
         }
         lock.unlock()
-        observer.attach(object, label: label, keys: keys)
+        let attachment = observer.attach(object, label: label, keys: keys)
+        replaceKVCRejections(for: object, label: label, refused: attachment.refused)
         advertiseCapabilities()
+    }
+
+    /// Refused keyPaths become a counted, readable note rather than an
+    /// exception: registration is the only moment the probe knows the host asked
+    /// for state it will never see, and a daemon-side "no state events" is
+    /// otherwise indistinguishable from a model that never changed.
+    ///
+    /// Re-registering replaces the object's key set, so it replaces its notes
+    /// too — `kvcRejections` describes what is registered *now*. The count keeps
+    /// every refusal ever made, because a note that quietly disappeared would be
+    /// the same lie as a silent refusal.
+    private func replaceKVCRejections(
+        for object: NSObject,
+        label: String,
+        refused: [(keyPath: String, reason: String)]
+    ) {
+        let subject = ObjectIdentifier(object)
+        lock.lock()
+        kvcRejectionNotes.removeAll { $0.subject == subject }
+        rejectedKeys += refused.count
+        for refusal in refused {
+            kvcRejectionNotes.append((
+                subject,
+                "\(label).\(refusal.keyPath.isEmpty ? "∅" : refusal.keyPath): \(refusal.reason)"
+            ))
+        }
+        while kvcRejectionNotes.count > ProbeRuntime.rejectionNoteLimit { kvcRejectionNotes.removeFirst() }
+        lock.unlock()
     }
 
     @discardableResult
     func detachKVCObject(_ object: NSObject) -> Bool {
         lock.lock()
         let observer = kvObserver
+        // Symmetry with registration: what this object asked for and did not get
+        // goes with it, whether the observation itself is still live or its weak
+        // slot has already been pruned. `rejectedKeyCount` stays — it is a
+        // lifetime counter, not a gauge of what is registered right now.
+        kvcRejectionNotes.removeAll { $0.subject == ObjectIdentifier(object) }
         lock.unlock()
         guard let observer, observer.detach(object) else { return false }
         lock.lock()
@@ -661,8 +792,10 @@ final class ProbeRuntime: @unchecked Sendable {
     /// `sendTimeoutMs` (the descriptor is non-blocking; POLLOUT carries the
     /// wait). A line that cannot be written whole is a drop *and* a broken
     /// stream — half a newline-delimited frame can never be trusted again — so
-    /// the descriptor is retired here and the connection thread reconnects (and
-    /// re-drains) on its next pass. Never an exception into the app under test.
+    /// the descriptor is retired here (ownership of the close goes to the
+    /// connection thread, which it may still be polling) and the connection
+    /// thread reconnects (and re-drains) on its next pass. Never an exception
+    /// into the app under test.
     private func deliver(line: Data, snapshotFD: Int32) {
         defer {
             lock.lock()
@@ -673,6 +806,8 @@ final class ProbeRuntime: @unchecked Sendable {
         let live = fd == snapshotFD
         lock.unlock()
         guard live else {
+            // `fd` already moved on: whoever moved it owns the close, and this
+            // frame is a counted drop.
             countDroppedWrite()
             return
         }
@@ -693,9 +828,7 @@ final class ProbeRuntime: @unchecked Sendable {
         }
         guard delivered else {
             countDroppedWrite()
-            lock.lock()
-            if fd == snapshotFD { fd = -1 }
-            lock.unlock()
+            retireByWriter(snapshotFD)
             return
         }
     }
@@ -759,6 +892,21 @@ final class ProbeRuntime: @unchecked Sendable {
         kvObserver?.debugTargetCount ?? 0
     }
 
+    /// The descriptor backing the live connection (-1 = offline). Together with
+    /// `debugDescriptorAwaitingClose` this *is* the retirement ownership state:
+    /// a socket is either adopted, or owed to a named closer, never neither.
+    internal var debugConnectionDescriptor: Int32 {
+        lock.lock(); defer { lock.unlock() }
+        return fd
+    }
+
+    /// Descriptor the writer retired whose close the connection thread (or, at
+    /// the test seam, the next reset) still owes. -1 = nothing is owed.
+    internal var debugDescriptorAwaitingClose: Int32 {
+        lock.lock(); defer { lock.unlock() }
+        return awaitingCloseFD
+    }
+
     /// Test hook: adopt an already-connected descriptor (a socketpair end) so
     /// the delivery path can be watched without a daemon. Configured exactly
     /// like a connected socket, so an unprotected descriptor cannot sneak
@@ -771,8 +919,14 @@ final class ProbeRuntime: @unchecked Sendable {
             return false
         }
         lock.lock()
+        // This seam is the closer for whatever an earlier adoption left owed:
+        // without taking it here, adopting a second socket would silently drop
+        // the first one's retirement and leak it — the bug this hand-off is for.
+        let owed = awaitingCloseFD
+        awaitingCloseFD = -1
         fd = descriptor
         lock.unlock()
+        if owed >= 0, owed != descriptor { closeDeferred(owed) }
         return true
     }
 
@@ -783,12 +937,16 @@ final class ProbeRuntime: @unchecked Sendable {
         stopped = true
         connectionGeneration += 1
         let descriptor = fd
+        let owed = awaitingCloseFD
         fd = -1
+        awaitingCloseFD = -1
         started = false
         queuedWrites = 0
         offlineBuffer = []
         dropped = 0
         droppedWrites = 0
+        rejectedKeys = 0
+        kvcRejectionNotes = []
         advertisedCapabilities = []
         backoffOverrideStorage = nil
         let observer = kvObserver
@@ -803,6 +961,11 @@ final class ProbeRuntime: @unchecked Sendable {
         // state frames into whichever runtime comes next.
         observer?.detachAll()
         if descriptor >= 0 { closeDeferred(descriptor) }
+        // The test seam has no connection thread, so the reset is the closer for
+        // a descriptor the writer retired. `owed != descriptor` cannot overlap in
+        // practice (a retired number stays taken until it is closed), and it
+        // keeps one number from being closed twice if it ever did.
+        if owed >= 0, owed != descriptor { closeDeferred(owed) }
     }
 
     // MARK: Metal (Z4.5)
@@ -919,7 +1082,10 @@ final class KVCObserver: NSObject {
     var hasLiveTargets: Bool {
         emitLock.lock(); defer { emitLock.unlock() }
         pruneLocked()
-        return !targets.isEmpty
+        // A target whose every keyPath was refused observes nothing, and
+        // advertising `z3`/`checkpoint` for it would claim a state channel the
+        // daemon then never sees events on.
+        return targets.contains { !$0.keys.isEmpty }
     }
 
     var debugTargetCount: Int {
@@ -928,7 +1094,50 @@ final class KVCObserver: NSObject {
         return targets.count
     }
 
-    func attach(_ object: NSObject, label: String, keys: [String]) {
+    /// What one `attach` call ended up registering.
+    struct Attachment {
+        /// keyPaths now observed, in the caller's order of first appearance.
+        let observed: [String]
+        /// keyPaths refused *before* KVO could raise on them, with the reason.
+        let refused: [(keyPath: String, reason: String)]
+    }
+
+    /// Observe `keys` of `object` and report what actually got observed.
+    ///
+    /// Everything that would have made Foundation raise comes back as a refusal
+    /// instead. The caller's array is normalised first — empties out, repeats
+    /// collapsed — because `keys: ["count", "count"]` (the natural outcome of
+    /// concatenating two key lists) registered the same keyPath twice and KVO
+    /// threw an Objective-C exception on the *host's* thread, which is the one
+    /// unforgivable thing this SDK promises against. Then each keyPath is
+    /// resolved against the object, so a typo is a counted note instead of a
+    /// crash.
+    ///
+    /// Validation reads the object graph through its getters: it runs on the
+    /// registering thread, once per registration, never on a hot path and never
+    /// under `emitLock` (a getter that fires a KVO notification would otherwise
+    /// deadlock against `observeValue`).
+    @discardableResult
+    func attach(_ object: NSObject, label: String, keys: [String]) -> Attachment {
+        var observed: [String] = []
+        var refused: [(keyPath: String, reason: String)] = []
+        var seen = Set<String>()
+        for raw in keys {
+            let keyPath = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if keyPath.isEmpty {
+                refused.append((keyPath: "", reason: "empty keyPath: there is no key to observe (a whitespace-only entry counts as empty)"))
+                continue
+            }
+            // A repeat inside one call is normalisation, not a loss: the key is
+            // observed exactly once afterwards, which is what the caller wanted.
+            guard seen.insert(keyPath).inserted else { continue }
+            if let reason = rejectionReason(for: keyPath, on: object) {
+                refused.append((keyPath: keyPath, reason: reason))
+            } else {
+                observed.append(keyPath)
+            }
+        }
+
         emitLock.lock()
         pruneLocked()
         var replacedKeys: [String] = []
@@ -940,14 +1149,84 @@ final class KVCObserver: NSObject {
             replacedKeys = targets[index].keys
             targets.remove(at: index)
         }
-        targets.append(Target(object: object, label: label, keys: keys))
+        targets.append(Target(object: object, label: label, keys: observed))
         emitLock.unlock()
-        for key in replacedKeys where !keys.contains(key) {
+
+        for key in replacedKeys where !observed.contains(key) {
             object.removeObserver(self, forKeyPath: key)
         }
-        for key in keys where !replacedKeys.contains(key) {
+        for key in observed where !replacedKeys.contains(key) {
+            // Validated above: `addObserver` cannot raise for a key KVC resolves
+            // on this exact object (KVO raises at registration time, not later).
             object.addObserver(self, forKeyPath: key, options: [.old, .new], context: nil)
         }
+        return Attachment(observed: observed, refused: refused)
+    }
+
+    /// nil = safe to register. Resolves every component of the path against the
+    /// live object graph (see `isKVCKey`) and refuses anything it cannot prove —
+    /// with a reason the host can act on, because a guard that cannot say why it
+    /// refused is a silent failure with extra steps.
+    private func rejectionReason(for keyPath: String, on root: NSObject) -> String? {
+        let components = keyPath.components(separatedBy: ".")
+        var subject = root
+        for (offset, component) in components.enumerated() {
+            if component.isEmpty {
+                return "keyPath '\(keyPath)' has an empty component"
+            }
+            if component.hasPrefix("@") {
+                return "'\(component)' is a KVC collection operator: the probe cannot resolve it without the collection's element type, and a typo inside one raises exactly like a bad plain key — register the plain keyPaths instead"
+            }
+            guard isKVCKey(subject, component) else {
+                return "'\(component)' is not an observable KVC key on \(className(of: subject)) — the accessor search finds no `-\(component)`, `-is\(component.prefix(1).uppercased() + component.dropFirst())` or `-get\(component.prefix(1).uppercased() + component.dropFirst()):`. KVC can read some keys through a `-<key>Value` accessor or a direct ivar, but KVO cannot generate notifications for those: expose it as an `@objc dynamic` property of an NSObject subclass"
+            }
+            guard offset < components.count - 1 else { return nil } // last component: observed directly
+            guard let stepped = subject.value(forKey: component) else {
+                return "keyPath '\(keyPath)' cannot be validated: '\(component)' is nil on this object right now, so the keys after it have no class to check — register it once the graph is populated"
+            }
+            guard let next = stepped as? NSObject else {
+                return "keyPath '\(keyPath)' steps through '\(component)', a value with no key '\(components[offset + 1])' below it"
+            }
+            if next is NSNumber || next is NSString || next is NSDate {
+                return "keyPath '\(keyPath)' steps through '\(component)', a scalar value that has no key '\(components[offset + 1])'"
+            }
+            if next is NSArray || next is NSSet || next is NSOrderedSet {
+                return "keyPath '\(keyPath)' steps through the to-many '\(component)': the probe observes single-valued keyPaths only (nested to-many observation would need one registration per element)"
+            }
+            subject = next
+        }
+        return nil
+    }
+
+    /// KVC's accessor search, restricted to the forms that answer *without* an
+    /// out-parameter: `-<key>`, `-is<Key>`, `-get<Key>:`. A hit here is a key
+    /// the object really does resolve, which is what keeps both `addObserver`
+    /// below and the `value(forKey:)` step from raising (`-is<Key>` is the form
+    /// a Bool property answers, so `editable` on an NSTextView — whose only
+    /// getter is `-isEditable` — still resolves; measured, not assumed).
+    /// Direct-ivar-only keys are *not* accepted: KVC would read them, but KVO
+    /// cannot generate notifications for them, so taking them would trade a
+    /// refusal now for a silent dead channel later.
+    ///
+    /// Limit: KVO's registration only needs the read side, so a getter-without-
+    /// setter key registers here and then fires solely on the host's own
+    /// willChange/didChange calls. That is not something this probe can tell
+    /// apart statically, and no claim is made about it.
+    private func isKVCKey(_ object: NSObject, _ key: String) -> Bool {
+        let capitalized = key.prefix(1).uppercased() + key.dropFirst()
+        for candidate in [key, "is\(capitalized)", "get\(capitalized):"]
+        where object.responds(to: Selector(candidate)) {
+            return true
+        }
+        return false
+    }
+
+    /// Class name as the host knows it: KVO renames the observed class at
+    /// runtime, and that noise does not belong in a message somebody reads.
+    private func className(of object: NSObject) -> String {
+        let name = String(describing: type(of: object))
+        let marker = "NSKVONotifying_"
+        return name.hasPrefix(marker) ? String(name.dropFirst(marker.count)) : name
     }
 
     /// Removes this object's observers and its slot. Returns false when the
@@ -991,7 +1270,14 @@ final class KVCObserver: NSObject {
     ) {
         guard let keyPath, let object = object as? NSObject else { return }
         emitLock.lock()
-        let label = targets.first { $0.object === object }?.label ?? "kvc"
+        // A notification for a nested keyPath arrives from the *tail* object of
+        // the path, which is not the one the app registered — falling back to
+        // "kvc" there would rename the whole evidence domain (and let two models
+        // collide inside it), so the registered owner of that keyPath is asked
+        // for its label instead.
+        let label = targets.first { $0.object === object }?.label
+            ?? targets.first { $0.keys.contains(keyPath) }?.label
+            ?? "kvc"
         emitLock.unlock()
         let before = change?[.oldKey].map { stringify($0) } ?? "∅"
         let after = change?[.newKey].map { stringify($0) } ?? "∅"

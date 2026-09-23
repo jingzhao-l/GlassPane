@@ -14,17 +14,45 @@ import Foundation
 ///     exactly what EngineCore reads as "this pid has a probe", so an
 ///     unverified peer never reaches it and cannot forge rollback or
 ///     attribution evidence (R5-01).
-///   * **Single-owner descriptors** (A-17, R2-04): `stateLock` guards
-///     `running`, `listenFD`, `ownedFDs`, `clientFDs`; a descriptor is closed
-///     once by the thread that drops its ownership token, and command writes
-///     hold that same lock, so a close cannot race a write.
+///   * **Single-owner descriptors** (A-17, R2-04, A-06): a descriptor is closed
+///     exactly once, by the thread that drops its ownership token.
+///
+/// Lock discipline — two layers, never held at the same time:
+///   * `stateLock` guards `running`, `listenFD`, `ownedFDs`, `clientFDs` and
+///     `sendGates`. Every region inside it is a dictionary/set read or update:
+///     no syscall, no waiting. That is what keeps one stalled peer from delaying
+///     the accept loop and every other probe reader thread, each of which takes
+///     this lock on every loop iteration (A-06).
+///   * One `SendGate` per accepted connection guards *that connection's* writes
+///     against *that connection's* close. A command write is bounded by
+///     `commandWriteTimeoutSeconds` — enforced by the `poll` deadline *and* by
+///     `SO_SNDTIMEO` on the descriptor, because a blocking `write()` sleeps past
+///     any deadline its caller only checks between attempts — and it holds only
+///     its own gate, so a peer that stopped draining costs its own connection and
+///     nothing else.
+///
+/// Ownership is still proven for every write: a writer may only write while
+/// holding a gate it looked up under `stateLock`, and the closing thread removes
+/// that gate from `sendGates` in the same `stateLock` region where it drops
+/// `ownedFDs` membership before taking the gate and calling `close`. A write in
+/// flight therefore blocks the close (not the reverse), and a writer that loses
+/// the race sees `closed` set and never touches a descriptor it no longer owns.
 public final class ProbeSocketServer {
 
-    /// Concurrent probe clients, authenticated or not: beyond this a fresh
+    /// Concurrent probe *clients* — the listening descriptor is deliberately not
+    /// counted (A-11): the accept loop compares this against the client
+    /// fraction of `ownedFDs`, so the number a refusal reports and the number
+    /// that actually gets served are the same number. Beyond this a fresh
     /// connection is refused without a reader thread or a read buffer, so no
     /// peer can grow the daemon's thread count (R5-06). Refusal rather than
     /// eviction — an established probe is an evidence source, and closing one
     /// to admit a stranger would silently destroy a live act window (§5.2).
+    ///
+    /// This is the *live* admission gate for the daemon: one connection can
+    /// register exactly one pid (`acceptHello` rejects a hello naming a
+    /// different pid), so at most `maxConcurrentClients` pids are ever
+    /// registered through a socket and `ProbeInbox.maxRegisteredProbes` (16)
+    /// stays a looser backstop for a caller that reaches `register` directly.
     public static let maxConcurrentClients = 8
     /// Read deadline before an authenticated hello: a silent peer cannot hold a
     /// thread plus a 64 KiB buffer indefinitely (R5-06).
@@ -33,7 +61,10 @@ public final class ProbeSocketServer {
     /// EOF/ECONNRESET, so this only reaps half-open peers; it stays long
     /// enough that an idle-but-live app is never mistaken for one.
     public static let idleReadTimeoutSeconds = 900
-    /// Budget for one command write, partial-write resumption included.
+    /// Budget for one command write, partial-write resumption included. Applied
+    /// twice: as the absolute deadline between `write()` attempts, and as
+    /// `SO_SNDTIMEO` on the accepted descriptor so a single `write()` cannot sleep
+    /// past it (see `configureClientSocket`).
     public static let commandWriteTimeoutSeconds = 2
     static let listenBacklog = 8
     static let readerBufferSize = 64 * 1024
@@ -59,10 +90,15 @@ public final class ProbeSocketServer {
     private var running = false
     private var listenFD: Int32 = -1
     /// Every descriptor still owned: the listener plus accepted clients.
-    /// Membership is the single ownership token (A-17).
+    /// Membership is the single ownership token (A-17). The client share of this
+    /// set is what `maxConcurrentClients` bounds (A-11).
     private var ownedFDs: Set<Int32> = []
     /// Authenticated probe pid -> fd.
     private var clientFDs: [Int32: Int32] = [:]
+    /// fd -> that connection's send gate. Registered by the accept loop before
+    /// the reader thread starts and removed by the thread that closes the
+    /// descriptor, under `stateLock` in both cases (A-06).
+    private var sendGates: [Int32: SendGate] = [:]
 
     public init(
         socketPath: String,
@@ -262,13 +298,20 @@ public final class ProbeSocketServer {
             }
 
             stateLock.lock()
-            let refused = !running || ownedFDs.count >= ProbeSocketServer.maxConcurrentClients
-            if !refused { ownedFDs.insert(clientFD) }
+            // A-11: bound the *clients*, not everything owned — `ownedFDs` also
+            // holds the listening descriptor, and counting it made the real cap
+            // one smaller than the number the refusal message named.
+            let clientsOwned = ownedFDs.filter { $0 != listenFD }.count
+            let refused = !running || clientsOwned >= ProbeSocketServer.maxConcurrentClients
+            if !refused {
+                ownedFDs.insert(clientFD)
+                sendGates[clientFD] = SendGate(fd: clientFD)
+            }
             stateLock.unlock()
             if refused {
                 log.error(
-                    "probe connection refused: already owning \(ProbeSocketServer.maxConcurrentClients)"
-                        + " clients (fd \(clientFD) closed unread, no thread started)"
+                    "probe connection refused: already serving \(clientsOwned) client(s) against the"
+                        + " \(ProbeSocketServer.maxConcurrentClients)-client cap (fd \(clientFD) closed unread, no thread started)"
                 )
                 close(clientFD)
                 continue
@@ -285,6 +328,11 @@ public final class ProbeSocketServer {
         var boundPID: Int32?
         var ignoredPreHello = 0
         var rejectedFrames = 0
+        // A-09: state frames whose `source` token is not one of the schema's
+        // three channels. Counted and named here because this is the only place
+        // the raw token still exists; the inbox keeps the per-pid tally.
+        var unmappedStateFrames = 0
+        var firstUnmappedSource: String?
         var readTimeoutSeconds = ProbeSocketServer.preHelloReadTimeoutSeconds
         configureClientSocket(clientFD, readTimeoutSeconds: readTimeoutSeconds, stage: "pre-hello")
         var codec = FrameCodec()
@@ -318,6 +366,17 @@ public final class ProbeSocketServer {
             }
             if rejectedFrames > 0 {
                 log.error("probe fd \(clientFD) had \(rejectedFrames) frame(s) rejected")
+            }
+            if unmappedStateFrames > 0 {
+                // A-09: the observation is real but its channel is not nameable,
+                // so the pack can only report absence. Say so at close, with the
+                // token that caused it, instead of letting "no stateDiff" stand
+                // as the whole story.
+                log.error(
+                    "probe fd \(clientFD) sent \(unmappedStateFrames) state frame(s) the daemon could not"
+                        + " map to a state channel (first source=\"\(firstUnmappedSource ?? "?");\""
+                        + " schema lanes are z1-macro/z2-mirror/z3-kvc)"
+                )
             }
             closeOwned(clientFD)
         }
@@ -386,6 +445,19 @@ public final class ProbeSocketServer {
                     rejectedFrames += 1
                     continue
                 }
+                if case .state(_, _, _, let rawSource, _) = frame,
+                   StateDiffSource(rawValue: rawSource) == nil {
+                    unmappedStateFrames += 1
+                    if firstUnmappedSource == nil {
+                        firstUnmappedSource = rawSource
+                        log.error(
+                            "probe pid \(pid) reports state source \"\(rawSource)\", which is none of the"
+                                + " schema's state channels; the daemon will not name a channel it cannot"
+                                + " read (R6-15), so a probe that declares no channel in its hello gets no"
+                                + " stateDiff (A-09)"
+                        )
+                    }
+                }
                 inbox.ingest(pid: pid, frame: frame)
             }
         }
@@ -415,6 +487,11 @@ public final class ProbeSocketServer {
             return "peer credential check failed: \(rejection)"
         }
         guard inbox.register(hello) else {
+            // Backstop, not the live gate (A-11): the accept loop already bounds
+            // clients at `maxConcurrentClients` and one connection may register
+            // only the pid it authenticated, so a daemon-served socket cannot
+            // reach `maxRegisteredProbes`. It fires for any future caller that
+            // reaches `register` without going through a connection.
             return "registration refused: \(ProbeInbox.maxRegisteredProbes) distinct probe pids already registered"
         }
         stateLock.lock()
@@ -457,21 +534,67 @@ public final class ProbeSocketServer {
     /// Close one owned client descriptor. Membership of `ownedFDs` is the
     /// ownership token, so a descriptor already closed by its own reader is not
     /// closed again; its pid route goes away with it.
+    ///
+    /// The send gate is unregistered in the *same* `stateLock` region that drops
+    /// the membership (A-06): from that moment no writer can obtain the token,
+    /// and the ones that already hold it are finishing inside their own budget.
+    /// `close(fd)` then happens under `gate.lock`, so a write in flight is never
+    /// racing a close (A-17) and the wait costs only this connection.
     private func closeOwned(_ fd: Int32) {
         stateLock.lock()
-        defer { stateLock.unlock() }
-        guard ownedFDs.remove(fd) != nil else { return }
+        guard ownedFDs.remove(fd) != nil else {
+            stateLock.unlock()
+            return // already closed by its own reader: not ours to touch (R2-04)
+        }
         for pid in clientFDs.filter({ $0.value == fd }).map({ $0.key }) {
             clientFDs.removeValue(forKey: pid)
         }
+        let gate = sendGates.removeValue(forKey: fd)
+        stateLock.unlock()
+        guard let gate else {
+            // Owned without ever being offered for writing, so no writer can be
+            // inside it.
+            close(fd)
+            return
+        }
+        gate.lock.lock()
+        gate.closed = true // under `gate.lock`, so a writer cannot read it torn
         close(fd)
+        gate.lock.unlock()
+    }
+
+    /// One connection's send-side ownership token (A-06, A-17). See the class
+    /// header for the lock layering; the rule it enforces is that no thread ever
+    /// holds `stateLock` and a gate lock at the same time, so the two layers
+    /// cannot deadlock against each other.
+    private final class SendGate {
+        let fd: Int32
+        /// Held across a whole bounded command write, and across `close(fd)`.
+        let lock = NSLock()
+        /// True once the owning thread has taken the connection down. Read and
+        /// written only while holding `lock`.
+        var closed = false
+
+        init(fd: Int32) {
+            self.fd = fd
+        }
     }
 
     /// Per-connection socket options: `SO_NOSIGPIPE` so a write towards a probe
-    /// that already hung up cannot kill the daemon, and `SO_RCVTIMEO` so an idle
-    /// peer cannot pin a reader thread (R5-06). Failures are reported with their
-    /// errno, never swallowed — an unbounded read or a fatal pipe signal is the
-    /// fact an operator needs.
+    /// that already hung up cannot kill the daemon, `SO_RCVTIMEO` so an idle peer
+    /// cannot pin a reader thread (R5-06), and `SO_SNDTIMEO` so a peer that stops
+    /// draining cannot pin a writer thread either. Failures are reported with
+    /// their errno, never swallowed — an unbounded read or write, or a fatal pipe
+    /// signal, is the fact an operator needs.
+    ///
+    /// The send timeout is what makes `commandWriteTimeoutSeconds` real. A
+    /// descriptor this side leaves blocking, so `write()` on it does not return
+    /// when the peer's buffer is merely *partly* full: it sleeps until the whole
+    /// count is accepted, which for a probe that stopped reading is never.
+    /// `waitWritable`'s `poll` only proves one byte fits, so without
+    /// `SO_SNDTIMEO` the bounded-write loop below could hold a send gate — and
+    /// with it the close that waits on that gate — indefinitely. Same lesson
+    /// `SocketServer` learned for engine.sock (B-12).
     private func configureClientSocket(_ fd: Int32, readTimeoutSeconds: Int, stage: String) {
         var noSigPipe: Int32 = 1
         if setsockopt(
@@ -489,23 +612,68 @@ public final class ProbeSocketServer {
             log.error("probe \(stage) SO_RCVTIMEO(\(readTimeoutSeconds)s) not applied to fd \(fd): errno \(code)"
                 + " (\(ProbeSocketServer.systemMessage(code))) — reader may block")
         }
+        var sendTimeout = timeval(
+            tv_sec: Int(ProbeSocketServer.commandWriteTimeoutSeconds), tv_usec: 0
+        )
+        if setsockopt(
+            fd, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, socklen_t(MemoryLayout<timeval>.size)
+        ) != 0 {
+            let code = errno
+            log.error("probe \(stage) SO_SNDTIMEO(\(ProbeSocketServer.commandWriteTimeoutSeconds)s) not applied to fd \(fd): errno \(code)"
+                + " (\(ProbeSocketServer.systemMessage(code))) — a non-draining peer can wedge this write")
+        }
     }
 
-    /// Write one command line to an authenticated probe. `stateLock` is held for
-    /// the whole write so the descriptor cannot be closed underneath it (A-17),
-    /// and the write is bounded by `commandWriteTimeoutSeconds` so a probe that
-    /// stopped draining cannot pin a dispatcher thread. Every failure path logs
-    /// its errno and returns false: a command that never left the daemon is
-    /// reported, never presented as the probe falling silent (R2-07; mirrors
-    /// SocketServer.writeAll, EINTR retry included).
+    /// Write one command line to an authenticated probe. `stateLock` is taken
+    /// only long enough to resolve the route and look up the connection's send
+    /// gate (A-06); the poll/write loop then runs under that gate alone, so a
+    /// probe that stopped draining stalls its own connection instead of the
+    /// whole probe face. The write stays bounded by
+    /// `commandWriteTimeoutSeconds` so it cannot pin a dispatcher thread. Every
+    /// failure path logs its errno and returns false: a command that never left
+    /// the daemon is reported, never presented as the probe falling silent
+    /// (R2-07; mirrors SocketServer.writeAll, EINTR retry included).
     private func writeToClient(pid: Int32, data: Data) -> Bool {
         stateLock.lock()
-        defer { stateLock.unlock() }
-        guard let fd = clientFDs[pid], ownedFDs.contains(fd) else {
+        var gate: SendGate?
+        if let fd = clientFDs[pid], ownedFDs.contains(fd) {
+            gate = sendGates[fd]
+        }
+        stateLock.unlock()
+        guard let gate else {
             log.error("probe command not sent to pid \(pid): no live connection")
             return false
         }
+        return writeThroughGate(gate, pid: pid, data: data)
+    }
+
+    /// The bounded write itself, one connection's send gate held for its whole
+    /// duration. Ownership proof (A-17) is the gate: the closing thread removes
+    /// it from `sendGates` under `stateLock` before it may take the lock, so
+    /// either this loop holds the gate and the close waits for it, or the close
+    /// already happened and `gate.closed` says so — in which case the descriptor
+    /// is gone (and may even have been recycled to another process) and is not
+    /// touched.
+    ///
+    /// The budget is enforced twice, on purpose: the absolute deadline in
+    /// `waitWritable` between attempts, and `SO_SNDTIMEO` on the descriptor
+    /// inside each attempt. Only the second one bounds a `write()` that the
+    /// kernel accepted as "writable" and then slept on, so a peer that stops
+    /// draining costs this connection at most a little over
+    /// `commandWriteTimeoutSeconds` — never the reader thread that comes to
+    /// close it, and never another probe's command (A-06).
+    private func writeThroughGate(_ gate: SendGate, pid: Int32, data: Data) -> Bool {
+        gate.lock.lock()
+        defer { gate.lock.unlock() }
+        guard !gate.closed else {
+            log.error(
+                "probe command not sent to pid \(pid): its connection closed while the command was"
+                    + " being prepared (fd \(gate.fd) is no longer ours to write)"
+            )
+            return false
+        }
         guard !data.isEmpty else { return true }
+        let fd = gate.fd
         let deadline = Date().addingTimeInterval(Double(ProbeSocketServer.commandWriteTimeoutSeconds))
         let total = data.count
         var offset = 0
@@ -522,8 +690,12 @@ public final class ProbeSocketServer {
             if written <= 0 {
                 let code = errno
                 if code == EINTR { continue }
+                let sendTimedOut = code == EAGAIN || code == EWOULDBLOCK
                 log.error("probe command for pid \(pid) NOT DELIVERED after \(offset)/\(total) bytes:"
-                    + " errno \(code) (\(ProbeSocketServer.systemMessage(code)))")
+                    + " errno \(code) (\(ProbeSocketServer.systemMessage(code)))"
+                    + (sendTimedOut
+                        ? " — send timeout: the peer stopped draining"
+                        : ""))
                 return false
             }
             offset += written
@@ -534,8 +706,10 @@ public final class ProbeSocketServer {
     /// Wait for write-readiness against an absolute deadline: nil means
     /// writable, a string says why it is not — a stalled peer, an expired
     /// budget and a failed `poll` stay three different facts. Needed because a
-    /// blocking write to a peer that stopped reading would otherwise hold the
-    /// descriptor lock for the kernel's own unbounded timeout.
+    /// blocking write to a peer that stopped reading would otherwise hold *this
+    /// connection's* send gate for the kernel's own unbounded timeout (A-06:
+    /// the stall is now bounded and per-connection, so no other probe and no
+    /// dispatcher thread waits behind it).
     private static func waitWritable(_ fd: Int32, deadline: Date) -> String? {
         let writableFlag = Int16(POLLOUT)
         while true {
