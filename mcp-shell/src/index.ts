@@ -138,6 +138,21 @@ function main(): void {
       // `gp_probe_status` from being served. `pushDelivery` serialises only the
       // write of each finished frame — one frame at a time on the byte stream,
       // replies in completion order, paired by the JSON-RPC id each carries.
+      //
+      // What that split deliberately leaves *out* of the completion order is the
+      // `EvidenceAuditSession`. Its `reset()`/`record()` run after an `await`,
+      // so ordering them through this queue would order them by completion, and
+      // the trail a later `gp_recent_reports` reads would depend on which daemon
+      // reply landed first. `tools.ts` therefore claims a trail turn
+      // synchronously when `executeTool` is entered — which happens inside the
+      // synchronous prefix of the `handleLine` call on the next line, i.e. in the
+      // order the frames arrived — so the trail is mutated and read in *request*
+      // order while the engine calls and these replies keep flowing freely
+      // (`tools.test.mjs`: "an act admitted after an attach keeps its trail
+      // entry…"). Do not fold the two back together: this queue is for bytes,
+      // the trail turn is for `operationIds`, and only the second one has an
+      // order the agent acts on — a trail that lost an act tells it to click
+      // again.
       queue.pushDelivery(server.handleLine(line), writeResponse);
     },
     onOversize: (bytes, prefix) => {

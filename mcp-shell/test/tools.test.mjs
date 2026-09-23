@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-import { TOOL_SPECS, TOOL_BY_NAME, executeTool } from "../dist/tools.js";
+import { TOOL_SPECS, TOOL_BY_NAME, executeTool, trailScopedTool } from "../dist/tools.js";
 import { EvidenceAuditSession } from "../dist/audit-session.js";
 import { canonicalJson } from "../dist/canonical.js";
 import { FORCE_OVERWRITE_ENV } from "../dist/project-registry.js";
@@ -396,6 +396,180 @@ test("gp_attach resets the session trail", async () => {
   assert.deepEqual(session.recentIds(20), []);
 });
 
+/* ------------------------------------------------------------------ *
+ * B-02 follow-up: the audit trail keeps *request* order even though the
+ * replies no longer do.
+ *
+ * Since B-02 an outstanding engine call cannot hold back `ping`, `tools/list`
+ * or `gp_probe_status`, which also means two pipelined tool calls apply their
+ * `session.reset()` / `session.record()` in whichever order the daemon answered.
+ * Pipelining is legal and the timeout remedy tells the agent to do it, so the
+ * trail either kept an act across a re-attach (evidence of the app the attach
+ * replaced) or lost it ("no operations recorded in this session" → the agent
+ * re-performs the act on the user's screen). tools.ts claims a trail turn
+ * before its first await, so the outcome below is the request-order one no
+ * matter which reply lands first — and the two tests are the same pair of
+ * calls with the replies swapped, which is exactly the thing that used to flip.
+ * ------------------------------------------------------------------ */
+
+/** Answer one specific outstanding engine frame, out of the order they went out. */
+function respondTo(io, frame, result) {
+  io.send(JSON.stringify({ id: frame.id, result }));
+}
+
+/** The engine frames a shell call has put on the wire, in the order it sent them. */
+function framesSent(io) {
+  return io.sent.map((line) => JSON.parse(line));
+}
+
+/**
+ * Let every pending microtask run before answering the fake engine.
+ *
+ * `gp_recent_reports` is the one tool whose *first* engine frame sits behind an
+ * `await`: it reads the trail before it asks the daemon, and that read waits for
+ * its turn (tools.ts trail ordering). So its frame is not on the wire in the
+ * call's own tick, unlike every other tool driven in this file. A `setImmediate`
+ * tick drains the microtask queue, so this waits for scheduling only — never
+ * for a 500ms engine deadline.
+ */
+function flush() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+test("an act admitted after an attach keeps its trail entry when the act replies first", async () => {
+  const { engine, io } = makeEngine();
+  const session = new EvidenceAuditSession();
+  const attach = TOOL_BY_NAME.get("gp_attach");
+  const act = TOOL_BY_NAME.get("gp_act");
+
+  const attachPromise = executeTool(attach, { bundleId: "com.example.app" }, engine, session);
+  const actPromise = executeTool(act, { selector: { role: "AXButton" }, action: "press" }, engine, session);
+  // B-02 still holds: the trail is queued, the daemon requests are not.
+  assert.equal(io.sent.length, 2, "the act reaches the engine without waiting for the attach");
+  const [attachFrame, actFrame] = framesSent(io);
+
+  // Out of order: the act answers first, the attach's reply arrives later.
+  respondTo(io, actFrame, { operationId: OP_A, actConfirmed: true });
+  respondTo(io, attachFrame, { pid: 4242, bundleId: "com.example.app", appName: "Example" });
+  await Promise.all([attachPromise, actPromise]);
+
+  // Request order is attach → act, so the reset precedes the record: the act is
+  // in the trail the next gp_recent_reports / gp_export_evidence reads.
+  assert.deepEqual(session.recentIds(20), [OP_A]);
+});
+
+test("an act admitted before an attach is cleared by it when the attach replies first", async () => {
+  const { engine, io } = makeEngine();
+  const session = new EvidenceAuditSession();
+  const attach = TOOL_BY_NAME.get("gp_attach");
+  const act = TOOL_BY_NAME.get("gp_act");
+
+  const actPromise = executeTool(act, { selector: { role: "AXButton" }, action: "press" }, engine, session);
+  const attachPromise = executeTool(attach, { bundleId: "com.example.app" }, engine, session);
+  const [actFrame, attachFrame] = framesSent(io);
+
+  // The opposite interleaving of the test above: the attach answers first.
+  respondTo(io, attachFrame, { pid: 4242, bundleId: "com.example.app", appName: "Example" });
+  respondTo(io, actFrame, { operationId: OP_A, actConfirmed: true });
+  await Promise.all([actPromise, attachPromise]);
+
+  // Request order is act → attach, and a successful attach restarts the trail
+  // (`audit-session.ts`), so the act is gone — deterministically, not because
+  // the attach's reply happened to win the race.
+  assert.deepEqual(session.recentIds(20), []);
+});
+
+test("two pipelined acts record in request order when the daemon answers them out of order", async () => {
+  const { engine, io } = makeEngine();
+  const session = new EvidenceAuditSession();
+  const act = TOOL_BY_NAME.get("gp_act");
+
+  const first = executeTool(act, { selector: { role: "AXButton", title: "One" }, action: "press" }, engine, session);
+  const second = executeTool(act, { selector: { role: "AXButton", title: "Two" }, action: "press" }, engine, session);
+  const [firstFrame, secondFrame] = framesSent(io);
+
+  respondTo(io, secondFrame, { operationId: OP_B, actConfirmed: true });
+  respondTo(io, firstFrame, { operationId: OP_A, actConfirmed: true });
+  await Promise.all([first, second]);
+
+  assert.deepEqual(session.recentIds(20), [OP_A, OP_B]);
+});
+
+test("gp_recent_reports admitted behind an outstanding act reports that act", async () => {
+  const { engine, io } = makeEngine();
+  const session = new EvidenceAuditSession();
+  const act = TOOL_BY_NAME.get("gp_act");
+  const recent = TOOL_BY_NAME.get("gp_recent_reports");
+
+  const actPromise = executeTool(act, { selector: { role: "AXButton" }, action: "press" }, engine, session);
+  const recentPromise = executeTool(recent, { limit: 5 }, engine, session);
+  const actFrame = framesSent(io)[0];
+
+  respondTo(io, actFrame, { operationId: OP_A, actConfirmed: true });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // The read waited for the record, so it now has an operation to fetch. Answer
+  // from an empty trail and this reports GP_E_NO_EVIDENCE — which is the
+  // message that tells the agent to click again.
+  assert.ok(io.sent.length >= 2, "gp_recent_reports fetched evidence for the act admitted before it");
+  assert.equal(framesSent(io)[1].method, "last_evidence");
+  assert.equal(framesSent(io)[1].params.operationId, OP_A);
+  io.respond(evidenceFrame(OP_A, T3_DIAGNOSIS));
+
+  const outcome = await recentPromise;
+  assert.equal(outcome.isError, false);
+  assert.ok(outcome.content[0].text.includes(`# ${OP_A} · T3 · normal`));
+  await actPromise;
+});
+
+test("gp_probe_status and gp_observe are answered while a gp_act is still outstanding", async () => {
+  const { engine, io } = makeEngine();
+  const session = new EvidenceAuditSession();
+  const act = TOOL_BY_NAME.get("gp_act");
+
+  const actPromise = executeTool(act, { selector: { role: "AXButton" }, action: "press" }, engine, session);
+  const statusPromise = executeTool(TOOL_BY_NAME.get("gp_probe_status"), {}, engine, session);
+  const observePromise = executeTool(TOOL_BY_NAME.get("gp_observe"), {}, engine, session);
+  const [actFrame, statusFrame, observeFrame] = framesSent(io);
+
+  // `slowEngineRemedy` sends the agent to gp_probe_status *during* an
+  // outstanding act, and gp_observe/gp_snapshot/gp_probe_status frames carry no
+  // operationId for the trail, so none of them may queue behind it.
+  respondTo(io, statusFrame, { probes: [], attachedHasProbe: false });
+  respondTo(io, observeFrame, { axTree: [], nodeCount: 0, digest: "d".repeat(32), latencyMs: 4 });
+  const status = await statusPromise;
+  const observe = await observePromise;
+  assert.equal(status.isError, false, "gp_probe_status answered with the act outstanding");
+  assert.equal(observe.isError, false, "gp_observe answered with the act outstanding");
+
+  respondTo(io, actFrame, { operationId: OP_A, actConfirmed: true });
+  await actPromise;
+  // Excluded from the trail order does not mean excluded from the trail.
+  assert.deepEqual(session.recentIds(20), [OP_A]);
+});
+
+test("the trail-ordered set is the tools whose frames build the trail", () => {
+  // `gp_observe` / `gp_snapshot` / `gp_probe_status` are absent because their
+  // result frames carry no `operationId`/`evidenceId` to record (see
+  // `trailScopedTool`), and `gp_probe_status` in particular must keep answering
+  // during an outstanding act. A new engine method that starts answering with an
+  // operationId has to be added to that list, and this assertion is where the
+  // omission surfaces.
+  assert.deepEqual(
+    TOOL_SPECS.filter(trailScopedTool).map((spec) => spec.name),
+    [
+      "gp_attach",
+      "gp_act",
+      "gp_assert_element",
+      "gp_diagnose",
+      "gp_last_evidence",
+      "gp_restore",
+      "gp_export_evidence",
+      "gp_recent_reports",
+    ],
+  );
+});
+
 test("gp_recent_reports with no recorded operations is GP_E_NO_EVIDENCE", async () => {
   const { engine } = makeEngine();
   const recent = TOOL_BY_NAME.get("gp_recent_reports");
@@ -424,9 +598,10 @@ test("gp_recent_reports aggregates the recorded operations into one report", asy
 
   const recent = TOOL_BY_NAME.get("gp_recent_reports");
   const promise = executeTool(recent, { limit: 5 }, engine, session);
+  await flush();
 
   io.respond(evidenceFrame(OP_A, T3_DIAGNOSIS));
-  await new Promise((resolve) => setImmediate(resolve));
+  await flush();
   io.respond(evidenceFrame(OP_B, T3_DIAGNOSIS));
 
   const outcome = await promise;
@@ -438,7 +613,7 @@ test("gp_recent_reports aggregates the recorded operations into one report", asy
   assert.ok(text.includes("---"));
 });
 
-test("gp_recent_reports skips evicted entries with a note", async () => {
+test("gp_recent_reports skips entries the daemon cannot answer for, with a note", async () => {
   const { engine, io } = makeEngine();
   const session = new EvidenceAuditSession();
   session.record({ operationId: OP_A });
@@ -446,9 +621,10 @@ test("gp_recent_reports skips evicted entries with a note", async () => {
 
   const recent = TOOL_BY_NAME.get("gp_recent_reports");
   const promise = executeTool(recent, { limit: 5 }, engine, session);
+  await flush();
 
   io.respondError({ code: "GP_E_NO_EVIDENCE", message: "unknown operationId", remedy: "check the operationId" });
-  await new Promise((resolve) => setImmediate(resolve));
+  await flush();
   io.respond(evidenceFrame(OP_B, T3_DIAGNOSIS));
 
   const outcome = await promise;
@@ -469,8 +645,9 @@ test("gp_recent_reports renders HTML aggregation when format=html", async () => 
 
   const recent = TOOL_BY_NAME.get("gp_recent_reports");
   const promise = executeTool(recent, { format: "html", limit: 5 }, engine, session);
+  await flush();
   io.respond(evidenceFrame(OP_A, T3_DIAGNOSIS));
-  await new Promise((resolve) => setImmediate(resolve));
+  await flush();
   io.respond(evidenceFrame(OP_B, T3_DIAGNOSIS));
 
   const outcome = await promise;
@@ -479,6 +656,86 @@ test("gp_recent_reports renders HTML aggregation when format=html", async () => 
   assert.ok(text.includes("<h1>GlassPane recent reports (2)</h1>"));
   assert.ok(text.includes("<hr>"));
   assert.ok(text.includes(`<h1>${OP_A} · T3 · normal</h1>`));
+});
+
+/* ------------------------------------------------------------------ *
+ * The two properties the trail queue rests on: it orders by *claim*, and
+ * the wait it imposes is bounded.
+ * ------------------------------------------------------------------ */
+
+test("an abandoned trail turn does not let a report overtake an outstanding act", async () => {
+  // The middle call claims a trail turn and hands it back without touching the
+  // trail (its engine call failed), so releases are *not* in claim order here.
+  // The report has to wait for every turn that was open when it claimed, not
+  // just for the previous one — otherwise it reads the trail before the act
+  // writes it and tells the agent the act never happened, which is the harm the
+  // queue exists to prevent.
+  const { engine, io } = makeEngine();
+  const session = new EvidenceAuditSession();
+  const act = TOOL_BY_NAME.get("gp_act");
+  const lastEvidence = TOOL_BY_NAME.get("gp_last_evidence");
+  const recent = TOOL_BY_NAME.get("gp_recent_reports");
+
+  const actPromise = executeTool(act, { selector: { role: "AXButton" }, action: "press" }, engine, session);
+  const abandonedPromise = executeTool(lastEvidence, {}, engine, session);
+  const reportPromise = executeTool(recent, { limit: 5 }, engine, session);
+  await flush();
+  assert.equal(
+    framesSent(io).length,
+    2,
+    "the two engine calls went out at once; only the report is queued",
+  );
+
+  // The last_evidence frame is the one on the wire, so this answers the middle
+  // call — the act stays outstanding.
+  io.respondError({ code: "GP_E_NO_EVIDENCE", message: "no evidence recorded", remedy: "run gp_act first" });
+  assert.equal((await abandonedPromise).isError, true);
+
+  // Only now does the act answer, and it records into the trail.
+  const [actFrame] = framesSent(io);
+  respondTo(io, actFrame, { operationId: OP_A, actConfirmed: true });
+  await actPromise;
+
+  await flush();
+  const reportFrame = framesSent(io)[2];
+  assert.equal(reportFrame.method, "last_evidence");
+  assert.equal(
+    reportFrame.params.operationId,
+    OP_A,
+    "the report read the trail *after* the act that was still outstanding when it claimed its turn",
+  );
+  io.respond(evidenceFrame(OP_A, T3_DIAGNOSIS));
+  const report = await reportPromise;
+  assert.equal(report.isError, false);
+  assert.ok(report.content[0].text.includes(`# ${OP_A} · T3 · normal`));
+});
+
+test("an unanswered act releases the trail when the engine deadline settles it", async () => {
+  // Every trail-scoped call can be made to wait behind another, so the wait has
+  // to be bounded: a turn is outstanding only while its `executeTool` promise
+  // is, and `engine.call` always settles — here on its deadline. If it did not,
+  // one dropped daemon frame would wedge `gp_recent_reports`,
+  // `gp_export_evidence` and every later evidence tool for the life of the
+  // process, which is a worse failure than the interleaving the queue fixes.
+  const { engine, io } = makeEngine({ timeoutMs: 30 });
+  const session = new EvidenceAuditSession();
+  const act = TOOL_BY_NAME.get("gp_act");
+  const recent = TOOL_BY_NAME.get("gp_recent_reports");
+
+  const actPromise = executeTool(act, { selector: { role: "AXButton" }, action: "press" }, engine, session);
+  await flush();
+  assert.equal(framesSent(io).length, 1, "the act is on the wire and nothing answered it");
+
+  const report = await Promise.race([
+    executeTool(recent, { limit: 5 }, engine, session),
+    new Promise((resolve) => setTimeout(() => resolve("wedged"), 1000)),
+  ]);
+  assert.notEqual(report, "wedged", "the report must not outlive the act's 30 ms engine deadline");
+  assert.equal(report.isError, true);
+  assert.ok(report.content[0].text.startsWith("GP_E_NO_EVIDENCE"));
+
+  const actOutcome = await actPromise;
+  assert.equal(actOutcome.isError, true, "the unanswered act itself surfaces as an engine error");
 });
 
 /* ------------------------------------------------------------------ *

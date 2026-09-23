@@ -434,7 +434,28 @@ public final class EngineCore {
         GPError(
             code: .badParams,
             message: "project \(projectId) has no evidenceStoragePath, so it owns no evidence archive of its own; the shared default directory (\(EvidenceStore.defaultDirectory)) is not its substitute and nothing was deleted",
-            remedy: "prune the shared archive by leaving projectId out of the call, or register the project's own directory first: gp_project_set with \"evidenceStoragePath\": \"\(evidenceStorageExample)\" and then restart the background service (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`) so it reloads projects.json"
+            remedy: "name the archive you mean instead of leaving the target implicit. This project's own: gp_project_set with \"evidenceStoragePath\": \"\(evidenceStorageExample)\" and then restart the background service (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`) so it reloads projects.json. The shared archive: `glasspaned --prune-evidence --older-than <days>` with no `--project` — that is the process which owns it; an engine instance built without one has no shared archive to fall back to and says so, and leaving projectId out of a call on such an instance deletes nothing."
+        )
+    }
+
+    /// The same rule seen from the other side: an engine that was handed **no
+    /// archive** owns no directory to prune or to measure. `pruneEvidence` used
+    /// to fold that absence into `EvidenceStore.defaultDirectory` and delete
+    /// aged entries from the shared archive, which is the substitution
+    /// `noArchiveRefusal` already refuses for a project that named no directory
+    /// — and the textual isolation gate cannot see it, because the shared
+    /// archive is reached by *omitting* an argument rather than by naming a
+    /// path token. "No store injected" means no disk side effect.
+    ///
+    /// Public for the same reason as `noArchiveRefusal`: the words are a
+    /// contract a test pins by equality, and they have to send the agent to the
+    /// surface that *does* own the shared archive — `glasspaned --prune-evidence`
+    /// with no `--project` — instead of to a store this instance lacks.
+    public static func noStoreArchiveRefusal() -> GPError {
+        GPError(
+            code: .badParams,
+            message: "this engine instance has no evidence archive injected, so it has no directory to prune or measure: the shared default directory (\(EvidenceStore.defaultDirectory)) is not its substitute and nothing was deleted",
+            remedy: "name the archive you mean. Either give this instance one where it is built — EngineCore(evidenceStore:) with a store over a directory, the way the background service injects EvidenceStore.atProductionDefault() — or scope the call to a project that owns one: gp_project_set {\"projectId\": \"<that prj_…>\", \"displayName\": …, \"bundleId\" or \"pid\": …, \"evidenceStoragePath\": \"\(evidenceStorageExample)\"} (repeat the project's other fields — the update replaces them), restart the background service so it reloads projects.json (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`), then call again with that projectId. To prune the shared archive itself use the process that owns it: `glasspaned --prune-evidence --older-than <days>`, after looking at what is there with `glasspaned --evidence-stats` and counting without deleting via `--dry-run`"
         )
     }
 
@@ -1287,10 +1308,18 @@ public final class EngineCore {
 
     // MARK: - P5 evidence maintenance (spec v5.0 §9.3)
 
-    /// Age-prune evidence, either on the active store's directory (nil
-    /// projectId) or on a registered project's evidenceStoragePath directory.
-    /// Returns the number of entries removed; a missing directory counts 0.
-    /// Storage-layer primitive — no socket frame, no method-table change.
+    /// Age-prune evidence, either on a registered project's
+    /// `evidenceStoragePath` directory or, with `projectId` nil, on the archive
+    /// injected into this instance. Returns the number of entries removed; a
+    /// missing directory counts 0. Storage-layer primitive — no socket frame,
+    /// no method-table change.
+    ///
+    /// An instance built with `evidenceStore: nil` has no archive to prune and
+    /// refuses (`noStoreArchiveRefusal`) rather than falling back to the shared
+    /// default directory: the fallback deleted aged entries from
+    /// `~/.glasspane/evidence/` on one omitted argument's say-so, which is the
+    /// substitution this round's own `noArchiveRefusal` refuses from the project
+    /// side.
     public func pruneEvidence(projectId: String?, olderThanDays: Int) throws -> Int {
         let dir: String
         if let projectId {
@@ -1306,7 +1335,8 @@ public final class EngineCore {
                 throw refusal
             }
         } else {
-            dir = evidenceStore?.directory ?? EvidenceStore.defaultDirectory
+            guard let evidenceStore else { throw Self.noStoreArchiveRefusal() }
+            dir = evidenceStore.directory
         }
         // A temporary store over the resolved directory — never mutates the
         // active store's own directory/retention state (P5 §9.3). The engine's
@@ -1421,7 +1451,7 @@ public final class EngineCore {
                     throw GPError(
                         code: .restoreUnsupported,
                         message: "tier-1 restore requires a Z5 probe payload; snapshot '\(snapshotId)' has none because the export never produced one — \(reason)",
-                        remedy: "the probe is attached; re-snapshotting alone changes nothing until the reported cause is fixed. For a digest mismatch the state moved underneath the export, so take the snapshot again while the app is quiet. For a delivery/timeout reason run gp_probe_status and read `disconnections` plus each row's `connected` flag, then re-establish the probe (GP.start() in the app) or restart the background service with `launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`. For a missing `checkpoint` capability the attached probe SDK predates checkpoint export: update the app's SDK. Tier-2 ffwd needs none of that — pass `steps` and the rollback runs on the UI"
+                        remedy: "the probe is attached; re-snapshotting alone changes nothing until the reported cause is fixed. For a digest mismatch the state moved underneath the export, so take the snapshot again while the app is quiet. For a delivery/timeout reason run gp_probe_status and read `recentDisconnections` — that is the drop history, one row per dropped registration with its `pid`, `disconnectReason`, `disconnectedAt` and a per-pid `drops` count; `disconnections` is only the total number of drops since start, and `probes` lists live registrations (every row `connected: true`), so a probe that has dropped is simply absent from it rather than flagged inside it. Then re-establish the probe (GP.start() in the app) or restart the background service with `launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`. For a missing `checkpoint` capability the attached probe SDK predates checkpoint export: update the app's SDK. Tier-2 ffwd needs none of that — pass `steps` and the rollback runs on the UI"
                     )
                 }
                 throw GPError(
@@ -1476,7 +1506,7 @@ public final class EngineCore {
                         ? "tier-1 restore command was never delivered to the probe: \(why)"
                         : "tier-1 restore execution refused by probe: \(why)",
                     remedy: undelivered
-                        ? "nothing was rewritten and the app's state is untouched: the checkpoint_restore bytes did not leave the daemon (\(why)). Run gp_probe_status and read `disconnections` plus each row's `connected` flag — the probe socket is gone or was never attached. Re-establish it (GP.start() in the app, or restart the background service with `launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`), take a fresh gp_snapshot, then restore again; or roll back on the UI with tier-2 ffwd by passing `steps`"
+                        ? "nothing was rewritten and the app's state is untouched: the checkpoint_restore bytes did not leave the daemon (\(why)). Run gp_probe_status and read `recentDisconnections` — the drop history, one row per dropped registration with its `pid`, `disconnectReason`, `disconnectedAt` and a per-pid `drops` count — because that is where a gone socket shows: `disconnections` is only the total number of drops since start, and `probes` carries live registrations only (every row `connected: true`), so this pid is absent from it rather than listed in it as disconnected. Re-establish the probe (GP.start() in the app, or restart the background service with `launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`), take a fresh gp_snapshot, then restore again; or roll back on the UI with tier-2 ffwd by passing `steps`"
                         : "the probe answered and refused the rewrite (\(why)): re-snapshot with gp_snapshot against the live probe and restore again, or roll back on the UI with tier-2 ffwd by passing `steps`"
                 )
             }

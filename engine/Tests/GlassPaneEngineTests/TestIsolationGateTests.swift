@@ -21,7 +21,13 @@ import XCTest
 ///       47 test call sites that pass neither argument harmless, and it is
 ///       why the rules below can be textual: they exist to keep the *escaped*
 ///       routes (named factories, optional values folded into a location)
-///       from creeping back in;
+///       from creeping back in. Round 3 found the one route this claim did not
+///       cover, and it was reached by *omitting* an argument rather than by
+///       naming a path: `pruneEvidence` with no project on an engine built with
+///       no archive fell through to the shared directory and deleted aged files
+///       from it. `EngineCore` now refuses that combination ("no store injected
+///       means no disk side effect"), and the last rule below is the textual
+///       half of the same pair, which is why it matches two shapes at once;
 ///   (b) this scan — forbidden shapes matched over the **whole text** of every
 ///       `.swift` file of the engine test tree, so a construct split across
 ///       lines is caught as the same shape as one written on a single line
@@ -128,6 +134,36 @@ final class TestIsolationGateTests: XCTestCase {
         }
     }
 
+    /// The route no token rule can see: an age-prune with **no project named**
+    /// on an engine built with **no archive injected**. Neither half is a path
+    /// literal or a state-object default — the shared archive was reached by
+    /// *omitting* an argument — and that pair is what deleted aged entries out
+    /// of the developer's own archive from inside `swift test`, one argument
+    /// away. `EngineCore` refuses the combination now; the rule keeps the call
+    /// shape from being written again unnoticed. Deliberately a *pair*: an
+    /// injected store plus a nil project is the one legitimate form (it prunes
+    /// the archive the caller named), and a store-less engine pruned by project
+    /// is legitimate too.
+    private func storeLessPruneRule(_ name: String) throws -> Rule {
+        let prune = try NSRegularExpression(
+            // `[^)]*` keeps the search inside one argument list, so the shape
+            // is found whatever order the arguments are written in and however
+            // many lines the call spans.
+            pattern: needle("prune", "Evidence")
+                + "\\s*\\([^)]*" + needle("projectId") + "\\s*:\\s*nil"
+        )
+        let noArchive = try NSRegularExpression(
+            pattern: needle("evidence", "Store") + "\\s*:\\s*nil"
+        )
+        return Rule(name: name) { text in
+            let full = NSRange(text.startIndex..., in: text)
+            guard noArchive.matches(in: text, range: full).isEmpty == false else {
+                return []
+            }
+            return prune.matches(in: text, range: full).map { $0.range.location }
+        }
+    }
+
     /// The forbidden shapes. `registry`, `store` and `gate` are the three
     /// file-backed state objects of the engine; each rule names the cost of
     /// the shape it catches.
@@ -208,6 +244,9 @@ final class TestIsolationGateTests: XCTestCase {
             try rule(
                 "hardcoded path handed to the approval ledger",
                 gate + needle("\\(\\s*path\\s*:\\s*\"")
+            ),
+            try storeLessPruneRule(
+                "age-prune with no project on an engine with no archive (shared default)"
             ),
         ]
     }
@@ -300,6 +339,17 @@ final class TestIsolationGateTests: XCTestCase {
     /// written across several lines, which is what the old line-local scanner
     /// reported as clean — and the shapes the fix introduced have to pass.
     func testScannerRejectsTheForbiddenShapes() throws {
+        // The pair shape the token rules cannot see, one line and split. Held in
+        // locals so the assertions below can require *this* rule — not any other
+        // — to be the one that reports it.
+        let projectLessPrune = needle(
+            "let c = Engine", "Core", "(channel: ch, evidence", "Store", ": nil)\n",
+            "let removed = try c.prune", "Evidence(projectId: nil, olderThanDays: 30)"
+        )
+        let projectLessPruneSplit = needle(
+            "let c = Engine", "Core", "(channel: ch,\n  evidence", "Store", ": nil)\n",
+            "let removed = try c.prune", "Evidence(\n  projectId: nil,\n  olderThanDays: 30\n)"
+        )
         let offenders: [(name: String, text: String)] = [
             (needle("bare", "Project", "Registry"),
              needle("let r = Project", "Registry", "()")),
@@ -338,12 +388,25 @@ final class TestIsolationGateTests: XCTestCase {
              needle("Evidence", "Store", "(directory", ": \"/tmp/ev\")")),
             (needle("hardcoded", "gate"),
              needle("Approval", "Gate", "(path", ": \"/tmp/ap.json\")")),
+            (needle("project-less", "prune"), projectLessPrune),
+            (needle("project-less prune, split across lines"), projectLessPruneSplit),
         ]
         let rules = try rules()
         for offender in offenders {
             XCTAssertFalse(
                 findings(in: offender.text, rules: rules, prefix: "snippet").isEmpty,
                 "rule gap: nothing reported the \(offender.name) shape\n\(offender.text)"
+            )
+        }
+        // Attribution: the pair rule has to be the one that fires, or a future
+        // rule that happens to cover part of the shape could leave this pair
+        // unreported while the loop above still passes.
+        let prunePairRules = rules.filter { $0.name.hasPrefix("age-prune") }
+        XCTAssertEqual(prunePairRules.count, 1, "the pair rule is missing from `rules()`")
+        for shape in [projectLessPrune, projectLessPruneSplit] {
+            XCTAssertEqual(
+                findings(in: shape, rules: prunePairRules, prefix: "snippet").count, 1,
+                "the pair rule did not report the project-less prune shape\n\(shape)"
             )
         }
         let sanctioned: [String] = [
@@ -357,6 +420,13 @@ final class TestIsolationGateTests: XCTestCase {
                    "let s = Evidence", "Store", "(\n  directory", ": dir,\n  maxFiles: nil\n)"),
             needle("let c = Engine", "Core", "(channel: ch, project", "Registry", ": reg ?? TestSandbox.projectRegistry(\"x\"))"),
             needle("let g = Approval", "Gate", "()"),
+            // The two legitimate halves of the pair rule: pruning the archive
+            // the caller *did* name, with no project; and a store-less engine
+            // pruned by project, which resolves through the registry instead.
+            needle("let c = Engine", "Core", "(channel: ch, evidence", "Store", ": store)\n",
+                   "let removed = try c.prune", "Evidence(projectId: nil, olderThanDays: 30)"),
+            needle("let c = Engine", "Core", "(channel: ch, evidence", "Store", ": nil)\n",
+                   "let removed = try c.prune", "Evidence(projectId: project, olderThanDays: 30)"),
             needle("let h = NSHome", "Directory", "()  // not composed with the state folder"),
             // The window is what makes the two-line composition rule safe: the
             // same two literals far apart in one file are not a composed path.

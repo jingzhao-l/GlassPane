@@ -14,7 +14,7 @@ import {
 import { canonicalJson } from "./canonical.js";
 import { daemonUnreachableRemedy, EngineCallError, EngineJsonRpcClient } from "./engine-client.js";
 import { formatToolError, formatToolErrorShape, GP_E_BAD_PARAMS, GP_E_INTERNAL, GP_E_NO_EVIDENCE, GP_E_NOT_FOUND, GP_E_PROJECT_LIMIT } from "./errors.js";
-import { EvidenceAuditSession } from "./audit-session.js";
+import { EvidenceAuditSession, type TrailTurn } from "./audit-session.js";
 import { renderHTML, renderMarkdown, escapeHTML } from "./evidence-report.js";
 import type { EvidencePackReportView } from "./evidence-report.js";
 import {
@@ -172,6 +172,11 @@ export interface ToolSpec {
 export interface ToolExecuteContext {
   engine: EngineJsonRpcClient;
   session: EvidenceAuditSession;
+  /**
+   * This call's position in the audit trail's request order. Tools that do not
+   * touch the trail get {@link INERT_TRAIL_TURN}, which never waits.
+   */
+  turn: TrailTurn;
 }
 
 /** Tool result shape shared by the default path and custom executors. */
@@ -467,6 +472,111 @@ export const TOOL_BY_NAME: ReadonlyMap<string, ToolSpec> = new Map(
 );
 
 /* ------------------------------------------------------------------ *
+ * Audit-trail ordering (B-02 follow-up).
+ *
+ * `index.ts` starts every request at once and serialises only the *write* of
+ * each finished frame, so an outstanding `gp_act` cannot stop `ping`,
+ * `tools/list` or `gp_probe_status`. That is right for the byte stream and
+ * wrong for `EvidenceAuditSession`: its `reset()`/`record()` run *after* the
+ * engine `await`, so by themselves they apply in completion order. A client
+ * that pipelines `gp_act` and `gp_attach` — which the timeout remedy actively
+ * encourages — would then leave whichever interleaving the daemon happened to
+ * produce: either the act survives the attach's reset (the new session's trail
+ * carries evidence of the app it replaced) or it is wiped (the agent is told
+ * "no operations recorded in this session" and re-performs the act on the
+ * user's screen). Both are the harm this round already removed for the
+ * session-reset semantics; concurrency must not turn it back into a coin flip.
+ *
+ * Invariant enforced here: **the trail is mutated and read in the order the
+ * requests were admitted**, so for any overlap the trail is exactly what a
+ * serial run of the same requests would leave. The turn machinery itself lives
+ * on the session (`EvidenceAuditSession.claimTrailTurn`, `audit-session.ts`)
+ * because request order is a property of one session's trail, not of this
+ * module: two sessions in one process must not queue behind each other. What
+ * stays here is the policy: which tools need a turn, and where the turns are
+ * taken.
+ *
+ * A turn is claimed when `executeTool` is entered, which `McpServer.handleLine`
+ * reaches *synchronously* from the arriving frame — claim order therefore is
+ * request order — and it is never *held* across an engine call: every
+ * `acquire()` sits directly in front of a `reset()` / `record()` / trail read.
+ * Ordering cannot be pushed onto the reply queue instead: a mutation enqueued
+ * from after an `await` is enqueued in completion order, which is the defect.
+ *
+ * Bounded wait: a turn is only outstanding while its `executeTool` promise is,
+ * and `engine.call` always settles — on a reply, a transport error, or its
+ * per-method deadline — so the worst-case queue delay is the outstanding
+ * engine deadline, never a wedge. `test/tools.test.mjs` pins that with a
+ * deliberately unanswered act.
+ * ------------------------------------------------------------------ */
+
+/** The turn of a tool that never touches the trail: it never waits. */
+const INERT_TRAIL_TURN: TrailTurn = {
+  acquire: async () => {
+    // Nothing to wait for: this call cannot add anything to the trail, so it
+    // must not be able to hold up the calls that can.
+  },
+  release: () => undefined,
+};
+
+/**
+ * Engine methods whose frame the trail is built from: `attach` resets it (the
+ * daemon invalidates its evidence history when the attached app changes), and
+ * the rest answer with an `operationId`/`evidenceId` for `record()` to collect.
+ */
+const TRAIL_SCOPED_ENGINE_METHODS: readonly string[] = [
+  "attach",
+  "act",
+  "assert_element",
+  "diagnose",
+  "last_evidence",
+  "restore",
+];
+
+/**
+ * Orchestrated tools that touch the trail through their own executor:
+ * `gp_export_evidence` records the pack it fetched, and `gp_recent_reports`
+ * *reads* the trail — a read queued after an outstanding `gp_act` has to see
+ * that act, or it reports an operation the agent then repeats.
+ *
+ * Deliberately absent: `gp_observe`, `gp_snapshot`, `gp_probe_status`. They do
+ * reach `session.record()`, but recording a frame that carries neither
+ * `operationId` nor `evidenceId` appends nothing, and none of the three can
+ * carry one: an `axTree` node is `{role,title,identifier,children}`
+ * (`TreeDigest.AxNode`), `snapshot` answers
+ * `{snapshotId,treeDigest,nodeCount,capturedAt,latencyMs}` and `probe_status`
+ * `{probes,attachedHasProbe,disconnections,recentDisconnections}`
+ * (`EngineCore.probeStatus`). Leaving them out is also what keeps
+ * `slowEngineRemedy`'s promise true — `gp_probe_status` is the call an agent is
+ * told to make *while an act is outstanding*. Any engine method that starts
+ * answering with an operationId must be added above, or its trail write lands
+ * in completion order again.
+ */
+const TRAIL_SCOPED_TOOL_NAMES: readonly string[] = ["gp_export_evidence", "gp_recent_reports"];
+
+/** Does this tool read or write `EvidenceAuditSession`? */
+export function trailScopedTool(spec: ToolSpec): boolean {
+  return (
+    TRAIL_SCOPED_TOOL_NAMES.includes(spec.name)
+    || TRAIL_SCOPED_ENGINE_METHODS.includes(spec.engineMethod)
+  );
+}
+
+/** Read the trail once this call's turn comes up, i.e. in request order. */
+async function readTrail(
+  session: EvidenceAuditSession,
+  turn: TrailTurn,
+  limit: number,
+): Promise<string[]> {
+  await turn.acquire();
+  try {
+    return session.recentIds(limit);
+  } finally {
+    turn.release();
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * Tools/call execution (spec §6.2): pre-validate -> forward -> map error.
  * ------------------------------------------------------------------ */
 
@@ -475,6 +585,10 @@ export const TOOL_BY_NAME: ReadonlyMap<string, ToolSpec> = new Map(
  * the tool's zod schema (isError + GP_E_BAD_PARAMS on failure), then either
  * runs the tool's own `execute` (orchestrated tools) or forwards the method
  * to the engine and maps engine/connection errors to agent-facing errors.
+ *
+ * A tool that touches the audit trail waits for its turn in request order
+ * before it does (see the trail-ordering block above); the engine call that
+ * precedes that wait stays concurrent with every other outstanding request.
  */
 export async function executeTool(
   spec: ToolSpec,
@@ -494,25 +608,57 @@ export async function executeTool(
     };
   }
 
+  if (!trailScopedTool(spec)) {
+    return runValidatedTool(spec, checked.value, engine, session, INERT_TRAIL_TURN);
+  }
+  // Claimed here, before any `await`, so the claim order is the order the
+  // frames arrived in.
+  const turn = session.claimTrailTurn();
+  try {
+    return await runValidatedTool(spec, checked.value, engine, session, turn);
+  } finally {
+    // Idempotent backstop: a mutation site that threw between `acquire()` and
+    // its own release must not leave every later trail-scoped call waiting.
+    turn.release();
+  }
+}
+
+async function runValidatedTool(
+  spec: ToolSpec,
+  value: Record<string, unknown>,
+  engine: EngineJsonRpcClient,
+  session: EvidenceAuditSession,
+  turn: TrailTurn,
+): Promise<ToolResult> {
   if (spec.execute !== undefined) {
-    return spec.execute(checked.value, { engine, session });
+    return spec.execute(value, { engine, session, turn });
   }
 
   try {
-    const raw = await engine.call(spec.engineMethod, checked.value);
-    if (spec.name === "gp_attach") {
-      // A successful attach invalidates the daemon's evidence history, so
-      // the session trail starts fresh (spec v1.3 §10.3).
-      session.reset();
+    const raw = await engine.call(spec.engineMethod, value);
+    // Everything below touches the trail, so it waits for its turn: this is
+    // where completion order is turned back into request order.
+    await turn.acquire();
+    try {
+      if (spec.name === "gp_attach") {
+        // A successful attach invalidates the daemon's evidence history, so
+        // the session trail starts fresh (spec v1.3 §10.3).
+        session.reset();
+      }
+      // Spec §6.3: evidence packs are passed through a strong read-side
+      // validation (kernel parseEvidencePackRead) before surfacing to the agent,
+      // so a Swift↔TS drift (assertion C35) fails here as a tool error instead of
+      // corrupt JSON — while a pack the engine legitimately wrote stays readable.
+      if (spec.engineMethod === "last_evidence") {
+        parseEvidenceFrame(raw);
+      }
+      session.record(raw);
+    } finally {
+      // Released before the reply is built: holding the trail across
+      // `canonicalJson` would make every later evidence tool wait on a
+      // serialization step that has nothing to do with the trail.
+      turn.release();
     }
-    // Spec §6.3: evidence packs are passed through a strong read-side
-    // validation (kernel parseEvidencePackRead) before surfacing to the agent,
-    // so a Swift↔TS drift (assertion C35) fails here as a tool error instead of
-    // corrupt JSON — while a pack the engine legitimately wrote stays readable.
-    if (spec.engineMethod === "last_evidence") {
-      parseEvidenceFrame(raw);
-    }
-    session.record(raw);
     return {
       content: [{ type: "text", text: canonicalJson(raw) }],
       isError: false,
@@ -749,7 +895,12 @@ async function exportEvidence(
   try {
     const raw = await context.engine.call("last_evidence", { operationId: argv.operationId });
     const { pack, measuredSchemaVersion } = parseEvidenceFrame(raw);
-    context.session.record(raw);
+    await context.turn.acquire();
+    try {
+      context.session.record(raw);
+    } finally {
+      context.turn.release();
+    }
     return { content: [{ type: "text", text: render(packForReport(pack, measuredSchemaVersion), undefined) }], isError: false };
   } catch (error) {
     return mapAuditError(error);
@@ -761,7 +912,13 @@ async function recentReports(
   context: ToolExecuteContext,
 ): Promise<ToolResult> {
   const argv = args as RecentReportsArgs;
-  const ids = context.session.recentIds(argv.limit);
+  // The trail read is the reason this tool is trail-scoped: it has to see the
+  // operations admitted before it, and answering from the state *before* an
+  // outstanding `gp_act` is what makes an agent repeat that act. The turn is
+  // released right after the read — the evidence fetches below do not touch the
+  // trail, and queueing them behind this turn would make every later evidence
+  // tool wait on daemon round trips that are none of its business.
+  const ids = await readTrail(context.session, context.turn, argv.limit);
   if (ids.length === 0) {
     return {
       content: [{ type: "text", text: formatToolError(

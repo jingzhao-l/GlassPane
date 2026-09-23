@@ -592,7 +592,8 @@ if options.approvalAudit || options.approvalVerify {
 
 if options.pruneEvidence || options.evidenceStats {
     // 目录解析与批三 pruneEvidence 同口径：项目维度查 registry →
-    // evidenceStoragePath → 默认目录；无项目维度 → 默认证据目录。
+    // evidenceStoragePath（缺失或不合法即拒绝，不回落共享档案）；
+    // 无项目维度 → 显式命名的共享默认档案目录。
     //
     // A-07/C-06: the project dimension used to hand the stored
     // `evidenceStoragePath` straight to the store that deletes from it, while
@@ -601,6 +602,18 @@ if options.pruneEvidence || options.evidenceStats {
     // resolver the engine uses: nothing is deleted or measured in a directory
     // the daemon would refuse to archive into, and a project that named no
     // directory of its own never gets the shared archive touched in its place.
+    //
+    // The store is built here, once, so the deleting pass and the reading pass
+    // cannot be pointed at different archives. Omitting `--project` still means
+    // the shared archive — this process is the one that owns `~/.glasspane`, and
+    // `atProductionDefault()` is the only route to it, so the destructive scope
+    // is named at the call site rather than folded in by an omitted argument.
+    // `EngineCore.pruneEvidence` refuses its own no-store case for exactly that
+    // reason (an embedded engine that was handed no archive has no directory to
+    // prune), and this branch is where the shared archive is meant to be pruned.
+    // `dir` repeats the location because `EvidenceStore.directory` is
+    // module-internal and the JSON output has to name what was touched.
+    let store: EvidenceStore
     let dir: String
     if let projectId = options.maintenanceProjectId {
         let registry = ProjectRegistry()
@@ -632,12 +645,13 @@ if options.pruneEvidence || options.evidenceStats {
             exit(1)
         case .success(let stored):
             dir = stored
+            store = EvidenceStore(directory: stored)
         }
     } else {
         dir = EvidenceStore.defaultDirectory
+        store = EvidenceStore.atProductionDefault()
     }
     if options.pruneEvidence {
-        let store = EvidenceStore(directory: dir)
         // --dry-run 与真实修剪共享同一判定路径（countExpired 与 prune 同源，
         // P5 §12.2 诚实口径：输出=真实会删除的数量，非估算）。
         let removed = options.pruneDryRun
@@ -653,7 +667,7 @@ if options.pruneEvidence || options.evidenceStats {
         exit(0)
     }
     if options.evidenceStats {
-        let stats = EvidenceStore(directory: dir).stats()
+        let stats = store.stats()
         let payload: [String: Any] = [
             "count": stats.count,
             "totalBytes": stats.totalBytes,

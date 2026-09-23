@@ -237,6 +237,9 @@ test("gp_recent_reports annotates a folded pack the same way as a single export"
   const session = new EvidenceAuditSession();
   session.record({ operationId: value.operationId });
   const promise = executeTool(TOOL_BY_NAME.get("gp_recent_reports"), { limit: 1 }, engine, session);
+  // This tool's first frame waits for its audit-trail turn; drain the
+  // microtasks before answering it (`tools.test.mjs`: `flush`).
+  await new Promise((resolve) => setImmediate(resolve));
   io.respond({ evidencePack: value });
   const outcome = await promise;
   assert.equal(outcome.isError, false);
