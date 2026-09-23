@@ -293,6 +293,22 @@ agent 可执行、不得许诺不存在的能力。八项发现的逐项落点�
   publish-shape guard（bundle+pack+干净环境 initialize 握手）已随本轮落地，
   剩一次性前置：npm 侧 Trusted publisher 或 NPM_TOKEN secret（owner 网页操作）。
   handler lane 真 app 命中复采已于同日闭环（见 §12）。
+- **Trusted Publisher 落地（2026-09-22，一次性前置清偿）**：两包各配一条
+  GitHub Actions Trusted Publisher（仓库 jingzhao-l/GlassPane、工作流
+  release.yml、环境 release），**"publish directly" 未勾 = staged only**——
+  发布授权按产品原则留在人手里（CI 造暂存件，owner `npm stage approve` 兑现
+  存在 2FA）；npm 官方同期开始限制 bypass-2FA token 直发（CI 日志实测到
+  notice），该选择与 registry 演进同向。`release.yml` 已适配：publish 模式
+  直发被拒自动回落 `npm stage publish --provenance` 并打 notice；node 22 +
+  npm@11（stage 子命令需 ≥11.15）；撤 `NODE_AUTH_TOKEN`（空 token 会写进
+  .npmrc 挡 OIDC）。dry 模式换 `npm pack --dry-run`（npm 11 的
+  `publish --dry-run` 会查 registry，已发布版本必撞 403，不再是纯本地校验）。
+  dry 首跑（run 35731020796）另抓出**真打包缺陷**：`bundle` 脚本非幂等，
+  CI 里 `npm run bundle` + `prepublishOnly` 双跑使 tarball 混入
+  `schemas/schemas/` 重复件——已修（`rm -rf schemas` 前置）。实测注册表在档
+  的 0.1.0 **含**该重复目录（当时手工发布同样双跑所致；纯冗余 24KB，运行侧
+  只读平铺 schemas，无功能影响）：处置=随下一个真实变更的 patch 版自然修复，
+  不单独追发（待用户发布授权时一并定）。
 - **attach 复验（2026-09-22，授权后）**：用户已在系统设置把 Qoder 的开发者工具
   开关打开；本会话复跑 `xcrun lldb --batch -o "process attach --pid <自起子进程>"`
   仍回 `Not allowed to attach to process`。成因坐实为**责任进程快照**：Qoder 进程
