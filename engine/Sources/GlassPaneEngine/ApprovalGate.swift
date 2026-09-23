@@ -68,8 +68,11 @@ public struct ApprovalRecord: Codable, Equatable {
 ///   silently-valid one — so `--approval-verify` exposes the damage.
 public final class ApprovalGate {
 
-    /// Default daemon ledger path (`~/.glasspane/approvals.json`).
-    public static let defaultPath = NSHomeDirectory() + "/.glasspane/approvals.json"
+    /// Default daemon ledger path: the approvals file of the home-derived state
+    /// root. Derived from `StateRoot` rather than composed here — the home
+    /// lookup behind it ignores a `HOME` override, so the per-user location has
+    /// to come from one named source (X-22).
+    public static let defaultPath = StateRoot.homeDefault().approvalsFile
     /// Upper bound for `ApprovalRecord.reason` (P5 §3.2).
     public static let reasonMaxLength = 512
 
@@ -104,6 +107,23 @@ public final class ApprovalGate {
         } else {
             records = []
         }
+    }
+
+    /// A file-persisted ledger over `<stateRoot>/approvals.json` — the route
+    /// `glasspaned` takes for `--approval-audit`, `--approval-verify` and the
+    /// daemon itself, so a run that named a state root cannot append to the
+    /// per-user chain and a run that named none cannot be pointed elsewhere.
+    ///
+    /// The directory is **not** created here, and that is a measured gap rather
+    /// than a claim of safety: `persist()` has no mkdir step, so an append into
+    /// a directory that does not exist yet is lost silently, and the next
+    /// process reads `count: 0` from a chain it never got. In `glasspaned` the
+    /// root is always there before the ledger is used (the archive and the
+    /// registry each create it on their first write, and the smoke runs
+    /// pre-create it mode 0700), but a caller that builds only a ledger has to
+    /// create the directory itself.
+    public convenience init(stateRoot: StateRoot, clock: @escaping () -> Date = { Date() }) {
+        self.init(path: stateRoot.approvalsFile, clock: clock)
     }
 
     // MARK: - Chain access

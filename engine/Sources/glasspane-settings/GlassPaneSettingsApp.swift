@@ -13,6 +13,13 @@ enum SettingsPanelScene {
 /// 主窗口 = 权限清单卡片 + daemon 状态卡 + 拒绝降级形态折叠区；
 /// 菜单栏项 = 轻量入口（打开主窗口 / 刷新 / 退出）。
 /// 面板不持久化任何配置：权限状态实时检测，刷新即重查。
+///
+/// 面板**不接受 `--state-dir`**（daemon 才有那个参数）。它不写 projects.json、
+/// 不写审批台账、不删证据档案——它只连一个 daemon，读它的权限席位并把申请/重启
+/// 请求转过去。在这里加一个"状态根"参数不会搬动任何数据，只会让用户以为面板
+/// 换了数据面；要指向另一个 daemon，用 `--socket-path`，那才是面板唯一的定位参数。
+/// 默认那条路径与 daemon 同源（`SettingsModel.defaultSocketPath` → `StateRoot`），
+/// 不再在本文件里另算一遍。
 @main
 struct GlassPaneSettingsApp: App {
     @StateObject private var model: SettingsModel
@@ -20,6 +27,8 @@ struct GlassPaneSettingsApp: App {
     init() {
         switch Self.socketPathArgument() {
         case .unspecified:
+            // Nothing named: resolve through the shared rule, i.e. the socket of
+            // the daemon running on its default state root.
             _model = StateObject(wrappedValue: SettingsModel(socketPath: nil))
         case .path(let path):
             _model = StateObject(wrappedValue: SettingsModel(socketPath: path))
@@ -75,6 +84,8 @@ struct GlassPaneSettingsApp: App {
         let lines = [
             "glasspane-settings 启动参数有误：\(reason)",
             "用法：glasspane-settings [--socket-path <socket 路径>]",
+            "本面板没有 --state-dir：它不持有状态面（不写注册表、不写审批台账、不删证据档案），",
+            "要连哪一个后台服务只由 --socket-path 决定；不传即按 daemon 的默认 socket 解析。",
             "已拒绝启动：不回落缺省 socket 路径（那是真实后台服务在用的），"
                 + "把取值补全后重新运行本命令。",
         ]

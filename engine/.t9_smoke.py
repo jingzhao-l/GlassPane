@@ -16,14 +16,13 @@ N 轮 act → 内存/句柄斜率持续为正 → 联合裁决 degrading → evi
     自起 daemon 模式（默认）：在临时目录起专用 daemon——临时 --socket-path/
     --probe-socket-path 一对 + --no-c33（T9 采样走 proc_pidinfo，关输入监听免
     操作员键鼠把 act 打成 busy；镜像 .p6_smoke.py 的 daemon 启动参数）。
-    状态根隔离（B-01）：本脚本**尝试**把 HOME 挪进临时目录，但不再声称它是
-    "唯一 agent-可执行的隔离通道"——那是未经测量的断言。daemon 的
-    EvidenceStore/ApprovalGate/ProjectRegistry 都按 NSHomeDirectory() 解析路径，
-    而 glasspaned 的 parseArguments 没有任何能重定向该根的 flag，HOME 是否被
-    采纳只能实测：起 daemon 前用被测二进制自己的只读 CLI（--evidence-stats 的
-    dir、--active-project 的 registryPath）问出状态根，落在沙箱内才放行，否则
-    NOT RUN exit 2 并点名台账 X-22（daemon 侧 --state-dir）。放行者是测量，
-    不是环境变量名。
+    状态根隔离（B-01 + X-22）：daemon 以 `--state-dir <临时目录>/home/.glasspane`
+    启动，但**不因传了就宣称隔离**——NSHomeDirectory 不读 $HOME（本项目已因此把开发者
+    真实 projects.json 从 71 条写成 2 条），所以 HOME 沙箱本身挪不动任何写入面。起
+    daemon 前用被测二进制自己的只读 CLI（带同一套 --state-dir 参数：--evidence-stats
+    的 dir、--active-project 的 registryPath）问出它解析到的状态根，realpath 后必须落
+    在那个根内且不等于真实 ~/.glasspane，并要求未知参数仍以 64 被拒；证明不了即 NOT
+    RUN exit 2。放行者是测量，不是参数名，也不是环境变量名。
     不给 --daemon-bin 时按 GLASSPANE_DAEMON_BIN → 仓库相对
     .build/{debug,release}/glasspaned 定位；都不可得 → NOT RUN exit 2。
     绝不隐式回落到 ~/.glasspane/engine.sock 现网口。
@@ -154,41 +153,82 @@ def fail(msg):
     sys.exit(1)
 
 
-# ---- 状态根隔离（B-01）------------------------------------------------------
-# daemon 的三个写入面全部由 NSHomeDirectory() 解析：EvidenceStore.defaultDirectory、
-# ApprovalGate.defaultPath、ProjectRegistry.defaultProjectsPath；而 glasspaned 的
-# parseArguments（Sources/glasspaned/main.swift）里**没有**任何 flag 能挪动这个根
-# （--socket-path / --probe-socket-path 只挪 socket）。所以"把 HOME 指进沙箱"到底
-# 隔没隔离，不可假设、必须实测：起 daemon **之前**先用被测二进制自己的只读 CLI 问出
-# 它解析到的状态根，证明它落在沙箱之内才放行；证明不了即 NOT RUN(2)，一条断言都不跑。
-# 事后指纹（state_fingerprint）只是第二道闸——它只能在已经写坏之后告知，不能当隔离
-# 证明用，因此本前置闸不可省、也不可被它替代。
+# ---- 状态根隔离（B-01 + X-22）------------------------------------------------
+# daemon 的三个写入面（evidence 档案、projects.json、approvals.json）从**一个**状态根
+# 派生：--state-dir 给的就是那个目录本身（Swift 侧的 StateRoot，
+# Sources/GlassPaneEngine/StateRoot.swift），没给才落回 NSHomeDirectory() 下的 per-user
+# 目录。"落回"那一条是硬事实而不是推测：macOS 的 NSHomeDirectory **不读 $HOME**，所以
+# 把 HOME 指进沙箱挪不动任何写入面——本项目已因此把开发者真实的 projects.json 从 71 条
+# 改成 2 条（不可恢复）。于是本闸仍然是**证明式**的，只是证明的东西变了：起 daemon
+# **之前**先用被测二进制自己的只读 CLI（带着本脚本要传给 daemon 的那套 --state-dir）问出
+# 它解析到的状态根，实测它确实落在本脚本预建的沙箱状态根内、且不等于真实 ~/.glasspane；
+# 问不到、落在沙箱外、或它根本没听 --state-dir，一律 NOT RUN(2)，一条断言都不跑。
+# "传了参数"永远不等于"已隔离"——只有被测二进制自己的回显才算测量。
+# 事后指纹（state_fingerprint）仍只是第二道闸——它只能在已经写坏之后告知，不能当隔离证明
+# 用，因此本前置闸不可省、也不可被它替代。
 # 本段在 engine/.p6_smoke.py 与 engine/.t9_smoke.py 中逐字一致：冒烟脚本按本仓惯例
 # 各自自包含（.smoke_client.py 与 .t9_smoke.py 的 send/recv_frame 亦然），不做跨脚本
 # import；改一处必须同步另一处。
 ISOLATION_PROBE_PROJECT_ID = "prj_gp-smoke-isolation-canary"
 ISOLATION_PROBE_TIMEOUT = 20.0
+# 两个都必须问得到才算数：evidence 靠 --evidence-stats 的 dir，projects 靠
+# --active-project 未命中分支的 registryPath（approvals.json 与 projects.json 同源于
+# 同一个状态根，取后者的父目录）。
+STATE_FACES = ("evidence", "projects")
+# 一个本脚本确定不认识的参数，用来**实测**"未知参数仍然被拒"。注入参数的意义建立在这个
+# 前提上：一个静默吞掉未知 flag 的 CLI，可以在同样吞掉 --state-dir 的时候让路径回显
+# 看着像成功了。
+UNKNOWN_FLAG_CANARY = "--state-dir-canary-not-a-flag"
 
 
 def daemon_state_dir_args(state_root):
-    """X-22（台账）：daemon 一旦支持重定向状态根，只改这里——返回
-    ["--state-dir", state_root]，两个冒烟脚本共用同一形状，前置闸自然转绿。
-    今天必须返回空表：main.swift 的 parseArguments 把未知参数判成
-    `unknown argument` 并以 64 退出，伪造参数＝伪造隔离。
+    """X-22 已落地：daemon 的状态根由 --state-dir 显式命名，两个冒烟脚本共用这一形状。
+
+    取值就是今天 NSHomeDirectory() + "/.glasspane" 所代表的那个目录本身，**不是**它的
+    父目录——evidence/、projects.json、approvals.json、probe.sock 都从这个目录派生。
+    非法取值（缺值、以 -- 开头、相对路径）由 daemon 判成用法错误、以 64 退出；其余未知
+    参数同样以 64 退出，而那一条不是假设，是 require_proven_isolation() 用
+    UNKNOWN_FLAG_CANARY 实测的（伪造参数＝伪造隔离，所以拒绝未知参数这件事本身必须在
+    放行之前被测量到）。
     """
-    return []
+    return ["--state-dir", state_root]
+
+
+def sandbox_state_root(sandbox_home):
+    """本脚本自己的沙箱状态根：预建在 `<沙箱 HOME>/.glasspane`。
+
+    与 daemon_isolation_env() 预建的那个目录同源，也就是 --state-dir 的取值本身——
+    两处各自拼一次就是"注入的路径"与"证明的路径"可以不是同一条的路子。
+    """
+    return os.path.join(sandbox_home, ".glasspane")
+
+
+def real_user_state_root():
+    """开发者真实的 per-user 状态根（本脚本自己进程的环境，HOME 从未挪过）。
+
+    判据用它，而不是用"沙箱之外"这个模糊说法：daemon 没听 --state-dir 时解析到的正是
+    这里，那才是本轮会毁掉的东西。
+    """
+    return os.path.realpath(os.path.join(os.path.expanduser("~"), ".glasspane"))
+
+
+def path_inside(candidate, parent):
+    """realpath 后的 `candidate` 是否就是 `parent` 或在它之下（按路径分量，不按字面）。"""
+    return candidate == parent or candidate.startswith(parent + os.sep)
 
 
 def daemon_isolation_env(workdir):
-    """→ (沙箱 HOME, daemon 追加参数, daemon 子进程环境)。
+    """→ (沙箱状态根, daemon 追加参数, daemon 子进程环境)。
 
-    HOME 挪进沙箱只是**尝试**，不是隔离声明：它能否被 NSHomeDirectory 采纳，由
-    require_proven_isolation() 实测决定。沙箱内的 ~/.glasspane 预建出来，让
-    EvidenceStore 的 chmod-0700 判定走与真实形态一致的路径。
+    HOME 挪进沙箱是**顺带**，不是隔离通道：NSHomeDirectory 不采纳它，真正挪动写入面的
+    是 --state-dir。沙箱内的 .glasspane 以 0700 预建，让 EvidenceStore 的 chmod-0700
+    判定与真实形态走同一条路径。返回值第一项就是 --state-dir 的取值本身，前置闸证明的
+    也是它，两者同源（见 sandbox_state_root）。
     """
     home = os.path.join(workdir, "home")
-    os.makedirs(os.path.join(home, ".glasspane"), mode=0o700, exist_ok=True)
-    return home, daemon_state_dir_args(home), dict(os.environ, HOME=home)
+    root = sandbox_state_root(home)
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    return root, daemon_state_dir_args(root), dict(os.environ, HOME=home)
 
 
 def _first_json_object(text):
@@ -206,15 +246,16 @@ def _first_json_object(text):
 def probe_state_roots(daemon_bin, env, notes, extra_args=()):
     """问被测二进制自己：状态根解析到了哪里。两条命令都**只读**，不落盘。
 
-      --evidence-stats         → {"dir": EvidenceStore.defaultDirectory, …}；
+      --evidence-stats         → {"dir": 本次状态根下的 evidence 归档目录, …}；
                                  stats() 只枚举归档目录，不创建也不删除
       --active-project <假 id> → 未注册分支的 JSON 带 registryPath，且该分支按
                                  R2-16/R6-06 明示 stateChanged=false（从不写状态）
 
-    approvals.json 没有回显路径的 CLI，但它与 projects.json 同源自
-    NSHomeDirectory()（同一份默认拼接），所以取 registryPath 的父目录作同一个根。
-    `extra_args` 必须与起 daemon 时追加的参数一致（X-22 落地后就是 --state-dir 那一
-    对），否则探测问的是"默认根"、daemon 用的是"注入根"，闸会在该转绿的那天反而红。
+    approvals.json 没有回显路径的 CLI，但它与 projects.json 派生自**同一个**状态根
+    （--state-dir 给的那个，或没给时的 home 默认），所以取 registryPath 的父目录作同
+    一个根。`extra_args` 必须与起 daemon 时追加的参数一致（就是 --state-dir 那一对，
+    require_proven_isolation() 会先把这一致性结构上核对一遍），否则探测问的是"默认根"、
+    daemon 用的是"注入根"，闸会在该转绿的那天反而红。
     返回 {面名: 绝对路径}；问不出来的面记进 notes，由调用方按"未证明"处理。
     """
     probes = (
@@ -244,37 +285,127 @@ def probe_state_roots(daemon_bin, env, notes, extra_args=()):
     return roots
 
 
-def require_proven_isolation(daemon_bin, daemon_env, sandbox_home, extra_args=()):
-    """前置闸（起 daemon 之前）：沙箱环境没挪动状态根，就不起 daemon。
-    `extra_args` 与随后 Popen 追加的参数同一份——闸问的必须是"这一轮真的会用的
-    那套参数"，否则放行判定与实际启动可以指向两个根。"""
+def require_proven_isolation(daemon_bin, daemon_env, state_root, extra_args=()):
+    """前置闸（起 daemon 之前）：**实测** --state-dir 把状态根挪进了沙箱，才起 daemon。
+
+    四条判据，结论只来自被测二进制自己的回显与退出码，不来自"参数传了没有"：
+      1. 参数一致性（结构）：`extra_args` 必须正是 `daemon_state_dir_args(state_root)`。
+         闸问的那套参数与随后 Popen 追加的那套必须是同一份，否则放行判定与实际启动可以
+         指向两个根。
+      2. 未知参数仍被拒（实测）：带 UNKNOWN_FLAG_CANARY 的那次调用必须以 64 退出。CLI
+         若静默吞掉未知 flag，"回显落在沙箱里"就可能是它连 --state-dir 一起吞掉的结果。
+      3. 两个写入面都问得到：evidence 的 `dir` 与 projects 的 `registryPath`（缺一即
+         未证明——只问得到一条不等于另一条也没逃）。
+      4. realpath 后每个面都落在 `--state-dir` 那个根之内，且没有一个落在真实
+         ~/.glasspane 之内或之下。"在沙箱外"这种模糊说法不作判据，真实根才是要守的东西。
+      5. 同一套参数、HOME 换回**真实值**再问一次，结论必须仍然是那个沙箱根。只有"路径跟
+         着 --state-dir 走、不跟着 HOME 走"才叫注入生效；少了这一条，一个忽略 --state-dir
+         却采纳 HOME 的 daemon 也能交出"落在沙箱里"的回显，而那正是"传了参数就当已隔离"。
+    任何一条不成立 → NOT RUN(2)，一条断言都不跑。
+    """
+    expected = os.path.realpath(state_root)
+    live_root = real_user_state_root()
     notes = []
+
+    def not_run(reason_lines):
+        print("NOT RUN — 状态根隔离未证明，一条断言都没有执行（NOT RUN ≠ PASS）")
+        print(f"  --state-dir 的取值：{state_root}（realpath {expected}）")
+        print(f"  真实 per-user 状态根：{live_root}")
+        for line in reason_lines:
+            print(line)
+        print("  放行后果：evidence 档案写进开发者真实 ~/.glasspane/evidence，restore 的")
+        print("       'restore executed' 审批行追加进真实哈希链 approvals.json（审计链被冒名写入），")
+        print("       注册表被整表重写——71 条变 2 条那次就是这么丢的。")
+        print("REMEDY: daemon 已经有 --state-dir（X-22 已落地），走到这里说明本轮没把它用上：")
+        print("  (1) 被测二进制是旧构建 → cd engine && swift build 后复跑（本脚本按")
+        print("      .build/{debug,release}/glasspaned 定位，或 GLASSPANE_DAEMON_BIN 指定）；")
+        print("  (2) daemon 侧的解析链断了 → 逐条自己复现（都只读，agent 可执行）：")
+        flags = " ".join([*extra_args, "--evidence-stats"])
+        print(f"      HOME={daemon_env.get('HOME')} {daemon_bin} {flags}")
+        print("        → dir 必须在 --state-dir 那个根内（判据 3/4）")
+        print(f"      HOME={os.path.expanduser('~')} {daemon_bin} {flags}")
+        print("        → dir 必须**仍然**在那个根内：跟着 HOME 走就是假注入（判据 5）")
+        print(f"      {daemon_bin} --evidence-stats")
+        print("        → 这一问报出的就是没传参数时的回落形状，也是第二道闸要守的真实文件")
+        print("      第一条或第二条落在沙箱外 → --state-dir 没贯穿到那个写入面，"
+              "报进台账并点名是哪个面。")
+        sys.exit(2)
+
+    # 判据 1：闸与 daemon 用的是同一套参数。
+    if list(extra_args) != daemon_state_dir_args(state_root):
+        not_run([
+            "  结构不符：本轮追加的参数不是 daemon_state_dir_args(state_root) 的那一份。",
+            f"      实际：{list(extra_args)}",
+            f"      应为：{daemon_state_dir_args(state_root)}",
+        ])
+    if not os.path.isdir(expected):
+        not_run(["  沙箱状态根本不存在（预建失败？）：daemon 不会在里面留下任何东西。"])
+    if path_inside(expected, live_root):
+        not_run(["  沙箱状态根本就在真实 ~/.glasspane 之内：本轮无从证明不逃逸。"])
+
+    # 判据 2：未知参数仍以 64 被拒（保留对其它未知参数的拒绝，才谈得上"这一对参数被吃了"）。
+    try:
+        canary = subprocess.run(
+            [daemon_bin, *extra_args, UNKNOWN_FLAG_CANARY, "--evidence-stats"],
+            env=daemon_env, capture_output=True, text=True,
+            timeout=ISOLATION_PROBE_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as error:
+        not_run([f"  canary 调用无法执行（{error}）：未知参数的拒绝没测到，不放行。"])
+    if canary.returncode != 64:
+        not_run([
+            f"  被测 daemon 静默接受了未知参数 {UNKNOWN_FLAG_CANARY}"
+            f"（rc={canary.returncode}，应为 64＝用法错误）。",
+            "  那样的 CLI 同样可以在吞掉 --state-dir 的同时把回显指向别处，隔离不可信。",
+        ])
+
+    # 判据 3 + 4：向被测二进制自己问它这一轮真的会用的那套参数解析到了哪里。
     roots = probe_state_roots(daemon_bin, daemon_env, notes, extra_args)
-    home = os.path.realpath(sandbox_home)
-    escaped = {name: path for name, path in roots.items()
-               if path != home and not path.startswith(home + os.sep)}
-    if roots and not escaped:
-        print("PASS 状态根隔离已实测（daemon 的写入面全在沙箱内） "
+    # 判据 5：同一套参数、HOME 换回真实值。这一步把"参数带着走"与"HOME 带着走"分开：
+    # 一个忽略 --state-dir 却采纳 HOME 的 CLI 在这一问里会报出真实 per-user 根。
+    home_notes = []
+    against_home = probe_state_roots(daemon_bin, dict(os.environ), home_notes, extra_args)
+    missing = [face for face in STATE_FACES if face not in roots]
+    escaped = {name: path for name, path in roots.items() if not path_inside(path, expected)}
+    colliding = {name: path for name, path in roots.items() if path_inside(path, live_root)}
+    home_missing = [face for face in STATE_FACES if face not in against_home]
+    home_escaped = {name: path for name, path in against_home.items()
+                    if not path_inside(path, expected)}
+    if (roots and against_home and not missing and not home_missing
+            and not escaped and not colliding and not home_escaped):
+        print("PASS 状态根隔离已实测（daemon 自报的写入面全在 --state-dir 那个根内，"
+              "且换回真实 HOME 也照样跟着那个参数） "
               + " ".join(f"{name}={roots[name]}" for name in sorted(roots)))
+        # 对照测量：同一沙箱环境、**不带**注入参数再问一次。它报出的就是本轮若不传参数会
+        # 写去哪（第二道闸的受害者清单同源）。报出真实 per-user 根 = NSHomeDirectory 不读
+        # HOME，与本闸的前提一致。
+        control_notes = []
+        control = probe_state_roots(daemon_bin, daemon_env, control_notes)
+        if not control:
+            print("NOTE 对照测量（不带 --state-dir）没问出任何状态根，未量到本轮的回落形状："
+                  + "；".join(control_notes))
+        elif all(path_inside(path, expected) for path in control.values()):
+            print("NOTE 不带 --state-dir 的回显同样落在沙箱内 → 这份二进制的 home 解析采纳了"
+                  "HOME 环境变量（真机不该如此）：判据 5 已把注入与 HOME 分开量过，但这一条值得"
+                  "单独查 daemon 侧的 home 口径。")
         return
-    print("NOT RUN — 状态根隔离未证明，一条断言都没有执行（NOT RUN ≠ PASS）")
-    print(f"  期望：daemon 的写入面落在 {home}/.glasspane/ 之下")
+    reasons = []
+    for face in missing:
+        reasons.append(f"  问不到 {face} 面的状态根（两个面都要问得到才算证明）")
+    for face in home_missing:
+        reasons.append(f"  带 --state-dir、HOME 换回真实值后问不到 {face} 面（注入未贯穿）")
     for name in sorted(escaped):
-        print(f"  逃逸：{name} 解析到 {escaped[name]}（沙箱之外）")
+        reasons.append(f"  逃逸：{name} 解析到 {escaped[name]}（--state-dir 那个根之外）")
+    for name in sorted(colliding):
+        reasons.append(f"  撞车：{name} 解析到 {colliding[name]}（真实 per-user 状态根之内）"
+                       " → --state-dir 没有作用到这个面上")
+    for name in sorted(home_escaped):
+        reasons.append(f"  假注入：真实 HOME 下 {name} 解析到 {home_escaped[name]}"
+                       " —— 回显跟着 HOME 走而不是跟着 --state-dir 走，"
+                       "不能断定这个参数被采纳了")
     if not roots:
-        print("  未能从被测二进制问出任何状态根——探测无结果＝未证明，不放行")
-    for note in notes:
-        print(f"  note: {note}")
-    print("  放行后果：evidence 档案写进开发者真实 ~/.glasspane/evidence，restore 的")
-    print("       'restore executed' 审批行追加进真实哈希链 approvals.json（审计链被冒名写入）。")
-    print("REMEDY: 被测 daemon 没有可重定向状态根的 flag → 见台账 X-22：给 glasspaned 加")
-    print("  --state-dir <path>（EvidenceStore/ApprovalGate/ProjectRegistry 改走注入路径，")
-    print("  删掉解析到活状态的缺省），落地后把它填进本文件的 daemon_state_dir_args()。")
-    print("  本判定可自行复现（agent 可执行；沙箱 HOME 与继承 HOME 各跑一次，只读）：")
-    flags = " ".join([*extra_args, "--evidence-stats"])
-    print(f"    HOME={home} {daemon_bin} {flags}")
-    print(f"    {daemon_bin} {flags}   # dir 不随之移动 → 状态根不可重定向")
-    sys.exit(2)
+        reasons.append("  未能从被测二进制问出任何状态根——探测无结果＝未证明，不放行")
+    reasons.extend(f"  note: {note}" for note in notes + home_notes)
+    not_run(reasons)
 
 
 def live_state_targets(daemon_bin, notes):
@@ -416,10 +547,11 @@ def main():
                 print("REMEDY: cd engine && swift build -c release；或 --daemon-bin <path>"
                       "（env GLASSPANE_DAEMON_BIN 同义）；旧接口：第 1 位置参数显式给已有 socket")
                 sys.exit(2)
-            # 状态根隔离（B-01）：先证明 HOME 真的挪动了 daemon 的写入面，才起 daemon。
-            # 证明不了 → NOT RUN(2)（本脚本 24 轮 act + T9 判定会把档案写进真实归档）。
-            sandbox_home, state_dir_args, daemon_env = daemon_isolation_env(workdir)
-            require_proven_isolation(daemon_bin, daemon_env, sandbox_home, state_dir_args)
+            # 状态根隔离（B-01 + X-22）：先实测 daemon 自己把写入面落在本轮
+            # --state-dir 那个根里，才起 daemon。证明不了 → NOT RUN(2)（本脚本 24 轮
+            # act + T9 判定会把档案写进真实归档）。
+            state_root, state_dir_args, daemon_env = daemon_isolation_env(workdir)
+            require_proven_isolation(daemon_bin, daemon_env, state_root, state_dir_args)
             live_targets = live_state_targets(daemon_bin, probe_notes)
             state_before = state_fingerprint(live_targets)
             socket_path = os.path.join(workdir, "engine.sock")

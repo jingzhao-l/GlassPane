@@ -88,6 +88,26 @@ public final class EngineCore {
     /// `nil` stays only where no daemon made the claim (an engine built by a
     /// test), and the act response says so instead of inventing a cause.
     private let inputMonitorAbsenceReason: String?
+    /// R3-1: the operator's **declaration** that no human input reaches this
+    /// machine during the window (`--unattended-window`). It is not a
+    /// measurement, and it can never override one: it changes the verdict only
+    /// where nothing was watched at all, so a window with an observed human
+    /// event stays `contaminated: true` no matter what was declared.
+    ///
+    /// Why a declaration is allowed to stand where a measurement may not: the
+    /// `contaminated: true` that an unwatched window produces is an *inference*
+    /// from the absence of a channel ("we cannot rule it out"), not a fact the
+    /// daemon observed. A maintenance run — a smoke harness, a CI box, a headless
+    /// host — knows something the daemon does not: that there is nobody at the
+    /// keyboard. Without that third input, the strongest attribution level
+    /// (`.strong`, P6 §2.3) is unreachable for every daemon started with
+    /// `--no-c33`, which is exactly how the only end-to-end probe gate
+    /// (`engine/.p6_smoke.py`) was pinned red: it asserted a `.strong` canary
+    /// against a daemon that could only ever answer `.weak`. The declaration is
+    /// recorded in the archive as a declaration (`contaminationBasis`), so a
+    /// reader can always tell "nobody was there" from "somebody watched and saw
+    /// nothing".
+    private let declaresUnattendedWindow: Bool
     /// A-01: per-snapshot record of a checkpoint export that **ran and failed**,
     /// keyed by snapshotId, so `restore(mode: rollback_full)` can distinguish
     /// "this snapshot has no probe payload because nothing was exported" from
@@ -133,7 +153,8 @@ public final class EngineCore {
         snapshotProbe: (() -> SnapshotProbeInfo?)? = nil,
         probeInbox: ProbeInbox? = nil,
         permissionsReport: (() -> DaemonPermissionSnapshot?)? = nil,
-        inputMonitorAbsenceReason: String? = nil
+        inputMonitorAbsenceReason: String? = nil,
+        declaresUnattendedWindow: Bool = false
     ) {
         self.channel = channel
         self.clock = clock
@@ -148,6 +169,7 @@ public final class EngineCore {
         self.probeInbox = probeInbox
         self.permissionsReport = permissionsReport
         self.inputMonitorAbsenceReason = inputMonitorAbsenceReason
+        self.declaresUnattendedWindow = declaresUnattendedWindow
     }
 
     // MARK: - ISO-8601 timestamp
@@ -455,7 +477,7 @@ public final class EngineCore {
         GPError(
             code: .badParams,
             message: "this engine instance has no evidence archive injected, so it has no directory to prune or measure: the shared default directory (\(EvidenceStore.defaultDirectory)) is not its substitute and nothing was deleted",
-            remedy: "name the archive you mean. Either give this instance one where it is built — EngineCore(evidenceStore:) with a store over a directory, the way the background service injects EvidenceStore.atProductionDefault() — or scope the call to a project that owns one: gp_project_set {\"projectId\": \"<that prj_…>\", \"displayName\": …, \"bundleId\" or \"pid\": …, \"evidenceStoragePath\": \"\(evidenceStorageExample)\"} (repeat the project's other fields — the update replaces them), restart the background service so it reloads projects.json (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`), then call again with that projectId. To prune the shared archive itself use the process that owns it: `glasspaned --prune-evidence --older-than <days>`, after looking at what is there with `glasspaned --evidence-stats` and counting without deleting via `--dry-run`"
+            remedy: "name the archive you mean. Either give this instance one where it is built — EngineCore(evidenceStore:) with a store over a directory, the way the background service injects EvidenceStore.at(stateRoot:) with the root --state-dir named (or the home default when nothing was named) — or scope the call to a project that owns one: gp_project_set {\"projectId\": \"<that prj_…>\", \"displayName\": …, \"bundleId\" or \"pid\": …, \"evidenceStoragePath\": \"\(evidenceStorageExample)\"} (repeat the project's other fields — the update replaces them), restart the background service so it reloads projects.json (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`), then call again with that projectId. To prune the shared archive itself use the process that owns it: `glasspaned --prune-evidence --older-than <days>`, after looking at what is there with `glasspaned --evidence-stats` and counting without deleting via `--dry-run`"
         )
     }
 
@@ -917,9 +939,29 @@ public final class EngineCore {
             }
             return inputMonitorAbsenceReason
         }()
-        let contaminated = contaminationVerdict?.contaminated ?? (monitorFault != nil)
+        // R3-1: the declaration reaches only the inference, never an
+        // observation. An event the guard actually caught keeps the verdict
+        // `contaminated: true` whatever was declared, and a window that really
+        // was watched is decided by what the watch saw.
+        let observedHumanInput = !(contaminationVerdict?.humanEvents ?? []).isEmpty
+        let declaredUnattended =
+            declaresUnattendedWindow && !contaminationMonitored && !observedHumanInput
+        let contaminated = declaredUnattended
+            ? false
+            : (contaminationVerdict?.contaminated ?? (monitorFault != nil))
         let contaminationBasis: String
-        if contaminationMonitored {
+        if declaredUnattended {
+            // No new response key: `contaminationMonitored: false` together with
+            // `contaminated: false` is already an unambiguous pair — it can only
+            // mean "the window was watched by nobody and somebody declared that
+            // as unattended", because every other unwatched path above answers
+            // `true`. The monitor's own fault stays quoted in this same string,
+            // so declaring a window unattended cannot launder a broken channel
+            // into a clean one, and `circuitBreaker.reason` keeps its
+            // `input-contamination-*` label (see below) either way.
+            contaminationBasis = "no input monitor watched this window and the operator declared it unattended (--unattended-window): the contaminated=false verdict here is a declaration, not a measurement"
+                + (monitorFault.map { " — the monitor's own state stays on record: \($0)" } ?? "")
+        } else if contaminationMonitored {
             contaminationBasis = "the input stream was watched for the whole operation window"
         } else if monitorWasLost, let monitorFault {
             contaminationBasis = "the input monitor stopped reporting inside this window: \(monitorFault) — the contaminated=true verdict is the absence of a watching channel, not an observed input"

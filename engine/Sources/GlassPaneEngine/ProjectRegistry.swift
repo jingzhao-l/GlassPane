@@ -16,9 +16,11 @@ import Foundation
 /// refused while it stands.
 public final class ProjectRegistry {
 
-    /// Default path for the projects file.
-    public static let defaultProjectsPath =
-        NSHomeDirectory() + "/.glasspane/projects.json"
+    /// Default path for the projects file: the registry of the home-derived
+    /// state root. Derived from `StateRoot` and not composed here, because the
+    /// home lookup behind it ignores a `HOME` override — the location has to
+    /// have one named source (X-22).
+    public static let defaultProjectsPath = StateRoot.homeDefault().projectsFile
 
     public let filePath: String
     private var projects: [ProjectEntry] = []
@@ -34,6 +36,13 @@ public final class ProjectRegistry {
     public init(filePath: String = ProjectRegistry.defaultProjectsPath) {
         self.filePath = filePath
         load()
+    }
+
+    /// A registry over `<stateRoot>/projects.json` — the route `glasspaned`
+    /// takes for every subcommand, so `--state-dir` cannot be honoured by one
+    /// command and missed by another.
+    public convenience init(stateRoot: StateRoot) {
+        self.init(filePath: stateRoot.projectsFile)
     }
 
     /// All registered projects (snapshot). Empty when `loadFailed` — check the

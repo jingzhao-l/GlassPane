@@ -134,18 +134,33 @@ final class SettingsModel: ObservableObject {
         }
     }
 
-    /// 与 daemon 默认一致的 socket 路径。
-    public static func defaultSocketPath() -> String {
-        NSHomeDirectory() + "/.glasspane/engine.sock"
+    /// The socket this panel talks to when the caller named none — the same
+    /// rule the daemon uses, reached through `StateRoot` instead of a second
+    /// copy of the path. The panel used to compose `home + "/.glasspane/…" `
+    /// here on its own: two files holding one rule is how a daemon started on a
+    /// moved socket leaves a settings window silently pointed at a different
+    /// process (or at none).
+    ///
+    /// `stateRoot` is an injection point for tests and for a panel asked to
+    /// watch a daemon that runs on a named state root. It is deliberately **not**
+    /// a `--state-dir` flag on this executable: the panel deletes nothing and
+    /// rewrites nothing — it reads permission seats and sends restart/grant
+    /// requests to whichever daemon it can reach — so a data-plane redirect has
+    /// no meaning here, and advertising one in its usage would read as "the
+    /// panel can move my state", which it cannot. `--socket-path` stays the
+    /// panel's only location argument, and it wins over any root.
+    static func defaultSocketPath(stateRoot: StateRoot? = nil) -> String {
+        StateRoot.engineSocketPath(explicitSocketPath: nil, stateRoot: stateRoot)
     }
 
     init(
         socketPath: String? = nil,
+        stateRoot: StateRoot? = nil,
         refreshOnAppear: Bool = true,
         probes: PermissionProbeSet = PermissionProbeSet(),
         daemonProbe: DaemonProbe = DaemonProbe()
     ) {
-        let resolvedSocketPath = socketPath ?? Self.defaultSocketPath()
+        let resolvedSocketPath = socketPath ?? Self.defaultSocketPath(stateRoot: stateRoot)
         self.panelProbes = probes
         self.daemonProbe = daemonProbe
         self.panelSubject = probes.snapshot().subject

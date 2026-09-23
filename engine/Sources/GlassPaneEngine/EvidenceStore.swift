@@ -45,9 +45,13 @@ public final class EvidenceStore {
 
     /// The per-user archive location (spec v1.5 §9.2). A *value*, not an
     /// initializer default: no construction resolves to it unless a caller
-    /// names it (`atProductionDefault()`) or passes it as `directory`.
-    public static let defaultDirectory =
-        NSHomeDirectory() + "/.glasspane/evidence/"
+    /// names it (`atProductionDefault()`, or `at(stateRoot:)` with the
+    /// home-derived root) or passes it as `directory`.
+    ///
+    /// Derived from `StateRoot` rather than composed here: the home lookup
+    /// behind it ignores a `HOME` override, so this string must have exactly
+    /// one named source across the module.
+    public static let defaultDirectory = StateRoot.homeDefault().evidenceDirectory
 
     /// Default archive retention cap (spec v1.6 §12.2). Large enough that the
     /// default "audit everything first" semantics keep holding, but bounded so
@@ -156,22 +160,46 @@ public final class EvidenceStore {
         self.log = log
     }
 
-    /// The **only** way to bind a store to `defaultDirectory`. Named on purpose:
-    /// reaching the per-user archive is a decision a reader must see in the
-    /// call site, not a side effect of leaving an argument out.
+    /// The **only** way to bind a store to `defaultDirectory` by name. Kept
+    /// named on purpose: reaching the per-user archive is a decision a reader
+    /// must see in the call site, not a side effect of leaving an argument out.
     ///
-    /// Production has exactly one caller (`glasspaned`, which is the process
-    /// that owns `~/.glasspane`). Tests have none — `TestIsolationGateTests`
-    /// rejects this name anywhere under `engine/Tests`, so a test that really
-    /// needs the live archive has to delete that guard first and say why.
+    /// C-02/C-03 kept, X-22 added: `glasspaned` resolves one `StateRoot` per
+    /// process and builds every archive through `at(stateRoot:)`, so this is
+    /// what it means when nothing was injected — the same value, named. Tests
+    /// have no route here at all — `TestIsolationGateTests` rejects this name
+    /// anywhere under `engine/Tests`, so a test that really needs the live
+    /// archive has to delete that guard first and say why.
     public static func atProductionDefault(
         maxFiles: Int? = nil,
         maxAgeDays: Int? = nil,
         now: @escaping () -> Date = { Date() },
         log: EngineLog = EngineLog(quiet: false)
     ) -> EvidenceStore {
+        at(
+            stateRoot: StateRoot.homeDefault(),
+            maxFiles: maxFiles,
+            maxAgeDays: maxAgeDays,
+            now: now,
+            log: log
+        )
+    }
+
+    /// A store over the evidence archive of a named state root — the location
+    /// `<root>/evidence/` and nothing else. X-22: a smoke run or a second
+    /// installation that passes `--state-dir` gets an archive inside the root
+    /// it named, and one that names nothing gets the home-derived per-user
+    /// archive, which is the same call with a different argument rather than a
+    /// different code path.
+    public static func at(
+        stateRoot: StateRoot,
+        maxFiles: Int? = nil,
+        maxAgeDays: Int? = nil,
+        now: @escaping () -> Date = { Date() },
+        log: EngineLog = EngineLog(quiet: false)
+    ) -> EvidenceStore {
         EvidenceStore(
-            directory: defaultDirectory,
+            directory: stateRoot.evidenceDirectory,
             maxFiles: maxFiles,
             maxAgeDays: maxAgeDays,
             now: now,

@@ -1287,7 +1287,7 @@ final class EngineCoreWaveTwoBetaTests: XCTestCase {
             "the evidence maintenance branch is gone"
         )
         let end = try XCTUnwrap(
-            source.range(of: "let socketPath = options.socketPath"),
+            source.range(of: "let socketPath = StateRoot.engineSocketPath"),
             "the slice anchor (daemon entry) is gone"
         )
         let block = source[start.lowerBound..<end.lowerBound]
@@ -1308,9 +1308,24 @@ final class EngineCoreWaveTwoBetaTests: XCTestCase {
 
     func testDaemonNamesBothProductionLocationsInsteadOfDefaultingIntoThem() throws {
         let source = try repoSource("engine/Sources/glasspaned/main.swift")
+        // X-22 renamed the route, not the property: the daemon still has to
+        // reach its archive by *name*, and the name it uses is now the state
+        // root it resolved for this run.
         XCTAssertTrue(
-            source.contains("EvidenceStore.atProduction"),
+            source.contains("EvidenceStore.at(stateRoot:"),
             "the daemon reaches the real archive by name only"
+        )
+        // …and the stronger form of the same rule: one root per process, so a
+        // subcommand cannot default into a location another subcommand is not
+        // using (that is how the real projects.json was overwritten once).
+        XCTAssertTrue(
+            source.contains("resolvedStateRoot(injected: options.stateDir)"),
+            "every state-touching path must come from the one resolved root"
+        )
+        XCTAssertFalse(
+            source.contains("NSHomeDirectory()"),
+            "the home lookup lives in StateRoot alone; a second copy here is a "
+                + "path no gate can see (NSHomeDirectory does not honour HOME)"
         )
         XCTAssertFalse(
             source.contains("let store = EvidenceStore" + "()")
@@ -1429,6 +1444,109 @@ final class EngineCoreWaveTwoBetaTests: XCTestCase {
             try EvidencePack.decodeAndValidate(pack.jsonData()),
             "the basis rides an existing field, so the frozen schema still holds"
         )
+    }
+
+    /// R3-1: `--unattended-window` is the operator's *declaration* that nobody is
+    /// at the keyboard, and it is the only thing that can make a window nobody
+    /// watched read as not contaminated. Two properties are pinned here: it
+    /// applies to the inference (never to an observed input), and it does not
+    /// erase the record that no monitor was running. Without this, a daemon
+    /// started with `--no-c33` can never answer above `.weak`, and the one
+    /// end-to-end probe gate (`engine/.p6_smoke.py`) has no reachable `.strong`
+    /// canary — which is how that gate sat permanently red before this flag.
+    func testDeclaredUnattendedWindowReplacesTheInferenceNotTheRecord() throws {
+        let core = EngineCore(
+            channel: makeChannel(), settle: {},
+            inputMonitorAbsenceReason: "C33 was declined at startup by the --no-c33 flag",
+            declaresUnattendedWindow: true
+        )
+        _ = try core.attach(bundleId: "com.example.app", pid: nil)
+        let result = try core.act(selector: submitSelector, action: .press)
+
+        XCTAssertEqual(result["contaminationMonitored"] as? Bool, false)
+        let basis = try XCTUnwrap(result["contaminationBasis"] as? String)
+        XCTAssertTrue(basis.contains("declaration, not a measurement"), basis)
+        // The declaration must not become a cover story for a missing monitor:
+        // the reason the window was unwatched is quoted in the same sentence.
+        XCTAssertTrue(
+            basis.contains("C33 was declined at startup by the --no-c33 flag"),
+            basis
+        )
+        let pack = try core.lastEvidence(operationId: nil)
+        XCTAssertFalse(
+            pack.attribution.contaminated,
+            "the operator's statement is what makes the verdict false here"
+        )
+        XCTAssertEqual(
+            pack.attribution.level, .soft,
+            "the cap lifts from .weak to .soft — the probe signal, not the declaration, is what turns .soft into .strong"
+        )
+        let reason = try XCTUnwrap(pack.circuitBreaker.reason)
+        XCTAssertTrue(
+            reason.contains("input-contamination-not-monitored: C33 was declined at startup by the --no-c33 flag"),
+            "the archive still says nobody was watching: \(reason)"
+        )
+        XCTAssertNotNil(
+            try EvidencePack.decodeAndValidate(pack.jsonData()),
+            "the declaration rides the existing reason/basis fields, so the frozen schema still holds"
+        )
+    }
+
+    func testDeclaredUnattendedWindowNeverOverridesAnObservedHumanInput() throws {
+        // The other half of the ruling: a declaration is allowed to stand only
+        // where nothing was watched. An input the monitor actually caught is a
+        // measurement, and no startup flag may talk it out of existence —
+        // otherwise one flag would silently downgrade the audit trail it is
+        // supposed to be honest about.
+        let now = Date(timeIntervalSince1970: 1_000)
+        let guard_ = AttributionGuard(
+            inputSource: ScriptedInputEventSource(events: [
+                InputEvent(timestamp: 999.9, source: .human)
+            ]),
+            clock: { now },
+            idleWindowSeconds: 0.5
+        )
+        let core = EngineCore(
+            channel: makeChannel(), settle: {}, attributionGuard: guard_,
+            declaresUnattendedWindow: true
+        )
+        _ = try core.attach(bundleId: "com.example.app", pid: nil)
+        // The window is busy with a real human input, so the plain call refuses;
+        // `degrade` is the documented way to proceed with the contamination
+        // recorded, which is the only way this pair (declaration + observation)
+        // can reach the archive at all.
+        let result = try core.act(selector: submitSelector, action: .press, degrade: true)
+        let basis = try XCTUnwrap(result["contaminationBasis"] as? String)
+        XCTAssertFalse(
+            basis.contains("declaration, not a measurement"),
+            "the window WAS watched, so the declared-unattended sentence must not appear: \(basis)"
+        )
+        let pack = try core.lastEvidence(operationId: nil)
+        XCTAssertEqual(
+            pack.attribution, Attribution(level: .weak, contaminated: true),
+            "an observed human input decides the verdict against the declaration"
+        )
+        XCTAssertNotNil(
+            result["humanInputEvents"],
+            "the observed events stay on the response, declared or not"
+        )
+    }
+
+    func testUndeclaredEngineKeepsTheConservativeVerdict() throws {
+        // The default must stay the pessimistic one: `declaresUnattendedWindow`
+        // is opt-in per process, so forgetting the flag cannot quietly upgrade
+        // unwatched windows into clean ones. Same engine as the first declared
+        // test, one argument missing.
+        let core = EngineCore(
+            channel: makeChannel(), settle: {},
+            inputMonitorAbsenceReason: "C33 was declined at startup by the --no-c33 flag"
+        )
+        _ = try core.attach(bundleId: "com.example.app", pid: nil)
+        let result = try core.act(selector: submitSelector, action: .press)
+        let basis = try XCTUnwrap(result["contaminationBasis"] as? String)
+        XCTAssertFalse(basis.contains("declaration"), basis)
+        let pack = try core.lastEvidence(operationId: nil)
+        XCTAssertEqual(pack.attribution, Attribution(level: .weak, contaminated: true))
     }
 
     func testMonitorAbsenceWithoutAStatedReasonChangesNoArchivedVerdict() throws {
