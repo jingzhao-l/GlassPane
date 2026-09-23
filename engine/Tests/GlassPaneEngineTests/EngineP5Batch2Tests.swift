@@ -380,6 +380,10 @@ final class EngineP5Batch2Tests: XCTestCase {
         XCTAssertEqual(gate.count, 1)
         XCTAssertEqual(gate.chain().first?.operationType, "restore")
         XCTAssertEqual(gate.chain().first?.riskTier, .high)
-        XCTAssertTrue(gate.chain().first?.reason.contains("rollback_full") == true)
+        XCTAssertEqual(gate.chain().first?.reason, "restore planned only (no execution surface): rollback_full")
+        XCTAssertFalse(
+            gate.chain().first?.reason.contains("executed") == true,
+            "档 1 计划态没有执行面，台账不得写成执行过（A-4）"
+        )
     }
 }

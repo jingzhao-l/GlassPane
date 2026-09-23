@@ -90,7 +90,7 @@ final class SettingsModel: ObservableObject {
 
     /// 与 daemon 默认一致的 socket 路径。
     public static func defaultSocketPath() -> String {
-        NSHomeDirectory() + "/.glasspane/engine.sock"
+        DaemonProbe.defaultSocketPath
     }
 
     init(
@@ -122,7 +122,7 @@ final class SettingsModel: ObservableObject {
     // MARK: - 引导动作（P1 v1.2 §11.2：由 daemon 自己申请，面板只导航）
 
     /// 权限卡的统一引导入口：
-    ///  1. 已授权 → no-op；
+    ///  1. 已授权 → 只把系统设置里对应那一页打开（按钮语义是"查看"）；
     ///  2. 取到 daemon 身份 → `launchctl submit` 让 daemon 以**自身身份**发起
     ///     系统申请，随后打开对应系统面板深链；
     ///  3. 取不到 daemon 身份 → 只打开深链并如实说明"面板代申请会记错主体"，
@@ -136,6 +136,11 @@ final class SettingsModel: ObservableObject {
             return
         case .accessibility, .inputMonitoring, .screenRecording:
             if status(of: kind) == .granted {
+                // 已授权时按钮的语义是"跳到系统设置里那一行"，所以必须真的跳。
+                // 早先这里直接 return，用户点一个写着"查看"的按钮却毫无反应。
+                pendingGuideKind = kind
+                pendingGuideText = "系统设置已打开，\(PermissionGuide.descriptorName(for: kind))这一项当前是开启的。"
+                PermissionGuide.openSystemPane(for: kind)
                 return
             }
             if let binaryPath = daemon.subject?.binaryPath {

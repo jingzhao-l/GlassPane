@@ -108,16 +108,33 @@ final class EngineCoreTests: XCTestCase {
         XCTAssertNotNil(pack.circuitBreaker.reason)
     }
 
-    func testDeadProcessRecordsT1Evidence() throws {
+    /// 操作前就已不在场的进程**不能**判 T1（"崩在本次操作里"是没发生过的断言）。
+    /// 此前这条用例正是按那个错误口径写的，现在钉住两个方向。
+    func testAlreadyDeadProcessIsNotClaimedAsCrashDuringOperation() throws {
         try attach()
         channel.alive = false
         XCTAssertThrowsGPError(.actFailed) {
             try core.act(selector: submitSelector, action: .press)
         }
         let pack = try core.lastEvidence(operationId: nil)
+        XCTAssertEqual(pack.signals.crash?.processAliveBefore, false)
         XCTAssertEqual(pack.signals.crash?.processAliveAfter, false)
         let (diagnosisClass, _) = Classifier.classify(pack)
+        XCTAssertNotEqual(diagnosisClass, .t1, "进程没启动不能被说成崩在我们的操作里")
+    }
+
+    func testProcessExitingDuringOperationRecordsT1() throws {
+        try attach()
+        // 存活序列 [true, false]：操作前在场、操作后没了。act 本身不必失败，
+        // T1 断言的是"退出发生在本次操作窗口内"这一归因。
+        channel.aliveSequence = [true, false]
+        _ = try core.act(selector: submitSelector, action: .press)
+        let pack = try core.lastEvidence(operationId: nil)
+        XCTAssertEqual(pack.signals.crash?.processAliveBefore, true)
+        XCTAssertEqual(pack.signals.crash?.processAliveAfter, false)
+        let (diagnosisClass, report) = Classifier.classify(pack)
         XCTAssertEqual(diagnosisClass, .t1)
+        XCTAssertTrue(report.anomaly.contains("exited during the operation"))
     }
 
     func testUnresponsiveAppRecordsT2Evidence() throws {

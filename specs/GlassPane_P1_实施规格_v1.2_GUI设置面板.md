@@ -463,3 +463,54 @@ mcp-shell 提交就在）：unref 的定时器不维持事件循环，当"等一
 | P1-S20 | 面板文案面向用户 | UI 字符串不写规格编号、不写实现自辩；可操作控件带稳定 identifier 以便自动化定位 | ✓ 2026-09-20（`gp-guide-*`/`gp-verify-*`/`gp-restart-daemon`/`gp-refresh`；测试断言不含 §） |
 | P1-S14 | 错误 remedy 可执行 | `assert_element` 缺信号上下文时仍回 `GP_E_NO_OPERATION`（码表与 P0 §3.3 语义不动），但 remedy 改为可执行的 "run act first"，消除自指循环 | ✓ 2026-09-20（走 `GPError` 的 per-instance remedy 通道） |
 | P1-S21 | 请求超时必然交付 | `EngineJsonRpcClient.call` 的超时定时器不得 `unref()`；回归在**裸子进程**里跑（除该 Promise 外无 handle）：缺陷态 exit 13/无输出，修后 exit 0 + `REJECTED GP_E_ENGINE_UNREACHABLE` | ✓ 2026-09-21（CI 第二次真跑暴露；`mcp-shell/test/fixtures/timeout-loop.mjs`，本地 mcp-shell 71 用例全绿） |
+
+---
+
+## 12. 面板控制台化（v1.2 追加，2026-09-22）
+
+### 12.1 为什么扩
+
+§6.2 把面板定义为"权限 onboarding 一页"，这在 P1 批三时是完整的：那时 evidence 仅内存态、没有项目注册表、没有审批台账。到 2026-09-22，磁盘上已实测存在 **561 条证据档案**（`~/.glasspane/evidence/`）、**68 条项目注册项**（`projects.json`）、**38 条审批签名链记录**（`approvals.json`），全部只有 daemon CLI 读得到，**没有任何人类界面**。"让开发者回到桌面就能审计"（综述 §5.14 / PRD US-10）在 GUI 面上是缺的。
+
+### 12.2 结构与不变量
+
+| 面 | 内容 | 不变量 |
+|---|---|---|
+| 导航 | `NavigationSplitView`：首次使用（权限，默认落点）／日常审计（证据档案 · 项目 · 审批台账）；侧栏底部常驻 daemon 存活点 | 默认落点恒为权限页，**§10/§11 的全部既有断言不得回退**（P1-C6 冒烟逐条复跑） |
+| 窗口标题 | 只在根设一次 `GlassPane 设置` | 各页**不得**再设 `navigationTitle`——实测会把窗口标题顶成页名，P1-C6 `FAIL window title missing`；页名改由页内 `PageTitleView` 表达 |
+| 页签可驱动性 | 侧栏条目是显式 `Button`（非 `List(selection:)` 行） | SwiftUI 侧栏行在 AX 树里是 **AXStaticText**，`act` 按标识选不中也不能按动 → 页签必须 `gp-nav-<section>` 可 `act`（实测三条 `actConfirmed=true`） |
+| 数据面 | `GlassPaneEngine/LocalArchive.swift`：档案扫描、摘要折算、筛选、测试残留判据、台账校验，全部纯函数 + 目录/读文件可注入 | 面板壳仍不做逻辑单测（§9.3）；**读侧逻辑一律下沉到 engine 库并在 CI 单测**（`LocalArchiveTests` 15 用例） |
+| 协议面 | 只读已落盘文件 | **§6.5 冻结面不变**：不新增 socket 方法、不新增 MCP 工具、不碰 evidence/decision-log/recipe schema |
+| 写入面 | 面板不写 `projects.json`；清理/删除只经 daemon 一次性 CLI（`--project-prune` / `--project-remove`），随后提示"重启后台服务才生效" | 运行中的 daemon 内存持有一份注册表，面板直接覆写会被它下一次写盘**静默冲掉**——静默失效正是 §11.8 复盘的那类缺陷 |
+| 诚实呈现 | 目录缺失 / 目录为空 / 有文件解不开 三者分开；未测量通道（无屏幕录制时的像素）保持 nil 并写"未测量"；`daemon:auto` 记录显式标为"后台服务自批"并计数 | 与 README"拿不到数据就显示未验证，永远不会为了好看而点亮"同源 |
+
+### 12.3 测试残留判据（双条件，宁漏勿误）
+
+`bundleId == com.example.app` **且** `evidenceStoragePath` 落在系统临时目录（`NSTemporaryDirectory()` 及其 symlink 解析形、`/tmp/`、`/private/tmp/`）。实测命中当前全部 68 条；真项目即使误配同名 bundleId，只要证据不在临时目录就不会被自动清。删除前必须先 `--dry-run` 出清单、在面板确认表里逐条可见。
+
+### 12.3.1 两条 CLI 的输出契约（2026-09-23 与代码对齐后补）
+
+判据只有一份（`LocalArchive.isTestResidue`）：面板的预览表与 `--project-prune --dry-run` 用的是同一个函数，不存在两处各写一遍"什么算残留"。
+
+| 命令 | 字段 | 退出码 |
+|---|---|---|
+| `--project-prune [--dry-run]` | `dryRun` `total`（修剪前条数）`matched`（命中）`pruned`（**真正落盘**条数）`prunedProjectIds` `failed` + `failures[]`（逐条原因）`remaining`（修剪后条数）`loadFailed` `requiresDaemonRestart` `projects[]`（命中明细） | 命中 5 条只删掉 3 条即为 **1**；`loadFailed` 为 1；其余为 0 |
+| `--project-remove <id> [--dry-run]` | 实删：`removed` `projectId` `remaining` `requiresDaemonRestart`；`--dry-run`：`dryRun` `wouldRemove` `found` `remaining` `loadFailed` | 未知 id → 3；拒绝覆写损坏表 → 1；成功 → 0 |
+
+`pruned` 取的是"写成功并有读回校验"的条数，不是命中条数——一次把 `pruned` 写成 `matched` 的修剪，等于在用户问"删了多少"时撒谎。`--dry-run` 对两条命令都成立：带它却不预览、直接真删，是面板"先看清单再动手"承诺的反面。
+
+### 12.3.2 注册表写入的安全边界（同批补，与 A-1 事故同源）
+
+* `ProjectRegistry(filePath:)` / `EvidenceStore(directory:)` **没有缺省路径**；活路径（`~/.glasspane/…`）只有 `live()` 一个入口，且只允许 `glasspaned` 引用。`EngineCore` 不再在缺省时自建活注册表。
+* 读不回的 `projects.json` 一律**拒绝覆写**（`loadFailed` 锁不做自动解锁：自动重读会丢掉本次写入，照旧覆写会丢掉文件里的真条目，两个方向都是无声丢数据）。错误文案给出可执行补救（修文件 + `--restore-launchd` 或面板重启），不指向不存在的解锁接口。
+* 每次写入 = 先写临时件 → 原子替换 → 清掉 `replaceItemAt` 留下的备份件 → **读回比对字节**；任何一步失败即抛错，且内存表保持不变（写失败不留幻影条目）。
+* 没有注入档案的核心**拒绝**执行删档（`pruneEvidence`），不再回落到 `~/.glasspane/evidence/`——那是一条从单测就能不可逆清掉用户证据档案的路径。
+* 以上四条各有一个回归用例，另有一道源码扫描闸（`ProjectRegistryIsolationTests`）：测试里出现活路径字样、或生产代码里活路径引用超出 daemon 入口，即红。
+
+### 12.4 验收项
+
+| 编号 | 验收项 | 通过标准 | 状态 |
+|---|---|---|---|
+| P1-S22 | 控制台四页可用且旧断言不回退 | `.c6_smoke.py` 全绿（四卡 identifier + 跳转 AXButton + ≥12 AXStaticText + 折叠三角 + 窗口标题）；三张新页签 `act` by identifier 全部 `actConfirmed=true` | ✓ 2026-09-22 真机（隔离 socket `/tmp/gp_c6.sock`，未碰现网 daemon） |
+| P1-S23 | 档案读侧逻辑可 CI 测 | `LocalArchiveTests`：缺目录≠空档案、解不开的文件按名列出、排序稳定、未测通道保持 nil、残留判据双条件、台账损坏不读成"空但健康" | ✓ 2026-09-22（`swift test` 390 通过 0 失败，基线 374） |
+| P1-S24 | 面板文案不出现重复前缀与错位指代 | "缺少时："由视图单侧负责（`PermissionDescriptor` 归一）；安装器使用说明里的 UI 指代随改名同步 | ✓ 2026-09-22 |

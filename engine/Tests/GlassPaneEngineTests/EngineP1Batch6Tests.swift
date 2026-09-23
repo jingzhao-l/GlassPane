@@ -19,13 +19,17 @@ final class EngineP1Batch6Tests: XCTestCase {
     }
 
     /// An EngineCore normalised to a writable temp archive + scripted channel.
+    /// `directory: nil` = **不挂档案**（`evidenceStore` 为 nil，纯内存），
+    /// 不再是"回落到 `~/.glasspane/evidence/`"：这个用例原本叫
+    /// "without archive"，实际却往用户的真实证据档案里写（A-1 的同一形状）。
+    /// 要写档案就必须显式给一个临时目录。
     private func makeCore(
         directory: String? = nil,
         registry: ProjectRegistry? = nil
     ) -> (core: EngineCore, channel: ScriptedChannel, store: EvidenceStore?) {
         let channel = ScriptedChannel(fallbackTree: TestTrees.standard)
         channel.fallbackCapture = TestImages.solid(100)
-        let store = EvidenceStore(directory: directory)
+        let store = directory.map { EvidenceStore(directory: $0) }
         let core = EngineCore(channel: channel, settle: {}, projectRegistry: registry, evidenceStore: store)
         return (core, channel, store)
     }
@@ -167,7 +171,11 @@ final class EngineP1Batch6Tests: XCTestCase {
 
     func testAttachWithProjectRoutesArchiveToProjectDir() throws {
         let projectDir = tempDir()
-        let registry = ProjectRegistry()
+        // 必须注入临时路径：`ProjectRegistry()` 默认落在 ~/.glasspane/projects.json，
+        // 那正是运行中 daemon 读写的真表。此前每次 `swift test` 都往用户注册表里
+        // 塞一条 com.example.app 假项目（实测已累积 68 条），且 maxProjects=128
+        // 一旦触顶，真实项目注册会直接 GP_E_PROJECT_LIMIT。
+        let registry = ProjectRegistry(filePath: tempDir() + "/projects.json")
         let project = try registry.create(
             displayName: "Proj",
             bundleId: "com.example.app",

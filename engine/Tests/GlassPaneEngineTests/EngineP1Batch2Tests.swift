@@ -140,7 +140,10 @@ final class EngineP1Batch2Tests: XCTestCase {
         XCTAssertThrowsError(try core.restore(snapshotId: snapshotId, steps: steps)) { error in
             let gpError = error as? GPError
             XCTAssertEqual(gpError?.code, .restoreStepFailed)
-            XCTAssertTrue(gpError?.message.contains("step 0 failed") == true)
+            // 步骤编号从 1 起：这条 message 会进不可抵赖的审批台账，
+            // "failed at step 0" 会被读成"第 0 步"，而第 2 步失败时写的是 "step 1"
+            // ——在审计面上指错步骤与没测到却上报同性质。
+            XCTAssertTrue(gpError?.message.contains("step 1 failed") == true)
         }
         XCTAssertEqual(channel.actionCallCount, 1, "only the first step is attempted before abort")
     }

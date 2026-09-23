@@ -89,6 +89,16 @@ struct ContentView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
+                // 自我说明。这个窗口会在跑真机冒烟时自己弹出来，看着像一
+                // 个没做完的灰框，很容易被误认成产品界面或残留垃圾。它不是产品
+                // 界面：它是 P6 §4 的合成对照 app，冒烟靠它的控件与节点数变化
+                // 钉诊断分类。此处刻意不参与任何断言（无 identifier 参与判定），
+                // 加它不改变任何分类结论。
+                Text("GlassPane 自检夹具窗口 · 由真机冒烟自动打开 · 关掉它只会让本次冒烟失败，不影响任何功能")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("fixture-notice")
                 Text("count: \(model.count)").accessibilityIdentifier("count-label")
                 Text("drift: \(model.drift)").accessibilityIdentifier("drift-label")
                 // ---- H6: replay panel (side-effect suppression subject) ----

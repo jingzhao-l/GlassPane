@@ -12,6 +12,10 @@
  *
  * 所有辅助函数均具名导出，供 node:test 单测（test/cli.test.mjs），主流程通过
  * import.meta.url 守卫隔离，测试导入不会触发安装动作。
+ *
+ * 对外契约：退出码是脚本/agent 唯一机器可读的结论——0 = 产物就位**且**daemon 实测
+ * 应答过 hello（或本轮按要求压根不该起 daemon），1 = 未通过校验或构建/注册失败，
+ * 2 = 参数错误。install.sh 以 exec 委托，退出码原样透传。口径详见 usageText。
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { createInterface } from 'node:readline/promises'
@@ -29,6 +33,13 @@ export const DAEMON_LOG_NAME = 'installer-daemon.log'
 export const LAUNCHD_LABEL = 'com.glasspane.daemon'
 export const LAUNCHD_DIR_NAME = 'Library/LaunchAgents'
 export const LAUNCHD_FILE_NAME = `${LAUNCHD_LABEL}.plist`
+
+/** 分离启动后的**有界观察窗口**：spawn 失败（ENOENT、参数被拒）以异步 error 事件
+ *  落地，`/usr/bin/open` 目标缺失则以非零退出落地，两者都发生在启动后的几百毫秒
+ *  内，所以窗口要给足才能真的看见失败（旧值 150ms 常常在 `open` 退出前就收工，
+ *  等于那道退出码分支没有触发路径）。窗口外的崩溃仍然看不到——存活判定的真源
+ *  始终是收尾那次 socket hello 校验，不是这里。 */
+export const LAUNCH_SETTLE_MS = 600
 
 /** bundle 安置目录与产物名（P1 v1.2 §11.1：daemon 必须有 bundle 身份，系统设置
  *  的权限列表才会显示可读名与图标，「+」选择器也才找得到它。安置在
@@ -632,15 +643,90 @@ export async function confirm(question, { autoYes = false } = {}) {
   }
 }
 
-/** 后台分离启动长驻进程（daemon / GUI），日志追加写盘，返回 PID。 */
-export function startDetached(binPath, args, logPath) {
-  const logStream = fs.openSync(logPath, 'a')
+/** 创建日志/socket 目录（`~/.glasspane`），一次性、幂等（A-8 的后半段）。
+ *
+ *  为什么必须由安装器在**写 plist 之前**做，而不是等 startDetached 顺手 mkdir：
+ *  `~/.glasspane` 同时是三样东西的落点——socket、launchd plist 的
+ *  StandardOutPath/StandardErrorPath、手动启动的日志。默认注册 launchd
+ *  （parseArgs 的 launchd 默认 true）时 bootstrap 的 RunAtLoad 会在安装器自己
+ *  那次 startDetached **之前**就把 daemon 拉起来，而后面"socket 已可达即跳过手动
+ *  启动"那条分支让手动分支根本不执行——于是全新机器上第一个进场的 spawner 是
+ *  launchd，而它要写的目录还不存在。startDetached 里的 mkdirSync 救不了这一枪。
+ *
+ *  不改变任何文件位置：只建目录，路径口径与 install() 里算出来的完全一致。 */
+export function ensureLogDir(logPath, { mkdir = fs.mkdirSync } = {}) {
+  const dir = path.dirname(logPath)
+  try {
+    mkdir(dir, { recursive: true })
+    return { ok: true, dir, error: null }
+  } catch (error) {
+    return { ok: false, dir, error: `日志/socket 目录不可用：${dir}（${error.message}）` }
+  }
+}
+
+/** 后台分离启动长驻进程（daemon / GUI），日志追加写盘。
+ *
+ *  返回 `{ ok, pid, error, exit }` 而不是裸 PID：spawn 的失败是**异步** error 事件，
+ *  此前函数只回 `child.pid`，于是"日志目录不存在 / 启动器路径不存在"这类
+ *  故障会先打印一句 `PID undefined`，再抛未捕获异常——用户看到的是一次成功
+ *  输出加一个崩溃栈。这里等一小段时间把 error 事件收进来。
+ *
+ *  窗口之后还有一件确定可观测的事：子进程是否**已经退出**。`child.on('error')`
+ *  只把失败写进一个没人读的变量，而秒退的子进程（参数被拒、bundle 校验失败、
+ *  日志写不进去）在窗口内收不到任何 error 事件，旧实现于是带着一个已经作废的
+ *  PID 返回 ok:true。现在读 `child.exitCode`/`child.signalCode`：非零退出或被
+ *  信号终止 → ok:false 并给出原因；退出码 0 仍算命令被受理（`/usr/bin/open`
+ *  就是"提交给 LaunchServices 后立刻 0 退出"的形态，把它判成失败是过度修复），
+ *  但窗口内观察到的退出状态会通过 `exit` 字段如实回传，调用方不得再说"进程在跑"。
+ *
+ *  如实边界：这是一次**有界观察**，不是存活证明——窗口外的崩溃、窗口之后才到的
+ *  error 事件都看不见；daemon 到底活没活，只有收尾那次 socket hello 校验说了算。
+ *
+ *  日志目录（`~/.glasspane`）由 install() 在建 plist、bootstrap 之前一次性创建
+ *  （见 ensureLogDir）；这里的 mkdirSync 只是给直接调用方与单测留的兜底。 */
+export async function startDetached(binPath, args, logPath, { settleMs = LAUNCH_SETTLE_MS, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  try {
+    fs.mkdirSync(path.dirname(logPath), { recursive: true })
+  } catch (error) {
+    return { ok: false, pid: null, error: `日志目录不可用：${error.message}`, exit: null }
+  }
+  let logStream
+  try {
+    logStream = fs.openSync(logPath, 'a')
+  } catch (error) {
+    return { ok: false, pid: null, error: `日志文件打不开：${error.message}`, exit: null }
+  }
   const child = spawn(binPath, args, {
     detached: true,
     stdio: ['ignore', logStream, logStream],
   })
+  let failure = null
+  child.on('error', (error) => { failure = `${error.message}` })
   child.unref()
-  return child.pid
+  // 给 spawn 的 error 事件一个落地窗口（ENOENT 在下一 tick 才到）。
+  await sleep(settleMs)
+  if (child.pid == null) {
+    return { ok: false, pid: null, error: failure ?? '子进程未起来（拿不到 PID）', exit: null }
+  }
+  // 'exit' 事件会在窗口内把 exitCode/signalCode 填上；两者都为 null 才是"窗口
+  // 结束时仍在运行"。（detached + unref 不影响 exitCode 的记账。）
+  const exit = child.exitCode !== null || child.signalCode !== null
+    ? { code: child.exitCode, signal: child.signalCode }
+    : null
+  if (failure) {
+    return { ok: false, pid: null, error: `${failure}`, exit }
+  }
+  if (exit && (exit.code !== 0 || exit.signal !== null)) {
+    const how = exit.signal ? `被信号 ${exit.signal} 终止` : `以退出码 ${exit.code} 结束`
+    return {
+      ok: false,
+      pid: null,
+      error: `子进程 ${child.pid} 在 ${settleMs}ms 观察窗口内就${how}，回传的是作废的 PID。`
+        + `注意：窗口外的崩溃与 error 事件看不到，本结论是有界观察而非存活证明。`,
+      exit,
+    }
+  }
+  return { ok: true, pid: child.pid, error: null, exit }
 }
 
 /** bundle 形态的 `open` 参数（纯函数）。
@@ -712,6 +798,14 @@ export function usageText() {
     '  --no-bootstrap     本地找不到仓库时不自动 clone，改为打印定位指引',
     '  -h, --help         显示本帮助',
     '',
+    '退出码（脚本/agent 调用方读这个，别读屏幕文案）:',
+    '  0  安装完成且 daemon 实测应答 hello；或本轮按要求压根不该有 daemon',
+    '     （--no-daemon 且 --no-launchd）',
+    '  1  收尾未通过 hello 校验（daemon 没起来/不应答），或构建/产物/launchd 出错',
+    '  2  命令行参数错误',
+    '  注：install.sh 用 exec 委托本文件，退出码原样透传，所以 `curl | sh` 的',
+    '      $? 就是这里的结论。',
+    '',
   ].join('\n')
 }
 
@@ -742,6 +836,7 @@ export function nextStepsText({
   rootDir,
   socketPath,
   guiOpened,
+  daemonVerified = true,
   daemon = { viaBundle: false, path: null },
   settingsApp = null,
 }) {
@@ -751,6 +846,14 @@ export function nextStepsText({
   return [
     paint('后续使用说明', 'bold'),
     '',
+    // daemon 没实测应答时，后面所有"已装好"的措辞都不成立——把这条摆在最前面，
+    // 而不是让人照着说明接完 MCP 才发现连不上。补救命令必须是**真路径**（本函数
+    // 已经拿到 rootDir），印 "<仓库目录>" 占位符等于没给可执行的东西。
+    ...(daemonVerified ? [] : [
+      paint('⚠ 后台服务未通过 hello 校验：下面第 1 步接好的 MCP 客户端会连不上 daemon。', 'red'),
+      `   先修这一步：node "${path.join(rootDir, 'installer', 'cli.js')}" --restore-launchd`,
+      '',
+    ]),
     '1. MCP 客户端（Claude Desktop / Cursor / 任意 MCP host）接入配置片段：',
     '',
     mcpClientConfigSnippet({ rootDir, socketPath }),
@@ -760,9 +863,17 @@ export function nextStepsText({
     daemon.viaBundle
       ? '   在系统设置的对应权限列表里应能看到「GlassPane Daemon」（带图标，可用「+」选择或从 Finder 拖入）。'
       : '   当前 daemon 是裸二进制形态，权限列表里只会显示文件名「glasspaned」（无图标，「+」选择器看不到隐藏目录）；重跑安装（默认打包 .app）可获得带图标的条目。',
-    guiOpened
-      ? '   面板已打开：点权限卡「授权」会让 daemon 以自身身份发起申请并跳转到对应系统面板。'
-      : `   打开面板：open "${settingsAppHint}"（点权限卡「授权」即由 daemon 自身发起申请）。`,
+    // guiOpened 的口径 = 启动命令被受理且未报错退出（bundle 形态经 `/usr/bin/open`，
+    // 目标缺失/被 LaunchServices 拒绝时它返回非零 → 走下面那条手工指引）。窗口是否
+    // 真出现在屏幕上没实测过，而且 `-g` 本就不抢焦点，得把这层边界写在话里。
+    ...(guiOpened ? [
+      '   面板已打开（口径：启动命令已发出且在观察窗口内未报错退出——bundle 形态走的',
+      '   `open` 在目标 bundle 缺失时会非零退出，未报错即产物确实在；窗口外的失败看不',
+      `   到，所以没看到窗口属正常（-g 不抢焦点），再起一次：open "${settingsAppHint}"）。`,
+      '   点权限卡「授权」会让 daemon 以自身身份发起申请并跳转到对应系统面板。',
+    ] : [
+      `   打开面板：open "${settingsAppHint}"（点权限卡「授权」即由 daemon 自身发起申请）。`,
+    ]),
     `   验证 daemon 自报的席位与主体：${daemon.path ?? path.join(rootDir, 'engine', '.build', 'release', DAEMON_EXE_NAME)} --permissions`,
     '   口径提醒：daemon 必须由 launchd/登录项拉起，权限自报才等于真实席位；从终端或',
     '   GUI 手动起的实例会继承启动者 app 的判定（真机实测：同 bundle 两种起法读数不同）。',
@@ -771,7 +882,7 @@ export function nextStepsText({
     `   作业被 bootout（等授权期间常发生）后的恢复**不需要手敲 launchctl**：`,
     `   node "${path.join(rootDir, 'installer', 'cli.js')}" --restore-launchd`,
     `   （检测→bootstrap→hello 校验自报席位；勾完 TCC 框重跑即自动换进程复验）`,
-    `4. entryName 核对：设置面板「Daemon 状态 → 主体」应与上面「${entryName}」一致；不一致说明连到了别的构建实例。`,
+`4. entryName 核对：设置面板「Daemon 状态 → 主体」应与上面「${entryName}」一致；不一致说明连到了别的构建实例。`,
     '5. registry 发布形态：MCP 服务器已可独立安装（`npm i -g glasspane-mcp`，命令名',
     '   glasspane-mcp）；但它只是转发层，daemon 与权限仍由本次安装产出，缺 daemon 时',
     '   工具调用会返回带补救步骤的结构化错误。',
@@ -819,7 +930,38 @@ export function repoMissingText() {
   ].join('\n')
 }
 
-/** 主安装流程；所有副作用步骤均记录真实执行结果，失败即抛错终止。 */
+/** 收尾判定 → 对外结论（纯函数）。
+ *  退出码是本 CLI 唯一**机器可读**的结论：install.sh 是 `exec node cli.js` 委托，
+ *  `curl | sh` 与按退出码办事的 agent 都只看到它，看不到屏幕上那句"安装未完成"。
+ *  所以 daemon 没实测应答 hello 就必须非零，否则半成品安装会被报成成功。
+ *  例外：本次安装本就不该留下 daemon（--no-daemon 且 --no-launchd）时，"没验到"
+ *  是用户的选择而不是故障，退出码保持 0（告警文案照给，nextStepsText 也照警告）。 */
+export function installOutcome({ verified = false, daemonExpected = true } = {}) {
+  const ok = Boolean(verified) || !daemonExpected
+  return { ok, exitCode: ok ? 0 : 1, verified: Boolean(verified), daemonExpected }
+}
+
+/** 未通过校验时的提示行（纯函数，可单测）。必须自带**用户真能执行**的补救命令，
+ *  并点明退出码非零——只说"安装未完成"的话，脚本调用方什么也拿不到。 */
+export function verificationFailureText({
+  arrived = false,
+  socketPath,
+  daemonLog,
+  cliPath,
+  exitCode = 1,
+} = {}) {
+  return [
+    arrived
+      ? `安装未完成：socket 在（${socketPath}），但 daemon 没有正确应答 hello——见 ${daemonLog}`
+      : `安装未完成：没有等到 daemon 在 ${socketPath} 应答 hello——见 ${daemonLog}`,
+    `本命令退出码 ${exitCode}：install.sh 与调用它的脚本/agent 按安装失败处理，先别接 MCP。`,
+    `补救（不需要手敲 launchctl）：node "${cliPath}" --restore-launchd`,
+    '修好后重跑安装器即可（它会覆盖式重建产物与 plist）。',
+  ].join('\n')
+}
+
+/** 主安装流程；所有副作用步骤均记录真实执行结果，失败即抛错终止。
+ *  返回值是收尾校验结论（`installOutcome`），入口守卫据此设退出码。 */
 export async function install({ options = parseArgs([]).options, env = process.env } = {}) {
   const explicitRoot = options.repoDir ? path.resolve(options.repoDir) : null
   const envRoot = env.GLASSPANE_REPO ? path.resolve(env.GLASSPANE_REPO) : null
@@ -866,6 +1008,19 @@ export async function install({ options = parseArgs([]).options, env = process.e
   })
 
   printStep(`项目根目录: ${rootDir}`)
+
+  // 审计 A-8 的后半段：`~/.glasspane` 在全新机器上并不存在，而它同时是 socket、
+  // launchd plist 的 StandardOutPath/StandardErrorPath 与手动启动日志三者的父目录。
+  // 必须**在这里**建——路径刚定、plist 还没写、还没 bootstrap。默认就注册 launchd
+  // （options.launchd 默认 true），bootstrap 的 RunAtLoad 会先于安装器自己那次
+  // startDetached 把 daemon 拉起来，之后"socket 已可达即跳过手动启动"，所以靠
+  // startDetached 内部 mkdir 永远慢一步：首跑真正要进这个目录的 spawner 是 launchd。
+  // 只建目录，不改变任何文件的落点。
+  const logDir = ensureLogDir(daemonLog)
+  if (!logDir.ok) {
+    throw new Error(`${logDir.error}——plist 与产物均未写入，安装在此中止`)
+  }
+  printStep(`日志与 socket 目录就位：${logDir.dir}`)
 
   if (!options.skipBuild) {
     printStep('安装 npm 依赖（workspaces: kernel / mcp-shell / installer）……')
@@ -922,6 +1077,9 @@ export async function install({ options = parseArgs([]).options, env = process.e
 
   // 开机自启先于手工启动注册：bootstrap 触发 RunAtLoad 会立即拉起 daemon，
   // 随后手工启动步骤发现 socket 已可达即跳过——避免两个实例抢 socket。
+  // 前置条件：daemonLog 的父目录（= socket 目录）已在上面 ensureLogDir 建好——
+  // 下面这份 plist 的 StandardOutPath/StandardErrorPath 就写在那个目录里，而
+  // RunAtLoad 让 launchd 成为第一个往那里写的 spawner（全新机器上目录原本不存在）。
   if (options.launchd) {
     const launchAgentsDir = path.join(process.env.HOME ?? '', ...LAUNCHD_DIR_NAME.split('/'))
     const plistPath = path.join(launchAgentsDir, LAUNCHD_FILE_NAME)
@@ -989,8 +1147,21 @@ export async function install({ options = parseArgs([]).options, env = process.e
     } else {
       const start = daemonStartCommand({ daemonLaunch, daemonApp: plan.daemonApp, socketPath })
       printStep(`启动 glasspaned（${daemonLaunch.viaBundle ? 'bundle 形态，经 open 登记主进程' : '裸二进制形态'}，日志: ${daemonLog}）……`)
-      const pid = startDetached(start.launchPath, start.args, daemonLog)
-      printStep(`glasspaned 启动命令已发出，PID ${pid}`)
+      const started = await startDetached(start.launchPath, start.args, daemonLog)
+      if (!started.ok) {
+        printStep(paint(`glasspaned 启动命令失败：${started.error}`, 'red'))
+      } else if (started.exit) {
+        // 窗口内启动命令就已退出 0：经 open 时是"已提交给 LaunchServices"的正常
+        // 形态，裸二进制形态则意味着 daemon 自己秒退。两种情况都不能说"进程在跑"
+        // ——那只有下面收尾的 socket hello 校验才配说。
+        printStep(paint(
+          `glasspaned 启动命令已执行完毕并退出（码 ${started.exit.code}，PID ${started.pid}）；`
+          + '这不代表 daemon 在跑，存活与否以下面的 hello 校验为准',
+          'yellow',
+        ))
+      } else {
+        printStep(`glasspaned 启动命令已发出且观察窗口内未退出，PID ${started.pid}`)
+      }
     }
   }
 
@@ -1002,18 +1173,57 @@ export async function install({ options = parseArgs([]).options, env = process.e
     }
     const guiStart = guiStartCommand({ guiLaunch, settingsApp: plan.settingsApp })
     printStep(`打开设置面板（${guiLaunch.viaBundle ? 'GlassPane.app，经 open 登记主进程' : '裸二进制'}，权限引导）……`)
-    startDetached(guiStart.launchPath, guiStart.args, daemonLog)
-    guiOpened = true
+    const gui = await startDetached(guiStart.launchPath, guiStart.args, daemonLog)
+    // "面板已打开"只能是实测结论。startDetached 现在会把 `open` 的非零退出（目标
+    // bundle 缺失、被 LaunchServices 拒绝）与窗口内被信号终止都判成 ok:false，
+    // 所以 gui.ok 的口径是"启动命令被受理且未报错退出"，不是"窗口已在屏幕上"
+    // （bundle 形态带 -g，本就不抢焦点）——文案里把这层边界写明，见 nextStepsText。
+    guiOpened = gui.ok
+    if (!gui.ok) {
+      printStep(paint(`设置面板没能打开：${gui.error}`, 'yellow'))
+    }
   }
 
-  printStep('安装完成。')
+  // 收尾校验：socket 到位 + 一次 hello 真握手。安装器此前无条件打印"安装完成。"，
+  // 而且**无论校没校验过都退出 0**——install.sh 是 exec 委托，`curl | sh` 和按退出
+  // 码办事的 agent 只看到 0，于是半成品安装被报成成功。现在结论同时进文案与退出码。
+  // 本轮是否**应该**留下一个在跑的 daemon：--no-daemon 但注册了 launchd 时，
+  // bootstrap 的 RunAtLoad 已经把它拉起来了，同样要等要验（旧代码只看 options.daemon，
+  // 于是这种组合下 timeoutMs=1ms，必然"没验到"）。
+  const daemonExpected = Boolean(options.daemon || options.launchd)
+  const arrived = await waitForSocket(socketPath, { timeoutMs: daemonExpected ? 12000 : 1 })
+  const hello = arrived ? await socketHello(socketPath) : null
+  const verified = Boolean(arrived && hello?.version)
+  const outcome = installOutcome({ verified, daemonExpected })
+  if (verified) {
+    printStep(`实测校验通过：daemon 在 ${socketPath} 应答 hello（version=${hello.version}${hello.pid ? `，pid=${hello.pid}` : ''}）`)
+    printStep(`安装完成（退出码 ${outcome.exitCode}）。`)
+  } else if (daemonExpected) {
+    for (const line of verificationFailureText({
+      arrived,
+      socketPath,
+      daemonLog,
+      cliPath: path.join(rootDir, 'installer', 'cli.js'),
+      exitCode: outcome.exitCode,
+    }).split('\n')) {
+      printStep(paint(line, 'red'))
+    }
+  } else {
+    printStep(paint(
+      `本次按要求没有起 daemon（--no-daemon 且 --no-launchd），未做 hello 校验，退出码 ${outcome.exitCode}；`
+      + '接 MCP 前先自行启动 daemon，否则客户端连不上。',
+      'yellow',
+    ))
+  }
   process.stdout.write(`\n${nextStepsText({
     rootDir,
     socketPath,
     guiOpened,
+    daemonVerified: verified,
     daemon: daemonLaunch,
     settingsApp: plan.settingsApp ?? undefined,
   })}\n`)
+  return outcome
 }
 
 /** 入口守卫：直接用 node 运行本文件时才走安装流程（测试导入仅取函数）。 */
@@ -1051,8 +1261,11 @@ if (isMain) {
   }
 
   install({ options })
-    .then(() => {
+    .then((outcome) => {
       process.stdout.write('\n')
+      // 退出码 = 收尾校验结论。用 process.exitCode 而不是 process.exit()：让上面的
+      // 说明文本先冲干净（`curl | sh` 常接管道，截断会把"下一步怎么办"整段吃掉）。
+      process.exitCode = outcome.exitCode
     })
     .catch((installError) => {
       process.stderr.write(paint(`\n安装失败：${installError.message}\n`, 'red'))

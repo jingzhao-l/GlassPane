@@ -47,6 +47,8 @@ public final class EvidenceStore {
     public static let fileExtension = "json"
 
     private(set) var directory: String
+    /// 构造时给定的目录——`useDefaultDirectory()` 的落点。
+    private let constructionDirectory: String
 
     /// Archive retention cap. Writes exceeding this prune the oldest entries
     /// (by mtime) so the active directory stays bounded (spec v1.6 §12.2).
@@ -70,23 +72,42 @@ public final class EvidenceStore {
     ///   - maxAgeDays: age-based TTL; nil disables ageing. Values < 1 are
     ///     clamped to nil (disabled) rather than "delete on write".
     ///   - now: clock for age computation (defaults to the wall clock).
+    /// 档案目录必须显式给出。`directory: nil` 曾默认回落到
+    /// `~/.glasspane/evidence/`，于是任何一次"忘了传目录"的构造——尤其是单测——
+    /// 都会往用户的真实证据档案里写、并按保留策略删里面的旧件。生产侧的真实
+    /// 目录只有一个入口：`live()`（见 `ProjectRegistryIsolationTests`）。
     public init(
-        directory: String? = nil,
+        directory: String,
         maxFiles: Int? = nil,
         maxAgeDays: Int? = nil,
         now: @escaping () -> Date = { Date() }
     ) {
-        self.directory = directory ?? EvidenceStore.defaultDirectory
+        self.directory = directory
+        self.constructionDirectory = directory
         let requested = maxFiles ?? EvidenceStore.defaultMaxFiles
         self.maxFiles = max(requested, 1)
         self.maxAgeDays = maxAgeDays.map { $0 >= 1 ? $0 : nil } ?? nil
         self.now = now
     }
 
+    /// 生产档案根：`~/.glasspane/evidence/`。仅 daemon 使用。
+    public static func live() -> EvidenceStore {
+        EvidenceStore(directory: defaultDirectory)
+    }
+
     /// Update the active store directory (called when the active project
     /// changes on attach; spec v1.5 §9.3).
     public func setDirectory(_ dir: String) {
         directory = dir
+    }
+
+    /// 回到**本档案被构造时**的目录。
+    ///
+    /// 切换活跃项目时"这个项目没配档案路径"要复位，但复位的终点不是
+    /// `EvidenceStore.defaultDirectory`（那是 `~/.glasspane/evidence/`，会把一个
+    /// 注入的临时档案重定向到用户的真实档案里），而是这个实例自己的起点。
+    public func useDefaultDirectory() {
+        directory = constructionDirectory
     }
 
     /// Update the age-based TTL retention (P5 §9.2). Values < 1 are clamped

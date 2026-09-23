@@ -34,6 +34,8 @@ private struct Options {
     var pruneOlderThanDays = 30
     var maintenanceProjectId: String?
     var pruneDryRun = false
+    var projectPrune = false
+    var projectRemoveId: String?
     var evidenceStats = false
     var c33Enabled = true
     var checkDeveloperTools = false
@@ -130,6 +132,14 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             }
             index += 1
             options.maintenanceProjectId = arguments[index]
+        case "--project-prune":
+            options.projectPrune = true
+        case "--project-remove":
+            guard index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") else {
+                return .error("--project-remove requires a project ID")
+            }
+            index += 1
+            options.projectRemoveId = arguments[index]
         case "--dry-run":
             options.pruneDryRun = true
         case "--socket-path":
@@ -172,11 +182,13 @@ private func printUsage() {
         glasspaned --recipe-validate <path>
         glasspaned --approval-audit
         glasspaned --approval-verify
+        glasspaned --project-prune [--dry-run]
+        glasspaned --project-remove <project-id> [--dry-run]
         glasspaned --prune-evidence [--older-than <days>] [--project <id>] [--dry-run]
         glasspaned --evidence-stats [--project <id>]
 
     OPTIONS:
-        --socket-path <path>   Unix socket path (default: ~/.glasspane/engine.sock)
+        --socket-path <path>   Unix socket path (default: \(DaemonProbe.defaultSocketPath))
         --verbose             Log frames and state transitions to stderr
         --grant-accessibility  Onboarding: prompt for accessibility permission
         --check-screen-permission   Print screen recording permission state
@@ -205,7 +217,7 @@ private func printUsage() {
                                  operation-right mutex; act never blocks on user input)
         --no-probe           Disable the P6 probe socket (Z5 black-box only;
                                  handlerProbe/stateDiff signals stay null)
-        --probe-socket-path <path>  Probe listener path (default ~/.glasspane/probe.sock)
+        --probe-socket-path <path>  Probe listener path (default \(DaemonProbe.defaultProbeSocketPath))
         --force-socket       Take over the socket even when a live daemon is
                                  already serving it (default: refuse and exit 65)
         --list-projects        List all registered projects (JSON) and exit
@@ -228,7 +240,7 @@ private func printUsage() {
 }
 
 private func defaultSocketPath() -> String {
-    NSHomeDirectory() + "/.glasspane/engine.sock"
+    DaemonProbe.defaultSocketPath
 }
 
 // MARK: - Permission subject surface (P1 spec v1.2 §11.2)
@@ -465,7 +477,7 @@ if let kind = options.requestPermission {
 // MARK: - P1 project management commands (spec v1.4 §3)
 
 if options.listProjects {
-    let registry = ProjectRegistry()
+    let registry = ProjectRegistry.live()
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
     if let data = try? encoder.encode(registry.all) {
@@ -477,8 +489,123 @@ if options.listProjects {
     exit(0)
 }
 
+// MARK: - Test-residue project pruning (GUI 控制台「项目」页的写入面)
+
+if options.projectPrune {
+    // 面板不直接改 projects.json：运行中的 daemon 内存里持有一份注册表，
+    // 面板侧覆写会被它下一次写盘冲掉。修剪因此只有这一条写入路径，
+    // 并且如实报告"要不要重启后台服务才生效"。
+    let registry = ProjectRegistry.live()
+    let residue = registry.all.filter { LocalArchive.isTestResidue($0) }
+    let totalBefore = registry.all.count
+    let socketPath = options.socketPath ?? defaultSocketPath()
+    var pruned: [String] = []
+    var failures: [String] = []
+    if !options.pruneDryRun {
+        for entry in residue {
+            do {
+                if try registry.remove(entry.projectId) { pruned.append(entry.projectId) }
+            } catch let error as GPError {
+                // 一条失败不能让其余条目也停在"未尝试"，但绝不能继续被算成已修剪：
+                // 此前 pruned 直接取命中数，写入被拒绝（损坏表拒覆写）时照样报成功。
+                failures.append("\(entry.projectId): \(error.message)")
+            } catch {
+                failures.append("\(entry.projectId): \(error.localizedDescription)")
+            }
+        }
+    }
+    let payload: [String: Any] = [
+        "dryRun": options.pruneDryRun,
+        "total": totalBefore,
+        "matched": residue.count,
+        "pruned": pruned.count,
+        "prunedProjectIds": pruned,
+        "failed": failures.count,
+        "failures": failures,
+        "remaining": registry.all.count,
+        "loadFailed": registry.loadFailed,
+        // 有活着的 daemon 时，磁盘上的修剪要重启后才被它看见。
+        "requiresDaemonRestart": !pruned.isEmpty
+            && DaemonProbe().reachable(socketPath: socketPath),
+        "projects": residue.map { entry -> [String: Any] in
+            [
+                "projectId": entry.projectId,
+                "displayName": entry.displayName,
+                "bundleId": entry.bundleId ?? NSNull(),
+                "evidenceStoragePath": entry.evidenceStoragePath ?? NSNull(),
+                "createdAt": entry.createdAt
+            ]
+        }
+    ]
+    if let data = try? JSONSerialization.data(
+        withJSONObject: payload, options: [.sortedKeys, .prettyPrinted]
+    ) {
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data("\n".utf8))
+    }
+    // 退出码必须能被上游判定：命中 5 条只删掉 3 条不是成功。
+    let unaccounted = !options.pruneDryRun && residue.count != pruned.count + failures.count
+    exit(registry.loadFailed || !failures.isEmpty || unaccounted ? 1 : 0)
+}
+
+// MARK: - Single project removal (GUI 控制台「项目」页的写入面)
+
+if let removeId = options.projectRemoveId {
+    let registry = ProjectRegistry.live()
+    let socketPath = options.socketPath ?? defaultSocketPath()
+    if options.pruneDryRun {
+        // `--dry-run` 对单条删除同样要成立：此前它只被 `--project-prune` 读，
+        // 带上它的 remove 会静默真删。预览与实删必须是同一个判定。
+        let found = registry.get(removeId) != nil
+        let payload: [String: Any] = [
+            "dryRun": true,
+            "wouldRemove": removeId,
+            "found": found,
+            "remaining": registry.all.count,
+            "loadFailed": registry.loadFailed
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) {
+            FileHandle.standardOutput.write(data)
+            FileHandle.standardOutput.write(Data("\n".utf8))
+        }
+        exit(found ? 0 : 3)
+    }
+    var removed = 0
+    do {
+        if try registry.remove(removeId) { removed = 1 }
+    } catch let error as GPError {
+        // 未知 id 与"注册表读不开拒绝覆写"是两种结局，必须分开报：
+        // 后者意味着用户的档案已损坏，面板要显示损坏而不是"没找到"。
+        let payload: [String: Any] = [
+            "removed": 0,
+            "projectId": removeId,
+            "error": error.code.rawValue,
+            "loadFailed": registry.loadFailed
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) {
+            FileHandle.standardOutput.write(data)
+            FileHandle.standardOutput.write(Data("\n".utf8))
+        }
+        exit(error.code == .notFound ? 3 : 1)
+    } catch {
+        exit(1)
+    }
+    let payload: [String: Any] = [
+        "removed": removed,
+        "projectId": removeId,
+        "remaining": registry.all.count,
+        // 活着的 daemon 仍持有旧内存表，磁盘改动要重启后才被它看见。
+        "requiresDaemonRestart": DaemonProbe().reachable(socketPath: socketPath)
+    ]
+    if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) {
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data("\n".utf8))
+    }
+    exit(0)
+}
+
 if let activeId = options.activeProjectId {
-    let registry = ProjectRegistry()
+    let registry = ProjectRegistry.live()
     if let entry = registry.get(activeId) {
         FileHandle.standardOutput.write(
             Data("active project: \(entry.projectId) (\(entry.displayName))\n".utf8)
@@ -564,7 +691,7 @@ if options.pruneEvidence || options.evidenceStats {
     // evidenceStoragePath → 默认目录；无项目维度 → 默认证据目录。
     let dir: String
     if let projectId = options.maintenanceProjectId {
-        let registry = ProjectRegistry()
+        let registry = ProjectRegistry.live()
         guard let entry = registry.get(projectId) else {
             FileHandle.standardError.write(
                 Data("{\"error\": \"unknown project \(projectId)\"}\n".utf8)
@@ -664,8 +791,7 @@ if options.c33Enabled {
 var probeInbox: ProbeInbox?
 var probeServer: ProbeSocketServer?
 if options.probeEnabled {
-    let probeSocketPath = options.probeSocketPath
-        ?? NSHomeDirectory() + "/.glasspane/probe.sock"
+    let probeSocketPath = options.probeSocketPath ?? DaemonProbe.defaultProbeSocketPath
     let inbox = ProbeInbox()
     let server = ProbeSocketServer(socketPath: probeSocketPath, inbox: inbox, log: log)
     do {
@@ -680,7 +806,8 @@ if options.probeEnabled {
 }
 let core = EngineCore(
     channel: channel,
-    evidenceStore: EvidenceStore(),
+    projectRegistry: ProjectRegistry.live(),
+    evidenceStore: EvidenceStore.live(),
     attributionGuard: attributionGuard,
     degradationTracker: DegradationTracker(),
     metricsProbe: ProcessMetricsProbe(),

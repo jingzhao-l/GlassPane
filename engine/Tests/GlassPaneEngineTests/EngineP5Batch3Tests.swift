@@ -266,4 +266,50 @@ final class EngineP5Batch3Tests: XCTestCase {
         XCTAssertEqual(removed, 1)
         XCTAssertEqual(activeStore.stats().count, 0)
     }
+
+    /// 没有档案的核心**不许**去删 `~/.glasspane/evidence/`。
+    /// 这是 A-1 的同形缺陷、后果更重的一版：一旦"没注入档案"回落到活目录，
+    /// 任何一个个测调用删档接口就会不可逆地清掉用户的真实证据档案。
+    func testPruneWithoutArchiveRefusesInsteadOfTouchingLiveArchive() throws {
+        let core = EngineCore(channel: ScriptedChannel(fallbackTree: TestTrees.standard))
+        XCTAssertThrowsError(try core.pruneEvidence(projectId: nil, olderThanDays: 1)) { error in
+            let gpError = error as! GPError
+            XCTAssertEqual(gpError.code, .internalError)
+            XCTAssertTrue(gpError.message.contains("no evidence archive"), gpError.message)
+        }
+    }
+
+    /// A-2 复位的落点是"本实例构造时的目录"，不是家目录常量：
+    /// 否则"attach 一个没配证据路径的项目"就把注入的临时档案重定向到真实档案。
+    func testAttachWithoutStoragePathResetsToTheStoresOwnDefault() throws {
+        let dirA = try makeTempDir("reset-a")
+        let dirB = try makeTempDir("reset-b")
+        defer {
+            try? FileManager.default.removeItem(atPath: dirA)
+            try? FileManager.default.removeItem(atPath: dirB)
+        }
+        let registry = ProjectRegistry(filePath: dirA + "/projects.json")
+        let withPath = try registry.create(
+            displayName: "With", bundleId: "com.example.app", pid: nil,
+            recipeConfigPath: nil, calibrationAssetsPath: nil, evidenceStoragePath: dirB,
+            now: { self.injectedNow }
+        )
+        let noPath = try registry.create(
+            displayName: "NoPath", bundleId: "com.example.app", pid: nil,
+            recipeConfigPath: nil, calibrationAssetsPath: nil, evidenceStoragePath: nil,
+            now: { self.injectedNow }
+        )
+        let store = EvidenceStore(directory: dirA)
+        let core = EngineCore(
+            channel: ScriptedChannel(fallbackTree: TestTrees.standard),
+            projectRegistry: registry,
+            evidenceStore: store
+        )
+
+        _ = try core.attach(bundleId: "com.example.app", pid: nil, projectId: withPath.projectId)
+        XCTAssertEqual(store.directory, dirB)
+        _ = try core.attach(bundleId: "com.example.app", pid: nil, projectId: noPath.projectId)
+        XCTAssertEqual(store.directory, dirA, "复位必须回到本实例的构造目录")
+        XCTAssertFalse(store.directory.contains("/.glasspane/"), store.directory)
+    }
 }

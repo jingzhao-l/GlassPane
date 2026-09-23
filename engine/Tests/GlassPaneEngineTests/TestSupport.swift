@@ -16,6 +16,11 @@ final class ScriptedChannel: RuntimeChannel {
     var app: AttachedApp
     var attachError: ChannelError?
     var alive = true
+    /// 逐次返回的存活序列（非 nil 时覆盖 `alive`）。用于表达"操作前活着、
+    /// 操作后没了"这种真崩溃形态——单一 `alive` 只能造出 before==after，
+    /// 于是崩溃类判定此前无法被单测覆盖。
+    var aliveSequence: [Bool]?
+    var aliveCallCount = 0
     var pingResult: Result<Double, ChannelError> = .success(3)
     var treeResults: [Result<AxTreeSnapshot, ChannelError>] = []
     var fallbackTree: AxTreeSnapshot
@@ -71,7 +76,12 @@ final class ScriptedChannel: RuntimeChannel {
     }
 
     func isProcessAlive() -> Bool {
-        alive
+        if let sequence = aliveSequence {
+            let index = min(aliveCallCount, sequence.count - 1)
+            aliveCallCount += 1
+            return sequence[index]
+        }
+        return alive
     }
 
     func captureWindow() throws -> WindowCapture {
