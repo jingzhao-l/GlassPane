@@ -58,7 +58,7 @@ export const INSTALL_SH_URL =
 /** 发布线锚点（版本真源 = 根 package.json，由 scripts/set-version.mjs 统一改写，
  *  勿手改）：npx 形态下本地没有仓库时，引导 clone 的就是这个 tag，与 install.sh
  *  的 `GLASSPANE_RELEASE` 同值——两条一键入口必须拿到同一份源码。 */
-export const RELEASE_VERSION = '1.1.0'
+export const RELEASE_VERSION = '1.1.1'
 /** 发布 ref（tag 名）。GLASSPANE_REF 环境变量可覆盖（追主干用 `main`）。 */
 export const REPO_REF = `v${RELEASE_VERSION}`
 

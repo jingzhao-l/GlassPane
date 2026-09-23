@@ -6,6 +6,25 @@
 规格阶段作为里程碑分节记录，不追溯伪造版本号。所有日期取自 `git log`，每条 bullet 可回溯到其给出的 commit hash 或
 `specs/` 正文；两者都给不出来的内容已被删除。
 
+## [1.1.1] — 2026-09-23
+
+在 1.1.0 纳入基础设施审计后，本迭代把 iterate 复审（r1–r4b）与既有主线的各类收口合并进 main，并统一推送。
+版本从 `1.1.0` 升至 `1.1.1`；发布前按单一版本线全员对齐，四包（根 `@glasspane/monorepo` / `glasspane-install` /
+`glasspane-mcp` / `@iterate/kernel`）与引用位点统一到 `1.1.1`。
+
+### Added
+
+- **iterate 复审收口合入**。`iterate/full-review-20260922`（r1–r4b 六回合审查）并入 `main`，解决 engine 源码/测试、
+  bridge、`iterate.config.yaml` 等 14 处冲突；两侧成果共存（如 bridge 的 `SEND_SOCK_TIMEOUT_S=10.0` 与
+  `MAX_TRACE_SAMPLES`、B-24 语义；`ApprovalGate` 的 `StateRoot.approvalsFile` 与 `autoApprover="daemon:auto"`），
+  engine 迁移至 `StateRoot` 工厂构造，`TestIsolationGateTests` 扫描通过。
+
+### Changed
+
+- 发布前版本线从 `1.1.0` 升至 `1.1.1`（原因：`1.1.0` 已在 GitHub 先存在并钉在更早的 tag 上，为避免 npm 发布的
+  `1.1.0` 与 GitHub Release 内容漂移，改为推送新的 `v1.1.1`）。含 iterate 合并的最新代码落在 `1.1.1`，三线
+  （tag=main=npm）对齐。
+
 ## [1.1.0] — 2026-09-22
 
 一次基础设施审计的结果：本仓库被逐条对照作者的另一个项目检视，发现的全部问题在同一批提交中修完。
