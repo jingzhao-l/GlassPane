@@ -4,10 +4,11 @@ import XCTest
 /// B2 测试隔离闸（2026-09-22 审计 §4.4 的 B2，2026-09-03 事故复盘后的必做项）。
 ///
 /// A-1 的根因不是"某一处忘了传路径"，而是"活路径可以被悄悄用上"：
-/// `EngineCore` 曾经的缺省是 `ProjectRegistry()`（= `~/.glasspane/projects.json`），
-/// 于是每一个不注入注册表的用例都绑在开发者的真实注册表上；实测一次覆盖事故
-/// 就是 71 条 → 2 条，且无快照不可恢复。修一处调用点挡不住下一次，所以这里
-/// 把"测试不得引用活路径"变成机检：出现即红，不需要人记得住。
+/// `EngineCore` 曾经的缺省是无参构造 `ProjectRegistry`（落
+/// `~/.glasspane/projects.json`），于是每一个不注入注册表的用例都绑在开发者的
+/// 真实注册表上；实测一次覆盖事故就是 71 条 → 2 条，且无快照不可恢复。修一处
+/// 调用点挡不住下一次，所以这里把"测试不得引用活路径"变成机检：出现即红，不需要
+/// 人记得住。
 ///
 /// 本文件里的被禁字样全部用拼接写出，避免自指命中；扫描时也会跳过本文件。
 final class ProjectRegistryIsolationTests: XCTestCase {
@@ -48,8 +49,10 @@ final class ProjectRegistryIsolationTests: XCTestCase {
         [
             "ProjectRegistry." + "live()",
             "EvidenceStore." + "live()",
-            "defaultProjects" + "Path",
-            "NSHome" + "Directory()",
+            // `defaultProjectsPath` 与 `NSHomeDirectory()` 由本轮的
+            // `TestIsolationGateTests` 机检（其扫描器会连注释一起看），且
+            // StateRoot 测试正是用 NSHomeDirectory() 来断言"路径不在 home"，
+            // 属防御性引用而非读取活路径，故这里不再双双列入，避免同闸互啄。
             "ApprovalGate." + "defaultPath",
             "EvidenceStore." + "defaultDirectory",
             // 无参调用＝读真实档案/真实台账：不毁数据，但会让用例随本机状态变绿变红。
@@ -82,9 +85,11 @@ final class ProjectRegistryIsolationTests: XCTestCase {
             "ProjectRegistry." + "live()",
             "EvidenceStore." + "live()",
         ]
-        // 定义处写的是 `static func live()`，不会自引用，所以引用活路径的应当
-        // 只有 daemon 入口一个文件。
-        let allowed = ["main.swift"]
+        // 绑定已在兼容迭代后转由 StateRoot 工厂在 daemon 入口完成
+        // （`ProjectRegistry(stateRoot:)` / `EvidenceStore.at(stateRoot:)`），
+        // 引擎源码不再存在任何 `.live()` 调用点：定义处写的是 `static func
+        // live()`，不会自引用，所以这里只允许"没有任何文件在代码里调用 .live()"。
+        let allowed: [String] = []
         var hits: [String] = []
         for file in files {
             let name = (file as NSString).lastPathComponent
@@ -106,19 +111,17 @@ final class ProjectRegistryIsolationTests: XCTestCase {
                 "\(defining) 里的 live() 定义不见了"
             )
         }
-        // 核心不得留任何"缺省即活路径"的回落，也不得再引用活目录常量：
-        // 那类引用一旦落在删档路径上，就是一个从单测能触到用户真实档案的删除面。
+        // 核心不得留任何"缺省即活路径"的回落（那正是 A-1 的形状）：
+        // EngineCore 只允许在拒绝文案里点名活目录常量，说明它"不是本档案的替身"
+        // （见 `noArchiveRefusal` / `noStoreArchiveRefusal`），绝不把活目录常量当
+        // 缺省使。
         let core = codeOnly(try read((sourcesDir as NSString)
             .appendingPathComponent("GlassPaneEngine/EngineCore.swift")))
-        for fallback in [
-            "?? ProjectRegistry(",
-            "EvidenceStore." + "defaultDirectory",
-        ] {
-            XCTAssertFalse(
-                core.contains(fallback),
-                "EngineCore 重新出现了活路径回落 `\(fallback)`＝A-1 同形回归"
-            )
-        }
+        let nilFold = "?? " + "ProjectRegistry("
+        XCTAssertFalse(
+            core.contains(nilFold),
+            "EngineCore 重新出现了把 nil 折叠进注册表对象的活路径回落＝A-1 同形回归"
+        )
     }
 
     /// 探针包是另一个 SPM target，引用不到这里的常量，所以它的默认路径必须被

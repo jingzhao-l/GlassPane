@@ -5,13 +5,33 @@ import Foundation
 enum ParamValidation {
 
     static let selectorMaxLength = 512
+    /// `expected` is persisted verbatim into every evidence pack and re-emitted
+    /// by exports, so it carries the same cap as the selector fields and the
+    /// shell's `ExpectSchema` — length-only checks were the gap (P0 §3.3).
+    static let expectedMaxLength = 512
     static let observeMaxDepthLower = 1
     static let observeMaxDepthUpper = 10
     static let stepsLower = 1
     static let stepsUpper = 64
+    /// `attach.pid` is narrowed to `pid_t` (Int32) by the dispatcher: an
+    /// unbounded value survives the integer check and then traps the whole
+    /// conversion, so the range is part of the bad-params contract, not a
+    /// nicety (P0 §3.3).
+    static let pidLower = 1
+    static let pidUpper = Int(Int32.max)
     /// Crockford base32 body shared by op_/snap_ ids (§1.2 / P0 §4.1).
     private static let idBodyPattern = "[0-9A-HJKMNP-TV-Z]{26}"
     static let snapshotIdPattern = "^snap_" + idBodyPattern + "$"
+    static let operationIdPattern = "^op_" + idBodyPattern + "$"
+    static let restoreModeMaxLength = 32
+
+    /// Closed set for `restore.mode` (P1 v1.1 §1.2, P5 v5.0 §6.4): the two
+    /// literals EngineCore branches on, plus the documented names of the two
+    /// forms it runs when `mode` is omitted. Anything else used to be free
+    /// text that ended up inside the hash-chained approval ledger.
+    static let restoreModes: [String] = [
+        "compare", "ffwd", "restore_snapshot", "rollback_full"
+    ]
 
     static func optString(
         _ params: [String: Any],
@@ -107,6 +127,12 @@ enum ParamValidation {
             return .bool(bool)
         }
         if let string = raw as? String {
+            guard string.count <= expectedMaxLength else {
+                throw GPError(
+                    code: .badParams,
+                    message: "field 'expected' exceeds \(expectedMaxLength) characters"
+                )
+            }
             return .string(string)
         }
         throw GPError(code: .badParams, message: "field 'expected' must be a string or boolean")
@@ -127,6 +153,43 @@ enum ParamValidation {
             throw GPError(code: .badParams, message: "field 'snapshotId' must match \(snapshotIdPattern)")
         }
         return snapshotId
+    }
+
+    /// Required `operationId`: the ULID shape, never free text. The value is
+    /// composed straight into the on-disk evidence path
+    /// (`EvidenceStore.path(for:)`), so an unchecked string let a caller walk
+    /// out of the archive directory (P0 §4.1).
+    static func requireOperationId(_ params: [String: Any], _ key: String = "operationId") throws -> String {
+        guard let raw = params[key] else {
+            throw GPError(code: .badParams, message: "field '\(key)' is required")
+        }
+        guard let operationId = raw as? String,
+              operationId.range(of: operationIdPattern, options: .regularExpression) != nil else {
+            throw GPError(code: .badParams, message: "field '\(key)' must match \(operationIdPattern)")
+        }
+        return operationId
+    }
+
+    /// Optional `operationId` (diagnose / last_evidence): omitting the field
+    /// yields nil (the engine then answers "latest"), any present value must
+    /// match the id pattern.
+    static func optOperationId(_ params: [String: Any], _ key: String = "operationId") throws -> String? {
+        guard params.keys.contains(key) else { return nil }
+        return try requireOperationId(params, key)
+    }
+
+    /// Optional `restore.mode` restricted to `restoreModes`. A length-only
+    /// check let any agent-authored sentence reach the approval ledger
+    /// verbatim (`restore executed: <mode>`).
+    static func optRestoreMode(_ params: [String: Any], _ key: String = "mode") throws -> String? {
+        guard let mode = try optString(params, key, maxLength: restoreModeMaxLength) else { return nil }
+        guard restoreModes.contains(mode) else {
+            throw GPError(
+                code: .badParams,
+                message: "field '\(key)' must be one of \(restoreModes)"
+            )
+        }
+        return mode
     }
 
     /// Optional `steps` array of act-like steps for ffwd 重演 (§1.2).

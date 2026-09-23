@@ -68,8 +68,11 @@ public struct ApprovalRecord: Codable, Equatable {
 ///   silently-valid one — so `--approval-verify` exposes the damage.
 public final class ApprovalGate {
 
-    /// Default daemon ledger path (`~/.glasspane/approvals.json`).
-    public static let defaultPath = NSHomeDirectory() + "/.glasspane/approvals.json"
+/// Default daemon ledger path: the approvals file of the home-derived state
+    /// root. Derived from `StateRoot` rather than composed here — the home
+    /// lookup behind it ignores a `HOME` override, so the per-user location has
+    /// to come from one named source (X-22).
+    public static let defaultPath = StateRoot.homeDefault().approvalsFile
     /// 当前协议没有人类审批交互（方法表冻结，P5 §3.8 诚实声明 1），因此台账里
     /// 的记录一律由 daemon 自登记。这个值是**唯一真源**：面板要把它如实呈现为
     /// "后台服务自批"，就不能各处再抄一遍字面量。
@@ -86,13 +89,22 @@ public final class ApprovalGate {
     /// surface the damage honestly instead of presenting an empty-but-valid
     /// ledger as evidence of a healthy audit trail.
     public private(set) var loadFailed = false
+    /// Where persistence failures go. Both the primary write and its fallback
+    /// can fail, and the ledger's contract ("the disk side is simply stale,
+    /// surfaced by verify/audit") only holds if somebody says so — a silent
+    /// second failure is how an audit trail ends up missing records that every
+    /// in-process reader believed were appended (the chain still verifies; it
+    /// just stops containing things that happened).
+    private let log: EngineLog
 
     public init(
         path: String? = nil,
-        clock: @escaping () -> Date = { Date() }
+        clock: @escaping () -> Date = { Date() },
+        log: EngineLog = EngineLog(quiet: true)
     ) {
         self.path = path
         self.clock = clock
+        self.log = log
         if let path {
             // File exists → decode; missing or corrupt → empty chain (honest:
             // a corrupt ledger is never presented as a valid one — verify
@@ -108,6 +120,27 @@ public final class ApprovalGate {
         } else {
             records = []
         }
+    }
+
+    /// A file-persisted ledger over `<stateRoot>/approvals.json` — the route
+    /// `glasspaned` takes for `--approval-audit`, `--approval-verify` and the
+    /// daemon itself, so a run that named a state root cannot append to the
+    /// per-user chain and a run that named none cannot be pointed elsewhere.
+    ///
+    /// The directory is **not** created here, and that is a measured gap rather
+    /// than a claim of safety: `persist()` has no mkdir step, so an append into
+    /// a directory that does not exist yet is lost silently, and the next
+    /// process reads `count: 0` from a chain it never got. In `glasspaned` the
+    /// root is always there before the ledger is used (the archive and the
+    /// registry each create it on their first write, and the smoke runs
+    /// pre-create it mode 0700), but a caller that builds only a ledger has to
+    /// create the directory itself.
+    public convenience init(
+        stateRoot: StateRoot,
+        clock: @escaping () -> Date = { Date() },
+        log: EngineLog = EngineLog(quiet: true)
+    ) {
+        self.init(path: stateRoot.approvalsFile, clock: clock, log: log)
     }
 
     // MARK: - Chain access
@@ -226,22 +259,48 @@ public final class ApprovalGate {
 
     /// Atomic write (tmp + replaceItemAt, same pattern as EvidenceStore and
     /// ProjectRegistry). A failed write never breaks the in-memory chain —
-    /// the disk side is simply stale, surfaced by verify/audit (P5 §3.4).
+    /// the disk side is simply stale, surfaced by verify/audit (P5 §3.4) — but
+    /// "surfaced" requires a voice, so both the primary failure and the
+    /// fallback's are logged, and the ledger file is left owner-only (`0600`)
+    /// because it is a signature chain other accounts must not read (R5-04).
     private func persist() {
         guard let path else { return }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        guard let data = try? encoder.encode(records) else { return }
+        let data: Data
+        do {
+            data = try encoder.encode(records)
+        } catch {
+            log.error("approval ledger could not be encoded (\(records.count) records): \(error) — nothing was written to \(path)")
+            return
+        }
         let tmpPath = path + ".tmp"
         do {
             try data.write(to: URL(fileURLWithPath: tmpPath))
+            // The mode is set while the bytes are still under the temporary
+            // name, so there is no window in which the finished ledger is
+            // group- or world-readable.
+            if let defect = StateRoot.isolateFile(at: tmpPath) {
+                throw NSError(
+                    domain: "GlassPaneApprovalGate", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: defect]
+                )
+            }
             _ = try FileManager.default.replaceItemAt(
                 URL(fileURLWithPath: path),
                 withItemAt: URL(fileURLWithPath: tmpPath)
             )
             try? FileManager.default.removeItem(atPath: tmpPath)
         } catch {
-            try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            log.error("approval ledger write via \(tmpPath) failed: \(error) — falling back to an atomic rewrite of \(path)")
+            do {
+                try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+                if let defect = StateRoot.isolateFile(at: path) {
+                    log.error("approval ledger \(path) is not owner-only after the fallback write: \(defect)")
+                }
+            } catch {
+                log.error("approval ledger fallback write to \(path) failed too: \(error) — the \(records.count) record(s) exist in memory only and are NOT in the audit trail on disk")
+            }
         }
     }
 

@@ -5,17 +5,37 @@ import GlassPaneEngine
 /// glasspaned — the P0 engine daemon. Serves the v0 local-socket protocol
 /// (P0 spec §3) on a Unix domain socket with 0600 permissions.
 ///
+/// Every mutable location (evidence archive, projects.json, approvals.json,
+/// probe socket) is derived from **one** state root: the directory named by
+/// `--state-dir <path>`, or — when nothing was named — the per-user folder
+/// under this process's home directory, which does **not** follow a `HOME`
+/// override. A run that has to stay off the developer's own state names
+/// `--state-dir`; every subcommand resolves the same root.
+///
 /// Usage:
-///   glasspaned [--socket-path <path>] [--verbose]
+///   glasspaned [--state-dir <path>] [--socket-path <path>] [--verbose]
 ///   glasspaned --grant-accessibility
 ///   glasspaned --check-screen-permission
 ///   glasspaned --guide-screen-permission
 ///   glasspaned --permissions
 ///   glasspaned --request-permission <kind>
+///   glasspaned [--state-dir <path>] --list-projects
+///   glasspaned [--state-dir <path>] --active-project <project-id>
+///   glasspaned [--state-dir <path>] --approval-audit | --approval-verify
+///   glasspaned [--state-dir <path>] --prune-evidence [--older-than <days>] [--project <id>] [--dry-run]
+///   glasspaned [--state-dir <path>] --evidence-stats [--project <id>]
 ///   glasspaned --help
+///
+/// The permission commands above read no state, so they take no state root;
+/// every other line resolves exactly one, and `--state-dir` is how it is named.
 
 private struct Options {
     var socketPath: String?
+    /// The state root named by `--state-dir`. nil means **nothing was named**,
+    /// which is different from naming the home folder: the daemon says so on
+    /// stderr when it touches state, because "injected" and "fell back" are the
+    /// two outcomes a smoke gate has to tell apart.
+    var stateDir: StateRoot?
     var verbose = false
     var grantAccessibility = false
     var checkScreenPermission = false
@@ -25,6 +45,7 @@ private struct Options {
     var permissionsJSON = false
     var requestPermission: PermissionKind?
     var forceSocket = false
+    var forceProbeSocket = false
     var listProjects = false
     var activeProjectId: String?
     var recipeValidate: String?
@@ -34,10 +55,12 @@ private struct Options {
     var pruneOlderThanDays = 30
     var maintenanceProjectId: String?
     var pruneDryRun = false
-    var projectPrune = false
-    var projectRemoveId: String?
     var evidenceStats = false
     var c33Enabled = true
+    /// R3-1: `--unattended-window` — the operator states that no human input
+    /// reaches this machine while the daemon works. A declaration, never a
+    /// measurement, and it cannot override one (see `EngineCore`).
+    var unattendedWindowDeclared = false
     var checkDeveloperTools = false
     var probeSocketPath: String?
     var probeEnabled = true
@@ -85,6 +108,10 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             options.checkDeveloperTools = true
         case "--no-c33":
             options.c33Enabled = false
+        case "--unattended-window":
+            // No value: it states one thing about this process's environment and
+            // takes no argument to take it wrong.
+            options.unattendedWindowDeclared = true
         case "--no-probe":
             options.probeEnabled = false
         case "--probe-socket-path":
@@ -95,6 +122,22 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             options.probeSocketPath = arguments[index]
         case "--force-socket":
             options.forceSocket = true
+        case "--force-probe-socket":
+            options.forceProbeSocket = true
+        case "--state-dir":
+            // The value is consumed only when it is a value: refusal follows
+            // `--probe-socket-path` (a token that is another flag is not a
+            // path) and additionally demands an absolute path, because a
+            // relative one would make the state root depend on the working
+            // directory this process was started in. `.error` is the usage
+            // route: message to stderr, usage printed, exit 64.
+            switch StateRootArgument(raw: index + 1 < arguments.count ? arguments[index + 1] : nil) {
+            case .named(let root):
+                options.stateDir = root
+                index += 1
+            case .rejected(let reason):
+                return .error("--state-dir \(reason)")
+            }
         case "--list-projects":
             options.listProjects = true
         case "--active-project":
@@ -132,14 +175,6 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             }
             index += 1
             options.maintenanceProjectId = arguments[index]
-        case "--project-prune":
-            options.projectPrune = true
-        case "--project-remove":
-            guard index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") else {
-                return .error("--project-remove requires a project ID")
-            }
-            index += 1
-            options.projectRemoveId = arguments[index]
         case "--dry-run":
             options.pruneDryRun = true
         case "--socket-path":
@@ -155,6 +190,17 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
                     return .error("--socket-path requires a value")
                 }
                 options.socketPath = value
+            } else if argument.hasPrefix("--state-dir=") {
+                // Same `--key=value` shape as --socket-path, same validation:
+                // one `StateRootArgument` rule set decides both forms, so the
+                // two spellings cannot disagree about what is a root.
+                let value = String(argument.dropFirst("--state-dir=".count))
+                switch StateRootArgument(raw: value) {
+                case .named(let root):
+                    options.stateDir = root
+                case .rejected(let reason):
+                    return .error("--state-dir \(reason)")
+                }
             } else {
                 return .error("unknown argument: \(argument)")
             }
@@ -169,7 +215,7 @@ private func printUsage() {
     glasspaned — GlassPane P0 engine daemon
 
     USAGE:
-        glasspaned [--socket-path <path>] [--verbose]
+        glasspaned [--state-dir <path>] [--socket-path <path>] [--verbose]
         glasspaned --grant-accessibility
         glasspaned --check-screen-permission
         glasspaned --guide-screen-permission
@@ -177,18 +223,36 @@ private func printUsage() {
         glasspaned --check-accessibility
         glasspaned --permissions
         glasspaned --request-permission <kind>
-        glasspaned --list-projects
-        glasspaned --active-project <project-id>
+        glasspaned [--state-dir <path>] --list-projects
+        glasspaned [--state-dir <path>] --active-project <project-id>
         glasspaned --recipe-validate <path>
-        glasspaned --approval-audit
-        glasspaned --approval-verify
-        glasspaned --project-prune [--dry-run]
-        glasspaned --project-remove <project-id> [--dry-run]
-        glasspaned --prune-evidence [--older-than <days>] [--project <id>] [--dry-run]
-        glasspaned --evidence-stats [--project <id>]
+        glasspaned [--state-dir <path>] --approval-audit
+        glasspaned [--state-dir <path>] --approval-verify
+        glasspaned [--state-dir <path>] --prune-evidence [--older-than <days>] [--project <id>] [--dry-run]
+        glasspaned [--state-dir <path>] --evidence-stats [--project <id>]
 
     OPTIONS:
-        --socket-path <path>   Unix socket path (default: \(DaemonProbe.defaultSocketPath))
+        --state-dir <path>    The directory this process keeps its state in:
+                                 <path>/evidence/ (evidence archive),
+                                 <path>/projects.json (project registry),
+                                 <path>/approvals.json (approval ledger),
+                                 <path>/probe.sock (unless --probe-socket-path
+                                 is given) and <path>/daemon.sock (unless
+                                 --socket-path is given). Applies to every
+                                 subcommand that reads state, always the same
+                                 one within a run. Must be an absolute path;
+                                 anything else is a usage error (exit 64).
+                                 When it is absent the root is the per-user
+                                 folder under this process's home directory,
+                                 which does **not** follow a HOME environment
+                                 variable set by the caller — overriding HOME
+                                 does not isolate a run, and a run that needs
+                                 isolation has to name --state-dir. The first
+                                 state-touching command of such a run writes one
+                                 line to stderr saying the home default was used.
+        --socket-path <path>   Unix socket path (default: ~/.glasspane/engine.sock,
+                                 or <state-dir>/daemon.sock when --state-dir names
+                                 a root)
         --verbose             Log frames and state transitions to stderr
         --grant-accessibility  Onboarding: prompt for accessibility permission
         --check-screen-permission   Print screen recording permission state
@@ -215,19 +279,47 @@ private func printUsage() {
                                  checkbox; verification is machine-owned.
         --no-c33             Disable C33 input monitoring (degrade to pure
                                  operation-right mutex; act never blocks on user input)
+        --unattended-window  Declare that no human input reaches this machine
+                                 while the daemon works (a maintenance harness on a
+                                 machine nobody is typing at). It changes the
+                                 contamination verdict **only** for a window that no
+                                 input monitor watched, and never overrides an input
+                                 the monitor actually saw; the archive records the
+                                 verdict as a declaration, so a reader can still tell
+                                 "somebody watched and saw nothing" from "nobody was
+                                 watching and somebody said it was fine". Without it a
+                                 --no-c33 daemon cannot produce a `strong` attribution
+                                 at all: every window reads as unwatched, so every
+                                 window reads contaminated.
         --no-probe           Disable the P6 probe socket (Z5 black-box only;
                                  handlerProbe/stateDiff signals stay null)
-        --probe-socket-path <path>  Probe listener path (default \(DaemonProbe.defaultProbeSocketPath))
-        --force-socket       Take over the socket even when a live daemon is
-                                 already serving it (default: refuse and exit 65)
+        --probe-socket-path <path>  Probe listener path (default: <state-dir>/probe.sock,
+                                 which is ~/.glasspane/probe.sock when no root is named)
+        --force-socket       Take over the engine socket even when a live daemon
+                                 is already serving it (default: refuse and exit 65)
+        --force-probe-socket Take over probe.sock even when another listener owns
+                                 it (default: start without a probe listener and
+                                 keep the Z5 black-box form; the probe listener
+                                 never answers hello, so "a connection can be
+                                 established" is how its owner is detected)
         --list-projects        List all registered projects (JSON) and exit
-        --active-project <id>  Set the active project ID and exit
-        --recipe-validate <path>  Validate a recipe YAML file and exit
+        --active-project <id>  Report whether <id> is a registered project (JSON)
+                                 and exit. **This command changes nothing**: the
+                                 registry has no active-project field and no
+                                 protocol method accepts one, so the payload says
+                                 stateChanged=false. To make a project active,
+                                 call gp_attach with its projectId.
+        --recipe-validate <path>  Validate a recipe **JSON** file against the frozen
+                                 kernel recipe contract (schemaVersion
+                                 "glasspane.recipe/0.1-draft", steps {kind, params})
+                                 and exit; nothing is written either way
         --approval-audit        Dump the approval ledger (JSON array) and exit
         --approval-verify       Verify the approval hash chain and exit
         --prune-evidence        Prune expired evidence entries and exit
         --older-than <days>     Expiry threshold in days (default: 30; --prune-evidence only)
         --project <id>          Scope maintenance to a project's evidence directory
+                                 (a directory the daemon would refuse to archive
+                                 into is refused here too: exit 1, stateChanged=false)
         --dry-run               Report what pruning would remove without deleting
         --evidence-stats        Print evidence archive stats (JSON) and exit
         --help, -h            Show this help
@@ -239,8 +331,30 @@ private func printUsage() {
     FileHandle.standardOutput.write(Data(usage.utf8))
 }
 
-private func defaultSocketPath() -> String {
-    DaemonProbe.defaultSocketPath
+// MARK: - State root (X-22)
+
+/// The one state root this process reads and writes through, resolving
+/// `--state-dir` against the home default.
+///
+/// Every state-touching subcommand calls this instead of composing a path of
+/// its own: one run, one root, so `--list-projects` cannot read a registry the
+/// daemon it reports on is not writing.
+///
+/// When nothing was named it also writes the line that makes the fallback
+/// observable. The other half of the proof is the path each subcommand echoes
+/// in its own JSON (`dir`, `registryPath`); a run that only points `HOME` at a
+/// sandbox is **not** isolated, because the home lookup behind this default
+/// never consults that variable, so the line says which root it fell back to
+/// instead of letting the fallback read as a choice.
+private func resolvedStateRoot(injected: StateRoot?) -> StateRoot {
+    if let injected { return injected }
+    let root = StateRoot.homeDefault()
+    let notice = "glasspaned: --state-dir was not given — state is read and written "
+        + "under the home default \(root.path). That default does not consult a HOME "
+        + "environment variable, so pointing HOME at a sandbox does not isolate this "
+        + "run; pass --state-dir <path> to name the root."
+    FileHandle.standardError.write(Data((notice + "\n").utf8))
+    return root
 }
 
 // MARK: - Permission subject surface (P1 spec v1.2 §11.2)
@@ -258,12 +372,13 @@ private func permissionSnapshotJSON(_ snapshot: DaemonPermissionSnapshot) -> [St
     return ["subject": subject, "permissions": snapshot.permissionsWire]
 }
 
-private func writeJSON(_ object: [String: Any]) {
-    guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
-          let text = String(data: data, encoding: .utf8) else {
-        return
-    }
-    FileHandle.standardOutput.write(Data((text + "\n").utf8))
+/// CLI 的机器可读出口：任何一行都经过 JSON 转义（R5-03）。历史上这几处是字符串
+/// 插值拼 JSON / 直接原文打印，把 agent 自撰的 `displayName` 与路径原样送上终端
+/// （OSC-52 复制序列、ANSI 光标移动都可执行）。转义口径与 `--list-projects` 的
+/// JSONEncoder 一致：<0x20 控制字符、引号、反斜杠一律转义，斜杠不转义。
+private func writeJSON(_ object: [String: Any], to handle: FileHandle = .standardOutput) {
+    guard let line = AgentText.jsonLine(object) else { return }
+    handle.write(Data(line.utf8))
 }
 
 // MARK: - Onboarding (R36: permission guidance)
@@ -437,10 +552,7 @@ if options.checkDeveloperTools {
     // 勾选系统面板，检测/复验/机器消费全部由此命令承担。
     let probe = DebugCapabilityProbe()
     let payload = probe.jsonPayload()
-    if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) {
-        FileHandle.standardOutput.write(data)
-        FileHandle.standardOutput.write(Data("\n".utf8))
-    }
+    writeJSON(payload)
     exit((payload["granted"] as? Bool) == true ? 0 : 1)
 }
 if options.checkInputPermission {
@@ -477,7 +589,8 @@ if let kind = options.requestPermission {
 // MARK: - P1 project management commands (spec v1.4 §3)
 
 if options.listProjects {
-    let registry = ProjectRegistry.live()
+    let stateRoot = resolvedStateRoot(injected: options.stateDir)
+    let registry = ProjectRegistry(stateRoot: stateRoot)
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
     if let data = try? encoder.encode(registry.all) {
@@ -489,147 +602,56 @@ if options.listProjects {
     exit(0)
 }
 
-// MARK: - Test-residue project pruning (GUI 控制台「项目」页的写入面)
-
-if options.projectPrune {
-    // 面板不直接改 projects.json：运行中的 daemon 内存里持有一份注册表，
-    // 面板侧覆写会被它下一次写盘冲掉。修剪因此只有这一条写入路径，
-    // 并且如实报告"要不要重启后台服务才生效"。
-    let registry = ProjectRegistry.live()
-    let residue = registry.all.filter { LocalArchive.isTestResidue($0) }
-    let totalBefore = registry.all.count
-    let socketPath = options.socketPath ?? defaultSocketPath()
-    var pruned: [String] = []
-    var failures: [String] = []
-    if !options.pruneDryRun {
-        for entry in residue {
-            do {
-                if try registry.remove(entry.projectId) { pruned.append(entry.projectId) }
-            } catch let error as GPError {
-                // 一条失败不能让其余条目也停在"未尝试"，但绝不能继续被算成已修剪：
-                // 此前 pruned 直接取命中数，写入被拒绝（损坏表拒覆写）时照样报成功。
-                failures.append("\(entry.projectId): \(error.message)")
-            } catch {
-                failures.append("\(entry.projectId): \(error.localizedDescription)")
-            }
-        }
-    }
-    let payload: [String: Any] = [
-        "dryRun": options.pruneDryRun,
-        "total": totalBefore,
-        "matched": residue.count,
-        "pruned": pruned.count,
-        "prunedProjectIds": pruned,
-        "failed": failures.count,
-        "failures": failures,
-        "remaining": registry.all.count,
-        "loadFailed": registry.loadFailed,
-        // 有活着的 daemon 时，磁盘上的修剪要重启后才被它看见。
-        "requiresDaemonRestart": !pruned.isEmpty
-            && DaemonProbe().reachable(socketPath: socketPath),
-        "projects": residue.map { entry -> [String: Any] in
-            [
-                "projectId": entry.projectId,
-                "displayName": entry.displayName,
-                "bundleId": entry.bundleId ?? NSNull(),
-                "evidenceStoragePath": entry.evidenceStoragePath ?? NSNull(),
-                "createdAt": entry.createdAt
-            ]
-        }
-    ]
-    if let data = try? JSONSerialization.data(
-        withJSONObject: payload, options: [.sortedKeys, .prettyPrinted]
-    ) {
-        FileHandle.standardOutput.write(data)
-        FileHandle.standardOutput.write(Data("\n".utf8))
-    }
-    // 退出码必须能被上游判定：命中 5 条只删掉 3 条不是成功。
-    let unaccounted = !options.pruneDryRun && residue.count != pruned.count + failures.count
-    exit(registry.loadFailed || !failures.isEmpty || unaccounted ? 1 : 0)
-}
-
-// MARK: - Single project removal (GUI 控制台「项目」页的写入面)
-
-if let removeId = options.projectRemoveId {
-    let registry = ProjectRegistry.live()
-    let socketPath = options.socketPath ?? defaultSocketPath()
-    if options.pruneDryRun {
-        // `--dry-run` 对单条删除同样要成立：此前它只被 `--project-prune` 读，
-        // 带上它的 remove 会静默真删。预览与实删必须是同一个判定。
-        let found = registry.get(removeId) != nil
-        let payload: [String: Any] = [
-            "dryRun": true,
-            "wouldRemove": removeId,
-            "found": found,
-            "remaining": registry.all.count,
-            "loadFailed": registry.loadFailed
-        ]
-        if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) {
-            FileHandle.standardOutput.write(data)
-            FileHandle.standardOutput.write(Data("\n".utf8))
-        }
-        exit(found ? 0 : 3)
-    }
-    var removed = 0
-    do {
-        if try registry.remove(removeId) { removed = 1 }
-    } catch let error as GPError {
-        // 未知 id 与"注册表读不开拒绝覆写"是两种结局，必须分开报：
-        // 后者意味着用户的档案已损坏，面板要显示损坏而不是"没找到"。
-        let payload: [String: Any] = [
-            "removed": 0,
-            "projectId": removeId,
-            "error": error.code.rawValue,
-            "loadFailed": registry.loadFailed
-        ]
-        if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) {
-            FileHandle.standardOutput.write(data)
-            FileHandle.standardOutput.write(Data("\n".utf8))
-        }
-        exit(error.code == .notFound ? 3 : 1)
-    } catch {
-        exit(1)
-    }
-    let payload: [String: Any] = [
-        "removed": removed,
-        "projectId": removeId,
-        "remaining": registry.all.count,
-        // 活着的 daemon 仍持有旧内存表，磁盘改动要重启后才被它看见。
-        "requiresDaemonRestart": DaemonProbe().reachable(socketPath: socketPath)
-    ]
-    if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) {
-        FileHandle.standardOutput.write(data)
-        FileHandle.standardOutput.write(Data("\n".utf8))
-    }
-    exit(0)
-}
-
 if let activeId = options.activeProjectId {
-    let registry = ProjectRegistry.live()
-    if let entry = registry.get(activeId) {
-        FileHandle.standardOutput.write(
-            Data("active project: \(entry.projectId) (\(entry.displayName))\n".utf8)
-        )
-    } else {
-        FileHandle.standardError.write(
-            Data("error: unknown project \(activeId)\n".utf8)
-        )
+    let stateRoot = resolvedStateRoot(injected: options.stateDir)
+    let registry = ProjectRegistry(stateRoot: stateRoot)
+    // R2-16 / R6-06：这条命令从来没有写过任何状态——ProjectRegistry 没有 active
+    // 字段，冻结的协议方法表里也没有"设置活跃项目"的方法。旧输出把 projectId 与
+    // displayName 原文拼成一行确认 + 退出码 0，读起来像一次成功的状态变更（P6 §11
+    // 专门审过的幻影控制形状），所以这里如实输出**核验报告**并显式
+    // stateChanged=false；displayName 是 agent 自撰内容，只能经 JSON 转义出口离开
+    // 进程（R5-03）。
+    guard let entry = registry.get(activeId) else {
+        writeJSON([
+            "command": "--active-project",
+            "found": false,
+            "stateChanged": false,
+            "projectId": activeId,
+            "registryPath": registry.filePath,
+            "error": "no project \(activeId) is registered",
+            "next": "glasspaned --list-projects"
+        ], to: .standardError)
         exit(1)
     }
+    writeJSON([
+        "command": "--active-project",
+        "found": true,
+        "stateChanged": false,
+        "projectId": entry.projectId,
+        "displayName": entry.displayName,
+        "bundleId": entry.bundleId ?? NSNull(),
+        "evidenceStoragePath": entry.evidenceStoragePath ?? NSNull(),
+        "registryPath": registry.filePath,
+        "note": "this command only verified that the projectId is registered; glasspaned keeps no active-project state, so nothing was selected or written. To archive subsequent operations under this project, call attach/gp_attach with projectId=\(entry.projectId)."
+    ])
     exit(0)
 }
 
 if let recipePath = options.recipeValidate {
     let fm = FileManager.default
     guard fm.fileExists(atPath: recipePath) else {
-        FileHandle.standardError.write(
-            Data("{\"valid\":false,\"errors\":[\"file not found: \(recipePath)\"]}\n".utf8)
+        // 手拼 JSON 的旧形状会把未转义的路径直接吐出去，口径改走同一转义出口
+        // （R5-03）；{"valid":…,"errors":[…]} 的对外形状与退出码不变。
+        writeJSON(
+            ["valid": false, "errors": ["file not found: \(recipePath)"], "path": recipePath],
+            to: .standardError
         )
         exit(2)
     }
     guard let data = fm.contents(atPath: recipePath) else {
-        FileHandle.standardError.write(
-            Data("{\"valid\":false,\"errors\":[\"cannot read: \(recipePath)\"]}\n".utf8)
+        writeJSON(
+            ["valid": false, "errors": ["cannot read: \(recipePath)"], "path": recipePath],
+            to: .standardError
         )
         exit(2)
     }
@@ -646,21 +668,29 @@ if let recipePath = options.recipeValidate {
 // MARK: - P5 approval-ledger maintenance (spec v5.0 §3.6)
 
 if options.approvalAudit || options.approvalVerify {
-    let gate = ApprovalGate(path: ApprovalGate.defaultPath)
+    let stateRoot = resolvedStateRoot(injected: options.stateDir)
+    let gate = ApprovalGate(stateRoot: stateRoot)
     if options.approvalVerify {
         let verdict = gate.verifyChain()
         let payload: [String: Any] = [
             "valid": verdict.valid,
             "count": gate.count,
+            // R6-07: a hash chain can prove that nothing *inside* it was edited;
+            // it cannot prove that its tail is still there, because a shorter
+            // chain re-verifies from the same genesis. No local anchor fixes
+            // that — an anchor file in a directory the same account can write is
+            // deletable by exactly the party the check would catch, and claiming
+            // otherwise would be a guard with no reachable refusal. What this
+            // pair does give an operator or agent is the honest version: verify
+            // reports where the chain ends, so a run that recorded `count` and
+            // `tailHash` earlier can notice a shrinkage it cannot derive from
+            // the ledger alone. The detectable attack (cut, then append a
+            // spliced record) remains `valid: false`.
+            "tailHash": gate.tailHash(),
             "firstBrokenIndex": verdict.firstBrokenIndex.map { $0 as Any } ?? NSNull(),
             "loadFailed": gate.loadFailed
         ]
-        if let data = try? JSONSerialization.data(
-            withJSONObject: payload, options: [.sortedKeys]
-        ) {
-            FileHandle.standardOutput.write(data)
-            FileHandle.standardOutput.write(Data("\n".utf8))
-        }
+        writeJSON(payload)
         let ok = verdict.valid && !gate.loadFailed
         if !ok && gate.loadFailed {
             FileHandle.standardError.write(
@@ -688,22 +718,71 @@ if options.approvalAudit || options.approvalVerify {
 
 if options.pruneEvidence || options.evidenceStats {
     // 目录解析与批三 pruneEvidence 同口径：项目维度查 registry →
-    // evidenceStoragePath → 默认目录；无项目维度 → 默认证据目录。
+    // evidenceStoragePath（缺失或不合法即拒绝，不回落共享档案）；
+    // 无项目维度 → 本次运行解析出的那一个状态根下的共享档案目录
+    // （--state-dir 给了就是 <state-dir>/evidence，没给就是 home 默认）。
+    //
+    // A-07/C-06: the project dimension used to hand the stored
+    // `evidenceStoragePath` straight to the store that deletes from it, while
+    // `attach` had already started refusing that same stored value. Both
+    // commands now go through `EngineCore.projectArchiveDirectory`, the one
+    // resolver the engine uses: nothing is deleted or measured in a directory
+    // the daemon would refuse to archive into, and a project that named no
+    // directory of its own never gets the shared archive touched in its place.
+    //
+    // The store is built here, once, so the deleting pass and the reading pass
+    // cannot be pointed at different archives. Omitting `--project` still means
+    // the shared archive — with `--state-dir` that is `<state-dir>/evidence/`,
+    // and without it this process's own per-user archive, which is exactly the
+    // root every other subcommand of this run resolved. The destructive scope is
+    // still named at the call site rather than folded in by an omitted argument;
+    // what leaving the argument out can no longer do is point one command at a
+    // directory another command is not using.
+    // `EngineCore.pruneEvidence` refuses its own no-store case for exactly that
+    // reason (an embedded engine that was handed no archive has no directory to
+    // prune), and this branch is where the shared archive is meant to be pruned.
+    // `dir` repeats the location because `EvidenceStore.directory` is
+    // module-internal and the JSON output has to name what was touched.
+    let stateRoot = resolvedStateRoot(injected: options.stateDir)
+    let store: EvidenceStore
     let dir: String
     if let projectId = options.maintenanceProjectId {
-        let registry = ProjectRegistry.live()
+        let registry = ProjectRegistry(stateRoot: stateRoot)
         guard let entry = registry.get(projectId) else {
-            FileHandle.standardError.write(
-                Data("{\"error\": \"unknown project \(projectId)\"}\n".utf8)
+            writeJSON(
+                [
+                    "error": "unknown project \(projectId)",
+                    "project": projectId,
+                    "stateChanged": false,
+                    "next": "glasspaned --list-projects"
+                ],
+                to: .standardError
             )
             exit(1)
         }
-        dir = entry.evidenceStoragePath ?? EvidenceStore.defaultDirectory
+        switch EngineCore.projectArchiveDirectory(projectId: projectId, entry: entry) {
+        case .failure(let refusal):
+            writeJSON(
+                [
+                    "error": refusal.message,
+                    "remedy": refusal.remedy,
+                    "code": refusal.code.rawValue,
+                    "project": projectId,
+                    "registryPath": registry.filePath,
+                    "stateChanged": false
+                ],
+                to: .standardError
+            )
+            exit(1)
+        case .success(let stored):
+            dir = stored
+            store = EvidenceStore(directory: stored)
+        }
     } else {
-        dir = EvidenceStore.defaultDirectory
+        dir = stateRoot.evidenceDirectory
+        store = EvidenceStore.at(stateRoot: stateRoot)
     }
     if options.pruneEvidence {
-        let store = EvidenceStore(directory: dir)
         // --dry-run 与真实修剪共享同一判定路径（countExpired 与 prune 同源，
         // P5 §12.2 诚实口径：输出=真实会删除的数量，非估算）。
         let removed = options.pruneDryRun
@@ -715,57 +794,107 @@ if options.pruneEvidence || options.evidenceStats {
             "project": options.maintenanceProjectId ?? NSNull(),
             "dir": dir
         ]
-        if let data = try? JSONSerialization.data(
-            withJSONObject: payload, options: [.sortedKeys]
-        ) {
-            FileHandle.standardOutput.write(data)
-            FileHandle.standardOutput.write(Data("\n".utf8))
-        }
+        writeJSON(payload)
         exit(0)
     }
     if options.evidenceStats {
-        let stats = EvidenceStore(directory: dir).stats()
+        let stats = store.stats()
         let payload: [String: Any] = [
             "count": stats.count,
             "totalBytes": stats.totalBytes,
             "project": options.maintenanceProjectId ?? NSNull(),
             "dir": dir
         ]
-        if let data = try? JSONSerialization.data(
-            withJSONObject: payload, options: [.sortedKeys]
-        ) {
-            FileHandle.standardOutput.write(data)
-            FileHandle.standardOutput.write(Data("\n".utf8))
-        }
+        writeJSON(payload)
         exit(0)
     }
 }
 
-let socketPath = options.socketPath ?? defaultSocketPath()
+// One resolution for the whole daemon: the sockets below and every state object
+// handed to EngineCore come from this root, so a `--state-dir` run cannot serve
+// from the sandbox while archiving into the per-user folder (or the other way
+// round, which is how the real projects.json was lost).
+let stateRoot = resolvedStateRoot(injected: options.stateDir)
+// `--socket-path` wins outright. Otherwise a **named** root serves on
+// `<root>/daemon.sock`, and a run that named nothing keeps the historic
+// `<home>/.glasspane/engine.sock` name — renaming the socket of an existing
+// installation is not this change's to make, and `StateRoot` is the one place
+// the whole rule is written (the settings panel resolves through it too).
+let socketPath = StateRoot.engineSocketPath(
+    explicitSocketPath: options.socketPath,
+    stateRoot: options.stateDir
+)
+let probeSocketPath = options.probeSocketPath ?? stateRoot.probeSocketFile
 let log = EngineLog(quiet: !options.verbose)
-// 遮罩点必须早于本文件后续创建的任何线程（C33 runloop、probe accept、
-// per-client、GCD worker）——线程继承创建者的信号遮罩，这是 sigwait
-// 送达确定性的前提。--check-*/--grant-* 等即时 CLI 路径在此之前已 exit，
-// Ctrl-C 语义不受影响。
-blockShutdownSignalsEarly()
+// R5-04: this process writes the archive, the registry and the approval chain,
+// so it is the process that closes the exposure the umask left there — files and
+// directories that predate the 0700/0600 rule are tightened once, here, and
+// every path it could not tighten is named in the log. The one-shot maintenance
+// subcommands deliberately do **not** do this: `--evidence-stats` and
+// `--active-project` are the read-only probes the smoke gates use to measure
+// which state root a run resolved, and a probe that chmods is not read-only.
+stateRoot.tightenPermissions(log: log)
 
-// 单实例护栏（P1 v1.2 §11.1）：socket 已由活着的 daemon 在服务时拒绝启动。
-// 绑定的 unlink+bind 语义会抢占文件，留下一个"没人连得到"的孤儿实例——而
-// TCC 授权条目按进程身份记账，多实例并存时用户在系统设置里看到的条目与真正
-// 服务请求的实例可能对不上，这正是本次修的坑。`--force-socket` 显式抢占，
-// `--socket-path` 起并行实例（不同 socket 即不同主体）。
-if !options.forceSocket {
-    if let incumbent = DaemonProbe().helloSummary(socketPath: socketPath) {
-        let message = """
-        glasspaned: a daemon is already serving \(socketPath) (pid \(incumbent.pid), version \(incumbent.version)).
-          - attach to it instead of starting a second instance, or
-          - use --socket-path <other> for a parallel instance, or
-          - use --force-socket to take over this socket (the old instance keeps running but loses the socket).
-        """
-        FileHandle.standardError.write(Data((message + "\n").utf8))
-        exit(65)
+// 单实例护栏（P1 v1.2 §11.1 + R2-02/A-18）：判定必须三态分开——「回了 hello」
+// 「名字后面没有监听者（残留文件）」「有监听者但不开口」。旧实现用 helloSummary，
+// 把后两种连同「3s 没回音」一起当成"没有 daemon"，随后无条件 unlink+bind，负载下
+// 直接覆盖一个只是暂时没回话的活实例，留下没人连得上的孤儿；TCC 席位按进程身份
+// 记账，用户在系统设置里看到的条目与真正服务请求的实例就可能对不上。
+// `--force-socket` 才是显式抢占，`--socket-path` 起并行实例（不同 socket 即不同主体）。
+//
+// R5-07：护栏**必须在 `blockShutdownSignalsEarly()` 之前**跑完。旧顺序是先装遮罩再
+// 护栏、而 sigwait 线程要到 `startShutdownWaiter` 才存在——那段窗口里 SIGTERM/SIGINT
+// 被屏蔽却无人消费，配上无界的 DaemonProbe 读环就成了不可杀的启动。此刻信号还是
+// 默认处置，Ctrl-C / kill 立刻生效；探测本身也已换成绝对时限 + 字节上限的有界会话。
+let socketProbe = DaemonProbe()
+let engineLiveness = socketProbe.liveness(socketPath: socketPath)
+switch DaemonProbe.takeoverDecision(engineLiveness, force: options.forceSocket) {
+case .refuse(let incumbent):
+    let message = """
+    glasspaned: \(socketPath) is already owned (\(incumbent)).
+      - attach to that instance instead of starting a second one, or
+      - use --socket-path <other> for a parallel instance, or
+      - use --force-socket to take this name over (the old instance keeps running but loses the socket).
+    """
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+    exit(65)
+case .preempt(let incumbent):
+    log.error("--force-socket: taking \(socketPath) over from \(incumbent); the previous instance keeps running but loses the socket")
+case .bind:
+    if case .noListener(let reason) = engineLiveness {
+        log.info("nothing listens on \(socketPath) (\(reason)) — binding it")
     }
 }
+
+// A-18：engine.sock 有 §11.1 护栏，probe.sock 过去**一个都没有**——第二个 daemon
+// 静默 unlink+bind 抢走探针名字，旧实例继续服务 engine.sock，归因面就此裂到两个进程
+// 上（探针事件进 B、操作与证据记在 A）。探针监听者按协议永不回 hello，所以"连接能不
+// 能建立"才是它的存活判据（waitForHello: false，不白等 3s）。默认行为不变：名字有主
+// 就少开一个监听者并如实报降级，而不是抢；抢占要显式 --force-probe-socket。
+// 判定必须在遮罩之前（同上），真正 start() 在遮罩之后——accept 线程要继承遮罩。
+var probeListenerAllowed = options.probeEnabled
+if options.probeEnabled {
+    let probeLiveness = socketProbe.liveness(socketPath: probeSocketPath, waitForHello: false)
+    switch DaemonProbe.takeoverDecision(probeLiveness, force: options.forceProbeSocket) {
+    case .refuse(let incumbent):
+        probeListenerAllowed = false
+        // 不经 EngineLog（quiet 模式会被吞）：静默少一个监听者正是 A-18 要消灭的形状。
+        FileHandle.standardError.write(Data(("""
+        glasspaned: probe name \(probeSocketPath) is already owned (\(incumbent)).
+          Starting WITHOUT a probe listener: Z5 black-box only, handlerProbe/stateDiff stay null.
+          - use --force-probe-socket to take the name over, or
+          - use --probe-socket-path <other> for this instance's own listener.
+        """ + "\n").utf8))
+    case .preempt(let incumbent):
+        log.error("--force-probe-socket: taking \(probeSocketPath) over from \(incumbent); the previous listener keeps its engine.sock but loses the probe stream.")
+    case .bind:
+        break
+    }
+}
+// 遮罩点必须早于本文件后续创建的任何线程（C33 runloop、probe accept、per-client、
+// GCD worker）——线程继承创建者的信号遮罩，这是 sigwait 送达确定性的前提。
+// 它也必须晚于上面两条护栏（见上），否则屏蔽期内无人消费信号 = 不可杀。
+blockShutdownSignalsEarly()
 let channel = AXChannel()
 // T9 progressive degradation is on by default: it needs no TCC permission
 // (proc_pidinfo is same-user process inspection). C33 is injected by default
@@ -774,49 +903,87 @@ let channel = AXChannel()
 // pure operation-right mutex form documented in P2 spec v2.0 §17.2.
 // --no-c33 opts out explicitly (act never waits on user input).
 var attributionGuard: AttributionGuard?
+// A-08: whichever branch leaves the guard out has to say why, because the
+// engine records "contamination not measured" from that statement — an
+// unexplained absence would go back to reading as a clean window.
+var inputMonitorAbsenceReason: String?
 if options.c33Enabled {
     let inputMonitor = CGEventInputMonitor()
     if inputMonitor.startOnBackgroundRunLoop() {
         attributionGuard = AttributionGuard(inputSource: inputMonitor)
         log.info("C33 active: CGEvent input tap installed (AttributionGuard injected)")
     } else {
+        inputMonitorAbsenceReason = "the CGEvent input tap could not be created by this daemon (Input Monitoring TCC not granted?)"
         log.info("C33 degraded: input tap unavailable (Input Monitoring TCC not granted?) — contamination undecidable, operation-right mutex only")
     }
 } else {
+    inputMonitorAbsenceReason = "C33 was declined at startup by the --no-c33 flag"
     log.info("C33 disabled via --no-c33 (pure no-guard form)")
+}
+// R3-1: the declaration is a statement about the machine, so it has to be
+// observable in the run that made it — an agent reading the daemon's own output
+// can then tell a declared-unattended run from one that merely never monitored.
+if options.unattendedWindowDeclared {
+    log.info("unattended window declared (contamination verdicts for unwatched windows are declarations, not measurements)")
+} else if attributionGuard == nil {
+    log.info("no unattended declaration and no input monitor: every window will read contaminated=true / attribution=weak")
 }
 // P6 spec v6.0 §5: the probe listener is on by default and self-degrades —
 // without probe.sock nothing connects, so every act keeps the Z5 black-box
 // form (handlerProbe/stateDiff null). --no-probe skips the listener entirely.
 var probeInbox: ProbeInbox?
 var probeServer: ProbeSocketServer?
-if options.probeEnabled {
-    let probeSocketPath = options.probeSocketPath ?? DaemonProbe.defaultProbeSocketPath
+if options.probeEnabled, probeListenerAllowed {
     let inbox = ProbeInbox()
-    let server = ProbeSocketServer(socketPath: probeSocketPath, inbox: inbox, log: log)
+    let server = ProbeSocketServer(
+        socketPath: probeSocketPath,
+        inbox: inbox,
+        log: log,
+        preemptsExistingSocket: options.forceProbeSocket
+    )
     do {
         try server.start()
         probeInbox = inbox
         probeServer = server
     } catch {
+        // start() 自带同一套 bind→三态判定→只清无主名字的纪律（A-18），护栏到这里
+        // 之间若被别的实例抢了名字，它会拒绝并如实抛 nameOccupied；其余是
+        // bind/chmod/listen 一类 errno。降级口径不变：Z5 黑箱继续。
+        // 与上面护栏同一诚实口径：不经 EngineLog（quiet 会把"少一个监听者"整个
+        // 吞掉，而那正是 A-18 要消灭的形状）。
         log.error("probe socket unavailable (\(error)) — continuing Z5-only, signals stay null")
+        FileHandle.standardError.write(Data(
+            "glasspaned: probe socket unavailable (\(error)) — this instance stays Z5-only; handlerProbe/stateDiff stay null\n".utf8
+        ))
     }
 } else {
     log.info("probe listener disabled via --no-probe (Z5 black-box only)")
 }
 let core = EngineCore(
     channel: channel,
-    projectRegistry: ProjectRegistry.live(),
-    evidenceStore: EvidenceStore.live(),
+    // C-02/C-03 named both locations out loud instead of letting an omitted
+    // argument decide; X-22 made that one argument: all three come from the
+    // `stateRoot` resolved above, which is either the directory `--state-dir`
+    // named or, with a line on stderr saying so, this process's per-user folder.
+    projectRegistry: ProjectRegistry(stateRoot: stateRoot),
+    evidenceStore: EvidenceStore.at(stateRoot: stateRoot),
     attributionGuard: attributionGuard,
     degradationTracker: DegradationTracker(),
     metricsProbe: ProcessMetricsProbe(),
-    approvalGate: ApprovalGate(path: ApprovalGate.defaultPath),
+    approvalGate: ApprovalGate(stateRoot: stateRoot, log: log),
     probeInbox: probeInbox,
-    permissionsReport: { permissionProbes.snapshot() }
+    permissionsReport: { permissionProbes.snapshot() },
+    inputMonitorAbsenceReason: inputMonitorAbsenceReason,
+    declaresUnattendedWindow: options.unattendedWindowDeclared
 )
 let dispatcher = Dispatcher(core: core, log: log)
-let server = SocketServer(socketPath: socketPath, dispatcher: dispatcher, log: log)
+let server = SocketServer(
+    socketPath: socketPath,
+    dispatcher: dispatcher,
+    log: log,
+    preemptsExistingSocket: options.forceSocket
+)
+// 遮罩已装、所有会创建线程的初始化都已完成，此刻起信号只会被这里消费。
 startShutdownWaiter(socketPaths: [server.socketPath] + (probeServer.map { [$0.socketPath] } ?? []))
 
 FileHandle.standardOutput.write(

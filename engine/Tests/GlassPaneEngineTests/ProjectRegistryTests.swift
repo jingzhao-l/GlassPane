@@ -7,9 +7,10 @@ final class ProjectRegistryTests: XCTestCase {
     // MARK: - Helpers
 
     private func tempFilePath() -> String {
-        let dir = NSTemporaryDirectory()
-        let name = "glasspane-test-\(UUID().uuidString).json"
-        return (dir as NSString).appendingPathComponent(name)
+        // Same shape as before (a unique, not-yet-existing `.json` path under a
+        // created parent), routed through `TestSandbox` so the isolation
+        // predicate runs on it — see `TestSupport.swift`.
+        TestSandbox.filePath("registry")
     }
 
     private var testDate: Date {
@@ -376,71 +377,295 @@ final class ProjectRegistryTests: XCTestCase {
     }
 }
 
-// MARK: - RecipeLoader tests (spec v1.4 §2, P1-E5)
+// MARK: - RecipeLoader tests (spec v1.4 §2, P1-E5) — R4-02 / R6-01
 
+/// Every literal here is written against the **kernel contract**, not against
+/// the implementation: `schemaVersion` is the string const, a step is
+/// `{kind, params}`. Each case also pins the *error text*, because
+/// `"missing or non-integer 'schemaVersion'"` is what told a person holding
+/// `"1"` that the key was absent.
 final class RecipeLoaderTests: XCTestCase {
+
+    private static let version = RecipeLoader.schemaVersion
 
     private func json(_ object: [String: Any]) -> Data {
         try! JSONSerialization.data(withJSONObject: object)
     }
 
+    /// One valid step, in the contract's shape.
+    private func step(
+        kind: Any = "act",
+        params: Any = ["selector": ["role": "AXButton", "title": "Submit"], "action": "press"],
+        extra: [String: Any] = [:]
+    ) -> [String: Any] {
+        var step: [String: Any] = ["kind": kind, "params": params]
+        for (key, value) in extra { step[key] = value }
+        return step
+    }
+
+    private func recipe(version: Any = RecipeLoaderTests.version,
+                        name: Any = "signup flow",
+                        steps: [Any]) -> [String: Any] {
+        ["schemaVersion": version, "name": name, "steps": steps]
+    }
+
+    /// The shared truth set: this is the same file the kernel suite validates
+    /// with ajv and the MCP shell validates with zod. If this ever fails, the
+    /// two languages have drifted apart again — which is the defect, and it is
+    /// no longer only visible in `kernel/`.
+    func testKernelFixtureIsTheTruthThisValidatesAgainst() throws {
+        let data = try KernelFixtures.data("recipe-config.ok-01.json")
+        let result = RecipeLoader.validate(data)
+        XCTAssertTrue(result.valid, "the contract's own fixture must validate: \(result.errors)")
+        XCTAssertFalse(
+            RecipeLoader.schemaVersion.isEmpty,
+            "the version literal must be a real value, not a stub"
+        )
+        // …and the literal this file is written against is the fixture's, read
+        // from the bytes rather than restated from the code.
+        let root = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        XCTAssertEqual(
+            root["schemaVersion"] as? String, RecipeLoader.schemaVersion,
+            "kernel fixture and engine validator disagree about the version literal"
+        )
+        let steps = try XCTUnwrap(root["steps"] as? [[String: Any]])
+        XCTAssertFalse(steps.isEmpty)
+        for one in steps {
+            XCTAssertEqual(
+                Set(one.keys), Set(RecipeLoader.stepKeys),
+                "the fixture's step shape is not the one this validator documents"
+            )
+        }
+    }
+
     func testValidRecipePasses() {
-        let recipe: [String: Any] = [
-            "schemaVersion": 1,
-            "name": "signup flow",
-            "steps": [
-                ["selector": ["role": "AXButton", "title": "Submit"], "action": "press"],
-            ],
-        ]
-        let result = RecipeLoader.validate(json(recipe))
+        let result = RecipeLoader.validate(json(recipe(steps: [step()])))
         XCTAssertTrue(result.valid, "expected valid; got errors: \(result.errors)")
         XCTAssertEqual(result.recipeName, "signup flow")
+        XCTAssertTrue(result.errors.isEmpty)
+    }
+
+    /// The split this test used to encode: an integer version was the *only*
+    /// accepted answer, and every file the contract calls valid failed.
+    func testIntegerSchemaVersionIsRejectedByName() {
+        let result = RecipeLoader.validate(json(recipe(version: 1, steps: [step()])))
+        XCTAssertFalse(result.valid)
+        XCTAssertTrue(
+            result.errors.contains {
+                $0.contains("must be the string \"\(Self.version)\"") && $0.contains("a number")
+            },
+            "a wrong-typed version must be reported as the type it is: \(result.errors)"
+        )
+    }
+
+    /// `JSONSerialization` gives both of these an `NSNumber`, and Swift's
+    /// `is Bool` says yes to a plain numeric one — so without the CoreFoundation
+    /// type check this pair collapses into the same sentence, and an agent reads
+    /// "got a boolean" about a file that contains `1`.
+    func testBooleanAndNumberAreToldApartInErrorText() {
+        let numeric = RecipeLoader.validate(json(recipe(version: 1, steps: [step()])))
+        XCTAssertTrue(
+            numeric.errors.contains { $0.contains("got a number") },
+            numeric.errors.description
+        )
+        let boolean = RecipeLoader.validate(json(recipe(version: true, steps: [step()])))
+        XCTAssertTrue(
+            boolean.errors.contains { $0.contains("got a boolean") },
+            boolean.errors.description
+        )
+    }
+
+    func testWrongStringSchemaVersionIsRejectedWithBothValues() {
+        let result = RecipeLoader.validate(
+            json(recipe(version: "glasspane.recipe/0.2", steps: [step()]))
+        )
+        XCTAssertFalse(result.valid)
+        XCTAssertTrue(
+            result.errors.contains {
+                $0.contains("\"glasspane.recipe/0.2\"") && $0.contains("requires exactly \"\(Self.version)\"")
+            },
+            result.errors.description
+        )
     }
 
     func testMissingSchemaVersionRejected() {
-        let recipe: [String: Any] = [
-            "name": "flow",
-            "steps": [],
-        ]
-        let result = RecipeLoader.validate(json(recipe))
+        var body = recipe(steps: [step()])
+        body["schemaVersion"] = nil
+        let result = RecipeLoader.validate(json(body))
         XCTAssertFalse(result.valid)
-        XCTAssertTrue(result.errors.contains { $0.contains("schemaVersion") })
+        XCTAssertTrue(
+            result.errors.contains { $0.contains("'schemaVersion' is required") },
+            result.errors.description
+        )
     }
 
     func testEmptyStepsRejected() {
-        let recipe: [String: Any] = [
-            "schemaVersion": 1,
-            "name": "flow",
-            "steps": [],
-        ]
-        let result = RecipeLoader.validate(json(recipe))
+        let result = RecipeLoader.validate(json(recipe(steps: [])))
         XCTAssertFalse(result.valid)
-        XCTAssertTrue(result.errors.contains { $0.contains("at least 1 step") })
+        XCTAssertTrue(
+            result.errors.contains { $0.contains("at least \(RecipeLoader.minSteps) step") },
+            result.errors.description
+        )
+    }
+
+    func testStepCountBoundaries() {
+        let atLimit = RecipeLoader.maxSteps
+        XCTAssertTrue(
+            RecipeLoader.validate(json(recipe(steps: Array(repeating: step(), count: atLimit)))).valid,
+            "\(atLimit) steps is the contract's ceiling and must pass"
+        )
+        let over = RecipeLoader.validate(
+            json(recipe(steps: Array(repeating: step(), count: atLimit + 1)))
+        )
+        XCTAssertFalse(over.valid)
+        XCTAssertTrue(
+            over.errors.contains {
+                $0.contains("contains \(atLimit + 1) steps") && $0.contains("maximum is \(atLimit)")
+            },
+            over.errors.description
+        )
     }
 
     func testMissingNameRejected() {
-        let recipe: [String: Any] = [
-            "schemaVersion": 1,
-            "steps": [["selector": ["role": "AXButton"], "action": "press"]],
-        ]
-        let result = RecipeLoader.validate(json(recipe))
+        var body = recipe(steps: [step()])
+        body["name"] = nil
+        let result = RecipeLoader.validate(json(body))
         XCTAssertFalse(result.valid)
-        XCTAssertTrue(result.errors.contains { $0.contains("'name'") })
+        XCTAssertTrue(
+            result.errors.contains { $0.contains("'name' is required") },
+            result.errors.description
+        )
     }
 
-    func testStepMissingActionRejected() {
-        let recipe: [String: Any] = [
-            "schemaVersion": 1,
-            "name": "flow",
-            "steps": [["selector": ["role": "AXButton"]]],
-        ]
-        let result = RecipeLoader.validate(json(recipe))
+    func testNameLengthBoundary() {
+        XCTAssertTrue(
+            RecipeLoader.validate(
+                json(recipe(name: String(repeating: "n", count: RecipeLoader.nameMaxLength),
+                             steps: [step()]))
+            ).valid,
+            "the cap is inclusive in the contract (z.string().max(256))"
+        )
+        let tooLong = String(repeating: "n", count: RecipeLoader.nameMaxLength + 1)
+        let result = RecipeLoader.validate(json(recipe(name: tooLong, steps: [step()])))
         XCTAssertFalse(result.valid)
-        XCTAssertTrue(result.errors.contains { $0.contains("steps[0].action") })
+        XCTAssertTrue(
+            result.errors.contains {
+                $0.contains("is \(tooLong.count) characters") && $0.contains("maximum is \(RecipeLoader.nameMaxLength)")
+            },
+            result.errors.description
+        )
+    }
+
+    func testStepKindMustBeOneOfTheContractEnum() {
+        let result = RecipeLoader.validate(json(recipe(steps: [step(kind: "click")])))
+        XCTAssertFalse(result.valid)
+        XCTAssertTrue(
+            result.errors.contains {
+                $0.contains("steps[0].kind") && $0.contains("\"click\"")
+                    && $0.contains("act, observe, assert, diagnose")
+            },
+            result.errors.description
+        )
+        // Every allowed kind is accepted — the enum is a set, not a guess.
+        for kind in RecipeLoader.stepKinds {
+            XCTAssertTrue(
+                RecipeLoader.validate(json(recipe(steps: [step(kind: kind)]))).valid,
+                "'\(kind)' is in the contract and must validate"
+            )
+        }
+    }
+
+    func testStepMissingParamsRejected() {
+        let result = RecipeLoader.validate(
+            json(recipe(steps: [["kind": "act"]]))
+        )
+        XCTAssertFalse(result.valid)
+        XCTAssertTrue(
+            result.errors.contains { $0.contains("steps[0].params' is required") },
+            result.errors.description
+        )
+    }
+
+    func testStepParamsMustBeAnObject() {
+        let result = RecipeLoader.validate(
+            json(recipe(steps: [step(params: "press it")]))
+        )
+        XCTAssertFalse(result.valid)
+        XCTAssertTrue(
+            result.errors.contains {
+                $0.contains("steps[0].params' must be an object") && $0.contains("a string")
+            },
+            result.errors.description
+        )
+    }
+
+    /// The old daemon-only shape: `selector`/`action` at step level. This must
+    /// fail *and* say where those keys belong, or the migration off it is a
+    /// mystery to whoever hits it.
+    func testLegacyStepShapeIsRejectedAndPointAtParams() {
+        let result = RecipeLoader.validate(
+            json(recipe(steps: [["kind": "act", "params": [:],
+                                  "selector": ["role": "AXButton"], "action": "press"]]))
+        )
+        XCTAssertFalse(result.valid)
+        XCTAssertTrue(
+            result.errors.contains {
+                $0.contains("steps[0]' has unknown key 'selector'") && $0.contains("inside 'params'")
+            },
+            result.errors.description
+        )
+        XCTAssertTrue(
+            result.errors.contains { $0.contains("unknown key 'action'") },
+            result.errors.description
+        )
+    }
+
+    func testUnknownTopLevelKeyRejected() {
+        var body = recipe(steps: [step()])
+        body["author"] = "me"
+        let result = RecipeLoader.validate(json(body))
+        XCTAssertFalse(result.valid)
+        XCTAssertTrue(
+            result.errors.contains { $0.contains("unknown top-level key 'author'") },
+            result.errors.description
+        )
+    }
+
+    func testNonObjectStepRejectedByType() {
+        let result = RecipeLoader.validate(json(recipe(steps: ["press submit"])))
+        XCTAssertFalse(result.valid)
+        XCTAssertTrue(
+            result.errors.contains {
+                $0.contains("steps[0]' must be an object") && $0.contains("a string")
+            },
+            result.errors.description
+        )
+    }
+
+    /// A top-level array parses fine as JSON; calling it "not valid JSON" sends
+    /// the reader to the wrong fix.
+    func testTopLevelArrayIsReportedAsShapeNotAsParseFailure() {
+        let data = try! JSONSerialization.data(withJSONObject: [["kind": "act"]])
+        let result = RecipeLoader.validate(data)
+        XCTAssertFalse(result.valid)
+        XCTAssertFalse(
+            result.errors.contains { $0.contains("not valid JSON") },
+            "the bytes *are* JSON: \(result.errors)"
+        )
+        XCTAssertTrue(
+            result.errors.contains { $0.contains("top level must be a JSON object") },
+            result.errors.description
+        )
     }
 
     func testEmptyFileRejected() {
         let result = RecipeLoader.validate(Data())
         XCTAssertFalse(result.valid)
+        XCTAssertTrue(
+            result.errors.contains { $0.contains("not valid JSON") },
+            result.errors.description
+        )
     }
 }

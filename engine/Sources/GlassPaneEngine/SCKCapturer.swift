@@ -29,10 +29,23 @@ import AppKit
 /// frame coordinates match SCK's display-logical space).
 public enum SCKCapturer {
 
-    /// Total wall-clock budget for one capture, mirroring the defensive
-    /// timeout discipline introduced for AX tree reads in P1.
-    /// Enforced across the content query, the screenshot manager call and the
-    /// SCStream first-frame wait.
+    /// Wall-clock budget for ONE stage of one capture, not for the capture as a
+    /// whole (A-13 — the comment used to claim "total", which no code enforced).
+    /// Same shape as the defensive per-call discipline P1 introduced for AX tree
+    /// reads: each stage ends a different async call and nothing can be cancelled
+    /// mid-stage, so each gets its own fresh budget — the
+    /// `SCShareableContent` query, the `SCScreenshotManager` call or the
+    /// `SCStream` start, and on the macOS 13 path the first-frame wait as well.
+    /// The constant keeps its name because P1 spec §2 cites `captureTimeoutSeconds`
+    /// as this 5 s figure; only the budget's stated scope was wrong.
+    ///
+    /// Worst case is therefore 10 s on the macOS 14 path (query + capture) and
+    /// 15 s on the macOS 13 path (query + stream start + first frame). A capture
+    /// that burns the full budget on a wedged window server can on its own
+    /// exceed `EngineCore.performanceLatencyBudgetMs` (10 s) and trip the act's
+    /// performance circuit breaker — that is the honest reading of what the
+    /// channel did, and shortening the per-stage budget to hide it would turn a
+    /// slow-but-real capture into `pixelCaptureDenied` on healthy machines.
     private static let captureTimeoutSeconds: TimeInterval = 5.0
 
     /// Captures the frontmost on-screen window owned by `pid`, cropped to
@@ -56,73 +69,234 @@ public enum SCKCapturer {
     // MARK: - Shared context resolution (macOS 13+, both branches)
 
     /// 解析目标窗口及其所在显示器。优先按 AX 传入的 windowId 精确匹配，
-    /// 未命中则回退 pid 属主 + 最大面积屏幕内窗口。
+    /// 未命中则回退 pid 属主 + 最大面积屏幕内窗口。两条分支共用同一属主判据
+    /// （见 `selectWindowIndex`），显示器判据见 `selectDisplayIndex`。
     @available(macOS 13.0, *)
     private static func resolveCaptureContext(ownerPid pid_t: pid_t, windowId: Int?) throws -> (window: SCWindow, display: SCDisplay) {
-        let content: SCShareableContent
+        // 三种结局（超时 / 查询抛错 / 没有结果）在 tryWaitShareableContent 里已经
+        // 各自成文为 pixelCaptureDenied，这里不再二次包装错误文本。
+        let content = try tryWaitShareableContent(macOS13: {
+            try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        })
+
+        // 判定抽成纯函数（两条 OS 分支共用、可脱离真机采集测试）。投影保持
+        // content 的原顺序，所以返回的下标直接回指 SCWindow / SCDisplay。
+        let windows = content.windows.map { window in
+            WindowCandidate(
+                windowId: Int(window.windowID),
+                ownerPid: window.owningApplication?.processID,
+                isOnScreen: window.isOnScreen,
+                frame: window.frame
+            )
+        }
+        let displays = content.displays.map { display in DisplayCandidate(frame: display.frame) }
+
+        let windowIndex: Int
+        let displayIndex: Int
         do {
-            guard let resolved = try tryWaitShareableContent(macOS13: {
-                try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            }) else {
-                throw ChannelError.pixelCaptureDenied(
-                    reason: "SCShareableContent query returned no content"
-                )
+            windowIndex = try selectWindowIndex(candidates: windows, exactWindowId: windowId, ownerPid: pid_t)
+            let chosen = windows[windowIndex]
+            displayIndex = try selectDisplayIndex(
+                displays: displays,
+                windowFrame: chosen.frame,
+                windowId: chosen.windowId,
+                ownerPid: pid_t
+            )
+        } catch let failure as ContextError {
+            throw channelError(for: failure)
+        }
+        return (content.windows[windowIndex], content.displays[displayIndex])
+    }
+
+    // MARK: - Capture-context selection (pure, both OS branches)
+
+    /// `SCWindow` 的可测投影：只带选择判据用到的四个事实。
+    struct WindowCandidate: Equatable {
+        let windowId: Int
+        let ownerPid: pid_t?
+        let isOnScreen: Bool
+        let frame: CGRect
+    }
+
+    /// `SCDisplay` 的可测投影。
+    struct DisplayCandidate: Equatable {
+        let frame: CGRect
+    }
+
+    /// 采集上下文判定的失败原因。每个 case 都是一次"未测量"，由
+    /// `channelError(for:)` 原样转成 `pixelCaptureDenied`，绝不降级成替代窗口
+    /// 或替代显示器。
+    enum ContextError: Error, Equatable {
+        /// 目标 pid 当前没有任何在屏窗口。
+        case noOnScreenWindow(ownerPid: pid_t)
+        /// 选中窗口的 frame 不与任何显示器相交，采集区域落在全部屏幕之外。
+        /// 这里曾经回落 `displays.first` + 越界 sourceRect，采回一张合法但空白的
+        /// 主屏图，让上层把"没测到"读成"像素没变"。
+        case windowOutsideEveryDisplay(ownerPid: pid_t, windowId: Int, frame: CGRect, displayCount: Int)
+
+        /// 面向证据/诊断的事实描述：谁、哪个窗口、哪个区域、查到了几块屏。
+        var reason: String {
+            switch self {
+            case .noOnScreenWindow(let pid):
+                return "no on-screen SCWindow owned by pid \(pid)"
+            case .windowOutsideEveryDisplay(let pid, let windowId, let frame, let displayCount):
+                let area = "\(frame.width)x\(frame.height)@(\(frame.minX),\(frame.minY))"
+                return "no SCDisplay intersects pid \(pid)'s window \(windowId) frame \(area) among \(displayCount) enumerated display(s)"
             }
-            content = resolved
-        } catch let failure as ChannelError {
-            throw failure
-        } catch {
-            throw ChannelError.pixelCaptureDenied(
-                reason: "SCShareableContent query failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// 判定失败 → 通道错误：任何"未测量"都走 pixelCaptureDenied，与 P0 §8 的
+    /// 降级口径一致（EngineCore 据此把 pixelDiff 记为缺失而不是零变化）。
+    static func channelError(for failure: ContextError) -> ChannelError {
+        .pixelCaptureDenied(reason: failure.reason)
+    }
+
+    /// 选窗口。**两条分支同一属主判据**：windowID 会被系统回收后复用给别的进程，
+    /// 所以"ID 命中"本身不能证明画面属于目标 pid——精确匹配同样要求
+    /// `owningApplication.processID == pid` 且在屏（回退分支一直是这么做的）。
+    /// 精确匹配不成立时按既有语义回退到该 pid 最大的在屏窗口；无可选窗口即抛错。
+    /// - Returns: `candidates` 中被选中窗口的下标。
+    static func selectWindowIndex(
+        candidates: [WindowCandidate],
+        exactWindowId: Int?,
+        ownerPid pid_t: pid_t
+    ) throws -> Int {
+        if let exactWindowId,
+           let exact = candidates.firstIndex(where: {
+               $0.windowId == exactWindowId && $0.ownerPid == pid_t && $0.isOnScreen
+           }) {
+            return exact
+        }
+        // 面积最大者胜出；同面积保留先出现者（与 `max(by:)` 的既有语义一致）。
+        var bestIndex: Int?
+        var bestArea: CGFloat = -1
+        for (index, candidate) in candidates.enumerated() {
+            guard candidate.ownerPid == pid_t, candidate.isOnScreen else { continue }
+            let area = candidate.frame.width * candidate.frame.height
+            guard area > bestArea else { continue }
+            bestArea = area
+            bestIndex = index
+        }
+        guard let bestIndex else { throw ContextError.noOnScreenWindow(ownerPid: pid_t) }
+        return bestIndex
+    }
+
+    /// 选显示器：只接受与窗口 frame 相交的那一块。不相交（或一块都没枚举到）就是
+    /// 一次显式的未测量，绝不拿 `displays.first` 当替身。
+    /// - Returns: `displays` 中被选中显示器的下标。
+    static func selectDisplayIndex(
+        displays: [DisplayCandidate],
+        windowFrame: CGRect,
+        windowId: Int,
+        ownerPid pid_t: pid_t
+    ) throws -> Int {
+        // A zero-area (or null) window is not "inside" a display: CGRect.intersects
+        // answers true for a 0×0 rect sitting in a display's bounds, which used to
+        // produce a legal-but-blank 1×1 capture and then a "pixels did not change"
+        // conclusion. Same not-measured outcome as an off-display window.
+        guard windowFrame.width > 0, windowFrame.height > 0 else {
+            throw ContextError.windowOutsideEveryDisplay(
+                ownerPid: pid_t,
+                windowId: windowId,
+                frame: windowFrame,
+                displayCount: displays.count
             )
         }
-
-        let window: SCWindow
-        if let windowId,
-           let exact = content.windows.first(where: { Int($0.windowID) == windowId }) {
-            window = exact
-        } else {
-            guard let largest = content.windows
-                .filter({ $0.owningApplication?.processID == pid_t && $0.isOnScreen })
-                .max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }) else {
-                throw ChannelError.pixelCaptureDenied(
-                    reason: "no on-screen SCWindow owned by pid \(pid_t)"
-                )
-            }
-            window = largest
-        }
-
-        guard let display = content.displays.first(where: { $0.frame.intersects(window.frame) })
-                ?? content.displays.first else {
-            throw ChannelError.pixelCaptureDenied(
-                reason: "no SCDisplay contains pid \(pid_t)'s window"
+        guard let index = displays.firstIndex(where: { $0.frame.intersects(windowFrame) }) else {
+            throw ContextError.windowOutsideEveryDisplay(
+                ownerPid: pid_t,
+                windowId: windowId,
+                frame: windowFrame,
+                displayCount: displays.count
             )
         }
-        return (window, display)
+        return index
     }
 
     /// Bridges a macOS-13+ async expression to this synchronous frame,
-    /// reusing the same timeout discipline as the image capture.
+    /// reusing the same timeout discipline as the image capture. The three
+    /// outcomes (timeout / thrown / no value) stay three distinct facts: a
+    /// timeout is never reported as "query returned no content", and a timed-out
+    /// result is never read out of the box while the cancelled task may still be
+    /// writing it.
     @available(macOS 13.0, *)
     private static func tryWaitShareableContent(
         macOS13 body: @escaping () async throws -> SCShareableContent
-    ) throws -> SCShareableContent? {
+    ) throws -> SCShareableContent {
+        switch resolveWait(
+            waitForAsync(timeout: captureTimeoutSeconds, body: body),
+            subject: "SCShareableContent query",
+            timeoutSeconds: captureTimeoutSeconds
+        ) {
+        case .value(let content):
+            return content
+        case .failure(let error):
+            throw error
+        }
+    }
+
+    // MARK: - async → sync bridge (shared by all three capture waits)
+
+    /// 一次性 async 取值拉到同步帧后的三种结局。超时是独立结局：被取消但仍在跑
+    /// 的任务之后还会往盒里写，所以它的任何值都不采信。
+    enum WaitOutcome<Value> {
+        case timedOut
+        case finished(value: Value?, error: Error?)
+    }
+
+    /// 桥结局归一成的两种事实：取到值，或一条 pixelCaptureDenied。
+    /// Mirror the P0 vocabulary: any capture failure downgrades to
+    /// pixelCaptureDenied so evidence handles it uniformly.
+    enum WaitResolution<Value> {
+        case value(Value)
+        case failure(ChannelError)
+    }
+
+    static func waitForAsync<Value>(
+        timeout: TimeInterval,
+        body: @escaping () async throws -> Value
+    ) -> WaitOutcome<Value> {
         let semaphore = DispatchSemaphore(value: 0)
-        let box = AsyncBox<SCShareableContent>()
+        let box = AsyncBox<Value>()
         let task = Task {
             do {
-                box.value = try await body()
+                let result = try await body()
+                box.setValue(result)
             } catch {
-                box.thrown = error
+                box.setThrown(error)
             }
             semaphore.signal()
         }
-        _ = semaphore.wait(timeout: .now() + captureTimeoutSeconds)
+        let waited = semaphore.wait(timeout: .now() + timeout)
         task.cancel()
-        if let thrown = box.thrown {
-            throw thrown
+        if waited == .timedOut {
+            return .timedOut
         }
-        return box.value
+        let snapshot = box.snapshot()
+        return .finished(value: snapshot.value, error: snapshot.thrown)
+    }
+
+    /// 三种结局逐条成文，互不折叠（超时不是"查无内容"，抛错不是"取到空值"）。
+    static func resolveWait<Value>(
+        _ outcome: WaitOutcome<Value>,
+        subject: String,
+        timeoutSeconds: TimeInterval
+    ) -> WaitResolution<Value> {
+        switch outcome {
+        case .timedOut:
+            return .failure(.pixelCaptureDenied(
+                reason: "\(subject) timed out after \(timeoutSeconds)s (not measured; the cancelled task may still be running)"
+            ))
+        case .finished(let value, let error):
+            if let error {
+                return .failure(.pixelCaptureDenied(reason: "\(subject) failed: \(error.localizedDescription)"))
+            }
+            guard let value else {
+                return .failure(.pixelCaptureDenied(reason: "\(subject) returned no result"))
+            }
+            return .value(value)
+        }
     }
 
     // MARK: - Path A (macOS 14+, SCScreenshotManager)
@@ -150,36 +324,18 @@ public enum SCKCapturer {
 
     @available(macOS 14.0, *)
     private static func awaitGuardedNextImage(contentFilter filter: SCContentFilter, config: SCStreamConfiguration) throws -> CGImage {
-        let semaphore = DispatchSemaphore(value: 0)
-        let box = AsyncBox<CGImage>()
-        let task = Task {
-            do {
-                let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
-                box.value = image
-                semaphore.signal()
-            } catch {
-                box.thrown = error
-                semaphore.signal()
-            }
+        switch resolveWait(
+            waitForAsync(timeout: captureTimeoutSeconds) {
+                try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            },
+            subject: "SCScreenshotManager capture",
+            timeoutSeconds: captureTimeoutSeconds
+        ) {
+        case .value(let image):
+            return image
+        case .failure(let error):
+            throw error
         }
-        let timedOut = semaphore.wait(timeout: .now() + captureTimeoutSeconds)
-        task.cancel()
-        if timedOut == .timedOut {
-            throw ChannelError.pixelCaptureDenied(
-                reason: "SCScreenshotManager timed out after \(captureTimeoutSeconds)s"
-            )
-        }
-        if let thrown = box.thrown {
-            // Mirror the P0 vocabulary: any capture failure downgrades to
-            // pixelCaptureDenied so evidence handles it uniformly.
-            throw ChannelError.pixelCaptureDenied(
-                reason: "screen capture failed: \(thrown.localizedDescription)"
-            )
-        }
-        guard let image = box.value else {
-            throw ChannelError.pixelCaptureDenied(reason: "screen capture returned no image")
-        }
-        return image
     }
 
     // MARK: - Path B (macOS 13, SCStream first-frame bridge)
@@ -203,17 +359,10 @@ public enum SCKCapturer {
 
         let bridge = StreamFrameBridge(timeout: .now() + captureTimeoutSeconds)
         let stream = SCStream(filter: filter, configuration: config, delegate: bridge)
-        do {
-            // 启动是异步回调；bridge 到同步帧并带上超时。startCapture 的 async
-            // 重载仅在 Task 内调用，避免 SDK 里 completion 版与 async 版的解析歧义。
-            try awaitStreamStart(of: stream)
-        } catch {
-            throw ChannelError.pixelCaptureDenied(
-                reason: "SCStream start failed: \(error.localizedDescription)"
-            )
-        }
-        // 首帧到手或超时后无条件停流，资源必须释放。
+        // 资源释放从 stream 存在的那一刻起登记：start 抛错或超时时采集会话已经建好，
+        // 登记在 awaitStreamStart 之后就等于 macOS 13 路径每次失败泄漏一个 SCStream。
         defer { stream.stopCapture(completionHandler: { _ in }) }
+        try awaitStreamStart(of: stream)
         guard let image = bridge.waitForFirstFrame() else {
             throw ChannelError.pixelCaptureDenied(
                 reason: "SCStream first frame timed out after \(captureTimeoutSeconds)s or stream stopped"
@@ -222,28 +371,21 @@ public enum SCKCapturer {
         return image
     }
 
+    /// 启动是异步回调；bridge 到同步帧并带上超时。startCapture 的 async 重载只在
+    /// `waitForAsync` 的 Task 内调用，避免 SDK 里 completion 版与 async 版的解析歧义。
+    /// 失败即抛已成文的 `pixelCaptureDenied`：ChannelError 不是 LocalizedError，
+    /// 调用方再包一层 `localizedDescription` 只会把上面的事实抹掉。
     @available(macOS 13.0, *)
     private static func awaitStreamStart(of stream: SCStream) throws {
-        let semaphore = DispatchSemaphore(value: 0)
-        let box = AsyncBox<Bool>()
-        let task = Task {
-            do {
-                try await stream.startCapture()
-                box.value = true
-            } catch {
-                box.thrown = error
-            }
-            semaphore.signal()
-        }
-        let timedOut = semaphore.wait(timeout: .now() + captureTimeoutSeconds)
-        task.cancel()
-        if timedOut == .timedOut {
-            throw ChannelError.pixelCaptureDenied(
-                reason: "SCStream start timed out after \(captureTimeoutSeconds)s"
-            )
-        }
-        if let thrown = box.thrown {
-            throw thrown
+        switch resolveWait(
+            waitForAsync(timeout: captureTimeoutSeconds) { try await stream.startCapture() },
+            subject: "SCStream start",
+            timeoutSeconds: captureTimeoutSeconds
+        ) {
+        case .value:
+            return
+        case .failure(let error):
+            throw error
         }
     }
 
@@ -325,10 +467,32 @@ public enum SCKCapturer {
     }
 
     /// Minimal thread-safe box for handoff from the actor-isolated Task
-    /// back to this synchronous frame.
-    private final class AsyncBox<Value> {
-        var value: Value?
-        var thrown: Error?
+    /// back to this synchronous frame. 交接的一对值由 NSLock 保护（与
+    /// `StreamFrameBridge` 同口径）：超时后 `waitForAsync` 只 cancel 不等待，
+    /// 仍在跑的任务会与同步侧读者并发读写同一个盒。
+    final class AsyncBox<Value> {
+        private let lock = NSLock()
+        private var storedValue: Value?
+        private var storedError: Error?
+
+        func setValue(_ value: Value) {
+            lock.lock()
+            defer { lock.unlock() }
+            storedValue = value
+        }
+
+        func setThrown(_ error: Error) {
+            lock.lock()
+            defer { lock.unlock() }
+            storedError = error
+        }
+
+        /// 同一把锁下取出的一对值。
+        func snapshot() -> (value: Value?, thrown: Error?) {
+            lock.lock()
+            defer { lock.unlock() }
+            return (storedValue, storedError)
+        }
     }
 }
 

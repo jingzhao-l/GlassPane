@@ -21,6 +21,43 @@ final class EvidenceRoundtripTests: XCTestCase {
     }
 
 
+    /// 冻结前落盘的档案可能**根本没有** `pixelDiff.bounds` 这个键（Swift 的合成编码器
+    /// 在 nil 时省略键，而 schema 要求它存在）。写侧现已显式补 `"bounds": null`，
+    /// 所以 ok-05 有意**不进** `evidenceFixtureNames`：那条 canonical 字节比对会红，
+    /// 而那个红正是本次修复要制造的非对称。这里把它钉成预期行为，防止后来者
+    /// "顺手"把 fixture 加进往返表或把读侧兼容当成冗余删掉。
+    func testPreFreezeArchiveWithoutBoundsReadsButReEncodesDifferently() throws {
+        let fixture = try KernelFixtures.data("evidence-pack.ok-05-pixelbounds-null.json")
+        let fixtureSignal = try XCTUnwrap(
+            pixelDiff(in: fixture), "fixture has no signals.pixelDiff object")
+        XCTAssertNil(fixtureSignal["bounds"],
+                     "fixture must model the pre-fix on-disk shape: key absent, not null")
+
+        // 读侧兼容：缺键的档案仍可解码并通过校验。
+        let pack = try EvidencePack.decodeAndValidate(fixture)
+        XCTAssertNil(pack.signals.pixelDiff?.bounds)
+
+        // 写侧诚实：重新编码必须把键补回来（值可以是 null），否则内核强校验会
+        // 把一条合法档案说成 "engine and kernel schema drifted"。
+        let encoded = try pack.jsonData()
+        let encodedSignal = try XCTUnwrap(
+            pixelDiff(in: encoded), "re-encoded pack lost signals.pixelDiff")
+        XCTAssertTrue(encodedSignal.keys.contains("bounds"),
+                      "write side must emit pixelDiff.bounds explicitly (null is the honest absence marker)")
+        XCTAssertTrue(encodedSignal["bounds"] is NSNull,
+                      "the key carries an explicit null, not an invented rectangle")
+        XCTAssertNotEqual(try canonicalJSON(fixture), try canonicalJSON(encoded),
+                          "the asymmetry is intentional — ok-05 stays out of the byte-equal roundtrip list")
+    }
+
+    /// `signals.pixelDiff` 子对象（键存在性与值分开判），避免依赖序列化空白风格。
+    private func pixelDiff(in data: Data) -> [String: Any]? {
+        guard let root = try? JSONSerialization.jsonObject(with: data),
+              let object = root as? [String: Any],
+              let signals = object["signals"] as? [String: Any] else { return nil }
+        return signals["pixelDiff"] as? [String: Any]
+    }
+
     private let evidenceFixtureNames = [
         "evidence-pack.ok-01.json",
         "evidence-pack.ok-02.json",

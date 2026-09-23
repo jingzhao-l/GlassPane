@@ -28,7 +28,12 @@ public enum Classifier {
         if pack.circuitBreaker.level == .channelFault {
             return outcome(.t0, path: path, evidence: evidenceSummary,
                 anomaly: "engine channel fault: AX API unavailable during the operation",
-                next: "check accessibility permission (glasspaned --grant-accessibility) and the daemon log, then retry the operation")
+                // R2-13: the old guidance sent the reader to `glasspaned
+                // --grant-accessibility`, which grants the CALLER's seat and is
+                // the phantom remedy the corrected GP_E_AX_UNAVAILABLE remedy
+                // now explicitly forbids. Names only the daemon-scoped, verified
+                // commands (same set the remedy table gates).
+                next: "the missing Accessibility seat is the daemon's, not the caller's: run `node installer/cli.js --restore-launchd` (it reads the seat the daemon itself reports and kickstarts the job so a fresh process re-reads TCC); if the daemon has no entry under System Settings > Privacy & Security > Accessibility yet, register it with launchctl submit running the daemon binary itself with --request-permission accessibility. Never try `glasspaned --grant-accessibility` on a running daemon — it only grants the terminal that runs it. Check the daemon log (stderr), then retry the operation")
         }
 
         if pack.signals.responsiveness?.responsive == false {

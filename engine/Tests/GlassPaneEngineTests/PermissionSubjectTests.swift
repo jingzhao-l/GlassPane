@@ -366,9 +366,23 @@ final class PermissionSubjectTests: XCTestCase {
         XCTAssertTrue(mapped.remedy.contains("--check-accessibility"), "给出自查手段而非盲动")
     }
 
-    func testTreeCapturePermissionFailureKeepsOnboardingRemedy() {
+    func testTreeCapturePermissionFailureFallsBackToDaemonScopedRemedy() {
+        // R2-13 重钉（原断言"非预算类失败沿用授权引导"已失效且方向相反）：
+        // `--grant-accessibility` 申请的是调用方的席位、阻塞 300s 还打印假成功，
+        // 现在只允许出现在 GP_E_AX_UNAVAILABLE remedy 的显式禁令句里。代码此刻
+        // 刻意的行为是：非预算成因回落冻结 remedy 表（daemon 自己的可执行路径
+        // --restore-launchd / kickstart / --request-permission），不是私有副本。
         let mapped = EngineCore.map(.treeCaptureFailed(reason: "AX element is disabled: api disabled"))
-        XCTAssertTrue(mapped.remedy.contains("--grant-accessibility"), "非预算类失败沿用授权引导")
+        XCTAssertEqual(mapped.code, .axUnavailable, "码表冻结：错误码不变")
+        XCTAssertEqual(mapped.remedy, GPError.remedy(for: .axUnavailable),
+                       "非预算成因 = remedy 表默认文案，逐字一致（不得另抄一份漂移）")
+        XCTAssertTrue(mapped.remedy.contains("--restore-launchd"),
+                      "回落文案必须指向作用在 daemon 身份上的路径，而不是调用方")
+        let lowered = mapped.remedy.lowercased()
+        if let at = lowered.range(of: "--grant-accessibility") {
+            XCTAssertTrue(lowered[lowered.startIndex..<at.lowerBound].contains("do not"),
+                          "--grant-accessibility 只许出现在否定语里（幻影 remedy 禁令）")
+        }
     }
 
     func testPixelCaptureDeniedRemedyPointsAtScreenRecording() {
@@ -572,4 +586,188 @@ final class PermissionSubjectTests: XCTestCase {
         XCTAssertEqual(restart.launchPath, Launchctl.path)
     }
 
+    // MARK: - 共用证据档案构造（R2-13 文本闸 / R5-04 隔离面）
+
+    private func makeMinimalPack() -> EvidencePack {
+        let selector = Selector(role: "AXButton", title: "Submit")
+        return EvidencePack(
+            operationId: "op_0123456789ABCDEFGHJKMNPQRS",
+            createdAt: "2026-09-14T12:00:00.000Z",
+            attribution: Attribution(level: .soft, contaminated: false),
+            circuitBreaker: CircuitBreaker(level: .channelFault),
+            signals: Signals(
+                act: ActSignal(selector: selector, action: .press, actConfirmed: true),
+                axEvent: AxEventSignal(
+                    treeDigestBefore: "aa", treeDigestAfter: "bb",
+                    nodeCount: 10, axChanged: true, latencyMs: 5
+                ),
+                pixelDiff: PixelDiffSignal(
+                    changedPixelRatio: 0.1,
+                    bounds: Bounds(x: 1, y: 1, width: 2, height: 2),
+                    windowId: 12
+                ),
+                crash: CrashSignal(processAliveBefore: true, processAliveAfter: true)
+            )
+        )
+    }
+
+    func testClassifierT0GuidanceNamesDaemonScopedCommands() {
+        // R2-13 的另一半：T0 的 next: 会进 agent 可见的诊断报告。旧文案指去
+        // `glasspaned --grant-accessibility`——那条申请的是**调用方**的席位，正是
+        // remedy 表现今显式禁止的幻影 remedy。这里钉住新文案只用已验证的、作用在
+        // daemon 身份上的命令，且 --grant-accessibility 只许死在禁令句里。
+        let (diagnosisClass, report) = Classifier.classify(makeMinimalPack())
+        XCTAssertEqual(diagnosisClass, .t0)
+        XCTAssertTrue(report.next.contains("--restore-launchd"),
+                      "T0 指引必须给出 node installer/cli.js --restore-launchd 这条已验证路径")
+        XCTAssertTrue(report.next.contains("--request-permission accessibility"),
+                      "daemon 无 TCC 条目时的登记命令也必须出现（经 launchctl submit 跑 daemon 二进制）")
+        let lowered = report.next.lowercased()
+        guard let at = lowered.range(of: "--grant-accessibility") else {
+            return XCTFail("禁令句不见了：文案必须显式劝阻 --grant-accessibility，否则读者会以为它仍然可用")
+        }
+        XCTAssertTrue(lowered[lowered.startIndex..<at.lowerBound].contains("never"),
+                      "--grant-accessibility 只许出现在 Never/Do NOT 的否定语里")
+    }
+
+    // MARK: - R5-04 证据档案目录的 0700 隔离（SocketServer 同口径）
+
+    private func uniqueHomePath(_ tag: String) -> String {
+        NSHomeDirectory() + "/gp-r504-\(tag)-\(UUID().uuidString.prefix(8))"
+    }
+
+    private func posixMode(of path: String) -> Int {
+        let attributes = (try? FileManager.default.attributesOfItem(atPath: path)) ?? [:]
+        return ((attributes[.posixPermissions] as? NSNumber)?.int16Value).map(Int.init) ?? -1
+    }
+
+    func testFreshHomeArchiveIsCreatedPrivateBeforeFirstPack() throws {
+        let dir = uniqueHomePath("fresh")
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = EvidenceStore(directory: dir, log: EngineLog(quiet: true))
+        XCTAssertTrue(store.write(makeMinimalPack()), "隔离可建立时不得挡写入")
+        XCTAssertEqual(posixMode(of: dir), 0o700, "R5-04：第一份档案落地前档案目录必须私有")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir + "/op_0123456789ABCDEFGHJKMNPQRS.json"))
+    }
+
+    func testPreexistingWorldReadableArchiveIsTightenedThenWritten() throws {
+        // R5-04 的真实形态：~/.glasspane 由 mcp-shell 以默认模式先建，而
+        // createDirectory(attributes:) 对**已存在**目录是 no-op——修复只剩
+        // chmod-after-create 这一条路，此测试把这条路径与"没修"区分开。
+        let dir = uniqueHomePath("tighten")
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        chmod(dir, 0o755)
+        XCTAssertEqual(posixMode(of: dir), 0o755, "前置条件：已存在的共享档案目录")
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let store = EvidenceStore(directory: dir, log: EngineLog(quiet: true))
+        XCTAssertTrue(store.write(makeMinimalPack()))
+        XCTAssertEqual(posixMode(of: dir), 0o700, "写入完成前隔离已被拉回 0700")
+    }
+
+    func testUnprotectableArchivePathRefusesWriteWithoutTouchingExistingData() throws {
+        // 权限建立不起来时的失败形态：拒绝写入（write 返回 false，EngineCore 侧
+        // 现成地呈现为 degraded + "make the evidence directory writable" remedy），
+        // 既不静默继续世界可读地写，也不删掉重来。
+        let planted = uniqueHomePath("planted")
+        FileManager.default.createFile(atPath: planted, contents: Data("precious".utf8))
+        defer { try? FileManager.default.removeItem(atPath: planted) }
+        let store = EvidenceStore(directory: planted, log: EngineLog(quiet: true))
+        XCTAssertFalse(store.write(makeMinimalPack()), "档案路径不是目录时必须拒写")
+        XCTAssertEqual(try? String(contentsOfFile: planted, encoding: .utf8), "precious",
+                       "拒写不得销毁既有数据")
+    }
+
+    // MARK: - A-18 probe.sock 抢占判定（bind → 三态判定 → 只清无主名字）
+
+    private func makeProbeTestPath(_ tag: String) throws -> String {
+        // Keep the full path well inside sockaddr_un's 104-byte sun_path:
+        // NSTemporaryDirectory is already ~60 chars on dev machines.
+        let dir = NSTemporaryDirectory() + "gp-a18-\(tag)-\(UUID().uuidString.prefix(4))"
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        return dir + "/probe.sock"
+    }
+
+    /// 一个占住名字的裸监听 fd：模拟先起 daemon 的 probe.sock（按协议它永不在
+    /// hello 之前回话，所以真实护栏对它用 waitForHello: false）。
+    private func makeStubListener(at path: String) -> Int32? {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        let copied = path.withCString { source -> Bool in
+            withUnsafeMutableBytes(of: &address.sun_path) { destination in
+                guard let base = destination.baseAddress else { return false }
+                _ = strncpy(base.assumingMemoryBound(to: CChar.self), source, destination.count)
+                return true
+            }
+        }
+        guard copied else { close(fd); return nil }
+        let bound = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { rebound in
+                Darwin.bind(fd, rebound, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard bound == 0, listen(fd, 4) == 0 else { close(fd); unlink(path); return nil }
+        return fd
+    }
+
+    func testProbeStartRefusesToStealNameFromLiveListener() throws {
+        let path = try makeProbeTestPath("refuse")
+        let listenerDir = (path as NSString).deletingLastPathComponent
+        defer { unlink(path); try? FileManager.default.removeItem(atPath: listenerDir) }
+        let stubFD = try XCTUnwrap(makeStubListener(at: path))
+        defer { close(stubFD) }
+        let server = ProbeSocketServer(
+            socketPath: path, inbox: ProbeInbox(), log: EngineLog(quiet: true),
+            livenessProbe: { _ in .presentButNotAnswering(reason: "listener accepted the connection") }
+        )
+        XCTAssertThrowsError(try server.start()) { error in
+            guard case ProbeServerError.nameOccupied(let detail) = error else {
+                return XCTFail("被占的名字必须报 nameOccupied（main.swift 据此 Z5-only 降级），实得 \(error)")
+            }
+            XCTAssertTrue(detail.contains("listener accepted"), "拒绝理由必须带上测到的占名者")
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path),
+                      "有主的名字不许被 unlink——这正是 A-18 脑裂的成因")
+    }
+
+    func testProbeStartClearsDemonstrablyUnownedName() throws {
+        // 残留：名字处是个普通文件（bind 必 EADDRINUSE）。判定为 noListener 时必须
+        // 清掉残留并成功 bind——A-18 里合法的另一半：无主的名字本来就该清。
+        // connect 对普通文件的 errno 有平台歧义（ECONNREFUSED/ENOTSOCK 之外的
+        // 分类风险），所以判定注入而非真探；真探侧的三态本身已由
+        // HumanInterventionAuditTests 钉住。
+        let path = try makeProbeTestPath("stale")
+        let listenerDir = (path as NSString).deletingLastPathComponent
+        defer { try? FileManager.default.removeItem(atPath: listenerDir) }
+        FileManager.default.createFile(atPath: path, contents: Data())
+        let server = ProbeSocketServer(
+            socketPath: path, inbox: ProbeInbox(), log: EngineLog(quiet: true),
+            livenessProbe: { _ in .noListener(reason: "connect: connection refused") }
+        )
+        XCTAssertNoThrow(try server.start())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path), "重绑后名字归新监听者")
+        server.stop()
+    }
+
+    func testProbeForceFlagPreemptsWithoutConsultingTheProbe() throws {
+        let path = try makeProbeTestPath("force")
+        let listenerDir = (path as NSString).deletingLastPathComponent
+        defer { try? FileManager.default.removeItem(atPath: listenerDir) }
+        let stubFD = try XCTUnwrap(makeStubListener(at: path))
+        defer { close(stubFD) }
+        var probeWasConsulted = false
+        let server = ProbeSocketServer(
+            socketPath: path, inbox: ProbeInbox(), log: EngineLog(quiet: true),
+            preemptsExistingSocket: true,
+            livenessProbe: { _ in
+                probeWasConsulted = true
+                return .presentButNotAnswering(reason: "must not be reached")
+            }
+        )
+        XCTAssertNoThrow(try server.start(), "--force-probe-socket 就是显式抢占，先赢先用")
+        XCTAssertFalse(probeWasConsulted, "force 路径直接 unlink+bind，不做抢占判定（同 SocketServer）")
+        server.stop()
+    }
 }

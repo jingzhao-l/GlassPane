@@ -15,6 +15,33 @@ public struct ProbeHello: Equatable {
     public let appName: String
     public let probeVersion: String
     public let capabilities: [String]
+    /// The probe's own drop counters, carried since §2.2 so a daemon-side
+    /// "0 handler hits" can be read against what never arrived. **Optional on
+    /// purpose**: a probe that does not report them must not be recorded as
+    /// having dropped nothing — `nil` is "unreported", `0` is a measurement.
+    public let droppedEvents: Int?
+    public let droppedWrites: Int?
+    public let rejectedKeys: Int?
+
+    public init(
+        pid: Int32,
+        bundleId: String? = nil,
+        appName: String,
+        probeVersion: String,
+        capabilities: [String],
+        droppedEvents: Int? = nil,
+        droppedWrites: Int? = nil,
+        rejectedKeys: Int? = nil
+    ) {
+        self.pid = pid
+        self.bundleId = bundleId
+        self.appName = appName
+        self.probeVersion = probeVersion
+        self.capabilities = capabilities
+        self.droppedEvents = droppedEvents
+        self.droppedWrites = droppedWrites
+        self.rejectedKeys = rejectedKeys
+    }
 }
 
 public enum ProbeInboundFrame: Equatable {
@@ -32,6 +59,16 @@ public enum ProbeInboundFrame: Equatable {
 }
 
 public enum ProbeWire {
+
+    /// A drop counter as the wire carries it: absent, or a non-negative integer.
+    /// Anything else comes back `nil` — "unreported" — rather than a number the
+    /// probe never claimed. A frame carrying `"droppedWrites": "many"` must not
+    /// become `0`, because `0` is the assertion that nothing was lost.
+    static func counter(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber else { return nil }
+        let whole = number.intValue
+        return whole >= 0 ? whole : nil
+    }
 
     /// Decode one frame payload (no trailing newline). Never throws: bad
     /// frames come back as `.malformed` so the socket layer can log + skip.
@@ -56,7 +93,10 @@ public enum ProbeWire {
                 bundleId: dict["bundleId"] as? String,
                 appName: appName,
                 probeVersion: probeVersion,
-                capabilities: capabilities
+                capabilities: capabilities,
+                droppedEvents: Self.counter(dict["droppedEvents"]),
+                droppedWrites: Self.counter(dict["droppedWrites"]),
+                rejectedKeys: Self.counter(dict["rejectedKeys"])
             ))
         case "handler":
             guard let file = dict["file"] as? String,

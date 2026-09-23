@@ -3,49 +3,79 @@ import Foundation
 // MARK: - Project Registry (P1 spec v1.4 §1.2)
 
 /// In-memory + file-persisted registry of registered projects.
-/// Atomic write via tmp + rename; file is loaded on init if it exists.
+/// Atomic write via a per-writer unique temp file + `replaceItemAt`; the file is
+/// loaded on init.
+///
+/// B-1 (daemon half, = A-15/R7-05): `save()` serialises the *whole* table, so a
+/// registry that failed to load must never be written — the old shape decoded
+/// with `try?` and returned on failure, which made a damaged projects.json
+/// look like "0 projects" and let the next `create()` replace the file with a
+/// one-entry table, destroying every other registration. The posture is the one
+/// this repo already uses in `ApprovalGate` (`loadFailed`): the table still
+/// loads empty, but the damage is recorded and every destructive write is
+/// refused while it stands.
 public final class ProjectRegistry {
 
-    /// Default path for the projects file.
-    public static let defaultProjectsPath =
-        NSHomeDirectory() + "/.glasspane/projects.json"
+    /// Default path for the projects file: the registry of the home-derived
+    /// state root. Derived from `StateRoot` and not composed here, because the
+    /// home lookup behind it ignores a `HOME` override — the location has to
+    /// have one named source (X-22).
+    public static let defaultProjectsPath = StateRoot.homeDefault().projectsFile
 
     public let filePath: String
     private var projects: [ProjectEntry] = []
-    /// 文件存在但读不回（损坏/截断/字段不符）时为 true。
-    ///
-    /// 没有这个标记时，损坏的 projects.json 会被 `load()` 静默当成"0 个项目"，
-    /// 而紧接着的任何一次 `create()`/`remove()` 就把空表覆写上去——用户的注册项
-    /// 无声丢失，且再也找不回。同仓 `ApprovalGate.loadFailed` 已是这个口径
-    /// （P5 §3.4「不把损坏读成空台账」），两处标准此前不一致，现在对齐：
-    /// 载入失败 → 拒绝覆写，直到进程重启重新读取。
-    ///
-    /// 这个锁**故意不做自动解锁**：调用方此刻内存里是一份"从损坏文件得来的空表"，
-    /// 而磁盘可能已被用户手工修好并装有真实条目。要么自动重读（丢掉本次刚写的
-    /// 那一条），要么照旧覆写（丢掉文件里全部真条目）——两个方向都是无声丢数据，
-    /// 所以唯一诚实的处理是拒绝写入并让人重启进程，让读取和写入来自同一份状态。
+
+    /// True when `filePath` existed but could not be read or decoded. Read
+    /// surfaces (attach/project lookup) must answer "unmeasurable", never
+    /// "no such project"; write surfaces refuse outright.
     public private(set) var loadFailed = false
 
-    /// 路径必须显式给出。这是有意的：`swift test` 曾因默认路径而每次运行都往
-    /// 开发者的真实 `~/.glasspane/projects.json` 里写假项目（审计 A-1，实测造成
-    /// 一次不可恢复的覆盖）。生产侧的"真实路径"只有 `live()` 这一个入口，
-    /// 单测侧则必须注入临时目录（`Tests` 里的 `ephemeralProjectRegistry()`）。
-    public init(filePath: String) {
+    /// Why the load failed, phrased for the agent-facing message.
+    public private(set) var loadFailure: String?
+
+    public init(filePath: String = ProjectRegistry.defaultProjectsPath) {
         self.filePath = filePath
         load()
     }
 
-    /// 生产注册表：`~/.glasspane/projects.json`。仅 daemon 与其一次性 CLI 子命令
-    /// 使用；任何测试构造它都应当被判为缺陷（`ProjectRegistryIsolationTests`）。
+    /// 生产注册表：`~/.glasspane/projects.json`（由 `StateRoot` 派生）。仅 daemon
+    /// 与其一次性 CLI 子命令使用；任何测试构造它都应当被判为缺陷
+    /// （`ProjectRegistryIsolationTests`）。单测侧必须注入临时目录
+    /// （`Tests` 里的 `ephemeralProjectRegistry()`）。
     public static func live() -> ProjectRegistry {
         ProjectRegistry(filePath: defaultProjectsPath)
     }
 
-    /// All registered projects (snapshot).
+    /// A registry over `<stateRoot>/projects.json` — the route `glasspaned`
+    /// takes for every subcommand, so `--state-dir` cannot be honoured by one
+    /// command and missed by another.
+    public convenience init(stateRoot: StateRoot) {
+        self.init(filePath: stateRoot.projectsFile)
+    }
+
+    /// All registered projects (snapshot). Empty when `loadFailed` — check the
+    /// flag before presenting this as "no projects registered".
     public var all: [ProjectEntry] { projects }
 
     /// Current count.
     public var count: Int { projects.count }
+
+    /// The unreadable registry as one agent-facing sentence, or nil when the
+    /// registry is trustworthy. Shared by every refusal so the write side and
+    /// the read side cannot describe the same damage differently.
+    public var unreadableReport: String? {
+        guard loadFailed else { return nil }
+        return "projects.json at \(filePath) \(loadFailure ?? "could not be read")"
+    }
+
+    /// Executable repair path for an unreadable registry. Deliberately does
+    /// **not** mirror the shell's `GLASSPANE_PROJECTS_FORCE_OVERWRITE` escape
+    /// hatch: that variable is only parsed by `mcp-shell` (R7-14), and the
+    /// daemon-side equivalent — move the damaged file aside yourself — needs no
+    /// second hidden mode to keep the registrations recoverable.
+    public var unreadableRemedy: String {
+        "repair that file before anything writes to it again: print it with `python3 -m json.tool \(filePath)`, fix or restore the damaged entry, then restart the background service so it reloads the registry (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`). To rebuild the registry from scratch instead — which costs every entry still in the unreadable file — move it aside first (`mv \(filePath) \(filePath).corrupt`) and retry."
+    }
 
     /// Lookup by project ID.
     public func get(_ projectId: String) -> ProjectEntry? {
@@ -63,6 +93,7 @@ public final class ProjectRegistry {
         evidenceStoragePath: String? = nil,
         now: () -> Date = { Date() }
     ) throws -> ProjectEntry {
+        try requireWritable()
         guard projects.count < ProjectEntry.maxProjects else {
             throw GPError(
                 code: .projectLimit,
@@ -94,13 +125,13 @@ public final class ProjectRegistry {
             evidenceStoragePath: evidenceStoragePath,
             createdAt: isoString(now())
         )
-        // 先落盘、成功后才改内存：`projects.remove(at:)` 先行的话，一旦写入抛错
-        // 内存里就没有了这条而磁盘上还在——长驻的 daemon 会带着这份幻影继续
-        // 应答（`--project-prune` 的 pruned 计数也正是从这里读的）。
-        var candidate = projects
-        candidate.append(entry)
-        try save(candidate)
-        projects = candidate
+        projects.append(entry)
+        do {
+            try save()
+        } catch {
+            projects.removeLast()
+            throw error
+        }
         return entry
     }
 
@@ -115,13 +146,16 @@ public final class ProjectRegistry {
         calibrationAssetsPath: String? = nil,
         evidenceStoragePath: String? = nil
     ) throws -> ProjectEntry {
+        try requireWritable()
         guard let index = projects.firstIndex(where: { $0.projectId == projectId }) else {
             throw GPError(
                 code: .notFound,
                 message: "unknown projectId \(projectId)"
             )
         }
-        var candidate = projects
+        // Snapshotted before the first mutation, so a failed write cannot leave
+        // an entry that only exists in this process.
+        let previous = projects
         if let displayName {
             guard !displayName.isEmpty else {
                 throw GPError(code: .badParams, message: "displayName must not be empty")
@@ -132,119 +166,185 @@ public final class ProjectRegistry {
                     message: "displayName exceeds \(ProjectEntry.maxDisplayNameLength) characters"
                 )
             }
-            candidate[index].displayName = displayName
+            projects[index].displayName = displayName
         }
-        if let bundleId { candidate[index].bundleId = bundleId }
-        if let pid { candidate[index].pid = pid }
-        if let recipeConfigPath { candidate[index].recipeConfigPath = recipeConfigPath }
-        if let calibrationAssetsPath { candidate[index].calibrationAssetsPath = calibrationAssetsPath }
-        if let evidenceStoragePath { candidate[index].evidenceStoragePath = evidenceStoragePath }
-        let entry = candidate[index]
-        try save(candidate)
-        projects = candidate
+        if let bundleId { projects[index].bundleId = bundleId }
+        if let pid { projects[index].pid = pid }
+        if let recipeConfigPath { projects[index].recipeConfigPath = recipeConfigPath }
+        if let calibrationAssetsPath { projects[index].calibrationAssetsPath = calibrationAssetsPath }
+        if let evidenceStoragePath { projects[index].evidenceStoragePath = evidenceStoragePath }
+        let entry = projects[index]
+        do {
+            try save()
+        } catch {
+            projects = previous
+            throw error
+        }
         return entry
     }
 
     /// Remove a project by ID. Returns true if found and removed.
     @discardableResult
     public func remove(_ projectId: String) throws -> Bool {
+        try requireWritable()
         guard let index = projects.firstIndex(where: { $0.projectId == projectId }) else {
             throw GPError(
                 code: .notFound,
                 message: "unknown projectId \(projectId)"
             )
         }
-        var candidate = projects
-        candidate.remove(at: index)
-        try save(candidate)
-        projects = candidate
+        let previous = projects
+        projects.remove(at: index)
+        do {
+            try save()
+        } catch {
+            projects = previous
+            throw error
+        }
         return true
     }
 
     // MARK: - Persistence
 
+    /// Loads the registry. A missing file is "nothing registered yet"; an
+    /// existing file that cannot be read or decoded is recorded as
+    /// `loadFailed` (§B-1) instead of being returned as an empty table.
     private func load() {
         guard FileManager.default.fileExists(atPath: filePath) else { return }
-        guard let data = FileManager.default.contents(atPath: filePath) else {
-            loadFailed = true
-            return
-        }
-        guard let decoded = try? JSONDecoder().decode([ProjectEntry].self, from: data) else {
-            loadFailed = true
-            return
-        }
-        projects = decoded
-    }
-
-    /// 写入的是 `candidate`（还没生效的那份表），成功之后调用方才 adopt 它——
-    /// 失败时内存状态保持与磁盘一致，长驻的 daemon 不会带着幻影条目继续应答。
-    ///
-    /// 载入失败即拒绝覆写（否则一次写入就把全部注册项抹平）。三条都是
-    /// "报成功之前先确认真的成功了"：编码失败、写入失败不再被 `try?` 咽掉
-    /// （此前 `create()` 会在什么都没落盘的情况下返回成功）；写完读回比对
-    /// （磁盘满/权限改过/替换中断，都只会让 `write` 不抛错而内容不对）；
-    /// `replaceItemAt` 留下的备份件必须清掉，否则每次写入都在目录里留一份
-    /// 含全部注册项的旧副本。
-    private func save(_ candidate: [ProjectEntry]) throws {
-        guard !loadFailed else {
-            throw GPError(
-                code: .internalError,
-                message: "registry at \(filePath) exists but could not be decoded; refusing to overwrite it, because this process is holding an empty table read from that unreadable file. Remedy: make the file readable again (restore it from a copy), then restart the background service so it re-reads: `node <repo>/installer/cli.js --restore-launchd`, or the restart button in the GlassPane panel. Writes stay refused until the process restarts."
-            )
-        }
         let data: Data
         do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-            data = try encoder.encode(candidate)
+            data = try Data(contentsOf: URL(fileURLWithPath: filePath))
         } catch {
-            throw GPError(
-                code: .internalError,
-                message: "could not encode registry (\(candidate.count) entries) for \(filePath): \(error.localizedDescription)"
-            )
+            loadFailed = true
+            loadFailure = "cannot be read (\(error))"
+            return
         }
-        // Atomic write: tmp + rename (same filesystem ⇒ atomic on macOS).
-        // 临时文件名必须唯一：daemon 与一次性 CLI 进程共用同一个 projects.json，
-        // 固定的 ".tmp" 后缀会让两个写入者互相踩对方的中间文件。
-        let tmpPath = filePath + ".\(UUID().uuidString).tmp"
-        let destination = URL(fileURLWithPath: filePath)
         do {
-            try data.write(to: URL(fileURLWithPath: tmpPath), options: [.atomic])
-            if let backup = try? FileManager.default.replaceItemAt(
-                destination,
-                withItemAt: URL(fileURLWithPath: tmpPath)
-            ), backup != destination {
-                // 被换下来的原件以备份名留在原地；留着它就是留一份旧注册表副本。
-                try? FileManager.default.removeItem(at: backup)
-            } else {
-                // replaceItemAt 失败：中间文件必须清掉，不能留下 .tmp 让下次写入踩到。
-                try? FileManager.default.removeItem(atPath: tmpPath)
-                try data.write(to: destination, options: [.atomic])
-            }
+            projects = try JSONDecoder().decode([ProjectEntry].self, from: data)
         } catch {
-            try? FileManager.default.removeItem(atPath: tmpPath)
-            throw GPError(
-                code: .internalError,
-                message: "could not write registry to \(filePath): \(error.localizedDescription)"
-            )
+            // The table stays empty on purpose (ApprovalGate's posture), but the
+            // flag makes "empty" mean "unreadable" everywhere it is used.
+            loadFailed = true
+            loadFailure = "is not a decodable project list (\(error))"
         }
-        try verifySaved(data, to: filePath)
     }
 
-    /// 读回校验：文件里的字节必须与刚编码出的那份一致。
-    /// 不一致即抛错——注册表的语义是"这条注册项已经存好了"，说成了却没存就是
-    /// 在审计面上撒谎。
-    private func verifySaved(_ data: Data, to path: String) throws {
-        guard FileManager.default.fileExists(atPath: path) else {
-            throw GPError(code: .internalError, message: "registry write reported no error but \(path) does not exist")
-        }
-        guard let onDisk = FileManager.default.contents(atPath: path) else {
-            throw GPError(code: .internalError, message: "registry written but \(path) could not be read back for verification")
-        }
-        guard onDisk == data else {
+    /// Refuses a whole-file rewrite while the previous load failed: `save()`
+    /// writes exactly what is in memory, so the write would replace a damaged
+    /// but recoverable file with the handful of entries this process holds.
+    private func requireWritable() throws {
+        guard loadFailed else { return }
+        throw GPError(
+            code: .internalError,
+            message: "\(unreadableReport ?? "projects.json exists but could not be decoded") — refusing to overwrite it, because this process is holding an empty table read from that unreadable file (writing it would replace every stored registration with the \(projects.count) entry/entries this process holds). Writes stay refused until the process restarts. Remedy: make the file readable again (restore it from a copy), then restart the background service so it re-reads: `node <repo>/installer/cli.js --restore-launchd`, or the restart button in the GlassPane panel.",
+            remedy: unreadableRemedy
+        )
+    }
+
+    /// Atomic write: a unique temp file, then `replaceItemAt`. Throws when the
+    /// registry did not reach the disk — an in-memory-only table disappears at
+    /// the next restart while every caller was just told the write succeeded.
+    private func save() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let data: Data
+        do {
+            data = try encoder.encode(projects)
+        } catch {
             throw GPError(
                 code: .internalError,
-                message: "registry write did not land: \(path) holds \(onDisk.count) bytes, expected \(data.count)"
+                message: "the project registry could not be encoded (\(error)); nothing was written to \(filePath)",
+                remedy: "this is a daemon-side defect, not a parameter problem: report the registry fields you passed (displayName/bundleId/pid and the three paths) — one of them carries a value the encoder rejected — and re-run after fixing it"
+            )
+        }
+        let destination = URL(fileURLWithPath: filePath)
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        // The temp name is unique per write: three processes rewrite this file
+        // (the daemon, the one-shot CLI and the Node shell), and a shared
+        // `<file>.tmp` lets one writer rename another's half-written buffer
+        // into place.
+        let tmpPath = "\(filePath).tmp-\(getpid())-\(UUID().uuidString)"
+        let tmpURL = URL(fileURLWithPath: tmpPath)
+        do {
+            try data.write(to: tmpURL)
+            // The registry lists every project this machine may act on, with
+            // paths and bundle ids; the umask default (`0644`) made it readable
+            // by every local account (R5-04). Tightened while it is still the
+            // temp file, so the published name is never world-readable.
+            if let defect = StateRoot.isolateFile(at: tmpPath) {
+                throw GPError(
+                    code: .internalError,
+                    message: "the project registry temp file \(tmpPath) could not be made owner-only: \(defect); nothing was published to \(filePath)",
+                    remedy: "the directory holding \(filePath) is on a volume that ignores chmod (read-only mount, ACL or immutable flag): make the directory owner-only writable, or move the state root with --state-dir to one that honors permissions; the registry was not written either way"
+                )
+            }
+            // `replaceItemAt` is the primitive this repo already uses for
+            // registry/approval-ledger writes: it moves the temp item into
+            // place and hands back the previous contents as a backup URL.
+            let backup = try FileManager.default.replaceItemAt(destination, withItemAt: tmpURL)
+            // Drop only a *genuinely different* superseded copy. On a first write
+            // (no previous file) the URL handed back can name the item that was
+            // just placed; removing it silently destroyed the write while every
+            // caller was told it succeeded (regression caught by the roundtrip
+            // suite on 2026-09-23). `.orig` litter must never cost data.
+            if let backup,
+               backup.standardizedFileURL.path != destination.standardizedFileURL.path {
+                try? FileManager.default.removeItem(at: backup)
+            }
+            // Belt: the table has to be readable back off disk before the caller
+            // hears "saved" — an in-memory-only registry is invisible to the next
+            // process and evaporates on restart.
+            try verifySaved(destination, expecting: projects.count)
+        } catch {
+            // No silent fallback write: the caller hears that the registry did
+            // not reach disk, and our own half-written temp file is removed (or
+            // the removal failure is reported inline rather than swallowed).
+            var litter = ""
+            if FileManager.default.fileExists(atPath: tmpPath) {
+                do {
+                    try FileManager.default.removeItem(atPath: tmpPath)
+                } catch let cleanupError {
+                    litter = "; the partial temporary file \(tmpPath) could not be removed either (\(cleanupError))"
+                }
+            }
+            throw GPError(
+                code: .internalError,
+                message: "project registry write to \(filePath) failed (\(error)); the file on disk is unchanged and the change was rolled back in memory\(litter)",
+                remedy: "check that the directory is writable and has free space (`ls -ld \(destination.deletingLastPathComponent().path)`, `df -k \(destination.deletingLastPathComponent().path)`), fix it, then repeat the call — until then the registry in the running daemon and the file disagree"
+            )
+        }
+    }
+
+    /// Read the live file back and refuse to claim success when it does not hold
+    /// what was just written. An in-memory-only table is invisible to the next
+    /// process (and to `attach`, which resolves projectId against the reloaded
+    /// registry), so "saved" has to mean "readable from disk".
+    private func verifySaved(_ destination: URL, expecting count: Int) throws {
+        let data: Data
+        do {
+            data = try Data(contentsOf: destination)
+        } catch {
+            throw GPError(
+                code: .internalError,
+                message: "the project registry write to \(filePath) did not land: the file cannot be read back (\(error)); the \(count) entry/entries exist only in this process",
+                remedy: "check the directory (`ls -ld \(destination.deletingLastPathComponent().path)`, `df -k \(destination.deletingLastPathComponent().path)`); the write must be retried before any caller relies on this registration"
+            )
+        }
+        guard let decoded = try? JSONDecoder().decode([ProjectEntry].self, from: data) else {
+            throw GPError(
+                code: .internalError,
+                message: "the project registry at \(filePath) was written but does not decode (\(data.count) bytes); this process's table and the file are now different representations",
+                remedy: "inspect the file (`python3 -m json.tool \(filePath)`); until it decodes, restart the background service so no process trusts an in-memory-only registry"
+            )
+        }
+        guard decoded.count == count else {
+            throw GPError(
+                code: .internalError,
+                message: "the project registry write to \(filePath) reads back \(decoded.count) entry/entries instead of \(count)",
+                remedy: "another writer likely replaced the file concurrently; re-read the registry (`glasspaned --list-projects`) before repeating the change"
             )
         }
     }

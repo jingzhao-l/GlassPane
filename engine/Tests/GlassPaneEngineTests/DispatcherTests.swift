@@ -187,4 +187,191 @@ final class DispatcherTests: XCTestCase {
         XCTAssertEqual(result["bye"] as? Bool, true)
         XCTAssertTrue(dispatcher.core.shutdownRequested)
     }
+
+    // MARK: - attach.pid range (R2-01)
+
+    /// A `pid` of 3000000000 passes the integrality check but traps the
+    /// `pid_t` (Int32) narrowing conversion in the dispatcher: one advertised
+    /// frame shape used to kill glasspaned. It must answer, not die.
+    func testAttachWithOutOfRangePidAnswersBadParams() throws {
+        for badPid in [0, -1, 2_147_483_648, 3_000_000_000, 9_223_372_036_854_775_806] {
+            let response = try perform(
+                "{\"id\":2,\"method\":\"attach\",\"params\":{\"pid\":\(badPid)}}"
+            )
+            let error = try self.error(of: response)
+            XCTAssertEqual(
+                error["code"] as? String, "GP_E_BAD_PARAMS",
+                "pid \(badPid) is out of the pid_t range and must be rejected"
+            )
+            XCTAssertEqual(
+                response["id"] as? Int, 2,
+                "the rejection still has to answer the requesting frame"
+            )
+        }
+    }
+
+    /// The range guard must not swallow legitimate pids.
+    func testAttachWithInBoundsPidStillWorks() throws {
+        let response = try perform("{\"id\":2,\"method\":\"attach\",\"params\":{\"pid\":4242}}")
+        XCTAssertNotNil(response["result"])
+        XCTAssertNil(response["error"])
+        XCTAssertEqual(channel.attachCallCount, 1)
+    }
+
+    // MARK: - operationId shape (B-10)
+
+    /// `operationId` names an on-disk evidence file downstream; snapshot ids
+    /// were pattern-checked, this one was only length-checked.
+    func testOperationIdMustMatchTheOpUlidShape() throws {
+        try attach()
+        let traversal = "../../../../etc/passwd"
+        let evidence = try perform(
+            "{\"id\":14,\"method\":\"last_evidence\",\"params\":{\"operationId\":\"\(traversal)\"}}"
+        )
+        let evidenceError = try error(of: evidence)
+        XCTAssertEqual(evidenceError["code"] as? String, "GP_E_BAD_PARAMS")
+        XCTAssertTrue(
+            (evidenceError["message"] as? String)?.contains("operationId") == true,
+            "the message has to name the offending field: \(evidenceError["message"] ?? "nil")"
+        )
+
+        let diagnose = try perform(
+            "{\"id\":13,\"method\":\"diagnose\",\"params\":{\"operationId\":\"op_1\"}}"
+        )
+        XCTAssertEqual(try error(of: diagnose)["code"] as? String, "GP_E_BAD_PARAMS")
+    }
+
+    /// Ids the daemon mints itself must keep round-tripping through the gate.
+    func testGeneratedOperationIdStillRoundTripsThroughValidation() throws {
+        try attach()
+        let actResponse = try perform(
+            "{\"id\":10,\"method\":\"act\",\"params\":{\"selector\":{\"role\":\"AXButton\",\"title\":\"Submit\"},\"action\":\"press\"}}"
+        )
+        let actResult = try XCTUnwrap(actResponse["result"] as? [String: Any])
+        let operationId = try XCTUnwrap(actResult["operationId"] as? String)
+
+        let evidence = try perform(
+            "{\"id\":14,\"method\":\"last_evidence\",\"params\":{\"operationId\":\"\(operationId)\"}}"
+        )
+        XCTAssertNil(evidence["error"])
+        let pack = try XCTUnwrap((evidence["result"] as? [String: Any])?["evidencePack"] as? [String: Any])
+        XCTAssertEqual(pack["operationId"] as? String, operationId)
+
+        let diagnose = try perform(
+            "{\"id\":13,\"method\":\"diagnose\",\"params\":{\"operationId\":\"\(operationId)\"}}"
+        )
+        XCTAssertNotNil(diagnose["result"])
+    }
+
+    // MARK: - assert expected cap (R5-05)
+
+    /// `expected` is persisted into every evidence pack and re-emitted by
+    /// exports; every sibling field had a length cap except this one.
+    func testAssertExpectedHonorsTheSelectorLengthCap() throws {
+        try attach()
+        let seed = try perform(
+            "{\"id\":10,\"method\":\"act\",\"params\":{\"selector\":{\"role\":\"AXButton\",\"title\":\"Submit\"},\"action\":\"press\"}}"
+        )
+        XCTAssertNotNil(seed["result"])
+
+        let atCap = String(repeating: "e", count: ParamValidation.expectedMaxLength)
+        let overCap = String(repeating: "e", count: ParamValidation.expectedMaxLength + 1)
+        let accepted = try perform(
+            "{\"id\":12,\"method\":\"assert_element\",\"params\":{\"selector\":{\"role\":\"AXButton\"},\"property\":\"title\",\"expected\":\"\(atCap)\"}}"
+        )
+        XCTAssertNotNil(accepted["result"], "\(atCap.count) characters must still pass")
+
+        let rejected = try perform(
+            "{\"id\":12,\"method\":\"assert_element\",\"params\":{\"selector\":{\"role\":\"AXButton\"},\"property\":\"title\",\"expected\":\"\(overCap)\"}}"
+        )
+        XCTAssertEqual(try error(of: rejected)["code"] as? String, "GP_E_BAD_PARAMS")
+    }
+
+    // MARK: - restore.mode closed set (R5-08)
+
+    func testRestoreRejectsModesTheDaemonDoesNotImplement() throws {
+        try attach()
+        let snapshotId = try takeSnapshotId()
+        for bogusMode in ["full-snapshot", "compare-and-restore", "human-approved 2026-09-22"] {
+            let response = try perform(
+                "{\"id\":20,\"method\":\"restore\",\"params\":{\"snapshotId\":\"\(snapshotId)\",\"mode\":\"\(bogusMode)\"}}"
+            )
+            XCTAssertEqual(
+                try error(of: response)["code"] as? String, "GP_E_BAD_PARAMS",
+                "mode '\(bogusMode)' is not one the daemon implements"
+            )
+        }
+    }
+
+    /// The whitelist must not eat the spec'd honest boundaries: the two
+    /// implemented tier-1 modes still reach EngineCore and still answer
+    /// GP_E_RESTORE_UNSUPPORTED (no probe payload in this core).
+    func testRestoreKeepsTheImplementedModesHonest() throws {
+        try attach()
+        let snapshotId = try takeSnapshotId()
+        for mode in ["restore_snapshot", "rollback_full"] {
+            let response = try perform(
+                "{\"id\":20,\"method\":\"restore\",\"params\":{\"snapshotId\":\"\(snapshotId)\",\"mode\":\"\(mode)\"}}"
+            )
+            XCTAssertEqual(
+                try error(of: response)["code"] as? String, "GP_E_RESTORE_UNSUPPORTED",
+                "mode '\(mode)' must stay a restore verdict, not a params verdict"
+            )
+        }
+        let compare = try perform(
+            "{\"id\":21,\"method\":\"restore\",\"params\":{\"snapshotId\":\"\(snapshotId)\",\"mode\":\"compare\"}}"
+        )
+        XCTAssertNotNil(compare["result"])
+    }
+
+    // MARK: - outbound frame cap (R6-02 / B-13)
+
+    /// The 4 MiB cap covers both directions (P0 §3.1). An oversized observe
+    /// answer must come back as GP_E_PAYLOAD_TOO_LARGE carrying the real
+    /// request id — never as an over-cap line that desynchronizes the shell.
+    func testOversizedResponseAnswersPayloadTooLargeWithRealId() throws {
+        try attach()
+        let heavyLeaf = AxNode(role: "AXStaticText", title: String(repeating: "x", count: 12_000))
+        channel.fallbackTree = TestTrees.snapshot([
+            AxNode(role: "AXWindow", title: "Big", children: Array(repeating: heavyLeaf, count: 400))
+        ])
+
+        let raw = dispatcher.handle(
+            .frame(Data("{\"id\":77,\"method\":\"observe\",\"params\":{\"maxDepth\":10}}".utf8))
+        )
+        XCTAssertLessThanOrEqual(
+            raw.count, FrameCodec.maxFrameBytes,
+            "the daemon must never emit a frame past the cap"
+        )
+        XCTAssertEqual(raw.count { $0 == 0x0A }, 1, "exactly one answer line")
+
+        let object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: raw, options: []) as? [String: Any]
+        )
+        XCTAssertEqual(object["id"] as? Int, 77, "the fallback frame must carry the request id")
+        let error = try XCTUnwrap(object["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? String, "GP_E_PAYLOAD_TOO_LARGE")
+        let message = try XCTUnwrap(error["message"] as? String)
+        XCTAssertTrue(
+            message.contains("maxDepth"),
+            "the agent needs the shrink instruction, not just a size: \(message)"
+        )
+        XCTAssertEqual(error["remedy"] as? String, GPError.remedy(for: .payloadTooLarge))
+    }
+
+    /// A response that fits is untouched by the cap check.
+    func testInBoundsResponseStillCarriesItsResult() throws {
+        try attach()
+        let response = try perform("{\"id\":78,\"method\":\"observe\",\"params\":{\"maxDepth\":10}}")
+        XCTAssertEqual(response["id"] as? Int, 78)
+        let result = try XCTUnwrap(response["result"] as? [String: Any])
+        XCTAssertEqual(result["nodeCount"] as? Int, 4)
+        XCTAssertNil(response["error"])
+    }
+
+    private func takeSnapshotId() throws -> String {
+        let response = try perform("{\"id\":19,\"method\":\"snapshot\",\"params\":{\"maxDepth\":6}}")
+        let result = try XCTUnwrap(response["result"] as? [String: Any])
+        return try XCTUnwrap(result["snapshotId"] as? String)
+    }
 }
