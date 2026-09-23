@@ -1203,6 +1203,15 @@ public final class EngineCore {
             // reader cannot treat a dropped probe as an attached one; the drop
             // history — with its reason and per-pid counts — rides its own key.
             payload["recentDisconnections"] = inbox.recentDisconnectionsJSON()
+            // X-3, closed: a state frame whose `source` token this daemon cannot
+            // map is counted process-wide, and until now the count had no reader
+            // at all — the same class of defect as a `hitCount: 0` that silently
+            // includes frames that never arrived. Per-pid rows carry
+            // `stateFramesUnmappedSource` (only when non-zero); this is the total
+            // that survives a probe disconnecting, and it is a *daemon-side*
+            // measurement, so unlike the probe's own counters it is never
+            // absent.
+            payload["unmapableStateFrames"] = inbox.unmapableStateFrameCount
         }
         return payload
     }

@@ -16,6 +16,15 @@ final class ApprovalGateTests: XCTestCase {
         ApprovalGate(path: path, clock: { date })
     }
 
+    /// Every ledger file this file creates lives inside `TestSandbox`, so the
+    /// isolation verdict is computed before a path can be written to. The older
+    /// shape composed `FileManager.default.temporaryDirectory` by hand here, which
+    /// is a route around the gate that exists because one `swift test` run took
+    /// the unbypassed version of it into the developer's real `~/.glasspane`.
+    private func makeTempDir(_ label: String) throws -> URL {
+        URL(fileURLWithPath: TestSandbox.directory(label))
+    }
+
     /// Appends `count` deterministic records (operationRef = "op-\(n)").
     private func appendChain(_ gate: ApprovalGate, count: Int) -> [ApprovalRecord] {
         var appended: [ApprovalRecord] = []
@@ -173,9 +182,7 @@ final class ApprovalGateTests: XCTestCase {
     /// anchor; the realistic attack path is truncation-then-append, which this
     /// test covers.)
     func testTruncationThenSpliceBreaksChain() throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("approval-truncation-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dir = try makeTempDir("approval-truncation")
         defer { try? FileManager.default.removeItem(at: dir) }
         let fileURL = dir.appendingPathComponent("approvals.json")
 
@@ -223,12 +230,49 @@ final class ApprovalGateTests: XCTestCase {
         XCTAssertEqual(verdict.firstBrokenIndex, 2)
     }
 
+    /// R6-07, stated as what it is: P5 §3.7 and the P5-A2 acceptance row claimed
+    /// "截断链尾 → invalid" as delivered, and no hash chain can deliver that — a
+    /// truncated chain re-verifies from genesis, so the claim was false as written.
+    /// The fix is the honest one: the surface publishes the two values that make
+    /// a shrinkage observable across runs (`count`, `tailHash`), and this test
+    /// pins both halves — replay genuinely cannot see the cut, and the published
+    /// pair genuinely can. An anchor file next to the ledger would have "fixed"
+    /// neither: whoever can rewrite `approvals.json` can delete the anchor too,
+    /// which is exactly the same-account threat model `SECURITY.md` declares.
+    func testPureTailCutIsUndetectableByReplayAndDetectableByComparison() throws {
+        let dir = try makeTempDir("approval-tailcut")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("approvals.json")
+
+        let gate = makeGate(path: fileURL.path)
+        let records = appendChain(gate, count: 4)
+        let beforeCount = gate.count
+        let beforeTail = gate.tailHash()
+        XCTAssertEqual(beforeCount, 4)
+        XCTAssertEqual(beforeTail, records.last?.hash)
+
+        // Cut the tail and rewrite the file — no appended record, so nothing is
+        // spliced and every remaining link still matches its predecessor.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(Array(records.dropLast(2))).write(to: fileURL)
+
+        let reloaded = makeGate(path: fileURL.path)
+        XCTAssertTrue(
+            reloaded.verifyChain().valid,
+            "premise of this test: replay alone must NOT flag a pure tail cut, or the spec claim would not have been wrong"
+        )
+        XCTAssertNotEqual(reloaded.count, beforeCount, "the published count moves")
+        XCTAssertNotEqual(reloaded.tailHash(), beforeTail, "…and so does the published tail")
+        // The pair is what an agent compares; `count` alone would let a cut-and-
+        // regrow attack through with the same length but a different end.
+        XCTAssertEqual(reloaded.count, 2)
+    }
+
     // MARK: - P5-A3 persistence
 
     func testPersistenceRoundtrip() throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("approval-roundtrip-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dir = try makeTempDir("approval-roundtrip")
         defer { try? FileManager.default.removeItem(at: dir) }
         let fileURL = dir.appendingPathComponent("approvals.json")
 
@@ -242,9 +286,7 @@ final class ApprovalGateTests: XCTestCase {
     }
 
     func testCorruptFileLoadsEmptyLedger() throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("approval-corrupt-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dir = try makeTempDir("approval-corrupt")
         defer { try? FileManager.default.removeItem(at: dir) }
         let fileURL = dir.appendingPathComponent("approvals.json")
         try Data("{not valid json".utf8).write(to: fileURL)
@@ -256,9 +298,7 @@ final class ApprovalGateTests: XCTestCase {
     }
 
     func testAtomicWriteLeavesNoTmpResidue() throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("approval-tmp-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dir = try makeTempDir("approval-tmp")
         defer { try? FileManager.default.removeItem(at: dir) }
         let fileURL = dir.appendingPathComponent("approvals.json")
 

@@ -186,11 +186,13 @@ public final class SocketServer {
     /// and every evidence archive, approval chain and registry entry becomes
     /// readable from other accounts on the machine.
     ///
-    /// Enforcement is scoped to private directories under the user's home. For a
-    /// socket path outside home (isolated smoke runs such as
-    /// `/tmp/glasspane-p6/engine.sock`) tightening a directory we do not own is
-    /// not ours to do, so that case logs the honest gap instead of pretending
-    /// the invariant holds.
+    /// Enforcement is scoped to **ownership, not home membership**: the checks
+    /// below (`chmod`, owner, resulting mode) are what decide it, and all
+    /// three answer correctly for a directory outside home. The rule used to
+    /// exempt paths outside `NSHomeDirectory()` — and since `--state-dir` lets a
+    /// run place its sockets anywhere, that exemption was the one shape most in
+    /// need of isolation (a maintenance run under `/var/folders` or `/tmp`)
+    /// skipping it while still binding the socket.
     private func prepareSocketDirectory() throws {
         let directory = (socketPath as NSString).deletingLastPathComponent
         guard !directory.isEmpty else { return }
@@ -200,9 +202,8 @@ public final class SocketServer {
             attributes: [.posixPermissions: 0o700]
         )
         let home = NSHomeDirectory()
-        guard directory != home, directory.hasPrefix(home + "/") else {
-            log.error("socket directory \(directory) is outside \(home) — per-user isolation (0700) is NOT enforced for this path")
-            return
+        if directory != home, !directory.hasPrefix(home + "/") {
+            log.info("socket directory \(directory) is outside \(home) — isolating it by ownership, not by home scope")
         }
         guard chmod(directory, 0o700) == 0 else {
             throw SocketErrorResponse.system(errno, "chmod(0700) \(directory)")

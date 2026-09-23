@@ -7,9 +7,10 @@ final class ProjectRegistryTests: XCTestCase {
     // MARK: - Helpers
 
     private func tempFilePath() -> String {
-        let dir = NSTemporaryDirectory()
-        let name = "glasspane-test-\(UUID().uuidString).json"
-        return (dir as NSString).appendingPathComponent(name)
+        // Same shape as before (a unique, not-yet-existing `.json` path under a
+        // created parent), routed through `TestSandbox` so the isolation
+        // predicate runs on it — see `TestSupport.swift`.
+        TestSandbox.filePath("registry")
     }
 
     private var testDate: Date {

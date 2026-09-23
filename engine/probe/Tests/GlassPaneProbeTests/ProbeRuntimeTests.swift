@@ -213,6 +213,10 @@ final class ProbeRuntimeTests: XCTestCase {
         XCTAssertEqual(hello["capabilities"] as? [String], ["z1"])
         XCTAssertNotNil(hello["droppedEvents"], "the registration must carry its loss counters")
         XCTAssertNotNil(hello["droppedWrites"])
+        // X-3: refused KVC/state registrations ride the same frame, because a
+        // daemon that never learns them reports "state never changed" for a
+        // probe that was never told to watch anything.
+        XCTAssertEqual(hello["rejectedKeys"] as? Int, 0, "a clean registration reports zero, and the daemon can tell that from silence")
 
         // A capability registered after the connection was accepted.
         final class Model: NSObject { @objc dynamic var count = 0 }

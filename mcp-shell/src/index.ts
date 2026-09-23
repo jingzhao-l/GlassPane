@@ -6,9 +6,9 @@ import { INVALID_REQUEST, JSONRPC, McpServer, SERVER_INFO } from "./dispatch.js"
 import {
   defaultSocketPath,
   EngineJsonRpcClient,
-  GP_E_PAYLOAD_TOO_LARGE,
   unixSocketEngineClient,
 } from "./engine-client.js";
+import { GP_E_PAYLOAD_TOO_LARGE } from "./errors.js";
 import {
   DrainAwareWriter,
   LineReader,

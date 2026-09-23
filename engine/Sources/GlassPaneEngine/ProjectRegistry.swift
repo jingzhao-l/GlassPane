@@ -262,6 +262,17 @@ public final class ProjectRegistry {
         let tmpURL = URL(fileURLWithPath: tmpPath)
         do {
             try data.write(to: tmpURL)
+            // The registry lists every project this machine may act on, with
+            // paths and bundle ids; the umask default (`0644`) made it readable
+            // by every local account (R5-04). Tightened while it is still the
+            // temp file, so the published name is never world-readable.
+            if let defect = StateRoot.isolateFile(at: tmpPath) {
+                throw GPError(
+                    code: .internalError,
+                    message: "the project registry temp file \(tmpPath) could not be made owner-only: \(defect); nothing was published to \(filePath)",
+                    remedy: "the directory holding \(filePath) is on a volume that ignores chmod (read-only mount, ACL or immutable flag): make the directory owner-only writable, or move the state root with --state-dir to one that honors permissions; the registry was not written either way"
+                )
+            }
             // `replaceItemAt` is the primitive this repo already uses for
             // registry/approval-ledger writes: it moves the temp item into
             // place and hands back the previous contents as a backup URL.

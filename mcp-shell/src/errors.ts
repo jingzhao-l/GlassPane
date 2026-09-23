@@ -10,6 +10,18 @@ export const GP_E_INTERNAL = "GP_E_INTERNAL";
 export const GP_E_PROJECT_LIMIT = "GP_E_PROJECT_LIMIT";
 export const GP_E_NOT_FOUND = "GP_E_NOT_FOUND";
 
+/**
+ * Codes this shell raises for itself, in one place so a string literal cannot
+ * exist twice with different spellings (X-15). They are **not** daemon codes:
+ * the daemon's `GPErrorCode` enum has no counterpart for either, because both
+ * describe a failure of the shell↔engine connection rather than of a request —
+ * a deadline this process chose to stop waiting on, and a frame too large to
+ * put on the wire. An agent must be able to tell those apart from a daemon
+ * error, and the daemon's own vocabulary is the only place that could add them.
+ */
+export const GP_E_ENGINE_TIMEOUT = "GP_E_ENGINE_TIMEOUT";
+export const GP_E_PAYLOAD_TOO_LARGE = "GP_E_PAYLOAD_TOO_LARGE";
+
 export interface ToolErrorText {
   code: string;
   message: string;

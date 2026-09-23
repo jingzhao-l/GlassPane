@@ -42,10 +42,11 @@ final class EngineP1Batch7Tests: XCTestCase {
         )
     }
 
+    /// `TestSandbox` rather than a hand-composed temp path: the sandbox is where
+    /// the isolation verdict is computed *before* a store can be pointed at a
+    /// directory, and its creation failure is reported instead of swallowed.
     private func tempDir() -> String {
-        let dir = NSTemporaryDirectory() + "/gpb7-" + UUID().uuidString
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        return dir
+        TestSandbox.directory("gpb7")
     }
 
     private func groupURL(_ base: String) -> URL {

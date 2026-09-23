@@ -239,6 +239,15 @@ public final class EvidenceStore {
         let tmpPath = filePath + ".tmp"
         do {
             try data.write(to: URL(fileURLWithPath: tmpPath), options: .atomic)
+            // Owner-only *before* the rename, so an evidence pack is never — not
+            // even briefly — readable by another local account. The archive is
+            // the audit trail the panel and `gp_export_evidence` publish, and
+            // `Data.write(.atomic)` creates with the process umask (R5-04).
+            if let defect = StateRoot.isolateFile(at: tmpPath) {
+                log.error("evidence pack \(tmpPath) could not be made owner-only: \(defect) — refusing to publish it into the archive")
+                try? FileManager.default.removeItem(atPath: tmpPath)
+                return false
+            }
             _ = try FileManager.default.replaceItemAt(
                 URL(fileURLWithPath: filePath),
                 withItemAt: URL(fileURLWithPath: tmpPath)
@@ -252,6 +261,9 @@ public final class EvidenceStore {
             // Fallback: direct write (see ProjectRegistry.save).
             do {
                 try data.write(to: URL(fileURLWithPath: filePath), options: .atomic)
+                if let defect = StateRoot.isolateFile(at: filePath) {
+                    log.error("evidence pack \(filePath) is not owner-only after the fallback write: \(defect)")
+                }
                 pruneIfNeeded()
                 pruneExpiredIfNeeded()
                 return true
@@ -463,10 +475,17 @@ public final class EvidenceStore {
     /// already there (the mcp-shell registry creates them with the default
     /// mode), so without a chmod-after-create the documented isolation is
     /// silently false and every other local account can read the evidence
-    /// packs. Enforcement is scoped to directories under the user's home;
-    /// outside home (isolated smoke runs in /var/folders or /tmp) tightening a
-    /// directory we do not own is not ours to do, so that case logs the gap
-    /// instead of pretending the invariant holds.
+    /// packs.
+    ///
+    /// What scopes the enforcement is **ownership, not home membership**. The
+    /// rule used to be "inside `NSHomeDirectory()`", which `--state-dir` broke
+    /// open: a maintenance run that names a root under `/var/folders` or `/tmp`
+    /// fell into the outside-home branch, logged `0700 is NOT enforced`, and
+    /// **wrote anyway** — the one shape of run that most needs the invariant was
+    /// the one that silently skipped it. Now: tighten when the path is ours
+    /// (`chmod` answers that directly — it fails when we do not own it), and
+    /// refuse the write when it is not, because adding world-readable packs to
+    /// a directory we cannot isolate is the failure this rule exists to prevent.
     ///
     /// When isolation cannot be established the write is **refused** (returns
     /// false — the failure mode `EngineCore` already surfaces as a degraded
@@ -491,10 +510,11 @@ public final class EvidenceStore {
             }
         }
         let home = NSHomeDirectory()
-        guard path != home, path.hasPrefix(home + "/") else {
-            log.error("evidence directory \(path) is outside \(home) — per-user isolation (0700) is NOT enforced for this path")
-            isolatedDirectory = probe
-            return true
+        if path != home, !path.hasPrefix(home + "/") {
+            // Not an exemption: a statement that this run put its archive
+            // outside the per-user folder, so the reader of the log can tell
+            // which directory was tightened by whom.
+            log.info("evidence directory \(path) is outside \(home) — isolating it by ownership instead of by home scope")
         }
         guard chmod(path, 0o700) == 0 else {
             log.error("chmod(0700) \(path) failed: \(String(cString: strerror(errno))) — refusing to write evidence other accounts could read")

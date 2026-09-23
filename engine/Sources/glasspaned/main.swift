@@ -675,6 +675,18 @@ if options.approvalAudit || options.approvalVerify {
         let payload: [String: Any] = [
             "valid": verdict.valid,
             "count": gate.count,
+            // R6-07: a hash chain can prove that nothing *inside* it was edited;
+            // it cannot prove that its tail is still there, because a shorter
+            // chain re-verifies from the same genesis. No local anchor fixes
+            // that — an anchor file in a directory the same account can write is
+            // deletable by exactly the party the check would catch, and claiming
+            // otherwise would be a guard with no reachable refusal. What this
+            // pair does give an operator or agent is the honest version: verify
+            // reports where the chain ends, so a run that recorded `count` and
+            // `tailHash` earlier can notice a shrinkage it cannot derive from
+            // the ledger alone. The detectable attack (cut, then append a
+            // spliced record) remains `valid: false`.
+            "tailHash": gate.tailHash(),
             "firstBrokenIndex": verdict.firstBrokenIndex.map { $0 as Any } ?? NSNull(),
             "loadFailed": gate.loadFailed
         ]
@@ -814,6 +826,14 @@ let socketPath = StateRoot.engineSocketPath(
 )
 let probeSocketPath = options.probeSocketPath ?? stateRoot.probeSocketFile
 let log = EngineLog(quiet: !options.verbose)
+// R5-04: this process writes the archive, the registry and the approval chain,
+// so it is the process that closes the exposure the umask left there — files and
+// directories that predate the 0700/0600 rule are tightened once, here, and
+// every path it could not tighten is named in the log. The one-shot maintenance
+// subcommands deliberately do **not** do this: `--evidence-stats` and
+// `--active-project` are the read-only probes the smoke gates use to measure
+// which state root a run resolved, and a probe that chmods is not read-only.
+stateRoot.tightenPermissions(log: log)
 
 // 单实例护栏（P1 v1.2 §11.1 + R2-02/A-18）：判定必须三态分开——「回了 hello」
 // 「名字后面没有监听者（残留文件）」「有监听者但不开口」。旧实现用 helloSummary，
@@ -950,7 +970,7 @@ let core = EngineCore(
     attributionGuard: attributionGuard,
     degradationTracker: DegradationTracker(),
     metricsProbe: ProcessMetricsProbe(),
-    approvalGate: ApprovalGate(stateRoot: stateRoot),
+    approvalGate: ApprovalGate(stateRoot: stateRoot, log: log),
     probeInbox: probeInbox,
     permissionsReport: { permissionProbes.snapshot() },
     inputMonitorAbsenceReason: inputMonitorAbsenceReason,

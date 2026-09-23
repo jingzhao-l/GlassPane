@@ -639,6 +639,13 @@ public final class ProbeInbox {
     /// whose `source` token the daemon could not map (A-09); absence means zero,
     /// which is what distinguishes "no state channel" from "state reported
     /// through a channel this daemon cannot read".
+    ///
+    /// The probe's own drop counters (`droppedEvents`, `droppedWrites`,
+    /// `rejectedKeys`) follow the **opposite** rule: they are added only when the
+    /// probe reported them, because a probe that predates them, or one whose
+    /// `hello` never arrived, has not measured anything. Writing `0` there would
+    /// turn "unknown" into the project's most expensive kind of wrong answer — a
+    /// clean bill of health for a channel that was leaking frames (X-3).
     public func statusJSON() -> [[String: Any]] {
         lock.lock(); defer { lock.unlock() }
         return connections.values.sorted { $0.hello.pid < $1.hello.pid }.map { connection -> [String: Any] in
@@ -654,6 +661,15 @@ public final class ProbeInbox {
             if let bundleId = connection.hello.bundleId { entry["bundleId"] = bundleId }
             if let unmapped = unmappedStateSources[connection.hello.pid], unmapped > 0 {
                 entry["stateFramesUnmappedSource"] = unmapped
+            }
+            if let droppedEvents = connection.hello.droppedEvents {
+                entry["droppedEvents"] = droppedEvents
+            }
+            if let droppedWrites = connection.hello.droppedWrites {
+                entry["droppedWrites"] = droppedWrites
+            }
+            if let rejectedKeys = connection.hello.rejectedKeys {
+                entry["rejectedKeys"] = rejectedKeys
             }
             return entry
         }

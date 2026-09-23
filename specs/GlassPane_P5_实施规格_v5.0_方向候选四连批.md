@@ -90,14 +90,14 @@ public struct ApprovalRecord: Codable, Equatable {
 
 ### 3.7 可测性与验收
 
-- **engine 单测**（`ApprovalGateTests`，纯内存）：创世记录 prevHash 空串、hash 为链尾 64 hex；append 链式串联（第 N 条 prevHash == 第 N-1 条 hash）；空台账 chain/verify；verifyChain 对完整链返回 valid；篡改中间记录（改 decision/reason/approvedBy）→ invalid + firstBrokenIndex 指向坏链起点；篡改 prevHash → invalid；截断链尾 → invalid；持久化 roundtrip（写文件→新实例加载→字段一致 + verify 通过）；损坏文件加载→空台账；原子写无 `.tmp` 残留；`--approval-audit/--approval-verify` CLI 接入（main.swift 命令分支）。
+- **engine 单测**（`ApprovalGateTests`，纯内存）：创世记录 prevHash 空串、hash 为链尾 64 hex；append 链式串联（第 N 条 prevHash == 第 N-1 条 hash）；空台账 chain/verify；verifyChain 对完整链返回 valid；篡改中间记录（改 decision/reason/approvedBy）→ invalid + firstBrokenIndex 指向坏链起点；篡改 prevHash → invalid；截断链尾 → **不可检（见 P5-A2 修订）**；截断后再追加（spliced）→ invalid；持久化 roundtrip（写文件→新实例加载→字段一致 + verify 通过）；损坏文件加载→空台账；原子写无 `.tmp` 残留；`--approval-audit/--approval-verify` CLI 接入（main.swift 命令分支）。
 - **EngineCore 集成**：注入 gate 后 restore 登记一条（operationRef/operationType/riskTier 断言）；gate 为 nil 时 restore 行为不回归。
 - **全量回归**：engine 全用例 + mcp-shell 全用例不回归。
 
 | 编号 | 验收项 | 通过标准 | 状态 |
 |---|---|---|---|
 | P5-A1 | 创世与链式哈希 | 创世 prevHash 为空串；每条 hash 为其规范内容（含链尾 hash）的完整 SHA-256 64 hex | ✓ |
-| P5-A2 | 链完整性校验 | 完整链 verify 通过；篡改任意记录字段 / prevHash / 截断 → invalid 且 firstBrokenIndex 正确 | ✓ |
+| P5-A2 | 链完整性校验 | 完整链 verify 通过；篡改任意记录字段 / prevHash / 截断后追加 → invalid 且 firstBrokenIndex 正确。**纯截断链尾不可检**：截短后的链仍从创世重放通过，这是哈希链在缺链外锚点时的固有性质而非实现缺陷。`--approval-verify` 因此额外发布 `count` 与 `tailHash`，使跨次运行可比较出收缩（`ApprovalGateTests.testPureTailCutIsUndetectableByReplayAndDetectableByComparison` 同时钉住「重放看不见」与「比较看得见」两半）。在台账同目录放锚点文件不算修复：能改写 `approvals.json` 的账号同样能删锚点，而 `SECURITY.md` 声明的威胁模型就是本机同权限进程。〔2026-09-23 修订：原文把「截断链尾 → invalid」列为已交付验收，与实现和哈希链性质均不符（R6-07）。〕 | ✓（按修订口径） |
 | P5-A3 | 持久化 roundtrip | 原子写 + 重载一致性；损坏文件加载为空台账不静默待有效；写失败不中断内存链 | ✓ |
 | P5-A4 | EngineCore 登记 | restore 执行时登记 high 风险记录；gate nil 时零回归 | ✓ |
 | P5-A5 | CLI 维护命令 | --approval-audit / --approval-verify 输出与退出码符合 §3.6 | ✓ |
@@ -225,8 +225,8 @@ public struct RestorePlan: Equatable {
 
 `EngineCore.pruneEvidence(projectId: String?, olderThanDays: Int) throws -> Int`：
 
-- `projectId == nil`：作用于当前 store 目录（`evidenceStore?.directory ?? EvidenceStore.defaultDirectory`；attach 未发生时为默认目录）；
-- `projectId != nil`：`projectRegistry.get(projectId)` 未命中 → `GP_E_NOT_FOUND`（既有码）；命中 → 目录 = `entry.evidenceStoragePath ?? EvidenceStore.defaultDirectory`，在该目录构造临时 EvidenceStore 执行 `prune(olderThanDays:)` 返回删除数（**不污染活跃 store 的目录状态**）；
+- `projectId == nil`：作用于**本实例被注入的那一个** store 目录（`evidenceStore.directory`）；实例未获注入档案时 → `GP_E_BAD_PARAMS` 拒绝（`EngineCore.noStoreArchiveRefusal`），**不得**回落到 `EvidenceStore.defaultDirectory`。〔2026-09-23 修订：原字面 `evidenceStore?.directory ?? EvidenceStore.defaultDirectory` 使「少写一个参数」等于「去删共享档案里的过期条目」，而 `swift test` 曾据此改写开发者真实档案；拒绝是本轮起的口径，共享档案的修剪归 `glasspaned --prune-evidence`（该进程显式命名自己的状态根）。〕
+- `projectId != nil`：`projectRegistry.get(projectId)` 未命中 → `GP_E_NOT_FOUND`（既有码）；命中 → 目录 = `entry.evidenceStoragePath`；项目未登记自有档案、或登记值不合法 → `GP_E_BAD_PARAMS` 拒绝（`EngineCore.noArchiveRefusal` / `evidenceStoragePathDefect`），**不得**回落共享档案；通过时在该目录构造临时 EvidenceStore 执行 `prune(olderThanDays:)` 返回删除数（**不污染活跃 store 的目录状态**）。〔2026-09-23 修订：与上一条同源——项目「没有自己的档案」不等于「可以删公共档案」，两处回落一并取消。〕
 - 目录不存在 → 返回 0（stat 语义同 store：缺失目录零删除，不抛）。
 - 本项目维度为**存储层原语**（无 socket 帧、无方法表变更）；CLI 批四消费之。
 

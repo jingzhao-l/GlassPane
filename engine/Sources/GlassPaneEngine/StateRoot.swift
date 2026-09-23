@@ -99,6 +99,110 @@ public struct StateRoot: Equatable {
         path.hasSuffix("/") ? path + name : path + "/" + name
     }
 
+    // MARK: - Ownership-only permissions (R5-04)
+
+    /// Bring one existing file to owner-only (`0600`) and **verify it after the
+    /// fact**, returning nil on success or the reason it is still reachable.
+    ///
+    /// This exists because the modes the project documents (`0700` directory,
+    /// `0600` files) were only ever applied to what a call *creates*:
+    /// `createDirectory(attributes:)` does not touch an existing directory and
+    /// `Data.write(.atomic)` creates with the process umask, so an installation
+    /// that predates the rule — or one whose `~/.glasspane` was made by the MCP
+    /// shell — kept `projects.json`, `approvals.json` and every evidence pack at
+    /// `0644`, readable by every local account, while the code believed the
+    /// invariant held. `SECURITY.md` and P0 §3.5 state the modes as fact, so
+    /// leaving the existing files alone is not a neutral choice.
+    ///
+    /// Nothing is created here and nothing is deleted: a missing path returns
+    /// nil (there is no exposure in a file that is not there), and a file the
+    /// caller cannot chmod is reported, not "recreated".
+    public static func isolateFile(at path: String) -> String? {
+        let attributes = (try? FileManager.default.attributesOfItem(atPath: path)) ?? [:]
+        guard !attributes.isEmpty else { return nil }
+        guard attributes[.type] as? FileAttributeType == .typeRegular else {
+            return "\(path) is not a regular file — left untouched"
+        }
+        let before = (attributes[.posixPermissions] as? NSNumber)?.int16Value ?? -1
+        if before & 0o077 == 0 { return nil }
+        if chmod(path, mode_t(0o600)) != 0 {
+            return "chmod(0600) \(path) failed: \(String(cString: strerror(errno)))"
+        }
+        let after = (try? FileManager.default.attributesOfItem(atPath: path)) ?? [:]
+        guard !after.isEmpty else {
+            return "\(path) cannot be read back after chmod — isolation unverified"
+        }
+        let mode = (after[.posixPermissions] as? NSNumber)?.int16Value ?? -1
+        guard mode == 0o600 else {
+            return "\(path) is still \(String(format: "%04o", Int(mode))) after chmod(0600)"
+        }
+        return nil
+    }
+
+    /// Bring the root, its archive directory and the state files inside them to
+    /// owner-only, reporting every step. Called once at daemon start, so the
+    /// long-lived process that writes the archive is also the one that closes
+    /// the pre-existing exposure — and so an operator sees in the log which
+    /// paths were tightened by this run rather than discovering it from a
+    /// permission error months later.
+    ///
+    /// Returns the lines it would want a reader to act on (empty when the whole
+    /// root is already isolated). It never throws: a directory it cannot tighten
+    /// is not a reason to refuse to *start*, and the writers keep refusing
+    /// individually (`EvidenceStore.ensureIsolatedDirectory` refuses the write),
+    /// so this sweep hardens what it can and says exactly what it could not.
+    public func tightenPermissions(log: EngineLog) -> [String] {
+        var notes: [String] = []
+        var info = stat()
+        if stat(path, &info) == 0 {
+            if chmod(path, mode_t(0o700)) != 0 {
+                notes.append("state root \(path): chmod(0700) failed: \(String(cString: strerror(errno)))")
+            } else {
+                var after = stat()
+                let mode = stat(path, &after) == 0 ? Int(after.st_mode & 0o777) : -1
+                if mode != 0o700 {
+                    notes.append("state root \(path): mode is \(String(format: "%04o", mode)), not 0700")
+                }
+            }
+        } else {
+            // The root does not exist yet: every writer creates it with 0700
+            // attributes, and saying so here keeps "nothing to do" distinct from
+            // "did not look".
+            log.info("state root \(path) does not exist yet — nothing to tighten")
+            return []
+        }
+        let files = [projectsFile, approvalsFile]
+            + (Self.jsonFiles(in: evidenceDirectory))
+        for file in files {
+            if let defect = Self.isolateFile(at: file) {
+                notes.append(defect)
+            }
+        }
+        // The archive directory itself (0700), separate from the root.
+        if stat(evidenceDirectory, &info) == 0, chmod(evidenceDirectory, mode_t(0o700)) != 0 {
+            notes.append("evidence directory \(evidenceDirectory): chmod(0700) failed: \(String(cString: strerror(errno)))")
+        }
+        for note in notes {
+            log.error("state permission not isolatable — \(note)")
+        }
+        if notes.isEmpty {
+            log.info("state root \(path): permissions tightened to owner-only (0700 dirs, 0600 files)")
+        }
+        return notes
+    }
+
+    /// The archive entries this sweep may tighten: exactly the names
+    /// `EvidenceStore` writes (`isEntryName`), so a stray file in the directory
+    /// is left alone rather than being renamed into the archive's shape.
+    private static func jsonFiles(in directory: String) -> [String] {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            atPath: directory
+        ) else { return [] }
+        return entries
+            .filter { EvidenceStore.isEntryName($0) }
+            .map { directory + "/" + $0 }
+    }
+
     /// Drops redundant trailing slashes so `/tmp/x/` and `/tmp/x` are the same
     /// root (and `Equatable` says so). Symlinks, `..` and the home-vs-`$HOME`
     /// question are **not** resolved here: the smoke gates compare paths with

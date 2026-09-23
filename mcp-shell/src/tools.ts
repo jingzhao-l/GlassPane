@@ -362,7 +362,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: "gp_probe_status",
-    description: "List GlassPaneProbe connections (pid, capabilities, events seen) and whether the attached app has a live probe — probe presence is what makes T4/T5/T7/T8 verdicts and tier-1 checkpoint restores decidable.",
+    description: "List GlassPaneProbe connections and whether the attached app has a live probe — probe presence is what makes T4/T5/T7/T8 verdicts and tier-1 checkpoint restores decidable. `probes` holds **live** registrations only (every row `connected: true`), so a probe that dropped is absent from it rather than flagged inside it: read `recentDisconnections` for that history (`pid`, `disconnectReason`, `disconnectedAt`, per-pid `drops`), and `disconnections` is just the total count since start. Each live row can also carry the frame-accounting that makes a zero verdict readable: `stateFramesUnmappedSource` (daemon-side, per pid), and `droppedEvents` / `droppedWrites` / `rejectedKeys` as the probe itself reported them — those are **absent when unreported**, which is not the same as zero, and `unmapableStateFrames` is the daemon-side total that survives a disconnect.",
     engineMethod: "probe_status",
     inputSchema: {
       type: "object",

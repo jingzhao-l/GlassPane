@@ -12,7 +12,7 @@ import {
   recoverFrameId,
   StreamLineIo,
 } from "./io.js";
-import { GP_E_ENGINE_UNREACHABLE } from "./errors.js";
+import { GP_E_ENGINE_TIMEOUT, GP_E_ENGINE_UNREACHABLE, GP_E_PAYLOAD_TOO_LARGE } from "./errors.js";
 
 /**
  * Agent-actionable remedy for an unreachable daemon (P6 §11 audit items ④/⑥:
@@ -135,9 +135,12 @@ export interface EngineIdentityExpectation {
   version?: string;
 }
 
-/** Shell-local failure codes (mirrors the daemon's `GPErrorCode` spellings). */
-export const GP_E_ENGINE_TIMEOUT = "GP_E_ENGINE_TIMEOUT";
-export const GP_E_PAYLOAD_TOO_LARGE = "GP_E_PAYLOAD_TOO_LARGE";
+/**
+ * Shell-side failure codes live in `errors.ts` with the rest of the agent-facing
+ * vocabulary (X-15); this file used to declare them locally, which left
+ * `GP_E_ENGINE_TIMEOUT` spelled in two places with only a comment keeping them
+ * together.
+ */
 
 /** Error frame returned by the daemon (spec §3.2.1) or raised by the shell. */
 export interface EngineErrorBody {

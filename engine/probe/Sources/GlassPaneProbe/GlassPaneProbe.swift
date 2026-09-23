@@ -448,7 +448,11 @@ final class ProbeRuntime: @unchecked Sendable {
             // "0 handler hits" be read as "0 hits" instead of "N frames never
             // delivered".
             "droppedEvents": offlineDropped,
-            "droppedWrites": writeDropped
+            "droppedWrites": writeDropped,
+            // KVC/state registrations the runtime refused (bad keyPath, non-KVC
+            // object): a later "state never changed" is only readable against
+            // this, or the daemon reports zero for a probe that was never told.
+            "rejectedKeys": rejectedKeys
         ]
         if let bundleId { payload["bundleId"] = bundleId }
         writeFrame(payload)

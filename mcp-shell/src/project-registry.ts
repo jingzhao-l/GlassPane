@@ -60,10 +60,41 @@ const PROTECTED_ROOTS: readonly string[] = [
   "/", "/Applications", "/System", "/Library", "/Users", "/private", "/tmp", "/Volumes",
 ];
 
-/** Trees owned by the system/other installs: nothing here is project data. */
+/**
+ * Trees owned by the system/other installs: nothing here is project data.
+ *
+ * The list is the **union** of what this file and the daemon each refused, and
+ * it is pinned against the Swift side by `test/path-consistency.test.mjs`
+ * rather than kept in sync by hope (J). Two halves of the divergence this
+ * closes:
+ * - `/usr`, `/bin`, `/sbin`, `/dev` were rejected by name only on the daemon
+ *   side; here they survived unless their *owner* happened to be root, so the
+ *   same registered value produced a refusal from one process and an acceptance
+ *   from the other — and the accepting one is the one that writes projects.json.
+ * - `/tmp` matched exactly, so `/tmp/x` fell through to the ownership rule and
+ *   passed for a caller-owned scratch directory, while the daemon called the
+ *   same path shared scratch. Shared scratch is world-writable by definition:
+ *   a registry pointing there is readable-by-everyone evidence, whatever the
+ *   directory's own mode says on the day it is checked.
+ */
 const PROTECTED_SUBTREES: readonly string[] = [
   "/Applications", "/System", "/Library", "/private/etc",
+  "/usr", "/bin", "/sbin", "/dev",
+  "/tmp", "/private/tmp", "/private/var/tmp",
 ];
+
+/**
+ * The two lists, exported **only** so `test/path-consistency.test.mjs` can
+ * compare them against the daemon's own literals in
+ * `engine/Sources/GlassPaneEngine/EngineCore.swift`. Nothing in this module
+ * reads them through here; they stay `const` and internal to the write path.
+ * A second language implementing the same rule is a drift waiting to happen, and
+ * the only honest guard is one that reads the other side's source.
+ */
+export const AGENT_PATH_PROTECTION = {
+  roots: PROTECTED_ROOTS,
+  subtrees: PROTECTED_SUBTREES,
+} as const;
 
 /**
  * The file the *daemon* reads — `ProjectRegistry.defaultProjectsPath` in Swift.
@@ -582,7 +613,7 @@ const PATH_SHAPE_HINT =
   + "the user running this shell (never a shared tree such as /Users/Shared, another "
   + "user's home, /private/tmp, or a top-level directory of the boot volume), and not the "
   + "filesystem root, a mounted volume root, your home directory, anything under "
-  + "~/Library, or a system-owned tree (/Applications, /System, /Library, /private/etc) "
+  + `~/Library, or a system-owned tree (${PROTECTED_SUBTREES.join(", ")}) `
   + "— the daemon writes evidence into this directory and deletes expired entries from it";
 
 /**
