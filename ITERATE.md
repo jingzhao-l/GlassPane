@@ -66,7 +66,7 @@ npm 包里不得残留 `file:` 引用（CI 的 publish-shape 守卫专抓这个�
 
 1. **门禁命令必须逐字精确匹配** `validation.commands`。本项目实测可用的形态（从仓库根）：
    `swift build --package-path engine`、`swift test --package-path engine`、
-   `swift test --package-path engine/probe`、`python3 -m pytest -q bridge`、
+   `swift test --package-path engine/probe`、`python3 -m pytest -q bridge`、、`node scripts/check-doc-links.mjs`
    `npm run build`、`npm test --workspaces --if-present`、`node scripts/check-version.mjs`。
    加参数、换目录、串 `&&` 都会被运行时拒绝。
 2. **`swift test` 有 1 条按设计跳过**（opt-in 真机项）。基线是"374 通过 / 0 失败 / 1 跳过"，

@@ -123,6 +123,19 @@ jobs:
       - name: Test all workspaces (kernel + mcp-shell)
         run: npm run test --workspaces --if-present
 
+  # 对外文档守卫：死链、失效锚点、双语成对（README/SECURITY/CONTRIBUTING 任一侧
+  # 改名或漏翻译都在这里现形——面向陌生读者的文档，链接断了等于没交付）。
+  docs:
+    name: public docs (links, anchors, bilingual parity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Check links, anchors and bilingual pairing across public docs
+        run: node scripts/check-doc-links.mjs
+
   # 版本线守卫：根 workspace / 两个 npm 包 / kernel / MCP 自报 / daemon 自报 /
   # .app bundle / install.sh 钉的 tag / lockfile 必须是同一个数字。漂移的后果不是
   # 难看而是危险：用户按 tag 装到的源码，和 registry 上的包、面板里显示的版本对不上。
