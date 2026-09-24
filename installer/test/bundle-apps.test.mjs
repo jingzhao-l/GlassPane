@@ -21,14 +21,22 @@ import {
   guiStartCommand,
   installBundles,
   nextStepsText,
+  startDetached,
+  ensureLogDir,
+  installOutcome,
+  verificationFailureText,
   parseArgs,
   launchdPlistString,
   LAUNCHD_LABEL,
+  LAUNCH_SETTLE_MS,
   APPS_DIR_NAME,
   DAEMON_APP_NAME,
   DAEMON_EXE_NAME,
   PANEL_EXE_NAME,
   SETTINGS_APP_NAME,
+  SOCKET_DIR_NAME,
+  SOCKET_FILE_NAME,
+  DAEMON_LOG_NAME,
 } from '../cli.js'
 
 // ---------------------------------------------------------------------------
@@ -155,6 +163,7 @@ test('nextStepsText: bundle 形态与裸二进制形态的条目名各自如实'
   })
   assert.ok(bundled.includes('GlassPane Daemon'), 'bundle 形态应给出带图标的条目名')
   assert.ok(bundled.includes('面板已打开'))
+  assert.ok(bundled.includes('未报错退出'), '"面板已打开"必须自带口径边界（观测到的是命令未报错，不是窗口在屏）')
   assert.ok(bundled.includes('授权勾选必须人工'), '诚实边界：TCC 不程序化')
   assert.ok(bundled.includes(plan.daemonExecutable), '给出 --permissions 验证命令的完整路径')
   assert.ok(bundled.includes('--permissions'))
@@ -310,4 +319,185 @@ test('launchdNeedsReregister：比对已加载 program，而非 plist 文本', (
     '换 bundle 路径必须 bootout + bootstrap')
   assert.equal(launchdNeedsReregister({ alreadyLoaded: true, loadedProgram: null, desiredProgram: '/a' }), true,
     '读不到定义一律重来（陈旧定义的真机形态：EX_CONFIG）')
+})
+
+// ---------------------------------------------------------------------------
+// 安装收尾的诚实性：daemon 没实测应答就不许说"安装完成"，启动失败不许说 PID。
+// ---------------------------------------------------------------------------
+
+test('nextStepsText: daemon 未通过 hello 校验时先给失败告警与补救命令', () => {
+  const unverified = nextStepsText({
+    rootDir: '/repo',
+    socketPath: '/s.sock',
+    guiOpened: true,
+    daemonVerified: false,
+    daemon: { path: '/repo/glasspaned', viaBundle: true },
+  })
+  assert.ok(unverified.includes('未通过 hello 校验'), '未校验通过必须显式告警')
+  assert.ok(unverified.includes('--restore-launchd'), '告警必须带可执行的补救命令')
+  assert.ok(
+    unverified.includes('node "/repo/installer/cli.js" --restore-launchd'),
+    '补救命令必须是拼好的真实路径，印 "<仓库目录>" 占位符等于没给可执行的东西',
+  )
+
+  const verified = nextStepsText({
+    rootDir: '/repo',
+    socketPath: '/s.sock',
+    guiOpened: true,
+    daemonVerified: true,
+    daemon: { path: '/repo/glasspaned', viaBundle: true },
+  })
+  assert.ok(!verified.includes('未通过 hello 校验'), '校验通过时不该出现告警')
+})
+
+test('nextStepsText: 面板没打开时不谎称"面板已打开"', () => {
+  const text = nextStepsText({
+    rootDir: '/repo',
+    socketPath: '/s.sock',
+    guiOpened: false,
+    daemon: { path: '/repo/glasspaned', viaBundle: true },
+  })
+  assert.ok(!text.includes('面板已打开'))
+  assert.ok(text.includes('open "'), '给出手工打开面板的命令')
+})
+
+test('startDetached: 启动器不存在时报错，而不是打印 PID undefined', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-detach-'))
+  const result = await startDetached(
+    path.join(dir, 'definitely-not-here'), [], path.join(dir, 'log.txt'),
+    { settleMs: 250 },
+  )
+  assert.equal(result.ok, false)
+  assert.equal(result.pid, null)
+  assert.ok(result.error && result.error.length > 0, '失败必须带原因')
+})
+
+test('startDetached: 日志目录不存在时先建目录再启动', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-detach2-'))
+  const logPath = path.join(dir, 'nested', 'missing', 'daemon.log')
+  const result = await startDetached('/bin/sleep', ['0.2'], logPath, { settleMs: 250 })
+  assert.equal(result.ok, true, `应启动成功：${result.error ?? ''}`)
+  assert.ok(typeof result.pid === 'number')
+  assert.ok(fs.existsSync(logPath), '日志文件（含父目录）必须由安装器负责创建')
+})
+
+// ---------------------------------------------------------------------------
+// 审计轮 2 的三条：① 退出码必须反映收尾校验（install.sh exec 透传，agent 只读得到
+// 退出码）；② 观察窗口之后子进程已退出/被信号终止不许再报 ok:true；③ 全新机器的
+// ~/.glasspane 必须在写 plist 之前由安装器建好——launchd 的 RunAtLoad 才是第一个
+// 往那里写的 spawner。
+// ---------------------------------------------------------------------------
+
+test('installOutcome: daemon 未实测应答 hello → 退出码非零', () => {
+  const failed = installOutcome({ verified: false, daemonExpected: true })
+  assert.equal(failed.ok, false)
+  assert.equal(failed.exitCode, 1, '未通过校验不得退出 0——否则 install.sh 与调用方一起把半成品安装报成成功')
+  assert.equal(failed.verified, false)
+
+  const passed = installOutcome({ verified: true, daemonExpected: true })
+  assert.deepEqual({ ok: passed.ok, exitCode: passed.exitCode }, { ok: true, exitCode: 0 })
+})
+
+test('installOutcome: 本轮本就不该起 daemon（--no-daemon 且 --no-launchd）时不做失败判定', () => {
+  assert.equal(installOutcome({ verified: false, daemonExpected: false }).exitCode, 0,
+    '用户显式不要 daemon，"没验到"不是故障')
+  // --no-daemon 但保留默认 launchd 时，bootstrap 的 RunAtLoad 已经把 daemon 拉起来了：
+  // 这一格必须仍按"该有 daemon"算，否则未启动的 daemon 会被静默放走。
+  assert.equal(installOutcome({ verified: false, daemonExpected: true }).exitCode, 1)
+})
+
+test('verificationFailureText: 失败提示带退出码 + 真实路径的补救命令', () => {
+  const noSocket = verificationFailureText({
+    arrived: false,
+    socketPath: '/Users/dev/.glasspane/engine.sock',
+    daemonLog: '/Users/dev/.glasspane/installer-daemon.log',
+    cliPath: '/repo/installer/cli.js',
+    exitCode: 1,
+  })
+  assert.ok(noSocket.includes('安装未完成'), '先说结论')
+  assert.ok(noSocket.includes('退出码 1'), '必须点明退出码：脚本调用方只读得到这个')
+  assert.ok(noSocket.includes('node "/repo/installer/cli.js" --restore-launchd'),
+    '补救命令必须是拼好的真实路径，用户/agent 直接可执行')
+  assert.ok(noSocket.includes('/Users/dev/.glasspane/installer-daemon.log'), '必须指向日志')
+  assert.ok(noSocket.includes('engine.sock'), '必须指向没等到应答的 socket')
+
+  const badHello = verificationFailureText({
+    arrived: true, socketPath: '/s.sock', daemonLog: '/l.log', cliPath: '/c.js', exitCode: 1,
+  })
+  assert.ok(badHello.includes('socket 在'), 'socket 在但不应答是另一种故障，文案必须分开')
+  assert.ok(!badHello.includes('没有等到 daemon 在 /s.sock'), '两种故障不得混成一句')
+})
+
+test('ensureLogDir: 全新机器的 ~/.glasspane 可一次递归建立（落点不变，幂等）', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-logdir-'))
+  const home = path.join(root, 'home')
+  const logPath = path.join(home, SOCKET_DIR_NAME, DAEMON_LOG_NAME)
+  assert.equal(fs.existsSync(path.join(home, SOCKET_DIR_NAME)), false, '前置：目录原本不存在')
+
+  const first = ensureLogDir(logPath)
+  assert.equal(first.ok, true, first.error ?? '')
+  assert.equal(first.dir, path.join(home, SOCKET_DIR_NAME))
+  assert.ok(fs.existsSync(first.dir), 'launchd StandardOutPath 的目录必须已就位')
+  const again = ensureLogDir(logPath)
+  assert.equal(again.ok, true, '幂等：重跑安装不报错')
+  assert.equal(
+    path.dirname(path.join(home, SOCKET_DIR_NAME, SOCKET_FILE_NAME)),
+    first.dir,
+    'socket 与日志同父目录：这一次 mkdir 同时覆盖两个落点',
+  )
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('ensureLogDir: 建不出来时返回原因，让 install() 在写 plist 之前就中止', () => {
+  const failed = ensureLogDir('/Users/dev/.glasspane/installer-daemon.log', {
+    mkdir: () => { throw new Error('EACCES: permission denied') },
+  })
+  assert.equal(failed.ok, false)
+  assert.equal(failed.dir, '/Users/dev/.glasspane')
+  assert.ok(failed.error.includes('EACCES'), '失败必须带真实原因，供 install() 抛错')
+  assert.ok(failed.error.includes('/Users/dev/.glasspane'), '原因必须点出是哪个目录')
+})
+
+test('startDetached: 窗口内非零退出/被信号终止 → ok:false，不再带着作废 PID 报成功', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-lateexit-'))
+  const logPath = path.join(dir, 'daemon.log')
+
+  const exited = await startDetached('/bin/sh', ['-c', 'exit 7'], logPath, { settleMs: 400 })
+  assert.equal(exited.ok, false, `秒退的子进程不得报成功：${exited.error ?? ''}`)
+  assert.equal(exited.pid, null, 'ok:false 一律不回 PID（那是个已经作废的数字）')
+  assert.deepEqual(exited.exit, { code: 7, signal: null }, '观察到的退出状态要如实回传')
+  assert.ok(exited.error.includes('7'), '原因必须带上真实退出码')
+  assert.ok(exited.error.includes('有界观察'), '必须说明这是有界观察而非存活证明')
+
+  const signalled = await startDetached('/bin/sh', ['-c', 'kill -TERM $$'], logPath, { settleMs: 400 })
+  assert.equal(signalled.ok, false, '被 SIGTERM 打掉的子进程同样不是成功')
+  assert.equal(signalled.pid, null)
+  assert.ok(signalled.exit, '必须观察到"命令已经退出"这个事实')
+  assert.ok(
+    signalled.exit.signal === 'SIGTERM'
+      || (signalled.exit.code !== null && signalled.exit.code !== 0),
+    `退出原因必须是信号或非零码，实测到的是 ${JSON.stringify(signalled.exit)}`,
+  )
+
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('startDetached: 窗口内 0 退出算命令被受理（`open` 的正常形态），窗口外不作存活结论', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-exit0-'))
+  const logPath = path.join(dir, 'daemon.log')
+
+  // /usr/bin/open 提交给 LaunchServices 后就是 0 退出；把它判成失败属于过度修复，
+  // 但调用方必须能从 `exit` 读到"命令已退出"这个事实（install() 据此改口）。
+  const clean = await startDetached('/bin/sh', ['-c', 'exit 0'], logPath, { settleMs: 400 })
+  assert.equal(clean.ok, true, clean.error ?? '')
+  assert.deepEqual(clean.exit, { code: 0, signal: null })
+
+  const alive = await startDetached('/bin/sleep', ['1'], logPath, { settleMs: 150 })
+  assert.equal(alive.ok, true, alive.error ?? '')
+  assert.equal(alive.exit, null, '窗口结束时仍在跑：exit 只能是"未观察到退出"')
+  assert.ok(Number.isInteger(alive.pid) && alive.pid > 0)
+
+  assert.ok(LAUNCH_SETTLE_MS >= 400,
+    '窗口要给足，否则 `/usr/bin/open` 的非零退出（目标缺失）根本没机会被观察到')
+  fs.rmSync(dir, { recursive: true, force: true })
 })

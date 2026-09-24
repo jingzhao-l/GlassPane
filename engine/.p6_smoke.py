@@ -25,6 +25,7 @@ Exit codes: 0 = PASS（全部断言真实执行）, 1 = FAIL,
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -562,6 +563,49 @@ def run_canary(client, identifier, accepted, label, pre_wait=0.0, post_wait=0.0,
     sys.exit(1)
 
 
+def sweep_orphan_fixtures(demo_bin):
+    """收掉上一次被强杀时留下的孤儿夹具窗口。
+
+    `finally` 里的 terminate 只在脚本**活着走到收尾**时才有效。脚本被 SIGKILL
+    （或终端被直接关掉）时，`start_new_session` 拉起的 probe-demo 不随父进程死，
+    于是那个灰色夹具窗口一直留在用户桌面上——用户看到的"运行时冒出来又关不掉的
+    灰面板"就是这么来的。开跑前先扫一遍，顺手把上一轮的残留收掉。
+    """
+    # 按**可执行文件名**匹配，不按传入的完整路径：`pgrep -f` 比的是进程自己的
+    # 命令行，冒烟用绝对路径起它、但人（或上一轮的别的调用方式）可能用相对路径
+    # 起——只匹配绝对路径就会漏掉真正该收的那个孤儿。
+    needle = os.path.basename(demo_bin)
+    try:
+        listing = subprocess.run(["pgrep", "-f", needle],
+                                 capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return []
+    killed = []
+    for raw in listing.split():
+        try:
+            pid = int(raw)
+        except ValueError:
+            continue
+        if pid == os.getpid():
+            continue
+        # 只收**真孤儿**：父进程已变成 launchd（ppid 1）。正在跑的冒烟里，demo 的
+        # 父进程是那个 python 脚本本身——不加这一条，两次并发冒烟会把对方正在用的
+        # 夹具窗口杀掉，把一条好端端的闸门变成随机 flaky。
+        ppid = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)],
+                              capture_output=True, text=True, timeout=5).stdout.strip()
+        if ppid != "1":
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed.append(pid)
+        except ProcessLookupError:
+            pass
+    if killed:
+        print(f"NOTE 收掉上一轮遗留的 probe-demo 孤儿进程：{killed}")
+        time.sleep(1.0)
+    return killed
+
+
 def main():
     daemon_bin = resolve_binary(sys.argv[1] if len(sys.argv) > 1 else None,
                                 "GLASSPANE_DAEMON_BIN", DAEMON_CANDIDATES)
@@ -577,6 +621,8 @@ def main():
         print("REMEDY: cd engine && swift build && (cd probe && swift build)；"
               "或以位置参数/env（GLASSPANE_DAEMON_BIN、GLASSPANE_DEMO_BIN）显式给出二进制路径")
         sys.exit(2)
+
+    sweep_orphan_fixtures(demo_bin)
 
     workdir = tempfile.mkdtemp(prefix="glasspane-p6-smoke-")
     engine_sock = os.path.join(workdir, "engine.sock")

@@ -355,6 +355,44 @@ final class EngineP5Batch3Tests: XCTestCase {
         )
         XCTAssertTrue(sibling.remedy.contains("--prune-evidence"), sibling.remedy)
     }
+
+    /// An `attach` that names no per-project storage path must reset the active
+    /// archive to *this* instance's construction directory, not keep the
+    /// directory of the previously attached project (which would let two
+    /// projects cross-write into each other's archive). This pins the merged
+    /// `useDefaultDirectory()` reset from main.
+    func testAttachWithoutStoragePathResetsToTheStoresOwnDefault() throws {
+        let dirA = try makeTempDir("reset-a")
+        let dirB = try makeTempDir("reset-b")
+        defer {
+            try? FileManager.default.removeItem(atPath: dirA)
+            try? FileManager.default.removeItem(atPath: dirB)
+        }
+        let registry = ProjectRegistry(filePath: dirA + "/projects.json")
+        let withPath = try registry.create(
+            displayName: "With", bundleId: "com.example.app",
+            recipeConfigPath: nil, calibrationAssetsPath: nil, evidenceStoragePath: dirB,
+            now: { self.injectedNow }
+        )
+        let noPath = try registry.create(
+            displayName: "NoPath", bundleId: "com.example.app",
+            recipeConfigPath: nil, calibrationAssetsPath: nil, evidenceStoragePath: nil,
+            now: { self.injectedNow }
+        )
+        let store = EvidenceStore(directory: dirA)
+        let core = EngineCore(
+            channel: ScriptedChannel(fallbackTree: TestTrees.standard),
+            clock: { self.injectedNow },
+            projectRegistry: registry,
+            evidenceStore: store
+        )
+
+        _ = try core.attach(bundleId: "com.example.app", pid: nil, projectId: withPath.projectId)
+        XCTAssertEqual(store.directory, dirB)
+        _ = try core.attach(bundleId: "com.example.app", pid: nil, projectId: noPath.projectId)
+        XCTAssertEqual(store.directory, dirA, "复位必须回到本实例的构造目录")
+        XCTAssertFalse(store.directory.contains("/.glasspane/"), store.directory)
+    }
 }
 
 /// The two `rollback_full` remedies tell an agent which fields of

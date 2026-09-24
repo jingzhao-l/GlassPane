@@ -85,6 +85,17 @@ public final class DaemonProbe: @unchecked Sendable {
     /// 不是单次 read 的超时。
     public static let helloTimeoutSeconds: TimeInterval = 3
 
+/// daemon socket 的默认路径——**唯一真源**。daemon 的 CLI 默认值、设置面板
+    /// 的探测路径与安装器写入的 plist 都必须引用它；此前这三处各写了一遍字面量
+    /// （main.swift / SettingsModel.swift / 帮助文本），任何一处改动都会让面板
+    /// 探到一个不存在的 socket 并恒显"未运行"。
+    public static let defaultSocketPath = NSHomeDirectory() + "/.glasspane/engine.sock"
+
+    /// 探针监听的默认路径——**唯一真源**（同上）。探针 SDK 一侧
+    /// （`engine/probe/Sources/GlassPaneProbe`）是另一个 SPM 包、无法引用这里的
+    /// 常量，所以它自己那份默认值必须由跨包断言钉住一致，而不是靠人记
+    /// （见 `ProjectRegistryIsolationTests.testProbeSocketDefaultsAgreeAcrossPackages`）。
+    public static let defaultProbeSocketPath = NSHomeDirectory() + "/.glasspane/probe.sock"
     /// hello 响应的字节上限（R5-07：旧读环无上限）。daemon 的 hello 带 identity +
     /// 四类席位，实测远小于此；超上限即视为对端不合规并断开，绝不无限收。
     public static let maxHelloResponseBytes = 64 * 1024

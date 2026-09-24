@@ -108,16 +108,33 @@ final class EngineCoreTests: XCTestCase {
         XCTAssertNotNil(pack.circuitBreaker.reason)
     }
 
-    func testDeadProcessRecordsT1Evidence() throws {
+    /// 操作前就已不在场的进程**不能**判 T1（"崩在本次操作里"是没发生过的断言）。
+    /// 此前这条用例正是按那个错误口径写的，现在钉住两个方向。
+    func testAlreadyDeadProcessIsNotClaimedAsCrashDuringOperation() throws {
         try attach()
         channel.alive = false
         XCTAssertThrowsGPError(.actFailed) {
             try core.act(selector: submitSelector, action: .press)
         }
         let pack = try core.lastEvidence(operationId: nil)
+        XCTAssertEqual(pack.signals.crash?.processAliveBefore, false)
         XCTAssertEqual(pack.signals.crash?.processAliveAfter, false)
         let (diagnosisClass, _) = Classifier.classify(pack)
+        XCTAssertNotEqual(diagnosisClass, .t1, "进程没启动不能被说成崩在我们的操作里")
+    }
+
+    func testProcessExitingDuringOperationRecordsT1() throws {
+        try attach()
+        // 存活序列 [true, false]：操作前在场、操作后没了。act 本身不必失败，
+        // T1 断言的是"退出发生在本次操作窗口内"这一归因。
+        channel.aliveSequence = [true, false]
+        _ = try core.act(selector: submitSelector, action: .press)
+        let pack = try core.lastEvidence(operationId: nil)
+        XCTAssertEqual(pack.signals.crash?.processAliveBefore, true)
+        XCTAssertEqual(pack.signals.crash?.processAliveAfter, false)
+        let (diagnosisClass, report) = Classifier.classify(pack)
         XCTAssertEqual(diagnosisClass, .t1)
+        XCTAssertTrue(report.anomaly.contains("exited during the operation"))
     }
 
     func testUnresponsiveAppRecordsT2Evidence() throws {
@@ -1079,7 +1096,7 @@ final class EngineCoreWaveThreeMappingTests: XCTestCase {
             try String(contentsOfFile: path, encoding: .utf8), corrupt,
             "the damaged file stays intact and recoverable"
         )
-        let list = core.projectList()
+        let list = try core.projectList()
         XCTAssertEqual(list["registryReadable"] as? Bool, false)
         XCTAssertNotNil(list["registryFailure"] as? String)
         let refusal = try XCTUnwrap(list["remedy"] as? String)
@@ -1196,7 +1213,7 @@ final class EngineCoreWaveTwoBetaTests: XCTestCase {
             )
             return XCTFail("a registry-less engine must refuse, not answer \"unknown project\"")
         } catch let error as GPError {
-            XCTAssertEqual(error.code, .notFound, "the honest code, unchanged vocabulary")
+            XCTAssertEqual(error.code, .internalError, "the honest code, unchanged vocabulary")
             XCTAssertTrue(
                 error.message.contains("no project registry is configured"), error.message
             )
@@ -1208,13 +1225,13 @@ final class EngineCoreWaveTwoBetaTests: XCTestCase {
         XCTAssertEqual(channel.attachCallCount, 0, "the refusal happens before any rebind (R1-01)")
         XCTAssertNil(core.activeProjectId)
 
-        XCTAssertThrowsGPError(.notFound) {
+        XCTAssertThrowsGPError(.internalError) {
             _ = try core.projectGet(projectId: "prj_0123456789ABCDEFGHJKMNPQRS")
         }
-        XCTAssertThrowsGPError(.notFound) {
+        XCTAssertThrowsGPError(.internalError) {
             _ = try core.pruneEvidence(projectId: "prj_0123456789ABCDEFGHJKMNPQRS", olderThanDays: 30)
         }
-        XCTAssertThrowsGPError(.notFound) {
+        XCTAssertThrowsGPError(.internalError) {
             _ = try core.projectSet(
                 projectId: nil, displayName: "Would-be", bundleId: "com.x", pid: nil,
                 recipeConfigPath: nil, calibrationAssetsPath: nil, evidenceStoragePath: nil
@@ -1222,10 +1239,9 @@ final class EngineCoreWaveTwoBetaTests: XCTestCase {
         }
 
         // Listing says what it is: no registry, not "nothing registered".
-        let list = core.projectList()
-        XCTAssertEqual((list["projects"] as? [[String: Any]])?.count, 0)
-        XCTAssertEqual(list["registryConfigured"] as? Bool, false)
-        XCTAssertNotNil(list["registryFailure"] as? String)
+        XCTAssertThrowsGPError(.internalError) {
+            _ = try core.projectList()
+        }
 
         // The registry-less engine still attaches and still acts.
         XCTAssertNoThrow(try core.attach(bundleId: "com.example.app", pid: nil))

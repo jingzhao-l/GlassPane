@@ -2,9 +2,49 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [未发布]
+
+一次面向陌生读者的文档重审：原文把 GlassPane 写成"让 AI 证明它说了什么"的诚实性工具，
+这偏离了立项动机。按 `specs/GlassPane_5.8_项目综述文档.md` 自己的定位改回来——它是 **macOS 上给
+AI 编程代理用的 GUI 测试与验证层**：代理已经能做静态半场（构建/审查/单元测试），缺的是运行时半场
+（构建 → 到达状态 → 操作 → 观察 → 诊断 → 修复 → 重验），而常见的替代方案"截图 → 视觉理解 → 坐标操作"
+既不能断言也不能归因、不能重复、不能撤销。
+
+- 新增"为什么不是截图"对照表（元素级定位、结构化差异、数值像素测量、归因强度、可重复、成本、回滚、
+  审计留痕），并如实写出代价的另一面：视觉判断（审美、无树内容）仍归视觉模型，GlassPane 负责测量。
+- 新增"它做不到什么"：不能无头跑（需登录 GUI 会话）、SwiftUI 拖拽会话合成不出（实测）、
+  仅 7 个无障碍动词（不写控件值、不发合成 HID，故自由文本输入不在范围内）、
+  目标应用不暴露无障碍树时结构验证受限、`strong` 归因需应用内嵌探针配合。
+- README 加 npm 下载量徽章（`npm/dm` 两包，实测 shields.io 返回 200）；示例 tag 更新为 v1.1.1。
+- 双语补齐：`SECURITY.md`、`CONTRIBUTING.md` 由中文单腿改为英文主 + `*.zh-CN.md` 镜像，
+  章节 1:1 对齐；翻译过程中按代码收紧两处被写过头的主张（探针 pid 校验、事件 tap 的位置），
+  并把"测试绝不可指向真实 ~/.glasspane"写成贡献者硬规则（对应 projects.json 被覆盖事故）。
+- 新增 `scripts/check-doc-links.mjs` 与 CI `docs` 任务：对外 9 份文档的相对链接、页内/跨页锚点、
+  双语成对性一次体检（当前 183 条仓库内链接 0 死链）；命令同步登记进
+  `iterate.config.yaml` 的 `validation.commands.docs` 与 `ITERATE.md` 门禁清单。
+
 关于 `v0.1.0` 之前的历史：仓库在 2026-09-22 之前不存在任何 git tag，也不存在可用的版本号，因此那段时间按 P0…P6
 规格阶段作为里程碑分节记录，不追溯伪造版本号。所有日期取自 `git log`，每条 bullet 可回溯到其给出的 commit hash 或
 `specs/` 正文；两者都给不出来的内容已被删除。
+
+## [1.1.1] — 2026-09-23
+
+在 1.1.0 纳入基础设施审计后，本迭代把 iterate 复审（r1–r4b）与既有主线的各类收口合并进 main，并统一推送。
+版本从 `1.1.0` 升至 `1.1.1`；发布前按单一版本线全员对齐，四包（根 `@glasspane/monorepo` / `glasspane-install` /
+`glasspane-mcp` / `@iterate/kernel`）与引用位点统一到 `1.1.1`。
+
+### Added
+
+- **iterate 复审收口合入**。`iterate/full-review-20260922`（r1–r4b 六回合审查）并入 `main`，解决 engine 源码/测试、
+  bridge、`iterate.config.yaml` 等 14 处冲突；两侧成果共存（如 bridge 的 `SEND_SOCK_TIMEOUT_S=10.0` 与
+  `MAX_TRACE_SAMPLES`、B-24 语义；`ApprovalGate` 的 `StateRoot.approvalsFile` 与 `autoApprover="daemon:auto"`），
+  engine 迁移至 `StateRoot` 工厂构造，`TestIsolationGateTests` 扫描通过。
+
+### Changed
+
+- 发布前版本线从 `1.1.0` 升至 `1.1.1`（原因：`1.1.0` 已在 GitHub 先存在并钉在更早的 tag 上，为避免 npm 发布的
+  `1.1.0` 与 GitHub Release 内容漂移，改为推送新的 `v1.1.1`）。含 iterate 合并的最新代码落在 `1.1.1`，三线
+  （tag=main=npm）对齐。
 
 ## [1.1.0] — 2026-09-22
 
@@ -23,8 +63,16 @@
   在定位不到仓库时直接 `throw new Error(repoMissingText())`——源码树必须先存在。现在安装器自举：定位不到仓库时
   clone 钉住的 tag 到 `~/glasspane` 并继续，与 `install.sh` 同一策略。
 - **发布自动化**。`.github/workflows/release.yml` 新增 tag 触发的 GitHub Release job，产出确定性 source tarball +
-  `SHA256SUMS.txt`；既有手动 `workflow_dispatch` job 继续以 `npm publish --provenance` 发布两个包。
+  `SHA256SUMS.txt`（v1.1.0 的 Release 即由它生成，校验和经下载侧 `sha256sum -c` 独立复核）；手动 `workflow_dispatch`
+  job 以 `npm publish --provenance` 发两个裸名包，直发被拒时自动回落 `npm stage publish`（Trusted Publishing 配成
+  staged-only，"是否存在"最后一步 `npm stage approve` 留在 owner 手里）。dry 分支改用 `npm pack --dry-run`——npm 11
+  的 `publish --dry-run` 不再纯本地，会查 registry 撞已发版本。
 - **文档门面**。`README.md` 重写为英文主入口 + 新增 `README.zh-CN.md`；新增 `CONTRIBUTING.md`、`SECURITY.md`、`.github/CODEOWNERS` 与 issue / PR 模板。
+
+- **自我 dogfood**。新增 `ITERATE.md` + `iterate.config.yaml`（本项目的 iterate onboarding 产物，AI 通道生成）：
+  审查维度按层分 6 套蓝图，`validation.commands` 逐字收录从仓库根实测通过的 7 条门禁命令（与 `ci.yml` 各 lane 同源），
+  并把 `specs/**` 与 `kernel/schemas/**` 设为禁区、归因核心与发布工作流设为需架构审批。
+  验证：`iterate doctor` 18 项全通过、`iterate fingerprint` 无漂移、`scripts/validate.py config` 通过。
 
 ### Changed
 
@@ -44,9 +92,9 @@
   [P6 §13](specs/GlassPane_P6_实施规格_v6.0_探针SDK与LLDB桥实现.md) 的决策单，前置是一次付费的 Apple Developer
   Program（$99/年）。外部用户首次启动因此会被 Gatekeeper 拦下，需在系统设置里手动允许；此前 README 承诺"一键安装"却
   未带这条限定，与项目自陈的原则冲突（"拿不到数据就显示未验证，永远不会为了好看而点亮"）。
-- **1.1.0 可能先在 GitHub 存在、后在 npm 存在**。`npm publish --provenance` 需 owner 在 npmjs.com 一次性开启
-  Trusted Publishing（或配 `NPM_TOKEN` secret），见 [release.yml](.github/workflows/release.yml) 头部注释与
-  P6 §13 的"发布后遗留"。该前置未解除前，npm 上不会自动出现 1.1.0。
+- **1.1.0 先在 GitHub 存在**。GitHub Release 与源码 tarball 已随 tag 产出；registry 上仍是 `glasspane-mcp@0.1.0`
+  与 `glasspane-install@1.0.0`，直到 owner 跑一次 `mode=publish` 并 `npm stage approve`（发布不可逆，这最后一步刻意
+  不自动化，见 [release.yml](.github/workflows/release.yml) 头部口径）。
 
 ## [0.1.0] — 2026-09-21 … 2026-09-22
 

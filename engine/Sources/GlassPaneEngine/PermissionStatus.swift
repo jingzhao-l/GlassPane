@@ -109,13 +109,13 @@ public struct PermissionDescriptor: Equatable, Sendable {
             kind: .screenRecording,
             displayName: "屏幕录制",
             purposeText: "对比操作前后的画面像素，界面变化靠它来确认",
-            degradationText: "缺少时：只看界面结构和数值，画面变化无法判定，相关结论会更保守"
+            degradationText: "只看界面结构和数值，画面变化无法判定，相关结论会更保守"
         ),
         PermissionDescriptor(
             kind: .developerTools,
             displayName: "开发者工具",
             purposeText: "让调试器附加到进程，用于崩溃现场等深度检查",
-            degradationText: "缺少时：深度调试通道不可用（默认路径不依赖它），下方“验证调试能力”可得实测结论"
+            degradationText: "深度调试通道不可用（默认路径不依赖它），点「验证调试能力」可得实测结论"
         ),
     ]
 

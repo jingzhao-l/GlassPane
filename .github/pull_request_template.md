@@ -53,7 +53,7 @@
 
 CI 不承载 GUI 会话、真实 TCC 席位与真实被测 app 的流程。若本 PR 触及：
 
-- [ ] 已在真机执行相应冒烟，并把结果（含失败与降级形态）写入 [engine/smoke.md](engine/smoke.md)
+- [ ] 已在真机执行相应冒烟，并把结果（含失败与降级形态）写入 [engine/smoke.md](https://github.com/jingzhao-l/GlassPane/blob/main/engine/smoke.md)
 - [ ] 权限主体核对通过：设置面板「Daemon 状态 → 主体」与实际服务的二进制一致
 - [ ] 涉及 launchd 的作业，验证过 `--restore-launchd` 的修复路径
 

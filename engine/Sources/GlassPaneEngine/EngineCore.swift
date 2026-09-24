@@ -24,7 +24,7 @@ public final class EngineCore {
     /// In-memory snapshot retention cap (P1 spec v1.1 §1.5).
     public static let snapshotHistoryLimit = 8
 
-    public let version = "1.1.0"
+    public let version = "1.1.1"
     public let protocolVersion = "0"
     public private(set) var attachedApp: AttachedApp?
     /// Currently active project (P1 spec v1.4 §1.3). Set via attach with projectId.
@@ -288,9 +288,17 @@ public final class EngineCore {
         }
         // The stored path was vetted by `evidenceStorageRefusal` before the
         // rebind; the only fall-through left is a project that never named one
-        // (spec v1.5 §9.3), which keeps the store's own directory.
-        if let evidenceStore, let dir = entry?.evidenceStoragePath {
-            evidenceStore.setDirectory(dir)
+        // (spec v1.5 §9.3). The directory is **reset on every attach**: a
+        // project without an `evidenceStoragePath` returns the store to its
+        // default directory, otherwise "attach A (has path) then attach B (no
+        // path)" keeps writing B's evidence into A's archive — cross-project
+        // cross-write, and the attribution is wrong on the record (v1.5 §9.3).
+        if let evidenceStore {
+            if let dir = entry?.evidenceStoragePath {
+                evidenceStore.setDirectory(dir)
+            } else {
+                evidenceStore.useDefaultDirectory()
+            }
         }
         // Re-attach to the same app is idempotent; a different app
         // invalidates the evidence history and the degradation window
@@ -316,7 +324,7 @@ public final class EngineCore {
     private func requireRegistry() throws -> ProjectRegistry {
         guard let projectRegistry else {
             throw GPError(
-                code: .notFound,
+                code: .internalError,
                 message: "no project registry is configured for this engine instance, so no projectId can be resolved and nothing can be registered — this is not an answer about \(ProjectRegistry.defaultProjectsPath): nothing was read and nothing was written",
                 remedy: Self.noRegistryRemedy
             )
@@ -1239,18 +1247,32 @@ public final class EngineCore {
 
     // MARK: - P1 project registry (spec v1.4 §1)
 
-    /// List all registered projects.
-    public func projectList() -> [String: Any] {
+    /// 没有注册表时的统一口径：**报错**，不是回一份空表。
+    /// 空列表在 agent 与面板眼里等于"用户没有注册任何项目"，那是一个引擎并没有
+    /// 测量过的结论（P0 §8 禁止的就是这个）。生产 daemon 一定注入注册表
+    /// （`glasspaned` 里的 `ProjectRegistry.live()`），所以这条只在"核心被脱离了
+    /// 它的存储面来使用"时触发。
+    private func registryOrThrow(_ doing: String) throws -> ProjectRegistry {
         guard let projectRegistry else {
-            // C-03: zero rows from an engine with no registry is not "nothing is
-            // registered" — the same honesty rule B-1 established for an
-            // unreadable file.
-            return [
-                "projects": [[String: Any]](),
-                "registryConfigured": false,
-                "registryFailure": "this engine instance has no project registry configured",
-                "remedy": Self.noRegistryRemedy,
-            ]
+            throw GPError(
+                code: .internalError,
+                message: "no project registry is configured for this engine; cannot \(doing)"
+            )
+        }
+        return projectRegistry
+    }
+
+    /// List all registered projects.
+    public func projectList() throws -> [String: Any] {
+        guard let projectRegistry else {
+            // C-03, main-facing contract: with no registry there is nothing to
+            // enumerate, and "nothing is registered" is a verdict no measurement
+            // supports — refuse rather than answer an empty table.
+            throw GPError(
+                code: .internalError,
+                message: "no project registry is configured for this engine; cannot list projects",
+                remedy: Self.noRegistryRemedy
+            )
         }
         let entries: [[String: Any]] = projectRegistry.all.map { entry in
             var dict: [String: Any] = [
@@ -1396,6 +1418,24 @@ public final class EngineCore {
         return EvidenceStore(directory: dir, now: clock).prune(olderThanDays: olderThanDays)
     }
 
+    /// 解析"该动哪个档案目录"。
+    ///
+    /// 绝不回落到 `EvidenceStore.defaultDirectory`：那是一条"核心没有档案，
+    /// 却去删 `~/.glasspane/evidence/`"的路径——从任何一个个测都能触到用户的
+    /// 真实证据档案，而删除是不可逆的（与 A-1 同形状，只是后果更重）。
+    /// 没配 `evidenceStoragePath` 的项目，证据本就写在活跃档案的目录里
+    /// （attach 时的 `setDirectory(path ?? 活跃目录)`，同口径）。
+    private func archiveDirectory(for configured: String?, subject: String) throws -> String {
+        if let configured, !configured.isEmpty { return configured }
+        guard let evidenceStore else {
+            throw GPError(
+                code: .internalError,
+                message: "no evidence archive is configured for this engine; refusing to prune \(subject)"
+            )
+        }
+        return evidenceStore.directory
+    }
+
     // MARK: - P1 snapshot/restore (spec v1.1 §1)
 
     /// Captures a digest-only baseline of the attached app's AX tree and
@@ -1523,7 +1563,6 @@ public final class EngineCore {
                     message: "tier-1 restore plan invalid for snapshot '\(snapshotId)': \(validation.issues.joined(separator: "; "))"
                 )
             }
-            registerRestoreApproval(snapshotId: snapshotId, mode: "rollback_full", hasSteps: false)
 
             // P6 §5.5: gpz1 checkpoints have a live execution surface — the
             // probe retained the export under this snapshot's ref, so the
@@ -1533,6 +1572,10 @@ public final class EngineCore {
                let inbox = probeInbox, let pid = attachedApp?.pid,
                inbox.connection(for: pid) != nil {
                 if let post = inbox.checkpointRestore(pid: pid, ref: snapshot.snapshotId, domains: plan.domains) {
+                    registerRestoreApproval(
+                        snapshotId: snapshotId, mode: "rollback_full", hasSteps: false,
+                        outcome: "executed via gp-probe"
+                    )
                     return [
                         "snapshotId": snapshot.snapshotId,
                         "baselineTreeDigest": snapshot.treeDigest,
@@ -1561,6 +1604,10 @@ public final class EngineCore {
                         : "the probe answered and refused the rewrite (\(why)): re-snapshot with gp_snapshot against the live probe and restore again, or roll back on the UI with tier-2 ffwd by passing `steps`"
                 )
             }
+            registerRestoreApproval(
+                snapshotId: snapshotId, mode: "rollback_full", hasSteps: false,
+                outcome: "planned only (no execution surface)"
+            )
             return [
                 "snapshotId": snapshot.snapshotId,
                 "baselineTreeDigest": snapshot.treeDigest,
@@ -1581,24 +1628,31 @@ public final class EngineCore {
                 "rollbackExecuted": false,
                 "executionSurface": "z5-probe-runtime",
                 "probeVersion": probe.probeVersion,
-                "consistent": true
+                // P5 §6.4 原文要求计划态回 consistent:true。这里保留该字段
+                // （不改方法表），但补一个 basis 说明它表达的是"计划自洽"，
+                // 不是"实测到状态一致"——面板与 agent 都不该把它读成后者。
+                "consistent": true,
+                "consistentBasis": "plan-only, state not re-measured"
             ]
         }
         guard let snapshot = snapshot(withId: snapshotId) else {
             throw GPError(code: .noSnapshot, message: "unknown snapshotId \(snapshotId)")
         }
 
-        // P5 §3.5: high-risk approval registration before every executed
-        // restore form (compare / ffwd / rollback_full). Registration is
-        // best-effort — the ledger is an audit surface, never a gate: a write
-        // failure or rejected reason must not change restore semantics.
-        registerRestoreApproval(snapshotId: snapshotId, mode: mode, hasSteps: steps != nil)
-
+        // P5 §3.5: 高风险操作的审批登记。登记是 best-effort——台账是审计面，
+        // 不是闸门：写失败或原因被拒都不该改变 restore 语义。
+        // 但**登记的时机**必须晚于被测动作：此前它在动作之前就写下
+        // "restore executed: …"，而 ffwd 可能中途失败、档 1 计划态根本没执行，
+        // 于是一条不可抵赖的链上留下了没发生过的事（P5 §3.2 的定位恰是防抵赖）。
         guard let steps else {
             // Baseline-consistency form: compare current tree against the
             // snapshot digest. confirmed/total stay 0 — no step ran.
             let tree = try currentTreeDigest()
             let consistent = tree.digest == snapshot.treeDigest
+            registerRestoreApproval(
+                snapshotId: snapshotId, mode: mode, hasSteps: false,
+                outcome: "executed"
+            )
             return [
                 "snapshotId": snapshot.snapshotId,
                 "baselineTreeDigest": snapshot.treeDigest,
@@ -1624,20 +1678,32 @@ public final class EngineCore {
                     "operationId": outcome["operationId"] as? String ?? ""
                 ])
             } catch {
-                throw Self.restoreStepFailure(index: index, inner: error)
+                registerRestoreApproval(
+                    snapshotId: snapshotId, mode: mode, hasSteps: true,
+                    outcome: "failed at step \(index + 1)"
+                )
+                throw Self.restoreStepFailure(index: index + 1, inner: error)
             }
         }
 
         // Post-roll-forward target tree for the consistency reference.
-        let target = try? currentTreeDigest()
+        // 这里曾经用 `try?` 吞掉捕获失败：nil 进响应字典后 JSONSerialization
+        // 直接抛错，整包退化成一个不相干的 GP_E_INTERNAL（remedy 还在说
+        // "缩小 observe maxDepth"），而 `consistent:false` 又宣称了一个根本没
+        // 测到的结论。失败必须按它本来的面目上报。
+        let target = try currentTreeDigest()
+        registerRestoreApproval(
+            snapshotId: snapshotId, mode: mode, hasSteps: true,
+            outcome: "executed \(stepResults.count)/\(steps.count) steps"
+        )
         return [
             "snapshotId": snapshot.snapshotId,
             "baselineTreeDigest": snapshot.treeDigest,
             "steps": stepResults,
             "confirmed": stepResults.count,
             "total": steps.count,
-            "targetDigest": target?.digest as Any,
-            "consistent": target.map { $0.digest == snapshot.treeDigest } ?? false
+            "targetDigest": target.digest,
+            "consistent": target.digest == snapshot.treeDigest
         ]
     }
 
@@ -1645,14 +1711,22 @@ public final class EngineCore {
 
     /// P5 §3.5: registers one high-risk approval record for an executed
     /// restore. Best-effort and non-blocking by design.
-    private func registerRestoreApproval(snapshotId: String, mode: String?, hasSteps: Bool) {
+    /// 登记一次高风险 restore。`outcome` 由**实际结局**生成（executed /
+    /// failed at step N / planned only），不再由调用前的猜测写死。
+    private func registerRestoreApproval(
+        snapshotId: String,
+        mode: String?,
+        hasSteps: Bool,
+        outcome: String
+    ) {
+        let label = Self.approvalLedgerLabel(mode: mode, hasSteps: hasSteps)
         approvalGate?.append(
             operationRef: snapshotId,
             operationType: "restore",
             riskTier: .high,
             decision: .approve,
-            approvedBy: "daemon:auto",
-            reason: "restore executed: \(Self.approvalLedgerLabel(mode: mode, hasSteps: hasSteps))"
+            approvedBy: ApprovalGate.autoApprover,
+            reason: "restore \(outcome): \(label)"
         )
     }
 

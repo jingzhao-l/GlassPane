@@ -33,6 +33,7 @@ import argparse
 import json
 import os
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -49,6 +50,8 @@ WATCH_QUEUE_LIMIT = 64
 WATCHPOINT_NOTE_LIMIT = 24
 TRACE_SAMPLES = 5
 TRACE_INTERVAL_S = 1.0
+#: R30回传 socket 的 connect/send 上限：对端不读取时宁可报错，不可挂住桥。
+SEND_SOCK_TIMEOUT_S = 10.0
 MAX_TRACE_SAMPLES = 32
 EMIT_TIMEOUT_S = 5.0
 
@@ -587,6 +590,7 @@ def emit(payload, out_path=None, send_sock=None, timeout_s=None):
     The socket is bounded on connect *and* send and always closed: an engine
     side that stopped draining would otherwise hang the bridge forever with a
     leaked fd (§6.2 only promises "failure surfaces", silence is not success).
+    The default bound is EMIT_TIMEOUT_S; an explicit timeout_s overrides it.
     """
     text = render_json(payload)
     sys.stdout.write("%s%s%s\n" % (SENTINEL_BEGIN, text, SENTINEL_END))
@@ -622,9 +626,36 @@ def run_outer(args):
         samples=args.samples,
         extra_script=args.setup,
     )
+    # `start_new_session=True` + 到期 `killpg`：debugserver 是 lldb 的**子进程**
+    # 且继承了同一对管道。`subprocess.run(timeout=)` 超时只 kill 直接子进程，
+    # 随后仍会无时限地 `communicate()` 等管道 EOF——而管道被活着的 debugserver
+    # 握着，于是"永不静默挂起"的注释不成立，且被 attach 的目标进程会常驻
+    # SIGSTOP（用户的被测应用被冻死在这里）。自成进程组才能整组收掉。
+    timed_out = False
     try:
-        completed = subprocess.run(argv, capture_output=True, text=True, timeout=args.timeout)
+        proc = subprocess.Popen(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
+        )
+    except OSError as error:
+        sys.stderr.write("cannot spawn lldb: %s\n" % error)
+        return 2
+    try:
+        out, err = proc.communicate(timeout=args.timeout)
+        completed = _Completed(proc.returncode, out, err)
     except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            out, err = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, err = "", ""
+        completed = _Completed(proc.returncode, out, err)
+    if timed_out:
         # F5: lldb --batch can hang pre-timeout on machines where debug attach
         # is gated or cold-started. Structured refusal, never a silent hang.
         payload = assemble_result(
@@ -636,7 +667,9 @@ def run_outer(args):
                 "lldb did not produce a capture within %ss. On this machine "
                 "debugger attach/launch is permission-gated (P6 §0 F1/F2/F5): "
                 "grant System Settings > Privacy & Security > Developer Tools to the "
-                "calling process, or run inside an already-authorized Terminal session." % args.timeout,
+                "calling process, or run inside an already-authorized Terminal session. "
+                "Note: the whole lldb process group was killed on timeout, so a target "
+                "that had been stopped here is no longer held by this bridge." % args.timeout,
             ],
         )
         try:
@@ -665,7 +698,141 @@ def run_outer(args):
     except OSError as error:
         sys.stderr.write("send-sock delivery failed: %s\n" % error)
         return 2
-    return 0 if payload.get("status") != "failed" else 1
+    return 0 if capture_succeeded(payload) else 1
+
+
+class _Completed:
+    """Popen 结果的最小封装，保持与 subprocess.CompletedProcess 同样的读法。"""
+
+    __slots__ = ("returncode", "stdout", "stderr")
+
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+#: 只有"确实停住并采到线程"才算一次成功的现场采集。
+#: 此前退出码写成 `0 if status != "failed" else 1`，于是 `no-process`、
+#: `eStateRunning`（预算内没停住）、`exited-before-stop` 这些**零线程**结局
+#: 全部以 0 退出——开发者工具 TCC 被拒时 lldb 仍会跑完 gp-capture 并回
+#: `no-process`，下游于是收到"成功但什么都没有"。
+#:
+#: A-11 的第一版把白名单直接比在 `str(process.GetState())` 上，这一步是押注：
+#: 本机绑定里 `SBProcess.GetState()` 的签名是 `-> lldb::StateType`（C 扩展
+#: `_lldb...so` 里的枚举，`lldb/__init__.py` 中并无 SBEnum 类兜住 __str__），
+#: 它的 str() 到底是 "eStateStopped"、"5"、还是 "StateType.eStateStopped"，
+#: 我们**没有实测**（requires run）。押错的后果不是报错，而是**每次真机采集都
+#: 以 1 退出**——看着像守卫生效，其实判据已经失效（false red）。
+#: 因此：契约是**状态名**，判定不再经过枚举的字符串渲染。
+_OK_STATE_NAMES = ("eStateStopped", "eStateAttached")
+
+#: LLDB `ProcessState` 的状态名全集（判定与归一只认这些名字——闭集）。
+#: `eStateAttached` 必须在列：白名单认它，而 producer 是把 lldb 返回的 int 反查
+#: 成名字传给父进程的。漏一个名字不是少一条记录，而是**真机上每一次以 attached
+#: 停住的采集都判成失败**（int 反查不到 → status 无名 → 判定表落空）。
+PROCESS_STATE_NAMES = (
+    "eStateInvalid", "eStateUnloaded", "eStateConnected", "eStateAttaching",
+    "eStateLaunching", "eStateStopped", "eStateRunning", "eStateCrashed",
+    "eStateExited", "eStateSuspended", "eStateDetached", "eStateAttached",
+)
+
+#: name -> int 的**权威来源是运行时可导入的 `lldb` 模块常量**（真机走这条：
+#: 取值由 LLDB 自己定义，见 `state_int_by_name()`，且权威分支**不与本表混用**）。
+#: 下面这张表只是纯逻辑 CI（没有 lldb 可导入）用的镜像：数值 = 上面声明次序的
+#: 序号，**未与本机 lldb 核对过**，也不参与真机判定——producer 在 lldb 内部用
+#: lldb 自己的值得到名字，传给父进程的 status 已经是裸状态名，父进程只做
+#: 名对名比较，因此这张表的数值再怎么错也不会把一次真采集判成失败。
+_FALLBACK_STATE_INT = {name: index for index, name in enumerate(PROCESS_STATE_NAMES)}
+
+_STATE_INT_BY_NAME = None
+
+
+def state_int_by_name():
+    """状态名 -> 整数。lldb 可导入时**只**信 lldb 常量（权威分支），一条也不用
+    镜像补齐：混表会让镜像序号盖过真值，int→名字 反查就此认错状态——那正是本
+    次要消除的那类假象。只有 lldb 完全取不到值（纯逻辑 CI）才退回镜像表。
+    """
+    global _STATE_INT_BY_NAME
+    if _STATE_INT_BY_NAME is not None:
+        return _STATE_INT_BY_NAME
+    resolved = {}
+    try:
+        import lldb
+    except ImportError:
+        lldb = None
+    if lldb is not None:
+        for name in PROCESS_STATE_NAMES:
+            value = getattr(lldb, name, None)
+            if value is None:
+                continue  # 这个 LLDB 版本没有该状态：如实缺席，不猜
+            try:
+                resolved[name] = int(value)
+            except (TypeError, ValueError):
+                continue  # 常量取不到 int：同样缺席，绝不让 producer 因此炸掉
+    if not resolved:
+        # 到这里就是没有 lldb 的纯逻辑环境：镜像表兜底，只为让 name↔int 自洽
+        # 可测，**不代表**本机 lldb 的取值（真机走上面那条权威分支）。
+        resolved = dict(_FALLBACK_STATE_INT)
+    _STATE_INT_BY_NAME = resolved
+    return resolved
+
+
+def _name_for_int(value, table):
+    for name, mapped in table.items():
+        if mapped == value:
+            return name
+    return None
+
+
+def normalize_state(state, table=None):
+    """把进程状态归一成 (int | None, 裸状态名 | None)。
+
+    接受四种传入形态，判定结果与枚举怎么 str() 无关：
+      int 5 / 数字串 "5" / 裸名 "eStateStopped" / 带前缀名 "lldb.eStateStopped"
+      （前缀按最后一段剥，所以 "StateType.eStateStopped" 同样吃得下）。
+    解析不出状态名的一律回 None 名字（`no-process`、`failed` 这些合成结局串
+    就落在这里）——**未知即拒绝**，不替 lldb 编一个名字。
+    `table` 可注入：单测用它证明结论不依赖具体数值。
+    """
+    if table is None:
+        table = state_int_by_name()
+    if state is None or isinstance(state, bool):
+        return None, None
+    if isinstance(state, int):
+        return state, _name_for_int(state, table)
+    text = str(state).strip()
+    digits = text[1:] if text[:1] in ("+", "-") else text
+    if digits.isdigit():
+        value = int(text)
+        return value, _name_for_int(value, table)
+    bare = text.rsplit(".", 1)[-1]
+    if bare in table:
+        return table[bare], bare
+    # 词表是**闭集**：只认 PROCESS_STATE_NAMES 里的名字。放一个"看着像状态名"的
+    # 字符串过去，等于让判定表之外的人也能给状态命名（`eStateStoppedNot` 这种
+    # 拼错的名字会一路飘到判定里，而拼错的人收不到任何提示）。
+    return None, None
+
+
+def state_matches(state, expected_name, table=None):
+    """这个状态与那个状态名是不是同一件事？int 与名字在此互解。"""
+    _actual_int, actual_name = normalize_state(state, table)
+    _expected_int, expected = normalize_state(expected_name, table)
+    if actual_name is None or expected is None:
+        return False
+    return actual_name == expected
+
+
+def capture_succeeded(payload):
+    """本次采集是否可当作成功交付（纯函数，单测直接钉住判定表）。
+    状态：int / 裸名 / 带前缀名都认；线程表为空一律不算成功。"""
+    if not isinstance(payload, dict):
+        return False
+    status = payload.get("status")
+    if not any(state_matches(status, name) for name in _OK_STATE_NAMES):
+        return False
+    return bool(payload.get("threads"))
 
 
 # ---------------------------------------------------------------------------
@@ -1034,10 +1201,22 @@ def _payload_from_process(process, mode, errors=None, samples=None):
             signal_description = "signal %d" % top.GetStopReasonDataAtIndex(0)
     except Exception:
         pass
+    # 进程状态**在此处归一一次**：int 直接取自 SB 枚举，名字由 lldb 模块常量
+    # 反查（`state_int_by_name()` 在 lldb 内部走权威分支）。这条路径与 str()
+    # 无关，所以退出码判据不再押在"枚举怎么渲染"上——本文件里 `_describe_stop`
+    # 的 `stop == 7` 与 `run_capture_cli` 的 `state == lldb.eStateStopped` 本来
+    # 就是数值比较，这里补齐第三处（原先唯一用 str() 的就是这一行）。
+    raw_state = process.GetState()
+    try:
+        state_input = int(raw_state)
+    except (TypeError, ValueError):
+        state_input = raw_state  # 取不到 int：交给 normalize_state 尽力解析
+    _state_int, state_name = normalize_state(state_input)
+    status = state_name or ("state(%s)" % raw_state)
     result = assemble_result(
         mode=mode,
         target={"pid": process.GetProcessID()},
-        status=str(process.GetState()),
+        status=status,
         threads=threads,
         registers=_collect_registers(top) if top and top.IsValid() else {},
         stop_reason=stop_reason,

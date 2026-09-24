@@ -15,7 +15,11 @@ public enum Classifier {
             : "act.\(pack.signals.act.action.rawValue) -> ax-confirm -> tree-digest -> pixel-diff"
 
         // Ordered rules; the first match wins.
-        if pack.signals.crash?.processAliveAfter == false {
+        // T1 只在"操作前活着、操作后没了"时成立。此前只看 after==false，
+        // 于是 attach 到一个已死进程（before 也是 false）会被说成"崩在本次
+        // 操作里"——把"没启动"报成"被我们弄坏了"。
+        if pack.signals.crash?.processAliveBefore == true
+            && pack.signals.crash?.processAliveAfter == false {
             return outcome(.t1, path: path, evidence: evidenceSummary,
                 anomaly: "target process exited during the operation",
                 next: "relaunch the app and re-attach, then replay the recipe; inspect ~/Library/Logs/DiagnosticReports for a crash report")
@@ -81,13 +85,13 @@ public enum Classifier {
             // claimed (silence ≠ no-change for state-incapable probes).
             if handlerProbe.hitCount > 0 && stateChanged == false && !axChanged && !pixelChanged {
                 return outcome(.t4, path: path, evidence: evidenceSummary,
-                    anomaly: "logic bug: \(handlerProbe.hitCount) handler hit(s) (\(handlerProbeSummary(handlerProbe))) but state, AX tree and pixels all silent",
+                    anomaly: "logic bug: \(handlerProbe.hitCount) handler hit(s) (\(handlerProbeSummary(handlerProbe))) but state and AX tree silent, \(pixelClause(pack))",
                     next: "inspect the handler body between hit locations \(handlerProbeSummary(handlerProbe)) — the bound effect is missing or writes a stale key")
             }
             // T5: state moved but neither view channel followed (dependency loss).
             if handlerProbe.hitCount > 0 && stateChanged == true && !axChanged && !pixelChanged {
                 return outcome(.t5, path: path, evidence: evidenceSummary,
-                    anomaly: "SwiftUI dependency loss: handler hit and state changed (\(stateDiffSummary(pack))) but AX tree and pixels stayed silent",
+                    anomaly: "SwiftUI dependency loss: handler hit and state changed (\(stateDiffSummary(pack))) but AX tree stayed silent, \(pixelClause(pack))",
                     next: "check the view's observation of the changed key (Z1b-style direct @State writes and missing @Observable registration are the usual roots); re-bind or route through the observed model")
             }
             // T7: view channels moved while the observed state stayed put.
@@ -139,11 +143,18 @@ public enum Classifier {
             ? " and the assertion failed"
             : ""
         return outcome(.t3, path: path, evidence: evidenceSummary,
-            anomaly: "operation confirmed but neither the AX tree nor pixels changed\(failure); binding lost",
+            anomaly: "operation confirmed but the AX tree did not change and \(pixelClause(pack))\(failure); binding lost",
             next: "verify the selector matches an enabled control; observe the tree; check the action binding and isEnabled state")
     }
 
     // MARK: - Internals
+
+    /// 像素通道的如实措辞：没有捕获值时不能写成"像素没变"。
+    /// 归类判定保持保守不变（nil 走 false 分支），改的只是**说出来的那句话**
+    /// ——P0 §8 授权 T3/T4/T5 的是归类结论，不是宣称一个未测量的负例。
+    static func pixelClause(_ pack: EvidencePack) -> String {
+        pack.signals.pixelDiff == nil ? "pixels not measured" : "pixels unchanged"
+    }
 
     private static func handlerProbeSummary(_ handlerProbe: HandlerProbeSignal) -> String {
         let refs = handlerProbe.handlers.prefix(4).map { "\($0.file):\($0.line)" }.joined(separator: ", ")

@@ -68,11 +68,15 @@ public struct ApprovalRecord: Codable, Equatable {
 ///   silently-valid one — so `--approval-verify` exposes the damage.
 public final class ApprovalGate {
 
-    /// Default daemon ledger path: the approvals file of the home-derived state
+/// Default daemon ledger path: the approvals file of the home-derived state
     /// root. Derived from `StateRoot` rather than composed here — the home
     /// lookup behind it ignores a `HOME` override, so the per-user location has
     /// to come from one named source (X-22).
     public static let defaultPath = StateRoot.homeDefault().approvalsFile
+    /// 当前协议没有人类审批交互（方法表冻结，P5 §3.8 诚实声明 1），因此台账里
+    /// 的记录一律由 daemon 自登记。这个值是**唯一真源**：面板要把它如实呈现为
+    /// "后台服务自批"，就不能各处再抄一遍字面量。
+    public static let autoApprover = "daemon:auto"
     /// Upper bound for `ApprovalRecord.reason` (P5 §3.2).
     public static let reasonMaxLength = 512
 

@@ -1,20 +1,27 @@
-# GlassPane 项目级 iterate 配置（覆盖 skill 默认值 / overrides master config）
-# 生成：2026-09-22 AI onboarding（基线 origin/main，gate 命令镜像 .github/workflows/ci.yml）
+# GlassPane 项目级 iterate 配置
+# 由 AI 通道 onboarding 生成（GlassPane dogfood 自家 iterate 生态）。
+# 改版本请走 scripts/set-version.mjs；本文件的 validation.commands 是运行时唯一
+# 可信命令白名单——只能逐字匹配执行，加参数或换目录都会被拒绝。
 
-goal: "全面审查并迭代本项目目前所有代码实现（已提交状态，6 维 × 3 轮，收敛 0 finding）"
+goal: "在完全不牺牲证据诚实性的前提下收敛代码质量：门禁全绿、跨层契约同步、测不出的仍标未验证"
 
-max_rounds: 3
+max_rounds: 7
+
+# 审查/修复产出的语言（本仓文档与提交正文以中文为主）
 language: zh
+
 mode: iterate
 
-# 本轮启用维度（用户选定：核心 6 维；performance / style-tests / ui-ux 留下一轮）
 dimensions:
   - correctness
   - security
+  - performance
   - architecture
+  - style-tests
+  - tech-debt
   - spec-compliance
   - frontend-backend
-  - tech-debt
+  - ui-ux
 
 review:
   scope: full
@@ -25,54 +32,111 @@ atomic:
 
 git:
   target_branch: main
+  # 本仓主工作副本常被并行会话以 dirty 状态占用，worktree 隔离是硬要求
   use_worktree: true
   push_per_round: false
   auto_merge: false
 
+# 按范围的审查蓝图：目标指明层次时走对应集合，跨层改动取并集
+dimension_sets:
+  engine:
+    dimensions:
+      - correctness
+      - performance
+      - architecture
+      - spec-compliance
+      - style-tests
+      - tech-debt
+    focus:
+      correctness: "归因/证据语义不可让步：不得为通过断言而伪造测量或借用他卡读数"
+      performance: "注意 latency budget 与快照保留上限（EngineCore 常量）"
+  gui:
+    dimensions:
+      - ui-ux
+      - frontend-backend
+      - correctness
+      - style-tests
+    focus:
+      ui-ux: "面板只呈现 daemon 实测结果；未验证态必须可见且不被美化"
+      frontend-backend: "设置界面读数与 glasspaned --permissions 自报必须同源"
+  mcp:
+    dimensions:
+      - correctness
+      - spec-compliance
+      - security
+      - style-tests
+    focus:
+      spec-compliance: "工具契约三处镜像：kernel schema / daemon / mcp-shell tools.ts"
+      security: "结构化错误里的 remedy 必须可执行，且不得泄露屏幕内容"
+  bridge:
+    dimensions:
+      - correctness
+      - security
+      - style-tests
+      - tech-debt
+  release:
+    dimensions:
+      - correctness
+      - security
+      - spec-compliance
+      - tech-debt
+    focus:
+      security: "发布通道不可逆：provenance / staged-only / 校验和三者语义不得混淆"
+  docs:
+    dimensions:
+      - spec-compliance
+      - correctness
+      - tech-debt
+    focus:
+      correctness: "文档主张须能指到代码位置或已发生的 CI/registry 实测"
+
 validation:
   command_whitelist:
-    - "swift"
     - "npm"
+    - "node"
+    - "swift"
     - "python3"
-    - "pytest"
-  # 唯一运行时权威：只在下列模块的精确命令中执行。
-  # 工作目录约定见 ITERATE.md §3（engine 类命令在 engine/ 下跑，probe 在 engine/probe/ 下跑，以此类推）。
+    - "sh"
+  # 全部经仓库根实测通过（2026-09-22），且与 .github/workflows/ci.yml 各 lane 对齐
   commands:
-    engine:
-      - "swift build"
-      - "swift test"
-    engine-probe:
-      - "swift test"
-    engine-signal-smoke:
-      - "python3 .signal_smoke.py .build/debug/glasspaned"
-    bridge:
-      - "python3 -m pytest -q"
-    kernel:
-      - "npm test"
-    mcp-shell:
-      - "npm test"
-    installer:
-      - "npm test"
-    root:
+    typescript:
       - "npm run build"
-      - "npm run test --workspaces --if-present"
+      - "npm test --workspaces --if-present"
+    release:
+      - "node scripts/check-version.mjs"
+    swift:
+      - "swift build --package-path engine"
+      - "swift test --package-path engine"
+    swift-probe:
+      - "swift test --package-path engine/probe"
+    python:
+      - "python3 -m pytest -q bridge"
+    shell:
+      - "sh -n install.sh"
+    docs:
+      - "node scripts/check-doc-links.mjs"
 
+# 交付时必须成立的不变量（/iterate defensive 收尾由 `iterate invariant` 执行）
 invariants:
   ensure:
     - "README.md"
-    - "LICENSE"
-    - "specs"
-    - "kernel/schemas/evidence-pack.schema.json"
+    - "README.zh-CN.md"
+    - "CHANGELOG.md"
+    - "SECURITY.md"
+    - "CONTRIBUTING.md"
+    - "install.sh"
+    - "specs/GlassPane_PRD_v1.0.md"
   commands:
-    engine:
-      - "swift build"
-      - "swift test"
-    bridge:
-      - "python3 -m pytest -q"
-    kernel:
-      - "npm test"
-    mcp-shell:
-      - "npm test"
+    typescript:
+      - "npm run build"
+      - "npm test --workspaces --if-present"
+    release:
+      - "node scripts/check-version.mjs"
+    swift:
+      - "swift build --package-path engine"
+      - "swift test --package-path engine"
+    python:
+      - "python3 -m pytest -q bridge"
 
 reviewer:
   output_schema_validation: true
@@ -80,87 +144,31 @@ reviewer:
   coverage_validation: true
   scope_chunk_size: 25
 
+personalization:
+  # 禁区：验收台账与跨语言契约，iterate 不得单边改写
+  protected_paths:
+    - "specs/**"
+    - "kernel/schemas/**"
+    - "LICENSE"
+  risk_areas:
+    - path: "engine/Sources/GlassPaneEngine/"
+      reason: "归因与证据语义核心；改动等于改动产品对外承诺"
+    - path: "engine/Sources/glasspaned/main.swift"
+      reason: "信号处理与 socket 生命周期（sigwait 方案被真机证伪过替代方案）"
+    - path: "mcp-shell/src/tools.ts"
+      reason: "对外 MCP 工具契约，需与 kernel schema 和 daemon 三处同步"
+    - path: ".github/workflows/release.yml"
+      reason: "不可逆发布通道（GitHub Release 资产 + npm provenance/stage）"
+    - path: "scripts/version-sites.mjs"
+      reason: "版本线位点表；漏一位即用户装到的与仓库不一致"
+
+# onboarding 状态（AI 通道；指纹由 iterate_cli.fingerprint 计算，勿手改）
 onboarding:
   version: "1.0"
-  completed_at: "2026-09-22T21:20:00+08:00"
-  channel: "ai"
+  channel: ai
   drift_check: true
-  drift_ignore:
-    - "package-lock.json"
-    - "kernel/package-lock.json"
-    - "mcp-shell/package-lock.json"
+  skill_version: 3.4.2
+  completed_at: "2026-09-22T14:00:55Z"
   fingerprints:
-    - path: "package.json"
-      sha256: "f767ed21731facf65ec06f90a726f4ae5bcba32a9fe949f818de7738cd3a4003"
-    - path: "engine/Package.swift"
-      sha256: "0cd2c203c4e654bc6f151b79518d865ac9f03d45558eba6ef103428e9c94854c"
-    - path: "kernel/package.json"
-      sha256: "ec60190f89d59248308d470cb76b996ea1ee1a8dcb9cb92573709c797a1ca0ba"
-    - path: "mcp-shell/package.json"
-      sha256: "a994cd2931286fa18fbd932350253951955d5e617d132a7fe81a00c59e31cb40"
-    - path: "installer/package.json"
-      sha256: "61ed367694f951ec8702bf3c389e8c8884104b97ab201c48556b1eecc432cd9b"
-
-personalization:
-  version: "1.0"
-
-  # 禁区：契约真源与法律文件，本轮只报不改
-  protected_paths:
-    - "LICENSE"
-    - "kernel/schemas/**"
-
-  # 风险区：另一会话正在改的面上（2026-09-22 21:00–21:16 的 8 笔提交足迹），改动需与用户合流
-  risk_areas:
-    - path: "installer/"
-      reason: "并行会话刚改过 cli.js/package.json/test（v1.1.0 统一版本线），此处改动合并冲突概率高"
-    - path: "install.sh"
-      reason: "同上（发布 tag 钉版 + npx 自举兑现）"
-    - path: ".github/"
-      reason: "并行会话刚改过 ci.yml/release.yml"
-    - path: "README.md"
-      reason: "并行会话刚重写为英文主入口 + zh-CN 镜像"
-
-  # 已知意图（抑制误报）
-  known_intentional:
-    - file: "engine/Sources/GlassPaneEngine/ApprovalGate.swift"
-      line: 0
-      dimension: "correctness"
-      reason: "方法表冻结导致无人类审批入口，daemon:auto 自批是既成规格决定（结构性缺口 B1，需规格级决策）"
-    - file: "spike/"
-      line: 0
-      dimension: "tech-debt"
-      reason: "一次性实验脚本，非交付面，不计技术债"
-    - file: "engine/Sources/GlassPaneEngine/EvidenceStore.swift"
-      line: 0
-      dimension: "performance"
-      reason: "每次 write 全量列目录属已知 B-18，性能维度本轮未启用，不重复报"
-
-  dimension_focus:
-    - dimension: "correctness"
-      focus: "优先「未测量即上报」类诚实性破口：try? 吞错后仍给结论、硬编码布尔、超时当负例、并发读写裸 var、fd/编号复用后写错对象"
-    - dimension: "security"
-      focus: "路径参数是否可被 agent 控成任意目录（写入/删除）、拼进 shell 脚本的字符串是否转义、socket 单实例与 unlink+bind 竞态、损坏文件是否被降级成空表后覆写"
-    - dimension: "spec-compliance"
-      focus: "对照 specs/GlassPane_P0…P6 中文规格逐条核：协议方法表、§11.7 可核验化、§6.5 冻结面、P5 证据/回滚口径、P4 发布形态"
-    - dimension: "frontend-backend"
-      focus: "mcp-shell(TS) ↔ engine(Swift daemon) 契约一致性：错误码/字段/校验强度双侧是否等价，evidence schema 读侧 legacy 是否两侧放行一致"
-    - dimension: "architecture"
-      focus: "同一判据/同一路径在 daemon、一次性 CLI、面板三处各写一份的漂移；纯函数是否被测试绕过而生产不可达；新增呈现逻辑是否下沉到 engine 库"
-    - dimension: "tech-debt"
-      focus: "注释自称的行为与代码实际不符（撒谎的注释）、开关无触发路径（fail-closed 死功能）、bundle 产物非幂等、被规格淘汰但仍被引用的不变量"
-
-  fix_priority_order:
-    - security
-    - correctness
-    - spec-compliance
-    - frontend-backend
-    - architecture
-    - tech-debt
-
-  forbidden_fixes:
-    - "try? / catch 吞错式修复（用 nil 或默认值掩盖失败）"
-    - "// @ts-ignore / as any 绕过类型"
-    - "# noqa / type: ignore 绕过 Python 检查"
-    - "把断言改成迁就现有实现而不标注意图"
-    - "为通过 gate 而放宽/删除既有测试"
-    - "在面板文案里写 §规格引用或实现自辩话术"
+    - path: package.json
+      sha256: 958fa1006d1266e22ba96225998616ea2c8d763ffbde754b87adc5fe8beff13d

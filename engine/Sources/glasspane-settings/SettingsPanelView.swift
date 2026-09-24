@@ -2,13 +2,16 @@ import SwiftUI
 import UniformTypeIdentifiers
 import GlassPaneEngine
 
-/// 设置面板主窗口（P1 spec v1.2 §6.2）。
+/// 权限页（P1 spec v1.2 §6.2 的 onboarding 面，控制台默认落点）。
 ///
-/// 布局：拖拽引导条（可拖动的 app 图标 + 操作说明）→ 权限清单逐项卡片（图标/
-/// 名称/用途/状态徽标/引导按钮，卡片即落点）→ daemon 状态卡（socket 路径、
-/// 存活、协议版本）→ 拒绝降级形态说明折叠区。窗口打开后每 1s 轮询一次权限
-/// 实测状态，授权完成即自动点亮（拖拽只能打开系统面板，授权动作由用户在系统
-/// 设置里完成，本面板只是替用户精确导航）。
+/// 布局：状态总览 → 拖拽引导条（可拖动的后台服务图标）→ 引导横幅 →
+/// 权限清单逐项卡片（卡片即落点）→ 后台服务卡 → 拒绝降级形态折叠区。
+///
+/// 呈现纪律（与 §11.7 同源，改动时三条都不能破）：
+///  1. 每张卡的前导图标仍是 `Image(systemName: iconName)`——它的符号名就是
+///     P1-C6 真机冒烟用来定位卡片的无障碍标识，换符号等于换掉闸门；
+///  2. 状态由"形状 + 带标识的图标"双表达，不依赖颜色（色盲可用）；
+///  3. 状态真源是 daemon 自报席位，面板不代测；读不到就显示"未验证"。
 struct SettingsPanelView: View {
     @EnvironmentObject private var model: SettingsModel
 
@@ -19,6 +22,7 @@ struct SettingsPanelView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
+                overviewStrip
                 DragGuideBannerView()
                 if let guideText = model.pendingGuideText {
                     GuideBannerView(kind: model.pendingGuideKind, text: guideText) {
@@ -31,63 +35,69 @@ struct SettingsPanelView: View {
                 degradationSection
             }
             .padding(20)
+            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear(perform: startPolling)
         .onDisappear(perform: stopPolling)
-        // 动作之后重新起表：重启/授权改的是 daemon 的状态，面板只能靠**继续测**
-        // 才知道它有没有回来。全部达成时轮询会自己停表，模型加一次计数就是
-        // "该再测下去了"（`SettingsModel.pollingRestartToken`）。
-        .onChange(of: model.pollingRestartToken) { _ in startPolling() }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(SettingsPanelScene.title)
+            Text("权限")
                 .font(.title2.bold())
-            Text("这些权限需要你在系统设置里勾选。每张卡说明它的用途和缺少时的表现；状态自动检测，改动后点「刷新」。")
+            Text("这几项要你在系统设置里勾选。每张卡写明它的用途和缺少时的表现；状态自动检测，改动后点「刷新」。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private var permissionSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Text("权限").font(.headline)
-                Spacer()
+    /// 一眼能看懂的总览：还差几项、差哪几项。省掉"逐张卡看一遍"的负担。
+    private var overviewStrip: some View {
+        let pending = model.entries.filter { $0.kind != .developerTools && $0.status != .granted }
+        return HStack(spacing: 10) {
+            Image(systemName: pending.isEmpty ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                .font(.title3)
+                .foregroundStyle(pending.isEmpty ? Color.green : Color.orange)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(pending.isEmpty ? "必备权限已全部授权" : "还有 \(pending.count) 项必备权限没授权")
+                    .font(.callout.weight(.semibold))
+                Text(pending.isEmpty
+                     ? "开发者工具是可选的深度调试通道，不影响日常使用。"
+                     : pending.map { $0.descriptor.displayName }.joined(separator: "、")
+                     + " 缺得越多，能验证的通道越少。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            // 主体声明（P1 v1.2 §11.2）：状态真源是 daemon 自报席位，面板不代测。
-            Text(subjectLine)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-            // 需要注意的横幅：文案与按钮同源（`daemonAttentionBanner`）。
-            // 「重启后台服务」是破坏性控件（`kickstart -k` 会打断正在执行的操作），
-            // 只在测量支撑得起"该重启"时才出现：要么实测到"系统已授权、运行实例
-            // 读不到"，要么后台服务根本没有服务在监听，要么就是不答话连续重复到
-            // 了能排除"它只是正在忙别的客户端"的程度。
-            // 单次不答话只给非破坏性的「刷新」——它既不会打断任何东西，也是这一
-            // 状态唯一诚实的下一步。不自动重启：那会中断正在进行的 act。
-            if let attention = model.daemonAttentionBanner {
+            Spacer()
+        }
+        .padding(12)
+        .consoleCard(tint: pending.isEmpty ? .green : .orange)
+    }
+
+    private var permissionSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader(
+                title: "权限清单",
+                subtitle: subjectLine,
+                systemImage: "lock.shield"
+            )
+            // 授权已落但运行实例读不到（TCC 判定按进程缓存）→ 给出重启入口。
+            // 不自动重启：那会中断正在进行的 act，必须由用户点。
+            if !model.kindsNeedingRestart.isEmpty {
                 HStack(alignment: .top, spacing: 8) {
-                    Text(attention.text)
-                        .font(.caption)
+                    Image(systemName: "arrow.triangle.2.circlepath.circle")
                         .foregroundStyle(.orange)
+                    Text(model.restartHint)
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
                     Spacer()
-                    if attention.offersRestart {
-                        Button("重启后台服务") { model.restartDaemon() }
-                            .controlSize(.small)
-                            .accessibilityIdentifier(PermissionGuide.restartDaemonIdentifier)
-                            .help("立即重启后台服务（会打断正在执行的操作）")
-                    } else {
-                        // 与 Daemon 状态区那个「刷新」同一个动作、同一个标识：
-                        // 自动化按 gp-refresh 找到的都是"再问一次后台服务"。
-                        Button("刷新") { model.refresh() }
-                            .controlSize(.small)
-                            .accessibilityIdentifier(PermissionGuide.refreshIdentifier)
-                            .help("再问一次后台服务（不重启它，不会打断任何操作）")
-                    }
+                    Button("重启后台服务") { model.restartDaemon() }
+                        .controlSize(.small)
+                        .accessibilityIdentifier(PermissionGuide.restartDaemonIdentifier)
+                        .help("立即重启后台服务（会打断正在执行的操作）")
                 }
                 .padding(10)
                 .background(Color.orange.opacity(0.08))
@@ -97,10 +107,9 @@ struct SettingsPanelView: View {
                 PermissionCardView(
                     entry: entry,
                     capabilityLine: capabilityLine(for: entry.kind),
-                    // 徽标措辞是否带"（实测）"：与 `entry.status` 同源，
-                    // 不允许徽标与标识各读各的值。
-                    badgeComesFromMeasurement: entry.kind == .developerTools
-                        && model.liveDeveloperToolsReport != nil,
+                    verifiedStatus: entry.kind == .developerTools
+                        ? model.developerToolsCapability?.status
+                        : nil,
                     onVerifyCapability: entry.kind == .developerTools
                         ? { Task { await model.verifyDeveloperTools() } }
                         : nil,
@@ -122,130 +131,106 @@ struct SettingsPanelView: View {
             return "正在实测调试能力……通常约 1 分钟，首次启动调试器可能更久"
         }
         if let error = model.developerToolsProbeError { return error }
-        if let report = model.liveDeveloperToolsReport { return report.summaryText() }
-        if model.developerToolsCapability != nil {
-            // 结论还在，但它归属的那个进程不再答话：说清楚为什么这张卡是灰的。
-            return "后台服务当前没有应答：上次实测的结论不再代表现状，恢复连接后重新验证"
-        }
-        return nil
+        return model.developerToolsCapability?.summaryText()
     }
 
     /// 授权主体一行话：daemon 自报身份（含是否 bundle 身份）+ 面板主体免责。
-    /// 读不到身份时的三种成因各说各话——"没在跑"、"跑了但不答话"、"答了但没上报
-    /// 身份"不是一回事，混成一句就是把没测到的事说成测到的。
     private var subjectLine: String {
-        let disclaimer = "；" + PermissionGuide.panelSubjectDisclaimer
-        if let subject = model.daemon.subject {
-            let identity = subject.hasBundleIdentity ? "已打包应用" : "未打包（系统设置列表内只显示文件名）"
-            return "授权主体：\(subject.tccEntryName)（\(identity)）· \(subject.binaryPath)"
+        guard let subject = model.daemon.subject else {
+            return PermissionGuide.daemonOfflineText + "；" + PermissionGuide.panelSubjectDisclaimer
         }
-        switch model.daemon.liveness {
-        case .running:
-            // 有回音，但回音里没带身份字段（不上报这一栏的旧版本）。
-            return "后台服务有回应，但它没有上报自己的授权身份：卡片只能显示未验证" + disclaimer
-        case .presentButSilent:
-            return "后台服务没有回应（socket 文件还在）：授权跟着进程走，此刻读不到它的席位，本卡不做代替显示" + disclaimer
-        case .absent:
-            return PermissionGuide.daemonOfflineText + disclaimer
-        case .notMeasured:
-            return "还没向后台服务打过招呼：点「刷新」读它自报的席位" + disclaimer
-        }
+        let identity = subject.hasBundleIdentity ? "已打包应用" : "未打包（系统设置列表内只显示文件名）"
+        return "授权主体：\(subject.tccEntryName)（\(identity)）"
     }
 
     private var daemonSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Daemon 状态").font(.headline)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                SectionHeader(title: "后台服务", systemImage: "desktopcomputer")
                 Spacer()
                 if model.isRefreshing {
-                    ProgressView().controlSize(.small)
+                    HStack(spacing: 5) {
+                        ProgressView().controlSize(.small)
+                        Text("检测中").font(.caption).foregroundStyle(.secondary)
+                    }
                 } else {
-                    Button("刷新") { model.refresh() }
-                        .controlSize(.small)
-                        .accessibilityIdentifier(PermissionGuide.refreshIdentifier)
+                    Button {
+                        model.refresh()
+                    } label: {
+                        Label("刷新", systemImage: "arrow.clockwise")
+                    }
+                    .controlSize(.small)
+                    .accessibilityIdentifier(PermissionGuide.refreshIdentifier)
                 }
             }
-            VStack(alignment: .leading, spacing: 6) {
-                statusRow("Socket", model.daemon.socketPath)
-                statusRow("存活", daemonLivenessText)
-                if let version = model.daemon.version {
-                    statusRow("版本", "glasspaned \(version)")
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    StatusDotView(tone: model.daemon.reachable ? .good : .bad)
+                    Text(model.daemon.reachable ? "运行中" : "未运行")
+                        .font(.callout.weight(.medium))
+                    if let version = model.daemon.version {
+                        ChipView(text: "glasspaned \(version)", color: .secondary)
+                    }
+                    if let protocolVersion = model.daemon.protocolVersion {
+                        ChipView(text: "协议 \(protocolVersion)", color: .secondary)
+                    }
+                    if let pid = model.daemon.pid {
+                        ChipView(text: "PID \(pid)", color: .secondary, systemImage: "number")
+                    }
+                    Spacer()
                 }
-                if let protocolVersion = model.daemon.protocolVersion {
-                    statusRow("协议", protocolVersion)
-                }
-                if let pid = model.daemon.pid {
-                    statusRow("PID", "\(pid)")
-                }
+                PathRowView(label: "Socket", path: model.daemon.socketPath, identifierKey: "socket")
                 if let subject = model.daemon.subject {
-                    statusRow("主体", subject.tccEntryName)
-                    statusRow("主体路径", subject.hasBundleIdentity ? (subject.bundlePath ?? subject.binaryPath) : subject.binaryPath)
+                    PathRowView(
+                        label: "程序",
+                        path: subject.hasBundleIdentity
+                            ? (subject.bundlePath ?? subject.binaryPath)
+                            : subject.binaryPath,
+                        identifierKey: "binary"
+                    )
                 }
                 if let error = model.lastRefreshError {
-                    Text(error).font(.caption).foregroundStyle(.red)
-                }
-                // 动作失败与读取失败分列两行：前者是"你要的事没办成"，
-                // 后者是"我这次没读到"，共用一行会互相抹掉。
-                if let error = model.lastActionError {
-                    Text(error).font(.caption).foregroundStyle(.red)
+                    HStack(spacing: 5) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                    }
                 }
             }
-            .padding(12)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-        }
-    }
-
-    /// 存活一行：**只**由 `hello` 有没有回音决定。socket 文件存在不等于后台服务
-    /// 在跑（进程被强杀后文件留在原地），所以"文件在、没人答话"单独成一态，
-    /// 既不说"运行中"也不说"未运行"。没回音时上面的版本/PID/协议/主体行一并清空，
-    /// 不留一个不答话进程的自报当现状。
-    private var daemonLivenessText: String {
-        switch model.daemon.liveness {
-        case .running:
-            return "运行中（刚刚回应了查询）"
-        case .presentButSilent:
-            return "没有回应（socket 文件还在）"
-        case .absent:
-            return "没有服务在监听（socket 文件不在）"
-        case .notMeasured:
-            return "还没测过"
+            .consoleCard()
         }
     }
 
     private var degradationSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("拒绝降级形态").font(.headline)
+            Text("不勾选会怎样").font(.headline)
             DisclosureGroup {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 10) {
                     ForEach(model.entries) { entry in
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(entry.descriptor.displayName).font(.callout.bold())
-                            Text(entry.descriptor.degradationText)
+                            Text(entry.descriptor.displayName)
+                                .font(.callout.weight(.medium))
+                            Text("缺少时：" + entry.descriptor.degradationText)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        .padding(.top, 4)
+                        .padding(.top, 2)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 8)
             } label: {
-                Text("下面的每一项都标了缺少该权限时的实际表现，便于你决定勾或不勾。")
+                Text("每一项都写明缺少该权限时的实际表现，便于你决定勾或不勾。")
                     .font(.callout)
+                    .foregroundStyle(.secondary)
             }
-        }
-    }
-
-    private func statusRow(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Text(label)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .frame(width: 56, alignment: .leading)
-            Text(value)
-                .font(.callout.monospaced())
-                .textSelection(.enabled)
-            Spacer()
+            .padding(12)
+            .consoleCard()
         }
     }
 
@@ -266,18 +251,15 @@ struct SettingsPanelView: View {
     /// 启动 1s 权限轮询：拖拽/按钮只负责导航与"让 daemon 自己申请"，是否授权
     /// 由用户在系统面板完成，UI 通过向 daemon 打 `hello` 读它自报的席位自动点亮
     /// （必备三类全部 granted 才停表；daemon 不可达不停表——见 P1 v1.2 §11.2）。
-    /// 定时器挂进 `.common` 模式：只挂默认模式时，拖动窗口/打开菜单期间轮询
-    /// 整个停摆，用户在系统设置里勾完回来卡片不会自己变绿。
     private func startPolling() {
         stopPolling()
-        let timer = Timer(timeInterval: 1, repeats: true) { _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
             Task { @MainActor in
                 if await model.pollPermissions() {
                     stopPolling()
                 }
             }
         }
-        RunLoop.main.add(timer, forMode: .common)
         pollTimer = timer
     }
 
@@ -287,7 +269,7 @@ struct SettingsPanelView: View {
     }
 }
 
-/// 拖拽引导条：顶部可拖动的 app 图标 + 说明（拖 → 打开系统面板 → 授权后自动
+/// 拖拽引导条：顶部可拖动的后台服务图标 + 说明（拖 → 打开系统面板 → 授权后自动
 /// 点亮）。拖拽源由 `PermissionGuide.dragSource(for:)` 决定（P1 v1.2 §11.3）：
 /// daemon 有 bundle 身份时提供 **daemon 真身 .app 的 fileURL**（可直接拖进系统
 /// 设置权限列表，条目带可读名与图标）；裸二进制形态下只能提供纯文本导航。
@@ -296,11 +278,7 @@ struct DragGuideBannerView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "app")
-                .font(.system(size: 30))
-                .foregroundStyle(Color.accentColor)
-                .padding(8)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.accentColor.opacity(0.12)))
+            dragIcon
                 .help("按住并拖到此页下方的权限卡上")
 
             VStack(alignment: .leading, spacing: 3) {
@@ -309,16 +287,17 @@ struct DragGuideBannerView: View {
                 Text(model.dragSourceHint)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Spacer()
         }
         .padding(12)
         .background(Color.accentColor.opacity(0.07))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .clipShape(RoundedRectangle(cornerRadius: ConsoleTheme.cardRadius, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.accentColor.opacity(0.35), lineWidth: 1)
+            RoundedRectangle(cornerRadius: ConsoleTheme.cardRadius, style: .continuous)
+                .stroke(Color.accentColor.opacity(0.30), lineWidth: 1)
         )
         .onDrag {
             switch model.dragSource {
@@ -330,6 +309,26 @@ struct DragGuideBannerView: View {
             }
         }
     }
+
+    /// 图标用后台服务自己的真实 app 图标。此前固定用 SF Symbol "app"，
+    /// 它渲染成一个空框，用户看到的就是"一个坏掉的方块要我拖"。
+    private var dragIcon: some View {
+        let bundlePath = model.daemon.subject?.bundlePath
+        return Group {
+            if let icon = AppIconLoader.icon(forPath: bundlePath) {
+                Image(nsImage: icon)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            } else {
+                Image(systemName: "app.dashed")
+                    .font(.system(size: 24))
+                    .foregroundStyle(Color.accentColor)
+            }
+        }
+        .frame(width: 38, height: 38)
+        .padding(6)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.accentColor.opacity(0.12)))
+    }
 }
 
 /// 引导进行中横幅：展示最近一次落点/按钮触发的引导文案与所属权限，可手动关闭。
@@ -340,34 +339,49 @@ struct GuideBannerView: View {
 
     private var tint: Color {
         guard let kind else { return .accentColor }
-        switch kind {
-        case .accessibility:
-            return .blue
-        case .inputMonitoring:
-            return .orange
-        case .screenRecording:
-            return .purple
-        case .developerTools:
-            return .gray
-        }
+        return PermissionTint.color(for: kind)
     }
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "info.circle.fill")
+            Image(systemName: "arrow.forward.circle.fill")
                 .foregroundStyle(tint)
             Text(text)
                 .font(.callout)
                 .textSelection(.enabled)
-            Spacer()
-            Button("关闭") {
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 6)
+            Button {
                 onDismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption.weight(.bold))
             }
+            .buttonStyle(.borderless)
             .controlSize(.small)
+            .help("关闭这条提示")
+            .accessibilityLabel("关闭引导提示")
         }
         .padding(10)
         .background(tint.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(tint.opacity(0.25), lineWidth: 1)
+        )
+        .accessibilityIdentifier("gp-guide-banner")
+    }
+}
+
+/// 四类权限的固定配色（横幅与卡片共用，避免两处各写一遍 switch）。
+enum PermissionTint {
+    static func color(for kind: PermissionKind) -> Color {
+        switch kind {
+        case .accessibility: return .blue
+        case .inputMonitoring: return .orange
+        case .screenRecording: return .purple
+        case .developerTools: return .gray
+        }
     }
 }
 
@@ -378,9 +392,8 @@ struct PermissionCardView: View {
     let entry: SettingsModel.PermissionEntry
     /// 机器探测行（仅开发者工具卡使用：受限 lldb 实测结论）。
     var capabilityLine: String? = nil
-    /// 徽标措辞是否带"（实测）"：调用方给的必须与 `entry.status` 同源
-    /// （状态本身已经由 `SettingsModel` 按实测结论折算，这里只决定说法）。
-    var badgeComesFromMeasurement: Bool = false
+    /// 实测结论折算的状态（仅开发者工具卡；有值时徽标按实测状态显示）。
+    var verifiedStatus: PermissionStatus? = nil
     /// 「验证调试能力」动作；nil 表示该卡不提供机器探测。
     var onVerifyCapability: (() -> Void)? = nil
     /// 探测在途：按钮禁点，避免叠加 launchd 任务。
@@ -392,11 +405,10 @@ struct PermissionCardView: View {
 
     @State private var isDropTargeted = false
 
-    /// 卡片状态：可见徽标与机器可读标识**共用的唯一来源**。此前徽标读实测值、
-    /// 标识读 `entry.status`，于是撤销授权后重新验证失败时，卡片一边挂着绿色
-    /// "可用（实测）"、一边报 `gp-perm-developer-tools-unverifiable`，两面互相
-    /// 冒充；实测结论现在已在模型侧折算进 `entry.status`。
-    private var displayStatus: PermissionStatus { entry.status }
+    /// 开发者工具卡：一旦有"验证调试能力"的实测结论，徽标改按实测状态显示
+    /// （系统没有查询接口 ≠ 不能实测；实测结论必须让用户看得见，而不是永远
+    /// 灰在"未验证"）。其余卡恒按 daemon 自报席位。
+    private var displayStatus: PermissionStatus { verifiedStatus ?? entry.status }
 
     private var badgeColor: Color {
         switch displayStatus {
@@ -405,18 +417,18 @@ struct PermissionCardView: View {
         case .denied:
             return .red
         case .notDetermined:
-            return .gray
+            return .secondary
         case .unverifiable:
-            return .gray
+            return .secondary
         }
     }
 
     private var badgeText: String {
         switch displayStatus {
         case .granted:
-            return badgeComesFromMeasurement ? "可用（实测）" : "已授权"
+            return verifiedStatus != nil ? "可用（实测）" : "已授权"
         case .denied:
-            return badgeComesFromMeasurement ? "被拒绝（实测）" : "已拒绝"
+            return verifiedStatus != nil ? "被拒绝（实测）" : "已拒绝"
         case .notDetermined:
             return "未请求"
         case .unverifiable:
@@ -463,54 +475,47 @@ struct PermissionCardView: View {
         }
     }
 
+    /// 引导按钮标题。已授权时不再显示一个"灰掉的已授权"——那既重复徽标信息，
+    /// 又让人以为界面坏了；改成仍然有效的动作：跳到系统设置里那一行。
     private var buttonTitle: String {
-        // 开发者工具卡的按钮只是"打开对应系统面板"的导航：实测结论不改变它要干什么。
-        if entry.kind == .developerTools { return "打开系统设置" }
-        switch displayStatus {
+        switch entry.status {
         case .granted:
-            return "已授权"
+            return "在系统设置中查看"
         case .denied:
             return "打开系统设置"
         case .notDetermined:
             return "授权"
         case .unverifiable:
             // 必备权限取不到 daemon 自报席位时按钮仍有效：点击即让 daemon 重新
-            // 申请并跳转面板。
-            return "授权"
+            // 申请并跳转面板；开发者工具无申请接口，只跳面板。
+            return entry.kind == .developerTools ? "打开系统设置" : "授权"
         }
-    }
-
-    /// 引导按钮何时禁用：仅"已授权、不必再跳系统面板"的三类。开发者工具即使实测
-    /// 可用也保留入口——系统里的勾与"能不能调试"不是一回事，用户仍可能要回去改设置。
-    private var guideButtonDisabled: Bool {
-        entry.kind != .developerTools && displayStatus == .granted
     }
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             Image(systemName: iconName)
-                .font(.title3)
+                .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(badgeColor)
-                .frame(width: 32)
+                .frame(width: 22, height: 22)
+                .padding(9)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(badgeColor.opacity(0.10))
+                )
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 7) {
                     Text(entry.descriptor.displayName).font(.callout.bold())
-                    BadgeView(text: badgeText, color: badgeColor)
-                    // 机器核验面：observe 读到该 identifier 即证明卡片确实按此状态
-                    // 渲染（形状本身表达状态，不靠颜色）。
-                    Image(systemName: PermissionGuide.statusIcon(for: displayStatus))
-                        .font(.caption)
-                        .foregroundStyle(badgeColor)
-                        .accessibilityIdentifier(
-                            PermissionGuide.statusIdentifier(kind: entry.kind, status: displayStatus)
+                    BadgeView(
+                        text: badgeText,
+                        color: badgeColor,
+                        statusIcon: PermissionGuide.statusIcon(for: entry.status),
+                        statusIdentifier: PermissionGuide.statusIdentifier(
+                            kind: entry.kind, status: entry.status
                         )
-                    if entry.restartPending {
-                        // 待重启标记：只说一件事——"系统里已授权、运行中的 daemon
-                        // 还没读到，确实欠一次重启"。它挂在 `restartPending` 上而
-                        // 不是 `statusNote != nil` 上：注记还兼着"这次没读到它的
-                        // 上报"，用后者当判据会让沉默的 daemon 在三个标识上同时
-                        // 发布"已授权待重启"，而旁边的中文说的是另一回事。
+                    )
+                    if entry.statusNote != nil {
                         Image(systemName: "arrow.clockwise.circle")
                             .font(.caption)
                             .foregroundStyle(.orange)
@@ -521,6 +526,11 @@ struct PermissionCardView: View {
                 Text(entry.descriptor.purposeText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("缺少时：" + entry.descriptor.degradationText)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let capabilityLine {
                     // 带时刻的探测结论，与实时席位分列，不互相冒充。结论旁边放一枚
                     // 带标识的图标：Text 内容不进 AXTitle（P6 §0 F6），"到底渲染成
@@ -536,17 +546,20 @@ struct PermissionCardView: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
+                    .padding(.top, 1)
                 }
                 if let statusNote = entry.statusNote {
                     // 状态来源注记：daemon 未上报席位时如实说明，不冒充已测。
                     Text(statusNote)
                         .font(.caption2)
                         .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
-            Spacer()
+            Spacer(minLength: 8)
 
             HStack(spacing: 6) {
                 if onVerifyCapability != nil {
@@ -557,22 +570,30 @@ struct PermissionCardView: View {
                     .accessibilityIdentifier(PermissionGuide.verifyCapabilityIdentifier)
                     .disabled(capabilityBusy)
                 }
-                Button(buttonTitle) {
-                    onGuide(entry.kind)
+                // 已授权时用次要样式，未授权时用主行动样式；两种 ButtonStyle
+                // 类型不同，不能三元合并，只能分支渲染。
+                Group {
+                    if entry.status == .granted {
+                        Button(buttonTitle) { onGuide(entry.kind) }
+                            .buttonStyle(.bordered)
+                    } else {
+                        Button(buttonTitle) { onGuide(entry.kind) }
+                            .buttonStyle(.borderedProminent)
+                    }
                 }
-                .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 // 控件标识：按钮标题不进 AXTitle，按标题 act 选不中元素。
                 .accessibilityIdentifier(PermissionGuide.guideIdentifier(for: entry.kind))
-                .disabled(guideButtonDisabled)
             }
         }
         .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .clipShape(RoundedRectangle(cornerRadius: ConsoleTheme.cardRadius, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(isDropTargeted ? Color.accentColor : Color.clear, lineWidth: 2)
+            RoundedRectangle(cornerRadius: ConsoleTheme.cardRadius, style: .continuous)
+                .stroke(isDropTargeted ? Color.accentColor : ConsoleTheme.cardStroke,
+                        lineWidth: isDropTargeted ? 2 : 1)
         )
         .onDrop(
             of: [UTType.fileURL, UTType.plainText],
@@ -666,20 +687,46 @@ struct PermissionCardDropDelegate: DropDelegate {
     }
 }
 
-/// 状态徽标（三态着色 + unverifiable 灰描边）。
+/// 状态徽标：文字 + 一枚表达状态的图标，图标带无障碍标识供自动化判读
+/// （形状而非颜色承载状态，色盲可用）。三态着色 + unverifiable 灰描边。
 struct BadgeView: View {
     let text: String
     let color: Color
+    /// 状态图标（SF Symbol 名）；nil 时不渲染图标。
+    var statusIcon: String? = nil
+    /// 图标上的无障碍标识（`PermissionGuide.statusIdentifier`）。
+    var statusIdentifier: String? = nil
 
     var body: some View {
-        Text(text)
-            .font(.caption2.weight(.semibold))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .foregroundStyle(color)
-            .overlay(
-                RoundedRectangle(cornerRadius: 4)
-                    .stroke(color.opacity(0.6), lineWidth: 1)
-            )
+        HStack(spacing: 3) {
+            if let statusIcon {
+                Image(systemName: statusIcon)
+                    .font(.system(size: 9, weight: .bold))
+                    .modifier(BadgeIdentifier(identifier: statusIdentifier))
+            }
+            Text(text)
+        }
+        .font(.caption2.weight(.semibold))
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .foregroundStyle(color)
+        .background(color.opacity(0.10))
+        .clipShape(Capsule())
+        .overlay(
+            Capsule().stroke(color.opacity(0.55), lineWidth: 1)
+        )
+    }
+}
+
+/// 状态图标必须始终挂上标识（缺标识时 §11.7 的机器判读就断了），
+/// 但仍要求显式给值，避免误挂到别的徽标上。
+private struct BadgeIdentifier: ViewModifier {
+    let identifier: String?
+    func body(content: Content) -> some View {
+        if let identifier {
+            content.accessibilityIdentifier(identifier)
+        } else {
+            content
+        }
     }
 }

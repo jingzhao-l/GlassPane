@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """bridge/test_bridge.py — P6 §6.6: pure-logic unit tests for the LLDB
 bridge (queue policy, JSON assembly, truncation, sentinel extraction, argv
-composition, socket回传). No debug permission needed — run with:
+composition, socket回传, 退出码判据). No debug permission needed.
 
+三种跑法都跑**全部**用例（P6 §6.6 口径是 python3 直跑，P1 §CI 用 pytest）：
+
+    python3 bridge/test_bridge.py
     python3 -m unittest discover -s bridge -p 'test_*.py'
+    python3 -m pytest -q
+
+`if __name__ == "__main__"` 守卫必须留在**文件物理末尾**：任何定义在它之后的
+用例，直跑与 unittest discover 两种口径都不会执行（曾有两例栽在这里）。
 """
 
 import json
@@ -594,6 +601,109 @@ class TruncationIsVisible(unittest.TestCase):
         self.assertIsNone(thread["queue"])      # None = not measured
         named = gb.thread_entry(2, "main", "signal", [], queue="com.apple.main-thread")
         self.assertEqual("com.apple.main-thread", named["queue"])
+
+
+# ---------------------------------------------------------------------------
+# 退出码判定：零线程的"成功"不是成功（外层 run 用 capture_succeeded 决定退出码）
+# A-11 的残余风险是"白名单押在枚举的字符串渲染上"，所以这里钉的是**归一器**
+# 的等价关系，而不是某张字面量表：结论若依赖具体 int 数值，注入表会立刻变红。
+# 注：这些用例必须是 TestCase 方法——`python3 bridge/test_bridge.py` 与
+# `python3 -m unittest discover` 都只收集 TestCase，模块级 test_* 函数只有
+# pytest 会跑（第一版的两条就因此从未在文档口径下执行过）。
+# ---------------------------------------------------------------------------
+
+class CaptureExitCodeGuard(unittest.TestCase):
+    """capture_succeeded 判定表 + 进程状态归一器（纯逻辑，本机无 lldb）。"""
+
+    # 一张刻意与 LLDB 取值毫无关系的表（序号自 900 起）。用它跑通的等价关系，
+    # 才证明判据真的与数值无关——只在镜像表上跑通证明不了这一点。
+    EXOTIC = {name: 900 + index for index, name in enumerate(gb.PROCESS_STATE_NAMES)}
+
+    def tables(self):
+        return {"fallback": None, "exotic": self.EXOTIC}
+
+    def test_whitelist_names_are_real_declared_states(self):
+        # 白名单里打错一个字母 = 永不匹配 = 每次真机采集假红，先钉住拼写面。
+        for name in gb._OK_STATE_NAMES:
+            self.assertIn(name, gb.PROCESS_STATE_NAMES)
+
+    def test_state_int_by_name_is_injective_and_complete(self):
+        table = gb.state_int_by_name()
+        self.assertEqual(sorted(table), sorted(gb.PROCESS_STATE_NAMES))
+        self.assertEqual(len(set(table.values())), len(table))  # 两名一值=判据撞车
+
+    def test_normalize_state_accepts_int_bare_and_qualified_forms(self):
+        for label, table in self.tables().items():
+            resolved_table = table or gb.state_int_by_name()
+            for name, value in resolved_table.items():
+                for rendering in (value, str(value), name, "lldb." + name,
+                                  "StateType." + name):
+                    _int, resolved = gb.normalize_state(rendering, table)
+                    self.assertEqual(resolved, name, (label, rendering, name))
+
+    def test_state_matches_equivalence_over_the_whole_table(self):
+        # 用户口径：state_matches(<eStateStopped 的 int>, "eStateStopped") 这类
+        # 等价关系要在**整张表**上成立，且换一张数值完全不同的表照样成立。
+        for label, table in self.tables().items():
+            for name, value in (table or gb.state_int_by_name()).items():
+                self.assertTrue(
+                    gb.state_matches(value, name, table), (label, value, name))
+                self.assertTrue(
+                    gb.state_matches(name, value, table), (label, name, value))
+                self.assertTrue(
+                    gb.state_matches("lldb." + name, name, table), (label, name))
+                for other in gb.PROCESS_STATE_NAMES:
+                    if other != name:
+                        self.assertFalse(
+                            gb.state_matches(value, other, table),
+                            (label, name, other))  # 相邻状态不得互相串味
+
+    def test_unresolvable_status_normalizes_to_nothing(self):
+        for junk in ("no-process", "exited-before-stop", "failed", "",
+                     "eStateStoppedNot", None, True, False, [], {}):
+            self.assertEqual(gb.normalize_state(junk), (None, None), junk)
+        self.assertFalse(gb.state_matches("eStateStoppedNot", "eStateStopped"))
+
+    def test_capture_succeeded_requires_stopped_state_and_threads(self):
+        stopped = gb.state_int_by_name()["eStateStopped"]
+        self.assertTrue(gb.capture_succeeded(
+            {"status": "eStateStopped", "threads": [{"id": 1}]}))
+        # 同一状态的三种写法必须给同一个判决（A-11 押的就是这里）。
+        for rendering in (stopped, str(stopped), "lldb.eStateStopped"):
+            self.assertTrue(gb.capture_succeeded(
+                {"status": rendering, "threads": [{"id": 1}]}), rendering)
+        # 这些形态此前全部以 0 退出，下游读到的是"成功但零线程"。
+        for payload in (
+            {"status": "no-process", "threads": []},
+            {"status": "eStateRunning", "threads": []},
+            {"status": "exited-before-stop", "threads": []},
+            {"status": "failed", "threads": [{"id": 1}]},
+            {"status": "eStateStopped", "threads": []},
+            {"status": "lldb.eStateRunning", "threads": [{"id": 1}]},
+            {},
+            None,
+        ):
+            self.assertFalse(gb.capture_succeeded(payload), payload)
+
+    def test_empty_threads_stopped_state_is_a_failure(self):
+        # 状态对了但什么都没采到 —— 这正是 A-11 要拦的那一类假成功。
+        stopped = gb.state_int_by_name()["eStateStopped"]
+        for payload in (
+            {"status": "eStateStopped", "threads": []},
+            {"status": "eStateAttached", "threads": []},
+            {"status": stopped, "threads": []},
+            {"status": "lldb.eStateStopped", "threads": []},
+            {"status": "eStateStopped"},                      # threads 缺席
+            {"status": "eStateStopped", "threads": None},
+        ):
+            self.assertFalse(gb.capture_succeeded(payload), payload)
+
+    def test_capture_succeeded_accepts_attached_with_threads(self):
+        attached = gb.state_int_by_name()["eStateAttached"]
+        self.assertTrue(gb.capture_succeeded(
+            {"status": "eStateAttached", "threads": [{"id": 9}]}))
+        self.assertTrue(gb.capture_succeeded(
+            {"status": attached, "threads": [{"id": 9}]}))
 
 
 if __name__ == "__main__":

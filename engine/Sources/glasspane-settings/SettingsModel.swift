@@ -14,10 +14,6 @@ import GlassPaneEngine
 ///
 /// 状态判定全部在 engine 库探针层，本层仅做编排与缓存
 /// （P1 spec v1.2 §9.3：SwiftUI 壳不做逻辑单测）。
-/// 唯一的例外是 daemon 存活：它按**本层自己的测量**呈现——`hello` 有回音才算
-/// 在运行，socket 文件存在与否只用来区分"没人答话"和"没有服务"。"没人答话"
-/// 只记录没答话这一件事：一次不答话指认不了原因，所以破坏性的重启建议要等
-/// 连续重复的不答话（`consecutiveSilentMeasurements`）才拿出来。
 @MainActor
 final class SettingsModel: ObservableObject {
 
@@ -28,66 +24,24 @@ final class SettingsModel: ObservableObject {
         var status: PermissionStatus
         /// 状态来源说明（daemon 自报 / daemon 未运行 / 旧 daemon 不上报）。
         var statusNote: String?
-        /// 「系统里已授权、正在运行的 daemon 还读不到」= **确实欠一次重启**。
-        /// 与 `statusNote` 分列两件事：注记还兼着"这次没读到它的上报"这句读侧
-        /// 结论，拿非空当重启判据会让一个沉默的 daemon 把三张卡都发布成
-        /// `gp-perm-<kind>-restart-pending`（机器面说"已授权待重启"，人眼看的是
-        /// "读不到状态"）。
-        var restartPending = false
         var id: PermissionKind { kind }
-    }
-
-    /// daemon 存活状态：**只由测量决定**——向它打 `hello` 到底有没有回音。
-    /// socket 文件存在不等于后台服务在跑（进程被 SIGKILL 后文件照旧留在原地，
-    /// 卡死的进程也照样留着），因此"文件在、没人答话"必须是独立一态，
-    /// 既不算运行中，也不冒充"测量过说它没跑"。
-    enum Liveness: Equatable {
-        /// hello 得到回音（版本/PID/协议/主体这几行的内容就来自这次回音）。
-        case running
-        /// socket 文件在，但 hello 没有回音。三种成因都能走到这里，**一次测量
-        /// 区分不了**：对端卡死、残留的 stale socket，以及对端活着但正在服务别的
-        /// 客户端（`SocketServer` 串行 accept，`hello` 排队排不进 3s 窗口）。
-        case presentButSilent
-        /// socket 文件不在。
-        case absent
-        /// 还没打过 hello（面板起来后的第一拍）。
-        case notMeasured
-    }
-
-    /// 一次存活测量的结局。`notMeasured` 与"没有回音"必须分开：被在途保护跳过的
-    /// 那一拍什么也没测，不能拿它去作废上一次测量。
-    private enum DaemonMeasurement {
-        case answered(DaemonProbe.Summary)
-        case silent(socketPresent: Bool)
-        case notMeasured
     }
 
     /// daemon 状态卡内容。
     struct DaemonEntry {
         var socketPath: String
-        /// 最近一次存活测量的结果（还没测量过时为 `.notMeasured`）。
-        var liveness: Liveness
+        var reachable: Bool
         var version: String?
         var protocolVersion: String?
         var pid: Int?
-        /// daemon 自报的授权主体（nil = 最近一次没拿到回音，或回音里没带身份）。
+        /// daemon 自报的授权主体（nil = 未连上或旧 daemon 不上报）。
         var subject: PermissionSubject?
-
-        /// 只有真的收到回音才算"在运行"。
-        var isRunning: Bool { liveness == .running }
     }
 
     @Published var entries: [PermissionEntry] = []
     @Published var daemon: DaemonEntry
     @Published var isRefreshing = false
-    /// 「读不到后台服务」的红字（渲染在 daemon 卡里）：只由存活测量赋值，读到了
-    /// 就清空。此前全文没有任何地方给它赋值，失败在界面上完全没有痕迹。
-    /// 什么都没测成的那一拍（在途保护跳过的）**不改动它**：它说的是上一条测量
-    /// 的结论，被一次空转抹掉就成了"没测到 = 测好了"。
     @Published var lastRefreshError: String?
-    /// 用户点下去的动作（申请授权 / 重启后台服务）没执行成功时的红字。与上一行
-    /// 分列：一句说的是"读"，一句说的是"做"，混用会互相抹掉。
-    @Published var lastActionError: String?
     /// 拖拽引导状态：最近一次落点的权限类别（nil = 无进行中的引导）。
     @Published var pendingGuideKind: PermissionKind?
     /// 拖拽引导文案（`PermissionGuide.instruction` 或手动按钮引导文案）。
@@ -134,39 +88,24 @@ final class SettingsModel: ObservableObject {
         }
     }
 
-    /// The socket this panel talks to when the caller named none — the same
-    /// rule the daemon uses, reached through `StateRoot` instead of a second
-    /// copy of the path. The panel used to compose `home + "/.glasspane/…" `
-    /// here on its own: two files holding one rule is how a daemon started on a
-    /// moved socket leaves a settings window silently pointed at a different
-    /// process (or at none).
-    ///
-    /// `stateRoot` is an injection point for tests and for a panel asked to
-    /// watch a daemon that runs on a named state root. It is deliberately **not**
-    /// a `--state-dir` flag on this executable: the panel deletes nothing and
-    /// rewrites nothing — it reads permission seats and sends restart/grant
-    /// requests to whichever daemon it can reach — so a data-plane redirect has
-    /// no meaning here, and advertising one in its usage would read as "the
-    /// panel can move my state", which it cannot. `--socket-path` stays the
-    /// panel's only location argument, and it wins over any root.
-    static func defaultSocketPath(stateRoot: StateRoot? = nil) -> String {
-        StateRoot.engineSocketPath(explicitSocketPath: nil, stateRoot: stateRoot)
+    /// 与 daemon 默认一致的 socket 路径。
+    public static func defaultSocketPath() -> String {
+        DaemonProbe.defaultSocketPath
     }
 
     init(
         socketPath: String? = nil,
-        stateRoot: StateRoot? = nil,
         refreshOnAppear: Bool = true,
         probes: PermissionProbeSet = PermissionProbeSet(),
         daemonProbe: DaemonProbe = DaemonProbe()
     ) {
-        let resolvedSocketPath = socketPath ?? Self.defaultSocketPath(stateRoot: stateRoot)
+        let resolvedSocketPath = socketPath ?? Self.defaultSocketPath()
         self.panelProbes = probes
         self.daemonProbe = daemonProbe
         self.panelSubject = probes.snapshot().subject
         daemon = DaemonEntry(
             socketPath: resolvedSocketPath,
-            liveness: .notMeasured,
+            reachable: false,
             version: nil,
             protocolVersion: nil,
             pid: nil,
@@ -183,7 +122,7 @@ final class SettingsModel: ObservableObject {
     // MARK: - 引导动作（P1 v1.2 §11.2：由 daemon 自己申请，面板只导航）
 
     /// 权限卡的统一引导入口：
-    ///  1. 已授权 → no-op；
+    ///  1. 已授权 → 只把系统设置里对应那一页打开（按钮语义是"查看"）；
     ///  2. 取到 daemon 身份 → `launchctl submit` 让 daemon 以**自身身份**发起
     ///     系统申请，随后打开对应系统面板深链；
     ///  3. 取不到 daemon 身份 → 只打开深链并如实说明"面板代申请会记错主体"，
@@ -192,12 +131,16 @@ final class SettingsModel: ObservableObject {
         setPendingGuide(kind)
         switch kind {
         case .developerTools:
-            // 无公开查询 API：只打开面板 + 文案；卡片状态来自「验证调试能力」
-            // 的实测结论（没测过才是 unverifiable）。
+            // 无系统总开关、无公开查询 API：仅打开面板 + 文案（恒 unverifiable）。
             PermissionGuide.openSystemPane(for: kind)
             return
         case .accessibility, .inputMonitoring, .screenRecording:
             if status(of: kind) == .granted {
+                // 已授权时按钮的语义是"跳到系统设置里那一行"，所以必须真的跳。
+                // 早先这里直接 return，用户点一个写着"查看"的按钮却毫无反应。
+                pendingGuideKind = kind
+                pendingGuideText = "系统设置已打开，\(PermissionGuide.descriptorName(for: kind))这一项当前是开启的。"
+                PermissionGuide.openSystemPane(for: kind)
                 return
             }
             if let binaryPath = daemon.subject?.binaryPath {
@@ -225,81 +168,41 @@ final class SettingsModel: ObservableObject {
     /// 以 launchd 一过性任务的方式让 daemon 发起申请。命令构造是 engine 侧纯
     /// 函数（`PermissionGuide.daemonRequestCommand`），本处只负责执行与清理。
     private func requestPermissionViaDaemon(_ kind: PermissionKind, daemonBinaryPath: String) {
-        lastActionError = nil
+        let nonce = "\(Int(Date().timeIntervalSince1970))-\(UInt32.random(in: 1...UInt32.max))"
         let command = PermissionGuide.daemonRequestCommand(
             for: kind,
             daemonBinaryPath: daemonBinaryPath,
-            nonce: Self.oneShotNonce()
+            nonce: nonce
         )
-        if let failure = Self.runSystemBinary(command.launchPath, arguments: command.arguments) {
-            // 申请动作没跑起来 = 系统设置里不会出现这个主体，卡片也不会自己变绿；
-            // 这句必须留在界面上，否则用户只看到"已请求授权"。
-            lastActionError = "没能请后台服务自己发起授权申请：\(failure)。授权动作本身仍可在系统设置里手动加。"
-        }
-        // 任务为一次性（申请动作即起即停）；延迟清理标签。
+        runSystemBinary(command.launchPath, arguments: command.arguments)
+        // 任务为一次性（申请动作即起即停）；延迟清理标签，失败静默。
         let cleanup = PermissionGuide.daemonRequestCleanupCommand(jobLabel: command.jobLabel)
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 5_000_000_000)
-            if let failure = Self.runSystemBinary(cleanup.launchPath, arguments: cleanup.arguments) {
-                FileHandle.standardError.write(Data("one-shot cleanup \(command.jobLabel): \(failure)\n".utf8))
-            }
+            self.runSystemBinary(cleanup.launchPath, arguments: cleanup.arguments)
         }
     }
 
-    /// 一次性 launchd 任务的标签后缀：**秒级时间戳加随机尾**。只用秒级时间戳时，
-    /// 同一秒内并发的两个任务（席位重探与调试能力验证会同时发生）标签撞车，
-    /// 收尾的 `launchctl remove` 会把对方刚提交的作业 bootout 掉——那条测量
-    /// 从未起跑，却被报成"等得有点久"。
-    nonisolated private static func oneShotNonce() -> String {
-        "\(Int(Date().timeIntervalSince1970))-\(UInt32.random(in: 1...UInt32.max))"
-    }
-
-    /// 尽力而为地执行系统侧命令（launchctl / open）：不取输出，但"命令没跑起来"
-    /// 与"跑起来了"必须区分开——静默失败曾让整面板停摆数日无人察觉。
-    /// 返回 nil 表示已交给系统执行。
-    nonisolated private static func runSystemBinary(
-        _ launchPath: String,
-        arguments: [String],
-        waitsForExit: Bool = false
-    ) -> String? {
+    /// 尽力而为地执行系统侧命令（launchctl / open）：不取输出、失败静默——
+    /// 命令不可用时卡片文案仍然给出下一步（与 `PermissionGuide.openSystemPane` 同口径）。
+    nonisolated private func runSystemBinary(_ launchPath: String, arguments: [String]) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: launchPath)
         process.arguments = arguments
-        do {
-            try process.run()
-        } catch {
-            return "命令无法执行（\(launchPath)）：\(error.localizedDescription)"
-        }
-        guard waitsForExit else { return nil }
-        process.waitUntilExit()
-        guard process.terminationStatus != 0 else { return nil }
-        return "没有成功（\(launchPath) 退出码 \(process.terminationStatus)）"
+        try? process.run()
     }
 
-    /// 同上，但**等命令跑完并取回退出码**（等待放在主 actor 之外）：需要知道
-    /// 成没成就用这条，不能只凭"我把它 spawn 出去了"。
-    nonisolated private static func runSystemBinaryAndWait(
-        _ launchPath: String,
-        arguments: [String]
-    ) async -> String? {
-        await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: runSystemBinary(
-                    launchPath, arguments: arguments, waitsForExit: true
-                ))
-            }
-        }
-    }
-
-    // MARK: - 状态测量（卡片席位 = daemon 自报；daemon 存活 = hello 有没有回音）
+    // MARK: - 状态测量（真源 = daemon 自报）
 
     /// 周期性权限检测（拖拽/按钮后自动点亮）：向 daemon 打一次 hello 取其自报
     /// 席位。必备权限全部 granted 时返回 true，供 UI 停表。
     ///
-    /// hello 无回音时**不保留上一次的自报内容**：那几行属于一个此刻不答话的进程，
-    /// 继续挂着就是拿它的旧话当现状（存活行与四张卡同步降级）。
+    /// hello 无响应（daemon 正在处理一次 act，SocketServer 单连接语义下会排队）
+    /// 时**保持上一次读数**，不清空也不降级——降级判断交给显式「刷新」。
     func pollPermissions() async -> Bool {
-        applyDaemonSummary(await measureDaemon())
+        if let summary = await helloSummary() {
+            applyDaemonSummary(summary)
+        }
         if !essentialPermissionsGranted {
             // 运行实例没达成：先分清"系统里真没授权"还是"授权了没重启"。
             await reprobeSeats()
@@ -318,13 +221,8 @@ final class SettingsModel: ObservableObject {
     }
 
     /// 系统里已授权、但运行中的 daemon 还读不到的权限（需重启生效）。
-    /// 交集只取 daemon **真的上报过席位**的那些类别：沉默的或不上报这一栏的旧
-    /// 版本会让 `running` 里没有这一项，而"没上报"不等于"它说没授权"——把它当
-    /// 否定来比对，就成了拿三张"读不到状态"的卡去宣布"只欠一次重启"。
     var kindsNeedingRestart: [PermissionKind] {
-        let reported = daemonReportedStatuses
-        return PermissionReprobe.kindsNeedingRestart(running: reported, reprobed: reprobed)
-            .filter { reported[$0] != nil }
+        PermissionReprobe.kindsNeedingRestart(running: daemonReportedStatuses, reprobed: reprobed)
     }
 
     var restartHint: String {
@@ -332,84 +230,15 @@ final class SettingsModel: ObservableObject {
         return kinds.isEmpty ? "" : PermissionGuide.restartNeededText(kinds)
     }
 
-    /// 「重启后台服务」横幅的形态：**文案与此刻该给的控件同源算出**。
-    /// 分成两个独立布尔会让横幅一边写着"先刷新试试"、一边摆出那个会打断正在
-    /// 执行的操作的按钮——用户读到的是一句自相矛盾的建议。
-    struct AttentionBanner {
-        let text: String
-        /// true = 横幅提供「重启后台服务」（`launchctl kickstart -k`，破坏性）；
-        /// false = 只提供非破坏性的「刷新」。
-        let offersRestart: Bool
-    }
-
-    /// 连续"socket 文件在、但 hello 没有回音"的测量次数。
-    /// **单次不答话建立不起任何关于原因的结论**：`SocketServer` 串行 accept，
-    /// 一个正为别的 MCP 会话干活的健康 daemon 会长期处在这个状态里，所以
-    /// 破坏性的重启控件要等重复出现的不答话才拿出来。`.answered` 时归零。
-    @Published private(set) var consecutiveSilentMeasurements = 0
-    /// 认定"连续多次都不答话"所需的次数（1s 轮询 + 3s hello 超时，约十秒）。
-    static let restartSuggestionStreak = 3
-    /// 重启动作之后**留给后台服务重新上线的测量拍数**。`kickstart -k` 先杀进程
-    /// 再拉起，这期间它既可能"文件在、不答话"也可能"文件一时没了"，两种都不
-    /// 能算它坏了。按拍数计而不是按墙上时钟计，横幅的分支才不依赖"现在是几点"
-    /// （只有真的测了一拍才会推进）。
-    @Published private(set) var restartGraceSamplesRemaining = 0
-    static let restartGraceSampleBudget = 4
-    /// 视图的 1s 轮询靠这个计数重新起表（+1 即重启）。动作之后的状态只能靠
-    /// **继续测量**恢复：固定睡一觉再采一次，采到的多半还是"没回来"，降级态
-    /// 就被钉死在界面上了。
-    @Published private(set) var pollingRestartToken = 0
-
-    /// 需要注意的横幅；nil = 此刻不必显示。
-    ///
-    /// 四种情形给四种下一步，只有测量支撑得起"重启"时才提供那个按钮：
-    ///  - 刚点过重启、还在宽限拍数内 → 只是"正在等它上线"，不提供第二次重启；
-    ///  - 授权已落、运行实例读不到（`kindsNeedingRestart`，两边都实测过）→ 重启；
-    ///  - socket 文件不在 → 没有东西会被打断，重启就是拉起它的正当手段；
-    ///  - 文件在但没回音 → 先说"没答话"、下一步是重测；连续多拍都不答话，
-    ///    才升级为"可能卡住了，重启"。
-    var daemonAttentionBanner: AttentionBanner? {
-        if !kindsNeedingRestart.isEmpty {
-            return AttentionBanner(text: restartHint, offersRestart: true)
-        }
-        switch daemon.liveness {
-        case .presentButSilent, .absent:
-            if restartGraceSamplesRemaining > 0 {
-                return AttentionBanner(
-                    text: "已经向后台服务发出重启指令，正在等它重新上线（通常要几秒）：这段时间里它不答话是正常的。",
-                    offersRestart: false
-                )
-            }
-            if daemon.liveness == .absent {
-                return AttentionBanner(
-                    text: "后台服务没有在运行：点「重启后台服务」让 launchd 重新拉起它",
-                    offersRestart: true
-                )
-            }
-            if consecutiveSilentMeasurements >= Self.restartSuggestionStreak {
-                return AttentionBanner(
-                    text: "后台服务连续 \(consecutiveSilentMeasurements) 次询问都没有回应（socket 文件还在）：它可能已经卡住了，重启后台服务可以重新拉起它",
-                    offersRestart: true
-                )
-            }
-            return AttentionBanner(
-                text: "后台服务这次没有回应（socket 文件还在）。它一次只服务一个客户端，正在为别的客户端干活时也是这个样子，所以一次不答话还判断不了它坏了：等下一次自动检测，或点「刷新」立刻重测。",
-                offersRestart: false
-            )
-        case .running, .notMeasured:
-            return nil
-        }
-    }
-
     /// daemon 自报的席位（重探/重启后需要重算注记，单独留一份）。
     private var daemonReportedStatuses: [PermissionKind: PermissionStatus] = [:]
 
     /// 最近一次"调试能力"机器探测结果（P6 §7 的 `--check-developer-tools`，
-    /// 由 daemon 自己的二进制在 launchd 上下文中跑）。显式触发、带时刻；
-    /// 归属进程还在答话时它才算现状（见 `liveDeveloperToolsReport`）。
+    /// 由 daemon 自己的二进制在 launchd 上下文中跑）。显式触发、带时刻，
+    /// 不作为实时席位。
     @Published var developerToolsCapability: DeveloperToolsCapability.Report?
-    /// 这次实测**归属**哪个 daemon 进程：发起验证时就按当时自报的 pid 钉死
-    /// （不是在最长 260s 的等待之后才补记），回音时它必须还是当前进程。
+    /// developerToolsCapability 是在哪个 daemon 进程上测得；pid 变了必须作废
+    /// （旧结论不能冒充新进程的状态）。
     @Published var developerToolsProbePid: Int?
     @Published var isProbingDeveloperTools = false
     @Published var developerToolsProbeError: String?
@@ -418,17 +247,6 @@ final class SettingsModel: ObservableObject {
     private var capabilityInFlight = false
     /// 调试能力探测含真实 lldb 冷启动（P6 §0 F5 预算 120s × 两侧），等待窗要宽。
     static let capabilityProbeTimeout: TimeInterval = 260
-
-    /// **当前有效**的调试能力实测结论：它归属的那个 daemon 进程必须还是此刻
-    /// 正在答话的这个进程。没有有效结论时卡片两副面孔（可见徽标与机器可读
-    /// 标识）一律回到 `unverifiable`——不由视图各取一次值，避免两面互相冒充。
-    var liveDeveloperToolsReport: DeveloperToolsCapability.Report? {
-        guard daemon.isRunning,
-              let report = developerToolsCapability,
-              let probePid = developerToolsProbePid,
-              probePid == daemon.pid else { return nil }
-        return report
-    }
 
     /// 用 daemon 自己的二进制重跑一次 `--permissions`（launchd 一次性任务，
     /// 责任上下文是 daemon 本身）：拿到"同一身份的新进程"看到的席位。
@@ -440,7 +258,7 @@ final class SettingsModel: ObservableObject {
         reprobeIntervalNow = min(reprobeIntervalNow * 2, Self.reprobeIntervalCap)
         lastReprobeAt = Date()
         defer { reprobeInFlight = false }
-        let nonce = Self.oneShotNonce()
+        let nonce = "\(Int(Date().timeIntervalSince1970))"
         let directory = NSTemporaryDirectory()
         let scriptPath = directory + "glasspane-reprobe-\(nonce).zsh"
         let outputPath = directory + "glasspane-reprobe-\(nonce).json"
@@ -462,14 +280,10 @@ final class SettingsModel: ObservableObject {
 
     /// 显式验证 daemon 的调试能力（开发者工具席位）。探测本身是受限的真
     /// `xcrun lldb` 运行（P6 §7），代价高，因此只由用户点击触发，结果带时刻
-    /// 呈现；daemon 自报的 `hello.permissions.developerTools` 恒为
-    /// `unverifiable`（TCC 无公开查询接口这一事实不变），开发者工具卡显示的
-    /// 是这次实测的结论——结论作废时卡片同步退回未验证。
+    /// 呈现；`hello.permissions.developerTools` 仍是 `unverifiable`（TCC 无公开
+    /// 查询接口这一事实不变）。
     func verifyDeveloperTools() async {
-        // 身份与 pid 在**发起时**一次取全：这次实测从头到尾只属于这个进程。
-        // 等到回音后再记 pid，等于把一份可能来自上一个进程的结论挂到重启后的
-        // 新进程头上（面板自己就带重启按钮，这条路径是常规路径不是边角）。
-        guard let binaryPath = daemon.subject?.binaryPath, let probePid = daemon.pid else {
+        guard let binaryPath = daemon.subject?.binaryPath else {
             recordProbeFailure(.unreadable, "还没连上后台服务：调试能力要由它自己实测。点「刷新」恢复连接后重试。")
             return
         }
@@ -477,10 +291,8 @@ final class SettingsModel: ObservableObject {
         capabilityInFlight = true
         isProbingDeveloperTools = true
         developerToolsProbeError = nil
-        developerToolsProbeFailure = nil
-        developerToolsProbePid = probePid
         defer { capabilityInFlight = false; isProbingDeveloperTools = false }
-        let nonce = Self.oneShotNonce()
+        let nonce = "\(Int(Date().timeIntervalSince1970))"
         let directory = NSTemporaryDirectory()
         let scriptPath = directory + "glasspane-devtools-\(nonce).zsh"
         let outputPath = directory + "glasspane-devtools-\(nonce).json"
@@ -498,16 +310,11 @@ final class SettingsModel: ObservableObject {
                 timeoutSeconds: timeout
             )
         }.value
-        guard developerToolsProbePid == probePid else {
-            // 在途期间 daemon 换过进程（作废由 applyDaemonSummary 落地）：
-            // 这份回音不属于当前进程，直接丢掉，不点亮任何结论。
-            recordProbeFailure(.unreadable, "后台服务在这次验证期间换过进程：这份回音不是它给的，结论已作废，请再验证一次。")
-            return
-        }
         switch outcome {
         case .text(let text):
             if let report = DeveloperToolsCapability.parse(text, observedAt: Date()) {
                 developerToolsCapability = report
+                developerToolsProbePid = daemon.pid
                 developerToolsProbeError = nil
                 developerToolsProbeFailure = nil
                 setPendingGuide(.developerTools)
@@ -521,25 +328,18 @@ final class SettingsModel: ObservableObject {
         case .timedOut:
             recordProbeFailure(.timedOut)
         }
-        rebuildEntries()
     }
 
     /// 记录一次验证失败：文案（可覆盖为上下文更贴切的说法）+ 可判读的失败阶段。
-    /// **同时作废上一次的结论**——新一轮实测没拿出结果，之前那个"可用（实测）"
-    /// 就不再是现状（撤销授权后再验证失败时留着绿徽标，等于用旧测量冒充新状态）。
     private func recordProbeFailure(_ failure: CapabilityFailure, _ text: String? = nil) {
         developerToolsProbeFailure = failure
         developerToolsProbeError = text ?? failure.fallbackText
-        developerToolsCapability = nil
-        developerToolsProbePid = nil
-        rebuildEntries()
     }
 
     /// 结论行的状态标记：在途 / 失败(在哪一步) / 已出结论；nil = 整行不渲染。
-    /// 只认**当前有效**的实测结论（作废过的、换了进程的都不算）。
     var capabilityMarker: PermissionGuide.CapabilityMarker? {
         if isProbingDeveloperTools { return .pending }
-        if let report = liveDeveloperToolsReport { return .concluded(report.status) }
+        if let report = developerToolsCapability { return .concluded(report.status) }
         if let failure = developerToolsProbeFailure { return .failed(failure) }
         return nil
     }
@@ -548,46 +348,19 @@ final class SettingsModel: ObservableObject {
     /// 因此只作为用户显式点击的动作提供，绝不自动执行。
     func restartDaemon() {
         let command = PermissionGuide.daemonRestartCommand(label: Self.launchdLabel, uid: Int(getuid()))
-        // kickstart -k 会杀掉当前进程：属于它的调试能力实测结论同时失效。
-        invalidateDeveloperToolsProbe()
-        lastActionError = nil
+        runSystemBinary(command.launchPath, arguments: command.arguments)
         reprobed = nil
         reprobeIntervalNow = Self.reprobeInterval
-        // 重启是一段新观测窗口的起点：之前攒下的"连续不答话"次数不属于它，
-        // 清空后由轮询重新计数（读侧的红字不清——此刻还没有新的测量替它说话）。
-        consecutiveSilentMeasurements = 0
-        // 先按"它正在重新上线"处理这几拍；kickstart 本身失败时再收回（下面）。
-        restartGraceSamplesRemaining = Self.restartGraceSampleBudget
         Task { @MainActor in
-            // 退出码要看：这个后台服务不是 launchd 托管时 kickstart 直接失败，
-            // 不取退出码就只剩一句"点了没反应"。
-            if let failure = await Self.runSystemBinaryAndWait(
-                command.launchPath, arguments: command.arguments
-            ) {
-                self.lastActionError = "重启后台服务\(failure)：\(PermissionGuide.manualRestartHint)"
-                // 指令本身就没成，"正在等它上线"这个前提不成立。
-                self.restartGraceSamplesRemaining = 0
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if let summary = await helloSummary() {
+                applyDaemonSummary(summary)
             }
-            // 不在这里睡一觉再采一次：那一次通常正好落在"还没回来"上，横幅就此
-            // 停在降级态且再也不会自愈。改成把轮询重新起表（视图 `.onChange` 接手），
-            // 重启窗口里的沉默由上面的宽限拍数吸收。
-            self.pollingRestartToken += 1
         }
-    }
-
-    /// 作废调试能力的实测结论与其进程归属：换了进程 = 没测过。
-    private func invalidateDeveloperToolsProbe() {
-        developerToolsCapability = nil
-        developerToolsProbePid = nil
-        developerToolsProbeError = nil
-        developerToolsProbeFailure = nil
-        rebuildEntries()
     }
 
     /// 一次性任务的结局：文本，或失败在哪一步。两者必须分开——面板曾在
     /// "启动器路径不存在"与"实测超时"共用一个 nil 的状态里摸黑排查。
-    /// `.spawnFailed` 覆盖"提交就没被接受"（作业从未起跑），`.timedOut` 只用于
-    /// "起跑后没在预算内回话"。
     enum OneShotOutcome {
         case text(String)
         case writeFailed
@@ -627,13 +400,6 @@ final class SettingsModel: ObservableObject {
             FileHandle.standardError.write(Data("runOneShot launchctl submit failed: \(error)\n".utf8))
             return .spawnFailed
         }
-        // 提交命令的退出码要看：launchctl 拒收（标签已被占用、脚本不可执行…）时
-        // 作业从未起跑，等满预算再报"没有回音"就是把没发生的事说成超时。
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            FileHandle.standardError.write(Data("runOneShot submit exited \(process.terminationStatus) label=\(command.jobLabel)\n".utf8))
-            return .spawnFailed
-        }
         var result: OneShotOutcome = .timedOut
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while Date() < deadline {
@@ -648,157 +414,87 @@ final class SettingsModel: ObservableObject {
         let remover = Process()
         remover.executableURL = URL(fileURLWithPath: cleanup.launchPath)
         remover.arguments = cleanup.arguments
-        do {
-            try remover.run()
-        } catch {
-            // 清理没跑成 = 标签留在 launchd 里等下次回收；不假装已经收干净。
-            FileHandle.standardError.write(Data("runOneShot cleanup \(command.jobLabel) failed: \(error)\n".utf8))
-        }
+        try? remover.run()
         try? FileManager.default.removeItem(atPath: scriptPath)
         try? FileManager.default.removeItem(atPath: outputPath)
         return result
     }
 
     /// 重查全部权限与 daemon 状态（hello 会话 3s 超时，放后台不阻塞主线程）。
-    /// 失败**必须留下一句话**：这一行红字本来就渲染在 daemon 卡里，此前没有任何
-    /// 地方给它赋值，于是"读不到后台服务"在面板上完全没有痕迹。
-    /// 反过来也一样：这一行只由**真的测出来的东西**改写（赋值点在
-    /// `applyDaemonSummary`），什么都没测成的那一拍（在途保护）不得抹掉上一条
-    /// 结论——抹掉之后面板看起来就像"刷新成功"。
     func refresh() {
         isRefreshing = true
-        Task { @MainActor in
-            self.applyDaemonSummary(await self.measureDaemon())
-            self.isRefreshing = false
+        lastRefreshError = nil
+        let socketPath = daemon.socketPath
+        let transport = daemonProbe
+        Task.detached(priority: .userInitiated) {
+            let reachable = transport.reachable(socketPath: socketPath)
+            let summary = transport.helloSummary(socketPath: socketPath)
+            Task { @MainActor in
+                self.applyDaemonSummary(summary, reachable: reachable)
+                self.isRefreshing = false
+            }
         }
     }
 
-    /// 一次存活测量（后台队列，带在途保护）：hello 有没有回音，以及没回音时
-    /// socket 文件在不在。后者只用来区分"没人答话"与"根本没在服务"，
-    /// 它自己**永不**充当存活判据——文件是进程死后也会留在原地的东西。
-    private func measureDaemon() async -> DaemonMeasurement {
-        guard !helloInFlight else { return .notMeasured }
+    /// 一次性 hello（后台队列，带在途保护）。
+    private func helloSummary() async -> DaemonProbe.Summary? {
+        guard !helloInFlight else { return nil }
         helloInFlight = true
         defer { helloInFlight = false }
         let socketPath = daemon.socketPath
         let transport = daemonProbe
-        let (summary, socketPresent) = await withCheckedContinuation {
-            (continuation: CheckedContinuation<(DaemonProbe.Summary?, Bool), Never>) in
+        return await withCheckedContinuation { (continuation: CheckedContinuation<DaemonProbe.Summary?, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
-                let summary = transport.helloSummary(socketPath: socketPath)
-                continuation.resume(returning: (summary, transport.reachable(socketPath: socketPath)))
+                continuation.resume(returning: transport.helloSummary(socketPath: socketPath))
             }
         }
-        if let summary { return .answered(summary) }
-        return .silent(socketPresent: socketPresent)
     }
 
-    /// 把一次测量落到发布状态：**测到什么就显示什么**。
-    ///  - 有回音：daemon 自报什么就显示什么，没上报的权限卡一律 `unverifiable`，
-    ///    不用面板进程的席位冒充；
-    ///  - 没回音：清掉上一次回音留下的版本/协议/PID/主体行。留着它们，就是把一个
-    ///    此刻不答话（甚至已经死了）的进程的自报当成现状，与同一屏上的
-    ///    "后台服务未在运行"自相矛盾。
-    ///  - 这一拍什么都没测（`.notMeasured`）：**整段跳过**，上一条结论继续有效。
-    private func applyDaemonSummary(_ measurement: DaemonMeasurement) {
-        switch measurement {
-        case .notMeasured:
-            // 这一拍什么都没测（在途保护），上一次的结果继续有效。
-            return
-        case .answered(let summary):
-            daemon.liveness = .running
+    /// 把 hello 结果落到发布状态：daemon 自报什么就显示什么；没有上报的
+    /// 权限卡一律 `unverifiable` + 注记，不用面板进程的席位冒充。
+    private func applyDaemonSummary(_ summary: DaemonProbe.Summary?, reachable: Bool? = nil) {
+        if let summary {
             daemon.version = summary.version
             daemon.protocolVersion = summary.protocolVersion
             daemon.pid = summary.pid
-            daemon.subject = summary.subject
-            // 这一行红字只表达"读不到后台服务"；这次读到了，它就该消失。
-            lastRefreshError = nil
-            // 答话了：连续不答话的计数归零，重启的宽限拍数也用不上了。
-            consecutiveSilentMeasurements = 0
-            restartGraceSamplesRemaining = 0
             if let probePid = developerToolsProbePid, probePid != summary.pid {
                 // daemon 换过进程：上一次"验证调试能力"的结论不再代表现状。
-                invalidateDeveloperToolsProbe()
+                developerToolsCapability = nil
+                developerToolsProbeError = nil
+                developerToolsProbePid = nil
             }
-            daemonReportedStatuses = summary.permissions
-        case .silent(let socketPresent):
-            daemon.liveness = socketPresent ? .presentButSilent : .absent
-            daemon.version = nil
-            daemon.protocolVersion = nil
-            daemon.pid = nil
-            daemon.subject = nil
-            lastRefreshError = Self.daemonUnreachableText(
-                measurement, socketPath: daemon.socketPath
-            )
-            // 重启宽限期里的沉默**不计入**连续不答话：那几拍是"它正在被 launchd
-            // 重新拉起"，不是"它活着却不答话"的证据。
-            // 计数只数"文件在、没人答话"：换到"根本没有服务在监听"是另一件事
-            // （那有它自己的下一步），不能替它凑次数。
-            if restartGraceSamplesRemaining > 0 {
-                restartGraceSamplesRemaining -= 1
-            } else if socketPresent {
-                consecutiveSilentMeasurements += 1
-            } else {
-                consecutiveSilentMeasurements = 0
-            }
-            // 重探结论是"当时正在答话的那个运行实例"的席位对照出来的；它现在不
-            // 答话了，"系统里已授权、只欠一次重启"就不再是测量出来的事实，留着
-            // 它会让沉默的 daemon 把三张卡都点成待重启。重新答话后轮询会再探一次。
-            reprobed = nil
-            // 实测结论的归属进程此刻无从确认（没答话=拿不到 pid）：卡片两副面孔
-            // 一律回到未验证；记录本身留着，同一个进程重新答话时结论还能归属回去。
-            daemonReportedStatuses = [:]
         }
+        if let reachable {
+            daemon.reachable = reachable
+        }
+        // hello 有响应即视为存活（探测失败不推翻此前的 reachable=true 判定，
+        // 因为 socket 文件可能仍在但对端无响应——那种情况由刷新按钮重新判定）。
+        if summary != nil {
+            daemon.reachable = true
+        }
+        daemon.subject = summary?.subject
+        daemonReportedStatuses = summary?.permissions ?? [:]
         rebuildEntries()
     }
 
-    /// 读不到后台服务时给用户的红字（nil = 这次读到了）。文案只说测到了什么、
-    /// 下一步点哪个控件，不写规格编号也不解释实现。**没答话时不推荐重启**：
-    /// 一次不答话区分不了"它正在服务别的客户端"与"它卡住了"，而重启会打断正在
-    /// 执行的操作——那条建议要等连续测量把可能性收窄（见 `daemonAttentionBanner`）。
-    nonisolated private static func daemonUnreachableText(
-        _ measurement: DaemonMeasurement,
-        socketPath: String
-    ) -> String? {
-        switch measurement {
-        case .notMeasured, .answered:
-            return nil
-        case .silent(let socketPresent):
-            return socketPresent
-                ? "读不到后台服务的状态：\(socketPath) 的 socket 文件在，但它没有回应（可能在服务另一个客户端，也可能已经停止响应）。等下一次自动检测，或点「刷新」立刻重测。"
-                : "读不到后台服务的状态：\(socketPath) 上没有服务在监听。点「重启后台服务」让 launchd 重新拉起它。"
-        }
-    }
-
-    /// 由 daemon 自报席位 + 重探结果重算卡片状态与注记。这里算出来的 `status`
-    /// 是每张卡的**唯一**状态来源：可见徽标与机器可读标识（`gp-perm-<kind>-<status>`）
-    /// 都读它，两面不允许各取一次值。
-    /// `restartPending` 同理，但它问的是另一件事：**这次重启是不是测量要求的**。
-    /// 只有"运行实例自报没达成、同一身份的新进程实测达成"这一对结果同时拿到时
-    /// 才成立；daemon 没上报席位（沉默/旧版本）时它恒为 false，`gp-perm-<kind>-
-    /// restart-pending` 也就不会在"读不到状态"的卡上亮起来。
+    /// 由 daemon 自报席位 + 重探结果重算卡片状态与注记。
     private func rebuildEntries() {
         let reported = daemonReportedStatuses
         let restartKinds = Set(kindsNeedingRestart)
         for index in entries.indices {
             let kind = entries[index].kind
             if kind == .developerTools {
-                // 系统没有查询接口 ≠ 不能实测：有当前有效的实测结论就按结论显示
-                // （granted/denied/unverifiable），没有就回到"未验证"。
-                entries[index].status = liveDeveloperToolsReport?.status ?? .unverifiable
+                entries[index].status = .unverifiable
                 entries[index].statusNote = nil
-                entries[index].restartPending = false
                 continue
             }
             if let status = reported[kind] {
                 entries[index].status = status
-                entries[index].restartPending = restartKinds.contains(kind)
-                entries[index].statusNote = entries[index].restartPending
+                entries[index].statusNote = restartKinds.contains(kind)
                     ? "系统设置里已勾选，重启后台服务后生效"
                     : nil
             } else {
                 entries[index].status = .unverifiable
-                entries[index].restartPending = false
                 entries[index].statusNote = Self.noDaemonReportNote
             }
         }

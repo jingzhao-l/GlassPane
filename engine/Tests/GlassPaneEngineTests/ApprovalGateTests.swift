@@ -516,9 +516,38 @@ final class ApprovalGateEngineIntegrationTests: XCTestCase {
         XCTAssertEqual(record.operationType, "restore")
         XCTAssertEqual(record.riskTier, .high)
         XCTAssertEqual(record.decision, .approve)
-        XCTAssertEqual(record.approvedBy, "daemon:auto")
-        XCTAssertTrue(record.reason.hasPrefix("restore executed:"))
+        XCTAssertEqual(record.approvedBy, ApprovalGate.autoApprover)
+        XCTAssertEqual(
+            ApprovalGate.autoApprover, "daemon:auto",
+            "自批身份是台账审计口径的一部分：改这个值要过规格，不能顺手改常量"
+        )
+        XCTAssertEqual(record.reason, "restore executed: compare")
         XCTAssertTrue(gate.verifyChain().valid)
+    }
+
+    /// A-4 的实际断言：链上的这句话必须由**真实结局**生成。
+    /// 早先的写法是在动作之前写死 "restore executed: …"，于是中途失败的 ffwd
+    /// 也在不可抵赖的链上留下了一件没发生过的事。
+    func testFailedStepRegistersTheActualOutcomeNotAClaimedSuccess() throws {
+        let channel = ScriptedChannel(fallbackTree: TestTrees.standard)
+        channel.actionError = ChannelError.actRejected(reason: "scripted rejection")
+        let gate = ApprovalGate()
+        let core = try makeCore(channel: channel, gate: gate)
+
+        let snap = try core.snapshot(maxDepth: 6)
+        guard let snapshotId = snap["snapshotId"] as? String else {
+            return XCTFail("no snapshotId")
+        }
+        let step: (Selector, Action) = (Selector(role: "AXButton", title: "Submit"), .press)
+        XCTAssertThrowsError(try core.restore(snapshotId: snapshotId, steps: [step], mode: nil)) { error in
+            let gpError = error as! GPError
+            XCTAssertEqual(gpError.code, .restoreStepFailed)
+            XCTAssertTrue(gpError.message.contains("step 1"), gpError.message)
+        }
+        XCTAssertEqual(gate.count, 1)
+        let reason = gate.chain().first?.reason ?? ""
+        XCTAssertEqual(reason, "restore failed at step 1: ffwd")
+        XCTAssertFalse(reason.contains("executed"), "失败的 ffwd 不能在台账里被说成执行过：\(reason)")
     }
 
     func testFfwdRestoreRegistersWithFfwdLabel() throws {

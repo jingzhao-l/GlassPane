@@ -45,6 +45,14 @@ public final class ProjectRegistry {
         load()
     }
 
+    /// 生产注册表：`~/.glasspane/projects.json`（由 `StateRoot` 派生）。仅 daemon
+    /// 与其一次性 CLI 子命令使用；任何测试构造它都应当被判为缺陷
+    /// （`ProjectRegistryIsolationTests`）。单测侧必须注入临时目录
+    /// （`Tests` 里的 `ephemeralProjectRegistry()`）。
+    public static func live() -> ProjectRegistry {
+        ProjectRegistry(filePath: defaultProjectsPath)
+    }
+
     /// A registry over `<stateRoot>/projects.json` — the route `glasspaned`
     /// takes for every subcommand, so `--state-dir` cannot be honoured by one
     /// command and missed by another.
@@ -243,7 +251,7 @@ public final class ProjectRegistry {
         guard loadFailed else { return }
         throw GPError(
             code: .internalError,
-            message: "\(unreadableReport ?? "projects.json is unreadable"). Writing it would replace every stored registration with the \(projects.count) entry/entries this process holds, so nothing was created, changed or removed.",
+            message: "\(unreadableReport ?? "projects.json exists but could not be decoded") — refusing to overwrite it, because this process is holding an empty table read from that unreadable file (writing it would replace every stored registration with the \(projects.count) entry/entries this process holds). Writes stay refused until the process restarts. Remedy: make the file readable again (restore it from a copy), then restart the background service so it re-reads: `node <repo>/installer/cli.js --restore-launchd`, or the restart button in the GlassPane panel.",
             remedy: unreadableRemedy
         )
     }
