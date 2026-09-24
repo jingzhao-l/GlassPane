@@ -50,6 +50,13 @@ AI 编程代理用的 GUI 测试与验证层**：代理已经能做静态半场�
 规格阶段作为里程碑分节记录，不追溯伪造版本号。所有日期取自 `git log`，每条 bullet 可回溯到其给出的 commit hash 或
 `specs/` 正文；两者都给不出来的内容已被删除。
 
+- 真机诊断 `GeometryAuditDiagnosticTests`（`GLASSPANE_LAYOUT_DIAG=1` 才跑，无权限/无 GUI 会话干净跳过）
+  抓到一个合成用例永远抓不到的缺陷：第一版每个元素 role/title/identifier/position/size 全读，
+  在真实应用上 10 秒无障碍预算被击穿、整次审计**颗粒无收**（还观察到 wall time 明显大于宣称的
+  预算）。两处修正：① 只读 role + 几何，title 仅对可交互角色读（"哪个按钮点不到"才需要名字）；
+  ② 预算耗尽改为带着已测部分返回并置 `complete=false` + `stopReason`，审计据此留下
+  `geometryScanIncomplete` 且不允许给出 `pass`——"要么全有要么报错"与大界面天然不兼容。
+
 ## [1.1.1] — 2026-09-23
 
 在 1.1.0 纳入基础设施审计后，本迭代把 iterate 复审（r1–r4b）与既有主线的各类收口合并进 main，并统一推送。

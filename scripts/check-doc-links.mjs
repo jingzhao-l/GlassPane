@@ -67,10 +67,40 @@ function read(rel) {
   return fs.readFileSync(path.join(ROOT, rel), 'utf8')
 }
 
+/** 从 mcp-shell 源码里数出真实工具数（不依赖构建产物）。 */
+function realToolCount() {
+  const src = path.join(ROOT, 'mcp-shell', 'src', 'tools.ts')
+  if (!fs.existsSync(src)) return null
+  return (fs.readFileSync(src, 'utf8').match(/^\s*name:\s*"gp_[a-z_]+",/gm) ?? []).length
+}
+
+/** 扫描文档中"\d+ (MCP|个) tools/工具"式表述，与真实数量比对。 */
+function toolCountDrift() {
+  const real = realToolCount()
+  if (real === null) return ['无法从 mcp-shell/src/tools.ts 数出工具数量']
+  const out = []
+  const pattern = /(\d+)\s*(?:MCP tools|`gp_\*` MCP tools|个 MCP 工具|个 `gp_\*`|个工具)/g
+  for (const doc of DOCS.filter((d) => fs.existsSync(path.join(ROOT, d)))) {
+    const text = read(doc)
+    for (const m of text.matchAll(pattern)) {
+      if (m[0].includes('gp_act') || m[0].includes('动词')) continue
+      if (Number(m[1]) !== real) {
+        out.push(`${doc}: 写了 ${m[1]} 个工具，代码里实际是 ${real} 个（"\${m[1]} …"）`)
+      }
+    }
+  }
+  return out
+}
+
 export function check() {
   const problems = []
   const present = DOCS.filter((d) => fs.existsSync(path.join(ROOT, d)))
   const anchors = new Map(present.map((d) => [d, headingsOf(read(d))]))
+
+  // 文档里抄写的工具数量必须等于代码里的真实数量：README 用"15 个工具"这种说法
+  // 是好意（读者不必自己数），但手抄数字必然漂移，所以让它可验证。
+  const countProblems = toolCountDrift()
+  problems.push(...countProblems)
 
   for (const [a, b] of MIRROR_PAIRS) {
     const ea = fs.existsSync(path.join(ROOT, a))

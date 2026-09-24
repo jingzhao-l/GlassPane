@@ -113,7 +113,8 @@ all. GlassPane measures; it does not have taste. Use both for what they are good
 - **Layout operability audit** — `gp_audit_ui` walks element geometry and applies deterministic
   rules: zero-sized or out-of-window controls are blocking; undersized hit targets, clipped
   elements and overlapping targets are advisory. Geometry it could not read never counts toward a
-  `pass`, and a truncated overlap scan says so.
+  `pass`, and a truncated or budget-stopped scan says so. On large interfaces the walk can stop
+  early by design; it then reports what it measured plus `complete: false` rather than nothing.
 - **Numerical pixel verification** — how much of the target region changed and where, computed
   locally; no screenshot is stored or shipped to a model.
 - **Attribution with a strength ladder** — `weak` by default; `strong` when the app under test
