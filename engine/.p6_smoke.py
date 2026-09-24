@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import hashlib
 import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -63,6 +64,72 @@ def resolve_binary(explicit, env_var, candidates):
         if os.path.exists(cand):
             return cand
     return candidates[-1]
+
+
+def _newest_source_mtime(source_root):
+    """`source_root` 下最新源文件的 mtime（跳过 .build 与点目录）。0.0 = 目录不存在/无源文件。"""
+    newest = 0.0
+    for dirpath, dirnames, filenames in os.walk(source_root):
+        dirnames[:] = [d for d in dirnames if d != ".build" and not d.startswith(".")]
+        for name in filenames:
+            if name.endswith((".swift", ".c", ".h", ".m", ".py", ".ts", ".js")):
+                try:
+                    newest = max(newest, os.path.getmtime(os.path.join(dirpath, name)))
+                except OSError:
+                    continue
+    return newest
+
+
+def require_current_build(pairs):
+    """实测"本轮被测的产物不早于它所声称构建自的源码"，并留下可回溯的指纹。
+
+    R4-02。此前两条端到端闸只检查产物**存在**，不检查它是**当前构建**：实测过一次
+    demo 停在旧能力集（hello 报 caps=['z1']，缺 z3/checkpoint），于是整轮"绿"测的是旧 SDK。
+    判据是产物的指纹与时间戳，不是"我刚刚 build 过"这句话——命令说过什么不等于发生了什么。
+    返回 (指纹行, 不成立的原因)。原因非空由调用方 NOT RUN(2)：过期产物跑出来的结论不能用。
+    """
+    lines, problems = [], []
+    for role, binary, source_root in pairs:
+        try:
+            with open(binary, "rb") as handle:
+                digest = hashlib.sha256(handle.read()).hexdigest()[:12]
+        except OSError as error:
+            problems.append(f"{role}: 产物读不出（{error}）——身份无法确认，不放行")
+            continue
+        built = os.path.getmtime(binary)
+        newest_src = _newest_source_mtime(source_root)
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(built))
+        lines.append(f"{role} sha256:{digest} mtime={when}")
+        if not newest_src:
+            problems.append(
+                f"{role}: 源码树 {source_root} 走不出任何源文件——无法判断产物是否当前，不放行"
+            )
+            continue
+        if built + 1.0 < newest_src:
+            problems.append(
+                f"{role} 比它所声称的源码树旧：{binary} 构建于 {when}，而 {source_root} 下最新源文件是 "
+                + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(newest_src))
+                + " —— 本轮会测到旧构建，改动不参与测量"
+            )
+    return lines, problems
+
+
+def reject_foreign_checkout(candidates, here, other_roots=("/Volumes/Eng-Dev/GlassPane",)):
+    """把"另一个工作副本里的构建产物"从**兜底**候选里剔掉（显式 argv/env 给定不受影响）。
+
+    同一台机器常并存多个 checkout。本脚本跑在 worktree 里，若兜底到
+    `/Volumes/Eng-Dev/GlassPane/engine/probe/.build/...`，测的就是另一棵树的代码，
+    而输出看起来完全正常——这与"构建过期"同族，都是拿不是本轮的东西当证据。
+    返回 (留下的候选, 被剔除的候选)。
+    """
+    real_here = os.path.realpath(here)
+    kept, refused = [], []
+    for one in candidates:
+        resolved = os.path.realpath(one)
+        inside_repo = resolved == real_here or resolved.startswith(real_here + os.sep)
+        foreign = any(resolved.startswith(os.path.realpath(root)) for root in other_roots)
+        (kept if inside_repo or not foreign else refused).append(one)
+    return kept, refused
 
 
 def check(label, condition, detail=""):
@@ -676,6 +743,40 @@ def main():
                                 "GLASSPANE_DAEMON_BIN", DAEMON_CANDIDATES)
     demo_bin = resolve_binary(sys.argv[2] if len(sys.argv) > 2 else None,
                               "GLASSPANE_DEMO_BIN", DEMO_CANDIDATES)
+    # R4-02 的两半，都在任何断言之前量：
+    # ① 兜底候选里若有别的 checkout 的产物，先用掉它——那测的是另一棵树；
+    # ② 产物比自己的源码树旧，那测的是旧构建。两种都不放行，且都留下指纹便于回溯。
+    resolved = (
+        ("daemon", daemon_bin, DAEMON_CANDIDATES,
+         (len(sys.argv) > 1 and sys.argv[1]) or os.environ.get("GLASSPANE_DAEMON_BIN")),
+        ("demo", demo_bin, DEMO_CANDIDATES,
+         (len(sys.argv) > 2 and sys.argv[2]) or os.environ.get("GLASSPANE_DEMO_BIN")),
+    )
+    for name, chosen, candidates, explicit in resolved:
+        if explicit:
+            continue          # 人显式给的路径不猜：那就是他要点名的那个件
+        kept, refused = reject_foreign_checkout(candidates, HERE)
+        if chosen in refused:
+            print(f"NOT RUN — {name} 落到另一个工作副本的产物上，本轮不放行（NOT RUN ≠ PASS）：")
+            for one in refused:
+                print(f"  被剔除外来产物：{one}")
+            print("REMEDY: cd engine && swift build && (cd probe && swift build) 后复跑；"
+                  "或确实要跨副本时，用位置参数/env（GLASSPANE_DAEMON_BIN、GLASSPANE_DEMO_BIN）显式点名。")
+            sys.exit(2)
+    fingerprints, stale = require_current_build([
+        ("daemon", daemon_bin, os.path.join(HERE, "Sources")),
+        ("demo", demo_bin, os.path.join(HERE, "probe", "Sources")),
+    ])
+    if stale:
+        print("NOT RUN — 被测产物不是当前构建，本轮未执行任何断言（NOT RUN ≠ PASS）：")
+        for line in stale:
+            print(f"  {line}")
+        print("  实测指纹：" + " | ".join(fingerprints))
+        print("REMEDY: cd engine && swift build && (cd probe && swift build) 后复跑。")
+        sys.exit(2)
+    check("被测产物身份与新鲜度已实测（sha256 + 构建时间不晚于各自源码树）", True,
+          " | ".join(fingerprints))
+
     missing = [p for p in (daemon_bin, demo_bin) if not os.path.exists(p)]
     if missing:
         # 本文件头部定义 exit 0 = PASS：前置缺失绝不能以 0 离场冒充绿——
