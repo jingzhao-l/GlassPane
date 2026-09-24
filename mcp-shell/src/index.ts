@@ -42,11 +42,35 @@ function parseArgs(argv: readonly string[]): CliOptions {
   return options;
 }
 
+/**
+ * The socket a call lands on, in the order the shell actually resolves it. The
+ * third line is a *guess made from this process's HOME* and must be worded as
+ * one: `glasspaned`'s own default is the per-user home folder as the system
+ * reports it (`StateRoot.homeDefault()`, which does not follow a caller-set
+ * `HOME` — the same non-inheritance this project has already lost data to), and
+ * a daemon started with `--state-dir` binds `<state-dir>/daemon.sock` where no
+ * `HOME` value points. `defaultSocketPath` carries the full reason.
+ */
 const USAGE = `usage: glasspane-mcp [--socket-path <path>]
 
 Bridges an AI agent (MCP stdio) to the GlassPane engine daemon.
-The daemon socket defaults to $HOME/.glasspane/engine.sock
-(override with GLASSPANE_ENGINE_SOCK or --socket-path).
+
+Socket, in the order this shell resolves it:
+  1. --socket-path <path>
+  2. GLASSPANE_ENGINE_SOCK=<path>
+  3. $HOME/.glasspane/engine.sock — a guess read from this process's HOME, not
+     the daemon's rule: glasspaned's own default is the home folder the system
+     reports, which a HOME you export does not move, and glasspaned --state-dir
+     <dir> serves <dir>/daemon.sock instead.
+
+So "nothing is listening on the default path" means this shell guessed a
+different directory, not that the daemon is dead. Connect to the socket the
+daemon is really on — read it, do not re-derive it:
+  launchctl print gui/$(id -u)/com.glasspane.daemon      # the installed job's --socket-path value
+  glasspane-mcp --socket-path <that path>                 # or, equivalently:
+  GLASSPANE_ENGINE_SOCK=<that path> glasspane-mcp
+A daemon started by hand with --state-dir has no launchd job to read: pass it
+<state-dir>/daemon.sock.
 `;
 
 /** How long a blocked stdout may stay blocked before the stall is reported. */

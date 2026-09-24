@@ -84,7 +84,12 @@ public struct ApprovalRecord: Codable, Equatable {
 | 命令 | 输出 | 退出码 |
 |---|---|---|
 | `--approval-audit` | 审批链 JSON 数组（key-sorted 编码），无 `--path` 覆盖时读默认路径 | 0；读取失败（损坏/不可读）→ 1 |
-| `--approval-verify` | `{"valid": true/false, "count": N, "firstBrokenIndex": n/null}` | 0=完整 / 1=校验失败或读取失败 / 2=参数错 |
+| `--approval-verify` | `{"valid": bool, "count": N, "tailHash": "<链尾 64 hex>"｜""（空链）, "firstBrokenIndex": n｜null, "loadFailed": bool, "persistFailed": "<本进程落盘失败的具体原因>"｜null, "ledgerPath": "<绝对路径>"｜null, "stateRoot": "<本次运行的状态根>"}` | 0=完整 / 1=校验失败、读取失败或本进程落盘失败 / 2=参数错 |
+
+> 〔2026-09-24 修订（R6-07 与 r5a 的落盘可见性）：本表原只列 `valid`/`count`/`firstBrokenIndex` 三键，
+> 而 P5-A5 要求"输出符合 §3.6"——按旧表判，多发布 `tailHash` 的实现反而必失败。`tailHash` 是为
+> 「纯尾切不可检」补的比较锚点（见 P5-A2 修订），`persistFailed`/`ledgerPath`/`stateRoot` 是把
+> "台账只在内存里、盘上没有"这件事变成机器可读事实（否则它只在 stderr 里，退出码仍 0）。〕
 
 - 两命令为**维护面直读**（不经 socket、不入 daemon 主循环），与 `--list-projects` 同范式。
 

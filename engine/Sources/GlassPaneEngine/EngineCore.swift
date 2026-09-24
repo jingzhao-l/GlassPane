@@ -385,8 +385,15 @@ public final class EngineCore {
         let stripped = stripFirmlink(resolved)
         let components = stripped.split(separator: "/", omittingEmptySubsequences: true)
         if components.isEmpty { return "the filesystem root" }
-        if sharedScratchStoragePaths.contains(stripped) {
-            return "a world-writable shared scratch directory"
+        // Subtree-matched, exactly like `systemOwnedStorageTrees` below. It used
+        // to be `sharedScratchStoragePaths.contains(stripped)` — an equality
+        // test — so `/private/tmp/x` passed here while the MCP shell (which
+        // treats the same names as trees) refused it: the round that unified the
+        // two *lists* left the *matching* apart, and a shared scratch directory
+        // one level down is the same exposure as the directory itself.
+        for scratch in sharedScratchStoragePaths
+        where stripped == scratch || stripped.hasPrefix(scratch + "/") {
+            return "inside the world-writable shared scratch directory \(scratch)"
         }
         if components.count == 1 { return "the top-level directory /\(components[0]) of the boot volume" }
         if components[0] == "Volumes", components.count == 2 { return "the root of a mounted volume" }
@@ -937,6 +944,18 @@ public final class EngineCore {
         // tellable apart from the archive alone, without a second evidence shape.
         // Which of the two startup forms it was stays in the daemon's own words,
         // because the string below is the only thing it hands over.
+        //
+        // Stated precisely, because there is a third shape and it is not the
+        // conservative one: an engine with **no monitor and no stated reason**
+        // (`inputMonitorAbsenceReason == nil`, `contaminationVerdict == nil`)
+        // answers `contaminated: false` + `.soft`, and only the act response's
+        // `contaminationBasis` says "'false' here is not an observation". That is
+        // deliberate — inventing a reason nobody gave would be the fabricated
+        // default this block exists to remove — but it means the one-rule claim
+        // above holds for *a daemon*, not for every embedding. A `glasspaned`
+        // process cannot reach it: both branches that leave the guard out set a
+        // reason, which is what
+        // `EngineCoreTests.testDaemonAlwaysStatesAReasonWhenNoMonitorRuns` pins.
         let contaminationMonitored = contaminationVerdict?.monitored ?? false
         let monitorWasLost = contaminationVerdict?.monitored == false
         let monitorFault: String? = {
@@ -1216,9 +1235,10 @@ public final class EngineCore {
             // at all — the same class of defect as a `hitCount: 0` that silently
             // includes frames that never arrived. Per-pid rows carry
             // `stateFramesUnmappedSource` (only when non-zero); this is the total
-            // that survives a probe disconnecting, and it is a *daemon-side*
-            // measurement, so unlike the probe's own counters it is never
-            // absent.
+            // that survives a probe disconnecting. Like `disconnections` just
+            // above it, the key exists only when an inbox exists — `--no-probe`
+            // is the absence of the surface, and a measured zero needs something
+            // that measures.
             payload["unmapableStateFrames"] = inbox.unmapableStateFrameCount
         }
         return payload
@@ -1317,7 +1337,7 @@ public final class EngineCore {
             throw GPError(
                 code: .badParams,
                 message: "evidenceStoragePath \"\(stored)\" \(defect). Nothing was registered.",
-                remedy: "use a project-owned directory at least two levels deep, e.g. \"\(Self.evidenceStorageExample)\": absolute, with no \".\" or \"..\" component, and neither the filesystem root, a top-level directory, a mounted volume root, your home directory, anything inside ~/Library, nor a system-owned tree (\(Self.systemOwnedStorageTrees.joined(separator: ", "))) — the daemon writes evidence into this directory and deletes expired entries from it"
+                remedy: "use a project-owned directory at least two levels deep, e.g. \"\(Self.evidenceStorageExample)\": absolute, with no \".\" or \"..\" component, and neither the filesystem root, a top-level directory, a mounted volume root, your home directory, anything inside ~/Library, a system-owned tree (\(Self.systemOwnedStorageTrees.joined(separator: ", "))), nor world-writable shared scratch (\(Self.sharedScratchStoragePaths.joined(separator: ", ")) and anything below them) — the daemon writes evidence into this directory and deletes expired entries from it"
             )
         }
         // C-03: with no registry there is nothing to write into, and creating a

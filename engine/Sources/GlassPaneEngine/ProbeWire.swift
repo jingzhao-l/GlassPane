@@ -76,10 +76,23 @@ public enum ProbeWire {
     /// the object actually is (`RecipeLoader.describe` walks into this same
     /// trap and answers it the same way).
     static func counter(_ value: Any?) -> Int? {
-        guard let number = value as? NSNumber else { return nil }
-        guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        guard let number = scalar(value) else { return nil }
         let whole = number.intValue
         return whole >= 0 ? whole : nil
+    }
+
+    /// An `NSNumber` only when the JSON really carried a number.
+    ///
+    /// The boolean veto has to live at the single place every numeric field is
+    /// read, not just in the counters below it: `{"pid": true}` used to decode as
+    /// `pid == 1` (Swift bridges `NSNumber` to whatever scalar is asked for), so a
+    /// malformed frame could register a probe against a pid that no such process
+    /// owns — and every later "hitCount: 0" would then be a measurement about
+    /// somebody else's process. Same trap as `counter`, same answer.
+    static func scalar(_ value: Any?) -> NSNumber? {
+        guard let number = value as? NSNumber else { return nil }
+        guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        return number
     }
 
     /// Decode one frame payload (no trailing newline). Never throws: bad
@@ -94,7 +107,7 @@ public enum ProbeWire {
         }
         switch type {
         case "hello":
-            guard let pidNumber = dict["pid"] as? NSNumber, pidNumber.intValue > 0,
+            guard let pidNumber = scalar(dict["pid"]), pidNumber.intValue > 0,
                   let appName = dict["appName"] as? String,
                   let probeVersion = dict["probeVersion"] as? String else {
                 return .malformed(reason: "hello requires pid>0, appName, probeVersion")
@@ -112,14 +125,14 @@ public enum ProbeWire {
             ))
         case "handler":
             guard let file = dict["file"] as? String,
-                  let line = (dict["line"] as? NSNumber)?.intValue, line >= 0 else {
+                  let line = (scalar(dict["line"]))?.intValue, line >= 0 else {
                 return .malformed(reason: "handler requires file and line>=0")
             }
             return .handler(
                 file: file,
                 line: line,
-                ts: (dict["ts"] as? NSNumber)?.doubleValue ?? 0,
-                durationNs: (dict["durationNs"] as? NSNumber)?.intValue
+                ts: (scalar(dict["ts"]))?.doubleValue ?? 0,
+                durationNs: (scalar(dict["durationNs"]))?.intValue
             )
         case "state":
             guard let key = dict["key"] as? String,
@@ -133,7 +146,7 @@ public enum ProbeWire {
                 before: before,
                 after: after,
                 source: source,
-                ts: (dict["ts"] as? NSNumber)?.doubleValue ?? 0
+                ts: (scalar(dict["ts"]))?.doubleValue ?? 0
             )
         case "checkpoint":
             let ref = (dict["ref"] as? String) ?? ""

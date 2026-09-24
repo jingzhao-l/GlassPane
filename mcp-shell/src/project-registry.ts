@@ -76,6 +76,18 @@ const PROTECTED_ROOTS: readonly string[] = [
  *   same path shared scratch. Shared scratch is world-writable by definition:
  *   a registry pointing there is readable-by-everyone evidence, whatever the
  *   directory's own mode says on the day it is checked.
+ *
+ * What that pinning does **not** cover, so the split is recorded rather than
+ * implied as closed: the guard reads the daemon's *names*, not its *matcher*.
+ * These entries are matched as subtrees here (`/private/tmp/x` is refused),
+ * while `EngineCore.resolvedStoragePathDefect` still compares
+ * `sharedScratchStoragePaths` for exact equality, so that path is accepted by
+ * the daemon — same list, two verdicts. The open half is registered in
+ * `specs/GlassPane_规格修订_2026-09-23_iterate-round4.md` ("仍未收口": the Swift
+ * half of path validation) and is closed in Swift, not here; this file's
+ * subtree behaviour is what the input-level entries of
+ * `test/path-consistency.test.mjs` pin, so a future downgrade of either side is
+ * visible in at least one gate.
  */
 const PROTECTED_SUBTREES: readonly string[] = [
   "/Applications", "/System", "/Library", "/private/etc",

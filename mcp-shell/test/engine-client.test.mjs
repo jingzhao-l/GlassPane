@@ -1,14 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import {
   CALLER_VISIBLE_CEILING_MS,
   ENGINE_DEADLINES_MS,
+  ENGINE_SOCKET_ENV,
   EngineJsonRpcClient,
   callerDeadlineMs,
+  defaultSocketPath,
   engineClientOver,
   engineDeadlineMs,
   RESTORE_BASE_DEADLINE_MS,
@@ -490,4 +495,80 @@ test("each fresh connection handshakes and reports what it measured", async () =
   await Promise.all([second, third]);
   ok.client.close();
   silent.client.close();
+});
+
+/* ------------------------------------------------------------------ *
+ * Where the daemon socket is (A-1 family: the default is a guess, and
+ * saying so is the fix — the shell cannot ask a daemon it has not met).
+ * ------------------------------------------------------------------ */
+
+test("the default socket path is a $HOME guess, and its own text says which guess", () => {
+  const had = Object.prototype.hasOwnProperty.call(process.env, ENGINE_SOCKET_ENV);
+  const saved = process.env[ENGINE_SOCKET_ENV];
+  try {
+    // The override is the route that works under a redirected HOME, so it is
+    // the behaviour worth pinning: honoured, and ahead of the guess.
+    process.env[ENGINE_SOCKET_ENV] = "/tmp/gp-sock-env/engine.sock";
+    assert.equal(defaultSocketPath(), "/tmp/gp-sock-env/engine.sock");
+
+    delete process.env[ENGINE_SOCKET_ENV];
+    const fallback = defaultSocketPath();
+    assert.equal(
+      fallback,
+      path.join(os.homedir(), ".glasspane", "engine.sock"),
+      "with nothing set the default is the folder under the HOME this process sees",
+    );
+    assert.ok(
+      fallback.startsWith(`${os.homedir()}/`),
+      `${fallback}: outside its own home the default would be a different guess`,
+    );
+
+    // Honest-by-construction: the divergence to `NSHomeDirectory()`, and the
+    // `--state-dir` case the guess can never reach, have to be written down at
+    // the definition — a caller reading the help text is the only defence here.
+    const source = fs.readFileSync(
+      fileURLToPath(new URL("../src/engine-client.ts", import.meta.url)),
+      "utf8",
+    );
+    const at = source.indexOf("export function defaultSocketPath");
+    assert.notEqual(at, -1, "defaultSocketPath must stay the one place the default is resolved");
+    const doc = source.slice(0, at).split("/**").pop();
+    assert.ok(doc.includes(ENGINE_SOCKET_ENV), "the override must be named by its value, not by a re-typed string");
+    assert.match(doc, /NSHomeDirectory/, "the other side's home lookup must be named");
+    assert.match(doc, /\$HOME/, "the fact that this side reads the HOME variable must be stated");
+    assert.match(doc, /daemon\.sock|--state-dir/, "the state-dir socket the default can never find must be stated");
+  } finally {
+    if (had) process.env[ENGINE_SOCKET_ENV] = saved;
+    else delete process.env[ENGINE_SOCKET_ENV];
+  }
+});
+
+/** The built CLI's `--help`, i.e. the text an agent reads when the socket is wrong. */
+function usageText() {
+  const cli = fileURLToPath(new URL("../dist/index.js", import.meta.url));
+  const result = spawnSync(process.execPath, [cli, "--help"], { encoding: "utf8", timeout: 15_000 });
+  assert.equal(result.status, 0, `--help exited ${result.status}: ${(result.stderr ?? "").trim()}`);
+  return result.stdout;
+}
+
+test("usage names the two routes an agent can run itself and does not promise HOME matches", () => {
+  const text = usageText();
+  // The true property is not a phrasing: it is that both exits — and the shape
+  // each needs — are in the text, because either one alone leaves the agent
+  // asking a human where the daemon is.
+  assert.ok(text.includes(ENGINE_SOCKET_ENV), `usage must name the env override (${ENGINE_SOCKET_ENV})`);
+  assert.match(text, /--socket-path\s*[<=]/, "usage must give --socket-path in a copyable shape");
+  // The case no HOME value can reach, so naming it is what keeps this from
+  // being a choice between two guesses.
+  assert.match(text, /daemon\.sock/, "the --state-dir daemon's socket name must appear");
+  // And how to find the live value without deriving anything: a command.
+  assert.match(text, /launchctl print/, "usage must give the command that reads the socket the daemon is on");
+  // The claim that made the default a trap was that $HOME is how the daemon
+  // picks too. It has to read as this shell's guess instead.
+  assert.doesNotMatch(
+    text,
+    /the daemon socket defaults to|daemon[^\n]{0,40}defaults? to \$HOME/i,
+    "usage must not present the $HOME guess as the daemon's own default",
+  );
+  assert.match(text, /guess/, "the default has to be called what it is: a guess this process makes");
 });

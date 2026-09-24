@@ -285,6 +285,18 @@ public final class EvidenceStore {
         guard let data = try? pack.jsonData() else { return false }
         guard ensureIsolatedDirectory() else { return false }
         let filePath = path(for: pack.operationId)
+        let destination = URL(fileURLWithPath: filePath)
+        // Nothing may be published *onto* something that is not one of this
+        // archive's own entries. Measured: when the entry name is held by a
+        // directory, `replaceItemAt` does not fail politely — it takes the
+        // directory's contents with it, which contradicts this type's declared
+        // blast radius (only `op_<26 chars>.json`, only ever deleted by an
+        // explicit prune). Refusing on sight is the only shape that keeps that
+        // promise; a rewrite of a real entry stays allowed.
+        if FileManager.default.fileExists(atPath: filePath), !Self.isDeletableEntry(destination) {
+            log.error("evidence entry \(filePath) exists but is not an archive entry this store wrote — refusing to write, and leaving it exactly as found")
+            return false
+        }
         let tmpPath = filePath + ".tmp"
         do {
             try data.write(to: URL(fileURLWithPath: tmpPath), options: .atomic)

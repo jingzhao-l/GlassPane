@@ -251,19 +251,38 @@ probe.sock、--no-c33，不连用户现网 daemon；拉起 `engine/probe` 的合
 probe-demo，GLASSPANE_PROBE_SOCK 指向该探针口。**socket 隔离 ≠ 状态根隔离**：
 evidence 归档与 approvals.json 走 NSHomeDirectory()，见文末「冒烟状态根隔离与
 熔断标签分段匹配（2026-09-23，B-01/A-02）」一节）。
-结果：**P6 SMOKE OK**——
+结果：**P6 SMOKE OK**——（首跑 2026-09-19；档 1 的 UI 回写两路核验为 2026-09-24
+谓词纠正后复跑的实测值，纠正原委见下面观察 13）
 
 | 断言面 | 实测 |
 |---|---|
 | 注册/能力 | probe hello `gp-probe/0.1.0`，caps=[z1,z3,checkpoint]，attachedHasProbe=true |
 | evidence 真值 | handlerProbe `{hitCount:1, handlers:[probe_demo/ProbeDemoApp.swift:76]}` + stateDiff.changed=true 落盘；attribution=**strong**（本仓库首次） |
 | 金丝雀 | T4/T5/T7/T8/T3 各检出一次；T8 lateCount=1 由 diagnose 时刷新入账（迟到宽限窗内） |
-| 档 1 | snapshot 带真实 gpz1 payload → rollback_full **执行面**回传 rollbackExecuted=true、surface=gp-probe、postStateDigest==expected（consistent=true），恢复后 UI 结构回写可见 |
+| 档 1 | snapshot 带真实 gpz1 payload → rollback_full **执行面**回传 rollbackExecuted=true、surface=gp-probe、postStateDigest==expected（consistent=true）。UI 回写**两路**核验：结构路按 identifier=="count-marker-row" 精确计数标记行，实测 before=4 → after=0、delta=4∈[4,6]；数值路走现成 `assert_element`（property=value）读 count-label 的 AXValue，实测回滚前 `'count: 4'` → 回滚后 `'count: 0'`，精确到"快照值本身被写回" |
 
 观察留档（详见 P6 §0 F6–F8）：
-13. **SwiftUI Text 内容不进树 digest**：observe 的 AxNode 只有 role/title/identifier，
-    Text 文案在 AXValue——纯文本改写对 Z5 树通道不可见。"UI 变了"类 canary 必须用
-    结构变化（节点增删）表达；demo 已改 Image 计数行。这是通道可见性边界，不是缺陷。
+13. **SwiftUI Text 内容不进树 digest（2026-09-24 收窄）**：observe 的 AxNode 只有
+    role/title/identifier，Text 文案在 AXValue——纯文本改写对 Z5 树通道不可见。
+    "UI 变了"类 canary 因此用结构变化（节点增删）表达；demo 已改 Image 计数行。
+    这条边界**只限 observe/digest 一个通道**：`assert_element` 的 property=value 走
+    AXChannel.readProperty 读 kAXValueAttribute，实测能直接取到 "count: 4"/"count: 0"
+    文案——所以"数值回写"不必止步于结构代理，档 1 已同时钉数值断言。
+    同一条记录里曾有一句误诊：`ProbeDemoApp.swift` 的注释原文写着"observe 序列化不含
+    无标识 Image"，`.p6_smoke.py` 的旧 docstring 则把同一信念直接用在了谓词上
+    （数全树无 identifier 的 AXImage）。前者**与实测相反**：daemon 的 buildNode
+    对 role/identifier 没有任何过滤，每个节点都带三键上树
+    （诊断阶段对照实验：attach Finder 时 AXImage=4、其中无 identifier=4，四张全在树里）。
+    真相是 SwiftUI 把**容器的** `.accessibilityIdentifier` 传播到每个子 Image，所以
+    标记行在树里的形状是 `{"children": [], "identifier": "count-marker-row",
+    "role": "AXImage"}`（与 min(count,6) 1:1；count=0 时容器自缩成一个 AXUnknown）。
+    后果：`.p6_smoke.py` 旧谓词数"全树无 identifier 的 AXImage"，在任何机器上恒 0，
+    档 1 那条差值断言**从未绿过**（不是环境、不是漂移）。2026-09-24 改为按
+    identifier 精确锁定后首次真绿（before=4/after=0/delta=4）。收窄是**加强**不是
+    放宽：旧谓词把系统菜单/徽标等外部节点也数进差值（见观察 14），那是一条能在
+    count 完全没回写时凑出 [4,6] 的假绿通路；全树无标识 Image 的数量降级为
+    对照诊断输出（随结果打印，不参与断言），以便下次形状再变时一眼分清
+    "标记行形状变了"还是"树里多了别的图像"。这是通道可见性边界，不是缺陷。
 14. **系统 Apple 菜单徽标是树 digest 噪声源**：全 app 树含"App Store…, N 项更新"类
     菜单项，其自发跳变可翻转 axChanged。冒烟 canary 因此采用"≤4 次重试 + 明示噪声"
     口径（判定语义由单测确定化，真机只证端到端通路存在）。

@@ -15,9 +15,18 @@
 - **改为**：三类输入，判决按优先级 **测量 > 声明 > 未知**：
   1. 监视器抓到人类输入 → `contaminated: true`，`.weak`（不变，且**任何声明都不得覆盖它**）；
   2. 窗口无人监视 **且**操作员声明本机无人值守（`glasspaned --unattended-window`）→ `contaminated: false`，
-     级别上限放宽到 `.soft`；档案的 `contaminationBasis` 必须自陈「这是声明不是测量」，
+     级别上限放宽到 `.soft`；act 响应的 `contaminationBasis` 必须自陈「这是声明不是测量」，
      且 `circuitBreaker.reason` 仍保留 `input-contamination-not-monitored` / `-monitor-lost` 标签；
   3. 无人监视且无人声明 → 维持原口径（`true` + `.weak`）。
+     〔2026-09-24 两处更正：① 上面第 2 条写作"档案的 `contaminationBasis` 自陈"不成立 ——
+     冻结的 evidence schema 是 `additionalProperties: false` 且**没有** `contaminationBasis` 字段，
+     这句话只在 **act 响应**里成立。档案侧可读出的声明证据因此是三件：`attribution.contaminated == false`
+     + `circuitBreaker.reason` 仍带 `not-monitored` 标签（监视器缺失这一事实不被抹掉）+ 守护进程启动日志与
+     其命令行参数；规格不得把"读档案就知道有人声明过"当成已交付能力。
+     ② 第 3 条的"未测量 ⇒ true+.weak"对**守护进程**成立，但对"既无监视器又无人给出原因"的内嵌引擎
+     （测试/嵌入方）不成立：那种情形答案是 `false` + `.soft`，只有 basis 句子说明它不是观测。
+     这条不对称刻意保留 —— 凭空造一个"原因"就是把未测量写成结论；守护进程不可达该分支这一事实由
+     `EngineCoreTests.testDaemonAlwaysStatesAReasonWhenNoMonitorRuns` 钉住（文本闸，理由见其注释）。〕
 - **为什么**：第 2 类缺失时，`--no-c33` 启动的守护进程**永远**产不出 `.strong`（P6 §2.3 的
   soft→strong 升级以「未污染」为前提）。仓库唯一的端到端探针闸 `engine/.p6_smoke.py` 正是断言一个
   `.strong` 金丝雀，于是在任何无输入监控席位的机器上必红——「永久红闸」与本轮 A-08 修掉的那条同形。
@@ -116,3 +125,58 @@ P1 v1.0 §2 实施记录项 3、P2 v2.1 §19.2、P4 v4.0 §33.1 观察 3 仍写
   跨语言清单由 `mcp-shell/test/path-consistency.test.mjs` 钉住；Swift 侧输入级实现留下一轮。
 - `--no-c33` 与 `--unattended-window` 的组合是否应有一条规格级「禁止在生产 launchd 配置里同时出现」的
   部署约束（声明是能力，不是默认）。
+
+---
+
+# 追加（2026-09-24，round 5 独立复审之后）
+
+第 4 轮 diff 的独立全新视角复审报 14 条，本批闭合其中与"未测量当结论 / 守卫只说不做"同族的：
+
+## 已闭合（含本文件的第 5 处正文改动）
+
+5. **P5 §3.6 `--approval-verify` 输出表**已并入 `tailHash`/`loadFailed`/`persistFailed`/`ledgerPath`/`stateRoot`
+   与退出码口径（旧表会让 P5-A5"输出符合 §3.6"必判失败）。
+- **共享临时目录的匹配语义**：`EngineCore.resolvedStoragePathDefect` 过去对
+  `/tmp`、`/private/tmp`、`/private/var/tmp` 做**精确等于**匹配，MCP shell 做**子树**匹配 ⇒
+  `/private/tmp/x` 两侧裁决仍不同（第 4 轮只统一了名单）。现改为子树匹配，理由文案指名是哪一条树；
+  输入级期望钉在 `EngineCoreTests.testStoredPathRulesMatchTheOnesTheShellEnforcesAtWriteTime`
+  （新增 `/private/tmp/x`、`/tmp/anything/in/here`、`/private/var/tmp/a`、`/usr/share/x`）。
+- **探针数值字段的布尔**：`{"droppedWrites": false}` 曾被 `as? NSNumber` 桥成 `0`，
+  `{"pid": true}` 曾被桥成 `pid == 1`（等于让一帧坏数据注册到别人的进程上）。
+  `ProbeWire.scalar` 统一按 CoreFoundation 类型 ID 否决布尔，`counter`/`pid`/`line`/`durationNs` 全走它；
+  钉在 `ProbeCounterTests.testBooleanHelloCountersAreUnreportedNotReadAsZeroOrOne`、
+  `testBooleanPidIsMalformedRatherThanProcessOne`。
+- **`StateRoot.isolateFile` 不再把"读不到"当"已私有"**：`attributesOfItem` 失败此前返回 `nil`（＝无缺陷）。
+  现区分"文件不存在"（无东西可隔离）与"文件存在但属性读不出"（隔离不可证明 ⇒ 拒绝）。
+  先用 `fileExists` 短路是错的：父目录不可搜索时它也答"不存在"，正好把要防的那种失败抹平。
+- **证据档案的声明半径**：条目名被**目录**占据时 `replaceItemAt` 会连目录内容一并摧毁，
+  与 `EvidenceStore` 自陈的"只碰自己写的 op_*.json"相反。现为发布前判据拒绝，
+  钉在 `StatePermissionTests.testEntryNameHeldByADirectoryIsRefusedAndLeftIntact`
+  （含反向用例：重写自己的条目仍然允许，守卫不能退化成"永不写"）。
+- **落盘失败的可见性**：`ApprovalGate.persistFailed` + `--approval-verify` 载荷（见上表），
+  `EvidenceStore.write` 的两条路径（rename / fallback）与 `ProjectRegistry.save` 在权限判据不过时
+  **拒绝并回报**，不再"记一条日志然后照写"。
+- **`--state-dir` 的收紧时机**：状态根解析与 `tightenPermissions` 移到 engine.sock 单实例判定之后
+  —— 一个注定以 65 退出的第二实例不得改动正在服务的实例的状态根模式。
+- **`.p6_smoke.py` 的 UI 回写检查**（R4-01）：谓词从"无 identifier 的 AXImage"改为
+  `identifier == "count-marker-row"`，并按 `assert_element{value}` 增加数值断言（`count: 4 → count: 0`）。
+  收窄同时堵掉一条**假绿**通路（旧谓词把系统菜单徽标算进差值）。实测：`delta=4 before=4 after=0`、
+  `P6 SMOKE OK`；反向变异（把 identifier 换成不存在的值）复现 `before=0` ⇒ 该断言的承重件被证明。
+
+## 仍开放（不承诺，逐条点名）
+
+- **R4-02**：`.p6_smoke.py`/`.t9_smoke.py` 仍不校验 demo 二进制是否为**当前构建**；实测见过
+  `caps=['z1']`（缺 z3/checkpoint）⇒ 端到端闸可能静默测旧 SDK。修法方向：demo 自报能力集与
+  SDK 源码声明的能力常量比对，不符即 NOT RUN(2)。
+- **长度单位只对齐了一半**：Swift 侧 `RecipeLoader` 已改按 **Unicode 码点**（与 ajv 的 `maxLength` 等价，
+  含代理对），但 zod 侧 `.max()` 按 **UTF-16 码元** ⇒ 256 个 emoji 在 Swift/schema 侧过、zod 侧不过。
+  彻底统一要改 `kernel/src/recipe-config.ts`（镜像面，canonical 在 iterate-skill 主仓），
+  本批只在 `RecipeLoaderTests.testAstralNameFollowsTheSchemaAndStillDivergesFromZod` 里把分歧写成可执行期望。
+  同类 `String.count` 上限还在 `ParamValidation.swift` 与 `EvidenceModels.swift`（后者 P3/P4 §740 已自认差值）。
+- **默认 socket 路径的两种"home"**：TS 用 `os.homedir()`（读 `$HOME`），Swift 用 `NSHomeDirectory()`
+  （不读）；shell 侧已在定义处与 `--help` 里如实标注为"本进程的猜测"并给出两条 agent 可自行执行的出路
+  （`launchctl print …` 读回、`--socket-path`/`GLASSPANE_ENGINE_SOCK`）。`installer/cli.js` 仍以
+  `process.env.HOME` 拼 `--socket-path`，属同一族的安装期风险，未动。
+- 路径校验的 Swift 半边其余缺口：`given` 双查、`recipeConfigPath`/`calibrationAssetsPath` 内容级校验、
+  ownership/世界可写兜底（TS 已有）。`path-consistency.test.mjs` 现在**在文件头明说**自己只比名单不比语义。
+- P6 §5.4(3) 冻结形状表仍未逐格并入新增键；`--no-c33` 与 `--unattended-window` 是否需要一条部署约束。

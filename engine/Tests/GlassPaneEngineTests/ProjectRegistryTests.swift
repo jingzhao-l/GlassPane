@@ -690,6 +690,103 @@ final class RecipeLoaderTests: XCTestCase {
         )
     }
 
+    /// The same boundary with non-ASCII names, where the three plausible units
+    /// stop agreeing. What each one gives for the strings built below:
+    ///
+    ///     name                          graphemes  code points  UTF-16 units
+    ///     "\u{00E9}" × 256                    256          256           256
+    ///     "\u{00E9}" × 257                    257          257           257
+    ///     ("e"+"\u{0301}") × 128 + "e"        129          257           257
+    ///     ("e"+"\u{0301}") × 129              129          258           258
+    ///     "\u{1F600}" × 256                   256          256           512
+    ///     "\u{1F600}" × 257                   257          257           514
+    ///
+    /// `kernel/schemas/recipe-config.schema.json`'s `maxLength` counts the **code
+    /// points** column (checked against the ajv build the kernel suite itself runs:
+    /// `limitLength.js` calls `ucs2length`, which folds each surrogate pair), and
+    /// that is now the column this validator follows. `String.count` reads the
+    /// *grapheme* column, and zod's `.max()` reads the **UTF-16** one — see
+    /// `testAstralNameFollowsTheSchemaAndStillDivergesFromZod` for the row where
+    /// following the schema therefore still disagrees with zod. The existing
+    /// `testNameLengthBoundary` could never see any of this: its literal is ASCII,
+    /// where all three columns are equal.
+    func testNonAsciiNameBoundaryIsCountedInCodePoints() {
+        // Precomposed U+00E9: 1 cluster, 1 code point, 1 unit — non-ASCII, but the
+        // case where the units still agree. Pins the plain 256/257 boundary.
+        let atCap = String(repeating: "\u{00E9}", count: RecipeLoader.nameMaxLength)
+        let overCap = String(repeating: "\u{00E9}", count: RecipeLoader.nameMaxLength + 1)
+        XCTAssertEqual(atCap.unicodeScalars.count, 256, "the fixture string is not the length the test claims")
+        XCTAssertEqual(overCap.unicodeScalars.count, 257, "the fixture string is not the length the test claims")
+        XCTAssertTrue(
+            RecipeLoader.validate(json(recipe(name: atCap, steps: [step()]))).valid,
+            "256 code points is the inclusive cap whatever the script"
+        )
+        let over = RecipeLoader.validate(json(recipe(name: overCap, steps: [step()])))
+        XCTAssertFalse(over.valid)
+        XCTAssertTrue(
+            over.errors.contains { $0.contains("is 257 characters") },
+            over.errors.description
+        )
+
+        // The case that actually split the languages: 128 combining sequences
+        // plus one bare "e" is 257 code points but only 129 grapheme clusters.
+        // The old rule read 129 and accepted; the schema reads 257 and rejects.
+        let combining = String(repeating: "e\u{0301}", count: 128) + "e"
+        XCTAssertEqual(combining.count, 129, "grapheme clusters — what String.count sees")
+        XCTAssertEqual(combining.unicodeScalars.count, 257, "code points — what the schema counts")
+        let rejected = RecipeLoader.validate(json(recipe(name: combining, steps: [step()])))
+        XCTAssertFalse(rejected.valid, "a name the frozen schema rejects must not validate here")
+        XCTAssertTrue(
+            rejected.errors.contains { $0.contains("is 257 characters (Unicode code points)") },
+            "the message must report the unit it enforced: \(rejected.errors)"
+        )
+        XCTAssertFalse(
+            rejected.errors.contains { $0.contains("is 129") },
+            "reporting the cluster count is the bug itself: \(rejected.errors)"
+        )
+        // And 256 code points of the same combining text still fits, so the rule
+        // is the cap in code points — not a blanket ban on non-ASCII names.
+        let combiningAtCap = String(repeating: "e\u{0301}", count: 128)
+        XCTAssertEqual(combiningAtCap.count, 128, "grapheme clusters")
+        XCTAssertEqual(combiningAtCap.unicodeScalars.count, 256, "code points")
+        XCTAssertTrue(
+            RecipeLoader.validate(json(recipe(name: combiningAtCap, steps: [step()]))).valid,
+            "256 code points built from 128 clusters is still within the cap"
+        )
+    }
+
+    /// The part this fix does **not** close, pinned instead of merely asserted in
+    /// a comment: astral characters are where the schema and the zod twin disagree
+    /// with each other, so matching the schema means *not* matching zod.
+    /// 256 × U+1F600 is 256 graphemes, 256 code points and 512 UTF-16 code units;
+    /// the schema (ajv's code-point `maxLength`) and this validator accept it,
+    /// while `z.string().max(256)` in `kernel/src/recipe-config.ts` counts the 512
+    /// units and rejects. The disagreement therefore sits inside `kernel/` itself —
+    /// its own `assertBothSidesAccept` helper would fail on this input — and
+    /// closing it means editing a protected path, not this file. What this test
+    /// records is which side the engine mirrors, so a later reader cannot mistake
+    /// the code-point rule for a three-way unification that never happened.
+    func testAstralNameFollowsTheSchemaAndStillDivergesFromZod() {
+        let emoji = String(repeating: "\u{1F600}", count: RecipeLoader.nameMaxLength)
+        XCTAssertEqual(emoji.count, 256, "grapheme clusters")
+        XCTAssertEqual(emoji.unicodeScalars.count, 256, "code points — the schema's unit, and this one")
+        XCTAssertEqual(Array(emoji.utf16).count, 512, "UTF-16 code units — zod's unit, deliberately not ours")
+        XCTAssertTrue(
+            RecipeLoader.validate(json(recipe(name: emoji, steps: [step()]))).valid,
+            "the schema's verdict governs; zod would answer 512 > 256 and reject"
+        )
+        // One code point past the cap fails for every unit, which is the only
+        // part of this boundary where all three languages agree.
+        let overCap = String(repeating: "\u{1F600}", count: RecipeLoader.nameMaxLength + 1)
+        XCTAssertEqual(overCap.unicodeScalars.count, 257)
+        let result = RecipeLoader.validate(json(recipe(name: overCap, steps: [step()])))
+        XCTAssertFalse(result.valid)
+        XCTAssertTrue(
+            result.errors.contains { $0.contains("is 257 characters (Unicode code points)") },
+            result.errors.description
+        )
+    }
+
     func testStepKindMustBeOneOfTheContractEnum() {
         let result = RecipeLoader.validate(json(recipe(steps: [step(kind: "click")])))
         XCTAssertFalse(result.valid)

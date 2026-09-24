@@ -35,10 +35,36 @@ export function daemonUnreachableRemedy(): string {
 export const ENGINE_SOCKET_ENV = "GLASSPANE_ENGINE_SOCK";
 
 /**
- * The daemon listens here by default (spec §3.1). Single source: the CLI
- * argument parser in index.ts and the reconnecting transport both resolve the
- * path through this function, so an env override cannot be honoured on one side
- * only.
+ * Where this shell connects when nothing was named, in order: `GLASSPANE_ENGINE_SOCK`
+ * (the env var {@link ENGINE_SOCKET_ENV} spells), then the explicit
+ * `--socket-path` this shell's own CLI accepts, then the fallback below.
+ *
+ * The fallback is a **guess made from `$HOME`**, and it is worth being exact
+ * about which guess: `os.homedir()` reads `$HOME`, while the daemon's own
+ * default is `StateRoot.homeDefault()` = `NSHomeDirectory() + "/.glasspane"`,
+ * which on macOS does **not** consult `$HOME` — the same non-inheritance that
+ * has already cost this project real data, and the reason a caller cannot
+ * isolate a run by exporting `HOME`. So in a process whose `$HOME` points into
+ * a sandbox the two sides resolve **different directories**: this shell goes
+ * looking for `$HOME/.glasspane/engine.sock` inside the sandbox while the daemon
+ * is still serving only the socket under the real home. Nor is there a third
+ * case to cover by guessing better — a daemon started with `--state-dir <root>`
+ * listens on `<root>/daemon.sock`, which no value of `$HOME` points at.
+ *
+ * The reliable route is therefore to stop deriving and to say which socket: set
+ * `GLASSPANE_ENGINE_SOCK`, or pass `--socket-path`. The installer's launchd job
+ * hands the daemon an explicit `--socket-path` already, which is what makes an
+ * installed pair agree — so read that value back rather than recomputing it;
+ * this shell's `--help` gives the command.
+ *
+ * Deliberately not "fixed" by asking the daemon: before a connection exists
+ * there is no daemon to ask, and `hello` is itself answered after connecting.
+ * Matching the daemon's home lookup from Node would take an FFI call to
+ * `NSHomeDirectory()`, which this shell does not have.
+ *
+ * Single source all the same: the CLI argument parser in index.ts and the
+ * reconnecting transport both resolve the path through this function, so an env
+ * override cannot be honoured on one side only.
  */
 export function defaultSocketPath(): string {
   return process.env[ENGINE_SOCKET_ENV] ?? path.join(os.homedir(), ".glasspane", "engine.sock");

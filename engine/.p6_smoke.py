@@ -11,7 +11,10 @@ control app, then asserts the full probe surface:
   2. five canaries: NO_ANOMALY/strong, T4, T5, T7, T8, T3 — each detected once
   3. tier-1 checkpoint: snapshot carries a real gpz1 payload; rollback_full
      executes through the probe (rollbackExecuted=true, consistent=true) and
-     the count-marker-row structurally returns to the snapshot value (0).
+     the UI is verified to have been written back from the restored value twice
+     over: structurally (count-marker-row Image rows return to the snapshot
+     value 0, delta in [4,6]) and numerically (assert_element on count-label's
+     `value` attribute reads back exactly "count: 0").
 
 Usage: python3 .p6_smoke.py [daemon-bin] [demo-bin]
   daemon-bin 定位顺序：argv > env GLASSPANE_DAEMON_BIN > 仓库相对
@@ -509,27 +512,89 @@ def evidence_of(client, operation_id):
     return frame.get("evidencePack", frame)
 
 
-def marker_nodes(client):
-    """count 驱动的可见结构节点数（probe-demo 的 count-marker-row 行数）。
+COUNT_MARKER_IDENTIFIER = "count-marker-row"
 
-    observe 方法表冻结在 role/title/identifier（P0 §3，真机观察 13：SwiftUI Text
-    文案在 AXValue 通道，daemon 不序列化），"count: N" 字符串读不到，而
-    count-label 又无条件在场——它的存在不随恢复值变化，不构成 UI 佐证。
-    demo 为此把 count 具象成 Image 行数（ProbeDemoApp.swift 的结构性标记）。
-    这里数全树"无 identifier 的 AXImage"：press→restore 窗口内 drift-marker-row
-    与 lazy 行恒常（没有按钮能改它们），差值只可能来自 count 回写。
+
+def marker_row_counts(client):
+    """一次 observe 同时量两个计数，返回 (marker_rows, unlabeled_images)。
+
+    marker_rows —— role==AXImage 且 identifier=="count-marker-row"。**判定只看这一列。**
+      实测形状（2026-09-24 真机 observe，maxDepth=10）：
+      {"children": [], "identifier": "count-marker-row", "role": "AXImage"}，
+      数量与 demo 的 min(count, 6) 1:1；count=0 时那个 HStack 容器自缩成一个
+      AXUnknown，行里一张 Image 都不剩。原因：SwiftUI 会把容器上的
+      .accessibilityIdentifier("count-marker-row") **传播到每个子 Image**，所以标记行
+      在树里是"带 identifier 的 AXImage"，不是"无 identifier 的 AXImage"——旧谓词
+      （只数无标识 AXImage）在任何机器上恒 0，差值断言从未绿过，与环境和漂移无关。
+    unlabeled_images —— role==AXImage 且无 identifier。**只作对照诊断输出，不参与任何
+      断言**：下次这条检查再红时，一眼分清是"标记行的形状变了"（marker_rows 归 0）
+      还是"树里多了别的图像"（unlabeled 涨了）。
+
+    为什么收窄到 identifier 是**加强**而不是放宽：它同时堵掉一条假绿通路。旧谓词数的
+    是**全树**无标识 Image，会把系统菜单/徽标等**外部节点**算进差值（smoke.md 真机
+    观察 14：全 app 树含 Apple 菜单"N 项更新"徽标且自发跳变）——外部图像一旦随行数
+    变化，count 完全没被回写时 before/after 差值也能落进 [4,6]。按 identifier 精确锁定
+    demo 自己的标记行之后，"差值只可能来自 count 回写"才重新成为事实。
+
+    daemon 侧对 role/identifier 没有任何过滤（AXChannel.buildNode 逐节点读
+    role/title/identifier，TreeDigest.AxNode 只有这三键），所以两种形状能同时存在；
+    诊断阶段的对照实验：attach Finder 时 AXImage=4 / 其中无 identifier=4，四张全在树里。
     """
     tree = client.call("observe", {"maxDepth": 10})
-    total = [0]
+    rows = [0]
+    unlabeled = [0]
 
     def walk(nodes):
         for node in nodes:
-            if node.get("role") == "AXImage" and not node.get("identifier"):
-                total[0] += 1
+            if node.get("role") == "AXImage":
+                identifier = node.get("identifier")
+                if identifier == COUNT_MARKER_IDENTIFIER:
+                    rows[0] += 1
+                elif not identifier:
+                    unlabeled[0] += 1
             walk(node.get("children") or [])
 
     walk(tree.get("axTree") or [])
-    return total[0]
+    return rows[0], unlabeled[0]
+
+
+COUNT_LABEL_SELECTOR = {"role": "AXStaticText", "identifier": "count-label"}
+SNAPSHOT_COUNT_LABEL_VALUE = "count: 0"
+
+
+def assert_count_label(client, expected=SNAPSHOT_COUNT_LABEL_VALUE, equal=True,
+                       attempts=4, settle=0.8):
+    """用协议里现成的 assert_element 读 count-label 的 AXValue（零新增实现）。
+
+    通道：Selector(role, identifier) + property=value → daemon 读
+    kAXValueAttribute（AXChannel.readProperty），以 actual 回传
+    （EngineCore.assertElement）。这是 observe 取不到的那一路——AxNode 只序列化
+    role/title/identifier，Text 文案在 AXValue 里（smoke.md 真机观察 13）。
+    前提"会话里已有一次 act"由本脚本 restore 前的 press 满足：assert_element 复用
+    最近一次 act 的信号上下文，否则报 GP_E_NO_OPERATION。
+
+    equal=True  → 判 daemon 自己的 passed（actual == expected）
+    equal=False → 判 actual != expected，用于**前提核验**：堵掉"这条数值断言本来就
+                  成立"的假绿（若回滚前标签已经显示快照值，那"回滚后 == 快照值"恒真）
+
+    AXValue 的读值会滞后于 SwiftUI 的重渲周期，所以这里是**有界重试 + 如实回报读取
+    次数**（与 run_canary 同一先例与同一理由：判定语义由单测确定化，真机只证端到端
+    通路存在），期望本身不放宽。返回 (通过, actual, 读取次数)。
+    """
+    actual = None
+    for attempt in range(1, attempts + 1):
+        if attempt > 1:
+            time.sleep(settle)
+        frame = client.call("assert_element", {
+            "selector": COUNT_LABEL_SELECTOR,
+            "property": "value",
+            "expected": expected,
+        })
+        actual = frame.get("actual")
+        passed = frame.get("passed") is True if equal else (actual != expected)
+        if passed:
+            return True, actual, attempt
+    return False, actual, attempts
 
 
 def run_canary(client, identifier, accepted, label, pre_wait=0.0, post_wait=0.0, attempts=4):
@@ -755,7 +820,14 @@ def main():
         # ---- tier-1 checkpoint: executed rollback + UI 结构回写核验 ---------
         # push further, then roll the checkpoint back through the probe
         press(client, "ok-press")
-        markers_before = marker_nodes(client)
+        markers_before, unlabeled_before = marker_row_counts(client)
+        # 前提核验（数值通道的假绿闸）：回滚前 count-label 显示的**不是**快照值。
+        # 没有这一条，下面"回滚后 AXValue=='count: 0'"可以本来就成立而恒真。
+        # 也是这一次读取顺带证明 AXValue 通道真的读得到文案（不是 nil/空串）。
+        moved, label_before, label_before_reads = assert_count_label(
+            client, equal=False)
+        check("回滚前 count-label 不显示快照值（否则下一条数值断言恒真）", moved,
+              f"AXValue={label_before!r} 读取次数={label_before_reads}")
         restore = client.call("restore", {"snapshotId": snapshot_id, "mode": "rollback_full"})
         check("档 1 执行面：rollbackExecuted=true + consistent=true（§5.5/C34 语义）",
               restore.get("rollbackExecuted") is True and restore.get("consistent") is True
@@ -765,21 +837,50 @@ def main():
         tree = client.call("observe", {"maxDepth": 10})
         text = json.dumps(tree.get("axTree"))
         check("恢复后 UI 回写可见（count 标签存在）", "count-label" in text)
-        # 值敏感的 UI 回写核验（弱断言"标签存在即过"保留，但不再由它充数）：
-        # before/after 两点观察窗口内 drift 行与 lazy 行数恒定，无 identifier
-        # AXImage 总数的差值只可能来自 count 标记行：回滚目标为快照值 count=0，
+        # 值敏感的 UI 回写核验（弱断言"标签存在即过"保留，但不再由它充数——
+        # count-label 无条件在场，存在性本身不随恢复值变化）：
+        # 判定按 identifier=="count-marker-row" 精确锁定 demo 自己的标记行，
+        # 外部图像（系统菜单/徽标）与 drift-marker-row、lazy 行都落在谓词之外，
+        # 于是 before/after 差值只可能来自 count 回写：回滚目标为快照值 count=0，
         # 回滚前 count=C+1≥4（初始 ok-press + NO_ANOMALY 金丝雀 + delayed +
         # 本轮加压，行渲染 min(count,6)）→ 差值必须落在 [4,6]。
         # 证明：探针写回的数值确实驱动 demo UI 结构回退，且回退量与快照值一致
         #       （没回滚 → 差 0；只回退一步 → 差 ≤1；都判 FAIL）。
-        # 不证明：具体数字文案 "count: 0"——AXValue 不在 observe 方法表内
-        #       （P6 §0 F6），结构行数即该通道能取到的最强可观测证物，如实到顶。
+        # 不证明：具体数字文案——observe 的 AxNode 不序列化 AXValue（真机观察 13）。
+        #       那一条由紧随其后的 assert_element 数值断言补上（走的是属性通道，
+        #       不是 observe 树），这里不再声称"结构行数即能取到的最强证物"。
         time.sleep(0.8)  # 给 SwiftUI 一次重渲周期再读树
-        markers_after = marker_nodes(client)
+        markers_after, unlabeled_after = marker_row_counts(client)
         markers_delta = markers_before - markers_after
         check("恢复后 UI 结构回写：count 标记行随快照值 0 清空（差值∈[4,6]）",
               4 <= markers_delta <= 6,
               f"delta={markers_delta} before={markers_before} after={markers_after}")
+        # 对照计数：诊断输出，不参与断言（形状再变时用来分清"标记行形状变了"
+        # 还是"树里多了别的图像"）。
+        print(f"NOTE 对照计数（不参与断言）：全树无 identifier 的 AXImage "
+              f"before={unlabeled_before} after={unlabeled_after}；"
+              f"identifier==count-marker-row 的 AXImage before={markers_before} "
+              f"after={markers_after}")
+        # ---- 数值回写核验：快照值本身被写回界面（比结构行数更强的一条）-------
+        # 现成通道 assert_element + property=value，零新增实现：读的是
+        # kAXValueAttribute，回传 actual。它精确到"count 标签的文案 == 快照值 0"，
+        # 而结构行数只到"行数回退了"。滞后时按有界重试处理并如实打印读取次数。
+        zeroed, label_after, label_after_reads = assert_count_label(client)
+        # 读取次数如实分三种口径：一次达成 / 重试后达成 / 重试用尽仍未达成。
+        # 失败时不得写"第 N 次达成"（那是把用尽上限说成成功）。
+        if not zeroed:
+            read_note = f"有界重试 {label_after_reads} 次仍未读到快照值"
+        elif label_after_reads > 1:
+            read_note = f"第 {label_after_reads} 次读取才达成（此前值滞后，见 NOTE）"
+        else:
+            read_note = "首次读取即达成"
+        check("恢复后数值回写：count-label 的 AXValue 等于快照值 'count: 0'"
+              "（assert_element value，比结构行数更强）",
+              zeroed,
+              f"AXValue={label_after!r}（回滚前 {label_before!r}）{read_note}")
+        if zeroed and label_after_reads > 1:
+            print(f"NOTE 数值通道读取滞后：AXValue 在第 {label_after_reads} 次读取才等于"
+                  f"快照值（前 {label_after_reads - 1} 次仍是回滚前文案），期望未放宽")
 
         print(f"C34 参考：restore digest {str(restore.get('postStateDigest'))[:8]}… 一致性已验")
         client.call("shutdown")

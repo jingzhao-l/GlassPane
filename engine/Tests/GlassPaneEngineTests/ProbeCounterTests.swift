@@ -169,6 +169,45 @@ final class ProbeCounterTests: XCTestCase {
         )
     }
 
+    /// The same veto has to cover the identity fields, not only the counters:
+    /// `{"pid": true}` used to bridge through `NSNumber` and register a probe as
+    /// pid 1 — every later "hitCount: 0" would then be a measurement about
+    /// somebody else's process, and the frame that *proved* nothing was watched
+    /// would be the one the daemon trusted least.
+    func testBooleanPidIsMalformedRatherThanProcessOne() throws {
+        let json = """
+        {"t":"hello","pid":true,"appName":"A","probeVersion":"v","capabilities":[]}
+        """
+        guard case let .malformed(reason) = ProbeWire.decode(Data(json.utf8)) else {
+            return XCTFail("a boolean pid must not decode as a registration")
+        }
+        XCTAssertTrue(reason.contains("pid"), reason)
+    }
+
+    func testBooleanLineAndTimestampsAreNotReadAsNumbers() throws {
+        let handler = """
+        {"t":"handler","file":"a.swift","line":true,"ts":false}
+        """
+        guard case let .malformed(reason) = ProbeWire.decode(Data(handler.utf8)) else {
+            return XCTFail("a boolean `line` must not decode as line 1")
+        }
+        XCTAssertTrue(reason.contains("line"), reason)
+    }
+
+    func testAbsentTimestampIsStillZeroAndNotRefused() throws {
+        // The boolean veto must not turn into a required-field invention: `ts`
+        // has always defaulted, and defaulting there is not a false measurement.
+        let handler = """
+        {"t":"handler","file":"a.swift","line":7,"ts":1.5}
+        """
+        guard case .handler(let file, let line, let ts, _) = ProbeWire.decode(Data(handler.utf8)) else {
+            return XCTFail("expected a handler frame")
+        }
+        XCTAssertEqual(file, "a.swift")
+        XCTAssertEqual(line, 7)
+        XCTAssertEqual(ts, 1.5, accuracy: 0.0001)
+    }
+
     func testProbeStatusRowsReachTheAgentWithTheirCounters() throws {
         let inbox = ProbeInbox(now: { Date() })
         XCTAssertTrue(inbox.register(hello(pid: 77, droppedWrites: 5)))

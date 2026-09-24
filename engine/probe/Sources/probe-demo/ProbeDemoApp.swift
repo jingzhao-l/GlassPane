@@ -206,8 +206,15 @@ struct ReplayPanel: View {
             // Image 数量会在 observe 树里可见地增长（H6 真重放判定面）。
             HStack(spacing: 1) {
                 ForEach(0 ..< min(store.appearCount, 8), id: \.self) { i in
-                    // observe 序列化不含无标识 Image；用带 identifier 的按钮做
-                    // tick，保证 H6 判定面在树里可见（计数=onAppear 触发次数）。
+                    // 用带 identifier 的按钮做 tick，让 H6 判定面在树里逐个可寻址
+                    // （计数=onAppear 触发次数）。**理由不是"observe 序列化不含无标识
+                    // Image"**——那句是误诊，已在 2026-09-24 实测推翻：daemon 的 buildNode
+                    // 对 role/identifier 没有任何过滤，每个节点都带 role/title/identifier
+                    // 上树（诊断阶段对照实验：attach Finder 时 4 张 AXImage 全无标识、4 张都可见）。
+                    // observe 真正取不到的只有 AXValue，也就是 Text 文案（smoke.md 观察 13）。
+                    // 另一条实测到的 SwiftUI 行为：容器的 .accessibilityIdentifier 会传播到
+                    // 每个子 Image，所以裸 Image 在树里并非"无标识"，而是带上容器名——
+                    // 判定要按 identifier 精确锁定，见 engine/.p6_smoke.py marker_row_counts。
                     Button("") {}
                         .buttonStyle(.borderless)
                         .frame(width: 8)

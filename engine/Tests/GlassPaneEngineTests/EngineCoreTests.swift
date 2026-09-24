@@ -1002,8 +1002,16 @@ final class EngineCoreWaveThreeMappingTests: XCTestCase {
 
         let refused: [(String, String?)] = [
             ("/", "the filesystem root"),
-            ("/private/tmp", "a world-writable shared scratch directory"),
+            ("/private/tmp", "inside the world-writable shared scratch directory /private/tmp"),
+            // Subtree-matched, which is what the shell already did and this side
+            // did not: the shared scratch *directory* being refused while a
+            // directory one level inside it is accepted is the same exposure
+            // wearing a different name (`/private/tmp/attacker/app/.glasspane`).
+            ("/private/tmp/x", "inside the world-writable shared scratch directory /private/tmp"),
+            ("/tmp/anything/in/here", "inside the world-writable shared scratch directory /tmp"),
+            ("/private/var/tmp/a", "inside the world-writable shared scratch directory /private/var/tmp"),
             ("/usr", "the top-level directory /usr of the boot volume"),
+            ("/usr/share/x", "inside the system-owned tree /usr"),
             ("/Volumes/DataHD", "the root of a mounted volume"),
             ("/System/Library/Foo", "inside the system-owned tree /System"),
             ("/private/etc/evidence", "inside the system-owned tree /private/etc"),
@@ -1351,6 +1359,47 @@ final class EngineCoreWaveTwoBetaTests: XCTestCase {
         XCTAssertTrue(
             source.contains("projectRegistry: ProjectRegistry"),
             "the daemon injects its registry instead of letting the initializer decide"
+        )
+    }
+
+    /// The engine has one branch that answers `contaminated: false` for a window
+    /// nobody watched: no monitor **and** no stated reason. It exists for an
+    /// engine built by a test or an embedder (`testMonitorAbsenceWithoutAStatedReasonChangesNoArchivedVerdict`
+    /// keeps it honest), and it must never be a daemon's answer — a daemon that
+    /// leaves the input monitor out says why, which is what the block below pins.
+    ///
+    /// Pinned by text because this is top-level code in an executable target (the
+    /// same reason `testMaintenanceCliRoutesThroughTheSharedValidator` reads the
+    /// file). What it cannot prove: that a *future* third branch sets a reason —
+    /// so the assertion is on the count of guard-creating paths, not on a
+    /// substring that would still match if a new `else` forgot the reason.
+    func testDaemonAlwaysStatesAReasonWhenNoMonitorRuns() throws {
+        let source = try repoSource("engine/Sources/glasspaned/main.swift")
+        let start = try XCTUnwrap(
+            source.range(of: "var attributionGuard: AttributionGuard?"),
+            "the C33 startup block is gone"
+        )
+        let end = try XCTUnwrap(
+            source.range(of: "let core = EngineCore("),
+            "the slice anchor (engine construction) is gone"
+        )
+        let block = source[start.lowerBound..<end.lowerBound]
+        XCTAssertEqual(
+            block.components(separatedBy: "attributionGuard = AttributionGuard(").count - 1,
+            1,
+            "exactly one path may install a monitor; a second one needs its own reason statement and this test must be read again, not edited"
+        )
+        XCTAssertTrue(
+            block.contains("inputMonitorAbsenceReason = \"the CGEvent input tap could not be created"),
+            "the tap-creation-failure branch must name its reason: \(block)"
+        )
+        XCTAssertTrue(
+            block.contains("inputMonitorAbsenceReason = \"C33 was declined at startup by the --no-c33 flag\""),
+            "the opt-out branch must name its reason: \(block)"
+        )
+        XCTAssertFalse(
+            block.contains("inputMonitorAbsenceReason = nil"),
+            "clearing the reason is how a daemon reaches the engine's optimistic branch"
         )
     }
 

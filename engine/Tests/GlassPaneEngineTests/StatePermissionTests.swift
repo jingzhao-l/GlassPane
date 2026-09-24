@@ -228,6 +228,53 @@ final class StatePermissionTests: XCTestCase {
         XCTAssertEqual(mode(of: filePath), 0o600)
     }
 
+    /// The blast-radius promise this type states in its own documentation is that
+    /// it touches nothing but its own `op_<26>.json` entries. Measured against that
+    /// promise: when the entry name is held by a **directory**, `replaceItemAt` does
+    /// not decline — it takes the directory's contents with it. So a store pointed
+    /// at a directory whose names collide with an operationId must refuse on sight,
+    /// and the refusal has to leave the stranger exactly as found.
+    func testEntryNameHeldByADirectoryIsRefusedAndLeftIntact() throws {
+        let dir = TestSandbox.directory("entry-is-directory")
+        let store = EvidenceStore(directory: dir)
+        let pack = pack(createdAt: "2026-09-23T00:00:00.000Z", seed: 33)
+        let filePath = dir + "/" + pack.operationId + ".json"
+        let sentinel = filePath + "/not-yours.txt"
+        try FileManager.default.createDirectory(atPath: filePath, withIntermediateDirectories: true)
+        try "someone else's data".write(toFile: sentinel, atomically: true, encoding: .utf8)
+
+        XCTAssertFalse(
+            store.write(pack),
+            "publishing onto a directory is the one thing this store's declared radius forbids"
+        )
+        var info = stat()
+        XCTAssertEqual(stat(filePath, &info), 0, "the directory must still exist")
+        XCTAssertEqual(
+            try String(contentsOfFile: sentinel, encoding: .utf8),
+            "someone else's data",
+            "…with its contents"
+        )
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: filePath + ".tmp"),
+            "a refused write leaves no temporary litter either"
+        )
+    }
+
+    /// The allowed case next to it, so the guard above cannot turn into "never
+    /// rewrite": re-publishing the same operationId replaces a real entry.
+    func testRewritingARealEntryIsStillAllowed() throws {
+        let dir = TestSandbox.directory("entry-rewrite")
+        let store = EvidenceStore(directory: dir)
+        let first = pack(createdAt: "2026-09-23T00:00:00.000Z", seed: 34)
+        XCTAssertTrue(store.write(first))
+        let again = pack(createdAt: "2026-09-23T00:00:01.000Z", seed: 34)
+        XCTAssertTrue(
+            store.write(again),
+            "the same operationId is this store's own entry; refusing it would break attach-time re-export"
+        )
+        XCTAssertEqual(mode(of: dir + "/" + again.operationId + ".json"), 0o600)
+    }
+
     // MARK: - the published name, not just the temporary one
 
     /// Found by measurement while the fallback case above was being built, and

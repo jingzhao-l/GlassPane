@@ -118,8 +118,24 @@ public struct StateRoot: Equatable {
     /// nil (there is no exposure in a file that is not there), and a file the
     /// caller cannot chmod is reported, not "recreated".
     public static func isolateFile(at path: String) -> String? {
-        let attributes = (try? FileManager.default.attributesOfItem(atPath: path)) ?? [:]
-        guard !attributes.isEmpty else { return nil }
+        // One probe, two very different failures, and the difference is read out
+        // of the error rather than from a second `fileExists` call: a file that
+        // is **not there** is nothing to isolate (the startup sweep runs against
+        // paths a fresh install has not written yet — `approvals.json` appears on
+        // the first approval), while a file that **cannot be examined** is
+        // exactly as unable to prove 0600 as one that was never tightened.
+        // Testing `fileExists` first would fold the second case into the first:
+        // an unreadable parent directory makes `fileExists` answer "no", and
+        // "no such file" is not evidence that nothing is world-readable.
+        let attributes: [FileAttributeKey: Any]
+        do {
+            attributes = try FileManager.default.attributesOfItem(atPath: path)
+        } catch let error as NSError
+        where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError {
+            return nil
+        } catch {
+            return "\(path) cannot be examined (\(error.localizedDescription)) — isolation unproven"
+        }
         guard attributes[.type] as? FileAttributeType == .typeRegular else {
             return "\(path) is not a regular file — left untouched"
         }

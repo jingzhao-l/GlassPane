@@ -38,7 +38,33 @@ public struct RecipeLoader {
     /// The contract's version literal, in one place so the rule and the error
     /// text cannot disagree about what is required.
     public static let schemaVersion = "glasspane.recipe/0.1-draft"
-    /// `name` length cap (kernel `RECIPE_NAME_MAX_LENGTH`).
+    /// `name` length cap (kernel `RECIPE_NAME_MAX_LENGTH`), in **Unicode code
+    /// points**.
+    ///
+    /// The unit is the rule, not a detail: `recipe-config.schema.json` states the
+    /// cap as `"maxLength": 256`, and the validator the kernel suite runs that
+    /// schema through (ajv 8, `runtime/ucs2length.js`) counts code points — it
+    /// walks UTF-16 and folds each high/low surrogate pair into one. This type
+    /// compared `String.count`, which counts **grapheme clusters**, so outside
+    /// ASCII it agreed with neither contract side.
+    ///
+    /// Aligning with the schema does **not** align with the zod twin, and that is
+    /// the honest limit of this fix: `kernel/src/recipe-config.ts` reaches 256
+    /// through `z.string().max(256)`, and JavaScript's `.length` counts **UTF-16
+    /// code units**. For every BMP character — precomposed or decomposed accents,
+    /// CJK, Cyrillic — one code point is one unit, so the two contract sides agree
+    /// and this matches both. For each *astral* character (emoji, rare
+    /// ideographs) zod counts 2 where the schema counts 1, so a name of 256
+    /// U+1F600 is 256 code points for the schema and here, but 512 units for zod:
+    /// accepted on one side, rejected on the other. No unit choice removes that
+    /// disagreement — it is the same set of astral strings whichever side this
+    /// mirrors — and mirroring zod would have meant diverging from the frozen
+    /// schema, which is the cross-language truth surface and a protected path.
+    /// What the grapheme count could not claim is any agreement at all outside
+    /// ASCII, which is why the schema wins.
+    /// Pinned, in both directions, by
+    /// `testNonAsciiNameBoundaryIsCountedInCodePoints` and
+    /// `testAstralNameFollowsTheSchemaAndStillDivergesFromZod`.
     public static let nameMaxLength = 256
     /// Kernel `RECIPE_MIN_STEPS`.
     public static let minSteps = 1
@@ -112,8 +138,19 @@ public struct RecipeLoader {
         case .none:
             errors.append("'name' is required (a string)")
         case let value as String:
-            if value.count > nameMaxLength {
-                errors.append("'name' is \(value.count) characters; maximum is \(nameMaxLength)")
+            // `unicodeScalars.count`, not `String.count`: the cap's unit is code
+            // points (see `nameMaxLength`). The grapheme count under-read exactly
+            // where names get non-ASCII — ("e" + U+0301) × 129 is 129 clusters but
+            // 258 code points — so the engine passed a file the frozen schema
+            // rejects, which is the one-recipe-two-verdicts defect. The message
+            // names the unit it enforced, since "258" is not the number of
+            // anything a reader would eyeball in that string.
+            // Other `String.count` caps still exist in this target
+            // (`ParamValidation`, `EvidenceModels.summary`); those are different
+            // fields with their own contract sides and are not touched here.
+            let codePoints = value.unicodeScalars.count
+            if codePoints > nameMaxLength {
+                errors.append("'name' is \(codePoints) characters (Unicode code points); maximum is \(nameMaxLength)")
             }
         case let value:
             errors.append("'name' must be a string, got \(describe(value))")
