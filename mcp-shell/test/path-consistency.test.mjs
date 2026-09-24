@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { projectSet, ProjectRegistryError, AGENT_PATH_PROTECTION } from "../dist/project-registry.js";
+import { privateSandbox } from "./support/sandbox.mjs";
 
 /**
  * J: the same registered path was judged by two validators that did not agree,
@@ -85,14 +86,17 @@ test("the shell's exact-root list stays a superset of what resolution can produc
  * asserted: a guard that only ever refuses is as useless as one that never does.
  */
 test("projectSet's verdicts match the shared table entry by entry", (t) => {
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "gp-path-table-")), "projects.json");
+  const tableSandbox = privateSandbox("gp-path-table-");
+  const file = path.join(tableSandbox.dir, "projects.json");
   process.env.GLASSPANE_PROJECTS_FILE = file;
   t.after(() => {
     delete process.env.GLASSPANE_PROJECTS_FILE;
     fs.rmSync(path.dirname(file), { recursive: true, force: true });
+    tableSandbox.dispose();
   });
 
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "gp-path-owner-"));
+  const scratchSandbox = privateSandbox("gp-path-owner-");
+  const scratch = scratchSandbox.dir;
   const base = {
     displayName: "Table",
     bundleId: "com.example.table",

@@ -1,3 +1,4 @@
+import { privateSandbox } from './support/sandbox.mjs'
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -27,7 +28,8 @@ import { makeEngine } from "./helpers.mjs";
  * ------------------------------------------------------------------ */
 
 function useRegistry() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gp-registry-"));
+  const sandbox = privateSandbox("gp-registry-");
+  const root = sandbox.dir;
   const filePath = path.join(root, "projects.json");
   const previousFile = process.env.GLASSPANE_PROJECTS_FILE;
   const previousForce = process.env[FORCE_OVERWRITE_ENV];
@@ -44,6 +46,7 @@ function useRegistry() {
       if (previousForce === undefined) delete process.env[FORCE_OVERWRITE_ENV];
       else process.env[FORCE_OVERWRITE_ENV] = previousForce;
       fs.rmSync(root, { recursive: true, force: true });
+      sandbox.dispose();
     },
   };
 }
