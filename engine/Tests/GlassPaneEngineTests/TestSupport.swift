@@ -26,6 +26,8 @@ final class ScriptedChannel: RuntimeChannel {
     var fallbackTree: AxTreeSnapshot
     var actionError: ChannelError?
     var propertyResult: Result<StringOrBool, ChannelError> = .success(.bool(true))
+    var geometryResults: [Result<AxGeometrySnapshot, ChannelError>] = []
+    var fallbackGeometry = AxGeometrySnapshot(nodes: [], window: nil, latencyMs: 0)
     var captureResults: [Result<CGImage, ChannelError>] = []
     var fallbackCapture: CGImage?
 
@@ -35,6 +37,7 @@ final class ScriptedChannel: RuntimeChannel {
     private(set) var actionCallCount = 0
     private(set) var propertyCallCount = 0
     private(set) var captureCallCount = 0
+    private(set) var geometryCallCount = 0
 
     init(
         app: AttachedApp = AttachedApp(
@@ -82,6 +85,12 @@ final class ScriptedChannel: RuntimeChannel {
             return sequence[index]
         }
         return alive
+    }
+
+    func geometrySnapshot(maxDepth: Int) throws -> AxGeometrySnapshot {
+        geometryCallCount += 1
+        if geometryResults.isEmpty { return fallbackGeometry }
+        return try geometryResults.removeFirst().get()
     }
 
     func captureWindow() throws -> WindowCapture {

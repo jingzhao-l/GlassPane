@@ -101,6 +101,125 @@ public final class AXChannel: RuntimeChannel {
         )
     }
 
+    /// 几何遍历：role/title/identifier + position/size，扁平输出并带索引路径。
+    ///
+    /// 与 `treeSnapshot` 共用同一套预算纪律（`enforceBudget` 逐次压超时），
+    /// 但每个元素的几何读是**独立降级**的：一个元素读不到几何不会作废整次
+    /// 审计，它变成一个 `unread` 计入覆盖率——审计因此只能把结论降级为
+    /// `insufficient`，而不是把没看到的当成没毛病。
+    public func geometrySnapshot(maxDepth: Int) throws -> AxGeometrySnapshot {
+        let element = try requireAppElement()
+        let started = CFAbsoluteTimeGetCurrent()
+        let deadline = started + Self.treeTimeoutSeconds
+        defer { AXUIElementSetMessagingTimeout(element, Float(Self.messagingTimeoutSeconds)) }
+        var nodes: [AxGeometryNode] = []
+        try walkGeometry(for: element, path: "", depth: 0, maxDepth: maxDepth, deadline: deadline, into: &nodes)
+        let windowFrame: AxFrame? = attached.flatMap { app in
+            frontmostOnScreenWindow(of: app.pid).flatMap { (_, rect) in
+                AxFrame(x: Double(rect.minX), y: Double(rect.minY), width: Double(rect.width), height: Double(rect.height))
+            }
+        }
+        let latencyMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
+        return AxGeometrySnapshot(nodes: nodes, window: windowFrame, latencyMs: latencyMs)
+    }
+
+    private func walkGeometry(
+        for element: AXUIElement,
+        path: String,
+        depth: Int,
+        maxDepth: Int,
+        deadline: CFTimeInterval,
+        into nodes: inout [AxGeometryNode]
+    ) throws {
+        let role = try attributeString(element, kAXRoleAttribute, deadline: deadline) ?? ""
+        let title = try attributeString(element, kAXTitleAttribute, deadline: deadline)
+        let identifier = try attributeString(element, kAXIdentifierAttribute, deadline: deadline)
+        nodes.append(AxGeometryNode(
+            path: path.isEmpty ? "0" : path,
+            role: role,
+            title: title,
+            identifier: identifier,
+            geometry: try readFrame(of: element, deadline: deadline)
+        ))
+        guard depth < maxDepth, let children = try childElements(of: element, deadline: deadline) else { return }
+        for (index, child) in children.enumerated() {
+            try walkGeometry(
+                for: child,
+                path: path.isEmpty ? "\(index)" : "\(path)/\(index)",
+                depth: depth + 1,
+                maxDepth: maxDepth,
+                deadline: deadline,
+                into: &nodes
+            )
+        }
+    }
+
+    /// position + size 合成一个读数。两个属性里**任一**没读出来就是 unread，
+    /// 不能被"另一个读到了"掩盖成部分成功：半个矩形既不能判命中目标，也不能判
+    /// 出界，只会被算成量到了。
+    private func readFrame(of element: AXUIElement, deadline: CFTimeInterval) throws -> GeometryRead {
+        let (positionOutcome, positionValue) = try readAttribute(
+            element, kAXPositionAttribute, deadline: deadline, action: "reading element position"
+        )
+        let (sizeOutcome, sizeValue) = try readAttribute(
+            element, kAXSizeAttribute, deadline: deadline, action: "reading element size"
+        )
+        if case let .unreadable(channelError) = positionOutcome { return .unread(reason: describe(channelError)) }
+        if case let .unreadable(channelError) = sizeOutcome { return .unread(reason: describe(channelError)) }
+        guard positionOutcome == .answered, sizeOutcome == .answered,
+              let rawPosition = positionValue, let rawSize = sizeValue else {
+            return .absent
+        }
+        guard let valuePosition = rawPosition as! AXValue?, let valueSize = rawSize as! AXValue? else {
+            return .unread(reason: "geometry came back as something that is not an AXValue")
+        }
+        var point = CGPoint.zero
+        var cgSize = CGSize.zero
+        guard AXValueGetValue(valuePosition, .cgPoint, &point),
+              AXValueGetValue(valueSize, .cgSize, &cgSize) else {
+            return .unread(reason: "geometry AXValue could not be decoded into a point and a size")
+        }
+        return .measured(AxFrame(
+            x: Double(point.x), y: Double(point.y),
+            width: Double(cgSize.width), height: Double(cgSize.height)
+        ))
+    }
+
+    /// 一次属性读，按 `classifyAttributeRead` 的既有判据归类，同时把原值带回。
+    /// 不新写一套错误分类：树遍历与选择器搜索过去就对同一个失败给过不同结论
+    /// （R2-06），几何不能成为第三个各说各话的地方。
+    private func readAttribute(
+        _ element: AXUIElement,
+        _ attribute: String,
+        deadline: CFTimeInterval,
+        action: String
+    ) throws -> (AttributeReadOutcome, CFTypeRef?) {
+        try Self.enforceBudget(on: element, deadline: deadline, what: action)
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+        let outcome = Self.classifyAttributeRead(
+            error: error,
+            hasValue: value != nil,
+            processTrusted: AXIsProcessTrusted(),
+            action: action
+        )
+        return (outcome, value)
+    }
+
+    /// 未知值原样落进 unread 原因里，而不是被 `.answered` 分支的强转崩在运行时。
+    private func describe(_ error: ChannelError) -> String {
+        switch error {
+        case let .axUnavailable(reason): return reason
+        case let .treeCaptureFailed(reason): return reason
+        case let .actRejected(reason): return reason
+        case let .attributeUnavailable(reason): return reason
+        case let .pixelCaptureDenied(reason): return reason
+        case .appNotFound: return "the app is gone"
+        case .assertTargetNotFound: return "target not found"
+        case .pingTimeout: return "the accessibility ping timed out"
+        }
+    }
+
     public func performAction(selector: Selector, action: Action) throws {
         let element = try requireAppElement()
         // 选择器搜索同样受墙钟预算约束（R2-19）：搜索里的每一次属性读取

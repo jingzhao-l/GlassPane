@@ -194,7 +194,7 @@ public final class EngineCore {
             "version": version,
             "protocolVersion": protocolVersion,
             "pid": Int(ProcessInfo.processInfo.processIdentifier),
-            "capabilities": ["act", "observe", "assert_element", "diagnose", "snapshot", "restore", "probe"]
+            "capabilities": ["act", "observe", "assert_element", "audit_ui", "diagnose", "snapshot", "restore", "probe"]
         ]
         // P1 v1.2 §11.2：带上 daemon 自身的授权主体与四类席位（未注入钩子时
         // 整段省略——面板据此如实显示"未验证"，不以面板进程的权限冒充）。
@@ -1066,6 +1066,29 @@ public final class EngineCore {
         result["contaminationMonitored"] = contaminationMonitored
         result["contaminationBasis"] = contaminationBasis
         return result
+    }
+
+    /// 界面可操作性审计：一次几何遍历 + `UILayoutAudit` 的确定性规则。
+    /// 返回值刻意带 `coverage`：没量到的比例越大，结论越弱；量不到就没有"通过"。
+    public func auditUI(maxDepth: Int, minHitTargetPt: Double?) throws -> [String: Any] {
+        let snapshot: AxGeometrySnapshot
+        do {
+            snapshot = try channel.geometrySnapshot(maxDepth: maxDepth)
+        } catch let error as ChannelError {
+            throw EngineCore.map(error)
+        }
+        let result = UILayoutAudit.audit(
+            snapshot,
+            minHitTargetPt: minHitTargetPt ?? UILayoutAudit.defaultMinHitTargetPt
+        )
+        let data = try JSONEncoder().encode(result)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw GPError(code: .internalError, message: "the layout audit did not serialize to an object")
+        }
+        var payload = object
+        payload["latencyMs"] = snapshot.latencyMs
+        payload["windowKnown"] = snapshot.window != nil
+        return payload
     }
 
     public func observe(maxDepth: Int, role: String?) throws -> [String: Any] {
