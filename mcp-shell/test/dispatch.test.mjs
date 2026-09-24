@@ -147,14 +147,15 @@ test("ping returns empty result", async () => {
   assert.deepEqual(response.result, {});
 });
 
-test("tools/list returns the fourteen tools", async () => {
+test("tools/list returns the fifteen tools", async () => {
   const { server } = makeServer();
   const response = await server.handleLine(enq({ jsonrpc: "2.0", id: 3, method: "tools/list" }));
   const names = response.result.tools.map((tool) => tool.name);
-  assert.equal(names.length, 14);
+  assert.equal(names.length, 15);
   assert.ok(names.includes("gp_attach"));
   assert.ok(names.includes("gp_snapshot"));
   assert.ok(names.includes("gp_restore"));
+  assert.ok(names.includes("gp_audit_ui"));
   assert.ok(names.includes("gp_probe_status"));
   assert.ok(names.includes("gp_export_evidence"));
   assert.ok(names.includes("gp_recent_reports"));
@@ -193,6 +194,57 @@ test("tools/call invalid arguments become isError with GP_E_BAD_PARAMS", async (
   });
   const response = await server.handleLine(request);
   assert.equal(response.id, 5);
+  assert.equal(response.result.isError, true);
+  assert.ok(response.result.content[0].text.startsWith("GP_E_BAD_PARAMS"));
+  assert.equal(engine.io.sent.length, 0);
+});
+
+test("gp_audit_ui forwards the audit_ui method with its parameters", async () => {
+  const { server, engine } = makeServer();
+  const promise = server.handleLine(
+    enq({
+      jsonrpc: "2.0",
+      id: 21,
+      method: "tools/call",
+      params: { name: "gp_audit_ui", arguments: { maxDepth: 4, minHitTargetPt: 28 } },
+    }),
+  );
+  await Promise.resolve();
+  const frame = engine.io.lastFrame();
+  assert.equal(frame.method, "audit_ui");
+  assert.deepEqual(frame.params, { maxDepth: 4, minHitTargetPt: 28 });
+  engine.io.respond({ verdict: "advisory", findings: [], coverage: { total: 2, measured: 2, absent: 0, unread: 0, ratio: 1 } });
+  const response = await promise;
+  assert.equal(response.result.isError, false);
+});
+
+test("gp_audit_ui rejects an out-of-range hit target before touching the engine", async () => {
+  const { server, engine } = makeServer();
+  for (const bad of [0, 401, "44", true]) {
+    const response = await server.handleLine(
+      enq({
+        jsonrpc: "2.0",
+        id: 22,
+        method: "tools/call",
+        params: { name: "gp_audit_ui", arguments: { minHitTargetPt: bad } },
+      }),
+    );
+    assert.equal(response.result.isError, true, `minHitTargetPt=${JSON.stringify(bad)} 应在本地被拒`);
+    assert.ok(response.result.content[0].text.startsWith("GP_E_BAD_PARAMS"));
+  }
+  assert.equal(engine.io.sent.length, 0, "本地就该拦下，不能把越界值转给引擎");
+});
+
+test("gp_audit_ui refuses unknown parameters instead of silently ignoring them", async () => {
+  const { server, engine } = makeServer();
+  const response = await server.handleLine(
+    enq({
+      jsonrpc: "2.0",
+      id: 23,
+      method: "tools/call",
+      params: { name: "gp_audit_ui", arguments: { screenshot: true } },
+    }),
+  );
   assert.equal(response.result.isError, true);
   assert.ok(response.result.content[0].text.startsWith("GP_E_BAD_PARAMS"));
   assert.equal(engine.io.sent.length, 0);
@@ -312,7 +364,7 @@ test("an outstanding gp_act does not hold back ping or tools/list", async () => 
   await drainAll(queue);
   assert.deepEqual(written.map((r) => r.id), [101, 102],
     "ping and tools/list are answered while the act is still outstanding");
-  assert.equal(written[1].result.tools.length, 14);
+  assert.equal(written[1].result.tools.length, 15);
   assert.equal(writesMostInFlight, 1, "frames still go out one at a time");
 
   io.respond({ operationId: "op_0123456789ABCDEFGHJKMNPQRS", actConfirmed: true });

@@ -90,6 +90,14 @@ export const ObserveArgs = z.strictObject({
 });
 export type ObserveArgs = z.infer<typeof ObserveArgs>;
 
+const OptionalHitTargetSchema = z.number().min(1).max(400).optional();
+
+export const AuditUiArgs = z.strictObject({
+  maxDepth: OptionalDepthSchema,
+  minHitTargetPt: OptionalHitTargetSchema,
+});
+export type AuditUiArgs = z.infer<typeof AuditUiArgs>;
+
 export const ActArgs = z.strictObject({
   selector: SelectorSchema,
   action: ActionSchema,
@@ -288,6 +296,24 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       required: ["selector", "property", "expected"],
     },
     validate: zodBridge(AssertElementArgs),
+  },
+  {
+    name: "gp_audit_ui",
+    description:
+      "Audit the attached app's layout for operability: element geometry plus deterministic rules " +
+      "report zero-sized or out-of-window controls (blocking), undersized hit targets, clipped " +
+      "elements and frame overlaps (advisory). The verdict distinguishes pass from insufficient: " +
+      "unmeasured geometry never counts as a clean result. Read-only — it records no operation.",
+    engineMethod: "audit_ui",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        maxDepth: { type: "integer", minimum: 1, maximum: 10 },
+        minHitTargetPt: { type: "number", minimum: 1, maximum: 400 },
+      },
+    },
+    validate: zodBridge(AuditUiArgs),
   },
   {
     name: "gp_diagnose",

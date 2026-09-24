@@ -3,6 +3,29 @@
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
 ## [未发布]
+### Added — 界面可操作性与几何
+
+- `gp_audit_ui`（引擎方法 `audit_ui`，工具面 14 → **15**）：一次只读的几何遍历 + 确定性规则，
+  回答"这个界面是不是能用"。阻塞级 = 零尺寸的可交互元素、中心落在窗口外的元素；提示级 =
+  命中目标小于 44pt（可用 `minHitTargetPt` 覆盖）、被窗口裁切、两个可交互目标重叠超过小者 50%
+  （启发式，无障碍树没有层级顺序，只能报形状冲突）、整棵树无可交互角色。
+- 新增 `engine/Sources/GlassPaneEngine/AXGeometry.swift`：`AxFrame` / `GeometryRead` /
+  `AxGeometryNode` / `AxGeometrySnapshot`。**几何不进入 `AxNode`，因此不进入 `TreeDigest`**——
+  树摘要一旦掺进位置尺寸，一次 hover 或一段动画就会让"这次操作是否改变了界面"回答"改变了"。
+- `GeometryRead` 是三态（`measured` / `absent` / `unread`）而不是 `frame: AxFrame?`：
+  "应用明确不给几何"和"这次没读到"是两件事，混成一个 nil 就会把没看到的算进通过。
+- 判定值多了 `insufficient`，且优先级高于 `pass`：几何覆盖率为 0 或 measured/total < 0.8 时
+  不许报干净；重叠扫描超出 300 目标配对预算被截断时，会自己留下 `overlapScanTruncated`
+  finding 并且不再可能给出 `pass`。空树判 `insufficient`，不判干净。
+- `RuntimeChannel` 新增 `geometrySnapshot(maxDepth:)` 协议成员，**不给默认实现**：新的 channel
+  形态必须正面回答能不能读几何，不能靠继承一个"返回空"把能力假装存在。
+- 新增 `ParamValidation.optDouble`（与 `optInt` 同判据：布尔不当数字收、越界即拒、非有限拒）。
+- 测试：`UILayoutAuditTests` 18 例（含"量不到就不许通过""窗口未知时不许凭空判越界"
+  "未知角色不报目标过小""截断不换 pass"），走 `ScriptedChannel`，不依赖活的 AX 目标，
+  因此进 CI；`dispatch.test.mjs` 增加 3 例（参数转发、越界值与未知参数在本地拦下、
+  不落到引擎）。`[待真机]` 真实应用上的几何覆盖率与规则误报率尚未测过——
+  单元测试只证明规则本身按设计工作，不证明某个具体界面。
+
 
 一次面向陌生读者的文档重审：原文把 GlassPane 写成"让 AI 证明它说了什么"的诚实性工具，
 这偏离了立项动机。按 `specs/GlassPane_5.8_项目综述文档.md` 自己的定位改回来——它是 **macOS 上给

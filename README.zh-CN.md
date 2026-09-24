@@ -92,9 +92,12 @@ GlassPane 给代理装上带账本的眼睛和手：
 
 ## 能力一览
 
-- **14 个 MCP 工具（stdio）** —— Claude Desktop、Cursor 或任意 MCP host；`tools/list` 是权威面。
+- **15 个 MCP 工具（stdio）** —— Claude Desktop、Cursor 或任意 MCP host；`tools/list` 是权威面。
 - **执行并当场确认** —— 操作直接返回它造成的变更，"我点了但没反应"成为对话里的事实而非争论。
 - **元素级断言** —— 存在/可用/值，返回布尔并附上被解析到的选择器。
+- **界面可操作性审计** —— `gp_audit_ui` 走一遍元素几何并套用确定性规则：零尺寸、落在窗口外的控件判
+  阻塞；命中目标过小、被裁切、互相重叠判提示。量不到的部分永远不计入"通过"，重叠扫描被截断时它自己会
+  说明。
 - **数值化像素验证** —— 目标区域变了多少、变在哪，本机算出；不存储也不外发截图。
 - **有强度等级的归因** —— 默认 `weak`；被测应用内嵌探针 SDK 并确认处理器跑过时才 `strong`。
 - **污染检测** —— 操作中途有人手介入，测量会如实这么说，而不是悄悄把变化算给代理的那一次点击。
@@ -247,6 +250,7 @@ node installer/cli.js --restore-launchd
 | | `gp_observe` | 返回应用的无障碍树 |
 | | `gp_act` | 执行 7 个无障碍动作之一并确认效果 |
 | 断言 | `gp_assert_element` | 控件属性判定：存在、可用、值 |
+| | `gp_audit_ui` | 只读的界面布局审计：元素几何 + 确定性规则，给出 `pass`/`advisory`/`blocking`/`insufficient` 判定与覆盖率 |
 | | `gp_diagnose` | 给没生效的操作分类：没变 / 变晚了 / 被并发输入污染 |
 | 证据 | `gp_last_evidence` | 取最近（或指定）操作的完整证据包 |
 | | `gp_export_evidence` | 把一次操作的包渲染成 HTML/Markdown 审计报告 |
@@ -255,6 +259,10 @@ node installer/cli.js --restore-launchd
 | | `gp_restore` | 重放录制的步骤回到基线，或与基线比对 |
 | 探针 | `gp_probe_status` | 哪些应用有在线 `GlassPaneProbe`，它报了些什么 |
 | 项目 | `gp_project_list` / `gp_project_set` / `gp_project_get` | 登记并读取每应用配置 |
+
+`gp_audit_ui` 不记录操作、也不写证据包：它测的是界面此刻的样子，所以它的判定允许回答"证据不足"，
+而不是装成看过了。几何被刻意挡在树的摘要之外——一次 hover、一段动画或光标移动，都不该让
+"这次操作有没有改变这个界面"回答"改变了"。
 
 ## 证据包里有什么
 
