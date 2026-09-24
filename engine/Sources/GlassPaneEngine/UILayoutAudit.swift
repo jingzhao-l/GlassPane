@@ -103,6 +103,14 @@ public enum UILayoutAudit {
     /// 覆盖率达到多少才允许给出 `pass`。低于它就是 `insufficient`。
     static let passCoverageRatio = 0.8
 
+    /// 菜单族角色：在菜单被打开之前，它们在无障碍树里就是 0 尺寸 —— 真机第一次跑
+    /// 就证实了这点（审计给出的 5 条 blocking 全是 AXMenuItem，如"关于本机"）。
+    /// 所以这类元素不判"点不到"：没有 frame 不等于坏，只等于现在没展开。
+    /// 它们仍参与重叠/覆盖率等其他判定。
+    static let framelessUntilShownRoles: Set<String> = [
+        "menuitem", "menu bar", "menubar", "menu", "menu extra",
+    ]
+
     /// 可交互角色：只有名单内的角色才承担"点得到吗"的责任。
     /// 名单外的角色（分组、静态文本、容器）不参与零尺寸/命中目标类判定——
     /// 宁可少报，也不要拿一个本来就不可点的元素报出"目标太小"。
@@ -121,6 +129,12 @@ public enum UILayoutAudit {
 
     static func isInteractive(_ node: AxGeometryNode) -> Bool {
         interactiveRoles.contains(normalizedRole(node.role))
+    }
+
+    /// 供几何走查复用：只有可交互角色才值得多花一次 AX 读去取 title。
+    /// 判定与审计共用同一个名单，避免"走查以为是容器、审计以为是控件"这类分裂。
+    static func isInteractiveRole(_ raw: String) -> Bool {
+        interactiveRoles.contains(normalizedRole(raw))
     }
 
     public static func audit(
@@ -162,15 +176,22 @@ public enum UILayoutAudit {
             return (node, frame)
         }
 
+        let framelessUntilShown: (AxGeometryNode) -> Bool = { node in
+            framelessUntilShownRoles.contains(normalizedRole(node.role))
+        }
         for (node, frame) in measuredInteractive {
             if frame.width <= 0 || frame.height <= 0 {
+                if framelessUntilShown(node) { continue }
                 findings.append(LayoutFinding(
                     rule: "zeroSizedInteractive",
-                    severity: .blocking,
+                    severity: snapshot.window == nil ? .advisory : .blocking,
                     elementPath: node.path,
                     role: node.role,
                     title: node.title,
-                    detail: "可交互元素的尺寸为 0，点不到也就用不了。",
+                    detail: snapshot.window == nil
+                        ? "可交互元素的尺寸为 0。当前读不到窗口边界（缺屏幕录制授权时很常见），"
+                            + "因此只能报可疑，不能断定点不到。"
+                        : "可交互元素的尺寸为 0，点不到也就用不了。",
                     measured: ["width": frame.width, "height": frame.height]
                 ))
                 continue
@@ -251,6 +272,31 @@ public enum UILayoutAudit {
             }
         }
 
+        if snapshot.window == nil {
+            findings.append(LayoutFinding(
+                rule: "windowBoundsUnavailable",
+                severity: .advisory,
+                elementPath: nil, role: nil, title: nil,
+                detail: "读不到窗口边界（通常是没有屏幕录制授权），越界与裁切两类检查没有执行。"
+                    + "本结论不覆盖「元素是否落在屏幕内」。",
+                measured: [:]
+            ))
+        }
+
+        if !snapshot.complete {
+            // 走查没走完就下"通过"，等于对没看过的部分发合格证。
+            findings.append(LayoutFinding(
+                rule: "geometryScanIncomplete",
+                severity: .advisory,
+                elementPath: nil,
+                role: nil,
+                title: nil,
+                detail: "几何遍历未走完（\(snapshot.stopReason ?? "原因未知")）；已量的部分仍然报，"
+                    + "但整体结论不能是干净。",
+                measured: ["nodesCollected": Double(snapshot.nodes.count)]
+            ))
+        }
+
         if truncated {
             // 只比对了前 overlapPairBudget 个目标：剩下的配对没看过。
             // 因此"没发现遮挡"这句话不成立，必须留一条 finding 并把结论压到
@@ -273,7 +319,7 @@ public enum UILayoutAudit {
             verdict = .blocking
         } else if coverage.measured == 0 || coverage.ratio < passCoverageRatio {
             verdict = .insufficient
-        } else if findings.isEmpty && !truncated {
+        } else if findings.isEmpty && !truncated && snapshot.complete && snapshot.window != nil {
             verdict = .pass
         } else {
             verdict = .advisory

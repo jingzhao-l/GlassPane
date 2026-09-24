@@ -113,50 +113,90 @@ public final class AXChannel: RuntimeChannel {
         let deadline = started + Self.treeTimeoutSeconds
         defer { AXUIElementSetMessagingTimeout(element, Float(Self.messagingTimeoutSeconds)) }
         var nodes: [AxGeometryNode] = []
-        try walkGeometry(for: element, path: "", depth: 0, maxDepth: maxDepth, deadline: deadline, into: &nodes)
+        var stopReason: String?
+        do {
+            try walkGeometry(
+                for: element, path: "", depth: 0, maxDepth: maxDepth,
+                deadline: deadline, into: &nodes, stopReason: &stopReason
+            )
+        } catch let ChannelError.treeCaptureFailed(reason) {
+            // 预算耗尽不再作废整次审计：已经量到的元素照实交回去，没走完的部分由
+            // complete=false + stopReason 说明。"要么全有要么报错"会让一次审计在
+            // 大界面上什么都拿不到，而部分测量配上诚实的覆盖率本来就是这套规则的语义。
+            stopReason = reason
+        }
         let windowFrame: AxFrame? = attached.flatMap { app in
             frontmostOnScreenWindow(of: app.pid).flatMap { (_, rect) in
                 AxFrame(x: Double(rect.minX), y: Double(rect.minY), width: Double(rect.width), height: Double(rect.height))
             }
         }
         let latencyMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
-        return AxGeometrySnapshot(nodes: nodes, window: windowFrame, latencyMs: latencyMs)
+        return AxGeometrySnapshot(
+            nodes: nodes, window: windowFrame, latencyMs: latencyMs,
+            complete: stopReason == nil, stopReason: stopReason
+        )
     }
 
+    /// 每个元素的读次数刻意压到最低：role 必读（判定是否可交互靠它），position+size
+    /// 必读（审计的输入），而 title **只在可交互角色上读**——"哪个按钮点不到"需要名字，
+    /// 一个 AXGroup 的名字对判定没有价值。第一次实现四处全读，在真实应用上 10 秒预算
+    /// 直接耗尽、整次审计颗粒无收（真机诊断抓到的，CI 的合成用例看不出来）。
     private func walkGeometry(
         for element: AXUIElement,
         path: String,
         depth: Int,
         maxDepth: Int,
         deadline: CFTimeInterval,
-        into nodes: inout [AxGeometryNode]
+        into nodes: inout [AxGeometryNode],
+        stopReason: inout String?
     ) throws {
-        let role = try attributeString(element, kAXRoleAttribute, deadline: deadline) ?? ""
-        let title = try attributeString(element, kAXTitleAttribute, deadline: deadline)
-        let identifier = try attributeString(element, kAXIdentifierAttribute, deadline: deadline)
-        nodes.append(AxGeometryNode(
-            path: path.isEmpty ? "0" : path,
-            role: role,
-            title: title,
-            identifier: identifier,
-            geometry: try readFrame(of: element, deadline: deadline)
-        ))
-        guard depth < maxDepth, let children = try childElements(of: element, deadline: deadline) else { return }
+        let label = path.isEmpty ? "0" : path
+        let role: String
+        let geometry: GeometryRead
+        do {
+            role = try attributeString(element, kAXRoleAttribute, deadline: deadline) ?? ""
+            geometry = try readFrame(of: element, deadline: deadline)
+        } catch let error {
+            guard let reason = Self.budgetStopReason(error) else { throw error }
+            stopReason = reason
+            return
+        }
+        var title: String?
+        if UILayoutAudit.isInteractiveRole(role) {
+            title = try attributeString(element, kAXTitleAttribute, deadline: deadline)
+        }
+        nodes.append(AxGeometryNode(path: label, role: role, title: title, geometry: geometry))
+        guard depth < maxDepth else { return }
+        let children: [AXUIElement]?
+        do {
+            children = try childElements(of: element, deadline: deadline)
+        } catch let error {
+            guard let reason = Self.budgetStopReason(error) else { throw error }
+            stopReason = reason
+            return
+        }
+        guard let children else { return }
         for (index, child) in children.enumerated() {
+            guard stopReason == nil else { return }
             try walkGeometry(
                 for: child,
-                path: path.isEmpty ? "\(index)" : "\(path)/\(index)",
+                path: label.isEmpty ? "\(index)" : "\(label)/\(index)",
                 depth: depth + 1,
                 maxDepth: maxDepth,
                 deadline: deadline,
-                into: &nodes
+                into: &nodes,
+                stopReason: &stopReason
             )
         }
     }
 
-    /// position + size 合成一个读数。两个属性里**任一**没读出来就是 unread，
-    /// 不能被"另一个读到了"掩盖成部分成功：半个矩形既不能判命中目标，也不能判
-    /// 出界，只会被算成量到了。
+    /// 预算耗尽从叶子往上传：记一次原因，之后不再发新的 AX 调用。
+    static func budgetStopReason(_ error: any Error) -> String? {
+        guard case let channelError as ChannelError = error,
+              case let ChannelError.treeCaptureFailed(reason) = channelError else { return nil }
+        return reason
+    }
+
     private func readFrame(of element: AXUIElement, deadline: CFTimeInterval) throws -> GeometryRead {
         let (positionOutcome, positionValue) = try readAttribute(
             element, kAXPositionAttribute, deadline: deadline, action: "reading element position"

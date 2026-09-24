@@ -200,6 +200,55 @@ final class UILayoutAuditTests: XCTestCase {
         XCTAssertEqual(decoded[2].geometry.frame?.width, 10)
     }
 
+    func testIncompleteScanCannotProduceCleanPass() {
+        let nodes = [node("0", role: "AXButton", frame: AxFrame(x: 20, y: 20, width: 120, height: 44))]
+        let partial = AxGeometrySnapshot(
+            nodes: nodes, window: AxFrame(x: 0, y: 0, width: 800, height: 600),
+            latencyMs: 10_001, complete: false,
+            stopReason: "the 10.0s accessibility budget ran out before reading element position"
+        )
+        let result = UILayoutAudit.audit(partial)
+        XCTAssertNotEqual(result.verdict, .pass, "没走完的遍历换不来一句通过")
+        XCTAssertTrue(result.findings.contains { $0.rule == "geometryScanIncomplete" })
+    }
+
+    func testInteractiveRoleGateDecidesWhoGetsNamed() {
+        XCTAssertTrue(UILayoutAudit.isInteractiveRole("AXButton"))
+        XCTAssertTrue(UILayoutAudit.isInteractiveRole("axTextField"))
+        XCTAssertFalse(UILayoutAudit.isInteractiveRole("AXGroup"))
+    }
+
+    func testMenuItemsAreNotBlockedForHavingNoFrame() {
+        // 真机实测：第一版把 5 个 AXMenuItem（"关于本机"等）判成 blocking，
+        // 而菜单项在展开前就是 0 尺寸——这是规则的错，不是应用的错。
+        let result = UILayoutAudit.audit(snapshot([
+            node("0", role: "AXMenuItem", frame: AxFrame(x: 0, y: 0, width: 0, height: 0), title: "关于本机"),
+            node("1", role: "AXButton", frame: AxFrame(x: 20, y: 20, width: 88, height: 44)),
+        ]))
+        XCTAssertFalse(result.findings.contains { $0.rule == "zeroSizedInteractive" })
+        // 窗口已知、按钮达标、菜单项按"展开前无 frame"豁免：这才允许是 pass。
+        XCTAssertEqual(result.verdict, .pass, "菜单项不该被当成用不了: \(result.findings.map(\.rule))")
+    }
+
+    func testUnknownWindowSelfReportsInsteadOfSilentlySkippingChecks() {
+        let result = UILayoutAudit.audit(snapshot(
+            [node("0", role: "AXButton", frame: AxFrame(x: 20, y: 20, width: 88, height: 44))],
+            window: nil
+        ))
+        XCTAssertTrue(result.findings.contains { $0.rule == "windowBoundsUnavailable" })
+        XCTAssertNotEqual(result.verdict, .pass, "没跑越界检查就不许报干净")
+    }
+
+    func testZeroSizedWithoutWindowIsAdvisoryNotBlocking() {
+        let result = UILayoutAudit.audit(snapshot(
+            [node("0", role: "AXButton", frame: AxFrame(x: 300, y: 300, width: 0, height: 0))],
+            window: nil
+        ))
+        let finding = result.findings.first { $0.rule == "zeroSizedInteractive" }
+        XCTAssertEqual(finding?.severity, .advisory, "不知道窗口在哪，就无权断言它点不到")
+        XCTAssertNotEqual(result.verdict, .blocking)
+    }
+
     // MARK: - 引擎接线（走 ScriptedChannel，不碰真实 AX）
 
     func testEngineAuditUiReturnsVerdictAndCoverage() throws {

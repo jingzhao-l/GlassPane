@@ -109,10 +109,21 @@ public struct AxGeometrySnapshot: Codable, Equatable {
     public let nodes: [AxGeometryNode]
     public let window: AxFrame?
     public let latencyMs: Double
+    /// false = 预算耗尽等原因导致走查提前停止，`nodes` 只是界面的一部分。
+    public let complete: Bool
+    public let stopReason: String?
 
-    public init(nodes: [AxGeometryNode], window: AxFrame?, latencyMs: Double) {
+    public init(
+        nodes: [AxGeometryNode],
+        window: AxFrame?,
+        latencyMs: Double,
+        complete: Bool = true,
+        stopReason: String? = nil
+    ) {
         self.nodes = nodes
         self.window = window
         self.latencyMs = latencyMs
+        self.complete = complete
+        self.stopReason = stopReason
     }
 }
