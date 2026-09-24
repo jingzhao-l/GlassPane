@@ -399,6 +399,8 @@ final class ProjectRegistryTests: XCTestCase {
             .deletingLastPathComponent()   // repo root
             .appendingPathComponent(relativePath)
         return try String(contentsOf: url, encoding: .utf8)
+    }
+
     // MARK: - Corrupt registry must not be overwritten (A-1/B-1 的拒绝分支)
 
     /// 一个读不回的 projects.json：`loadFailed` 置位，写入被**拒绝**，磁盘上的
