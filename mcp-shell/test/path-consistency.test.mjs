@@ -97,6 +97,7 @@ test("projectSet's verdicts match the shared table entry by entry", (t) => {
 
   const scratchSandbox = privateSandbox("gp-path-owner-");
   const scratch = scratchSandbox.dir;
+  t.after(() => scratchSandbox.dispose());
   const base = {
     displayName: "Table",
     bundleId: "com.example.table",

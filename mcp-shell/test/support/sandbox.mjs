@@ -47,32 +47,38 @@ export function privateSandbox(prefix = 'gp-sandbox-') {
   const dir = fs.mkdtempSync(path.join(SANDBOX_BASE, prefix))
   fs.chmodSync(dir, 0o700)
 
-  const guarded = underProtectedTree(dir)
-  assert.equal(
-    guarded,
-    null,
-    `测试沙箱 ${dir} 落在受保护树 ${guarded} 里：夹具不能用共享暂存目录（os.tmpdir() 在 Linux 上就是 /tmp）。`,
-  )
-  const stat = fs.statSync(dir)
-  assert.equal(
-    typeof process.getuid === 'function' ? stat.uid === process.getuid() : true,
-    true,
-    `测试沙箱 ${dir} 的 owner 不是当前 uid，会被 projectSet 的归属规则拒掉。`,
-  )
-  // 与守卫同一判据：只看**最近的现存祖先**（产品就是这么判的，见
-  // src/project-registry.ts 的 nearestExistingAncestor + world-writable 检查），
-  // 不是一路爬到根——仓库卷本身可能是 775，那与证据目录是否共享无关。
-  const nearest = path.dirname(dir)
-  for (const candidate of [dir, nearest]) {
-    let st
-    try { st = fs.statSync(candidate) } catch { continue }
-    if ((st.mode & 0o022) !== 0) {
-      throw new Error(
-        `测试沙箱 ${candidate} 是 group/world-writable（mode ${(st.mode & 0o777).toString(8)}）：`
-        + '任何同组用户都能在这里放文件或软链，projectSet 会拒——夹具必须建在私有 0700 目录下。',
-      )
+  try {
+    const guarded = underProtectedTree(dir)
+    assert.equal(
+      guarded,
+      null,
+      `测试沙箱 ${dir} 落在受保护树 ${guarded} 里：夹具不能用共享暂存目录（os.tmpdir() 在 Linux 上就是 /tmp）。`,
+    )
+    const stat = fs.statSync(dir)
+    assert.equal(
+      typeof process.getuid === 'function' ? stat.uid === process.getuid() : true,
+      true,
+      `测试沙箱 ${dir} 的 owner 不是当前 uid，会被 projectSet 的归属规则拒掉。`,
+    )
+    // 与守卫同一判据：只看**最近的现存祖先**（产品就是这么判的，见
+    // src/project-registry.ts 的 nearestExistingAncestor + world-writable 检查），
+    // 不是一路爬到根——仓库卷本身可能是 775，那与证据目录是否共享无关。
+    const nearest = path.dirname(dir)
+    for (const candidate of [dir, nearest]) {
+      let st
+      try { st = fs.statSync(candidate) } catch { continue }
+      if ((st.mode & 0o022) !== 0) {
+        throw new Error(
+          `测试沙箱 ${candidate} 是 group/world-writable（mode ${(st.mode & 0o777).toString(8)}）：`
+          + '任何同组用户都能在这里放文件或软链，projectSet 会拒——夹具必须建在私有 0700 目录下。',
+        )
+      }
+      break
     }
-    break
+  } catch (error) {
+    // 自检失败也要把刚建的目录收掉，不给下一次运行留残骸。
+    fs.rmSync(dir, { recursive: true, force: true })
+    throw error
   }
 
   return {
