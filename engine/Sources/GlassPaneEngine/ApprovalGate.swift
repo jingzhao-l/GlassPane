@@ -85,6 +85,22 @@ public final class ApprovalGate {
     /// surface the damage honestly instead of presenting an empty-but-valid
     /// ledger as evidence of a healthy audit trail.
     public private(set) var loadFailed = false
+    /// The last persistence attempt that did **not** leave this chain on disk as
+    /// an owner-only file, with the concrete reason and the target path; cleared
+    /// by the next attempt that did. nil means "the disk side matches what this
+    /// process holds" — for an in-memory gate (`path == nil`) nothing is
+    /// expected on disk, so it stays nil.
+    ///
+    /// This is an audit fact, not debug output. `verifyChain()` verifies the
+    /// **in-memory** `records`, so a silently failed persist cannot be caught by
+    /// it — and `--approval-verify` reads the file from a *different* process, so
+    /// it does not lie either: what it reports is the shorter chain the disk
+    /// actually holds. Before this field existed, both halves of that statement
+    /// were invisible from inside the process doing the appending: the append was
+    /// reported to its caller as recorded, the chain kept verifying, and the
+    /// record simply was not in the audit trail. A reader that needs to know
+    /// "this approval exists only in RAM" has to be able to ask.
+    public private(set) var persistFailed: String?
     /// Where persistence failures go. Both the primary write and its fallback
     /// can fail, and the ledger's contract ("the disk side is simply stale,
     /// surfaced by verify/audit") only holds if somebody says so — a silent
@@ -92,6 +108,18 @@ public final class ApprovalGate {
     /// in-process reader believed were appended (the chain still verifies; it
     /// just stops containing things that happened).
     private let log: EngineLog
+
+    /// The isolation verdict for a finished ledger, as one named step — the same
+    /// seam `EvidenceStore.isolationCheck` is, for the same measured reason: the
+    /// volume this refuses (a mount that ignores `chmod`) cannot be built by a
+    /// non-root test, and a refusal no test has executed is the shape this
+    /// round's review keeps rejecting. Production always answers with
+    /// `StateRoot.isolateFile`; the candidate space that fails to reach the
+    /// verdict any other way is measured and written up on
+    /// `StatePermissionTests.testFallbackWriteRefusesAPackItCannotIsolate`, and
+    /// `ApprovalGateTests.testFallbackIsolationFailureIsRecordedToo` drives this
+    /// one through the same door.
+    var isolationCheck: (String) -> String? = StateRoot.isolateFile(at:)
 
     public init(
         path: String? = nil,
@@ -125,12 +153,12 @@ public final class ApprovalGate {
     ///
     /// The directory is **not** created here, and that is a measured gap rather
     /// than a claim of safety: `persist()` has no mkdir step, so an append into
-    /// a directory that does not exist yet is lost silently, and the next
-    /// process reads `count: 0` from a chain it never got. In `glasspaned` the
-    /// root is always there before the ledger is used (the archive and the
-    /// registry each create it on their first write, and the smoke runs
-    /// pre-create it mode 0700), but a caller that builds only a ledger has to
-    /// create the directory itself.
+    /// a directory that does not exist yet does not reach disk — it is reported
+    /// in `persistFailed` (with the target path) and the next process reads
+    /// `count: 0` from a chain it never got. In `glasspaned` the root is always
+    /// there before the ledger is used (the archive and the registry each create
+    /// it on their first write, and the smoke runs pre-create it mode 0700), but
+    /// a caller that builds only a ledger has to create the directory itself.
     public convenience init(
         stateRoot: StateRoot,
         clock: @escaping () -> Date = { Date() },
@@ -140,6 +168,13 @@ public final class ApprovalGate {
     }
 
     // MARK: - Chain access
+
+    /// The file this ledger persists to, or nil when it is memory-only. Exposed
+    /// because every surface that reports the chain has to name the file it
+    /// actually read: `--approval-verify` under `--state-dir` reads
+    /// `<state-dir>/approvals.json`, and a payload that printed the home-derived
+    /// default instead would point an agent at a file this process never opens.
+    public var ledgerPath: String? { path }
 
     /// Current chain, head first.
     public func chain() -> [ApprovalRecord] {
@@ -256,9 +291,16 @@ public final class ApprovalGate {
     /// Atomic write (tmp + replaceItemAt, same pattern as EvidenceStore and
     /// ProjectRegistry). A failed write never breaks the in-memory chain —
     /// the disk side is simply stale, surfaced by verify/audit (P5 §3.4) — but
-    /// "surfaced" requires a voice, so both the primary failure and the
-    /// fallback's are logged, and the ledger file is left owner-only (`0600`)
-    /// because it is a signature chain other accounts must not read (R5-04).
+    /// "surfaced" requires a voice, so every failure shape below both logs and
+    /// records the reason in `persistFailed`, and every shape that ends with the
+    /// chain actually on disk owner-only clears it. Publishing the state is the
+    /// point: a verdict that only ever reaches a log line leaves the caller
+    /// holding records it believes are recorded.
+    ///
+    /// The ledger file is left owner-only (`0600`) because it is a signature
+    /// chain other accounts must not read (R5-04). On the fallback route the
+    /// bytes land before the mode is fixed, so an isolation failure there is
+    /// reported as its own reason: the record *is* on disk, but exposed.
     private func persist() {
         guard let path else { return }
         let encoder = JSONEncoder()
@@ -267,16 +309,19 @@ public final class ApprovalGate {
         do {
             data = try encoder.encode(records)
         } catch {
-            log.error("approval ledger could not be encoded (\(records.count) records): \(error) — nothing was written to \(path)")
+            reportPersistenceFailure(
+                "approval ledger could not be encoded (\(records.count) records): \(error) — nothing was written to \(path)"
+            )
             return
         }
         let tmpPath = path + ".tmp"
         do {
             try data.write(to: URL(fileURLWithPath: tmpPath))
             // The mode is set while the bytes are still under the temporary
-            // name, so there is no window in which the finished ledger is
-            // group- or world-readable.
-            if let defect = StateRoot.isolateFile(at: tmpPath) {
+            // name, so the published name is never *created* group- or
+            // world-readable; the check after the rename below is what covers the
+            // case where a destination that already had that mode is replaced.
+            if let defect = isolationCheck(tmpPath) {
                 throw NSError(
                     domain: "GlassPaneApprovalGate", code: 1,
                     userInfo: [NSLocalizedDescriptionKey: defect]
@@ -287,17 +332,58 @@ public final class ApprovalGate {
                 withItemAt: URL(fileURLWithPath: tmpPath)
             )
             try? FileManager.default.removeItem(atPath: tmpPath)
+            // …and the window the temporary name closes is only half the story:
+            // measured on APFS, `replaceItemAt` hands the *destination's*
+            // attributes to the item that lands, so a ledger that was ever
+            // published 0644 — an installation that predates R5-04, or one written
+            // by the fallback below — keeps that mode through every later rewrite,
+            // while the temporary file's check reports success. The published name
+            // is therefore judged too, and a defect there is reported rather than
+            // assumed away. Nothing is deleted: this is the audit trail, and the
+            // honest outcome is a failed persist the reader can see.
+            if let defect = isolationCheck(path) {
+                reportPersistenceFailure(
+                    "approval ledger \(path) is not owner-only after the rename: \(defect) — permission judgment, not a full disk: the chain is on disk and readable by every local account, because the published file kept the mode of the one it replaced (chmod 600 \(path), or move the state root with --state-dir to a volume that honors permissions)"
+                )
+            } else {
+                persistFailed = nil
+            }
         } catch {
-            log.error("approval ledger write via \(tmpPath) failed: \(error) — falling back to an atomic rewrite of \(path)")
+            let primary = error
+            log.error("approval ledger write via \(tmpPath) failed: \(primary) — falling back to an atomic rewrite of \(path)")
+            // The rejected copy holds the whole chain, and the reason it was
+            // rejected may be precisely that it is not owner-only. Leaving it
+            // there publishes the exposure the failure was reported for, so it
+            // goes — same discipline `EvidenceStore.write` applies to its own
+            // temporary file, and reported the same way when it cannot go.
+            if FileManager.default.fileExists(atPath: tmpPath) {
+                do {
+                    try FileManager.default.removeItem(atPath: tmpPath)
+                } catch {
+                    log.error("the rejected ledger copy \(tmpPath) could not be removed (\(error)) — it is still on disk and it is NOT owner-only; delete that one file by name")
+                }
+            }
             do {
                 try data.write(to: URL(fileURLWithPath: path), options: .atomic)
-                if let defect = StateRoot.isolateFile(at: path) {
-                    log.error("approval ledger \(path) is not owner-only after the fallback write: \(defect)")
+                if let defect = isolationCheck(path) {
+                    reportPersistenceFailure(
+                        "approval ledger \(path) is not owner-only after the fallback write: \(defect) — permission judgment, not a full disk: the \(records.count) record(s) reached disk but the hash chain is readable by every local account, so \(path) has to be tightened (chmod 600) or the state root moved with --state-dir to a volume that honors permissions"
+                    )
+                } else {
+                    persistFailed = nil
                 }
             } catch {
-                log.error("approval ledger fallback write to \(path) failed too: \(error) — the \(records.count) record(s) exist in memory only and are NOT in the audit trail on disk")
+                reportPersistenceFailure(
+                    "approval ledger write to \(path) failed twice (via \(tmpPath): \(primary); direct: \(error)) — the \(records.count) record(s) exist in this process only and are NOT in the audit trail on disk"
+                )
             }
         }
+    }
+
+    /// One persistence failure, stated once and kept queryable.
+    private func reportPersistenceFailure(_ reason: String) {
+        persistFailed = reason
+        log.error(reason)
     }
 
     // MARK: - Helpers

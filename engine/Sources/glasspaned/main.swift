@@ -342,10 +342,14 @@ private func printUsage() {
 ///
 /// When nothing was named it also writes the line that makes the fallback
 /// observable. The other half of the proof is the path each subcommand echoes
-/// in its own JSON (`dir`, `registryPath`); a run that only points `HOME` at a
-/// sandbox is **not** isolated, because the home lookup behind this default
-/// never consults that variable, so the line says which root it fell back to
-/// instead of letting the fallback read as a choice.
+/// in its own JSON (`dir`, `registryPath`, `ledgerPath`, `stateRoot`); a run that
+/// only points `HOME` at a sandbox is **not** isolated, because the home lookup
+/// behind this default never consults that variable, so the line says which root
+/// it fell back to instead of letting the fallback read as a choice.
+///
+/// The daemon calls this *after* the single-instance guard, because a second
+/// instance that exits 65 must not announce a root it then never touches — and
+/// must not tighten one either.
 private func resolvedStateRoot(injected: StateRoot?) -> StateRoot {
     if let injected { return injected }
     let root = StateRoot.homeDefault()
@@ -670,6 +674,17 @@ if let recipePath = options.recipeValidate {
 if options.approvalAudit || options.approvalVerify {
     let stateRoot = resolvedStateRoot(injected: options.stateDir)
     let gate = ApprovalGate(stateRoot: stateRoot)
+    // P8: a ledger whose last append never reached disk is an audit fact, so it
+    // is published here rather than left in a log line — and it changes this
+    // command's exit code. Scope stated exactly, because the field's honesty
+    // depends on it: a one-shot verify/audit run reads the file and never
+    // appends, so `gate.persistFailed` can only be nil *in this process*. The
+    // run that can fail to persist is the daemon, whose gate `EngineCore` holds;
+    // that instance has to surface the field on its own status face (the `hello`
+    // payload / an engine method) for the fact to leave the process that knows
+    // it. The keys are here so the shape of the answer does not depend on which
+    // process is asked, and `ledgerPath`/`stateRoot` so a reader of either run
+    // sees the file this run actually opened.
     if options.approvalVerify {
         let verdict = gate.verifyChain()
         let payload: [String: Any] = [
@@ -688,13 +703,21 @@ if options.approvalAudit || options.approvalVerify {
             // spliced record) remains `valid: false`.
             "tailHash": gate.tailHash(),
             "firstBrokenIndex": verdict.firstBrokenIndex.map { $0 as Any } ?? NSNull(),
-            "loadFailed": gate.loadFailed
+            "loadFailed": gate.loadFailed,
+            "persistFailed": gate.persistFailed ?? NSNull(),
+            "ledgerPath": gate.ledgerPath ?? NSNull(),
+            "stateRoot": stateRoot.path
         ]
         writeJSON(payload)
-        let ok = verdict.valid && !gate.loadFailed
+        let ok = verdict.valid && !gate.loadFailed && gate.persistFailed == nil
         if !ok && gate.loadFailed {
             FileHandle.standardError.write(
                 Data("warning: ledger file exists but is corrupt; verify cannot pass\n".utf8)
+            )
+        }
+        if let failure = gate.persistFailed {
+            FileHandle.standardError.write(
+                Data("warning: \(failure)\n".utf8)
             )
         }
         exit(ok ? 0 : 1)
@@ -762,6 +785,15 @@ if options.pruneEvidence || options.evidenceStats {
         }
         switch EngineCore.projectArchiveDirectory(projectId: projectId, entry: entry) {
         case .failure(let refusal):
+            // P8: the refusal is right that this project owns no archive, and the
+            // shared archive it warns against is *this run's* — `<state-dir>/
+            // evidence/` when `--state-dir` named a root, this process's per-user
+            // folder when it did not. The engine's own sentence cannot know which,
+            // so the payload names the locations this process actually opened
+            // (`registryPath`, `stateRoot`, `sharedArchiveOfThisRun`) and repeats
+            // the command that owns them, with the root spelled out so the agent
+            // pruning it cannot be pointed at a different installation than the
+            // one that refused.
             writeJSON(
                 [
                     "error": refusal.message,
@@ -769,6 +801,9 @@ if options.pruneEvidence || options.evidenceStats {
                     "code": refusal.code.rawValue,
                     "project": projectId,
                     "registryPath": registry.filePath,
+                    "stateRoot": stateRoot.path,
+                    "sharedArchiveOfThisRun": stateRoot.evidenceDirectory,
+                    "next": "glasspaned --prune-evidence --older-than \(options.pruneOlderThanDays) --state-dir \(stateRoot.path) — with no --project, because that command is the surface that owns \(stateRoot.evidenceDirectory); look first with --evidence-stats and count without deleting via --dry-run",
                     "stateChanged": false
                 ],
                 to: .standardError
@@ -810,30 +845,21 @@ if options.pruneEvidence || options.evidenceStats {
     }
 }
 
-// One resolution for the whole daemon: the sockets below and every state object
-// handed to EngineCore come from this root, so a `--state-dir` run cannot serve
-// from the sandbox while archiving into the per-user folder (or the other way
-// round, which is how the real projects.json was lost).
-let stateRoot = resolvedStateRoot(injected: options.stateDir)
 // `--socket-path` wins outright. Otherwise a **named** root serves on
 // `<root>/daemon.sock`, and a run that named nothing keeps the historic
 // `<home>/.glasspane/engine.sock` name — renaming the socket of an existing
 // installation is not this change's to make, and `StateRoot` is the one place
 // the whole rule is written (the settings panel resolves through it too).
+//
+// The state root itself is resolved **below**, after the single-instance guard
+// has decided that this run is the one that serves: nothing above this line may
+// touch state, and neither may a run that is about to exit 65 (P8/R5-04's
+// ordering half — see the comment on `stateRoot` where it is finally resolved).
 let socketPath = StateRoot.engineSocketPath(
     explicitSocketPath: options.socketPath,
     stateRoot: options.stateDir
 )
-let probeSocketPath = options.probeSocketPath ?? stateRoot.probeSocketFile
 let log = EngineLog(quiet: !options.verbose)
-// R5-04: this process writes the archive, the registry and the approval chain,
-// so it is the process that closes the exposure the umask left there — files and
-// directories that predate the 0700/0600 rule are tightened once, here, and
-// every path it could not tighten is named in the log. The one-shot maintenance
-// subcommands deliberately do **not** do this: `--evidence-stats` and
-// `--active-project` are the read-only probes the smoke gates use to measure
-// which state root a run resolved, and a probe that chmods is not read-only.
-stateRoot.tightenPermissions(log: log)
 
 // 单实例护栏（P1 v1.2 §11.1 + R2-02/A-18）：判定必须三态分开——「回了 hello」
 // 「名字后面没有监听者（残留文件）」「有监听者但不开口」。旧实现用 helloSummary，
@@ -865,6 +891,32 @@ case .bind:
         log.info("nothing listens on \(socketPath) (\(reason)) — binding it")
     }
 }
+
+// One resolution for the whole daemon: the sockets below and every state object
+// handed to EngineCore come from this root, so a `--state-dir` run cannot serve
+// from the sandbox while archiving into the per-user folder (or the other way
+// round, which is how the real projects.json was lost).
+//
+// It sits **after** the single-instance guard on purpose (P8). The guard is what
+// decides whether this process is the service; a second instance that is about
+// to exit 65 owns nothing and gets to change nothing, and until this line moved
+// it had already rewritten the *living* instance's state root — the sweep below
+// chmods the root, its archive directory and every entry inside them. Tightening
+// another process's state from a run that immediately loses the name is the same
+// family of defect this round keeps finding: a check that speaks and then acts
+// anyway. The ordering also puts the `--state-dir was not given` notice (written
+// by `resolvedStateRoot`) in the only run that really is about to read and write
+// that root, instead of in one that touches nothing.
+let stateRoot = resolvedStateRoot(injected: options.stateDir)
+let probeSocketPath = options.probeSocketPath ?? stateRoot.probeSocketFile
+// R5-04: this process writes the archive, the registry and the approval chain,
+// so it is the process that closes the exposure the umask left there — files and
+// directories that predate the 0700/0600 rule are tightened once, here, and
+// every path it could not tighten is named in the log. The one-shot maintenance
+// subcommands deliberately do **not** do this: `--evidence-stats` and
+// `--active-project` are the read-only probes the smoke gates use to measure
+// which state root a run resolved, and a probe that chmods is not read-only.
+stateRoot.tightenPermissions(log: log)
 
 // A-18：engine.sock 有 §11.1 护栏，probe.sock 过去**一个都没有**——第二个 daemon
 // 静默 unlink+bind 抢走探针名字，旧实例继续服务 engine.sock，归因面就此裂到两个进程

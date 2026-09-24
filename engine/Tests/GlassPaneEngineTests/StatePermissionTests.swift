@@ -167,6 +167,186 @@ final class StatePermissionTests: XCTestCase {
         )
     }
 
+    /// R5-04's fallback branch, with the rejection made **executable**.
+    ///
+    /// What it stands for: a volume that will not isolate a file it is handed —
+    /// a read-only mount, an ACL override, an immutable flag — on which the
+    /// rename route cannot be used at all, so `write` falls back to publishing
+    /// the pack under its final name and that finished file refuses `0600`.
+    ///
+    /// The fallback is driven for real: a directory squatting on `<entry>.tmp`
+    /// makes the temporary write throw (measured on this checkout:
+    /// `NSCocoaErrorDomain Code=512`), which is exactly the "the temp name is
+    /// unusable" condition the fallback exists for, and the pack then lands at
+    /// its final name (measured: `Code=512` on the temp, fallback write succeeds).
+    /// The *isolation verdict* is injected, because no non-root test can build
+    /// that volume — measured candidate space, all of which fail to reach the
+    /// branch: a directory, a non-empty directory, a `uchg`-flagged file, a FIFO,
+    /// a dangling symlink, a symlink loop and a symlink onto an immutable file
+    /// each leave the fallback either throwing too (so the verdict was already
+    /// false before the fix and the test proves nothing) or landing a plain
+    /// `0644` regular file that `chmod(0600)` fixes on the spot; an inherited
+    /// `deny writeattr` ACL is copied onto the new pack (which stays `0644`, i.e.
+    /// exactly the exposure) while `chmod` still succeeds, because a file's owner
+    /// may always set its own mode. So the seam is the only route to the
+    /// refusal — and the control below shows the verdict, not the fixture, is
+    /// what decides the answer.
+    func testFallbackWriteRefusesAPackItCannotIsolate() throws {
+        let dir = TestSandbox.directory("fallback-refuse")
+        let store = EvidenceStore(directory: dir)
+        let pack = pack(createdAt: "2026-09-23T00:00:00.000Z", seed: 21)
+        let filePath = dir + "/" + pack.operationId + ".json"
+        try FileManager.default.createDirectory(
+            atPath: filePath + ".tmp", withIntermediateDirectories: true
+        )
+
+        var judged: [String] = []
+        store.isolationCheck = { path in
+            judged.append(path)
+            return "\(path) is still 0644 after chmod(0600)" // what such a volume answers
+        }
+        XCTAssertFalse(
+            store.write(pack),
+            "the fallback's isolation failure has to change the verdict, not only the log line"
+        )
+        XCTAssertEqual(
+            judged, [filePath],
+            "the fallback must judge the file it published — and nothing else"
+        )
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: filePath),
+            "a refused pack must not stay in the archive readable by other accounts"
+        )
+
+        // The control: the same filesystem state, the production verdict, and the
+        // write lands. So the refusal above was the judgment and not the fixture.
+        store.isolationCheck = StateRoot.isolateFile(at:)
+        XCTAssertTrue(
+            store.write(pack),
+            "the fallback still publishes when the volume isolates what it is given"
+        )
+        XCTAssertEqual(mode(of: filePath), 0o600)
+    }
+
+    // MARK: - the published name, not just the temporary one
+
+    /// Found by measurement while the fallback case above was being built, and
+    /// the same family as the four defects this round is fixing: a check that
+    /// answers for the wrong object. `replaceItemAt` hands the **destination's**
+    /// attributes to the item that lands (measured: an `0600` temp file replacing
+    /// an `0644` destination leaves the result `0644`), so "the mode is set while
+    /// it is still the temp file" only holds for a name that does not exist yet.
+    /// Every installation that predates R5-04 has a name that exists, so its
+    /// evidence packs, project table and approval ledger stayed world-readable
+    /// through every rewrite while all three writers reported success — the
+    /// exposure the sweep at startup is supposed to end kept being *re-created*
+    /// by the writers themselves, one write at a time.
+    ///
+    /// No fixture beyond a chmod reaches this: the precondition is an existing
+    /// file at the wrong mode, which is what an old installation is.
+    func testRewritingAPreExistingWorldReadableFileTightensIt() throws {
+        // The evidence archive.
+        let dir = TestSandbox.directory("rewrite-modes")
+        let store = EvidenceStore(directory: dir)
+        let pack = pack(createdAt: "2026-09-23T00:00:00.000Z", seed: 31)
+        XCTAssertTrue(store.write(pack))
+        let entry = dir + "/" + pack.operationId + ".json"
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: entry)
+        XCTAssertEqual(mode(of: entry), 0o644, "the exposure this case exists for")
+        XCTAssertTrue(store.write(pack), "a rewrite on a normal volume must still succeed")
+        XCTAssertEqual(
+            mode(of: entry), 0o600,
+            "…and the pack has to come out owner-only, not inherit the mode it replaced"
+        )
+
+        // The project registry.
+        let registryPath = TestSandbox.filePath("registry-modes")
+        let registry = ProjectRegistry(filePath: registryPath)
+        _ = try registry.create(displayName: "A", bundleId: "com.rewrite.a")
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: registryPath)
+        _ = try registry.create(displayName: "B", bundleId: "com.rewrite.b")
+        XCTAssertEqual(
+            mode(of: registryPath), 0o600,
+            "the registry lists every project this machine may act on; a rewrite that kept 0644 would keep the leak"
+        )
+
+        // The approval ledger, and the state that has to say nothing is outstanding.
+        let ledgerPath = TestSandbox.filePath("ledger-modes")
+        let gate = ApprovalGate(path: ledgerPath, clock: { Date(timeIntervalSince1970: 1_800_000_000) })
+        func approve(_ ref: String) {
+            XCTAssertNotNil(gate.append(
+                operationRef: ref,
+                operationType: "restore",
+                riskTier: .high,
+                decision: .approve,
+                approvedBy: "state-permission-test",
+                reason: "rewrite mode case"
+            ))
+        }
+        approve("snap-1")
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: ledgerPath)
+        approve("snap-2")
+        XCTAssertNil(gate.persistFailed, "the ledger came out private, so nothing stands open: \(gate.persistFailed ?? "")")
+        XCTAssertEqual(mode(of: ledgerPath), 0o600)
+    }
+
+    // MARK: - startup ordering (P8: the sweep is a mutation, so it needs the lock)
+
+    /// The daemon's tightening pass rewrites the modes of the state root, its
+    /// archive directory and every entry inside them. Until this gate existed it
+    /// ran *before* the single-instance guard, so a second instance that was
+    /// about to exit 65 had already chmod-ed the root of the instance that is
+    /// serving requests right now — a doomed run mutating live state. The anchor
+    /// comparison below is the shape this repo already uses for `main.swift`
+    /// (it is top-level code in an executable target and cannot be imported), and
+    /// it reads the ordering, not the wording: reordering those two lines is the
+    /// regression.
+    func testDaemonTightensStateOnlyAfterItWinsTheSocketName() throws {
+        let source = try repoSource("engine/Sources/glasspaned/main.swift")
+        let liveness = try XCTUnwrap(
+            source.range(of: "socketProbe.liveness(socketPath: socketPath)"),
+            "the single-instance guard's liveness probe has moved out of main.swift — update this gate deliberately"
+        )
+        let mask = try XCTUnwrap(
+            source.range(of: "blockShutdownSignalsEarly()", range: liveness.upperBound..<source.endIndex),
+            "the signal-mask anchor after the guard is gone; the slice below needs a new end"
+        )
+        let afterGuard = source[liveness.upperBound..<mask.lowerBound]
+
+        let tighten = try XCTUnwrap(
+            afterGuard.range(of: "stateRoot.tightenPermissions(log: log)"),
+            "the startup sweep must run AFTER the liveness decision: an instance that loses the socket name and exits 65 must not have rewritten the state root of the instance that is serving"
+        )
+        XCTAssertNil(
+            source[..<liveness.lowerBound].range(of: "tightenPermissions"),
+            "nothing above the liveness probe may tighten state — that is the ordering this gate pins"
+        )
+        // Same slice requirement for the resolution the sweep acts on: the run
+        // that names no `--state-dir` announces the home fallback only once it is
+        // the service, because a run that touches nothing must not claim it
+        // reads and writes a root.
+        let resolution = try XCTUnwrap(
+            afterGuard.range(of: "let stateRoot = resolvedStateRoot(injected: options.stateDir)"),
+            "the daemon's state root is resolved before the guard decided anything"
+        )
+        XCTAssertLessThan(resolution.lowerBound, tighten.lowerBound)
+        // And the refusal the ordering protects: exit 65 comes before the sweep.
+        XCTAssertNotNil(afterGuard.range(of: "exit(65)"))
+    }
+
+    /// Reads a repo-relative source file the way `HumanInterventionAuditTests`
+    /// and `EngineCoreTests` already do: `#filePath` is compiled in, so the gate
+    /// does not depend on the working directory `swift test` happens to use.
+    private func repoSource(_ relativePath: String) throws -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // Tests/GlassPaneEngineTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // engine
+            .deletingLastPathComponent()   // repo root
+            .appendingPathComponent(relativePath)
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
     /// The state root outside the home directory is isolated **by ownership**,
     /// which is what `--state-dir` made reachable: the old rule exempted
     /// everything outside `NSHomeDirectory()`, logged the gap, and wrote anyway —

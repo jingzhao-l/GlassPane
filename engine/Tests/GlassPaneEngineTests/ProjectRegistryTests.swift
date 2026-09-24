@@ -268,6 +268,138 @@ final class ProjectRegistryTests: XCTestCase {
         _ = try core.attach(bundleId: "com.other", pid: nil, projectId: nil)
         XCTAssertNil(core.activeProjectId)
     }
+
+    // MARK: - P8 (defect 4): an agent-facing message names the paths it opened
+
+    /// The construction route this round closed, pinned in source because it is
+    /// a *route* and not a behavior: the registry's `filePath:` used to carry a
+    /// default value pointing at the home-derived table, so a call site that
+    /// named no location — one added tomorrow by someone who read nothing — got
+    /// the developer's own projects.json instead of an error. That is the same
+    /// defect the isolation gate keeps scanning for in `engine/Tests`; the
+    /// default parameter was the version of it that lived in production and no
+    /// text gate could see. The named factory is the only way left to reach the
+    /// per-user table, and it has to stay spelled.
+    func testRegistryLocationCannotBeReachedByOmittingTheArgument() throws {
+        let source = try repoSource("engine/Sources/GlassPaneEngine/ProjectRegistry.swift")
+        XCTAssertFalse(
+            source.contains("filePath: String ="),
+            "the registry location has to be named at every call site: a default value is how a location-less construction silently became the developer's own projects.json"
+        )
+        XCTAssertTrue(
+            source.contains("public init(filePath: String)"),
+            "the required-argument initializer is gone: \(source.prefix(400))…"
+        )
+        XCTAssertTrue(
+            source.contains("atProductionDefault() -> ProjectRegistry"),
+            "the home table must stay reachable, and only by name: the named factory is what the isolation gate bans in tests"
+        )
+        // `stateRoot:` — the route `glasspaned` takes — still exists, so nothing
+        // is pushed back towards composing a path by hand.
+        XCTAssertTrue(source.contains("init(stateRoot: StateRoot)"))
+    }
+
+    /// The other half of the same rule, as behavior: every sentence a registry
+    /// refusal sends names **this** instance's table and never the home-derived
+    /// one. A `--state-dir` run whose agent is told to `mv` or `json.tool` a file
+    /// it never opens follows an instruction against the wrong state.
+    func testRefusalTextNamesTheInjectedTableAndNeverTheHomeDefault() throws {
+        let path = TestSandbox.filePath("registry-refusal")
+        try Data("{ this is not a project list".utf8).write(
+            to: URL(fileURLWithPath: path), options: .atomic
+        )
+        // The exposure the review found: a location this process never reads or
+        // writes, derived from a home lookup that no argument can change.
+        let homeTable = StateRoot.homeDefault().projectsFile
+        XCTAssertNotEqual(homeTable, path, "test premise: the injected table is not the home one")
+
+        let registry = ProjectRegistry(filePath: path)
+        XCTAssertTrue(registry.loadFailed)
+        let report = try XCTUnwrap(registry.unreadableReport)
+        let remedy = registry.unreadableRemedy
+        for text in [report, remedy] {
+            XCTAssertTrue(text.contains(path), "the refusal must name the file it refused to rewrite: \(text)")
+            XCTAssertFalse(
+                text.contains(homeTable),
+                "and must not name a table this instance never opened: \(text)"
+            )
+        }
+        XCTAssertThrowsError(try registry.create(displayName: "X", bundleId: "com.refusal")) { error in
+            guard let gpError = error as? GPError else {
+                return XCTFail("the refusal is a GPError with an agent-facing remedy, got \(error)")
+            }
+            XCTAssertEqual(gpError.code, .internalError)
+            XCTAssertFalse(gpError.message.contains(homeTable), gpError.message)
+            XCTAssertFalse(gpError.remedy.contains(homeTable), gpError.remedy)
+            XCTAssertTrue(gpError.remedy.contains(path), gpError.remedy)
+        }
+    }
+
+    /// The CLI's side of the same sentence. `glasspaned --prune-evidence --project
+    /// <id>` refuses when that project owns no archive; the refusal is correct, but
+    /// until now every path in the payload except the engine's own sentence was
+    /// this run's, and the sentence named a shared archive derived from home —
+    /// the one file a `--state-dir` run never opens. The keys pinned below are the
+    /// CLI's answer to that: the root this process resolved, the archive it owns,
+    /// and the command (with its `--state-dir`) that can actually prune it.
+    ///
+    /// Honest about the half this gate cannot pin: `error`/`remedy` are still
+    /// `EngineCore.noArchiveRefusal`'s words, so the home-derived path survives
+    /// inside that sentence until the engine takes the injected store/registry
+    /// path instead (another lane's file). Stated, not assumed away.
+    ///
+    /// Pinned by text because the branch is top-level code in an executable target
+    /// — the same reason `EngineCoreTests` reads `main.swift` instead of calling it.
+    func testArchiveRefusalPayloadNamesTheRootThisRunResolved() throws {
+        let source = try repoSource("engine/Sources/glasspaned/main.swift")
+        let start = try XCTUnwrap(
+            source.range(of: "if options.pruneEvidence || options.evidenceStats"),
+            "the evidence maintenance branch is gone"
+        )
+        let end = try XCTUnwrap(
+            source.range(of: "let socketPath = StateRoot.engineSocketPath"),
+            "the slice anchor (daemon entry) is gone"
+        )
+        let block = source[start.lowerBound..<end.lowerBound]
+        let refusal = try XCTUnwrap(
+            block.range(of: "case .failure(let refusal):"),
+            "the no-archive refusal is gone from the maintenance branch"
+        )
+        let payload = block[refusal.lowerBound...]
+        XCTAssertTrue(
+            payload.contains("\"stateRoot\": stateRoot.path"),
+            "the payload has to say which root this process resolved, not one it never touches"
+        )
+        XCTAssertTrue(
+            payload.contains("\"sharedArchiveOfThisRun\": stateRoot.evidenceDirectory"),
+            "and which archive it owns: that is the archive the engine's sentence calls \"shared\""
+        )
+        XCTAssertTrue(
+            payload.contains("\"next\": \"glasspaned --prune-evidence"),
+            "the remedy has to name, in the emitted command, the surface that actually owns the shared archive"
+        )
+        XCTAssertTrue(
+            payload.contains("--state-dir \\(stateRoot.path)"),
+            "…and pin the installation it prunes, so a second run cannot be pointed at another state root"
+        )
+        XCTAssertTrue(
+            payload.contains("\"stateChanged\": false"),
+            "a refusal must still deny that anything was deleted"
+        )
+    }
+
+    /// Reads a repo-relative source file the way `HumanInterventionAuditTests`
+    /// and `EngineCoreTests` already do: `#filePath` is compiled in, so the gate
+    /// does not depend on the working directory `swift test` happens to run in.
+    private func repoSource(_ relativePath: String) throws -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // Tests/GlassPaneEngineTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // engine
+            .deletingLastPathComponent()   // repo root
+            .appendingPathComponent(relativePath)
+        return try String(contentsOf: url, encoding: .utf8)
+    }
 }
 
 // MARK: - RecipeLoader tests (spec v1.4 §2, P1-E5) — R4-02 / R6-01

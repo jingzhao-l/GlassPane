@@ -128,8 +128,25 @@ public final class ProbeInbox {
             // 否则每次公告都会抹掉在途 act 的命中，证据里的 `hitCount: 0` 就又变成
             // 一个"没采到"被说成"没命中"的假负结论（round-1 协调项 X-1）。
             // capabilities 取新值：SDK 每次发的是当前全集，替换才是权威语义。
+            // 三个自报计数器是这条"替换"规则唯一的例外，因为它们在 hello 上是
+            // 可选字段：能力变更公告往往只带 capabilities，若整体换掉 hello，先报过
+            // `droppedEvents: 40` 的探针就会被这一帧更啰嗦、但对该键更沉默的公告
+            // 抹回"未上报"。方向上仍诚实（缺席不等于 0），可那次真测量白白蒸发了。
+            // 合并规则一句话：**新值缺失则沿用旧值** —— 上报过的测量不会因为后一帧
+            // 没提它就作废；从没上报过的（旧值也是 nil）继续缺席。
+            // 真断开不走这里：`disconnect(pid:)` 会摘掉注册，重连的进程因此落到下面
+            // 那条全新分支，计数不会被上一个进程残留。
             connections[hello.pid] = Connection(
-                hello: hello,
+                hello: ProbeHello(
+                    pid: hello.pid,
+                    bundleId: hello.bundleId,
+                    appName: hello.appName,
+                    probeVersion: hello.probeVersion,
+                    capabilities: hello.capabilities,
+                    droppedEvents: hello.droppedEvents ?? existing.hello.droppedEvents,
+                    droppedWrites: hello.droppedWrites ?? existing.hello.droppedWrites,
+                    rejectedKeys: hello.rejectedKeys ?? existing.hello.rejectedKeys
+                ),
                 connectedAt: existing.connectedAt,
                 eventsSeen: existing.eventsSeen
             )

@@ -11,6 +11,7 @@ final class ProbeCounterTests: XCTestCase {
 
     private func hello(
         pid: Int32 = 4242,
+        capabilities: [String] = ["z1"],
         droppedEvents: Int? = nil,
         droppedWrites: Int? = nil,
         rejectedKeys: Int? = nil
@@ -20,7 +21,7 @@ final class ProbeCounterTests: XCTestCase {
             bundleId: "com.example.app",
             appName: "Example",
             probeVersion: "gp-probe/0.1.0",
-            capabilities: ["z1"],
+            capabilities: capabilities,
             droppedEvents: droppedEvents,
             droppedWrites: droppedWrites,
             rejectedKeys: rejectedKeys
@@ -77,6 +78,40 @@ final class ProbeCounterTests: XCTestCase {
                 "\(field): \(value) must not become a reported count"
             )
         }
+    }
+
+    /// A JSON boolean is not a count, but `JSONSerialization` hands it back as an
+    /// `NSNumber` and `as? NSNumber` accepts it, so a naive numeric read turns
+    /// `"droppedWrites": false` into the claim "zero writes were lost" — the
+    /// exact inversion of the rule this file pins, reached from the side nobody
+    /// thought to test. `true` is the same mistake wearing a different number.
+    func testBooleanHelloCountersAreUnreportedNotReadAsZeroOrOne() throws {
+        let json = """
+        {"t":"hello","pid":1,"appName":"A","probeVersion":"v","capabilities":[],\
+        "droppedWrites":false,"droppedEvents":true,"rejectedKeys":false}
+        """
+        guard case let .hello(decoded) = ProbeWire.decode(Data(json.utf8)) else {
+            return XCTFail("expected the frame to still decode as hello")
+        }
+        XCTAssertNil(decoded.droppedWrites, "false must not become the measured claim 0")
+        XCTAssertNil(decoded.droppedEvents, "true must not become the measured claim 1")
+        XCTAssertNil(decoded.rejectedKeys, "false must not become the measured claim 0")
+    }
+
+    /// The other half of that veto: rejecting booleans must not slide into
+    /// "suspicious shapes go missing". `0` is the one value here that *is* a
+    /// measurement, and a probe reporting a clean channel has to be believed.
+    func testZeroHelloCounterStaysAMeasurementAndIsNotSweptIntoAbsence() throws {
+        let json = """
+        {"t":"hello","pid":1,"appName":"A","probeVersion":"v","capabilities":[],\
+        "droppedWrites":0,"droppedEvents":0,"rejectedKeys":0}
+        """
+        guard case let .hello(decoded) = ProbeWire.decode(Data(json.utf8)) else {
+            return XCTFail("expected a hello frame")
+        }
+        XCTAssertEqual(decoded.droppedWrites, 0, "an explicit 0 is a measured \"nothing lost\"")
+        XCTAssertEqual(decoded.droppedEvents, 0)
+        XCTAssertEqual(decoded.rejectedKeys, 0)
     }
 
     /// Unknown keys must keep being tolerated: this decoder is what lets an older
@@ -145,5 +180,84 @@ final class ProbeCounterTests: XCTestCase {
         let rows = try XCTUnwrap(core.probeStatus()["probes"] as? [[String: Any]])
         let row = try XCTUnwrap(rows.first { ($0["pid"] as? Int) == 77 })
         XCTAssertEqual(row["droppedWrites"] as? Int, 5)
+    }
+
+    // MARK: - a second hello for the same pid
+
+    /// The SDK's capability announcements reuse the pid and do not have to repeat
+    /// the counters, so the old whole-`hello` replacement turned a reported
+    /// `droppedEvents: 40` back into "unreported". That direction is still honest
+    /// — absence is not zero — but a real measurement evaporated only because a
+    /// later frame chose to say less. A probe that measured its own losses gets
+    /// to keep the credit for having measured them.
+    func testRehelloThatOmitsCountersCarriesForwardTheEarlierMeasurement() throws {
+        let inbox = ProbeInbox(now: { Date(timeIntervalSince1970: 1_800_000_000) })
+        XCTAssertTrue(inbox.register(hello(pid: 33, droppedEvents: 40, droppedWrites: 2, rejectedKeys: 1)))
+        XCTAssertTrue(inbox.register(hello(pid: 33, capabilities: ["z1", "kvc"])))
+
+        let rows = inbox.statusJSON()
+        XCTAssertEqual(rows.count, 1, "a re-hello is the same process, not a second registration")
+        let row = try XCTUnwrap(rows.first)
+        XCTAssertEqual(row["droppedEvents"] as? Int, 40)
+        XCTAssertEqual(row["droppedWrites"] as? Int, 2)
+        XCTAssertEqual(row["rejectedKeys"] as? Int, 1)
+        // The counters are the only fields that merge: capabilities keep the
+        // "the newest announcement is authoritative" semantics, so this fix must
+        // not be read as a general sticky-hello rule.
+        XCTAssertEqual(
+            row["capabilities"] as? [String],
+            ["z1", "kvc"],
+            "capabilities take the new value; only the counters carry forward"
+        )
+    }
+
+    /// The opposite direction, which the carry-forward must not break: an earlier
+    /// absence is not a verdict that pins the row there. The first hello had
+    /// nothing to report, the second one reports 7, and the row has to move.
+    func testRehelloWithANewMeasurementOverridesTheEarlierAbsence() throws {
+        let inbox = ProbeInbox(now: { Date(timeIntervalSince1970: 1_800_000_000) })
+        XCTAssertTrue(inbox.register(hello(pid: 55)))
+        let before = try XCTUnwrap(inbox.statusJSON().first)
+        XCTAssertNil(
+            before["droppedWrites"],
+            "before anyone measures it the key is absent"
+        )
+
+        XCTAssertTrue(inbox.register(hello(pid: 55, droppedWrites: 7)))
+        let row = try XCTUnwrap(inbox.statusJSON().first)
+        XCTAssertEqual(row["droppedWrites"] as? Int, 7, "a new measurement beats an earlier absence")
+        XCTAssertNil(
+            row["droppedEvents"],
+            "and the merge stays per-counter: one nobody ever reported is still not a 0"
+        )
+    }
+
+    /// A counter that *neither* hello reported must survive the merge as absence —
+    /// carrying forward "nothing" is how a 0 gets invented.
+    func testRehelloNeverInventsACounterNeitherHelloReported() throws {
+        let inbox = ProbeInbox(now: { Date(timeIntervalSince1970: 1_800_000_000) })
+        XCTAssertTrue(inbox.register(hello(pid: 66, droppedEvents: 40)))
+        XCTAssertTrue(inbox.register(hello(pid: 66, rejectedKeys: 1)))
+
+        let row = try XCTUnwrap(inbox.statusJSON().first)
+        XCTAssertEqual(row["droppedEvents"] as? Int, 40)
+        XCTAssertEqual(row["rejectedKeys"] as? Int, 1)
+        XCTAssertNil(row["droppedWrites"], "nil merged with nil stays nil")
+    }
+
+    /// The carry-forward belongs to one live registration, not to a pid slot: a
+    /// process that genuinely disconnected starts its own counters at nothing,
+    /// otherwise a recycled pid would be judged against the last app's losses.
+    func testDisconnectClearsTheCarriedForwardCountersForTheNextRegistration() throws {
+        let inbox = ProbeInbox(now: { Date(timeIntervalSince1970: 1_800_000_000) })
+        XCTAssertTrue(inbox.register(hello(pid: 88, droppedEvents: 40)))
+        inbox.disconnect(pid: 88)
+        XCTAssertTrue(inbox.register(hello(pid: 88)))
+
+        let row = try XCTUnwrap(inbox.statusJSON().first)
+        XCTAssertNil(
+            row["droppedEvents"],
+            "a new process has not measured anything yet — its predecessor's 40 is not its claim"
+        )
     }
 }

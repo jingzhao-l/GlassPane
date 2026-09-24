@@ -329,6 +329,162 @@ final class ApprovalGateTests: XCTestCase {
         XCTAssertNil(rejected)
         XCTAssertEqual(gate.count, 0)
     }
+
+    // MARK: - P8: a persist that did not reach disk is an audit fact
+
+    /// The divergence this pins: `verifyChain()` verifies the **in-memory**
+    /// `records`, and `--approval-verify` reads the file from a different
+    /// process — so neither one ever lied about it, and neither one could tell
+    /// the process that was appending either. The append was reported to its
+    /// caller as recorded, the chain kept verifying, and the record simply was
+    /// not in the audit trail. `persistFailed` is the answer to "is what I hold
+    /// on disk", and a success has to take the answer back.
+    ///
+    /// Reachable without any exotic volume, and that is not a coincidence:
+    /// `ApprovalGate(stateRoot:)` documents that persist() creates no directory,
+    /// so a ledger whose parent does not exist yet cannot be written — measured
+    /// on this checkout, the temp write throws (`NSCocoaErrorDomain Code=4`) and
+    /// the atomic fallback throws too (`mktemp` fails, same code 4), which is the
+    /// shape of the failure the field now keeps.
+    func testPersistFailureIsRecordedWithItsTargetAndClearedBySuccess() throws {
+        let path = TestSandbox.directory("ledger-nowrite") + "/absent/approvals.json"
+        TestSandbox.assertIsolated(path, label: "ledger-nowrite")
+        let gate = ApprovalGate(path: path, clock: { ApprovalGateTests.isoEpoch })
+        XCTAssertNil(gate.persistFailed, "no attempt yet — nil must not read as 'already durable'")
+
+        XCTAssertNotNil(gate.append(
+            operationRef: "snap-1",
+            operationType: "restore",
+            riskTier: .high,
+            decision: .approve,
+            approvedBy: "daemon:auto",
+            reason: "first record never reached disk"
+        ))
+        XCTAssertEqual(gate.count, 1)
+        XCTAssertTrue(gate.verifyChain().valid, "the in-memory chain is intact — which is exactly why this needed a field")
+        let failure = try XCTUnwrap(
+            gate.persistFailed,
+            "a record that did not reach disk has to be askable about, not only logged"
+        )
+        XCTAssertTrue(failure.contains(path), "the reason has to name the target: \(failure)")
+        XCTAssertTrue(
+            failure.contains("NOT in the audit trail"),
+            "and say that the consequence is a missing record, not a slow disk: \(failure)"
+        )
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: path),
+            "premise of the test: nothing was written to \(path)"
+        )
+
+        // The environment is fixed; the next durable append clears the record, so
+        // a reader can never be told "the last write failed" about a ledger that
+        // has since been written.
+        try FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true
+        )
+        XCTAssertNotNil(gate.append(
+            operationRef: "snap-2",
+            operationType: "restore",
+            riskTier: .high,
+            decision: .approve,
+            approvedBy: "daemon:auto",
+            reason: "now it is on disk"
+        ))
+        XCTAssertNil(gate.persistFailed, "a success must clear the last failure")
+        XCTAssertFalse(gate.loadFailed)
+        let reloaded = ApprovalGate(path: path, clock: { ApprovalGateTests.isoEpoch })
+        XCTAssertEqual(
+            reloaded.count, 2,
+            "the field and the file now agree: both records are on disk"
+        )
+        XCTAssertTrue(reloaded.verifyChain().valid)
+    }
+
+    /// The other persistence shape: an in-memory ledger (`path == nil`) has no
+    /// disk side to be stale against, so it must never report a failure — and the
+    /// path it publishes is nil, so no surface can print a location this gate
+    /// does not use.
+    func testInMemoryLedgerReportsNeitherPathNorFailure() {
+        let gate = makeGate()
+        _ = appendChain(gate, count: 2)
+        XCTAssertNil(gate.persistFailed)
+        XCTAssertNil(gate.ledgerPath)
+        XCTAssertEqual(gate.count, 2)
+    }
+
+    /// …and the third: the bytes land, the mode does not. `persist()`'s fallback
+    /// ends with the same isolation check the evidence archive runs, and before
+    /// this round that check answered only with a log line, so "the signature
+    /// chain is readable by every local account" was a fact no reader could ask
+    /// about.
+    ///
+    /// The predicate stands for one specific volume: a mount that will not
+    /// isolate *any* file it is given, which is why both names are refused — the
+    /// temporary one (the primary throws on its own verdict, real code, and the
+    /// run falls back) and the published one (the reason under test). What the
+    /// filesystem still decides for real is that the writes *land*: measured on
+    /// this checkout, the temp write and the atomic rewrite both succeed with the
+    /// production verdict (mode 0644 in between), so the refusal below is the
+    /// judgment and not the fixture. Driving the fallback any other way was
+    /// measured and does not work here — a directory squatting on
+    /// `approvals.json.tmp` does **not** make the primary write throw, because
+    /// unlike `EvidenceStore` this one is not `.atomic`.
+    func testFallbackIsolationFailureIsRecordedToo() throws {
+        let dir = TestSandbox.directory("ledger-isolate-fallback")
+        let path = dir + "/approvals.json"
+        TestSandbox.assertIsolated(path, label: "ledger-isolate-fallback")
+        let gate = ApprovalGate(path: path, clock: { ApprovalGateTests.isoEpoch })
+        var judged: [String] = []
+        gate.isolationCheck = { candidate in
+            judged.append(candidate)
+            return "\(candidate) is still 0644 after chmod(0600)"
+        }
+
+        XCTAssertNotNil(gate.append(
+            operationRef: "snap-exposed",
+            operationType: "restore",
+            riskTier: .high,
+            decision: .approve,
+            approvedBy: "daemon:auto",
+            reason: "landed world-readable"
+        ))
+        XCTAssertEqual(
+            judged, [path + ".tmp", path],
+            "the primary judges the temporary name, its verdict throws into the fallback, and the fallback judges the published ledger: \(judged)"
+        )
+        let failure = try XCTUnwrap(
+            gate.persistFailed,
+            "a ledger that reached disk without isolation is an audit fact, not a log line"
+        )
+        XCTAssertTrue(failure.contains("not owner-only after the fallback write"), failure)
+        XCTAssertTrue(failure.contains(path), "the reason has to name the exposed file: \(failure)")
+        XCTAssertTrue(
+            failure.contains("--state-dir"),
+            "…and carry the executable fix, since a volume that ignores chmod is the cause: \(failure)"
+        )
+        XCTAssertEqual(gate.count, 1, "this shape is 'exposed', not 'absent': the record is on disk")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: path + ".tmp"),
+            "the rejected temporary copy must not stay on disk holding the chain"
+        )
+
+        // Control: the production verdict on the same bytes clears the record.
+        gate.isolationCheck = StateRoot.isolateFile(at:)
+        XCTAssertNotNil(gate.append(
+            operationRef: "snap-isolated",
+            operationType: "restore",
+            riskTier: .high,
+            decision: .approve,
+            approvedBy: "daemon:auto",
+            reason: "and isolated this time"
+        ))
+        XCTAssertNil(gate.persistFailed)
+        XCTAssertEqual(
+            try (FileManager.default.attributesOfItem(atPath: path)[.posixPermissions] as? NSNumber)?
+                .int16Value, 0o600
+        )
+    }
 }
 
 /// P5-A4: EngineCore registration with/without an injected approval gate.

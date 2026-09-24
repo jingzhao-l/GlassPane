@@ -16,10 +16,12 @@ import Foundation
 /// refused while it stands.
 public final class ProjectRegistry {
 
-    /// Default path for the projects file: the registry of the home-derived
-    /// state root. Derived from `StateRoot` and not composed here, because the
-    /// home lookup behind it ignores a `HOME` override — the location has to
-    /// have one named source (X-22).
+    /// The registry's home-derived path, as a **value with no default behind
+    /// it**: the routes to it are the named factory below or a caller that
+    /// spells it out, because a `filePath:` default silently handed every
+    /// location-less construction — including a test helper forwarding its own
+    /// optional — the developer's real `projects.json`, which is how 71 live
+    /// registrations were replaced by two synthetic ones (R7-02/B2).
     public static let defaultProjectsPath = StateRoot.homeDefault().projectsFile
 
     public let filePath: String
@@ -33,7 +35,12 @@ public final class ProjectRegistry {
     /// Why the load failed, phrased for the agent-facing message.
     public private(set) var loadFailure: String?
 
-    public init(filePath: String = ProjectRegistry.defaultProjectsPath) {
+    /// The table lives where the caller says it lives — there is no default.
+    ///
+    /// `filePath:` is required (P8, the shape `EvidenceStore.init(directory:)`
+    /// already has): an argument left *out* is not a location anybody chose, and
+    /// on this type the un-chosen location was the developer's own registry.
+    public init(filePath: String) {
         self.filePath = filePath
         load()
     }
@@ -43,6 +50,14 @@ public final class ProjectRegistry {
     /// command and missed by another.
     public convenience init(stateRoot: StateRoot) {
         self.init(filePath: stateRoot.projectsFile)
+    }
+
+    /// The **only** way to bind a registry to `defaultProjectsPath` by name.
+    /// Kept named on purpose: reaching the per-user table is a decision a reader
+    /// has to see at the call site, not the outcome of leaving an argument out —
+    /// and `TestIsolationGateTests` bans this name anywhere under `engine/Tests`.
+    public static func atProductionDefault() -> ProjectRegistry {
+        ProjectRegistry(filePath: ProjectRegistry.defaultProjectsPath)
     }
 
     /// All registered projects (snapshot). Empty when `loadFailed` — check the
@@ -265,7 +280,9 @@ public final class ProjectRegistry {
             // The registry lists every project this machine may act on, with
             // paths and bundle ids; the umask default (`0644`) made it readable
             // by every local account (R5-04). Tightened while it is still the
-            // temp file, so the published name is never world-readable.
+            // temp file, so the name that is *created* is never world-readable —
+            // and the published name is judged again after the rename below,
+            // because a replacement keeps the mode of what it replaced.
             if let defect = StateRoot.isolateFile(at: tmpPath) {
                 throw GPError(
                     code: .internalError,
@@ -306,6 +323,23 @@ public final class ProjectRegistry {
                 code: .internalError,
                 message: "project registry write to \(filePath) failed (\(error)); the file on disk is unchanged and the change was rolled back in memory\(litter)",
                 remedy: "check that the directory is writable and has free space (`ls -ld \(destination.deletingLastPathComponent().path)`, `df -k \(destination.deletingLastPathComponent().path)`), fix it, then repeat the call — until then the registry in the running daemon and the file disagree"
+            )
+        }
+        // The table is on disk and reads back; the last thing that can still be
+        // false is *who can read it*. `replaceItemAt` hands the destination's
+        // attributes to the item that lands (measured on APFS: a 0644
+        // destination stays 0644 when an 0600 temp file replaces it), so a
+        // registry that predates R5-04 — or one first created by the MCP shell,
+        // which uses the default mode — keeps that mode through every rewrite
+        // while the temp file's check reports success. Judged here, on the
+        // published name: the normal volume answers by tightening it, and a
+        // volume that will not is refused out loud instead of silently keeping a
+        // world-readable project list.
+        if let defect = StateRoot.isolateFile(at: filePath) {
+            throw GPError(
+                code: .internalError,
+                message: "the project registry at \(filePath) landed but is not owner-only: \(defect) — every local account can read the project list this daemon acts on, and the write is reported as failed rather than as saved",
+                remedy: "chmod 600 \(filePath) and make its directory owner-only (`ls -ld \(destination.deletingLastPathComponent().path)`); if the volume still ignores chmod (read-only mount, ACL or immutable flag) move the state root with --state-dir to one that honors permissions and restart the background service (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`). Nothing was deleted: the table on disk is the new one, it is simply not private."
             )
         }
     }

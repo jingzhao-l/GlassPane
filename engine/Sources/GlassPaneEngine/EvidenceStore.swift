@@ -130,6 +130,23 @@ public final class EvidenceStore {
     /// operator fixes the permission.
     private var isolatedDirectory: String?
 
+    /// The isolation verdict for one finished pack, as a single named step.
+    ///
+    /// Production always answers with `StateRoot.isolateFile`, and this exists
+    /// only so that the *refusals* in `write` are branches a test can execute:
+    /// the volume condition they refuse (a mount that ignores `chmod` — read-only,
+    /// ACL-enforced, immutable-flagged) cannot be reproduced without root or a
+    /// second filesystem, and every non-root construction that reaches a
+    /// publication leaves a plain `0644` regular file that `chmod(0600)` fixes on
+    /// the spot. `StatePermissionTests` measured that candidate space (directory,
+    /// non-empty directory, `uchg` file, FIFO, dangling symlink, symlink loop,
+    /// symlink to an immutable file, inherited `deny writeattr` ACL) and
+    /// documented the results next to the case; a refusal no test has ever
+    /// reached is the shape R5-04's own review keeps rejecting, so this seam is
+    /// internal and `@testable`-reachable exactly like `isExpired`, which is
+    /// internal for the same reason.
+    var isolationCheck: (String) -> String? = StateRoot.isolateFile(at:)
+
     /// The archive lives where the caller says it lives — there is no default.
     ///
     /// - Parameters:
@@ -231,6 +248,17 @@ public final class EvidenceStore {
     /// Returns whether the write actually landed, so tests can assert on
     /// failure path — a directory that cannot be proven private reports a
     /// measured failure (false) instead of writing readable-by-everyone packs.
+    ///
+    /// Every step that can publish answers to that claim, on the name it
+    /// published: the rename route isolates the temporary file *before* it is
+    /// renamed and judges the published name *after* it lands (a replacement
+    /// keeps the mode of what it replaced — measured, see the comment there), and
+    /// the fallback route isolates the file it wrote and **takes the publication
+    /// back** when isolation fails. The fallback used to log the defect and
+    /// `return true` anyway, which made "cannot be isolated ⇒ refuse the write" a
+    /// claim only the branch that never runs honoured: on a read-only mount, an
+    /// ACL-enforced or immutable-flagged volume, every pack still reached the
+    /// archive world readable and `EngineCore` was told `evidencePersisted: true`.
     @discardableResult
     public func write(_ pack: EvidencePack) -> Bool {
         guard let data = try? pack.jsonData() else { return false }
@@ -243,9 +271,9 @@ public final class EvidenceStore {
             // even briefly — readable by another local account. The archive is
             // the audit trail the panel and `gp_export_evidence` publish, and
             // `Data.write(.atomic)` creates with the process umask (R5-04).
-            if let defect = StateRoot.isolateFile(at: tmpPath) {
+            if let defect = isolationCheck(tmpPath) {
                 log.error("evidence pack \(tmpPath) could not be made owner-only: \(defect) — refusing to publish it into the archive")
-                try? FileManager.default.removeItem(atPath: tmpPath)
+                removeAfterRefusal(tmpPath)
                 return false
             }
             _ = try FileManager.default.replaceItemAt(
@@ -254,22 +282,66 @@ public final class EvidenceStore {
             )
             // Best-effort cleanup if rename succeeded but the tmp lingers.
             try? FileManager.default.removeItem(atPath: tmpPath)
+            // The rename is **not** the end of the isolation question: measured on
+            // APFS, `replaceItemAt` hands the *destination's* attributes to the item
+            // that lands there, so replacing a pack that was ever published 0644 —
+            // an installation that predates R5-04, or one written by the fallback
+            // below — leaves the new pack 0644 while the temporary file's check
+            // reports success. Judging only the temp would therefore claim an
+            // invariant the published archive does not hold, which is the same
+            // failure spoken-and-not-acted shape as the fallback's.
+            if let defect = isolationCheck(filePath) {
+                log.error(isolationRefusalReport(filePath, defect: defect, route: "rename"))
+                removeAfterRefusal(filePath)
+                return false
+            }
             pruneIfNeeded()
             pruneExpiredIfNeeded()
             return true
         } catch {
-            // Fallback: direct write (see ProjectRegistry.save).
+            // Fallback: direct write (see ProjectRegistry.save). Reached when the
+            // temporary name cannot be used at all — which is what a full,
+            // wedged or partially read-only volume looks like from here — so the
+            // pack goes straight to its final name.
             do {
                 try data.write(to: URL(fileURLWithPath: filePath), options: .atomic)
-                if let defect = StateRoot.isolateFile(at: filePath) {
-                    log.error("evidence pack \(filePath) is not owner-only after the fallback write: \(defect)")
-                }
-                pruneIfNeeded()
-                pruneExpiredIfNeeded()
-                return true
             } catch {
                 return false
             }
+            if let defect = isolationCheck(filePath) {
+                log.error(isolationRefusalReport(filePath, defect: defect, route: "fallback"))
+                removeAfterRefusal(filePath)
+                return false
+            }
+            pruneIfNeeded()
+            pruneExpiredIfNeeded()
+            return true
+        }
+    }
+
+    /// The refusal an isolation failure on the published name raises. It names
+    /// itself as a **permission judgment** and not as a disk fault, because the
+    /// bytes did land: a reader who concludes "out of space, retry later" from
+    /// this line walks away from a world-readable audit trail. The verdict the
+    /// caller gets is `false`, which `EngineCore` surfaces as
+    /// `evidencePersisted: false` plus `lastEvidencePersistenceFailure`, so this
+    /// is a failed write and not a missing probe.
+    private func isolationRefusalReport(
+        _ path: String, defect: String, route: String
+    ) -> String {
+        "evidence pack \(path) is not owner-only after the \(route) write: \(defect) — permission judgment, not a full disk: the bytes landed and were then withdrawn from \(directory), which is on a volume that will not isolate a file it is given (read-only mount, ACL or immutable flag). Nothing was left published; re-run after the directory is owner-only writable, or point the run at such a root with --state-dir"
+    }
+
+    /// Undo a publication the isolation verdict refused, and say so out loud
+    /// when the undo itself fails: the write is reported as failed either way,
+    /// but a pack that is still sitting there world-readable is a different
+    /// incident for the operator, and swallowing it is how "refused" becomes
+    /// another word for "published".
+    private func removeAfterRefusal(_ path: String) {
+        do {
+            try FileManager.default.removeItem(atPath: path)
+        } catch {
+            log.error("refused evidence file \(path) could not be removed after the isolation failure (\(error)) — it is still on disk and it is NOT owner-only; delete that one file by name")
         }
     }
 

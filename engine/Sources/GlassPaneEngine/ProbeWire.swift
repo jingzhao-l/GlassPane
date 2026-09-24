@@ -64,8 +64,20 @@ public enum ProbeWire {
     /// Anything else comes back `nil` — "unreported" — rather than a number the
     /// probe never claimed. A frame carrying `"droppedWrites": "many"` must not
     /// become `0`, because `0` is the assertion that nothing was lost.
+    ///
+    /// Booleans need an explicit veto for the same reason: `JSONSerialization`
+    /// answers `NSNumber` for `true`/`false` too, and `as? NSNumber` therefore
+    /// succeeds on them, so `{"droppedWrites": false}` would otherwise decode as
+    /// the measured claim "zero writes lost" — precisely the confusion this
+    /// counter exists to prevent. No Swift type test settles it, in either
+    /// direction: `NSNumber(value: false) is Bool` is true, but so is
+    /// `NSNumber(value: 1) is Bool`, because `NSNumber` bridges to whatever
+    /// scalar the cast asks for. Only the CoreFoundation type ID reports what
+    /// the object actually is (`RecipeLoader.describe` walks into this same
+    /// trap and answers it the same way).
     static func counter(_ value: Any?) -> Int? {
         guard let number = value as? NSNumber else { return nil }
+        guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
         let whole = number.intValue
         return whole >= 0 ? whole : nil
     }
