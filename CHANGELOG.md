@@ -2,6 +2,26 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.1.2] — 2026-09-25
+
+### Fixed — R6 遗留四项收口
+
+承接 1.1.1 的 iterate 复审（r1–r4b），本轮把决策日志里标记"仍开着"的四项逐个落地，
+版本线从 1.1.1 升至 1.1.2。以下每项都配套了能满足"撤销即红"的测试。
+
+- **面板人读面缺席渲染**。`EvidenceTabView` 此前对 `stateDiff/crash/handlerProbe` 缺席直接无卡、
+  `responsiveness` 整块不渲染——"没测到长得像没事"。新增六通道缺席/已测判定的唯一纯函数
+  `PanelChannelFields`，各自渲染中文"不可用"卡而非消失。
+- **probe-status surface 闸形制收紧**。裸 `includes(key)` 会让短键命中无关散文造成假绿；改为
+  反引号 ``` `key` ``` 形制匹配，并核实 description 里 15 个发布键（含 `attachedHasProbe`、
+  `longSession` 两处真漏）全部有包裹。
+- **path-consistency 以语义而非字形判据**。不再匹配 `for…where…hasPrefix(x+"/")` 的字形，
+  改为读 Swift 侧实现断言"子树匹配 + ownability 兜底的存在与可达"，并禁止旧的 `.contains(`
+  等值匹配回来；等价重构不假红。
+- **双采集失败标签归并**。`no capture surface available` 此前落入 `pixel-capture-failed`
+  被当作应用缺陷；现在归并为既有环境边界标签 `pixel-capture-no-onscreen-window`，并同步
+  `.p6_smoke.py` 的不可用标签容忍集注释。
+
 ## [未发布]
 
 ### Fixed — 像素通路修好之后暴露的六条"像测量其实没测"
