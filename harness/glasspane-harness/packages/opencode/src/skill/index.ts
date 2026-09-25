@@ -31,7 +31,11 @@ const SKILL_PATTERN = "**/SKILL.md"
 // actual schemas instead of guesses.
 const CUSTOMIZE_OPENCODE_SKILL_NAME = "customize-opencode"
 const CUSTOMIZE_OPENCODE_SKILL_DESCRIPTION =
-  "Use ONLY when the user is editing or creating opencode's own configuration: opencode.json, opencode.jsonc, files under .opencode/, or files under ~/.config/opencode/. Also use when creating or fixing opencode agents, subagents, skills, plugins, MCP servers, or permission rules. Do not use for the user's own application code, or for any project that is not configuring opencode itself."
+  // [gp] Product: this prompt names the product's own configuration surface
+  // (glasspane-harness.json(c), .glasspane-harness/, ~/.config/glasspane-harness/);
+  // the upstream names stay listed as legacy fallbacks an existing checkout may
+  // still use. The skill id/body stay upstream's on purpose (lineage).
+  "Use ONLY when the user is editing or creating glasspane-harness's own configuration: glasspane-harness.json, glasspane-harness.jsonc, files under .glasspane-harness/, or files under ~/.config/glasspane-harness/ (legacy: opencode.json, opencode.jsonc, .opencode/, ~/.config/opencode/). Also use when creating or fixing glasspane-harness agents, subagents, skills, plugins, MCP servers, or permission rules. Do not use for the user's own application code, or for any project that is not configuring glasspane-harness itself."
 const CUSTOMIZE_OPENCODE_SKILL_BODY = SkillPlugin.CustomizeOpencodeContent
 
 export const Info = Schema.Struct({

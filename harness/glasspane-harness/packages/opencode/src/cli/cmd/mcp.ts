@@ -401,7 +401,14 @@ async function resolveConfigPath(baseDir: string, global = false) {
   ]
 
   if (!global) {
-    candidates.push(path.join(baseDir, ".opencode", "opencode.json"), path.join(baseDir, ".opencode", "opencode.jsonc"))
+    // [gp] Product: the product's project-dir config comes first; the upstream
+    // names stay as legacy fallbacks so an existing project keeps working.
+    candidates.push(
+      path.join(baseDir, ".glasspane-harness", "glasspane-harness.json"),
+      path.join(baseDir, ".glasspane-harness", "glasspane-harness.jsonc"),
+      path.join(baseDir, ".opencode", "opencode.json"),
+      path.join(baseDir, ".opencode", "opencode.jsonc"),
+    )
   }
 
   for (const candidate of candidates) {

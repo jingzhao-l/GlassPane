@@ -4,8 +4,8 @@
   "referenceClone": ".external/opencode",
   "observedAt": "2026-09-25",
   "counts": {
-    "identical": 6539,
-    "edited": 36,
+    "identical": 6538,
+    "edited": 37,
     "added": 45,
     "deleted": 57
   },
@@ -39,6 +39,7 @@
     "packages/opencode/src/plugin/index.ts",
     "packages/opencode/src/server/auth.ts",
     "packages/opencode/src/server/mdns.ts",
+    "packages/opencode/src/skill/index.ts",
     "packages/opencode/src/tool/registry.ts",
     "packages/script/src/index.ts",
     "packages/tui/src/context/editor.ts",
@@ -217,7 +218,7 @@
     {
       "file": "packages/opencode/src/cli/cmd/mcp.ts",
       "upstreamHash": "c2d2ee2f3b73be7a8f043a300c6acd4e8af2802a",
-      "forkHash": "1fa1290e4f861d1aaa1405fdbea3216dc61ac895"
+      "forkHash": "8996963e615b02fd29cb560c6ea0547ea2ecfba7"
     },
     {
       "file": "packages/opencode/src/cli/cmd/pr.ts",
@@ -293,6 +294,11 @@
       "file": "packages/opencode/src/server/mdns.ts",
       "upstreamHash": "0dd673c7b42ef2b6039940a2143578db0e97c9e4",
       "forkHash": "57bcf30385adc51cccb822103dbe5723a1182429"
+    },
+    {
+      "file": "packages/opencode/src/skill/index.ts",
+      "upstreamHash": "5a04ec213994a65dd25098b843efca1fbd1c4e0e",
+      "forkHash": "530ffd23b4802648f376fc2169a6bbf41f963d54"
     },
     {
       "file": "packages/opencode/src/tool/registry.ts",

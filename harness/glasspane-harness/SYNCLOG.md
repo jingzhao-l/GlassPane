@@ -2,6 +2,24 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-09-25 · 私有化批次 C′：项目目录配置面的两处低风险补齐
+
+- `cli/cmd/mcp.ts` 的项目目录配置候选：`.glasspane-harness/glasspane-harness.json(c)` 排前，
+  `.opencode/opencode.json(c)` 保留为遗留候选（与批次 A 的全局配置同名策略一致）。
+- `skill/index.ts` 的 customize 技能提示词：改为教产品自己的配置面（glasspane-harness.json(c)、
+  `.glasspane-harness/`、`~/.config/glasspane-harness/`），上游名以 legacy 形式并列；技能 id 与正文
+  保持上游（血缘）。顺带把血缘计数从 18,652 降到 **18,649**（提示词里三处 opencode 被产品名替掉）。
+- **刻意没做的**（保持 C 批的挂账，理由升级为技术性的）：项目级 `.opencode/` **目录**本身
+  （agents/commands/plugins 的项目内落点，20 处解析点）仍不改名。读完解析链才清楚这不是"加个
+  候选名"那么简单：v1 `ConfigPaths.directories()` 的下游 `config.ts:445` 用
+  `dir.endsWith(".opencode")` 过滤目录，合并方向是 `mergeConfig(result, source)`（后者覆盖前者），
+  v2 `core/config.ts` 另有一套 `up()` + basename 过滤 + `toReversed()` 的并行解析——"两者同层
+  共存时谁赢"必须先有固定点钉死，否则改名的失败模式是**用户的项目配置被静默忽略**，而这正是本线
+  SYNCLOG 反复吃过亏的那类"看起来是进展、实际静默破坏"。现状照实计入血缘基线（18,649），是
+  下一批的开工项而非遗漏。
+- 门禁：tsgo 0 错；固定点 60/60；brand-surface 0 命中（血缘 18,649）；product-surface 86/86；
+  fork-diff 6538/6677、37 edited；面 B 2,279 行 9.31%；E8 复跑全绿。
+
 ## 2026-09-25 · 私有化批次 C：品牌面棘轮 + 三条剩余固定点
 
 - `harness/tools/brand-surface.mjs` + `contracts/brand-surface.json`（首次基线：**0 命中**，
