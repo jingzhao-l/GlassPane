@@ -26,6 +26,7 @@ struct EvidenceTabView: View {
         VStack(spacing: 0) {
             PageTitleView(title: "证据档案", systemImage: "doc.text.magnifyingglass")
             filterBar
+            EvidenceStatsView()
             Divider()
             content
         }

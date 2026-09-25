@@ -19,6 +19,7 @@ struct ConsoleRootView: View {
         case evidence
         case projects
         case approvals
+        case recipes
 
         var id: String { rawValue }
 
@@ -28,6 +29,7 @@ struct ConsoleRootView: View {
             case .evidence: return "证据档案"
             case .projects: return "项目"
             case .approvals: return "审批台账"
+            case .recipes: return "配方"
             }
         }
 
@@ -37,6 +39,7 @@ struct ConsoleRootView: View {
             case .evidence: return "doc.text.magnifyingglass"
             case .projects: return "square.stack.3d.up"
             case .approvals: return "checkmark.seal"
+            case .recipes: return "scroll"
             }
         }
     }
@@ -66,6 +69,7 @@ struct ConsoleRootView: View {
             case .evidence: console.reloadEvidence()
             case .projects: console.reloadProjects()
             case .approvals: console.reloadApprovals()
+            case .recipes: break
             }
         }
     }
@@ -151,6 +155,8 @@ struct ConsoleRootView: View {
         case .approvals:
             let count = console.approvalReport?.records.count ?? 0
             return count == 0 ? nil : "\(count)"
+        case .recipes:
+            return nil
         }
     }
 
@@ -199,6 +205,8 @@ struct ConsoleRootView: View {
             ProjectsTabView()
         case .approvals:
             ApprovalsTabView()
+        case .recipes:
+            RecipesTabView()
         }
     }
 }
