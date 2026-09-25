@@ -172,13 +172,23 @@ def self_test_diagnosis(work):
     return problems
 
 
-def run_case(binary, tag, sock_dir, signum):
-    """起一个 daemon，发 signum，断言它自行干净退出。返回失败原因列表。"""
+def run_case(binary, tag, sock_dir, signum, inherit_ignored=False):
+    """起一个 daemon，发 signum，断言它自行干净退出。返回失败原因列表。
+
+    `inherit_ignored` 是 R6-12：让 daemon 在**继承 SIGINT=SIG_IGN** 的条件下起
+    （POSIX：作业控制把后台异步命令的 SIGINT/SIGQUIT 设为 ignore，子进程继承之）。
+    这正是门禁跑在 `nohup … &` 链条里、而单跑绿门内红的差别——继承来"忽略"的信号
+    不进 pending 队列，`sigwait` 永远收不到，daemon 于是真的杀不掉。没有这一档，
+    这个缺陷只能靠别人碰巧在后台跑门禁才看得见。
+    """
     engine_sock = os.path.join(sock_dir, "engine-%s.sock" % tag)
     probe_sock = os.path.join(sock_dir, "probe-%s.sock" % tag)
+    def pre_spawn():
+        if inherit_ignored and signum == signal.SIGINT:
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
     child = subprocess.Popen(
         [binary, "--socket-path", engine_sock, "--probe-socket-path", probe_sock, "--no-c33"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=pre_spawn,
     )
     failures = []
     if not wait_for_socket(engine_sock):
@@ -236,6 +246,7 @@ def main(argv):
         problems = self_test_diagnosis(sock_dir)
         problems += run_case(binary, "SIGTERM", sock_dir, 15)
         problems += run_case(binary, "SIGINT", sock_dir, 2)
+        problems += run_case(binary, "SIGINT", sock_dir, 2, inherit_ignored=True)
     finally:
         for name in os.listdir(sock_dir):
             try:

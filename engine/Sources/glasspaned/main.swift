@@ -519,6 +519,20 @@ private func blockShutdownSignalsEarly() {
     // connection is torn down cleanly (seen on real devices when a client
     // disconnects mid-operation).
     _ = signal(SIGPIPE, SIG_IGN)
+    // R6-12: an **inherited** SIG_IGN must not make the daemon unkillable. POSIX job
+    // control sets SIGINT (and SIGQUIT) to ignore for background asynchronous
+    // commands, and a child inherits that disposition — so a daemon started from
+    // `nohup … &`, or from any script the same way, came up with SIGINT ignored.
+    // An ignored signal is never queued as pending, which means `sigwait` cannot
+    // receive it: the shutdown thread existed, waited correctly, and simply never
+    // woke. Measured that way — the gate was green standalone and red inside a
+    // background chain, at 0.6 load per core, with the socket files still on disk
+    // (`sigwait 未消费信号`), i.e. this was never a timing or load problem.
+    // Reset to default before blocking so the mask, not the parent shell, decides
+    // how these two are delivered. SIGPIPE stays ignored on purpose above: there
+    // the point is that write() returns EPIPE instead of killing us.
+    _ = signal(SIGINT, SIG_DFL)
+    _ = signal(SIGTERM, SIG_DFL)
     pthread_sigmask(SIG_BLOCK, &shutdownSignalSet, nil)
 }
 
