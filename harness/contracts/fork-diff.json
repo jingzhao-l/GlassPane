@@ -1,0 +1,18 @@
+{
+  "baseTag": "v1.18.32",
+  "forkPath": "harness/glasspane-harness",
+  "referenceClone": ".external/opencode",
+  "observedAt": "2026-09-25",
+  "counts": {
+    "identical": 6632,
+    "edited": 0,
+    "added": 2,
+    "deleted": 0
+  },
+  "edited": [],
+  "added": [
+    "FORK.md",
+    "SYNCLOG.md"
+  ],
+  "deleted": []
+}
