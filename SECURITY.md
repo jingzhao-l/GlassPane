@@ -44,8 +44,10 @@ reports against those are usually judged out of scope.
   agent" from "this change came from a human" — it **reads** the user's input stream; the callback
   forwards each event unchanged, and nothing in the engine posts synthesized events. It is not a channel
   the daemon uses to inject input.
-- Screen Recording: captures the frontmost window's image for pixel comparison. Without that permission
-  this degrades to `pixelDiff: null` plus a verdict of INCONCLUSIVE.
+- Screen Recording: captures the frontmost window's image. Two consumers, one seat — pixel comparison
+  (`pixelDiff`, degrades to `null` plus a verdict of INCONCLUSIVE when the permission is missing) and
+  the explicit visual-review pass-through `gp_capture_view` (see below: it ships an image into the
+  conversation but writes nothing). Both fail closed; neither falls back to a substitute window.
 - Probe channel: listens on `~/.glasspane/probe.sock` and receives handler / state / checkpoint signals
   reported by the SDK inside the process under test.
 
@@ -83,9 +85,10 @@ reports against those are usually judged out of scope.
   ≤1 KiB), the classification verdict and the attribution. **The evidence path persists no raw
   screenshot** — only derived quantities. But `gp_observe` returns full accessibility trees into the
   MCP session, so that part lands in the agent host's context and in the remote model.
-- **`gp_capture_view` is the one path that moves pixels, and it is a pass-through.** It encodes a PNG
-  of the attached window and returns it as MCP image content; the daemon writes no file, and the tool
-  deliberately has **no `path` parameter** — a model-chosen output path would put an arbitrary
+- **`gp_capture_view` is the only path that ships screen pixels anywhere, and it is a pass-through.**
+  It encodes a PNG of the attached window and returns it as MCP image content; the daemon writes no
+  file, and the tool deliberately has **no `path` parameter** — a model-chosen output path would put an
+  arbitrary
   screen-content write into the protocol. What it cannot undo is the exposure: the image enters the
   conversation, so it reaches whatever your model provider retains, exactly like the accessibility
   trees above but with pixels instead of labels. Treat a session that used `gp_capture_view` as

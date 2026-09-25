@@ -340,8 +340,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       "the capture and writes nothing to disk (the result says persisted: false). Use it for what " +
       "measurements cannot judge — visual taste, layout that reads as wrong, content with no " +
       "accessibility tree. For anything assertable, prefer gp_audit_ui / gp_assert_element: a " +
-      "measurement repeats, a visual impression does not. WARNING: the image enters this " +
-      "conversation, so anything your model provider logs will retain whatever was on screen. " +
+      "measurement repeats, a visual impression does not. `scale` is a pixel-density factor applied " +
+      "to the captured image (window size is reported separately in points as pointSize), and the " +
+      "summary states both the requested scale and the appliedScale actually present in the image. " +
+      "WARNING: the image enters this conversation, so anything your model provider logs will " +
+      "retain whatever was on screen. " +
       "Needs the daemon's Screen Recording grant; oversized windows are refused with a suggested " +
       "scale rather than silently downsampled.",
     engineMethod: "capture_view",
@@ -843,19 +846,37 @@ async function captureView(
         isError: true,
       };
     }
+    // "没有落盘"是这条通路对外的主张，所以它必须由引擎**说出来**，不能由壳层在字段
+    // 缺失时补一个 `false`：`?? false` 会把"引擎没回答这个问题"变成"引擎说没有落盘"。
+    if (body.persisted !== false) {
+      return {
+        content: [{ type: "text", text: formatToolError(
+          GP_E_INTERNAL,
+          `capture_view answered without persisted:false (got ${JSON.stringify(body.persisted ?? null)})`,
+          "do not treat this image as unsaved: the engine did not say so. Retry once, then report the frame shape — the pass-through guarantee is a claim about the protocol, not a default the shell may fill in",
+        ) }],
+        isError: true,
+      };
+    }
+    const mimeType = typeof body.mimeType === "string" && body.mimeType.length > 0
+      ? body.mimeType
+      : "image/png";
     const summary = canonicalJson({
-      mimeType: body.mimeType ?? "image/png",
+      mimeType,
       byteCount: body.byteCount,
       pixelWidth: body.pixelWidth,
       pixelHeight: body.pixelHeight,
       scale: body.scale,
+      // 实际应用的倍率与请求值都给出：静默降采样失败时，"appliedScale" 才是
+      // 模型该信的那个数（它决定自己看到的是不是缩过的版本）。
+      appliedScale: body.appliedScale,
       windowId: body.windowId,
       pointSize: body.pointSize,
-      persisted: body.persisted ?? false,
+      persisted: body.persisted,
     });
     return {
       content: [
-        { type: "image", data: png, mimeType: "image/png" },
+        { type: "image", data: png, mimeType },
         { type: "text", text: summary },
       ],
       isError: false,

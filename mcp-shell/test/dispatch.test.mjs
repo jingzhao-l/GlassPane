@@ -337,6 +337,63 @@ test("gp_capture_view rejects a scale that would produce unreadable pixels", asy
   assert.equal(engine.io.sent.length, 0, "越界 scale 不该被转给引擎");
 });
 
+test("gp_capture_view refuses a frame that never said it persisted nothing", async () => {
+  const { server, engine } = makeServer();
+  const promise = server.handleLine(
+    enq({ jsonrpc: "2.0", id: 35, method: "tools/call", params: { name: "gp_capture_view", arguments: {} } }),
+  );
+  await Promise.resolve();
+  // 引擎这次没回答"有没有落盘"。壳层不许替它答 `false`：那会把"没回答"洗成
+  // "保证没存"，而 SECURITY.md 对外说的就是这句话。
+  const { persisted, ...withoutClaim } = {
+    pngBase64: "iVBORw0KGgo=",
+    mimeType: "image/png",
+    byteCount: 12,
+    pixelWidth: 864,
+    pixelHeight: 540,
+    scale: 1,
+    appliedScale: 1,
+    windowId: 12,
+    pointSize: { width: 1440, height: 900 },
+    persisted: false,
+  };
+  engine.io.respond(withoutClaim);
+  const response = await promise;
+  assert.equal(response.result.isError, true, "缺 persisted:false 的帧必须被拒");
+  assert.equal(response.result.content.some((part) => part.type === "image"), false,
+    "既然主张没被确认，就不该把这张图交进会话");
+  assert.ok(response.result.content[0].text.includes("persisted"), response.result.content[0].text);
+});
+
+test("gp_capture_view states the applied scale and trusts the engine's mime type", async () => {
+  const { server, engine } = makeServer();
+  const promise = server.handleLine(
+    enq({ jsonrpc: "2.0", id: 36, method: "tools/call", params: { name: "gp_capture_view", arguments: { scale: 0.6 } } }),
+  );
+  await Promise.resolve();
+  // 请求 0.6、实际只缩到 0.9（降采样失败时就会这样）：两个数都必须出现在摘要里，
+  // 否则模型以为自己在看 0.6 的版本。
+  engine.io.respond({
+    pngBase64: "iVBORw0KGgo=",
+    mimeType: "image/png",
+    byteCount: 12,
+    pixelWidth: 1296,
+    pixelHeight: 810,
+    scale: 0.6,
+    appliedScale: 0.9,
+    windowId: 12,
+    pointSize: { width: 1440, height: 900 },
+    persisted: false,
+  });
+  const response = await promise;
+  assert.equal(response.result.isError, false);
+  const [image, summary] = response.result.content;
+  const stated = JSON.parse(summary.text);
+  assert.equal(stated.scale, 0.6);
+  assert.equal(stated.appliedScale, 0.9, "appliedScale 必须原样转达，不能由请求值代替");
+  assert.equal(image.mimeType, stated.mimeType, "图像部分的 mime 必须与摘要同源，不能一边硬编码");
+});
+
 test("tools/call engine error maps to isError with GP_E prefix", async () => {
   const { server, io } = makeServer();
   const request = enq({
