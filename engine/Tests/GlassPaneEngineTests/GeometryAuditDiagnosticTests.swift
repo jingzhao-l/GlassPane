@@ -56,18 +56,30 @@ final class GeometryAuditDiagnosticTests: XCTestCase {
         // 而不是"这个应用没有可用界面"——两者不能混成一次"通过"。
         XCTAssertGreaterThan(measured, 0, "一次都没读到 position/size，说明几何遍历不可用（不是界面问题）")
         // 真机上"某个子树那一刻没回 AX"是常态（kAXError -25200），所以 unread
-        // 不该被当成失败——但它必须每一条都有原因，并且整体覆盖率达标。
-        // 上一版这里断言的是"unread 必须为 0"，那是把愿望写成了设计。
+        // 不该被当成失败——但它必须每一条都有原因。上一版这里断言的是"unread 必须为 0"，
+        // 那是把愿望写成了设计。
         XCTAssertGreaterThanOrEqual(Double(measured), Double(snapshot.nodes.count) * 0.8,
             "几何覆盖率低于 80%：\(measured)/\(snapshot.nodes.count)")
-        if unread > 0 {
-            let reasons = snapshot.nodes.compactMap { node -> String? in
-                if case let .unread(reason) = node.geometry { return reason }
-                return nil
+        let unreadNodes = snapshot.nodes.filter { if case .unread = $0.geometry { return true }; return false }
+        for node in unreadNodes {
+            if case let .unread(reason) = node.geometry {
+                XCTAssertFalse(reason.isEmpty, "unread 必须带原因（\(node.path)），否则调用方无从判断")
             }
-            XCTAssertEqual(reasons.count, unread)
-            for reason in reasons { XCTAssertFalse(reason.isEmpty, "unread 必须带原因，否则调用方无从判断") }
-            XCTAssertFalse(snapshot.complete, "有未读子树却报 complete=true：结论会盖住没看过的部分")
+        }
+        // 真正的不变式不是"有 unread 就必须 incomplete"——元素级读不到几何（例如
+        // AXValue 不是可解码的形状）会留下 unread 而遍历照常走完，那时 complete=true
+        // 是对的。必须成立的是：**放占位节点的那条路**（子树没答上）一定要把
+        // complete 落下来，否则未走过的部分会被当成看过了。
+        let placeholders = snapshot.nodes.filter { $0.role == AXChannel.unreadSubtreeRole }
+        if !placeholders.isEmpty {
+            XCTAssertFalse(snapshot.complete,
+                "有 \(placeholders.count) 个 unread 占位子树却报 complete=true：结论会盖住没看过的部分")
+        }
+        // 占位节点不得伪装成可交互元素：它一旦进了 interactive 名单，"这个控件点不到"
+        // 就会被报成界面的缺陷而不是我们没读到。
+        for placeholder in placeholders {
+            XCTAssertFalse(UILayoutAudit.isInteractiveRole(placeholder.role),
+                           "占位角色 \(placeholder.role) 不能是可交互角色")
         }
 
         // 视觉通道的真机分支。这里以前只截"前台那个应用"，而真机前台是 Finder——
@@ -76,7 +88,7 @@ final class GeometryAuditDiagnosticTests: XCTestCase {
         // 挑真有在屏窗口的常规应用逐个试，并把席位状态用系统 API 问出来，
         // 让"截到了"成为断言而不是运气。
         let seat = CGPreflightScreenCaptureAccess()
-        let candidates = Self.captureCandidates()
+        let candidates = RealWindowCandidates.largestAppWindows()
         var captureAttempts: [String] = []
         var foreignPng: PngEncoding.Result?
         var capturedWindowId = 0
@@ -109,7 +121,6 @@ final class GeometryAuditDiagnosticTests: XCTestCase {
         if let png = foreignPng {
             try assertRealPng(png, windowId: capturedWindowId)
         }
-
         let result = UILayoutAudit.audit(snapshot)
         print("DIAG AUDIT verdict=\(result.verdict.rawValue) findings=\(result.findings.count) "
             + "coverage=\(String(format: "%.2f", result.coverage.ratio)) truncated=\(result.overlapScanTruncated)")
@@ -122,8 +133,8 @@ final class GeometryAuditDiagnosticTests: XCTestCase {
             print("  - \(finding.rule)/\(finding.severity.rawValue) path=\(finding.elementPath ?? "-") "
                 + "role=\(finding.role ?? "-") title=\(finding.title ?? "-") :: \(finding.detail)")
         }
-        // 覆盖率不足时结论必须跟着变弱；量到了才允许给干净判定。
-        if unread > 0 {
+        // 覆盖率不足/遍历未完成时结论必须跟着变弱；量到了才允许给干净判定。
+        if !snapshot.complete {
             XCTAssertTrue(result.findings.contains { $0.rule == "geometryScanIncomplete" },
                           "遍历不完整却没在结论里说：\(result.findings.map(\.rule))")
         }
@@ -140,18 +151,21 @@ final class GeometryAuditDiagnosticTests: XCTestCase {
         // 这条通路报的也是"没有窗口"，听起来永远合理。
         let pipelined = try captureOwnRedWindow()
         print("DIAG CAPTURE SELF pngBytes=\(pipelined.byteCount) px=\(pipelined.pixelWidth)x\(pipelined.pixelHeight)")
-        try assertRealPng(pipelined, windowId: 0)
+        try assertRealPng(pipelined, windowId: nil)
         let center = try Self.centerPixel(of: pipelined)
         print("DIAG CAPTURE PIXEL r=\(center.red) g=\(center.green) b=\(center.blue)")
-        XCTAssertGreaterThan(center.red, 0.5, "截回来的必须是自己刚画的那个红窗口，实际读到的像素: \(center)")
-        XCTAssertLessThan(center.green, 0.35, "中心像素不是那个红，说明截到的不是这个窗口")
-        XCTAssertLessThan(center.blue, 0.35)
+        XCTAssertGreaterThan(center.red, 0.9, "截回来的必须是自己刚画的那个红窗口，实际读到的像素: \(center)")
+        // 阈值要紧：窗口是纯红（sRGB 1,0,0）。上一版容忍 g<0.35，而它自己记录的实测值
+        // 就是 g=0.15 —— 那不是红，是色彩空间被换过一遍；宽到 0.35 等于"只要不是绿的都算过"。
+        XCTAssertLessThan(center.green, 0.08, "中心像素带绿，说明截到的不是这个窗口：\(center)")
+        XCTAssertLessThan(center.blue, 0.08, "中心像素带蓝，说明截到的不是这个窗口：\(center)")
 
     }
 
     /// 一张"真 PNG"的最低证明：base64 解得回字节、签名对、解得出图像、维度与自报一致、
-    /// 且没有越过帧预算。
-    private func assertRealPng(_ png: PngEncoding.Result, windowId: Int) throws {
+    /// 且没有越过帧预算。`windowId` 只在"这次确实从某个窗口截的"时核对（不是 0 哨兵值，
+    /// 那会让调用点悄悄关掉一条断言）。
+    private func assertRealPng(_ png: PngEncoding.Result, windowId: Int?) throws {
         let bytes = try XCTUnwrap(Data(base64Encoded: png.base64))
         XCTAssertEqual(bytes.count, png.byteCount)
         XCTAssertEqual(Array(bytes.prefix(8)), [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
@@ -162,7 +176,7 @@ final class GeometryAuditDiagnosticTests: XCTestCase {
         XCTAssertGreaterThan(png.pixelWidth, 0)
         XCTAssertLessThanOrEqual(png.byteCount, PngEncoding.defaultMaxBytes,
                                  "真机窗口也必须落在帧预算内，超了就该走拒绝分支")
-        if windowId != 0 { XCTAssertGreaterThan(windowId, 0, "窗口号必须真的存在") }
+        if let windowId { XCTAssertGreaterThan(windowId, 0, "窗口号必须真的存在") }
     }
 
     /// 本进程自己开一个纯红窗口，用**产品同一条通路**截回来。
@@ -178,17 +192,21 @@ final class GeometryAuditDiagnosticTests: XCTestCase {
             styleMask: [.borderless], backing: .buffered, defer: false
         )
         window.isOpaque = true
-        window.backgroundColor = NSColor(calibratedRed: 1, green: 0, blue: 0, alpha: 1)
+        // sRGB 而不是 calibrated RGB：色彩空间转换会把纯红画成 (1, 0.15, 0)，
+        // 那时"中心像素是红的"就退化成一条谁都能过的宽阈值。
+        window.backgroundColor = NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)
         window.hasShadow = false
         window.level = .normal
-        window.orderFrontRegardless()
-        window.display()
-        // 窗口服务器合成需要一点时间，否则截到的是"还没有这张窗口"。
-        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        // 清理登记在窗口出现**之前**：orderFront 之后、采集之前任何一步抛错，
+        // 都会把一张红窗口留在用户屏幕上。
         defer {
             window.orderOut(nil)
             app.setActivationPolicy(previousPolicy)
         }
+        window.orderFrontRegardless()
+        window.display()
+        // 窗口服务器合成需要一点时间，否则截到的是"还没有这张窗口"。
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
 
         let channel = AXChannel()
         _ = try channel.attach(bundleId: nil, pid: getpid())
@@ -216,37 +234,5 @@ final class GeometryAuditDiagnosticTests: XCTestCase {
             Double(pointer[offset + 1]) / 255,
             Double(pointer[offset + 2]) / 255
         )
-    }
-
-    /// 候选＝"CGWindowList 里确实有非零尺寸在屏窗口"的常规应用，按窗口面积从大到小，
-    /// 最多 5 个（真机诊断不该退化成全屏扫描）。刻意排除自己：截代理宿主的窗口
-    /// 证明不了"能截到别人的界面"这件事。
-    private static func captureCandidates() -> [(name: String, pid: pid_t)] {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
-            return []
-        }
-        var best: [pid_t: (name: String, area: Double)] = [:]
-        for window in list {
-            // 用产品自己的键名与层规则：诊断挑出来的候选必须是产品那边也认的窗口，
-            // 否则"候选非空却没一次截成功"会变成一条假红。
-            guard let rawPid = window[AXChannel.windowOwnerPIDKey] as? Int,
-                  AXChannel.isAppWindowLayer(window[AXChannel.windowLayerKey] as? Int),
-                  let bounds = window[AXChannel.windowBoundsKey] as? [String: Any],
-                  let width = bounds["Width"] as? Double,
-                  let height = bounds["Height"] as? Double,
-                  width > 40, height > 40 else { continue }
-            let area = width * height
-            let name = (window["kCGWindowOwnerName"] as? String) ?? "pid \(rawPid)"
-            if (best[pid_t(rawPid)]?.area ?? 0) < area { best[pid_t(rawPid)] = (name, area) }
-        }
-        let mine = getpid()
-        let regular = Set(NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular }
-            .map { $0.processIdentifier })
-        return best
-            .filter { $0.key != mine && regular.contains($0.key) }
-            .sorted { $0.value.area > $1.value.area }
-            .prefix(5)
-            .map { (name: $0.value.name, pid: $0.key) }
     }
 }

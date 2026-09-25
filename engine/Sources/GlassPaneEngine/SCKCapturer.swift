@@ -48,11 +48,24 @@ public enum SCKCapturer {
     /// slow-but-real capture into `pixelCaptureDenied` on healthy machines.
     private static let captureTimeoutSeconds: TimeInterval = 5.0
 
+    /// 一次采集的三个事实：图像、**真正被截的那个窗口**的 id 与 frame。
+    ///
+    /// 为什么身份要由采集方给出：`selectWindowIndex` 在精确 id 不命中时按既有语义
+    /// 回退到"该 pid 最大的在屏窗口"（windowID 会被系统回收复用，回退是必要的）。
+    /// 如果调用方继续拿自己**请求**的 id 去标注这张图，就会出现"报告 12 号窗口、
+    /// 像素其实是 13 号"——前后两次各截一个窗口时，跨窗口的像素差还会被当成一次
+    /// 测量。身份由这里给，调用方比的就是实际截到的那两个窗口。
+    public struct Capture {
+        public let image: CGImage
+        public let windowId: Int
+        public let frame: CGRect
+    }
+
     /// Captures the frontmost on-screen window owned by `pid`, cropped to
     /// its frame. When `windowId` is provided (AX channel resolves it from
     /// `CGWindowList`), the same-pid window is matched exactly; otherwise the
     /// largest on-screen window of `pid` is used.
-    public static func captureWindow(ownerPid pid_t: pid_t, windowId: Int?) throws -> CGImage {
+    public static func captureWindow(ownerPid pid_t: pid_t, windowId: Int?) throws -> Capture {
         guard CGPreflightScreenCaptureAccess() else {
             throw ChannelError.pixelCaptureDenied(
                 reason: "screen recording permission not granted (P1 onboarding: glasspaned --guide-screen-permission)"
@@ -302,12 +315,16 @@ public enum SCKCapturer {
     // MARK: - Path A (macOS 14+, SCScreenshotManager)
 
     @available(macOS 14.0, *)
-    private static func captureViaScreenshotManager(ownerPid pid_t: pid_t, windowId: Int?) throws -> CGImage {
+    private static func captureViaScreenshotManager(ownerPid pid_t: pid_t, windowId: Int?) throws -> Capture {
         let context = try resolveCaptureContext(ownerPid: pid_t, windowId: windowId)
         // Whole-display filter + sourceRect 采样窗口区域，确定性最好；
         // 输出像素 = 窗口逻辑尺寸 × SCContentFilter 倍率（Retina 不降采样）。
         let filter = SCContentFilter(display: context.display, excludingWindows: [])
-        return try snapViaScreenshotManager(contentFilter: filter, windowFrame: context.window.frame)
+        return Capture(
+            image: try snapViaScreenshotManager(contentFilter: filter, windowFrame: context.window.frame),
+            windowId: Int(context.window.windowID),
+            frame: context.window.frame
+        )
     }
 
     @available(macOS 14.0, *)
@@ -341,10 +358,14 @@ public enum SCKCapturer {
     // MARK: - Path B (macOS 13, SCStream first-frame bridge)
 
     @available(macOS 13.0, *)
-    private static func captureViaStream(ownerPid pid_t: pid_t, windowId: Int?) throws -> CGImage {
+    private static func captureViaStream(ownerPid pid_t: pid_t, windowId: Int?) throws -> Capture {
         let context = try resolveCaptureContext(ownerPid: pid_t, windowId: windowId)
         let filter = SCContentFilter(display: context.display, excludingWindows: [])
-        return try snapViaStream(contentFilter: filter, windowFrame: context.window.frame)
+        return Capture(
+            image: try snapViaStream(contentFilter: filter, windowFrame: context.window.frame),
+            windowId: Int(context.window.windowID),
+            frame: context.window.frame
+        )
     }
 
     @available(macOS 13.0, *)

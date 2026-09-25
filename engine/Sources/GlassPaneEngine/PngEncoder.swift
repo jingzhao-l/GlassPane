@@ -19,6 +19,10 @@ public enum PngEncoding {
         public let byteCount: Int
         public let pixelWidth: Int
         public let pixelHeight: Int
+        /// **实际**应用的缩放倍率。与请求值可以不同：`downscaled` 拿不到上下文时
+        /// 会原样返回原图，那时报告请求值就是撒谎——模型会以为自己在看缩略图，
+        /// 而它看的其实是全尺寸（反过来也一样：以为看清了细节，其实被缩过）。
+        public let appliedScale: Double
     }
 
     public enum EncodingError: Error, Equatable {
@@ -79,11 +83,14 @@ public enum PngEncoding {
                 suggestedScale: suggestedScale(byteCount: count, limit: maxBytes)
             )
         }
+        // 实际倍率从"图真的变成了多大"倒推，而不是把请求值抄一遍。
+        let applied = image.width > 0 ? Double(target.width) / Double(image.width) : scale
         return Result(
             base64: sink.base64EncodedString(options: []),
             byteCount: count,
             pixelWidth: target.width,
-            pixelHeight: target.height
+            pixelHeight: target.height,
+            appliedScale: applied
         )
     }
 }

@@ -822,6 +822,18 @@ public final class EngineCore {
                     windowId: before.windowId
                 )
                 pixelChanged = outcome.changedPixelRatio > 0
+            } catch let error as PixelDiffError {
+                // 尺寸不同＝没有共同定义域可比：报"未测量"并说清是哪两个尺寸，
+                // 而不是让差分函数替它编一个 1.0 极值冒充测量结果。
+                pixelDiff = nil
+                pixelChanged = nil
+                switch error {
+                case let .geometryChanged(bw, bh, aw, ah):
+                    pixelDiffFailure = "pixel-capture-window-resized: the two captures have no common "
+                        + "pixel domain (before=\(bw)x\(bh), after=\(aw)x\(ah)); no ratio was measured"
+                case .bitmapUnavailable:
+                    pixelDiffFailure = "pixel-diff-computation-failed: \(error)"
+                }
             } catch {
                 pixelDiff = nil
                 pixelChanged = nil
@@ -1091,6 +1103,12 @@ public final class EngineCore {
     /// GP_E_PAYLOAD_TOO_LARGE 并附建议倍率，而不是悄悄降分辨率——悄悄降会让模型
     /// 以为它看清了，实际看清的是压缩过的版本。
     public func captureView(scale: Double) throws -> [String: Any] {
+        // 没挂接时通道会给一句 pixelCaptureDenied("no app attached to the channel")，
+        // 而像素拒绝的 remedy 默认讲的是屏幕录制席位——于是"你还没调用 gp_attach"
+        // 会被回答成"去系统设置里授权"。和其他需要挂接的方法同一道闸。
+        guard attachedApp != nil else {
+            throw GPError(code: .notAttached, message: "no app attached")
+        }
         let capture: WindowCapture
         do {
             capture = try channel.captureWindow()
@@ -1125,7 +1143,10 @@ public final class EngineCore {
             "pixelWidth": encoded.pixelWidth,
             "pixelHeight": encoded.pixelHeight,
             "windowId": capture.windowId,
+            // 两个都说：`scale` 是请求的，`appliedScale` 是图像**真的**被缩到的。
+            // 只报请求值时，一次静默的降采样失败会让模型以为自己在看 0.6 的版本。
             "scale": scale,
+            "appliedScale": encoded.appliedScale,
             "persisted": false,
             "pointSize": [
                 "width": capture.bounds.width,
@@ -1154,6 +1175,12 @@ public final class EngineCore {
         var payload = object
         payload["latencyMs"] = snapshot.latencyMs
         payload["windowKnown"] = snapshot.window != nil
+        // 遍历没走完必须能被机器读到，而不是只躺在某条 finding 的文字里：
+        // README 对外承诺的就是这两个字段。截断（overlapScanTruncated）早就有
+        // 一等布尔值，不完整却没有——两边不对称，读的人只会以为"没有那条 finding
+        // 就是看全了"。
+        payload["complete"] = snapshot.complete
+        payload["stopReason"] = snapshot.stopReason ?? NSNull()
         return payload
     }
 
@@ -2034,15 +2061,20 @@ public final class EngineCore {
     }
 
     /// Pure half of the above: which named failure a capture reason states.
+    ///
+    /// 顺序是有意的：**具体成因先于席位词**。原因文本里有一大半来自 Apple 的
+    /// `localizedDescription`（SCKCapturer 会把原文附在稳定主语后面），而"denied /
+    /// permission"这种词出现在那里的句子里并不等于"屏幕录制没给"。把席位判断放前面，
+    /// 等于让一句偶然的英文措辞把代理支去系统设置——那条路径比"没测到"更贵。
     static func pixelCaptureFailureLabel(reason: String) -> String {
         let lowered = reason.lowercased()
         if lowered.contains("window-changed") || lowered.contains("window changed") {
             return "pixel-capture-window-changed"
         }
-        if lowered.contains("permission") || lowered.contains("not granted") || lowered.contains("denied") {
-            return "screen-recording-denied"
+        if lowered.contains("window-resized") || lowered.contains("no common pixel domain") {
+            return "pixel-capture-window-resized"
         }
-        if lowered.contains("timed out") {
+        if lowered.contains("timed out") || lowered.contains("timeout") {
             return "pixel-capture-timeout"
         }
         if lowered.contains("no on-screen") || lowered.contains("scwindow") {
@@ -2051,19 +2083,25 @@ public final class EngineCore {
         if lowered.contains("scdisplay") {
             return "pixel-capture-window-outside-display"
         }
+        if lowered.contains("permission") || lowered.contains("not granted") || lowered.contains("denied") {
+            return "screen-recording-denied"
+        }
         return "pixel-capture-failed"
     }
 
-    /// 没有像素时"接下来怎么办"那句话。verify 通路要说 pixelDiff 降级，而
-    /// `capture_view` 根本没有 pixelDiff —— 两处共用同一个映射，只换这一句，
-    /// 是为了让同一个成因不会在两处得到两套指引（R2-06 的教训）。
-    static let pixelDiffDegradation =
-        "Until the capture works pixelDiff stays null and T6 degrades to INCONCLUSIVE (P1 v1.0 §5) — report it as undecidable, never as 'the pixels did not change'"
+    /// 像素失败被**抛成错误**时，调用方自己补一句"这次失败对你那条通路意味着什么"。
+    ///
+    /// 这里刻意不留默认值。以前默认写的是 gp_verify 的话（"pixelDiff 保持 null、T6
+    /// 降级 INCONCLUSIVE"），而全仓唯一会把 `pixelCaptureDenied` 抛出去的调用方是
+    /// `capture_view` — 它根本没有 pixelDiff 可降级；gp_verify 那边捕获失败是被记进
+    /// 证据包与熔断原因的（`pixel-capture-*` 标签 + `Classifier.pixelAbsentNextStep`），
+    /// 从不经过这个映射。于是一句默认文案服务不存在的调用方，还让"两边共用"的注释
+    /// 变成假的。现在没有调用方补话，错误里就没有那句话——不发明任何主张。
     static let captureViewDegradation =
         "gp_capture_view has no fallback: this visual review did not happen, so report it as not-seen — never infer from a missing image that the interface is fine"
 
     /// Maps channel failures onto protocol error codes (P0 spec §3.4).
-    static func map(_ error: ChannelError, degradation: String = EngineCore.pixelDiffDegradation) -> GPError {
+    static func map(_ error: ChannelError, degradation: String? = nil) -> GPError {
         switch error {
         case .axUnavailable(let reason):
             return GPError(code: .axUnavailable, message: reason)
@@ -2124,7 +2162,7 @@ public final class EngineCore {
             return GPError(
                 code: .axUnavailable,
                 message: "window capture unavailable (\(label)): \(reason)",
-                remedy: "\(advice). \(degradation)"
+                remedy: degradation.map { "\(advice). \($0)" } ?? advice
             )
         case .pingTimeout:
             return GPError(code: .actFailed, message: "app unresponsive (AX ping timeout)")

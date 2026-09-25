@@ -3,19 +3,15 @@ import Foundation
 import ScreenCaptureKit
 @testable import GlassPaneEngine
 
-/// P1-A2 真机捕获验证（opt-in）：驱动 SCKCapturer 真实捕获 Finder 窗口，
-/// 断言返回非空 CGImage 且裁剪生效。仅当环境变量 GLASSPANE_SCK_DIAG=1 时
-/// 运行，避免在无屏幕录制权限/无 GUI 会话的 CI 环境破坏全量绿。
+/// P1-A2 真机捕获验证（opt-in）：驱动 `SCKCapturer` 真实截一个**当前确实在屏的
+/// 应用窗口**，断言返回非空 CGImage 且裁剪生效。仅当 GLASSPANE_SCK_DIAG=1 且本
+/// 进程有屏幕录制席位时运行；CI 无 GUI 会话，会干净跳过。
 ///
-/// 历史：2026-09-16 本机真机验证通过——resolveWindow 命中 Finder 最大
-/// 窗口（1440×900 @2x，输出 2880×1800）；隔离实验确认
-/// `SCScreenshotManager` 尊重 `sourceRect` + `width/height`（100×100 配置
-/// 输出恰为 100×100，pointPixelScale=2.0）。daemon 进程的 act 上报
-/// screen-recording-denied 是 TCC 对 daemon 二进制的独立授权缺失，由 P1
-/// onboarding 命令（--guide-screen-permission）覆盖，属预期降级（P1-A4）。
+/// 历史修正：这里原本写死 `finderPID = 706`。pid 每次开机都变，所以 2026-09-16
+/// 那次通过之后它再也没绿过，而失败被当成"daemon 缺屏幕录制席位"记进了 P1 规格
+/// 与 smoke.md 的观察——那条结论混进了一个 CGWindowList 键名错误（见 AXChannel
+/// `frontmostWindow` 的注释），不能由这次诊断复现。现在每次现找目标。
 final class SCKCapturerDiagnosticTests: XCTestCase {
-
-    private let finderPID: pid_t = 706
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -29,16 +25,28 @@ final class SCKCapturerDiagnosticTests: XCTestCase {
         }
     }
 
-    func testRealFinderCaptureReturnsCroppedImage() {
-        let image = try? SCKCapturer.captureWindow(ownerPid: finderPID, windowId: nil)
-        XCTAssertNotNil(image, "真机捕获必须返回图像（定位错误见 failDescription）")
-        if let image {
-            XCTAssertGreaterThan(image.width, 0)
-            XCTAssertGreaterThan(image.height, 0)
-            print("DIAG CAPTURE OK \(image.width)x\(image.height)")
-        } else {
-            XCTFail("DIAG CAPTURE ERR (err desc unavailable)")
+    func testRealAppCaptureReturnsCroppedImage() throws {
+        let candidates = RealWindowCandidates.largestAppWindows()
+        guard let target = candidates.first else {
+            throw XCTSkip("此刻没有任何属于常规应用的在屏窗口可截（候选需要非本进程、应用层窗口）")
         }
+        let capture = try SCKCapturer.captureWindow(ownerPid: target.pid, windowId: target.windowId)
+        print("DIAG SCK CAPTURE OK app=\(target.name) pid=\(target.pid) window=\(capture.windowId) "
+            + "px=\(capture.image.width)x\(capture.image.height) "
+            + "frame=\(Int(target.frame.width))x\(Int(target.frame.height))")
+
+        XCTAssertGreaterThan(capture.image.width, 0)
+        XCTAssertGreaterThan(capture.image.height, 0)
+        // 身份必须是真的那个窗口，不是"请求的那个"：回退到别的窗口时报告也要跟着改，
+        // 否则上层会把两个不同窗口的差值当成一次像素测量。
+        XCTAssertGreaterThan(capture.windowId, 0, "必须报出实际截到的窗口号")
+        XCTAssertEqual(capture.windowId, target.windowId,
+                       "SCK 落到了别的窗口（请求 \(target.windowId)，实得 \(capture.windowId)）")
+        // 裁剪生效：输出宽高比必须跟着窗口走，否则截到的是整屏而不是这块区域。
+        let frameRatio = target.frame.width / target.frame.height
+        let imageRatio = CGFloat(capture.image.width) / CGFloat(capture.image.height)
+        XCTAssertEqual(imageRatio, frameRatio, accuracy: max(0.08, frameRatio * 0.08),
+                       "裁剪区域与窗口形状不符：image=\(imageRatio) frame=\(frameRatio)")
     }
 }
 

@@ -146,4 +146,29 @@ final class ClassifierTests: XCTestCase {
         let (_, report) = Classifier.classify(makePack())
         XCTAssertEqual(report.path, "act.press -> ax-confirm -> tree-digest -> pixel-diff")
     }
+
+    /// 像素通道"未测量"有好几种成因，而下一步各不相同。这里曾经不分成因一律写
+    /// "给 daemon 授予屏幕录制权限再重放"——通路修好之后，换窗/窗口 resize/没有窗口
+    /// 都会走进这条分支，把代理支到系统设置里去，而那里根本没有它要找的东西。
+    func testPixelAbsentNextStepNamesTheActualCause() {
+        func next(for reason: String?) -> String {
+            Classifier.pixelAbsentNextStep(reason: reason)
+        }
+        XCTAssertTrue(next(for: "screen-recording-denied: permission not granted").contains("Screen Recording"),
+                      "确实是席位问题时才提授权")
+        XCTAssertTrue(next(for: "pixel-capture-window-changed: before=12 after=13").contains("frontmost window"),
+                      "换窗要答换窗：\(next(for: "pixel-capture-window-changed: x"))")
+        XCTAssertFalse(next(for: "pixel-capture-window-changed: x").lowercased().contains("grant"),
+                       "换窗不是权限问题")
+        XCTAssertTrue(next(for: "pixel-capture-window-resized: no common pixel domain").contains("size"))
+        XCTAssertTrue(next(for: "pixel-capture-no-onscreen-window: no on-screen SCWindow").contains("unminimise"))
+        XCTAssertFalse(next(for: "pixel-capture-no-onscreen-window: x").lowercased().contains("screen recording to the daemon"))
+        XCTAssertTrue(next(for: "pixel-capture-timeout: SCStream start timed out").contains("redrawing"))
+        XCTAssertTrue(next(for: "pixel-capture-window-outside-display: no SCDisplay").contains("move the window"))
+        // 认不出的成因不许默认成"去授权"——那是把未知读成一个具体指控。
+        let unknown = next(for: "pixel-capture-failed: something else entirely")
+        XCTAssertFalse(unknown.lowercased().contains("grant"), unknown)
+        XCTAssertTrue(unknown.contains("circuitBreaker.reason"), unknown)
+        XCTAssertTrue(next(for: nil).contains("circuitBreaker.reason"), "没有 reason 时同样不许猜")
+    }
 }

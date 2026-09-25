@@ -119,12 +119,28 @@ final class CaptureViewTests: XCTestCase {
         }
     }
 
-    /// 上限与 socket 帧上限的关系必须成立：base64 放大 4/3 后仍要留得下 JSON 信封。
-    func testDefaultBudgetFitsInsideFrameLimit() {
-        let base64Growth = 4.0 / 3.0
-        let worstCase = Double(PngEncoding.defaultMaxBytes) * base64Growth
-        XCTAssertLessThan(worstCase, Double(FrameCodec.maxFrameBytes),
-                          "PNG 预算必须容得下 base64 膨胀与 JSON 信封")
+    /// 上限与 socket 帧上限的关系必须成立，而且**要把信封一起量**：只算
+    /// `defaultMaxBytes × 4/3` 的测试在有人给 payload 加字段、或者把预算抬到 3 MB 时
+    /// 照样是绿的——那是一条只能因"有人改了常数"而红的装饰。这里量的是真实
+    /// `capture_view` 返回体里除 payload 之外的全部字节。
+    func testDefaultBudgetFitsInsideFrameLimit() throws {
+        let channel = ScriptedChannel(fallbackTree: TestTrees.standard)
+        channel.fallbackCapture = try makeImage(width: 8, height: 8)
+        let core = EngineCore(channel: channel, evidenceStore: nil, approvalGate: nil)
+        _ = try core.attach(bundleId: "com.example.app", pid: nil)
+        var envelope = try core.captureView(scale: 1)
+        envelope["pngBase64"] = ""            // 其余键保留真实字段名与形状
+        let envelopeBytes = try JSONSerialization.data(withJSONObject: envelope).count
+        XCTAssertGreaterThan(envelopeBytes, 0)
+
+        // base64 的长度上界：ceil(n/3)*4。
+        let payloadWorst = (PngEncoding.defaultMaxBytes + 2) / 3 * 4
+        let total = payloadWorst + envelopeBytes
+        XCTAssertLessThan(total, FrameCodec.maxFrameBytes,
+            "最坏情况必须留得下帧：payload \(payloadWorst) + 信封 \(envelopeBytes) vs 上限 \(FrameCodec.maxFrameBytes)")
+        // 还要有余量：一次 act 的响应里除了这张图什么都不能带，就不叫"预算"了。
+        XCTAssertLessThan(Double(total), Double(FrameCodec.maxFrameBytes) * 0.9,
+            "总占用超过帧上限的 90% 时，任何额外字段都会把这次调用顶爆：\(total)")
     }
 
     // MARK: - 引擎接线
@@ -163,24 +179,70 @@ final class CaptureViewTests: XCTestCase {
             XCTAssertTrue(error.remedy.contains("did not happen"),
                 "必须给出视觉通道自己的诚实出口：\(error.remedy)")
         }
-        // 对照组：同一次失败在 gp_verify 的映射里仍然要说 pixelDiff，
-        // 否则上面那条"没说"只是因为两边都丢了这句话。
-        let verifyShape = EngineCore.map(ChannelError.pixelCaptureDenied(reason: "permission not granted"))
-        XCTAssertTrue(verifyShape.remedy.contains("pixelDiff"), verifyShape.remedy)
+        // 对照：同一次失败在**没有调用方补话**时两句都不说。旧实现把 gp_verify 那句
+        // 做成默认值，于是每个调用方都被告知"pixelDiff 保持 null、T6 降级"——而全仓
+        // 唯一会把像素拒绝抛成错误的调用方就是 capture_view，它没有 pixelDiff 可降级；
+        // gp_verify 自己走证据包/熔断那条路，从不经过这个 map。
+        let bare = EngineCore.map(ChannelError.pixelCaptureDenied(reason: "permission not granted"))
+        XCTAssertFalse(bare.remedy.contains("pixelDiff"), bare.remedy)
+        XCTAssertFalse(bare.remedy.contains("did not happen"), bare.remedy)
+        XCTAssertTrue(bare.remedy.lowercased().contains("system settings"),
+                      "确实是席位成因时仍要给席位指引：\(bare.remedy)")
     }
 
-    func testDispatcherRejectsScaleOutOfRange() throws {
-        // scale 越界在参数校验层就拒：0.05 的图发给模型是"看起来看过、其实满屏马赛克"。
+    /// `scale` 的合法范围必须在**协议入口**上被拒：以前这条测试把范围字面量抄进
+    /// 测试里调 `ParamValidation`，于是把 `Dispatcher.handleCaptureView` 改成
+    /// `0.01...2.0` 时套件照样全绿——那是一段"名字比实现大"的测试。
+    /// 0.05 的图发给模型是"看起来看过、其实满屏马赛克"。
+    func testDispatcherRejectsScaleOutOfRangeOverTheWire() throws {
         let channel = ScriptedChannel(fallbackTree: TestTrees.standard)
         channel.fallbackCapture = try makeImage(width: 16, height: 16)
-        let core = EngineCore(channel: channel, evidenceStore: nil, approvalGate: nil)
-        _ = try core.attach(bundleId: "com.example.app", pid: nil)
-        do {
-            _ = try ParamValidation.optDouble(["scale": 0.02], "scale", range: 0.1...1.0)
-            XCTFail("越界 scale 必须被拒")
-        } catch let error as GPError {
-            XCTAssertEqual(error.code, .badParams)
+        let dispatcher = Dispatcher(core: EngineCore(channel: channel, settle: {}))
+
+        func call(_ method: String, _ params: String) throws -> [String: Any] {
+            let request = Data("{\"id\":7,\"method\":\"\(method)\",\"params\":\(params)}".utf8)
+            let response = dispatcher.handle(.frame(request))
+            return (try JSONSerialization.jsonObject(with: response) as? [String: Any]) ?? [:]
         }
-        XCTAssertNoThrow(try ParamValidation.optDouble(["scale": 0.5], "scale", range: 0.1...1.0))
+        XCTAssertNotNil(try call("attach", "{\"bundleId\":\"com.example.app\"}")["result"])
+
+        for bad in ["0.02", "0.0", "-1", "1.5", "2"] {
+            let error = try XCTUnwrap(call("capture_view", "{\"scale\":\(bad)}")["error"] as? [String: Any],
+                                      "scale=\(bad) 必须被拒（拿到 result 就是越界生效了）")
+            XCTAssertEqual(error["code"] as? String, "GP_E_BAD_PARAMS", "scale=\(bad)")
+            XCTAssertNotNil(error["remedy"] as? String)
+        }
+        // 界内与缺省都要能过，否则上面的"拒绝"只是因为整条通路坏了。
+        let ok = try XCTUnwrap(call("capture_view", "{\"scale\":0.5}")["result"] as? [String: Any])
+        XCTAssertEqual(ok["appliedScale"] as? Double, 0.5)
+        let defaulted = try XCTUnwrap(call("capture_view", "{}")["result"] as? [String: Any])
+        XCTAssertEqual(defaulted["scale"] as? Double, 1.0)
+        XCTAssertEqual(defaulted["appliedScale"] as? Double, 1.0)
+    }
+
+    /// 没挂接时不许说"去授予屏幕录制权限"：那是把"你还没 gp_attach"支到系统设置里。
+    func testCaptureViewWithoutAttachmentIsNotASeatProblem() throws {
+        let channel = ScriptedChannel(fallbackTree: TestTrees.standard)
+        let core = EngineCore(channel: channel, evidenceStore: nil, approvalGate: nil)
+        XCTAssertThrowsError(try core.captureView(scale: 1)) { error in
+            let gp = try? XCTUnwrap(error as? GPError)
+            XCTAssertEqual(gp?.code, .notAttached)
+            XCTAssertFalse((gp?.remedy ?? "").lowercased().contains("screen recording"),
+                           "未挂接的 remedy 不许提席位：\(gp?.remedy ?? "")")
+        }
+    }
+
+    /// 报出去的倍率必须是**真的应用了的**那个，不是请求值。
+    func testAppliedScaleReportsWhatWasActuallyApplied() throws {
+        let image = try makeImage(width: 200, height: 100)
+        let half = try PngEncoding.encode(image, scale: 0.5)
+        XCTAssertEqual(half.appliedScale, 0.5, accuracy: 0.01)
+        XCTAssertEqual(half.pixelWidth, 100)
+        let same = try PngEncoding.encode(image, scale: 1)
+        XCTAssertEqual(same.appliedScale, 1, accuracy: 1e-9)
+        // 0.999 在 200px 上取整成 200：那时 applied 由实际尺寸倒推，不能写回请求值。
+        let near = try PngEncoding.encode(image, scale: 0.999)
+        XCTAssertEqual(near.appliedScale, Double(near.pixelWidth) / 200, accuracy: 1e-9,
+                       "appliedScale 必须由像素倒推，不是把请求值抄一遍")
     }
 }

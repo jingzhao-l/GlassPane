@@ -114,16 +114,18 @@ public final class AXChannel: RuntimeChannel {
         defer { AXUIElementSetMessagingTimeout(element, Float(Self.messagingTimeoutSeconds)) }
         var nodes: [AxGeometryNode] = []
         var stopReason: String?
+        var aborted = false
         do {
             try walkGeometry(
                 for: element, path: "", depth: 0, maxDepth: maxDepth,
-                deadline: deadline, into: &nodes, stopReason: &stopReason
+                deadline: deadline, into: &nodes, stopReason: &stopReason, aborted: &aborted
             )
         } catch let ChannelError.treeCaptureFailed(reason) {
             // 预算耗尽不再作废整次审计：已经量到的元素照实交回去，没走完的部分由
             // complete=false + stopReason 说明。"要么全有要么报错"会让一次审计在
             // 大界面上什么都拿不到，而部分测量配上诚实的覆盖率本来就是这套规则的语义。
             stopReason = reason
+            aborted = true
         }
         let windowFrame: AxFrame? = attached.flatMap { app in
             frontmostOnScreenWindow(of: app.pid).flatMap { (_, rect) in
@@ -141,6 +143,15 @@ public final class AXChannel: RuntimeChannel {
     /// 必读（审计的输入），而 title **只在可交互角色上读**——"哪个按钮点不到"需要名字，
     /// 一个 AXGroup 的名字对判定没有价值。第一次实现四处全读，在真实应用上 10 秒预算
     /// 直接耗尽、整次审计颗粒无收（真机诊断抓到的，CI 的合成用例看不出来）。
+    ///
+    /// `aborted` 与 `stopReason` 是两件事，分开才有意义：
+    /// - 一次子树没答上（kAXError -25200 这类）＝**这一截**没看到：记一条 unread 占位、
+    ///   把 `stopReason` 落下（于是 `complete=false`，结论不能再声称"整棵树干净"），
+    ///   然后**继续走它的兄弟与后续子树**。真机上这是常态，不是异常。
+    /// - 预算耗尽＝时间已经花完：`aborted=true`，不再发新的 AX 调用。
+    /// 早先这里只有一个 `stopReason`，于是"某子树没答上"会顺着兄弟循环把整次遍历停掉——
+    /// 注释写的是"继续走兄弟节点"，代码做的是反过来的事，而未走过的子树连一个节点都不产生，
+    /// 所以 `coverage` 的分母只包含看过的部分：看过 5% 也能报出 ratio=1.00。
     private func walkGeometry(
         for element: AXUIElement,
         path: String,
@@ -148,7 +159,8 @@ public final class AXChannel: RuntimeChannel {
         maxDepth: Int,
         deadline: CFTimeInterval,
         into nodes: inout [AxGeometryNode],
-        stopReason: inout String?
+        stopReason: inout String?,
+        aborted: inout Bool
     ) throws {
         let label = path.isEmpty ? "0" : path
         let role: String
@@ -158,9 +170,7 @@ public final class AXChannel: RuntimeChannel {
             geometry = try readFrame(of: element, deadline: deadline)
         } catch let error {
             if depth == 0 { throw error }
-            let reason = Self.budgetStopReason(error) ?? Self.errorReason(error)
-            nodes.append(AxGeometryNode(path: label, role: Self.unreadSubtreeRole, geometry: .unread(reason: reason)))
-            if stopReason == nil { stopReason = reason }
+            noteUnreadWalkFailure(error, path: label, into: &nodes, stopReason: &stopReason, aborted: &aborted)
             return
         }
         var title: String?
@@ -176,19 +186,15 @@ public final class AXChannel: RuntimeChannel {
         } catch let error {
             // 根元素读不到 = 什么都没看到，照旧抛；子树读不到 = 这一截没看到，
             // 记一条自述的 unread 占位、标注遍历不完整，然后继续走兄弟节点。
-            // 真机上这是常态（kAXError -25200：应用那一刻没回 AX），不是异常。
             if depth == 0 { throw error }
-            let reason = Self.budgetStopReason(error) ?? Self.errorReason(error)
-            nodes.append(AxGeometryNode(
-                path: "\(label)/unread", role: Self.unreadSubtreeRole,
-                geometry: .unread(reason: reason)
-            ))
-            if stopReason == nil { stopReason = reason }
+            noteUnreadWalkFailure(
+                error, path: "\(label)/unread", into: &nodes, stopReason: &stopReason, aborted: &aborted
+            )
             return
         }
         guard let children else { return }
         for (index, child) in children.enumerated() {
-            guard stopReason == nil else { return }
+            guard !aborted else { return }
             try walkGeometry(
                 for: child,
                 path: label.isEmpty ? "\(index)" : "\(label)/\(index)",
@@ -196,9 +202,38 @@ public final class AXChannel: RuntimeChannel {
                 maxDepth: maxDepth,
                 deadline: deadline,
                 into: &nodes,
-                stopReason: &stopReason
+                stopReason: &stopReason,
+                aborted: &aborted
             )
         }
+    }
+
+    /// 一次遍历内失败的记账：占位节点 + 首个不完整原因，只有预算耗尽才中止整次走查。
+    private func noteUnreadWalkFailure(
+        _ error: any Error,
+        path: String,
+        into nodes: inout [AxGeometryNode],
+        stopReason: inout String?,
+        aborted: inout Bool
+    ) {
+        let outcome = Self.walkFailure(for: error, path: path)
+        nodes.append(outcome.node)
+        if stopReason == nil { stopReason = outcome.reason }
+        if outcome.abortsWalk { aborted = true }
+    }
+
+    /// 纯判据（CI 可测）：**哪一种失败该停下整次走查**。
+    /// 预算耗尽＝时间花完了，别再发新的 AX 调用；一次子树没答上＝只作废这一截，
+    /// 兄弟与后续子树照走——真机上 kAXError -25200 是常态，把它当停机条件等于
+    /// "一个元素不肯答话，整棵树的审计就没做"。
+    static func walkFailure(for error: any Error, path: String) -> (node: AxGeometryNode, reason: String, abortsWalk: Bool) {
+        let budget = budgetStopReason(error)
+        let reason = budget ?? errorReason(error)
+        return (
+            AxGeometryNode(path: path, role: unreadSubtreeRole, geometry: .unread(reason: reason)),
+            reason,
+            budget != nil
+        )
     }
 
     /// 预算耗尽从叶子往上传：记一次原因，之后不再发新的 AX 调用。
@@ -217,7 +252,10 @@ public final class AXChannel: RuntimeChannel {
             return reason
         case .appNotFound: return "the app is gone"
         case .assertTargetNotFound: return "target not found"
-        case .pingTimeout: return "the accessibility ping timed out"
+        // kAXErrorCannotComplete 被归一成 `.pingTimeout`，但它同时也是"这一次读
+        // 应用没在超时里答上"。写成"ping 超时"是在断言一件没发生过的事——
+        // 遍历子树时根本没有发过 ping，而这句话会原样进入审计结论与诊断输出。
+        case .pingTimeout: return "the app did not answer within its AX messaging timeout"
         }
     }
 
@@ -277,17 +315,10 @@ public final class AXChannel: RuntimeChannel {
     }
 
     /// 未知值原样落进 unread 原因里，而不是被 `.answered` 分支的强转崩在运行时。
+    /// 与静态的 `errorReason` 共用一份措辞：两处各写一份，就会有两种"同一个故障
+    /// 各说各话"的原因文本（R2-06 那一类）。
     private func describe(_ error: ChannelError) -> String {
-        switch error {
-        case let .axUnavailable(reason): return reason
-        case let .treeCaptureFailed(reason): return reason
-        case let .actRejected(reason): return reason
-        case let .attributeUnavailable(reason): return reason
-        case let .pixelCaptureDenied(reason): return reason
-        case .appNotFound: return "the app is gone"
-        case .assertTargetNotFound: return "target not found"
-        case .pingTimeout: return "the accessibility ping timed out"
-        }
+        Self.errorReason(error)
     }
 
     public func performAction(selector: Selector, action: Action) throws {
@@ -361,21 +392,27 @@ public final class AXChannel: RuntimeChannel {
         guard let attached else {
             throw ChannelError.pixelCaptureDenied(reason: "no app attached to the channel")
         }
-        guard let (windowId, bounds) = frontmostOnScreenWindow(of: attached.pid) else {
+        guard let (windowId, _) = frontmostOnScreenWindow(of: attached.pid) else {
             throw ChannelError.pixelCaptureDenied(
                 reason: "no on-screen window owned by pid \(attached.pid)"
             )
         }
         // P1: pixel capture migrated from deprecated CGWindowListCreateImage
         // to ScreenCaptureKit (GlassPane_P1_实施规格_v1.0_SCK迁移.md §2).
-        let image = try SCKCapturer.captureWindow(
+        // 身份取**采集实际命中的那个窗口**：请求的 windowID 会被系统回收复用，
+        // SCKCapturer 在这种情况下按 pid 回退到最大在屏窗口。若继续沿用请求值标注，
+        // "报告 12 号窗口 / 像素来自 13 号"就会把跨窗口的差值说成一次测量。
+        let captured = try SCKCapturer.captureWindow(
             ownerPid: attached.pid,
             windowId: windowId
         )
         return WindowCapture(
-            windowId: windowId,
-            bounds: Bounds(x: bounds.minX, y: bounds.minY, width: bounds.width, height: bounds.height),
-            image: image
+            windowId: captured.windowId,
+            bounds: Bounds(
+                x: captured.frame.minX, y: captured.frame.minY,
+                width: captured.frame.width, height: captured.frame.height
+            ),
+            image: captured.image
         )
     }
 
@@ -723,8 +760,9 @@ public final class AXChannel: RuntimeChannel {
     /// 是 `kCGWindowOwnerPID` / `kCGWindowBounds`，于是本函数在任何真机上都返回 nil，
     /// `captureWindow()` 永远抛 "no on-screen window owned by pid N"，`pixelDiff` 自
     /// 2026-09-15 起恒为缺失（分类器如实报"未测量"，所以一路全绿也没人发现）。
-    /// 现在键名直接取 CoreGraphics 的常量，且窗口挑选做成纯函数由单测覆盖——
-    /// 键名再写错要么编译不过，要么测试红，不会再静默失效。
+    /// 现在键名直接取 CoreGraphics 的常量，窗口挑选做成纯函数由单测覆盖；单测的夹具
+    /// **用字面量键名**写（不是引用这里的常量），否则把常量改回 `"PID"` 会连夹具一起
+    /// 变一致、判据测不出来——那正是这类错误活了十天的原因。
     static func frontmostWindow(in windowList: [[String: Any]], for pid: pid_t) -> (Int, CGRect)? {
         for window in windowList {
             guard let ownerPid = window[windowOwnerPIDKey] as? Int, ownerPid == Int(pid) else { continue }
@@ -743,8 +781,12 @@ public final class AXChannel: RuntimeChannel {
     /// 负层是桌面图片、墙纸、程序坞底片、WindowServer 背景（把它们当应用窗口去算像素差，
     /// 等于把壁纸的变化记成"界面变了"——那是假证据）；≥20 是菜单条、程序坞前景、
     /// 通知中心这类系统界面，不属于被测应用。
+    ///
+    /// 缺 layer 字段时**不认**这个窗口：让"读不到"变成"通过"，正是把像素通路弄死
+    /// 十天的那一类错误（键名写错 ⇒ `as? Int` 得到 nil ⇒ 判据静默放行）。
+    /// 宁可报"没有窗口"，也不可截错东西。
     static func isAppWindowLayer(_ layer: Int?) -> Bool {
-        guard let layer else { return true }   // 缺字段时不因此丢掉一次测量
+        guard let layer else { return false }
         return layer >= 0 && layer < systemUILayerFloor
     }
 

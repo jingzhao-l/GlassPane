@@ -5,16 +5,24 @@ import CoreGraphics
 /// 窗口挑选是像素通路的入口：它认错键，`pixelDiff` 就永远是"未测量"。
 /// 这段逻辑在真机上从 2026-09-15 起一直是死的（键名写成 "PID" / "Bounds"），
 /// 而所有测试都是绿的——因为它当时是私有成员、又只在有窗口的会话里才可能被走到。
-/// 现在它是纯函数，样本用**同一组 CoreGraphics 常量**造，所以键名再写错就会红在这里。
+///
+/// 夹具**刻意用字面量键名**，不引用产品的常量：用同一组常量造样本，等于让产品
+/// 自己给自己出题——把 `windowOwnerPIDKey` 改回 `"PID"` 时夹具会跟着一起变，
+/// 除了一条直读常量的断言外全都还是绿的。字面量才是"系统实际发出的那份形状"。
 final class AXWindowLookupTests: XCTestCase {
+
+    private static let ownerKey = "kCGWindowOwnerPID"
+    private static let numberKey = "kCGWindowNumber"
+    private static let boundsKey = "kCGWindowBounds"
+    private static let layerKey = "kCGWindowLayer"
 
     private func entry(pid: Int, number: Int, width: Double, height: Double, layer: Int?) -> [String: Any] {
         var dict: [String: Any] = [
-            AXChannel.windowOwnerPIDKey: pid,
-            AXChannel.windowNumberKey: number,
-            AXChannel.windowBoundsKey: ["X": 0.0, "Y": 0.0, "Width": width, "Height": height],
+            Self.ownerKey: pid,
+            Self.numberKey: number,
+            Self.boundsKey: ["X": 0.0, "Y": 0.0, "Width": width, "Height": height],
         ]
-        if let layer { dict[AXChannel.windowLayerKey] = layer }
+        if let layer { dict[Self.layerKey] = layer }
         return dict
     }
 
@@ -51,11 +59,16 @@ final class AXWindowLookupTests: XCTestCase {
         XCTAssertFalse(AXChannel.isAppWindowLayer(-2147483625), "墙纸/桌面底片不是应用窗口")
         XCTAssertFalse(AXChannel.isAppWindowLayer(20), "程序坞前景不是")
         XCTAssertFalse(AXChannel.isAppWindowLayer(21), "通知中心不是")
-        XCTAssertTrue(AXChannel.isAppWindowLayer(nil), "缺 layer 字段不该让一次测量消失")
+        // 缺 layer 字段＝认不出这个窗口。放行等于让"读不到"变成"通过"——
+        // 那正是把像素通路弄死十天的错误形态（键名写错时 `as? Int` 就是 nil）。
+        XCTAssertFalse(AXChannel.isAppWindowLayer(nil), "读不出层号时必须不认，宁可报『没有窗口』")
 
         let onlyDesktop = [entry(pid: 707, number: 39, width: 1440, height: 900, layer: -2147483603)]
         XCTAssertNil(AXChannel.frontmostWindow(in: onlyDesktop, for: 707),
                      "只有桌面窗口时必须报『没有窗口』，而不是把桌面当窗口截走")
+        let missingLayer = [entry(pid: 500, number: 7, width: 640, height: 480, layer: nil)]
+        XCTAssertNil(AXChannel.frontmostWindow(in: missingLayer, for: 500),
+                     "层号缺失的窗口不许被当成应用窗口截走")
     }
 
     /// 零尺寸窗口不能当命中：它会让后面的真窗口永远轮不到。
@@ -70,10 +83,8 @@ final class AXWindowLookupTests: XCTestCase {
     /// bounds 字段换了形状（不是字典 / 少键）→ nil，而不是崩或猜一个矩形。
     func testMalformedBoundsAreRejectedNotGuessed() {
         let badShape: [[String: Any]] = [
-            [AXChannel.windowOwnerPIDKey: 7, AXChannel.windowNumberKey: 1,
-             AXChannel.windowBoundsKey: "0,0,10,10", AXChannel.windowLayerKey: 0],
-            [AXChannel.windowOwnerPIDKey: 7, AXChannel.windowNumberKey: 2,
-             AXChannel.windowBoundsKey: ["X": 0.0, "Y": 0.0, "Width": 10.0], AXChannel.windowLayerKey: 0],
+            [Self.ownerKey: 7, Self.numberKey: 1, Self.boundsKey: "0,0,10,10", Self.layerKey: 0],
+            [Self.ownerKey: 7, Self.numberKey: 2, Self.boundsKey: ["X": 0.0, "Y": 0.0, "Width": 10.0], Self.layerKey: 0],
         ]
         XCTAssertNil(AXChannel.frontmostWindow(in: badShape, for: 7))
     }

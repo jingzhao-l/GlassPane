@@ -247,14 +247,23 @@ public enum UILayoutAudit {
         }
 
         if !snapshot.nodes.isEmpty, interactive.isEmpty {
+            // "整棵树里没有可交互角色"是一个关于**应用**的断言，只有走完整次遍历才配说。
+            // 遍历不完整时它只能关于"我看到的部分"——否则一条没走过的子树就能让结论
+            // 从"没看到控件"变成"这个应用没有控件"。
             findings.append(LayoutFinding(
                 rule: "noInteractiveElements",
                 severity: .advisory,
                 elementPath: nil,
                 role: nil,
                 title: nil,
-                detail: "整棵树里没有任何可交互角色。可能确实是只读界面；若预期能操作，说明控件没暴露到无障碍层。",
-                measured: ["nodeCount": Double(snapshot.nodes.count)]
+                detail: snapshot.complete
+                    ? "整棵树里没有任何可交互角色。可能确实是只读界面；若预期能操作，说明控件没暴露到无障碍层。"
+                    : "在本次**走过的**部分里没有任何可交互角色（遍历未完成：\(snapshot.stopReason ?? "原因未知")）。"
+                        + "这不是一棵没有控件的树，只是一段没看到控件的走查。",
+                measured: [
+                    "nodeCount": Double(snapshot.nodes.count),
+                    "walkComplete": snapshot.complete ? 1 : 0,
+                ]
             ))
         }
 
