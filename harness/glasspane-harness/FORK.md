@@ -48,7 +48,10 @@ git log v1.18.32..HEAD --oneline --grep '^\[gp\]' # 完整定制提交清单
 ## 已知边界（不粉饰）
 
 - `permission.ask` 在上游是**死钩子**（`v1.18.32` 全树仅一次出现＝声明处，零派发），fork 的权限引导必须走 `event` 收 `permission.asked` + `client.permission.reply`，不能挂它。运行时旁证与"仍缺决定性证据"的边界见 `specs/GlassPane_Harness_Fork_调研与方案_v0.1.md` §5.0/§5.1：要把这条升级成运行时决定性，需要一次真模型轮次（或上游肯加一个测试注入点）。
-- **构建环境要求（别重复踩）**：`bun run build` 先 vite 内嵌 Web UI（首次约 10 分钟，缓存后约 3 分钟），随后 `script/build.ts` 自己再跑一次 `bun add ghostty-web@github:…`。因此构建**必须**把信任锚传给子进程：`export NODE_EXTRA_CA_CERTS=<钥匙串导出的 PEM>`（macOS：`security find-certificate -a -p` 系统根 + `/Library/Keychains/System.keychain`）。只设 `PATH` 不设它，就会在 10 分钟后死在一个 TLS 报错上，看起来像"fork 构建不了"。本机签发 `objects.githubusercontent.com` 的是拦截代理（`CN=SteamTools Certificate`），curl/git 走系统信任库所以看不出来。验过的结果：`BUILD_RC=0`，`dist/opencode-darwin-arm64/bin/opencode` 138 MB，`--version` 返回 `0.0.0-harness/fork-import-<时间戳>`（渠道即分支名，可证是从本树构建）。
+- **构建环境要求（先跑 preflight，别重复踩）**：`bun run build` 先 vite 内嵌 Web UI（首次约 10 分钟，缓存后约 3 分钟），随后 `script/build.ts` 自己再跑一次 `bun add ghostty-web@github:…`。本机对 `objects.githubusercontent.com` 的 TLS 由**拦截代理**签发（`CN=SteamTools Certificate`），macOS 钥匙串信任它，所以 curl/git 都过，而自带 CA 的 bun 正确拒绝。构建因此**必须把信任锚传给子进程**：`export NODE_EXTRA_CA_CERTS=<钥匙串导出的 PEM>`。只设 `PATH` 不设它，就会在 10 分钟后死在一个 TLS 报错上，看起来像"fork 构建不了"。
+  - 检查方式：`sh packages/opencode/script/glasspane-preflight.sh`（先跑，秒级）。它验的是"这份束能不能验证 bun 将看到的那条链"，不是"有没有设变量"。三条路径都实测过：未设 → exit 1 并给可执行 remedy；只给 158 张系统根 → verification FAILED（正是 bun 失败时的配置）；给完整钥匙串束 163 张 → OK（正是构建通过时的配置）。**任何"跳过证书校验"的开关一律不用。**
+  - 不改依赖源的决定：npm 上有 `ghostty-web@0.4.0`，但上游钉的是一个 git commit（`83c0a07b`），换成 npm 版本等于在承诺"分叉可逐字节追溯"的 fork 里塞进一个未验证的依赖漂移。代价写清楚：**干净 CI 环境若没有这张拦截根证书或没有 github 直连，就构建不了这个 fork**——上游 CI 能过只是它环境没这层拦截。将来真要进 CI，先解的是网络与信任，不是悄悄换源。
+  验过的构建结果：`BUILD_RC=0`，`dist/opencode-darwin-arm64/bin/opencode` 138 MB，`--version` 返回 `0.0.0-harness/fork-import-<时间戳>`（渠道即分支名，可证是从本树构建）。
 - **整包构建耗时**：单次 >10 分钟。不要放在 PR CI 里；闸是**按包** `tsgo --noEmit`（上游口径就是 `bun turbo typecheck`）+ `fork-diff`。
 - 上游 v2 插件系统正在并行重写；我们改的是它公开说将来要换的 v1 形状。fork 形态对此反而更耐打（我们能改地板），但 `SYNCLOG.md` 必须如实记下每次同步的代价。
 - `fork-diff` 全树哈希约 2 分钟，**不进 PR CI**（和 142 MB 上游一样重）；它跑在本地/发布前与同步上游时。
