@@ -90,6 +90,21 @@ export const ObserveArgs = z.strictObject({
 });
 export type ObserveArgs = z.infer<typeof ObserveArgs>;
 
+const OptionalHitTargetSchema = z.number().min(1).max(400).optional();
+
+const OptionalScaleSchema = z.number().min(0.1).max(1).optional();
+
+export const CaptureViewArgs = z.strictObject({
+  scale: OptionalScaleSchema,
+});
+export type CaptureViewArgs = z.infer<typeof CaptureViewArgs>;
+
+export const AuditUiArgs = z.strictObject({
+  maxDepth: OptionalDepthSchema,
+  minHitTargetPt: OptionalHitTargetSchema,
+});
+export type AuditUiArgs = z.infer<typeof AuditUiArgs>;
+
 export const ActArgs = z.strictObject({
   selector: SelectorSchema,
   action: ActionSchema,
@@ -179,9 +194,19 @@ export interface ToolExecuteContext {
   turn: TrailTurn;
 }
 
+/**
+ * Content parts a tool may return. `image` exists for exactly one tool:
+ * `gp_capture_view`, whose whole point is handing one window image to the
+ * user's own model. It is a pass-through, not a store — the shell writes
+ * nothing to disk, so "no raw screenshot is persisted anywhere" stays true.
+ */
+export type ToolContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
 /** Tool result shape shared by the default path and custom executors. */
 export interface ToolResult {
-  content: Array<{ type: "text"; text: string }>;
+  content: ToolContent[];
   isError: boolean;
 }
 
@@ -288,6 +313,50 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       required: ["selector", "property", "expected"],
     },
     validate: zodBridge(AssertElementArgs),
+  },
+  {
+    name: "gp_audit_ui",
+    description:
+      "Audit the attached app's layout for operability: element geometry plus deterministic rules " +
+      "report zero-sized or out-of-window controls (blocking), undersized hit targets, clipped " +
+      "elements and frame overlaps (advisory). The verdict distinguishes pass from insufficient: " +
+      "unmeasured geometry never counts as a clean result. Read-only — it records no operation.",
+    engineMethod: "audit_ui",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        maxDepth: { type: "integer", minimum: 1, maximum: 10 },
+        minHitTargetPt: { type: "number", minimum: 1, maximum: 400 },
+      },
+    },
+    validate: zodBridge(AuditUiArgs),
+  },
+  {
+    name: "gp_capture_view",
+    description:
+      "Send the attached app's current window to your model once, as a PNG, for visual review. " +
+      "This is the only tool that moves image pixels, and it is a pass-through: the engine encodes " +
+      "the capture and writes nothing to disk (the result says persisted: false). Use it for what " +
+      "measurements cannot judge — visual taste, layout that reads as wrong, content with no " +
+      "accessibility tree. For anything assertable, prefer gp_audit_ui / gp_assert_element: a " +
+      "measurement repeats, a visual impression does not. `scale` is a pixel-density factor applied " +
+      "to the captured image (window size is reported separately in points as pointSize), and the " +
+      "summary states both the requested scale and the appliedScale actually present in the image. " +
+      "WARNING: the image enters this conversation, so anything your model provider logs will " +
+      "retain whatever was on screen. " +
+      "Needs the daemon's Screen Recording grant; oversized windows are refused with a suggested " +
+      "scale rather than silently downsampled.",
+    engineMethod: "capture_view",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        scale: { type: "number", minimum: 0.1, maximum: 1 },
+      },
+    },
+    validate: zodBridge(CaptureViewArgs),
+    execute: captureView,
   },
   {
     name: "gp_diagnose",
@@ -755,10 +824,81 @@ function packForReport(pack: EvidencePack, measuredSchemaVersion: string): Evide
 }
 
 /**
- * The two evidence-read failure classes, each with the remedy that matches its
- * cause. Shared by the default tool path and the orchestrated audit tools so
- * one defect cannot be reported with the other's remedy.
+ * `gp_capture_view`：把引擎返回的 PNG 作为 MCP image content 交给调用方，并附一段
+ * 文字摘要（尺寸、字节数、缩放、"没有落盘"）。摘要不是装饰：模型只看图时，没人记得
+ * 这张图是被 0.6 缩过的，而"我看清了"和"我看清的是缩过 40% 的版本"是两个结论。
  */
+async function captureView(
+  args: Record<string, unknown>,
+  context: ToolExecuteContext,
+): Promise<ToolResult> {
+  try {
+    const raw = await context.engine.call("capture_view", args);
+    const body = (raw ?? {}) as Record<string, unknown>;
+    const png = body.pngBase64;
+    if (typeof png !== "string" || png.length === 0) {
+      return {
+        content: [{ type: "text", text: formatToolError(
+          GP_E_INTERNAL,
+          "capture_view answered without a pngBase64 payload",
+          "retry once; if it repeats, report this — the engine captured but the shell could not read the image",
+        ) }],
+        isError: true,
+      };
+    }
+    // "没有落盘"是这条通路对外的主张，所以它必须由引擎**说出来**，不能由壳层在字段
+    // 缺失时补一个 `false`：`?? false` 会把"引擎没回答这个问题"变成"引擎说没有落盘"。
+    if (body.persisted !== false) {
+      return {
+        content: [{ type: "text", text: formatToolError(
+          GP_E_INTERNAL,
+          `capture_view answered without persisted:false (got ${JSON.stringify(body.persisted ?? null)})`,
+          "do not treat this image as unsaved: the engine did not say so. Retry once, then report the frame shape — the pass-through guarantee is a claim about the protocol, not a default the shell may fill in",
+        ) }],
+        isError: true,
+      };
+    }
+    const mimeType = typeof body.mimeType === "string" && body.mimeType.length > 0
+      ? body.mimeType
+      : "image/png";
+    const summary = canonicalJson({
+      mimeType,
+      byteCount: body.byteCount,
+      pixelWidth: body.pixelWidth,
+      pixelHeight: body.pixelHeight,
+      scale: body.scale,
+      // 实际应用的倍率与请求值都给出：静默降采样失败时，"appliedScale" 才是
+      // 模型该信的那个数（它决定自己看到的是不是缩过的版本）。
+      appliedScale: body.appliedScale,
+      windowId: body.windowId,
+      pointSize: body.pointSize,
+      persisted: body.persisted,
+    });
+    return {
+      content: [
+        { type: "image", data: png, mimeType },
+        { type: "text", text: summary },
+      ],
+      isError: false,
+    };
+  } catch (error) {
+    if (error instanceof EngineCallError) {
+      return {
+        content: [{ type: "text", text: formatToolErrorShape(error.toBody()) }],
+        isError: true,
+      };
+    }
+    return {
+      content: [{ type: "text", text: formatToolError(
+        GP_E_INTERNAL,
+        `internal shell error: ${String(error)}`,
+        "see the MCP server logs and retry",
+      ) }],
+      isError: true,
+    };
+  }
+}
+
 function mapEvidenceReadError(error: unknown): ToolResult | undefined {
   if (error instanceof EvidenceFrameShapeError) {
     return {

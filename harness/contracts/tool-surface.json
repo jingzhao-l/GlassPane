@@ -8,13 +8,13 @@
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
   "observedAt": "2026-09-25",
-  "engineLoc": 17197,
-  "engineFiles": 51,
+  "engineLoc": 18335,
+  "engineFiles": 54,
   "surfaces": {
     "mcpShell": {
-      "loc": 3719,
+      "loc": 3859,
       "files": 10,
-      "ratio": 0.1733
+      "ratio": 0.1698
     },
     "fork": {
       "loc": 539,
@@ -40,10 +40,10 @@
           "lines": 9
         }
       ],
-      "ratio": 0.0251
+      "ratio": 0.0237
     }
   },
-  "totalToolSurfaceLoc": 4258,
+  "totalToolSurfaceLoc": 4398,
   "note": null,
   "carried": null
 }

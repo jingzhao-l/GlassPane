@@ -68,6 +68,27 @@ enum ParamValidation {
         return intValue
     }
 
+    /// 可选浮点参数。与 `optInt` 同一判据：布尔不当数字收，越界即拒（拒得越早，
+    /// 调用方越不需要猜默认值）。
+    static func optDouble(
+        _ params: [String: Any],
+        _ key: String,
+        range: ClosedRange<Double>? = nil
+    ) throws -> Double? {
+        guard let raw = params[key] else { return nil }
+        guard let number = raw as? NSNumber, !ParamValidation.isBoolean(raw) else {
+            throw GPError(code: .badParams, message: "field '\(key)' must be a number")
+        }
+        let value = number.doubleValue
+        if !value.isFinite {
+            throw GPError(code: .badParams, message: "field '\(key)' must be finite")
+        }
+        if let range, !range.contains(value) {
+            throw GPError(code: .badParams, message: "field '\(key)' must be in \(range)")
+        }
+        return value
+    }
+
     static func optBool(_ params: [String: Any], _ key: String) throws -> Bool? {
         guard let raw = params[key] else { return nil }
         guard ParamValidation.isBoolean(raw), let bool = raw as? Bool else {

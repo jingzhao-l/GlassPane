@@ -1,90 +1,129 @@
-# 贡献指南（Contributing）
+# Contributing
 
-GlassPane 是 macOS 上的 **AI 代理运行时验证引擎**：代理（Claude / Cursor / 任意 MCP 客户端）调用一组
-`gp_*` 工具，每一次界面操作都留下可回放的证据包——操作前后的 AX 树对比、像素对比、归因结论（这次变化
-是不是这次操作造成的）、以及可回到操作前状态的检查点。它的核心资产是**诚实性**：拿不到实测数据就报
-「未验证」，绝不为了让指示灯变绿而撒谎。这条底线适用于代码、测试、文档和 PR 描述。
+**English** · [简体中文](./CONTRIBUTING.zh-CN.md)
 
-## 1. 开发环境
+GlassPane is the **GUI testing and verification layer for AI coding agents on macOS**: an agent calls the
+`gp_*` MCP tools to drive an app, and every operation returns the change it actually caused — the
+accessibility tree before and after, a numeric pixel measurement, an attribution verdict, and a
+checkpoint to roll back to. It exists because agents handle the static half of macOS development
+(build, review, unit tests) but are blind at the runtime half, and the usual fallback of
+"screenshot → vision model → click coordinates" cannot assert, attribute, repeat or undo. The core
+asset is **honesty**: with no measurement the result reads "unverified" — the indicator never goes
+green on a lie. Code, tests, docs and PR text all answer to that.
 
-| 依赖 | 要求 | 为什么需要 |
+## 1. Development environment
+
+| Dependency | Requirement | Why |
 |---|---|---|
-| macOS | 14+ | 捕获走 ScreenCaptureKit 的 macOS 14 形态（`SCScreenshotManager`），权限模型是 14 的 TCC |
-| Node.js | >= 18 | mcp-shell / kernel / installer 全是 Node ESM |
-| Xcode Command Line Tools | `xcode-select --install` | `swift build` / `swift test`，以及桥的 `xcrun lldb` |
-| Python | 3.11 | LLDB 桥测试套件（唯一第三方依赖是 pytest）与 `engine/` 下的冒烟脚本 |
-| git | 任意新版 | 一键安装会自动 clone |
+| macOS | 14+ | capture uses the macOS 14 form of ScreenCaptureKit (`SCScreenshotManager`, availability-guarded in [SCKCapturer.swift](./engine/Sources/GlassPaneEngine/SCKCapturer.swift)); permissions are 14's TCC |
+| Node.js | >= 18 | mcp-shell / kernel / installer are Node ESM (CI runs Node 20) |
+| Xcode CLT | `xcode-select --install` | `swift build` / `swift test`, and the bridge's `xcrun lldb` |
+| Python | 3.11 | the LLDB bridge pytest suite (pytest is its only third-party dep) and the `engine/` smoke scripts |
+| git | any recent version | the installer clones the pinned release tag automatically |
 
-起步（仓库根）：
+Start from the repo root: `npm ci` → `npm run build` → `cd engine && swift build`.
 
-```sh
-npm ci            # 根 workspaces：kernel + mcp-shell + installer
-npm run build     # tsc：kernel → mcp-shell
-cd engine && swift build
+## 2. Repository layout and how each layer is tested
+
+| Path | What it is | Test it locally |
+|---|---|---|
+| [engine/](./engine/) | Swift Package: the `glasspaned` background service (Accessibility / Input Monitoring / Screen Recording; unix socket `~/.glasspane/engine.sock`; launchd job `com.glasspane.daemon`) plus the `glasspane-settings` SwiftUI panel. [engine/scripts/make-app.sh](./engine/scripts/make-app.sh) assembles ad-hoc-signed `.app` bundles that the installer places under `~/Applications`, so the TCC pane shows a named, selectable entry instead of a binary hidden in `.build` | `swift build && swift test` in `engine/` |
+| [engine/probe/](./engine/probe/) | Separate SPM package `GlassPaneProbe`: the in-process Z1–Z4.5 probe SDK for the app under test | `swift test` in `engine/probe/` |
+| [mcp-shell/](./mcp-shell/) | TypeScript MCP stdio server, npm package `glasspane-mcp` | `npm test` in `mcp-shell/`; publish shape also via `npm run bundle` |
+| [installer/](./installer/) | Zero-third-party-dependency Node ESM installer, npm package `glasspane-install` | `npm test --workspace glasspane-install` |
+| [kernel/](./kernel/) | `@iterate/kernel`, private and **not published separately**: JSON Schema truth source [kernel/schemas/](./kernel/schemas/), shared with the author's iterate ecosystem, inlined into the bundle at publish time | `npm test` in `kernel/` |
+| [bridge/](./bridge/) | Python LLDB bridge and pytest suite (the pure-logic core tests without lldb) | `python3 -m pytest -q` in `bridge/` |
+| [spike/](./spike/) | feasibility experiments and measured records | not gated |
+| [specs/](./specs/) | the Chinese implementation and acceptance specs (PRD, P0–P6, 5.6/5.7/5.8 reviews) = **design of record** | a doc change is itself the PR |
+
+## 3. Gates: seven CI lanes, run them locally first
+
+[.github/workflows/ci.yml](./.github/workflows/ci.yml) has seven jobs; CI only repeats what you should already have measured.
+
+| CI job | Runner | What it measures |
+|---|---|---|
+| `swift` | macos-latest | engine build, pure-logic tests (no GUI permission needed), the probe package, and the signal-teardown gate `python3 .signal_smoke.py .build/debug/glasspaned`: SIGTERM/SIGINT must self-exit with code 0 and unlink both socket files |
+| `bridge` | ubuntu-latest, Python 3.11 | queue / truncation / sentinel / argv / socket loopback, lldb-free |
+| `kernel` | ubuntu-latest | C35 roundtrip against fixtures |
+| `mcp-shell` | ubuntu-latest | dispatch + tools + engine client, then the publish-shape guard (`npm run bundle`, `npm pack`, install the tarball in a clean directory, complete an MCP `initialize` handshake); a leaked `file:` dep or a missing schema file surfaces here |
+| `install-gate` | ubuntu-latest | the root layout that ships: installer units, the kernel → mcp-shell build, all workspace tests |
+| `version-line` | ubuntu-latest | every version site against the root manifest |
+| `docs` | ubuntu-latest | public docs health: relative links resolve, in-page and cross-page anchors exist, and each bilingual document has both legs (`node scripts/check-doc-links.mjs`) |
+
+The commands the iterate runtime accepts are the closed list in [iterate.config.yaml](./iterate.config.yaml) → `validation.commands`, matched **verbatim**: extra flags or a different working directory are refused.
+
+```text
+npm run build
+npm test --workspaces --if-present
+node scripts/check-version.mjs
+swift build --package-path engine
+swift test --package-path engine
+swift test --package-path engine/probe
+python3 -m pytest -q bridge
+sh -n install.sh
 ```
 
-## 2. 仓库布局与各层测试
+**The engine lanes need macOS 14+.** On Linux only the TypeScript and Python lanes run, so a Linux checkout cannot establish CI
+parity alone. CI also cannot run any flow needing a logged-in GUI session, a real TCC seat or a real app under test: those are manual
+smoke records in [engine/smoke.md](./engine/smoke.md), run on real hardware (or a self-hosted runner) and filed honestly, failures
+and degraded forms included. "CI is green" is never a substitute for "verified on hardware".
 
-| 路径 | 是什么 | 本地怎么测 |
-|---|---|---|
-| [engine/](engine/) | Swift Package：`glasspaned` 后台服务（辅助功能 / 输入监控 / 屏幕录制，unix socket `~/.glasspane/engine.sock`，launchd 作业 `com.glasspane.daemon`）+ `glasspane-settings` SwiftUI 面板；[engine/scripts/make-app.sh](engine/scripts/make-app.sh) 打 ad-hoc 签名 `.app` 并安置到 `~/Applications`，好让 TCC 面板出现可选中、有名字的条目 | `cd engine && swift build && swift test` |
-| [engine/probe/](engine/probe/) | 独立 SPM 包 GlassPaneProbe：被测进程内的 Z1–Z4.5 探针 SDK | `cd engine/probe && swift test` |
-| [mcp-shell/](mcp-shell/) | TypeScript MCP stdio 服务，npm 包 `glasspane-mcp` | `cd mcp-shell && npm test`；发布形态另跑 `npm run bundle` |
-| [installer/](installer/) | 零第三方依赖的 Node ESM 一键安装器，npm 包 `glasspane-install` | `npm test --workspace glasspane-install` |
-| [kernel/](kernel/) | `@iterate/kernel`，私有且**不单独发布**：JSON Schema 真值源 [kernel/schemas/](kernel/schemas/)，与作者的 iterate 生态共享，发布时由 bundle 内联 | `cd kernel && npm test` |
-| [bridge/](bridge/) | Python LLDB 调试桥与 pytest 套件（纯逻辑核可脱离 lldb 测） | `cd bridge && python3 -m pytest -q` |
-| [spike/](spike/) | 可行性实验与实测留档 | 不入门禁 |
-| [specs/](specs/) | 20 份中文实施规格与验收文档（PRD、P0–P6、5.6/5.7/5.8 项目综述）＝**设计真值** | 文档改动本身就是 PR |
+## 4. Test isolation: never point a test at a real user path
 
-CI 的五条通道见 [.github/workflows/ci.yml](.github/workflows/ci.yml)：swift（build + test + probe +
-信号收尾闸 `python3 .signal_smoke.py .build/debug/glasspaned`）、bridge、kernel、mcp-shell（含
-publish-shape 守卫：bundle + `npm pack` + 干净环境里完成 MCP initialize 握手）、根 workspace
-install-gate。**在提 PR 前把这几条在本地跑绿**，CI 只是同一套东西的重复。
+- Tests inject their own temp locations. **Never construct `ProjectRegistry()` with the default path** — it resolves
+  `~/.glasspane/projects.json`, the developer's own registry. One `swift test` run replaced 71 real registrations with 2 synthetic
+  fixtures, unrecoverable: see the `live()` warning in [ProjectRegistry.swift](./engine/Sources/GlassPaneEngine/ProjectRegistry.swift) and the comment near `engine/Tests/GlassPaneEngineTests/EngineCoreTests.swift:1336`.
+- Pointing `HOME` at a sandbox does not help — the home lookup behind those defaults ignores `HOME`
+  ([StateRoot.swift](./engine/Sources/GlassPaneEngine/StateRoot.swift)). Use an explicit argument: `TestSandbox.directory(…)`, `TestSandbox.projectRegistry(…)`, `TestSandbox.evidenceStore(at:)` from [TestSupport.swift](./engine/Tests/GlassPaneEngineTests/TestSupport.swift).
+- Two gates fail the suite rather than warn: [TestIsolationGateTests.swift](./engine/Tests/GlassPaneEngineTests/TestIsolationGateTests.swift)
+  and [ProjectRegistryIsolationTests.swift](./engine/Tests/GlassPaneEngineTests/ProjectRegistryIsolationTests.swift), the latter
+  forbidding in `Tests/` the calls `ProjectRegistry.live()`, `EvidenceStore.live()`, `ApprovalGate.defaultPath`,
+  `EvidenceStore.defaultDirectory`, `LocalArchive.scanEvidence()`, `LocalArchive.readApprovalLedger()`. Never widen either gate to make a test pass — that reopens the hole.
 
-CI 跑不了的那一半：所有依赖真实 GUI 会话、真实 TCC 席位、真实被测 app 的流程。它们记录在
-[engine/smoke.md](engine/smoke.md)，必须在真机（或自建 runner）上人工执行并如实留档——包括失败与降级
-形态。不要用「CI 绿了」代替「真机验过了」。
+## 5. Version line and releases
 
-## 3. 版本与发布
+- MIT; repository `jingzhao-l/GlassPane`; npm bare names `glasspane-mcp` and `glasspane-install`; the kernel ships in no package of
+  its own.
+- One number serves the whole repo: root workspace, both npm packages, kernel, MCP `serverInfo`, daemon `hello`, the `.app` bundle
+  version, the release tag pinned in [install.sh](./install.sh) and [installer/cli.js](./installer/cli.js), and the lockfiles.
+- `node scripts/set-version.mjs <semver>` is the **only** way to change a version: it rewrites every site listed in
+  [scripts/version-sites.mjs](./scripts/version-sites.mjs) in one pass. Hand-editing a single `package.json` causes drift and `node scripts/check-version.mjs`
+  (job `version-line`) fails on it. Drift is dangerous, not cosmetic: a tag install yields source that differs from the registry
+  package and a version that differs from the panel. Automation: [.github/workflows/release.yml](./.github/workflows/release.yml).
 
-- 协议 MIT；仓库 `jingzhao-l/GlassPane`；npm 裸名 `glasspane-mcp` 与 `glasspane-install`；kernel 不出包。
-- 版本线统一为 `1.1.0`。**改版本只走 `node scripts/set-version.mjs <version>`**，它一次性写全部
-  `package.json` 与真源；手工改单个 `package.json` 会立刻造成版本漂移，这类改动会被打回。
+## 6. Commits and pull requests
 
-## 4. 提交与 PR 约定
+- Conventional Commits prefix with a Chinese body, matching history: `fix: 请求超时定时器不再 unref……`,
+  `ci+release: provenance 发布通道与 publish-shape 守卫……`, `docs: ……`, `install: ……`. Repo docs and commit bodies stay Chinese (`language: zh` in [iterate.config.yaml](./iterate.config.yaml)).
+- **One logical change per commit** — practised here, not a slogan: a test and its implementation may share a `test+fix:` commit;
+  changes spanning lanes get split. Branches `feat/…`, `fix/…`, `docs/…`, `infra/…`; PRs target `main`.
+- Tick the checklist in [.github/pull_request_template.md](./.github/pull_request_template.md) honestly: anything not run stays
+  unticked with "not run + reason". A tick on a line you did not run is a defect.
 
-- Conventional Commits 前缀 + 中文正文，与现有历史一致：`fix: 请求超时定时器不再 unref……`、
-  `ci+release: provenance 发布通道与 publish-shape 守卫……`、`docs: ……`、`test+fix: ……`。
-- **一个逻辑变更一个提交**（这里是真实执行的习惯，不是口号）：测试与实现同属一个逻辑变更时可用
-  `test+fix:`，跨通道的改动拆开提。
-- 分支用 `feat/…`、`fix/…`、`docs/…`、`infra/…`。PR 目标分支是 `main`。
-- PR 模板里的门禁清单照实勾选；没跑过的项写「未跑 + 原因」，不要留勾。
+## 7. specs/ is the design of record
 
-## 5. specs 与代码的关系
+- Behaviour is specified and accepted in `specs/` first; code is one implementation of it. Change **behaviour** (semantics, error
+  codes, degraded forms, permission subject, evidence fields) → update the matching `specs/` document in the same PR; a pure refactor with byte-identical behaviour → say so explicitly in the PR description.
+- Adding or changing a `gp_*` tool means three places stay in sync, and a missing one is an incomplete change:
+  [kernel/schemas/](./kernel/schemas/) (JSON Schema truth), the daemon's method table and classifier in
+  [engine/Sources/GlassPaneEngine/](./engine/Sources/GlassPaneEngine/), and the tool table [mcp-shell/src/tools.ts](./mcp-shell/src/tools.ts).
+- The error-code table (`GPErrorCode` in [ProtocolErrors.swift](./engine/Sources/GlassPaneEngine/ProtocolErrors.swift)) is frozen:
+  fix failure paths under "code unchanged, semantics unchanged, remedy executable" — a remedy is a command an agent can run directly.
 
-`specs/` 是设计真值：功能先在里面被规格化、被验收，代码只是它的一种实现。
+## 8. Verification honesty
 
-- 改变**行为**（语义、错误码、降级形态、权限主体、证据字段）→ 同一个 PR 里更新对应 `specs/` 文档；
-  只做内部重构且行为逐字节不变 → 在 PR 描述里明确写出这一点。
-- 新增或修改任何 `gp_*` 工具 = 三处必须同步，缺一处即视为未完成：
-  1. [kernel/schemas/](kernel/schemas/) —— JSON Schema 真值；
-  2. daemon —— 方法表与分类器 [engine/Sources/GlassPaneEngine/](engine/Sources/GlassPaneEngine/)；
-  3. mcp-shell 工具表 [mcp-shell/src/tools.ts](mcp-shell/src/tools.ts)。
-- 错误码表是冻结的：失败路径的修法遵循「码不动、语义不动、remedy 可执行」——remedy 必须是代理能直接
-  执行的命令，不是一段安慰性散文。
+- Nothing goes green without a measurement: status bits, `attribution.level`, the panel's permission cards, acceptance ticks. Not
+  measured reads `unverified` / `INCONCLUSIVE` / a structured degradation.
+- Do not manufacture a passing gate: skipping assertions, loosening thresholds, or feeding unit tests mocks for what only hardware
+  can prove (debugger attach) is a defect, not a fix. A degraded form is labelled degraded — without Screen Recording, pixelDiff is
+  null and the verdict degrades to INCONCLUSIVE; that is neither a failure nor a success.
+- Permissions are ticked by a human in System Settings, item by item; no program can do it, and the granting subject must be the
+  daemon binary itself — not the terminal, not the settings window. Changes to permission subject or artifact identity need hardware
+  re-verification in [engine/smoke.md](./engine/smoke.md).
 
-## 6. 对贡献者而言的「验证诚实」
+## 9. Communication
 
-- 没有实测就不要让任何指示变绿：状态位、`attribution.level`、面板权限卡、验收项勾选，全部以真实测量为
-  准；拿不到就是 `未验证` / `INCONCLUSIVE` / 结构化降级。
-- 不要伪造通过的门禁：跳过断言、放宽阈值、给单测喂 mock 去做真机才能证的事（例如调试器 attach），都算
-  缺陷而不是解法。降级形态要按降级如实标注（例如缺屏幕录制时 pixelDiff 为 null、判定退化为
-  INCONCLUSIVE），它不是失败，也不是成功。
-- 权限只能由人在系统设置里逐项勾选，程序无法代勾；授权主体必须是 daemon 本身，不是终端、不是设置窗口。
-  涉及权限主体或产物身份的改动，必须真机复验并写进 [engine/smoke.md](engine/smoke.md)。
-
-## 7. 沟通
-
-- 一般问题与功能请求：GitHub issue（模板会问齐这个产品需要的信息）。
-- 安全问题与漏洞：见 [SECURITY.md](SECURITY.md)。**不要**在公开 issue 里贴令牌、日志原文或证据包。
-- 本仓库由 [CODEOWNERS](.github/CODEOWNERS) 指定的单一维护者评审；PR 保持小而聚焦会比大改动更快合入。
+- Questions and feature requests: GitHub issues — the templates in [.github/ISSUE_TEMPLATE/](./.github/ISSUE_TEMPLATE/) ask for what
+  this product needs. Security: [SECURITY.md](./SECURITY.md); do **not** paste tokens, raw logs or evidence packs into public issues.
+- Reviewed by the single maintainer in [.github/CODEOWNERS](./.github/CODEOWNERS); small focused PRs merge faster than large ones.
+  See also [README.md](./README.md) and [CHANGELOG.md](./CHANGELOG.md).

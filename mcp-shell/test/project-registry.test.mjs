@@ -1,9 +1,11 @@
+import { privateSandbox } from './support/sandbox.mjs'
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { AGENT_PATH_PROTECTION } from "../dist/project-registry.js";
 import {
   FORCE_OVERWRITE_ENV,
   PROJECTS_FILE_ENV,
@@ -27,7 +29,8 @@ import { makeEngine } from "./helpers.mjs";
  * ------------------------------------------------------------------ */
 
 function useRegistry() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gp-registry-"));
+  const sandbox = privateSandbox("gp-registry-");
+  const root = sandbox.dir;
   const filePath = path.join(root, "projects.json");
   const previousFile = process.env.GLASSPANE_PROJECTS_FILE;
   const previousForce = process.env[FORCE_OVERWRITE_ENV];
@@ -44,6 +47,7 @@ function useRegistry() {
       if (previousForce === undefined) delete process.env[FORCE_OVERWRITE_ENV];
       else process.env[FORCE_OVERWRITE_ENV] = previousForce;
       fs.rmSync(root, { recursive: true, force: true });
+      sandbox.dispose();
     },
   };
 }
@@ -171,33 +175,52 @@ test("projectSet refuses a symlinked hop into a protected root", () => {
     assert.equal(fs.existsSync(reg.filePath), false);
 
     // A symlink in the middle of the path is caught the same way: the literal
-    // string is under the temp dir, only resolution reaches the system tree.
-    const etcLink = path.join(reg.root, "etc-link");
-    fs.symlinkSync("/private/etc", etcLink, "dir");
-    const hop = path.join(etcLink, "ssh");
-    const nested = expectRegistryError(
-      () => projectSet({ ...baseArgs, evidenceStoragePath: hop }),
-      "GP_E_BAD_PARAMS",
-      "symlinked ancestor into a system tree",
-    );
-    // Two halves of one honest diagnosis: the location that was actually judged
-    // (/private/etc/ssh, not the temp-dir literal), and the reason that survives
-    // any re-picking. The ownership check fires here too — that tree belongs to
-    // uid 0 — but it is the weaker sentence, and printing it instead would blame
-    // the temp directory for a hop the caller can never fix by moving.
+    // string is under the private sandbox, only resolution reaches the system tree.
+    // 目标不再写死 /private/etc：那条只存在于 macOS，Linux runner 上 /etc 才是系统
+    // 配置树（/private/etc 根本不存在，于是断言的是"守卫判了一条不存在的路径"）。
+    // 从守卫自己导出的清单里取本平台真实存在、且自身不是软链的系统树来验，
+    // macOS 得到 /private/etc + /usr，Linux 得到 /etc + /usr —— 覆盖同一分支。
+    const candidates = ["/private/etc", "/etc", "/usr"].filter((p) => {
+      try {
+        return (
+          AGENT_PATH_PROTECTION.subtrees.includes(p) &&
+          fs.existsSync(p) &&
+          !fs.lstatSync(p).isSymbolicLink()
+        )
+      } catch {
+        return false
+      }
+    });
     assert.ok(
-      nested.includes(
-        "resolves to /private/etc/ssh, which is inside the system-owned tree /private/etc",
-      ),
-      `real destination + named-tree reason: ${nested}`,
+      candidates.length > 0,
+      `本平台必须至少有一条可验证的系统树，实际候选: ${candidates.join(", ")}`,
     );
-    assert.equal(
-      nested.includes(`resolves to ${hop}`),
-      false,
-      `the unresolved literal must not be printed as the resolved location: ${nested}`,
-    );
-    assert.ok(nested.includes(`(given: "${hop}")`), "the caller's own string stays visible");
-    assert.equal(fs.existsSync(reg.filePath), false);
+    for (const systemTree of candidates) {
+      const link = path.join(reg.root, `link-${path.basename(systemTree)}`);
+      try { fs.unlinkSync(link) } catch { /* 首次 */ }
+      fs.symlinkSync(systemTree, link, "dir");
+      const hop = path.join(link, "ssh");
+      const nested = expectRegistryError(
+        () => projectSet({ ...baseArgs, evidenceStoragePath: hop }),
+        "GP_E_BAD_PARAMS",
+        `symlinked ancestor into a system tree (${systemTree})`,
+      );
+      const resolved = path.join(fs.realpathSync(systemTree), "ssh");
+      assert.ok(
+        nested.includes(`resolves to ${resolved}, which is inside the system-owned tree`),
+        `the refusal must name the resolved location it judged, not the literal hop: ${nested}`,
+      );
+      assert.equal(
+        nested.includes(`resolves to ${hop}`),
+        false,
+        `未解析的字面量不能冒充解析结果: ${nested}`,
+      );
+      assert.ok(
+        nested.includes(`(given: "${hop}")`),
+        `调用方自己传的串要在拒绝理由里保留可见: ${nested}`,
+      );
+    }
+
   } finally {
     reg.dispose();
   }

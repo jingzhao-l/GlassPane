@@ -194,7 +194,7 @@ public final class EngineCore {
             "version": version,
             "protocolVersion": protocolVersion,
             "pid": Int(ProcessInfo.processInfo.processIdentifier),
-            "capabilities": ["act", "observe", "assert_element", "diagnose", "snapshot", "restore", "probe"]
+            "capabilities": ["act", "observe", "assert_element", "audit_ui", "capture_view", "diagnose", "snapshot", "restore", "probe"]
         ]
         // P1 v1.2 §11.2：带上 daemon 自身的授权主体与四类席位（未注入钩子时
         // 整段省略——面板据此如实显示"未验证"，不以面板进程的权限冒充）。
@@ -799,7 +799,19 @@ public final class EngineCore {
         // X-6: the diff itself can fail after both captures succeeded. That is
         // a third fact, and it used to be reported with the capture's label.
         var pixelDiffFailure: String?
-        if let before = captureBefore, let after = captureAfter {
+        if let before = captureBefore, let after = captureAfter, before.windowId != after.windowId {
+            // 前后两次截的**不是同一个窗口**（应用换窗、新开了一个同尺寸窗口）。
+            // 逐像素比出来的数字仍然在 0...1 之间，看起来完全像一次正常测量，但它说的是
+            // "两个不同窗口的差别"，不是"这次操作改变了界面"——那是伪造的证据。
+            // 这条路径在 2026-09-25 之前从未被走到（窗口查找的键名写错，捕获恒失败），
+            // 现在它真的会跑到，所以这里必须能拒绝。
+            // 标签由 `pixelCaptureFailureLabel` 生成，不自己拼一个：像素通路的成因
+            // 分类只能有一套（R2-06 的教训）。
+            pixelDiff = nil
+            pixelChanged = nil
+            let raw = "the frontmost window changed between captures: before=\(before.windowId) after=\(after.windowId)"
+            pixelDiffFailure = "\(Self.pixelCaptureFailureLabel(reason: raw)): \(raw)"
+        } else if let before = captureBefore, let after = captureAfter {
             do {
                 let outcome = try PixelDiffer.diff(before: before.image, after: after.image)
                 pixelDiff = PixelDiffSignal(
@@ -810,6 +822,18 @@ public final class EngineCore {
                     windowId: before.windowId
                 )
                 pixelChanged = outcome.changedPixelRatio > 0
+            } catch let error as PixelDiffError {
+                // 尺寸不同＝没有共同定义域可比：报"未测量"并说清是哪两个尺寸，
+                // 而不是让差分函数替它编一个 1.0 极值冒充测量结果。
+                pixelDiff = nil
+                pixelChanged = nil
+                switch error {
+                case let .geometryChanged(bw, bh, aw, ah):
+                    pixelDiffFailure = "pixel-capture-window-resized: the two captures have no common "
+                        + "pixel domain (before=\(bw)x\(bh), after=\(aw)x\(ah)); no ratio was measured"
+                case .bitmapUnavailable:
+                    pixelDiffFailure = "pixel-diff-computation-failed: \(error)"
+                }
             } catch {
                 pixelDiff = nil
                 pixelChanged = nil
@@ -1066,6 +1090,98 @@ public final class EngineCore {
         result["contaminationMonitored"] = contaminationMonitored
         result["contaminationBasis"] = contaminationBasis
         return result
+    }
+
+    /// 一次性视觉审查通道：把当前窗口编成 PNG 交给**调用方的**模型看一眼。
+    ///
+    /// 引擎自己**不落盘**——这套工具对外的主张是"证据里只有测量数字，没有原始截图"，
+    /// 而视觉审查要的只是"给模型看一眼"，不是"把画面存下来"。因此这里刻意没有
+    /// `path` 之类的落盘参数：那会把一个由模型输出驱动的任意文件写入口放进协议里。
+    /// 要留档由调用方自己从会话里存。
+    ///
+    /// 尺寸受 socket 帧上限约束（见 PngEncoding.defaultMaxBytes）；超限报
+    /// GP_E_PAYLOAD_TOO_LARGE 并附建议倍率，而不是悄悄降分辨率——悄悄降会让模型
+    /// 以为它看清了，实际看清的是压缩过的版本。
+    public func captureView(scale: Double) throws -> [String: Any] {
+        // 没挂接时通道会给一句 pixelCaptureDenied("no app attached to the channel")，
+        // 而像素拒绝的 remedy 默认讲的是屏幕录制席位——于是"你还没调用 gp_attach"
+        // 会被回答成"去系统设置里授权"。和其他需要挂接的方法同一道闸。
+        guard attachedApp != nil else {
+            throw GPError(code: .notAttached, message: "no app attached")
+        }
+        let capture: WindowCapture
+        do {
+            capture = try channel.captureWindow()
+        } catch let error as ChannelError {
+            // 这句话必须换成视觉通道自己的：这里没有 pixelDiff 可降级，
+            // 让代理以为"像素测量还在，只是没了"是另一种假装看过。
+            throw Self.map(error, degradation: Self.captureViewDegradation)
+        }
+        let encoded: PngEncoding.Result
+        do {
+            encoded = try PngEncoding.encode(capture.image, scale: scale)
+        } catch let error as PngEncoding.EncodingError {
+            switch error {
+            case let .tooLarge(byteCount, limit, suggested):
+                throw GPError(
+                    code: .payloadTooLarge,
+                    message: "the PNG came out at \(byteCount) bytes, over the \(limit)-byte frame budget",
+                    remedy: "retry with scale: \(suggested) (smaller windows or lower scale keep the image legible to a vision model without breaking the frame limit)"
+                )
+            case .encoderUnavailable:
+                throw GPError(
+                    code: .internalError,
+                    message: "ImageIO could not produce a PNG destination",
+                    remedy: "report this: the capture existed but the encoder refused it"
+                )
+            }
+        }
+        return [
+            "pngBase64": encoded.base64,
+            "mimeType": "image/png",
+            "byteCount": encoded.byteCount,
+            "pixelWidth": encoded.pixelWidth,
+            "pixelHeight": encoded.pixelHeight,
+            "windowId": capture.windowId,
+            // 两个都说：`scale` 是请求的，`appliedScale` 是图像**真的**被缩到的。
+            // 只报请求值时，一次静默的降采样失败会让模型以为自己在看 0.6 的版本。
+            "scale": scale,
+            "appliedScale": encoded.appliedScale,
+            "persisted": false,
+            "pointSize": [
+                "width": capture.bounds.width,
+                "height": capture.bounds.height,
+            ],
+        ]
+    }
+
+    /// 界面可操作性审计：一次几何遍历 + `UILayoutAudit` 的确定性规则。
+    /// 返回值刻意带 `coverage`：没量到的比例越大，结论越弱；量不到就没有"通过"。
+    public func auditUI(maxDepth: Int, minHitTargetPt: Double?) throws -> [String: Any] {
+        let snapshot: AxGeometrySnapshot
+        do {
+            snapshot = try channel.geometrySnapshot(maxDepth: maxDepth)
+        } catch let error as ChannelError {
+            throw EngineCore.map(error)
+        }
+        let result = UILayoutAudit.audit(
+            snapshot,
+            minHitTargetPt: minHitTargetPt ?? UILayoutAudit.defaultMinHitTargetPt
+        )
+        let data = try JSONEncoder().encode(result)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw GPError(code: .internalError, message: "the layout audit did not serialize to an object")
+        }
+        var payload = object
+        payload["latencyMs"] = snapshot.latencyMs
+        payload["windowKnown"] = snapshot.window != nil
+        // 遍历没走完必须能被机器读到，而不是只躺在某条 finding 的文字里：
+        // README 对外承诺的就是这两个字段。截断（overlapScanTruncated）早就有
+        // 一等布尔值，不完整却没有——两边不对称，读的人只会以为"没有那条 finding
+        // 就是看全了"。
+        payload["complete"] = snapshot.complete
+        payload["stopReason"] = snapshot.stopReason ?? NSNull()
+        return payload
     }
 
     public func observe(maxDepth: Int, role: String?) throws -> [String: Any] {
@@ -1945,12 +2061,20 @@ public final class EngineCore {
     }
 
     /// Pure half of the above: which named failure a capture reason states.
+    ///
+    /// 顺序是有意的：**具体成因先于席位词**。原因文本里有一大半来自 Apple 的
+    /// `localizedDescription`（SCKCapturer 会把原文附在稳定主语后面），而"denied /
+    /// permission"这种词出现在那里的句子里并不等于"屏幕录制没给"。把席位判断放前面，
+    /// 等于让一句偶然的英文措辞把代理支去系统设置——那条路径比"没测到"更贵。
     static func pixelCaptureFailureLabel(reason: String) -> String {
         let lowered = reason.lowercased()
-        if lowered.contains("permission") || lowered.contains("not granted") || lowered.contains("denied") {
-            return "screen-recording-denied"
+        if lowered.contains("window-changed") || lowered.contains("window changed") {
+            return "pixel-capture-window-changed"
         }
-        if lowered.contains("timed out") {
+        if lowered.contains("window-resized") || lowered.contains("no common pixel domain") {
+            return "pixel-capture-window-resized"
+        }
+        if lowered.contains("timed out") || lowered.contains("timeout") {
             return "pixel-capture-timeout"
         }
         if lowered.contains("no on-screen") || lowered.contains("scwindow") {
@@ -1959,11 +2083,25 @@ public final class EngineCore {
         if lowered.contains("scdisplay") {
             return "pixel-capture-window-outside-display"
         }
+        if lowered.contains("permission") || lowered.contains("not granted") || lowered.contains("denied") {
+            return "screen-recording-denied"
+        }
         return "pixel-capture-failed"
     }
 
+    /// 像素失败被**抛成错误**时，调用方自己补一句"这次失败对你那条通路意味着什么"。
+    ///
+    /// 这里刻意不留默认值。以前默认写的是 gp_verify 的话（"pixelDiff 保持 null、T6
+    /// 降级 INCONCLUSIVE"），而全仓唯一会把 `pixelCaptureDenied` 抛出去的调用方是
+    /// `capture_view` — 它根本没有 pixelDiff 可降级；gp_verify 那边捕获失败是被记进
+    /// 证据包与熔断原因的（`pixel-capture-*` 标签 + `Classifier.pixelAbsentNextStep`），
+    /// 从不经过这个映射。于是一句默认文案服务不存在的调用方，还让"两边共用"的注释
+    /// 变成假的。现在没有调用方补话，错误里就没有那句话——不发明任何主张。
+    static let captureViewDegradation =
+        "gp_capture_view has no fallback: this visual review did not happen, so report it as not-seen — never infer from a missing image that the interface is fine"
+
     /// Maps channel failures onto protocol error codes (P0 spec §3.4).
-    static func map(_ error: ChannelError) -> GPError {
+    static func map(_ error: ChannelError, degradation: String? = nil) -> GPError {
         switch error {
         case .axUnavailable(let reason):
             return GPError(code: .axUnavailable, message: reason)
@@ -2024,7 +2162,7 @@ public final class EngineCore {
             return GPError(
                 code: .axUnavailable,
                 message: "window capture unavailable (\(label)): \(reason)",
-                remedy: "\(advice). Until the capture works pixelDiff stays null and T6 degrades to INCONCLUSIVE (P1 v1.0 §5) — report it as undecidable, never as 'the pixels did not change'"
+                remedy: degradation.map { "\(advice). \($0)" } ?? advice
             )
         case .pingTimeout:
             return GPError(code: .actFailed, message: "app unresponsive (AX ping timeout)")

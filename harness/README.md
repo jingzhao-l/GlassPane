@@ -15,6 +15,11 @@ mkdir -p .external && cd .external
 git clone --branch v1.18.32 --depth 1 https://github.com/anomalyco/opencode.git opencode
 ```
 
+并行 worktree **不要各存一份**（221 MB 起）。当前布局是主工作树放真克隆、每个 worktree 里
+`.external/opencode` 做成指回它的符号链接——`upstream.json.checkout` 与 `fork.referenceClone`
+都按仓根解析，链接对它俩透明（本 worktree 的 `--check`/`--record`/`fork-diff` 全部实测照跑）。
+链接是机器级的、`.external/` 本身 gitignore，所以这套安排不进版本控制，新环境照上面命令自建。
+
 ## 目录
 
 | 路径 | 作用 |
@@ -27,7 +32,7 @@ git clone --branch v1.18.32 --depth 1 https://github.com/anomalyco/opencode.git 
 | `tools/tool-surface.mjs` | 工具面占比棘轮：engine 与两个工具面的 LOC 比例，只挡"没被记录的增长" |
 | `contracts/hook-liveness.json` | 金样：20 声明 → 14 live / 5 structural / **1 dead（`permission.ask`）** |
 | `contracts/fork-diff.json` | 金样：声明过的分叉面（当前 `6631 identical / 1 edited / 5 added / 0 deleted`） |
-| `contracts/tool-surface.json` | 基线：engine 17,197 / A 3,719（17.33%）/ B 539（2.51%） |
+| `contracts/tool-surface.json` | 基线（2026-09-25 合流后复算）：engine 18,335 / A 3,859（16.98%）/ B 539（2.37%） |
 | `spike/` | E1/E2/E5/E6 的运行时探针与离线 mock 模型（`run.sh` 一键；结论见调研方案 §5.0） |
 
 金样一律由 `--record` 生成，**不要手改**。
@@ -67,3 +72,5 @@ node harness/tools/tool-surface.mjs --record    # 有意长厚后重新记基线
 一条如实挂账的分工：**CI 没有参照克隆，那里能核的只有"我们这一侧"**——`fork-diff --check` 无克隆时比对金样钉着的 fork 侧哈希与 added 文件是否还在（改内容照样红，实测 1 秒，所以它进了 `install-gate`）；`tool-surface` 在离线时把 vendored 文件的**行数**降级为上次记录并打印 `NOT re-measured`，不假绿。**上游字节的复测（6,632 个哈希 + 参照 `ls-files`，约 2 分钟、要背 223 MB 克隆）只在本地/发布前与同步上游时跑**，那是 `SYNCLOG.md` 每次必须留痕的原因。这个分工是设计而不是妥协：把 223 MB 参照塞进 PR CI 的结局是被人关掉守卫。
 
 上游侧那条真检测（新 release → `--probe` → 漂移即冻结）在 `.github/workflows/harness-contract.yml`：每周一次 + 手动可触发，手动输入的 tag 先钳成 `vMAJOR.MINOR.PATCH` 形状、事件数据只经环境变量下发。**这个机制今天在全球范围内都还没有先例**（iterate 侧只有文档承诺），所以它是这条线最先要立住的东西，而不是 fork 代码本身。
+
+还有一条属于"闸的闸"：`scripts/check-workflows.mjs`（挂在 `docs` job 里）检查工作流文件里没有重名 job 键、且每条 `run:` 引用的仓内脚本真的存在（按各 step 的 `working-directory` 解析）。它的来历就是本仓真出过的事故——一次跨 base 的 ci.yml 搬移让 `git merge` 把 `docs:` job 复制成两份，而我最初用 YAML 解析器数 job 数（映射重名键后覆盖前）**看不出任何问题**。看不见不等于不存在，所以这条检查现在机器做，六条负例见 `harness/glasspane-harness/SYNCLOG.md`。

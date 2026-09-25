@@ -65,6 +65,10 @@ public final class Dispatcher {
             return try handleSnapshot(request.params)
         case .restore:
             return try handleRestore(request.params)
+        case .captureView:
+            return try handleCaptureView(request.params)
+        case .auditUI:
+            return try handleAuditUI(request.params)
         case .probeStatus:
             return core.probeStatus()
         case .shutdown:
@@ -105,6 +109,29 @@ public final class Dispatcher {
         ) ?? EngineCore.defaultObserveDepth
         let role = try ParamValidation.optString(params, "role", maxLength: ParamValidation.selectorMaxLength)
         return try core.observe(maxDepth: maxDepth, role: role)
+    }
+
+    /// `audit_ui`：只读几何遍历 + 确定性规则。不产生操作、不写证据包，
+    /// 所以它不进 act 的因果链——它是"这个界面能不能用"的一次测量。
+    private func handleAuditUI(_ params: [String: Any]) throws -> [String: Any] {
+        let maxDepth = try ParamValidation.optInt(
+            params,
+            "maxDepth",
+            range: ParamValidation.observeMaxDepthLower...ParamValidation.observeMaxDepthUpper
+        ) ?? EngineCore.defaultObserveDepth
+        let minHitTargetPt = try ParamValidation.optDouble(
+            params,
+            "minHitTargetPt",
+            range: 1...400
+        )
+        return try core.auditUI(maxDepth: maxDepth, minHitTargetPt: minHitTargetPt)
+    }
+
+    /// `capture_view`：scale 越界直接拒（0.1 以下等于发给模型一堆马赛克，
+    /// 却仍然会被当成"我看过了"）。
+    private func handleCaptureView(_ params: [String: Any]) throws -> [String: Any] {
+        let scale = try ParamValidation.optDouble(params, "scale", range: 0.1...1.0) ?? 1.0
+        return try core.captureView(scale: scale)
     }
 
     private func handleAssert(_ params: [String: Any]) throws -> [String: Any] {

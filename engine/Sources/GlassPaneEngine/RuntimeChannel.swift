@@ -93,6 +93,11 @@ public protocol RuntimeChannel: AnyObject {
     /// Returns the ping round-trip in milliseconds; throws .pingTimeout.
     func ping() throws -> Double
     func treeSnapshot(maxDepth: Int) throws -> AxTreeSnapshot
+    /// 几何遍历：与 `treeSnapshot` 同一次深度受限的走查，但只带位置/尺寸。
+    /// 刻意与树分开，因为几何绝不能进 `TreeDigest`（见 AXGeometry.swift）。
+    /// 协议成员而非默认实现：新的 channel 形态必须正面回答"能不能读几何"，
+    /// 不能靠继承一个"返回空"的默认值把能力假裝存在。
+    func geometrySnapshot(maxDepth: Int) throws -> AxGeometrySnapshot
     func performAction(selector: Selector, action: Action) throws
     func readProperty(selector: Selector, property: AssertionProperty) throws -> StringOrBool
     func isProcessAlive() -> Bool

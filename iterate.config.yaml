@@ -113,6 +113,8 @@ validation:
       - "python3 -m pytest -q bridge"
     shell:
       - "sh -n install.sh"
+    docs:
+      - "node scripts/check-doc-links.mjs"
 
 # 交付时必须成立的不变量（/iterate defensive 收尾由 `iterate invariant` 执行）
 invariants:

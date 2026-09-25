@@ -114,9 +114,15 @@ public enum Classifier {
             guard let pixelDiff = pack.signals.pixelDiff else {
                 // P0 spec §9: with the pixel signal unavailable, a changed
                 // tree cannot be separated into T6 vs NO_ANOMALY.
+                //
+                // 但"下一步"必须对上**真的那个原因**。这里曾经不分成因一律说
+                // "给 daemon 授予屏幕录制权限再重放"——而自 2026-09-25 起像素通路
+                // 会因换窗、窗口缩放、没有窗口、超时等好几种原因给出未测量，
+                // 那些都不是席位问题（circuitBreaker.reason 几行之前就把成因写清了，
+                // 读它是免费的）。
                 return outcome(.inconclusive, path: path, evidence: evidenceSummary,
                     anomaly: "AX tree changed but the pixel signal is unavailable (circuitBreaker level \(pack.circuitBreaker.level.rawValue)); T6 is undecidable without screen capture",
-                    next: "grant screen recording permission to the daemon and replay the act for a decidable T6/NO_ANOMALY verdict")
+                    next: Self.pixelAbsentNextStep(reason: pack.circuitBreaker.reason))
             }
             if pixelDiff.changedPixelRatio > 0 {
                 if pack.assertion?.passed == false {
@@ -148,6 +154,33 @@ public enum Classifier {
     }
 
     // MARK: - Internals
+
+    /// 像素通道没有给出测量时，按 `circuitBreaker.reason` 里已成文的**成因标签**
+    /// 给下一步。判据只认自己写下过的标签（`EngineCore.pixelCaptureFailureLabel`
+    /// 的取值集合），认不出就回到"读 reason 原文"，绝不默认成"去授予屏幕录制权限"——
+    /// 那不是最省事的路径，那是一条可能把代理指开的假路径。
+    static func pixelAbsentNextStep(reason: String?) -> String {
+        let text = (reason ?? "").lowercased()
+        if text.contains("screen-recording-denied") {
+            return "grant Screen Recording to the daemon (System Settings > Privacy & Security > Screen Recording), restart it, and replay the act for a decidable T6/NO_ANOMALY verdict"
+        }
+        if text.contains("pixel-capture-window-changed") {
+            return "the frontmost window differed between the two captures, so no pixel ratio exists for this operation: replay it against a window that stays frontmost (the AX-side verdict stands on its own), and report the pixel channel as not measured"
+        }
+        if text.contains("pixel-capture-window-resized") {
+            return "the window changed size during the operation, so the two captures share no pixel domain: replay and compare against the AX tree, or snapshot a baseline (gp_snapshot) before the act"
+        }
+        if text.contains("pixel-capture-no-onscreen-window") {
+            return "the target owned no on-screen window at capture time — unminimise or reopen it (or attach to the pid that owns it) and replay; the Screen Recording seat is not the cause here"
+        }
+        if text.contains("pixel-capture-timeout") {
+            return "the capture query ran out of its time budget: let the app stop redrawing and replay once; if it repeats, report T6 as undecidable rather than re-granting the seat"
+        }
+        if text.contains("pixel-capture-window-outside-display") {
+            return "the window frame intersected no display, so the capture area was off every screen: move the window back on screen and replay"
+        }
+        return "the pixel channel produced no measurement; read circuitBreaker.reason for the cause before choosing a fix, and report T6 as undecidable rather than assuming the seat is missing"
+    }
 
     /// 像素通道的如实措辞：没有捕获值时不能写成"像素没变"。
     /// 归类判定保持保守不变（nil 走 false 分支），改的只是**说出来的那句话**

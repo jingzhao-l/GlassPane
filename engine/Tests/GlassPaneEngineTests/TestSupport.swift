@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 import CoreGraphics
 @testable import GlassPaneEngine
 
@@ -26,7 +27,11 @@ final class ScriptedChannel: RuntimeChannel {
     var fallbackTree: AxTreeSnapshot
     var actionError: ChannelError?
     var propertyResult: Result<StringOrBool, ChannelError> = .success(.bool(true))
+    var geometryResults: [Result<AxGeometrySnapshot, ChannelError>] = []
+    var fallbackGeometry = AxGeometrySnapshot(nodes: [], window: nil, latencyMs: 0)
     var captureResults: [Result<CGImage, ChannelError>] = []
+    /// 与 `captureResults` 一一对应的窗口号（空＝都用 12）。
+    var captureWindowIds: [Int] = []
     var fallbackCapture: CGImage?
 
     private(set) var attachCallCount = 0
@@ -35,6 +40,7 @@ final class ScriptedChannel: RuntimeChannel {
     private(set) var actionCallCount = 0
     private(set) var propertyCallCount = 0
     private(set) var captureCallCount = 0
+    private(set) var geometryCallCount = 0
 
     init(
         app: AttachedApp = AttachedApp(
@@ -84,6 +90,12 @@ final class ScriptedChannel: RuntimeChannel {
         return alive
     }
 
+    func geometrySnapshot(maxDepth: Int) throws -> AxGeometrySnapshot {
+        geometryCallCount += 1
+        if geometryResults.isEmpty { return fallbackGeometry }
+        return try geometryResults.removeFirst().get()
+    }
+
     func captureWindow() throws -> WindowCapture {
         captureCallCount += 1
         var image: CGImage
@@ -94,8 +106,11 @@ final class ScriptedChannel: RuntimeChannel {
         } else {
             throw ChannelError.pixelCaptureDenied(reason: "no capture scripted")
         }
+        // 窗口号可逐次编排：真机上"操作把前台窗口换掉了"是完全正常的事，
+        // 而固定窗口号会让"两次截的不是同一个窗口"这条判据永远跑不到。
+        let windowId = captureWindowIds.isEmpty ? 12 : captureWindowIds.removeFirst()
         return WindowCapture(
-            windowId: 12,
+            windowId: windowId,
             bounds: Bounds(x: 0, y: 0, width: 32, height: 32),
             image: image
         )
@@ -311,6 +326,48 @@ enum TestSandbox {
     /// A filesystem-safe fragment of a test label.
     private static func token(_ label: String) -> String {
         String(label.filter { $0.isLetter || $0.isNumber }.prefix(12)).lowercased()
+    }
+}
+
+// MARK: - Real-device window candidates (opt-in diagnostics only)
+
+/// 真机诊断的公共前置：找出"此刻确实有一个属于某应用的在屏窗口"的进程。
+/// 判据必须与产品同源（`AXChannel.isAppWindowLayer` + 同一组键名），否则诊断
+/// 挑出来的候选产品那边根本截不到，"候选非空却没截成功"就成了假红。
+///
+/// 以前 SCK 诊断写死了 `finderPID = 706`：pid 每次开机都变，2026-09-16 那次通过
+/// 之后它再也没绿过，而失败被记成"daemon 缺屏幕录制席位"（specs P1 §注 3、
+/// smoke.md 观察 3 都抄了这条）。所以这里每次现找，且只返回真正可截的窗口。
+enum RealWindowCandidates {
+
+    struct Hit {
+        let name: String
+        let pid: pid_t
+        let windowId: Int
+        let frame: CGRect
+    }
+
+    /// 按窗口面积从大到小，最多 `limit` 个；排除自己（截代理宿主证明不了能截到别人的界面）。
+    static func largestAppWindows(limit: Int = 5) -> [Hit] {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
+            return []
+        }
+        let mine = getpid()
+        let regular = Set(NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .map { $0.processIdentifier })
+        var hits: [Hit] = []
+        for window in list {
+            guard let rawPid = window[AXChannel.windowOwnerPIDKey] as? Int, rawPid != Int(mine) else { continue }
+            guard regular.contains(pid_t(rawPid)) else { continue }
+            guard let found = AXChannel.frontmostWindow(in: [window], for: pid_t(rawPid)) else { continue }
+            let name = (window["kCGWindowOwnerName"] as? String) ?? "pid \(rawPid)"
+            hits.append(Hit(name: name, pid: pid_t(rawPid), windowId: found.0, frame: found.1))
+        }
+        return hits
+            .sorted { ($0.frame.width * $0.frame.height) > ($1.frame.width * $1.frame.height) }
+            .prefix(limit)
+            .map { $0 }
     }
 }
 

@@ -144,6 +144,12 @@ jobs:
           node-version: 20
       - name: Check links, anchors and bilingual pairing across public docs
         run: node scripts/check-doc-links.mjs
+      # 工作流自身的体检：jobs 里不能有重名键（YAML 映射重名＝后一个静默覆盖前一个，
+      # 守卫会在没人察觉的情况下消失），且每条 run 引用的仓内脚本必须真的存在。
+      # 这两件事都是 2026-09-25 本仓真出过的事故：一次跨 base 的 ci.yml 搬住在合并时
+      # 把 docs job 复制成两份，同一次搬移还引用了当时不存在的 check-doc-links.mjs。
+      - name: Workflow self-check (duplicate job keys, missing scripts)
+        run: node scripts/check-workflows.mjs
 
   # 版本线守卫：根 workspace / 两个 npm 包 / kernel / MCP 自报 / daemon 自报 /
   # .app bundle / install.sh 钉的 tag / lockfile 必须是同一个数字。漂移的后果不是

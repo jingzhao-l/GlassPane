@@ -33,7 +33,7 @@ final class EngineCoreTests: XCTestCase {
         XCTAssertNotNil(result["pid"] as? Int)
         XCTAssertEqual(
             result["capabilities"] as? [String],
-            ["act", "observe", "assert_element", "diagnose", "snapshot", "restore", "probe"]
+            ["act", "observe", "assert_element", "audit_ui", "capture_view", "diagnose", "snapshot", "restore", "probe"]
         )
     }
 
@@ -778,13 +778,109 @@ final class EngineCoreWaveThreeMappingTests: XCTestCase {
         // An unknown reason stays unknown instead of being guessed as the seat.
         XCTAssertEqual(EngineCore.pixelCaptureFailureLabel(reason: "stream stopped"), "pixel-capture-failed")
 
+        // 顺序判据：成因文本里一大半是 Apple 的措辞，席位词必须**排最后**。
+        // 一句 "capture denied: no on-screen window" 该答"没有窗口"，而不是把用户支去系统设置。
+        XCTAssertEqual(
+            EngineCore.pixelCaptureFailureLabel(reason: "SCScreenshotManager capture failed: denied (no on-screen SCWindow)"),
+            "pixel-capture-no-onscreen-window"
+        )
+        XCTAssertEqual(
+            EngineCore.pixelCaptureFailureLabel(reason: "capture failed: the window changed between captures"),
+            "pixel-capture-window-changed"
+        )
+        XCTAssertEqual(
+            EngineCore.pixelCaptureFailureLabel(
+                reason: "pixel-capture-window-resized: no common pixel domain (before=640x400, after=320x400)"
+            ),
+            "pixel-capture-window-resized"
+        )
+        // 只有席位词时才允许答席位——这条负例保证上面的排序没有把真信号也吃掉。
+        XCTAssertEqual(
+            EngineCore.pixelCaptureFailureLabel(reason: "screen recording permission not granted"),
+            "screen-recording-denied"
+        )
+
         let permission = EngineCore.map(.pixelCaptureDenied(reason: "screen recording permission not granted"))
         XCTAssertTrue(permission.remedy.contains("System Settings > Privacy & Security > Screen Recording"))
         let noWindow = EngineCore.map(.pixelCaptureDenied(reason: "no on-screen SCWindow owned by pid 42"))
         XCTAssertTrue(noWindow.message.contains("pixel-capture-no-onscreen-window"), noWindow.message)
         XCTAssertTrue(noWindow.remedy.contains("unminimise"), noWindow.remedy)
         XCTAssertFalse(noWindow.remedy.hasPrefix("grant Screen Recording"), "the seat is not the cause here")
-        XCTAssertTrue(noWindow.remedy.contains("INCONCLUSIVE"), "the degradation statement holds in every branch")
+        // 没有调用方补话，错误里就不许出现"某条通路会降级"的主张：那句话只对
+        // **有** pixelDiff 的通路成立，而它曾经是默认值，替所有调用方说了这句话。
+        XCTAssertFalse(noWindow.remedy.contains("pixelDiff"), noWindow.remedy)
+        let withClause = EngineCore.map(
+            .pixelCaptureDenied(reason: "no on-screen SCWindow owned by pid 42"),
+            degradation: "SENTENCE-FOR-THIS-CALLER-ONLY"
+        )
+        XCTAssertTrue(withClause.remedy.hasSuffix("SENTENCE-FOR-THIS-CALLER-ONLY"), withClause.remedy)
+    }
+
+    /// 窗口查找的键名写错那半年里，像素通路**永远**是"未测量"，所以这条判据从没被走到过：
+    /// 前后两次截的不是同一个窗口时，跨窗口比出来的 0.x 不是"这次操作改变了界面"，
+    /// 而是两个不同界面的差别——那会是一条看起来完全可信的假证据。
+    func testWindowSwitchBetweenCapturesYieldsNoPixelClaim() throws {
+        let channel = makeChannel()
+        let core = EngineCore(channel: channel, settle: {})
+        _ = try core.attach(bundleId: "com.example.app", pid: nil)
+        channel.treeResults = [.success(TestTrees.standard), .success(TestTrees.buttonRetitled)]
+        channel.captureResults = [
+            .success(TestImages.solid(100)),
+            .success(TestImages.quadrantChanged(base: 100, delta: 120)),
+        ]
+        channel.captureWindowIds = [12, 13]
+        let result = try core.act(selector: submitSelector, action: .press)
+        XCTAssertNil(result["pixelChanged"] as? Bool, "跨窗口的差值不能当成一次像素测量")
+        let pack = try core.lastEvidence(operationId: nil)
+        XCTAssertNil(pack.signals.pixelDiff)
+        let reason = try XCTUnwrap(pack.circuitBreaker.reason)
+        XCTAssertTrue(reason.contains("pixel-capture-window-changed"), reason)
+        XCTAssertFalse(reason.contains("screen-recording-denied"), "换窗不是席位问题：\(reason)")
+        XCTAssertEqual(pack.circuitBreaker.level, .degraded)
+
+        // 对照组：同一次脚本、同样的两帧，只把窗口号改成一致，就必须给出数字。
+        // 没有这条对照，上面的"没有测量"可能只是因为像素通路整个坏了。
+        let control = makeChannel()
+        let controlCore = EngineCore(channel: control, settle: {})
+        _ = try controlCore.attach(bundleId: "com.example.app", pid: nil)
+        control.treeResults = [.success(TestTrees.standard), .success(TestTrees.buttonRetitled)]
+        control.captureResults = [
+            .success(TestImages.solid(100)),
+            .success(TestImages.quadrantChanged(base: 100, delta: 120)),
+        ]
+        control.captureWindowIds = [12, 12]
+        let controlResult = try controlCore.act(selector: submitSelector, action: .press)
+        XCTAssertEqual(controlResult["pixelChanged"] as? Bool, true)
+        let controlPack = try controlCore.lastEvidence(operationId: nil)
+        XCTAssertEqual(controlPack.signals.pixelDiff?.windowId, 12)
+        XCTAssertEqual(controlPack.signals.pixelDiff?.changedPixelRatio ?? 0, 0.25, accuracy: 1e-9)
+    }
+
+    /// 同一个窗口、操作中间被 resize：两次截图没有共同的像素定义域，旧实现会返回
+    /// `changedPixelRatio = 1`（"整屏都变了"）——一个看着像测量的极值。窗口确实变了，
+    /// 但"100% 的像素变了"没人测过，所以这里必须是未测量 + 说清成因。
+    func testResizedWindowDuringActIsNotMeasuredRatherThanFullyChanged() throws {
+        let channel = makeChannel()
+        let core = EngineCore(channel: channel, settle: {})
+        _ = try core.attach(bundleId: "com.example.app", pid: nil)
+        channel.treeResults = [.success(TestTrees.standard), .success(TestTrees.buttonRetitled)]
+        channel.captureResults = [
+            .success(TestImages.solid(100, width: 32, height: 32)),
+            .success(TestImages.solid(100, width: 16, height: 32)),
+        ]
+        channel.captureWindowIds = [12, 12]
+        let result = try core.act(selector: submitSelector, action: .press)
+        XCTAssertNil(result["pixelChanged"] as? Bool, "resize 不等于一次『像素全变了』的测量")
+        let pack = try core.lastEvidence(operationId: nil)
+        XCTAssertNil(pack.signals.pixelDiff)
+        let reason = try XCTUnwrap(pack.circuitBreaker.reason)
+        XCTAssertTrue(reason.contains("pixel-capture-window-resized"), reason)
+        XCTAssertTrue(reason.contains("32x32") && reason.contains("16x32"),
+                      "成因里要带两个尺寸，否则分不清是 resize 还是编码器坏了：\(reason)")
+        // 分类器拿着这条 reason 时，不许再把代理支去系统设置。
+        let (_, report) = Classifier.classify(pack)
+        XCTAssertFalse(report.next.lowercased().contains("grant"), report.next)
+        XCTAssertEqual(pack.circuitBreaker.level, .degraded)
     }
 
     // MARK: - X-9: an unread attribute is never a verdict about the element

@@ -121,6 +121,38 @@ final class AXChannelErrorAttributionTests: XCTestCase {
         }
     }
 
+    /// 走查失败的记账判据：**哪种**失败该让整次遍历停下来。
+    /// 预算耗尽＝别再发调用；一个子树没答上＝只作废那一截，兄弟照走。
+    /// 旧实现把两件事合成一个 `stopReason`，于是真机上最常见的 -25200 会顺着
+    /// 兄弟循环掐掉整棵树——而未走过的子树连节点都不产生，覆盖率的分母里看不见它们。
+    func testWalkFailureOnlyAbortsOnBudgetExhaustion() {
+        let budget = AXChannel.walkFailure(
+            for: ChannelError.treeCaptureFailed(reason: "the 10.0s accessibility budget ran out before reading AXSize"),
+            path: "0/3/unread"
+        )
+        XCTAssertTrue(budget.abortsWalk, "预算耗尽必须中止：继续发调用就是超发时间")
+        XCTAssertEqual(budget.node.role, AXChannel.unreadSubtreeRole)
+        XCTAssertTrue(budget.reason.contains("budget"), budget.reason)
+
+        // 同一次遍历里的普通 AX 失败：记 unread，但不许中止。
+        for error: ChannelError in [
+            .axUnavailable(reason: "walking children failed (kAXError -25200)"),
+            .pingTimeout,
+            .attributeUnavailable(reason: "element does not expose AXPosition"),
+        ] {
+            let outcome = AXChannel.walkFailure(for: error, path: "0/7/unread")
+            XCTAssertFalse(outcome.abortsWalk, "\(error) 只作废这一截，不能掐掉兄弟子树")
+            XCTAssertFalse(outcome.reason.isEmpty, "unread 必须带原因：\(outcome.node.path)")
+            XCTAssertEqual(outcome.node.path, "0/7/unread")
+        }
+        // `.pingTimeout` 曾经把原因写成"ping 超时"——遍历里根本没发过 ping，
+        // 那是一句关于没发生过的事的断言。
+        XCTAssertFalse(
+            AXChannel.walkFailure(for: ChannelError.pingTimeout, path: "0/1/unread").reason.contains("ping"),
+            "不能把一次没答上的属性读说成 ping 超时"
+        )
+    }
+
     // MARK: - R2-15: never invent a comparable value
 
     func testUnreadValueThrowsForEveryPropertyInsteadOfAComparableDefault() {

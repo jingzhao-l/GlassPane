@@ -29,6 +29,14 @@ public struct PixelRect: Equatable {
 public enum PixelDiffError: Error, Equatable {
     /// The comparison could not be performed (bitmap normalization failed).
     case bitmapUnavailable
+    /// 两张图的像素尺寸不同，逐像素比对没有共同定义域。
+    ///
+    /// 这里曾经直接返回 `changedPixelRatio = 1`（"整屏都变了"）：一个 0...1 之间的
+    /// 数字，`bounds` 却是 nil，看起来完全像一次测完的结论。窗口在操作中间被 resized
+    /// 是很正常的结局，"界面确实变了"成立，但"100% 的像素变了"是**没测过的事实**——
+    /// 它会喂给分类器、写进证据包、出现在报告里。未测量必须由调用方显式表达，
+    /// 不能由差分函数替它编一个极值。
+    case geometryChanged(beforeWidth: Int, beforeHeight: Int, afterWidth: Int, afterHeight: Int)
 }
 
 public enum PixelDiffer {
@@ -41,11 +49,14 @@ public enum PixelDiffer {
         let beforeBitmap = try rgba8Bitmap(of: before)
         let afterBitmap = try rgba8Bitmap(of: after)
 
-        // Mismatched dimensions mean the window content changed wholesale;
-        // a meaningful per-pixel region no longer exists.
+        // Mismatched dimensions mean there is no common domain to compare over:
+        // that is an explicit "not measured", not a ratio. See `geometryChanged`.
         guard beforeBitmap.width == afterBitmap.width,
               beforeBitmap.height == afterBitmap.height else {
-            return PixelDiffOutcome(changedPixelRatio: 1, bounds: nil)
+            throw PixelDiffError.geometryChanged(
+                beforeWidth: beforeBitmap.width, beforeHeight: beforeBitmap.height,
+                afterWidth: afterBitmap.width, afterHeight: afterBitmap.height
+            )
         }
 
         let width = beforeBitmap.width
