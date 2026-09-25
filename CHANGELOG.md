@@ -2,6 +2,32 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.2.0] — 2026-09-25
+
+### Added — feature-gap 四维精简审查落地
+
+承接 1.1.2 之后的一次"优先级审查 + 功能缺口"复核（round gap），确认既有 `gp_export_evidence` /
+`gp_recent_reports` / daemon `--evidence-stats` / `--recipe-validate` 已覆盖的基线后，本轮补齐四项缺口：
+
+- **HTTP/REST transport（新增 `glasspane-http` 入口）**。`mcp-shell` 新开一个 HTTP gateway：token
+  经 `GLASSPANE_HTTP_TOKEN` 注入（缺失即退出），仅绑定 127.0.0.1，处理 SIGINT/SIGTERM 干净退出。
+  新增 `/v1/stats` 与 `/v1/recipes/validate`；对无 daemon socket 通道的路径返回 `GP_HTTP_NOT_PROVIDED`。
+- **证据趋势统计卡**。设置/面板新增证据统计视图，输出分布与 `==` 计数（见下条的越界归并）。
+- **配方校验 + 模板编辑器**。RecipesTab 支持模板编辑，校验走 daemon 的 `--recipe-validate` 语义。
+
+### Fixed — 第二轮代码优先审查（正确性 / 安全 / 发布链路）
+
+- **http-gateway 发布链路缺失（阻断发版）**。此前 bundle 单入口会删掉非 index.js，且无独立 CLI 入口、
+  测试消费 tsc dist 而非 bundle，导致"测试绿但发布丢功能"且 CI 拦不住。本轮新增独立
+  `http-gateway-cli.ts` 入口、bundle 三入口、bundle smoke 门禁。
+- **证据 id 无上限 → DoS**。`MAX_EVIDENCE_IDS` 收敛到 20。
+- **token 长度探测**。改为 sha256 + `timingSafeEqual`，去掉按长度提前返回的分支。
+- **多余路径段触发真实 act**。路径段拆分后先 404，而不是透传到 act。
+- **绕过契约校验的 `LAST_EVIDENCE` 透传**。`last_evidence` 改走 `parseEvidenceFrame` 校验后再进入。
+- **证据统计越界 circuitBreakerLevel 丢失**。越界 level 归入显式"其他(不识别)" bucket，分布与 `==` 计数含盖。
+- **recipe 临时文件权限 / TOCTOU**。临时文件用 0600 + `O_EXCL` + `O_NOFOLLOW` + UUID。
+- **校验结果过期覆盖**。校验 token 门控（递增 token），防止慢校验覆盖新结果；验证期间禁用模板/刷新按钮。
+
 ## [1.1.2] — 2026-09-25
 
 ### Fixed — R6 遗留四项收口

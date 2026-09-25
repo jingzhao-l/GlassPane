@@ -24,7 +24,7 @@ public final class EngineCore {
     /// In-memory snapshot retention cap (P1 spec v1.1 §1.5).
     public static let snapshotHistoryLimit = 8
 
-    public let version = "1.1.2"
+    public let version = "1.2.0"
     public let protocolVersion = "0"
     public private(set) var attachedApp: AttachedApp?
     /// Currently active project (P1 spec v1.4 §1.3). Set via attach with projectId.
