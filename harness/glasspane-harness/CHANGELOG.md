@@ -85,3 +85,44 @@ The companion product surfaces, brought in as first-class citizens (owner decisi
   done, the canonical docs are `docs/` in this repository — the docs site is marked
   `not-yet-ours` in `product.json` rather than being quietly presented as finished.
 - Electron desktop app (second batch; needs signing and notarisation accounts).
+
+## [0.3.0] - 2026-09-25
+
+**macOS-only, and the npm distribution says so.** The GlassPane engine, its four macOS
+permission seats and the whole evidence pipeline exist only on macOS, so the product is
+macOS-only (owner decision). The npm side enforces it rather than describing it.
+
+### Changed
+- The npm distribution is macOS-only: the wrapper declares `os: ["darwin"]` /
+  `cpu: ["arm64", "x64"]`, so `npm install` on Linux or Windows is **refused by the
+  package manager with a reason** instead of downloading a binary that cannot run. The
+  target matrix in `product.json` is now exactly the two macOS targets.
+- `scripts/install.ps1` (Windows one-click) is **removed** — the POSIX installer is the
+  only one, and on a non-macOS host it says "macOS-only is a decision, not a missing
+  port" and exits.
+- The Linux/Windows/Intel-baseline platform packages published before this decision are
+  **deprecated on npm with the reason attached** (they cannot be unpublished; a
+  deprecation that explains itself beats a package that still installs).
+- The release lane builds the two macOS targets on `macos-14` / `macos-13`.
+
+### Added — npm infrastructure
+- `publish.ts --dry-run`: packs every artifact and validates its shape **without
+  touching the registry** — bin targets exist inside the tarball, the platform binary is
+  present and executable, the wrapper's `optionalDependencies` match `product.json`'s
+  target matrix, and the wrapper's `os`/`cpu` agree with the product's platform block.
+  Wired into the fork's CI, so a broken package shape fails a PR instead of a release.
+- `verify-published.ts`: "published" is not "works" — installs the **published** tarball
+  into a throwaway prefix, runs `--version`, and confirms the embedded web app is served
+  by that binary. Runs as the release lane's final job; on a non-macOS host it asserts
+  that npm refuses the install.
+- Wrapper metadata completed for its npm page: `engines.node`, `funding`,
+  `publishConfig` (access + tag), `sideEffects`, and a dist-tag policy —
+  `latest` for stable, `next` for anything on a non-latest channel, so a preview can
+  never be installed by `npm i -g glasspane-harness` by accident.
+- The npm publish/deprecation policy is recorded in `product.json` (`npm` block) so it
+  travels with the code instead of living in someone's head.
+
+### Docs
+- READMEs, `docs/install.md`, `docs/index.md` and `docs/troubleshooting.md` state the
+  platform boundary up front, with the npm `EBADPLATFORM` case in the troubleshooting
+  table.

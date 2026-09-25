@@ -12,7 +12,9 @@ permissions are missing" in one call, and every other answer refers back to it.
 | `GP_E_PAYLOAD_TOO_LARGE` | the engine's frame exceeded 4 MiB before a frame boundary | retry with a narrower query: lower `maxDepth` on `gp_observe`, or a `role` filter |
 | permission prompt rejected | the agent asked, the human said no | the tool call fails with a denial; nothing moved in the app. Grant it in the TUI prompt or configure the permission |
 | `GP_E_NO_SOCKET` in a *test* run | `GLASSPANE_SOCKET` points somewhere the test does not control | unset it for the run; the default is `~/.glasspane/engine.sock` |
-| `opencode: command not found` after an npm install | the global prefix is not writable / not on PATH | `npm install -g --prefix "$HOME/.local" glasspane-harness` and put `~/.local/bin` on PATH; the one-click installer does this for you |
+| `opencode: command not found` after an npm install | a previous install's command name (the product installs as `glasspane-harness` / `gp-harness`) | `glasspane-harness --version`; the old name is gone since 0.1.0 |
+| `npm ERR! code EBADPLATFORM` | the package is macOS-only (`os: darwin`) | there is no Linux/Windows build by decision; on a Mac, check the architecture (arm64 / x64) |
+| global prefix not writable / command not on PATH | npm's global prefix needs root | `npm install -g --prefix "$HOME/.local" glasspane-harness` and put `~/.local/bin` on PATH; the one-click installer does this for you |
 | build fails with `UNABLE_TO_VERIFY_LEAF_SIGNATURE` | your network intercepts TLS and the toolchain does not trust the proxy | export `NODE_EXTRA_CA_CERTS=<your proxy CA bundle>`; never disable certificate checks |
 | the web app is missing from `serve` | the binary was built with `--skip-embed-web-ui` | rebuild without that flag; the runtime flag `OPENCODE_DISABLE_EMBEDDED_WEB_UI` also hides it |
 

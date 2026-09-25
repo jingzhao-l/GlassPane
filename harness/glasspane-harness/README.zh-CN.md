@@ -54,12 +54,15 @@ Astro/Starlight 内容，能构建、留树，但本产品的 canonical 文档�
 npm install -g glasspane-harness     # 推荐
 bun add -g glasspane-harness
 curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.sh | bash
-irm https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.ps1 | iex   # PowerShell
 ```
 
 会装出两个命令：**`glasspane-harness`** 与短别名 **`gp-harness`**。
 
-前提：macOS 13+；要用 `gp_*` 工具面还需要 **GlassPane** 后台服务在跑且已授予辅助功能权限
+**只支持 macOS。** 引擎、权限模型、证据流水线都只存在于 macOS，npm 分发随之收成
+macOS-only：包声明 `os: darwin`，非 macOS 上 npm 直接拒绝安装，而不是给你一个跑不了的
+二进制。**没有 Linux / Windows 构建，这是决定，不是遗漏。**
+
+前提：macOS 13+（Apple silicon 或 Intel）；要用 `gp_*` 工具面还需要 **GlassPane** 后台服务在跑且已授予辅助功能权限
 （[先装 GlassPane](https://github.com/jingzhao-l/GlassPane)，安装器会把下一步说清楚）。没有引擎时，
 每个 `gp_*` 调用只会回 `GP_E_ENGINE_UNREACHABLE` 加一条 remedy——那是引擎的话，不是安装器的。
 

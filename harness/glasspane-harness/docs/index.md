@@ -23,6 +23,15 @@ invents a verdict.
 4. **Compaction may not erase evidence.** The session's anchors are re-injected into the
    summarisation prompt, and absence is arithmetic, never an assumption.
 
+## Platform support
+
+macOS 13+ (Apple silicon or Intel), and that is the whole list. The engine, the
+permission model and the evidence pipeline are macOS; the npm package declares
+`os: darwin` so an install elsewhere is refused by the package manager with a reason
+instead of downloading a binary that cannot run. No Linux or Windows build exists, and
+none is planned (owner decision, 2026-09-25). The non-macOS packages published before
+that decision are deprecated on npm rather than deleted, with the reason attached.
+
 ## Support policy
 
 Versions track `product.json`; releases are cut from the fork branch in the GlassPane

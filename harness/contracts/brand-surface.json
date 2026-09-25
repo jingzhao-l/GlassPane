@@ -30,18 +30,23 @@
   ],
   "hits": [
     {
-      "file": "README.md:136",
+      "file": "scripts/install.ps1",
+      "rule": "missing-product-file",
+      "count": 1
+    },
+    {
+      "file": "README.md:138",
       "rule": "doc-line-without-lineage",
       "count": 1
     },
     {
-      "file": "README.zh-CN.md:112",
+      "file": "README.zh-CN.md:115",
       "rule": "doc-line-without-lineage",
       "count": 1
     }
   ],
   "lineage": {
-    "occurrences": 18675,
+    "occurrences": 18677,
     "filesScanned": 3917
   }
 }

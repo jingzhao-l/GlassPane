@@ -3,7 +3,7 @@
   "name": "glasspane-harness",
   "displayName": "GlassPane Harness",
   "tagline": "Evidence-honest GUI verification harness for macOS apps — an opencode fork carrying GlassPane's native tool surface",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "binary": "glasspane-harness",
   "bins": [
     "glasspane-harness",
@@ -15,13 +15,11 @@
   "install": {
     "npm": "npm install -g glasspane-harness",
     "bun": "bun add -g glasspane-harness",
-    "curl": "curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.sh | bash",
-    "powershell": "irm https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.ps1 | iex"
+    "curl": "curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.sh | bash"
   },
   "product": {
     "ship": [
       "packages/opencode (CLI + TUI host + embedded web app)",
-      "packages/tui",
       "packages/app (web app, embedded in the binary)",
       "packages/sdk",
       "packages/plugin"
@@ -35,7 +33,7 @@
       "artifacts/ (upstream demo videos)",
       "packages/web (docs site — upstream content, not shipped yet)"
     ],
-    "note": "产品面（owner 2026-09-25 定）：CLI + TUI + **内嵌 web 应用** + 文档站 + SDK/plugin 随仓。桌面 app 列第二批（需要签名与公证通道）；**console/enterprise/stats/infra 不做**——那是上游托管服务的组织/额度后台，私有 harness 不需要这个形态（iterate 侧也没有对应物），源码留树做血缘。web app 默认内嵌（与上游、与 iterate 把 dashboard 烤进 wheel 一致），`--skip-embed-web-ui` 可出纯 CLI 构建。 文档站尚未私有化（上游 Astro/Starlight 树仍可构建，仅留树），canonical 文档是仓内 docs/；站点改造列入下一批并在 product.json 标记状态，不把上游文案当我们的文档发出去。",
+    "note": "产品面（owner 2026-09-25 定）：**macOS 专属**的 CLI + TUI + 内嵌 web 应用 + 仓内 docs/ + 随仓 SDK/plugin。不做 Linux/Windows 适配（分发面随之收成 macOS-only，见 platform.why）；console/enterprise/stats/infra 不做；Electron 桌面 app 第二批；上游文档站尚未私有化（canonical 文档是仓内 docs/）。",
     "docsSite": {
       "status": "not-yet-ours",
       "where": "packages/web (upstream Astro/Starlight tree, kept for lineage and still builds)",
@@ -58,60 +56,44 @@
   },
   "platformTargets": [
     {
-      "os": "linux",
-      "arch": "arm64"
-    },
-    {
-      "os": "linux",
-      "arch": "x64"
-    },
-    {
-      "os": "linux",
-      "arch": "x64",
-      "avx2": false
-    },
-    {
-      "os": "linux",
-      "arch": "arm64",
-      "abi": "musl"
-    },
-    {
-      "os": "linux",
-      "arch": "x64",
-      "abi": "musl"
-    },
-    {
-      "os": "linux",
-      "arch": "x64",
-      "abi": "musl",
-      "avx2": false
-    },
-    {
       "os": "darwin",
       "arch": "arm64"
     },
     {
       "os": "darwin",
       "arch": "x64"
-    },
-    {
-      "os": "darwin",
-      "arch": "x64",
-      "avx2": false
-    },
-    {
-      "os": "win32",
-      "arch": "arm64"
-    },
-    {
-      "os": "win32",
-      "arch": "x64"
-    },
-    {
-      "os": "win32",
-      "arch": "x64",
-      "avx2": false
     }
   ],
-  "platformTargetsNote": "目标矩阵的真源在此（上游把它写死在 script/build.ts 里）。build.ts 读它、publish.ts 用它算 optionalDependencies、product-surface.mjs 核三者一致。第一条发布流水线只覆盖 glibc/darwin/win32 的非 baseline 目标（macOS/Linux/Windows 原生 runner），musl 与 baseline 目标保留在清单里待补 lane。"
+  "platformTargetsNote": "目标矩阵的真源在此（上游把它写死在 script/build.ts 里）。build.ts 读它、publish.ts 用它算 optionalDependencies、product-surface.mjs 核三者一致。第一条发布流水线只覆盖 glibc/darwin/win32 的非 baseline 目标（macOS/Linux/Windows 原生 runner），musl 与 baseline 目标保留在清单里待补 lane。",
+  "platform": {
+    "os": [
+      "darwin"
+    ],
+    "minVersion": "13",
+    "arch": [
+      "arm64",
+      "x64"
+    ],
+    "why": "产品是 macOS 专属（引擎只存在于 macOS，辅助功能/输入监听/屏幕录制三张权限表也都是 macOS 的）。npm 分发随之收成 macOS-only：wrapper 的 os/cpu 字段会让 npm 在非 macOS 上直接拒绝安装，而不是装完再报错。Linux/Windows 的平台包已在 registry 上 **弃用**（不是删除：版本号不可回收，弃用带理由比留个能装的包诚实）。",
+    "dropped": {
+      "linux-*": "不做适配（owner 2026-09-25 决定）",
+      "windows-*": "不做适配；Windows 安装器 install.ps1 已删除",
+      "darwin-x64-baseline": "macOS 13+ 的机器全部有 AVX2，这个目标没有用户"
+    }
+  },
+  "npm": {
+    "registry": "https://registry.npmjs.org",
+    "packages": "glasspane-harness (wrapper) + glasspane-harness-darwin-arm64 / -darwin-x64",
+    "wrapperPostinstall": "node ./postinstall.mjs — 按平台取对应包，把真实二进制放到 bin/（npm ≥ 11 对首次见到的包会提示 allow-scripts；安装器会自动用 --allow-scripts 重试）",
+    "distTags": {
+      "latest": "稳定版",
+      "next": "预发布版（channel != latest 时）"
+    },
+    "publishPolicy": [
+      "版本线 = product.json 的 version（pre-1.0：证据契约不动，产品面可以动）",
+      "发布必须带 provenance（CI 用 Trusted Publisher + staged 兜底；本地手动发布不带 provenance，因此不作为常规路径）",
+      "每个平台包与 wrapper 同版本发布；wrapper 的 optionalDependencies 由 product.json 的 platformTargets 推出，不手写",
+      "发布后跑 verify-published：把已发布的 tarball 装进干净前缀并 --version，不靠'看起来成功'"
+    ]
+  }
 }

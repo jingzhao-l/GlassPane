@@ -114,7 +114,6 @@ const forbiddenFiles = [
   "packages/opencode/src/cli/cmd/uninstall.ts",
   "packages/opencode/bin/glasspane-harness",
   "scripts/install.sh",
-  "scripts/install.ps1",
 ]
 /** Comments carry the record of what was removed; only code can still reach it. */
 function stripComments(text) {
@@ -142,20 +141,23 @@ const candidatesLine = /const candidates = \[[^\]]*\]/.exec(configTs)?.[0] ?? ""
 check("config-names", /opencode\.jsonc/.test(candidatesLine) && /opencode\.json/.test(candidatesLine), "config.ts discovery dropped the legacy opencode.json(c) fallback — existing checkouts would break")
 check("config-names", candidatesLine.includes(`${product.name}.json`), "config.ts discovery does not accept the product's config file name first")
 
+// ---- macOS-only distribution: the npm side must refuse other platforms, not ship them
+const platform = product.platform ?? {}
+check("platform", Array.isArray(platform.os) && platform.os.length === 1 && platform.os[0] === "darwin", "product.platform.os must be exactly [darwin] — the product is macOS-only (owner decision)")
+check("platform", (product.platformTargets ?? []).every((t) => t.os === "darwin"), "a non-darwin platform target is declared — macOS-only means the npm distribution is macOS-only")
+check("platform", (product.install?.powershell ?? null) === null, "product.install still advertises a PowerShell one-liner — there is no Windows installer")
+
 // ---- the one-click installers: right URLs, parse, and plan
 const sh = stripComments(read("scripts/install.sh"))
-const ps1 = stripComments(read("scripts/install.ps1"))
 // The raw "curl | bash" URL lives where the user copies it from (product.json's
 // install block and the README); the script body is what executes after that.
 check("installer-urls", (product.install?.curl ?? "").includes(`raw.githubusercontent.com/${product.repo}/`), "product.json install.curl does not point at the product's own raw script URL")
-check("installer-urls", (product.install?.powershell ?? "").includes(`raw.githubusercontent.com/${product.repo}/`), "product.json install.powershell does not point at the product's own raw script URL")
 check("installer-urls", (product.install?.npm ?? "").includes(product.name), "product.json install.npm does not install the product package")
 check("installer-urls", sh.includes("releases/download") && sh.includes(product.repo), "install.sh does not point at the product's release assets (repo + /releases/download)")
 check("installer-urls", sh.includes(`npm install -g "$NPM_SPEC"`), "install.sh does not install the npm package (npm must be the primary lane)")
 check("installer-urls", sh.includes("GlassPane engine"), "install.sh does not tell the user that gp_* needs the GlassPane engine running")
-check("installer-urls", ps1.includes(product.repo) === false || ps1.includes("$Repo = \"" + product.repo + "\""), "install.ps1 REPO is not the product's repo")
 check("installer-urls", sh.includes(`REPO=\"` + product.repo + `\"`) || sh.includes(`REPO="${product.repo}"`), "install.sh REPO is not the product's repo")
-check("installer-urls", ps1.includes("/releases/download") && ps1.includes(product.repo), "install.ps1 does not point at the product's release assets (repo + /releases/download)")
+check("installer-urls", existsSync(path.join(forkRoot, "scripts", "install.ps1")) === false, "a Windows installer exists — the product is macOS-only (owner decision); one that half-works is worse than none")
 check("installer-syntax", (() => {
   try {
     execFileSync("sh", ["-n", path.join(forkRoot, "scripts", "install.sh")], { stdio: "pipe" })

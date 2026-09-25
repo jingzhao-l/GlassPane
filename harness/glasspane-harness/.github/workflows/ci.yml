@@ -52,6 +52,14 @@ jobs:
         working-directory: packages/tui
         run: bun test --timeout 30000 test/cli/tui/inline-tool-wrap-snapshot.test.tsx
 
+      # Pack every npm artifact and validate its shape (bins present and executable,
+      # wrapper's optionalDependencies == product.json's target matrix, os/cpu gate)
+      # without touching the registry. A package that installs but cannot run is the
+      # failure mode this catches on a PR instead of after a release.
+      - name: npm pack validation (no registry access)
+        working-directory: packages/opencode
+        run: bun run script/publish.ts --dry-run
+
       - name: Product manifest agrees with the package it ships
         run: |
           node -e '

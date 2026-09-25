@@ -2,6 +2,31 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-09-25 · v0.3.0：macOS-only 收口 + npm 基建（dry-run 校验 / 发布即验证 / dist-tag 策略）
+
+owner 2026-09-25："本项目是针对 macOS 的，不需要 Linux 和 Windows 适配" + "npm 包的基础设施完善一下"。
+
+- **平台面收成 macOS-only**（决定，不是"还没做"）：`product.json` 的目标矩阵只剩
+  `darwin-arm64` + `darwin-x64`（`darwin-x64-baseline` 也去掉：能跑 macOS 13 的机器全有 AVX2，
+  这个目标没有用户）；wrapper 的 `os`/`cpu` 由清单驱动 → **npm 在非 macOS 上直接拒绝安装**，
+  而不是给一个跑不了的二进制；`install.ps1` 删除，`install.sh` 的拒绝文案改成"这是决定，不是
+  遗漏"并说明引擎/权限/证据流水线都只存在于 macOS；release lane 的两个矩阵收成
+  `macos-14`/`macos-13`；README/安装文档/排障表把平台边界与 `EBADPLATFORM` 写进第一屏。
+- **已在 registry 上的 10 个不该发的平台包（6 linux + 3 windows + 1 baseline）全部 `npm deprecate`
+  并附理由**——版本号不可回收，弃用带说明比留个"还能装"的包诚实。逐个从 registry API 核过
+  （不是只看 `npm view` 的 CDN 视图）。
+- **npm 基建三件**：
+  1. `publish.ts --dry-run`：打包并校验每个 artifact 的形状（bin 指向的文件真在 tarball 里、
+     平台二进制存在且可执行、wrapper 的 optionalDependencies == 清单矩阵、os/cpu 与平台块一致），
+     **不碰 registry**；接进 fork 的 CI，坏形状在 PR 红而不是发版后红。
+  2. `verify-published.ts`：**"已发布"不等于"能用"**——把**已发布的** tarball 装进一次性前缀、
+     跑 `--version`、确认那个二进制自己把内嵌 web 服务出来；作为 release lane 的最后一步；
+     非 macOS 宿主上它反过来断言 npm 拒绝安装。
+  3. wrapper 元数据补齐（`engines`/`funding`/`publishConfig`/`sideEffects`）+ dist-tag 策略
+     （稳定 `latest`、预发布 `next`，预发布不会被 `npm i -g` 误装）。
+- 策略写进 `product.json` 的 `npm` 块（发布必须带 provenance、平台包与 wrapper 同版本、
+  optionalDependencies 不手写、发布后跑 verify），跟着代码走而不是记在某人脑子里。
+
 ## 2026-09-25 · v0.2.0：配套产品面回归（web 内嵌）+ README/基础设施（对齐 iterate 形态）
 
 owner 2026-09-25："那几个配套产品面还是需要的" + "README 等基础设施模仿 iterate 生态做"。

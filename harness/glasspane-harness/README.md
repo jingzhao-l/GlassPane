@@ -65,16 +65,18 @@ npm install -g glasspane-harness
 # or bun
 bun add -g glasspane-harness
 
-# or one-click (POSIX: npm first, GitHub release asset as fallback)
+# or one-click (npm first, GitHub release asset as fallback)
 curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.sh | bash
-
-# or one-click (Windows PowerShell)
-irm https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.ps1 | iex
 ```
 
 Two commands are installed: **`glasspane-harness`** and the short alias **`gp-harness`**.
 
-Prerequisites: macOS 13+, and — for the `gp_*` tools — the **GlassPane** background
+**macOS only.** The engine, the permission model and the evidence pipeline exist only on
+macOS, so the npm distribution is macOS-only too: the package declares `os: darwin` and
+npm refuses the install elsewhere instead of handing you a binary that cannot run. There
+is no Linux or Windows build, by decision, not by omission.
+
+Prerequisites: macOS 13+ (Apple silicon or Intel), and — for the `gp_*` tools — the **GlassPane** background
 service running with Accessibility granted ([install GlassPane](https://github.com/jingzhao-l/GlassPane);
 the installer prints the exact next steps). Without the engine every `gp_*` call answers
 `GP_E_ENGINE_UNREACHABLE` with a remedy — that is the engine's word, not the installer's.

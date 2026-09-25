@@ -63,10 +63,20 @@ step "Detecting platform"
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
 case "$OS" in
-  darwin) PLATFORM="darwin-$ARCH" ;;
-  linux)  PLATFORM="linux-$ARCH" ;;
+  darwin)
+    PLATFORM="darwin-$ARCH"
+    case "$ARCH" in
+      arm64 | x64) ;;
+      *) error "Unsupported macOS architecture: $ARCH (this product ships darwin-arm64 and darwin-x64)"; exit 1 ;;
+    esac
+    ;;
   *)
-    error "Unsupported OS: $OS — this product ships darwin and linux binaries (Windows: use scripts/install.ps1)"
+    # macOS-only is a product decision (the engine, the permission model and the
+    # evidence pipeline are macOS), not a missing port: there is no Linux or
+    # Windows build and there will not be one. Say exactly that instead of
+    # "unsupported OS".
+    error "glasspane-harness is macOS-only (the GlassPane engine and its evidence pipeline exist only on macOS)."
+    error "This machine reports $OS — there is no build for it, by decision, not by omission."
     exit 1
     ;;
 esac

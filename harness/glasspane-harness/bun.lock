@@ -561,7 +561,7 @@
     },
     "packages/opencode": {
       "name": "glasspane-harness",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "bin": {
         "glasspane-harness": "./bin/glasspane-harness",
         "gp-harness": "./bin/glasspane-harness",
