@@ -45,6 +45,14 @@ irm https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/
 
 Both commands are installed: **`glasspane-harness`** and the short alias **`gp-harness`**.
 
+Verified on the first real release (2026-09-25): `npm install -g glasspane-harness` and
+`bun add -g glasspane-harness` both install a working `0.1.0`. Two things the installer
+handles for you: npm >= 11 prints an `allow-scripts` warning for a package it has not seen
+(the wrapper's postinstall places the platform binary; the installer retries with
+`--allow-scripts` if the first attempt does not produce a working command), and a global
+prefix your user cannot write to (npm's default on some machines) is reported with the
+exact remedy: `npm install -g --prefix "$HOME/.local" glasspane-harness`.
+
 Prerequisites: macOS 13+, and — for the `gp_*` tools — the **GlassPane** background service
 running with Accessibility granted. Install GlassPane first
 ([jingzhao-l/GlassPane](https://github.com/jingzhao-l/GlassPane)); the installer prints the

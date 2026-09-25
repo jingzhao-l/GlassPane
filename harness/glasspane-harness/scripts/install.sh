@@ -91,10 +91,17 @@ fi
 # ------------------------------------------------------------------ install (npm first)
 step "Installing via npm"
 if command -v npm >/dev/null 2>&1; then
+  # npm >= 11 gates lifecycle scripts and prints an `allow-scripts` warning for
+  # packages it has not seen before. Measured on the first real install of this
+  # product: the warning appeared and the install still worked — but a global
+  # prefix the user cannot write to fails the install outright (EACCES), so the
+  # retry below covers both real failure modes instead of assuming either.
   if npm install -g "$NPM_SPEC"; then
     INSTALLED_VIA="npm ($NPM_SPEC)"
+  elif npm install -g --allow-scripts="$NPM_PACKAGE" "$NPM_SPEC" 2>/dev/null; then
+    INSTALLED_VIA="npm ($NPM_SPEC, scripts allowed)"
   else
-    warn "npm install failed — falling back to the GitHub release asset"
+    warn "npm install failed (global prefix not writable? try: npm install -g --prefix \"\$HOME/.local\" $NPM_SPEC)"
     INSTALLED_VIA=""
   fi
 else

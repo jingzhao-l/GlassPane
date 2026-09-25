@@ -2,6 +2,34 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-09-25 · 首发：glasspane-harness v0.1.0 上 npm + split 远端仓建成（外部动作执行完毕）
+
+用户 2026-09-25 "其他所有问题全部修掉"之后执行（此前记为"等 owner 点头"的外部动作，本机 `gh` 与
+`npm` 均以 jingzhao-l 认证）：
+
+- **split 远端仓建成**：`gh repo create jingzhao-l/glasspane-harness --public` + 推送
+  `git subtree split --prefix=harness/glasspane-harness`。**先证明再推**：split 分支的 tree 哈希与
+  `HEAD:harness/glasspane-harness` 逐字相等（`5efbbc1…`），6,615 文件、125.9 MB。
+- **npm 首发 v0.1.0**：本地 12 目标构建 `BUILD_RC=0`（含每个当前平台目标的冒烟 `--version`）→
+  `script/publish.ts` 发布 **12 个平台包 + wrapper**（`glasspane-harness` 与
+  `glasspane-harness-<os>-<arch>[-baseline][-musl]`），`PUBLISH_RC=0`。
+- **两条安装通道端到端实测**（这是"一键下载"真正成立的那一步）：
+  - `npm install -g --prefix ~/.local glasspane-harness` → `glasspane-harness --version` = **0.1.0**，
+    `gp-harness --version` = **0.1.0**；
+  - `bun add -g glasspane-harness` 同理（本机解析较慢，属环境）。
+  实测到并已写进 `scripts/install.sh` 与 README 的两件事：npm ≥ 11 对首次见到的包打印
+  `allow-scripts` 警告（安装仍成功；安装器在第一次没产出可用命令时用 `--allow-scripts` 重试），
+  以及全局前缀不可写（EACCES）时给出确切补救 `npm install -g --prefix "$HOME/.local"`。
+- **split 仓的 CI 第一次红，抓出两个真缺陷**（详见下面两条 fix 提交）：import 漏了 7 个上游文件
+  （`fork-diff` 盲区：四桶比的是工作树 vs 参照 index，"在磁盘上但从未提交"的文件看起来逐字相同），
+  以及**编译产物启动即崩**（vendored kernel 的 barrel 在模块初始化时用 `createRequire` 读
+  `../schemas/*.json`，单文件二进制里没有这个路径——源码模式永远看不见，是 build 自己的冒烟测试抓到的）。
+- **13 条残留的上游全量测试失败**（`cli/run`、`mcp-add`、`help-snapshots` 等子进程类）：串行 + CA 束 +
+  120s 超时后从 51 降到 13，隔离跑单条全过、整文件跑被 30s 预算杀掉（`Error: Timed out`，子进程无输出），
+  而 CLI 冷启动实测只要 1.5s（源码）/0.64s（编译产物）——是上游测试写死的时序预算与本机负载/全环境
+  隔离子进程之间的张力，不是产品缺陷；stash 对照（M5 基点）证明这 13 条与本线无关。挂账口径改为
+  "上游时序敏感用例在本机不可靠"，不再假装能修。
+
 ## 2026-09-25 · 私有化批次 D：项目目录改名（`.glasspane-harness`）+ 全量测试真因
 
 - **项目级 `.opencode/` 改名**（C/C′ 批记为"下一批开工项"，本批做完）：9 处——v1 `config/paths.ts` 与
