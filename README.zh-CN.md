@@ -2,13 +2,12 @@
 
 [English](./README.md) · **简体中文**
 
-[![npm: glasspane-mcp](https://img.shields.io/npm/v/glasspane-mcp)](https://www.npmjs.com/package/glasspane-mcp)
-[![npm: glasspane-install](https://img.shields.io/npm/v/glasspane-install)](https://www.npmjs.com/package/glasspane-install)
-[![下载量: glasspane-mcp](https://img.shields.io/npm/dm/glasspane-mcp?label=glasspane-mcp%20dl%2Fmo)](https://www.npmjs.com/package/glasspane-mcp)
-[![下载量: glasspane-install](https://img.shields.io/npm/dm/glasspane-install?label=glasspane-install%20dl%2Fmo)](https://www.npmjs.com/package/glasspane-install)
-![license: MIT](https://img.shields.io/badge/license-MIT-green)
 [![CI](https://github.com/jingzhao-l/GlassPane/actions/workflows/ci.yml/badge.svg)](https://github.com/jingzhao-l/GlassPane/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/jingzhao-l/GlassPane)](https://github.com/jingzhao-l/GlassPane/releases)
+
+[![npm：glasspane-mcp](https://img.shields.io/npm/v/glasspane-mcp)](https://www.npmjs.com/package/glasspane-mcp)
+[![累计下载：glasspane-mcp](https://img.shields.io/npm/dt/glasspane-mcp?label=%E7%B4%AF%E8%AE%A1%E4%B8%8B%E8%BD%BD)](https://www.npmjs.com/package/glasspane-mcp)
+![license: MIT](https://img.shields.io/badge/license-MIT-green)
 
 <center>
   <strong>macOS 上给 AI 编程代理用的 GUI 测试与验证层。</strong><br/>

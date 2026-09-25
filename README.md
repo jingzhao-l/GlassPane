@@ -2,13 +2,12 @@
 
 **English** · [简体中文](./README.zh-CN.md)
 
-[![npm: glasspane-mcp](https://img.shields.io/npm/v/glasspane-mcp)](https://www.npmjs.com/package/glasspane-mcp)
-[![npm: glasspane-install](https://img.shields.io/npm/v/glasspane-install)](https://www.npmjs.com/package/glasspane-install)
-[![downloads: glasspane-mcp](https://img.shields.io/npm/dm/glasspane-mcp?label=glasspane-mcp%20dl%2Fmo)](https://www.npmjs.com/package/glasspane-mcp)
-[![downloads: glasspane-install](https://img.shields.io/npm/dm/glasspane-install?label=glasspane-install%20dl%2Fmo)](https://www.npmjs.com/package/glasspane-install)
-![license: MIT](https://img.shields.io/badge/license-MIT-green)
 [![CI](https://github.com/jingzhao-l/GlassPane/actions/workflows/ci.yml/badge.svg)](https://github.com/jingzhao-l/GlassPane/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/jingzhao-l/GlassPane)](https://github.com/jingzhao-l/GlassPane/releases)
+
+[![npm: glasspane-mcp](https://img.shields.io/npm/v/glasspane-mcp)](https://www.npmjs.com/package/glasspane-mcp)
+[![downloads total: glasspane-mcp](https://img.shields.io/npm/dt/glasspane-mcp?label=downloads%20total)](https://www.npmjs.com/package/glasspane-mcp)
+![license: MIT](https://img.shields.io/badge/license-MIT-green)
 
 <center>
   <strong>GUI testing and verification for AI coding agents on macOS.</strong><br/>
