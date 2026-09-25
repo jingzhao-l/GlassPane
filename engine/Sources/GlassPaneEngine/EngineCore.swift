@@ -1236,6 +1236,25 @@ public final class EngineCore {
         guard attachedApp != nil else {
             throw GPError(code: .notAttached, message: "no app attached")
         }
+        // R5-06: the degradation window used to advance only on `act`, so a
+        // read-only agent — one that observes, diagnoses and exports but never
+        // clicks — could run for hours against a leaking app and see nothing,
+        // because nothing was ever sampled. Sampling measures the attached
+        // process, not the click, so it belongs on any request that reaches one.
+        // `pingMs` is nil here on purpose: observe does not pay for a
+        // responsiveness round trip, and nil is an honest absence rather than a
+        // number borrowed from another operation.
+        if let degradationTracker, let attached = attachedApp {
+            let probeMetrics = metricsProbe?.metrics(for: attached.pid)
+            degradationTracker.record(
+                DegradationSample(
+                    timestamp: clock().timeIntervalSince1970,
+                    pingMs: nil,
+                    memoryBytes: probeMetrics?.memoryBytes,
+                    handleCount: probeMetrics?.handleCount
+                )
+            )
+        }
         let snapshot: AxTreeSnapshot
         do {
             snapshot = try channel.treeSnapshot(maxDepth: maxDepth)
@@ -1385,6 +1404,24 @@ public final class EngineCore {
             // is the absence of the surface, and a measured zero needs something
             // that measures.
             payload["unmapableStateFrames"] = inbox.unmapableStateFrameCount
+        }
+        // R5-06, second half: T9 escalates the circuit breaker only when two
+        // drivers trend together (`drivers.count >= 2`), a deliberate false-alarm
+        // guard — but until now a single trending channel, and the whole `watch`
+        // tier, were invisible to any reader, because the escalation only ever
+        // surfaced inside an act's evidence. Publishing the verdict here turns
+        // "memory is climbing, handles are not, tier=watch" into an observable
+        // fact instead of silence that reads as health. Absent when no tracker is
+        // wired (an engine built without T9): never a fabricated zero.
+        if let degradationTracker {
+            let watch = degradationTracker.verdict()
+            var block: [String: Any] = [
+                "tier": watch.tier.rawValue,
+                "samples": watch.sampleCount,
+                "longSession": watch.longSession,
+            ]
+            if !watch.drivers.isEmpty { block["drivers"] = watch.drivers }
+            payload["degradation"] = block
         }
         return payload
     }

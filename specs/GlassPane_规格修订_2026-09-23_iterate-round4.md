@@ -180,3 +180,31 @@ P1 v1.0 §2 实施记录项 3、P2 v2.1 §19.2、P4 v4.0 §33.1 观察 3 仍写
 - 路径校验的 Swift 半边其余缺口：`given` 双查、`recipeConfigPath`/`calibrationAssetsPath` 内容级校验、
   ownership/世界可写兜底（TS 已有）。`path-consistency.test.mjs` 现在**在文件头明说**自己只比名单不比语义。
 - P6 §5.4(3) 冻结形状表仍未逐格并入新增键；`--no-c33` 与 `--unattended-window` 是否需要一条部署约束。
+
+---
+
+# 追加二（2026-09-25，round 5）：T9 的采样面与 watch 层可见性（R5-06 裁决落地）
+
+业主口径延续"你来，全修掉"。原登记项"只读型 agent 永远看不到退化告警、单维度泄漏永不告警"
+按以下裁决落地，**不**通过放宽升级阈值实现：
+
+1. **采样面**：`DegradationTracker.record` 过去只在 `act` 路径被调用，于是 observe/diagnose
+   型集成跑几小时也不会产生一个样本。采样量的是**被 attach 进程**（RSS/fd），与"是否点击"
+   无关，因此 `observe` 现在同样记一个样本（`pingMs` 保持 nil —— observe 不付一次响应性
+   往返的代价，nil 是诚实的缺席，不是从别的操作借来的数）。
+2. **watch 层可见**：升级仍要求 `drivers >= 2`（两信号同向才判退化，避免把合法缓存增长当泄漏，
+   这条判据是刻意的，不改）。改的是**沉默**：`gp_probe_status` 现在发布
+   `degradation = {tier, samples, longSession, drivers?}`，于是"内存单向上倾、句柄没跟、
+   tier=watch"成为可被读到的事实，而不是与"健康"长得一模一样的缺席。未接线 tracker 的实例
+   **不带该键**（无面 ≠ 健康，与 `disconnections` 同一口径）。
+3. **测试**：`DegradationSurfaceTests` 三例钉住"每次 observe 恰一个样本""drivers 必须点名
+   单个上倾通道""无 tracker ⇒ 键不存在"。`ClassifierTests` 的文件头此前自称 full-branch
+   coverage 而全文件从未出现 `stateDiff` —— 该声称只对实际被跑过的分支成立，已改实。
+
+顺带在同一段代码里发现并修掉一条**"缺席不陈述"**（R5-07，编译器警告暴露）：
+`Classifier.evidenceLine` 用 `if let stateDiff` 把 `stateDiffSummary(pack)` 挡在外面，
+而后者内部才有 `stateDiff=unavailable` 分支 —— 于是没测到时整段从诊断证据里消失，
+而两行之上的像素通道是明说 `pixelDiff=unavailable` 的。现改为无条件调用并补两例
+（缺席必须说得出、测到时的完整形状 `source=…, changed=false, keys=[count]` 要钉住）。
+`axEvent`/`handlerProbe`/`responsiveness` 三处仍是"未测即不提"的旧形状，**未一并改**：
+那是报告文本格式的变更面，需要连 `smoke.md` 与面板渲染一起复核，登记为 R5-08。

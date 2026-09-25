@@ -1,8 +1,17 @@
 import XCTest
 @testable import GlassPaneEngine
 
-/// A2: classifier full-branch coverage — every decidable class plus both
-/// INCONCLUSIVE families and NO_ANOMALY (5.8 §5.3, P0 spec §7.1).
+/// A2: classifier coverage — every decidable class plus both INCONCLUSIVE
+/// families and NO_ANOMALY (5.8 §5.3, P0 spec §7.1).
+///
+/// The header used to claim "full-branch coverage" while `stateDiff` appeared
+/// nowhere in this file: the state channel — one of the two inputs that split
+/// T5 from T7 — was never put into a pack here. That hole is where
+/// `stateDiff=unavailable` lived unread for as long as the reporter's `if let`
+/// kept the nil case from ever reaching it (see
+/// `testStateChannelAbsenceIsStatedNotOmitted`). Claim kept only for what is
+/// actually exercised; the two state-channel tests below are the start of
+/// earning the old wording.
 final class ClassifierTests: XCTestCase {
 
     private func makePack(
@@ -170,5 +179,67 @@ final class ClassifierTests: XCTestCase {
         XCTAssertFalse(unknown.lowercased().contains("grant"), unknown)
         XCTAssertTrue(unknown.contains("circuitBreaker.reason"), unknown)
         XCTAssertTrue(next(for: nil).contains("circuitBreaker.reason"), "没有 reason 时同样不许猜")
+    }
+
+    // MARK: - the state channel in the evidence line
+
+    private func pack(withState state: StateDiffSignal?) -> EvidencePack {
+        EvidencePack(
+            operationId: "op_0123456789ABCDEFGHJKMNPQRS",
+            createdAt: "2026-09-14T12:00:00.000Z",
+            attribution: Attribution(level: .soft, contaminated: false),
+            circuitBreaker: CircuitBreaker(level: .normal),
+            signals: Signals(
+                act: ActSignal(
+                    selector: Selector(role: "AXButton", title: "Submit"),
+                    action: .press, actConfirmed: true
+                ),
+                stateDiff: state,
+                pixelDiff: PixelDiffSignal(
+                    changedPixelRatio: 0.1,
+                    bounds: Bounds(x: 1, y: 1, width: 2, height: 2),
+                    windowId: 12
+                )
+            )
+        )
+    }
+
+    /// The bug this pins: the caller gated `stateDiffSummary` on a non-nil value,
+    /// which made the helper's own `stateDiff=unavailable` string unreachable. So
+    /// an unmeasured state channel disappeared from the evidence line entirely,
+    /// while the pixel channel two lines above says it is unavailable — and a
+    /// reader who sees no state term at all has no way to tell "not measured"
+    /// from "the reporter forgot the channel". Absence has to be stated.
+    func testStateChannelAbsenceIsStatedNotOmitted() {
+        let (_, report) = Classifier.classify(pack(withState: nil))
+        XCTAssertTrue(
+            report.evidence.contains("stateDiff=unavailable"),
+            "the state channel must announce that it did not measure: \"\(report.evidence)\""
+        )
+        // Control, so the assertion above is not just "anything is in the line":
+        // the pixel channel that *was* measured reports its ratio instead.
+        XCTAssertTrue(report.evidence.contains("changedPixelRatio=0.1"), report.evidence)
+    }
+
+    /// The positive half, and the first time this file puts a state reading into
+    /// a pack at all: `source`/`changed`/keys must reach the line, and a
+    /// not-changed reading must be told apart from an unmeasured one.
+    func testStateChannelReadingAppearsInEvidenceLine() {
+        let unchanged = StateDiffSignal(
+            source: .z3KVC,
+            changed: false,
+            entries: [StateEntry(key: "count", before: "4", after: "4")]
+        )
+        let (_, report) = Classifier.classify(pack(withState: unchanged))
+        // Pinned as the whole rendered term (measured output, not a fragment
+        // that would still pass if the source or the keys dropped out).
+        XCTAssertTrue(
+            report.evidence.contains("source=z3-kvc, changed=false, keys=[count]"),
+            report.evidence
+        )
+        XCTAssertFalse(
+            report.evidence.contains("stateDiff=unavailable"),
+            "a measured channel that says nothing changed is not an unmeasured one: \(report.evidence)"
+        )
     }
 }

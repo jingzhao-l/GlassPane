@@ -233,9 +233,13 @@ public enum Classifier {
         if let handlerProbe = pack.signals.handlerProbe {
             parts.append("handlerProbe hitCount=\(handlerProbe.hitCount) late=\(handlerProbe.lateCount) [\(handlerProbeSummary(handlerProbe))]")
         }
-        if let stateDiff = pack.signals.stateDiff {
-            parts.append(stateDiffSummary(pack))
-        }
+        // Not wrapped in `if let stateDiff`: the whole point of the helper's
+        // `stateDiff=unavailable` string is the case where there is no reading,
+        // and gating the call on a non-nil value made that branch unreachable —
+        // a missing state channel simply vanished from the evidence line, while
+        // the pixel channel two blocks above says `pixelDiff=unavailable`.
+        // The compiler's "value never used" warning is what exposed it.
+        parts.append(stateDiffSummary(pack))
         parts.append("circuitBreaker=\(pack.circuitBreaker.level.rawValue)")
         return parts.joined(separator: "; ")
     }

@@ -32,6 +32,7 @@ N 轮 act → 内存/句柄斜率持续为正 → 联合裁决 degrading → evi
   退出码：0 = PASS，1 = FAIL，2 = NOT RUN（一条断言都没跑，或本轮实际触碰了
     真实 ~/.glasspane 因而结果不可信——两种都 ≠ 通过）。
 """
+import hashlib
 import json
 import os
 import signal
@@ -539,6 +540,72 @@ def find_leak_button(tree, depth=0):
     return None
 
 
+def _newest_source_mtime(source_root):
+    """`source_root` 下最新源文件的 mtime（跳过 .build 与点目录）。0.0 = 目录不存在/无源文件。"""
+    newest = 0.0
+    for dirpath, dirnames, filenames in os.walk(source_root):
+        dirnames[:] = [d for d in dirnames if d != ".build" and not d.startswith(".")]
+        for name in filenames:
+            if name.endswith((".swift", ".c", ".h", ".m", ".py", ".ts", ".js")):
+                try:
+                    newest = max(newest, os.path.getmtime(os.path.join(dirpath, name)))
+                except OSError:
+                    continue
+    return newest
+
+
+def require_current_build(pairs):
+    """实测"本轮被测的产物不早于它所声称构建自的源码"，并留下可回溯的指纹。
+
+    R4-02。此前两条端到端闸只检查产物**存在**，不检查它是**当前构建**：实测过一次
+    demo 停在旧能力集（hello 报 caps=['z1']，缺 z3/checkpoint），于是整轮"绿"测的是旧 SDK。
+    判据是产物的指纹与时间戳，不是"我刚刚 build 过"这句话——命令说过什么不等于发生了什么。
+    返回 (指纹行, 不成立的原因)。原因非空由调用方 NOT RUN(2)：过期产物跑出来的结论不能用。
+    """
+    lines, problems = [], []
+    for role, binary, source_root in pairs:
+        try:
+            with open(binary, "rb") as handle:
+                digest = hashlib.sha256(handle.read()).hexdigest()[:12]
+        except OSError as error:
+            problems.append(f"{role}: 产物读不出（{error}）——身份无法确认，不放行")
+            continue
+        built = os.path.getmtime(binary)
+        newest_src = _newest_source_mtime(source_root)
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(built))
+        lines.append(f"{role} sha256:{digest} mtime={when}")
+        if not newest_src:
+            problems.append(
+                f"{role}: 源码树 {source_root} 走不出任何源文件——无法判断产物是否当前，不放行"
+            )
+            continue
+        if built + 1.0 < newest_src:
+            problems.append(
+                f"{role} 比它所声称的源码树旧：{binary} 构建于 {when}，而 {source_root} 下最新源文件是 "
+                + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(newest_src))
+                + " —— 本轮会测到旧构建，改动不参与测量"
+            )
+    return lines, problems
+
+
+def reject_foreign_checkout(candidates, here, other_roots=("/Volumes/Eng-Dev/GlassPane",)):
+    """把"另一个工作副本里的构建产物"从**兜底**候选里剔掉（显式 argv/env 给定不受影响）。
+
+    同一台机器常并存多个 checkout。本脚本跑在 worktree 里，若兜底到
+    `/Volumes/Eng-Dev/GlassPane/engine/probe/.build/...`，测的就是另一棵树的代码，
+    而输出看起来完全正常——这与"构建过期"同族，都是拿不是本轮的东西当证据。
+    返回 (留下的候选, 被剔除的候选)。
+    """
+    real_here = os.path.realpath(here)
+    kept, refused = [], []
+    for one in candidates:
+        resolved = os.path.realpath(one)
+        inside_repo = resolved == real_here or resolved.startswith(real_here + os.sep)
+        foreign = any(resolved.startswith(os.path.realpath(root)) for root in other_roots)
+        (kept if inside_repo or not foreign else refused).append(one)
+    return kept, refused
+
+
 def build_and_launch_canary(workdir):
     src = os.path.join(workdir, "LeakCanary.swift")
     bin_path = os.path.join(workdir, "leak-canary")
@@ -614,6 +681,22 @@ def main():
             # 状态根隔离（B-01 + X-22）：先实测 daemon 自己把写入面落在本轮
             # --state-dir 那个根里，才起 daemon。证明不了 → NOT RUN(2)（本脚本 24 轮
             # act + T9 判定会把档案写进真实归档）。
+            # R4-02 的 t9 半边（与 .p6_smoke.py 同名同体的共享段）：daemon 二进制必须
+            # 不早于 engine/Sources，否则这 24 轮测的是旧 daemon。金丝雀每次由 swiftc
+            # 现编，不存在过期问题，所以这里只量 daemon。
+            fingerprints, stale = require_current_build(
+                [('daemon', daemon_bin, os.path.join(HERE, 'Sources'))]
+            )
+            if stale:
+                print('NOT RUN — 被测 daemon 不是当前构建，本轮未执行任何断言（NOT RUN ≠ PASS）：')
+                for line in stale:
+                    print('  ' + line)
+                print('  实测指纹：' + ' | '.join(fingerprints))
+                print('REMEDY: cd engine && swift build -c release（或 swift build）后复跑；'
+                      '--daemon-bin 显式指到别处的件，也要自己保证它是当前构建。')
+                sys.exit(2)
+            print('PASS 被测 daemon 产物身份与新鲜度已实测（' + ' | '.join(fingerprints) + '）')
+
             state_root, state_dir_args, daemon_env = daemon_isolation_env(workdir)
             require_proven_isolation(daemon_bin, daemon_env, state_root, state_dir_args)
             live_targets = live_state_targets(daemon_bin, probe_notes)
