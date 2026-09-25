@@ -1,5 +1,6 @@
 import SwiftUI
 import GlassPaneEngine
+import Darwin  // open/write/close/unlink + S_IRUSR/S_IWUSR + O_EXCL/O_NOFOLLOW（临时文件独占创建）
 
 /// 配方页（控制台「配方」tab）：面向内核 recipe 契约的只读结构浏览 + 模板 + 校验。
 ///
@@ -23,6 +24,9 @@ struct RecipesTabView: View {
     /// 校验结论（nil = 还没点过校验）。
     @State private var outcome: RecipeValidationOutcome?
     @State private var isValidating = false
+    /// 每次校验分配递增序号（token）：后台完成时仅当 token 仍最新才写 outcome，
+    /// 保证显示的结论一定对应当前编辑器内容，不被旧校验覆盖。
+    @State private var validationToken = 0
 
     enum RecipeValidationOutcome: Equatable {
         case idle
@@ -113,6 +117,7 @@ struct RecipesTabView: View {
                             .font(.callout)
                     }
                     .help("把模板文本加载进编辑器")
+                    .disabled(isValidating)
                     .accessibilityIdentifier("gp-recipe-template-\(template.title)")
                 }
                 Spacer()
@@ -238,6 +243,9 @@ struct RecipesTabView: View {
         guard !isValidating else { return }
         isValidating = true
         outcome = .idle
+        // 分配新 token：本次校验唯一标识。（非 &+ 也不溢出——开关顺序由 MainActor 保证。）
+        validationToken += 1
+        let token = validationToken
 
         // 0) 客户端先做 JSON 可解析性检查：解析失败直接报"不是合法 JSON"。
         let contents = editorText
@@ -258,10 +266,12 @@ struct RecipesTabView: View {
             return
         }
 
-        // 2) 暂存到临时文件（面板只读边界内，用完即删）。
-        let tempPath = NSTemporaryDirectory() + "recipe-check-\(UInt32.random(in: 0...UInt32.max)).json"
+        // 2) 以 0600 + O_EXCL + O_NOFOLLOW 独占创建临时文件（面板只读边界内，用完即删）。
+        //    随机名不可预测，加上 O_EXCL 就同时消掉"其他进程先占路径 / 符号链接"的 TOCTOU，
+        //    权限也不开给别人读。写入失败则走 writeFailed，绝不落成 0644。
+        let tempPath: String
         do {
-            try contents.write(toFile: tempPath, atomically: true, encoding: .utf8)
+            tempPath = try Self.createSecurely(contents: contents)
         } catch {
             outcome = .writeFailed
             isValidating = false
@@ -269,8 +279,9 @@ struct RecipesTabView: View {
         }
 
         Task.detached(priority: .userInitiated) {
+            // 清理放进 defer，读与不读都会删。
+            defer { try? FileManager.default.removeItem(atPath: tempPath) }
             let run = ConsoleModel.runDaemonCLI(binary: binary, arguments: ["--recipe-validate", tempPath])
-            try? FileManager.default.removeItem(atPath: tempPath)
             let result: RecipeValidationOutcome
             if let run {
                 result = Self.parseVerdict(run.output)
@@ -278,10 +289,33 @@ struct RecipesTabView: View {
                 result = .daemonUnavailable
             }
             await MainActor.run {
+                // 仅当本次校验仍是最新才写结论，避免旧内容结论覆盖当前编辑器显示。
+                guard self.validationToken == token else { return }
                 self.outcome = result
                 self.isValidating = false
             }
         }
+    }
+
+    /// 以 0600 权限 + O_EXCL/O_NOFOLLOW 独占创建临时文件（UUID 随机名，重试避撞名）。
+    /// 返回写入成功后的路径；彻底失败抛错，不落盘低权限/可被替换的诊断文件。
+    private static func createSecurely(contents: String) throws -> String {
+        let dir = NSTemporaryDirectory()
+        let retries = 16
+        let byteCount = contents.utf8.count
+        for _ in 0..<retries {
+            let path = dir + "recipe-check-\(UUID().uuidString).json"
+            let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+            guard fd != -1 else { continue }  // 撞名/被占/符号链接 → 换名重试
+            let written = contents.withCString { bytes in write(fd, bytes, byteCount) }
+            close(fd)
+            if written == byteCount {
+                return path
+            }
+            unlink(path)  // 写坏了就删掉，不留残缺诊断文件
+        }
+        throw NSError(domain: "glasspane.recipes", code: 1,
+                      userInfo: [NSLocalizedDescriptionKey: "无法以独占权限创建临时文件（重试次数已用完）"])
     }
 
     /// 解析 `--recipe-validate` 的输出 `{valid, errors[], recipeName}`（字段以
@@ -307,6 +341,7 @@ struct RecipesTabView: View {
                 Label("刷新", systemImage: "arrow.clockwise")
             }
             .help("重新进入配方页（内容保存在本机设置里，不会丢失）")
+            .disabled(isValidating)
             .accessibilityIdentifier("gp-refresh-recipes")
         }
     }

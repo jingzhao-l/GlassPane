@@ -105,7 +105,8 @@ struct EvidenceStatsView: View {
 
     @ViewBuilder
     private var levelDistribution: some View {
-        let rows = EvidenceStatsAggregator.levelCounts(from: model.summaries)
+        let summaries = model.summaries
+        let rows = EvidenceStatsAggregator.levelCounts(from: summaries)
         VStack(alignment: .leading, spacing: 4) {
             Text("熔断级别分布").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             ForEach(rows, id: \.label) { row in
@@ -115,6 +116,18 @@ struct EvidenceStatsView: View {
                     maxCount: EvidenceStatsAggregator.maxRowCount(rows),
                     tint: levelColor(row.label)
                 )
+            }
+            // 有越界值时明示：只标记"无法识别"，不代测其含义，且分布总和与 count 对齐。
+            let unrecognized = EvidenceStatsAggregator.unrecognizedLevelCount(from: summaries)
+            if unrecognized > 0 {
+                HStack(spacing: 6) {
+                    Image(systemName: "questionmark.circle")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("\(unrecognized) 条 circuitBreaker level 无法识别")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -228,12 +241,25 @@ struct EvidenceCountRow: Equatable {
 
 /// 本地扫描的纯聚合逻辑，独立函数便于复核；是否为最新以模型状态为准。
 enum EvidenceStatsAggregator {
-    /// 熔断级别 0–3 的计数（正常/降级/未确认/通道故障）。
+    /// 熔断级别 0–3 的计数（正常/降级/未确认/通道故障）＋越界值并入"其他(不识别)"
+    /// 档，使各档之和恒等于 summaries.count（任何越界都不再静默丢失）。
     static func levelCounts(from summaries: [EvidenceSummary]) -> [EvidenceCountRow] {
-        [0, 1, 2, 3].map { level in
+        let recognized = [0, 1, 2, 3].map { level in
             EvidenceCountRow(label: "\(level) \(levelName(level))",
                              count: summaries.filter { $0.circuitBreakerLevel == level }.count)
         }
+        let unrecognized = unrecognizedLevelCount(from: summaries)
+        guard unrecognized > 0 else { return recognized }
+        return recognized + [EvidenceCountRow(label: "其他(不识别)", count: unrecognized)]
+    }
+
+    /// 越界（<0 或 >3）熔断级别条数。只统计，不代测其含义。
+    static func unrecognizedLevelCount(from summaries: [EvidenceSummary]) -> Int {
+        summaries.filter { !isRecognizedLevel($0.circuitBreakerLevel) }.count
+    }
+
+    private static func isRecognizedLevel(_ level: Int) -> Bool {
+        (0...3).contains(level)
     }
 
     /// 诊断分类计数（nil 的分类不算，表示"未诊断"）。
