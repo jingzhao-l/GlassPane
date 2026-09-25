@@ -40,7 +40,7 @@ final class UILayoutAuditTests: XCTestCase {
         XCTAssertEqual(result.verdict, .advisory)
         XCTAssertEqual(result.coverage.measured, 3)
         XCTAssertEqual(result.coverage.ratio, 1.0, accuracy: 0.0001)
-        XCTAssertTrue(result.findings.contains { $0.rule == "tinyHitTarget" })
+        XCTAssertTrue(result.findings.contains { $0.rule == "smallHitTarget" })
     }
 
     func testEverythingAtOrAboveMinimumPasses() {
@@ -58,7 +58,7 @@ final class UILayoutAuditTests: XCTestCase {
             node("0", role: "AXGroup", frame: AxFrame(x: 5, y: 5, width: 8, height: 8), title: "容器"),
             node("1", role: "AXButton", frame: AxFrame(x: 20, y: 20, width: 88, height: 44)),
         ]))
-        XCTAssertFalse(result.findings.contains { $0.rule == "tinyHitTarget" && $0.elementPath == "0" })
+        XCTAssertFalse(result.findings.contains { $0.rule == "smallHitTarget" && $0.elementPath == "0" })
     }
 
     // MARK: - 阻塞级问题
@@ -144,6 +144,22 @@ final class UILayoutAuditTests: XCTestCase {
         XCTAssertEqual(finding.severity, .advisory)
     }
 
+    func testFindingStormsAreAggregatedNotDumped() {
+        // 真机 Finder 一次给出 36 条 overlap：49 条 finding 一次倒给模型等于没有 finding，
+        // 被读到的只有头几条，其余只是把上下文挤掉。计数必须完整，样本可以截。
+        var nodes: [AxGeometryNode] = []
+        for index in 0 ..< 12 {
+            nodes.append(node("\(index)", role: "AXButton",
+                              frame: AxFrame(x: 20, y: 20, width: 20, height: 12)))
+        }
+        let result = UILayoutAudit.audit(snapshot(nodes))
+        let small = result.findings.filter { $0.rule == "smallHitTarget" }
+        XCTAssertLessThanOrEqual(small.count, UILayoutAudit.maxExamplesPerRule, "样本必须截")
+        XCTAssertEqual(result.ruleCounts["smallHitTarget"], 12, "计数不能被截")
+        XCTAssertTrue(result.findings.contains { $0.rule == "findingsAggregated" })
+        XCTAssertEqual(result.verdict, .advisory)
+    }
+
     // MARK: - 重叠与截断
 
     func testSeverelyOverlappingTargetsAreAdvisory() {
@@ -155,6 +171,39 @@ final class UILayoutAuditTests: XCTestCase {
             result.findings.contains { $0.rule == "overlappingInteractiveTargets" },
             "近乎重合的两个目标必须被指出来: \(result.findings.map(\.rule))"
         )
+    }
+
+    func testSiblingsUnderOneControlAreNotReportedAsOccluding() {
+        // 真机证据：Finder 一次给出 36 条 overlap，全部是同一段控件里的子 radio。
+        // 它们是同一个控件的部分，不是互相遮挡——报出来只会淹没真的那几条。
+        let siblings = (0 ..< 4).map { index in
+            node("0/1/\(index)", role: "AXRadioButton", frame: AxFrame(x: 20, y: 20, width: 60, height: 24))
+        }
+        let sameParent = UILayoutAudit.audit(snapshot(siblings + [node("9", role: "AXButton", frame: AxFrame(x: 400, y: 400, width: 88, height: 44))]))
+        XCTAssertFalse(sameParent.findings.contains { $0.rule == "overlappingInteractiveTargets" },
+                       "同一段控件的子元素不该被报成互相遮挡")
+        XCTAssertEqual(sameParent.ruleCounts["overlappingInteractiveTargets"] ?? 0, 0,
+                       "计数也必须为 0：样本截断不能用来藏问题")
+        // 不同父节点、真正叠在一起的两个目标仍然要报。
+        let crossParent = UILayoutAudit.audit(snapshot([
+            node("0/1/0", role: "AXButton", frame: AxFrame(x: 20, y: 20, width: 88, height: 44)),
+            node("2/0", role: "AXCheckBox", frame: AxFrame(x: 24, y: 24, width: 80, height: 40)),
+        ]))
+        XCTAssertTrue(crossParent.findings.contains { $0.rule == "overlappingInteractiveTargets" })
+
+        // 同父但角色不同的两个目标（组里的按钮压住了复选框）仍然要报：
+        // 豁免只看"同一个控件的组成部分"，不看"住在同一个容器里"。
+        let sameParentDifferentRole = UILayoutAudit.audit(snapshot([
+            node("3/0", role: "AXButton", frame: AxFrame(x: 20, y: 20, width: 88, height: 44)),
+            node("3/1", role: "AXCheckBox", frame: AxFrame(x: 24, y: 24, width: 80, height: 40)),
+        ]))
+        XCTAssertTrue(sameParentDifferentRole.findings.contains { $0.rule == "overlappingInteractiveTargets" },
+                      "同父不同角色不该被一起豁免")
+    }
+
+    func testParentPathSplitting() {
+        XCTAssertEqual(UILayoutAudit.parentPath("0/3/1"), "0/3")
+        XCTAssertEqual(UILayoutAudit.parentPath("7"), "")
     }
 
     func testTruncatedOverlapScanCannotClaimClean() {

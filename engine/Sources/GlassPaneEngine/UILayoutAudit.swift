@@ -77,25 +77,36 @@ public struct LayoutAuditResult: Codable, Equatable {
     public let minHitTargetPt: Double
     /// 重叠扫描是否因规模被截断。截断过就不能声称"没有遮挡"。
     public let overlapScanTruncated: Bool
+    /// 每条规则的完整计数（样本可能被截，计数不截）。
+    public let ruleCounts: [String: Int]
 
     public init(
         verdict: LayoutVerdict,
         findings: [LayoutFinding],
         coverage: LayoutCoverage,
         minHitTargetPt: Double,
-        overlapScanTruncated: Bool
+        overlapScanTruncated: Bool,
+        ruleCounts: [String: Int] = [:]
     ) {
         self.verdict = verdict
         self.findings = findings
         self.coverage = coverage
         self.minHitTargetPt = minHitTargetPt
         self.overlapScanTruncated = overlapScanTruncated
+        self.ruleCounts = ruleCounts
     }
 }
 
 public enum UILayoutAudit {
-    /// Apple 人机界面指南的 44pt 最小可点击目标；这里作为默认阈值，可被调用方覆盖。
+    /// 默认命中目标阈值。**出处要写清**：44pt 来自 Apple 面向触控的 iOS HIG，
+    /// macOS 的菜单栏/工具条控件通常只有 20 出头 pt，所以这个默认值对 Mac 界面偏严——
+    /// 真机跑 Finder 时它一口气报了 9 条。它是一条线索，不是裁决：调用方应当按自己
+    /// 目标的界面密度传 `minHitTargetPt`（工具栏密集的应用传 20 也完全合理）。
     public static let defaultMinHitTargetPt = 44.0
+
+    /// 同一条规则最多列几个样本。49 条 finding 一次倒给模型，等于没有 finding：
+    /// 真正被读的是头几条，其余把上下文挤掉。超出部分按规则汇总进 ruleCounts。
+    static let maxExamplesPerRule = 5
 
     /// 重叠扫描的两两比较上限；超过则截断并如实标记。
     static let overlapPairBudget = 300
@@ -198,12 +209,13 @@ public enum UILayoutAudit {
             }
             if frame.width < minHitTargetPt || frame.height < minHitTargetPt {
                 findings.append(LayoutFinding(
-                    rule: "tinyHitTarget",
+                    rule: "smallHitTarget",
                     severity: .advisory,
                     elementPath: node.path,
                     role: node.role,
                     title: node.title,
-                    detail: "命中目标小于常见的 \(Int(minHitTargetPt))pt 习惯；不必然坏，但容易被误点或点不中。",
+                    detail: "命中目标小于本次阈值 \(Int(minHitTargetPt))pt（默认值取自 iOS 触控标准，"
+                        + "对 Mac 的菜单栏/工具条偏严）；不必然坏，但容易被误点或点不中。",
                     measured: ["width": frame.width, "height": frame.height, "minPt": minHitTargetPt]
                 ))
             }
@@ -252,9 +264,15 @@ public enum UILayoutAudit {
             truncated = measuredInteractive.count > candidates.count
             for i in 0 ..< candidates.count {
                 for j in (i + 1) ..< candidates.count {
-                    let (_, a) = candidates[i]
-                    let (_, b) = candidates[j]
+                    let (nodeA, a) = candidates[i]
+                    let (nodeB, b) = candidates[j]
                     guard a.area > 0, b.area > 0 else { continue }
+                    // 同父且同角色 = 一个控件的若干组成部分（分段控件/单选组的子
+                    // AXRadioButton 就是真机 Finder 那 36 条 overlap 的全部来源），
+                    // 它们共享矩形是设计如此，不是谁盖住谁。判据必须同时看父路径与角色：
+                    // 只看父路径会把根层两个真控件也豁免掉（既有单测当场抓到过一次）。
+                    if parentPath(nodeA.path) == parentPath(nodeB.path),
+                       normalizedRole(nodeA.role) == normalizedRole(nodeB.role) { continue }
                     let overlap = a.intersectionArea(with: b)
                     let smaller = min(a.area, b.area)
                     guard overlap / smaller > 0.5 else { continue }
@@ -325,13 +343,44 @@ public enum UILayoutAudit {
             verdict = .advisory
         }
 
+        // 先汇总，再截样：ruleCounts 保住"这类问题一共几条"这个数字，
+        // findings 只留前几条样本，免得一次调用把调用方的上下文吃掉。
+        var ruleCounts: [String: Int] = [:]
+        for finding in findings { ruleCounts[finding.rule, default: 0] += 1 }
+        var seen: [String: Int] = [:]
+        var examples: [LayoutFinding] = []
+        var droppedAny = false
+        for finding in findings {
+            let count = seen[finding.rule, default: 0]
+            if count >= maxExamplesPerRule { droppedAny = true; continue }
+            seen[finding.rule] = count + 1
+            examples.append(finding)
+        }
+        if droppedAny {
+            examples.append(LayoutFinding(
+                rule: "findingsAggregated",
+                severity: .advisory,
+                elementPath: nil, role: nil, title: nil,
+                detail: "同类问题只列了前 \(maxExamplesPerRule) 条样本，完整条数见 ruleCounts；"
+                    + "计数没有被截断，被截的只是样本。",
+                measured: ruleCounts.mapValues(Double.init)
+            ))
+        }
+
         return LayoutAuditResult(
             verdict: verdict,
-            findings: findings,
+            findings: examples,
             coverage: coverage,
             minHitTargetPt: minHitTargetPt,
-            overlapScanTruncated: truncated
+            overlapScanTruncated: truncated,
+            ruleCounts: ruleCounts
         )
+    }
+
+    /// "0/3/1" → "0/3"；根节点返回空串。
+    static func parentPath(_ path: String) -> String {
+        guard let last = path.lastIndex(of: "/") else { return "" }
+        return String(path[..<last])
     }
 
     /// 元素在窗口内的可见面积占比。

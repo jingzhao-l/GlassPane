@@ -71,7 +71,7 @@ public final class AXChannel: RuntimeChannel {
             return elapsedMs
         case .cannotComplete:
             throw Self.permissionOrPingTimeout(
-                action: "ping", processTrusted: AXIsProcessTrusted()
+                action: "pinging the app", processTrusted: AXIsProcessTrusted()
             )
         case .apiDisabled:
             throw ChannelError.axUnavailable(reason: "AX API is disabled")
@@ -157,13 +157,16 @@ public final class AXChannel: RuntimeChannel {
             role = try attributeString(element, kAXRoleAttribute, deadline: deadline) ?? ""
             geometry = try readFrame(of: element, deadline: deadline)
         } catch let error {
-            guard let reason = Self.budgetStopReason(error) else { throw error }
-            stopReason = reason
+            if depth == 0 { throw error }
+            let reason = Self.budgetStopReason(error) ?? Self.errorReason(error)
+            nodes.append(AxGeometryNode(path: label, role: Self.unreadSubtreeRole, geometry: .unread(reason: reason)))
+            if stopReason == nil { stopReason = reason }
             return
         }
         var title: String?
         if UILayoutAudit.isInteractiveRole(role) {
-            title = try attributeString(element, kAXTitleAttribute, deadline: deadline)
+            // 名字缺失不影响任何判定，所以读失败只降级为空，不记 unread。
+            title = try? attributeString(element, kAXTitleAttribute, deadline: deadline) ?? nil
         }
         nodes.append(AxGeometryNode(path: label, role: role, title: title, geometry: geometry))
         guard depth < maxDepth else { return }
@@ -171,8 +174,16 @@ public final class AXChannel: RuntimeChannel {
         do {
             children = try childElements(of: element, deadline: deadline)
         } catch let error {
-            guard let reason = Self.budgetStopReason(error) else { throw error }
-            stopReason = reason
+            // 根元素读不到 = 什么都没看到，照旧抛；子树读不到 = 这一截没看到，
+            // 记一条自述的 unread 占位、标注遍历不完整，然后继续走兄弟节点。
+            // 真机上这是常态（kAXError -25200：应用那一刻没回 AX），不是异常。
+            if depth == 0 { throw error }
+            let reason = Self.budgetStopReason(error) ?? Self.errorReason(error)
+            nodes.append(AxGeometryNode(
+                path: "\(label)/unread", role: Self.unreadSubtreeRole,
+                geometry: .unread(reason: reason)
+            ))
+            if stopReason == nil { stopReason = reason }
             return
         }
         guard let children else { return }
@@ -191,6 +202,25 @@ public final class AXChannel: RuntimeChannel {
     }
 
     /// 预算耗尽从叶子往上传：记一次原因，之后不再发新的 AX 调用。
+    /// 自述式占位角色：让审计与调用方都看得出这一条不是应用给的元素，
+    /// 而是"这一截我们没读到"。它不在可交互名单里，因此不会被判成控件。
+    static let unreadSubtreeRole = "unread-subtree"
+
+    /// 任何错误的可读形态（预算之外的降级路径也要能在结论里说清原因）。
+    /// 与实例方法 describe(_:) 分开命名，避免同名的两种重载让调用点含混。
+    static func errorReason(_ error: any Error) -> String {
+        guard let channelError = error as? ChannelError else { return String(describing: error) }
+        switch channelError {
+        case let .treeCaptureFailed(reason), let .axUnavailable(reason),
+          let .actRejected(reason), let .attributeUnavailable(reason),
+          let .pixelCaptureDenied(reason):
+            return reason
+        case .appNotFound: return "the app is gone"
+        case .assertTargetNotFound: return "target not found"
+        case .pingTimeout: return "the accessibility ping timed out"
+        }
+    }
+
     static func budgetStopReason(_ error: any Error) -> String? {
         guard case let channelError as ChannelError = error,
               case let ChannelError.treeCaptureFailed(reason) = channelError else { return nil }
@@ -311,7 +341,7 @@ public final class AXChannel: RuntimeChannel {
             throw ChannelError.attributeUnavailable(reason: "element does not expose \(attribute)")
         case .cannotComplete:
             throw Self.permissionOrPingTimeout(
-                action: "read \(attribute)", processTrusted: AXIsProcessTrusted()
+                action: "reading \(attribute)", processTrusted: AXIsProcessTrusted()
             )
         case .apiDisabled:
             throw ChannelError.axUnavailable(reason: "AX API is disabled")
@@ -551,11 +581,11 @@ public final class AXChannel: RuntimeChannel {
             return .unreadable(ChannelError.axUnavailable(reason: "AX API is disabled"))
         case .invalidUIElement:
             return .unreadable(ChannelError.axUnavailable(
-                reason: "the element went away while trying to \(action); re-attach and retry"
+                reason: "the element went away while \(action); re-attach and retry"
             ))
         default:
             return .unreadable(ChannelError.axUnavailable(
-                reason: "trying to \(action) failed (kAXError \(error.rawValue))"
+                reason: "\(action) failed (kAXError \(error.rawValue))"
             ))
         }
     }
@@ -595,7 +625,7 @@ public final class AXChannel: RuntimeChannel {
     static func permissionOrPingTimeout(action: String, processTrusted: Bool) -> ChannelError {
         guard processTrusted else {
             return ChannelError.axUnavailable(
-                reason: "accessibility permission revoked while trying to \(action)"
+                reason: "accessibility permission revoked while \(action)"
             )
         }
         return ChannelError.pingTimeout
