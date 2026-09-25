@@ -485,6 +485,10 @@ CIRCUIT_PIXEL_UNAVAILABLE_LABELS = (
     "pixel-capture-timeout",
     "pixel-capture-no-onscreen-window",
     "pixel-capture-window-outside-display",
+    # 操作把应用换到了另一个窗口（新开窗口/sheet 抢走前台）：前后截的不是同一个窗口，
+    # 像素通路如实"未测量"。这仍是一条像素通路的 excuse，不是把误判洗成通过——
+    # 引擎此时拒绝给 changedPixelRatio，而不是给一个跨窗口的假数字。
+    "pixel-capture-window-changed",
 )
 # A-08/R3-1: an unwatched window keeps this label in the archive even when the
 # operator declared the window unattended and the verdict therefore reads

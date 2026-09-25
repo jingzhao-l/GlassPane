@@ -7,7 +7,7 @@
 
 ## 项目概述 / Project Overview
 
-GlassPane 是 macOS 上面向 AI 代理的**运行时验证引擎**：代理经 MCP 调用 14 个 `gp_*`
+GlassPane 是 macOS 上面向 AI 代理的**运行时验证引擎**：代理经 MCP 调用 16 个 `gp_*`
 工具驱动真实应用，每次操作产出可复核的证据包（前后无障碍树、像素差异实测、归因结论、
 可回滚检查点）。产品的立身之本是**诚实性**——测不出的必须写"未验证"，绝不能为了
 好看而点亮指示器。任何改动若在这一点上让步，即使测试全绿也算失败。
@@ -43,7 +43,7 @@ npm 包里不得残留 `file:` 引用（CI 的 publish-shape 守卫专抓这个�
 - `engine/Sources/glasspane-settings/` — SwiftUI 面板；权限卡只展示 daemon 实测结果。
 - `engine/scripts/make-app.sh` — 两个 `.app` 的打包与 ad-hoc 签名（identifier 型 DR，
   让 TCC 席位跨重签存活）。
-- `mcp-shell/src/` — `dispatch`（JSON-RPC）、`tools`（14 个工具契约）、`engine-client`。
+- `mcp-shell/src/` — `dispatch`（JSON-RPC）、`tools`（16 个工具契约）、`engine-client`。
 - `installer/cli.js` — 环境预检→构建→打包安置→launchd→面板→使用说明；纯函数与副作用
   严格分离以便 `node:test` 覆盖。
 - `bridge/` — LLDB 附挂采集；`spike/` — 可行性实验与留档结果。

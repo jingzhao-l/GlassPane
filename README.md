@@ -104,14 +104,19 @@ all. GlassPane measures; it does not have taste. Use both for what they are good
 
 ## At a glance
 
-- **14 MCP tools over stdio** — Claude Desktop, Cursor, or any MCP host; `tools/list` is the
+- **16 MCP tools over stdio** — Claude Desktop, Cursor, or any MCP host; `tools/list` is the
   authoritative surface.
 - **Act-and-confirm in one call** — the operation returns the change it produced, so "my click did
   nothing" is a fact in the transcript rather than an argument later.
 - **Element-level assertions** — present / enabled / value, as booleans with the selector that was
   resolved.
+- **Layout operability audit** — `gp_audit_ui` walks element geometry and applies deterministic
+  rules: zero-sized or out-of-window controls are blocking; undersized hit targets, clipped
+  elements and overlapping targets are advisory. Geometry it could not read never counts toward a
+  `pass`, and a truncated or budget-stopped scan says so. On large interfaces the walk can stop
+  early by design; it then reports what it measured plus `complete: false` rather than nothing.
 - **Numerical pixel verification** — how much of the target region changed and where, computed
-  locally; no screenshot is stored or shipped to a model.
+  locally; that measurement stores no screenshot and ships none to a model.
 - **Attribution with a strength ladder** — `weak` by default; `strong` when the app under test
   embeds the probe SDK and confirms its own handler ran.
 - **Contamination detection** — if a human touches the app mid-operation, the measurement says so
@@ -119,6 +124,9 @@ all. GlassPane measures; it does not have taste. Use both for what they are good
 - **Checkpoints and rollback** — snapshot a baseline; restore by replaying recorded steps.
 - **Crash and runtime capture** — an [LLDB bridge](bridge) attaches to the running process for
   cases the accessibility layer cannot see.
+- **An explicit visual-review channel** — `gp_capture_view` hands one PNG of the window to *your*
+  model when the question is genuinely visual (does this look right). It is a pass-through: the
+  engine encodes and writes nothing, the image travels into the conversation and stops there.
 - **Project-scoped configuration** — per-app storage paths, recipes and calibration roots via
   `gp_project_*`.
 - **Honest by construction** — anything not measured reports as unverified. Indicators never light
@@ -248,8 +256,13 @@ Stated plainly, because these determine whether it fits your workflow:
   `decrement`, `showMenu`, `confirm`, `cancel`, `pick`. It does not write element values directly and
   does not post synthetic HID events, so free-text typing into a field is out of scope.
 - **Apps that lie or stay silent.** If a target exposes no useful accessibility tree, structural
-  verification is limited to what little it publishes; that is when the probe SDK (or a vision
-  model) earns its place.
+  verification is limited to what little it publishes; that is when the probe SDK — or
+  `gp_capture_view` plus a vision model — earns its place.
+- **A visual impression is not a measurement.** `gp_capture_view` exists for taste and
+  gestalt, which no rule can judge. But it does not repeat, it cannot be asserted, and it is
+  bounded by the daemon's frame budget (a large window is refused with a suggested `scale`
+  rather than quietly downsampled). Ask it "does this look wrong"; do not ask it "did the
+  checkbox change", because that is what `gp_assert_element` is for.
 - **`strong` attribution requires a cooperating app.** It means the app's own embedded probe
   confirmed the handler ran — see [SECURITY.md](SECURITY.md) for what that does and does not prove.
 
@@ -279,14 +292,21 @@ error containing the exact remedy command — you should not need a document to 
 | | `gp_observe` | Return the attached app's accessibility tree |
 | | `gp_act` | Perform one of the 7 accessibility actions and confirm the effect |
 | Assert | `gp_assert_element` | Pass/fail on an element property — present, enabled, value |
+| | `gp_audit_ui` | Read-only layout audit: element geometry plus deterministic rules, with a `pass` / `advisory` / `blocking` / `insufficient` verdict and its coverage |
 | | `gp_diagnose` | Classify a non-effecting operation: no change / late / contaminated |
 | Evidence | `gp_last_evidence` | Full evidence pack for the latest (or a given) operation |
 | | `gp_export_evidence` | Render one operation as an HTML or Markdown audit report |
 | | `gp_recent_reports` | Aggregate the last N operations into one audit view |
 | Rollback | `gp_snapshot` | Capture a digest-only baseline of the tree |
 | | `gp_restore` | Replay recorded steps back to the baseline, or diff against it |
+| Visual | `gp_capture_view` | Send one PNG of the current window to your model for visual review; writes nothing to disk |
 | Probe | `gp_probe_status` | Which attached apps have a live `GlassPaneProbe`, and what it reported |
 | Projects | `gp_project_list` / `gp_project_set` / `gp_project_get` | Register and read per-app configuration |
+
+`gp_audit_ui` records no operation and writes no evidence pack: it measures the interface as it
+currently stands, which is why its verdict is allowed to answer `insufficient` instead of
+confidently clean. Geometry is deliberately kept out of the tree digest — a hover, an animation or
+a moving cursor must not be able to make "did this action change this screen?" answer yes.
 
 ## What an evidence pack contains
 

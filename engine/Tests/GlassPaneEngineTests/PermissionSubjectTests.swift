@@ -389,7 +389,18 @@ final class PermissionSubjectTests: XCTestCase {
         let mapped = EngineCore.map(.pixelCaptureDenied(reason: "no window on screen"))
         XCTAssertTrue(mapped.remedy.contains("Screen Recording"))
         XCTAssertTrue(mapped.remedy.contains("--check-screen-permission"))
-        XCTAssertTrue(mapped.remedy.contains("INCONCLUSIVE"), "同时说明降级形态（P1 v1.0 §5）")
+        // 原来这里钉的是"remedy 必须解释 pixelDiff 会降级成 INCONCLUSIVE"。那是默认文案，
+        // 而全仓唯一把像素拒绝抛成错误的调用方是 `capture_view`——它没有 pixelDiff 可降级。
+        // gp_verify 的降级形态由证据包（熔断标签）与 `Classifier.pixelAbsentNextStep` 说，
+        // 不由这条错误路径说。默认文案于是成了：给一个不存在的通路作承诺。
+        XCTAssertFalse(mapped.remedy.contains("pixelDiff"),
+                       "没有调用方补话时不许替它声明降级形态：\(mapped.remedy)")
+        let verifyShaped = EngineCore.map(
+            .pixelCaptureDenied(reason: "no window on screen"),
+            degradation: "pixelDiff stays null and T6 is INCONCLUSIVE"
+        )
+        XCTAssertTrue(verifyShaped.remedy.contains("INCONCLUSIVE"),
+                      "由真正拥有 pixelDiff 的调用方补话时，这句话必须原样出现在 remedy 里")
     }
 
     // MARK: - §11.7 面板渲染的机器核验面（identifier 真源）

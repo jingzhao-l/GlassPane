@@ -167,6 +167,7 @@ public struct StateRoot: Equatable {
     /// is not a reason to refuse to *start*, and the writers keep refusing
     /// individually (`EvidenceStore.ensureIsolatedDirectory` refuses the write),
     /// so this sweep hardens what it can and says exactly what it could not.
+    @discardableResult
     public func tightenPermissions(log: EngineLog) -> [String] {
         var notes: [String] = []
         var info = stat()

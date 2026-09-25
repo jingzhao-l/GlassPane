@@ -45,12 +45,20 @@ final class PixelDiffTests: XCTestCase {
         XCTAssertNotNil(outcome.bounds)
     }
 
-    func testMismatchedDimensionsReportFullChange() throws {
+    /// 尺寸不同＝没有共同定义域可比。旧实现在这里返回 `changedPixelRatio = 1`
+    /// （"整屏都变了"）：一个像极了的测量值，实际一个像素都没比过。窗口在操作中间
+    /// 被 resize 是常见结局，"界面变了"成立，"100% 像素变了"不成立——未测量必须由
+    /// 调用方显式说，不能由差分函数替它编极值。
+    func testMismatchedDimensionsRefuseToInventARatio() {
         let before = TestImages.solid(100, width: 32, height: 32)
         let after = TestImages.solid(100, width: 16, height: 32)
-        let outcome = try PixelDiffer.diff(before: before, after: after)
-        XCTAssertEqual(outcome.changedPixelRatio, 1, accuracy: 1e-12)
-        XCTAssertNil(outcome.bounds)
+        XCTAssertThrowsError(try PixelDiffer.diff(before: before, after: after)) { error in
+            XCTAssertEqual(
+                error as? PixelDiffError,
+                .geometryChanged(beforeWidth: 32, beforeHeight: 32, afterWidth: 16, afterHeight: 32),
+                "错误里必须带上两个尺寸，否则调用方无从知道是'变了大小'而不是'编码器坏了'"
+            )
+        }
     }
 
     func testTinyAlphaDifferenceBelowToleranceIsUnchanged() throws {

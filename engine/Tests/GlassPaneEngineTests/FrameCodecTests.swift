@@ -175,7 +175,7 @@ final class FrameCodecTests: XCTestCase {
 
     func testMethodWhitelistMatchesWireNames() {
         XCTAssertEqual(EngineMethod.allCases.map(\.rawValue).sorted(), [
-            "act", "assert_element", "attach", "diagnose", "hello",
+            "act", "assert_element", "attach", "audit_ui", "capture_view", "diagnose", "hello",
             "last_evidence", "observe", "probe_status", "restore", "shutdown", "snapshot",
         ])
     }
