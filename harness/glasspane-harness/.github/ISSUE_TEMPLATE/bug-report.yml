@@ -1,0 +1,48 @@
+name: Bug report
+description: Something behaved differently from what the docs promise
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: `glasspane-harness --version`, and a `gp_probe_status` output.
+        Both are asked for below — they answer most "is it installed / is the engine
+        there" questions faster than a round trip.
+  - type: input
+    id: version
+    attributes:
+      label: glasspane-harness version
+      placeholder: "0.1.0 (output of `glasspane-harness --version`)"
+    validations:
+      required: true
+  - type: textarea
+    id: engine
+    attributes:
+      label: gp_probe_status output
+      description: The engine's self-report (version, capabilities, permissions).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what happened instead. Paste the tool
+        call and the engine's answer (including any `GP_E_*` code) verbatim — the code is
+        part of the contract.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: macOS version
+      placeholder: "15.6"
+    validations:
+      required: true
+  - type: checkboxes
+    id: consent
+    attributes:
+      label: Consent
+      options:
+        - label: The reproduction involves only apps I am allowed to drive.
+          required: true

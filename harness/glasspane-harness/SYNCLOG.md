@@ -2,6 +2,34 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-09-25 · v0.2.0：配套产品面回归（web 内嵌）+ README/基础设施（对齐 iterate 形态）
+
+owner 2026-09-25："那几个配套产品面还是需要的" + "README 等基础设施模仿 iterate 生态做"。
+
+- **产品面重新划线**（`product.json` → `product`，FORK.md 同步）：**发** CLI+TUI、**内嵌 web
+  应用**（默认恢复内嵌，与上游、与 iterate 把 dashboard 烤进 wheel 一致；`--skip-embed-web-ui`
+  出纯 CLI 构建；运行期 `OPENCODE_DISABLE_EMBEDDED_WEB_UI` 与降级路径未动）、仓内 `docs/`、
+  随仓 SDK/plugin；**不发** console/enterprise/stats/infra（私有 harness 没有"组织与额度后台"形态）、
+  Electron 桌面 app（第二批，需签名/公证账号）、**上游文档站**（`packages/web` 内容尚未私有化，
+  product.json 里标 `not-yet-ours`，不把上游文案当我们的文档发）。**内嵌实测**：带内嵌构建
+  `Smoke test passed: 0.2.0`，`serve --port 4399` 真的吐出内嵌 HTML 与资源（curl 验过）。
+- **README 双语重写**（iterate 同款结构）：居中标题 + 语言切换 + npm 下载/动态版本/CI/License/
+  macOS/Stars 徽章 + banner + 问题陈述（agent 无法诚实回答"界面动了吗"）+ 产品面表 + 安装
+  （四条通道 + 实测注记：npm≥11 `allow-scripts` 警告、全局前缀不可写的补救）+ 上手 + `gp_*` 表 +
+  证据四条律 + 文档索引 + 开发命令 + 许可/署名。
+- **基础设施补齐**：`assets/logo.svg` + `assets/banner.svg`（SVG：品牌是可 diff 的文本，不是二进制）、
+  产品 `CHANGELOG.md`（0.1.0 首发 + 0.2.0 本批）、产品 `SECURITY.md`（披露流程 + 四张 macOS
+  权限表 + 依赖钉定姿态）、`docs/` 六页（index/install/tools/evidence/migrate/troubleshooting）、
+  `.github/ISSUE_TEMPLATE`（bug 表单强制要 `gp_probe_status` 输出；feature 表单问"它靠哪条证据"）、
+  `.github/pull_request_template.md`（把本线纪律做成勾选清单：fork-diff 同批重记、product.json
+  先行、brand 闸、带反向控制的固定点、边界照实）。
+- **文档链接检查扩面**：`check-doc-links.mjs` 现在覆盖产品文档（24 份 / 212 条链接）——扩完立刻抓到
+  两处**写死了工具数目**（FORK.md 的 M1 行、SYNCLOG 的旧记录；连本条描述修复的句子也先被检查器
+  咬了一次——它对"数目字面量"一视同仁），按本线"清单从 `hello` 读、
+  不抄"的口径改成不写死数目。私有化换了门面，门面上的死链也得红。
+- 版本线 0.1.0 → **0.2.0**（产品面变更走 minor，pre-1.0 语义）；发版前 `product-surface` 复核清单↔
+  各脚本一致。
+
 ## 2026-09-25 · 首发：glasspane-harness v0.1.0 上 npm + split 远端仓建成（外部动作执行完毕）
 
 用户 2026-09-25 "其他所有问题全部修掉"之后执行（此前记为"等 owner 点头"的外部动作，本机 `gh` 与
@@ -108,7 +136,7 @@
      builtin 的那行 `visible = filtered.filter(tool.id !== "execute" || codeModeDescription)`，
      断言没有任何可见性谓词提到 gp_，且 code-mode 目录只由 MCP 工具构成（旗标打开也不会把 gp_*
      折进 MCP-only 描述里）。
-- 顺带核实并**结掉**一个旧挂账项：TUI 对 `attachments` 的渲染出口——现有六个 gp_* 工具**今天
+- 顺带核实并**结掉**一个旧挂账项：TUI 对 `attachments` 的渲染出口——现有 `gp_*` 工具**今天
   没有一个产出 attachment**（grep 为零），所以"没有渲染出口"目前还不是缺口；等 capture 类工具
   落地那天它才会变成真问题，已写进方案 §10 代替原来的含糊挂账。
 - 门禁：固定点 **60/60**；brand-surface 0 漂移；product-surface 86/86；fork-diff / tool-surface /
@@ -254,7 +282,7 @@
   4. 回滚用 `git checkout` + `git clean -fdq`，而 fork 镜像是**未跟踪**的：一次 `bun: command not found`（环境缺件，不是代码坏）被判成红闸，回滚把 23 个 vendored 文件**直接删了**。现在运行前做快照、回滚从快照恢复、绝不 `git clean` 自己创建的路径；控制实验：`BUN=/usr/bin/false` 强制红闸 → 镜像 23 个文件、内容签名、溯源清单三项全 PASS。
 - 环境如实记：这台机器的 **bun 不见了**（今天早些时候还用它构建过），按 fork 的 `packageManager: bun@1.3.14` 重装了 1.3.14（安装脚本往 `~/.zshrc` 追加了 PATH 一行）。`bun test` **必须从 `packages/opencode` 里跑**——仓库根有个故意的 `do-not-run-tests-from-root` 挡路；而且要用包脚本的 `--timeout 30000`，否则 `test/preload.ts` 的 afterAll（dispose + 删临时目录）会被 5 秒默认超时打断成"无名失败"。
 - 门禁复跑：fork `bun test` **35/35**、`tsgo --noEmit` **0 错**；仓内 build OK、kernel **90/90**、mcp-shell 176/176、installer 70/70、版本线 OK、doc-links OK、check-workflows OK、hook-liveness `--offline` OK、kernel-vendor OK、tool-surface OK、fork-diff 在线/离线双向 OK。
-- **未跑/未验证**：`bun run build` 整包未随本批重跑（`dist/` 还是 M1 那次）；**真模型轮次仍然没做**，所以"宿主在 `tool.execute.after` 之后真的会调到这个 hook"这条只有静态证据（`session/tools.ts:121-129`）+ 内部插件确实被装载（serve 起来无报错、`gp_*` 6 个工具在注册表里）+ hook 函数本体的端到端（E7）；M4/M5 未动。
+- **未跑/未验证**：`bun run build` 整包未随本批重跑（`dist/` 还是 M1 那次）；**真模型轮次仍然没做**，所以"宿主在 `tool.execute.after` 之后真的会调到这个 hook"这条只有静态证据（`session/tools.ts:121-129`）+ 内部插件确实被装载（serve 起来无报错、`gp_*` 工具都在注册表里）+ hook 函数本体的端到端（E7）；M4/M5 未动。
 
 ## 2026-09-25 · 度量侧收口：上游参照合一 + 工具面棘轮（不动 vendored 树）
 

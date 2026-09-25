@@ -1,0 +1,33 @@
+# Migrate from opencode
+
+If you used an upstream `opencode` install (or a build of this fork before the
+private customisation), here is the rename map. Nothing in the agent's behaviour changed
+except what this table lists; the evidence surface is additive.
+
+## Names
+
+| Before | After |
+|---|---|
+| `opencode` binary, `opencode-ai` npm package | `glasspane-harness` / `gp-harness` binaries, `glasspane-harness` npm package (+ `glasspane-harness-<platform>`) |
+| `~/.local/share/opencode`, `~/.config/opencode` | `~/.glasspane-harness` equivalents (the old ones are not read; the uninstaller can remove them) |
+| `opencode.json(c)` project config | `glasspane-harness.json(c)` — the old names are still read as legacy fallbacks |
+| `.opencode/` project directory | `.glasspane-harness/` — `.opencode/` is still read, and when both exist the product's directory wins the merge |
+| `x-opencode-directory` header, `OPENCODE_*` env vars | unchanged (kept as lineage identifiers on purpose) |
+| `@opencode-ai/*` workspace packages | unchanged (same reason) |
+
+## Commands and behaviour
+
+- `--version` now prints the product's manifest version verbatim. (It used to inherit
+  upstream's release-time patch bump and could print a version that was never built.)
+- `upgrade` / `uninstall` act on the product package. The curl self-upgrade path is gone:
+  it used to fetch and execute `opencode.ai/install`; use `npm install -g glasspane-harness`
+  or `scripts/install.sh`.
+- The hosted console / enterprise stack and the publishing paths that pushed to upstream
+  registries (docker, AUR, Homebrew tap) are gone from this product.
+
+## Kept deliberately
+
+The agent loop, provider integrations, sessions, permissions, the TUI, the web app and the
+SDK/plugin surfaces are upstream's, at tag `v1.18.32`. `FORK.md` and `SYNCLOG.md` record
+every customisation commit (`[gp]` prefix) with its measurements, so a future sync is a
+diff you can read rather than a claim.

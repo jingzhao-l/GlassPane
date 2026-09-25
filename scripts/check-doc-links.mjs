@@ -16,6 +16,29 @@ import path from 'node:path'
 const ROOT = path.resolve(import.meta.dirname, '..')
 
 /** 参与检查的对外文档；新增公共文档时在这里登记。 */
+// The product lives in a vendored subtree, and its docs (README pair, docs/ pages,
+// CHANGELOG/SECURITY) are as link-worthy as the repository's own. Listing them here
+// means a dead link in the *product* README is the same red as one in ours — the
+// private-ization moved the front door, and a front door with a broken link is still a
+// broken front door.
+const FORK_DOCS = [
+  'harness/glasspane-harness/README.md',
+  'harness/glasspane-harness/README.zh-CN.md',
+  'harness/glasspane-harness/CHANGELOG.md',
+  'harness/glasspane-harness/SECURITY.md',
+  'harness/glasspane-harness/FORK.md',
+  'harness/glasspane-harness/SYNCLOG.md',
+  'harness/glasspane-harness/docs/index.md',
+  'harness/glasspane-harness/docs/install.md',
+  'harness/glasspane-harness/docs/tools.md',
+  'harness/glasspane-harness/docs/evidence.md',
+  'harness/glasspane-harness/docs/migrate-from-opencode.md',
+  'harness/glasspane-harness/docs/troubleshooting.md',
+  'harness/glasspane-harness/.github/pull_request_template.md',
+  'harness/glasspane-harness/.github/ISSUE_TEMPLATE/bug-report.yml',
+  'harness/glasspane-harness/.github/ISSUE_TEMPLATE/feature-request.yml',
+]
+
 const DOCS = [
   'README.md',
   'README.zh-CN.md',
@@ -26,11 +49,13 @@ const DOCS = [
   'CHANGELOG.md',
   'ITERATE.md',
   '.github/pull_request_template.md',
+  ...FORK_DOCS,
 ]
 
 /** 成对文档：任一侧缺失即漂移（双语约定不能只留一条腿）。 */
 const MIRROR_PAIRS = [
   ['README.md', 'README.zh-CN.md'],
+  ['harness/glasspane-harness/README.md', 'harness/glasspane-harness/README.zh-CN.md'],
   ['SECURITY.md', 'SECURITY.zh-CN.md'],
   ['CONTRIBUTING.md', 'CONTRIBUTING.zh-CN.md'],
 ]

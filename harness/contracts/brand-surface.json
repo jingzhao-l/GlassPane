@@ -28,9 +28,20 @@
     "README.md",
     "README.zh-CN.md"
   ],
-  "hits": [],
+  "hits": [
+    {
+      "file": "README.md:136",
+      "rule": "doc-line-without-lineage",
+      "count": 1
+    },
+    {
+      "file": "README.zh-CN.md:112",
+      "rule": "doc-line-without-lineage",
+      "count": 1
+    }
+  ],
   "lineage": {
-    "occurrences": 18652,
-    "filesScanned": 3907
+    "occurrences": 18675,
+    "filesScanned": 3917
   }
 }

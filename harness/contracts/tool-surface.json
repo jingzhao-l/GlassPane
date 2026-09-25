@@ -17,7 +17,7 @@
       "ratio": 0.1572
     },
     "fork": {
-      "loc": 2347,
+      "loc": 2348,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -87,7 +87,7 @@
         {
           "file": "packages/opencode/script/build.ts",
           "kind": "edited",
-          "lines": 22
+          "lines": 23
         },
         {
           "file": "packages/opencode/script/postinstall.mjs",
@@ -260,7 +260,7 @@
           "lines": 197
         }
       ],
-      "ratio": 0.0956,
+      "ratio": 0.0957,
       "vendorExcluded": {
         "files": 10,
         "lines": 1150
@@ -271,7 +271,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 6206,
+  "totalToolSurfaceLoc": 6207,
   "note": null,
   "carried": null
 }

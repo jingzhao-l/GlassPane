@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 180" role="img" aria-label="GlassPane Harness — evidence-honest GUI verification for macOS apps">
+  <rect width="720" height="180" rx="16" fill="#0b1220"/>
+  <g transform="translate(40 52) scale(1.2)">
+    <path d="M0 0h48v8H0zM0 14h32v8H0z" fill="#38bdf8"/>
+    <path d="M0 28h40v8H0z" fill="#f472b6"/>
+    <circle cx="44" cy="19" r="7" fill="#facc15"/>
+  </g>
+  <text x="130" y="86" font-family="-apple-system,Segoe UI,Helvetica,Arial" font-size="34" font-weight="700" fill="#e2e8f0">glasspane-harness</text>
+  <text x="132" y="122" font-family="-apple-system,Segoe UI,Helvetica,Arial" font-size="17" fill="#94a3b8">Evidence-honest GUI verification for macOS apps</text>
+  <text x="132" y="148" font-family="-apple-system,Segoe UI,Helvetica,Arial" font-size="14" fill="#64748b">an opencode fork · the engine decides, the harness shows you</text>
+</svg>

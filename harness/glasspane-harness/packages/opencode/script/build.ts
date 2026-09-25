@@ -21,12 +21,14 @@ const baselineFlag = process.argv.includes("--baseline")
 const skipInstall = process.argv.includes("--skip-install")
 const sourcemapsFlag = process.argv.includes("--sourcemaps")
 const plugin = createSolidTransformPlugin()
-// [gp] Product decision (product.json → product.note): the harness ships CLI+TUI,
-// so the embedded Web UI is **opt-in** here (upstream embedded it by default). The
-// runtime flag OPENCODE_DISABLE_EMBEDDED_WEB_UI and the graceful fallback in
-// server/shared/ui.ts are untouched, so embedding can come back with --embed-web-ui.
-const embedWebUi = process.argv.includes("--embed-web-ui")
-const skipEmbedWebUi = !embedWebUi
+// [gp] Product decision (revised 2026-09-25 after owner input: "那几个配套产品面
+// 还是需要的"): the web app IS a product face and is embedded by default again,
+// like upstream and like iterate-harness baking its dashboard into the wheel.
+// `--skip-embed-web-ui` stays for a CLI-only build (it is what a headless CI lane
+// or a slow machine wants); the runtime flag OPENCODE_DISABLE_EMBEDDED_WEB_UI and
+// the graceful fallback in server/shared/ui.ts are untouched, so a build without
+// the bundle still starts and says the UI is absent instead of failing.
+const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
 
 const createEmbeddedWebUIBundle = async () => {
   console.log(`Building Web UI to embed in the binary`)

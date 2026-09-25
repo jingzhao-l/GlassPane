@@ -1,47 +1,42 @@
-# Security
+# Security Policy
 
-## IMPORTANT
+## Reporting a vulnerability
 
-We do not accept AI generated security reports. We receive a large number of
-these and we absolutely do not have the resources to review them all. If you
-submit one that will be an automatic ban from the project.
+Report privately to the maintainer of
+[GlassPane](https://github.com/jingzhao-l/GlassPane) (the engine project and the owner of
+this product). Include: what you ran, the version (`glasspane-harness --version`), the
+engine version (`gp_probe_status` output), and a reproduction. Do not open a public issue
+for a suspected vulnerability in the engine or the harness.
 
-## Threat Model
+Please do not test against other people's applications without permission. This harness
+can move a real UI (`gp_act`); "it is just a local app" is exactly the property that
+makes a reportable bug.
 
-### Overview
+## What this product does with permissions
 
-OpenCode is an AI-powered coding assistant that runs locally on your machine. It provides an agent system with access to powerful tools including shell execution, file operations, and web access.
+On macOS the `gp_*` tools need the GlassPane engine, which needs system permissions:
 
-### No Sandbox
+| Permission | Why | If missing |
+|---|---|---|
+| Accessibility | read and drive the accessibility tree (`gp_observe`, `gp_act`) | engine reports the seat as not granted; the tool call answers with a remedy |
+| Input monitoring | correlate input events with observed changes | attribution quality drops (engine-side, reported) |
+| Screen recording | pixel diffs | `pixelDiff` signal absent; the engine says so |
+| Developer tools (probe SDK) | optional in-app instrumentation | optional; the engine advertises it as absent |
 
-OpenCode does **not** sandbox the agent. The permission system exists as a UX feature to help users stay aware of what actions the agent is taking - it prompts for confirmation before executing commands, writing files, etc. However, it is not designed to provide security isolation.
+Every mutating tool call goes through the harness permission plane (a prompt) before the
+engine is asked to act, and the engine — not the harness — decides what happened. The
+harness's own local state lives under `~/.glasspane-harness` (0700) and the decision log
+is written 0600. Nothing in the tool surface writes inside the engine's state root; the
+binding refuses that path by design.
 
-If you need true isolation, run OpenCode inside a Docker container or VM.
+## Dependency posture
 
-### Server Mode
-
-Server mode is opt-in only. When enabled, set `OPENCODE_SERVER_PASSWORD` to require HTTP Basic Auth. Without this, the server runs unauthenticated (with a warning). It is the end user's responsibility to secure the server - any functionality it provides is not a vulnerability.
-
-### Out of Scope
-
-| Category                        | Rationale                                                               |
-| ------------------------------- | ----------------------------------------------------------------------- |
-| **Server access when opted-in** | If you enable server mode, API access is expected behavior              |
-| **Sandbox escapes**             | The permission system is not a sandbox (see above)                      |
-| **LLM provider data handling**  | Data sent to your configured LLM provider is governed by their policies |
-| **MCP server behavior**         | External MCP servers you configure are outside our trust boundary       |
-| **Malicious config files**      | Users control their own config; modifying it is not an attack vector    |
-
----
-
-# Reporting Security Issues
-
-We appreciate your efforts to responsibly disclose your findings, and will make every effort to acknowledge your contributions.
-
-To report a security issue, please use the GitHub Security Advisory ["Report a Vulnerability"](https://github.com/anomalyco/opencode/security/advisories/new) tab.
-
-The team will send a response indicating the next steps in handling your report. After the initial reply to your report, the security team will keep you informed of the progress towards a fix and full announcement, and may ask for additional information or guidance.
-
-## Escalation
-
-If you do not receive an acknowledgement of your report within 6 business days, you may send an email to security@anoma.ly
+- Upstream opencode is **pinned** (`v1.18.32`) and the divergence from that pin is
+  measured, not described: `harness/tools/fork-diff.mjs` and the weekly
+  `harness-contract` workflow.
+- The vendored `@iterate/kernel` mirror is pinned by per-file sha256 with a provenance
+  manifest.
+- Dependabot is disabled on purpose: an auto-bump can pass this repo's CI and still
+  invalidate the recorded divergence surface.
+- npm releases carry provenance in CI (Trusted Publisher, staged-only); the install path
+  is `npm install -g glasspane-harness` or the reviewed one-click installer.
