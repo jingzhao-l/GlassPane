@@ -13,7 +13,7 @@
 2. **fork 比预想的便宜，但"便宜"不改变形态**：五项能力实测四项零 patch、只有"证据卡片渲染进会话流"必须改上游代码。**用户 2026-09-24 裁决：做产品级定制 fork**（形态见 §7.5），本文早先"五薄模块改成 npm 插件包 + 单文件 opt-in patch"的建议作废——"能外挂"不等于"该外挂"，GlassPane 的 harness 要 own the surface，像 `iterate-harness` 那样。零 patch 的实测结果因此降级为一条信息：它告诉我们哪些定制即便做了也**不会**与上游打架。
 3. **代价从"patch 面积"移到了三处别的地方**：① 上游正在并行重写 v2 插件系统，我们挂的是它公开说将来要换掉的 v1 形状；② **失效方式是静默的**——本次在 `v1.18.32` 全树实测确认 `Hooks["permission.ask"]` **只有声明、零触发点**（权限服务对 plugin host 零引用），而上游仓内文档却把它写在"Hook surface"里；③ 上游无 semver 政策、无弃用文档、每周 1–2 次发布，"失败即冻结升级"这条纪律**必须我们自己建机制**，因为 iterate 侧的同名纪律实测只存在于纸面（§6.2）。
 4. **Phase B 的第 0 号动作是发布 kernel，不是写功能**：`npm view @iterate/kernel` 实测 **404**，包体 `private: true` 且**没有 license 字段** → "kernel 以 npm 依赖进入 fork"今天物理上做不到。
-5. 三条与开工直接相关的既有事实（本次实测，全部新发现）：**"<10% 代码量"铁律在工具面 A 上已不成立（17.8%）且仓库内无人量它**；**mcp-shell 与 daemon 双写同一个 `~/.glasspane/projects.json`**（审计里 B-1/A-15 就是同一缺陷的两个副本）；**文档里的标准 kernel 同步命令会把 A-13 的修复删掉**——`tools/sync-kernel.sh` 已加三道守卫并实测拒绝（§10）。
+5. 三条与开工直接相关的既有事实（本次实测，全部新发现）：**"<10% 代码量"铁律在工具面 A 上已不成立（17.8%）且仓库内无人量它**（09-25 已配棘轮闸，见 §3-1）；**mcp-shell 与 daemon 双写同一个 `~/.glasspane/projects.json`**（审计里 B-1/A-15 就是同一缺陷的两个副本）；**文档里的标准 kernel 同步命令会把 A-13 的修复删掉**——`tools/sync-kernel.sh` 已加三道守卫并实测拒绝（§10）。
 
 ---
 
@@ -68,13 +68,14 @@
 两条由此产生的、直接约束 fork 的事实：
 
 1. **"<10% 代码量"铁律（三条架构铁律之一）在工具面 A 上已不成立**：3,719 / (17,197+3,719) = **17.8%**。而且这不是计量分歧——mcp-shell 里最大的两块是 `tools.ts`(1003) + `project-registry.ts`(778) + `engine-client.ts`(698)，后两块里确实有真逻辑，不是纯协议翻译。**仓库内没有任何自动化检查在量这个比例**，所以它是无声漂移的。fork 之前必须二选一：要么把铁律改写成可测口径并配闸（例如"工具面不得自行判定任何证据语义"这类可 grep 的约束 + LOC 比例告警），要么正式修订铁律数值。不处理就开工，等于给同一个失败模式加第二个实例。
+   **✅ 已选并落地（2026-09-25，`harness/tools/tool-surface.mjs` + `contracts/tool-surface.json`，接进 `ci.yml` 的 `tool-surface` job）**：选"配闸"，**不改数值**——把 10% 改成 20% 只会让第二次无声漂移变得合法，而这条律要防的从来不是某个数字，是"没人知道工具面长厚了"。闸的形态是**棘轮**：基线记在当前实测值，任一工具面的 LOC 超过基线即红，出路是同批 `--record` 并在提交里说明为什么长。**口径变更要写明**：分母从"engine + A"改成"engine + A + B"（fork 现在是第二个工具面，铁律问的是"占代码量"，不是"占引擎量"），因此 A 读作 **17.33%** 而不是 17.78%；分子、行数算法（`wc -l` 语义）与 §3 表格完全一致。B 当前 **539 行 / 2.51%**，逐文件可查（`preflight.sh` 83、`glasspane/daemon.ts` 171、`glasspane/index.ts` 276、`registry.ts` 的 `+9`）。**负例已实测**：A +3 行红、B +20 行红、给已列入 `edited` 的 `registry.ts` 再加 3 行也红（证明 `+N` 是照参照克隆重算的）、删 `fork-diff.json`（＝归因不能）也红。**一条边界如实挂账**：CI 没有参照克隆，所以那里量不到的是"上游字节变了多少"这一维（`tool-surface` 离线时把 vendored 文件的行数降级为上次记录并打印 `NOT re-measured`）；**"我们这一侧改了什么"在 CI 里是抓得住的**——同一批给 `fork-diff` 金样加了 fork 侧内容哈希钉，无克隆也能核对（实测 1 秒，已进 `install-gate`）。这条是过程中发现的盲区当场关掉的：加哈希钉之前，给已在改动名单里的 `registry.ts` 塞 3 行，`fork-diff --check` 与占比闸都各以不同理由看不见/只看见行数，名单却"没变"。可 grep 的那半个铁律（"工具面不得自行判定证据语义"）仍是**未做**项，见 §9-6。
 2. **mcp-shell 与 daemon 双写同一个 `~/.glasspane/projects.json`**（TS：`project-registry.ts:105` 直接 `homedir()/.glasspane/projects.json`；Swift：`ProjectRegistry.swift:23` 同一文件），两边各自实现了"损坏拒覆写/唯一临时文件名/读回比对"这套逻辑——2026-09-22 审计里 B-1（Swift 侧）与 A-15（TS 侧）是**同一个缺陷的两个副本**，修了两次。fork 的五薄模块绝不能带第三份这种复制。这条要在方案里落成硬约束（写进 §patch 纪律），并在契约测试里体现：工具面对同一份状态文件的写路径只能有一个。
 
 ---
 
 ## 4. 上游事实（opencode @ `v1.18.32`）
 
-参考检出：`/Volumes/Eng-Dev/.upstream/opencode-1.18.32`（142 MB，仓库外只读参照，本节 grep 结论以此为准）。
+参考检出：`/Volumes/Eng-Dev/.upstream/opencode-1.18.32`（142 MB，仓库外只读参照，本节 grep 结论以此为准）。09-25 起两份参照**合一**：`hook-liveness` 与 `fork-diff` 都读仓内 gitignore 的 `.external/opencode`（同一 tag 下两份参照对 20 个钩子的判定逐字一致，实测后合并；两个"上游"各说各话正是这条线要防的失效）。
 
 ### 4.1 身份、许可与节奏（本次用 `gh api` 复核）
 
@@ -175,11 +176,12 @@ Phase B 原文动作 = "两个 TS 壳消费 kernel v0.1（invariants + decision 
 1. **kernel 里没有那些东西**：`kernel/src` 573 行，导出面只有 3 份 schema + zod 镜像 + 4 个 `parse*` + `KernelSchemaError`；对 `src/`+`schemas/` grep `invariant|dimension|transaction` **零命中**。无 invariant 引擎、无 decision log 写入器、无审计链、无维度系统、无事务原语。
 2. **kernel 上不了 npm**：`npm view @iterate/kernel` → 404；`private: true` 且 `package.json` **没有 license 字段**。"npm 依赖进 fork"今天物理上做不到——这是 Phase B 的第 0 号动作。
 3. **canonical 落后于镜像**：`iterate-skill/kernel` 停在 `0.1.0-draft.1`（5 fixtures），GlassPane 镜像是 `1.1.1`（9 fixtures，含冻结与读侧兼容）。`diff -rq` 实测差异仅在 `evidence-pack.ts`/`parse.ts`/`index.ts`/`evidence-pack.test.mjs` + 4 个 mirror-only fixture，**镜像是严格超集 → A-13 的修复从未回流**。
-4. **文档里那条标准同步命令会当场把第 3 条炸掉**：`tools/sync-kernel.sh` 原本是裸 `rsync -a --delete`。实测会删 `fixtures/evidence-pack.ok-04-legacy-draft.json` 等 4 件、回退 `parse.ts`/`index.ts`，从而打断 `mcp-shell/src/tools.ts:729` 对 `parseEvidencePackRead` 的引用，并让版本线门禁必红。**已加三道守卫并验证**（§10）。
+4. **文档里那条标准同步命令会当场把第 3 条炸掉**：`tools/sync-kernel.sh` 原本是裸 `rsync -a --delete`。实测会删 `fixtures/evidence-pack.ok-04-legacy-draft.json` 等 4 件、回退 `parse.ts`/`index.ts`，从而打断 `mcp-shell/src/tools.ts:729` 对 `parseEvidencePackRead` 的引用，并让版本线门禁必红。**已加三道守卫并验证**（§10；守卫 ② 的形态在 09-25 改过，见下）。
+5. **守卫 ② 第一版写错了断言对象**（2026-09-25 自我订正）：我最初拿"canonical 版本 == 根版本"当放行条件，看上去严谨，实际是**拿一个不该由镜像决定的量当闸**——版本号归 canonical 的发布节奏管，而 GlassPane 侧所有位点由 `scripts/set-version.mjs` 统一压成一条线。拒掉一次合法同步（`0.1.0-draft.1 != 1.1.1`）既不保护任何东西，还会把唯一出路变成"先给 canonical 改版本号"，即为了让尺子变绿去改被测量物。改为**语义闸**：逐个断言消费者实际 import 的导出（`parseEvidencePack`/`parseEvidencePackRead`/`parseDecisionLogEntry`/`parseRecipeConfig`）在 canonical 的 `src/index.ts` 里存在，缺则拒绝并点名会断的消费者；拷贝后用 `set-version.mjs` 把镜像版本号重新压回本仓线。
 
 建议顺序（每步单独可验收）：
 
-1. 镜像→canonical **回流**（4 文件 + 4 fixture + 版本号），使 canonical ≥ 镜像；
+1. 镜像→canonical **回流**（4 文件 + 4 fixture + 版本号），使 canonical ≥ 镜像；**✅ 已执行（2026-09-25，`iterate-skill` 本地提交 `d893045`，8 files / 426 insertions，canonical 侧 `npm test` 59/59）**。版本号按上面第 5 条的裁决**不跟随**：canonical 保留自身的 `0.1.0-draft.1` 发布节奏，镜像落地后由 `set-version.mjs` 压回 1.1.1。回流后 `tools/sync-kernel.sh` 的真实同步（非 dry-run）在两条工作树上分别验证：worktree 第一次后验闸红（`tsc: command not found`，环境缺件不是内容问题）并**如实回滚**（`git diff kernel/` 归零、版本仍 1.1.1）——那次之后补装依赖重跑，两条树**都全绿**（`mirror @ d893045`、`post-sync gates green`、跑完 `git status -- kernel` 空：镜像内容已等于 canonical，守卫放行合法同步而不制造假改动）。
 2. canonical 侧补 **decision log 写入器 + 审计链映射**，并给它第一个真实生产者——那个生产者就是插件侧的 M2，故 2 与 5 互为前置，插件骨架先行；
 3. 去掉 `private`、定 license（MIT/Apache-2.0/BSD 三选一）、发 npm，`@glasspane/opencode-harness` 才能把它作为传递依赖带走；
 4. `decision-log-entry` schema 随第一个真实生产者由 draft 转冻结（与综述 §12.2 风险 4 的既定对冲口径一致，不再无端领先）；
@@ -209,22 +211,27 @@ Phase B 原文动作 = "两个 TS 壳消费 kernel v0.1（invariants + decision 
 | **地板正在换**：上游 v2 插件系统并行重写（`packages/plugin/src/v2/{effect,promise}`；`PLAN.md` 自陈"是实现计划不是当前 API 文档"，其目标之一"内外部插件使用同一公共 API"＝承认现在不是）；`compaction.ts` 附近自述非稳定 | 参考检出目录实存 + 调研方读 | M1–M4 放 npm 包而非 fork：地板换了只重跑契约测试，不动 patch；pin tag，只在 `v1.19.x`/`v2` 插件边界重评 base |
 | **静默死亡而非响亮失败**：死钩子（§5.1）、code-mode 短路、数组顺序优先级、仓内文档写错 | 本次全树 grep 实测 | hook-liveness 测试作**必跑闸**（唯一能抓这类问题的机制）；不依赖 release notes |
 | **唯一 patch 目标不稳**：`routes/session/index.tsx` 2,670 行（本次实测行数）、3 个月 15 次提交，上游有激进重排版的 `AGENTS.md` 风格规约 | 行数本次实测；churn 二手 | ~~"默认走 slot、patch ≤120 行"~~（已被 §7.5 裁决作废）。改后的对冲：M5 就在 fork 里改这个文件，但**改动面进 diff-surface 金样**，同步上游时若该文件被上游重排，冲突会显式出现在 `SYNCLOG.md` 而不是被静默覆盖 |
-| **`<10%` 铁律已破且无人量**：工具面 A 实测 17.8%（§3） | 本次 LOC 实测 | fork 前先定口径 + 配自动化测量闸；否则同一失败模式出现第二实例 |
+| **`<10%` 铁律已破且无人量**：工具面 A 实测 17.33%（§3，新口径） | 本次 LOC 实测 | ✅ 已配棘轮闸（`harness/tools/tool-surface.mjs`，进 CI `tool-surface` job，负例实测可红）；数值不改，越限状态如实记在金样里，闸只挡"没被记录的增长" |
 | **状态双写**：`projects.json` 已有 TS/Swift 两份实现（§3） | 本次实测两侧路径 | 五模块硬约束"不得新增对 daemon 状态文件的旁路写"，并把"写路径唯一"做成契约测试断言 |
 | **fork 退化成第二代码库**（iterate 侧已付过这笔钱，§6.2） | 本次实测 144 文件漂移，且其设计文档写"8 处定点" | ~~"只允许 series 形态"~~（§7.5 裁决作废：产品 fork 允许自由改）。真正的对冲是**可测量**：diff-surface 工具 + 金样 + `[gp]` 提交前缀清单 + 每次同步的冲突入 `SYNCLOG.md`。放弃的是"对上游 rebase 的能力"，这项代价已在 §7.5 明码写出，不允许再靠文档粉饰 |
 | **MCP 零 fork 通路已存在，会稀释 fork 的必要性**：opencode 原生消费外部 MCP（`glasspane-mcp` 直接可用），只是渲染走 `GenericTool` 很丑 | 调研方读 `mcp/index.ts` + `registry.ts:286` | 把 fork 的价值锚在 (a)/(d)/(e) 三件 MCP 做不到的事上；若 (c) 最终与 MCP 通路等价，就从 fork 范围删掉，不为叙事保留代码 |
 
-## 9. 待用户裁决
+## 9. 裁决记录（原"待用户裁决"）
 
-1. 上游坐标要不要回写进 PRD/综述：PRD 从未钉过 repo/tag（本文早期版本说它写了 `sst` 是我说错了，已订正），现在 `harness/upstream.json` 是事实真源。按 P4 §32-6"综述不改写、要改另起版本"的规则，这一步需要你裁决是**另起 5.9 综述版本**，还是让 PRD 单独引用 `harness/upstream.json` 而不复制数字。
-2. **"五薄模块"是否改口径**为"M1–M4 npm 插件包（零 patch）+ M5 单文件 opt-in patch"。推荐改：不改则 fork 税从 1 处涨到 4–5 处，§8.2 四约束里三条会失去意义。
-3. kernel 去 `private` + 选 license + 发 npm —— Phase B 第 0 号动作，也是本清单**唯一不可逆**项（发布）。
-4. `<10%` 铁律：配自动化闸，还是正式改数值（§3）。
-5. 是否批准先做那个 2–3 小时 spike（§10）：它一次性定死 (a)/(b)/(c) 的实测形态，再决定 M5 的默认档。
+用户 2026-09-25 指令："什么待决，你来决定。" 逐条收口如下；**只剩第 3 条仍归用户**，因为它是本清单里唯一不可逆、且我的既有约束明确划为需点头的动作（发布）。
+
+1. **上游坐标写不写回 PRD/综述** —— 决定：**不写**。真源是 `harness/upstream.json`（机器读、闸用它），PRD/综述按 P4 §32-6 的"综述不改写"规则保持原样，改由本方案文档承担坐标说明职责。理由：把 tag/版本号抄进散文文档正是 iterate 侧失去可见性的起点——散文里的数字不会变红，`upstream.json` 与金样会。
+2. **"五薄模块"口径** —— 已被 §7.5 的用户裁决覆盖（产品级 fork，不再区分零 patch / 有 patch）。M1 已按此落地。
+3. **kernel 去 `private` + 选 license + 发 npm**（Phase B 第 0 号动作，唯一不可逆项）—— **仍待用户**。技术侧准备已做：内容回流完成（§7 第 1 步），M1 不依赖发布（fork 内走相对路径绑定，发布后一行改回 npm 依赖）。license 建议与两仓一致（MIT），但这属于对外承诺，不代答。
+4. **`<10%` 铁律** —— 决定：**配棘轮闸，不改数值**（实现与负例见 §3-1）。§3 那半个"可 grep 的约束"（工具面不得自行判定证据语义）**未实现**，转为下面的开工项，不再挂在"待裁决"里冒充已决。
+5. **先做 spike 再决定 M5 默认档** —— spike 已做（§5.0，E1/E2/E5/E6 全在 pin 的树与真实 daemon 上跑过）。**M5 目标面定为 TUI**：实测根据只有两条——`toolDisplays` 是 14 个名字的硬编码集、集外一律走 `GenericTool` 的纯文本截断（§5 表 M5 行），且对 `packages/{tui,session-ui,plugin}/src` grep 渲染器注册表**零命中**。这条决定**不包含**任何"桌面/web 面不重要"的判断：那三个包会不会取代 TUI 仍是 §10 挂账的未验证项，真模型轮次一跑就要回头复核；若届时 `packages/app` 成为主面，M5 的目标文件随之移动，改的是位置不是契约。
+6. **新的开工项（原 §9 没有，从 §3-1 派生）**：把"工具面不得自行判定证据语义"做成可 grep 的闸（例如禁止 `mcp-shell/src` 与 fork 的 `tool/glasspane/` 出现阈值比较、像素比对、`pass/fail` 判定字面量），配基线金样。当前状态＝**未做**，因此 §3 的口径只完成了一半（量得出，还没拦住越界的行为）。
 
 ## 10. 本次做了什么、还有什么没验
 
-**仓库内改动（两批，都可回滚）**：① `tools/sync-kernel.sh` 加三道守卫 —— ① 删除守卫（rsync 干跑列出会被删的 mirror-only 文件即拒绝，remedy 点名"回流"与 `--allow-deletions` 两条出路）；② 版本线守卫（canonical 版本 ≠ 根版本即拒绝，因为 `check-version.mjs` 15 位点必红）；③ **同步后自验不过即回滚**（跑 check-version + build + kernel/mcp-shell 两套件，红则 `git checkout -- kernel && git clean -fdq kernel` 并声明已回滚）。实测三条都成立：对真实 canonical 跑 `--dry-run` 与真实调用**均 exit 1，且 `git status -- kernel` 零变更**（拒绝分支可执行、失败不写盘）；用"与镜像等价的合成 canonical"跑 `--dry-run` **通过**（守卫不是永假拒绝）。② **新开 `harness/` 目录**承载工具面 B 的仓库侧资产：`upstream.json`（上游坐标真源）、`tools/hook-liveness.mjs`（契约闸，`--check/--probe/--offline/--record` 四模式）、`contracts/hook-liveness.json`（金样）、`README.md`；并接进 `.github/workflows/harness-contract.yml`（每周解析上游最新 release → 下载该 tag → `--probe`，漂移即红＝冻结升级；手动输入的 tag 先钳成 `vMAJOR.MINOR.PATCH` 形状再用）、`ci.yml` 的 `install-gate`（离线自洽）、根 `package.json` 三个 `contracts:harness*` 脚本。因果验证跑在 `harness/` 的**临时副本**上（不污染仓库）：绿路径通过；把金样伪写成"`permission.ask` 是活的"→ `--check` 与 `--probe` 双双 exit 1；金样缺失 → exit 2 并指名 `--record`；`--record` 重跑结果与仓内金样**逐字节相同**（可复现，不依赖时间序）。`mcp-shell/`、`engine/`、`kernel/` 的代码与 schema **一行未改**；daemon socket 方法表未扩、无新错误码。
+**仓库内改动（两批，都可回滚）**：① `tools/sync-kernel.sh` 加三道守卫 —— ① 删除守卫（rsync 干跑列出会被删的 mirror-only 文件即拒绝，remedy 点名"回流"与 `--allow-deletions` 两条出路）；② **消费者契约守卫**（逐个断言 `mcp-shell` 实际 import 的导出在 canonical `src/index.ts` 存在，缺则拒绝并点名会断的消费者；同步后由 `set-version.mjs` 把镜像版本压回本仓线。初版这里是"版本线相等才放行"，已按 §7 第 5 条订正——那条闸拒的是合法工作，保护的东西另有其人）；③ **同步后自验不过即回滚**（跑 check-version + build + kernel/mcp-shell 两套件，红则 `git checkout -- kernel && git clean -fdq kernel` 并声明已回滚）。实测三条都成立：对真实 canonical 跑 `--dry-run` 与真实调用**均 exit 1，且 `git status -- kernel` 零变更**（拒绝分支可执行、失败不写盘）；用"与镜像等价的合成 canonical"跑 `--dry-run` **通过**（守卫不是永假拒绝）。09-25 改守卫 ② 后又重验了三条路径：抽掉 `parseEvidencePackRead` 的假 canonical → 拒绝并输出 `Consumers that would break: mcp-shell/src/tools.ts`；后验闸红 → 回滚且 `kernel/` 零 diff；真实 canonical → 全绿。**回流本身**（§7 顺序第 1 步）也在 09-25 落地为 `iterate-skill d893045`，跨仓提交不再挂账。② **新开 `harness/` 目录**承载工具面 B 的仓库侧资产：`upstream.json`（上游坐标真源）、`tools/hook-liveness.mjs`（契约闸，`--check/--probe/--offline/--record` 四模式）、`contracts/hook-liveness.json`（金样）、`README.md`；并接进 `.github/workflows/harness-contract.yml`（每周解析上游最新 release → 下载该 tag → `--probe`，漂移即红＝冻结升级；手动输入的 tag 先钳成 `vMAJOR.MINOR.PATCH` 形状再用）、`ci.yml` 的 `install-gate`（离线自洽）、根 `package.json` 三个 `contracts:harness*` 脚本。因果验证跑在 `harness/` 的**临时副本**上（不污染仓库）：绿路径通过；把金样伪写成"`permission.ask` 是活的"→ `--check` 与 `--probe` 双双 exit 1；金样缺失 → exit 2 并指名 `--record`；`--record` 重跑结果与仓内金样**逐字节相同**（可复现，不依赖时间序）。`mcp-shell/`、`engine/`、`kernel/` 的代码与 schema **一行未改**；daemon socket 方法表未扩、无新错误码。
+
+**§9 收口批次（2026-09-25）**：`harness/tools/tool-surface.mjs` + `contracts/tool-surface.json`（工具面占比棘轮，口径与负例见 §3-1）进 `ci.yml` 新 job `tool-surface`，根 `package.json` 加 `contracts:surface`；`harness/README.md` 重写（fork 已进仓，早期"上游代码不进仓"那一节连同 `.upstream/` 的旧位置一起作废，改为 `.external/opencode` + subtree split 形态，并把三把尺子各自的事故模型与负例清单写全）。§9 从"待用户裁决"改为**裁决记录**（第 3 条 kernel 发布仍归用户，第 6 条是新增的未做项，不冒充已决）。
 
 **上游核实方式**：`gh api`（身份/许可/stars/默认分支/最近 4 个 release 日期）；`raw.githubusercontent.com @ v1.18.32` 逐行读 8 个关键文件；v1.18.32 tarball **全树 grep**（死钩子结论、renderer registry 缺失、`experimentalCodeMode` 短路、各文件行数）。
 
