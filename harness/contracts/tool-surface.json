@@ -14,10 +14,10 @@
     "mcpShell": {
       "loc": 3859,
       "files": 10,
-      "ratio": 0.1646
+      "ratio": 0.1604
     },
     "fork": {
-      "loc": 1251,
+      "loc": 1867,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -25,9 +25,19 @@
           "lines": 142
         },
         {
+          "file": "packages/opencode/script/glasspane-e8-compaction.ts",
+          "kind": "added",
+          "lines": 339
+        },
+        {
           "file": "packages/opencode/script/glasspane-preflight.sh",
           "kind": "added",
           "lines": 83
+        },
+        {
+          "file": "packages/opencode/src/plugin/glasspane-compaction.ts",
+          "kind": "added",
+          "lines": 258
         },
         {
           "file": "packages/opencode/src/plugin/glasspane-decision-log.ts",
@@ -37,12 +47,12 @@
         {
           "file": "packages/opencode/src/tool/glasspane/daemon.ts",
           "kind": "added",
-          "lines": 171
+          "lines": 182
         },
         {
           "file": "packages/opencode/src/tool/glasspane/index.ts",
           "kind": "added",
-          "lines": 276
+          "lines": 279
         },
         {
           "file": "packages/opencode/src/tool/glasspane/kernel.ts",
@@ -52,7 +62,7 @@
         {
           "file": "packages/opencode/src/plugin/index.ts",
           "kind": "edited",
-          "lines": 5
+          "lines": 10
         },
         {
           "file": "packages/opencode/src/tool/registry.ts",
@@ -65,18 +75,18 @@
           "lines": 193
         }
       ],
-      "ratio": 0.0534,
+      "ratio": 0.0776,
       "vendorExcluded": {
         "files": 10,
         "lines": 1150
       },
       "testsExcluded": {
-        "files": 3,
-        "lines": 549
+        "files": 5,
+        "lines": 952
       }
     }
   },
-  "totalToolSurfaceLoc": 5110,
+  "totalToolSurfaceLoc": 5726,
   "note": null,
   "carried": null
 }

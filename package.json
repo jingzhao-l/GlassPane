@@ -18,6 +18,7 @@
     "contracts:harness:offline": "node harness/tools/hook-liveness.mjs --offline",
     "contracts:harness:probe": "node harness/tools/hook-liveness.mjs --probe",
     "contracts:surface": "node harness/tools/tool-surface.mjs --check",
+    "contracts:semantics": "node harness/tools/surface-semantics.mjs --check",
     "install:engine": "node installer/cli.js",
     "install:engine:silent": "node installer/cli.js --no-prompt --no-gui"
   }

@@ -2,6 +2,41 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-09-25 · M4 + M1 补齐 + §9-6：五薄模块收口
+
+- 改动面（`fork-diff`）：**`6628/6669 byte-identical, 4 edited, 37 added, 0 deleted`**（M5 批是 `6628 / 4 edited / 33 added`）。`added` +4：`src/plugin/glasspane-compaction.ts`（M4）、`test/plugin/glasspane-compaction.test.ts`（M4 固定点 16 条）、`test/tool/glasspane-surface.test.ts`（M1 固定点 6 条）、`script/glasspane-e8-compaction.ts`（E8 探针）。`edited` 名单不变（`plugin/index.ts` 再 +1 import、+1 数组项，含 3 行注释）。
+- **M4 的落点**：内部插件 `src/plugin/glasspane-compaction.ts`，绑 `experimental.session.compacting`（零 patch，触发点 `session/compaction.ts:374`）：
+  - 上游只给 `{sessionID}`，所以用 `client.session.messages` 拉会话（方案 §5 M4 行点名的要求）。**"判当前轮属哪个维度"的那半没有做，也没有假装做**：本 pin 的内核导出面里没有 `dimensionContext`（实测），维度系统按综述 §8.5 Phase A 首发范围属 iterate 侧节奏。M4 交付能诚实交付的形态——把引擎/内核**已写下**的证据锚点（opID、outcome、台账序号与哈希）转录进 `output.context`；会话用过 `gp_*` 但决策为 0 条时，缺席以 `calls vs decisions recorded` 的**算术**呈现，不静默。
+  - 只转录不判定：锚点字段全部来自 `metadata.result`（引擎写下）与 `metadata.decisionLog`（内核台账票据）；没有阈值、没有 pass/fail 合成——守住自己的边界靠的正是本批那条 §9-6 闸。
+  - 上游是 `nextPrompt = compacting.prompt ?? [默认提示, ...compacting.context]`：别人的 `prompt` 一旦被替换，`context` 就是死信。所以两条路都走（`prompt` 已定义 → 追加在它之后；否则进 `context`），且绝不替换别人的提示词。边界照实写在代码注释里：若别的插件在我们**之后**替换 prompt，写进 context 的块仍会被 `??` 丢掉——本 fork 今天没有第二个人碰这个钩子（已 grep）。
+  - 失败可见：拉消息失败不抛进宿主的压缩路径，而是把 `anchors NOT preserved` 追加进同一处（缺席必须说得出）。
+- **E8 运行时（M4 的决定性证据，不花钱不联网）**：`script/glasspane-e8-compaction.ts`——mock OpenAI-compatible provider（`@ai-sdk/openai-compatible` 在这个 build 里是 **bundled** provider，零安装零凭据）+ 从本树源码起 `serve` + 真实会话（mock 发一次 `gp_probe_status` 工具调用、宿主真执行落成 completed part）+ `POST /session/:id/summarize` 触发真压缩。判定写在 **provider 边界**：mock 记录每个请求体，断言的是"做摘要的那个模型请求带着注入块"、块里 `gp_* calls: 1 · decisions recorded: 0`（缺席被说出来）、且**压缩前的轮次没有泄漏该块**。实测全绿，连跑复现。
+  - 顺带把 M2 的一条挂账结了：同一会话里 `tool.execute.after` 的 note 落进了 part metadata（`skipped: gp call did not succeed (GP_E_ENGINE_UNREACHABLE)`）——宿主**确实走到** M2 的 hook（此前只有静态派发点证据）。真会话里 `logged` 分支的写入仍需一次证据成包的真轮次（E7 已用引擎自己写的档案字节验过写入本身）。
+- **M1 固定点补齐**（§7.5 纪律要求 M1–M5 各自有行为不变量，此前 M1 只有运行时证据）：`test/tool/glasspane-surface.test.ts` 6 条——id 裸 `gp_` 前缀/唯一/描述与 parser 齐、remedy 必进 `output`（E6 量过模型只读 output）、未宣布能力的方法给可执行 remedy、真死 socket 仍回 `{code,message,remedy}`。为此导出 `present()`/`unavailable()`（同 M5 导出 `glasspaneRow` 的理由：测不出来的规矩不是规矩）。
+- **本批修掉一个自己的运行时缺陷（因果已验）**：`daemon.ts` 的 `rawRequest` 原来 `net.createConnection(target)` 先连接、监听器后挂。缺失 socket 的 `error` 可能**在监听器挂上之前**发出，无监听器的 `'error'` 被抛成未捕获异常 → Promise reject，而契约是"永远 resolve 一个可读的 `DaemonReply`"。实测（`bun test` 下，同一条死 socket）：一次 run 回 `GP_E_ENGINE_UNREACHABLE`，一次直接 reject ENOENT，一次 2s 后走 `GP_E_ENGINE_TIMEOUT`。改为 `new net.Socket()` → 先挂全部监听器 → 最后 `socket.connect(target)`，之后连跑 5 次全绿。（真宿主里此前没炸——E8 跑出的是正常的 `GP_E_ENGINE_UNREACHABLE`——但"没炸"只是没赶上那个窗口。）
+- **§9-6 开工项落地**：新尺子 `harness/tools/surface-semantics.mjs` + 金样 `harness/contracts/surface-semantics.json`（棘轮式），进 `ci.yml` 的 `tool-surface` job 与根 `package.json` 的 `contracts:semantics`。三条规则：阈值比较（小数对照）、pass/fail 三元/相等合成（**按主语判**：`x.status !== "failed"` 是台账记账，`ok ? "pass" : "fail"` 才是判定）、证据字段比较（`!== undefined` 在场检查豁免——缺席要说得出）。**基线实测 0 命中 / 15 个文件**：两个工具面今天都不判证据语义。**反向因果三条**（都点名红、还原转绿）：`mcp-shell/src/tools.ts` 加 `ratio > 0.95` → threshold 红；`glasspane-decision-log.ts` 加 `ok ? "pass" : "fail"` → verdict 红；`mcp-shell/src/evidence-report.ts` 加 `pack.signals.pixelDiff >= 0.5` → 两条规则同红。无金样 → exit 2 并指名 `--record`。
+  - 校准过程照实记：第一版规则把本仓 `status: "failed"`（写台账自己的状态）与 `pixelDiff !== undefined`（在场检查）判成命中，基线一度 6 命中——**先校准规则再记基线**，否则金样记的是规则的噪声而不是事实。
+- **顺手修掉 CI 里一处自伤**：`tool-surface` job 的 `kernel-vendor` step 曾被复制成两份（同 name 同 run，同一次跨 base 合并事故的残留）。`check-workflows.mjs` 查的是 job 键与脚本引用，查不出"合法但重复的 step"，所以一直没人发现；已去重。
+- 占比账（`tool-surface`）：engine 18,335 / 面 A 3,859（16.03%）/ **面 B 1,867 行 = 7.76%**（M5 批是 1,251 / 5.34%）。测试排除 5 文件 952 行、vendored 排除 10 文件 1,150 行，两项照旧打印并进金样。
+- 门禁复跑：`fork-diff --check` 全量（含参照克隆）绿；`tool-surface --check` 绿；`hook-liveness --check` 在线绿（20 钩子无漂移）、`--offline` 绿；`kernel-vendor --check` 绿；`surface-semantics --check` 绿；`check-workflows` 绿（3 个工作流）；fork `tsgo --noEmit` **0 错**；glasspane 固定点 **57/57**（M1 6 + M2/M3 35 + M4 16）；E8 全绿。
+- **如实挂账（没跑/仍未验）**：
+  - opencode 包**全量** `bun test`：3659 tests / **51 fail**。经 `git stash -u` 对照证明这 51 条在 M5 基点**一模一样**（跑同样 16 个文件，失败名集合逐条相同：ONLY-in-mine 0、ONLY-in-baseline 0）——全在上游面（CLI 子进程 `run/serve/acp/mcp add`、`tool.grep`/`glob`/`skill`、`tui thread`、`httpapi-file`、help 快照），本批无关，但也没人修，如实挂账。
+  - tui 包全量 `bun test`：195 pass / 5 fail，全在上游 `DiffViewerFileTree` 与 hunk 导航（`packages/tui` 本批零改动，`git diff --name-only` 可证）；M5 的 `inline-tool-wrap` 与 `glasspaneRow` 23 条全绿。
+
+## 2026-09-25 · M5：会话流内 evidence 渲染（TUI patch + 口径修复）
+
+- 动机（提交 `5f3a494`）：`gp_*` 的引擎失败是一次 `status=completed` 的工具调用，`ok:false` 只在 metadata 里——`GenericTool` 把 `GP_E_NO_EVIDENCE` 这类**引擎拒绝**渲染得和真实结果一模一样。会话流分不出"引擎给了答案"还是"引擎给不出答案"，M5 让两者在会话流里视觉可分。
+- 改动面（`fork-diff`，该提交金样）：**`6628 identical / 4 edited / 33 added / 0 deleted`**；`edited` 从 2 涨到 4：`packages/tui/src/routes/session/index.tsx`（+193）与其上游测试 `inline-tool-wrap-snapshot.test.tsx`（+82），两者的**双侧内容哈希**都进金样。
+- 内容：`toolDisplay` 加 `gp_` 前缀分支（前瞻兼容未来方法，呼应 M1"从 `hello` 读能力、不抄死名单"）；导出纯函数 `glasspaneRow`（method 感知的安全转写，只转写引擎已下结论的字段；成功行**中性**——不渲染绿色 PASS，因为"证据是否证明 UI 生效"是 kernel 的裁决不是 TUI 的）；`GlassPaneTool` 组件接 `InlineToolRow` + 权限高亮 + 点击展开 remedy。
+- 测试 +6（gp_ 路由、成功转写、引擎失败带 remedy、call-error vs denied、`last_evidence` 字段逐字、未知方法不臆造形状）：**23 全绿**，8 个既有 snapshot 未动。
+- **守卫自身修复（M5 暴露的）**：`tool-surface` 的 `isTest` 排除原本只在 `added` 循环、`edited` 循环没有——此前没有 edited 文件是测试所以从未触发，M5 让测试文件进了 edited 桶，其 +82 行漏计进面 B，而报告还在打印 "tests excluded"。按口径对称性修复（edited 测试同 added 测试一样排除；面 B 1,251 / 5.34%——两种算法下都 <10%，不是为转绿而改数）。反向因果已验：非测试 edited 文件 +5 行变红，edited 测试 +5 行不计入。
+- 门禁（当时）：fork `tsgo --noEmit`、23 测试、hook-liveness、kernel-vendor、check-workflows 全绿。
+- **未跑/未验**：真 TUI 会话里这条渲染路径的观感未观测（组件级由测试钉住）；`packages/{app,session-ui,desktop}` 会不会取代 TUI 仍挂账（方案 §10）。
+
+  - 真模型轮次依旧没跑：`ctx.ask` 权限卡观感、`truncate.output` 对大 evidence 包的真截断、M4 在真模型下的压缩质量、真 TUI 会话里 M5 渲染的观感。
+  - 整包 `bun run build` 未重跑（产物仍是 M1 条那次的；E8 与门禁都从源码起服务，不需要产物）。
+
+
 ## 2026-09-25 · M2+M3：内核以 vendored 形态进 fork，决策审计链开始生产
 
 - 改动面（`fork-diff`）：**`6630/6665 byte-identical, 2 edited, 33 added, 0 deleted`**（上一批是 `6631/6637, 1 edited, 5 added`）。

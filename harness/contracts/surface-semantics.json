@@ -1,0 +1,32 @@
+{
+  "observedAt": "2026-09-25",
+  "source": "specs/GlassPane_Harness_Fork_调研与方案_v0.1.md §9-6（可 grep 的那半个铁律）",
+  "rules": [
+    {
+      "id": "threshold-comparison",
+      "why": "a decimal literal on the other side of a comparison is a threshold; thresholds belong to the engine"
+    },
+    {
+      "id": "verdict-synthesis",
+      "why": "pass/fail chosen by a ternary or an equality test is a verdict the surface synthesized; subjects named status/state (a write's own bookkeeping) are excluded, and engine-provided verdict fields are covered by evidence-field-compare's transcription exception instead"
+    },
+    {
+      "id": "evidence-field-compare",
+      "why": "comparing an engine evidence field moves its interpretation into the shell (`!== undefined` is a presence check and is excluded — absence must stay sayable)"
+    }
+  ],
+  "surfaces": {
+    "mcpShell": {
+      "caliber": "every *.ts under mcp-shell/src",
+      "filesScanned": 10,
+      "hits": []
+    },
+    "fork": {
+      "caliber": "fork evidence-handling files: src/tool/glasspane/** + src/plugin/glasspane-*.ts",
+      "filesScanned": 5,
+      "hits": []
+    }
+  },
+  "totalHits": 0,
+  "filesScanned": 15
+}

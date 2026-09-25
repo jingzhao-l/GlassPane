@@ -6,7 +6,7 @@
   "counts": {
     "identical": 6628,
     "edited": 4,
-    "added": 33,
+    "added": 37,
     "deleted": 0
   },
   "edited": [
@@ -19,13 +19,17 @@
     "FORK.md",
     "SYNCLOG.md",
     "packages/opencode/script/glasspane-e7-ledger.ts",
+    "packages/opencode/script/glasspane-e8-compaction.ts",
     "packages/opencode/script/glasspane-preflight.sh",
+    "packages/opencode/src/plugin/glasspane-compaction.ts",
     "packages/opencode/src/plugin/glasspane-decision-log.ts",
     "packages/opencode/src/tool/glasspane/daemon.ts",
     "packages/opencode/src/tool/glasspane/index.ts",
     "packages/opencode/src/tool/glasspane/kernel.ts",
+    "packages/opencode/test/plugin/glasspane-compaction.test.ts",
     "packages/opencode/test/plugin/glasspane-decision-log.test.ts",
     "packages/opencode/test/tool/glasspane-kernel.test.ts",
+    "packages/opencode/test/tool/glasspane-surface.test.ts",
     "packages/opencode/vendor/kernel/fixtures/decision-log-chain.ok-01.json",
     "packages/opencode/vendor/kernel/fixtures/decision-log-entry.ok-01.json",
     "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-01.json",
@@ -55,7 +59,7 @@
     {
       "file": "packages/opencode/src/plugin/index.ts",
       "upstreamHash": "6f05329a0833c0bb698572fba279e5bffc3bce49",
-      "forkHash": "57dadca509c2c66aefb2e8a7376920615c1d059c"
+      "forkHash": "81ac3334097fd6671f14ef0ea71730eb4be813c8"
     },
     {
       "file": "packages/opencode/src/tool/registry.ts",

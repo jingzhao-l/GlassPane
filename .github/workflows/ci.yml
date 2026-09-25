@@ -182,11 +182,14 @@ jobs:
           node-version: 20
       - name: Measure engine vs both tool surfaces, fail on unrecorded growth
         run: node harness/tools/tool-surface.mjs --check
+      # 工具面语义闸（方案 §9-6 的另一半）：阈值比较 / pass-fail 判定字面量 / 证据字段
+      # 比较出现即红（基线金样在外）。占比闸量"长厚了多少"，这条量"长的还是不是判"——
+      # 判定留在 Swift/kernel，出现在 shell 里就是第二个真源，编译和测试都看不见。
+      - name: No tool surface judges evidence semantics (grep ratchet)
+        run: node harness/tools/surface-semantics.mjs --check
       # vendored kernel: CI cannot reach canonical, but the manifest carries every
       # file's sha256, so "the fork grew its own kernel" is a red lane either way.
-      - name: Vendored kernel matches its provenance manifest
-        run: node harness/tools/kernel-vendor.mjs --check
-      # vendored 内核不需要 canonical 也能验：金样里钉着逐文件 sha256。这条红
-      # 只有一种解释——有人在 fork 里手改了内核，那是第二个真源，不是定制。
+      # （本步一度被复制成两份——同一次合并事故的残留，已去重；check-workflows
+      #   检查的是 job 键与脚本引用，查不出这种"合法但重复"的 step。）
       - name: Vendored kernel matches its provenance manifest
         run: node harness/tools/kernel-vendor.mjs --check

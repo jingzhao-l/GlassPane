@@ -22,8 +22,10 @@ import * as Daemon from "./daemon"
 
 /** One fixed metadata shape: upstream infers the tool's metadata type from what
  *  `execute` returns, so a union of shapes there becomes a union the registry
- *  cannot carry. */
-function present(tool: string, method: string, reply: Daemon.DaemonReply, summary: (result: unknown) => string): Tool.ExecuteResult {
+ *  cannot carry. Exported for the M1 fixed-point tests (same reason as
+ *  `glasspaneRow` in M5): the remedy-in-output rule is the invariant worth pinning,
+ *  and a test can only pin what it can name. */
+export function present(tool: string, method: string, reply: Daemon.DaemonReply, summary: (result: unknown) => string): Tool.ExecuteResult {
   if (!reply.ok) {
     const { code, message, remedy } = reply.error
     return {
@@ -39,8 +41,9 @@ function present(tool: string, method: string, reply: Daemon.DaemonReply, summar
   }
 }
 
-/** The one failure this surface can produce without reaching the daemon. */
-function unavailable(method: string, message: string): Tool.ExecuteResult {
+/** The one failure this surface can produce without reaching the daemon.
+ *  Exported for the M1 fixed-point tests, for the same reason as `present`. */
+export function unavailable(method: string, message: string): Tool.ExecuteResult {
   const remedy = "start or update the GlassPane background service, then call gp_probe_status to see what the engine advertises"
   return {
     title: `gp_${method}: unavailable`,

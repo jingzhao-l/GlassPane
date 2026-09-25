@@ -22,6 +22,7 @@ import { DigitalOceanAuthPlugin } from "./digitalocean"
 import { XaiAuthPlugin } from "./xai"
 import { CerebrasPlugin } from "./cerebras"
 import { SnowflakeCortexAuthPlugin } from "./snowflake-cortex"
+import { GlasspaneCompactionPlugin } from "./glasspane-compaction"
 import { GlasspaneDecisionLogPlugin } from "./glasspane-decision-log"
 import { Effect, Layer, Context } from "effect"
 import { EffectBridge } from "@/effect/bridge"
@@ -83,6 +84,10 @@ function internalPlugins(flags: RuntimeFlags.Info): PluginInstance[] {
     SnowflakeCortexAuthPlugin,
     XaiAuthPlugin,
     CerebrasPlugin,
+    // M4 — observation-only like the ledger plugin, but on the compaction hook:
+    // it reads the session and *appends* transcribed evidence anchors, so a
+    // summary cannot silently drop the audit chain's on-ramp.
+    GlasspaneCompactionPlugin,
     // Last on purpose: internal plugins run in registration order, and this one
     // only observes `tool.execute.after`, so it must see the same `output` the
     // model will get — after any other internal plugin has had its say.

@@ -42,11 +42,11 @@ git log v1.18.32..HEAD --oneline --grep '^\[gp\]' # 完整定制提交清单
 
 | # | 能力 | 落点 | 现状 |
 |---|---|---|---|
-| M1 | `gp_*` 工具面（结构化结果 + agent 可执行 remedy） | `packages/opencode/src/tool/glasspane/` + `tool/registry.ts` 注册 | **已落地并实测**（见 `SYNCLOG.md` 2026-09-25 M1 条）：6 个工具以原始 id 出现在 fork 自己的注册表里，传输链直连 daemon 通过 |
-| M2 | evidence 采集 → kernel 决策日志（opID↔entry 哈希链） | `src/plugin/glasspane-decision-log.ts`（内部插件，绑 `tool.execute.after`）+ `src/tool/glasspane/kernel.ts` | **已落地**：outcome/summary 全部转录自引擎写下的字段；运行时证据见 `SYNCLOG.md` 同日条与 `script/glasspane-e7-ledger.ts`。**仍未验**：真模型轮次下宿主是否走到这个 hook |
+| M1 | `gp_*` 工具面（结构化结果 + agent 可执行 remedy） | `packages/opencode/src/tool/glasspane/` + `tool/registry.ts` 注册 | **已落地并实测**（见 `SYNCLOG.md` 2026-09-25 M1 条）：6 个工具以原始 id 出现在 fork 自己的注册表里，传输链直连 daemon 通过；固定点测试 6 条（`test/tool/glasspane-surface.test.ts`，M4 批补齐——raw id 唯一性、remedy 进 `output`、死 socket 仍回 `{code,message,remedy}` 三字段） |
+| M2 | evidence 采集 → kernel 决策日志（opID↔entry 哈希链） | `src/plugin/glasspane-decision-log.ts`（内部插件，绑 `tool.execute.after`）+ `src/tool/glasspane/kernel.ts` | **已落地**：outcome/summary 全部转录自引擎写下的字段；运行时证据见 `SYNCLOG.md` 同日条与 `script/glasspane-e7-ledger.ts`。**宿主走到 hook 这一问已由 E8 回答**：真实会话里 `tool.execute.after` 被派发、note 落进 part metadata（skip 分支；`logged` 分支的真会话写入仍需一次证据成包的真轮次） |
 | M3 | `@iterate/kernel` 绑定 | **vendored 源** `packages/opencode/vendor/kernel/` + 溯源清单 `harness/contracts/kernel-vendor.json` | **已落地**：不依赖发布（P6 §13 决定 kernel 不单独发布）。同一份源码在 fork 里跑的是 zod 4 而 canonical 钉 zod 3 —— 这条耦合由 `tool/glasspane-kernel.test.ts` 量着 |
-| M4 | 维度感知上下文压缩 | `experimental.session.compacting` | 静态有派发点；运行时形状未观测（需真模型轮次） |
-| M5 | 会话流内 evidence 渲染 | `packages/tui/src/routes/session/index.tsx`（`toolDisplays` :2626 / `toolDisplay()` :2643 / `GenericTool` :1798） | 上游对该文件改动频繁（3 个月 15 次提交），是同步冲突的主来源 |
+| M4 | 维度感知上下文压缩 | `experimental.session.compacting`（触发点 `session/compaction.ts:374`，零 patch）| **已落地（M4 批）**：内部插件 `src/plugin/glasspane-compaction.ts`（`plugin/index.ts` 再 +1 import +1 数组项），钩子经 `client.session.messages` 拉会话，把引擎/内核已写下的**证据锚点**（opID/outcome/台账序号与哈希）追加进 `output.context`（`prompt` 已被替换时改追加进 prompt——上游 `prompt ?? [...context]` 会让 context 成死信）。**维度系统在本 pin 的内核里不存在**（导出面实测无 `dimensionContext`），M4 不发明维度，缺席以 `calls vs decisions recorded` 的算术呈现。固定点测试 16 条；**E8 运行时**（`script/glasspane-e8-compaction.ts`）证明钩子在真实宿主里被派发、注入块出现在 mock provider 收到的压缩提示词里。真模型轮次仍未跑（挂账同前） |
+| M5 | 会话流内 evidence 渲染 | `packages/tui/src/routes/session/index.tsx`（`toolDisplay` 加 `gp_` 前缀分支 / 新增 `glasspaneRow` 纯函数与 `GlassPaneTool` / `GenericTool` :1798 兜底） | **已落地（M5 批，2026-09-25）**：引擎拒绝（`ok:false`）与真实结果在会话流里视觉可分；固定点测试 +6（23 全绿、8 个既有 snapshot 未动），行模型 `glasspaneRow` 是导出的纯函数故可直接钉。上游对该文件改动频繁（3 个月 15 次提交），仍是同步冲突的主来源。**真 TUI 会话里的观感未观测**（组件级已测）；`packages/{app,session-ui,desktop}` 会不会取代 TUI 仍是 §10 挂账 |
 
 ## 已知边界（不粉饰）
 

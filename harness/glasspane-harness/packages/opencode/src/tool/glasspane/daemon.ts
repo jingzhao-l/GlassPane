@@ -53,7 +53,9 @@ function failure(code: string, message: string, remedy: string): DaemonReply {
 function rawRequest(method: string, params: object, timeoutMs: number): Promise<DaemonReply> {
   return new Promise((resolve) => {
     const target = socketPath()
-    const socket = net.createConnection(target)
+    // The socket is created unconnected on purpose: `connect` runs *after* the
+    // listeners below exist (see the comment at the bottom of this function).
+    const socket = new net.Socket()
     let buffer = ""
     let settled = false
 
@@ -125,6 +127,15 @@ function rawRequest(method: string, params: object, timeoutMs: number): Promise<
       }
       finish({ ok: true, result: reply?.result })
     })
+
+    // Connect only after every listener exists. A pipe that does not exist can
+    // fail while `connect()` itself is still running, and an 'error' emitted
+    // with no listener is thrown as an uncaught exception instead of becoming
+    // the reply the model reads — measured under `bun test`: the same dead
+    // socket resolved as GP_E_ENGINE_UNREACHABLE in one run and rejected with
+    // a raw ENOENT in the next. With the listeners in place first, the outcome
+    // is the reply either way.
+    socket.connect(target)
   })
 }
 
