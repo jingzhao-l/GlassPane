@@ -8,8 +8,13 @@
   "description": "GlassPane Harness — evidence-honest GUI verification harness for macOS apps (opencode fork with GlassPane's native gp_* tool surface)",
   "keywords": ["glasspane", "harness", "gui-testing", "macos", "accessibility", "evidence", "agent"],
   "homepage": "https://github.com/jingzhao-l/glasspane-harness#readme",
-  "bugs": { "url": "https://github.com/jingzhao-l/glasspane-harness/issues" },
-  "repository": { "type": "git", "url": "https://github.com/jingzhao-l/glasspane-harness.git" },
+  "bugs": {
+    "url": "https://github.com/jingzhao-l/glasspane-harness/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jingzhao-l/glasspane-harness.git"
+  },
   "scripts": {
     "typecheck": "tsgo --noEmit",
     "test": "bun test --timeout 30000 --only-failures",

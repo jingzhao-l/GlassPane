@@ -282,3 +282,18 @@ describe("the fork's dependency shape is measured, not assumed", () => {
     }
   })
 })
+
+describe("the binding's import shape (a product requirement, not a style choice)", () => {
+  test("it does not import the kernel barrel, whose schemas.ts cannot survive compilation", () => {
+    // The kernel's index.js re-exports schemas.ts, which reads
+    // `../schemas/*.json` off disk at module init. Fine from source; fatal in the
+    // single-file binary (the product would not start — this exact failure was
+    // found by script/build.ts's smoke test after the private-ization batches).
+    // The mirror must stay byte-identical (kernel-vendor.mjs), so the fix lives
+    // here: per-module imports, pinned by this test so a future "tidy-up" cannot
+    // quietly reintroduce a binary that cannot boot.
+    const binding = readFileSync(path.join(import.meta.dirname, "..", "..", "src", "tool", "glasspane", "kernel.ts"), "utf8")
+    expect(binding).not.toMatch(/vendor\/kernel\/src\/index\.js/)
+    expect(binding).toContain("vendor/kernel/src/parse.js")
+  })
+})

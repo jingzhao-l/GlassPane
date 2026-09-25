@@ -209,12 +209,12 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "45b7d68e03caccda2fb57791c7dbc81a967597e8"
+      "forkHash": "91f5e618d873bcb1eb8be0185edffd11a087b76c"
     },
     {
       "file": "packages/opencode/script/build.ts",
       "upstreamHash": "ce45f770f04e8997161e5d746374d3af2374db71",
-      "forkHash": "dd076250f557e537a3cc87525d1b443495792a44"
+      "forkHash": "6668200a0338569f54f14b79f631385b6d29c363"
     },
     {
       "file": "packages/opencode/script/postinstall.mjs",
@@ -369,7 +369,7 @@
     {
       "file": "packages/script/src/index.ts",
       "upstreamHash": "d148ce0d2b708763d201e64152f9d0cb8cb0a28c",
-      "forkHash": "3f2bfd8b9674c530aeb3ca703353cb8a5842b631"
+      "forkHash": "c7292e8d3d9e30dd5a34930bd82669e2c1afd822"
     },
     {
       "file": "packages/tui/src/context/editor.ts",

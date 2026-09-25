@@ -30,21 +30,30 @@ import path from "node:path"
 
 import { Global } from "@opencode-ai/core/global"
 
+// Per-module imports, NOT the kernel's `index.js` barrel — and that is a
+// product requirement, not a style choice. The barrel re-exports `schemas.ts`,
+// which loads the three JSON Schemas at module init through
+// `createRequire(import.meta.url)("../schemas/….json")`: a *runtime file read*
+// next to the module. That works from source (E8, the fixed points) and cannot
+// work in the single-file binary the release ships — the product died at startup
+// with `Cannot find module '../schemas/evidence-pack.schema.json'`, found by
+// script/build.ts's own smoke test. Every export we use below lives in its own
+// module; `schemas.ts` is only reachable through the barrel, and we use none of
+// its exports. The mirror stays untouched (kernel-vendor.mjs stays green), and
+// `tool/glasspane-kernel.test.ts` pins that the barrel import never comes back.
+import { KernelSchemaError } from "../../../vendor/kernel/src/errors.js"
+import type { EvidencePack } from "../../../vendor/kernel/src/evidence-pack.js"
+import { decisionOutcomeFromEvidence, decisionSummaryFromEvidence } from "../../../vendor/kernel/src/evidence-decision.js"
 import {
   appendDecisionLogEntry,
   decisionLogEntryHash,
-  decisionOutcomeFromEvidence,
-  decisionSummaryFromEvidence,
   newDecisionEntryId,
-  parseEvidencePackRead,
   readDecisionLog,
   verifyDecisionLogText,
   KernelDecisionLogError,
-  KernelSchemaError,
-  type DecisionLogEntry,
-  type DecisionOutcome,
-  type EvidencePack,
-} from "../../../vendor/kernel/src/index.js"
+} from "../../../vendor/kernel/src/decision-log.js"
+import type { DecisionLogEntry, DecisionOutcome } from "../../../vendor/kernel/src/decision-log-entry.js"
+import { parseEvidencePackRead } from "../../../vendor/kernel/src/parse.js"
 
 export type { DecisionLogEntry, DecisionOutcome, EvidencePack }
 

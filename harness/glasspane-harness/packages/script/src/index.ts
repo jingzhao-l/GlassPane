@@ -43,14 +43,13 @@ const IS_PREVIEW = CHANNEL !== "latest"
 const VERSION = await (async () => {
   if (env.OPENCODE_VERSION) return env.OPENCODE_VERSION
   if (IS_PREVIEW) return `0.0.0-${CHANNEL}-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}`
-  // [gp] Product: version comes from product.json, not from "the latest thing on
-  // the upstream registry" — the fork's version line is its own.
-  const version = product?.version ?? rootPkg.version ?? "0.1.0"
-  const [major, minor, patch] = version.split(".").map((x: string) => Number(x) || 0)
-  const t = env.OPENCODE_BUMP?.toLowerCase()
-  if (t === "major") return `${major + 1}.0.0`
-  if (t === "minor") return `${major}.${minor + 1}.0`
-  return `${major}.${minor}.${patch + 1}`
+  // [gp] Product: the version is exactly what product.json says. Upstream's
+  // default here was a *patch bump* (its release script installed the published
+  // package and computed the next number), so an ordinary local build of the
+  // fork printed `0.1.1` — a version that was never built or published. Our
+  // release lane passes OPENCODE_VERSION explicitly (from product.json), so the
+  // bump has no caller left; the honest default is the manifest's own number.
+  return product?.version ?? rootPkg.version ?? "0.1.0"
 })()
 
 // [gp] Product: the upstream TEAM_MEMBERS file is not shipped (private product),

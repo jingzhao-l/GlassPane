@@ -87,6 +87,33 @@ function observeFork() {
   return map
 }
 
+/**
+ * The fork side as **git has it**, not as the disk has it.
+ *
+ * WHY this exists (found by its own failure, 2026-09-25): the four buckets used
+ * to compare the fork's *working tree* against the reference's *git index*. A
+ * file that sits on disk but was never committed therefore looked byte-identical
+ * to upstream — and the first release CI run on the split repo failed with
+ * `ENOENT ... @opencode-ai/client@file:vendor/...tgz` because exactly seven
+ * upstream files (including that vendored tarball) were physically present but
+ * absent from our history. "Faithful import" has to be measured in the same
+ * place a release reads from: the committed tree.
+ */
+function observeForkCommitted() {
+  const raw = execFileSync("git", ["ls-tree", "-r", "HEAD", "--", forkRel], { cwd: repoRoot, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 })
+  const prefix = forkRel.replace(/\/$/, "") + "/"
+  const map = new Map()
+  for (const line of raw.split("\n")) {
+    if (!line) continue
+    const match = /^(\d+)\s+blob\s+([0-9a-f]{40})\t(.*)$/.exec(line)
+    if (!match) continue
+    const rel = match[3].startsWith(prefix) ? match[3].slice(prefix.length) : match[3]
+    map.set(rel, { hash: match[2], mode: match[1] })
+  }
+  if (!map.size) die(2, `git ls-tree found nothing under ${forkRel} — cannot measure the committed fork tree`)
+  return map
+}
+
 function observeReference() {
   if (!existsSync(path.join(refDir, ".git"))) return null
   const version = execFileSync("git", ["-C", refDir, "describe", "--tags"], { encoding: "utf8" }).trim()
@@ -105,8 +132,14 @@ function observeReference() {
   return map
 }
 
+const forkCommitted = observeForkCommitted()
 const fork = observeFork()
 const ref = observeReference()
+// Files on disk that git does not have (inside the fork subtree). They are not
+// "ours" in any shipped sense — they are invisible to a release — so they are
+// reported by name instead of being silently counted as identical.
+const uncommitted = [...fork.keys()].filter((rel) => !forkCommitted.has(rel)).sort()
+const missingFromWorktree = [...forkCommitted.keys()].filter((rel) => !fork.has(rel)).sort()
 
 if (!ref) {
   if (mode === "record") die(2, `--record needs the reference clone at ${refRel} (git clone --branch ${pin.tag})`)
@@ -139,10 +172,14 @@ if (!ref) {
     }
   }
   for (const rel of golden.added ?? []) {
-    if (!fork.has(rel)) {
-      console.error(`  ✗ '${rel}' is declared as ours but is not in the fork tree`)
+    if (!forkCommitted.has(rel)) {
+      console.error(`  ✗ '${rel}' is declared as ours but is not committed in the fork tree`)
       offlineDrift++
     }
+  }
+  for (const rel of uncommitted) {
+    console.error(`  ✗ '${rel}' exists on disk but is not committed — a release would not ship it`)
+    offlineDrift++
   }
   if (offlineDrift > 0) {
     console.error(`fork-diff: ${offlineDrift} mismatch(es) between the tree and ${path.relative(repoRoot, goldenFile)} (our side).`)
@@ -157,13 +194,13 @@ const identical = []
 const edited = []
 const added = []
 const deleted = []
-for (const [rel, f] of fork) {
+for (const [rel, f] of forkCommitted) {
   const r = ref.get(rel)
   if (!r) added.push(rel)
   else if (r.hash !== f.hash || r.mode !== f.mode) edited.push(rel)
   else identical.push(rel)
 }
-for (const rel of ref.keys()) if (!fork.has(rel)) deleted.push(rel)
+for (const rel of ref.keys()) if (!forkCommitted.has(rel)) deleted.push(rel)
 
 const observed = {
   baseTag: pin.tag,
@@ -186,6 +223,21 @@ const observed = {
 
 const total = ref.size + added.length
 console.log(`fork-diff vs ${pin.tag}: ${identical.length}/${total} byte-identical, ${edited.length} edited, ${added.length} added, ${deleted.length} deleted`)
+
+if (uncommitted.length || missingFromWorktree.length) {
+  for (const rel of uncommitted) console.error(`  ✗ on disk but not committed: ${rel}`)
+  for (const rel of missingFromWorktree) console.error(`  ✗ committed but absent from the worktree: ${rel}`)
+  console.error("fork-diff: the working tree and the committed fork tree disagree.")
+  console.error("  A release ships the committed tree, so a file that only exists on disk is")
+  console.error("  invisible to users (this is how seven upstream files were dropped from the")
+  console.error("  import while looking byte-identical). Commit them (git add -f if ignored)")
+  console.error("  or delete them, then run again.")
+  if (mode === "record") {
+    console.error("  Refusing to record over a tree that is not what a release would ship.")
+    process.exit(1)
+  }
+  process.exit(1)
+}
 
 if (mode === "record") {
   mkdirSync(path.dirname(goldenFile), { recursive: true })
