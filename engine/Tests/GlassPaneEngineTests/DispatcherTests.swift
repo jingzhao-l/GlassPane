@@ -38,9 +38,9 @@ final class DispatcherTests: XCTestCase {
         let result = try XCTUnwrap(response["result"] as? [String: Any])
         XCTAssertEqual(result["engine"] as? String, "glasspaned")
         XCTAssertEqual(result["protocolVersion"] as? String, "0")
-        // P6 §5.3: capabilities gained "probe" (6 → 7); audit_ui 再加一项（7 → 8）。
+        // P6 §5.3: capabilities gained "probe" (6 → 7); audit_ui → 8; capture_view → 9。
         // 这条计数是对外协商面：hello 里报的能力少一项，客户端就会去调一个不存在的方法。
-        XCTAssertEqual((result["capabilities"] as? [String])?.count, 8)
+        XCTAssertEqual((result["capabilities"] as? [String])?.count, 9)
     }
 
     func testAttachWithBothBundleIdAndPidFails() throws {

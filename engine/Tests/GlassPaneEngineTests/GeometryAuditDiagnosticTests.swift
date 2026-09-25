@@ -53,16 +53,53 @@ final class GeometryAuditDiagnosticTests: XCTestCase {
         // 真正的判据只有一条：几何必须基本量得到。若一条都读不到，说明遍历本身坏了，
         // 而不是"这个应用没有可用界面"——两者不能混成一次"通过"。
         XCTAssertGreaterThan(measured, 0, "一次都没读到 position/size，说明几何遍历不可用（不是界面问题）")
-        XCTAssertEqual(unread, 0, "有元素的几何读取超时/被拒：覆盖率会被审计如实降级，这里先暴露原因")
+        // 真机上"某个子树那一刻没回 AX"是常态（kAXError -25200），所以 unread
+        // 不该被当成失败——但它必须每一条都有原因，并且整体覆盖率达标。
+        // 上一版这里断言的是"unread 必须为 0"，那是把愿望写成了设计。
+        XCTAssertGreaterThanOrEqual(Double(measured), Double(snapshot.nodes.count) * 0.8,
+            "几何覆盖率低于 80%：\(measured)/\(snapshot.nodes.count)")
+        if unread > 0 {
+            let reasons = snapshot.nodes.compactMap { node -> String? in
+                if case let .unread(reason) = node.geometry { return reason }
+                return nil
+            }
+            XCTAssertEqual(reasons.count, unread)
+            for reason in reasons { XCTAssertFalse(reason.isEmpty, "unread 必须带原因，否则调用方无从判断") }
+            XCTAssertFalse(snapshot.complete, "有未读子树却报 complete=true：结论会盖住没看过的部分")
+        }
+
+        // 视觉通道的真机分支：这台机器上 daemon 有屏幕录制、而测试进程继承的是
+        // 代理宿主的席位，所以两条分支都可能。两条都如实打印，绝不静默——
+        // "没测到"和"测了没通过"必须能被区分。
+        do {
+            let capture = try channel.captureWindow()
+            let encoded = try PngEncoding.encode(capture.image, scale: 0.6)
+            print("DIAG CAPTURE OK window=\(capture.windowId) pngBytes=\(encoded.byteCount) "
+                + "px=\(encoded.pixelWidth)x\(encoded.pixelHeight)")
+            XCTAssertGreaterThan(encoded.byteCount, 0)
+        } catch let error as ChannelError {
+            print("DIAG CAPTURE DENIED \(error)")
+        } catch let error as PngEncoding.EncodingError {
+            print("DIAG CAPTURE TOO LARGE \(error)")
+        }
 
         let result = UILayoutAudit.audit(snapshot)
         print("DIAG AUDIT verdict=\(result.verdict.rawValue) findings=\(result.findings.count) "
             + "coverage=\(String(format: "%.2f", result.coverage.ratio)) truncated=\(result.overlapScanTruncated)")
+        // 先绑定再打印：字符串插值里放跨行的闭包，Swift 解析不了（编译期就炸）。
+        let counts = result.ruleCounts.sorted { $0.value > $1.value }
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: " ")
+        print("DIAG AUDIT COUNTS " + counts)
         for finding in result.findings.prefix(8) {
             print("  - \(finding.rule)/\(finding.severity.rawValue) path=\(finding.elementPath ?? "-") "
                 + "role=\(finding.role ?? "-") title=\(finding.title ?? "-") :: \(finding.detail)")
         }
         // 覆盖率不足时结论必须跟着变弱；量到了才允许给干净判定。
+        if unread > 0 {
+            XCTAssertTrue(result.findings.contains { $0.rule == "geometryScanIncomplete" },
+                          "遍历不完整却没在结论里说：\(result.findings.map(\.rule))")
+        }
         if result.coverage.ratio < UILayoutAudit.passCoverageRatio {
             XCTAssertEqual(result.verdict, .insufficient, "覆盖率不足却给出了 \(result.verdict)")
         }

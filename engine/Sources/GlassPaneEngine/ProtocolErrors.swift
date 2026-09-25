@@ -54,7 +54,7 @@ public struct GPError: Error {
         case .payloadTooLarge:
             return "reduce observe maxDepth or narrow the selector scope"
         case .methodNotFound:
-            return "use a method from the protocol method table (hello/attach/act/observe/assert_element/audit_ui/diagnose/last_evidence/snapshot/restore/probe_status/shutdown)"
+            return "use a method from the protocol method table (hello/attach/act/observe/assert_element/audit_ui/capture_view/diagnose/last_evidence/snapshot/restore/probe_status/shutdown)"
         case .badParams:
             return "fix the parameters according to the method table"
         case .notAttached:

@@ -63,6 +63,7 @@ public enum EngineMethod: String, CaseIterable {
     case diagnose, lastEvidence = "last_evidence"
     case snapshot, restore
     case auditUI = "audit_ui" // 界面可操作性审计（几何 + 确定性规则）
+    case captureView = "capture_view" // 一次性视觉审查通道（PNG 到调用方，引擎不落盘）
     case probeStatus = "probe_status" // P6 spec v6.0 §5.4
     case shutdown
 }

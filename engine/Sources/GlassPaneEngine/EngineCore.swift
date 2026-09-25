@@ -194,7 +194,7 @@ public final class EngineCore {
             "version": version,
             "protocolVersion": protocolVersion,
             "pid": Int(ProcessInfo.processInfo.processIdentifier),
-            "capabilities": ["act", "observe", "assert_element", "audit_ui", "diagnose", "snapshot", "restore", "probe"]
+            "capabilities": ["act", "observe", "assert_element", "audit_ui", "capture_view", "diagnose", "snapshot", "restore", "probe"]
         ]
         // P1 v1.2 §11.2：带上 daemon 自身的授权主体与四类席位（未注入钩子时
         // 整段省略——面板据此如实显示"未验证"，不以面板进程的权限冒充）。
@@ -1066,6 +1066,60 @@ public final class EngineCore {
         result["contaminationMonitored"] = contaminationMonitored
         result["contaminationBasis"] = contaminationBasis
         return result
+    }
+
+    /// 一次性视觉审查通道：把当前窗口编成 PNG 交给**调用方的**模型看一眼。
+    ///
+    /// 引擎自己**不落盘**——这套工具对外的主张是"证据里只有测量数字，没有原始截图"，
+    /// 而视觉审查要的只是"给模型看一眼"，不是"把画面存下来"。因此这里刻意没有
+    /// `path` 之类的落盘参数：那会把一个由模型输出驱动的任意文件写入口放进协议里。
+    /// 要留档由调用方自己从会话里存。
+    ///
+    /// 尺寸受 socket 帧上限约束（见 PngEncoding.defaultMaxBytes）；超限报
+    /// GP_E_PAYLOAD_TOO_LARGE 并附建议倍率，而不是悄悄降分辨率——悄悄降会让模型
+    /// 以为它看清了，实际看清的是压缩过的版本。
+    public func captureView(scale: Double) throws -> [String: Any] {
+        let capture: WindowCapture
+        do {
+            capture = try channel.captureWindow()
+        } catch let error as ChannelError {
+            // 这句话必须换成视觉通道自己的：这里没有 pixelDiff 可降级，
+            // 让代理以为"像素测量还在，只是没了"是另一种假装看过。
+            throw Self.map(error, degradation: Self.captureViewDegradation)
+        }
+        let encoded: PngEncoding.Result
+        do {
+            encoded = try PngEncoding.encode(capture.image, scale: scale)
+        } catch let error as PngEncoding.EncodingError {
+            switch error {
+            case let .tooLarge(byteCount, limit, suggested):
+                throw GPError(
+                    code: .payloadTooLarge,
+                    message: "the PNG came out at \(byteCount) bytes, over the \(limit)-byte frame budget",
+                    remedy: "retry with scale: \(suggested) (smaller windows or lower scale keep the image legible to a vision model without breaking the frame limit)"
+                )
+            case .encoderUnavailable:
+                throw GPError(
+                    code: .internalError,
+                    message: "ImageIO could not produce a PNG destination",
+                    remedy: "report this: the capture existed but the encoder refused it"
+                )
+            }
+        }
+        return [
+            "pngBase64": encoded.base64,
+            "mimeType": "image/png",
+            "byteCount": encoded.byteCount,
+            "pixelWidth": encoded.pixelWidth,
+            "pixelHeight": encoded.pixelHeight,
+            "windowId": capture.windowId,
+            "scale": scale,
+            "persisted": false,
+            "pointSize": [
+                "width": capture.bounds.width,
+                "height": capture.bounds.height,
+            ],
+        ]
     }
 
     /// 界面可操作性审计：一次几何遍历 + `UILayoutAudit` 的确定性规则。
@@ -1985,8 +2039,16 @@ public final class EngineCore {
         return "pixel-capture-failed"
     }
 
+    /// 没有像素时"接下来怎么办"那句话。verify 通路要说 pixelDiff 降级，而
+    /// `capture_view` 根本没有 pixelDiff —— 两处共用同一个映射，只换这一句，
+    /// 是为了让同一个成因不会在两处得到两套指引（R2-06 的教训）。
+    static let pixelDiffDegradation =
+        "Until the capture works pixelDiff stays null and T6 degrades to INCONCLUSIVE (P1 v1.0 §5) — report it as undecidable, never as 'the pixels did not change'"
+    static let captureViewDegradation =
+        "gp_capture_view has no fallback: this visual review did not happen, so report it as not-seen — never infer from a missing image that the interface is fine"
+
     /// Maps channel failures onto protocol error codes (P0 spec §3.4).
-    static func map(_ error: ChannelError) -> GPError {
+    static func map(_ error: ChannelError, degradation: String = EngineCore.pixelDiffDegradation) -> GPError {
         switch error {
         case .axUnavailable(let reason):
             return GPError(code: .axUnavailable, message: reason)
@@ -2047,7 +2109,7 @@ public final class EngineCore {
             return GPError(
                 code: .axUnavailable,
                 message: "window capture unavailable (\(label)): \(reason)",
-                remedy: "\(advice). Until the capture works pixelDiff stays null and T6 degrades to INCONCLUSIVE (P1 v1.0 §5) — report it as undecidable, never as 'the pixels did not change'"
+                remedy: "\(advice). \(degradation)"
             )
         case .pingTimeout:
             return GPError(code: .actFailed, message: "app unresponsive (AX ping timeout)")

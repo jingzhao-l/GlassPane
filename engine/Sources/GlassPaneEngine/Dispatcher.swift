@@ -65,6 +65,8 @@ public final class Dispatcher {
             return try handleSnapshot(request.params)
         case .restore:
             return try handleRestore(request.params)
+        case .captureView:
+            return try handleCaptureView(request.params)
         case .auditUI:
             return try handleAuditUI(request.params)
         case .probeStatus:
@@ -123,6 +125,13 @@ public final class Dispatcher {
             range: 1...400
         )
         return try core.auditUI(maxDepth: maxDepth, minHitTargetPt: minHitTargetPt)
+    }
+
+    /// `capture_view`：scale 越界直接拒（0.1 以下等于发给模型一堆马赛克，
+    /// 却仍然会被当成"我看过了"）。
+    private func handleCaptureView(_ params: [String: Any]) throws -> [String: Any] {
+        let scale = try ParamValidation.optDouble(params, "scale", range: 0.1...1.0) ?? 1.0
+        return try core.captureView(scale: scale)
     }
 
     private func handleAssert(_ params: [String: Any]) throws -> [String: Any] {
