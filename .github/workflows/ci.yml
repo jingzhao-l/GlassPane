@@ -182,3 +182,11 @@ jobs:
           node-version: 20
       - name: Measure engine vs both tool surfaces, fail on unrecorded growth
         run: node harness/tools/tool-surface.mjs --check
+      # vendored kernel: CI cannot reach canonical, but the manifest carries every
+      # file's sha256, so "the fork grew its own kernel" is a red lane either way.
+      - name: Vendored kernel matches its provenance manifest
+        run: node harness/tools/kernel-vendor.mjs --check
+      # vendored 内核不需要 canonical 也能验：金样里钉着逐文件 sha256。这条红
+      # 只有一种解释——有人在 fork 里手改了内核，那是第二个真源，不是定制。
+      - name: Vendored kernel matches its provenance manifest
+        run: node harness/tools/kernel-vendor.mjs --check

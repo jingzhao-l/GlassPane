@@ -4,23 +4,57 @@
   "referenceClone": ".external/opencode",
   "observedAt": "2026-09-25",
   "counts": {
-    "identical": 6631,
-    "edited": 1,
-    "added": 5,
+    "identical": 6630,
+    "edited": 2,
+    "added": 33,
     "deleted": 0
   },
   "edited": [
+    "packages/opencode/src/plugin/index.ts",
     "packages/opencode/src/tool/registry.ts"
   ],
   "added": [
     "FORK.md",
     "SYNCLOG.md",
+    "packages/opencode/script/glasspane-e7-ledger.ts",
     "packages/opencode/script/glasspane-preflight.sh",
+    "packages/opencode/src/plugin/glasspane-decision-log.ts",
     "packages/opencode/src/tool/glasspane/daemon.ts",
-    "packages/opencode/src/tool/glasspane/index.ts"
+    "packages/opencode/src/tool/glasspane/index.ts",
+    "packages/opencode/src/tool/glasspane/kernel.ts",
+    "packages/opencode/test/plugin/glasspane-decision-log.test.ts",
+    "packages/opencode/test/tool/glasspane-kernel.test.ts",
+    "packages/opencode/vendor/kernel/fixtures/decision-log-chain.ok-01.json",
+    "packages/opencode/vendor/kernel/fixtures/decision-log-entry.ok-01.json",
+    "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-01.json",
+    "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-02.json",
+    "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-03.json",
+    "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-04-legacy-draft.json",
+    "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-05-pixelbounds-null.json",
+    "packages/opencode/vendor/kernel/fixtures/recipe-config.ok-01.json",
+    "packages/opencode/vendor/kernel/fixtures/report.ok-01.html",
+    "packages/opencode/vendor/kernel/fixtures/report.ok-01.md",
+    "packages/opencode/vendor/kernel/schemas/decision-log-entry.schema.json",
+    "packages/opencode/vendor/kernel/schemas/evidence-pack.schema.json",
+    "packages/opencode/vendor/kernel/schemas/recipe-config.schema.json",
+    "packages/opencode/vendor/kernel/src/canonical-json.ts",
+    "packages/opencode/vendor/kernel/src/decision-log-entry.ts",
+    "packages/opencode/vendor/kernel/src/decision-log.ts",
+    "packages/opencode/vendor/kernel/src/errors.ts",
+    "packages/opencode/vendor/kernel/src/evidence-decision.ts",
+    "packages/opencode/vendor/kernel/src/evidence-pack.ts",
+    "packages/opencode/vendor/kernel/src/index.ts",
+    "packages/opencode/vendor/kernel/src/parse.ts",
+    "packages/opencode/vendor/kernel/src/recipe-config.ts",
+    "packages/opencode/vendor/kernel/src/schemas.ts"
   ],
   "deleted": [],
   "editedDetail": [
+    {
+      "file": "packages/opencode/src/plugin/index.ts",
+      "upstreamHash": "6f05329a0833c0bb698572fba279e5bffc3bce49",
+      "forkHash": "57dadca509c2c66aefb2e8a7376920615c1d059c"
+    },
     {
       "file": "packages/opencode/src/tool/registry.ts",
       "upstreamHash": "9167cb3ea6bc5c8dd075f0f8271adbdec6074b12",

@@ -97,6 +97,29 @@ const surfaceALoc = surfaceAFiles.reduce((s, f) => s + loc(f), 0)
  * forward and the run says so out loud — silently skipping a measurement is how
  * the 17.78% happened in the first place.
  */
+/**
+ * Provenance of the vendored kernel inside the fork. Vendored third-party source
+ * is a **dependency**, so its lines do not count as our tool surface — but only
+ * while `harness/contracts/kernel-vendor.json` declares each file. A file that
+ * lives under the vendor directory without being declared is counted as ours, so
+ * "the fork grew its own kernel file" cannot hide behind this exclusion.
+ */
+function readVendorExclusion(forkRel) {
+  const manifestFile = path.join(repoRoot, "harness", "contracts", "kernel-vendor.json")
+  if (!existsSync(manifestFile)) return { prefix: null, declared: new Set() }
+  const manifest = JSON.parse(readFileSync(manifestFile, "utf8"))
+  const forkPath = manifest?.forkPath
+  if (typeof forkPath !== "string" || !Array.isArray(manifest?.files)) {
+    return { prefix: null, declared: new Set() }
+  }
+  // The manifest stores repo-relative paths; fork-diff lists fork-relative ones.
+  // Compare in one space, not two — that mismatch alone would silently disable
+  // the exclusion and start counting vendored lines as our own.
+  const relTo = forkPath.startsWith(`${forkRel}/`) ? forkPath.slice(forkRel.length + 1) : forkPath
+  const prefix = relTo.endsWith("/") ? relTo : `${relTo}/`
+  return { prefix, declared: new Set(manifest.files.map((f) => `${prefix}${f.file}`)) }
+}
+
 function measureFork(golden) {
   if (!existsSync(forkDiffGolden)) return fail("fork-diff golden absent — surface B cannot be attributed")
   if (!existsSync(pinFile)) return fail("harness/upstream.json absent — fork location unknown")
@@ -109,6 +132,14 @@ function measureFork(golden) {
   if (!existsSync(forkDir)) return fail(`fork tree not found at ${forkRel}`)
   const refDir = path.join(repoRoot, refRel)
   const hasRef = existsSync(path.join(refDir, ".git"))
+  const vendor = { ...readVendorExclusion(forkRel), excluded: [] }
+
+  // Surface A is measured as `mcp-shell/src`, tests excluded. Counting B's tests
+  // would compare two different things, so test files are excluded here too —
+  // and reported, because an exclusion that is not printed is how a measurement
+  // quietly becomes unfalsifiable.
+  const isTest = (rel) => /(^|\/)test\//.test(rel) || rel.endsWith(".test.ts") || rel.endsWith(".test.tsx")
+  const excludedTests = []
 
   const files = []
   let unmeasured = []
@@ -116,7 +147,16 @@ function measureFork(golden) {
     if (!REF_EXTS.includes(path.extname(rel))) continue
     const abs = path.join(forkDir, rel)
     if (!existsSync(abs)) return fail(`fork-diff says '${rel}' is ours but it is not in the tree`)
-    files.push({ file: rel, kind: "added", lines: loc(abs) })
+    if (vendor.declared.has(rel)) {
+      vendor.excluded.push({ file: rel, lines: loc(abs) })
+      continue
+    }
+    if (isTest(rel)) {
+      excludedTests.push({ file: rel, lines: loc(abs) })
+      continue
+    }
+    const undeclared = vendor.prefix !== null && rel.startsWith(vendor.prefix)
+    files.push({ file: rel, kind: undeclared ? "undeclared-vendor" : "added", lines: loc(abs) })
   }
 
   const prevEdited = new Map(
@@ -138,13 +178,22 @@ function measureFork(golden) {
     files.push({ file: rel, kind: "edited", lines: n })
   }
 
+  // A rule that excludes everything is indistinguishable from a measurement of
+  // zero, so refuse instead: `(^|\/test\/)` once matched the empty string at
+  // position 0 and classified every single file as a test, which reported
+  // surface B as 14 LOC and looked like a plausible number.
+  const codeish = (fd.added ?? []).filter((rel) => REF_EXTS.includes(path.extname(rel)) && !vendor.declared.has(rel))
+  if (codeish.length > 0 && files.length === 0) {
+    return fail(`${codeish.length} fork file(s) are ours to measure but every one was excluded — the exclusion rules are wrong, not the surface empty`)
+  }
+
   const carried = unmeasured.length
     ? `reference clone absent (${refRel}): lines attributed to ${unmeasured.join(", ")} are the previous run's, NOT re-measured`
     : null
-  return { files, carried, note: null }
+  return { files, carried, note: null, excluded: vendor.excluded, tests: excludedTests }
 }
 
-const fail = (note) => ({ files: [], carried: null, note })
+const fail = (note) => ({ files: [], carried: null, note, excluded: [], tests: [] })
 
 function addedLinesAgainstRef(refDir, rel, forkAbs) {
   let before
@@ -168,6 +217,13 @@ function addedLinesAgainstRef(refDir, rel, forkAbs) {
   }
 }
 
+/** Summarise what the provenance manifest took out of surface B, so the number
+ *  stays explainable: dependency lines are not our lines, but they are counted. */
+function vendorSummary(excluded) {
+  if (!excluded.length) return { files: 0, lines: 0 }
+  return { files: excluded.length, lines: excluded.reduce((sum, f) => sum + f.lines, 0) }
+}
+
 function build(golden) {
   const fork = measureFork(golden)
   const forkLoc = fork.files.reduce((s, f) => s + f.lines, 0)
@@ -187,7 +243,13 @@ function build(golden) {
     engineFiles: engineFiles.length,
     surfaces: {
       mcpShell: { loc: surfaceALoc, files: surfaceAFiles.length, ratio: ratio(surfaceALoc) },
-      fork: { loc: forkLoc, files: fork.files, ratio: ratio(forkLoc) },
+      fork: {
+        loc: forkLoc,
+        files: fork.files,
+        ratio: ratio(forkLoc),
+        vendorExcluded: vendorSummary(fork.excluded),
+        testsExcluded: vendorSummary(fork.tests),
+      },
     },
     totalToolSurfaceLoc: surfaceALoc + forkLoc,
     note: fork.note,
@@ -207,10 +269,26 @@ show("surface B  fork (ours)", observed.surfaces.fork)
 if (observed.surfaces.fork.files.length) {
   for (const f of observed.surfaces.fork.files) console.log(`    ${f.kind.padEnd(6)} ${f.file}  ${f.lines}`)
 }
+if (observed.surfaces.fork.testsExcluded.files > 0) {
+  console.log(`  tests excluded from surface B (surface A is measured as src/ only): ${observed.surfaces.fork.testsExcluded.files} files, ${observed.surfaces.fork.testsExcluded.lines} lines — counted out loud so the caliber can be audited`)
+}
+if (observed.surfaces.fork.vendorExcluded.files > 0) {
+  console.log(`  vendored dependency excluded from surface B per harness/contracts/kernel-vendor.json: ${observed.surfaces.fork.vendorExcluded.files} files, ${observed.surfaces.fork.vendorExcluded.lines} lines (not our surface; kernel-vendor.mjs owns their integrity)`)
+}
 if (observed.carried) console.log(`  note: ${observed.carried}`)
 if (observed.note) console.log(`  note: ${observed.note}`)
 
 if (mode === "record") {
+  // Recording is only allowed over a measurement that exists. Writing a golden
+  // while attribution failed would freeze a *wrong* baseline (surface B at 0 LOC
+  // happened exactly this way once: a moved vendor directory left the golden
+  // naming files that were no longer there), and the next --check would then
+  // compare future runs against a number that was never measured.
+  if (observed.note) {
+    console.error(`tool-surface: refusing to record — ${observed.note}`)
+    console.error("  Fix the attribution first (fork-diff --record declares which files exist).")
+    process.exit(1)
+  }
   mkdirSync(path.dirname(goldenFile), { recursive: true })
   writeFileSync(goldenFile, JSON.stringify(observed, null, 2) + "\n")
   console.log(`recorded -> ${path.relative(repoRoot, goldenFile)}`)
