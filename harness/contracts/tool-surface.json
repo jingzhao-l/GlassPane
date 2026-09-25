@@ -14,10 +14,10 @@
     "mcpShell": {
       "loc": 3859,
       "files": 10,
-      "ratio": 0.1577
+      "ratio": 0.1574
     },
     "fork": {
-      "loc": 2279,
+      "loc": 2326,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -65,9 +65,24 @@
           "lines": 159
         },
         {
+          "file": "packages/core/src/config.ts",
+          "kind": "edited",
+          "lines": 7
+        },
+        {
           "file": "packages/core/src/global.ts",
           "kind": "edited",
           "lines": 4
+        },
+        {
+          "file": "packages/core/src/plugin/agent.ts",
+          "kind": "edited",
+          "lines": 3
+        },
+        {
+          "file": "packages/core/src/plugin/skill.ts",
+          "kind": "edited",
+          "lines": 3
         },
         {
           "file": "packages/opencode/script/build.ts",
@@ -83,6 +98,16 @@
           "file": "packages/opencode/script/publish.ts",
           "kind": "edited",
           "lines": 65
+        },
+        {
+          "file": "packages/opencode/src/agent/agent.ts",
+          "kind": "edited",
+          "lines": 1
+        },
+        {
+          "file": "packages/opencode/src/cli/cmd/agent.ts",
+          "kind": "edited",
+          "lines": 5
         },
         {
           "file": "packages/opencode/src/cli/cmd/attach.ts",
@@ -152,10 +177,20 @@
         {
           "file": "packages/opencode/src/config/config.ts",
           "kind": "edited",
-          "lines": 9
+          "lines": 12
+        },
+        {
+          "file": "packages/opencode/src/config/paths.ts",
+          "kind": "edited",
+          "lines": 12
         },
         {
           "file": "packages/opencode/src/config/tui-migrate.ts",
+          "kind": "edited",
+          "lines": 6
+        },
+        {
+          "file": "packages/opencode/src/config/tui.ts",
           "kind": "edited",
           "lines": 6
         },
@@ -170,6 +205,16 @@
           "lines": 10
         },
         {
+          "file": "packages/opencode/src/plugin/install.ts",
+          "kind": "edited",
+          "lines": 3
+        },
+        {
+          "file": "packages/opencode/src/plugin/tui/runtime.ts",
+          "kind": "edited",
+          "lines": 2
+        },
+        {
           "file": "packages/opencode/src/server/auth.ts",
           "kind": "edited",
           "lines": 2
@@ -178,6 +223,11 @@
           "file": "packages/opencode/src/server/mdns.ts",
           "kind": "edited",
           "lines": 3
+        },
+        {
+          "file": "packages/opencode/src/session/session.ts",
+          "kind": "edited",
+          "lines": 2
         },
         {
           "file": "packages/opencode/src/skill/index.ts",
@@ -210,18 +260,18 @@
           "lines": 197
         }
       ],
-      "ratio": 0.0931,
+      "ratio": 0.0949,
       "vendorExcluded": {
         "files": 10,
         "lines": 1150
       },
       "testsExcluded": {
-        "files": 5,
-        "lines": 1036
+        "files": 6,
+        "lines": 1116
       }
     }
   },
-  "totalToolSurfaceLoc": 6138,
+  "totalToolSurfaceLoc": 6185,
   "note": null,
   "carried": null
 }

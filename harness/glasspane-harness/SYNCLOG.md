@@ -2,6 +2,34 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-09-25 · 私有化批次 D：项目目录改名（`.glasspane-harness`）+ 全量测试真因
+
+- **项目级 `.opencode/` 改名**（C/C′ 批记为"下一批开工项"，本批做完）：9 处——v1 `config/paths.ts` 与
+  v2 `core/config.ts` 两套解析器、v1 `config.ts:445` 目录名过滤器与 `config/tui.ts` 扫描过滤器、
+  四个写路径（`plugin/install.ts`、`cli/cmd/agent.ts`、`session/session.ts` 的 plans、
+  `plugin/tui/runtime.ts` 的 themes/tui.json）、plans 权限两条并列放行（产品路径 + 遗留路径）、
+  v1/v2 两份 customize 提示词（C′ 已做）。**"同层共存谁赢"是实测的**：用 remeda 实跑
+  `mergeDeep(target, source)` 确认"**后者覆盖前者**"，所以解析器目标顺序写成
+  `[".opencode", ".glasspane-harness"]`（遗留在前、产品在后）——反过来会让遗留目录静默压过
+  产品自己的配置，而这类失败编译与其它测试都看不见。
+- 新增固定点 `test/config/project-config-dirs.test.ts`（6 条 = 3 行为 + 3 结构）：只有遗留目录被
+  找到、只有产品目录被找到、**同层两者时产品目录排在后面**（配合实测的合并方向）；三处目录名过滤器
+  接受产品名（v2 与 TUI 扫描的过滤器在需要整套配置图的服务层里，结构钉住并在注释里写明这条边界）。
+  **反向控制已验**：把目标顺序写反 → 同层用例变红 → 还原转绿。
+- **`51 条全量测试失败的真因查清**（此前按"上游旧账"挂着账）：
+  1. **头号根因是本机 TLS 拦截，不是代码**：测试运行期要从 GitHub 下载 ripgrep，Bun 不信任拦截证书
+     （与 A 批 build 的 `UNABLE_TO_VERIFY_LEAF_SIGNATURE` 同一个坑）。带上钥匙串 CA 束
+     （`NODE_EXTRA_CA_CERTS=/var/tmp/glasspane-harness/ca-bundle.pem`）后 `tool/grep`/`tool/glob`/
+     acp 全绿；
+  2. 剩下的子进程类（`cli/run`、`cli/serve`、`mcp-add`、`help-snapshots`、`httpapi-file`、
+     `tui/thread`）**隔离跑全过**（单条 10.6s），批量并行时撞的是 30s 默认超时——不是缺陷，是本机
+     负载下的超时；串行 + `--timeout 120000` 的复跑结果附在本条末尾。
+  教训：**"全量红"先分环境类与代码类再谈修**。上一轮把 51 条整包当"上游旧账"挂着，其中一半当场可解。
+- 账：fork-diff 6528/6678 identical、47 edited、46 added、57 deleted；面 B 2,326 行 9.49%；
+  固定点 60/60 + 新 6 条 = **66/66**；brand 0 命中（血缘 18,652）；product-surface 86/86；tsgo 0 错。
+- **外部动作已解锁**（本机 `gh` 与 `npm` 均以 jingzhao-l 认证；`glasspane-harness` 在 npm 上未被占、
+  远端仓尚不存在）：split 子树仓 + 首发 npm 的执行结果见下一条。
+
 ## 2026-09-25 · 私有化批次 C′：项目目录配置面的两处低风险补齐
 
 - `cli/cmd/mcp.ts` 的项目目录配置候选：`.glasspane-harness/glasspane-harness.json(c)` 排前，

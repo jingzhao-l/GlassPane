@@ -139,6 +139,9 @@ export const Plugin = define({
             { action: "plan_exit", resource: "*", effect: "allow" },
             { action: "external_directory", resource: path.join(Global.Path.data, "plans", "*"), effect: "allow" },
             { action: "edit", resource: "*", effect: "deny" },
+            // [gp] Plans are authored under the product dir now; the legacy path
+            // stays allowed so plans written by older builds remain editable.
+            { action: "edit", resource: path.join(".glasspane-harness", "plans", "*.md"), effect: "allow" },
             { action: "edit", resource: path.join(".opencode", "plans", "*.md"), effect: "allow" },
             {
               action: "edit",

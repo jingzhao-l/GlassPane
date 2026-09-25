@@ -108,7 +108,11 @@ const AgentCreateCommand = effectCmd({
           if (prompts.isCancel(scopeResult)) throw new UI.CancelledError()
           scope = scopeResult
         }
-        targetPath = path.join(scope === "global" ? Global.Path.config : path.join(ctx.worktree, ".opencode"), "agents")
+        // [gp] Agents are authored into the product's project dir now.
+        targetPath = path.join(
+          scope === "global" ? Global.Path.config : path.join(ctx.worktree, ".glasspane-harness"),
+          "agents",
+        )
       }
 
       // Get description

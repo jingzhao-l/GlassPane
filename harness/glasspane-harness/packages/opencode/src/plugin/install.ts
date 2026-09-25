@@ -334,7 +334,9 @@ function patchDir(input: PatchInput) {
   if (input.global) return input.config ?? Global.Path.config
   const git = input.vcs === "git" && input.worktree !== "/"
   const root = git ? input.worktree : input.directory
-  return path.join(root, ".opencode")
+  // [gp] New plugins install into the product's project dir; a legacy
+  // `.opencode` in the same project is still read (config/paths.ts).
+  return path.join(root, ".glasspane-harness")
 }
 
 function patchName(kind: Kind): "opencode" | "tui" {

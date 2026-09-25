@@ -442,7 +442,9 @@ const layer = Layer.effect(
         const deps: Fiber.Fiber<void>[] = []
 
         for (const dir of directories) {
-          if (dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR) {
+          // [gp] Either directory name is a project config dir (product first,
+          // legacy kept); the file list inside already prefers the product names.
+          if (dir.endsWith(".opencode") || dir.endsWith(".glasspane-harness") || dir === Flag.OPENCODE_CONFIG_DIR) {
             for (const file of ["glasspane-harness.json", "glasspane-harness.jsonc", "opencode.json", "opencode.jsonc"]) {
               const source = path.join(dir, file)
               yield* Effect.logDebug(`loading config from ${source}`)

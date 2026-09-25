@@ -330,7 +330,8 @@ export const Event = {
 
 export function plan(input: { slug: string; time: { created: number } }, instance: InstanceContext) {
   const base = instance.project.vcs
-    ? path.join(instance.worktree, ".opencode", "plans")
+    // [gp] Plans live in the product's project dir now (legacy `.opencode/plans` is still readable via permissions).
+    ? path.join(instance.worktree, ".glasspane-harness", "plans")
     : path.join(Global.Path.data, "plans")
   return path.join(base, [input.time.created, input.slug].join("-") + ".md")
 }

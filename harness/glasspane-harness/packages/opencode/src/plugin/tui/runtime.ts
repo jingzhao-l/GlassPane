@@ -255,7 +255,7 @@ function createThemeInstaller(
     const local_dir =
       path.basename(source_dir) === ".opencode"
         ? path.join(source_dir, "themes")
-        : path.join(source_dir, ".opencode", "themes")
+        : path.join(source_dir, ".glasspane-harness", "themes")
     const dest_dir = meta.scope === "local" ? local_dir : path.join(Global.Path.config, "themes")
     const dest = path.join(dest_dir, `${name}.json`)
     const stat = await Filesystem.statAsync(src)
@@ -814,7 +814,7 @@ function defaultPluginOrigin(state: RuntimeState, spec: string): ConfigPlugin.Or
   return {
     spec,
     scope: "local",
-    source: state.api.state.path.config || path.join(state.directory, ".opencode", "tui.json"),
+    source: state.api.state.path.config || path.join(state.directory, ".glasspane-harness", "tui.json"),
   }
 }
 
