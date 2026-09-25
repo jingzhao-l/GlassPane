@@ -147,15 +147,16 @@ test("ping returns empty result", async () => {
   assert.deepEqual(response.result, {});
 });
 
-test("tools/list returns the fifteen tools", async () => {
+test("tools/list returns the sixteen tools", async () => {
   const { server } = makeServer();
   const response = await server.handleLine(enq({ jsonrpc: "2.0", id: 3, method: "tools/list" }));
   const names = response.result.tools.map((tool) => tool.name);
-  assert.equal(names.length, 15);
+  assert.equal(names.length, 16);
   assert.ok(names.includes("gp_attach"));
   assert.ok(names.includes("gp_snapshot"));
   assert.ok(names.includes("gp_restore"));
   assert.ok(names.includes("gp_audit_ui"));
+  assert.ok(names.includes("gp_capture_view"));
   assert.ok(names.includes("gp_probe_status"));
   assert.ok(names.includes("gp_export_evidence"));
   assert.ok(names.includes("gp_recent_reports"));
@@ -248,6 +249,92 @@ test("gp_audit_ui refuses unknown parameters instead of silently ignoring them",
   assert.equal(response.result.isError, true);
   assert.ok(response.result.content[0].text.startsWith("GP_E_BAD_PARAMS"));
   assert.equal(engine.io.sent.length, 0);
+});
+
+test("gp_capture_view returns one image part plus a text summary that states it persisted nothing", async () => {
+  const { server, engine } = makeServer();
+  const promise = server.handleLine(
+    enq({
+      jsonrpc: "2.0",
+      id: 31,
+      method: "tools/call",
+      params: { name: "gp_capture_view", arguments: { scale: 0.6 } },
+    }),
+  );
+  await Promise.resolve();
+  const frame = engine.io.lastFrame();
+  assert.equal(frame.method, "capture_view");
+  assert.deepEqual(frame.params, { scale: 0.6 });
+  engine.io.respond({
+    pngBase64: "iVBORw0KGgo=",
+    mimeType: "image/png",
+    byteCount: 12,
+    pixelWidth: 864,
+    pixelHeight: 540,
+    scale: 0.6,
+    windowId: 12,
+    pointSize: { width: 1440, height: 900 },
+    persisted: false,
+  });
+  const response = await promise;
+  assert.equal(response.result.isError, false);
+  const [image, summary] = response.result.content;
+  assert.equal(image.type, "image");
+  assert.equal(image.mimeType, "image/png");
+  assert.equal(image.data, "iVBORw0KGgo=");
+  // 摘要不是装饰：模型只看图时没人记得这张图被 0.6 缩过，而"我看清了"与
+  // "我看清的是缩过的版本"是两个结论；"有没有落盘"同样必须随图一起说。
+  const stated = JSON.parse(summary.text);
+  assert.equal(stated.scale, 0.6);
+  assert.equal(stated.persisted, false);
+  assert.equal(stated.pixelWidth, 864);
+});
+
+test("gp_capture_view relays the engine's refusal instead of inventing an empty image", async () => {
+  const { server, engine } = makeServer();
+  const promise = server.handleLine(
+    enq({ jsonrpc: "2.0", id: 32, method: "tools/call", params: { name: "gp_capture_view", arguments: {} } }),
+  );
+  await Promise.resolve();
+  engine.io.respondError({
+    code: "GP_E_PIXEL_CAPTURE_DENIED",
+    message: "screen recording is not granted to the daemon",
+    remedy: "tick it for GlassPane Daemon in the settings panel",
+  });
+  const response = await promise;
+  assert.equal(response.result.isError, true);
+  const text = response.result.content[0].text;
+  assert.ok(text.includes("GP_E_PIXEL_CAPTURE_DENIED"), text);
+  assert.equal(response.result.content.some((part) => part.type === "image"), false,
+    "被拒时绝不能返回一张空白图");
+});
+
+test("gp_capture_view refuses an engine frame that carries no image", async () => {
+  const { server, engine } = makeServer();
+  const promise = server.handleLine(
+    enq({ jsonrpc: "2.0", id: 33, method: "tools/call", params: { name: "gp_capture_view", arguments: {} } }),
+  );
+  await Promise.resolve();
+  engine.io.respond({ mimeType: "image/png", byteCount: 0 });
+  const response = await promise;
+  assert.equal(response.result.isError, true);
+  assert.ok(response.result.content[0].text.startsWith("GP_E_INTERNAL"), response.result.content[0].text);
+});
+
+test("gp_capture_view rejects a scale that would produce unreadable pixels", async () => {
+  const { server, engine } = makeServer();
+  for (const bad of [0, 0.05, 1.5, "0.6"]) {
+    const response = await server.handleLine(
+      enq({
+        jsonrpc: "2.0",
+        id: 34,
+        method: "tools/call",
+        params: { name: "gp_capture_view", arguments: { scale: bad } },
+      }),
+    );
+    assert.equal(response.result.isError, true, `scale=${JSON.stringify(bad)} 应在本地被拒`);
+  }
+  assert.equal(engine.io.sent.length, 0, "越界 scale 不该被转给引擎");
 });
 
 test("tools/call engine error maps to isError with GP_E prefix", async () => {
@@ -364,7 +451,7 @@ test("an outstanding gp_act does not hold back ping or tools/list", async () => 
   await drainAll(queue);
   assert.deepEqual(written.map((r) => r.id), [101, 102],
     "ping and tools/list are answered while the act is still outstanding");
-  assert.equal(written[1].result.tools.length, 15);
+  assert.equal(written[1].result.tools.length, 16);
   assert.equal(writesMostInFlight, 1, "frames still go out one at a time");
 
   io.respond({ operationId: "op_0123456789ABCDEFGHJKMNPQRS", actConfirmed: true });

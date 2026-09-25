@@ -9,7 +9,7 @@ import { canonicalJson } from "../dist/canonical.js";
 import { FORCE_OVERWRITE_ENV } from "../dist/project-registry.js";
 import { makeEngine } from "./helpers.mjs";
 
-test("tools/list shape: fifteen tools with expected names and methods", () => {
+test("tools/list shape: sixteen tools with expected names and methods", () => {
   const names = TOOL_SPECS.map((spec) => spec.name);
   assert.deepEqual(names, [
     "gp_attach",
@@ -17,6 +17,7 @@ test("tools/list shape: fifteen tools with expected names and methods", () => {
     "gp_act",
     "gp_assert_element",
     "gp_audit_ui",
+    "gp_capture_view",
     "gp_diagnose",
     "gp_last_evidence",
     "gp_snapshot",
@@ -28,10 +29,10 @@ test("tools/list shape: fifteen tools with expected names and methods", () => {
     "gp_project_set",
     "gp_project_get",
   ]);
-  assert.equal(TOOL_BY_NAME.size, 15);
+  assert.equal(TOOL_BY_NAME.size, 16);
   assert.deepEqual(
     TOOL_SPECS.map((s) => s.engineMethod),
-    ["attach", "observe", "act", "assert_element", "audit_ui", "diagnose", "last_evidence", "snapshot", "restore", "probe_status", "export_evidence", "recent_reports", "project_list", "project_set", "project_get"],
+    ["attach", "observe", "act", "assert_element", "audit_ui", "capture_view", "diagnose", "last_evidence", "snapshot", "restore", "probe_status", "export_evidence", "recent_reports", "project_list", "project_set", "project_get"],
   );
   assert.equal(TOOL_SPECS.every((s) => s.name.startsWith("gp_")), true);
 });

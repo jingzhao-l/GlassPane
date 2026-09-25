@@ -57,8 +57,14 @@ GlassPane 不是普通工具库：它**持有** macOS 的高危权限（辅助�
   这里）。
 - 内容：操作 selector（role/title/identifier —— **标题是被测 app 自己的文本**）、动作与确认位、AX 树摘要与
   节点数、像素差异比例与窗口几何/窗口号、响应性与存活信号、handler 命中的 file:line、状态变更的
-  before/after 规范化字符串（各 ≤1 KiB）、分类结论与归因。**原始截图不落盘**（只存派生量），但
-  `gp_observe` 会把完整 AX 树交回 MCP 会话——那部分会进入代理宿主的上下文与远端模型。
+  before/after 规范化字符串（各 ≤1 KiB）、分类结论与归因。**证据通路不落任何原始截图**（只存派生量），
+  但 `gp_observe` 会把完整 AX 树交回 MCP 会话——那部分会进入代理宿主的上下文与远端模型。
+- **`gp_capture_view` 是唯一会移动像素的通路，且它是"过路"而非"存档"**：引擎把挂接窗口编成 PNG
+  作为 MCP image content 返回，daemon 不写任何文件；这个工具**刻意没有 `path` 参数**——让模型自己
+  选输出路径，等于在协议里开一个由屏幕内容驱动的任意文件写入口。它撤不掉的是暴露面：图像进到
+  会话里，就会落到你的模型服务商保留的一切，与上面那些 AX 树同级，只是换成像素。用过
+  `gp_capture_view` 的会话要按"那个窗口当时的画面已被截走"对待；凡是测量能定的事，优先用
+  `gp_audit_ui` / `gp_assert_element`。
 - 导出件是副本：`gp_export_evidence` / `gp_recent_reports` 生成的 HTML/Markdown 报告按调用方指定路径
   落地，同样含界面文本；Z4.5 Metal 捕获会把 `.gputrace` 文档写进**被测 app** 的临时目录。
 - 清理：先看体量，再按期限清理。

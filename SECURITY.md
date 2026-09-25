@@ -80,9 +80,17 @@ reports against those are usually judged out of scope.
   test's own UI**), the action and its confirmation bit, an AX tree summary and node count, the
   changed-pixel ratio plus window geometry and window id, responsiveness and liveness signals, the
   `file:line` of any handler that fired, before/after normalized state strings (each truncated at
-  ≤1 KiB), the classification verdict and the attribution. **Raw screenshots are not persisted** — only
-  derived quantities. But `gp_observe` returns full accessibility trees into the MCP session, so that
-  part lands in the agent host's context and in the remote model.
+  ≤1 KiB), the classification verdict and the attribution. **The evidence path persists no raw
+  screenshot** — only derived quantities. But `gp_observe` returns full accessibility trees into the
+  MCP session, so that part lands in the agent host's context and in the remote model.
+- **`gp_capture_view` is the one path that moves pixels, and it is a pass-through.** It encodes a PNG
+  of the attached window and returns it as MCP image content; the daemon writes no file, and the tool
+  deliberately has **no `path` parameter** — a model-chosen output path would put an arbitrary
+  screen-content write into the protocol. What it cannot undo is the exposure: the image enters the
+  conversation, so it reaches whatever your model provider retains, exactly like the accessibility
+  trees above but with pixels instead of labels. Treat a session that used `gp_capture_view` as
+  containing a screenshot of everything that was on that window, and prefer `gp_audit_ui` /
+  `gp_assert_element` for anything a measurement can settle.
 - Exports are copies: the HTML/Markdown reports produced by `gp_export_evidence` / `gp_recent_reports`
   are written to the path the caller specifies and contain the same interface text. Z4.5 Metal capture
   writes a `.gputrace` document into the **app under test's** temporary directory.
