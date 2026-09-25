@@ -2271,7 +2271,13 @@ public final class EngineCore {
         if lowered.contains("timed out") || lowered.contains("timeout") {
             return "pixel-capture-timeout"
         }
-        if lowered.contains("no on-screen") || lowered.contains("scwindow") {
+        if lowered.contains("no on-screen") || lowered.contains("scwindow")
+            // R6-双失败：`SCKCapturer` 在两阶段都失败、拿不到任何候选采集面时抛
+            // "no capture surface available for window <id>"。这仍是"窗口不在任何可
+            // 采集面上"的环境边界（与 `no on-screen` 同族），不是应用缺陷，所以不进
+            // 通用 `pixel-capture-failed`（那条既不在 p6 的不可用容忍表、也不会给代理
+            // 一条可执行的成因），而是归并为既有容忍标签 `pixel-capture-no-onscreen-window`。
+            || lowered.contains("no capture surface") {
             return "pixel-capture-no-onscreen-window"
         }
         if lowered.contains("scdisplay") {

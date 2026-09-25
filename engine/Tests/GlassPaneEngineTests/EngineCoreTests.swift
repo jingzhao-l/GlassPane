@@ -775,6 +775,16 @@ final class EngineCoreWaveThreeMappingTests: XCTestCase {
             EngineCore.pixelCaptureFailureLabel(reason: "screen recording permission not granted"),
             "screen-recording-denied"
         )
+        // R6-双失败:两种阶段都失败、拿不到候选采集面 → 归并为"无在屏窗口"族的环境
+        // 边界，不落进通用 pixel-capture-failed（那条不在 p6 的不可用容忍表里）。
+        XCTAssertEqual(
+            EngineCore.pixelCaptureFailureLabel(reason: "no capture surface available for window 1443"),
+            "pixel-capture-no-onscreen-window"
+        )
+        XCTAssertEqual(
+            EngineCore.pixelCaptureFailureLabel(reason: "SCScreenshotManager no capture surface for window 7"),
+            "pixel-capture-no-onscreen-window"
+        )
         // An unknown reason stays unknown instead of being guessed as the seat.
         XCTAssertEqual(EngineCore.pixelCaptureFailureLabel(reason: "stream stopped"), "pixel-capture-failed")
 

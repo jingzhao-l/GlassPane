@@ -48,7 +48,11 @@ function publishedKeys(body) {
 }
 
 function undescribed(keys, description) {
-  return keys.filter((key) => !description.includes(key));
+  // R7-低8: match the backtick-wrapped form `` `key` `` rather than the bare name.
+  // A bare `includes(key)` lets a short key (e.g. `tier`) be judged "described" by
+  // colliding with unrelated prose in the description, which is exactly the false
+  // green this gate exists to prevent. Descriptions name code keys in backticks.
+  return keys.filter((key) => !description.includes(`\`${key}\``));
 }
 
 const description = TOOL_BY_NAME.get("gp_probe_status").description;

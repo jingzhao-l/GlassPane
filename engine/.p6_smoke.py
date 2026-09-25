@@ -575,6 +575,10 @@ def enforce_no_state_escape(before, targets, probe_notes):
 CIRCUIT_PIXEL_UNAVAILABLE_LABELS = (
     "screen-recording-denied",
     "pixel-capture-timeout",
+    # R6-双失败：引擎侧 `pixelCaptureFailureLabel` 把 "no capture surface available
+    # (for window <id>)"（两阶段均失败、拿不到候选采集面）归并为这个标签 —— 它属于
+    # "窗口不在可采集面上"的环境边界，不是应用缺陷。归并后这里已覆盖它，无需新条目，
+    # 也避免让它漏成通用 pixel-capture-failed（那条故意不放进来）。
     "pixel-capture-no-onscreen-window",
     "pixel-capture-window-outside-display",
     # 操作把应用换到了另一个窗口（新开窗口/sheet 抢走前台）：前后截的不是同一个窗口，

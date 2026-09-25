@@ -283,9 +283,26 @@ struct EvidenceDetailView: View {
             }
             if let assertion = pack.assertion { assertionSection(assertion) }
             if let diagnosis = pack.diagnosis { diagnosisSection(diagnosis) }
-            if let stateDiff = pack.signals.stateDiff { stateSection(stateDiff) }
-            if let crash = pack.signals.crash { aliveSection(crash) }
-            if let probe = pack.signals.handlerProbe { probeSection(probe) }
+            if let stateDiff = pack.signals.stateDiff {
+                stateSection(stateDiff)
+            } else if let reason = PanelChannelFields.reason(for: "stateDiff") {
+                unmeasuredCard(title: "内部状态", systemImage: "number.square", reason: reason)
+            }
+            if let crash = pack.signals.crash {
+                aliveSection(crash)
+            } else if let reason = PanelChannelFields.reason(for: "crash") {
+                unmeasuredCard(title: "进程存活", systemImage: "heart.circle", reason: reason)
+            }
+            if let probe = pack.signals.handlerProbe {
+                probeSection(probe)
+            } else if let reason = PanelChannelFields.reason(for: "handlerProbe") {
+                unmeasuredCard(title: "探针命中", systemImage: "antenna.radiowaves.left.and.right", reason: reason)
+            }
+            if let responsiveness = pack.signals.responsiveness {
+                responsivenessSection(responsiveness)
+            } else if let reason = PanelChannelFields.reason(for: "responsiveness") {
+                unmeasuredCard(title: "响应性", systemImage: "gauge.with.dots.needle.50percent", reason: reason)
+            }
         } else {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
@@ -570,6 +587,21 @@ struct EvidenceDetailView: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
+        }
+    }
+
+    private func responsivenessSection(_ responsiveness: ResponsivenessSignal) -> some View {
+        DetailCard(
+            title: "响应性",
+            systemImage: "gauge.with.dots.needle.50percent",
+            tint: responsiveness.responsive ? .green : .orange
+        ) {
+            DetailRowView(
+                label: "是否响应",
+                value: responsiveness.responsive ? "是" : "否",
+                valueColor: responsiveness.responsive ? .green : .orange
+            )
+            DetailRowView(label: "往返耗时", value: String(format: "%.1f ms", responsiveness.pingMs))
         }
     }
 

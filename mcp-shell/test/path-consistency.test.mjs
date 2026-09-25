@@ -34,6 +34,16 @@ import { privateSandbox } from "./support/sandbox.mjs";
  * branches or `ownabilityDefect` ever go back to comparing a whole path, which is
  * the form that let one level below a protected directory through.
  *
+ * Historical note (R7-低9): those `hasPrefix` checks were first written as a
+ * byte-for-byte glyph (a regex of the exact `for … where … hasPrefix(x + "/")`
+ * spelling). That failed the real test — it did not actually pin "a child of a
+ * protected directory is refused", it pinned one *way of writing it*, so an
+ * equivalent refactor (renaming the loop variable, splitting the `||`, reflowing)
+ * would have turned the gate red for no reason. They are now semantic: a loop over
+ * each protected list must reach a `.hasPrefix(` subtree primitive in its guard,
+ * whatever the operand order, names, or whitespace; and the `.contains(` equality
+ * form is banned for both lists, not just the one it once hid behind.
+ *
  * What remains out of reach here: this file still cannot execute the daemon, so
  * the *behaviour* it proves is the shell's (the input-level subtree entries in the
  * truth table at the bottom) and the daemon's is read as source. A semantic change
@@ -326,8 +336,18 @@ test("the daemon matches protected storage as subtrees and falls back to ownersh
     .join("\n");
 
   for (const list of ["sharedScratchStoragePaths", "systemOwnedStorageTrees"]) {
+    // Semantic, not a glyph. The old check pinned the exact spelling
+    // `for x in <list> where y == z || y.hasPrefix(z + "/")`, so an equivalent
+    // refactor — renaming the loop variable, splitting the `||`, hoisting the
+    // `list + "/"` prefix, or reflowing onto more lines — turned the gate red
+    // even though subtree semantics were intact (R7-低9). The semantic contract
+    // this must survive is narrower and stricter: the loop that iterates `<list>`
+    // has to reach a subtree primitive (`.hasPrefix(`) inside its guard, whatever
+    // the operand order, names, or whitespace. If subtree matching dies and the
+    // list is matched by whole-path equality only, `.hasPrefix(` leaves the guard
+    // and this goes red.
     const subtree = new RegExp(
-      `for\\s+\\w+\\s+in\\s+${list}\\s+where\\s+\\w+\\s*==\\s*\\w+\\s*\\|\\|\\s*\\w+\\.hasPrefix\\(\\w+\\s*\\+\\s*"\\/"\\)`
+      `for\\s+[A-Za-z_][A-Za-z0-9_]*\\s+in\\s+${list}\\s+[^{]*?hasPrefix\\(`
     );
     assert.match(
       body.replace(/\s+/g, " "),
@@ -348,10 +368,12 @@ test("the daemon matches protected storage as subtrees and falls back to ownersh
   );
 
   // Negative half, and the one that would actually catch a regression: the
-  // equality form is what made a child of `/tmp` admissible.
+  // equality form is what made a child of `/tmp` admissible. Checked for *both*
+  // protected lists so a `systemOwnedStorageTrees.contains(...)` sneaking back
+  // is no quieter than the shared-scratch one it once hid behind.
   assert.doesNotMatch(
     body,
-    /sharedScratchStoragePaths\s*\.contains\(/,
+    /(?:sharedScratchStoragePaths|systemOwnedStorageTrees)\s*\.contains\(/,
     "exact-equality matching is back in resolvedStoragePathDefect",
   );
 });
