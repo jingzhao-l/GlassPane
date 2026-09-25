@@ -90,9 +90,40 @@ private let LEAK_BYTES = 8 * 1024 * 1024
 
 final class LeakCanary: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
+    private var button: NSButton!
     private var slabs: [[UInt8]] = []
     private var leakedFds: [Int32] = []
     private var clicks = 0
+
+    /// Where this process records what it actually did, one line per click.
+    ///
+    /// The harness used to print "内存 8MB/次 + fd 1/次" from the constants in
+    /// this source file — a claim about the injection recited from the code that
+    /// was supposed to perform it, which is how a T9 gate that never triggered
+    /// got diagnosed as a detector bug for as long as it took someone to measure
+    /// the process instead of reading the script. Now the canary reports its own
+    /// resident size and fd count per click, and the assertions talk about those
+    /// numbers or they do not run.
+    private let metricsPath = ProcessInfo.processInfo.environment["CANARY_METRICS_FILE"]
+
+    private func reportMetrics() {
+        guard let metricsPath else { return }
+        var usage = rusage()
+        let rssKb: Int
+        if getrusage(RUSAGE_SELF, &usage) == 0 {
+            rssKb = Int(usage.ru_maxrss / 1024)   // bytes on Darwin
+        } else {
+            rssKb = -1
+        }
+        let line = "clicks=\(clicks) rss_kb=\(rssKb) fds_opened=\(leakedFds.count)\n"
+        if let handle = FileHandle(forWritingAtPath: metricsPath) {
+            handle.seekToEndOfFile()
+            handle.write(Data(line.utf8))
+            handle.closeFile()
+        } else {
+            try? Data(line.utf8).write(to: URL(fileURLWithPath: metricsPath))
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("CANARY_PID=\(ProcessInfo.processInfo.processIdentifier)")
@@ -101,7 +132,11 @@ final class LeakCanary: NSObject, NSApplicationDelegate {
         window = NSWindow(contentRect: rect, styleMask: [.titled, .closable],
                           backing: .buffered, defer: false)
         window.title = "Leak Canary"
-        let button = NSButton(title: "leak", target: self, action: #selector(leakOne(_:)))
+        button = NSButton(title: "leak", target: self, action: #selector(leakOne(_:)))
+        // The selector binds to this identifier, not to the title: the title is
+        // the witness that a press actually ran, and a selector keyed to it would
+        // stop matching the moment the witness updated (measured that way).
+        button.setAccessibilityIdentifier("leak-button")
         button.frame = NSRect(x: 120, y: 90, width: 120, height: 40)
         window.contentView?.addSubview(button)
         window.makeKeyAndOrderFront(nil)
@@ -115,6 +150,13 @@ final class LeakCanary: NSObject, NSApplicationDelegate {
         if fd >= 0 {
             leakedFds.append(fd)
         }
+        // The title is the independent witness: `observe`/`assert_element` can
+        // see `leak#N` without trusting anything this process says about itself,
+        // and "actConfirmed" only ever meant AXPress returned success — AppKit
+        // accepts a press against a window it never shows and the handler never
+        // runs. That gap is what made 24 rounds of "confirmed" acts measure zero.
+        button?.title = "leak#\(clicks)"
+        reportMetrics()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -169,6 +211,7 @@ def fail(msg):
 # 本段在 engine/.p6_smoke.py 与 engine/.t9_smoke.py 中逐字一致：冒烟脚本按本仓惯例
 # 各自自包含（.smoke_client.py 与 .t9_smoke.py 的 send/recv_frame 亦然），不做跨脚本
 # import；改一处必须同步另一处。
+LEAK_MB_PER_CLICK = 8      # 与 CANARY_SOURCE 的 LEAK_BYTES 同值，只用于失败信息
 ISOLATION_PROBE_PROJECT_ID = "prj_gp-smoke-isolation-canary"
 ISOLATION_PROBE_TIMEOUT = 20.0
 # 两个都必须问得到才算数：evidence 靠 --evidence-stats 的 dir，projects 靠
@@ -487,8 +530,8 @@ def find_leak_button(tree, depth=0):
         return None
     if not isinstance(tree, dict):
         return None
-    if tree.get("role") == "AXButton" and tree.get("title") == "leak":
-        return {"role": "AXButton", "title": "leak"}
+    if tree.get("role") == "AXButton" and tree.get("identifier") == "leak-button":
+        return {"role": "AXButton", "identifier": "leak-button"}
     for child in tree.get("children", []) or []:
         found = find_leak_button(child, depth + 1)
         if found:
@@ -506,8 +549,13 @@ def build_and_launch_canary(workdir):
     )
     if compiled.returncode != 0:
         fail(f"swiftc 金丝雀编译失败：{compiled.stderr[:400]}")
+    # 自报计数器走文件而不是 stdout 管道：管道的另一端在脚本手里，脚本正忙着
+    # 一轮轮发 act，读它就得并发；写文件则任何一方随时能取到最近事实。
+    metrics_path = os.path.join(workdir, "canary-metrics.txt")
+    open(metrics_path, "w").close()
     launched = subprocess.Popen(
-        [bin_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        [bin_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env=dict(os.environ, CANARY_METRICS_FILE=metrics_path),
     )
     pid = None
     deadline = time.time() + 20
@@ -520,7 +568,23 @@ def build_and_launch_canary(workdir):
         launched.kill()
         fail("金丝雀未在超时内输出 CANARY_PID")
     time.sleep(1.5)  # 留给 AppKit 完成窗口与 AX 树就绪
-    return launched, pid
+    return launched, pid, metrics_path
+
+
+def canary_metrics(path):
+    """解析金丝雀自报的 (clicks, rss_kb, fds_opened)，取最后一次；没有则 None。"""
+    last = None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                fields = dict(
+                    one.split("=", 1) for one in line.split() if "=" in one
+                )
+                if {"clicks", "rss_kb", "fds_opened"} <= set(fields):
+                    last = (int(fields["clicks"]), int(fields["rss_kb"]), int(fields["fds_opened"]))
+    except OSError:
+        return None
+    return last
 
 
 def main():
@@ -594,8 +658,8 @@ def main():
             fail(f"hello 无 version: {frame}")
         print(f"PASS daemon hello（version={frame.get('version')}）")
 
-        canary, pid = build_and_launch_canary(workdir)
-        print(f"PASS 泄漏金丝雀已启动（pid={pid}，内存 8MB/次 + fd 1/次）")
+        canary, pid, metrics_path = build_and_launch_canary(workdir)
+        print(f"PASS 泄漏金丝雀已启动（pid={pid}；注入速率不再从常量宣读，见每轮自报计数）")
 
         frame = send(sock, nid(), "attach", {"pid": pid})
         assert "pid" in frame and "appName" in frame, f"attach by pid 失败: {frame}"
@@ -621,6 +685,18 @@ def main():
             frame = send(sock, nid(), "act", {"selector": button, "action": "press"})
             if frame.get("actConfirmed") is not True:
                 fail(f"第 {round_index} 轮 act 未确认：{json.dumps(frame)[:300]}")
+            # actConfirmed 只说明 AXPress 返回 success，不说明动作执行过（AppKit
+            # 收下从未上屏的窗口的 press 就丢掉）。所以第一件要量的是"注入真的发生了
+            # 吗"，而不是把没发生的注入交给检测器去怪它不响。
+            if round_index == 3:
+                probe = canary_metrics(metrics_path)
+                if probe is None or probe[0] < 3:
+                    fail(
+                        f"注入未落地：金丝雀自报 clicks={probe[0] if probe else 'None'}"
+                        f"（已发 {round_index} 次 act 且全部 actConfirmed=true）——"
+                        "问题在点击没有到达 handler，不在 T9 检测器；"
+                        "读 daemon.log 里的 pixel-capture-* 标签与 assert_element leak#N 佐证窗口上屏"
+                    )
             frame = send(sock, nid(), "last_evidence", {})
             pack = frame.get("evidencePack", frame)
             circuit = pack.get("circuitBreaker") or {}
@@ -637,7 +713,15 @@ def main():
             print("最近 evidence 轨迹：")
             for entry in trajectory:
                 print(f"  act#{entry[0]} level={entry[1]} reason={entry[2] or '-'}")
-            fail(f"{max_acts} 轮内未检出 degradation|，T9 未触发（见轨迹人工分析泄漏注入是否生效）")
+            measured = canary_metrics(metrics_path)
+            shown = (f"clicks={measured[0]} rss_kb={measured[1]} fds={measured[2]}"
+                     if measured else "金丝雀未写出任何自报计数")
+            print(f"注入侧实测：{shown}")
+            fail(
+                f"{max_acts} 轮内未检出 degradation|，T9 未触发。注入侧实测：{shown} "
+                f"（期望 clicks≈{max_acts}、RSS 至少增长 {LEAK_MB_PER_CLICK}MB×clicks）——"
+                "先比对这一行与上面的轨迹再判断是注入还是判据"
+            )
 
         # 退化裁决已落到 evidence → diagnose 应以 T9 归类（Classifer T9 规则）。
         frame = send(sock, nid(), "diagnose", {})
