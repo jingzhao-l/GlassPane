@@ -14,3 +14,6 @@ __pycache__/
 
 # npm pack 产物（发布用，不入库；历史上误提过一枚 glasspane-mcp-shell-0.1.0.tgz）
 *.tgz
+
+# 上游参照克隆（223 MB，含 .git）；fork 的 diff 尺子读它，绝不进版本控制
+.external/

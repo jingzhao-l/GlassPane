@@ -1,0 +1,128 @@
+name: Harness contract (upstream opencode)
+
+# 这条 lane 的唯一职责：在**上游发布**时回答"升级会不会把我们脚下的插件地板换掉"，
+# 并在答"会"的时候让升级冻结（红）。工具面 B 的契约测试纪律（综述 §8.2 / R34）
+# 全靠这一条才从纸面变成机制——见 specs/GlassPane_Harness_Fork_调研与方案_v0.1.md §6.2。
+#
+# 不在 PR CI 里跑：它要下载上游 tarball（~142 MB），且失败与本次提交无关。
+# PR CI 只跑离线自洽（见 ci.yml 的 install-gate）。
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # 每周一 06:17 UTC：上游约每周 1–2 次发布，这个频率够早也不会和发布日同频
+  workflow_dispatch:
+    inputs:
+      probe_tag:
+        description: "要探查的上游 tag（留空＝上游最新 release）"
+        required: false
+        default: ""
+  push:
+    paths:
+      - "harness/**"
+      - ".github/workflows/harness-contract.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: hook-liveness vs upstream (${{ matrix.purpose }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        purpose: [pinned, latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Resolve upstream tag
+        id: tag
+        env:
+          PURPOSE: ${{ matrix.purpose }}
+          PROBE_TAG: ${{ github.event.inputs.probe_tag }}
+        run: |
+          set -eu
+          pinned="$(node -p "require('./harness/upstream.json').tag")"
+          if [ "$PURPOSE" = "pinned" ]; then
+            echo "tag=$pinned" >> "$GITHUB_OUTPUT"
+            echo "checkout_dir=$RUNNER_TEMP/upstream-pinned" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          resolved=""
+          if [ -n "${PROBE_TAG:-}" ]; then
+            resolved="$PROBE_TAG"
+          else
+            resolved="$(curl -fsSL https://api.github.com/repos/anomalyco/opencode/releases/latest | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{console.log(JSON.parse(s).tag_name)})')"
+          fi
+          # 手动输入的 tag 会进 curl URL 与摘要文本：先钳成 release tag 的形状，
+          # 不给它任何成为 shell 片段或 ref 注入的机会。
+          if ! printf '%s' "$resolved" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error title=probe_tag 形状不合法::期望 vMAJOR.MINOR.PATCH，收到 '$resolved'（未执行任何下载）。"
+            exit 1
+          fi
+          echo "tag=$resolved" >> "$GITHUB_OUTPUT"
+          echo "checkout_dir=$RUNNER_TEMP/upstream-latest" >> "$GITHUB_OUTPUT"
+
+      - name: Skip when latest equals the pin (nothing to probe)
+        id: skip
+        env:
+          PURPOSE: ${{ matrix.purpose }}
+          RESOLVED: ${{ steps.tag.outputs.tag }}
+        run: |
+          pinned="$(node -p "require('./harness/upstream.json').tag")"
+          if [ "$PURPOSE" = "latest" ] && [ "$RESOLVED" = "$pinned" ]; then
+            echo "上游最新 release 就是 pin（$pinned）——没有新版本可探查，跳过。" >> "$GITHUB_STEP_SUMMARY"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch upstream at the resolved tag
+        if: steps.skip.outputs.skip == 'false'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          DIR: ${{ steps.tag.outputs.checkout_dir }}
+        run: |
+          set -eu
+          mkdir -p "$DIR"
+          curl -fsSL -o "$DIR/oc.tgz" "https://codeload.github.com/anomalyco/opencode/tar.gz/refs/tags/$TAG"
+          tar xzf "$DIR/oc.tgz" -C "$DIR" --strip-components=1
+          rm -f "$DIR/oc.tgz"
+          node -p "'fetched ' + require('$DIR/packages/opencode/package.json').version + ' into ' + '$DIR'"
+
+      - name: Pinned base must still match the golden
+        if: matrix.purpose == 'pinned' && steps.skip.outputs.skip == 'false'
+        env:
+          HARNESS_UPSTREAM_CHECKOUT: ${{ steps.tag.outputs.checkout_dir }}
+        run: node harness/tools/hook-liveness.mjs --check
+
+      - name: Probe a newer upstream release (drift = freeze the upgrade)
+        if: matrix.purpose == 'latest' && steps.skip.outputs.skip == 'false'
+        env:
+          HARNESS_UPSTREAM_CHECKOUT: ${{ steps.tag.outputs.checkout_dir }}
+          PROBED_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -eu
+          pinned="$(node -p "require('./harness/upstream.json').tag")"
+          out="$(node harness/tools/hook-liveness.mjs --probe 2>&1 || true)"
+          printf '%s\n' "$out"
+          {
+            echo "### 上游探查 $pinned → $PROBED_TAG"
+            echo '```'
+            printf '%s\n' "$out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if printf '%s' "$out" | grep -q "drift"; then
+            echo "::error title=上游换了插件地板::hook-liveness 在 $PROBED_TAG 上漂移。按综述 R34 归因＝上游坏：冻结升级，不要在本仓打补丁绕过。"
+            exit 1
+          fi
+
+      - name: Offline self-consistency (always, cheap)
+        if: matrix.purpose == 'pinned'
+        run: |
+          node harness/tools/hook-liveness.mjs --offline
+          node -e "const j=require('./harness/contracts/hook-liveness.json');const dead=j.hooks.filter(h=>h.kind==='dead').map(h=>h.name);console.log('known dead hooks:', JSON.stringify(dead));if(!(dead.length===1&&dead[0]==='permission.ask')){console.error('金样的死钩子集与调研结论不符');process.exit(1)}"

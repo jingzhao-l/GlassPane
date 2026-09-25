@@ -1,0 +1,29 @@
+{
+  "_comment": "Pinned coordinates for GlassPane 工具面 B (opencode fork line). The fork base is a tag, not a moving branch: divergence is only measurable if what we compare against is fixed.",
+  "repo": "anomalyco/opencode",
+  "redirectedFrom": "sst/opencode (301 as of 2026-09-24; the org's own bio points at anomalyco)",
+  "tag": "v1.18.32",
+  "baseCommit": "545f51d release: v1.18.32",
+  "license": "MIT",
+  "defaultBranch": "dev",
+  "releaseCadence": "~1-2 patch releases/week (v1.18.32 2026-09-21, .31 09-14, .30 09-09, .29 09-04); no semver policy, no deprecation doc, release notes are bugfix-only",
+  "observedAt": "2026-09-24",
+  "checkout": "/Volumes/Eng-Dev/.upstream/opencode-1.18.32",
+  "checkoutSource": "https://codeload.github.com/anomalyco/opencode/tar.gz/refs/tags/v1.18.32",
+  "hooksFile": "packages/plugin/src/index.ts",
+  "scanDirs": ["packages/opencode/src", "packages/core/src"],
+  "scanNote": "Only the host/engine trees count as dispatch sites. Feature-plugin and doc trees are excluded: a first-party plugin calling a hook does not prove the engine dispatches it, and prose never proves anything.",
+  "fork": {
+    "shape": "产品级私有化定制 fork（用户 2026-09-24 裁决），宿主形态同 iterate-harness：fork 作为受版本控制的子目录存在于项目源头仓库，发布靠 git subtree split 到独立仓。全树 import，忠实照搬（6,632 条目一字不差，含 60 个符号链接）。",
+    "path": "harness/glasspane-harness",
+    "publishTarget": "jingzhao-l/glasspane-harness（远端尚未创建；创建后由 subtree split 发布）",
+    "referenceClone": ".external/opencode",
+    "referenceCloneNote": "上游完整 clone（含 .git，223 MB），gitignore 掉。fork-diff 尺子读它的 ls-files -s 做逐文件 blob 比对；将来 cherry-pick 也从这儿取。",
+    "commitPrefix": "[gp]",
+    "syncPolicy": "不 rebase 历史、不 merge 上游分支。fetch 新 tag → 在临时分支把我们的 [gp] 提交集合重放到新 base → 跑 fork-diff --record + hook-liveness --probe + 固定点测试 → 冲突与结论写 harness/glasspane-harness/SYNCLOG.md。",
+    "invariants": [
+      "判定性验证逻辑 100% 留在 Swift：fork 里可以有 UI、编排与语义层，但『这次变化是不是这次操作造成的』只能由 glasspaned 给出。",
+      "分叉必须可测量：任何触碰 vendored 树的提交都要在同一提交里更新 harness/contracts/fork-diff.json，否则 fork-diff --check 红。"
+    ]
+  }
+}

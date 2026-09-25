@@ -122,6 +122,23 @@ jobs:
         run: npm run build
       - name: Test all workspaces (kernel + mcp-shell)
         run: npm run test --workspaces --if-present
+      # 上游不在本 lane 被观测（142 MB tarball，且失败与本次提交无关）；这里只验
+      # 金样自洽与坐标一致性，真·上游探查在 harness-contract.yml 的周跑里。
+      - name: Harness contract — golden self-consistency (offline)
+        run: node harness/tools/hook-liveness.mjs --offline
+
+  # 对外文档守卫：死链、失效锚点、双语成对（README/SECURITY/CONTRIBUTING 任一侧
+  # 改名或漏翻译都在这里现形——面向陌生读者的文档，链接断了等于没交付）。
+  docs:
+    name: public docs (links, anchors, bilingual parity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Check links, anchors and bilingual pairing across public docs
+        run: node scripts/check-doc-links.mjs
 
   # 版本线守卫：根 workspace / 两个 npm 包 / kernel / MCP 自报 / daemon 自报 /
   # .app bundle / install.sh 钉的 tag / lockfile 必须是同一个数字。漂移的后果不是
