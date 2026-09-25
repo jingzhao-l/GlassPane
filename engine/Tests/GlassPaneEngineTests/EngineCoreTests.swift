@@ -1563,6 +1563,52 @@ final class EngineCoreWaveTwoBetaTests: XCTestCase {
         }
     }
 
+    /// The ownership half of the path rule (J, second pass). The deny list can
+    /// only name what somebody thought to name; this is what catches the rest.
+    /// Both directions are asserted, because a guard that only ever refuses is
+    /// the same defect wearing the opposite sign.
+    func testOwnabilityRefusesWorldWritableAndForeignButAcceptsOurOwnSandbox() throws {
+        let mine = TestSandbox.directory("ownable-mine")
+        XCTAssertNil(
+            EngineCore.ownabilityDefect(path: mine),
+            "a directory this process created must stay admissible, or the rule is just 'never archive'"
+        )
+
+        let openToAll = TestSandbox.directory("ownable-world-writable")
+        try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: openToAll)
+        let defect = try XCTUnwrap(
+            EngineCore.ownabilityDefect(path: openToAll + "/evidence"),
+            "a group/world-writable ancestor makes an evidence pack tamper-evident to nobody"
+        )
+        XCTAssertTrue(defect.contains("writable by group or other"), defect)
+        XCTAssertTrue(defect.contains("777"), defect)
+
+        // The deliberate expectation change: `<folders>/<zz>/<zy>/T/<name>` used to
+        // read as a private per-user temp path by name alone. Measured here, the
+        // real one is `drwx------` and owned by the user; a fabricated pair of
+        // components has no ancestor this process owns, which is what the shell
+        // has refused since its ownership rule landed.
+        let fabricated = "/private/var/folders/zz/zy/T/gpb6-invented"
+        XCTAssertNotNil(
+            EngineCore.ownabilityDefect(path: fabricated),
+            "a path whose nearest existing ancestor belongs to root is not ours to archive into"
+        )
+    }
+
+    /// The refusal has to reach the stored value, not just the helper: the same
+    /// entry point `attach`/`pruneEvidence`/CLI use.
+    func testWorldWritableStoredPathIsRejectedAtTheSingleEntryPoint() throws {
+        let openToAll = TestSandbox.directory("entry-world-writable")
+        try FileManager.default.setAttributes([.posixPermissions: 0o777], ofItemAtPath: openToAll)
+        let stored = openToAll + "/evidence"
+        let defect = try XCTUnwrap(
+            EngineCore.evidenceStoragePathDefect(stored),
+            "evidenceStoragePathDefect must carry the ownership rule, or every caller has to remember to call two functions"
+        )
+        XCTAssertTrue(defect.contains("writable by group or other"), defect)
+        XCTAssertNil(EngineCore.evidenceStoragePathDefect(TestSandbox.directory("entry-mine") + "/evidence"))
+    }
+
     // MARK: - A-01: an export that failed is not "no probe"
 
     func testFailedCheckpointExportSurvivesIntoTheRollbackRefusal() throws {

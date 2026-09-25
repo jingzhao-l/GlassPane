@@ -281,7 +281,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       "Perform a UI action on the attached app and confirm it. " +
       "If the daemon reports GP_E_BUSY_INPUT (real user input is contaminating the window), retry later, " +
       "or set degrade: true to proceed immediately with the contamination recorded in evidence " +
-      "(attribution becomes weak + contaminated=true) — never silently clean.",
+      "(attribution becomes weak + contaminated=true) — never silently clean. " +
+      "Prefer selector.identifier over selector.title to name the element: a title is not a stable handle " +
+      "(a measured case: every act against a title-keyed selector reported actConfirmed while the app's " +
+      "handler never ran, because the press resolved to something that was not the button). " +
+      "actConfirmed means the accessibility action was accepted — not that the intended element handled it; " +
+      "to prove the click itself, read the probe's handler hit or the state change, or assert_element " +
+      "against a value that the action is supposed to change.",
     engineMethod: "act",
     inputSchema: {
       type: "object",

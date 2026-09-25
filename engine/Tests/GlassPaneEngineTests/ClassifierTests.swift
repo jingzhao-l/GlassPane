@@ -242,4 +242,54 @@ final class ClassifierTests: XCTestCase {
             "a measured channel that says nothing changed is not an unmeasured one: \(report.evidence)"
         )
     }
+
+    /// R5-08: an unmeasured channel must be *said*, not left out. The evidence
+    /// line used to name `pixelDiff=unavailable` while `axEvent`,
+    /// `responsiveness`, `crash` and `handlerProbe` silently disappeared when
+    /// nil — and a reader skimming a list of terms cannot tell "measured: no
+    /// change" from "never consulted", which is precisely the distinction T4/T5/T7
+    /// turn on. One pack with every channel absent, one assertion per channel.
+    func testEveryUnmeasuredChannelSaysSo() {
+        let pack = EvidencePack(
+            operationId: "op_0123456789ABCDEFGHJKMNPQRS",
+            createdAt: "2026-09-14T12:00:00.000Z",
+            attribution: Attribution(level: .weak, contaminated: true),
+            circuitBreaker: CircuitBreaker(level: .normal),
+            signals: Signals(
+                act: ActSignal(
+                    selector: Selector(role: "AXButton", title: "Submit"),
+                    action: .press, actConfirmed: true
+                )
+            )
+        )
+        let (_, report) = Classifier.classify(pack)
+        for term in [
+            "axEvent=unavailable",
+            "pixelDiff=unavailable",
+            "responsiveness=unmeasured",
+            "crash=unmeasured",
+            "handlerProbe=absent",
+            "stateDiff=unavailable",
+        ] {
+            XCTAssertTrue(
+                report.evidence.contains(term),
+                "\(term) must be stated when that channel did not run: \"\(report.evidence)\""
+            )
+        }
+        // The one phrase that must NOT appear: an absent probe is not a probe
+        // that answered zero.
+        XCTAssertFalse(report.evidence.contains("hitCount=0"), report.evidence)
+    }
+
+    /// The positive shape, so the test above is not "everything is missing".
+    func testMeasuredChannelsStillReportTheirValuesNotTheAbsenceText() {
+        let (_, report) = Classifier.classify(makePack())
+        XCTAssertTrue(report.evidence.contains("axChanged=true"), report.evidence)
+        XCTAssertTrue(report.evidence.contains("changedPixelRatio=0.1"), report.evidence)
+        XCTAssertFalse(report.evidence.contains("axEvent=unavailable"), report.evidence)
+        XCTAssertFalse(report.evidence.contains("pixelDiff=unavailable"), report.evidence)
+        // This helper builds no probe, so the probe's own absence term *is* the
+        // right output here — asserting its absence would assert a lie.
+        XCTAssertTrue(report.evidence.contains("handlerProbe=absent"), report.evidence)
+    }
 }

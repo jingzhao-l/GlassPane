@@ -458,6 +458,57 @@ public final class EngineCore {
         }
     }
 
+    /// Why a location is not safely ours to archive into, judged by **ownership**
+    /// on the nearest existing ancestor.
+    ///
+    /// The name rules in `resolvedStoragePathDefect` are a deny list; a deny list
+    /// only ever covers what somebody thought to name. Measured on this machine:
+    ///   * a real per-user temp dir (`getconf DARWIN_USER_TEMP_DIR`) is
+    ///     `drwx------` owned by the user — admissible, and this must not refuse it;
+    ///   * `/Users/Shared` is `drwxrwxrwt` owned by root — world-writable, so a
+    ///     pack written "into a directory nobody owns" is readable-and-replaceable
+    ///     by every local account;
+    ///   * `/private/var/folders` is `drwxr-xr-x` owned by root, so a *fabricated*
+    ///     `<folders>/<zz>/<zy>/T/<name>` path (which the name rules let through,
+    ///     since `/T/` looks private) has no ancestor this process owns at all.
+    ///
+    /// That last case is a deliberate change to a previously-accepted shape: the
+    /// MCP shell already refuses it (`project-registry.ts` ownership rule, tested
+    /// at `project-registry.test.mjs:494`), and the daemon accepting what the
+    /// write path refuses is the same split R4/J has been closing. The asymmetry
+    /// was never safe — evidence archives are the audit trail, and one written
+    /// into a directory another account can write can be edited by that account.
+    ///
+    /// Not pure (it stats the filesystem), so it is a separate predicate from
+    /// `resolvedStoragePathDefect`, which stays a pure name rule the whole table
+    /// can be tested against without touching disk.
+    static func ownabilityDefect(path: String) -> String? {
+        var cursor = URL(fileURLWithPath: path, isDirectory: true)
+        while true {
+            let attributes = (try? FileManager.default.attributesOfItem(atPath: cursor.path)) ?? [:]
+            if !attributes.isEmpty {
+                guard let number = attributes[.posixPermissions] as? NSNumber else {
+                    return "\(cursor.path) exists but its permissions cannot be read"
+                }
+                let mode = Int(truncating: number)
+                if mode & 0o022 != 0 {
+                    return "\(cursor.path) is writable by group or other (mode "
+                        + String(format: "%04o", mode) + "), so an evidence pack under it is not tamper-evident"
+                }
+                let owner = attributes[.ownerAccountID] as? NSNumber
+                if (owner?.intValue ?? -1) != Int(getuid()) {
+                    return "\(cursor.path) is owned by uid \(owner?.intValue ?? -1), not this process (uid \(getuid()))"
+                }
+                return nil
+            }
+            let parent = cursor.deletingLastPathComponent()
+            if parent.path == cursor.path {
+                return "\(path) has no existing ancestor this process can examine"
+            }
+            cursor = parent
+        }
+    }
+
     /// Everything wrong with a stored `evidenceStoragePath` (nil = adoptable).
     /// Public because the `glasspaned` maintenance CLI is a second *deleting*
     /// reader of the same stored value and must apply this exact rule (A-07).
@@ -466,7 +517,10 @@ public final class EngineCore {
         guard let resolved = resolveStoragePath(stored) else {
             return "cannot be located (`realpath` failed all the way up its path), and the daemon will not archive into or prune a directory it cannot resolve"
         }
-        return resolvedStoragePathDefect(resolved: resolved)
+        if let nameDefect = resolvedStoragePathDefect(resolved: resolved) { return nameDefect }
+        // Ownership last: it is the one step that touches disk, and it answers the
+        // question the deny list cannot — "is this directory ours to archive into".
+        return ownabilityDefect(path: resolved)
     }
 
     /// The refusal, worded so the caller sees both honest options: fix the

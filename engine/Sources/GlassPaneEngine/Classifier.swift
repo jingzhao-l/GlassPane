@@ -216,8 +216,20 @@ public enum Classifier {
             "\(pack.operationId) \(pack.attribution.level.rawValue) attribution",
             "actConfirmed=\(pack.signals.act.actConfirmed)"
         ]
+        // R5-08: every measurement channel states itself, measured or not.
+        //
+        // Three of these used to be bare `if let` blocks, so a channel that did
+        // not run simply vanished from the line — while `pixelDiff` (and
+        // `stateDiff`, since R5-07) said `=unavailable`. That asymmetry is not
+        // cosmetic: `diagnose` is read by an agent that decides whether to
+        // re-act, and a term missing from a list of terms it cannot distinguish
+        // "the digest channel measured no change" from "the digest channel was
+        // never consulted". Absence has to be a stated fact, once the report
+        // starts using the word for some channels and not for others.
         if let axEvent = pack.signals.axEvent {
             parts.append("axChanged=\(axEvent.axChanged) (digest \(axEvent.treeDigestBefore) -> \(axEvent.treeDigestAfter), \(axEvent.nodeCount) nodes, \(axEvent.latencyMs)ms)")
+        } else {
+            parts.append("axEvent=unavailable (no before/after digest was captured for this window)")
         }
         if let pixelDiff = pack.signals.pixelDiff {
             parts.append("changedPixelRatio=\(pixelDiff.changedPixelRatio)")
@@ -226,12 +238,21 @@ public enum Classifier {
         }
         if let responsiveness = pack.signals.responsiveness {
             parts.append("responsive=\(responsiveness.responsive) pingMs=\(responsiveness.pingMs)")
+        } else {
+            parts.append("responsiveness=unmeasured (no responsiveness round trip ran)")
         }
         if let crash = pack.signals.crash {
             parts.append("alive \(String(crash.processAliveBefore)) -> \(String(crash.processAliveAfter))")
+        } else {
+            parts.append("crash=unmeasured (process liveness was not sampled)")
         }
         if let handlerProbe = pack.signals.handlerProbe {
             parts.append("handlerProbe hitCount=\(handlerProbe.hitCount) late=\(handlerProbe.lateCount) [\(handlerProbeSummary(handlerProbe))]")
+        } else {
+            // `handlerProbe=absent` is not the same claim as `hitCount=0`: the
+            // first says no probe answered, the second says one answered and
+            // caught nothing — the distinction T4/T5/T7 hinge on.
+            parts.append("handlerProbe=absent (no probe answered this window; not a zero hit count)")
         }
         // Not wrapped in `if let stateDiff`: the whole point of the helper's
         // `stateDiff=unavailable` string is the case where there is no reading,
