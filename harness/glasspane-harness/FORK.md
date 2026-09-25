@@ -9,11 +9,13 @@
 
 1. **判定性验证逻辑 100% 留在 Swift**。本 fork 里可以有 UI、编排、语义层与呈现，但"这次变化是不是这次操作造成的"这类判定只能由 `glasspaned` 通过 local socket 给出。方法表在合并 `origin/main`（f16f8c8）之后是 **13 个**：`hello / attach / act / observe / assert_element / diagnose / last_evidence / snapshot / restore / audit_ui / capture_view / probe_status / shutdown`（真源是 `engine/Sources/GlassPaneEngine/FrameCodec.swift` 的 `enum EngineMethod`；数的时候要展开 `case hello, attach, act, observe` 这类一行多枚举——**该枚举有 8 行 `case`、13 个成员**，按行数会数错。别信任何写死的数字，包括这一句）。错误帧恒 `{code, message, remedy}` 三字段。**这个数是别的会话会改的**（1.1.1 基点上只有 11 个，`audit_ui`、`capture_view` 都是之后合入的）——所以 fork 侧不许把方法名抄成字面量清单，要从 daemon 的 `hello.capabilities` / 协商结果读。fork 侧只做绑定与呈现。工具面 A 已经犯过一次"同一份状态两边各写一份实现"的错（`projects.json` 的 TS/Swift 双写，见 `specs/…审计_2026-09-22`），fork 不允许成为第三份。
 2. **分叉必须可测量**。任何触碰 vendored 树的提交，必须在**同一个提交**里更新 `harness/contracts/fork-diff.json`；不更新就 `fork-diff --check` 红。
+3. **vendored 内核不是我们的代码，也不是可以改的地方**。`packages/opencode/vendor/kernel/` 的真源是 `iterate-skill/kernel`（canonical），经 `tools/sync-kernel.sh --target=fork` 单向同步，逐文件 sha256 钉在 `harness/contracts/kernel-vendor.json`。在这里手改一个字节 = `kernel-vendor --check` 红（CI 也跑）。
 
 ```bash
 node harness/tools/fork-diff.mjs --check    # 实际分叉面 vs 记录面（约 2 分钟，逐文件 blob 比对）
 node harness/tools/fork-diff.mjs --record   # 改完上游文件后重记，连同改动一起提交
 node harness/tools/tool-surface.mjs --check # 我们在 fork 里写了多少行（棘轮：只挡没被记录的增长，进 CI）
+node harness/tools/kernel-vendor.mjs --check # vendored 内核 == 它的溯源清单（进 CI，不需要 canonical）
 ```
 
 为什么把这条写死：另一条 harness 线（`iterate-harness`）的设计文档写着"8 处定点修改"，而它自己的树里 194 个共享文件有 **144 个**被改过、20 个被删、8 个新增，并且没有任何机器检查能发现这件事。**定制多少从来不是问题，不知道定制了多少才是。**
@@ -41,8 +43,8 @@ git log v1.18.32..HEAD --oneline --grep '^\[gp\]' # 完整定制提交清单
 | # | 能力 | 落点 | 现状 |
 |---|---|---|---|
 | M1 | `gp_*` 工具面（结构化结果 + agent 可执行 remedy） | `packages/opencode/src/tool/glasspane/` + `tool/registry.ts` 注册 | **已落地并实测**（见 `SYNCLOG.md` 2026-09-25 M1 条）：6 个工具以原始 id 出现在 fork 自己的注册表里，传输链直连 daemon 通过 |
-| M2 | evidence 采集 → kernel 决策日志（opID↔entry 哈希链） | `event` + `tool.execute.*` 绑定 | 运行时已见 `{id,type,properties}`（E1/E5） |
-| M3 | `@iterate/kernel` 绑定 | npm 依赖 | **卡住**：kernel 未发布（npm 404、`private: true`、无 license）。内容侧已就绪——09-25 把镜像超前 canonical 的 evidence 读侧兼容回流进 `iterate-skill`（`d893045`），canonical 现在是超集；发布是 Phase B 第 0 号动作，属用户决策项 |
+| M2 | evidence 采集 → kernel 决策日志（opID↔entry 哈希链） | `src/plugin/glasspane-decision-log.ts`（内部插件，绑 `tool.execute.after`）+ `src/tool/glasspane/kernel.ts` | **已落地**：outcome/summary 全部转录自引擎写下的字段；运行时证据见 `SYNCLOG.md` 同日条与 `script/glasspane-e7-ledger.ts`。**仍未验**：真模型轮次下宿主是否走到这个 hook |
+| M3 | `@iterate/kernel` 绑定 | **vendored 源** `packages/opencode/vendor/kernel/` + 溯源清单 `harness/contracts/kernel-vendor.json` | **已落地**：不依赖发布（P6 §13 决定 kernel 不单独发布）。同一份源码在 fork 里跑的是 zod 4 而 canonical 钉 zod 3 —— 这条耦合由 `tool/glasspane-kernel.test.ts` 量着 |
 | M4 | 维度感知上下文压缩 | `experimental.session.compacting` | 静态有派发点；运行时形状未观测（需真模型轮次） |
 | M5 | 会话流内 evidence 渲染 | `packages/tui/src/routes/session/index.tsx`（`toolDisplays` :2626 / `toolDisplay()` :2643 / `GenericTool` :1798） | 上游对该文件改动频繁（3 个月 15 次提交），是同步冲突的主来源 |
 

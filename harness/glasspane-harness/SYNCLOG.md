@@ -2,6 +2,32 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-09-25 · M2+M3：内核以 vendored 形态进 fork，决策审计链开始生产
+
+- 改动面（`fork-diff`）：**`6630/6665 byte-identical, 2 edited, 33 added, 0 deleted`**（上一批是 `6631/6637, 1 edited, 5 added`）。
+  - `edited` 从 1 涨到 2：`tool/registry.ts`（M1）+ **`src/plugin/index.ts`**（M2 的内部插件注册，2 个 hunk：import + 数组末尾一项）。
+  - `added` 从 5 涨到 33：我们自己的 5 个源/脚本文件 + 2 个测试文件 + **23 个 vendored 内核文件**（`packages/opencode/vendor/kernel/{src,schemas,fixtures}`）。
+- 占比账（`tool-surface`）：engine 18,335 / 面 A 3,859（16.60%）/ **面 B 1,058 行 = 4.55%**。两项排除都被显式打印并计入金样：**vendored 依赖 10 个代码文件 1,150 行**（由溯源清单排除，不算我们写的）与**测试 2 个文件 467 行**（面 A 的口径本来就是 `src/`，把 B 的测试算进去就是拿两个不同的量比大小）。
+- **M3 的形态**（订正后）：`@iterate/kernel` 不进 npm，也不跨仓相对引用，而是 **vendored 源 + 溯源钉**：
+  - 新尺子 `harness/tools/kernel-vendor.mjs` + 金样 `harness/contracts/kernel-vendor.json`（canonical repo/path/branch/ref/version + 每个文件的 sha256）。`--record` **只在对齐时写**：本批真出过一次 canonical 已经前进（15df8d5）而镜像没跟上，`--record` 直接拒绝（"not byte-identical to canonical … fix the copy or the edit, do not record it"）——它拒绝给分叉盖合法章。
+  - `--check` 无克隆也能跑（CI 形态）。六条控制：清树绿；改一个 vendored 源文件 → 点名哈希变更 exit 1；删一个 → exit 1；塞进一个清单没声明的文件 → exit 1 且说"fork 长出了自己的内核文件"；`KERNEL_SRC` 在场时跨读 canonical，镜像落后 → **STALE exit 1**；还原全绿。
+  - 为什么放在 `packages/opencode/vendor/kernel` 而不是顶层 `packages/kernel`：**zod 解析不到**。bun 的依赖在 `packages/*/node_modules`，顶层新目录没有 node_modules，`import "zod"` 直接 `Cannot find package`；而给它加 package.json 就要重跑整棵 fork 的 `bun install`（10 分钟起，还会再撞一次 ghostty-web 的 TLS）。放进 opencode 包内 → 用包自己的 zod，零安装。控制实验就是这个报错本身。
+  - **同一份源码跑在两个 zod 大版本上**（canonical 钉 3.25.76，fork catalog 是 4.1.8）。`tsgo --noEmit` 立刻抓到一处前向不兼容：`z.record(z.unknown())` 在 zod 4 里键类型必填（TS2554）。修在内核（两参写法 3/4 都合法，canonical 90/90 仍绿），不修在 fork。**这条耦合从此是量出来的**：fork 侧固定点测试里断言 `zod` 主版本为 4，且 strict/absent-vs-null/未知键拒绝这些**跨大版本最容易漂**的行为逐条测。
+- **M2 的落点**：`src/plugin/glasspane-decision-log.ts` 作为**内部插件**（`internalPlugins` 末尾一项；`OPENCODE_DISABLE_DEFAULT_PLUGINS` 是上游自己的关闭开关，不再另造私有开关）。绑 `tool.execute.after`：
+  - 只转录，不判定——outcome/summary 来自内核的 `decisionOutcomeFromEvidence`/`decisionSummaryFromEvidence`，那两个函数只读引擎已经写下的字段；**判定仍在 Swift**，铁律没动。
+  - 不猜哪些方法有包：没有 `evidencePack` 就是 `skipped`，**不维护方法名清单**（方法表这两个星期从 11 长到 13，抄死的清单必过期）。
+  - 台账写不进 `~/.glasspane`：`resolveLedger` 直接拒（`GLASSPANE_SOCKET` 也会参与定位状态根），因为那是引擎的地盘——`projects.json` 双写已经付过一次学费（B-1/A-15 同一缺陷两个副本）。
+  - 写失败**进 `output`**（`decision log NOT written: … remedy: …`），只在尾部追加、绝不替换模型看到的结论；成功时 `output` 一字节都不动（有断言钉住）。
+- **运行时证据（E7，`script/glasspane-e7-ledger.ts`，不进 CI）**：连真 daemon（`hello`/`probe_status`），用**引擎自己写到 `~/.glasspane/evidence/` 的档案字节**驱动 hook → 链条两条、`0600`、跳过路径、损坏尾部拒绝并点名 line 3、档案未被写入。**顺带量出一个 daemon 缺陷**：`gp_last_evidence` 无论带不带 `operationId` 都回 `GP_E_NO_EVIDENCE`，而磁盘上有 **582 个档案**（539 个 `0.1-draft` + 43 个 `0.1`；最新那条 `pixelDiff.bounds` 是 `null`，内核读侧完全接受）。也就是说 daemon 的回放路径与它的写入端不在同一处——E7 把它打成 `NOTE FINDING` 而不是悄悄绕开。engine/派发链是别的会话的地盘，本批不改，只留可复现脚本。
+- **本批自己抓出来的四个错**（每个都补了控制，不是口头认错）：
+  1. `tools/sync-kernel.sh` 参数化时把守卫① 的干跑写成 `rsync -n --delete`（丢了 `-a`），rsync 报错但**退出码被 awk 吃掉** → 守卫① 变成永久"无删除"。现在 enumerate 的失败会被显式判定为"枚举不出来＝拒绝"。
+  2. `tool-surface --record` 会在**归因失败**时照样写金样（那次写下 surface B = 0 LOC 的假基线）。现在 record 前先看归因，拒写并说明"要给一个从没量过的数定基线，等于把无声漂移重新发明一遍"。
+  3. 测试排除式 `/(^|\/test\/)/` 里那个 `^` 匹配空串 → **每个文件都被当成测试**，面 B 一度只剩 14 行。除法式子换成 `/(^|\/)test\//`，并加了一条兜底：若有文件该算而我们却一个没算，红着说"排除规则错了，不是面为空"。
+  4. 回滚用 `git checkout` + `git clean -fdq`，而 fork 镜像是**未跟踪**的：一次 `bun: command not found`（环境缺件，不是代码坏）被判成红闸，回滚把 23 个 vendored 文件**直接删了**。现在运行前做快照、回滚从快照恢复、绝不 `git clean` 自己创建的路径；控制实验：`BUN=/usr/bin/false` 强制红闸 → 镜像 23 个文件、内容签名、溯源清单三项全 PASS。
+- 环境如实记：这台机器的 **bun 不见了**（今天早些时候还用它构建过），按 fork 的 `packageManager: bun@1.3.14` 重装了 1.3.14（安装脚本往 `~/.zshrc` 追加了 PATH 一行）。`bun test` **必须从 `packages/opencode` 里跑**——仓库根有个故意的 `do-not-run-tests-from-root` 挡路；而且要用包脚本的 `--timeout 30000`，否则 `test/preload.ts` 的 afterAll（dispose + 删临时目录）会被 5 秒默认超时打断成"无名失败"。
+- 门禁复跑：fork `bun test` **35/35**、`tsgo --noEmit` **0 错**；仓内 build OK、kernel **90/90**、mcp-shell 176/176、installer 70/70、版本线 OK、doc-links OK、check-workflows OK、hook-liveness `--offline` OK、kernel-vendor OK、tool-surface OK、fork-diff 在线/离线双向 OK。
+- **未跑/未验证**：`bun run build` 整包未随本批重跑（`dist/` 还是 M1 那次）；**真模型轮次仍然没做**，所以"宿主在 `tool.execute.after` 之后真的会调到这个 hook"这条只有静态证据（`session/tools.ts:121-129`）+ 内部插件确实被装载（serve 起来无报错、`gp_*` 6 个工具在注册表里）+ hook 函数本体的端到端（E7）；M4/M5 未动。
+
 ## 2026-09-25 · 度量侧收口：上游参照合一 + 工具面棘轮（不动 vendored 树）
 
 - 改动面（`fork-diff --check`）：**仍是 `6631/6637 byte-identical, 1 edited, 5 added, 0 deleted`，绿**。本批只动 `harness/`（尺子与文档）与本文件，未触碰任何 vendored 源文件；FORK.md/SYNCLOG.md 的编辑不改变 added **名单**，所以记录面不变——这正是"以文件名为单位声明分叉"的含义，也是它的盲区（见下第 4 条）。
