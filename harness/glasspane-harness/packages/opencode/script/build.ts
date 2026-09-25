@@ -21,7 +21,12 @@ const baselineFlag = process.argv.includes("--baseline")
 const skipInstall = process.argv.includes("--skip-install")
 const sourcemapsFlag = process.argv.includes("--sourcemaps")
 const plugin = createSolidTransformPlugin()
-const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
+// [gp] Product decision (product.json → product.note): the harness ships CLI+TUI,
+// so the embedded Web UI is **opt-in** here (upstream embedded it by default). The
+// runtime flag OPENCODE_DISABLE_EMBEDDED_WEB_UI and the graceful fallback in
+// server/shared/ui.ts are untouched, so embedding can come back with --embed-web-ui.
+const embedWebUi = process.argv.includes("--embed-web-ui")
+const skipEmbedWebUi = !embedWebUi
 
 const createEmbeddedWebUIBundle = async () => {
   console.log(`Building Web UI to embed in the binary`)
@@ -50,68 +55,18 @@ const createEmbeddedWebUIBundle = async () => {
 const embeddedFileMap = skipEmbedWebUi ? null : await createEmbeddedWebUIBundle()
 const treeSitterWorker = await Bun.file(fileURLToPath(import.meta.resolve("@opentui/core/parser.worker"))).text()
 
-const allTargets: {
-  os: string
-  arch: "arm64" | "x64"
-  abi?: "musl"
-  avx2?: false
-}[] = [
-  {
-    os: "linux",
-    arch: "arm64",
-  },
-  {
-    os: "linux",
-    arch: "x64",
-  },
-  {
-    os: "linux",
-    arch: "x64",
-    avx2: false,
-  },
-  {
-    os: "linux",
-    arch: "arm64",
-    abi: "musl",
-  },
-  {
-    os: "linux",
-    arch: "x64",
-    abi: "musl",
-  },
-  {
-    os: "linux",
-    arch: "x64",
-    abi: "musl",
-    avx2: false,
-  },
-  {
-    os: "darwin",
-    arch: "arm64",
-  },
-  {
-    os: "darwin",
-    arch: "x64",
-  },
-  {
-    os: "darwin",
-    arch: "x64",
-    avx2: false,
-  },
-  {
-    os: "win32",
-    arch: "arm64",
-  },
-  {
-    os: "win32",
-    arch: "x64",
-  },
-  {
-    os: "win32",
-    arch: "x64",
-    avx2: false,
-  },
-]
+// [gp] Product: the target matrix lives in product.json (one truth for build,
+// publish and the product-surface gate). Upstream hard-coded it right here, which
+// meant the npm wrapper's optionalDependencies had to be re-derived by hand.
+const product = (await Bun.file(path.join(import.meta.dirname, "..", "..", "..", "product.json"))
+  .json()
+  .catch(() => null)) as { platformTargets?: PlatformTarget[] } | null
+if (!product?.platformTargets?.length) {
+  console.error("product.json is missing or has no platformTargets — refusing to build a product with an unrecorded target matrix")
+  process.exit(2)
+}
+type PlatformTarget = { os: string; arch: "arm64" | "x64"; abi?: "musl"; avx2?: false }
+const allTargets: PlatformTarget[] = product.platformTargets
 
 const targets = singleFlag
   ? allTargets.filter((item) => {
@@ -175,8 +130,8 @@ for (const item of targets) {
       autoloadTsconfig: true,
       autoloadPackageJson: true,
       target: name.replace(pkg.name, "bun") as any,
-      outfile: `dist/${name}/bin/opencode`,
-      execArgv: [`--user-agent=opencode/${Script.version}`, "--use-system-ca", "--"],
+      outfile: `dist/${name}/bin/glasspane-harness`,
+      execArgv: [`--user-agent=glasspane-harness/${Script.version}`, "--use-system-ca", "--"],
       windows: {},
     },
     files: {
@@ -203,7 +158,7 @@ for (const item of targets) {
 
   // Smoke test: only run if binary is for current platform
   if (item.os === process.platform && item.arch === process.arch && !item.abi) {
-    const binaryPath = `dist/${name}/bin/opencode`
+    const binaryPath = `dist/${name}/bin/glasspane-harness`
     console.log(`Running smoke test: ${binaryPath} --version`)
     try {
       const versionOutput = await $`${binaryPath} --version`.text()

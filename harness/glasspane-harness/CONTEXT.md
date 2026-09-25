@@ -1,3 +1,10 @@
+> **Lineage doc, not a product doc.** This file is upstream opencode's own
+> development-process document, kept so future syncs from `v1.18.32` stay honest.
+> The product's own documents are `README.md` / `README.zh-CN.md` (what it is),
+> `product.json` (machine-readable identity), `FORK.md` (what we changed and why)
+> and `SYNCLOG.md` (per-batch numbers and boundaries). Product changes are
+> [GlassPane Harness](https://github.com/jingzhao-l/glasspane-harness).
+
 # OpenCode Session Runtime
 
 OpenCode sessions preserve durable conversational history while assembling the runtime context an agent needs to act correctly in its current environment.

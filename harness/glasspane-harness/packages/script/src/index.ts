@@ -4,6 +4,14 @@ import path from "path"
 
 const rootPkgPath = path.resolve(import.meta.dir, "../../../package.json")
 const rootPkg = await Bun.file(rootPkgPath).json()
+// [gp] Product: the product line lives in product.json (machine-readable truth,
+// shipped with the subtree). packages/opencode/package.json is kept in step by
+// harness/tools/product-surface.mjs; the dev fallback below is only for the
+// unlikely case that a checkout has the package but not the manifest.
+const productPath = path.resolve(import.meta.dir, "../../../product.json")
+const product = (await Bun.file(productPath)
+  .json()
+  .catch(() => null)) as { name?: string; version?: string } | null
 const expectedBunVersion = rootPkg.packageManager?.split("@")[1]
 
 if (!expectedBunVersion) {
@@ -27,6 +35,7 @@ const CHANNEL = await (async () => {
   if (env.OPENCODE_CHANNEL) return env.OPENCODE_CHANNEL
   if (env.OPENCODE_BUMP) return "latest"
   if (env.OPENCODE_VERSION && !env.OPENCODE_VERSION.startsWith("0.0.0-")) return "latest"
+  if (product?.version && !product.version.startsWith("0.0.0-")) return "latest"
   return await $`git branch --show-current`.text().then((x) => x.trim())
 })()
 const IS_PREVIEW = CHANNEL !== "latest"
@@ -34,12 +43,9 @@ const IS_PREVIEW = CHANNEL !== "latest"
 const VERSION = await (async () => {
   if (env.OPENCODE_VERSION) return env.OPENCODE_VERSION
   if (IS_PREVIEW) return `0.0.0-${CHANNEL}-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}`
-  const version = await fetch("https://registry.npmjs.org/opencode-ai/latest")
-    .then((res) => {
-      if (!res.ok) throw new Error(res.statusText)
-      return res.json()
-    })
-    .then((data: any) => data.version)
+  // [gp] Product: version comes from product.json, not from "the latest thing on
+  // the upstream registry" — the fork's version line is its own.
+  const version = product?.version ?? rootPkg.version ?? "0.1.0"
   const [major, minor, patch] = version.split(".").map((x: string) => Number(x) || 0)
   const t = env.OPENCODE_BUMP?.toLowerCase()
   if (t === "major") return `${major + 1}.0.0`
@@ -47,13 +53,16 @@ const VERSION = await (async () => {
   return `${major}.${minor}.${patch + 1}`
 })()
 
-const bot = ["actions-user", "opencode", "opencode-agent[bot]"]
+// [gp] Product: the upstream TEAM_MEMBERS file is not shipped (private product),
+// so the team list is the bots only; if a file exists it is still honoured.
+const bot = ["actions-user", "glasspane-harness"]
 const teamPath = path.resolve(import.meta.dir, "../../../.github/TEAM_MEMBERS")
 const team = [
   ...(await Bun.file(teamPath)
     .text()
     .then((x) => x.split(/\r?\n/).map((x) => x.trim()))
-    .then((x) => x.filter((x) => x && !x.startsWith("#")))),
+    .then((x) => x.filter((x) => x && !x.startsWith("#")))
+    .catch(() => [] as string[])),
   ...bot,
 ]
 
@@ -74,4 +83,4 @@ export const Script = {
     return team
   },
 }
-console.log(`opencode script`, JSON.stringify(Script, null, 2))
+console.log(`${product?.name ?? "glasspane-harness"} script`, JSON.stringify(Script, null, 2))

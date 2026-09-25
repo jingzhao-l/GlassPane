@@ -1,0 +1,197 @@
+name: Release
+
+# Two independent release actions, deliberately **not** chained (same reasoning as
+# the GlassPane repo's own release.yml: "a tag was pushed" is not "we decided to
+# publish", and publishing is irreversible):
+#
+#   1) GitHub Release assets — on a `v*` tag, automatically: per-platform binary
+#      archives (zip/tar.gz) built on native runners, plus SHA256SUMS.txt.
+#      script/build.ts does the upload when OPENCODE_RELEASE=1; the installers pin
+#      the tag, so a user can reproduce the exact bytes.
+#   2) npm publish — manual workflow_dispatch, dry by default: the platform
+#      packages (one per runner) and then the `glasspane-harness` wrapper
+#      (postinstall picks the right platform package). Provenance on; the
+#      "publish directly refused" case falls back to npm's staged flow so the
+#      owner approves explicitly — same model as the GlassPane repo.
+#
+# Prerequisites on the npm side (external, one-time, owner): a GitHub Actions
+# Trusted Publisher for this repo/workflow/environment `release` for every package
+# (`glasspane-harness` + the platform packages), with "publish directly" NOT
+# enabled. No NPM_TOKEN is configured here on purpose: an empty token written by
+# setup-node would defeat OIDC.
+#
+# First lane covers the five native targets (linux x64/arm64, darwin x64/arm64,
+# win32 x64). The musl and baseline targets are declared in product.json but have
+# no CI lane yet — an honest gap, recorded in SYNCLOG.md, not a silent omission.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      publish_npm:
+        description: "Publish the npm packages (requires confirm=true)"
+        type: boolean
+        required: false
+        default: false
+      confirm:
+        description: "I understand npm publishing is irreversible"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  version-check:
+    name: tag matches the product version
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag must equal product.json's version
+        run: |
+          node -e '
+            const fs = require("fs")
+            const product = JSON.parse(fs.readFileSync("product.json", "utf8"))
+            const tag = process.env.GITHUB_REF_NAME.replace(/^v/, "")
+            if (tag !== product.version) { console.error(`tag ${tag} != product.json version ${product.version} — the release lane refuses to ship mismatched bytes`); process.exit(1) }
+            console.log("tag and product version agree:", product.version)
+          '
+
+  binaries:
+    name: binary ${{ matrix.target }}
+    if: github.event_name == 'push'
+    needs: version-check
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, runner: ubuntu-latest }
+          - { target: linux-arm64, runner: ubuntu-24.04-arm }
+          - { target: darwin-x64, runner: macos-13 }
+          - { target: darwin-arm64, runner: macos-14 }
+          - { target: win32-x64, runner: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Read the product version
+        id: product
+        run: node -p "JSON.parse(require('fs').readFileSync('product.json','utf8')).version"
+
+      - name: Install workspace
+        run: bun install
+
+      - name: Build this platform and attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          OPENCODE_RELEASE: "1"
+          OPENCODE_VERSION: ${{ steps.product.outputs }}
+        run: bun run build --single
+
+  checksums:
+    name: SHA256SUMS for the release assets
+    if: github.event_name == 'push'
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download every release asset and checksum it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p assets && cd assets
+          gh release download --repo "$GH_REPO" --pattern '*.zip' --pattern '*.tar.gz' || true
+          if [ -z "$(ls -A)" ]; then echo "::error::no release assets found to checksum"; exit 1; fi
+          sha256sum ./* > SHA256SUMS.txt
+          gh release upload "${{ github.ref_name }}" SHA256SUMS.txt --clobber --repo "$GH_REPO"
+          cat SHA256SUMS.txt
+
+  publish-platform:
+    name: npm ${{ matrix.target }}
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, runner: ubuntu-latest }
+          - { target: linux-arm64, runner: ubuntu-24.04-arm }
+          - { target: darwin-x64, runner: macos-13 }
+          - { target: darwin-arm64, runner: macos-14 }
+          - { target: win32-x64, runner: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Install workspace
+        run: bun install
+
+      - name: Upgrade npm (staged publishing needs >= 11.15)
+        run: npm install -g npm@latest
+
+      - name: Build this platform
+        run: bun run build --single
+
+      - name: Publish the platform package with provenance (staged-only fallback)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd packages/opencode
+          pkg="$(node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("product.json","utf8"));const t=p.platformTargets.find(t=>`${t.os==="win32"?"windows":t.os}-${t.arch}`===process.argv[1]);console.log(`${p.name}-${process.argv[1]}${t?.abi?"-"+t.abi:""}`)' '${{ matrix.target }}')"
+          ver="$(node -p "JSON.parse(require('fs').readFileSync('product.json','utf8')).version")"
+          echo "publishing $pkg@$ver"
+          cd "dist/$pkg"
+          npm publish --provenance --access public || {
+            echo "::notice::direct publish refused (staged-only trusted publisher) — staging instead"
+            npm stage publish . --provenance
+            echo "::notice::owner approves with: npm stage approve <stage-id> (ids: npm stage list)"
+          }
+
+  publish-wrapper:
+    name: npm glasspane-harness (wrapper)
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
+    needs: publish-platform
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Install workspace
+        run: bun install
+
+      - name: Upgrade npm (staged publishing needs >= 11.15)
+        run: npm install -g npm@latest
+
+      - name: Assemble and publish the wrapper (optionalDependencies come from product.json)
+        working-directory: packages/opencode
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! bun run script/publish.ts --wrapper-only; then
+            echo "::notice::direct publish refused (staged-only trusted publisher) — staging instead"
+            cd dist/glasspane-harness
+            npm stage publish . --provenance
+            echo "::notice::owner approves with: npm stage approve <stage-id> (ids: npm stage list)"
+          fi
+

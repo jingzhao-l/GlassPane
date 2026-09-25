@@ -1,3 +1,10 @@
+> **Lineage doc, not a product doc.** This file is upstream opencode's own
+> development-process document, kept so future syncs from `v1.18.32` stay honest.
+> The product's own documents are `README.md` / `README.zh-CN.md` (what it is),
+> `product.json` (machine-readable identity), `FORK.md` (what we changed and why)
+> and `SYNCLOG.md` (per-batch numbers and boundaries). Product changes are
+> [GlassPane Harness](https://github.com/jingzhao-l/glasspane-harness).
+
 # Contributing to OpenCode
 
 We want to make it easy for you to contribute to OpenCode. Here are the most common type of changes that get merged:

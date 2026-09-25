@@ -24,9 +24,11 @@ const archMap = {
 
 const platform = platformMap[os.platform()] ?? os.platform()
 const arch = archMap[os.arch()] ?? os.arch()
-const base = `opencode-${platform}-${arch}`
-const sourceBinary = platform === "windows" ? "opencode.exe" : "opencode"
-const targetBinary = path.join(__dirname, "bin", "opencode.exe")
+// Product identity lives in product.json at the repo root; product-surface.mjs
+// keeps these constants in step with it (this file ships inside the npm wrapper).
+const base = `glasspane-harness-${platform}-${arch}`
+const sourceBinary = platform === "windows" ? "glasspane-harness.exe" : "glasspane-harness"
+const targetBinary = path.join(__dirname, "bin", "glasspane-harness.exe")
 
 function supportsAvx2() {
   if (arch !== "x64") return false
@@ -127,7 +129,7 @@ function installPackage(name) {
   const version = packageJson.optionalDependencies?.[name]
   if (!version) return
 
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-install-"))
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "glasspane-harness-install-"))
   try {
     const result = childProcess.spawnSync(
       "npm",
@@ -175,7 +177,7 @@ function main() {
   }
 
   throw new Error(
-    `It seems your package manager failed to install the right opencode CLI package. Try manually installing ${packageNames()
+    `It seems your package manager failed to install the right glasspane-harness CLI package. Try manually installing ${packageNames()
       .map((name) => JSON.stringify(name))
       .join(" or ")}.`,
   )

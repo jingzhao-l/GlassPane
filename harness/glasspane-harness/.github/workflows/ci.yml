@@ -1,0 +1,67 @@
+name: CI
+
+# The product's functional lane: it can install, typecheck and run the fixed-point
+# tests on the packages we actually ship (CLI + TUI + SDK + plugin). The strict
+# harness gates (hook-liveness / fork-diff / kernel-vendor / tool-surface /
+# surface-semantics / product-surface / brand-surface) live one level up in the
+# GlassPane repo's `harness/` — that is where the fork is developed, and the
+# split repo is a distribution of its results, not a second source of truth.
+#
+# Deliberately NOT here: any publish/deploy job. Upstream's 26 workflows are
+# gone (they pushed to anomalyco/* infrastructure and published opencode
+# packages); distribution is release.yml's single story, on our own credentials.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: install, typecheck, fixed points
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Install workspace
+        run: bun install
+
+      - name: Typecheck the shipped packages
+        run: |
+          for pkg in opencode tui sdk/js plugin; do
+            echo "::group::$pkg"
+            (cd "packages/$pkg" && bun run typecheck)
+            echo "::endgroup::"
+          done
+
+      - name: Fixed-point tests (glasspane tool surface, ledger, compaction, rendering)
+        working-directory: packages/opencode
+        run: bun test --timeout 30000 test/tool/glasspane-surface.test.ts test/tool/glasspane-kernel.test.ts test/plugin/glasspane-decision-log.test.ts test/plugin/glasspane-compaction.test.ts
+
+      - name: TUI rendering fixed points
+        working-directory: packages/tui
+        run: bun test --timeout 30000 test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+
+      - name: Product manifest agrees with the package it ships
+        run: |
+          node -e '
+            const fs = require("fs")
+            const product = JSON.parse(fs.readFileSync("product.json", "utf8"))
+            const pkg = JSON.parse(fs.readFileSync("packages/opencode/package.json", "utf8"))
+            const problems = []
+            if (pkg.name !== product.name) problems.push(`package name ${pkg.name} != product ${product.name}`)
+            if (pkg.version !== product.version) problems.push(`package version ${pkg.version} != product ${product.version}`)
+            for (const bin of product.bins) if (!pkg.bin?.[bin]) problems.push(`bin ${bin} missing from package.json`)
+            if (problems.length) { console.error("product.json and packages/opencode/package.json disagree:"); for (const p of problems) console.error(" -", p); process.exit(1) }
+            console.log("product manifest OK:", product.name, product.version, "bins:", product.bins.join(", "))
+          '

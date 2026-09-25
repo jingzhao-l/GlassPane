@@ -1,129 +1,128 @@
-<p align="center">
-  <a href="https://opencode.ai">
-    <picture>
-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
-    </picture>
-  </a>
-</p>
-<p align="center">The open source AI coding agent.</p>
-<p align="center">
-  <a href="https://opencode.ai/discord"><img alt="Discord" src="https://img.shields.io/discord/1391832426048651334?style=flat-square&label=discord" /></a>
-  <a href="https://www.npmjs.com/package/opencode-ai"><img alt="npm" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square" /></a>
-  <a href="https://github.com/anomalyco/opencode/actions/workflows/publish.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/anomalyco/opencode/publish.yml?style=flat-square&branch=dev" /></a>
-</p>
+# GlassPane Harness
 
-<p align="center">
-  <a href="README.md">English</a> |
-  <a href="README.zh.md">简体中文</a> |
-  <a href="README.zht.md">繁體中文</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.it.md">Italiano</a> |
-  <a href="README.da.md">Dansk</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.bs.md">Bosanski</a> |
-  <a href="README.ar.md">العربية</a> |
-  <a href="README.no.md">Norsk</a> |
-  <a href="README.br.md">Português (Brasil)</a> |
-  <a href="README.th.md">ไทย</a> |
-  <a href="README.tr.md">Türkçe</a> |
-  <a href="README.uk.md">Українська</a> |
-  <a href="README.bn.md">বাংলা</a> |
-  <a href="README.gr.md">Ελληνικά</a> |
-  <a href="README.vi.md">Tiếng Việt</a>
-</p>
+> Evidence-honest GUI verification harness for macOS apps.
+> An [opencode](https://github.com/anomalyco/opencode) fork carrying **GlassPane's** native
+> `gp_*` tool surface — the engine decides what happened to an app; the harness shows you.
 
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+```
+  ██████  ██  █████  ███████ ██████   ██  █████  ██    ██ ███████ ███    ██ ███████ ███████
+ ██       ██ ██   ██ ██      ██   ██  ██ ██   ██ ██    ██ ██      ████   ██ ██      ██
+ ███████  ██ ███████ █████   ██████   ██ ██   ██ ██    ██ █████   ██ ██  ██ █████   ███████
+      ██  ██ ██   ██ ██      ██   ██  ██ ██   ██  ██  ██  ██      ██  ██ ██ ██      ██
+ ██████   ██ ██   ██ ███████ ██   ██  ██ █████  ██   ████ ███████ ██   ██ ███████ ███████
+```
+
+**What it is.** A coding agent in your terminal (TUI + headless server + `run`), customized
+for one job: driving and *verifying* real macOS app interfaces. Instead of an LLM guessing
+whether a button worked, the agent calls a Swift engine that captures accessibility-tree
+diffs, pixel diffs, crash and responsiveness signals, then reports **the engine's own
+attribution** (`strong` / `soft` / `none`, circuit-breaker level, pass/fail/inconclusive) —
+never a verdict invented in TypeScript. Every verified call is appended to a hash-chained
+decision log, and a compaction hook re-injects those evidence anchors so summarising a
+session can never quietly drop the audit chain.
+
+**Product surface: CLI + TUI** (headless `serve`/`run` included). The upstream web UI, desktop
+app and hosted console are **not shipped** — they live in the tree for lineage and syncing
+only, and the embedded web UI is opt-in via `--embed-web-ui`. Rationale and cost: `FORK.md`.
 
 ---
 
-### Installation
+## Install
 
 ```bash
-# YOLO
-curl -fsSL https://opencode.ai/install | bash
+# npm (recommended)
+npm install -g glasspane-harness
 
-# Package managers
-npm i -g opencode-ai@latest        # or bun/pnpm/yarn
-scoop install opencode             # Windows
-choco install opencode             # Windows
-brew install anomalyco/tap/opencode # macOS and Linux (recommended, always up to date)
-brew install opencode              # macOS and Linux (official brew formula, updated less)
-sudo pacman -S opencode            # Arch Linux (Stable)
-paru -S opencode-bin               # Arch Linux (Latest from AUR)
-mise use -g opencode               # Any OS
-nix run nixpkgs#opencode           # or github:anomalyco/opencode for latest dev branch
+# or bun
+bun add -g glasspane-harness
+
+# or one-click (POSIX: npm first, GitHub release asset as fallback)
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.sh | bash
+
+# or one-click (Windows PowerShell)
+irm https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.ps1 | iex
 ```
 
-> [!TIP]
-> Remove versions older than 0.1.x before installing.
+Both commands are installed: **`glasspane-harness`** and the short alias **`gp-harness`**.
 
-### Desktop App (BETA)
+Prerequisites: macOS 13+, and — for the `gp_*` tools — the **GlassPane** background service
+running with Accessibility granted. Install GlassPane first
+([jingzhao-l/GlassPane](https://github.com/jingzhao-l/GlassPane)); the installer prints the
+exact next steps, and the agent can verify the engine with `gp_probe_status`.
 
-OpenCode is also available as a desktop application. Download directly from the [releases page](https://github.com/anomalyco/opencode/releases) or [opencode.ai/download](https://opencode.ai/download).
-
-| Platform              | Download                           |
-| --------------------- | ---------------------------------- |
-| macOS (Apple Silicon) | `opencode-desktop-mac-arm64.dmg`   |
-| macOS (Intel)         | `opencode-desktop-mac-x64.dmg`     |
-| Windows               | `opencode-desktop-windows-x64.exe` |
-| Linux                 | `.deb`, `.rpm`, or `.AppImage`     |
+## Quick start
 
 ```bash
-# macOS (Homebrew)
-brew install --cask opencode-desktop
-# Windows (Scoop)
-scoop bucket add extras; scoop install extras/opencode-desktop
+glasspane-harness                       # interactive TUI
+glasspane-harness run "attach to Notes, type a heading, and tell me whether the UI proved it"
+glasspane-harness serve --port 4096     # headless server for other clients
 ```
 
-#### Installation Directory
+In the TUI, the first thing to ask the agent for is always a `gp_probe_status` — it reports
+the engine version, advertised capabilities and permission state, and every remedy the tool
+surface emits points back at it.
 
-The install script respects the following priority order for the installation path:
+## The `gp_*` tool surface
 
-1. `$OPENCODE_INSTALL_DIR` - Custom installation directory
-2. `$XDG_BIN_DIR` - XDG Base Directory Specification compliant path
-3. `$HOME/bin` - Standard user binary directory (if it exists or can be created)
-4. `$HOME/.opencode/bin` - Default fallback
+| Tool | What it does | Permissions |
+|---|---|---|
+| `gp_probe_status` | Engine self-report: version, capabilities, accessibility/developer-tools permissions | prompts (diagnostic entry point) |
+| `gp_attach` | Attach to a running app by bundle id or pid | prompts |
+| `gp_observe` | Snapshot the attached window's accessibility tree (digest, node count) | prompts |
+
+## The evidence discipline (why this fork exists)
+
+1. **Judgement stays in Swift.** Attribution, diagnosis class, circuit-breaker level and the
+   pass/fail/inconclusive outcome are computed by the GlassPane engine. The harness
+   transcribes; it never derives. (Enforced by a ratchet: `surface-semantics.mjs` fails CI
+   when a tool surface grows a threshold, a pixel verdict or a pass/fail synthesis.)
+2. **What the model reads is what the engine said.** Error codes and agent-executable
+   remedies go into the tool's `output` string, not only into metadata.
+3. **The audit chain is a product feature.** Verified calls are appended to a hash-chained
+   decision log (op id ↔ entry hash); a fixed-point test re-computes the chain with two
+   independent hashers so the ledger can be verified without trusting the writer.
+4. **Compaction may not erase evidence.** The compaction hook injects the session's evidence
+   anchors into the summarisation prompt; absence is stated as arithmetic
+   ("gp_* calls: N · decisions recorded: M"), never assumed.
+
+## Private customisation of the upstream fork
+
+| Changed (product surface) | Kept on purpose (lineage) |
+|---|---|
+| Product name, binary, bins, npm packages, user agent, mDNS name, state root (`~/.local/share/glasspane-harness`), config file names (`glasspane-harness.json(c)`, upstream names still read), default TUI theme, `--version`/`serve`/upgrade/uninstall wording, README, installer, release pipeline | `@opencode-ai/*` workspace package names, `OPENCODE_*` env var names, protocol/type names, the web UI/app/console sources (not shipped), upstream AGENTS/CONTEXT docs |
+
+`product.json` at this directory's root is the machine-readable truth for the left column;
+`harness/tools/product-surface.mjs` fails CI when a script drifts from it, and
+`harness/tools/brand-surface.mjs` ratchets brand strings. Upstream is pinned at `v1.18.32`;
+every customisation commit carries the `[gp]` prefix, and the divergence surface is measured
+(not prose) by `fork-diff`.
+
+## Development
 
 ```bash
-# Examples
-OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
-XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
+bun install                       # workspace (on TLS-intercepting networks bun needs
+                                  # NODE_EXTRA_CA_CERTS — the reason and the experiment
+                                  # are in ../../harness/glasspane-harness/FORK.md)
+bun run typecheck                 # per package
+bun test --timeout 30000          # fixed-point tests (run inside packages/opencode)
+bun run build --single            # product build: CLI+TUI, no web UI embedded
 ```
 
-### Agents
+The repo-side gates live one level up in `harness/` (hook-liveness, fork-diff,
+kernel-vendor, tool-surface, surface-semantics, product-surface, brand-surface) — rationale,
+negative controls and known boundaries are documented in `harness/README.md`, `FORK.md` and
+`SYNCLOG.md`.
 
-OpenCode includes two built-in agents you can switch between with the `Tab` key.
+## License & attribution
 
-- **build** - Default, full-access agent for development work
-- **plan** - Read-only agent for analysis and code exploration
-  - Denies file edits by default
-  - Asks permission before running bash commands
-  - Ideal for exploring unfamiliar codebases or planning changes
+MIT, like upstream. `LICENSE` is upstream's, unchanged; `NOTICE` records what this fork
+changed and where the code came from. Upstream: [anomalyco/opencode](https://github.com/anomalyco/opencode)
+`v1.18.32` © SST — without them this product does not exist, and `FORK.md` exists so that
+claim stays true for future syncs.
 
-Also included is a **general** subagent for complex searches and multistep tasks.
-This is used internally and can be invoked using `@general` in messages.
+| `gp_act` | Perform one accessibility action and return what the engine observed changing (op id ties it to the evidence pack) | prompts (moves a real app) |
+| `gp_diagnose` | Classify an operation from its evidence pack (contaminated / out-of-band / callback / pre-existing / no-change) | prompts |
+| `gp_last_evidence` | Fetch the evidence pack the engine archived for an operation | prompts |
 
-Learn more about [agents](https://opencode.ai/docs/agents).
-
-### Documentation
-
-For more info on how to configure OpenCode, [**head over to our docs**](https://opencode.ai/docs).
-
-### Contributing
-
-If you're interested in contributing to OpenCode, please read our [contributing docs](./CONTRIBUTING.md) before submitting a pull request.
-
-### Building on OpenCode
-
-If you are working on a project that's related to OpenCode and is using "opencode" as part of its name, for example "opencode-dashboard" or "opencode-mobile", please add a note to your README to clarify that it is not built by the OpenCode team and is not affiliated with us in any way.
-
----
-
-**Join our community** [Discord](https://discord.gg/opencode) | [X.com](https://x.com/opencode)
+Whether a method is available is **read from the running engine** (`hello.capabilities`) —
+the list is never hard-coded, because it grows upstream of this file.

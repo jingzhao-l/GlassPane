@@ -25,14 +25,34 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
-const wfDir = path.join(repoRoot, ".github", "workflows")
+// Two workflow roots, because the product lives in a vendored subtree: our own CI,
+// and the fork's (the split repo's own ci.yml/release.yml travel with the subtree).
+// A missing second root is fine (it only exists on the harness line); a present
+// one is scanned with the same rules.
+const wfRoots = [path.join(repoRoot, ".github", "workflows"), path.join(repoRoot, "harness", "glasspane-harness", ".github", "workflows")]
 
-if (!existsSync(wfDir)) {
-  console.error(`check-workflows: ${path.relative(repoRoot, wfDir)} does not exist — nothing was verified`)
+const primary = wfRoots[0]
+if (!existsSync(primary)) {
+  console.error(`check-workflows: ${path.relative(repoRoot, primary)} does not exist — nothing was verified`)
   process.exit(2)
 }
-const files = readdirSync(wfDir).filter((f) => f.endsWith(".yml") || f.endsWith(".yaml")).sort()
-if (!files.length) {
+const targets = []
+for (const dir of wfRoots) {
+  if (!existsSync(dir)) continue
+  for (const f of readdirSync(dir).filter((f) => f.endsWith(".yml") || f.endsWith(".yaml")).sort()) {
+    // Script paths in a workflow are resolved against that workflow's *repo root*:
+    // the primary root's root is this repository; the fork subtree's root is the
+    // subtree itself (which becomes the repo root after the subtree split).
+    const isPrimary = dir === wfRoots[0]
+    targets.push({
+      dir,
+      file: f,
+      root: isPrimary ? repoRoot : path.join(repoRoot, "harness", "glasspane-harness"),
+      label: isPrimary ? f : path.relative(repoRoot, path.join(dir, f)),
+    })
+  }
+}
+if (!targets.length) {
   console.error("check-workflows: no workflow files found — refusing to report success over an empty set")
   process.exit(2)
 }
@@ -42,8 +62,10 @@ if (!files.length) {
  * get them from indentation rather than a YAML parser so that duplicate keys
  * (which a parser collapses) stay visible.
  */
-function inspect(file) {
-  const lines = readFileSync(path.join(wfDir, file), "utf8").split("\n")
+function inspect(target) {
+  const { dir, file } = target
+  const base = path.join(dir, file)
+  const lines = readFileSync(base, "utf8").split("\n")
   const problems = []
   const jobKeys = []
   let section = null // top-level key we are inside of
@@ -112,8 +134,8 @@ function inspect(file) {
     for (const script of referencedScripts(ref.text)) {
       if (script.includes("${") || script.includes("$(")) continue // composed at runtime, not checkable here
       const rel = path.posix.join(ref.dir, script)
-      if (!existsSync(path.join(repoRoot, rel))) {
-        problems.push(`line ${ref.line}${ref.dir ? ` (working-directory: ${ref.dir})` : ""}: step runs "${script}" but ${rel} is not in the repository`)
+      if (!existsSync(path.join(target.root, rel))) {
+        problems.push(`line ${ref.line}${ref.dir ? ` (working-directory: ${ref.dir})` : ""}: step runs "${script}" but ${rel} does not exist under ${path.relative(repoRoot, target.root) || "."}`)
       }
     }
   }
@@ -141,22 +163,22 @@ function referencedScripts(cmd) {
 }
 
 let bad = 0
-for (const file of files.sort()) {
-  const { jobs, problems } = inspect(file)
+for (const target of targets) {
+  const { jobs, problems } = inspect(target)
   if (!jobs.length) {
-    console.error(`check-workflows: ${file} declares no jobs at all — nothing verified`)
+    console.error(`check-workflows: ${target.label} declares no jobs at all — nothing verified`)
     bad++
     continue
   }
   for (const p of problems) {
-    console.error(`  ✗ ${file}: ${p}`)
+    console.error(`  ✗ ${target.label}: ${p}`)
     bad++
   }
-  if (!problems.length) console.log(`  ok ${file}: ${jobs.length} job(s), every referenced repo script exists`)
+  if (!problems.length) console.log(`  ok ${target.label}: ${jobs.length} job(s), every referenced script exists`)
 }
 
 if (bad > 0) {
-  console.error(`check-workflows: ${bad} problem(s) in ${files.length} workflow file(s).`)
+  console.error(`check-workflows: ${bad} problem(s) in ${targets.length} workflow file(s).`)
   process.exit(1)
 }
-console.log(`check-workflows: ${files.length} workflow file(s) clean`)
+console.log(`check-workflows: ${targets.length} workflow file(s) clean`)

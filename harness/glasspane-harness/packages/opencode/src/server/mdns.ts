@@ -8,8 +8,9 @@ export function publish(port: number, domain?: string) {
   if (bonjour) unpublish()
 
   try {
-    const host = domain ?? "opencode.local"
-    const name = `opencode-${port}`
+    // [gp] Product: the mDNS advertisement is the product's, not the upstream's.
+    const host = domain ?? "glasspane-harness.local"
+    const name = `glasspane-harness-${port}`
     bonjour = new Bonjour()
     const service = bonjour.publish({
       name,

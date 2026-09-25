@@ -1,10 +1,15 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "version": "1.18.32",
-  "name": "opencode",
+  "version": "0.1.0",
+  "name": "glasspane-harness",
   "type": "module",
   "license": "MIT",
   "private": true,
+  "description": "GlassPane Harness — evidence-honest GUI verification harness for macOS apps (opencode fork with GlassPane's native gp_* tool surface)",
+  "keywords": ["glasspane", "harness", "gui-testing", "macos", "accessibility", "evidence", "agent"],
+  "homepage": "https://github.com/jingzhao-l/glasspane-harness#readme",
+  "bugs": { "url": "https://github.com/jingzhao-l/glasspane-harness/issues" },
+  "repository": { "type": "git", "url": "https://github.com/jingzhao-l/glasspane-harness.git" },
   "scripts": {
     "typecheck": "tsgo --noEmit",
     "test": "bun test --timeout 30000 --only-failures",
@@ -16,7 +21,8 @@
     "dev:temporary": "bun run ./src/temporary.ts"
   },
   "bin": {
-    "opencode": "./bin/opencode"
+    "glasspane-harness": "./bin/glasspane-harness",
+    "gp-harness": "./bin/glasspane-harness"
   },
   "exports": {
     "./*": "./src/*.ts"

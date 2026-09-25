@@ -1,0 +1,109 @@
+{
+  "$comment": "产品清单 — glasspane-harness 的机器可读真源：发行名、命令名、平台包模板、版本线、安装入口、上游血缘、产品面边界。随 subtree split 走；改任何一处名字先改这里，product-surface.mjs 会核各脚本是否跟上。",
+  "name": "glasspane-harness",
+  "displayName": "GlassPane Harness",
+  "tagline": "Evidence-honest GUI verification harness for macOS apps — an opencode fork carrying GlassPane's native tool surface",
+  "version": "0.1.0",
+  "binary": "glasspane-harness",
+  "bins": [
+    "glasspane-harness",
+    "gp-harness"
+  ],
+  "platformPackage": "glasspane-harness-{os}-{arch}{suffix}",
+  "registry": "https://registry.npmjs.org",
+  "repo": "jingzhao-l/glasspane-harness",
+  "install": {
+    "npm": "npm install -g glasspane-harness",
+    "bun": "bun add -g glasspane-harness",
+    "curl": "curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.sh | bash",
+    "powershell": "irm https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.ps1 | iex"
+  },
+  "product": {
+    "ship": [
+      "packages/opencode (CLI + TUI host)",
+      "packages/tui",
+      "packages/sdk",
+      "packages/plugin"
+    ],
+    "lineageOnly": [
+      "packages/app",
+      "packages/web",
+      "packages/console",
+      "packages/desktop",
+      "packages/session-ui",
+      "packages/storybook"
+    ],
+    "note": "lineageOnly 的上游包不进产品构建（Web UI 不嵌入，桌面 app 与 SaaS console 不随产品发布），保留在树里做血缘与同步；嵌入开关 OPENCODE_DISABLE_EMBEDDED_WEB_UI 仍在，想开回来随时可开。决策与代价见 FORK.md『产品面』一节。"
+  },
+  "upstream": {
+    "repo": "anomalyco/opencode",
+    "tag": "v1.18.32",
+    "license": "MIT",
+    "attribution": "NOTICE",
+    "note": "内部标识（@opencode-ai/* 工作区包名、OPENCODE_* 环境变量、类型与协议名）刻意保留为血缘名，不进产品面；brand-surface.mjs 按基线计数豁免它们。"
+  },
+  "glasspane": {
+    "daemon": "glasspaned",
+    "tools": "gp_*",
+    "engineRepo": "https://github.com/jingzhao-l/GlassPane",
+    "note": "gp_* 工具面的前提是 GlassPane 引擎在跑（daemon + 辅助功能权限），安装器要对此说人话。"
+  },
+  "platformTargets": [
+    {
+      "os": "linux",
+      "arch": "arm64"
+    },
+    {
+      "os": "linux",
+      "arch": "x64"
+    },
+    {
+      "os": "linux",
+      "arch": "x64",
+      "avx2": false
+    },
+    {
+      "os": "linux",
+      "arch": "arm64",
+      "abi": "musl"
+    },
+    {
+      "os": "linux",
+      "arch": "x64",
+      "abi": "musl"
+    },
+    {
+      "os": "linux",
+      "arch": "x64",
+      "abi": "musl",
+      "avx2": false
+    },
+    {
+      "os": "darwin",
+      "arch": "arm64"
+    },
+    {
+      "os": "darwin",
+      "arch": "x64"
+    },
+    {
+      "os": "darwin",
+      "arch": "x64",
+      "avx2": false
+    },
+    {
+      "os": "win32",
+      "arch": "arm64"
+    },
+    {
+      "os": "win32",
+      "arch": "x64"
+    },
+    {
+      "os": "win32",
+      "arch": "x64",
+      "avx2": false
+    }
+  ],
+  "platformTargetsNote": "目标矩阵的真源在此（上游把它写死在 script/build.ts 里）。build.ts 读它、publish.ts 用它算 optionalDependencies、product-surface.mjs 核三者一致。第一条发布流水线只覆盖 glibc/darwin/win32 的非 baseline 目标（macOS/Linux/Windows 原生 runner），musl 与 baseline 目标保留在清单里待补 lane。"
+}

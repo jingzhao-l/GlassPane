@@ -2,6 +2,46 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-09-25 · 私有化批次 A：产品身份（glasspane-harness）与发布流水线
+
+- **动机**：上一批把 M1–M5 收口了，但产品还叫 opencode——npm 包、二进制、安装脚本、
+  状态根、配置文件、TUI 主题全是上游的名字，一个 GlassPane 的私有产品"装出来是 opencode"
+  说不过去。参照 iterate 生态的做法（`iterate-harness` = openharness 的私有化 fork：改发行面、
+  保留内部血缘名、自建发布），本批做**产品身份**。
+- 改动面（`fork-diff`）：**`6539/6675 byte-identical, 36 edited, 43 added, 57 deleted`**
+  （上一批 `6628 / 4 edited / 37 added / 0 deleted`）。`deleted` 57 件逐类：上游 26 个工作流、
+  20 份 locale README、`STATS.md`、`CODEOWNERS`/`TEAM_MEMBERS`/`pull_request_template`/
+  `ISSUE_TEMPLATE`/`publish-python-sdk.yml`——它们要么会往 anomalyco 的基础设施推（docker
+  ghcr、AUR、homebrew tap、`opencode.ai/install` 自升级），要么是上游的营销与协作流程。
+  `added`：`product.json`（产品清单）、`NOTICE`、`bin/glasspane-harness`（原 `bin/opencode` 改名）、
+  自建 `ci.yml` + `release.yml`。
+- 改了哪些产品面：包名/bins/平台包模板/版本线（`0.1.0`，独立产品线，**不参与主仓 1.1.1 版本线**——
+  `check-version.mjs` 复跑仍绿）、user agent、mDNS 名、状态根（`global.ts` 一个常量带全部 XDG
+  路径）、配置文件名（`glasspane-harness.json(c)` 优先 + 上游名遗留回退）、TUI 默认主题（读时迁移旧
+  id）、basic auth 默认用户名、install/upgrade/uninstall/serve/tui/run/attach/pr/providers/web/debug
+  的用户可见文案、README 双语重写。细节与"刻意保留的血缘名"清单见 `FORK.md`『产品身份与私有化』。
+- **删掉的三处"会替别人干活"的路径**（都不是品牌问题，是安全问题）：`publish.ts` 尾块推 docker
+  ghcr/AUR/anomalyco homebrew tap；`installation` 的 curl 自升级会 fetch 并执行
+  `opencode.ai/install`；`packages/web` 的 console 部署基建（`infra/`）随产品不发布。
+- Web UI 嵌入从默认改为 `--embed-web-ui` 显式开启（产品面只发 CLI+TUI；假设与代价写在
+  `FORK.md` 与 `product.json` 的 `product.note`）。
+- 门禁：`fork-diff --check` 全量绿（6539/6675）；`tool-surface --check` 绿（面 B 1,867 → **2,098
+  行 = 8.64%**，仍 <10%，增量是本批的注释与清单读取）；`hook-liveness --check` 在线 20 钩子无漂移；
+  `kernel-vendor` 绿；`surface-semantics` 绿；`check-workflows` 绿（**已扩到扫 fork 自己的两个工作
+  流**：脚本路径按各自仓根解析，split 之后子树就是仓根）；`check-version` 绿（主仓版本线未受影响）；
+  `check-doc-links` 绿；fork `tsgo --noEmit`：core/opencode/tui **0 错**（过程中抓到 3 个真错：被替换
+  掉的 `upgradeCurl` 残留旧函数体导致 `response` 未定义 + 返回类型不匹配、`publish.ts` 的
+  `avx2?: false` 与 JSON 导入的 `boolean` 不兼容——全部按错改完转绿）；glasspane 固定点 **57/57**；
+  **E8 复跑全绿**（改名后宿主仍能起、钩子仍被派发、注入块仍到 mock provider）。
+- **如实挂账**：① npm Trusted Publisher（每个包一条、staged-only）与远端仓 `jingzhao-l/glasspane-harness`
+  是外部动作，未执行——`release.yml` 写好了等 owner 点头；② musl/baseline 目标在 `product.json`
+  里有声明但 CI 还没有 lane（release.yml 只跑 5 个原生目标）；③ 项目级 `.opencode/` 目录（agents/
+  commands/plugins 的项目内落点，20 处解析点）**本批没改名**——改名必须带遗留回退才安全，属于下一
+  批的显式开工项，不是遗漏；④ 整包 `bun run build` 未重跑（改名后的产物要等发布 lane 首跑才验；
+  E8 与门禁都从源码起服务）；⑤ 上一批挂账的 51 条上游全量测试失败依旧（与本批无关，已对照证明）。
+- 本批引入的两道新闸（`product-surface.mjs` / `brand-surface.mjs`）与一键安装器在**下一批**；
+  上一条"假设"（产品面只发 CLI+TUI）在下一批的固定点与文档里再钉一次。
+
 ## 2026-09-25 · M4 + M1 补齐 + §9-6：五薄模块收口
 
 - 改动面（`fork-diff`）：**`6628/6669 byte-identical, 4 edited, 37 added, 0 deleted`**（M5 批是 `6628 / 4 edited / 33 added`）。`added` +4：`src/plugin/glasspane-compaction.ts`（M4）、`test/plugin/glasspane-compaction.test.ts`（M4 固定点 16 条）、`test/tool/glasspane-surface.test.ts`（M1 固定点 6 条）、`script/glasspane-e8-compaction.ts`（E8 探针）。`edited` 名单不变（`plugin/index.ts` 再 +1 import、+1 数组项，含 3 行注释）。

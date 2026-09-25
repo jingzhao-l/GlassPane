@@ -38,6 +38,16 @@ git log v1.18.32..HEAD --oneline --grep '^\[gp\]' # 完整定制提交清单
 
 为什么放弃"失败可归因于上游"：产品级 fork 主动改地板，红的时候天然混着"上游变了"和"我们改了"。归因力从哪儿补回来——`fork-diff` 的改动面清单 + `hook-liveness` 的扩展点存活断言 + `SYNCLOG.md` 的时间线。三者都在仓里，都跑过。
 
+## 产品身份与私有化（产品面）
+
+**产品名 `glasspane-harness`（2026-09-25 私有化批次）**。真源是本目录根的 `product.json`（发行名、命令、平台包模板、版本线、安装入口、目标矩阵、产品面边界）——改名字先改它，`harness/tools/product-surface.mjs` 核各脚本有没有跟上，`harness/tools/brand-surface.mjs` 棘轮盯品牌串。
+
+**改了的（产品面）**：`packages/opencode/package.json`（name `glasspane-harness`、bins `glasspane-harness`+`gp-harness`、版本线 `0.1.0`、描述/关键词/仓库链接）；`bin/opencode` → `bin/glasspane-harness`（平台包解析、缓存目录、报错文案）；`script/build.ts`（产物 `bin/glasspane-harness`、user-agent、目标矩阵改读 `product.json`、**Web UI 嵌入改为 `--embed-web-ui` 显式开启**）；`script/publish.ts`（wrapper 以产品名发布、双 bin、provenance、`--wrapper-only` 模式、optionalDependencies 来自目标矩阵；**删掉上游 registry 尾块**——docker ghcr / AUR / anomalyco homebrew tap，那会往别人家基础设施推）；`script/postinstall.mjs`；`src/installation/index.ts`（升级/检测/registry 走产品包名；**curl 自升级路径删除**——原来会 fetch 并执行 `opencode.ai/install`）；`src/cli/cmd/uninstall.ts`（包名 + `~/.glasspane-harness/bin` profile 清理）；`src/server/mdns.ts`；`src/server/auth.ts`（basic auth 默认用户名）；`packages/core/src/global.ts`（状态根常量 → `~/.local/share/glasspane-harness` 等）；`config.ts`/`tui-migrate.ts`/`mcp.ts`（配置文件名 `glasspane-harness.json(c)` 优先，上游名保留为遗留回退）；TUI（默认主题 id `glasspane`，旧 id 读时迁移；clientInfo；**上游 Zen/Go 付费引导入口清空**）；`serve`/`tui`/`run`/`upgrade`/`attach`/`pr`/`providers`/`web`/`debug` 等用户可见文案；README 双语重写 + `NOTICE`；上游 26 个工作流、`STATS.md`、20 份 locale README、CODEOWNERS/TEAM_MEMBERS/ISSUE_TEMPLATE 全部移除，改为自建 `ci.yml` + `release.yml`。
+
+**刻意保留的（血缘名）**：`@opencode-ai/*` 工作区包名、`OPENCODE_*` 环境变量、协议与类型名、`x-opencode-directory` 头、上游 AGENTS/CONTEXT/CONTRIBUTING（加了一行"这是血缘文档"的头）、Web UI/app/console 源码（**不进产品**，见下）。理由与 iterate 侧一致：私有化要改的是**发行面与产品面**，不是把 2 700 个文件里的每个内部标识都洗一遍——后者会毁掉同步能力（`fork-diff` 的 diff 面会变成全树噪音），而且没人能从品牌上看出任何东西。保留项由 `brand-surface.mjs` 按基线计数，不许增长。
+
+**产品面边界（用户 2026-09-25 的问题超时未答，按推荐项执行，记此为假设）**：只发 **CLI + TUI**（含无头 `serve`/`run`）；上游 Web UI、桌面 app、SaaS console **不随产品发布**，源码留在树里做血缘与同步。代价与好处都如实说：好处是构建从 ~10 分钟（vite 内嵌 Web UI + ghostty-web 的 TLS 坑）降到分钟级、品牌面干净、上游托管 console 这类"别人的服务"不会出现在私有产品里；代价是 `opencode web` 这类依赖 Web UI 的命令在默认构建下没有界面（`server/shared/ui.ts` 加载失败即降级，开关 `OPENCODE_DISABLE_EMBEDDED_WEB_UI` 与 `--embed-web-ui` 都在，随时开回来）。**这一条是可以回滚的决策**：真需要 Web UI 时改 product.json + build 的一行默认值即可。
+
 ## 我们的能力面（M1–M5）
 
 | # | 能力 | 落点 | 现状 |

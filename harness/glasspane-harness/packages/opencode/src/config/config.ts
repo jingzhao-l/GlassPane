@@ -138,7 +138,10 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Co
 export const use = serviceUse(Service)
 
 function globalConfigFile() {
-  const candidates = ["opencode.jsonc", "opencode.json", "config.json"].map((file) =>
+  // [gp] Product: glasspane-harness.json(c) is the product's config name; the
+// upstream opencode.json(c) stays in the list as a legacy fallback so an existing
+// checkout keeps working (same precedence order, one extra name each).
+const candidates = ["glasspane-harness.jsonc", "glasspane-harness.json", "opencode.jsonc", "opencode.json", "config.json"].map((file) =>
     path.join(Global.Path.config, file),
   )
   for (const file of candidates) {
@@ -270,6 +273,9 @@ const layer = Layer.effect(
         }
       }
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "config.json"), env))
+      // [gp] Product: product-named files first, upstream-named ones as legacy fallbacks.
+      result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "glasspane-harness.json"), env))
+      result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "glasspane-harness.jsonc"), env))
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.json"), env))
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.jsonc"), env))
 
@@ -437,7 +443,7 @@ const layer = Layer.effect(
 
         for (const dir of directories) {
           if (dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR) {
-            for (const file of ["opencode.json", "opencode.jsonc"]) {
+            for (const file of ["glasspane-harness.json", "glasspane-harness.jsonc", "opencode.json", "opencode.jsonc"]) {
               const source = path.join(dir, file)
               yield* Effect.logDebug(`loading config from ${source}`)
               yield* merge(source, yield* loadFile(source, authEnv))
@@ -529,7 +535,7 @@ const layer = Layer.effect(
 
         const managedDir = ConfigManaged.managedConfigDir()
         if (existsSync(managedDir)) {
-          for (const file of ["opencode.json", "opencode.jsonc"]) {
+          for (const file of ["glasspane-harness.json", "glasspane-harness.jsonc", "opencode.json", "opencode.jsonc"]) {
             const source = path.join(managedDir, file)
             yield* merge(source, yield* loadFile(source), "global")
           }
