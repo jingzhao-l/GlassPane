@@ -4,16 +4,20 @@
   "referenceClone": ".external/opencode",
   "observedAt": "2026-09-25",
   "counts": {
-    "identical": 6528,
-    "edited": 47,
-    "added": 46,
-    "deleted": 57
+    "identical": 6527,
+    "edited": 51,
+    "added": 55,
+    "deleted": 54
   },
   "edited": [
+    ".github/ISSUE_TEMPLATE/bug-report.yml",
+    ".github/ISSUE_TEMPLATE/feature-request.yml",
+    ".github/pull_request_template.md",
     "AGENTS.md",
     "CONTEXT.md",
     "CONTRIBUTING.md",
     "README.md",
+    "SECURITY.md",
     "bun.lock",
     "packages/core/src/config.ts",
     "packages/core/src/global.ts",
@@ -61,10 +65,19 @@
   "added": [
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
+    "CHANGELOG.md",
     "FORK.md",
     "NOTICE",
     "README.zh-CN.md",
     "SYNCLOG.md",
+    "assets/banner.svg",
+    "assets/logo.svg",
+    "docs/evidence.md",
+    "docs/index.md",
+    "docs/install.md",
+    "docs/migrate-from-opencode.md",
+    "docs/tools.md",
+    "docs/troubleshooting.md",
     "packages/opencode/bin/glasspane-harness",
     "packages/opencode/script/glasspane-e7-ledger.ts",
     "packages/opencode/script/glasspane-e8-compaction.ts",
@@ -108,12 +121,9 @@
   ],
   "deleted": [
     ".github/CODEOWNERS",
-    ".github/ISSUE_TEMPLATE/bug-report.yml",
     ".github/ISSUE_TEMPLATE/config.yml",
-    ".github/ISSUE_TEMPLATE/feature-request.yml",
     ".github/TEAM_MEMBERS",
     ".github/publish-python-sdk.yml",
-    ".github/pull_request_template.md",
     ".github/workflows/close-issues.yml",
     ".github/workflows/close-prs.yml",
     ".github/workflows/compliance-close.yml",
@@ -167,6 +177,21 @@
   ],
   "editedDetail": [
     {
+      "file": ".github/ISSUE_TEMPLATE/bug-report.yml",
+      "upstreamHash": "da82bde2e12db6ace24637da504e47c5808381e7",
+      "forkHash": "a482b0e94fc4129fe4c2345997eb7855a4055689"
+    },
+    {
+      "file": ".github/ISSUE_TEMPLATE/feature-request.yml",
+      "upstreamHash": "42f1d3c51a342a8e1538a233e4dc3aa91fd7307a",
+      "forkHash": "e95d0a2ebb4abce2c7e415dc78b95419c7c4f852"
+    },
+    {
+      "file": ".github/pull_request_template.md",
+      "upstreamHash": "393bf90518e9c82e8ffccededc3b823b7a90500f",
+      "forkHash": "22d553a6cef32b878eb94663caab5d65ac104561"
+    },
+    {
       "file": "AGENTS.md",
       "upstreamHash": "cd2327e888119bb084895b615f5abc8f81afcc3f",
       "forkHash": "3c2b118da100f3030278b212e5cfba1b6009db01"
@@ -209,12 +234,12 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "91f5e618d873bcb1eb8be0185edffd11a087b76c"
+      "forkHash": "9f7eab69668eeedd6839bde5ff200ac5d3b13af9"
     },
     {
       "file": "packages/opencode/script/build.ts",
       "upstreamHash": "ce45f770f04e8997161e5d746374d3af2374db71",
-      "forkHash": "6668200a0338569f54f14b79f631385b6d29c363"
+      "forkHash": "6bdb535fe91910e7fdf1c63ed0d20b7289ca1ff0"
     },
     {
       "file": "packages/opencode/script/postinstall.mjs",
@@ -399,7 +424,12 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "bc2b858e76d2f23ad65e693b3ae4f03bb71c1fa3"
+      "forkHash": "04a57e8be39c0669bf26d37991fc6e52a3edfb00"
+    },
+    {
+      "file": "SECURITY.md",
+      "upstreamHash": "e7e59f4a27ac2bd2ed5005f8851dcb946c08f914",
+      "forkHash": "1d92d4ba1f689bbe745a1b191e46e807db6dfe61"
     }
   ]
 }
