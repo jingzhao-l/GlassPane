@@ -200,3 +200,8 @@ jobs:
       # **一致**（不需要基线数字），顺带 sh -n + --dry-run 真跑一遍安装器。
       - name: Product manifest agrees with everything that ships it
         run: node harness/tools/product-surface.mjs --check
+      # 品牌棘轮（私有化批次 C）：产品面文件里不许再长出上游品牌（npm 名/平台包/
+      # 上游 registry/用户可见字符串），README 里每处 opencode 必须在署名行上，
+      # 另加全树血缘计数只许减不许增。product-surface 量"彼此一致"，这条量"是产品"。
+      - name: No unrecorded upstream brand drift (product files, docs, lineage count)
+        run: node harness/tools/brand-surface.mjs --check

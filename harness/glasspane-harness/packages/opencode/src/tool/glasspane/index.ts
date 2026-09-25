@@ -142,7 +142,16 @@ export const AttachTool = Tool.define(
 )
 
 export const ObserveParams = Schema.Struct({
-  maxDepth: Schema.optional(Schema.NumberFromString.annotate({ description: "1-10, engine default is 6. Lower it when the tree is huge." })),
+  // [gp] The "1-10" in the description used to be prose only: an agent could ask
+  // for maxDepth=100000 and the request would sail through until the daemon's
+  // 4MB frame cap turned it into a payload error — one wasted round trip, and a
+  // denial-of-context lever aimed at the model's own tool call. The bound is now
+  // the schema, so the model is corrected before anything leaves the process.
+  maxDepth: Schema.optional(
+    Schema.NumberFromString.check(Schema.isInt()).check(Schema.isBetween({ minimum: 1, maximum: 10 })).annotate({
+      description: "1-10 (enforced by the schema), engine default is 6. Lower it when the tree is huge.",
+    }),
+  ),
   role: Schema.optional(Schema.String.annotate({ description: "filter to one role, e.g. AXButton" })),
 })
 

@@ -6,7 +6,7 @@
   "counts": {
     "identical": 6539,
     "edited": 36,
-    "added": 43,
+    "added": 45,
     "deleted": 57
   },
   "edited": [
@@ -90,7 +90,9 @@
     "packages/opencode/vendor/kernel/src/parse.ts",
     "packages/opencode/vendor/kernel/src/recipe-config.ts",
     "packages/opencode/vendor/kernel/src/schemas.ts",
-    "product.json"
+    "product.json",
+    "scripts/install.ps1",
+    "scripts/install.sh"
   ],
   "deleted": [
     ".github/CODEOWNERS",

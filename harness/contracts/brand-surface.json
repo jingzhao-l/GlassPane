@@ -1,0 +1,36 @@
+{
+  "observedAt": "2026-09-25",
+  "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
+  "rules": [
+    {
+      "id": "upstream-npm-name",
+      "why": "the upstream npm package name is not installable as *this* product; a user following it gets opencode (@opencode-ai/* workspace scopes are kept bloodline)"
+    },
+    {
+      "id": "upstream-platform-package",
+      "why": "platform packages are named after the product (product.json → platformPackage)"
+    },
+    {
+      "id": "upstream-registry",
+      "why": "those endpoints belong to someone else's release; touching them is a push into a stranger's account"
+    },
+    {
+      "id": "upstream-in-user-text",
+      "why": "a user-facing string that says opencode is a product claim; internal identifiers are bloodline, strings are identity"
+    },
+    {
+      "id": "doc-line-without-lineage",
+      "why": "a README line that says opencode must also say fork/upstream/anomalyco/MIT/上游/血缘"
+    }
+  ],
+  "productFiles": 25,
+  "docFiles": [
+    "README.md",
+    "README.zh-CN.md"
+  ],
+  "hits": [],
+  "lineage": {
+    "occurrences": 18652,
+    "filesScanned": 3906
+  }
+}

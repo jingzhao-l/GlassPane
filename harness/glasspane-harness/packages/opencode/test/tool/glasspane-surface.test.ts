@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import { readFileSync, unlinkSync } from "node:fs"
+import net from "node:net"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { Agent } from "@/agent/agent"
@@ -63,6 +65,27 @@ describe("what the registry receives", () => {
     const defs = await loadDefs()
     expect(defs.map((def) => def.id)).toContain("gp_probe_status")
   })
+
+  test("observe's depth is bounded by the schema, not by the description", async () => {
+    // The "1-10" used to live only in the description string. An agent that asked
+    // for maxDepth=100000 got a request the daemon had to answer with a
+    // payload error — a wasted round trip, and a context lever pointed at the
+    // model's own tool call. The bound is now the schema, so the model is
+    // corrected before anything leaves the process.
+    const { ObserveParams } = await import("../../src/tool/glasspane/index")
+    const { Schema } = await import("effect")
+    const decode = Schema.decodeUnknownEffect(ObserveParams)
+    expect(Effect.runSync(decode({ maxDepth: "6" })).maxDepth).toBe(6)
+    for (const bad of ["0", "11", "100000", "-1"]) {
+      let rejected = false
+      try {
+        Effect.runSync(decode({ maxDepth: bad }))
+      } catch {
+        rejected = true
+      }
+      expect(rejected).toBe(true)
+    }
+  })
 })
 
 describe("what the model reads on the failure path", () => {
@@ -123,3 +146,64 @@ describe("the daemon's error frame, measured against a real dead socket", () => 
     }
   })
 })
+
+describe("bounds the surface puts on itself", () => {
+  test("an over-sized engine frame is refused in-band with a remedy — never a raised defect", async () => {
+    // A real unix-socket peer is used on purpose: the cap is enforced in the
+    // client's byte loop, so a fake `DaemonReply` would test nothing. The peer
+    // answers with a single 5 MiB line (over MAX_FRAME_BYTES) and never a newline,
+    // which is exactly what a runaway tree or a mis-chewed pack looks like.
+    const socket = path.join(tmpdir(), `gp-m1-oversize-${Date.now()}-${Math.random().toString(36).slice(2)}.sock`)
+    const server = net.createServer((conn) => {
+      conn.once("data", () => {
+        // 5 MiB with no frame boundary in sight.
+        conn.write(Buffer.alloc(5 * 1024 * 1024, 0x78))
+      })
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject)
+      server.listen(socket, resolve)
+    })
+    const previous = process.env.GLASSPANE_SOCKET
+    process.env.GLASSPANE_SOCKET = socket
+    try {
+      const reply = await Effect.runPromise(Daemon.call("observe", {}, 5_000))
+      expect(reply.ok).toBe(false)
+      if (reply.ok) return
+      expect(reply.error.code).toBe("GP_E_PAYLOAD_TOO_LARGE")
+      expect(reply.error.remedy.length).toBeGreaterThan(0)
+      expect(reply.error.remedy).toContain("maxDepth")
+    } finally {
+      if (previous === undefined) delete process.env.GLASSPANE_SOCKET
+      else process.env.GLASSPANE_SOCKET = previous
+      server.close()
+      try {
+        unlinkSync(socket)
+      } catch {
+        // best effort: a leftover socket under tmpdir is not worth failing over
+      }
+    }
+  })
+
+  test("the registry's own visibility filter cannot hide a gp_* tool", () => {
+    // Structural, and honestly labelled as such: building the whole registry needs
+    // the full service graph, so this pins the *shape* of the one upstream line
+    // that could swallow builtins (the code-mode `visible` filter) and the one
+    // list code mode is actually scoped to (MCP tools). If either changes, this
+    // test names the change instead of letting the surface disappear silently.
+    const source = readFileSync(path.join(import.meta.dirname, "..", "..", "src", "tool", "registry.ts"), "utf8")
+    const visible = /const visible = filtered\.filter\(\(tool\) => tool\.id !== "execute" \|\| codeModeDescription\)/.test(
+      source,
+    )
+    expect(visible).toBe(true)
+    // Code mode only ever rewrites the visibility of the `execute` wrapper tool; no
+    // gp_ id is named in any visibility predicate.
+    const gpVisibilityRules = [...source.matchAll(/\(tool\)\s*=>[^\n]*gp_/g)]
+    expect(gpVisibilityRules.length).toBe(0)
+    // The code-mode catalog is built from MCP tools only, so turning the flag on
+    // cannot fold the gp_* builtins into an MCP-only description.
+    const codeMode = readFileSync(path.join(import.meta.dirname, "..", "..", "src", "tool", "code-mode.ts"), "utf8")
+    expect(/export function describeCatalog\(mcpTools: Record<string, MCP\.McpTool>/.test(codeMode)).toBe(true)
+  })
+})
+

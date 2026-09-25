@@ -2,6 +2,42 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-09-25 · 私有化批次 C：品牌面棘轮 + 三条剩余固定点
+
+- `harness/tools/brand-surface.mjs` + `contracts/brand-surface.json`（首次基线：**0 命中**，
+  血缘 **18,652 处 / 3,906 文件**（口径：排除 fork 自己的血缘文档——SYNCLOG/FORK/上游 AGENTS/两份 README/NOTICE——它们是"讲血缘故事的地方"，诚实的文档写作不该让代码血缘计数变红；两份 README 的**措辞**仍由行级规则管住））。口径与四条规则见工具头注释；要点：产品面 25 个文件里
+  **可执行文本**零容忍（注释豁免——"我们删掉了 X"的注释是记录不是引用），两份 README 按行判定
+  （每处 opencode 必须在署名行，**包路径 `packages/opencode` 也算行**），全树血缘计数只许减不许增。
+  今日全仓 opencode 串最多的一处就是这条基线本身：它把 `@opencode-ai/*`、`OPENCODE_*` 这些
+  **刻意保留**的血缘名变成有基线的存量，而不是没人管的增量。
+- 反向因果六条全验可红：安装器装上游 npm 名 / publish 推上游 ghcr / README 叫用户跑 opencode /
+  postinstall 解析上游平台包 / 用户可见字符串说 opencode / 血缘计数增长（塞一个新文件）。两条
+  **校准负例**：无引号的 `opencode-ai` 与模板形式 `opencode-${platform}` 一开始只被总计数兜住、
+  专属规则没咬——都收紧到"任何出现"后各自单咬。总计数兜底不能替代专属规则。**又两条校准**：① 血缘计数最初把 fork 自己的血缘文档算进去，SYNCLOG 里诚实写一句"opencode"就红——按文件排除（README 仍走行级规则）；② `upstream-npm-name` 收紧到"任何出现"后误咬 17 处刻意保留的 `@opencode-ai/*` 工作区作用域（重记基线时 17 个假命中暴露）——改为"前面不是 @ 也不属于标识符"，基线回到 0 命中。
+- 三条剩余固定点（`packages/opencode/test/tool/glasspane-surface.test.ts`，57 → **60**）：
+  1. **超尺寸帧在带内失败**（真 unix socket 对端吐 5 MiB 无换行 → `GP_E_PAYLOAD_TOO_LARGE` +
+     可执行 remedy，不抛异常）——这是"truncate.output 对大 evidence 包"那一挂账项的**可测部分**：
+     传输层上限是 4 MiB，越界时模型看到的是引擎形状的错误帧而不是炸掉的调用。
+  2. **`maxDepth` 的 1–10 由 schema 强制**（此前只是描述文字：`maxDepth=100000` 会真的发出去，
+     等引擎用 payload 错误把它顶回来——一次白跑的对 round，还等于给模型自己的工具调用递了把
+     上下文杠杆）。改成 `NumberFromString.check(isInt).check(isBetween{1,10})`，沿用本仓既有的
+     `Schema.Int.check(Schema.isBetween(...))` 写法（effect 4 beta 没有 `Schema.int`/`between`，
+     第一次尝试的写法被 tsgo 抓住）。
+  3. **code-mode 旗标不藏工具面**（结构型，注释里说清它的边界）：钉住 registry 里唯一可能吞掉
+     builtin 的那行 `visible = filtered.filter(tool.id !== "execute" || codeModeDescription)`，
+     断言没有任何可见性谓词提到 gp_，且 code-mode 目录只由 MCP 工具构成（旗标打开也不会把 gp_*
+     折进 MCP-only 描述里）。
+- 顺带核实并**结掉**一个旧挂账项：TUI 对 `attachments` 的渲染出口——现有六个 gp_* 工具**今天
+  没有一个产出 attachment**（grep 为零），所以"没有渲染出口"目前还不是缺口；等 capture 类工具
+  落地那天它才会变成真问题，已写进方案 §10 代替原来的含糊挂账。
+- 门禁：固定点 **60/60**；brand-surface 0 漂移；product-surface 86/86；fork-diff / tool-surface /
+  hook-liveness / kernel-vendor / surface-semantics / check-workflows(5) / check-doc-links 全绿；
+  fork tsgo 0 错。E8 本批未重跑（改的是测试与仓根侧工具，运行时未动；上一批 E8 全绿）。
+- **如实挂账**：① code-mode 固定点是结构性的——真跑一遍 `ToolRegistry.tools()` 需要整套服务图，
+  这批没搭（注释里写明了这条边界，不是伪装成行为测试）；② 血缘计数把 `.opencode/` 项目目录
+  的 20 处解析点全树未改这件事照实计入基线（改名必须带遗留回退，下一批开工项）；③ 外部动作
+  （远端仓、Trusted Publisher、npm 首发）仍等 owner。
+
 ## 2026-09-25 · 私有化批次 B：一键安装器 + 产品面一致性闸
 
 - **动机**：批次 A 改了名，但"名字"这件事散在 9 个地方（product.json、package.json、build、
