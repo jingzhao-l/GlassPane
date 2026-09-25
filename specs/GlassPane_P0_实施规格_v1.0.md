@@ -214,6 +214,8 @@ KernelSchemaError { code: "KERNEL_E_SCHEMA", issues: [{path, message}] }
 
 **迁移执行记录（2026-09-22，用户拍板：主仓库 + subtree）**：目标 = `jingzhao-l/iterate-skill` 主仓库顶层 `kernel/`，**主仓库自有目录，不是第四个 subtree 子仓库**——kernel 是生态契约层（两壳 + GlassPane 三方共费），挂任一消费者仓库都会让其余方跨仓依赖；harness/plugin 用独立子仓是因为它们各自独立演进发布，kernel 契约级低频变更不值得多养一仓；将来若需独立发 `@iterate/kernel` npm 包，再对主仓内 `kernel/` 做一次 subtree split 即可升格，历史不丢。方式 = `git subtree split --prefix=kernel`（6 笔史）→ iterate-skill 侧 `git subtree add`（不 squash，保历史）。**迁移后归属约定**：iterate-skill 为 kernel 唯一编辑入口（canonical）；GlassPane `kernel/` 降为镜像，经 `tools/sync-kernel.sh` 单向同步，提交信息固定 `sync(kernel): iterate-skill@<sha>` 保溯源；两侧 CI 各自继续跑自身测试面（C35 双绑定不因迁移放松）。
 
+**镜像漂移事故与同步守卫（2026-09-25）**：迁移后第三天实测镜像**超前** canonical——09-22 至 09-24 之间 evidence schema 冻结（draft → v0.1）与 A-13 读侧兼容（`parseEvidencePackRead`、`LEGACY_EVIDENCE_SCHEMA_VERSION`）只写在镜像侧，从未回流。此时按 §5.4 的标准命令同步会删掉 4 个 fixture、回退 `src/parse.ts`/`src/index.ts`，打断 `mcp-shell/src/tools.ts` 的 import，且 `check-version.mjs` 15 位点必红。**处置**：(a) 内容回流 `iterate-skill`（本地提交 `d893045`，canonical `npm test` 59/59），归属方向恢复为 canonical ≥ 镜像；(b) `tools/sync-kernel.sh` 由裸 rsync 改为三道守卫，且**每条的拒绝分支都实测可执行、失败不落盘**：① 删除守卫（干跑列出会被删的 mirror-only 路径即 exit 1，remedy 先给"回流"再给 `--allow-deletions`）；② 消费者契约守卫（断言 `mcp-shell` 实际 import 的 4 个 `parse*` 导出存在于 canonical，缺则点名会断的消费者并拒绝）——**版本号不参与门禁**：canonical 保留自身发布节奏（当前 `0.1.0-draft.1`），镜像落地后由 `scripts/set-version.mjs` 统一压回本仓版本线，拿版本相等当闸会拒掉合法同步而保护不了任何东西；③ 后验自卷守卫（check-version + build + kernel/mcp-shell 两套件，红则 `git checkout -- kernel && git clean -fdq kernel` 并明确宣告已回滚）。**教训入档**：单向镜像同步的前提是"方向唯一"这句话有人检查；没有删除守卫时，它连续三天为假，而仓库里所有关于 kernel 归属的记载都仍然自称成立。
+
 ---
 
 ## 6. MCP 工具契约（P0 子集，工具面 A）
