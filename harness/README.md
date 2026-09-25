@@ -33,10 +33,11 @@ git clone --branch v1.18.32 --depth 1 https://github.com/anomalyco/opencode.git 
 | `tools/kernel-vendor.mjs` | 溯源尺子：vendored 内核的每个文件必须等于清单里的 sha256；canonical 在场时还交叉复核（镜像落后＝红） |
 | `tools/tool-surface.mjs` | 工具面占比棘轮：engine 与两个工具面的 LOC 比例，只挡"没被记录的增长" |
 | `tools/surface-semantics.mjs` | 工具面**语义**棘轮（方案 §9-6）：阈值比较 / pass-fail 合成 / 证据字段比较，只挡"没被记录的新命中" |
+| `tools/product-surface.mjs` | 产品面**一致性**闸（私有化批次 B）：`product.json` ↔ package.json / build / publish / postinstall / bin shim / 安装器 / 工作流逐条对齐，且产品面可执行文本里不许再出现上游 registry（AUR / homebrew tap / ghcr / opencode.ai/install / opencode-ai 包名） |
 | `contracts/hook-liveness.json` | 金样：20 声明 → 14 live / 5 structural / **1 dead（`permission.ask`）** |
-| `contracts/fork-diff.json` | 金样：声明过的分叉面（当前 `6630 identical / 2 edited / 33 added / 0 deleted`，其中 23 个 added 是 vendored 内核） |
+| `contracts/fork-diff.json` | 金样：声明过的分叉面（当前 `6539 identical / 36 edited / 43 added / 57 deleted`；added 里 23 个是 vendored 内核，deleted 是上游 26 个工作流 + 20 份 locale README 等，批次 A/B 的 SYNCLOG 逐类记了账） |
 | `contracts/kernel-vendor.json` | 溯源清单：canonical 的 repo/ref/branch/version + 23 个文件的 sha256/字节数（`--record` 在对不齐时直接拒绝写） |
-| `contracts/tool-surface.json` | 基线（2026-09-25 M4 批后复算）：engine 18,335 / 面 A 3,859（16.03%）/ 面 B 1,867（7.76%），并记着被排除的测试（5 文件 952 行）与 vendored 依赖行数 |
+| `contracts/tool-surface.json` | 基线（2026-09-25 私有化批次 A 后复算）：engine 18,335 / 面 A 3,859（15.89%）/ 面 B 2,098（8.64%），并记着被排除的测试（5 文件 952 行）与 vendored 依赖行数 |
 | `contracts/surface-semantics.json` | 基线（2026-09-25 首次记录）：**0 命中 / 15 个文件**——两个工具面今天都不判证据语义；规则说明逐条进金样 |
 | `spike/` | E1/E2/E5/E6 的运行时探针与离线 mock 模型（`run.sh` 一键；结论见调研方案 §5.0）。E7（决策链对着真 daemon）在 fork 内：`packages/opencode/script/glasspane-e7-ledger.ts`；E8（压缩钩子对着真宿主，不花钱）也在 fork 内：`packages/opencode/script/glasspane-e8-compaction.ts` |
 
@@ -48,7 +49,7 @@ afterAll 要 dispose runtime + 删临时目录，5 秒默认超时会把它打�
 `packageManager` 钉的 **bun@1.3.14**（这台机器上的 bun 曾经消失过，导致一批闸误判成红——缺工具
 不等于失败，`tools/sync-kernel.sh` 现在会明说哪几道闸没跑）。
 
-## 五把尺子各防哪一种事故
+## 尺子各防哪一种事故
 
 **hook-liveness** — 上游宿主按**名字**派发钩子：`Plugin.trigger(name, input, output)` → `hook[name]?.(...)`（`packages/opencode/src/plugin/index.ts:284-298`）。"声明了但没人 trigger"的钩子于是**类型合法、加载成功、永不运行**。pin 的 `v1.18.32` 上 `Hooks["permission.ask"]`（`packages/plugin/src/index.ts:261`）全树只出现这一次＝零派发，而上游仓内文档 `packages/core/src/plugin/skill/customize-opencode.md:354` 却把它列在"Hook surface"里。structural 那 5 个（`config`/`tool`/`auth`/`provider`/`dispose`）是宿主初始化期直接读字段，不按名派发，因此**不算死钩子**；豁免理由写在 `hook-liveness.mjs` 的 `STRUCTURAL` 表里，每条点名读取位点。
 
@@ -59,6 +60,8 @@ afterAll 要 dispose runtime + 删临时目录，5 秒默认超时会把它打�
 **kernel-vendor** — `@iterate/kernel` 不单独发布（P6 §13），所以它以 **vendored 源**的形式活在 fork 里；而 subtree split 之后的独立仓又够不到 `../../kernel`。"vendored" 与"我们自己的第二份实现"只差一条清单：`contracts/kernel-vendor.json` 记 canonical 的 repo/ref/branch/version 和每个文件的 sha256，`--check` 在**没有 canonical 的 CI 里**也能抓到任何手改、新增或删除。它和 fork-diff 是两种不同的红：改一行 vendored 内容 → 占比闸**不动**（那不是我们的行），溯源闸**变红**。
 
 **surface-semantics** — 占比闸量的是"长厚了多少"，它量的是"长的还是不是**判**"：铁律"工具面不得自行判定任何证据语义"此前同样只是散文，而判定悄悄外移到 shell 的失败模式是**编译通过、测试全绿**，另外三把尺子一条都看不见。所以扫两个工具面（`mcp-shell/src` + fork 的 `src/tool/glasspane/**` 与 `src/plugin/glasspane-*.ts`），三条规则——小数阈值比较、pass/fail 的三元/相等**合成**（按主语判：`x.status !== "failed"` 是台账记账，`ok ? "pass" : "fail"` 才是判定）、证据字段比较（`!== undefined` 在场检查豁免，因为"缺席必须说得出"），同样做成棘轮 + 基线金样。**首次基线 0 命中**：两个工具面今天都不判证据语义，三条反向因果已验可红。校准记录在 `SYNCLOG.md`：第一版规则把本仓 `status: "failed"` 与 `pixelDiff !== undefined` 判成命中，基线一度 6 命中——**先校准规则再记基线**，否则金样记的是规则的噪声。
+
+**product-surface** — 私有化是**分布式事实**：产品名住在 `product.json`，但同一事实散在 `packages/opencode/package.json`、`script/build.ts`、`script/publish.ts`、`script/postinstall.mjs`、`bin/glasspane-harness`、两个安装器和工作流里，**没有任何东西会发现其中一处还写着上游的名字**。症状不是红测试——是装出来的东西不对，或者发布推到陌生人 registry（这正是批次 A 从上游脚本里拆掉的 ghcr/AUR/homebrew tap/opencode.ai/install 四条路）。brand 那道闸量字符串，这道量**一致**：86 条断言，**无基线**（它量的不是数字，是"该不该一样"——规则错了就改规则，没有 `--record` 可盖）。安装器不只被读：`sh -n` 过语法，`--dry-run` 真跑一遍并断言计划里出现产品名。反向因果五条已验可红（版本漂移、代码里塞回 ghcr、安装器指向别人仓、多一个工作流、配置发现丢掉遗留回退），另有两条是**校准负例**：第一版 URL 规则被注释里的仓库名喂饱（改为只看可执行文本），以及 state-root/config 两条一度被分段插入落在 `process.exit` 之后成为死代码（计数从 83 变 86 才发现——**"闸是绿的"要连计数一起看**）。
 
 ## 怎么跑
 
@@ -74,6 +77,7 @@ node harness/tools/tool-surface.mjs --check     # 工具面没有偷偷长（CI 
 node harness/tools/tool-surface.mjs --record    # 有意长厚后重新记基线
 node harness/tools/surface-semantics.mjs --check  # 工具面没有开始自行判定证据语义（CI 每跑）
 node harness/tools/surface-semantics.mjs --record # 有意新增命中（并说清为什么合法）
+node harness/tools/product-surface.mjs --check   # 产品面各件与 product.json 一致？（CI 每跑，含 sh -n + --dry-run）
 node harness/tools/kernel-vendor.mjs --check    # vendored 内核 == 溯源清单？（CI 每跑，不需要 canonical）
 KERNEL_SRC=/path/to/iterate-skill node harness/tools/kernel-vendor.mjs --check  # 更强：连 canonical 一起跨读
 KERNEL_SRC=/path/to/iterate-skill tools/sync-kernel.sh --target=fork            # 唯一的合法更新路径

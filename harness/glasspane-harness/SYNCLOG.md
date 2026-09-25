@@ -2,6 +2,42 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-09-25 · 私有化批次 B：一键安装器 + 产品面一致性闸
+
+- **动机**：批次 A 改了名，但"名字"这件事散在 9 个地方（product.json、package.json、build、
+  publish、postinstall、bin shim、两个安装器、工作流），改一处忘另一处的症状**不是红测试**——
+  是装出来的东西不对，或者发布推到陌生人 registry。iterate 的 npm 包配 postinstall + curl|bash
+  双通道；我们照形态建，但把"一致"变成机器检查。
+- 新增：`scripts/install.sh`（横幅/OS 探测/npm 优先→GitHub release 资产兜底/`--version`/`--dry-run`/
+  验证/`gp_*` 前提说人话：GlassPane 引擎要先装且授权辅助功能，没有它每个 gp_* 调用只会回
+  `GP_E_ENGINE_UNREACHABLE`——那是引擎的话，不是安装器的）、`scripts/install.ps1`（同形态，Windows；
+  并说清 Windows 上 harness 是跑在 macOS 宿主对面的客户端）；`harness/tools/product-surface.mjs`。
+- `product-surface.mjs`：**86 条一致性断言、无基线**（它量的不是数字而是"该不该一样"，所以没有
+  `--record`——规则错了改规则，没有金样可盖）。覆盖：manifest 名称/版本/bins ↔ product.json、
+  平台包模板与 12 个目标名唯一、build 读清单且写产品二进制名与 user-agent、publish 以产品名发
+  wrapper 且有 `--wrapper-only`、**产品面可执行文本里不许再出现上游 registry**（ghcr.io/anomalyco /
+  anomalyco/homebrew-tap / aur.archlinux.org / opencode.ai/install / "opencode-ai"）、postinstall 与
+  bin shim 的平台包/二进制名、install/upgrade/uninstall 的包名、状态根常量、配置发现**产品名优先且
+  遗留名仍在**、两个安装器的 URL/形态（`sh -n` 过语法，`--dry-run` 真跑并断言计划里有产品名）、
+  fork 工作流恰好是 ci+release 两个且 release 有 tag/手动双闸、NOTICE 记着上游 tag 与 MIT。
+- 接入：`.github/workflows/ci.yml` 的 tool-surface lane 加一步；`package.json` 加
+  `contracts:product`；`harness/README.md` 目录表/尺子/怎么跑/金样数字同步（顺手把上一轮遗留的
+  旧分叉数字 6630/2/33 与面 B 1,867 更成实测值）。
+- 反向因果五条全验可红：① product.json 版本改成 9.9.9 → `manifest-version` 点名；② publish.ts
+  代码里塞回 `ghcr.io/anomalyco/opencode` → `no-upstream-registries` 点名；③ 安装器 REPO 指向别人仓
+  → `installer-urls` 两条点名；④ 多放回一个 publish.yml → `workflows` 点名；⑤ 配置发现删掉
+  `opencode.json(c)` 遗留回退 → `config-names` 点名；还原后转绿。
+- **两条校准负例也是这批最值钱的产出**：① 第一版 URL 规则被注释里的仓库名喂饱（`install.sh` 的
+  仓库名只出现在 header 注释里，规则却过了）——改为只看可执行文本（注释里的"我们删掉了 X"是记录，
+  不是引用）；② state-root/config 两条断言一度被分段插入落在 `process.exit` 之后成了死代码，闸一直
+  绿——是计数从 83 跳到 86 时才发现。**"闸是绿的"必须连计数一起看**，这条已写进尺子说明。
+- 门禁：product-surface 绿（86/86）；check-workflows 5 个工作流绿；check-doc-links 绿；fork tsgo
+  0 错；固定点 57/57 未受本批影响（安装器与闸都在仓根侧，不进 fork 运行时）。
+- **如实挂账**：① 整套安装流程（真 `npm install -g`、真下载 release 资产）**未端到端跑过**——
+  因为 npm 上还没有 `glasspane-harness` 这个包、远端仓还不存在（外部动作，owner 点头才做）；本地
+  能验的（语法、dry-run 计划、URL 与清单一致）都验了。② Windows 侧只做了形态对照，没在 Windows
+  机器上跑过（ps1 无法在本机执行）。③ Trusted Publisher 仍待 owner 配置。
+
 ## 2026-09-25 · 私有化批次 A：产品身份（glasspane-harness）与发布流水线
 
 - **动机**：上一批把 M1–M5 收口了，但产品还叫 opencode——npm 包、二进制、安装脚本、

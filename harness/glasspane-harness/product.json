@@ -9,7 +9,7 @@
     "glasspane-harness",
     "gp-harness"
   ],
-  "platformPackage": "glasspane-harness-{os}-{arch}{suffix}",
+  "platformPackage": "{name}-{os}-{arch}{suffix}",
   "registry": "https://registry.npmjs.org",
   "repo": "jingzhao-l/glasspane-harness",
   "install": {

@@ -193,3 +193,10 @@ jobs:
       #   检查的是 job 键与脚本引用，查不出这种"合法但重复"的 step。）
       - name: Vendored kernel matches its provenance manifest
         run: node harness/tools/kernel-vendor.mjs --check
+      # 私有化产品面一致性（2026-09-25 批次 B）：产品名/版本/bins/平台包模板住在
+      # product.json 里，但同一事实散在 package.json、build.ts、publish.ts、
+      # postinstall.mjs、bin shim、两个安装器和工作流里。改了一处忘了另一处，
+      # 症状不是红测试——是装出来的东西或推到别人 registry 的发布。这条量的是
+      # **一致**（不需要基线数字），顺带 sh -n + --dry-run 真跑一遍安装器。
+      - name: Product manifest agrees with everything that ships it
+        run: node harness/tools/product-surface.mjs --check
