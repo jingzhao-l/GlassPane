@@ -1403,6 +1403,70 @@ final class EngineCoreWaveTwoBetaTests: XCTestCase {
         )
     }
 
+    /// J, the remaining half of the name rules: the shell has refused
+    /// `/Users/Shared` and somebody else's home since B-13 while the daemon's
+    /// list let them through, so the same stored value passed the process that
+    /// writes `projects.json` and failed the one that archives into it.
+    func testOtherHomesAndTheSharedHomeAreRefusedByName() throws {
+        let cases: [(String, String)] = [
+            ("/Users/Shared/team/app", "the shared home tree /Users/Shared"),
+            ("/Users/somebody-else/app/.glasspane/evidence", "another user's home directory (/Users/somebody-else)"),
+        ]
+        for (resolved, fragment) in cases {
+            let defect = try XCTUnwrap(
+                EngineCore.resolvedStoragePathDefect(resolved: resolved, home: "/Users/x"),
+                "\(resolved) must be refused"
+            )
+            XCTAssertTrue(defect.contains(fragment), "\(resolved) → \(defect)")
+        }
+        // The positive side, or this is just "refuse more": our own home's
+        // descendants stay admissible, and so does the firmlink spelling of them.
+        XCTAssertNil(EngineCore.resolvedStoragePathDefect(resolved: "/Users/x/work/app/evidence", home: "/Users/x"))
+        XCTAssertNil(
+            EngineCore.resolvedStoragePathDefect(
+                resolved: "/System/Volumes/Data/Users/x/work/app/evidence", home: "/Users/x"
+            ),
+            "the firmlink must not turn our own home into another user's"
+        )
+    }
+
+    func testAllThreePathFieldsAreCheckedAtWriteTimeAndTheRemedyNamesTheRightOne() throws {
+        let registry = TestSandbox.projectRegistry("three-fields")
+        let core = EngineCore(channel: makeChannel(), settle: {}, projectRegistry: registry)
+        for (field, value) in [
+            ("recipeConfigPath", "/Users/Shared/team/recipe.json"),
+            ("calibrationAssetsPath", "/Users/Shared/team/calibration"),
+            ("evidenceStoragePath", "/Users/Shared/team/evidence"),
+        ] {
+            // Exactly one field carries the bad value per iteration; the others
+            // stay nil so a pass could not be attributed to the wrong argument.
+            let recipe = field == "recipeConfigPath" ? value : nil
+            let calibration = field == "calibrationAssetsPath" ? value : nil
+            let evidence = field == "evidenceStoragePath" ? value : nil
+            XCTAssertThrowsError(
+                try core.projectSet(
+                    projectId: nil, displayName: "Shared path", bundleId: "com.example.shared",
+                    pid: nil,
+                    recipeConfigPath: recipe,
+                    calibrationAssetsPath: calibration,
+                    evidenceStoragePath: evidence
+                ),
+                "\(field) must not be registrable through the daemon"
+            ) { error in
+                let gp = error as! GPError
+                XCTAssertEqual(gp.code, .badParams)
+                XCTAssertTrue(gp.message.hasPrefix("\(field) \""), gp.message)
+                // An agent told to re-set the *other* key after this rejection
+                // would run a command that changes nothing about its own error.
+                XCTAssertTrue(
+                    gp.remedy.contains("\"\(field)\":"),
+                    "the remedy must name the field that was refused: \(gp.remedy)"
+                )
+            }
+            XCTAssertEqual(registry.count, 0, "a refused registration writes nothing: \(field)")
+        }
+    }
+
     // MARK: - A-01: an export that failed is not "no probe"
 
     func testFailedCheckpointExportSurvivesIntoTheRollbackRefusal() throws {

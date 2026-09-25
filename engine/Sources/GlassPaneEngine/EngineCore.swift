@@ -405,6 +405,23 @@ public final class EngineCore {
         if stripped == "\(strippedHome)/Library" || stripped.hasPrefix("\(strippedHome)/Library/") {
             return "inside the current user's Library folder"
         }
+        // Somebody else's home, and the shared one. The MCP shell has refused
+        // these since B-13 while the daemon's list-based rule let them through,
+        // so the same stored value passed the process that *writes*
+        // `projects.json` and failed the one that archives into the directory —
+        // the split this round is closing (J). This stays a name rule (pure, so
+        // the whole set is testable without a filesystem); the ownership and
+        // world-writable checks the shell performs need `stat` and are recorded
+        // as the remaining gap, not silently claimed here.
+        if components[0] == "Users", components.count >= 2 {
+            let owner = String(components[1])
+            if owner == "Shared" {
+                return "the shared home tree /Users/Shared, which every local account can read"
+            }
+            if "/Users/" + owner != strippedHome {
+                return "another user's home directory (/Users/\(owner))"
+            }
+        }
         return nil
     }
 
@@ -515,6 +532,18 @@ public final class EngineCore {
     }
 
     static let evidenceStorageExample = "/Users/you/work/notes-app/.glasspane/evidence"
+
+    /// The same remedy for whichever of the three path fields was refused.
+    ///
+    /// `evidenceStorageRemedy` spells its own key exactly once (pinned by
+    /// `EngineCoreTests.testAllThreePathFieldsAreCheckedAtWriteTimeAndTheRemedyNamesTheRightOne`),
+    /// so naming the rejected field here is a substitution on that single
+    /// occurrence rather than a second copy of the sentence that could drift. An
+    /// agent told to re-set `evidenceStoragePath` after `recipeConfigPath` was
+    /// refused would run a command that changes nothing about its own error.
+    public static func pathRemedy(field: String) -> String {
+        evidenceStorageRemedy.replacingOccurrences(of: "\"evidenceStoragePath\":", with: "\"\(field)\":")
+    }
 
     public static let evidenceStorageRemedy = "re-point the registration at a project-owned directory and reload: gp_project_set with {\"projectId\": \"<that prj_…>\", \"displayName\": …, \"bundleId\" or \"pid\": …, \"evidenceStoragePath\": \"\(evidenceStorageExample)\"} (repeat the project's other fields — the update replaces them), then restart the background service, which read projects.json once at startup: `launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`. Attaching without projectId is the other honest choice: the daemon then keeps its own archive directory instead of adopting this project's."
 
@@ -1333,11 +1362,22 @@ public final class EngineCore {
         // A-14 on the daemon's own write side: the shell validates paths, but
         // this method is a second writer of the same file, and a path stored
         // here is what `attach` and `pruneEvidence` later act on.
-        if let stored = evidenceStoragePath, let defect = Self.evidenceStoragePathDefect(stored) {
+        //
+        // All three path fields, not just the archive. The MCP shell already
+        // checked the other two; the daemon checked one, so a value that the
+        // shell would refuse could still reach `projects.json` through this
+        // method — and `recipeConfigPath` is read back out and validated by
+        // `--recipe-validate` later, which makes it a live input, not a comment.
+        for (field, stored) in [
+            ("evidenceStoragePath", evidenceStoragePath),
+            ("recipeConfigPath", recipeConfigPath),
+            ("calibrationAssetsPath", calibrationAssetsPath),
+        ] {
+            guard let stored, let defect = Self.evidenceStoragePathDefect(stored) else { continue }
             throw GPError(
                 code: .badParams,
-                message: "evidenceStoragePath \"\(stored)\" \(defect). Nothing was registered.",
-                remedy: "use a project-owned directory at least two levels deep, e.g. \"\(Self.evidenceStorageExample)\": absolute, with no \".\" or \"..\" component, and neither the filesystem root, a top-level directory, a mounted volume root, your home directory, anything inside ~/Library, a system-owned tree (\(Self.systemOwnedStorageTrees.joined(separator: ", "))), nor world-writable shared scratch (\(Self.sharedScratchStoragePaths.joined(separator: ", ")) and anything below them) — the daemon writes evidence into this directory and deletes expired entries from it"
+                message: "\(field) \"\(stored)\" \(defect). Nothing was registered.",
+                remedy: Self.pathRemedy(field: field)
             )
         }
         // C-03: with no registry there is nothing to write into, and creating a

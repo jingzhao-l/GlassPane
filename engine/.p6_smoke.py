@@ -51,6 +51,8 @@ DEMO_CANDIDATES = [
 ]
 
 PASS = []
+# 每读到一枚档案就追加一个 bool：该档案的 signals.pixelDiff 是否是一个实测对象。
+PIXEL_DIFFS = []
 
 
 def resolve_binary(explicit, env_var, candidates):
@@ -576,7 +578,13 @@ def diagnose_of(client, operation_id):
 
 def evidence_of(client, operation_id):
     frame = client.call("last_evidence", {"operationId": operation_id})
-    return frame.get("evidencePack", frame)
+    pack = frame.get("evidencePack", frame)
+    # R5-04：记下这一枚档案里像素通道**是否真的测出过东西**。null 有两种来源——
+    # "这一轮界面确实没变"与"通道根本没测"（键名漂移、权限缺失），把它们混在
+    # 一起读就是拿缺席当结论；2026-09-25 那次 CGWindowList 键名写错就藏在这里。
+    signals = pack.get("signals") or {}
+    PIXEL_DIFFS.append(bool(signals.get("pixelDiff")))
+    return pack
 
 
 COUNT_MARKER_IDENTIFIER = "count-marker-row"
@@ -998,6 +1006,18 @@ def main():
         # 第二道闸（B-01）：daemon 已退出，此刻比指纹不会漏掉在途写入。绿字
         # "P6 SMOKE OK" 因此挪到 try/finally 之后——逃逸的那一轮不配留下 PASS 字样。
         enforce_no_state_escape(state_before, live_targets, probe_notes)
+    # R5-04 的正向断言：本轮必须至少测出一枚非 null 的 pixelDiff。
+    # 冒烟对"像素不可用"的容忍（CIRCUIT_PIXEL_UNAVAILABLE_LABELS）只在通道**能**测
+    # 而本轮恰好没测到时才无害；如果整轮没有一次成功测量，那这个标签就不再是
+    # "已知边界"而是通道故障的自陈——本仓库 2026-09-25 之前的形态正是后者，
+    # 而当时没有任何一条断言能把它和"这台机器没授权"区分开。
+    measured = sum(1 for one in PIXEL_DIFFS if one)
+    check(
+        "像素通道本轮实测出过 pixelDiff（区分「界面没变」与「通道没测」）",
+        measured > 0,
+        f"{measured}/{len(PIXEL_DIFFS)} 枚档案带非 null pixelDiff；"
+        "全零 ⇒ 捕获路径或屏幕录制席位故障，此时 T5/T6/T7 的判定不可信",
+    )
     print("P6 SMOKE OK")
 
 

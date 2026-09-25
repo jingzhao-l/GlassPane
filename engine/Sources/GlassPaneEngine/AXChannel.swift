@@ -524,9 +524,25 @@ public final class AXChannel: RuntimeChannel {
         ) as? [[String: Any]] else {
             return nil
         }
-        for window in windowList {
+        return Self.frontmostWindow(in: windowList, pid: Int(pid))
+    }
+
+    /// The window-selection rule, pure: `CGWindowListCopyWindowInfo` returns
+    /// windows front-to-back, so the first entry owned by `pid` with usable
+    /// bounds is the one to capture.
+    ///
+    /// Split out because the live list needs Screen Recording and a stable
+    /// desktop — neither of which a unit suite can promise — while the failure
+    /// this function had was invisible at exactly that boundary: with a wrong key
+    /// spelling the live call still returns a non-empty list, every lookup
+    /// misses, and the only observable is the message "no on-screen window
+    /// owned by pid N", which reads as a fact about the app instead of a fact
+    /// about this code. `AXChannelWindowKeyTests` now drives it with synthetic
+    /// dictionaries in the real spellings.
+    static func frontmostWindow(in windows: [[String: Any]], pid: Int) -> (Int, CGRect)? {
+        for window in windows {
             guard let ownerPid = window[Self.windowOwnerPIDKey] as? Int,
-                  ownerPid == Int(pid),
+                  ownerPid == pid,
                   let windowId = window[Self.windowNumberKey] as? Int,
                   let bounds = Self.rect(fromWindowBounds: window[Self.windowBoundsKey]),
                   bounds.width > 0, bounds.height > 0 else {
@@ -539,9 +555,20 @@ public final class AXChannel: RuntimeChannel {
 
     /// CGWindowInfo dictionary keys (values from CGWindow.h; the Swift
     /// constants are unavailable in the current SDK).
+    ///
+    /// These are the *string values* CoreGraphics actually files the dictionary
+    /// under — measured on this machine (`/var/tmp/gp-iterate-gates/cgwin_probe
+    /// .swift`, 2026-09-25): a window's keys came back as `kCGWindowOwnerPID`,
+    /// `kCGWindowNumber`, `kCGWindowBounds`, … Two of the three spelled here
+    /// used to be `"PID"` and `"Bounds"`, which exist in no CGWindow dictionary:
+    /// every owner-pid and bounds lookup failed, `captureWindow` threw
+    /// "no on-screen window owned by pid" for **any** attached app, and
+    /// `pixelDiff` was null in every pack the daemon wrote. A dead channel that
+    /// reports itself as a property of the app is the reason the spellings below
+    /// are pinned by a test rather than trusted.
     private static let windowNumberKey = "kCGWindowNumber"
-    private static let windowOwnerPIDKey = "PID"
-    private static let windowBoundsKey = "Bounds"
+    private static let windowOwnerPIDKey = "kCGWindowOwnerPID"
+    private static let windowBoundsKey = "kCGWindowBounds"
 
     private static func rect(fromWindowBounds raw: Any?) -> CGRect? {
         guard let dict = raw as? [String: Any],
