@@ -249,7 +249,7 @@
     {
       "file": "packages/opencode/script/publish.ts",
       "upstreamHash": "ac1cafff56f46e9611a9ff78aa05217d21a907ef",
-      "forkHash": "281326c6d5843ce21fd73c38487794984a8ac4cf"
+      "forkHash": "45d214f485e3a338545ecc0fc0e00236bb5a03cc"
     },
     {
       "file": "packages/opencode/src/agent/agent.ts",

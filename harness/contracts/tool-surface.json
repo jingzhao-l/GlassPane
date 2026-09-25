@@ -14,10 +14,10 @@
     "mcpShell": {
       "loc": 3859,
       "files": 10,
-      "ratio": 0.1561
+      "ratio": 0.156
     },
     "fork": {
-      "loc": 2528,
+      "loc": 2541,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -102,7 +102,7 @@
         {
           "file": "packages/opencode/script/publish.ts",
           "kind": "edited",
-          "lines": 138
+          "lines": 151
         },
         {
           "file": "packages/opencode/src/agent/agent.ts",
@@ -265,7 +265,7 @@
           "lines": 197
         }
       ],
-      "ratio": 0.1023,
+      "ratio": 0.1027,
       "vendorExcluded": {
         "files": 10,
         "lines": 1150
@@ -276,7 +276,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 6387,
+  "totalToolSurfaceLoc": 6400,
   "note": null,
   "carried": null
 }

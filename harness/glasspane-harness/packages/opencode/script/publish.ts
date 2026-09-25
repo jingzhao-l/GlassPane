@@ -111,14 +111,26 @@ const declaredPlatforms: Record<string, string> = Object.fromEntries(
   (product.platformTargets ?? []).map((target) => [platformPackageName(target), version]),
 )
 
+// A clean checkout has no dist/ (it is gitignored build output). The first CI run
+// of the pack lane died here with a raw ENOENT, which is the tool being honest
+// about its assumption and the lane being useless. Now it says what it needs.
+const distExists = existsSync(path.join(dir, "dist"))
 const binaries: Record<string, string> = {}
-for (const filepath of new Bun.Glob("*/package.json").scanSync({ cwd: "./dist" })) {
-  const found = await Bun.file(`./dist/${filepath}`).json()
-  binaries[found.name] = found.version
+if (distExists) {
+  for (const filepath of new Bun.Glob("*/package.json").scanSync({ cwd: "./dist" })) {
+    const found = await Bun.file(`./dist/${filepath}`).json()
+    binaries[found.name] = found.version
+  }
+} else {
+  console.log(`no ./dist here — validating the wrapper only (platform tarballs need a build first)`)
+  if (!dryRun) {
+    console.error("publish: nothing to publish: run `bun run build` first (dist/ is build output and is not in git)")
+    process.exit(2)
+  }
 }
 console.log(wrapperOnly || dryRun ? "wrapper-only mode" : "binaries", binaries)
 const missing = Object.keys(declaredPlatforms).filter((name) => !wrapperOnly && !binaries[name])
-if (missing.length) console.log(`note: ${missing.length} declared target(s) are not built in this run: ${missing.join(", ")}`)
+if (missing.length && distExists) console.log(`note: ${missing.length} declared target(s) are not built in this run: ${missing.join(", ")}`)
 
 await $`mkdir -p ./dist/${pkg.name}`
 await $`mkdir -p ./dist/${pkg.name}/bin`
