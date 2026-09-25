@@ -82,6 +82,7 @@
     "packages/opencode/script/glasspane-e7-ledger.ts",
     "packages/opencode/script/glasspane-e8-compaction.ts",
     "packages/opencode/script/glasspane-preflight.sh",
+    "packages/opencode/script/verify-published.ts",
     "packages/opencode/src/plugin/glasspane-compaction.ts",
     "packages/opencode/src/plugin/glasspane-decision-log.ts",
     "packages/opencode/src/tool/glasspane/daemon.ts",
@@ -116,7 +117,6 @@
     "packages/opencode/vendor/kernel/src/recipe-config.ts",
     "packages/opencode/vendor/kernel/src/schemas.ts",
     "product.json",
-    "scripts/install.ps1",
     "scripts/install.sh"
   ],
   "deleted": [
@@ -199,7 +199,7 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "f4713ba54528d81d47cea6eb991fef0af1c3d1a5"
+      "forkHash": "e897fbe71c33ad45a36b1335e407defb371c3760"
     },
     {
       "file": "CONTEXT.md",
@@ -234,7 +234,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "9f7eab69668eeedd6839bde5ff200ac5d3b13af9"
+      "forkHash": "4069b7d0a67e5d6e2fa0cc9b4c40ce3ff0e7a658"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -249,7 +249,7 @@
     {
       "file": "packages/opencode/script/publish.ts",
       "upstreamHash": "ac1cafff56f46e9611a9ff78aa05217d21a907ef",
-      "forkHash": "ae12cf6e74ef3aebfb41cf0b56c18245d2ff7f4c"
+      "forkHash": "281326c6d5843ce21fd73c38487794984a8ac4cf"
     },
     {
       "file": "packages/opencode/src/agent/agent.ts",
@@ -424,7 +424,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "04a57e8be39c0669bf26d37991fc6e52a3edfb00"
+      "forkHash": "fe254171688318a79d4838eb97d9ff17cb08da89"
     },
     {
       "file": "SECURITY.md",
