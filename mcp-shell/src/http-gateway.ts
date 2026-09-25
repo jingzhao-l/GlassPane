@@ -1,5 +1,5 @@
 import http, { type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { URL } from "node:url";
 
 import { EngineCallError, unixSocketEngineClient } from "./engine-client.js";
@@ -29,6 +29,14 @@ export const DEFAULT_GATEWAY_HOST = "127.0.0.1";
 /** Ceiling on a forwarded request body, so no client can exhaust gateway memory. */
 const MAX_REQUEST_BODY_BYTES = 256 * 1024;
 
+/**
+ * Ceiling on one GET /v1/evidence?ids= aggregation (aligned with the MCP
+ * recent_reports limit=20). Without it a single request could fan into the
+ * daemon as thousands of serial last_evidence calls (request amplification /
+ * DoS); over the ceiling the whole call is rejected with 400.
+ */
+const MAX_EVIDENCE_IDS = 20;
+
 /** operationId shape shared with the daemon / MCP shell (form `op_` + 26 Crockford base32). */
 const OPERATION_ID_PATTERN = /^op_[0-9A-HJKMNP-TV-Z]{26}$/;
 
@@ -43,6 +51,12 @@ const HTTP_UNAUTHORIZED = "GP_HTTP_UNAUTHORIZED";
 const HTTP_NOT_FOUND = "GP_HTTP_NOT_FOUND";
 const HTTP_BAD_REQUEST = "GP_HTTP_BAD_REQUEST";
 const HTTP_PAYLOAD_TOO_LARGE = "GP_HTTP_PAYLOAD_TOO_LARGE";
+/**
+ * Returned when a route is intentional but maps to no daemon socket method on
+ * this build (e.g. /v1/stats only exists as the daemon CLI --evidence-stats):
+ * the answer is an honest "not provided here", never a fabricated success.
+ */
+const HTTP_NOT_PROVIDED = "GP_HTTP_NOT_PROVIDED";
 
 /** The client surface the gateway depends on; injectable for tests. */
 export interface EngineClientLike {
@@ -173,21 +187,35 @@ async function dispatch(
     return;
   }
   if (req.method === "GET") {
-    if (resource === "hello" && id === undefined) {
+    // Each GET route requires exactly its own segment count. A surplus segment
+    // (`/v1/evidence/<id>/junk`, `/v1/hello/x`) is a 404, never a silently
+    // trimmed route: trimming would let a caller think a path is invalid while
+    // the real act still runs underneath it, which is dangerous on a live action.
+    if (resource === "hello" && segments.length === 2) {
       await handleHello(client, res);
       return;
     }
-    if (resource === "evidence" && id === undefined) {
+    if (resource === "evidence" && segments.length === 2) {
       await handleEvidenceAggregate(url, client, res);
       return;
     }
-    if (resource === "evidence" && id !== undefined) {
+    if (resource === "evidence" && segments.length === 3 && id !== undefined) {
       await handleEvidenceSingle(id, url, client, res);
       return;
     }
-  } else if (req.method === "POST" && resource === "tools" && id !== undefined) {
-    await handleToolForward(id, req, client, res);
-    return;
+    if (resource === "stats" && segments.length === 2) {
+      handleEvidenceStats(res);
+      return;
+    }
+  } else if (req.method === "POST") {
+    if (resource === "tools" && segments.length === 3 && id !== undefined) {
+      await handleToolForward(id, req, client, res);
+      return;
+    }
+    if (resource === "recipes" && id === "validate" && segments.length === 3) {
+      await handleRecipeValidate(req, res);
+      return;
+    }
   }
   NotFound(res, url.pathname);
 }
@@ -239,6 +267,12 @@ async function handleEvidenceAggregate(
     fail(res, 400, HTTP_BAD_REQUEST,
       "invalid or empty ids",
       "ids must be a comma-separated list of operationIds of form `op_[0-9A-HJKMNP-TV-Z]{26}`");
+    return;
+  }
+  if (ids.length > MAX_EVIDENCE_IDS) {
+    fail(res, 400, HTTP_BAD_REQUEST,
+      `too many ids: ${ids.length} exceeds the ${MAX_EVIDENCE_IDS}-id ceiling`,
+      `pass at most ${MAX_EVIDENCE_IDS} operationIds per request; split the batch`);
     return;
   }
   const format = parseFormat(url.searchParams.get("format"));
@@ -337,10 +371,61 @@ async function handleToolForward(
 
   try {
     const result = await client.call(spec.engineMethod, checked.value);
+    // Honesty-bypass guard (mirrors tools.ts §6.3): a last_evidence frame is
+    // passed through the strong read-side validation before it is surfaced, so
+    // a pack the engine wrote but the kernel cannot parse is reported as an
+    // error here and never echoed forward as if it were trusted evidence.
+    if (spec.engineMethod === "last_evidence") {
+      try {
+        parseEvidenceFrame(result);
+      } catch {
+        fail(res, 502, GP_E_INTERNAL,
+          "the daemon returned a last_evidence frame that does not match the engine contract (no parseable evidencePack)",
+          "reenact the operation so the daemon writes a fresh pack; if it still fails, the engine and kernel schemas have drifted (assertion C35)");
+        return;
+      }
+    }
     ok(res, result);
   } catch (error) {
     await failEngine(res, error);
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * Endpoints whose capability exists only as a daemon CLI command on this build
+ * (no socket method): the gateway answers honestly that it cannot measure or
+ * validate here, and never mints a fake success (honesty red line).
+ * ------------------------------------------------------------------ */
+
+/** GET /v1/stats: evidence stats are the daemon CLI `--evidence-stats`, not a
+ * socket method on this build. The gateway reports "not provided" rather than
+ * inventing count/totalBytes/listFailure/dir. */
+function handleEvidenceStats(res: ServerResponse): void {
+  fail(res, 501, HTTP_NOT_PROVIDED,
+    "evidence statistics are not exposed over this daemon's socket protocol in this build",
+    "run `glasspaned --evidence-stats` against the same --state-dir this socket serves to get count/totalBytes/listFailure/dir");
+}
+
+/** POST /v1/recipes/validate: recipe validation (`glasspaned --recipe-validate`)
+ * is a daemon CLI capability, not a socket method on this build. The recipe JSON
+ * body is drained/disposed but never "validated" here, and no fake valid result
+ * is minted — the caller is pointed at the daemon CLI that genuinely validates. */
+async function handleRecipeValidate(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    await readBody(req, MAX_REQUEST_BODY_BYTES);
+  } catch (error) {
+    if (error instanceof HTTPPayloadTooLargeError) {
+      fail(res, 400, HTTP_PAYLOAD_TOO_LARGE,
+        `request body exceeds ${MAX_REQUEST_BODY_BYTES} bytes`,
+        "shrink the request payload and retry");
+      return;
+    }
+    fail(res, 400, HTTP_BAD_REQUEST, "could not read the request body", "resend the request");
+    return;
+  }
+  fail(res, 501, HTTP_NOT_PROVIDED,
+    "recipe validation is not exposed over this daemon's socket protocol in this build",
+    "run `glasspaned --recipe-validate <recipe.json-path>`; this build provides no socket method for it");
 }
 
 /* ------------------------------------------------------------------ *
@@ -364,13 +449,20 @@ function authorized(req: IncomingMessage, expected: Buffer): boolean {
   return tokenMatches(expected, bearer);
 }
 
-/** Constant-time comparison so the token length/prefix cannot be probed. */
+/**
+ * Constant-time comparison. Every candidate, whatever its length, is hashed to
+ * a fixed 32-byte digest before the timing-safe compare, so a length mismatch
+ * never returns early and neither length nor prefix can be probed from response
+ * timing or from an observable branch (the work is the same for any input).
+ */
 function tokenMatches(expected: Buffer, received: string): boolean {
-  const receivedBuf = Buffer.from(received, "utf8");
-  if (receivedBuf.length !== expected.length) {
-    return false;
-  }
-  return timingSafeEqual(expected, receivedBuf);
+  const expectedDigest = sha256(expected);
+  const receivedDigest = sha256(Buffer.from(received, "utf8"));
+  return timingSafeEqual(expectedDigest, receivedDigest);
+}
+
+function sha256(data: Buffer): Buffer {
+  return createHash("sha256").update(data).digest();
 }
 
 /* ------------------------------------------------------------------ *

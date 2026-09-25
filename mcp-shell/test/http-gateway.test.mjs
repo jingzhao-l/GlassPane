@@ -1,6 +1,11 @@
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { buildSync } from "esbuild";
 
 import { createHttpGateway } from "../dist/http-gateway.js";
 import { EngineCallError } from "../dist/engine-client.js";
@@ -247,4 +252,228 @@ test("POST /v1/tools/act surfaces the engine's no-replay remedy on error", async
 
 test("createHttpGateway refuses an empty token (security red line)", () => {
   assert.throws(() => createHttpGateway({ socketPath: "/tmp/x.sock", token: "" }));
+});
+
+
+/* ------------------------------------------------------------------ *
+ * A: GET /v1/evidence?ids= caps the id count at 20 (no request amplification)
+ * ------------------------------------------------------------------ */
+
+test("GET /v1/evidence?ids= rejects more than 20 ids with 400 before touching the daemon", async () => {
+  const fake = new FakeGatewayClient();
+  fake.on("last_evidence", () => ({ evidencePack: fixturePack() }));
+  const { gw, base } = await startGateway(fake);
+  try {
+    const ids = Array.from({ length: 21 }, (_, i) => `op_0PAAAA${String(i).padStart(20, "0")}`).join(",");
+    const res = await fetch(`${base}/v1/evidence?ids=${ids}`, { headers: auth() });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.ok, false);
+    assert.equal(body.error.code, "GP_HTTP_BAD_REQUEST");
+    assert.ok(body.error.message.includes("20"), "the message must name the ceiling");
+    assert.equal(fake.invoked("last_evidence").length, 0, "over-limit ids must never reach the daemon");
+  } finally {
+    await gw.close();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * B: token length/prefix cannot take a shortcut branch (constant-time compare)
+ * ------------------------------------------------------------------ */
+
+test("401 for tokens shorter, longer or equal-but-different from the real token", async () => {
+  const fake = new FakeGatewayClient();
+  const { gw, base } = await startGateway(fake);
+  try {
+    const candidates = ["", "t", "short", "x".repeat(64), TEST_TOKEN.slice(0, -1) + "Z"];
+    for (const token of candidates) {
+      const res = await fetch(`${base}/v1/hello`, {
+        headers: token === "" ? {} : { Authorization: `Bearer ${token}` },
+      });
+      assert.equal(res.status, 401, `token of length ${token.length} must yield 401, not pass a length branch`);
+      const body = await res.json();
+      assert.equal(body.error.code, "GP_HTTP_UNAUTHORIZED");
+    }
+  } finally {
+    await gw.close();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * C: surplus path segments are a 404, never a silently-trimmed route
+ * ------------------------------------------------------------------ */
+
+test("an extra path segment after a real route returns 404 (no silent trimming)", async () => {
+  const fake = new FakeGatewayClient();
+  fake.on("act", () => ({ operationId: ID, actConfirmed: true }));
+  fake.on("last_evidence", () => ({ evidencePack: fixturePack() }));
+  const { gw, base } = await startGateway(fake);
+  try {
+    const cases = [
+      { url: `${base}/v1/hello/x`, method: "GET" },
+      { url: `${base}/v1/evidence/${ID}/junk`, method: "GET" },
+      {
+        url: `${base}/v1/tools/act/junk`,
+        method: "POST",
+        body: JSON.stringify({ selector: { role: "button" }, action: "press" }),
+      },
+    ];
+    for (const c of cases) {
+      const res = await fetch(c.url, { method: c.method, headers: auth(), body: c.body });
+      assert.equal(res.status, 404, `expected 404 for ${c.url}`);
+      const body = await res.json();
+      assert.equal(body.ok, false);
+      assert.equal(body.error.code, "GP_HTTP_NOT_FOUND");
+    }
+    assert.equal(fake.invoked("act").length, 0, "/v1/tools/act/junk must not dispatch the real act");
+  } finally {
+    await gw.close();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * D: POST /v1/tools/last_evidence runs the same contract validation as the
+ *    evidence GET and MCP paths (a daemon frame that does not parse is never
+ *    passed through as trusted evidence)
+ * ------------------------------------------------------------------ */
+
+test("POST /v1/tools/last_evidence does not pass through an unparseable frame", async () => {
+  const fake = new FakeGatewayClient();
+  fake.on("last_evidence", () => ({ notEvidence: true }));
+  const { gw, base } = await startGateway(fake);
+  try {
+    const res = await fetch(`${base}/v1/tools/last_evidence`, {
+      method: "POST",
+      headers: auth(),
+      body: JSON.stringify({ operationId: ID }),
+    });
+    assert.equal(res.status, 502);
+    const body = await res.json();
+    assert.equal(body.ok, false, "an unparseable frame must never be echoed as ok:true");
+    assert.equal(body.error.code, "GP_E_INTERNAL");
+    assert.ok(body.error.message.includes("evidencePack"), "the message must call out the missing contract");
+  } finally {
+    await gw.close();
+  }
+});
+
+test("POST /v1/tools/last_evidence passes a parseable frame through honestly", async () => {
+  const fake = new FakeGatewayClient();
+  const raw = { evidencePack: fixturePack() };
+  fake.on("last_evidence", () => raw);
+  const { gw, base } = await startGateway(fake);
+  try {
+    const res = await fetch(`${base}/v1/tools/last_evidence`, {
+      method: "POST",
+      headers: auth(),
+      body: JSON.stringify({ operationId: ID }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.ok(body.result.evidencePack, "a parseable frame is echoed");
+  } finally {
+    await gw.close();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * E: daemon-CLI-only capabilities answer honestly (never a fabricated success)
+ * ------------------------------------------------------------------ */
+
+test("GET /v1/stats answers honestly that stats are not on the socket protocol", async () => {
+  const fake = new FakeGatewayClient();
+  const { gw, base } = await startGateway(fake);
+  try {
+    const res = await fetch(`${base}/v1/stats`, { headers: auth() });
+    assert.equal(res.status, 501);
+    const body = await res.json();
+    assert.equal(body.ok, false);
+    assert.equal(body.error.code, "GP_HTTP_NOT_PROVIDED");
+    assert.ok(body.error.remedy.includes("--evidence-stats"), "must point at the daemon CLI");
+    assert.equal(fake.calls.length, 0, "no daemon method is invented for stats");
+  } finally {
+    await gw.close();
+  }
+});
+
+test("POST /v1/recipes/validate answers honestly that validation is not on the socket protocol", async () => {
+  const fake = new FakeGatewayClient();
+  const { gw, base } = await startGateway(fake);
+  try {
+    const res = await fetch(`${base}/v1/recipes/validate`, {
+      method: "POST",
+      headers: auth(),
+      body: JSON.stringify({ name: "demo-recipe" }),
+    });
+    assert.equal(res.status, 501);
+    const body = await res.json();
+    assert.equal(body.ok, false);
+    assert.equal(body.error.code, "GP_HTTP_NOT_PROVIDED");
+    assert.ok(body.error.remedy.includes("--recipe-validate"), "must point at the daemon CLI");
+    assert.equal(fake.calls.length, 0, "recipe validation must not dispatch any daemon call");
+  } finally {
+    await gw.close();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * F/G: release wiring and bundle keep the http-gateway importable (smoke gate)
+ * ------------------------------------------------------------------ */
+
+const MCP_SHELL_ROOT = fileURLToPath(new URL("..", import.meta.url));
+
+/** Recursively copy a directory tree (schema fixtures) using the platform `cp`. */
+function copyRecursive(src, dest) {
+  const res = spawnSync("cp", ["-R", `${src}/.`, dest], { encoding: "utf8" });
+  assert.equal(res.status, 0, `schema copy failed: ${res.stderr}`);
+}
+
+
+test("release bundle preserves a resolvable http-gateway entry and the publish wiring", async () => {
+  const pkg = JSON.parse(readFileSync(path.join(MCP_SHELL_ROOT, "package.json"), "utf8"));
+  assert.equal(pkg.bin["glasspane-mcp"], "dist/index.js");
+  assert.equal(pkg.bin["glasspane-http"], "dist/http-gateway-cli.js", "bin must expose the CLI entry");
+  assert.ok(pkg.exports["./http-gateway"], "exports must surface ./http-gateway");
+
+  // The bundle script must multi-enter the library AND the CLI entry, and its
+  // dist clean-up must whitelist both http-gateway.js and http-gateway-cli.js
+  // so the release bundle is not silently dropped (the regression this gates).
+  assert.match(pkg.scripts.bundle, /src\/http-gateway\.ts/);
+  assert.match(pkg.scripts.bundle, /src\/http-gateway-cli\.ts/);
+  assert.match(pkg.scripts.bundle, /dist\/http-gateway\.js/);
+  assert.match(pkg.scripts.bundle, /dist\/http-gateway-cli\.js/);
+  const findDelete = /find dist[^&]*? -delete/.exec(pkg.scripts.bundle);
+  assert.ok(findDelete, "bundle script must keep a dist clean-up step");
+  assert.match(findDelete[0], /! -name 'http-gateway\.js'/);
+  assert.match(findDelete[0], /! -name 'http-gateway-cli\.js'/);
+
+  // Prove createHttpGateway stays importable from an actual esbuild bundle.
+  const dir = mkdtempSync(path.join(os.tmpdir(), "gp-bundle-smoke-"));
+  try {
+    // The library bundle reads evidence-pack.schema.json from a sibling
+    // `schemas/` at import time (mirroring the published `schemas/` copy the
+    // bundle script makes). Recreate that layout so the bundle is importable.
+    mkdirSync(path.join(dir, "dist"), { recursive: true });
+    mkdirSync(path.join(dir, "schemas"), { recursive: true });
+    copyRecursive(
+      path.join(MCP_SHELL_ROOT, "..", "kernel", "schemas"),
+      path.join(dir, "schemas"),
+    );
+    buildSync({
+      entryPoints: [path.join(MCP_SHELL_ROOT, "src", "http-gateway.ts")],
+      bundle: true,
+      platform: "node",
+      format: "esm",
+      target: "node18",
+      // No externals: the temp bundle has no node_modules, so it must be
+      // self-contained to be importable at all.
+      outfile: path.join(dir, "dist", "http-gateway.js"),
+      logLevel: "silent",
+    });
+    const bundled = await import(pathToFileURL(path.join(dir, "dist", "http-gateway.js")).href);
+    assert.equal(typeof bundled.createHttpGateway, "function", "bundled http-gateway must export createHttpGateway");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
