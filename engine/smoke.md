@@ -138,7 +138,7 @@ printf '%s\n' \
 | C33 阶段一 操作权互斥 | `engine/.c33_smoke.py` | PASS：注入器连发 otherMouseDown（未占用键 29，(5,5) 角落，无交互副作用）期间 act 如实得 `GP_E_BUSY_INPUT`（5 次重试×50ms 预算耗尽） |
 | C33 阶段二 污染检出 | 同上 | PASS（第 1 次尝试）：注入事件落入操作持有窗 → evidence `attribution.contaminated=true`、`level=weak`（归因如实降级） |
 | C33 阶段三 无误杀 | 同上 | PASS：输入静默后 act `contaminated=false`、`level=soft` |
-| T9/基础回路回归 | `.t9_smoke.py` / `.c33_smoke.py` 头部 | guard 注入后 T9 SMOKE OK（第 16/24 轮触发，busy 零误伤）、完整操作回路 + 归因面如实落盘不回归 |
+| T9/基础回路回归 | `.t9_smoke.py` / `.c33_smoke.py` 头部 | guard 注入后 T9 SMOKE OK（**2026-09-25 14:13 复测：第 12/24 轮触发**，采样节流 0.5 s + 趋势跨度下限 20 s 之后比历史留档的 16/24 更早；busy 零误伤）、完整操作回路 + 归因面如实落盘不回归 |
 
 真机观察补充：
 

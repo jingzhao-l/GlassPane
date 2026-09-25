@@ -795,7 +795,31 @@ def run_canary(client, identifier, accepted, label, pre_wait=0.0, post_wait=0.0,
             extra = "" if attempt == 0 else f"（第 {attempt + 1} 次达成；此前分类 {cls} 见 NOTE）"
             check(label, True, f"class={cls}{extra}")
             return pack
-    print(f"FAIL {label} — {attempts} 次后仍未落入 {accepted}，最后 class={last[0]}（如系统菜单噪声持续或判定确误，此为真失败）")
+    numbers = {}
+    cls, diag, pack = last
+    signals = pack.get("signals") or {}
+    pixel = signals.get("pixelDiff")
+    numbers["changedPixelRatio"] = (pixel or {}).get("changedPixelRatio")
+    numbers["windowId"] = (pixel or {}).get("windowId")
+    numbers["axChanged"] = (signals.get("axEvent") or {}).get("axChanged")
+    numbers["stateChanged"] = (signals.get("stateDiff") or {}).get("changed")
+    numbers["hitCount"] = (signals.get("handlerProbe") or {}).get("hitCount")
+    try:
+        one, five, fifteen = os.getloadavg()
+        numbers["load1m"] = round(one, 2)
+        numbers["cores"] = os.cpu_count()
+    except OSError:
+        numbers["load1m"] = "读不出"
+    print(
+        f"FAIL {label} — {attempts} 次后仍未落入 {accepted}，最后 class={cls}\n"
+        f"     实测通道：{json.dumps(numbers, ensure_ascii=False)}\n"
+        f"     读法：ratio=0 说的是\u201c前后两帧采集到的像素没差\u201d，不等于\u201c界面没变\u201d——\n"
+        f"     state/ax/handler 都变了而像素没差：要么采集赶在重绘之前"
+        f"（本机此刻负载 {numbers['load1m']}/{numbers.get('cores')} 核），"
+        f"要么拍到的不是这块界面（窗口被遮 / 拿错 windowId）。\n"
+        f"     这两种都要人来判，不许靠加重试次数或放宽 accepted 了结；"
+        f"ratio 为 null 才归到像素通道哑火那一族。"
+    )
     sys.exit(1)
 
 

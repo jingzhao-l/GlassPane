@@ -47,12 +47,21 @@ public final class SocketServer {
         self.preemptsExistingSocket = preemptsExistingSocket
     }
 
+    /// Called once, immediately after **this** instance's bind succeeded and before
+    /// the accept loop. R6-07: the daemon registers its socket with the shutdown
+    /// waiter through this hook, because the waiter thread is now created at the top
+    /// of startup (before any listener exists) and must not unlink a name the process
+    /// never owned. `bindAndListen()` throws on every failure path, so reaching this
+    /// callback means the file at `socketPath` is ours.
+    public var onBound: (() -> Void)?
+
     public func run() throws {
         try prepareSocketDirectory()
         // `listenFD` is assigned only for a socket that is bound *and* listening:
         // `bindAndListen()` owns the descriptor until then and closes it itself
         // on every failure path (R2-09).
         listenFD = try openListenSocket()
+        onBound?()
         log.info("listening on \(socketPath)")
 
         // Accept loop: one client at a time; P0 has a single engine consumer.

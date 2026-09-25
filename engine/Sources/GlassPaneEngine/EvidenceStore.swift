@@ -7,9 +7,16 @@ import Foundation
 public struct EvidenceArchiveStats: Equatable {
     public let count: Int
     public let totalBytes: Int
-    public init(count: Int, totalBytes: Int) {
+    /// R6-08: nil means the listing completed, so `count: 0` is the statement
+    /// "this archive holds nothing". Non-nil means the archive could **not** be
+    /// read, and the two zeros below are then the zeros of "nothing was
+    /// measured" — which `glasspaned --evidence-stats` publishes as null.
+    public let listFailure: String?
+
+    public init(count: Int, totalBytes: Int, listFailure: String? = nil) {
         self.count = count
         self.totalBytes = totalBytes
+        self.listFailure = listFailure
     }
 }
 
@@ -402,17 +409,29 @@ public final class EvidenceStore {
 
     // MARK: - Archive lifecycle (spec v1.6 §12)
 
-    /// Aggregate size of the active archive: evidence entry count and total
-    /// on-disk bytes. Missing/empty directories report 0/0 and never throw.
+    /// Aggregate size of the active archive: entry count and total on-disk bytes,
+    /// plus whether that count was obtained at all. A missing or empty directory
+    /// reports 0/0 with `listFailure == nil`; a directory that exists but cannot
+    /// be read reports `listFailure`, because publishing 0 there is what let
+    /// `--evidence-stats` certify an unreadable archive as empty. Never throws.
     public func stats() -> EvidenceArchiveStats {
-        let urls = archiveEntryURLs(keys: [.fileSizeKey])
-        var totalBytes = 0
-        for url in urls {
-            if let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) {
-                totalBytes += size
+        switch archiveListing(keys: [.fileSizeKey]) {
+        case .absent:
+            return EvidenceArchiveStats(count: 0, totalBytes: 0)
+        case let .unreadable(path):
+            return EvidenceArchiveStats(
+                count: 0, totalBytes: 0,
+                listFailure: "cannot read the evidence archive at \(path) to count it"
+            )
+        case let .entries(urls):
+            var totalBytes = 0
+            for url in urls {
+                if let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) {
+                    totalBytes += size
+                }
             }
+            return EvidenceArchiveStats(count: urls.count, totalBytes: totalBytes)
         }
-        return EvidenceArchiveStats(count: urls.count, totalBytes: totalBytes)
     }
 
     /// Remove every evidence entry in the active directory, returning the
@@ -552,21 +571,64 @@ public final class EvidenceStore {
 
     // MARK: - Helpers
 
+    /// The three things a listing can say. `absent` and `unreadable` used to be
+    /// the same answer (`[]`), which is the shape this project keeps having to
+    /// remove: an archive that was never created genuinely holds nothing, while
+    /// an archive behind a directory this process may not read holds *unknown*.
+    /// Measured on this machine, the two are distinguishable at the error level:
+    /// `NSCocoaErrorDomain` 260 is ENOENT and 257 is EACCES.
+    enum ArchiveListing {
+        case entries([URL])
+        case absent
+        case unreadable(String)
+    }
+
+    /// Why the **last** listing failed, or nil when it completed. The maintenance
+    /// CLI builds one store per invocation and reads this immediately after the
+    /// call, which is how a published `0` turns into "could not count"; internal
+    /// serving-thread callers get a `log.error` instead, because a shared flag
+    /// there would not say whose listing it described.
+    private(set) var listingFailure: String?
+
     /// List the archive's entries in the active directory, requesting the given
     /// resource keys. An entry is a file this store created — see
     /// `isDeletableEntry` — so foreign `.json` files and `.json`-named
     /// directories are excluded here once, for every consumer (observation and
-    /// deletion alike). Returns `[]` when the directory is missing (never
-    /// throws), so iterative listing is safe on a never-created archive.
+    /// deletion alike). Never throws; a failed listing is an outcome, not an
+    /// exception.
+    private func archiveListing(keys: [URLResourceKey]) -> ArchiveListing {
+        do {
+            let urls = try FileManager.default.contentsOfDirectory(
+                at: URL(fileURLWithPath: directory),
+                includingPropertiesForKeys: keys + [.isRegularFileKey, .isSymbolicLinkKey],
+                options: [.skipsHiddenFiles]
+            )
+            listingFailure = nil
+            return .entries(urls.filter { Self.isDeletableEntry($0) })
+        } catch let failure as NSError where failure.domain == NSCocoaErrorDomain
+            && failure.code == NSFileReadNoSuchFileError {
+            listingFailure = nil
+            return .absent
+        } catch {
+            listingFailure = "cannot list the evidence archive at \(directory) (\(error))"
+            return .unreadable(directory)
+        }
+    }
+
+    /// The form callers use when a failed listing must not change what they do:
+    /// they see no entries, and the reason is both in `listingFailure` (for a
+    /// published number) and in the log (for a serving-thread path). Deleting or
+    /// counting for the CLI has to consult one of the two — see `stats()`.
     private func archiveEntryURLs(keys: [URLResourceKey]) -> [URL] {
-        guard let urls = try? FileManager.default.contentsOfDirectory(
-            at: URL(fileURLWithPath: directory),
-            includingPropertiesForKeys: keys + [.isRegularFileKey, .isSymbolicLinkKey],
-            options: [.skipsHiddenFiles]
-        ) else {
+        switch archiveListing(keys: keys) {
+        case let .entries(urls):
+            return urls
+        case .absent:
+            return []
+        case .unreadable:
+            log.error(listingFailure ?? "listing failed at \(directory)")
             return []
         }
-        return urls.filter { Self.isDeletableEntry($0) }
     }
 
     // MARK: - Directory isolation (R5-04)

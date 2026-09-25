@@ -486,6 +486,33 @@ var shutdownSignalSet: sigset_t = {
     return set
 }()
 
+/// Which socket files the shutdown waiter may unlink, decided **at signal time**.
+///
+/// The waiter thread is created the moment the mask goes on (see `startShutdownWaiter`'s
+/// call site), which is before either listener exists — so it cannot take a snapshot of
+/// the paths. It reads this registry instead, and a path is added only by the code that
+/// actually bound it: "只清无主名字" (A-18) is precisely the rule a pre-bind snapshot
+/// would break, since an instance that loses the name to an incumbent must never unlink
+/// the winner's socket file.
+private final class ShutdownSocketRegistry {
+    private let lock = NSLock()
+    private var paths: [String] = []
+
+    func register(_ path: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        if !paths.contains(path) { paths.append(path) }
+    }
+
+    var current: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return paths
+    }
+}
+
+private let shutdownSockets = ShutdownSocketRegistry()
+
 private func blockShutdownSignalsEarly() {
     // Writes to a socket whose peer has closed raise SIGPIPE by default and
     // would kill the daemon. Ignore it so write() returns EPIPE and the
@@ -503,13 +530,13 @@ private func blockShutdownSignalsEarly() {
 /// fd——跨线程 close 有 fd 复用竞态。sigwait 形态三条全免疫：遮罩继承送达确
 /// 定、收尾跑在普通线程上下文；这里只 unlink socket 文件、不关在用的 fd，
 /// 与正常退出留下的现场一致。运维不再需要 kill -9。
-private func startShutdownWaiter(socketPaths: [String]) {
+private func startShutdownWaiter(registry: ShutdownSocketRegistry) {
     Thread.detachNewThread {
         var signalNumber: Int32 = 0
         while true {
             let code = sigwait(&shutdownSignalSet, &signalNumber)
             guard code == 0 else { continue }
-            for path in socketPaths { unlink(path) }
+            for path in registry.current { unlink(path) }
             exit(0)
         }
     }
@@ -834,9 +861,14 @@ if options.pruneEvidence || options.evidenceStats {
     }
     if options.evidenceStats {
         let stats = store.stats()
+        // R6-08: when the archive could not be read these are not zeros, they are
+        // "not obtained" — and the p6 gate's isolation precondition consumes
+        // exactly this line, so a 0 here used to certify an unreadable archive.
+        let unreadable = stats.listFailure != nil
         let payload: [String: Any] = [
-            "count": stats.count,
-            "totalBytes": stats.totalBytes,
+            "count": unreadable ? NSNull() : stats.count,
+            "totalBytes": unreadable ? NSNull() : stats.totalBytes,
+            "listFailure": stats.listFailure ?? NSNull(),
             "project": options.maintenanceProjectId ?? NSNull(),
             "dir": dir
         ]
@@ -947,6 +979,17 @@ if options.probeEnabled {
 // GCD worker）——线程继承创建者的信号遮罩，这是 sigwait 送达确定性的前提。
 // 它也必须晚于上面两条护栏（见上），否则屏蔽期内无人消费信号 = 不可杀。
 blockShutdownSignalsEarly()
+// R6-07: the consumer thread has to exist **before** anything that can take time.
+// It used to be started on the last line of startup — after the probe listener, the
+// input monitor and `EngineCore` were wired — on the theory that "the mask is on and
+// every thread-creating init is done". That left a window in which a masked signal had
+// no consumer at all, and the signal gate kept hitting it: measured on this machine at
+// 13× its core count, the stretch between the mask and the waiter overran the smoke's
+// 6 s budget, so `SIGINT` sat pending with nothing scheduled to take it and the daemon
+// read as unkillable. That is the shape R5-07 removed for the single-instance guard,
+// reappearing one function later. Starting the thread first costs nothing: the
+// registry is empty until a listener really binds, so an early exit unlinks nothing.
+startShutdownWaiter(registry: shutdownSockets)
 let channel = AXChannel()
 // T9 progressive degradation is on by default: it needs no TCC permission
 // (proc_pidinfo is same-user process inspection). C33 is injected by default
@@ -997,6 +1040,8 @@ if options.probeEnabled, probeListenerAllowed {
         try server.start()
         probeInbox = inbox
         probeServer = server
+        // Bound successfully, so this name is ours to remove on shutdown.
+        shutdownSockets.register(probeSocketPath)
     } catch {
         // start() 自带同一套 bind→三态判定→只清无主名字的纪律（A-18），护栏到这里
         // 之间若被别的实例抢了名字，它会拒绝并如实抛 nameOccupied；其余是
@@ -1035,8 +1080,11 @@ let server = SocketServer(
     log: log,
     preemptsExistingSocket: options.forceSocket
 )
-// 遮罩已装、所有会创建线程的初始化都已完成，此刻起信号只会被这里消费。
-startShutdownWaiter(socketPaths: [server.socketPath] + (probeServer.map { [$0.socketPath] } ?? []))
+// 消费线程已在遮罩之后立刻创建（见上面的 R6-07）；这里只登记 engine 自己的名字，
+// 而且登记的时机由 `SocketServer` 在 bind 成功之后回调决定——在 `run()` 之前登记会
+// 给"抢名失败的那一方去 unlink 现任的 socket"留出窗口，而那正是 A-18 三条状态判定要
+// 消灭的形状。
+server.onBound = { shutdownSockets.register(server.socketPath) }
 
 FileHandle.standardOutput.write(
     Data("glasspaned \(core.version) listening on \(socketPath)\n".utf8)

@@ -241,6 +241,11 @@ enum TestSandbox {
     /// Process-scoped root under the system temp directory. `swift test` runs
     /// the whole target in one process, so tests never share a path with each
     /// other and never reuse a leftover directory.
+    ///
+    /// Since round 7 this is also the *definition* of isolation: `isolationDefect`
+    /// admits a path only inside here. Being somewhere under the shared temp
+    /// directory is not isolation — it is only a naming convention every other
+    /// process on the machine may also pick.
     static let root = NSTemporaryDirectory() + "gp-t\(ProcessInfo.processInfo.processIdentifier)"
 
     /// Where a path resolves, expressed as a *predicate* rather than as a string.
@@ -265,9 +270,15 @@ enum TestSandbox {
     }
 
     /// The real temp root, for the cases that must name it rather than trust a
-    /// helper's word for it: `isolationDefect` compares against it, and the
-    /// residue predicate of the console reads paths shaped like a leftover
-    /// archive. Read-only by the rule above — compose nothing from it.
+    /// helper's word for it: the residue predicate of the console reads paths
+    /// shaped like a leftover archive, and a case that proves this sandbox really
+    /// does sit inside the shared temp directory compares against it.
+    ///
+    /// Read-only by the rule above — compose nothing from it. Round 7 removed the
+    /// one excuse for treating it as a write target: `isolationDefect` no longer
+    /// accepts a path merely because it starts here, so a hand-composed path from
+    /// this value is refused by `assertIsolated` at runtime instead of being
+    /// waved through as "isolated".
     static let systemTempRoot = NSTemporaryDirectory()
 
     /// A unique directory path that does **not** exist yet, for the tests whose
@@ -342,9 +353,29 @@ enum TestSandbox {
     /// purpose (C-05): a runtime guard nobody has ever seen refuse something is
     /// not a guard, so `TestIsolationGateTests` feeds this predicate the shapes
     /// it exists to catch, and `assertIsolated` asserts on its answer.
+    ///
+    /// The bar is `root`, the process-private sandbox, and not the shared temp
+    /// directory. Round 7 measured what the looser bar let through: a predicate
+    /// that only asks whether a path starts with the system temp root rates
+    /// `TestSandbox`'s own shared-temp value plus a hand-written suffix — and the
+    /// equivalent forms built from the environment's temp variable, from a
+    /// literal path under the world-writable scratch directory, or from the C
+    /// library's make-a-temporary-directory call — as isolated. Nothing stops any
+    /// other process naming those same paths, so two concurrent runs share one
+    /// registry and one test's fixture becomes another test's "existing state".
+    /// `root` carries this process's pid, so requiring it is what makes the word
+    /// mean "no one else can reach it" rather than "it is somewhere in temp".
+    ///
+    /// The two refusals kept from the earlier version, in the same order:
+    ///   1. a path outside the sandbox root — it can reach real state, or another
+    ///      run's files, and nothing about it has been checked;
+    ///   2. a path *inside* the root that still names the production state folder,
+    ///      which is the same mistake one level in: it is exactly the directory
+    ///      the real daemon cleans up after itself.
     static func isolationDefect(_ path: String) -> String? {
-        if !path.hasPrefix(NSTemporaryDirectory()) {
-            return "outside NSTemporaryDirectory(); it can reach the real per-user state"
+        if !path.hasPrefix(root + "/") {
+            return "outside the process-private sandbox root (\(root)): it can reach "
+                + "the real per-user state or another run's files"
         }
         // Spelled in pieces on purpose: the source gate reads this file too.
         if path.contains("/." + "glasspane") {

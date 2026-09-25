@@ -287,12 +287,35 @@ final class TestIsolationGateTests: XCTestCase {
     ///     that assertion through `TestSandbox.systemTempRoot` would let the
     ///     sandbox grade its own homework, since the value under test would be
     ///     the one the sandbox chose to report.
-    /// Both files still have to *contain* the banned shapes, which
-    /// `testTheExemptionIsLoadBearingAndScoped` re-scans with the exemption
-    /// lifted. An allowlist nobody needs is a hole nobody closed.
-    private var locationPeekAllowlist: Set<String> {
-        Set([needle("Test", "Support") + ".swift",
-             needle("TestIsolation", "GateTests") + ".swift"])
+    /// Exemptions are per **(rule, file)**, matched on the path relative to the
+    /// scanned tree rather than on a bare file name: a name would let anybody drop
+    /// a second `TestSupport.swift` into a subdirectory and inherit the exemption.
+    /// And every pair has to be *earned* —
+    /// `testTheExemptionIsLoadBearingAndScoped` re-scans each pair with that one
+    /// exemption lifted and requires that rule to report something in that file.
+    /// An exemption nobody needs is a hole nobody closed.
+    private var locationPeekExemptions: [String: [String]] {
+        [
+            needle("temp location", " peeked at by hand"): [
+                // The sandbox implementation is the one place allowed to ask the
+                // system where the temp directory is…
+                needle("/", "GlassPaneEngineTests/", "Test", "Support.swift"),
+                // …and so is this file's half-(c), which compares sandbox paths
+                // against the raw value on purpose: routing that assertion
+                // through `TestSandbox.systemTempRoot` would let the sandbox grade
+                // its own homework.
+                needle("/", "GlassPaneEngineTests/", "TestIsolation", "GateTests.swift"),
+            ],
+            needle("home location", " composed into a path by hand"): [
+                // Only the implementation composes a home path; the two home
+                // predicates in `TestSandbox` exist so nothing else has to.
+                needle("/", "GlassPaneEngineTests/", "Test", "Support.swift"),
+            ],
+        ]
+    }
+
+    private func exempt(_ ruleName: String, _ relativePath: String) -> Bool {
+        (locationPeekExemptions[ruleName] ?? []).contains(relativePath)
     }
 
     /// The two rules whose only purpose is "no file may compose a state path out
@@ -301,9 +324,18 @@ final class TestIsolationGateTests: XCTestCase {
     private func locationPeekRules() throws -> [Rule] {
         [
             try rule(
+                // Everything that can name the shared temp directory, not just the
+                // Foundation call: the sandbox's own `systemTempRoot` is the same
+                // value under a nicer name, and round 7's runtime bar
+                // (`isolationDefect` now requires the process-private root) is what
+                // turns any of these into a refusal even when the text slips past
+                // this pattern.
                 "temp location peeked at by hand",
                 needle("NS", "Temporary", "Directory") + needle("\\s*\\(")
                     + needle("|", "\\.", "temporary", "Directory")
+                    + needle("|", "system", "TempRoot", "\\s*\\+")
+                    + needle("|", "TMP", "DIR")
+                    + needle("|", "mk", "dtemp")
             ),
             try rule(
                 "home location composed into a path by hand",
@@ -372,8 +404,8 @@ final class TestIsolationGateTests: XCTestCase {
             let text = try String(contentsOf: url, encoding: .utf8)
             let prefix = String(url.path.dropFirst(root.path.count))
             reported += findings(in: text, rules: rules, prefix: prefix)
-            if !locationPeekAllowlist.contains(url.lastPathComponent) {
-                reported += findings(in: text, rules: peekRules, prefix: prefix)
+            for peek in peekRules where !exempt(peek.name, prefix) {
+                reported += findings(in: text, rules: [peek], prefix: prefix)
             }
         }
         guard reported.isEmpty else {
@@ -523,17 +555,33 @@ final class TestIsolationGateTests: XCTestCase {
         // Attribution, in both directions: the temp rule must be the one that
         // reports a temp lookup and the home rule the one that reports a home
         // composition. Otherwise a future edit could make one pattern swallow the
-        // other's shape and the loop above would still pass.
+        // other's shape and the loop above would still pass. Counted as
+        // "this rule fired, that one did not" rather than as an exact number of
+        // hits: a shape can legitimately contain two occurrences (a peek *and*
+        // a composition), and pinning the arithmetic would make the test fail
+        // for reasons that say nothing about which rule is doing the work.
         let tempRule = peek.filter { $0.name.hasPrefix("temp") }
         let homeRule = peek.filter { $0.name.hasPrefix("home") }
         XCTAssertEqual(tempRule.count, 1)
         XCTAssertEqual(homeRule.count, 1)
-        XCTAssertEqual(findings(in: offenders[0], rules: tempRule, prefix: "s").count, 1,
-                       "the temp rule did not report its own shape")
-        XCTAssertEqual(findings(in: offenders[1], rules: tempRule, prefix: "s").count, 1,
-                       "the temp rule missed the FileManager property spelling")
-        XCTAssertEqual(findings(in: offenders[2], rules: homeRule, prefix: "s").count, 1,
-                       "the home rule did not report its own shape")
+        for (index, text) in [(0, offenders[0]), (1, offenders[1])] {
+            XCTAssertFalse(
+                findings(in: text, rules: tempRule, prefix: "s").isEmpty,
+                "the temp rule did not report its own shape (\(index))\n\(text)"
+            )
+            XCTAssertTrue(
+                findings(in: text, rules: homeRule, prefix: "s").isEmpty,
+                "the home rule reported a temp shape (\(index)) — the two patterns overlap"
+            )
+        }
+        XCTAssertFalse(
+            findings(in: offenders[2], rules: homeRule, prefix: "s").isEmpty,
+            "the home rule did not report its own shape"
+        )
+        XCTAssertTrue(
+            findings(in: offenders[2], rules: tempRule, prefix: "s").isEmpty,
+            "the temp rule reported a home shape — the two patterns overlap"
+        )
         for text in [
             // Split like every other snippet in this file: the scan reads this
             // file's whole text too, so a compliant example written as one
@@ -558,26 +606,39 @@ final class TestIsolationGateTests: XCTestCase {
         let root = testTreeRoot
         let files = swiftFiles(under: root)
         XCTAssertFalse(files.isEmpty, "the gate scanned nothing, so it guards nothing")
-        let names = Set(files.map { $0.lastPathComponent })
-        for exempt in locationPeekAllowlist {
-            XCTAssertTrue(names.contains(exempt), "allowlist names a file that is not there: \(exempt)")
-        }
-        XCTAssertEqual(
-            locationPeekAllowlist.count, 2,
-            "the location-peek exemption is for one implementation file and the gate itself; "
-                + "a third name needs that reason written here"
-        )
         let peek = try locationPeekRules()
-        for exempt in locationPeekAllowlist.sorted() {
-            guard let url = files.first(where: { $0.lastPathComponent == exempt }) else { continue }
-            let text = try String(contentsOf: url, encoding: .utf8)
-            let hits = findings(in: text, rules: peek, prefix: exempt)
-            XCTAssertFalse(
-                hits.isEmpty,
-                "\(exempt) is exempt from the location-peek rules but contains none of their "
-                    + "shapes — remove it from the allowlist, or the exemption is decoration."
-            )
+        let peekNames = Set(peek.map { $0.name })
+        XCTAssertEqual(
+            Set(locationPeekExemptions.keys), peekNames,
+            "every peek rule needs its own exemption entry (an empty list counts): keyed by rule "
+                + "name, a renamed rule would otherwise inherit an exemption by accident"
+        )
+        let relative = Dictionary(uniqueKeysWithValues: files.map {
+            (String($0.path.dropFirst(root.path.count)), $0)
+        })
+        for (ruleName, paths) in locationPeekExemptions.sorted(by: { $0.key < $1.key }) {
+            for path in paths {
+                guard let url = relative[path] else {
+                    XCTFail("exemption names a file that is not in the scanned tree: \(path)")
+                    continue
+                }
+                let text = try String(contentsOf: url, encoding: .utf8)
+                let hits = findings(in: text, rules: peek.filter { $0.name == ruleName }, prefix: path)
+                XCTAssertFalse(
+                    hits.isEmpty,
+                    "\(path) is exempt from `\(ruleName)` but that rule finds nothing in it — "
+                        + "either the exemption is decoration (delete the entry) or the rule "
+                        + "stopped matching the shape it exists to ban (fix the rule)."
+                )
+            }
         }
+        // The home rule is deliberately *not* granted to this file: the gate
+        // composes no home path, and letting it start would need arguing for here.
+        XCTAssertFalse(
+            exempt(needle("home location", " composed into a path by hand"),
+                   needle("/", "GlassPaneEngineTests/", "TestIsolation", "GateTests.swift")),
+            "the gate file may not exempt itself from the home rule"
+        )
     }
 
     /// Half (c): the paths the shared helpers hand out are unique, inside the
@@ -594,6 +655,10 @@ final class TestIsolationGateTests: XCTestCase {
         let paths = [directory, file, registry.filePath, store.directory, ledger.path]
         for path in paths {
             XCTAssertTrue(path.hasPrefix(temp), "state path escaped the temp dir: \(path)")
+            XCTAssertTrue(
+                path.hasPrefix(TestSandbox.root + "/"),
+                "state path escaped the process-private sandbox root: \(path)"
+            )
             XCTAssertFalse(
                 path.contains(needle("/.", "glasspane")),
                 "state path names the production state folder: \(path)"
@@ -623,16 +688,29 @@ final class TestIsolationGateTests: XCTestCase {
         // C-05: the runtime half must be able to refuse — one case per branch,
         // so a helper that ever hands out a path outside the temp directory, or
         // one inside the state folder, fails at the moment the path is created.
+        // The bar is the process-private root, not "somewhere in temp". Round 7
+        // measured what the looser bar certified: a path built by hand out of the
+        // shared temp directory — from `TestSandbox.systemTempRoot`, `$TMPDIR`, a
+        // literal `/tmp/...`, or `mkdtemp` — passed as isolated, so two concurrent
+        // `swift test` runs could share one registry and one test's fixture became
+        // another's "existing state". Every refusal below has to be reachable, and
+        // the accepted case has to be the sandbox's own route, so the predicate
+        // cannot satisfy itself by refusing everything.
         let stateFolder = needle("/.", "glasspane")
         XCTAssertEqual(
             TestSandbox.isolationDefect("/Use" + "rs/someone" + stateFolder + "/evidence")?
-                .contains("outside NSTemporaryDirectory"), true,
-            "a path outside the temp directory must be refused before anything else"
+                .contains("outside the process-private sandbox root"), true,
+            "a path under somebody's home must be refused before anything else"
         )
         XCTAssertEqual(
             TestSandbox.isolationDefect(temp + stateFolder + "/evidence")?
+                .contains("outside the process-private sandbox root"), true,
+            "a shared-temp path that is not ours is refused on that ground first: \(temp + stateFolder)"
+        )
+        XCTAssertEqual(
+            TestSandbox.isolationDefect("\(TestSandbox.root)\(stateFolder)/evidence")?
                 .contains("production state folder"), true,
-            "a temp-prefixed path that names the state folder must be refused too"
+            "inside the root is not enough either: naming the state folder must still be refused"
         )
         XCTAssertNotNil(
             TestSandbox.isolationDefect("/Some" + "where/else/T/gate-run"),

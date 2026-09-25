@@ -112,11 +112,11 @@ daemon → 探针：`op_begin {}` / `op_end {}` / `checkpoint_export {domains}` 
 1. 新文件（GlassPaneEngine）：`ProbeWire.swift`（帧编解码 + 命令构造，纯函数）、`ProbeInbox.swift`（连接表 + 每连接事件环 ≤512 + 窗口归属 + lateCount，纯逻辑可单测）、`ProbeSocketServer.swift`（NDJSON 监听，结构对齐 SocketServer）。
 2. EngineCore 新增可选注入 `probeInbox:`；`act()` 在有连接探针时：op_begin → 采集窗口 → op_end → 构造 `handlerProbe/stateDiff` 真值 + strong 归因（§2.3/§3）；无连接 → 逐字节维持现状（null + soft）。
 3. 新方法 `probe_status`（方法表白名单追加）。权威键表在此，修订记录只记变更不复述：
-   - 顶层：`{probes:[…], attachedHasProbe:bool, disconnections:int, recentDisconnections:[…], unmapableStateFrames:int, degradation:{tier,samples,longSession,drivers?}}`。
+   - 顶层：`{probes:[…], attachedHasProbe:bool, disconnections:int, recentDisconnections:[…], unmapableStateFrames:int, degradation:{…}}`；`degradation` 的完整子键（2026-09-25 round 6 之后）：`tier`(`healthy`/`watch`/`degrading`)、`judged`(bool)、`basis`(带实测数字的一句话)、`samples`+`minimumSamples`、`spanSeconds`+`minimumSpanSeconds`、`longSession`、`drivers`(仅在 ≥1 时出现)、`slopes`(仅带真算出斜率的通道：`pingMsPerSec`/`memoryBytesPerSec`/`handlesPerSec`)。**`judged:false` 时 `tier:healthy` 说的是"没法判"，不是"测出来健康"**——`basis` 与两道门限值成对发布，读者不需要知道默认值就能解释这两个计数。
    - `probes` 每行：`{pid,appName,probeVersion,capabilities,connectedAt,eventsSeen,connected:true}`，另有 `bundleId`（探针上报时）与 `stateFramesUnmappedSource`（该 pid 计数非零时）。
    - `recentDisconnections` 每行：`{pid, appName, disconnectReason, disconnectedAt, connectedAt, drops}`，只含已断开且未重连的注册。
    - 探针自报的三个计数：`droppedEvents` / `droppedWrites` / `rejectedKeys`，逐行可选。
-   - **缺席规则**：`disconnections`/`recentDisconnections`/`unmapableStateFrames` 只在探针收件箱被接线时存在，`degradation` 只在 T9 追踪器被接线时存在，`bundleId` 与三个自报计数只在探针上报时存在——未上报即不写该键，`0` 是测量结果（不是缺省）。
+   - **缺席规则**：`disconnections`/`recentDisconnections`/`unmapableStateFrames` 只在探针收件箱被接线时存在，`degradation` 只在 T9 追踪器被接线时存在，`bundleId` 与三个自报计数只在探针上报时存在，`slopes` 里某一通道只在它真算出斜率时存在——未上报即不写该键，`0` 是测量结果（不是缺省）。这条一致性的机器保证是 `mcp-shell/test/probe-status-surface.test.mjs`：它从 `EngineCore.probeStatus()` 的源码里抽出全部发布键，逐个要求在 `gp_probe_status` 的工具描述里出现（描述是 agent 在读回包之前唯一能看到的东西）。
    - `probes` 保持"活注册"语义（A-10）：断开过的探针不出现在其中，也不存在 `connected:false` 这种行；断开史走 `recentDisconnections`。
    - `hello.capabilities` 追加 `"probe"`。
 4. 新错误码 `GP_E_PROBE_UNAVAILABLE`：remedy "在目标 app 集成 GlassPaneProbe（GP.start()）并确认其运行；探针在场是 T4/T5/T7/T8 判定的前提，缺场时诊断维持 INCONCLUSIVE——勿猜测"。`probe_status` 之外不强制探针（所有既有方法零破坏）。

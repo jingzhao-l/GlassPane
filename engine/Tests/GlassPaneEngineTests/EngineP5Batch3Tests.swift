@@ -191,6 +191,56 @@ final class EngineP5Batch3Tests: XCTestCase {
         XCTAssertEqual(store.countExpired(olderThanDays: 30), 0)
     }
 
+    /// R6-08: an archive this process cannot read is not an empty archive.
+    ///
+    /// `archiveEntryURLs` folded a failed `contentsOfDirectory` into `[]`, and
+    /// `stats()` published that as `count: 0 / totalBytes: 0` — the same "absence
+    /// reported as a measurement" shape this round removed from
+    /// `EngineCore.ownabilityDefect`, on the one surface whose job is answering
+    /// "how much evidence is there": `glasspaned --evidence-stats`, which the
+    /// console panel and `.p6_smoke.py`'s isolation precondition both read.
+    /// Listed / absent / unreadable are now three answers.
+    func testUnreadableArchiveIsNotReportedAsEmpty() throws {
+        let outer = TestSandbox.directory("stats-unreadable")
+        let locked = outer + "/archive"
+        try FileManager.default.createDirectory(atPath: locked, withIntermediateDirectories: true)
+        let store = EvidenceStore(directory: locked, log: EngineLog(quiet: true))
+        XCTAssertTrue(store.write(pack(createdAt: iso(injectedNow), seed: 51)))
+        XCTAssertEqual(store.stats().count, 1, "precondition: the archive holds one entry")
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locked) }
+        // Precondition, measured: 0000 removes the read bit as well as the search
+        // bit, so even the owner is refused. If that stops being true the case
+        // tests nothing and must be rethought, not deleted.
+        XCTAssertThrowsError(try FileManager.default.contentsOfDirectory(atPath: locked))
+
+        let stats = store.stats()
+        XCTAssertNotNil(stats.listFailure, "a directory that cannot be listed must say so")
+        XCTAssertTrue(stats.listFailure?.contains(locked) == true,
+                      "the message has to name the archive: \(stats.listFailure ?? "nil")")
+        XCTAssertEqual(stats.count, 0, "the zeros stay, and they are meaningless without the failure")
+    }
+
+    /// The other two outcomes, so `listFailure` cannot degrade into "always
+    /// suspicious": a never-created archive is legitimately empty, and a readable
+    /// one counts itself with no failure attached.
+    func testAbsentAndReadableArchivesReportNoListingFailure() throws {
+        let missing = TestSandbox.pendingDirectory("stats-absent") + "/evidence"
+        let absent = EvidenceStore(directory: missing, log: EngineLog(quiet: true)).stats()
+        XCTAssertNil(absent.listFailure,
+                     "an archive that was never written is empty as a fact, not as a gap")
+        XCTAssertEqual(absent.count, 0)
+
+        let readable = TestSandbox.directory("stats-readable")
+        let store = EvidenceStore(directory: readable, log: EngineLog(quiet: true))
+        XCTAssertTrue(store.write(pack(createdAt: iso(injectedNow), seed: 52)))
+        let stats = store.stats()
+        XCTAssertNil(stats.listFailure, "\(stats)")
+        XCTAssertEqual(stats.count, 1)
+        XCTAssertGreaterThan(stats.totalBytes, 0)
+    }
+
     func testPruneMissingDirectoryReturnsZero() throws {
         // A path *inside* the sandbox that was never created: the case under
         // test is "this directory does not exist", not "this path was never

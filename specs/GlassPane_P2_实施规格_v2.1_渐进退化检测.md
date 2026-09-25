@@ -555,6 +555,10 @@ public struct DegradationVerdict: Equatable {
 ### 19.2 真机冒烟（可选）
 
 - daemon 长跑对同一金丝雀 app 持续 act，注入内存泄漏的对照组 → `gp_recent_reports`/`last_evidence` 可见 `.degraded` + `degradation|` reason 的 evidence，`gp_diagnose` 输出类 T9（与 C33 冒烟同口径：真机补充观测，正式 T9 现场验收以实测数据回填）。
+- ✓ 2026-09-25 复跑（同脚本，round 6 加了采样节流 0.5 s 与趋势跨度下限 20 s 之后）：第 **12/24** 轮触发，
+  驱动对 `memory+handles`、`longSession=false`；比 09-19 的 16/24 **更早**，因为密集 observe 样本不再把泄漏样本
+  挤出 64 窗。跨度闸的 20 s 是由句柄地板反解出来的（1 fd ÷ 0.05 fd/s），代价是任何会话的前 20 秒 T9 不可判定——
+  这条代价现在写在 `degradation.judged`/`basis` 里，读者看得见。
 - ✓ 2026-09-19 真机冒烟通过（`engine/.t9_smoke.py`）：脚本自编译泄漏金丝雀（AppKit，8MB 内存 + 1 fd/次点击保留），daemon 驱动 act 至第 16/24 轮 → `last_evidence` 熔断升级 `.degraded`、reason=`degradation|memory+handles; longSession=false; screen-recording-denied` → `diagnose.class=T9`，留档 `engine/smoke.md`。
 
 ### 19.3 验收表

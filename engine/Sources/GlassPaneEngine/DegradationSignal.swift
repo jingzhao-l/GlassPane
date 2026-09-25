@@ -122,7 +122,11 @@ public final class DegradationTracker {
     /// 一次"两种节奏下会得到不同裁决——R5-06 让 observe 也采样之后，一个只读代理
     /// 能在几秒内把 64 格填满，把带泄漏的历史整窗挤出去（漏检），反过来也能用几次
     /// 抖动凑出两个驱动（假警）。0.5 秒这个数不改变 act 路径的节奏：真机冒烟
-    /// （`engine/.t9_smoke.py`）每轮 ≈1 秒，24 轮仍然测得到（实测见该脚本的 PASS 行）。
+    /// 留档数字，不是推演：2026-09-25 14:13 那次 `engine/.t9_smoke.py` 以 0.5 s 节流
+    /// + 20 s 跨度闸的配置，在第 **12/24** 轮触发（驱动对 `memory+handles`、
+    /// `longSession=false`；日志 `/var/tmp/gp-iterate-gates/runs/r622-fullchain.log`）。
+    /// 同一闸在加闸之前的留档是 16/24（`engine/smoke.md` 已同步为这一轮的实测值）。
+    /// 每轮多少秒这里不写：那份日志没有时间戳，写了就是拿源码常量宣读运行时事实。
     public static let defaultMinSampleIntervalSeconds: Double = 0.5
 
     /// 默认趋势判定的最小窗口跨度（秒）。数是从地板反推出来的，不是手感：
@@ -236,14 +240,18 @@ public final class DegradationTracker {
             )
         }
 
+        // Strictly above the floor, as this file's own wording has always said
+        // ("噪声地板**之上**的正斜率计为一个上倾信号"). With `>=` the boundary itself
+        // was a driver: at exactly the 20.0 s minimum span, one single fd is
+        // 0.05 fd/s — the very reading the span floor exists to disallow.
         var drivers: [String] = []
-        if let pingSlope, pingSlope >= pingNoiseFloorMsPerSec {
+        if let pingSlope, pingSlope > pingNoiseFloorMsPerSec {
             drivers.append("ping")
         }
-        if let memorySlope, memorySlope >= memoryNoiseFloorBytesPerSec {
+        if let memorySlope, memorySlope > memoryNoiseFloorBytesPerSec {
             drivers.append("memory")
         }
-        if let handleSlope, handleSlope >= handleNoiseFloorPerSec {
+        if let handleSlope, handleSlope > handleNoiseFloorPerSec {
             drivers.append("handles")
         }
 
