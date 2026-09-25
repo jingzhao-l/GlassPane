@@ -15,13 +15,14 @@ import AppKit
 /// surfaced as `ChannelError.pixelCaptureDenied` so evidence downgrades
 /// exactly as P0 §8 specifies.
 ///
-/// SDK reality note (P1 spec §2 已同步): this SDK does NOT expose a
-/// `SCContentFilter(window:)` initializer. The deterministic window capture
-/// is built from `SCContentFilter(display:excludingWindows:)` plus
-/// `SCStreamConfiguration.sourceRect` (points, display-logical coordinates)
-/// and output size = window points × pixel scale. This also avoids the
-/// `desktopIndependentWindow:` init, which can raise for windows that are not
-/// desktop-independent.
+/// SDK reality note (P1 spec §2 已同步): there is no `SCContentFilter(window:)`
+/// initializer, but `SCContentFilter(desktopIndependentWindow:)` exists and is the
+/// **only** filter that captures a window's own surface. Until R6-11 this file used
+/// the display filter plus a `sourceRect` crop exclusively, which samples the screen
+/// region — measured: with another window on top, the crop returned that window's
+/// pixels, so a real UI change was published as `changedPixelRatio = 0`. The capture
+/// now prefers the window-scoped filter, keeps the display crop purely as a fallback,
+/// and refuses to measure at all when the fallback would be needed under an overlap.
 ///
 /// Pixel scale source differs per branch: macOS 14+ reads
 /// `SCContentFilter.pointPixelScale`; macOS 13 lacks that property, so path B
@@ -312,28 +313,126 @@ public enum SCKCapturer {
         }
     }
 
+    // MARK: - R6-11: which surface is being captured, and what may be said about it
+
+    /// One capture candidate: a filter, plus the crop that goes with it.
+    ///
+    /// `sourceRect == nil` means the filter is the **window's own surface** — the
+    /// compositor keeps one, so that picture is the target even when another window
+    /// covers it on screen. `sourceRect != nil` is the older shape: sample the
+    /// display, crop to the window's frame. That crop contains whatever is *on top*.
+    ///
+    /// Measured 2026-09-25 (`PixelOcclusionDiagnosticTests`, real window server,
+    /// opt-in): a 320x200 target with its background changed under a floating
+    /// cover produced `changedPixelRatio = 0.0` and a centre pixel of the cover's
+    /// green (r 0.01 / g 1.0 / b 0.0), while the same change with nothing on top
+    /// produced `ratio = 1.0`. So a covered window's pixel evidence said "the
+    /// interface did not change visually" about an interface that did — and the
+    /// classifier, believing the channel, blamed the app's render layer (T6).
+    /// That is the "absence dressed as a measurement" shape, one level worse than
+    /// not measuring.
+    private struct SurfaceCapture {
+        let filter: SCContentFilter
+        let sourceRect: CGRect?
+        let label: String
+    }
+
+    /// On-screen windows in front of `targetNumber` whose bounds intersect its frame.
+    ///
+    /// `CGWindowListCopyWindowInfo` is ordered front-to-back, so everything before
+    /// the target's own number sits above it. Negative layers (wallpaper, dock
+    /// backing, menu-bar shadows) are ignored: they do not cover an app window's
+    /// content. An entry without usable bounds is not counted either — this decides
+    /// whether to *refuse a measurement*, so a neighbour that cannot be placed must
+    /// not turn a valid capture into a refused one.
+    static func occludingWindows(inFrontOf targetNumber: Int, frame: CGRect) -> [Int] {
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return []
+        }
+        var inFront: [Int] = []
+        for entry in list {
+            guard let number = entry[kCGWindowNumber as String] as? Int else { continue }
+            if number == targetNumber { break }
+            guard number > 0,
+                  let layer = entry[kCGWindowLayer as String] as? Int, layer >= 0,
+                  let raw = entry[kCGWindowBounds as String] as? [String: Any] else { continue }
+            let other = CGRect(
+                x: (raw["X"] as? CGFloat) ?? 0, y: (raw["Y"] as? CGFloat) ?? 0,
+                width: (raw["Width"] as? CGFloat) ?? 0, height: (raw["Height"] as? CGFloat) ?? 0
+            )
+            if other.intersects(frame) { inFront.append(number) }
+        }
+        return inFront
+    }
+
+    /// The candidates, best first. The display crop is offered **only when nothing
+    /// covers the target**: with something on top, the two candidates would disagree
+    /// about the app's appearance and the fallback is the one that lies, so nothing
+    /// is measured at all and the refusal names what is in the way.
+    private static func surfaceCaptures(
+        context: (window: SCWindow, display: SCDisplay)
+    ) -> [SurfaceCapture] {
+        var candidates: [SurfaceCapture] = []
+        candidates.append(SurfaceCapture(
+            filter: SCContentFilter(desktopIndependentWindow: context.window),
+            sourceRect: nil, label: "window-surface"
+        ))
+        let covered = occludingWindows(inFrontOf: Int(context.window.windowID), frame: context.window.frame)
+        if covered.isEmpty {
+            candidates.append(SurfaceCapture(
+                filter: SCContentFilter(display: context.display, excludingWindows: []),
+                sourceRect: context.window.frame, label: "display-region"
+            ))
+        } else {
+            let names = covered.map { String($0) }.joined(separator: ", ")
+            let note = "glasspaned: pixel capture of window " + String(context.window.windowID)
+                + " needs a display crop while " + String(covered.count)
+                + " window(s) are on top of it (" + names
+                + "); that region is not the target surface, so no pixel ratio is measured (R6-11)\n"
+            FileHandle.standardError.write(Data(note.utf8))
+        }
+        return candidates
+    }
+
     // MARK: - Path A (macOS 14+, SCScreenshotManager)
 
     @available(macOS 14.0, *)
     private static func captureViaScreenshotManager(ownerPid pid_t: pid_t, windowId: Int?) throws -> Capture {
         let context = try resolveCaptureContext(ownerPid: pid_t, windowId: windowId)
-        // Whole-display filter + sourceRect 采样窗口区域，确定性最好；
-        // 输出像素 = 窗口逻辑尺寸 × SCContentFilter 倍率（Retina 不降采样）。
-        let filter = SCContentFilter(display: context.display, excludingWindows: [])
-        return Capture(
-            image: try snapViaScreenshotManager(contentFilter: filter, windowFrame: context.window.frame),
-            windowId: Int(context.window.windowID),
-            frame: context.window.frame
+        // 先取窗口自己的面；只有它抛错时才考虑整屏裁剪，而那条路在没有东西盖住时才允许
+        // （见 `surfaceCaptures`）。输出像素 = 区域尺寸 × 倍率（Retina 不降采样）。
+        var lastError: Error?
+        for surface in surfaceCaptures(context: context) {
+            do {
+                return Capture(
+                    image: try snapViaScreenshotManager(contentFilter: surface.filter,
+                                                        sourceRect: surface.sourceRect,
+                                                        windowFrame: context.window.frame),
+                    windowId: Int(context.window.windowID),
+                    frame: context.window.frame
+                )
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? ChannelError.pixelCaptureDenied(
+            reason: "no capture surface available for window " + String(context.window.windowID)
         )
     }
 
     @available(macOS 14.0, *)
-    private static func snapViaScreenshotManager(contentFilter filter: SCContentFilter, windowFrame: CGRect) throws -> CGImage {
+    private static func snapViaScreenshotManager(contentFilter filter: SCContentFilter,
+                                                 sourceRect: CGRect?,
+                                                 windowFrame: CGRect) throws -> CGImage {
         let config = SCStreamConfiguration()
         let scale = CGFloat(filter.pointPixelScale)
-        config.sourceRect = windowFrame
-        config.width = max(1, Int(ceil(windowFrame.width * scale)))
-        config.height = max(1, Int(ceil(windowFrame.height * scale)))
+        let region = sourceRect ?? windowFrame
+        // A window-scoped filter is already the window: setting a display-space
+        // sourceRect on it would crop the wrong thing entirely.
+        if let rect = sourceRect { config.sourceRect = rect }
+        config.width = max(1, Int(ceil(region.width * scale)))
+        config.height = max(1, Int(ceil(region.height * scale)))
         config.showsCursor = false
         config.capturesAudio = false
         return try awaitGuardedNextImage(contentFilter: filter, config: config)
@@ -360,21 +459,35 @@ public enum SCKCapturer {
     @available(macOS 13.0, *)
     private static func captureViaStream(ownerPid pid_t: pid_t, windowId: Int?) throws -> Capture {
         let context = try resolveCaptureContext(ownerPid: pid_t, windowId: windowId)
-        let filter = SCContentFilter(display: context.display, excludingWindows: [])
-        return Capture(
-            image: try snapViaStream(contentFilter: filter, windowFrame: context.window.frame),
-            windowId: Int(context.window.windowID),
-            frame: context.window.frame
+        var lastError: Error?
+        for surface in surfaceCaptures(context: context) {
+            do {
+                return Capture(
+                    image: try snapViaStream(contentFilter: surface.filter,
+                                             sourceRect: surface.sourceRect,
+                                             windowFrame: context.window.frame),
+                    windowId: Int(context.window.windowID),
+                    frame: context.window.frame
+                )
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? ChannelError.pixelCaptureDenied(
+            reason: "no capture surface available for window " + String(context.window.windowID)
         )
     }
 
     @available(macOS 13.0, *)
-    private static func snapViaStream(contentFilter filter: SCContentFilter, windowFrame: CGRect) throws -> CGImage {
+    private static func snapViaStream(contentFilter filter: SCContentFilter,
+                                      sourceRect: CGRect?,
+                                      windowFrame: CGRect) throws -> CGImage {
         let config = SCStreamConfiguration()
-        let scale = streamPixelScale(for: windowFrame)
-        config.sourceRect = windowFrame
-        config.width = max(1, Int(ceil(windowFrame.width * scale)))
-        config.height = max(1, Int(ceil(windowFrame.height * scale)))
+        let region = sourceRect ?? windowFrame
+        let scale = streamPixelScale(for: region)
+        if let rect = sourceRect { config.sourceRect = rect }
+        config.width = max(1, Int(ceil(region.width * scale)))
+        config.height = max(1, Int(ceil(region.height * scale)))
         config.showsCursor = false
         config.capturesAudio = false
 
