@@ -1780,6 +1780,9 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         <Match when={display() === "skill"}>
           <Skill {...toolprops} />
         </Match>
+        <Match when={display() === "glasspane"}>
+          <GlassPaneTool {...toolprops} />
+        </Match>
         <Match when={true}>
           <GenericTool {...toolprops} />
         </Match>
@@ -1830,6 +1833,68 @@ function GenericTool(props: ToolProps) {
         </box>
       </BlockTool>
     </Show>
+  )
+}
+
+/**
+ * GlassPane evidence rendering for the session flow (M5). All of the
+ * decision-making lives in the exported pure {@link glasspaneRow}; this component
+ * only wires that row model to {@link InlineToolRow} plus the session chrome
+ * (theme, permission highlight, expand-on-click). Keeping the logic pure is what
+ * lets the test suite assert the engine-failure distinction without mounting a
+ * Session.
+ */
+function GlassPaneTool(props: ToolProps) {
+  const { theme } = useTheme()
+  const ctx = use()
+  const sync = useSync()
+  const renderer = useRenderer()
+  const [errorExpanded, setErrorExpanded] = createSignal(false)
+
+  const row = createMemo(() =>
+    glasspaneRow({
+      tool: props.tool,
+      status: props.part.state.status,
+      error: props.part.state.status === "error" ? props.part.state.error : undefined,
+      metadata: props.metadata,
+    }),
+  )
+
+  const permission = createMemo(() => {
+    const callID = sync.data.permission[ctx.sessionID]?.at(0)?.tool?.callID
+    if (!callID) return false
+    return callID === props.part.callID
+  })
+
+  const failed = createMemo(() => row().state === "engine-failure" || row().state === "call-error")
+  const complete = createMemo(() => row().state === "success")
+  const fg = createMemo(() => {
+    if (permission()) return theme.warning
+    if (failed()) return theme.error
+    if (complete()) return theme.textMuted
+    return theme.text
+  })
+
+  return (
+    <InlineToolRow
+      icon={failed() ? "✗" : "◈"}
+      iconColor={failed() ? theme.error : undefined}
+      color={fg()}
+      errorColor={theme.error}
+      failed={failed()}
+      denied={row().state === "denied"}
+      error={row().detail}
+      errorExpanded={errorExpanded()}
+      complete={complete()}
+      pending={row().pending}
+      spinner={row().state === "pending"}
+      onMouseUp={() => {
+        if (renderer.getSelection()?.getSelectedText()) return
+        if (failed()) setErrorExpanded((value) => !value)
+      }}
+    >
+      {failed() && !complete() ? row().line : `${props.tool} ${row().line}`}
+    </InlineToolRow>
   )
 }
 
@@ -2623,6 +2688,129 @@ function numberValue(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined
 }
 
+/* ------------------------------------------------------------------ *
+ * GlassPane evidence row model (M5).
+ *
+ * Why a `gp_*` call needs its own row model instead of falling through to
+ * GenericTool: a GlassPane *engine* failure is a COMPLETED tool call whose
+ * metadata carries `ok:false` — `part.state.status` stays "completed", so the
+ * generic path paints an engine refusal (e.g. `GP_E_NO_EVIDENCE`) with the same
+ * muted row as a real result, and the session flow cannot tell "the engine
+ * answered" from "the engine could not answer". This function is the whole
+ * decision, kept pure so the test suite can assert it without mounting a
+ * Session; `GlassPaneTool` only maps the model onto InlineToolRow.
+ *
+ * The iron law holds here: it transcribes, it never judges. `ok` is the daemon's
+ * reply flag, and every field surfaced under a "success" row (`attribution.level`,
+ * `circuitBreaker.level`, `assertion.passed`, …) is a value the engine already
+ * concluded. Success is deliberately neutral (no green "PASS") — whether the
+ * evidence means the UI *worked* is the kernel's verdict
+ * (`decisionOutcomeFromEvidence`), not the TUI's to render.
+ * ------------------------------------------------------------------ */
+export type GlassPaneRowState = "pending" | "success" | "engine-failure" | "call-error" | "denied"
+
+export type GlassPaneRow = {
+  /** What colour/icon the row gets. */
+  state: GlassPaneRowState
+  /** The engine method, e.g. "act" — never the `gp_`-prefixed tool name. */
+  method: string
+  /** Row body: the success summary, or the failure headline. */
+  line: string
+  /** Expandable failure detail: the engine message plus its remedy, or the call error. */
+  detail?: string
+  /** Spinner/tilde copy while the call is in flight. */
+  pending: string
+}
+
+const GLASSPANE_PENDING: Record<string, string> = {
+  probe_status: "Probing GlassPane engine…",
+  attach: "Attaching to app…",
+  observe: "Reading accessibility tree…",
+  act: "Performing action…",
+  diagnose: "Diagnosing operation…",
+  last_evidence: "Fetching evidence pack…",
+}
+
+function glasspaneBool(value: unknown) {
+  return value === true ? "true" : value === false ? "false" : "?"
+}
+
+/** Transcribe the engine-reported result fields for one method into a scannable line. */
+function glasspaneSummary(method: string, result: Record<string, unknown> | undefined): string {
+  if (!result) return method
+  if (method === "act") {
+    const op = stringValue(result.operationId)
+    return `confirmed=${glasspaneBool(result.actConfirmed)} tree=${glasspaneBool(result.axChanged)} pixels=${glasspaneBool(result.pixelChanged)}${op ? ` · op ${op}` : ""}`
+  }
+  if (method === "observe") {
+    return `nodes=${stringValue(result.nodeCount) ?? "?"} digest=${stringValue(result.digest) ?? "?"}`
+  }
+  if (method === "diagnose") {
+    const cls = stringValue(result.class) ?? "?"
+    const next = stringValue(recordValue(result.report)?.next)
+    return next ? `${cls} · next: ${next}` : cls
+  }
+  if (method === "attach") {
+    const app = stringValue(result.app) ?? stringValue(result.name) ?? stringValue(result.bundleId)
+    const pid = numberValue(result.pid)
+    return [app, pid !== undefined ? `pid ${pid}` : undefined].filter(Boolean).join(" · ") || "attached"
+  }
+  if (method === "last_evidence") {
+    const pack = recordValue(result.evidencePack) ?? result
+    const att = recordValue(pack.attribution)
+    const cb = recordValue(pack.circuitBreaker)
+    const assertion = recordValue(pack.assertion)
+    const bits = [
+      att ? `attribution ${stringValue(att.level) ?? "?"}${att.contaminated === true ? ", contaminated" : ""}` : undefined,
+      cb ? `cb ${numberValue(cb.level) ?? "?"}` : undefined,
+      assertion
+        ? `assertion ${assertion.passed === true ? "passed" : assertion.passed === false ? "failed" : "?"}`
+        : undefined,
+    ].filter(Boolean)
+    return bits.join(" · ") || "evidence pack"
+  }
+  // probe_status and anything unrecognised: no invented shape, just the method.
+  return method
+}
+
+export function glasspaneRow(input: {
+  tool: string
+  status: string
+  error?: string
+  metadata: Record<string, unknown>
+}): GlassPaneRow {
+  const meta = recordValue(input.metadata) ?? {}
+  const method = stringValue(meta.method) ?? input.tool.replace(/^gp_/, "")
+  const pending = GLASSPANE_PENDING[method] ?? `Running ${input.tool}…`
+
+  if (input.status === "running" || input.status === "pending") {
+    return { state: "pending", method, line: method, pending }
+  }
+
+  const denied =
+    input.error?.includes("QuestionRejectedError") ||
+    input.error?.includes("rejected permission") ||
+    input.error?.includes("specified a rule") ||
+    input.error?.includes("user dismissed")
+  if (input.status === "error") {
+    if (denied) return { state: "denied", method, line: input.tool, detail: input.error, pending }
+    return { state: "call-error", method, line: input.tool, detail: input.error, pending }
+  }
+
+  // Engine-level failure: the tool executed fine but the daemon reported a code.
+  if (meta.ok === false) {
+    const code = stringValue(meta.code)
+    const message = stringValue(meta.message)
+    const remedy = stringValue(meta.remedy)
+    // The detail carries the remedy the M1 contract guarantees is agent-executable;
+    // surfacing it on click (not only in the output string) is the point of M5.
+    const detail = [message, remedy ? `remedy: ${remedy}` : undefined].filter(Boolean).join("\n")
+    return { state: "engine-failure", method, line: `${input.tool}${code ? ` ${code}` : ""}`, detail, pending }
+  }
+
+  return { state: "success", method, line: glasspaneSummary(method, recordValue(meta.result)), pending }
+}
+
 const toolDisplays = new Set([
   "bash",
   "glob",
@@ -2641,6 +2829,11 @@ const toolDisplays = new Set([
 ])
 
 export function toolDisplay(tool: string) {
+  // The GlassPane surface is a family (`gp_*`), not a fixed list — matching the
+  // prefix keeps a future `gp_audit_ui`-style method on the evidence renderer
+  // instead of letting it silently fall back to the generic text wall (the same
+  // reason M1 reads capabilities from `hello` rather than a copied list).
+  if (tool.startsWith("gp_")) return "glasspane"
   return toolDisplays.has(tool) ? tool : "generic"
 }
 

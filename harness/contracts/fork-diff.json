@@ -4,14 +4,16 @@
   "referenceClone": ".external/opencode",
   "observedAt": "2026-09-25",
   "counts": {
-    "identical": 6630,
-    "edited": 2,
+    "identical": 6628,
+    "edited": 4,
     "added": 33,
     "deleted": 0
   },
   "edited": [
     "packages/opencode/src/plugin/index.ts",
-    "packages/opencode/src/tool/registry.ts"
+    "packages/opencode/src/tool/registry.ts",
+    "packages/tui/src/routes/session/index.tsx",
+    "packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx"
   ],
   "added": [
     "FORK.md",
@@ -59,6 +61,16 @@
       "file": "packages/opencode/src/tool/registry.ts",
       "upstreamHash": "9167cb3ea6bc5c8dd075f0f8271adbdec6074b12",
       "forkHash": "36a359e3d1a7bde7229f37a82f2f36332df975d3"
+    },
+    {
+      "file": "packages/tui/src/routes/session/index.tsx",
+      "upstreamHash": "2b54f21671b3889e6752175b1c2b0f36d189d3b9",
+      "forkHash": "6ab672b88ff3c13c9f225b8cb93619e5b2a30ffc"
+    },
+    {
+      "file": "packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx",
+      "upstreamHash": "6da90633ca421fa085fa1c69ffbd5c0c8a3dc0fa",
+      "forkHash": "ac8e1a80f678abd51cd6f4f6b941ff1f26c3b27e"
     }
   ]
 }

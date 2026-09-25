@@ -15,6 +15,7 @@ import {
   parseTodos,
   alwaysSeparate,
   toolDisplay,
+  glasspaneRow,
 } from "../../../src/routes/session"
 
 let testSetup: Awaited<ReturnType<typeof testRender>> | undefined
@@ -226,6 +227,87 @@ describe("TUI inline tool wrapping", () => {
   test("falls back for unknown tool names", () => {
     expect(toolDisplay("bash")).toBe("bash")
     expect(toolDisplay("plugin_tool")).toBe("generic")
+  })
+
+  test("routes the GlassPane family to the evidence renderer, including future methods", () => {
+    expect(toolDisplay("gp_act")).toBe("glasspane")
+    expect(toolDisplay("gp_last_evidence")).toBe("glasspane")
+    // A method added after this renderer was written must not fall back to generic.
+    expect(toolDisplay("gp_audit_ui")).toBe("glasspane")
+    expect(toolDisplay("gp")).toBe("generic")
+  })
+
+  test("glasspaneRow transcribes a successful act without judging it", () => {
+    const row = glasspaneRow({
+      tool: "gp_act",
+      status: "completed",
+      metadata: {
+        ok: true,
+        method: "act",
+        result: { actConfirmed: true, axChanged: true, pixelChanged: false, operationId: "op123" },
+      },
+    })
+    expect(row.state).toBe("success")
+    expect(row.method).toBe("act")
+    expect(row.line).toBe("confirmed=true tree=true pixels=false · op op123")
+    expect(row.detail).toBeUndefined()
+  })
+
+  test("glasspaneRow makes an engine failure distinct from success and carries the remedy", () => {
+    const row = glasspaneRow({
+      tool: "gp_last_evidence",
+      status: "completed",
+      metadata: {
+        ok: false,
+        method: "last_evidence",
+        code: "GP_E_NO_EVIDENCE",
+        message: "the engine archived no evidence for that operation",
+        remedy: "call gp_act first so the engine has an operation to report",
+      },
+    })
+    // The tool call COMPLETED; only metadata.ok flags the engine refusal.
+    expect(row.state).toBe("engine-failure")
+    expect(row.line).toBe("gp_last_evidence GP_E_NO_EVIDENCE")
+    expect(row.detail).toContain("the engine archived no evidence")
+    expect(row.detail).toContain("remedy: call gp_act first")
+  })
+
+  test("glasspaneRow distinguishes a thrown call error and a permission denial", () => {
+    const denied = glasspaneRow({ tool: "gp_act", status: "error", error: "user rejected permission", metadata: {} })
+    expect(denied.state).toBe("denied")
+    const thrown = glasspaneRow({ tool: "gp_act", status: "error", error: "socket closed", metadata: {} })
+    expect(thrown.state).toBe("call-error")
+    expect(thrown.detail).toBe("socket closed")
+  })
+
+  test("glasspaneRow surfaces evidence-pack fields for last_evidence, verbatim", () => {
+    const row = glasspaneRow({
+      tool: "gp_last_evidence",
+      status: "completed",
+      metadata: {
+        ok: true,
+        method: "last_evidence",
+        result: {
+          evidencePack: {
+            operationId: "op9",
+            attribution: { level: "strong", contaminated: true },
+            circuitBreaker: { level: 2 },
+            assertion: { passed: false },
+          },
+        },
+      },
+    })
+    expect(row.state).toBe("success")
+    expect(row.line).toBe("attribution strong, contaminated · cb 2 · assertion failed")
+  })
+
+  test("glasspaneRow never invents a shape for unknown methods or missing results", () => {
+    expect(glasspaneRow({ tool: "gp_probe_status", status: "running", metadata: {} }).state).toBe("pending")
+    const unknown = glasspaneRow({ tool: "gp_future", status: "completed", metadata: { ok: true, method: "future" } })
+    expect(unknown.state).toBe("success")
+    expect(unknown.line).toBe("future")
+    const noResult = glasspaneRow({ tool: "gp_observe", status: "completed", metadata: { ok: true, method: "observe" } })
+    expect(noResult.line).toBe("observe")
   })
 
   test("replaces pending copy when a tool fails before completion", async () => {

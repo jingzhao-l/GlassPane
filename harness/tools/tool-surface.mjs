@@ -169,12 +169,25 @@ function measureFork(golden) {
     if (!hasRef) {
       const was = prevEdited.get(rel)
       if (was === undefined) return fail(`no reference clone and no baseline for edited file '${rel}' — cannot attribute surface B`)
+      if (isTest(rel)) {
+        excludedTests.push({ file: rel, lines: was })
+        continue
+      }
       unmeasured.push(rel)
       files.push({ file: rel, kind: "edited", lines: was })
       continue
     }
     const n = addedLinesAgainstRef(refDir, rel, abs)
     if (!Number.isFinite(n)) return fail(`reference clone at ${refRel} has no '${rel}' at HEAD — cannot attribute surface B`)
+    if (isTest(rel)) {
+      // An edited TEST file is excluded exactly like an added one: the caliber
+      // says "tests excluded" and means it, whichever fork-diff bucket the file
+      // arrived in. Before M5 no edited file was a test, so this path never fired
+      // and an edited test's `+` lines leaked into surface B while the report
+      // went on printing "tests excluded".
+      excludedTests.push({ file: rel, lines: n })
+      continue
+    }
     files.push({ file: rel, kind: "edited", lines: n })
   }
 
