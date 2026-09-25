@@ -799,7 +799,19 @@ public final class EngineCore {
         // X-6: the diff itself can fail after both captures succeeded. That is
         // a third fact, and it used to be reported with the capture's label.
         var pixelDiffFailure: String?
-        if let before = captureBefore, let after = captureAfter {
+        if let before = captureBefore, let after = captureAfter, before.windowId != after.windowId {
+            // 前后两次截的**不是同一个窗口**（应用换窗、新开了一个同尺寸窗口）。
+            // 逐像素比出来的数字仍然在 0...1 之间，看起来完全像一次正常测量，但它说的是
+            // "两个不同窗口的差别"，不是"这次操作改变了界面"——那是伪造的证据。
+            // 这条路径在 2026-09-25 之前从未被走到（窗口查找的键名写错，捕获恒失败），
+            // 现在它真的会跑到，所以这里必须能拒绝。
+            // 标签由 `pixelCaptureFailureLabel` 生成，不自己拼一个：像素通路的成因
+            // 分类只能有一套（R2-06 的教训）。
+            pixelDiff = nil
+            pixelChanged = nil
+            let raw = "the frontmost window changed between captures: before=\(before.windowId) after=\(after.windowId)"
+            pixelDiffFailure = "\(Self.pixelCaptureFailureLabel(reason: raw)): \(raw)"
+        } else if let before = captureBefore, let after = captureAfter {
             do {
                 let outcome = try PixelDiffer.diff(before: before.image, after: after.image)
                 pixelDiff = PixelDiffSignal(
@@ -2024,6 +2036,9 @@ public final class EngineCore {
     /// Pure half of the above: which named failure a capture reason states.
     static func pixelCaptureFailureLabel(reason: String) -> String {
         let lowered = reason.lowercased()
+        if lowered.contains("window-changed") || lowered.contains("window changed") {
+            return "pixel-capture-window-changed"
+        }
         if lowered.contains("permission") || lowered.contains("not granted") || lowered.contains("denied") {
             return "screen-recording-denied"
         }

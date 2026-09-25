@@ -713,11 +713,24 @@ public final class AXChannel: RuntimeChannel {
         ) as? [[String: Any]] else {
             return nil
         }
+        return Self.frontmostWindow(in: windowList, for: pid)
+    }
+
+    /// 纯函数半段：从一份 CGWindowList 里挑该 pid **最前面**的那个应用窗口。
+    /// CGWindowList 已按前后顺序排好，所以第一个命中的就是最前面的。
+    ///
+    /// **这里曾经是整条像素通路的死点**：键名写死成 `"PID"` 与 `"Bounds"`，而真实键名
+    /// 是 `kCGWindowOwnerPID` / `kCGWindowBounds`，于是本函数在任何真机上都返回 nil，
+    /// `captureWindow()` 永远抛 "no on-screen window owned by pid N"，`pixelDiff` 自
+    /// 2026-09-15 起恒为缺失（分类器如实报"未测量"，所以一路全绿也没人发现）。
+    /// 现在键名直接取 CoreGraphics 的常量，且窗口挑选做成纯函数由单测覆盖——
+    /// 键名再写错要么编译不过，要么测试红，不会再静默失效。
+    static func frontmostWindow(in windowList: [[String: Any]], for pid: pid_t) -> (Int, CGRect)? {
         for window in windowList {
-            guard let ownerPid = window[Self.windowOwnerPIDKey] as? Int,
-                  ownerPid == Int(pid),
-                  let windowId = window[Self.windowNumberKey] as? Int,
-                  let bounds = Self.rect(fromWindowBounds: window[Self.windowBoundsKey]),
+            guard let ownerPid = window[windowOwnerPIDKey] as? Int, ownerPid == Int(pid) else { continue }
+            guard isAppWindowLayer(window[windowLayerKey] as? Int) else { continue }
+            guard let windowId = window[windowNumberKey] as? Int,
+                  let bounds = rect(fromWindowBounds: window[windowBoundsKey]),
                   bounds.width > 0, bounds.height > 0 else {
                 continue
             }
@@ -726,13 +739,24 @@ public final class AXChannel: RuntimeChannel {
         return nil
     }
 
-    /// CGWindowInfo dictionary keys (values from CGWindow.h; the Swift
-    /// constants are unavailable in the current SDK).
-    private static let windowNumberKey = "kCGWindowNumber"
-    private static let windowOwnerPIDKey = "PID"
-    private static let windowBoundsKey = "Bounds"
+    /// 哪些层算"应用的窗口"。0 是普通窗口，1...19 是浮动面板/HUD 一类的应用自有层；
+    /// 负层是桌面图片、墙纸、程序坞底片、WindowServer 背景（把它们当应用窗口去算像素差，
+    /// 等于把壁纸的变化记成"界面变了"——那是假证据）；≥20 是菜单条、程序坞前景、
+    /// 通知中心这类系统界面，不属于被测应用。
+    static func isAppWindowLayer(_ layer: Int?) -> Bool {
+        guard let layer else { return true }   // 缺字段时不因此丢掉一次测量
+        return layer >= 0 && layer < systemUILayerFloor
+    }
 
-    private static func rect(fromWindowBounds raw: Any?) -> CGRect? {
+    /// 系统界面（菜单条 / 程序坞前景 / 通知中心）开始出现的层号。
+    static let systemUILayerFloor = 20
+
+    static let windowNumberKey = kCGWindowNumber as String
+    static let windowOwnerPIDKey = kCGWindowOwnerPID as String
+    static let windowBoundsKey = kCGWindowBounds as String
+    static let windowLayerKey = kCGWindowLayer as String
+
+    static func rect(fromWindowBounds raw: Any?) -> CGRect? {
         guard let dict = raw as? [String: Any],
               let x = dict["X"] as? Double,
               let y = dict["Y"] as? Double,

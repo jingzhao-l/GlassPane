@@ -1,5 +1,7 @@
 import XCTest
 import AppKit
+import CoreGraphics
+import ImageIO
 @testable import GlassPaneEngine
 
 /// 真机几何诊断（opt-in）：对**当前前台应用**跑一次 `geometrySnapshot` +
@@ -68,19 +70,44 @@ final class GeometryAuditDiagnosticTests: XCTestCase {
             XCTAssertFalse(snapshot.complete, "有未读子树却报 complete=true：结论会盖住没看过的部分")
         }
 
-        // 视觉通道的真机分支：这台机器上 daemon 有屏幕录制、而测试进程继承的是
-        // 代理宿主的席位，所以两条分支都可能。两条都如实打印，绝不静默——
-        // "没测到"和"测了没通过"必须能被区分。
-        do {
-            let capture = try channel.captureWindow()
-            let encoded = try PngEncoding.encode(capture.image, scale: 0.6)
-            print("DIAG CAPTURE OK window=\(capture.windowId) pngBytes=\(encoded.byteCount) "
-                + "px=\(encoded.pixelWidth)x\(encoded.pixelHeight)")
-            XCTAssertGreaterThan(encoded.byteCount, 0)
-        } catch let error as ChannelError {
-            print("DIAG CAPTURE DENIED \(error)")
-        } catch let error as PngEncoding.EncodingError {
-            print("DIAG CAPTURE TOO LARGE \(error)")
+        // 视觉通道的真机分支。这里以前只截"前台那个应用"，而真机前台是 Finder——
+        // 它此刻确实没有在屏窗口（桌面归"墙纸"进程），于是"没有目标"和"没有授权"
+        // 混成了同一条日志，happy path 一次也没被走到。现在改成：按 CGWindowList
+        // 挑真有在屏窗口的常规应用逐个试，并把席位状态用系统 API 问出来，
+        // 让"截到了"成为断言而不是运气。
+        let seat = CGPreflightScreenCaptureAccess()
+        let candidates = Self.captureCandidates()
+        var captureAttempts: [String] = []
+        var foreignPng: PngEncoding.Result?
+        var capturedWindowId = 0
+        for candidate in candidates {
+            let label = "\(candidate.name) pid=\(candidate.pid)"
+            do {
+                let captureChannel = AXChannel()
+                _ = try captureChannel.attach(bundleId: nil, pid: candidate.pid)
+                let window = try captureChannel.captureWindow()
+                let png = try PngEncoding.encode(window.image, scale: 0.6)
+                foreignPng = png
+                capturedWindowId = window.windowId
+                print("DIAG CAPTURE OK app=\(label) window=\(window.windowId) "
+                    + "pngBytes=\(png.byteCount) px=\(png.pixelWidth)x\(png.pixelHeight) "
+                    + "points=\(Int(window.bounds.width))x\(Int(window.bounds.height))")
+                break
+            } catch let error {
+                captureAttempts.append("\(label): \(String(describing: error))")
+            }
+        }
+        for attempt in captureAttempts { print("DIAG CAPTURE FAIL " + attempt) }
+        if seat && !candidates.isEmpty {
+            XCTAssertNotNil(foreignPng,
+                "席位在（CGPreflightScreenCaptureAccess=true）却有窗口的应用一个都截不成功：\(captureAttempts)")
+        } else if seat {
+            print("DIAG CAPTURE NO CANDIDATE 当前 Space 上没有别的应用窗口可截，外来窗口这条分支本上下文测不到")
+        } else {
+            print("DIAG CAPTURE NO SEAT 本进程没有屏幕录制席位，外来窗口这条分支在此上下文不可验证")
+        }
+        if let png = foreignPng {
+            try assertRealPng(png, windowId: capturedWindowId)
         }
 
         let result = UILayoutAudit.audit(snapshot)
@@ -107,5 +134,119 @@ final class GeometryAuditDiagnosticTests: XCTestCase {
             measured == snapshot.nodes.count || result.verdict != .pass,
             "只量到一部分元素却报了 pass：部分测量不能换全量结论"
         )
+        // 流水线本身必须有一次"确定能截到、而且知道该截到什么"的验证：
+        // 本进程开一个纯红窗口，走同一条 `captureWindow()` → `PngEncoding` 通路截回来，
+        // 再解码核对中心像素是红的。只断言"没报错"是不够的——键名写错那半年，
+        // 这条通路报的也是"没有窗口"，听起来永远合理。
+        let pipelined = try captureOwnRedWindow()
+        print("DIAG CAPTURE SELF pngBytes=\(pipelined.byteCount) px=\(pipelined.pixelWidth)x\(pipelined.pixelHeight)")
+        try assertRealPng(pipelined, windowId: 0)
+        let center = try Self.centerPixel(of: pipelined)
+        print("DIAG CAPTURE PIXEL r=\(center.red) g=\(center.green) b=\(center.blue)")
+        XCTAssertGreaterThan(center.red, 0.5, "截回来的必须是自己刚画的那个红窗口，实际读到的像素: \(center)")
+        XCTAssertLessThan(center.green, 0.35, "中心像素不是那个红，说明截到的不是这个窗口")
+        XCTAssertLessThan(center.blue, 0.35)
+
+    }
+
+    /// 一张"真 PNG"的最低证明：base64 解得回字节、签名对、解得出图像、维度与自报一致、
+    /// 且没有越过帧预算。
+    private func assertRealPng(_ png: PngEncoding.Result, windowId: Int) throws {
+        let bytes = try XCTUnwrap(Data(base64Encoded: png.base64))
+        XCTAssertEqual(bytes.count, png.byteCount)
+        XCTAssertEqual(Array(bytes.prefix(8)), [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(bytes as CFData, nil))
+        let decoded = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        XCTAssertEqual(decoded.width, png.pixelWidth, "真机图像：像素维度必须与自报一致")
+        XCTAssertEqual(decoded.height, png.pixelHeight)
+        XCTAssertGreaterThan(png.pixelWidth, 0)
+        XCTAssertLessThanOrEqual(png.byteCount, PngEncoding.defaultMaxBytes,
+                                 "真机窗口也必须落在帧预算内，超了就该走拒绝分支")
+        if windowId != 0 { XCTAssertGreaterThan(windowId, 0, "窗口号必须真的存在") }
+    }
+
+    /// 本进程自己开一个纯红窗口，用**产品同一条通路**截回来。
+    /// 窗口一定关掉：这是在别人机器上跑的诊断，不留残骸。
+    private func captureOwnRedWindow() throws -> PngEncoding.Result {
+        // 命令行测试进程里 `NSApp` 是 nil（全局只在 NSApplicationMain 里赋值），
+        // 必须先拿到 shared 实例再改策略——直接写 NSApp.xxx 会当场崩在这里。
+        let app = NSApplication.shared
+        let previousPolicy = app.activationPolicy()
+        app.setActivationPolicy(.accessory)
+        let window = NSWindow(
+            contentRect: NSRect(x: 40, y: 40, width: 320, height: 200),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.isOpaque = true
+        window.backgroundColor = NSColor(calibratedRed: 1, green: 0, blue: 0, alpha: 1)
+        window.hasShadow = false
+        window.level = .normal
+        window.orderFrontRegardless()
+        window.display()
+        // 窗口服务器合成需要一点时间，否则截到的是"还没有这张窗口"。
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        defer {
+            window.orderOut(nil)
+            app.setActivationPolicy(previousPolicy)
+        }
+
+        let channel = AXChannel()
+        _ = try channel.attach(bundleId: nil, pid: getpid())
+        let capture = try channel.captureWindow()
+        return try PngEncoding.encode(capture.image, scale: 1)
+    }
+
+    /// 解回 PNG 并读中心像素（RGBA8，逐字节自己数，不猜通道顺序）。
+    private static func centerPixel(of png: PngEncoding.Result) throws -> (red: Double, green: Double, blue: Double) {
+        let bytes = try XCTUnwrap(Data(base64Encoded: png.base64))
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(bytes as CFData, nil))
+        let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        let space = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
+        let context = try XCTUnwrap(
+            CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8,
+                      bytesPerRow: 0, space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        )
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        guard let base = context.data else { return (-1, -1, -1) }
+        let pointer = base.assumingMemoryBound(to: UInt8.self)
+        let center = CGPoint(x: image.width / 2, y: image.height / 2)
+        let offset = (Int(center.y) * context.bytesPerRow) + Int(center.x) * 4
+        return (
+            Double(pointer[offset]) / 255,
+            Double(pointer[offset + 1]) / 255,
+            Double(pointer[offset + 2]) / 255
+        )
+    }
+
+    /// 候选＝"CGWindowList 里确实有非零尺寸在屏窗口"的常规应用，按窗口面积从大到小，
+    /// 最多 5 个（真机诊断不该退化成全屏扫描）。刻意排除自己：截代理宿主的窗口
+    /// 证明不了"能截到别人的界面"这件事。
+    private static func captureCandidates() -> [(name: String, pid: pid_t)] {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
+            return []
+        }
+        var best: [pid_t: (name: String, area: Double)] = [:]
+        for window in list {
+            // 用产品自己的键名与层规则：诊断挑出来的候选必须是产品那边也认的窗口，
+            // 否则"候选非空却没一次截成功"会变成一条假红。
+            guard let rawPid = window[AXChannel.windowOwnerPIDKey] as? Int,
+                  AXChannel.isAppWindowLayer(window[AXChannel.windowLayerKey] as? Int),
+                  let bounds = window[AXChannel.windowBoundsKey] as? [String: Any],
+                  let width = bounds["Width"] as? Double,
+                  let height = bounds["Height"] as? Double,
+                  width > 40, height > 40 else { continue }
+            let area = width * height
+            let name = (window["kCGWindowOwnerName"] as? String) ?? "pid \(rawPid)"
+            if (best[pid_t(rawPid)]?.area ?? 0) < area { best[pid_t(rawPid)] = (name, area) }
+        }
+        let mine = getpid()
+        let regular = Set(NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .map { $0.processIdentifier })
+        return best
+            .filter { $0.key != mine && regular.contains($0.key) }
+            .sorted { $0.value.area > $1.value.area }
+            .prefix(5)
+            .map { (name: $0.value.name, pid: $0.key) }
     }
 }

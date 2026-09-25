@@ -787,6 +787,46 @@ final class EngineCoreWaveThreeMappingTests: XCTestCase {
         XCTAssertTrue(noWindow.remedy.contains("INCONCLUSIVE"), "the degradation statement holds in every branch")
     }
 
+    /// 窗口查找的键名写错那半年里，像素通路**永远**是"未测量"，所以这条判据从没被走到过：
+    /// 前后两次截的不是同一个窗口时，跨窗口比出来的 0.x 不是"这次操作改变了界面"，
+    /// 而是两个不同界面的差别——那会是一条看起来完全可信的假证据。
+    func testWindowSwitchBetweenCapturesYieldsNoPixelClaim() throws {
+        let channel = makeChannel()
+        let core = EngineCore(channel: channel, settle: {})
+        _ = try core.attach(bundleId: "com.example.app", pid: nil)
+        channel.treeResults = [.success(TestTrees.standard), .success(TestTrees.buttonRetitled)]
+        channel.captureResults = [
+            .success(TestImages.solid(100)),
+            .success(TestImages.quadrantChanged(base: 100, delta: 120)),
+        ]
+        channel.captureWindowIds = [12, 13]
+        let result = try core.act(selector: submitSelector, action: .press)
+        XCTAssertNil(result["pixelChanged"] as? Bool, "跨窗口的差值不能当成一次像素测量")
+        let pack = try core.lastEvidence(operationId: nil)
+        XCTAssertNil(pack.signals.pixelDiff)
+        let reason = try XCTUnwrap(pack.circuitBreaker.reason)
+        XCTAssertTrue(reason.contains("pixel-capture-window-changed"), reason)
+        XCTAssertFalse(reason.contains("screen-recording-denied"), "换窗不是席位问题：\(reason)")
+        XCTAssertEqual(pack.circuitBreaker.level, .degraded)
+
+        // 对照组：同一次脚本、同样的两帧，只把窗口号改成一致，就必须给出数字。
+        // 没有这条对照，上面的"没有测量"可能只是因为像素通路整个坏了。
+        let control = makeChannel()
+        let controlCore = EngineCore(channel: control, settle: {})
+        _ = try controlCore.attach(bundleId: "com.example.app", pid: nil)
+        control.treeResults = [.success(TestTrees.standard), .success(TestTrees.buttonRetitled)]
+        control.captureResults = [
+            .success(TestImages.solid(100)),
+            .success(TestImages.quadrantChanged(base: 100, delta: 120)),
+        ]
+        control.captureWindowIds = [12, 12]
+        let controlResult = try controlCore.act(selector: submitSelector, action: .press)
+        XCTAssertEqual(controlResult["pixelChanged"] as? Bool, true)
+        let controlPack = try controlCore.lastEvidence(operationId: nil)
+        XCTAssertEqual(controlPack.signals.pixelDiff?.windowId, 12)
+        XCTAssertEqual(controlPack.signals.pixelDiff?.changedPixelRatio ?? 0, 0.25, accuracy: 1e-9)
+    }
+
     // MARK: - X-9: an unread attribute is never a verdict about the element
 
     func testAttributeReadFailureIsNotReportedAsAnAbsentElement() {

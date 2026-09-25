@@ -29,6 +29,8 @@ final class ScriptedChannel: RuntimeChannel {
     var geometryResults: [Result<AxGeometrySnapshot, ChannelError>] = []
     var fallbackGeometry = AxGeometrySnapshot(nodes: [], window: nil, latencyMs: 0)
     var captureResults: [Result<CGImage, ChannelError>] = []
+    /// 与 `captureResults` 一一对应的窗口号（空＝都用 12）。
+    var captureWindowIds: [Int] = []
     var fallbackCapture: CGImage?
 
     private(set) var attachCallCount = 0
@@ -103,8 +105,11 @@ final class ScriptedChannel: RuntimeChannel {
         } else {
             throw ChannelError.pixelCaptureDenied(reason: "no capture scripted")
         }
+        // 窗口号可逐次编排：真机上"操作把前台窗口换掉了"是完全正常的事，
+        // 而固定窗口号会让"两次截的不是同一个窗口"这条判据永远跑不到。
+        let windowId = captureWindowIds.isEmpty ? 12 : captureWindowIds.removeFirst()
         return WindowCapture(
-            windowId: 12,
+            windowId: windowId,
             bounds: Bounds(x: 0, y: 0, width: 32, height: 32),
             image: image
         )
