@@ -12,14 +12,22 @@
  * HOW. Compare every file in the fork tree against the pinned upstream clone by
  * **git blob hash** — identical hash means byte-identical content, so symlink
  * targets and file modes are covered too and "changed whitespace only" cannot
- * hide. Four buckets: identical / edited / added / deleted.
+ * hide. Four buckets: identical / edited / added / deleted. Edited files are
+ * additionally pinned by *both* hashes in the golden (upstream's and ours), so
+ * growth inside an already-declared patch cannot pass unnoticed either.
  *
  * MODES
  *   --record  write harness/contracts/fork-diff.json (the declared divergence)
  *   --check   fail if the tree's actual divergence differs from that record
  *
- * Exit codes: 0 ok (including a loud offline skip), 1 divergence differs from
- * the record, 2 the tool could not measure (missing pin, missing reference).
+ * With the reference clone absent, --check still verifies OUR side of the
+ * record (fork-side hashes of edited files + presence of added ones) and prints
+ * that upstream bytes were not re-measured. A clone-free lane that checks
+ * nothing must not exit 0.
+ *
+ * Exit codes: 0 ok (including a loud offline partial check), 1 divergence
+ * differs from the record, 2 the tool could not measure (missing pin, missing
+ * reference for a mode that needs one).
  */
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
@@ -104,9 +112,44 @@ if (!ref) {
   if (mode === "record") die(2, `--record needs the reference clone at ${refRel} (git clone --branch ${pin.tag})`)
   if (!existsSync(goldenFile)) die(2, `no golden at ${path.relative(repoRoot, goldenFile)} and no reference clone`)
   const golden = JSON.parse(readFileSync(goldenFile, "utf8"))
-  console.log(`fork-diff: reference clone absent (${refRel}) — upstream NOT re-measured in this run.`)
+  if (golden.baseTag !== pin.tag) die(1, `golden recorded at ${golden.baseTag}, pin says ${pin.tag} — refusing to compare across bases`)
+  console.log(`fork-diff: reference clone absent (${refRel}) — upstream bytes NOT re-measured in this run.`)
   console.log(`  recorded divergence against ${golden.baseTag}: ${golden.counts.edited} edited, ${golden.counts.added} added, ${golden.counts.deleted} deleted, ${golden.counts.identical} identical`)
-  console.log("  OK (offline). Re-record with the clone present; CI lanes must not pretend to measure.")
+
+  // What a clone-free lane CAN still check is **our** side of the divergence:
+  // every edited vendored file carries the fork-side hash recorded when the
+  // clone was present. Without this, a CI lane would print "offline, OK" while
+  // the patched files accumulated changes nobody could see — the iterate-side
+  // failure, reproduced with extra steps.
+  const detail = golden.editedDetail ?? []
+  if (!detail.length && (golden.counts?.edited ?? 0) > 0) {
+    die(1, `golden records ${(golden.counts.edited)} edited file(s) but no content hashes — this lane has nothing to check. Re-run --record with the reference clone present.`)
+  }
+  let offlineDrift = 0
+  for (const d of detail) {
+    const now = fork.get(d.file)
+    if (!now) {
+      console.error(`  ✗ '${d.file}' is declared edited but is missing from the fork tree`)
+      offlineDrift++
+      continue
+    }
+    if (now.hash !== d.forkHash) {
+      console.error(`  ✗ '${d.file}': our content moved (${d.forkHash.slice(0, 8)} → ${now.hash.slice(0, 8)}) — re-record with the clone present so the divergence is reviewed`)
+      offlineDrift++
+    }
+  }
+  for (const rel of golden.added ?? []) {
+    if (!fork.has(rel)) {
+      console.error(`  ✗ '${rel}' is declared as ours but is not in the fork tree`)
+      offlineDrift++
+    }
+  }
+  if (offlineDrift > 0) {
+    console.error(`fork-diff: ${offlineDrift} mismatch(es) between the tree and ${path.relative(repoRoot, goldenFile)} (our side).`)
+    process.exit(1)
+  }
+  console.log(`  our side matches the record: ${detail.length} edited file(s) hash-checked, ${(golden.added ?? []).length} added file(s) present`)
+  console.log("  OK (offline). Upstream bytes are checked by the local/pre-release full run and by harness-contract.yml, not here.")
   process.exit(0)
 }
 
@@ -131,6 +174,14 @@ const observed = {
   edited: edited.sort(),
   added: added.sort(),
   deleted: deleted.sort(),
+  // Content, not just names. A divergence declared by filename alone is blind to
+  // the file that is already on the list growing another hundred lines — the
+  // exact way the iterate-side fork lost control of its own patch surface. So
+  // every edited file is pinned by both hashes: what upstream has, and what we
+  // put in its place.
+  editedDetail: edited
+    .map((rel) => ({ file: rel, upstreamHash: ref.get(rel).hash, forkHash: fork.get(rel).hash }))
+    .sort((a, b) => a.file.localeCompare(b.file)),
 }
 
 const total = ref.size + added.length
@@ -163,6 +214,32 @@ for (const key of ["edited", "added", "deleted"]) {
   }
 }
 if (!same(observed.edited, golden.edited) || !same(observed.added, golden.added) || !same(observed.deleted, golden.deleted)) drift ||= 1
+
+// Content drift inside the declared surface: the file name was already on the
+// list, so the bucket comparison above cannot see it. Compare the pinned hashes.
+const wasDetail = new Map((golden.editedDetail ?? []).map((d) => [d.file, d]))
+for (const d of observed.editedDetail) {
+  const was = wasDetail.get(d.file)
+  if (!was) {
+    console.error(`  ✗ '${d.file}' is edited but has no recorded content hash (golden predates hash recording) — re-run --record`)
+    drift++
+    continue
+  }
+  if (was.upstreamHash !== d.upstreamHash) {
+    console.error(`  ✗ '${d.file}': the REFERENCE moved (${was.upstreamHash.slice(0, 8)} → ${d.upstreamHash.slice(0, 8)}) — the clone at ${refRel} is no longer ${pin.tag} for this path`)
+    drift++
+  }
+  if (was.forkHash !== d.forkHash) {
+    console.error(`  ✗ '${d.file}': our content moved (${was.forkHash.slice(0, 8)} → ${d.forkHash.slice(0, 8)}) — the file is already in the declared divergence, so the name-list check alone would have called this clean`)
+    drift++
+  }
+}
+for (const file of wasDetail.keys()) {
+  if (!observed.edited.includes(file)) {
+    console.error(`  ✗ '${file}' was declared edited but no longer differs from upstream — re-record`)
+    drift++
+  }
+}
 
 if (drift > 0) {
   console.error(`fork-diff: the fork's actual divergence no longer matches ${path.relative(repoRoot, goldenFile)}.`)

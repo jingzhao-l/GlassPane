@@ -144,8 +144,12 @@ function findFireSites(files, name) {
 
 function observe(pin, { expectTag = true } = {}) {
   // HARNESS_UPSTREAM_CHECKOUT lets CI point the tool at a freshly fetched tag
-  // without rewriting the pinned coordinates in the repository.
-  const checkout = path.resolve(process.env.HARNESS_UPSTREAM_CHECKOUT || pin.checkout)
+  // without rewriting the pinned coordinates in the repository. A relative
+  // pin.checkout resolves against the repo root, so the same coordinates work
+  // from any clone of this repository (and `.external/opencode` is the one
+  // clone both rulers read — one upstream, not two that can disagree).
+  const raw = process.env.HARNESS_UPSTREAM_CHECKOUT || pin.checkout
+  const checkout = path.isAbsolute(raw) ? raw : path.resolve(repoRoot, raw)
   if (!existsSync(checkout)) return null
   let version = null
   const versionFile = path.join(checkout, "packages/opencode/package.json")

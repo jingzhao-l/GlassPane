@@ -2,6 +2,15 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-09-25 · 度量侧收口：上游参照合一 + 工具面棘轮（不动 vendored 树）
+
+- 改动面（`fork-diff --check`）：**仍是 `6631/6637 byte-identical, 1 edited, 5 added, 0 deleted`，绿**。本批只动 `harness/`（尺子与文档）与本文件，未触碰任何 vendored 源文件；FORK.md/SYNCLOG.md 的编辑不改变 added **名单**，所以记录面不变——这正是"以文件名为单位声明分叉"的含义，也是它的盲区（见下第 4 条）。
+- **两把尺子过去读两份"上游"**：`hook-liveness` 读 `upstream.json.checkout`（当初的 142 MB tarball 解包目录 `/Volumes/Eng-Dev/.upstream/opencode-1.18.32`），`fork-diff` 读 `.external/opencode`（含 `.git` 的完整克隆）。合并为**一份**：`checkout` 改成 `.external/opencode`，工具改为"相对路径按仓根解析"。合并前先验两份参照**说的是不是同一件事**：`HARNESS_UPSTREAM_CHECKOUT=.external/opencode node harness/tools/hook-liveness.mjs --check` → `checked 20 hooks against anomalyco/opencode@v1.18.32: no drift`，再 `--record` → 与仓内金样**逐字节相同**（仅 `observedAt` 差）。两份能各说各话的"上游"就是这条线自己要防的失效模式，所以这不是清理，是消除一个真实的分裂真源。
+- 新增第三把尺子 `harness/tools/tool-surface.mjs`（+ `contracts/tool-surface.json`，进 `ci.yml` 的 `tool-surface` job）。它量的是 fork 自己的账：**我们在 fork 里写的行也算工具面**。基线：engine 17,197 LOC；面 A（`mcp-shell/src`）3,719 行 = **17.33%**；面 B（fork 内我们写的）539 行 = **2.51%**（`preflight.sh` 83 + `glasspane/daemon.ts` 171 + `glasspane/index.ts` 276 + `registry.ts` 的 `+9`）。铁律的 10% **不改成能过的数字**，A 的越限如实记在金样里，闸只挡没被记录的增长（负例：A +3 行红、B +20 行红、给已 `edited` 的 `registry.ts` 加 3 行也红、删 `fork-diff.json` 让归因不能也红；还原后全绿，三个被动的文件 MD5 前后一致）。
+- **一个盲区被发现并当场关掉**（先记录现象，再修，再复验）：`fork-diff` 原本以**文件名**为单位声明分叉，于是"已经在我们改动面里的文件又长了几行"它看不见——实测给 `registry.ts` 加 3 行，`--check` 仍 `6631/6637 … 1 edited …` **exit 0**（日志 `/var/tmp/glasspane-harness/blind-spot.log`）。这正是 iterate 侧那种失控的机制版本：名单看着没变，内容一直在长。修法：金样给每个 edited 文件钉**两个哈希**（上游的与我们的），`--check` 名单之外再比内容。关闸后的复验（`/var/tmp/glasspane-harness/fork-diff-hash.log`）：① 用**旧金样**（无哈希字段）跑 `--check` → exit 1 并指名 `--record`（证明新断言真的在跑，不是装饰）；② 重记后 → exit 0，`editedDetail = {registry.ts, upstreamHash 9167cb3e…, forkHash 36a359e3…}`（前者与"pristine import"那次核对过上游 blob 一致）；③ 再加 2 行 → **exit 1 并点名 our content moved**（同一步在修之前是绿的）；④ 还原 → exit 0，`git status` 该文件零残留。
+- **CI 侧的覆盖跟着一起补上**（否则上一条修法只管本地，等于没管日常）：`fork-diff --check` 现在**没有参照克隆也能核我们这一侧**——比对金样里的 fork 侧哈希与 added 文件是否还在，并照实打印"上游字节本轮未复测"。该步已进 `ci.yml` 的 `install-gate`。四条负例实测（`/var/tmp/glasspane-harness/fork-diff-offline.log`）：清树 → exit 0 并报 `1 edited file(s) hash-checked, 5 added file(s) present`；给 `registry.ts` 加 2 行 → **exit 1**；金样被剥掉 `editedDetail`（＝这条 lane 无事可控）→ **exit 1 并直说 "this lane has nothing to check"**，而不是绿；删掉一个 added 文件 → exit 1。还原后在线全量 `--check` 仍 exit 0，三个被动文件 MD5 前后一致、`git status` 零残留。**剩余边界**：上游侧内容（我们相对 v1.18.32 究竟改了多少行）只有本地/发布前的全量跑与周跑覆盖，PR CI 不看上游——这是有意的：223 MB 参照 + 2 分钟全树哈希进 PR CI，结局是被人关掉。
+- 未跑：`bun run build`（构建产物不随本批改动，仍以 M1 条那次为准）；真模型轮次依旧没做。
+
 ## 2026-09-25 · M1：`gp_*` 工具面进 fork（第一次真正的 vendored 编辑）
 
 - 改动面（`fork-diff`）：**`6631/6636 byte-identical, 1 edited, 4 added, 0 deleted`**

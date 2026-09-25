@@ -126,6 +126,11 @@ jobs:
       # 金样自洽与坐标一致性，真·上游探查在 harness-contract.yml 的周跑里。
       - name: Harness contract — golden self-consistency (offline)
         run: node harness/tools/hook-liveness.mjs --offline
+      # 无参照克隆时 fork-diff 仍核对**我们这一侧**：edited vendored 文件的 fork 侧
+      # 哈希 + added 文件是否还在。上游字节这里量不到，它会照实打印；但"我们偷偷改了
+      # registry.ts 第 4 个 hunk"在这条 lane 里是红。
+      - name: Fork divergence — our side of the record (offline)
+        run: node harness/tools/fork-diff.mjs --check
 
   # 对外文档守卫：死链、失效锚点、双语成对（README/SECURITY/CONTRIBUTING 任一侧
   # 改名或漏翻译都在这里现形——面向陌生读者的文档，链接断了等于没交付）。
@@ -153,3 +158,21 @@ jobs:
           node-version: 20
       - name: Check every derived site agrees with root package.json
         run: node scripts/check-version.mjs
+
+  # 工具面占比守卫：三条架构铁律里唯一有数字的那条（工具面 <10% 代码量）此前只是
+  # 一句散文，实测 17.33% 而仓库里没有任何东西能发现——这就是"无声漂移"。这里做成
+  # 棘轮：允许增长，不允许**没人注意到**。基线在 harness/contracts/tool-surface.json，
+  # 重新记录必须和代码同批提交，让比例变化在 diff 里可见。
+  # 一条如实挂账的边界：本 lane 没有上游参照克隆，所以**已列入 edited 清单的 vendored
+  # 文件内部长了几行**在这里量不到（工具会打印 "NOT re-measured"）。那一维由本地/发布前的
+  # fork-diff + tool-surface 全量跑覆盖，不假装 CI 也管得住。
+  tool-surface:
+    name: tool surface ratio (ratchet)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Measure engine vs both tool surfaces, fail on unrecorded growth
+        run: node harness/tools/tool-surface.mjs --check

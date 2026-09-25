@@ -19,5 +19,12 @@
     "packages/opencode/src/tool/glasspane/daemon.ts",
     "packages/opencode/src/tool/glasspane/index.ts"
   ],
-  "deleted": []
+  "deleted": [],
+  "editedDetail": [
+    {
+      "file": "packages/opencode/src/tool/registry.ts",
+      "upstreamHash": "9167cb3ea6bc5c8dd075f0f8271adbdec6074b12",
+      "forkHash": "36a359e3d1a7bde7229f37a82f2f36332df975d3"
+    }
+  ]
 }

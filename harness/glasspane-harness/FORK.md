@@ -13,6 +13,7 @@
 ```bash
 node harness/tools/fork-diff.mjs --check    # 实际分叉面 vs 记录面（约 2 分钟，逐文件 blob 比对）
 node harness/tools/fork-diff.mjs --record   # 改完上游文件后重记，连同改动一起提交
+node harness/tools/tool-surface.mjs --check # 我们在 fork 里写了多少行（棘轮：只挡没被记录的增长，进 CI）
 ```
 
 为什么把这条写死：另一条 harness 线（`iterate-harness`）的设计文档写着"8 处定点修改"，而它自己的树里 194 个共享文件有 **144 个**被改过、20 个被删、8 个新增，并且没有任何机器检查能发现这件事。**定制多少从来不是问题，不知道定制了多少才是。**
@@ -41,7 +42,7 @@ git log v1.18.32..HEAD --oneline --grep '^\[gp\]' # 完整定制提交清单
 |---|---|---|---|
 | M1 | `gp_*` 工具面（结构化结果 + agent 可执行 remedy） | `packages/opencode/src/tool/glasspane/` + `tool/registry.ts` 注册 | **已落地并实测**（见 `SYNCLOG.md` 2026-09-25 M1 条）：6 个工具以原始 id 出现在 fork 自己的注册表里，传输链直连 daemon 通过 |
 | M2 | evidence 采集 → kernel 决策日志（opID↔entry 哈希链） | `event` + `tool.execute.*` 绑定 | 运行时已见 `{id,type,properties}`（E1/E5） |
-| M3 | `@iterate/kernel` 绑定 | npm 依赖 | **卡住**：kernel 未发布（npm 404、`private: true`、无 license） |
+| M3 | `@iterate/kernel` 绑定 | npm 依赖 | **卡住**：kernel 未发布（npm 404、`private: true`、无 license）。内容侧已就绪——09-25 把镜像超前 canonical 的 evidence 读侧兼容回流进 `iterate-skill`（`d893045`），canonical 现在是超集；发布是 Phase B 第 0 号动作，属用户决策项 |
 | M4 | 维度感知上下文压缩 | `experimental.session.compacting` | 静态有派发点；运行时形状未观测（需真模型轮次） |
 | M5 | 会话流内 evidence 渲染 | `packages/tui/src/routes/session/index.tsx`（`toolDisplays` :2626 / `toolDisplay()` :2643 / `GenericTool` :1798） | 上游对该文件改动频繁（3 个月 15 次提交），是同步冲突的主来源 |
 

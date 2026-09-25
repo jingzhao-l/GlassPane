@@ -1,0 +1,49 @@
+{
+  "limit": 0.1,
+  "limitSource": "三条架构铁律（specs/GlassPane_Design_Decisions.md）",
+  "caliber": {
+    "engine": "lines of every *.swift under engine/Sources",
+    "mcpShell": "lines of every *.ts under mcp-shell/src",
+    "fork": "fork-diff `added` files + `+` lines of `edited` vendored files, docs excluded",
+    "ratio": "surface / (engine + mcp-shell + fork)"
+  },
+  "observedAt": "2026-09-25",
+  "engineLoc": 17197,
+  "engineFiles": 51,
+  "surfaces": {
+    "mcpShell": {
+      "loc": 3719,
+      "files": 10,
+      "ratio": 0.1733
+    },
+    "fork": {
+      "loc": 539,
+      "files": [
+        {
+          "file": "packages/opencode/script/glasspane-preflight.sh",
+          "kind": "added",
+          "lines": 83
+        },
+        {
+          "file": "packages/opencode/src/tool/glasspane/daemon.ts",
+          "kind": "added",
+          "lines": 171
+        },
+        {
+          "file": "packages/opencode/src/tool/glasspane/index.ts",
+          "kind": "added",
+          "lines": 276
+        },
+        {
+          "file": "packages/opencode/src/tool/registry.ts",
+          "kind": "edited",
+          "lines": 9
+        }
+      ],
+      "ratio": 0.0251
+    }
+  },
+  "totalToolSurfaceLoc": 4258,
+  "note": null,
+  "carried": null
+}
