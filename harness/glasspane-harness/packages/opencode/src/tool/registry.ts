@@ -16,6 +16,9 @@ import { WebFetchTool } from "./webfetch"
 import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
+// [gp] M1: GlassPane's native tool surface. One import, one init block, one
+// spread — every extra line here is paid for at each upstream sync.
+import { glasspaneDefs } from "./glasspane"
 import * as Tool from "./tool"
 import { Config } from "@/config/config"
 import { type ToolContext as PluginToolContext, type ToolDefinition } from "@opencode-ai/plugin"
@@ -117,6 +120,9 @@ const layer = Layer.effect(
     const agent = yield* Agent.Service
     const codeMode = flags.experimentalCodeMode ? yield* Effect.promise(() => import("./code-mode")) : undefined
     const codeModeTool = codeMode ? yield* codeMode.CodeModeTool : undefined
+    // [gp] M1 — GlassPane's tool surface, registered as builtins (not as a
+    // plugin): a tool the registry does not list is a tool the agent cannot see.
+    const glasspane = yield* glasspaneDefs
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("ToolRegistry.state")(function* (ctx) {
@@ -243,6 +249,9 @@ const layer = Layer.effect(
             tool.search,
             tool.skill,
             tool.patch,
+            // [gp] M1 — spread, not enumerated: adding a tool to the surface must
+            // not require a second edit in this file.
+            ...glasspane,
             ...(tool.execute ? [tool.execute] : []),
             ...(flags.experimentalLspTool ? [tool.lsp] : []),
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),

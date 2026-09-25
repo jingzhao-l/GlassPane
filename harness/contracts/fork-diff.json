@@ -4,15 +4,19 @@
   "referenceClone": ".external/opencode",
   "observedAt": "2026-09-25",
   "counts": {
-    "identical": 6632,
-    "edited": 0,
-    "added": 2,
+    "identical": 6631,
+    "edited": 1,
+    "added": 4,
     "deleted": 0
   },
-  "edited": [],
+  "edited": [
+    "packages/opencode/src/tool/registry.ts"
+  ],
   "added": [
     "FORK.md",
-    "SYNCLOG.md"
+    "SYNCLOG.md",
+    "packages/opencode/src/tool/glasspane/daemon.ts",
+    "packages/opencode/src/tool/glasspane/index.ts"
   ],
   "deleted": []
 }
