@@ -790,7 +790,7 @@ class EvidenceFrameShapeError extends Error {
  * the same archive (B-09). The archive text an agent reads back through
  * gp_last_evidence is the daemon's frame, untouched.
  */
-function parseEvidenceFrame(raw: unknown): { pack: EvidencePack; measuredSchemaVersion: string } {
+export function parseEvidenceFrame(raw: unknown): { pack: EvidencePack; measuredSchemaVersion: string } {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new EvidenceFrameShapeError("result frame is not an object");
   }
@@ -817,7 +817,7 @@ function parseEvidenceFrame(raw: unknown): { pack: EvidencePack; measuredSchemaV
  * needed no fold is returned unchanged, which keeps the common report
  * byte-identical to the shared golden.
  */
-function packForReport(pack: EvidencePack, measuredSchemaVersion: string): EvidencePackReportView {
+export function packForReport(pack: EvidencePack, measuredSchemaVersion: string): EvidencePackReportView {
   if (measuredSchemaVersion === pack.schemaVersion) {
     return pack;
   }
