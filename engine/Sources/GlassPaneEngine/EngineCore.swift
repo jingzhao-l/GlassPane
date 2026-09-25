@@ -482,10 +482,32 @@ public final class EngineCore {
     /// Not pure (it stats the filesystem), so it is a separate predicate from
     /// `resolvedStoragePathDefect`, which stays a pure name rule the whole table
     /// can be tested against without touching disk.
+    ///
+    /// Two outcomes of a `stat` are not one absence. Measured on this machine:
+    /// a path that is not there fails with `NSCocoaErrorDomain` 260 (POSIX ENOENT)
+    /// while a path behind a directory the process may not search fails with 257
+    /// (EACCES) — including the case where *nothing* under that directory can be
+    /// named. The loop used to fold both into an empty attribute set and climb to
+    /// the parent, so an unsearchable ancestor quietly certified everything below
+    /// it. That is the same mistake the ledger fix made in the other direction
+    /// ("cannot read" reported as "private"): the check's answer has to be about
+    /// what it saw.
     static func ownabilityDefect(path: String) -> String? {
         var cursor = URL(fileURLWithPath: path, isDirectory: true)
         while true {
-            let attributes = (try? FileManager.default.attributesOfItem(atPath: cursor.path)) ?? [:]
+            let attributes: [FileAttributeKey: Any]
+            do {
+                attributes = try FileManager.default.attributesOfItem(atPath: cursor.path)
+            } catch let failure as NSError where failure.domain == NSCocoaErrorDomain
+                && failure.code == NSFileReadNoSuchFileError {
+                attributes = [:]  // genuinely not there: ask the directory above it
+            } catch let failure as NSError {
+                return "\(cursor.path) cannot be examined (\(failure.domain) \(failure.code)), "
+                    + "so nothing here can say who would be able to write into it"
+            } catch {
+                return "\(cursor.path) cannot be examined (unclassified stat failure), "
+                    + "so nothing here can say who would be able to write into it"
+            }
             if !attributes.isEmpty {
                 guard let number = attributes[.posixPermissions] as? NSNumber else {
                     return "\(cursor.path) exists but its permissions cannot be read"
@@ -1471,10 +1493,31 @@ public final class EngineCore {
             let watch = degradationTracker.verdict()
             var block: [String: Any] = [
                 "tier": watch.tier.rawValue,
+                // R6-01: `tier` on its own cannot tell "measured clean" from
+                // "nothing was judged yet" — and now that this key has readers,
+                // that ambiguity would be a published false positive. `judged`
+                // says which it is; `basis` carries the measured numbers that
+                // explain it, and the two thresholds travel with the reading so
+                // nobody has to know the defaults to interpret `samples`.
+                "judged": watch.judged,
+                "basis": watch.basis,
                 "samples": watch.sampleCount,
+                "minimumSamples": watch.minimumSamplesForTrend,
+                "spanSeconds": watch.elapsedSeconds,
+                "minimumSpanSeconds": watch.minimumTrendSpanSeconds,
                 "longSession": watch.longSession,
             ]
             if !watch.drivers.isEmpty { block["drivers"] = watch.drivers }
+            // A channel with no slope is absent here rather than `0`, the same
+            // convention the probe counters use: `memoryBytesPerSec: 0` is a
+            // measurement, a missing key means the metrics probe never read it
+            // (or read a dead pid), and `pingMsPerSec` means every sample in the
+            // window was an unresponsive round trip or an `observe`.
+            var slopes: [String: Any] = [:]
+            if let ping = watch.pingSlopeMsPerSec { slopes["pingMsPerSec"] = ping }
+            if let memory = watch.memorySlopeBytesPerSec { slopes["memoryBytesPerSec"] = memory }
+            if let handles = watch.handleSlopePerSec { slopes["handlesPerSec"] = handles }
+            if !slopes.isEmpty { block["slopes"] = slopes }
             payload["degradation"] = block
         }
         return payload

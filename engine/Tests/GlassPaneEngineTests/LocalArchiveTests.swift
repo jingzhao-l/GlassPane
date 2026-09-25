@@ -11,9 +11,7 @@ final class LocalArchiveTests: XCTestCase {
     // MARK: - fixtures
 
     private func tempDir() -> String {
-        let dir = NSTemporaryDirectory() + "/gp-archive-" + UUID().uuidString
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        return dir
+        TestSandbox.directory("archive")
     }
 
     private func pack(
@@ -175,7 +173,7 @@ final class LocalArchiveTests: XCTestCase {
     }
 
     func testResidueRequiresBothSampleBundleAndTempPath() {
-        let temp = NSTemporaryDirectory()
+        let temp = TestSandbox.systemTempRoot
         XCTAssertTrue(
             LocalArchive.isTestResidue(entry(bundleId: "com.example.app", evidencePath: temp + "/x"))
         )
@@ -193,7 +191,7 @@ final class LocalArchiveTests: XCTestCase {
 
     func testResidueCatchesRealTempRootForms() {
         let roots = LocalArchive.defaultTempRoots()
-        XCTAssertTrue(roots.contains { NSTemporaryDirectory().hasPrefix($0) })
+        XCTAssertTrue(roots.contains { TestSandbox.systemTempRoot.hasPrefix($0) })
         for root in ["/tmp/", "/private/tmp/"] {
             XCTAssertTrue(
                 LocalArchive.isTestResidue(entry(bundleId: "com.example.app", evidencePath: root + "gp")),

@@ -87,6 +87,81 @@ test("a null channel names the missing measurement instead of going blank", () =
   );
 });
 
+/**
+ * R6-09: all six channels, in the documented order. Four of them used to be
+ * dropped when the pack carried no reading, which is the gap that reads to a
+ * human as "nothing happened". The TS and Swift spellings are compared to each
+ * other below rather than to a copy of themselves.
+ */
+const CHANNEL_ORDER = ["axEvent", "handlerProbe", "stateDiff", "pixelDiff", "responsiveness", "crash"];
+
+function barePack() {
+  return withSignals(z5Pack(), (s) => {
+    s.axEvent = undefined;
+    s.pixelDiff = undefined;
+    s.responsiveness = undefined;
+    s.crash = undefined;
+  });
+}
+
+test("every absent channel names itself, in the documented order", () => {
+  const lines = evidenceSummaryLines(barePack()).filter((line) =>
+    CHANNEL_ORDER.some((channel) => line.startsWith(`${channel}:`)),
+  );
+  assert.deepEqual(
+    lines.map((line) => line.split(":")[0]),
+    CHANNEL_ORDER,
+    `channel lines out of order or missing: ${JSON.stringify(lines)}`,
+  );
+  for (const line of lines) {
+    assert.match(line, /: not measured \(/, line);
+  }
+});
+
+/**
+ * The control that keeps the case above from being a wish: a pack that measured
+ * all six renders no absence line at all. This is also why the shared golden did
+ * not move when the four new lines landed — `goldenPack()` carries every channel.
+ */
+test("a measured channel is never reported as unmeasured", () => {
+  const lines = evidenceSummaryLines(goldenPack());
+  for (const line of lines) {
+    assert.ok(!line.includes("not measured"), `measured pack rendered an absence: ${line}`);
+  }
+  for (const channel of CHANNEL_ORDER) {
+    assert.ok(lines.some((line) => line.startsWith(`${channel}:`)), `${channel} line missing`);
+  }
+});
+
+/**
+ * The mirror's other half: the six strings this file's renderer prints are
+ * compared with the six the engine prints, read out of the Swift source. A
+ * one-sided rewording fails here, which is the cheaper of the two ways a
+ * cross-language drift can be caught (the golden only covers a pack where every
+ * channel is present).
+ */
+test("the Swift renderer's absence wording is byte-identical to this one", () => {
+  const swift = readFileSync(
+    new URL("../../engine/Sources/GlassPaneEngine/EvidenceReportGenerator.swift", import.meta.url),
+    "utf8",
+  );
+  const found = [...swift.matchAll(/"([a-zA-Z]+: not measured \([^"]*\))"/g)].map((match) => match[1]);
+  assert.equal(found.length, CHANNEL_ORDER.length, `Swift literals found: ${JSON.stringify(found)}`);
+  // Compared per channel, not per file position: the Swift constants are grouped
+  // by when they landed, and a drift check that fails on ordering would hide the
+  // wording difference it exists to catch.
+  const byChannel = new Map(found.map((line) => [line.split(":")[0], line]));
+  assert.deepEqual(
+    [...byChannel.keys()].sort(),
+    [...CHANNEL_ORDER].sort(),
+    `Swift names a channel this side does not: ${JSON.stringify(found)}`,
+  );
+  const tsLines = evidenceSummaryLines(barePack()).filter((line) =>
+    CHANNEL_ORDER.some((channel) => line.startsWith(`${channel}:`)),
+  );
+  assert.deepEqual(tsLines, CHANNEL_ORDER.map((channel) => byChannel.get(channel)));
+});
+
 test("empty lists say so; long lists are bounded with the elided count", () => {
   const empty = withSignals(goldenPack(), (s) => {
     s.handlerProbe.handlers = [];

@@ -21,30 +21,24 @@ import { privateSandbox } from "./support/sandbox.mjs";
  * not the other fails here, with the difference printed rather than implied.
  *
  * WHAT THIS FILE DOES NOT COVER, stated because a green run here is otherwise
- * read as "the two sides agree": every check below compares *which paths are
- * named*. It cannot see *how a named path is matched*, and the two sides match
- * identical names differently today:
- * - this shell treats `/tmp`, `/private/tmp` and `/private/var/tmp` as
- *   **subtrees**, so `/private/tmp/x` is refused
- *   (`PROTECTED_SUBTREES`, src/project-registry.ts);
- * - the daemon compares `sharedScratchStoragePaths` by **exact equality**
- *   (`EngineCore.resolvedStoragePathDefect`, the `sharedScratchStoragePaths
- *   contains stripped` branch — no `hasPrefix` beside it, and no ownership
- *   fallback in Swift either), so `/private/tmp/x` is accepted there.
- * Same list, two verdicts: the set comparisons below would not notice, and the
- * split is therefore *registered* rather than implied — it is the "仍未收口"
- * entry of `specs/GlassPane_规格修订_2026-09-23_iterate-round4.md` (the Swift
- * half of path validation), and the one who closes it is whoever holds
- * `EngineCore.swift`. This file does not touch Swift and does not pretend a
- * list comparison settled the semantics.
+ * read as "the two sides agree": most checks below compare *which paths are
+ * named*, which cannot see *how a named path is matched*. That gap used to be a
+ * live split — the shell treated `/tmp`, `/private/tmp` and `/private/var/tmp` as
+ * subtrees (`PROTECTED_SUBTREES`, src/project-registry.ts) while the daemon
+ * compared `sharedScratchStoragePaths` by exact equality, so `/private/tmp/x` was
+ * refused here and accepted there. It was registered in the header of this file
+ * and in `specs/GlassPane_规格修订_2026-09-23_iterate-round4.md`, and it is closed
+ * (ba07b66): the daemon now subtree-matches both lists and has an ownership
+ * fallback. The closing is not taken on anyone's word — the last test below reads
+ * the matching semantics out of `EngineCore.swift` and fails if the `hasPrefix`
+ * branches or `ownabilityDefect` ever go back to comparing a whole path, which is
+ * the form that let one level below a protected directory through.
  *
- * What is pinned here instead, and how to tell when the caveat goes stale: the
- * TS side's *behaviour* is proven by the input-level subtree entries in the
- * truth table at the bottom of this file (they fail the moment this shell stops
- * treating shared scratch as a tree), and the daemon's exact-match branch is
- * quoted above rather than paraphrased. When that quote no longer matches the
- * Swift source, the split is closed: delete this caveat, and the set comparison
- * then does say what it looks like it says.
+ * What remains out of reach here: this file still cannot execute the daemon, so
+ * the *behaviour* it proves is the shell's (the input-level subtree entries in the
+ * truth table at the bottom) and the daemon's is read as source. A semantic change
+ * written in an unexpected place in Swift is caught by the assertion that the
+ * quoted text exists, not by inference.
  */
 
 const REPO_ROOT = new URL("../../", import.meta.url).pathname;
@@ -300,4 +294,64 @@ test("projectSet's verdicts match the shared table entry by entry", (t) => {
   const accepted = projectSet({ ...base, evidenceStoragePath: acceptedPath });
   assert.equal(accepted.evidenceStoragePath, acceptedPath);
   assert.ok(fs.existsSync(file), "the accepted case must actually have written the registry");
+});
+
+/**
+ * R6-03: the matching semantics, read out of the daemon.
+ *
+ * The two sides used to name the same paths and disagree about what "inside"
+ * means: this shell refused `/private/tmp/x` because it matches shared scratch as
+ * a subtree, while the daemon compared the whole path against the list and took
+ * the child as somebody else's directory. The header of this file carried that as
+ * a registered split with a stated removal condition; the split is closed, so the
+ * caveat becomes a control. It has to be able to go red the way the defect came
+ * back — by someone writing `contains(stripped)` again — which is why the last
+ * assertion is the negative one.
+ */
+test("the daemon matches protected storage as subtrees and falls back to ownership", () => {
+  const source = fs.readFileSync(DAEMON_SOURCE, "utf8");
+  const declaration = "static func resolvedStoragePathDefect";
+  const start = source.indexOf(declaration);
+  assert.notEqual(start, -1, `${declaration} moved: point this check at its new home and say why`);
+  const next = source.indexOf("static func", start + declaration.length);
+  const raw = next === -1 ? source.slice(start) : source.slice(start, next);
+  // Comments stripped for the checks below, which is the *opposite* of what the
+  // Swift-side isolation gate does with its own tree — and for the opposite
+  // reason. There, prose has to count so a violation cannot hide behind a `//`;
+  // here the function's own comment quotes the equality form it replaced, so
+  // matching prose would report the fixed shape as present forever.
+  const body = raw
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("//"))
+    .join("\n");
+
+  for (const list of ["sharedScratchStoragePaths", "systemOwnedStorageTrees"]) {
+    const subtree = new RegExp(
+      `for\\s+\\w+\\s+in\\s+${list}\\s+where\\s+\\w+\\s*==\\s*\\w+\\s*\\|\\|\\s*\\w+\\.hasPrefix\\(\\w+\\s*\\+\\s*"\\/"\\)`
+    );
+    assert.match(
+      body.replace(/\s+/g, " "),
+      subtree,
+      `${list} is no longer subtree-matched: a path one level below it is accepted by the daemon ` +
+        `and refused here, which is the split this check exists to keep shut`,
+    );
+  }
+
+  // The ownership fallback: TS has refused a world-writable or foreign-owned
+  // directory since the round that unified the lists; the daemon gained it in
+  // ba07b66, wired at the tail of the evidence-path check rather than as a name.
+  assert.match(source, /static func ownabilityDefect\(path: String\)/, "ownabilityDefect is gone");
+  assert.match(
+    source.replace(/\s+/g, " "),
+    /evidenceStoragePathDefect[\s\S]{0,900}?ownabilityDefect\(path:/,
+    "the ownership fallback is no longer reached from the evidence-path check",
+  );
+
+  // Negative half, and the one that would actually catch a regression: the
+  // equality form is what made a child of `/tmp` admissible.
+  assert.doesNotMatch(
+    body,
+    /sharedScratchStoragePaths\s*\.contains\(/,
+    "exact-equality matching is back in resolvedStoragePathDefect",
+  );
 });

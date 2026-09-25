@@ -184,10 +184,21 @@ final class EngineP1Batch4Tests: XCTestCase {
 
         XCTAssertTrue(html.contains("<h2>ANOMALY</h2>"))
         XCTAssertTrue(html.contains("—"))
-        // No assertion/axEvent/pixelDiff/responsiveness/crash lines.
+        // An absent assertion section renders no line at all: there is nothing to
+        // report on an operation that made no assertion.
         XCTAssertFalse(markdown.contains("* assert "))
-        XCTAssertFalse(markdown.contains("* axEvent:"))
-        XCTAssertFalse(markdown.contains("* pixelDiff:"))
+        // R6-09 changed what an absent *channel* renders. These two lines used to
+        // read `XCTAssertFalse(contains("* axEvent:"))` and
+        // `XCTAssertFalse(contains("* pixelDiff:"))`, which pinned the behaviour
+        // this round removed: a channel that was never measured left no line, so
+        // "the UI did not change" and "nothing was measured" produced the same
+        // report. The tolerance claim of this case (nothing throws, the sections
+        // still render) is unchanged; the channel lines are now required by name in
+        // `testEveryAbsentChannelNamesItselfInOrder`.
+        XCTAssertTrue(markdown.contains("* axEvent: not measured"), markdown)
+        XCTAssertTrue(markdown.contains("* pixelDiff: not measured"), markdown)
+        XCTAssertTrue(markdown.contains("* responsiveness: not measured"), markdown)
+        XCTAssertTrue(markdown.contains("* crash: not measured"), markdown)
     }
 
     func testReportTitleFallsBackToAssertionProperty() {
@@ -346,6 +357,48 @@ final class EngineP1Batch4Tests: XCTestCase {
         XCTAssertTrue(z5Lines.contains(
             "stateDiff: not measured (the probe reported no state channel)"
         ), "\(z5Lines)")
+    }
+
+    /// R6-09: the same rule applied to all six channels. Four of them
+    /// (`axEvent`, `pixelDiff`, `responsiveness`, `crash`) used to be *dropped*
+    /// from the report when the pack carried no reading for them, so a reader of
+    /// the console or an exported report could not tell "the UI did not change"
+    /// from "nothing was measured" — the shape this project's classifier was
+    /// fixed for, in the human-facing view. Order is part of the contract (both
+    /// renderer headers name it), so this asserts the six lines as a sequence.
+    func testEveryAbsentChannelNamesItselfInOrder() throws {
+        var pack = try Self.z5Pack()
+        pack.signals.axEvent = nil
+        let lines = EvidenceReportGenerator.evidenceSummaryLines(pack: pack)
+        let channelLines = lines.filter { line in
+            ["axEvent:", "handlerProbe:", "stateDiff:", "pixelDiff:", "responsiveness:", "crash:"]
+                .contains { line.hasPrefix($0) }
+        }
+        XCTAssertEqual(channelLines, [
+            "axEvent: not measured (this pack carries no AX tree digest)",
+            "handlerProbe: not measured (no probe connection served this act window)",
+            "stateDiff: not measured (the probe reported no state channel)",
+            "pixelDiff: not measured (this pack carries no pixel comparison)",
+            "responsiveness: not measured (this pack carries no responsiveness round trip)",
+            "crash: not measured (this pack carries no process liveness sample)",
+        ], "\(channelLines)")
+    }
+
+    /// The control that keeps the case above from being a wish: a pack that
+    /// *did* measure all six renders none of those strings. This is also the
+    /// reason the shared golden did not have to move when the four absence lines
+    /// landed — `goldenPack()` carries every channel.
+    func testMeasuredChannelsNeverRenderAnAbsenceLine() throws {
+        let lines = EvidenceReportGenerator.evidenceSummaryLines(pack: try Self.goldenPack())
+        for line in lines {
+            XCTAssertFalse(line.contains("not measured"), "measured pack: \(line)")
+        }
+        for prefix in ["axEvent:", "handlerProbe:", "stateDiff:", "pixelDiff:", "responsiveness:", "crash:"] {
+            XCTAssertTrue(
+                lines.contains { $0.hasPrefix(prefix) },
+                "\(prefix) missing from a pack that measures it: \(lines)"
+            )
+        }
     }
 
     /// Empty lists say so; long ones are bounded with the elided count.

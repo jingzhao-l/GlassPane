@@ -27,6 +27,7 @@ SIGTERM/socket-unlink 闸门变成永久什么都不证明的 no-op。确实要�
 """
 
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -83,6 +84,94 @@ def wait_for_socket(path, timeout=10.0):
     return False
 
 
+def shutdown_stall_diagnosis(engine_sock, probe_sock):
+    """超时那一刻还能看见什么，就说什么——两类失败的修法不一样。
+
+    `startShutdownWaiter` 的收尾顺序是"先 unlink socket，再 exit(0)"
+    （`engine/Sources/glasspaned/main.swift` 里 sigwait 分支那两行，改那里必须同步
+    这里），所以超时还没退出时，socket 文件在不在就是"信号有没有被消费"的可见证据：
+      - 两个文件都没了 ⇒ 信号吃到了，慢在 exit(0) 或调度；
+      - 还有文件留着 ⇒ sigwait 没吃到信号，这才是 SIGTERM 哑火那一族（F10/R5-07 修的洞）。
+    把这两种压成一句"6s 内未退出"，红的那一次就只能靠重跑去猜——本仓为"失败被包装成
+    听起来合理的解释"付过一次让像素通道死十天的代价，这条闸不许再来一次。
+    """
+    leftovers = [name for name in (engine_sock, probe_sock) if os.path.exists(name)]
+    if leftovers:
+        return ("sigwait 未消费信号（socket 文件仍在：%s）——属 SIGTERM 哑火一族"
+                % ", ".join(os.path.basename(one) for one in leftovers))
+    return "信号已消费（两个 socket 均已被 unlink），慢在 exit(0)/调度"
+
+
+_STUB_SOURCE = """
+import os, signal, sys, time
+engine, probe, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+open(engine, "w").close()
+open(probe, "w").close()
+
+
+def arrived(signum, frame):
+    # 'consumed' 复现真收尾的顺序：先 unlink 再退出，然后卡在退出这一步；
+    # 'ignored' 只表示" socket 文件还在"——分类只看现场，不看它为什么不动。
+    if mode == "consumed":
+        for path in (engine, probe):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    time.sleep(30)
+
+
+signal.signal(signal.SIGINT, arrived)
+signal.signal(signal.SIGTERM, arrived)
+time.sleep(30)
+"""
+
+
+def self_test_diagnosis(work):
+    """判据自己得能被红色检验：用两个 stub 各造一种超时形态。
+
+    一个只在真出问题时才说话的诊断，等于没有诊断——这里主动制造"信号已消费但没退出"
+    与"socket 还在"两种现场，各要求诊断说对一次。说错或 stub 压根没卡住（＝这条
+    判据今天没被检验过）都算失败。
+    """
+    stub = os.path.join(work, "shutdown-stub.py")
+    with open(stub, "w", encoding="utf-8") as handle:
+        handle.write(_STUB_SOURCE)
+    problems = []
+    for tag, expect_consumed in (("consumed", True), ("ignored", False)):
+        engine_sock = os.path.join(work, "self-%s-engine.sock" % tag)
+        probe_sock = os.path.join(work, "self-%s-probe.sock" % tag)
+        for path in (engine_sock, probe_sock):
+            if os.path.exists(path):
+                os.unlink(path)
+        child = subprocess.Popen(
+            [sys.executable, stub, engine_sock, probe_sock, tag]
+        )
+        deadline = time.time() + 5
+        while time.time() < deadline and not os.path.exists(engine_sock):
+            time.sleep(0.02)
+        os.kill(child.pid, signal.SIGINT)
+        stalled = True
+        try:
+            child.wait(timeout=1.0)
+            stalled = False
+        except subprocess.TimeoutExpired:
+            pass
+        diagnosis = shutdown_stall_diagnosis(engine_sock, probe_sock)
+        child.kill()
+        child.wait()
+        for path in (engine_sock, probe_sock):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        if not stalled:
+            problems.append("自检 stub（%s）没能在信号后卡住 ⇒ 诊断分支今天没有被检验过" % tag)
+        elif (diagnosis.startswith("信号已消费")) != expect_consumed:
+            problems.append("自检 %s 诊断与现场不符 ⇒ %s" % (tag, diagnosis))
+    return problems
+
+
 def run_case(binary, tag, sock_dir, signum):
     """起一个 daemon，发 signum，断言它自行干净退出。返回失败原因列表。"""
     engine_sock = os.path.join(sock_dir, "engine-%s.sock" % tag)
@@ -100,10 +189,17 @@ def run_case(binary, tag, sock_dir, signum):
     try:
         code = child.wait(timeout=EXIT_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
+        diagnosis = shutdown_stall_diagnosis(engine_sock, probe_sock)
         child.kill()
         child.wait()
-        return ["%s 后 %.0fs 内未退出（SIGTERM 哑火复现，只能靠 KILL）"
-                % (tag, EXIT_TIMEOUT_SECONDS)]
+        try:
+            one, five, _ = os.getloadavg()
+            context = "1 分钟负载 %.2f / %d 核" % (one, os.cpu_count() or 0)
+        except OSError:
+            context = "负载读不出"
+        # 现场先记下来再说话：红一次如果只能靠重跑去猜，那次红就等于没发生。
+        return ["%s 后 %.0fs 内未退出：%s（%s）"
+                % (tag, EXIT_TIMEOUT_SECONDS, diagnosis, context)]
     if code != 0:
         failures.append("%s 后退出码 %d（期望 0）" % (tag, code))
     for leftover in (engine_sock, probe_sock):
@@ -137,7 +233,7 @@ def main(argv):
     sock_dir = "/tmp/glasspane-signal-smoke-%d" % os.getpid()
     os.makedirs(sock_dir, exist_ok=True)
     try:
-        problems = []
+        problems = self_test_diagnosis(sock_dir)
         problems += run_case(binary, "SIGTERM", sock_dir, 15)
         problems += run_case(binary, "SIGINT", sock_dir, 2)
     finally:

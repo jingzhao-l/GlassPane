@@ -93,14 +93,13 @@ final class StateRootTests: XCTestCase {
         XCTAssertEqual(root.probeSocketFile, child(path, "probe.sock"))
         XCTAssertEqual(root.daemonSocketFile, child(path, "daemon.sock"))
 
-        let home = NSHomeDirectory()
         for location in derivedLocations(of: root) {
             XCTAssertTrue(
                 location.path.hasPrefix(path),
                 "\(location.name) escaped the injected root: \(location.path)"
             )
             XCTAssertFalse(
-                location.path.hasPrefix(home),
+                TestSandbox.resolvesUnderRealHome(location.path),
                 "\(location.name) resolved under the home directory anyway: \(location.path)"
             )
             // The runtime half of the isolation contract, applied to the derived
@@ -126,10 +125,13 @@ final class StateRootTests: XCTestCase {
     func testHomeDefaultRootIsThePerUserFolderUnderHome() throws {
         let perUserFolder = "/." + "glasspane"
         let root = StateRoot.homeDefault()
-        XCTAssertEqual(root.path, NSHomeDirectory() + perUserFolder)
-        XCTAssertEqual(root.projectsFile, NSHomeDirectory() + perUserFolder + "/projects.json")
-        XCTAssertEqual(root.approvalsFile, NSHomeDirectory() + perUserFolder + "/approvals.json")
-        XCTAssertEqual(root.probeSocketFile, NSHomeDirectory() + perUserFolder + "/probe.sock")
+        XCTAssertTrue(TestSandbox.equalsRealHome(root.path, plus: perUserFolder), root.path)
+        XCTAssertTrue(TestSandbox.equalsRealHome(root.projectsFile, plus: perUserFolder + "/projects.json"),
+            root.projectsFile)
+        XCTAssertTrue(TestSandbox.equalsRealHome(root.approvalsFile, plus: perUserFolder + "/approvals.json"),
+            root.approvalsFile)
+        XCTAssertTrue(TestSandbox.equalsRealHome(root.probeSocketFile, plus: perUserFolder + "/probe.sock"),
+            root.probeSocketFile)
     }
 
     /// Trailing slashes are normalization, not two different roots: `/x/` and

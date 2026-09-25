@@ -698,10 +698,11 @@ public final class ProbeInbox {
     /// connected, now dropped" instead of seeing an empty list (R2-18, §5.3(3))
     /// — without that history ever reading as a live probe (A-10). A pid that has
     /// re-registered is a live row in `statusJSON()` and is not repeated here.
-    /// Production consumer: `EngineCore.probeStatus()`, which must forward this
-    /// as the response's top-level `recentDisconnections` key; until that line
-    /// exists in EngineCore the array is only reachable from these tests, and the
-    /// daemon log stays the production trace of a drop (R2-18).
+    /// Production consumer: `EngineCore.probeStatus()`, which forwards this as the
+    /// response's top-level `recentDisconnections` key, which
+    /// `EngineCoreTests.testProbeStatusSurfacesTheRecordedDisconnections` pins
+    /// along with its row shape, so a drop reaches an agent instead of living
+    /// only in the daemon log.
     public func recentDisconnectionsJSON() -> [[String: Any]] {
         lock.lock(); defer { lock.unlock() }
         return disconnections

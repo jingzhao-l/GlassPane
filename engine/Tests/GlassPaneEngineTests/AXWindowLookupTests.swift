@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 import CoreGraphics
 @testable import GlassPaneEngine
 
@@ -59,6 +60,12 @@ final class AXWindowLookupTests: XCTestCase {
         XCTAssertFalse(AXChannel.isAppWindowLayer(-2147483625), "墙纸/桌面底片不是应用窗口")
         XCTAssertFalse(AXChannel.isAppWindowLayer(20), "程序坞前景不是")
         XCTAssertFalse(AXChannel.isAppWindowLayer(21), "通知中心不是")
+        // 24/25/27 是 2026-09-25 在本机活列表上实测到的三个装饰层：菜单条(407)、
+        // 控制中心的状态项 ×16(705)、一个 accessory 应用的 52×52 悬浮球(2292)。
+        // 区间上界一旦被人放宽，第一张被截走的"界面"就是菜单条或悬浮球。
+        XCTAssertFalse(AXChannel.isAppWindowLayer(24), "菜单条不是应用窗口")
+        XCTAssertFalse(AXChannel.isAppWindowLayer(25), "菜单栏状态项不是应用窗口")
+        XCTAssertFalse(AXChannel.isAppWindowLayer(27), " accessory 应用的悬浮球不是被测界面")
         // 缺 layer 字段＝认不出这个窗口。放行等于让"读不到"变成"通过"——
         // 那正是把像素通路弄死十天的错误形态（键名写错时 `as? Int` 就是 nil）。
         XCTAssertFalse(AXChannel.isAppWindowLayer(nil), "读不出层号时必须不认，宁可报『没有窗口』")
@@ -87,8 +94,13 @@ final class AXWindowLookupTests: XCTestCase {
     /// 个会话把应用窗口放到 ≥20 层，产品就会安静地回到"永远找不到窗口"——与键名写错同一
     /// 种失效形态，而所有合成夹具仍然是绿的。拿活列表跑一次是唯一能显形的方式。
     ///
-    /// 取不到窗口时如实 skip 并报出实测条数（无屏幕录制席位、无窗口会话都可能）：空列表
-    /// 对键名什么都不能证明，跳过不等于通过，所以把它写成可回溯的一行。
+    /// 前置条件必须**独立**于被测规则：以前用"活列表非空"当前提，2026-09-25 实测证明这条
+    /// 前提是假的——这台机器此刻 24 个在屏窗口全是系统装饰（负层 5、程序坞 20、菜单条 24、
+    /// 状态项 25×16、悬浮球 27），一个应用窗口都没有，此时"0 个能通过层规则"是**正确的
+    /// 产品行为**，而断言把它报成"像素通道又死了"。一个会因为桌面状态变红的控制，最后就是
+    /// 被人忽略的控制——那条让键名写错活了十天的路，正是从"失败被包装成听起来合理的解释"
+    /// 走过来的。现在改用 `NSRunningApplication.activationPolicy` 划候选集（这个判据不由
+    /// 层规则定义，也不由本文件定义），有真应用窗口才允许断言。
     func testLiveWindowListIsSelectableByTheCurrentKeysAndLayerRules() throws {
         guard let raw = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
                 as? [[String: Any]] else {
@@ -102,14 +114,35 @@ final class AXWindowLookupTests: XCTestCase {
             withOwnerKey.count, raw.count,
             "\(raw.count) 个在屏窗口里只有 \(withOwnerKey.count) 个带 kCGWindowOwnerPID —— 其余会被静默跳过"
         )
-        let selectable = withOwnerKey.filter { window in
+        // Finder owns the desktop, which the product must refuse; an accessory
+        // process owns the chrome, which it must also refuse. Neither belongs in
+        // the set that decides whether this machine has anything to prove.
+        let appWindows = withOwnerKey.filter { window in
+            guard let owner = window["kCGWindowOwnerPID"] as? Int,
+                  let app = NSRunningApplication(processIdentifier: pid_t(owner))
+            else { return false }
+            return app.activationPolicy == .regular && app.bundleIdentifier != "com.apple.finder"
+        }
+        let histogram = raw.compactMap { $0[kCGWindowLayer as String] as? Int }
+            .sorted()
+            .reduce(into: [Int: Int]()) { counts, layer in counts[layer, default: 0] += 1 }
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)×\($0.value)" }
+            .joined(separator: " ")
+        guard !appWindows.isEmpty else {
+            throw XCTSkip(
+                "活列表里 \(raw.count) 个在屏窗口没有一个是常规应用拥有的（层号直方图：\(histogram)）"
+                    + " —— 本机此刻验证不了层区间；跳过不等于通过"
+            )
+        }
+        let selectable = appWindows.filter { window in
             guard let owner = window["kCGWindowOwnerPID"] as? Int else { return false }
             return AXChannel.frontmostWindow(in: [window], for: pid_t(owner)) != nil
         }
         XCTAssertGreaterThan(
             selectable.count, 0,
-            "活列表里没有任何窗口能通过当前键名 + 层规则（\(raw.count) 个全被拒）—— 像素通道又死了，"
-                + "这一次要查的是层区间或新的键形制，不是键名字面量"
+            "\(appWindows.count) 个常规应用窗口里没有能通过当前键名 + 层规则的（全机层号直方图：\(histogram)）"
+                + " —— 像素通道又死了，这一次要查的是层区间或新的键形制，不是键名字面量"
         )
     }
 

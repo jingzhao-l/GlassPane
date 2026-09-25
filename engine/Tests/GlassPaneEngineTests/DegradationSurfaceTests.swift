@@ -70,11 +70,13 @@ final class DegradationSurfaceTests: XCTestCase {
         let clock = VariableClock(start: 1_000)
         let tracker = DegradationTracker(minimumSamplesForTrend: 2)
         let probe = ScriptedMetricsProbe()
-        probe.memorySeries = [1_000, 9_000]     // one trending channel: memory
+        // 30 s apart, 60 KB/step: the window has to clear the trend-span floor
+        // before any of this is a judgement rather than a refusal to make one.
+        probe.memorySeries = [1_000, 61_000]     // one trending channel: memory
         let core = makeCore(channel: channel, clock: clock, tracker: tracker, probe: probe)
         _ = try core.attach(bundleId: "com.example.app", pid: nil)
         _ = try core.observe(maxDepth: 4, role: nil)
-        clock.advance(by: 1)
+        clock.advance(by: 30)
         _ = try core.observe(maxDepth: 4, role: nil)
 
         let block = try XCTUnwrap(
@@ -83,12 +85,54 @@ final class DegradationSurfaceTests: XCTestCase {
         )
         let tier = try XCTUnwrap(block["tier"] as? String)
         XCTAssertEqual(block["samples"] as? Int, 2)
-        XCTAssertNotEqual(tier, "degrading", "a single trending channel is not an escalation")
+        XCTAssertEqual(tier, "watch", "one trending channel is an early warning, not an escalation")
+        XCTAssertNotEqual(tier, "degrading", "escalation needs two drivers: \(block)")
         XCTAssertEqual(
             block["drivers"] as? [String] ?? [],
             ["memory"],
             "the one trending driver has to be named, not folded into silence: \(block)"
         )
+        // R6-01: the reading has to travel with what it means. `judged` separates
+        // a measurement from a refusal, the two thresholds are published next to
+        // the counts they gate (so a reader never has to know the defaults), and
+        // `slopes` carries only the channels that produced one.
+        XCTAssertEqual(block["judged"] as? Bool, true, "\(block)")
+        let basis = try XCTUnwrap(block["basis"] as? String)
+        XCTAssertTrue(basis.hasPrefix("judged from "), basis)
+        XCTAssertEqual(block["minimumSamples"] as? Int, 2)
+        XCTAssertEqual(block["minimumSpanSeconds"] as? Double, 20)
+        XCTAssertEqual(block["spanSeconds"] as? Double, 30)
+        let slopes = try XCTUnwrap(block["slopes"] as? [String: Any])
+        XCTAssertNotNil(slopes["memoryBytesPerSec"], "\(slopes)")
+        XCTAssertNil(slopes["pingMsPerSec"], "observe pays for no ping: absent, not zero")
+        XCTAssertNil(slopes["handlesPerSec"], "the scripted probe reports no handle count")
+    }
+
+    /// R6-01, the published half of the fix: before it, an unmeasured window
+    /// reached an agent as `tier: "healthy"` — the same bytes a measured-clean app
+    /// produces. `probe_status` is where the read-only agent looks, so this is the
+    /// one place the ambiguity could not stay invisible.
+    func testProbeStatusSaysWhenNothingWasJudged() throws {
+        let channel = ScriptedChannel(fallbackTree: TestTrees.standard)
+        let clock = VariableClock(start: 1_000)
+        let tracker = DegradationTracker()          // defaults: 6 samples, 20 s span
+        let probe = ScriptedMetricsProbe()
+        probe.memorySeries = [1_000, 9_000]
+        let core = makeCore(channel: channel, clock: clock, tracker: tracker, probe: probe)
+        _ = try core.attach(bundleId: "com.example.app", pid: nil)
+        _ = try core.observe(maxDepth: 4, role: nil)
+        clock.advance(by: 30)
+        _ = try core.observe(maxDepth: 4, role: nil)
+
+        let block = try XCTUnwrap(core.probeStatus()["degradation"] as? [String: Any])
+        XCTAssertEqual(block["judged"] as? Bool, false, "\(block)")
+        XCTAssertEqual(block["tier"] as? String, "healthy")
+        let basis = try XCTUnwrap(block["basis"] as? String)
+        XCTAssertTrue(basis.hasPrefix("not judged: "), basis)
+        XCTAssertTrue(basis.contains("2 samples"), basis)
+        XCTAssertNil(block["drivers"], "a refusal names no drivers")
+        XCTAssertNil(block["slopes"], "a refusal publishes no slopes")
+        XCTAssertEqual(block["minimumSamples"] as? Int, 6, "the reader needs the gate value")
     }
 
     /// The negative half: an engine wired without a tracker reports no

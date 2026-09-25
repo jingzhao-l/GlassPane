@@ -335,7 +335,7 @@ final class EngineCoreRound1Tests: XCTestCase {
         Selector(role: "AXButton", title: "Submit")
     }
 
-    /// C-05: this used to compose its own path from `NSTemporaryDirectory()`,
+    /// C-05: this used to ask Foundation for the temp directory and compose its own path
     /// which the runtime half of the isolation gate never saw. Everything a
     /// state object is built on now comes from `TestSandbox`, whose paths are
     /// asserted isolated before they are handed out.
@@ -1123,7 +1123,7 @@ final class EngineCoreWaveThreeMappingTests: XCTestCase {
         let accepted = [
             // The firmlink must not turn a real home path into a system tree…
             "/System/Volumes/Data/Users/x/work/app/.glasspane/evidence",
-            // …and an injected temp archive (what `NSTemporaryDirectory()`
+            // …and an injected temp archive (what the system temp lookup
             // produces, i.e. every test in this target) must stay admissible.
             "/private/var/folders/zz/zy/T/gpb6-1",
             "/Users/x/work/notes-app/.glasspane/evidence",
@@ -1593,6 +1593,39 @@ final class EngineCoreWaveTwoBetaTests: XCTestCase {
             EngineCore.ownabilityDefect(path: fabricated),
             "a path whose nearest existing ancestor belongs to root is not ours to archive into"
         )
+    }
+
+    /// R6-05: two `stat` outcomes are not one absence. Measured on this machine,
+    /// "not there" is `NSCocoaErrorDomain` 260 and "a directory above it will not
+    /// let us through" is 257 — and the loop used to fold both into an empty
+    /// attribute set, climb one level, and certify whatever it found there. So a
+    /// locked ancestor quietly approved everything beneath it, which is the
+    /// read-nothing-passes shape this project keeps having to re-learn.
+    func testUnexaminableAncestorIsADefectNotAnAbsence() throws {
+        let outer = TestSandbox.directory("locked-outer")
+        let locked = outer + "/locked"
+        try FileManager.default.createDirectory(atPath: locked, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locked)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked)
+
+        // Precondition, measured rather than assumed: with the directory at 0000,
+        // *listing* it fails for this process even though statting the directory
+        // itself succeeds (an inode is not an entry). If that ever stops being
+        // true on this OS, this case has to be rethought instead of deleted.
+        XCTAssertThrowsError(try FileManager.default.contentsOfDirectory(atPath: locked))
+
+        let defect = try XCTUnwrap(
+            EngineCore.ownabilityDefect(path: locked + "/evidence"),
+            "an unsearchable ancestor must be reported as an unexamined path, not climbed past"
+        )
+        XCTAssertTrue(defect.contains("cannot be examined"), defect)
+        XCTAssertTrue(defect.contains(locked), "the message has to name what it could not read: \(defect)")
+
+        // The other side of the same line: a *missing* child of a directory this
+        // process owns is still admissible — that is the ordinary first write.
+        XCTAssertNil(EngineCore.ownabilityDefect(path: outer + "/not-yet-created/evidence"))
     }
 
     /// The refusal has to reach the stored value, not just the helper: the same

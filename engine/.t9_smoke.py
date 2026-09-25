@@ -35,6 +35,7 @@ N 轮 act → 内存/句柄斜率持续为正 → 联合裁决 degrading → evi
 import hashlib
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -142,6 +143,11 @@ final class LeakCanary: NSObject, NSApplicationDelegate {
         window.contentView?.addSubview(button)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        // R6-04: report once before any click. The harness needs a baseline it
+        // measured — "8MB per click" recited from `LEAK_BYTES` says what the
+        // script intends, not what this process did — and a zero-click line is
+        // also the earliest witness that the canary is alive and writing.
+        reportMetrics()
     }
 
     @objc private func leakOne(_ sender: Any?) {
@@ -212,7 +218,11 @@ def fail(msg):
 # 本段在 engine/.p6_smoke.py 与 engine/.t9_smoke.py 中逐字一致：冒烟脚本按本仓惯例
 # 各自自包含（.smoke_client.py 与 .t9_smoke.py 的 send/recv_frame 亦然），不做跨脚本
 # import；改一处必须同步另一处。
-LEAK_MB_PER_CLICK = 8      # 与 CANARY_SOURCE 的 LEAK_BYTES 同值，只用于失败信息
+LEAK_MB_PER_CLICK = 8      # 与 CANARY_SOURCE 的 LEAK_BYTES 同值
+# R6-04：它不再是失败信息里的一句宣读，而是注入侧的下限判据——实测 rss 增量 ÷ 实测
+# clicks 必须达到它的半数（另一半留给被测量进程自己的分配）。以前只印不判，于是
+# "T9 没响"永远有可能是"泄漏根本没发生"，而那会把判据叫醒去查一个不存在的 bug。
+MIN_LEAK_MB_PER_CLICK = LEAK_MB_PER_CLICK / 2
 ISOLATION_PROBE_PROJECT_ID = "prj_gp-smoke-isolation-canary"
 ISOLATION_PROBE_TIMEOUT = 20.0
 # 两个都必须问得到才算数：evidence 靠 --evidence-stats 的 dir，projects 靠
@@ -540,18 +550,105 @@ def find_leak_button(tree, depth=0):
     return None
 
 
-def _newest_source_mtime(source_root):
-    """`source_root` 下最新源文件的 mtime（跳过 .build 与点目录）。0.0 = 目录不存在/无源文件。"""
+def _newest_source_mtime(source_roots):
+    """`source_roots` 里最新源文件的 mtime（跳过 .build 与点目录）。0.0 = 一个都走不出。
+
+    参数是**一组**目录：新鲜度必须对着这个产物真正链接的源码集来量，见
+    `_target_source_roots`。
+    """
     newest = 0.0
-    for dirpath, dirnames, filenames in os.walk(source_root):
-        dirnames[:] = [d for d in dirnames if d != ".build" and not d.startswith(".")]
-        for name in filenames:
-            if name.endswith((".swift", ".c", ".h", ".m", ".py", ".ts", ".js")):
-                try:
-                    newest = max(newest, os.path.getmtime(os.path.join(dirpath, name)))
-                except OSError:
-                    continue
+    for source_root in source_roots:
+        for dirpath, dirnames, filenames in os.walk(source_root):
+            dirnames[:] = [d for d in dirnames if d != ".build" and not d.startswith(".")]
+            for name in filenames:
+                if name.endswith((".swift", ".c", ".h", ".m", ".py", ".ts", ".js")):
+                    try:
+                        newest = max(newest, os.path.getmtime(os.path.join(dirpath, name)))
+                    except OSError:
+                        continue
     return newest
+
+
+def _package_targets(package_swift):
+    """Package.swift 里的 target → (path, 依赖名)。写法变了就老实返回 {}，由调用方退回宽基线。"""
+    try:
+        with open(package_swift, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        return {}
+    found = {}
+    # Every target kind SwiftPM knows, not just the three this file first met:
+    # `engine/probe/Package.swift` declares its macro plugin with `.macro(`, and
+    # missing it there silently dropped the macro sources from the demo's
+    # freshness baseline while the note claimed they were an external package.
+    kinds = "executableTarget|testTarget|target|macro|plugin|binary|systemLibrary"
+    for chunk in re.split(r"\.(?:" + kinds + r")\s*\(", text)[1:]:
+        name = re.search(r'name:\s*"([^"]+)"', chunk)
+        if not name:
+            continue
+        path = re.search(r'path:\s*"([^"]+)"', chunk)
+        # `path:` is optional in a manifest: engine/Package.swift writes it, engine/probe/
+        # Package.swift does not and rides SwiftPM's default (`Sources/<name>`). Measured:
+        # requiring the literal silently lost `probe-demo`, i.e. the demo's freshness
+        # baseline fell back to the whole tree while claiming to be scoped.
+        relative = path.group(1) if path else os.path.join("Sources", name.group(1))
+        deps = re.search(r"dependencies:\s*\[([^\]]*)\]", chunk)
+        found[name.group(1)] = (
+            relative,
+            re.findall(r'"([^"]+)"', deps.group(1)) if deps else [],
+        )
+    return found
+
+
+def _target_source_roots(package_dir, target):
+    """`target` 的源码目录 + 它在**本包内**的依赖闭包，名单现读自 Package.swift。
+
+    R6-04：新鲜度基线原来取整个 `engine/Sources`。任何与被测产物无关的 target（GUI
+    面板）改一行，daemon 这一条就被判成"产物比源码旧"→ NOT RUN。方向是安全的（宁可
+    白烧一次门禁），但白烧在无关事由上的门禁，下一次就被人 `--skip` 掉——那才是真失效。
+    现在只量这个产物实际链接的 target 集；闭包从清单的 `path:` / `dependencies:` 现读，
+    不写死名单：新增一个包内依赖不需要有人记得回来改这里。
+
+    返回 (源码目录列表, 本包外的依赖名)。依赖名不在本包 target 集里＝跨包 `.product`
+    （SwiftSyntax 那一类），它不参与"本仓产物是否当前"的判断，但要说出来：如果哪天那
+    是个拼错的**本包** target 名，这里就是看得见它的地方。target 本身找不到 → ([], [])。
+    """
+    targets = _package_targets(os.path.join(package_dir, "Package.swift"))
+    if target not in targets:
+        return [], []
+    roots, pending, seen, external = [], [target], set(), []
+    while pending:
+        current = pending.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        entry = targets.get(current)
+        if entry is None:
+            external.append(current)
+            continue
+        roots.append(os.path.join(package_dir, entry[0]))
+        pending.extend(entry[1])
+    return sorted(set(roots)), sorted(set(external))
+
+
+def build_source_roots(package_dir, target):
+    """`_target_source_roots` 的带退路版本：解析不出来就退回旧的宽基线，并说明为什么。
+
+    退回宽基线只会让门禁更容易 NOT RUN，不会让它更容易放行——这条方向是故意的。
+    """
+    roots, external = _target_source_roots(package_dir, target)
+    if not roots:
+        print(
+            f"NOTE 解析不出 {package_dir} 里 target {target!r} 的源码集，"
+            f"新鲜度基线退回 {package_dir}/Sources（宽基线：无关 target 的改动也会让本轮 NOT RUN）"
+        )
+        return [os.path.join(package_dir, "Sources")]
+    if external:
+        print(
+            f"NOTE {target} 的依赖里有 {len(external)} 个本包外的名字（{', '.join(external)}），"
+            "不计入本仓源码新鲜度——它们是外部包的产物，不是这里没算进来的源码"
+        )
+    return roots
 
 
 def require_current_build(pairs):
@@ -560,10 +657,12 @@ def require_current_build(pairs):
     R4-02。此前两条端到端闸只检查产物**存在**，不检查它是**当前构建**：实测过一次
     demo 停在旧能力集（hello 报 caps=['z1']，缺 z3/checkpoint），于是整轮"绿"测的是旧 SDK。
     判据是产物的指纹与时间戳，不是"我刚刚 build 过"这句话——命令说过什么不等于发生了什么。
+    R6-04 把每对的第三项从"一个源码根"改成"一组"：由 `build_source_roots` 从
+    Package.swift 现读该 target 的依赖闭包，无关 target 的改动不再把本轮打成 NOT RUN。
     返回 (指纹行, 不成立的原因)。原因非空由调用方 NOT RUN(2)：过期产物跑出来的结论不能用。
     """
     lines, problems = [], []
-    for role, binary, source_root in pairs:
+    for role, binary, source_roots in pairs:
         try:
             with open(binary, "rb") as handle:
                 digest = hashlib.sha256(handle.read()).hexdigest()[:12]
@@ -571,17 +670,19 @@ def require_current_build(pairs):
             problems.append(f"{role}: 产物读不出（{error}）——身份无法确认，不放行")
             continue
         built = os.path.getmtime(binary)
-        newest_src = _newest_source_mtime(source_root)
+        newest_src = _newest_source_mtime(source_roots)
         when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(built))
         lines.append(f"{role} sha256:{digest} mtime={when}")
         if not newest_src:
             problems.append(
-                f"{role}: 源码树 {source_root} 走不出任何源文件——无法判断产物是否当前，不放行"
+                f"{role}: 源码集 {', '.join(source_roots)} 走不出任何源文件"
+                "——无法判断产物是否当前，不放行"
             )
             continue
         if built + 1.0 < newest_src:
             problems.append(
-                f"{role} 比它所声称的源码树旧：{binary} 构建于 {when}，而 {source_root} 下最新源文件是 "
+                f"{role} 比它所声称的源码集旧：{binary} 构建于 {when}，而 "
+                + f"{', '.join(source_roots)} 下最新源文件是 "
                 + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(newest_src))
                 + " —— 本轮会测到旧构建，改动不参与测量"
             )
@@ -685,7 +786,7 @@ def main():
             # 不早于 engine/Sources，否则这 24 轮测的是旧 daemon。金丝雀每次由 swiftc
             # 现编，不存在过期问题，所以这里只量 daemon。
             fingerprints, stale = require_current_build(
-                [('daemon', daemon_bin, os.path.join(HERE, 'Sources'))]
+                [('daemon', daemon_bin, build_source_roots(HERE, 'glasspaned'))]
             )
             if stale:
                 print('NOT RUN — 被测 daemon 不是当前构建，本轮未执行任何断言（NOT RUN ≠ PASS）：')
@@ -760,8 +861,19 @@ def main():
                 break
             time.sleep(0.5)
         if button is None:
-            fail("金丝雀 AX 树中未找到 title='leak' 的 AXButton（AX 权限未授予 daemon？）")
+            fail(
+                "金丝雀 AX 树中未找到 identifier='leak-button' 的 AXButton"
+                "（标题现在是 leak#N，而选择器从来不按标题匹配；先怀疑 AX 权限未授予 daemon）"
+            )
 
+        # 注入侧基线：第一轮按下**之前**的自报计数。没有它，下面那句"每击泄漏多少"
+        # 就只能引用源码常量，而常量说明的是脚本打算注入多少，不是这台机器上真的注入了多少。
+        baseline = canary_metrics(metrics_path)
+        if baseline is None:
+            fail(
+                "注入侧基线读不到（金丝雀没写自报计数文件）——缺了基线，\"每击泄漏多少\"就退化成"
+                "宣读源码常量，那是把没测到当不用判；本轮不跑 T9 判定"
+            )
         trajectory = []
         verdict_reason = None
         for round_index in range(1, max_acts + 1):
@@ -780,6 +892,18 @@ def main():
                         "问题在点击没有到达 handler，不在 T9 检测器；"
                         "读 daemon.log 里的 pixel-capture-* 标签与 assert_element leak#N 佐证窗口上屏"
                     )
+                else:  # a baseline is a precondition of reaching here (checked above)
+                    clicks = probe[0] - baseline[0]
+                    grew_mb = (probe[1] - baseline[1]) / 1024.0
+                    per_click = grew_mb / clicks if clicks else 0.0
+                    if per_click < MIN_LEAK_MB_PER_CLICK:
+                        fail(
+                            f"注入速率不足：实测 {clicks} 次点击只让常驻内存涨了 {grew_mb:.1f}MB"
+                            f"（每击 {per_click:.1f}MB，下限 {MIN_LEAK_MB_PER_CLICK}MB）——"
+                            "这里 T9 的沉默是正确的，要查的是金丝雀，不是把判据调低"
+                        )
+                    print(f"PASS 注入侧实测：{clicks} 击 +{grew_mb:.1f}MB"
+                          f"（每击 {per_click:.1f}MB ≥ 下限 {MIN_LEAK_MB_PER_CLICK}MB）")
             frame = send(sock, nid(), "last_evidence", {})
             pack = frame.get("evidencePack", frame)
             circuit = pack.get("circuitBreaker") or {}
@@ -802,8 +926,9 @@ def main():
             print(f"注入侧实测：{shown}")
             fail(
                 f"{max_acts} 轮内未检出 degradation|，T9 未触发。注入侧实测：{shown} "
-                f"（期望 clicks≈{max_acts}、RSS 至少增长 {LEAK_MB_PER_CLICK}MB×clicks）——"
-                "先比对这一行与上面的轨迹再判断是注入还是判据"
+                f"（期望 clicks≈{max_acts}，实测 "
+                f"{measured[0] if measured else '无'}；每击应有的 {LEAK_MB_PER_CLICK}MB 见上面"
+                + "\"注入侧实测\"那一行——它 PASS 过才说明泄漏真的在长，这时才该怀疑判据"
             )
 
         # 退化裁决已落到 evidence → diagnose 应以 T9 归类（Classifer T9 规则）。

@@ -28,6 +28,7 @@ Exit codes: 0 = PASS（全部断言真实执行）, 1 = FAIL,
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -68,18 +69,105 @@ def resolve_binary(explicit, env_var, candidates):
     return candidates[-1]
 
 
-def _newest_source_mtime(source_root):
-    """`source_root` 下最新源文件的 mtime（跳过 .build 与点目录）。0.0 = 目录不存在/无源文件。"""
+def _newest_source_mtime(source_roots):
+    """`source_roots` 里最新源文件的 mtime（跳过 .build 与点目录）。0.0 = 一个都走不出。
+
+    参数是**一组**目录：新鲜度必须对着这个产物真正链接的源码集来量，见
+    `_target_source_roots`。
+    """
     newest = 0.0
-    for dirpath, dirnames, filenames in os.walk(source_root):
-        dirnames[:] = [d for d in dirnames if d != ".build" and not d.startswith(".")]
-        for name in filenames:
-            if name.endswith((".swift", ".c", ".h", ".m", ".py", ".ts", ".js")):
-                try:
-                    newest = max(newest, os.path.getmtime(os.path.join(dirpath, name)))
-                except OSError:
-                    continue
+    for source_root in source_roots:
+        for dirpath, dirnames, filenames in os.walk(source_root):
+            dirnames[:] = [d for d in dirnames if d != ".build" and not d.startswith(".")]
+            for name in filenames:
+                if name.endswith((".swift", ".c", ".h", ".m", ".py", ".ts", ".js")):
+                    try:
+                        newest = max(newest, os.path.getmtime(os.path.join(dirpath, name)))
+                    except OSError:
+                        continue
     return newest
+
+
+def _package_targets(package_swift):
+    """Package.swift 里的 target → (path, 依赖名)。写法变了就老实返回 {}，由调用方退回宽基线。"""
+    try:
+        with open(package_swift, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        return {}
+    found = {}
+    # Every target kind SwiftPM knows, not just the three this file first met:
+    # `engine/probe/Package.swift` declares its macro plugin with `.macro(`, and
+    # missing it there silently dropped the macro sources from the demo's
+    # freshness baseline while the note claimed they were an external package.
+    kinds = "executableTarget|testTarget|target|macro|plugin|binary|systemLibrary"
+    for chunk in re.split(r"\.(?:" + kinds + r")\s*\(", text)[1:]:
+        name = re.search(r'name:\s*"([^"]+)"', chunk)
+        if not name:
+            continue
+        path = re.search(r'path:\s*"([^"]+)"', chunk)
+        # `path:` is optional in a manifest: engine/Package.swift writes it, engine/probe/
+        # Package.swift does not and rides SwiftPM's default (`Sources/<name>`). Measured:
+        # requiring the literal silently lost `probe-demo`, i.e. the demo's freshness
+        # baseline fell back to the whole tree while claiming to be scoped.
+        relative = path.group(1) if path else os.path.join("Sources", name.group(1))
+        deps = re.search(r"dependencies:\s*\[([^\]]*)\]", chunk)
+        found[name.group(1)] = (
+            relative,
+            re.findall(r'"([^"]+)"', deps.group(1)) if deps else [],
+        )
+    return found
+
+
+def _target_source_roots(package_dir, target):
+    """`target` 的源码目录 + 它在**本包内**的依赖闭包，名单现读自 Package.swift。
+
+    R6-04：新鲜度基线原来取整个 `engine/Sources`。任何与被测产物无关的 target（GUI
+    面板）改一行，daemon 这一条就被判成"产物比源码旧"→ NOT RUN。方向是安全的（宁可
+    白烧一次门禁），但白烧在无关事由上的门禁，下一次就被人 `--skip` 掉——那才是真失效。
+    现在只量这个产物实际链接的 target 集；闭包从清单的 `path:` / `dependencies:` 现读，
+    不写死名单：新增一个包内依赖不需要有人记得回来改这里。
+
+    返回 (源码目录列表, 本包外的依赖名)。依赖名不在本包 target 集里＝跨包 `.product`
+    （SwiftSyntax 那一类），它不参与"本仓产物是否当前"的判断，但要说出来：如果哪天那
+    是个拼错的**本包** target 名，这里就是看得见它的地方。target 本身找不到 → ([], [])。
+    """
+    targets = _package_targets(os.path.join(package_dir, "Package.swift"))
+    if target not in targets:
+        return [], []
+    roots, pending, seen, external = [], [target], set(), []
+    while pending:
+        current = pending.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        entry = targets.get(current)
+        if entry is None:
+            external.append(current)
+            continue
+        roots.append(os.path.join(package_dir, entry[0]))
+        pending.extend(entry[1])
+    return sorted(set(roots)), sorted(set(external))
+
+
+def build_source_roots(package_dir, target):
+    """`_target_source_roots` 的带退路版本：解析不出来就退回旧的宽基线，并说明为什么。
+
+    退回宽基线只会让门禁更容易 NOT RUN，不会让它更容易放行——这条方向是故意的。
+    """
+    roots, external = _target_source_roots(package_dir, target)
+    if not roots:
+        print(
+            f"NOTE 解析不出 {package_dir} 里 target {target!r} 的源码集，"
+            f"新鲜度基线退回 {package_dir}/Sources（宽基线：无关 target 的改动也会让本轮 NOT RUN）"
+        )
+        return [os.path.join(package_dir, "Sources")]
+    if external:
+        print(
+            f"NOTE {target} 的依赖里有 {len(external)} 个本包外的名字（{', '.join(external)}），"
+            "不计入本仓源码新鲜度——它们是外部包的产物，不是这里没算进来的源码"
+        )
+    return roots
 
 
 def require_current_build(pairs):
@@ -88,10 +176,12 @@ def require_current_build(pairs):
     R4-02。此前两条端到端闸只检查产物**存在**，不检查它是**当前构建**：实测过一次
     demo 停在旧能力集（hello 报 caps=['z1']，缺 z3/checkpoint），于是整轮"绿"测的是旧 SDK。
     判据是产物的指纹与时间戳，不是"我刚刚 build 过"这句话——命令说过什么不等于发生了什么。
+    R6-04 把每对的第三项从"一个源码根"改成"一组"：由 `build_source_roots` 从
+    Package.swift 现读该 target 的依赖闭包，无关 target 的改动不再把本轮打成 NOT RUN。
     返回 (指纹行, 不成立的原因)。原因非空由调用方 NOT RUN(2)：过期产物跑出来的结论不能用。
     """
     lines, problems = [], []
-    for role, binary, source_root in pairs:
+    for role, binary, source_roots in pairs:
         try:
             with open(binary, "rb") as handle:
                 digest = hashlib.sha256(handle.read()).hexdigest()[:12]
@@ -99,17 +189,19 @@ def require_current_build(pairs):
             problems.append(f"{role}: 产物读不出（{error}）——身份无法确认，不放行")
             continue
         built = os.path.getmtime(binary)
-        newest_src = _newest_source_mtime(source_root)
+        newest_src = _newest_source_mtime(source_roots)
         when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(built))
         lines.append(f"{role} sha256:{digest} mtime={when}")
         if not newest_src:
             problems.append(
-                f"{role}: 源码树 {source_root} 走不出任何源文件——无法判断产物是否当前，不放行"
+                f"{role}: 源码集 {', '.join(source_roots)} 走不出任何源文件"
+                "——无法判断产物是否当前，不放行"
             )
             continue
         if built + 1.0 < newest_src:
             problems.append(
-                f"{role} 比它所声称的源码树旧：{binary} 构建于 {when}，而 {source_root} 下最新源文件是 "
+                f"{role} 比它所声称的源码集旧：{binary} 构建于 {when}，而 "
+                + f"{', '.join(source_roots)} 下最新源文件是 "
                 + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(newest_src))
                 + " —— 本轮会测到旧构建，改动不参与测量"
             )
@@ -776,8 +868,8 @@ def main():
                   "或确实要跨副本时，用位置参数/env（GLASSPANE_DAEMON_BIN、GLASSPANE_DEMO_BIN）显式点名。")
             sys.exit(2)
     fingerprints, stale = require_current_build([
-        ("daemon", daemon_bin, os.path.join(HERE, "Sources")),
-        ("demo", demo_bin, os.path.join(HERE, "probe", "Sources")),
+        ("daemon", daemon_bin, build_source_roots(HERE, "glasspaned")),
+        ("demo", demo_bin, build_source_roots(os.path.join(HERE, "probe"), "probe-demo")),
     ])
     if stale:
         print("NOT RUN — 被测产物不是当前构建，本轮未执行任何断言（NOT RUN ≠ PASS）：")

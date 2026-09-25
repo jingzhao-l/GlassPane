@@ -243,6 +243,50 @@ enum TestSandbox {
     /// other and never reuse a leftover directory.
     static let root = NSTemporaryDirectory() + "gp-t\(ProcessInfo.processInfo.processIdentifier)"
 
+    /// Where a path resolves, expressed as a *predicate* rather than as a string.
+    ///
+    /// This is deliberately not `static let systemHome = NSHomeDirectory()`.
+    /// Handing out the location would be a route around the isolation gate: the
+    /// shapes it bans are `NSHomeDirectory()` composed into a path, and an alias
+    /// with a nicer name matches no rule while being the same capability — a test
+    /// could build a state path under home and `removeItem` it again, which is the
+    /// exact route round 6 closed (`uniqueHomePath` did that for three cases). A
+    /// test that needs to *know* whether a path is under home asks this; a test
+    /// that needs a place to write uses `directory`/`filePath`/`pendingDirectory`.
+    static func resolvesUnderRealHome(_ path: String) -> Bool {
+        path.hasPrefix(NSHomeDirectory() + "/")
+    }
+
+    /// `path == <real home> + suffix`, for the cases that assert where the
+    /// production default lands (the per-user state folder). Same reasoning as
+    /// above: the comparison is the information, not the location.
+    static func equalsRealHome(_ path: String, plus suffix: String) -> Bool {
+        path == NSHomeDirectory() + suffix
+    }
+
+    /// The real temp root, for the cases that must name it rather than trust a
+    /// helper's word for it: `isolationDefect` compares against it, and the
+    /// residue predicate of the console reads paths shaped like a leftover
+    /// archive. Read-only by the rule above — compose nothing from it.
+    static let systemTempRoot = NSTemporaryDirectory()
+
+    /// A unique directory path that does **not** exist yet, for the tests whose
+    /// subject is the creation itself (a fresh archive must be private *before*
+    /// its first pack). Its parent is the sandbox root and it goes through the
+    /// same runtime check as `directory`, so an uncreated path is isolated in
+    /// advance instead of being discovered by a write. The root itself is
+    /// created here: a test that plants a file with `createFile` gets no
+    /// intermediate directories from Foundation, and a silently missing parent
+    /// would read as a defect in the code under test.
+    static func pendingDirectory(_ label: String = "state") -> String {
+        let path = "\(root)/\(token(label))-\(UUID().uuidString.prefix(8))"
+        assertIsolated(path, label: label)
+        try? FileManager.default.createDirectory(
+            atPath: root, withIntermediateDirectories: true
+        )
+        return path
+    }
+
     /// A unique directory for one purpose, created on demand. A sandbox that
     /// could not be created is reported as such — every later assertion of the
     /// test would otherwise read as a defect in the code under test.

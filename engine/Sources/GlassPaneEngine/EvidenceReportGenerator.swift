@@ -6,9 +6,10 @@ import Foundation
 /// PRD US-10 evidence 审查 UX). Pure functions: the same pack in, the same
 /// string out — no timestamps are synthesized (capturedAt is echoed as-is),
 /// no randomness, no state. All pack-owned values are rendered verbatim; an
-/// absent optional field renders as the "—" placeholder, a channel that was
-/// never measured as a named "not measured" line (spec v1.3 §10.2 缺省安全性,
-/// §13.1 如实声明).
+/// absent optional field renders as the "—" placeholder, and every one of the
+/// six signal channels renders a line whether or not it was measured: absence
+/// is named on its own line rather than shown as a missing line (spec v1.3
+/// §10.2 缺省安全性, §13.1 如实声明).
 ///
 /// The mcp-shell type mirror (`mcp-shell/src/evidence-report.ts`) is checked
 /// by a real shared golden, not by this comment: `kernel/fixtures/
@@ -55,11 +56,18 @@ public enum EvidenceReportGenerator {
             lines.append(
                 "axEvent: changed=\(axEvent.axChanged) nodes=\(axEvent.nodeCount) latencyMs=\(doubleText(axEvent.latencyMs))"
             )
+        } else {
+            lines.append(axEventNotMeasured)
         }
         // P6 §3.1 promotes both probe channels to first-class signals, and
         // T4/T5/T7/T8 rest on them: a report that stops at the black-box
         // signals cannot justify `attribution: strong`. A null channel renders
         // a "not measured" line, never a gap that reads as "nothing happened".
+        // That rule used to be written here and obeyed by two of the six
+        // channels only — `axEvent`, `pixelDiff`, `responsiveness` and `crash`
+        // silently dropped their line, which is the same defect the classifier
+        // was fixed for (a report where an unmeasured channel and an
+        // unremarkable measurement look alike).
         if let handlerProbe = pack.signals.handlerProbe {
             lines.append(handlerProbeText(handlerProbe))
         } else {
@@ -76,16 +84,22 @@ public enum EvidenceReportGenerator {
                 line += " bounds=\(doubleText(bounds.x)),\(doubleText(bounds.y)),\(doubleText(bounds.width)),\(doubleText(bounds.height))"
             }
             lines.append(line)
+        } else {
+            lines.append(pixelDiffNotMeasured)
         }
         if let responsiveness = pack.signals.responsiveness {
             lines.append(
                 "responsiveness: responsive=\(responsiveness.responsive) pingMs=\(doubleText(responsiveness.pingMs))"
             )
+        } else {
+            lines.append(responsivenessNotMeasured)
         }
         if let crash = pack.signals.crash {
             lines.append(
                 "crash: aliveBefore=\(crash.processAliveBefore) aliveAfter=\(crash.processAliveAfter)"
             )
+        } else {
+            lines.append(crashNotMeasured)
         }
         return lines
     }
@@ -170,6 +184,19 @@ public enum EvidenceReportGenerator {
         "handlerProbe: not measured (no probe connection served this act window)"
     private static let stateDiffNotMeasured =
         "stateDiff: not measured (the probe reported no state channel)"
+
+    /// The four black-box channels, in the same shape. Each line says what the
+    /// pack does *not* carry; none of them guesses why, because the pack records
+    /// no reason and an invented one is how a broken capture channel spent ten
+    /// days reading as a quiet UI.
+    private static let axEventNotMeasured =
+        "axEvent: not measured (this pack carries no AX tree digest)"
+    private static let pixelDiffNotMeasured =
+        "pixelDiff: not measured (this pack carries no pixel comparison)"
+    private static let responsivenessNotMeasured =
+        "responsiveness: not measured (this pack carries no responsiveness round trip)"
+    private static let crashNotMeasured =
+        "crash: not measured (this pack carries no process liveness sample)"
 
     /// Render caps: a pack may legally carry 32 handlers / 64 state entries.
     private static let maxHandlersShown = 8

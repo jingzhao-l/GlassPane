@@ -56,7 +56,7 @@ final class EngineP5Batch3Tests: XCTestCase {
 
     /// Every scratch directory in this file goes through `TestSandbox`, so the
     /// isolation verdict (`TestSupport.assertIsolated`) is computed before a
-    /// store can be pointed at a path — a local `temporaryDirectory` here was a
+    /// store can be pointed at a path — a locally composed temp path here was a
     /// route around the gate that W5-A exists to close, and `EvidenceStore`
     /// deletes from whatever directory it is handed.
     private func makeTempDir(_ name: String) throws -> String {

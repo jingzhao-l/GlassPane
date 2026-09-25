@@ -643,8 +643,15 @@ final class PermissionSubjectTests: XCTestCase {
 
     // MARK: - R5-04 证据档案目录的 0700 隔离（SocketServer 同口径）
 
-    private func uniqueHomePath(_ tag: String) -> String {
-        NSHomeDirectory() + "/gp-r504-\(tag)-\(UUID().uuidString.prefix(8))"
+    /// These three cases are about the *mode* an archive ends up with, not about
+    /// which directory it lives in, so they take sandbox paths like every other
+    /// state in this suite. The older shape composed a unique folder under
+    /// `NSHomeDirectory` and deleted it afterwards: writing and `removeItem`-ing
+    /// a home-relative tree is exactly what the isolation gate exists to stop,
+    /// and "the name I picked will not collide" is not isolation. The outside-home
+    /// premise has its own case (`testStoreOutsideHomeIsStillIsolated`).
+    private func archivePathUnderTest(_ tag: String) -> String {
+        TestSandbox.pendingDirectory("r504-" + tag)
     }
 
     private func posixMode(of path: String) -> Int {
@@ -652,8 +659,8 @@ final class PermissionSubjectTests: XCTestCase {
         return ((attributes[.posixPermissions] as? NSNumber)?.int16Value).map(Int.init) ?? -1
     }
 
-    func testFreshHomeArchiveIsCreatedPrivateBeforeFirstPack() throws {
-        let dir = uniqueHomePath("fresh")
+    func testFreshArchiveIsCreatedPrivateBeforeFirstPack() throws {
+        let dir = archivePathUnderTest("fresh")
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let store = EvidenceStore(directory: dir, log: EngineLog(quiet: true))
         XCTAssertTrue(store.write(makeMinimalPack()), "隔离可建立时不得挡写入")
@@ -665,7 +672,7 @@ final class PermissionSubjectTests: XCTestCase {
         // R5-04 的真实形态：~/.glasspane 由 mcp-shell 以默认模式先建，而
         // createDirectory(attributes:) 对**已存在**目录是 no-op——修复只剩
         // chmod-after-create 这一条路，此测试把这条路径与"没修"区分开。
-        let dir = uniqueHomePath("tighten")
+        let dir = archivePathUnderTest("tighten")
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         chmod(dir, 0o755)
         XCTAssertEqual(posixMode(of: dir), 0o755, "前置条件：已存在的共享档案目录")
@@ -679,7 +686,7 @@ final class PermissionSubjectTests: XCTestCase {
         // 权限建立不起来时的失败形态：拒绝写入（write 返回 false，EngineCore 侧
         // 现成地呈现为 degraded + "make the evidence directory writable" remedy），
         // 既不静默继续世界可读地写，也不删掉重来。
-        let planted = uniqueHomePath("planted")
+        let planted = archivePathUnderTest("planted")
         FileManager.default.createFile(atPath: planted, contents: Data("precious".utf8))
         defer { try? FileManager.default.removeItem(atPath: planted) }
         let store = EvidenceStore(directory: planted, log: EngineLog(quiet: true))
@@ -691,11 +698,16 @@ final class PermissionSubjectTests: XCTestCase {
     // MARK: - A-18 probe.sock 抢占判定（bind → 三态判定 → 只清无主名字）
 
     private func makeProbeTestPath(_ tag: String) throws -> String {
-        // Keep the full path well inside sockaddr_un's 104-byte sun_path:
-        // NSTemporaryDirectory is already ~60 chars on dev machines.
-        let dir = NSTemporaryDirectory() + "gp-a18-\(tag)-\(UUID().uuidString.prefix(4))"
+        // `sockaddr_un.sun_path` is 104 bytes, so the bound name has to stay
+        // short. Asserted rather than assumed: the path now comes from the
+        // process-scoped sandbox root, and a root that grows would otherwise
+        // show up as a bind failure that reads like a defect in the guard under
+        // test.
+        let dir = TestSandbox.pendingDirectory("a18" + tag)
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        return dir + "/probe.sock"
+        let path = dir + "/probe.sock"
+        XCTAssertLessThan(path.utf8.count, 104, "socket path exceeds sun_path: \(path)")
+        return path
     }
 
     /// 一个占住名字的裸监听 fd：模拟先起 daemon 的 probe.sock（按协议它永不在

@@ -177,9 +177,14 @@ P1 v1.0 §2 实施记录项 3、P2 v2.1 §19.2、P4 v4.0 §33.1 观察 3 仍写
   （不读）；shell 侧已在定义处与 `--help` 里如实标注为"本进程的猜测"并给出两条 agent 可自行执行的出路
   （`launchctl print …` 读回、`--socket-path`/`GLASSPANE_ENGINE_SOCK`）。`installer/cli.js` 仍以
   `process.env.HOME` 拼 `--socket-path`，属同一族的安装期风险，未动。
-- 路径校验的 Swift 半边其余缺口：`given` 双查、`recipeConfigPath`/`calibrationAssetsPath` 内容级校验、
-  ownership/世界可写兜底（TS 已有）。`path-consistency.test.mjs` 现在**在文件头明说**自己只比名单不比语义。
-- P6 §5.4(3) 冻结形状表仍未逐格并入新增键；`--no-c33` 与 `--unattended-window` 是否需要一条部署约束。
+- 路径校验的 Swift 半边：ownership/世界可写兜底**已于 ba07b66 落地**（`EngineCore.ownabilityDefect`，
+  2026-09-25 round 6 又把它对"读不到的祖先目录"补成显式缺陷而非缺席，R6-05），两侧匹配语义也统一为子树
+  （`path-consistency.test.mjs` 末尾那条 `the daemon matches protected storage as subtrees…` 现在钉的是语义，
+  文件头那段"只比名单不比语义"的自陈已按它自己写的删除条件改写）。
+  **仍未收口**：`given` 双查与 `recipeConfigPath`/`calibrationAssetsPath` 的内容级校验——Swift 侧只看名字。
+- **P6 §5(3) 已并入**（2026-09-25 round 6）：`probe_status` 的权威键表现在写在 P6 §5 第 3 条里，
+  含缺席规则与 `degradation` 全部键；本修订记录 §4 只留变更事实，键表以 P6 为准。
+  **仍未收口**：`--no-c33` 与 `--unattended-window` 是否需要一条部署约束。
 
 ---
 

@@ -401,7 +401,7 @@ final class StatePermissionTests: XCTestCase {
     func testStoreOutsideHomeIsStillIsolated() throws {
         let dir = TestSandbox.directory("outside-home")
         XCTAssertFalse(
-            dir.hasPrefix(NSHomeDirectory() + "/"),
+            TestSandbox.resolvesUnderRealHome(dir),
             "test premise: the sandbox must actually be outside home, got \(dir)"
         )
         let store = EvidenceStore(directory: dir)

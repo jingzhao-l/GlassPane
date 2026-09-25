@@ -42,13 +42,23 @@ import XCTest
 /// and multi-line — back through the same matching code and requires it to be
 /// reported, and requires the compliant shapes this round introduced to pass.
 ///
+/// Round 6 added a fourth rule family (`locationPeekRules`) for the route the
+/// token rules could not see at all: a test helper that composed its own path out
+/// of the system temp or home lookup, wrote state there and deleted it afterwards.
+/// It is unique-named, so nothing collides, and it is still not isolation — the
+/// home one in particular ran `removeItem` on a home-relative tree. Two files are
+/// exempt from it by name (`locationPeekAllowlist`), and
+/// `testTheExemptionIsLoadBearingAndScoped` requires each of those names to be
+/// earned, because an exemption nobody needs is a hole nobody closed.
+///
 /// Why this file never reports itself: each searched-for fragment is joined at
 /// runtime from two or more string pieces (`needle`), so no run of this source
 /// contains the contiguous text a rule looks for — which now matters across
 /// whole files, not just per line. Comments are deliberately *not* stripped
 /// before matching: the tree was checked for shapes appearing only in prose,
 /// and a stripper would also silence a violation hidden behind a `//` inside a
-/// raw string.
+/// raw string. That is also why prose elsewhere in this target names the
+/// banned lookups descriptively instead of spelling them out.
 final class TestIsolationGateTests: XCTestCase {
 
     // MARK: - Needles
@@ -263,6 +273,45 @@ final class TestIsolationGateTests: XCTestCase {
             .deletingLastPathComponent()  // Tests
     }
 
+    /// The two files exempt from `locationPeekRules`, by name.
+    ///
+    /// A rule that bans reading the system's own temp and home locations can be
+    /// satisfied in exactly one honest way: a test asks for the value from
+    /// somewhere. So the ban is "one place may ask, and that place is named",
+    /// not "no file may contain the token":
+    ///   * `TestSupport.swift` *is* that place — `TestSandbox` hands out every
+    ///     write target from the temp root, and its runtime predicate compares
+    ///     against the same lookup;
+    ///   * this file is the gate's own end-to-end check (half (c)), which
+    ///     compares sandbox paths against the raw temp value on purpose: routing
+    ///     that assertion through `TestSandbox.systemTempRoot` would let the
+    ///     sandbox grade its own homework, since the value under test would be
+    ///     the one the sandbox chose to report.
+    /// Both files still have to *contain* the banned shapes, which
+    /// `testTheExemptionIsLoadBearingAndScoped` re-scans with the exemption
+    /// lifted. An allowlist nobody needs is a hole nobody closed.
+    private var locationPeekAllowlist: Set<String> {
+        Set([needle("Test", "Support") + ".swift",
+             needle("TestIsolation", "GateTests") + ".swift"])
+    }
+
+    /// The two rules whose only purpose is "no file may compose a state path out
+    /// of the system's own locations". Kept separate from `rules()` because half
+    /// of them is file-name scoped.
+    private func locationPeekRules() throws -> [Rule] {
+        [
+            try rule(
+                "temp location peeked at by hand",
+                needle("NS", "Temporary", "Directory") + needle("\\s*\\(")
+                    + needle("|", "\\.", "temporary", "Directory")
+            ),
+            try rule(
+                "home location composed into a path by hand",
+                needle("NSHome", "Directory") + needle("\\s*\\(\\s*\\)\\s*\\+")
+            ),
+        ]
+    }
+
     private func swiftFiles(under root: URL) -> [URL] {
         guard let walk = FileManager.default.enumerator(
             at: root,
@@ -317,11 +366,15 @@ final class TestIsolationGateTests: XCTestCase {
         )
 
         let rules = try rules()
+        let peekRules = try locationPeekRules()
         var reported: [String] = []
         for url in files {
             let text = try String(contentsOf: url, encoding: .utf8)
             let prefix = String(url.path.dropFirst(root.path.count))
             reported += findings(in: text, rules: rules, prefix: prefix)
+            if !locationPeekAllowlist.contains(url.lastPathComponent) {
+                reported += findings(in: text, rules: peekRules, prefix: prefix)
+            }
         }
         guard reported.isEmpty else {
             return XCTFail(
@@ -390,8 +443,16 @@ final class TestIsolationGateTests: XCTestCase {
              needle("Approval", "Gate", "(path", ": \"/tmp/ap.json\")")),
             (needle("project-less", "prune"), projectLessPrune),
             (needle("project-less prune, split across lines"), projectLessPruneSplit),
+            (needle("temp location peeked, one line"),
+             needle("let dir = NS", "TemporaryDirectory", "() + \"gp-x\"")),
+            (needle("temp location peeked, split across lines"),
+             needle("let dir = NS", "TemporaryDirectory", "(\n  )\n  + \"gp-x\"")),
+            (needle("FileManager temp directory property"),
+             needle("let dir = fm.", "temporary", "Directory", "().path")),
+            (needle("home location composed into a path"),
+             needle("let p = NSHome", "Directory", "() + \"", "/gp-state", "/ev\"")),
         ]
-        let rules = try rules()
+        let rules = try rules() + locationPeekRules()
         for offender in offenders {
             XCTAssertFalse(
                 findings(in: offender.text, rules: rules, prefix: "snippet").isEmpty,
@@ -438,6 +499,84 @@ final class TestIsolationGateTests: XCTestCase {
         ]
         for text in sanctioned {
             XCTAssertEqual(findings(in: text, rules: rules, prefix: "snippet"), [String](), text)
+        }
+    }
+
+    /// The two location-peek rules exist to stop a test composing a state path
+    /// out of the system's own temp/home lookups; the route that replaces them is
+    /// naming the location once (`TestSandbox`) and taking it from there. So the
+    /// compliant shapes below have to stay clean even though they *do* build a
+    /// path from a location value — the ban is on hand-composing the lookup, not
+    /// on holding a path in a local.
+    func testLocationPeekRulesReportOnlyTheHandComposedLookups() throws {
+        let peek = try locationPeekRules()
+        XCTAssertEqual(peek.count, 2, "the peek rule set lost a member")
+        let offenders = [
+            needle("let dir = NS", "Temporary", "Directory", "() + \"gp-x\""),
+            needle("let dir = fm.", "temporary", "Directory", "()"),
+            needle("let p = NSHome", "Directory", "() + \"/x\""),
+        ]
+        for (index, text) in offenders.enumerated() {
+            let hits = findings(in: text, rules: peek, prefix: "snippet")
+            XCTAssertFalse(hits.isEmpty, "peek rule gap: nothing reported \(index)\n\(text)")
+        }
+        // Attribution, in both directions: the temp rule must be the one that
+        // reports a temp lookup and the home rule the one that reports a home
+        // composition. Otherwise a future edit could make one pattern swallow the
+        // other's shape and the loop above would still pass.
+        let tempRule = peek.filter { $0.name.hasPrefix("temp") }
+        let homeRule = peek.filter { $0.name.hasPrefix("home") }
+        XCTAssertEqual(tempRule.count, 1)
+        XCTAssertEqual(homeRule.count, 1)
+        XCTAssertEqual(findings(in: offenders[0], rules: tempRule, prefix: "s").count, 1,
+                       "the temp rule did not report its own shape")
+        XCTAssertEqual(findings(in: offenders[1], rules: tempRule, prefix: "s").count, 1,
+                       "the temp rule missed the FileManager property spelling")
+        XCTAssertEqual(findings(in: offenders[2], rules: homeRule, prefix: "s").count, 1,
+                       "the home rule did not report its own shape")
+        for text in [
+            // Split like every other snippet in this file: the scan reads this
+            // file's whole text too, so a compliant example written as one
+            // contiguous literal is a violation the gate reports against itself.
+            needle("let dir = TestSandbox.directory(\"x\")\n",
+                   "let s = Evidence", "Store", "(directory", ": dir)"),
+            needle("let dir = TestSandbox.filePath(\"x\")\n",
+                   "let r = Project", "Registry", "(filePath", ": dir)"),
+            needle("let t = TestSandbox.systemTempRoot  // read for a predicate, not composed"),
+            needle("let inHome = TestSandbox.resolvesUnder", "RealHome", "(dir)"),
+        ] {
+            XCTAssertEqual(findings(in: text, rules: peek, prefix: "s"), [String](), text)
+        }
+    }
+
+    /// An exemption that nothing needs is a hole nobody closed, so each
+    /// allowlisted file has to earn its name: lifting the exemption over its own
+    /// text has to report something. The set is also pinned to exactly the two
+    /// files it names, and every *other* file in the tree is proven to hold no
+    /// banned lookup by the main scan, which excludes only these names.
+    func testTheExemptionIsLoadBearingAndScoped() throws {
+        let root = testTreeRoot
+        let files = swiftFiles(under: root)
+        XCTAssertFalse(files.isEmpty, "the gate scanned nothing, so it guards nothing")
+        let names = Set(files.map { $0.lastPathComponent })
+        for exempt in locationPeekAllowlist {
+            XCTAssertTrue(names.contains(exempt), "allowlist names a file that is not there: \(exempt)")
+        }
+        XCTAssertEqual(
+            locationPeekAllowlist.count, 2,
+            "the location-peek exemption is for one implementation file and the gate itself; "
+                + "a third name needs that reason written here"
+        )
+        let peek = try locationPeekRules()
+        for exempt in locationPeekAllowlist.sorted() {
+            guard let url = files.first(where: { $0.lastPathComponent == exempt }) else { continue }
+            let text = try String(contentsOf: url, encoding: .utf8)
+            let hits = findings(in: text, rules: peek, prefix: exempt)
+            XCTAssertFalse(
+                hits.isEmpty,
+                "\(exempt) is exempt from the location-peek rules but contains none of their "
+                    + "shapes — remove it from the allowlist, or the exemption is decoration."
+            )
         }
     }
 

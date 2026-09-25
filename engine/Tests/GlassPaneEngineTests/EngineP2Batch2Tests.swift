@@ -11,11 +11,18 @@ final class EngineP2Batch2Tests: XCTestCase {
 
     // MARK: - DegradationTracker pure logic
 
+
+    // R6-01: a trend is a rate, so these fixtures sample 30 s apart — the window
+    // has to clear `minimumTrendSpanSeconds` (20 s) for a judgement to exist at
+    // all. The deltas are scaled with the spacing so each slope stays above its
+    // own noise floor (memory 60 KB/30 s = 2 000 B/s vs the 512 B/s floor; handles
+    // 4/30 s = 0.13 fd/s vs 0.05; ping 20 ms/30 s = 0.67 ms/s vs 0.5).
+
     func testFlatSeriesIsHealthy() {
         let tracker = DegradationTracker(minimumSamplesForTrend: 2)
         for index in 0..<6 {
             tracker.record(DegradationSample(
-                timestamp: 1_000 + Double(index),
+                timestamp: 1_000 + 30 * Double(index),
                 pingMs: 3,
                 memoryBytes: 4_000,
                 handleCount: 100
@@ -25,6 +32,9 @@ final class EngineP2Batch2Tests: XCTestCase {
         XCTAssertEqual(verdict.tier, .healthy)
         XCTAssertTrue(verdict.drivers.isEmpty)
         XCTAssertEqual(verdict.sampleCount, 6)
+        // The distinction R6-01 exists for: this is healthy *because it was
+        // measured*, not because the window was too short to judge.
+        XCTAssertTrue(verdict.judged, verdict.basis)
     }
 
     func testSingleRisingSignalIsWatch() {
@@ -32,9 +42,9 @@ final class EngineP2Batch2Tests: XCTestCase {
         // Only memory rises; ping and handles stay flat → exactly one driver.
         for index in 0..<4 {
             tracker.record(DegradationSample(
-                timestamp: 1_000 + Double(index),
+                timestamp: 1_000 + 30 * Double(index),
                 pingMs: 3,
-                memoryBytes: 1_000 * Int64(index),
+                memoryBytes: 60_000 * Int64(index),
                 handleCount: 100
             ))
         }
@@ -50,9 +60,9 @@ final class EngineP2Batch2Tests: XCTestCase {
         // Ping and memory both rise; handles absent → joint verdict degrading.
         for index in 0..<5 {
             tracker.record(DegradationSample(
-                timestamp: 1_000 + Double(index),
-                pingMs: 2 + Double(index),
-                memoryBytes: 1_000 * Int64(index),
+                timestamp: 1_000 + 30 * Double(index),
+                pingMs: 2 + 20 * Double(index),
+                memoryBytes: 60_000 * Int64(index),
                 handleCount: nil
             ))
         }
@@ -68,10 +78,10 @@ final class EngineP2Batch2Tests: XCTestCase {
         }
         for index in 0..<5 {
             tracker.record(DegradationSample(
-                timestamp: 1_000 + Double(index),
+                timestamp: 1_000 + 30 * Double(index),
                 pingMs: 3,
-                memoryBytes: 800 * Int64(index),
-                handleCount: 100 + index
+                memoryBytes: 60_000 * Int64(index),
+                handleCount: 100 + 4 * index
             ))
         }
         let verdict = tracker.verdict()
@@ -90,7 +100,13 @@ final class EngineP2Batch2Tests: XCTestCase {
                 handleCount: nil
             ))
         }
-        XCTAssertEqual(tracker.verdict().tier, .healthy)
+        let verdict = tracker.verdict()
+        XCTAssertEqual(verdict.tier, .healthy)
+        XCTAssertFalse(verdict.judged, "three samples is not a measurement")
+        XCTAssertTrue(
+            verdict.basis.contains("3 samples in the window, 6 needed"),
+            "the refusal has to name both numbers: \(verdict.basis)"
+        )
     }
 
     func testWindowTrimsOldestSamples() {
@@ -125,8 +141,8 @@ final class EngineP2Batch2Tests: XCTestCase {
         let tracker = DegradationTracker(minimumSamplesForTrend: 2)
         for index in 0..<6 {
             tracker.record(DegradationSample(
-                timestamp: 1_000 + Double(index),
-                pingMs: 1 + Double(index),
+                timestamp: 1_000 + 30 * Double(index),
+                pingMs: 1 + 20 * Double(index),
                 memoryBytes: nil,
                 handleCount: nil
             ))
@@ -146,7 +162,112 @@ final class EngineP2Batch2Tests: XCTestCase {
         XCTAssertEqual(tracker.verdict().tier, .healthy)
     }
 
+    // MARK: - R6-01: the window must not be a function of the client's cadence
+
+    /// The mechanism: samples arriving faster than `minSampleIntervalSeconds` are
+    /// refused, and `record` reports that they were. A cap nobody can observe is
+    /// not a cap, hence the return value.
+    func testDenseSamplingIsRefusedAndCountsItself() {
+        let tracker = DegradationTracker(minimumSamplesForTrend: 2)
+        var accepted = 0
+        for index in 0..<100 {  // 100 samples, 10 ms apart = 1 second of calling
+            if tracker.record(DegradationSample(
+                timestamp: 1_000 + Double(index) * 0.01,
+                pingMs: 3, memoryBytes: 4_000, handleCount: 100
+            )) { accepted += 1 }
+        }
+        XCTAssertEqual(accepted, tracker.sampleCount, "only accepted samples may be in the window")
+        XCTAssertEqual(
+            accepted, 2,
+            "a 10 ms cadence must collapse to the 0.5 s cap: first sample + one at +0.5s"
+        )
+        let verdict = tracker.verdict()
+        XCTAssertFalse(verdict.judged, "two samples 0.5 s apart is not a trend: \(verdict.basis)")
+    }
+
+    /// The property the cap exists for: the *same physical process* must get the
+    /// same verdict whether the agent polls it every 50 ms or every second. Before
+    /// this round the 64-sample window's time depth was `64 × cadence`, so the
+    /// 50 ms poller evicted the leak out of its own window and read a healthy app.
+    func testVerdictIsInvariantToSamplingCadence() {
+        // One physical event: at t=20 s the process takes on 2 MB and 40 handles
+        // and keeps them. Sampled to t=40 s at two cadences.
+        func tier(cadence: Double) -> DegradationTier {
+            let tracker = DegradationTracker()
+            var time = 0.0
+            while time <= 40.0 {
+                let stepped = time >= 20
+                tracker.record(DegradationSample(
+                    timestamp: time,
+                    pingMs: 3,
+                    memoryBytes: stepped ? 3_000_000 : 1_000_000,
+                    handleCount: stepped ? 140 : 100
+                ))
+                time += cadence
+            }
+            return tracker.verdict().tier
+        }
+        let polled = tier(cadence: 0.05)     // an agent hammering observe
+        let paced = tier(cadence: 1.0)       // an agent acting about once a second
+        XCTAssertEqual(polled, .degrading, "50 ms polling evicted the leak: \(polled.rawValue)")
+        XCTAssertEqual(paced, .degrading, "the same leak at 1 s cadence: \(paced.rawValue)")
+        XCTAssertEqual(polled, paced, "cadence changed the verdict")
+    }
+
+    /// The other half of the coupling: a short, dense window used to be able to
+    /// *manufacture* a trend, because a few KB of allocator jitter over 250 ms is
+    /// 800 B/s and that clears the 512 B/s floor. The floors are per-second rates,
+    /// so a window with no per-second baseline is refused instead of judged.
+    func testAllocatorJitterOverAShortWindowIsNotTrending() {
+        // The density cap is switched off here on purpose: this case is about the
+        // span gate alone (`testDenseSamplingIsRefusedAndCountsItself` covers the
+        // cap, and with the cap on this fixture would be refused for having one
+        // sample instead of eight).
+        let tracker = DegradationTracker(
+            minimumSamplesForTrend: 2, minSampleIntervalSeconds: 0
+        )
+        for index in 0..<8 {  // 8 samples, 50 ms apart: 0.35 s of wall time
+            tracker.record(DegradationSample(
+                timestamp: Double(index) * 0.05,
+                pingMs: 3 + Double(index) * 0.01,
+                memoryBytes: Int64(2_000 * index),   // 2 KB per 50 ms = 40 000 B/s
+                handleCount: 100 + index             // 1 fd per 50 ms = 20 fd/s
+            ))
+        }
+        let verdict = tracker.verdict()
+        XCTAssertFalse(verdict.judged, verdict.basis)
+        XCTAssertEqual(verdict.tier, .healthy, "a refusal must never be published as a trend")
+        XCTAssertTrue(verdict.drivers.isEmpty)
+        XCTAssertNil(verdict.memorySlopeBytesPerSec, "no slope: nothing was measured")
+        XCTAssertLessThan(verdict.elapsedSeconds, verdict.minimumTrendSpanSeconds)
+        XCTAssertTrue(
+            verdict.basis.contains("window spans"),
+            "the refusal has to name the span it measured: \(verdict.basis)"
+        )
+
+        // The control that proves the gate is what refuses: same bytes, span gate
+        // off → 40 000 B/s of allocator jitter and 20 fd/s of churn read as two
+        // trending channels and escalate to `degrading`. If this ever comes back
+        // healthy too, the assertion above is passing for a reason unrelated to
+        // the window length.
+        let ungated = DegradationTracker(
+            minimumSamplesForTrend: 2, minSampleIntervalSeconds: 0, minimumTrendSpanSeconds: 0
+        )
+        for index in 0..<8 {
+            ungated.record(DegradationSample(
+                timestamp: Double(index) * 0.05,
+                pingMs: 3 + Double(index) * 0.01,
+                memoryBytes: Int64(2_000 * index),
+                handleCount: 100 + index
+            ))
+        }
+        let ungatedVerdict = ungated.verdict()
+        XCTAssertTrue(ungatedVerdict.judged, ungatedVerdict.basis)
+        XCTAssertEqual(ungatedVerdict.tier, .degrading, "\(ungatedVerdict.drivers)")
+    }
+
     // MARK: - ProcessMetricsProbe real reads
+
 
     func testSelfProbeReportsLiveMetrics() {
         let probe = ProcessMetricsProbe()
@@ -182,7 +303,7 @@ final class EngineP2Batch2Tests: XCTestCase {
         let clock = VariableClock(start: 1_000)
         let tracker = DegradationTracker(minimumSamplesForTrend: 2)
         let probe = ScriptedMetricsProbe()
-        probe.memorySeries = [4_000, 4_000]
+        probe.memorySeries = [4_000, 4_000]  // flat over a 30 s step: measured, not short
         let core = EngineCore(
             channel: channel,
             clock: { clock.time() },
@@ -190,7 +311,7 @@ final class EngineP2Batch2Tests: XCTestCase {
             metricsProbe: probe
         )
         _ = try attachingAndActing(core)
-        clock.advance(by: 1)
+        clock.advance(by: 30)
         _ = try attachingAndActing(core)
         let pack = try core.lastEvidence(operationId: nil)
         XCTAssertEqual(pack.circuitBreaker.level, .normal)
@@ -203,7 +324,7 @@ final class EngineP2Batch2Tests: XCTestCase {
         let clock = VariableClock(start: 1_000)
         let tracker = DegradationTracker(minimumSamplesForTrend: 2)
         let probe = ScriptedMetricsProbe()
-        probe.memorySeries = [1_000, 5_000] // rising resident memory
+        probe.memorySeries = [1_000, 61_000] // rising resident memory: 2 000 B/s
         let core = EngineCore(
             channel: channel,
             clock: { clock.time() },
@@ -213,8 +334,8 @@ final class EngineP2Batch2Tests: XCTestCase {
         _ = try attaching(core)
         channel.pingResult = .success(2)
         _ = try core.act(selector: Selector(role: "AXButton", title: "Submit"), action: .press)
-        clock.advance(by: 1)
-        channel.pingResult = .success(5) // rising main-thread latency
+        clock.advance(by: 30)
+        channel.pingResult = .success(24) // rising main-thread latency: 0.73 ms/s
         _ = try core.act(selector: Selector(role: "AXButton", title: "Submit"), action: .press)
 
         let pack = try core.lastEvidence(operationId: nil)
@@ -239,8 +360,8 @@ final class EngineP2Batch2Tests: XCTestCase {
         _ = try attaching(core)
         channel.pingResult = .success(2)
         _ = try core.act(selector: Selector(role: "AXButton", title: "Submit"), action: .press)
-        clock.advance(by: 1)
-        channel.pingResult = .success(9)
+        clock.advance(by: 30)
+        channel.pingResult = .success(30)  // 0.93 ms/s: one trending channel
         _ = try core.act(selector: Selector(role: "AXButton", title: "Submit"), action: .press)
 
         XCTAssertEqual(tracker.verdict().tier, .watch)

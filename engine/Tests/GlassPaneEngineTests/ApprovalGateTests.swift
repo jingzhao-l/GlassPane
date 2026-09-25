@@ -18,7 +18,7 @@ final class ApprovalGateTests: XCTestCase {
 
     /// Every ledger file this file creates lives inside `TestSandbox`, so the
     /// isolation verdict is computed before a path can be written to. The older
-    /// shape composed `FileManager.default.temporaryDirectory` by hand here, which
+    /// shape asked Foundation for the temp directory and composed the path by hand, which
     /// is a route around the gate that exists because one `swift test` run took
     /// the unbypassed version of it into the developer's real `~/.glasspane`.
     private func makeTempDir(_ label: String) throws -> URL {

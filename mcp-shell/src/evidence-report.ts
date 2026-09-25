@@ -53,14 +53,17 @@ export function evidenceSummaryLines(pack: EvidencePackReportView): string[] {
   }
   const act = pack.signals.act;
   lines.push(`act ${act.action} ${selectorText(act.selector)}: ${act.actConfirmed ? "confirmed" : "rejected"}`);
-  if (pack.signals.axEvent !== undefined) {
+  if (pack.signals.axEvent !== undefined && pack.signals.axEvent !== null) {
     const ax = pack.signals.axEvent;
     lines.push(`axEvent: changed=${ax.axChanged} nodes=${ax.nodeCount} latencyMs=${doubleText(ax.latencyMs)}`);
+  } else {
+    lines.push(AX_EVENT_NOT_MEASURED);
   }
   // P6 §3.1 promotes both probe channels to first-class signals, and T4/T5/
   // T7/T8 rest on them: a report that stops at the black-box signals cannot
   // justify `attribution: strong`. A null channel renders a "not measured"
-  // line, never a gap that reads as "nothing happened".
+  // line, never a gap that reads as "nothing happened" — for all six channels,
+  // which is what the engine side says too (see the mirrored constants below).
   lines.push(
     pack.signals.handlerProbe !== undefined && pack.signals.handlerProbe !== null
       ? handlerProbeText(pack.signals.handlerProbe)
@@ -71,7 +74,7 @@ export function evidenceSummaryLines(pack: EvidencePackReportView): string[] {
       ? stateDiffText(pack.signals.stateDiff)
       : STATE_DIFF_NOT_MEASURED,
   );
-  if (pack.signals.pixelDiff !== undefined) {
+  if (pack.signals.pixelDiff !== undefined && pack.signals.pixelDiff !== null) {
     const px = pack.signals.pixelDiff;
     let line = `pixelDiff: changedRatio=${doubleText(px.changedPixelRatio)} windowId=${px.windowId}`;
     if (px.bounds !== null) {
@@ -79,14 +82,20 @@ export function evidenceSummaryLines(pack: EvidencePackReportView): string[] {
       line += ` bounds=${doubleText(b.x)},${doubleText(b.y)},${doubleText(b.width)},${doubleText(b.height)}`;
     }
     lines.push(line);
+  } else {
+    lines.push(PIXEL_DIFF_NOT_MEASURED);
   }
-  if (pack.signals.responsiveness !== undefined) {
+  if (pack.signals.responsiveness !== undefined && pack.signals.responsiveness !== null) {
     const r = pack.signals.responsiveness;
     lines.push(`responsiveness: responsive=${r.responsive} pingMs=${doubleText(r.pingMs)}`);
+  } else {
+    lines.push(RESPONSIVENESS_NOT_MEASURED);
   }
-  if (pack.signals.crash !== undefined) {
+  if (pack.signals.crash !== undefined && pack.signals.crash !== null) {
     const c = pack.signals.crash;
     lines.push(`crash: aliveBefore=${c.processAliveBefore} aliveAfter=${c.processAliveAfter}`);
+  } else {
+    lines.push(CRASH_NOT_MEASURED);
   }
   return lines;
 }
@@ -164,6 +173,18 @@ const NO_DIAGNOSIS_TEXT =
 /** Null probe channels: named absence, not silence (P6 §3.1). */
 const HANDLER_PROBE_NOT_MEASURED = "handlerProbe: not measured (no probe connection served this act window)";
 const STATE_DIFF_NOT_MEASURED = "stateDiff: not measured (the probe reported no state channel)";
+
+/**
+ * The four black-box channels, worded exactly as the engine words them, and for
+ * the same reason: each line says what the pack does not carry and guesses at no
+ * cause. `test/evidence-report.test.mjs` compares these six strings against
+ * `EvidenceReportGenerator.swift`'s own literals, so a one-sided rewording fails
+ * there instead of quietly splitting the two views of one pack.
+ */
+const AX_EVENT_NOT_MEASURED = "axEvent: not measured (this pack carries no AX tree digest)";
+const PIXEL_DIFF_NOT_MEASURED = "pixelDiff: not measured (this pack carries no pixel comparison)";
+const RESPONSIVENESS_NOT_MEASURED = "responsiveness: not measured (this pack carries no responsiveness round trip)";
+const CRASH_NOT_MEASURED = "crash: not measured (this pack carries no process liveness sample)";
 
 /** Render caps: a pack may legally carry 32 handlers / 64 state entries. */
 const MAX_HANDLERS_SHOWN = 8;
