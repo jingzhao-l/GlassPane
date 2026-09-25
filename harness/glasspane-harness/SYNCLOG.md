@@ -24,6 +24,13 @@
   （`fork-diff` 盲区：四桶比的是工作树 vs 参照 index，"在磁盘上但从未提交"的文件看起来逐字相同），
   以及**编译产物启动即崩**（vendored kernel 的 barrel 在模块初始化时用 `createRequire` 读
   `../schemas/*.json`，单文件二进制里没有这个路径——源码模式永远看不见，是 build 自己的冒烟测试抓到的）。
+- **新仓的 dependabot 关掉了**（`.github/dependabot.yml` 写成 `updates: []` + 理由）：这个仓钉在
+  `v1.18.32`，而"与钉点的分叉面是**实测**的"正是本线的纪律；一条自动 bump PR 可以让本仓 CI 全绿
+  （固定点不测第三方字节）却让已记录的分叉面失效。依赖移动仍按老路进来：参照克隆、每周 probe、一次
+  有意的同步。
+- **split 仓 CI 全绿**（干净 runner 上：install + 四个发布包 typecheck + 66 条固定点 + product.json
+  冒烟），`conclusion: success`。GitHub release 资产 lane（release.yml 的 5 个原生目标）在本机记录时
+  仍在排队等 runner——npm 是主通道且已实测，资产是兜底通道。
 - **13 条残留的上游全量测试失败**（`cli/run`、`mcp-add`、`help-snapshots` 等子进程类）：串行 + CA 束 +
   120s 超时后从 51 降到 13，隔离跑单条全过、整文件跑被 30s 预算杀掉（`Error: Timed out`，子进程无输出），
   而 CLI 冷启动实测只要 1.5s（源码）/0.64s（编译产物）——是上游测试写死的时序预算与本机负载/全环境
