@@ -32,6 +32,7 @@ import { livenessProbeDecision, slowEngineRemedy } from "../dist/engine-client.j
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROTOCOL_ERRORS = path.resolve(HERE, "..", "..", "engine", "Sources", "GlassPaneEngine", "ProtocolErrors.swift");
+const ENGINE_CORE = path.resolve(HERE, "..", "..", "engine", "Sources", "GlassPaneEngine", "EngineCore.swift");
 const SHARED = [
   GP_E_BAD_PARAMS, GP_E_INTERNAL, GP_E_NO_EVIDENCE, GP_E_NOT_FOUND,
   GP_E_PAYLOAD_TOO_LARGE, GP_E_PROJECT_LIMIT,
@@ -173,4 +174,127 @@ test("every engine call in the tool layer carries the trail generation it was ad
   }
   assert.deepEqual(missing, [], `这些 engine.call 没带链纪元，迟到回复将无法判断归属：${JSON.stringify(missing)}`);
   assert.ok(source.includes("session.generation"), "一条都没匹配到＝这个闸已经不再看任何东西");
+});
+
+/* ------------------------------------------------------------------ *
+ * R9: the daemon's per-label capture advice, read out of `EngineCore.swift`.
+ *
+ * `pixelCaptureFailureLabel` names the cause of a failed capture; the switch
+ * inside `map(_:degradation:)` is what turns that name into the sentence the
+ * agent acts on — the MCP shell forwards daemon remedies verbatim
+ * (`engine-client.ts` `engineError`). `pixel-capture-no-surface` (window on
+ * screen but covered) had no arm, so it fell into `default:`, whose text orders
+ * re-granting Screen Recording and restarting the daemon; a restart cancels an
+ * act in flight, so the advice for a covered window was actively destructive.
+ * Two claims are pinned so the defect cannot come back or spread:
+ *  1. every label the classifier can emit has its own arm — a new label must
+ *     not silently fall through to `default` (set equality, both directions:
+ *     an arm for a label nobody emits is dead prose waiting to mislead);
+ *  2. no `pixel-capture-*` arm's text names a re-grant or a restart command —
+ *     only `screen-recording-denied` may order the seat, because only that
+ *     label's cause *is* the seat.
+ * Mutations that redden this gate (name them, per doctrine):
+ *  - delete `case "pixel-capture-no-surface":` → the label loses its arm →
+ *    claim 1 is red (before this file existed, the label still produced a —
+ *    wrong — remedy at runtime and every behavioural test stayed green);
+ *  - restore the no-surface advice to `seatAdvice` (or paste "grant Screen
+ *    Recording" / "restart the daemon" into any pixel-capture-* arm) → claim 2
+ *    is red;
+ *  - add a new `return "pixel-capture-…"` to `pixelCaptureFailureLabel`
+ *    without an arm → claim 1 is red.
+ * ------------------------------------------------------------------ */
+
+/** The labels `pixelCaptureFailureLabel` can answer with, from its own returns. */
+function swiftCaptureLabels() {
+  const source = fs.readFileSync(ENGINE_CORE, "utf8");
+  const declaration = "static func pixelCaptureFailureLabel(reason: String) -> String {";
+  const start = source.indexOf(declaration);
+  assert.notEqual(start, -1,
+    "EngineCore 里找不到 pixelCaptureFailureLabel——标签的出处没了，这条闸必须红而不是跳过");
+  const next = source.indexOf("\n    static ", start + declaration.length);
+  const body = source.slice(start, next === -1 ? undefined : next);
+  const labels = new Set();
+  for (const match of body.matchAll(/return\s+"([a-z0-9-]+)"/g)) {
+    labels.add(match[1]);
+  }
+  // The equality checks below already fail when this set or the arm set empties,
+  // but a floor states the intent: a parse of ~zero labels means the writing
+  // style moved, and the gate must say so rather than pass on an empty loop.
+  assert.ok(labels.size >= 8, `只解析出 ${labels.size} 个捕获标签，读取方式已经对不上写法`);
+  return labels;
+}
+
+/** The `case "<label>": advice = …` arms of the advice switch, label → text. */
+function swiftCaptureAdviceArms() {
+  const source = fs.readFileSync(ENGINE_CORE, "utf8");
+  const opened = source.indexOf("switch label {");
+  assert.notEqual(opened, -1,
+    "EngineCore.map 里不再有 `switch label {`——出路文本换了写法，这条闸要看住它的新家");
+  const closed = source.indexOf("return GPError(", opened);
+  assert.notEqual(closed, -1, "switch 之后找不到它喂的那个 GPError——扫描边界定不下来");
+  const arms = new Map();
+  let current = null;
+  let text = [];
+  const flush = () => {
+    if (current !== null) arms.set(current, text.join(" ").replace(/\s+/g, " ").trim());
+  };
+  for (const raw of source.slice(opened, closed).split("\n")) {
+    const line = raw.replace(/\/\/.*$/, "");
+    const arm = /^\s*case\s+"([a-z0-9-]+)"\s*:/.exec(line);
+    if (arm) {
+      flush();
+      current = arm[1];
+      text = [line.replace(/^\s*case\s+"[a-z0-9-]+"\s*:/, "")];
+      continue;
+    }
+    if (/^\s*default\s*:/.test(line)) {
+      // `default` is deliberately not an arm: whatever it says, no label may
+      // depend on it — claim 1 is what keeps it unreachable prose.
+      flush();
+      current = null;
+      continue;
+    }
+    if (current !== null) text.push(line);
+  }
+  flush();
+  assert.ok(arms.size >= 8, `只解析出 ${arms.size} 条 advice 分支，扫描方式已经对不上写法`);
+  return arms;
+}
+
+test("every pixel-capture label has its own advice arm, and none of them orders a re-grant or a restart", () => {
+  const labels = swiftCaptureLabels();
+  const arms = swiftCaptureAdviceArms();
+
+  // Claim 1a: no label falls through to `default`.
+  const withoutArm = [...labels].filter((label) => !arms.has(label)).sort();
+  assert.deepEqual(withoutArm, [],
+    `这些捕获标签没有自己的出路分支，会落进 default 那句"去授予屏幕录制并重启 daemon"：${withoutArm.join(", ")}`);
+  // Claim 1b: no arm waits for a label that is never emitted (dead prose).
+  const deadArms = [...arms.keys()].filter((label) => !labels.has(label)).sort();
+  assert.deepEqual(deadArms, [],
+    `这些分支服务的标签已不是 pixelCaptureFailureLabel 的取值，出路成了没人触发的死文本：${deadArms.join(", ")}`);
+
+  // Claim 2: the seat sentence belongs to exactly one label. Deliberately
+  // patterned on the *command* spellings ("grant Screen Recording", "restart
+  // the daemon", the launchd verbs), so an arm that says "no permission grant
+  // can fix this" or "do not re-grant on this error alone" — which is what the
+  // honest arms do — stays green while an affirmative order to re-grant or
+  // recycle the daemon goes red.
+  for (const [label, text] of arms) {
+    if (!label.startsWith("pixel-capture-")) continue;
+    assert.doesNotMatch(text, /grant\s+screen\s+recording/i,
+      `\`${label}\` 的出路命令去授予屏幕录制，而它的成因不是席位：${text.slice(0, 160)}`);
+    assert.doesNotMatch(text, /restart\s+the\s+daemon|kickstart|--restore-launchd|--grant/i,
+      `\`${label}\` 的出路命令重启或再授权——重启会杀掉用户屏幕上在跑的 act：${text.slice(0, 160)}`);
+  }
+
+  // The positive half that must keep working: the one label whose cause *is*
+  // the seat still routes to the seat sentence, and no-surface still says what
+  // actually covers it and what to do instead.
+  assert.match(arms.get("screen-recording-denied") ?? "", /seatAdvice|grant Screen Recording/,
+    "唯一该去授予席位的分支不再指向席位文本了——这条闸的正半边的对照物没了");
+  assert.match(arms.get("pixel-capture-no-surface") ?? "", /cover/i,
+    "no-surface 的出路必须仍说出真成因（被盖住），否则又是一句不指向事实的话");
+  assert.match(arms.get("pixel-capture-no-surface") ?? "", /raise|bring|above|move the covering window/i,
+    "no-surface 的出路必须给一个能执行的动作（把目标窗口带到上层），而不是只有诊断");
 });

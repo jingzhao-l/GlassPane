@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { projectSet, ProjectRegistryError, AGENT_PATH_PROTECTION } from "../dist/project-registry.js";
+import { projectSet, ProjectRegistryError, AGENT_PATH_PROTECTION, daemonRestartNotice } from "../dist/project-registry.js";
 import { executableSource } from "./support/source.mjs";
 import { privateSandbox } from "./support/sandbox.mjs";
 
@@ -392,6 +392,17 @@ test("the shell's exact roots are each named by the daemon or covered by one of 
   // generalized rules covers — and which of the two, plus the rule that did it,
   // is printed in the assertion message instead of being left to the reader.
   const source = fs.readFileSync(DAEMON_SOURCE, "utf8");
+  // R9-e: the loop below is per-entry, so an *empty* `roots` iterated zero
+  // times and the gate stayed green while the shell silently stopped refusing
+  // anything. Proof by reasoning: mutation = shrink `PROTECTED_ROOTS` in
+  // `project-registry.ts` to `[]` — before this guard every assertion here
+  // (and the set comparisons' shell side) passed on the empty set; with it,
+  // the gate reddens at once because the object the whole file compares has
+  // vanished. A parse that finds nothing is red, not quietly satisfied.
+  assert.ok(
+    Array.isArray(AGENT_PATH_PROTECTION.roots) && AGENT_PATH_PROTECTION.roots.length > 0,
+    "AGENT_PATH_PROTECTION.roots 是空的——这个循环不再检查任何东西，shell 侧的精确保护根表没了对照物",
+  );
   const daemonNamed = [...new Set([
     ...swiftArrayLiteral(source, "systemOwnedStorageTrees"),
     ...swiftArrayLiteral(source, "sharedScratchStoragePaths"),
@@ -473,6 +484,23 @@ test("projectSet's verdicts match the shared table entry by entry", (t) => {
   // `because` read out of the shell's own subtree loop. What stays hand-written is
   // only what no manifest can generate — a verdict the live filesystem decides, or
   // one this shell reaches by a rule that is not a tree name.
+  // Why the macOS-shaped absolute literals below (`/System/Volumes/Data/Users`,
+  // `/Users/Shared/a`, the `/private/...` rows) are not wrongly-red on the
+  // Linux CI runner, pinned per R9-f instead of left to folklore: the mcp-shell
+  // suite runs on `ubuntu-latest` (`.github/workflows/ci.yml`, `mcp-shell` job;
+  // do not move that without re-reading this), and every *verdict* in this
+  // table comes from `projectSet`, whose protected-root/subtree matching is
+  // lexical — path components compared against `PROTECTED_ROOTS`/
+  // `PROTECTED_SUBTREES` and the daemon-derived lists — never against whether
+  // the directory exists on the host. So a path that is refused on macOS is
+  // refused on Linux too, whatever each `/Users` entry happens to be. The
+  // rows whose *reason* genuinely depends on the live filesystem (the owner/
+  // mode walk to the nearest existing ancestor, `/tmp`'s realpath) carry
+  // `because: null`: the verdict stays pinned — the ownership walk lands on
+  // root-owned `/` or `/etc/ssh` on both platforms — and the wording does
+  // not. That is why these expectations are not made platform-derived: the
+  // thing under test refuses these paths identically everywhere, and a
+  // platform switch here would only hide a future split, not prevent one.
   const refused = [
     ...generatedManifestRows(),
     // Not on either Swift list: refused because the nearest existing directory
@@ -747,4 +775,71 @@ test("the manifest rows accept the tree that covers the resolved location, and o
   assert.ok(manifestRefusalRows(synthetic, phraseOf, (t) => t).find((row) => row.literal === "/bin")
     .becauseAnyOf.every((one) => one === phraseOf("/bin")),
     "without a moving realpath the row must tighten back to its own literal");
+});
+
+/* ------------------------------------------------------------------ *
+ * R9-高1（B7 的补闸）：这条先跑红了才写出来的。
+ *
+ * `daemonRestartNotice` 现在说"哪个 root 在跑，本壳看不见，也不要从 $HOME 猜"。
+ * 反过来的一句 —— "socket 会报出 state root" —— 读起来同样顺，而它是**假的**：
+ * 线上没有任何方法回这个字段（方法表冻结，`"stateRoot"` 作为 JSON 键只出现在
+ * `glasspaned` 的 CLI 子命令输出里）。反向变异实测：把 notice 里那句
+ * "the socket reports no state root" 改成 "the socket reports the state root already"
+ * 之后，原有的 `--state-dir` / `launchctl print` 措辞断言**一条都不会红** ——
+ * 因为它们钉的是短语在场，不是事实成立。所以这里钉两件事：
+ *   1. 事实的另一侧：从 Swift 里量出"哪些文件会吐 `"stateRoot"` 这个键"，集合必须
+ *      只有 CLI 那一个。哪天有人把它加进某个线上回复，这条会红 —— 那时该改的是
+ *      notice（改成"读它"），不是这条闸。
+ *   2. 文案不得声称 socket 报出了 root。两种语序都 forbid，免得换一种写法绕过。
+ * ------------------------------------------------------------------ */
+
+/** Every Swift file under engine/Sources that emits a quoted JSON key. */
+function swiftFilesEmittingKey(root, key) {
+  const hits = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!entry.name.endsWith(".swift")) {
+        continue;
+      }
+      if (executableSource(fs.readFileSync(full, "utf8")).includes(key)) {
+        hits.push(path.relative(REPO_ROOT, full));
+      }
+    }
+  };
+  walk(root);
+  return hits.sort();
+}
+
+test("no socket reply carries the daemon's state root, and the registry notice must not claim one does", () => {
+  const emitters = swiftFilesEmittingKey(
+    path.join(REPO_ROOT, "engine/Sources"),
+    '"stateRoot"',
+  );
+  assert.deepEqual(emitters, ["engine/Sources/glasspaned/main.swift"],
+    `"stateRoot" 这个键的出处变了：${emitters.join(", ")}。如果它进了某个线上回复，`
+    + "notice 里那句\u201c本壳看不见\u201d就该换成\u201c去读它\u201d —— 改文案，别改这条闸来迁就");
+
+  // Only the *affirmative* claim is forbidden: the honest sentence is "the socket
+  // reports no state root", and a pattern that caught that would reward deleting
+  // the disclaimer instead of telling the truth. Hence the required determiner.
+  const claimsSocketReportsIt = [
+    /\b(socket|service)[^.]{0,90}\b(reports?|returns?|names?|gives?|tells?|exposes?)\b[^.]{0,20}\b(the|a|an|its|our|this)\b[^.]{0,20}state[ -]root/i,
+    /\bstate[ -]root\b[^.]{0,40}\b(reported|returned|named|given|exposed)\b[^.]{0,30}\b(socket|service)\b/i,
+  ];
+  for (const filePath of ["/Users/example/work", "/Users/other/.glasspane/projects.json"]) {
+    const notice = daemonRestartNotice(filePath);
+    for (const claim of claimsSocketReportsIt) {
+      assert.equal(claim.test(notice), false,
+        `notice 把本壳看不见的东西说成了能从 socket 读到：${claim} —— ${notice}`);
+    }
+    // 正向的一半还得在：不能靠删掉整段自辩来通过上一条断言。
+    assert.match(notice, /cannot see|will not guess|not certain from here/,
+      `notice 要说清自己的边界，而不是沉默地少说一句：${notice}`);
+    assert.match(notice, /launchctl print/, `边界要给出一条做得到的读法：${notice}`);
+  }
 });

@@ -373,11 +373,17 @@ test("projectSet result states that the running daemon has not seen the entry", 
 
 /**
  * B-10: that notice used to be one unconditional sentence, which claimed a
- * restart would surface a file the daemon never loads (the daemon reads only
- * `~/.glasspane/projects.json`; `GLASSPANE_PROJECTS_FILE` is shell-only) and
- * prescribed a kickstart that cannot work for a job that was never bootstrapped.
- * The default-path branch is asserted through the pure builder below rather than
- * by writing to ~/.glasspane, which this suite must never do.
+ * restart would surface a file the daemon does not load because of anything in
+ * its own configuration (`GLASSPANE_PROJECTS_FILE` is shell-only), and prescribed
+ * a kickstart that cannot work for a job that was never bootstrapped.
+ *
+ * Round 9 corrects the premise inside that correction: the daemon's root is the
+ * per-user one **by default**, and `glasspaned --state-dir <root>` moves it to
+ * `<root>/projects.json`, which nothing on the socket reports. So "a restart will
+ * not help" is now conditional too, and the sentence that carries it has to name
+ * the case it holds in and the check that decides between them — asserted below
+ * through the pure builder rather than by writing to ~/.glasspane, which this
+ * suite must never do.
  */
 test("the notice for a file the daemon cannot load says a restart will not help", () => {
   const reg = useRegistry();
@@ -386,11 +392,126 @@ test("the notice for a file the daemon cannot load says a restart will not help"
     assert.match(notice, /never reads that file/);
     assert.ok(notice.includes(daemonProjectsPath()), "it names the file the daemon loads");
     assert.match(notice, new RegExp(PROJECTS_FILE_ENV));
-    assert.match(notice, /restarting the service will not help/);
+    assert.match(notice, /no restart of the service will make it load this one/,
+      `变量指过去的文件不会因为重启被读到，这句必须还在：${notice}`);
     assert.equal(notice.includes("until the service restarts"), false);
   } finally {
     reg.dispose();
   }
+});
+
+/* ------------------------------------------------------------------ *
+ * R9-高7: `--state-dir` is a second root, and the shell cannot see it
+ *
+ * `StateRoot(path:)` + `ProjectRegistry(stateRoot:)` make a service started with
+ * `glasspaned --state-dir <root>` load `<root>/projects.json`; the socket's
+ * method table is frozen and answers no "which root", and neither $HOME nor any
+ * other environment value may be guessed into an answer. So both branches of the
+ * notice had been asserting knowledge this shell does not have: the stray-write
+ * branch that the service reads only the home-derived file, and the default-path
+ * branch that a restart is the thing that will surface the entry.
+ *
+ * The one discriminator the surface does have is the service's own answer:
+ * `gp_project_list` reads the file just written and `gp_attach {projectId}` is
+ * answered by the running copy. Written-and-listed plus GP_E_NOT_FOUND is
+ * therefore "different file", and the notice has to say what to do about that
+ * instead of restarting again.
+ * ------------------------------------------------------------------ */
+
+/** The two facts an agent can act on, named in the copy that hands them over. */
+function assertRootDiscriminator(notice, label) {
+  assert.match(notice, /--state-dir/, `${label}: the second root the daemon can run on must be named`);
+  assert.match(notice, /gp_project_list/, `${label}: the check has to be a tool this surface offers`);
+  assert.match(notice, /gp_attach \{projectId\}/,
+    `${label}: the discriminator is the running service's own answer, by the parameter it advertises`);
+  assert.match(notice, /GP_E_NOT_FOUND/, `${label}: the outcome that decides has to be stated`);
+  assert.match(notice, /launchctl print/,
+    `${label}: reading the job's arguments is the non-destructive way to learn its root`);
+  // A parameter, tool or command this surface does not offer would be the next
+  // GP_E_BAD_PARAMS; the copy may only point at real ones.
+  assert.equal(/POST |\/v1\/tools|projectId=/.test(notice), false, `${label}: ${notice}`);
+}
+
+test("both notices name the --state-dir root and the check that decides between them", () => {
+  // MUTATION THIS PINS: dropping the `--state-dir` clause (or the discriminator)
+  // from either branch of `daemonRestartNotice` — reverting to the pre-round-9
+  // text, which told an agent whose service ran on another root that a restart
+  // would surface its registration.
+  const reg = useRegistry();
+  try {
+    const own = daemonRestartNotice(daemonProjectsPath());
+    assertRootDiscriminator(own, "the default-root notice");
+    const stray = daemonRestartNotice(reg.filePath);
+    assertRootDiscriminator(stray, "the shell-override notice");
+    // Neither branch may claim to *know* which root the running service chose.
+    for (const [label, notice] of [["own", own], ["stray", stray]]) {
+      assert.match(notice, /cannot see|invisible to this shell|not certain from here/,
+        `${label}: the notice states its own limit, or it is asserting a fact it cannot observe`);
+    }
+  } finally {
+    reg.dispose();
+  }
+});
+
+test("the default-root notice makes the restart conditional and says what a persisted GP_E_NOT_FOUND means", () => {
+  // MUTATION THIS PINS: the unconditional "…until the service restarts" sentence
+  // with nothing after it. On a `--state-dir` service the restart reloads the
+  // same other file, so the notice has to say what that outcome means and what to
+  // do about it — and must not offer a root it derived itself.
+  const notice = daemonRestartNotice(daemonProjectsPath());
+  assert.match(notice, /running background service loaded that file once/);
+  assert.match(notice, /until the service restarts/);
+  assert.match(notice, /If this is the root the service was started on/,
+    `重启这条只在一个前提下成立，前提必须写在句子里：${notice}`);
+  assert.match(notice, /is not knowable from here/);
+  assert.match(notice, /attach that answers GP_E_NOT_FOUND means the service is loading a different projects\.json/);
+  assert.match(notice, /no restart of the service will make it read anywhere else/);
+  assert.match(notice, /restarting again changes nothing/, "判据之后要说明别再重启");
+  assert.match(notice, new RegExp(PROJECTS_FILE_ENV), "把注册落进那个根的办法要叫得出名字");
+  assert.equal(/HOME=|process\.env\.HOME|\$HOME\/\.glasspane/.test(notice), false,
+    `notice 不得教 agent 用 $HOME 去猜那个根：${notice}`);
+});
+
+test("the shell-override notice keeps the stray write apart from the state-dir case", () => {
+  // MUTATION THIS PINS: folding the two cases back into one unconditional
+  // sentence. `PROJECTS_FILE_ENV` really is shell-only — that half of B-10 stays
+  // true whatever root the service chose — and `--state-dir` is the *other* way
+  // this file can be the right one, so the notice has to hold both.
+  const reg = useRegistry();
+  try {
+    const notice = daemonRestartNotice(reg.filePath);
+    assert.match(notice, new RegExp(`${PROJECTS_FILE_ENV}[^.]*is honoured by this MCP shell only`));
+    assert.match(notice, /its default root/, "the home-derived file is the default, not the only root");
+    assert.match(notice, /glasspaned --state-dir <root>/, `第二个根必须在文案里：${notice}`);
+    assert.ok(notice.includes(reg.filePath), "it names the file that was written");
+    // The way out of the stray write stays spelled out, and the case where no
+    // job exists at all remains the installer's call rather than a guess.
+    assert.match(notice, /unset /);
+    assert.match(notice, /launchctl kickstart/);
+    assert.match(notice, /never bootstrapped/);
+  } finally {
+    reg.dispose();
+  }
+});
+
+test("the projects-path doc states that it is the default root, not the only one", () => {
+  // MUTATION THIS PINS: the comment above `daemonProjectsPath` going back to "It
+  // has no override of its own". That sentence is what let the notice assert a
+  // restart fixes a stale service, and `StateRoot.swift` / `main.swift` say
+  // otherwise — the comment is the only place a reader of this file meets the
+  // fact before writing against it.
+  const source = fs.readFileSync(
+    new URL("../src/project-registry.ts", import.meta.url),
+    "utf8",
+  );
+  const at = source.indexOf("export function daemonProjectsPath");
+  assert.notEqual(at, -1, "daemonProjectsPath must stay the one place the default is resolved");
+  const doc = source.slice(0, at).split("/**").pop();
+  assert.match(doc, /--state-dir/, "the second root has to be documented where the default is defined");
+  assert.match(doc, /default/i, "and labelled as the default, not as the only file the daemon reads");
+  assert.equal(/no override of its own/.test(doc), false,
+    "the claim that made the restart notice wrong must not come back");
+  assert.match(doc, /method table is frozen|reports no state root/);
 });
 
 test("the notice for the daemon's own file states the restart, with the un-bootstrapped fallback", () => {

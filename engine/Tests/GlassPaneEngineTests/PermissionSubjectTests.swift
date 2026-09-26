@@ -386,21 +386,46 @@ final class PermissionSubjectTests: XCTestCase {
     }
 
     func testPixelCaptureDeniedRemedyPointsAtScreenRecording() {
-        let mapped = EngineCore.map(.pixelCaptureDenied(reason: "no window on screen"))
-        XCTAssertTrue(mapped.remedy.contains("Screen Recording"))
-        XCTAssertTrue(mapped.remedy.contains("--check-screen-permission"))
-        // 原来这里钉的是"remedy 必须解释 pixelDiff 会降级成 INCONCLUSIVE"。那是默认文案，
-        // 而全仓唯一把像素拒绝抛成错误的调用方是 `capture_view`——它没有 pixelDiff 可降级。
-        // gp_verify 的降级形态由证据包（熔断标签）与 `Classifier.pixelAbsentNextStep` 说，
-        // 不由这条错误路径说。默认文案于是成了：给一个不存在的通路作承诺。
-        XCTAssertFalse(mapped.remedy.contains("pixelDiff"),
-                       "没有调用方补话时不许替它声明降级形态：\(mapped.remedy)")
+        // R9 重钉（不是放宽）：这条测试原来喂的是 `"no window on screen"`，一个**通用**
+        // 成因，而它断言的却是"出路必须指向授予屏幕录制 + 重启 daemon"。那是 `default:`
+        // 分支的文案在替一个它没量过的成因作诊断——`pixel-capture-no-surface` 就是这样
+        // 被支去重启 daemon 的（重启会取消并回滚用户屏幕上正在执行的 act）。现在每个标签
+        // 都有自己的分支（`remedy-surface.test.mjs` 双向对表盯着），所以这里改成喂
+        // **真的**席位成因：席位确实没给时，指向屏幕录制这句话必须还在。
+        let denied = EngineCore.map(.pixelCaptureDenied(
+            reason: "Screen Recording permission is denied for this process"
+        ))
+        XCTAssertEqual(denied.code, .axUnavailable, "码表冻结：错误码不变")
+        XCTAssertTrue(denied.remedy.contains("Screen Recording"),
+                      "成因确实是席位时，出路必须点名那个席位：\(denied.remedy)")
+        XCTAssertTrue(denied.remedy.contains("--check-screen-permission"),
+                      "给出自查手段而非盲动：\(denied.remedy)")
+        XCTAssertFalse(denied.remedy.contains("pixelDiff"),
+                       "没有调用方补话时不许替它声明降级形态：\(denied.remedy)")
         let verifyShaped = EngineCore.map(
             .pixelCaptureDenied(reason: "no window on screen"),
             degradation: "pixelDiff stays null and T6 is INCONCLUSIVE"
         )
         XCTAssertTrue(verifyShaped.remedy.contains("INCONCLUSIVE"),
                       "由真正拥有 pixelDiff 的调用方补话时，这句话必须原样出现在 remedy 里")
+    }
+
+    func testUnclassifiedPixelCaptureFailureDoesNotOrderAGrantOrARestart() {
+        // 反向的一半：分类器说不出成因时（这里喂的是它认不出的任何文本），出路**不得**
+        // 把代理支去重授席位或重启 daemon——那两条动作分别会打断用户的授权流程、并取消
+        // 正在执行的 act，而它们要解决的那个成因在这里根本没被证明存在。
+        // 变异核对：把 `pixel-capture-failed` 分支改回 `seatAdvice`（"grant Screen
+        // Recording … then restart the daemon"）即红。
+        let generic = EngineCore.map(.pixelCaptureDenied(reason: "the capture produced no image"))
+        let lowered = generic.remedy.lowercased()
+        for forbidden in ["restart the daemon", "--restore-launchd", "kickstart", "grant screen recording"] {
+            XCTAssertFalse(lowered.contains(forbidden),
+                           "未归因的捕获失败不得命令 \(forbidden)：\(generic.remedy)")
+        }
+        XCTAssertTrue(generic.remedy.lowercased().contains("reason"),
+                      "未归因时必须让代理去读原文成因：\(generic.remedy)")
+        XCTAssertFalse(generic.remedy.contains("pixelDiff"),
+                       "同样不许替没有 pixelDiff 的调用方声明降级：\(generic.remedy)")
     }
 
     // MARK: - §11.7 面板渲染的机器核验面（identifier 真源）

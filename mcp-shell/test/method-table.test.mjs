@@ -11,7 +11,7 @@ import {
   RESTORE_BASE_DEADLINE_MS,
 } from "../dist/engine-client.js";
 import { TOOL_SPECS } from "../dist/tools.js";
-import { methodsSentByShell } from "./support/wire-surface.mjs";
+import { shellWireSurface } from "./support/wire-surface.mjs";
 
 /**
  * R8-中5: the daemon's method table is frozen (`FrameCodec.EngineMethod`), and
@@ -72,9 +72,39 @@ function swiftEngineMethods() {
   return names;
 }
 
+/**
+ * The guard both method-table gates run before trusting the derivation. It is
+ * deliberately *not* a `sent.length >= 10`-style floor: the forwarded-from-spec
+ * half alone produces 11 names, so a floor on the merged set survives even when
+ * the literal `.call("<name>")` scan has died — and it was exactly a
+ * variable-named call (`engine.call(spec.engineMethod, …)` in `tools.ts`) whose
+ * methods could otherwise escape this file and the late-reply sweep unnoticed.
+ * What has to keep being true is that *both producers still produce*:
+ *  - the spec half contributes one method per forwarded-as-is spec, and its
+ *    premise (`engine.call(spec.engineMethod, …)` still exists) is alive;
+ *  - the literal half still finds at least one wire method the spec half
+ *    cannot produce (today `capture_view`).
+ * Mutations that redden this (named per doctrine): re-spell every orchestrated
+ * `.call("name")` as `.call(\`name\`)` or a variable → `literalOnly` empties →
+ * red; refactor `runValidatedTool`'s forward away → `variableForwardAlive`
+ * false → red; point the scan at a directory with no `.ts` → both halves empty
+ * → red. Without this, tests below compare against whatever the scan happened
+ * to find and pass on a shrunk set.
+ */
+function assertDerivationAlive(surface) {
+  assert.ok(surface.speclessCount >= 1 && surface.fromSpecs.size === surface.speclessCount,
+    `转发自 spec 的那半边没产出（forwardable=${surface.speclessCount}，解析出 ${surface.fromSpecs.size}）——推导已经断了`);
+  assert.ok(surface.variableForwardAlive,
+    "tools.ts 里找不到 `engine.call(spec.engineMethod, …)` 这个转发臂——spec 半边的前提没了，方法表要看住它的新家");
+  assert.ok(surface.literalOnly.length >= 1,
+    "字面量 `.call(\"<name>\")` 扫描再也找不到 spec 环路给不出的方法——这一半边已经不再检查任何东西");
+}
+
 test("every method this shell sends is one the daemon declares", () => {
   const swift = swiftEngineMethods();
-  const sent = [...methodsSentByShell(TOOL_SPECS, path.resolve(HERE, "..", "src"))].sort();
+  const surface = shellWireSurface(TOOL_SPECS, path.resolve(HERE, "..", "src"));
+  assertDerivationAlive(surface);
+  const sent = [...surface.sent].sort();
   assert.ok(sent.length >= 10, `只收集到 ${sent.length} 个方法名，这条闸已经不再检查任何东西`);
   const unknown = sent.filter((method) => !swift.has(method));
   assert.deepEqual(unknown, [],
@@ -82,7 +112,12 @@ test("every method this shell sends is one the daemon declares", () => {
 });
 
 test("every method this shell sends has a deadline derived from the daemon, not the fallback", () => {
-  const sent = [...methodsSentByShell(TOOL_SPECS, path.resolve(HERE, "..", "src"))].sort();
+  const surface = shellWireSurface(TOOL_SPECS, path.resolve(HERE, "..", "src"));
+  // Same guard as above: without it, a dead derivation shrinks `sent` and the
+  // `missing` filter below goes green by never seeing the method that rides the
+  // fallback.
+  assertDerivationAlive(surface);
+  const sent = [...surface.sent].sort();
   // `restore` is the one sent method whose deadline is *derived* rather than
   // listed: an ffwd restore replays its steps by calling `act` per step, so a
   // table entry would be a number that contradicts the formula

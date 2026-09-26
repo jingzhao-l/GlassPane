@@ -381,3 +381,102 @@ P1 v1.0 §2 实施记录项 3、P2 v2.1 §19.2、P4 v4.0 §33.1 观察 3 仍写
 （每核 load 15–33），两条闸按构建产物新鲜度判据自拒并返回 `NOT RUN(2)` —— 这是它们该有的行为，不是缺陷，
 也不能拿它当"通过"。**1.3.0 的发布门禁改为以 GitHub CI 全绿为凭打 tag**；真机两闸留待机器空下来补跑，
 若届时发现问题走 1.3.1。
+
+**补记（同日 17:27–17:35，机器空出来后）**：两条真机闸都在本基线上跑到了 RC=0 —— `.p6_smoke.py` 在每核
+load 1.03 下 27 项 PASS（含"恢复后 UI 数值回写"与"像素通道本轮实测出过 pixelDiff"），`.t9_smoke.py` 在
+每核 0.87 下 RC=0（含注入侧实测 3 击 +29.8 MB），`gate.sh all` 在每核 1.14 下 `GATE_DONE failed=0`
+（9 个模块 exit=0；swift 702 / mcp-shell 261 / bridge 58 等）。**打 tag 用的是 CI 绿，这一条不变**；
+补跑只是把"未经真机端到端验证"这句话从"没跑过"改成"跑过且通过，但晚于 tag"。
+同一次补跑还暴露了门禁自身的两个缺陷（见「追加五」第 6 条）：真实 `projects.json` 的基线是 2026-09-23
+ captures 的，早已过期，于是它打印 `CHANGED` 却仍然 `failed=0`。
+
+
+# 追加五（2026-09-26，round 9）：1.3.0 发布之后对 MCP 面的五维复审
+
+审的是**已经发布出去的 1.3.0 代码**（tag `v1.3.0` = `cc414cd`）。五个只读 lane（时序与关联 /
+跨语言契约 / 建议可执行性 / 门禁可红性 / 数据与隐私面）报回 40 余条，逐条回代码复核后**成立 20 条**，
+其中高危 8 条。本追加记成六条契约。
+
+## 1. 无 id 的帧要按 daemon 的到达顺序归因，不是按"谁还在等"
+
+- **改为**：id 为 null/缺失的错误帧归给**最早被发出、尚未被回答**的那条请求 —— 包括调用方已经拿到
+  超时、但 daemon 仍在做的那条（它仍在被跟踪就是为了接住迟到回复）。落到已结算条目上时走迟到回复那条路
+  （记日志 + 交给汇点），**永远不得**把它的答案和 remedy 递给另一个还在等的调用方。"没有任何请求在飞"
+  这句话只允许在跟踪表真的为空时说。
+- **为什么**：旧实现把"oldest" 实现成 `oldestOpen()`（只挑未结算的），而注释说的是"oldest unanswered"。
+  daemon 单连接 FIFO，于是"`act` 超时 → 代理照 remedy 发 `gp_probe_status` → daemon 给那条 act 的
+  无 id 错误"这条路径上，act 的错误码与 remedy 被当成探针的答案交给探针调用方，探针自己的跟踪项被删掉，
+  它真正的回复随后被报成"这个客户端从没发过"；另一支（没有未结算项）直接把它说成"没有请求在飞"，
+  于是那次真实执行过的操作**没进证据链**——正是 R8-高3 要消灭的"再点一次"形状。
+- **锚点**：`test/engine-client.test.mjs` 的三条归因用例（排队中的调用方必须仍在等、迟到的错误被如实
+  记录、无 id 的 result 进汇点）；反向变异＝把 `oldestTracked` 改回只挑未结算。
+
+## 2. "这个请求能不能重发"是一处策略，抄成三份就有一份会漏
+
+- **改为**：判定不可重放的方法集合由传输层**唯一导出**（`isReplayUnsafeMethod`），`tools.ts` 与
+  `http-gateway.ts` 都问它，各自只保留自己的**文案**。超帧回复的建议对不可重放的方法明说"不要重发"，
+  并指向读的一侧（`gp_recent_reports` / `gp_last_evidence` / `gp_observe` / `gp_probe_status`）。
+- **为什么**：`act` 的回复超帧＝请求**已经到达并被回答**，只是答案太大被丢；此时给一句"换个更具体的
+  selector 重试"就是在命令第二次点击。同一形状还漏在 HTTP 面：curl 调用方拿的是同一份建议。三个 lane
+  各自抄了一份集合（传输层私有、工具层私有、网关又一份），只差没人把它们并成一处 —— 第四个不可重放的
+  方法加在任意一处，另两处就会继续教代理重点。
+- **锚点**：`test/tools.test.mjs`「no-retry 建议恰好覆盖传输层拒绝重放的方法」（双向对表）、
+  `test/http-gateway.test.mjs` 对每个可转发工具比较两面文案；反向变异＝把分支改成恒假或把 `gp_` 前缀
+  漏进 HTTP 文案。
+
+## 3. 建议里出现"重启"的两条新路径都要掐掉，且要能被机器看出没有重启
+
+- **改为**：(a) 帧**已经到达**但形状不对（`GP_E_INTERNAL`）时不得命令 `--restore-launchd` /
+  `kickstart`，改为交出一个读的检查（同一连接上发 `gp_probe_status`；`launchctl print` 回读运行中
+  job 的 socket 与 state root）；(b) daemon 侧每个 `pixel-capture-*` 标签都有自己的出路，
+  **只有** `screen-recording-denied` 可以提"授予屏幕录制 / 重启 daemon"。
+- **为什么**：(a) 说话的对象刚刚回答过，重启会带走它手上可能正在执行的 act；(b)
+  `pixel-capture-no-surface`（窗口在屏、被别人盖住）此前落进 `default:`，那句文案让用户去系统设置里
+  重新授权并重启服务，而壳层是**原样转发** daemon 的 remedy 的 —— 一条错标签的指令成了打断用户的动作。
+- **锚点**：`test/remedy-surface.test.mjs` 新闸（分类器能吐出的标签集合与 advice 分支集合**双向相等**，
+  且除席位那条外任何分支都不得出现 grant/restart 类命令词）；`PermissionSubjectTests` 两两成对的用例
+  （席位真被拒 → 必须点名 Screen Recording；成因未归因 → 必须不出现重启与授予）。反向变异＝删掉
+  no-surface 分支或把它的文案换回 `seatAdvice`。
+
+## 4. "已经到界"的判断必须覆盖每个 advertise 了边界的旋钮，且界值来自 schema
+
+- **改为**：`atAdvertisedFloor` 对 depth / limit / scale 一视同仁（此前只有 scale），文案按各自真实
+  下界陈述"这里已无可再缩"，而不是叫用户去缩一个壳层会自己拒掉的值。
+- **为什么**：`gp_observe {maxDepth:1}` 收到"把 maxDepth 再调小（本工具 advertise 1…10）"，跟着就是
+  zod `min(1)` 的 `GP_E_BAD_PARAMS`；`gp_recent_reports {limit:1}` 同形。这是 R8d-高2 的同一条判据
+  只落实了一半 —— 修了读参数这件事，没修读**边界**这件事。
+- **锚点**：`test/tools.test.mjs` 逐 kind 的下界用例；反向变异＝把过滤条件改回 `kind === "scale"`。
+
+## 5. 对外发布面上三条没人守的红线
+
+- **改为**：HTTP 网关 (a) 只允许回环地址，非回环一律在开连接与 bind 之前拒绝并点名被拒的值；
+  (b) bearer token 有**长度与熵**双门槛（门槛数字写进拒绝理由与 usage，并给一条做得到的生成命令）；
+  (c) bind 失败是致命错误，用自己的退出码退出并说清"这个进程没有在服务"。
+- **为什么**：这三条此前都是纸面承诺 —— 导出的工厂接受任意 `host`（`0.0.0.0` 一步把 act 面放到局域网，
+  无 TLS、只有一个 bearer），`GLASSPANE_HTTP_TOKEN=a` 就能守住"改用户屏幕"的面，而端口被占时
+  CLI 打一行日志继续活着：真正在服务的是抢占端口的那个进程，它顺带收走了调用方重发的 token，
+  还能返回伪造的证据包。这一族不是"建议措辞"，是发布面上的可达性。
+- **锚点**：`test/http-gateway.test.mjs` A/B/C 三组（逐值拒绝 + 真的 bind 成功且地址是回环；两条门槛
+  各一侧；起一个占端口的进程再看 CLI 的退出码与文案）。反向变异＝把 `options.host` 直接透传、
+  把门槛判断短路、把 `process.exit` 去掉 —— 三条都必须在**有限时间内变红**（见 §6 的挂死教训）。
+
+## 6. 门禁自己：三处不会红的对照，一处会挂死的对照，和一个只会嘟囔的守卫
+
+- **改为**：(1) 探针期限那条闸原先比较 `callerDeadlineMs(m) > callerDeadlineMs("probe_status")`，
+  两侧同过 `min(·, ceiling)` ⇒ 对任何表内容都为假。改比 daemon 侧期限，并要求"比探针久的方法"这个
+  **集合**保持为清单所列（新成员必须被有意加进来）。(2) 读 Swift 的两条对照改法：`history.removeAll()`
+  不再只看第一处（后面新增一次无条件清空就看不见），字段表接受 `public let|var` 并从结构体自己的
+  `init` 反推应有字段数（替掉 `>= 2` 这种恒真门限）。(3) `methodsSentByShell` 只看字面量
+  `engine.call("x")`，看不见 `engine.call(spec.engineMethod, …)`；现在两条产生路径分别暴露并要求
+  各自非空（`assertDerivationAlive`），派生方式换了写法即红。
+  (4) **会挂死的对照不是对照**：删掉 token 门槛后，那组用例不红而是把事件循环占住 —— 断言"必须抛"
+  的测试要把没抛时创建出来的东西关掉。所有"期待拒绝"的用例按此形状重写。(5) 中央 gate.sh 的真实
+  `projects.json` 守卫只在**跑完**比对一次基线，而基线是 9-23 抓的：结果它天天报 `CHANGED` 却仍
+  `failed=0`，等于把"开发者注册表被动过"这件最贵的事降级成噪音。改为本次运行自己抓基线、变动计入
+  失败并另存前后两份，且给 `GP_REG_FILE` 一个覆盖点，好让拒绝分支可以在**副本**上被证明能红。
+- **为什么**：这五条都是"绿色给出的假安全感"，与本仓所有其他缺陷同族；(5) 的额外后果是：本轮 17:33
+  那次 `failed=0` 的绿灯当时看起来与守卫报红互相矛盾，真相是基线陈旧——不修就永远分不清"误报"和
+  "真被写过"。
+- **锚点**：`probe-liveness.test.mjs`、`attach-identity.test.mjs`、`method-table.test.mjs` +
+  `test/support/wire-surface.mjs`、`http-gateway.test.mjs`，以及 `/var/tmp/gp-iterate-gates/gate.sh`
+  （守卫的拒绝分支已实测：改一份副本 → `GUARD_FAILURE` + `GATE_DONE failed=1` + 退出码非 0）。

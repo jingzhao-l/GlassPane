@@ -108,8 +108,10 @@ export const ENGINE_TIMEOUT_MS = 10_000;
  * `GP_E_ENGINE_TIMEOUT` and the no-replay remedy, and the request stays
  * registered, so the reply that arrives later is still attributed and written
  * to the log (`onDeadline` -> `reportLateReply`). Nothing is discarded by
- * answering early, which is what makes the multi-minute deadlines above safe to
- * cap: they describe the daemon, not the caller's wait.
+ * answering early — the only thing that ends that registration is the transport
+ * going away, and `teardown` logs the tracked requests it drops when it does —
+ * which is what makes the multi-minute deadlines above safe to cap: they
+ * describe the daemon, not the caller's wait.
  */
 export const CALLER_VISIBLE_CEILING_MS = 50_000;
 
@@ -184,8 +186,38 @@ export const ENGINE_DEADLINES_MS = {
 /** Fixed part of an ffwd restore deadline (per-step cost is `act` above). */
 export const RESTORE_BASE_DEADLINE_MS = 30_000;
 
-/** Methods whose reply is a user-visible action: replaying them is unsafe. */
-const REPLAY_UNSAFE_METHODS = new Set(["act", "restore"]);
+/**
+ * Methods that must not be re-issued after their caller was answered early,
+ * each with the reason it is unsafe.
+ *
+ * `attach` belongs here with `act` and `restore` (R9-中3). The one sentence this
+ * replaces called every other method "a read" and told its caller to retry it,
+ * which for `attach` ordered an agent to re-perform a request that is still
+ * running: attach is a daemon-state change, and when the attached app changes the
+ * daemon discards the evidence history the outstanding request is being recorded
+ * in (`tools.ts`' trail-ordering note names that condition). Re-issuing it can
+ * therefore erase the record of an operation that has not answered yet.
+ */
+const REPLAY_UNSAFE_REASONS: Readonly<Record<string, string>> = {
+  act: "the original action can still take effect on the user's screen",
+  restore: "the original replay can still take effect on the user's screen, step by step",
+  attach: "the original attach can still re-point the daemon at another app and, when that changes the attached app, discard the trail the request that has not answered yet is being recorded in",
+};
+
+/**
+ * The single answer to "will re-issuing this method perform a change the daemon may
+ * already have carried out?". Exported because two other layers have to ask it —
+ * `tools.ts` when it rewrites an oversized reply, `http-gateway.ts` when it answers
+ * a curl caller — and a membership list copied into each of them is how the advice
+ * for one tool drifts back into "just retry the click". A caller that wants the
+ * *reason* per method owns that text; membership comes from here.
+ */
+export function isReplayUnsafeMethod(method: string): boolean {
+  return Object.prototype.hasOwnProperty.call(REPLAY_UNSAFE_REASONS, method);
+}
+
+/** The non-replayable methods, for gates that must see the set change on purpose. */
+export const REPLAY_UNSAFE_METHOD_NAMES: readonly string[] = Object.keys(REPLAY_UNSAFE_REASONS);
 
 /** Deadline for one request; `restore` scales with its replayed step count. */
 export function engineDeadlineMs(
@@ -334,16 +366,50 @@ export function lateReplyRoute(surface: ShellSurface): string {
       + "in this session's trail, so a later gp_recent_reports lists the operation that ran instead of telling you to "
       + "run it again — **while this server still tracks the request**: the window is bounded ("
       + LATE_REPLY_RETENTION + " timed-out requests, and an eviction is logged), a re-attach in between supersedes it "
-      + "(also logged, with the operationIds it dropped), and if this process has exited nothing will be recorded at all"
+      + "(also logged, with the operationIds it dropped), a transport that ends first is logged the same way with the "
+      + "requests it stopped tracking, and if this process has exited nothing will be recorded at all"
     : "the original reply, when it lands, is written to this gateway's stderr with its body, so the operationId it "
       + "carries can be read off that line and fetched with GET /v1/evidence/<operationId> — the tracking window is "
-      + "bounded (" + LATE_REPLY_RETENTION + " timed-out requests, and an eviction is logged), and this gateway keeps "
+      + "bounded (" + LATE_REPLY_RETENTION + " timed-out requests, and an eviction is logged, as is a transport that "
+      + "ends before the reply lands), and this gateway keeps "
       + "no operation trail of its own";
 }
 
 /**
+ * What a slow reply from `method` means for the caller's next request, per
+ * method family (R9-中3). This used to be one sentence — "retry this read
+ * narrower (smaller maxDepth / a tighter selector) — that is safe for a read" —
+ * delivered to every method that is not `act`/`restore`/`probe_status`, and it
+ * was wrong twice over: it ordered a re-issue of `attach`, which is a
+ * daemon-state change and is handled by {@link REPLAY_UNSAFE_REASONS} now, and it
+ * named parameters the method's own schema does not have. Advice an agent cannot
+ * execute is not advice, so each branch below says what can actually be shrunk,
+ * and the branches that can be shrunk by nothing say so.
+ * `test/engine-client.test.mjs` checks each named parameter against `TOOL_SPECS`
+ * rather than against this file's opinion.
+ */
+function retryGuidance(method: string): string {
+  switch (method) {
+    case "observe":
+    case "snapshot":
+    case "audit_ui":
+      return "then re-send the same request with a smaller maxDepth: these three walk the accessibility tree, and depth is the knob their own schemas offer for how much of it they walk";
+    case "assert_element":
+      return "then re-send it for one element: its schema requires a selector and has no depth knob, so the only thing that can be narrowed is which element it resolves";
+    case "capture_view":
+      return "then re-send it at a lower scale: this is the capture-and-encode path, so the bytes are what take the time and `scale` is the only knob its schema has";
+    case "diagnose":
+    case "last_evidence":
+      return "then re-send it unchanged once the daemon answers: this reads back an operation the daemon has already recorded, it changes nothing, and none of its parameters control how much work the daemon does — there is nothing to narrow";
+    default:
+      return `then wait for the outstanding reply, and re-send '${method}' only if it changes or records nothing — its own tool description is where that is stated, and this shell names a narrowing parameter only for the methods above`;
+  }
+}
+
+/**
  * Remedy for a deadline overrun: wait and measure, never restart on a probe that
- * merely went unanswered, and never replay a user-visible action.
+ * merely went unanswered, and never replay a request whose re-issue has a side
+ * effect.
  */
 export function slowEngineRemedy(method: string, surface: ShellSurface = "mcp"): string {
   // "goes out immediately" is a property of the *client*, not of this shell: the
@@ -356,13 +422,14 @@ export function slowEngineRemedy(method: string, surface: ShellSurface = "mcp"):
   const poll = "if your client can send a second request while this one is still outstanding, confirm the daemon is alive with a cheap call: the shell does not queue one MCP request behind another, so gp_probe_status goes out at once and is answered as soon as the daemon is free of the request in front of it. Read its answer as: "
     + livenessProbeGuide();
   const restarted = livenessProbeDecision("unreachable");
-  if (REPLAY_UNSAFE_METHODS.has(method)) {
-    return `${poll}. The daemon serves one request at a time and is still working on this one, so wait for it; do NOT re-issue ${method}, because the original action can still take effect on the user's screen — ${lateReplyRoute(surface)}. Only ${restarted}`;
+  const unsafe = REPLAY_UNSAFE_REASONS[method];
+  if (unsafe !== undefined) {
+    return `${poll}. The daemon serves one request at a time and is still working on this one, so wait for it; do NOT re-issue ${method}, because ${unsafe} — ${lateReplyRoute(surface)}. Only ${restarted}`;
   }
   if (method === "probe_status") {
     return `the liveness probe itself has not been answered, and it is given the longest wait this shell allows any request (${CALLER_VISIBLE_CEILING_MS}ms), so this particular answer carries no information about whether the daemon is alive: the daemon is single-connection and is still working on the request in front of this probe. ${livenessProbeDecision("timed-out")}. Keep waiting instead — the outstanding call's reply is attributed when it lands, and ${lateReplyRoute(surface)}. If the daemon's socket really is gone, the next call answers with ${GP_E_ENGINE_UNREACHABLE}, and that remedy names the restore command.`;
   }
-  return `${poll}. The daemon serves one request at a time and is still working on this one, so wait, then retry this read narrower (smaller maxDepth / a tighter selector) — that is safe for a read; a restart is authorised only by ${restarted}`;
+  return `${poll}. The daemon serves one request at a time and is still working on this one, so wait — ${retryGuidance(method)}; a restart is authorised only by ${restarted}`;
 }
 
 /**
@@ -429,7 +496,14 @@ export class EngineJsonRpcClient {
   private closed = false;
   private readonly pending = new Map<number, Pending>();
   private noteHandler: ((note: string) => void) | null = null;
-  private lateReplyHandler: ((reply: LateReply) => void) | null = null;
+  /**
+   * Declared to accept anything as its return value, while the public
+   * {@link onLateReply} keeps the `(reply) => void` shape callers were written
+   * against: an `async` sink is assignable to both, and only this wider one lets
+   * {@link reportLateReply} see the promise it has to keep from becoming an
+   * unhandled rejection.
+   */
+  private lateReplyHandler: ((reply: LateReply) => unknown) | null = null;
 
   constructor(
     private readonly io: LineIo,
@@ -566,7 +640,8 @@ export class EngineJsonRpcClient {
     this.reject(entry, new EngineCallError(
       GP_E_ENGINE_TIMEOUT,
       `engine is still working on '${entry.method}': no reply after ${entry.deadlineMs}ms. `
-      + "The request stays registered — a late reply is written to the server log — so this is a busy or slow daemon, not an unreachable one."
+      + "The request stays registered — a late reply is written to the server log — so this is a busy or slow daemon, not an unreachable one. "
+      + "That registration lasts only while this connection does: if the transport ends first, the server log says so and names what it stopped tracking."
       + capped,
       slowEngineRemedy(entry.method, this.surface),
     ));
@@ -620,16 +695,39 @@ export class EngineJsonRpcClient {
     //   id null/absent — the daemon lost the id while answering a frame it
     //     could not parse (its own oversize path) or could not serialize. It
     //     processes strictly in arrival order and writes each response before
-    //     reading the next request, so the oldest unanswered request is the
-    //     one it was working on.
+    //     reading the next request, so the request it was working on is the
+    //     oldest one this client still *tracks* (R9-高1). Tracked, not "the
+    //     oldest the caller is still waiting on": a request whose caller was
+    //     answered at the ceiling is still the daemon's current one, and
+    //     skipping it delivered that other request's failure to the next caller
+    //     in the queue, deleted the entry its real reply needed, and made that
+    //     reply read as a frame this client never issued. The reverse mutation to
+    //     watch for is `oldestTracked` becoming `oldestOpen` again.
     //   any other id shape — nothing to attribute; say so and leave the
     //     outstanding requests to their own deadlines.
     if (id === null || id === undefined) {
-      const target = this.oldestOpen();
-      if (frame.error && target) {
-        // This frame *is* that request's answer, so stop tracking it.
-        this.pending.delete(target.id);
-        this.reject(target, attribute(this.engineError(frame.error), target));
+      const target = this.oldestTracked();
+      if (target) {
+        if (target.settled) {
+          // Its caller already has an answer, so this is a late reply: report it,
+          // route a result to the trail sink, and under no circumstances hand it
+          // to a different caller that is still waiting.
+          this.pending.delete(target.id);
+          this.reportLateReply(target, frame, true);
+          return;
+        }
+        if (frame.error) {
+          // This frame *is* that request's answer, so stop tracking it.
+          this.pending.delete(target.id);
+          this.reject(target, attribute(this.engineError(frame.error), target));
+          return;
+        }
+        // A result frame with no id is not something the daemon's own paths
+        // produce (its id-less answers are the error paths), and delivering a
+        // guessed result to a live caller would answer it with another request's
+        // data — so nothing is settled here and the request keeps its own
+        // deadline.
+        this.report(`engine sent an id-less frame with a result while '${target.method}' (id ${target.id}) is still waiting for its answer; an id-less answer from this daemon is an error frame, so this one was not delivered to any caller: ${truncate(line)}`);
         return;
       }
       this.report(frame.error
@@ -650,23 +748,22 @@ export class EngineJsonRpcClient {
 
   /**
    * A frame over the cap: attribute it to the request it belonged to — from
-   * the retained head when the daemon echoed an id, else by arrival order —
-   * and fail that one call only.
+   * the retained head when the daemon echoed an id, else by arrival order, which
+   * is the oldest *tracked* request for the same reason the id-less frame path
+   * uses it (R9-高1) — and fail that one call only.
    */
   private failOversizedReply(error: OversizeFrameError): void {
     const echoed = recoverFrameId(error.prefix);
-    let entry = typeof echoed === "number" ? this.pending.get(echoed) : undefined;
-    if (entry?.settled) {
-      this.pending.delete(entry.id);
-      this.report(`the engine's late reply to '${entry.method}' (id ${entry.id}) exceeded the ${MAX_FRAME_BYTES}-byte frame cap (${error.bytes} bytes), so its body could not be delivered even late`);
-      return;
-    }
-    const inferred = entry === undefined;
-    if (!entry) {
-      entry = this.oldestOpen();
-    }
+    const direct = typeof echoed === "number" ? this.pending.get(echoed) : undefined;
+    const entry = direct ?? this.oldestTracked();
     if (!entry) {
       this.report(`engine sent an oversized frame (${error.bytes} bytes) with no request in flight — dropped, connection intact`);
+      return;
+    }
+    const inferred = direct === undefined;
+    if (entry.settled) {
+      this.pending.delete(entry.id);
+      this.report(`the engine's late reply to '${entry.method}' (id ${entry.id}) exceeded the ${MAX_FRAME_BYTES}-byte frame cap (${error.bytes} bytes), so its body could not be delivered even late${inferred ? " (attributed by arrival order: the frame's head carried no readable id)" : ""}`);
       return;
     }
     this.pending.delete(entry.id);
@@ -689,39 +786,65 @@ export class EngineJsonRpcClient {
     );
   }
 
-  /** Oldest request the caller is still waiting on (daemon FIFO order). */
-  private oldestOpen(): Pending | undefined {
-    for (const entry of this.pending.values()) {
-      if (!entry.settled) {
-        return entry;
-      }
-    }
-    return undefined;
+  /**
+   * Oldest request this client still tracks, settled ones included: that is the
+   * request the daemon's arrival-ordered answer belongs to. `Map` iteration is
+   * insertion order, which is the order the requests went out.
+   */
+  private oldestTracked(): Pending | undefined {
+    return this.pending.values().next().value;
   }
 
-  private reportLateReply(entry: Pending, frame: CallFrame): void {
-    const body = frame.error
-      ? `error ${JSON.stringify(frame.error)}`
-      : truncate(jsonOrString(frame.result));
+  /**
+   * Route the reply that lands after its caller was already answered. `inferred`
+   * marks an attribution made by arrival order rather than by a matching id, and
+   * says so in the note.
+   */
+  private reportLateReply(entry: Pending, frame: CallFrame, inferred = false): void {
+    const byOrder = inferred
+      ? " (attributed by arrival order: the frame carried no request id, and this is the oldest request this client still tracks)"
+      : "";
+    if (frame.error) {
+      // Name the missing operationId rather than leaving this to read as a reply
+      // that was logged and then silently not recorded: an error answer carries
+      // nothing the trail could hold on to.
+      this.report(
+        `late engine reply for '${entry.method}' (id ${entry.id}), ${entry.deadlineMs}ms deadline already reported, is an error frame (${JSON.stringify(frame.error)}): an error answer names no operationId, so nothing can be recorded in the trail for it${byOrder}`,
+      );
+      return;
+    }
     this.report(
-      `late engine reply for '${entry.method}' (id ${entry.id}), ${entry.deadlineMs}ms deadline already reported: ${body}`,
+      `late engine reply for '${entry.method}' (id ${entry.id}), ${entry.deadlineMs}ms deadline already reported: ${truncate(jsonOrString(frame.result))}${byOrder}`,
     );
-    if (frame.error || frame.result === undefined) {
-      // An error answer carries no operationId to record, and a frame with
-      // neither `result` nor `error` is not an answer this sink can use.
+    if (frame.result === undefined) {
+      // A frame with neither `result` nor `error` is not an answer this sink can
+      // use.
       return;
     }
     const handler = this.lateReplyHandler;
     if (handler === null) {
       return;
     }
+    const reply: LateReply = { method: entry.method, result: frame.result, correlation: entry.correlation };
     try {
-      handler({ method: entry.method, result: frame.result, correlation: entry.correlation });
+      const returned = handler(reply);
+      // An `async` sink satisfies the `(reply) => void` signature it is
+      // registered with, and its rejection never reaches the `catch` below — it
+      // escapes as an unhandled rejection, which takes the MCP process down with
+      // every request still pending in it (R9-中2). The reverse mutation is to
+      // drop this block and leave the sync `catch` as the whole guard.
+      if (returned instanceof Promise) {
+        returned.catch((error: unknown) => this.reportSinkFailure(entry, error));
+      }
     } catch (error) {
       // The reply has already been logged above; a sink that throws must not
       // lose that fact, and must not be allowed to take the transport down.
-      this.report(`the late-reply sink failed for '${entry.method}' (id ${entry.id}): ${String(error)}`);
+      this.reportSinkFailure(entry, error);
     }
+  }
+
+  private reportSinkFailure(entry: Pending, error: unknown): void {
+    this.report(`the late-reply sink failed for '${entry.method}' (id ${entry.id}): ${String(error)}`);
   }
 
   private resolve(entry: Pending, value: unknown): void {
@@ -747,9 +870,23 @@ export class EngineJsonRpcClient {
     entry.settled = true;
   }
 
-  /** Reject everything outstanding and drop every handle. */
+  /**
+   * Reject everything outstanding and drop every handle. The settled entries go
+   * too, and that has to be reported: each of them was answered with "the
+   * request stays registered" (`onDeadline`) and with {@link lateReplyRoute}'s
+   * promise that its reply is attributed when it lands. This map is what that
+   * promise was standing on, so clearing it silently leaves an agent reading the
+   * log for an operation that really ran, finding nothing, and unable to tell
+   * "this shell stopped tracking it" from "it never happened" — the difference
+   * that decides whether it re-performs an `act` on the user's screen (R9-中1).
+   * The reverse mutation is to delete this note and keep the silent clear.
+   */
   private teardown(reason: EngineCallError): void {
     const entries = [...this.pending.values()];
+    // Read before the loop below: `reject()` marks an entry settled, and a
+    // request that never got an answer is not one whose caller was promised a
+    // tracking window.
+    const tracked = entries.filter((entry) => entry.settled);
     this.pending.clear();
     for (const entry of entries) {
       if (!entry.settled) {
@@ -758,6 +895,11 @@ export class EngineJsonRpcClient {
         clearTimeout(entry.timer);
         entry.timer = null;
       }
+    }
+    if (tracked.length > 0) {
+      this.report(
+        `${reason.message}: late-reply tracking ended for ${tracked.length} request(s) whose callers had been told their replies would still be attributed (${tracked.map((entry) => `'${entry.method}' id ${entry.id}`).join(", ")}). Nothing tracks them now, so a reply that lands after this line is not attributed, not recorded in the trail, and not evidence either way that the operation ran.`,
+      );
     }
   }
 
