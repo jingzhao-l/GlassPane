@@ -13,7 +13,10 @@ const GO_UPSELL_FREE_TIER_DONT_SHOW = "go_upsell_dont_show"
 const GO_UPSELL_ACCOUNT_RATE_LIMIT_LAST_SEEN_AT = "go_upsell_account_rate_limit_last_seen_at"
 const GO_UPSELL_ACCOUNT_RATE_LIMIT_DONT_SHOW = "go_upsell_account_rate_limit_dont_show"
 const GO_UPSELL_WINDOW = 86_400_000 // 24 hrs
-const GO_UPSELL_PROVIDERS = new Set(["opencode", "opencode-go"])
+// [gp] Product: this dialog used to nudge users toward a paid plan for the
+// first-party provider. There is no first-party provider and no plan to sell here,
+// so the upsell set is empty and the dialog explains the limit instead.
+const GO_UPSELL_PROVIDERS = new Set<string>()
 
 function goUpsellKeys(status: SessionStatus) {
   if (status.type !== "retry" || !status.action) return
@@ -74,14 +77,10 @@ export function useUsageExceededDialogs() {
             link={action.link}
             onClose={(dontShowAgain) => {
               setGoUpsellState(keys.lastSeenAt, Date.now())
+              // [gp] Product: the "buy a plan" path pointed at the first-party
+              // provider. There is nothing to buy here, so dismissing simply closes
+              // the dialog and the user connects their own key when they want to.
               if (dontShowAgain) setGoUpsellState(keys.dontShow, Date.now())
-              else {
-                void import("../../components/dialog-connect-provider").then((x) => {
-                  const controller = x.useProviderConnectController()
-                  controller.select("opencode-go")
-                  void dialog.show(() => <x.DialogConnectProvider controller={controller} />)
-                })
-              }
             }}
           />
         ))

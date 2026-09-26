@@ -6,6 +6,7 @@ import { Context, Effect, Layer } from "effect"
 import { Flock } from "./util/flock"
 import { Flag } from "./flag/flag"
 import { makeGlobalNode } from "./effect/app-node"
+import { read as EnvRead } from "./flag/flag"
 
 // [gp] Product: the local state root is the product's (global.ts is the single
 // constant behind every XDG path). Upstream's `opencode` dirs are left alone on
@@ -19,7 +20,7 @@ const tmp = path.join(os.tmpdir(), app)
 
 const paths = {
   get home() {
-    return process.env.OPENCODE_TEST_HOME ?? os.homedir()
+    return EnvRead("OPENCODE_TEST_HOME") ?? os.homedir()
   },
   data,
   bin: path.join(cache, "bin"),

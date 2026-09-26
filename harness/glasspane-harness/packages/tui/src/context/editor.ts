@@ -5,6 +5,7 @@ import { isRecord } from "../util/record"
 import { useTuiPaths } from "./runtime"
 import { createSimpleContext } from "./helper"
 import { editorIntegration } from "../editor"
+import { read as EnvRead } from "@opencode-ai/core/flag/flag"
 
 const MCP_PROTOCOL_VERSION = "2025-11-25"
 
@@ -114,7 +115,7 @@ export const { use: useEditorContext, provider: EditorContextProvider } = create
   init: (props: { integration?: EditorIntegration; WebSocketImpl?: typeof WebSocket }) => {
     const paths = useTuiPaths()
     const editor = props.integration ?? editorIntegration
-    const value = process.env.CLAUDE_CODE_SSE_PORT || process.env.OPENCODE_EDITOR_SSE_PORT
+    const value = process.env.CLAUDE_CODE_SSE_PORT || EnvRead("OPENCODE_EDITOR_SSE_PORT")
     const parsedPort = value ? Number.parseInt(value, 10) : undefined
     const port =
       parsedPort && Number.isInteger(parsedPort) && parsedPort > 0 && parsedPort <= 65535 ? parsedPort : undefined

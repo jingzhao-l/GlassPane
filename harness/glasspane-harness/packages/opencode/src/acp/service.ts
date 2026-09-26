@@ -46,7 +46,9 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { Provider } from "@/provider/provider"
 import type { Command } from "@/command"
 
-export const AuthMethodID = "opencode-login"
+// [gp] Product: this was the first-party account login id. It is kept as a string
+// literal only because the ACP payload shape is typed; the product has no login.
+export const AuthMethodID = "harness-login"
 
 export type Error = ACPError.Error
 type ServiceConnection = Pick<AgentSideConnection, "sessionUpdate"> &
@@ -99,15 +101,9 @@ export function make(input: {
       id: AuthMethodID,
     }
 
-    if (params.clientCapabilities?._meta?.["terminal-auth"] === true) {
-      authMethod._meta = {
-        "terminal-auth": {
-          command: "opencode",
-          args: ["auth", "login"],
-          label: "OpenCode Login",
-        },
-      }
-    }
+    // [gp] Product: upstream advertised a terminal-auth flow here that ran
+    // `opencode auth login` for the first-party account. This product has no account,
+    // so an editor must not be told to launch a login that cannot exist.
 
     const response = {
       protocolVersion: 1,
@@ -805,11 +801,10 @@ function defaultModelFromConfig(
   if (configured && providers[configured.providerID]?.models[configured.modelID]) return configured
 
   // First-session ACP startup must not scan historical sessions just to infer
-  // a default. Configured model, opencode provider, then sorted best model keep
-  // the protocol response deterministic without extra session/message reads.
-  const opencodeProvider = providers[ProviderV2.ID.make("opencode")]
-  const opencodeModel = opencodeProvider ? Provider.sort(Object.values(opencodeProvider.models))[0] : undefined
-  if (opencodeProvider && opencodeModel) return { providerID: opencodeProvider.id, modelID: opencodeModel.id }
+  // a default. The configured model, then the sorted best model, keeps the
+  // protocol response deterministic without extra session/message reads.
+  // [gp] Product: upstream preferred its own provider here; that provider is not
+  // in the catalog any more, so there is nothing to prefer.
 
   const best = Provider.sort(Object.values(providers).flatMap((provider) => Object.values(provider.models)))[0]
   if (best) return { providerID: best.providerID, modelID: best.id }

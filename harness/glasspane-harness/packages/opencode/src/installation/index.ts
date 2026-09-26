@@ -276,30 +276,16 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
             const formula = yield* getBrewFormula()
             const env = { HOMEBREW_NO_AUTO_UPDATE: "1" }
             if (formula.includes("/")) {
-              const tap = yield* run(["brew", "tap", "anomalyco/tap"], { env })
-              if (tap.code !== 0) {
-                upgradeResult = tap
-                break
-              }
-              const repo = yield* text(["brew", "--repo", "anomalyco/tap"])
-              const dir = repo.trim()
-              if (dir) {
-                const pull = yield* run(["git", "pull", "--ff-only"], { cwd: dir, env })
-                if (pull.code !== 0) {
-                  upgradeResult = pull
-                  break
-                }
-              }
+              // [gp] Product: upstream pulled `anomalyco/tap` here. This product is
+              // published to npm and has no tap of its own, so upgrading a formula
+              // that came from someone else's tap is refused with the way out, rather
+              // than silently fetching another project's repository.
+              upgradeResult = yield* run(["echo", "This formula comes from a third-party tap; upgrade with: npm install -g glasspane-harness@latest"], { env })
+              break
             }
             upgradeResult = yield* run(["brew", "upgrade", formula], { env })
             break
           }
-          case "choco":
-            upgradeResult = yield* run(["choco", "upgrade", "opencode", `--version=${target}`, "-y"])
-            break
-          case "scoop":
-            upgradeResult = yield* run(["scoop", "install", `opencode@${target}`])
-            break
           default:
             return yield* new UpgradeFailedError({ stderr: `Unknown installation method: ${m}` })
         }

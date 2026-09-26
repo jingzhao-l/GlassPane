@@ -9,11 +9,11 @@ const id = "internal:sidebar-footer"
 function View(props: { api: TuiPluginApi; sessionID: string }) {
   const paths = useTuiPaths()
   const theme = () => props.api.theme.current
-  const has = createMemo(() =>
-    props.api.state.provider.some(
-      (item) => item.id !== "opencode" || Object.values(item.models).some((model) => model.cost?.input !== 0),
-    ),
-  )
+  // [gp] Product: upstream treated the first-party provider as "already connected",
+  // because it shipped free models. There is no first-party provider any more — every
+  // provider in the catalog needs the user's own key — so this is simply "is anything
+  // connected at all".
+  const has = createMemo(() => props.api.state.provider.some((item) => Object.keys(item.models).length > 0))
   const done = createMemo(() => props.api.kv.get("dismissed_getting_started", false))
   const show = createMemo(() => !has() && !done())
   const path = createMemo(() => {
@@ -53,9 +53,9 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
                 ✕
               </text>
             </box>
-            <text fg={theme().textMuted}>OpenCode includes free models so you can start immediately.</text>
             <text fg={theme().textMuted}>
-              Connect from 75+ providers to use other models, including Claude, GPT, Gemini etc
+              Bring your own API key: connect any of the providers in the catalog — Anthropic, OpenAI, Google,
+              GitHub Copilot, OpenRouter and more.
             </text>
             <box flexDirection="row" gap={1} justifyContent="space-between">
               <text fg={theme().text}>Connect provider</text>

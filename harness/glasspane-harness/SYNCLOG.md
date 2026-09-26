@@ -2,6 +2,37 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-09-26 · v0.5.x：产品面逐类审计清零 + 10 片上游树移除 + 一次自己造成的版本号报废
+
+owner：持续检查私有化（细节不再提 opencode）、全面整理不需要的文件（**桌面端保留**）、问 glm52 与
+VSCode 是什么、问 kernel 是不是为 iterate 双向集成准备的。
+
+- **按"用户看得见的地方"分类审计再逐类修**（不是凭印象）：环境变量（新增 `GLASSPANE_HARNESS_*`，
+  唯一解析点 `flag/flag.ts` 的 `read()`，**旧名继续有效**——让人已导出的设置静默失效本身是缺陷）、
+  线上标识（X-Title/X-Source/User-Agent/originator/HTTP-Referer/MCP client/OTLP 全部改名）、
+  用户自己的文件（`glasspane-harness.db` **带一次性旧名 rename**，绝不让人看起来"历史丢了"）、
+  mDNS 实际值（此前帮助文案改了、值没改 = 文档与行为分裂）、CLI scriptName（`--help` 打印的就是它）、
+  内置 skill（`customize-harness`，它注入每个会话，文本即产品面）、不再往用户配置写第三方 `$schema`、
+  TUI/web app 的第一方残留（Zen 推广与链接、免费模型话术、付费引导、推荐标签、排序）。
+  63 个语言文件、2,700+ 条用户可见文案改为产品名；键名与调用点同步（键名有类型，typecheck 抓到了漏改）。
+- **审计抓到的真缺陷**：我自己在改名时把 `ConfigPaths.files("opencode", …)` 换掉，导致**旧的项目配置
+  不再被读取**（与兼容承诺冲突）——已改为两个都读、产品名后读；以及 mDNS 文案/值分裂、指向已删命令的
+  用户提示、让编辑器去跑不存在的 `opencode auth login`、导入已不存在的云端分享。
+- **删掉 10 片从来不属于本产品的上游树**（零交叉依赖，实测）：console / enterprise / stats / web /
+  storybook / containers / function / identity / slack / docs，加 `artifacts/`（上游给某模型做的
+  宣传视频工程，7.8MB）、`.vscode/`、`install/`、`nix/`+`flake.*`、`sdks/vscode`、`infra/`+`sst.config.ts`、
+  `perf/`、`github/`、`screenshot-uk.png`。**保留** `packages/desktop`（产品面，第二批）、`patches/`、
+  `specs/`。`product.json → product.removedTrees` 记录在案。
+- **门禁**：`brand-surface` 新增 5 类规则（第一方网关 / 线上标识 / 第三方 schema 写入 / 产品文件名 /
+  已删树），兼容读取处走显式白名单；规则扫描前先剥注释，否则它会把自己写的"这里删掉了 X"判为违规。
+  另修 `fork-diff` 的假阳性（把 gitignore 的构建产物当成"在盘上未提交"）。
+- **一次自己造成的版本号报废**：我并发启动了两次 publish，npm 把其中一个 stage，`0.5.0` 的 wrapper
+  版本号被 registry 拒绝再次发布，实际发的是 0.5.1（同内容）。已把"同一时刻只允许一个发布"变成脚本
+  里的排他锁（`mkdir` 原子创建），并在 CHANGELOG 里写明。
+- **验证**：全量 typecheck 0 错；固定点 61/61；core skill、config 套件 107/107；brand-surface 0 hit，
+  lineage 18,566 → 9,887；0.5.1 已从 registry 端到端实测（装出来报 0.5.1、os 门是 darwin、内嵌 web
+  服务正常）。
+
 ## 2026-09-25 · v0.4.0：删掉第一方账号面（改成自带 API key）+ 仓库自己的项目目录改名 + npm README/发布手册
 
 owner 2026-09-25 三问：(1) npm 上怎么设 trusted publisher；(2) npm 包也要有 README；

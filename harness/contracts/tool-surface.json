@@ -4,7 +4,7 @@
   "caliber": {
     "engine": "lines of every *.swift under engine/Sources",
     "mcpShell": "lines of every *.ts under mcp-shell/src",
-    "fork": "fork-diff `added` files + `+` lines of `edited` vendored files, docs excluded",
+    "fork": "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted",
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
   "observedAt": "2026-09-26",
@@ -14,31 +14,11 @@
     "mcpShell": {
       "loc": 3859,
       "files": 10,
-      "ratio": 0.1485
+      "ratio": 0.1484
     },
     "fork": {
-      "loc": 3788,
+      "loc": 3808,
       "files": [
-        {
-          "file": ".glasspane-harness/env.d.ts",
-          "kind": "added",
-          "lines": 4
-        },
-        {
-          "file": ".glasspane-harness/plugins/tui-smoke.tsx",
-          "kind": "added",
-          "lines": 1019
-        },
-        {
-          "file": ".glasspane-harness/tool/github-pr-search.ts",
-          "kind": "added",
-          "lines": 64
-        },
-        {
-          "file": ".glasspane-harness/tool/github-triage.ts",
-          "kind": "added",
-          "lines": 60
-        },
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
           "kind": "added",
@@ -90,7 +70,382 @@
           "lines": 176
         },
         {
+          "file": "packages/app/src/components/dialog-connect-provider.stories.tsx",
+          "kind": "edited",
+          "lines": 1
+        },
+        {
+          "file": "packages/app/src/components/dialog-connect-provider.tsx",
+          "kind": "edited",
+          "lines": 8
+        },
+        {
+          "file": "packages/app/src/components/dialog-select-model-unpaid-v2.stories.tsx",
+          "kind": "edited",
+          "lines": 1
+        },
+        {
+          "file": "packages/app/src/components/dialog-select-model-unpaid-v2.tsx",
+          "kind": "edited",
+          "lines": 4
+        },
+        {
+          "file": "packages/app/src/components/dialog-select-model-unpaid.tsx",
+          "kind": "edited",
+          "lines": 1
+        },
+        {
+          "file": "packages/app/src/components/dialog-select-model.tsx",
+          "kind": "edited",
+          "lines": 1
+        },
+        {
+          "file": "packages/app/src/components/dialog-select-server.tsx",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
+          "file": "packages/app/src/components/settings-providers.tsx",
+          "kind": "edited",
+          "lines": 1
+        },
+        {
+          "file": "packages/app/src/components/settings-v2/providers.tsx",
+          "kind": "edited",
+          "lines": 1
+        },
+        {
+          "file": "packages/app/src/components/terminal.tsx",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
+          "file": "packages/app/src/hooks/use-providers.ts",
+          "kind": "edited",
+          "lines": 1
+        },
+        {
+          "file": "packages/app/src/i18n/am.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/ar.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/az.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/bg.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/bn.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/br.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/bs.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/ca.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/cs.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/da.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/de.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/desktop-native.ts",
+          "kind": "edited",
+          "lines": 4
+        },
+        {
+          "file": "packages/app/src/i18n/dv.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/dz.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/el.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/en.ts",
+          "kind": "edited",
+          "lines": 12
+        },
+        {
+          "file": "packages/app/src/i18n/es.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/et.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/fa.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/fi.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/fo.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/fr.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/hi.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/hr.ts",
+          "kind": "edited",
+          "lines": 12
+        },
+        {
+          "file": "packages/app/src/i18n/hu.ts",
+          "kind": "edited",
+          "lines": 12
+        },
+        {
+          "file": "packages/app/src/i18n/hy.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/id.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/is.ts",
+          "kind": "edited",
+          "lines": 12
+        },
+        {
+          "file": "packages/app/src/i18n/it.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/ja.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/ka.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/km.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/ko.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/lo.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/lt.ts",
+          "kind": "edited",
+          "lines": 12
+        },
+        {
+          "file": "packages/app/src/i18n/lv.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/mk.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/mn.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/ms.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/my.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/ne.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/nl.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/no.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/pa.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/pl.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/ro.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/ru.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/si.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/sk.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/sl.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/sq.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/sr.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/sv.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/tg.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/th.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/tk.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/tr.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/uk.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/ur.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/uz.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/vi.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/zh.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
+          "file": "packages/app/src/i18n/zht.ts",
+          "kind": "edited",
+          "lines": 16
+        },
+        {
           "file": "packages/app/src/pages/session/timeline/message-timeline.tsx",
+          "kind": "edited",
+          "lines": 7
+        },
+        {
+          "file": "packages/app/src/pages/session/usage-exceeded-dialogs.tsx",
           "kind": "edited",
           "lines": 7
         },
@@ -100,19 +455,49 @@
           "lines": 0
         },
         {
+          "file": "packages/app/src/utils/server.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
+          "file": "packages/app/src/wsl/settings-model.ts",
+          "kind": "edited",
+          "lines": 8
+        },
+        {
           "file": "packages/core/src/config.ts",
           "kind": "edited",
           "lines": 7
         },
         {
+          "file": "packages/core/src/database/database.ts",
+          "kind": "edited",
+          "lines": 29
+        },
+        {
+          "file": "packages/core/src/flag/flag.ts",
+          "kind": "edited",
+          "lines": 48
+        },
+        {
           "file": "packages/core/src/global.ts",
           "kind": "edited",
-          "lines": 4
+          "lines": 5
+        },
+        {
+          "file": "packages/core/src/observability/logging.ts",
+          "kind": "edited",
+          "lines": 3
+        },
+        {
+          "file": "packages/core/src/observability/otlp.ts",
+          "kind": "edited",
+          "lines": 0
         },
         {
           "file": "packages/core/src/plugin/agent.ts",
           "kind": "edited",
-          "lines": 3
+          "lines": 7
         },
         {
           "file": "packages/core/src/plugin/provider.ts",
@@ -120,29 +505,124 @@
           "lines": 0
         },
         {
+          "file": "packages/core/src/plugin/provider/cerebras.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
+          "file": "packages/core/src/plugin/provider/kilo.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
+          "file": "packages/core/src/plugin/provider/llmgateway.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
+          "file": "packages/core/src/plugin/provider/nvidia.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
+          "file": "packages/core/src/plugin/provider/openai.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
+          "file": "packages/core/src/plugin/provider/openrouter.ts",
+          "kind": "edited",
+          "lines": 1
+        },
+        {
+          "file": "packages/core/src/plugin/provider/vercel.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
+          "file": "packages/core/src/plugin/provider/zenmux.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
           "file": "packages/core/src/plugin/skill.ts",
+          "kind": "edited",
+          "lines": 8
+        },
+        {
+          "file": "packages/core/src/project.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
+          "file": "packages/core/src/repository.ts",
+          "kind": "edited",
+          "lines": 2
+        },
+        {
+          "file": "packages/core/src/shell.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
+          "file": "packages/core/src/tool/webfetch.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
+          "file": "packages/core/src/tool/websearch.ts",
+          "kind": "edited",
+          "lines": 5
+        },
+        {
+          "file": "packages/core/src/v1/config/server.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
+          "file": "packages/desktop/src/main/wsl/servers.ts",
           "kind": "edited",
           "lines": 3
         },
         {
+          "file": "packages/desktop/src/main/wsl/sidecar.ts",
+          "kind": "edited",
+          "lines": 1
+        },
+        {
           "file": "packages/opencode/script/build.ts",
           "kind": "edited",
-          "lines": 23
+          "lines": 20
         },
         {
           "file": "packages/opencode/script/postinstall.mjs",
           "kind": "edited",
-          "lines": 7
+          "lines": 2
         },
         {
           "file": "packages/opencode/script/publish.ts",
           "kind": "edited",
-          "lines": 187
+          "lines": 176
+        },
+        {
+          "file": "packages/opencode/src/acp/service.ts",
+          "kind": "edited",
+          "lines": 10
         },
         {
           "file": "packages/opencode/src/agent/agent.ts",
           "kind": "edited",
           "lines": 1
+        },
+        {
+          "file": "packages/opencode/src/auth/index.ts",
+          "kind": "edited",
+          "lines": 4
+        },
+        {
+          "file": "packages/opencode/src/cli/cmd/acp.ts",
+          "kind": "edited",
+          "lines": 2
         },
         {
           "file": "packages/opencode/src/cli/cmd/agent.ts",
@@ -152,62 +632,87 @@
         {
           "file": "packages/opencode/src/cli/cmd/attach.ts",
           "kind": "edited",
-          "lines": 2
+          "lines": 0
         },
         {
           "file": "packages/opencode/src/cli/cmd/debug/index.ts",
           "kind": "edited",
-          "lines": 1
+          "lines": 0
         },
         {
           "file": "packages/opencode/src/cli/cmd/github.handler.ts",
           "kind": "edited",
-          "lines": 15
+          "lines": 13
         },
         {
           "file": "packages/opencode/src/cli/cmd/import.ts",
           "kind": "edited",
-          "lines": 17
+          "lines": 13
         },
         {
           "file": "packages/opencode/src/cli/cmd/mcp.ts",
           "kind": "edited",
-          "lines": 15
+          "lines": 14
+        },
+        {
+          "file": "packages/opencode/src/cli/cmd/models.ts",
+          "kind": "edited",
+          "lines": 4
+        },
+        {
+          "file": "packages/opencode/src/cli/cmd/plug.ts",
+          "kind": "edited",
+          "lines": 1
         },
         {
           "file": "packages/opencode/src/cli/cmd/pr.ts",
           "kind": "edited",
-          "lines": 1
+          "lines": 5
         },
         {
           "file": "packages/opencode/src/cli/cmd/providers.ts",
           "kind": "edited",
-          "lines": 1
+          "lines": 0
         },
         {
           "file": "packages/opencode/src/cli/cmd/run.ts",
           "kind": "edited",
-          "lines": 3
+          "lines": 0
+        },
+        {
+          "file": "packages/opencode/src/cli/cmd/run/demo.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
+          "file": "packages/opencode/src/cli/cmd/run/footer.command.tsx",
+          "kind": "edited",
+          "lines": 2
+        },
+        {
+          "file": "packages/opencode/src/cli/cmd/run/trace.ts",
+          "kind": "edited",
+          "lines": 2
         },
         {
           "file": "packages/opencode/src/cli/cmd/serve.ts",
           "kind": "edited",
-          "lines": 2
+          "lines": 0
         },
         {
           "file": "packages/opencode/src/cli/cmd/tui.ts",
           "kind": "edited",
-          "lines": 2
+          "lines": 1
         },
         {
           "file": "packages/opencode/src/cli/cmd/uninstall.ts",
           "kind": "edited",
-          "lines": 23
+          "lines": 15
         },
         {
           "file": "packages/opencode/src/cli/cmd/upgrade.ts",
           "kind": "edited",
-          "lines": 3
+          "lines": 0
         },
         {
           "file": "packages/opencode/src/cli/cmd/web.ts",
@@ -217,12 +722,17 @@
         {
           "file": "packages/opencode/src/cli/network.ts",
           "kind": "edited",
-          "lines": 1
+          "lines": 4
         },
         {
           "file": "packages/opencode/src/config/config.ts",
           "kind": "edited",
-          "lines": 13
+          "lines": 39
+        },
+        {
+          "file": "packages/opencode/src/config/managed.ts",
+          "kind": "edited",
+          "lines": 2
         },
         {
           "file": "packages/opencode/src/config/paths.ts",
@@ -232,7 +742,7 @@
         {
           "file": "packages/opencode/src/config/tui-migrate.ts",
           "kind": "edited",
-          "lines": 6
+          "lines": 10
         },
         {
           "file": "packages/opencode/src/config/tui.ts",
@@ -242,7 +752,7 @@
         {
           "file": "packages/opencode/src/effect/app-runtime.ts",
           "kind": "edited",
-          "lines": 1
+          "lines": 0
         },
         {
           "file": "packages/opencode/src/effect/bootstrap-runtime.ts",
@@ -250,14 +760,29 @@
           "lines": 1
         },
         {
-          "file": "packages/opencode/src/index.ts",
+          "file": "packages/opencode/src/effect/config-service.ts",
           "kind": "edited",
           "lines": 0
         },
         {
+          "file": "packages/opencode/src/ide/index.ts",
+          "kind": "edited",
+          "lines": 2
+        },
+        {
+          "file": "packages/opencode/src/index.ts",
+          "kind": "edited",
+          "lines": 5
+        },
+        {
           "file": "packages/opencode/src/installation/index.ts",
           "kind": "edited",
-          "lines": 32
+          "lines": 28
+        },
+        {
+          "file": "packages/opencode/src/mcp/index.ts",
+          "kind": "edited",
+          "lines": 0
         },
         {
           "file": "packages/opencode/src/plugin/index.ts",
@@ -267,12 +792,22 @@
         {
           "file": "packages/opencode/src/plugin/install.ts",
           "kind": "edited",
-          "lines": 3
+          "lines": 7
+        },
+        {
+          "file": "packages/opencode/src/plugin/openai/codex.ts",
+          "kind": "edited",
+          "lines": 0
         },
         {
           "file": "packages/opencode/src/plugin/tui/runtime.ts",
           "kind": "edited",
-          "lines": 2
+          "lines": 0
+        },
+        {
+          "file": "packages/opencode/src/plugin/xai.ts",
+          "kind": "edited",
+          "lines": 0
         },
         {
           "file": "packages/opencode/src/project/bootstrap.ts",
@@ -282,17 +817,27 @@
         {
           "file": "packages/opencode/src/provider/provider.ts",
           "kind": "edited",
-          "lines": 12
+          "lines": 17
+        },
+        {
+          "file": "packages/opencode/src/provider/transform.ts",
+          "kind": "edited",
+          "lines": 5
         },
         {
           "file": "packages/opencode/src/server/auth.ts",
           "kind": "edited",
-          "lines": 2
+          "lines": 0
         },
         {
           "file": "packages/opencode/src/server/mdns.ts",
           "kind": "edited",
-          "lines": 3
+          "lines": 1
+        },
+        {
+          "file": "packages/opencode/src/server/routes/instance/httpapi/api.ts",
+          "kind": "edited",
+          "lines": 0
         },
         {
           "file": "packages/opencode/src/server/routes/instance/httpapi/groups/experimental.ts",
@@ -320,19 +865,34 @@
           "lines": 4
         },
         {
+          "file": "packages/opencode/src/server/routes/instance/httpapi/public.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
           "file": "packages/opencode/src/server/routes/instance/httpapi/server.ts",
           "kind": "edited",
           "lines": 0
         },
         {
+          "file": "packages/opencode/src/session/llm/native-runtime.ts",
+          "kind": "edited",
+          "lines": 1
+        },
+        {
+          "file": "packages/opencode/src/session/llm/request.ts",
+          "kind": "edited",
+          "lines": 5
+        },
+        {
           "file": "packages/opencode/src/session/session.ts",
           "kind": "edited",
-          "lines": 2
+          "lines": 1
         },
         {
           "file": "packages/opencode/src/skill/index.ts",
           "kind": "edited",
-          "lines": 5
+          "lines": 12
         },
         {
           "file": "packages/opencode/src/storage/schema.ts",
@@ -340,9 +900,29 @@
           "lines": 0
         },
         {
+          "file": "packages/opencode/src/temporary.ts",
+          "kind": "edited",
+          "lines": 3
+        },
+        {
           "file": "packages/opencode/src/tool/registry.ts",
           "kind": "edited",
           "lines": 9
+        },
+        {
+          "file": "packages/opencode/src/tool/webfetch.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
+          "file": "packages/opencode/src/tool/websearch.ts",
+          "kind": "edited",
+          "lines": 2
+        },
+        {
+          "file": "packages/opencode/src/util/repository.ts",
+          "kind": "edited",
+          "lines": 2
         },
         {
           "file": "packages/script/src/index.ts",
@@ -350,14 +930,39 @@
           "lines": 22
         },
         {
+          "file": "packages/server/src/auth.ts",
+          "kind": "edited",
+          "lines": 2
+        },
+        {
+          "file": "packages/server/src/routes.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
           "file": "packages/tui/src/app.tsx",
           "kind": "edited",
           "lines": 0
         },
         {
+          "file": "packages/tui/src/attention.ts",
+          "kind": "edited",
+          "lines": 1
+        },
+        {
+          "file": "packages/tui/src/component/dialog-model.tsx",
+          "kind": "edited",
+          "lines": 2
+        },
+        {
           "file": "packages/tui/src/component/dialog-provider.tsx",
           "kind": "edited",
-          "lines": 0
+          "lines": 11
+        },
+        {
+          "file": "packages/tui/src/component/use-connected.tsx",
+          "kind": "edited",
+          "lines": 1
         },
         {
           "file": "packages/tui/src/config/keybind.ts",
@@ -367,7 +972,7 @@
         {
           "file": "packages/tui/src/context/editor.ts",
           "kind": "edited",
-          "lines": 1
+          "lines": 2
         },
         {
           "file": "packages/tui/src/context/sync.tsx",
@@ -380,28 +985,48 @@
           "lines": 10
         },
         {
+          "file": "packages/tui/src/editor-zed.ts",
+          "kind": "edited",
+          "lines": 2
+        },
+        {
+          "file": "packages/tui/src/feature-plugins/home/tips.tsx",
+          "kind": "edited",
+          "lines": 1
+        },
+        {
+          "file": "packages/tui/src/feature-plugins/sidebar/footer.tsx",
+          "kind": "edited",
+          "lines": 7
+        },
+        {
+          "file": "packages/tui/src/prompt/traits.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
           "file": "packages/tui/src/routes/session/index.tsx",
           "kind": "edited",
-          "lines": 197
+          "lines": 181
         },
         {
           "file": "script/translate-app.ts",
           "kind": "edited",
-          "lines": 3
+          "lines": 0
         }
       ],
-      "ratio": 0.1458,
+      "ratio": 0.1465,
       "vendorExcluded": {
         "files": 10,
         "lines": 1150
       },
       "testsExcluded": {
-        "files": 16,
-        "lines": 1168
+        "files": 21,
+        "lines": 1185
       }
     }
   },
-  "totalToolSurfaceLoc": 7647,
+  "totalToolSurfaceLoc": 7667,
   "note": null,
   "carried": null
 }

@@ -31,7 +31,7 @@ export type PatchDeps = {
   readText: (file: string) => Promise<string>
   write: (file: string, text: string) => Promise<void>
   exists: (file: string) => Promise<boolean>
-  files: (dir: string, name: "opencode" | "tui") => string[]
+  files: (dir: string, name: string) => string[]
 }
 
 export type PatchInput = {
@@ -339,8 +339,12 @@ function patchDir(input: PatchInput) {
   return path.join(root, ".glasspane-harness")
 }
 
-function patchName(kind: Kind): "opencode" | "tui" {
-  if (kind === "server") return "opencode"
+function patchName(kind: Kind): "glasspane-harness" | "tui" {
+  // [gp] Product: a server plugin's config is written into the product's own config
+  // file. A project that still has `opencode.json` keeps it, and it is still merged
+  // (see config.ts) — so nothing a user configured is lost, and nothing new is
+  // written under the old name.
+  if (kind === "server") return "glasspane-harness"
   return "tui"
 }
 

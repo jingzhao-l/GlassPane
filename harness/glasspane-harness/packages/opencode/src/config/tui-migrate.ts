@@ -8,8 +8,6 @@ import { Global } from "@opencode-ai/core/global"
 import { Filesystem } from "@/util/filesystem"
 import * as ConfigPaths from "@/config/paths"
 
-const TUI_SCHEMA_URL = "https://opencode.ai/tui.json"
-
 const decodeTheme = Schema.decodeUnknownOption(Schema.String)
 const decodeRecord = Schema.decodeUnknownOption(Schema.Record(Schema.String, Schema.Unknown))
 const decodeScrollSpeed = Schema.decodeUnknownOption(TuiConfig.ScrollSpeed)
@@ -50,9 +48,10 @@ export async function migrateTuiConfig(input: MigrateInput) {
     const targetExists = await Filesystem.exists(target)
     if (targetExists) continue
 
-    const payload: Record<string, unknown> = {
-      $schema: TUI_SCHEMA_URL,
-    }
+    // [gp] Product: no `$schema` is written. This product hosts no published theme
+    // schema, and a URL pointing at a third party's domain is a private-isation leak
+    // in a file the user edits. TUI settings are documented in docs/configuration.md.
+    const payload: Record<string, unknown> = {}
     if (extracted.theme !== undefined) payload.theme = extracted.theme
     if (extracted.keybinds !== undefined) payload.keybinds = extracted.keybinds
     if (tui) Object.assign(payload, tui)
@@ -114,7 +113,7 @@ async function backupAndStripLegacy(file: string, source: string) {
 
 async function opencodeFiles(input: { directories: string[]; cwd: string }) {
   const files = [
-    ...ConfigPaths.fileInDirectory(Global.Path.config, "opencode"),
+    ...ConfigPaths.fileInDirectory(Global.Path.config, "glasspane-harness"),
     ...(await Filesystem.findUp(
         ["glasspane-harness.json", "glasspane-harness.jsonc", "opencode.json", "opencode.jsonc"],
         input.cwd,

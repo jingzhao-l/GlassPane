@@ -33,6 +33,21 @@
  *                            that also says fork / upstream / anomalyco / MIT /
  *                            上游 / 血缘 — an attribution line, not a product claim
  *   lineage-growth           the global occurrence count may shrink, never grow
+ *   first-party-gateway      no shipped code may offer, wire-identify as, or link
+ *                            to opencode's own paid cloud (`opencode`/`opencode-go`
+ *                            providers, "opencodeZen" copy, opencode.ai/zen)
+ *   wire-identity            the headers we send to third-party providers
+ *                            (X-Title, X-Source, originator, User-Agent) name this
+ *                            product, not the upstream project
+ *   foreign-schema-write     we never write a third party's `$schema` URL into a
+ *                            file the user edits (opencode.ai/config.json)
+ *   product-file-name        the user's own files are named for the product:
+ *                            glasspane-harness.db / glasspane-harness.log, and the
+ *                            mDNS default is the product's domain
+ *   removed-tree             an upstream tree this product deleted (console, web,
+ *                            stats, enterprise, the docs site, artifacts/, nix/,
+ *                            infra/, install/, sdks/vscode, .vscode/) does not
+ *                            come back
  *
  * MODES
  *   --record  write harness/contracts/brand-surface.json (the baseline)
@@ -196,6 +211,102 @@ function scan() {
       hits.push({ file: `${rel}:${i + 1}`, rule: "doc-line-without-lineage", count: 1 })
     })
   }
+  // ---- rules that keep the private-isation from regressing (2026-09-26 batch) ----
+  const SHIPPED_SRC = [
+    "packages/opencode/src",
+    "packages/core/src",
+    "packages/tui/src",
+    "packages/app/src",
+    "packages/server/src",
+  ]
+  // Files where the upstream identifier is the *subject* rather than the product's
+  // own name: the code that migrates away from it, or that still accepts it. Each
+  // entry is a decision, not a hole — a new one has to be argued for in review.
+  const LEGACY_NAME_ALLOWANCE = [
+    "packages/core/src/database/database.ts", // renames opencode.db on first run
+    "packages/opencode/src/config/config.ts", // reads the legacy project config name
+    "packages/opencode/src/config/tui-migrate.ts", // migrates the legacy tui config
+    "packages/tui/src/context/theme.tsx", // migrates a stored upstream theme id
+  ]
+  const shippedFiles = []
+  const walkSrc = (dir) => {
+    if (!existsSync(path.join(forkRoot, dir))) return
+    for (const entry of readdirSync(path.join(forkRoot, dir), { withFileTypes: true })) {
+      const rel = `${dir}/${entry.name}`
+      if (entry.isDirectory()) walkSrc(rel)
+      else if (/\.(ts|tsx)$/.test(entry.name)) shippedFiles.push(rel)
+    }
+  }
+  SHIPPED_SRC.forEach(walkSrc)
+  const readShipped = (rel) => readFileSync(path.join(forkRoot, rel), "utf8")
+  for (const rel of shippedFiles) {
+    // Comments are stripped first: a `[gp]` note that *explains* the removal quotes
+    // the old name on purpose, and a rule that flagged its own explanation would be
+    // a rule nobody could keep green.
+    const text = stripComments(readShipped(rel))
+    for (const [rule, re, why] of [
+      [
+        "first-party-gateway",
+        /["'`](?:opencode|opencode-go|opencodeZen|opencode\.ai\/zen)["'`]|dialog\.provider\.opencode|provider\.connect\.opencodeZen/,
+        "a first-party gateway surface came back (provider id, upsell copy or a link to the paid cloud)",
+      ],
+      [
+        "wire-identity",
+        /["'`](?:X-Title|x-title|X-Source|X-Cerebras-3rd-Party-Integration)["'`]\s*:\s*["'`]opencode["'`]|(?:originator|User-Agent)\s*:\s*[`"']opencode\//,
+        "a request header still identifies us to third-party providers as opencode",
+      ],
+      [
+        "foreign-schema-write",
+        /\$schema["'`]?\s*[:=]\s*["'`]https:\/\/opencode\.ai\/(?:config|tui|theme)\.json/,
+        "a third party's schema URL is written into a file the user edits",
+      ],
+      [
+        "product-file-name",
+        // The legacy database name is allowed in exactly one place: the migration
+        // that renames it. `LEGACY_NAME_ALLOWANCE` lists the files where the old
+        // name is the *subject* rather than the product's own name.
+        /["'`]opencode\.(?:db|log)["'`]|default:\s*["'`]opencode\.local["'`]/,
+        "the user's own files or the LAN service are named for the upstream project",
+      ],
+    ]) {
+      // A legacy name is legitimate where the code migrates *from* it or still
+      // accepts it as an input; those files are listed explicitly above.
+      if (LEGACY_NAME_ALLOWANCE.includes(rel)) continue
+      if (re.test(text)) hits.push({ file: rel, rule, count: 1 })
+    }
+  }
+  // the built-in skill is injected into every session: its name and body are surface
+  if (existsSync(path.join(forkRoot, "packages/core/src/plugin/skill/customize-opencode.md")))
+    hits.push({ file: "packages/core/src/plugin/skill/customize-opencode.md", rule: "first-party-gateway", count: 1 })
+  for (const locale of readdirSync(path.join(forkRoot, "packages/app/src/i18n"))) {
+    const text = readFileSync(path.join(forkRoot, "packages/app/src/i18n", locale), "utf8")
+    // values only: `"key": "... opencode ..."`. Key names are internal identifiers.
+    for (const m of text.matchAll(/"[^"]*"\s*:\s*"[^"]*\bopencode\b[^"]*"/gi))
+      hits.push({ file: `packages/app/src/i18n/${locale}`, rule: "first-party-gateway", count: 1 })
+    if (/\bopencode\b/i.test(text.replace(/"[^"]*"\s*:/g, "")) === false && /opencode/i.test(text))
+      hits.push({ file: `packages/app/src/i18n/${locale}`, rule: "first-party-gateway", count: 1 })
+  }
+  for (const rel of [
+    "artifacts",
+    ".vscode",
+    "install",
+    "nix",
+    "sdks",
+    "infra",
+    "perf",
+    "github",
+    "sst.config.ts",
+    "flake.nix",
+    "screenshot-uk.png",
+    "packages/console",
+    "packages/web",
+    "packages/stats",
+    "packages/enterprise",
+  ]) {
+    if (existsSync(path.join(forkRoot, rel)))
+      hits.push({ file: rel, rule: "removed-tree", count: 1 })
+  }
+
   // lineage counter across the whole fork
   const files = forkTextFiles()
   let occurrences = 0

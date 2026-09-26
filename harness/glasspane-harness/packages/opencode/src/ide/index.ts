@@ -2,6 +2,7 @@ import { Schema } from "effect"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Process } from "@/util/process"
 import { IdeEvent } from "@opencode-ai/schema/ide-event"
+import { read as EnvRead } from "@opencode-ai/core/flag/flag"
 
 const SUPPORTED_IDES = [
   { name: "Windsurf" as const, cmd: "windsurf" },
@@ -30,7 +31,7 @@ export function ide() {
 }
 
 export function alreadyInstalled() {
-  return process.env["OPENCODE_CALLER"] === "vscode" || process.env["OPENCODE_CALLER"] === "vscode-insiders"
+  return EnvRead("OPENCODE_CALLER") === "vscode" || EnvRead("OPENCODE_CALLER") === "vscode-insiders"
 }
 
 export async function install(ide: (typeof SUPPORTED_IDES)[number]["name"]) {

@@ -6,9 +6,9 @@ import { define } from "./internal"
 import { Effect } from "effect"
 import { AbsolutePath } from "../schema"
 import { SkillV2 } from "../skill"
-import customizeOpencodeContent from "./skill/customize-opencode.md" with { type: "text" }
+import customizeHarnessContent from "./skill/customize-harness.md" with { type: "text" }
 
-export const CustomizeOpencodeContent = customizeOpencodeContent
+export const CustomizeHarnessContent = customizeHarnessContent
 
 export const Plugin = define({
   id: "skill",
@@ -18,13 +18,13 @@ export const Plugin = define({
         SkillV2.EmbeddedSource.make({
           type: "embedded",
           skill: SkillV2.Info.make({
-            name: "customize-opencode",
+            name: "customize-harness",
             description:
               // [gp] Same product text as the v1 skill: the product's own config
               // surface first, upstream names kept as legacy fallbacks.
               "Use ONLY when the user is editing or creating glasspane-harness's own configuration: glasspane-harness.json, glasspane-harness.jsonc, files under .glasspane-harness/, or files under ~/.config/glasspane-harness/ (legacy: opencode.json, opencode.jsonc, .opencode/, ~/.config/opencode/). Also use when creating or fixing glasspane-harness agents, subagents, commands, skills, plugins, MCP servers, or permission rules. Do not use for the user's own application code, or for any project that is not configuring glasspane-harness itself.",
-            location: AbsolutePath.make("/builtin/customize-opencode.md"),
-            content: CustomizeOpencodeContent,
+            location: AbsolutePath.make("/builtin/customize-harness.md"),
+            content: CustomizeHarnessContent,
           }),
         }),
       )

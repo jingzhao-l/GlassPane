@@ -79,9 +79,9 @@ Azure、OpenRouter 等等全在——几百个模型——每一个都用**你�
 | **SDK** | TypeScript SDK 与 plugin SDK，用来写自己的 `gp_*` 式工具 | 工作区包，随树发布 |
 
 **刻意不发**：上游的托管 console / enterprise 栈（私有 harness 不需要"组织与额度后台"这种形态）、
-Electron 桌面 app（第二批——需要签名与公证账号），以及上游的**文档站**（`packages/web` 仍是上游
-Astro/Starlight 内容，能构建、留树，但本产品的 canonical 文档是 `docs/`，等站点由它重建前不算我们的
-文档）。三者都留在树里做血缘，让将来对着钉点 tag 的每次同步仍然诚实。
+上游的**文档站**（`packages/web`）——这两片树已**从本仓删除**；本产品的 canonical 文档是 `docs/`。
+它们从来不属于这个产品，把别人的产品面留在自己仓里只会让私有化变成自欺。Electron 桌面 app 保留在
+树里（产品面，第二批——需要签名与公证账号）。
 
 ## 安装
 

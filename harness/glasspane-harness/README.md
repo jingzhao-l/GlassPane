@@ -94,10 +94,9 @@ dialog. There is nothing to sign up for and nothing to log into. See
 Not shipped, on purpose: the upstream hosted console / enterprise stack (a private harness
 has no use for an organisation-and-quota back office), the Electron desktop app (a second
 batch — it needs signing and notarisation accounts), and the upstream docs *site*
-(`packages/web` still holds upstream's Astro/Starlift content; it builds and stays in the
-tree, but this product's canonical documentation is `docs/` until the site is rebuilt from
-it). All three stay in the tree as lineage so future syncs from the pinned upstream tag
-stay honest.
+(upstream's Astro/Starlight tree) is **gone from this repository**; the documentation is
+`docs/`, and the console/enterprise/stats trees went with it. They were never part of
+this product, and keeping them meant keeping someone else's product surface in our repo.
 
 ## Install
 

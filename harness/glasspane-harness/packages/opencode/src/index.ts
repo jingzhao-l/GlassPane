@@ -28,6 +28,7 @@ import { DbCommand } from "./cli/cmd/db"
 import { errorMessage } from "./util/error"
 import { PluginCommand } from "./cli/cmd/plug"
 import { Heap } from "./cli/heap"
+import { read as EnvRead } from "@opencode-ai/core/flag/flag"
 
 const args = hideBin(process.argv)
 
@@ -43,7 +44,7 @@ function show(out: string) {
 
 const cli = yargs(args)
   .parserConfiguration({ "populate--": true })
-  .scriptName("opencode")
+  .scriptName("glasspane-harness")
   .wrap(100)
   .help("help", "show help")
   .alias("help", "h")
@@ -63,17 +64,17 @@ const cli = yargs(args)
     type: "boolean",
   })
   .middleware(async (opts) => {
-    if (opts.printLogs) process.env.OPENCODE_PRINT_LOGS = "1"
-    if (opts.logLevel) process.env.OPENCODE_LOG_LEVEL = opts.logLevel
+    if (opts.printLogs) process.env["GLASSPANE_HARNESS_PRINT_LOGS"] = "1"
+    if (opts.logLevel) process.env["GLASSPANE_HARNESS_LOG_LEVEL"] = opts.logLevel
     if (opts.pure) {
-      process.env.OPENCODE_PURE = "1"
+      process.env["GLASSPANE_HARNESS_PURE"] = "1"
     }
 
     Heap.start()
 
     process.env.AGENT = "1"
     process.env.OPENCODE = "1"
-    process.env.OPENCODE_PID = String(process.pid)
+    process.env["GLASSPANE_HARNESS_PID"] = String(process.pid)
   })
   .usage("")
   .completion("completion", "generate shell completion script")

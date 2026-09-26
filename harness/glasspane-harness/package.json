@@ -9,8 +9,6 @@
     "dev": "bun run --cwd packages/opencode src/index.ts",
     "dev:desktop": "bun --cwd packages/desktop dev",
     "dev:web": "bun --cwd packages/app dev",
-    "dev:console": "ulimit -n 10240 2>/dev/null; bun run --cwd packages/console/app dev",
-    "dev:stats": "bun sst shell --stage=production -- bun run --cwd packages/stats/app dev",
     "dev:storybook": "bun --cwd packages/storybook storybook",
     "lint": "oxlint",
     "typecheck": "bun turbo typecheck",
@@ -25,10 +23,7 @@
   "workspaces": {
     "packages": [
       "packages/*",
-      "packages/console/*",
-      "packages/stats/*",
-      "packages/sdk/js",
-      "packages/slack"
+      "packages/sdk/js"
     ],
     "catalog": {
       "@effect/opentelemetry": "4.0.0-beta.83",
@@ -79,7 +74,6 @@
       "@typescript/native-preview": "7.0.0-dev.20251207.1",
       "zod": "4.1.8",
       "remeda": "2.26.0",
-      "sst": "4.13.1",
       "shiki": "4.2.0",
       "solid-list": "0.3.0",
       "tailwindcss": "4.1.11",
@@ -106,7 +100,6 @@
     "oxlint-tsgolint": "0.21.0",
     "prettier": "3.6.2",
     "semver": "^7.6.0",
-    "sst": "catalog:",
     "turbo": "2.10.2"
   },
   "dependencies": {

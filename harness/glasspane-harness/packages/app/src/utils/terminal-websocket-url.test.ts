@@ -29,7 +29,7 @@ describe("terminalWebSocketURL", () => {
       directory: "/tmp/project",
       cursor: 0,
       sameOrigin: false,
-      username: "opencode",
+      username: "glasspane-harness",
       password: "secret",
     })
 
@@ -49,7 +49,7 @@ describe("terminalWebSocketURL", () => {
       directory: "/tmp/project",
       cursor: 10,
       sameOrigin: true,
-      username: "opencode",
+      username: "glasspane-harness",
       password: "secret",
     })
 
@@ -67,7 +67,7 @@ describe("terminalWebSocketURL", () => {
       directory: "/tmp/project",
       cursor: 10,
       sameOrigin: true,
-      username: "opencode",
+      username: "glasspane-harness",
       password: "secret",
       authToken: true,
     })

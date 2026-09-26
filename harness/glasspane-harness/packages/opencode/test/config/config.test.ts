@@ -310,11 +310,14 @@ it.effect("creates the product-named global config with schema when no global co
     Effect.gen(function* () {
       yield* Config.use.get().pipe(provideInstanceEffect(dir))
 
-      // [gp] Product: the seeded global config is `glasspane-harness.jsonc`. The test
-      // still asserted `opencode.jsonc` for a long time, which made it red rather than
-      // informative — the name is the product's, and the assertion now says so.
+      // [gp] Product: the seeded global config is `glasspane-harness.jsonc`, and it
+      // must not carry a third party's schema URL — upstream injected
+      // `opencode.ai/config.json` into every file it opened, which put someone else's
+      // domain in the first line of a user's own config.
       const content = yield* FSUtil.use.readFileString(path.join(dir, "glasspane-harness.jsonc"))
-      expect(content).toContain('"$schema": "https://opencode.ai/config.json"')
+      expect(content).toContain("docs/models-and-keys.md")
+      expect(content).not.toContain("opencode.ai")
+      expect(content).not.toContain('"$schema"')
     }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(LayerNode.compile(CrossSpawnSpawner.node))),
   ),
 )
@@ -690,25 +693,28 @@ it.instance("handles environment variable substitution", () =>
   ),
 )
 
-it.instance("preserves env variables when adding $schema to config", () =>
+it.instance("leaves the user's config file byte-identical while resolving its env templates", () =>
   withProcessEnv(
     "PRESERVE_VAR",
     "secret_value",
     Effect.gen(function* () {
       const test = yield* TestInstance
-      // Config without $schema - should trigger auto-add
-      yield* FSUtil.use.writeWithDirs(
-        path.join(test.directory, "opencode.json"),
-        JSON.stringify({ username: "{env:PRESERVE_VAR}" }),
-      )
+      const file = path.join(test.directory, "opencode.json")
+      const original = JSON.stringify({ username: "{env:PRESERVE_VAR}" })
+      // [gp] Product: upstream rewrote every config file it opened to inject
+      // `"$schema": "https://opencode.ai/config.json"`. This product writes nothing
+      // into a file the user edits, so the stronger property is the one worth
+      // pinning: the template resolves at load time, and the file on disk is exactly
+      // what the user wrote — no secret, no third-party URL, no reformat.
+      yield* FSUtil.use.writeWithDirs(file, original)
       const config = yield* Config.use.get()
       expect(config.username).toBe("secret_value")
 
-      // Read the file to verify the env variable was preserved
-      const content = yield* FSUtil.use.readFileString(path.join(test.directory, "opencode.json"))
+      const content = yield* FSUtil.use.readFileString(file)
+      expect(content).toBe(original)
       expect(content).toContain("{env:PRESERVE_VAR}")
       expect(content).not.toContain("secret_value")
-      expect(content).toContain("$schema")
+      expect(content).not.toContain("opencode.ai")
     }),
   ),
 )

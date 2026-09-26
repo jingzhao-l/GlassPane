@@ -3,12 +3,38 @@ import { $ } from "bun"
 import pkg from "../package.json"
 import product from "../../../product.json"
 import { Script } from "@opencode-ai/script"
-import { existsSync } from "node:fs"
+import { existsSync, mkdirSync, rmSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "url"
 
 const dir = fileURLToPath(new URL("..", import.meta.url))
 process.chdir(dir)
+
+/**
+ * One publish at a time, enforced rather than remembered.
+ *
+ * WHY THIS EXISTS: on 2026-09-26 two of these were launched by mistake. Both packed
+ * the same version, both published the wrapper, and npm — seeing a duplicate — staged
+ * the loser instead of failing it. The result was a staged version that `npm stage
+ * list` does not show and that then refuses every future publish of that number: the
+ * version was burned and the release had to move to the next one. A `mkdir` is an
+ * atomic exclusive create on every filesystem we support, so it is a lock that needs no
+ * dependency and no cleanup if the process dies (the stale case is reported, not
+ * silently broken).
+ */
+const lockDir = path.join(dir, "dist", ".publish.lock")
+try {
+  mkdirSync(lockDir)
+} catch {
+  console.error(`another publish is running, or one died holding ${lockDir}`)
+  console.error(`if nothing is running: rm -rf ${lockDir} && retry`)
+  process.exit(2)
+}
+process.on("exit", () => {
+  try {
+    rmSync(lockDir, { recursive: true, force: true })
+  } catch {}
+})
 
 async function published(name: string, version: string) {
   return (await $`npm view ${name}@${version} version`.nothrow()).exitCode === 0

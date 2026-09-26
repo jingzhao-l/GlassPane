@@ -21,8 +21,12 @@ const options = {
   },
   "mdns-domain": {
     type: "string" as const,
+    // [gp] Product: the help text was rebranded in 0.1.0 but this default value was
+    // not, so the product advertised `glasspane-harness.local` while announcing
+    // itself on the LAN as `opencode.local`. A doc/behavior split is exactly the
+    // kind of thing a private-isation must not leave behind.
     describe: "custom domain name for mDNS service (default: glasspane-harness.local)",
-    default: "opencode.local",
+    default: "glasspane-harness.local",
   },
   cors: {
     type: "string" as const,

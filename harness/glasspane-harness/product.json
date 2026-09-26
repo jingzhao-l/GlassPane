@@ -3,7 +3,7 @@
   "name": "glasspane-harness",
   "displayName": "GlassPane Harness",
   "tagline": "Evidence-honest GUI verification harness for macOS apps — an opencode fork carrying GlassPane's native tool surface",
-  "version": "0.4.0",
+  "version": "0.5.1",
   "binary": "glasspane-harness",
   "bins": [
     "glasspane-harness",
@@ -108,7 +108,8 @@
       ],
       "status": "owner-action: not yet configured (npm CLI token cannot read trust settings: 403)",
       "note": "npm does not validate this at save time — a mismatch only fails at publish. The publish jobs carry `environment: release` and `id-token: write`, so the field values above are exactly what the workflow presents."
-    }
+    },
+    "versionBurnedNote": "0.5.0 的 wrapper 因一次并发发布被 npm stage（stage list 看不到它，但该版本号会被 registry 拒绝再次发布），因此实际发布的是 0.5.1，内容相同。发布脚本现在有排他锁防止再犯。"
   },
   "repoUrl": "https://github.com/jingzhao-l/glasspane-harness",
   "models": {
@@ -133,5 +134,19 @@
       ".opencode/ (legacy, read-only, lower precedence than the product dir)"
     ],
     "enforcedBy": "product-surface.mjs :: project-dir"
+  },
+  "privateSurface": {
+    "rule": "用户可见的产品面不再出现上游项目的名字：**代码、界面文案、请求头、本地文件名、命令行帮助、配置文件、局域网服务名**都由本产品命名。",
+    "envVars": "所有环境变量新增 GLASSPANE_HARNESS_* 名字（product.json → npm 无关；解析点只有一处：packages/core/src/flag/flag.ts 的 read()），旧的 OPENCODE_* 名字继续有效（先读新名，再读旧名）——私有化若让人已经导出的设置静默失效，本身就是缺陷。",
+    "wireIdentity": "给第三方服务发送的标识一律用本产品：X-Title / X-Source / User-Agent / originator / HTTP-Referer / MCP client name / OTLP service name。",
+    "ownFiles": "用户自己的文件用产品命名：glasspane-harness.db（带一次性旧名迁移 rename，绝不让历史'看起来丢了'）、glasspane-harness.log、项目 id 缓存文件。",
+    "mDNS": "局域网服务名 glasspane-harness.local（此前帮助文本说已改名、实际值没改，是文档与行为分裂）。",
+    "skill": "注入每个会话的内置 skill 改名 customize-harness，正文只讲本产品的配置路径（旧名仅在'仍然被读取'的意义上出现）。",
+    "noForeignSchema": "不再向用户文件写入第三方 $schema URL（此前每个配置首行都是 opencode.ai/config.json）。",
+    "gates": "harness/tools/brand-surface.mjs 新增 5 类规则：first-party-gateway / wire-identity / foreign-schema-write / product-file-name / removed-tree；兼容读取处（数据库迁移、旧配置名、旧主题名）走显式白名单，每一条都要在 review 里说明。",
+    "declaredUpstreamDependency": {
+      "modelsCatalogApi": "packages/core/src/models-dev.ts 读取 https://models.opencode.ai —— 这是模型目录的数据源，是本产品依赖的**第三方公开 API**，不是我们的产品面；记录在此以免被当成疏漏。",
+      "scope": "内部包作用域 @opencode-ai/*、Effect service tag、协议头名等内部标识符仍是 lineage：它们不对用户显示，改动会触及数千行 import。已量化：(scope 4,217 处 / OPENCODE_* 275 处 / 旧配置名 35 处)。"
+    }
   }
 }

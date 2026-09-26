@@ -112,7 +112,7 @@ export async function requestDeviceCode(options: XaiAuthPluginOptions = {}): Pro
     body: new URLSearchParams({
       client_id: CLIENT_ID,
       scope: SCOPE,
-      referrer: "opencode",
+      referrer: "glasspane-harness",
     }).toString(),
   })
   if (!response.ok) {

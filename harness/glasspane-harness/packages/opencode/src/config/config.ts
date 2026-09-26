@@ -34,6 +34,7 @@ import { ConfigVariable } from "./variable"
 import { ConfigV2Compat } from "./v2-compat"
 import { Npm } from "@opencode-ai/core/npm"
 import { withTransientReadRetry } from "@/util/effect-http-client"
+import { read as EnvRead } from "@opencode-ai/core/flag/flag"
 
 // Custom merge function that concatenates array fields instead of replacing them
 // Keep remeda's deep conditional merge type out of hot config-loading paths; TS profiling showed it dominates here.
@@ -240,11 +241,11 @@ const layer = Layer.effect(
       if (!("path" in options)) return data
 
       yield* Effect.promise(() => resolveLoadedPlugins(data, options.path))
-      if (!data.$schema) {
-        data.$schema = "https://opencode.ai/config.json"
-        const updated = text.replace(/^\s*\{/, '{\n  "$schema": "https://opencode.ai/config.json",')
-        yield* fs.writeFileString(options.path, updated).pipe(Effect.catch(() => Effect.void))
-      }
+      // [gp] Product: upstream injected `https://opencode.ai/config.json` into every
+      // config file it opened, so the first line a user saw in their own file was a
+      // third party's URL — and a URL that can change under them. This product does
+      // not host a published schema, so nothing is injected. A `$schema` the user
+      // already has is read and left exactly as it is.
       return data
     })
 
@@ -263,7 +264,17 @@ const layer = Layer.effect(
         const file = globalConfigFile()
         if (!existsSync(file)) {
           yield* fs
-            .writeWithDirs(file, JSON.stringify({ $schema: "https://opencode.ai/config.json" }, null, 2))
+            .writeWithDirs(
+              file,
+              [
+                "{",
+                "  // Providers are unlocked with your own API keys (docs/models-and-keys.md).",
+                "  // Config reference: docs/configuration.md",
+                '  "model": "anthropic/claude-sonnet-4-5"',
+                "}",
+                "",
+              ].join("\n"),
+            )
             .pipe(Effect.catch(() => Effect.void))
         }
       }
@@ -281,7 +292,6 @@ const layer = Layer.effect(
             .then(async (mod) => {
               const { provider, model, ...rest } = mod.default
               if (provider && model) result.model = `${provider}/${model}`
-              result["$schema"] = "https://opencode.ai/config.json"
               result = mergeConfig(result, rest)
               await fsNode.writeFile(path.join(Global.Path.config, "config.json"), JSON.stringify(result, null, 2))
               await fsNode.unlink(legacy)
@@ -393,7 +403,6 @@ const layer = Layer.effect(
                 })
               : {}
             const remoteConfig = mergeConfig(isRecord(wellknown.config) ? wellknown.config : {}, fetchedConfig)
-            if (!remoteConfig.$schema) remoteConfig.$schema = "https://opencode.ai/config.json"
             const source = wellknownURL
             const next = yield* loadConfig(
               JSON.stringify(remoteConfig),
@@ -417,8 +426,15 @@ const layer = Layer.effect(
         }
 
         if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG) {
-          for (const file of yield* ConfigPaths.files("opencode", ctx.directory, ctx.worktree).pipe(Effect.orDie)) {
-            yield* merge(file, yield* loadFile(file, authEnv), "local")
+          // [gp] Product: the project's own config names first in *load* order and
+          // last in *read* order, because the loader merges in order and the later
+          // merge wins (measured in the private-isation batch). So a checkout with
+          // both `opencode.json` and `glasspane-harness.json` gets the product's
+          // values, and a checkout with only the legacy name keeps working.
+          for (const name of ["opencode", "glasspane-harness"]) {
+            for (const file of yield* ConfigPaths.files(name, ctx.directory, ctx.worktree).pipe(Effect.orDie)) {
+              yield* merge(file, yield* loadFile(file, authEnv), "local")
+            }
           }
         }
 
@@ -480,9 +496,10 @@ const layer = Layer.effect(
           yield* mergePluginOrigins(dir, list)
         }
 
-        if (process.env.OPENCODE_CONFIG_CONTENT) {
+        const configContent = EnvRead("OPENCODE_CONFIG_CONTENT")
+        if (configContent) {
           const source = "OPENCODE_CONFIG_CONTENT"
-          const next = yield* loadConfig(process.env.OPENCODE_CONFIG_CONTENT, {
+          const next = yield* loadConfig(configContent, {
             dir: ctx.directory,
             source,
           })

@@ -72,36 +72,20 @@ export const PrCommand = effectCmd({
         })
       }
 
-      if (prInfo?.body) {
-        const sessionMatch = prInfo.body.match(/https:\/\/opncd\.ai\/s\/([a-zA-Z0-9_-]+)/)
-        if (sessionMatch) {
-          const sessionUrl = sessionMatch[0]
-          UI.println(`Found opencode session: ${sessionUrl}`)
-          UI.println(`Importing session...`)
-
-          const importResult = yield* Effect.promise(() =>
-            Process.text(["opencode", "import", sessionUrl], { nothrow: true }),
-          )
-          if (importResult.code === 0) {
-            const sessionIdMatch = importResult.text.trim().match(/Imported session: ([a-zA-Z0-9_-]+)/)
-            if (sessionIdMatch) {
-              sessionId = sessionIdMatch[1]
-              UI.println(`Session imported: ${sessionId}`)
-            }
-          }
-        }
-      }
+      // [gp] Product: upstream looked for a shared-session link in the PR body and
+      // imported it through the CLI. Sharing to a cloud account is gone, so there is
+      // no link to import and no reason to keep the lookup.
     }
 
     UI.println(`Successfully checked out PR #${prNumber} as branch '${localBranchName}'`)
     UI.println()
-    UI.println("Starting opencode...")
+    UI.println("Starting glasspane-harness...")
     UI.println()
 
-    const opencodeArgs = sessionId ? ["-s", sessionId] : []
+    const harnessArgs = sessionId ? ["-s", sessionId] : []
     const code = yield* Effect.promise(
       () =>
-        Process.spawn(["opencode", ...opencodeArgs], {
+        Process.spawn(["glasspane-harness", ...harnessArgs], {
           stdin: "inherit",
           stdout: "inherit",
           stderr: "inherit",

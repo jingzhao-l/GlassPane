@@ -61,7 +61,7 @@ export const ApiKey = {
 }
 
 export const OpenCodeZen = {
-  render: renderConnection("opencode", [{ type: "api", label: "API key" }]),
+  render: renderConnection("anthropic", [{ type: "api", label: "API key" }]),
 }
 
 export const LoginMethods = {

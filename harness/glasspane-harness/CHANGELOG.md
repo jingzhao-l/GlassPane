@@ -86,6 +86,67 @@ The companion product surfaces, brought in as first-class citizens (owner decisi
   `not-yet-ours` in `product.json` rather than being quietly presented as finished.
 - Electron desktop app (second batch; needs signing and notarisation accounts).
 
+## [0.5.1] - 2026-09-26
+
+**The same content as 0.5.0, published cleanly.** 0.5.0 exists on the registry because
+two publishes of it were launched by mistake and raced; npm accepted one and staged the
+other, which burned the number for the wrapper. The release moved to 0.5.1, and
+`publish.ts` now takes an exclusive lock (`dist/.publish.lock`, an atomic `mkdir`) so two
+publishes cannot run at once — a mistake that cost a version number is now a script bug
+instead of an operator one.
+
+## [0.5.0] - 2026-09-26
+
+**The product surface says our name, everywhere a person can see it — and the trees that
+were never ours are gone from the repository.**
+
+### Changed — the private-isation, audited rather than assumed
+- **Environment variables**: every knob now has a `GLASSPANE_HARNESS_*` name, resolved in
+  one place (`flag/flag.ts`'s `read()`). The old `OPENCODE_*` names still work — a
+  private-isation that silently ignores a setting someone already exported is its own bug.
+- **What we call ourselves on the wire**: `X-Title`, `X-Source`, `User-Agent`,
+  `originator`, `HTTP-Referer`, the MCP client name and the OTLP service name all say
+  `glasspane-harness`. Previously a request to OpenRouter, Cerebras, Kilo, Vercel,
+  NVIDIA, Zenmux or a user's own web fetch identified itself as opencode.
+- **The user's own files**: the database is `glasspane-harness.db` (with a one-time rename
+  of the old file — losing someone's session history would be the worst possible
+  private-isation bug), the log is `glasspane-harness.log`, and the server's basic-auth
+  default username is the product's rather than `opencode`.
+- **The LAN**: the mDNS default is now actually `glasspane-harness.local`. The help text
+  was rebranded in 0.1.0 while the value was not, so the product advertised one domain and
+  announced another.
+- **The CLI**: `scriptName` is the product's, which is what `--help` and usage errors print.
+  The ACP integration (what editors launch) no longer advertises a login that cannot exist.
+- **The built-in skill** is `customize-harness`, and its body documents this product's
+  config paths. It is injected into every session, so its text is product surface.
+- **No third-party `$schema` is written into your config any more.** Upstream injected
+  `https://opencode.ai/config.json` into every file it opened; the first line of a user's
+  own config was somebody else's URL.
+- First-party remnants removed from the TUI and web app: the Zen upsell and its link, the
+  "free models" claims, the paid-plan nudge, the recommended tags, the provider ordering
+  that floated the house gateway to the top.
+
+### Removed — trees that were never this product
+`packages/console`, `packages/enterprise`, `packages/stats`, `packages/web` (the docs
+site), `packages/storybook`, `packages/containers`, `packages/function`,
+`packages/identity`, `packages/slack`, `packages/docs`, plus `artifacts/` (an upstream
+promo-video project for a model release), `.vscode/`, `install/` (the upstream
+`opencode.ai/install` script), `nix/` + `flake.*`, `sdks/vscode` (an editor extension),
+`infra/` + `sst.config.ts`, `perf/`, `github/` (the upstream bot action) and
+`screenshot-uk.png`. None of them were referenced by shipped code — measured, not assumed.
+
+**Kept on purpose**: `packages/desktop` (product surface, batch 2), `patches/` (bun
+applies them at install time), `specs/` (the design record of the code we maintain).
+
+### Gates
+- `brand-surface` gained five rule classes — first-party gateway, wire identity, foreign
+  schema writes, product file names, and removed trees — with a short explicit allowance
+  list for the three places that legitimately *read* an old name (the database migration,
+  the legacy config file names, a stored theme id).
+- The ruler's own blind spot was fixed: `fork-diff` used to treat gitignored build output
+  as "a file that exists but was never committed", which is the same class of false
+  positive as the import bug it was built to catch.
+
 ## [0.4.0] - 2026-09-25
 
 **A complete programming agent with the GlassPane kernel fused in — and no account to

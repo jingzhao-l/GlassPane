@@ -5,6 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { Option, Schema } from "effect"
 import type { EditorSelection } from "./context/editor"
+import { read as EnvRead } from "@opencode-ai/core/flag/flag"
 
 const ZedEditorRowSchema = Schema.Struct({
   item_kind: Schema.String,
@@ -186,7 +187,7 @@ function isZedActiveEditorRow(row: ZedEditorRow): row is ZedActiveEditorRow {
 
 export function resolveZedDbPath() {
   const candidates = [
-    process.env.OPENCODE_ZED_DB,
+    EnvRead("OPENCODE_ZED_DB"),
     path.join(os.homedir(), "Library", "Application Support", "Zed", "db", "0-stable", "db.sqlite"),
     path.join(os.homedir(), ".local", "share", "zed", "db", "0-stable", "db.sqlite"),
   ].filter((item): item is string => Boolean(item))

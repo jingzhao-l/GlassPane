@@ -174,10 +174,10 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     })
   }
 
-  const opencodeProjectID = input.model.providerID.startsWith("opencode")
-    ? (yield* InstanceState.context).project.id
-    : undefined
-
+  // [gp] Product: the first branch was the first-party gateway, which sent
+  // `x-opencode-*` headers and a project id. That gateway is not in the catalog any
+  // more, so only the third-party branch remains: session affinity, a session id
+  // and the user agent — which is what providers actually read.
   return {
     system,
     messages,
@@ -185,19 +185,11 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     params,
     messageTransformOptions: options,
     headers: {
-      ...(input.model.providerID.startsWith("opencode")
-        ? {
-            ...(opencodeProjectID ? { "x-opencode-project": opencodeProjectID } : {}),
-            "x-opencode-session": input.sessionID,
-            "x-opencode-request": input.user.id,
-            "x-opencode-client": input.flags.client,
-            "User-Agent": USER_AGENT,
-          }
-        : {
-            "x-session-affinity": input.sessionID,
-            "X-Session-Id": input.sessionID,
-            "User-Agent": USER_AGENT,
-          }),
+      ...({
+        "x-session-affinity": input.sessionID,
+        "X-Session-Id": input.sessionID,
+        "User-Agent": USER_AGENT,
+      }),
       ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
       ...input.model.headers,
       ...headers,

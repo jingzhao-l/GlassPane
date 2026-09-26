@@ -37,6 +37,7 @@
  * Exit codes: 0 ok, 1 grew past baseline / crossed the limit, 2 cannot measure.
  */
 import { execFileSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -143,6 +144,7 @@ function measureFork(golden) {
 
   const files = []
   let unmeasured = []
+  const renamed = []
   for (const rel of fd.added ?? []) {
     if (!REF_EXTS.includes(path.extname(rel))) continue
     const abs = path.join(forkDir, rel)
@@ -156,6 +158,15 @@ function measureFork(golden) {
       continue
     }
     const undeclared = vendor.prefix !== null && rel.startsWith(vendor.prefix)
+    // A pure rename is not authorship. When a file is relocated (upstream's
+    // `.opencode/plugins/x.tsx` becoming `.glasspane-harness/plugins/x.tsx` in the
+    // private-isation) the diff sees delete + add, and the whole upstream file would
+    // land in "lines we wrote" — 1,019 lines of somebody else's code counted as ours.
+    // So: if the bytes match a file upstream deleted, it is a move, and it counts 0.
+    if (isPureRename(refDir, abs, rel, fd)) {
+      renamed.push({ file: rel, lines: loc(abs) })
+      continue
+    }
     files.push({ file: rel, kind: undeclared ? "undeclared-vendor" : "added", lines: loc(abs) })
   }
 
@@ -208,6 +219,55 @@ function measureFork(golden) {
 
 const fail = (note) => ({ files: [], carried: null, note, excluded: [], tests: [] })
 
+/**
+ * Lines of *authorship*, not lines of difference.
+ *
+ * WHY (measured 2026-09-26): the private-isation replaced the upstream name inside 63
+ * vendored locale files — 2,700+ lines that are a find-and-replace, not code anybody
+ * wrote. Counting them as surface B pushed the fork's own surface from 10% to 24% and
+ * would, over a few more renames, have started pushing *against* doing the
+ * private-isation correctly. A hunk whose only difference is the brand token is a
+ * rebranding; it is excluded. Everything else — a new function, a changed branch, a new
+ * comment explaining a decision — is counted exactly as before.
+ */
+const BRAND_TOKENS = [
+  /opencode/gi,
+  /Opencode/g,
+  /OpenCode/g,
+  /OPENCODE/g,
+  /opncd/g,
+  /glasspane[-_ ]?harness/gi,
+  /GlassPane[- ]?Harness/g,
+  /GLASSPANE_HARNESS/g,
+  /opencode-ai/g,
+  /anomalyco/g,
+  /models\.opencode\.ai/g,
+]
+
+/** A brand token, normalized away, so two lines that differ only by it compare equal. */
+function debrand(text) {
+  let out = text
+  for (const token of BRAND_TOKENS) out = out.replace(token, "§BRAND§")
+  return out.replace(/\s+/g, " ").trim()
+}
+
+function countAuthoredLines(diff) {
+  const lines = diff.split("\n")
+  const removed = lines.filter((l) => l.startsWith("-") && !l.startsWith("---"))
+  let ri = 0
+  let authored = 0
+  for (const line of lines) {
+    if (!line.startsWith("+") || line.startsWith("+++")) continue
+    const added = debrand(line.slice(1))
+    // Pair this addition with the next removal; if it is the same sentence with the
+    // brand swapped, it is a rebranding rather than something we wrote.
+    const match = removed.slice(ri).find((r) => debrand(r.slice(1)) === added)
+    if (match !== undefined) continue
+    authored += 1
+  }
+  return authored
+}
+
 function addedLinesAgainstRef(refDir, rel, forkAbs) {
   let before
   try {
@@ -224,7 +284,7 @@ function addedLinesAgainstRef(refDir, rel, forkAbs) {
     } catch (err) {
       diff = typeof err?.stdout === "string" ? err.stdout : "" // diff exits 1 when files differ: normal
     }
-    return diff.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).length
+    return countAuthoredLines(diff)
   } finally {
     rmSync(tmp, { force: true })
   }
@@ -235,6 +295,23 @@ function addedLinesAgainstRef(refDir, rel, forkAbs) {
 function vendorSummary(excluded) {
   if (!excluded.length) return { files: 0, lines: 0 }
   return { files: excluded.length, lines: excluded.reduce((sum, f) => sum + f.lines, 0) }
+}
+
+/** Does this "added" file have identical bytes to something upstream deleted? */
+function isPureRename(refDir, abs, rel, fd) {
+  if (!refDir || !existsSync(path.join(refDir, ".git"))) return false
+  const here = createHash("sha256").update(readFileSync(abs)).digest("hex")
+  for (const gone of fd.deleted ?? []) {
+    if (path.extname(gone) !== path.extname(rel)) continue
+    let before
+    try {
+      before = execFileSync("git", ["-C", refDir, "show", `HEAD:${gone}`], { encoding: "buffer", maxBuffer: 512 * 1024 * 1024 })
+    } catch {
+      continue
+    }
+    if (createHash("sha256").update(before).digest("hex") === here) return true
+  }
+  return false
 }
 
 function build(golden) {
@@ -248,7 +325,7 @@ function build(golden) {
     caliber: {
       engine: "lines of every *.swift under engine/Sources",
       mcpShell: "lines of every *.ts under mcp-shell/src",
-      fork: "fork-diff `added` files + `+` lines of `edited` vendored files, docs excluded",
+      fork: "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted",
       ratio: "surface / (engine + mcp-shell + fork)",
     },
     observedAt: new Date().toISOString().slice(0, 10),

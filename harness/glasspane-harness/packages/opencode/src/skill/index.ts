@@ -24,19 +24,19 @@ const EXTERNAL_SKILL_PATTERN = "skills/**/SKILL.md"
 const OPENCODE_SKILL_PATTERN = "{skill,skills}/**/SKILL.md"
 const SKILL_PATTERN = "**/SKILL.md"
 
-// Built-in skill that ships with opencode. The model's intuition for what an
-// opencode.json should look like is often wrong, and opencode hard-fails on
-// invalid config, so users hit cryptic startup errors. Loading this skill
-// when the model is asked to touch opencode's own config files gives it the
-// actual schemas instead of guesses.
-const CUSTOMIZE_OPENCODE_SKILL_NAME = "customize-opencode"
+// Built-in skill that ships with the harness. The model's intuition for what a
+// config file should look like is often wrong, and the harness hard-fails on
+// invalid config, so users hit cryptic startup errors. Loading this skill when
+// the model is asked to touch the harness's own config files gives it the actual
+// shapes instead of guesses.
+const CUSTOMIZE_OPENCODE_SKILL_NAME = "customize-harness"
 const CUSTOMIZE_OPENCODE_SKILL_DESCRIPTION =
   // [gp] Product: this prompt names the product's own configuration surface
   // (glasspane-harness.json(c), .glasspane-harness/, ~/.config/glasspane-harness/);
   // the upstream names stay listed as legacy fallbacks an existing checkout may
-  // still use. The skill id/body stay upstream's on purpose (lineage).
+  // still use.
   "Use ONLY when the user is editing or creating glasspane-harness's own configuration: glasspane-harness.json, glasspane-harness.jsonc, files under .glasspane-harness/, or files under ~/.config/glasspane-harness/ (legacy: opencode.json, opencode.jsonc, .opencode/, ~/.config/opencode/). Also use when creating or fixing glasspane-harness agents, subagents, skills, plugins, MCP servers, or permission rules. Do not use for the user's own application code, or for any project that is not configuring glasspane-harness itself."
-const CUSTOMIZE_OPENCODE_SKILL_BODY = SkillPlugin.CustomizeOpencodeContent
+const CUSTOMIZE_OPENCODE_SKILL_BODY = SkillPlugin.CustomizeHarnessContent
 
 export const Info = Schema.Struct({
   name: Schema.String,

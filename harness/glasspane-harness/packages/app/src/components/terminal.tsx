@@ -180,7 +180,7 @@ export const Terminal = (props: TerminalProps) => {
   const directory = sdk().directory
   const url = sdk().url
   const auth = connection.http
-  const username = auth?.username ?? "opencode"
+  const username = auth?.username ?? "glasspane-harness"
   const password = auth?.password ?? ""
   const authToken = connection.type === "http" ? connection.authToken : false
   const sameOrigin = new URL(url, location.href).origin === location.origin

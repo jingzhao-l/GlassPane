@@ -142,6 +142,10 @@ export const Plugin = define({
             // [gp] Plans are authored under the product dir now; the legacy path
             // stays allowed so plans written by older builds remain editable.
             { action: "edit", resource: path.join(".glasspane-harness", "plans", "*.md"), effect: "allow" },
+            // [gp] Product: plans belong to the product's project directory. The legacy
+            // `.opencode/plans` path stays allowed because an existing checkout may
+            // still keep its plans there (the directory is still read).
+            { action: "edit", resource: path.join(".glasspane-harness", "plans", "*.md"), effect: "allow" },
             { action: "edit", resource: path.join(".opencode", "plans", "*.md"), effect: "allow" },
             {
               action: "edit",
