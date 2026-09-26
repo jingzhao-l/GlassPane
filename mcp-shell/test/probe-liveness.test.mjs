@@ -1,0 +1,185 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  CALLER_VISIBLE_CEILING_MS,
+  ENGINE_DEADLINES_MS,
+  EngineJsonRpcClient,
+  LIVENESS_PROBE_OUTCOMES,
+  callerDeadlineMs,
+  engineDeadlineMs,
+  livenessProbeDecision,
+  slowEngineRemedy,
+} from "../dist/engine-client.js";
+import { TOOL_SPECS } from "../dist/tools.js";
+import { FakeLineIo } from "./helpers.mjs";
+
+/**
+ * R8-高1. The daemon answers one request at a time, so `gp_probe_status` is
+ * queued behind the very request the agent is standing over — and
+ * `slowEngineRemedy` tells the agent to send that probe *during* an outstanding
+ * `act`. With a 15 s window it expired against a busy daemon, and the wording
+ * then read "restart only if gp_probe_status times out too", i.e. an act longer
+ * than 15 s was guaranteed to produce an instruction to `--restore-launchd` a
+ * daemon that is mid-action on the user's screen (SIGTERM cancels and rolls that
+ * act back). These three gates hold the two halves of the fix: the probe's
+ * window, and the fact that an unanswered probe authorises nothing.
+ */
+
+const RESTORE_COMMAND = "--restore-launchd";
+
+/** Was the promise settled? (mocked timers make the settle synchronous-ish) */
+async function settledInFlight() {
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+test("a probe of a busy daemon is given the whole client-safe window, not 15 s", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const io = new FakeLineIo();
+  const client = new EngineJsonRpcClient(io);
+
+  let outcome = null;
+  const probe = client.call("probe_status").then(
+    () => { outcome = "answered"; },
+    (error) => { outcome = error.code; },
+  );
+
+  // The scenario the old numbers got wrong: an `act` that legitimately takes
+  // 30 s of daemon time. At 15 s+1 ms the probe must still be in flight.
+  t.mock.timers.tick(15_001);
+  await settledInFlight();
+  assert.equal(outcome, null, "15 s 就判定探针失败 = 旧缺陷：把在干的活当成死");
+
+  // The daemon frees up and answers the queued probe at 30 s.
+  io.respond({ probes: [], attachedHasProbe: false });
+  await probe;
+  assert.equal(outcome, "answered");
+});
+
+test("an unanswered probe still settles at the ceiling rather than hanging", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const io = new FakeLineIo();
+  const client = new EngineJsonRpcClient(io);
+
+  let outcome = null;
+  const probe = client.call("probe_status").then(
+    () => { outcome = "answered"; },
+    (error) => { outcome = error.code; },
+  );
+  t.mock.timers.tick(CALLER_VISIBLE_CEILING_MS - 1);
+  await settledInFlight();
+  assert.equal(outcome, null, "到点之前不得先结算");
+  t.mock.timers.tick(1);
+  await probe;
+  assert.equal(outcome, "GP_E_ENGINE_TIMEOUT", "探针必须仍然会结算，否则它自己成了挂死");
+});
+
+test("no engine method can outlive the probe meant to diagnose it", () => {
+  const methods = [...new Set([
+    ...Object.keys(ENGINE_DEADLINES_MS),
+    ...TOOL_SPECS.map((spec) => spec.engineMethod),
+  ])];
+  const probeWindow = callerDeadlineMs("probe_status");
+  const offenders = methods.filter((method) => callerDeadlineMs(method) > probeWindow);
+  assert.deepEqual(offenders, [], "这些方法的调用方等待比探针还长，探针就必然先超时");
+
+  // The comparison has to be load-bearing: `act` really does run past the probe's
+  // old 15 s on the daemon side, which is what made the old window a trap.
+  assert.ok(methods.length > 5, "方法清单空了，这条闸就只是装饰");
+  assert.ok(engineDeadlineMs("act") > 15_000, "act 的 daemon 侧最坏值必须仍在 15 s 之上");
+});
+
+test("only an unreachable daemon authorises a restart, and the remedy ships that table", () => {
+  const restarters = LIVENESS_PROBE_OUTCOMES.filter((outcome) =>
+    livenessProbeDecision(outcome).includes(RESTORE_COMMAND));
+  assert.deepEqual(restarters, ["unreachable"],
+    "重启指令只能挂在 GP_E_ENGINE_UNREACHABLE 上；别处出现就等于把忙判定为死");
+
+  const timedOut = livenessProbeDecision("timed-out");
+  assert.match(timedOut, /NOT evidence that the daemon is down/);
+  assert.match(timedOut, /do not run the restore command on this answer alone/);
+  assert.match(timedOut, /GP_E_ENGINE_TIMEOUT/, "结局必须点回它对应的那个错误码");
+
+  // The table is what the agent actually receives, not a parallel copy of it.
+  for (const method of ["act", "restore", "observe", "snapshot", "assert_element"]) {
+    const remedy = slowEngineRemedy(method);
+    for (const outcome of LIVENESS_PROBE_OUTCOMES) {
+      assert.ok(remedy.includes(livenessProbeDecision(outcome)),
+        `${method} 的 remedy 没有渲染 ${outcome} 这条判据，表就成了没人读的文档`);
+    }
+  }
+});
+
+test("a probe that itself timed out is not told to send a probe", () => {
+  const remedy = slowEngineRemedy("probe_status");
+  assert.ok(!remedy.includes("gp_probe_status goes out immediately"),
+    "探针超时的建议不得再让代理去探针（循环指引）");
+  assert.ok(!remedy.includes(RESTORE_COMMAND),
+    "探针自己没答上，不得在任何位置给出重启命令");
+  assert.ok(remedy.includes("GP_E_ENGINE_UNREACHABLE"),
+    "要给出路：真断了会由哪个错误码点名重启命令");
+});
+
+/**
+ * R8b-高4's own gate. Mutation run 2026-09-26 caught that this fix had **no** red
+ * behind it: the liveness table was pinned, `hello` was not. The handshake is the
+ * one comparison that catches "an old daemon is under this shell" (R4-06), and
+ * `ReconnectingSocketIo` writes the frame that *triggers* the connection before
+ * the `connect` event fires `hello` — so on a session whose first request is an
+ * `act`, `hello` is queued behind it and a 15 s handshake window expires against
+ * a healthy daemon, silently dropping the version/protocol check.
+ */
+
+/** A fake transport that can report "connected", which `FakeLineIo` never does. */
+class OpenableIo extends FakeLineIo {
+  #openHandler = null;
+
+  onOpen(handler) {
+    this.#openHandler = handler;
+  }
+
+  fireOpen() {
+    this.#openHandler?.();
+  }
+}
+
+test("the hello handshake outlives the request that triggered the connection", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const io = new OpenableIo();
+  const client = new EngineJsonRpcClient(io);
+  const notes = [];
+  client.onEngineNote((note) => notes.push(note));
+
+  // The frame that opens the connection goes out first, then `connect` fires and
+  // the handshake writes `hello` behind it — the real production order.
+  const act = client.call("act", { selector: { role: "AXButton" }, action: "press" }).catch(() => "timed out");
+  io.fireOpen();
+  const helloFrame = io.lastFrame();
+  assert.equal(helloFrame.method, "hello", "connect 之后必须立刻发起握手");
+
+  // 15 s is the window this used to have; the comparison must not be over yet.
+  t.mock.timers.tick(15_001);
+  await settledInFlight();
+  io.respond({ engine: "glasspaned", version: "1.2.0", protocolVersion: "9-not-this-shell" });
+  await settledInFlight();
+
+  assert.ok(
+    notes.some((note) => note.includes("protocol mismatch")),
+    `握手的版本比对没跑起来（多半是 hello 先超时了）：${JSON.stringify(notes)}`,
+  );
+  assert.ok(
+    !notes.some((note) => note.includes("did not answer the hello handshake")),
+    `hello 被自己的期限判死，R4-06 的比对就永久丢失：${JSON.stringify(notes)}`,
+  );
+
+  // The act in front of it still gets its own honest answer at the ceiling.
+  t.mock.timers.tick(CALLER_VISIBLE_CEILING_MS);
+  assert.equal(await act, "timed out");
+});
+
+test("hello is given the same wait as the probe, not a shorter one", () => {
+  // The arithmetic form of the same rule: whichever request a connection starts
+  // with, the handshake behind it must not be the first thing to expire.
+  assert.equal(callerDeadlineMs("hello"), CALLER_VISIBLE_CEILING_MS,
+    "hello 的期限短于客户端耐性 ⇒ 首请求较慢时版本比对必然丢失");
+});

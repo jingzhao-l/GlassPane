@@ -337,6 +337,19 @@ public enum SCKCapturer {
         let label: String
     }
 
+    /// What the capture may try, plus the fact needed to explain a refusal.
+    ///
+    /// `occludedBy` is not decoration: without it the only thing a failed capture
+    /// can say is "no capture surface available", and the label layer then files it
+    /// under "the app owns no on-screen window" — a fact this file already knows to
+    /// be false, because it resolved the window before getting here. The advice that
+    /// follows from a false label ("unminimise or reopen it") cannot work, so the
+    /// refusal has to carry the true cause.
+    private struct SurfacePlan {
+        var candidates: [SurfaceCapture] = []
+        var occludedBy: [Int] = []
+    }
+
     /// On-screen windows in front of `targetNumber` whose bounds intersect its frame.
     ///
     /// `CGWindowListCopyWindowInfo` is ordered front-to-back, so everything before
@@ -370,17 +383,19 @@ public enum SCKCapturer {
     /// covers the target**: with something on top, the two candidates would disagree
     /// about the app's appearance and the fallback is the one that lies, so nothing
     /// is measured at all and the refusal names what is in the way.
-    private static func surfaceCaptures(
+    private static func surfacePlan(
         context: (window: SCWindow, display: SCDisplay)
-    ) -> [SurfaceCapture] {
-        var candidates: [SurfaceCapture] = []
-        candidates.append(SurfaceCapture(
-            filter: SCContentFilter(desktopIndependentWindow: context.window),
-            sourceRect: nil, label: "window-surface"
-        ))
+    ) -> SurfacePlan {
+        var plan = SurfacePlan(
+            candidates: [SurfaceCapture(
+                filter: SCContentFilter(desktopIndependentWindow: context.window),
+                sourceRect: nil, label: "window-surface"
+            )]
+        )
         let covered = occludingWindows(inFrontOf: Int(context.window.windowID), frame: context.window.frame)
+        plan.occludedBy = covered
         if covered.isEmpty {
-            candidates.append(SurfaceCapture(
+            plan.candidates.append(SurfaceCapture(
                 filter: SCContentFilter(display: context.display, excludingWindows: []),
                 sourceRect: context.window.frame, label: "display-region"
             ))
@@ -392,7 +407,24 @@ public enum SCKCapturer {
                 + "); that region is not the target surface, so no pixel ratio is measured (R6-11)\n"
             FileHandle.standardError.write(Data(note.utf8))
         }
-        return candidates
+        return plan
+    }
+
+    /// The refusal text for "no candidate produced an image", worded to the facts
+    /// the plan has: an occluded target is a different problem from a window that
+    /// is not on screen at all, and the caller's next step differs accordingly.
+    private static func noSurfaceReason(
+        context: (window: SCWindow, display: SCDisplay), plan: SurfacePlan
+    ) -> String {
+        let window = String(context.window.windowID)
+        guard !plan.occludedBy.isEmpty else {
+            return "no capture surface available for window " + window
+                + " (neither its own surface nor a display crop produced an image)"
+        }
+        return "window " + window + " is on screen but is covered by "
+            + String(plan.occludedBy.count) + " window(s) ("
+            + plan.occludedBy.map { String($0) }.joined(separator: ", ")
+            + "), and its own surface could not be captured either"
     }
 
     // MARK: - Path A (macOS 14+, SCScreenshotManager)
@@ -400,10 +432,11 @@ public enum SCKCapturer {
     @available(macOS 14.0, *)
     private static func captureViaScreenshotManager(ownerPid pid_t: pid_t, windowId: Int?) throws -> Capture {
         let context = try resolveCaptureContext(ownerPid: pid_t, windowId: windowId)
-        // 先取窗口自己的面；只有它抛错时才考虑整屏裁剪，而那条路在没有东西盖住时才允许
-        // （见 `surfaceCaptures`）。输出像素 = 区域尺寸 × 倍率（Retina 不降采样）。
+        // 先取窗口自己的面；整屏裁剪只在 `surfacePlan` 判定没有东西盖住时才会进候选。
+        // 输出像素 = 区域尺寸 × 倍率（Retina 不降采样）。
+        let plan = surfacePlan(context: context)
         var lastError: Error?
-        for surface in surfaceCaptures(context: context) {
+        for surface in plan.candidates {
             do {
                 return Capture(
                     image: try snapViaScreenshotManager(contentFilter: surface.filter,
@@ -416,9 +449,7 @@ public enum SCKCapturer {
                 lastError = error
             }
         }
-        throw lastError ?? ChannelError.pixelCaptureDenied(
-            reason: "no capture surface available for window " + String(context.window.windowID)
-        )
+        throw lastError ?? ChannelError.pixelCaptureDenied(reason: noSurfaceReason(context: context, plan: plan))
     }
 
     @available(macOS 14.0, *)
@@ -460,7 +491,8 @@ public enum SCKCapturer {
     private static func captureViaStream(ownerPid pid_t: pid_t, windowId: Int?) throws -> Capture {
         let context = try resolveCaptureContext(ownerPid: pid_t, windowId: windowId)
         var lastError: Error?
-        for surface in surfaceCaptures(context: context) {
+        let plan = surfacePlan(context: context)
+        for surface in plan.candidates {
             do {
                 return Capture(
                     image: try snapViaStream(contentFilter: surface.filter,
@@ -473,9 +505,7 @@ public enum SCKCapturer {
                 lastError = error
             }
         }
-        throw lastError ?? ChannelError.pixelCaptureDenied(
-            reason: "no capture surface available for window " + String(context.window.windowID)
-        )
+        throw lastError ?? ChannelError.pixelCaptureDenied(reason: noSurfaceReason(context: context, plan: plan))
     }
 
     @available(macOS 13.0, *)

@@ -173,6 +173,9 @@ public enum Classifier {
         if text.contains("pixel-capture-no-onscreen-window") {
             return "the target owned no on-screen window at capture time — unminimise or reopen it (or attach to the pid that owns it) and replay; the Screen Recording seat is not the cause here"
         }
+        if text.contains("pixel-capture-no-surface") {
+            return "the target window is on screen but no picture of it could be taken — something covers it and the window-isolated capture failed too: bring the target above the covering window (or move the cover aside) and replay; this is not a missing Screen Recording seat and not a minimised window, and T6 stays undecidable until a capture exists"
+        }
         if text.contains("pixel-capture-timeout") {
             return "the capture query ran out of its time budget: let the app stop redrawing and replay once; if it repeats, report T6 as undecidable rather than re-granting the seat"
         }

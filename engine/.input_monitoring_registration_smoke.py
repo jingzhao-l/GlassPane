@@ -31,6 +31,7 @@ GlassPane Daemon 一行；点「输入监控」却什么都不出现，只能把
 import argparse
 import glob
 import os
+import pwd
 import plistlib
 import shutil
 import subprocess
@@ -38,7 +39,40 @@ import sys
 import tempfile
 import time
 
-SOURCE_BUNDLE = os.path.expanduser("~/Applications/GlassPane Daemon.app")
+def record_home():
+    """本机用户的 home：**只**从口令库读（`pwd.getpwuid(os.getuid()).pw_dir`）。
+
+    与 daemon 侧 `StateRoot.homeDefault()` = `NSHomeDirectory() + "/.glasspane"` 同语义
+    （macOS 上 NSHomeDirectory **不采纳 $HOME**），因此 `DEFAULT_SOCKET` 必须这样派生：
+    用 `os.path.expanduser("~/.glasspane/engine.sock")` 时，脚本一旦跑在 HOME 被重定向的
+    环境里（gate.sh 对 engine 模块就是这么做的）连的就是一个不存在的 socket，而真 daemon
+    仍在真实 home 上应答——"连不上"会被读成"没在跑"。读不到口令库记录时直接拒答，**不回落
+    $HOME**：回落正是本项目把 `~/.glasspane/projects.json` 从 71 条写成 2 条的那个形状。
+    口径与 engine/.p6_smoke.py、engine/.t9_smoke.py 的同名 `record_home()` 一致（那两份逐字
+    一致）；本函数在 .c33_smoke.py 与 .rebuild_survival_smoke.py 之间逐字一致——冒烟脚本按本
+    仓惯例各自自包含、不做跨脚本 import，改一处必须同步其余几处。
+    """
+    try:
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError as error:
+        print(f"NOT RUN — 口令库里没有 uid={os.getuid()} 的记录（{error}）：本脚本的目标路径"
+              "只能对着真实 home 派生，$HOME 不算（daemon 的 NSHomeDirectory 不读它），"
+              "回落 $HOME 会让本脚本对着一个不存在的位置判定。", file=sys.stderr)
+        raise SystemExit(2)
+    if not home or not home.startswith(os.sep):
+        print(f"NOT RUN — uid={os.getuid()} 的记录里 pw_dir 不是绝对路径（{home!r}）。",
+              file=sys.stderr)
+        raise SystemExit(2)
+    return home
+
+
+
+# bundle 的位置按**口令库里的 home** 派生，不读 $HOME：`os.path.expanduser("~")` 优先取
+# $HOME，而本脚本的判据（"这台机器上装着 daemon 的 bundle 长什么样"）必须对着真实现场问。
+# 与 .rebuild_survival_smoke.py / .c33_smoke.py / .p6_smoke.py / .t9_smoke.py 的同名
+# `record_home()` 逐字一致（冒烟脚本按本仓惯例各自自包含、不做跨脚本 import，
+# 改一处必须同步其余几处）。
+SOURCE_BUNDLE = os.path.join(record_home(), "Applications", "GlassPane Daemon.app")
 LISTEN_EVENT = "kTCCServiceListenEvent"
 LOG_POLL_SECONDS = 90.0
 LOG_POLL_INTERVAL = 5.0

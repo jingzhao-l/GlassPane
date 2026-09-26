@@ -24,7 +24,7 @@ public final class EngineCore {
     /// In-memory snapshot retention cap (P1 spec v1.1 §1.5).
     public static let snapshotHistoryLimit = 8
 
-    public let version = "1.2.0"
+    public let version = "1.3.0"
     public let protocolVersion = "0"
     public private(set) var attachedApp: AttachedApp?
     /// Currently active project (P1 spec v1.4 §1.3). Set via attach with projectId.
@@ -2271,13 +2271,16 @@ public final class EngineCore {
         if lowered.contains("timed out") || lowered.contains("timeout") {
             return "pixel-capture-timeout"
         }
-        if lowered.contains("no on-screen") || lowered.contains("scwindow")
-            // R6-双失败：`SCKCapturer` 在两阶段都失败、拿不到任何候选采集面时抛
-            // "no capture surface available for window <id>"。这仍是"窗口不在任何可
-            // 采集面上"的环境边界（与 `no on-screen` 同族），不是应用缺陷，所以不进
-            // 通用 `pixel-capture-failed`（那条既不在 p6 的不可用容忍表、也不会给代理
-            // 一条可执行的成因），而是归并为既有容忍标签 `pixel-capture-no-onscreen-window`。
-            || lowered.contains("no capture surface") {
+        // R7 更正 R6-双失败 的归并：那条理由（不落进通用 `pixel-capture-failed`，
+        // 因为通用标签既不在 p6 的容忍表也不给成因）仍然成立，但它被塞进的标签说的是
+        // 一句本文件明知为假的事实——窗口是被 `SCShareableContent` 解析出来的，所以它
+        // **在屏**，失败的是"拿不到它这张图"（被盖住，且独立窗口采集也失败）。
+        // 标签错，下一步就错：`pixel-capture-no-onscreen-window` 的出路是"取消最小化
+        // 或重开窗口"，对一只本来就显示的窗口毫无用处。所以给它自己的标签与自己的出路。
+        if lowered.contains("no capture surface") || lowered.contains("is on screen but is covered") {
+            return "pixel-capture-no-surface"
+        }
+        if lowered.contains("no on-screen") || lowered.contains("scwindow") {
             return "pixel-capture-no-onscreen-window"
         }
         if lowered.contains("scdisplay") {

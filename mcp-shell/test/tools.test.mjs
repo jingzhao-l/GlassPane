@@ -7,6 +7,7 @@ import { TOOL_SPECS, TOOL_BY_NAME, executeTool, trailScopedTool } from "../dist/
 import { EvidenceAuditSession } from "../dist/audit-session.js";
 import { canonicalJson } from "../dist/canonical.js";
 import { FORCE_OVERWRITE_ENV } from "../dist/project-registry.js";
+import { createTrackedMcpServer } from "../dist/dispatch.js";
 import { makeEngine } from "./helpers.mjs";
 
 test("tools/list shape: sixteen tools with expected names and methods", () => {
@@ -938,3 +939,223 @@ function siblingsOf(filePath, suffix) {
   const base = path.basename(filePath);
   return fs.readdirSync(dir).filter((name) => name.startsWith(`${base}${suffix}`));
 }
+/* ------------------------------------------------------------------ *
+ * R8-高3: the product path the sink exists for. An `act` whose reply lands
+ * after the caller was told to wait must still show up in
+ * `gp_recent_reports`; otherwise the answer the agent gets is
+ * "GP_E_NO_EVIDENCE ... run gp_act first" for a click that already
+ * happened on the user's screen, and the remedy's promise ("its operationId
+ * is recorded in this session's trail") is decoration.
+ *
+ * Driven through `createTrackedMcpServer` — the same seam index.ts uses —
+ * because a test that rebuilt the wiring here would pass against an
+ * un-wired production server.
+ * ------------------------------------------------------------------ */
+
+test("an act answered after its timeout still lands in gp_recent_reports", async () => {
+  const { io, engine } = makeEngine();
+  const notes = [];
+  const { session } = createTrackedMcpServer(engine, (note) => notes.push(note));
+
+  const act = TOOL_BY_NAME.get("gp_act");
+  const recent = TOOL_BY_NAME.get("gp_recent_reports");
+  const OP_LATE = "op_99999999999999999999999999";
+
+  const timedOut = await executeTool(act, { selector: { role: "AXButton" }, action: "press" }, engine, session);
+  assert.equal(timedOut.isError, true, "调用方应先拿到超时诊断");
+  assert.ok(timedOut.content[0].text.startsWith("GP_E_ENGINE_TIMEOUT"), timedOut.content[0].text);
+  assert.deepEqual(session.recentIds(20), [], "超时本身不得编造一次操作");
+
+  // The daemon frees up and answers the request it never forgot.
+  const actFrame = JSON.parse(io.sent[io.sent.length - 1]);
+  assert.equal(actFrame.method, "act");
+  io.send(JSON.stringify({ id: actFrame.id, result: { operationId: OP_LATE, actConfirmed: true } }));
+  await flush();
+  assert.deepEqual(session.recentIds(20), [OP_LATE], "迟到回复的 operationId 必须进链");
+
+  const promise = executeTool(recent, { limit: 5 }, engine, session);
+  await flush();
+  const evidenceFrameSent = JSON.parse(io.sent[io.sent.length - 1]);
+  assert.equal(evidenceFrameSent.method, "last_evidence");
+  assert.equal(evidenceFrameSent.params.operationId, OP_LATE,
+    "gp_recent_reports 必须去取那次迟到操作，而不是回 GP_E_NO_EVIDENCE");
+  io.respond(evidenceFrame(OP_LATE, T3_DIAGNOSIS));
+
+  const outcome = await promise;
+  assert.equal(outcome.isError, false);
+  assert.ok(outcome.content[0].text.includes(`# ${OP_LATE} · T3 · normal`),
+    outcome.content[0].text.slice(0, 300));
+});
+
+test("the trail turn a late reply takes does not block the calls behind it", async () => {
+  const { io, engine } = makeEngine();
+  const { session } = createTrackedMcpServer(engine, () => undefined);
+  const act = TOOL_BY_NAME.get("gp_act");
+  const OP_LATE = "op_88888888888888888888888888";
+
+  await executeTool(act, { selector: { role: "AXButton" }, action: "press" }, engine, session);
+  const actFrame = JSON.parse(io.sent[io.sent.length - 1]);
+  io.send(JSON.stringify({ id: actFrame.id, result: { operationId: OP_LATE } }));
+
+  // A late arrival claims a turn on the way in. If it ever failed to release,
+  // the next trail-scoped call would sit on its 500 ms engine deadline instead
+  // of being answered, so this asserts the following call completes and sees it.
+  const second = executeTool(act, { selector: { role: "AXButton", title: "Two" }, action: "press" }, engine, session);
+  await flush();
+  io.respond({ operationId: "op_after_late", actConfirmed: true });
+  await second;
+  await flush();
+  assert.deepEqual(session.recentIds(20), [OP_LATE, "op_after_late"]);
+});
+
+/* ------------------------------------------------------------------ *
+ * R8-高3 / R8b-高1: which trail a late reply may be written into.
+ *
+ * The arrival-time turn gives a late reply the only honest position left, but
+ * position is not *attribution*: an operation from before a re-attach belongs to
+ * the previous app's history, and the daemon agrees — it clears its own history
+ * exactly when the attached app changes. So the reply has to carry the trail
+ * generation it was admitted under, and the wiring has to refuse a mismatch
+ * rather than either losing it silently or leaking it into a new session.
+ * ------------------------------------------------------------------ */
+
+const ATTACH_A = { pid: 1111, bundleId: "com.example.a", appName: "A" };
+const ATTACH_B = { pid: 2222, bundleId: "com.example.b", appName: "B" };
+
+async function admitAct(io, engine, session) {
+  const act = TOOL_BY_NAME.get("gp_act");
+  const outcome = await executeTool(act, { selector: { role: "AXButton" }, action: "press" }, engine, session);
+  assert.equal(outcome.isError, true, "act 先按 deadline 拿到超时诊断");
+  return JSON.parse(io.sent[io.sent.length - 1]);
+}
+
+test("a late reply from a superseded attach is refused, and says so", async () => {
+  const { io, engine } = makeEngine();
+  const notes = [];
+  const { session } = createTrackedMcpServer(engine, (note) => notes.push(note));
+  const attach = TOOL_BY_NAME.get("gp_attach");
+  const OP_BEFORE = "op_77777777777777777777777777";
+
+  const actFrame = await admitAct(io, engine, session);
+  const late = () => io.send(JSON.stringify({ id: actFrame.id, result: { operationId: OP_BEFORE } }));
+
+  // Attach to a *different* app: the daemon drops its history here, so the act
+  // that is about to be answered belongs to a session that no longer exists.
+  const attachPromise = executeTool(attach, { bundleId: ATTACH_B.bundleId }, engine, session);
+  await flush();
+  io.respond(ATTACH_B);
+  await attachPromise;
+
+  late();
+  await flush();
+  assert.deepEqual(session.recentIds(20), [],
+    "上一个 app 的操作不得出现在新 app 的链里");
+  const refusal = notes.find((note) => note.includes("superseded attach"));
+  assert.ok(refusal, `被拒的迟到回复必须自陈，而不是静静消失：${JSON.stringify(notes)}`);
+  assert.ok(refusal.includes(OP_BEFORE), "拒绝要说出被丢掉的是哪个操作，否则代理无从回查");
+  assert.ok(refusal.includes("gp_last_evidence"), "还要给出还能把它取回来的那条路");
+});
+
+test("an idempotent re-attach to the same app keeps a late-recorded operation", async () => {
+  const { io, engine } = makeEngine();
+  const notes = [];
+  const { session } = createTrackedMcpServer(engine, (note) => notes.push(note));
+  const attach = TOOL_BY_NAME.get("gp_attach");
+  const act = TOOL_BY_NAME.get("gp_act");
+  const recent = TOOL_BY_NAME.get("gp_recent_reports");
+  const OP_LATE = "op_66666666666666666666666666";
+
+  // Attach first, so the trail has an owner: the act is admitted under it.
+  let attachPromise = executeTool(attach, { bundleId: ATTACH_A.bundleId }, engine, session);
+  await flush();
+  io.respond(ATTACH_A);
+  await attachPromise;
+
+  const actFrame = await admitAct(io, engine, session);
+  io.send(JSON.stringify({ id: actFrame.id, result: { operationId: OP_LATE } }));
+  await flush();
+  assert.deepEqual(session.recentIds(20), [OP_LATE]);
+  assert.equal(notes.length, 0, `同纪元的不该被拒：${JSON.stringify(notes)}`);
+
+  // The agent re-attaches the same app (idempotent: the daemon keeps its
+  // history). This used to wipe the trail and send it back to "run gp_act
+  // first" for a click that had already happened.
+  attachPromise = executeTool(attach, { bundleId: ATTACH_A.bundleId }, engine, session);
+  await flush();
+  io.respond(ATTACH_A);
+  await attachPromise;
+  assert.deepEqual(session.recentIds(20), [OP_LATE],
+    "幂等 re-attach 之后链必须还在——否则又回到诱导重复点击的那个答案");
+
+  const promise = executeTool(recent, { limit: 5 }, engine, session);
+  await flush();
+  io.respond(evidenceFrame(OP_LATE, T3_DIAGNOSIS));
+  const outcome = await promise;
+  assert.equal(outcome.isError, false);
+  assert.ok(outcome.content[0].text.includes(`# ${OP_LATE} · T3 · normal`));
+  assert.equal(act.name, "gp_act");
+});
+
+test("gp_attach refuses a bundleId and a pid together rather than attaching the one the daemon prefers", async () => {
+  const { io, engine } = makeEngine();
+  const { session } = createTrackedMcpServer(engine, () => undefined);
+  const attach = TOOL_BY_NAME.get("gp_attach");
+
+  const outcome = await executeTool(
+    attach,
+    { bundleId: "com.example.a", pid: 4242 },
+    engine,
+    session,
+  );
+  assert.equal(outcome.isError, true);
+  assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"), outcome.content[0].text);
+  assert.equal(io.sent.length, 0,
+    "两个身份都必须拦在壳层：daemon 收到两个字段时按 pid 优先、静默忽略 bundleId");
+  assert.deepEqual(attach.inputSchema.oneOf, [{ required: ["bundleId"] }, { required: ["pid"] }],
+    "advertising 的 oneOf 就是恰好一个，zod 不得比它宽松");
+});
+
+test("a late reply that arrives while an attach is in flight cannot overtake its reset", async () => {
+  const { io, engine } = makeEngine();
+  const notes = [];
+  const { session } = createTrackedMcpServer(engine, (note) => notes.push(note));
+  const attach = TOOL_BY_NAME.get("gp_attach");
+  const OP_BEFORE_B = "op_55555555555555555555555555";
+
+  // Session belongs to A.
+  let p1 = executeTool(attach, { bundleId: ATTACH_A.bundleId }, engine, session);
+  await flush();
+  io.respond(ATTACH_A);
+  await p1;
+
+  // An act under A, answered only after its deadline (that is the late-reply case).
+  const actFrame = await admitAct(io, engine, session);
+
+  // Re-attach to B, admitted and **not yet answered**: its trail turn is open, and
+  // the reset happens when its reply lands.
+  const attachB = executeTool(attach, { bundleId: ATTACH_B.bundleId }, engine, session);
+  await flush();
+
+  // The late reply lands in this window. Its epoch still matches at arrival — the
+  // only honest check is the epoch **after** the write acquires its turn, because
+  // the turn is what orders it against the reset.
+  io.send(JSON.stringify({ id: actFrame.id, result: { operationId: OP_BEFORE_B } }));
+  await flush();
+
+  const attachFrame = JSON.parse(io.sent[io.sent.length - 1]);
+  assert.equal(attachFrame.method, "attach");
+  io.respond(ATTACH_B);
+  await attachB;
+  await flush();
+
+  assert.deepEqual(
+    session.recentIds(20), [],
+    "A 的操作不得越过 B 的 attach 落进新链：纪元复查必须发生在取得 trail turn 之后",
+  );
+  // 两条拒绝路径（到达时就发现 / 等到 turn 之后才发现）措辞不同，但都必须说得出
+  // "没写进去"并且点名被丢掉的操作，否则代理只会看到一个凭空消失的动作。
+  const refusal = notes.find((note) => note.includes("not recorded"));
+  assert.ok(refusal, `拒绝必须说出口，不能静默写入也不能静默丢弃：${JSON.stringify(notes)}`);
+  assert.ok(refusal.includes(OP_BEFORE_B), "要说清楚丢掉的是哪个操作");
+  assert.match(refusal, /superseded attach|chain restarted/, `必须说清被谁取代：${refusal}`);
+});

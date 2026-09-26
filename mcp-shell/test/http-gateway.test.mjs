@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildSync } from "esbuild";
 
 import { createHttpGateway } from "../dist/http-gateway.js";
-import { EngineCallError } from "../dist/engine-client.js";
+import { EngineCallError, slowEngineRemedy } from "../dist/engine-client.js";
 import { GP_E_NO_EVIDENCE } from "../dist/errors.js";
 
 const TEST_TOKEN = "test-bearer-token-12345";
@@ -28,6 +28,16 @@ class FakeGatewayClient {
     this.calls.push({ method, params });
     const handler = this.handlers.get(method);
     return Promise.resolve().then(() => (handler ? handler(params) : {}));
+  }
+
+  /** Captured by the gateway; see R8b-高3 (a bridge must write down what no
+   * HTTP response carries). */
+  onEngineNote(handler) {
+    this.noteHandler = handler;
+  }
+
+  onLateReply(handler) {
+    this.lateHandler = handler;
   }
 
   on(method, handler) {
@@ -53,12 +63,13 @@ function auth(token = TEST_TOKEN) {
   return { Authorization: `Bearer ${token}` };
 }
 
-async function startGateway(fake, token = TEST_TOKEN) {
+async function startGateway(fake, token = TEST_TOKEN, extra = {}) {
   const gw = createHttpGateway({
     socketPath: "/tmp/fake-engine.sock", // never touched: connectController replaces the connector
     token,
     port: 0,
     connectController: () => fake,
+    ...extra,
   });
   await new Promise((resolve) => gw.server.once("listening", resolve));
   return { gw, base: `http://127.0.0.1:${gw.server.address().port}` };
@@ -475,5 +486,58 @@ test("release bundle preserves a resolvable http-gateway entry and the publish w
     assert.equal(typeof bundled.createHttpGateway, "function", "bundled http-gateway must export createHttpGateway");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * R8b-高3: this gateway hands out the engine client's timeout remedy, which
+ * tells a caller to go read *this process's* stderr. That promise was false
+ * twice over: nothing registered for the engine notes or late replies, and the
+ * remedy text named `gp_recent_reports` — a tool the HTTP surface does not
+ * expose (`FORWARDABLE_TOOLS` skips every tool with its own `execute`).
+ * ------------------------------------------------------------------ */
+
+test("the gateway registers for engine notes and late replies and writes them to its report sink", async () => {
+  const fake = new FakeGatewayClient();
+  const notes = [];
+  const { gw, base } = await startGateway(fake, TEST_TOKEN, { report: (note) => notes.push(note) });
+  try {
+    assert.ok(base, "the server is up");
+    assert.equal(typeof fake.noteHandler, "function", "没有 onEngineNote 注册，日志承诺就是空的");
+    assert.equal(typeof fake.lateHandler, "function", "没有 onLateReply 注册同上");
+
+    fake.noteHandler("engine sent a frame for request id 3, which this client never issued");
+    assert.ok(notes.some((line) => line.includes("never issued")), JSON.stringify(notes));
+
+    fake.lateHandler({ method: "act", result: { operationId: "op_http_late" } });
+    const late = notes.find((line) => line.includes("late engine reply"));
+    assert.ok(late, `迟到回复必须带正文落地，operationId 才取得到：${JSON.stringify(notes)}`);
+    assert.ok(late.includes("op_http_late"));
+  } finally {
+    await gw.close();
+  }
+});
+
+test("the gateway's timeout remedy routes to its own route, not to an MCP tool", async () => {
+  const fake = new FakeGatewayClient();
+  fake.on("act", () => Promise.reject(new EngineCallError(
+    "GP_E_ENGINE_TIMEOUT",
+    "engine is still working on 'act': no reply after 50000ms",
+    slowEngineRemedy("act", "http"),
+  )));
+  const { gw, base } = await startGateway(fake);
+  try {
+    const res = await fetch(`${base}/v1/tools/act`, {
+      method: "POST",
+      headers: { ...auth(), "content-type": "application/json" },
+      body: JSON.stringify({ selector: { role: "AXButton" }, action: "press" }),
+    });
+    const body = await res.text();
+    assert.equal(res.status, 502, body);
+    assert.ok(!body.includes("gp_recent_reports"),
+      `HTTP 调用方没有这个工具可调：${body.slice(0, 240)}`);
+    assert.ok(body.includes("/v1/evidence/"), `要给出它真能走的那条路：${body.slice(0, 240)}`);
+  } finally {
+    await gw.close();
   }
 });

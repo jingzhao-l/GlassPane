@@ -16,6 +16,7 @@ import {
   projectList,
   projectSet,
 } from "../dist/project-registry.js";
+import { GP_E_NO_USER_RECORD } from "../dist/errors.js";
 import { TOOL_BY_NAME, executeTool } from "../dist/tools.js";
 import { makeEngine } from "./helpers.mjs";
 
@@ -552,6 +553,232 @@ test("a private ancestor the current user owns is what makes a deep root accepta
     fs.chmodSync(parent, 0o750);
     const target = path.join(parent, ".glasspane", "evidence");
     assert.equal(projectSet({ ...baseArgs, evidenceStoragePath: target }).evidenceStoragePath, target);
+  } finally {
+    reg.dispose();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * The home the daemon actually reads (round-8 MCP review, 高2)
+ *
+ * The daemon's state root is `StateRoot.homeDefault()` =
+ * `NSHomeDirectory() + "/.glasspane"`, and `StateRoot.swift` says in its own
+ * header that on macOS that lookup "does **not** honour a `HOME` override set
+ * by the caller" — the non-inheritance that has already cost this project real
+ * registrations. Node has *two* home lookups and they differ on exactly this:
+ * `os.homedir()` reads `$HOME`, `os.userInfo().homedir` reads the passwd record.
+ * Measured on this machine:
+ *
+ *   HOME=/tmp/fake-sbx-home node -e 'const os=require("os"); \
+ *     console.log(os.homedir(), "|", os.userInfo().homedir)'
+ *   -> /tmp/fake-sbx-home | /Users/ethanlin
+ *
+ * So the two `$HOME`-following lookups in `project-registry.ts` resolved a
+ * different directory than the daemon from the moment a caller exported `HOME`:
+ *  - `daemonProjectsPath()` handed back a sandbox path while its own doc
+ *    promises "the file the *daemon* reads … a write aimed elsewhere is a write
+ *    nothing loads", and `daemonRestartNotice()` compared against that value —
+ *    so the stray-write guard passed the file nothing loads and refused the file
+ *    the daemon does load;
+ *  - `refuseCandidate()`'s home rule protected the sandbox, leaving the real
+ *    home and `~/Library` registrable — one exported variable switched the
+ *    protection off.
+ * Both are pinned below, through the exported surface rather than the private
+ * helper. Neither test writes anywhere but its own sandbox: `useRegistry()`
+ * pins `GLASSPANE_PROJECTS_FILE` for the whole run, so no call here can reach
+ * the real `~/.glasspane` whatever the home lookup returns.
+ * ------------------------------------------------------------------ */
+
+/**
+ * Run `body` with `$HOME` pointed at a fresh private sandbox directory, then put
+ * `$HOME` back. The restore is in `finally` because this file runs sequentially
+ * inside one process and the tests above (and the daemon-path ones below) judge
+ * the *real* home: leaking a sandboxed `HOME` would turn a green run into an
+ * accident. The fake home exists only to poison `$HOME` — it is never passed to
+ * `projectSet` as a storage root.
+ */
+function withSandboxHome(body) {
+  const fakeHome = privateSandbox("gp-fake-home-");
+  const previous = process.env.HOME;
+  process.env.HOME = fakeHome.dir;
+  try {
+    // The premise, checked rather than assumed. If `os.homedir()` ever stopped
+    // following `$HOME`, every assertion below would hold vacuously and the
+    // regression it exists to catch would sail through.
+    assert.equal(
+      os.homedir(),
+      fakeHome.dir,
+      "premise broken: os.homedir() did not follow $HOME into the sandbox, so nothing " +
+      "below distinguishes the two lookups — re-read Node's home semantics before trusting this test",
+    );
+    return body(fakeHome.dir);
+  } finally {
+    if (previous === undefined) delete process.env.HOME;
+    else process.env.HOME = previous;
+    fakeHome.dispose();
+  }
+}
+
+test("daemonProjectsPath follows the daemon's home, not $HOME", () => {
+  const reg = useRegistry();
+  try {
+    withSandboxHome(() => {
+      const expected = path.join(os.userInfo().homedir, ".glasspane", "projects.json");
+      const sandboxed = path.join(process.env.HOME, ".glasspane", "projects.json");
+      const actual = daemonProjectsPath();
+      assert.equal(
+        actual,
+        expected,
+        `the shell and the daemon must name the same file (Swift: StateRoot.homeDefault() \
+         = NSHomeDirectory() + "/.glasspane/projects.json"). With $HOME=${process.env.HOME} \
+         this shell named ${actual}`,
+      );
+      assert.notEqual(
+        actual,
+        sandboxed,
+        `a $HOME-derived path is a file nothing loads: ${actual} — and \`daemonRestartNotice\` \
+         built from it would tell the agent to write *there*`,
+      );
+      assert.equal(
+        actual.startsWith(`${process.env.HOME}/`),
+        false,
+        `the daemon's registry must not resolve inside the sandbox: ${actual}`,
+      );
+    });
+  } finally {
+    reg.dispose();
+  }
+});
+
+test("the stray-write guard still points at the daemon's file when $HOME moves", () => {
+  const reg = useRegistry();
+  try {
+    withSandboxHome(() => {
+      // The guard's whole job is to tell the caller "the file you wrote is not
+      // the file the daemon loads". With $HOME pointing into the sandbox the
+      // sandbox path *was* the computed daemon path, so a write to the real
+      // registry — the one write that does load — got the warning, and a write
+      // to the sandbox got the reassuring sentence. Both halves are pinned.
+      const notice = daemonRestartNotice(reg.filePath);
+      assert.match(
+        notice,
+        /never reads that file/,
+        `a sandboxed file is not the one the daemon loads, and the notice must say so: ${notice}`,
+      );
+      assert.ok(
+        notice.includes(path.join(os.userInfo().homedir, ".glasspane", "projects.json")),
+        `the notice must name the daemon's real file, not a $HOME-derived one: ${notice}`,
+      );
+
+      const own = daemonRestartNotice(daemonProjectsPath());
+      assert.match(
+        own,
+        /loaded that file once/,
+        `the daemon's own file must get the plain restart sentence: ${own}`,
+      );
+      assert.equal(
+        own.includes("never reads that file"),
+        false,
+        `the daemon's own file cannot be the one it never reads: ${own}`,
+      );
+    });
+  } finally {
+    reg.dispose();
+  }
+});
+
+test("a sandboxed $HOME does not move the home and ~/Library protections", () => {
+  const reg = useRegistry();
+  try {
+    withSandboxHome(() => {
+      const systemHome = os.userInfo().homedir;
+      const refused = [
+        [systemHome, "the current user's home directory"],
+        [path.join(systemHome, "Library"), "inside the current user's Library folder"],
+        [
+          path.join(systemHome, "Library", "Preferences", "GlassPane"),
+          "inside the current user's Library folder",
+        ],
+      ];
+      for (const [value, reason] of refused) {
+        const message = expectRegistryError(
+          () => projectSet({ ...baseArgs, evidenceStoragePath: value }),
+          "GP_E_BAD_PARAMS",
+          `${value} while HOME=${process.env.HOME}`,
+        );
+        // The *named* rule, by name: an accidental refusal for some other
+        // reason (an ownership complaint, say) would pass a "was it refused"
+        // check while the home protection itself stayed off.
+        assert.ok(
+          message.includes(reason),
+          `${value} must be refused by the named rule "${reason}" — exporting HOME must not \
+           switch the protection off, and a different reason means it did: ${message}`,
+        );
+        assert.match(message, /An acceptable value is a project-owned directory/);
+      }
+      assert.equal(
+        fs.existsSync(reg.filePath),
+        false,
+        "none of them reached the registry",
+      );
+    });
+  } finally {
+    reg.dispose();
+  }
+});
+
+/**
+ * The refusal branch, made executable rather than asserted in prose.
+ *
+ * `systemHome()` says that when the user record cannot be read it refuses
+ * instead of falling back. A branch nobody can run is a branch nobody keeps, and
+ * the regression here would be invisible to the cross-language gate if someone
+ * wrote the fallback as `process.env.HOME` rather than `os.homedir()` — the ban
+ * is on the spelling, this is on the behaviour. So the lookup is made to fail
+ * while `$HOME` still answers, and the answer must be a refusal that names
+ * neither the sandbox nor any path at all.
+ */
+test("no user record is a refusal, not a $HOME guess", () => {
+  const reg = useRegistry();
+  try {
+    withSandboxHome((sandboxHome) => {
+      const realUserInfo = os.userInfo;
+      const recordHome = os.userInfo().homedir;
+      try {
+        os.userInfo = () => {
+          throw Object.assign(new Error("getpwuid: no such user"), { code: "ENOENT" });
+        };
+        // GP_E_NO_USER_RECORD, not GP_E_INTERNAL: `tools.ts` maps GP_E_INTERNAL
+        // to "the projects file is damaged, go read it", and for this failure
+        // there is no damaged file — naming one would send the agent to open a
+        // healthy projects.json. The behavioural assertions below (no `$HOME`
+        // fallback, the missing lookup named) are the point of this test.
+        const message = expectRegistryError(
+          () => daemonProjectsPath(),
+          GP_E_NO_USER_RECORD,
+          "home lookup with no user record",
+        );
+        assert.equal(
+          message.includes(sandboxHome),
+          false,
+          `$HOME is not the fallback: the shell answered with a path derived from it. ${message}`,
+        );
+        assert.match(message, /NSHomeDirectory/, `must say which lookup it needed: ${message}`);
+        assert.match(message, /password database/, `must name a remedy: ${message}`);
+        // The tolerant branch it refuses to fake: nothing was written, and the
+        // registry the caller pointed at is still absent.
+        assert.equal(fs.existsSync(reg.filePath), false);
+      } finally {
+        os.userInfo = realUserInfo;
+      }
+      // The patch is gone again — otherwise every later test in this file would
+      // be judging a stub, and "green" would mean nothing.
+      assert.equal(
+        daemonProjectsPath(),
+        path.join(recordHome, ".glasspane", "projects.json"),
+        "os.userInfo must be back to the real lookup after the stub",
+      );
+    });
   } finally {
     reg.dispose();
   }

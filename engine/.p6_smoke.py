@@ -28,10 +28,12 @@ Exit codes: 0 = PASS（全部断言真实执行）, 1 = FAIL,
 
 import json
 import os
+import pwd
 import re
 import signal
 import subprocess
 import sys
+import ast
 import tempfile
 import time
 import hashlib
@@ -284,13 +286,76 @@ def sandbox_state_root(sandbox_home):
     return os.path.join(sandbox_home, ".glasspane")
 
 
-def real_user_state_root():
-    """开发者真实的 per-user 状态根（本脚本自己进程的环境，HOME 从未挪过）。
+class HomeRecordUnavailable(Exception):
+    """本用户的 home 读不到。此时**没有**可用的真根，也没有可以回退的次优值。"""
 
-    判据用它，而不是用"沙箱之外"这个模糊说法：daemon 没听 --state-dir 时解析到的正是
-    这里，那才是本轮会毁掉的东西。
+
+def record_home():
+    """本机用户的 home 目录：**只**从口令库读（`pwd.getpwuid(os.getuid()).pw_dir`）。
+
+    与 daemon 侧的 `NSHomeDirectory()`（`Sources/GlassPaneEngine/StateRoot.swift` 的
+    `homeDefault()`）同语义：macOS 上两者都**不采纳 $HOME**。反过来，Python 的
+    `os.path.expanduser("~")` 优先读 `$HOME`——用它拼"真根"，脚本一旦跑在 HOME 被重定向
+    的环境里（gate.sh 对 engine 模块就是这么做的，任何未来的沙箱也会这么做），报出的就是
+    沙箱而不是真根，于是"没有任何写入面落在真实根内"这条判据改成守着沙箱、放着真文件，
+    毁掉开发者真实的 `~/.glasspane` 时一声不响（fail-open）。这与把 projects.json 从 71 条
+    写成 2 条那次同源于一个 lookup，mcp-shell 侧已用 `os.userInfo().homedir` 修掉同一处
+    （`mcp-shell/src/project-registry.ts` 的 `systemHome()`）。
+    读不到记录（uid 在口令库里没有条目）时抛 `HomeRecordUnavailable` 而**不回落到 $HOME**：
+    一个错的真根远比"没有真根"危险。
     """
-    return os.path.realpath(os.path.join(os.path.expanduser("~"), ".glasspane"))
+    try:
+        entry = pwd.getpwuid(os.getuid())
+    except KeyError as error:
+        raise HomeRecordUnavailable(
+            f"口令库里没有 uid={os.getuid()} 的记录（{error}）") from error
+    home = entry.pw_dir
+    if not home or not home.startswith(os.sep):
+        raise HomeRecordUnavailable(
+            f"uid={os.getuid()} 的记录里 pw_dir 不是绝对路径（{home!r}）")
+    return home
+
+
+def real_user_state_root():
+    """开发者真实的 per-user 状态根 = daemon 不传 `--state-dir` 时会写进去的那个目录。
+
+    home 取自口令库（见 `record_home()`），**不取自 $HOME**：判据不依赖"本脚本自己的环境
+    里 HOME 从未挪过"这个前提——那个前提不属于本脚本能保证的东西，而它一旦被破坏，用
+    $HOME 拼出来的"真根"就成了沙箱本身，守卫也随之失去意义。daemon 侧同一目录由
+    `NSHomeDirectory()` 得出，同样不读 $HOME，两边因此指的是同一个目录。
+    """
+    return os.path.realpath(os.path.join(record_home(), ".glasspane"))
+
+
+def announce_home_source():
+    """启动即核对 home 口径，并把事实打出来（本文件自己的可证伪断言）。
+
+    要求：`os.environ.get("HOME")` 与口令库里的 home 不一致时，**必须**说出这一事实，
+    同时说出判据用的真根不跟着 $HOME 走。也就是说人为
+    `HOME=/tmp/whatever python3 <本脚本>`（.p6_smoke.py 与 .t9_smoke.py 同一段）时，真根仍
+    然报成 `/Users/<you>/.glasspane`——这一条既能被读，也能被反驳（它对不上就是脚本写错了）。
+    口令库里没有本用户的记录 → NOT RUN(2) 离场，此处不回落 $HOME（回落正是本轮要消灭的
+    形状），且早于任何子进程与任何断言。
+    """
+    try:
+        home = record_home()
+        live_root = real_user_state_root()
+    except HomeRecordUnavailable as error:
+        print(f"NOT RUN — 启动前置的 home 口径核对失败（{error}），一条断言都没执行"
+              "（NOT RUN ≠ PASS）。")
+        print("  这里**不**回落到 $HOME：真根一旦由 $HOME 拼出，被重定向的 HOME 会让状态根")
+        print("  隔离守卫把沙箱当成真根，毁掉开发者真实的 ~/.glasspane 时一声不响。")
+        print("  REMEDY: 以口令库里有条目的 uid 运行（对照：dscl . -read /Users/$(id -un)"
+              " NFSHomeDirectory）。")
+        sys.exit(2)
+    env_home = os.environ.get("HOME")
+    print(f"home 口径：口令库 pw_dir={home} → real_user_state_root()={live_root}"
+          "（daemon 侧同源 = NSHomeDirectory()，两者都不读 $HOME）")
+    if env_home != home:
+        print(f"NOTE $HOME={env_home!r} 与口令库的 home={home!r} 不一致：本脚本正跑在 HOME 被"
+              "重定向的环境里。真根**仍取自口令库**（上面那个 real_user_state_root），不随"
+              " $HOME 走；判据不依赖“HOME 从未挪过”这个前提。")
+    return live_root
 
 
 def path_inside(candidate, parent):
@@ -378,20 +443,32 @@ def require_proven_isolation(daemon_bin, daemon_env, state_root, extra_args=()):
       3. 两个写入面都问得到：evidence 的 `dir` 与 projects 的 `registryPath`（缺一即
          未证明——只问得到一条不等于另一条也没逃）。
       4. realpath 后每个面都落在 `--state-dir` 那个根之内，且没有一个落在真实
-         ~/.glasspane 之内或之下。"在沙箱外"这种模糊说法不作判据，真实根才是要守的东西。
-      5. 同一套参数、HOME 换回**真实值**再问一次，结论必须仍然是那个沙箱根。只有"路径跟
-         着 --state-dir 走、不跟着 HOME 走"才叫注入生效；少了这一条，一个忽略 --state-dir
-         却采纳 HOME 的 daemon 也能交出"落在沙箱里"的回显，而那正是"传了参数就当已隔离"。
+         ~/.glasspane 之内或之下。"在沙箱外"这种模糊说法不作判据，真实根才是要守的东西；
+         而"真实根"只从口令库派生（record_home()），$HOME 不参与——本脚本可能正跑在 HOME
+         被重定向的环境里，那时 $HOME 拼出的"真根"就是沙箱，判据当场反过来守着沙箱。
+      5. 同一套参数、HOME 换回**口令库里的真实 home** 再问一次，结论必须仍然是那个沙箱根。
+         只有"路径跟着 --state-dir 走、不跟着 HOME 走"才叫注入生效；少了这一条，一个忽略
+         --state-dir 却采纳 HOME 的 daemon 也能交出"落在沙箱里"的回显，而那正是"传了参数
+         就当已隔离"。
     任何一条不成立 → NOT RUN(2)，一条断言都不跑。
     """
     expected = os.path.realpath(state_root)
-    live_root = real_user_state_root()
     notes = []
+    try:
+        live_home = record_home()
+        live_root = real_user_state_root()
+    except HomeRecordUnavailable as error:
+        # 判据要拿"真根"当比对基准，而这里没有任何办法猜出它：读不到就 NOT RUN。
+        # 回落 $HOME 会把沙箱目录当真根，那条"没有面落在真根之内"的判据随即守着沙箱。
+        print("NOT RUN — 真根无从报出，状态根隔离未证明，一条断言都没执行（NOT RUN ≠ PASS）：")
+        print(f"  {error}")
+        print("  本闸不回落 $HOME（$HOME 可被任何调用方改写，daemon 却不读它）；见 record_home()。")
+        sys.exit(2)
 
     def not_run(reason_lines):
         print("NOT RUN — 状态根隔离未证明，一条断言都没有执行（NOT RUN ≠ PASS）")
         print(f"  --state-dir 的取值：{state_root}（realpath {expected}）")
-        print(f"  真实 per-user 状态根：{live_root}")
+        print(f"  真实 per-user 状态根：{live_root}（由口令库 pw_dir={live_home} 派生，与 $HOME 无关）")
         for line in reason_lines:
             print(line)
         print("  放行后果：evidence 档案写进开发者真实 ~/.glasspane/evidence，restore 的")
@@ -404,8 +481,9 @@ def require_proven_isolation(daemon_bin, daemon_env, state_root, extra_args=()):
         flags = " ".join([*extra_args, "--evidence-stats"])
         print(f"      HOME={daemon_env.get('HOME')} {daemon_bin} {flags}")
         print("        → dir 必须在 --state-dir 那个根内（判据 3/4）")
-        print(f"      HOME={os.path.expanduser('~')} {daemon_bin} {flags}")
-        print("        → dir 必须**仍然**在那个根内：跟着 HOME 走就是假注入（判据 5）")
+        print(f"      HOME={live_home} {daemon_bin} {flags}")
+        print("        → 这一问用的是口令库里的 home（$HOME 不算），dir 必须**仍然**在那个根内："
+              "跟着 HOME 走就是假注入（判据 5）")
         print(f"      {daemon_bin} --evidence-stats")
         print("        → 这一问报出的就是没传参数时的回落形状，也是第二道闸要守的真实文件")
         print("      第一条或第二条落在沙箱外 → --state-dir 没贯穿到那个写入面，"
@@ -441,10 +519,13 @@ def require_proven_isolation(daemon_bin, daemon_env, state_root, extra_args=()):
 
     # 判据 3 + 4：向被测二进制自己问它这一轮真的会用的那套参数解析到了哪里。
     roots = probe_state_roots(daemon_bin, daemon_env, notes, extra_args)
-    # 判据 5：同一套参数、HOME 换回真实值。这一步把"参数带着走"与"HOME 带着走"分开：
-    # 一个忽略 --state-dir 却采纳 HOME 的 CLI 在这一问里会报出真实 per-user 根。
+    # 判据 5：同一套参数、HOME 换回**口令库里的真实 home** 再问一次。这一步把"参数带着走"
+    # 与"HOME 带着走"分开：一个忽略 --state-dir 却采纳 HOME 的 CLI 在这一问里会报出真实
+    # per-user 根。真值在这里显式给出而不是继承本脚本的 $HOME——本脚本可能正跑在 HOME 被
+    # 重定向的环境里，那时"继承"到的根本不是真实值，这一问也就没量到它声称的东西。
     home_notes = []
-    against_home = probe_state_roots(daemon_bin, dict(os.environ), home_notes, extra_args)
+    against_home = probe_state_roots(daemon_bin, dict(os.environ, HOME=live_home),
+                                     home_notes, extra_args)
     missing = [face for face in STATE_FACES if face not in roots]
     escaped = {name: path for name, path in roots.items() if not path_inside(path, expected)}
     colliding = {name: path for name, path in roots.items() if path_inside(path, live_root)}
@@ -585,6 +666,10 @@ CIRCUIT_PIXEL_UNAVAILABLE_LABELS = (
     # 像素通路如实"未测量"。这仍是一条像素通路的 excuse，不是把误判洗成通过——
     # 引擎此时拒绝给 changedPixelRatio，而不是给一个跨窗口的假数字。
     "pixel-capture-window-changed",
+    # R7：窗口在屏但拍不到它自己（被盖住 + 独立窗口采集也失败）。这条以前被归并进
+    # "无在屏窗口"标签，而那个标签对它是假话（窗口明明在屏），代理照它去"取消最小化"
+    # 根本无效。现在它有独立标签与独立出路，仍然算"通路没测到"而不是"判定错"。
+    "pixel-capture-no-surface",
 )
 # A-08/R3-1: an unwatched window keeps this label in the archive even when the
 # operator declared the window unattended and the verdict therefore reads
@@ -870,7 +955,110 @@ def sweep_orphan_fixtures(demo_bin):
     return killed
 
 
+# 本段与 engine/.t9_smoke.py 共享同一段判据代码。本仓惯例是冒烟脚本各自自包含、不做跨脚本
+# import，所以"改一处必须同步另一处"过去只由一句人读注释承担——而注释不是闸：本轮就发生过
+# 一次"提交信息声称有 `shared_block_problems` 守卫，回代码一查从未存在"。下面这道闸把它变成
+# 机器判据：与兄弟脚本逐名比对顶层定义，漂移即 NOT RUN(2)。
+SHARED_BLOCK_INTENTIONALLY_DIFFERENT = {
+    # 每一条都必须**仍然真的不同**才留着；一旦两边写成一样，闸会要求删掉这条例外。
+    "DAEMON_CANDIDATES": "p6 多兜一份 /tmp/glasspane-p6 下的构建产物（p6 自己做 round-trip 重建的位置），t9 没有这一步",
+    "main": "两个脚本各自的入口：argv 形态、断言顺序与报告文本本就不同",
+}
+
+
+def shared_block_definitions(script):
+    """一个脚本里的顶层具名定义 → {name: 源码文本}（按 ast 的行范围切片）。
+
+    按**定义**而不是按整段文本比对：整段比对会因为两份文件各自的本地产物常量与入口
+    而必然不等，那条闸就只能靠"忽略整段"活着，等于没有判据。
+    """
+    with open(script, "r", encoding="utf-8") as handle:
+        lines = handle.read().splitlines()
+    tree = ast.parse("\n".join(lines))
+    out = {}
+    for node in tree.body:
+        name = None
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            name = node.name
+        elif isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+            name = node.targets[0].id
+        if name and not name.startswith("_"):
+            out[name] = "\n".join(lines[node.lineno - 1:node.end_lineno])
+    return out
+
+
+def shared_block_not_run(reason_lines):
+    """本闸自己的 NOT RUN 出口（模块级的 `not_run` 不存在——它是
+    `require_proven_isolation` 里的局部函数），说清一条断言都没执行再以 2 离场。"""
+    print("NOT RUN — 共享段比对未通过，一条断言都没有执行（NOT RUN ≠ PASS）：")
+    for line in reason_lines:
+        print(line)
+    print("  出路二选一：把共享判据在同一批次里改齐两份，或把确实该不同的名字连同"
+          "**为什么不同**加进 SHARED_BLOCK_INTENTIONALLY_DIFFERENT。")
+    sys.exit(2)
+
+
+def verify_shared_block(this_script):
+    """与兄弟脚本逐名比对；漂移或例外失配即 NOT RUN(2)。
+
+    两个方向都要能红：① 有人在一份里改了共享判据而另一份没改 → 该名字不在例外表里，红；
+    ② 例外表里的名字被写成两边一致（漂移消失或抄平） → 例外不再承重，红。第二条是防止
+    例外表变成"永远无人复核的免检清单"，那正是本轮之前那条注释的失败模式。
+    读不到兄弟脚本（单独 checkout、只拷了一份）→ 明说未比对，不当成通过。
+    """
+    here = os.path.dirname(os.path.abspath(this_script))
+    sibling_name = ".t9_smoke.py" if os.path.basename(this_script).startswith(".p6") else ".p6_smoke.py"
+    sibling = os.path.join(here, sibling_name)
+    if not os.path.isfile(sibling):
+        print(f"NOTE 共享段未比对：找不到兄弟脚本 {sibling}（比对本闸只在本仓完整 checkout 时有意义）")
+        return
+    try:
+        mine = shared_block_definitions(this_script)
+    except (OSError, SyntaxError) as error:
+        shared_block_not_run([f"本脚本自身无法解析，共享段无从比对：{error}"])
+        return
+    try:
+        theirs = shared_block_definitions(sibling)
+    except (OSError, SyntaxError) as error:
+        shared_block_not_run([f"{sibling_name} 无法解析，共享段无从比对：{error}"])
+        return
+
+    reasons = []
+    drifted = []
+    stale_exceptions = []
+    checked = 0
+    for name in sorted(set(mine) & set(theirs)):
+        checked += 1
+        if mine[name] == theirs[name]:
+            if name in SHARED_BLOCK_INTENTIONALLY_DIFFERENT:
+                stale_exceptions.append(name)
+            continue
+        if name in SHARED_BLOCK_INTENTIONALLY_DIFFERENT:
+            continue
+        drifted.append(name)
+    missing_exceptions = [name for name in SHARED_BLOCK_INTENTIONALLY_DIFFERENT
+                          if name not in mine or name not in theirs]
+    if drifted:
+        reasons.append("这些定义在两份冒烟脚本里已经不一致，而它们不在具名例外表中（共享判据漂移）：")
+        reasons.extend(f"  {name}：改一处必须同步另一处" for name in drifted)
+    if stale_exceptions:
+        reasons.append("这些名字被登记为\u201c有意不同\u201d，但两边现在已经写成一样 —— 例外不再承重，请删掉它：")
+        reasons.extend(f"  {name}" for name in stale_exceptions)
+    if missing_exceptions:
+        reasons.append("例外表点名了两侧并不都有的定义（表本身过期）：")
+        reasons.extend(f"  {name}" for name in missing_exceptions)
+    if reasons:
+        shared_block_not_run(reasons)
+    print(f"PASS 共享段已比对：{checked} 个两侧同名定义，{len(drifted) + len(stale_exceptions)} 处漂移，"
+          f"{len(SHARED_BLOCK_INTENTIONALLY_DIFFERENT)} 条例外均经核对确实仍然不同（{sibling_name}）")
+
+
 def main():
+    # 启动第一件事：核对 home 口径（口令库 vs $HOME）并把事实打出来。任何子进程、任何断言
+    # 之前——读不到本用户的记录即 NOT RUN(2)，不带着一个猜出来的"真根"往下跑。
+    announce_home_source()
+    # 与兄弟脚本的共享判据逐名比对（漂移即 NOT RUN，见 verify_shared_block）。
+    verify_shared_block(__file__)
     daemon_bin = resolve_binary(sys.argv[1] if len(sys.argv) > 1 else None,
                                 "GLASSPANE_DAEMON_BIN", DAEMON_CANDIDATES)
     demo_bin = resolve_binary(sys.argv[2] if len(sys.argv) > 2 else None,

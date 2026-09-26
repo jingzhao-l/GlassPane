@@ -16,12 +16,15 @@ cdhash 已变、identifier 与 DR 未变的 bundle，kickstart 重启 launchd �
 
 前置不满足（非 macOS / bundle 未装 / daemon 不应答 / DR 里含 cdhash / 一个席位都没授权）
 → SKIP 并 exit 0（与 .signal_smoke.py 同口径：环境不满足不冒充失败）。前置满足而授权丢了
-→ exit 1，并把恢复用备份的位置打印出来。
+→ exit 1，并把恢复用备份的位置打印出来。口令库里读本用户的 home 都读不到 → NOT RUN
+（exit 2）：`--bundle`/`--socket` 的默认值全靠那个 home，$HOME 不参与（daemon 的
+NSHomeDirectory 不读它，回落会让本脚本对着不存在的位置把自己 SKIP 掉）。
 """
 
 import argparse
 import json
 import os
+import pwd
 import shutil
 import socket
 import subprocess
@@ -29,8 +32,45 @@ import sys
 import tempfile
 import time
 
-DEFAULT_BUNDLE = os.path.expanduser("~/Applications/GlassPane Daemon.app")
-DEFAULT_SOCKET = os.path.expanduser("~/.glasspane/engine.sock")
+
+def record_home():
+    """本机用户的 home：**只**从口令库读（`pwd.getpwuid(os.getuid()).pw_dir`）。
+
+    与 daemon 侧 `StateRoot.homeDefault()` = `NSHomeDirectory() + "/.glasspane"` 同语义
+    （macOS 上 NSHomeDirectory **不采纳 $HOME**），因此 `DEFAULT_SOCKET` 必须这样派生：
+    用 `os.path.expanduser("~/.glasspane/engine.sock")` 时，脚本一旦跑在 HOME 被重定向的
+    环境里（gate.sh 对 engine 模块就是这么做的）连的就是一个不存在的 socket，而真 daemon
+    仍在真实 home 上应答——"连不上"会被读成"没在跑"。读不到口令库记录时直接拒答，**不回落
+    $HOME**：回落正是本项目把 `~/.glasspane/projects.json` 从 71 条写成 2 条的那个形状。
+    口径与 engine/.p6_smoke.py、engine/.t9_smoke.py 的同名 `record_home()` 一致（那两份逐字
+    一致）；本函数在 .c33_smoke.py 与 .rebuild_survival_smoke.py 之间逐字一致——冒烟脚本按本
+    仓惯例各自自包含、不做跨脚本 import，改一处必须同步其余几处。
+    """
+    try:
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError as error:
+        print(f"NOT RUN — 口令库里没有 uid={os.getuid()} 的记录（{error}）：本脚本的目标路径"
+              "只能对着真实 home 派生，$HOME 不算（daemon 的 NSHomeDirectory 不读它），"
+              "回落 $HOME 会让本脚本对着一个不存在的位置判定。", file=sys.stderr)
+        raise SystemExit(2)
+    if not home or not home.startswith(os.sep):
+        print(f"NOT RUN — uid={os.getuid()} 的记录里 pw_dir 不是绝对路径（{home!r}）。",
+              file=sys.stderr)
+        raise SystemExit(2)
+    return home
+
+
+# 现网 bundle 的位置。这里读的是**安装时**的 home：installer/cli.js 的 bundlePlan 用
+# `homeDir: process.env.HOME`（installer/cli.js:1005 → bundlePlan 的
+# `path.join(homeDir, APPS_DIR_NAME)`，由 installBundles 真正 copy 到位），所以严格说
+# 生产者是安装器那一刻的 $HOME。仍然走同一个 home 出口，理由是：安装发生在正常登录会话里
+# （那一刻 $HOME == 口令库 pw_dir），而 $HOME 与 pw_dir 出现分歧的唯一场合是"装完之后
+# 有人把 HOME 挪进沙箱再跑本脚本"——那一刻 `$HOME/Applications` 按定义是空的，本脚本会
+# 以 `SKIP：daemon bundle 未安装` 静默收工，这条 TCC 存活闸就此停摆而无人知晓；口令库那
+# 个 home 才是 bundle 真实躺着的地方。真要指别处（例如自建的 /Applications 安装），
+# `--bundle` 显式覆盖，路径不由环境变量猜。
+DEFAULT_BUNDLE = os.path.join(record_home(), "Applications", "GlassPane Daemon.app")
+DEFAULT_SOCKET = os.path.join(record_home(), ".glasspane", "engine.sock")
 HELLO_TIMEOUT_SECONDS = 40.0
 SEATS = ("accessibility", "inputMonitoring", "screenRecording", "developerTools")
 

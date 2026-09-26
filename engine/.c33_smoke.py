@@ -17,11 +17,13 @@
 退出语义：
 - TCC 未授权 → SKIP（exit 0），附强制授权指引；
 - 授权且全断言 PASS → exit 0；
-- 任何断言失败 → FAIL（exit 1）。
+- 任何断言失败 → FAIL（exit 1）；
+- 口令库里读不到本用户的记录（home 无从派生）→ NOT RUN（exit 2）：不拿 $HOME 猜目标
+  socket，也不以 0 离场冒充"环境不满足所以不算失败"。
 
 用法：
   python3 .c33_smoke.py [socket] [daemon-bin] [target] [--shutdown]
-    socket      默认 ~/.glasspane/engine.sock
+    socket      默认 <口令库 home>/.glasspane/engine.sock（见 record_home：不是 $HOME）
     daemon-bin  默认 ../engine 同仓库 .build/release/glasspaned（引擎推导）
     target      可选：bundleId（如 com.apple.Notes）或 pid；缺省自动发现
                 运行中的 glasspane-settings（点其"刷新"按钮，无副作用）
@@ -29,6 +31,7 @@
 """
 import json
 import os
+import pwd
 import signal
 import socket
 import subprocess
@@ -37,7 +40,35 @@ import tempfile
 import threading
 import time
 
-DEFAULT_SOCKET = os.path.expanduser("~/.glasspane/engine.sock")
+
+def record_home():
+    """本机用户的 home：**只**从口令库读（`pwd.getpwuid(os.getuid()).pw_dir`）。
+
+    与 daemon 侧 `StateRoot.homeDefault()` = `NSHomeDirectory() + "/.glasspane"` 同语义
+    （macOS 上 NSHomeDirectory **不采纳 $HOME**），因此 `DEFAULT_SOCKET` 必须这样派生：
+    用 `os.path.expanduser("~/.glasspane/engine.sock")` 时，脚本一旦跑在 HOME 被重定向的
+    环境里（gate.sh 对 engine 模块就是这么做的）连的就是一个不存在的 socket，而真 daemon
+    仍在真实 home 上应答——"连不上"会被读成"没在跑"。读不到口令库记录时直接拒答，**不回落
+    $HOME**：回落正是本项目把 `~/.glasspane/projects.json` 从 71 条写成 2 条的那个形状。
+    口径与 engine/.p6_smoke.py、engine/.t9_smoke.py 的同名 `record_home()` 一致（那两份逐字
+    一致）；本函数在 .c33_smoke.py 与 .rebuild_survival_smoke.py 之间逐字一致——冒烟脚本按本
+    仓惯例各自自包含、不做跨脚本 import，改一处必须同步其余几处。
+    """
+    try:
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError as error:
+        print(f"NOT RUN — 口令库里没有 uid={os.getuid()} 的记录（{error}）：本脚本的目标路径"
+              "只能对着真实 home 派生，$HOME 不算（daemon 的 NSHomeDirectory 不读它），"
+              "回落 $HOME 会让本脚本对着一个不存在的位置判定。", file=sys.stderr)
+        raise SystemExit(2)
+    if not home or not home.startswith(os.sep):
+        print(f"NOT RUN — uid={os.getuid()} 的记录里 pw_dir 不是绝对路径（{home!r}）。",
+              file=sys.stderr)
+        raise SystemExit(2)
+    return home
+
+
+DEFAULT_SOCKET = os.path.join(record_home(), ".glasspane", "engine.sock")
 DEFAULT_DAEMON = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), ".build", "release", "glasspaned"
 )

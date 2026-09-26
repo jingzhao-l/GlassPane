@@ -173,10 +173,13 @@ P1 v1.0 §2 实施记录项 3、P2 v2.1 §19.2、P4 v4.0 §33.1 观察 3 仍写
   彻底统一要改 `kernel/src/recipe-config.ts`（镜像面，canonical 在 iterate-skill 主仓），
   本批只在 `RecipeLoaderTests.testAstralNameFollowsTheSchemaAndStillDivergesFromZod` 里把分歧写成可执行期望。
   同类 `String.count` 上限还在 `ParamValidation.swift` 与 `EvidenceModels.swift`（后者 P3/P4 §740 已自认差值）。
-- **默认 socket 路径的两种"home"**：TS 用 `os.homedir()`（读 `$HOME`），Swift 用 `NSHomeDirectory()`
-  （不读）；shell 侧已在定义处与 `--help` 里如实标注为"本进程的猜测"并给出两条 agent 可自行执行的出路
-  （`launchctl print …` 读回、`--socket-path`/`GLASSPANE_ENGINE_SOCK`）。`installer/cli.js` 仍以
-  `process.env.HOME` 拼 `--socket-path`，属同一族的安装期风险，未动。
+- **默认 socket 路径的两种"home"**：不再是"待统一的分歧"，而是**已裁决的不对称**——见文末
+  「追加三」§3：`projects.json` 一侧改为与 daemon 同源（口令库），engine socket 一侧**刻意**继续
+  跟随本进程 `$HOME`，并由 `test/engine-client.test.mjs` 的 `the socket guess and the daemon's own
+  file are derived from different homes, deliberately` 钉住两侧。
+  **仍未收口**：`installer/cli.js:551/552/998/1001/1084` 仍以 `process.env.HOME` 拼 launchd 的
+  `--socket-path` 与日志/plist 路径 —— 安装器与守护进程解析出不同目录时，会把作业注册到它不监听的
+  socket 上。`installer/` 属只报不改的风险区，本轮只登记。
 - 路径校验的 Swift 半边：ownership/世界可写兜底**已于 ba07b66 落地**（`EngineCore.ownabilityDefect`，
   2026-09-25 round 6 又把它对"读不到的祖先目录"补成显式缺陷而非缺席，R6-05），两侧匹配语义也统一为子树
   （`path-consistency.test.mjs` 末尾那条 `the daemon matches protected storage as subtrees…` 现在钉的是语义，
@@ -213,3 +216,127 @@ P1 v1.0 §2 实施记录项 3、P2 v2.1 §19.2、P4 v4.0 §33.1 观察 3 仍写
 （缺席必须说得出、测到时的完整形状 `source=…, changed=false, keys=[count]` 要钉住）。
 `axEvent`/`handlerProbe`/`responsiveness` 三处仍是"未测即不提"的旧形状，**未一并改**：
 那是报告文本格式的变更面，需要连 `smoke.md` 与面板渲染一起复核，登记为 R5-08。
+
+---
+
+# 追加三（2026-09-26，round 8 / 8b）：MCP 壳层对外发布前的四条口径
+
+业主口径延续"把剩下的修掉，然后发版"。round 8 的 MCP 专项审查给出的是**阻断发布**的结论
+（"高1/高2/高3 三条都在真实负载下可走到，会把代理引向'杀掉正在执行的 act'或'重复点击'，
+而现有门禁一条都不会红"），8b 复审又在这批修复自己身上找到一条同形缺陷。以下六条因此**升为契约**，
+今后改代码必须同时改这里，否则代码与规格会各自说一套。
+
+## 1. 诊断工具不得比它诊断的对象先超时；无人应答不等于宕机
+
+- **原口径**（`slowEngineRemedy`）：「`gp_probe_status` 也超时就重启 daemon」。
+- **改为**：探针与握手的调用方期限 = `CALLER_VISIBLE_CEILING_MS`（`probe_status`、`hello` 两条），
+  且重启指令**只挂在 `GP_E_ENGINE_UNREACHABLE` 上**。四种探针结局各自的判据写在
+  `livenessProbeDecision()` 里，`timed-out` 明写"这不是 daemon 死了的证据"。
+- **为什么**：daemon 单连接串行处理，探针排在被诊断的那个请求**后面**。原口径在
+  "act 合法跑过 15 s"时必然产出"重启"指令，而 SIGTERM 会让 daemon 取消并回滚那次正在
+  用户屏幕上执行的 act —— 一条诊断指引反过来杀掉了被诊断的工作。`hello` 同理：懒连接下
+  触发连接的那一帧先写，握手因此排在首请求之后，15 s 时版本/协议比对永远丢失（R4-06 的
+  测量静默失效）。
+- **锚点**：`test/probe-liveness.test.mjs`（mock timers 量"15 s 仍在飞 / 30 s 得到答复 /
+  50 s 才结算"；表上算术不变量：任何被发送方法的调用方期限都不得超过探针；四结局表恰有一条
+  给出 `--restore-launchd`；`probe_status` 自己的超时不得再叫代理去探针）、
+  `test/method-table.test.mjs`（凡本壳会写上线的方法必须有具名期限，不许落在 `ENGINE_TIMEOUT_MS*3`
+  缺省上；`audit_ui`/`capture_view` 此前正是靠缺省值蒙过去）。
+- **仍不成立的部分（写明以免被当成已交付）**：`act` 的 daemon 最坏值是 120 s，探针最多只能等
+  50 s（客户端的耐性），所以"探针没答上"在某些真实负载下**必然**发生。这正是判据而不是期限
+  要承担的部分。
+
+## 2. "会话链"承诺按接入面分岔
+
+- **改为**：MCP stdio 侧可以承诺"迟到回复的 operationId 会进本会话链，`gp_recent_reports` 会列出它"；
+  HTTP 网关侧**不得**出现 `gp_recent_reports`（该工具带 `execute`，被 `FORWARDABLE_TOOLS` 排除，
+  `POST /v1/tools/recent_reports` 恒 404），只能指向自己 stderr 那一行 + `GET /v1/evidence/<id>`。
+- **为什么**：同一份 `slowEngineRemedy` 文本原先同时发给 curl 调用方，把它支去一个不存在的工具；
+  而网关两个 sink 都没接，"读日志"这句话当时是空的。
+- **锚点**：`test/remedy-surface.test.mjs`（两surface 文案各自断言）、
+  `test/http-gateway.test.mjs`（注册了 note/late sink 且真写进 report 汇点）。
+
+## 3. 主目录解析的不对称是裁决，不是漏网
+
+- **改为**：凡"必须是 daemon 那个文件/那份保护"的地方走口令库（`os.userInfo().homedir`，与
+  `NSHomeDirectory()` 同语义）；凡"本进程自己的猜测"（默认 socket 路径）继续走 `$HOME`。
+- **为什么**：`projects.json` 用 `$HOME` 会让两侧读写不同文件，"你写的这份 daemon 不加载"那条守卫
+  两头都错；而 socket 若改成口令库，一个把 `$HOME` 指进沙箱以求隔离的进程会**静默接上用户真 daemon**，
+  在它屏幕上点击。同一个 `$HOME` 依赖，一个是缺陷，另一个是安全边界 —— 所以必须写下是哪一侧。
+- **锚点**：`test/engine-client.test.mjs` 的两条（不对称本身 + 每侧只有一个出口，按
+  `executableSource` 剥注释后计数）、`test/path-consistency.test.mjs` 里 `systemHome()` 对
+  `StateRoot.swift`/`NSHomeDirectory()` 的双向闸、`mcp-shell/src/project-registry.ts` 的 `systemHome()`。
+- **Python 半边同批落地**：`engine/.p6_smoke.py`/`.t9_smoke.py` 的 `real_user_state_root()` 原先用
+  `os.path.expanduser("~")`（优先读 `$HOME`），而它正是**隔离守卫的判据** —— 脚本跑在 `$HOME` 被重定向的
+  环境里时会把沙箱目录当成"真根"，于是那条保护开发者真实 `projects.json` 的判据 fail-open。现走
+  `pwd.getpwuid(os.getuid()).pw_dir`，取不到记录即 NOT RUN，绝不回落 `$HOME`；`.c33_smoke.py`/
+  `.rebuild_survival_smoke.py` 的默认 socket 与 bundle 路径同源。
+
+## 4. 证据链只在被 attach 的**应用**变化时重新开始，迟到回复带纪元
+
+- **改为**：`gp_attach` 成功不再无条件 `reset()`；判据是 attach 结果里的应用身份是否与当前一致，
+  身份由 Swift `AttachedApp` 的**全部**存储属性（`pid`/`bundleId`/`appName`）构成 —— 与 daemon
+  `if attachedApp != app { history.removeAll() }` 同条件。每一次 `call()` 携带当时的链纪元，
+  迟到回复落地时纪元不符即**拒绝写入并说明拒绝**（并给出还能回查的那条路）。
+- **为什么**：原实现在"act 超时 → 迟到回复入链 → 幂等 re-attach"这条路径上又把操作抹掉，回到
+  `GP_E_NO_EVIDENCE … run gp_act first`（正是本条要消灭的重复点击诱因）；反向也会错 —— attach 在飞时
+  迟到的回复会按**到达时刻**写进新会话链，让代理把上一个 app 的操作当成本会话的。
+- **锚点**：`test/attach-identity.test.mjs`（字段表从 `RuntimeChannel.swift` 解析、幂等 re-attach 不清链、
+  换 app 才推进纪元）、`test/tools.test.mjs` 两条时序（串档被拒且点名被丢的操作；幂等 re-attach 之后
+  `gp_recent_reports` 仍列得出那次操作）。
+
+## 5. `gp_attach` 的 `bundleId`/`pid` 是**互斥**，且与对外 advertised 的 `oneOf` 同严
+
+- **改为**：zod 从"至少一个"改成"恰好一个"。两个都给 ⇒ `GP_E_BAD_PARAMS`，一帧都不发。
+- **为什么**：daemon 的解析是 `if let pid { … }` 优先、**静默忽略** `bundleId`
+  （`AXChannel.resolveRunningApplication`）。原先代理可以同时点名两个应用而 attach 到它没说的那个，
+  并在错误的进程上点击；而对外 advertised 的 JSON Schema 早已是 `oneOf`，两侧说法相反。
+- **锚点**：`test/tools.test.mjs`（both 用例 + "advertising 的 oneOf 就是恰好一个，zod 不得更宽"）。
+
+## 6. 错误码字面量与"壳层专有"声称都要可核
+
+- **改为**：`GP_E_UNKNOWN`（daemon 帧没带 code 时的回落）与 `GP_E_NO_USER_RECORD`（本进程在口令库里
+  没有条目）都进 `errors.ts`；`GP_E_PAYLOAD_TOO_LARGE` 的注释改口 —— 它**同时**是 daemon 码
+  （`GPErrorCode.payloadTooLarge`），不是壳层专有。`projectErrorRemedy` 为 `GP_E_NO_USER_RECORD`
+  单独给一条指引（原先它和"projects 文件坏了"共用一句，会把代理支去读一个健康的文件）。
+- **锚点**：`test/remedy-surface.test.mjs`（枚举集合双向比对；凡 daemon remedy 里点名
+  `--restore-launchd`/`launchctl kickstart` 的码，壳层判据不得说"engine-error 永不重启"——
+  `GP_E_AX_UNAVAILABLE` 的 daemon remedy 本身就命令重启；src 内 `GP_E_*` 字面量只允许出现在
+  `errors.ts`，注释与 Swift 字面量排除规则写在测试里）、`engine/Sources/GlassPaneEngine/ProtocolErrors.swift`
+  的 `CaseIterable` 全表扫。
+
+## 本记录的自我更正（必须留痕，不要靠改写历史抹掉）
+
+- 提交 `8493126` 的信息里写「共享块两处字节一致的守卫仍由 `shared_block_problems` 把着」。**该守卫在本
+  基线上不存在**，`git log -S shared_block_problems` 全库无命中：它只活在 2026-09-25 那次被丢弃的 stash 里，
+  当时判定其内容已由别处落地，这一判断对**共享块漂移闸本身不成立**。2026-09-26 回代码实测：
+  `.p6_smoke.py` 与 `.t9_smoke.py` 各自持有 6 个同名顶层常量，其中 5 个（`HERE`、`STATE_FACES`、
+  `ISOLATION_PROBE_PROJECT_ID`、`ISOLATION_PROBE_TIMEOUT`、`UNKNOWN_FLAG_CANARY`）逐字相同，
+  `DAEMON_CANDIDATES` **有意**不同（p6 多一条 `/tmp/glasspane-p6` 构建路径）。当时一致性只由该段
+  开头一句人读注释承担（「本段在 … 中逐字一致 …改一处必须同步另一处」），**没有任何机器闸**盯 ——
+  这正是"已有守卫"这一错误声称能混过去的原因。
+  **本轮已把它变成机器闸**（同日补做）：两份脚本各自在 `main()` 第一件事调用
+  `verify_shared_block(__file__)`，按**顶层定义逐名**与兄弟脚本比对（`ast` 切片，非整段文本），
+  漂移即 `NOT RUN(2)`；例外表 `SHARED_BLOCK_INTENTIONALLY_DIFFERENT` 只允许
+  `DAEMON_CANDIDATES` 与 `main` 两条，且每条都要求**仍然真的不同**才保留（抄平即红、点名一个
+  两侧并不都有的定义也红）。三个方向的实测：漂一个常量 → 红；把 `DAEMON_CANDIDATES` 两边写成
+  一样 → 红并点名它；例外表加一个不共享的名字 → 红。正常状态打印
+  `PASS 共享段已比对：27 个两侧同名定义，0 处漂移，2 条例外均经核对确实仍然不同`。
+  已知覆盖边界（写在这里以免被当成全量证明）：只比对**两侧同名**的定义，因此把共享判据改名或
+  搬进别处不在这条闸的视野内。
+  同批的构建新鲜度闸（`_package_targets`/`build_source_roots`，实测以 `sha256 + 构建时间` 出结论）
+  确在两文件内，不受这条更正影响。
+- round 8 的"共享块字节一致"这一说法源自我自己早先的转记，未经代码复核即写进提交信息；这是
+  「不要用提交信息当已修统计」的又一实例，逐条回代码复核后才能进下一环。
+
+## 仍未收口（不承诺，逐条点名）
+
+- ~~p6/t9 同名定义的漂移无人盯~~ —— **已收口**：`verify_shared_block`（见上一节的更正）。
+  仍待观察的是它的覆盖面：改名/搬走共享判据不会被它抓到。
+- **`installer/cli.js` 的 `$HOME` 半边**（§3 末）：风险区，只报不改。
+- **`engine/.input_monitoring_registration_smoke.py:41`** 仍以 `expanduser` 派生 bundle 路径（§3 同族，
+  round 8b 复核发现，未在本批处理）。
+- **探针在 `act` 最长 120 s 的负载下仍会超时**（§1 末）：判据已按"不是死"写，但只要客户端耐性
+  仍是 50 s，就不存在一个能让探针必然答得上的期限。
+- **`notifications/cancelled` 只能记一行**：本壳无法真的撤销 daemon 上已发出的请求，日志里明说
+  "撤销不是撤销回"。要做真撤销需要 daemon 侧的取消通道，而方法表是冻结面。

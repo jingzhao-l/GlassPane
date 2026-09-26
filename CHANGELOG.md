@@ -2,6 +2,82 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.3.0] — 2026-09-26
+
+MCP 专项审查（round 8）与对同批修复自身的复审（round 8b）落地。**这一版之前 MCP 面被判定为
+"不宜对外发布"**：三条高危都在真实负载下可走到，而当时的门禁一条都不会红。本版把三条连同
+4 项中危、若干低危与 12 条新闸一起收口；判据与残留项写在
+`specs/GlassPane_规格修订_2026-09-23_iterate-round4.md` 的「追加三」与 `.iterate_decisions.md`。
+
+### Fixed — 代理指引不得在忙的时候喊"重启"，也不得诱导重复点击
+
+- **`gp_probe_status` 的调用方期限 15 s → 50 s（客户端耐性上限），且重启指令只挂在
+  `GP_E_ENGINE_UNREACHABLE` 上**。守护进程单连接串行，探针排在被它诊断的那个请求**后面**：
+  一次合法跑过 15 s 的 `gp_act` 必然让探针超时，而旧文案明写"`gp_probe_status` 也超时就重启"，
+  于是代理会去 `--restore-launchd` 一个正在用户屏幕上执行动作的 daemon（SIGTERM 会取消并回滚
+  那次动作）。四种探针结局（answered / engine-error / timed-out / unreachable）现在各自陈述
+  自己被允许引出什么动作，只有 `unreachable` 给出重启命令。
+- **同一形状在握手处也补上**：`hello` 原为 15 s，而懒连接下"触发连接的那一帧"先写，
+  所以会话的第一个请求是 `act` 时版本/协议比对必然丢失（只剩一行 stderr）。`hello` 同样抬到
+  ceiling。
+- **`engine-error` 那句"该码自己的 remedy 永不重启"是未实测的全称断言**，已删除：守护进程给
+  `GP_E_AX_UNAVAILABLE` 的 remedy 本身就命令 `--restore-launchd` + `launchctl kickstart -k`。
+  现在由测试从 Swift 的 remedy 表里**量出**哪些码命令重启，并要求壳层判据不得禁止它。
+- **超时之后才落地的回复，其 `operationId` 现在会写进本会话证据链**。此前只进日志：
+  `gp_recent_reports` 对一次真正执行过的 `gp_act` 回答 `GP_E_NO_EVIDENCE … run gp_act first`，
+  等于叫代理再点一次。迟到回复带着它被准入时的**链纪元**，纪元不符（中途换过应用）即
+  **拒绝写入并说明**，同时给出还能把它取回来的那条路。
+- **证据链只在被 attach 的应用真的变化时重新开始**（与守护进程
+  `if attachedApp != app { history.removeAll() }` 同条件，身份键覆盖 Swift `AttachedApp` 的
+  全部字段）。旧实现每次成功 attach 都清空，于是幂等的同应用 re-attach 会抹掉刚记录的操作。
+- **HTTP 网关不再给出 MCP 面才成立的答案**：`curl` 调用方拿到的指引不再提
+  `gp_recent_reports`（该路由恒 404），改指本进程 stderr 与 `GET /v1/evidence/<operationId>`；
+  同时真的注册了 note / late-reply 两个汇点，"去读 stderr"这句话不再落空。
+
+### Fixed — 跨语言同源与输入边界
+
+- **`projects.json` 的路径与"不得指向用户主目录"的保护改按守护进程的规则解析主目录**
+  （`os.userInfo().homedir`，读口令库而非 `$HOME`）。此前导出一个 `HOME` 就能让两侧读写不同文件、
+  并绕过主目录保护。默认 socket 路径**刻意**继续跟随 `$HOME`（否则一个把自己关进沙箱的进程会
+  静默接上用户的真 daemon），这一不对称由两条测试钉住，理由写进源码与规格。
+- **`gp_attach` 的 `bundleId` 与 `pid` 改为互斥**。守护进程的解析是 pid 优先并**静默忽略**
+  `bundleId`，而壳层的 zod 只要求"至少一个"（对外 advertised 的 JSON Schema 早已是 `oneOf`）：
+  同时点名两个应用会 attach 到代理没有说的那个并在其界面上下钻。现在两者同给即
+  `GP_E_BAD_PARAMS`，一帧都不发。
+- **`notifications/cancelled` 不再被静默丢弃**：落一行日志，并明说"本壳无法撤销已经发往
+  daemon 的请求，撤销不是撤销回"。
+- **超帧回复的建议改为按该请求真实携带的参数生成**（`capture_view` 拿的是 `scale`，
+  旧文案让它去缩一个它没有的 `maxDepth`）。
+- **`GP_E_NO_USER_RECORD` / `GP_E_UNKNOWN` 收进错误码单一出口**；`GP_E_PAYLOAD_TOO_LARGE`
+  的"壳层专有"注释改口（守护进程枚举里本来就有它）；`McpServer` 的审计会话改为运行时必填，
+  缺它即拒绝构造（此前类型必填、运行时可选，未接线看起来完全正常）。
+- **引擎侧**："拍不到采集面"不再冒充"窗口没上屏"（新标签 `pixel-capture-no-surface` + 对应的
+  可执行下一步），面板证据页的通道分母从写死的 3 改为真实的 6。
+
+### Added — 门禁（每条都做过"撤销修复即红"的因果核对）
+
+- `mcp-shell/test/probe-liveness.test.mjs`：用 mock timers 量真实布防期限（15 s 时探针仍在飞、
+  30 s 得到答复、50 s 才结算）+ "任何被发送方法的调用方期限不得超过探针"的表上不变量 +
+  "四结局里恰有一处可给出重启命令"。
+- `mcp-shell/test/method-table.test.mjs`：从 `FrameCodec.swift` 解析 `EngineMethod`，凡本壳会
+  发上线的方法必须有**具名**期限（`audit_ui` / `capture_view` 此前一直在吃缺省 30 s）。
+- `mcp-shell/test/attach-identity.test.mjs`：身份键必须覆盖 Swift `AttachedApp` 的每个存储属性，
+  且守护进程"按应用变化清历史"这一条件若改写即红。
+- `mcp-shell/test/remedy-surface.test.mjs`：错误码"共享 / 壳层专有"的分类与 daemon 枚举双向比对、
+  `src/` 内 `GP_E_*` 字面量单一出口、两种接入面各自的 remedy 文本。
+- `mcp-shell/test/path-consistency.test.mjs`：真值表的系统树行由 Swift 两份清单**生成**（原为手抄
+  5 个名字，清单实际 8+3 项）；4 MiB 帧上限三判据对表；PNG 预算 × 4/3 ≤ 帧上限的不等式。
+- `engine/.p6_smoke.py` / `.t9_smoke.py`：`verify_shared_block()` 把"改一处必须同步另一处"这句
+  人读注释变成机器闸（漂移、例外被抄平、例外表过期三个方向都能红）。
+
+### 已知边界（不当成已交付）
+
+- `act` 的守护进程侧最坏值是 120 s，而探针最多只能等 50 s：某些真实负载下"探针没答上"必然发生，
+  承担这件事的是判据而不是某个期限。
+- `installer/cli.js` 仍以 `process.env.HOME` 拼 launchd 的 `--socket-path` 与日志路径（风险区，
+  本轮只登记）。
+- `notifications/cancelled` 只能记一行：真撤销需要 daemon 侧的取消通道，而方法表是冻结面。
+
 ## [1.2.0] — 2026-09-25
 
 ### Added — feature-gap 四维精简审查落地

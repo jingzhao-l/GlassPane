@@ -21,6 +21,7 @@ import {
 } from "../dist/engine-client.js";
 import { MAX_FRAME_BYTES, OversizeFrameError } from "../dist/io.js";
 import { FakeLineIo } from "./helpers.mjs";
+import { executableSource } from "./support/source.mjs";
 
 test("call resolves when a matching success frame arrives", async () => {
   const io = new FakeLineIo();
@@ -571,4 +572,210 @@ test("usage names the two routes an agent can run itself and does not promise HO
     "usage must not present the $HOME guess as the daemon's own default",
   );
   assert.match(text, /guess/, "the default has to be called what it is: a guess this process makes");
+});
+
+/* ------------------------------------------------------------------ *
+ * R8-高3: the late-reply sink. A reply that lands after its caller was
+ * answered names an operation that really ran; logging it is not enough,
+ * because the operationId has to reach the session trail that
+ * `gp_recent_reports` reads (see tools.test.mjs for the product path).
+ * ------------------------------------------------------------------ */
+
+test("a late reply hands its result body to the registered sink", async () => {
+  const io = new FakeLineIo();
+  const client = new EngineJsonRpcClient(io, 20);
+  const seen = [];
+  client.onLateReply((reply) => seen.push(reply));
+
+  const promise = client.call("act", {}).catch(() => undefined);
+  const frame = io.lastFrame();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  await promise;
+  assert.equal(seen.length, 0, "没有回复就不该有 sink 调用");
+
+  io.send(JSON.stringify({ id: frame.id, result: { operationId: "op_late_1", actConfirmed: true } }));
+  assert.equal(seen.length, 1, "迟到回复必须交给 sink");
+  assert.equal(seen[0].method, "act");
+  assert.equal(seen[0].result.operationId, "op_late_1");
+  // The correlation is what lets the caller tell "this belongs to the trail I am
+  // writing now" from "this belongs to a superseded attach" (R8b-高1); a call
+  // that passed none reads back as none.
+  assert.equal(seen[0].correlation, undefined);
+  client.close();
+});
+
+test("a late error frame and an evicted entry reach no sink", async () => {
+  const io = new FakeLineIo();
+  const client = new EngineJsonRpcClient(io, 20);
+  const seen = [];
+  client.onLateReply((reply) => seen.push(reply));
+
+  const errorPromise = client.call("act", {}).catch(() => undefined);
+  const errorFrame = io.lastFrame();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  await errorPromise;
+  io.send(JSON.stringify({
+    id: errorFrame.id,
+    error: { code: "GP_E_ACT_FAILED", message: "no such element", remedy: "re-observe" },
+  }));
+  assert.equal(seen.length, 0, "错误帧里没有 operationId，不该冒充一次记录");
+
+  // The retention window is what bounds this tracking; past it the entry is gone
+  // and the sink cannot be called — which is why the eviction is logged.
+  const dropped = [];
+  client.onEngineNote((note) => dropped.push(note));
+  const first = client.call("act", {}).catch(() => undefined);
+  const firstFrame = io.lastFrame();
+  for (let i = 0; i < 20; i++) {
+    await client.call("probe_status", {}).catch(() => undefined);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  await first;
+  io.send(JSON.stringify({ id: firstFrame.id, result: { operationId: "op_evicted" } }));
+  assert.equal(seen.length, 0, "被保留窗挤掉的条目不得再写链");
+  assert.ok(dropped.some((note) => note.includes("retention cap")),
+    "挤掉必须自己说出来");
+  client.close();
+});
+
+test("the correlation a call was given comes back with its late reply", async () => {
+  const io = new FakeLineIo();
+  const client = new EngineJsonRpcClient(io, 20);
+  const seen = [];
+  client.onLateReply((reply) => seen.push(reply));
+
+  const promise = client.call("act", {}, 7).catch(() => undefined);
+  const frame = io.lastFrame();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  await promise;
+  io.send(JSON.stringify({ id: frame.id, result: { operationId: "op_gen_7" } }));
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].correlation, 7,
+    "客户端把链纪元交给我们，迟到回复时必须原样还回来，否则接线方无从判断该不该写");
+  client.close();
+});
+
+test("a sink that throws is reported and keeps the transport alive", async () => {
+  const io = new FakeLineIo();
+  const client = new EngineJsonRpcClient(io, 20);
+  const notes = [];
+  client.onEngineNote((note) => notes.push(note));
+  client.onLateReply(() => {
+    throw new Error("sink exploded");
+  });
+
+  const promise = client.call("act", {}).catch(() => undefined);
+  const frame = io.lastFrame();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  await promise;
+  io.send(JSON.stringify({ id: frame.id, result: { operationId: "op_x" } }));
+  assert.ok(notes.some((note) => note.includes("late-reply sink failed") && note.includes("sink exploded")),
+    `sink 抛错必须被点名，而不是静默或炸掉连接：${JSON.stringify(notes)}`);
+
+  // The connection is still usable afterwards.
+  const next = client.call("diagnose");
+  io.respond({ class: "T1", report: {} });
+  assert.deepEqual(await next, { class: "T1", report: {} });
+  client.close();
+});
+
+/* ------------------------------------------------------------------ *
+ * R8-中9: this shell resolves "the user's home" two different ways, on purpose.
+ * A future reader who "makes these consistent" would either turn every
+ * `$HOME`-sandboxed process into a client of the user's live daemon (socket
+ * side), or make the shell write a projects file the daemon cannot load
+ * (registry side). Both are product defects, so the split is asserted rather
+ * than commented.
+ * ------------------------------------------------------------------ */
+
+test("the socket guess and the daemon's own file are derived from different homes, deliberately", async () => {
+  const { daemonProjectsPath } = await import("../dist/project-registry.js");
+  const sandbox = path.join(os.tmpdir(), `gp-home-split-${process.pid}`);
+  const savedHome = process.env.HOME;
+  const savedSocket = process.env[ENGINE_SOCKET_ENV];
+  delete process.env[ENGINE_SOCKET_ENV];
+  fs.mkdirSync(sandbox, { recursive: true });
+  try {
+    process.env.HOME = sandbox;
+    // The socket follows `$HOME`: a private HOME stays a private boundary, and
+    // connecting to the real daemon has to be an act of naming, not an accident.
+    assert.equal(defaultSocketPath(), path.join(sandbox, ".glasspane", "engine.sock"),
+      "socket 回落若改成 passwd 的 home，$HOME 沙箱里的进程就会静默接上用户的真 daemon");
+    // The registry follows the *daemon*: it must keep naming the file the service
+    // actually loads, whichever `$HOME` the caller exported.
+    const real = daemonProjectsPath();
+    assert.ok(!real.startsWith(`${sandbox}/`),
+      `projects 文件的路径若改成 $HOME，写出去的就是 daemon 永远不会加载的文件：${real}`);
+    assert.notEqual(real, path.join(sandbox, ".glasspane", "projects.json"));
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    if (savedSocket === undefined) delete process.env[ENGINE_SOCKET_ENV];
+    else process.env[ENGINE_SOCKET_ENV] = savedSocket;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("the two lookups are each spelled in exactly one source file", () => {
+  // One seam per rule, or the split stops being a decision and becomes an accident.
+  // The counts are taken over `executableSource`, i.e. code rather than prose:
+  // these very files *explain* the wrong lookup in their comments, and a gate
+  // that matched raw text would report the documentation as the defect.
+  const read = (name) => executableSource(
+    fs.readFileSync(fileURLToPath(new URL(`../src/${name}`, import.meta.url)), "utf8"),
+  );
+  const registry = read("project-registry.ts");
+  assert.equal((registry.match(/os\.homedir\(/g) ?? []).length, 0,
+    "project-registry.ts 里再出现 os.homedir() 就是第二处 home 解析");
+  assert.equal((registry.match(/os\.userInfo\(/g) ?? []).length, 1,
+    "daemon 侧 home 只有一个出口（systemHome），否则两处可以解析出不同目录");
+  const client = read("engine-client.ts");
+  const at = client.indexOf("export function defaultSocketPath");
+  assert.notEqual(at, -1);
+  const body = client.slice(at);
+  assert.equal((body.match(/os\.homedir\(/g) ?? []).length, 1,
+    "socket 猜测也必须只有一个出口");
+  assert.equal((body.match(/os\.userInfo\(/g) ?? []).length, 0,
+    "socket 回落不得改用 passwd 记录 —— 见 defaultSocketPath 的 R8-中9 注释");
+});
+
+/* ------------------------------------------------------------------ *
+ * R8b-低: the "reply was too big" advice has to be about the request that
+ * actually happened. One sentence about maxDepth used to be sent for every
+ * method, which for `capture_view` (an encoded PNG, no maxDepth) told the agent
+ * to retry something identical.
+ * ------------------------------------------------------------------ */
+
+async function oversizedRemedyFor(params) {
+  const io = new FakeLineIo();
+  const client = engineClientOver(io, 5_000);
+  const call = client.call(params?.scale === undefined ? "observe" : "capture_view", params);
+  const id = io.lastFrame().id;
+  io.emitError(new OversizeFrameError(MAX_FRAME_BYTES + 1, `{"id":${id},"result":{"blob":`));
+  let remedy = null;
+  await call.catch((error) => {
+    assert.equal(error.code, "GP_E_PAYLOAD_TOO_LARGE");
+    remedy = error.remedy;
+  });
+  assert.notEqual(remedy, null, "这一路必须真的被走到，否则下面的断言是空的");
+  return remedy;
+}
+
+test("a capture_view reply over the cap is narrowed by scale, the knob it actually has", async () => {
+  const remedy = await oversizedRemedyFor({ scale: 2, selector: { role: "AXButton" } });
+  assert.match(remedy, /smaller scale/, `没点出真正能调的那个参数：${remedy}`);
+  assert.ok(remedy.includes(String(MAX_FRAME_BYTES)), "帧预算要给出具体字节数");
+  assert.match(remedy, /does not take/, "必须说明 maxDepth 在这里不适用，而不是让代理去缩一个不存在的参数");
+});
+
+test("a tree reply over the cap is narrowed by maxDepth and a selector", async () => {
+  const remedy = await oversizedRemedyFor({ maxDepth: 10 });
+  assert.match(remedy, /smaller maxDepth/);
+  assert.ok(!/\bscale\b/.test(remedy), "observe 没有 scale，提到它就是凭空指路");
+});
+
+test("a request with no narrowing knob is told not to retry it unchanged", async () => {
+  const remedy = await oversizedRemedyFor({});
+  assert.match(remedy, /do not retry it unchanged/, "没有可缩的参数时必须明说，而不是给一条假的指路");
+  assert.ok(!remedy.includes("maxDepth"), `凭空建议了一个请求里没有的参数：${remedy}`);
 });
