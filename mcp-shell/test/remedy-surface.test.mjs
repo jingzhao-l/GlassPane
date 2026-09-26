@@ -121,6 +121,14 @@ test("the mcp remedy promises the trail, the http remedy promises its own stderr
   assert.ok(http.includes("/v1/evidence/"), `HTTP 侧要给出它真能走的那条路：${http.slice(0, 200)}`);
   // Both surfaces must still name the log they actually write to.
   assert.ok(mcp.includes("stderr") && http.includes("stderr"));
+  // …and neither may promise the late reply *unconditionally*: the tracking
+  // window is bounded, a re-attach supersedes it, and a stopped process records
+  // nothing. A promise without its boundary drifts back into "guaranteed".
+  for (const [surface, text] of [["mcp", mcp], ["http", http]]) {
+    assert.match(text, /while this server still tracks|tracking window is bounded/i,
+      `${surface} 侧把迟到回复写成了无条件承诺`);
+    assert.match(text, /\b16\b/, "有界窗口必须把界限说出来，而不是只说\"有限\"");
+  }
 });
 
 test("a GP_E_* literal appears in src/ only in errors.ts", () => {

@@ -330,8 +330,15 @@ export type ShellSurface = "mcp" | "http";
 /** Where the answer to a timed-out request can be found, per surface. */
 export function lateReplyRoute(surface: ShellSurface): string {
   return surface === "mcp"
-    ? "the original reply, when it lands, is written to this server's log (stderr) *and* its operationId is recorded in this session's trail, so a later gp_recent_reports lists the operation that ran instead of telling you to run it again"
-    : "the original reply, when it lands, is written to this gateway's stderr with its body, so the operationId it carries can be read off that line and fetched with GET /v1/evidence/<operationId>; this gateway keeps no operation trail of its own";
+    ? "the original reply, when it lands, is written to this server's log (stderr) *and* its operationId is recorded "
+      + "in this session's trail, so a later gp_recent_reports lists the operation that ran instead of telling you to "
+      + "run it again — **while this server still tracks the request**: the window is bounded ("
+      + LATE_REPLY_RETENTION + " timed-out requests, and an eviction is logged), a re-attach in between supersedes it "
+      + "(also logged, with the operationIds it dropped), and if this process has exited nothing will be recorded at all"
+    : "the original reply, when it lands, is written to this gateway's stderr with its body, so the operationId it "
+      + "carries can be read off that line and fetched with GET /v1/evidence/<operationId> — the tracking window is "
+      + "bounded (" + LATE_REPLY_RETENTION + " timed-out requests, and an eviction is logged), and this gateway keeps "
+      + "no operation trail of its own";
 }
 
 /**
