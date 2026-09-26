@@ -219,7 +219,11 @@ test("an oversized reply fails only the call it belonged to", async () => {
     assert.equal(err.code, "GP_E_PAYLOAD_TOO_LARGE");
     assert.match(err.message, /connection is intact/);
     assert.doesNotMatch(err.message, /carried no request id/, "the id was recovered, so no inference");
-    assert.match(err.remedy, /smaller maxDepth/);
+    // The transport states the fact and points at the schema; it no longer
+    // guesses which knobs this particular method has (R8d-高2 — that guess made
+    // `gp_observe` with a default maxDepth get told it had nothing to narrow).
+    // The concrete advice is composed by the tool layer and asserted there.
+    assert.match(err.remedy, /the tool's own schema names the parameters/);
     return true;
   });
   io.respond({ connected: false });
@@ -737,45 +741,4 @@ test("the two lookups are each spelled in exactly one source file", () => {
     "socket 猜测也必须只有一个出口");
   assert.equal((body.match(/os\.userInfo\(/g) ?? []).length, 0,
     "socket 回落不得改用 passwd 记录 —— 见 defaultSocketPath 的 R8-中9 注释");
-});
-
-/* ------------------------------------------------------------------ *
- * R8b-低: the "reply was too big" advice has to be about the request that
- * actually happened. One sentence about maxDepth used to be sent for every
- * method, which for `capture_view` (an encoded PNG, no maxDepth) told the agent
- * to retry something identical.
- * ------------------------------------------------------------------ */
-
-async function oversizedRemedyFor(params) {
-  const io = new FakeLineIo();
-  const client = engineClientOver(io, 5_000);
-  const call = client.call(params?.scale === undefined ? "observe" : "capture_view", params);
-  const id = io.lastFrame().id;
-  io.emitError(new OversizeFrameError(MAX_FRAME_BYTES + 1, `{"id":${id},"result":{"blob":`));
-  let remedy = null;
-  await call.catch((error) => {
-    assert.equal(error.code, "GP_E_PAYLOAD_TOO_LARGE");
-    remedy = error.remedy;
-  });
-  assert.notEqual(remedy, null, "这一路必须真的被走到，否则下面的断言是空的");
-  return remedy;
-}
-
-test("a capture_view reply over the cap is narrowed by scale, the knob it actually has", async () => {
-  const remedy = await oversizedRemedyFor({ scale: 2, selector: { role: "AXButton" } });
-  assert.match(remedy, /smaller scale/, `没点出真正能调的那个参数：${remedy}`);
-  assert.ok(remedy.includes(String(MAX_FRAME_BYTES)), "帧预算要给出具体字节数");
-  assert.match(remedy, /does not take/, "必须说明 maxDepth 在这里不适用，而不是让代理去缩一个不存在的参数");
-});
-
-test("a tree reply over the cap is narrowed by maxDepth and a selector", async () => {
-  const remedy = await oversizedRemedyFor({ maxDepth: 10 });
-  assert.match(remedy, /smaller maxDepth/);
-  assert.ok(!/\bscale\b/.test(remedy), "observe 没有 scale，提到它就是凭空指路");
-});
-
-test("a request with no narrowing knob is told not to retry it unchanged", async () => {
-  const remedy = await oversizedRemedyFor({});
-  assert.match(remedy, /do not retry it unchanged/, "没有可缩的参数时必须明说，而不是给一条假的指路");
-  assert.ok(!remedy.includes("maxDepth"), `凭空建议了一个请求里没有的参数：${remedy}`);
 });

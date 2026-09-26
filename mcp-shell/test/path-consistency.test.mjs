@@ -231,9 +231,12 @@ function manifestRefusalRows(manifest, phrase, realpathOf = (target) => fs.realp
       ...member,
       value: `${member.literal}/${MANIFEST_CHILD}`,
       because: phrase(member.literal),
-      // Empty covering set means the member is not on the list that would catch
-      // its own child — which is a contradiction worth reporting rather than
-      // papering over, so the row keeps its literal-only expectation and goes red.
+      // Unreachable by construction, and kept as a guard rather than advertised as
+      // a red direction: a member always covers its own child, so `matchedTrees`
+      // holds at least the member itself. If `covers()` ever stops being
+      // reflexive this fallback is what keeps the row asserting *something*; the
+      // red paths that do exist are the derived ones below (a tree that covers
+      // nothing is not accepted, and an unresolvable member keeps its literal).
       becauseAnyOf: (matchedTrees.length > 0 ? matchedTrees : [member.literal]).map(phrase),
     };
   });

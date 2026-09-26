@@ -1,6 +1,6 @@
 import { EngineJsonRpcClient } from "./engine-client.js";
-import { executeTool, TOOL_SPECS, ToolSpec } from "./tools.js";
-import { EvidenceAuditSession, operationIds } from "./audit-session.js";
+import { attachIdentityOf, executeTool, TOOL_SPECS, ToolSpec } from "./tools.js";
+import { EvidenceAuditSession, operationIds, UNKNOWN_GENERATION } from "./audit-session.js";
 
 /* ------------------------------------------------------------------ *
  * JSON-RPC 2.0 message shapes (spec §6.1).
@@ -278,14 +278,14 @@ export function createTrackedMcpServer(
   const session = new EvidenceAuditSession();
   engine.onLateReply(({ method, result, correlation }) => {
     if (correlation !== undefined && correlation !== session.generation) {
-      // Fast path only: the authoritative comparison happens inside
-      // `recordLateArrival`, after the write has taken its turn. This one exists
-      // so an obviously-superseded reply does not queue at all.
-      // The request was admitted under an earlier attach. Writing its
-      // operationId into the trail now would put an operation from the previous
-      // app into the new app's history, which is what the trail's whole
-      // request-order machinery exists to prevent (R8b-高1). Saying so is the
-      // point: the alternative is a late id that silently never appears.
+      // The request was admitted under an earlier attach: writing its
+      // operationId now would put an operation from the previous app into the
+      // new app's history, which is what the trail's whole request-order
+      // machinery exists to prevent (R8b-高1). This test at arrival is a fast
+      // path only — the authoritative one is inside `recordLateArrival`, after
+      // the write has taken its turn — and it exists so an obviously superseded
+      // reply does not queue at all. Saying so is the point either way: the
+      // alternative is a late id that silently never appears.
       const ids = operationIds(result);
       report(
         `late reply to '${method}' belongs to a superseded attach (trail generation ${correlation}, current `
@@ -297,20 +297,36 @@ export function createTrackedMcpServer(
       );
       return;
     }
-    void session.recordLateArrival(result, correlation).then(
+    void session.recordLateArrival((trail) => {
+      if (method === "attach") {
+        // A late attach reply is still the event that changes which app the
+        // trail belongs to. Restarting only on the in-time path (what 8b shipped)
+        // left the generation untouched, so every epoch gate added to catch the
+        // cross-app leak was dead for the busiest — and most leak-prone — case.
+        const restarted = trail.restart(attachIdentityOf(result));
+        report(
+          restarted
+            ? `late attach reply: the trail restarted for ${describeAttach(result)} (generation ${trail.generation})`
+            : `late attach reply for the already-attached ${describeAttach(result)}: trail unchanged`,
+        );
+        return;
+      }
+      trail.record(result);
+    }, correlation ?? UNKNOWN_GENERATION).then(
       (outcome) => {
         if (outcome.written) {
           return;
         }
         const ids = operationIds(result);
         report(
-          `late reply to '${method}' was admitted under trail generation ${correlation ?? "?"} and the `
-          + `chain restarted at ${outcome.generationAtWrite} while it waited: not recorded, and `
-          + `gp_recent_reports will not list it`
+          `late reply to '${method}' was admitted under trail generation ${correlation ?? "unknown"}, which the `
+          + `chain restarted away from (now ${outcome.generationAtWrite}): not recorded, and gp_recent_reports `
+          + "will not list it"
           + (ids.length > 0
             ? `; the operations it named are ${ids.join(", ")} — fetch one with gp_last_evidence while the `
               + "daemon still holds it"
-            : "; the frame named no operationId, so there is nothing to fetch back"),
+            : "; no operationId appeared within the depth this shell reads (3), so there is nothing it "
+              + "can name for you to fetch back"),
         );
       },
       (error: unknown) => {
@@ -322,4 +338,16 @@ export function createTrackedMcpServer(
     );
   });
   return { server: new McpServer({ engine, session, report }), session };
+}
+
+/** The attach result's app, phrased for a log line; never a guessed identity. */
+function describeAttach(result: unknown): string {
+  if (typeof result !== "object" || result === null) {
+    return "an attach reply that is not an object";
+  }
+  const record = result as Record<string, unknown>;
+  const parts = ["pid", "bundleId", "appName"]
+    .filter((field) => record[field] !== undefined && record[field] !== null)
+    .map((field) => `${field}=${String(record[field])}`);
+  return parts.length > 0 ? parts.join(" ") : "an attach reply naming no app";
 }
