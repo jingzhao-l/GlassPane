@@ -74,19 +74,47 @@ test("an unanswered probe still settles at the ceiling rather than hanging", asy
   assert.equal(outcome, "GP_E_ENGINE_TIMEOUT", "探针必须仍然会结算，否则它自己成了挂死");
 });
 
+/**
+ * Every method whose *daemon-side* worst case outruns the probe's window. Each
+ * one is survivable only because its caller is answered at the ceiling anyway,
+ * which is the case `livenessProbeDecision("timed-out")` exists to disarm, and
+ * because the deadline table says `act`'s 120 s is deliberate. The list is the
+ * point: a method that joins it has to be added here on purpose, and a probe
+ * window that shrinks puts every existing member in front of the same assertion.
+ */
+const DAEMON_SIDE_OUTLIVES_PROBE = ["act", "assert_element", "last_evidence", "snapshot"];
+
 test("no engine method can outlive the probe meant to diagnose it", () => {
   const methods = [...new Set([
     ...Object.keys(ENGINE_DEADLINES_MS),
     ...TOOL_SPECS.map((spec) => spec.engineMethod),
   ])];
-  const probeWindow = callerDeadlineMs("probe_status");
-  const offenders = methods.filter((method) => callerDeadlineMs(method) > probeWindow);
-  assert.deepEqual(offenders, [], "这些方法的调用方等待比探针还长，探针就必然先超时");
+  // `callerDeadlineMs` cannot carry this gate, and the version of this test that
+  // used it was decoration: both sides of that comparison pass through the same
+  // ceiling, so `callerDeadlineMs(m) > callerDeadlineMs("probe_status")` is false
+  // for every m whatever the table says. Compare the daemon-side numbers, where
+  // the two quantities can really differ, and require the set to stay exactly the
+  // one reasoned about above. Reverse mutations that this reddens on:
+  // `probe_status` given a shorter window (the 15 s that made the probe a trap),
+  // or any other method raised above it without being named in the list.
+  const probeWindow = engineDeadlineMs("probe_status");
+  const outrunning = methods.filter((method) => engineDeadlineMs(method) > probeWindow).sort();
+  assert.deepEqual(outrunning, [...DAEMON_SIDE_OUTLIVES_PROBE].sort(),
+    `这些方法在 daemon 侧比探针更久，而清单只列了 ${DAEMON_SIDE_OUTLIVES_PROBE.join(", ")}`);
+
+  // The probe has to be given the whole client-safe window *on its own terms*,
+  // not by being one of several numbers the ceiling happens to flatten: with the
+  // ceiling removed from the arithmetic this is the shape the fix has.
+  assert.equal(probeWindow, CALLER_VISIBLE_CEILING_MS,
+    "探针自己的期限短于客户端耐性，就必然先于它在诊断的请求超时");
+  assert.equal(callerDeadlineMs("probe_status"), CALLER_VISIBLE_CEILING_MS);
 
   // The comparison has to be load-bearing: `act` really does run past the probe's
   // old 15 s on the daemon side, which is what made the old window a trap.
   assert.ok(methods.length > 5, "方法清单空了，这条闸就只是装饰");
   assert.ok(engineDeadlineMs("act") > 15_000, "act 的 daemon 侧最坏值必须仍在 15 s 之上");
+  assert.ok(DAEMON_SIDE_OUTLIVES_PROBE.includes("act"),
+    "act 是这条闸存在的理由；它不在清单里说明清单是被改出来的，不是推出来的");
 });
 
 test("only an unreachable daemon authorises a restart, and the remedy ships that table", () => {

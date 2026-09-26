@@ -150,6 +150,50 @@ MCP 专项审查（round 8）与对同批修复自身的三轮复审（round 8b 
 
 ## [未发布]
 
+### Fixed — Round 9：审的是**已经发出去的 1.3.0**，五维并行复审后成立的 20 条（8 高）
+
+判据与因果核对见 `specs/GlassPane_规格修订_2026-09-23_iterate-round4.md`「追加五」与
+`.iterate_decisions.md` 的 Round 9。下面每一条都有反向变异：把修复撤销 → 对应测试必须红（13 条变异，
+第 8 条当时零红，于是为它补了一道闸，补完再跑即红）。
+
+- **无 id 的帧按 daemon 的到达顺序归因，而不是按"还有谁在等"**。旧实现把注释里的"oldest unanswered"
+  写成了"oldest unsettled"：`act` 超时后代理照 remedy 发探针，daemon 给那条 act 的无 id 错误会被当成
+  探针的答案交给探针调用方（连 remedy 一起），探针自己随后被报成"客户端从没发过"；另一支则把它说成
+  "没有请求在飞"，那次真实执行过的操作因此**没进证据链**——正是 R8-高3 要消灭的"再点一次"。
+- **不可重放的方法集合改成传输层唯一导出**（`isReplayUnsafeMethod`），`tools.ts` 与 `http-gateway.ts`
+  只保留各自文案。此前同一策略抄了三份，而 `gp_act` 的回复超帧时两套建议都在说"换个更具体的 selector
+  重试"——那是在命令第二次点击。现在不可重放的工具拿到的是"不要重发，去读 `gp_recent_reports` /
+  `gp_last_evidence` / `gp_observe`"。
+- **两条新的"重启"漏句被掐掉**：帧已到达但形状不对（`GP_E_INTERNAL`）不再附带
+  `--restore-launchd`，改为给读得出来的检查（同连接发 `gp_probe_status`；`launchctl print` 回读运行
+  中 job 的参数）；daemon 侧 `pixel-capture-no-surface`（窗口在屏、被别的东西盖住）有了自己的出路，
+  不再落进 `default:` 那句"授予屏幕录制并重启服务"，并由新闸双向对表：分类器能吐出的标签集合 = advice
+  分支集合，且除 `screen-recording-denied` 外任何分支都不得出现授予/重启命令词。
+- **"已经到界"从此覆盖每个 advertise 了边界的旋钮**，不再只认 `scale`：`gp_observe {maxDepth: 1}` 与
+  `gp_recent_reports {limit: 1}` 不再被命令去缩一个自家 zod 会拒的值。
+- **HTTP 网关三条发布红线落到代码**：只允许回环地址（非回环在开连接与 bind 之前拒绝并点名被拒的值）；
+  bearer token 有长度与熵双门槛（门槛数字写进拒绝理由与 usage，并附一条做得到的生成命令）；bind 失败
+  用自己的退出码退出并说清"这个进程没有在服务"。此前"永不监听通配地址"只是注释，`TOKEN=a` 就能守住
+  改用户屏幕的面，端口被抢时进程看起来还在服务。
+- **`gp_recent_reports` 有了自己的总预算**（等于客户端耐性上限，复用导出的常量而非新数字），超预算时
+  点名没取到的 operationId 并返回超时而不是"没有证据"；此前 20 个 id 各自 50 s，最坏能把调用方挂住
+  ~1000 s——挂住的正是那条专门用来阻止重复点击的工具。
+- **注册表通知不再宣称 daemon 没有状态根覆盖**：`glasspaned --state-dir <root>` 会改变它加载的
+  `projects.json`，而 socket 不回这个字段。通知现在明说"本壳看不见、也不从 `$HOME` 猜"，并给出可自查
+  的判别（`gp_project_list` 看盘上有什么、`gp_attach {projectId}` 是否 `GP_E_NOT_FOUND`、
+  `launchctl print` 读运行中 job 的参数）。新增一条闸同时钉住事实的另一侧：`"stateRoot"` 这个键在
+  Swift 里只允许出现在 CLI 的 payload 文件中。
+- **`GP_E_PROJECT_LIMIT` 不再命令一个不存在的删除**；`tools/list` 描述里不再出现规格编号，
+  证据校验失败也不再让用户"去修 assertion C35"（改为说明两侧 schema 不一致与怎么读出来）。
+- **三处永不泛红的对照重写**：探针期限那条两侧同过 `min(·, ceiling)` 因而恒假（改为比较 daemon 侧期限
+  并要求"比探针更久的方法"清单逐名）；`history.removeAll()` 不再只看第一处、字段表接受 `let|var` 并
+  从结构体 `init` 反推应有字段数；`methodsSentByShell` 现在分别暴露两条产生路径并要求各自非空。
+- **新增一类判定：会挂死的对照不是对照**。删掉 token 门槛后那组用例不红而是占住事件循环——所有
+  "期待拒绝"的用例改为 try/finally 关掉自己创建出来的 server，反向变异由此从"卡 9 分钟"变成"3 条红"。
+- **门禁自身的守卫也修了**：中央 `gate.sh` 对真实 `projects.json` 的基线改为**每次运行自抓**，变动
+  计入失败并另存前后两份，退出码与 `failed=` 一致（旧行为是拿 09-23 的哈希天天报 `CHANGED` 却仍然
+  `failed=0`，把最贵的一件事降成了噪音）。
+
 ### Fixed — 像素通路修好之后暴露的六条"像测量其实没测"
 
 上一条修复让捕获第一次真的跑到，于是那条路上从没走到的分支全部现形。这一批逐条来自

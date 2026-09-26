@@ -13,11 +13,17 @@ import {
 
 import { canonicalJson } from "./canonical.js";
 import { MAX_FRAME_BYTES } from "./io.js";
-import { daemonUnreachableRemedy, EngineCallError, EngineJsonRpcClient } from "./engine-client.js";
+import {
+  CALLER_VISIBLE_CEILING_MS,
+  EngineCallError,
+  EngineJsonRpcClient,
+  isReplayUnsafeMethod,
+} from "./engine-client.js";
 import {
   formatToolError,
   formatToolErrorShape,
   GP_E_BAD_PARAMS,
+  GP_E_ENGINE_TIMEOUT,
   GP_E_INTERNAL,
   GP_E_NO_EVIDENCE,
   GP_E_NOT_FOUND,
@@ -37,6 +43,7 @@ import {
   projectGet,
   ProjectRegistryError,
   FORCE_OVERWRITE_ENV,
+  MAX_PROJECTS,
 } from "./project-registry.js";
 
 /* ------------------------------------------------------------------ *
@@ -498,7 +505,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: "gp_project_list",
-    description: "List all registered GlassPane projects (P1 spec v1.4).",
+    description:
+      "List every project stored in the project registry file: projectId, displayName, createdAt, the "
+      + "bundleId or pid that identifies its app, and any configured recipe, calibration or evidence paths. "
+      + "It reads the file, so it reports what has been written rather than what the running background "
+      + "service has loaded.",
     engineMethod: "project_list",
     inputSchema: {
       type: "object",
@@ -724,6 +735,35 @@ function narrowingKnobsFor(spec: ToolSpec, params: Record<string, unknown>): Nar
   return knobs;
 }
 
+/**
+ * Is this knob already at the floor the tool's own schema advertises?
+ *
+ * The floor is not a matter of phrasing: zod answers `maxDepth: 0` with
+ * `min(1)` and GP_E_BAD_PARAMS, so "retry with a smaller maxDepth" on a request
+ * that already carried `1` is an instruction this shell rejects on receipt. R8d-
+ * 高2 noticed that for `scale` alone; `depth` and `limit` carry a `minimum` in
+ * the schema exactly the same way, so they come through here too.
+ */
+function atAdvertisedFloor(knob: NarrowingKnob): boolean {
+  return knob.minimum !== undefined
+    && knob.sent !== undefined
+    && knob.sent <= knob.minimum;
+}
+
+/** What this knob controls, for the sentence that says it cannot go lower. */
+function knobSubject(kind: NarrowingKnob["kind"]): string {
+  switch (kind) {
+    case "depth":
+      return "the tree it reads";
+    case "limit":
+      return "the number of entries it collects";
+    case "scale":
+      return "the image";
+    case "selector":
+      return "the reply";
+  }
+}
+
 function describeKnob(knob: NarrowingKnob): string {
   const bounds = knob.minimum !== undefined && knob.maximum !== undefined
     ? ` (this tool advertises ${knob.minimum}…${knob.maximum})`
@@ -732,6 +772,12 @@ function describeKnob(knob: NarrowingKnob): string {
       : knob.minimum !== undefined
         ? ` (this tool advertises at least ${knob.minimum})`
         : "";
+  if (atAdvertisedFloor(knob)) {
+    // At the floor there is nothing left to lower, and telling an agent to lower
+    // it is a command this shell would then reject: say which part of the reply
+    // is therefore already minimal, in this tool's own parameter name.
+    return `${knob.name} is already at this tool's floor (${knob.minimum}), so ${knobSubject(knob.kind)} cannot be made smaller that way here`;
+  }
   switch (knob.kind) {
     case "depth":
       return `a smaller maxDepth${bounds}`;
@@ -745,12 +791,7 @@ function describeKnob(knob: NarrowingKnob): string {
         ? "a more specific selector (aim at one element)"
         : `a tighter ${knob.name} filter`;
     case "scale":
-      // At the advertised floor there is nothing left to lower, and telling an
-      // agent to lower it is a command this shell would then reject: zod's
-      // `min(0.1)` answers GP_E_BAD_PARAMS. Say what is left instead.
-      return knob.sent !== undefined && knob.minimum !== undefined && knob.sent <= knob.minimum
-        ? `scale is already at this tool's floor (${knob.minimum}), so the image cannot be shrunk further here`
-        : `a smaller scale${bounds}${knob.sent !== undefined ? `, currently ${knob.sent}` : ""}`;
+      return `a smaller scale${bounds}${knob.sent !== undefined ? `, currently ${knob.sent}` : ""}`;
   }
 }
 
@@ -767,29 +808,86 @@ function describeKnob(knob: NarrowingKnob): string {
  * shrink" is the schema it was shown, so that is what this reads; the sent value
  * is used only to notice a knob that is already at its floor.
  *
- * `test/remedy-surface.test.mjs` checks the two properties that make this worth
+ * `test/tools.test.mjs` checks the three properties that make this worth
  * having: every parameter it names exists in that tool's own advertised schema,
- * and no knob at its floor is ever described as shrinkable.
+ * no knob at its floor is ever described as shrinkable, and the floor rule is
+ * applied to every kind that advertises a `minimum` rather than to `scale` only.
  */
 export function oversizedReplyAdvice(spec: ToolSpec, params: Record<string, unknown>): string {
   const knobs = narrowingKnobsFor(spec, params);
-  const shrinkable = knobs.filter((knob) => !(
-    knob.kind === "scale"
-    && knob.sent !== undefined && knob.minimum !== undefined && knob.sent <= knob.minimum
-  ));
+  const atFloor = knobs.filter(atAdvertisedFloor);
+  const shrinkable = knobs.filter((knob) => !atAdvertisedFloor(knob));
   const head = `the reply was too large for one frame (${MAX_FRAME_BYTES}-byte limit); `;
+  // A knob the request already holds at its floor is stated even when another
+  // knob is still open: without it, `gp_observe {maxDepth: 1}` reads "retry with
+  // a tighter role filter" and the agent has no way to know the depth it set is
+  // already the smallest the tool publishes — the number it would otherwise go
+  // back and lower, into a GP_E_BAD_PARAMS.
+  const floorNote = atFloor.length === 0
+    ? ""
+    : `${atFloor.map(describeKnob).join("; ")}; `;
   if (shrinkable.length === 0) {
     return knobs.length > 0
-      ? head + `${knobs.map(describeKnob).join("; ")} — nothing left to narrow on this request: ask a `
+      ? head + `${atFloor.map(describeKnob).join("; ")} — nothing left to narrow on this request: ask a `
         + "smaller question (one element, one region) rather than retrying it unchanged; the connection is "
         + "intact and the daemon keeps answering other requests"
       : head + "this tool advertises no parameter that shrinks a reply, so do not retry it unchanged — ask a "
         + "smaller question (one element, one region) instead; the connection is intact and the daemon keeps "
         + "answering other requests";
   }
-  return head + `retry with ${shrinkable.map(describeKnob).join(" and ")}; `
+  return head + floorNote + `retry with ${shrinkable.map(describeKnob).join(" and ")}; `
     + "the reply body has to fit one frame, and a retried identical request will be dropped identically; "
     + "the connection is intact and the daemon keeps answering other requests";
+}
+
+/**
+ * The harm each non-replayable request does, keyed by the engine method that
+ * carries it — the *sentence* only. Whether a method is non-replayable at all is
+ * the transport's decision (`isReplayUnsafeMethod`, exported from
+ * `engine-client.ts`), because that is where the same question is already asked
+ * when a caller's wait is capped: a GP_E_PAYLOAD_TOO_LARGE reply proves the request
+ * reached the daemon and was answered — only the answer was dropped for size — so
+ * telling the caller to send one of these again is an instruction to perform the
+ * change a second time, which is the exact harm B-02's ceiling exists to remove.
+ * A method missing from this map still gets the no-retry advice with the generic
+ * harm clause, never the "retry narrower" advice: the fallback errs toward not
+ * acting. `test/tools.test.mjs` compares the transport's verdict against the advice
+ * for every tool in both directions.
+ */
+const REPLAY_UNSAFE_PAYLOAD_HARMS: Readonly<Record<string, string>> = {
+  act: "it changes the user's screen",
+  restore: "it replays recorded steps onto the user's screen, one after another",
+  attach: "it re-points the daemon at another app, and a changed attach discards the evidence history a request that has not answered yet is being recorded in",
+};
+
+/**
+ * The advice for a replay-unsafe tool whose reply did not fit the frame.
+ *
+ * `oversizedReplyAdvice` answers "how do I make the next reply smaller", which is
+ * the right question for a read and the wrong one here. This surface does have
+ * routes for finding out what happened without acting again: the trail
+ * (`gp_recent_reports`, `gp_last_evidence`) records the operations this session
+ * admitted, and `gp_observe` / `gp_assert_element` / `gp_probe_status` read the
+ * daemon's state on the same connection.
+ */
+export function replayUnsafePayloadAdvice(
+  spec: ToolSpec,
+  method: string,
+  params: Record<string, unknown>,
+): string {
+  const shrinkable = narrowingKnobsFor(spec, params).filter((knob) => !atAdvertisedFloor(knob));
+  const head = `the reply was too large for one frame (${MAX_FRAME_BYTES}-byte limit); `;
+  const harm = REPLAY_UNSAFE_PAYLOAD_HARMS[method] ?? "it changes daemon state";
+  const narrower = shrinkable.length > 0
+    ? `with ${shrinkable.map(describeKnob).join(" and ")}`
+    : "only after narrowing it (this tool advertises no parameter that shrinks a reply, so ask a smaller question: one element, one region)";
+  return head
+    + `do not re-issue this request. '${spec.name}' already reached the daemon and was answered — only the answer was dropped for exceeding one frame — and ${harm}, `
+    + `so sending it again performs the change a second time rather than recovering the first. Read what happened instead: gp_recent_reports lists the operations this session `
+    + `recorded and gp_last_evidence {operationId} returns one of them in full, and gp_observe / gp_assert_element read the app the daemon is attached to now without `
+    + `performing anything (gp_probe_status answers on the same connection and names the apps with a live probe with their pids). `
+    + `The connection is intact and the daemon keeps answering other requests; if that reading shows this request never took effect, it can be sent again ${narrower}, `
+    + `and a retried identical request will be dropped identically.`;
 }
 
 /** Read the trail once this call's turn comes up, i.e. in request order. */
@@ -843,8 +941,10 @@ export async function executeTool(
   // all catch their own engine errors, so a per-site rewrite would keep working
   // for the tools somebody remembered and quietly not for the rest (that is how
   // R8d-高2 left it). `Object.create` shares the client's own state — the real
-  // prototype, no cast, no `any` — with one method shadowed.
-  const advised = engineWithPayloadAdvice(engine, spec);
+  // prototype, no cast, no `any` — with one method shadowed. The validated
+  // arguments travel with it because an orchestrated tool's inner frame does not
+  // carry the knob the caller actually set (see {@link engineWithPayloadAdvice}).
+  const advised = engineWithPayloadAdvice(engine, spec, checked.value);
   if (!trailScopedTool(spec)) {
     return runValidatedTool(spec, checked.value, advised, session, INERT_TRAIL_TURN);
   }
@@ -1080,13 +1180,30 @@ async function captureView(
   }
 }
 
+/**
+ * A reply arrived on this socket and did not decode. Two different facts, and
+ * the old text collapsed both into "restart the service":
+ *
+ *  - `EvidenceFrameShapeError` — the frame carried no pack at all;
+ *  - `KernelSchemaError` — a pack arrived and the shared evidence schema rejects it.
+ *
+ * Neither is a dead daemon: something answered. Ordering `--restore-launchd` here
+ * was the defect, because the daemon the agent is standing over may hold an act
+ * that has already changed the user's screen, and the restart takes it down mid
+ * flight. What each remedy does instead is state the fact and hand over a check
+ * that reads something: `gp_probe_status` answers a *different* reply shape on the
+ * same socket, so it separates "a foreign service is on this path" from "the two
+ * sides disagree about evidence", and `launchctl print` reads back the running
+ * job's own arguments — which socket, which `--state-dir` — without touching
+ * either.
+ */
 function mapEvidenceReadError(error: unknown): ToolResult | undefined {
   if (error instanceof EvidenceFrameShapeError) {
     return {
       content: [{ type: "text", text: formatToolError(
         GP_E_INTERNAL,
         error.message,
-        `retry gp_last_evidence for the same operationId; if the answer still carries no evidencePack object then whatever is listening on this socket does not speak the engine contract — ${daemonUnreachableRemedy()}`,
+        "retry gp_last_evidence for the same operationId once. If it still answers with no evidencePack object, the socket is speaking something other than the engine contract — send gp_probe_status on this same connection: it is a different reply shape, and an answer there means the service is alive and this is a disagreement about the evidence format between two builds, not a dead daemon. Do not restart anything on this answer: a restart takes down the service that just answered you and anything it has in flight on the user's screen, so `--restore-launchd` and `launchctl kickstart` are both the wrong move here. What identifies the service instead is reading it: `launchctl print gui/$(id -u)/com.glasspane.daemon` gives the socket path and state root the running job was started with, and comparing that with the GLASSPANE_ENGINE_SOCK or --socket-path this shell was given says whether the two are pointed at the same daemon. Retrying this call unchanged gets the same frame back",
       ) }],
       isError: true,
     };
@@ -1095,8 +1212,8 @@ function mapEvidenceReadError(error: unknown): ToolResult | undefined {
     return {
       content: [{ type: "text", text: formatToolError(
         GP_E_INTERNAL,
-        `engine returned an invalid evidence pack: ${error.message}`,
-        "engine and kernel schema drifted; fix the common fixtures (assertion C35)",
+        `engine returned an evidence pack this shell's read rules reject: ${error.message}`,
+        "a pack did arrive and its contents do not satisfy the evidence format this shell was built against, so the two sides came from different releases rather than one of them being down. Read the versions instead of restarting: `launchctl print gui/$(id -u)/com.glasspane.daemon` gives the program path the running service was started from, and this shell reports its own build on startup. Any other operation's pack can still be fetched by id with gp_last_evidence {operationId}, so the read is not lost — this pack is. Do not hand-edit an archive or a fixture to make this pack validate: the disagreement is the finding, and the report is the place it should surface",
       ) }],
       isError: true,
     };
@@ -1192,7 +1309,17 @@ function mapProjectError(error: unknown): ToolResult {
  */
 function projectErrorRemedy(code: string): string {
   if (code === GP_E_PROJECT_LIMIT) {
-    return "delete unused projects first (`glasspaned --list-projects` prints the registered set), then retry";
+    // What is actually possible. The old sentence was "delete unused projects
+    // first (`glasspaned --list-projects` prints the registered set), then
+    // retry", which ordered an action nothing here performs: this surface adds
+    // and patches entries (`gp_project_set`) and reads them (`gp_project_list`,
+    // `gp_project_get`), and the daemon CLI's project-shaped flags
+    // (`--list-projects`, `--active-project`, and the evidence-only
+    // `--prune-evidence`/`--project`) print or prune archives — none removes a
+    // registration. `test/tools.test.mjs` pins both halves: the remedy names no
+    // delete on this surface, and every `glasspaned --flag` it quotes is one the
+    // daemon's own argument parser accepts.
+    return `the limit (${MAX_PROJECTS}) counts the entries stored in the projects file named above, so a new registration cannot be made to fit by changing an existing one: gp_project_set with an existing projectId patches that entry and leaves the count where it is. See what is stored with gp_project_list, then free a slot by removing an entry from that file itself (read it first with \`python3 -m json.tool <that path>\`; this surface offers no delete, so this is a repair of the file the message names, the same route a damaged registry takes) and retry. To read the same set without this shell: glasspaned --list-projects prints the file the service loads by default`;
   }
   if (code === GP_E_NOT_FOUND) {
     return "check the projectId; use gp_project_list to view available projects";
@@ -1242,6 +1369,66 @@ async function exportEvidence(
   }
 }
 
+/**
+ * The whole `gp_recent_reports` call gets **one** caller-visible ceiling, not
+ * one per trail entry.
+ *
+ * `limit` reaches 20 and each id is its own `last_evidence` round trip, for which
+ * the transport will wait up to `CALLER_VISIBLE_CEILING_MS`. Sequentially that is
+ * 20 × 50 s of held client — some 1000 s — on the one tool whose purpose is to
+ * tell an agent whether the `gp_act` it is standing behind already happened. The
+ * client gives up long before that, holds no code and no remedy, and does the one
+ * thing B-02's ceiling exists to prevent: it clicks again. So the bound is not a
+ * new number but the ceiling the shell already promises for *any* request, spent
+ * across the fan-out instead of per round trip. Nothing is lost by answering
+ * early: the packs already fetched are rendered, and every id that was not
+ * fetched is named in the report rather than left out.
+ */
+const RECENT_REPORTS_BUDGET_MS = CALLER_VISIBLE_CEILING_MS;
+
+/** One wall-clock bound for a call that makes several engine round trips. */
+class CallBudget {
+  readonly #startedAt = Date.now();
+  #expiry: Promise<"budget"> | null = null;
+  #timer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(private readonly budgetMs: number) {}
+
+  /** True once the whole budget has been spent on the fetches so far. */
+  get spent(): boolean {
+    return Date.now() - this.#startedAt >= this.budgetMs;
+  }
+
+  /**
+   * Resolves `"budget"` at the deadline, arming the one timer on first use.
+   * Unreferenced, because a tool that has already answered must not be the
+   * reason a session's process stays up.
+   */
+  get expired(): Promise<"budget"> {
+    this.#expiry ??= new Promise<"budget">((resolve) => {
+      const left = Math.max(this.budgetMs - (Date.now() - this.#startedAt), 0);
+      const timer = setTimeout(() => resolve("budget"), left);
+      this.#timer = timer;
+      timer.unref();
+    });
+    return this.#expiry;
+  }
+
+  /** Releases the timer once the fan-out is over, however it ended. */
+  done(): void {
+    if (this.#timer !== null) {
+      clearTimeout(this.#timer);
+      this.#timer = null;
+    }
+  }
+}
+
+/** One `last_evidence` read's outcome, tagged so nothing can reject into a race. */
+type RecentReportFetch =
+  | { kind: "pack"; pack: EvidencePackReportView }
+  | { kind: "missing" }
+  | { kind: "failed"; error: unknown };
+
 async function recentReports(
   args: Record<string, unknown>,
   context: ToolExecuteContext,
@@ -1265,12 +1452,15 @@ async function recentReports(
     };
   }
 
-  // Fetch each trail id; the daemon's bounded history may have evicted it or
-  // the engine may have restarted, so per-item misses are skipped with a
-  // note instead of failing the whole report.
+  // Fetch each trail id; the daemon's bounded history may have evicted it or the
+  // engine may have restarted, so per-item misses are skipped with a note
+  // instead of failing the whole report — and the whole fan-out is bounded by
+  // RECENT_REPORTS_BUDGET_MS, so an id the budget could not reach is named as not
+  // fetched rather than dropped from the report or waited on without bound.
   const packs: Array<{ id: string; pack: EvidencePackReportView }> = [];
   const skipped: string[] = [];
-  for (const id of ids) {
+  const notFetched: string[] = [];
+  const fetchOne = async (id: string): Promise<RecentReportFetch> => {
     try {
       // The per-id fetches are reads, but they still carry the generation: a
       // late reply to one of them must not be written into a successor app's
@@ -1281,14 +1471,59 @@ async function recentReports(
         context.session.generation,
       );
       const parsed = parseEvidenceFrame(raw);
-      packs.push({ id, pack: packForReport(parsed.pack, parsed.measuredSchemaVersion) });
+      return { kind: "pack", pack: packForReport(parsed.pack, parsed.measuredSchemaVersion) };
     } catch (error) {
       if (error instanceof EngineCallError && error.code === GP_E_NO_EVIDENCE) {
+        return { kind: "missing" };
+      }
+      // Tagged, never rethrown: this promise is raced against the budget, and a
+      // rejection the race has already lost would surface as an unhandled
+      // rejection instead of as this call's answer.
+      return { kind: "failed", error };
+    }
+  };
+
+  const budget = new CallBudget(RECENT_REPORTS_BUDGET_MS);
+  try {
+    for (const [index, id] of ids.entries()) {
+      if (budget.spent) {
+        notFetched.push(...ids.slice(index));
+        break;
+      }
+      const settled = await Promise.race([fetchOne(id), budget.expired]);
+      if (settled === "budget") {
+        // The read in flight is dropped here, and with it every id that had not
+        // been sent: they stay named in the report, because the daemon may still
+        // be answering the one in flight — precisely what an agent has to know
+        // before it decides whether the action behind it needs doing again.
+        notFetched.push(...ids.slice(index));
+        break;
+      }
+      if (settled.kind === "pack") {
+        packs.push({ id, pack: settled.pack });
+      } else if (settled.kind === "missing") {
         skipped.push(id);
       } else {
-        return mapAuditError(error);
+        return mapAuditError(settled.error);
       }
     }
+  } finally {
+    budget.done();
+  }
+
+  if (packs.length === 0 && notFetched.length > 0) {
+    // Not "no evidence": the operations are recorded and this call ran out of the
+    // wait it allows itself. Answering GP_E_NO_EVIDENCE here would tell an agent
+    // its actions produced nothing, which is the one reading that makes it re-run
+    // the act they came from.
+    return {
+      content: [{ type: "text", text: formatToolError(
+        GP_E_ENGINE_TIMEOUT,
+        `gp_recent_reports fetched no pack inside its ${RECENT_REPORTS_BUDGET_MS}ms budget: ${notFetched.length} of ${ids.length} trail ${ids.length === 1 ? "entry" : "entries"} went unanswered (${notFetched.join(", ")})`,
+        "the operations are recorded and the daemon may still be answering; ask for fewer at once with a smaller limit (gp_recent_reports advertises 1…20), or read one operation with gp_last_evidence {operationId} / gp_export_evidence {operationId}, each of which answers inside its own deadline. Do not re-run gp_act to regenerate what the trail already holds",
+      ) }],
+      isError: true,
+    };
   }
 
   if (packs.length === 0) {
@@ -1309,12 +1544,21 @@ async function recentReports(
   const skipNote = skipped.length === 0 ? "" : argv.format === "html"
     ? `<p class="gp-skipped">skipped ${skipped.length} unreachable ${skipped.length === 1 ? "entry" : "entries"}: ${escapeHTML(skipped.join(", "))}</p>`
     : `> skipped ${skipped.length} unreachable ${skipped.length === 1 ? "entry" : "entries"}: ${skipped.join(", ")}`;
+  // A budget stop is a different fact from an unreachable entry: the daemon may
+  // be answering these right now, so they are named as not fetched, with the
+  // wait that ran out, and never folded into the "unreachable" count.
+  const unfetchedNote = notFetched.length === 0 ? "" : argv.format === "html"
+    ? `<p class="gp-not-fetched">not fetched within this report's ${RECENT_REPORTS_BUDGET_MS}ms wait: ${notFetched.length} ${notFetched.length === 1 ? "entry" : "entries"} left unanswered: ${escapeHTML(notFetched.join(", "))}. Fetch one by id with gp_last_evidence, or ask again with a smaller limit</p>`
+    : `> not fetched within this report's ${RECENT_REPORTS_BUDGET_MS}ms wait: ${notFetched.length} ${notFetched.length === 1 ? "entry" : "entries"} left unanswered: ${notFetched.join(", ")}. Fetch one by id with gp_last_evidence, or ask again with a smaller limit`;
   const separator = argv.format === "html" ? "\n<hr>\n" : "\n\n---\n";
   const body = packs.map(({ pack }) => render(pack, undefined)).join(separator);
 
   const sections: string[] = [header];
   if (skipNote !== "") {
     sections.push(skipNote);
+  }
+  if (unfetchedNote !== "") {
+    sections.push(unfetchedNote);
   }
   sections.push(body);
   return { content: [{ type: "text", text: sections.join("\n") }], isError: false };
@@ -1356,18 +1600,39 @@ export type { Selector, Action, AssertionProperty };
  * has `maxDepth`. `Object.create` keeps the real client (its pending map, its
  * sinks, its reconnecting transport) on the prototype chain and shadows exactly
  * one method, so wrapping cannot lose state or invent a fake client.
+ *
+ * The rewrite is not one sentence for every tool: a request whose re-issue
+ * changes the user's screen gets the no-retry advice instead of the narrowing
+ * advice, because "retry with a narrower X" is an instruction to perform that
+ * change a second time. See {@link replayUnsafePayloadAdvice}.
+ *
+ * `toolArgs` are the arguments the *agent* sent, which for an orchestrated tool
+ * are not the params of the frame that failed: `gp_recent_reports` asks
+ * `last_evidence` per id, so its `limit` — the one number the caller can still
+ * lower — appears nowhere on the wire.
  */
 export function engineWithPayloadAdvice(
   engine: EngineJsonRpcClient,
   spec: ToolSpec,
+  toolArgs: Record<string, unknown> = {},
 ): EngineJsonRpcClient {
   const wrapped = Object.create(engine) as EngineJsonRpcClient;
   Object.defineProperty(wrapped, "call", {
     value: (method: string, params?: Record<string, unknown>, correlation?: number): Promise<unknown> =>
       engine.call(method, params, correlation).catch((error: unknown) => {
         if (error instanceof EngineCallError && error.code === GP_E_PAYLOAD_TOO_LARGE) {
+          // The agent's own arguments are the ones it could change, and an
+          // orchestrated tool's inner request does not carry them:
+          // `gp_recent_reports` fetches `{operationId}` per id, so reading only
+          // the frame's params misses a `limit` the caller already sent. The
+          // request's own values win where both name one.
+          const asked = { ...toolArgs, ...params ?? {} };
           throw new EngineCallError(
-            error.code, error.message, oversizedReplyAdvice(spec, params ?? {}),
+            error.code,
+            error.message,
+            isReplayUnsafeMethod(method)
+              ? replayUnsafePayloadAdvice(spec, method, asked)
+              : oversizedReplyAdvice(spec, asked),
           );
         }
         throw error;

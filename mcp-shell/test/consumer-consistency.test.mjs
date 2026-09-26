@@ -147,7 +147,16 @@ test("failure/kernel-api: a schema-violating pack body fails zod with the C35 re
   assert.ok(outcome.content[0].text.startsWith("GP_E_INTERNAL"));
   // zod-level attribution: the issue names the missing pack field.
   assert.ok(outcome.content[0].text.includes("schemaVersion"));
-  assert.ok(outcome.content[0].text.includes("assertion C35"));
+  // R9-d: this used to pin the literal string "assertion C35" — developer
+  // prose sitting inside agent-facing remedy text, and another lane is
+  // stripping exactly that wording right now. What the sentence must keep
+  // guaranteeing is the behaviour: a pack DID arrive and was rejected by the
+  // evidence contract (schema/format), which is what separates this reply from
+  // the envelope case below ("no pack at all") and from "the daemon is down".
+  // Mutation: re-point this remedy at daemon liveness ("restart", "unreachable",
+  // "no answer") without the contract attribution → red.
+  assert.match(outcome.content[0].text, /schema|evidence format|evidence contract/i,
+    "schema-violating pack body 必须被归因到证据契约本身，而不是缺包或死 daemon");
   // A body violation is not a dead daemon: no restart guidance on this path.
   assert.ok(!outcome.content[0].text.includes("restore-launchd"));
 });
@@ -1277,6 +1286,13 @@ test("the PNG budget still fits the frame cap after base64 inflation", () => {
   // comparison that cannot lose, which is what the comment above `defaultMaxBytes`
   // already was.
   const widest = Math.floor((frame * inflation.denominator) / inflation.numerator);
+  // DECORATION: this assert is an arithmetic identity — `widest` is *defined*
+  // as floor(frame×den/num), so `(widest+1)×num > frame×den` holds for every
+  // input and can never redden. The weight in this test is carried by its
+  // sibling above (`budget × num <= frame × den` over the two numbers measured
+  // from the Swift sources) and by the `budget < widest` headroom check below;
+  // kept because deleting a passing check is its own kind of loss, but nobody
+  // should read it as coverage.
   assert.ok(
     (widest + 1) * inflation.numerator > frame * inflation.denominator,
     `${widest} + 1 still satisfies the inequality, so it admits bodies the frame cap rejects`,
@@ -1316,6 +1332,12 @@ test("the frame a capture_view reply becomes is measured, not estimated", () => 
   // base64's alphabet is ASCII, so its length is its byte count.
   const body = Buffer.alloc(budget).toString("base64");
   const onTheWire = Buffer.byteLength(body, "ascii");
+  // DECORATION: `byteLength(base64(n bytes)) === 4·ceil(n/3)` is a property of
+  // base64 itself, true for every input length and for every budget/frame cap
+  // — it cannot redden under any source change. The weight here is carried by
+  // the sibling asserts below: the measured `onTheWire` compared against the
+  // inflation ratio the encoder's comment *states* (red when prose and bytes
+  // disagree), and `onTheWire + 1 <= frame` against the measured frame cap.
   assert.equal(
     onTheWire,
     4 * Math.ceil(budget / 3),

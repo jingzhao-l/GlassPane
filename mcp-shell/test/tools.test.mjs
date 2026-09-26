@@ -8,9 +8,9 @@ import { attachIdentityOf, TOOL_SPECS, TOOL_BY_NAME, executeTool, trailScopedToo
 import { EvidenceAuditSession } from "../dist/audit-session.js";
 import { canReceiveDaemonReply, methodsSentByShell } from "./support/wire-surface.mjs";
 import { canonicalJson } from "../dist/canonical.js";
-import { FORCE_OVERWRITE_ENV } from "../dist/project-registry.js";
+import { FORCE_OVERWRITE_ENV, MAX_PROJECTS } from "../dist/project-registry.js";
 import { createTrackedMcpServer } from "../dist/dispatch.js";
-import { EngineJsonRpcClient } from "../dist/engine-client.js";
+import { EngineJsonRpcClient, CALLER_VISIBLE_CEILING_MS, slowEngineRemedy } from "../dist/engine-client.js";
 import { FakeLineIo } from "./helpers.mjs";
 import { MAX_FRAME_BYTES, OversizeFrameError } from "../dist/io.js";
 import { makeEngine } from "./helpers.mjs";
@@ -197,7 +197,10 @@ test("last_evidence rejects a schema-violating pack as isError (spec §6.3)", as
   const outcome = await promise;
   assert.equal(outcome.isError, true);
   assert.ok(outcome.content[0].text.startsWith("GP_E_INTERNAL"));
-  assert.ok(outcome.content[0].text.includes("invalid evidence pack"));
+  // The message states which side rejected the pack (this shell's read rules) and
+  // carries the zod detail; it does not blame the daemon or order a restart.
+  assert.ok(outcome.content[0].text.includes("this shell's read rules reject"));
+  assert.ok(outcome.content[0].text.includes("restore-launchd") === false);
 });
 
 test("last_evidence rejects a malformed frame (no evidencePack) as isError", async () => {
@@ -1353,4 +1356,397 @@ test("no advice names a parameter the tool does not advertise", async () => {
   }
   assert.deepEqual(skipped, [], `这些工具本该被扫到却没有：${skipped.join("; ")}`);
   assert.deepEqual(offenders, [], offenders.join("; "));
+});
+
+/* ------------------------------------------------------------------ *
+ * Round-9 MCP review: advice an agent can follow without being refused
+ * by the next call, and without being sent to destroy something.
+ *
+ * Four shapes, all of them the same mistake in different clothes: copy that
+ * names an action the surface does not offer (a knob at its floor, a delete that
+ * does not exist, a restart on a path where a frame arrived), and copy written
+ * for the developer who wrote it rather than for the caller reading it.
+ * ------------------------------------------------------------------ */
+
+/** Drive a tool to the "reply did not fit" path and hand back its answer text. */
+async function evidenceReadFailureText(frame) {
+  const { engine, io } = makeEngine();
+  const tool = TOOL_BY_NAME.get("gp_last_evidence");
+  const promise = executeTool(tool, {}, engine);
+  io.respond(frame);
+  const outcome = await promise;
+  assert.equal(outcome.isError, true);
+  return outcome.content[0].text;
+}
+
+test("a knob at its advertised floor is refused for every kind that advertises one", async () => {
+  // MUTATION THIS PINS: the floor filter in `oversizedReplyAdvice` going back to
+  // `knob.kind === "scale"` only (mcp-shell/src/tools.ts). `gp_observe` with
+  // `maxDepth: 1` then reads "retry with a smaller maxDepth (this tool advertises
+  // 1…10)" — and zod's `min(1)` answers that retry with GP_E_BAD_PARAMS, so the
+  // advice is a command this shell refuses to carry out. `gp_audit_ui`,
+  // `gp_snapshot` and `gp_recent_reports`'s `limit` are the same shape.
+  const observe = await oversizedAdviceThrough("gp_observe", { maxDepth: 1 });
+  assert.match(observe, /maxDepth is already at this tool's floor \(1\)/,
+    `已在下界的 maxDepth 不得再被说成可缩：${observe}`);
+  assert.ok(!/smaller maxDepth/.test(observe), observe);
+  // …and the knob that genuinely is still open gets named, by the name this tool
+  // publishes (it has `role`, not `selector`).
+  assert.match(observe, /retry with a tighter role filter/, observe);
+
+  const snapshot = await oversizedAdviceThrough("gp_snapshot", { maxDepth: 1 });
+  assert.match(snapshot, /maxDepth is already at this tool's floor \(1\)/, snapshot);
+  assert.ok(!/smaller maxDepth/.test(snapshot), snapshot);
+  assert.match(snapshot, /nothing left to narrow on this request/, snapshot);
+
+  const recent = await oversizedAdviceThrough("gp_recent_reports", { limit: 1 }, { seedTrail: true });
+  assert.match(recent, /limit is already at this tool's floor \(1\)/, recent);
+  assert.ok(!/smaller limit/.test(recent), recent);
+  // The second half of the same mistake: `gp_recent_reports` asks the daemon for
+  // `last_evidence {operationId}` per id, so an advice built from the *frame's*
+  // params never sees the `limit` the caller sent and offers to lower a number
+  // that is already at its floor.
+  assert.ok(recent.includes("last_evidence"), `发出的帧是 last_evidence，说明参数与工具参数不是同一份：${recent}`);
+
+  // Above the floor the same sentence stays an instruction that works, with the
+  // bounds read out of the advertised schema rather than typed a second time.
+  const deep = await oversizedAdviceThrough("gp_observe", { maxDepth: 4 });
+  assert.match(deep, /retry with a smaller maxDepth \(this tool advertises 1…10\)/, deep);
+});
+
+test("an oversized reply to a replay-unsafe tool forbids the retry instead of ordering one", async () => {
+  // MUTATION THIS PINS: the `isReplayUnsafeMethod` branch in
+  // `engineWithPayloadAdvice` (mcp-shell/src/tools.ts). `gp_act` advertises
+  // `selector`, so the narrowing advice on that path reads "retry with a more
+  // specific selector" — an instruction to perform the same change on the user's
+  // screen a second time, when the dropped reply is proof the request *was*
+  // answered. The transport refuses to replay these methods on its own; the
+  // advice must not order by hand what the transport will not do.
+  const act = await oversizedAdviceThrough("gp_act", { selector: { role: "AXButton" }, action: "press" });
+  assert.match(act, /do not re-issue this request/, act);
+  assert.ok(!/\bretry with\b/.test(act), `不可重放的工具不得收到"重试"：${act}`);
+  // The fact the sentence rests on, stated rather than assumed.
+  assert.match(act, /already reached the daemon and was answered/, act);
+  assert.match(act, /'gp_act'/, "要说清是哪一次请求，而不是引擎方法名");
+  assert.match(act, /it changes the user's screen/);
+  // The trail is the route it does get, and every tool it names exists.
+  assert.match(act, /gp_recent_reports lists/);
+  assert.match(act, /gp_last_evidence \{operationId\}/);
+  assert.match(act, /gp_observe \/ gp_assert_element/);
+  assert.match(act, /gp_probe_status answers on the same connection/);
+  // A knob is still named for the case where the reading says the change never
+  // took effect — and only ever one `gp_act` publishes.
+  assert.match(act, /a more specific selector/);
+
+  const restore = await oversizedAdviceThrough("gp_restore", { snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS" });
+  assert.match(restore, /do not re-issue this request/, restore);
+  assert.ok(!/\bretry with\b/.test(restore), restore);
+  assert.match(restore, /it replays recorded steps onto the user's screen/);
+  // `restore` advertises no knob that shrinks a reply, so none may be invented.
+  assert.ok(!/smaller (maxDepth|scale|limit)|tighter (role|title)/.test(restore), restore);
+  assert.match(restore, /no parameter that shrinks a reply/);
+
+  const attach = await oversizedAdviceThrough("gp_attach", { bundleId: "com.example.sweep" });
+  assert.match(attach, /do not re-issue this request/, attach);
+  assert.match(attach, /re-points the daemon at another app/);
+  assert.ok(!/\bretry with\b/.test(attach), attach);
+
+  // A read keeps the narrowing advice: refusing to re-issue a read would be its
+  // own unusable instruction.
+  const observe = await oversizedAdviceThrough("gp_observe", {});
+  assert.match(observe, /retry with a smaller maxDepth/, observe);
+  assert.ok(!/do not re-issue this request/.test(observe), observe);
+});
+
+/**
+ * The transport's replay verdict, read from its behaviour instead of its
+ * spelling: `slowEngineRemedy` carries the no-replay clause for exactly the
+ * methods the transport will not replay, and that is the same decision table the
+ * payload advice has to agree with. Reading the source text for a private
+ * constant would break on the next rename; this breaks only if the decision
+ * itself stops being observable, which the guard below notices.
+ */
+function transportForbidsReplay(method) {
+  return /do NOT re-issue/.test(slowEngineRemedy(method, "mcp"));
+}
+
+test("the no-retry advice covers exactly the methods the transport refuses to replay", async () => {
+  // MUTATION THIS PINS: any drift between the tool layer's list of non-replayable
+  // methods and the transport's. Add one there and not here → that tool's advice
+  // reads "retry with …" and the agent re-performs a screen change; remove one
+  // and a plain read gets told never to re-issue. Both directions, over every
+  // tool that can receive a reply.
+  const markerVisible = /do NOT re-issue/.test(slowEngineRemedy("act", "mcp"))
+    && !/do NOT re-issue/.test(slowEngineRemedy("observe", "mcp"));
+  assert.ok(markerVisible,
+    "slowEngineRemedy 已不再把可重放与不可重放分开——这条对照就没有对照物了");
+
+  const sweepArgs = {
+    gp_attach: { bundleId: "com.example.sweep" },
+    gp_act: { selector: { role: "AXButton" }, action: "press" },
+    gp_assert_element: { selector: { role: "AXButton" }, property: "title", expected: "Submit" },
+    gp_capture_view: { scale: 1 },
+    gp_restore: { snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS" },
+    gp_export_evidence: { operationId: OP_A, format: "markdown" },
+    gp_recent_reports: { limit: 2 },
+  };
+  const drift = [];
+  for (const spec of TOOL_SPECS) {
+    if (spec.name.startsWith("gp_project_")) continue; // answered from the file, never a frame
+    const forbids = transportForbidsReplay(spec.engineMethod);
+    let text;
+    try {
+      text = await oversizedAdviceThrough(spec.name, sweepArgs[spec.name] ?? {}, { seedTrail: true });
+    } catch (error) {
+      drift.push(`${spec.name}: ${String(error).slice(0, 90)}`);
+      continue;
+    }
+    const advised = /do not re-issue this request/.test(text);
+    if (advised !== forbids) {
+      drift.push(`${spec.name} (${spec.engineMethod}): transport forbids replay = ${forbids}, advice forbids retry = ${advised}`);
+    }
+  }
+  assert.deepEqual(drift, [], drift.join("; "));
+});
+
+test("a frame that arrived without a pack does not order a restart of what sent it", async () => {
+  // MUTATION THIS PINS: `daemonUnreachableRemedy()` back into the
+  // `mapEvidenceReadError` GP_E_INTERNAL remedy. A frame demonstrably came off
+  // this socket, so the service is up; `--restore-launchd` bootstraps it over,
+  // which takes down a daemon that may be holding an act already applied to the
+  // user's screen. The remedy must state the fact (something answered, not with
+  // the engine contract) and hand over a check that only reads.
+  const text = await evidenceReadFailureText({ unexpected: true });
+  assert.ok(text.startsWith("GP_E_INTERNAL"), text);
+  assert.match(text, /without an evidencePack object/);
+  assert.match(text, /do not restart anything on this answer/i,
+    `重启必须被点名反对，而不是悄悄不提——agent 手边就有那条命令：${text}`);
+  const at = text.indexOf("--restore-launchd");
+  assert.ok(at > 0, `--restore-launchd 要出现在文案里并被禁掉：${text}`);
+  assert.match(text.slice(Math.max(0, at - 160), at), /do not|wrong move/i,
+    `重启命令只能出现在禁令里，出现在动作里就是下一次点击的元凶：${text}`);
+  // The non-destructive discriminator, offered by this very surface, plus the
+  // one command that reads which service is behind this socket.
+  assert.match(text, /gp_probe_status/);
+  assert.match(text, /launchctl print/);
+  assert.ok(text.includes("GLASSPANE_ENGINE_SOCK"), "判别要给出它读的那条 socket 是从哪来的");
+});
+
+test("the schema-rejection remedy states the disagreement and names no assertion id", async () => {
+  // MUTATION THIS PINS: "engine and kernel schema drifted; fix the common
+  // fixtures (assertion C35)". The assertion id is a row in a document the agent
+  // cannot open, and "drifted" reads as an invitation to go edit one side.
+  const text = await evidenceReadFailureText({ evidencePack: { operationId: "bad" } });
+  assert.ok(text.startsWith("GP_E_INTERNAL"), text);
+  assert.match(text, /this shell's read rules reject/);
+  assert.ok(!/\bassertion C\d+\b/.test(text), `agent -facing 文案里不得出现断言编号：${text}`);
+  assert.ok(!/\bC35\b/.test(text), text);
+  assert.ok(!/spec v|§/.test(text), text);
+  // A pack did arrive and was rejected: nothing here is down, so no restart.
+  assert.ok(!text.includes("restore-launchd"), text);
+  assert.match(text, /gp_last_evidence \{operationId\}/, "要给出还能读的那条路");
+});
+
+test("no tools/list description carries a spec section or an assertion id", () => {
+  // MUTATION THIS PINS: "(P1 spec v1.4)" back into `gp_project_list`'s
+  // description. `tools/list` is the contract an agent reads to decide what to
+  // call; a document version it cannot open is not a fact about the tool.
+  const offenders = [];
+  for (const spec of TOOL_SPECS) {
+    const hit = [/\bspec\b/i, /§/, /\bassertion C\d+/i].filter((re) => re.test(spec.description));
+    if (hit.length > 0) {
+      offenders.push(`${spec.name} [${hit.join(",")}]: ${spec.description.slice(0, 100)}`);
+    }
+  }
+  assert.deepEqual(offenders, [], offenders.join("; "));
+  // The sweep has to be looking at something: every description is read, and one
+  // is long enough that a truncated copy of this gate would pass it vacuously.
+  assert.equal(TOOL_SPECS.length, 16);
+  assert.ok(TOOL_SPECS.every((spec) => typeof spec.description === "string" && spec.description.length > 10));
+});
+
+/** The `glasspaned --flag` names the daemon's own argument parser accepts. */
+function daemonCliFlags() {
+  const source = fs.readFileSync(
+    path.resolve(HERE, "..", "..", "engine", "Sources", "glasspaned", "main.swift"),
+    "utf8",
+  );
+  const flags = new Set();
+  for (const match of source.matchAll(/case\s+"(--[a-z-]+)"/g)) {
+    flags.add(match[1]);
+  }
+  assert.ok(flags.size >= 15, `只解析出 ${flags.size} 个 daemon CLI 开关，这条对照已经不作数`);
+  return flags;
+}
+
+test("the project-limit remedy orders only actions this surface can perform", async () => {
+  // MUTATION THIS PINS: `return "delete unused projects first (\`glasspaned
+  // --list-projects\` prints the registered set), then retry"` in
+  // `projectErrorRemedy`. Nothing in this project removes a registration — the
+  // three `gp_project_*` tools read, `gp_project_set` creates or patches, and the
+  // daemon CLI parses no delete flag — so the sentence ordered an action no caller
+  // has, and quoted a flag that only prints.
+  await withProjectsFile(async () => {
+    const { engine } = makeEngine();
+    const setTool = TOOL_BY_NAME.get("gp_project_set");
+    for (let i = 0; i < MAX_PROJECTS; i++) {
+      const filled = await executeTool(setTool, { displayName: `Filler ${i}`, bundleId: `com.filler.${i}` }, engine);
+      assert.equal(filled.isError, false, `第 ${i} 次注册必须成功，否则这条闸测的不是上限：${filled.content[0].text}`);
+    }
+    const outcome = await executeTool(
+      setTool, { displayName: "The one that does not fit", bundleId: "com.real.newapp" }, engine,
+    );
+    assert.equal(outcome.isError, true);
+    const text = outcome.content[0].text;
+    assert.ok(text.startsWith("GP_E_PROJECT_LIMIT"), text);
+    assert.ok(!/delete unused projects/i.test(text), text);
+    assert.ok(/this surface offers no delete/i.test(text),
+      `上限的出路必须承认这里没有删除动作：${text}`);
+    assert.ok(text.includes(`(${MAX_PROJECTS})`), `上限要说成可核对的数字：${text}`);
+    // The two moves that do exist are named, by their real tool names.
+    assert.ok(text.includes("gp_project_list") && text.includes("gp_project_set"), text);
+    assert.match(text, /patches that entry and leaves the count/);
+    // Anything the remedy tells the agent to run must be a command the shipped
+    // binary accepts: `--project-remove` would have read perfectly and answered
+    // "unknown argument".
+    const flags = daemonCliFlags();
+    const quoted = [...text.matchAll(/glasspaned\s+(--[a-z-]+)/g)].map((match) => match[1]);
+    assert.ok(quoted.length > 0, "remedy 引用了 CLI 却没有可核对的开关，这条断言就成了空的");
+    assert.deepEqual(quoted.filter((flag) => !flags.has(flag)), [],
+      `remedy 报了 daemon 不解析的开关：${quoted.join(", ")}`);
+  });
+});
+
+test("the limit the remedy quotes is the limit the daemon enforces", () => {
+  // The remedy states `MAX_PROJECTS`; the number that actually refuses the write
+  // lives in Swift, so quoting it here is a claim about another process.
+  const source = fs.readFileSync(
+    path.resolve(HERE, "..", "..", "engine", "Sources", "GlassPaneEngine", "ProjectModels.swift"),
+    "utf8",
+  );
+  const declared = /static let maxProjects\s*=\s*(\d+)/.exec(source);
+  assert.ok(declared, "读不到 daemon 的 maxProjects——这条对照就没有对照物了");
+  assert.equal(MAX_PROJECTS, Number(declared[1]), "两侧的上限已经不同：remedy 报的数会是真的错数");
+});
+
+/* ------------------------------------------------------------------ *
+ * R9-中4: `gp_recent_reports` fans out one `last_evidence` per trail id.
+ * Each fetch is capped by the caller-visible ceiling, so an unbounded loop is
+ * `limit` × that ceiling of held client — on the one tool that exists to stop a
+ * duplicate click. The fan-out therefore spends ONE budget, and says which ids
+ * it could not reach.
+ * ------------------------------------------------------------------ */
+
+/** The `last_evidence` frames a call has put on the wire, in order. */
+function evidenceFrames(io) {
+  return framesSent(io).filter((frame) => frame.method === "last_evidence");
+}
+
+test("gp_recent_reports stops at its own budget and names the ids it never fetched", async (t) => {
+  // MUTATION THIS PINS: the `budget.spent` guard before each fetch. Without it
+  // the loop asks for all four ids however long each one takes, and the header
+  // claims a report the agent has to wait out entry by entry.
+  t.mock.timers.enable({ apis: ["Date"] });
+  const { engine, io } = makeEngine({ timeoutMs: 5_000 });
+  const session = new EvidenceAuditSession();
+  const ids = [OP_A, OP_B, "op_22222222222222222222222222", "op_33333333333333333333333333"];
+  for (const id of ids) {
+    session.record({ operationId: id });
+  }
+  assert.equal(session.recentIds(4).length, 4, "premise: 链里要有四条，才测得出第四条取不到");
+
+  const promise = executeTool(TOOL_BY_NAME.get("gp_recent_reports"), { limit: 4 }, engine, session);
+  const answered = [];
+  for (let i = 0; i < 3; i++) {
+    await flush();
+    const frames = evidenceFrames(io);
+    assert.equal(frames.length, i + 1, `第 ${i + 1} 次取证的请求应当已经发出`);
+    const frame = frames[frames.length - 1];
+    respondTo(io, frame, evidenceFrame(frame.params.operationId, T3_DIAGNOSIS));
+    answered.push(frame.params.operationId);
+    // Each answer costs a third of the whole budget: the fourth can never fit.
+    t.mock.timers.tick(Math.ceil(CALLER_VISIBLE_CEILING_MS / 3));
+  }
+  const outcome = await promise;
+
+  assert.equal(outcome.isError, false, outcome.content[0].text);
+  const text = outcome.content[0].text;
+  const unfetched = ids.filter((id) => !answered.includes(id));
+  assert.equal(unfetched.length, 1, "premise: 应当恰好剩一条");
+  assert.ok(text.includes(`# GlassPane recent reports (${answered.length})`),
+    `标题的份数必须是真取到的那份：${text.slice(0, 200)}`);
+  assert.ok(!text.includes(`recent reports (${ids.length})`), "部分报告不得冒充完整报告");
+  assert.match(text, new RegExp(`not fetched within this report's ${CALLER_VISIBLE_CEILING_MS}ms wait`));
+  assert.ok(text.includes(unfetched[0]), `没取的 id 必须点名，不能静默消失：${text.slice(0, 300)}`);
+  assert.ok(!text.includes("unreachable"), "预算到点不等于 daemon 没有这条证据，两种事实不得混写");
+  // The bound is what this asserts, not the answer's wording alone: the fourth
+  // request must never have gone out at all.
+  assert.equal(evidenceFrames(io).length, 3, "预算用完后不得再发出请求");
+});
+
+test("an unanswered last_evidence cannot hold gp_recent_reports past its budget", async (t) => {
+  // MUTATION THIS PINS: the `Promise.race` against `budget.expired`. A daemon
+  // that stops answering the second id then holds this tool for the whole
+  // transport ceiling of that one call, per id — which is the wait the agent
+  // cannot outlast, and the one it answers by clicking again.
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  // A far larger per-call deadline than the budget: only the budget can save this
+  // call, which is the situation under test.
+  const { engine, io } = makeEngine({ timeoutMs: CALLER_VISIBLE_CEILING_MS * 10 });
+  const session = new EvidenceAuditSession();
+  session.record({ operationId: OP_A });
+  session.record({ operationId: OP_B });
+
+  const promise = executeTool(TOOL_BY_NAME.get("gp_recent_reports"), { limit: 2 }, engine, session);
+  await flush();
+  const [first] = evidenceFrames(io);
+  const fetchedId = first.params.operationId;
+  respondTo(io, first, evidenceFrame(fetchedId, T3_DIAGNOSIS));
+  await flush();
+  assert.equal(evidenceFrames(io).length, 2, "premise: 第二条请求已发出且无人回答");
+  const leftBehind = [OP_A, OP_B].find((id) => id !== fetchedId);
+
+  t.mock.timers.tick(CALLER_VISIBLE_CEILING_MS);
+  for (let i = 0; i < 20; i++) {
+    await flush();
+  }
+  const outcome = await Promise.race([promise, Promise.resolve("NOT ANSWERED")]);
+  assert.notEqual(outcome, "NOT ANSWERED", "预算到点，工具必须自己给出答案，而不是等那条没人答的请求");
+
+  assert.equal(outcome.isError, false, outcome.content[0].text);
+  const text = outcome.content[0].text;
+  assert.ok(text.includes("# GlassPane recent reports (1)"), text.slice(0, 200));
+  assert.match(text, /not fetched within this report's 50000ms wait: 1 entry left unanswered/);
+  assert.ok(text.includes(leftBehind), "在途那条要按没取到报出来：它确实没有被等到");
+  assert.equal(evidenceFrames(io).length, 2, "到点之后不得再发第三条");
+});
+
+test("gp_recent_reports with nothing fetched inside budget is a timeout, not 'no evidence'", async (t) => {
+  // MUTATION THIS PINS: letting the empty-pack case fall through to
+  // GP_E_NO_EVIDENCE. "no evidence is reachable" tells the agent its actions
+  // produced nothing, which is the one reading that makes it re-run the act —
+  // here the actions are in the trail and only the fetch ran out of time.
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const { engine, io } = makeEngine({ timeoutMs: CALLER_VISIBLE_CEILING_MS * 10 });
+  const session = new EvidenceAuditSession();
+  session.record({ operationId: OP_A });
+  session.record({ operationId: OP_B });
+
+  const promise = executeTool(TOOL_BY_NAME.get("gp_recent_reports"), { limit: 2 }, engine, session);
+  await flush();
+  t.mock.timers.tick(CALLER_VISIBLE_CEILING_MS);
+  for (let i = 0; i < 20; i++) {
+    await flush();
+  }
+  const outcome = await Promise.race([promise, Promise.resolve("NOT ANSWERED")]);
+  assert.notEqual(outcome, "NOT ANSWERED", "一条都没取到时同样不得悬着调用方");
+
+  assert.equal(outcome.isError, true);
+  const text = outcome.content[0].text;
+  assert.ok(text.startsWith("GP_E_ENGINE_TIMEOUT"), text);
+  assert.ok(!text.startsWith("GP_E_NO_EVIDENCE"), text);
+  assert.match(text, /the operations are recorded/);
+  assert.match(text, /a smaller limit \(gp_recent_reports advertises 1…20\)/);
+  assert.match(text, /gp_last_evidence \{operationId\}/);
+  assert.ok(/do not re-run gp_act/i.test(text), `超预算的文案不得把"再来一次动作"当成出路：${text}`);
 });

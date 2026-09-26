@@ -27,14 +27,37 @@ function attachedAppFields() {
   const block = /public struct AttachedApp: Equatable \{([\s\S]*?)\n\}/.exec(source);
   assert.ok(block, "找不到 AttachedApp 声明——身份键的对照物没了，这条闸必须红而不是跳过");
   const fields = [];
+  const initAssigns = [];
+  let insideInit = false;
   for (const raw of block[1].split("\n")) {
     const line = raw.replace(/\/\/.*$/, "").trim();
-    const stored = /^public let ([A-Za-z0-9_]+)\s*:/.exec(line);
+    // `let` **and** `var`: a `public var` stored property participates in the
+    // synthesized `Equatable` exactly like a `let`, so reading only `let` let a
+    // field re-declared (or newly added) as `var` drop out of the comparison
+    // silently — the identity key could then miss a field the daemon clears
+    // history on.
+    const stored = /^public\s+(?:let|var)\s+([A-Za-z0-9_]+)\s*:/.exec(line);
     if (stored) {
       fields.push(stored[1]);
+      continue;
+    }
+    if (/^public init\b/.test(line)) insideInit = true;
+    if (insideInit) {
+      const assigned = /self\.([A-Za-z0-9_]+)\s*=/.exec(line);
+      if (assigned) initAssigns.push(assigned[1]);
+      if (/^\}/.test(line)) insideInit = false;
     }
   }
-  assert.ok(fields.length >= 2, `AttachedApp 只解析出 ${fields.length} 个存储属性，解析方式已经失效`);
+  // The expected count is derived from the struct itself, not typed here: its
+  // own `init` assigns every stored property, so the assignment list is a
+  // second, independent reading of the same set. The old `fields.length >= 2`
+  // passed even when the parse had silently dropped a field (3 → 2 still ≥ 2);
+  // two readings that disagree cannot. If the struct ever loses its explicit
+  // `init`, this goes red and says so instead of quietly watching nothing.
+  assert.ok(initAssigns.length >= 2,
+    `AttachedApp 的显式 init 只给 ${initAssigns.length} 个属性赋值——期望字段数没有出处了，改用别的推导或改这条闸`);
+  assert.deepEqual([...new Set(fields)].sort(), [...new Set(initAssigns)].sort(),
+    `AttachedApp 的存储属性（${fields.join(", ")}）与它 init 的赋值（${initAssigns.join(", ")}）对不上——字段读取方式已过期，身份键的对照表不可信`);
   return fields;
 }
 
@@ -73,13 +96,49 @@ test("the daemon still clears history only when the attached app changed", () =>
   // `restart()` mirrors this condition, so if the daemon ever changes it (e.g.
   // clears on every attach), the shell's more-lenient rule becomes a leak and
   // this has to be the thing that says so.
+  //
+  // EVERY occurrence is checked, not just the first: `indexOf` read only the
+  // site that was there when the file was written, so an *additional*
+  // unconditional `history.removeAll()` — the exact shape of the bug this
+  // mirror exists to catch — was invisible to it and left the gate green.
+  // Mutation that reddens this (and used to): add `history.removeAll()` as the
+  // first statement of `attach` — its nearest guard line is no
+  // `if attachedApp != app`, so that site fails.
+  // Mutation: rename the daemon's condition (`attachedApp?.pid != app.pid`) —
+  // every site fails, as it must: the shell's rule is derived from *this* one.
   const source = fs.readFileSync(ENGINE_CORE, "utf8");
-  const at = source.indexOf("history.removeAll()");
-  assert.notEqual(at, -1, "EngineCore 里再也找不到 history.removeAll()——镜像的条件消失了");
-  const guard = source.slice(Math.max(0, at - 400), at);
-  assert.match(guard.replace(/\s+/g, " "), /if attachedApp != app/,
-    "daemon 不再按 app 变化清历史，shell 侧的同源规则要重判");
+  const sites = [...source.matchAll(/history\.removeAll\(\)/g)];
+  assert.ok(sites.length >= 1, "EngineCore 里再也找不到 history.removeAll()——镜像的条件消失了");
+  for (const site of sites) {
+    const line = source.slice(0, site.index).split("\n").length;
+    const guard = nearestGuardLine(source.slice(0, site.index));
+    assert.ok(guard !== null && /attachedApp\s*!=\s*app/.test(guard),
+      `EngineCore.swift:${line} 的 history.removeAll() 不在 \`if attachedApp != app\` 之下` +
+      (guard === null ? "（它上面没有直接的守卫——这是一次无条件清空）" : `，最近的守卫是：${guard}`));
+  }
 });
+
+/**
+ * The line that opens the block the clear sits in: walk back over blank and
+ * comment lines until a `}` closing a previous block (no guard → `null`) or an
+ * `if` (return its condition). Deliberately shallow — the point is not to
+ * resolve Swift scoping, it is that a clear added *outside* the guarded block
+ * has no `if attachedApp != app` on its way up within a few lines.
+ */
+function nearestGuardLine(textBefore) {
+  const lines = textBefore.split("\n");
+  const own = lines[lines.length - 1];
+  const candidates = [own, ...lines.slice(0, -1).reverse()];
+  for (const raw of candidates) {
+    const line = raw.replace(/\/\/.*$/, "").trim();
+    if (line === "") continue;
+    const opened = /(?:^|[};]\s*)if\s+(.+?)\s*\{?\s*$/.exec(line);
+    if (opened) return opened[1];
+    if (line.startsWith("}")) return null;
+    if (/[{(]$/.test(line)) return null; // reached an enclosing statement, not a guard
+  }
+  return null;
+}
 
 test("an identity is only the same identity when all three fields match", () => {
   const base = { pid: 4242, bundleId: "com.example.app", appName: "Example" };

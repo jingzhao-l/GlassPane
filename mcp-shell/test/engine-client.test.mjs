@@ -17,8 +17,10 @@ import {
   engineClientOver,
   engineDeadlineMs,
   RESTORE_BASE_DEADLINE_MS,
+  slowEngineRemedy,
   unixSocketEngineClient,
 } from "../dist/engine-client.js";
+import { TOOL_SPECS } from "../dist/tools.js";
 import { MAX_FRAME_BYTES, OversizeFrameError } from "../dist/io.js";
 import { FakeLineIo } from "./helpers.mjs";
 import { executableSource } from "./support/source.mjs";
@@ -137,11 +139,108 @@ test("a deadline overrun says slow, not unreachable, and forbids replaying act",
     assert.match(err.remedy, /do NOT re-issue act/);
     return true;
   });
+  // R9-中3: the narrowing advice is per method family, so `observe` keeps it and
+  // names the parameter it really has. The mutation this pins is the single
+  // generic tail coming back — then this line passes and the family assertions
+  // below ("attach", "diagnose", "capture_view", the schema cross-check) go red.
   const other = new EngineJsonRpcClient(new FakeLineIo(), 30);
   await assert.rejects(other.call("observe"), (err) => {
-    assert.match(err.remedy, /retry this read narrower/);
+    assert.match(err.remedy, /re-send the same request with a smaller maxDepth/);
     return true;
   });
+});
+
+/* ------------------------------------------------------------------ *
+ * R9-中3: `slowEngineRemedy`'s tail used to be one sentence for every
+ * method that is not `act`/`restore`/`probe_status` — "retry this read
+ * narrower (smaller maxDepth / a tighter selector) — that is safe for a
+ * read". It was sent to `attach` (a daemon-state change that can discard
+ * the trail), to the operation reads (which have no knob to turn), and to
+ * `capture_view` (whose knob is `scale`). Both halves are pinned: the
+ * family wording, and — against `TOOL_SPECS` — that no remedy names a
+ * parameter the method's own schema does not have.
+ * ------------------------------------------------------------------ */
+
+/** Which parameter names each method's timeout remedy is allowed to name. */
+const NARROWING_KNOBS = {
+  observe: ["maxDepth"],
+  snapshot: ["maxDepth"],
+  audit_ui: ["maxDepth"],
+  assert_element: ["selector"],
+  capture_view: ["scale"],
+  diagnose: [],
+  last_evidence: [],
+  attach: [],
+  act: [],
+  restore: [],
+};
+
+/**
+ * The properties every tool that forwards this engine method advertises — the
+ * intersection, because advice addressed to a method is read by the caller of
+ * whichever tool sent it, and a knob only one of them has is not advice the
+ * other can execute.
+ */
+function schemaProperties(engineMethod) {
+  const specs = TOOL_SPECS.filter((spec) => spec.engineMethod === engineMethod);
+  assert.ok(specs.length >= 1, `${engineMethod} is forwarded by no tool, so this check has no schema to read`);
+  const lists = specs.map((spec) => Object.keys(spec.inputSchema.properties ?? {}));
+  return lists[0].filter((name) => lists.every((list) => list.includes(name)));
+}
+
+/** The part of the remedy that carries the wait/retry instruction. */
+const WAIT_CLAUSE = "still working on this one, so ";
+function tailOf(remedy) {
+  const at = remedy.indexOf(WAIT_CLAUSE);
+  assert.notEqual(at, -1, `remedy has no wait clause to read: ${remedy.slice(0, 160)}`);
+  return remedy.slice(at + WAIT_CLAUSE.length);
+}
+
+test("the re-issue ban covers the methods that change state, each with its own reason", () => {
+  for (const method of ["act", "restore", "attach"]) {
+    const remedy = slowEngineRemedy(method);
+    assert.match(remedy, new RegExp(`do NOT re-issue ${method}`),
+      `${method} must be told not to re-issue: its reply is not a read`);
+    assert.ok(!/maxDepth|tighter selector|narrower/.test(tailOf(remedy)),
+      `${method}'s remedy must not read as a narrowing retry`);
+  }
+  // `attach` is the one this defect was about: the reason has to name what it
+  // actually does, or the sentence is a prohibition with no explanation.
+  assert.match(slowEngineRemedy("attach"), /re-point the daemon at another app/);
+  assert.match(slowEngineRemedy("attach"), /discard the trail/);
+  assert.match(slowEngineRemedy("act"), /take effect on the user's screen/);
+});
+
+test("no timeout remedy names a parameter the method's schema does not have", () => {
+  const named = ["maxDepth", "selector", "scale"];
+  for (const [method, allowed] of Object.entries(NARROWING_KNOBS)) {
+    const tail = tailOf(slowEngineRemedy(method));
+    for (const knob of named) {
+      if (allowed.includes(knob)) {
+        assert.ok(tail.includes(knob), `${method} should be pointed at its own ${knob}`);
+        // …and the schema has to still carry it, or the advice is stale.
+        assert.ok(schemaProperties(method).includes(knob),
+          `${method}'s remedy names ${knob}, which its tool schema does not advertise`);
+      } else {
+        assert.ok(!tail.includes(knob),
+          `${method}'s remedy names ${knob}, which its schema does not have: ${tail.slice(0, 200)}`);
+      }
+    }
+  }
+});
+
+test("a read with nothing to narrow says so instead of implying a safe retry", () => {
+  for (const method of ["diagnose", "last_evidence"]) {
+    const tail = tailOf(slowEngineRemedy(method));
+    assert.match(tail, /re-send it unchanged/, `${method}: no parameter controls the work`);
+    assert.match(tail, /nothing to narrow/, `${method}: the honest sentence is "there is nothing to narrow"`);
+  }
+  // A method this shell has no family for gets no invented knob, and no
+  // blanket promise that re-sending is safe: whether a call changes anything is
+  // stated by its own tool description, not by this file.
+  const unknown = tailOf(slowEngineRemedy("recent_reports"));
+  assert.ok(!/maxDepth|tighter selector/.test(unknown), unknown.slice(0, 200));
+  assert.match(unknown, /only if it changes or records nothing/);
 });
 
 test("a timed-out call keeps its entry so the late reply is still delivered", async () => {
@@ -677,6 +776,253 @@ test("a sink that throws is reported and keeps the transport alive", async () =>
     `sink 抛错必须被点名，而不是静默或炸掉连接：${JSON.stringify(notes)}`);
 
   // The connection is still usable afterwards.
+  const next = client.call("diagnose");
+  io.respond({ class: "T1", report: {} });
+  assert.deepEqual(await next, { class: "T1", report: {} });
+  client.close();
+});
+
+/* ------------------------------------------------------------------ *
+ * R9-高1 — arrival-order attribution.
+ *
+ * The daemon answers in the order it received requests, so the request an
+ * id-less frame belongs to is the oldest one this client still *tracks* —
+ * including one whose caller was already answered at the deadline. Attributing
+ * by "oldest the caller is still waiting on" instead handed that other
+ * request's failure to the next caller, deleted the entry its own reply was
+ * still tracked under, and made the reply that then landed read as a frame
+ * this client never issued. Every test in this block reddens on exactly that
+ * swap (`oldestTracked` back to `oldestOpen`).
+ * ------------------------------------------------------------------ */
+
+/** Answers `promise` in the background and reports which way it settled. */
+function track(promise) {
+  const state = { value: "pending" };
+  promise.then(() => { state.value = "resolved"; }, () => { state.value = "rejected"; });
+  return state;
+}
+
+/** Lets a frame handler and a rejected sink run, without advancing any timer. */
+async function flush() {
+  for (let i = 0; i < 4; i++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+/**
+ * Every test below drives the first request's deadline with `t.mock.timers`, so
+ * the *second* request's deadline cannot expire underneath it: with real timers
+ * a 20 ms window under a loaded runner let the queued request time out between
+ * two `setImmediate`s, and the test then failed on the harness instead of on the
+ * code.
+ */
+function timedOutClient(t, io, deadlineMs) {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  return new EngineJsonRpcClient(io, deadlineMs);
+}
+
+/**
+ * Fires the deadline of the request that is outstanding right now. Every caller
+ * below is `.catch()`-ed *before* this runs: the tick rejects it synchronously,
+ * and a rejection with no handler attached yet is an unhandled rejection that
+ * fails the file for the wrong reason.
+ */
+async function expire(t, deadlineMs) {
+  t.mock.timers.tick(deadlineMs);
+  await flush();
+}
+
+test("an id-less error belongs to the request that timed out, not to the caller still waiting", async (t) => {
+  const io = new FakeLineIo();
+  const client = timedOutClient(t, io, 20);
+  const notes = [];
+  client.onEngineNote((note) => notes.push(note));
+  const seen = [];
+  client.onLateReply((reply) => seen.push(reply));
+
+  const act = client.call("act", { selector: { role: "AXButton" }, action: "press" }).catch((err) => err.code);
+  await expire(t, 20);
+  assert.equal(await act, "GP_E_ENGINE_TIMEOUT");
+  const probe = client.call("probe_status");
+  const probeState = track(probe);
+
+  // The daemon's failure for the *act*, with the id lost on its way out.
+  io.send(JSON.stringify({
+    id: null,
+    error: { code: "GP_E_ACT_FAILED", message: "the element moved", remedy: "re-observe and press again" },
+  }));
+  await flush();
+
+  assert.equal(probeState.value, "pending",
+    "a frame answering a request whose caller already gave up must not settle the next caller");
+  assert.ok(!notes.some((note) => /no request in flight/.test(note)),
+    `a request was tracked, so the note may not claim none was: ${JSON.stringify(notes)}`);
+  const late = notes.find((note) => /late engine reply for 'act'/.test(note));
+  assert.ok(late, `expected the act's late error to be reported as its own: ${JSON.stringify(notes)}`);
+  assert.match(late, /GP_E_ACT_FAILED/);
+  assert.match(late, /is an error frame/);
+  assert.match(late, /no operationId/);
+  assert.match(late, /attributed by arrival order/);
+  assert.equal(seen.length, 0, "an error frame names no operationId, so it may not be recorded as an operation");
+
+  // The tracked entry the frame answered is gone; the probe's real reply, by
+  // its own id, is still delivered normally.
+  io.respond({ connected: true });
+  assert.deepEqual(await probe, { connected: true });
+
+  // And only now, with nothing tracked, is "no request in flight" the truth.
+  io.send(JSON.stringify({ id: null, error: { code: "GP_E_X", message: "m", remedy: "r" } }));
+  assert.ok(notes.some((note) => /with no request in flight: /.test(note)), JSON.stringify(notes));
+  client.close();
+});
+
+test("an id-less reply for a request the caller gave up on still reaches the trail sink", async (t) => {
+  const io = new FakeLineIo();
+  const client = timedOutClient(t, io, 20);
+  const notes = [];
+  client.onEngineNote((note) => notes.push(note));
+  const seen = [];
+  client.onLateReply((reply) => seen.push(reply));
+
+  const act = client.call("act", {}).catch(() => undefined);
+  await expire(t, 20);
+  await act;
+  const probe = client.call("probe_status");
+  const probeState = track(probe);
+  io.send(JSON.stringify({ id: undefined, result: { operationId: "op_idless", actConfirmed: true } }));
+  await flush();
+
+  assert.equal(seen.length, 1, "a result frame with an operationId is exactly what the sink exists for");
+  assert.equal(seen[0].method, "act", "it belongs to the act, not to the request queued behind it");
+  assert.equal(seen[0].result.operationId, "op_idless");
+  assert.equal(probeState.value, "pending");
+  assert.match(notes.find((note) => /late engine reply for 'act'/.test(note)) ?? "", /attributed by arrival order/);
+  io.respond({ connected: false });
+  assert.deepEqual(await probe, { connected: false });
+  client.close();
+});
+
+test("an id-less result is never guessed onto a caller that is still waiting", async () => {
+  const io = new FakeLineIo();
+  const client = engineClientOver(io, 5_000);
+  const notes = [];
+  client.onEngineNote((note) => notes.push(note));
+  const observe = client.call("observe", { maxDepth: 10 });
+  const state = track(observe);
+
+  io.send(JSON.stringify({ id: null, result: { tree: "belongs to someone else" } }));
+  await flush();
+  assert.equal(state.value, "pending",
+    "the daemon's id-less answers are error frames; a result with no id is not this caller's answer");
+  assert.ok(notes.some((note) => /was not delivered to any caller/.test(note)), JSON.stringify(notes));
+  assert.ok(notes.some((note) => /'observe' \(id 0\) is still waiting/.test(note)), JSON.stringify(notes));
+
+  io.respond({ tree: [] });
+  assert.deepEqual(await observe, { tree: [] });
+  client.close();
+});
+
+test("an oversized frame with no readable id skips a settled request only to its own caller", async (t) => {
+  const io = new FakeLineIo();
+  const client = timedOutClient(t, io, 20);
+  const notes = [];
+  client.onEngineNote((note) => notes.push(note));
+  const observe = client.call("observe", { maxDepth: 10 }).catch(() => undefined);
+  await expire(t, 20);
+  await observe;
+  const snapshot = client.call("snapshot");
+  const state = track(snapshot);
+  io.emitError(new OversizeFrameError(MAX_FRAME_BYTES + 9, "xxxx"));
+  await flush();
+
+  assert.equal(state.value, "pending", "the oversized frame is the observe's late reply, not the snapshot's");
+  assert.ok(notes.some((note) => /late reply to 'observe'/.test(note)
+    && /attributed by arrival order/.test(note)), JSON.stringify(notes));
+  io.respond({ snapshotId: "snap_OK" });
+  assert.deepEqual(await snapshot, { snapshotId: "snap_OK" });
+  client.close();
+});
+
+/* ------------------------------------------------------------------ *
+ * R9-中1 — the tracking window has an end, and it has to say so. `onDeadline`
+ * tells the caller the request "stays registered" and `lateReplyRoute` points
+ * at that registration; a transport that goes away first deletes the entries
+ * that promise was standing on. Silent here meant an agent reading the log for
+ * an operation that really ran could not tell "not tracked anymore" from
+ * "never happened" — the difference that decides whether it clicks again.
+ * The mutation: drop the teardown note and keep the silent `pending.clear()`.
+ * ------------------------------------------------------------------ */
+
+test("the transport going away reports the late replies it stopped tracking", async (t) => {
+  const io = new FakeLineIo();
+  const client = timedOutClient(t, io, 20);
+  const notes = [];
+  client.onEngineNote((note) => notes.push(note));
+  const seen = [];
+  client.onLateReply((reply) => seen.push(reply));
+
+  for (const method of ["act", "observe"]) {
+    const call = client.call(method, {}).catch((err) => err.code);
+    await expire(t, 20);
+    assert.equal(await call, "GP_E_ENGINE_TIMEOUT", `${method} must be settled and still tracked`);
+  }
+  const waiting = client.call("snapshot");
+  client.close();
+  await assert.rejects(waiting, (err) => err.code === "GP_E_ENGINE_UNREACHABLE");
+
+  const note = notes.find((line) => /late-reply tracking ended for 2 request/.test(line));
+  assert.ok(note, `teardown must name how many tracked requests it discarded: ${JSON.stringify(notes)}`);
+  assert.match(note, /'act' id 0/);
+  assert.match(note, /'observe' id 1/);
+  assert.match(note, /not attributed/);
+  assert.match(note, /engine client closed/, "it has to say what ended the window");
+
+  // The reported window really is closed: the same reply now reads as untracked.
+  io.send(JSON.stringify({ id: 0, result: { operationId: "op_too_late" } }));
+  assert.equal(seen.length, 0);
+  assert.ok(notes.some((line) => /never issued/.test(line)), JSON.stringify(notes));
+});
+
+test("a teardown with nothing tracked claims no discarded requests", async () => {
+  const io = new FakeLineIo();
+  const client = new EngineJsonRpcClient(io, 20);
+  const notes = [];
+  client.onEngineNote((note) => notes.push(note));
+  const answered = client.call("observe");
+  io.respond({ tree: [] });
+  await answered;
+  client.close();
+  assert.ok(!notes.some((note) => /late-reply tracking ended/.test(note)),
+    `the count has to be measured, not asserted up front: a teardown that reports discards it did not make is the same failure in the right shape: ${JSON.stringify(notes)}`);
+});
+
+/* ------------------------------------------------------------------ *
+ * R9-中2 — an `async` sink type-checks against `(reply) => void`, so its
+ * rejection is invisible to the `try`/`catch` around the call and escapes as an
+ * unhandled rejection: the MCP process dies with every request still pending.
+ * The mutation: delete the promise branch and leave the sync `catch` as the
+ * whole guard (this test then fails on the missing note, and on the unhandled
+ * rejection that node reports for the file).
+ * ------------------------------------------------------------------ */
+
+test("a late-reply sink that rejects asynchronously is reported, not left unhandled", async (t) => {
+  const io = new FakeLineIo();
+  const client = timedOutClient(t, io, 20);
+  const notes = [];
+  client.onEngineNote((note) => notes.push(note));
+  client.onLateReply(async () => {
+    throw new Error("sink rejected");
+  });
+
+  const promise = client.call("act", {}).catch(() => undefined);
+  const frame = io.lastFrame();
+  await expire(t, 20);
+  await promise;
+  io.send(JSON.stringify({ id: frame.id, result: { operationId: "op_x" } }));
+  await flush();
+
+  assert.ok(notes.some((note) => note.includes("late-reply sink failed") && note.includes("sink rejected")),
+    `an async sink's rejection must be named like a sync throw, not left to kill the process: ${JSON.stringify(notes)}`);
   const next = client.call("diagnose");
   io.respond({ class: "T1", report: {} });
   assert.deepEqual(await next, { class: "T1", report: {} });

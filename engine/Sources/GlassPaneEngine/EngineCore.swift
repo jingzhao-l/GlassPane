@@ -2359,6 +2359,22 @@ public final class EngineCore {
                 advice = "the target owns no on-screen window right now, which no permission grant can fix (the seat is verifiable with `glasspaned --check-screen-permission`): unminimise or reopen the window, or attach to the pid that owns it, then retry"
             case "pixel-capture-window-outside-display":
                 advice = "the window frame intersects no display, so the capture area is off every screen: move the window back on screen (or check its saved frame) and retry — the Screen Recording seat is not the problem, verify it with `glasspaned --check-screen-permission` if unsure"
+            // R9: `pixel-capture-no-surface` used to fall into `default:`, whose
+            // text sends the agent to re-grant Screen Recording and restart the
+            // daemon. The MCP shell forwards daemon remedies verbatim, so a
+            // covered window produced a restart order — and a restart cancels
+            // any act in flight. The classifier already rules on this label
+            // (`Classifier.pixelAbsentNextStep`); the advice must say the same
+            // thing the label does: the window is on screen, the cover is the
+            // cause, and no seat or daemon state is involved.
+            case "pixel-capture-no-surface":
+                advice = "the window is on screen — the daemon resolved it through SCShareableContent — but no picture of it exists: another window covers it and the window-isolated capture failed too. Nothing is minimised and no permission is missing, so there is nothing to re-grant here; bring the target above whatever covers it (raise it, click its title bar, or move the covering window aside) and retry. Until a capture succeeds the visual channel is not measured: read the structure with gp_observe and report the visual check as not-done rather than as passed"
+            case "pixel-capture-window-changed":
+                advice = "the frontmost window differed between the two captures, so there is no pixel pair to compare: keep the target window frontmost for the whole operation (a mid-operation click that moves focus re-triggers this) and retry; gp_observe confirms which window is frontmost without needing a capture"
+            case "pixel-capture-window-resized":
+                advice = "the window changed size during the operation, so the two captures share no pixel domain: retry while the window keeps its size — a live-autosizing or animating window will keep hitting this — or take a baseline with gp_snapshot before the operation and compare against the AX tree when the size cannot be held"
+            case "pixel-capture-failed":
+                advice = "the capture failed with a cause this classifier cannot name: the verbatim reason after the label is the daemon's own words and it is the only trustworthy guide here — act on what it states, confirm the seat reads back granted with `glasspaned --check-screen-permission` before changing anything about permissions, and report the visual channel as not measured until a capture succeeds"
             default:
                 advice = "\(seatAdvice); if that seat is already granted the failure is in the capture path itself, so read the reason above verbatim instead of re-granting"
             }

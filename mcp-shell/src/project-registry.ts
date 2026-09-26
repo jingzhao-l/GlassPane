@@ -34,7 +34,15 @@ import { daemonUnreachableRemedy } from "./engine-client.js";
 const CROCKFORD_BODY_RE = "[0-9A-HJKMNP-TV-Z]{26}";
 const PROJECT_ID_RE = new RegExp(`^prj_${CROCKFORD_BODY_RE}$`);
 
-const MAX_PROJECTS = 128;
+/**
+ * The registry's ceiling, and the number a `GP_E_PROJECT_LIMIT` reply states.
+ * Exported because `tools.ts` quotes it back to the agent in that code's remedy,
+ * and a limit nobody can name is a limit nobody can act around. The daemon keeps
+ * its own copy at `ProjectModels.ProjectEntry.maxProjects`; `test/tools.test.mjs`
+ * reads that literal out of the Swift source and fails if the two numbers differ,
+ * so neither side can move the ceiling without the other going red.
+ */
+export const MAX_PROJECTS = 128;
 const MAX_DISPLAY_NAME_LENGTH = 256;
 const MAX_FIELD_LENGTH = 1024;
 
@@ -170,15 +178,27 @@ function systemHome(): string {
 }
 
 /**
- * The file the *daemon* reads — `ProjectRegistry.defaultProjectsPath` in Swift.
- * It has no override of its own: {@link PROJECTS_FILE_ENV} is parsed by this
- * shell alone (R7-14), so a write aimed elsewhere is a write nothing loads.
+ * The file the daemon reads **when it was started with no state root of its
+ * own** — `ProjectRegistry.defaultProjectsPath` =
+ * `StateRoot.homeDefault().projectsFile` in Swift, which is what this function
+ * mirrors, home record included.
  *
- * Derived from {@link systemHome}, not from `$HOME`, because this is the
- * daemon's path and the daemon does not consult `$HOME`: with an overridden
- * `HOME` the old lookup named the sandbox file, which made both halves of that
- * promise false — a write into the sandbox was reported as the file the service
- * loads, and a write to the file it really loads was called a stray.
+ * It is the *default*, not the only root, and the distinction is load-bearing:
+ * `glasspaned --state-dir <path>` (parsed at `glasspaned/main.swift`, resolved
+ * through `StateRoot(path:)`) makes the service load `<path>/projects.json`
+ * instead — `ProjectRegistry(stateRoot:)` is the route every subcommand takes, so
+ * no command honours the flag and misses it. This shell cannot see that root: the
+ * daemon's method table is frozen and reports no state root over the socket, and
+ * guessing one from `$HOME` or from the environment is what this module refuses to
+ * do ({@link systemHome}). So this value answers "where the service writes by
+ * default", never "where the running service reads", and
+ * {@link daemonRestartNotice} says what to check when the two differ.
+ *
+ * Derived from {@link systemHome}, not from `$HOME`, because a root *this* process
+ * can move is not the daemon's default root: with an overridden `HOME` the old
+ * lookup named the sandbox file, which made both halves of the promise it was
+ * written for false — a write into the sandbox was reported as the file the
+ * service loads, and a write to the file it really loads was called a stray.
  */
 export function daemonProjectsPath(): string {
   return path.join(systemHome(), ".glasspane", "projects.json");
@@ -537,21 +557,55 @@ function assertSingleIdentity(entry: ProjectEntry): void {
  * surface needs the same distinction because gp_attach is answered by the
  * daemon's in-memory copy of this file.
  *
- * B-10: computed from the facts instead of asserted blindly, because the old
- * text was wrong in two ways. It promised that a restart makes the entry
- * visible for *any* path this shell had just written, while the daemon only
- * ever loads {@link daemonProjectsPath} — under {@link PROJECTS_FILE_ENV} the
- * shell is writing a file nothing reads, and no restart fixes that. And it
+ * B-10: computed from the facts instead of asserted blindly, because the old text
+ * was wrong twice over. It promised a restart surfaces *any* path this shell had
+ * just written, while {@link PROJECTS_FILE_ENV} is a file nothing reads; and it
  * prescribed a raw `launchctl kickstart`, which cannot work for a job that was
- * never bootstrapped; the shell already has a helper that hands over a restore
- * command covering that case, so the notice defers to it.
+ * never bootstrapped, so the notice defers to the helper that covers that case.
+ *
+ * Round 9 keeps both corrections and drops one premise: "the daemon loads
+ * {@link daemonProjectsPath} and nothing else" is only true of a service started
+ * with no state root. `glasspaned --state-dir <root>` makes it load
+ * `<root>/projects.json` (`ProjectRegistry(stateRoot:)`, and every subcommand
+ * resolves through the same root), and the socket cannot be asked which root the
+ * running job chose — the method table is frozen and reports no state root. So a
+ * notice that simply ordered a restart was telling an agent that restarting would
+ * help in the one case where it cannot, and a notice that said "this is the file
+ * the service loads" was naming a file the service may not load. Both branches
+ * therefore name the `--state-dir` case, hand over the one discriminator the
+ * surface actually has, and say what each outcome means:
+ * {@link rootDiscriminator}.
  */
 export function daemonRestartNotice(filePath: string): string {
   const daemonPath = daemonProjectsPath();
   if (path.resolve(filePath) !== path.resolve(daemonPath)) {
-    return `Saved in ${filePath}, but the background service never reads that file: it loads ${daemonPath} once when it starts (${PROJECTS_FILE_ENV} is honoured by this MCP shell only, not by the daemon), so gp_attach will keep returning GP_E_NOT_FOUND for this projectId and restarting the service will not help. Repeat the registration against ${daemonPath} — unset ${PROJECTS_FILE_ENV} for the shell, or write the entry where the daemon looks — and only then restart the background service so it reloads: ${restartCommand()}`;
+    return `Saved in ${filePath}. The background service does not read this path because of anything in its own configuration: its default root is the folder under this user's home record, where it loads ${daemonPath} once when it starts, and ${PROJECTS_FILE_ENV} — the variable that pointed this write here — is honoured by this MCP shell only, so as far as the service's own configuration goes it never reads that file, and no restart of the service will make it load this one. ${rootDiscriminator()} To land the entry where that default root looks: unset ${PROJECTS_FILE_ENV} for this shell (or point it at ${daemonPath}) and repeat gp_project_set, then restart the background service so it reloads — ${restartCommand()}`;
   }
-  return `Saved in ${filePath}, but the running background service loaded that file once when it started, so gp_attach will keep returning GP_E_NOT_FOUND for this projectId until the service restarts: ${restartCommand()}`;
+  return `Saved in ${filePath}, the projects file under the home record this user's state root defaults to. If this is the root the service was started on — which is not knowable from here — then the running background service loaded that file once when it started, so gp_attach will keep returning GP_E_NOT_FOUND for this projectId until the service restarts: ${restartCommand()}. ${rootDiscriminator()}`;
+}
+
+/**
+ * The check an agent can run itself, with what each outcome means.
+ *
+ * It is the only discriminator this surface has: `gp_project_list` reads the file
+ * this call wrote, and `gp_attach {projectId}` is answered by the running
+ * service's own copy. Written-and-listed plus a GP_E_NOT_FOUND attach is
+ * therefore not "the write failed" — it is the service and the shell looking at
+ * different files, and the two ways that happens need opposite answers: a service
+ * that predates the write is fixed by reloading it, and a service started with
+ * `--state-dir <root>` is not fixed by any restart, because every restart reads
+ * the same other file. Which of the two it is comes from reading the job's
+ * arguments (`launchctl print`), never from deriving a root here.
+ */
+function rootDiscriminator(): string {
+  return "Tell the two cases apart with the service's own answer: gp_project_list reads the file this call wrote, so an entry it lists is on disk, and gp_attach {projectId} is answered by the running service — an entry the list shows plus an attach that answers GP_E_NOT_FOUND means the service is loading a different projects.json than the one this write reached, not that the write failed. "
+    + "Which file the running service loads is one thing this shell cannot see and will not guess from $HOME: `glasspaned --state-dir <root>` moves it to <root>/projects.json, and the socket reports no state root. Read it instead of deriving it — `launchctl print gui/"
+    + currentUid()
+    + "/com.glasspane.daemon` prints the arguments the job was started with. "
+    + "If those arguments name a --state-dir, the entry has to go into that root's projects.json (repeat gp_project_set with "
+    + PROJECTS_FILE_ENV
+    + " pointed at <that root>/projects.json): no restart of the service will make it read anywhere else, so restarting again changes nothing. "
+    + "If they name no --state-dir, the service is on the default root and simply predates this write, and one restart with the command in this notice is what surfaces it.";
 }
 
 /** The restart instruction, including the case where kickstart cannot work. */
