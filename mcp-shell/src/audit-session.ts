@@ -22,6 +22,13 @@ export interface TrailTurn {
   release(): void;
 }
 
+/** Where a late arrival ended up: written, or refused because a re-attach got there first. */
+export interface LateArrivalOutcome {
+  written: boolean;
+  /** The trail generation in force at the moment of the decision. */
+  generationAtWrite: number;
+}
+
 /** A claimed position whose holder has not released yet. */
 interface TrailGate {
   settled: Promise<void>;
@@ -137,12 +144,30 @@ export class EvidenceAuditSession {
    * exist to prevent. Claiming on arrival gives the only honest position left:
    * behind whatever is still outstanding, and ordered among late arrivals by
    * when they arrived.
+   *
+   * `admittedUnderGeneration` is compared **inside** that wait (see the body):
+   * the position and the epoch can only be judged at the moment the write
+   * actually happens.
    */
-  recordLateArrival(result: unknown): Promise<void> {
+  recordLateArrival(
+    result: unknown,
+    admittedUnderGeneration?: number,
+  ): Promise<LateArrivalOutcome> {
     const turn = this.claimTrailTurn();
     return turn.acquire().then(() => {
       try {
+        // Re-checked **after** the wait, because the wait is the whole point of
+        // the turn: a re-attach admitted before this reply landed may still be
+        // outstanding, and when its reply lands the trail restarts. Judging the
+        // epoch at arrival would let the late write queue behind that reset and
+        // then land in the successor app's trail anyway — measured, not
+        // hypothetical: an operation from app A appeared in app B's trail with
+        // only the arrival-time check in place.
+        if (admittedUnderGeneration !== undefined && admittedUnderGeneration !== this.epoch) {
+          return { written: false, generationAtWrite: this.epoch };
+        }
         this.record(result);
+        return { written: true, generationAtWrite: this.epoch };
       } finally {
         // Released in every outcome: a turn that never released would hold up
         // every later trail-scoped call, which is a worse failure than losing

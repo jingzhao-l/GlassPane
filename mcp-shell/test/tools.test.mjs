@@ -1114,3 +1114,48 @@ test("gp_attach refuses a bundleId and a pid together rather than attaching the 
   assert.deepEqual(attach.inputSchema.oneOf, [{ required: ["bundleId"] }, { required: ["pid"] }],
     "advertising 的 oneOf 就是恰好一个，zod 不得比它宽松");
 });
+
+test("a late reply that arrives while an attach is in flight cannot overtake its reset", async () => {
+  const { io, engine } = makeEngine();
+  const notes = [];
+  const { session } = createTrackedMcpServer(engine, (note) => notes.push(note));
+  const attach = TOOL_BY_NAME.get("gp_attach");
+  const OP_BEFORE_B = "op_55555555555555555555555555";
+
+  // Session belongs to A.
+  let p1 = executeTool(attach, { bundleId: ATTACH_A.bundleId }, engine, session);
+  await flush();
+  io.respond(ATTACH_A);
+  await p1;
+
+  // An act under A, answered only after its deadline (that is the late-reply case).
+  const actFrame = await admitAct(io, engine, session);
+
+  // Re-attach to B, admitted and **not yet answered**: its trail turn is open, and
+  // the reset happens when its reply lands.
+  const attachB = executeTool(attach, { bundleId: ATTACH_B.bundleId }, engine, session);
+  await flush();
+
+  // The late reply lands in this window. Its epoch still matches at arrival — the
+  // only honest check is the epoch **after** the write acquires its turn, because
+  // the turn is what orders it against the reset.
+  io.send(JSON.stringify({ id: actFrame.id, result: { operationId: OP_BEFORE_B } }));
+  await flush();
+
+  const attachFrame = JSON.parse(io.sent[io.sent.length - 1]);
+  assert.equal(attachFrame.method, "attach");
+  io.respond(ATTACH_B);
+  await attachB;
+  await flush();
+
+  assert.deepEqual(
+    session.recentIds(20), [],
+    "A 的操作不得越过 B 的 attach 落进新链：纪元复查必须发生在取得 trail turn 之后",
+  );
+  // 两条拒绝路径（到达时就发现 / 等到 turn 之后才发现）措辞不同，但都必须说得出
+  // "没写进去"并且点名被丢掉的操作，否则代理只会看到一个凭空消失的动作。
+  const refusal = notes.find((note) => note.includes("not recorded"));
+  assert.ok(refusal, `拒绝必须说出口，不能静默写入也不能静默丢弃：${JSON.stringify(notes)}`);
+  assert.ok(refusal.includes(OP_BEFORE_B), "要说清楚丢掉的是哪个操作");
+  assert.match(refusal, /superseded attach|chain restarted/, `必须说清被谁取代：${refusal}`);
+});

@@ -278,6 +278,9 @@ export function createTrackedMcpServer(
   const session = new EvidenceAuditSession();
   engine.onLateReply(({ method, result, correlation }) => {
     if (correlation !== undefined && correlation !== session.generation) {
+      // Fast path only: the authoritative comparison happens inside
+      // `recordLateArrival`, after the write has taken its turn. This one exists
+      // so an obviously-superseded reply does not queue at all.
       // The request was admitted under an earlier attach. Writing its
       // operationId into the trail now would put an operation from the previous
       // app into the new app's history, which is what the trail's whole
@@ -294,12 +297,29 @@ export function createTrackedMcpServer(
       );
       return;
     }
-    session.recordLateArrival(result).catch((error: unknown) => {
-      // Reported, never swallowed: the reply body itself is already in the log
-      // line the client emitted before calling this sink, so this one says
-      // specifically that the *trail write* failed.
-      report(`late reply could not be recorded in this session's trail: ${String(error)}`);
-    });
+    void session.recordLateArrival(result, correlation).then(
+      (outcome) => {
+        if (outcome.written) {
+          return;
+        }
+        const ids = operationIds(result);
+        report(
+          `late reply to '${method}' was admitted under trail generation ${correlation ?? "?"} and the `
+          + `chain restarted at ${outcome.generationAtWrite} while it waited: not recorded, and `
+          + `gp_recent_reports will not list it`
+          + (ids.length > 0
+            ? `; the operations it named are ${ids.join(", ")} — fetch one with gp_last_evidence while the `
+              + "daemon still holds it"
+            : "; the frame named no operationId, so there is nothing to fetch back"),
+        );
+      },
+      (error: unknown) => {
+        // Reported, never swallowed: the reply body itself is already in the log
+        // line the client emitted before calling this sink, so this one says
+        // specifically that the *trail write* failed.
+        report(`late reply could not be recorded in this session's trail: ${String(error)}`);
+      },
+    );
   });
   return { server: new McpServer({ engine, session, report }), session };
 }
