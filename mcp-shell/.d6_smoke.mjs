@@ -2,12 +2,12 @@
 // gp_attach -> gp_act -> gp_export_evidence(markdown/html)，断言四段报告可见。
 // 经由 dist 里的真实 McpServer + EngineClient 走与 CLI 完全相同的代码路径。
 import process from "node:process";
-import { unixSocketEngineClient } from "./dist/engine-client.js";
-import { McpServer } from "./dist/dispatch.js";
+import { defaultSocketPath, unixSocketEngineClient } from "./dist/engine-client.js";
+import { createTrackedMcpServer } from "./dist/dispatch.js";
 
-const socketPath = process.argv[2] ?? `${process.env.HOME}/.glasspane/engine.sock`;
+const socketPath = process.argv[2] ?? defaultSocketPath();
 const engine = unixSocketEngineClient(socketPath);
-const server = new McpServer({ engine });
+const server = createTrackedMcpServer(engine, (note) => process.stderr.write(`${note}\n`)).server;
 
 let nextId = 0;
 const req = (method, params) =>

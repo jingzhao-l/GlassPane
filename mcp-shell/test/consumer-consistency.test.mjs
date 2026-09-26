@@ -12,6 +12,8 @@ import {
 import { canonicalJson } from "../dist/canonical.js";
 import { EvidenceAuditSession } from "../dist/audit-session.js";
 import { RESTORE_MODES, TOOL_BY_NAME, executeTool } from "../dist/tools.js";
+import { LineReader, MAX_FRAME_BYTES } from "../dist/io.js";
+import { executableSource } from "./support/source.mjs";
 import { makeEngine } from "./helpers.mjs";
 
 /**
@@ -39,6 +41,13 @@ import { makeEngine } from "./helpers.mjs";
  * schema froze (legacy `0.1-draft` label, `pixelDiff.bounds` omitted instead of
  * null). Both are exercised here, because the shell's job is to let a user read
  * their own audit trail *and* to refuse off-contract bodies.
+ *
+ * The last layer below is a different kind of consumer consistency: the framing
+ * both processes speak. `MAX_FRAME_BYTES` (this shell) and
+ * `FrameCodec.maxFrameBytes` (the daemon) are one protocol fact written twice, and
+ * until now no test compared them — see the section's own header for why reading
+ * the *guard*, not just the number, is the part that makes the comparison mean
+ * something.
  */
 
 function fixture(relativePath) {
@@ -359,4 +368,192 @@ test("every advertised restore mode passes the validator and is forwarded verbat
     io.respond({ snapshotId, confirmed: 0, total: 0 });
     assert.equal((await promise).isError, false, `${mode} is a mode the daemon documents`);
   }
+});
+
+/* ------------------------------------------------------------------ *
+ * The frame cap: ONE byte count, written twice in two languages
+ * (`mcp-shell/src/io.ts` `MAX_FRAME_BYTES`, `FrameCodec.swift`
+ * `maxFrameBytes`), and until now kept in sync by a comment on each side
+ * that named the other one. A comment cannot be run, so this reads the
+ * number out of both sources, evaluates it, and then checks that the
+ * number it got is the one each side's *guard* compares against — not a
+ * leftover literal elsewhere in the same file — and that this shell's
+ * reader actually cuts at the daemon's value.
+ * ------------------------------------------------------------------ */
+
+/** The byte-count declarations this gate resolves, and where they live. */
+const FRAME_CAP_DECLARATIONS = {
+  MAX_FRAME_BYTES: { file: "../src/io.ts", declaration: "MAX_FRAME_BYTES" },
+  maxFrameBytes: {
+    file: "../../engine/Sources/GlassPaneEngine/FrameCodec.swift",
+    declaration: "maxFrameBytes",
+  },
+};
+
+/**
+ * The judgements that consume the cap. Each is the statement that decides
+ * whether a line is delivered or dropped, matched against comment-stripped
+ * source so prose that quotes the cap (`FrameCodec.swift`'s own header, and
+ * `PngEncoder.swift`'s "`FrameCodec.maxFrameBytes = 4 MB`") cannot be read as a
+ * second declaration, and requiring the operand to be a *named constant* so a
+ * guard re-pointed at a literal or at another constant of the same file fails
+ * here instead of silently changing what this compares.
+ *
+ * The shell has no outbound cap of its own (`StreamLineIo.writeLine` writes
+ * whatever it is given), so the shell half of the pair is its inbound reject —
+ * which is also what bounds what it will accept back, and what its remedy text
+ * quotes (`GP_E_PAYLOAD_TOO_LARGE`).
+ */
+const FRAME_CAP_CRITERIA = [
+  {
+    role: "this shell's inbound reject (LineReader.consume → onOversize)",
+    file: "../src/io.ts",
+    site: /if\s*\(\s*this\.bytes\s*\+\s*segmentBytes\s*>\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)/,
+  },
+  {
+    role: "the daemon's inbound reject (FrameCodec.append → .oversize)",
+    file: "../../engine/Sources/GlassPaneEngine/FrameCodec.swift",
+    site: /if\s+buffer\.count\s*>\s*(?:Self|FrameCodec)\.([A-Za-z_][A-Za-z0-9_]*)/,
+  },
+  {
+    role: "the daemon's outbound reject (Dispatcher.response guard)",
+    file: "../../engine/Sources/GlassPaneEngine/Dispatcher.swift",
+    site: /guard\s+data\.count\s*\+\s*1\s*<=\s*FrameCodec\.([A-Za-z_][A-Za-z0-9_]*)\s+else\b/,
+  },
+];
+
+/**
+ * One byte-count declaration, read from `file` and *evaluated*.
+ *
+ * Evaluated rather than string-compared because both sides spell the number as an
+ * expression today, and a gate that read the spelling would fire on `1024 * 1024 *
+ * 4` or `4_194_304` — false alarms are how a guard like this ends up deleted. The
+ * evaluator is a sum of products of integers, written out on purpose: a byte count
+ * this file has to `eval` to read is a byte count it should not be claiming.
+ */
+function frameCapBytes(file, declaration) {
+  const source = executableSource(readFileSync(new URL(file, import.meta.url), "utf8"));
+  const pattern = new RegExp(`\\b${declaration}\\b\\s*(?::[^=]*)?=\\s*([0-9][0-9_ *+]*)`, "g");
+  const hits = [...source.matchAll(pattern)];
+  assert.equal(
+    hits.length,
+    1,
+    `${file} has to declare \`${declaration}\` exactly once, as a readable byte count ` +
+    `(found ${hits.length}: ${JSON.stringify(hits.map((hit) => hit[1].trim()))}). Zero means the cap ` +
+    `moved or stopped being a literal — point this gate at its new home and say why; more than one ` +
+    `means one file now holds two answers to the same question`,
+  );
+  const expression = hits[0][1].trim();
+  assert.match(
+    expression,
+    /^[0-9][0-9_]*(?:\s*[*+]\s*[0-9][0-9_]*)*$/,
+    `${file}: \`${declaration} = ${expression}\` is not a product/sum of integers, so this gate ` +
+    `refuses to guess what byte count it means`,
+  );
+  return expression
+    .split("+")
+    .map((term) => term
+      .split("*")
+      .reduce((total, factor) => total * Number(factor.trim().replace(/_/g, "")), 1))
+    .reduce((total, term) => total + term, 0);
+}
+
+/* ------------------------------------------------------------------ *
+ * R8b: the PNG budget and the frame cap are two numbers with one
+ * inequality between them, and until now nothing wrote that inequality
+ * down. `PngEncoding.defaultMaxBytes` (2.4 MB) exists *because*
+ * `FrameCodec.maxFrameBytes` is 4 MiB and base64 inflates a body by 4/3
+ * (PngEncoder.swift's own comment). Raise the budget past ~3.1 MB and every
+ * `capture_view` reply is dropped by the framing layer as oversize — while the
+ * 4 MiB three-way gate added above stays green, because both of *its* numbers
+ * are still 4 MiB. That is the shape this guard exists for.
+ * ------------------------------------------------------------------ */
+
+test("the PNG budget still fits the frame cap after base64 inflation", () => {
+  const budget = frameCapBytes("../../engine/Sources/GlassPaneEngine/PngEncoder.swift", "defaultMaxBytes");
+  const frame = frameCapBytes("../../engine/Sources/GlassPaneEngine/FrameCodec.swift", "maxFrameBytes");
+  // Integer arithmetic, no floating point: `* 4 <= * 3` is the same statement as
+  // "budget × 4/3 fits", without rounding a threshold into a silent off-by-one.
+  assert.ok(
+    budget * 4 <= frame * 3,
+    `base64 后是 ${(budget * 4 / 3).toFixed(0)} 字节，帧上限只有 ${frame}：`
+    + "每一帧 capture_view 都会被 Framing 层丢掉，而两条 cap 自己仍然相等",
+  );
+  // The comment promises the JSON envelope gets headroom too; say how much, so a
+  // future raise is a decision with a number attached rather than a guess.
+  const headroom = frame - Math.ceil(budget * 4 / 3);
+  assert.ok(headroom > 0, `信封余量已经用尽（headroom=${headroom}）`);
+  // And the TS side must not be carrying its own copy of the budget number.
+  const tsSources = ["../src/tools.ts", "../src/engine-client.ts", "../src/http-gateway.ts"];
+  const restated = tsSources.filter((file) => readFileSync(new URL(file, import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "").includes(String(budget)));
+  assert.deepEqual(restated, [],
+    `TS 侧把 PNG 预算抄成了字面量，Swift 一改这里就悄悄过期：${restated.join(", ")}`);
+});
+
+test("the frame cap is one byte count across both languages, and each guard uses that one", () => {
+  const readings = FRAME_CAP_CRITERIA.map((criterion) => {
+    const source = executableSource(readFileSync(new URL(criterion.file, import.meta.url), "utf8"));
+    const site = criterion.site.exec(source);
+    assert.ok(
+      site,
+      `${criterion.role} no longer compares against a named constant, so nothing here can say which ` +
+      `number decides an oversize frame. Either the guard started spelling a literal or it moved: in ` +
+      `both cases the two sides need re-pointing at each other rather than left to match by hope`,
+    );
+    const declared = FRAME_CAP_DECLARATIONS[site[1]];
+    assert.ok(
+      declared,
+      `${criterion.role} judges with \`${site[1]}\`, which this gate cannot resolve to the cap — a ` +
+      `second constant took over the guard, or the cap's declaration changed name. Add the real one ` +
+      `to FRAME_CAP_DECLARATIONS with the file that declares it and why it is the same rule`,
+    );
+    return { ...criterion, symbol: site[1], bytes: frameCapBytes(declared.file, declared.declaration) };
+  });
+
+  const values = [...new Set(readings.map((one) => one.bytes))];
+  assert.equal(
+    values.length,
+    1,
+    `the frame cap is not one number any more:\n` +
+      readings.map((one) => `  ${one.role} → ${one.symbol} = ${one.bytes}`).join("\n") +
+      `\nTwo caps means a frame the daemon answers with GP_E_PAYLOAD_TOO_LARGE and this shell ` +
+      `buffers, or the reverse — the drift a comment on each side was supposed to prevent`,
+  );
+  const cap = values[0];
+  assert.ok(
+    Number.isSafeInteger(cap) && cap > 0,
+    `a frame cap of ${cap} is not a byte count any transport can honour`,
+  );
+
+  // The declaration is read from source, so the module this shell actually loads
+  // has to agree with it: an edited-but-unbuilt file, or a second cap exported
+  // from somewhere else, would otherwise pass on the strength of prose.
+  assert.equal(
+    MAX_FRAME_BYTES,
+    cap,
+    `the shell's loaded MAX_FRAME_BYTES (${MAX_FRAME_BYTES}) is not the ${cap} its source declares`,
+  );
+
+  // And the loaded number is the one the reader *cuts at*, measured against the
+  // daemon's value rather than against the constant imported next to it — one
+  // byte either side of the boundary, both directions asserted.
+  const lines = [];
+  const oversize = [];
+  const reader = new LineReader({
+    onLine: (line) => lines.push(line.length),
+    onOversize: (bytes) => oversize.push(bytes),
+  });
+  reader.push(`${"z".repeat(cap)}\n`);
+  assert.deepEqual(
+    { lines, oversize },
+    { lines: [cap], oversize: [] },
+    `a frame of exactly the daemon's cap must be a frame here, not an oversize`,
+  );
+  reader.push(`${"z".repeat(cap + 1)}\n`);
+  assert.deepEqual(
+    { lines, oversize },
+    { lines: [cap], oversize: [cap + 1] },
+    `one byte past the daemon's cap must be dropped here, with its size reported`,
+  );
 });

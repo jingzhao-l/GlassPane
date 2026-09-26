@@ -2,7 +2,12 @@
 import process from "node:process";
 
 import { canonicalJson } from "./canonical.js";
-import { INVALID_REQUEST, JSONRPC, McpServer, SERVER_INFO } from "./dispatch.js";
+import {
+  createTrackedMcpServer,
+  INVALID_REQUEST,
+  JSONRPC,
+  SERVER_INFO,
+} from "./dispatch.js";
 import {
   defaultSocketPath,
   EngineJsonRpcClient,
@@ -145,7 +150,10 @@ function main(): void {
   const queue = new OrderedReplyQueue((error) => logNote(`reply failed: ${String(error)}`));
   engine.onEngineNote(logNote);
 
-  const server = new McpServer({ engine });
+  // One shared audit session plus the late-reply sink; see
+  // `createTrackedMcpServer` for why that wiring is a production seam and not
+  // four lines in here.
+  const server = createTrackedMcpServer(engine, logNote).server;
 
   /** One framed reply on stdout; a notification/blank line has none to write. */
   const writeResponse = async (response: unknown): Promise<void> => {

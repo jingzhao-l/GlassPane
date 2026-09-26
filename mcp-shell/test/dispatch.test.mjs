@@ -2,11 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  createTrackedMcpServer,
   McpServer,
   MCP_PROTOCOL_VERSION,
   SERVER_INFO,
   SUPPORTED_PROTOCOL_VERSIONS,
 } from "../dist/dispatch.js";
+import { EvidenceAuditSession } from "../dist/audit-session.js";
 import { OrderedReplyQueue } from "../dist/io.js";
 import { makeEngine } from "./helpers.mjs";
 
@@ -14,7 +16,7 @@ const enq = (obj) => JSON.stringify(obj);
 
 function makeServer(timeoutMs = 500) {
   const { engine, io } = makeEngine({ timeoutMs });
-  const server = new McpServer({ engine });
+  const server = new McpServer({ engine, session: new EvidenceAuditSession() });
   return { server, engine, io };
 }
 
@@ -532,4 +534,58 @@ test("an outstanding gp_act does not hold back ping or tools/list", async () => 
   await drainAll(queue);
   assert.deepEqual(reported.map((e) => e.message), ["handleLine blew up", "stdout rejected"]);
   assert.equal(reached, true, "a poisoned chain would stop every later reply");
+});
+/* ------------------------------------------------------------------ *
+ * R8-中5: a notification gets no answer per JSON-RPC, which is exactly why it
+ * needs a log line — otherwise `notifications/cancelled` (a client saying it has
+ * given up) disappears while the daemon request it refers to keeps acting on the
+ * user's screen.
+ * ------------------------------------------------------------------ */
+
+test("notifications/cancelled is reported, and still gets no response frame", async () => {
+  const { engine } = makeEngine();
+  const notes = [];
+  const server = createTrackedMcpServer(engine, (note) => notes.push(note)).server;
+
+  const response = await server.handleLine(JSON.stringify({
+    jsonrpc: "2.0",
+    method: "notifications/cancelled",
+    params: { requestId: 7, reason: "user stopped it" },
+  }));
+  assert.equal(response, null, "notification 不得有回复帧");
+  assert.equal(notes.length, 1, `撤销通知一条日志都没有：${JSON.stringify(notes)}`);
+  assert.ok(notes[0].includes("notifications/cancelled") && notes[0].includes("7"), notes[0]);
+  assert.match(notes[0], /cannot cancel what the daemon is already doing/);
+  assert.match(notes[0], /A cancel is not an undo/);
+});
+
+test("an unimplemented notification is reported as dropped, initialized excluded", async () => {
+  const { engine } = makeEngine();
+  const notes = [];
+  const server = createTrackedMcpServer(engine, (note) => notes.push(note)).server;
+
+  assert.equal(await server.handleLine(JSON.stringify({
+    jsonrpc: "2.0", method: "notifications/initialized",
+  })), null);
+  assert.deepEqual(notes, [], "initialized 是本壳预期内的通知，不该制造噪音");
+
+  assert.equal(await server.handleLine(JSON.stringify({
+    jsonrpc: "2.0", method: "notifications/progress", params: {},
+  })), null);
+  assert.equal(notes.length, 1, `未实现的通知必须留下痕迹：${JSON.stringify(notes)}`);
+  assert.ok(notes[0].includes("notifications/progress") && notes[0].includes("dropped"), notes[0]);
+});
+
+test("a session-less McpServer is refused at runtime, not just in types", () => {
+  const { engine } = makeEngine();
+  // The types make `session` required; these tests are JavaScript, and so is
+  // every real consumer of `dist`. Without a runtime check, `new McpServer({
+  // engine })` would build a server whose trail is a fresh object per call —
+  // operations vanish and nothing is reported.
+  assert.throws(() => new McpServer({ engine }), /requires a shared EvidenceAuditSession/);
+  assert.throws(
+    () => new McpServer({ engine, session: undefined }),
+    /createTrackedMcpServer/,
+    "拒绝信息必须点名该用哪个接缝",
+  );
 });

@@ -1,6 +1,6 @@
 import { EngineJsonRpcClient } from "./engine-client.js";
 import { executeTool, TOOL_SPECS, ToolSpec } from "./tools.js";
-import { EvidenceAuditSession } from "./audit-session.js";
+import { EvidenceAuditSession, operationIds } from "./audit-session.js";
 
 /* ------------------------------------------------------------------ *
  * JSON-RPC 2.0 message shapes (spec §6.1).
@@ -33,7 +33,7 @@ export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = [
   "2025-03-26",
   MCP_PROTOCOL_VERSION,
 ] as const;
-export const SERVER_INFO = { name: "glasspane-mcp", version: "1.2.0" } as const;
+export const SERVER_INFO = { name: "glasspane-mcp", version: "1.3.0" } as const;
 
 export const PARSE_ERROR = -32700;
 export const INVALID_REQUEST = -32600;
@@ -67,8 +67,23 @@ interface IncomingRequest {
 export interface McpServerDeps {
   engine: EngineJsonRpcClient;
   specs?: readonly ToolSpec[];
-  /** Overridable audit session (per-server operationId trail, spec v1.3 §10.3). */
-  session?: EvidenceAuditSession;
+  /**
+   * The per-server operationId trail (spec v1.3 §10.3). **Required**: it used to
+   * be optional with a `?? new EvidenceAuditSession()` default, which let a
+   * server be built with a trail nobody else holds a reference to — every tool
+   * result then looked correct while `gp_recent_reports` answered from an empty
+   * trail, and the late-reply sink was wired to a *different* session. The
+   * composition is `createTrackedMcpServer`'s job now, so the default had no
+   * legitimate user (R8b-低).
+   */
+  session: EvidenceAuditSession;
+  /**
+   * Sink for facts the protocol gives no answer to: a notification this shell
+   * does not act on. Without it `notifications/cancelled` — a client saying it
+   * has given up on a request — vanished with zero trace while the daemon
+   * request it refers to stayed in flight and kept acting on the user's screen.
+   */
+  report?: (note: string) => void;
 }
 
 export class McpServer {
@@ -76,8 +91,19 @@ export class McpServer {
   private readonly session: EvidenceAuditSession;
 
   constructor(private readonly deps: McpServerDeps) {
+    // Checked at runtime, not only in types: every caller that matters here is
+    // JavaScript (`dist` consumers, the smoke scripts, the tests), where a
+    // missing `session` would compile forever and fall back to a per-call trail
+    // that silently loses operations. Refusing is the only way the requirement
+    // exists outside the editor.
+    if (!deps.session) {
+      throw new Error(
+        "McpServer requires a shared EvidenceAuditSession: build it with "
+        + "createTrackedMcpServer(engine, report), which also wires the late-reply sink",
+      );
+    }
     this.specs = deps.specs ?? TOOL_SPECS;
-    this.session = deps.session ?? new EvidenceAuditSession();
+    this.session = deps.session;
   }
 
   /** Handle a single newline-delimited frame; returns a response or null. */
@@ -116,7 +142,28 @@ export class McpServer {
   }
 
   private async handleNotification(request: IncomingRequest): Promise<void> {
-    // no-op: only `notifications/initialized` is expected at P0; nothing to do.
+    // Nothing is *done* with a notification: only `notifications/initialized`
+    // was expected at P0, and answering one would be a protocol error. But
+    // `notifications/cancelled` is a client saying it has given up on a request
+    // this shell may well have already forwarded to the daemon — and the daemon
+    // is single-connection and still acting on it. Dropping that silently left
+    // no trace of the most confusing state an operator can hit ("I cancelled,
+    // why did it still click?"), so it is reported. R8b-中5.
+    const method = request.method;
+    if (method === "notifications/cancelled") {
+      const params = request.params as { requestId?: unknown } | undefined;
+      const target = params && params.requestId !== undefined ? String(params.requestId) : "<no requestId>";
+      this.deps.report?.(
+        `received notifications/cancelled for request ${target}; this shell cannot cancel what the daemon is `
+        + "already doing, so if that request had been forwarded it is still running and can still change the "
+        + "user's screen \u2014 its reply will be attributed and recorded when it lands. A cancel is not an undo",
+      );
+    } else if (method !== "notifications/initialized") {
+      this.deps.report?.(
+        `notification '${String(method)}' is not implemented by this shell and was dropped without an answer `
+        + "(notifications never get one); nothing was done with it",
+      );
+    }
   }
 
   private async dispatch(request: IncomingRequest, id: number | string): Promise<RpcResponse> {
@@ -206,4 +253,53 @@ export class McpServer {
   private error(code: number, message: string, id: number | string | null): RpcResponse {
     return { jsonrpc: JSONRPC, id, error: { code, message } };
   }
+}
+
+/**
+ * Wire an engine client to a server over one shared audit session, including the
+ * late-reply sink (R8-高3).
+ *
+ * This is a function rather than four lines inside `main()` so that the test for
+ * "a reply that lands after the caller was answered still reaches the trail"
+ * drives **the** wiring an MCP client actually gets. Inlining it would leave the
+ * only copy of that decision in a file that runs `main()` on import, i.e. a fix
+ * on a path no test can execute.
+ *
+ * The session is created here and handed to `McpServer` rather than left to its
+ * default, because the engine client must reach the *same* instance: a late
+ * reply names an operation that really ran, and the only place an agent can get
+ * that back from is this trail (`gp_recent_reports`). A sink that recorded into
+ * a second session would look fixed and change nothing.
+ */
+export function createTrackedMcpServer(
+  engine: EngineJsonRpcClient,
+  report: (note: string) => void,
+): { server: McpServer; session: EvidenceAuditSession } {
+  const session = new EvidenceAuditSession();
+  engine.onLateReply(({ method, result, correlation }) => {
+    if (correlation !== undefined && correlation !== session.generation) {
+      // The request was admitted under an earlier attach. Writing its
+      // operationId into the trail now would put an operation from the previous
+      // app into the new app's history, which is what the trail's whole
+      // request-order machinery exists to prevent (R8b-高1). Saying so is the
+      // point: the alternative is a late id that silently never appears.
+      const ids = operationIds(result);
+      report(
+        `late reply to '${method}' belongs to a superseded attach (trail generation ${correlation}, current `
+        + `${session.generation}): not recorded, and gp_recent_reports will not list it`
+        + (ids.length > 0
+          ? `; the operations it named are ${ids.join(", ")} — fetch one with gp_last_evidence while the `
+            + "daemon still holds it"
+          : "; the frame named no operationId, so there is nothing to fetch back"),
+      );
+      return;
+    }
+    session.recordLateArrival(result).catch((error: unknown) => {
+      // Reported, never swallowed: the reply body itself is already in the log
+      // line the client emitted before calling this sink, so this one says
+      // specifically that the *trail write* failed.
+      report(`late reply could not be recorded in this session's trail: ${String(error)}`);
+    });
+  });
+  return { server: new McpServer({ engine, session, report }), session };
 }

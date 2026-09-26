@@ -13,7 +13,16 @@ import {
 
 import { canonicalJson } from "./canonical.js";
 import { daemonUnreachableRemedy, EngineCallError, EngineJsonRpcClient } from "./engine-client.js";
-import { formatToolError, formatToolErrorShape, GP_E_BAD_PARAMS, GP_E_INTERNAL, GP_E_NO_EVIDENCE, GP_E_NOT_FOUND, GP_E_PROJECT_LIMIT } from "./errors.js";
+import {
+  formatToolError,
+  formatToolErrorShape,
+  GP_E_BAD_PARAMS,
+  GP_E_INTERNAL,
+  GP_E_NO_EVIDENCE,
+  GP_E_NOT_FOUND,
+  GP_E_NO_USER_RECORD,
+  GP_E_PROJECT_LIMIT,
+} from "./errors.js";
 import { EvidenceAuditSession, type TrailTurn } from "./audit-session.js";
 import { renderHTML, renderMarkdown, escapeHTML } from "./evidence-report.js";
 import type { EvidencePackReportView } from "./evidence-report.js";
@@ -79,8 +88,16 @@ export const AttachArgs = z.strictObject({
   bundleId: OptionalBundleIdSchema,
   pid: OptionalPidSchema,
   projectId: OptionalProjectIdSchema,
-}).refine((v) => v.bundleId !== undefined || v.pid !== undefined, {
-  message: "attach requires either bundleId or pid",
+}).refine((v) => (v.bundleId === undefined) !== (v.pid === undefined), {
+  // Exclusive, not merely "at least one" (R8-中6). The advertised JSON Schema
+  // below already says `oneOf` (exactly one), and the daemon resolves both
+  // fields by *preferring pid and ignoring bundleId*
+  // (`AXChannel.resolveRunningApplication`: `if let pid { … } if let bundleId { … }`).
+  // So the loose zod rule let an agent name two different apps and get the one
+  // it did not mean, attached, and acting on the user's screen — with the reply
+  // naming only one of them. Refusing is the only answer that cannot mislead.
+  message: "attach takes exactly one of bundleId or pid, not both and not neither",
+  path: ["bundleId"],
 });
 export type AttachArgs = z.infer<typeof AttachArgs>;
 
@@ -637,6 +654,35 @@ export function trailScopedTool(spec: ToolSpec): boolean {
   );
 }
 
+/**
+ * The attach result's app identity, keyed by **every** stored property of the
+ * daemon's `AttachedApp` (`pid`, `bundleId`, `appName`) — that struct's
+ * `Equatable` conformance is precisely what decides whether `EngineCore.attach`
+ * clears the daemon's evidence history, so a key that left a field out would
+ * keep this trail across a change the daemon did clear, and the next app would
+ * read the previous app's operations as its own.
+ *
+ * Null means the reply did not identify the app (no `pid` or no `appName`):
+ * unknown is treated as *changed*, because an identity that cannot be compared
+ * cannot be shown to be the same one. `test/attach-identity.test.mjs` reads the
+ * Swift struct and fails if the key ever covers fewer fields than it stores.
+ */
+export function attachIdentityOf(result: unknown): string | null {
+  if (typeof result !== "object" || result === null) {
+    return null;
+  }
+  const record = result as Record<string, unknown>;
+  const pid = typeof record.pid === "number" ? String(record.pid) : null;
+  const appName = typeof record.appName === "string" ? record.appName : null;
+  if (pid === null || appName === null) {
+    return null;
+  }
+  // `nil` bundleId is a value of its own here: Swift compares the optional, so
+  // "no bundle id" attached twice is the same app, not a change.
+  const bundleId = typeof record.bundleId === "string" ? record.bundleId : "<no-bundle-id>";
+  return `${pid}|${bundleId}|${appName}`;
+}
+
 /** Read the trail once this call's turn comes up, i.e. in request order. */
 async function readTrail(
   session: EvidenceAuditSession,
@@ -710,15 +756,23 @@ async function runValidatedTool(
   }
 
   try {
-    const raw = await engine.call(spec.engineMethod, value);
+    // `session.generation` travels with the request so a reply that lands after
+    // this caller was answered can be judged against the trail it belongs to
+    // (R8b-高1, `EngineJsonRpcClient.call`'s correlation).
+    const raw = await engine.call(spec.engineMethod, value, session.generation);
     // Everything below touches the trail, so it waits for its turn: this is
     // where completion order is turned back into request order.
     await turn.acquire();
     try {
       if (spec.name === "gp_attach") {
-        // A successful attach invalidates the daemon's evidence history, so
-        // the session trail starts fresh (spec v1.3 §10.3).
-        session.reset();
+        // The trail restarts when the *attached app* changes, which is the
+        // daemon's own condition (`if attachedApp != app { history.removeAll() }`)
+        // — not on every successful attach. Clearing unconditionally deleted
+        // operations the daemon still had, including the one a late reply had
+        // just put into the trail, which sent the agent back to
+        // "GP_E_NO_EVIDENCE … run gp_act first" for a click that already
+        // happened (spec v1.3 §10.3, R8b-高1).
+        session.restart(attachIdentityOf(raw));
       }
       // Spec §6.3: evidence packs are passed through a strong read-side
       // validation (kernel parseEvidencePackRead) before surfacing to the agent,
@@ -962,9 +1016,12 @@ async function projectGetTool(args: Record<string, unknown>): Promise<ToolResult
     if (entry === undefined) {
       return {
         content: [{ type: "text", text: formatToolError(
-          "GP_E_NOT_FOUND",
+          // Both the code and the remedy come from the one place they are
+          // spelled: this used to retype the literal and the sentence, so a
+          // change to `projectErrorRemedy` left this reply behind (R8-低).
+          GP_E_NOT_FOUND,
           `unknown project ${argv.projectId}`,
-          "check the projectId; use gp_project_list to view available projects",
+          projectErrorRemedy(GP_E_NOT_FOUND),
         ) }],
         isError: true,
       };
@@ -1019,6 +1076,13 @@ function projectErrorRemedy(code: string): string {
   if (code === GP_E_NOT_FOUND) {
     return "check the projectId; use gp_project_list to view available projects";
   }
+  if (code === GP_E_NO_USER_RECORD) {
+    // Distinct from GP_E_INTERNAL on purpose: this failure names no file, and
+    // sending the agent to read and repair `projects.json` for a missing
+    // password-database entry wastes the one turn it has — the file it would
+    // open is not the thing that is wrong.
+    return "this process has no entry in the password database, so neither it nor the daemon can know which user's state directory is meant; run the shell as a user that has one (`id -u` / `dscl . -read /Users/<name> NFSHomeDirectory`). Nothing in ~/.glasspane needs repairing for this";
+  }
   if (code === GP_E_INTERNAL) {
     return `the projects file is the problem, not your arguments: the message above names its path, so read it with \`python3 -m json.tool <that path>\`, repair or restore the damaged entry, and retry — or set ${FORCE_OVERWRITE_ENV}=1 and call gp_project_set to rebuild the registry from scratch (the unloadable file is moved aside as <path>.unreadable-<id>, never deleted, and every entry still in it is lost). Do not retry the same read-only call unchanged: it will keep failing.`;
   }
@@ -1039,7 +1103,11 @@ async function exportEvidence(
   const argv = args as ExportEvidenceArgs;
   const render = argv.format === "html" ? renderHTML : renderMarkdown;
   try {
-    const raw = await context.engine.call("last_evidence", { operationId: argv.operationId });
+    const raw = await context.engine.call(
+      "last_evidence",
+      { operationId: argv.operationId },
+      context.session.generation,
+    );
     const { pack, measuredSchemaVersion } = parseEvidenceFrame(raw);
     await context.turn.acquire();
     try {
@@ -1083,7 +1151,14 @@ async function recentReports(
   const skipped: string[] = [];
   for (const id of ids) {
     try {
-      const raw = await context.engine.call("last_evidence", { operationId: id });
+      // The per-id fetches are reads, but they still carry the generation: a
+      // late reply to one of them must not be written into a successor app's
+      // trail either.
+      const raw = await context.engine.call(
+        "last_evidence",
+        { operationId: id },
+        context.session.generation,
+      );
       const parsed = parseEvidenceFrame(raw);
       packs.push({ id, pack: packForReport(parsed.pack, parsed.measuredSchemaVersion) });
     } catch (error) {

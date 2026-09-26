@@ -8,6 +8,7 @@ import {
   GP_E_BAD_PARAMS,
   GP_E_INTERNAL,
   GP_E_NOT_FOUND,
+  GP_E_NO_USER_RECORD,
   GP_E_PROJECT_LIMIT,
 } from "./errors.js";
 import { daemonUnreachableRemedy } from "./engine-client.js";
@@ -109,12 +110,78 @@ export const AGENT_PATH_PROTECTION = {
 } as const;
 
 /**
+ * The user's home directory, by **the same lookup the daemon uses**, and the
+ * only place in this module that resolves it. Both consumers here have to agree
+ * with a *second process*, which is why this is not a matter of taste:
+ *
+ * - `os.homedir()` reads `$HOME` — a caller-controlled variable.
+ * - `os.userInfo().homedir` reads the user record (passwd), which is what
+ *   `NSHomeDirectory()` does, which is what `StateRoot.homeDefault()` =
+ *   `NSHomeDirectory() + "/.glasspane"` is built from, which is what
+ *   `ProjectRegistry.defaultProjectsPath` = `StateRoot.homeDefault().projectsFile`
+ *   publishes to the daemon.
+ *
+ * Measured, on this machine, with `$HOME` pointed somewhere else:
+ *
+ * ```
+ * HOME=/tmp/fake-sbx-home node -e 'const os=require("os");
+ *   console.log(os.homedir(), "|", os.userInfo().homedir)'
+ * -> /tmp/fake-sbx-home | /Users/ethanlin
+ * ```
+ *
+ * So `os.homedir()` and `NSHomeDirectory()` resolve **different directories** as
+ * soon as a caller exports `HOME` — an agent sandbox doing that is the ordinary
+ * case, not the exotic one. `StateRoot.swift`'s own header records what the
+ * `$HOME` assumption cost once already (a `swift test` run that rewrote the
+ * developer's real `projects.json` while every path in the suite looked
+ * sandboxed), and the answer there was to stop reading the variable. This is the
+ * same decision taken from the Node side: never infer the home from `$HOME`,
+ * ask the record.
+ *
+ * When there is no record to ask, refuse rather than fall back. `os.homedir()`
+ * is not the fallback here — that would reopen exactly the split this function
+ * exists to close, silently. The posture matches {@link refuseUnownedTree},
+ * which refuses when there is no uid to compare instead of assuming one
+ * ("Refuse, never assume"). Unreachable on macOS for a GUI/launchd process: the
+ * effective uid always has a record; a container running as a uid absent from
+ * its passwd database is where this branch would fire.
+ *
+ * Pinned against the Swift side by `test/path-consistency.test.mjs`, which bans
+ * `os.homedir(` in this file outright, so a third consumer cannot be written
+ * against the wrong lookup later.
+ */
+function systemHome(): string {
+  try {
+    return os.userInfo().homedir;
+  } catch (error) {
+    throw new ProjectRegistryError(
+      // Not GP_E_INTERNAL: `tools.ts` maps that code to "the projects file is
+      // damaged, go read it", and for this failure there is no damaged file —
+      // the process has no user record to derive a path from (R8b).
+      GP_E_NO_USER_RECORD,
+      "cannot read the user record this shell's home directory comes from " +
+      `(${describeError(error)}). The background service derives its state root the same way ` +
+      "(NSHomeDirectory(), not $HOME), so there is no value here to fall back to: guessing from " +
+      "$HOME would name a projects.json the daemon does not load and would let the " +
+      "home-directory protection guard the wrong tree. Run this shell as a user that has an " +
+      "entry in the password database.",
+    );
+  }
+}
+
+/**
  * The file the *daemon* reads — `ProjectRegistry.defaultProjectsPath` in Swift.
  * It has no override of its own: {@link PROJECTS_FILE_ENV} is parsed by this
  * shell alone (R7-14), so a write aimed elsewhere is a write nothing loads.
+ *
+ * Derived from {@link systemHome}, not from `$HOME`, because this is the
+ * daemon's path and the daemon does not consult `$HOME`: with an overridden
+ * `HOME` the old lookup named the sandbox file, which made both halves of that
+ * promise false — a write into the sandbox was reported as the file the service
+ * loads, and a write to the file it really loads was called a stray.
  */
 export function daemonProjectsPath(): string {
-  return path.join(os.homedir(), ".glasspane", "projects.json");
+  return path.join(systemHome(), ".glasspane", "projects.json");
 }
 
 /**
@@ -650,9 +717,19 @@ const PATH_SHAPE_HINT =
  * call rather than beside it — when a symlink hop lands inside `/private/etc`,
  * the ownership check also fires (that tree belongs to uid 0) and would report
  * the weaker, fixable-sounding reason first.
+ *
+ * The home half of the rule reads {@link systemHome}, i.e. the user record, not
+ * `$HOME`. It has to: this is the protection that keeps an agent from pointing
+ * the daemon's evidence archive — a directory it writes into and deletes
+ * expired packs from — at the user's home or `~/Library`, where the rest of
+ * their data lives. Under `$HOME`-derived homes the protected tree moved to
+ * wherever the variable pointed, so exporting one variable switched the rule
+ * off over the real home; the sandbox kept being guarded while `/Users/<you>`
+ * became registrable. Same source as the daemon's own root, for the same reason
+ * {@link daemonProjectsPath} uses it.
  */
 function refuseCandidate(target: string): PathRefusal | null {
-  const home = stripFirmlink(path.posix.normalize(os.homedir()));
+  const home = stripFirmlink(path.posix.normalize(systemHome()));
   if (target === home) return named("the current user's home directory");
   if (isInside(`${home}/Library`, target)) return named("inside the current user's Library folder");
   if (isProtectedRoot(target)) return named("a protected system root");

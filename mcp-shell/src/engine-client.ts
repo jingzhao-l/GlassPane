@@ -12,7 +12,12 @@ import {
   recoverFrameId,
   StreamLineIo,
 } from "./io.js";
-import { GP_E_ENGINE_TIMEOUT, GP_E_ENGINE_UNREACHABLE, GP_E_PAYLOAD_TOO_LARGE } from "./errors.js";
+import {
+  GP_E_ENGINE_TIMEOUT,
+  GP_E_ENGINE_UNREACHABLE,
+  GP_E_PAYLOAD_TOO_LARGE,
+  GP_E_UNKNOWN,
+} from "./errors.js";
 
 /**
  * Agent-actionable remedy for an unreachable daemon (P6 §11 audit items ④/⑥:
@@ -59,8 +64,26 @@ export const ENGINE_SOCKET_ENV = "GLASSPANE_ENGINE_SOCK";
  *
  * Deliberately not "fixed" by asking the daemon: before a connection exists
  * there is no daemon to ask, and `hello` is itself answered after connecting.
- * Matching the daemon's home lookup from Node would take an FFI call to
- * `NSHomeDirectory()`, which this shell does not have.
+ *
+ * R8-中9, and read this before "harmonising" it with `systemHome()`: matching the
+ * daemon's lookup from Node **is** available — `os.userInfo().homedir` reads the
+ * user record, the same source `NSHomeDirectory()` uses, no FFI needed, and
+ * `project-registry.ts`'s `systemHome()` does exactly that. This function
+ * deliberately does not. The two files sit on opposite sides of a safety
+ * question:
+ *   - `projects.json` is *our* data: naming a file the daemon cannot load turns
+ *     a write into a stray, so it must follow the daemon's rule.
+ *   - the engine socket is *the user's screen*: a process that pointed `$HOME`
+ *     somewhere private as its own isolation boundary currently fails to connect
+ *     ("nothing is listening on the guessed path", an honest refusal). Resolve
+ *     the home the daemon's way here and that same process silently drives the
+ *     live daemon — clicks, state writes, the whole act surface — against a
+ *     machine it asked not to be on. `$HOME`-redirect is not a supported way to
+ *     isolate from a daemon (name the socket, or don't), but it must not be
+ *     upgraded into a way to reach it either.
+ *
+ * `test/engine-client.test.mjs` pins both halves of that split, so changing
+ * either side is a deliberate edit against a red test rather than a cleanup.
  *
  * Single source all the same: the CLI argument parser in index.ts and the
  * reconnecting transport both resolve the path through this function, so an env
@@ -72,37 +95,6 @@ export function defaultSocketPath(): string {
 
 /** Fallback deadline for a method missing from the table below. */
 export const ENGINE_TIMEOUT_MS = 10_000;
-
-/**
- * Per-method wall-clock deadlines. 10 s is the daemon's *internal* latency
- * flag (`EngineCore.performanceLatencyBudgetMs`), not its worst-case wall
- * time: a tree walk gets 10 s of its own (`AXChannel.treeTimeoutSeconds`), an
- * act reads the tree twice around a 2 s ping, and an ffwd restore replays up
- * to 64 steps (ParamValidation.stepsUpper) by calling act per step. A uniform
- * 10 s deadline diagnoses a slow-but-healthy daemon as "unreachable, restart
- * it" and then throws away the reply that lands later, so every value here is
- * strictly larger than the daemon's own worst case for that method.
- *
- * What these numbers do after B-02: they are still the caller's wait for every
- * method below the ceiling, and above it they are the daemon-side worst case
- * the timeout text quotes — the caller answered at the ceiling, while the
- * request stays registered so the real reply is attributed when it lands.
- */
-export const ENGINE_DEADLINES_MS = {
-  hello: 15_000,
-  attach: 30_000,
-  act: 120_000,
-  observe: 45_000,
-  assert_element: 60_000,
-  diagnose: 30_000,
-  last_evidence: 60_000,
-  snapshot: 90_000,
-  probe_status: 15_000,
-  shutdown: 15_000,
-} as const;
-
-/** Fixed part of an ffwd restore deadline (per-step cost is `act` above). */
-export const RESTORE_BASE_DEADLINE_MS = 30_000;
 
 /**
  * B-02: how long a *caller* may be kept waiting for any method, whatever the
@@ -121,14 +113,76 @@ export const RESTORE_BASE_DEADLINE_MS = 30_000;
  */
 export const CALLER_VISIBLE_CEILING_MS = 50_000;
 
-/** When the caller gets its answer for `method`: its deadline, capped. */
-export function callerDeadlineMs(
-  method: string,
-  params?: Record<string, unknown>,
-  ceilingMs: number = CALLER_VISIBLE_CEILING_MS,
-): number {
-  return Math.min(engineDeadlineMs(method, params), ceilingMs);
-}
+/**
+ * Per-method wall-clock deadlines. 10 s is the daemon's *internal* latency
+ * flag (`EngineCore.performanceLatencyBudgetMs`), not its worst-case wall
+ * time: a tree walk gets 10 s of its own (`AXChannel.treeTimeoutSeconds`), an
+ * act reads the tree twice around a 2 s ping, and an ffwd restore replays up
+ * to 64 steps (ParamValidation.stepsUpper) by calling act per step. A uniform
+ * 10 s deadline diagnoses a slow-but-healthy daemon as "unreachable, restart
+ * it" and then throws away the reply that lands later, so every value here is
+ * strictly larger than the daemon's own worst case for that method.
+ *
+ * What these numbers do after B-02: they are still the caller's wait for every
+ * method below the ceiling, and above it they are the daemon-side worst case
+ * the timeout text quotes — the caller answered at the ceiling, while the
+ * request stays registered so the real reply is attributed when it lands.
+ *
+ * `probe_status` is deliberately *not* "the cheap call, so give it the shortest
+ * window". The daemon answers one request at a time, so a probe is queued
+ * behind whatever the agent is standing over, and {@link slowEngineRemedy}
+ * tells the agent to send exactly this probe *while an `act` is outstanding*. A
+ * probe with a shorter window than the request in front of it expires against a
+ * busy daemon, and the agent then reads "the probe timed out too" as permission
+ * to restart — which cancels and rolls back an action mid-flight on the user's
+ * screen. It gets the full client-safe wait so the busy-but-will-finish case is
+ * answerable at all; the case where it is not (`act` up to 120 s against a 50 s
+ * ceiling — no deadline here can cover it, since the ceiling is the client's
+ * patience, not the daemon's) is what
+ * {@link livenessProbeDecision}'s `timed-out` entry exists to disarm.
+ * `test/probe-liveness.test.mjs` pins both halves: the armed timer, and the
+ * arithmetic invariant that no method can outlive the probe meant to diagnose it.
+ */
+export const ENGINE_DEADLINES_MS = {
+  // `hello` is at the bottom of this table, where its reason is written out.
+  attach: 30_000,
+  act: 120_000,
+  observe: 45_000,
+  assert_element: 60_000,
+  diagnose: 30_000,
+  last_evidence: 60_000,
+  snapshot: 90_000,
+  probe_status: CALLER_VISIBLE_CEILING_MS,
+  // R8b-高4: the same trap as `probe_status`, one layer down. `handshake()` is
+  // fired by the transport's `connect` event, but `ReconnectingSocketIo` is lazy:
+  // the frame that *causes* the connection is written first, so when a session's
+  // very first request is an `act`, `hello` is queued behind it. At 15 s the
+  // handshake expired against a healthy daemon every time, R4-06's protocol and
+  // version comparison never ran, and the only trace was one stderr line — a
+  // silent loss of the one measurement that catches "an old daemon is under this
+  // shell". It gets the full client wait so the comparison happens.
+  hello: CALLER_VISIBLE_CEILING_MS,
+  shutdown: 15_000,
+  // R8-中5: these two used to ride `ENGINE_TIMEOUT_MS * 3` by omission, which is
+  // a deadline nobody derived from the daemon. Both are on the wire
+  // (`gp_audit_ui` forwards `audit_ui`; `gp_capture_view` calls `capture_view`
+  // from its own executor), and `test/method-table.test.mjs` now refuses any
+  // sent method that is missing here.
+  //
+  // `audit_ui` is one geometry snapshot walk (`AXChannel.geometrySnapshot`,
+  // capped by `AXChannel.treeTimeoutSeconds` = 10 s) plus a pure-geometry
+  // overlap scan. It rides `observe`'s number rather than a fresh guess: same
+  // tree walk, without observe's pixel round trip.
+  audit_ui: 45_000,
+  // `capture_view` is attach + `SCKCapturer.captureWindow` + PNG encode. The
+  // capture tries up to two candidate surfaces at `captureTimeoutSeconds` = 5 s
+  // each (R6-11 made the second candidate conditional, so two attempts is the
+  // real worst case), then encodes inside the frame budget.
+  capture_view: 30_000,
+} as const;
+
+/** Fixed part of an ffwd restore deadline (per-step cost is `act` above). */
+export const RESTORE_BASE_DEADLINE_MS = 30_000;
 
 /** Methods whose reply is a user-visible action: replaying them is unsafe. */
 const REPLAY_UNSAFE_METHODS = new Set(["act", "restore"]);
@@ -145,6 +199,15 @@ export function engineDeadlineMs(
   }
   const known: number | undefined = ENGINE_DEADLINES_MS[method as keyof typeof ENGINE_DEADLINES_MS];
   return known ?? ENGINE_TIMEOUT_MS * 3;
+}
+
+/** When the caller gets its answer for `method`: its deadline, capped. */
+export function callerDeadlineMs(
+  method: string,
+  params?: Record<string, unknown>,
+  ceilingMs: number = CALLER_VISIBLE_CEILING_MS,
+): number {
+  return Math.min(engineDeadlineMs(method, params), ceilingMs);
 }
 
 /** Engine protocol version this shell speaks (daemon `hello.protocolVersion`). */
@@ -193,13 +256,106 @@ export class EngineCallError extends Error {
   }
 }
 
-/** Remedy for a deadline overrun: wait and measure, never restart or replay. */
-export function slowEngineRemedy(method: string): string {
-  const poll = "confirm the daemon is alive with a cheap call instead — gp_probe_status goes out immediately while this request is still outstanding (the shell no longer queues one MCP request behind another) and is answered as soon as the daemon is free of it";
-  if (REPLAY_UNSAFE_METHODS.has(method)) {
-    return `${poll}. The daemon serves one request at a time and is still working on this one, so wait for it; do NOT re-issue ${method}, because the original action can still take effect on the user's screen — the original reply is written to this server's log (stderr) when it lands, which is where the answer is. Restart only if gp_probe_status times out too — then ${daemonUnreachableRemedy()}`;
+/**
+ * What an agent can learn from a `gp_probe_status` it sent while another call is
+ * outstanding, and — the part that was wrong before — what each answer
+ * authorises.
+ *
+ * R8-高1: the sentence this replaces told the agent to "restart only if
+ * gp_probe_status times out too". The daemon serves **one request at a time**,
+ * so a probe is queued behind the very request it is meant to diagnose: against
+ * a busy daemon "the probe timed out as well" is the *expected* answer, not
+ * evidence of death. Following it therefore meant running `--restore-launchd`
+ * against a daemon that is mid-`act` on the user's screen — and SIGTERM makes
+ * that daemon cancel and roll back the in-flight action (`main.swift`'s early
+ * shutdown path). A liveness check whose failure branch is reached exactly when
+ * the thing it checks is alive is not a check. Only a transport outcome can tell
+ * "gone" from "busy", so every outcome now states its own decision, and
+ * `test/probe-liveness.test.mjs` pins that exactly one of them may name the
+ * restore command.
+ */
+export type LivenessProbeOutcome = "answered" | "engine-error" | "timed-out" | "unreachable";
+
+/** Every outcome the four sentences below cover; the gate iterates this list. */
+export const LIVENESS_PROBE_OUTCOMES: readonly LivenessProbeOutcome[] = [
+  "answered",
+  "engine-error",
+  "timed-out",
+  "unreachable",
+];
+
+/**
+ * The decision for one probe outcome. There is no `default` on purpose: adding
+ * an outcome to {@link LIVENESS_PROBE_OUTCOMES} without deciding what it
+ * authorises is a compile error rather than a silent hole.
+ *
+ * Only `unreachable` may name the restore command, because only it is raised
+ * when the socket itself is gone ({@link GP_E_ENGINE_UNREACHABLE}); `timed-out`
+ * is {@link GP_E_ENGINE_TIMEOUT}, which by construction means "no answer yet".
+ * The lookup is a function, not a frozen object, so the filesystem probe inside
+ * `daemonUnreachableRemedy()` stays out of module initialisation.
+ */
+export function livenessProbeDecision(outcome: LivenessProbeOutcome): string {
+  switch (outcome) {
+    case "answered":
+      return "answered at all (a result or an engine error frame) => the daemon is alive and has worked its way past the request in front of yours: keep waiting, the outstanding call's reply is still attributed and recorded";
+    case "engine-error":
+      return "answered with a named engine error code => the daemon is alive, so this answer never means \"restart the daemon because it is wedged\"; follow that code's own remedy instead, and note that some codes genuinely do name a restart (`GP_E_AX_UNAVAILABLE` does, because a wedged Accessibility API needs the service recycled) — that is the daemon's decision to make, not this sentence's";
+    case "timed-out":
+      return `not answered within its own window => NOT evidence that the daemon is down: it is single-connection and still busy with the earlier request (this is ${GP_E_ENGINE_TIMEOUT}, and the request stays registered so the real reply is attributed when it lands). Keep waiting; do not run the restore command on this answer alone, because restarting cancels and rolls back an action that is mid-flight on the user's screen`;
+    case "unreachable":
+      return `${GP_E_ENGINE_UNREACHABLE} (nothing is listening, or the transport died) => this is the one answer that justifies touching the daemon's lifecycle: ${daemonUnreachableRemedy()}`;
   }
-  return `${poll}. The daemon serves one request at a time and is still working on this one, so wait, then retry this read narrower (smaller maxDepth / a tighter selector); if gp_probe_status times out as well, ${daemonUnreachableRemedy()}`;
+}
+
+/** The four probe decisions, rendered into one clause for a remedy. */
+function livenessProbeGuide(): string {
+  return LIVENESS_PROBE_OUTCOMES
+    .map((outcome) => `${outcome} — ${livenessProbeDecision(outcome)}`)
+    .join("; ");
+}
+
+/**
+ * Which way into this shell an answer is being delivered to. The two surfaces
+ * hold different state: only the MCP stdio server has an
+ * `EvidenceAuditSession`, so only it can promise that a late reply's
+ * operationId will come back through `gp_recent_reports`. Promising that to a
+ * `curl` caller of the HTTP gateway sends it to a tool that route does not even
+ * expose (`POST /v1/tools/recent_reports` is a 404 — `FORWARDABLE_TOOLS` skips
+ * every tool with its own `execute`), so each surface gets the sentence about
+ * the state it really has (R8b-高3).
+ */
+export type ShellSurface = "mcp" | "http";
+
+/** Where the answer to a timed-out request can be found, per surface. */
+export function lateReplyRoute(surface: ShellSurface): string {
+  return surface === "mcp"
+    ? "the original reply, when it lands, is written to this server's log (stderr) *and* its operationId is recorded in this session's trail, so a later gp_recent_reports lists the operation that ran instead of telling you to run it again"
+    : "the original reply, when it lands, is written to this gateway's stderr with its body, so the operationId it carries can be read off that line and fetched with GET /v1/evidence/<operationId>; this gateway keeps no operation trail of its own";
+}
+
+/**
+ * Remedy for a deadline overrun: wait and measure, never restart on a probe that
+ * merely went unanswered, and never replay a user-visible action.
+ */
+export function slowEngineRemedy(method: string, surface: ShellSurface = "mcp"): string {
+  // "goes out immediately" is a property of the *client*, not of this shell: the
+  // shell will not queue one MCP request behind another, but a client that
+  // serialises its own tool calls cannot send the probe until the outstanding
+  // request has been answered — and then `answered`/`engine-error` are
+  // unreachable and only `timed-out` can occur. Wording it as a conditional
+  // keeps the guidance executable without asserting an unmeasured fact about
+  // whoever is reading it (R8b-低).
+  const poll = "if your client can send a second request while this one is still outstanding, confirm the daemon is alive with a cheap call: the shell does not queue one MCP request behind another, so gp_probe_status goes out at once and is answered as soon as the daemon is free of the request in front of it. Read its answer as: "
+    + livenessProbeGuide();
+  const restarted = livenessProbeDecision("unreachable");
+  if (REPLAY_UNSAFE_METHODS.has(method)) {
+    return `${poll}. The daemon serves one request at a time and is still working on this one, so wait for it; do NOT re-issue ${method}, because the original action can still take effect on the user's screen — ${lateReplyRoute(surface)}. Only ${restarted}`;
+  }
+  if (method === "probe_status") {
+    return `the liveness probe itself has not been answered, and it is given the longest wait this shell allows any request (${CALLER_VISIBLE_CEILING_MS}ms), so this particular answer carries no information about whether the daemon is alive: the daemon is single-connection and is still working on the request in front of this probe. ${livenessProbeDecision("timed-out")}. Keep waiting instead — the outstanding call's reply is attributed when it lands, and ${lateReplyRoute(surface)}. If the daemon's socket really is gone, the next call answers with ${GP_E_ENGINE_UNREACHABLE}, and that remedy names the restore command.`;
+  }
+  return `${poll}. The daemon serves one request at a time and is still working on this one, so wait, then retry this read narrower (smaller maxDepth / a tighter selector) — that is safe for a read; a restart is authorised only by ${restarted}`;
 }
 
 /**
@@ -224,6 +380,16 @@ interface CallFrame {
 type Pending = {
   id: number;
   method: string;
+  /**
+   * Opaque number handed in by whoever made the call and echoed back to the
+   * late-reply sink. This client never interprets it — the shell's caller uses it
+   * as the audit-trail generation the request was admitted under, so a reply
+   * that lands after a re-attach can be told apart from one that belongs to the
+   * trail it would otherwise be written into (R8b-高1).
+   */
+  correlation?: number;
+  /** The request's own params: the only honest basis for "narrow this". */
+  params?: Record<string, unknown>;
   deadlineMs: number;
   methodDeadlineMs: number;
   timer: ReturnType<typeof setTimeout> | null;
@@ -238,6 +404,14 @@ const LATE_REPLY_RETENTION = 16;
 /** Log ceiling for a frame body; excess is marked, never silently cut. */
 const LOG_BODY_CHARS = 64 * 1024;
 
+/** One late engine reply, as handed to {@link EngineJsonRpcClient.onLateReply}. */
+export interface LateReply {
+  method: string;
+  result: unknown;
+  /** Whatever `call()` was given; see {@link Pending.correlation}. */
+  correlation?: number;
+}
+
 /**
  * Request/response association over a line transport. Kept independent of
  * the transport so tests inject a fake LineIo (spec §7.1 "fake engine
@@ -248,6 +422,7 @@ export class EngineJsonRpcClient {
   private closed = false;
   private readonly pending = new Map<number, Pending>();
   private noteHandler: ((note: string) => void) | null = null;
+  private lateReplyHandler: ((reply: LateReply) => void) | null = null;
 
   constructor(
     private readonly io: LineIo,
@@ -260,6 +435,8 @@ export class EngineJsonRpcClient {
      * registration.
      */
     private readonly callerCeilingMs: number = CALLER_VISIBLE_CEILING_MS,
+    /** Whom a timeout's remedy is being written for; see {@link ShellSurface}. */
+    private readonly surface: ShellSurface = "mcp",
   ) {
     this.io.onMessage((line) => this.handleMessage(line));
     this.io.onError((error) => {
@@ -293,8 +470,27 @@ export class EngineJsonRpcClient {
     this.noteHandler = handler;
   }
 
-  /** Send a request and await its matching response frame. */
-  call(method: string, params?: Record<string, unknown>): Promise<unknown> {
+  /**
+   * Sink for the *body* of a reply that lands after its caller was already
+   * answered (R8-高3). Logging it is not enough: the operationId in that frame
+   * is the only thing that puts the operation into this session's evidence
+   * trail, and without it `gp_recent_reports` answers
+   * `GP_E_NO_EVIDENCE ... run gp_act first` for an act that genuinely ran and
+   * genuinely mutated the user's screen — an agent reading that answer clicks
+   * again. The entry the reply is attributed to is only kept for
+   * `LATE_REPLY_RETENTION` requests, so this sink sees the tracked window and
+   * the eviction note says when something fell outside it.
+   */
+  onLateReply(handler: (reply: LateReply) => void): void {
+    this.lateReplyHandler = handler;
+  }
+
+  /**
+   * Send a request and await its matching response frame. `correlation` is
+   * echoed to {@link onLateReply} if this request is answered after its caller
+   * has already been given a timeout; it is otherwise unused by this client.
+   */
+  call(method: string, params?: Record<string, unknown>, correlation?: number): Promise<unknown> {
     const id = this.nextId++;
     const frame = { id, method, ...(params === undefined ? {} : { params }) };
     // An injected `timeoutMs` is the caller's own bound (tests, explicit
@@ -307,6 +503,8 @@ export class EngineJsonRpcClient {
       const entry: Pending = {
         id,
         method,
+        correlation,
+        params,
         deadlineMs,
         methodDeadlineMs,
         timer: null,
@@ -363,7 +561,7 @@ export class EngineJsonRpcClient {
       `engine is still working on '${entry.method}': no reply after ${entry.deadlineMs}ms. `
       + "The request stays registered — a late reply is written to the server log — so this is a busy or slow daemon, not an unreachable one."
       + capped,
-      slowEngineRemedy(entry.method),
+      slowEngineRemedy(entry.method, this.surface),
     ));
     this.retainForLateReply();
   }
@@ -468,13 +666,13 @@ export class EngineJsonRpcClient {
     this.reject(entry, attribute(new EngineCallError(
       GP_E_PAYLOAD_TOO_LARGE,
       `the engine's reply to '${entry.method}' exceeded the ${MAX_FRAME_BYTES}-byte frame cap (${error.bytes} bytes) and was dropped; the connection is intact and other requests are unaffected`,
-      "narrow this request: retry with a smaller maxDepth or a more specific selector (the daemon keeps answering other requests)",
+      oversizedReplyRemedy(entry),
     ), entry, inferred));
   }
 
   private engineError(body: Partial<EngineErrorBody>): EngineCallError {
     return new EngineCallError(
-      String(body.code ?? "GP_E_UNKNOWN"),
+      String(body.code ?? GP_E_UNKNOWN),
       String(body.message ?? "the engine sent an error frame without a message"),
       typeof body.remedy === "string" && body.remedy !== ""
         ? body.remedy
@@ -499,6 +697,22 @@ export class EngineJsonRpcClient {
     this.report(
       `late engine reply for '${entry.method}' (id ${entry.id}), ${entry.deadlineMs}ms deadline already reported: ${body}`,
     );
+    if (frame.error || frame.result === undefined) {
+      // An error answer carries no operationId to record, and a frame with
+      // neither `result` nor `error` is not an answer this sink can use.
+      return;
+    }
+    const handler = this.lateReplyHandler;
+    if (handler === null) {
+      return;
+    }
+    try {
+      handler({ method: entry.method, result: frame.result, correlation: entry.correlation });
+    } catch (error) {
+      // The reply has already been logged above; a sink that throws must not
+      // lose that fact, and must not be allowed to take the transport down.
+      this.report(`the late-reply sink failed for '${entry.method}' (id ${entry.id}): ${String(error)}`);
+    }
   }
 
   private resolve(entry: Pending, value: unknown): void {
@@ -582,6 +796,49 @@ export class EngineJsonRpcClient {
       this.report(`version mismatch: engine self-reports '${version}', this MCP shell ships '${wantVersion}' (single version line) — one side is stale`);
     }
   }
+}
+
+/**
+ * What to do when a *reply* was too big to fit the frame cap.
+ *
+ * R8b-低: this used to be one sentence about `maxDepth` and selectors, sent for
+ * every method. For `capture_view` it was unactionable — the oversized body is an
+ * encoded PNG, `capture_view` takes no `maxDepth`, and the knob that does work
+ * (`scale`) was never named, so an agent following the advice retried an
+ * identical request and hit the identical drop. The advice is therefore derived
+ * from the params the request actually carried rather than from a list of method
+ * names, which would go stale the first time a parameter is added or renamed.
+ *
+ * What that costs, stated so nobody reads more coverage than there is: a request
+ * that *could* have sent `maxDepth` and did not is indistinguishable here from
+ * one that cannot take it at all, which is why the third branch says "no
+ * narrowing parameter this shell can name" rather than "this method takes none".
+ * Naming the method's real knobs would mean importing the tool schemas into the
+ * transport layer, and the transport is deliberately schema-free (it is the one
+ * piece both surfaces and the tests inject a fake for).
+ */
+export function oversizedReplyRemedy(entry: { method: string; params?: Record<string, unknown> }): string {
+  const shared = "the connection is intact and the daemon keeps answering other requests";
+  const params = entry.params ?? {};
+  if (typeof params.scale === "number") {
+    return `retry '${entry.method}' with a smaller scale — the encoded image must fit inside the `
+      + `${MAX_FRAME_BYTES}-byte frame, and a lower scale is the only knob this request has; `
+      + `the same \`scale\` parameter is what to change (not maxDepth, which this request does not take); ${shared}`;
+  }
+  const knobs: string[] = [];
+  if (params.maxDepth !== undefined) {
+    knobs.push("a smaller maxDepth");
+  }
+  if (params.selector !== undefined || params.role !== undefined) {
+    knobs.push("a more specific selector");
+  }
+  if (knobs.length === 0) {
+    return `this request carries no narrowing parameter this shell can name, so do not retry it unchanged: `
+      + `split what you were asking for into smaller parts (a narrower method, or fewer elements) — `
+      + `a retried identical request will be dropped identically; ${shared}`;
+  }
+  return `narrow this request: retry with ${knobs.join(" and ")} — the reply body must fit the `
+    + `${MAX_FRAME_BYTES}-byte frame; ${shared}`;
 }
 
 /** Note which request an id-less attribution was matched to, without hiding it. */
@@ -703,6 +960,8 @@ export function unixSocketEngineClient(
     identity?: EngineIdentityExpectation;
     open?: EngineTransportOpener;
     callerCeilingMs?: number;
+    /** Pass `"http"` from the gateway: its callers have no operation trail. */
+    surface?: ShellSurface;
   } = {},
 ): EngineJsonRpcClient {
   const open: EngineTransportOpener = options.open
@@ -712,6 +971,7 @@ export function unixSocketEngineClient(
     undefined,
     options.identity ?? null,
     options.callerCeilingMs ?? CALLER_VISIBLE_CEILING_MS,
+    options.surface ?? "mcp",
   );
 }
 

@@ -63,6 +63,17 @@ export interface EngineClientLike {
   call(method: string, params?: Record<string, unknown>): Promise<unknown>;
   /** Present on the real client; optional so a fake may omit it. */
   close?(): void;
+  /**
+   * Sinks for what this gateway cannot answer with: a fact attached to no
+   * request (an id-less frame, a handshake that failed) and the body of a reply
+   * that landed after its caller was already answered. Both are the daemon's
+   * real behaviour, and with no sink they left no trace at all — while the
+   * remedy this gateway hands out tells the caller to go read stderr
+   * (R8-高3). Optional so a fake may omit it; the gateway refuses to *claim* a
+   * log line it did not register for.
+   */
+  onEngineNote?(handler: (note: string) => void): void;
+  onLateReply?(handler: (reply: { method: string; result: unknown }) => void): void;
 }
 
 export interface HttpGatewayOptions {
@@ -74,6 +85,13 @@ export interface HttpGatewayOptions {
   host?: string;
   /** Injectable client factory so tests run without a real socket. */
   connectController?: (socketPath: string) => EngineClientLike;
+  /**
+   * Where to write the facts that have no HTTP response: engine notes and late
+   * replies. Defaults to stderr with this process's own prefix, because the
+   * remedy text this gateway hands out tells a caller to read *this gateway's
+   * stderr* — a promise that has to have a writer behind it (R8-高3).
+   */
+  report?: (note: string) => void;
 }
 
 export interface HttpGateway {
@@ -102,9 +120,26 @@ export function createHttpGateway(options: HttpGatewayOptions): HttpGateway {
       `createHttpGateway requires a non-empty token (read ${GLASSPANE_HTTP_TOKEN_ENV}); refusing to start with an empty or defaulted token`,
     );
   }
+  const report = options.report ?? ((note: string) => {
+    try {
+      process.stderr.write(`[glasspane-http] ${note}
+`);
+    } catch {
+      // A stderr that cannot take a line leaves nowhere to report this; the
+      // gateway must not die over its own log (same last resort as index.ts).
+    }
+  });
   const client: EngineClientLike = options.connectController !== undefined
     ? options.connectController(options.socketPath)
-    : unixSocketEngineClient(options.socketPath);
+    : unixSocketEngineClient(options.socketPath, { surface: "http" });
+  // The gateway is a *bridge*, so everything the engine client learns that no
+  // HTTP response carries has to be written down here: the remedy text handed to
+  // a curl caller says "read this gateway's stderr", and that promise is only
+  // true because of these two registrations.
+  client.onEngineNote?.((note) => report(`engine: ${note}`));
+  client.onLateReply?.(({ method, result }) => {
+    report(`late engine reply to '${method}': ${JSON.stringify(result) ?? String(result)}`);
+  });
   const expectedToken = Buffer.from(options.token, "utf8");
 
   const server = http.createServer((req, res) => {
