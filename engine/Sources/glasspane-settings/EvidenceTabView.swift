@@ -416,12 +416,17 @@ struct EvidenceDetailView: View {
         return parts.joined(separator: " · ")
     }
 
+    /// 分母是详情页**真的渲染的六条可选通道**，不是摘要里那三个数值字段。
+    /// 以前写死 3（只数界面结构／像素／内部状态），于是探针、响应性、进程存活全缺席时
+    /// 也能显示"已测量通道 3／3"——把"没测到"算进"测完了"，正是这张卡片要说出的事。
+    /// 判定复用 `PanelChannelFields`（纯函数、有单测），视图不再自己数。
     private var measuredChannels: Int {
-        [summary.axChanged != nil, summary.pixelRatio != nil, summary.stateChanged != nil]
+        if let pack { return PanelChannelFields.measuredCount(in: pack.signals) }
+        return [summary.axChanged != nil, summary.pixelRatio != nil, summary.stateChanged != nil]
             .filter { $0 }.count
     }
 
-    private var totalChannels: Int { 3 }
+    private var totalChannels: Int { PanelChannelFields.totalCount }
 
     // MARK: 各通道
 

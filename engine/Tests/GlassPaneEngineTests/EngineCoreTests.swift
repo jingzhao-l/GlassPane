@@ -775,16 +775,41 @@ final class EngineCoreWaveThreeMappingTests: XCTestCase {
             EngineCore.pixelCaptureFailureLabel(reason: "screen recording permission not granted"),
             "screen-recording-denied"
         )
-        // R6-双失败:两种阶段都失败、拿不到候选采集面 → 归并为"无在屏窗口"族的环境
-        // 边界，不落进通用 pixel-capture-failed（那条不在 p6 的不可用容忍表里）。
+        // R7 更正:这两条以前钉的是"归并进无在屏窗口族"。归并的动机（不落进通用
+        // pixel-capture-failed）仍成立，代价却是发出一条陈述假事实的标签——窗口是解析
+        // 出来的，必然在屏。现在它有自己的标签，p6 的不可用容忍表也已收下它。
         XCTAssertEqual(
             EngineCore.pixelCaptureFailureLabel(reason: "no capture surface available for window 1443"),
-            "pixel-capture-no-onscreen-window"
+            "pixel-capture-no-surface"
         )
         XCTAssertEqual(
-            EngineCore.pixelCaptureFailureLabel(reason: "SCScreenshotManager no capture surface for window 7"),
+            EngineCore.pixelCaptureFailureLabel(
+                reason: "window 7 is on screen but is covered by 2 window(s) (12, 34), "
+                    + "and its own surface could not be captured either"
+            ),
+            "pixel-capture-no-surface"
+        )
+        // 归并不能反向吞掉它本来冒充的那一族：仍然要说"无在屏窗口"。
+        XCTAssertEqual(
+            EngineCore.pixelCaptureFailureLabel(reason: "no on-screen SCWindow owned by pid 9"),
             "pixel-capture-no-onscreen-window"
         )
+        // 每个标签都得配一条**互相区分**的出路（教条：拒绝要给出下一步）。这里刻意不用
+        // "不得提到某个词"的写法——新那条出路本来就要说明"不是席位、不是最小化"，禁词会
+        // 把诚实的澄清也判成失败。区分靠正向断言：各自的出路必须含只有它才成立的动作。
+        let surfaceAdvice = Classifier.pixelAbsentNextStep(reason: "pixel-capture-no-surface: covered")
+        XCTAssertFalse(surfaceAdvice.isEmpty, "新标签没有出路文案")
+        XCTAssertTrue(surfaceAdvice.contains("covering") || surfaceAdvice.contains("above"),
+                      "出路没有指向真正的成因：\(surfaceAdvice)")
+        // 冒充者不能顺手拿到真标签的出路，两条出路必须是不同文本。
+        let noWindowAdvice = Classifier.pixelAbsentNextStep(
+            reason: "pixel-capture-no-onscreen-window: no on-screen SCWindow"
+        )
+        XCTAssertTrue(noWindowAdvice.contains("unminimise") || noWindowAdvice.contains("reopen"),
+                      "无在屏窗口那条出路被改坏了：\(noWindowAdvice)")
+        XCTAssertNotEqual(surfaceAdvice, noWindowAdvice,
+                          "两个不同成因共用一条出路，等于其中一个在说谎")
+
         // An unknown reason stays unknown instead of being guessed as the seat.
         XCTAssertEqual(EngineCore.pixelCaptureFailureLabel(reason: "stream stopped"), "pixel-capture-failed")
 

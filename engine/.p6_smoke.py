@@ -585,6 +585,10 @@ CIRCUIT_PIXEL_UNAVAILABLE_LABELS = (
     # 像素通路如实"未测量"。这仍是一条像素通路的 excuse，不是把误判洗成通过——
     # 引擎此时拒绝给 changedPixelRatio，而不是给一个跨窗口的假数字。
     "pixel-capture-window-changed",
+    # R7：窗口在屏但拍不到它自己（被盖住 + 独立窗口采集也失败）。这条以前被归并进
+    # "无在屏窗口"标签，而那个标签对它是假话（窗口明明在屏），代理照它去"取消最小化"
+    # 根本无效。现在它有独立标签与独立出路，仍然算"通路没测到"而不是"判定错"。
+    "pixel-capture-no-surface",
 )
 # A-08/R3-1: an unwatched window keeps this label in the archive even when the
 # operator declared the window unattended and the verdict therefore reads
