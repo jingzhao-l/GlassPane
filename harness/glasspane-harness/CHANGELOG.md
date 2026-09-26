@@ -86,6 +86,53 @@ The companion product surfaces, brought in as first-class citizens (owner decisi
   `not-yet-ours` in `product.json` rather than being quietly presented as finished.
 - Electron desktop app (second batch; needs signing and notarisation accounts).
 
+## [0.4.0] - 2026-09-25
+
+**A complete programming agent with the GlassPane kernel fused in — and no account to
+log into.** This release is mostly the removal of a first-party vendor surface, plus the
+npm and docs work that goes with it.
+
+### Added
+- `docs/models-and-keys.md` — the model catalog and the three ways to supply a key
+  (env var, `{env:NAME}` config template, TUI `/connect`). "Bring your own key" is now the
+  documented model story, not an accident.
+- `docs/release.md` — the release runbook, including the **npm trusted-publisher setup**
+  for all three packages (the field values are pinned to what `release.yml` presents:
+  owner `jingzhao-l`, repo `glasspane-harness`, workflow `release.yml`, environment
+  `release`). Until that is configured, CI cannot publish; the manual path is documented
+  too.
+- **npm READMEs.** 0.2.0's npm pages were a bare version string. The wrapper now ships the
+  product README (EN + 中文) and each platform package ships a short README that says what
+  the binary is and points at the wrapper. `publish.ts --dry-run` fails without them, so a
+  README-less tarball cannot ship.
+- The publishing jobs carry `environment: release`, which is both the value npm's trusted
+  publisher must match and a place to require a human reviewer.
+
+### Changed
+- **This repository's own project directory is now `.glasspane-harness/`** (was upstream's
+  `.opencode/`): the agent, command, skill, glossary and theme config that opencode used to
+  develop itself now lives under the product's own name, so the repo dogfoods the rename.
+  `.opencode/` is kept as a *read-only compatibility target* in a user's project — a
+  `product-surface` assertion fails if a `.opencode/` reappears at the root **or** if the
+  compat read is deleted.
+- The repo's dev config file is `glasspane-harness.jsonc` (the name the product reads
+  first).
+
+### Removed — the first-party account surface (BYOK instead)
+- The `opencode` first-party provider is filtered out of the model catalog.
+- `auth login` / `logout` / `switch`, the `/org` TUI command and the console-org dialog.
+- `/experimental/console*` server endpoints, the console-managed-provider config state,
+  and the provider dialog's "managed by console" branch.
+- Session sharing to opencode's cloud: the share modules, share/unshare endpoints, the
+  `share` and `autoshare` config keys, the TUI `/share` command and the web app's share
+  affordances (kept in the component shape, permanently off, one line to flip).
+- The local `account` / `account_state` tables are no longer managed by the schema. The
+  tables remain in existing databases — no destructive migration; the rows are inert.
+- `import <share-url>` no longer fetches console shares; import a local JSON export.
+
+Everything else in the catalog is untouched: Anthropic, OpenAI, Google, GitHub Copilot,
+Bedrock, Azure, OpenRouter and the rest still ship, unlocked by your own key.
+
 ## [0.3.0] - 2026-09-25
 
 **macOS-only, and the npm distribution says so.** The GlassPane engine, its four macOS

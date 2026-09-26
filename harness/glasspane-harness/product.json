@@ -3,7 +3,7 @@
   "name": "glasspane-harness",
   "displayName": "GlassPane Harness",
   "tagline": "Evidence-honest GUI verification harness for macOS apps — an opencode fork carrying GlassPane's native tool surface",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "binary": "glasspane-harness",
   "bins": [
     "glasspane-harness",
@@ -11,7 +11,6 @@
   ],
   "platformPackage": "{name}-{os}-{arch}{suffix}",
   "registry": "https://registry.npmjs.org",
-  "repo": "jingzhao-l/glasspane-harness",
   "install": {
     "npm": "npm install -g glasspane-harness",
     "bun": "bun add -g glasspane-harness",
@@ -94,6 +93,45 @@
       "发布必须带 provenance（CI 用 Trusted Publisher + staged 兜底；本地手动发布不带 provenance，因此不作为常规路径）",
       "每个平台包与 wrapper 同版本发布；wrapper 的 optionalDependencies 由 product.json 的 platformTargets 推出，不手写",
       "发布后跑 verify-published：把已发布的 tarball 装进干净前缀并 --version，不靠'看起来成功'"
-    ]
+    ],
+    "packageReadme": "wrapper = the product README (EN + zh-CN); each platform package = a short README saying what the binary is and pointing at the wrapper. Both are asserted by publish.ts --dry-run, so a README-less tarball cannot ship.",
+    "trustedPublisher": {
+      "provider": "github-actions",
+      "owner": "jingzhao-l",
+      "repository": "glasspane-harness",
+      "workflow": "release.yml",
+      "environment": "release",
+      "packages": [
+        "glasspane-harness",
+        "glasspane-harness-darwin-arm64",
+        "glasspane-harness-darwin-x64"
+      ],
+      "status": "owner-action: not yet configured (npm CLI token cannot read trust settings: 403)",
+      "note": "npm does not validate this at save time — a mismatch only fails at publish. The publish jobs carry `environment: release` and `id-token: write`, so the field values above are exactly what the workflow presents."
+    }
+  },
+  "repoUrl": "https://github.com/jingzhao-l/glasspane-harness",
+  "models": {
+    "policy": "byok (bring your own key)",
+    "catalog": "full models.dev catalog, minus the first-party `opencode` provider (filtered at the catalog boundary in provider.ts)",
+    "why": "上游的第一方 provider 是一条通往 opencode 自家付费云的通道，由登录账号解锁。本产品没有这个账号（第一方账号面已删除），留着就是提供一个用不了的入口。第三方 provider 全部保留，用用户自己的 API key 解锁——这才是'通用编程 harness'该有的样子。",
+    "removedFirstParty": [
+      "the `opencode` catalog entry (opencode's own model gateway)",
+      "`auth login` / `logout` / `switch` CLI commands and the `/org` TUI command with the org switcher",
+      "`/experimental/console*` endpoints, the console-managed-provider config state and the provider dialog's console branch",
+      "session sharing to opencode's cloud (share/share-next modules, share endpoints, share/autoshare config keys, the GitHub bot's session card)"
+    ],
+    "keptIntact": "Anthropic / OpenAI / Google / GitHub Copilot / Bedrock / Azure / OpenRouter and the rest: hundreds of models, each unlocked by the user's own key via env var, `{env:NAME}` config template, or the TUI `/connect` dialog",
+    "accountTables": "the local `account`/`account_state` tables stay in existing databases; drizzle stops managing them. No destructive migration — the rows were console-account rows and are inert.",
+    "docs": "docs/models-and-keys.md"
+  },
+  "repo": "jingzhao-l/glasspane-harness",
+  "repoLayout": {
+    "projectDir": ".glasspane-harness/",
+    "why": "仓库自己的 agent/命令/技能/术语表目录用产品自己的名字，这样仓库自己就验证了改名是真的（狗粮自吃）。上游开发时用 `.opencode/`；`.opencode` 作为**读取兼容目标**保留在产品里（老 checkout 必须还能用），由 product-surface 断言双向看守：根目录不许出现 `.opencode`，同时不许把兼容读取删掉。",
+    "compatRead": [
+      ".opencode/ (legacy, read-only, lower precedence than the product dir)"
+    ],
+    "enforcedBy": "product-surface.mjs :: project-dir"
   }
 }

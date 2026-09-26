@@ -78,9 +78,9 @@ describe("translate app", () => {
   })
 
   test("maps product locale codes to their glossaries", () => {
-    expect(glossaryFile("fr")).toBe(".opencode/glossary/fr.md")
-    expect(glossaryFile("zh")).toBe(".opencode/glossary/zh-cn.md")
-    expect(glossaryFile("zht")).toBe(".opencode/glossary/zh-tw.md")
+    expect(glossaryFile("fr")).toBe(".glasspane-harness/glossary/fr.md")
+    expect(glossaryFile("zh")).toBe(".glasspane-harness/glossary/zh-cn.md")
+    expect(glossaryFile("zht")).toBe(".glasspane-harness/glossary/zh-tw.md")
   })
 
   test("finds key and placeholder drift", () => {

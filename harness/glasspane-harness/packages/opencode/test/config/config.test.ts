@@ -15,8 +15,6 @@ import { Npm } from "@opencode-ai/core/npm"
 import { InstanceRef } from "../../src/effect/instance-ref"
 import type { InstanceContext } from "../../src/project/instance-context"
 import { Auth } from "../../src/auth"
-import { Account } from "../../src/account/account"
-import { AccessToken, AccountID, OrgID } from "../../src/account/schema"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Env } from "../../src/env"
 import {
@@ -40,7 +38,6 @@ import { ProjectV2 } from "@opencode-ai/core/project"
 import { Filesystem } from "@/util/filesystem"
 import { ConfigPlugin } from "@/config/plugin"
 import { ConfigPluginV1 } from "@opencode-ai/core/v1/config/plugin"
-import { AccountTest } from "../fake/account"
 import { AuthTest } from "../fake/auth"
 import { NpmTest } from "../fake/npm"
 
@@ -96,13 +93,11 @@ function remoteConfigClient(input: {
 const configLayer = (
   options: {
     auth?: Layer.Layer<Auth.Service>
-    account?: Layer.Layer<Account.Service>
-    client?: HttpClient.HttpClient
+      client?: HttpClient.HttpClient
   } = {},
 ) =>
   LayerNode.compile(LayerNode.group([Config.node, FSUtil.node, Env.node, CrossSpawnSpawner.node]), [
     [Auth.node, options.auth ?? AuthTest.empty],
-    [Account.node, options.account ?? AccountTest.empty],
     [Npm.node, NpmTest.noop],
     [httpClient, Layer.succeed(HttpClient.HttpClient, options.client ?? unexpectedHttp)],
   ])
@@ -310,12 +305,15 @@ it.instance("falls back to generic username when system user info is unavailable
   }),
 )
 
-it.effect("creates global jsonc config with schema when no global configs exist", () =>
+it.effect("creates the product-named global config with schema when no global configs exist", () =>
   withGlobalConfig({}, ({ dir }) =>
     Effect.gen(function* () {
       yield* Config.use.get().pipe(provideInstanceEffect(dir))
 
-      const content = yield* FSUtil.use.readFileString(path.join(dir, "opencode.jsonc"))
+      // [gp] Product: the seeded global config is `glasspane-harness.jsonc`. The test
+      // still asserted `opencode.jsonc` for a long time, which made it red rather than
+      // informative — the name is the product's, and the assertion now says so.
+      const content = yield* FSUtil.use.readFileString(path.join(dir, "glasspane-harness.jsonc"))
       expect(content).toContain('"$schema": "https://opencode.ai/config.json"')
     }).pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(LayerNode.compile(CrossSpawnSpawner.node))),
   ),
@@ -741,49 +739,6 @@ it.instance("handles file inclusion with replacement tokens", () =>
   }),
 )
 
-const accountTokenIt = configIt({
-  account: Layer.mock(Account.Service)({
-    active: () =>
-      Effect.succeed(
-        Option.some({
-          id: AccountID.make("account-1"),
-          email: "user@example.com",
-          url: "https://control.example.com",
-          active_org_id: OrgID.make("org-1"),
-        }),
-      ),
-    activeOrg: () =>
-      Effect.succeed(
-        Option.some({
-          account: {
-            id: AccountID.make("account-1"),
-            email: "user@example.com",
-            url: "https://control.example.com",
-            active_org_id: OrgID.make("org-1"),
-          },
-          org: {
-            id: OrgID.make("org-1"),
-            name: "Example Org",
-          },
-        }),
-      ),
-    config: () =>
-      Effect.succeed(
-        Option.some({
-          provider: { opencode: { options: { apiKey: "{env:OPENCODE_CONSOLE_TOKEN}" } } },
-        }),
-      ),
-    token: () => Effect.succeed(Option.some(AccessToken.make("st_test_token"))),
-  }),
-})
-
-accountTokenIt.instance("resolves env templates in account config with account token", () =>
-  Effect.gen(function* () {
-    const config = yield* Config.use.get()
-    expect(config.provider?.["opencode"]?.options?.apiKey).toBe("st_test_token")
-  }),
-)
-
 it.instance("validates config schema and throws on invalid values", () =>
   Effect.gen(function* () {
     const test = yield* TestInstance
@@ -875,16 +830,21 @@ it.instance("handles command configuration", () =>
   }),
 )
 
-it.instance("migrates autoshare to share field", () =>
+it.instance("ignores a legacy autoshare key instead of failing the load", () =>
   Effect.gen(function* () {
     const test = yield* TestInstance
     yield* writeConfigEffect(test.directory, {
       $schema: "https://opencode.ai/config.json",
       autoshare: true,
     })
+    // [gp] Product: `share` / `autoshare` were removed with cloud sharing. A config file
+    // from an older install must still load rather than fail validation, and nothing may
+    // derive sharing behaviour from it any more. The key survives the v1→v2 lowering as
+    // an undeclared passthrough field (that is what "still loads" means); what matters is
+    // that `share` is not synthesised from it and that no code reads it — the schema no
+    // longer declares either key, which is what makes it unreadable.
     const config = yield* Config.use.get()
-    expect(config.share).toBe("auto")
-    expect(config.autoshare).toBe(true)
+    expect(config.share).toBeUndefined()
   }),
 )
 
@@ -1732,7 +1692,6 @@ test("remote well-known config can use FetchHttpClient layer", async () => {
         Layer.mergeAll(
           LayerNode.compile(LayerNode.group([Config.node, FSUtil.node, Env.node, CrossSpawnSpawner.node]), [
             [Auth.node, wellKnownAuth(server.url.origin)],
-            [Account.node, AccountTest.empty],
             [Npm.node, NpmTest.noop],
             [httpClient, FetchHttpClient.layer],
           ]),

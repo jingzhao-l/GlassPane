@@ -2,6 +2,48 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-09-25 · v0.4.0：删掉第一方账号面（改成自带 API key）+ 仓库自己的项目目录改名 + npm README/发布手册
+
+owner 2026-09-25 三问：(1) npm 上怎么设 trusted publisher；(2) npm 包也要有 README；
+(3) "本 harness 是通用编程 harness，未删减 opencode 正常功能，只是深度融合了我们的内核"，
+另外整理目录结构、解释 `.opencode/` 是什么、并把"他们自己作为提供商 + login"改成填 API key。
+
+- **第一方账号面整片删除，改成 BYOK**（`product.json → models`，文档 `docs/models-and-keys.md`）：
+  - 删：`opencode` 第一方 provider（目录边界一处过滤，`provider.ts`）、`auth login/logout/switch`
+    CLI 命令、`/org` 命令与组织切换对话框（`dialog-console-org.tsx`）、`/experimental/console*`
+    端点与 console 托管 provider 状态（config/server/handlers/groups/sync.tsx/dialog-provider）、
+    云端会话分享（share-next + session share 服务、share/unshare 端点、`share`/`autoshare`
+    配置键、TUI `/share`、web app 的分享按钮、GitHub bot 的会话卡片）、core 的账号表与本地
+    `account`/`account_state` 表管理（**表留在用户已有库里，drizzle 不再管，不做破坏性迁移**）、
+    `import <share-url>` 改为导入本地 JSON 导出并给出理由。
+  - 留：models.dev 目录里其他每一个 provider 与模型（Anthropic/OpenAI/Google/Copilot/
+    Bedrock/Azure/OpenRouter…），用**用户自己的 key** 解锁（env / `{env:NAME}` / TUI `/connect`）。
+    判据：删掉的是**厂商登录**，不是能力；README 用 fork-diff 的实测数字（6527/6687 逐字节）
+    声明"这是加法"，并把唯一的例外写清楚。
+  - 全量 typecheck 归零（turbo，TC_RC=0）；顺带修掉两个**我们自己的**旧红灯：一条断言
+    `opencode.jsonc` 的用例自 0.1.0 私有化起就红（产品早已改成 `glasspane-harness.jsonc`），
+    一条断言已删行为的用例——都改成断言产品现在的样子。
+- **仓库自己的项目目录 `.opencode/` → `.glasspane-harness/`**：那是 opencode 开发自己用的
+  agent/命令/技能/术语表/主题目录，也就是产品的**项目目录**布局。改名后仓库自己吃自己狗粮，
+  验证改名是真的；目录里的配置也改名成 `glasspane-harness.jsonc`。`.opencode` 作为**只读兼容
+  目标**保留在产品里（老 checkout 必须还能用），`product-surface` 双向看守：根目录出现
+  `.opencode` 会红（已用反向控制证明），删掉兼容读取也会红。
+- **npm README**（门禁要求）：wrapper 的 tarball 现在带产品 README（EN + 中文），平台包带一份
+  说明"这是哪个平台的二进制、别直接装、装 wrapper"的短 README；`publish.ts --dry-run` 缺
+  README 即失败，所以"没有 README 的包"发不出去。
+- **`docs/release.md`**：发布手册，把 trusted publisher 的五个字段钉死在 `release.yml` 实际
+  呈现的值上（owner `jingzhao-l` / repo `glasspane-harness` / workflow `release.yml` /
+  environment `release` / GitHub Actions），并写明 npm **保存时不校验**、连接不可编辑、
+  403 的原因（绕过 2FA 的 token 读不了 trust 端点，所以这是 owner 动作）。发布 job 加
+  `environment: release`：既是 npm 要匹配的值，也是将来挂 reviewer 的位置。
+- **一个我自己犯的错，被门禁当场抓住**：把 `product.json` 的 `repo`（字符串 `owner/name`）用
+  对象覆盖了，安装器 URL 断言立刻变红。改成独立的 `repoLayout` 键并恢复 `repo`——这正是
+  "产品面要能测"的意义。
+- **一条固定点的真根因**（不是回归）：超尺寸帧用例内部写死 5s 调用预算，而本机把 5 MiB 推过
+  unix socket 要 ~4.7s，没有余量 → 先超时成 `GP_E_ENGINE_TIMEOUT`。上限拦截本身完好（拿到
+  `GP_E_PAYLOAD_TOO_LARGE` + remedy），`daemon.ts` 逐字节等于上游、今天未碰。预算与 lane 的
+  30s 契约对齐并把原因写进注释。固定点 61/61 + TUI 23/23 绿。
+
 ## 2026-09-25 · v0.3.0：macOS-only 收口 + npm 基建（dry-run 校验 / 发布即验证 / dist-tag 策略）
 
 owner 2026-09-25："本项目是针对 macOS 的，不需要 Linux 和 Windows 适配" + "npm 包的基础设施完善一下"。

@@ -43,6 +43,29 @@ async function publish(dir: string, name: string, version: string) {
   await $`npm publish *.tgz --access public${provenance} --tag ${distTag}`.cwd(dir)
 }
 
+/** The npm page of a platform package: what it is, and where the product is. */
+async function writePlatformReadme(dir: string, name: string) {
+  const target = name.replace(`${pkg.name}-`, "")
+  const body = [
+    `# ${name}`,
+    "",
+    `Platform binary of [${pkg.name}](${product.repoUrl}) for **${target}** (macOS ${product.platform?.minVersion}+).`,
+    "",
+    "You almost certainly do not want to install this directly. It contains one compiled",
+    `binary and no JavaScript entry points; install the wrapper instead:`,
+    "",
+    "```bash",
+    `npm install -g ${pkg.name}`,
+    "```",
+    "",
+    `The wrapper resolves the right platform package for the machine, verifies it and places the`,
+    `binary on your PATH. See ${product.repoUrl}#readme for the product README, docs and the`,
+    "macOS permission setup.",
+    "",
+  ].join("\n")
+  await Bun.file(path.join(dir, "README.md")).write(body)
+}
+
 /**
  * What a published tarball must contain, checked before it can be published.
  * A package that installs but cannot run is the worst outcome of a release lane:
@@ -61,6 +84,7 @@ async function validateTarball(dir: string, name: string, version: string): Prom
     }
     if (!existsSync(path.join(dir, "postinstall.mjs"))) problems.push("postinstall.mjs is missing — the platform binary would never be placed")
     if (!existsSync(path.join(dir, "LICENSE"))) problems.push("LICENSE is missing")
+    if (!existsSync(path.join(dir, "README.md"))) problems.push("README.md is missing — the npm page would render as a bare version string")
     const declared = Object.keys(manifest.optionalDependencies ?? {}).sort()
     if (declared.join(",") !== Object.keys(declaredPlatforms).sort().join(",")) {
       problems.push(`optionalDependencies [${declared.join(", ")}] do not match product.json's target matrix [${Object.keys(declaredPlatforms).join(", ")}]`)
@@ -74,6 +98,7 @@ async function validateTarball(dir: string, name: string, version: string): Prom
     // a platform package: the binary itself
     const binary = name.endsWith("-darwin-x64") ? "glasspane-harness" : "glasspane-harness"
     if (!existsSync(path.join(dir, "bin", binary))) problems.push(`bin/${binary} is missing from the tarball`)
+    if (!existsSync(path.join(dir, "README.md"))) problems.push("README.md is missing — the npm page would render as a bare version string")
     const stat = existsSync(path.join(dir, "bin", binary)) ? (await Bun.file(path.join(dir, "bin", binary)).stat?.()) : undefined
     if (stat && (stat.mode & 0o111) === 0) problems.push(`bin/${binary} is not executable in the tarball (mode ${(stat.mode & 0o777).toString(8)})`)
   }
@@ -136,6 +161,16 @@ await $`mkdir -p ./dist/${pkg.name}`
 await $`mkdir -p ./dist/${pkg.name}/bin`
 await $`cp ./script/postinstall.mjs ./dist/${pkg.name}/postinstall.mjs`
 await Bun.file(`./dist/${pkg.name}/LICENSE`).write(await Bun.file("../../LICENSE").text())
+
+// The npm page for a package renders its README, and 0.2.0 shipped without one —
+// so the page was a bare version string. The wrapper gets the product README (it
+// is the thing a reader wants on the page); platform packages get a short README
+// that says what the package is and points at the product repo, because their
+// "readme" is really a download notice.
+// The product READMEs live at the fork root, not in this package (cwd is
+// packages/opencode), so the paths climb two levels.
+await Bun.file(`./dist/${pkg.name}/README.md`).write(await Bun.file("../../README.md").text())
+await Bun.file(`./dist/${pkg.name}/README.zh-CN.md`).write(await Bun.file("../../README.zh-CN.md").text())
 await Bun.file(`./dist/${pkg.name}/bin/${pkg.name}.exe`).write(
   [
     `echo "Error: ${pkg.name}'s postinstall script was not run." >&2`,
@@ -194,6 +229,7 @@ if (!wrapperOnly) {
   // In --dry-run this loop validates instead of publishing (publish() returns
   // before it touches the registry), so a PR can prove every tarball's shape.
   const tasks = Object.entries(binaries).map(async ([name]) => {
+    if (name !== pkg.name) await writePlatformReadme(`./dist/${name}`, name)
     await publish(`./dist/${name}`, name, binaries[name])
   })
   await Promise.all(tasks)

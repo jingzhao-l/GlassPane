@@ -1,5 +1,5 @@
 {
-  "observedAt": "2026-09-25",
+  "observedAt": "2026-09-26",
   "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
   "rules": [
     {
@@ -23,30 +23,14 @@
       "why": "a README line that says opencode must also say fork/upstream/anomalyco/MIT/上游/血缘"
     }
   ],
-  "productFiles": 25,
+  "productFiles": 24,
   "docFiles": [
     "README.md",
     "README.zh-CN.md"
   ],
-  "hits": [
-    {
-      "file": "scripts/install.ps1",
-      "rule": "missing-product-file",
-      "count": 1
-    },
-    {
-      "file": "README.md:138",
-      "rule": "doc-line-without-lineage",
-      "count": 1
-    },
-    {
-      "file": "README.zh-CN.md:115",
-      "rule": "doc-line-without-lineage",
-      "count": 1
-    }
-  ],
+  "hits": [],
   "lineage": {
-    "occurrences": 18677,
-    "filesScanned": 3917
+    "occurrences": 18566,
+    "filesScanned": 3900
   }
 }

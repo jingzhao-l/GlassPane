@@ -30,7 +30,7 @@
  * Exit codes: 0 agree, 1 disagree (named rule + file), 2 cannot measure.
  */
 import { execFileSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -141,6 +141,26 @@ const candidatesLine = /const candidates = \[[^\]]*\]/.exec(configTs)?.[0] ?? ""
 check("config-names", /opencode\.jsonc/.test(candidatesLine) && /opencode\.json/.test(candidatesLine), "config.ts discovery dropped the legacy opencode.json(c) fallback — existing checkouts would break")
 check("config-names", candidatesLine.includes(`${product.name}.json`), "config.ts discovery does not accept the product's config file name first")
 
+// ---- the repository's own project directory is the product's, and the legacy
+// `.opencode` name survives only as a compatibility read in a user's project
+const forkRootEntries = readdirSync(forkRoot, { withFileTypes: true }).map((e) => e.name)
+check(
+  "project-dir",
+  forkRootEntries.includes(".glasspane-harness") === true,
+  "the repo's own project directory is not `.glasspane-harness/` — the product should dogfood its own name",
+)
+check(
+  "project-dir",
+  forkRootEntries.includes(".opencode") === false,
+  "a `.opencode/` directory is back at the fork root — it is upstream's dev-config name; ours is `.glasspane-harness/` (the legacy name is only a read-compat target in a user's project)",
+)
+const paths = stripComments(read("packages/opencode/src/config/paths.ts"))
+check(
+  "project-dir",
+  paths.includes('".opencode"') && paths.includes('".glasspane-harness"'),
+  "the legacy `.opencode` project dir is no longer probed — an existing upstream checkout must keep working",
+)
+
 // ---- macOS-only distribution: the npm side must refuse other platforms, not ship them
 const platform = product.platform ?? {}
 check("platform", Array.isArray(platform.os) && platform.os.length === 1 && platform.os[0] === "darwin", "product.platform.os must be exactly [darwin] — the product is macOS-only (owner decision)")
@@ -180,7 +200,6 @@ check("installer-dry-run", (() => {
 // ---- our own pipelines only, and attribution on disk
 const wfDir = path.join(forkRoot, ".github", "workflows")
 if (!existsSync(wfDir)) die(2, "the fork has no .github/workflows — cannot verify the product's pipelines")
-const { readdirSync } = await import("node:fs")
 const workflows = readdirSync(wfDir).sort()
 check("workflows", workflows.length === 2 && workflows.includes("ci.yml") && workflows.includes("release.yml"), `the fork's workflows are [${workflows.join(", ")}] — expected exactly ci.yml + release.yml (upstream's 26 are gone for good)`)
 const release = readFileSync(path.join(wfDir, "release.yml"), "utf8")

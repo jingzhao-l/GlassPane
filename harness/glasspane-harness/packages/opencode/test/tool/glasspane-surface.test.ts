@@ -167,7 +167,13 @@ describe("bounds the surface puts on itself", () => {
     const previous = process.env.GLASSPANE_SOCKET
     process.env.GLASSPANE_SOCKET = socket
     try {
-      const reply = await Effect.runPromise(Daemon.call("observe", {}, 5_000))
+      // The peer answers with 5 MiB, and moving 5 MiB through a unix socket costs
+      // real time on a loaded macOS laptop (measured ~4.7s here). The cap is
+      // enforced correctly in either case, but a 5s *call* budget left no headroom,
+      // so the call timed out first and the test reported GP_E_ENGINE_TIMEOUT for a
+      // frame that is actually refused in-band. The budget now matches the fixed-point
+      // lane's own 30s contract; what this test asserts is unchanged.
+      const reply = await Effect.runPromise(Daemon.call("observe", {}, 30_000))
       expect(reply.ok).toBe(false)
       if (reply.ok) return
       expect(reply.error.code).toBe("GP_E_PAYLOAD_TOO_LARGE")

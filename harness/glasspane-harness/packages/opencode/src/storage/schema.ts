@@ -1,4 +1,3 @@
-export { AccountTable, AccountStateTable, ControlAccountTable } from "@opencode-ai/core/account/sql"
 export { ProjectTable } from "@opencode-ai/core/project/sql"
 export { SessionTable, MessageTable, PartTable, TodoTable } from "@opencode-ai/core/session/sql"
 export { SessionShareTable } from "@opencode-ai/core/share/sql"

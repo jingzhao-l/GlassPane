@@ -53,6 +53,7 @@ const refRel = pin.fork?.referenceClone
 if (!forkRel || !refRel) die(2, 'upstream.json missing fork.path / fork.referenceClone')
 
 const forkDir = path.join(repoRoot, forkRel)
+const forkPrefix = forkRel.replace(/\/$/, "") + "/"
 const refDir = path.join(repoRoot, refRel)
 if (!existsSync(forkDir)) die(2, `fork tree not found at ${forkRel}`)
 
@@ -62,12 +63,40 @@ function walk(dir, base = dir, out = []) {
     if (entry === ".git" || entry === "node_modules" || entry === "dist") continue
     const full = path.join(dir, entry)
     const rel = path.relative(base, full).split(path.sep).join("/")
+    if (lstatSync(full).isDirectory()) {
+      if (ignoredDirs.has(rel)) continue
+      walk(full, base, out)
+      continue
+    }
+    // An ignored *file* (a tsbuildinfo, a log) is the same false positive as an
+    // ignored directory, so both come out of the walk.
+    if (ignoredDirs.has(rel)) continue
     const st = lstatSync(full)
-    if (st.isDirectory()) walk(full, base, out)
-    else if (st.isFile() || st.isSymbolicLink()) out.push(rel)
+    if (st.isFile() || st.isSymbolicLink()) out.push(rel)
   }
   return out
 }
+
+/**
+ * Directories git ignores, collapsed (`--directory`), computed in ONE call.
+ *
+ * WHY: gitignored build output is not a candidate for "present on disk but missing
+ * from the release", and listing it was a false positive that trains people to
+ * ignore this tool (found 2026-09-25, when a turbo log made the ruler red on a
+ * clean tree). A per-path `check-ignore` is correct but costs one subprocess per
+ * entry — thousands for this tree — so the set is asked for once and whole
+ * subtrees are pruned. A *tracked* file is never in this set by construction.
+ */
+const ignoredDirs = new Set(
+  execFileSync("git", ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "--", forkRel], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  })
+    .split("\n")
+    .filter(Boolean)
+    .map((p) => (p.startsWith(forkPrefix) ? p.slice(forkPrefix.length) : p).replace(/\/$/, "")),
+)
 
 /** git's blob hash: sha1("blob <len>\0" + content); symlink content is its target. */
 function blobHash(abs) {

@@ -120,6 +120,7 @@ jobs:
     name: npm ${{ matrix.target }}
     if: github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
     runs-on: ${{ matrix.runner }}
+    environment: release
     permissions:
       id-token: write
       contents: read
@@ -163,6 +164,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
     needs: publish-platform
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       id-token: write
       contents: read

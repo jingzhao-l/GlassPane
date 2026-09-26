@@ -182,29 +182,6 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
           },
         },
       }),
-    opencode: Effect.fnUntraced(function* (input: Info) {
-      const env = yield* dep.env()
-      const hasKey = iife(() => {
-        if (input.env.some((item) => env[item])) return true
-        return false
-      })
-      const ok =
-        hasKey ||
-        Boolean(yield* dep.auth(input.id)) ||
-        Boolean((yield* dep.config()).provider?.["opencode"]?.options?.apiKey)
-
-      if (!ok) {
-        for (const [key, value] of Object.entries(input.models)) {
-          if (value.cost.input === 0) continue
-          delete input.models[key]
-        }
-      }
-
-      return {
-        autoload: Object.keys(input.models).length > 0,
-        options: ok ? {} : { apiKey: "public" },
-      }
-    }),
     openai: () =>
       Effect.succeed({
         autoload: false,
@@ -1402,7 +1379,15 @@ const layer = Layer.effect(
         const bridge = yield* EffectBridge.make()
         const cfg = yield* config.get()
         const modelsDev = yield* modelsDevSvc.get()
-        const catalog = mapValues(modelsDev, fromModelsDevProvider)
+        // [gp] Product: the models.dev catalog ships a first-party `opencode`
+        // provider — a gateway to opencode's own paid cloud, unlocked by logging
+        // into an account. This product has no such account (see the removal of
+        // src/account and the console endpoints), so the entry is dropped here:
+        // every remaining provider is third-party and is unlocked by the user's
+        // own API key. One filter at the catalog boundary instead of special
+        // cases further down.
+        const { opencode: _firstParty, ...thirdPartyCatalog } = modelsDev
+        const catalog = mapValues(thirdPartyCatalog, fromModelsDevProvider)
         const database = mapValues(catalog, toPublicInfo)
 
         const providers: Record<ProviderV2.ID, Info> = {} as Record<ProviderV2.ID, Info>
@@ -1968,11 +1953,9 @@ const layer = Layer.effect(
         return undefined
       }
 
-      const priority = providerID.startsWith("opencode")
-        ? ["gpt-nano"]
-        : providerID.startsWith("github-copilot")
-          ? ["gpt-mini", ...smallModelFamilyPriority]
-          : smallModelFamilyPriority
+      const priority = providerID.startsWith("github-copilot")
+        ? ["gpt-mini", ...smallModelFamilyPriority]
+        : smallModelFamilyPriority
       const models = sortBy(
         Object.values(provider.models),
         [(model) => model.release_date, "desc"],

@@ -2,12 +2,12 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-09-25",
+  "observedAt": "2026-09-26",
   "counts": {
-    "identical": 6527,
-    "edited": 51,
-    "added": 55,
-    "deleted": 54
+    "identical": 6437,
+    "edited": 83,
+    "added": 96,
+    "deleted": 112
   },
   "edited": [
     ".github/ISSUE_TEMPLATE/bug-report.yml",
@@ -19,9 +19,12 @@
     "README.md",
     "SECURITY.md",
     "bun.lock",
+    "packages/app/src/pages/session/timeline/message-timeline.tsx",
+    "packages/app/src/pages/session/use-session-commands.tsx",
     "packages/core/src/config.ts",
     "packages/core/src/global.ts",
     "packages/core/src/plugin/agent.ts",
+    "packages/core/src/plugin/provider.ts",
     "packages/core/src/plugin/skill.ts",
     "packages/opencode/package.json",
     "packages/opencode/script/build.ts",
@@ -32,6 +35,7 @@
     "packages/opencode/src/cli/cmd/attach.ts",
     "packages/opencode/src/cli/cmd/debug/index.ts",
     "packages/opencode/src/cli/cmd/github.handler.ts",
+    "packages/opencode/src/cli/cmd/import.ts",
     "packages/opencode/src/cli/cmd/mcp.ts",
     "packages/opencode/src/cli/cmd/pr.ts",
     "packages/opencode/src/cli/cmd/providers.ts",
@@ -46,25 +50,92 @@
     "packages/opencode/src/config/paths.ts",
     "packages/opencode/src/config/tui-migrate.ts",
     "packages/opencode/src/config/tui.ts",
+    "packages/opencode/src/effect/app-runtime.ts",
+    "packages/opencode/src/effect/bootstrap-runtime.ts",
+    "packages/opencode/src/index.ts",
     "packages/opencode/src/installation/index.ts",
     "packages/opencode/src/plugin/index.ts",
     "packages/opencode/src/plugin/install.ts",
     "packages/opencode/src/plugin/tui/runtime.ts",
+    "packages/opencode/src/project/bootstrap.ts",
+    "packages/opencode/src/provider/provider.ts",
     "packages/opencode/src/server/auth.ts",
     "packages/opencode/src/server/mdns.ts",
+    "packages/opencode/src/server/routes/instance/httpapi/groups/experimental.ts",
+    "packages/opencode/src/server/routes/instance/httpapi/groups/global.ts",
+    "packages/opencode/src/server/routes/instance/httpapi/groups/session.ts",
+    "packages/opencode/src/server/routes/instance/httpapi/handlers/experimental.ts",
+    "packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts",
+    "packages/opencode/src/server/routes/instance/httpapi/server.ts",
     "packages/opencode/src/session/session.ts",
     "packages/opencode/src/skill/index.ts",
+    "packages/opencode/src/storage/schema.ts",
     "packages/opencode/src/tool/registry.ts",
+    "packages/opencode/test/AGENTS.md",
+    "packages/opencode/test/agent/plugin-agent-regression.test.ts",
+    "packages/opencode/test/cli/error.test.ts",
+    "packages/opencode/test/cli/import.test.ts",
+    "packages/opencode/test/config/config.test.ts",
+    "packages/opencode/test/config/v2-compat.test.ts",
+    "packages/opencode/test/fixture/config.ts",
+    "packages/opencode/test/plugin/trigger.test.ts",
+    "packages/opencode/test/plugin/workspace-adapter.test.ts",
+    "packages/opencode/test/server/httpapi-experimental.test.ts",
     "packages/script/src/index.ts",
+    "packages/tui/src/app.tsx",
+    "packages/tui/src/component/dialog-provider.tsx",
+    "packages/tui/src/config/keybind.ts",
     "packages/tui/src/context/editor.ts",
+    "packages/tui/src/context/sync.tsx",
     "packages/tui/src/context/theme.tsx",
     "packages/tui/src/routes/session/index.tsx",
     "packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx",
-    "packages/web/package.json"
+    "packages/web/package.json",
+    "script/translate-app.test.ts",
+    "script/translate-app.ts"
   ],
   "added": [
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
+    ".glasspane-harness/.gitignore",
+    ".glasspane-harness/agent/duplicate-pr.md",
+    ".glasspane-harness/agent/triage.md",
+    ".glasspane-harness/command/ai-deps.md",
+    ".glasspane-harness/command/changelog.md",
+    ".glasspane-harness/command/commit.md",
+    ".glasspane-harness/command/issues.md",
+    ".glasspane-harness/command/learn.md",
+    ".glasspane-harness/command/rmslop.md",
+    ".glasspane-harness/command/spellcheck.md",
+    ".glasspane-harness/command/translate.md",
+    ".glasspane-harness/env.d.ts",
+    ".glasspane-harness/glasspane-harness.jsonc",
+    ".glasspane-harness/glossary/README.md",
+    ".glasspane-harness/glossary/ar.md",
+    ".glasspane-harness/glossary/br.md",
+    ".glasspane-harness/glossary/bs.md",
+    ".glasspane-harness/glossary/da.md",
+    ".glasspane-harness/glossary/de.md",
+    ".glasspane-harness/glossary/es.md",
+    ".glasspane-harness/glossary/fr.md",
+    ".glasspane-harness/glossary/ja.md",
+    ".glasspane-harness/glossary/ko.md",
+    ".glasspane-harness/glossary/no.md",
+    ".glasspane-harness/glossary/pl.md",
+    ".glasspane-harness/glossary/ru.md",
+    ".glasspane-harness/glossary/th.md",
+    ".glasspane-harness/glossary/tr.md",
+    ".glasspane-harness/glossary/zh-cn.md",
+    ".glasspane-harness/glossary/zh-tw.md",
+    ".glasspane-harness/plugins/smoke-theme.json",
+    ".glasspane-harness/plugins/tui-smoke.tsx",
+    ".glasspane-harness/skills/effect/SKILL.md",
+    ".glasspane-harness/skills/rtl-aware-development/SKILL.md",
+    ".glasspane-harness/themes/.gitignore",
+    ".glasspane-harness/themes/mytheme.json",
+    ".glasspane-harness/tool/github-pr-search.ts",
+    ".glasspane-harness/tool/github-triage.ts",
+    ".glasspane-harness/tui.json",
     "CHANGELOG.md",
     "FORK.md",
     "NOTICE",
@@ -76,6 +147,8 @@
     "docs/index.md",
     "docs/install.md",
     "docs/migrate-from-opencode.md",
+    "docs/models-and-keys.md",
+    "docs/release.md",
     "docs/tools.md",
     "docs/troubleshooting.md",
     "packages/opencode/bin/glasspane-harness",
@@ -151,6 +224,45 @@
     ".github/workflows/triage.yml",
     ".github/workflows/typecheck.yml",
     ".github/workflows/unlock.yml",
+    ".opencode/.gitignore",
+    ".opencode/agent/duplicate-pr.md",
+    ".opencode/agent/triage.md",
+    ".opencode/command/ai-deps.md",
+    ".opencode/command/changelog.md",
+    ".opencode/command/commit.md",
+    ".opencode/command/issues.md",
+    ".opencode/command/learn.md",
+    ".opencode/command/rmslop.md",
+    ".opencode/command/spellcheck.md",
+    ".opencode/command/translate.md",
+    ".opencode/env.d.ts",
+    ".opencode/glossary/README.md",
+    ".opencode/glossary/ar.md",
+    ".opencode/glossary/br.md",
+    ".opencode/glossary/bs.md",
+    ".opencode/glossary/da.md",
+    ".opencode/glossary/de.md",
+    ".opencode/glossary/es.md",
+    ".opencode/glossary/fr.md",
+    ".opencode/glossary/ja.md",
+    ".opencode/glossary/ko.md",
+    ".opencode/glossary/no.md",
+    ".opencode/glossary/pl.md",
+    ".opencode/glossary/ru.md",
+    ".opencode/glossary/th.md",
+    ".opencode/glossary/tr.md",
+    ".opencode/glossary/zh-cn.md",
+    ".opencode/glossary/zh-tw.md",
+    ".opencode/opencode.jsonc",
+    ".opencode/plugins/smoke-theme.json",
+    ".opencode/plugins/tui-smoke.tsx",
+    ".opencode/skills/effect/SKILL.md",
+    ".opencode/skills/rtl-aware-development/SKILL.md",
+    ".opencode/themes/.gitignore",
+    ".opencode/themes/mytheme.json",
+    ".opencode/tool/github-pr-search.ts",
+    ".opencode/tool/github-triage.ts",
+    ".opencode/tui.json",
     "README.ar.md",
     "README.bn.md",
     "README.br.md",
@@ -173,7 +285,26 @@
     "README.zh.md",
     "README.zht.md",
     "STATS.md",
-    "packages/opencode/bin/opencode"
+    "packages/core/src/account.ts",
+    "packages/core/src/account/sql.ts",
+    "packages/core/src/plugin/provider/opencode.ts",
+    "packages/core/src/v1/config/console-state.ts",
+    "packages/core/test/plugin/provider-opencode.test.ts",
+    "packages/opencode/bin/opencode",
+    "packages/opencode/src/account/account.ts",
+    "packages/opencode/src/account/repo.ts",
+    "packages/opencode/src/account/schema.ts",
+    "packages/opencode/src/account/url.ts",
+    "packages/opencode/src/cli/cmd/account.ts",
+    "packages/opencode/src/share/session.ts",
+    "packages/opencode/src/share/share-next.ts",
+    "packages/opencode/test/account/repo.test.ts",
+    "packages/opencode/test/account/service.test.ts",
+    "packages/opencode/test/cli/account.test.ts",
+    "packages/opencode/test/fake/account.ts",
+    "packages/opencode/test/share/share-next.test.ts",
+    "packages/tui/src/component/dialog-console-org.tsx",
+    "packages/tui/src/util/provider-origin.ts"
   ],
   "editedDetail": [
     {
@@ -199,7 +330,7 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "e897fbe71c33ad45a36b1335e407defb371c3760"
+      "forkHash": "760da32896207a144148b553acf9871ae566fe26"
     },
     {
       "file": "CONTEXT.md",
@@ -210,6 +341,16 @@
       "file": "CONTRIBUTING.md",
       "upstreamHash": "a9c545efb896596b6fe2d586b7407942246aeda7",
       "forkHash": "c44a12b979a13b032c5520fe49924e9cf53177e8"
+    },
+    {
+      "file": "packages/app/src/pages/session/timeline/message-timeline.tsx",
+      "upstreamHash": "e0838825570e0e137f2dc6a188e7c6abe6fe46fa",
+      "forkHash": "486c1375444045ad27df83d67e21200a2ffc6a38"
+    },
+    {
+      "file": "packages/app/src/pages/session/use-session-commands.tsx",
+      "upstreamHash": "18d5b172ff17891aea4441bef1a0965e12fd6e8a",
+      "forkHash": "41341316c58842e58194e2d4154f696e1ef0e90c"
     },
     {
       "file": "packages/core/src/config.ts",
@@ -227,6 +368,11 @@
       "forkHash": "9b04bba692cd6d6bbfba0610c9eb228407c95ac1"
     },
     {
+      "file": "packages/core/src/plugin/provider.ts",
+      "upstreamHash": "1749b474ed338579cef78d6f86bb8b98068f93d2",
+      "forkHash": "4ba7eafeb7e855b469995ec7b065efba157041cd"
+    },
+    {
       "file": "packages/core/src/plugin/skill.ts",
       "upstreamHash": "ea723dd89dea01fce6ebab3d32ec0116552ae4a0",
       "forkHash": "666d28820e2ee89379d24d8ce087ab6eb6a71fa0"
@@ -234,7 +380,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "4069b7d0a67e5d6e2fa0cc9b4c40ce3ff0e7a658"
+      "forkHash": "374d9ab4dd568ab8f1c745c1bae527aad15207b3"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -249,7 +395,7 @@
     {
       "file": "packages/opencode/script/publish.ts",
       "upstreamHash": "ac1cafff56f46e9611a9ff78aa05217d21a907ef",
-      "forkHash": "45d214f485e3a338545ecc0fc0e00236bb5a03cc"
+      "forkHash": "424aef5c091699f39c0abd5ea1eab625dfe404c9"
     },
     {
       "file": "packages/opencode/src/agent/agent.ts",
@@ -274,7 +420,12 @@
     {
       "file": "packages/opencode/src/cli/cmd/github.handler.ts",
       "upstreamHash": "fcf44279ce7f2c764ed86771d913f784bf584746",
-      "forkHash": "63aacc935a711c3dbc7f58d5386bf9211b28f12b"
+      "forkHash": "f89907858b246ee8e3df39e51c40a69cdb63a457"
+    },
+    {
+      "file": "packages/opencode/src/cli/cmd/import.ts",
+      "upstreamHash": "1b7350f744785d1d72ef3923783f390b2ebed03e",
+      "forkHash": "b5596be1692f066db47580a04770695cc2b809b3"
     },
     {
       "file": "packages/opencode/src/cli/cmd/mcp.ts",
@@ -329,7 +480,7 @@
     {
       "file": "packages/opencode/src/config/config.ts",
       "upstreamHash": "9e10b67fe703609a3ccf243ebe1801bf338961d3",
-      "forkHash": "cfc6ad2d8569e9993f5af68385241e01f3aea624"
+      "forkHash": "af03c85a67b92d5db0cb7d656df19a59a0cebef0"
     },
     {
       "file": "packages/opencode/src/config/paths.ts",
@@ -345,6 +496,21 @@
       "file": "packages/opencode/src/config/tui.ts",
       "upstreamHash": "8f503751f379447d4b73ed901f35f18166fda95a",
       "forkHash": "f925d11025a9c662d8bc50433714f1e8ed189eaf"
+    },
+    {
+      "file": "packages/opencode/src/effect/app-runtime.ts",
+      "upstreamHash": "d17326966f92a808bd5112f3dfb326f9b2da3dff",
+      "forkHash": "e9e4ba69b8729f1900afeca9bab7f80e6c0f2b6c"
+    },
+    {
+      "file": "packages/opencode/src/effect/bootstrap-runtime.ts",
+      "upstreamHash": "57fe43b46ee34548524b2dc422bda8b5d765103f",
+      "forkHash": "f9902bc025e40afcf58929b6298397b0f2ef9d69"
+    },
+    {
+      "file": "packages/opencode/src/index.ts",
+      "upstreamHash": "13540a73a36fcb27f591011d9147c60073055b45",
+      "forkHash": "fdc606b2c9790b0921e05eeb487d35a538af150d"
     },
     {
       "file": "packages/opencode/src/installation/index.ts",
@@ -367,6 +533,16 @@
       "forkHash": "227d6a37fc372de88853db97fd73ed402852ca7c"
     },
     {
+      "file": "packages/opencode/src/project/bootstrap.ts",
+      "upstreamHash": "acf0caed3cdf05c7af0a8d1dbaa994a70a172c51",
+      "forkHash": "d11e4e8e6204e3eb753d7c01a80c92b2f6aecb63"
+    },
+    {
+      "file": "packages/opencode/src/provider/provider.ts",
+      "upstreamHash": "867ef2ca2fa800b271b42684c26bde7d90776b0a",
+      "forkHash": "05dbfd04b37753fd6555a14f1b2a96c5f9f82901"
+    },
+    {
       "file": "packages/opencode/src/server/auth.ts",
       "upstreamHash": "9630ddbe20ed28944037de56363c672666931964",
       "forkHash": "bbc9002d9b2cbcc259cf4dcb431270d4b30e232a"
@@ -375,6 +551,36 @@
       "file": "packages/opencode/src/server/mdns.ts",
       "upstreamHash": "0dd673c7b42ef2b6039940a2143578db0e97c9e4",
       "forkHash": "57bcf30385adc51cccb822103dbe5723a1182429"
+    },
+    {
+      "file": "packages/opencode/src/server/routes/instance/httpapi/groups/experimental.ts",
+      "upstreamHash": "52c714a5ae64686d1fa1ae389e8939c3019de362",
+      "forkHash": "8e6a1cade841c852626d121659ecacb4a5841b5b"
+    },
+    {
+      "file": "packages/opencode/src/server/routes/instance/httpapi/groups/global.ts",
+      "upstreamHash": "5dded3acf3be0a3e41a9817a9477c439a8ccf97f",
+      "forkHash": "8dc2d1388b42b8bb4fbb416679e90771188c1bfc"
+    },
+    {
+      "file": "packages/opencode/src/server/routes/instance/httpapi/groups/session.ts",
+      "upstreamHash": "959a303dc964e97c02056ea634213b39d9da3f08",
+      "forkHash": "7bec08c4fe092210158de031a1207bfed588c4eb"
+    },
+    {
+      "file": "packages/opencode/src/server/routes/instance/httpapi/handlers/experimental.ts",
+      "upstreamHash": "b218c6040d1ebe4eee58e940b1dddf9069afcc07",
+      "forkHash": "7abfdb5d67b44fdbaf2664eb70e2b8650c907456"
+    },
+    {
+      "file": "packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts",
+      "upstreamHash": "662585020a643d5d2e933a9f74e391d32a7afac7",
+      "forkHash": "5b015951a62853fcc092f1358cacef5d04605247"
+    },
+    {
+      "file": "packages/opencode/src/server/routes/instance/httpapi/server.ts",
+      "upstreamHash": "fb9d2db65621540a514786f2061714f16b6c766c",
+      "forkHash": "75f7e623f29ebe55b820f9426e112e3590325f6c"
     },
     {
       "file": "packages/opencode/src/session/session.ts",
@@ -387,9 +593,64 @@
       "forkHash": "530ffd23b4802648f376fc2169a6bbf41f963d54"
     },
     {
+      "file": "packages/opencode/src/storage/schema.ts",
+      "upstreamHash": "06d095f06d4ccf127ae65fa339295e6a793998f2",
+      "forkHash": "332b932a3551249be86bc246ce519944278261ae"
+    },
+    {
       "file": "packages/opencode/src/tool/registry.ts",
       "upstreamHash": "9167cb3ea6bc5c8dd075f0f8271adbdec6074b12",
       "forkHash": "36a359e3d1a7bde7229f37a82f2f36332df975d3"
+    },
+    {
+      "file": "packages/opencode/test/agent/plugin-agent-regression.test.ts",
+      "upstreamHash": "0249aaeb847fa8c7210d47e5708bf82d3c3f96cd",
+      "forkHash": "979fc11c4b45881e2c81d3fdd6c7f7497e0b8cd3"
+    },
+    {
+      "file": "packages/opencode/test/AGENTS.md",
+      "upstreamHash": "464b75cd82f050585ebe64974337fbcc1c891601",
+      "forkHash": "21c6f14698980c49edd9e3259eedd65637b2ea88"
+    },
+    {
+      "file": "packages/opencode/test/cli/error.test.ts",
+      "upstreamHash": "b29ca2b3bae1961bdc3ce6f069d7124174d51ca2",
+      "forkHash": "7541602c6733539d75eef2968f4978ea09345ce0"
+    },
+    {
+      "file": "packages/opencode/test/cli/import.test.ts",
+      "upstreamHash": "59824c3efcb988f880a01b6a959f0288501ceded",
+      "forkHash": "796b509b0d421a74f46a08825bc0349ba0bc9f8f"
+    },
+    {
+      "file": "packages/opencode/test/config/config.test.ts",
+      "upstreamHash": "8d5baede50fdb357619c6564942047eabc84275a",
+      "forkHash": "eba358c846f08d2e73aaec2ca64e0eb468d319a8"
+    },
+    {
+      "file": "packages/opencode/test/config/v2-compat.test.ts",
+      "upstreamHash": "51873f0c4e826ec1244c9a1d18177cb89664012f",
+      "forkHash": "cdca83ed0c09f3960a6b9b8af87ac43ff3227bb2"
+    },
+    {
+      "file": "packages/opencode/test/fixture/config.ts",
+      "upstreamHash": "71133521380ecb65c33f791f9db7cf184efdecb2",
+      "forkHash": "cff4839bcc1f79b5f75f70eafe576368605241ec"
+    },
+    {
+      "file": "packages/opencode/test/plugin/trigger.test.ts",
+      "upstreamHash": "07fd8e2f21bc51e80ecdfcb61c1851c7fd057db1",
+      "forkHash": "72e706c8f2d343e3e761edf1c73e2132be74dfb3"
+    },
+    {
+      "file": "packages/opencode/test/plugin/workspace-adapter.test.ts",
+      "upstreamHash": "a8dd172521726a5d847b30ef8ca49a38bd0951df",
+      "forkHash": "918077cfca0125613e97b990e46c47b43f6d130c"
+    },
+    {
+      "file": "packages/opencode/test/server/httpapi-experimental.test.ts",
+      "upstreamHash": "171716435697e036351e7a134cac425994561efe",
+      "forkHash": "9f95e8b69422eccde867e8f774f8c40a976b3605"
     },
     {
       "file": "packages/script/src/index.ts",
@@ -397,9 +658,29 @@
       "forkHash": "c7292e8d3d9e30dd5a34930bd82669e2c1afd822"
     },
     {
+      "file": "packages/tui/src/app.tsx",
+      "upstreamHash": "6852311f9e845639027804d8d18c7b3c23475b6e",
+      "forkHash": "bd2bc2a9526b2a42a415cf253254caec39398959"
+    },
+    {
+      "file": "packages/tui/src/component/dialog-provider.tsx",
+      "upstreamHash": "6b86a32e3482a819de0e8985bf49d7e0f7d8537c",
+      "forkHash": "53178d59905cb5396850a40cac8cecb3e6668f57"
+    },
+    {
+      "file": "packages/tui/src/config/keybind.ts",
+      "upstreamHash": "5dd7e4b5aafe91a13d033839025b3be836f5e448",
+      "forkHash": "40d76a6eb1beabec0d869f15579992e7529381a4"
+    },
+    {
       "file": "packages/tui/src/context/editor.ts",
       "upstreamHash": "cf2fbbf9e62b383c50cd2b3f547316c022ecd66b",
       "forkHash": "453c2869847c993d547f43e7a13e7468b8b735d1"
+    },
+    {
+      "file": "packages/tui/src/context/sync.tsx",
+      "upstreamHash": "71e050d11e68cc87df3dda585a2f0503ef02b189",
+      "forkHash": "606acc31cf7eb452140e87e84f5c6795aabdc09d"
     },
     {
       "file": "packages/tui/src/context/theme.tsx",
@@ -409,7 +690,7 @@
     {
       "file": "packages/tui/src/routes/session/index.tsx",
       "upstreamHash": "2b54f21671b3889e6752175b1c2b0f36d189d3b9",
-      "forkHash": "b606e57891d0e7f3095f699474d952bc5ef677ae"
+      "forkHash": "44fab1cef5e5d08ec89214e64425f99bdd5b056f"
     },
     {
       "file": "packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx",
@@ -424,7 +705,17 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "fe254171688318a79d4838eb97d9ff17cb08da89"
+      "forkHash": "ec6437033dea00289acac1006d458951c6893e07"
+    },
+    {
+      "file": "script/translate-app.test.ts",
+      "upstreamHash": "03e312678120638e330d7efa93374214644212d3",
+      "forkHash": "756f6da126ad0d00106f27318263f82fea1b99c4"
+    },
+    {
+      "file": "script/translate-app.ts",
+      "upstreamHash": "90fc1619c325ab6242730852b82ba48bcc148243",
+      "forkHash": "462d9250b58f0d406e0bcc253712ebca668fac48"
     },
     {
       "file": "SECURITY.md",

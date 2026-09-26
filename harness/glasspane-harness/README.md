@@ -27,7 +27,7 @@ did what it asked. It sees its own tool output, guesses from prose, and reports 
 Screenshots don't help: they show *a* moment, not a *change*, and they cannot say whether
 the change was caused by the click.
 
-**GlassPane Harness** is a coding agent (an [opencode](https://github.com/anomalyco/opencode)
+**GlassPane Harness** is a coding agent (an [opencode](https://github.com/anomalyco/opencode) upstream fork
 fork) wired to a Swift verification engine through a native `gp_*` tool surface. Every
 action is measured — accessibility-tree diff, pixel diff, crash and responsiveness
 signals — and the engine reports **its own** attribution (`strong` / `soft` / `none`,
@@ -38,6 +38,49 @@ drop the audit chain.
 
 The engine is [GlassPane](https://github.com/jingzhao-l/GlassPane). The harness is the
 agent side of it.
+
+## This is a complete coding agent, not a stripped one
+
+The verification wiring is the point of this fork, but it is **additive**. Everything
+upstream opencode does, this harness still does — same agents, same tools, same models, same
+permissions, same LSP and MCP support, same TUI and web app, same SDK and plugin API.
+Nothing was cut to make room for the kernel.
+
+That is a measured claim, not a promise. The fork tracks upstream
+[anomalyco/opencode](https://github.com/anomalyco/opencode) at a pinned tag, and
+`harness/tools/fork-diff.mjs` compares every file in this tree against that tag on every
+change:
+
+```
+fork-diff vs v1.18.32: 6527/6687 byte-identical, 51 edited, 55 added, 54 deleted
+```
+
+Roughly 98% of the upstream tree is byte-for-byte upstream. The edits are concentrated in
+config/paths/branding, the `gp_*` tool surface, the kernel binding, the compaction hook,
+and the packaging scripts. The deleted files are upstream's own publish plumbing for
+channels this product does not use (ghcr images, AUR, a Homebrew tap, a hosted console
+account) — plus, in 0.4.0, the first-party account surface described below.
+
+What "additive" means in practice: if upstream ships a feature in a later release, this
+fork can take it, because the feature is still here to take.
+
+### One exception, and it is deliberate: no account, bring your own key
+
+Upstream lets you `auth login` to an opencode account, which unlocks opencode's own
+model gateway (a first-party provider in the catalog) and remote session sharing. This
+product has no such account, so that surface is removed rather than shipped broken:
+
+- upstream's `opencode` provider entry is filtered out of the model catalog
+- `auth login` / `logout` / `switch`, the `/org` command and the org switcher are gone
+- the `/experimental/console*` endpoints and the console-managed-provider state are gone
+- session sharing to opencode's upstream cloud is gone (`share` / `autoshare` config keys too)
+
+**Everything else in the catalog is untouched.** Anthropic, OpenAI, Google, GitHub
+Copilot, Amazon Bedrock, Azure, OpenRouter and the rest are all still there — hundreds of
+models — and each one is unlocked by **your own API key**, supplied by environment
+variable, by the config file with an `{env:NAME}` template, or by the TUI's `/connect`
+dialog. There is nothing to sign up for and nothing to log into. See
+[`docs/models-and-keys.md`](docs/models-and-keys.md).
 
 ## Product surfaces
 
@@ -133,10 +176,14 @@ Details: [`docs/evidence.md`](docs/evidence.md).
 ## Documentation
 
 - [`docs/install.md`](docs/install.md) — install paths, permissions, verification
+- [`docs/models-and-keys.md`](docs/models-and-keys.md) — the model catalog and how to supply
+  your own API keys
 - [`docs/tools.md`](docs/tools.md) — the `gp_*` surface, argument by argument
 - [`docs/evidence.md`](docs/evidence.md) — attribution, diagnosis, the decision log
-- [`docs/migrate-from-opencode.md`](docs/migrate-from-opencode.md) — what the private
+- [`docs/migrate-from-opencode.md`](docs/migrate-from-opencode.md) — what the fork changed versus upstream
   customisation changed, and what deliberately stayed
+- [`docs/release.md`](docs/release.md) — cutting a release, and the npm trusted-publisher
+  setup
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — engine unreachable, permission
   denials, the `GP_E_*` codes
 - [`FORK.md`](FORK.md) / [`SYNCLOG.md`](SYNCLOG.md) — the fork's coordinates, discipline

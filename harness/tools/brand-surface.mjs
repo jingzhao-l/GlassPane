@@ -63,7 +63,6 @@ const PRODUCT_FILES = [
   "packages/opencode/script/publish.ts",
   "packages/opencode/script/postinstall.mjs",
   "scripts/install.sh",
-  "scripts/install.ps1",
   // user-facing runtime
   "packages/core/src/global.ts",
   "packages/opencode/src/installation/index.ts",

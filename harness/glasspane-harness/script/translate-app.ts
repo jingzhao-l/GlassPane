@@ -123,9 +123,9 @@ export function targetFiles(locale: Locale) {
 }
 
 export function glossaryFile(locale: Locale) {
-  if (locale === "zh") return ".opencode/glossary/zh-cn.md"
-  if (locale === "zht") return ".opencode/glossary/zh-tw.md"
-  return `.opencode/glossary/${locale}.md`
+  if (locale === "zh") return ".glasspane-harness/glossary/zh-cn.md"
+  if (locale === "zht") return ".glasspane-harness/glossary/zh-tw.md"
+  return `.glasspane-harness/glossary/${locale}.md`
 }
 
 export function findDrift(source: Dictionary, target: Dictionary, locale?: Locale) {

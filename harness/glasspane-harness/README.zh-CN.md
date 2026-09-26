@@ -34,6 +34,41 @@
 
 引擎是 [GlassPane](https://github.com/jingzhao-l/GlassPane)，harness 是它的 agent 侧。
 
+## 这是一个完整的编程 harness，不是被削过头的 fork
+
+验证接线是这次分叉的落点，但它是**加法**：上游 opencode 会做的每一件事，这个 harness 都会做——
+同样的 agent、工具、模型、权限，同样的 LSP 与 MCP 支持，同样的 TUI 与 web 应用，同样的
+SDK 与 plugin API。为了塞下内核，没有任何功能被砍掉。
+
+这句话是**量出来的**，不是承诺。分叉锚定上游
+[anomalyco/opencode](https://github.com/anomalyco/opencode) 的某个 tag，
+`harness/tools/fork-diff.mjs` 每次改动都会把本树与那个 tag 逐文件对比：
+
+```
+fork-diff vs v1.18.32: 6527/6687 byte-identical, 51 edited, 55 added, 54 deleted
+```
+
+上游树约 98% 逐字节保持上游原样。改动集中在 config/paths/品牌、`gp_*` 工具面、内核绑定、
+压缩钩子和打包脚本；删掉的是上游**自己的**发布管道（ghcr 镜像、AUR、Homebrew tap、
+托管 console 账号）——外加 0.4.0 里下面说的第一方账号面。
+
+"加法"在实践中的含义：上游后续版本发布的功能，这个 fork 接得住——因为功能还在那里。
+
+### 唯一的例外，而且是刻意的：没有账号，自带 API key
+
+上游可以 `auth login` 登录 opencode 账号，用来解锁 opencode 自家的模型网关（目录里的第一方
+provider）和云端会话分享。本产品没有这个账号，所以这片面是**删掉**而不是留一个跑不通的壳：
+
+- 上游目录里的 `opencode` provider 条目被过滤掉
+- `auth login` / `logout` / `switch`、`/org` 命令、组织切换器全部移除
+- `/experimental/console*` 端点与 console 托管 provider 状态全部移除
+- 分享会话到上游 opencode 云端的能力移除（`share` / `autoshare` 配置键一并移除）
+
+**目录里其他一切都原封不动。** Anthropic、OpenAI、Google、GitHub Copilot、Amazon Bedrock、
+Azure、OpenRouter 等等全在——几百个模型——每一个都用**你自己的 API key** 解锁：环境变量、
+配置文件里的 `{env:NAME}` 模板，或 TUI 的 `/connect` 对话框。不用注册、不用登录。见
+[`docs/models-and-keys.md`](docs/models-and-keys.md)。
+
 ## 产品面
 
 | 产品面 | 你拿到什么 | 怎么发 |
@@ -112,7 +147,7 @@ glasspane-harness --help
 - [`docs/install.md`](docs/install.md) — 安装通道、权限、自检
 - [`docs/tools.md`](docs/tools.md) — 逐个参数的 `gp_*` 参考
 - [`docs/evidence.md`](docs/evidence.md) — 归因、诊断、决策日志
-- [`docs/migrate-from-opencode.md`](docs/migrate-from-opencode.md) — 私有化改了什么、刻意留了什么
+- [`docs/migrate-from-opencode.md`](docs/migrate-from-opencode.md) — 相对上游改了什么、刻意留了什么
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — 引擎不可达、权限拒绝、`GP_E_*` 码表
 - [`FORK.md`](FORK.md) / [`SYNCLOG.md`](SYNCLOG.md) — 分叉坐标、纪律、每批实测数字；
   [`NOTICE`](NOTICE) — 署名；[`CHANGELOG.md`](CHANGELOG.md) — 每个版本发了什么

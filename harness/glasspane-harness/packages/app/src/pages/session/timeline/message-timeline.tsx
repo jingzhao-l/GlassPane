@@ -298,8 +298,13 @@ export function MessageTimeline(props: {
   })
   const titleValue = createMemo(() => info()?.title)
   const titleLabel = createMemo(() => sessionTitle(titleValue()))
-  const shareUrl = createMemo(() => info()?.share?.url)
-  const shareEnabled = createMemo(() => sync().data.config.share !== "disabled")
+  // [gp] Product: sharing a session means uploading it to opencode's cloud, which
+  // needs a first-party account this product does not have — the endpoint is gone,
+  // so the affordances are permanently off. They stay in the component's shape
+  // (rather than being deleted across ~15 JSX sites and 30 locales) and never
+  // render. This is the one place to flip if sharing ever comes back.
+  const shareUrl = createMemo(() => undefined as string | undefined)
+  const shareEnabled = createMemo(() => false)
   const parentID = createMemo(() => info()?.parentID)
   const parent = createMemo(() => {
     const id = parentID()
