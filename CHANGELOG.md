@@ -4,10 +4,14 @@
 
 ## [1.3.0] — 2026-09-26
 
-MCP 专项审查（round 8）与对同批修复自身的复审（round 8b）落地。**这一版之前 MCP 面被判定为
-"不宜对外发布"**：三条高危都在真实负载下可走到，而当时的门禁一条都不会红。本版把三条连同
-4 项中危、若干低危与 12 条新闸一起收口；判据与残留项写在
-`specs/GlassPane_规格修订_2026-09-23_iterate-round4.md` 的「追加三」与 `.iterate_decisions.md`。
+MCP 专项审查（round 8）与对同批修复自身的三轮复审（round 8b / 8c / 8d）落地。**这一版之前 MCP 面被判定为
+"不宜对外发布"**：三条高危都在真实负载下可走到，而当时的门禁一条都不会红；8b/8c/8d 复审的对象是
+**这三条修复本身**，又抓到 4 + 1 + 2 条。本版把三条连同中低危与 14+ 条新闸一起收口；判据与残留项写在
+`specs/GlassPane_规格修订_2026-09-23_iterate-round4.md` 的「追加三」「追加四」与 `.iterate_decisions.md`。
+
+> 发版说明：`v1.3.0` 的 tag 打在本条目补写之前，所以 GitHub Release 的源码 tarball 与 npm 包里的
+> CHANGELOG 是**补写前**的文本（代码本身已含 8c/8d 两条修复，已实测：装出来的 `dist/index.js` 里有
+> 迟到 attach 重启链与按 schema 生成的建议）。npm 包不可变，这段差异只在此处披露，不回改历史。
 
 ### Fixed — 代理指引不得在忙的时候喊"重启"，也不得诱导重复点击
 
@@ -30,6 +34,10 @@ MCP 专项审查（round 8）与对同批修复自身的复审（round 8b）落�
 - **证据链只在被 attach 的应用真的变化时重新开始**（与守护进程
   `if attachedApp != app { history.removeAll() }` 同条件，身份键覆盖 Swift `AttachedApp` 的
   全部字段）。旧实现每次成功 attach 都清空，于是幂等的同应用 re-attach 会抹掉刚记录的操作。
+- **迟到的 `attach` 回复现在也真的执行这条规则**（round 8d）。上一版把 `restart()` 只挂在"非迟到"
+  分支：daemon 已按换 app 清了历史，壳层的链纪元却**永不推进**，于是为抓跨应用串档而加的每一道纪元
+  判据，在最忙也最容易串档的那条路径上整体失效且零日志。现在"记一条"还是"换 app 重启"由同一个回调
+  在**取得 trail turn 之后**决定（8c 的同一形状），没有纪元的迟到帧默认拒绝写入。
 - **HTTP 网关不再给出 MCP 面才成立的答案**：`curl` 调用方拿到的指引不再提
   `gp_recent_reports`（该路由恒 404），改指本进程 stderr 与 `GET /v1/evidence/<operationId>`；
   同时真的注册了 note / late-reply 两个汇点，"去读 stderr"这句话不再落空。
@@ -46,8 +54,12 @@ MCP 专项审查（round 8）与对同批修复自身的复审（round 8b）落�
   `GP_E_BAD_PARAMS`，一帧都不发。
 - **`notifications/cancelled` 不再被静默丢弃**：落一行日志，并明说"本壳无法撤销已经发往
   daemon 的请求，撤销不是撤销回"。
-- **超帧回复的建议改为按该请求真实携带的参数生成**（`capture_view` 拿的是 `scale`，
-  旧文案让它去缩一个它没有的 `maxDepth`）。
+- **超帧回复的建议改由"该工具自己 advertised 的参数表"生成**（round 8d 定形）。中间一版按"这次请求
+  恰好带了哪些参数"派生，实测三处错：`gp_observe` 未显式写 `maxDepth` 就被宣判"没有可缩的参数"（它
+  明明 advertise 1…10）；唯一能带 `scale` 的 `capture_view` 那一支根本走不到（PNG 预算 base64 后
+  3.2 MB < 4 MiB 帧上限，这条不等式现由测试钉住）；`scale` 已在下界 0.1 时还叫它"再调小"——那是
+  一条会被壳层自己的校验拒掉的指令。现在界值全部读自工具的 `inputSchema.properties`，到界的旋钮如实
+  说明"无可再缩"并改指一条真能走的路（问更小的问题，而非原样重试）。
 - **`GP_E_NO_USER_RECORD` / `GP_E_UNKNOWN` 收进错误码单一出口**；`GP_E_PAYLOAD_TOO_LARGE`
   的"壳层专有"注释改口（守护进程枚举里本来就有它）；`McpServer` 的审计会话改为运行时必填，
   缺它即拒绝构造（此前类型必填、运行时可选，未接线看起来完全正常）。
@@ -65,6 +77,13 @@ MCP 专项审查（round 8）与对同批修复自身的复审（round 8b）落�
   且守护进程"按应用变化清历史"这一条件若改写即红。
 - `mcp-shell/test/remedy-surface.test.mjs`：错误码"共享 / 壳层专有"的分类与 daemon 枚举双向比对、
   `src/` 内 `GP_E_*` 字面量单一出口、两种接入面各自的 remedy 文本。
+- `mcp-shell/test/tools.test.mjs` 两类新用例：**建议不得点名该工具没 advertise 的参数**（对表内每个工具
+  都先跑一遍它自己的 `spec.validate`，所以工具新增必填项会让这条变红并点名要改的行，而不是悄悄少测一个
+  工具），以及"迟到的 attach 回复重启链"（含幂等 re-attach **不**重启的反例）。
+- `mcp-shell/test/support/wire-surface.mjs`：把"本壳会发哪些方法"提出来给两条闸共用 —— "能不能收到迟到
+  回复"与"有没有具名期限"必须是同一个答案。
+- `probe-liveness.test.mjs` 另加两条：握手期限等于耐性上限、握手活得比触发它的那个请求久。这两条是补的——
+  上一版的 `hello` 修复随代码一起提交却**没有任何门禁**，反向变异 `hello: 15_000` 零红才暴露。
 - `mcp-shell/test/path-consistency.test.mjs`：真值表的系统树行由 Swift 两份清单**生成**（原为手抄
   5 个名字，清单实际 8+3 项）；4 MiB 帧上限三判据对表；PNG 预算 × 4/3 ≤ 帧上限的不等式。
 - `engine/.p6_smoke.py` / `.t9_smoke.py`：`verify_shared_block()` 把"改一处必须同步另一处"这句
@@ -77,6 +96,11 @@ MCP 专项审查（round 8）与对同批修复自身的复审（round 8b）落�
 - `installer/cli.js` 仍以 `process.env.HOME` 拼 launchd 的 `--socket-path` 与日志路径（风险区，
   本轮只登记）。
 - `notifications/cancelled` 只能记一行：真撤销需要 daemon 侧的取消通道，而方法表是冻结面。
+- **本版以 GitHub CI 全绿为发布凭据**（`main @ cc414cd`，7 个 job 全过；装出来的包实测可完成
+  `initialize` + `tools/list`，16 个工具与源码表逐名一致）。本机两条端到端闸 `engine/.p6_smoke.py` 与
+  `engine/.t9_smoke.py` 在打 tag 时**没有一次可归因的绿**：并行会话把每核 load 顶到 15–33，两条闸按构建
+  新鲜度判据自拒并返回 `NOT RUN(2)`（那是正确行为，不是通过）。CI 跑在 ubuntu runner 上，不覆盖真机
+  AX / 屏幕录制路径，所以这两面未经端到端验证；机器空下来补跑，若发现问题按 1.3.1 发布修复。
 
 ## [1.2.0] — 2026-09-25
 
