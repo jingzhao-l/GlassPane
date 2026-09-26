@@ -6,7 +6,7 @@
   "counts": {
     "identical": 4677,
     "edited": 250,
-    "added": 97,
+    "added": 98,
     "deleted": 1705
   },
   "edited": [
@@ -313,6 +313,7 @@
     "docs/evidence.md",
     "docs/index.md",
     "docs/install.md",
+    "docs/kernel-integration.md",
     "docs/migrate-from-opencode.md",
     "docs/models-and-keys.md",
     "docs/release.md",
@@ -2671,7 +2672,7 @@
     {
       "file": "packages/opencode/script/publish.ts",
       "upstreamHash": "ac1cafff56f46e9611a9ff78aa05217d21a907ef",
-      "forkHash": "58c650ae517055278cea0feec856caa1b1b0df65"
+      "forkHash": "5a53a4bbf48d0529c2f7096575897986c4c30b09"
     },
     {
       "file": "packages/opencode/src/acp/service.ts",
@@ -3301,7 +3302,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "85f8c05ea0db11c10ca8524b2349c519db558f18"
+      "forkHash": "2c30934b0c48cb0d7ab9ae2f213f7d1a48528690"
     },
     {
       "file": "script/translate-app.test.ts",

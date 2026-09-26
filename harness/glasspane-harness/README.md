@@ -183,6 +183,8 @@ Details: [`docs/evidence.md`](docs/evidence.md).
   customisation changed, and what deliberately stayed
 - [`docs/release.md`](docs/release.md) — cutting a release, and the npm trusted-publisher
   setup
+- [`docs/kernel-integration.md`](docs/kernel-integration.md) — the shared kernel, why it is
+  not on npm, and how much of the two-way integration exists today
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — engine unreachable, permission
   denials, the `GP_E_*` codes
 - [`FORK.md`](FORK.md) / [`SYNCLOG.md`](SYNCLOG.md) — the fork's coordinates, discipline

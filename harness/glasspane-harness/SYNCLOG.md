@@ -2,6 +2,35 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-09-26 · kernel 集成状态：把"要不要发 npm"从记忆变成记录，并发现溯源链在锚点处断了
+
+owner 问：kernel 为什么不发布到 npm？做双向集成是不是必须发 npm？
+
+- **为什么不发**：这是**已记录的决定，不是待办**。P6 §13（2026-09-21 用户口令：file: 依赖会漏进
+  已发布清单，故内联字节）+ P4 §33.2（registry 发布跟 iterate monorepo 自己的发布节奏）；而 fork 以
+  subtree 独立成仓，相对 `../../kernel` 的 import 会在第一次发布就断——所以只剩 vendored 或 npm，
+  选了 vendored。调研文档里"Phase B 第 0 号动作是发布 kernel"那句**已被自己订正**（把战略读成了待办）；
+  "npm 依赖"描述的是依赖的**方向与计数口径**，不是发布指令。
+- **是否必须发**：**对任何具体场景都不必须，对"一个 kernel、N 个消费者"的机械约束最省事**。R40 场景
+  要的是：① 同一份实现与 schema（vendoring 就够，分发渠道无关）；② kernel 暴露该场景需要的钩子
+  （`dimensionContext`、决策日志写入器、invariant 求值——**这是今天真正的阻塞，而且是 API 问题不是分发
+  问题**）；③ R34 消费者矩阵的交叉验证（这一步分发方式才有区别：npm 让 4 个消费者解析到同一版本，
+  API 断裂在 install/typecheck 阶段就炸；vendored 只能靠一致性套件事后逐个发现）。
+  代价对比写进 `docs/kernel-integration.md`（身份、断裂发现时机、版本偏移、补丁、一致性套件）。
+- **新增 `kernel-vendor.mjs --probe`**（只读，一次 `git ls-remote`）：问两个问题——canonical 分支是否移动、
+  **我们钉的 ref 是否还解析得到**。第一次运行就抓到**真问题**：我们钉的 `bb80f97` 与分支
+  `kernel/decision-log-chain` 在 canonical 仓**已不存在**（只剩 main / docs/glasspane-cross-link），
+  而 canonical main 比我们的镜像**落后三个模块**（canonical-json / decision-log / evidence-decision，
+  2026-09-25 的回流只落在本地提交）。说得准确：`--check` 仍能证明 vendored 字节自记录以来未变，
+  但**已不能证明它们就是 canonical 的字节**——溯源链在锚点处断了。probe 报 ANCHOR UNREACHABLE 并
+  退出 1，而不是耸耸肩说"无漂移"。
+- **发布与否变成机器可读的**：`product.json → kernel.mode`（当前 `vendored`）+ `kernel-vendor --check`
+  断言声明与树一致——否则"模式"只是散文，会在有人发布或重新 vendor 的那一刻开始漂。
+- probe 挂在**既有的定时 lane**（`harness-contract.yml`，每周一 06:17 UTC，与上游探针同频）。我第一版
+  加在了 `ci.yml` 里，而那个 workflow **根本没有 schedule 触发器**——一个永远不会跑的 job 就是
+  "看起来接好了其实没有"，已撤掉。
+- `docs/kernel-integration.md`：kernel 是什么/为什么不发/发不发的区别/今天做到哪/两阶段收口计划。
+
 ## 2026-09-26 · v0.5.x：产品面逐类审计清零 + 10 片上游树移除 + 一次自己造成的版本号报废
 
 owner：持续检查私有化（细节不再提 opencode）、全面整理不需要的文件（**桌面端保留**）、问 glm52 与

@@ -18,6 +18,14 @@
  * MODES
  *   --record <canonical-checkout> <canonical-version>   (run by tools/sync-kernel.sh --target=fork)
  *   --check                                             (run locally and in CI)
+ *   --probe                                             (scheduled: has the canonical kernel moved?)
+ *
+ * WHY A PROBE. "One kernel, N consumers" is only a fact while somebody checks. We
+ * pin a ref; if the iterate side moves the branch, the only symptom would be a
+ * scenario that quietly stops agreeing. The probe compares our pinned ref against
+ * the canonical branch head and reports drift — the same shape as fork-diff's
+ * upstream probe, and it needs no registry publication to be useful. It observes;
+ * it does not fetch, sync or rewrite anything.
  *
  * Exit codes: 0 ok, 1 the vendor no longer matches its provenance, 2 cannot measure.
  */
@@ -35,8 +43,8 @@ const SUBDIRS = ["src", "schemas", "fixtures"]
 
 const argv = process.argv.slice(2)
 const mode = argv[0]
-if (mode !== "--record" && mode !== "--check") {
-  console.error("usage: kernel-vendor.mjs --record <canonical-checkout> <canonical-version> | --check")
+if (mode !== "--record" && mode !== "--check" && mode !== "--probe") {
+  console.error("usage: kernel-vendor.mjs --record <canonical-checkout> <canonical-version> | --check | --probe")
   process.exit(2)
 }
 
@@ -74,6 +82,99 @@ function vendoredFiles(dir) {
     for (const file of walk(full)) out.push(path.relative(dir, file).split(path.sep).join("/"))
   }
   return out.sort()
+}
+
+/**
+ * Has the canonical kernel moved past the ref we pinned?
+ *
+ * Read-only: one `git ls-remote` against the canonical repo. It reports, it does
+ * not fetch, sync or rewrite. Exit 0 with a "DRIFTED" line is a finding for a human
+ * (or a scheduled job) to act on, not a CI failure — the vendored bytes are still
+ * exactly what the manifest says they are, which is what --check enforces.
+ */
+/**
+ * The declared mode must be the real one. `product.json → kernel.mode` says how this
+ * product gets the kernel; if the tree disagrees with the declaration, the declaration
+ * is the thing that is wrong — and a mode that is only prose drifts the moment
+ * somebody publishes or re-vendors.
+ */
+function checkDeclaredMode() {
+  const productFile = path.join(repoRoot, "harness", "glasspane-harness", "product.json")
+  if (!existsSync(productFile)) return 0
+  const product = JSON.parse(readFileSync(productFile, "utf8"))
+  const declared = product?.kernel?.mode
+  if (!declared) {
+    console.error("  ✗ product.json has no kernel.mode — the distribution form of the shared kernel must be declared")
+    return 1
+  }
+  const { dir } = vendorDir()
+  const vendored = existsSync(dir)
+  if (declared === "vendored" && !vendored) {
+    console.error(`  ✗ product.json declares kernel.mode=vendored but ${path.relative(repoRoot, dir)} is absent`)
+    return 1
+  }
+  if (declared === "npm" && vendored) {
+    console.error("  ✗ product.json declares kernel.mode=npm while vendored source is still in the tree — one form at a time")
+    return 1
+  }
+  console.log(`kernel-vendor: declared mode '${declared}' matches the tree${declared === "vendored" ? ` (${path.relative(repoRoot, dir)})` : ""}`)
+  return 0
+}
+
+if (mode === "--probe") {
+  const manifest = JSON.parse(readFileSync(manifestFile, "utf8"))
+  const canonical = manifest.canonical ?? {}
+  if (!canonical.repo) die(2, "manifest has no canonical.repo — nothing to probe")
+  let head
+  try {
+    head = execFileSync("git", ["ls-remote", `https://github.com/${canonical.repo}.git`, `refs/heads/${canonical.branch}`], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim()
+  } catch {
+    console.log(`kernel-vendor: could not reach ${canonical.repo} (offline?) — probe skipped, not a failure`)
+    process.exit(0)
+  }
+  const remote = head.split(/\s+/)[0]
+  const pinned = canonical.ref ?? ""
+
+  // Is the commit we pinned still *there*? This is a different failure from "the
+  // branch moved", and a worse one: with a moved branch we can re-sync; with an
+  // unreachable anchor the manifest can no longer prove that our bytes are anybody
+  // else's bytes, and --check can only prove they have not changed *since*.
+  let anchorAlive = true
+  try {
+    execFileSync("git", ["ls-remote", `https://github.com/${canonical.repo}.git`, pinned], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim() || (anchorAlive = false)
+  } catch {
+    anchorAlive = false
+  }
+  if (!remote) {
+    console.log(`kernel-vendor: branch ${canonical.branch} not found in ${canonical.repo} — no drift signal; checking the anchor only`)
+  }
+  if (!anchorAlive) {
+    console.log(`kernel-vendor: ANCHOR UNREACHABLE — ${canonical.repo} cannot resolve our pinned ref ${pinned.slice(0, 12)}`)
+    console.log("  The vendored bytes still match the manifest (--check proves they never changed), but the")
+    console.log("  provenance chain to canonical is broken: we can no longer prove these ARE its bytes, only")
+    console.log("  that they have not changed since we recorded them. This is a finding, not a pass.")
+    console.log("  Fix: re-anchor the manifest to a reachable ref after backflow (tools/sync-kernel.sh --target=fork).")
+    process.exit(1)
+  }
+
+  if (!remote) process.exit(0) // anchor is alive (we got here), nothing else to say
+  if (remote === pinned) {
+    console.log(`kernel-vendor: canonical ${canonical.branch} @ ${pinned.slice(0, 12)} — no drift (${canonical.version})`)
+    process.exit(0)
+  }
+  // Is our pin an ancestor of the branch head? That needs the objects, so this is
+  // reported as "unknown" rather than guessed — a guess here would be the exact
+  // kind of unmeasured claim this project refuses to make.
+  console.log(`kernel-vendor: DRIFTED — canonical ${canonical.branch} head is ${remote.slice(0, 12)}, we pin ${pinned.slice(0, 12)} (${canonical.version})`)
+  console.log("  Our vendored bytes are still exactly what the manifest declares (--check proves that),")
+  console.log("  but the shared kernel has moved. To take it: KERNEL_SRC=/path/to/iterate-skill tools/sync-kernel.sh --target=fork")
+  process.exit(0)
 }
 
 if (mode === "--record") {
@@ -184,6 +285,8 @@ if (checkout) {
 } else {
   console.log(`kernel-vendor: ${recorded.size} files checked against the manifest; canonical bytes NOT re-read (KERNEL_SRC unset) — a vendor that is stale-but-untouched is caught by the fork sync, not here`)
 }
+
+bad += checkDeclaredMode()
 
 if (bad > 0) {
   console.error(`kernel-vendor: ${bad} problem(s). The vendored kernel is the canonical package's bytes or it is nothing.`)

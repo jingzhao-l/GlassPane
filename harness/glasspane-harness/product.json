@@ -148,5 +148,31 @@
       "modelsCatalogApi": "packages/core/src/models-dev.ts 读取 https://models.opencode.ai —— 这是模型目录的数据源，是本产品依赖的**第三方公开 API**，不是我们的产品面；记录在此以免被当成疏漏。",
       "scope": "内部包作用域 @opencode-ai/*、Effect service tag、协议头名等内部标识符仍是 lineage：它们不对用户显示，改动会触及数千行 import。已量化：(scope 4,217 处 / OPENCODE_* 275 处 / 旧配置名 35 处)。"
     }
+  },
+  "kernel": {
+    "package": "@iterate/kernel",
+    "version": "0.1.0-draft.1",
+    "canonical": {
+      "repo": "jingzhao-l/iterate-skill",
+      "path": "kernel",
+      "branch": "kernel/decision-log-chain"
+    },
+    "mode": "vendored",
+    "modeWhy": "记录在案的决定，不是待办：P6 §13（file: 依赖会漏进已发布清单，故内联字节）、P4 §33.2（registry 发布跟 iterate monorepo 自己的发布节奏）；而 fork 以 subtree 方式独立成仓，相对 ../../kernel 的 import 会在第一次发布就断——所以只剩 vendored 或 npm。",
+    "switchToNpm": {
+      "cost": "kernel.ts 一行 import，其余不动（该文件头部就是这么写的）",
+      "needs": [
+        "iterate monorepo 发布 @iterate/kernel@0.1.0",
+        "拥有 @iterate npm scope（跨账号动作）"
+      ],
+      "blockedBy": "kernel 当前 API 还没有 R40 场景需要的东西（dimensionContext、决策日志写入器、invariant 求值）；先发布等于发布一个还没有这些 API 的 draft。"
+    },
+    "enforcedBy": [
+      "harness/tools/kernel-vendor.mjs --check（23 个文件逐个 sha256）",
+      "harness/tools/kernel-vendor.mjs --probe（canonical 是否移动/锚点是否还在）",
+      "harness/tools/tool-surface.mjs（按依赖计，不计我们的工具面）"
+    ],
+    "knownFinding": "2026-09-26 probe 首次运行发现：我们钉的 ref bb80f97 与分支 kernel/decision-log-chain 在 canonical 仓已不存在（只剩 main / docs/glasspane-cross-link），而 canonical main 比我们的镜像落后三个模块（canonical-json / decision-log / evidence-decision，2026-09-25 的回流只落在本地提交）。结论要说得准确：--check 仍能证明 vendored 字节自记录以来未变，但已不能证明它们**就是** canonical 的字节——溯源链在锚点处断了。修法：回流三个模块 → push → 用可达 ref 重新锚定。",
+    "docs": "docs/kernel-integration.md"
   }
 }

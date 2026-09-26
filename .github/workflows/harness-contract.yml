@@ -126,3 +126,19 @@ jobs:
         run: |
           node harness/tools/hook-liveness.mjs --offline
           node -e "const j=require('./harness/contracts/hook-liveness.json');const dead=j.hooks.filter(h=>h.kind==='dead').map(h=>h.name);console.log('known dead hooks:', JSON.stringify(dead));if(!(dead.length===1&&dead[0]==='permission.ask')){console.error('金样的死钩子集与调研结论不符');process.exit(1)}"
+
+  # The shared kernel lives in another repository, pinned by ref. Asking "has it moved,
+  # and is our anchor still reachable?" on the same weekly schedule as the upstream probe
+  # is what keeps "one kernel, N consumers" a fact rather than a hope. It fails when the
+  # anchor is unreachable, because that breaks the provenance chain — not when the
+  # vendored bytes change (the normal lane already proves they did not).
+  kernel-drift:
+    name: kernel drift probe
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: canonical kernel: moved? anchor still reachable?
+        run: node harness/tools/kernel-vendor.mjs --probe
