@@ -22,8 +22,12 @@ process.chdir(dir)
  * dependency and no cleanup if the process dies (the stale case is reported, not
  * silently broken).
  */
+// `dist/` is build output and does not exist in a clean checkout — the first CI run
+// of this lane died here with exit 2, which is the lock's own code. The parent is
+// created first for exactly that reason.
 const lockDir = path.join(dir, "dist", ".publish.lock")
 try {
+  mkdirSync(path.dirname(lockDir), { recursive: true })
   mkdirSync(lockDir)
 } catch {
   console.error(`another publish is running, or one died holding ${lockDir}`)
