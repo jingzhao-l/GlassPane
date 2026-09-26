@@ -16,6 +16,8 @@ import { ProjectSetArgs } from "../dist/project-registry.js";
 import { LineReader, MAX_FRAME_BYTES } from "../dist/io.js";
 import { executableSource } from "./support/source.mjs";
 import { makeEngine } from "./helpers.mjs";
+import { EngineJsonRpcClient } from "../dist/engine-client.js";
+import { FakeLineIo } from "./helpers.mjs";
 
 /**
  * C28/C35 consumer consistency (spec v3.0 §21–§22, R33/R34).
@@ -249,7 +251,14 @@ test("gp_recent_reports annotates a folded pack the same way as a single export"
   // The provenance fold has two render call sites (`gp_export_evidence` and the
   // aggregate); fixing one and leaving the other to print the bare const would
   // put two of this shell's own reports in the contradiction B-02/B-09 removed.
-  const { engine, io } = makeEngine();
+  // NOT `makeEngine()`: its 500 ms is a *caller deadline*, and this test must let one
+  // microtask turn pass before it can answer (the audit-trail turn), so under load the
+  // deadline can fire before the reply is even written — two lanes each saw this go red
+  // once on an otherwise-identical tree. A control that fails for scheduling reasons is
+  // not measuring the product: this client carries the method table's own bound instead,
+  // so the render assertion below is the only thing that can fail here.
+  const io = new FakeLineIo();
+  const engine = new EngineJsonRpcClient(io);
   const value = fixture("evidence-pack.ok-04-legacy-draft.json");
   const session = new EvidenceAuditSession();
   session.record({ operationId: value.operationId });
