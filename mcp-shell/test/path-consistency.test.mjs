@@ -186,32 +186,55 @@ const MANIFEST_CHILD = "gp-daemon-manifest-probe";
  * the *twin's* name: the shell judges the resolved location first (see
  * `strongestRefusal`, whose resolved target outranks the given one), which is the
  * right product behaviour and the wrong thing to hard-code as a platform fact. So
- * for a member whose realpath differs from itself the row requires "refused, by
- * the protected-tree rule, naming either the Swift literal or its realpath" and
- * nothing looser — the verdict and the rule are still both asserted, only the
- * spelling of the matched tree is allowed to be the canonical one. Computed from
- * `fs.realpathSync` on every run, so it tightens back to a single expected phrase
- * by itself the day a member stops being a twin. A member that does not exist on
- * the machine running this suite gets no widening at all: `realpathSync` throws,
- * the row keeps its literal-only expectation, and the shell answers it from the
- * ownership fallback, which this row then reports as red rather than skipping.
+ * for a member whose location moves under `realpath` the row requires "refused, by
+ * the protected-tree rule, naming a tree that actually covers where the probe
+ * landed" and nothing looser — the verdict and the rule are still both asserted,
+ * only the spelling of the matched tree is allowed to be the canonical one.
+ *
+ * The accepted spellings are computed as **every manifest member that is an
+ * ancestor of either the literal path or its realpath**, not as a per-item alias
+ * list. That difference is what CI caught on 2026-09-26: the row generated for
+ * `/bin` was given `["/bin", "/usr/bin"]` (the literal plus its realpath) while
+ * both macOS (`/bin` → `/usr/bin`) and the ubuntu runner resolve the probe to
+ * `/usr/bin/<probe>`, which the shell correctly refuses as being inside the tree
+ * **`/usr`** — a manifest member nobody listed as an alias of `/bin`. An alias
+ * list is a platform fact wearing a derived name; the covering relation is the
+ * rule the shell actually applies, so it is what the row allows, and it still
+ * rejects an ownership-only refusal or a tree that covers nothing.
+ *
+ * Computed from `fs.realpathSync` on every run, so it tightens back to a single
+ * expected phrase by itself the day a member stops being a twin. A member that
+ * does not exist on the machine running this suite gets no widening at all:
+ * `realpathSync` throws, the row keeps its literal-only expectation, and the shell
+ * answers it from the ownership fallback, which this row reports as red rather
+ * than skipping.
  */
-function manifestRefusalRows(manifest, phrase) {
+function manifestRefusalRows(manifest, phrase, realpathOf = (target) => fs.realpathSync(target)) {
+  const literals = [...new Set(manifest.map((member) => member.literal))];
+  const covers = (tree, target) => target === tree || target.startsWith(`${tree}/`);
   return manifest.map((member) => {
     let real = null;
     try {
-      real = fs.realpathSync(member.literal);
+      real = realpathOf(member.literal);
     } catch {
       real = null;
     }
-    const matchedTrees = real !== null && real !== member.literal
-      ? [member.literal, real]
-      : [member.literal];
+    // The locations this row's probe can be judged at: what the caller wrote, and
+    // where the filesystem says that actually is. Either may be the one the shell
+    // matched, and the manifest member that covers it is the rule behind the word.
+    const locations = real === null || real === member.literal
+      ? [member.literal]
+      : [member.literal, real];
+    const matchedTrees = literals.filter((tree) =>
+      locations.some((location) => covers(tree, `${location}/${MANIFEST_CHILD}`)));
     return {
       ...member,
       value: `${member.literal}/${MANIFEST_CHILD}`,
       because: phrase(member.literal),
-      becauseAnyOf: matchedTrees.map(phrase),
+      // Empty covering set means the member is not on the list that would catch
+      // its own child — which is a contradiction worth reporting rather than
+      // papering over, so the row keeps its literal-only expectation and goes red.
+      becauseAnyOf: (matchedTrees.length > 0 ? matchedTrees : [member.literal]).map(phrase),
     };
   });
 }
@@ -686,4 +709,39 @@ test("the shell derives the daemon's home, not its own $HOME", () => {
     "ProjectRegistry.defaultProjectsPath is no longer StateRoot.homeDefault().projectsFile, so \
      daemonProjectsPath() in this shell is mirroring a path the daemon does not use",
   );
+});
+
+test("the manifest rows accept the tree that covers the resolved location, and only those", () => {
+  // `manifestRefusalRows` is the one place that decides which wording counts as
+  // "refused by the right rule", and the case that broke on CI (a `/bin` probe the
+  // filesystem reports under `/usr/bin`, refused as inside `/usr`) cannot be
+  // reproduced on the machine that wrote it. So the rule is exercised against a
+  // synthetic manifest with an injected realpath instead of hoping the next OS
+  // behaves: covering is derived from the lists, never from an alias table.
+  const synthetic = [
+    { literal: "/bin", declaration: "systemOwnedStorageTrees" },
+    { literal: "/usr", declaration: "systemOwnedStorageTrees" },
+    { literal: "/quux", declaration: "sharedScratchStoragePaths" },
+  ];
+  const phraseOf = (tree) => `inside the system-owned tree ${tree}`;
+  const rows = manifestRefusalRows(synthetic, phraseOf, (target) =>
+    target === "/bin" ? "/usr/bin" : target);
+
+  const bin = rows.find((row) => row.literal === "/bin");
+  assert.deepEqual(bin.becauseAnyOf.sort(), [phraseOf("/bin"), phraseOf("/usr")].sort(),
+    `a /bin probe that resolves under /usr/bin must be allowed to be refused as inside either: ${bin.becauseAnyOf}`);
+  assert.ok(!bin.becauseAnyOf.includes(phraseOf("/quux")),
+    "covering is a path relation, not a set of anything-goes strings");
+  assert.equal(bin.value, "/bin/gp-daemon-manifest-probe", "the row still probes the Swift literal");
+
+  // The red direction: a member whose own child is covered by nobody keeps the
+  // literal-only expectation, so a shell that stopped matching it reports red
+  // instead of being handed a looser phrase list.
+  const orphan = manifestRefusalRows(
+    [{ literal: "/zzz", declaration: "systemOwnedStorageTrees" }], phraseOf, () => { throw new Error("no such path"); },
+  )[0];
+  assert.deepEqual(orphan.becauseAnyOf, [phraseOf("/zzz")]);
+  assert.ok(manifestRefusalRows(synthetic, phraseOf, (t) => t).find((row) => row.literal === "/bin")
+    .becauseAnyOf.every((one) => one === phraseOf("/bin")),
+    "without a moving realpath the row must tighten back to its own literal");
 });
