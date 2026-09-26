@@ -2,13 +2,20 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { TOOL_SPECS, TOOL_BY_NAME, executeTool, trailScopedTool } from "../dist/tools.js";
+import { attachIdentityOf, TOOL_SPECS, TOOL_BY_NAME, executeTool, trailScopedTool } from "../dist/tools.js";
 import { EvidenceAuditSession } from "../dist/audit-session.js";
+import { canReceiveDaemonReply, methodsSentByShell } from "./support/wire-surface.mjs";
 import { canonicalJson } from "../dist/canonical.js";
 import { FORCE_OVERWRITE_ENV } from "../dist/project-registry.js";
 import { createTrackedMcpServer } from "../dist/dispatch.js";
+import { EngineJsonRpcClient } from "../dist/engine-client.js";
+import { FakeLineIo } from "./helpers.mjs";
+import { MAX_FRAME_BYTES, OversizeFrameError } from "../dist/io.js";
 import { makeEngine } from "./helpers.mjs";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 test("tools/list shape: sixteen tools with expected names and methods", () => {
   const names = TOOL_SPECS.map((spec) => spec.name);
@@ -499,7 +506,15 @@ test("two pipelined acts record in request order when the daemon answers them ou
 });
 
 test("gp_recent_reports admitted behind an outstanding act reports that act", async () => {
-  const { engine, io } = makeEngine();
+  // Not `makeEngine()`: this asserts *ordering*, and the 500 ms in that helper is
+  // a caller deadline. At the load this machine has been sitting at today (load
+  // average 210 = 26 per core, another project's Swift build) the deadline fired
+  // before the trail turn came around and the test went red for a scheduling
+  // reason — a control that only fails when the machine is busy tells you nothing
+  // about ordering, in either direction. The table's own bound keeps the
+  // assertion honest: an act admitted before the read must still be fetched.
+  const io = new FakeLineIo();
+  const engine = new EngineJsonRpcClient(io);
   const session = new EvidenceAuditSession();
   const act = TOOL_BY_NAME.get("gp_act");
   const recent = TOOL_BY_NAME.get("gp_recent_reports");
@@ -1158,4 +1173,184 @@ test("a late reply that arrives while an attach is in flight cannot overtake its
   assert.ok(refusal, `拒绝必须说出口，不能静默写入也不能静默丢弃：${JSON.stringify(notes)}`);
   assert.ok(refusal.includes(OP_BEFORE_B), "要说清楚丢掉的是哪个操作");
   assert.match(refusal, /superseded attach|chain restarted/, `必须说清被谁取代：${refusal}`);
+});
+
+/* ------------------------------------------------------------------ *
+ * R8d-高1: the late-reply path had a whole branch missing. `restart()` — the
+ * thing that decides which app a trail belongs to — was reachable only from the
+ * in-time attach path, so an attach whose *own* caller had already been given a
+ * timeout never restarted anything: the generation never moved, every epoch gate
+ * added to catch the cross-app leak was dead in exactly the busiest case, and the
+ * daemon's history clear (`EngineCore.attach`, on app change) had no mirror here.
+ * ------------------------------------------------------------------ */
+
+test("an attach that answers after its own caller timed out still restarts the trail", async () => {
+  const { io, engine } = makeEngine();
+  const notes = [];
+  const { session } = createTrackedMcpServer(engine, (note) => notes.push(note));
+  const attach = TOOL_BY_NAME.get("gp_attach");
+  const OP_UNDER_A = "op_44444444444444444444444444";
+
+  const first = executeTool(attach, { bundleId: ATTACH_A.bundleId }, engine, session);
+  await flush();
+  io.respond(ATTACH_A);
+  await first;
+  assert.equal(session.attachedApp, attachIdentityOf(ATTACH_A), "第一次 attach 建立了归属");
+  const generationAfterA = session.generation;
+
+  // A records under A.
+  const actFrame = await admitAct(io, engine, session);
+  io.send(JSON.stringify({ id: actFrame.id, result: { operationId: OP_UNDER_A } }));
+  await flush();
+  assert.deepEqual(session.recentIds(20), [OP_UNDER_A]);
+
+  // Now the second attach, which will be answered late — after its caller has
+  // already been answered with a timeout.
+  const lateAttach = executeTool(attach, { bundleId: ATTACH_B.bundleId }, engine, session);
+  const lateFrame = JSON.parse(io.sent[io.sent.length - 1]);
+  assert.equal(lateFrame.method, "attach");
+  const timedOut = await lateAttach;
+  assert.equal(timedOut.isError, true, "调用方先拿到超时诊断");
+  assert.ok(timedOut.content[0].text.startsWith("GP_E_ENGINE_TIMEOUT"));
+  assert.equal(session.attachedApp, attachIdentityOf(ATTACH_A),
+    "回复还没落地之前，归属当然还属于 A");
+
+  io.send(JSON.stringify({ id: lateFrame.id, result: ATTACH_B }));
+  await flush();
+
+  assert.equal(session.attachedApp, attachIdentityOf(ATTACH_B),
+    "迟到的 attach 回复必须照样换掉归属：daemon 在这一刻清的是它自己的历史");
+  assert.ok(session.generation > generationAfterA, "纪元必须前进，否则后续所有纪元判据都是死的");
+  assert.deepEqual(session.recentIds(20), [], "A 的操作不得留在 B 的链里");
+  assert.ok(
+    notes.some((note) => note.includes("late attach reply") && note.includes(String(ATTACH_B.pid))),
+    `这条链的换主必须留下痕迹：${JSON.stringify(notes)}`,
+  );
+
+  // And an operation admitted before that restart stays refused afterwards.
+  io.send(JSON.stringify({ id: actFrame.id, result: { operationId: "op_too_late" } }));
+  await flush();
+  assert.equal(session.recentIds(20).includes("op_too_late"), false,
+    "纪元复判必须对已被换主的会话仍然有效");
+});
+
+/* ------------------------------------------------------------------ *
+ * R8d-高2: "narrow this reply" is a claim about the *tool*, so it is composed
+ * where the tool's schema is. The transport used to guess from the params that
+ * happened to be sent, which got both directions wrong: `gp_observe` with the
+ * default depth was told it had nothing to shrink (it advertises `maxDepth`
+ * 1…10), and `capture_view`'s scale branch could never be reached because the
+ * PNG budget already sits under the frame cap.
+ * ------------------------------------------------------------------ */
+
+async function oversizedAdviceThrough(specName, args, { seedTrail = false } = {}) {
+  const { io, engine } = makeEngine();
+  const spec = TOOL_BY_NAME.get(specName);
+  const session = new EvidenceAuditSession();
+  // The two audit tools read the trail before they ask the daemon, so with an
+  // empty trail they answer `GP_E_NO_EVIDENCE` and never put a frame on the wire
+  // at all — the sweep would then be silently skipping them. One recorded id is
+  // what makes them reach the transport, which is the thing under test.
+  if (seedTrail) {
+    session.record({ operationId: OP_A });
+  }
+  const call = executeTool(spec, args, engine, session);
+  for (let i = 0; i < 20 && io.sent.length === 0; i++) {
+    await flush();
+  }
+  assert.ok(io.sent.length > 0, `${specName} never reached the transport`);
+  const frame = JSON.parse(io.sent[io.sent.length - 1]);
+  io.emitError(new OversizeFrameError(MAX_FRAME_BYTES + 1, `{"id":${frame.id},"result":{"blob":`));
+  const outcome = await call;
+  assert.equal(outcome.isError, true);
+  assert.ok(outcome.content[0].text.startsWith("GP_E_PAYLOAD_TOO_LARGE"), outcome.content[0].text);
+  return outcome.content[0].text;
+}
+
+test("the too-large advice names the knobs the tool itself advertises", async () => {
+  const observe = await oversizedAdviceThrough("gp_observe", {});
+  assert.match(observe, /smaller maxDepth/, `observe 明明 advertise 了 maxDepth，却被说成没有可缩的参数：${observe}`);
+  assert.match(observe, /advertises 1…10/, "界值要来自它自己广告出去的 schema，不能另抄一份");
+
+  const audit = await oversizedAdviceThrough("gp_audit_ui", {});
+  assert.match(audit, /smaller maxDepth/);
+
+  const capture = await oversizedAdviceThrough("gp_capture_view", { scale: 1 });
+  assert.match(capture, /smaller scale/, `capture_view 的 scale 是唯一旋钮：${capture}`);
+  assert.match(capture, /currently 1/);
+});
+
+test("a knob already at its advertised floor is never described as shrinkable", async () => {
+  const text = await oversizedAdviceThrough("gp_capture_view", { scale: 0.1 });
+  assert.match(text, /already at this tool's floor \(0\.1\)/,
+    `0.1 是 schema 的下界，再叫它调小就是给出一条会被自己拒掉的指令：${text}`);
+  assert.ok(!/retry with a smaller scale/.test(text), text);
+  assert.match(text, /ask a smaller question/, "到界之后必须给出真正还能做的事，而不是停在\"没有旋钮\"");
+});
+
+test("no advice names a parameter the tool does not advertise", async () => {
+  // The property that makes the helper worth having: it may only point at knobs
+  // this very tool publishes. Advice that names anything else sends an agent to a
+  // parameter the shell would then reject with GP_E_BAD_PARAMS — the same family
+  // of mistake R8d-高2 found in the old transport-level guess, pointing the other
+  // way (there it invented nothing but named a knob the *request* hadn't sent).
+  //
+  // Scope is derived, not typed out: a tool can only be told how to shrink a
+  // reply if a reply can reach it at all, and the registry trio answers out of
+  // `projects.json` and never writes a frame. The same derivation
+  // `test/method-table.test.mjs` uses decides it (one rule, shared), and the
+  // argument table below is run through `spec.validate`, so a tool that gains a
+  // required field makes this red with a pointer instead of sliding out of the
+  // sweep unnoticed.
+  const HERE = path.dirname(fileURLToPath(import.meta.url));
+  const sent = methodsSentByShell(TOOL_SPECS, path.resolve(HERE, "..", "src"));
+  const swept = TOOL_SPECS.filter((spec) => canReceiveDaemonReply(spec, sent));
+  const excluded = TOOL_SPECS.filter((spec) => !canReceiveDaemonReply(spec, sent)).map((spec) => spec.name);
+  const sweepArgs = {
+    gp_attach: { bundleId: "com.example.sweep" },
+    gp_act: { selector: { role: "AXButton" }, action: "press" },
+    gp_assert_element: { selector: { role: "AXButton" }, property: "title", expected: "Submit" },
+    gp_restore: { snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS" },
+    gp_export_evidence: { operationId: OP_A, format: "markdown" },
+  };
+  // Coverage without a name list: a forwarded tool always gets a reply, so one
+  // missing from the sweep means the derivation is broken; and nothing that
+  // reaches the daemon may be excluded.
+  const forwarded = TOOL_SPECS.filter((spec) => spec.execute === undefined);
+  assert.deepEqual(
+    forwarded.filter((spec) => !swept.includes(spec)).map((spec) => spec.name), [],
+    "被转发的工具没进扫描——它必然收得到回复，是推导坏了",
+  );
+  assert.deepEqual(
+    excluded.filter((name) => TOOL_SPECS.find((spec) => spec.name === name)?.execute === undefined), [],
+    `一个被转发的工具被判成"够不到 daemon"：${excluded.join(", ")}`,
+  );
+  assert.ok(swept.length >= 10, `只扫了 ${swept.length} 个工具，这条闸的覆盖已经不作数`);
+
+  const offenders = [];
+  const skipped = [];
+  for (const spec of swept) {
+    const args = sweepArgs[spec.name] ?? {};
+    const checked = spec.validate(args);
+    if (!checked.ok) {
+      skipped.push(`${spec.name} 过不了自己的校验: ${checked.issues}`);
+      continue;
+    }
+    let text;
+    try {
+      text = await oversizedAdviceThrough(spec.name, args, { seedTrail: true });
+    } catch (error) {
+      skipped.push(`${spec.name}: ${String(error).slice(0, 90)}`);
+      continue;
+    }
+    const advertised = new Set(Object.keys(spec.inputSchema?.properties ?? {}));
+    for (const knob of ["maxDepth", "scale", "limit", "selector", "role", "title", "property"]) {
+      const claims = new RegExp(`smaller ${knob}\\b|\\b${knob} is already|tighter ${knob}\\b`, "");
+      if (claims.test(text) && !advertised.has(knob)) {
+        offenders.push(`${spec.name} 点了自己广告里没有的 \`${knob}\`: ${text.slice(0, 150)}`);
+      }
+    }
+  }
+  assert.deepEqual(skipped, [], `这些工具本该被扫到却没有：${skipped.join("; ")}`);
+  assert.deepEqual(offenders, [], offenders.join("; "));
 });

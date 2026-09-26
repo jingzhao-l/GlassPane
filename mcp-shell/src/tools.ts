@@ -12,6 +12,7 @@ import {
 } from "@iterate/kernel";
 
 import { canonicalJson } from "./canonical.js";
+import { MAX_FRAME_BYTES } from "./io.js";
 import { daemonUnreachableRemedy, EngineCallError, EngineJsonRpcClient } from "./engine-client.js";
 import {
   formatToolError,
@@ -21,6 +22,7 @@ import {
   GP_E_NO_EVIDENCE,
   GP_E_NOT_FOUND,
   GP_E_NO_USER_RECORD,
+  GP_E_PAYLOAD_TOO_LARGE,
   GP_E_PROJECT_LIMIT,
 } from "./errors.js";
 import { EvidenceAuditSession, type TrailTurn } from "./audit-session.js";
@@ -683,6 +685,113 @@ export function attachIdentityOf(result: unknown): string | null {
   return `${pid}|${bundleId}|${appName}`;
 }
 
+/**
+ * One advertised numeric bound, read out of a tool's own JSON Schema.
+ *
+ * `maximum`/`minimum` are what `tools/list` publishes, so they are also what an
+ * agent can act on: advice built from anything else can tell it to use a value
+ * this shell would then reject.
+ */
+interface NarrowingKnob {
+  name: string;
+  kind: "scale" | "depth" | "selector" | "limit";
+  minimum?: number;
+  maximum?: number;
+  /** The value the request carried, when it carried one. */
+  sent?: number;
+}
+
+function narrowingKnobsFor(spec: ToolSpec, params: Record<string, unknown>): NarrowingKnob[] {
+  const properties = (spec.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+  const knobs: NarrowingKnob[] = [];
+  for (const [name, raw] of Object.entries(properties)) {
+    const schema = raw as { type?: string; minimum?: number; maximum?: number };
+    const sentValue = params[name];
+    const sent = typeof sentValue === "number" ? sentValue : undefined;
+    // Which knob shrinks *what* is a property of the tool, so the mapping is
+    // spelled per name rather than guessed from types: `limit` and `maxDepth`
+    // are both integers and shrink very different things.
+    if (name === "maxDepth") {
+      knobs.push({ name, kind: "depth", minimum: schema.minimum, maximum: schema.maximum, sent });
+    } else if (name === "scale") {
+      knobs.push({ name, kind: "scale", minimum: schema.minimum, maximum: schema.maximum, sent });
+    } else if (name === "limit") {
+      knobs.push({ name, kind: "limit", minimum: schema.minimum, maximum: schema.maximum, sent });
+    } else if (name === "selector" || name === "role" || name === "title") {
+      knobs.push({ name, kind: "selector", sent: undefined });
+    }
+  }
+  return knobs;
+}
+
+function describeKnob(knob: NarrowingKnob): string {
+  const bounds = knob.minimum !== undefined && knob.maximum !== undefined
+    ? ` (this tool advertises ${knob.minimum}…${knob.maximum})`
+    : knob.maximum !== undefined
+      ? ` (this tool advertises at most ${knob.maximum})`
+      : knob.minimum !== undefined
+        ? ` (this tool advertises at least ${knob.minimum})`
+        : "";
+  switch (knob.kind) {
+    case "depth":
+      return `a smaller maxDepth${bounds}`;
+    case "limit":
+      return `a smaller limit${bounds}`;
+    case "selector":
+      // Named by the parameter this tool really publishes: `gp_observe` has
+      // `role`, not `selector`, and telling it to tighten a field it does not
+      // accept is the same mistake this function exists to stop making.
+      return knob.name === "selector"
+        ? "a more specific selector (aim at one element)"
+        : `a tighter ${knob.name} filter`;
+    case "scale":
+      // At the advertised floor there is nothing left to lower, and telling an
+      // agent to lower it is a command this shell would then reject: zod's
+      // `min(0.1)` answers GP_E_BAD_PARAMS. Say what is left instead.
+      return knob.sent !== undefined && knob.minimum !== undefined && knob.sent <= knob.minimum
+        ? `scale is already at this tool's floor (${knob.minimum}), so the image cannot be shrunk further here`
+        : `a smaller scale${bounds}${knob.sent !== undefined ? `, currently ${knob.sent}` : ""}`;
+  }
+}
+
+/**
+ * The advice for a reply that did not fit the frame.
+ *
+ * R8d-高2 replaces the previous version of this function, which read the *params
+ * the request happened to carry*: `gp_observe` with no explicit `maxDepth` got
+ * "this request carries no narrowing parameter this shell can name", which is
+ * false — the tool advertises `maxDepth` 1…10 and the daemon applies its own
+ * default — and `capture_view`'s `scale` branch could never be reached at all,
+ * because the PNG budget is already below the frame cap (a fact now pinned by
+ * `test/consumer-consistency.test.mjs`). The authority for "what can this caller
+ * shrink" is the schema it was shown, so that is what this reads; the sent value
+ * is used only to notice a knob that is already at its floor.
+ *
+ * `test/remedy-surface.test.mjs` checks the two properties that make this worth
+ * having: every parameter it names exists in that tool's own advertised schema,
+ * and no knob at its floor is ever described as shrinkable.
+ */
+export function oversizedReplyAdvice(spec: ToolSpec, params: Record<string, unknown>): string {
+  const knobs = narrowingKnobsFor(spec, params);
+  const shrinkable = knobs.filter((knob) => !(
+    knob.kind === "scale"
+    && knob.sent !== undefined && knob.minimum !== undefined && knob.sent <= knob.minimum
+  ));
+  const head = `the reply was too large for one frame (${MAX_FRAME_BYTES}-byte limit); `;
+  if (shrinkable.length === 0) {
+    return knobs.length > 0
+      ? head + `${knobs.map(describeKnob).join("; ")} — nothing left to narrow on this request: ask a `
+        + "smaller question (one element, one region) rather than retrying it unchanged; the connection is "
+        + "intact and the daemon keeps answering other requests"
+      : head + "this tool advertises no parameter that shrinks a reply, so do not retry it unchanged — ask a "
+        + "smaller question (one element, one region) instead; the connection is intact and the daemon keeps "
+        + "answering other requests";
+  }
+  return head + `retry with ${shrinkable.map(describeKnob).join(" and ")}; `
+    + "the reply body has to fit one frame, and a retried identical request will be dropped identically; "
+    + "the connection is intact and the daemon keeps answering other requests";
+}
+
 /** Read the trail once this call's turn comes up, i.e. in request order. */
 async function readTrail(
   session: EvidenceAuditSession,
@@ -729,14 +838,21 @@ export async function executeTool(
     };
   }
 
+  // The advice is attached once, here, rather than at each place an error is
+  // rendered: `gp_capture_view`, `gp_export_evidence` and `gp_recent_reports`
+  // all catch their own engine errors, so a per-site rewrite would keep working
+  // for the tools somebody remembered and quietly not for the rest (that is how
+  // R8d-高2 left it). `Object.create` shares the client's own state — the real
+  // prototype, no cast, no `any` — with one method shadowed.
+  const advised = engineWithPayloadAdvice(engine, spec);
   if (!trailScopedTool(spec)) {
-    return runValidatedTool(spec, checked.value, engine, session, INERT_TRAIL_TURN);
+    return runValidatedTool(spec, checked.value, advised, session, INERT_TRAIL_TURN);
   }
   // Claimed here, before any `await`, so the claim order is the order the
   // frames arrived in.
   const turn = session.claimTrailTurn();
   try {
-    return await runValidatedTool(spec, checked.value, engine, session, turn);
+    return await runValidatedTool(spec, checked.value, advised, session, turn);
   } finally {
     // Idempotent backstop: a mutation site that threw between `acquire()` and
     // its own release must not leave every later trail-scoped call waiting.
@@ -893,7 +1009,12 @@ async function captureView(
   context: ToolExecuteContext,
 ): Promise<ToolResult> {
   try {
-    const raw = await context.engine.call("capture_view", args);
+    // The generation travels with this call too. `capture_view` answers with a PNG
+    // and no operationId today, so nothing leaks if it is omitted — but that is a
+    // property of the reply shape, not of the call site, and the trail must not
+    // depend on nobody ever adding an id to this frame. The gate at the bottom of
+    // `test/remedy-surface.test.mjs` keeps every `.call(` in this file honest.
+    const raw = await context.engine.call("capture_view", args, context.session.generation);
     const body = (raw ?? {}) as Record<string, unknown>;
     const png = body.pngBase64;
     if (typeof png !== "string" || png.length === 0) {
@@ -1223,3 +1344,34 @@ function mapAuditError(error: unknown): ToolResult {
 
 // Re-exported types for dispatch/tests.
 export type { Selector, Action, AssertionProperty };
+
+
+/**
+ * The engine view handed to one tool: the same client, with one kind of error's
+ * remedy rewritten from this tool's own advertised schema.
+ *
+ * The transport can only state the fact (a reply did not fit one frame). Which
+ * parameters could make the next reply smaller belongs to the tool contract, and
+ * includes knobs the caller never sent — `gp_observe` without `maxDepth` still
+ * has `maxDepth`. `Object.create` keeps the real client (its pending map, its
+ * sinks, its reconnecting transport) on the prototype chain and shadows exactly
+ * one method, so wrapping cannot lose state or invent a fake client.
+ */
+export function engineWithPayloadAdvice(
+  engine: EngineJsonRpcClient,
+  spec: ToolSpec,
+): EngineJsonRpcClient {
+  const wrapped = Object.create(engine) as EngineJsonRpcClient;
+  Object.defineProperty(wrapped, "call", {
+    value: (method: string, params?: Record<string, unknown>, correlation?: number): Promise<unknown> =>
+      engine.call(method, params, correlation).catch((error: unknown) => {
+        if (error instanceof EngineCallError && error.code === GP_E_PAYLOAD_TOO_LARGE) {
+          throw new EngineCallError(
+            error.code, error.message, oversizedReplyAdvice(spec, params ?? {}),
+          );
+        }
+        throw error;
+      }),
+  });
+  return wrapped;
+}

@@ -3,10 +3,17 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { URL } from "node:url";
 
 import { EngineCallError, unixSocketEngineClient } from "./engine-client.js";
-import { GP_E_BAD_PARAMS, GP_E_INTERNAL, GP_E_NO_EVIDENCE } from "./errors.js";
+import { GP_E_BAD_PARAMS, GP_E_INTERNAL, GP_E_NO_EVIDENCE, GP_E_PAYLOAD_TOO_LARGE } from "./errors.js";
 import { escapeHTML, renderHTML, renderMarkdown } from "./evidence-report.js";
 import type { EvidencePackReportView } from "./evidence-report.js";
-import { packForReport, parseEvidenceFrame, TOOL_SPECS, type ToolSpec } from "./tools.js";
+import {
+  oversizedReplyAdvice,
+  packForReport,
+  parseEvidenceFrame,
+  TOOL_BY_NAME,
+  TOOL_SPECS,
+  type ToolSpec,
+} from "./tools.js";
 
 /**
  * HTTP/REST transport for non-MCP clients (curl / scripts) to reach the GlassPane
@@ -333,7 +340,9 @@ async function handleEvidenceAggregate(
       if (error instanceof EngineCallError && error.code === GP_E_NO_EVIDENCE) {
         skipped.push(operationId);
       } else {
-        await failEngine(res, error);
+        // The too-large advice is the tool contract's business, so the aggregate
+        // route asks the same helper the single-fetch route uses.
+        await failEngine(res, error, TOOL_BY_NAME.get("gp_last_evidence"), { operationId });
         return;
       }
     }
@@ -422,7 +431,7 @@ async function handleToolForward(
     }
     ok(res, result);
   } catch (error) {
-    await failEngine(res, error);
+    await failEngine(res, error, spec, checked.value);
   }
 }
 
@@ -585,10 +594,21 @@ function NotFound(res: ServerResponse, pathname: string): void {
 }
 
 /** Map an engine/daemon error to an honest HTTP error with the daemon's remedy. */
-async function failEngine(res: ServerResponse, error: unknown): Promise<void> {
+async function failEngine(
+  res: ServerResponse,
+  error: unknown,
+  spec?: ToolSpec,
+  params?: Record<string, unknown>,
+): Promise<void> {
   if (error instanceof EngineCallError) {
     const status = error.code === GP_E_NO_EVIDENCE ? 404 : 502;
-    fail(res, status, error.code, error.message, error.remedy);
+    // Same rule as the MCP path: the transport states the fact, the tool
+    // contract owns the advice. A curl caller reading a too-large reply gets
+    // the knobs its own request actually has.
+    const remedy = spec !== undefined && error.code === GP_E_PAYLOAD_TOO_LARGE
+      ? oversizedReplyAdvice(spec, params ?? {})
+      : error.remedy;
+    fail(res, status, error.code, error.message, remedy);
     return;
   }
   fail(res, 500, GP_E_INTERNAL,

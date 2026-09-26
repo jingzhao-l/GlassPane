@@ -673,7 +673,9 @@ export class EngineJsonRpcClient {
     this.reject(entry, attribute(new EngineCallError(
       GP_E_PAYLOAD_TOO_LARGE,
       `the engine's reply to '${entry.method}' exceeded the ${MAX_FRAME_BYTES}-byte frame cap (${error.bytes} bytes) and was dropped; the connection is intact and other requests are unaffected`,
-      oversizedReplyRemedy(entry),
+      "narrow this request or ask for less of it; the tool's own schema names the parameters that can "
+      + "shrink a reply, and this shell rewrites this line into that advice when it can (the transport "
+      + "layer deliberately does not guess them)",
     ), entry, inferred));
   }
 
@@ -803,49 +805,6 @@ export class EngineJsonRpcClient {
       this.report(`version mismatch: engine self-reports '${version}', this MCP shell ships '${wantVersion}' (single version line) — one side is stale`);
     }
   }
-}
-
-/**
- * What to do when a *reply* was too big to fit the frame cap.
- *
- * R8b-低: this used to be one sentence about `maxDepth` and selectors, sent for
- * every method. For `capture_view` it was unactionable — the oversized body is an
- * encoded PNG, `capture_view` takes no `maxDepth`, and the knob that does work
- * (`scale`) was never named, so an agent following the advice retried an
- * identical request and hit the identical drop. The advice is therefore derived
- * from the params the request actually carried rather than from a list of method
- * names, which would go stale the first time a parameter is added or renamed.
- *
- * What that costs, stated so nobody reads more coverage than there is: a request
- * that *could* have sent `maxDepth` and did not is indistinguishable here from
- * one that cannot take it at all, which is why the third branch says "no
- * narrowing parameter this shell can name" rather than "this method takes none".
- * Naming the method's real knobs would mean importing the tool schemas into the
- * transport layer, and the transport is deliberately schema-free (it is the one
- * piece both surfaces and the tests inject a fake for).
- */
-export function oversizedReplyRemedy(entry: { method: string; params?: Record<string, unknown> }): string {
-  const shared = "the connection is intact and the daemon keeps answering other requests";
-  const params = entry.params ?? {};
-  if (typeof params.scale === "number") {
-    return `retry '${entry.method}' with a smaller scale — the encoded image must fit inside the `
-      + `${MAX_FRAME_BYTES}-byte frame, and a lower scale is the only knob this request has; `
-      + `the same \`scale\` parameter is what to change (not maxDepth, which this request does not take); ${shared}`;
-  }
-  const knobs: string[] = [];
-  if (params.maxDepth !== undefined) {
-    knobs.push("a smaller maxDepth");
-  }
-  if (params.selector !== undefined || params.role !== undefined) {
-    knobs.push("a more specific selector");
-  }
-  if (knobs.length === 0) {
-    return `this request carries no narrowing parameter this shell can name, so do not retry it unchanged: `
-      + `split what you were asking for into smaller parts (a narrower method, or fewer elements) — `
-      + `a retried identical request will be dropped identically; ${shared}`;
-  }
-  return `narrow this request: retry with ${knobs.join(" and ")} — the reply body must fit the `
-    + `${MAX_FRAME_BYTES}-byte frame; ${shared}`;
 }
 
 /** Note which request an id-less attribution was matched to, without hiding it. */

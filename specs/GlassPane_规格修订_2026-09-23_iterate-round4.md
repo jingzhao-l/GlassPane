@@ -340,3 +340,44 @@ P1 v1.0 §2 实施记录项 3、P2 v2.1 §19.2、P4 v4.0 §33.1 观察 3 仍写
   仍是 50 s，就不存在一个能让探针必然答得上的期限。
 - **`notifications/cancelled` 只能记一行**：本壳无法真的撤销 daemon 上已发出的请求，日志里明说
   "撤销不是撤销回"。要做真撤销需要 daemon 侧的取消通道，而方法表是冻结面。
+
+# 追加四（2026-09-26，round 8d）：本轮复审的对象是 8b/8c 的修复本身
+
+两条高危都由现场复现得出，不是推测；两条都落在**上一批刚写的代码**上，所以逐条记在这里。
+
+## 1. 追加三 §4 的"纪元"，在 attach 这条最忙的路径上当时并未生效
+
+- **改为**：迟到的 `attach` 回复**本身就重启证据链**。分流判据放在 `recordLateArrival` **取得 trail turn 之后**，
+  由调用方传入的 `apply` 回调在同一时刻决定"往链里记一条"还是"换 app 重新开始"，attach 与非 attach 走同一时机、
+  同一判据。未携带纪元的迟到帧记为 `UNKNOWN_GENERATION`，默认**拒绝写入**，而不是当作当前纪元接受。
+  到达时刻的纪元快检保留，但它的身份被写明：只是"明显过期的帧不必去排队"的短路，权威判定在链内。
+- **为什么**：8b 把 `restart()` 只挂在"非迟到"分支。于是 daemon 已经按换 app 清空了自己的历史，壳层的链纪元却
+  **永不推进** —— 为抓跨应用串档而加的那几道纪元判据，恰好在最忙、也最容易串档的 attach 路径上整体失效，而且
+  零日志。复审者复现出的形状：trail 里留着前一个 app 的 operationId、`generation` 仍是 0、`notes` 为空；它与
+  磁盘档案回落合起来的后果，是把上一个应用的证据渲染进新会话的报告 —— 正是 §4 要消灭的那类误读。
+- **锚点**：`test/tools.test.mjs`「late attach 回复重启链」（含幂等 re-attach **不**重启的反例）。
+  反向核对：把该分支改成恒假 → 用例红；还原 → `tools` 59/59。
+
+## 2. "把回复缩窄"是关于**工具**的事实，写在看不见 schema 的传输层就必然出错
+
+- **改为**：超帧建议改由 `oversizedReplyAdvice(spec, params)` 生成，且只在 `executeTool` 这一个入口经
+  `Object.create(engine)` 影子覆盖 `call` 后交给工具执行体 —— 转发工具与三个自带执行体的工具走同一条路。
+  可缩旋钮的**界值全部读自该工具 advertised 的 `inputSchema.properties`**，不再从"这次请求恰好带了哪些参数"派生；
+  已落在下界的旋钮如实说明"无可再缩"，并改指一条真能走的路（问更小的问题，而非原样重试）。HTTP 面复用同一个
+  函数生成建议，不再把 curl 调用方支去 `gp_recent_reports` —— HTTP 面上并没有这条路由，未知子路径一律 404
+  （`mcp-shell/src/http-gateway.ts:233`）。
+- **为什么**：旧实现有三处实测错误。① `gp_observe` 未显式写 `maxDepth` 就被宣判"没有可缩的参数"，而它明明
+  advertise 1…10；② 唯一能带 `scale` 的 `capture_view` 那一支根本走不到（PNG 预算 2.4 MB → base64 3.2 MB
+  < 4 MiB 帧上限，这条不等式现由 `test/consumer-consistency.test.mjs` 钉住）；③ 对 `scale` 已在下界 0.1 的请求
+  还命令"再调小"，那是一条会被壳层自己的校验拒掉的指令 —— 违反"remedy 必须代理可执行"。
+- **锚点**：`test/tools.test.mjs`「建议不得点名该工具没 advertise 的参数」（对表内每个工具都跑一遍
+  `spec.validate`，所以工具新增必填项会让这条变红并点名要改的行，而不是悄悄少测一个工具）、
+  `test/remedy-surface.test.mjs` 的 HTTP 形状建议、`test/consumer-consistency.test.mjs` 的帧/预算不等式。
+  反向核对：让 `executeTool` 直接返回原 `engine` → 两条 schema 用例红。
+
+## 发版门禁口径（round 8d 起，用户 2026-09-26 选定）
+
+真机两条闸（`engine/.p6_smoke.py`、`engine/.t9_smoke.py`）在本基线上**尚未产出可归因的绿**：机器被另一个会话占满
+（每核 load 15–33），两条闸按构建产物新鲜度判据自拒并返回 `NOT RUN(2)` —— 这是它们该有的行为，不是缺陷，
+也不能拿它当"通过"。**1.3.0 的发布门禁改为以 GitHub CI 全绿为凭打 tag**；真机两闸留待机器空下来补跑，
+若届时发现问题走 1.3.1。

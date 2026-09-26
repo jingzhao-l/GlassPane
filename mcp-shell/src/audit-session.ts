@@ -22,6 +22,14 @@ export interface TrailTurn {
   release(): void;
 }
 
+/**
+ * Handed to {@link EvidenceAuditSession.recordLateArrival} when the request that
+ * produced a late reply never said which generation it belonged to. It is
+ * deliberately not `undefined` and not a number the real epochs can ever reach:
+ * an unattributed frame is *known* unattributed, and refusing it is the default.
+ */
+export const UNKNOWN_GENERATION = -1;
+
 /** Where a late arrival ended up: written, or refused because a re-attach got there first. */
 export interface LateArrivalOutcome {
   written: boolean;
@@ -147,10 +155,14 @@ export class EvidenceAuditSession {
    *
    * `admittedUnderGeneration` is compared **inside** that wait (see the body):
    * the position and the epoch can only be judged at the moment the write
-   * actually happens.
+   * actually happens. A reply whose request carried no generation cannot be
+   * placed either — so it is passed as {@link UNKNOWN_GENERATION} and the caller
+   * decides whether that is acceptable; this method refuses it by default, because
+   * "we do not know which attach this belongs to" is not a reason to write into
+   * somebody else's trail.
    */
   recordLateArrival(
-    result: unknown,
+    apply: (session: EvidenceAuditSession) => void,
     admittedUnderGeneration?: number,
   ): Promise<LateArrivalOutcome> {
     const turn = this.claimTrailTurn();
@@ -163,10 +175,15 @@ export class EvidenceAuditSession {
         // then land in the successor app's trail anyway — measured, not
         // hypothetical: an operation from app A appeared in app B's trail with
         // only the arrival-time check in place.
-        if (admittedUnderGeneration !== undefined && admittedUnderGeneration !== this.epoch) {
+        if (admittedUnderGeneration !== this.epoch) {
           return { written: false, generationAtWrite: this.epoch };
         }
-        this.record(result);
+        // The caller decides *what* the frame means (record an operation, restart
+        // the trail on an attach) and it is decided here, at the moment the trail
+        // is actually held: 8b's first version restarted only on the non-late
+        // path, so an attach whose own caller had already been answered never
+        // restarted anything and left no log line at all.
+        apply(this);
         return { written: true, generationAtWrite: this.epoch };
       } finally {
         // Released in every outcome: a turn that never released would hold up

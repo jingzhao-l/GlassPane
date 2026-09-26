@@ -151,3 +151,26 @@ test("a GP_E_* literal appears in src/ only in errors.ts", () => {
   }
   assert.deepEqual(offenders, [], `这些文件里出现了裸写的错误码字面量：${offenders.join(", ")}`);
 });
+
+test("every engine call in the tool layer carries the trail generation it was admitted under", () => {
+  // The late-reply sink can only refuse a superseded write if the request said
+  // which generation it belonged to. `capture_view` was the one `.call(` in
+  // `tools.ts` that did not, and the reason it was harmless ("a PNG frame names
+  // no operationId") is a fact about the daemon's *reply* — so the next field
+  // added to that frame would have reopened the cross-app leak silently, with no
+  // test able to notice. This is the shape-of-the-call check; the behaviour it
+  // protects is tested in `tools.test.mjs`.
+  const source = fs.readFileSync(path.resolve(HERE, "..", "src", "tools.ts"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("//"))
+    .join("\n");
+  const missing = [];
+  for (const match of source.matchAll(/(?:engine|context\.engine)\.call\(([\s\S]{0,160}?)\);/g)) {
+    if (!match[1].includes("session.generation")) {
+      missing.push(match[1].replace(/\s+/g, " ").slice(0, 90));
+    }
+  }
+  assert.deepEqual(missing, [], `这些 engine.call 没带链纪元，迟到回复将无法判断归属：${JSON.stringify(missing)}`);
+  assert.ok(source.includes("session.generation"), "一条都没匹配到＝这个闸已经不再看任何东西");
+});

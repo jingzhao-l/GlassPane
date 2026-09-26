@@ -11,6 +11,7 @@ import {
   RESTORE_BASE_DEADLINE_MS,
 } from "../dist/engine-client.js";
 import { TOOL_SPECS } from "../dist/tools.js";
+import { methodsSentByShell } from "./support/wire-surface.mjs";
 
 /**
  * R8-中5: the daemon's method table is frozen (`FrameCodec.EngineMethod`), and
@@ -71,35 +72,9 @@ function swiftEngineMethods() {
   return names;
 }
 
-/**
- * Every method name this shell can write to the daemon socket:
- *  - the specs whose request is forwarded as-is (`execute === undefined`), and
- *  - the names spelled in an `engine.call("<name>")` / `.call("<name>")` inside
- *    `src/` — the orchestrated tools that reach the daemon themselves.
- * `hello` is added from the handshake, which is a method call by another name.
- */
-function methodsSentByShell() {
-  const sent = new Set(["hello"]);
-  for (const spec of TOOL_SPECS) {
-    if (spec.execute === undefined) {
-      sent.add(spec.engineMethod);
-    }
-  }
-  for (const entry of fs.readdirSync(path.resolve(HERE, "..", "src"), { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith(".ts")) {
-      continue;
-    }
-    const body = fs.readFileSync(path.resolve(HERE, "..", "src", entry.name), "utf8");
-    for (const match of body.matchAll(/\.call\(\s*"([a-z_]+)"/g)) {
-      sent.add(match[1]);
-    }
-  }
-  return sent;
-}
-
 test("every method this shell sends is one the daemon declares", () => {
   const swift = swiftEngineMethods();
-  const sent = [...methodsSentByShell()].sort();
+  const sent = [...methodsSentByShell(TOOL_SPECS, path.resolve(HERE, "..", "src"))].sort();
   assert.ok(sent.length >= 10, `只收集到 ${sent.length} 个方法名，这条闸已经不再检查任何东西`);
   const unknown = sent.filter((method) => !swift.has(method));
   assert.deepEqual(unknown, [],
@@ -107,7 +82,7 @@ test("every method this shell sends is one the daemon declares", () => {
 });
 
 test("every method this shell sends has a deadline derived from the daemon, not the fallback", () => {
-  const sent = [...methodsSentByShell()].sort();
+  const sent = [...methodsSentByShell(TOOL_SPECS, path.resolve(HERE, "..", "src"))].sort();
   // `restore` is the one sent method whose deadline is *derived* rather than
   // listed: an ffwd restore replays its steps by calling `act` per step, so a
   // table entry would be a number that contradicts the formula
