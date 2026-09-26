@@ -376,34 +376,50 @@ export function lateReplyRoute(surface: ShellSurface): string {
 }
 
 /**
- * What a slow reply from `method` means for the caller's next request, per
- * method family (R9-中3). This used to be one sentence — "retry this read
- * narrower (smaller maxDepth / a tighter selector) — that is safe for a read" —
- * delivered to every method that is not `act`/`restore`/`probe_status`, and it
- * was wrong twice over: it ordered a re-issue of `attach`, which is a
- * daemon-state change and is handled by {@link REPLAY_UNSAFE_REASONS} now, and it
- * named parameters the method's own schema does not have. Advice an agent cannot
- * execute is not advice, so each branch below says what can actually be shrunk,
- * and the branches that can be shrunk by nothing say so.
- * `test/engine-client.test.mjs` checks each named parameter against `TOOL_SPECS`
- * rather than against this file's opinion.
+ * Where the question "what can be narrowed here?" is answered, per surface, in
+ * words the caller of that surface can act on. This layer cannot quote the
+ * answer: it holds one request's *params*, never the ranges those params
+ * advertise, and a schema-free guess at a knob is exactly what
+ * {@link reIssueGuidance} exists to stop.
  */
-function retryGuidance(method: string): string {
-  switch (method) {
-    case "observe":
-    case "snapshot":
-    case "audit_ui":
-      return "then re-send the same request with a smaller maxDepth: these three walk the accessibility tree, and depth is the knob their own schemas offer for how much of it they walk";
-    case "assert_element":
-      return "then re-send it for one element: its schema requires a selector and has no depth knob, so the only thing that can be narrowed is which element it resolves";
-    case "capture_view":
-      return "then re-send it at a lower scale: this is the capture-and-encode path, so the bytes are what take the time and `scale` is the only knob its schema has";
-    case "diagnose":
-    case "last_evidence":
-      return "then re-send it unchanged once the daemon answers: this reads back an operation the daemon has already recorded, it changes nothing, and none of its parameters control how much work the daemon does — there is nothing to narrow";
-    default:
-      return `then wait for the outstanding reply, and re-send '${method}' only if it changes or records nothing — its own tool description is where that is stated, and this shell names a narrowing parameter only for the methods above`;
-  }
+const NARROWING_AUTHORITY: Record<ShellSurface, string> = {
+  mcp: "the gp_* tool that took this call publishes its own parameters, and their floors, in the schema shown beside "
+    + "that tool — read it there, not here",
+  http: "this gateway publishes no parameter listing of its own, so the floors a body was accepted against are in the "
+    + "request contract this call was copied from",
+};
+
+/**
+ * What the timeout answer may say about the caller's *next* request when the
+ * method is not one the transport refuses to replay.
+ *
+ * Round 9 took the knob guess out of the oversized-reply path — "narrow this
+ * reply" is composed by the tool layer from that tool's own schema — and this
+ * function then put it back on the timeout path: every `observe`/`snapshot`/
+ * `audit_ui` caller was told to re-send the same request with a smaller depth,
+ * whether or not it had already sent the smallest value the shell's own schema
+ * validation accepts. The retry this line ordered was therefore rejected by the
+ * very floor it was supposed to help, and the agent that read it had one move
+ * left: raise the value, which asks the daemon for *more* of the tree that is
+ * already taking too long.
+ *
+ * So this states only what a transport can see — the wait is spent, the daemon is
+ * still working on this same request, a second copy of it queues behind the first
+ * — and hands "what can be narrowed, and whether it can still be narrowed at the
+ * values already sent" to the surface that owns the schema (named per surface,
+ * because the two surfaces do not hold the same thing). It names no parameter and
+ * no direction for one, and `test/engine-client.test.mjs` guards that as a rule
+ * rather than as a phrasing: it reads the parameter names out of `TOOL_SPECS` and
+ * refuses any transport remedy text that puts one next to a narrowing verb, which
+ * a re-wording cannot satisfy by trading "smaller maxDepth" for another knob.
+ */
+function reIssueGuidance(surface: ShellSurface): string {
+  return "wait for the outstanding reply rather than sending this request again: the daemon answers one request at "
+    + "a time, so a second copy of it now only queues behind the one still running and answers nothing sooner, and if "
+    + "the first did take effect the copy performs it a second time. What is worth narrowing here, and whether it can "
+    + "still be narrowed at the values this request already sent, is a fact about a schema, and this layer holds no "
+    + `schema for any request: ${NARROWING_AUTHORITY[surface]}. Re-send only after reading that, and only if the `
+    + "request is one whose repetition changes nothing";
 }
 
 /**
@@ -419,7 +435,11 @@ export function slowEngineRemedy(method: string, surface: ShellSurface = "mcp"):
   // unreachable and only `timed-out` can occur. Wording it as a conditional
   // keeps the guidance executable without asserting an unmeasured fact about
   // whoever is reading it (R8b-低).
-  const poll = "if your client can send a second request while this one is still outstanding, confirm the daemon is alive with a cheap call: the shell does not queue one MCP request behind another, so gp_probe_status goes out at once and is answered as soon as the daemon is free of the request in front of it. Read its answer as: "
+  // The probe has a name on each surface, and naming the wrong one is not a style
+  // problem: a curl caller told to call `gp_probe_status` can only guess at
+  // `POST /v1/tools/gp_probe_status`, which this gateway answers with a 404.
+  const probeCall = surface === "mcp" ? "gp_probe_status" : "POST /v1/tools/probe_status";
+  const poll = `if your client can send a second request while this one is still outstanding, confirm the daemon is alive with a cheap call: the shell does not queue one request behind another on this surface, so ${probeCall} goes out at once and is answered as soon as the daemon is free of the request in front of it. Read its answer as: `
     + livenessProbeGuide();
   const restarted = livenessProbeDecision("unreachable");
   const unsafe = REPLAY_UNSAFE_REASONS[method];
@@ -429,7 +449,7 @@ export function slowEngineRemedy(method: string, surface: ShellSurface = "mcp"):
   if (method === "probe_status") {
     return `the liveness probe itself has not been answered, and it is given the longest wait this shell allows any request (${CALLER_VISIBLE_CEILING_MS}ms), so this particular answer carries no information about whether the daemon is alive: the daemon is single-connection and is still working on the request in front of this probe. ${livenessProbeDecision("timed-out")}. Keep waiting instead — the outstanding call's reply is attributed when it lands, and ${lateReplyRoute(surface)}. If the daemon's socket really is gone, the next call answers with ${GP_E_ENGINE_UNREACHABLE}, and that remedy names the restore command.`;
   }
-  return `${poll}. The daemon serves one request at a time and is still working on this one, so wait — ${retryGuidance(method)}; a restart is authorised only by ${restarted}`;
+  return `${poll}. The daemon serves one request at a time and is still working on this one, so ${reIssueGuidance(surface)}; a restart is authorised only by ${restarted}`;
 }
 
 /**
@@ -476,7 +496,25 @@ type Pending = {
 const LATE_REPLY_RETENTION = 16;
 
 /** Log ceiling for a frame body; excess is marked, never silently cut. */
-const LOG_BODY_CHARS = 64 * 1024;
+export const LOG_BODY_CHARS = 64 * 1024;
+
+/**
+ * How a reply frame was matched to the request it is reported for.
+ *
+ * `echoed-id` is the frame carrying the request id this client sent and the
+ * lookup hitting; that is the only attribution this transport can *confirm*.
+ * `arrival-order` is the daemon's id-less answer (it loses the id on the paths
+ * that could not parse or could not serialize the frame), matched to the oldest
+ * request still tracked because the daemon answers in the order it received
+ * them — an inference from scheduling, never a confirmation, so anything written
+ * from it into an evidence trail has to carry that caveat with it
+ * (`EvidenceAuditSession.provenanceOf`).
+ *
+ * Spelled as the same two literals `audit-session.ts` accepts for the same
+ * reason: the transport is the only thing that sees the frame, and the session is
+ * the only thing that decides what the trail claims about an id.
+ */
+export type FrameAttribution = "echoed-id" | "arrival-order";
 
 /** One late engine reply, as handed to {@link EngineJsonRpcClient.onLateReply}. */
 export interface LateReply {
@@ -484,6 +522,35 @@ export interface LateReply {
   result: unknown;
   /** Whatever `call()` was given; see {@link Pending.correlation}. */
   correlation?: number;
+  /**
+   * Whether this reply's *request* was confirmed by an echoed id or inferred
+   * from arrival order; see {@link FrameAttribution}. A sink that records this
+   * body into a trail must not present an `arrival-order` frame as a confirmed
+   * one, because the method it is filed under is a guess.
+   */
+  attribution: FrameAttribution;
+}
+
+/**
+ * The mutable half of {@link EngineJsonRpcClient}'s state, held in one object so
+ * that a write through a prototype-chain receiver lands on the client itself — see
+ * the field's comment in the class for why that is a safety property here and not
+ * a style preference.
+ */
+interface ClientState {
+  /** Next request id. Written by every `call()`. */
+  nextId: number;
+  /** Set once by `close()`; read by `call()` and `handshake()`. */
+  closed: boolean;
+  noteHandler: ((note: string) => void) | null;
+  /**
+   * Declared to accept anything as its return value, while the public
+   * {@link EngineJsonRpcClient.onLateReply} keeps the `(reply) => void` shape
+   * callers were written against: an `async` sink is assignable to both, and only
+   * this wider one lets {@link EngineJsonRpcClient.reportLateReply} see the promise
+   * it has to keep from becoming an unhandled rejection.
+   */
+  lateReplyHandler: ((reply: LateReply) => unknown) | null;
 }
 
 /**
@@ -492,18 +559,32 @@ export interface LateReply {
  * transport").
  */
 export class EngineJsonRpcClient {
-  private nextId = 0;
-  private closed = false;
-  private readonly pending = new Map<number, Pending>();
-  private noteHandler: ((note: string) => void) | null = null;
   /**
-   * Declared to accept anything as its return value, while the public
-   * {@link onLateReply} keeps the `(reply) => void` shape callers were written
-   * against: an `async` sink is assignable to both, and only this wider one lets
-   * {@link reportLateReply} see the promise it has to keep from becoming an
-   * unhandled rejection.
+   * Every mutable piece of this client's state, in one object that is *never*
+   * reassigned through `this`.
+   *
+   * That is not a style choice (R10-中4). `tools.ts` hands one tool an engine view
+   * built with `Object.create(engine)`, which puts the real client on the shadow's
+   * prototype chain so the shadow shares its map, its sinks and its transport — and
+   * any method that runs with the *shadow* as `this` then writes its field on the
+   * shadow, because assigning a property that exists only on the prototype creates
+   * an own property instead of touching the prototype's. `pending` survived that
+   * only because it is a `Map` that gets mutated rather than reassigned. A
+   * `this.closed = true` did not: it marked the shadow closed and left the client
+   * sending requests on a transport it had been told to end. Reading state out of
+   * this box still resolves through the chain, and writing a property of it mutates
+   * the one box the client itself holds.
+   *
+   * `test/engine-client.test.mjs` closes the *shadow* and asserts the client behind
+   * it is closed, which is the observable form of the whole rule.
    */
-  private lateReplyHandler: ((reply: LateReply) => unknown) | null = null;
+  private readonly state: ClientState = {
+    nextId: 0,
+    closed: false,
+    noteHandler: null,
+    lateReplyHandler: null,
+  };
+  private readonly pending = new Map<number, Pending>();
 
   constructor(
     private readonly io: LineIo,
@@ -548,7 +629,7 @@ export class EngineJsonRpcClient {
    * "not measured" turns into a confident wrong story.
    */
   onEngineNote(handler: (note: string) => void): void {
-    this.noteHandler = handler;
+    this.state.noteHandler = handler;
   }
 
   /**
@@ -563,7 +644,17 @@ export class EngineJsonRpcClient {
    * the eviction note says when something fell outside it.
    */
   onLateReply(handler: (reply: LateReply) => void): void {
-    this.lateReplyHandler = handler;
+    this.state.lateReplyHandler = handler;
+  }
+
+  /**
+   * Whether {@link close} has ended this client. Public because the answer has to
+   * be readable *through* the `Object.create` shadow the tool layer builds: a
+   * shadow that was closed has to report the client behind it closed, otherwise
+   * "closed" is a property of whichever object happened to receive the call.
+   */
+  isClosed(): boolean {
+    return this.state.closed;
   }
 
   /**
@@ -572,7 +663,23 @@ export class EngineJsonRpcClient {
    * has already been given a timeout; it is otherwise unused by this client.
    */
   call(method: string, params?: Record<string, unknown>, correlation?: number): Promise<unknown> {
-    const id = this.nextId++;
+    if (this.state.closed) {
+      // A client that was closed does not write into its transport any more: the
+      // id it would have used is one the daemon never saw, so nothing can answer
+      // it and no late reply can ever be attributed to it. The remedy says which
+      // thing ended — this shell's own client — and names no daemon lifecycle
+      // command: nothing was sent, so nothing about the daemon was measured, and a
+      // restart ordered here could recycle a daemon that is mid-action on the
+      // user's screen.
+      return Promise.reject(new EngineCallError(
+        GP_E_ENGINE_UNREACHABLE,
+        `cannot send '${method}': this engine client was closed, so it opens nothing and sends nothing`,
+        "the engine client of this shell ended, not the daemon: nothing was sent, so nothing about the daemon was "
+        + "measured and no restart is authorised by this answer. Ask through a server process that still has a live "
+        + "engine client — start this server again — rather than recycling the daemon",
+      ));
+    }
+    const id = this.state.nextId++;
     const frame = { id, method, ...(params === undefined ? {} : { params }) };
     // An injected `timeoutMs` is the caller's own bound (tests, explicit
     // overrides) and is never re-capped; otherwise the caller waits the
@@ -616,12 +723,16 @@ export class EngineJsonRpcClient {
   }
 
   close(): void {
+    // Marked first, and as a property of the shared box rather than a field of
+    // `this`: `io.close()` below can run the transport's close handler
+    // synchronously, and anything that answers to it has to *read* a flag that is
+    // already set — on the client, not on whichever object received the call.
+    this.state.closed = true;
     this.teardown(new EngineCallError(
       GP_E_ENGINE_UNREACHABLE,
       "engine client closed",
       daemonUnreachableRemedy(),
     ));
-    this.closed = true;
     this.io.close();
   }
 
@@ -711,7 +822,10 @@ export class EngineJsonRpcClient {
         if (target.settled) {
           // Its caller already has an answer, so this is a late reply: report it,
           // route a result to the trail sink, and under no circumstances hand it
-          // to a different caller that is still waiting.
+          // to a different caller that is still waiting. `inferred: true` is the
+          // other half of R10-中2 — the *body* is the daemon's, but which request it
+          // answers is this method's inference from arrival order, so the sink (and
+          // the trail behind it) is told the attribution was not confirmed.
           this.pending.delete(target.id);
           this.reportLateReply(target, frame, true);
           return;
@@ -798,11 +912,23 @@ export class EngineJsonRpcClient {
   /**
    * Route the reply that lands after its caller was already answered. `inferred`
    * marks an attribution made by arrival order rather than by a matching id, and
-   * says so in the note.
+   * says so in the note — and hands the same distinction to the sink, which is
+   * the only place the caveat can travel with the body it records (R10-中2: an
+   * id-less result is a *guess about which request this is the answer to*, and a
+   * trail that files it without that note presents a guessed frame as a verified
+   * one). What the transport may not do is claim the sink recorded anything: it
+   * cannot see whether the trail accepted the frame or refused it for belonging to
+   * a superseded attach.
    */
   private reportLateReply(entry: Pending, frame: CallFrame, inferred = false): void {
+    const attribution: FrameAttribution = inferred ? "arrival-order" : "echoed-id";
     const byOrder = inferred
-      ? " (attributed by arrival order: the frame carried no request id, and this is the oldest request this client still tracks)"
+      // Deliberately free of a narrowing verb: the sentence states *which* request
+      // this is filed under, not what the caller should change, and
+      // `test/engine-client.test.mjs` refuses remedy/note text that pairs the two.
+      ? " (attributed by arrival order: this frame echoed no request id, so nothing here confirms that guess — this is "
+        + "the oldest request this client still tracks, and the daemon answers in the order it received them; a frame "
+        + "matched to a request that way is recorded as inferred, never as verified)"
       : "";
     if (frame.error) {
       // Name the missing operationId rather than leaving this to read as a reply
@@ -821,11 +947,16 @@ export class EngineJsonRpcClient {
       // use.
       return;
     }
-    const handler = this.lateReplyHandler;
+    const handler = this.state.lateReplyHandler;
     if (handler === null) {
       return;
     }
-    const reply: LateReply = { method: entry.method, result: frame.result, correlation: entry.correlation };
+    const reply: LateReply = {
+      method: entry.method,
+      result: frame.result,
+      correlation: entry.correlation,
+      attribution,
+    };
     try {
       const returned = handler(reply);
       // An `async` sink satisfies the `(reply) => void` signature it is
@@ -904,7 +1035,7 @@ export class EngineJsonRpcClient {
   }
 
   private report(note: string): void {
-    this.noteHandler?.(note);
+    this.state.noteHandler?.(note);
   }
 
   /**
@@ -914,7 +1045,7 @@ export class EngineJsonRpcClient {
    * per (re)connection and report the measurement, including "unmeasured".
    */
   private handshake(): void {
-    if (this.closed) {
+    if (this.state.closed) {
       return;
     }
     this.call("hello").then(
@@ -961,7 +1092,7 @@ function attribute(error: EngineCallError, entry: Pending, inferred = true): Eng
   );
 }
 
-function truncate(text: string): string {
+export function truncate(text: string): string {
   return text.length <= LOG_BODY_CHARS
     ? text
     : `${text.slice(0, LOG_BODY_CHARS)}… [+${text.length - LOG_BODY_CHARS} chars not logged]`;

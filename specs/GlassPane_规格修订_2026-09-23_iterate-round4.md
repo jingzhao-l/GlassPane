@@ -480,3 +480,77 @@ load 1.03 下 27 项 PASS（含"恢复后 UI 数值回写"与"像素通道本轮
 - **锚点**：`probe-liveness.test.mjs`、`attach-identity.test.mjs`、`method-table.test.mjs` +
   `test/support/wire-surface.mjs`、`http-gateway.test.mjs`，以及 `/var/tmp/gp-iterate-gates/gate.sh`
   （守卫的拒绝分支已实测：改一份副本 → `GUARD_FAILURE` + `GATE_DONE failed=1` + 退出码非 0）。
+
+# 追加六（2026-09-26，round 10）：审 round 9 的修复本身，加上数据面的一条静默丢字段
+
+审的对象是 `ff3699d`（round 9 落进 main 的那一批）。三个 lane：全新视角复审、数据与隐私面、
+门禁可红性。**lane 报回的条目仍然逐条回代码复核**，其中一条被判定不成立（见 §6），其余成立。
+
+## 1. `canonicalJson` 会**吞掉**名为 `__proto__` 的成员
+
+- **改为**：排序后的对象用 `Object.create(null)` 构造，`__proto__` 因此是一个普通成员。
+- **为什么**：旧写法 `const sorted = {}; sorted[key] = …` 在 `key === "__proto__"` 时命中的是
+  **继承来的 setter**：那一行改的是新对象的原型，成员根本没写进去，于是它在规范化输出里**静默消失**。
+  这个函数负责 (a) stdio 每一帧出站文本（`src/index.ts`）与 (b) 转发展示给代理的 daemon 正文
+  （`tools.ts`），后果是"daemon 发了这个字段，代理被告知没有"。daemon 自己的写手
+  （`engine/Sources/GlassPaneEngine/CanonicalJSON.swift`）按普通字典成员输出它，两个接入面对同一份
+  包给出不同字节 —— 正是规范化写手要防的那类分歧。实测（改前）：
+  `canonicalJson(JSON.parse('{"__proto__":{"a":1},"x":1}')) === '{"x":1}'`。
+- **锚点**：`mcp-shell/test/canonical.test.mjs` 四条（顶层与嵌套都保留、其余输入逐字不变、
+  产品路径 `gp_observe` 转发后正文仍含该成员、以及**读 Swift 写手**确认它不点名这个键——
+  两侧一旦再次分叉，这条先红）。反向变异：改回 `{}` 或改成"删除该键以求一致"都红。
+
+## 2. "传输层看不见 schema"这条纪律，在同批的另一条路上又破了
+
+- **改为**：超时 remedy 不再由传输层点名任何参数；可缩旋钮与**是否已到界**由工具层在同一处入口
+  （`engineWithPayloadAdvice` 现在同时改写 `GP_E_PAYLOAD_TOO_LARGE` 与 `GP_E_ENGINE_TIMEOUT`）
+  按 advertised 的 `inputSchema` 生成。
+- **为什么**：round 9 给超时文案写了 `retryGuidance`，对 `observe/snapshot/audit_ui` 恒说
+  "re-send with a smaller maxDepth"。带着 `maxDepth: 1` 的调用方收到的仍是一条自家 zod 会拒的指令 ——
+  与刚修掉的 `oversizedReplyAdvice` 同形，只是换了条路径。判据没变：**能看见界值的层才有资格说"还能缩"**。
+- **锚点**：`engine-client.test.mjs` 里"传输文案不得出现参数名+方向"的源码扫描（含 6 个已知坏写法
+  作正例、3 个允许写法作反例），以及 `tools.test.mjs` 的下界用例。
+
+## 3. 迟到帧的"归属方式"要一路走到链上，不能只停在传输层
+
+- **改为**：`LateReply.attribution` 由 `dispatch.ts` 转交 `recordLateArrival`，无 id 的迟到帧写进链时
+  记为 `late-inferred`，`gp_recent_reports` 逐项标注；带 id 的迟到回复仍是 `late`。
+- **为什么**：按到达顺序归属是**猜**（daemon 单连接按接收顺序回答），猜来的 operationId 有可能落到
+  别的操作名下。既不抹掉（抹掉＝宣称"这个操作没跑过"，那是更危险的假），也不冒充已核实。
+- **锚点**：`engine-client.test.mjs` 端到端两条（同一根线、同样迟到，唯一差别是有没有 echoed id ——
+  互为对照，"一律写 inferred"过不了第二条）。
+
+## 4. 壳层写注册表的两条：文件模式与可指向的目录
+
+- **改为**：`project-registry.ts` 写完后把状态根收成 0700、`projects.json` 收成 0600，并**读回校验**
+  （chmod 在不支持卷上静默成功，读不回期望位即按"写入没有如承诺落地"报错）；同时拒绝把证据根注册到
+  家目录的点目录下（`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.config`、`~/.glasspane`）。
+- **为什么**：前者是把已登记的产品决策（就地收紧，见本文件 round-4 §8 与 `.iterate_decisions.md` R4-D）
+  落实到**剩下的那个写者**：daemon 启动时收紧，而壳层每次 `gp_project_set` 又把模式放松回去，直到下次
+  重启。后者是真实可达的破坏面：daemon 会把注册的存储根 chmod 0700 并往里写档案 —— 一个被注册的
+  `~/.ssh` 会被改权限并被写文件，而这条规则此前既不在拒绝表里也没写在任何提示文案里。
+- **锚点**：`project-registry.test.mjs`（去掉 chmod 即红；去掉新拒绝即红并点名 `~/.ssh`）。
+- **残留（明确不修）**：对外发布的 JSON Schema 仍允许空串 `role`/`title`，而 daemon 拒绝空 `role`；
+  本批把壳层的 zod 收紧了，`kernel/schemas/**` 是受保护区（canonical 在 iterate-skill 仓），需另一次镜像改动。
+
+## 5. 网关三条：名字、预算、端口
+
+- **改为**：`isLoopbackHost` 只认回环**地址字面量**（127.0.0.0/8、`::1`、`::ffff:127.x`），拒绝一切名字，
+  并说明名字属于"要连过去的那一侧"；`GET /v1/evidence?ids=` 的整条扇出共用**一个**预算（复用导出的
+  客户端耐性上限，不新造数字），没取到的 id 在响应里点名而不是静默跳过；CLI 的 `--port` 只接受十进制
+  数字并在解析处报错（`--port=0x50` 曾经意味着 80 端口，`--port=` 意味着"随机端口"），报错时不创建任何
+  客户端与 sink。
+- **为什么**：`localhost` 由 `/etc/hosts` 决定去哪，正是这道闸拒绝其它名字的理由，而旧拒绝文案还自己
+  建议用 `localhost`；一条 curl 曾能把单连接 daemon 占住约 20×50 s；绑错端口是配置错误，不是运行时意外。
+- **锚点**：`http-gateway.test.mjs` 按**类**断言（任何 `net.isIP()` 读不出地址的字符串都被拒），
+  重新放行某一个名字即红；预算与端口各有独立用例。
+
+## 6. 本追加的一条 lane 报告判为不成立（记下来，因为它的形状值得记住）
+
+- lane 报"新的 `gp_recent_reports` 总预算没有任何测试提到它，改成 `Infinity` 也全绿"。实测不成立：
+  `tools.test.mjs` 有具名用例断言预算边界与"未取到的 id"文案，且同一位置在 round 9 的变异跑里
+  一次性变红 3 条（`CEILING × 20` 那次）。**报告里的"零红"结论必须自己跑过才能采信** —— 这正是
+  「不要用别人的绿灯/红感当证据」这条既有纪律的又一次应用。
+- 另记流程事实：本轮两个 lane 撞到 subagent 回合上限，剩余项（`dispatch.ts` 的接线、`canonical.ts`
+  及其测试、`slowEngineRemedy` 的分面对话）由主线自己补做并补测试；共享树里"lane 报完即完成"不作数，
+  收口前必看 `git status` 与整树编译。

@@ -276,7 +276,7 @@ export function createTrackedMcpServer(
   report: (note: string) => void,
 ): { server: McpServer; session: EvidenceAuditSession } {
   const session = new EvidenceAuditSession();
-  engine.onLateReply(({ method, result, correlation }) => {
+  engine.onLateReply(({ method, result, correlation, attribution }) => {
     if (correlation !== undefined && correlation !== session.generation) {
       // The request was admitted under an earlier attach: writing its
       // operationId now would put an operation from the previous app into the
@@ -312,7 +312,11 @@ export function createTrackedMcpServer(
         return;
       }
       trail.record(result);
-    }, correlation ?? UNKNOWN_GENERATION).then(
+    // The frame's own attribution, forwarded: an id pulled out of a reply that echoed
+    // no request id is filed as inferred, and `gp_recent_reports` must say so rather
+    // than let the entry read as verified (R10-中2). Dropping it would be the worse
+    // lie — it would claim no such operation ran.
+    }, correlation ?? UNKNOWN_GENERATION, attribution).then(
       (outcome) => {
         if (outcome.written) {
           return;

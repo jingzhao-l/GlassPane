@@ -7,10 +7,19 @@ import { fileURLToPath } from "node:url";
 import { attachIdentityOf, TOOL_SPECS, TOOL_BY_NAME, executeTool, trailScopedTool } from "../dist/tools.js";
 import { EvidenceAuditSession } from "../dist/audit-session.js";
 import { canReceiveDaemonReply, methodsSentByShell } from "./support/wire-surface.mjs";
+import { privateSandbox } from "./support/sandbox.mjs";
 import { canonicalJson } from "../dist/canonical.js";
 import { FORCE_OVERWRITE_ENV, MAX_PROJECTS } from "../dist/project-registry.js";
 import { createTrackedMcpServer } from "../dist/dispatch.js";
-import { EngineJsonRpcClient, CALLER_VISIBLE_CEILING_MS, slowEngineRemedy } from "../dist/engine-client.js";
+import {
+  EngineJsonRpcClient,
+  CALLER_VISIBLE_CEILING_MS,
+  LIVENESS_PROBE_OUTCOMES,
+  isReplayUnsafeMethod,
+  lateReplyRoute,
+  livenessProbeDecision,
+  slowEngineRemedy,
+} from "../dist/engine-client.js";
 import { FakeLineIo } from "./helpers.mjs";
 import { MAX_FRAME_BYTES, OversizeFrameError } from "../dist/io.js";
 import { makeEngine } from "./helpers.mjs";
@@ -764,11 +773,17 @@ test("an unanswered act releases the trail when the engine deadline settles it",
  * ------------------------------------------------------------------ */
 
 function withProjectsFile(t) {
-  const tmp = new URL(`./tmp-project-${process.pid}.json`, import.meta.url).pathname;
+  // A private 0700 sandbox, not this package's own `test/` directory:
+  // `saveProjects` now brings the *state root* it writes into to the daemon's
+  // modes (0700 dir / 0600 file), and a fixture pointed at the source tree would
+  // have `gp_project_set` chmod the repository mid-suite. `project-registry.test.mjs`
+  // already isolates this way; the tools-level fixtures have to as well.
+  const sandbox = privateSandbox("gp-tools-projects-");
+  const tmp = path.join(sandbox.dir, "projects.json");
   process.env.GLASSPANE_PROJECTS_FILE = tmp;
   return Promise.resolve(t()).finally(() => {
     delete process.env.GLASSPANE_PROJECTS_FILE;
-    try { fs.unlinkSync(tmp); } catch { /* already gone */ }
+    sandbox.dispose();
   });
 }
 
@@ -880,7 +895,10 @@ test("gp_project_get rejects malformed projectId as GP_E_BAD_PARAMS", async () =
 const CORRUPT_REGISTRY = '[{"projectId":"prj_0123456789ABCDEFGHJKMNPQRS","displayName":"A","pid":not-a-number}]\n';
 
 function withCorruptRegistry(t) {
-  const tmp = new URL(`./tmp-corrupt-${process.pid}.json`, import.meta.url).pathname;
+  // Same reason as `withProjectsFile`: a registry fixture must not live in the
+  // source tree, because `saveProjects` now tightens the directory it writes into.
+  const sandbox = privateSandbox("gp-tools-corrupt-");
+  const tmp = path.join(sandbox.dir, "projects.json");
   fs.writeFileSync(tmp, CORRUPT_REGISTRY, "utf8");
   const previousForce = process.env[FORCE_OVERWRITE_ENV];
   delete process.env[FORCE_OVERWRITE_ENV]; // the refusal under test needs no escape hatch
@@ -888,7 +906,7 @@ function withCorruptRegistry(t) {
   return Promise.resolve(t(tmp)).finally(() => {
     delete process.env.GLASSPANE_PROJECTS_FILE;
     if (previousForce !== undefined) process.env[FORCE_OVERWRITE_ENV] = previousForce;
-    try { fs.unlinkSync(tmp); } catch { /* already gone */ }
+    sandbox.dispose();
   });
 }
 
@@ -1750,3 +1768,564 @@ test("gp_recent_reports with nothing fetched inside budget is a timeout, not 'no
   assert.match(text, /gp_last_evidence \{operationId\}/);
   assert.ok(/do not re-run gp_act/i.test(text), `超预算的文案不得把"再来一次动作"当成出路：${text}`);
 });
+
+/* ------------------------------------------------------------------ *
+ * Round-10 lane A, item 1: `GP_E_ENGINE_TIMEOUT` is rewritten where the
+ * advertised schema is.
+ *
+ * The transport owns the fact ("nothing came back inside the wait this shell
+ * chose") and the safety table that goes with it; it owns no answer to "what
+ * would have made this answer cheaper", because it never sees a schema. That
+ * half now comes from `slowReplyAdvice`, through the same single entry point
+ * `GP_E_PAYLOAD_TOO_LARGE` was already routed through, so the two cannot drift
+ * apart per tool.
+ * ------------------------------------------------------------------ */
+
+/** Drive a tool to a timeout and hand back the agent-facing text. */
+async function timeoutThrough(specName, args, { seedTrail = false, timeoutMs = 20 } = {}) {
+  const { engine } = makeEngine({ timeoutMs });
+  const spec = TOOL_BY_NAME.get(specName);
+  const session = new EvidenceAuditSession();
+  // The audit tools read the trail before they ask the daemon, so an empty one
+  // answers `GP_E_NO_EVIDENCE` and never reaches the transport at all.
+  if (seedTrail) {
+    session.record({ operationId: OP_A });
+  }
+  const outcome = await executeTool(spec, args, engine, session);
+  assert.equal(outcome.isError, true, `${specName} answered success against a silent daemon`);
+  const text = outcome.content[0].text;
+  assert.ok(text.startsWith("GP_E_ENGINE_TIMEOUT"), text.slice(0, 200));
+  return text;
+}
+
+/** The authored-text marker: this sentence is only true of a schema read. */
+const AUTHORED_TIMEOUT = /these are the parameters this tool itself advertises|there is nothing left to narrow on this request/;
+
+/** The parameter names a timeout remedy could conceivably tell a caller to lower. */
+const NAMEABLE_PARAMS = [
+  "maxDepth", "scale", "limit", "selector", "role", "title", "property",
+  "format", "steps", "mode", "pid", "bundleId", "projectId", "operationId",
+  "minHitTargetPt", "snapshotId", "degrade", "expected",
+];
+
+function advertisedProperties(spec) {
+  return new Set(Object.keys(spec.inputSchema?.properties ?? {}));
+}
+
+test("a timed-out read already holding its floor value is not told to lower it", async () => {
+  // MUTATION THIS PINS: composing the timeout narrowing clause without
+  // `atAdvertisedFloor` (or dropping `toolAuthorsTimeoutAdvice` so the transport's
+  // knob-free answer is all the agent ever gets). `gp_observe {maxDepth: 1}`
+  // advertised `minimum: 1`, and "re-send it with a smaller maxDepth" is then a
+  // command this shell's own zod rejects with `GP_E_BAD_PARAMS` — the agent spends
+  // the turn on a retry that cannot be validated, against a daemon that is still
+  // working on the first one.
+  const observe = await timeoutThrough("gp_observe", { maxDepth: 1 });
+  assert.match(observe, /maxDepth is already at this tool's floor \(1\)/, observe);
+  assert.ok(!/smaller maxDepth/.test(observe), `1 已是 maxDepth 的下界：${observe}`);
+  // The knob that still has room is named, by the name this tool publishes.
+  assert.match(observe, /a tighter role filter/, observe);
+
+  const snapshot = await timeoutThrough("gp_snapshot", { maxDepth: 1 });
+  assert.match(snapshot, /there is nothing left to narrow on this request/, snapshot);
+  assert.match(snapshot, /maxDepth is already at this tool's floor \(1\)/, snapshot);
+  assert.ok(!/smaller maxDepth/.test(snapshot), snapshot);
+  assert.match(snapshot, /the tree it reads cannot be made smaller that way here/, snapshot);
+
+  // Above the floor the same sentence is an instruction that works, with the
+  // bounds read out of the advertised schema rather than typed a second time.
+  const deep = await timeoutThrough("gp_observe", { maxDepth: 4 });
+  assert.match(deep, /re-send 'gp_observe' with a smaller maxDepth \(this tool advertises 1…10\)/, deep);
+});
+
+test("a timed-out read is never pointed at a parameter it does not advertise", async () => {
+  // MUTATION THIS PINS: naming a knob from the *method* instead of from
+  // `spec.inputSchema` — the mistake the transport is not allowed to make either
+  // (`test/engine-client.test.mjs` guards it there). `gp_capture_view` has `scale`
+  // and nothing else; `gp_audit_ui` has `minHitTargetPt`, which controls nothing
+  // about the size of a reply and is therefore not offered.
+  const capture = await timeoutThrough("gp_capture_view", { scale: 1 });
+  assert.match(capture, /a smaller scale \(this tool advertises 0\.1…1\), currently 1/, capture);
+  for (const other of ["maxDepth", "limit", "selector", "role", "minHitTargetPt"]) {
+    assert.ok(
+      !new RegExp(`(smaller|tighter) ${other}\\b`).test(capture),
+      `gp_capture_view 只 advertise scale，建议里却出现了 ${other}：${capture}`,
+    );
+  }
+
+  const audit = await timeoutThrough("gp_audit_ui", {});
+  assert.match(audit, /a smaller maxDepth/, audit);
+  assert.ok(!/smaller minHitTargetPt|tighter minHitTargetPt/.test(audit), audit);
+});
+
+test("a timed-out action keeps the transport's no-replay answer, unrewritten", async () => {
+  // MUTATION THIS PINS: dropping the `isReplayUnsafeMethod` guard from
+  // `toolAuthorsTimeoutAdvice`. A timeout does **not** prove the daemon finished —
+  // for `act` it proves only that this shell stopped waiting — so the authored
+  // "once it is answered, re-send it with a more specific selector" would order a
+  // second change on the user's screen, which is the harm the transport's own
+  // no-replay branch exists to remove.
+  for (const [name, args] of [
+    ["gp_act", { selector: { role: "AXButton" }, action: "press" }],
+    ["gp_restore", { snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS" }],
+    ["gp_attach", { bundleId: "com.example.sweep" }],
+  ]) {
+    const text = await timeoutThrough(name, args);
+    assert.ok(AUTHORED_TIMEOUT.test(text) === false, `${name} 的超时建议不得由工具层重写成"再发一次"：${text}`);
+    assert.ok(!new RegExp(`re-send '${name}'`).test(text), text);
+  }
+  const act = await timeoutThrough("gp_act", { selector: { role: "AXButton" }, action: "press" });
+  assert.ok(act.includes(slowEngineRemedy("act", "mcp")),
+    `不可重放方法的超时建议必须原样带上传输层的那句话：${act}`);
+  assert.match(act, /do NOT re-issue act/);
+});
+
+test("the probe's own timeout is not rewritten into an answer that names a restart", async () => {
+  // MUTATION THIS PINS: authoring the timeout remedy for `gp_probe_status` too.
+  // It advertises no parameter, so the tool layer has nothing to add — and the text
+  // it *would* compose ships the liveness table, whose `unreachable` entry names
+  // `--restore-launchd`. A probe that went unanswered is the one answer that must
+  // never put a restart command in front of the agent (R8-高1).
+  const text = await timeoutThrough("gp_probe_status", {});
+  assert.ok(!AUTHORED_TIMEOUT.test(text), text.slice(0, 200));
+  assert.ok(!text.includes("--restore-launchd"), text);
+  assert.ok(text.includes(slowEngineRemedy("probe_status", "mcp")), text.slice(0, 200));
+});
+
+test("a rewritten timeout still ships the whole liveness table and the late-reply bound", async () => {
+  // MUTATION THIS PINS: replacing the transport's remedy with a shorter
+  // tool-authored one that forgot a fact the transport was already giving: which
+  // four answers a `gp_probe_status` can return and what each authorises, and how
+  // long this shell keeps a timed-out request registered. A remedy that answers
+  // "how do I narrow it" by deleting "is the daemon even alive" is a regression
+  // dressed as an improvement.
+  const text = await timeoutThrough("gp_observe", { maxDepth: 3 });
+  assert.ok(AUTHORED_TIMEOUT.test(text), text.slice(0, 200));
+  for (const outcome of LIVENESS_PROBE_OUTCOMES) {
+    assert.ok(text.includes(livenessProbeDecision(outcome)),
+      `重写后的超时建议丢了 ${outcome} 这条判据：${text.slice(0, 200)}…`);
+  }
+  assert.ok(text.includes(lateReplyRoute("mcp")), "迟到回复的界限要跟着建议一起到代理手里");
+  assert.match(text, /\b16\b/, "有界窗口必须把界限说出来");
+  assert.match(text, /A restart is authorised only by/, text.slice(-400));
+  assert.match(text, /do not put a second copy of the same request on the wire/);
+});
+
+test("no timeout advice contradicts a bound the tool that owns it advertises", async () => {
+  // The property, over the whole table: every tool that can receive a reply, run
+  // once with nothing sent and once with **each** numeric parameter it advertises
+  // pinned at its own `minimum` and at its `maximum`. A future tool that gains a
+  // bound this advice ignores reddens here, in the direction that matters: the
+  // suggestion names a parameter it does not publish, orders a value below the
+  // floor it publishes, or quotes a range that is not the one in its schema.
+  const HERE_DIR = path.dirname(fileURLToPath(import.meta.url));
+  const sent = methodsSentByShell(TOOL_SPECS, path.resolve(HERE_DIR, "..", "src"));
+  const baseArgs = {
+    // `pid`, not `bundleId`: this sweep pins every numeric parameter at its
+    // advertised bounds in turn, and `gp_attach` takes exactly one of the two
+    // (`AttachArgs.refine`), so a merged `bundleId` + `pid` state would fail the
+    // tool's own rule rather than test the advice.
+    gp_attach: { pid: 4242 },
+    gp_act: { selector: { role: "AXButton" }, action: "press" },
+    gp_assert_element: { selector: { role: "AXButton" }, property: "title", expected: "Submit" },
+    gp_restore: { snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS" },
+    gp_export_evidence: { operationId: OP_A, format: "markdown" },
+  };
+  const offenders = [];
+  const skipped = [];
+  let states = 0;
+  let authoredStates = 0;
+  let floorStates = 0;
+  for (const spec of TOOL_SPECS) {
+    if (!canReceiveDaemonReply(spec, sent) && !spec.name.startsWith("gp_recent")) {
+      continue;
+    }
+    const numbers = Object.entries(spec.inputSchema?.properties ?? {})
+      .filter(([, s]) => s?.type === "integer" || s?.type === "number")
+      .map(([name, s]) => ({ name, minimum: s.minimum, maximum: s.maximum }));
+    const cases = [{ label: "nothing sent", args: baseArgs[spec.name] ?? {} }];
+    for (const knob of numbers) {
+      if (typeof knob.minimum === "number") {
+        cases.push({ label: `${knob.name} at its floor`, args: { ...baseArgs[spec.name], [knob.name]: knob.minimum }, atFloor: knob.name });
+      }
+      if (typeof knob.maximum === "number") {
+        cases.push({ label: `${knob.name} at its ceiling`, args: { ...baseArgs[spec.name], [knob.name]: knob.maximum } });
+      }
+    }
+    for (const state of cases) {
+      const checked = spec.validate(state.args);
+      if (!checked.ok) {
+        skipped.push(`${spec.name} [${state.label}]: ${checked.issues}`);
+        continue;
+      }
+      let text;
+      try {
+        text = await timeoutThrough(spec.name, checked.value, { seedTrail: true });
+      } catch (error) {
+        skipped.push(`${spec.name} [${state.label}]: ${String(error).slice(0, 90)}`);
+        continue;
+      }
+      states += 1;
+      const advertised = advertisedProperties(spec);
+      const authored = AUTHORED_TIMEOUT.test(text);
+      if (authored) {
+        authoredStates += 1;
+      }
+      // (1) A parameter named next to a narrowing verb must be one this tool
+      //     publishes; the schema, not this file, is the list of candidates.
+      for (const name of NAMEABLE_PARAMS) {
+        const claims = new RegExp(`(smaller|tighter) ${name}\\b|${name} is already at this tool's floor`);
+        if (claims.test(text) && !advertised.has(name)) {
+          offenders.push(`${spec.name} [${state.label}] 点了自己广告里没有的 \`${name}\``);
+        }
+        // (2) A value the caller already holds at its advertised floor may never
+        //     be described as shrinkable, by either author.
+        if (state.atFloor === name && new RegExp(`(smaller|tighter) ${name}\\b`).test(text)) {
+          offenders.push(`${spec.name} [${state.label}] 让代理去调小已经在下界的 \`${name}\`：这条会被壳层自己拒掉`);
+        }
+      }
+      if (state.atFloor !== undefined) {
+        floorStates += 1;
+      }
+      // (3) Every bound quoted has to be the bound in the schema it came from.
+      for (const match of text.matchAll(/\(this tool advertises ([\d.]+)…([\d.]+)\)/g)) {
+        const pair = numbers.find((k) => String(k.minimum) === match[1] && String(k.maximum) === match[2]);
+        if (pair === undefined) {
+          offenders.push(`${spec.name} [${state.label}] 引用了不在自己 schema 里的区间 ${match[1]}…${match[2]}`);
+        }
+      }
+      for (const match of text.matchAll(/(\w+) is already at this tool's floor \(([\d.]+)\)/g)) {
+        const schema = (spec.inputSchema?.properties ?? {})[match[1]];
+        if (schema === undefined || String(schema.minimum) !== match[2]) {
+          offenders.push(`${spec.name} [${state.label}] 说 ${match[1]} 的下界是 ${match[2]}，schema 里不是这个数`);
+        }
+      }
+      // (4) The decision this layer makes about each method must be the transport's,
+      //     in both directions: a replay-unsafe method never gets a re-issue
+      //     instruction, and a replay-safe method with a knob always gets its own
+      //     narrowing answer rather than a pointer at a schema it cannot read.
+      const unsafe = isReplayUnsafeMethod(spec.engineMethod);
+      if (unsafe && !/do NOT re-issue/.test(text)) {
+        offenders.push(`${spec.name} (${spec.engineMethod}): 不可重放的方法丢了"不得重发"`);
+      }
+      if (unsafe && authored) {
+        offenders.push(`${spec.name} (${spec.engineMethod}): 不可重放的方法被工具层重写成了"再发一次"`);
+      }
+      if (!unsafe && numbers.length > 0 && !authored) {
+        offenders.push(`${spec.name}: advertise 了可调旋钮却拿不到按自己界值写出的建议`);
+      }
+    }
+  }
+  assert.deepEqual(skipped, [], `这些工具/状态本该被扫到却没有：${skipped.join("; ")}`);
+  assert.deepEqual(offenders, [], offenders.join("\n"));
+  assert.ok(states >= 20, `只跑了 ${states} 个状态，这条扫描已经不构成覆盖`);
+  assert.ok(authoredStates >= 6, `只有 ${authoredStates} 个状态收到工具层建议，重写大概已经断开`);
+  assert.ok(floorStates >= 5, `只有 ${floorStates} 个状态把某个旋钮压在了下界上，界值判据形同虚设`);
+});
+
+/* ------------------------------------------------------------------ *
+ * Round-10 lane A, item 2: `gp_recent_reports` may not forward a shape it
+ * would refuse at its own front door, and one bad id may not cost the report.
+ * ------------------------------------------------------------------ */
+
+const FOREIGN_ID = "op_not-an-operation-id";
+
+test("gp_recent_reports validates a trail id before spending a request on it", async () => {
+  // MUTATION THIS PINS: dropping the `OPERATION_ID_PATTERN` filter. The trail is
+  // written from *any* daemon frame (`EvidenceAuditSession.record` harvests every
+  // string-valued operationId/evidenceId it finds and has no rule of its own to
+  // apply), so a malformed id used to be forwarded straight into
+  // `last_evidence {operationId}` — past the shell's own
+  // `OptionalOperationIdSchema`, which the HTTP half does apply — and the
+  // `GP_E_BAD_PARAMS` it came back with aborted the whole call.
+  const { engine, io } = makeEngine();
+  const session = new EvidenceAuditSession();
+  session.record({ evidenceId: FOREIGN_ID });
+  session.record({ operationId: OP_A });
+
+  const promise = executeTool(TOOL_BY_NAME.get("gp_recent_reports"), { limit: 5 }, engine, session);
+  await flush();
+  const frames = evidenceFrames(io);
+  assert.deepEqual(frames.map((frame) => frame.params.operationId), [OP_A],
+    "畸形 id 一个请求都不值得发出去");
+  respondTo(io, frames[0], evidenceFrame(OP_A, T3_DIAGNOSIS));
+  const outcome = await promise;
+
+  assert.equal(outcome.isError, false, outcome.content[0].text);
+  const text = outcome.content[0].text;
+  assert.match(text, /rejected 1 trail entry/, text.slice(0, 300));
+  assert.ok(text.includes(FOREIGN_ID), `被拒的 id 要点名，不能静默消失：${text}`);
+  assert.ok(text.includes(`# ${OP_A} · T3 · normal`), "取到的那份不得因为另一条畸形就丢掉");
+  assert.ok(!text.includes("unreachable"), "没发过请求的条目不得冒充\"daemon 里没有这条\"");
+});
+
+test("a trail of nothing but foreign ids never reaches the daemon", async () => {
+  const { engine, io } = makeEngine();
+  const session = new EvidenceAuditSession();
+  session.record({ operationId: "" });
+  session.record({ operationId: FOREIGN_ID });
+  const outcome = await executeTool(
+    TOOL_BY_NAME.get("gp_recent_reports"), { limit: 5 }, engine, session,
+  );
+  assert.equal(engine.io.sent.length, 0, "一条都不合法＝一个请求都不发");
+  assert.equal(outcome.isError, true);
+  const text = outcome.content[0].text;
+  assert.ok(text.startsWith("GP_E_INTERNAL"), `这不是没有证据，是 daemon 与 id 文法不一致：${text}`);
+  assert.ok(!text.startsWith("GP_E_NO_EVIDENCE"), "把畸形 id 说成\"没有证据\"会把代理支去重跑那个动作");
+  assert.ok(text.includes(FOREIGN_ID), text);
+});
+
+test("one id that fails hard keeps the packs already fetched", async () => {
+  // MUTATION THIS PINS: `return mapAuditError(settled.error)` inside the fetch
+  // loop. One unexpected answer used to throw away every pack this call had
+  // already read — leaving the agent with nothing for a trail that demonstrably
+  // holds operations, which is the state in which it re-runs the act.
+  const { engine, io } = makeEngine();
+  const session = new EvidenceAuditSession();
+  session.record({ operationId: OP_A });
+  session.record({ operationId: OP_B });
+
+  const promise = executeTool(TOOL_BY_NAME.get("gp_recent_reports"), { limit: 5 }, engine, session);
+  await flush();
+  const [first] = evidenceFrames(io);
+  respondTo(io, first, evidenceFrame(OP_A, T3_DIAGNOSIS));
+  await flush();
+  const frames = evidenceFrames(io);
+  assert.equal(frames.length, 2, "premise: 第二条已经发出");
+  respondToError(io, frames[1], { code: "GP_E_NOT_ATTACHED", message: "no app attached", remedy: "call gp_attach first" });
+
+  const outcome = await promise;
+  assert.equal(outcome.isError, false, outcome.content[0].text);
+  const text = outcome.content[0].text;
+  assert.ok(text.includes(`# ${OP_A} · T3 · normal`), `已经取到的那份必须还在报告里：${text.slice(0, 200)}`);
+  assert.ok(text.includes(OP_B), `失败的那条要点名：${text}`);
+  assert.match(text, /GP_E_NOT_ATTACHED/, "带上去的是哪个答案，代理才不用猜");
+  assert.match(text, /Do not re-run gp_act/, text);
+});
+
+test("a foreign id is bounded and neutralised where the report prints it", async () => {
+  // MUTATION THIS PINS: dropping `renderTrailId`'s escape (or its length bound).
+  // The ids in these notes were never validated by anything — they are the strings
+  // a daemon frame happened to carry — and both renderings are consumed: HTML by
+  // something that parses tags, Markdown by something that parses headings,
+  // emphasis and tables. An unbounded one is a frame this shell then refuses to
+  // deliver at all, which is a worse outcome than a truncated name.
+  const hostile = `<img src=x onerror="alert(1)">**op**|#\`${FOREIGN_ID}`;
+  const long = `op_${"A".repeat(400)}`;
+  for (const format of ["markdown", "html"]) {
+    const { engine, io } = makeEngine();
+    const session = new EvidenceAuditSession();
+    session.record({ operationId: hostile });
+    session.record({ operationId: long });
+    session.record({ operationId: OP_A });
+    const promise = executeTool(TOOL_BY_NAME.get("gp_recent_reports"), { limit: 5, format }, engine, session);
+    await flush();
+    const frames = evidenceFrames(io);
+    assert.deepEqual(frames.map((f) => f.params.operationId), [OP_A], "畸形 id 不得上到线上");
+    respondTo(io, frames[0], evidenceFrame(OP_A, T3_DIAGNOSIS));
+    const text = (await promise).content[0].text;
+    // The assertions belong to the note that prints the foreign ids: the report
+    // body has headings and markup of its own, and judging the whole document
+    // would only prove the renderer is not a no-op.
+    const [note] = text.split("\n").filter((line) => line.includes("rejected 2"));
+    assert.ok(note !== undefined, `两条被拒的 id 必须在报告里各归一处：${text.slice(0, 300)}`);
+    assert.ok(note.includes(FOREIGN_ID), `尾巴要能被认出来：${note}`);
+    assert.ok(!note.includes("<img"), `${format} 把外来 id 原样拼进了标记文本：${note}`);
+    assert.ok(!note.includes("A".repeat(400)), `${format} 报告不得无界地转写外来 id`);
+    assert.match(note, /\+\d+ more chars/, `要说明被截掉了多少：${note.slice(0, 200)}`);
+    if (format === "html") {
+      // HTML has one escaping rule and it is the entity form: `#` and the backtick
+      // carry no meaning there, and turning them into something else would break
+      // the id an agent may still want to compare by eye.
+      assert.match(note, /&lt;img/, note);
+      assert.match(note, /&quot;alert/, note);
+    } else {
+      // Markdown has five, and all of them are structural.
+      assert.ok(!note.includes("<"), "Markdown 渲染器会把 < 后面的东西当标签");
+      assert.ok(!note.includes("`"), "反引号会在 Markdown 里开一段代码");
+      assert.ok(!note.includes("|"), "竖线会在 Markdown 里造表格单元");
+      assert.ok(!note.includes("#"), "# 会在 Markdown 里造标题");
+      assert.ok(!note.includes("*"), "* 会在 Markdown 里造强调");
+    }
+  }
+});
+
+/** Answer one specific in-flight frame with an error frame. */
+function respondToError(io, frame, body) {
+  io.send(JSON.stringify({ id: frame.id, error: body }));
+}
+
+/* ------------------------------------------------------------------ *
+ * Round-10 lane A, item 3: an empty `selector.role` / `selector.title`.
+ * ------------------------------------------------------------------ */
+
+const PARAM_VALIDATION_SWIFT = path.resolve(HERE, "..", "..", "engine", "Sources", "GlassPaneEngine", "ParamValidation.swift");
+const AX_CHANNEL_SWIFT = path.resolve(HERE, "..", "..", "engine", "Sources", "GlassPaneEngine", "AXChannel.swift");
+const EVIDENCE_REPORT_SWIFT = path.resolve(HERE, "..", "..", "engine", "Sources", "GlassPaneEngine", "EvidenceReportGenerator.swift");
+
+/**
+ * The daemon's selector rules, read out of its source instead of restated.
+ *
+ * Hardcoding `false` for "may `role` be empty" would be decoration: the day
+ * `optSelector` grows an emptiness guard for `title` too — or drops the one it has
+ * for `role` — the shell and the daemon would disagree again, and only a gate that
+ * re-reads the rule would notice which side is now wrong.
+ */
+function daemonSelectorRules() {
+  const source = fs.readFileSync(PARAM_VALIDATION_SWIFT, "utf8");
+  const opened = source.indexOf("static func optSelector");
+  assert.notEqual(opened, -1,
+    "ParamValidation.swift 里找不到 optSelector：这条闸读的东西搬家了，要改的是闸本身而不是结论");
+  const closed = source.indexOf("static func requireSelector", opened);
+  assert.notEqual(closed, -1, "optSelector 的函数体读不到结尾，判据不可信");
+  const body = source.slice(opened, closed);
+
+  const roleGuard = body.match(/guard\s+let\s+role\s*=\s*dict\["role"\][\s\S]{0,80}?else/);
+  assert.ok(roleGuard !== null, "optSelector 不再用 guard 读 role——重读这条闸");
+  const maxLength = source.match(/static let selectorMaxLength\s*=\s*(\d+)/);
+  assert.ok(maxLength !== null, "selectorMaxLength 不在了——长度上限这条判据也读不到了");
+
+  // `title` is read through `optString`, which has no emptiness guard at all:
+  // that is the whole difference between the two fields, and it is what makes the
+  // daemon's *evidence* disagree with the daemon's *action*.
+  const titleLine = body.match(/let title = try optString\(dict, "title"[^\n]*\n/);
+  assert.ok(titleLine !== null, "optSelector 不再经 optString 读 title——重读这条闸");
+  const optStringBody = source.slice(source.indexOf("static func optString"), source.indexOf("static func optInt"));
+  assert.notEqual(optStringBody.indexOf("optString"), -1);
+  const optStringRejectsEmpty = /\.isEmpty/.test(optStringBody);
+
+  const channel = fs.readFileSync(AX_CHANNEL_SWIFT, "utf8");
+  const matchesTitleExactly = /if let wantedTitle = selector\.title \{[\s\S]{0,200}?if title != wantedTitle \{ return false \}/.test(channel);
+  const report = fs.readFileSync(EVIDENCE_REPORT_SWIFT, "utf8");
+  const rendersTitleOnlyWhenNonEmpty = /if let title = selector\.title\?\.nonEmpty/.test(report);
+
+  return {
+    selectorMaxLength: Number(maxLength[1]),
+    roleMustBeNonEmpty: /!role\.isEmpty/.test(roleGuard[0]),
+    titleMustBeNonEmptyByDaemonAlone: optStringRejectsEmpty,
+    titleDisagrees: matchesTitleExactly && rendersTitleOnlyWhenNonEmpty,
+  };
+}
+
+test("the shell refuses an empty selector.role instead of paying a round trip for the daemon's rule", async () => {
+  // MUTATION THIS PINS: reverting the request-side selector to the kernel's
+  // length-only `SelectorSchema`. `ParamValidation.optSelector` refuses an empty
+  // `role` outright, so the shell used to spend a socket round trip to learn a rule
+  // it could have applied itself — and `gp_act` is not a call worth guessing about.
+  const rules = daemonSelectorRules();
+  const act = TOOL_BY_NAME.get("gp_act");
+  for (const selector of [{ role: "" }, { role: "", title: "Submit" }]) {
+    const { engine } = makeEngine();
+    const outcome = await executeTool(act, { selector, action: "press" }, engine);
+    assert.equal(rules.roleMustBeNonEmpty, true, "daemon 不再要求非空 role 了——这条判据要重读");
+    assert.equal(outcome.isError, true, `role:"" 必须由壳层拒掉：${outcome.content[0].text}`);
+    assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"), outcome.content[0].text);
+    assert.equal(engine.io.sent.length, 0, "壳层自己就能拒的形状不得占用 daemon");
+  }
+});
+
+test("an empty selector.title is refused because the evidence would print it as absent", async () => {
+  // MUTATION THIS PINS: accepting `title: ""`. `AXChannel.elementMatches` compares
+  // the wanted title for exact equality, so `""` is a *value* that selects the
+  // elements with an empty AX title; `EvidenceReportGenerator.selectorText` prints
+  // `selector.title?.nonEmpty`, so the pack it writes describes the action as
+  // having had no title at all. An action whose own evidence disagrees with it is
+  // the one thing this surface exists to prevent.
+  const rules = daemonSelectorRules();
+  assert.equal(rules.titleDisagrees, true,
+    "daemon 侧的读法变了（匹配或渲染改了）：这条闸的结论要按新读法重推，不能沿用");
+  assert.equal(rules.titleMustBeNonEmptyByDaemonAlone, false,
+    "daemon 已经自己拒空 title 了：壳层这条规则的依据要重记");
+
+  const act = TOOL_BY_NAME.get("gp_act");
+  const { engine } = makeEngine();
+  const outcome = await executeTool(act, { selector: { role: "AXButton", title: "" }, action: "press" }, engine);
+  assert.equal(outcome.isError, true);
+  assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"), outcome.content[0].text);
+  assert.equal(engine.io.sent.length, 0);
+
+  // A restore step carries the same selector, and the same rule applies to it.
+  const restore = TOOL_BY_NAME.get("gp_restore");
+  const stepped = await executeTool(restore, {
+    snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS",
+    steps: [{ selector: { role: "AXButton", title: "" }, action: "press" }],
+  }, engine);
+  assert.ok(stepped.content[0].text.startsWith("GP_E_BAD_PARAMS"), stepped.content[0].text);
+
+  // `identifier` is the field this rule deliberately does NOT extend to: an empty
+  // identifier can only fail to resolve, so nothing here disagrees with anything.
+  const ok = makeEngine();
+  const keptPromise = executeTool(act, { selector: { role: "AXButton", identifier: "" }, action: "press" }, ok.engine);
+  await flush();
+  ok.io.respond({ operationId: OP_A, actConfirmed: true });
+  const kept = await keptPromise;
+  assert.equal(kept.isError, false, kept.content[0].text);
+  assert.equal(ok.io.lastFrame().params.selector.identifier, "",
+    "空 identifier 仍然是那条 selector 的一部分：它只是永远选不中，不是与什么相矛盾");
+});
+
+test("the advertised selector schema and the zod rule say the same thing about each field", () => {
+  // MUTATION THIS PINS: tightening one side only. `tools/list` is what an agent
+  // reads *before* it forms a request, so a `minLength` the validator does not
+  // enforce — or a value the validator refuses that the schema still advertises as
+  // fine — is an advertised contract this shell breaks on receipt.
+  const rules = daemonSelectorRules();
+  const offenders = [];
+  const selectors = [];
+  for (const spec of TOOL_SPECS) {
+    const properties = spec.inputSchema?.properties ?? {};
+    if (properties.selector !== undefined) {
+      selectors.push({ spec, schema: properties.selector, label: "selector" });
+    }
+    const stepItems = properties.steps?.items;
+    if (stepItems?.properties?.selector !== undefined) {
+      selectors.push({ spec, schema: stepItems.properties.selector, label: "steps[].selector" });
+    }
+  }
+  assert.ok(selectors.length >= 3, `只找到 ${selectors.length} 处对外 advertise 的 selector，扫描已经跟不上了`);
+
+  for (const { spec, schema, label } of selectors) {
+    for (const [field, fieldSchema] of Object.entries(schema.properties ?? {})) {
+      const advertisedMin = fieldSchema.minLength ?? 0;
+      const selector = { role: "AXButton" };
+      selector[field] = "";
+      const accepted = spec.validate(requestWith(spec, selector)).ok;
+      if (accepted !== (advertisedMin === 0)) {
+        offenders.push(`${spec.name}.${label}.${field}: minLength=${advertisedMin}, zod 收空串=${accepted}`);
+      }
+      if (fieldSchema.maxLength !== rules.selectorMaxLength) {
+        offenders.push(`${spec.name}.${label}.${field}: advertise 的上限 ${fieldSchema.maxLength} 不是 daemon 的 ${rules.selectorMaxLength}`);
+      }
+      if (field === "role" && advertisedMin < 1 && rules.roleMustBeNonEmpty) {
+        offenders.push(`${spec.name}.${label}.role: daemon 要求非空，advertise 里却没有 minLength`);
+      }
+      // The length bound is enforced too, not only advertised: a value over the
+      // daemon's `selectorMaxLength` reaches it as a `GP_E_BAD_PARAMS` from the
+      // far end of a socket.
+      const tooLong = { role: "AXButton" };
+      tooLong[field] = "x".repeat(rules.selectorMaxLength + 1);
+      assert.equal(
+        spec.validate(requestWith(spec, tooLong)).ok,
+        false,
+        `${spec.name}.${label}.${field} 接受了超过 daemon 上限的值`,
+      );
+    }
+  }
+  assert.deepEqual(offenders, [], offenders.join("; "));
+
+  // The exact boundary, measured rather than assumed.
+  const act = TOOL_BY_NAME.get("gp_act");
+  assert.equal(act.validate({ selector: { role: "r".repeat(rules.selectorMaxLength) }, action: "press" }).ok, true);
+  assert.equal(act.validate({ selector: { role: "r".repeat(rules.selectorMaxLength + 1) }, action: "press" }).ok, false);
+});
+
+/** A minimal valid request for `spec` carrying `selector` in the place it lives. */
+function requestWith(spec, selector) {
+  if (spec.name === "gp_restore") {
+    return { snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS", steps: [{ selector, action: "press" }] };
+  }
+  if (spec.name === "gp_assert_element") {
+    return { selector, property: "title", expected: "Submit" };
+  }
+  return { selector, action: "press" };
+}

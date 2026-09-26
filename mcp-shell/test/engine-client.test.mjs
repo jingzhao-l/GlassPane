@@ -12,6 +12,7 @@ import {
   ENGINE_DEADLINES_MS,
   ENGINE_SOCKET_ENV,
   EngineJsonRpcClient,
+  REPLAY_UNSAFE_METHOD_NAMES,
   callerDeadlineMs,
   defaultSocketPath,
   engineClientOver,
@@ -20,9 +21,17 @@ import {
   slowEngineRemedy,
   unixSocketEngineClient,
 } from "../dist/engine-client.js";
-import { TOOL_SPECS } from "../dist/tools.js";
+import { engineWithPayloadAdvice, oversizedReplyAdvice, TOOL_BY_NAME, TOOL_SPECS } from "../dist/tools.js";
+import {
+  AUDIT_HISTORY_LIMIT,
+  EvidenceAuditSession,
+  TRAIL_PROVENANCE_NOTES,
+  UNKNOWN_GENERATION,
+  operationIds,
+} from "../dist/audit-session.js";
 import { MAX_FRAME_BYTES, OversizeFrameError } from "../dist/io.js";
 import { FakeLineIo } from "./helpers.mjs";
+import { createTrackedMcpServer } from "../dist/dispatch.js";
 import { executableSource } from "./support/source.mjs";
 
 test("call resolves when a matching success frame arrives", async () => {
@@ -139,41 +148,209 @@ test("a deadline overrun says slow, not unreachable, and forbids replaying act",
     assert.match(err.remedy, /do NOT re-issue act/);
     return true;
   });
-  // R9-中3: the narrowing advice is per method family, so `observe` keeps it and
-  // names the parameter it really has. The mutation this pins is the single
-  // generic tail coming back — then this line passes and the family assertions
-  // below ("attach", "diagnose", "capture_view", the schema cross-check) go red.
+  // R10-高1 re-pins this line. What it used to assert —
+  // /re-send the same request with a smaller maxDepth/ — *is* the defect: the
+  // transport named a knob and a direction for a request that may already have
+  // sent that knob's own schema floor, so the retry it ordered was rejected by the
+  // schema it was supposed to help. The equivalent claim now is that a read caller
+  // is told to wait rather than to send another copy, and that the narrowing
+  // question is pointed at the surface that owns the schema. The guard below, the
+  // schema cross-check, and the source scan carry the rest of what this test used
+  // to pin.
   const other = new EngineJsonRpcClient(new FakeLineIo(), 30);
-  await assert.rejects(other.call("observe"), (err) => {
-    assert.match(err.remedy, /re-send the same request with a smaller maxDepth/);
+  await assert.rejects(other.call("observe", { maxDepth: 1 }), (err) => {
+    assert.match(err.remedy, /rather than sending this request again/);
+    assert.match(err.remedy, /queues behind the one still running/);
+    assert.doesNotMatch(err.remedy, /re-send the same request with a smaller/);
     return true;
   });
 });
 
 /* ------------------------------------------------------------------ *
- * R9-中3: `slowEngineRemedy`'s tail used to be one sentence for every
+ * R9-中3 found that `slowEngineRemedy`'s tail was one sentence for every
  * method that is not `act`/`restore`/`probe_status` — "retry this read
  * narrower (smaller maxDepth / a tighter selector) — that is safe for a
- * read". It was sent to `attach` (a daemon-state change that can discard
- * the trail), to the operation reads (which have no knob to turn), and to
- * `capture_view` (whose knob is `scale`). Both halves are pinned: the
- * family wording, and — against `TOOL_SPECS` — that no remedy names a
- * parameter the method's own schema does not have.
+ * read" — and that it was sent to `attach`, to the operation reads, and to
+ * `capture_view`, none of which it describes. Round 9 fixed the *wrong
+ * method* half and left the *wrong surface* half in place: the per-family
+ * branch still named a knob and a direction, which is R10-高1 — a caller that
+ * had already sent the schema's own floor was ordered below it and answered by
+ * `GP_E_BAD_PARAMS` from this shell's own zod.
+ *
+ * What is pinned here is the split, in both directions:
+ *  - the transport names no schema-bound parameter next to a narrowing
+ *    direction, in its composed answer or in its own source text (`SCAN`);
+ *  - the tool layer still does, and must, because that is where the schema is
+ *    (`oversizedReplyAdvice` is asserted to violate the transport's rule).
  * ------------------------------------------------------------------ */
 
-/** Which parameter names each method's timeout remedy is allowed to name. */
-const NARROWING_KNOBS = {
-  observe: ["maxDepth"],
-  snapshot: ["maxDepth"],
-  audit_ui: ["maxDepth"],
-  assert_element: ["selector"],
-  capture_view: ["scale"],
-  diagnose: [],
-  last_evidence: [],
-  attach: [],
-  act: [],
-  restore: [],
-};
+/**
+ * The parameter names every tool schema in this shell advertises, read off the
+ * contract rather than typed out here: a guard whose knob list is a literal in
+ * the test can be satisfied by naming a knob the list forgot.
+ */
+const SCHEMA_PARAMETERS = [...new Set(TOOL_SPECS.flatMap(
+  (spec) => Object.keys(spec.inputSchema.properties ?? {}),
+))].sort();
+
+/**
+ * Verbs whose object is a request parameter. Deliberately a *phrase* list rather
+ * than the three words from the bug report, so that "use a tighter selector",
+ * "reduce the limit" and "cut your maxDepth down" all read as the same defect.
+ */
+const NARROWING_DIRECTION = /\b(?:small(?:er|est)|low(?:er|est)?(?:ed)?|tight(?:er)?|narrow(?:s|ed|ing)?|reduc(?:e|es|ed)|shr(?:ink|inks|inking)|shorter|fewer|decreas(?:e|es|ed)|(?:cut|turn|dial|tone)\b[^.;]{0,40}\bdown\b)/i;
+
+/** Any camelCase name: how a knob that no schema in `TOOL_SPECS` has yet still gets caught. */
+const CAMEL_NAME = /\b[a-z]+[A-Z][A-Za-z0-9]*\b/g;
+
+/** Sentence-sized pieces of an agent-facing string. */
+function clauses(text) {
+  return text.split(/[.;:—!?]+/);
+}
+
+/**
+ * The pairing rule: a narrowing direction and a parameter named in the same
+ * sentence. Naming a reply field in prose (`the operationId it carries`) is not
+ * the defect and must stay green, or the guard would be answered by deleting the
+ * sentence rather than by moving the claim to the layer that owns it.
+ */
+function narrowingPairings(text) {
+  const offenders = [];
+  for (const clause of clauses(text)) {
+    if (!NARROWING_DIRECTION.test(clause)) {
+      continue;
+    }
+    for (const name of SCHEMA_PARAMETERS) {
+      if (new RegExp(`\\b${name}\\b`, "i").test(clause)) {
+        offenders.push(`${name} in "${clause.trim().slice(0, 160)}"`);
+      }
+    }
+    for (const camel of clause.match(CAMEL_NAME) ?? []) {
+      offenders.push(`${camel} in "${clause.trim().slice(0, 160)}"`);
+    }
+  }
+  return offenders;
+}
+
+/**
+ * Every string-literal chain in `src/engine-client.ts`, with comments removed and
+ * `${…}` expressions taken out. A chain is the text the transport actually says,
+ * including the fragments it writes on separate lines: scanning each quoted
+ * fragment on its own would be dodged by putting the knob in the next fragment.
+ */
+function transportLiteralChains(source) {
+  const code = executableSource(source);
+  const literal = /"((?:[^"\\\n]|\\.)*)"|`((?:[^`\\]|\\.)*)`|'((?:[^'\\\n]|\\.)*)'/g;
+  const chains = [];
+  let current = null;
+  let last = 0;
+  for (const match of code.matchAll(literal)) {
+    const raw = (match[1] ?? match[2] ?? match[3] ?? "")
+      .replace(/\$\{[^{}]*\}/g, " ")
+      .replace(/\\(["'`\\])/g, "$1");
+    const gap = code.slice(last, match.index).replace(/\$\{[^{}]*\}/g, " ");
+    const glued = current !== null && /^[\s+]*$/u.test(gap);
+    if (glued) {
+      current += raw;
+    } else {
+      if (current !== null) chains.push(current);
+      current = raw;
+    }
+    last = match.index + match[0].length;
+  }
+  if (current !== null) chains.push(current);
+  return chains;
+}
+
+/** The round-9 sentence, and the wordings a re-wording would reach for. */
+const KNOWN_DEFECT_TEXTS = [
+  "then re-send the same request with a smaller maxDepth: these three walk the accessibility tree",
+  "then re-send it at a lower scale: this is the capture-and-encode path",
+  "use a tighter selector and retry",
+  "reduce the limit before sending it again",
+  "cut your maxDepth down and re-send",
+  // A knob this shell's schemas do not even have yet: the camelCase half is what
+  // keeps the rule from being a list of the three names in the bug report.
+  "retry with a smaller walkDepth",
+];
+
+/** Text that must stay green, so the rule is about the pairing and not about size. */
+const ALLOWED_TEXTS = [
+  "the operationId it carries can be read off that line and fetched with GET /v1/evidence/<operationId>",
+  "What is worth narrowing here, and whether it can still be narrowed at the values this request already sent, is a fact about a schema",
+  "narrow this request or ask for less of it; the tool's own schema names the parameters that can shrink a reply",
+];
+
+test("the guard's own predicate still sees the defect it was written for", () => {
+  // MUTATION THIS PINS: relaxing `narrowingPairings` until it reports nothing,
+  // which is how a source-scan gate becomes decoration. Each known-bad wording
+  // must produce an offender, each allowed wording must produce none, and the
+  // knob vocabulary must come from schemas that still have knobs.
+  assert.ok(SCHEMA_PARAMETERS.length >= 15,
+    `只解析出 ${SCHEMA_PARAMETERS.length} 个 schema 参数名，词汇表已经不看任何东西了`);
+  assert.ok(SCHEMA_PARAMETERS.includes("maxDepth") && SCHEMA_PARAMETERS.includes("scale"),
+    `schema 词汇里没有 maxDepth/scale：${SCHEMA_PARAMETERS.join(", ")}`);
+  for (const text of KNOWN_DEFECT_TEXTS) {
+    assert.ok(narrowingPairings(text).length > 0, `这条旧缺陷文案没有被判定：${text}`);
+  }
+  for (const text of ALLOWED_TEXTS) {
+    assert.deepEqual(narrowingPairings(text), [], `不该被判定的话被判定为缺陷：${text}`);
+  }
+});
+
+test("the transport's composed timeout answer names no parameter and no direction for one", () => {
+  const methods = [...new Set([
+    ...Object.keys(ENGINE_DEADLINES_MS),
+    ...TOOL_SPECS.map((spec) => spec.engineMethod),
+    ...REPLAY_UNSAFE_METHOD_NAMES,
+    "recent_reports",
+    "a_method_this_shell_has_never_seen",
+  ])];
+  const offenders = [];
+  for (const method of methods) {
+    for (const surface of ["mcp", "http"]) {
+      for (const pairing of narrowingPairings(slowEngineRemedy(method, surface))) {
+        offenders.push(`${method}/${surface}: ${pairing}`);
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], offenders.join(" | "));
+});
+
+test("src/engine-client.ts says nothing narrower than the answer it composes", () => {
+  // MUTATION THIS PINS: putting the knob back in the transport — in a fragment of
+  // a chain, or in a sentence that never reaches `slowEngineRemedy` in a test.
+  const source = fs.readFileSync(
+    fileURLToPath(new URL("../src/engine-client.ts", import.meta.url)),
+    "utf8",
+  );
+  const chains = transportLiteralChains(source);
+  assert.ok(chains.length >= 30, `只读出 ${chains.length} 段文本，扫描方式已经对不上这里的写法`);
+  // The positive half has to survive the same strip, or an over-eager parse turns
+  // this green by reading nothing.
+  assert.ok(chains.some((text) => text.includes("do NOT re-issue")),
+    "扫描没有读到超时 remedy 的正文，这条闸就成了空转");
+  assert.ok(chains.some((text) => /the tool's own schema names the parameters/.test(text)),
+    "扫描没有读到超帧 remedy 的那句分权文本，它已经换了写法");
+  const offenders = chains.flatMap((text, index) => narrowingPairings(text).map((p) => `#${index}: ${p}`));
+  assert.deepEqual(offenders, [], offenders.join(" | "));
+});
+
+/**
+ * The other half of the split, asserted as a *contrast*: the layer that owns the
+ * schema does name knobs and directions, and this shell's guard is not a ban on
+ * the sentence. `oversizedReplyAdvice` is the tool layer's exported composer; if
+ * it ever stops naming a knob, the transport's deferral points at an answer that
+ * is no longer there, and this test is what notices.
+ */
+test("the tool layer is the one that names knobs, and the transport rule would flag it", () => {
+  const observe = TOOL_BY_NAME.get("gp_observe");
+  assert.ok(observe, "gp_observe 不在了，这条对照就没有对照物");
+  const advice = oversizedReplyAdvice(observe, {});
+  assert.ok(narrowingPairings(advice).length > 0,
+    `工具层的窄化建议不再点名参数，分权就成了空话：${advice}`);
+  assert.match(advice, /maxDepth/, advice);
+});
 
 /**
  * The properties every tool that forwards this engine method advertises — the
@@ -211,36 +388,63 @@ test("the re-issue ban covers the methods that change state, each with its own r
   assert.match(slowEngineRemedy("act"), /take effect on the user's screen/);
 });
 
-test("no timeout remedy names a parameter the method's schema does not have", () => {
-  const named = ["maxDepth", "selector", "scale"];
-  for (const [method, allowed] of Object.entries(NARROWING_KNOBS)) {
+test("no timeout remedy names a parameter at all, whatever its method's schema has", () => {
+  // R10-高1 re-pins the round-9 cross-check. That test asserted, per family, that
+  // the remedy named *its own* knob (`observe` -> `maxDepth`, `capture_view` ->
+  // `scale`) and that the knob existed in the schema; the claim that survives is
+  // the stricter one — the transport names none — while the schema still has to
+  // carry the knobs the tool layer will name, or the deferral points at nothing.
+  const families = ["observe", "snapshot", "audit_ui", "assert_element", "capture_view", "diagnose", "last_evidence"];
+  for (const method of families) {
     const tail = tailOf(slowEngineRemedy(method));
-    for (const knob of named) {
-      if (allowed.includes(knob)) {
-        assert.ok(tail.includes(knob), `${method} should be pointed at its own ${knob}`);
-        // …and the schema has to still carry it, or the advice is stale.
-        assert.ok(schemaProperties(method).includes(knob),
-          `${method}'s remedy names ${knob}, which its tool schema does not advertise`);
-      } else {
-        assert.ok(!tail.includes(knob),
-          `${method}'s remedy names ${knob}, which its schema does not have: ${tail.slice(0, 200)}`);
-      }
+    const advertised = schemaProperties(method);
+    for (const knob of SCHEMA_PARAMETERS) {
+      assert.ok(!new RegExp(`\\b${knob}\\b`, "i").test(tail),
+        `${method}'s remedy names ${knob}, a parameter the transport has no schema to read: ${tail.slice(0, 200)}`);
     }
+    // The deferral has to land somewhere real: the tool that can be told to
+    // narrow still advertises the knob the transport refuses to name.
+    assert.ok(advertised.length >= 1, `${method} 的工具 schema 一个参数都没有，分权就没有对象`);
   }
+  for (const method of ["observe", "snapshot", "audit_ui"]) {
+    assert.ok(schemaProperties(method).includes("maxDepth"),
+      `${method} 的 schema 不再 advertise maxDepth，工具层的窄化建议就失去了出处`);
+  }
+  assert.ok(schemaProperties("capture_view").includes("scale"),
+    "capture_view 的 schema 不再 advertise scale，同上");
 });
 
-test("a read with nothing to narrow says so instead of implying a safe retry", () => {
-  for (const method of ["diagnose", "last_evidence"]) {
-    const tail = tailOf(slowEngineRemedy(method));
-    assert.match(tail, /re-send it unchanged/, `${method}: no parameter controls the work`);
-    assert.match(tail, /nothing to narrow/, `${method}: the honest sentence is "there is nothing to narrow"`);
+test("the timeout answer keeps the facts it can see and hands the rest over", () => {
+  // What replaced "re-send it unchanged / there is nothing to narrow" (a schema
+  // claim) and "re-send only if it changes or records nothing" (a *method* name an
+  // MCP caller cannot call, and a safety promise about a call this layer cannot
+  // classify). The transport states its own deadline was spent, says the daemon is
+  // still working on this request, tells the caller not to queue a second copy —
+  // and per surface names where the narrowing question is actually answered.
+  const facts = [
+    /rather than sending this request again/,
+    /queues behind the one still running/,
+    /is a fact about a schema/,
+  ];
+  for (const method of ["diagnose", "last_evidence", "recent_reports", "a_method_this_shell_has_never_seen"]) {
+    const remedy = slowEngineRemedy(method, "mcp");
+    // The two facts this layer can actually see: the wait is spent, and the daemon
+    // is working on *this* request. Everything else in the answer is a pointer.
+    assert.match(remedy, /still working on this one/);
+    const tail = tailOf(remedy);
+    for (const fact of facts) {
+      assert.match(tail, fact, `${method} 的出路不再说这句它看得到的事实：${tail.slice(0, 240)}`);
+    }
+    // The MCP caller is pointed at the tool list it actually holds, and the
+    // promise that a re-send is safe is gone: whether a call changes anything is
+    // stated by its own tool description, not by this file.
+    assert.match(tail, /gp_\*/);
+    assert.ok(!/do NOT re-issue/.test(tail),
+      "可重放的一支不得借用 no-replay 的标记，否则 tools.test.mjs 的对照失去区分");
   }
-  // A method this shell has no family for gets no invented knob, and no
-  // blanket promise that re-sending is safe: whether a call changes anything is
-  // stated by its own tool description, not by this file.
-  const unknown = tailOf(slowEngineRemedy("recent_reports"));
-  assert.ok(!/maxDepth|tighter selector/.test(unknown), unknown.slice(0, 200));
-  assert.match(unknown, /only if it changes or records nothing/);
+  const http = tailOf(slowEngineRemedy("observe", "http"));
+  assert.match(http, /this gateway publishes no parameter listing/);
+  assert.ok(!/gp_\*/.test(http), `curl 调用方手上没有 gp_* 可调：${http.slice(0, 200)}`);
 });
 
 test("a timed-out call keeps its entry so the late reply is still delivered", async () => {
@@ -700,6 +904,10 @@ test("a late reply hands its result body to the registered sink", async () => {
   assert.equal(seen.length, 1, "迟到回复必须交给 sink");
   assert.equal(seen[0].method, "act");
   assert.equal(seen[0].result.operationId, "op_late_1");
+  // This frame echoed the id `call()` sent, so the attribution is confirmed and the
+  // sink is told so: R10-中2's whole point is that the trail can tell this case from
+  // the arrival-order one below.
+  assert.equal(seen[0].attribution, "echoed-id");
   // The correlation is what lets the caller tell "this belongs to the trail I am
   // writing now" from "this belongs to a superseded attach" (R8b-高1); a call
   // that passed none reads back as none.
@@ -895,8 +1103,17 @@ test("an id-less reply for a request the caller gave up on still reaches the tra
   assert.equal(seen.length, 1, "a result frame with an operationId is exactly what the sink exists for");
   assert.equal(seen[0].method, "act", "it belongs to the act, not to the request queued behind it");
   assert.equal(seen[0].result.operationId, "op_idless");
+  // R10-中2: the frame echoed no id, so *which request* this answers is a guess, and
+  // the guess has to travel with the body instead of being smoothed over on the way
+  // to the trail. MUTATION THIS PINS: `reportLateReply(target, frame, true)` going
+  // back to the default (the id-less path claiming a confirmed attribution).
+  assert.equal(seen[0].attribution, "arrival-order",
+    "没有回显 id 的迟到回复，不得以'已确认'的身份进 sink");
   assert.equal(probeState.value, "pending");
-  assert.match(notes.find((note) => /late engine reply for 'act'/.test(note)) ?? "", /attributed by arrival order/);
+  const idLessNote = notes.find((note) => /late engine reply for 'act'/.test(note)) ?? "";
+  assert.match(idLessNote, /attributed by arrival order/);
+  assert.match(idLessNote, /echoed no request id/, "note 必须说清这是猜的，没有任何回显 id 证实它");
+  assert.match(idLessNote, /inferred/);
   io.respond({ connected: false });
   assert.deepEqual(await probe, { connected: false });
   client.close();
@@ -1087,4 +1304,254 @@ test("the two lookups are each spelled in exactly one source file", () => {
     "socket 猜测也必须只有一个出口");
   assert.equal((body.match(/os\.userInfo\(/g) ?? []).length, 0,
     "socket 回落不得改用 passwd 记录 —— 见 defaultSocketPath 的 R8-中9 注释");
+});
+
+/* ------------------------------------------------------------------ *
+ * R10-中2 — an id-less frame's attribution is a guess, and the trail has to
+ * carry the guess with the id.
+ *
+ * With a *result* (not an error) and no id, the transport deletes the settled
+ * entry and routes the body to the late-reply sink, which records its
+ * operationIds into this session's trail. `gp_recent_reports` then lists them as
+ * operations that ran. The attribution is by arrival order — the daemon answers
+ * in the order it received requests — and nothing on the wire confirms it, so the
+ * entry may be filed under an operation that belongs to the request queued behind
+ * it. Dropping the id would be the worse lie ("no such operation ran" is what an
+ * agent acts on), so it is kept and labelled: `provenanceOf` is what lets the
+ * listing say *inferred* instead of *verified*.
+ * ------------------------------------------------------------------ */
+
+const OP_IN_ORDER = "op_000000000000000000000000inorder";
+const OP_LATE_CONFIRMED = "op_0000000000000000000000lateok";
+const OP_LATE_GUESSED = "op_0000000000000000000000lateguess";
+
+test("the trail records how each id arrived, and an inferred one is not verified", async () => {
+  const session = new EvidenceAuditSession();
+  // Nothing recorded yet: the answer is "this trail does not hold that id", not a
+  // default that could be rendered as a claim.
+  assert.equal(session.provenanceOf(OP_IN_ORDER), null);
+
+  // The in-time path: a call that held its own trail turn, answered by the frame
+  // that echoed its id. This is the only entry the trail may call verified.
+  session.record({ operationId: OP_IN_ORDER });
+  assert.equal(session.provenanceOf(OP_IN_ORDER), "in-order");
+  assert.deepEqual(session.inferredIds(), []);
+
+  // A late reply whose frame echoed the id: late (its position in request order is
+  // arranged on arrival), but the operation is the daemon's own.
+  await session.recordLateArrival(
+    (trail) => trail.record({ operationId: OP_LATE_CONFIRMED }),
+    session.generation,
+    "echoed-id",
+  );
+  assert.equal(session.provenanceOf(OP_LATE_CONFIRMED), "late");
+  assert.deepEqual(session.inferredIds(), [], "只有回显 id 的迟到回复不得被标成猜的");
+
+  // The frame this defect is about: a *result* with no id at all.
+  await session.recordLateArrival(
+    (trail) => trail.record({ operationId: OP_LATE_GUESSED }),
+    session.generation,
+    "arrival-order",
+  );
+  assert.equal(session.provenanceOf(OP_LATE_GUESSED), "late-inferred");
+  assert.deepEqual(session.inferredIds(), [OP_LATE_GUESSED]);
+  assert.deepEqual(session.recentIds(20), [OP_IN_ORDER, OP_LATE_CONFIRMED, OP_LATE_GUESSED],
+    "标注归属方式不得改变链的内容或顺序——迟到操作仍要在链里，否则 agent 会以为它没跑");
+
+  const note = TRAIL_PROVENANCE_NOTES["late-inferred"];
+  assert.match(note, /arrival order/, "note 必须说清归属是按到达顺序推的");
+  assert.match(note, /could not be confirmed by an echoed id/, "note 必须说清没有任何回显 id 证实它");
+  assert.match(note, /not as verified|never as verified/, "它不得被读成已核实");
+
+  // A second arrival of the same id — this time in order — must not upgrade the
+  // record: nothing about the guessed frame became confirmable.
+  session.record({ operationId: OP_LATE_GUESSED });
+  assert.equal(session.provenanceOf(OP_LATE_GUESSED), "late-inferred",
+    "再见到同一个 id 不得把猜的升格成核实过的");
+});
+
+test("a late arrival is never filed as verified even when the sink cannot say more", async () => {
+  // MUTATION THIS PINS: `recordLateArrival` dropping `this.lateWindow = attribution`
+  // (or defaulting it to the in-order path). The sink in `dispatch.ts` records with a
+  // bare `trail.record(result)`; the mechanism has to be visible from inside this
+  // session, or a guessed frame reads as a confirmed one whenever the caller forgets
+  // to pass a flag.
+  const session = new EvidenceAuditSession();
+  await session.recordLateArrival(
+    (trail) => trail.record({ operationId: OP_LATE_GUESSED }),
+    session.generation,
+  );
+  assert.equal(session.provenanceOf(OP_LATE_GUESSED), "late",
+    "迟到的写入至少必须是 late，不得因为调用方没带标注就升格成 in-order");
+  assert.ok(session.provenanceOf(OP_LATE_GUESSED) !== "in-order");
+
+  // The window closes with the write, so the next ordinary record is in-order again.
+  session.record({ operationId: OP_IN_ORDER });
+  assert.equal(session.provenanceOf(OP_IN_ORDER), "in-order");
+
+  // And a refused late write leaves no provenance behind: the id is not in the trail,
+  // so the trail may not describe how it arrived.
+  const other = new EvidenceAuditSession();
+  const outcome = await other.recordLateArrival(
+    (trail) => trail.record({ operationId: OP_LATE_CONFIRMED }),
+    UNKNOWN_GENERATION,
+    "arrival-order",
+  );
+  assert.equal(outcome.written, false);
+  assert.deepEqual(other.recentIds(20), []);
+  assert.equal(other.provenanceOf(OP_LATE_CONFIRMED), null,
+    "没写进链的 id 不得留下归属记录，否则读起来像链里有一个被标了注的操作");
+});
+
+test("provenance is trimmed and cleared with the trail it describes", () => {
+  // MUTATION THIS PINS: dropping the `provenance.delete` in the eviction, or the
+  // `provenance.clear()` in `restart()`. A stale entry under an id the trail no longer
+  // holds reads as "recorded, with a caveat" for an operation the trail does not list.
+  const session = new EvidenceAuditSession();
+  const first = operationIds({ operationId: OP_IN_ORDER })[0];
+  session.record({ operationId: first });
+  for (let i = 0; i < AUDIT_HISTORY_LIMIT + 2; i++) {
+    session.record({ operationId: `op_fill_${String(i).padStart(2, "0")}` });
+  }
+  assert.equal(session.recentIds(AUDIT_HISTORY_LIMIT * 2).length, AUDIT_HISTORY_LIMIT);
+  assert.equal(session.provenanceOf(first), null, "被保留窗挤出的 id 必须连同归属一起消失");
+  assert.equal(session.inferredIds().length, 0);
+  // An id the trim *kept*, so the next assertion cannot pass by accident: it is the
+  // restart that has to forget it. MUTATION THIS PINS: `restart()` without
+  // `provenance.clear()` — the ids are gone, and a stale label on a gone id reads as
+  // "this trail lists it, with a caveat" the moment the app is re-attached.
+  const survivor = `op_fill_${String(AUDIT_HISTORY_LIMIT + 1).padStart(2, "0")}`;
+  assert.equal(session.provenanceOf(survivor), "in-order");
+
+  session.restart("com.example.app pid=1");
+  assert.deepEqual(session.recentIds(20), []);
+  assert.equal(session.provenanceOf(survivor), null, "换主之后旧链的归属不得留下");
+});
+
+test("the real MCP wiring files an id-less late reply as a late arrival, never as verified", async (t) => {
+  // The end-to-end half of R10-中2, driven through `createTrackedMcpServer`'s sink so
+  // this is the wiring an MCP client actually gets. What is asserted is the floor that
+  // holds with the sink unchanged: an operation written from a late frame is not filed
+  // as an in-order one. The `late-inferred` label needs the sink to forward
+  // `reply.attribution` (one line in `dispatch.ts`, a different lane's file); the
+  // transport already hands it over, and the unit test above pins what the session
+  // does with it.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const io = new FakeLineIo();
+  const client = new EngineJsonRpcClient(io, 20);
+  const { session } = createTrackedMcpServer(client, () => undefined);
+
+  const act = client.call("act", { selector: { role: "AXButton" }, action: "press" }, session.generation)
+    .catch((error) => error.code);
+  t.mock.timers.tick(20);
+  assert.equal(await act, "GP_E_ENGINE_TIMEOUT");
+
+  io.send(JSON.stringify({ id: null, result: { operationId: OP_LATE_GUESSED } }));
+  await flush();
+
+  assert.deepEqual(session.recentIds(20), [OP_LATE_GUESSED],
+    "迟到的操作必须仍然进链：抹掉它是让用户再点一次");
+  // R10-中2 的另一半（dispatch 现在把 `reply.attribution` 转交下来）：无 id 的帧的归属
+  // 是按到达顺序**猜**的，链上必须写成 `late-inferred`。反向变异：拿掉 dispatch.ts 里
+  // 的第三参数（回到默认 `unknown` → `late`）即红——这条盯的是"那根线接上了没有"，
+  // 不只是 session 会不会打标。
+  assert.equal(session.provenanceOf(OP_LATE_GUESSED), "late-inferred",
+    "无 id 的迟到帧不得读成已核实，也不得读成按 id 确认过的迟到");
+  client.close();
+});
+
+test("a late reply that echoed its request id is filed as late, not as inferred", async (t) => {
+  // 上一条的对照：同一根线、同样迟到，唯一差别是帧带了客户端发出的那个 id。
+  // 没有这一半，"一律写 inferred"也能过上一条。
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const io = new FakeLineIo();
+  const client = new EngineJsonRpcClient(io, 20);
+  const { session } = createTrackedMcpServer(client, () => undefined);
+
+  const act = client.call("act", { selector: { role: "AXButton" }, action: "press" }, session.generation)
+    .catch((error) => error.code);
+  t.mock.timers.tick(20);
+  assert.equal(await act, "GP_E_ENGINE_TIMEOUT");
+
+  const frame = io.lastFrame();
+  io.send(JSON.stringify({ id: frame.id, result: { operationId: OP_LATE_GUESSED } }));
+  await flush();
+
+  assert.deepEqual(session.recentIds(20), [OP_LATE_GUESSED]);
+  assert.equal(session.provenanceOf(OP_LATE_GUESSED), "late",
+    "带 id 的迟到回复是按 id 确认的，不该被降级成猜测");
+  client.close();
+});
+
+/* ------------------------------------------------------------------ *
+ * R10-中4 — `tools.ts` hands each tool an `Object.create(engine)` shadow with
+ * `call` shadowed, so methods the tool layer does *not* shadow run with the
+ * shadow as `this`. A field write there lands on the shadow: `close()` marked
+ * the shadow closed and left the client sending requests on a transport it had
+ * been told to end. The fix is one shared state box
+ * (`EngineJsonRpcClient.state`), and these tests drive the tool layer's real
+ * wrapper rather than a copy of it.
+ * ------------------------------------------------------------------ */
+
+test("closing the tool layer's shadow closes the client behind it", async () => {
+  const io = new FakeLineIo();
+  const client = new EngineJsonRpcClient(io, 20);
+  const shadow = engineWithPayloadAdvice(client, TOOL_BY_NAME.get("gp_observe"), {});
+  assert.notEqual(shadow, client, "对照物必须是那个 shadow，而不是 client 本身");
+  assert.equal(shadow.isClosed(), false);
+  assert.equal(client.isClosed(), false);
+
+  shadow.close();
+
+  assert.equal(client.isClosed(), true,
+    "close() 写的是 shadow 自己的字段的话，真 client 还在发请求——这就是 round 9 记下的那条");
+  assert.equal(shadow.isClosed(), true);
+
+  // The observable behaviour, not the flag: a closed client answers at once and
+  // says which thing ended, instead of writing a frame no daemon will ever answer.
+  for (const [label, target] of [["client", client], ["shadow", shadow]]) {
+    await assert.rejects(target.call("observe", { maxDepth: 1 }), (error) => {
+      assert.equal(error.code, "GP_E_ENGINE_UNREACHABLE", `${label} 关闭后不得再发`);
+      assert.match(error.message, /was closed/, `${label} 的答复必须说清是客户端关了：${error.message}`);
+      assert.doesNotMatch(error.message, /GP_E_ENGINE_TIMEOUT/);
+      // Nothing was sent, so nothing about the daemon was measured: the one answer
+      // that authorises a restart is `GP_E_ENGINE_UNREACHABLE` from a *failed*
+      // transport, and a locally closed client must not borrow its command.
+      assert.doesNotMatch(error.remedy, /--restore-launchd|launchctl/,
+        `${label} 的出路不得把本机关闭写成该重启 daemon：${error.remedy}`);
+      assert.match(error.remedy, /no restart is authorised/i);
+      return true;
+    }, `${label} 在 client 关闭后仍被接受`);
+  }
+
+  // Outstanding requests still get their honest answer, and the sinks registered
+  // through the shadow are the client's: `onEngineNote` writes state too.
+  const io2 = new FakeLineIo();
+  const client2 = new EngineJsonRpcClient(io2, 20);
+  const notes = [];
+  engineWithPayloadAdvice(client2, TOOL_BY_NAME.get("gp_observe"), {}).onEngineNote((note) => notes.push(note));
+  client2.call("observe", { maxDepth: 1 }).catch(() => undefined);
+  io2.send(JSON.stringify({ id: 9999, result: {} }));
+  assert.ok(notes.some((note) => /never issued/.test(note)),
+    `shadow 上注册的 sink 必须真的接到 client 身上：${JSON.stringify(notes)}`);
+});
+
+/* ------------------------------------------------------------------ *
+ * R10-中5 — 探针在两个接入面上名字不同，而超时 remedy 是在传输层写成的。
+ * 给 curl 调用方留一个 `gp_probe_status`，它只能瞎猜一条本网关根本不提供的路由。
+ * 反向变异：把任一面写死（另一面的断言红），或去掉替换让两面都说 gp_probe_status。
+ * ------------------------------------------------------------------ */
+
+test("the timeout remedy names the probe of the surface it is delivered on", () => {
+  const mcp = slowEngineRemedy("observe", "mcp");
+  const http = slowEngineRemedy("observe", "http");
+
+  assert.ok(mcp.includes("gp_probe_status"), `MCP 面要给出 MCP 的名字：${mcp}`);
+  assert.equal(http.includes("gp_probe_status"), false,
+    `curl 调用方拿不到 gp_ 这个名字，只能瞎猜路由：${http}`);
+  assert.ok(http.includes("POST /v1/tools/probe_status"),
+    `HTTP 面要指出这条路由真的存在：${http}`);
+
+  // 对称的一半：MCP 文案里不得出现 HTTP 路由，否则这条闸可以靠"两边都写满"通过。
+  assert.equal(/POST \/v1\//.test(mcp), false, `MCP 面不得出现 HTTP 路由：${mcp}`);
 });

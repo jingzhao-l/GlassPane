@@ -6,8 +6,10 @@ import {
   ENGINE_DEADLINES_MS,
   EngineJsonRpcClient,
   LIVENESS_PROBE_OUTCOMES,
+  REPLAY_UNSAFE_METHOD_NAMES,
   callerDeadlineMs,
   engineDeadlineMs,
+  isReplayUnsafeMethod,
   livenessProbeDecision,
   slowEngineRemedy,
 } from "../dist/engine-client.js";
@@ -210,4 +212,76 @@ test("hello is given the same wait as the probe, not a shorter one", () => {
   // with, the handshake behind it must not be the first thing to expire.
   assert.equal(callerDeadlineMs("hello"), CALLER_VISIBLE_CEILING_MS,
     "hello 的期限短于客户端耐性 ⇒ 首请求较慢时版本比对必然丢失");
+});
+
+/* ------------------------------------------------------------------ *
+ * R10-低 — `REPLAY_UNSAFE_METHOD_NAMES` was exported "for gates that must see
+ * the set change on purpose", and no gate read it: a name claiming a reader that
+ * does not exist is how a membership list drifts while its export looks lived-upto.
+ * It gets one here, and the reader is behavioural — the set is compared against
+ * the answer the transport actually hands a caller, in both directions, so the
+ * export cannot be a copy of the table and the table cannot grow a silent member.
+ * ------------------------------------------------------------------ */
+
+/** The transport's own no-replay marker, as `tools.test.mjs` reads it too. */
+const NO_REPLAY_MARKER = /do NOT re-issue/;
+
+/** Every engine method a timeout can be reported for, from the tables themselves. */
+const ALL_ENGINE_METHODS = [...new Set([
+  ...Object.keys(ENGINE_DEADLINES_MS),
+  ...TOOL_SPECS.map((spec) => spec.engineMethod),
+  ...REPLAY_UNSAFE_METHOD_NAMES,
+  // A method with no deadline entry and no tool: the fallback branch has to be in
+  // the comparison too, or the set could be "complete" only over the listed ones.
+  "recent_reports",
+  "a_method_this_shell_has_never_seen",
+])];
+
+test("the exported replay-unsafe set is exactly the set whose answer forbids re-issue", () => {
+  const marked = ALL_ENGINE_METHODS.filter((method) => ["mcp", "http"].every(
+    (surface) => NO_REPLAY_MARKER.test(slowEngineRemedy(method, surface)),
+  ));
+  assert.ok(marked.length >= 3,
+    `只有 ${marked.length} 个方法的答复禁止重发，这套对照已经没有对象了`);
+  // Direction 1: nothing the transport forbids is missing from the export.
+  // Direction 2: nothing the export names is unforbidden — an extra member would be
+  // a read told never to re-issue, which is its own unusable instruction.
+  assert.deepEqual([...REPLAY_UNSAFE_METHOD_NAMES].sort(), marked.sort(),
+    `导出清单与 remedy 文本里的 no-replay 判据不再同一：清单 ${REPLAY_UNSAFE_METHOD_NAMES.join(",")} / 文本 ${marked.join(",")}`);
+  // The predicate the other layers branch on has to agree with the exported names:
+  // `Object.keys` versus a hand-written array is exactly the drift this export
+  // exists to make visible.
+  assert.deepEqual(
+    ALL_ENGINE_METHODS.filter((method) => isReplayUnsafeMethod(method)).sort(),
+    [...REPLAY_UNSAFE_METHOD_NAMES].sort(),
+    "isReplayUnsafeMethod 与 REPLAY_UNSAFE_METHOD_NAMES 给出两份成员表，消费方就会各信一边",
+  );
+  // `hasOwnProperty`-backed membership, so an inherited name cannot join the set.
+  assert.equal(isReplayUnsafeMethod("constructor"), false,
+    "原型链上的名字不得被当成不可重放的方法");
+
+  // And the set itself, written out. The export's stated purpose is that a gate sees
+  // a membership change *on purpose*, so a change is only allowed to go through by
+  // editing this line too — which is where the reasoning for the new member has to be
+  // written down (each reason's source is `REPLAY_UNSAFE_REASONS`' own comment).
+  // Reverse mutation this pins: `act: … restore: … attach: …` gaining `observe`, or
+  // losing `attach`; both leave the two equality checks above green because both
+  // sides move together.
+  assert.deepEqual([...REPLAY_UNSAFE_METHOD_NAMES].sort(), ["act", "attach", "restore"],
+    `不可重放的方法集变了：现在是 ${REPLAY_UNSAFE_METHOD_NAMES.join(", ")}`);
+
+  // The real control for R10-高1's rewrite: inside the set the answer carries the
+  // explicit ban and the method's own reason; outside it, the answer defers to the
+  // tool layer and must not borrow the ban's marker (which is what makes the marker
+  // a discriminator rather than a slogan).
+  for (const method of marked) {
+    assert.match(slowEngineRemedy(method), new RegExp(`do NOT re-issue ${method}, because`),
+      `${method} 的禁令没有配上它自己的理由，成了一句话纪律`);
+  }
+  for (const method of ALL_ENGINE_METHODS.filter((m) => !marked.includes(m) && m !== "probe_status")) {
+    const remedy = slowEngineRemedy(method, "mcp");
+    assert.ok(!NO_REPLAY_MARKER.test(remedy), `${method} 不是不可重放的方法，却领到了 no-replay 禁令`);
+    assert.match(remedy, /is a fact about a schema/,
+      `${method} 的出路不再把窄化问题交给持有 schema 的一层：${remedy.slice(0, 200)}`);
+  }
 });
