@@ -2376,7 +2376,18 @@ public final class EngineCore {
             case "pixel-capture-failed":
                 advice = "the capture failed with a cause this classifier cannot name: the verbatim reason after the label is the daemon's own words and it is the only trustworthy guide here — act on what it states, confirm the seat reads back granted with `glasspaned --check-screen-permission` before changing anything about permissions, and report the visual channel as not measured until a capture succeeds"
             default:
-                advice = "\(seatAdvice); if that seat is already granted the failure is in the capture path itself, so read the reason above verbatim instead of re-granting"
+                // R10-中5: this arm used to carry the seat sentence, and it was
+                // reached by nothing — `pixelCaptureFailureLabel` is a closed set of
+                // returns and every one of them has its own case above (the two-way
+                // set equality in `mcp-shell/test/remedy-surface.test.mjs` is what
+                // keeps that true). Unreachable is not the same as harmless: the text
+                // stayed live for the *next* label anyone adds, and it ordered a
+                // re-grant and a daemon restart — the second of which cancels an act
+                // in flight on the user's screen — for a cause this switch has never
+                // measured. Say only what an unclassifiable cause supports: read the
+                // verbatim reason, and change nothing about the seat or the process
+                // on this line's authority.
+                advice = "this failure carries a cause the capture classifier does not recognise, so nothing here can say what it was: read the verbatim reason after the label above, which is the daemon's own words and the only evidence available. Do not re-grant anything and do not recycle the daemon on this answer — neither is implicated by a cause this switch did not name, and restarting cancels an act that is mid-flight on the user's screen. If the reason does state a permission problem, confirm the seat reads back granted with `glasspaned --check-screen-permission` before touching it. Until a capture succeeds the visual channel is not measured: read the structure with gp_observe and report the visual check as not-done rather than as passed"
             }
             return GPError(
                 code: .axUnavailable,

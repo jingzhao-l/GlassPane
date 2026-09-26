@@ -8,12 +8,13 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildSync } from "esbuild";
 
-import { assertLoopbackHost, createHttpGateway, GLASSPANE_HTTP_TOKEN_ENV, MIN_TOKEN_CHARS, MIN_TOKEN_DISTINCT_CHARS } from "../dist/http-gateway.js";
-import { EngineCallError, slowEngineRemedy } from "../dist/engine-client.js";
-import { replayUnsafePayloadAdvice, TOOL_SPECS } from "../dist/tools.js";
+import { assertLoopbackHost, createHttpGateway, EVIDENCE_FANOUT_BUDGET_MS, GLASSPANE_HTTP_TOKEN_ENV, MIN_TOKEN_CHARS, MIN_TOKEN_DISTINCT_CHARS } from "../dist/http-gateway.js";
+import { CALLER_VISIBLE_CEILING_MS, EngineCallError, LOG_BODY_CHARS, slowEngineRemedy, truncate } from "../dist/engine-client.js";
+import { replayUnsafePayloadAdvice, TOOL_BY_NAME, TOOL_SPECS } from "../dist/tools.js";
 import * as errorCodes from "../dist/errors.js";
 import {
   GP_E_BAD_PARAMS,
+  GP_E_ENGINE_TIMEOUT,
   GP_E_ENGINE_UNREACHABLE,
   GP_E_INTERNAL,
   GP_E_NO_EVIDENCE,
@@ -91,6 +92,56 @@ async function startGateway(fake, token = TEST_TOKEN, extra = {}) {
   });
   await new Promise((resolve) => gw.server.once("listening", resolve));
   return { gw, base: `http://127.0.0.1:${gw.server.address().port}` };
+}
+
+/**
+ * Let queued microtasks and socket I/O run, N rounds deep.
+ *
+ * `setImmediate` deliberately stays real in the budget tests below: they mock
+ * `Date` and `setTimeout` to spend a budget without waiting 50 s, and this is how
+ * the request under that mock is still driven to its answer.
+ */
+async function settleRounds(rounds) {
+  for (let i = 0; i < rounds; i++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+/**
+ * Await `promise`, but never longer than `rounds` event-loop turns.
+ *
+ * The budget tests mock `setTimeout`, so a real timeout cannot bound them and a
+ * mutation that stops the gateway from answering must not hang the suite either
+ * (that is the whole reason these tests are written this way). `null` means "it
+ * did not answer", which the assertion below turns red.
+ */
+async function answeredWithin(promise, rounds) {
+  let outcome = "not answered";
+  const watched = promise.then(
+    (value) => {
+      outcome = value;
+    },
+    (error) => {
+      outcome = `rejected: ${String(error)}`;
+    },
+  );
+  for (let i = 0; i < rounds; i++) {
+    if (outcome !== "not answered") {
+      break;
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  await watched;
+  return outcome === "not answered" ? null : outcome;
+}
+
+/** `src/http-gateway.ts` with its comments stripped: these scans are about code. */
+function gatewayCode() {
+  return readFileSync(path.join(MCP_SHELL_ROOT, "src", "http-gateway.ts"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("//"))
+    .join("\n");
 }
 
 test("GET /v1/hello returns the daemon hello result", async () => {
@@ -628,13 +679,21 @@ test("createHttpGateway refuses every host that is not loopback, naming the valu
 });
 
 test("the loopback spellings an operator may actually write are accepted", () => {
-  for (const host of ["127.0.0.1", "127.5.6.7", "::1", "[::1]", "localhost", "LOCALHOST", "::ffff:127.0.0.1"]) {
-    assert.equal(assertLoopbackHost(host), host.trim(), `'${host}' 是本机回环，必须放行`);
+  // R10-中1, re-pin (the reason is stated, and it is a narrowing, not a loosening):
+  // `localhost`, `LOCALHOST` and the `ip6-*` aliases used to be on this list. They
+  // are off it now, and the class claim in the test below is why: accepting a name
+  // makes `/etc/hosts` and DNS decide the bind, which is the exact reason every
+  // *other* name is refused here, and the refusal itself used to recommend the one
+  // value that is not self-describing. Nothing else about the accepted set moved —
+  // the addresses are the addresses an operator can write and mean.
+  for (const host of ["127.0.0.1", "127.5.6.7", "127.0.0.255", "::1", "[::1]", "0:0:0:0:0:0:0:1", "::ffff:127.0.0.1"]) {
+    assert.equal(assertLoopbackHost(host), host.trim(), `'${host}' 是回环地址字面量，必须放行`);
   }
   // The refused half of the same function, so a widening of the accepted set here
   // cannot pass by only ever being tested against values it already allows.
   assert.throws(() => assertLoopbackHost("0.0.0.0"), /loopback/);
   assert.throws(() => assertLoopbackHost("169.254.1.1"), /loopback/);
+  assert.throws(() => assertLoopbackHost("localhost"), /loopback/);
 });
 
 test("a refused bind never reaches the socket, and an accepted one is loopback", async () => {
@@ -1178,13 +1237,25 @@ test("a late reply note is capped, says what it capped, and survives an unserial
     const big = notes.find((line) => line.includes("late engine reply to 'observe'"));
     assert.ok(big, "迟到回复必须落一行");
     assert.ok(big.length < 70_000, `未设上限的正文有 ${big.length} 字符`);
-    assert.match(big, /reply body truncated: \d+ of \d+ chars not written/, "截断要说截了多少");
+    // R10-中6, re-pin: the marker's *words* changed because the helper that writes
+    // them moved to its authority (`engine-client.ts`'s `truncate`, the layer that
+    // produces these bodies). The property this line asserts is the one the old
+    // text asserted — the note says how much did not get written — and the number
+    // is checked against the cap rather than against a second spelling of it, so
+    // the assertion cannot be satisfied by a marker that stopped counting.
+    const excess = /… \[\+(\d+) chars not logged\]$/.exec(big);
+    assert.ok(excess, `截断要说出截了多少：${big.slice(-120)}`);
+    assert.equal(
+      Number(excess[1]),
+      JSON.stringify({ tree: "x".repeat(100_000) }).length - LOG_BODY_CHARS,
+      "报出的缺口必须是按上限算出来的那个数，不能是另一处抄来的常量",
+    );
     assert.match(big, /not redacted/, "正文是原始 UI 树内容，不能不声明");
 
     fake.lateHandler({ method: "act", result: { operationId: "op_http_small" } });
     const small = notes.find((line) => line.includes("late engine reply to 'act'"));
     assert.ok(small.includes('{"operationId":"op_http_small"}'), "没超限的正文要原样落地");
-    assert.ok(!/truncated/.test(small), small);
+    assert.ok(!/not logged/.test(small), small);
 
     const circular = {};
     circular.self = circular;
@@ -1195,4 +1266,527 @@ test("a late reply note is capped, says what it capped, and survives an unserial
   } finally {
     await gw.close();
   }
+});
+
+/* ------------------------------------------------------------------ *
+ * R10-中1 (HIGH-ish): the loopback guard accepted `localhost`,
+ * `ip6-localhost` and `LOCALHOST`. Honouring a name means resolving it, and
+ * resolving it hands the bind — this module's one security decision — to
+ * `/etc/hosts` and DNS: precisely the reason the same function refuses
+ * `example.com`, and the refusal text used to *recommend* the unsafe spelling.
+ * Reverse mutation: put any name back on the accepted list. The gate below is a
+ * class claim (a string `net.isIP()` does not read as an address must be
+ * refused), so it cannot be dodged by re-adding the one alias no case sent.
+ * ------------------------------------------------------------------ */
+
+/** Names and addresses mixed on purpose; the oracle below decides each one. */
+const BIND_CORPUS = [
+  "127.0.0.1", "127.5.6.7", "127.0.255.255", "::1", "[::1]", "0:0:0:0:0:0:0:1", "::ffff:127.0.0.1",
+  "0.0.0.0", "::", "192.168.1.10", "127.0.0.256", "169.254.1.1", "10.0.0.1", "8.8.8.8",
+  "localhost", "LOCALHOST", "LocalHost", "localhost.", "ip6-localhost", "ip6-loopback",
+  "localhost.localdomain", "127.0.0.1.attacker.example", "example.com", "glasspane.internal",
+  "daemon", "0.0.0.0.example", "127.0.0.1:8787", "", "   ",
+  "ip6-scope-localhost", "my-host", "Localhost", "LOCALHOST.", "glasspane-http.internal",
+  "fe80::1", "::ffff:8.8.8.8",
+];
+
+/** The address literals the guard accepts, enumerated with the spellings its doc claims. */
+function isLoopbackAddressLiteral(value) {
+  const unwrapped = value.trim().replace(/^\[|\]$/g, "").toLowerCase();
+  const family = net.isIP(unwrapped);
+  if (family === 4) {
+    return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(unwrapped)
+      && unwrapped.split(".").every((octet) => Number(octet) <= 255);
+  }
+  if (family === 6) {
+    return unwrapped === "::1"
+      || unwrapped === "0:0:0:0:0:0:0:1"
+      || /^::ffff:127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(unwrapped);
+  }
+  // `net.isIP` answers 0 for a name and for a malformed address alike; neither is
+  // a loopback literal, and the caller-facing half below tells them apart.
+  return false;
+}
+
+test("the bind guard's accepted set is exactly the loopback address literals — no name, whatever it is called", () => {
+  /** What the guard says about one value: accepted, plus its refusal if any. */
+  function verdict(value) {
+    try {
+      return { accepted: assertLoopbackHost(value) === value.trim(), message: "" };
+    } catch (error) {
+      return { accepted: false, message: String(error.message) };
+    }
+  }
+  let namesSeen = 0;
+  let literalsSeen = 0;
+  for (const value of BIND_CORPUS) {
+    const unwrapped = value.trim().replace(/^\[|\]$/g, "");
+    const isAName = unwrapped !== "" && net.isIP(unwrapped) === 0 && !/^[0-9a-fA-F:.]+$/.test(unwrapped);
+    const { accepted, message } = verdict(value);
+    if (isAName) {
+      namesSeen += 1;
+      // THE CLASS CLAIM: anything that is not an address literal is refused — so
+      // putting one alias back on an allowlist reddens this line for that alias,
+      // and for the generated `.invalid` spellings below that no allowlist would
+      // ever list by hand.
+      assert.equal(accepted, false, `'${value}' 是一个名字，名字不得决定 bind`);
+      // Where a name *can* be sent, and the concrete literal to send instead: the
+      // sentence has to be executable by the operator who just got refused.
+      assert.ok(message.includes(`'${value}'`), "拒绝要点名被拒的值");
+      assert.match(message, /http:\/\/localhost:<port>/, `拒绝要说明名字可以送去哪里（客户端连的那个 URL）：${message}`);
+      assert.match(message, /127\.0\.0\.1/, `要给出一个可直接改用的地址字面量：${message}`);
+      continue;
+    }
+    assert.equal(accepted, isLoopbackAddressLiteral(value), `'${value}'：放行判定与回环字面量的类判定分叉了（${message}）`);
+    if (accepted) {
+      literalsSeen += 1;
+      continue;
+    }
+    assert.match(message, /loopback/, `'${value}' 不是回环，拒绝的话要说清是回环问题`);
+  }
+  // Generated names, so the claim is about the class and not about the handful of
+  // spellings written above: `.invalid` is reserved-never-resolvable, and every
+  // value dressed as a name under it has to stay refused.
+  for (const value of ["127.0.0.1", "::1", "localhost", "10.0.0.1", "example", "0.0.0.0"]) {
+    const asName = `${value}.invalid`;
+    assert.throws(() => assertLoopbackHost(asName), /loopback/, `'${asName}' 是一个名字，必须被拒绝`);
+    namesSeen += 1;
+  }
+  assert.ok(namesSeen >= 18, `只认出 ${namesSeen} 个名字形态的值，这条类断言已经没有覆盖`);
+  assert.ok(literalsSeen >= 5, `只认出 ${literalsSeen} 个回环字面量，正半边没跑过东西`);
+});
+
+test("createHttpGateway will not start on a name, and starts on the literal that means the same thing", async () => {
+  // The behaviour, not just the predicate: a name must not reach `listen()`, where
+  // whatever the resolver answers that day becomes the bind.
+  const started = [];
+  try {
+    for (const host of ["localhost", "ip6-localhost"]) {
+      let error = null;
+      try {
+        started.push(createHttpGateway({
+          socketPath: "/tmp/never-opened.sock",
+          token: TEST_TOKEN,
+          port: 0,
+          host,
+          connectController: () => new FakeGatewayClient(),
+        }));
+      } catch (thrown) {
+        error = thrown;
+      }
+      assert.ok(error instanceof Error, `host '${host}' 必须根本起不来`);
+    }
+    assert.equal(started.length, 0, "名字不得留下一个 listening 的 server");
+    const onLiteral = createHttpGateway({
+      socketPath: "/tmp/never-opened.sock",
+      token: TEST_TOKEN,
+      port: 0,
+      host: "127.0.0.1",
+      connectController: () => new FakeGatewayClient(),
+    });
+    started.push(onLiteral);
+    await new Promise((resolve) => onLiteral.server.once("listening", resolve));
+    assert.equal(onLiteral.server.address().address, "127.0.0.1");
+  } finally {
+    for (const gw of started) {
+      gw.server.removeAllListeners("error");
+      gw.server.on("error", () => {});
+      await gw.close().catch(() => {});
+    }
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * R10-中2 (MEDIUM): `GET /v1/evidence?ids=` fanned out up to 20 *serial*
+ * `last_evidence` calls, each allowed the caller-visible ceiling, from one curl
+ * request — ~1000 s of holding the daemon's single connection, which no client
+ * outlasts and which answers as a dropped connection with no code and no remedy.
+ * `tools.ts` had already solved this shape for `gp_recent_reports`: one budget for
+ * the aggregate, and every id it could not reach named as not fetched.
+ * ------------------------------------------------------------------ */
+
+/** A valid id per index, in the shape the tool contract advertises. */
+function opIdAt(n) {
+  return `op_0PAAAA${String(n).padStart(20, "0")}`;
+}
+
+test("the ids= fan-out spends ONE budget for the whole request and names the ids it never fetched", async (t) => {
+  // MUTATION THIS PINS: the budget check taken before each send. Without it the
+  // loop asks for all eight ids however long each one costs, and the answer is
+  // the sum of their deadlines rather than the one wait this request allowed.
+  t.mock.timers.enable({ apis: ["Date"] });
+  const fake = new FakeGatewayClient();
+  const real = Object.getPrototypeOf(fake).call.bind(fake);
+  fake.call = (method, params) => {
+    const outcome = real(method, params);
+    // Each answer costs a third of the whole budget: the fourth can never fit.
+    t.mock.timers.tick(Math.ceil(EVIDENCE_FANOUT_BUDGET_MS / 3));
+    return outcome;
+  };
+  fake.on("last_evidence", () => ({ evidencePack: fixturePack() }));
+  const { gw, base } = await startGateway(fake);
+  try {
+    const ids = Array.from({ length: 8 }, (_, i) => opIdAt(i));
+    const res = await fetch(`${base}/v1/evidence?ids=${ids.join(",")}&format=markdown`, { headers: auth() });
+    const body = await res.json();
+    assert.equal(res.status, 200, JSON.stringify(body));
+    const asked = fake.invoked("last_evidence").map((call) => call.params.operationId);
+    assert.equal(asked.length, 3, `预算到点之后不得再发出请求（实际发了 ${asked.length} 个）`);
+    assert.deepEqual(body.result.renderedIds, ids.slice(0, 3));
+    assert.deepEqual(body.result.notFetched, ids.slice(3), "没取到的 id 必须点名，不能被静默跳过");
+    assert.ok(body.result.report.includes(`# GlassPane evidence reports (3)`), "标题的份数是真取到的那份");
+    assert.match(body.result.report, new RegExp(`not fetched within this request's ${EVIDENCE_FANOUT_BUDGET_MS}ms wait`));
+    assert.ok(body.result.report.includes(ids[3]), `部分报告要写出第一条没取到的 id：${body.result.report.slice(0, 300)}`);
+    assert.ok(!body.result.report.includes("unreachable"), "预算到点不等于 daemon 说没有这条证据，两种事实不得混写");
+  } finally {
+    await gw.close();
+  }
+});
+
+test("an unanswered last_evidence cannot hold the ids= fan-out past its budget", async (t) => {
+  // MUTATION THIS PINS: the race against the budget. A daemon that stops answering
+  // the second id otherwise holds this request for that one call's whole deadline,
+  // per id — which is the wait the caller cannot outlast.
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const fake = new FakeGatewayClient();
+  let seen = 0;
+  fake.on("last_evidence", () => {
+    seen += 1;
+    if (seen === 1) {
+      return { evidencePack: fixturePack() };
+    }
+    return new Promise(() => {});
+  });
+  const { gw, base } = await startGateway(fake);
+  try {
+    const promise = fetch(`${base}/v1/evidence?ids=${opIdAt(1)},${opIdAt(2)},${opIdAt(3)}&format=markdown`, { headers: auth() });
+    await settleRounds(200);
+    assert.equal(fake.invoked("last_evidence").length, 2, "premise: 第二条已经发出且无人回答");
+    t.mock.timers.tick(EVIDENCE_FANOUT_BUDGET_MS);
+    const res = await answeredWithin(promise, 20_000);
+    assert.notEqual(res, null, "预算到点，网关必须自己给出答案，而不是等那条没人答的请求");
+    const body = await res.json();
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.deepEqual(body.result.renderedIds, [opIdAt(1)]);
+    assert.deepEqual(body.result.notFetched, [opIdAt(2), opIdAt(3)], "在途那条要按没取到报出来：它确实没被等到");
+    assert.match(body.result.report, new RegExp(`not fetched within this request's ${CALLER_VISIBLE_CEILING_MS}ms wait: 2 entries left unanswered`));
+    assert.equal(fake.invoked("last_evidence").length, 2, "到点之后不得再发第三条");
+  } finally {
+    await gw.close();
+  }
+});
+
+test("an ids= request that fetched nothing inside its budget is a timeout, not \"no evidence\"", async (t) => {
+  // MUTATION THIS PINS: letting the empty-after-budget case fall into the
+  // GP_E_NO_EVIDENCE branch. "None of these operations have evidence" is the one
+  // reading that sends a caller back to perform the action again, and here the
+  // operations may well have packs — this request only stopped waiting.
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const fake = new FakeGatewayClient();
+  fake.on("last_evidence", () => new Promise(() => {}));
+  const { gw, base } = await startGateway(fake);
+  try {
+    const promise = fetch(`${base}/v1/evidence?ids=${opIdAt(1)},${opIdAt(2)}&format=markdown`, { headers: auth() });
+    await settleRounds(200);
+    assert.equal(fake.invoked("last_evidence").length, 1, "premise: 第一条已经发出且无人回答");
+    t.mock.timers.tick(EVIDENCE_FANOUT_BUDGET_MS);
+    const res = await answeredWithin(promise, 20_000);
+    assert.notEqual(res, null, "一条都没取到时同样不得悬着调用方");
+    const body = await res.json();
+    assert.equal(res.status, 504, JSON.stringify(body));
+    assert.equal(body.error.code, GP_E_ENGINE_TIMEOUT);
+    assert.notEqual(body.error.code, GP_E_NO_EVIDENCE, "等待耗尽不是「没有证据」这个结论");
+    assert.ok(body.error.message.includes(opIdAt(2)), `没取的 id 要点名：${body.error.message}`);
+    assert.ok(body.error.remedy.includes("GET /v1/evidence/<operationId>"), body.error.remedy);
+    assert.ok(body.error.remedy.includes("POST /v1/tools/observe"), body.error.remedy);
+    assert.ok(!body.error.remedy.includes("--restore-launchd"), "一条到点的等待不构成重启 daemon 的依据");
+    assert.ok(!/gp_[a-z_]+/.test(JSON.stringify(body)), JSON.stringify(body).slice(0, 240));
+  } finally {
+    await gw.close();
+  }
+});
+
+test("the fan-out budget is the caller-visible ceiling on both surfaces, in the same units, imported not retyped", () => {
+  // `tools.ts` does not export `CallBudget` or its bound, so the equivalence is
+  // pinned here instead: one symbol on each side, read off the transport, and no
+  // digit copy in the gateway that could drift from it.
+  assert.equal(EVIDENCE_FANOUT_BUDGET_MS, CALLER_VISIBLE_CEILING_MS, "两条面的聚合预算必须是同一个上限（同一个数、同一单位 ms）");
+  const gatewaySource = readFileSync(path.join(MCP_SHELL_ROOT, "src", "http-gateway.ts"), "utf8");
+  const toolsSource = readFileSync(path.join(MCP_SHELL_ROOT, "src", "tools.ts"), "utf8");
+  assert.match(gatewaySource, /const EVIDENCE_FANOUT_BUDGET_MS = CALLER_VISIBLE_CEILING_MS;/, "网关的聚合预算不再是那个被导入的上限了");
+  assert.match(toolsSource, /const RECENT_REPORTS_BUDGET_MS = CALLER_VISIBLE_CEILING_MS;/, "MCP 侧的聚合预算换了来路，两边的对照要重新看");
+  const code = gatewayCode();
+  const retyped = code.match(/\b50_?0{4}\b/g) ?? [];
+  assert.deepEqual(retyped, [], `网关把上限抄成了字面量，engine-client 一改这里就悄悄过期：${JSON.stringify(retyped)}`);
+});
+
+/* ------------------------------------------------------------------ *
+ * R10-中3 (MEDIUM): `--port=abc` / `--port=99999` / `--port=0x50` / `--port=`
+ * sailed through the `=`-form parser unvalidated, and the failure surfaced later
+ * from `listen()` — after the engine client and the sinks existed, without USAGE,
+ * without naming the flag, and under the wrong exit code. Measured on the pre-fix
+ * build: `--port=abc` → exit 2 with `failed to start the HTTP gateway: RangeError
+ * [ERR_SOCKET_BAD_PORT] … (NaN)`; `--port=0x50` → 80, refused by the OS with
+ * EACCES at bind time; `--port=` → `Number("")` is 0, so the gateway started and
+ * printed `listening on http://127.0.0.1:63743`.
+ * ------------------------------------------------------------------ */
+
+test("the CLI refuses every bad --port spelling where it parses it, with usage and the config code", () => {
+  for (const flagValue of ["--port=abc", "--port=99999", "--port=65536", "--port=0x50", "--port=0.5", "--port=", "--port=1e5", "--port=-1", "--port= 80"]) {
+    const res = spawnSync(process.execPath, [CLI_PATH, flagValue], {
+      encoding: "utf8",
+      timeout: 30_000,
+      env: { ...process.env, [GLASSPANE_HTTP_TOKEN_ENV]: TEST_TOKEN, GLASSPANE_ENGINE_SOCK: "/tmp/gp-absent.sock" },
+    });
+    assert.equal(res.status, 2, `${flagValue}: 配置错误必须是配置退出码：${res.stderr}`);
+    assert.match(res.stderr, /usage: glasspane-http/, `${flagValue}: 拒绝要附上 USAGE：${res.stderr}`);
+    assert.ok(res.stderr.includes("--port"), `${flagValue}: 拒绝要点名是哪个参数：${res.stderr}`);
+    assert.ok(res.stderr.includes(flagValue.slice("--port=".length)), `${flagValue}: 拒绝要报出被拒的值：${res.stderr}`);
+    // The ordering is the point: a refusal from the parser never gets as far as
+    // constructing the gateway, so the late failure text cannot appear here.
+    assert.ok(!res.stderr.includes("failed to start the HTTP gateway"), `${flagValue}: 这条拒绝来自解析处，不是 listen() 之后的补救：${res.stderr}`);
+    assert.ok(!res.stderr.includes("listening on"), `${flagValue}: 坏值不得先把端口绑上：${res.stderr}`);
+    assert.ok(!res.stderr.includes("FATAL"), `${flagValue}: 配置错误不是绑定失败：${res.stderr}`);
+  }
+});
+
+test("a bad --port value creates nothing: the bind is never attempted, so the port stays untouched", async () => {
+  // A held listener makes "nothing was created" observable. `0x<hex port>` parses
+  // to the port itself under the old `Number()` form, so a value that reaches
+  // `listen()` shows up as the bind-failure path (exit 3, FATAL, "not serving").
+  const holder = net.createServer();
+  await new Promise((resolve) => holder.listen(0, "127.0.0.1", resolve));
+  const port = holder.address().port;
+  try {
+    for (const spelling of [`0x${port.toString(16)}`, String(port)]) {
+      const res = spawnSync(process.execPath, [CLI_PATH, `--port=${spelling}`], {
+        encoding: "utf8",
+        timeout: 30_000,
+        env: { ...process.env, [GLASSPANE_HTTP_TOKEN_ENV]: TEST_TOKEN, GLASSPANE_ENGINE_SOCK: "/tmp/gp-absent.sock" },
+      });
+      if (spelling === String(port)) {
+        // The control half: a *valid* port that cannot be bound is the other
+        // failure, with the other exit code. If this ever exits 2 the refusal
+        // above is refusing valid values too.
+        assert.equal(res.status, 3, res.stderr);
+        assert.match(res.stderr, /FATAL/, res.stderr);
+        continue;
+      }
+      assert.equal(res.status, 2, `十六进制写法必须在选择处被拒：${res.stderr}`);
+      assert.ok(!res.stderr.includes("FATAL"), `十六进制值走到了 bind 才失败，说明选择处没拦：${res.stderr}`);
+      assert.ok(!res.stderr.includes("not serving"), res.stderr);
+      assert.ok(!res.stderr.includes("listening on"), res.stderr);
+      const connected = await new Promise((resolve) => {
+        const probe = net.createConnection({ host: "127.0.0.1", port });
+        probe.once("connect", () => {
+          probe.destroy();
+          resolve("accepted");
+        });
+        probe.once("error", (error) => resolve(`refused:${error.code}`));
+      });
+      assert.equal(connected, "accepted", "持有端口的进程必须仍是唯一的监听者");
+    }
+  } finally {
+    holder.close();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * R10-中5 (MEDIUM): the transport's timeout remedy is written for both surfaces,
+ * and its `http` branch still told a curl caller to send `gp_probe_status` and
+ * explained a queue of MCP requests it is not standing in. `engine-client.ts` is
+ * the authority for that text and its behaviour is finished, so the translation
+ * happens at this boundary — and the gate is a scan of every body, not of one
+ * phrasing, because the daemon authors remedies too and forwards them through here.
+ * ------------------------------------------------------------------ */
+
+/** Every engine method this surface forwards, with a body its own schema accepts. */
+function forwardableRequestCases() {
+  const candidates = [
+    {},
+    { selector: { role: "AXButton" }, action: "press" },
+    { bundleId: "com.example.Finder" },
+    { operationId: ID },
+    { maxDepth: 2 },
+    { mode: "compare" },
+    { steps: [{ selector: { role: "AXButton" }, action: "press" }], mode: "ffwd" },
+    { selector: { role: "AXButton" }, property: "title", expected: "OK" },
+    { snapshotId: "snap_0PAAAABBBBCCCCDDDDEEEEFFFF" },
+    { snapshotId: "snap_0PAAAABBBBCCCCDDDDEEEEFFFF", steps: [{ selector: { role: "AXButton" }, action: "press" }] },
+  ];
+  const cases = [];
+  for (const spec of TOOL_SPECS) {
+    if (spec.execute !== undefined) {
+      continue;
+    }
+    const body = candidates.find((candidate) => spec.validate(candidate).ok);
+    assert.ok(body !== undefined, `premise: 没有一个候选体能通过 '${spec.engineMethod}' 自己的校验，这条扫描漏掉了它`);
+    cases.push({ method: spec.engineMethod, body });
+  }
+  assert.ok(cases.length >= 8, `只扫到 ${cases.length} 条转发的 daemon 方法，这条闸已经没有读者`);
+  return cases;
+}
+
+test("no HTTP answer names an MCP tool: every timeout remedy arrives in this surface's own words", async () => {
+  for (const { method, body } of forwardableRequestCases()) {
+    const fake = new FakeGatewayClient();
+    fake.on(method, () => {
+      throw new EngineCallError(
+        GP_E_ENGINE_TIMEOUT,
+        `engine is still working on '${method}': no reply after ${CALLER_VISIBLE_CEILING_MS}ms`,
+        slowEngineRemedy(method, "http"),
+      );
+    });
+    const { gw, base } = await startGateway(fake);
+    try {
+      const res = await fetch(`${base}/v1/tools/${method}`, {
+        method: "POST",
+        headers: { ...auth(), "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const text = await res.text();
+      assert.ok(!/gp_[a-z_]+/.test(text), `'${method}' 的超时答复里还留着 MCP 的工具名：${text.slice(0, 240)}`);
+      assert.ok(!/one MCP request/.test(text), `'${method}' 的超时答复还在解释另一条面的队列：${text.slice(0, 240)}`);
+      if (method === "probe_status") {
+        // The probe's own timeout must not answer by telling the caller to send a
+        // probe; it routes to the trail-free read instead.
+        assert.ok(!/probe_status/.test(text.replace(/'probe_status'|working on 'probe_status'/g, "")),
+          `'${method}' 的超时答复不得再支一次探针：${text.slice(0, 240)}`);
+        assert.ok(text.includes("/v1/evidence/"), `'${method}' 的超时答复要给出这条面上真能走的那条读法：${text.slice(0, 240)}`);
+        continue;
+      }
+      assert.ok(text.includes("POST /v1/tools/probe_status"), `'${method}' 的超时答复要给出这条面上真能发的探针：${text.slice(0, 240)}`);
+      await assertEveryNamedRouteAnswers(gw, base, text);
+    } finally {
+      await gw.close();
+    }
+  }
+});
+
+test("a remedy the daemon authored crosses the boundary translated, and is never sent to a 404", async () => {
+  // The other author of caller-facing text is the daemon's own Swift table, which
+  // has no HTTP surface in view at all: it names `gp_observe` (which this gateway
+  // does forward) and `gp_recent_reports` (which it does not, and whose route is a
+  // 404). Both halves have to come out right.
+  const fake = new FakeGatewayClient();
+  fake.on("observe", () => {
+    throw new EngineCallError(
+      "GP_E_AX_UNAVAILABLE",
+      "the attribute could not be read",
+      "Run gp_observe to see the node, read the trail with gp_recent_reports, then repeat gp_assert_element",
+    );
+  });
+  const { gw, base } = await startGateway(fake);
+  try {
+    const res = await fetch(`${base}/v1/tools/observe`, { method: "POST", headers: auth(), body: JSON.stringify({ maxDepth: 2 }) });
+    const body = await res.json();
+    const text = JSON.stringify(body);
+    assert.ok(!/gp_[a-z_]+/.test(text), `daemon 写的 remedy 原名穿到了 curl 读者手上：${text.slice(0, 240)}`);
+    assert.ok(text.includes("POST /v1/tools/observe"), text.slice(0, 240));
+    assert.ok(text.includes("POST /v1/tools/assert_element"), text.slice(0, 240));
+    assert.ok(!text.includes("POST /v1/tools/recent_reports"), "recent_reports 在这条面上是 404，翻译不能造出一条不存在的路由");
+    assert.match(body.error.remedy, /does not expose/, `不能暴露的工具要被说成没暴露：${body.error.remedy}`);
+    await assertEveryNamedRouteAnswers(gw, base, text);
+  } finally {
+    await gw.close();
+  }
+});
+
+/** Ask every route a body names; none of them may answer "no such route". */
+async function assertEveryNamedRouteAnswers(gw, base, text) {
+  const named = new Set();
+  for (const match of text.matchAll(/POST \/v1\/tools\/([a-z_]+)/g)) {
+    named.add(match[1]);
+  }
+  assert.ok(named.size >= 1, `答复没有点名任何本面路由，这条扫描已经不看东西了：${text.slice(0, 200)}`);
+  for (const method of named) {
+    const res = await fetch(`${base}/v1/tools/${method}`, { method: "POST", headers: auth(), body: "{}" });
+    const body = await res.json();
+    assert.notEqual(body.error?.code, "GP_HTTP_NOT_FOUND", `答复把调用方支到一条不存在的路由：POST /v1/tools/${method}`);
+  }
+  assert.ok(gw.server.listening, "premise: 对照要在同一个网关上跑");
+}
+
+/* ------------------------------------------------------------------ *
+ * R10-中6 (LOW): two numbers and one regex lived twice, with a `BLOCKED-ON-lane-B`
+ * note as the only thing keeping them together. `engine-client.ts` owns the log
+ * body cap and `tools.ts` owns the operationId grammar; both are now read from
+ * there, and the pins below are what a future change on one side trips over
+ * instead of drifting past.
+ * ------------------------------------------------------------------ */
+
+test("both surfaces truncate one engine body at the same bound with the same marker", async () => {
+  const fake = new FakeGatewayClient();
+  const notes = [];
+  const { gw } = await startGateway(fake, TEST_TOKEN, { report: (note) => notes.push(note) });
+  try {
+    const body = { tree: "y".repeat(LOG_BODY_CHARS + 4_321) };
+    fake.lateHandler({ method: "observe", result: body });
+    const note = notes.find((line) => line.includes("late engine reply to 'observe'"));
+    assert.ok(note, "迟到回复必须落一行");
+    const stringified = JSON.stringify(body);
+    assert.ok(
+      note.endsWith(truncate(stringified)),
+      "网关写下的正文必须与 engine-client 自己截出来的那一串逐字节相同——两条面截的是同一个上限",
+    );
+    assert.notEqual(truncate(stringified), stringified, "premise: 这条正文必须真的超上限");
+    // The arithmetic, from the imported bound rather than from a marker string the
+    // test and the gateway both copied: this is what fails if one surface's cap
+    // moves on its own.
+    const expectedExcess = stringified.length - LOG_BODY_CHARS;
+    assert.ok(expectedExcess > 0, "premise: 上限得小于这条正文");
+    assert.ok(note.endsWith(`[+${expectedExcess} chars not logged]`), `截断报出的缺口要按同一个上限算：${note.slice(-80)}`);
+  } finally {
+    await gw.close();
+  }
+  const code = gatewayCode();
+  const caps = code.match(/\b65536\b|\b64 \* 1024\b|LOG_BODY_CHARS\s*=/g) ?? [];
+  assert.deepEqual(caps, [], `网关又自己抄了一份正文上限，MCP 侧一改这里就悄悄分叉：${JSON.stringify(caps)}`);
+});
+
+test("the operationId rule this surface applies is the one the tool contract publishes", async () => {
+  const spec = TOOL_BY_NAME.get("gp_last_evidence");
+  assert.ok(spec, "premise: gp_last_evidence 的契约是这个规则的唯一出处");
+  const advertised = new RegExp(spec.inputSchema.properties.operationId.pattern);
+  const candidates = [
+    ID,
+    MISSING_ID,
+    "op_0PAAAABBBBCCCCDDDDEEEEFFFFF",
+    "op_0PAAAABBBBCCCCDDDDEEEEFFF",
+    "op_0PAAAABBBBCCCCDDDDEEEEFFFI",
+    "op_0PAAAABBBBCCCCDDDDEEEEFFFU",
+    "op_0pAAAABBBBCCCCDDDDEEEEFFFF",
+    "0PAAAABBBBCCCCDDDDEEEEFFFF",
+    "not-an-id",
+    "",
+  ];
+  const fake = new FakeGatewayClient();
+  fake.on("last_evidence", () => ({ evidencePack: fixturePack() }));
+  const { gw, base } = await startGateway(fake);
+  try {
+    for (const candidate of candidates) {
+      // The contract's own answer, from the same file: the advertised pattern plus
+      // the validator the MCP path runs.
+      const contractAccepts = advertised.test(candidate) && spec.validate({ operationId: candidate }).ok;
+      const res = await fetch(`${base}/v1/evidence/${encodeURIComponent(candidate)}`, { headers: auth() });
+      const gatewayAccepts = !(res.status === 400 && (await res.clone().json()).error?.code === "GP_HTTP_BAD_REQUEST");
+      assert.equal(gatewayAccepts, contractAccepts, `'${candidate}'：网关与工具契约对 id 形状的判定分叉了（${res.status}）`);
+    }
+  } finally {
+    await gw.close();
+  }
+  // And the grammar is *read*, never spelled again here.
+  const code = gatewayCode();
+  const spellings = code.match(/op_\[|op_[0-9A-HJKMNP-TV-Z]{26}/g) ?? [];
+  assert.deepEqual(spellings, [], `网关里又出现了自己拼的 operationId 文法：${JSON.stringify(spellings)}`);
+});
+
+test("the gateway holds no second copy of the advice it delegates: no stale lane note, no re-spelled set", () => {
+  const code = gatewayCode();
+  assert.ok(!/BLOCKED-ON/.test(code), "已经落地的跨面依赖还挂着 BLOCKED-ON 的旧注释");
+  assert.ok(!/LATE_REPLY_BODY_CHARS/.test(code), "被删掉的本地上限还留在某处");
+  // The replay-unsafe verdict is the transport's, asked of the transport.
+  assert.match(code, /isReplayUnsafeMethod\(spec\.engineMethod\)/);
+  const copies = code.match(/"act",\s*"restore",\s*"attach"/g) ?? [];
+  assert.deepEqual(copies, [], `网关又抄了一份不可重放的方法集合：${JSON.stringify(copies)}`);
 });

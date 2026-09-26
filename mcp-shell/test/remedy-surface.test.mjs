@@ -186,13 +186,19 @@ test("every engine call in the tool layer carries the trail generation it was ad
  * screen but covered) had no arm, so it fell into `default:`, whose text orders
  * re-granting Screen Recording and restarting the daemon; a restart cancels an
  * act in flight, so the advice for a covered window was actively destructive.
- * Two claims are pinned so the defect cannot come back or spread:
+ * Two claims are pinned so the defect cannot come back or spread, and a third
+ * (R10-中4) covers the arm the first two let slip past:
  *  1. every label the classifier can emit has its own arm — a new label must
  *     not silently fall through to `default` (set equality, both directions:
  *     an arm for a label nobody emits is dead prose waiting to mislead);
  *  2. no `pixel-capture-*` arm's text names a re-grant or a restart command —
  *     only `screen-recording-denied` may order the seat, because only that
- *     label's cause *is* the seat.
+ *     label's cause *is* the seat;
+ *  3. the `default:` arm names neither command either. It is unreachable given
+ *     claim 1, which is exactly why claims 1 and 2 could both stay green while it
+ *     still read "grant Screen Recording … then restart the daemon": the gate
+ *     skipped it as "not an arm". Unreachable prose is the arm the next label
+ *     falls into.
  * Mutations that redden this gate (name them, per doctrine):
  *  - delete `case "pixel-capture-no-surface":` → the label loses its arm →
  *    claim 1 is red (before this file existed, the label still produced a —
@@ -201,7 +207,10 @@ test("every engine call in the tool layer carries the trail generation it was ad
  *    Recording" / "restart the daemon" into any pixel-capture-* arm) → claim 2
  *    is red;
  *  - add a new `return "pixel-capture-…"` to `pixelCaptureFailureLabel`
- *    without an arm → claim 1 is red.
+ *    without an arm → claim 1 is red;
+ *  - put the seat sentence back in `default:` (verbatim, or as the `seatAdvice`
+ *    interpolation it was) → claim 3 is red while claims 1 and 2 stay green,
+ *    which is the hole this round closed.
  * ------------------------------------------------------------------ */
 
 /** The labels `pixelCaptureFailureLabel` can answer with, from its own returns. */
@@ -248,8 +257,12 @@ function swiftCaptureAdviceArms() {
       continue;
     }
     if (/^\s*default\s*:/.test(line)) {
-      // `default` is deliberately not an arm: whatever it says, no label may
-      // depend on it — claim 1 is what keeps it unreachable prose.
+      // `default` is not an *arm*: no label may depend on it, which is claim 1.
+      // R10-中4: it is not exempt from claim 3 either. Treating it as "not an arm"
+      // was what let its text keep ordering a re-grant and a daemon restart after
+      // every label had grown its own case — prose no input reaches, and the one
+      // shape a future label falls into. The text below the switch is gated on its
+      // own, in `swiftCaptureDefaultArm`.
       flush();
       current = null;
       continue;
@@ -259,6 +272,30 @@ function swiftCaptureAdviceArms() {
   flush();
   assert.ok(arms.size >= 8, `只解析出 ${arms.size} 条 advice 分支，扫描方式已经对不上写法`);
   return arms;
+}
+
+/** The `default:` arm's own text — the prose no label reaches today. */
+function swiftCaptureDefaultArm() {
+  const source = fs.readFileSync(ENGINE_CORE, "utf8");
+  const opened = source.indexOf("switch label {");
+  assert.notEqual(opened, -1, "EngineCore.map 里不再有 `switch label {`——这条闸要看住它的新家");
+  const closed = source.indexOf("return GPError(", opened);
+  const block = source.slice(opened, closed);
+  const at = block.search(/^\s*default\s*:/m);
+  assert.notEqual(at, -1,
+    "捕获建议的 switch 不再写 `default:`——String 上的穷尽分支必须有它，这条闸要看它的新写法");
+  const lines = block.slice(at).split("\n").slice(1);
+  const text = [];
+  for (const raw of lines) {
+    if (/^\s*\}/.test(raw)) {
+      break;
+    }
+    text.push(raw.replace(/\/\/.*$/, ""));
+  }
+  const joined = text.join(" ").replace(/\s+/g, " ").trim();
+  assert.ok(joined.length > 60,
+    `default: 分支只解析出 ${joined.length} 个字符，扫描方式已经对不上写法：${joined}`);
+  return joined;
 }
 
 test("every pixel-capture label has its own advice arm, and none of them orders a re-grant or a restart", () => {
@@ -287,6 +324,25 @@ test("every pixel-capture label has its own advice arm, and none of them orders 
     assert.doesNotMatch(text, /restart\s+the\s+daemon|kickstart|--restore-launchd|--grant/i,
       `\`${label}\` 的出路命令重启或再授权——重启会杀掉用户屏幕上在跑的 act：${text.slice(0, 160)}`);
   }
+
+  // Claim 3 (R10-中4): the `default:` arm. It is unreachable today — that is what
+  // claim 1 says — and its text used to be the seat sentence anyway, which is how
+  // a re-grant and a daemon restart survived every gate that only looked at arms.
+  // Unreachable prose is not harmless prose: it is the arm the *next* label falls
+  // into, and a restart cancels an act in flight on the user's screen.
+  const defaultArm = swiftCaptureDefaultArm();
+  assert.doesNotMatch(defaultArm, /grant\s+screen\s+recording/i,
+    `default: 分支又把代理支去授予屏幕录制：${defaultArm.slice(0, 160)}`);
+  assert.doesNotMatch(defaultArm, /restart\s+the\s+daemon|kickstart|--restore-launchd|--grant/i,
+    `default: 分支又命令重启或再授权——重启会杀掉用户屏幕上在跑的 act：${defaultArm.slice(0, 160)}`);
+  assert.ok(!defaultArm.includes("seatAdvice"),
+    `default: 分支又插值了席位建议文本（seatAdvice），等于把那句被撤掉的命令换了个写法放回来：${defaultArm.slice(0, 160)}`);
+  // And it still has to be a sentence an agent can act on for a cause the
+  // classifier cannot name: the verbatim reason, and one executable check.
+  assert.match(defaultArm, /verbatim reason/i,
+    "default: 分支要让代理读原文成因，这是它对未归因失败唯一说得出口的事实");
+  assert.match(defaultArm, /--check-screen-permission/,
+    "default: 分支仍要给一条能执行的自查，而不是只有一句『不知道』");
 
   // The positive half that must keep working: the one label whose cause *is*
   // the seat still routes to the seat sentence, and no-surface still says what

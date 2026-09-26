@@ -40,6 +40,33 @@ interface CliOptions {
   help: boolean;
 }
 
+/**
+ * The one place a `--port` value is turned into a number, for both spellings.
+ *
+ * Validated *here*, where the flag is read, because the alternative was a value
+ * that reached `server.listen()` and failed there: `--port=abc` (NaN),
+ * `--port=0.5`, `--port=99999` and — since `Number()` reads a hex literal —
+ * `--port=0x50`, which quietly meant port 80. By then the engine client and the
+ * sinks exist, the message is a Node `RangeError`/`EACCES` rather than a usage
+ * error, the exit code is not the config code, `USAGE` is never printed, and
+ * nothing names the flag the operator mistyped. `--port=` (empty) is in the same
+ * class: `Number("")` is 0, which Node reads as "pick an ephemeral port", so an
+ * argument nobody meant started a listener on a random one.
+ *
+ * Digits only, so no sign, no space, no exponent, no `0x`, no `Infinity`, and no
+ * empty string; then the port range itself.
+ */
+function parsePort(raw: string | undefined, flag: string): number {
+  if (typeof raw !== "string" || !/^\d{1,5}$/.test(raw)) {
+    throw new Error(`${flag} needs a port as decimal digits, 0-65535 (no hex like 0x50, no empty value); got '${raw ?? "nothing"}'`);
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0 || value > 65535) {
+    throw new Error(`${flag} requires an integer between 0 and 65535; got '${raw}'`);
+  }
+  return value;
+}
+
 function parseArgs(argv: readonly string[]): CliOptions {
   const options: CliOptions = { socketPath: defaultSocketPath(), port: DEFAULT_GATEWAY_PORT, help: false };
   for (let i = 0; i < argv.length; i++) {
@@ -56,15 +83,10 @@ function parseArgs(argv: readonly string[]): CliOptions {
     } else if (arg.startsWith("--socket-path=")) {
       options.socketPath = arg.slice("--socket-path=".length);
     } else if (arg === "--port" || arg === "-p") {
-      const raw = argv[i + 1]!;
-      const value = Number(raw);
-      if (raw === undefined || !Number.isInteger(value) || value < 0 || value > 65535) {
-        throw new Error("--port requires an integer between 0 and 65535");
-      }
-      options.port = value;
+      options.port = parsePort(argv[i + 1], arg);
       i += 1;
     } else if (arg.startsWith("--port=")) {
-      options.port = Number(arg.slice("--port=".length));
+      options.port = parsePort(arg.slice("--port=".length), "--port");
     }
   }
   return options;
@@ -74,6 +96,10 @@ const USAGE = `usage: glasspane-http [--socket-path <path>] [--port <n>]
 
 Exposes the GlassPane engine as an HTTP/REST gateway on ${HOST} only (a loopback
 bind is enforced at startup; this process never listens anywhere else).
+
+Arguments are validated before anything is opened: --port takes decimal digits
+0-65535 (0 asks the OS for a free port), and a hex value like 0x50, an empty
+value or a number out of that range is refused here rather than by bind().
 
 Lifetime and auth:
   - GLASSPANE_HTTP_TOKEN <token> is required and read from the environment;

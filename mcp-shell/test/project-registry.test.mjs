@@ -904,3 +904,198 @@ test("no user record is a refusal, not a $HOME guess", () => {
     reg.dispose();
   }
 });
+
+/* ------------------------------------------------------------------ *
+ * Round-10 lane A, item 4: the state root this shell writes has to be at the
+ * daemon's modes *when this shell wrote it*, not whenever the daemon next
+ * starts. The recorded decision for this family is 就地收紧 — tighten in place
+ * (`.iterate_decisions.md` R4-D; `specs/GlassPane_规格修订_2026-09-23_iterate-round4.md` §8)
+ * — so a pre-existing loose directory or file is brought to the rule rather
+ * than excused by it.
+ * ------------------------------------------------------------------ */
+
+/** The permission bits alone, without the file-type flags `stat.mode` carries. */
+function modeOf(target) {
+  return fs.statSync(target).mode & 0o777;
+}
+
+function registryFileAt(t, filePath) {
+  const previousFile = process.env.GLASSPANE_PROJECTS_FILE;
+  const previousForce = process.env[FORCE_OVERWRITE_ENV];
+  process.env.GLASSPANE_PROJECTS_FILE = filePath;
+  delete process.env[FORCE_OVERWRITE_ENV];
+  return () => {
+    if (previousFile === undefined) delete process.env.GLASSPANE_PROJECTS_FILE;
+    else process.env.GLASSPANE_PROJECTS_FILE = previousFile;
+    if (previousForce !== undefined) process.env[FORCE_OVERWRITE_ENV] = previousForce;
+  };
+}
+
+test("gp_project_set leaves a new state root at the daemon's 0700 directory and 0600 file", () => {
+  // MUTATION THIS PINS: `fs.writeFileSync(tmp, …)` with no mode and no chmod —
+  // what this writer did, which under the measured umask 022 published
+  // `projects.json` 0644 and `mkdirSync` without a mode left the root 0755. The
+  // umask is forced to 000 here so the assertion cannot be satisfied by whoever
+  // runs the suite: it is the writer's chmod that has to produce 0600.
+  const sandbox = privateSandbox("gp-modes-new-");
+  const root = path.join(sandbox.dir, ".glasspane");
+  const filePath = path.join(root, "projects.json");
+  const restore = registryFileAt(null, filePath);
+  const previousUmask = process.umask(0o000);
+  try {
+    projectSet(baseArgs);
+    assert.equal(modeOf(root), 0o700, `状态根必须是 0700，实测 ${(modeOf(root)).toString(8)}`);
+    assert.equal(modeOf(filePath), 0o600, `projects.json 必须是 0600，实测 ${(modeOf(filePath)).toString(8)}`);
+    assert.deepEqual(siblings(root, ".tmp-"), [], "一次成功的写不得留下临时文件");
+  } finally {
+    process.umask(previousUmask);
+    restore();
+    sandbox.dispose();
+  }
+});
+
+test("a loose pre-existing state root is tightened by the write that lands in it", () => {
+  // The half "create with the right mode" cannot deliver: the daemon's
+  // `StateRoot.tightenPermissions` names "a ~/.glasspane made by the MCP shell" as
+  // the hole it has to close at startup, and until it starts again every
+  // `gp_project_set` re-published a 0644 table. So the writer has to tighten what
+  // it found, not only what it creates.
+  const sandbox = privateSandbox("gp-modes-loose-");
+  const root = path.join(sandbox.dir, ".glasspane");
+  fs.mkdirSync(root, { mode: 0o755 });
+  fs.chmodSync(root, 0o755);
+  const filePath = path.join(root, "projects.json");
+  fs.writeFileSync(filePath, "[]", { mode: 0o644 });
+  fs.chmodSync(filePath, 0o644);
+  const restore = registryFileAt(null, filePath);
+  try {
+    // Premise, checked: this really is the loose shape the fix is about.
+    assert.equal(modeOf(root), 0o755);
+    assert.equal(modeOf(filePath), 0o644);
+
+    projectSet({ ...baseArgs, displayName: "Tightened" });
+    assert.equal(modeOf(root), 0o700, `就地收紧没发生：${(modeOf(root)).toString(8)}`);
+    assert.equal(modeOf(filePath), 0o600, `就地收紧没发生：${(modeOf(filePath)).toString(8)}`);
+    assert.equal(JSON.parse(read(filePath))[0].displayName, "Tightened", "收紧之后文件仍是那次写的内容");
+  } finally {
+    restore();
+    sandbox.dispose();
+  }
+});
+
+test("a chmod that does not stick is reported as a failed write, not as a saved one", () => {
+  // MUTATION THIS PINS: dropping the read-back after `chmodSync`. A volume that
+  // ignores chmod (read-only mount, ACL, immutable flag) answers `success` and
+  // leaves the old mode in place, which is exactly the case where the project list
+  // is world-readable and the writer believes it is not. `fs.chmodSync` is made to
+  // do nothing here so the verification is the only thing that can fail.
+  const sandbox = privateSandbox("gp-modes-verify-");
+  const root = path.join(sandbox.dir, ".glasspane");
+  const filePath = path.join(root, "projects.json");
+  const restore = registryFileAt(null, filePath);
+  const realChmod = fs.chmodSync;
+  const previousUmask = process.umask(0o000);
+  try {
+    fs.chmodSync = () => undefined;
+    const message = expectRegistryError(
+      () => projectSet(baseArgs),
+      "GP_E_INTERNAL",
+      "a chmod nobody honoured",
+    );
+    assert.match(message, /is still [0-7]{3} after chmod\(600\)/, `要报告实测到的那个模式：${message}`);
+    assert.match(message, /chmod 600/, `remedy 要给出代理真能执行的那条命令：${message}`);
+    assert.match(message, /chmod 700/, message);
+    assert.deepEqual(siblings(root, ".tmp-"), [], "失败的写不得把半截临时文件留在状态根里");
+  } finally {
+    process.umask(previousUmask);
+    fs.chmodSync = realChmod;
+    restore();
+    sandbox.dispose();
+  }
+  // The patch is off again, and a normal write reaches the same two modes —
+  // otherwise every later test in this file would be judging a stub.
+  const check = privateSandbox("gp-modes-after-");
+  const after = path.join(check.dir, "projects.json");
+  const restoreAfter = registryFileAt(null, after);
+  try {
+    projectSet(baseArgs);
+    assert.equal(modeOf(after), 0o600);
+  } finally {
+    restoreAfter();
+    check.dispose();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * Round-10 lane A, item 5: a home dot-directory is not a project-owned
+ * directory, and the ownership rule cannot see that.
+ * ------------------------------------------------------------------ */
+
+test("a credential-bearing home dot-directory is refused as a storage root", () => {
+  // MUTATION THIS PINS: deleting `refuseHomeDotDirectory` from `refuseCandidate`.
+  // Everything the generic rule checks, `~/.ssh` passes: the user owns it and it is
+  // not world-writable — it is 0700, which is *why* it holds what it holds. The
+  // daemon then chmods the registered root 0700 (already true, so nothing
+  // complains), writes evidence packs into it, and prunes expired ones out of it.
+  const reg = useRegistry();
+  try {
+    const home = os.userInfo().homedir;
+    const refused = [
+      [path.join(home, ".ssh"), ".ssh"],
+      [path.join(home, ".aws"), ".aws"],
+      [path.join(home, ".gnupg", "evidence"), ".gnupg"],
+      [path.join(home, ".config", "gcloud"), ".config"],
+      [path.join(home, ".glasspane"), ".glasspane"],
+    ];
+    for (const [value, dot] of refused) {
+      const message = expectRegistryError(
+        () => projectSet({ ...baseArgs, evidenceStoragePath: value }),
+        "GP_E_BAD_PARAMS",
+        value,
+      );
+      // Which rule fired, in the message, by name — "was refused" is not the
+      // assertion; an ownership complaint would mean this rule never ran.
+      assert.match(message, /dot-directory of the current user's home directory/, message);
+      assert.ok(message.includes(`~/${dot}`), `要点名是哪一条 ${dot}：${message}`);
+      // And the boundary is in the shape hint too, so the next call is formed
+      // right instead of being refused again with a different name.
+      assert.match(message, /An acceptable value is a project-owned directory/, message);
+      assert.match(message, /dot-directory of your home/, `PATH_SHAPE_HINT 没说出这条边界：${message}`);
+      assert.match(message, /~\/\.ssh/, "文案要举一例，代理才知道这条规则管的是什么东西");
+      assert.match(message, /chmods a registered storage root to 0700/, "要说清后果，不只是说禁止");
+      assert.equal(fs.existsSync(reg.filePath), false, "被拒的路径不得先建起注册表");
+    }
+
+    // The rule is about the home directory, not about the dot: a project keeping
+    // its archive in a dot-directory of its own is the shape the hint advertises.
+    const legal = path.join(reg.root, "proj", "notes-app", ".ssh", "evidence");
+    assert.equal(projectSet({ ...baseArgs, evidenceStoragePath: legal }).evidenceStoragePath, legal);
+  } finally {
+    reg.dispose();
+  }
+});
+
+test("the home dot-directory rule reads the user record, not $HOME", () => {
+  // Same premise as the home and ~/Library protections above: a rule that moved
+  // with `$HOME` would stop guarding the real `~/.ssh` the moment a caller
+  // exported it, and would start refusing a sandbox the moment somebody else did.
+  const reg = useRegistry();
+  try {
+    withSandboxHome((fakeHome) => {
+      const realHome = os.userInfo().homedir;
+      const real = expectRegistryError(
+        () => projectSet({ ...baseArgs, evidenceStoragePath: path.join(realHome, ".ssh") }),
+        "GP_E_BAD_PARAMS",
+        `the real ~/.ssh while HOME=${fakeHome}`,
+      );
+      assert.match(real, /dot-directory of the current user's home directory/, real);
+      assert.equal(
+        fs.existsSync(path.join(fakeHome, ".ssh")),
+        false,
+        "沙箱家目录不该被这条规则碰",
+      );
+    });
+  } finally {
+    reg.dispose();
+  }
+});

@@ -1,11 +1,15 @@
 import http, { type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 import { URL } from "node:url";
 
 import {
+  CALLER_VISIBLE_CEILING_MS,
   EngineCallError,
+  LOG_BODY_CHARS,
   isReplayUnsafeMethod,
   lateReplyRoute,
+  truncate,
   unixSocketEngineClient,
 } from "./engine-client.js";
 import {
@@ -85,19 +89,6 @@ export const MIN_TOKEN_DISTINCT_CHARS = 8;
  * produces against the verdict for every forwardable tool, in both directions.
  */
 
-/**
- * Log ceiling for one late reply body, and the marker this file writes when a
- * body is cut at it.
- *
- * BLOCKED-ON-lane-B: `engine-client.ts` has exactly this helper (`truncate`, over
- * `LOG_BODY_CHARS`) but does not export it, and its late-reply sink is handed the
- * *raw* `frame.result` — so the HTTP side had to cap it again here. Export it and
- * this copy is deleted. Drift risk: the two caps can disagree, which is why
- * `test/http-gateway.test.mjs` hands the sink a body over this cap and requires
- * both the marker and its numbers, so a silent re-widening here goes red.
- */
-const LATE_REPLY_BODY_CHARS = 64 * 1024;
-
 /** Ceiling on a forwarded request body, so no client can exhaust gateway memory. */
 const MAX_REQUEST_BODY_BYTES = 256 * 1024;
 
@@ -109,8 +100,52 @@ const MAX_REQUEST_BODY_BYTES = 256 * 1024;
  */
 const MAX_EVIDENCE_IDS = 20;
 
-/** operationId shape shared with the daemon / MCP shell (form `op_` + 26 Crockford base32). */
-const OPERATION_ID_PATTERN = /^op_[0-9A-HJKMNP-TV-Z]{26}$/;
+/**
+ * One wall-clock budget for the **whole** `ids=` fan-out, spent across the
+ * `last_evidence` round trips instead of granted to each of them.
+ *
+ * The bound is the one this shell already promises any single caller
+ * (`CALLER_VISIBLE_CEILING_MS`, imported rather than restated), because a
+ * request that holds the daemon's one connection for 20 x that ceiling is
+ * answered by no client: it gives up holding nothing in hand, and the one thing
+ * an agent with no answer does is re-perform the action the report existed to
+ * check on. `tools.ts` made exactly this decision for `gp_recent_reports`
+ * (`RECENT_REPORTS_BUDGET_MS`, spent through its `CallBudget`); that class is not
+ * exported, so the equivalence — same bound, same units, one timer for the
+ * aggregate — is pinned by `test/http-gateway.test.mjs` against both files rather
+ * than by a second number here. An id the budget could not reach is named in the
+ * response as not fetched, never dropped from it.
+ */
+export const EVIDENCE_FANOUT_BUDGET_MS = CALLER_VISIBLE_CEILING_MS;
+
+/**
+ * The operationId grammar, read out of the tool contract that advertises it.
+ *
+ * `tools.ts` owns this rule twice over — as the zod rule `gp_last_evidence`
+ * validates with, and as the `pattern` its `tools/list` schema publishes — and a
+ * third spelling here is what let the two drift (the copy this replaces was
+ * already carrying a stale comment claiming the shared form). Deriving it means a
+ * change on the authority side is this file's behaviour too, with nothing left to
+ * re-sync; `test/http-gateway.test.mjs` refuses both a re-spelled literal here and
+ * a contract that stops publishing the pattern.
+ */
+const OPERATION_ID_PATTERN = operationIdPatternFromToolContract();
+
+function operationIdPatternFromToolContract(): RegExp {
+  const spec = TOOL_BY_NAME.get("gp_last_evidence");
+  const properties = (spec?.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+  const pattern = (properties?.operationId as { pattern?: string } | undefined)?.pattern;
+  if (typeof pattern !== "string" || pattern === "") {
+    // Refusing to start is the honest answer: an unvalidated id reaching the
+    // socket would be this gateway spending a round trip on a shape its own tool
+    // contract rejects, and a silently loosened rule is worse than no rule.
+    throw new Error("http-gateway: gp_last_evidence's published operationId pattern is missing, so the operationId grammar has no authority to read it from");
+  }
+  return new RegExp(pattern);
+}
+
+/** Ids in the shape the tool contract advertises, for a caller-facing sentence. */
+const OPERATION_ID_FORM = OPERATION_ID_PATTERN.source.replace(/^\^/, "").replace(/\$$/, "");
 
 const REPORT_FORMATS = ["html", "markdown"] as const;
 type ReportFormat = (typeof REPORT_FORMATS)[number];
@@ -242,8 +277,12 @@ export function createHttpGateway(options: HttpGatewayOptions): HttpGateway {
     // The transport hands the sink the raw reply body, and on this surface that
     // body is UI-tree content (titles, values, sometimes a document's text). The
     // MCP path caps what it writes; an uncapped `JSON.stringify` here could put
-    // tens of megabytes of it on stderr per late reply.
-    report(`late engine reply to '${method}' (reply body below, raw engine content and not redacted): ${truncateLateReplyBody(stringifyReply(result))}`);
+    // tens of megabytes of it on stderr per late reply. The cap and its marker are
+    // `engine-client.ts`'s (`truncate` over `LOG_BODY_CHARS`) — the file that
+    // produces the body owns how much of it gets written, and this sink writes the
+    // same content on the other surface, so it calls the same helper rather than
+    // re-spelling 64 KiB and drifting from it.
+    report(`late engine reply to '${method}' (reply body below, raw engine content and not redacted): ${truncate(stringifyReply(result))}`);
   });
   const expectedToken = Buffer.from(options.token, "utf8");
 
@@ -289,15 +328,24 @@ function forceCloseConnections(server: Server): void {
  * them is the user's screen).
  * ------------------------------------------------------------------ */
 
-/** The loopback *names* accepted: `localhost` and the two alias spellings a macOS
- * resolver answers. Any other name is refused, because naming the bind means
- * letting `/etc/hosts` and DNS decide where it lands — and a caller that meant
- * loopback can write the address. */
-const LOOPBACK_HOST_NAMES = new Set(["localhost", "ip6-localhost", "ip6-loopback"]);
-
-/** True for the loopback forms only: 127.0.0.0/8 (and its v4-mapped v6 spelling),
- * `::1`, and the `localhost` names. `0.0.0.0`, `::`, the empty string and every
- * routable address or name are false. */
+/**
+ * True for a loopback **address literal** and nothing else: 127.0.0.0/8 (and its
+ * v4-mapped v6 spelling) or `::1`.
+ *
+ * Names are not accepted, including the three this function used to allow
+ * (`localhost`, `ip6-localhost`, `ip6-loopback`). A name cannot be honoured
+ * without resolving it, and resolving it hands the bind — the one security
+ * decision this module makes — to `/etc/hosts` and DNS: exactly the reasoning by
+ * which every *other* name is refused here, applied inconsistently. `127.0.0.1`
+ * says what it means at the moment of `listen()`, and it is what the refusals
+ * offer. A caller that wants to reach this gateway by name still can: the name
+ * belongs in the URL it connects to, where resolving it decides only where the
+ * request goes.
+ *
+ * `test/http-gateway.test.mjs` asserts the *class* (any string `net.isIP()` does
+ * not read as an address is refused) so re-admitting one name cannot pass by
+ * being the one spelling no case sends.
+ */
 export function isLoopbackHost(value: string): boolean {
   const trimmed = value.trim().toLowerCase();
   if (trimmed === "") {
@@ -306,7 +354,7 @@ export function isLoopbackHost(value: string): boolean {
   const host = trimmed.startsWith("[") && trimmed.endsWith("]")
     ? trimmed.slice(1, -1)
     : trimmed;
-  if (LOOPBACK_HOST_NAMES.has(host) || host === "::1" || host === "0:0:0:0:0:0:0:1") {
+  if (host === "::1" || host === "0:0:0:0:0:0:0:1") {
     return true;
   }
   const mapped = /^::ffff:(.+)$/.exec(host);
@@ -317,20 +365,37 @@ export function isLoopbackHost(value: string): boolean {
 }
 
 /**
- * Refuse any bind that is not loopback. The module doc promises 127.0.0.1 only;
- * this is the sentence that makes it true for `options.host` too, so a caller of
- * the published `./http-gateway` export cannot put the act/restore surface on a
- * wildcard with one bearer token and no TLS in front of it.
+ * Refuse any bind that is not a loopback address literal. The module doc promises
+ * 127.0.0.1 only; this is the sentence that makes it true for `options.host` too,
+ * so a caller of the published `./http-gateway` export cannot put the act/restore
+ * surface on a wildcard with one bearer token and no TLS in front of it — nor on
+ * whatever a name happens to resolve to on the day.
  */
 export function assertLoopbackHost(host: string): string {
   if (isLoopbackHost(host)) {
     return host.trim();
   }
+  const trimmed = host.trim();
+  // "Is this a name, or an address that simply is not loopback?" — the two get
+  // different answers, because only the first is refused for a reason the caller
+  // can act on by writing an address. Bracket forms are unwrapped for `isIP`, and
+  // a string made of address characters alone is treated as an attempted address
+  // (`127.0.0.256` is a bad number, not a name).
+  const unwrapped = trimmed.replace(/^\[|\]$/g, "");
+  const nameNotAddress = trimmed !== "" && isIP(unwrapped) === 0 && !/^[0-9a-fA-F:.]+$/.test(unwrapped);
+  const whereANameGoes = nameNotAddress
+    ? ` A name is answered by \`/etc/hosts\` and DNS, so accepting one for the bind hands the choice of `
+      + `interface to whoever edits those; send the name where resolution is the client's own business — `
+      + `in the URL it curls, e.g. http://localhost:<port>/v1/hello — and pass this gateway an address it `
+      + `cannot be talked out of, such as 127.0.0.1 or ::1. `
+    : " Pass one of the loopback literals above. ";
   throw new Error(
-    `createHttpGateway refuses host '${host}': only a loopback address is accepted `
-    + `(127.0.0.0/8, ::1 or "localhost"), because this gateway serves the act/restore surface `
-    + `with one bearer token and no TLS — bound to a wildcard or a routable address, every peer `
-    + `that can reach this port can press controls on this machine's screen`,
+    `createHttpGateway refuses host '${host}': only a loopback address literal is accepted `
+    + `(127.0.0.1 — any address in 127.0.0.0/8 — or ::1, in either the bare or the ::ffff:-mapped `
+    + `spelling).${whereANameGoes}`
+    + `This gateway serves the act/restore surface with one bearer token and no TLS — bound to a `
+    + `wildcard or to a routable address, every peer that can reach this port can press controls on `
+    + `this machine's screen, which is what a loopback literal is here to rule out.`,
   );
 }
 
@@ -352,13 +417,6 @@ export function assertTokenPolicy(token: string): void {
       + `it. Generate one with "openssl rand -hex 16" and export it as ${GLASSPANE_HTTP_TOKEN_ENV}.`,
     );
   }
-}
-
-/** Cap one late reply body, and say how much of it did not get written. */
-function truncateLateReplyBody(text: string): string {
-  return text.length <= LATE_REPLY_BODY_CHARS
-    ? text
-    : `${text.slice(0, LATE_REPLY_BODY_CHARS)}… [reply body truncated: ${text.length - LATE_REPLY_BODY_CHARS} of ${text.length} chars not written]`;
 }
 
 /** The transport's values come from JSON.parse, but an injected client can hand
@@ -471,7 +529,7 @@ async function handleEvidenceSingle(
   if (operationId === null) {
     fail(res, 400, HTTP_BAD_REQUEST,
       `invalid operationId '${rawId}'`,
-      "operationId must match `op_[0-9A-HJKMNP-TV-Z]{26}`");
+      `operationId must match \`${OPERATION_ID_FORM}\``);
     return;
   }
   const format = parseFormat(url.searchParams.get("format"));
@@ -499,6 +557,74 @@ async function handleEvidenceSingle(
   }
 }
 
+/**
+ * One wall-clock bound for a request that makes several engine round trips — the
+ * same shape `tools.ts` uses for `gp_recent_reports` (`CallBudget`), reimplemented
+ * here only because that class is not exported. The three members are the three
+ * decisions that make a budget a budget and not a timeout: {@link spent} stops
+ * *sending* the next request, {@link expired} stops *waiting* on the one already
+ * in flight, and {@link done} releases the single timer so an answered request is
+ * not the reason this process stays alive.
+ *
+ * `test/http-gateway.test.mjs` pins the equivalence with the authority (same
+ * bound, same units, both arms enforced) rather than letting the two drift.
+ */
+class FanOutBudget {
+  readonly #startedAt = Date.now();
+  #expiry: Promise<"budget"> | null = null;
+  #timer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(private readonly budgetMs: number) {}
+
+  /** True once the whole budget has been spent on the fetches so far. */
+  get spent(): boolean {
+    return Date.now() - this.#startedAt >= this.budgetMs;
+  }
+
+  /**
+   * Resolves `"budget"` at the deadline, arming the one timer on first use.
+   * Unreferenced, because a request that has already been answered must not be
+   * the reason the gateway's process stays up.
+   */
+  get expired(): Promise<"budget"> {
+    this.#expiry ??= new Promise<"budget">((resolve) => {
+      const left = Math.max(this.budgetMs - (Date.now() - this.#startedAt), 0);
+      const timer = setTimeout(() => resolve("budget"), left);
+      this.#timer = timer;
+      timer.unref();
+    });
+    return this.#expiry;
+  }
+
+  /** Releases the timer once the fan-out is over, however it ended. */
+  done(): void {
+    if (this.#timer !== null) {
+      clearTimeout(this.#timer);
+      this.#timer = null;
+    }
+  }
+}
+
+/** One `last_evidence` read's outcome, tagged so nothing can reject into the race. */
+type EvidenceFetch =
+  | { kind: "pack"; raw: unknown }
+  | { kind: "missing" }
+  | { kind: "failed"; error: unknown };
+
+async function fetchLastEvidence(client: EngineClientLike, operationId: string): Promise<EvidenceFetch> {
+  try {
+    return { kind: "pack", raw: await client.call("last_evidence", { operationId }) };
+  } catch (error) {
+    if (error instanceof EngineCallError && error.code === GP_E_NO_EVIDENCE) {
+      return { kind: "missing" };
+    }
+    // Tagged, never rethrown: this promise is raced against the budget, and a
+    // rejection the race has already lost would surface as an unhandled rejection
+    // instead of as this request's answer.
+    return { kind: "failed", error };
+  }
+}
+
 async function handleEvidenceAggregate(
   url: URL,
   client: EngineClientLike,
@@ -508,7 +634,7 @@ async function handleEvidenceAggregate(
   if (ids === null) {
     fail(res, 400, HTTP_BAD_REQUEST,
       "invalid or empty ids",
-      "ids must be a comma-separated list of operationIds of form `op_[0-9A-HJKMNP-TV-Z]{26}`");
+      `ids must be a comma-separated list of operationIds of form \`${OPERATION_ID_FORM}\``);
     return;
   }
   if (ids.length > MAX_EVIDENCE_IDS) {
@@ -523,35 +649,77 @@ async function handleEvidenceAggregate(
     return;
   }
 
-  // Fetch each id; the daemon's bounded history may have evicted it or the
-  // engine may have restarted, so per-item misses are skipped with a note
-  // instead of failing the whole report (honesty: a missing pack is "skipped",
-  // never a fabricated render).
+  // Fetch each id inside ONE budget for the whole fan-out: the daemon answers one
+  // request at a time, and each `last_evidence` is allowed the caller-visible
+  // ceiling on its own, so an unbudgeted loop over the id ceiling is that ceiling
+  // times the id count of held connection — a wait no curl client
+  // outlasts, and one whose answer arrives as a dropped connection with no code
+  // and no remedy. The daemon's bounded history may have evicted an id or the
+  // engine may have restarted, so per-item misses are skipped with a note instead
+  // of failing the whole report, and an id the budget could not reach is named as
+  // not fetched (honesty: a missing pack is "skipped", an unreached one "not
+  // fetched", never a fabricated render and never a silent omission).
   const blocks: string[] = [];
   const renderedIds: string[] = [];
   const skipped: string[] = [];
-  for (const operationId of ids) {
-    let raw: unknown;
-    try {
-      raw = await client.call("last_evidence", { operationId });
-    } catch (error) {
-      if (error instanceof EngineCallError && error.code === GP_E_NO_EVIDENCE) {
-        skipped.push(operationId);
-        continue;
+  const notFetched: string[] = [];
+  const budget = new FanOutBudget(EVIDENCE_FANOUT_BUDGET_MS);
+  try {
+    for (const [index, operationId] of ids.entries()) {
+      if (budget.spent) {
+        notFetched.push(...ids.slice(index));
+        break;
       }
-      // The too-large advice is the tool contract's business, so the aggregate
-      // route asks the same helper the single-fetch route uses.
-      await failEngine(res, error, TOOL_BY_NAME.get("gp_last_evidence"), { operationId });
-      return;
+      const settled = await Promise.race([fetchLastEvidence(client, operationId), budget.expired]);
+      if (settled === "budget") {
+        // The read in flight is dropped here, and with it every id that had not
+        // been sent: the daemon may still be answering exactly that request, which
+        // is what the caller has to know before deciding anything, so they stay
+        // named in the answer.
+        notFetched.push(...ids.slice(index));
+        break;
+      }
+      if (settled.kind === "pack") {
+        try {
+          const { pack, measuredSchemaVersion } = parseEvidenceFrame(settled.raw);
+          blocks.push(render(packForReport(pack, measuredSchemaVersion), format));
+          renderedIds.push(operationId);
+        } catch (error) {
+          failEvidenceFrameShape(res, error, operationId);
+          return;
+        }
+      } else if (settled.kind === "missing") {
+        skipped.push(operationId);
+      } else {
+        // The too-large advice is the tool contract's business, so the aggregate
+        // route asks the same helper the single-fetch route uses.
+        await failEngine(res, settled.error, TOOL_BY_NAME.get("gp_last_evidence"), { operationId });
+        return;
+      }
     }
-    try {
-      const { pack, measuredSchemaVersion } = parseEvidenceFrame(raw);
-      blocks.push(render(packForReport(pack, measuredSchemaVersion), format));
-      renderedIds.push(operationId);
-    } catch (error) {
-      failEvidenceFrameShape(res, error, operationId);
-      return;
-    }
+  } finally {
+    budget.done();
+  }
+
+  if (blocks.length === 0 && notFetched.length > 0) {
+    // Not "no evidence": these operations may well have packs, and this read ran
+    // out of the wait it allows itself. Answering GP_E_NO_EVIDENCE here tells a
+    // caller its actions produced nothing — the reading that makes it re-perform
+    // the action they came from.
+    fail(res, 504, GP_E_ENGINE_TIMEOUT,
+      `this gateway fetched no pack inside its own ${EVIDENCE_FANOUT_BUDGET_MS}ms budget for ${ids.length} `
+      + `id(s): ${notFetched.length} went unanswered (${notFetched.join(", ")})`
+      + (skipped.length === 0
+        ? ""
+        : `, and ${skipped.length} were answered as having no evidence in the daemon history`),
+      "the ids named above were not fetched, which is not a finding about the operations behind them: the daemon "
+      + "answers one request at a time and may still be working on the one this request stopped waiting for. Read "
+      + "one operation with GET /v1/evidence/<operationId>, which answers inside its own deadline, or send this "
+      + `request again with fewer ids (at most ${MAX_EVIDENCE_IDS} per request, and this budget is one request's, `
+      + "not one id's). See what the attached app is doing now without changing it with POST /v1/tools/observe, "
+      + "POST /v1/tools/assert_element or POST /v1/tools/probe_status. A wait that expired says nothing about the "
+      + "daemon's health, so nothing here authorises restarting it.");
+    return;
   }
 
   if (blocks.length === 0) {
@@ -570,13 +738,16 @@ async function handleEvidenceAggregate(
     ? `<h1>GlassPane evidence reports (${blocks.length})</h1>`
     : `# GlassPane evidence reports (${blocks.length})`;
   const skipNote = makeSkipNote(skipped, format);
+  const unfetchedNote = makeNotFetchedNote(notFetched, format);
   const separator = format === "html" ? "\n<hr>\n" : "\n\n---\n";
   const sections: string[] = [header];
-  if (skipNote !== "") {
-    sections.push(skipNote);
+  for (const note of [skipNote, unfetchedNote]) {
+    if (note !== "") {
+      sections.push(note);
+    }
   }
   sections.push(blocks.join(separator));
-  ok(res, { format, renderedIds, skipped, report: sections.join("\n") });
+  ok(res, { format, renderedIds, skipped, notFetched, report: sections.join("\n") });
 }
 
 async function handleToolForward(
@@ -774,6 +945,29 @@ function makeSkipNote(skipped: readonly string[], format: ReportFormat): string 
     : `> skipped ${skipped.length} unreachable ${label}: ${skipped.join(", ")}`;
 }
 
+/**
+ * The other half of "what this report does not contain": an id this request
+ * stopped waiting for, named with the wait that ran out.
+ *
+ * Deliberately not folded into {@link makeSkipNote}. "Unreachable" is the
+ * daemon's answer — it was asked and said it has no such pack — while a
+ * budget stop means nothing was answered, and the daemon may be producing that
+ * pack right now. An agent that reads the second as the first goes and performs
+ * the action again.
+ */
+function makeNotFetchedNote(notFetched: readonly string[], format: ReportFormat): string {
+  if (notFetched.length === 0) {
+    return "";
+  }
+  const label = notFetched.length === 1 ? "entry" : "entries";
+  const sentence = `not fetched within this request's ${EVIDENCE_FANOUT_BUDGET_MS}ms wait: `
+    + `${notFetched.length} ${label} left unanswered: ${notFetched.join(", ")}. `
+    + "Fetch one by id with GET /v1/evidence/<operationId>, or ask again with a shorter ids= list";
+  return format === "html"
+    ? `<p class="gp-not-fetched">${escapeHTML(sentence)}</p>`
+    : `> ${sentence}`;
+}
+
 /* ------------------------------------------------------------------ *
  * Response envelopes and the body reader (all JSON, capped).
  * ------------------------------------------------------------------ */
@@ -783,8 +977,50 @@ function ok(res: ServerResponse, result: unknown): void {
 }
 
 function fail(res: ServerResponse, status: number, code: string, message: string, remedy: string): void {
-  writeJson(res, status, { ok: false, error: { code, message, remedy } });
+  // One boundary, and every caller-facing sentence crosses it. The remedy for a
+  // timeout is authored in `engine-client.ts` for *both* surfaces (`surface:
+  // "http"` selects the late-reply sentence), and the daemon authors its own table
+  // in Swift with no HTTP surface in view at all — so a name written for an MCP
+  // caller can arrive here from either, and a curl caller cannot call a tool by
+  // name. This is where that gets translated, because it is where this surface's
+  // advice ends and another's begins; the authoring layers stay untouched, which
+  // is what keeps this from being a second copy of their text.
+  writeJson(res, status, { ok: false, error: { code, message: forHttpCaller(message), remedy: forHttpCaller(remedy) } });
 }
+
+/**
+ * Rewrite another layer's caller-facing prose into what this surface can execute.
+ *
+ * Two classes of leak, both real and both from text this file does not own:
+ *  - an MCP tool name (`gp_probe_status`), which has no meaning for a curl caller
+ *    and — worse — invites a `POST /v1/tools/gp_probe_status` shaped guess;
+ *  - a *false* claim about the other surface ("the shell does not queue one MCP
+ *    request behind another"), which on this side describes a queue the reader is
+ *    not standing in.
+ * The route each tool name maps to is read out of {@link FORWARDABLE_TOOLS}, the
+ * same map that decides which routes exist, so a translation can never name a 404
+ * — a tool the daemon answers but this gateway does not forward (every tool with
+ * its own `execute`) is reported as not exposed here rather than sent to a route
+ * that is not. `test/http-gateway.test.mjs` scans every response body this
+ * produces for `gp_` names and asks of every route it does name.
+ */
+function forHttpCaller(text: string): string {
+  let out = text.replace(/\bgp_([a-z][a-z_]*)\b/g, (_whole, method: string) => (
+    FORWARDABLE_TOOLS.has(method)
+      ? `POST /v1/tools/${method}`
+      : "an MCP-only tool this gateway does not expose"
+  ));
+  for (const [pattern, replacement] of MCP_PROSE_FOR_HTTP) {
+    out = out.replace(pattern, replacement);
+  }
+  return out;
+}
+
+/** Clauses written from the MCP shell's own point of view, stated for this one. */
+const MCP_PROSE_FOR_HTTP: ReadonlyArray<readonly [RegExp, string]> = [
+  [/the shell does not queue one MCP request behind another/gi,
+    "this gateway does not queue one request behind another"],
+];
 
 function writeJson(res: ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body);
@@ -884,17 +1120,14 @@ async function failEngine(
  * {@link httpReplayUnsafePayloadAdvice}.
  *
  * For every other code this returns the remedy its author wrote (the daemon's own
- * table, or `engine-client.ts`'s timeout text) unchanged. That includes the codes
- * whose remedy genuinely does name a restart, because the daemon is the one that
- * measured the condition — the gateway adds no restart order of its own, and the
- * only one it could not have earned is the fall-through above.
- *
- * BLOCKED-ON-lane-B: the timeout text this passes through is written for both
- * surfaces and still says "so gp_probe_status goes out at once" on the `http`
- * branch (`slowEngineRemedy`'s poll clause) — a tool name a curl caller has to
- * translate into `POST /v1/tools/probe_status` on its own. It belongs to
- * `engine-client.ts`; rewriting it here would be a second copy of that advice, so
- * the pass-through stays and the naming has to be fixed at the source.
+ * table, or `engine-client.ts`'s timeout text) with its *words for the other
+ * surface* translated by {@link forHttpCaller} at the response boundary — that
+ * text still says "the shell does not queue one MCP request behind another, so
+ * gp_probe_status goes out at once" on its `http` branch, and a curl caller has no
+ * tool by that name. Rewriting the sentence here instead of in
+ * `engine-client.ts` keeps one copy of the advice: the authoring layer holds the
+ * transport's facts, this file holds what its own callers can type, and
+ * `test/http-gateway.test.mjs` fails on any `gp_` name that gets through.
  */
 function engineRemedy(
   error: EngineCallError,
@@ -918,9 +1151,10 @@ function engineRemedy(
  * `replayUnsafePayloadAdvice()` routes that caller to `gp_recent_reports` — a tool
  * this surface does not expose (`POST /v1/tools/recent_reports` is a 404) and the
  * HTTP gateway has no operation trail to list from anyway. The narrowing clause is
- * still delegated to lane B's exported `oversizedReplyAdvice`, so the knob and
- * floor facts stay in one file; the set this branches on is
- * {@link REPLAY_UNSAFE_ENGINE_METHODS}, whose BLOCKED-ON note explains the copy.
+ * still delegated to `tools.ts`'s exported `oversizedReplyAdvice`, so the knob and
+ * floor facts stay in one file; whether this branch is taken at all is asked of
+ * the transport (`isReplayUnsafeMethod` in `engine-client.ts`), the one layer that
+ * already answers that question when it caps a caller's wait.
  */
 function httpReplayUnsafePayloadAdvice(spec: ToolSpec, params: Record<string, unknown>): string {
   return "do not re-send this request on this answer. "

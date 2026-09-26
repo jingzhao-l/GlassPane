@@ -37,6 +37,55 @@ export interface LateArrivalOutcome {
   generationAtWrite: number;
 }
 
+/**
+ * How an id got into this trail, per id, in the words a renderer can put beside
+ * it. The three values are not adjectives of confidence: they name which
+ * mechanism wrote the id, and each one is a fact the session itself observes.
+ *
+ * - `in-order`: written by a call whose own request held a trail turn, answered
+ *   by a frame that echoed that request's id. This is the only entry the trail
+ *   may describe as verified.
+ * - `late`: written from a reply that landed after its caller had already been
+ *   answered, so it had no turn left to write at and took the position
+ *   {@link recordLateArrival} gives it — behind whatever is still outstanding.
+ *   The *operation* is the daemon's own; only its place in request order is
+ *   arranged by arrival.
+ * - `late-inferred`: that same late write, for a frame that echoed **no request
+ *   id** (R10-中2). Which request it answers is then a guess from the daemon's
+ *   in-order scheduling, not a match, and an id pulled out of it can be filed
+ *   under the wrong operation. The trail still records it — dropping it would
+ *   claim "no such operation ran", which is the more dangerous lie for an agent
+ *   deciding whether to click again — but it must not read as verified, and
+ *   `gp_recent_reports` has to say so from here rather than from the log line.
+ *
+ * Producers: `EngineJsonRpcClient`'s `LateReply.attribution` decides between the
+ * last two (`echoed-id` -> `late`, `arrival-order` -> `late-inferred`); a caller
+ * that passes nothing gets `late`, which is everything this session can see on
+ * its own.
+ */
+export type TrailProvenance = "in-order" | "late" | "late-inferred";
+
+/**
+ * The attribution a late arrival carries: the same two literals
+ * `engine-client.ts`'s `FrameAttribution` produces, and `unknown` for a caller
+ * that cannot say (a wiring that has not read the field yet).
+ */
+export type LateArrivalAttribution = "echoed-id" | "arrival-order" | "unknown";
+
+/**
+ * The sentence the surface that shows the trail puts beside one id. Written here
+ * because this is the layer that knows the mechanism; the tool layer renders it.
+ */
+export const TRAIL_PROVENANCE_NOTES: Readonly<Record<TrailProvenance, string>> = {
+  "in-order": "recorded from the reply to this session's own request, matched by the id that request carried",
+  "late": "recorded from a reply that landed after its caller had already been answered, so it was filed at the next "
+    + "free trail position rather than at its request's own",
+  "late-inferred": "recorded from a reply that landed late AND echoed no request id: which request it answers is "
+    + "inferred from arrival order (the daemon answers in the order it received them) and could not be confirmed by an "
+    + "echoed id, so this operation is listed as inferred — not as verified — and its identity, not merely its order, "
+    + "is what the inference covers",
+};
+
 /** A claimed position whose holder has not released yet. */
 interface TrailGate {
   settled: Promise<void>;
@@ -66,16 +115,71 @@ export class EvidenceAuditSession {
    */
   private openGates = new Set<TrailGate>();
 
-  /** Record every operationId/evidenceId found in an engine result frame. */
+  /**
+   * How each id in {@link ids} got here. Keyed by the id, because that is what a
+   * reader holds; the map is trimmed with the list and cleared when the trail
+   * restarts, so an id can never outlive the provenance that describes it.
+   */
+  private readonly provenance = new Map<string, TrailProvenance>();
+
+  /**
+   * Non-null while {@link recordLateArrival} holds the trail, and says how the
+   * frame being written was attributed. This is what lets a plain
+   * `trail.record(result)` inside that callback be filed as a late arrival without
+   * the caller having to remember to say so: the write happens inside a window only
+   * that method opens, so the mechanism is visible here rather than being a claim
+   * somebody must repeat at every call site.
+   */
+  private lateWindow: LateArrivalAttribution | null = null;
+
+  /**
+   * Record every operationId/evidenceId found in an engine result frame, tagged
+   * with the provenance of the path that is recording it (see
+   * {@link TrailProvenance}): `in-order` from a call that held its own trail turn,
+   * `late`/`late-inferred` from inside {@link recordLateArrival}.
+   */
   record(result: unknown): void {
+    const source: TrailProvenance = this.lateWindow === null
+      ? "in-order"
+      : this.lateWindow === "arrival-order" ? "late-inferred" : "late";
     for (const id of collectOperationIds(result)) {
       if (!this.ids.includes(id)) {
+        // First arrival wins, in both lists. An id that arrives a second time
+        // through a *worse* channel would otherwise upgrade the record: the
+        // guessed attribution is the one an agent has to be told about, and a
+        // re-arrival never confirms the frame that was matched by guesswork.
         this.ids.push(id);
+        this.provenance.set(id, source);
         if (this.ids.length > AUDIT_HISTORY_LIMIT) {
-          this.ids.splice(0, this.ids.length - AUDIT_HISTORY_LIMIT);
+          const evicted = this.ids.splice(0, this.ids.length - AUDIT_HISTORY_LIMIT);
+          for (const gone of evicted) {
+            this.provenance.delete(gone);
+          }
         }
       }
     }
+  }
+
+  /**
+   * How one id in this trail got recorded, or null when the trail does not hold
+   * it — never recorded, evicted past {@link AUDIT_HISTORY_LIMIT}, or cleared by a
+   * {@link restart}. A reader that lists ids for an agent renders
+   * {@link TRAIL_PROVENANCE_NOTES} for anything that is not `in-order`: an id
+   * pulled from a frame this shell only *guessed* an owner for must not appear
+   * beside one it matched by id (R10-中2).
+   *
+   * Read off the map alone, so the map *is* the record of what the trail holds: an
+   * id whose provenance outlives its own entry would come back labelled as if it
+   * were still listed, and the eviction and the restart are the two places that
+   * would have to remember to delete. `test/engine-client.test.mjs` pins both.
+   */
+  provenanceOf(id: string): TrailProvenance | null {
+    return this.provenance.get(id) ?? null;
+  }
+
+  /** The ids currently filed as inferred; see {@link TrailProvenance}. */
+  inferredIds(): string[] {
+    return this.ids.filter((id) => this.provenance.get(id) === "late-inferred");
   }
 
   /**
@@ -128,6 +232,7 @@ export class EvidenceAuditSession {
     }
     this.attachedAppKey = appKey;
     this.ids = [];
+    this.provenance.clear();
     this.epoch += 1;
     // Deliberately does *not* touch `openGates`: outstanding turns are not
     // outstanding mutations, and forgetting them would let a later read overtake
@@ -160,10 +265,20 @@ export class EvidenceAuditSession {
    * decides whether that is acceptable; this method refuses it by default, because
    * "we do not know which attach this belongs to" is not a reason to write into
    * somebody else's trail.
+   *
+   * `attribution` is how the transport matched that frame to a request, and it is
+   * the difference between `late` and `late-inferred` below: a frame that echoed
+   * the id the client sent is confirmed, one with no id is filed against the
+   * oldest tracked request by the daemon's in-order scheduling (R10-中2). Anything
+   * this method writes is a late arrival by construction, so the window opens
+   * whether or not the caller can say more — the default `unknown` is what the
+   * session can see on its own, and it is *not* `in-order`: an unconfirmed
+   * attribution must not read as a verified one.
    */
   recordLateArrival(
     apply: (session: EvidenceAuditSession) => void,
     admittedUnderGeneration?: number,
+    attribution: LateArrivalAttribution = "unknown",
   ): Promise<LateArrivalOutcome> {
     const turn = this.claimTrailTurn();
     return turn.acquire().then(() => {
@@ -183,9 +298,15 @@ export class EvidenceAuditSession {
         // is actually held: 8b's first version restarted only on the non-late
         // path, so an attach whose own caller had already been answered never
         // restarted anything and left no log line at all.
+        //
+        // The window is opened for the whole of that callback and closed in the
+        // `finally`, so a `record()` inside it is tagged by the mechanism that is
+        // actually running rather than by whether the caller remembered to say so.
+        this.lateWindow = attribution;
         apply(this);
         return { written: true, generationAtWrite: this.epoch };
       } finally {
+        this.lateWindow = null;
         // Released in every outcome: a turn that never released would hold up
         // every later trail-scoped call, which is a worse failure than losing
         // one late id.

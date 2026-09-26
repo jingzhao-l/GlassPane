@@ -399,22 +399,102 @@ function readFailureMessage(filePath: string, failure: string): string {
   return `projects.json at ${filePath} ${failure}. This is a read failure, not an empty registry: the entries that are registered cannot be listed. See the damage with \`python3 -m json.tool ${filePath}\`, then repair or replace that file. To rebuild the registry from scratch instead — which costs every existing entry — set ${FORCE_OVERWRITE_ENV}=1 and call gp_project_set again.`;
 }
 
+/**
+ * The modes the daemon's `StateRoot` publishes for this state root: the
+ * directory `0700`, every file inside it `0600` (`StateRoot.tightenPermissions`
+ * / `StateRoot.isolateFile`, spec revision §8 "就地收紧"). These are the daemon's
+ * numbers, not this writer's preference — it reads and writes the *same*
+ * `projects.json`, and the table it holds is the project list a daemon will act
+ * on for every local account that can read it.
+ *
+ * The round-4 decision for this family of defects is *tighten in place*: what the
+ * state root already is gets brought to the documented mode, rather than what is
+ * documented being lowered to what the file happens to be. So these are applied
+ * to a pre-existing directory and a pre-existing file too, which is the half the
+ * old code skipped — `mkdir` with the default mode plus a `writeFileSync` with no
+ * mode answered 0755/0644 under umask 022, and `StateRoot.swift`'s own comment
+ * names "a ~/.glasspane made by the MCP shell" as the hole the daemon then has to
+ * close at the next start. Until that start, every `gp_project_set` re-loosened
+ * what the daemon had tightened.
+ */
+const STATE_DIR_MODE = 0o700;
+const STATE_FILE_MODE = 0o600;
+
+/**
+ * Bring one path to `want` and *verify it after* the chmod.
+ *
+ * The verification is not decoration: a volume that ignores chmod (read-only
+ * mount, ACL, immutable flag) answers the call with success and leaves the old
+ * mode in place, which is exactly the case where the file is world-readable and
+ * the writer believes it is not. The daemon does the same two-step
+ * (`StateRoot.isolateFile`), and refuses out loud when the mode does not stick —
+ * so does this, under the code that means "the write did not land as promised".
+ */
+function tightenMode(target: string, want: number, kind: "directory" | "file"): void {
+  try {
+    fs.chmodSync(target, want);
+  } catch (error) {
+    throw new ProjectRegistryError(
+      GP_E_INTERNAL,
+      `the ${kind} ${target} could not be made owner-only (chmod ${(want & 0o777).toString(8)} failed: ${describeError(error)})`,
+    );
+  }
+  let mode: number;
+  try {
+    mode = fs.statSync(target).mode & 0o777;
+  } catch (error) {
+    throw new ProjectRegistryError(
+      GP_E_INTERNAL,
+      `the ${kind} ${target} was tightened but cannot be read back (${describeError(error)})`,
+    );
+  }
+  if (mode !== want) {
+    throw new ProjectRegistryError(
+      GP_E_INTERNAL,
+      `the ${kind} ${target} is still ${(mode & 0o777).toString(8)} after chmod(${(want & 0o777).toString(8)})`,
+    );
+  }
+}
+
 function saveProjects(filePath: string, entries: ProjectEntry[]): void {
   const dir = path.dirname(filePath);
-  fs.mkdirSync(dir, { recursive: true });
   // Atomic write: tmp + rename. The temp name is unique per write — three
   // different processes rewrite this file (daemon CLI, shell tools, panel),
   // and a shared `<file>.tmp` lets one writer rename another's half-written
   // buffer into place.
   const tmpPath = `${filePath}.tmp-${uniqueToken()}`;
   try {
+    // `mode` on `mkdir` is applied only to what it creates *and* masked by the
+    // process umask, so it cannot be the whole answer; the chmod inside is what
+    // makes the promise true, and it runs on a directory that already existed.
+    fs.mkdirSync(dir, { recursive: true, mode: STATE_DIR_MODE });
+    tightenMode(dir, STATE_DIR_MODE, "directory");
     fs.writeFileSync(tmpPath, JSON.stringify(entries, null, 2), "utf8");
+    // Tightened while it still carries the temp name, so the path that is
+    // *created* is never world-readable, and judged again after the rename: a
+    // replacement can hand the destination's older, looser mode to the item that
+    // lands (the daemon says as much about `replaceItemAt` on APFS), which is the
+    // pre-existing world-readable file this shell is about to rewrite.
+    tightenMode(tmpPath, STATE_FILE_MODE, "file");
     fs.renameSync(tmpPath, filePath);
+    tightenMode(filePath, STATE_FILE_MODE, "file");
   } catch (error) {
+    // The half-written temp file goes either way: a mode that would not stick is
+    // no reason to leave litter next to a registry somebody else has to read.
     try {
       fs.unlinkSync(tmpPath);
     } catch {
       /* temp already gone, or never created */
+    }
+    if (error instanceof ProjectRegistryError) {
+      throw new ProjectRegistryError(
+        error.code,
+        `${error.message}; projects.json at ${filePath} was therefore not published as owner-only, and `
+        + `gp_project_set refuses to report a write the daemon's own modes did not hold. Bring the state root `
+        + `to them yourself (chmod 700 ${dir}, chmod 600 ${filePath}) and retry — a volume that ignores chmod `
+        + "(read-only mount, ACL, immutable flag) needs the daemon's --state-dir moved to one that honours "
+        + "permissions; until then the registry on disk and this shell disagree about who can read it",
+      );
     }
     throw error;
   }
@@ -746,8 +826,45 @@ const PATH_SHAPE_HINT =
   + "the user running this shell (never a shared tree such as /Users/Shared, another "
   + "user's home, /private/tmp, or a top-level directory of the boot volume), and not the "
   + "filesystem root, a mounted volume root, your home directory, anything under "
-  + `~/Library, or a system-owned tree (${PROTECTED_SUBTREES.join(", ")}) `
+  + "~/Library, a dot-directory of your home (`~/.ssh`, `~/.aws`, `~/.gnupg`, "
+  + "`~/.config`, `~/.glasspane` and their kin — the daemon chmods whatever is registered "
+  + "here to 0700 and writes evidence packs into it, so a credential store or the daemon's "
+  + "own state root is the wrong answer twice over), or a system-owned tree "
+  + `(${PROTECTED_SUBTREES.join(", ")}) `
   + "— the daemon writes evidence into this directory and deletes expired entries from it";
+
+/**
+ * The home dot-directory rule of {@link refuseCandidate}.
+ *
+ * A path under the home directory is judged by ownership and by the world-writable
+ * test, and a home dot-directory passes both: the user owns `~/.ssh`, and it is not
+ * world-writable — it is usually 0700, which is *why* it holds what it holds. The
+ * registration the daemon then performs on it is `chmod 0700` (already true) plus
+ * **writing evidence packs into it** (`EvidenceStore` prunes expired packs from the
+ * registered directory), so a mistyped value turns the account's key chain or the
+ * daemon's own state root into an archive this shell hands out `gp_export_evidence`
+ * from — and the prune half can delete what it finds there.
+ *
+ * So the boundary is: a *project-owned directory*, which a dot-directory directly
+ * under the home is not. `~/work/notes-app/.glasspane/evidence` stays legal (the
+ * dot-directory there is two levels below the home, inside a project tree, which is
+ * exactly the shape the hint above advertises); `~/.ssh` and everything under it
+ * does not.
+ */
+function refuseHomeDotDirectory(target: string, home: string): PathRefusal | null {
+  if (!isInside(home, target) || target === home) {
+    return null;
+  }
+  const first = target.slice(home.length + 1).split("/")[0];
+  if (first === undefined || first.length < 2 || first[0] !== ".") {
+    return null;
+  }
+  return named(`a dot-directory of the current user's home directory (~/${first}), which is where that `
+    + "account's credentials and client configuration live (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config`) or "
+    + "the daemon's own private state (`~/.glasspane`); the daemon chmods a registered storage root to 0700 "
+    + "and writes evidence packs into it, and prunes expired ones out of it, so this is not a place a project "
+    + `archive may be pointed at — name a directory inside the project instead, e.g. "the project tree/${first}"`);
+}
 
 /**
  * Why `target` (already firmlink-normalized) is unusable, or null if fine.
@@ -763,7 +880,10 @@ const PATH_SHAPE_HINT =
  *
  * The named list is kept rather than folded into that rule for the case the
  * ownership test cannot see: this shell running as uid 0 owns everything, and a
- * system tree is still somebody else's data root.
+ * system tree is still somebody else's data root. The same blind spot is why
+ * {@link refuseHomeDotDirectory} is a named rule and not an ownership one: the
+ * user's `~/.ssh` is owned by the user and is not world-writable, so the generic
+ * test waves it through — and the registered root is where the daemon then writes.
  *
  * The two halves answer differently, so each tags its reason (see {@link
  * PathRefusal}): the named rules are marked `named` and the ownership fallback
@@ -786,6 +906,8 @@ function refuseCandidate(target: string): PathRefusal | null {
   const home = stripFirmlink(path.posix.normalize(systemHome()));
   if (target === home) return named("the current user's home directory");
   if (isInside(`${home}/Library`, target)) return named("inside the current user's Library folder");
+  const homeDot = refuseHomeDotDirectory(target, home);
+  if (homeDot !== null) return homeDot;
   if (isProtectedRoot(target)) return named("a protected system root");
   const components = target.split("/").filter((c) => c !== "");
   if (components.length === 0) return named("the filesystem root");

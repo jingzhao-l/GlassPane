@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  SelectorSchema,
+  SELECTOR_MAX_LENGTH,
   ActionSchema,
   AssertionPropertySchema,
   parseEvidencePackRead,
@@ -17,7 +17,10 @@ import {
   CALLER_VISIBLE_CEILING_MS,
   EngineCallError,
   EngineJsonRpcClient,
+  LIVENESS_PROBE_OUTCOMES,
   isReplayUnsafeMethod,
+  lateReplyRoute,
+  livenessProbeDecision,
 } from "./engine-client.js";
 import {
   formatToolError,
@@ -63,16 +66,63 @@ const OptionalPidSchema = z.number().int().min(1).max(PID_INT32_MAX).optional();
 const OptionalDepthSchema = z.number().int().min(1).max(10).optional();
 const OptionalRoleSchema = z.string().max(128).optional();
 const OptionalBundleIdSchema = z.string().max(256).optional();
-const OptionalOperationIdSchema = z.string().regex(/^op_[0-9A-HJKMNP-TV-Z]{26}$/).optional();
+/**
+ * The id grammar, in one place: `op_` + 26 Crockford base32 characters
+ * (P0 §4.1, mirrored by `ParamValidation.operationIdPattern` on the daemon side
+ * and by `OPERATION_ID_PATTERN` in `http-gateway.ts`).
+ *
+ * It is a `const` rather than three inline regex literals because the shape is
+ * now consulted at a second kind of place: {@link recentReports} checks an id it
+ * harvested out of a daemon frame *before* spending a request on it, and the one
+ * rule has to be the rule the agent was advertised.
+ */
+const OPERATION_ID_PATTERN = /^op_[0-9A-HJKMNP-TV-Z]{26}$/;
+const OptionalOperationIdSchema = z.string().regex(OPERATION_ID_PATTERN).optional();
 const OptionalProjectIdSchema = z.string().regex(/^prj_[0-9A-HJKMNP-TV-Z]{26}$/).optional();
 
 const ExpectSchema = z.union([z.string().max(512), z.boolean()]);
+
+/**
+ * The **request-side** selector rule, tightened over the kernel's shared one.
+ *
+ * The kernel's `SelectorSchema` (used unchanged when *reading* a pack back,
+ * which is right: a pack on disk is a record, not a request) only caps the
+ * length, so it accepts `role: ""` and `title: ""`. Neither is a question any
+ * part of this stack can answer honestly, and the two fail differently:
+ *
+ *  - `role: ""` is refused by the daemon outright
+ *    (`ParamValidation.optSelector`, `guard … , !role.isEmpty`), so the shell
+ *    used to spend a round trip to learn a rule it could have applied itself —
+ *    and on the HTTP gateway it spent one and then reported the daemon's
+ *    wording instead of this tool's.
+ *  - `title: ""` is *accepted* by the daemon, matched by exact equality in
+ *    `AXChannel.elementMatches` (`title != wantedTitle`), and then printed as
+ *    **absent** by the evidence report (`selector.title?.nonEmpty`). So the
+ *    action that was performed and the evidence describing it disagree, which
+ *    is the one outcome an evidence surface may not produce.
+ *
+ * Refusing both here is the shell-side half of the fix; `test/tools.test.mjs`
+ * reads the rules above out of the daemon's own sources rather than restating
+ * them, so a daemon that starts accepting an empty `role` — or starts printing
+ * an empty `title` — reddens that gate instead of quietly disagreeing with this
+ * file. The published JSON Schema below carries the same `minLength`, so what
+ * `tools/list` advertises is what is enforced.
+ *
+ * `identifier` keeps the kernel's rule: the daemon has no emptiness guard on it
+ * either, but an empty identifier can only ever *fail to resolve* (nothing in
+ * the tree carries one), so the disagreement the title has never arises.
+ */
+const ShellSelectorSchema = z.strictObject({
+  role: z.string().min(1).max(SELECTOR_MAX_LENGTH),
+  title: z.string().min(1).max(SELECTOR_MAX_LENGTH).optional(),
+  identifier: z.string().max(SELECTOR_MAX_LENGTH).optional(),
+});
 
 /** Crockford base32 body shared by op_/snap_ ids (P0 §4.1 / P1 v1.1 §1.2). */
 const SnapshotIdSchema = z.string().regex(/^snap_[0-9A-HJKMNP-TV-Z]{26}$/);
 
 const ActStepSchema = z.strictObject({
-  selector: SelectorSchema,
+  selector: ShellSelectorSchema,
   action: ActionSchema,
 });
 const RestoreStepsSchema = z.array(ActStepSchema).min(1).max(64).optional();
@@ -132,14 +182,14 @@ export const AuditUiArgs = z.strictObject({
 export type AuditUiArgs = z.infer<typeof AuditUiArgs>;
 
 export const ActArgs = z.strictObject({
-  selector: SelectorSchema,
+  selector: ShellSelectorSchema,
   action: ActionSchema,
   degrade: z.boolean().optional(),
 });
 export type ActArgs = z.infer<typeof ActArgs>;
 
 export const AssertElementArgs = z.strictObject({
-  selector: SelectorSchema,
+  selector: ShellSelectorSchema,
   property: AssertionPropertySchema,
   expected: ExpectSchema,
 });
@@ -175,7 +225,7 @@ export type ProbeStatusArgs = z.infer<typeof ProbeStatusArgs>;
 const ReportFormatSchema = z.enum(["html", "markdown"]).default("markdown");
 
 export const ExportEvidenceArgs = z.strictObject({
-  operationId: z.string().regex(/^op_[0-9A-HJKMNP-TV-Z]{26}$/),
+  operationId: z.string().regex(OPERATION_ID_PATTERN),
   format: ReportFormatSchema,
 });
 export type ExportEvidenceArgs = z.infer<typeof ExportEvidenceArgs>;
@@ -260,9 +310,12 @@ const selectorJsonSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
-    role: { type: "string", maxLength: 512 },
-    title: { type: "string", maxLength: 512 },
-    identifier: { type: "string", maxLength: 512 },
+    // `minLength` here is the advertised half of {@link ShellSelectorSchema};
+    // `test/tools.test.mjs` compares the two against each other and against the
+    // daemon's own rule, so neither side can be tightened or loosened alone.
+    role: { type: "string", minLength: 1, maxLength: SELECTOR_MAX_LENGTH },
+    title: { type: "string", minLength: 1, maxLength: SELECTOR_MAX_LENGTH },
+    identifier: { type: "string", maxLength: SELECTOR_MAX_LENGTH },
   },
   required: ["role"],
 } as const;
@@ -890,6 +943,74 @@ export function replayUnsafePayloadAdvice(
     + `and a retried identical request will be dropped identically.`;
 }
 
+/**
+ * The advice for a request that was never answered inside the caller's wait.
+ *
+ * R9-中3 moved this here on purpose. A deadline overrun is the one engine error
+ * whose *cause* the transport knows ("still working on the request in front of
+ * yours") and whose *cure* it cannot know: which parameter would have made this
+ * answer cheaper is a property of the tool, and the only authority for that is
+ * the schema the tool published to `tools/list`. The transport therefore states
+ * the fact and the wait; the narrowing clause below is composed from the same
+ * advertised bounds `oversizedReplyAdvice` reads, so it is floor-aware for time
+ * exactly as it is for size — `gp_observe {maxDepth: 1}` is told that its depth
+ * is already at the tool's floor, never told to lower a value this shell would
+ * then reject with `GP_E_BAD_PARAMS`.
+ *
+ * What the transport owns is imported rather than re-worded — the four probe
+ * outcomes ({@link livenessProbeDecision}), the one outcome that authorises a
+ * restart, and the bounded late-reply window ({@link lateReplyRoute}) — because a
+ * rewritten remedy that silently dropped "a busy daemon is not a dead daemon"
+ * would send the agent to `--restore-launchd` over an act in flight, which is the
+ * exact harm R8-高1 removed.
+ */
+export function slowReplyAdvice(
+  spec: ToolSpec,
+  params: Record<string, unknown>,
+): string {
+  const knobs = narrowingKnobsFor(spec, params);
+  const atFloor = knobs.filter(atAdvertisedFloor);
+  const shrinkable = knobs.filter((knob) => !atAdvertisedFloor(knob));
+  const floorNote = atFloor.length === 0 ? "" : ` ${atFloor.map(describeKnob).join("; ")}.`;
+  const narrowed = shrinkable.length === 0
+    ? `there is nothing left to narrow on this request:${floorNote} ask a smaller question `
+      + "(one element, one region) rather than re-sending the same one and waiting out the "
+      + "same deadline on it"
+    : `once it is answered, re-send '${spec.name}' with ${shrinkable.map(describeKnob).join(" and ")} `
+      + `— these are the parameters this tool itself advertises as deciding how much work one `
+      + `answer carries${floorNote}`;
+  const probeGuide = LIVENESS_PROBE_OUTCOMES
+    .map((outcome) => `${outcome} — ${livenessProbeDecision(outcome)}`)
+    .join("; ");
+  return "the daemon serves one request at a time and is still working on this one, so this answer "
+    + "describes a busy daemon, not a dead one: wait for it, and do not put a second copy of the same "
+    + `request on the wire while the first is outstanding — it queues behind the work that is already late. ${narrowed}. `
+    + "If your client can send a second request while this one is still outstanding, confirm the daemon is "
+    + "alive with gp_probe_status (this shell does not queue one MCP request behind another) and read its "
+    + `answer as: ${probeGuide}. A restart is authorised only by ${livenessProbeDecision("unreachable")}. `
+    + `Nothing is discarded by this shell having answered early: ${lateReplyRoute("mcp")}`;
+}
+
+/**
+ * Does the tool layer have more to say about a timeout on `method` than the
+ * transport does?
+ *
+ * Only where the tool actually advertises a knob: a request that carries one is
+ * the request whose cost the caller can still change, and the transport cannot
+ * see the tool's schema. Everywhere else the transport's own sentence stands —
+ * including `gp_probe_status`, whose remedy the transport writes specially because
+ * a probe that went unanswered must not be told to send a probe (and must not
+ * name a restart at all). Replay-unsafe methods are the transport's too: its
+ * remedy already forbids the re-issue, and this layer adds no reason to re-issue.
+ */
+export function toolAuthorsTimeoutAdvice(
+  spec: ToolSpec,
+  method: string,
+  params: Record<string, unknown>,
+): boolean {
+  return !isReplayUnsafeMethod(method) && narrowingKnobsFor(spec, params).length > 0;
+}
+
 /** Read the trail once this call's turn comes up, i.e. in request order. */
 async function readTrail(
   session: EvidenceAuditSession,
@@ -1429,6 +1550,63 @@ type RecentReportFetch =
   | { kind: "missing" }
   | { kind: "failed"; error: unknown };
 
+/**
+ * How much of one trail id a report prints.
+ *
+ * An id that reached the trail from a daemon frame can be any string, and the
+ * report is one text part: unbounded, twenty of them are a payload this shell
+ * then refuses to deliver (`MAX_FRAME_BYTES`), which is a worse outcome than a
+ * truncated name.
+ */
+const RENDERED_ID_MAX_CHARS = 64;
+
+/** Markdown structure characters: none of them occurs in an accepted id. */
+const MARKDOWN_STRUCTURE_CHARS = /[`|[\]<>#*\\]/g;
+
+/**
+ * One string that did not come from this shell's own vocabulary, bounded and
+ * neutralised for the report it is about to appear in.
+ *
+ * Two renderings, and each half is load-bearing on its own: an HTML report is
+ * consumed by something that parses tags, so `&` and `<` have to come back as
+ * entities; a Markdown report is consumed by something that parses headings,
+ * emphasis and tables, so a `#`, a `*` or a backtick would restructure it. An
+ * accepted operationId contains none of those characters, which is why bounding
+ * and neutralising cost the normal case nothing.
+ */
+function renderForeign(text: string, format: "html" | "markdown"): string {
+  const bounded = text.length <= RENDERED_ID_MAX_CHARS
+    ? text
+    : `${text.slice(0, RENDERED_ID_MAX_CHARS)}…+${text.length - RENDERED_ID_MAX_CHARS} more chars`;
+  const stripped = bounded.replace(/[\u0000-\u001f\u007f]/g, "·");
+  return format === "html"
+    ? escapeHTML(stripped)
+    : stripped.replace(MARKDOWN_STRUCTURE_CHARS, "·");
+}
+
+/** One trail id as it appears in a report. */
+function renderTrailId(id: string, format: "html" | "markdown"): string {
+  return renderForeign(id, format);
+}
+
+/** A list of trail ids as it appears in a report. */
+function renderTrailIds(ids: readonly string[], format: "html" | "markdown"): string {
+  return ids.map((id) => renderTrailId(id, format)).join(", ");
+}
+
+/** One fetch failure, in the one line a partial report has room for. */
+function describeFetchFailure(error: unknown): string {
+  if (error instanceof EngineCallError) {
+    return `${error.code}: ${error.message}`;
+  }
+  const mapped = mapEvidenceReadError(error);
+  if (mapped !== undefined) {
+    const [first] = mapped.content;
+    return first !== undefined && first.type === "text" ? first.text : "the evidence read failed";
+  }
+  return `${GP_E_INTERNAL}: ${String(error)}`;
+}
+
 async function recentReports(
   args: Record<string, unknown>,
   context: ToolExecuteContext,
@@ -1452,6 +1630,43 @@ async function recentReports(
     };
   }
 
+  // The trail is written from *any* daemon frame: `EvidenceAuditSession.record`
+  // collects every string-valued `operationId`/`evidenceId` it finds, with no
+  // shape check of its own (it must not invent one — the frames it reads are the
+  // daemon's). So an id can reach here that `gp_last_evidence`'s own
+  // `operationId` rule would reject, and the HTTP half has always checked
+  // (`http-gateway.ts` `OPERATION_ID_PATTERN`). Asking the daemon for one costs a
+  // round trip to be told `GP_E_BAD_PARAMS`, and — because a hard error used to
+  // abort this call outright — it threw away every pack already fetched, which is
+  // the one outcome that leaves the agent holding nothing and re-running the act
+  // the report was opened to check on. Validate the shape *before* spending the
+  // request, report the rejects, never send them.
+  const rejected: string[] = [];
+  const sendable: string[] = [];
+  for (const id of ids) {
+    (OPERATION_ID_PATTERN.test(id) ? sendable : rejected).push(id);
+  }
+  const format = argv.format === "html" ? ("html" as const) : ("markdown" as const);
+  const rejectedClause = (count: number) => `rejected ${count} trail ${count === 1 ? "entry" : "entries"}`
+    + ` whose operationId is not one this shell sends (must match op_ + 26 Crockford base32 characters): `;
+  if (sendable.length === 0) {
+    return {
+      content: [{ type: "text", text: formatToolError(
+        GP_E_INTERNAL,
+        `gp_recent_reports sent no request: all ${ids.length} ${ids.length === 1 ? "id" : "ids"} in this session's trail `
+        + "are shaped like operationIds the daemon would reject, so this shell refused them before the wire: "
+        + renderTrailIds(rejected, format),
+        "these ids were harvested from engine reply frames, so the disagreement is between the daemon and the id "
+        + "grammar this shell publishes, not in your arguments, and nothing here can repair one: gp_last_evidence "
+        + "and gp_export_evidence apply the same rule, so an id rejected here cannot be fetched from there either. "
+        + "Re-run gp_act / gp_assert_element only for work that genuinely has not happened — the operations behind "
+        + "these ids are recorded in the trail, and this call reporting them unusable is not evidence that they did "
+        + "not run",
+      ) }],
+      isError: true,
+    };
+  }
+
   // Fetch each trail id; the daemon's bounded history may have evicted it or the
   // engine may have restarted, so per-item misses are skipped with a note
   // instead of failing the whole report — and the whole fan-out is bounded by
@@ -1460,6 +1675,12 @@ async function recentReports(
   const packs: Array<{ id: string; pack: EvidencePackReportView }> = [];
   const skipped: string[] = [];
   const notFetched: string[] = [];
+  /** One id the daemon answered with something that is not "no evidence". */
+  let hardFailure: {
+    id: string;
+    line: string;
+    mapped: ToolResult;
+  } | null = null;
   const fetchOne = async (id: string): Promise<RecentReportFetch> => {
     try {
       // The per-id fetches are reads, but they still carry the generation: a
@@ -1485,9 +1706,9 @@ async function recentReports(
 
   const budget = new CallBudget(RECENT_REPORTS_BUDGET_MS);
   try {
-    for (const [index, id] of ids.entries()) {
+    for (const [index, id] of sendable.entries()) {
       if (budget.spent) {
-        notFetched.push(...ids.slice(index));
+        notFetched.push(...sendable.slice(index));
         break;
       }
       const settled = await Promise.race([fetchOne(id), budget.expired]);
@@ -1496,7 +1717,7 @@ async function recentReports(
         // been sent: they stay named in the report, because the daemon may still
         // be answering the one in flight — precisely what an agent has to know
         // before it decides whether the action behind it needs doing again.
-        notFetched.push(...ids.slice(index));
+        notFetched.push(...sendable.slice(index));
         break;
       }
       if (settled.kind === "pack") {
@@ -1504,11 +1725,47 @@ async function recentReports(
       } else if (settled.kind === "missing") {
         skipped.push(id);
       } else {
-        return mapAuditError(settled.error);
+        // The fan-out stops — this shell is not going to keep asking a daemon
+        // that answers with an unexpected error — but the packs already in hand
+        // do not go with it. Everything the call did manage to read is rendered,
+        // and the id that failed is named with the answer it got.
+        hardFailure = {
+          id,
+          line: describeFetchFailure(settled.error),
+          mapped: mapAuditError(settled.error),
+        };
+        notFetched.push(...sendable.slice(index + 1));
+        break;
       }
     }
   } finally {
     budget.done();
+  }
+
+  if (packs.length === 0 && hardFailure !== null) {
+    // Nothing could be rendered, so the daemon's own answer is the whole of this
+    // call's information and goes out under its own code — the same answer the
+    // call gave before the packs were made to survive a failure, with the ids it
+    // never reached appended so that a partial fetch is never read as a full one.
+    const [first] = hardFailure.mapped.content;
+    const base = first !== undefined && first.type === "text"
+      ? first.text
+      : `${GP_E_INTERNAL}: the evidence read failed`;
+    const extras: string[] = [];
+    if (notFetched.length > 0) {
+      extras.push(`${notFetched.length} further ${notFetched.length === 1 ? "entry" : "entries"} never fetched: `
+        + renderTrailIds(notFetched, format));
+    }
+    if (rejected.length > 0) {
+      extras.push(`${rejectedClause(rejected.length)}${renderTrailIds(rejected, format)}`);
+    }
+    return {
+      content: [{
+        type: "text",
+        text: extras.length === 0 ? base : `${base}\n> ${extras.join("; ")}`,
+      }],
+      isError: true,
+    };
   }
 
   if (packs.length === 0 && notFetched.length > 0) {
@@ -1519,7 +1776,7 @@ async function recentReports(
     return {
       content: [{ type: "text", text: formatToolError(
         GP_E_ENGINE_TIMEOUT,
-        `gp_recent_reports fetched no pack inside its ${RECENT_REPORTS_BUDGET_MS}ms budget: ${notFetched.length} of ${ids.length} trail ${ids.length === 1 ? "entry" : "entries"} went unanswered (${notFetched.join(", ")})`,
+        `gp_recent_reports fetched no pack inside its ${RECENT_REPORTS_BUDGET_MS}ms budget: ${notFetched.length} of ${ids.length} trail ${ids.length === 1 ? "entry" : "entries"} went unanswered (${renderTrailIds(notFetched, format)})`,
         "the operations are recorded and the daemon may still be answering; ask for fewer at once with a smaller limit (gp_recent_reports advertises 1…20), or read one operation with gp_last_evidence {operationId} / gp_export_evidence {operationId}, each of which answers inside its own deadline. Do not re-run gp_act to regenerate what the trail already holds",
       ) }],
       isError: true,
@@ -1537,28 +1794,45 @@ async function recentReports(
     };
   }
 
-  const render = argv.format === "html" ? renderHTML : renderMarkdown;
-  const header = argv.format === "html"
+  const render = format === "html" ? renderHTML : renderMarkdown;
+  const header = format === "html"
     ? `<h1>GlassPane recent reports (${packs.length})</h1>`
     : `# GlassPane recent reports (${packs.length})`;
-  const skipNote = skipped.length === 0 ? "" : argv.format === "html"
-    ? `<p class="gp-skipped">skipped ${skipped.length} unreachable ${skipped.length === 1 ? "entry" : "entries"}: ${escapeHTML(skipped.join(", "))}</p>`
-    : `> skipped ${skipped.length} unreachable ${skipped.length === 1 ? "entry" : "entries"}: ${skipped.join(", ")}`;
+  // Every dynamic value that reaches one of these notes has already been through
+  // {@link renderForeign}, so the note itself only assembles safe pieces.
+  const note = (className: string, sentence: string) => format === "html"
+    ? `<p class="${className}">${sentence}</p>`
+    : `> ${sentence}`;
+  const skipNote = skipped.length === 0
+    ? ""
+    : note("gp-skipped", `skipped ${skipped.length} unreachable ${skipped.length === 1 ? "entry" : "entries"}: ${renderTrailIds(skipped, format)}`);
   // A budget stop is a different fact from an unreachable entry: the daemon may
   // be answering these right now, so they are named as not fetched, with the
   // wait that ran out, and never folded into the "unreachable" count.
-  const unfetchedNote = notFetched.length === 0 ? "" : argv.format === "html"
-    ? `<p class="gp-not-fetched">not fetched within this report's ${RECENT_REPORTS_BUDGET_MS}ms wait: ${notFetched.length} ${notFetched.length === 1 ? "entry" : "entries"} left unanswered: ${escapeHTML(notFetched.join(", "))}. Fetch one by id with gp_last_evidence, or ask again with a smaller limit</p>`
-    : `> not fetched within this report's ${RECENT_REPORTS_BUDGET_MS}ms wait: ${notFetched.length} ${notFetched.length === 1 ? "entry" : "entries"} left unanswered: ${notFetched.join(", ")}. Fetch one by id with gp_last_evidence, or ask again with a smaller limit`;
-  const separator = argv.format === "html" ? "\n<hr>\n" : "\n\n---\n";
+  const unfetchedNote = notFetched.length === 0 ? "" : format === "html"
+    ? `<p class="gp-not-fetched">not fetched within this report's ${RECENT_REPORTS_BUDGET_MS}ms wait: ${notFetched.length} ${notFetched.length === 1 ? "entry" : "entries"} left unanswered: ${renderTrailIds(notFetched, format)}. Fetch one by id with gp_last_evidence, or ask again with a smaller limit</p>`
+    : `> not fetched within this report's ${RECENT_REPORTS_BUDGET_MS}ms wait: ${notFetched.length} ${notFetched.length === 1 ? "entry" : "entries"} left unanswered: ${renderTrailIds(notFetched, format)}. Fetch one by id with gp_last_evidence, or ask again with a smaller limit`;
+  // Ids this shell refused to send are reported as *rejected*, in their
+  // neutralised form, and never as "unreachable": the daemon was never asked, so
+  // it has no opinion about them, and an agent reading "unreachable" goes looking
+  // for evidence that was never addressable.
+  const rejectNote = rejected.length === 0
+    ? ""
+    : note("gp-rejected", `${rejectedClause(rejected.length)}${renderTrailIds(rejected, format)}. They were not sent, so nothing was lost by their absence here: gp_last_evidence validates an id the same way before it asks`);
+  const failureNote = hardFailure === null
+    ? ""
+    : note("gp-fetch-failed", `the report stops here: ${renderTrailId(hardFailure.id, format)} failed with `
+      + `${renderForeign(hardFailure.line, format)}. The ${packs.length} ${packs.length === 1 ? "pack" : "packs"} above were fetched and are `
+      + "rendered; read the failed one on its own with gp_last_evidence {operationId}. Do not re-run gp_act to "
+      + "regenerate what the trail already holds");
+  const separator = format === "html" ? "\n<hr>\n" : "\n\n---\n";
   const body = packs.map(({ pack }) => render(pack, undefined)).join(separator);
 
   const sections: string[] = [header];
-  if (skipNote !== "") {
-    sections.push(skipNote);
-  }
-  if (unfetchedNote !== "") {
-    sections.push(unfetchedNote);
+  for (const section of [rejectNote, skipNote, unfetchedNote, failureNote]) {
+    if (section !== "") {
+      sections.push(section);
+    }
   }
   sections.push(body);
   return { content: [{ type: "text", text: sections.join("\n") }], isError: false };
@@ -1601,10 +1875,14 @@ export type { Selector, Action, AssertionProperty };
  * sinks, its reconnecting transport) on the prototype chain and shadows exactly
  * one method, so wrapping cannot lose state or invent a fake client.
  *
- * The rewrite is not one sentence for every tool: a request whose re-issue
- * changes the user's screen gets the no-retry advice instead of the narrowing
- * advice, because "retry with a narrower X" is an instruction to perform that
- * change a second time. See {@link replayUnsafePayloadAdvice}.
+ * The rewrite is not one sentence for every tool, and not one error either:
+ * a request whose re-issue changes the user's screen gets the no-retry advice
+ * instead of the narrowing advice, because "retry with a narrower X" is an
+ * instruction to perform that change a second time. And a reply that never came
+ * back is a different fact from a reply that came back too big, so
+ * `GP_E_ENGINE_TIMEOUT` is rewritten too — for the tools that advertise a knob
+ * the transport cannot see ({@link toolAuthorsTimeoutAdvice}). See
+ * {@link replayUnsafePayloadAdvice} and {@link slowReplyAdvice}.
  *
  * `toolArgs` are the arguments the *agent* sent, which for an orchestrated tool
  * are not the params of the frame that failed: `gp_recent_reports` asks
@@ -1620,13 +1898,16 @@ export function engineWithPayloadAdvice(
   Object.defineProperty(wrapped, "call", {
     value: (method: string, params?: Record<string, unknown>, correlation?: number): Promise<unknown> =>
       engine.call(method, params, correlation).catch((error: unknown) => {
-        if (error instanceof EngineCallError && error.code === GP_E_PAYLOAD_TOO_LARGE) {
-          // The agent's own arguments are the ones it could change, and an
-          // orchestrated tool's inner request does not carry them:
-          // `gp_recent_reports` fetches `{operationId}` per id, so reading only
-          // the frame's params misses a `limit` the caller already sent. The
-          // request's own values win where both name one.
-          const asked = { ...toolArgs, ...params ?? {} };
+        if (!(error instanceof EngineCallError)) {
+          throw error;
+        }
+        // The agent's own arguments are the ones it could change, and an
+        // orchestrated tool's inner request does not carry them:
+        // `gp_recent_reports` fetches `{operationId}` per id, so reading only
+        // the frame's params misses a `limit` the caller already sent. The
+        // request's own values win where both name one.
+        const asked = { ...toolArgs, ...params ?? {} };
+        if (error.code === GP_E_PAYLOAD_TOO_LARGE) {
           throw new EngineCallError(
             error.code,
             error.message,
@@ -1634,6 +1915,12 @@ export function engineWithPayloadAdvice(
               ? replayUnsafePayloadAdvice(spec, method, asked)
               : oversizedReplyAdvice(spec, asked),
           );
+        }
+        if (
+          error.code === GP_E_ENGINE_TIMEOUT
+          && toolAuthorsTimeoutAdvice(spec, method, asked)
+        ) {
+          throw new EngineCallError(error.code, error.message, slowReplyAdvice(spec, asked));
         }
         throw error;
       }),
