@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 
 import {
   parseEvidencePack,
@@ -12,6 +12,7 @@ import {
 import { canonicalJson } from "../dist/canonical.js";
 import { EvidenceAuditSession } from "../dist/audit-session.js";
 import { RESTORE_MODES, TOOL_BY_NAME, executeTool } from "../dist/tools.js";
+import { ProjectSetArgs } from "../dist/project-registry.js";
 import { LineReader, MAX_FRAME_BYTES } from "../dist/io.js";
 import { executableSource } from "./support/source.mjs";
 import { makeEngine } from "./helpers.mjs";
@@ -269,13 +270,19 @@ test("failure/fixture-upstream: an unreadable fixture surfaces as an upstream re
  * narrowing: `pid_t(3000000000)` traps the daemon while it decodes the frame,
  * and a pid that large stored in projects.json makes Swift fail to decode the
  * whole registry file. So the value must die here, and tools/list must say so.
+ *
+ * The bounds below come from {@link daemonPidDomain}, which evaluates them out
+ * of `ParamValidation.swift`. They used to be `const PID_INT32_MAX = 2_147_483_647`
+ * written out here — the third hand copy of that number in the shell, after
+ * `src/tools.ts` and `src/project-registry.ts` — and a copy in the file whose
+ * job is to compare the others cannot notice any drift: it *is* the drift, read
+ * back as agreement. See "the daemon's pid domain" below for the gate.
  * ------------------------------------------------------------------ */
 
-const PID_INT32_MAX = 2_147_483_647;
-
 test("gp_attach refuses pids outside the daemon's Int32 domain without a frame", async () => {
+  const { lower, upper } = daemonPidDomain();
   const spec = TOOL_BY_NAME.get("gp_attach");
-  for (const pid of [0, -1, 1.5, PID_INT32_MAX + 1, 3_000_000_000]) {
+  for (const pid of [lower - 1, lower - 2, 1.5, upper + 1, 3_000_000_000]) {
     const { engine, io } = makeEngine();
     const outcome = await executeTool(spec, { pid }, engine);
     assert.equal(outcome.isError, true, `pid ${pid} must not reach the daemon`);
@@ -288,29 +295,31 @@ test("gp_attach refuses pids outside the daemon's Int32 domain without a frame",
 });
 
 test("gp_attach accepts the boundary pids the daemon can hold", async () => {
+  const { lower, upper } = daemonPidDomain();
   const spec = TOOL_BY_NAME.get("gp_attach");
-  for (const pid of [1, PID_INT32_MAX]) {
+  for (const pid of [lower, upper]) {
     const { engine, io } = makeEngine();
     const promise = executeTool(spec, { pid }, engine);
     io.respond({ pid, bundleId: "com.example.app", appName: "Example" });
     const outcome = await promise;
-    assert.equal(outcome.isError, false, `pid ${pid} is inside Int32`);
+    assert.equal(outcome.isError, false, `pid ${pid} is inside the daemon's domain`);
     assert.equal(io.sent.length, 1);
   }
 });
 
 test("the advertised pid schemas state the domain the validators enforce", () => {
+  const { lower, upper } = daemonPidDomain();
   // gp_attach forwards to the daemon's `pid_t` narrowing and gp_project_set
   // stores the value as a Swift `Int32?`: same domain (R4-01). The registry's
   // own fields are additionally patch-shaped, so `null` — "clear it" (B-11) — is
   // part of what its advertised type has to state.
   assert.deepEqual(TOOL_BY_NAME.get("gp_attach").inputSchema.properties.pid, {
     type: "integer",
-    minimum: 1,
-    maximum: PID_INT32_MAX,
+    minimum: lower,
+    maximum: upper,
   });
   const project = TOOL_BY_NAME.get("gp_project_set").inputSchema.properties;
-  assert.deepEqual(project.pid, { type: ["integer", "null"], minimum: 1, maximum: PID_INT32_MAX });
+  assert.deepEqual(project.pid, { type: ["integer", "null"], minimum: lower, maximum: upper });
   assert.deepEqual(project.bundleId, { type: ["string", "null"], maxLength: 256 });
   for (const field of ["recipeConfigPath", "calibrationAssetsPath", "evidenceStoragePath"]) {
     assert.deepEqual(project[field], { type: ["string", "null"], maxLength: 1024 });
@@ -423,6 +432,235 @@ const FRAME_CAP_CRITERIA = [
 ];
 
 /**
+ * The fixed-width integer types whose bounds a limit here can be spelled with,
+ * and how many bits each spans on the 64-bit platform this daemon runs on.
+ */
+const INTEGER_TYPE_BITS = {
+  Int: 64,
+  UInt: 64,
+  Int8: 8,
+  Int16: 16,
+  Int32: 32,
+  Int64: 64,
+  UInt8: 8,
+  UInt16: 16,
+  UInt32: 32,
+  UInt64: 64,
+};
+
+/** `Int32.max` / `UInt8.min` as a number — the form the daemon spells its ceilings. */
+function integerTypeBound(name) {
+  const [type, bound] = String(name).split(".");
+  const bits = INTEGER_TYPE_BITS[type];
+  assert.ok(
+    bits !== undefined && (bound === "max" || bound === "min"),
+    `\`${name}\` is not a fixed-width integer bound this gate resolves (\`Int\`/\`UInt\`, \`Int8\`…\`Int64\`, ` +
+    `\`UInt8\`…\`UInt64\`, each with \`.max\`/\`.min\`). A limit written another way is a different fact, not the same ` +
+    `fact spelled differently: point the gate at the new fact and say where it comes from`,
+  );
+  const signed = !type.startsWith("UInt");
+  const magnitude = 2 ** (signed ? bits - 1 : bits);
+  if (bound === "max") return magnitude - 1;
+  return signed ? -magnitude : 0;
+}
+
+/** `Int(x)`: Swift's trapping conversion — out of range there is no value at all. */
+function integerConversion(type, value, context) {
+  const bits = INTEGER_TYPE_BITS[type];
+  assert.ok(
+    bits !== undefined,
+    `${context}: \`${type}(…)\` is not an integer conversion this gate reads`,
+  );
+  const signed = !type.startsWith("UInt");
+  const magnitude = 2 ** (signed ? bits - 1 : bits);
+  const low = signed ? -magnitude : 0;
+  const high = magnitude - 1;
+  assert.ok(
+    Number.isInteger(value) && value >= low && value <= high,
+    `${context}: \`${type}(${value})\` is outside \`${type}\`, which is a run-time trap in Swift — the very failure ` +
+    `mode the pid bound exists to stop. A gate that read it as a number would be measuring a value no process can hold`,
+  );
+  return value;
+}
+
+/**
+ * Evaluate an integer expression read out of a source file: sums, products,
+ * parentheses, a leading minus, `_`-separated literals, fixed-width bounds by
+ * name, one-argument conversions of them, and whatever names the caller can
+ * resolve (usually a sibling declaration).
+ *
+ * Shared by every gate in this file that reads a number out of someone else's
+ * source — the frame cap, the pid domain, the PNG budget — because three
+ * evaluators is three opinions about what `4 * 1024 * 1024` means, and the two
+ * that agree out loud while disagreeing about `Int(Int32.max)` is exactly the
+ * shape this round keeps finding. Nothing is `eval`ed: the whole expression has
+ * to reassemble out of the tokens above, so a shift, a modulo, a ternary or a
+ * `#if` fails here instead of returning a plausible-looking wrong number.
+ */
+function constExprValue(expression, { resolve, context }) {
+  const text = String(expression).trim();
+  const tokens = text.match(/\d[\d_]*|[A-Za-z_][A-Za-z0-9_.]*|[()+*,-]/g) ?? [];
+  assert.equal(
+    tokens.join(""),
+    text.replace(/\s+/g, ""),
+    `${context}: \`${text}\` is spelled with something this gate does not evaluate (only sums, products, ` +
+    `parentheses, a leading minus, \`_\`-separated integers and resolvable names go through). Refusing is the ` +
+    `point: a bound it cannot read is a bound it cannot mirror, and a guessed one passes while lying`,
+  );
+  let at = 0;
+  const peek = () => tokens[at];
+  const sum = () => {
+    let total = product();
+    while (peek() === "+" || peek() === "-") {
+      const operator = tokens[at++];
+      const right = product();
+      total = operator === "+" ? total + right : total - right;
+    }
+    return total;
+  };
+  const product = () => {
+    let value = unary();
+    while (peek() === "*") {
+      at += 1;
+      value *= unary();
+    }
+    return value;
+  };
+  const unary = () => {
+    if (peek() === "-") {
+      at += 1;
+      return -unary();
+    }
+    if (peek() === "+") {
+      at += 1;
+      return unary();
+    }
+    return atom();
+  };
+  const atom = () => {
+    const token = tokens[at++];
+    assert.ok(token !== undefined, `${context}: \`${text}\` ends in the middle of an operand`);
+    if (token === "(") {
+      const inner = sum();
+      assert.equal(tokens[at++], ")", `${context}: \`${text}\` has unbalanced parentheses`);
+      return inner;
+    }
+    if (/^\d/.test(token)) return Number(token.replace(/_/g, ""));
+    assert.match(
+      token,
+      /^[A-Za-z_]/,
+      `${context}: \`${token}\` is neither an integer nor a name this gate can resolve`,
+    );
+    if (peek() !== "(") return resolve(token, [], context);
+    at += 1;
+    const args = [sum()];
+    while (peek() === ",") {
+      at += 1;
+      args.push(sum());
+    }
+    assert.equal(tokens[at++], ")", `${context}: \`${text}\` leaves a call unterminated`);
+    return resolve(token, args, context);
+  };
+  const value = sum();
+  assert.equal(
+    at,
+    tokens.length,
+    `${context}: \`${text}\` leaves ${JSON.stringify(tokens.slice(at))} unread`,
+  );
+  assert.ok(
+    Number.isSafeInteger(value),
+    `${context}: \`${text}\` evaluates to ${value}, which no consumer here can hold exactly — widening a bound ` +
+    `this shell mirrors is a contract change to make by hand, not one to read past`,
+  );
+  return value;
+}
+
+/**
+ * The integer constants of one source file, read *by name* so that a use site can
+ * be evaluated through the constant it references rather than through a copy of
+ * its digits.
+ *
+ * `executableSource` is applied here, as in the frame-cap gate, so prose that
+ * quotes a declaration cannot be read as a second declaration of it.
+ */
+function sourceIntegers(file) {
+  const text = readFileSync(new URL(file, import.meta.url), "utf8");
+  const code = executableSource(text);
+  const values = new Map();
+  const reading = [];
+
+  function rightHandSide(declaration) {
+    const pattern = new RegExp(
+      `^[ \\t]*(?:(?:public|private|internal|fileprivate|static|final|override|export|declare|readonly)` +
+        `\\s+)*(?:const|let|var)\\s+${declaration}\\b[ \\t]*(?::[^=\\n]*)?=[ \\t]*(.*)$`,
+      "gm",
+    );
+    const hits = [...code.matchAll(pattern)];
+    assert.equal(
+      hits.length,
+      1,
+      `${file} has to declare \`${declaration}\` exactly once, as a one-line integer (found ${hits.length}: ` +
+      `${JSON.stringify(hits.map((hit) => hit[1].trim()))}). Zero means it moved, stopped being a literal, or was ` +
+      `split across lines — point this gate at its new home and say why; more than one means one file now holds ` +
+      `two answers to the same question`,
+    );
+    return hits[0][1].trim().replace(/[;,][ \t]*$/, "");
+  }
+
+  function evaluate(expression, context) {
+    return constExprValue(expression, {
+      context: `${file}: ${context}`,
+      resolve: (name, args, at) => {
+        if (args.length > 0) {
+          assert.equal(args.length, 1, `${at}: \`${name}(…)\` takes more than one argument, so this is not a conversion`);
+          return integerConversion(name, args[0], at);
+        }
+        if (name.includes(".")) return integerTypeBound(name);
+        return integer(name);
+      },
+    });
+  }
+
+  function integer(declaration) {
+    if (!values.has(declaration)) {
+      assert.ok(
+        !reading.includes(declaration),
+        `${file}: ${[...reading, declaration].join(" = ")} = … is a cycle, so none of these constants has a value ` +
+        `for the mirrors to agree with`,
+      );
+      reading.push(declaration);
+      try {
+        const expression = rightHandSide(declaration);
+        values.set(declaration, evaluate(expression, `\`${declaration} = ${expression}\``));
+      } finally {
+        reading.pop();
+      }
+    }
+    return values.get(declaration);
+  }
+
+  /** A `[lower, upper]` pair, evaluated element by element (the registry's shape). */
+  function tuple(declaration) {
+    const expression = rightHandSide(declaration);
+    const listed = /^\[(.*)\]$/.exec(expression);
+    assert.ok(
+      listed,
+      `${file}: \`${declaration} = ${expression}\` is no longer a one-line \`[lower, upper]\`, so this gate cannot ` +
+      `tell which bound is which — read it another way and say what each element means`,
+    );
+    assert.doesNotMatch(
+      listed[1],
+      /[[\]()]/,
+      `${file}: \`${declaration}\` nests something inside its tuple, which this reader does not resolve`,
+    );
+    return listed[1].split(",").map((element) =>
+      evaluate(element, `\`${declaration} = ${expression}\` element \`${element.trim()}\``));
+  }
+
+  return { file, text, code, rightHandSide, evaluate, integer, tuple };
+}
+
+/**
  * One byte-count declaration, read from `file` and *evaluated*.
  *
  * Evaluated rather than string-compared because both sides spell the number as an
@@ -430,6 +668,12 @@ const FRAME_CAP_CRITERIA = [
  * 4` or `4_194_304` — false alarms are how a guard like this ends up deleted. The
  * evaluator is a sum of products of integers, written out on purpose: a byte count
  * this file has to `eval` to read is a byte count it should not be claiming.
+ *
+ * Deliberately narrower than {@link constExprValue}, of which it is the digits-only
+ * case: the frame cap is a count, so a cap spelled with a *name* is a different
+ * question (whose answer may well be another file) and this gate refuses to
+ * resolve it silently. The pid ceiling is the opposite case — there the name *is*
+ * the fact — which is why `daemonPidDomain` goes through `sourceIntegers`.
  */
 function frameCapBytes(file, declaration) {
   const source = executableSource(readFileSync(new URL(file, import.meta.url), "utf8"));
@@ -450,45 +694,324 @@ function frameCapBytes(file, declaration) {
     `${file}: \`${declaration} = ${expression}\` is not a product/sum of integers, so this gate ` +
     `refuses to guess what byte count it means`,
   );
-  return expression
-    .split("+")
-    .map((term) => term
-      .split("*")
-      .reduce((total, factor) => total * Number(factor.trim().replace(/_/g, "")), 1))
-    .reduce((total, term) => total + term, 0);
+  return constExprValue(expression, {
+    context: `${file}: \`${declaration} = ${expression}\``,
+    resolve: (name, _args, context) =>
+      assert.fail(`${context}: it references \`${name}\`, which this digits-only reader cannot resolve`),
+  });
 }
 
 /* ------------------------------------------------------------------ *
- * R8b: the PNG budget and the frame cap are two numbers with one
- * inequality between them, and until now nothing wrote that inequality
- * down. `PngEncoding.defaultMaxBytes` (2.4 MB) exists *because*
- * `FrameCodec.maxFrameBytes` is 4 MiB and base64 inflates a body by 4/3
- * (PngEncoder.swift's own comment). Raise the budget past ~3.1 MB and every
- * `capture_view` reply is dropped by the framing layer as oversize — while the
- * 4 MiB three-way gate added above stays green, because both of *its* numbers
- * are still 4 MiB. That is the shape this guard exists for.
+ * The daemon's pid domain: ONE range, decided in Swift
+ * (`ParamValidation.pidLower` / `pidUpper`, handed to `optInt(range:)` by
+ * `Dispatcher.attach:86`) and written three times in this shell —
+ * `src/tools.ts`'s `PID_INT32_MAX`, `src/project-registry.ts`'s `PID_RANGE`, and
+ * the bounds `tools/list` advertises — plus a fourth the task did not name
+ * (`inspectStoredEntry`'s decode check). `project-registry.ts:44-46` *claims* in
+ * a comment that it mirrors the Swift declarations; until this section nothing
+ * compared them, which is the recurring shape: a note saying "these two agree",
+ * with no run path that could ever notice they don't.
  * ------------------------------------------------------------------ */
 
-test("the PNG budget still fits the frame cap after base64 inflation", () => {
-  const budget = frameCapBytes("../../engine/Sources/GlassPaneEngine/PngEncoder.swift", "defaultMaxBytes");
-  const frame = frameCapBytes("../../engine/Sources/GlassPaneEngine/FrameCodec.swift", "maxFrameBytes");
-  // Integer arithmetic, no floating point: `* 4 <= * 3` is the same statement as
-  // "budget × 4/3 fits", without rounding a threshold into a silent off-by-one.
+const PARAM_VALIDATION_FILE = "../../engine/Sources/GlassPaneEngine/ParamValidation.swift";
+const PNG_ENCODER_FILE = "../../engine/Sources/GlassPaneEngine/PngEncoder.swift";
+const FRAME_CODEC_FILE = "../../engine/Sources/GlassPaneEngine/FrameCodec.swift";
+const ENGINE_CORE_FILE = "../../engine/Sources/GlassPaneEngine/EngineCore.swift";
+const TOOLS_FILE = "../src/tools.ts";
+const REGISTRY_FILE = "../src/project-registry.ts";
+
+/** Every source file in this shell, for the "who carries a copy of N" gates. */
+const SHELL_SOURCE_FILES = [
+  ...readdirSync(new URL("../src/", import.meta.url)).map((entry) => `../src/${entry}`),
+  ...readdirSync(new URL(".", import.meta.url))
+    .filter((entry) => entry.endsWith(".mjs"))
+    .map((entry) => `./${entry}`),
+];
+
+const READERS = new Map();
+
+/**
+ * One reader per file, so every gate in this file evaluates the same reading of
+ * it — and so a constant referenced from three places is parsed once.
+ */
+function sourceReader(file) {
+  if (!READERS.has(file)) READERS.set(file, sourceIntegers(file));
+  return READERS.get(file);
+}
+
+/**
+ * The daemon's authoritative pid range, *evaluated* out of the Swift that decides
+ * it, together with the fixed-width type its own doc comment claims the ceiling is
+ * the top of.
+ *
+ * Why evaluation and never text: `pidUpper` is not written as a number there, it is
+ * written as `Int(Int32.max)`, while both mirrors in the shell write the same fact
+ * as digits. A text gate across those is either permanently red (the spellings
+ * differ by design) or loosened into a substring test that a wrong ceiling still
+ * passes. So {@link constExprValue} resolves the *name* — `Int32.max` → 2^31−1 — and
+ * the gate then checks three independent things that can each be wrong on their
+ * own: the width the comment claims, the value the declaration evaluates to, and
+ * every mirror in this shell.
+ */
+function daemonPidDomain() {
+  const swift = sourceReader(PARAM_VALIDATION_FILE);
+  const lower = swift.integer("pidLower");
+  const upper = swift.integer("pidUpper");
+  // `/// attach.pid is narrowed to `pid_t` (Int32) by the dispatcher` — read from
+  // the prose, because that is where the *reason* for the number lives.
+  const claimed = /narrowed to `pid_t` \((Int\d+)\)/.exec(swift.text);
   assert.ok(
-    budget * 4 <= frame * 3,
-    `base64 后是 ${(budget * 4 / 3).toFixed(0)} 字节，帧上限只有 ${frame}：`
-    + "每一帧 capture_view 都会被 Framing 层丢掉，而两条 cap 自己仍然相等",
+    claimed,
+    `${PARAM_VALIDATION_FILE} no longer states which fixed-width type \`pid_t\` is, so \`pidUpper\` is a number ` +
+    `with a reason stored somewhere else: re-point this at the new claim and say where the width comes from now`,
   );
-  // The comment promises the JSON envelope gets headroom too; say how much, so a
-  // future raise is a decision with a number attached rather than a guess.
-  const headroom = frame - Math.ceil(budget * 4 / 3);
-  assert.ok(headroom > 0, `信封余量已经用尽（headroom=${headroom}）`);
-  // And the TS side must not be carrying its own copy of the budget number.
-  const tsSources = ["../src/tools.ts", "../src/engine-client.ts", "../src/http-gateway.ts"];
-  const restated = tsSources.filter((file) => readFileSync(new URL(file, import.meta.url), "utf8")
-    .replace(/\/\*[\s\S]*?\*\//g, "").includes(String(budget)));
-  assert.deepEqual(restated, [],
-    `TS 侧把 PNG 预算抄成了字面量，Swift 一改这里就悄悄过期：${restated.join(", ")}`);
+  const width = claimed[1];
+  assert.equal(
+    upper,
+    integerTypeBound(`${width}.max`),
+    `\`pidUpper\` evaluates to ${upper}, but the comment above it claims the domain is \`${width}\` ` +
+    `(whose top is ${integerTypeBound(`${width}.max`)}). Value and reason disagree inside one declaration, and ` +
+    `every mirror below would then faithfully copy whichever one it happened to read`,
+  );
+  assert.ok(
+    lower >= 1,
+    `\`pidLower\` is ${lower}: pid 0 is the process-group sentinel and a negative pid is no process, so the ` +
+    `daemon's floor moved under this shell. Re-point the sides named in PID_BOUND_CRITERIA at the new floor on ` +
+    `purpose — do not let this gate go quiet by spreading ${lower} around`,
+  );
+  assert.ok(lower <= upper, `\`pidLower\` ${lower} sits above \`pidUpper\` ${upper}: the range admits nothing`);
+  return { lower, upper, width };
+}
+
+/**
+ * Every judgement in this shell that decides whether a pid is admissible, and the
+ * two operands it decides with (floor, ceiling).
+ *
+ * Same discipline as `FRAME_CAP_CRITERIA` above: an operand has to resolve to a
+ * *declaration*, because the digits are the same either way and a value-only
+ * comparison stays green the day a validator stops using the constant and starts
+ * carrying its own copy — which is precisely when the copy goes stale and nothing
+ * is left that could notice.
+ *
+ * The floors are compared by value only, and that asymmetry is on purpose rather
+ * than oversight: three of them (`tools.ts`'s `.min(1)` and the two advertised
+ * `minimum: 1`) are spelled as digits today because that file declares no floor
+ * constant to reference, so collapsing them is a `src/` change this test lane must
+ * not make. The ceiling does have a constant in both files, so "reference it" is
+ * enforceable there and enforced.
+ */
+const PID_BOUND_CRITERIA = [
+  {
+    role: "this shell's inbound pid validator (`tools.ts` OptionalPidSchema)",
+    file: TOOLS_FILE,
+    site: /const OptionalPidSchema = z\.number\(\)\.int\(\)\.min\(\s*([^)]*?)\s*\)\.max\(\s*([^)]*?)\s*\)/,
+  },
+  {
+    role: "the pid `tools/list` advertises for gp_attach",
+    file: TOOLS_FILE,
+    site: /pid: \{ type: "integer", minimum: ([^,]*?), maximum: ([^,]*?) \}/,
+  },
+  {
+    role: "the pid `tools/list` advertises for gp_project_set",
+    file: TOOLS_FILE,
+    site: /pid: \{ type: \["integer", "null"\], minimum: ([^,]*?), maximum: ([^,]*?) \}/,
+  },
+  {
+    role: "the registry's stored-pid schema (`ProjectSetArgs`)",
+    file: REGISTRY_FILE,
+    site: /pid: z\.number\(\)\.int\(\)\.min\(\s*([^)]*?)\s*\)\.max\(\s*([^)]*?)\s*\)/,
+  },
+  {
+    role: "the registry's second line of defense (`assertStorablePid`)",
+    file: REGISTRY_FILE,
+    site: /!Number\.isInteger\(pid\) \|\| pid < ([^|\s]+) \|\| pid > ([^\s)]+)/,
+  },
+  {
+    role: "the range `assertStorablePid`'s remedy text quotes",
+    file: REGISTRY_FILE,
+    site: /pid must be an integer in \$\{([^}]+)\}\.\.\$\{([^}]+)\}/,
+  },
+];
+
+/** One operand of a pid judgement: what it says, what it means, whether it is a copy. */
+function pidBoundOperand(file, operand) {
+  const text = operand.trim();
+  const listed = /^([A-Za-z_$][\w$]*)\[(\d)\]$/.exec(text);
+  const value = listed
+    ? sourceReader(file).tuple(listed[1])[Number(listed[2])]
+    : /^[A-Za-z_$][\w$]*$/.test(text)
+      ? sourceReader(file).integer(text)
+      : Number(text.replace(/_/g, ""));
+  assert.ok(
+    Number.isSafeInteger(value),
+    `${file}: the pid bound \`${text}\` does not resolve to an integer this shell can compare`,
+  );
+  return { text, value, copiesDigits: /^\d/.test(text) };
+}
+
+function pidBoundSides() {
+  return PID_BOUND_CRITERIA.map((criterion) => {
+    const site = criterion.site.exec(sourceReader(criterion.file).code);
+    assert.ok(
+      site,
+      `${criterion.role} no longer spells its bounds where this gate can read them, so nothing here says which ` +
+      `floor and ceiling decide whether a pid is admissible. Either the guard was rewritten or it moved: re-point ` +
+      `this criterion at it and say which operand is which, rather than leaving the two sides to match by hope`,
+    );
+    return {
+      ...criterion,
+      floor: pidBoundOperand(criterion.file, site[1]),
+      ceiling: pidBoundOperand(criterion.file, site[2]),
+    };
+  });
+}
+
+/** Files in this shell that spell `value` out as digits, with how many times. */
+function digitCopiesOf(value, files = SHELL_SOURCE_FILES) {
+  const found = [];
+  for (const file of files) {
+    // Code, not prose (`executableSource`, the one definition this repo's source
+    // scans share): the file explaining *why* a number must not be copied has to
+    // be allowed to spell the number out. A gate that fires on that sentence gets
+    // the sentence deleted — which is how a copy ban ends up guarding nothing.
+    const text = executableSource(readFileSync(new URL(file, import.meta.url), "utf8"));
+    const hits = [...text.matchAll(/\b\d[\d_]*\b/g)].filter(
+      (one) => Number(one[0].replace(/_/g, "")) === value,
+    );
+    if (hits.length > 0) found.push({ file, count: hits.length });
+  }
+  return found;
+}
+
+/**
+ * Hand-copied ceilings this shell is allowed to hold, per file.
+ *
+ * A ratchet, not an approval. The copies it names are all held to the daemon's
+ * evaluated value by the test above, so none of them can go stale in silence; what
+ * a value comparison cannot see is a *new* copy arriving, and that is what this
+ * count refuses. It is also the gate that goes red when the `src/` lane collapses
+ * them into one export — the fix the task says this lane must not make — at which
+ * point the allowance shrinks in the same commit.
+ */
+const KNOWN_CEILING_COPIES = {
+  [TOOLS_FILE]: 1,
+  [REGISTRY_FILE]: 2,
+};
+
+test("the daemon's pid domain is one range, and each TS side reaches it through a constant", () => {
+  const { lower, upper, width } = daemonPidDomain();
+  const drift = [];
+  for (const side of pidBoundSides()) {
+    if (side.floor.value !== lower) {
+      drift.push(`${side.role}: floor \`${side.floor.text}\` = ${side.floor.value}, the daemon admits from ${lower}`);
+    }
+    if (side.ceiling.value !== upper) {
+      drift.push(`${side.role}: ceiling \`${side.ceiling.text}\` = ${side.ceiling.value}, the daemon's ${width} ceiling is ${upper}`);
+    }
+    if (side.ceiling.copiesDigits) {
+      drift.push(`${side.role}: ceiling spelled out as the digits \`${side.ceiling.text}\` instead of referencing the constant ${side.file} declares — from that day the copy and the constant are two answers to one question, and only a edit to both keeps them agreeing`);
+    }
+  }
+  assert.deepEqual(drift, [], `the pid domain is not one range any more:\n  ${drift.join("\n  ")}`);
+
+  // The comment that made the promise, checked as a claim rather than read as
+  // reassurance: it has to name the two declarations whose values were just
+  // compared, or it points at a rule that no longer exists — which is how a
+  // "mirrors X" note stays plausible for years after X is deleted.
+  const registry = sourceReader(REGISTRY_FILE);
+  assert.match(registry.code, /\bconst PID_RANGE\b/, "project-registry.ts no longer declares PID_RANGE, so the mirror this section is about has moved");
+  const above = registry.text.slice(0, registry.text.search(/\bconst PID_RANGE\b/)).trimEnd();
+  const note = /\/\*\*(?:(?!\*\/)[\s\S])*\*\/\s*$/.exec(above);
+  assert.ok(
+    note,
+    "the declaration note above `PID_RANGE` is gone, so nothing states any more which daemon rule the range mirrors",
+  );
+  assert.match(note[0], /ParamValidation/, "the note no longer names the daemon module it mirrors");
+  for (const named of ["pidLower", "pidUpper"]) {
+    assert.ok(
+      note[0].includes(named),
+      `the note above \`PID_RANGE\` (${JSON.stringify(note[0].slice(0, 80))}…) no longer names ` +
+      `\`ParamValidation.${named}\`, so it no longer says which of the daemon's two bounds it mirrors`,
+    );
+    assert.ok(
+      Number.isSafeInteger(sourceReader(PARAM_VALIDATION_FILE).integer(named)),
+      `\`ParamValidation.${named}\`, named by that note, has no readable value: the promise points at a rule this gate cannot read`,
+    );
+  }
+});
+
+test("the registry's stored-pid check is the decode domain it names, not the accept domain", () => {
+  const { width } = daemonPidDomain();
+  const registry = sourceReader(REGISTRY_FILE);
+  // A *stored* pid is a different question from an acceptable one: `Int32?` decodes
+  // -500 fine, so `inspectStoredEntry` must not refuse to read a registry over it
+  // (that would blank every registration for one hand-edited field), while
+  // `assertStorablePid` above must never let -500 in. Two ranges, both derived from
+  // one width — and only the width is shared truth, which is what this compares.
+  const site = /pid < (-?[0-9_]+) \|\| pid > ([0-9_]+)\) \{\s*\n[^\n]*return[^\n]*outside the range the daemon can decode/
+    .exec(registry.code);
+  assert.ok(
+    site,
+    "project-registry.ts no longer checks a stored pid against hand-written bounds next to a message about the " +
+    "decode range, so this gate cannot tell whether the read path still accepts what the write path refuses",
+  );
+  const [low, high] = [site[1], site[2]].map((digits) => Number(digits.replace(/_/g, "")));
+  assert.equal(high, integerTypeBound(`${width}.max`), `the stored ceiling ${high} is not \`${width}.max\``);
+  assert.equal(
+    low,
+    integerTypeBound(`${width}.min`),
+    `the stored floor ${low} is not \`${width}.min\` — the accept floor is ${daemonPidDomain().lower}, and the two differ on purpose`,
+  );
+  const claimed = /outside the range the daemon can decode \((Int\d+)\)/.exec(registry.text);
+  assert.ok(claimed, "the refusal no longer names the integer type it is measuring, so the numbers have no claim to check");
+  assert.equal(
+    claimed[1],
+    width,
+    `the registry refuses what is outside \`${claimed[1]}\` while the daemon's pid ceiling is \`${width}.max\`: one protocol fact, spelled twice, now disagreeing`,
+  );
+});
+
+test("no file other than the ones named carries the daemon's ceiling as digits", () => {
+  const { upper, width } = daemonPidDomain();
+  const found = digitCopiesOf(upper);
+  const unallowed = found.filter((one) => one.count > (KNOWN_CEILING_COPIES[one.file] ?? 0));
+  assert.deepEqual(
+    unallowed,
+    [],
+    `the ${width} ceiling is now hand-copied ${JSON.stringify(unallowed.map((one) => `${one.file} ×${one.count}`))} ` +
+    `beyond the allowance (${JSON.stringify(KNOWN_CEILING_COPIES)}). Every copy is a place that goes stale alone: ` +
+    `reference the constant the file already declares, or collapse them into one export — the collapse is the ` +
+    `src/-side fix this test lane deliberately does not make`,
+  );
+  const tightening = Object.entries(KNOWN_CEILING_COPIES)
+    .filter(([file, allowed]) => allowed > (found.find((one) => one.file === file)?.count ?? 0))
+    .map(([file, allowed]) => `${file} carries ${allowed - (found.find((one) => one.file === file)?.count ?? 0)} fewer than the ${allowed} allowed`);
+  assert.deepEqual(
+    tightening,
+    [],
+    `a copy was removed — good — but the allowance still permits it to come back: ${tightening.join("; ")}. ` +
+    `Tighten KNOWN_CEILING_COPIES in the same commit that collapses the source`,
+  );
+});
+
+test("the loaded registry validator admits the daemon's whole domain and nothing past it", () => {
+  const { lower, upper } = daemonPidDomain();
+  // `ProjectSetArgs` alone: a pure zod parse, so nothing here reaches for
+  // `~/.glasspane` or the sandbox helper.
+  for (const [pid, storable] of [
+    [lower, true],
+    [upper, true],
+    [lower - 1, false],
+    [upper + 1, false],
+    [null, true],
+  ]) {
+    const parsed = ProjectSetArgs.safeParse({ displayName: "x", pid });
+    assert.equal(
+      parsed.success,
+      storable,
+      `pid ${JSON.stringify(pid)} against the daemon range ${lower}..${upper}: ${JSON.stringify(parsed.error?.issues ?? parsed.data)}`,
+    );
+  }
 });
 
 test("the frame cap is one byte count across both languages, and each guard uses that one", () => {
@@ -555,5 +1078,305 @@ test("the frame cap is one byte count across both languages, and each guard uses
     { lines, oversize },
     { lines: [cap], oversize: [cap + 1] },
     `one byte past the daemon's cap must be dropped here, with its size reported`,
+  );
+});
+
+test("reading the daemon's bounds is arithmetic, and the shapes it cannot read stay refused", () => {
+  const { upper, width } = daemonPidDomain();
+  const swift = sourceReader(PARAM_VALIDATION_FILE);
+  // The name *is* the fact here: `Int(Int32.max)` and the digits this shell mirrors
+  // it with are one value in two spellings, and no text comparison across them can
+  // be both strict and quiet — so the gate evaluates. Proof, on the expression the
+  // declaration is made of and on ones it is not:
+  assert.equal(swift.evaluate(`Int(${width}.max)`, "synthetic ceiling"), upper);
+  assert.equal(swift.evaluate(`Int(${width}.max) - 1`, "one below the ceiling"), upper - 1);
+  // The signed range is asymmetric — `-Int32.min` is one *past* `Int32.max` — which
+  // is why the daemon spells its ceiling from `.max` and could not have derived it
+  // from the floor. If this ever reads as `upper`, the mirrors that copy one bound
+  // out of the other are off by one and nobody has said so.
+  assert.equal(swift.evaluate(`-${width}.min`, "the signed floor, negated"), upper + 1);
+  assert.equal(swift.evaluate("2 * 1024 * 1024", "a product"), 2 ** 21);
+  assert.equal(swift.evaluate("1024 * 1024 * 4", "the same product, reordered"), 2 ** 22);
+  // …and refuse, rather than return something plausible, for every shape a limit
+  // could be written with that this does not read. These are the samples that make
+  // the gate's "I evaluated it" mean something: a pass on the one expression the
+  // daemon happens to use today proves nothing about the evaluator's reach.
+  for (const [expression, why] of [
+    ["1 << 21", "a shift"],
+    ["2 ** 21", "an exponent"],
+    ["Int(Int32.max) + unpublishedLimit", "a name with no declaration behind it"],
+    ["Int(Int64.max)", "a bound no consumer here can hold exactly"],
+    ["UInt8(Int16.max)", "a conversion that would trap at run time in Swift"],
+    ["max(1, 2)", "a call this gate has no rule for"],
+  ]) {
+    let refused = false;
+    try {
+      swift.evaluate(expression, `synthetic \`${expression}\``);
+    } catch {
+      refused = true;
+    }
+    assert.ok(
+      refused,
+      `${why}: \`${expression}\` was read as a number. A gate that guesses at shapes it has no rule for reports ` +
+      `agreement where there is none, which is the failure this whole file is written against`,
+    );
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * R8b: the PNG budget and the frame cap are two numbers with one
+ * inequality between them, and until now nothing wrote that inequality
+ * down. `PngEncoding.defaultMaxBytes` exists *because*
+ * `FrameCodec.maxFrameBytes` is 4 MiB and base64 inflates a body by 4/3
+ * (`PngEncoder.swift`'s own comment). Raise the budget past the widest body
+ * that survives the inflation and every `capture_view` reply is dropped by the
+ * framing layer as oversize — while the three-way cap gate above stays green,
+ * because both of *its* numbers are still 4 MiB. That is the shape this guard
+ * exists for.
+ *
+ * Three things make the inequality mean something rather than being two
+ * numbers admiring each other, and each is a separate test below: the budget has
+ * to be the quantity the encoder actually refuses on ({@link pngBudgetGuardChain},
+ * the same "read the guard, not the number" discipline as `FRAME_CAP_CRITERIA`),
+ * the 4/3 has to come from the place that chose the budget rather than from this
+ * file ({@link base64Inflation}), and the inflation itself has to be *measured*
+ * rather than believed, because the comment is prose.
+ * ------------------------------------------------------------------ */
+
+/**
+ * The base64 inflation factor, read from the one place in this repo that states it.
+ *
+ * `PngEncoder.swift` never multiplies by 4/3: the encoder checks the *PNG* length
+ * against the budget and hands the base64 on, and the cap is applied to the
+ * serialised frame in `Dispatcher.swift` (already gated by `FRAME_CAP_CRITERIA`).
+ * So the ratio's only declaration site is the prose above `defaultMaxBytes` that
+ * says why the budget is not the cap — which makes this the one place in this file
+ * where matching *inside* a comment is the point and `executableSource` is
+ * deliberately not applied. The gate goes red when that prose moves or stops
+ * naming a ratio, instead of keeping a private copy of 4 and 3 that would outlive
+ * the reasoning. What the ratio is worth is then measured, not trusted.
+ */
+function base64Inflation() {
+  const stated = [...sourceReader(PNG_ENCODER_FILE).text.matchAll(/放大\s*([0-9])\s*\/\s*([0-9])/g)];
+  assert.equal(
+    stated.length,
+    1,
+    `the base64 inflation this inequality is built on is stated ${stated.length} times in PngEncoder.swift. ` +
+    `It has exactly one declaration site (the comment above \`defaultMaxBytes\`): if that prose was reworded or ` +
+    `moved, re-point this at wherever the ratio lives now and say why — a 4/3 typed in here is a number this gate ` +
+    `would keep honouring after the daemon stopped meaning it`,
+  );
+  const [numerator, denominator] = [Number(stated[0][1]), Number(stated[0][2])];
+  assert.ok(
+    Number.isInteger(numerator) && Number.isInteger(denominator) && denominator > 0 && numerator > denominator,
+    `PngEncoder.swift states base64 inflation as ${numerator}/${denominator}, which is not a shrink-free ratio — ` +
+    `an encoder that got smaller would let this gate bless budgets the framing layer then drops`,
+  );
+  return { numerator, denominator };
+}
+
+/**
+ * Which quantity `defaultMaxBytes` actually decides, as a chain read out of the
+ * encoder: the guard compares `X <= P`, `P` is `encode`'s own parameter, that
+ * parameter defaults from the declared budget, and `X` is the encoder's output
+ * length (`sink.length`) — i.e. the bytes *before* base64, which is what makes the
+ * 4/3 an inequality on the budget instead of a decoration. Break any link and the
+ * test below compares a number nobody applies with a cap nobody reads.
+ */
+function pngBudgetGuardChain() {
+  const encoder = sourceReader(PNG_ENCODER_FILE);
+  const defaulted = /maxBytes:\s*Int\s*=\s*([A-Za-z_][A-Za-z0-9_.]*)/.exec(encoder.code);
+  assert.ok(
+    defaulted,
+    "PngEncoder.encode no longer takes its limit as a parameter defaulted from a named constant, so nothing here " +
+    "can say that the budget in the inequality is the budget the encoder applies",
+  );
+  assert.equal(
+    defaulted[1],
+    "defaultMaxBytes",
+    `\`encode(maxBytes:)\` defaults to \`${defaulted[1]}\`, not the budget this gate does arithmetic on — a second ` +
+    `budget took over the call path, or the one being compared stopped being used`,
+  );
+  const guard = /guard\s+([A-Za-z_]\w*)\s*<=\s*([A-Za-z_]\w*)\s+else/.exec(encoder.code);
+  assert.ok(
+    guard,
+    "the encoder no longer refuses with a `length <= limit` guard, so the budget decides nothing where this gate " +
+    "reads it: it is checked against a cap it never touches",
+  );
+  assert.equal(
+    guard[2],
+    "maxBytes",
+    `the encoder's guard compares against \`${guard[2]}\` rather than the parameter defaulted from the budget`,
+  );
+  const measured = /let\s+([A-Za-z_]\w*)\s*=\s*sink\.length/.exec(encoder.code);
+  assert.ok(
+    measured,
+    "the length the encoder has is no longer its own output (`sink.length`), so this gate cannot say what the " +
+    "budget is a budget *of* — pre- or post-base64 is exactly the distinction the 4/3 rides on",
+  );
+  assert.equal(
+    guard[1],
+    measured[1],
+    `the guard compares \`${guard[1]}\` while the encoder's output length is named \`${measured[1]}\``,
+  );
+  const wrapped = /base64EncodedString\(\s*options:\s*(\[[^\]]*\])/.exec(encoder.code);
+  assert.ok(wrapped, "the encoder no longer states how it writes base64, so the measured inflation below has no source");
+  assert.equal(
+    wrapped[1],
+    "[]",
+    `the base64 is written with options \`${wrapped[1]}\`: line breaks add bytes on top of the 4/3 measured below, ` +
+    `and every one of them counts against the frame cap`,
+  );
+  const carried = sourceReader(ENGINE_CORE_FILE).code.match(/"pngBase64":\s*([A-Za-z_.]+)/);
+  assert.ok(
+    carried,
+    "capture_view's reply no longer carries the encoder's base64 under `pngBase64`, so the frame bounded by this " +
+    "inequality is not the frame the daemon sends",
+  );
+  return { guard: guard[0], carried: carried[1] };
+}
+
+test("the PNG budget still fits the frame cap after base64 inflation", () => {
+  const budget = frameCapBytes(PNG_ENCODER_FILE, "defaultMaxBytes");
+  const frame = frameCapBytes(FRAME_CODEC_FILE, "maxFrameBytes");
+  const inflation = base64Inflation();
+  // Integer arithmetic, no floating point: `budget × numerator <= frame × denominator`
+  // is the same statement as "budget inflated by the documented ratio fits", with the
+  // ratio read from the comment that chose the budget and without rounding a
+  // threshold into a silent off-by-one.
+  assert.ok(
+    budget * inflation.numerator <= frame * inflation.denominator,
+    `a PNG at the budget ${budget} inflates to ${inflation.numerator}/${inflation.denominator} of it, ` +
+    `which is past the frame cap ${frame}: 每一帧 capture_view 都会被 framing 层丢掉，而两条 cap 自己仍然相等`,
+  );
+  // The inequality has to be a boundary and not a slogan: the widest budget that
+  // still fits, plus one byte, must fail it. Otherwise this test would be a
+  // comparison that cannot lose, which is what the comment above `defaultMaxBytes`
+  // already was.
+  const widest = Math.floor((frame * inflation.denominator) / inflation.numerator);
+  assert.ok(
+    (widest + 1) * inflation.numerator > frame * inflation.denominator,
+    `${widest} + 1 still satisfies the inequality, so it admits bodies the frame cap rejects`,
+  );
+  // And the comment promises the JSON envelope gets headroom too, so the budget may
+  // not sit *on* the boundary: `{"result":{"pngBase64":…}}` and the newline
+  // `Dispatcher.response` appends before comparing both come out of the same cap.
+  // Say how much is left, so a future raise is a decision with a number attached
+  // rather than a guess.
+  assert.ok(
+    budget < widest,
+    `预算 ${budget} 已经贴到 ${widest} 的边界：base64 之后的帧没有留给 JSON 信封的空间了`,
+  );
+  // And the TS side must not be carrying its own copy of the budget number, in
+  // either spelling (`2400000` / `2_400_000` — the previous version of this check
+  // looked for the undecorated one only, so the digits in the shell's own style
+  // would have slipped past it).
+  assert.deepEqual(
+    digitCopiesOf(budget),
+    [],
+    `TS 侧把 PNG 预算抄成了字面量，Swift 一改这里就悄悄过期：${JSON.stringify(digitCopiesOf(budget))}`,
+  );
+});
+
+test("the budget the inequality bounds is the budget the encoder applies", () => {
+  pngBudgetGuardChain();
+});
+
+test("the frame a capture_view reply becomes is measured, not estimated", () => {
+  const budget = frameCapBytes(PNG_ENCODER_FILE, "defaultMaxBytes");
+  const frame = frameCapBytes(FRAME_CODEC_FILE, "maxFrameBytes");
+  const inflation = base64Inflation();
+  pngBudgetGuardChain();
+  // The ratio in the comment is prose; this is the same claim made of bytes. The
+  // chain above proved the capped quantity is the *pre*-base64 length, so the only
+  // thing left to measure is what one of those bodies becomes on the wire — and
+  // base64's alphabet is ASCII, so its length is its byte count.
+  const body = Buffer.alloc(budget).toString("base64");
+  const onTheWire = Buffer.byteLength(body, "ascii");
+  assert.equal(
+    onTheWire,
+    4 * Math.ceil(budget / 3),
+    `a ${budget}-byte PNG became ${onTheWire} bytes of base64, which is not the 4-per-3 the encoder's comment states`,
+  );
+  assert.ok(
+    budget * inflation.numerator <= onTheWire * inflation.denominator
+      && onTheWire * inflation.denominator <= budget * inflation.numerator + 2 * inflation.denominator,
+    `the stated inflation (${inflation.numerator}/${inflation.denominator}) and the measured one `
+    + `(${onTheWire}/${budget}) disagree by more than base64's rounded-up tail — the inequality above was checked `
+    + "against a ratio the bytes do not have, which is the direction that lets an oversized budget pass",
+  );
+  // `Dispatcher.response` compares `data.count + 1`, the +1 being the newline that
+  // terminates the frame; the envelope around the base64 is what the strict `<`
+  // in the test above leaves room for, and this is the number that says how much.
+  assert.ok(
+    onTheWire + 1 <= frame,
+    `the base64 alone (${onTheWire}) plus its terminating newline is already past the frame cap ${frame}`,
+  );
+  assert.ok(
+    frame - onTheWire - 1 > 0,
+    `no room left for the JSON envelope of a capture_view reply (cap ${frame}, body ${onTheWire})`,
+  );
+});
+
+/**
+ * Byte-count claims a tool advertisement could make, in the units this repo's
+ * prose uses. "MB" is ambiguous *here* — `PngEncoder.swift`'s own comment calls
+ * 4 194 304 "4 MB" — so a claim with a unit is read both ways and has to match the
+ * daemon's number under one of them; a bare integer has only the one reading.
+ */
+function advertisedByteClaims(text) {
+  const claims = [];
+  for (const stated of text.matchAll(/\b\d[\d_]{5,}\b/g)) {
+    claims.push({ stated: stated[0], readings: [Number(stated[0].replace(/_/g, ""))] });
+  }
+  const UNIT = { K: [1000, 1024], M: [1000 ** 2, 1024 ** 2], G: [1000 ** 3, 1024 ** 3] };
+  for (const stated of text.matchAll(/([0-9]+(?:\.[0-9]+)?)\s*([KMG])(i?)B\b/g)) {
+    const [decimal, binary] = UNIT[stated[2]];
+    const magnitude = Number(stated[1]);
+    claims.push({
+      stated: stated[0],
+      readings: stated[3] === "i" ? [Math.round(magnitude * binary)] : [Math.round(magnitude * decimal), Math.round(magnitude * binary)],
+    });
+  }
+  return claims;
+}
+
+/** The claims above that do *not* state the daemon's number. */
+function offBudgetClaims(claims, budget) {
+  return claims.filter((claim) => !claim.readings.includes(budget)).map((claim) => claim.stated);
+}
+
+test("gp_capture_view advertises no second copy of the PNG budget", () => {
+  const budget = frameCapBytes(PNG_ENCODER_FILE, "defaultMaxBytes");
+  const spec = TOOL_BY_NAME.get("gp_capture_view");
+  const claims = advertisedByteClaims(`${spec.description} ${JSON.stringify(spec.inputSchema)}`);
+  // This shell does not carry the byte budget today: the advertisement says
+  // "oversized windows are refused with a suggested scale" and names no number,
+  // and the only restatement in the repo is prose in CHANGELOG.md. That is a fact
+  // about the current advertisement, not a rule — so the comparison below is what
+  // makes it safe: if an advertisement starts quoting a budget, it has to quote
+  // *this* one.
+  assert.deepEqual(
+    offBudgetClaims(claims, budget),
+    [],
+    `gp_capture_view now advertises a byte budget that the daemon does not use: ${JSON.stringify(offBudgetClaims(claims, budget))} (daemon: ${budget})`,
+  );
+  assert.deepEqual(
+    claims,
+    [],
+    `gp_capture_view advertises ${JSON.stringify(claims.map((claim) => claim.stated))}; the assertion above ` +
+    `already holds each of them against the daemon's budget, so update this one to say how many restatements the ` +
+    `advertisement carries rather than letting the count go unchecked`,
+  );
+  // The empty list is the only shape the real advertisement can produce today, so
+  // both directions of the comparator are proven on synthetic text: an assertion
+  // that can only ever see its happy path is the "a comment says they agree" shape
+  // again, wearing a test's clothes.
+  assert.deepEqual(advertisedByteClaims(`up to ${budget} bytes per PNG`).map((claim) => claim.readings), [[budget]]);
+  assert.deepEqual(offBudgetClaims(advertisedByteClaims(`up to ${budget} bytes per PNG`), budget), []);
+  assert.deepEqual(
+    offBudgetClaims(advertisedByteClaims(`up to ${budget + 1} bytes per PNG, or 2.5 MB of them`), budget)
+      .sort(),
+    [`${budget + 1}`, "2.5 MB"].sort(),
   );
 });
