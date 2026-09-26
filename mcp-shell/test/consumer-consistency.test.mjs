@@ -43,11 +43,18 @@ import { makeEngine } from "./helpers.mjs";
  * null). Both are exercised here, because the shell's job is to let a user read
  * their own audit trail *and* to refuse off-contract bodies.
  *
- * The last layer below is a different kind of consumer consistency: the framing
- * both processes speak. `MAX_FRAME_BYTES` (this shell) and
- * `FrameCodec.maxFrameBytes` (the daemon) are one protocol fact written twice, and
- * until now no test compared them — see the section's own header for why reading
- * the *guard*, not just the number, is the part that makes the comparison mean
+ * The last layers below are a different kind of consumer consistency: protocol
+ * facts that are decided in one language and reached for in the other. The
+ * framing both processes speak — `MAX_FRAME_BYTES` (this shell) and
+ * `FrameCodec.maxFrameBytes` (the daemon) — is one byte count written twice, kept
+ * in sync until recently by a comment on each side that named the other one; the
+ * daemon's pid domain and the PNG budget's inequality against the frame cap are
+ * the same defect in the same shape. A comment cannot be run, so these sections
+ * read the fact out of the source that owns it, *evaluate* it (a ceiling spelled
+ * `Int(Int32.max)` is a value, not a string), check that each side's *guard*
+ * compares against it rather than a leftover literal, and require every use site
+ * in this shell to reach the constant instead of carrying its digits — see each
+ * section's own header for why that last part is what makes the comparison mean
  * something.
  */
 
@@ -817,7 +824,7 @@ const PID_BOUND_CRITERIA = [
     site: /pid: \{ type: \["integer", "null"\], minimum: ([^,]*?), maximum: ([^,]*?) \}/,
   },
   {
-    role: "the registry's stored-pid schema (`ProjectSetArgs`)",
+    role: "the registry's patch-shaped pid schema (`ProjectSetArgs`)",
     file: REGISTRY_FILE,
     site: /pid: z\.number\(\)\.int\(\)\.min\(\s*([^)]*?)\s*\)\.max\(\s*([^)]*?)\s*\)/,
   },
@@ -909,7 +916,7 @@ test("the daemon's pid domain is one range, and each TS side reaches it through 
       drift.push(`${side.role}: ceiling \`${side.ceiling.text}\` = ${side.ceiling.value}, the daemon's ${width} ceiling is ${upper}`);
     }
     if (side.ceiling.copiesDigits) {
-      drift.push(`${side.role}: ceiling spelled out as the digits \`${side.ceiling.text}\` instead of referencing the constant ${side.file} declares — from that day the copy and the constant are two answers to one question, and only a edit to both keeps them agreeing`);
+      drift.push(`${side.role}: ceiling spelled out as the digits \`${side.ceiling.text}\` instead of referencing the constant ${side.file} declares — from that day the copy and the constant are two answers to one question, and only an edit to both keeps them agreeing`);
     }
   }
   assert.deepEqual(drift, [], `the pid domain is not one range any more:\n  ${drift.join("\n  ")}`);
@@ -956,7 +963,14 @@ test("the registry's stored-pid check is the decode domain it names, not the acc
     "decode range, so this gate cannot tell whether the read path still accepts what the write path refuses",
   );
   const [low, high] = [site[1], site[2]].map((digits) => Number(digits.replace(/_/g, "")));
-  assert.equal(high, integerTypeBound(`${width}.max`), `the stored ceiling ${high} is not \`${width}.max\``);
+  assert.equal(
+    high,
+    integerTypeBound(`${width}.max`),
+    `the stored ceiling is ${high}, not \`${width}.max\` (${integerTypeBound(`${width}.max`)}). If the read path is ` +
+    `now meant to tolerate something wider than the daemon can decode, that is a claim about Swift's \`Int32?\` ` +
+    `decoder and this gate needs the new numbers plus the reason — a ceiling above the decode domain means one ` +
+    `hand-edited entry makes the whole registry unreadable, which is the bug \`PID_RANGE\`'s note warns about`,
+  );
   assert.equal(
     low,
     integerTypeBound(`${width}.min`),
