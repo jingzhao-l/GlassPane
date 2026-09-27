@@ -16,11 +16,11 @@
 // RUN WITH BUN, not node: one of the implementations under test is TypeScript source
 // (vendor/kernel/src/*.ts), which only bun can import directly.
 //
-//   bun harness/tools/kernel-conformance.mjs
+//   bun harness/glasspane-harness/script/kernel-conformance.mjs
 //       The identity we make today: the vendored kernel against the mirrored
 //       fixtures. Needs nothing but this repo.
 //
-//   bun harness/tools/kernel-conformance.mjs --impl /path/to/publishable/kernel
+//   bun harness/glasspane-harness/script/kernel-conformance.mjs --impl /path/to/publishable/kernel
 //       A second implementation (a checkout with a built dist/, or the directory an
 //       installed @iterate/kernel lives in). Every fixture must produce a
 //       byte-identical result in both, or this fails.
@@ -31,15 +31,21 @@ import { createHash } from "node:crypto"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
-const fixturesDir = path.join(repoRoot, "harness/contracts/kernel-fixtures")
-// The *root* of the vendored kernel, not its src/: loadImpl decides whether an
-// implementation is TypeScript source or a built dist/, so the same argument works
-// for a checkout and for an installed package.
-const vendoredKernel = path.join(
-  repoRoot,
-  "harness/glasspane-harness/packages/opencode/vendor/kernel",
-)
+// Root discovery, same rule as kernel-vendor.mjs: walk up to the directory that holds
+// product.json, so the same file works from the product repo and from the monorepo.
+// Fixtures live next to the manifest in the product tree, because that is the tree
+// that ships the vendored kernel.
+const here = path.dirname(fileURLToPath(import.meta.url))
+let repoRoot = here
+for (let i = 0; i < 6 && !existsSync(path.join(repoRoot, "product.json")); i++) {
+  repoRoot = path.dirname(repoRoot)
+}
+if (!existsSync(path.join(repoRoot, "product.json"))) {
+  console.error(`kernel-conformance: cannot find product.json above ${here}`)
+  process.exit(2)
+}
+const fixturesDir = path.join(repoRoot, "contracts/kernel-fixtures")
+const vendoredKernel = path.join(repoRoot, "packages/opencode/vendor/kernel")
 
 /** Canonical JSON: keys sorted, no insignificant whitespace. Byte equality or nothing. */
 function canonical(value) {
@@ -164,7 +170,7 @@ for (const i of impls) {
 
 const files = readdirSync(fixturesDir).filter((f) => f.endsWith(".json") && kindOf(f)).sort()
 if (files.length === 0) {
-  console.error("kernel-conformance: no fixtures found — this would pass while proving nothing")
+  console.error(`kernel-conformance: no fixtures found in ${fixturesCandidates.join(" or ")} — this would pass while proving nothing`)
   process.exit(1)
 }
 

@@ -143,7 +143,7 @@ npm publish --provenance --access public
 Then the switch on our side is one line, and it is a *checked* one:
 
 ```bash
-bun harness/tools/kernel-conformance.mjs --impl <path to the installed @iterate/kernel>
+bun harness/glasspane-harness/script/kernel-conformance.mjs --impl <path to the installed @iterate/kernel>
 ```
 
 `product.json → kernel.mode` becomes `npm`, `kernel-vendor --check` then requires the

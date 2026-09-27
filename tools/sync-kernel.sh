@@ -236,7 +236,7 @@ if [ "$target" = "repo" ]; then
     exit 1
   }
 else
-  node "$root/harness/tools/kernel-vendor.mjs" --record "$SRC" "$src_version" || {
+  node "$root/harness/glasspane-harness/script/kernel-vendor.mjs" --record "$SRC" "$src_version" || {
     echo "error: the provenance manifest could not be written; rolling the vendor back." >&2
     rolled_back=1; rollback
     exit 1
@@ -264,7 +264,7 @@ else
   BUN="${BUN:-$(command -v bun || true)}"
   if [ -z "$BUN" ] && [ -x "$HOME/.bun/bin/bun" ]; then BUN="$HOME/.bun/bin/bun"; fi
   gates=(
-    "node $root/harness/tools/kernel-vendor.mjs --check"
+    "node $root/harness/glasspane-harness/script/kernel-vendor.mjs --check"
     "node $root/harness/tools/fork-diff.mjs --check"
     "node $root/harness/tools/tool-surface.mjs --check"
   )

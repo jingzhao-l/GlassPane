@@ -83,8 +83,8 @@ node harness/tools/surface-semantics.mjs --record # 有意新增命中（并说�
 node harness/tools/product-surface.mjs --check   # 产品面各件与 product.json 一致？（CI 每跑，含 sh -n + --dry-run）
 node harness/tools/brand-surface.mjs --check     # 没有新的未记录品牌漂移？（CI 每跑）
 node harness/tools/brand-surface.mjs --record    # 有意新增（并说清为什么合法）
-node harness/tools/kernel-vendor.mjs --check    # vendored 内核 == 溯源清单？（CI 每跑，不需要 canonical）
-KERNEL_SRC=/path/to/iterate-skill node harness/tools/kernel-vendor.mjs --check  # 更强：连 canonical 一起跨读
+node harness/glasspane-harness/script/kernel-vendor.mjs --check    # vendored 内核 == 溯源清单？（CI 每跑，不需要 canonical）
+KERNEL_SRC=/path/to/iterate-skill node harness/glasspane-harness/script/kernel-vendor.mjs --check  # 更强：连 canonical 一起跨读
 KERNEL_SRC=/path/to/iterate-skill tools/sync-kernel.sh --target=fork            # 唯一的合法更新路径
 ```
 

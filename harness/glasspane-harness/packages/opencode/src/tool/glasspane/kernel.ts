@@ -7,7 +7,7 @@
  * publishing to the iterate monorepo's own rhythm). So the bytes live in
  * `packages/opencode/vendor/kernel`, pinned by
  * `harness/contracts/kernel-vendor.json` and checked by
- * `harness/tools/kernel-vendor.mjs`. Everything that touches them goes through
+ * `harness/glasspane-harness/script/kernel-vendor.mjs`. Everything that touches them goes through
  * this module, so the day the package is published, switching to a semver
  * dependency is one import line here and nothing else.
  *

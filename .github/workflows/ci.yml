@@ -141,10 +141,10 @@ jobs:
       # 哈希只证明字节没变；这一条证明我们依赖的那些答案还是那些答案——而这是
       # 将来把 vendored 换成 npm 依赖时唯一能说明"换的只是分发方式"的东西。
       - name: Kernel conformance — mirrored fixtures through the shipped kernel
-        run: bun harness/tools/kernel-conformance.mjs
+        run: bun harness/glasspane-harness/script/kernel-conformance.mjs
       # 内核的**出处**自洽：vendored 字节 + 镜像 fixtures 都必须还是清单里记下的那些。
       - name: Kernel provenance — vendor and mirrored fixtures match the manifest
-        run: node harness/tools/kernel-vendor.mjs --check
+        run: node harness/glasspane-harness/script/kernel-vendor.mjs --check
 
   # 对外文档守卫：死链、失效锚点、双语成对（README/SECURITY/CONTRIBUTING 任一侧
   # 改名或漏翻译都在这里现形——面向陌生读者的文档，链接断了等于没交付）。
@@ -206,7 +206,7 @@ jobs:
       # （本步一度被复制成两份——同一次合并事故的残留，已去重；check-workflows
       #   检查的是 job 键与脚本引用，查不出这种"合法但重复"的 step。）
       - name: Vendored kernel matches its provenance manifest
-        run: node harness/tools/kernel-vendor.mjs --check
+        run: node harness/glasspane-harness/script/kernel-vendor.mjs --check
       # 私有化产品面一致性（2026-09-25 批次 B）：产品名/版本/bins/平台包模板住在
       # product.json 里，但同一事实散在 package.json、build.ts、publish.ts、
       # postinstall.mjs、bin shim、两个安装器和工作流里。改了一处忘了另一处，

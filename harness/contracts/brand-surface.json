@@ -1,6 +1,6 @@
 {
-  "observedAt": "2026-09-26",
-  "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
+  "observedAt": "2026-09-27",
+  "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）；lineage 计数改为不含 packages/opencode 这一目录名（它是树里的真实路径，manifest/fixture/tool 参数都必须正确引用它，而 ratchet 分不清它与一次泄出的改名）——2026-09-26 七个新增全部属于这一类。",
   "rules": [
     {
       "id": "upstream-npm-name",
@@ -30,7 +30,7 @@
   ],
   "hits": [],
   "lineage": {
-    "occurrences": 9818,
-    "filesScanned": 3296
+    "occurrences": 9615,
+    "filesScanned": 3307
   }
 }

@@ -307,11 +307,19 @@ function scan() {
       hits.push({ file: rel, rule: "removed-tree", count: 1 })
   }
 
-  // lineage counter across the whole fork
+  // Lineage counter across the whole fork.
+  //
+  // What it counts is the *name*, i.e. branding and prose. What it deliberately does
+  // not count is the fork's own directory name: packages/opencode is a path in the tree
+  // that a manifest, a fixture path and a tool argument all have to name correctly. On
+  // 2026-09-26 seven new occurrences were all of that kind, and the ratchet could not
+  // tell them apart from a rebrand that leaked — a tripwire that cannot be satisfied
+  // honestly gets worked around, and then it protects nothing.
   const files = forkTextFiles()
   let occurrences = 0
   for (const abs of files) {
-    occurrences += (readFileSync(abs, "utf8").match(/opencode/gi) ?? []).length
+    const text = readFileSync(abs, "utf8")
+    occurrences += (text.replace(/packages\/opencode\b/gi, "packages/<fork>").match(/opencode/gi) ?? []).length
   }
   return { hits, lineage: { occurrences, filesScanned: files.length } }
 }

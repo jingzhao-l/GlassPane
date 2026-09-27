@@ -35,13 +35,27 @@ import { existsSync, readFileSync, readdirSync, lstatSync, writeFileSync, mkdirS
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
+// Root discovery: this script lives in the product tree (script/), and it is run both
+// from the product repo and from the monorepo that contains it. Rather than take a
+// path on the command line and be wrong in one of the two places, walk up to the
+// directory that actually holds product.json — the thing being described.
 const here = path.dirname(fileURLToPath(import.meta.url))
-const repoRoot = path.resolve(here, "..", "..")
-const manifestFile = path.join(repoRoot, "harness", "contracts", "kernel-vendor.json")
+const productRoot = (() => {
+  let dir = here
+  for (let i = 0; i < 6; i++) {
+    if (existsSync(path.join(dir, "product.json"))) return dir
+    dir = path.dirname(dir)
+  }
+  die(2, `cannot find product.json above ${here} — run this from inside the product tree`)
+})()
+const repoRoot = productRoot
+// The manifest and the fixtures it hashes live inside the product tree, so the product
+// repo can verify its own provenance without depending on the monorepo around it.
+const manifestFile = path.join(repoRoot, "contracts", "kernel-vendor.json")
 const vendorRel = "packages/opencode/vendor/kernel" // inside the fork tree
 // Fixtures live outside the fork tree on purpose: they are the cross-implementation
 // contract, mirrored and hash-checked, not vendored into the shipped package.
-const mirroredFixtures = path.join(repoRoot, "harness/contracts/kernel-fixtures")
+const mirroredFixtureDirs = [path.join(repoRoot, "contracts/kernel-fixtures")]
 const SUBDIRS = ["src", "schemas", "fixtures"]
 
 const argv = process.argv.slice(2)
@@ -70,10 +84,20 @@ function walk(dir, base = dir, out = []) {
 const sha256 = (buffer) => createHash("sha256").update(buffer).digest("hex")
 
 function vendorDir() {
-  const pin = JSON.parse(readFileSync(path.join(repoRoot, "harness", "upstream.json"), "utf8"))
-  const forkRel = pin?.fork?.path
-  if (!forkRel) die(2, 'upstream.json missing fork.path — cannot locate the vendor')
-  return { forkRel, dir: path.join(repoRoot, forkRel, vendorRel) }
+  // Inside the product tree the vendor sits at a path we know, so the product repo can
+  // check its own provenance with no reference to the monorepo around it. upstream.json
+  // (which records the pinned fork path) is only needed for the in-place monorepo tree.
+  const local = path.join(repoRoot, vendorRel)
+  if (existsSync(local)) return { forkRel: path.dirname(vendorRel), dir: local }
+  for (const base of [path.dirname(repoRoot), path.dirname(path.dirname(repoRoot))]) {
+    const pinFile = path.join(base, "harness", "upstream.json")
+    if (!existsSync(pinFile)) continue
+    const forkRel = JSON.parse(readFileSync(pinFile, "utf8"))?.fork?.path
+    if (!forkRel) continue
+    const dir = path.join(base, forkRel, vendorRel)
+    if (existsSync(dir)) return { forkRel, dir }
+  }
+  die(2, `cannot locate the vendored kernel (looked for ${path.relative(process.cwd(), local)} and in upstream.json)`)
 }
 
 /** Files of the vendored subset, as `packages/kernel/<rel>` paths inside the fork. */
@@ -195,7 +219,7 @@ if (mode === "--record") {
 
   const manifest = {
     _comment:
-      "Provenance of the @iterate/kernel source vendored into the opencode fork. Written by tools/sync-kernel.sh --target=fork; check with harness/tools/kernel-vendor.mjs --check. Do not hand-edit, and do not edit files under packages/kernel inside the fork — the canonical home is iterate-skill/kernel.",
+      "Provenance of the @iterate/kernel source vendored into the opencode fork. Written by tools/sync-kernel.sh --target=fork; check with harness/glasspane-harness/script/kernel-vendor.mjs --check. Do not hand-edit, and do not edit files under packages/kernel inside the fork — the canonical home is iterate-skill/kernel.",
     canonical: {
       repo: "jingzhao-l/iterate-skill",
       path: "kernel",
@@ -210,22 +234,22 @@ if (mode === "--record") {
     totalBytes: entries.reduce((sum, e) => sum + e.bytes, 0),
   }
   // The fixtures are the contract, not decoration: they are what a second
-  // implementation of the kernel has to agree with (harness/tools/kernel-conformance.mjs).
+  // implementation of the kernel has to agree with (harness/glasspane-harness/script/kernel-conformance.mjs).
   // Mirror them here and hash them in the same manifest, so a fixture change upstream
   // arrives as a diff in this repo instead of as a silent behaviour change.
   const canonicalFixtures = path.join(srcKernel, "fixtures")
   const fixtures = []
   if (existsSync(canonicalFixtures)) {
-    mkdirSync(mirroredFixtures, { recursive: true })
+    for (const dir of mirroredFixtureDirs) mkdirSync(dir, { recursive: true })
     for (const name of readdirSync(canonicalFixtures).sort()) {
       if (!name.endsWith(".json")) continue
       const bytes = readFileSync(path.join(canonicalFixtures, name))
-      writeFileSync(path.join(mirroredFixtures, name), bytes)
+      for (const dir of mirroredFixtureDirs) writeFileSync(path.join(dir, name), bytes)
       fixtures.push({ file: name, sha256: sha256(bytes), bytes: bytes.length })
     }
   }
   manifest.fixtures = fixtures
-  manifest.mirroredFixtures = path.relative(repoRoot, mirroredFixtures)
+  manifest.mirroredFixtures = mirroredFixtureDirs.map((d) => path.relative(repoRoot, d))
 
   mkdirSync(path.dirname(manifestFile), { recursive: true })
   writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + "\n")
@@ -295,14 +319,19 @@ if (checkout) {
 // The mirrored fixtures are part of the recorded provenance, so a hand-edited fixture
 // fails the same way a hand-edited vendored kernel file does.
 if (Array.isArray(manifest.fixtures)) {
-  for (const f of manifest.fixtures) {
-    const local = path.join(mirroredFixtures, f.file)
-    if (!existsSync(local)) {
-      console.error(`  ✗ fixture '${f.file}' is declared but missing from ${path.relative(repoRoot, mirroredFixtures)}`)
-      bad++
-    } else if (sha256(readFileSync(local)) !== f.sha256) {
-      console.error(`  ✗ fixture '${f.file}' was edited locally — fixtures are mirrored, not owned (re-run --target=fork)`)
-      bad++
+  // Both mirrors must be present and correct: the product repo ships the vendored
+  // kernel, so a copy that silently went missing there is a green lane with nothing
+  // behind it.
+  for (const dir of mirroredFixtureDirs) {
+    for (const f of manifest.fixtures) {
+      const local = path.join(dir, f.file)
+      if (!existsSync(local)) {
+        console.error(`  ✗ fixture '${f.file}' is declared but missing from ${path.relative(repoRoot, dir)}`)
+        bad++
+      } else if (sha256(readFileSync(local)) !== f.sha256) {
+        console.error(`  ✗ fixture '${f.file}' differs in ${path.relative(repoRoot, dir)} — fixtures are mirrored, not owned (re-run --target=fork)`)
+        bad++
+      }
     }
   }
   if (manifest.fixtures.length === 0) {

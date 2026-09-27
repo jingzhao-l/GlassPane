@@ -1,5 +1,5 @@
 {
-  "_comment": "Provenance of the @iterate/kernel source vendored into the opencode fork. Written by tools/sync-kernel.sh --target=fork; check with harness/tools/kernel-vendor.mjs --check. Do not hand-edit, and do not edit files under packages/kernel inside the fork — the canonical home is iterate-skill/kernel.",
+  "_comment": "Provenance of the @iterate/kernel source vendored into the opencode fork. Written by tools/sync-kernel.sh --target=fork; check with harness/glasspane-harness/script/kernel-vendor.mjs --check. Do not hand-edit, and do not edit files under packages/kernel inside the fork — the canonical home is iterate-skill/kernel.",
   "canonical": {
     "repo": "jingzhao-l/iterate-skill",
     "path": "kernel",
@@ -173,6 +173,5 @@
       "sha256": "68613bcabf45cf059d7086ead38c099ef0dd9b678bb67d5a5e31da77b6ca3549",
       "bytes": 628
     }
-  ],
-  "mirroredFixtures": "harness/contracts/kernel-fixtures"
+  ]
 }

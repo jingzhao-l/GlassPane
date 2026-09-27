@@ -60,6 +60,18 @@ jobs:
         working-directory: packages/opencode
         run: bun run script/publish.ts --dry-run
 
+      # 出处：随包发出的 vendored 内核，以及镜像下来的契约 fixtures，都必须还是
+      # kernel-vendor.json 里记下的那些字节。改了任何一个而不重录，就是"我们悄悄
+      # 改了自己的语义内核"。
+      - name: Kernel provenance (vendored bytes + mirrored fixtures)
+        run: node script/kernel-vendor.mjs --check
+
+      # 行为：把 fixtures 跑过**我们随包发出的那份源码**。哈希只证明字节没变；这条
+      # 证明我们依赖的那些答案还是那些答案。将来若把 vendored 换成 npm 依赖，加
+      # --impl <已安装的包目录> 就是那条证明"换的只是分发方式"的证据。
+      - name: Kernel conformance (mirrored fixtures through the shipped kernel)
+        run: bun script/kernel-conformance.mjs
+
       - name: Product manifest agrees with the package it ships
         run: |
           node -e '

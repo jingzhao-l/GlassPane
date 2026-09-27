@@ -15,7 +15,7 @@
 node harness/tools/fork-diff.mjs --check    # 实际分叉面 vs 记录面（约 2 分钟，逐文件 blob 比对）
 node harness/tools/fork-diff.mjs --record   # 改完上游文件后重记，连同改动一起提交
 node harness/tools/tool-surface.mjs --check # 我们在 fork 里写了多少行（棘轮：只挡没被记录的增长，进 CI）
-node harness/tools/kernel-vendor.mjs --check # vendored 内核 == 它的溯源清单（进 CI，不需要 canonical）
+node harness/glasspane-harness/script/kernel-vendor.mjs --check # vendored 内核 == 它的溯源清单（进 CI，不需要 canonical）
 ```
 
 为什么把这条写死：另一条 harness 线（`iterate-harness`）的设计文档写着"8 处定点修改"，而它自己的树里 194 个共享文件有 **144 个**被改过、20 个被删、8 个新增，并且没有任何机器检查能发现这件事。**定制多少从来不是问题，不知道定制了多少才是。**

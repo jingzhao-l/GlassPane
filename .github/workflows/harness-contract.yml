@@ -141,4 +141,4 @@ jobs:
         with:
           node-version: "22"
       - name: canonical kernel: moved? anchor still reachable?
-        run: node harness/tools/kernel-vendor.mjs --probe
+        run: node harness/glasspane-harness/script/kernel-vendor.mjs --probe
