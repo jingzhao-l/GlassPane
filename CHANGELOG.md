@@ -2,6 +2,98 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.3.1] — 2026-09-27
+
+1.3.0 发布之后连做两轮复审：round 9 审的是**已发布的那份代码**（五维并行，报回 40+ 条、逐条回代码复核后
+成立 20 条），round 10 审的是 **round 9 那批修复本身**（三个 lane，成立 12 条）。判据、因果核对与"报回但不
+成立"的条目都留了痕：规格 `specs/GlassPane_规格修订_2026-09-23_iterate-round4.md` 的「追加五」「追加六」与
+`.iterate_decisions.md` 的 Round 9 / Round 10。
+
+**为什么记 1.3.1 而不是 1.4.0，反方一并写下**：这一版收紧了三处对外输入面 —— `selector.role`/`title` 不再
+接受空串（此前 daemon 拒、壳层放行，现在两侧同判）；注册的证据存储根不再允许指向 `~/.ssh` 一类家目录点目录
+（daemon 会把注册的根 chmod 0700 并往里写档案）；HTTP 网关拒绝非回环 host 与低于门槛的 bearer token
+（**一个原先靠 `GLASSPANE_HTTP_TOKEN=a` 就能起起来的调用方，现在会拒绝启动**，绑不上端口也不再"打一行日志
+继续活着"）。按本仓"对外可见的契约变化按 minor 记"的口径，这几条足以判成 1.4.0；选 1.3.1 的理由是它们掐掉的
+是**已经在误导用户/代理的可达路径**（错误建议诱导重复点击、`--port=0x50` 意味着 80 端口、`localhost` 去哪里
+由 `/etc/hosts` 决定），而不是新增能力。认为该记 minor 的话说一声：改号比发版便宜，发出去就收不回。
+
+
+### Fixed — Round 10：审 round 9 的修复本身，成立 12 条
+
+判据与因果核对见规格「追加六」。反向变异 12 条全部达到预期红。
+
+- **`canonicalJson` 不再吞掉名为 `__proto__` 的成员**（高危数据面）。排序后的对象此前是 `{}` 字面量，
+  对该键赋值命中的是继承来的 setter——成员根本没写进去，而 stdio 每一帧出站文本与转发给代理的 daemon
+  正文都过这个函数；daemon 侧的规范化写手把它当普通字典成员输出，于是同一个证据包在两个接入面给出
+  不同字节。现在用 `Object.create(null)` 构造，其余输入逐字不变（有等价性用例），并有一条**读 Swift
+  源码**的对照，防止两侧再次分叉。
+- **传输层重新闭上"点名参数"这条路**：超时 remedy 不再说"缩 maxDepth"（`maxDepth:1` 的调用方收到的
+  曾是自家 zod 会拒的指令），可缩旋钮与是否已到界改由拿到 schema 的工具层在同一入口生成；新增一条
+  扫描源码的闸，把"参数名 + 方向"这种写法整体禁掉（6 个已知坏写法作正例、3 个允许写法作反例）。
+- **迟到帧的归属方式一路走到链上**：无 id 的迟到回复写为 `late-inferred`（按到达顺序猜的，不得读成
+  已核实），带 echoed id 的仍是 `late`，`gp_recent_reports` 逐项标注；不抹掉——抹掉等于宣称"这个操作
+  没跑过"，那对要不要再点一次的代理是更危险的假。
+- **壳层写注册表落实已登记的"就地收紧"**：写完把状态根收成 0700、`projects.json` 收成 0600，并**读回
+  校验**（在不支持 chmod 的卷上成功是静默的）；证据根不得指向家目录的点目录（`~/.ssh`、`~/.aws`、
+  `~/.gnupg`、`~/.config`、`~/.glasspane`）——daemon 会把注册的根 chmod 0700 并往里写档案。
+- **HTTP 网关三条**：只接受回环**地址字面量**，拒绝一切名字（`localhost` 去哪里由 `/etc/hosts` 决定，
+  而这正是它拒绝其它名字的理由，旧拒绝文案还自己建议用它）；`GET /v1/evidence?ids=` 的整条扇出共用
+  一个预算并点名没取到的 id；CLI 的 `--port` 只接受十进制数字并在解析处报错（`--port=0x50` 曾意味着
+  80，`--port=` 意味着随机端口），报错时不创建任何客户端。
+- **探针的名字按接入面给**：curl 调用方拿到的超时文案说 `POST /v1/tools/probe_status`，不再给一个它
+  只能瞎猜成 `POST /v1/tools/gp_probe_status` 的 MCP 名字；对称的一半也钉住（MCP 文案里不得出现路由）。
+- **daemon 那条不可达的 `default:` 建议改写**：它曾带着"授予屏幕录制并重启 daemon"，而分类器的取值
+  已全部各有分支 ⇒ 没人走得到；这段"没人走得到但随时会被下一个新标签继承"的文案换成只说"未归因"的话，
+  并把闸扩成"连 `default:` 也不得出现授予/重启命令词"。
+- **一条不成立的报告留痕**：lane 报"新的总预算没有测试提到，改成 Infinity 也全绿"——实测有具名用例
+  且同位置曾一次红 3 条。红与零红都必须自己跑过，别把别人的判断当测量。
+
+
+### Fixed — Round 9：审的是**已经发出去的 1.3.0**，五维并行复审后成立的 20 条（8 高）
+
+判据与因果核对见 `specs/GlassPane_规格修订_2026-09-23_iterate-round4.md`「追加五」与
+`.iterate_decisions.md` 的 Round 9。下面每一条都有反向变异：把修复撤销 → 对应测试必须红（13 条变异，
+第 8 条当时零红，于是为它补了一道闸，补完再跑即红）。
+
+- **无 id 的帧按 daemon 的到达顺序归因，而不是按"还有谁在等"**。旧实现把注释里的"oldest unanswered"
+  写成了"oldest unsettled"：`act` 超时后代理照 remedy 发探针，daemon 给那条 act 的无 id 错误会被当成
+  探针的答案交给探针调用方（连 remedy 一起），探针自己随后被报成"客户端从没发过"；另一支则把它说成
+  "没有请求在飞"，那次真实执行过的操作因此**没进证据链**——正是 R8-高3 要消灭的"再点一次"。
+- **不可重放的方法集合改成传输层唯一导出**（`isReplayUnsafeMethod`），`tools.ts` 与 `http-gateway.ts`
+  只保留各自文案。此前同一策略抄了三份，而 `gp_act` 的回复超帧时两套建议都在说"换个更具体的 selector
+  重试"——那是在命令第二次点击。现在不可重放的工具拿到的是"不要重发，去读 `gp_recent_reports` /
+  `gp_last_evidence` / `gp_observe`"。
+- **两条新的"重启"漏句被掐掉**：帧已到达但形状不对（`GP_E_INTERNAL`）不再附带
+  `--restore-launchd`，改为给读得出来的检查（同连接发 `gp_probe_status`；`launchctl print` 回读运行
+  中 job 的参数）；daemon 侧 `pixel-capture-no-surface`（窗口在屏、被别的东西盖住）有了自己的出路，
+  不再落进 `default:` 那句"授予屏幕录制并重启服务"，并由新闸双向对表：分类器能吐出的标签集合 = advice
+  分支集合，且除 `screen-recording-denied` 外任何分支都不得出现授予/重启命令词。
+- **"已经到界"从此覆盖每个 advertise 了边界的旋钮**，不再只认 `scale`：`gp_observe {maxDepth: 1}` 与
+  `gp_recent_reports {limit: 1}` 不再被命令去缩一个自家 zod 会拒的值。
+- **HTTP 网关三条发布红线落到代码**：只允许回环地址（非回环在开连接与 bind 之前拒绝并点名被拒的值）；
+  bearer token 有长度与熵双门槛（门槛数字写进拒绝理由与 usage，并附一条做得到的生成命令）；bind 失败
+  用自己的退出码退出并说清"这个进程没有在服务"。此前"永不监听通配地址"只是注释，`TOKEN=a` 就能守住
+  改用户屏幕的面，端口被抢时进程看起来还在服务。
+- **`gp_recent_reports` 有了自己的总预算**（等于客户端耐性上限，复用导出的常量而非新数字），超预算时
+  点名没取到的 operationId 并返回超时而不是"没有证据"；此前 20 个 id 各自 50 s，最坏能把调用方挂住
+  ~1000 s——挂住的正是那条专门用来阻止重复点击的工具。
+- **注册表通知不再宣称 daemon 没有状态根覆盖**：`glasspaned --state-dir <root>` 会改变它加载的
+  `projects.json`，而 socket 不回这个字段。通知现在明说"本壳看不见、也不从 `$HOME` 猜"，并给出可自查
+  的判别（`gp_project_list` 看盘上有什么、`gp_attach {projectId}` 是否 `GP_E_NOT_FOUND`、
+  `launchctl print` 读运行中 job 的参数）。新增一条闸同时钉住事实的另一侧：`"stateRoot"` 这个键在
+  Swift 里只允许出现在 CLI 的 payload 文件中。
+- **`GP_E_PROJECT_LIMIT` 不再命令一个不存在的删除**；`tools/list` 描述里不再出现规格编号，
+  证据校验失败也不再让用户"去修 assertion C35"（改为说明两侧 schema 不一致与怎么读出来）。
+- **三处永不泛红的对照重写**：探针期限那条两侧同过 `min(·, ceiling)` 因而恒假（改为比较 daemon 侧期限
+  并要求"比探针更久的方法"清单逐名）；`history.removeAll()` 不再只看第一处、字段表接受 `let|var` 并
+  从结构体 `init` 反推应有字段数；`methodsSentByShell` 现在分别暴露两条产生路径并要求各自非空。
+- **新增一类判定：会挂死的对照不是对照**。删掉 token 门槛后那组用例不红而是占住事件循环——所有
+  "期待拒绝"的用例改为 try/finally 关掉自己创建出来的 server，反向变异由此从"卡 9 分钟"变成"3 条红"。
+- **门禁自身的守卫也修了**：中央 `gate.sh` 对真实 `projects.json` 的基线改为**每次运行自抓**，变动
+  计入失败并另存前后两份，退出码与 `failed=` 一致（旧行为是拿 09-23 的哈希天天报 `CHANGED` 却仍然
+  `failed=0`，把最贵的一件事降成了噪音）。
+
+
 ## [1.3.0] — 2026-09-26
 
 MCP 专项审查（round 8）与对同批修复自身的三轮复审（round 8b / 8c / 8d）落地。**这一版之前 MCP 面被判定为
@@ -102,127 +194,11 @@ MCP 专项审查（round 8）与对同批修复自身的三轮复审（round 8b 
   新鲜度判据自拒并返回 `NOT RUN(2)`（那是正确行为，不是通过）。CI 跑在 ubuntu runner 上，不覆盖真机
   AX / 屏幕录制路径，所以这两面未经端到端验证；机器空下来补跑，若发现问题按 1.3.1 发布修复。
 
-## [1.2.0] — 2026-09-25
+## [1.3.0] 的漏记条目（当时留在 `[未发布]` 名下，实际已随 1.3.0 发出）
 
-### Added — feature-gap 四维精简审查落地
+下面这一组是 2026-09-25 像素通路修复之后补的判据（`359fd4e` 等），是 `v1.3.0` 的祖先，因此
+**已经在 1.3.0 的产物里**；把它们留在这里只为让"哪一版包含什么"有一处真相，不重复计入 1.3.1。
 
-承接 1.1.2 之后的一次"优先级审查 + 功能缺口"复核（round gap），确认既有 `gp_export_evidence` /
-`gp_recent_reports` / daemon `--evidence-stats` / `--recipe-validate` 已覆盖的基线后，本轮补齐四项缺口：
-
-- **HTTP/REST transport（新增 `glasspane-http` 入口）**。`mcp-shell` 新开一个 HTTP gateway：token
-  经 `GLASSPANE_HTTP_TOKEN` 注入（缺失即退出），仅绑定 127.0.0.1，处理 SIGINT/SIGTERM 干净退出。
-  新增 `/v1/stats` 与 `/v1/recipes/validate`；对无 daemon socket 通道的路径返回 `GP_HTTP_NOT_PROVIDED`。
-- **证据趋势统计卡**。设置/面板新增证据统计视图，输出分布与 `==` 计数（见下条的越界归并）。
-- **配方校验 + 模板编辑器**。RecipesTab 支持模板编辑，校验走 daemon 的 `--recipe-validate` 语义。
-
-### Fixed — 第二轮代码优先审查（正确性 / 安全 / 发布链路）
-
-- **http-gateway 发布链路缺失（阻断发版）**。此前 bundle 单入口会删掉非 index.js，且无独立 CLI 入口、
-  测试消费 tsc dist 而非 bundle，导致"测试绿但发布丢功能"且 CI 拦不住。本轮新增独立
-  `http-gateway-cli.ts` 入口、bundle 三入口、bundle smoke 门禁。
-- **证据 id 无上限 → DoS**。`MAX_EVIDENCE_IDS` 收敛到 20。
-- **token 长度探测**。改为 sha256 + `timingSafeEqual`，去掉按长度提前返回的分支。
-- **多余路径段触发真实 act**。路径段拆分后先 404，而不是透传到 act。
-- **绕过契约校验的 `LAST_EVIDENCE` 透传**。`last_evidence` 改走 `parseEvidenceFrame` 校验后再进入。
-- **证据统计越界 circuitBreakerLevel 丢失**。越界 level 归入显式"其他(不识别)" bucket，分布与 `==` 计数含盖。
-- **recipe 临时文件权限 / TOCTOU**。临时文件用 0600 + `O_EXCL` + `O_NOFOLLOW` + UUID。
-- **校验结果过期覆盖**。校验 token 门控（递增 token），防止慢校验覆盖新结果；验证期间禁用模板/刷新按钮。
-
-## [1.1.2] — 2026-09-25
-
-### Fixed — R6 遗留四项收口
-
-承接 1.1.1 的 iterate 复审（r1–r4b），本轮把决策日志里标记"仍开着"的四项逐个落地，
-版本线从 1.1.1 升至 1.1.2。以下每项都配套了能满足"撤销即红"的测试。
-
-- **面板人读面缺席渲染**。`EvidenceTabView` 此前对 `stateDiff/crash/handlerProbe` 缺席直接无卡、
-  `responsiveness` 整块不渲染——"没测到长得像没事"。新增六通道缺席/已测判定的唯一纯函数
-  `PanelChannelFields`，各自渲染中文"不可用"卡而非消失。
-- **probe-status surface 闸形制收紧**。裸 `includes(key)` 会让短键命中无关散文造成假绿；改为
-  反引号 ``` `key` ``` 形制匹配，并核实 description 里 15 个发布键（含 `attachedHasProbe`、
-  `longSession` 两处真漏）全部有包裹。
-- **path-consistency 以语义而非字形判据**。不再匹配 `for…where…hasPrefix(x+"/")` 的字形，
-  改为读 Swift 侧实现断言"子树匹配 + ownability 兜底的存在与可达"，并禁止旧的 `.contains(`
-  等值匹配回来；等价重构不假红。
-- **双采集失败标签归并**。`no capture surface available` 此前落入 `pixel-capture-failed`
-  被当作应用缺陷；现在归并为既有环境边界标签 `pixel-capture-no-onscreen-window`，并同步
-  `.p6_smoke.py` 的不可用标签容忍集注释。
-
-## [未发布]
-
-### Fixed — Round 10：审 round 9 的修复本身，成立 12 条
-
-判据与因果核对见规格「追加六」。反向变异 12 条全部达到预期红。
-
-- **`canonicalJson` 不再吞掉名为 `__proto__` 的成员**（高危数据面）。排序后的对象此前是 `{}` 字面量，
-  对该键赋值命中的是继承来的 setter——成员根本没写进去，而 stdio 每一帧出站文本与转发给代理的 daemon
-  正文都过这个函数；daemon 侧的规范化写手把它当普通字典成员输出，于是同一个证据包在两个接入面给出
-  不同字节。现在用 `Object.create(null)` 构造，其余输入逐字不变（有等价性用例），并有一条**读 Swift
-  源码**的对照，防止两侧再次分叉。
-- **传输层重新闭上"点名参数"这条路**：超时 remedy 不再说"缩 maxDepth"（`maxDepth:1` 的调用方收到的
-  曾是自家 zod 会拒的指令），可缩旋钮与是否已到界改由拿到 schema 的工具层在同一入口生成；新增一条
-  扫描源码的闸，把"参数名 + 方向"这种写法整体禁掉（6 个已知坏写法作正例、3 个允许写法作反例）。
-- **迟到帧的归属方式一路走到链上**：无 id 的迟到回复写为 `late-inferred`（按到达顺序猜的，不得读成
-  已核实），带 echoed id 的仍是 `late`，`gp_recent_reports` 逐项标注；不抹掉——抹掉等于宣称"这个操作
-  没跑过"，那对要不要再点一次的代理是更危险的假。
-- **壳层写注册表落实已登记的"就地收紧"**：写完把状态根收成 0700、`projects.json` 收成 0600，并**读回
-  校验**（在不支持 chmod 的卷上成功是静默的）；证据根不得指向家目录的点目录（`~/.ssh`、`~/.aws`、
-  `~/.gnupg`、`~/.config`、`~/.glasspane`）——daemon 会把注册的根 chmod 0700 并往里写档案。
-- **HTTP 网关三条**：只接受回环**地址字面量**，拒绝一切名字（`localhost` 去哪里由 `/etc/hosts` 决定，
-  而这正是它拒绝其它名字的理由，旧拒绝文案还自己建议用它）；`GET /v1/evidence?ids=` 的整条扇出共用
-  一个预算并点名没取到的 id；CLI 的 `--port` 只接受十进制数字并在解析处报错（`--port=0x50` 曾意味着
-  80，`--port=` 意味着随机端口），报错时不创建任何客户端。
-- **探针的名字按接入面给**：curl 调用方拿到的超时文案说 `POST /v1/tools/probe_status`，不再给一个它
-  只能瞎猜成 `POST /v1/tools/gp_probe_status` 的 MCP 名字；对称的一半也钉住（MCP 文案里不得出现路由）。
-- **daemon 那条不可达的 `default:` 建议改写**：它曾带着"授予屏幕录制并重启 daemon"，而分类器的取值
-  已全部各有分支 ⇒ 没人走得到；这段"没人走得到但随时会被下一个新标签继承"的文案换成只说"未归因"的话，
-  并把闸扩成"连 `default:` 也不得出现授予/重启命令词"。
-- **一条不成立的报告留痕**：lane 报"新的总预算没有测试提到，改成 Infinity 也全绿"——实测有具名用例
-  且同位置曾一次红 3 条。红与零红都必须自己跑过，别把别人的判断当测量。
-
-### Fixed — Round 9：审的是**已经发出去的 1.3.0**，五维并行复审后成立的 20 条（8 高）
-
-判据与因果核对见 `specs/GlassPane_规格修订_2026-09-23_iterate-round4.md`「追加五」与
-`.iterate_decisions.md` 的 Round 9。下面每一条都有反向变异：把修复撤销 → 对应测试必须红（13 条变异，
-第 8 条当时零红，于是为它补了一道闸，补完再跑即红）。
-
-- **无 id 的帧按 daemon 的到达顺序归因，而不是按"还有谁在等"**。旧实现把注释里的"oldest unanswered"
-  写成了"oldest unsettled"：`act` 超时后代理照 remedy 发探针，daemon 给那条 act 的无 id 错误会被当成
-  探针的答案交给探针调用方（连 remedy 一起），探针自己随后被报成"客户端从没发过"；另一支则把它说成
-  "没有请求在飞"，那次真实执行过的操作因此**没进证据链**——正是 R8-高3 要消灭的"再点一次"。
-- **不可重放的方法集合改成传输层唯一导出**（`isReplayUnsafeMethod`），`tools.ts` 与 `http-gateway.ts`
-  只保留各自文案。此前同一策略抄了三份，而 `gp_act` 的回复超帧时两套建议都在说"换个更具体的 selector
-  重试"——那是在命令第二次点击。现在不可重放的工具拿到的是"不要重发，去读 `gp_recent_reports` /
-  `gp_last_evidence` / `gp_observe`"。
-- **两条新的"重启"漏句被掐掉**：帧已到达但形状不对（`GP_E_INTERNAL`）不再附带
-  `--restore-launchd`，改为给读得出来的检查（同连接发 `gp_probe_status`；`launchctl print` 回读运行
-  中 job 的参数）；daemon 侧 `pixel-capture-no-surface`（窗口在屏、被别的东西盖住）有了自己的出路，
-  不再落进 `default:` 那句"授予屏幕录制并重启服务"，并由新闸双向对表：分类器能吐出的标签集合 = advice
-  分支集合，且除 `screen-recording-denied` 外任何分支都不得出现授予/重启命令词。
-- **"已经到界"从此覆盖每个 advertise 了边界的旋钮**，不再只认 `scale`：`gp_observe {maxDepth: 1}` 与
-  `gp_recent_reports {limit: 1}` 不再被命令去缩一个自家 zod 会拒的值。
-- **HTTP 网关三条发布红线落到代码**：只允许回环地址（非回环在开连接与 bind 之前拒绝并点名被拒的值）；
-  bearer token 有长度与熵双门槛（门槛数字写进拒绝理由与 usage，并附一条做得到的生成命令）；bind 失败
-  用自己的退出码退出并说清"这个进程没有在服务"。此前"永不监听通配地址"只是注释，`TOKEN=a` 就能守住
-  改用户屏幕的面，端口被抢时进程看起来还在服务。
-- **`gp_recent_reports` 有了自己的总预算**（等于客户端耐性上限，复用导出的常量而非新数字），超预算时
-  点名没取到的 operationId 并返回超时而不是"没有证据"；此前 20 个 id 各自 50 s，最坏能把调用方挂住
-  ~1000 s——挂住的正是那条专门用来阻止重复点击的工具。
-- **注册表通知不再宣称 daemon 没有状态根覆盖**：`glasspaned --state-dir <root>` 会改变它加载的
-  `projects.json`，而 socket 不回这个字段。通知现在明说"本壳看不见、也不从 `$HOME` 猜"，并给出可自查
-  的判别（`gp_project_list` 看盘上有什么、`gp_attach {projectId}` 是否 `GP_E_NOT_FOUND`、
-  `launchctl print` 读运行中 job 的参数）。新增一条闸同时钉住事实的另一侧：`"stateRoot"` 这个键在
-  Swift 里只允许出现在 CLI 的 payload 文件中。
-- **`GP_E_PROJECT_LIMIT` 不再命令一个不存在的删除**；`tools/list` 描述里不再出现规格编号，
-  证据校验失败也不再让用户"去修 assertion C35"（改为说明两侧 schema 不一致与怎么读出来）。
-- **三处永不泛红的对照重写**：探针期限那条两侧同过 `min(·, ceiling)` 因而恒假（改为比较 daemon 侧期限
-  并要求"比探针更久的方法"清单逐名）；`history.removeAll()` 不再只看第一处、字段表接受 `let|var` 并
-  从结构体 `init` 反推应有字段数；`methodsSentByShell` 现在分别暴露两条产生路径并要求各自非空。
-- **新增一类判定：会挂死的对照不是对照**。删掉 token 门槛后那组用例不红而是占住事件循环——所有
-  "期待拒绝"的用例改为 try/finally 关掉自己创建出来的 server，反向变异由此从"卡 9 分钟"变成"3 条红"。
-- **门禁自身的守卫也修了**：中央 `gate.sh` 对真实 `projects.json` 的基线改为**每次运行自抓**，变动
-  计入失败并另存前后两份，退出码与 `failed=` 一致（旧行为是拿 09-23 的哈希天天报 `CHANGED` 却仍然
-  `failed=0`，把最贵的一件事降成了噪音）。
 
 ### Fixed — 像素通路修好之后暴露的六条"像测量其实没测"
 
@@ -400,6 +376,52 @@ AI 编程代理用的 GUI 测试与验证层**：代理已经能做静态半场�
   预算）。两处修正：① 只读 role + 几何，title 仅对可交互角色读（"哪个按钮点不到"才需要名字）；
   ② 预算耗尽改为带着已测部分返回并置 `complete=false` + `stopReason`，审计据此留下
   `geometryScanIncomplete` 且不允许给出 `pass`——"要么全有要么报错"与大界面天然不兼容。
+
+## [1.2.0] — 2026-09-25
+
+### Added — feature-gap 四维精简审查落地
+
+承接 1.1.2 之后的一次"优先级审查 + 功能缺口"复核（round gap），确认既有 `gp_export_evidence` /
+`gp_recent_reports` / daemon `--evidence-stats` / `--recipe-validate` 已覆盖的基线后，本轮补齐四项缺口：
+
+- **HTTP/REST transport（新增 `glasspane-http` 入口）**。`mcp-shell` 新开一个 HTTP gateway：token
+  经 `GLASSPANE_HTTP_TOKEN` 注入（缺失即退出），仅绑定 127.0.0.1，处理 SIGINT/SIGTERM 干净退出。
+  新增 `/v1/stats` 与 `/v1/recipes/validate`；对无 daemon socket 通道的路径返回 `GP_HTTP_NOT_PROVIDED`。
+- **证据趋势统计卡**。设置/面板新增证据统计视图，输出分布与 `==` 计数（见下条的越界归并）。
+- **配方校验 + 模板编辑器**。RecipesTab 支持模板编辑，校验走 daemon 的 `--recipe-validate` 语义。
+
+### Fixed — 第二轮代码优先审查（正确性 / 安全 / 发布链路）
+
+- **http-gateway 发布链路缺失（阻断发版）**。此前 bundle 单入口会删掉非 index.js，且无独立 CLI 入口、
+  测试消费 tsc dist 而非 bundle，导致"测试绿但发布丢功能"且 CI 拦不住。本轮新增独立
+  `http-gateway-cli.ts` 入口、bundle 三入口、bundle smoke 门禁。
+- **证据 id 无上限 → DoS**。`MAX_EVIDENCE_IDS` 收敛到 20。
+- **token 长度探测**。改为 sha256 + `timingSafeEqual`，去掉按长度提前返回的分支。
+- **多余路径段触发真实 act**。路径段拆分后先 404，而不是透传到 act。
+- **绕过契约校验的 `LAST_EVIDENCE` 透传**。`last_evidence` 改走 `parseEvidenceFrame` 校验后再进入。
+- **证据统计越界 circuitBreakerLevel 丢失**。越界 level 归入显式"其他(不识别)" bucket，分布与 `==` 计数含盖。
+- **recipe 临时文件权限 / TOCTOU**。临时文件用 0600 + `O_EXCL` + `O_NOFOLLOW` + UUID。
+- **校验结果过期覆盖**。校验 token 门控（递增 token），防止慢校验覆盖新结果；验证期间禁用模板/刷新按钮。
+
+## [1.1.2] — 2026-09-25
+
+### Fixed — R6 遗留四项收口
+
+承接 1.1.1 的 iterate 复审（r1–r4b），本轮把决策日志里标记"仍开着"的四项逐个落地，
+版本线从 1.1.1 升至 1.1.2。以下每项都配套了能满足"撤销即红"的测试。
+
+- **面板人读面缺席渲染**。`EvidenceTabView` 此前对 `stateDiff/crash/handlerProbe` 缺席直接无卡、
+  `responsiveness` 整块不渲染——"没测到长得像没事"。新增六通道缺席/已测判定的唯一纯函数
+  `PanelChannelFields`，各自渲染中文"不可用"卡而非消失。
+- **probe-status surface 闸形制收紧**。裸 `includes(key)` 会让短键命中无关散文造成假绿；改为
+  反引号 ``` `key` ``` 形制匹配，并核实 description 里 15 个发布键（含 `attachedHasProbe`、
+  `longSession` 两处真漏）全部有包裹。
+- **path-consistency 以语义而非字形判据**。不再匹配 `for…where…hasPrefix(x+"/")` 的字形，
+  改为读 Swift 侧实现断言"子树匹配 + ownability 兜底的存在与可达"，并禁止旧的 `.contains(`
+  等值匹配回来；等价重构不假红。
+- **双采集失败标签归并**。`no capture surface available` 此前落入 `pixel-capture-failed`
+  被当作应用缺陷；现在归并为既有环境边界标签 `pixel-capture-no-onscreen-window`，并同步
+  `.p6_smoke.py` 的不可用标签容忍集注释。
 
 ## [1.1.1] — 2026-09-23
 
