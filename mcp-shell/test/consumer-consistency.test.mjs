@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 
 import {
+  EVIDENCE_PACK_JSON_SCHEMA,
+  SelectorSchema,
   parseEvidencePack,
   parseEvidencePackRead,
   parseDecisionLogEntry,
@@ -1424,4 +1426,164 @@ test("gp_capture_view advertises no second copy of the PNG budget", () => {
       .sort(),
     [`${budget + 1}`, "2.5 MB"].sort(),
   );
+});
+
+/* ------------------------------------------------------------------ *
+ * Selector emptiness: one rule, four surfaces.
+ *
+ * The verdict is decided in the daemon's parameter parsing
+ * (`ParamValidation.optSelector`, plus the two daemon readings that make an
+ * empty `title` a contradiction rather than a mere oddity). It is then published
+ * as JSON Schema (`kernel/schemas/evidence-pack.schema.json`, the C35 source of
+ * truth), mirrored as zod (`kernel/src/evidence-pack.ts` → `SelectorSchema`,
+ * which `src/tools.ts` now imports instead of restating), and advertised to the
+ * agent in `tools/list`. Four places, one judgement — and until this section
+ * nothing read the daemon's judgement and compared it to the other three, which
+ * is how `role: {type: string, maxLength: 512}` came to sit next to a daemon that
+ * refuses `role: ""`, and how a second, stricter copy of the same selector grew
+ * in this shell.
+ *
+ * Nothing here is a restated `true`: each verdict is *derived* from what the
+ * daemon's own sources currently say, so a daemon that drops its guard, starts
+ * refusing the empty title itself, or starts printing an empty title reddens this
+ * gate instead of letting the kernel quietly disagree with it.
+ * ------------------------------------------------------------------ */
+
+const AX_CHANNEL_FILE = "../../engine/Sources/GlassPaneEngine/AXChannel.swift";
+const EVIDENCE_REPORT_FILE = "../../engine/Sources/GlassPaneEngine/EvidenceReportGenerator.swift";
+
+/**
+ * The daemon's selector rules, read out of the Swift that decides them.
+ *
+ * `tools.test.mjs` already reads these for the shell's own request path; this
+ * reads them for the *published* contract, which is the half that had no gate:
+ * the kernel's schema and zod are what a Swift `Codable`, an HTTP gateway and any
+ * third-party consumer of `@iterate/kernel` all take their rule from.
+ */
+function daemonSelectorEmptiness() {
+  const swift = readFileSync(new URL(PARAM_VALIDATION_FILE, import.meta.url), "utf8");
+  const opened = swift.indexOf("static func optSelector");
+  assert.notEqual(opened, -1,
+    "ParamValidation.swift 里找不到 optSelector：这条闸读的东西搬家了，要改的是闸本身而不是结论");
+  const closed = swift.indexOf("static func requireSelector", opened);
+  assert.notEqual(closed, -1, "optSelector 的函数体读不到结尾，判据不可信");
+  const body = swift.slice(opened, closed);
+
+  const roleGuard = /guard\s+let\s+role\s*=\s*dict\["role"\][\s\S]{0,80}?else/.exec(body);
+  assert.ok(roleGuard !== null, "optSelector 不再用 guard 读 role——重读这条闸");
+  const maxLength = /static let selectorMaxLength\s*=\s*(\d+)/.exec(swift);
+  assert.ok(maxLength !== null, "selectorMaxLength 不在了——长度上限这条判据也读不到了");
+
+  // `title` and `identifier` are both read through `optString`, whose only rule is
+  // a length cap. Whether that helper grew an emptiness guard is the difference
+  // between "the daemon refuses it" and "only its consumers can", so it is read,
+  // not assumed.
+  const lengthOnlyReader = /let (title|identifier) = try optString\(dict, "\1"[^\n]*/g;
+  assert.equal(
+    [...body.matchAll(lengthOnlyReader)].length,
+    2,
+    "optSelector 不再把 title/identifier 交给 optString——两条字段的读法变了，重读这条闸",
+  );
+  const optStringBody = swift.slice(swift.indexOf("static func optString"), swift.indexOf("static func optInt"));
+  const readerRefusesEmpty = /\.isEmpty/.test(optStringBody);
+
+  // The reason an empty `title` may not be published as a legal value even though
+  // the daemon swallows it: the daemon matches it for exact equality and then
+  // renders it as absent, so an act and the pack describing it disagree.
+  const channel = executableSource(readFileSync(new URL(AX_CHANNEL_FILE, import.meta.url), "utf8"));
+  const matchesTitleExactly =
+    /if let wantedTitle = selector\.title \{[\s\S]{0,200}?if title != wantedTitle \{ return false \}/.test(channel);
+  const report = executableSource(readFileSync(new URL(EVIDENCE_REPORT_FILE, import.meta.url), "utf8"));
+  const printsTitleOnlyWhenNonEmpty = /if let title = selector\.title\?\.nonEmpty/.test(report);
+
+  return {
+    selectorMaxLength: Number(maxLength[1]),
+    roleRefusedByDaemonAlone: /!role\.isEmpty/.test(roleGuard[0]),
+    titleRefusedByDaemonAlone: readerRefusesEmpty,
+    identifierRefusedByDaemonAlone: readerRefusesEmpty,
+    titleEvidenceDisagrees: matchesTitleExactly && printsTitleOnlyWhenNonEmpty,
+  };
+}
+
+/** The published kernel JSON Schema's `$defs.selector`, the C35 source of truth. */
+function publishedSelectorRule() {
+  const selector = EVIDENCE_PACK_JSON_SCHEMA.$defs?.selector;
+  assert.ok(
+    selector && typeof selector === "object",
+    "kernel/schemas/evidence-pack.schema.json 里读不到 $defs.selector：发布出去的契约换了地方",
+  );
+  assert.deepEqual(selector.required, ["role"], "$defs.selector 的必填集不再是 role，这条闸的字段对照要重读");
+  assert.ok(selector.properties, "$defs.selector 没有 properties，逐字段的 minLength 无从比对");
+  return selector.properties;
+}
+
+/** Does the kernel's zod accept this field as the empty string? */
+function kernelZodAcceptsEmpty(field) {
+  const sample = { role: "AXButton", title: "Submit", identifier: "ok-press" };
+  sample[field] = "";
+  return SelectorSchema.safeParse(sample).success;
+}
+
+/** Does `tools/list` advertise an empty value for this field as legal? */
+function advertisedAcceptsEmpty(field) {
+  const advertised = TOOL_BY_NAME.get("gp_act").inputSchema.properties.selector.properties[field];
+  assert.ok(advertised, `gp_act 不再 advertise selector.${field}，这条闸看不到对外承诺了`);
+  return (advertised.minLength ?? 0) === 0;
+}
+
+test("selector emptiness: the daemon's guard, the published schema and the kernel zod are one rule", () => {
+  // MUTATIONS THIS PINS, one per side:
+  //  - published schema: dropping `"minLength": 1` from `$defs.selector.role` or
+  //    `.title` → the schema says admissible, the daemon and the zod say refused.
+  //  - kernel zod: dropping `.min(1)` → the loaded `SelectorSchema` accepts `""`
+  //    while the schema the same package ships refuses it (this is what let
+  //    `this shell` grow its own stricter copy in the first place).
+  //  - daemon: dropping `!role.isEmpty` from `optSelector`, or making
+  //    `EvidenceReportGenerator` print an empty title, flips a *derived* verdict
+  //    and the two TS sides then disagree with it.
+  const daemon = daemonSelectorEmptiness();
+  const published = publishedSelectorRule();
+
+  assert.equal(daemon.roleRefusedByDaemonAlone, true,
+    "daemon 不再要求 selector.role 非空了：空 role 的结论要按新读法重推，不能沿用");
+  assert.equal(
+    daemon.titleRefusedByDaemonAlone || daemon.titleEvidenceDisagrees,
+    true,
+    "daemon 侧对空 title 的读法变了（既不拒、也不再匹配后渲染成缺失）：这条闸的结论要按新读法重推",
+  );
+
+  const verdicts = [];
+  for (const field of ["role", "title", "identifier"]) {
+    const mustRefuse =
+      field === "role" ? daemon.roleRefusedByDaemonAlone
+        : field === "title"
+          ? daemon.titleRefusedByDaemonAlone || daemon.titleEvidenceDisagrees
+          : daemon.identifierRefusedByDaemonAlone;
+    // An empty `identifier` is the field no side rules on: the daemon has no guard
+    // on it and the "nothing in the tree carries an empty AXIdentifier" premise is
+    // not readable from Swift, so the derivation stops at the daemon. `tools.test
+    // .mjs` keeps the behavioural half — that `identifier: ""` is still forwarded.
+    const schemaRefuses = (published[field]?.minLength ?? 0) > 0;
+    const zodRefuses = !kernelZodAcceptsEmpty(field);
+    const advertisedRefuses = !advertisedAcceptsEmpty(field);
+    for (const [surface, refuses] of [
+      ["published JSON Schema", schemaRefuses],
+      ["kernel zod (`SelectorSchema`)", zodRefuses],
+      ["tools/list advertisement", advertisedRefuses],
+    ]) {
+      verdicts.push({ field, surface, refuses, mustRefuse });
+      assert.equal(
+        refuses,
+        mustRefuse,
+        `selector.${field}: ${surface} ${refuses ? "拒绝" : "接受"}空串，而 daemon 的判据要求` +
+        `${mustRefuse ? "拒绝" : "接受"}——四处只有一处变了，agent 收到的承诺与执行它的规则从此是两个答案`,
+      );
+    }
+    assert.equal(
+      published[field]?.maxLength,
+      daemon.selectorMaxLength,
+      `selector.${field}: 发布的 maxLength ${published[field]?.maxLength} 不是 daemon 的 ${daemon.selectorMaxLength}`,
+    );
+  }
+  assert.equal(verdicts.length, 9, "每个字段的三面比对都要留下记录，少一面就是这条闸少读了一面");
 });

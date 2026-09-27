@@ -4,7 +4,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { attachIdentityOf, TOOL_SPECS, TOOL_BY_NAME, executeTool, trailScopedTool } from "../dist/tools.js";
+import {
+  attachIdentityOf, TOOL_SPECS, TOOL_BY_NAME, executeTool, trailScopedTool,
+  oversizedReplyAdvice, replayUnsafePayloadAdvice, toolAuthorsTimeoutAdvice,
+  isNarrowableByRetryMethod,
+} from "../dist/tools.js";
 import { EvidenceAuditSession } from "../dist/audit-session.js";
 import { canReceiveDaemonReply, methodsSentByShell } from "./support/wire-surface.mjs";
 import { privateSandbox } from "./support/sandbox.mjs";
@@ -15,6 +19,8 @@ import {
   EngineJsonRpcClient,
   CALLER_VISIBLE_CEILING_MS,
   LIVENESS_PROBE_OUTCOMES,
+  REPLAY_UNSAFE_METHOD_NAMES,
+  STATE_CHANGING_ON_RETRY_METHOD_NAMES,
   isReplayUnsafeMethod,
   lateReplyRoute,
   livenessProbeDecision,
@@ -1452,9 +1458,19 @@ test("an oversized reply to a replay-unsafe tool forbids the retry instead of or
   assert.match(act, /gp_last_evidence \{operationId\}/);
   assert.match(act, /gp_observe \/ gp_assert_element/);
   assert.match(act, /gp_probe_status answers on the same connection/);
-  // A knob is still named for the case where the reading says the change never
-  // took effect — and only ever one `gp_act` publishes.
-  assert.match(act, /a more specific selector/);
+  // RE-PINNED (finding 中-1, was `assert.match(act, /a more specific selector/)`).
+  // That assertion pinned the *defect*: `gp_act`'s only advertised parameter is the
+  // selector, and the round's finding is that offering it as a narrowing knob tells
+  // the agent to press a different control — the same harm the sentence above
+  // forbids, ordered by the sentence below it. The direction is now the opposite
+  // one, and the mutation that reddens it is putting `gp_act` back into
+  // `TARGET_SELECTING_KNOBS`' absence (or re-adding the old clause), after which
+  // `/a more specific selector/` appears again and the first assertion here fails.
+  assert.ok(!/a more specific selector|tighter selector|smaller selector|aim at one element/.test(act),
+    `gp_act 的出路不得把 selector 说成可以拧小的旋钮：${act}`);
+  // The parameter is still named — the advice says what it is, not what to change.
+  assert.match(act, /'selector' names which control the action is performed on/, act);
+  assert.match(act, /it can be sent again exactly as it stands/, act);
 
   const restore = await oversizedAdviceThrough("gp_restore", { snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS" });
   assert.match(restore, /do not re-issue this request/, restore);
@@ -1826,11 +1842,27 @@ test("a timed-out read already holding its floor value is not told to lower it",
   // The knob that still has room is named, by the name this tool publishes.
   assert.match(observe, /a tighter role filter/, observe);
 
+  // RE-PINNED (finding 中-2). These four assertions pinned `gp_snapshot`'s timeout
+  // as tool-authored ("there is nothing left to narrow…", "maxDepth is already at
+  // this tool's floor (1)"), which is the *floor* half of the story and missed the
+  // other half: `snapshot` writes the daemon's bounded ring (`storeSnapshot`,
+  // `engine/Sources/GlassPaneEngine/EngineCore.swift:2070`, trimmed to
+  // `snapshotHistoryLimit`), so *any* re-send — floor-aware wording included — can
+  // evict the baseline this caller's own earlier snapshot returned and that
+  // `gp_restore {snapshotId}` later needs. The claim that survives is the stricter
+  // one: `gp_snapshot` gets the transport's answer, which orders no re-send. The
+  // mutation is dropping `"snapshot"` from
+  // `STATE_CHANGING_ON_RETRY_METHOD_NAMES` in `src/engine-client.ts`; the authored
+  // floor wording comes back and both assertions below fail on it.
   const snapshot = await timeoutThrough("gp_snapshot", { maxDepth: 1 });
-  assert.match(snapshot, /there is nothing left to narrow on this request/, snapshot);
-  assert.match(snapshot, /maxDepth is already at this tool's floor \(1\)/, snapshot);
-  assert.ok(!/smaller maxDepth/.test(snapshot), snapshot);
-  assert.match(snapshot, /the tree it reads cannot be made smaller that way here/, snapshot);
+  assert.ok(!/there is nothing left to narrow on this request/.test(snapshot),
+    `gp_snapshot 的超时答复不得再由工具层写成"下一次发得小一点"：${snapshot}`);
+  assert.ok(!/re-send 'gp_snapshot'/.test(snapshot), snapshot);
+  assert.ok(snapshot.includes(slowEngineRemedy("snapshot", "mcp")),
+    `快照的超时要原样带上传输层那句不得重发的话：${snapshot.slice(0, 200)}`);
+  assert.match(snapshot, /rather than sending this request again/);
+  // The floor rule still holds for a read that does not write daemon state.
+  assert.match(observe, /the tree it reads cannot be made smaller that way here/, observe);
 
   // Above the floor the same sentence is an instruction that works, with the
   // bounds read out of the advertised schema rather than typed a second time.
@@ -1878,6 +1910,168 @@ test("a timed-out action keeps the transport's no-replay answer, unrewritten", a
   assert.ok(act.includes(slowEngineRemedy("act", "mcp")),
     `不可重放方法的超时建议必须原样带上传输层的那句话：${act}`);
   assert.match(act, /do NOT re-issue act/);
+});
+
+/* ------------------------------------------------------------------ *
+ * Finding 中-1 — `selector` is not a narrowing knob where it selects the thing
+ * acted on.
+ *
+ * `narrowingKnobsFor` used to map `selector`/`role`/`title` **by name**, so the
+ * same word was a knob in `gp_observe` (where it filters a tree nothing is acted
+ * on) and in `gp_act` (where it picks the control that gets pressed). Two
+ * consequences, both of them the doctrine's two failure modes:
+ *  - a timed-out `gp_assert_element` was answered "re-send with a more specific
+ *    selector (aim at one element)": the substitute asserts a *different node*,
+ *    and because the tool is trail-scoped, `gp_recent_reports`/`gp_diagnose`
+ *    render that substitute as the answer to the original claim — the evidence
+ *    trail lies;
+ *  - `gp_act`'s no-replay advice closed with "…it can be sent again with a more
+ *    specific selector": click another control — the user's screen changes in a
+ *    way nobody asked for.
+ * The knob table is therefore per-tool-per-purpose. These tests are per-tool on
+ * purpose: a name-matched fix would pass one and fail the other.
+ * ------------------------------------------------------------------ */
+
+/** Wording that tells the caller to change what the operation is aimed at. */
+const RE_AIMING = [
+  /more specific selector/,
+  /tighter selector/,
+  /smaller selector/,
+  /aim at one element/,
+  /narrow(?:ing)? (?:it |the |your )?selector/,
+  /selector[^.]{0,30}\b(with|send it with)\b/,
+  /refine the selector/,
+];
+
+/**
+ * The detector must not be decoration: the exact sentence the shell used to ship
+ * has to be caught by the list above, or "no re-aiming wording" could be satisfied
+ * by an advice that says the same thing in words this test never looks for.
+ */
+const OLD_DEFECT_TEXTS = [
+  "once it is answered, re-send 'gp_assert_element' with a more specific selector (aim at one element)",
+  "if that reading shows this request never took effect, it can be sent again with a more specific selector",
+  "retry with a tighter selector and a narrower title",
+];
+
+test("the re-aiming detector sees the wording this finding removed", () => {
+  // MUTATION THIS PINS: hollowing out `RE_AIMING` until nothing matches, which is
+  // how this block would go green while the advice keeps ordering re-aiming.
+  for (const text of OLD_DEFECT_TEXTS) {
+    assert.ok(RE_AIMING.some((pattern) => pattern.test(text)), `旧缺陷文案没有被判定：${text}`);
+  }
+  // And the honest sentence about the same parameter must *not* be caught, or the
+  // gate would be satisfied by deleting any mention of the selector.
+  for (const text of [
+    "'selector' names which element the claim is about, so changing it is not a smaller or cheaper request",
+    "read the tree with gp_observe and, if the element you meant is another one, make that its own claim",
+  ]) {
+    assert.ok(!RE_AIMING.some((pattern) => pattern.test(text)), `诚实的说明被误判：${text}`);
+  }
+});
+
+test("a timed-out assertion is never told to re-aim its selector", async () => {
+  // MUTATION THIS PINS: dropping `gp_assert_element` from `TARGET_SELECTING_KNOBS`
+  // in `src/tools.ts` — `selector` becomes an offered knob again and the authored
+  // clause returns.
+  const text = await timeoutThrough("gp_assert_element", {
+    selector: { role: "AXButton" }, property: "title", expected: "Submit",
+  });
+  for (const pattern of RE_AIMING) {
+    assert.ok(!pattern.test(text), `超时的断言不得被支去改选元素（${pattern}）：${text}`);
+  }
+  // The parameter is still explained, and the route is waiting plus reading.
+  assert.match(text, /'selector' names which element the claim is about/, text);
+  assert.match(text, /it is a different operation/, text);
+  assert.match(text, /this session's trail still files it as the verdict on the claim you first made/, text);
+  assert.match(text, /Wait for the outstanding reply/, text);
+  assert.match(text, /read the app rather than re-aiming this claim/, text);
+  assert.match(text, /gp_observe lists what is on screen/, text);
+  // The facts the transport already owned survive the rewrite: the probe table and
+  // the bounded late-reply window.
+  for (const outcome of LIVENESS_PROBE_OUTCOMES) {
+    assert.ok(text.includes(livenessProbeDecision(outcome)), `丢了 ${outcome} 判据：${text.slice(0, 200)}`);
+  }
+  assert.ok(text.includes(lateReplyRoute("mcp")));
+});
+
+test("an oversized assertion reply is not answered by aiming at another element", async () => {
+  // MUTATION THIS PINS: the same, on the size path — `selector` re-entering
+  // `oversizedReplyAdvice`'s offered list for `gp_assert_element`.
+  const text = await oversizedAdviceThrough("gp_assert_element", {
+    selector: { role: "AXButton" }, property: "title", expected: "Submit",
+  });
+  for (const pattern of RE_AIMING) {
+    assert.ok(!pattern.test(text), `超帧的断言不得被支去改选元素（${pattern}）：${text}`);
+  }
+  assert.match(text, /'selector' names which element the claim is about/, text);
+  assert.match(text, /this request already carries one element and one region/, text);
+});
+
+test("gp_act's no-replay advice forbids re-aiming as strictly as it forbids replaying", async () => {
+  // MUTATION THIS PINS: dropping `gp_act` from `TARGET_SELECTING_KNOBS`, which puts
+  // "it can be sent again with a more specific selector" back into
+  // `replayUnsafePayloadAdvice` — i.e. click another control.
+  const spec = TOOL_BY_NAME.get("gp_act");
+  const text = replayUnsafePayloadAdvice(spec, "act", { selector: { role: "AXButton" }, action: "press" });
+  for (const pattern of RE_AIMING) {
+    assert.ok(!pattern.test(text), `gp_act 的出路不得教代理改按一个控件（${pattern}）：${text}`);
+  }
+  assert.match(text, /it can be sent again exactly as it stands, with the same selector/, text);
+  assert.match(text, /'selector' names which control the action is performed on/, text);
+  assert.match(text, /a different control takes the press/, text);
+  // A tool whose knob really is a reply-size knob keeps the old, executable advice.
+  const read = oversizedReplyAdvice(TOOL_BY_NAME.get("gp_observe"), {});
+  assert.match(read, /retry with a smaller maxDepth/, read);
+});
+
+/* ------------------------------------------------------------------ *
+ * Finding 中-2 — a method whose re-issue writes daemon state is not narrowed by
+ * sending it again, whatever the tool's floor says.
+ *
+ * `toolAuthorsTimeoutAdvice` kept only `!isReplayUnsafeMethod`, so the transport's
+ * own qualification was lost one layer up: `gp_snapshot {maxDepth: 10}` was answered
+ * "re-send with a smaller maxDepth". A snapshot is a *write* — `storeSnapshot`
+ * (`engine/Sources/GlassPaneEngine/EngineCore.swift:2070`) appends and trims
+ * oldest-first to `EngineCore.snapshotHistoryLimit` — so each retry can evict the
+ * baseline the same caller's earlier `gp_snapshot` returned, which is exactly what
+ * `gp_restore {snapshotId}` needs afterwards.
+ * ------------------------------------------------------------------ */
+
+test("a method whose re-issue writes daemon state is not narrowable by retry", () => {
+  // MUTATION THIS PINS: dropping `"snapshot"` from
+  // `STATE_CHANGING_ON_RETRY_METHOD_NAMES` in `src/engine-client.ts`.
+  assert.ok(STATE_CHANGING_ON_RETRY_METHOD_NAMES.includes("snapshot"),
+    `snapshot 不再在"重发会写 daemon 状态"的清单里，Ring 判据就没人说了：${STATE_CHANGING_ON_RETRY_METHOD_NAMES}`);
+  assert.equal(isNarrowableByRetryMethod("snapshot"), false, "snapshot 可以靠重发变窄——它会挤掉 gp_restore 要的基线");
+  for (const method of REPLAY_UNSAFE_METHOD_NAMES) {
+    assert.equal(isNarrowableByRetryMethod(method), false, `${method} 的重发判据丢了`);
+  }
+  // The distinction has to stay a distinction: a read that writes nothing keeps it.
+  for (const method of ["observe", "audit_ui", "capture_view", "assert_element", "diagnose"]) {
+    assert.equal(isNarrowableByRetryMethod(method), true, `${method} 是读，不该被这条闸拦下`);
+  }
+
+  const snapshotSpec = TOOL_BY_NAME.get("gp_snapshot");
+  assert.equal(toolAuthorsTimeoutAdvice(snapshotSpec, "snapshot", { maxDepth: 9 }), false,
+    "工具层不得为 snapshot 写'再发一次'的建议");
+  assert.equal(toolAuthorsTimeoutAdvice(TOOL_BY_NAME.get("gp_observe"), "observe", { maxDepth: 9 }), true);
+});
+
+test("a timed-out snapshot keeps the transport's no-re-send answer", async () => {
+  // The behavioural half of the same mutation: with `snapshot` back off the list,
+  // this composes "re-send 'gp_snapshot' with a smaller maxDepth" and every
+  // assertion below fails.
+  const text = await timeoutThrough("gp_snapshot", { maxDepth: 9 });
+  assert.ok(!AUTHORED_TIMEOUT.test(text), text.slice(0, 200));
+  assert.ok(!/re-send 'gp_snapshot'/.test(text), text);
+  assert.ok(!/smaller maxDepth/.test(text), text);
+  assert.ok(text.includes(slowEngineRemedy("snapshot", "mcp")),
+    `快照超时要原样用传输层的答复：${text.slice(0, 200)}`);
+  // The reason the transport's sentence is the right one: it orders no re-send and
+  // says what a second copy does instead.
+  assert.match(text, /wait for the outstanding reply rather than sending this request again/);
+  assert.match(text, /if the first did take effect the copy performs it a second time/);
 });
 
 test("the probe's own timeout is not rewritten into an answer that names a restart", async () => {
@@ -2002,8 +2196,14 @@ test("no timeout advice contradicts a bound the tool that owns it advertises", a
       }
       // (4) The decision this layer makes about each method must be the transport's,
       //     in both directions: a replay-unsafe method never gets a re-issue
-      //     instruction, and a replay-safe method with a knob always gets its own
+      //     instruction, and a method that may be narrowed at all gets its own
       //     narrowing answer rather than a pointer at a schema it cannot read.
+      //     RE-PINNED by finding 中-2: the middle clause used to read "a replay-safe
+      //     method with a knob always gets its own narrowing answer", which forced a
+      //     re-send instruction onto `gp_snapshot` — a read whose re-issue writes the
+      //     daemon's bounded snapshot ring. The predicate now comes from the
+      //     transport's own lists (`isNarrowableByRetryMethod`), so the exception is
+      //     one fact in one place rather than a name this file remembers.
       const unsafe = isReplayUnsafeMethod(spec.engineMethod);
       if (unsafe && !/do NOT re-issue/.test(text)) {
         offenders.push(`${spec.name} (${spec.engineMethod}): 不可重放的方法丢了"不得重发"`);
@@ -2011,7 +2211,10 @@ test("no timeout advice contradicts a bound the tool that owns it advertises", a
       if (unsafe && authored) {
         offenders.push(`${spec.name} (${spec.engineMethod}): 不可重放的方法被工具层重写成了"再发一次"`);
       }
-      if (!unsafe && numbers.length > 0 && !authored) {
+      if (!isNarrowableByRetryMethod(spec.engineMethod) && authored) {
+        offenders.push(`${spec.name} (${spec.engineMethod}): 重发会改动 daemon 状态的方法被工具层写成了"再发一次更小的"`);
+      }
+      if (isNarrowableByRetryMethod(spec.engineMethod) && numbers.length > 0 && !authored) {
         offenders.push(`${spec.name}: advertise 了可调旋钮却拿不到按自己界值写出的建议`);
       }
     }

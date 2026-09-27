@@ -219,6 +219,30 @@ export function isReplayUnsafeMethod(method: string): boolean {
 /** The non-replayable methods, for gates that must see the set change on purpose. */
 export const REPLAY_UNSAFE_METHOD_NAMES: readonly string[] = Object.keys(REPLAY_UNSAFE_REASONS);
 
+/**
+ * Methods whose re-issue writes daemon state the *caller* depends on, even though
+ * replaying them is not unsafe in the sense {@link REPLAY_UNSAFE_REASONS} means
+ * (no operation of the user's is performed a second time). They are the other half
+ * of the answer to "may this be narrowed by sending it again?", and they are kept
+ * apart from the set above because `test/probe-liveness.test.mjs` pins that set's
+ * membership as the no-replay judgement.
+ *
+ * `snapshot` is here because of a ring, not of a click: `storeSnapshot`
+ * (`engine/Sources/GlassPaneEngine/EngineCore.swift:2070`) appends the new
+ * baseline and then trims oldest-first to `EngineCore.snapshotHistoryLimit` (the
+ * same file, line 25 — 8 entries). A `gp_snapshot` whose caller timed out may
+ * therefore have been carried out already, and every re-send — "with a smaller
+ * maxDepth", which is what the tool layer used to say — adds another entry that can
+ * evict the baseline the caller's *own earlier* snapshot returned, the one
+ * `gp_restore {snapshotId}` needs later. Evicting a caller's evidence to fetch a
+ * cheaper copy of it is not narrowing.
+ *
+ * `attach` writes state too, and is already a replay-unsafe method; `tools.ts`
+ * unions the two lists rather than repeating names here.
+ */
+export const STATE_CHANGING_ON_RETRY_METHOD_NAMES: readonly string[] = ["snapshot"];
+
+
 /** Deadline for one request; `restore` scales with its replayed step count. */
 export function engineDeadlineMs(
   method: string,
@@ -390,6 +414,40 @@ const NARROWING_AUTHORITY: Record<ShellSurface, string> = {
 };
 
 /**
+ * What the answer to an *outstanding* request may say when this shell's own client
+ * ends while the daemon is still working on it (finding 中-3).
+ *
+ * This rejection used to carry `daemonUnreachableRemedy()` — "run … --restore-launchd,
+ * then retry" — on a routine shutdown, possibly with an `act` in flight. Two things
+ * were wrong with that, and both are claims about authority rather than about tone:
+ *  - the close measures nothing about the daemon, so it is not one of the answers
+ *    that may name a lifecycle command. `livenessProbeDecision("unreachable")`
+ *    reserves that for a transport outcome, and `test/probe-liveness.test.mjs`
+ *    pins that exactly one probe outcome may name it; a shutdown is not it. A
+ *    daemon SIGTERMed mid-`act` cancels and rolls the action back on the user's
+ *    screen.
+ *  - "then retry" orders the re-issue of a request whose re-issue is the harm this
+ *    file spends the rest of its length refusing.
+ *
+ * What this layer does know is three things, and they are what the text says: the
+ * client of this shell is ending, whether the daemon finished is unknown here, and
+ * the reply may still land — under the bounded contract {@link lateReplyRoute}
+ * spells, of which this close is itself one of the named endings.
+ */
+function clientClosingRemedy(surface: ShellSurface): string {
+  const readRoute = surface === "mcp"
+    ? "gp_recent_reports lists the operations this session recorded and gp_last_evidence {operationId} returns one in full"
+    : "this gateway keeps no operation trail of its own, so the stderr line this reply is written to is the record";
+  return `this shell's own engine client is ending, which measures nothing about the daemon: nothing here authorises `
+    + "touching the daemon's lifecycle, and no restart is authorised by this answer. What is unknown stays unknown: "
+    + "whether the daemon finished this request cannot be told from a client that stopped asking. The reply may still "
+    + `land, under the bound this shell already states — ${lateReplyRoute(surface)} — and this shutdown is one of the `
+    + "endings that bound names: the server log line written at this moment lists the requests this client stopped "
+    + `tracking. Read what happened rather than performing it a second time: ${readRoute}. Ask through a server `
+    + "process that still has a live engine client.";
+}
+
+/**
  * What the timeout answer may say about the caller's *next* request when the
  * method is not one the transport refuses to replay.
  *
@@ -488,6 +546,18 @@ type Pending = {
   methodDeadlineMs: number;
   timer: ReturnType<typeof setTimeout> | null;
   settled: boolean;
+  /**
+   * Set when an id-less frame has already been attributed to this request by
+   * arrival order. The entry stays tracked (finding 中-4): the arrival-order
+   * attribution is a *guess*, and the layer that consumes it (`dispatch.ts`'s
+   * generation check) may refuse it — and if the entry were dropped at the same
+   * moment, the daemon's real reply, which does echo the id, would then read as a
+   * frame this client never issued, which is how an operation that really ran
+   * becomes unrecordable and the agent is told to run `gp_act` a second time.
+   * Marking instead of deleting keeps the guess from being reused for the *next*
+   * id-less frame while the echoed reply is still expected.
+   */
+  arrivalOrderConsumed?: boolean;
   deliver: (value: unknown) => void;
   fail: (reason: EngineCallError) => void;
 };
@@ -728,10 +798,16 @@ export class EngineJsonRpcClient {
     // synchronously, and anything that answers to it has to *read* a flag that is
     // already set — on the client, not on whichever object received the call.
     this.state.closed = true;
+    // The outstanding calls are rejected with what *this* event can support
+    // ({@link clientClosingRemedy}), not with the unreachable-daemon remedy: a
+    // shutdown of this shell is not a measurement of the daemon, and the one
+    // finding that does justify a lifecycle command is reserved for the transport
+    // paths above, where a socket really did go away.
     this.teardown(new EngineCallError(
       GP_E_ENGINE_UNREACHABLE,
-      "engine client closed",
-      daemonUnreachableRemedy(),
+      "engine client closed: this shell's own client is ending, so whether the daemon finished this request is "
+      + "not known here and this client can no longer attribute the reply that may still land",
+      clientClosingRemedy(this.surface),
     ));
     this.io.close();
   }
@@ -790,7 +866,21 @@ export class EngineJsonRpcClient {
     if (typeof id === "number") {
       const entry = this.pending.get(id);
       if (!entry) {
-        this.report(`engine sent a frame for request id ${id}, which this client never issued (or already gave up on): ${truncate(line)}`);
+        // The refusal has to be diagnosable, not just firm: an id this client no
+        // longer tracks is either one it evicted from the late-reply window or one
+        // the daemon invented, and the only thing that tells the two apart is which
+        // requests are still held. Naming them is what finding 中-4 asks the refusal
+        // path to keep able to do, now that an id-less frame no longer removes one.
+        const tracked = [...this.pending.values()];
+        const held = tracked.length === 0
+          ? "nothing is tracked now"
+          : `this client still tracks ${tracked.length} request(s): `
+            + tracked.map((kept) => "'" + kept.method + "' id " + kept.id
+              + (kept.settled ? " (caller already answered)" : "")).join(", ");
+        this.report(
+          `engine sent a frame for request id ${id}, which this client never issued (or already gave up on); `
+          + held + ": " + truncate(line),
+        );
         return;
       }
       this.pending.delete(id);
@@ -826,8 +916,20 @@ export class EngineJsonRpcClient {
           // other half of R10-中2 — the *body* is the daemon's, but which request it
           // answers is this method's inference from arrival order, so the sink (and
           // the trail behind it) is told the attribution was not confirmed.
-          this.pending.delete(target.id);
+          //
+          // The entry is *not* deleted, and that is finding 中-4: an inferred
+          // attribution can be refused downstream (a reply admitted under a
+          // superseded trail generation is not recorded), and the refused frame is
+          // the only thing the delete used to make room for. Dropping the entry
+          // here destroyed the one route back — the daemon's own reply with the id
+          // echoed — and the log then said "this client never issued" about a
+          // request it had in fact sent, for an operation that had in fact run.
+          // Marking it consumes the guess for arrival-order purposes only.
           this.reportLateReply(target, frame, true);
+          target.arrivalOrderConsumed = true;
+          // The retention is what bounds these now-kept entries, so it runs here
+          // as well as on the deadline path; the eviction it performs is logged.
+          this.retainForLateReply();
           return;
         }
         if (frame.error) {
@@ -904,10 +1006,22 @@ export class EngineJsonRpcClient {
    * Oldest request this client still tracks, settled ones included: that is the
    * request the daemon's arrival-ordered answer belongs to. `Map` iteration is
    * insertion order, which is the order the requests went out.
+   *
+   * An entry whose id-less answer has already been taken (`arrivalOrderConsumed`)
+   * is passed over for *this* purpose while staying in the map for the echoed-id
+   * lookup: the guess has been spent once and may not be spent again on the next
+   * id-less frame, and the request it was spent on is still the request whose real
+   * reply can arrive with its id (finding 中-4).
    */
   private oldestTracked(): Pending | undefined {
-    return this.pending.values().next().value;
+    for (const entry of this.pending.values()) {
+      if (!entry.arrivalOrderConsumed) {
+        return entry;
+      }
+    }
+    return undefined;
   }
+
 
   /**
    * Route the reply that lands after its caller was already answered. `inferred`

@@ -3,6 +3,7 @@ import {
   SELECTOR_MAX_LENGTH,
   ActionSchema,
   AssertionPropertySchema,
+  SelectorSchema,
   parseEvidencePackRead,
   KernelSchemaError,
   type Selector,
@@ -12,12 +13,15 @@ import {
 } from "@iterate/kernel";
 
 import { canonicalJson } from "./canonical.js";
+import { readUpdateState } from "./update-state.js";
 import { MAX_FRAME_BYTES } from "./io.js";
 import {
   CALLER_VISIBLE_CEILING_MS,
   EngineCallError,
   EngineJsonRpcClient,
   LIVENESS_PROBE_OUTCOMES,
+  REPLAY_UNSAFE_METHOD_NAMES,
+  STATE_CHANGING_ON_RETRY_METHOD_NAMES,
   isReplayUnsafeMethod,
   lateReplyRoute,
   livenessProbeDecision,
@@ -82,47 +86,38 @@ const OptionalProjectIdSchema = z.string().regex(/^prj_[0-9A-HJKMNP-TV-Z]{26}$/)
 
 const ExpectSchema = z.union([z.string().max(512), z.boolean()]);
 
-/**
- * The **request-side** selector rule, tightened over the kernel's shared one.
+/* ------------------------------------------------------------------ *
+ * The selector.
  *
- * The kernel's `SelectorSchema` (used unchanged when *reading* a pack back,
- * which is right: a pack on disk is a record, not a request) only caps the
- * length, so it accepts `role: ""` and `title: ""`. Neither is a question any
- * part of this stack can answer honestly, and the two fail differently:
+ * The request-side rule **is** the kernel's `SelectorSchema`, imported above and
+ * used unchanged by `ActStepSchema`, `ActArgs` and `AssertElementArgs`: there is
+ * no shell-side tightening left to express, because the kernel now refuses the
+ * two values this shell used to refuse for its own reasons.
  *
- *  - `role: ""` is refused by the daemon outright
- *    (`ParamValidation.optSelector`, `guard … , !role.isEmpty`), so the shell
- *    used to spend a round trip to learn a rule it could have applied itself —
- *    and on the HTTP gateway it spent one and then reported the daemon's
- *    wording instead of this tool's.
- *  - `title: ""` is *accepted* by the daemon, matched by exact equality in
- *    `AXChannel.elementMatches` (`title != wantedTitle`), and then printed as
- *    **absent** by the evidence report (`selector.title?.nonEmpty`). So the
- *    action that was performed and the evidence describing it disagree, which
- *    is the one outcome an evidence surface may not produce.
+ *  - `role: ""`, which `ParamValidation.optSelector` refuses outright
+ *    (`guard let role = dict["role"] as? String, !role.isEmpty`), so paying a
+ *    socket round trip (and, on the HTTP gateway, relaying the daemon's wording
+ *    instead of this tool's) to learn it was always the shell's bug;
+ *  - `title: ""`, which the daemon *accepts* and matches by exact equality
+ *    (`AXChannel.elementMatches`, `title != wantedTitle`) while the evidence
+ *    report prints it as **absent** (`EvidenceReportGenerator.selectorText`,
+ *    `selector.title?.nonEmpty`) — an action whose own evidence contradicts it.
  *
- * Refusing both here is the shell-side half of the fix; `test/tools.test.mjs`
- * reads the rules above out of the daemon's own sources rather than restating
- * them, so a daemon that starts accepting an empty `role` — or starts printing
- * an empty `title` — reddens that gate instead of quietly disagreeing with this
- * file. The published JSON Schema below carries the same `minLength`, so what
- * `tools/list` advertises is what is enforced.
+ * `identifier` stays emptiness-free on every side: an empty identifier can only
+ * ever *fail to resolve* (nothing in the tree carries one), so the disagreement
+ * `title` had never arises for it.
  *
- * `identifier` keeps the kernel's rule: the daemon has no emptiness guard on it
- * either, but an empty identifier can only ever *fail to resolve* (nothing in
- * the tree carries one), so the disagreement the title has never arises.
- */
-const ShellSelectorSchema = z.strictObject({
-  role: z.string().min(1).max(SELECTOR_MAX_LENGTH),
-  title: z.string().min(1).max(SELECTOR_MAX_LENGTH).optional(),
-  identifier: z.string().max(SELECTOR_MAX_LENGTH).optional(),
-});
+ * `test/tools.test.mjs` keeps reading those daemon rules out of the Swift sources
+ * rather than restating them, and `test/consumer-consistency.test.mjs` holds the
+ * published kernel JSON Schema, that kernel zod and the daemon's guard to one
+ * emptiness verdict per field — so no one of the three can loosen in silence.
+ * ------------------------------------------------------------------ */
 
 /** Crockford base32 body shared by op_/snap_ ids (P0 §4.1 / P1 v1.1 §1.2). */
 const SnapshotIdSchema = z.string().regex(/^snap_[0-9A-HJKMNP-TV-Z]{26}$/);
 
 const ActStepSchema = z.strictObject({
-  selector: ShellSelectorSchema,
+  selector: SelectorSchema,
   action: ActionSchema,
 });
 const RestoreStepsSchema = z.array(ActStepSchema).min(1).max(64).optional();
@@ -182,14 +177,14 @@ export const AuditUiArgs = z.strictObject({
 export type AuditUiArgs = z.infer<typeof AuditUiArgs>;
 
 export const ActArgs = z.strictObject({
-  selector: ShellSelectorSchema,
+  selector: SelectorSchema,
   action: ActionSchema,
   degrade: z.boolean().optional(),
 });
 export type ActArgs = z.infer<typeof ActArgs>;
 
 export const AssertElementArgs = z.strictObject({
-  selector: ShellSelectorSchema,
+  selector: SelectorSchema,
   property: AssertionPropertySchema,
   expected: ExpectSchema,
 });
@@ -310,9 +305,11 @@ const selectorJsonSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
-    // `minLength` here is the advertised half of {@link ShellSelectorSchema};
+    // `minLength` here is the advertised half of the kernel's `SelectorSchema`;
     // `test/tools.test.mjs` compares the two against each other and against the
-    // daemon's own rule, so neither side can be tightened or loosened alone.
+    // daemon's own rule, and `test/consumer-consistency.test.mjs` compares both
+    // against the published `kernel/schemas/evidence-pack.schema.json`, so no
+    // side can be tightened or loosened alone.
     role: { type: "string", minLength: 1, maxLength: SELECTOR_MAX_LENGTH },
     title: { type: "string", minLength: 1, maxLength: SELECTOR_MAX_LENGTH },
     identifier: { type: "string", maxLength: SELECTOR_MAX_LENGTH },
@@ -758,11 +755,72 @@ export function attachIdentityOf(result: unknown): string | null {
  */
 interface NarrowingKnob {
   name: string;
-  kind: "scale" | "depth" | "selector" | "limit";
+  /**
+   * `target` is not a knob this layer may offer: see
+   * {@link TARGET_SELECTING_KNOBS}. The others decide how much a reply carries.
+   */
+  kind: "scale" | "depth" | "selector" | "limit" | "target";
   minimum?: number;
   maximum?: number;
   /** The value the request carried, when it carried one. */
   sent?: number;
+  /** For `target`: what the parameter picks, and what a different value would do. */
+  picks?: string;
+  substitute?: string;
+}
+
+/**
+ * Which of a tool's advertised parameters pick **the thing the operation acts
+ * on**, per tool and per parameter name rather than per name alone.
+ *
+ * `maxDepth`, `scale` and `limit` decide how much the daemon has to write back;
+ * `selector` decides *which element* an operation is about. For the two tools
+ * below those are opposite properties, and offering the second as a "narrowing
+ * knob" told an agent that had just been refused (a timeout, or a reply that did
+ * not fit one frame) to "re-send with a more specific selector (aim at one
+ * element)" — and the request it then sent was a **different operation**:
+ *  - `gp_assert_element` writes the trail (`TRAIL_SCOPED_ENGINE_METHODS`), so the
+ *    verdict about the substitute element is filed as the answer to the claim the
+ *    agent first made, and `gp_recent_reports`/`gp_diagnose` render that
+ *    substitute as if the original claim had been checked;
+ *  - `gp_act` changes the user's screen, so "a more specific selector" is an
+ *    instruction to press a control nobody agreed to press.
+ *
+ * Neither reply gets cheaper or faster by changing the value, so there is nothing
+ * here to advise. Where such a parameter is the only one a tool has, the advice
+ * points at waiting and *reading* instead, and says plainly that aiming at
+ * another element would be another claim, not a smaller one. `gp_observe`'s
+ * `role` stays an ordinary knob: it filters a tree this tool only reads, and no
+ * element is acted on.
+ *
+ * MUTATION THIS PINS (finding 中-1): deleting either entry — every
+ * `test/tools.test.mjs` case in the "a selector is not a narrowing knob" block
+ * reddens, because the advice starts offering `selector` again.
+ */
+const TARGET_SELECTING_KNOBS: Readonly<Record<string, { param: string; picks: string; substitute: string }>> = {
+  gp_act: {
+    param: "selector",
+    picks: "which control the action is performed on",
+    substitute: "a different control takes the press, and the user's screen changes in a way no one asked for",
+  },
+  gp_assert_element: {
+    param: "selector",
+    picks: "which element the claim is about",
+    substitute: "the answer then describes a different element, while this session's trail still files it as the verdict on the claim you first made",
+  },
+};
+
+/** The target descriptor when this tool's parameter picks what is acted on. */
+function targetSelectingKnob(specName: string, paramName: string): { picks: string; substitute: string } | null {
+  // `hasOwnProperty` rather than a bare lookup: a tool parameter named
+  // `constructor` must not inherit a descriptor off `Object.prototype`.
+  if (!Object.prototype.hasOwnProperty.call(TARGET_SELECTING_KNOBS, specName)) {
+    return null;
+  }
+  const entry = TARGET_SELECTING_KNOBS[specName];
+  return entry !== undefined && entry.param === paramName
+    ? { picks: entry.picks, substitute: entry.substitute }
+    : null;
 }
 
 function narrowingKnobsFor(spec: ToolSpec, params: Record<string, unknown>): NarrowingKnob[] {
@@ -774,7 +832,9 @@ function narrowingKnobsFor(spec: ToolSpec, params: Record<string, unknown>): Nar
     const sent = typeof sentValue === "number" ? sentValue : undefined;
     // Which knob shrinks *what* is a property of the tool, so the mapping is
     // spelled per name rather than guessed from types: `limit` and `maxDepth`
-    // are both integers and shrink very different things.
+    // are both integers and shrink very different things — and the same name is
+    // not the same thing in two tools, which is what `targetSelectingKnob`
+    // settles for `selector`.
     if (name === "maxDepth") {
       knobs.push({ name, kind: "depth", minimum: schema.minimum, maximum: schema.maximum, sent });
     } else if (name === "scale") {
@@ -782,11 +842,37 @@ function narrowingKnobsFor(spec: ToolSpec, params: Record<string, unknown>): Nar
     } else if (name === "limit") {
       knobs.push({ name, kind: "limit", minimum: schema.minimum, maximum: schema.maximum, sent });
     } else if (name === "selector" || name === "role" || name === "title") {
-      knobs.push({ name, kind: "selector", sent: undefined });
+      const target = targetSelectingKnob(spec.name, name);
+      knobs.push(target === null
+        ? { name, kind: "selector", sent: undefined }
+        : { name, kind: "target", sent: undefined, picks: target.picks, substitute: target.substitute });
     }
   }
   return knobs;
 }
+
+/** The knobs that make a reply smaller — everything except the operand itself. */
+function replyShrinkingKnobs(knobs: NarrowingKnob[]): NarrowingKnob[] {
+  return knobs.filter((knob) => knob.kind !== "target");
+}
+
+/** The knobs that name what the operation acts on, and so may not be offered. */
+function targetKnobs(knobs: NarrowingKnob[]): NarrowingKnob[] {
+  return knobs.filter((knob) => knob.kind === "target");
+}
+
+/**
+ * Why a target parameter is not a narrowing knob, in one clause.
+ *
+ * It has to be said rather than omitted: an advice that stays silent about the
+ * only parameter the tool really does expose reads to the agent as "the shell
+ * looked and found nothing", and the move it then invents is the one this
+ * sentence exists to forbid.
+ */
+function describeTargetKnob(knob: NarrowingKnob): string {
+  return `'${knob.name}' names ${knob.picks ?? "which element this operation is about"}, so changing it is not a smaller or cheaper request — it is a different operation, and ${knob.substitute ?? "the answer then describes something else"}`;
+}
+
 
 /**
  * Is this knob already at the floor the tool's own schema advertises?
@@ -814,6 +900,11 @@ function knobSubject(kind: NarrowingKnob["kind"]): string {
       return "the image";
     case "selector":
       return "the reply";
+    case "target":
+      // Never reached by `atAdvertisedFloor` (a target parameter carries no
+      // numeric bound), present so adding a bound to one cannot slip past this
+      // switch unnoticed.
+      return "the element the operation is about";
   }
 }
 
@@ -845,6 +936,10 @@ function describeKnob(knob: NarrowingKnob): string {
         : `a tighter ${knob.name} filter`;
     case "scale":
       return `a smaller scale${bounds}${knob.sent !== undefined ? `, currently ${knob.sent}` : ""}`;
+    case "target":
+      // Callers take target-shaped knobs out of any list they render with this
+      // function; the clause is what they say instead.
+      return describeTargetKnob(knob);
   }
 }
 
@@ -869,21 +964,28 @@ function describeKnob(knob: NarrowingKnob): string {
 export function oversizedReplyAdvice(spec: ToolSpec, params: Record<string, unknown>): string {
   const knobs = narrowingKnobsFor(spec, params);
   const atFloor = knobs.filter(atAdvertisedFloor);
-  const shrinkable = knobs.filter((knob) => !atAdvertisedFloor(knob));
+  const target = targetKnobs(knobs);
+  const shrinkable = replyShrinkingKnobs(knobs).filter((knob) => !atAdvertisedFloor(knob));
   const head = `the reply was too large for one frame (${MAX_FRAME_BYTES}-byte limit); `;
-  // A knob the request already holds at its floor is stated even when another
-  // knob is still open: without it, `gp_observe {maxDepth: 1}` reads "retry with
-  // a tighter role filter" and the agent has no way to know the depth it set is
-  // already the smallest the tool publishes — the number it would otherwise go
-  // back and lower, into a GP_E_BAD_PARAMS.
-  const floorNote = atFloor.length === 0
-    ? ""
-    : `${atFloor.map(describeKnob).join("; ")}; `;
+  // A knob the request already holds at its floor, and a knob that is not a knob
+  // at all because it names what the operation targets, are stated together: both
+  // are things the agent might otherwise "fix" by changing. Without the second
+  // one an advice that offers nothing reads as "the shell looked and found no
+  // parameter", and the move the agent then invents is the re-aiming this function
+  // exists to refuse. R8d-高2 kept the floor half; finding 中-1 adds the target half.
+  const refused = [...atFloor.map(describeKnob), ...target.map(describeTargetKnob)];
+  const floorNote = refused.length === 0 ? "" : `${refused.join("; ")}; `;
   if (shrinkable.length === 0) {
     return knobs.length > 0
-      ? head + `${atFloor.map(describeKnob).join("; ")} — nothing left to narrow on this request: ask a `
-        + "smaller question (one element, one region) rather than retrying it unchanged; the connection is "
-        + "intact and the daemon keeps answering other requests"
+      ? head + floorNote
+        + "nothing left to narrow on this request: "
+        + (target.length > 0
+          // The request is already about one element; saying "ask a smaller
+          // question" to it would be nonsense, and the only real alternative is
+          // reading first and then deciding — out loud — what to ask.
+          ? "this request already carries one element and one region, so read the tree with gp_observe and, if the element you meant is another one, make that its own claim rather than treating this answer as a size problem"
+          : "ask a smaller question (one element, one region) rather than retrying it unchanged")
+        + "; the connection is intact and the daemon keeps answering other requests"
       : head + "this tool advertises no parameter that shrinks a reply, so do not retry it unchanged — ask a "
         + "smaller question (one element, one region) instead; the connection is intact and the daemon keeps "
         + "answering other requests";
@@ -892,6 +994,7 @@ export function oversizedReplyAdvice(spec: ToolSpec, params: Record<string, unkn
     + "the reply body has to fit one frame, and a retried identical request will be dropped identically; "
     + "the connection is intact and the daemon keeps answering other requests";
 }
+
 
 /**
  * The harm each non-replayable request does, keyed by the engine method that
@@ -928,12 +1031,22 @@ export function replayUnsafePayloadAdvice(
   method: string,
   params: Record<string, unknown>,
 ): string {
-  const shrinkable = narrowingKnobsFor(spec, params).filter((knob) => !atAdvertisedFloor(knob));
+  const knobs = narrowingKnobsFor(spec, params);
+  const shrinkable = replyShrinkingKnobs(knobs).filter((knob) => !atAdvertisedFloor(knob));
+  const target = targetKnobs(knobs);
   const head = `the reply was too large for one frame (${MAX_FRAME_BYTES}-byte limit); `;
   const harm = REPLAY_UNSAFE_PAYLOAD_HARMS[method] ?? "it changes daemon state";
+  // What the caller may change if the reading says nothing took effect. A tool
+  // whose only parameter is the operand it acts on has nothing here: "narrow the
+  // selector" would be a *second* change on the user's screen, aimed at a control
+  // nobody chose, which is the same harm this function already forbids one clause
+  // earlier. Finding 中-1; `test/tools.test.mjs` reddens if `selector` comes back
+  // into this sentence for `gp_act`.
   const narrower = shrinkable.length > 0
     ? `with ${shrinkable.map(describeKnob).join(" and ")}`
-    : "only after narrowing it (this tool advertises no parameter that shrinks a reply, so ask a smaller question: one element, one region)";
+    : target.length > 0
+      ? `exactly as it stands, with the same ${target.map((knob) => knob.name).join(" and ")} (${target.map(describeTargetKnob).join("; ")})`
+      : "only after narrowing it (this tool advertises no parameter that shrinks a reply, so ask a smaller question: one element, one region)";
   return head
     + `do not re-issue this request. '${spec.name}' already reached the daemon and was answered — only the answer was dropped for exceeding one frame — and ${harm}, `
     + `so sending it again performs the change a second time rather than recovering the first. Read what happened instead: gp_recent_reports lists the operations this session `
@@ -942,6 +1055,7 @@ export function replayUnsafePayloadAdvice(
     + `The connection is intact and the daemon keeps answering other requests; if that reading shows this request never took effect, it can be sent again ${narrower}, `
     + `and a retried identical request will be dropped identically.`;
 }
+
 
 /**
  * The advice for a request that was never answered inside the caller's wait.
@@ -970,15 +1084,27 @@ export function slowReplyAdvice(
 ): string {
   const knobs = narrowingKnobsFor(spec, params);
   const atFloor = knobs.filter(atAdvertisedFloor);
-  const shrinkable = knobs.filter((knob) => !atAdvertisedFloor(knob));
+  const target = targetKnobs(knobs);
+  const shrinkable = replyShrinkingKnobs(knobs).filter((knob) => !atAdvertisedFloor(knob));
   const floorNote = atFloor.length === 0 ? "" : ` ${atFloor.map(describeKnob).join("; ")}.`;
-  const narrowed = shrinkable.length === 0
-    ? `there is nothing left to narrow on this request:${floorNote} ask a smaller question `
-      + "(one element, one region) rather than re-sending the same one and waiting out the "
-      + "same deadline on it"
-    : `once it is answered, re-send '${spec.name}' with ${shrinkable.map(describeKnob).join(" and ")} `
+  const narrowed = shrinkable.length > 0
+    ? `once it is answered, re-send '${spec.name}' with ${shrinkable.map(describeKnob).join(" and ")} `
       + `— these are the parameters this tool itself advertises as deciding how much work one `
-      + `answer carries${floorNote}`;
+      + `answer carries${floorNote}`
+    : target.length > 0
+      // An assertion already carries one element and one property, and its
+      // `selector` is what makes it *that* assertion. There is no knob left to
+      // turn, and the one thing an agent could still change is the one thing
+      // whose change would silently re-file a different claim under the first
+      // one, so the route here is waiting and reading. Finding 中-1.
+      ? `there is nothing left to narrow on this request, and no parameter of '${spec.name}' can stand in `
+        + `for one: ${target.map(describeTargetKnob).join("; ")}. Wait for the outstanding reply — it is `
+        + "attributed and recorded in this session's trail when it lands — and read the app rather than "
+        + "re-aiming this claim: gp_observe lists what is on screen, and gp_probe_status names the apps "
+        + "with a live probe"
+      : `there is nothing left to narrow on this request:${floorNote} ask a smaller question `
+        + "(one element, one region) rather than re-sending the same one and waiting out the "
+        + "same deadline on it";
   const probeGuide = LIVENESS_PROBE_OUTCOMES
     .map((outcome) => `${outcome} — ${livenessProbeDecision(outcome)}`)
     .join("; ");
@@ -992,6 +1118,30 @@ export function slowReplyAdvice(
 }
 
 /**
+ * Methods whose *retry* is not the answer to a slow reply, whatever knobs the tool
+ * advertises: the transport's own no-replay set plus {@link
+ * STATE_CHANGING_ON_RETRY_METHOD_NAMES}.
+ *
+ * Two different questions, one list on each side, and this is where they are
+ * unioned: `act`/`restore`/`attach` are refused because the operation itself may
+ * still take effect, and `snapshot` is refused because a fresh request writes into
+ * the daemon's bounded snapshot ring. Membership comes from the transports'
+ * exports rather than a third copy of the names, which is what finding 中-2 asks
+ * for: the tool layer's rewrite used to keep only the replay-unsafe half and so
+ * put "re-send with a smaller maxDepth" back on the one read whose re-issue
+ * destroys the baseline `gp_restore` later needs.
+ */
+const NOT_NARROWABLE_BY_RETRY: ReadonlySet<string> = new Set([
+  ...REPLAY_UNSAFE_METHOD_NAMES,
+  ...STATE_CHANGING_ON_RETRY_METHOD_NAMES,
+]);
+
+/** May the tool layer answer a timeout on `method` by telling the caller to re-send narrower? */
+export function isNarrowableByRetryMethod(method: string): boolean {
+  return !NOT_NARROWABLE_BY_RETRY.has(method);
+}
+
+/**
  * Does the tool layer have more to say about a timeout on `method` than the
  * transport does?
  *
@@ -1000,16 +1150,18 @@ export function slowReplyAdvice(
  * see the tool's schema. Everywhere else the transport's own sentence stands —
  * including `gp_probe_status`, whose remedy the transport writes specially because
  * a probe that went unanswered must not be told to send a probe (and must not
- * name a restart at all). Replay-unsafe methods are the transport's too: its
- * remedy already forbids the re-issue, and this layer adds no reason to re-issue.
+ * name a restart at all). And a method whose re-issue changes daemon state is not
+ * narrowed by re-sending it at all ({@link NOT_NARROWABLE_BY_RETRY}): its answer
+ * is the transport's, which orders no re-send.
  */
 export function toolAuthorsTimeoutAdvice(
   spec: ToolSpec,
   method: string,
   params: Record<string, unknown>,
 ): boolean {
-  return !isReplayUnsafeMethod(method) && narrowingKnobsFor(spec, params).length > 0;
+  return isNarrowableByRetryMethod(method) && narrowingKnobsFor(spec, params).length > 0;
 }
+
 
 /** Read the trail once this call's turn comes up, i.e. in request order. */
 async function readTrail(
@@ -1125,8 +1277,16 @@ async function runValidatedTool(
       // serialization step that has nothing to do with the trail.
       turn.release();
     }
+    const content = [{ type: "text" as const, text: canonicalJson(raw) }];
+    if (spec.name === "gp_diagnose") {
+      // A diagnosis is where an agent decides whether an odd answer is a bug or an
+      // old build, so the machine's own freshness goes beside it — read from the
+      // updater's state, never written here. The block is a separate content item so
+      // the JSON reply an agent parses stays byte-identical.
+      content.push({ type: "text", text: readUpdateState().summary });
+    }
     return {
-      content: [{ type: "text", text: canonicalJson(raw) }],
+      content,
       isError: false,
     };
   } catch (error) {

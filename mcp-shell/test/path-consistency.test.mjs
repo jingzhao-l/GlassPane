@@ -793,9 +793,44 @@ test("the manifest rows accept the tree that covers the resolved location, and o
  *   2. 文案不得声称 socket 报出了 root。两种语序都 forbid，免得换一种写法绕过。
  * ------------------------------------------------------------------ */
 
-/** Every Swift file under engine/Sources that emits a quoted JSON key. */
-function swiftFilesEmittingKey(root, key) {
-  const hits = [];
+/**
+ * Every spelling that can put a JSON key named `keyName` into what a Swift file
+ * writes out.
+ *
+ * The original gate looked for the quoted literal alone, and finding 中-5 named
+ * what that misses: a `Codable` property declared as `let stateRoot: URL` emits
+ * the key with no quoted `stateRoot` anywhere in the file (and so does an
+ * explicit `CodingKeys` case), and a key assembled from parts — `"state" +
+ * "Root"` — is invisible to a literal search at both halves. All four are looked
+ * for here, because the fact this gate defends ("nothing on the socket answers
+ * with the daemon's state root") is a fact about the *bytes on the wire*, not
+ * about how the Swift author spelled the name.
+ *
+ * WHAT A SWIFT-SIDE RENAME DOES TO THIS GATE, plainly: if `glasspaned` renames
+ * its CLI key away from `stateRoot`, the inventory below comes back without that
+ * row and the `deepEqual` reddens; the same happens if the key ever enters a
+ * socket reply. Both reds are the gate working. The fix is to point these
+ * spellings at the new name and to re-derive which of them is CLI-only — not to
+ * delete the expectation, which would leave the notice's claim about the socket
+ * guarded by nothing while the file still reads green.
+ */
+function keySpellingMatchers(keyName) {
+  const halves = [];
+  for (let cut = 1; cut < keyName.length; cut += 1) {
+    halves.push(`"${keyName.slice(0, cut)}"\\s*\\+\\s*"${keyName.slice(cut)}"`);
+  }
+  return [
+    { name: "quoted", re: new RegExp(`"${keyName}"`) },
+    { name: "property", re: new RegExp(`\\b(?:let|var)\\s+${keyName}\\s*[:(=]`) },
+    { name: "coding-keys-case", re: new RegExp(`\\benum\\s+CodingKeys\\b[\\s\\S]{0,300}?\\bcase\\b[^}]*\\b${keyName}\\b`) },
+    { name: "assembled-from-parts", re: new RegExp(halves.join("|"), "i") },
+  ];
+}
+
+/** The Swift files under `root` that can name `keyName`, each with its spellings. */
+function swiftFilesNamingKey(root, keyName) {
+  const matchers = keySpellingMatchers(keyName);
+  const found = [];
   const walk = (dir) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
@@ -806,37 +841,165 @@ function swiftFilesEmittingKey(root, key) {
       if (!entry.name.endsWith(".swift")) {
         continue;
       }
-      if (executableSource(fs.readFileSync(full, "utf8")).includes(key)) {
-        hits.push(path.relative(REPO_ROOT, full));
+      const source = executableSource(fs.readFileSync(full, "utf8"));
+      const spellings = matchers.filter((matcher) => matcher.re.test(source)).map((matcher) => matcher.name);
+      if (spellings.length > 0) {
+        found.push({ file: path.relative(REPO_ROOT, full), spellings });
       }
     }
   };
   walk(root);
-  return hits.sort();
+  return found.sort((left, right) => left.file.localeCompare(right.file));
+}
+
+/** The processes this shell could plausibly claim to ask for the state root. */
+const STATE_ROOT_SUBJECT = "socket|service|daemon|engine|connection|handshake";
+const STATE_ROOT_VERB = "reports?|returns?|names?|gives?|tells?|exposes?|shows?|carries?|publishes?";
+const STATE_ROOT_PAST = "reported|returned|named|given|exposed|shown|carried|published";
+const STATE_ROOT_DETERMINER = "the|a|an|its|our|this|your";
+
+/**
+ * Both word orders, with the two gaps captured so a negation can be located
+ * (see {@link claimsStateRootReadable}). The determiner is still required: it is
+ * what separates "reports the state root" from "reports no state root".
+ */
+const STATE_ROOT_CLAIMS = [
+  new RegExp(`\\b(${STATE_ROOT_SUBJECT})\\b([^.]{0,90})\\b(${STATE_ROOT_VERB})\\b([^.]{0,20})`
+    + `\\b(${STATE_ROOT_DETERMINER})\\b[^.]{0,20}state[ -]root`, "gi"),
+  new RegExp(`\\b(state[ -]root)\\b([^.]{0,90})\\b(${STATE_ROOT_PAST})\\b([^.]{0,90})`
+    + `\\b(${STATE_ROOT_SUBJECT})\\b`, "gi"),
+];
+
+const NEGATION_WORDS = "\\bnot\\b|\\bnever\\b|\\bno\\b|\\bnothing\\b|\\bneither\\b|\\bwithout\\b|\\bcannot\\b|[’']t\\b";
+/** A negation sitting right before the verb is this sentence's own: "does not report". */
+const NEGATED_BEFORE_VERB = new RegExp(`(?:${NEGATION_WORDS})\\s*$`, "i");
+/** …and one that opens the clause before the subject: "no socket reply carries". */
+const NEGATED_BEFORE_SUBJECT = new RegExp(
+  `(?:^|[\\s(,;:])\\s*(?:${NEGATION_WORDS})(?:\\s+\\w+){0,2}\\s*$`, "i",
+);
+
+/**
+ * The affirmative claims in `text` that the daemon's state root can be read off
+ * one of the surfaces this shell actually talks to.
+ *
+ * Two halves, both from finding 中-5. The first is the subject set: it used to be
+ * `socket|service`, so the equally false "the daemon tells you its state root"
+ * passed — the gate only refused the sentence in one of two spellings, which is
+ * not a refusal. The second is the negation guard, which is what makes the wider
+ * set survivable: without it the *honest* sentence ("the socket does not report
+ * the state root", measured below) reddens too, and the pressure on the next
+ * reader is to delete the disclaimer rather than to tell the truth — the exact
+ * failure this file's own comment says it exists to avoid.
+ *
+ * A negation counts when it sits next to the verb or opens the clause ahead of
+ * the subject; a negation buried further back in the clause does not, because
+ * "the socket is wedged, not busy, and reports the state root" is a false claim
+ * with a negation in it, and that shape is the one this guard must keep catching.
+ */
+function claimsStateRootReadable(text) {
+  const hits = [];
+  for (const pattern of STATE_ROOT_CLAIMS) {
+    for (const match of text.matchAll(pattern)) {
+      const beforeVerb = match[2] ?? "";
+      const afterVerb = match[4] ?? "";
+      const negated = NEGATED_BEFORE_VERB.test(beforeVerb)
+        || NEGATED_BEFORE_VERB.test(afterVerb)
+        || /^\s*(?:no|not|never|nothing|without)\b/i.test(afterVerb)
+        || NEGATED_BEFORE_SUBJECT.test(text.slice(Math.max(0, match.index - 32), match.index));
+      if (!negated) {
+        hits.push(match[0]);
+      }
+    }
+  }
+  return hits;
 }
 
 test("no socket reply carries the daemon's state root, and the registry notice must not claim one does", () => {
-  const emitters = swiftFilesEmittingKey(
-    path.join(REPO_ROOT, "engine/Sources"),
-    '"stateRoot"',
-  );
+  const named = swiftFilesNamingKey(path.join(REPO_ROOT, "engine/Sources"), "stateRoot");
+  const emitters = named
+    .filter((row) => row.spellings.includes("quoted"))
+    .map((row) => row.file);
   assert.deepEqual(emitters, ["engine/Sources/glasspaned/main.swift"],
     `"stateRoot" 这个键的出处变了：${emitters.join(", ")}。如果它进了某个线上回复，`
     + "notice 里那句\u201c本壳看不见\u201d就该换成\u201c去读它\u201d —— 改文案，别改这条闸来迁就");
 
-  // Only the *affirmative* claim is forbidden: the honest sentence is "the socket
-  // reports no state root", and a pattern that caught that would reward deleting
-  // the disclaimer instead of telling the truth. Hence the required determiner.
-  const claimsSocketReportsIt = [
-    /\b(socket|service)[^.]{0,90}\b(reports?|returns?|names?|gives?|tells?|exposes?)\b[^.]{0,20}\b(the|a|an|its|our|this)\b[^.]{0,20}state[ -]root/i,
-    /\bstate[ -]root\b[^.]{0,40}\b(reported|returned|named|given|exposed)\b[^.]{0,30}\b(socket|service)\b/i,
+  // The half the literal scan could not see (finding 中-5): the module that builds
+  // the socket's replies may not name the key in *any* spelling, quoted or not.
+  // `glasspaned/main.swift` is the CLI's `--json` subcommand output, which is what
+  // the row above measures; `glasspane-settings` is a SwiftUI panel that never
+  // answers the socket. Anything new inside `GlassPaneEngine` is a reply field.
+  const insideReplies = named.filter((row) => row.file.startsWith("engine/Sources/GlassPaneEngine"));
+  assert.deepEqual(insideReplies, [],
+    "daemon 的回复模块开始用任何一种拼法说 state root 了："
+    + insideReplies.map((row) => `${row.file}(${row.spellings.join(",")})`).join("; ")
+    + " —— notice 里\u201csocket 不报 state root\u201d那句从此是假的，改文案，别放宽这条闸");
+
+  // And the scan must not be green because it went blind: each spelling has a
+  // fixture that only it catches. MUTATION THIS PINS: dropping any matcher above
+  // — the unquoted `let stateRoot:` of a Codable reply struct or the `"state" +
+  // "Root"` assembly — which is exactly what would let a real reply field slip
+  // past a gate that still prints as passing.
+  const fixtures = {
+    quoted: 'let json: [String: Any] = ["stateRoot": root.path]',
+    property: "struct Reply: Codable {\n    let stateRoot: URL\n}",
+    "coding-keys-case": "enum CodingKeys: String, CodingKey {\n    case pid\n    case stateRoot\n}",
+    "assembled-from-parts": 'var json: [String: Any] = [:]\njson["state" + "Root"] = root.path',
+  };
+  // The membership first, so "every spelling is scanned" cannot be green merely
+  // because a matcher was deleted along with its fixture row.
+  assert.deepEqual(keySpellingMatchers("stateRoot").map((matcher) => matcher.name), [
+    "quoted", "property", "coding-keys-case", "assembled-from-parts",
+  ], "少了一种拼法，这条闸就少守一面：删掉 matcher 不是收窄探针，是让 stateRoot 从另一个写法漏出去");
+  for (const matcher of keySpellingMatchers("stateRoot")) {
+    const own = fixtures[matcher.name];
+    assert.ok(own !== undefined, `拼法 ${matcher.name} 没有对应的 fixture，这条半边没人钉`);
+    assert.ok(matcher.re.test(own), `${matcher.name} 这条拼法的探针坏了：${JSON.stringify(own)}`);
+    for (const [other, text] of Object.entries(fixtures)) {
+      if (other === matcher.name) {
+        continue;
+      }
+      assert.ok(!matcher.re.test(text),
+        `${matcher.name} 的探针把 ${other} 的写法也吞了 ——"全都命中"的扫描等于没有扫描`);
+    }
+  }
+
+  // The wording half. Both directions are pinned as fixtures, because the gate
+  // that only ever reads the notice cannot say which of the two it lost.
+  const FALSE_CLAIMS = [
+    "the daemon tells you its state root",
+    "the engine returns the state root",
+    "the socket reports the state root already",
+    "the service gives the state root",
+    "the handshake names the state root",
+    "the connection exposes your state root",
+    "the state root is reported by the daemon",
+    "the socket is wedged, not busy, and reports the state root",
   ];
+  // Every one of these is *true* of this build, and each is one rewording away
+  // from the false form above: the negation is where an honest sentence puts it.
+  const HONEST_FORMS = [
+    "the socket reports no state root",
+    "the socket does not report the state root",
+    "the daemon never names the state root",
+    "no socket reply carries the state root",
+    "the engine cannot see the state root",
+    "the handshake returns no state root at all",
+    "the state root is not reported by the socket",
+    "nothing the daemon returns names the state root",
+  ];
+  for (const claim of FALSE_CLAIMS) {
+    assert.ok(claimsStateRootReadable(claim).length > 0,
+      `这句是假的，闸却放过了（主语集合或否定判据被收窄了？）：${claim}`);
+  }
+  for (const honest of HONEST_FORMS) {
+    assert.deepEqual(claimsStateRootReadable(honest), [],
+      `这句是本壳的真话，闸却把它判红了 —— 下一次会有人删掉自辩来让它变绿：${honest}`);
+  }
+
   for (const filePath of ["/Users/example/work", "/Users/other/.glasspane/projects.json"]) {
     const notice = daemonRestartNotice(filePath);
-    for (const claim of claimsSocketReportsIt) {
-      assert.equal(claim.test(notice), false,
-        `notice 把本壳看不见的东西说成了能从 socket 读到：${claim} —— ${notice}`);
-    }
+    assert.deepEqual(claimsStateRootReadable(notice), [],
+      `notice 把本壳看不见的东西说成了能从 socket 读到：${notice}`);
     // 正向的一半还得在：不能靠删掉整段自辩来通过上一条断言。
     assert.match(notice, /cannot see|will not guess|not certain from here/,
       `notice 要说清自己的边界，而不是沉默地少说一句：${notice}`);

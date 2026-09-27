@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  GlassPane update agent — TEMPLATE.
+
+  The substitution tokens in this file are filled by `renderAgentPlist()` in
+  ../lib/launchd.js, which is the only writer of a registered copy
+  (~/Library/LaunchAgents/com.glasspane.update.plist). Editing this file changes
+  what every future registration looks like; it changes nothing that is already
+  loaded, because launchd caches the definition it read at bootstrap time (the
+  same trap that produced EX_CONFIG twice in this repo).
+
+  Semantics pinned by the spec (2026-09-27 §2, §5, §7):
+    · one calendar run a day at the configured local time (default 12:00);
+    · RunAtLoad false — logging in must not start an update in the user's
+      session;
+    · the daily command is the same CLI the panel calls: `check` then `apply`.
+      `apply` exits 3 when nothing is staged or the daemon is busy, which is a
+      refusal with a reason, not a crash; launchd's next calendar slot retries;
+    · macOS replays a calendar job missed during sleep but NOT one missed while
+      the machine was powered off — hence the 36 h overdue judgement the panel
+      shows;
+    · stdout/stderr are the operator's only trace of a headless run, so both go
+      to <stateRoot>/update.log.
+
+  WHY NO PATH APPEARS INSIDE THE SHELL COMMAND (this is the shape, not a style):
+  every value this template substitutes — the node binary, the CLI path, the
+  state root, the log path — comes from a *file on disk* that another process
+  writes (`update-install.json`, `GLASSPANE_STATE_DIR`, `--state-dir`). The
+  previous shape interpolated them into a single `/bin/sh -c "…"` string, so a
+  state root containing a quote or a `;` became code executed daily as the user.
+  Here the shell sees a command string that is a **literal in this file** and
+  `--auto` rides on the **apply** step only: it is what marks the run as the
+  scheduled one, and §5's "automatic update is off must refuse here" is a property of the
+  swap, not of looking. `check` stays trigger-neutral so a disabled machine can still be
+  inspected by the same job without pretending a person asked for it.
+contains no path at all; the paths arrive as positional parameters (`$0`…`$3`),
+  which launchd hands to `/bin/sh` through `execv` as separate argv slots. A
+  parameter in `$0` position is never re-parsed by the shell, so no quote, `;`,
+  `$( )` or backtick in a path can start a new command. `test/launchd.test.mjs`
+  proves it by *running* the rendered argv with a hostile state root and looking
+  for the file the injection would have created.
+
+  `/bin/sh` is still here for one reason: this job has to run two commands in
+  sequence and stop if the first one refuses (`check && apply`), which a single
+  `ProgramArguments` array cannot express. That is the only thing the shell does.
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>{{LABEL}}</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/sh</string>
+      <string>-c</string>
+      <string>"$0" "$1" check "$2" "$3" --json &amp;&amp; "$0" "$1" apply "$2" "$3" --auto --json</string>
+      <string>{{NODE_PATH}}</string>
+      <string>{{CLI_PATH}}</string>
+      <string>{{STATE_FLAG}}</string>
+      <string>{{STATE_ROOT}}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StartCalendarInterval</key>
+    <dict>
+      <key>Hour</key>
+      <integer>{{HOUR}}</integer>
+      <key>Minute</key>
+      <integer>{{MINUTE}}</integer>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>600</integer>
+    <key>StandardOutPath</key>
+    <string>{{LOG_PATH}}</string>
+    <key>StandardErrorPath</key>
+    <string>{{LOG_PATH}}</string>
+  </dict>
+</plist>

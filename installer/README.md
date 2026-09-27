@@ -39,10 +39,21 @@ a fixed artifact).
 | `--no-daemon` / `--no-gui` | 不启动 daemon / 不打开设置面板 |
 | `--no-app` | 不打包 `.app`（daemon 将以裸二进制运行，系统设置里只显示文件名） |
 | `--no-launchd` | 不注册开机自启 |
+| `--no-auto-update` | 不注册每日自动更新代理（并把它卸载 + 状态记 `disabled=true`）；手动 `check`/`apply` 仍可用 |
 | `--replace-daemon` | 先收拢已在跑的旧实例（旧构建会占住 socket） |
 | `--skip-build` | 跳过 npm/tsc/swift 编译 |
 | `--restore-launchd` | 只做 launchd 恢复 + 校验 daemon 自报席位 |
 | `-h, --help` | 完整用法 |
+
+默认**开**自动更新：安装器把 `{updaterCli, installRoot, agentLabel,
+registeredAt}` 写进 `<stateRoot>/update-install.json`（0600，临时文件 + rename + 读回校验），
+并注册每日一次的 `com.glasspane.update` 作业。指针与作业都由 `updater/` 自己那套实现写出
+（`writePointer` / `renderAgentPlist` / `registerAgent`），安装器不渲染 plist、不抄标签。
+安装树里没有 `updater/cli.js`（旧 checkout）时：**如实打印缺的是哪个文件、你失去什么**，
+不写指针、不注册作业，而安装本身仍然成功——静默跳过不是这个仓库允许的失败形态。
+
+卸载本机安装时，除了 daemon 那份作业，**也要**卸掉更新代理：
+`node <repo>/updater/cli.js disable` 一条命令做这件事（bootout + 删 plist + 记 `disabled=true`）。
 
 ## What still needs a human / 仍需人工的两件事
 

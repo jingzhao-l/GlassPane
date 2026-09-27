@@ -30,9 +30,19 @@ export const MIN_NODE_MAJOR = 18
 export const SOCKET_DIR_NAME = '.glasspane'
 export const SOCKET_FILE_NAME = 'engine.sock'
 export const DAEMON_LOG_NAME = 'installer-daemon.log'
+/** daemon 作业名。**真源是 updater 的 `DAEMON_JOB_LABEL`**（规格 §2/§3 都在那边用它）；
+ *  这里保留一份同值常量是因为安装器必须能脱离 updater/ 独立 import（npx 形态、旧
+ *  checkout），而 `test/auto-update.test.mjs` 把两者钉成相等——改任何一边都会红。 */
 export const LAUNCHD_LABEL = 'com.glasspane.daemon'
 export const LAUNCHD_DIR_NAME = 'Library/LaunchAgents'
 export const LAUNCHD_FILE_NAME = `${LAUNCHD_LABEL}.plist`
+
+/** 安装树里 updater 各模块的相对位置（规格 §7：指针与定时代理都必须指向**安装产物里**
+ *  的那一份 CLI，而不是 installer 自己旁边的副本）。 */
+export const UPDATER_CLI_SEGMENTS = ['updater', 'cli.js']
+export const UPDATER_STATE_SEGMENTS = ['updater', 'lib', 'state.js']
+export const UPDATER_LAUNCHD_SEGMENTS = ['updater', 'lib', 'launchd.js']
+export const UPDATER_CODES_SEGMENTS = ['updater', 'lib', 'codes.js']
 
 /** 分离启动后的**有界观察窗口**：spawn 失败（ENOENT、参数被拒）以异步 error 事件
  *  落地，`/usr/bin/open` 目标缺失则以非零退出落地，两者都发生在启动后的几百毫秒
@@ -58,7 +68,7 @@ export const INSTALL_SH_URL =
 /** 发布线锚点（版本真源 = 根 package.json，由 scripts/set-version.mjs 统一改写，
  *  勿手改）：npx 形态下本地没有仓库时，引导 clone 的就是这个 tag，与 install.sh
  *  的 `GLASSPANE_RELEASE` 同值——两条一键入口必须拿到同一份源码。 */
-export const RELEASE_VERSION = '1.3.1'
+export const RELEASE_VERSION = '1.4.0'
 /** 发布 ref（tag 名）。GLASSPANE_REF 环境变量可覆盖（追主干用 `main`）。 */
 export const REPO_REF = `v${RELEASE_VERSION}`
 
@@ -93,6 +103,7 @@ export function parseArgs(argv) {
     replaceDaemon: false,
     skipBuild: false,
     restoreLaunchd: false,
+    autoUpdate: true,
     bootstrap: true,
     help: false,
   }
@@ -123,6 +134,11 @@ export function parseArgs(argv) {
         break
       case '--no-launchd':
         opts.launchd = false
+        break
+      case '--no-auto-update':
+        // 规格 §5：默认开，一键关。关掉 = 不注册每日代理 + 状态里记 disabled=true
+        // （由 updater 自己的 writer 写，面板才会显示"自动更新已关闭"而不是"从未检查"）。
+        opts.autoUpdate = false
         break
       case '--no-daemon':
         opts.daemon = false
@@ -611,6 +627,226 @@ export async function restoreLaunchd({
 }
 
 // ---------------------------------------------------------------------------
+// 自动更新接线（规格 2026-09-27 §5「默认开、一键关」+ §7「指针文档」）
+//
+// 这里**不**渲染 plist、**不**拼 LaunchAgents 路径、**不**自己实现 0600 writer、
+// **不**再判一次"用环境变量关掉自动更新"那个开关：四样都从安装树里的 updater 模块取
+// （`renderAgentPlist` / `registerAgent` / `agentPlistPath` / `AGENT_LABEL` /
+// `writePointer` / `resolveStateRoot` / `runCommand`）。注册与卸载走
+// `runCommand('enable'|'disable')`——与面板按钮、与定时代理跑的是同一条实现
+// （§7「一处实现，一处真相」），也因此那个环境开关只由 updater 自己读一次：它答
+// "环境已经关了"（返回 auto-disabled 这个 code，安装器读的是它的**结论**而不是变量本身），
+// 安装器就再请它执行自己的 disable，好让状态里落下与 --no-auto-update 同样的
+// disabled=true，而不是在 installer 里做第二套解读。
+// 选择"import 模块并调 runCommand"而不是"spawn node <root>/updater/cli.js enable"：
+// 后者无法在不碰真实 ~/Library/LaunchAgents 的前提下被单测驱动（updater 自己的
+// cli.test.mjs 只能跑 status/usage 这类无副作用子命令）。注入 deps 里的
+// `runLaunchctl`/`uid`/`homeDir` 就能把整条注册链留在临时 HOME 内，这正是本仓
+// 测试一直在用的口径。
+// ---------------------------------------------------------------------------
+
+/** 安装树里 updater 各入口的绝对路径（指针 §7 要写的就是这一份的位置）。 */
+export function updaterTreePaths(rootDir) {
+  return {
+    cli: path.join(rootDir, ...UPDATER_CLI_SEGMENTS),
+    state: path.join(rootDir, ...UPDATER_STATE_SEGMENTS),
+    launchd: path.join(rootDir, ...UPDATER_LAUNCHD_SEGMENTS),
+    codes: path.join(rootDir, ...UPDATER_CODES_SEGMENTS),
+  }
+}
+
+/**
+ * 安装树里没有更新脚本（旧 checkout / 未打包 updater/）时的文案（纯函数，可单测）。
+ * 三件事必须说齐：缺的是**哪个文件的绝对路径**、因此没写成什么、用户因此失去什么。
+ * 刻意不写代理标签——那个名字只存在于 updater 的常量里，此处读不到，宁可说"每日
+ * 定时更新代理"也不在 installer 里抄一份（抄了就是改名时会漂移的第二真源）。
+ */
+export function autoUpdateMissingText({ updaterCli, rootDir, detail = null } = {}) {
+  return [
+    `自动更新未接线：安装树里找不到更新脚本 ${updaterCli}`,
+    `（${rootDir} 这份源码缺 updater/ 目录——旧 checkout，或安装产物里没打包该目录。）`,
+    '本轮因此**没有**写安装指针，也**没有**注册每日定时更新代理。你失去：每日定时的自动检查与',
+    '换版、设置面板的「立即检查 / 安装更新」两个按钮（面板读不到安装指针会显示"读不到更新状态"，',
+    '不会假装成功）、以及 gp_diagnose 响应里的 update 摘要。',
+    'daemon 与开机自启不受影响，安装结论仍由收尾的 hello 校验决定；要拿回自动更新：',
+    '把源码更新到含 updater/ 的版本后重跑安装器（它会补写指针并注册代理）。',
+    ...(detail ? [`（读取 ${updaterCli} 时的原始错误：${detail}）`] : []),
+  ].join('\n')
+}
+
+/**
+ * 取安装树里的 updater 模块。文件不存在、或它自己的依赖不在（ERR_MODULE_NOT_FOUND/
+ * ENOENT）→ `{ missing, detail }`，由调用方**如实打印**后跳过；其它加载错误一律抛——
+ * 把"坏了"说成"没有"是本仓禁止的那类静默。
+ */
+async function importUpdaterModule(file, { exists }) {
+  if (!exists(file)) return { missing: file, detail: '文件不存在' }
+  try {
+    return { module: await import(pathToFileURL(file).href) }
+  } catch (error) {
+    if (error?.code === 'ERR_MODULE_NOT_FOUND' || error?.code === 'ENOENT') {
+      return { missing: file, detail: error.message }
+    }
+    throw new Error(`安装树里的更新脚本无法加载：${file}（${error?.message ?? String(error)}）`)
+  }
+}
+
+/**
+ * 写 §7 的指针文档并注册/卸载每日代理。
+ *
+ * 三个注入位是给单测留的（`homeDir`/`uid`/`runLaunchctl`）：整条注册链——plist 落盘、
+ * `launchctl bootout/bootstrap`——都留在临时 HOME 里，开发机的 `~/Library/LaunchAgents`
+ * 一个字节都不动，口径与 test/cli.test.mjs 的 restoreLaunchd 假件、
+ * updater/test/launchd.test.mjs 的 `run` 注入一致。真实安装只传 `rootDir/env/autoUpdate`。
+ *
+ * 幂等：指针是整份覆盖写（`writePointer` 临时文件 + rename + 读回校验 mode），代理
+ * 那边 `registerAgent` 先 `bootout` 再 `bootstrap`——重跑安装既不会留下两个作业，也
+ * 不会留下指向已挪走 checkout 的旧 plist（launchd 缓存 bootstrap 时读到的定义，
+ * 这正是本仓 EX_CONFIG 栽过两轮的坑）。
+ *
+ * 返回的是给使用说明与调用方读的结论；`state: 'missing'` 是**已如实打印告警**的跳过
+ * （安装继续、退出码不受影响），其余失败一律抛给 install() 走非零退出——静默跳过是
+ * 本仓禁止的失败形态。
+ */
+export async function registerAutoUpdate({
+  rootDir,
+  env = process.env,
+  homeDir = null,
+  uid = null,
+  runLaunchctl = null,
+  autoUpdate = true,
+  now = new Date(),
+  exists = fs.existsSync,
+  say = (line) => printStep(line),
+} = {}) {
+  const tree = updaterTreePaths(rootDir)
+  const modules = {}
+  for (const [key, file] of [['cli', tree.cli], ['state', tree.state], ['launchd', tree.launchd], ['codes', tree.codes]]) {
+    const got = await importUpdaterModule(file, { exists })
+    if (got.missing) {
+      for (const line of autoUpdateMissingText({ updaterCli: file, rootDir, detail: got.detail }).split('\n')) {
+        say(paint(line, 'yellow'))
+      }
+      return {
+        ok: true,
+        registered: false,
+        state: 'missing',
+        reason: 'updater-missing',
+        agentLabel: null,
+        schedule: null,
+        stateRoot: null,
+        updaterCli: file,
+        pointer: null,
+        pointerPath: null,
+        detail: got.detail,
+      }
+    }
+    modules[key] = got.module
+  }
+  const { cli, state, launchd, codes } = modules
+
+  // 状态根只由 updater 的 resolveStateRoot 决定（flag → GLASSPANE_STATE_DIR → 家目录
+  // /.glasspane）；homeDir 为空时不传，让它按自己的口径取口令记录里的那个家。
+  const homeArgs = homeDir ? { homeDir } : {}
+  const stateRoot = cli.resolveStateRoot({ flags: {}, env, ...homeArgs })
+  const agentLabel = launchd.AGENT_LABEL
+
+  // §7 指针四字段，写盘用 updater 自己的 writer（0600 + 临时文件 + rename + 读回校验）。
+  const written = state.writePointer(
+    stateRoot,
+    { updaterCli: tree.cli, installRoot: rootDir, agentLabel },
+    { now },
+  )
+  const readBack = state.readPointer(stateRoot)
+  if (!readBack.ok) {
+    throw new Error(`自动更新指针写完读不回来（${readBack.code}）：${readBack.message}`)
+  }
+
+  const flags = { json: false, auto: false, help: false, consents: [], overrides: {}, 'state-dir': stateRoot }
+  const deps = { cliPath: tree.cli, ...homeArgs }
+  if (uid !== null && uid !== undefined) deps.uid = String(uid)
+  if (runLaunchctl) deps.runLaunchctl = runLaunchctl
+
+  let outcome = await cli.runCommand({ command: autoUpdate ? 'enable' : 'disable', flags, env, deps })
+  let switchedOffByEnv = false
+  if (autoUpdate && outcome.code === codes.CODES.autoDisabled) {
+    // updater 自己读了那个环境变量并拒绝注册。安装器不重复解读它，只把它的原话留着，
+    // 再请它跑自己的 disable——这样面板读到的是 disabled=true（"自动更新已关闭"），
+    // 而不是"从未检查"。
+    const updaterSentence = outcome.message
+    const second = await cli.runCommand({ command: 'disable', flags, env, deps })
+    if (!second.ok) {
+      throw new Error(`自动更新状态卸载写入失败：${second.message ?? '未知原因'}（updater 关于环境变量的一手原话：${updaterSentence}）`)
+    }
+    outcome = { ...second, message: `${updaterSentence}｜${second.message}` }
+    switchedOffByEnv = true
+  }
+  if (!outcome.ok) {
+    throw new Error(`${autoUpdate ? '自动更新代理注册' : '自动更新代理卸载'}失败：${outcome.message ?? '未知原因'}`)
+  }
+
+  const registered = autoUpdate && !switchedOffByEnv
+  const schedule = `${launchd.DEFAULT_HOUR}:${String(launchd.DEFAULT_MINUTE).padStart(2, '0')}`
+  const summary = {
+    ok: true,
+    registered,
+    state: registered ? 'registered' : 'off',
+    reason: switchedOffByEnv ? 'env' : (autoUpdate ? null : 'flag'),
+    agentLabel,
+    schedule,
+    stateRoot,
+    updaterCli: tree.cli,
+    pointer: written.pointer,
+    pointerPath: written.path,
+    message: outcome.message,
+  }
+  if (registered) {
+    say(`每日自动更新已注册（${agentLabel}，默认 ${schedule}，状态根 ${stateRoot}；指针 ${written.path}）——一键关：node "${tree.cli}" disable`)
+  } else {
+    say(
+      `自动更新已关闭（${switchedOffByEnv ? 'updater 报环境变量已关，见下面它自己的原话' : '--no-auto-update'}）：`
+      + `${agentLabel} 未注册/已卸载，状态里记 disabled=true——面板显示"自动更新已关闭（上次检查 …）"而不是"从未检查"。`
+      + `手动 node "${tree.cli}" check / apply 仍可用；重开：node "${tree.cli}" enable。`
+      + `（updater 原话：${outcome.message}）`,
+    )
+  }
+  return summary
+}
+
+/**
+ * §5 在「后续使用说明」里的落点：把代理名、时刻、状态根与**真路径**的开关命令写清楚。
+ * `update` 缺省（老调用方）时一行不出，以免给没接线的环境编出一段说明。
+ * 末行是卸载口径——移除 daemon 作业的那些手工命令必须同时移除这个更新代理，
+ * 否则装完再删的用户会留下一个每天照跑、却没有界面入口的定时作业。
+ */
+export function updateGuidanceText(update) {
+  if (!update) return []
+  if (update.state === 'missing') {
+    return [
+      `6. 自动更新：本轮未接线（安装树缺 ${update.updaterCli}，详见上面那条告警）。`,
+      '   这一份装出来的 GlassPane 不会自己更新，面板上的两个更新按钮也读不到状态；',
+      '   把源码更新到含 updater/ 的版本后重跑安装器即可补上（指针 + 每日代理）。',
+    ]
+  }
+  if (update.state === 'registered') {
+    return [
+      `6. 自动更新：默认开。launchd 每日 ${update.schedule} 跑 "${update.updaterCli}" check && apply`,
+      `   （作业 ${update.agentLabel}，RunAtLoad=false，日志 ${update.stateRoot}/update.log）；`,
+      '   只在 daemon 空闲应答探针、且规格 §1 七道校验全过时才换版，major 永远等人点按钮。',
+      `   一键关：node "${update.updaterCli}" disable（卸该作业 + 状态记 disabled=true）；重开：enable。`,
+      `   卸载本机安装时：bootout daemon 作业的同时**也必须** bootout ${update.agentLabel} 并删它的 plist。`,
+    ]
+  }
+  return [
+    `6. 自动更新：已关闭（${update.reason === 'env' ? 'updater 判定环境变量为关，安装器没有第二套解读' : '--no-auto-update'}）。`,
+    `   ${update.agentLabel} 未注册，状态记 disabled=true：面板显示"自动更新已关闭（上次检查 …）"，`,
+    '   不会静默消失；手动检查/安装仍是同一条 CLI（面板上那两个按钮也是它）。',
+    `   重开：node "${update.updaterCli}" enable${update.reason === 'env' ? '（先把那个环境变量去掉，否则 updater 按 §7 拒绝注册）' : ''}。`,
+    `   它也负责卸载：bootout ${update.agentLabel} + 删 ~/Library/LaunchAgents 下那份 plist。`,
+  ]
+}
+
+// ---------------------------------------------------------------------------
 // 执行层
 // ---------------------------------------------------------------------------
 
@@ -792,6 +1028,10 @@ export function usageText() {
     '  --no-app           不打包/安置 .app（仅裸二进制产物；权限条目将只显示文件',
     '                     名且无图标，见 P1 v1.2 §11.1）',
     '  --no-launchd       不注册开机自启（launchd bootstrap）',
+    '  --no-auto-update   不注册每日自动更新代理（规格 2026-09-27 §5）：卸载该代理并在',
+    '                     状态里记 disabled=true，面板显示"自动更新已关闭"而不是"从未',
+    '                     检查"；手动 check/apply 仍可用。等价的环境开关由 updater 自己',
+    '                     判定（本安装器不重复解读那个环境变量）',
     '  --restore-launchd  只做 launchd 恢复：检测作业被 bootout → bootstrap → hello',
     '                     校验 daemon 自报席位（勾完 TCC 框后重跑即自动换进程复验）',
     '  --skip-build       跳过 npm/tsc/swift 编译（已构建过时使用）',
@@ -839,6 +1079,7 @@ export function nextStepsText({
   daemonVerified = true,
   daemon = { viaBundle: false, path: null },
   settingsApp = null,
+  update = null,
 }) {
   const settingsAppHint =
     settingsApp ?? path.join(rootDir, 'engine', '.build', 'release', SETTINGS_APP_NAME)
@@ -886,6 +1127,7 @@ export function nextStepsText({
     '5. registry 发布形态：MCP 服务器已可独立安装（`npm i -g glasspane-mcp`，命令名',
     '   glasspane-mcp）；但它只是转发层，daemon 与权限仍由本次安装产出，缺 daemon 时',
     '   工具调用会返回带补救步骤的结构化错误。',
+    ...updateGuidanceText(update),
     '',
   ].join('\n')
 }
@@ -1103,6 +1345,21 @@ export async function install({ options = parseArgs([]).options, env = process.e
     printStep(bootstrapResult.already ? bootstrapResult.message : `开机自启已注册（${plistPath}）`)
   }
 
+  // 自动更新接线（规格 2026-09-27 §5/§7）：daemon 作业注册之后就做，且**不**因为
+  // --no-launchd 而跳过——每日定时代理与开机自启是两件事（前者 RunAtLoad=false）。
+  // 装树里没有 updater/ 时是"如实告警 + 不写指针 + 安装继续"；其余失败（指针读不回、
+  // launchctl 拒绝 bootstrap、状态写不进）一律抛出 → 退出码 1，绝不静默跳过。
+  //
+  // 这里**不**传 homeDir：状态根与代理 plist 的落点都由 updater 自己算（状态根取口令
+  // 记录里的家目录，见 updater/cli.js 的 recordHomeDir 注释与它的 home.test.mjs），
+  // 安装器其余路径仍按 process.env.HOME 拼——那是 SECURITY §2.5 记着的已知未闭口，
+  // 本轮不给它再添第三种家目录口径；只保证"指针落在 `updater enable` 会落的那一处"。
+  const update = await registerAutoUpdate({
+    rootDir,
+    env,
+    autoUpdate: options.autoUpdate,
+  })
+
   if (options.daemon) {
     if (!fs.existsSync(daemonLaunch.path)) {
       throw new Error(`daemon 产物不存在：${daemonLaunch.path}（请勿在未构建时使用 --skip-build 启动 daemon）`)
@@ -1222,6 +1479,7 @@ export async function install({ options = parseArgs([]).options, env = process.e
     daemonVerified: verified,
     daemon: daemonLaunch,
     settingsApp: plan.settingsApp ?? undefined,
+    update,
   })}\n`)
   return outcome
 }

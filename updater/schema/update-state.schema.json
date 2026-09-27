@@ -1,0 +1,111 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "glasspane.update-state/1",
+  "title": "GlassPane updater state (spec 2026-09-27 §4)",
+  "description": "Shape of <stateRoot>/update-state.json and of the single JSON line `--json` prints. Validated inside this package only: it is local installation state, not a cross-language evidence contract, so it deliberately does NOT live in kernel/schemas.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "lastCheckAt",
+    "current",
+    "latest",
+    "status",
+    "code",
+    "staged",
+    "lastError",
+    "disabled",
+    "autoApply",
+    "history",
+    "updatedAt"
+  ],
+  "properties": {
+    "schemaVersion": { "enum": [1] },
+    "updatedAt": {
+      "description": "ISO-8601 instant this file was published.",
+      "type": "string"
+    },
+    "lastCheckAt": {
+      "description": "ISO-8601 instant of the last check that reached the source, or null when nothing has ever been checked. Drives the 36 h overdue judgement.",
+      "type": ["string", "null"],
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"
+    },
+    "current": {
+      "description": "Version the machine is running, read back from the installed bundle.",
+      "type": ["string", "null"],
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "latest": {
+      "description": "Highest version the source offered, parseable tag stripped of its v.",
+      "type": ["string", "null"],
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "status": {
+      "enum": [
+        "up-to-date",
+        "available",
+        "staged",
+        "applied",
+        "deferred",
+        "needs-consent",
+        "check-overdue",
+        "rolled-back",
+        "check-failed",
+        "staged-build-failed",
+        "apply-failed",
+        "rollback-failed",
+        "disabled",
+        "installer-pointer-stale"
+      ]
+    },
+    "code": {
+      "description": "Stable code of the gate that refused, or null. The panel switches on this, never on the message text.",
+      "type": ["string", "null"],
+      "pattern": "^[a-z0-9][a-z0-9.-]*$"
+    },
+    "staged": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["version", "dir", "digest", "at"],
+      "properties": {
+        "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+        "dir": { "type": "string" },
+        "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "at": { "type": "string" }
+      }
+    },
+    "lastError": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["code", "message", "at"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]*$" },
+        "message": {
+          "description": "Human-actionable sentence. No internal section numbers, no self-justification.",
+          "type": "string",
+          "minLength": 1
+        },
+        "at": { "type": "string" },
+        "details": { "type": ["string", "null"] }
+      }
+    },
+    "disabled": { "type": "boolean" },
+    "autoApply": { "type": "boolean" },
+    "history": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["at", "action", "result", "digest"],
+        "properties": {
+          "at": { "type": "string" },
+          "action": { "enum": ["check", "apply", "rollback", "enable", "disable", "restore"] },
+          "result": { "type": "string" },
+          "digest": { "type": ["string", "null"], "pattern": "^([0-9a-f]{1,64})?$" },
+          "code": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}

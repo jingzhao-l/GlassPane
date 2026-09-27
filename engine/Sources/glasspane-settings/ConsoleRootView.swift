@@ -6,12 +6,14 @@ import GlassPaneEngine
 /// 信息架构上分两组：
 ///  - **首次使用**：权限（onboarding 是面板的原始职责，也是默认落点）；
 ///  - **日常审计**：证据档案 / 项目 / 审批台账——这些数据早就落盘了，
-///    此前只有 daemon CLI 读得到，人没有界面可看。
+///    此前只有 daemon CLI 读得到，人没有界面可看；
+///  - **这台机器**：更新（装的版本新不新、到点没检查成、现在能不能手动来一次）。
 ///
 /// 默认选中"权限"，因此 P1-C6 真机冒烟读到的仍是权限页那套结构。
 struct ConsoleRootView: View {
     @EnvironmentObject private var settings: SettingsModel
     @EnvironmentObject private var console: ConsoleModel
+    @EnvironmentObject private var updates: UpdateModel
 
     /// 侧栏条目。`id` 同时用作恢复选中的稳定标识。
     enum ConsoleSection: String, CaseIterable, Identifiable {
@@ -20,6 +22,7 @@ struct ConsoleRootView: View {
         case projects
         case approvals
         case recipes
+        case updates
 
         var id: String { rawValue }
 
@@ -30,6 +33,7 @@ struct ConsoleRootView: View {
             case .projects: return "项目"
             case .approvals: return "审批台账"
             case .recipes: return "配方"
+            case .updates: return "更新"
             }
         }
 
@@ -40,6 +44,7 @@ struct ConsoleRootView: View {
             case .projects: return "square.stack.3d.up"
             case .approvals: return "checkmark.seal"
             case .recipes: return "scroll"
+            case .updates: return "arrow.triangle.2.circlepath"
             }
         }
     }
@@ -54,6 +59,7 @@ struct ConsoleRootView: View {
             detail
                 .environmentObject(settings)
                 .environmentObject(console)
+                .environmentObject(updates)
         }
         // 窗口标题的唯一落点：各页不得再设 navigationTitle，否则会把
         // "GlassPane 设置" 顶掉（P1-C6 真机冒烟按窗口标题定位面板）。
@@ -70,6 +76,8 @@ struct ConsoleRootView: View {
             case .projects: console.reloadProjects()
             case .approvals: console.reloadApprovals()
             case .recipes: break
+            // 更新状态是更新器写在盘上的，进这一页时重读一次（不联网）。
+            case .updates: updates.refresh()
             }
         }
     }
@@ -88,9 +96,11 @@ struct ConsoleRootView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 2) {
             sidebarGroupTitle("首次使用")
-            ForEach(ConsoleSection.allCases) { section in
+            ForEach(ConsoleSection.allCases.filter { $0 != .updates }) { section in
                 sidebarButton(section)
             }
+            sidebarGroupTitle("这台机器")
+            sidebarButton(.updates)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 8)
@@ -157,6 +167,9 @@ struct ConsoleRootView: View {
             return count == 0 ? nil : "\(count)"
         case .recipes:
             return nil
+        case .updates:
+            // 有版本等着装、或到点没检查成，才在侧栏上给标记。
+            return updates.offersUpdate ? "待更新" : nil
         }
     }
 
@@ -177,12 +190,13 @@ struct ConsoleRootView: View {
             Button {
                 settings.refresh()
                 console.refreshAll()
+                updates.refresh()
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.caption)
             }
             .buttonStyle(.borderless)
-            .help("重新检测权限与档案")
+            .help("重新检测权限、档案与更新状态")
             // 标识与权限页里的「刷新」分开：同一个 identifier 出现在两处，
             // 自动化按标识 act 时会选不中唯一元素。
             .accessibilityIdentifier("gp-refresh-all")
@@ -207,6 +221,8 @@ struct ConsoleRootView: View {
             ApprovalsTabView()
         case .recipes:
             RecipesTabView()
+        case .updates:
+            UpdateTabView()
         }
     }
 }
