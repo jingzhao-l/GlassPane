@@ -30,6 +30,11 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
+      verify_oidc:
+        description: "Verify the npm trusted publisher without publishing (stage, then reject)"
+        type: boolean
+        required: false
+        default: false
       publish_npm:
         description: "Publish the npm packages (requires confirm=true)"
         type: boolean

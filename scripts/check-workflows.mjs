@@ -140,6 +140,16 @@ function inspect(target) {
     }
   }
 
+  // 3. a job gated on `inputs.x` that nobody declared is a job that never runs.
+  //    Found 2026-09-26: the verify-trusted-publisher job existed, its input did not
+  //    (an insert missed the indentation), and the dispatch API rejected the run — a
+  //    workflow that looks wired and is not.
+  const declared = new Set(lines.map((l) => l.match(/^[ \t]{6}([A-Za-z0-9_]+):[ \t]*$/)?.[1]).filter(Boolean))
+  const referenced = new Set([...(lines.join("\n").match(/inputs\.([A-Za-z0-9_]+)/g) ?? [])].map((m) => m.split(".")[1]))
+  for (const name of referenced) {
+    if (!declared.has(name)) problems.push(`uses inputs.${name} but never declares it under workflow_dispatch.inputs`)
+  }
+
   return { jobs: [...seen.keys()], problems }
 }
 
