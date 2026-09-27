@@ -138,42 +138,27 @@ if (mode === "--probe") {
   const remote = head.split(/\s+/)[0]
   const pinned = canonical.ref ?? ""
 
-  // Is the commit we pinned still *there*? This is a different failure from "the
-  // branch moved", and a worse one: with a moved branch we can re-sync; with an
-  // unreachable anchor the manifest can no longer prove that our bytes are anybody
-  // else's bytes, and --check can only prove they have not changed *since*.
-  let anchorAlive = true
-  try {
-    execFileSync("git", ["ls-remote", `https://github.com/${canonical.repo}.git`, pinned], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim() || (anchorAlive = false)
-  } catch {
-    anchorAlive = false
-  }
+  // What `git ls-remote` can answer is "where does this branch point", and nothing
+  // else: it matches ref *names*, so asking it about a raw commit SHA always misses.
+  // The first version of this probe did exactly that and reported ANCHOR UNREACHABLE
+  // for a ref that was on the remote the whole time (proved by pinning the manifest to
+  // main's head and watching it still fail). A checker that cries wolf is worse than no
+  // checker, so: compare the branch head with the pin, and when they differ say what we
+  // can prove — that they differ — instead of guessing at ancestry we cannot see.
   if (!remote) {
-    console.log(`kernel-vendor: branch ${canonical.branch} not found in ${canonical.repo} — no drift signal; checking the anchor only`)
-  }
-  if (!anchorAlive) {
-    console.log(`kernel-vendor: ANCHOR UNREACHABLE — ${canonical.repo} cannot resolve our pinned ref ${pinned.slice(0, 12)}`)
-    console.log("  The vendored bytes still match the manifest (--check proves they never changed), but the")
-    console.log("  provenance chain to canonical is broken: we can no longer prove these ARE its bytes, only")
-    console.log("  that they have not changed since we recorded them. This is a finding, not a pass.")
-    console.log("  Fix: re-anchor the manifest to a reachable ref after backflow (tools/sync-kernel.sh --target=fork).")
+    console.log(`kernel-vendor: branch ${canonical.branch} not found in ${canonical.repo} — the pin cannot be compared to anything`)
     process.exit(1)
   }
 
-  if (!remote) process.exit(0) // anchor is alive (we got here), nothing else to say
   if (remote === pinned) {
     console.log(`kernel-vendor: canonical ${canonical.branch} @ ${pinned.slice(0, 12)} — no drift (${canonical.version})`)
     process.exit(0)
   }
-  // Is our pin an ancestor of the branch head? That needs the objects, so this is
-  // reported as "unknown" rather than guessed — a guess here would be the exact
-  // kind of unmeasured claim this project refuses to make.
   console.log(`kernel-vendor: DRIFTED — canonical ${canonical.branch} head is ${remote.slice(0, 12)}, we pin ${pinned.slice(0, 12)} (${canonical.version})`)
   console.log("  Our vendored bytes are still exactly what the manifest declares (--check proves that),")
-  console.log("  but the shared kernel has moved. To take it: KERNEL_SRC=/path/to/iterate-skill tools/sync-kernel.sh --target=fork")
+  console.log("  but the shared kernel has moved. Whether our pin is an ancestor of the head needs the")
+  console.log("  objects, so it is not claimed here. To take the move:")
+  console.log("    KERNEL_SRC=/path/to/iterate-skill tools/sync-kernel.sh --target=fork")
   process.exit(0)
 }
 

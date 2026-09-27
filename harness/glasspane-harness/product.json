@@ -172,7 +172,7 @@
       "harness/tools/kernel-vendor.mjs --probe（canonical 是否移动/锚点是否还在）",
       "harness/tools/tool-surface.mjs（按依赖计，不计我们的工具面）"
     ],
-    "knownFinding": "2026-09-26 probe 首次运行发现：我们钉的 ref bb80f97 与分支 kernel/decision-log-chain 在 canonical 仓已不存在（只剩 main / docs/glasspane-cross-link），而 canonical main 比我们的镜像落后三个模块（canonical-json / decision-log / evidence-decision，2026-09-25 的回流只落在本地提交）。结论要说得准确：--check 仍能证明 vendored 字节自记录以来未变，但已不能证明它们**就是** canonical 的字节——溯源链在锚点处断了。修法：回流三个模块 → push → 用可达 ref 重新锚定。",
+    "knownFinding": "已修复（2026-09-27）：canonical 的 kernel/decision-log-chain 分支从未 push 过（Phase B 内核工作——决策日志写入器、evidence→decision 映射、读侧兼容冻结——只存在在一台机器上），所以我们钉的 bb80f97 在远端解析不到。已把该分支 push 到 origin，探针现在报 'no drift'。**但当时的检测器本身是坏的**：它用 git ls-remote 去解析裸 SHA，而 ls-remote 只匹配 ref 名，因此对确定存在的 ref 也报 'ANCHOR UNREACHABLE'（用 main 的 head 做过反证）。结论以 git ls-remote --heads 的独立证据为准，不以探针的判词为准。",
     "docs": "docs/kernel-integration.md"
   }
 }

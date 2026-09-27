@@ -77,19 +77,24 @@ What a two-way scenario (the R40 list) actually needs:
   - the canonical side has no decision-log **writer**; the first real producer of a
     decision-log entry is supposed to be this fork's plugin (M2) — the two are mutually
     dependent by design, plugin skeleton first.
-- **A finding the new probe surfaced.** `kernel-vendor.mjs --probe` (added in this batch)
-  compares our pinned ref against the canonical branch head. On its first run it found
-  that **our pinned ref `bb80f97…` and the branch `kernel/decision-log-chain` no longer
-  exist in the canonical repository** — only `main` and `docs/glasspane-cross-link`
-  remain, and the commit cannot be resolved. Canonical `main` is at the same
-  `0.1.0-draft.1` and is **behind** our mirror by three modules (`canonical-json.ts`,
-  `decision-log.ts`, `evidence-decision.ts`): the 2026-09-25 backflow landed as a local
-  commit there, not on the remote.
+- **A real finding, and a broken checker that found it for the wrong reason.** The new
+  `kernel-vendor.mjs --probe` reported that our pinned ref was unreachable. Two things
+  were true and only one of them was the checker's fault:
+  - **Real:** the branch `kernel/decision-log-chain` — carrying the whole Phase B kernel
+    work (the decision-log writer, the evidence→decision mapping, the frozen read-side
+    compat) — had **never been pushed**. It existed only on one laptop, which is why no
+    remote could resolve `bb80f97`. Fixed on 2026-09-27 by pushing the branch; the probe
+    then reports "no drift" against the same pin.
+  - **The checker was wrong:** its first version asked `git ls-remote` to resolve a raw
+    commit SHA, and `ls-remote` only matches ref *names* — so it reported
+    "ANCHOR UNREACHABLE" even for a ref that was certainly on the remote (proved by
+    pinning the manifest to `main`'s head and watching it still fail). The fixed version
+    compares the branch head with the pin — the only question `ls-remote` can answer —
+    and explicitly declines to claim ancestry it cannot see.
 
-  What that means precisely: `--check` can still prove our vendored bytes have not changed
-  since we recorded them, but the manifest can no longer prove they *are* canonical's
-  bytes. The provenance chain is broken at the anchor, and the probe says so (exit 1,
-  "ANCHOR UNREACHABLE") instead of shrugging.
+  The lesson is the one this project keeps paying for: a tool's output is not evidence
+  until the tool has been shown to be right. The push was justified by
+  `git ls-remote --heads` (independently), not by the probe's verdict.
 
 ## The two stages that would actually finish it
 
