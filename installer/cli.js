@@ -21,6 +21,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createInterface } from 'node:readline/promises'
 import { pathToFileURL } from 'node:url'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import net from 'node:net'
@@ -71,6 +72,68 @@ export const INSTALL_SH_URL =
 export const RELEASE_VERSION = '1.4.0'
 /** 发布 ref（tag 名）。GLASSPANE_REF 环境变量可覆盖（追主干用 `main`）。 */
 export const REPO_REF = `v${RELEASE_VERSION}`
+
+/** 发布签名公钥（GPG，key 0929EA31DF4F7429F63FC53189D88B1D043A1298，uid
+ *  jingzhao-l (sign-github) <ET_lin@outlook.com>）。与 npm 安装链的 Integrity 不同，
+ *  GPG 校验的是"来源/作者身份"而不是"内容哈希"：clone 到的发布 tag 若带 GPG 签名，
+ *  用这把公钥验签通过，才能确证源码出自发布者之手（而非同名 tag 或中间人）。
+ *  恒为 best-effort：未签名/不可用只告警不阻断，因为 HTTPS clone + tag 钉版本已保证
+ *  内容完整性，GPG 是额外的一层来源证明。 */
+export const GLASSPANE_SIGNING_PUBLIC_KEY = [
+  '-----BEGIN PGP PUBLIC KEY BLOCK-----',
+  '',
+  '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',
+  'YVXa4IEQs7aBxKO+n+T2AvUYiKQ=',
+  '=DYXk',
+  '-----END PGP PUBLIC KEY BLOCK-----',
+].join('\n')
 
 const ANSI = {
   reset: '\x1b[0m',
@@ -623,6 +686,74 @@ export async function restoreLaunchd({
     message: granted
       ? `daemon 已由 launchd 服务且自报辅助功能 granted（pid ${checked.pid}，version ${checked.version}）——无人工动作剩余`
       : `daemon 已就位，自报辅助功能为 ${checked.accessibility ?? 'unknown'}；唯一剩余人工动作 = 系统设置>隐私与安全性>辅助功能 勾选 daemon，然后重跑本命令复验（届时会自动换进程取新判定）`,
+  }
+}
+
+/** 判定 `git verify-tag` 结果的语义（纯函数，可单测）。
+ *  git 对"未签名 tag"与"签名无效"都返回退出码 1，必须靠 stderr 里的
+ *  "no signature found" 区分——前者是"本来就没签"（未签名），后者才是"签名对不上"
+ *  （invalid）。退出码 0 = 用已导入的发布公钥验签通过。 */
+export function classifyTagVerify({ status, stdout = '', stderr = '' } = {}) {
+  const text = `${stdout ?? ''}\n${stderr ?? ''}`
+  if (status === 0) {
+    return { status: 'verified', detail: '发布 tag 的 GPG 签名有效，出自发布者私钥' }
+  }
+  if (/no signature found/i.test(text)) {
+    return { status: 'unsigned', detail: '该发布 tag 未做 GPG 签名（不是内容被篡改，只是缺签名层）' }
+  }
+  return { status: 'invalid', detail: `git verify-tag 失败（退出码 ${status}），签名无法确证` }
+}
+
+/** 仓库里是否存在指定 tag ref（IO 探测，纯判定）。 */
+export function repoHasRef(repoDir, ref, { spawn = spawnSync } = {}) {
+  return spawn('git', ['-C', repoDir, 'rev-parse', '--verify', `refs/tags/${ref}`], { stdio: 'ignore' }).status === 0
+}
+
+/** 对 clone 下来的发布 tag 做 GPG 验签（best-effort，不抛错）。
+ *  隔离 GNUPGHOME 并临时导入发布公钥，`git verify-tag` 只看退出码与 stderr；不动
+ *  用户钥匙环、无网络依赖。返回 classifyTagVerify 的口径（verified/unsigned/invalid/
+ *  unavailable）。不能确证来源时不阻断——被验的 tag 与安装用的源码是同一个 ref，
+ *  HTTPS + tag 钉版本已保证内容完整。 */
+export function verifyCloneTagGpg({
+  repoDir,
+  ref,
+  tmpDir = null,
+  spawn = spawnSync,
+  mkdtemp = fs.mkdtempSync,
+  remove = fs.rmSync,
+} = {}) {
+  const gpgVersion = spawn('gpg', ['--version'], { encoding: 'utf8' })
+  if (gpgVersion.error || gpgVersion.status !== 0) {
+    return { status: 'unavailable', detail: 'gpg 不可用，跳过发布 tag GPG 验签' }
+  }
+  if (!repoHasRef(repoDir, ref, { spawn })) {
+    return { status: 'unavailable', detail: `仓库中不存在 tag ${ref}，跳过验签` }
+  }
+  let gnupgHome = tmpDir
+  let created = false
+  try {
+    if (!gnupgHome) {
+      gnupgHome = mkdtemp(path.join(os.tmpdir(), 'glasspane-gnupg-'))
+      created = true
+    }
+    fs.mkdirSync(gnupgHome, { recursive: true })
+    const keyPath = path.join(gnupgHome, 'publish-key.asc')
+    fs.writeFileSync(keyPath, GLASSPANE_SIGNING_PUBLIC_KEY, 'utf8')
+    const imp = spawn('gpg', ['--homedir', gnupgHome, '--batch', '--import', keyPath], { encoding: 'utf8' })
+    if (imp.status !== 0) {
+      return { status: 'unavailable', detail: '导入发布公钥失败，跳过验签' }
+    }
+    const res = spawn('git', ['-C', repoDir, 'verify-tag', ref], {
+      encoding: 'utf8',
+      env: { ...process.env, GNUPGHOME: gnupgHome },
+    })
+    return classifyTagVerify({ status: res.status, stdout: res.stdout, stderr: res.stderr })
+  } catch (error) {
+    return { status: 'unavailable', detail: `发布 tag GPG 验签不可用：${error.message}` }
+  } finally {
+    if (created) {
+      try { remove(gnupgHome, { recursive: true, force: true }) } catch { /* 临时目录清理失败不致命 */ }
+    }
   }
 }
 
@@ -1233,6 +1364,19 @@ export async function install({ options = parseArgs([]).options, env = process.e
       throw new Error(`clone 完成但目录结构不完整：${plan.targetDir}\n\n${repoMissingText()}`)
     }
     rootDir = plan.targetDir
+  }
+
+  // 发布 tag GPG 验签（best-effort）：定位/ clone 到的根目录若含发布 tag，就用发布
+  // 公钥验签其签名。未签名/不可用只告警不阻断——HTTPS clone + tag 钉版本已保证内容
+  // 完整性，GPG 是来源证明的增量（见 verifyCloneTagGpg）。
+  const pinRef = env.GLASSPANE_REF || REPO_REF
+  if (pinRef !== 'main' && repoHasRef(rootDir, pinRef)) {
+    const sig = verifyCloneTagGpg({ repoDir: rootDir, ref: pinRef })
+    if (sig.status === 'verified') {
+      printStep(paint(`发布 tag ${pinRef} GPG 签名验证通过`, 'green'))
+    } else {
+      printStep(paint(`发布 tag ${pinRef} 未通过 GPG 验签（${sig.status}：${sig.detail}）——继续安装`, 'yellow'))
+    }
   }
 
   const engineDir = path.join(rootDir, 'engine')

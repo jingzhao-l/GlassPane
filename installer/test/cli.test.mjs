@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 import {
   parseArgs,
   resolveProjectRoot,
@@ -15,13 +16,16 @@ import {
   repoMissingText,
   RELEASE_VERSION,
   REPO_URL,
+  classifyTagVerify,
+  repoHasRef,
+  verifyCloneTagGpg,
 } from '../cli.js'
 
 function makeFakeRoot() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glasspane-installer-test-'))
   fs.mkdirSync(path.join(root, 'engine'), { recursive: true })
   fs.mkdirSync(path.join(root, 'mcp-shell'), { recursive: true })
-  fs.writeFileSync(path.join(root, 'engine', 'Package.swift'), '// swift-tools-version:5.9\n')
+  fs.writeFileSync(path.join(root, 'engine', 'Package.swift'), '// swift-tools-version:5.9')
   fs.writeFileSync(path.join(root, 'mcp-shell', 'package.json'), '{}')
   return root
 }
@@ -296,7 +300,7 @@ test('bootstrapPlan: 目标已是 GlassPane 结构 → 复用，不重复 clone'
   const repo = path.join(outer, 'glasspane')
   fs.mkdirSync(path.join(repo, 'engine'), { recursive: true })
   fs.mkdirSync(path.join(repo, 'mcp-shell'), { recursive: true })
-  fs.writeFileSync(path.join(repo, 'engine', 'Package.swift'), '//\n')
+  fs.writeFileSync(path.join(repo, 'engine', 'Package.swift'), '//')
   fs.writeFileSync(path.join(repo, 'mcp-shell', 'package.json'), '{}')
   const plan = bootstrapPlan({ homeDir: outer, installDir: repo })
   assert.equal(plan.error, undefined)
@@ -321,4 +325,67 @@ test('repoMissingText: 指引里的 ref 与 --no-bootstrap 文案口径一致', 
   assert.match(text, new RegExp(`--branch v${RELEASE_VERSION}`))
   assert.match(text, /install\.sh \| sh/)
   assert.match(text, /GLASSPANE_REF=main/)
+})
+
+// ---------------------------------------------------------------------------
+// 发布 tag GPG 验签（P4 §35 来源证明；best-effort，不阻断）
+// ---------------------------------------------------------------------------
+
+function makeGitRepoWithUnsignedTag() {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'glasspane-verifytag-'))
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'x')
+  const git = (args) => spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' })
+  git(['init', '-q'])
+  git(['config', 'user.email', 't@t.local'])
+  git(['config', 'user.name', 't'])
+  git(['add', 'a.txt'])
+  git(['commit', '-qm', 'init'])
+  git(['tag', '-a', 'v0.0.0', '-m', 'unsigned tag'])
+  return repo
+}
+
+test('classifyTagVerify: 退出码 0 = 验签通过', () => {
+  const res = classifyTagVerify({ status: 0, stdout: 'Good signature', stderr: '' })
+  assert.equal(res.status, 'verified')
+})
+
+test('classifyTagVerify: no signature found = 未签名（非篡改）', () => {
+  const res = classifyTagVerify({ status: 1, stderr: 'error: no signature found' })
+  assert.equal(res.status, 'unsigned')
+})
+
+test('classifyTagVerify: 其余非零失败 = invalid（签名对不上/无法确证）', () => {
+  assert.equal(classifyTagVerify({ status: 1, stderr: 'gpg: BAD signature from ...' }).status, 'invalid')
+  assert.equal(classifyTagVerify({ status: 2, stderr: 'Could not check signature: public key not found' }).status, 'invalid')
+})
+
+test('repoHasRef: 有 tag 为 true，无则为 false（不抛错）', () => {
+  const repo = makeGitRepoWithUnsignedTag()
+  try {
+    assert.equal(repoHasRef(repo, 'v0.0.0'), true)
+    assert.equal(repoHasRef(repo, 'v9.9.9'), false)
+    assert.equal(repoHasRef('/definitely/not/a/repo', 'v0.0.0'), false)
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+test('verifyCloneTagGpg: 未签名 tag 如实报 unsigned（真实 gpg 路径）', { skip: commandAvailable('gpg') ? false : 'gpg 不可用' }, () => {
+  const repo = makeGitRepoWithUnsignedTag()
+  try {
+    const res = verifyCloneTagGpg({ repoDir: repo, ref: 'v0.0.0' })
+    assert.equal(res.status, 'unsigned')
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+test('verifyCloneTagGpg: 仓库无该 tag → unavailable，不触发 gpg', () => {
+  const repo = makeGitRepoWithUnsignedTag()
+  try {
+    const res = verifyCloneTagGpg({ repoDir: repo, ref: 'v9.9.9', tmpDir: '/definitely/unwritable' })
+    assert.equal(res.status, 'unavailable')
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true })
+  }
 })
