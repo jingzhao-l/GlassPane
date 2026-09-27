@@ -8,6 +8,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [Unreleased]
+
+Nothing in the product's own surface changed; this batch is about being able to *prove*
+what the product depends on.
+
+### Added
+
+- **Kernel conformance lane** (`bun script/kernel-conformance.mjs`): the kernel's own
+  fixtures, mirrored into `contracts/kernel-fixtures/` and hash-pinned, are run through the
+  kernel this package ships. Byte-identical answers or exit 1. With `--impl <dir>` it runs
+  a second implementation — a built `dist/` or an installed `@iterate/kernel` — and
+  demands the same answers, which is the evidence that changing how the kernel is
+  delivered does not change what it means.
+- **Kernel provenance gate** (`node script/kernel-vendor.mjs --check`) now also covers the
+  mirrored fixtures, and both gates live in the product tree so this repository can
+  verify itself.
+
+### Fixed
+
+- The kernel's pinned ref was unresolvable because the canonical branch had never been
+  pushed; the branch is now published and the manifest re-anchored to it.
+- The drift probe asked `git ls-remote` to resolve a commit SHA. `ls-remote` matches ref
+  names, so it reported "anchor unreachable" even for refs that were on the remote. It now
+  asks the one question `ls-remote` can answer, and declines to guess at ancestry it cannot
+  see.
+
 ## [0.1.0] - 2026-09-25
 
 First public release of the private customisation. Everything below is a decision that
