@@ -4,10 +4,10 @@
     "repo": "jingzhao-l/iterate-skill",
     "path": "kernel",
     "branch": "kernel/decision-log-chain",
-    "ref": "bb80f976fa241c90730ba4fd99ecadb295fab98d",
+    "ref": "cb46f7ad6129f5743505d07cc140ec9a700e2271",
     "version": "0.1.0-draft.1"
   },
-  "vendoredAt": "2026-09-25",
+  "vendoredAt": "2026-09-27",
   "forkPath": "harness/glasspane-harness/packages/opencode/vendor/kernel",
   "subdirs": [
     "src",
@@ -131,5 +131,48 @@
       "bytes": 1352
     }
   ],
-  "totalBytes": 68020
+  "totalBytes": 68020,
+  "fixtures": [
+    {
+      "file": "decision-log-chain.ok-01.json",
+      "sha256": "eb4586b0ee0cfc5224ba9a985c37fc25eeaaffe5bd8f34c83284d01a05aca4bd",
+      "bytes": 1597
+    },
+    {
+      "file": "decision-log-entry.ok-01.json",
+      "sha256": "0215a26e60c2c44475fd0072a394469c75ed39c14737cde39d4fe2c49eb85bf2",
+      "bytes": 346
+    },
+    {
+      "file": "evidence-pack.ok-01.json",
+      "sha256": "491dfecafd05393f1a22d2a272329910ccca89571a9069026e1652a9b216afb7",
+      "bytes": 1727
+    },
+    {
+      "file": "evidence-pack.ok-02.json",
+      "sha256": "02f08cd9b40fd92229f44396c44d41d0169aa8d5c1e8013258d088d7a2ece9c2",
+      "bytes": 794
+    },
+    {
+      "file": "evidence-pack.ok-03.json",
+      "sha256": "83fd4afef67ee4647a903300ef9ba39c67d0ca6e84b857a3d6b8e29b263ddcac",
+      "bytes": 1836
+    },
+    {
+      "file": "evidence-pack.ok-04-legacy-draft.json",
+      "sha256": "25138822ee84276c72482b6621d1444ad61854fb1dd4f1b297349502c5aa26b3",
+      "bytes": 1451
+    },
+    {
+      "file": "evidence-pack.ok-05-pixelbounds-null.json",
+      "sha256": "325bf0b7bacb9d9200fe705713cf34c9eb31fe79e31a2ca7c7aef91e743c417e",
+      "bytes": 1352
+    },
+    {
+      "file": "recipe-config.ok-01.json",
+      "sha256": "68613bcabf45cf059d7086ead38c099ef0dd9b678bb67d5a5e31da77b6ca3549",
+      "bytes": 628
+    }
+  ],
+  "mirroredFixtures": "harness/contracts/kernel-fixtures"
 }

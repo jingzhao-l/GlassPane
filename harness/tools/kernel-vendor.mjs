@@ -39,6 +39,9 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(here, "..", "..")
 const manifestFile = path.join(repoRoot, "harness", "contracts", "kernel-vendor.json")
 const vendorRel = "packages/opencode/vendor/kernel" // inside the fork tree
+// Fixtures live outside the fork tree on purpose: they are the cross-implementation
+// contract, mirrored and hash-checked, not vendored into the shipped package.
+const mirroredFixtures = path.join(repoRoot, "harness/contracts/kernel-fixtures")
 const SUBDIRS = ["src", "schemas", "fixtures"]
 
 const argv = process.argv.slice(2)
@@ -206,6 +209,24 @@ if (mode === "--record") {
     files: entries,
     totalBytes: entries.reduce((sum, e) => sum + e.bytes, 0),
   }
+  // The fixtures are the contract, not decoration: they are what a second
+  // implementation of the kernel has to agree with (harness/tools/kernel-conformance.mjs).
+  // Mirror them here and hash them in the same manifest, so a fixture change upstream
+  // arrives as a diff in this repo instead of as a silent behaviour change.
+  const canonicalFixtures = path.join(srcKernel, "fixtures")
+  const fixtures = []
+  if (existsSync(canonicalFixtures)) {
+    mkdirSync(mirroredFixtures, { recursive: true })
+    for (const name of readdirSync(canonicalFixtures).sort()) {
+      if (!name.endsWith(".json")) continue
+      const bytes = readFileSync(path.join(canonicalFixtures, name))
+      writeFileSync(path.join(mirroredFixtures, name), bytes)
+      fixtures.push({ file: name, sha256: sha256(bytes), bytes: bytes.length })
+    }
+  }
+  manifest.fixtures = fixtures
+  manifest.mirroredFixtures = path.relative(repoRoot, mirroredFixtures)
+
   mkdirSync(path.dirname(manifestFile), { recursive: true })
   writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + "\n")
   console.log(`kernel-vendor: recorded ${entries.length} files (${manifest.totalBytes} bytes) @ ${ref.slice(0, 7)} (${branch})`)
@@ -269,6 +290,28 @@ if (checkout) {
   }
 } else {
   console.log(`kernel-vendor: ${recorded.size} files checked against the manifest; canonical bytes NOT re-read (KERNEL_SRC unset) — a vendor that is stale-but-untouched is caught by the fork sync, not here`)
+}
+
+// The mirrored fixtures are part of the recorded provenance, so a hand-edited fixture
+// fails the same way a hand-edited vendored kernel file does.
+if (Array.isArray(manifest.fixtures)) {
+  for (const f of manifest.fixtures) {
+    const local = path.join(mirroredFixtures, f.file)
+    if (!existsSync(local)) {
+      console.error(`  ✗ fixture '${f.file}' is declared but missing from ${path.relative(repoRoot, mirroredFixtures)}`)
+      bad++
+    } else if (sha256(readFileSync(local)) !== f.sha256) {
+      console.error(`  ✗ fixture '${f.file}' was edited locally — fixtures are mirrored, not owned (re-run --target=fork)`)
+      bad++
+    }
+  }
+  if (manifest.fixtures.length === 0) {
+    console.error("  ✗ the manifest records zero fixtures — the conformance lane would have nothing to compare")
+    bad++
+  }
+} else {
+  console.error("  ✗ the manifest has no fixtures section — re-run tools/sync-kernel.sh --target=fork")
+  bad++
 }
 
 bad += checkDeclaredMode()

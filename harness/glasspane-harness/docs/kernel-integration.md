@@ -96,6 +96,60 @@ What a two-way scenario (the R40 list) actually needs:
   until the tool has been shown to be right. The push was justified by
   `git ls-remote --heads` (independently), not by the probe's verdict.
 
+## Publishing `@iterate/kernel`: the decision, and what made it safe to consider
+
+**Decision: not yet — and the reason is not caution, it is measurement.** Everything needed
+to publish is now in place, and the one thing that is missing cannot be done from a machine
+without an interactive npm login.
+
+What the evidence says:
+
+- **No consumer would benefit today.** The other shell in the ecosystem
+  (`iterate-plugin`) has no kernel dependency at all — its dependencies are all
+  `@deepseek-ai/*` and nothing in the tree references the kernel. Publishing under
+  `@iterate` would change the delivery form for exactly one consumer: us.
+- **The scope cannot be verified from here.** `npm org ls iterate` returns 403 with the
+  token available on this machine, so "do we own `@iterate`?" has no answer available
+  except by trying to publish. Creating a public npm organisation under an account is an
+  outward-facing identity action, so it is not something to do unasked.
+- **The published form had a real defect, now fixed.** The kernel's `exports` map offered
+  only the barrel, and the barrel re-exports `schemas.ts`, which reads `../schemas/*.json`
+  through `createRequire` at module load — the exact thing that broke this fork's
+  single-file binary. Publishing that would have shipped a package that breaks its first
+  consumer. The package now has a subpath export per module, a license, and a
+  `prepublishOnly` build.
+- **The zod range was a lie, and the conformance lane caught it.** The package pinned
+  `zod: 3.25.76` while its schemas are written to work on zod 3 and 4 alike. So an
+  installed copy pulled in its own zod 3 under a zod 4 consumer, and the kernel's error
+  text changed with the *delivery form*: the same rejected fixture said `Invalid input`
+  when vendored and `Invalid literal value` when installed. The dependency is now
+  `>=3.25.76 <5`, and both forms answer identically.
+
+**Proof the published form works, without publishing it.** `npm pack` → install the tarball
+into an empty project → run all eight mirrored fixtures through both the vendored source
+and the installed package: byte-identical answers, exit 0. A deliberately sabotaged copy
+fails the same lane (5 of 8 fixtures, exit 1), so the lane is not vacuous.
+
+**What remains is one command you run**, after confirming the scope is yours:
+
+```bash
+cd <iterate-skill checkout on kernel/decision-log-chain>
+cd kernel && npx tsc -p tsconfig.json      # or: npm run build
+npm version 0.1.0                           # from 0.1.0-draft.1
+# set "private": false in package.json, then:
+npm publish --provenance --access public
+```
+
+Then the switch on our side is one line, and it is a *checked* one:
+
+```bash
+bun harness/tools/kernel-conformance.mjs --impl <path to the installed @iterate/kernel>
+```
+
+`product.json → kernel.mode` becomes `npm`, `kernel-vendor --check` then requires the
+dependency instead of the vendor tree, and the conformance lane becomes the gate that keeps
+the two delivery forms from quietly diverging.
+
 ## The two stages that would actually finish it
 
 **Stage 1 — without publishing (what this repository can do now).**

@@ -17,13 +17,16 @@ owner 问：kernel 为什么不发布到 npm？做双向集成是不是必须发
   问题**）；③ R34 消费者矩阵的交叉验证（这一步分发方式才有区别：npm 让 4 个消费者解析到同一版本，
   API 断裂在 install/typecheck 阶段就炸；vendored 只能靠一致性套件事后逐个发现）。
   代价对比写进 `docs/kernel-integration.md`（身份、断裂发现时机、版本偏移、补丁、一致性套件）。
-- **新增 `kernel-vendor.mjs --probe`**（只读，一次 `git ls-remote`）：问两个问题——canonical 分支是否移动、
-  **我们钉的 ref 是否还解析得到**。第一次运行就抓到**真问题**：我们钉的 `bb80f97` 与分支
-  `kernel/decision-log-chain` 在 canonical 仓**已不存在**（只剩 main / docs/glasspane-cross-link），
-  而 canonical main 比我们的镜像**落后三个模块**（canonical-json / decision-log / evidence-decision，
-  2026-09-25 的回流只落在本地提交）。说得准确：`--check` 仍能证明 vendored 字节自记录以来未变，
-  但**已不能证明它们就是 canonical 的字节**——溯源链在锚点处断了。probe 报 ANCHOR UNREACHABLE 并
-  退出 1，而不是耸耸肩说"无漂移"。
+- **新增 `kernel-vendor.mjs --probe`**（只读，一次 `git ls-remote`）：问 canonical 分支头是否还等于我们钉的 ref。
+  第一次运行报"锚点不可达"，追下去发现**两件事、只有一件是探针的错**：
+  - **真问题**：`kernel/decision-log-chain` 分支（Phase B 内核工作：决策日志写入器、evidence→decision 映射、
+    读侧兼容冻结）**从未 push**，只存在于一台机器上，所以远端解析不到 `bb80f97`——证据是
+    `git ls-remote --heads` 返回空，与探针的判词无关。**2026-09-27 已 push 该分支**，探针随即报 no drift，
+    溯源链恢复（`--check` 现在证明的仍是"字节自记录未变"，加上分支头一致 = 锚点活着）。
+  - **探针的错**：第一版用 `git ls-remote` 解析裸 SHA，而 ls-remote 只匹配 ref 名，因此对确定存在的 ref 也报
+    "ANCHOR UNREACHABLE"（反证：把 manifest 临时钉到 main 的 head，仍报同一句）。已改成只问 ls-remote 能回答的
+    问题（分支头 vs 钉的 ref），并明确拒绝就看不到的对象猜测祖先关系。
+  - **教训照写进记录**：工具的输出在证明工具有效之前不是证据。那次 push 的依据是独立的 `git ls-remote --heads`。
 - **发布与否变成机器可读的**：`product.json → kernel.mode`（当前 `vendored`）+ `kernel-vendor --check`
   断言声明与树一致——否则"模式"只是散文，会在有人发布或重新 vendor 的那一刻开始漂。
 - probe 挂在**既有的定时 lane**（`harness-contract.yml`，每周一 06:17 UTC，与上游探针同频）。我第一版
