@@ -56,6 +56,30 @@ npm 读回不存在、launchd 命令拼接可被路径注入、`launchctl print`
 资产 URL 与重定向没钉住、CI 门只要求"存在一个 success run"（文档工作流也算）、执行暂存内容的步骤排在
 可信性校验之前、可以换到相同或更旧版本、换版后抛错却报告"什么都没变"、`disable` 按 `$HOME` 解析。
 
+### Fixed — 发布链：`release.yml` 从 09-27 起加载不了，Release 静默停摆
+
+签名步骤写成 `if: ${{ secrets.GPG_PRIVATE_KEY != '' }}`，而 `secrets` 不是 step 级 `if` 的合法
+context。GitHub 对这种文件在**解析期**整体作废：不产生任何 job，因此没有任何日志，之后每次触发只留下
+一个 0 步、名字是文件路径的红色 run。main 上连着六次 push 都只表现为"又一个看不懂的红灯"，实际后果是
+1.3.1 之后一次 Release 都没被创建过——没有 tarball、没有 SHA256SUMS，钉在 tag 上的安装器和自动更新
+那八道校验都无从落脚。
+
+- 门控拆成两步：先在一个读得到 secret 的 step 里把"私钥配了没有"写进 `$GITHUB_OUTPUT`，签名步骤再用
+  `steps.gpg-key.outputs.present` 判断。没配时前一步显式发 warning 说明这次发布只有校验和、没有来源
+  签名，不再静默跳过；两个分支都在本机真跑过。
+- 新守卫 `scripts/check-workflows.mjs`（CI job `GitHub Actions workflows compile`，先 `--self-test`
+  再扫仓库）：只认两类"解析期就死"的确定形状——非法 context（`if` / `runs-on` / `uses` /
+  `environment` 里引用 `secrets`）与同层重复键（merge 时整块手抄最容易造出来）。反向变异已证：把那一行
+  改回旧写法，守卫在该行报红、退出码 1。11 条对照里有一半是**不得报**的合法形状（注释里的 `secrets`、
+  `run:` 正文里的同名行、`env:` / `with:` 里的 secret 引用）——会把注释当缺陷的扫描器，下一个人就删
+  注释换绿，闸静默消失。
+- 因果证据是同一条命令的前后对比：修复前 `gh workflow run release.yml` 返回
+  `HTTP 422 … failed to parse workflow: (Line: 83, Col: 13): Unrecognized named-value: 'secrets'`，
+  修复后被接受并跑绿（dry 模式，不发布任何东西）。
+- 仍未闭合的一条：仓库与 `release` 环境里都没有 `GPG_PRIVATE_KEY`/`GPG_PASSPHRASE`，所以配好之前
+  发布产物依旧没有 `.asc`——第 8 道校验会判 `unsigned-release`，定时更新照设计拒绝自动换版，
+  人可以用 `updater check --consent unsigned-release` 放行一次。
+
 ## [1.3.1] — 2026-09-27
 
 1.3.0 发布之后连做两轮复审：round 9 审的是**已发布的那份代码**（五维并行，报回 40+ 条、逐条回代码复核后
