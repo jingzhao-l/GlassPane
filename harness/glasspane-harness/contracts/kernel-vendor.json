@@ -4,11 +4,11 @@
     "repo": "jingzhao-l/iterate-skill",
     "path": "kernel",
     "branch": "kernel/decision-log-chain",
-    "ref": "cb46f7ad6129f5743505d07cc140ec9a700e2271",
+    "ref": "2ed342b912111eb07365a400f67436882ab41cfd",
     "version": "0.1.0-draft.1"
   },
-  "vendoredAt": "2026-09-27",
-  "forkPath": "harness/glasspane-harness/packages/opencode/vendor/kernel",
+  "vendoredAt": "2026-09-28",
+  "forkPath": "packages/opencode/vendor/packages/opencode/vendor/kernel",
   "subdirs": [
     "src",
     "schemas",
@@ -24,6 +24,11 @@
       "file": "fixtures/decision-log-entry.ok-01.json",
       "sha256": "0215a26e60c2c44475fd0072a394469c75ed39c14737cde39d4fe2c49eb85bf2",
       "bytes": 346
+    },
+    {
+      "file": "fixtures/dimension-context.ok-01.json",
+      "sha256": "464354bb9f0118121f1680c7a044510595b50a4e61d690e5a04b951cd98ddc2b",
+      "bytes": 3209
     },
     {
       "file": "fixtures/evidence-pack.ok-01.json",
@@ -96,6 +101,11 @@
       "bytes": 16641
     },
     {
+      "file": "src/dimension-context.ts",
+      "sha256": "e19c5106b304156d08a0f6b7269706b77c17fbcb9f7ce7775734740f64b8b6d9",
+      "bytes": 11823
+    },
+    {
       "file": "src/errors.ts",
       "sha256": "42ab20647b05237d2b0d1f2e7532541ffdd7d71e9e0ca4bddced8ecebdc87ec6",
       "bytes": 768
@@ -112,13 +122,13 @@
     },
     {
       "file": "src/index.ts",
-      "sha256": "c72200ea9b1a447a30906c0a5a8c34ceae5de8f5b27b1c6cddc8cafa667cda44",
-      "bytes": 3034
+      "sha256": "5c8922cc63a13a750f43578e056572795392530f9d150cbad23ff84f9349324d",
+      "bytes": 3812
     },
     {
       "file": "src/parse.ts",
-      "sha256": "8d214be59cabcddeab5989b5b135c14b61bbf4c858a92c7a49a97c07080718af",
-      "bytes": 2150
+      "sha256": "8f0260e0960779394b837a1f7ea56bdf66e4f5b47dce72cd75512be9cfb9ae7e",
+      "bytes": 2628
     },
     {
       "file": "src/recipe-config.ts",
@@ -131,7 +141,7 @@
       "bytes": 1352
     }
   ],
-  "totalBytes": 68020,
+  "totalBytes": 84308,
   "fixtures": [
     {
       "file": "decision-log-chain.ok-01.json",
@@ -142,6 +152,11 @@
       "file": "decision-log-entry.ok-01.json",
       "sha256": "0215a26e60c2c44475fd0072a394469c75ed39c14737cde39d4fe2c49eb85bf2",
       "bytes": 346
+    },
+    {
+      "file": "dimension-context.ok-01.json",
+      "sha256": "464354bb9f0118121f1680c7a044510595b50a4e61d690e5a04b951cd98ddc2b",
+      "bytes": 3209
     },
     {
       "file": "evidence-pack.ok-01.json",
@@ -173,5 +188,8 @@
       "sha256": "68613bcabf45cf059d7086ead38c099ef0dd9b678bb67d5a5e31da77b6ca3549",
       "bytes": 628
     }
+  ],
+  "mirroredFixtures": [
+    "contracts/kernel-fixtures"
   ]
 }

@@ -1,6 +1,6 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 
-import { readEvidenceFrame } from "../tool/glasspane/kernel"
+import { describeDimensionCoverage, dimensionCoverage, readEvidenceFrame } from "../tool/glasspane/kernel"
 
 /**
  * M4 — the fork's compaction plugin: when a session that used the GlassPane tool
@@ -23,13 +23,13 @@ import { readEvidenceFrame } from "../tool/glasspane/kernel"
  *    chained through `kernel.ts`). No thresholds, no pass/fail synthesis, no
  *    "looks verified" — the iron law, same as M1/M2.
  *  - It may not invent dimensions. The kernel's dimension system
- *    (`dimensionContext()`, 综述 §8.5 / PRD §8.5) does not exist at this pin —
- *    it is an iterate-side roadmap item, and the vendored kernel's export
- *    surface was measured to confirm that (no dimension export). So M4 does not
- *    guess a dimension ontology: it preserves what exists (evidence anchors)
- *    and states absence by arithmetic (calls vs recorded decisions) rather than
- *    by prose that could go stale. When the kernel grows the API, the injection
- *    point below is where it gets wired — the seam is the hook, not a fake call.
+ *    (`dimensionContext`, 综述 §8.5 / PRD §8.5) landed in the kernel at
+ *    `2ed342b` and is consumed here through `dimensionCoverage`. It takes the
+ *    dimension ids the caller was configured with and does the accounting; the
+ *    vocabulary itself belongs to the iterate config (nine ids, locked across
+ *    six sources by `test_dimension_lock.py`), so this module never declares an
+ *    ontology of its own. A session with no plan still produces a coverage line,
+ *    and that line says nothing was verified rather than staying silent.
  *  - It may not break compaction. A failed message pull appends a visible note
  *    and returns; it never throws into the host's compaction path, and it never
  *    replaces `output.prompt` (replacing it would silently discard the default
@@ -50,6 +50,12 @@ const MAX_ANCHORS = 20
 /** One transcribed decision. Undefined fields were absent — never filled in by guessing. */
 export type EvidenceAnchor = {
   method: string
+  /**
+   * The review dimension this call was attributed to, when the host recorded
+   * one. Absent means the transcript did not say — it is never derived from the
+   * method name, because "observe" is a method, not a dimension.
+   */
+  dimension?: string
   operationId?: string
   outcome?: string
   ledgerLine?: number
@@ -63,6 +69,14 @@ export type AnchorCollection = {
   /** Recorded decisions, in conversation order. */
   anchors: EvidenceAnchor[]
   withoutDecision: number
+  /**
+   * The dimension ids this session was reviewed against, as configured. Empty
+   * is a legitimate value and means the session was never given a plan — the
+   * kernel then reports zero coverage rather than this module inventing a
+   * vocabulary. Kept as a plain list because the ids come from the host's
+   * configuration, not from anything recorded in the transcript.
+   */
+  plannedDimensions?: string[]
 }
 
 export type CompactionNote =
@@ -140,6 +154,36 @@ export function collectEvidenceAnchors(messages: unknown): AnchorCollection {
 }
 
 /**
+ * The dimension coverage line, computed by the kernel and rendered verbatim.
+ *
+ * `undefined` only when the session was never given a plan AND recorded
+ * nothing — there is no coverage to state and inventing one would be the exact
+ * failure this whole structure exists to prevent. Every other case produces a
+ * line, including `0/3 dimensions verified, 3 unverified (…), 0 decisions`,
+ * which is the most useful sentence in the block.
+ */
+export function renderDimensionCoverage(collected: AnchorCollection): string | undefined {
+  const planned = collected.plannedDimensions ?? []
+  const recorded: Record<string, { decisions: number }> = {}
+  for (const anchor of collected.anchors) {
+    // Only an explicitly recorded dimension counts. Falling back to the method
+    // name would make "observe" a dimension, which is the guessing this module
+    // is not allowed to do; an anchor with no dimension simply contributes to no
+    // dimension, and the coverage line says so.
+    if (!anchor.dimension) continue
+    const current = recorded[anchor.dimension]
+    recorded[anchor.dimension] = { decisions: (current?.decisions ?? 0) + 1 }
+  }
+  if (planned.length === 0 && Object.keys(recorded).length === 0) return undefined
+
+  const context = dimensionCoverage({
+    planned: planned.map((id) => ({ id })),
+    recorded,
+  })
+  return describeDimensionCoverage(context)
+}
+
+/**
  * Render the injected block, or `undefined` when the session never touched the
  * GlassPane surface (nothing to preserve, nothing to say). A session that *did*
  * touch it always gets a block — including "decisions recorded: 0", because an
@@ -160,6 +204,14 @@ export function renderAnchorBlock(collected: AnchorCollection): string | undefin
     "",
     `gp_* calls: ${collected.calls} · decisions recorded: ${collected.anchors.length} · without a decision record: ${collected.withoutDecision}`,
   ]
+  const coverage = renderDimensionCoverage(collected)
+  if (coverage !== undefined) {
+    lines.push(
+      `- dimension coverage: ${coverage}`,
+      "  (computed by the kernel from the configured plan and what the engine recorded; a dimension",
+      "   with no decision is reported as unverified, never as fine)",
+    )
+  }
   if (collected.withoutDecision > 0) {
     lines.push(
       "- calls without a decision record are status-only or failed calls (not every engine method emits an evidence pack) — counted, not guessed",
