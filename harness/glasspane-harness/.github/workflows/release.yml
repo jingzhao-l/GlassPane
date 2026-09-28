@@ -104,6 +104,11 @@ jobs:
     if: github.event_name == 'push'
     needs: binaries
     runs-on: ubuntu-latest
+    # This job holds the signing step, and the signing key lives in the `release`
+    # environment. Environment secrets reach a job only if it declares that
+    # environment — otherwise `[ -n "$GPG_INPUT_KEY" ]` is false and the release
+    # ships checksums nobody signed, which reads identically to "secret not set".
+    environment: release
     permissions:
       contents: write
     steps:

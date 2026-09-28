@@ -2,7 +2,28 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
-## [未发布 — 版本线已提到 1.4.0]
+## [未发布]
+
+### Fixed — 签名 job 读不到自己那把私钥：`v1.4.0` 发出来仍是无签名的
+
+`v1.4.0` 打出去之后，Release 里只有 `GlassPane-1.4.0.tar.gz` 与 `SHA256SUMS-1.4.0.txt` 两件，没有
+`.asc`。日志里那条 warning（"未配置 GPG_PRIVATE_KEY"）说得没错，但它把责任推给了不存在的事实：私钥
+**配了**，配在 `release` 环境里，而签名所在的 `github-release` job 没有声明这个环境 —— GitHub 只把
+环境级 secret 交给声明了该环境的 job。于是"配了却读不到"在 CI 里与"根本没配"完全同形，而 best-effort
+的语义让这一版照常发了货：产物是好的，只是没人签过校验文件，updater 第 8 道对它判 `unsigned-release`，
+每一次定时自动更新都会停在 needs-consent —— 一个专门用来"自动更新"的 release 不能被自动更新到。
+
+- `github-release` job 声明 `environment: release`（该环境 `protection_rules` 为空、
+  `can_admins_bypass=true`，所以打 tag 不额外需要人工审批）。收编进主仓的 harness 副本有同一处漏声明，
+  它的 `checksums` job 也补上了 `environment: release`。
+- **签名从 best-effort 改成必须成功**：detect step 与"没配就跳过"的门控删掉，签名步骤无条件执行，
+  读不到私钥就直接失败并点名 `gh secret set --env release`。理由就是上面那条后果——宁可这一版发不出去，
+  也不发一个下游必然拒绝自动应用的产物。签完还逐件 `[ -s … ]` 复查文件真的落盘：gpg 退 0 不等于签名存在。
+- `v1.4.0` 的两份 `.asc` 由本机用同一把 key 事后补签并上传（provenance：CI 之外的路径产生，签的是
+  已发布的那两份字节；`SHA256SUMS-1.4.0.txt.asc` 用 installer 内嵌公钥验过，指纹一致）。
+  自下一个 tag 起签名重新由 Release 工作流自己完成。
+
+## [1.4.0] — 2026-09-28
 
 ### Added — 自动更新（每天定时检查并换版，面板可手动，失败会说话）
 
@@ -20,7 +41,8 @@
   **这份 release 是谁发布的**（第 8 条，见下条）。状态与面板都显示 sha256 供人核对，major 一律要人点按钮。
 - **第八道校验：来源证明（作者性）从假设变成可检查的主张**。发布链侧 `release.yml` 会为
   `GlassPane-<ver>.tar.gz` 与 `SHA256SUMS-<ver>.txt` 各产一份 detached armored 签名（`.asc`，
-  配了 `GPG_PRIVATE_KEY` 才生成）；updater 侧在**一次性隔离 GNUPGHOME**里 `gpg --verify` 校验那份
+  配了 `GPG_PRIVATE_KEY` 才生成；这一句当时就不成立——私钥配了而 job 读不到，见上方 `[未发布]`）；
+  updater 侧在**一次性隔离 GNUPGHOME**里 `gpg --verify` 校验那份
   校验文件的签名，公钥**动态 import `installer/cli.js` 复用它已导出的那一份**（不在 `updater/` 里抄第二份
   trust anchor——两处必须一致却没人核对的东西，本仓已经栽过两次），结论用词也复用安装器的
   `classifyTagVerify`。四态各有 code 与句子：`verified`（状态文件记下指纹与被验资产）/ `invalid`
@@ -76,9 +98,10 @@ context。GitHub 对这种文件在**解析期**整体作废：不产生任何 j
 - 因果证据是同一条命令的前后对比：修复前 `gh workflow run release.yml` 返回
   `HTTP 422 … failed to parse workflow: (Line: 83, Col: 13): Unrecognized named-value: 'secrets'`，
   修复后被接受并跑绿（dry 模式，不发布任何东西）。
-- 仍未闭合的一条：仓库与 `release` 环境里都没有 `GPG_PRIVATE_KEY`/`GPG_PASSPHRASE`，所以配好之前
-  发布产物依旧没有 `.asc`——第 8 道校验会判 `unsigned-release`，定时更新照设计拒绝自动换版，
-  人可以用 `updater check --consent unsigned-release` 放行一次。
+- 当时仍未闭合的一条：仓库与 `release` 环境里都没有 `GPG_PRIVATE_KEY`/`GPG_PASSPHRASE`，所以这一版的
+  产物没有 `.asc`——第 8 道校验判 `unsigned-release`，定时更新照设计拒绝自动换版，人可以用
+  `updater check --consent unsigned-release` 放行一次。（私钥随后配进了 `release` 环境，但那不能直接被
+  这个 job 读到；真正的形状与补签见上方 `[未发布]`。）
 
 ## [1.3.1] — 2026-09-27
 

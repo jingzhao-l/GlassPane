@@ -66,15 +66,21 @@ const KEY_FPRS = [FAKE_SIGNER_FPR]
 test('the .asc name is the one release.yml actually produces, not one this file guessed', () => {
   const workflow = path.resolve(import.meta.dirname, '..', '..', '.github', 'workflows', 'release.yml')
   const text = fs.readFileSync(workflow, 'utf8')
-  // The signing step loops over exactly the two artifacts, armored and detached,
-  // and the upload step collects whatever `.asc` files that produced. `gpg
-  // --detach-sign --armor FILE` with no `--output` writes `FILE.asc`, which is
-  // where the name gate 8 looks for comes from.
+  // The signing step loops over exactly the two artifacts, armored and detached, and
+  // the upload step names the sidecar next to the file it signed. `gpg --detach-sign
+  // --armor FILE` with no `--output` writes `FILE.asc`, which is where the name gate 8
+  // looks for comes from. The upload used to collect whatever `.asc` happened to exist
+  // (`ls *.asc`); signing is mandatory now, so the two names are pushed into an array
+  // and expanded — a missing sidecar fails the run instead of quietly publishing a
+  // release whose asset list reads "nobody signed this".
   const loop = /for f in "GlassPane-\$\{VERSION\}\.tar\.gz" "(SHA256SUMS-\$\{VERSION\}\.txt)"; do/.exec(text)
   assert.ok(loop, 'release.yml no longer signs the checksum file, so gate 8 has to be re-read against whatever it does instead')
   assert.equal(loop[1], 'SHA256SUMS-${VERSION}.txt', 'the file the workflow signs is no longer the checksum file this updater parses for a digest')
   assert.match(text, /--detach-sign --armor "\$f"/, 'the signature is no longer detached+armored, so the artifact is no longer named <file>.asc')
-  assert.match(text, /ls \*\.asc/, 'the upload no longer collects .asc artifacts, so nothing reaches the release as a signature asset')
+  assert.match(text, /\[ -s "\$\{f\}\.asc" \]/, 'the non-empty-sidecar check is gone: gpg can exit 0 without writing a signature, and that would read as signed')
+  assert.match(text, /ASSETS\+=\("\$f" "\$\{f\}\.asc"\)/, 'the .asc is no longer uploaded alongside the file it signs, so gate 8 has nothing to verify')
+  assert.match(text, /gh release upload "\$REF_NAME" "\$\{ASSETS\[@\]\}"/, 'the release upload no longer expands the signed asset set')
+  assert.doesNotMatch(text, /if: \$\{\{ (steps|secrets)\.gpg-key|steps\.gpg-key\.outputs\.present/, 'signing became conditional again: a skipped sign step publishes checksums nobody signed')
   // `${VERSION}` there is the tag with its `v` removed, which is exactly what
   // `parseTag` hands this module, so the two names are the same string:
   assert.equal(SUMS_NAME, `SHA256SUMS-${VERSION}.txt`)
