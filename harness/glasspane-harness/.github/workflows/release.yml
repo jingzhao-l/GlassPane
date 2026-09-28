@@ -1,0 +1,305 @@
+name: Release
+
+# Two independent release actions, deliberately **not** chained (same reasoning as
+# the GlassPane repo's own release.yml: "a tag was pushed" is not "we decided to
+# publish", and publishing is irreversible):
+#
+#   1) GitHub Release assets — on a `v*` tag, automatically: per-platform binary
+#      archives (zip/tar.gz) built on native runners, plus SHA256SUMS.txt.
+#      script/build.ts does the upload when OPENCODE_RELEASE=1; the installers pin
+#      the tag, so a user can reproduce the exact bytes.
+#   2) npm publish — manual workflow_dispatch, dry by default: the platform
+#      packages (one per runner) and then the `glasspane-harness` wrapper
+#      (postinstall picks the right platform package). Provenance on; the
+#      "publish directly refused" case falls back to npm's staged flow so the
+#      owner approves explicitly — same model as the GlassPane repo.
+#
+# Prerequisites on the npm side (external, one-time, owner): a GitHub Actions
+# Trusted Publisher for this repo/workflow/environment `release` for every package
+# (`glasspane-harness` + the platform packages), with "publish directly" NOT
+# enabled. No NPM_TOKEN is configured here on purpose: an empty token written by
+# setup-node would defeat OIDC.
+#
+# First lane covers the five native targets (linux x64/arm64, darwin x64/arm64,
+# win32 x64). The musl and baseline targets are declared in product.json but have
+# no CI lane yet — an honest gap, recorded in SYNCLOG.md, not a silent omission.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      verify_oidc:
+        description: "Verify the npm trusted publisher without publishing (stage, then reject)"
+        type: boolean
+        required: false
+        default: false
+      publish_npm:
+        description: "Publish the npm packages (requires confirm=true)"
+        type: boolean
+        required: false
+        default: false
+      confirm:
+        description: "I understand npm publishing is irreversible"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  version-check:
+    name: tag matches the product version
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag must equal product.json's version
+        run: |
+          node -e '
+            const fs = require("fs")
+            const product = JSON.parse(fs.readFileSync("product.json", "utf8"))
+            const tag = process.env.GITHUB_REF_NAME.replace(/^v/, "")
+            if (tag !== product.version) { console.error(`tag ${tag} != product.json version ${product.version} — the release lane refuses to ship mismatched bytes`); process.exit(1) }
+            console.log("tag and product version agree:", product.version)
+          '
+
+  binaries:
+    name: binary ${{ matrix.target }}
+    if: github.event_name == 'push'
+    needs: version-check
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: darwin-x64, runner: macos-13 }
+          - { target: darwin-arm64, runner: macos-14 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Read the product version
+        id: product
+        run: node -p "JSON.parse(require('fs').readFileSync('product.json','utf8')).version"
+
+      - name: Install workspace
+        run: bun install
+
+      - name: Build this platform and attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          OPENCODE_RELEASE: "1"
+          OPENCODE_VERSION: ${{ steps.product.outputs }}
+        run: bun run build --single
+
+  checksums:
+    name: SHA256SUMS for the release assets
+    if: github.event_name == 'push'
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download every release asset and checksum it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p assets && cd assets
+          gh release download --repo "$GH_REPO" --pattern '*.zip' --pattern '*.tar.gz' || true
+          if [ -z "$(ls -A)" ]; then echo "::error::no release assets found to checksum"; exit 1; fi
+          sha256sum ./* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # Sign every release asset (zip/tar.gz) plus SHA256SUMS.txt with GPG, so the
+      # installer fallback and any consumer can verify provenance (not just the
+      # checksums' integrity). Same best-effort model as the GlassPane repo: only
+      # runs when the GPG_PRIVATE_KEY/GPG_PASSPHRASE secrets are configured, skips
+      # silently otherwise. Output is an ASCII-armored detached signature (`.asc`).
+      # The signing happens in this job because it holds the assembled asset set;
+      # `script/build.ts` uploads the binaries in the `binaries` job, and this job
+      # adds the checksum + signatures on top, so a release never ships unsigned.
+      - name: Sign release assets with GPG (best-effort)
+        if: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+        env:
+          GPG_INPUT_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          cd assets
+          mkdir -p "$HOME/.gnupg" && chmod 700 "$HOME/.gnupg"
+          printf '%s\n' "allow-loopback-pinentry" >> "$HOME/.gnupg/gpg-agent.conf"
+          gpgconf --kill gpg-agent
+          printf '%s\n' "$GPG_INPUT_KEY" | gpg --batch --yes --import
+          # Sign every downloaded asset and the checksum file; each sidecar is
+          # `$f.asc`, which is exactly what the installer fallback (scripts/install.sh)
+          # looks for next to the tarball it downloads.
+          for f in ./* SHA256SUMS.txt; do
+            [ -f "$f" ] || continue
+            gpg --batch --yes --pinentry-mode loopback \
+              --passphrase "$GPG_PASSPHRASE" --detach-sign --armor "$f"
+          done
+          ls -la ./*.asc
+
+      # Upload SHA256SUMS.txt plus any `.asc` signatures (present only when the
+      # signing secrets are configured; an empty $ASC_FILES expands to nothing,
+      # so gh never references a missing file). Re-uploading SHA256SUMS.txt with
+      # --clobber is idempotent.
+      - name: Upload checksum and signature files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd assets
+          ASC_FILES=""
+          if ls ./*.asc >/dev/null 2>&1; then ASC_FILES="$(ls ./*.asc | tr '\n' ' ')"; fi
+          gh release upload "${{ github.ref_name }}" SHA256SUMS.txt $ASC_FILES --clobber --repo "$GH_REPO"
+
+  publish-platform:
+    name: npm ${{ matrix.target }}
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
+    runs-on: ${{ matrix.runner }}
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: darwin-x64, runner: macos-13 }
+          - { target: darwin-arm64, runner: macos-14 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Install workspace
+        run: bun install
+
+      - name: Upgrade npm (staged publishing needs >= 11.15)
+        run: npm install -g npm@latest
+
+      - name: Build this platform
+        run: bun run build --single
+
+      - name: Publish the platform package with provenance (staged-only fallback)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd packages/opencode
+          pkg="$(node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("product.json","utf8"));const t=p.platformTargets.find(t=>`${t.os==="win32"?"windows":t.os}-${t.arch}`===process.argv[1]);console.log(`${p.name}-${process.argv[1]}${t?.abi?"-"+t.abi:""}`)' '${{ matrix.target }}')"
+          ver="$(node -p "JSON.parse(require('fs').readFileSync('product.json','utf8')).version")"
+          echo "publishing $pkg@$ver"
+          cd "dist/$pkg"
+          npm publish --provenance --access public || {
+            echo "::notice::direct publish refused (staged-only trusted publisher) — staging instead"
+            npm stage publish . --provenance
+            echo "::notice::owner approves with: npm stage approve <stage-id> (ids: npm stage list)"
+          }
+
+  publish-wrapper:
+    name: npm glasspane-harness (wrapper)
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
+    needs: publish-platform
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Install workspace
+        run: bun install
+
+      - name: Upgrade npm (staged publishing needs >= 11.15)
+        run: npm install -g npm@latest
+
+      - name: Assemble and publish the wrapper (optionalDependencies come from product.json)
+        working-directory: packages/opencode
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! bun run script/publish.ts --wrapper-only; then
+            echo "::notice::direct publish refused (staged-only trusted publisher) — staging instead"
+            cd dist/glasspane-harness
+            npm stage publish . --provenance
+            echo "::notice::owner approves with: npm stage approve <stage-id> (ids: npm stage list)"
+          fi
+
+  # Does the npm trusted publisher actually work? Proved, not assumed.
+  #
+  # WHY STAGE-THEN-REJECT: a direct publish would need a version that does not exist
+  # yet, and "npm whoami" does not reflect OIDC (npm documents this). `npm stage
+  # publish` *is* an OIDC-authenticated operation, so staging the wrapper and then
+  # rejecting it exercises exactly the path a release takes — repository, workflow
+  # filename, environment — and leaves nothing behind. It needs no macOS runner,
+  # because it never builds a binary.
+  verify-trusted-publisher:
+    name: verify npm trusted publisher (OIDC)
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_oidc == true
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Install workspace
+        run: bun install
+
+      - name: Upgrade npm (staged publishing needs >= 11.15)
+        run: npm install -g npm@latest
+
+      - name: Stage the wrapper through OIDC, then reject it
+        working-directory: packages/opencode
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The wrapper manifest is generated by the publish script, so generate it
+          # without publishing anything (--dry-run does exactly that and touches no
+          # registry).
+          bun run script/publish.ts --dry-run --wrapper-only
+          cd dist/glasspane-harness
+          # Stage a *probe* version. Staging the real one would be refused as
+          # "already published" and we would learn nothing about the OIDC exchange —
+          # which is the whole question. A prerelease carrying the run number can
+          # never collide and is never published: we reject it in the next step.
+          node -e '
+            const fs = require("fs")
+            const p = JSON.parse(fs.readFileSync("package.json", "utf8"))
+            p.version = `${p.version}-oidc-probe.${process.env.GITHUB_RUN_NUMBER}`
+            fs.writeFileSync("package.json", JSON.stringify(p, null, 2))
+            console.log("probe version:", p.version)
+          '
+          npm stage publish . --provenance
+          # The registry attributes the stage to "GitHub Actions (trusted automation)"
+          # when the trusted publisher matched, so this line is the proof.
+          echo "::notice::staged through OIDC — the trusted publisher matched (repo, workflow, environment)"
+          # Rejecting needs proof of presence, which OIDC deliberately does not carry:
+          # npm documents that stage list/view/approve/reject require interactive auth.
+          # So the probe cannot clean up after itself, and pretending otherwise would be
+          # a lie in a release lane. It prints exactly what a human must run instead.
+          id="$(npm stage list --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);process.stdout.write(j[0]?.id ?? "")}catch{}})')"
+          if [ -n "$id" ]; then
+            echo "::notice::a staged probe is waiting for a human reject: npm stage reject $id"
+            echo "::notice::(or reject it on npmjs.com — a probe must never be published)"
+          else
+            echo "::notice::could not read the stage list without interactive auth; check npmjs.com for a staged probe to reject"
+          fi

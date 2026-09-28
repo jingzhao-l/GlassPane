@@ -1,0 +1,42 @@
+# NOTICE — glasspane-harness
+
+## What this is
+
+`glasspane-harness` is a private, product-grade customization of the open-source project
+**opencode** (`anomalyco/opencode`, formerly `sst/opencode`). It is developed in the
+GlassPane repository under `harness/glasspane-harness/` and distributed as its own
+repository (`jingzhao-l/glasspane-harness`) and npm packages (`glasspane-harness` +
+`glasspane-harness-<platform>`).
+
+The product adds GlassPane's native `gp_*` tool surface, the evidence-discipline
+constraints that go with it (judgement stays in the Swift engine, hash-chained decision
+log, compaction-safe evidence anchors), and the product identity described in
+`product.json` / `FORK.md`.
+
+## Upstream code and license
+
+- Upstream: `anomalyco/opencode`, pinned at tag **`v1.18.32`** (commit `545f51d`).
+- License: **MIT** — the upstream `LICENSE` file in this directory is theirs, unchanged.
+- Copyright: © SST (and the opencode contributors), per the upstream license text.
+- The fork was created from a full, faithful import of the upstream tree
+  (`harness/tools/fork-diff.mjs` recorded `6632/6632 byte-identical` at import time).
+  Everything we changed is enumerated, measured and reviewable:
+  - every customisation commit carries the `[gp]` prefix,
+  - the divergence surface is recorded in `harness/contracts/fork-diff.json`,
+  - the narrative (per-batch numbers, reverse controls, honest boundaries) is in
+    `FORK.md` and `SYNCLOG.md`.
+
+No upstream trademark or endorsement is claimed. Where upstream brand names still appear
+in this tree (e.g. `@opencode-ai/*` internal package names, `OPENCODE_*` environment
+variables, protocol/type identifiers, the non-shipped web/app/console sources), they are
+kept deliberately as lineage identifiers — not as product identity. `product.json` →
+`product` lists what ships, and `harness/tools/brand-surface.mjs` keeps the boundary from
+drifting.
+
+## Third-party components
+
+This product includes third-party open-source components under their own licenses (Bun,
+SolidJS, Hono, Effect, the AI SDK provider packages, tree-sitter workers, and the
+dependencies listed in the workspace `package.json` files). Those licenses apply as
+published by their respective projects; the vendored `@iterate/kernel` mirror is tracked
+separately in `harness/contracts/kernel-vendor.json` with its provenance.

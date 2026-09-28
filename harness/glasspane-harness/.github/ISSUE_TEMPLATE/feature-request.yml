@@ -1,0 +1,29 @@
+name: Feature request
+description: A capability the harness should have
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The bar for this product: a feature that makes the *evidence* stronger, cheaper to
+        check, or easier to audit. "The model guesses better" is not a feature here — the
+        judgement belongs to the engine.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: The situation, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Which evidence does it rely on?
+      description: Which engine signal / field / ledger entry would carry it. If the answer
+        is "the model would infer it", say so — that is useful information too.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
