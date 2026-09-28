@@ -112,13 +112,37 @@ export function scanWorkflow(text) {
   return findings
 }
 
-function workflowFiles(dir) {
-  if (!existsSync(dir)) return []
-  return readdirSync(dir)
-    .filter((name) => /\.(ya?ml)$/.test(name))
-    .filter((name) => statSync(join(dir, name)).isFile())
-    .sort()
-    .map((name) => join(dir, name))
+function workflowFiles(root) {
+  // 仓库内**所有** `.github/workflows` 副本，不只根目录那一份。理由：harness 收编进主仓后
+  // 自带一份 release.yml，它现在不被 GitHub 加载（嵌套目录），但按既定 subtree split 发布
+  // 的那天它就是那仓的根工作流——同一处 bug 会从第一天起静默停摆，而这里正是它已经在 main
+  // 上静默停摆了一个月才被发现的那类形状。
+  const found = []
+  const skip = new Set(['node_modules', '.git', '.build', 'dist', 'build'])
+  const collect = (dir) => {
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || skip.has(entry.name)) continue
+      const path = join(dir, entry.name)
+      if (entry.name === '.github') {
+        const workflows = join(path, 'workflows')
+        if (existsSync(workflows) && statSync(workflows).isDirectory()) {
+          for (const file of readdirSync(workflows).sort()) {
+            if (/\.(ya?ml)$/.test(file) && statSync(join(workflows, file)).isFile()) found.push(join(workflows, file))
+          }
+        }
+        continue
+      }
+      collect(path)
+    }
+  }
+  collect(root)
+  return found
 }
 
 /**
@@ -154,9 +178,9 @@ function selfTest() {
 function main() {
   if (process.argv.includes('--self-test')) return selfTest() ? 0 : 1
 
-  const files = workflowFiles(WORKFLOWS_DIR)
+  const files = workflowFiles('.')
   if (files.length === 0) {
-    process.stderr.write(`找不到工作流目录 ${WORKFLOWS_DIR}——门禁无对象可查，判为不可用\n`)
+    process.stderr.write('这个仓里一个工作流文件都找不到——门禁无对象可查，判为不可用\n')
     return 2
   }
 

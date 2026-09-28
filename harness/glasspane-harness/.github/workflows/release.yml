@@ -122,14 +122,33 @@ jobs:
 
       # Sign every release asset (zip/tar.gz) plus SHA256SUMS.txt with GPG, so the
       # installer fallback and any consumer can verify provenance (not just the
-      # checksums' integrity). Same best-effort model as the GlassPane repo: only
-      # runs when the GPG_PRIVATE_KEY/GPG_PASSPHRASE secrets are configured, skips
-      # silently otherwise. Output is an ASCII-armored detached signature (`.asc`).
-      # The signing happens in this job because it holds the assembled asset set;
-      # `script/build.ts` uploads the binaries in the `binaries` job, and this job
-      # adds the checksum + signatures on top, so a release never ships unsigned.
-      - name: Sign release assets with GPG (best-effort)
-        if: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+      # checksums' integrity). Output is an ASCII-armored detached signature
+      # (`.asc`) beside each file. Signing lives in this job because it holds the
+      # assembled asset set: `script/build.ts` uploads the binaries in the
+      # `binaries` job, and this job adds the checksum and signatures on top.
+      #
+      # `secrets` is NOT an available context in a step-level `if`. Writing
+      # `if: ${{ secrets.X != '' }}` makes GitHub refuse to parse the whole
+      # workflow — zero jobs, zero logs, and every later trigger then leaves only a
+      # 0-step red run named after the file path, which reads as "a flaky check"
+      # rather than "this release chain stopped running". So the presence of the
+      # key is computed in a step that may read the secret, and the gate below
+      # reads that step's output.
+      - name: Detect release signing key
+        id: gpg-key
+        env:
+          GPG_INPUT_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${GPG_INPUT_KEY:-}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::GPG_PRIVATE_KEY is not configured — this release ships SHA256SUMS.txt but no .asc provenance signatures"
+          fi
+      - name: Sign release assets with GPG
+        # Skipping is no longer silent: the step above states the gap on the run.
+        if: ${{ steps.gpg-key.outputs.present == 'true' }}
         env:
           GPG_INPUT_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
