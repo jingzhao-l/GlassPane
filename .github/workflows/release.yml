@@ -1,7 +1,8 @@
 name: Release
 # 两条独立的发布动作，故意**不**串在一起：
-#   1) GitHub Release（打 tag 即触发，自动）：确定性源码 tarball + SHA256SUMS.txt。
-#      install.sh / npx 钉的就是这个 tag，用户据此可复现同一份源码。
+#   1) GitHub Release（打 tag 即触发，自动）：确定性源码 tarball + SHA256SUMS.txt，
+#      两者各带一份 GPG detached 签名。install.sh / npx 钉的就是这个 tag，用户据此可复现
+#      同一份源码；签名是 updater 第 8 道校验（作者性）的判据，签不出来就不发这一版。
 #   2) npm publish（手动 workflow_dispatch，默认 dry）：两个裸名包带 provenance。
 #      不挂在 tag 事件上，因为"发了 tag"不等于"决定对外发版"——发布不可逆，
 #      必须是一次显式操作。
@@ -41,6 +42,10 @@ jobs:
     name: source tarball + SHA256SUMS
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    # 签名私钥配在这个环境里，job 不声明它就读不到 —— v1.4.0 首跑正是因为没声明，
+    # detect 步走了"没配"那条分支，于是照常发了货、只是没有 .asc。环境本身无保护规则
+    # （protection_rules 为空、can_admins_bypass），所以声明它不会给打 tag 增加人工审批。
+    environment: release
     permissions:
       contents: write
     steps:
@@ -75,33 +80,25 @@ jobs:
             -o "GlassPane-${VERSION}.tar.gz" HEAD
           sha256sum "GlassPane-${VERSION}.tar.gz" > "SHA256SUMS-${VERSION}.txt"
           cat "SHA256SUMS-${VERSION}.txt"
-      - name: Detect release signing key
-        id: gpg-key
-        # `secrets` 不是 step 级 if 的合法 context：直接写 `if: secrets.X != ''` 会让
-        # GitHub 拒绝解析整个工作流（此后每次触发都只有 0 job、无日志的红色 run，
-        # Release 链静默停摆；见 scripts/check-workflows.mjs 的门禁说明）。可用性只能
-        # 在一个读得到 secret 的 step 里算出来，再交给下游 if 读 output。
-        env:
-          GPG_INPUT_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -n "${GPG_INPUT_KEY:-}" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::未配置 GPG_PRIVATE_KEY（仓库 secret 或 release 环境）：本次发布只有 SHA256SUMS，没有 .asc 来源签名"
-          fi
       - name: Sign release artifacts with GPG
-        # 配了 GPG_PRIVATE_KEY/GPG_PASSPHRASE 才签名；未配则整步跳过，tarball +
-        # SHA256SUMS 照常上传，只少 GPG 来源证明这一层——缺口由上一步写成 warning，
-        # 不静默。产物为 ASCII-armored detached 签名（.asc），consumers 用发布公钥
-        # `gpg --verify <file>.asc <file>` 核对来源。
-        if: ${{ steps.gpg-key.outputs.present == 'true' }}
+        # 签名是**必须成功的一步**，不是 best-effort。这一份 `.asc` 是 updater 第 8 道校验
+        # （作者性）唯一的判据：没有它，每一次定时更新都会停在 needs-consent，"自动更新"这个
+        # 功能对外等于没有 —— 而 v1.4.0 的首跑正是这样一个 release（签名步被静默跳过，货照样
+        # 发）。宁可这一版发不出去，也不发一个下游必然拒绝自动应用的产物：这一步失败时"建
+        # Release"还没执行，什么对外可见的东西都没留下。
+        # 未配置或口令不对都归一为"这一步失败"；remedy 说清配在哪、用哪条命令。
         env:
           GPG_INPUT_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           set -euo pipefail
+          if [ -z "${GPG_INPUT_KEY:-}" ]; then
+            echo "::error::GPG_PRIVATE_KEY 读不到。签名私钥配在 release 环境，本 job 已声明该环境，" \
+              "所以读不到只有两种可能：secret 没配，或被改名。配法：" \
+              "printf '%s' <armored 私钥> | gh secret set GPG_PRIVATE_KEY --env release，" \
+              "口令同理（--env release 而非仓库级）。修好之前不发版。"
+            exit 1
+          fi
           mkdir -p "$HOME/.gnupg" && chmod 700 "$HOME/.gnupg"
           printf '%s\n' "allow-loopback-pinentry" >> "$HOME/.gnupg/gpg-agent.conf"
           gpgconf --kill gpg-agent
@@ -110,30 +107,37 @@ jobs:
             gpg --batch --yes --pinentry-mode loopback \
               --passphrase "$GPG_PASSPHRASE" --detach-sign --armor "$f"
           done
+          # 两份签名件都得存在且非空：少一份就是这一步没做完，而"做完"的证据只能来自文件系统，
+          # 不能来自 gpg 的退出码（空输入、口令不对都可能是退 0 而不落盘）。
+          for f in "GlassPane-${VERSION}.tar.gz" "SHA256SUMS-${VERSION}.txt"; do
+            [ -s "${f}.asc" ] || { echo "::error::${f}.asc 缺失或为空 —— 签名没有真的产出"; exit 1; }
+          done
           ls -la *.asc
       - name: Create or update the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          NOTES="Release ${VERSION}. Source archive checksum: see \`SHA256SUMS-${VERSION}.txt\`."
+          NOTES="Release ${VERSION}. Source archive checksum: see \`SHA256SUMS-${VERSION}.txt\`, which is GPG-signed — \`gpg --verify SHA256SUMS-${VERSION}.txt.asc SHA256SUMS-${VERSION}.txt\`."
           NOTES="$NOTES"$'\n\n'"Install (one command, clones this tag): \`curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh | sh\`"
           NOTES="$NOTES"$'\n\n'"See [CHANGELOG.md](https://github.com/jingzhao-l/GlassPane/blob/${REF_NAME}/CHANGELOG.md) for what changed."
           # target 显式钉在被 checkout 的 commit 上：gh 默认会写成分支名，
           # 那样 Release 的 target 就与 tag 内容脱钩，可复现性锚点只剩资产本身。
           TARGET_SHA=$(git rev-parse HEAD)
-          # 收集 GPG 签名件（存在才带上：未配 GPG_PRIVATE_KEY secret 时没有 .asc，
-          # 空变量展开为空，gh 不会去引用不存在的文件）。
-          ASC_FILES=""
-          if ls *.asc >/dev/null 2>&1; then ASC_FILES="$(ls *.asc | tr '\n' ' ')"; fi
+          # 四件一起传，签名件按名字点名：上一步已经保证两份 .asc 都存在且非空，所以这里
+          # 不再"存在才带上"（那种形状正是把静默降级写进发布路径）。
+          ASSETS=()
+          for f in "GlassPane-${VERSION}.tar.gz" "SHA256SUMS-${VERSION}.txt"; do
+            ASSETS+=("$f" "${f}.asc")
+          done
           # 用默认 GITHUB_TOKEN 建的 Release 会落为 draft（GitHub 对 Actions
           # 身份建的发布默认不直接对外），不显式取消就永远只挂在 /releases 草稿区。
           if gh release view "$REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$REF_NAME" "GlassPane-${VERSION}.tar.gz" "SHA256SUMS-${VERSION}.txt" $ASC_FILES --clobber
+            gh release upload "$REF_NAME" "${ASSETS[@]}" --clobber
             gh release edit "$REF_NAME" --notes "$NOTES" --target "$TARGET_SHA"
           else
             gh release create "$REF_NAME" \
-              "GlassPane-${VERSION}.tar.gz" "SHA256SUMS-${VERSION}.txt" $ASC_FILES \
+              "${ASSETS[@]}" \
               --title "GlassPane ${VERSION}" --notes "$NOTES" --target "$TARGET_SHA"
           fi
           gh release edit "$REF_NAME" --draft=false --latest
