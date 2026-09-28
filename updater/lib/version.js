@@ -84,13 +84,13 @@ export function readBundleVersion(appPath, { readFile = (p) => fs.readFileSync(p
   let text
   try {
     text = readFile(plistPath)
-  } catch (error) {
-    throw new UpdaterError(CODES.versionMismatchLocal, `Info.plist for ${appPath} could not be read (${error.message}): reinstall GlassPane`)
+  } catch {
+    // No bundle at all (headless install, moved directory, or simply not installed
+    // yet): a reading that is *absent* is not the same as a reading that disagrees.
+    return null
   }
   const match = /<key>CFBundleShortVersionString<\/key>\s*<string>([^<]*)<\/string>/.exec(text)
-  if (!match) {
-    throw new UpdaterError(CODES.versionMismatchLocal, `Info.plist at ${plistPath} carries no CFBundleShortVersionString: reinstall GlassPane`)
-  }
+  if (!match) return null
   return parsePlainVersion(match[1]).version
 }
 
@@ -98,14 +98,15 @@ export function readBundleVersion(appPath, { readFile = (p) => fs.readFileSync(p
 export function readDaemonVersion(executable, { run = defaultRun } = {}) {
   const result = run(executable, ['--version'])
   const text = String(result?.stdout ?? '')
-  if (!result || result.ok === false) {
-    throw new UpdaterError(CODES.versionMismatchLocal, `the daemon binary ${executable} did not report a version: reinstall GlassPane`)
-  }
   const match = /(?:^|\s)(\d+\.\d+\.\d+)(?:\s|$)/m.exec(text)
-  if (!match) {
-    throw new UpdaterError(CODES.versionMismatchLocal, `the daemon binary ${executable} printed ${JSON.stringify(text.trim())}, which is not a version: reinstall GlassPane`)
-  }
-  return parsePlainVersion(match[1]).version
+  if (match) return parsePlainVersion(match[1]).version
+  // Measured 2026-09-27 against a real install: the daemon on this machine is 0.1.0
+  // and answers `--version` with `unknown argument` + usage on fd 1, exit 64. The
+  // flag is newer than the install, so *this is the normal case for exactly the
+  // machines auto-update exists for* — treating it as a hard failure made the first
+  // real `check` refuse to run at all. Report "no reading" and let `localVersion`
+  // decide; the bundle plist usually knows the version.
+  return null
 }
 
 function defaultRun(bin, args) {
@@ -123,7 +124,17 @@ export function localVersion({ appsDir, daemonExecutable, settingsAppName, daemo
   const settingsBundle = readBundleVersion(path.join(appsDir, settingsAppName), { readFile })
   const daemon = readDaemonVersion(daemonExecutable, { run })
   const seen = { daemonApp: bundle, settingsApp: settingsBundle, daemonBinary: daemon }
-  const distinct = [...new Set([bundle, settingsBundle, daemon])]
+  const readings = [bundle, settingsBundle, daemon].filter((v) => v !== null)
+  if (readings.length === 0) {
+    return {
+      ok: false,
+      code: CODES.versionMismatchLocal,
+      version: null,
+      seen,
+      message: `nothing installed at ${appsDir} reports a version (no .app bundle Info.plist and a daemon that does not answer --version): run the GlassPane installer first — an updater that guessed its own starting point could not tell an upgrade from a downgrade.`,
+    }
+  }
+  const distinct = [...new Set(readings)]
   if (distinct.length > 1) {
     return {
       ok: false,
@@ -133,5 +144,5 @@ export function localVersion({ appsDir, daemonExecutable, settingsAppName, daemo
       message: `the installed GlassPane reports ${Object.entries(seen).map(([k, v]) => `${k}=${v}`).join(', ')} — these must match. Automatic update is refused on a half-installed machine: re-run the GlassPane installer, then update again.`,
     }
   }
-  return { ok: true, code: null, version: daemon, seen, message: null }
+  return { ok: true, code: null, version: readings[0], seen, message: null }
 }

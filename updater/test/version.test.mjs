@@ -103,18 +103,87 @@ test('bundle and binary disagreeing refuses the whole update, and says reinstall
   }
 })
 
-test('a bundle with no readable version, and a binary that prints nothing, both refuse rather than guessing', () => {
+/**
+ * The readers report "no reading" (`null`); the *refusal* lives in `localVersion`,
+ * which is the only place that can see all three readings at once.
+ *
+ * This changed on 2026-09-27 because of a real run: `node updater/cli.js check`
+ * against this machine's install failed with `version-mismatch-local` — the daemon
+ * there is 0.1.0 and answers `--version` with `unknown argument` + usage and exit
+ * 64, because the flag is newer than the install. A reader that throws on "the
+ * binary does not know the question" makes the updater dead on arrival for exactly
+ * the machines it exists for, while still telling nobody anything. Reversing this
+ * (throwing again) reddens the old-install case below, and dropping the
+ * `readings.length === 0` guard in `localVersion` reddens the first case.
+ */
+test('readers that learn nothing yield null, and the judgement refuses only when nothing answered', () => {
   const dir = tempDir(`${TMP_PREFIX}ver-broken-`)
   try {
     const appsDir = path.join(dir, 'Applications')
     fs.mkdirSync(path.join(appsDir, 'GlassPane.app', 'Contents'), { recursive: true })
     fs.writeFileSync(path.join(appsDir, 'GlassPane.app', 'Contents', 'Info.plist'), '<plist><dict></dict></plist>')
-    assert.equal(capture(() => readBundleVersion(path.join(appsDir, 'GlassPane.app'))).code, CODES.versionMismatchLocal)
+    assert.equal(readBundleVersion(path.join(appsDir, 'GlassPane.app')), null, 'a plist without the key is no reading')
+    assert.equal(readBundleVersion(path.join(appsDir, 'NotInstalled.app'))
+      , null, 'a bundle that is not there at all is no reading either')
 
     const silent = path.join(dir, 'glasspaned')
     fs.writeFileSync(silent, '#!/bin/sh\necho "no version here"\n')
     fs.chmodSync(silent, 0o755)
-    assert.equal(capture(() => readDaemonVersion(silent)).code, CODES.versionMismatchLocal)
+    assert.equal(readDaemonVersion(silent), null)
+
+    const verdict = localVersion({
+      appsDir,
+      daemonExecutable: silent,
+      settingsAppName: 'GlassPane.app',
+      daemonAppName: 'GlassPane Daemon.app',
+    })
+    assert.equal(verdict.ok, false, 'nothing answered ⇒ still a refusal, not a guess')
+    assert.equal(verdict.code, CODES.versionMismatchLocal)
+    assert.match(verdict.message, /nothing installed at/)
+  } finally {
+    removeDir(dir)
+  }
+})
+
+/** The state this machine is actually in: old daemon, readable bundle. */
+test('an install whose daemon predates --version is still readable from its bundle', () => {
+  const dir = tempDir(`${TMP_PREFIX}ver-old-`)
+  try {
+    const appsDir = path.join(dir, 'Applications')
+    for (const [name, version] of [['GlassPane.app', '0.1.0'], ['GlassPane Daemon.app', '0.1.0']]) {
+      fs.mkdirSync(path.join(appsDir, name, 'Contents'), { recursive: true })
+      fs.writeFileSync(
+        path.join(appsDir, name, 'Contents', 'Info.plist'),
+        `<plist><dict><key>CFBundleShortVersionString</key><string>${version}</string></dict></plist>`,
+      )
+    }
+    const oldDaemon = path.join(dir, 'glasspaned')
+    fs.writeFileSync(oldDaemon, '#!/bin/sh\necho "glasspaned: unknown argument: --version"\nexit 64\n')
+    fs.chmodSync(oldDaemon, 0o755)
+    const verdict = localVersion({
+      appsDir,
+      daemonExecutable: oldDaemon,
+      settingsAppName: 'GlassPane.app',
+      daemonAppName: 'GlassPane Daemon.app',
+    })
+    assert.equal(verdict.ok, true, verdict.message)
+    assert.equal(verdict.version, '0.1.0')
+    assert.equal(verdict.seen.daemonApp, '0.1.0')
+    assert.equal(verdict.seen.daemonBinary, null, 'the missing reading stays visible in the record')
+
+    // And a real disagreement between the readings that DO exist is still refused.
+    fs.writeFileSync(
+      path.join(appsDir, 'GlassPane.app', 'Contents', 'Info.plist'),
+      '<plist><dict><key>CFBundleShortVersionString</key><string>1.4.0</string></dict></plist>',
+    )
+    const split = localVersion({
+      appsDir,
+      daemonExecutable: oldDaemon,
+      settingsAppName: 'GlassPane.app',
+      daemonAppName: 'GlassPane Daemon.app',
+    })
+    assert.equal(split.ok, false, 'a half-updated machine must not be auto-updated from an unknown base')
+    assert.match(split.message, /0\.1\.0.*1\.4\.0|1\.4\.0.*0\.1\.0/)
   } finally {
     removeDir(dir)
   }
