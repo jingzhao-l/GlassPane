@@ -149,3 +149,21 @@ jobs:
           node-version: 20
       - name: Check every derived site agrees with root package.json
         run: node scripts/check-version.mjs
+
+  # 工作流可编译性守卫。GitHub 拒绝解析的工作流不产生任何 job 日志：它在解析期整体
+  # 作废，之后每次触发只留下一个 0 步、名为文件路径的红色 run。c3797d4 用
+  # `if: ${{ secrets.X != '' }}`（secrets 不是 step if 的合法 context）把 Release 链
+  # 锁死，main 上连着六次 push 只表现为"又一个看不懂的红灯"，签名步骤因此从未跑过。
+  # 这条守卫的意义不是"少一步"而是"整条链还在不在"。
+  workflow-lint:
+    name: GitHub Actions workflows compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Reject workflow files GitHub would refuse to load
+        run: |
+          node scripts/check-workflows.mjs --self-test
+          node scripts/check-workflows.mjs
