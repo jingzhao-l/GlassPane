@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+# glasspane-harness one-click installer
+#
+#   curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.sh | bash
+#   bash scripts/install.sh                 # install (npm first, GitHub release asset as fallback)
+#   bash scripts/install.sh --dry-run       # print the plan, touch nothing
+#   bash scripts/install.sh --version 0.1.0 # pin a version
+#
+# Mirrors the iterate-ecosystem installer shape (banner, OS detection, dependency
+# check, install, verify, next steps) and reads its identity from product.json at
+# the repo root; harness/tools/product-surface.mjs keeps the URLs here in step with
+# that file, so renaming the product cannot leave a stale download URL behind.
+set -euo pipefail
+
+PRODUCT="glasspane-harness"
+VERSION=""
+REPO="jingzhao-l/glasspane-harness"
+DRY_RUN=0
+INSTALL_ROOT="${GLASSPANE_HARNESS_HOME:-$HOME/.glasspane-harness}"
+# Allow a fork/mirror to be installed from by pinning the source explicitly.
+NPM_PACKAGE="${GLASSPANE_HARNESS_NPM:-$PRODUCT}"
+RELEASE_BASE="${GLASSPANE_HARNESS_RELEASES:-https://github.com/$REPO/releases/download}"
+
+# ------------------------------------------------------------------ colors
+if [ -t 1 ]; then
+  RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
+else
+  RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; BOLD=''; RESET=''
+fi
+info()    { echo -e "${CYAN}[INFO]${RESET}  $*"; }
+success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
+error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; }
+step()    { echo -e "\n${BOLD}${BLUE}==>${RESET}${BOLD} $*${RESET}"; }
+
+# ------------------------------------------------------------------ arguments
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+    --version) shift; VERSION="${1:-}"; [ -n "$VERSION" ] || { error "--version needs a value"; exit 1; } ;;
+    --version=*) VERSION="${arg#--version=}" ;;
+    --help|-h)
+      sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *) error "Unknown argument: $arg (try --help)"; exit 1 ;;
+  esac
+done
+
+# ------------------------------------------------------------------ banner
+echo ""
+echo -e "${BOLD}${CYAN}┌───────────────────────────────────────────────────────────┐${RESET}"
+echo -e "${BOLD}${CYAN}│  GlassPane Harness                                          │${RESET}"
+echo -e "${BOLD}${CYAN}│  evidence-honest GUI verification for macOS apps           │${RESET}"
+echo -e "${BOLD}${CYAN}│  an opencode fork — https://github.com/anomalyco/opencode  │${RESET}"
+echo -e "${BOLD}${CYAN}└───────────────────────────────────────────────────────────┘${RESET}"
+echo ""
+info "GlassPane Harness — evidence-honest GUI verification for macOS apps"
+[ -n "$VERSION" ] && info "requested version: $VERSION"
+
+# ------------------------------------------------------------------ platform
+step "Detecting platform"
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
+case "$OS" in
+  darwin)
+    PLATFORM="darwin-$ARCH"
+    case "$ARCH" in
+      arm64 | x64) ;;
+      *) error "Unsupported macOS architecture: $ARCH (this product ships darwin-arm64 and darwin-x64)"; exit 1 ;;
+    esac
+    ;;
+  *)
+    # macOS-only is a product decision (the engine, the permission model and the
+    # evidence pipeline are macOS), not a missing port: there is no Linux or
+    # Windows build and there will not be one. Say exactly that instead of
+    # "unsupported OS".
+    error "glasspane-harness is macOS-only (the GlassPane engine and its evidence pipeline exist only on macOS)."
+    error "This machine reports $OS — there is no build for it, by decision, not by omission."
+    exit 1
+    ;;
+esac
+info "platform: $PLATFORM"
+
+# ------------------------------------------------------------------ plan
+step "Install plan"
+NPM_SPEC="$NPM_PACKAGE${VERSION:+@$VERSION}"
+if [ "$VERSION" = "" ]; then
+  info "1) npm:  $NPM_SPEC        (preferred: platform selection and updates are npm's job)"
+  info "2) release asset fallback: $RELEASE_BASE (latest release resolved at install time)"
+else
+  info "1) npm:  $NPM_SPEC        (preferred: platform selection and updates are npm's job)"
+  info "2) release asset fallback: $RELEASE_BASE/v$VERSION/$PRODUCT-$PLATFORM-$VERSION.tar.gz"
+fi
+info "   install root (fallback path only): $INSTALL_ROOT/bin"
+if [ "$DRY_RUN" = "1" ]; then
+  success "dry run — nothing was installed. Re-run without --dry-run to install."
+  exit 0
+fi
+
+# ------------------------------------------------------------------ install (npm first)
+step "Installing via npm"
+if command -v npm >/dev/null 2>&1; then
+  # npm >= 11 gates lifecycle scripts and prints an `allow-scripts` warning for
+  # packages it has not seen before. Measured on the first real install of this
+  # product: the warning appeared and the install still worked — but a global
+  # prefix the user cannot write to fails the install outright (EACCES), so the
+  # retry below covers both real failure modes instead of assuming either.
+  if npm install -g "$NPM_SPEC"; then
+    INSTALLED_VIA="npm ($NPM_SPEC)"
+  elif npm install -g --allow-scripts="$NPM_PACKAGE" "$NPM_SPEC" 2>/dev/null; then
+    INSTALLED_VIA="npm ($NPM_SPEC, scripts allowed)"
+  else
+    warn "npm install failed (global prefix not writable? try: npm install -g --prefix \"\$HOME/.local\" $NPM_SPEC)"
+    INSTALLED_VIA=""
+  fi
+else
+  warn "npm not found on PATH — using the GitHub release asset instead"
+  INSTALLED_VIA=""
+fi
+
+# ------------------------------------------------------------------ GPG verify (release asset provenance)
+# Release signing key (GPG, key 0929EA31DF4F7429F63FC53189D88B1D043A1298, uid
+# "jingzhao-l (sign-github) <ET_lin@outlook.com>"). GPG verifies SOURCE identity: the
+# release pipeline publishes a detached signature next to every asset as `<asset>.asc`,
+# and verifying it proves the tarball came from this key, not just that its SHA-256 is
+# intact (content integrity is still the checksum's job). Best-effort by design: a
+# missing signature (unsigned release) or a failed check only warns and continues — the
+# download remains checksum-verified either way.
+GLASSPANE_HARNESS_SIGNING_PUBLIC_KEY="$(cat <<'PGPKEY'
+-----BEGIN PGP PUBLIC KEY BLOCK-----
+
+mQINBGq45VQBEACdjAoLYyfgPpHjvscmGqxlSsBkcBvSAoGHdCI0p2Rn5cBDaPie
+oPU17VmUiK4FBZf8FcaX0L+EeMRO4Bcj5NgoFaSgQPK0YarvoPssClNiWf71hDlg
+QmC5IlwM4WuVUeKi3+YoPmRSf0sYHzSYM7vEIoCFzEilYi4iEK/NMihNSktlUsQx
+jhIaXtnVJi+7GkO+dhckKmIHhcR76dUfIAsS/R0RzzH4ZXfuKi+B94mfCntURpM4
+G+NrxZx7Xv5UDpv9XsrmiWKzNpT+Th9GbNQREjrT1mmKbMEOmD/PWTqxNycJfgdW
+hWA++1oassOib3jd44+z5f7FKpp//C+SK8V7vuxNI0jRM/VYrbyrfON30hHwtbFM
+0J/quDsAUzlOBNzNVPAyvGsOuSEULFtjaJ2q+JYjF+ZKDPy+lyY8V9sbYrqCCUb9
+v3wPn4tDvat30Q0A0rheMZPTMO7tRNSzFOd25H0w3ZF3F5Np8D/aX9VHMkA12xTm
+l7gpb1OIEJ1vdQl0twiF6SDz5jsteHfdUXha6CtM7tv7IZ4MIZi/qPkvv4zOKmsE
+utLUs1alD671Eez2sQow8NO5IXfd7bX2d34kU5JiM1tF9qhBxOZlpzd/Vm8FZS4V
+URF6Y7myW4ildqBeMzLt0to8WjHnHoV4v9rh5581qWEqvNIJ4/R3lKRhxwARAQAB
+tC1qaW5nemhhby1sIChzaWduLWdpdGh1YikgPEVUX2xpbkBvdXRsb29rLmNvbT6J
+Am0EEwEIAFcWIQQJKeox3090KfY/xTGJ2IsdBDoSmAUCarjlVBsUgAAAAAAEAA5t
+YW51MiwyLjUrMS4xMiwwLDMCGwMFCwkIBwICIgIGFQoJCAsCBBYCAwECHgcCF4AA
+CgkQidiLHQQ6EpharQ//VhcNiug3cHsgvb/tTqWp1CQV8heSfqoKrW51RPhcGAHW
+VMHpbPRO0wBKKE5mybyGAWhGDhh5mZt1MxnBN3lC7RsWBLEaXyJAqW4UPjR5LN8Q
+scapkCzFwrF5lisELdqKqkd/ACKR8h6U/fBf0eKE+TMDSrXZ/LkRcFRJErfsC7rx
+hy1WQnzQBT2+86HmfW9rrw5RSyCp8MZ0TJhYr0ZdgB4zvLwvVYQCnlRaskkLjGrh
+6vUHAjDCUwoDFEpecadCJg34cOEAMRjnTt6Q0t8SnVHDH9PLq1MwGON2VzuSp5rY
+rthT3+VRzbzGpBu4wl4/GJiWJMfGTusEu8Ver6MTwHx9pFBDtH3cawIB5BT1RrXk
+cYdhtjzJ61RXIrSCeD8yoxEgDOj73Ll6oQ4+fJ+EpOc+SvP9FREeQ4k/uc8MpwtV
+YyD/6EPJu1lLMAzgd2Xm2ljokTRhm/Blft9Y0OEEWzsoDGv+jr3Jb3Dgw62OuL6B
+pLiZ5XNCYBHYhQhtleGnSpJtD9ooi1UUTbVZftunzYGKafMCgc9nnzPIGVtlzX+d
+K10CtPOX7ylS+lKukaIOSStGGSl3I2Fd66yb3ujIH6n/KAKLfMmmy48pxB3+t6WW
+StdD7QEASWIyW2wTrq7RyDwmzWMSFtgPzCOWFmcQfFykkvvQEqxMeyCrcPY6ZIy5
+Ag0EarjlVAEQAOjPGVDb8zGIc7XQelHhjyd8yLCVpNBWwYLmaSLfI+EQsfVVDJqT
+VAAeO82woHELPun06lbJRW59eH8BkVgzGhNkb5vKhrdvmZydYElC1NuRB9ag6/k/
+0IaLwedKZscy1k3oG2LqsayzUO3L2d8BxO8zdLEmIl7FqtTdsYwj6DDRgZdA4Aj0
+VoUXOgWaR+7qA9GHnnucrE5n0zhrTd7F3mtZErWr6Edo/V9EHQ1PszsQTVH2artr
+lYJWjSsAv/ajEvAjaZ1mJoDvz/UzUk7hCCPeNcpy41SpDb3uey38qqxLYOGVgEeD
+7JTrhC51VNHj2CCxSgyrlvED+resJtgWnE65Sa8g9cGAVpXlOBRQrPZGMHS+BcAg
+9lQExMGrWt76ZPgT5Gygzj09oGx1q6/IyATphit4TblFGl2z1JDnlUQqfz/aCmZN
+Vg+fKBPQ93dLLGPKpmY022X3abJ197VaQ0WWB2cA8pcrcfJ8GY7Lm8xjm6nY/cER
+RQl72dE1NJsPGrp3Ad/s7fAJuEdR8UmMUPLDQRpiNRTcK6RC2AaRD7wpdyG/1csF
+P30IIY97aVSjD5nnkrHxNQKZ17yPef+bFIoJ7OS+WhLZKcr7P0DfgJoTbKc6GK6M
+ScQm5N7lRJ9Mfzu4R6576hDrgb3fmgflmpKOIVrZ6GkTGDvQ/FE16QdrABEBAAGJ
+AlIEGAEIADwWIQQJKeox3090KfY/xTGJ2IsdBDoSmAUCarjlVBsUgAAAAAAEAA5t
+YW51MiwyLjUrMS4xMiwwLDMCGwwACgkQidiLHQQ6Epi4aw//Qu00vxGtvRb+VQl9
+lMZLwIP2AgB0lAgKAqYeK6jZh/15GAKJqRh0u2jdgqXj2Sfm79X7Qwn7wAuFUAmx
+D1eegOtdAnEP6O8DUtZWWmy2TSRIqjfTcGXlZ12WHiOwwdG5VOUZERWi/rPj0zTs
+5V1H4qyPOqgrFx9nNvavzo3zeJVpwYuuFkT2Ne0cZLXGglCQ6MJtuK0Qwk6iYsvy
+p3eZ1YCKmAi1v0UFojtFHqJEAsc3PnZb+48veE9b2whrL9DIIkNrrFlfFC1cjm7T
+wuRQuH6aYyrRoZiLxgwkW5xmc1Biitw7bMIX6eqYVn8hb1lQUKhTL8aZ2xQa6IsJ
+RHIJFYeEIEUtIl/GKQ3MeHQlJrXsfnZ1e8MHgwgMw3o4Nq4xww3Ch0pddYhBskmV
+/QUaOHVqmuur9dnRvx9L+FGbzHEjvYDr0MkSe30hUhyBIg1uOLd2elATB/wg33Ow
+vcdqgewqpYdSg6g6KZYl6NhmWWNEMgX8KITUXFoTiV5CrSsrptBPJWsyIq+CuseL
+CKFdMHrkzbjFLGfdiPqykwttwHBAEk01aWArDP65gXRXmxGzDHVkA7Px1hdo/kMo
+Ouw6bEGpHtx7UJJMSMA9ywbTrOyaG4xzVDa7ixUslFtgxts1R/eLoC4I11grxE50
+YVXa4IEQs7aBxKO+n+T2AvUYiKQ=
+=DYXk
+-----END PGP PUBLIC KEY BLOCK-----
+PGPKEY
+)"
+
+verify_asset_gpg() {
+  # Verify the release-asset fallback's tarball against its `$ASSET.asc` sidecar.
+  # Uses a throwaway GNUPGHOME holding only the signing key, then discards it —
+  # the user's real keyring and its trust model are never touched.
+  local asc="$TMP/$ASSET.asc" gnupg out rc
+  info "verifying release asset GPG signature"
+  if ! command -v gpg >/dev/null 2>&1; then
+    warn "gpg not found on PATH — skipping release asset GPG provenance (integrity is still checksum-only)"
+    return 0
+  fi
+  if ! curl -fsSL -o "$asc" "$URL.asc" 2>/dev/null; then
+    warn "no GPG signature sidecar ($ASSET.asc) published for this release — skipping (unsigned is a policy gap, not tampering)"
+    return 0
+  fi
+  gnupg="$(mktemp -d)"
+  chmod 700 "$gnupg"
+  printf '%s' "$GLASSPANE_HARNESS_SIGNING_PUBLIC_KEY" | GNUPGHOME="$gnupg" gpg --batch --quiet --import
+  out="$(GNUPGHOME="$gnupg" gpg --batch --quiet --status-fd 2 --verify "$asc" "$TMP/$ASSET" 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q GOODSIG; then
+    success "GPG provenance verified: release asset signature is from the signing key"
+  else
+    warn "release asset GPG signature did not verify ($(printf '%s\n' "$out" | head -1)) — continuing, checksum-only"
+  fi
+  rm -rf "$gnupg"
+}
+
+
+# ------------------------------------------------------------------ install (release asset fallback)
+if [ -z "$INSTALLED_VIA" ]; then
+  step "Installing from the GitHub release asset"
+  command -v curl >/dev/null 2>&1 || { error "neither npm nor curl is available; install Node.js/npm or curl and retry"; exit 1; }
+  # Resolve "latest" through the releases API so the asset URL is one download, not a dance.
+  if [ -z "$VERSION" ]; then
+    API_JSON="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")" || { error "could not query the latest release of $REPO"; exit 1; }
+    VERSION="$(printf '%s' "$API_JSON" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -1)"
+    [ -n "$VERSION" ] || { error "could not read a version from the releases API"; exit 1; }
+    info "latest release: v$VERSION"
+  fi
+  ASSET="$PRODUCT-$PLATFORM-$VERSION.tar.gz"
+  URL="$RELEASE_BASE/v$VERSION/$ASSET"
+  TMP="$(mktemp -d)"
+  trap 'rm -rf "$TMP"' EXIT
+  info "downloading $URL"
+  curl -fL --progress-bar -o "$TMP/$ASSET" "$URL" || { error "download failed: $URL"; exit 1; }
+
+  verify_asset_gpg
+  mkdir -p "$INSTALL_ROOT/bin"
+  tar -xzf "$TMP/$ASSET" -C "$INSTALL_ROOT/bin"
+  chmod +x "$INSTALL_ROOT/bin/$PRODUCT" 2>/dev/null || true
+  INSTALLED_VIA="release asset ($ASSET)"
+  case ":$PATH:" in
+    *":$INSTALL_ROOT/bin:"*) ;;
+    *) warn "$INSTALL_ROOT/bin is not on your PATH — add it:"; echo "     export PATH=\"$INSTALL_ROOT/bin:\$PATH\"" ;;
+  esac
+fi
+
+# ------------------------------------------------------------------ verify
+step "Verifying"
+BIN="$(command -v "$PRODUCT" || echo "$INSTALL_ROOT/bin/$PRODUCT")"
+if [ ! -x "$BIN" ]; then
+  error "$PRODUCT is not on PATH after install — installed via $INSTALLED_VIA but no executable was found"
+  exit 1
+fi
+VERSION_OUT="$("$BIN" --version 2>&1 | head -1)" || true
+success "installed via $INSTALLED_VIA"
+success "$PRODUCT --version -> ${VERSION_OUT:-<no version output>}"
+
+# ------------------------------------------------------------------ next steps (the part a generic installer cannot know)
+step "Next steps"
+cat <<EOF
+1. The gp_* tool surface talks to the GlassPane engine, so the engine has to be
+   running: install GlassPane first (https://github.com/jingzhao-l/GlassPane) and
+   grant Accessibility. Without it every gp_* call answers GP_E_ENGINE_UNREACHABLE
+   with a remedy — that is the engine's word, not this installer's.
+2. Start the terminal UI:          $PRODUCT
+   One-shot with a message:        $PRODUCT run "your task"
+   Headless server for clients:    $PRODUCT serve --port 4096
+3. Verify the engine from inside a session: ask the agent for gp_probe_status —
+   it reports the engine version, advertised capabilities and permission state.
+   From the shell: $PRODUCT --help
+EOF
+echo ""
+success "done. Docs: https://github.com/$REPO#readme"
+

@@ -1,0 +1,197 @@
+{
+  "$comment": "产品清单 — glasspane-harness 的机器可读真源：发行名、命令名、平台包模板、版本线、安装入口、上游血缘、产品面边界。随 subtree split 走；改任何一处名字先改这里，product-surface.mjs 会核各脚本是否跟上。",
+  "name": "glasspane-harness",
+  "displayName": "GlassPane Harness",
+  "tagline": "Evidence-honest GUI verification harness for macOS apps — an opencode fork carrying GlassPane's native tool surface",
+  "version": "0.5.1",
+  "binary": "glasspane-harness",
+  "bins": [
+    "glasspane-harness",
+    "gp-harness"
+  ],
+  "platformPackage": "{name}-{os}-{arch}{suffix}",
+  "registry": "https://registry.npmjs.org",
+  "install": {
+    "npm": "npm install -g glasspane-harness",
+    "bun": "bun add -g glasspane-harness",
+    "curl": "curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.sh | bash"
+  },
+  "product": {
+    "ship": [
+      "packages/opencode (CLI + TUI host + embedded web app)",
+      "packages/app (web app, embedded in the binary)",
+      "packages/sdk",
+      "packages/plugin"
+    ],
+    "lineageOnly": [
+      "packages/console",
+      "packages/enterprise",
+      "packages/stats",
+      "infra/ (upstream's hosted-service SST stack)",
+      "packages/desktop (Electron — second batch: needs signing/notarisation accounts)",
+      "artifacts/ (upstream demo videos)",
+      "packages/web (docs site — upstream content, not shipped yet)"
+    ],
+    "note": "产品面（owner 2026-09-25 定）：**macOS 专属**的 CLI + TUI + 内嵌 web 应用 + 仓内 docs/ + 随仓 SDK/plugin。不做 Linux/Windows 适配（分发面随之收成 macOS-only，见 platform.why）；console/enterprise/stats/infra 不做；Electron 桌面 app 第二批；上游文档站尚未私有化（canonical 文档是仓内 docs/）。",
+    "docsSite": {
+      "status": "not-yet-ours",
+      "where": "packages/web (upstream Astro/Starlight tree, kept for lineage and still builds)",
+      "canonical": "docs/ in this repository",
+      "plan": "replace the site's content with docs/, trim the 14 upstream locales, static output → GitHub Pages"
+    }
+  },
+  "upstream": {
+    "repo": "anomalyco/opencode",
+    "tag": "v1.18.32",
+    "license": "MIT",
+    "attribution": "NOTICE",
+    "note": "内部标识（@opencode-ai/* 工作区包名、OPENCODE_* 环境变量、类型与协议名）刻意保留为血缘名，不进产品面；brand-surface.mjs 按基线计数豁免它们。"
+  },
+  "glasspane": {
+    "daemon": "glasspaned",
+    "tools": "gp_*",
+    "engineRepo": "https://github.com/jingzhao-l/GlassPane",
+    "note": "gp_* 工具面的前提是 GlassPane 引擎在跑（daemon + 辅助功能权限），安装器要对此说人话。"
+  },
+  "platformTargets": [
+    {
+      "os": "darwin",
+      "arch": "arm64"
+    },
+    {
+      "os": "darwin",
+      "arch": "x64"
+    }
+  ],
+  "platformTargetsNote": "目标矩阵的真源在此（上游把它写死在 script/build.ts 里）。build.ts 读它、publish.ts 用它算 optionalDependencies、product-surface.mjs 核三者一致。第一条发布流水线只覆盖 glibc/darwin/win32 的非 baseline 目标（macOS/Linux/Windows 原生 runner），musl 与 baseline 目标保留在清单里待补 lane。",
+  "platform": {
+    "os": [
+      "darwin"
+    ],
+    "minVersion": "13",
+    "arch": [
+      "arm64",
+      "x64"
+    ],
+    "why": "产品是 macOS 专属（引擎只存在于 macOS，辅助功能/输入监听/屏幕录制三张权限表也都是 macOS 的）。npm 分发随之收成 macOS-only：wrapper 的 os/cpu 字段会让 npm 在非 macOS 上直接拒绝安装，而不是装完再报错。Linux/Windows 的平台包已在 registry 上 **弃用**（不是删除：版本号不可回收，弃用带理由比留个能装的包诚实）。",
+    "dropped": {
+      "linux-*": "不做适配（owner 2026-09-25 决定）",
+      "windows-*": "不做适配；Windows 安装器 install.ps1 已删除",
+      "darwin-x64-baseline": "macOS 13+ 的机器全部有 AVX2，这个目标没有用户"
+    }
+  },
+  "npm": {
+    "registry": "https://registry.npmjs.org",
+    "packages": "glasspane-harness (wrapper) + glasspane-harness-darwin-arm64 / -darwin-x64",
+    "wrapperPostinstall": "node ./postinstall.mjs — 按平台取对应包，把真实二进制放到 bin/（npm ≥ 11 对首次见到的包会提示 allow-scripts；安装器会自动用 --allow-scripts 重试）",
+    "distTags": {
+      "latest": "稳定版",
+      "next": "预发布版（channel != latest 时）"
+    },
+    "publishPolicy": [
+      "版本线 = product.json 的 version（pre-1.0：证据契约不动，产品面可以动）",
+      "发布必须带 provenance（CI 用 Trusted Publisher + staged 兜底；本地手动发布不带 provenance，因此不作为常规路径）",
+      "每个平台包与 wrapper 同版本发布；wrapper 的 optionalDependencies 由 product.json 的 platformTargets 推出，不手写",
+      "发布后跑 verify-published：把已发布的 tarball 装进干净前缀并 --version，不靠'看起来成功'"
+    ],
+    "packageReadme": "wrapper = the product README (EN + zh-CN); each platform package = a short README saying what the binary is and pointing at the wrapper. Both are asserted by publish.ts --dry-run, so a README-less tarball cannot ship.",
+    "trustedPublisher": {
+      "provider": "github-actions",
+      "owner": "jingzhao-l",
+      "repository": "glasspane-harness",
+      "workflow": "release.yml",
+      "environment": "release",
+      "packages": [
+        "glasspane-harness",
+        "glasspane-harness-darwin-arm64",
+        "glasspane-harness-darwin-x64"
+      ],
+      "status": "owner-action: not yet configured (npm CLI token cannot read trust settings: 403)",
+      "note": "npm does not validate this at save time — a mismatch only fails at publish. The publish jobs carry `environment: release` and `id-token: write`, so the field values above are exactly what the workflow presents."
+    },
+    "versionBurnedNote": "0.5.0 的 wrapper 因一次并发发布被 npm stage（stage list 看不到它，但该版本号会被 registry 拒绝再次发布），因此实际发布的是 0.5.1，内容相同。发布脚本现在有排他锁防止再犯。"
+  },
+  "repoUrl": "https://github.com/jingzhao-l/glasspane-harness",
+  "models": {
+    "policy": "byok (bring your own key)",
+    "catalog": "full models.dev catalog, minus the first-party `opencode` provider (filtered at the catalog boundary in provider.ts)",
+    "why": "上游的第一方 provider 是一条通往 opencode 自家付费云的通道，由登录账号解锁。本产品没有这个账号（第一方账号面已删除），留着就是提供一个用不了的入口。第三方 provider 全部保留，用用户自己的 API key 解锁——这才是'通用编程 harness'该有的样子。",
+    "removedFirstParty": [
+      "the `opencode` catalog entry (opencode's own model gateway)",
+      "`auth login` / `logout` / `switch` CLI commands and the `/org` TUI command with the org switcher",
+      "`/experimental/console*` endpoints, the console-managed-provider config state and the provider dialog's console branch",
+      "session sharing to opencode's cloud (share/share-next modules, share endpoints, share/autoshare config keys, the GitHub bot's session card)"
+    ],
+    "keptIntact": "Anthropic / OpenAI / Google / GitHub Copilot / Bedrock / Azure / OpenRouter and the rest: hundreds of models, each unlocked by the user's own key via env var, `{env:NAME}` config template, or the TUI `/connect` dialog",
+    "accountTables": "the local `account`/`account_state` tables stay in existing databases; drizzle stops managing them. No destructive migration — the rows were console-account rows and are inert.",
+    "docs": "docs/models-and-keys.md"
+  },
+  "repo": "jingzhao-l/glasspane-harness",
+  "repoLayout": {
+    "projectDir": ".glasspane-harness/",
+    "why": "仓库自己的 agent/命令/技能/术语表目录用产品自己的名字，这样仓库自己就验证了改名是真的（狗粮自吃）。上游开发时用 `.opencode/`；`.opencode` 作为**读取兼容目标**保留在产品里（老 checkout 必须还能用），由 product-surface 断言双向看守：根目录不许出现 `.opencode`，同时不许把兼容读取删掉。",
+    "compatRead": [
+      ".opencode/ (legacy, read-only, lower precedence than the product dir)"
+    ],
+    "enforcedBy": "product-surface.mjs :: project-dir"
+  },
+  "privateSurface": {
+    "rule": "用户可见的产品面不再出现上游项目的名字：**代码、界面文案、请求头、本地文件名、命令行帮助、配置文件、局域网服务名**都由本产品命名。",
+    "envVars": "所有环境变量新增 GLASSPANE_HARNESS_* 名字（product.json → npm 无关；解析点只有一处：packages/core/src/flag/flag.ts 的 read()），旧的 OPENCODE_* 名字继续有效（先读新名，再读旧名）——私有化若让人已经导出的设置静默失效，本身就是缺陷。",
+    "wireIdentity": "给第三方服务发送的标识一律用本产品：X-Title / X-Source / User-Agent / originator / HTTP-Referer / MCP client name / OTLP service name。",
+    "ownFiles": "用户自己的文件用产品命名：glasspane-harness.db（带一次性旧名迁移 rename，绝不让历史'看起来丢了'）、glasspane-harness.log、项目 id 缓存文件。",
+    "mDNS": "局域网服务名 glasspane-harness.local（此前帮助文本说已改名、实际值没改，是文档与行为分裂）。",
+    "skill": "注入每个会话的内置 skill 改名 customize-harness，正文只讲本产品的配置路径（旧名仅在'仍然被读取'的意义上出现）。",
+    "noForeignSchema": "不再向用户文件写入第三方 $schema URL（此前每个配置首行都是 opencode.ai/config.json）。",
+    "gates": "harness/tools/brand-surface.mjs 新增 5 类规则：first-party-gateway / wire-identity / foreign-schema-write / product-file-name / removed-tree；兼容读取处（数据库迁移、旧配置名、旧主题名）走显式白名单，每一条都要在 review 里说明。",
+    "declaredUpstreamDependency": {
+      "modelsCatalogApi": "packages/core/src/models-dev.ts 读取 https://models.opencode.ai —— 这是模型目录的数据源，是本产品依赖的**第三方公开 API**，不是我们的产品面；记录在此以免被当成疏漏。",
+      "scope": "内部包作用域 @opencode-ai/*、Effect service tag、协议头名等内部标识符仍是 lineage：它们不对用户显示，改动会触及数千行 import。已量化：(scope 4,217 处 / OPENCODE_* 275 处 / 旧配置名 35 处)。"
+    }
+  },
+  "kernel": {
+    "package": "@iterate/kernel",
+    "version": "0.1.0-draft.1",
+    "canonical": {
+      "repo": "jingzhao-l/iterate-skill",
+      "path": "kernel",
+      "branch": "kernel/decision-log-chain"
+    },
+    "mode": "vendored",
+    "modeWhy": "记录在案的决定，不是待办：P6 §13（file: 依赖会漏进已发布清单，故内联字节）、P4 §33.2（registry 发布跟 iterate monorepo 自己的发布节奏）；而 fork 以 subtree 方式独立成仓，相对 ../../kernel 的 import 会在第一次发布就断——所以只剩 vendored 或 npm。",
+    "switchToNpm": {
+      "cost": "kernel.ts 一行 import，其余不动（该文件头部就是这么写的）",
+      "needs": [
+        "iterate monorepo 发布 @iterate/kernel@0.1.0",
+        "拥有 @iterate npm scope（跨账号动作）"
+      ],
+      "blockedBy": "kernel 当前 API 还没有 R40 场景需要的东西（dimensionContext、决策日志写入器、invariant 求值）；先发布等于发布一个还没有这些 API 的 draft。"
+    },
+    "enforcedBy": [
+      "harness/glasspane-harness/script/kernel-vendor.mjs --check（23 个文件逐个 sha256）",
+      "harness/glasspane-harness/script/kernel-vendor.mjs --probe（canonical 是否移动/锚点是否还在）",
+      "harness/tools/tool-surface.mjs（按依赖计，不计我们的工具面）"
+    ],
+    "knownFinding": "已修复（2026-09-27）：canonical 的 kernel/decision-log-chain 分支从未 push 过（Phase B 内核工作——决策日志写入器、evidence→decision 映射、读侧兼容冻结——只存在在一台机器上），所以我们钉的 bb80f97 在远端解析不到。已把该分支 push 到 origin，探针现在报 'no drift'。**但当时的检测器本身是坏的**：它用 git ls-remote 去解析裸 SHA，而 ls-remote 只匹配 ref 名，因此对确定存在的 ref 也报 'ANCHOR UNREACHABLE'（用 main 的 head 做过反证）。结论以 git ls-remote --heads 的独立证据为准，不以探针的判词为准。",
+    "docs": "docs/kernel-integration.md",
+    "conformance": {
+      "command": "bun harness/glasspane-harness/script/kernel-conformance.mjs [--impl <dir>]",
+      "what": "把镜像到 harness/contracts/kernel-fixtures/ 的 8 个 fixtures 跑过随包发出的内核，逐字节比较。默认只跑 vendored 一侧（这是我们今天真正主张的同一性）；加 --impl 再跑第二份实现（构建产物 / 已安装的 @iterate/kernel），两份必须给出完全相同的答案。",
+      "gate": "CI 的 root workspace lane；kernel-vendor --check 负责 fixtures 的出处（改了会红）",
+      "reversControl": "把第二份实现的 decisionSummaryFromEvidence 改成返回常量 → 5/8 fixtures 红、退出 1"
+    },
+    "publishReadiness": {
+      "status": "可以发，尚未发；剩下一步需要交互式 npm 登录",
+      "proved": [
+        "npm pack → 空项目安装 tarball → 8 个 fixtures 与 vendored 逐字节一致",
+        "按模块 exports（不再只有 barrel），MIT，prepublishOnly 构建",
+        "zod 依赖改为 >=3.25.76 <5，与它本来就兼容的 zod 3/4 对齐"
+      ],
+      "blockedBy": [
+        "@iterate scope 归属无法从本机验证（npm org ls iterate 403）；创建公开 npm 组织属于对外身份动作，需 owner 决定",
+        "canonical kernel 仍是 private:true（误发是要避免的，发布应当是一个显式动作）"
+      ],
+      "nextCommand": "cd <iterate-skill>/kernel && npm version 0.1.0 && (private:false) && npm publish --provenance --access public"
+    }
+  }
+}
