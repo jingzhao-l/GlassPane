@@ -70,7 +70,7 @@ test('a disabled machine reports that it is off, and the panel keeps showing it'
   assert.equal(summary.overdue, false)
 })
 
-test('the summary is what gp_diagnose and the panel read, and it carries the digest', () => {
+test('the summary is what gp_diagnose and the panel read, and it carries the digest and the authorship verdict', () => {
   const dir = tempDir(`${TMP_PREFIX}overdue-`)
   try {
     const state = checkedAt(new Date(T0).toISOString(), {
@@ -79,17 +79,33 @@ test('the summary is what gp_diagnose and the panel read, and it carries the dig
       latest: '1.4.1',
       code: null,
       staged: { version: '1.4.1', dir: path.join(dir, 'update-staging', '1.4.1'), digest: 'ab'.repeat(32), at: new Date(T0).toISOString() },
+      authorship: {
+        version: '1.4.1',
+        signature: 'verified',
+        signedAsset: 'SHA256SUMS-1.4.1.txt.asc',
+        keyFingerprint: '09'.repeat(20),
+        consented: false,
+        at: new Date(T0).toISOString(),
+      },
     })
     saveState(dir, state, { now: new Date(T0) })
     const loaded = loadState(dir).state
     const summary = updateSummary(loaded, T0 + 37 * 60 * 60 * 1000)
+    // The closed shape, pinned off the summary itself: a field gate 8 writes and
+    // the summary does not carry is a fact no agent can ever ask about.
     assert.deepEqual(Object.entries(summary).map(([k]) => k).sort(), [
-      'autoApply', 'code', 'current', 'disabled', 'lastCheckAt', 'latest', 'overdue', 'stagedDigest', 'stagedVersion', 'status', 'storedStatus',
+      'authorship', 'authorshipConsented', 'authorshipKey', 'authorshipVersion',
+      'autoApply', 'code', 'current', 'disabled', 'lastCheckAt', 'latest', 'overdue',
+      'stagedDigest', 'stagedVersion', 'status', 'storedStatus',
     ])
     assert.equal(summary.status, 'staged')
     assert.equal(summary.storedStatus, 'staged')
     assert.equal(summary.overdue, true, 'a staged offer with a stale check reports both facts; the panel keeps Install live and adds "Check now"')
     assert.equal(summary.stagedDigest, 'ab'.repeat(32))
+    assert.equal(summary.authorship, 'verified')
+    assert.equal(summary.authorshipVersion, '1.4.1')
+    assert.equal(summary.authorshipConsented, false, 'nobody had to accept anything: this one signed')
+    assert.equal(summary.authorshipKey, '09'.repeat(20), 'and the key it signed against is quotable')
     assert.equal(fs.existsSync(path.join(dir, 'update-state.json')), true)
   } finally {
     removeDir(dir)

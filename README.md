@@ -270,6 +270,15 @@ to, swaps in the new version. The page that drives it is the **更新** (Updates
 - **A major version is never applied on a schedule.** It waits as an offer, with the reason on the page
   (跨大版本升级，可能改变对外行为), and pressing 「安装更新」 is what confirms it. Nothing is skipped
   silently: `--consent major` is that button's effect, and the scheduled run does not have it.
+- **A release nobody signed is not installed by the schedule either.** Each release carries a detached GPG
+  signature over its checksum file, verified against the key shipped with this program; that is what turns
+  "who published this" from an assumption into a checked claim (and it means exactly *matches the key we
+  ship*). If there is nothing to check — no signature published (`v1.3.1` predates the signing job), or no
+  `gpg` on the machine — the daily run stops and says so on the page; you may proceed once by hand with
+  `updater check --consent unsigned-release`, and the state file and `gp_diagnose` keep reporting that
+  release as installed **without authorship proof**. A signature that is published and does not check is
+  refused outright: no consent overrides it. The 「安装更新」 button does not grant this one (only
+  `--consent major` is wired to it today), so grant it at a terminal.
 - **Turn automatic update off for good** — any one of these, and the last is the strongest:
 
   ```bash

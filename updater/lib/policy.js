@@ -13,8 +13,16 @@
 import { bumpKind, compareVersions, parseTag } from './version.js'
 import { CODES } from './codes.js'
 
-/** Consent gates that `apply` can be handed a flag for. */
-export const CONSENT_KINDS = Object.freeze(['major', 'state-dir'])
+/**
+ * Consent gates a human can name with `--consent <kind>`.
+ *
+ * The third one is different in kind from the other two: `major` and `state-dir`
+ * are judgements this tool can make for itself, while `unsigned-release` is
+ * "the proof that would have answered this question was not published". Granting
+ * it never overrules a *bad* signature — see `lib/check.js` gate 8 — it accepts a
+ * missing one, and the state file keeps saying that it did.
+ */
+export const CONSENT_KINDS = Object.freeze(['major', 'state-dir', 'unsigned-release'])
 
 /**
  * Decide what `check` should record for a candidate release.

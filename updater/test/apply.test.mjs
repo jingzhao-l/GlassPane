@@ -35,7 +35,7 @@ import {
   snapshotDir,
 } from '../lib/apply.js'
 import { mcpToolsList } from '../lib/mcp.js'
-import { emptyState, loadState, nextState, saveState } from '../lib/state.js'
+import { emptyState, loadState, nextState, saveState, updateSummary } from '../lib/state.js'
 import { writableRoots } from '../lib/fsutil.js'
 import { fakeMcpPeer, makeDaemonBinary, makeFakeApp, removeDir, shortSocketPath, startSocketDaemon, tempDir, TMP_PREFIX } from './helpers.mjs'
 
@@ -135,6 +135,88 @@ test('a successful apply backs up, swaps, and only then publishes the new curren
     await daemon.close()
     fx.cleanup()
   }
+})
+
+/**
+ * §1 gate 8's record has to outlive the thing it describes. `staged` is cleared by
+ * a successful swap, so without `authorship` the machine would be left holding an
+ * `applied` row that reads exactly like the one for a signed release — and the one
+ * surface that quotes freshness to an agent (`gp_diagnose`) prints `lastError`, so
+ * clearing `code` on success would delete the sentence "this was installed without
+ * proof of who published it".
+ *
+ * REVERSE MUTATION: hard-code the success stamp to `code: null` (the previous
+ * shape) — the first test below goes red on both the record and the sentence; stamp
+ * the note unconditionally instead, and the *second* test goes red, because a
+ * verified release would start carrying a warning that never happened.
+ */
+async function applyWithAuthorship(label, authorship) {
+  const fx = fixture(label)
+  const kick = await okKick()
+  const socketPath = shortSocketPath(fx.dir, 'ok.sock')
+  const daemon = await startSocketDaemon(socketPath, { behaviour: 'answer', version: '1.4.1' })
+  try {
+    if (authorship !== null) {
+      const seeded = loadState(fx.stateRoot).state
+      saveState(fx.stateRoot, nextState(seeded, { authorship }, { now: NOW }), { now: NOW })
+    }
+    const result = await applyUpdate({
+      stateRoot: fx.stateRoot,
+      appsDir: fx.appsDir,
+      bundles: BUNDLES,
+      now: NOW,
+      currentVersion: '1.4.0',
+      socketPath,
+      probe: { socketPath, timeoutMs: 1_000 },
+      job: { ok: true, args: ['glasspaned', '--socket-path', socketPath] },
+      build: okBuild(fx.builtDir),
+      kickstart: kick.fn,
+      toolsList: okTools,
+      npm: okNpm,
+    })
+    return { result, state: loadState(fx.stateRoot).state }
+  } finally {
+    await daemon.close()
+    fx.cleanup()
+  }
+}
+
+test('a swap whose release had no authorship proof still says so after it is installed', async () => {
+  const { result, state } = await applyWithAuthorship('applied-unsigned', {
+    version: '1.4.1',
+    signature: 'unsigned-release',
+    signedAsset: null,
+    keyFingerprint: null,
+    consented: true,
+    at: NOW.toISOString(),
+  })
+  assert.equal(result.status, 'applied', result.message)
+  assert.equal(exitCodeFor(result), EXIT.OK, 'the warning is a sentence, not a refusal: the swap did happen')
+  assert.match(result.message, /without authorship proof/, 'the human running apply hears it in this run, not only later')
+  assert.equal(state.staged, null, 'the offer is retired…')
+  assert.equal(state.authorship.signature, 'unsigned-release', '…the proof gap is not: it is the only record left')
+  assert.equal(state.code, CODES.releaseUnsigned)
+  assert.equal(state.lastError.code, CODES.releaseUnsigned)
+  assert.match(state.lastError.message, /was applied without authorship proof/)
+  assert.match(state.lastError.message, /--consent unsigned-release/)
+  assert.equal(updateSummary(state).authorship, 'unsigned-release', 'gp_diagnose reads the summary, so it has to be in it')
+})
+
+test('a swap of a release that verified against the embedded key stays a clean success', async () => {
+  const { result, state } = await applyWithAuthorship('applied-verified', {
+    version: '1.4.1',
+    signature: 'verified',
+    signedAsset: 'SHA256SUMS-1.4.1.txt.asc',
+    keyFingerprint: '09'.repeat(20),
+    consented: false,
+    at: NOW.toISOString(),
+  })
+  assert.equal(result.status, 'applied', result.message)
+  assert.equal(result.code, null, 'a proven release must not be warned about, or the warning stops meaning anything')
+  assert.equal(state.code, null)
+  assert.equal(state.lastError, null)
+  assert.equal(state.authorship.signature, 'verified', 'the positive record is what stays')
+  assert.equal(updateSummary(state).authorshipConsented, false)
 })
 
 test('a daemon that does not report the new version is rolled back, and the exit code says 4', async () => {

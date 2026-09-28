@@ -14,11 +14,22 @@
 - **新工作区 `updater/`**（零运行时依赖，纯 ESM）：`check / apply / status / rollback / enable / disable`
   六个子命令，stdout 恰好一行 JSON，退出码 `0/2/3/4/5` 是契约的一部分（`5` 专指"换了但回滚也没成，
   需要人"）。launchd agent `com.glasspane.update` 每日跑同一条 CLI —— 面板不实现第二套更新逻辑。
-- **信任链七道校验，任一不过就不换版**：钉死仓库与 https、tag 语义化且严格更大（major 永不自动应用）、
+- **信任链八道校验，任一不过就不换版**：钉死仓库与 https、tag 语义化且严格更大（major 永不自动应用）、
   产物与校验文件必须成对、`SHA256SUMS` 严格解析（多义即拒，不"取第一个"）、落盘后**实测** sha256、
-  解包树自我一致性（跑它自己的 `scripts/check-version.mjs`）、该提交在 main 上必须有 success 的 CI run。
-  作者性不假装解决：release tag 未签名 ⇒ 校验给的是完整性 + 版本一致 + 可追溯，状态与面板都显示 sha256
-  供人核对，major 一律要人点按钮。
+  解包树自我一致性（跑它自己的 `scripts/check-version.mjs`）、该提交在 main 上必须有 success 的 CI run、
+  **这份 release 是谁发布的**（第 8 条，见下条）。状态与面板都显示 sha256 供人核对，major 一律要人点按钮。
+- **第八道校验：来源证明（作者性）从假设变成可检查的主张**。发布链侧 `release.yml` 会为
+  `GlassPane-<ver>.tar.gz` 与 `SHA256SUMS-<ver>.txt` 各产一份 detached armored 签名（`.asc`，
+  配了 `GPG_PRIVATE_KEY` 才生成）；updater 侧在**一次性隔离 GNUPGHOME**里 `gpg --verify` 校验那份
+  校验文件的签名，公钥**动态 import `installer/cli.js` 复用它已导出的那一份**（不在 `updater/` 里抄第二份
+  trust anchor——两处必须一致却没人核对的东西，本仓已经栽过两次），结论用词也复用安装器的
+  `classifyTagVerify`。四态各有 code 与句子：`verified`（状态文件记下指纹与被验资产）/ `invalid`
+  （`signature-invalid`，**硬拒，任何 consent 都不能覆盖**）/ `unsigned-release` /
+  `signature-tool-missing`。后两态下**定时运行一律拒绝**（`needs-consent`），人可用新增的
+  `--consent unsigned-release` 放行一次，放行之后状态文件与 `gp_diagnose` 摘要会**长期**写明"这一版是
+  无作者性证明装上的"。诚实边界：`verified` 的确切含义只是"与我们随代码分发的那把 key 相符"。
+  测试：`updater/test/signature.test.mjs`（23 条，含一条真跑 `gpg` 的分支测试——没装 gpg 的机器断言的
+  正是"缺失"这条路，绝不静默跳过），`check.test.mjs` 增加 7 条端到端编排用例。
 - **什么时候才允许换版**：守护进程单连接串行，所以"探针答得上来"是唯一可证的空闲 —— 构建可能要十几分钟，
   因此每一次 `kickstart` 之前都重新探一次，探不到就 `deferred`，**一次都不重启**；运行中的 job 若带着
   非默认 `--state-dir`，本工具不动它（读 `launchctl print`，读不懂按 fail-closed 处理）。

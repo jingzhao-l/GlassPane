@@ -138,6 +138,74 @@ export function defaultTreeFiles(version, { guardExit = 0, guardMarker = null } 
   ]
 }
 
+/* ------------------------------------------------------------------ gpg layer */
+
+/**
+ * A `runGpg` stand-in for the four authorship states, because *whether this
+ * machine has gpg installed* is not a fact any test may depend on: the suite has
+ * to reddening on a policy mutation, not on somebody's Homebrew state. Exactly
+ * like `fakeMcpPeer` below and the `runner` seam in `lib/selfcheck.js`, this
+ * replaces **process selection only** — the argv it records, the files it was
+ * handed, and the exit codes it answers with are what `lib/signature.js` decides
+ * on, and `signature.test.mjs` has one test that drives the real binary instead.
+ *
+ * `outcome` picks the gpg answer; `verifiedPaths` records what `--verify` was
+ * asked about, which is how the pairing "this .asc, those checksum bytes" is
+ * pinned rather than assumed.
+ */
+export const FAKE_SIGNER_FPR = '0929EA31DF4F7429F63FC53189D88B1D043A1298'
+export const FOREIGN_SIGNER_FPR = 'DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF12'
+
+export function fakeGpg({
+  outcome = 'verified',
+  keyFingerprints = [FAKE_SIGNER_FPR],
+  signerFingerprint = FAKE_SIGNER_FPR,
+  importStatus = 0,
+} = {}) {
+  const calls = []
+  const verified = []
+  const runGpg = (args, ctx = {}) => {
+    calls.push({ args, gnupgHome: ctx?.gnupgHome ?? null })
+    const argv = Array.isArray(args) ? args : []
+    if (outcome === 'unavailable') return { status: null, stdout: '', stderr: 'spawnSync gpg ENOENT' }
+    if (argv[0] === '--version') return { status: 0, stdout: 'gpg (GnuPG) 2.5.0\n', stderr: '' }
+    if (argv.includes('--import')) {
+      return { status: importStatus, stdout: '', stderr: importStatus === 0 ? 'gpg: key imported\n' : 'gpg: import failed\n' }
+    }
+    if (argv.includes('--list-keys')) {
+      return { status: 0, stdout: keyFingerprints.map((fpr) => `fpr:::::::::${fpr}:\n`).join(''), stderr: '' }
+    }
+    if (argv.includes('--verify')) {
+      const at = argv.indexOf('--verify')
+      const signedFile = argv[at + 2] ?? null
+      verified.push({
+        signatureFile: argv[at + 1] ?? null,
+        signedFile,
+        gnupgHome: ctx?.gnupgHome ?? null,
+        // Read *at the moment of the call*: the verification directory is deleted
+        // when the gate finishes, so a test that looks later would be asserting
+        // nothing. This is what pins "gpg was handed the same bytes the digest
+        // gate trusted" rather than merely "a file with the right name existed".
+        signedBytes: signedFile && fs.existsSync(signedFile) ? fs.readFileSync(signedFile, 'utf8') : null,
+      })
+      if (outcome === 'verified') {
+        return { status: 0, stdout: `[GNUPG:] GOODSIG ${signerFingerprint.slice(-16)} 4 2\n[GNUPG:] VALIDSIG ${signerFingerprint} 1790502228 0\n`, stderr: 'gpg: Good signature from "jingzhao-l (sign-github)"\n' }
+      }
+      if (outcome === 'foreign-key') {
+        return { status: 0, stdout: `[GNUPG:] GOODSIG X 4 2\n[GNUPG:] VALIDSIG ${signerFingerprint} 1790502228 0\n`, stderr: 'gpg: Good signature from "somebody else"\n' }
+      }
+      if (outcome === 'empty-asc') return { status: 1, stdout: '[GNUPG:] NODATA 1\n', stderr: 'gpg: no signature found\n' }
+      if (outcome === 'no-public-key') {
+        return { status: 1, stdout: `[GNUPG:] NO_PUBKEY ${signerFingerprint.slice(-16)}\n`, stderr: "gpg: Can't check signature: No public key\n" }
+      }
+      if (outcome === 'no-validsig') return { status: 0, stdout: '[GNUPG:] GOODSIG X 4 2\n', stderr: 'gpg: Good signature from\n' }
+      return { status: 1, stdout: '[GNUPG:] BADSIG 4 2 1\n', stderr: 'gpg: BAD signature from "jingzhao-l (sign-github)"\n' }
+    }
+    return { status: 0, stdout: '', stderr: '' }
+  }
+  return { runGpg, calls, verified }
+}
+
 /* -------------------------------------------------------------- unix socket */
 
 /**

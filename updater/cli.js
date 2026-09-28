@@ -28,6 +28,7 @@ import { applyUpdate, buildStagedTree, DEFAULT_BUNDLES, rollbackToBackup } from 
 import { probeIdle, resolveEngineSocket } from './lib/idle.js'
 import { AGENT_LABEL, DAEMON_JOB_LABEL, DEFAULT_HOUR, DEFAULT_MINUTE, agentPlistPath, readRunningJob, registerAgent, renderAgentPlist, unregisterAgent } from './lib/launchd.js'
 import { localVersion } from './lib/version.js'
+import { CONSENT_KINDS } from './lib/policy.js'
 import { makeBytesFetcher, makeFetcher } from './lib/source.js'
 
 export const SUBCOMMANDS = ['check', 'apply', 'status', 'rollback', 'enable', 'disable']
@@ -35,7 +36,7 @@ export const SUBCOMMANDS = ['check', 'apply', 'status', 'rollback', 'enable', 'd
 export const USAGE = `usage: node updater/cli.js <command> [options]
 
 commands
-  check       fetch the latest release, run the seven trust gates, stage it
+  check       fetch the latest release, run the eight trust gates, stage it
   apply       swap the staged version in, but only when the daemon is idle
   status      print the recorded state plus the overdue judgement (no network)
   rollback    restore the newest verified backup and restart the daemon
@@ -49,9 +50,16 @@ options
   --daemon-bin <path>  glasspaned executable used for the version read-back
   --socket <path>      daemon socket to probe (default: read off the job)
   --json               one line of JSON on stdout, everything else to stderr
-  --consent <kind>     record a human decision: "major" or "state-dir"
+  --consent <kind>     record a human decision: "major", "state-dir", or
+                       "unsigned-release" — stage a release that carries no
+                       verifiable GPG signature (or that this machine could not
+                       check). It accepts a *missing* proof only: a signature that
+                       is published and does not check is refused no matter what is
+                       passed here. The state file keeps reporting an accepted
+                       release as "applied without authorship proof".
   --auto               mark the call as the scheduled run (never a person
-                       pressed a button): majors and disabled state refuse
+                       pressed a button): majors, a disabled state root and an
+                       unsigned release all refuse
   --at <iso>           override "now" (tests and repro)
   --hour/--minute      schedule for enable (local time, one run per day)
   --disable            accepted on any command as a no-op alias of disable
@@ -71,7 +79,7 @@ export function parseArgs(argv) {
     else if (token === '--enable') flags.overrides.enable = true
     else if (token === '--consent') {
       const value = argv[(i += 1)]
-      if (!value) return { ok: false, reason: '--consent needs a value (major or state-dir)' }
+      if (!value) return { ok: false, reason: `--consent needs a value (${CONSENT_KINDS.join(' | ')})` }
       flags.consents.push(value)
     } else if (token.startsWith('--consent=')) flags.consents.push(token.slice('--consent='.length))
     else if (['--state-dir', '--state-root', '--apps-dir', '--daemon-bin', '--socket', '--at', '--hour', '--minute'].includes(token)) {
@@ -375,6 +383,11 @@ export function humanLine(payload) {
   if (payload.lastCheckAt) bits.push(`lastCheckAt=${payload.lastCheckAt}`)
   if (summary.overdue) bits.push('check is overdue: press Check now')
   if (payload.staged?.digest) bits.push(`staged sha256=${payload.staged.digest}`)
+  // Gate 8 on the plain-text line: an accepted-unsigned install must not read as a
+  // clean one to whoever is tailing it.
+  if (payload.authorship && payload.authorship.signature && payload.authorship.signature !== 'verified') {
+    bits.push(`authorship=${payload.authorship.signature}${payload.authorship.consented === true ? ' (consented, unproven)' : ''}`)
+  }
   return bits.join(' ')
 }
 

@@ -12,7 +12,7 @@
 - **源**：`https://api.github.com/repos/jingzhao-l/GlassPane/releases/latest`。仓库名是常量，
   不由参数或环境变量决定；`GLASSPANE_UPDATE_BASE` 只能把主机换成 **https** 或 **127.0.0.1**
   （后者仅供测试），换成明文地址即拒绝启动检查而不是降级。
-- **七道校验，任一不过就不换版**，并把不过的那条以稳定 code 记进状态文件：
+- **八道校验，任一不过就不换版**，并把不过的那条以稳定 code 记进状态文件：
   1. `tag` 必须匹配 `^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$`，且**语义化版本严格大于**当前
      （当前值取本机 `.app` 的 `CFBundleShortVersionString`，与 `glasspaned --version` 读回的值必须
      一致，不一致 = `version-mismatch-local`，不更新并提示重装）；`code=tag-unparseable`。
@@ -31,11 +31,29 @@
   7. CI 凭据：该 release 的 `target_commitish` 指向的提交必须在 `main` 上有**结论为 success 的 CI run**
      （查询 `actions/runs?head_sha=…&branch=main`）；查不到 = `ci-unverified`，查得到但非 success =
      `ci-not-green`。理由与 1.3.0 的发版凭据同一条：这个仓库对外发布时用的就是 CI 绿。
-- **作者性（诚实边界，不当成已解决）**：release 的 tag 未做签名（无 Git sign / minisign），所以
-  第 4–7 条给的是**完整性 + 版本一致性 + 构建可追溯**，不是"这份产物一定出自仓库所有者"。
-  因此：状态文件与面板都要显示 tarball 的 sha256（人可与网页核对），并且
-  **自动应用只在无交互变更的补丁/次版本上发生**；major 一律要人点按钮。签名通道的接入是后续项，
-  本规格不假装它已经存在。
+  8. **来源证明（作者性）**：该 release 的 `SHA256SUMS-<ver>.txt` 必须带一份 detached ASCII-armored GPG
+     签名资产，名字就是 `release.yml` 里 `gpg --detach-sign --armor` 自己写出的那个
+     `SHA256SUMS-<ver>.txt.asc`（命名由 `test/signature.test.mjs` 从工作流原文反推，两边任一侧改名即红）。
+     在**隔离的一次性 GNUPGHOME**（建在该版本的 0700 暂存目录里，验完即删）中导入公钥后用 `gpg --verify`
+     判定；公钥**不复制第二份**——`installer/cli.js` 已经导出 `GLASSPANE_SIGNING_PUBLIC_KEY` 与
+     `classifyTagVerify`，updater 侧动态 import 复用同一份值与同一套结论用词。四种状态各有 code 与句子：
+     - `verified`：换版继续；状态文件记下被验的资产名与密钥指纹（`authorship` 字段）。
+     - `invalid`（签名存在但对不上，或是对不上**我们内置的那把 key**）⇒ `signature-invalid`，**硬拒**：
+       任何 consent 都不能覆盖一个坏签名——`--consent unsigned-release` 回答的是"没人签"，永远不回答
+       "签名自相矛盾"。
+     - `unsigned-release`（这个 release 压根没发 `.asc`；签名 job 是 1.3.1 之后加的，那之前的 release
+       全是这一态）⇒ `release-unsigned`。
+     - `signature-tool-missing`（这台机器没有 `gpg`，或读不到内置公钥）⇒ `signature-tool-missing`。
+     后两种是"缺证据"而不是"证据为假"：**定时（`--auto`）运行一律拒绝**并落 `needs-consent`；
+     人可以用 `updater check --consent unsigned-release` 继续，而状态文件与 `gp_diagnose` 的摘要在此后
+     必须**一直**写明这份是"无作者性证明装上的"。次序上这条排在第 4 条之后、下载 tarball 之前，并且
+     永远在任何执行暂存内容的步骤（第 6 条）之前——见 §8 第 2 条。
+- **作者性（边界照实说，既不夸大也不假装不存在）**：第 8 条把"谁发布的"从**未经检验的假设**变成
+  一条可网络验证的判断，但它的确切含义只有"这些字节匹配本程序内置的那把公钥"：内置 key 是随代码分发的
+  字符串，不是仓库身份；能被换的只是 `installer/cli.js` 里那一个导出值。因此第 3–7 条仍负责完整性 /
+  版本一致性 / 构建可追溯，而**签名缺失的 release 不再等于"和以前一样自动装"**：定时运行拒绝，
+  人点一次才算数，并且这份记录留在状态文件里。人的兜底照旧有效：状态与面板显示 tarball 的 sha256
+  （可与发布页核对），major 一律要人点按钮，一键关闭自动更新。
 - **npm 两个包不走 registry 更新**：从**已校验的暂存树**里 `npm pack` 出 tgz 再
   `npm install -g <该 tgz>`，避免"校验了 A 却装了 B"的双源。安装后必须 `npm ls -g` 读回版本等于
   `<ver>`，否则 `rollback`。
@@ -69,8 +87,12 @@
 ## 4. 没跑成 / 失败时，用户看得到也能动手
 
 - 状态文件 `<stateRoot>/update-state.json`（**0600**，写临时文件 + `rename`，读回校验落盘 mode；
-  chmod 不生效即报错，与注册表同一形状）：`{lastCheckAt, current, latest, status, staged, lastError,
-  disabled, autoApply, history[]}`。
+  chmod 不生效即报错，与注册表同一形状）：`{lastCheckAt, current, latest, status, staged, authorship,
+  lastError, disabled, autoApply, history[]}`。`authorship` 记第 8 条的结论（哪一种状态、验的是哪个资产、
+  用哪把 key 的指纹、是不是人给的 consent），并且**故意不进 `required`**：第 8 条之前写下的状态文件
+  必须还读得出来，一份读不出来的状态等于这台机器再也更新不动。schema 是
+  `additionalProperties: false` 的封闭形状：对象**内部**多一个没声明的键 = 直接拒绝落盘；顶层未声明的键
+  会被 `nextState` 按"字段清单取自 schema 本身"滤掉（静默不落地）。两种漂移都靠测试红，不靠记性。
 - **过期判定**：`now - lastCheckAt > 36 h` ⇒ 面板与 `gp_diagnose` 显示"检查已过期（上次 X）"并给
   「立即检查」；这一条专门兜住"固定时间电脑是关的"。
 - `status` 是封闭枚举（`up-to-date / available / staged / applied / deferred / needs-consent /
@@ -100,6 +122,12 @@
 | 实测 sha256 | `digest.test.mjs` | 改用头长度 ⇒ 红 |
 | 暂存树版本线自证 | `selfcheck.test.mjs` | 跳过 check-version ⇒ 红 |
 | CI 凭据 | `ci.test.mjs` | 允许无 CI run ⇒ 红 |
+| 来源证明的四态各自可判 | `signature.test.mjs` | `gpg` 退出 0 就判 verified（不比内置 key 指纹）⇒ 红；换成本地化文案的 gpg 输出也仍要判对 ⇒ 只 grep 英文句子的实现红 |
+| `.asc` 资产名 = 工作流真产出的那个 | `signature.test.mjs`（从 `release.yml` 原文反推） | 改名 `.sig`、或工作流不再 `--detach-sign --armor` ⇒ 红 |
+| 公钥只有一份（borrow，不 copy） | `signature.test.mjs` | 在 `updater/**` 里再抄一份 armored key ⇒ 红 |
+| 未签名 release 不自动装、consent 才继续 | `check.test.mjs` | 删掉 `check.js` 的 gate 8 编排 ⇒ 红（那份 release 直接 stage） |
+| 坏签名不可被任何 consent 覆盖 | `check.test.mjs` | 把 `invalid` 也当成"缺证据"去查 consents ⇒ 红 |
+| 无作者性装上后仍然一直在说 | `check.test.mjs` + `overdue.test.mjs`（摘要形状） | applied 时把 `code` 清成 null（警告消失）⇒ 红 |
 | 忙时不换版 | `idle.test.mjs`（假 socket 不答探针） | 把超时当空闲 ⇒ 红 |
 | 非默认 state-dir 不动 | `launchd.test.mjs` | 去掉读参数 ⇒ 红 |
 | 握手不符即回滚 | `apply.test.mjs` | 去掉 restore 调用 ⇒ 红 |
@@ -110,7 +138,7 @@
 ## 7. 接口契约（面板、launchd、代理共用一处实现）
 
 - 入口：`node <installRoot>/updater/cli.js <子命令>`。子命令与语义：
-  - `check` 拉 release → §1 七道校验 → 通过则解包暂存（`<stateRoot>/update-staging/<ver>/`）并写状态；
+  - `check` 拉 release → §1 八道校验 → 通过则解包暂存（`<stateRoot>/update-staging/<ver>/`）并写状态；
   - `apply` 只在**已暂存且 §2 空闲判据通过**时换版（含 §3 的备份/握手/回滚）；
   - `status` 读状态文件并附 §4 的过期判定，不联网；
   - `rollback` 用备份恢复上一版并重启核对；

@@ -74,6 +74,20 @@
         "at": { "type": "string" }
       }
     },
+    "authorship": {
+      "description": "Gate 8: how the source of the release this record is about was established. Written by `check` the moment the signature gate is reached, and it outlives `staged` on purpose: after a successful apply this is the only thing on disk that still says the installed release came without authorship proof. `consented: true` means a person passed --consent unsigned-release, i.e. accepted the missing proof; the scheduled run cannot. `signature-tool-missing` means this machine could not check at all (no gpg, or no key to check against). Deliberately absent from `required`: a state file written before gate 8 must still load, and a document that cannot be read is a machine that cannot update.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["version", "signature", "signedAsset", "keyFingerprint", "consented", "at"],
+      "properties": {
+        "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+        "signature": { "enum": ["verified", "invalid", "unsigned-release", "signature-tool-missing"] },
+        "signedAsset": { "type": ["string", "null"] },
+        "keyFingerprint": { "type": ["string", "null"], "pattern": "^[0-9A-Fa-f]{16,64}$" },
+        "consented": { "type": "boolean" },
+        "at": { "type": "string" }
+      }
+    },
     "lastError": {
       "type": ["object", "null"],
       "additionalProperties": false,

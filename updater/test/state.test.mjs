@@ -28,6 +28,25 @@ test('the schema this package ships is the one the state file is checked against
   const schema = loadSchema()
   assert.equal(schema.$id, 'glasspane.update-state/1')
   assert.deepEqual(validate(schema, emptyState({ now: NOW })), [], 'the empty state must be valid, not merely constructible')
+  // Gate 8's field: declared (so `nextState`, whose field list *is* the schema's
+  // property list, actually carries it into the document) and deliberately not
+  // required (a state file written before the signature gate existed must still
+  // load, or this machine can never update again).
+  assert.ok(Object.keys(schema.properties).includes('authorship'), 'authorship is not in the schema, so every write of it is silently dropped')
+  assert.equal(schema.required.includes('authorship'), false)
+  assert.equal(emptyState({ now: NOW }).authorship, null, 'a machine that has never checked has no authorship claim, not an unproven one')
+  const closed = { version: '1.4.1', signature: 'verified', signedAsset: null, keyFingerprint: null, consented: false, at: NOW.toISOString() }
+  assert.deepEqual(validate(schema, { ...emptyState({ now: NOW }), authorship: closed }), [])
+  assert.throws(
+    () => assertValidState({ ...emptyState({ now: NOW }), authorship: { ...closed, notaryAlgorithm: 'minisign' } }),
+    /not allowed by the schema/,
+    'an undeclared key *inside* the record is a refusal to write, which is the failure mode that gets noticed',
+  )
+  assert.throws(
+    () => assertValidState({ ...emptyState({ now: NOW }), authorship: { ...closed, signature: 'probably-signed' } }),
+    /not one of/,
+    'the four authorship states are a closed enum too',
+  )
 })
 
 test('a status outside the closed enum is never published', () => {

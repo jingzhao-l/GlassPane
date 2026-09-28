@@ -13,6 +13,61 @@ import { assertAssetUrl } from './source.js'
 export const TARBALL_NAME = (version) => `GlassPane-${version}.tar.gz`
 export const SUMS_NAME = (version) => `SHA256SUMS-${version}.txt`
 
+/**
+ * Gate 8's third asset: the **detached signature of the checksum file**.
+ *
+ * The name is not a guess — it is what `.github/workflows/release.yml` produces.
+ * Its signing step loops
+ *
+ *     for f in "GlassPane-${VERSION}.tar.gz" "SHA256SUMS-${VERSION}.txt"; do
+ *       gpg … --detach-sign --armor "$f"
+ *     done
+ *
+ * and `gpg --detach-sign --armor FILE` with no `--output` writes `FILE.asc`, so
+ * the asset this updater has to find is `SHA256SUMS-<ver>.txt.asc` — the sums
+ * name with `.asc` appended, *not* a name this package invents. `test/
+ * signature.test.mjs` re-derives it from the workflow text, so renaming the
+ * artifact on either side reddens the pairing.
+ *
+ * Which of the two `.asc` files this gate reads: `SHA256SUMS-<ver>.txt.asc`,
+ * because gate 4/5 trust exactly one row of that checksum file, and a signature
+ * over it is what makes that row the publisher's own statement rather than the
+ * first thing a downloader agreed with. A release that ships *only* the
+ * tarball's signature therefore still lands as `unsigned-release` for this gate
+ * (see `findSignatureAsset`), which is a deliberate asymmetry and is noted in
+ * `updater/README.md` as the place the naming can drift.
+ */
+export const SIGNATURE_SUFFIX = '.asc'
+export const SIGNATURE_NAME = (version) => `${SUMS_NAME(version)}${SIGNATURE_SUFFIX}`
+
+/**
+ * Gate 3's *optional* third asset. Unlike `requireAssetPair`, a missing
+ * signature is not `assets-missing`: the release is well-formed and simply
+ * predates the signing job (`v1.3.1` looks exactly like this). "Nothing to
+ * verify" is a different claim from "the checksum file is missing", and it is
+ * `signature.js`'s `unsigned-release` outcome to make — so this returns `null`
+ * and lets the policy module say which of the two it was.
+ *
+ * What it does refuse, like gate 3: two assets with the same name (which one is
+ * the signature?) and a URL off the pinned host (the bytes we would verify are
+ * not the release's).
+ */
+export function findSignatureAsset(release, { version, base }) {
+  const name = SIGNATURE_NAME(version)
+  const hits = assetIndex(release).filter((asset) => asset.name === name)
+  if (hits.length === 0) return null
+  if (hits.length > 1) {
+    throw new UpdaterError(
+      CODES.assetsMissing,
+      `release ${version} publishes ${hits.length} copies of ${name}; refusing to pick which one is the signature`,
+    )
+  }
+  if (!hits[0].url) {
+    throw new UpdaterError(CODES.assetsMissing, `release asset ${name} carries no download URL`)
+  }
+  return { name, url: assertAssetUrl(hits[0].url, { base }) }
+}
+
 /** Normalise a GitHub release payload's asset list to `{ name, url }`. */
 export function assetIndex(release) {
   const assets = Array.isArray(release?.assets) ? release.assets : []

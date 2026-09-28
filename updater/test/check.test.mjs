@@ -1,10 +1,11 @@
 /**
- * §1's seven gates, end to end, in the order the spec puts them.
+ * §1's eight gates, end to end, in the order the spec puts them.
  *
  * This file exists because nothing else drove `lib/check.js`: every gate had a
  * unit test and the *sequence* — which is what §1 actually specifies — had none.
- * Deleting the CI gate, dropping the self-check call, or running the self-check
- * before the provenance gate all used to leave the suite green.
+ * Deleting the CI gate, dropping the self-check call, running the self-check
+ * before the provenance gate, or staging a release whose checksum file nobody
+ * signed all used to leave the suite green.
  *
  * What is real here: a `node:http` server on 127.0.0.1 serving a genuine
  * `.tar.gz` built by this package's own writer in the layout `release.yml`
@@ -12,12 +13,21 @@
  * real digest measurement, the real unpack, and a real child process running the
  * tree's own `scripts/check-version.mjs`. That guard script appends to an
  * **execution marker** file, so "did staged content run?" is answered by the
- * filesystem rather than asserted by this file.
+ * filesystem rather than asserted by this file. The one substitute is gpg itself:
+ * which exit code a machine's GnuPG gives back is not a fact the other seven
+ * gates may be graded on, so `signatureOpts.runner` answers for it here and
+ * `test/signature.test.mjs` owns the single test that touches the real binary.
  *
  * REVERSE MUTATIONS reddened here, each named at the test that catches it:
  *   · delete the `verifyCiGreen` call in `lib/check.js` —
  *     `a release the CI gate refuses never has its staged code executed` goes red
  *     (the release stages, and the marker exists).
+ *   · delete the gate 8 block in `lib/check.js` —
+ *     `an unsigned release refuses the scheduled run …` goes red (it stages
+ *     instead), and so does `a release whose signature does not check is refused
+ *     even when a human offers consent`.
+ *   · let gate 8 run *after* the tree is unpacked — the same execution-marker
+ *     test reddens, which is what §8.8 is made of.
  *   · trust the declared length instead of measuring —
  *     `a tarball whose digest disagrees with SHA256SUMS …` goes red.
  *   · drop the self-check — `a staged tree whose own guard exits non-zero …`.
@@ -32,6 +42,7 @@ import path from 'node:path'
 
 import { runCheck } from '../lib/check.js'
 import { CODES } from '../lib/codes.js'
+import { updateSummary } from '../lib/state.js'
 import { makeBytesFetcher, makeFetcher } from '../lib/source.js'
 import { stagedTreePresent } from '../lib/staging.js'
 import { loadState } from '../lib/state.js'
@@ -41,6 +52,9 @@ import {
   PINNED_PATH,
   bytesResponse,
   defaultTreeFiles,
+  FAKE_SIGNER_FPR,
+  FOREIGN_SIGNER_FPR,
+  fakeGpg,
   jsonResponse,
   makeDaemonBinary,
   makeFakeApp,
@@ -79,10 +93,18 @@ function makeMachine(label, currentVersion = '1.4.0') {
 }
 
 /**
- * The 127.0.0.1 source for one release: the document, the two assets, and the
+ * The 127.0.0.1 source for one release: the document, the assets, and the
  * `actions/runs` answer. The release handler builds the asset URLs from the
  * request's own `Host`, so the payload points at the port the server really got
  * rather than at a number this file invented.
+ *
+ * `signature` decides which of the three authorship shapes this release has:
+ *   'sums'      `SHA256SUMS-<ver>.txt.asc` — what `release.yml` uploads when the
+ *               signing secret is configured, and the only shape gate 8 accepts
+ *   'tarball'   only `GlassPane-<ver>.tar.gz.asc` is published (the naming drift
+ *               this gate must not mistake for a signed release)
+ *   null        no signature asset at all, which is every release tagged before
+ *               the signing job existed — `v1.3.1` among them
  */
 async function startSource({
   version,
@@ -95,6 +117,7 @@ async function startSource({
   targetCommitish = SHA,
   dropSumsAsset = false,
   assetOrigin = null,
+  signature = 'sums',
 }) {
   const files = treeFiles ?? defaultTreeFiles(version)
   const archive = tarball ?? packTarGz(files)
@@ -102,11 +125,16 @@ async function startSource({
   const tarballName = `GlassPane-${version}.tar.gz`
   const sumsName = `SHA256SUMS-${version}.txt`
   const sumsText = sums ?? `${digest}  ${tarballName}\n`
+  const signatureName = signature === 'sums' ? `${sumsName}.asc` : signature === 'tarball' ? `${tarballName}.asc` : null
+  // Content is irrelevant to the injected gpg and irrelevant to the digest gates
+  // (which never read it); what matters is that the *name* is on the asset list.
+  const signatureBytes = Buffer.from('-----BEGIN PGP SIGNATURE-----\n\nfake armored body\n-----END PGP SIGNATURE-----\n')
   const routes = {
     [PINNED_PATH + '/releases/latest']: (req, res) => {
       const origin = assetOrigin ?? `http://${req.headers.host}`
       const assets = [{ name: tarballName, browser_download_url: `${origin}/${tarballName}` }]
       if (!dropSumsAsset) assets.push({ name: sumsName, browser_download_url: `${origin}/${sumsName}` })
+      if (signatureName) assets.push({ name: signatureName, browser_download_url: `${origin}/${signatureName}` })
       const body = { tag_name: `v${version}`, target_commitish: targetCommitish, assets }
       if (commitId) body.commit_id = commitId
       res.writeHead(200, { 'content-type': 'application/json' })
@@ -118,13 +146,14 @@ async function startSource({
       res.end(sumsText)
     },
   }
+  if (signatureName) routes[`/${signatureName}`] = bytesResponse(signatureBytes)
   if (runs !== null) {
     routes[PINNED_PATH + '/actions/runs'] = runsStatus === null
       ? jsonResponse(runs)
       : jsonResponse(runs, runsStatus)
   }
   const server = await startServer(routes)
-  return { server, digest, tarballName, sumsName, files }
+  return { server, digest, tarballName, sumsName, signatureName, files }
 }
 
 /**
@@ -138,8 +167,17 @@ const REFERENCE = makeMachine('reference')
 const LOCAL = REFERENCE.local()
 assert.equal(LOCAL.ok, true, 'the fixture machine must be internally consistent for the other tests to mean anything')
 
-/** One `runCheck` with the real transports against one of those servers. */
-function check({ machine, server, consents = [], env = {}, trigger = 'auto', local = LOCAL }) {
+/**
+ * One `runCheck` with the real transports against one of those servers.
+ *
+ * `gpg` is the only injected part of gate 8, and it has to be: whether this
+ * machine has GnuPG installed is not something the other seven gates may be
+ * graded on (`test/signature.test.mjs` is where the four authorship states are
+ * decided, and it owns the one test that touches the real binary). Everything
+ * else on this path — the fetches, the digest, the unpack, the guard script —
+ * stays real.
+ */
+function check({ machine, server, consents = [], env = {}, trigger = 'auto', local = LOCAL, gpg = fakeGpg() }) {
   return runCheck({
     stateRoot: machine.dir,
     env: { GLASSPANE_UPDATE_BASE: server.origin, ...env },
@@ -149,19 +187,21 @@ function check({ machine, server, consents = [], env = {}, trigger = 'auto', loc
     trigger,
     fetchJson: makeFetcher(),
     fetchBytes: makeBytesFetcher(),
+    signatureOpts: { runner: gpg.runGpg },
     log: () => {},
   })
 }
 
 const paths = (server) => server.requests.map((r) => r.pathname)
 
-test('all seven gates pass: the release is staged and the state records the digest', async () => {
+test('all eight gates pass: the release is staged and the state records the digest and the key', async () => {
   const machine = makeMachine('pass')
   const src = await startSource({ version: '1.4.1' })
   try {
-    const result = await check({ machine, server: src.server })
+    const gpg = fakeGpg()
+    const result = await check({ machine, server: src.server, gpg })
     assert.equal(result.status, 'staged', result.message)
-    assert.equal(result.code, null)
+    assert.equal(result.code, null, 'a verified signature leaves a clean success: no standing authorship note')
     assert.equal(result.ok, true)
     assert.equal(result.staged.digest, src.digest, '§1.5: the digest measured off the downloaded file is the one recorded')
     const state = loadState(machine.dir).state
@@ -171,6 +211,18 @@ test('all seven gates pass: the release is staged and the state records the dige
     assert.equal(state.staged.version, '1.4.1')
     assert.equal(state.staged.digest, src.digest)
     assert.equal(state.lastError, null)
+    // §1.8's own half of the record: *which* asset was verified, and *which* key
+    // it verified against. "Verified" without a named key is a claim with no
+    // fingerprint behind it.
+    assert.deepEqual(state.authorship, {
+      version: '1.4.1',
+      signature: 'verified',
+      signedAsset: 'SHA256SUMS-1.4.1.txt.asc',
+      keyFingerprint: FAKE_SIGNER_FPR,
+      consented: false,
+      at: NOW.toISOString(),
+    })
+    assert.equal(updateSummary(state).authorship, 'verified', 'gp_diagnose reads the summary, not the gate')
     assert.equal(state.history.at(-1).result, 'staged')
     assert.equal(state.history.at(-1).digest, src.digest.slice(0, 12), 'history keeps the leading 12 characters (spec §3.5)')
     // The tree lands one wrapper folder deep, which is the layout `git archive
@@ -182,9 +234,20 @@ test('all seven gates pass: the release is staged and the state records the dige
     assert.deepEqual(paths(src.server), [
       PINNED_PATH + '/releases/latest',
       `/${src.sumsName}`,
+      `/${src.signatureName}`,
       `/${src.tarballName}`,
       PINNED_PATH + '/actions/runs',
-    ], 'the release document, the two assets, then the CI query')
+    ], 'the release document, the checksum file, its signature, then the archive, then the CI query')
+    // The pairing gate 8 is about: this .asc, verified over exactly the checksum
+    // bytes the digest gate then trusted. Swapping the two arguments in
+    // `lib/signature.js` reddens here.
+    assert.equal(gpg.verified.length, 1, 'gate 8 asked gpg once')
+    assert.equal(path.basename(gpg.verified[0].signedFile), 'SHA256SUMS-1.4.1.txt')
+    assert.equal(path.basename(gpg.verified[0].signatureFile), 'SHA256SUMS-1.4.1.txt.asc')
+    assert.notEqual(path.basename(gpg.verified[0].signedFile), 'GlassPane-1.4.1.tar.gz')
+    // The throwaway keyring is not state: it is gone when the check is done, so a
+    // machine that verified once does not keep a keyring around for next time.
+    assert.equal(fs.existsSync(path.join(machine.stagingOf('1.4.1'), 'gnupg-verify')), false)
   } finally {
     await src.server.close()
     machine.cleanup()
@@ -275,9 +338,10 @@ test('execution of staged content is the last gate: the guard runs once, after e
     assert.deepEqual(paths(src.server), [
       PINNED_PATH + '/releases/latest',
       `/${src.sumsName}`,
+      `/${src.signatureName}`,
       `/${src.tarballName}`,
       PINNED_PATH + '/actions/runs',
-    ], 'every network-verifiable gate finished before the tree ran')
+    ], 'every network-verifiable gate — including the one that asks who signed the checksum file — finished before the tree ran')
   } finally {
     await src.server.close()
     machine.cleanup()
@@ -492,6 +556,180 @@ test('the CI gate follows commit_id when the release carries one, and says which
     const asked = src.server.requests.find((r) => r.pathname === PINNED_PATH + '/actions/runs')
     assert.equal(asked.query.head_sha, commitId, 'the CI query was made against commit_id, not the branch name in target_commitish')
     assert.equal(asked.query.branch, 'main')
+  } finally {
+    await src.server.close()
+    machine.cleanup()
+  }
+})
+
+/* ---------------------------------------------------------------- gate 8: who
+ * published this? The four authorship states are *classified* in
+ * `test/signature.test.mjs`; what is graded here is the consequence `check`
+ * draws from each, in the order §8.8 demands: a release whose checksum file
+ * nobody signed must not be downloaded, staged, or run by a schedule, and the one
+ * state that is a contradiction rather than an absence must not be waved through
+ * by a human either.
+ */
+
+// REVERSE MUTATION: delete the gate 8 block from `lib/check.js` — this release
+// stages (the fixture publishes no `.asc`, so the gate was the only thing
+// refusing), and `an accepted-unsigned release keeps saying so` loses its subject.
+// Move gate 8 below `extractInto` and the marker assertion reddens instead.
+test('an unsigned release refuses the scheduled run, downloads no archive, and runs nothing', async () => {
+  const machine = makeMachine('unsigned-auto')
+  const marker = path.join(machine.dir, 'guard-ran')
+  const src = await startSource({
+    version: '1.4.1',
+    signature: null,
+    treeFiles: defaultTreeFiles('1.4.1', { guardMarker: marker }),
+  })
+  try {
+    const result = await check({ machine, server: src.server, trigger: 'auto' })
+    assert.equal(result.ok, false)
+    assert.equal(result.status, 'needs-consent', 'a missing proof is a refusal a person can overrule, not a failure')
+    assert.equal(result.code, CODES.releaseUnsigned)
+    assert.equal(result.staged, null)
+    assert.deepEqual(paths(src.server), [PINNED_PATH + '/releases/latest', `/${src.sumsName}`], 'the checksum file was read; not a byte of the archive was fetched for a release whose checksum file is unproven')
+    assert.equal(fs.existsSync(marker), false, 'the tree’s own guard RAN on a release gate 8 refuses')
+    assert.equal(fs.existsSync(machine.stagingOf('1.4.1')), false, 'the staging directory went with the refusal')
+    const state = loadState(machine.dir).state
+    assert.equal(state.status, 'needs-consent')
+    assert.equal(state.authorship.signature, 'unsigned-release')
+    assert.equal(state.authorship.consented, false, 'nobody accepted anything here: the schedule refused on its own')
+    assert.match(state.lastError.message, /--consent unsigned-release/, '§4: the sentence the panel prints names the one action that is left')
+    assert.equal(updateSummary(state).authorship, 'unsigned-release')
+  } finally {
+    await src.server.close()
+    machine.cleanup()
+  }
+})
+
+test('a release that publishes only the tarball signature is unsigned for this gate', async () => {
+  const machine = makeMachine('unsigned-tarball-only')
+  // The shape a renamed or half-uploaded signing step produces: `.asc` files
+  // exist, and not one of them is over the file gates 4 and 5 trust.
+  const src = await startSource({ version: '1.4.1', signature: 'tarball' })
+  try {
+    const result = await check({ machine, server: src.server })
+    assert.equal(result.code, CODES.releaseUnsigned)
+    assert.equal(result.staged, null)
+    assert.match(result.state.lastError.message, /publishes no SHA256SUMS-1\.4\.1\.txt\.asc/)
+  } finally {
+    await src.server.close()
+    machine.cleanup()
+  }
+})
+
+test('a machine with no gpg refuses the schedule and records what it could not check', async () => {
+  const machine = makeMachine('no-gpg')
+  const src = await startSource({ version: '1.4.1' })
+  try {
+    const result = await check({ machine, server: src.server, gpg: fakeGpg({ outcome: 'unavailable' }) })
+    assert.equal(result.status, 'needs-consent')
+    assert.equal(result.code, CODES.signatureToolMissing, '"could not check" is not "checked and clean"')
+    assert.equal(result.staged, null)
+    assert.equal(loadState(machine.dir).state.authorship.signature, 'signature-tool-missing')
+  } finally {
+    await src.server.close()
+    machine.cleanup()
+  }
+})
+
+test('the same unsigned release stages when a person consents, and keeps saying it is unproven', async () => {
+  const machine = makeMachine('unsigned-consent')
+  const src = await startSource({ version: '1.4.1', signature: null })
+  try {
+    const result = await check({ machine, server: src.server, consents: ['unsigned-release'] })
+    assert.equal(result.status, 'staged', result.message)
+    assert.equal(result.staged.version, '1.4.1')
+    // The consent buys the *staging*, never a clean bill of health: the code and
+    // the sentence stay stamped, which is what the panel and `gp_diagnose` print.
+    assert.equal(result.code, CODES.releaseUnsigned)
+    const state = loadState(machine.dir).state
+    assert.equal(state.status, 'staged')
+    assert.deepEqual(state.authorship, {
+      version: '1.4.1',
+      signature: 'unsigned-release',
+      signedAsset: null,
+      keyFingerprint: null,
+      consented: true,
+      at: NOW.toISOString(),
+    })
+    assert.equal(state.lastError.code, CODES.releaseUnsigned)
+    assert.match(state.lastError.message, /without authorship proof/)
+    const summary = updateSummary(state)
+    assert.equal(summary.authorship, 'unsigned-release')
+    assert.equal(summary.authorshipConsented, true)
+    assert.equal(stagedTreePresent({ stateRoot: machine.dir, staged: state.staged }).ok, true, 'the tree is really there: consenting stages, it does not merely apologise')
+  } finally {
+    await src.server.close()
+    machine.cleanup()
+  }
+})
+
+// REVERSE MUTATION: drop `signature.outcome === 'invalid'` from the consent
+// condition in `lib/check.js` — the first assertion below goes red, because a
+// release whose signature contradicts itself would start honouring a consent flag.
+test('a release whose signature does not check is refused even when a human offers consent', async () => {
+  const machine = makeMachine('bad-sig')
+  const marker = path.join(machine.dir, 'guard-ran')
+  const src = await startSource({
+    version: '1.4.1',
+    treeFiles: defaultTreeFiles('1.4.1', { guardMarker: marker }),
+  })
+  try {
+    const result = await check({
+      machine,
+      server: src.server,
+      consents: ['unsigned-release'],
+      gpg: fakeGpg({ outcome: 'badsig' }),
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.code, CODES.signatureInvalid)
+    assert.equal(result.status, 'check-failed', 'a bad signature is not a consent question, so it is not `needs-consent` either')
+    assert.match(result.message, /no consent can override/)
+    assert.equal(result.staged, null)
+    assert.equal(loadState(machine.dir).state.staged, null)
+    assert.equal(fs.existsSync(machine.stagingOf('1.4.1')), false)
+    assert.equal(fs.existsSync(marker), false, 'nothing from the staged tree ran on a release gate 8 rejects')
+    assert.deepEqual(paths(src.server), [PINNED_PATH + '/releases/latest', `/${src.sumsName}`, `/${src.signatureName}`], 'the archive was never fetched for a release whose own signature contradicts it')
+  } finally {
+    await src.server.close()
+    machine.cleanup()
+  }
+})
+
+test('a good signature made by a key that is not the embedded one is the same hard refusal', async () => {
+  const machine = makeMachine('foreign-key')
+  const src = await startSource({ version: '1.4.1' })
+  try {
+    const result = await check({
+      machine,
+      server: src.server,
+      consents: ['unsigned-release'],
+      gpg: fakeGpg({ outcome: 'foreign-key', signerFingerprint: FOREIGN_SIGNER_FPR }),
+    })
+    assert.equal(result.code, CODES.signatureInvalid)
+    assert.equal(result.staged, null)
+    assert.match(result.message, /reads back under DEADBEEF/, 'the sentence names the key that actually signed it, not just "bad"')
+  } finally {
+    await src.server.close()
+    machine.cleanup()
+  }
+})
+
+test('a major that is also unsigned refuses for both reasons, and the authorship note survives', async () => {
+  const machine = makeMachine('major-unsigned', '1.4.1')
+  const src = await startSource({ version: '2.0.0', signature: null })
+  try {
+    const result = await check({ machine, server: src.server, consents: ['unsigned-release'] })
+    assert.equal(result.status, 'needs-consent')
+    assert.equal(result.code, CODES.consentRequired, 'the blocking reason is the one a button answers')
+    assert.match(result.message, /major upgrade/)
+    assert.match(result.message, /without authorship proof/, 'and the second reason is still said out loud')
+    const state = loadState(machine.dir).state
+    assert.equal(state.authorship.signature, 'unsigned-release')
+    assert.equal(state.authorship.version, '2.0.0')
   } finally {
     await src.server.close()
     machine.cleanup()

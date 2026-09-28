@@ -308,11 +308,19 @@ permission rather than by a secret.
   that same release's `SHA256SUMS`; the tag, the unpacked tree's own version line and the version that
   lands agree; the commit the release names has a green CI run on `main`; the npm packages are packed from
   that verified tree instead of being fetched again. That is integrity, version consistency and build
-  traceability — **not authorship**: the tag is **unsigned** (no Git signature, no minisign), so anyone
-  entitled to publish a release in that repository gets through, and signing is an open item in the same
-  family as the notarization gap in section 2.7. What the residual leaves you: compare the digest the page
-  shows against the release page before installing, keep automatic apply off and install by hand, or pin
-  the version and update deliberately.
+  traceability. Authorship is now a **checked** claim rather than an assumption: the release publishes a
+  detached GPG signature over its checksum file (`SHA256SUMS-<ver>.txt.asc`), verified in a throwaway
+  keyring against the public key this repository ships with the code. Read that precisely: *verified*
+  means "these bytes match the key we ship", and since the key is distributed by the same channel, it is
+  not proof that the author is the organisation — only that whoever signed it holds that key. A signature
+  that is published and **does not check is a hard refusal that no consent overrides**. Where there is
+  nothing to check — **no `.asc` published** (every release tagged before the signing job existed,
+  `v1.3.1` among them) or **no `gpg` on this machine** — authorship is unknown, not proven: the scheduled
+  run refuses and leaves `needs-consent`, and only a person may proceed with
+  `updater check --consent unsigned-release`, which the state file and `gp_diagnose` then keep reporting
+  for as long as that release is what is installed. What the residual leaves you: compare the digest the
+  page shows against the release page before installing, keep automatic apply off and install by hand, or
+  pin the version and update deliberately.
 - **The state root became security-relevant.** The job's instructions — including which script to execute —
   come from `~/.glasspane/update-state.json` and `~/.glasspane/update-install.json`, so anything that can
   write the state root or that path pointer can steer an update into `~/Applications` and your global npm

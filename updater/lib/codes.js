@@ -49,6 +49,14 @@ export const CODES = Object.freeze({
   versionLineBroken: 'version-line-broken',
   ciUnverified: 'ci-unverified',
   ciNotGreen: 'ci-not-green',
+  // §1 gate 8 (authorship): the detached GPG signature over this release's
+  // SHA256SUMS file, checked against the key `installer/cli.js` ships.
+  // `signature-invalid` is the one refusal no consent can wave through; the
+  // other two name a *missing* proof, which a person may accept and a schedule
+  // may not.
+  signatureInvalid: 'signature-invalid',
+  releaseUnsigned: 'release-unsigned',
+  signatureToolMissing: 'signature-tool-missing',
   assetHostUnpinned: 'asset-host-unpinned',
   // A download that left the pinned host after a redirect (§1's host pinning is
   // about the bytes that land on disk, not only about the URL in the payload).

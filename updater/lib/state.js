@@ -47,6 +47,7 @@ export function emptyState({ now = new Date(), autoApply = true, disabled = fals
     status: 'up-to-date',
     code: null,
     staged: null,
+    authorship: null,
     lastError: null,
     disabled,
     autoApply,
@@ -111,6 +112,14 @@ export function updateSummary(state, now = Date.now()) {
     autoApply: state?.autoApply === true,
     stagedVersion: state?.staged?.version ?? null,
     stagedDigest: state?.staged?.digest ?? null,
+    // Gate 8 outlives the staged offer: after a successful swap `staged` is gone
+    // and this is the only thing on disk still saying whether anybody proved who
+    // published what is now installed. It has to be in the summary, because the
+    // summary is what `gp_diagnose` and the panel quote.
+    authorship: state?.authorship?.signature ?? null,
+    authorshipVersion: state?.authorship?.version ?? null,
+    authorshipConsented: state?.authorship?.consented === true,
+    authorshipKey: state?.authorship?.keyFingerprint ?? null,
   }
 }
 

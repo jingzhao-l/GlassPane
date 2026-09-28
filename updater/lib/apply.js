@@ -39,6 +39,7 @@ import { kickstartJob, readRunningJob } from './launchd.js'
 import { mcpToolsList } from './mcp.js'
 import { bumpKind, parsePlainVersion } from './version.js'
 import { decideSwapPermission, foreignStateDir } from './policy.js'
+import { authorshipNote } from './signature.js'
 import { loadState, nextState, saveState } from './state.js'
 import { stagedTreePresent } from './staging.js'
 
@@ -806,20 +807,31 @@ export async function applyUpdate({
 
     // §3.5: only a full success moves `current`, and the staging tree is retired.
     removeTreeWithin(roots.staging, staged.dir)
+    // Gate 8's answer is *not* retired with it. `check` wrote `authorship` for the
+    // release it staged, `nextState` carries untouched fields through, so this is
+    // the one record left on the machine saying whether what is now installed came
+    // with proof of who published it. When it did not, the success is stamped with
+    // the standing note rather than a clean `code: null` — a swap that cleared the
+    // warning would leave the panel and `gp_diagnose` reporting a plain "up to
+    // date" about an unproven release.
+    const standing = authorshipNote(state.authorship, 'applied')
+    const swapped = `updated ${baseline} -> ${wantVersion}`
+    const message = standing ? `${swapped}. ${standing.message}` : swapped
     const saved = stamp({
       status: 'applied',
-      code: null,
+      code: standing?.code ?? null,
+      message: standing?.message ? message : null,
       current: wantVersion,
       latest: state.latest,
       staged: null,
       lastError: null,
-      historyEntry: { action: 'apply', result: 'applied', digest: state.staged.digest, code: null },
+      historyEntry: { action: 'apply', result: 'applied', digest: state.staged.digest, code: standing?.code ?? null },
     })
     return {
       ok: true,
       status: 'applied',
-      code: null,
-      message: `updated ${baseline} -> ${wantVersion}`,
+      code: standing?.code ?? null,
+      message,
       state: saved,
       rollback: { ok: true, performed: false },
       backup: { dir: backup.dir, marker: backup.marker },
