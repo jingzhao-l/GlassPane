@@ -357,6 +357,107 @@ final class TestIsolationGateTests: XCTestCase {
         return found.sorted { $0.path < $1.path }
     }
 
+
+    /// The source with every comment's characters replaced by spaces (lengths and
+    /// line breaks preserved, so a reported line number still points at the line).
+    ///
+    /// Why the gate strips rather than reporting what it finds: a scan that treats
+    /// prose as a violation reports the *explanation* of the rule as if it were the
+    /// defect, and the next reader deletes the explanation to get green — which is
+    /// how a guard ends up guarding nothing while the comment that documented it is
+    /// gone. Round 10 hit this on the TypeScript side (`executableSource`); round 11
+    /// hit it here, where a comment in `UpdatePanelTests` naming the very call the
+    /// gate bans was reported as the violation. Only code can build a state path, so
+    /// only code is scanned. String literals stay: `"https://x"` must not put the
+    /// rest of a line out of scope, and a token inside a string is still something a
+    /// caller can pass along.
+    func executableCode(_ text: String) -> String {
+        let chars = Array(text)
+        func matches(_ literal: String, at index: Int) -> Bool {
+            let needle = Array(literal)
+            guard index + needle.count <= chars.count else { return false }
+            for offset in 0..<needle.count where chars[index + offset] != needle[offset] { return false }
+            return true
+        }
+        // Every output slot starts as a space; only code characters are copied
+        // back over it, and newlines are always preserved so a reported line
+        // number still names the line a reader would find.
+        var out = Array(repeating: Character(" "), count: chars.count)
+        for index in chars.indices where chars[index] == Character("\n") { out[index] = Character("\n") }
+        var i = 0
+        var blockDepth = 0
+        var stringDelimiter: String? = nil
+        while i < chars.count {
+            let c = chars[i]
+            if c == Character("\n") {
+                out[i] = c
+                i += 1
+                continue
+            }
+            if let delimiter = stringDelimiter {
+                if c == Character("\\") {
+                    // Keep the escape and the escaped character in place: dropping
+                    // them would shift every reported line by nothing and break the
+                    // `\"` case by ending the string one character early.
+                    out[i] = c
+                    if i + 1 < chars.count { out[i + 1] = chars[i + 1] }
+                    i += 2
+                    continue
+                }
+                if matches(delimiter, at: i) {
+                    for offset in 0..<delimiter.count { out[i + offset] = delimiter[delimiter.index(delimiter.startIndex, offsetBy: offset)] }
+                    i += delimiter.count
+                    stringDelimiter = nil
+                    continue
+                }
+                out[i] = c
+                i += 1
+                continue
+            }
+            if blockDepth > 0 {
+                if matches("*/", at: i) {
+                    blockDepth -= 1
+                    i += 2
+                    continue
+                }
+                if matches("/*", at: i) {
+                    blockDepth += 1
+                    i += 2
+                    continue
+                }
+                i += 1
+                continue
+            }
+            if matches("//", at: i) {
+                // A line comment swallows to — but not including — its newline, so
+                // the line count of everything after it is unchanged.
+                i += 2
+                while i < chars.count && chars[i] != Character("\n") { i += 1 }
+                continue
+            }
+            if matches("/*", at: i) {
+                blockDepth += 1
+                i += 2
+                continue
+            }
+            if matches("\"\"\"", at: i) {
+                stringDelimiter = "\"\"\""
+                out[i] = Character("\""); out[i + 1] = Character("\""); out[i + 2] = Character("\"")
+                i += 3
+                continue
+            }
+            if c == Character("\"") {
+                stringDelimiter = "\""
+                out[i] = c
+                i += 1
+                continue
+            }
+            out[i] = c
+            i += 1
+        }
+        return String(out)
+    }
+
     /// Every rule hit in one text, as `name:line [rule] source`. The line is
     /// where the *shape* begins, which for a multi-line construct is its first
     /// line; a rule that hits several times reports each one.
@@ -401,7 +502,7 @@ final class TestIsolationGateTests: XCTestCase {
         let peekRules = try locationPeekRules()
         var reported: [String] = []
         for url in files {
-            let text = try String(contentsOf: url, encoding: .utf8)
+            let text = executableCode(try String(contentsOf: url, encoding: .utf8))
             let prefix = String(url.path.dropFirst(root.path.count))
             reported += findings(in: text, rules: rules, prefix: prefix)
             for peek in peekRules where !exempt(peek.name, prefix) {
@@ -540,6 +641,58 @@ final class TestIsolationGateTests: XCTestCase {
     /// compliant shapes below have to stay clean even though they *do* build a
     /// path from a location value — the ban is on hand-composing the lookup, not
     /// on holding a path in a local.
+    /// `executableCode` may only ever *remove prose*. If it ever blanked code, the
+    /// whole gate would become a mute button that no positive case notices — which
+    /// is why this test feeds the scanner's own known-offenders through the
+    /// stripper, in both directions, and checks line numbers survive it.
+    ///
+    /// Mutations, each of which reddens one case below: make the stripper blank a
+    /// whole line from the first `//` it sees *including* that line's code after a
+    /// string URL (`urlLine`); stop honouring nested `/* /* */ */` (the tail after
+    /// the inner close gets eaten); drop the newline-preservation and the reported
+    /// line numbers shift; strip string literals as if they were comments.
+    func testTheCommentStripperBlanksProseAndNeverCode() throws {
+        let token = needle("Project", "Registry", "()")
+        let reported: (String) -> [String] = { source in
+            self.findings(in: self.executableCode(source), rules: [try! self.rule("bare registry", token)], prefix: "/snippet.swift")
+        }
+
+        // (1) code is still code after the stripper ran.
+        XCTAssertEqual(reported(needle("let r = ", token)).count, 1,
+            "the stripper ate code — the gate can no longer see the shape it exists to catch")
+
+        // (2) the same shape inside a line comment is not a violation.
+        XCTAssertEqual(reported(needle("// why we never write ", token, " here\nlet r = Safe()")).isEmpty, true,
+            "prose was reported as a defect: the reader deletes the comment to get green")
+
+        // (3) `///` doc lines are prose too (this is how round 11 actually broke).
+        XCTAssertEqual(reported(needle("/// never build with ", token, "\n    func f() {}")).isEmpty, true)
+
+        // (4) nested block comments: the tail after the inner close is code again.
+        let nested = needle("/* outer /* inner ", token, " */ after */ let r = ", token)
+        XCTAssertEqual(reported(nested).count, 1,
+            "the second hit is outside the nested comment, so exactly one violation must survive")
+
+        // (5) a URL in a string literal must not swallow the rest of the line.
+        let urlLine = needle("let api = \"https://example.test/v1\" ; let r = ", token)
+        XCTAssertEqual(reported(urlLine).count, 1,
+            "the line after a string containing `//` was treated as a comment")
+
+        // (6) string literals are NOT comments: their contents stay in scope (the
+        // pre-stripper scan saw them too, and keeping that is the conservative
+        // choice — a path assembled from a string constant is still reachable).
+        // So the raw-body occurrence and the code after the delimiter both count.
+        let multiline = needle("let body = \"\"\"\n// ", token, "\n\"\"\"\nlet r = ", token)
+        XCTAssertEqual(reported(multiline).count, 2,
+            "the string body must still be scanned, and the code after the closing delimiter too")
+
+        // (7) line numbers survive stripping, or every report points at the wrong line.
+        let offset = needle("// one\n/* two\nthree */\nlet r = ", token)
+        let hits = reported(offset)
+        XCTAssertEqual(hits.count, 1)
+        XCTAssertTrue(hits[0].contains(":4 ["), "violation is on line 4, report says: \(hits[0])")
+    }
+
     func testLocationPeekRulesReportOnlyTheHandComposedLookups() throws {
         let peek = try locationPeekRules()
         XCTAssertEqual(peek.count, 2, "the peek rule set lost a member")

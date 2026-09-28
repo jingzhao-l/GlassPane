@@ -47,6 +47,12 @@ export const SITES = [
     hint: 'npm 包版本',
   },
   {
+    id: 'glasspane-update',
+    file: 'updater/package.json',
+    regex: /("version":\s*")([^"]+)(")/,
+    hint: '不单独发布（private），但同一条版本线：面板与 launchd 调的是同一棵树里的它',
+  },
+  {
     id: '@iterate/kernel',
     file: 'kernel/package.json',
     regex: /("version":\s*")([^"]+)(")/,

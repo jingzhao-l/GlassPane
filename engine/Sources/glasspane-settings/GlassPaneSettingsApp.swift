@@ -9,11 +9,13 @@ import SwiftUI
 struct GlassPaneSettingsApp: App {
     @StateObject private var model: SettingsModel
     @StateObject private var console: ConsoleModel
+    @StateObject private var updates: UpdateModel
 
     init() {
         let settings = SettingsModel(socketPath: Self.resolveSocketPath())
         _model = StateObject(wrappedValue: settings)
         _console = StateObject(wrappedValue: ConsoleModel())
+        _updates = StateObject(wrappedValue: UpdateModel())
     }
 
     /// 解析 `--socket-path <path>`（与 daemon CLI 同语义；缺省用默认路径）。
@@ -42,6 +44,7 @@ struct GlassPaneSettingsApp: App {
             ConsoleRootView()
                 .environmentObject(model)
                 .environmentObject(console)
+                .environmentObject(updates)
                 .frame(minWidth: 820, minHeight: 560)
         }
         .commands {
@@ -51,6 +54,7 @@ struct GlassPaneSettingsApp: App {
                 Button("刷新状态") {
                     model.refresh()
                     console.refreshAll()
+                    updates.refresh()
                 }
                 .keyboardShortcut("r", modifiers: [.command])
             }
@@ -68,6 +72,7 @@ struct GlassPaneSettingsApp: App {
             Button("刷新状态") {
                 model.refresh()
                 console.refreshAll()
+                updates.refresh()
             }
             Divider()
             Button("退出") {

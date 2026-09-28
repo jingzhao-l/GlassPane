@@ -14,9 +14,11 @@ import {
   EngineJsonRpcClient,
   REPLAY_UNSAFE_METHOD_NAMES,
   callerDeadlineMs,
+  daemonUnreachableRemedy,
   defaultSocketPath,
   engineClientOver,
   engineDeadlineMs,
+  lateReplyRoute,
   RESTORE_BASE_DEADLINE_MS,
   slowEngineRemedy,
   unixSocketEngineClient,
@@ -598,6 +600,106 @@ test("close() settles an outstanding call instead of leaking it", async () => {
   });
 });
 
+/* ------------------------------------------------------------------ *
+ * Finding 中-3 — one code, two opposite authorities.
+ *
+ * `close()` rejected the calls it was dropping with `daemonUnreachableRemedy()` —
+ * "run … --restore-launchd, then retry" — on a routine shutdown of *this shell*,
+ * possibly with an `act` in flight. That answer and the one this file's sibling
+ * guard gives for the *next* `GP_E_ENGINE_UNREACHABLE` ("no restart is authorised
+ * by this answer") contradict each other, and the contradiction is not cosmetic:
+ * a daemon bootstrapped over while it is mid-`act` cancels and rolls back the
+ * action on the user's screen (`main.swift`'s early shutdown path), and "then
+ * retry" orders the re-issue of a request whose re-issue is the harm the rest of
+ * this file refuses.
+ *
+ * What a close actually knows is three things, and the rejection may say those
+ * and nothing more: this client is ending; whether the daemon finished is unknown
+ * here; the reply may still land, under the same bounded late-reply contract every
+ * other timeout quotes.
+ * ------------------------------------------------------------------ */
+
+/** Words that order the caller to perform the request a second time. */
+const RE_ISSUE_ORDERING = [
+  /\bretry\b/i,
+  /\bre-?send\b/i,
+  /\bsend it again\b/i,
+  /\brun it again\b/i,
+  /\bissue it again\b/i,
+  /\breplay it\b/i,
+];
+
+/** Lifecycle verbs a shutdown answer may never put in front of a caller. */
+const LIFECYCLE_COMMANDS = /--restore-launchd|launchctl|kickstart|launchd|bootstrap\b|boot-out/i;
+
+test("a close with an act in flight names no restart and orders no re-issue", async () => {
+  // MUTATION THIS PINS: handing `close()`'s rejection `daemonUnreachableRemedy()`
+  // again (the shape this file shipped before the finding), which puts
+  // `--restore-launchd` and "then retry" in the answer for a request that may still
+  // be executing on the user's screen.
+  const io = new FakeLineIo();
+  const client = new EngineJsonRpcClient(io, 60_000);
+  const notes = [];
+  client.onEngineNote((note) => notes.push(note));
+  const outstanding = client.call("act", { selector: { role: "AXButton" }, action: "press" }, 0);
+  client.close();
+
+  const error = await outstanding.then(
+    () => { throw new Error("close() 让一个在飞的请求成功了"); },
+    (err) => err,
+  );
+  assert.equal(error.code, "GP_E_ENGINE_UNREACHABLE", "码不变，变的只是它声称的权限");
+  assert.ok(!LIFECYCLE_COMMANDS.test(error.remedy),
+    `一条本机关闭的答复点到了 daemon 的生命周期命令：${error.remedy}`);
+  assert.ok(!error.remedy.includes(daemonUnreachableRemedy()),
+    `关闭答复不得借用 unreachable 的那条出路：${error.remedy}`);
+  // The re-issue scan runs on this answer's *own* words. The quoted late-reply
+  // contract is allowed to contain "instead of telling you to run it again" because
+  // that clause forbids the repeat; scanning through it would make the honest
+  // sentence the reason a gate fails.
+  const own = error.remedy.replace(lateReplyRoute("mcp"), "[the transport's late-reply contract]");
+  assert.notEqual(own, error.remedy, "迟到回复的契约必须原样在场，不是转述");
+  for (const ordering of RE_ISSUE_ORDERING) {
+    assert.ok(!ordering.test(own), `关闭答复命令代理把在飞的 act 再做一遍（${ordering}）：${own}`);
+  }
+
+  // What it *does* say: the three facts a close can support.
+  assert.match(error.message, /client closed/, "仍是原来那句话的开头，别的声音都别冒充");
+  assert.match(error.message, /this shell's own client is ending/, error.message);
+  assert.match(error.message, /whether the daemon finished this request is not known here/, error.message);
+  assert.match(error.message, /may still land/, error.message);
+  // …and the late-reply contract it points at, with its bound, in the transport's
+  // own words rather than a shortened paraphrase of them.
+  assert.ok(error.remedy.includes(lateReplyRoute("mcp")),
+    `关闭答复要原样 honour 迟到回复那一条契约：${error.remedy.slice(0, 240)}`);
+  assert.match(error.remedy, /no restart is authorised by this answer/);
+  assert.match(error.remedy, /Read what happened rather than performing it a second time/);
+  assert.match(error.remedy, /gp_recent_reports lists/, "MCP 面的出路要给 MCP 面有的工具");
+  assert.equal(error.remedy.includes("/v1/evidence/"), false, "MCP 面不得给 curl 路由");
+
+  // And the tracking-window note stays a measurement: a request whose caller never
+  // got an answer is not one whose *late-reply* window was discarded, and a count
+  // that claimed it was would be the same lie in the other direction.
+  assert.ok(!notes.some((note) => /late-reply tracking ended/.test(note)),
+    `一条未超时的请求不该出现在迟到窗口的丢弃数里：${JSON.stringify(notes)}`);
+});
+
+test("the close answer is written for the surface that receives it", async () => {
+  // MUTATION THIS PINS: dropping the per-surface split in `clientClosingRemedy`,
+  // which sends a curl caller of the HTTP gateway to `gp_recent_reports` — a tool
+  // this gateway does not expose at all.
+  const io = new FakeLineIo();
+  const client = new EngineJsonRpcClient(io, 60_000, null, CALLER_VISIBLE_CEILING_MS, "http");
+  const outstanding = client.call("observe", { maxDepth: 4 });
+  client.close();
+  const error = await outstanding.catch((err) => err);
+  assert.equal(error.code, "GP_E_ENGINE_UNREACHABLE");
+  assert.ok(!LIFECYCLE_COMMANDS.test(error.remedy), error.remedy);
+  assert.ok(!/gp_[a-z_]+/.test(error.remedy), `curl 调用方手上没有 gp_* 可调：${error.remedy}`);
+  assert.ok(error.remedy.includes(lateReplyRoute("http")), error.remedy.slice(0, 240));
+  assert.match(error.remedy, /this gateway keeps no operation trail of its own/);
+});
+
 /* ------------------------------- A-16 ------------------------------- */
 
 /** Duplex whose write side never loops back into its read side. */
@@ -1116,6 +1218,109 @@ test("an id-less reply for a request the caller gave up on still reaches the tra
   assert.match(idLessNote, /inferred/);
   io.respond({ connected: false });
   assert.deepEqual(await probe, { connected: false });
+  client.close();
+});
+
+test("an id-less frame may not destroy the tracked entry a refused late arrival still needs", async (t) => {
+  // MUTATION THIS PINS: putting `this.pending.delete(target.id)` back in front of
+  // `reportLateReply(target, frame, true)` in the id-less path of `handleMessage`
+  // ("delete before dispatch"). The sequence below is the one the finding names:
+  // an `act` admitted under trail generation 0 times out; the client re-attaches
+  // (generation 1); the daemon's id-less answer is consumed against the act's slot
+  // and the downstream generation check refuses it; the act's real reply then lands
+  // **with its id echoed** — and if the delete already removed the entry, that frame
+  // reads as "a frame this client never issued", the operation that really ran is
+  // unrecordable, and the agent is told `GP_E_NO_EVIDENCE … run gp_act first` and
+  // clicks again.
+  const io = new FakeLineIo();
+  const client = timedOutClient(t, io, 20);
+  const notes = [];
+  client.onEngineNote((note) => notes.push(note));
+  const seen = [];
+  client.onLateReply((reply) => seen.push(reply));
+
+  const act = client.call("act", { selector: { role: "AXButton" }, action: "press" }, 0).catch((err) => err.code);
+  await expire(t, 20);
+  assert.equal(await act, "GP_E_ENGINE_TIMEOUT", "the act's caller is answered, and the entry stays tracked");
+  const actId = JSON.parse(io.sent[io.sent.length - 1]).id;
+
+  // The re-attach that moves the trail to a new generation, still outstanding.
+  const reattach = client.call("attach", { bundleId: "com.example.next" }, 1);
+  const attachId = JSON.parse(io.sent[io.sent.length - 1]).id;
+
+  // The daemon's answer to the act, with the id lost on the way out: attributed by
+  // arrival order to the act, and refused downstream because generation 0 is
+  // superseded — the sink here records the refusal the way `dispatch.ts` does.
+  io.send(JSON.stringify({ id: null, result: { operationId: "op_inferred", actConfirmed: true } }));
+  await flush();
+  assert.equal(seen.length, 1, JSON.stringify(notes));
+  assert.equal(seen[0].method, "act");
+  assert.equal(seen[0].attribution, "arrival-order");
+  assert.equal(seen[0].correlation, 0, "the frame has to travel with the generation it was admitted under");
+  const attachState = track(reattach);
+  assert.equal(attachState.value, "pending", "the id-less frame may not be spent on the request behind it");
+
+  // A second id-less frame must not be guessed onto the act again: the first guess
+  // was consumed, and re-using it would file someone else's answer under the act.
+  io.send(JSON.stringify({ id: null, result: { operationId: "op_someone_elses", attached: true } }));
+  await flush();
+  assert.equal(seen.length, 1, `一个到达顺序的猜测只能花一次：${JSON.stringify(notes)}`);
+  assert.ok(notes.some((note) => /was not delivered to any caller/.test(note)), JSON.stringify(notes));
+
+  // The act's real reply, id echoed — the route the delete used to destroy.
+  io.send(JSON.stringify({ id: actId, result: { operationId: "op_real", actConfirmed: true } }));
+  await flush();
+  assert.equal(seen.length, 2,
+    `回显了 id 的迟到回复必须仍然归到它自己的请求上，而不是变成"这个壳从没发过": ${JSON.stringify(notes)}`);
+  assert.equal(seen[1].attribution, "echoed-id", "这一次是确认过的归属，不是猜的");
+  assert.equal(seen[1].result.operationId, "op_real");
+  assert.ok(!notes.some((note) => /never issued/.test(note)),
+    `确认归属的回复不得被写成"从未发出"：${JSON.stringify(notes)}`);
+
+  io.send(JSON.stringify({ id: attachId, result: { pid: 4242, bundleId: "com.example.next", appName: "Next" } }));
+  assert.deepEqual(await reattach, { pid: 4242, bundleId: "com.example.next", appName: "Next" });
+  client.close();
+});
+
+test("a refused frame says which requests this client still holds", async () => {
+  // The other half of finding 中-4: now that an id-less arrival no longer removes an
+  // entry, "a frame for an id this client never issued" has two very different
+  // causes — an eviction from the late-reply window, or a frame the daemon invented —
+  // and the only thing that tells them apart is the answer to "what is still held?".
+  // MUTATION THIS PINS: dropping `held` from the refusal note.
+  const io = new FakeLineIo();
+  const client = engineClientOver(io, 5_000);
+  const notes = [];
+  client.onEngineNote((note) => notes.push(note));
+  const observe = client.call("observe", { maxDepth: 2 });
+  const snapshot = client.call("snapshot").catch((err) => err.code);
+  io.send(JSON.stringify({ id: 9_999, result: { junk: true } }));
+
+  const refusal = notes.find((note) => /never issued/.test(note));
+  assert.ok(refusal, JSON.stringify(notes));
+  assert.match(refusal, /this client still tracks 2 request\(s\): 'observe' id 0, 'snapshot' id 1/, refusal);
+  assert.ok(!/\(caller already answered\)/.test(refusal),
+    `两条都还在等自己的答复，不得标成已答复：${refusal}`);
+
+  io.send(JSON.stringify({ id: 0, result: { tree: [] } }));
+  assert.deepEqual(await observe, { tree: [] });
+  client.close();
+  assert.equal(await snapshot, "GP_E_ENGINE_UNREACHABLE");
+});
+
+test("the refusal says plainly when nothing is tracked at all", async () => {
+  // The same note's other branch, asserted rather than assumed: an empty window has
+  // to read as empty, because a "still tracks" list naming an entry that is not
+  // there would send a reader looking for something already evicted.
+  // MUTATION THIS PINS: rendering the empty case with the non-empty wording.
+  const io = new FakeLineIo();
+  const client = engineClientOver(io, 5_000);
+  const notes = [];
+  client.onEngineNote((note) => notes.push(note));
+  io.send(JSON.stringify({ id: 777, result: {} }));
+  const refusal = notes.find((note) => /never issued/.test(note));
+  assert.ok(refusal, JSON.stringify(notes));
+  assert.match(refusal, /nothing is tracked now/, refusal);
   client.close();
 });
 

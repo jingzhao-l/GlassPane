@@ -554,3 +554,45 @@ load 1.03 下 27 项 PASS（含"恢复后 UI 数值回写"与"像素通道本轮
 - 另记流程事实：本轮两个 lane 撞到 subagent 回合上限，剩余项（`dispatch.ts` 的接线、`canonical.ts`
   及其测试、`slowEngineRemedy` 的分面对话）由主线自己补做并补测试；共享树里"lane 报完即完成"不作数，
   收口前必看 `git status` 与整树编译。
+
+# 追加七（2026-09-27，round 11）：两条登记过的残留收口，加一条扫描类守卫的新形状
+
+## 1. kernel 的 selector 允许空串 —— 从 canonical 一侧收，不按镜像改
+
+- **改为**：`kernel/schemas/evidence-pack.schema.json` 的 `role`/`title` 加 `minLength: 1`，
+  `kernel/src/evidence-pack.ts` 对应 `.min(1)`；`identifier` 保持原样（空 identifier 只会永远匹配不上，
+  不会像空 `role` 那样两侧判据相反 —— 这条理由从壳层注释搬进 canonical，免得只活在一处）。
+  **先改 canonical（iterate-skill 主仓 `kernel/`），再把两份文件字节级抄进本仓镜像**，
+  `diff -q` 为证；`dist/evidence-pack.js` 一并重建（发布形态里 bundle 会内联它）。
+  `mcp-shell/src/tools.ts` 里那份重抄的 `ShellSelectorSchema` 删除，改为 import kernel 的那一份 ——
+  同一份契约此前有两个定义者，round 10 的收紧只落在了壳层这一侧。
+- **为什么**：daemon 拒绝空 `role`（`ParamValidation.swift:105-107`），空 `title` 被精确匹配
+  （`AXChannel.swift:540-547`）却在报告里按 `.nonEmpty` 印成"没有"（`EvidenceReportGenerator.swift:284,329`）；
+  对外发布的 schema 两条都放行 ⇒ 代理照 advertised 的契约构造请求，拿到一个通用 `GP_E_BAD_PARAMS`。
+- **锚点**：`mcp-shell/test/consumer-consistency.test.mjs` 新读 Swift 判据做三方对表（发布 schema /
+  kernel zod / daemon 实装），四个方向各自实测过红（删 schema 的 minLength、删 zod 的 `.min(1)`、
+  daemon 不再判空、报告不再 `.nonEmpty`）。
+- **登记为未修（只列出）**：`diagnosis.report.*` 四个字段 daemon 侧按 `.nonEmpty` 印、schema 不判空，
+  与本条同形；`ProjectRegistry.swift:118,175` 要求非空 `displayName`，kernel 无对应 schema；
+  `prevEntryHash` 的空串是创世块的合法值，**不该**收紧。
+
+## 2. SECURITY 双语的"唯一本地信任边界"改口径
+
+见 `SECURITY.md` / `SECURITY.zh-CN.md` §2：两个接入面（socket 与回环 HTTP 网关）各自的可达者、
+各自的防线，以及**没有**挡住什么（无 TLS、单一共享 token、同用户进程）。这条不是文字修饰：
+文档说只有一扇门时，读者不会去检查第二扇。
+
+## 3. 新形状：把注释当缺陷的源码扫描，会把解释注释删掉
+
+- **改为**：Swift 侧的测试隔离闸（`TestIsolationGateTests`）扫描前先过一遍 `executableCode`：
+  行注释、`///` 文档行、`/* */`（Swift 允许嵌套）里的字符被替换成空格（**长度与换行都保留**，
+  报告的行号仍然指着那一行），字符串字面量**不**剥（保守选择，剥了会把 `"https://…"` 之后整行代码
+  看成注释 —— 那才是真正的漏检）。
+- **为什么**：round 11 新增的面板测试里，有一句注释**提到**了这条闸禁止的那个调用名 —— 于是
+  `swift test` 报了一条"测试隔离违规"，指着注释。这类闸若按原文匹配，下一个为了让它变绿的人
+  删掉的是解释规则的注释，规则本身从此没人写得清了（round 10 在 TypeScript 侧已经用
+  `executableSource` 处理过同一形状，Swift 侧当时没同步）。
+- **锚点**：`testTheCommentStripperBlanksProseAndNeverCode` 七组：代码里的形状剥完仍在（否则整条闸
+  成了静音按钮）、同样形状在 `//` 与 `///` 中不再算违规、嵌套块注释闭合之后的代码仍算、
+  含 `//` 的 URL 字符串之后那行代码仍算、多行字符串之后仍算、行号不因剥离而漂移。
+  实测过的反向变异：让剥离器把字符串当注释处理 ⇒ 第 (5) 组立刻红。

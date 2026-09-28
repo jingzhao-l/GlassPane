@@ -29,9 +29,36 @@ export type AttributionLevel = z.infer<typeof AttributionLevelSchema>;
 export const CircuitBreakerLevelSchema = z.number().int().min(0).max(3);
 export type CircuitBreakerLevel = z.infer<typeof CircuitBreakerLevelSchema>;
 
+/**
+ * The selector rule, in one definition shared by every consumer.
+ *
+ * `role` and `title` refuse the empty string because neither is a question this
+ * stack can answer honestly, and the two fail differently:
+ *
+ *  - `role: ""` is refused by the daemon outright (`ParamValidation.optSelector`,
+ *    `guard let role = dict["role"] as? String, !role.isEmpty`), so a request or
+ *    a pack carrying it could only ever be rejected further downstream.
+ *  - `title: ""` *is* accepted by the daemon and matched by exact equality
+ *    (`AXChannel.elementMatches`, `if title != wantedTitle { return false }`),
+ *    while the evidence report prints it through `String.nonEmpty`
+ *    (`EvidenceReportGenerator.selectorText`) — so the action that was performed
+ *    and the pack describing it disagree, which is the one outcome an evidence
+ *    surface may not produce.
+ *
+ * `identifier` deliberately carries no emptiness rule: the daemon has none either
+ * (it goes through the length-only `optString`), and an empty identifier can only
+ * ever *fail to resolve* — nothing in the tree carries one — so the disagreement
+ * `title` has never arises for it.
+ *
+ * `mcp-shell` advertises these same three fields in `tools/list` and no longer
+ * restates the rule locally; the cross-check that keeps the published JSON
+ * Schema, this zod and the daemon's guards agreeing on emptiness is
+ * `mcp-shell/test/consumer-consistency.test.mjs`, which reads the daemon's rules
+ * out of its Swift sources instead of copying them.
+ */
 export const SelectorSchema = z.strictObject({
-  role: z.string().max(SELECTOR_MAX_LENGTH),
-  title: z.string().max(SELECTOR_MAX_LENGTH).optional(),
+  role: z.string().min(1).max(SELECTOR_MAX_LENGTH),
+  title: z.string().min(1).max(SELECTOR_MAX_LENGTH).optional(),
   identifier: z.string().max(SELECTOR_MAX_LENGTH).optional(),
 });
 export type Selector = z.infer<typeof SelectorSchema>;

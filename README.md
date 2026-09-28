@@ -33,6 +33,7 @@ re-verify, without a human in the middle of every round.
 - [At a glance](#at-a-glance)
 - [Quick start](#quick-start)
 - [Installation](#installation)
+- [Keeping GlassPane up to date](#keeping-glasspane-up-to-date)
 - [What it cannot do](#what-it-cannot-do)
 - [Connecting an MCP client](#connecting-an-mcp-client)
 - [Tools](#tools)
@@ -222,13 +223,17 @@ A "one-command install" that has a known manual step in it should say so.
 | `~/Applications/GlassPane.app` | settings / permission guide panel |
 | `~/Applications/GlassPane Daemon.app` | the daemon (the TCC grant subject) |
 | `~/Library/LaunchAgents/com.glasspane.daemon.plist` | launchd job (start at login) |
+| `~/Library/LaunchAgents/com.glasspane.update.plist` | launchd job for the daily update check |
 | `~/.glasspane/engine.sock` | daemon socket, mode `0600` |
 | `~/.glasspane/evidence/` | per-operation evidence packs |
 | `~/.glasspane/installer-daemon.log` | installer and daemon log |
+| `~/.glasspane/update-state.json`, `update-install.json`, `update.log`, `update-staging/`, `update-backup/` | updater state, its record of where the program lives, its log, and the download/rollback areas |
 
 ```bash
 launchctl bootout "gui/$(id -u)/com.glasspane.daemon" 2>/dev/null
+launchctl bootout "gui/$(id -u)/com.glasspane.update" 2>/dev/null
 rm -f ~/Library/LaunchAgents/com.glasspane.daemon.plist
+rm -f ~/Library/LaunchAgents/com.glasspane.update.plist
 rm -rf ~/Applications/GlassPane.app ~/Applications/"GlassPane Daemon.app"
 rm -rf ~/.glasspane
 ```
@@ -240,6 +245,61 @@ launchctl:
 ```bash
 node installer/cli.js --restore-launchd
 ```
+
+## Keeping GlassPane up to date
+
+The installer registers a per-user job that asks the release page once a day and, when it is allowed
+to, swaps in the new version. The page that drives it is the **更新** (Updates) section of
+`GlassPane.app` — the panel's labels are Chinese-only today, so they are quoted as they appear.
+
+- **What gets updated**: the two bundles in `~/Applications` (settings panel and daemon; the daemon is
+  restarted as part of the swap) and the two global npm packages, `glasspane-mcp` and
+  `glasspane-install`. All of it comes out of **one** release archive whose checksum was verified — the
+  npm packages are packed from that same verified tree instead of being fetched from the registry, so
+  the code that was checked and the code that lands cannot be two different things.
+- **When**: one run a day at a fixed local time, 12:00 by default (`enable --hour 3 --minute 45` moves
+  it). A swap only happens while the daemon is idle, so an update never starts in the middle of a run
+  your agent is performing on screen; a busy daemon defers that round and the next slot retries.
+- **Do it right now, by hand**: press 「立即检查」 (check now) to fetch and verify, then
+  「安装更新」 (install update) to apply what passed. The card above the buttons shows current version,
+  newest version, when it last checked, the version waiting, and its full `sha256` — copy it and compare
+  against the release page if you want to be sure of what you are installing. `gp_diagnose` answers the
+  same question for an agent: whether this machine is behind, and as what.
+- A button that has nothing to do stays **visible and disabled, with a reason line under it** — the
+  panel never hides a control to avoid explaining it, and never shows a failure as a success.
+- **A major version is never applied on a schedule.** It waits as an offer, with the reason on the page
+  (跨大版本升级，可能改变对外行为), and pressing 「安装更新」 is what confirms it. Nothing is skipped
+  silently: `--consent major` is that button's effect, and the scheduled run does not have it.
+- **A release nobody signed is not installed by the schedule either.** Each release carries a detached GPG
+  signature over its checksum file, verified against the key shipped with this program; that is what turns
+  "who published this" from an assumption into a checked claim (and it means exactly *matches the key we
+  ship*). If there is nothing to check — no signature published (`v1.3.1` predates the signing job), or no
+  `gpg` on the machine — the daily run stops and says so on the page; you may proceed once by hand with
+  `updater check --consent unsigned-release`, and the state file and `gp_diagnose` keep reporting that
+  release as installed **without authorship proof**. A signature that is published and does not check is
+  refused outright: no consent overrides it. The 「安装更新」 button does not grant this one (only
+  `--consent major` is wired to it today), so grant it at a terminal.
+- **Turn automatic update off for good** — any one of these, and the last is the strongest:
+
+  ```bash
+  node installer/cli.js --no-auto-update    # at install time: the job is never registered
+  node "<updater>" disable                 # any time later; `enable` reverses it
+  GLASSPANE_UPDATE_DISABLE=1               # also refuses a later enable, so it survives re-installs
+  ```
+
+  `<updater>` is the program path the page itself lists under 更新器 → 程序. Off is not mute: the page
+  keeps reporting 自动更新已关闭 with the time of the last check, and check/install still work by hand —
+  the switch governs the schedule, not your ability to update.
+- **Machine was asleep or switched off at the fixed time**: macOS replays a run missed while asleep, but
+  not one missed while powered off. So nothing depends on that: unless the page has something more
+  specific to tell you (a version waiting, or a refusal and why), a check older than 36 hours is reported
+  as 检查已过期, with how long ago it actually looked and the check button live.
+- **"The rollback needed a human"** means exit code 5 — the new version went in, failed the read-back
+  check after restart, and putting the old version back did not verify either. The tool stops guessing
+  from there: 「安装更新」 is disabled and its reason line tells you to reinstall by hand (自动退回没成功，
+  请先人工重新安装) — that is, re-run the [installer](#channels) so `~/Applications` is rebuilt from
+  source, then reopen this page. When the restore *does* verify (exit code 4) you are back on the previous
+  version and the page says so plainly.
 
 ## What it cannot do
 

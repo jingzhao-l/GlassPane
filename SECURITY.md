@@ -20,17 +20,27 @@ yet.
 - On either path: **do not** paste tokens, raw logs from `~/.glasspane/`, evidence-pack JSON, exported
   reports, or screenshots into a public issue. Those files can contain account names, real names and
   email content belonging to other people, visible on the screens that were under test.
-- Directions worth reporting: a socket, permission or evidence path that is not covered by the boundary
-  described below; anything that lets "unverified" pass as "verified"; a cross-user process reaching the
-  daemon or the bridge; evidence escaping `~/.glasspane/` and a caller's explicit paths; launchd being
-  re-registered. Any severity is welcome — in this project, displaying something unverified as verified
-  is handled as a defect.
+- Directions worth reporting: a socket, gateway bind, permission or evidence path that is not covered by
+  the boundary described below; anything that lets "unverified" pass as "verified"; a cross-user process
+  reaching the daemon or the bridge; evidence escaping `~/.glasspane/` and a caller's explicit paths;
+  launchd being re-registered. Any severity is welcome — in this project, displaying something unverified
+  as verified is handled as a defect.
 
 ## 2. Threat model summary
 
-**The boundary, stated plainly**: other processes running with the same privileges as the logged-in
-user on this machine. Cross-user, cross-network, and already-rooted machines are not protected, and
-reports against those are usually judged out of scope.
+**The boundary, stated plainly**: code running on this machine. There are **three** local surfaces, and
+they do not have the same reach:
+
+- the **unix socket** (section 2.2) is gated by file ownership and mode, so whoever can open it is
+  running as your user;
+- the **loopback HTTP gateway** (section 2.3) — which exists only if you start it yourself — is gated by
+  one shared bearer token and is reachable over the loopback interface by **any local account**, not only
+  by processes running as your user.
+- the **scheduled updater** (section 2.8) carries no act and no token, but it can replace the binaries
+  the other two are reached through.
+
+Cross-network and already-rooted machines are not protected, and reports against those are usually judged
+out of scope.
 
 ### 2.1 What the daemon can see, what it can do, and as whom
 
@@ -51,16 +61,25 @@ reports against those are usually judged out of scope.
 - Probe channel: listens on `~/.glasspane/probe.sock` and receives handler / state / checkpoint signals
   reported by the SDK inside the process under test.
 
-### 2.2 The unix socket is the only local trust boundary
+### 2.2 Surface one: the daemon's unix socket
 
 - `~/.glasspane/engine.sock`: parent directory `0700`, socket file `0600`; the daemon binds and chmods
-  them itself.
+  them itself, and refuses to serve at all when that directory cannot be brought to `0700`, is not a
+  directory, or belongs to another account. `~/.glasspane/probe.sock`, the state files and the evidence
+  archive get the same enforcement on the daemon's start-of-run sweep.
+- **What the mode gates is users, not processes.** Every process running as your own user can open this
+  socket; nothing about the mode makes the screen safe from code you have already run.
 - **There is no peer authentication anywhere in the command path** — the daemon never checks a caller's
   uid, pid or code identity, there is no token and no encryption. Any process that can open this socket
   as that user can drive the daemon's full capability set equivalently, including operating other apps
   as the already-granted principal "GlassPane Daemon". The trust model is "any code on this machine =
   the agent's hands": code running under your account, and any MCP server or plugin you connect, is
   inside the circle.
+- **Nothing on this path asks a human.** `attach`, `act`, `snapshot`, `restore`, `observe` and the rest
+  of the socket method table are carried out as soon as the frame is accepted; there is no confirmation
+  step, and no approval prompt between a caller and a click on the user's screen. The approval ledger is
+  not a gate on it either: its records are written by the daemon itself (`daemon:auto`) after the outcome
+  of a `restore`, as an audit trail, and the settings panel presents them as self-approval.
 - `~/.glasspane/probe.sock` has the same ownership and mode, but the connecting side **names its own
   pid** (a field in the `hello` frame), and that claim is checked only against the kernel's view of the
   connection — never against any code identity. A cooperating or lying same-user app can therefore
@@ -71,8 +90,96 @@ reports against those are usually judged out of scope.
   `--replace-daemon`, which terminates the running instance first. An older or maliciously started
   instance can displace the granted principal. After installing, check the panel's "Daemon status →
   subject" against the binary path that is actually running.
+- How a caller finds the socket, and why the last resort is a guess it is meant to lose: `GLASSPANE_ENGINE_SOCK`,
+  then an explicit `--socket-path`, then `$HOME/.glasspane/engine.sock`. That fallback reads `$HOME`
+  **deliberately**, even though the daemon's own default location comes from the home the system records
+  for the user, which does not consult `HOME`. In a process whose `$HOME` points into a sandbox the two
+  sides therefore resolve different directories, and the caller is refused ("nothing is listening on the
+  guessed path") instead of silently driving the live daemon — clicks, state writes, the whole act
+  surface — on a machine it asked not to be on. Redirecting `$HOME` is not a supported way to isolate
+  from a daemon, and it must not be upgraded into a way to reach one: name the socket, or don't. An
+  installed pair agrees because the launchd job hands the daemon an explicit `--socket-path` (see
+  section 2.5); read that value back rather than recomputing it.
 
-### 2.3 Evidence packs carry screen content out: what is on disk, and how to erase it
+### 2.3 Surface two: the loopback HTTP gateway
+
+`glasspane-http` (the `glasspane-mcp` package's second bin, and the published `./http-gateway` export)
+bridges HTTP/REST callers onto the same daemon socket: `GET /v1/hello`, the evidence reads, and
+`POST /v1/tools/<name>` for every daemon method the shell forwards — which **includes `act`, `attach`,
+`restore` and `snapshot`**. It is not started by the installer and not started by the MCP server; it
+exists only while someone runs it. `gp_capture_view` and the orchestrated tools (export, report listing,
+project ops) are not on this surface.
+
+**Who can reach it.** It listens on `127.0.0.1` (default port 8787) and never on a wildcard, so no
+network peer can reach it. But loopback TCP is not owner-only the way a socket file can be: **any local
+account** can open that port. On this surface the file-mode gate of section 2.2 is replaced by a single
+shared bearer token, and that token is the whole boundary.
+
+**What stops them** — each of these refuses to start or exits; none of them downgrades instead:
+
+- **Bind.** Only a loopback address *literal* is accepted: any address in `127.0.0.0/8`, or `::1`, in
+  either the bare or the `::ffff:`-mapped spelling. `0.0.0.0`, `::`, any routable address and **any
+  name — including `localhost`** — are refused with an error. A name is answered by `/etc/hosts` and
+  DNS, so accepting one would hand the choice of interface, and therefore of who can reach the act
+  surface, to whoever edits those files. Reach the gateway by name from the client side, where resolving
+  it decides only where the request goes. `--port` is validated as decimal digits 0–65535 before anything
+  is opened, so a mistyped value cannot quietly become port 80 or an ephemeral one.
+- **The token.** Read from `GLASSPANE_HTTP_TOKEN`; never generated, never defaulted, empty refused. It
+  must be at least 32 characters drawn from at least 8 distinct ones (`MIN_TOKEN_CHARS`,
+  `MIN_TOKEN_DISTINCT_CHARS`; both the CLI and the gateway check it). A length floor alone is satisfied
+  by `a` repeated 32 times, so the distinct-character arm is part of the rule, not decoration. Make one
+  with `openssl rand -hex 16`.
+- **How it is compared.** The expected and received bearer are each reduced to a SHA-256 digest and
+  compared with a timing-safe equality, so a length mismatch never returns early and neither the length
+  nor a matching prefix can be probed from response timing. That removes a prefix oracle; it does **not**
+  make a short token unguessable, and there is no rate limit, lockout or attempt count here — a local
+  process can send candidates at loopback speed. The guess cost is carried entirely by the token's
+  length and variety.
+- **A bind that fails is fatal.** `glasspane-http` exits 3 when it cannot bind, instead of carrying on.
+  The path this closes: with the port already held by another process and this one still looking alive,
+  every client keeps sending its requests — bearer token included — to whoever owns the port, and the
+  operator has no signal that the gateway served nothing at all. A gateway that is not listening must not
+  look alive.
+- **What one request can cost.** A request body is capped at 256 KiB; an `ids=` evidence aggregation at
+  20 ids and one shared 50 s wall-clock budget for the whole fan-out, so no single caller can fan into
+  thousands of serial daemon round trips or hold the daemon's one connection past the point where its
+  client has stopped listening.
+- **What an error means.** HTTP status is derived from the error's author (`httpStatusForEngineCode`):
+  a verdict the daemon produced about your request is a 4xx (`404` for no such operation or no evidence,
+  `400` for bad params, `409` for a project limit, `422` for any other code the daemon authors), and a 5xx
+  is only ever an answer about this gateway and its own shell — `503` nothing listening, `504` no answer
+  inside the deadline, `502` an answer that could not be delivered, `500` the gateway failing to complete
+  the request. This is a safety property, not cosmetics: a 5xx reads as
+  "the request never landed, sending it again is the fix", and on `act` that reading is a second click on
+  the user's screen. For the three methods whose repetition changes something — `act`, `attach`,
+  `restore` — the error bodies say do not re-send, and point the caller at the routes that read what
+  actually happened.
+
+**What does *not* stop them:**
+
+- **No TLS.** Plain HTTP over the loopback interface: the bearer token, and every body that comes back
+  (accessibility titles and values, evidence text), travel in clear text. Nothing on this surface
+  encrypts anything.
+- **One shared token, no per-user identity.** Every client holding it is the same principal. The gateway
+  cannot say which caller performed an operation, cannot revoke one caller without rotating the secret
+  for all of them, and does not record one caller's identity anywhere the daemon could attribute an act
+  to. The token is a gate, not an account.
+- **The gateway adds a second door to the same capability set, not a new capability.** To bridge, it has
+  to open the socket, so it runs as your user and gains nothing the socket did not already allow. What it
+  changes is reach: the door it opens is one that other local accounts can knock on, which the socket's
+  `0600` does not offer them.
+- **Late replies are raw engine content.** When an answer lands after its caller was already given a
+  deadline, the gateway writes that body to its own stderr, unredacted, capped at 64 KiB per reply with
+  the un-logged remainder counted in a marker (`LOG_BODY_CHARS`). If you redirect that stderr into a
+  file, it takes the mode that whatever started the gateway gave it — section 2.4 documents a
+  world-readable file in the state root that exists today.
+
+Practical consequences: do not leave this running when nothing is using it; treat the token as a
+password (environment, not a command line or a shell history line); and prefer the MCP path or the
+socket for anything that does not need HTTP, because those paths at least keep other accounts out by
+permission rather than by a secret.
+
+### 2.4 Evidence packs carry screen content out: what is on disk, and how to erase it
 
 - Location: `~/.glasspane/evidence/<operationId>.json` (one file per operation; archive cap 10,000 packs
   by default, `EvidenceStore.defaultMaxFiles = 10_000`), `~/.glasspane/projects.json`,
@@ -97,6 +204,19 @@ reports against those are usually judged out of scope.
 - Exports are copies: the HTML/Markdown reports produced by `gp_export_evidence` / `gp_recent_reports`
   are written to the path the caller specifies and contain the same interface text. Z4.5 Metal capture
   writes a `.gputrace` document into the **app under test's** temporary directory.
+- **Modes on the state root, as measured rather than as intended.** On the machine this page was checked
+  from: `~/.glasspane` `0700`, `engine.sock` `0600`, `approvals.json` and `projects.json` `0600` — the
+  daemon enforces those on bind and on its start-of-run sweep. `~/.glasspane/installer-daemon.log`
+  measured **`0644`** (`stat -f '%Lp' ~/.glasspane/installer-daemon.log` → `644`): world-readable as a
+  file mode, and it is the one file in the state root that no tightening covers — the sweep touches the
+  root, the registry, the approval chain and the evidence packs, not the launchd log. Today the only
+  thing keeping other accounts out of it is the `0700` directory above it, which is not the same
+  protection: it does not travel, so a copy of this file in a shared directory, a sync folder or a CI
+  artifact is readable by everyone who can read that copy. Its contents are the daemon's own stdout and stderr — startup and socket paths, pids,
+  client connect/disconnect, input-monitor and permission verdicts, engine error text — enough for
+  another account to learn that GlassPane is installed here, which daemon is running and what it has been
+  doing. Tighten it yourself if you would rather it were owner-only: `chmod 600
+  ~/.glasspane/installer-daemon.log`.
 - Cleanup. Size first, then prune by age:
 
   ```sh
@@ -109,11 +229,23 @@ reports against those are usually judged out of scope.
 - Do not put `~/.glasspane/` in cloud sync, shared directories, or CI artifacts. Redact per the rules in
   section 1 before filing an issue.
 
-### 2.4 launchd persistence registered by the installer
+### 2.5 launchd persistence registered by the installer
 
 - Writes `~/Library/LaunchAgents/com.glasspane.daemon.plist` — `RunAtLoad`, restart on abnormal exit,
   `ThrottleInterval 5`, executable pointing at `~/Applications/GlassPane Daemon.app`. This is a
-  **user-level** agent that starts at login; no system-level persistence is taken.
+  **user-level** agent that starts at login; no system-level persistence is taken. The job runs the daemon
+  only; it does not start the HTTP gateway of section 2.3, and it carries no token.
+- **Known, still open — where those paths come from.** The installer composes the socket path, the log
+  path above and the `LaunchAgents` path from `process.env.HOME`. The daemon's own default home is the
+  one the system records for the user, which does not consult `HOME`, so an install run with `HOME`
+  pointing elsewhere writes the job, the socket and the log under the redirected directory while the
+  evidence archive, the registry and the approval chain stay in the real home. The mixed result is
+  bounded, not catastrophic — the job hands the daemon an explicit `--socket-path`, so the daemon serves
+  the directory the installer named, and it refuses to bind unless that directory is owned by the
+  installing user and can be brought to `0700` — but the two halves of the state do not sit together, and
+  a caller that recomputes a path from `$HOME` instead of reading the job's value can end up pointed at
+  the wrong one. Until this is closed: install with a normal `HOME`, and read the socket path back from
+  `~/Library/LaunchAgents/com.glasspane.daemon.plist` rather than deriving it.
 - To remove persistence:
 
   ```sh
@@ -125,7 +257,7 @@ reports against those are usually judged out of scope.
   `node installer/cli.js --restore-launchd`: detect → bootstrap → verify the self-reported seat over
   `hello`. Passing `--no-launchd` at install time skips registration entirely.
 
-### 2.5 The LLDB bridge's debugger-attach capability
+### 2.6 The LLDB bridge's debugger-attach capability
 
 - `bridge/glasspane_bridge.py` uses the `xcrun lldb` SB API to **launch a new process or attach to an
   existing pid**, reading backtraces, registers and local variables, and arming hardware watchpoints.
@@ -138,7 +270,7 @@ reports against those are usually judged out of scope.
   any input a remote party can influence: that widens the "same-user code on this machine" boundary into
   remote code debugging.
 
-### 2.6 Ad-hoc signing without notarization: what it prevents and what it does not
+### 2.7 Ad-hoc signing without notarization: what it prevents and what it does not
 
 - Distribution builds are signed ad-hoc, with an identifier-only designated requirement that carries no
   cdhash:
@@ -163,6 +295,52 @@ reports against those are usually judged out of scope.
   manually in System Settings. The one-command install's `curl … | sh` is "execute a remote script" —
   read the script first, or point `GLASSPANE_REPO` at a local clone.
 
+### 2.8 The scheduled updater: a local job that can replace the binaries
+
+- **What it is**: a second user-level agent, `~/Library/LaunchAgents/com.glasspane.update.plist`, one run
+  a day (12:00 local by default), **as the logged-in user, with no escalation**. It fetches the latest
+  GitHub Release of the pinned repository over TLS and, when permitted, replaces
+  `~/Applications/GlassPane.app`, `~/Applications/GlassPane Daemon.app` and the global `glasspane-mcp` /
+  `glasspane-install` packages. The dials are the schedule and `GLASSPANE_UPDATE_BASE` (another *https*
+  host; a cleartext one is refused rather than downgraded to). `--no-auto-update` at install, `disable`,
+  or `GLASSPANE_UPDATE_DISABLE=1` take this section out of your threat model.
+- **What the checks prove, and what they do not.** The archive's measured SHA-256 equals the digest in
+  that same release's `SHA256SUMS`; the tag, the unpacked tree's own version line and the version that
+  lands agree; the commit the release names has a green CI run on `main`; the npm packages are packed from
+  that verified tree instead of being fetched again. That is integrity, version consistency and build
+  traceability. Authorship is now a **checked** claim rather than an assumption: the release publishes a
+  detached GPG signature over its checksum file (`SHA256SUMS-<ver>.txt.asc`), verified in a throwaway
+  keyring against the public key this repository ships with the code. Read that precisely: *verified*
+  means "these bytes match the key we ship", and since the key is distributed by the same channel, it is
+  not proof that the author is the organisation — only that whoever signed it holds that key. A signature
+  that is published and **does not check is a hard refusal that no consent overrides**. Where there is
+  nothing to check — **no `.asc` published** (every release tagged before the signing job existed,
+  `v1.3.1` among them) or **no `gpg` on this machine** — authorship is unknown, not proven: the scheduled
+  run refuses and leaves `needs-consent`, and only a person may proceed with
+  `updater check --consent unsigned-release`, which the state file and `gp_diagnose` then keep reporting
+  for as long as that release is what is installed. What the residual leaves you: compare the digest the
+  page shows against the release page before installing, keep automatic apply off and install by hand, or
+  pin the version and update deliberately.
+- **The state root became security-relevant.** The job's instructions — including which script to execute —
+  come from `~/.glasspane/update-state.json` and `~/.glasspane/update-install.json`, so anything that can
+  write the state root or that path pointer can steer an update into `~/Applications` and your global npm
+  packages. Those files are `0600` under a `0700` root: the same gate as section 2.2, which **gates
+  accounts, not your own processes** — same-user code is still the adversary, now holding a schedule and a
+  binary-replacement capability, and the `~/.glasspane/` handling rules of section 2.4 apply to them.
+- **It refuses instead of racing the daemon.** Before a swap, and again immediately before *every* restart
+  (including one after a rollback), the updater asks the daemon over its socket whether it is idle; an
+  answer means nothing was queued ahead of the probe, i.e. no act is in flight on your screen. No answer —
+  busy, unreachable, or an unparsable reply — defers the round and restarts nothing, because
+  `launchctl kickstart -k` cancels and rolls back whatever is in flight.
+- **A daemon writing to somebody else's state root is not touched**, and the read that decides it fails
+  closed: the arguments come from the *loaded* job via `launchctl print`, not from a plist launchd may
+  have bootstrapped an older copy of. A job naming another `--state-dir` is refused rather than swapped,
+  because replacing bundles another daemon uses changes a second installation, not this machine; output
+  that cannot be parsed to the end (no arguments block, unbalanced braces) is "unknown", which is a
+  refusal and never a default — a parser stopping at the first `}` would miss a `--state-dir` behind it.
+  The settings panel deliberately cannot grant this one; only a person at a terminal can, with
+  `apply --consent state-dir`.
+
 ## 3. These are **not** security issues (by design)
 
 - Permissions have to be ticked by a human in System Settings; no API lets the program tick them. The
@@ -174,13 +352,18 @@ reports against those are usually judged out of scope.
   of lighting up; an explicit, user-triggered capability probe runs bounded real `xcrun lldb` invocations
   and reports what it measured. Never falsely showing something as verified is a requirement here, not a
   defect.
-- Any same-user process can connect to the socket and drive the daemon; a probe self-declares its pid;
-  cross-user and network isolation are out of scope (see section 2).
+- Any same-user process can connect to the socket and drive the daemon; the socket's `0600` gates other
+  accounts, not other processes of your own account. A probe self-declares its pid. The HTTP gateway's
+  only gate is the shared bearer token, it offers no TLS, and it is reachable by any local account that
+  can hold the token. Cross-network isolation is out of scope (see section 2).
+- No tool call on either surface waits for a person. A frame the socket accepts is carried out, and the
+  gateway forwards to that same socket.
 - Degradation when Screen Recording or Input Monitoring is missing (`pixelDiff: null`, INCONCLUSIVE, a
   change in the circuit-breaker tier), and tier-1 `restore` refusing with `GP_E_RESTORE_UNSUPPORTED`:
   these degrade honestly, they are not gates to be bypassed.
 - The approval ledger currently holds only `daemon:auto` approve records. It is an **after-the-fact
-  signed audit chain**, not a human approval gate.
+  signed audit chain**, not a human approval gate, and nothing consults it before acting: it is an audit
+  surface, not a check that can be switched on.
 
 ## 4. Affected versions
 
@@ -194,4 +377,4 @@ reports against those are usually judged out of scope.
 X days / fixed within Y days" promise to make. What can be promised: private advisories are read and
 answered, confirmed issues are fixed on the `1.1.x` line, and the impact range plus workarounds are
 stated in the Release notes and CHANGELOG. If you need a temporary workaround, the two most effective are
-stopping the launchd job (`launchctl bootout`, see 2.4) and removing the granted TCC seats.
+stopping the launchd jobs (`launchctl bootout`, sections 2.5 and 2.8) and removing the granted TCC seats.

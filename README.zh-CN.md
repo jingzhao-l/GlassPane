@@ -30,6 +30,7 @@ GlassPane 补的就是这半个闭环。它把 macOS 应用的界面通过 MCP �
 - [能力一览](#能力一览)
 - [快速开始](#快速开始)
 - [安装](#安装)
+- [让 GlassPane 保持最新](#让-glasspane-保持最新)
 - [它做不到什么](#它做不到什么)
 - [接入 MCP 客户端](#接入-mcp-客户端)
 - [工具清单](#工具清单)
@@ -192,13 +193,17 @@ git clone --branch v1.1.1 https://github.com/jingzhao-l/GlassPane.git && cd Glas
 | `~/Applications/GlassPane.app` | 设置与权限引导面板 |
 | `~/Applications/GlassPane Daemon.app` | 后台服务（TCC 授权对象就是它） |
 | `~/Library/LaunchAgents/com.glasspane.daemon.plist` | launchd 开机自启作业 |
+| `~/Library/LaunchAgents/com.glasspane.update.plist` | 每日更新检查的 launchd 作业 |
 | `~/.glasspane/engine.sock` | 服务 socket，权限 `0600` |
 | `~/.glasspane/evidence/` | 逐操作证据包 |
 | `~/.glasspane/installer-daemon.log` | 安装与服务日志 |
+| `~/.glasspane/update-state.json`、`update-install.json`、`update.log`、`update-staging/`、`update-backup/` | 更新状态、更新器位置记录、日志，以及下载暂存与回滚备份 |
 
 ```bash
 launchctl bootout "gui/$(id -u)/com.glasspane.daemon" 2>/dev/null
+launchctl bootout "gui/$(id -u)/com.glasspane.update" 2>/dev/null
 rm -f ~/Library/LaunchAgents/com.glasspane.daemon.plist
+rm -f ~/Library/LaunchAgents/com.glasspane.update.plist
 rm -rf ~/Applications/GlassPane.app ~/Applications/"GlassPane Daemon.app"
 rm -rf ~/.glasspane
 ```
@@ -209,6 +214,53 @@ rm -rf ~/.glasspane
 ```bash
 node installer/cli.js --restore-launchd
 ```
+
+## 让 GlassPane 保持最新
+
+安装时会注册一个用户级的定时作业：每天问一次发布页有没有新版本，允许的话就把新版本换上。
+操作它的是 `GlassPane.app` 里的「更新」页。
+
+- **更新的是什么**：`~/Applications` 里的两个 bundle（设置面板与后台服务；换版后服务会被重启），
+  以及两个全局 npm 包 `glasspane-mcp`、`glasspane-install`。它们全部出自**同一个**校验过校验和的
+  发布压缩包——npm 包是从这份已校验的解包树里现场打出来的，不再去 registry 另取一份，
+  所以「验过的代码」和「装上的代码」不可能是两份东西。
+- **什么时候更新**：每天到点跑一次，默认本地 12:00（`enable --hour 3 --minute 45` 可改时间）。
+  换版只在后台服务空闲时发生，不会在代理正在你屏幕上执行动作的中途动手；服务忙就这一轮作罢，
+  下一个时间窗再试。
+- **现在就想查一次 / 手动装**：点「立即检查」拉取并校验，再点「安装更新」装上通过校验的那一份。
+  上方状态卡会给出当前版本、最新版本、上次检查时间、待装版本，以及它的完整 `sha256`——
+  想确认自己装的是什么，可以复制后与发布页核对。`gp_diagnose` 也给代理同样的答案：
+  这台机器的 GlassPane 旧不旧、现在停在哪个结论上。
+- 没有可装之事可做的按钮**不会消失，而是灰掉并在下面写一行原因**——面板不靠藏起来回避解释，
+  也不把失败显示成成功。
+- **跨大版本永不自动应用。** 它只是停在页面上等着，并写清理由（跨大版本升级，可能改变对外行为），
+  由你按下「安装更新」这一下才算确认；这个确认的作用就是 `--consent major`，而定时运行没有它。
+  它不是被悄悄跳过了。
+- **没人签名的 release 也不会被定时装上。** 每个 release 现在都为它的校验文件附上一份 detached GPG
+  签名，更新器用随程序分发的那把公钥验签——"这是谁发布的"从此由假设变成可检查的主张（它的准确含义只是
+  "与我们发布的 key 相符"）。没什么可验的时候——release 压根没发签名（`v1.3.1` 早于签名 job），或这台机器
+  没有 `gpg`——定时运行会停下并在页面上写明原因；人可以自己放行一次：
+  `updater check --consent unsigned-release`，此后状态文件与 `gp_diagnose` 会一直写明这一版是
+  **无作者性证明装上的**。签名发了却对不上则是直接硬拒，任何 consent 都不能覆盖。「安装更新」这个按钮
+  给不了这条确认（它今天只带 `--consent major`），要到终端里给。
+- **永久关掉自动更新**，下面三条任一即可，最后一条最硬：
+
+  ```bash
+  node installer/cli.js --no-auto-update    # 安装时就不注册那个定时作业
+  node "<更新器路径>" disable               # 之后任意时刻关掉；enable 可逆
+  GLASSPANE_UPDATE_DISABLE=1               # 连之后的 enable 都拒绝，因此重装也不会把它带回来
+  ```
+
+  `<更新器路径>` 就是这一页「更新器 → 程序」列出的那个路径。关掉不等于这页消失：面板会继续写
+  「自动更新已关闭（上次检查：X）」，而「立即检查」与「安装更新」照样能用——这个开关管的是定时，
+  不是你手动更新的能力。
+- **到点时这台机器是睡着或关着的**：睡眠中错过的运行 macOS 会在唤醒后补跑，关机期间错过的不会。
+  所以这件事不指望补跑：只要这一页没有更该先告诉你的事（有一份待装版本、或上一次被拒以及为什么被拒），
+  距上次检查超过 36 小时就会显示「检查已过期」，写明上次检查其实是多久之前，并把「立即检查」开给你按。
+- **「回滚需要人来收尾」指的是退出码 5**：新版本已经装上、重启后读回自检没过，而把旧版本放回去这一步
+  也没能被验证通过。到这一步工具不再自己猜：「安装更新」会被禁用，原因那一行会写明「自动退回没成功，
+  请先人工重新安装」——也就是重跑一次[安装器](#安装渠道)把 `~/Applications` 从源码重建出来，再回到
+  这一页。如果退回是验证成功的（退出码 4），你已经在旧版本上，页面会直接这么说。
 
 ## 它做不到什么
 

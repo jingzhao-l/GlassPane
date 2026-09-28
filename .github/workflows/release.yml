@@ -75,12 +75,28 @@ jobs:
             -o "GlassPane-${VERSION}.tar.gz" HEAD
           sha256sum "GlassPane-${VERSION}.tar.gz" > "SHA256SUMS-${VERSION}.txt"
           cat "SHA256SUMS-${VERSION}.txt"
-      - name: Sign release artifacts with GPG (best-effort)
-        # 与 iterate-harness 同款：仓库配了 GPG_PRIVATE_KEY/GPG_PASSPHRASE secrets 才
-        # 签名；未配则静默跳过——tarball + SHA256SUMS 仍照常上传，只少了 GPG 来源证
-        # 明这一层。产物为 ASCII-armored detached 签名（.asc），consumers 可用发布公钥
+      - name: Detect release signing key
+        id: gpg-key
+        # `secrets` 不是 step 级 if 的合法 context：直接写 `if: secrets.X != ''` 会让
+        # GitHub 拒绝解析整个工作流（此后每次触发都只有 0 job、无日志的红色 run，
+        # Release 链静默停摆；见 scripts/check-workflows.mjs 的门禁说明）。可用性只能
+        # 在一个读得到 secret 的 step 里算出来，再交给下游 if 读 output。
+        env:
+          GPG_INPUT_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${GPG_INPUT_KEY:-}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::未配置 GPG_PRIVATE_KEY（仓库 secret 或 release 环境）：本次发布只有 SHA256SUMS，没有 .asc 来源签名"
+          fi
+      - name: Sign release artifacts with GPG
+        # 配了 GPG_PRIVATE_KEY/GPG_PASSPHRASE 才签名；未配则整步跳过，tarball +
+        # SHA256SUMS 照常上传，只少 GPG 来源证明这一层——缺口由上一步写成 warning，
+        # 不静默。产物为 ASCII-armored detached 签名（.asc），consumers 用发布公钥
         # `gpg --verify <file>.asc <file>` 核对来源。
-        if: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+        if: ${{ steps.gpg-key.outputs.present == 'true' }}
         env:
           GPG_INPUT_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}

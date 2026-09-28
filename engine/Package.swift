@@ -28,7 +28,7 @@ let package = Package(
         ),
         .testTarget(
             name: "GlassPaneEngineTests",
-            dependencies: ["GlassPaneEngine"],
+            dependencies: ["GlassPaneEngine", "glasspane-settings"],
             path: "Tests/GlassPaneEngineTests"
         )
     ]

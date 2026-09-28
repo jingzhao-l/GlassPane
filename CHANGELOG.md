@@ -2,6 +2,84 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [未发布 — 版本线已提到 1.4.0]
+
+### Added — 自动更新（每天定时检查并换版，面板可手动，失败会说话）
+
+用户口径：定时检查 + 自动更新，对象是**已安装的 daemon（.app + launchd 服务）**与 **npm 两个包**；
+面板要能手动检查/手动更新，并且在"到点时机器是关的"或"重启失败"这类情况下**提示用户去点**。
+契约、判据与每条判据对应的能红测试都在 `specs/GlassPane_规格_自动更新_2026-09-27.md`（§8 是审计之后
+追加的硬要求，不是补丁说明）。
+
+- **新工作区 `updater/`**（零运行时依赖，纯 ESM）：`check / apply / status / rollback / enable / disable`
+  六个子命令，stdout 恰好一行 JSON，退出码 `0/2/3/4/5` 是契约的一部分（`5` 专指"换了但回滚也没成，
+  需要人"）。launchd agent `com.glasspane.update` 每日跑同一条 CLI —— 面板不实现第二套更新逻辑。
+- **信任链八道校验，任一不过就不换版**：钉死仓库与 https、tag 语义化且严格更大（major 永不自动应用）、
+  产物与校验文件必须成对、`SHA256SUMS` 严格解析（多义即拒，不"取第一个"）、落盘后**实测** sha256、
+  解包树自我一致性（跑它自己的 `scripts/check-version.mjs`）、该提交在 main 上必须有 success 的 CI run、
+  **这份 release 是谁发布的**（第 8 条，见下条）。状态与面板都显示 sha256 供人核对，major 一律要人点按钮。
+- **第八道校验：来源证明（作者性）从假设变成可检查的主张**。发布链侧 `release.yml` 会为
+  `GlassPane-<ver>.tar.gz` 与 `SHA256SUMS-<ver>.txt` 各产一份 detached armored 签名（`.asc`，
+  配了 `GPG_PRIVATE_KEY` 才生成）；updater 侧在**一次性隔离 GNUPGHOME**里 `gpg --verify` 校验那份
+  校验文件的签名，公钥**动态 import `installer/cli.js` 复用它已导出的那一份**（不在 `updater/` 里抄第二份
+  trust anchor——两处必须一致却没人核对的东西，本仓已经栽过两次），结论用词也复用安装器的
+  `classifyTagVerify`。四态各有 code 与句子：`verified`（状态文件记下指纹与被验资产）/ `invalid`
+  （`signature-invalid`，**硬拒，任何 consent 都不能覆盖**）/ `unsigned-release` /
+  `signature-tool-missing`。后两态下**定时运行一律拒绝**（`needs-consent`），人可用新增的
+  `--consent unsigned-release` 放行一次，放行之后状态文件与 `gp_diagnose` 摘要会**长期**写明"这一版是
+  无作者性证明装上的"。诚实边界：`verified` 的确切含义只是"与我们随代码分发的那把 key 相符"。
+  测试：`updater/test/signature.test.mjs`（23 条，含一条真跑 `gpg` 的分支测试——没装 gpg 的机器断言的
+  正是"缺失"这条路，绝不静默跳过），`check.test.mjs` 增加 7 条端到端编排用例。
+- **什么时候才允许换版**：守护进程单连接串行，所以"探针答得上来"是唯一可证的空闲 —— 构建可能要十几分钟，
+  因此每一次 `kickstart` 之前都重新探一次，探不到就 `deferred`，**一次都不重启**；运行中的 job 若带着
+  非默认 `--state-dir`，本工具不动它（读 `launchctl print`，读不懂按 fail-closed 处理）。
+- **换版与回滚**：先备份（逐文件 sha256 清单 + 读回校验）再动现场，换完用 socket 的 `hello` 与
+  `tools/list` 双向核对版本，不符就恢复备份并再次重启核对；恢复本身不可验证是唯一必须人工的结果。
+  npm 两个包从**已校验的暂存树**装（不从 registry），装完读回版本，不符即装回原版本。
+- **状态与指针**：`<stateRoot>/update-state.json` 与 `update-install.json` 都是 0600、临时文件 + rename
+  + 读回校验（在不支持 chmod 的卷上"成功"是静默的）；`status` 是封闭枚举，超过 36 小时没检查就报
+  `check-overdue` —— 这条兜住"到点时电脑是关的"。
+- **设置面板新增「更新」区**：当前/最新/上次检查/状态/待装版本/暂存校验和，失败原因**原文**显示；
+  「立即检查」「安装更新」「自动更新」开关按状态启用，**不可用时给出可见理由而不是隐藏**；
+  指针缺失或脚本不存在时如实说要重装，不静默成功。`swift test` 29 条用例覆盖按钮可达性与各种读失败。
+- **`gp_diagnose` 现在带上本机新鲜度**（单独一个 content 块，daemon 的 JSON 回复逐字不动）：
+  从没跑过更新 = 未知，不是"已是最新"；文件损坏/权限不对/状态不在枚举内 = 说清读不到。
+  壳层与 updater 对同一个状态根的解析由一条对照测试钉住（两者都必须按口令库而不是 `$HOME`）。
+- **安装器**：安装成功后写指针并注册每日 agent；`--no-auto-update` 或 `GLASSPANE_HTTP… DISABLE=1`
+  记为"已关闭"（面板显示关闭而不是"从没检查过"）；缺 `updater/cli.js` 的旧检出照样装成，但要说出
+  少了什么；重装幂等，不留两份 agent。
+
+### Fixed — Round 11：审这份新实现与 round 10 的修复
+
+见规格「追加七」与本节上方 §8（审计把 13 条升级为契约）。要点：空闲证据过期、`check` 编排从未被测、
+npm 读回不存在、launchd 命令拼接可被路径注入、`launchctl print` 解析在第一处 `}` 截断而放行别人的状态根、
+资产 URL 与重定向没钉住、CI 门只要求"存在一个 success run"（文档工作流也算）、执行暂存内容的步骤排在
+可信性校验之前、可以换到相同或更旧版本、换版后抛错却报告"什么都没变"、`disable` 按 `$HOME` 解析。
+
+### Fixed — 发布链：`release.yml` 从 09-27 起加载不了，Release 静默停摆
+
+签名步骤写成 `if: ${{ secrets.GPG_PRIVATE_KEY != '' }}`，而 `secrets` 不是 step 级 `if` 的合法
+context。GitHub 对这种文件在**解析期**整体作废：不产生任何 job，因此没有任何日志，之后每次触发只留下
+一个 0 步、名字是文件路径的红色 run。main 上连着六次 push 都只表现为"又一个看不懂的红灯"，实际后果是
+1.3.1 之后一次 Release 都没被创建过——没有 tarball、没有 SHA256SUMS，钉在 tag 上的安装器和自动更新
+那八道校验都无从落脚。
+
+- 门控拆成两步：先在一个读得到 secret 的 step 里把"私钥配了没有"写进 `$GITHUB_OUTPUT`，签名步骤再用
+  `steps.gpg-key.outputs.present` 判断。没配时前一步显式发 warning 说明这次发布只有校验和、没有来源
+  签名，不再静默跳过；两个分支都在本机真跑过。
+- 新守卫 `scripts/check-workflows.mjs`（CI job `GitHub Actions workflows compile`，先 `--self-test`
+  再扫仓库）：只认两类"解析期就死"的确定形状——非法 context（`if` / `runs-on` / `uses` /
+  `environment` 里引用 `secrets`）与同层重复键（merge 时整块手抄最容易造出来）。反向变异已证：把那一行
+  改回旧写法，守卫在该行报红、退出码 1。11 条对照里有一半是**不得报**的合法形状（注释里的 `secrets`、
+  `run:` 正文里的同名行、`env:` / `with:` 里的 secret 引用）——会把注释当缺陷的扫描器，下一个人就删
+  注释换绿，闸静默消失。
+- 因果证据是同一条命令的前后对比：修复前 `gh workflow run release.yml` 返回
+  `HTTP 422 … failed to parse workflow: (Line: 83, Col: 13): Unrecognized named-value: 'secrets'`，
+  修复后被接受并跑绿（dry 模式，不发布任何东西）。
+- 仍未闭合的一条：仓库与 `release` 环境里都没有 `GPG_PRIVATE_KEY`/`GPG_PASSPHRASE`，所以配好之前
+  发布产物依旧没有 `.asc`——第 8 道校验会判 `unsigned-release`，定时更新照设计拒绝自动换版，
+  人可以用 `updater check --consent unsigned-release` 放行一次。
+
 ## [1.3.1] — 2026-09-27
 
 1.3.0 发布之后连做两轮复审：round 9 审的是**已发布的那份代码**（五维并行，报回 40+ 条、逐条回代码复核后
