@@ -15,6 +15,14 @@ what the product depends on.
 
 ### Added
 
+- **Dimension-aware compaction (M4).** A compacted `gp_*` session now carries a
+  coverage line computed by the kernel: which planned review dimensions the
+  engine actually recorded a decision for, which recorded nothing, and which
+  recorded something the run never planned. A dimension with no decisions is
+  reported as unverified — never dropped, and never described as fine, since
+  only the engine may judge that. The dimension vocabulary is the iterate
+  config's; this side neither enumerates it nor infers one from a method name.
+
 - **Kernel conformance lane** (`bun script/kernel-conformance.mjs`): the kernel's own
   fixtures, mirrored into `contracts/kernel-fixtures/` and hash-pinned, are run through the
   kernel this package ships. Byte-identical answers or exit 1. With `--impl <dir>` it runs
