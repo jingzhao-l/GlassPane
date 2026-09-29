@@ -66,10 +66,37 @@ jobs:
             console.log("tag and product version agree:", product.version)
           '
 
+  create-release:
+    name: create the GitHub release for this tag
+    if: github.event_name == 'push'
+    needs: version-check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # `gh release upload` fails with "release not found" when the release does
+      # not exist yet, and nothing else in this lane creates one. That is how the
+      # first real run died: the binary built, the smoke test passed, and then
+      # the upload had nowhere to put the bytes. Creating it here — and only when
+      # absent, so re-running a tag is not an error — makes the lane idempotent.
+      - name: Create the release if it does not exist yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" --repo "$GH_REPO" >/dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists — leaving it as it is"
+            exit 0
+          fi
+          gh release create "${GITHUB_REF_NAME}" --repo "$GH_REPO" \
+            --title "glasspane-harness ${GITHUB_REF_NAME}" --generate-notes
+          echo "created release ${GITHUB_REF_NAME}"
+
   binaries:
     name: binary ${{ matrix.target }}
     if: github.event_name == 'push'
-    needs: version-check
+    needs: [version-check, create-release]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
