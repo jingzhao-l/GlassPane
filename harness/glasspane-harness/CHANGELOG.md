@@ -35,6 +35,18 @@ contract does not).
 
 ### Internal
 
+- **The release lane was broken end to end and had been for several releases.**
+  Five separate defects sat between a tag and a published binary, each hiding the
+  next: a `steps.*` expression that made GitHub reject the workflow file (zero
+  jobs dispatched), a `secrets` reference in a step's `if:` (same, and invisible
+  to any local YAML check), a `build` script invoked from the workspace root
+  where it does not exist, an upload that globbed both `.zip` and `.tar.gz` when
+  each runner only ever produces one, and no step creating the GitHub release
+  before the upload. `darwin-x64` additionally never got a runner at all, because
+  its matrix pinned `macos-13`, which GitHub has retired.
+  `check-workflows` now rejects `secrets` in an `if:`, so the second class of
+  failure is caught before it reaches the registry.
+
 - `packages/tui` typechecks clean (11 errors, one root cause: a `createResource`
   whose `T` could not be inferred, so every consumer lost its element type).
 - Two files that ship user-facing strings were outside the brand-surface
