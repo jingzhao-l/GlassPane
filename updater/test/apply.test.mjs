@@ -1176,7 +1176,7 @@ test('a successful swap re-exports the root bundle the new agent runs on', async
     assert.equal(state.caRoots.status, 'ok')
     assert.equal(state.caRoots.certs, 163)
   } finally {
-    await daemon.stop()
+    await daemon.close()
     fx.cleanup()
   }
 })
@@ -1205,7 +1205,7 @@ test('a refresh that could not produce a bundle does not turn a finished swap in
     assert.equal(result.status, 'applied', 'the version really did change; the CA gap is a next step, not a rollback trigger')
     assert.equal(loadState(fx.stateRoot).state.caRoots.status, 'probe-failed', '…and it stays on disk, so the panel can keep saying it')
   } finally {
-    await daemon.stop()
+    await daemon.close()
     fx.cleanup()
   }
 })
