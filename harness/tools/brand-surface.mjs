@@ -96,6 +96,14 @@ const PRODUCT_FILES = [
   "packages/tui/src/context/theme.tsx",
   "packages/tui/src/context/editor.ts",
   "packages/tui/src/routes/session/index.tsx",
+  // Added 2026-09-28 after two leaks were found *outside* this list: the session
+  // epilogue printed a hardcoded `opencode -s <id>` and the provider dialog kept a
+  // dead `opencode:` key. Both are user-facing and both shipped, while this
+  // ratchet reported "0 hits" — because a file that is not on the list is not
+  // scanned, and "not scanned" is indistinguishable from "clean". The two files
+  // below are the ones a user sees on exit and on the provider picker.
+  "packages/tui/src/util/presentation.ts",
+  "packages/tui/src/component/dialog-provider.tsx",
 ]
 const DOC_FILES = ["README.md", "README.zh-CN.md"]
 
