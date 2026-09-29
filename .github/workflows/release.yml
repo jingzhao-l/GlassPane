@@ -9,12 +9,15 @@ name: Release
 #
 # 前置已于 2026-09-22 满足：两个包（glasspane-mcp / glasspane-install）在
 # npmjs.com 各配了一条 GitHub Actions Trusted Publisher，仓库
-# jingzhao-l/GlassPane、工作流 release.yml、环境 release；**"publish
-# directly" 未勾（staged only）**——发布授权按产品原则留在人手里：
-#   · CI 先试直发；被拒即自动回落 `npm stage publish --provenance`，
-#     产出暂存件（不进 registry，装不到）。
-#   · owner 事后一条命令兑现存在：`npm stage approve <stage-id>`（2FA）。
-#     stage-id 见本工作流日志的 notice 行，或本地 `npm stage list`。
+# jingzhao-l/GlassPane、工作流 release.yml、环境 release。发布授权留在人手里靠的是
+# **触发本身**：npm 这条只认 workflow_dispatch 且 mode=publish，打 tag 不会发版
+# （GitHub Release 与 npm publish 是两条独立动作，见文件开头）。
+#   · 2026-09-29 发 1.4.0 实测：trusted publisher **直发成功**，provenance 进了 sigstore
+#     透明日志，没有产生任何 stage 件。这里此前写的「"publish directly" 未勾
+#     （staged only）」已不成立 —— 别按那句话去终端找 `npm stage approve`。
+#   · 万一哪天直发被拒（TP 配置改回 staged-only，或 npm 对 bypass-2FA token 的策略
+#     收紧），下面的 `|| npm stage publish` 分支接住，owner 用
+#     `npm stage approve <stage-id>`（2FA）兑现存在。
 # npm CLI ≥ 11.15 才有 stage 子命令，故先全局升 npm@11；不配 NPM_TOKEN
 # （空 token 会被 setup-node 写进 .npmrc，反而挡住 OIDC）。
 # npm 11 行为变化：`npm publish --dry-run` 不再纯本地、会查 registry 撞已发
