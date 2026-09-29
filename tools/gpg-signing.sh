@@ -187,6 +187,15 @@ NOTE
 
 # ── local ────────────────────────────────────────────────────────────────────
 cmd_local() {
+  local gpg_bin=""
+  if command -v gpg >/dev/null 2>&1; then
+    gpg_bin="$(command -v gpg)"
+  else
+    for c in /opt/homebrew/bin/gpg /usr/local/bin/gpg /usr/bin/gpg; do
+      [ -x "$c" ] && { gpg_bin="$c"; break; }
+    done
+    warn "gpg not on PATH; looked in the usual Homebrew locations"
+  fi
   local -a dirs=()
   if [ $# -eq 0 ]; then
     local repo dir env
@@ -210,7 +219,13 @@ cmd_local() {
     git -C "$root" config tag.gpgsign true
     git -C "$root" config gpg.format openpgp
     git -C "$root" config user.signingkey "$KEY_GRIP_HINT"
-    ok "$label: commit.gpgsign/tag.gpgsign=true signingkey=$KEY_GRIP_HINT"
+    # gpg.program must be absolute. Homebrew's gpg is not on the default PATH,
+    # and `git commit` then fails with the unhelpful "cannot run gpg: No such
+    # file or directory" — which reads like a missing key, not a missing PATH.
+    if [ -n "$gpg_bin" ]; then
+      git -C "$root" config gpg.program "$gpg_bin"
+    fi
+    ok "$label: commit.gpgsign/tag.gpgsign=true signingkey=$KEY_GRIP_HINT${gpg_bin:+ gpg.program=$gpg_bin}"
   done
 }
 
