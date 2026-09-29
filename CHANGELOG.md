@@ -2,6 +2,25 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.5.1] — 2026-09-29
+
+### Fixed — 探测 URL 拼成了 `[object Object]`，每台机器的 `caRoots` 都被记成 `probe-failed`
+
+1.5.0 的 §9.8 探测要用 release 端点，代码写成 `` `${resolveBase(env)}${RELATIVE_RELEASE_PATH}` ``，
+而 `resolveBase()` 返回的是 `{base, origin, overridden}`。子进程于是拿 `[object Object]/releases/latest`
+去 `fetch`，`new URL` 抛 `ERR_INVALID_URL`，`exportCaBundle` 如实降级。真正的伤害不是"少一次探测"，
+而是它**指挥用户去改自己机器的信任配置**（那条 remedy 写的是"把拦截根 import 进 System.keychain"），
+而坏的只是我一行拼接：安装日志、面板与 `gp_diagnose` 三处一起把一句假阳性说得很有把握。
+
+- 把构造收进可测的 `releaseProbeUrl(env)`：断言它等于 `https://api.github.com/repos/…/releases/latest`、
+  解析后 protocol/host/pathname 逐项对上，并且自建镜像基址 `GLASSPANE_UPDATE_BASE` 也必须带上同一条路径
+  （否则探测打到别处，又变成一次假的 `probe-failed`）。
+- 反向变异实测：把 `.base` 去掉 ⇒ 新用例红；恢复后 `ca-bundle` 16/16、本机 `updater` 全套 246/246。
+- 为什么 1.5.0 的测试没抓住：那些用例的 `probeUrl` 是我传进去的字符串常量，缺断言的是 `defaultDeps`
+  里的拼接。教训与 §9 那两处同源——**只在真机上跑一次才会露面的，是"桩替掉了生产的那一段"**。
+- 暴露它的正是 1.5.0 里那条"探测必须把子进程自己的原因带进记录"的改动：在此之前我只能看到
+  `TLS or DNS refused the connection` 这句我自己写的话，还据此怀疑过一次网络抖动。
+
 ## [1.5.0] — 2026-09-29
 
 版本判断（记下来免得下次靠记忆争）：这一批不是纯修复 —— 状态文件多了 `caRoots` 字段（schema 变化）、
