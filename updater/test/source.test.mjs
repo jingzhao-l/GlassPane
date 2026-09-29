@@ -195,6 +195,7 @@ test('a certificate-verification failure reports the cause code, not "fetch fail
   assert.equal(error.code, CODES.releaseUnreachable)
   assert.match(error.message, /UNABLE_TO_VERIFY_LEAF_SIGNATURE/, 'the code lives in error.cause; dropping it is what made this machine look offline while curl worked')
   assert.match(error.message, /fetch failed/, 'the original sentence stays, this is an addition not a rewrite')
+  assert.equal(error.tlsVerification, true, 'the recovery branch reads this flag, not my sentence')
   assert.match(error.details, new RegExp(`NODE_EXTRA_CA_CERTS=${BUNDLE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'the remedy names the file this machine should be handed')
   assert.match(error.details, /updater enable|installer/, 'and the two ways to produce it')
 })
@@ -205,6 +206,7 @@ test('a refused connection gets no certificate advice', async () => {
   }, { caBundlePath: BUNDLE })
   const error = await captureAsync(() => fetcher(URL_UNDER_TEST))
   assert.match(error.message, /ECONNREFUSED/)
+  assert.equal(error.tlsVerification === true, false, 'a refused connection must not arm the certificate-recovery branch')
   assert.equal(error.details, null, 'handing an operator a plausible fix for a problem they do not have turns the remedy into a new source of confusion')
 })
 

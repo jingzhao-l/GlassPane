@@ -86,6 +86,7 @@ export async function runCheck({
       status: patch.status,
       code: patch.code ?? null,
       message: patch.message ?? null,
+      tlsVerification: patch.tlsVerification === true,
       latest: patch.latest ?? previous.latest,
       current: patch.current ?? previous.current,
       // Off the *merged* document, not `patch.staged ?? previous.staged`: a
@@ -116,6 +117,9 @@ export async function runCheck({
         code,
         message: error?.message ?? null,
         details: error?.details ?? null,
+        // 不是状态文档的字段（`nextState` 会把它筛掉），只是这条拒绝要带给 CLI 的事实：
+        // §9.10 的自愈分支读它，不读文案。
+        tlsVerification: error?.tlsVerification === true,
         current: local?.version ?? previous.current,
         lastCheckAt: extra.stampCheck === false ? previous.lastCheckAt : now.toISOString(),
         staged: null,

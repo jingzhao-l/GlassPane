@@ -207,39 +207,63 @@
    （管理员装的根在后者），合并写进 `<stateRoot>/ca-roots.pem`。
 2. **写入与其余状态文件同形**：临时文件 + rename + 读回校验，0600。证书计数为 0 ⇒ 判为失败：不留半个
    文件、不写 agent 的环境变量、安装日志说清哪一步空了。绝不把"导出成功"建立在 `security` 的退出码上。
-3. **消费者只有两个，且都在进程启动前拿到变量**：launchd agent 的 plist 写
+3. **常态消费者只有两个，且都在进程启动前拿到变量**：launchd agent 的 plist 写
    `EnvironmentVariables.NODE_EXTRA_CA_CERTS`；面板 `Process` 起 CLI 时把同一个变量放进环境。
-   node 只在启动时读这份束，所以**不做 re-exec、不改 `NODE_TLS_REJECT_UNAUTHORIZED`、不加 `--insecure`**。
-   在终端手敲 `node updater/cli.js check` 的人若没设这个变量，唯一正确的行为是**失败并把 remedy 说出来**
-   （见第 6 条），而不是悄悄可用或悄悄不可用。
+   node 只在启动时读这份束，所以**不许改 `NODE_TLS_REJECT_UNAUTHORIZED`、不加 `--insecure`、不降级到 http**。
+   唯一被允许的 re-exec 是第 10 条，而且只在"已经失败在证书上"之后发生一次；除此之外，在终端手敲
+   `node updater/cli.js check` 的人若没设这个变量，正确行为是**失败并把 remedy 说出来**（见第 6 条）。
 4. **`NODE_EXTRA_CA_CERTS` 是追加而不是替换**：node 仍在验证完整链，Mozilla 束继续有效，只是另外也信任
    这台机器的管理员已经选择信任的那些根。文档必须这样写，否则读者会把它读成"关了校验"。内容级作者性
    仍由 §1 第 5、8 道兜住：下载字节必须匹配那份被我们自己的 key 签过的 `SHA256SUMS`，中间人签不出它。
-5. **刷新点**：安装时、`enable` 注册 agent 时、每次 `apply` 成功之后。理由很具体：拦截证书的有效期到
-   2027-02，轮换后不刷新就是每天一次 `release-unreachable`。
+5. **刷新点**：`enable` 注册 agent 时（安装器走的就是这条路）、每次 `apply` 成功之后、以及第 10 条的
+   证书类失败恢复时。理由很具体：拦截根会轮换（本机那张到 2027-02），只在前两个点刷新等于
+   "后来装了新代理的机器永远刷不到那张新根"。
 6. **失败文案必须带真因和可执行 remedy**。`release-unreachable` 现在写 `GET <url> failed: fetch failed`
    ——真因在 `error.cause.code` 里被吞掉了；一个人/代理看到 "fetch failed" 只会去查网络通不通，而浏览器里
    GitHub 明明打得开。契约：TLS 验证类失败必须报出 `cause` 的 code，并点名
    `export NODE_EXTRA_CA_CERTS=<stateRoot>/ca-roots.pem`；非 TLS 失败（`ECONNREFUSED`、DNS、4xx）**不得**
    套用这句 remedy，要报自己那条原因 —— 否则 remedy 本身成为误导源。
-7. **状态是封闭枚举，不是布尔**。实现与路径由 `updater/lib/ca-bundle.js` 独家持有（单一作者），调用点是三处：
-   安装时（安装器）、`enable` 注册 agent 时、每次 `apply` 成功之后。枚举：
-   `ok`（写出 N>0 张且探测通过）/ `probe-failed`（文件写出来了，但拿它仍到不了 release 端点——这才是"这台
-   机器还在被拦且束里缺那张根"）/ `empty`（`security` 有输出但 0 张证书）/ `unavailable`（没有 `security`
-   工具，即非 macOS）/ `write-unverified`（读回与写出内容不符）。记进状态文件的字段是 `caRoots`（可为
+7. **状态是封闭枚举，不是布尔**。实现与路径由 `updater/lib/ca-bundle.js` 独家持有（单一作者），调用点是
+   第 5 条那三处。枚举：
+   `ok`（写出 N>0 张）/ `probe-failed`（文件写出来了，但带着它仍连不上 release 端点——这才是"这台机器还在
+   被拦且束里缺那张根"）/ `empty`（`security` 有输出但 0 张证书）/ `unavailable`（没有 `security`
+   工具，即非 macOS）/ `write-unverified`（读回与写出内容不符）。
+   **端点自己答了一个非 2xx 不是束的失败**：403/404 说明 TLS 已经验通、是服务器不同意，记录必须留在 `ok`
+   并把那个答复写进 `detail`。把它写成 `probe-failed`，remedy 就指挥人去改信任配置——而那恰恰是这里
+   最不该乱动的东西（真机第一次安装就把它写成了 `TLS or DNS refused`，而九分钟后同一个 URL 直接 200）。
+   记进状态文件的字段是 `caRoots`（可为
    `null` = 这份安装从未导出过，面板与 `gp_diagnose` 要说"旧安装，未记录"而不是"正常"）。
    `empty`/`unavailable`/`write-unverified`/`probe-failed` 都必须附 remedy；**只有 `ok` 才算可用**。
 8. **导出之后探一次真的 release 端点**（best-effort）：探不通不阻断安装，但必须把原因写进安装日志、状态文件
    与面板，因为这条不修好，每日 agent 从装好那天起就是死的，而它看起来完全像"在正常工作"。
+   探测必须**起子进程**（node 只在进程启动时读这个变量，在当前进程里设它等于什么都没设），并且必须把子进程
+   自己那侧的原因（`REJECT <code> <message>` / `HTTP <status>`）带进记录——只留一个退出码，读的人就只能猜。
 9. **绝不因 TLS 不可用而降级**：不放宽 `GLASSPANE_UPDATE_BASE` 的 https 限制、不走 http、不跳过任何一道
    校验。宁可这一版不更新（停在 needs-consent、面板显示原因），也不在信任链上打洞。
 
+10. **证书类失败时重导一次束，并带着它把自己重跑一次**（2026-09-29 由用户批准；起因是真机形状）。
+    只有第 1–9 条会留下一个**永久**状态：束只在 `enable`/`apply` 刷新，而 TLS 失败永远走不到 `apply`；
+    机器后来装了新代理 ⇒ 每天定时检查死在第 1 道门上，面板读起来像"没有可用更新"。规则：
+    · 判据是**结构化事实** `tlsVerification`（`source.js` 依 `error.cause.code` 判定后随拒绝对象带上），
+      不许靠匹配自己写的句子——文案会改，判据不能跟着改；
+    · 调用方已经给了 `NODE_EXTRA_CA_CERTS` 时**不介入**：那份信任是操作者自己指的，方向归他；
+    · 只重跑一次：`GLASSPANE_CA_REEXEC=1` 是防循环标记，带标记那次不再重导也不再起子进程；
+    · 重跑的 argv 逐字相同（少一个参数就是另一件事），`--json` 那一行**只由子进程写**，父进程一个字都不加；
+    · 束导不出来（`empty`/`unavailable`/`write-unverified`）就不重跑，但结论必须落进状态文件；
+    · 子进程被信号杀死或压根没起来 ⇒ 退出码 `3`，绝不能是 `0`：一个"看起来跑完了每日检查"的 0 会把事故抹掉；
+    · 恢复只发生在 `main()`（可执行入口），不在 `runCommand()`（库接口）——安装器是库调用方，它背后
+      绝不该被偷偷起一个 CLI 子进程。
+
 | 判据 | 测试 | 反向变异怎么红 |
 | --- | --- | --- |
-| 0 张证书＝失败，不留文件不写环境变量 | `installer/test/ca-roots.test.mjs` | 桩返回空文本仍写文件 ⇒ 红 |
+| 0 张证书＝失败，不留文件不写环境变量 | `updater/test/ca-bundle.test.mjs` | 桩返回空文本仍写文件 ⇒ 红 |
 | 写后读回校验 mode 与内容 | 同上 | 去掉读回 ⇒ 红 |
 | plist 携带该变量且路径被 XML 转义 | `updater/test/launchd.test.mjs` | 删 `EnvironmentVariables` 或不转义 ⇒ 红 |
 | 面板 spawn 带上同一变量 | `engine/Tests/…/UpdatePanelTests.swift` | 环境不设 ⇒ 红 |
 | TLS 失败文案含 cause code 与 remedy；非 TLS 不含 | `updater/test/source.test.mjs` | 回到 `${error.message}` ⇒ 红 |
-| 五态封闭、各有说法，且 `caRoots:null` 读成"旧安装未记录"而不是"正常" | `updater/test/ca-bundle.test.mjs` + `installer/test/ca-roots.test.mjs` | 把 `probe-failed` 并入 `ok` ⇒ 红 |
+| 五态封闭、各有说法，且 `caRoots:null` 读成"旧安装未记录"而不是"正常" | `updater/test/ca-bundle.test.mjs` + `installer/test/auto-update.test.mjs` | 把 `probe-failed` 并入 `ok` ⇒ 红 |
 | apply 后刷新 | `updater/test/apply.test.mjs` | 去掉刷新调用 ⇒ 红 |
+| 端点答 403 仍算 `ok`，不是信任失败 | `updater/test/ca-bundle.test.mjs` | 把 answered-non-ok 并进 probe-failed ⇒ 红 |
+| 探测记录带子进程自己的原因 | 同上 | 丢掉 stderr 首行 ⇒ 那条 match 红 |
+| 渲染出的 plist 能被**严格**解析器读（注释内不得有连续连字符） | `updater/test/launchd.test.mjs` | 把 state-dir 的双连字符写回注释 ⇒ 红；`plutil` 这个宽容 oracle 看不见 |
+| 证书失败重导并重跑：argv 逐字、只一次、信号不返回 0、库调用方不起子进程 | `updater/test/tls-recovery.test.mjs`（8 条） | 删标记判断 ⇒ 循环那条红；空束也重跑 ⇒ 那条红；`status ?? 0` ⇒ 信号那条红；把恢复挪进 `runCommand` ⇒ main 那条红 |

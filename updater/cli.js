@@ -19,6 +19,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
+import { spawnSync } from 'node:child_process'
 
 import { CODES, EXIT, exitCodeFor } from './lib/codes.js'
 import { UpdaterError, canonicalPath } from './lib/fsutil.js'
@@ -31,9 +32,11 @@ import { localVersion } from './lib/version.js'
 import { CONSENT_KINDS } from './lib/policy.js'
 import { makeBytesFetcher, makeFetcher, resolveBase } from './lib/source.js'
 import { RELATIVE_RELEASE_PATH } from './lib/check.js'
-import { caBundlePath, describeCa, exportCaBundle, usableBundle } from './lib/ca-bundle.js'
+import { CA_ENV_VAR, caBundlePath, describeCa, exportCaBundle, usableBundle } from './lib/ca-bundle.js'
 
 export const SUBCOMMANDS = ['check', 'apply', 'status', 'rollback', 'enable', 'disable']
+// 防循环标记：重跑的那一次带着它，于是它自己的 TLS 失败只会如实报出原因，不再往上叠一层子进程。
+export const REEXEC_MARKER = 'GLASSPANE_CA_REEXEC'
 
 export const USAGE = `usage: node updater/cli.js <command> [options]
 
@@ -437,6 +440,41 @@ export function jsonLine(outcome) {
   return JSON.stringify(line)
 }
 
+/**
+ * §9.10：证书类失败时重导一次束，并**带着它把自己重跑一次**。
+ *
+ * 为什么必须有这一条：束只在 `enable` 与 `apply` 成功后刷新，而一次 TLS 失败永远走不到
+ * `apply`。于是"这台机器后来装了新代理"是一个会**永久卡住**的状态——每天定时跑、每天在同一
+ * 道门上失败，而它看起来像"没有可用更新"。这是真机跑出来的形状，不是假设。
+ *
+ * 三条边界，都是为了不把"追加信任"变成"擅自改信任"：
+ *   · 只在调用方**没有**给 `NODE_EXTRA_CA_CERTS` 时介入。人在终端上自己指了一份，方向就归他；
+ *   · 只重来一次（`GLASSPANE_CA_REEXEC=1` 是防循环标记，子进程带着它就不会再套一层）；
+ *   · 导不出可用的束就不重跑：把这次的导出结果写进状态，原来的拒绝照常返回。
+ *
+ * 返回 null 表示"没有恢复、请按原样输出"；返回数字表示"子进程已经替我把 stdout/退出码
+ * 演完了"——`--json` 那一行也只由子进程写一次，契约不被复制第二遍。
+ */
+export function recoverFromTlsFailure({ outcome, argv, env, refresh, spawnChild, onRecord } = {}) {
+  // 只读结构化事实。匹配我自己写的句子＝文案一改判据就失效，那正是这一路要避免的形状。
+  if (!outcome || outcome.tlsVerification !== true) return null
+  if (String(env[CA_ENV_VAR] ?? '') !== '') return null
+  if (String(env[REEXEC_MARKER] ?? '') === '1') return null
+  if (typeof refresh !== 'function' || typeof spawnChild !== 'function') return null
+
+  const record = refresh()
+  if (typeof onRecord === 'function') onRecord(record)
+  if (!record || record.status !== 'ok' || !record.path) return null
+
+  const child = spawnChild([...argv], { ...env, [CA_ENV_VAR]: record.path, [REEXEC_MARKER]: '1' })
+  const status = child && typeof child.status === 'number' ? child.status : null
+  if (status === null) {
+    // 被信号打断或压根没起来：绝不退 0。一个"看起来完成了每日检查"的 0 会把这次事故抹掉。
+    return EXIT.REFUSED
+  }
+  return status
+}
+
 export async function main({ argv = process.argv.slice(2), env = process.env, stdout = process.stdout, stderr = process.stderr, deps = {} } = {}) {
   const parsed = parseArgs(argv)
   if (!parsed.ok) {
@@ -464,6 +502,25 @@ export async function main({ argv = process.argv.slice(2), env = process.env, st
       state: null,
     }
     stderr.write(`updater: ${error.message}\n`)
+  }
+  if (!outcome.ok && outcome.tlsVerification === true) {
+    const root = resolveStateRoot({ flags: parsed.flags, env, homeDir: deps.homeDir ?? recordHomeDir() })
+    const recovered = recoverFromTlsFailure({
+      outcome,
+      argv,
+      env,
+      stateRoot: root,
+      refresh: deps.refreshCaBundle ?? (() => exportCaBundle({ stateRoot: root, probeUrl: null })),
+      spawnChild: deps.spawnChild
+        ?? ((childArgs, childEnv) => spawnSync(process.execPath, [new URL(import.meta.url).pathname, ...childArgs], { env: childEnv, stdio: 'inherit' })),
+      onRecord: (record) => {
+        // 导不出也要留痕：面板与 gp_diagnose 靠这条说话，否则这台机器的失败只剩一句猜测。
+        const stamp = new Date()
+        const { state } = loadState(root)
+        saveState(root, nextState(state, { caRoots: record }, { now: stamp }), { now: stamp })
+      },
+    })
+    if (recovered !== null) return recovered
   }
   const code = outcome.exitCode ?? exitCodeFor(outcome)
   if (parsed.flags.json) {

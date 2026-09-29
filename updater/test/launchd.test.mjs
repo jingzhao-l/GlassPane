@@ -461,6 +461,40 @@ test('a job that names --state-dir twice is not a job whose root can be read', (
 
 /* ------------------------------------------------- the CA bundle the agent is handed */
 
+/**
+ * A strict reader, on purpose. `plutil` (and launchd itself) accept an XML comment
+ * containing a double hyphen; `expat`, `xmllint` and Python's `plistlib` do not, and
+ * the installed plist is the file someone reaches for when the job misbehaves. This
+ * exact shape shipped in a real `~/Library/LaunchAgents` plist until a strict parser
+ * was pointed at it, while every plutil-based assertion above stayed green — a lenient
+ * oracle cannot see a malformation only strict readers refuse.
+ */
+function strictParse(file) {
+  const py = 'import plistlib,sys; plistlib.load(open(sys.argv[1],"rb")); print("STRICT OK")'
+  return spawnSync('python3', ['-c', py, file], { encoding: 'utf8' })
+}
+
+test('the rendered agent survives a strict XML/plist reader, not just plutil', () => {
+  const dir = tempDir(`${TMP_PREFIX}plist-strict-`)
+  try {
+    for (const caBundle of ['/Users/dev/.glasspane/ca-roots.pem', null]) {
+      const text = renderAgentPlist({ cliPath: '/x/cli.js', stateRoot: '/Users/dev/.glasspane', caBundle })
+      const file = path.join(dir, caBundle ? 'with-bundle.plist' : 'no-bundle.plist')
+      fs.writeFileSync(file, text)
+      for (const comment of [...text.matchAll(/<!--([\s\S]*?)-->/g)]) {
+        assert.equal(comment[1].includes('--'), false, '注释里出现连续连字符：严格解析器（expat/xmllint/plistlib）会整份拒收')
+      }
+      const strict = strictParse(file)
+      assert.equal(strict.status, 0, `strict parser refused the rendered plist:\n${strict.stderr || ''}\n${text}`)
+      assert.match(strict.stdout, /STRICT OK/)
+    }
+  } finally {
+    removeDir(dir)
+  }
+})
+
+
+
 test('the agent is handed the exported root bundle, because node reads it when the process starts', (t) => {
   if (process.platform !== 'darwin') return t.skip('plutil is the reader being satisfied here')
   const dir = tempDir(`${TMP_PREFIX}ca-env-`)
