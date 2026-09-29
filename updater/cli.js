@@ -20,6 +20,7 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
 import { CODES, EXIT, exitCodeFor } from './lib/codes.js'
 import { UpdaterError, canonicalPath } from './lib/fsutil.js'
@@ -157,7 +158,7 @@ export function resolveAppsDir({ flags = {}, env = process.env, homeDir = record
  * their own `deps` so the suite never touches a developer's home or the
  * internet.
  */
-export function defaultDeps({ stateRoot, appsDir, env, flags }) {
+export function defaultDeps({ stateRoot, appsDir, env, flags, exportCa = exportCaBundle } = {}) {
   const daemonBin = flags['daemon-bin'] ?? env.GLASSPANE_DAEMON_BIN ?? path.join(appsDir, 'GlassPane Daemon.app', 'Contents', 'MacOS', 'glasspaned')
   return {
     env,
@@ -185,7 +186,7 @@ export function defaultDeps({ stateRoot, appsDir, env, flags }) {
     // §9: the root bundle node needs on a TLS-intercepting machine, exported by
     // this module alone and refreshed at the two points that can do it without a
     // person in the loop — registering the agent, and finishing a swap.
-    refreshCaBundle: () => exportCaBundle({ stateRoot, probeUrl: releaseProbeUrl(env) }),
+    refreshCaBundle: () => exportCa({ stateRoot, probeUrl: releaseProbeUrl(env) }),
     usableCaBundle: () => usableBundle(caBundlePath(stateRoot)),
     now: () => new Date(),
   }
@@ -350,7 +351,7 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         const caRoots = merged.refreshCaBundle()
         const bundle = merged.usableCaBundle()
         const plistText = merged.renderAgentPlist({
-          cliPath: merged.cliPath ?? new URL(import.meta.url).pathname,
+          cliPath: merged.cliPath ?? fileURLToPath(import.meta.url),
           stateRoot,
           hour: Number(flags.hour ?? DEFAULT_HOUR),
           minute: Number(flags.minute ?? DEFAULT_MINUTE),
@@ -465,18 +466,37 @@ export function jsonLine(outcome) {
  * 返回 null 表示"没有恢复、请按原样输出"；返回数字表示"子进程已经替我把 stdout/退出码
  * 演完了"——`--json` 那一行也只由子进程写一次，契约不被复制第二遍。
  */
-export function recoverFromTlsFailure({ outcome, argv, env, refresh, spawnChild, onRecord } = {}) {
+export function recoverFromTlsFailure({ outcome, argv, env, refresh, spawnChild, onRecord, stderr = null } = {}) {
   // 只读结构化事实。匹配我自己写的句子＝文案一改判据就失效，那正是这一路要避免的形状。
   if (!outcome || outcome.tlsVerification !== true) return null
-  if (String(env[CA_ENV_VAR] ?? '') !== '') return null
   if (String(env[REEXEC_MARKER] ?? '') === '1') return null
   if (typeof refresh !== 'function' || typeof spawnChild !== 'function') return null
 
   const record = refresh()
-  if (typeof onRecord === 'function') onRecord(record)
+  // 写状态失败不能顺手取消重跑，但也不能吞掉：那句话并进结果消息里，读的人看得见"这次没落盘"。
+  let recorded = true
+  if (typeof onRecord === 'function') {
+    try {
+      onRecord(record)
+    } catch (error) {
+      recorded = false
+      record.recordWriteError = String(error?.message ?? error)
+    }
+  }
   if (!record || record.status !== 'ok' || !record.path) return null
-
+  const wanted = String(env[CA_ENV_VAR] ?? '')
+  if (wanted !== '' && wanted !== record.path) {
+    // 操作者自己指到别处的束：重跑只会用他那一份，我们刷新不了他的信任，就不代为决定。
+    // 等号那一侧不是可有可无：终端里照着 remedy 设过同一份路径的人，等的就是这次恢复。
+    return null
+  }
   const child = spawnChild([...argv], { ...env, [CA_ENV_VAR]: record.path, [REEXEC_MARKER]: '1' })
+  if (!recorded) {
+    // 重跑照做（那才是用户要的恢复），但"这次没能在状态里留下证据"必须说出来 ——
+    // 只写 stderr，`--json` 那一行仍然恰好一行、且只由子进程写。
+    stderrFor(stderr).write(`updater: 证书恢复已重跑，但导出结果没能写进状态文件（${record.recordWriteError ?? '原因未知'}）；`
+      + `下一次 \`updater enable\` 之前，面板与 gp_diagnose 看到的 caRoots 仍是上一次的记录。\n`)
+  }
   const status = child && typeof child.status === 'number' ? child.status : null
   if (status === null) {
     // 被信号打断或压根没起来：绝不退 0。一个"看起来完成了每日检查"的 0 会把这次事故抹掉。
@@ -520,9 +540,10 @@ export async function main({ argv = process.argv.slice(2), env = process.env, st
       argv,
       env,
       stateRoot: root,
-      refresh: deps.refreshCaBundle ?? (() => exportCaBundle({ stateRoot: root, probeUrl: null })),
+      refresh: deps.refreshCaBundle ?? (() => exportCaBundle({ stateRoot: root, probeUrl: releaseProbeUrl(env) })),
       spawnChild: deps.spawnChild
-        ?? ((childArgs, childEnv) => spawnSync(process.execPath, [new URL(import.meta.url).pathname, ...childArgs], { env: childEnv, stdio: 'inherit' })),
+        ?? ((childArgs, childEnv) => spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...childArgs], { env: childEnv, stdio: 'inherit' })),
+      stderr,
       onRecord: (record) => {
         // 导不出也要留痕：面板与 gp_diagnose 靠这条说话，否则这台机器的失败只剩一句猜测。
         const stamp = new Date()
@@ -550,7 +571,7 @@ export async function main({ argv = process.argv.slice(2), env = process.env, st
 let invokedDirectly = false
 try {
   invokedDirectly = Boolean(process.argv[1])
-    && fs.realpathSync(process.argv[1]) === fs.realpathSync(new URL(import.meta.url).pathname)
+    && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url))
 } catch {
   invokedDirectly = false
 }

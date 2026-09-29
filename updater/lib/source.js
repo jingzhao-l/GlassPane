@@ -201,7 +201,7 @@ export function describeTransportFailure(url, error, { caBundlePath = null } = {
   if (!isTlsVerificationFailure(code)) return { message: head, details: null, tlsVerification: false }
   const remedy = caBundlePath
     ? `node trusts only the CA bundle compiled into it and does not read the macOS keychain, so a machine whose HTTPS is intercepted by a locally trusted root needs that root handed to it: export NODE_EXTRA_CA_CERTS=${caBundlePath} (if that file does not exist yet, re-run the installer or "updater enable" — either exports the machine's own root bundle; nothing verifies less by doing this, it adds the roots this machine's administrator already trusts).`
-    : `node trusts only the CA bundle compiled into it and does not read the macOS keychain, so a machine whose HTTPS is intercepted needs its own root bundle exported: run the installer or "updater enable", then point NODE_EXTRA_CA_CERTS at <stateRoot>/ca-roots.pem.`
+    : `node trusts only the CA bundle compiled into it and does not read the macOS keychain, so a machine whose HTTPS is intercepted needs its own root bundle exported: run the installer or "updater enable", then point NODE_EXTRA_CA_CERTS at the ca-roots.pem inside your update state root ("updater status --json" names that directory in its stateRoot field).`
   // 结构化地说"这是证书类失败"：下游的自愈分支必须读这个布尔，而不是去匹配我写的句子
   // （文案会改，判据不能跟着改）。
   return { message: head, details: remedy, tlsVerification: true }

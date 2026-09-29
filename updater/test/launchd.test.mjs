@@ -474,7 +474,7 @@ function strictParse(file) {
   return spawnSync('python3', ['-c', py, file], { encoding: 'utf8' })
 }
 
-test('the rendered agent survives a strict XML/plist reader, not just plutil', () => {
+test('the rendered agent survives a strict XML/plist reader, not just plutil', (t) => {
   const dir = tempDir(`${TMP_PREFIX}plist-strict-`)
   try {
     for (const caBundle of ['/Users/dev/.glasspane/ca-roots.pem', null]) {
@@ -485,6 +485,7 @@ test('the rendered agent survives a strict XML/plist reader, not just plutil', (
         assert.equal(comment[1].includes('--'), false, '注释里出现连续连字符：严格解析器（expat/xmllint/plistlib）会整份拒收')
       }
       const strict = strictParse(file)
+      if (strict.error && strict.error.code === 'ENOENT') return t.skip('python3 不在这台机器上，严格读者这一半没得测')
       assert.equal(strict.status, 0, `strict parser refused the rendered plist:\n${strict.stderr || ''}\n${text}`)
       assert.match(strict.stdout, /STRICT OK/)
     }
@@ -574,3 +575,27 @@ function capture(fn) {
   }
   throw new assert.AssertionError({ message: 'the call was expected to refuse, and it did not' })
 }
+
+test('every substituted token keeps a `$&` in the value verbatim (replaceAll semantics, not XML)', (t) => {
+  if (process.platform !== 'darwin') return t.skip('plutil is the reader being satisfied here')
+  const dir = tempDir(`${TMP_PREFIX}plist-dollar-`)
+  try {
+    // `String.prototype.replaceAll(token, value)` 会把替换串里的 `$&` 展开成"刚才匹配到的那段"，
+    // 于是路径里一个 `$&` 就能把 plist 的前文原样拼回 <string>。XML 转义对它无效 —— 这是字符串
+    // 替换语义，不是文档语义。而这些值全部来自另一个进程写的文件（指针、状态根、日志路径）。
+    const values = {
+      nodePath: '/usr/local/bin/node$&',
+      cliPath: '/Users/x/my app$&/updater/cli.js',
+      stateRoot: '/Users/x/.glasspane$&',
+      logPath: '/Users/x/.glasspane$&/update.log',
+    }
+    const doc = plistToJson(renderAgentPlist({ ...values, caBundle: '/Users/x/.glasspane$&/ca-roots.pem' }), dir)
+    assert.deepEqual(doc.ProgramArguments.slice(3), [values.nodePath, values.cliPath, '--state-root', values.stateRoot],
+      'argv 槽位必须逐字等于传进来的路径')
+    assert.equal(doc.StandardOutPath, values.logPath, JSON.stringify(doc.StandardOutPath))
+    assert.equal(doc.EnvironmentVariables.NODE_EXTRA_CA_CERTS, '/Users/x/.glasspane$&/ca-roots.pem')
+    assert.equal(doc.ProgramArguments[2].includes('glasspane$&'), false, 'shell 里那句命令是常量，不该被任何值改写')
+  } finally {
+    removeDir(dir)
+  }
+})

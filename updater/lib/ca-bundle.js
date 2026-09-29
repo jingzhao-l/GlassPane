@@ -59,8 +59,16 @@ export function countCertificates(text) {
 }
 
 /**
- * 这个文件现在能不能交给 node。判据是**内容**不是退出码也不是文件大小：一份 0 字节的
- * `NODE_EXTRA_CA_CERTS` 会让 node 在启动期报错，等于把"每天失败一次"换成"每天启动失败一次"。
+ * 这个文件现在能不能交给 node。判据是**里面有几张证书**，不是文件在不在、也不是它多大。
+ *
+ * 理由要说准（本机 node v26.4.0 实测，`probe-ca-env3.sh` 可复现）：一份 0 字节的
+ * `NODE_EXTRA_CA_CERTS` **不会**让 node 在启动期报错——它能正常起、正常做 TLS 握手，只是
+ * 一张额外的根都没加进去；文件根本不存在时 node 也只往 stderr 打一行
+ * `Warning: Ignoring extra certs …`，不崩。把"空束"写成"启动失败"是我编的，已删。
+ *
+ * 那为什么仍然判它不可用：一台真被拦截的机器上，空束的表现与"什么都没做"**一模一样**——检查
+ * 照样倒在第一道门上，而状态里却记着"束已导出"。那种记录会把人支去查网络，而缺的是信任。
+ * 一张都没有的束不能证明任何事，所以它不是 `ok`。
  */
 export function usableBundle(bundlePath, { readFile = (p) => fs.readFileSync(p, 'utf8') } = {}) {
   let text
@@ -78,11 +86,13 @@ export function usableBundle(bundlePath, { readFile = (p) => fs.readFileSync(p, 
  * "束写好了但仍连不通"（拦截根不在这两个钥匙串里，或网络真的断了），后两者是"这台机器上导不出
  * 东西"。把它们混成一句，读的人就只能猜。
  */
-export function describeCa(record) {
+export function describeCa(record, { bundlePath = null } = {}) {
   if (!record) {
     return {
       summary: 'this install has never exported a root bundle for node',
-      remedy: 'run the installer again, or "updater enable": either one re-exports <stateRoot>/ca-roots.pem and re-registers the agent with it.',
+      remedy: bundlePath
+        ? `run the installer again, or "updater enable": either one re-exports ${bundlePath} and re-registers the agent with it.`
+        : 'run the installer again, or "updater enable": either one exports the machine\'s root bundle as ca-roots.pem inside your update state root (the stateRoot field of "updater status --json" names that directory) and re-registers the agent with it.',
     }
   }
   const where = record.path ? ` ${record.path}` : ''
@@ -112,7 +122,7 @@ export function describeCa(record) {
     case 'probe-failed':
       return {
         summary: `${record.certs} root certificate(s) were exported${where}, but a node started with them could not reach the release endpoint (${record.detail ?? 'no reason reported'})`,
-        remedy: 'the intercepting root is not in the system keychains, or the network really is down. Import it ("sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain <root>"), or export NODE_EXTRA_CA_CERTS to a bundle you control before invoking the updater.',
+        remedy: 'the intercepting root is not in the system keychains, or the network really is down. Import it ("sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain /path/to/the-intercepting-root.pem"), or export NODE_EXTRA_CA_CERTS to a bundle you control before invoking the updater.',
       }
     default:
       // 枚举外的一切都是"这份记录读不懂"。当成 ok 就是规格 §9.7 明令禁止的那种静默放行。

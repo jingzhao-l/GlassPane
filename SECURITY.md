@@ -321,6 +321,36 @@ permission rather than by a secret.
   for as long as that release is what is installed. What the residual leaves you: compare the digest the
   page shows against the release page before installing, keep automatic apply off and install by hand, or
   pin the version and update deliberately.
+- **It hands node extra trust, and that is the part worth weighing.** node does not read the macOS
+  trust store, so on a machine whose HTTPS is re-signed locally (corporate gateway, accelerator) the
+  daily job cannot reach the release endpoint at all. The fix: at registration the updater exports
+  every certificate from `SystemRootCertificates.keychain` and `System.keychain` into
+  `~/.glasspane/ca-roots.pem` and points the job's `NODE_EXTRA_CA_CERTS` at it — measured on the
+  author's machine: 158 + 5 = 163 certificates, 161 of them `CA:TRUE`. The consequences, stated in the
+  direction they actually run:
+  · **Additive only.** The Mozilla bundle stays in force and verification is never turned off — no
+  `NODE_TLS_REJECT_UNAUTHORIZED`, no `--insecure`, no cleartext anywhere on the release path. That is
+  no longer just a sentence here: `updater/test/trust-inversion.test.mjs` scans the shipped code for
+  those switches, comments excluded, and its own self-test has to keep proving it can fail.
+  · **Trust settings are not consulted.** `security find-certificate` lists certificates, not what
+  macOS is willing to trust. A root an administrator explicitly *distrusted*, or a CA sitting in
+  `System.keychain` for some unrelated purpose, becomes a trust anchor for this job even though the
+  operating system would refuse it. This is a widening relative to system policy, and it is the real
+  content of this bullet.
+  · **Non-CA certificates in that list are inert.** Measured: a self-signed `CA:FALSE` certificate
+  handed to node as the only extra anchor does not make a chain signed by it verify — OpenSSL refuses
+  with `INVALID_PURPOSE`. So the two Apple service identities the export includes
+  (`com.apple.systemdefault`, `com.apple.kerberos.kdc`) grant nothing.
+  · **Who could abuse the widening.** Anyone able to add a CA to those keychains already holds
+  administrator access to this machine, which is a strictly larger capability than the one described
+  here; the residual risk is the pre-existing certificate, not the export. If you want node to trust
+  less, set `NODE_EXTRA_CA_CERTS` to your own bundle before invoking the updater — the updater never
+  deletes an inherited value, never retargets a path it did not export, and never sets the key when it
+  has no usable bundle (an empty value would silently cancel yours).
+  · **Why it is not filtered by trust settings.** Filtering means reading `security dump-trust-settings`,
+  which has no machine-readable contract; a filter that silently dropped the intercepting root would
+  break exactly the check this exists for. The failure modes that are visible stay visible: a bundle
+  holding zero certificates is refused and reported, never recorded as `ok`.
 - **The state root became security-relevant.** The job's instructions — including which script to execute —
   come from `~/.glasspane/update-state.json` and `~/.glasspane/update-install.json`, so anything that can
   write the state root or that path pointer can steer an update into `~/Applications` and your global npm

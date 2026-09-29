@@ -618,7 +618,9 @@ final class UpdatePanelTests: XCTestCase {
     }
 
     /// 反向变异：**"文件在"就当能用**（一份 0 字节、或满是空白却没有证书的束被交给
-    /// `NODE_EXTRA_CA_CERTS`，node 在启动期报错——那是把每天失败一次换成每天连启动都启动不了）。
+    /// `NODE_EXTRA_CA_CERTS`：实测 node v26.4.0 不崩也不报错，它照常启动、照常握手，只是
+    /// 一张额外的根都没加——见 `updater/test/ca-bundle.test.mjs` 里那条实测控制。危险不是
+    /// "起不来"，是"看着做了其实什么都没做"，而状态里会记成"束已导出"）。
     func testCaBundleOnDiskIsJudgedByCertificatesNotByPresence() {
         let pem = """
         -----BEGIN CERTIFICATE-----
@@ -650,7 +652,8 @@ final class UpdatePanelTests: XCTestCase {
     }
 
     /// 反向变异：**无条件设置这个键**（束不在也把路径写进去），或**用空串"表示没有"**
-    /// （node 对空值是启动期报错，与不设完全是两件事）。
+    /// （空串不会让 node 崩——实测它与没设表现一致；它的问题是**把操作者从终端带进来的那一份
+    /// 信任静默覆盖掉**，所以"不写这个键"与"写一个空值"必须分成两件事）。
     func testCaBundleEnvironmentLeavesTheKeyOutWhenThereIsNoBundle() {
         for bundle in [UpdatePanel.CaBundleOnDisk.absent,
                        UpdatePanel.CaBundleOnDisk.empty(path: "/tmp/root/ca-roots.pem")] {
@@ -796,6 +799,28 @@ final class UpdatePanelTests: XCTestCase {
         }
     }
 
+    /// 反向变异：**把 `<那份束的路径>` 这类占位符留在界面上**（1.5.1 之前的 `unavailable`
+    /// 那句就是这么显示给用户的——那是一句让人自己去猜路径的话，不是一个做得动的动作）。
+    /// 这一页要么给出真实路径，要么用中文说清去哪儿查；尖括号里的模板字符串一律算违规。
+    func testCaRootsCopyNeverShowsAnAngleBracketPlaceholder() throws {
+        let shapes: [(String, UpdatePanel.Snapshot?)] = [
+            ("ok", try caRootsSnapshot(status: "ok", certs: 163, detail: nil)),
+            ("empty", try caRootsSnapshot(status: "empty", certs: 0, detail: "security printed nothing")),
+            ("unavailable", try caRootsSnapshot(status: "unavailable", certs: 0, detail: "no security tool")),
+            ("write-unverified", try caRootsSnapshot(status: "write-unverified", certs: 12, detail: "read back 0 of 12")),
+            ("probe-failed", try caRootsSnapshot(status: "probe-failed", certs: 163, detail: "UNABLE_TO_VERIFY_LEAF_SIGNATURE")),
+            ("认不出的状态", try caRootsSnapshot(status: "looks-fine", certs: 1, detail: nil)),
+            ("旧安装（记录为 null）", try snapshotWithNullCaRoots()),
+            ("没读到状态", nil),
+        ]
+        for (label, snapshot) in shapes {
+            let text = UpdatePanel.caRootsText(snapshot)
+            XCTAssertFalse(text.contains("<"), "\(label) 的文案里有尖括号占位符，用户按它做不了任何事：\(text)")
+            XCTAssertFalse(text.contains(">"), "\(label) 的文案里有尖括号占位符：\(text)")
+            XCTAssertFalse(text.contains("stateRoot"), "\(label) 把内部变量名当成了给用户看的句子：\(text)")
+        }
+    }
+
     /// 反向变异：**把 `null` 读成 `ok`**（这就是这台机器"面板每天看着都正常、
     /// 其实一次都没连上"的形状），或缺失时显示成"没有这个问题"。
     func testMissingOrNullCaRootsReadsAsAnOldInstallNotAsFine() throws {
@@ -938,8 +963,8 @@ final class UpdatePanelTests: XCTestCase {
     /// 一个"把自己收到的那个变量原样报回来"的假 node。
     ///
     /// 与 `writeFixtureNode` 分开写而不是改它：这批测试要看的正是多出来的那一句，
-    /// 而 `${VAR+set}` 分得清"根本没这个键"与"有一个空值"——这两种在 node 眼里是
-    /// 两件事（后者启动期报错），光看 `$VAR` 分不出来。
+    /// 而 `${VAR+set}` 分得清"根本没这个键"与"有一个空值"——面板的规矩是不设而非设空
+    /// （设空会静默覆盖操作者从终端带进来的那一份信任），光看 `$VAR` 分不出这两种。
     private func writeEnvironmentAwareNode(dir: URL, jsonLine: String, exitCode: Int32) throws -> URL {
         let path = dir.appendingPathComponent("node").path
         let body = """

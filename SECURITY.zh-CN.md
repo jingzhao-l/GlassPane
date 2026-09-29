@@ -243,6 +243,27 @@ GlassPane 不是普通工具库：它**持有** macOS 的高危权限（辅助�
   只有人可以用 `updater check --consent unsigned-release` 继续，而这一事实会一直被状态文件与
   `gp_diagnose` 说出来，只要装的还是这一版。这个残余留给你的动作：装之前把面板显示的完整校验和与发布页
   核对；关掉自动应用、只手动装；或者钉住版本，把更新当作一次有意识的动作。
+- **它给 node 追加了信任，这件事值得单独称量。** node 不读 macOS 的信任库，所以在这台机器的 HTTPS 被
+  本地重签（企业网关、加速器）时，每日作业根本连不上发布站点。做法是：注册那一刻更新器把
+  `SystemRootCertificates.keychain` 与 `System.keychain` 里的**每一张**证书导进
+  `~/.glasspane/ca-roots.pem`，并把作业的 `NODE_EXTRA_CA_CERTS` 指过去。作者机器上实测：158 + 5 = 163 张，
+  其中 161 张 `CA:TRUE`。后果按它真实的方向写清：
+  · **只追加，不取消校验。** Mozilla 那份束照常生效，校验从未被关掉——没有 `NODE_TLS_REJECT_UNAUTHORIZED`、
+  没有 `--insecure`、发布这条路径上没有明文。这一句也不再只是文档：`updater/test/trust-inversion.test.mjs`
+  会扫生产代码里的这些开关（注释除外），而它自带的自测必须持续证明自己能变红。
+  · **不看信任设置。** `security find-certificate` 列的是证书，不是"macOS 愿意信任什么"。管理员显式
+  **不信任**的那张根，或为了别的目的装进 `System.keychain` 的一张 CA，都会对这个作业变成 node 的信任锚，
+  哪怕系统本身拒绝它。这一条是本页真正的边界所在。
+  · **名单里那些非 CA 证书是无害的。** 实测：把一张自签的 `CA:FALSE` 证书作为唯一追加锚交给 node，由它签出的
+  链仍然验证不过——OpenSSL 报 `INVALID_PURPOSE`。所以导出里那两张 Apple 本机服务身份
+  （`com.apple.systemdefault`、`com.apple.kerberos.kdc`）什么都没授予。
+  · **谁能利用这个放宽。** 能往这两个钥匙串加 CA 的人，本来就已经握着这台机器的管理员权限——那比这里描述的
+  能力大得多，所以残余风险在于那张早已存在的证书，不在于导出。想让 node 少信任一些：在调用更新器之前把
+  `NODE_EXTRA_CA_CERTS` 设成你自己那份束。更新器从不删继承来的值，从不把不是自己导出的路径改指别处，也没有
+  可用束时**根本不写这个键**（写一个空值会静默取消你自己的那份信任）。
+  · **为什么不按信任设置过滤。** 过滤要读 `security dump-trust-settings`，而它没有机器可读的契约；一旦过滤
+  静默把拦截用的那张根丢掉，坏的正好是这条机制要保的那次检查。能被看见的失败态保持可见：一份一张证书都没有的
+  束会被判为失败并说出来，不会被记成 `ok`。
 - **状态根从此是安全相关资产。** 那个作业要执行什么、执行哪个脚本，都取自
   `~/.glasspane/update-state.json` 与 `~/.glasspane/update-install.json`；任何能写状态根或这份路径记录的
   东西，就能把一次更新推进你的 `~/Applications` 与全局 npm 包。这两个文件是 `0600`、父目录 `0700`，

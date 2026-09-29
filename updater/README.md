@@ -24,7 +24,8 @@
   `probe-failed` 只在传输/TLS 层失败时出现，且必须带子进程自己报出的原因。
 - **TLS 失败后的一次自我修复**：`main()`（只有可执行入口，不含库接口 `runCommand`）在拿到
   `tlsVerification` 的拒绝时重导一次束，带着 `NODE_EXTRA_CA_CERTS` 与防循环标记
-  `GLASSPANE_CA_REEXEC=1` 把**同一条 argv** 重跑一次；调用方已经给了那个变量就不介入（方向归操作者）；
+  `GLASSPANE_CA_REEXEC=1` 把**同一条 argv** 重跑一次；调用方把那个变量指到**别的路径**时不介入（方向归操作者），
+  他指的就是我们导出的那一份时照常恢复；
   导不出可用束就不重跑但一定留痕；子进程被信号杀死 ⇒ 退出码 `3`，绝不返回 `0`。
 - **它写哪里**：`<stateRoot>/update-state.json`、`update-install.json`、`update-staging/`、
   `update-backup/`、`update.log`。状态根按**口令库里的家目录**解析（`os.userInfo().homedir`），不按 `$HOME`：
@@ -33,10 +34,16 @@
 ## 已知边界（不当成已交付）
 
 - **node 不读 macOS 信任库，这条腿只能靠导出的束**：装了 HTTPS 中间人的机器（企业网关、加速器）上，
-  `curl`/`git`/`gh` 都正常而 `fetch` 拒绝同一条链，因为 node 只认自己打包的 CA 束。本树的处理是导出
-  "这台机器的管理员已经选择信任"的那些根并追加给 node（不是替换、更不是关闭校验）。边界要说清：
-  拦截根若不在这两个钥匙串里，就只能落 `probe-failed` 等人处理；而**内容安全从来不依赖这条腿** ——
-  下载字节必须匹配那份由发布 key 签过的 `SHA256SUMS`，中间人签不出它。
+  `curl`/`git`/`gh` 都正常而 `node fetch` 拒绝同一条链，因为 node 只认自己打包的 CA 束。本树的处理是导出
+  那两个钥匙串里的**全部**证书并**追加**给 node（不是替换、更不是关闭校验）。措辞得按实测来：
+  `security find-certificate` 列的是证书，**不是**"这台机器的管理员选择信任的东西"——信任设置不参与，
+  被管理员显式判为不信任的根、以及为别的目的躺在 `System.keychain` 里的 CA，都会对这个作业变成 node 的
+  信任锚。作者机器实测 158 + 5 = 163 张，其中 161 张 `CA:TRUE`；两张非 CA 的（`com.apple.systemdefault`、
+  `com.apple.kerberos.kdc`）经实测什么也授不了（自签的 `CA:FALSE` 当锚，OpenSSL 直接 `INVALID_PURPOSE`）。
+  完整版与理由在 `SECURITY.md` §2.8（中英两份）。其余边界：拦截根若不在这两个钥匙串里，就只能落
+  `probe-failed` 等人处理；而**内容安全从来不依赖这条腿** —— 下载字节必须匹配那份由发布 key 签过的
+  `SHA256SUMS`，中间人签不出它。想少给信任：调用更新器之前把 `NODE_EXTRA_CA_CERTS` 设成你自己那份束
+  （更新器不删继承来的值，也不把不是自己导出的路径改指别处）。
 - **作者性（第 8 条）如今是被检查的，但只检查到"内置 key"这一层**：`verified` 的确切含义是"这份
   `SHA256SUMS` 与随代码分发的那把公钥相符"，不是"发布者是这个组织"——公钥与代码走同一渠道，轮换就是改
   `installer/cli.js` 里那一个导出值（`updater/lib/signature.js` 动态 import 它，`updater/` 下不留第二份，
