@@ -849,6 +849,9 @@ export async function registerAutoUpdate({
   now = new Date(),
   exists = fs.existsSync,
   say = (line) => printStep(line),
+  // §9：注册那一趟现在会导出系统根证书束并起子进程探测一次 release 端点。
+  // 单测必须能替换掉这两件事——否则 `npm test` 变成一次联网测试，慢且不稳。
+  updaterDeps = {},
 } = {}) {
   const tree = updaterTreePaths(rootDir)
   const modules = {}
@@ -894,7 +897,7 @@ export async function registerAutoUpdate({
   }
 
   const flags = { json: false, auto: false, help: false, consents: [], overrides: {}, 'state-dir': stateRoot }
-  const deps = { cliPath: tree.cli, ...homeArgs }
+  const deps = { cliPath: tree.cli, ...homeArgs, ...updaterDeps }
   if (uid !== null && uid !== undefined) deps.uid = String(uid)
   if (runLaunchctl) deps.runLaunchctl = runLaunchctl
 
@@ -930,9 +933,24 @@ export async function registerAutoUpdate({
     pointer: written.pointer,
     pointerPath: written.path,
     message: outcome.message,
+    // `undefined`（这份 updater 根本不回报）与 `null`（回报了但没有束）对读者是同一句话：
+    // 没有证据。合成一个形状，下游就不必为两种"没有"各写一条分支——而两种分支里，
+    // 漏掉一种就是崩溃。
+    caRoots: outcome.state && outcome.state.caRoots ? outcome.state.caRoots : null,
   }
   if (registered) {
     say(`每日自动更新已注册（${agentLabel}，默认 ${schedule}，状态根 ${stateRoot}；指针 ${written.path}）——一键关：node "${tree.cli}" disable`)
+    // §9.8：node 不读 macOS 信任库，装了 HTTPS 中间人的机器上这件事只有 updater 自己能发现。
+    // 安装日志必须把它说出来——否则每天失败的是一个看起来在正常工作的代理。措辞与 remedy
+    // 都来自 outcome.message（唯一作者），这里只转述，不重写。
+    const ca = summary.caRoots
+    if (ca && ca.status === 'ok') {
+      say(`node 的系统根证书束：已导出 ${ca.certs} 张 → ${ca.path}，并已写进该作业的 NODE_EXTRA_CA_CERTS`)
+    } else if (ca) {
+      say(paint(`注意（自动更新的网络这一跳）：${outcome.message}`, 'yellow'))
+    } else {
+      say(paint(`注意：这份 updater 没有回报根证书束的导出结果（旧版本）；若本机 HTTPS 被中间人替换，每日检查会在第一道校验上失败，跑 node "${tree.cli}" enable 可重新导出。`, 'yellow'))
+    }
   } else {
     say(
       `自动更新已关闭（${switchedOffByEnv ? 'updater 报环境变量已关，见下面它自己的原话' : '--no-auto-update'}）：`
@@ -960,10 +978,18 @@ export function updateGuidanceText(update) {
     ]
   }
   if (update.state === 'registered') {
+    const ca = update.caRoots
+    const caLine = !ca
+      ? `   ⚠ 这份 updater 没有回报 node 要用的系统根证书束（旧版本）；本机 HTTPS 若被中间人替换，每日检查会在第一道校验上失败。补上：node "${update.updaterCli}" enable。`
+      : ca.status === 'ok'
+        ? `   node 用本机导出的系统根证书束 ${ca.certs} 张（${ca.path}，已写进作业的 NODE_EXTRA_CA_CERTS）。`
+        : `   ⚠ 本机没能导出 node 要用的系统根证书束（${ca.status}）；HTTPS 被中间人替换的机器上，每日检查会在第一道校验上失败，`
+          + '面板与 gp_diagnose 会一直显示这句话，修复办法是它给的那条。'
     return [
       `6. 自动更新：默认开。launchd 每日 ${update.schedule} 跑 "${update.updaterCli}" check && apply`,
       `   （作业 ${update.agentLabel}，RunAtLoad=false，日志 ${update.stateRoot}/update.log）；`,
-      '   只在 daemon 空闲应答探针、且规格 §1 七道校验全过时才换版，major 永远等人点按钮。',
+      '   只在 daemon 空闲应答探针、且规格 §1 八道校验全过时才换版，major 永远等人点按钮。',
+      ...(caLine ? [caLine] : []),
       `   一键关：node "${update.updaterCli}" disable（卸该作业 + 状态记 disabled=true）；重开：enable。`,
       `   卸载本机安装时：bootout daemon 作业的同时**也必须** bootout ${update.agentLabel} 并删它的 plist。`,
     ]
