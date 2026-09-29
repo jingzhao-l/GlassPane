@@ -532,6 +532,7 @@ export async function applyUpdate({
   npm = installNpmPackages,
   socketPath = null,
   writeState = true,
+  refreshCa = null,
 } = {}) {
   const roots = writableRoots(stateRoot)
   const { state } = loadState(stateRoot)
@@ -817,6 +818,11 @@ export async function applyUpdate({
     const standing = authorshipNote(state.authorship, 'applied')
     const swapped = `updated ${baseline} -> ${wantVersion}`
     const message = standing ? `${swapped}. ${standing.message}` : swapped
+    // §9: a swap replaces the very bundles the agent runs from, so the root bundle
+    // node is handed has to be re-exported with it. Without this, a rotated
+    // interception root turns the daily job dead under an install that just
+    // succeeded, and "applied" is the last honest thing the state file says.
+    const caRoots = refreshCa ? refreshCa() : state.caRoots ?? null
     const saved = stamp({
       status: 'applied',
       code: standing?.code ?? null,
@@ -824,6 +830,7 @@ export async function applyUpdate({
       current: wantVersion,
       latest: state.latest,
       staged: null,
+      caRoots,
       lastError: null,
       historyEntry: { action: 'apply', result: 'applied', digest: state.staged.digest, code: standing?.code ?? null },
     })

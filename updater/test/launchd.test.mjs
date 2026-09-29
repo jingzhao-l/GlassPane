@@ -22,6 +22,8 @@ import {
   DAEMON_JOB_LABEL,
   DEFAULT_HOUR,
   DEFAULT_MINUTE,
+  AGENT_TEMPLATE,
+  agentEnvironmentBlock,
   agentPlistPath,
   kickstartJob,
   parseLaunchctlArguments,
@@ -455,6 +457,77 @@ test('a job that names --state-dir twice is not a job whose root can be read', (
   assert.deepEqual(stateDirReadings(['--state-dir', '/a', '--state-dir', '/a']), ['/a'])
   assert.deepEqual(stateDirReadings(['--state-dir=/a', 'x']), ['/a'])
   assert.deepEqual(stateDirReadings(['glasspaned']), [])
+})
+
+/* ------------------------------------------------- the CA bundle the agent is handed */
+
+test('the agent is handed the exported root bundle, because node reads it when the process starts', (t) => {
+  if (process.platform !== 'darwin') return t.skip('plutil is the reader being satisfied here')
+  const dir = tempDir(`${TMP_PREFIX}ca-env-`)
+  try {
+    const bundle = '/Users/dev/.glasspane/ca-roots.pem'
+    const text = renderAgentPlist({ cliPath: '/x/cli.js', stateRoot: '/Users/dev/.glasspane', caBundle: bundle })
+    const doc = plistToJson(text, dir)
+    assert.equal(doc.EnvironmentVariables.NODE_EXTRA_CA_CERTS, bundle, 'a bundle that exists but is not in the job environment changes nothing')
+  } finally {
+    removeDir(dir)
+  }
+})
+
+test('no bundle means no EnvironmentVariables key at all — not an empty one, not an empty string', (t) => {
+  if (process.platform !== 'darwin') return t.skip('plutil is the reader being satisfied here')
+  const dir = tempDir(`${TMP_PREFIX}ca-none-`)
+  try {
+    const text = renderAgentPlist({ cliPath: '/x/cli.js', stateRoot: '/Users/dev/.glasspane' })
+    const doc = plistToJson(text, dir)
+    assert.equal('EnvironmentVariables' in doc, false, 'NODE_EXTRA_CA_CERTS="" is a bundle path that points at nothing; node fails at start-up on an unreadable file')
+    // The absence has to be readable by a person too: the installed plist is the
+    // artifact someone opens when the daily job misbehaves.
+    assert.match(text, /NODE_EXTRA_CA_CERTS not set: this machine has no exported system root bundle/)
+  } finally {
+    removeDir(dir)
+  }
+})
+
+test('a bundle path carrying XML metacharacters comes back byte-identical', (t) => {
+  if (process.platform !== 'darwin') return t.skip('plutil is the reader being satisfied here')
+  const dir = tempDir(`${TMP_PREFIX}ca-xml-`)
+  try {
+    const bundle = '/Users/dev/.glasspane/we&ird<c>"x".pem'
+    const doc = plistToJson(renderAgentPlist({ cliPath: '/x/cli.js', stateRoot: '/Users/dev/.glasspane', caBundle: bundle }), dir)
+    assert.equal(doc.EnvironmentVariables.NODE_EXTRA_CA_CERTS, bundle, 'an unescaped path rewrites the plist around itself and launchd reads a different job than this rendered')
+  } finally {
+    removeDir(dir)
+  }
+})
+
+test('an unnamed bundle is refused instead of rendered as a job that trusts nothing', () => {
+  for (const bad of ['', 42, {}]) {
+    assert.equal(capture(() => agentEnvironmentBlock(bad)).code, CODES.agentPathUnsafe)
+  }
+  assert.equal(capture(() => renderAgentPlist({
+    cliPath: '/x/cli.js',
+    stateRoot: '/Users/dev/.glasspane',
+    caBundle: '/Users/dev/.glasspane/\nca.pem',
+  })).code, CODES.agentPathUnsafe, 'a newline in a path cannot survive launchd reading the plist, so it is refused here rather than silently dropped')
+})
+
+test('a template that lost the ENV_BLOCK slot cannot be handed a bundle silently', () => {
+  assert.match(fs.readFileSync(AGENT_TEMPLATE, 'utf8'), /\{\{ENV_BLOCK\}\}/, 'the shipped template no longer asks for the environment block, so the bundle would never reach the job')
+  const body = fs.readFileSync(AGENT_TEMPLATE, 'utf8').replace('{{ENV_BLOCK}}', '<!-- slot gone -->')
+  // The plist still renders, still parses, still runs — it just never gets the
+  // bundle, and on an intercepted machine that is a daily failure that looks like
+  // a network problem. So: refuse when there was a bundle to hand over.
+  const error = capture(() => renderAgentPlist({
+    cliPath: '/x/cli.js',
+    stateRoot: '/Users/dev/.glasspane',
+    caBundle: '/Users/dev/.glasspane/ca-roots.pem',
+    template: body,
+  }))
+  assert.equal(error.code, CODES.agentPathUnsafe)
+  assert.match(error.message, /\{\{ENV_BLOCK\}\}/)
+  // …and the same template is fine when there is no bundle to place.
+  assert.doesNotThrow(() => renderAgentPlist({ cliPath: '/x/cli.js', stateRoot: '/Users/dev/.glasspane', template: body }))
 })
 
 /** The refusal, as data. */

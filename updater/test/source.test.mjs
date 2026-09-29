@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { DEFAULT_BASE, REPO_SLUG, UPDATE_BASE_ENV, assertAssetUrl, assertRedirectTarget, makeBytesFetcher, makeFetcher, resolveBase } from '../lib/source.js'
+import { DEFAULT_BASE, REPO_SLUG, UPDATE_BASE_ENV, assertAssetUrl, assertRedirectTarget, describeTransportFailure, isTlsVerificationFailure, makeBytesFetcher, makeFetcher, resolveBase } from '../lib/source.js'
 import { CODES } from '../lib/codes.js'
 import { UpdaterError } from '../lib/fsutil.js'
 import { PINNED_PATH, bytesResponse, jsonResponse, startServer } from './helpers.mjs'
@@ -174,3 +174,81 @@ async function captureAsync(fn) {
   }
   throw new assert.AssertionError({ message: 'the call was expected to refuse, and it did not' })
 }
+
+/* ------------------------------------------- a TLS failure must say what it is */
+
+const BUNDLE = '/Users/dev/.glasspane/ca-roots.pem'
+const URL_UNDER_TEST = 'https://api.github.com/repos/jingzhao-l/GlassPane/releases/latest'
+
+/** The exact shape undici produces: a TypeError whose `cause` carries the real code. */
+function tlsError() {
+  return Object.assign(new TypeError('fetch failed'), {
+    cause: Object.assign(new Error('unable to verify the first certificate'), { code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' }),
+  })
+}
+
+test('a certificate-verification failure reports the cause code, not "fetch failed"', async () => {
+  const fetcher = makeFetcher(async () => {
+    throw tlsError()
+  }, { caBundlePath: BUNDLE })
+  const error = await captureAsync(() => fetcher(URL_UNDER_TEST))
+  assert.equal(error.code, CODES.releaseUnreachable)
+  assert.match(error.message, /UNABLE_TO_VERIFY_LEAF_SIGNATURE/, 'the code lives in error.cause; dropping it is what made this machine look offline while curl worked')
+  assert.match(error.message, /fetch failed/, 'the original sentence stays, this is an addition not a rewrite')
+  assert.match(error.details, new RegExp(`NODE_EXTRA_CA_CERTS=${BUNDLE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'the remedy names the file this machine should be handed')
+  assert.match(error.details, /updater enable|installer/, 'and the two ways to produce it')
+})
+
+test('a refused connection gets no certificate advice', async () => {
+  const fetcher = makeFetcher(async () => {
+    throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }) })
+  }, { caBundlePath: BUNDLE })
+  const error = await captureAsync(() => fetcher(URL_UNDER_TEST))
+  assert.match(error.message, /ECONNREFUSED/)
+  assert.equal(error.details, null, 'handing an operator a plausible fix for a problem they do not have turns the remedy into a new source of confusion')
+})
+
+test('the binary transport says the same thing, because the payload hop is where it also fails', async () => {
+  const fetchBytes = makeBytesFetcher(async () => {
+    throw tlsError()
+  }, { caBundlePath: BUNDLE })
+  const error = await captureAsync(() => fetchBytes('https://objects.githubusercontent.com/x'))
+  assert.equal(error.code, CODES.releaseUnreachable)
+  assert.match(error.message, /UNABLE_TO_VERIFY_LEAF_SIGNATURE/)
+  assert.match(error.details, /NODE_EXTRA_CA_CERTS/)
+})
+
+test('a TLS failure with no bundle path still names how to get one', () => {
+  const described = describeTransportFailure(URL_UNDER_TEST, tlsError(), {})
+  assert.equal(isTlsVerificationFailure('SELF_SIGNED_CERT_IN_CHAIN'), true)
+  assert.equal(isTlsVerificationFailure('EAI_AGAIN'), false, 'a DNS hiccup is not a trust problem and must not borrow this sentence')
+  assert.match(described.details, /updater enable/)
+  assert.doesNotMatch(described.details, new RegExp(BUNDLE), 'there is no path on this machine yet; pointing at a file that does not exist would be a lie')
+})
+
+test('an HTTP answer is reported as an answer, not as a transport failure', async () => {
+  const fetcher = makeFetcher(async () => ({
+    ok: false,
+    status: 403,
+    statusText: 'Forbidden',
+    url: URL_UNDER_TEST,
+    json: async () => ({ message: 'rate limited' }),
+  }))
+  const error = await captureAsync(() => fetcher(URL_UNDER_TEST))
+  assert.match(error.message, /answered 403 Forbidden/)
+  assert.doesNotMatch(`${error.message} ${error.details ?? ''}`, /NODE_EXTRA_CA_CERTS/, 'the server answered: the trust chain worked, so telling someone to fix certificates is wrong')
+})
+
+test('an answer object with no status at all is described, not printed as undefined', async () => {
+  const fetcher = makeFetcher(async () => ({ ok: false, url: URL_UNDER_TEST, json: async () => ({}) }))
+  const error = await captureAsync(() => fetcher(URL_UNDER_TEST))
+  assert.match(error.message, /answered with no status/, 'a response that carries no status is still an answer; "answered undefined undefined" names nothing')
+  assert.equal(error.message.includes('undefined'), false, error.message)
+})
+
+test('an answer with no statusText still names the status it answered with', async () => {
+  const fetcher = makeFetcher(async () => ({ ok: false, status: 500, statusText: '', url: URL_UNDER_TEST, json: async () => ({}) }))
+  const error = await captureAsync(() => fetcher(URL_UNDER_TEST))
+  assert.equal(error.message.includes('undefined'), false, `"answered undefined undefined" tells nobody that a server answered ${500}: ${error.message}`)
+  assert.match(error.message, /answered 500/)
+})

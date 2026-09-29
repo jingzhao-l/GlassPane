@@ -29,7 +29,9 @@ import { probeIdle, resolveEngineSocket } from './lib/idle.js'
 import { AGENT_LABEL, DAEMON_JOB_LABEL, DEFAULT_HOUR, DEFAULT_MINUTE, agentPlistPath, readRunningJob, registerAgent, renderAgentPlist, unregisterAgent } from './lib/launchd.js'
 import { localVersion } from './lib/version.js'
 import { CONSENT_KINDS } from './lib/policy.js'
-import { makeBytesFetcher, makeFetcher } from './lib/source.js'
+import { makeBytesFetcher, makeFetcher, resolveBase } from './lib/source.js'
+import { RELATIVE_RELEASE_PATH } from './lib/check.js'
+import { caBundlePath, describeCa, exportCaBundle, usableBundle } from './lib/ca-bundle.js'
 
 export const SUBCOMMANDS = ['check', 'apply', 'status', 'rollback', 'enable', 'disable']
 
@@ -155,8 +157,10 @@ export function defaultDeps({ stateRoot, appsDir, env, flags }) {
         settingsAppName: 'GlassPane.app',
         daemonAppName: 'GlassPane Daemon.app',
       }),
-    fetchJson: makeFetcher(),
-    fetchBytes: makeBytesFetcher(),
+    // A TLS failure is reported with the bundle this machine *should* be handed, so
+    // the remedy names a path instead of a theory (§9.6).
+    fetchJson: makeFetcher(globalThis.fetch, { caBundlePath: caBundlePath(stateRoot) }),
+    fetchBytes: makeBytesFetcher(globalThis.fetch, { caBundlePath: caBundlePath(stateRoot) }),
     probeIdle,
     readRunningJob,
     build: buildStagedTree,
@@ -164,6 +168,12 @@ export function defaultDeps({ stateRoot, appsDir, env, flags }) {
     unregisterAgent,
     renderAgentPlist,
     agentPlistPath,
+    // §9: the root bundle node needs on a TLS-intercepting machine, exported by
+    // this module alone and refreshed at the two points that can do it without a
+    // person in the loop — registering the agent, and finishing a swap.
+    refreshCaBundle: () =>
+      exportCaBundle({ stateRoot, probeUrl: `${resolveBase(env)}${RELATIVE_RELEASE_PATH}` }),
+    usableCaBundle: () => usableBundle(caBundlePath(stateRoot)),
     now: () => new Date(),
   }
 }
@@ -266,6 +276,7 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         toolsList: merged.toolsList,
         npm: merged.npm,
         copyFn: merged.copyFn,
+        refreshCa: merged.refreshCaBundle,
       })
       return { ...result, command, exitCode: exitCodeFor(result) }
     }
@@ -306,6 +317,9 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
       const disable = command === 'disable'
       const { state } = loadState(stateRoot)
       let agent = { ok: true, message: 'the launchd agent was not touched' }
+      // 只有注册成功那一条路会赋值；下面的状态写入因此不需要再判一次 agent.ok ——
+      // 判了两次反而让人以为失败路径也会写状态。
+      let exportedCa = null
       if (disable) {
         agent = merged.unregisterAgent({ label: AGENT_LABEL, plistPath: merged.agentPlistPath({ homeDir: deps.homeDir ?? recordHomeDir() }), uid: merged.uid, run: merged.runLaunchctl })
       } else if (envDisabled) {
@@ -317,12 +331,21 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
           message: `GLASSPANE_UPDATE_DISABLE=1 is set, so the update agent was not registered. Unset it (or run "updater enable" from a shell without it) to switch automatic update back on.`,
         }
       } else {
+        // §9: the agent is the thing that must carry the bundle, so this is where
+        // the bundle gets exported — a job registered without it would fail its
+        // first network gate every day and still look like a running agent.
+        const caRoots = merged.refreshCaBundle()
+        const bundle = merged.usableCaBundle()
         const plistText = merged.renderAgentPlist({
           cliPath: merged.cliPath ?? new URL(import.meta.url).pathname,
           stateRoot,
           hour: Number(flags.hour ?? DEFAULT_HOUR),
           minute: Number(flags.minute ?? DEFAULT_MINUTE),
           label: AGENT_LABEL,
+          // The *file* decides what the job is handed, not this run's export record:
+          // an export that produced nothing keeps the previous bundle in place, and
+          // that bundle is still the trust this machine has.
+          caBundle: bundle.usable ? caBundlePath(stateRoot) : null,
         })
         agent = merged.registerAgent({
           label: AGENT_LABEL,
@@ -331,6 +354,7 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
           uid: merged.uid,
           run: merged.runLaunchctl,
         })
+        if (agent.ok) exportedCa = caRoots
       }
       if (!agent.ok) {
         return {
@@ -347,16 +371,22 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         autoApply: !disable,
         status: disable ? 'disabled' : (state.status === 'disabled' ? 'up-to-date' : state.status),
         code: null,
+        ...(exportedCa ? { caRoots: exportedCa } : {}),
         historyEntry: { action: disable ? 'disable' : 'enable', result: disable ? 'disabled' : 'enabled', digest: null, code: null },
       }, { now })
       const saved = saveState(stateRoot, next, { now })
+      // A bundle this machine could not produce is not a reason to refuse the
+      // registration — an un-intercepted network works fine without it. It *is* a
+      // reason to say so here, because the alternative is a daily job that fails
+      // its first gate while the panel reads "automatic update is on".
+      const ca = exportedCa && exportedCa.status !== 'ok' ? describeCa(exportedCa) : null
       return {
         ok: true,
         status: saved.state.status,
         code: null,
         message: disable
           ? `automatic update is off${agent.message ? ` (${agent.message})` : ''}: "updater check" and "updater apply" still work by hand`
-          : `automatic update is on${agent.message ? ` (${agent.message})` : ''}`,
+          : `automatic update is on${agent.message ? ` (${agent.message})` : ''}${ca ? `; ${ca.summary} — ${ca.remedy}` : ''}`,
         state: saved.state,
         command,
         exitCode: EXIT.OK,

@@ -21,6 +21,19 @@
   ],
   "properties": {
     "schemaVersion": { "enum": [1] },
+    "caRoots": {
+      "description": "What happened the last time this machine exported a system root bundle for node. Node reads NODE_EXTRA_CA_CERTS when a process starts and never consults the macOS trust store, so on a machine whose TLS is intercepted by a locally trusted root (corporate gateway, accelerator) an updater without this bundle fails its first network gate every single day while looking exactly like a working agent. Only `ok` is usable; every other status is read together with the remedy §9 of the auto-update spec attaches. Deliberately absent from `required`: a state file written before this existed must still load, and absent/null means 'this install never exported one', never 'fine'.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["status", "certs", "path", "exportedAt"],
+      "properties": {
+        "status": { "enum": ["ok", "empty", "unavailable", "write-unverified", "probe-failed"] },
+        "certs": { "type": "integer", "minimum": 0 },
+        "path": { "type": ["string", "null"] },
+        "exportedAt": { "type": ["string", "null"] },
+        "detail": { "type": ["string", "null"] }
+      }
+    },
     "updatedAt": {
       "description": "ISO-8601 instant this file was published.",
       "type": "string"
