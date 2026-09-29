@@ -65,7 +65,8 @@ if (!targets.length) {
 function inspect(target) {
   const { dir, file } = target
   const base = path.join(dir, file)
-  const lines = readFileSync(base, "utf8").split("\n")
+  const text = readFileSync(base, "utf8")
+  const lines = text.split("\n")
   const problems = []
   const jobKeys = []
   let section = null // top-level key we are inside of
@@ -126,6 +127,24 @@ function inspect(target) {
     if (at.length > 1) {
       problems.push(`job "${name}" is defined ${at.length} times (lines ${at.join(", ")}) — a YAML mapping keeps only the last, so one of these checks never runs`)
     }
+  }
+
+  // 1b. `secrets` in a step's `if:`. GitHub does not expose the secrets context
+  //     to an `if` expression, and a workflow containing one does not compile:
+  //     the whole file is rejected and *zero* jobs are dispatched, so the run
+  //     shows up as an instant failure with no job to read. PyYAML accepts it and
+  //     so did this file before this rule existed — the release lane was broken
+  //     by exactly this line and nothing local could see it. Secrets belong in
+  //     `env:`; the branch on them belongs in the shell, where a missing value
+  //     can produce a real error message instead of no run at all.
+  for (const match of text.matchAll(/^[ \t]*if:[ \t]*(.+)$/gm)) {
+    if (!match[1].includes("secrets.")) continue
+    const line = text.slice(0, match.index).split("\n").length
+    problems.push(
+      `line ${line}: an \`if:\` uses the secrets context (\`${match[1].trim()}\`) — GitHub does not expose it there, ` +
+        `and the file will not compile: the workflow is rejected whole and no job is dispatched. ` +
+        `Put the secret in \`env:\` and branch on it inside \`run:\`.`,
+    )
   }
 
   // 2. repo scripts referenced by run: steps must exist (resolved against the

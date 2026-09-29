@@ -114,6 +114,11 @@ jobs:
     if: github.event_name == 'push'
     needs: binaries
     runs-on: ubuntu-latest
+    # The signing secrets are environment-scoped, so this job has to declare the
+    # same environment the publish jobs use. Without it `GPG_INPUT_KEY` arrives
+    # empty and the signing step fails on purpose — which is the correct outcome,
+    # but only if the declaration is here.
+    environment: release
     permissions:
       contents: write
     steps:
@@ -132,18 +137,33 @@ jobs:
 
       # Sign every release asset (zip/tar.gz) plus SHA256SUMS.txt with GPG, so the
       # installer fallback and any consumer can verify provenance (not just the
-      # checksums' integrity). Best-effort, like the GlassPane repo: it runs only
-      # when GPG_PRIVATE_KEY/GPG_PASSPHRASE are configured and skips silently
-      # otherwise. It lives in this job because it holds the assembled asset set —
-      # `script/build.ts` uploads the binaries in the `binaries` job, and this job
-      # adds the checksum and signatures on top, so a release never ships unsigned.
-      - name: Sign release assets with GPG (best-effort)
-        if: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+      # checksums' integrity). Same model as the GlassPane repo's release lane.
+      #
+      # The guard lives in the shell, not in `if:`. GitHub does not expose the
+      # `secrets` context to an `if` expression, and a file that uses one does
+      # not compile at all — the whole workflow is then rejected and *zero* jobs
+      # are dispatched, which is what happened here: a release.yml carrying
+      # `if: ${{ secrets.GPG_PRIVATE_KEY != '' }}` produced a failed run on every
+      # push with no jobs, and no local check (PyYAML, our own check-workflows)
+      # could see it. Secrets go through `env`; the decision goes through bash.
+      #
+      # It fails loudly rather than skipping. A best-effort skip would let a
+      # release ship unsigned with nothing in the log saying so, which is the
+      # exact outcome the comment above claims cannot happen.
+      - name: Sign release assets with GPG
         env:
           GPG_INPUT_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           set -euo pipefail
+          if [ -z "${GPG_INPUT_KEY:-}" ]; then
+            echo "::error::GPG_PRIVATE_KEY is empty. The signing key lives in the" \
+              "'release' environment, which this job declares, so an empty value" \
+              "means it was never set or was renamed. To set it:" \
+              "printf '%s' <armored private key> | gh secret set GPG_PRIVATE_KEY --env release" \
+              "(same for the passphrase). Nothing is published until this is fixed."
+            exit 1
+          fi
           cd assets
           mkdir -p "$HOME/.gnupg" && chmod 700 "$HOME/.gnupg"
           printf '%s\n' "allow-loopback-pinentry" >> "$HOME/.gnupg/gpg-agent.conf"
