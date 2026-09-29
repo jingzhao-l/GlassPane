@@ -104,9 +104,18 @@ jobs:
         # literal step-output expression anywhere at job level — even inside a
         # comment — is what GitHub was choking on, so it must not appear here
         # verbatim either.
+        # `build` lives in packages/opencode, not at the workspace root: the root
+        # package.json has no `build` script, so `bun run build` from there fails
+        # with "Script not found \"build\"" before a single file is compiled. The
+        # install above stays at the root on purpose — it is what materialises the
+        # workspace — and only the build needs to be in the package.
+        working-directory: packages/opencode
         run: |
           set -euo pipefail
-          export OPENCODE_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('product.json','utf8')).version")"
+          # product.json is the product root's, so it is `../../product.json` from
+          # here. `script/build.ts` finds the same file by walking up from its own
+          # location, so both read one truth.
+          export OPENCODE_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('../../product.json','utf8')).version")"
           bun run build --single
 
   checksums:
