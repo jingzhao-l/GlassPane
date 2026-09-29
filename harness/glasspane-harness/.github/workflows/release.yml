@@ -84,10 +84,6 @@ jobs:
 
       - uses: ./.github/actions/setup-bun
 
-      - name: Read the product version
-        id: product
-        run: node -p "JSON.parse(require('fs').readFileSync('product.json','utf8')).version"
-
       - name: Install workspace
         run: bun install
 
@@ -96,8 +92,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           OPENCODE_RELEASE: "1"
-          OPENCODE_VERSION: ${{ steps.product.outputs }}
-        run: bun run build --single
+        # The version is read from product.json here rather than threaded in
+        # through `${{ steps.product.outputs }}`. That expression made GitHub
+        # reject the whole workflow file ("The template is not valid … A mapping
+        # was not expected" at this line), which failed every `binaries` job
+        # before the build started. product.json is already the single source of
+        # truth — the `version-check` job compares the tag against this same
+        # field — so reading it here removes an indirection rather than adding a
+        # second answer.
+        run: |
+          set -euo pipefail
+          export OPENCODE_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('product.json','utf8')).version")"
+          bun run build --single
 
   checksums:
     name: SHA256SUMS for the release assets
@@ -118,8 +124,50 @@ jobs:
           gh release download --repo "$GH_REPO" --pattern '*.zip' --pattern '*.tar.gz' || true
           if [ -z "$(ls -A)" ]; then echo "::error::no release assets found to checksum"; exit 1; fi
           sha256sum ./* > SHA256SUMS.txt
-          gh release upload "${{ github.ref_name }}" SHA256SUMS.txt --clobber --repo "$GH_REPO"
           cat SHA256SUMS.txt
+
+      # Sign every release asset (zip/tar.gz) plus SHA256SUMS.txt with GPG, so the
+      # installer fallback and any consumer can verify provenance (not just the
+      # checksums' integrity). Best-effort, like the GlassPane repo: it runs only
+      # when GPG_PRIVATE_KEY/GPG_PASSPHRASE are configured and skips silently
+      # otherwise. It lives in this job because it holds the assembled asset set —
+      # `script/build.ts` uploads the binaries in the `binaries` job, and this job
+      # adds the checksum and signatures on top, so a release never ships unsigned.
+      - name: Sign release assets with GPG (best-effort)
+        if: ${{ secrets.GPG_PRIVATE_KEY != '' }}
+        env:
+          GPG_INPUT_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          cd assets
+          mkdir -p "$HOME/.gnupg" && chmod 700 "$HOME/.gnupg"
+          printf '%s\n' "allow-loopback-pinentry" >> "$HOME/.gnupg/gpg-agent.conf"
+          gpgconf --kill gpg-agent
+          printf '%s\n' "$GPG_INPUT_KEY" | gpg --batch --yes --import
+          # Each sidecar is `$f.asc`, which is exactly what the installer fallback
+          # (scripts/install.sh) looks for next to the tarball it downloads.
+          for f in ./* SHA256SUMS.txt; do
+            [ -f "$f" ] || continue
+            gpg --batch --yes --pinentry-mode loopback \
+              --passphrase "$GPG_PASSPHRASE" --detach-sign --armor "$f"
+          done
+          ls -la ./*.asc
+
+      # Upload SHA256SUMS.txt plus any `.asc` signatures (present only when the
+      # signing secrets are configured; an empty $ASC_FILES expands to nothing, so
+      # gh never references a missing file). Re-uploading SHA256SUMS.txt with
+      # --clobber is idempotent.
+      - name: Upload checksum and signature files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd assets
+          ASC_FILES=""
+          if ls ./*.asc >/dev/null 2>&1; then ASC_FILES="$(ls ./*.asc | tr '\n' ' ')"; fi
+          gh release upload "${{ github.ref_name }}" SHA256SUMS.txt $ASC_FILES --clobber --repo "$GH_REPO"
 
   publish-platform:
     name: npm ${{ matrix.target }}

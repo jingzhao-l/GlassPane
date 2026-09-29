@@ -1,6 +1,6 @@
 {
-  "observedAt": "2026-09-27",
-  "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）；lineage 计数改为不含 packages/opencode 这一目录名（它是树里的真实路径，manifest/fixture/tool 参数都必须正确引用它，而 ratchet 分不清它与一次泄出的改名）——2026-09-26 七个新增全部属于这一类。",
+  "observedAt": "2026-09-29",
+  "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）；lineage 计数改为不含 packages/opencode 这个目录名（它是树里的真实路径，manifest/fixture/tool 参数都必须正确引用它，而 ratchet 分不清它与一次泄出的改名）——2026-09-26 七个新增全部属于这一类。｜2026-09-28 记 9616：新增的 opencode 字样全部出现在「断言它不存在」的位置（not.toContain）与解释为何删掉它的注释里，ratchet 按字面计数分不清这两者；同一批把 presentation.ts 里真正的泄露改掉，净增 1。反证仍然成立：把命令名改回 opencode 会转红。",
   "rules": [
     {
       "id": "upstream-npm-name",
@@ -23,14 +23,14 @@
       "why": "a README line that says opencode must also say fork/upstream/anomalyco/MIT/上游/血缘"
     }
   ],
-  "productFiles": 24,
+  "productFiles": 26,
   "docFiles": [
     "README.md",
     "README.zh-CN.md"
   ],
   "hits": [],
   "lineage": {
-    "occurrences": 9615,
-    "filesScanned": 3307
+    "occurrences": 9616,
+    "filesScanned": 3308
   }
 }
