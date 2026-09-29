@@ -191,7 +191,7 @@ test('a bundle that still cannot reach the endpoint is probe-failed, which is no
     })
     const record = exportCaBundle({ stateRoot, probeUrl: URL, run: f.run })
     assert.equal(record.status, 'probe-failed', 'certs on disk is not "the network path works"; this is the case where the exported bundle did not contain the intercepting root')
-    assert.match(record.detail, /unable to verify the first certificate/)
+    assert.match(record.detail, /unable to verify the first certificate/, 'the child process\'s own reason is what lands in the record — the installer once wrote "TLS or DNS refused" for a bundle that answered 200 ninety seconds later')
     assert.match(describeCa(record).remedy, /add-trusted-cert/, 'the named fix is: that root is not in the two keychains this exports')
   } finally {
     removeDir(stateRoot)
@@ -205,6 +205,37 @@ test('a probe that could not start is a failed probe, not a passed one', () => {
     const record = exportCaBundle({ stateRoot, probeUrl: URL, run: f.run })
     assert.equal(record.status, 'probe-failed')
     assert.match(record.detail, /node could not be started/)
+  } finally {
+    removeDir(stateRoot)
+  }
+})
+
+test('an endpoint that answers a non-2xx is not a failed bundle: TLS worked, the server decided', () => {
+  const stateRoot = scratch('answered-')
+  try {
+    const f = fakeRun({
+      keychains: { [KEYCHAIN_SOURCES[0]]: PEM(12), [KEYCHAIN_SOURCES[1]]: '' },
+      nodeExit: 20,
+      nodeStderr: 'HTTP 403 rate limited',
+    })
+    const record = exportCaBundle({ stateRoot, probeUrl: URL, run: f.run })
+    assert.equal(record.status, 'ok', '403 是端点自己的答复。把它写成 probe-failed，remedy 就会让人去改信任配置 —— 而那恰恰是这里最不该被动的东西')
+    assert.match(record.detail, /TLS/, '仍然要说一句：束这条路验过了')
+    assert.match(record.detail, /HTTP 403/, '以及端点到底答了什么')
+    assert.equal(describeCa(record).remedy, null, 'ok 态不编造建议')
+  } finally {
+    removeDir(stateRoot)
+  }
+})
+
+test('a transport failure with no reason from the child says so, instead of guessing one', () => {
+  const stateRoot = scratch('silent-')
+  try {
+    const f = fakeRun({ keychains: { [KEYCHAIN_SOURCES[0]]: PEM(2), [KEYCHAIN_SOURCES[1]]: '' }, nodeExit: 21, nodeStderr: '' })
+    const record = exportCaBundle({ stateRoot, probeUrl: URL, run: f.run })
+    assert.equal(record.status, 'probe-failed')
+    assert.match(record.detail, /could not reach|refused|exited/, record.detail)
+    assert.doesNotMatch(record.detail, /certificate/, '子进程没说"证书"，记录里就不许出现证书 —— 那正是安装那一次把 200 说成证书问题的来源')
   } finally {
     removeDir(stateRoot)
   }

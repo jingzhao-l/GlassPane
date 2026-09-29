@@ -111,7 +111,7 @@ export function describeCa(record) {
       }
     case 'probe-failed':
       return {
-        summary: `${record.certs} root certificate(s) were exported${where}, but a node started with them still could not reach the release endpoint (${record.detail ?? 'no further detail'})`,
+        summary: `${record.certs} root certificate(s) were exported${where}, but a node started with them could not reach the release endpoint (${record.detail ?? 'no reason reported'})`,
         remedy: 'the intercepting root is not in the system keychains, or the network really is down. Import it ("sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain <root>"), or export NODE_EXTRA_CA_CERTS to a bundle you control before invoking the updater.',
       }
     default:
@@ -140,19 +140,29 @@ export function probeWithBundle({
   nodePath = process.execPath,
   env = process.env,
 }) {
-  const script = 'fetch(process.argv[1],{headers:{accept:"application/vnd.github+json"}}).then((r)=>process.exit(r.ok?0:20),()=>process.exit(21))'
+  // 子进程把**它自己那一侧的失败原因**打到 stderr：真机第一次安装时探测失败，记录里只剩
+  // "TLS or DNS refused the connection" 这种我猜的话 —— 而当时盘上的束其实已经能用（几分钟后
+  // 同一个 URL 直接 200）。没有 cause code 的失败描述是猜谜，不是诊断。
+  const script = 'const f=(m)=>{process.stderr.write(m+"\\n");process.exit(1)};'
+    + 'fetch(process.argv[1],{headers:{accept:"application/vnd.github+json"}})'
+    + '.then((r)=>{if(r.ok)process.exit(0);process.stderr.write("HTTP "+r.status+" "+(r.statusText||""));process.exit(20)},'
+    + '(e)=>{const c=e&&e.cause||{};process.stderr.write("REJECT "+(e&&e.name||"error")+" "+(c.code||"")+" "+String(c.message||e&&e.message||"").slice(0,160));process.exit(21)})'
+    + '.catch((e)=>f("CRASH "+(e&&e.message||e)))'
   const res = run(nodePath, ['-e', script, url], { env: { ...env, [CA_ENV_VAR]: bundlePath }, timeout: 30_000 })
+  const stderr = String((res && res.stderr) ?? '').trim().split('\n')[0]
   if (res && res.error && res.error.code === 'ENOENT') {
-    return { ok: false, detail: `node could not be started to run the probe (${res.error.message})` }
+    return { kind: 'transport', detail: `node could not be started to run the probe (${res.error.message})` }
   }
-  if (res && res.error && /timeout/i.test(String(res.error.message ?? ''))) {
-    return { ok: false, detail: 'the probe did not answer within 30s' }
+  if (res && res.error && /timeout|ETIMEDOUT/i.test(String(res.error.message ?? ''))) {
+    return { kind: 'transport', detail: 'the probe did not answer within 30s' }
   }
   const status = res ? res.status : null
-  if (status === 0) return { ok: true, detail: null }
-  const hint = status === 20 ? 'the endpoint answered, but not OK' : status === 21 ? 'TLS or DNS refused the connection' : `probe exited ${String(status)}`
-  const stderr = String((res && res.stderr) ?? '').trim().split('\n')[0]
-  return { ok: false, detail: stderr ? `${hint}: ${stderr.slice(0, 200)}` : hint }
+  if (status === 0) return { kind: 'ok', detail: null }
+  // 端点**答了**（哪怕 403/404）：TLS 这条腿走通了。这不能算信任束失败 —— 把限流写成
+  // "证书没配对"会把人支去动信任配置，而那正是这里最不该动的东西。
+  if (status === 20) return { kind: 'answered-non-ok', detail: stderr || 'the endpoint answered a non-2xx status' }
+  const hint = status === 21 ? (stderr || 'the connection was refused before an answer') : `probe exited ${String(status)}`
+  return { kind: 'transport', detail: hint }
 }
 
 /**
@@ -227,6 +237,10 @@ export function exportCaBundle({
   const record = { status: 'ok', certs, path: target, exportedAt: now(), detail: null }
   if (!probeUrl) return record
   const probe = probeWithBundle({ bundlePath: target, url: probeUrl, run, nodePath, env })
-  if (probe.ok) return record
+  if (probe.kind === 'ok') return record
+  if (probe.kind === 'answered-non-ok') {
+    // 束能用是这条记录要回答的问题；端点自己的答复质量不是它的失败。
+    return { ...record, detail: `the bundle verified TLS; ${probe.detail}` }
+  }
   return { ...record, status: 'probe-failed', detail: probe.detail }
 }

@@ -16,10 +16,16 @@
   `lib/state.js`（`writePointer`/`readPointer`）、`lib/launchd.js`（`AGENT_LABEL`、排程常量）——
   标签、plist 与状态文件只有这一处实现。注册/卸载一律走 `runCommand('enable'|'disable')`。
 - **本机 TLS 信任**：`<stateRoot>/ca-roots.pem` 由 `lib/ca-bundle.js` 独家导出（`security find-certificate`
-  对系统根钥匙串 + `System.keychain`），`enable` 注册 agent 时和每次 `apply` 成功后各刷新一次；launchd 的
-  plist 与设置面板起子进程时都带上 `NODE_EXTRA_CA_CERTS`。结果记在状态文件的 `caRoots`（五态封闭：
-  `ok` / `empty` / `unavailable` / `write-unverified` / `probe-failed`；缺失或 `null` ＝ 旧安装没记录过，
-  面板与 `gp_diagnose` 不能说成"正常"）。
+  对系统根钥匙串 + `System.keychain`），`enable` 注册 agent 时、每次 `apply` 成功后、以及**证书类失败
+  恢复时**各刷新一次；launchd 的 plist 与设置面板起子进程时都带上 `NODE_EXTRA_CA_CERTS`。结果记在状态
+  文件的 `caRoots`（五态封闭：`ok` / `empty` / `unavailable` / `write-unverified` / `probe-failed`；
+  缺失或 `null` ＝ 旧安装没记录过，面板与 `gp_diagnose` 不能说成"正常"）。两个容易读错的点：
+  **端点答了 403/404 不是束的失败**（TLS 验通了，是服务器不同意；记录留在 `ok`，答复写进 `detail`）；
+  `probe-failed` 只在传输/TLS 层失败时出现，且必须带子进程自己报出的原因。
+- **TLS 失败后的一次自我修复**：`main()`（只有可执行入口，不含库接口 `runCommand`）在拿到
+  `tlsVerification` 的拒绝时重导一次束，带着 `NODE_EXTRA_CA_CERTS` 与防循环标记
+  `GLASSPANE_CA_REEXEC=1` 把**同一条 argv** 重跑一次；调用方已经给了那个变量就不介入（方向归操作者）；
+  导不出可用束就不重跑但一定留痕；子进程被信号杀死 ⇒ 退出码 `3`，绝不返回 `0`。
 - **它写哪里**：`<stateRoot>/update-state.json`、`update-install.json`、`update-staging/`、
   `update-backup/`、`update.log`。状态根按**口令库里的家目录**解析（`os.userInfo().homedir`），不按 `$HOME`：
   面板与守护进程读的是同一个 `~/.glasspane`，跟着 `$HOME` 走会写出一个谁也看不到的状态。
