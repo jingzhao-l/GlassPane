@@ -2,7 +2,7 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
-## [未发布]
+## [1.5.2] — 2026-09-30
 
 ### Fixed — round 12 复审的落点：三处"桩替掉了生产那一段"、一句我编的 node 行为、四条没有读者的禁令
 
