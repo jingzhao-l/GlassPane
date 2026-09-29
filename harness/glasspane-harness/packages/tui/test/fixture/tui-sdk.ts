@@ -63,8 +63,18 @@ export type FetchHandler = (url: URL) => Response | Promise<Response> | undefine
 
 export function createFetch(override?: FetchHandler, events?: ReturnType<typeof createEventSource>) {
   const session = [] as URL[]
+  /**
+   * Every pathname this transport was asked for, in order.
+   *
+   * A test that needs "the session record has arrived" cannot watch stdout: the
+   * epilogue is only written when the app exits, so waiting for it deadlocks.
+   * Watching the requests answers the question directly, and does not depend on
+   * how many microtasks the response took.
+   */
+  const requests = [] as string[]
   const fetch = (async (input: RequestInfo | URL) => {
     const url = new URL(input instanceof Request ? input.url : String(input))
+    requests.push(url.pathname)
     if (url.pathname === "/session") session.push(url)
     const overridden = await override?.(url)
     if (overridden) return overridden
@@ -105,5 +115,5 @@ export function createFetch(override?: FetchHandler, events?: ReturnType<typeof 
     if (url.pathname === "/vcs") return json({ branch: "main" })
     throw new Error(`unexpected request: ${url.pathname}`)
   }) as typeof globalThis.fetch
-  return { fetch, session }
+  return { fetch, session, requests }
 }

@@ -26,13 +26,26 @@ function wordmark(pad = "") {
   })
 }
 
+/**
+ * The one-pane summary printed when a session ends.
+ *
+ * Two things this must not do, both of which it used to do:
+ *
+ *  - print the upstream binary's name. Users copy this line to resume, so the
+ *    command has to be the one that exists on *their* machine — the product
+ *    installs as `glasspane-harness` / `gp-harness`, and an `opencode` here is
+ *    a command that does not resolve.
+ *  - print `undefined`. `sessionID` is optional because the session may not
+ *    have loaded yet; interpolating it blindly produced the literal
+ *    `glasspane-harness -s undefined`, which reads like a real command and is
+ *    not one. The continuation line is now omitted unless there is an id.
+ */
 export function sessionEpilogue(input: { title: string; sessionID?: string }) {
   const weak = (text: string) => `${dim}${text.padEnd(10, " ")}${reset}`
-  return [
-    ...wordmark("  "),
-    "",
-    `  ${weak("Session")}${bold}${input.title}${reset}`,
-    `  ${weak("Continue")}${bold}opencode -s ${input.sessionID}${reset}`,
-    "",
-  ].join("\n")
+  const lines = [...wordmark("  "), "", `  ${weak("Session")}${bold}${input.title}${reset}`]
+  if (input.sessionID !== undefined) {
+    lines.push(`  ${weak("Continue")}${bold}glasspane-harness -s ${input.sessionID}${reset}`)
+  }
+  lines.push("")
+  return lines.join("\n")
 }

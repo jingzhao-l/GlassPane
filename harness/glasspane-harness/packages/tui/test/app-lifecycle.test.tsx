@@ -6,6 +6,7 @@ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { Global } from "@opencode-ai/core/global"
 import { createTuiResolvedConfig } from "./fixture/tui-runtime"
 import { createEventSource, createFetch, directory, json } from "./fixture/tui-sdk"
+import { waitFor } from "./fixture/fixture"
 
 test("SIGHUP clears title and disposes scoped resources once", async () => {
   const setup = await createTestRenderer({ width: 80, height: 24, useThread: false })
@@ -65,19 +66,24 @@ test("app.exit prints the session epilogue after scoped cleanup", async () => {
   const core = await import("@opentui/core")
   mock.module("@opentui/core", () => ({ ...core, createCliRenderer: async () => setup.renderer }))
   const events = createEventSource()
+  const sessionPayload = {
+    id: "dummy",
+    title: "Demo session",
+    slug: "dummy",
+    projectID: "project",
+    directory,
+    version: "0.0.0-test",
+    time: { created: 0, updated: 0 },
+  }
   const calls = createFetch((url) => {
-    if (url.pathname === "/session")
-      return json([
-        {
-          id: "dummy",
-          title: "Demo session",
-          slug: "dummy",
-          projectID: "project",
-          directory,
-          version: "0.0.0-test",
-          time: { created: 0, updated: 0 },
-        },
-      ])
+    // The list *and* the record. `sync.session.get` reads `store.session.info`,
+    // which only the per-session refresh fills — mocking just `/session` left
+    // that request to fall through to the fixture's `throw`, so the epilogue was
+    // rendered from an empty session and the test asserted against nothing.
+    if (url.pathname === "/session") return json([sessionPayload])
+    if (url.pathname === "/session/dummy") return json(sessionPayload)
+    if (url.pathname === "/session/dummy/messages" || url.pathname === "/session/dummy/todo") return json([])
+    if (url.pathname === "/session/dummy/diff") return json([])
   })
   const originalWrite = process.stdout.write.bind(process.stdout)
   let stdout = ""
@@ -113,13 +119,24 @@ test("app.exit prints the session epilogue after scoped cleanup", async () => {
     )
 
     await ready
-    await setup.renderOnce()
+    // Wait for the session record to be *fetched*, then paint once more so the
+    // route's effect has run with it.
+    //
+    // Two things this replaces, both wrong: "render two frames and hope" is a
+    // race on how many microtasks the mock transport takes, and waiting for the
+    // title in `stdout` deadlocks — the epilogue is only written when the app
+    // exits, so it cannot be observed before the exit it precedes.
+    await waitFor(async () => {
+      await setup.renderOnce()
+      return calls.requests.includes("/session/dummy")
+    }, "the session record to be requested")
     await setup.renderOnce()
     api?.keymap.dispatchCommand("app.exit")
     await task
 
     expect(stdout).toContain("Demo session")
-    expect(stdout).toContain("opencode -s dummy")
+    expect(stdout).toContain("glasspane-harness -s dummy")
+    expect(stdout).not.toContain("opencode -s")
   } finally {
     process.stdout.write = originalWrite
     if (!setup.renderer.isDestroyed) setup.renderer.destroy()
