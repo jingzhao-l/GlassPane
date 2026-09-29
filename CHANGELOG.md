@@ -31,10 +31,24 @@
   自己变成误导源）。顺带修掉 `answered undefined undefined` 这种没信息量的文案。
 - 探测起的是**子进程**而不是在当前进程里设变量：后者证明的是一件没有发生的事。URL 走 argv 传给
   子进程，不进 `-e` 脚本。
+- **装到真机上又挖出两处，都当场修掉**：
+  ① 探测把"端点答了 403"和"证书验不过"混成同一个 `probe-failed`，remedy 于是指挥人去改信任配置——
+  而那次安装之后九分钟，同一个 URL 带着那份束直接回了 200。现在只有传输/TLS 层失败才降级，
+  非 2xx 留在 `ok` 并把答复写进 `detail`；且探测必须带上**子进程自己那侧的原因**
+  （`REJECT <code> <message>` / `HTTP <status>`），只留退出码＝读的人只能猜。
+  ② 渲染出的 agent plist 注释里有 `--state-dir`、`--auto`：XML 注释不允许连续两个连字符，
+  `plistlib`/`xmllint` 整份拒收，而 `plutil` 与 launchd 宽容——所以这条缺陷一路通过了所有断言。
+  现在有一条用例用严格解析器读渲染结果，并且直接检查注释内不出现该序列。
+- **TLS 失败后重导一次束并带标记重跑一次**（用户批准）：束原先只在 `enable`/`apply` 刷新，而一次 TLS
+  失败永远走不到 `apply`，于是"机器后来装了新代理"是个会永久卡住的状态。判据是结构化事实
+  `tlsVerification`（不匹配自己写的句子）；操作者已给的 `NODE_EXTRA_CA_CERTS` 不覆盖；只重跑一次
+  （`GLASSPANE_CA_REEXEC=1`）；argv 逐字、`--json` 那一行只由子进程写；子进程被信号杀死时退 `3` 不退 `0`；
+  恢复只挂在可执行入口 `main()`，不挂在库接口 `runCommand()`（安装器是库调用方）。
 - 新增测试：`updater/test/ca-bundle.test.mjs`（13 条）、`updater/test/enable.test.mjs`（7 条，
   顺带补上一个此前没人跑过的面——整套测试里 `enable` 从未被 CLI 层驱动过）、`launchd.test.mjs`
   5 条（含"模板丢了 `{{ENV_BLOCK}}` 槽就不许把束交给 job"）、`source.test.mjs` 6 条、
-  `apply.test.mjs` 3 条；`installer/test/auto-update.test.mjs` 3 条（注册成功要说出导出了多少张、
+  `apply.test.mjs` 3 条、`tls-recovery.test.mjs` 9 条（含两条走真实 `makeFetcher` 链路的：证书失败必须
+  触发恢复、拒连必须一次都不触发）；`installer/test/auto-update.test.mjs` 3 条（注册成功要说出导出了多少张、
   导不出来要转述 updater 的原话、旧 updater 不回报时说"没有回报"而不是给一个看起来可用的默认值），
   并给 `registerAutoUpdate` 加了 `updaterDeps` 接缝——否则安装器的单测会真的去跑
   `security find-certificate` 并起子进程联网探测。面板侧 12 条（含真子进程自报

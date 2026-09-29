@@ -23,14 +23,18 @@
       to <stateRoot>/update.log.
 
   WHY NO PATH APPEARS INSIDE THE SHELL COMMAND (this is the shape, not a style):
+  (flag names below are spelled without their leading double hyphens on purpose: an
+  XML comment may not contain that sequence at all, and launchd's reader is lenient
+  while every other plist reader is not — the literal flags live in ProgramArguments.)
   every value this template substitutes — the node binary, the CLI path, the
   state root, the log path — comes from a *file on disk* that another process
-  writes (`update-install.json`, `GLASSPANE_STATE_DIR`, `--state-dir`). The
+  writes (`update-install.json`, `GLASSPANE_STATE_DIR`, the state-dir override). The
   previous shape interpolated them into a single `/bin/sh -c "…"` string, so a
   state root containing a quote or a `;` became code executed daily as the user.
   Here the shell sees a command string that is a **literal in this file** and
-  `--auto` rides on the **apply** step only: it is what marks the run as the
-  scheduled one, and §5's "automatic update is off must refuse here" is a property of the
+  the auto marker (two hyphens + auto, spelled out below in ProgramArguments) rides on the **apply** step
+  only: it is what marks the run as the scheduled one, and the rule that
+  "automatic update is off must refuse here" is a property of the
   swap, not of looking. `check` stays trigger-neutral so a disabled machine can still be
   inspected by the same job without pretending a person asked for it.
 contains no path at all; the paths arrive as positional parameters (`$0`…`$3`),
