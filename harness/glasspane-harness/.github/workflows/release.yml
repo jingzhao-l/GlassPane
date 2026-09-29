@@ -92,14 +92,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           OPENCODE_RELEASE: "1"
-        # The version is read from product.json here rather than threaded in
-        # through `${{ steps.product.outputs }}`. That expression made GitHub
-        # reject the whole workflow file ("The template is not valid … A mapping
-        # was not expected" at this line), which failed every `binaries` job
-        # before the build started. product.json is already the single source of
-        # truth — the `version-check` job compares the tag against this same
-        # field — so reading it here removes an indirection rather than adding a
-        # second answer.
+        # The version is read from product.json here rather than threaded in from
+        # the previous step's output. That indirection made GitHub reject the
+        # whole workflow file ("The template is not valid … A mapping was not
+        # expected"), which failed every `binaries` job before the build started.
+        # product.json is already the single source of truth — the `version-check`
+        # job compares the tag against this same field — so reading it here
+        # removes a layer rather than adding a second answer.
+        #
+        # NB: this comment deliberately spells the expression out in prose. A
+        # literal step-output expression anywhere at job level — even inside a
+        # comment — is what GitHub was choking on, so it must not appear here
+        # verbatim either.
         run: |
           set -euo pipefail
           export OPENCODE_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('product.json','utf8')).version")"
