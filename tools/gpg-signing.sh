@@ -35,6 +35,7 @@
 #
 # Usage
 #   gpg-signing.sh seed                 # one-time: type the passphrase once
+#   gpg-signing.sh verify-pass           # is the passphrase right? stores nothing
 #   gpg-signing.sh install [repo...]    # push both secrets to the targets
 #   gpg-signing.sh verify [repo...]     # report what is in place and what is not
 #   gpg-signing.sh local [dir...]       # set commit/tag gpgsign in checkouts
@@ -98,13 +99,33 @@ cmd_seed() {
   [ -n "$pass" ] || { say "error: empty passphrase"; exit 2; }
 
   say "exporting the secret key…"
-  local armored
+  # gpg distinguishes the failure modes in its own words; a previous version of
+  # this script collapsed them all into "passphrase probably wrong", which is
+  # how a correct passphrase ended up being reported as wrong. Capture stderr
+  # and read what gpg actually said:
+  #   损坏的密码 / bad passphrase  -> the passphrase is wrong
+  #   缺少 pinentry               -> gpg never got one (a GUI prompt may have
+  #                                  appeared and been dismissed) — NOT "wrong"
+  local armored gpg_err
   armored="$(gpg --batch --yes --pinentry-mode loopback --passphrase "$pass" \
-                   --armor --export-secret-keys "$KEY_GRIP_HINT" 2>/dev/null || true)"
-  # A failed unlock can still exit 0, so the only honest test is a non-empty
-  # export that actually contains a private-key block.
-  if [ -z "$armored" ] || ! printf '%s' "$armored" | grep -q 'BEGIN PGP PRIVATE KEY BLOCK'; then
-    say "error: the export produced no private key block — passphrase probably wrong"
+                   --armor --export-secret-keys "$KEY_GRIP_HINT" 2>/tmp/.gpg-seed-err || true)"
+  gpg_err="$(cat /tmp/.gpg-seed-err 2>/dev/null || true)"
+  rm -f /tmp/.gpg-seed-err
+  if [ -n "$armored" ] && printf '%s' "$armored" | grep -q 'BEGIN PGP PRIVATE KEY BLOCK'; then
+    ok "key unlocked and exported"
+  elif printf '%s' "$gpg_err" | grep -qE '损坏的密码|bad passphrase'; then
+    say "error: gpg rejected the passphrase (损坏的密码). It really is wrong."
+    exit 1
+  elif [ -z "$gpg_err" ]; then
+    say "error: gpg produced neither a key nor a message. That is not a verdict"
+    say "       on the passphrase. Try again, or run: $0 verify-pass"
+    exit 1
+  else
+    say "error: the export failed for a reason other than a wrong passphrase."
+    say "       gpg said:"; printf '%s\n' "$gpg_err" | sed 's/^/         /' >&2
+    say "       Run '$0 verify-pass' to see this same message with your input"
+    say "       echoed back, which is the only way to tell a wrong passphrase"
+    say "       from a swallowed GUI prompt."
     exit 1
   fi
   security add-generic-password -U -s "$KEYCHAIN_SERVICE" -a private-key -w "$armored" >/dev/null
@@ -112,6 +133,40 @@ cmd_seed() {
   unset pass armored
   ok "private key + passphrase stored in keychain as service '$KEYCHAIN_SERVICE'"
   say "next: $0 install"
+}
+
+# ── verify-pass ──────────────────────────────────────────────────────────────
+# Answers exactly one question: is the passphrase right? It does not touch the
+# keychain and it does not store anything, so it is safe to run repeatedly while
+# you try variants. The verdict comes from gpg's own wording, never from guessing.
+cmd_verify_pass() {
+  need gpg
+  printf '口令（不回显，直接粘贴）: '
+  local pass
+  stty -echo 2>/dev/null || true
+  IFS= read -r pass
+  stty echo 2>/dev/null || true
+  printf '\n'
+  # --export-secret-keys is the operation that actually requires an unlock, so
+  # it is the honest probe; listing keys would "succeed" without ever asking.
+  local err
+  err="$(gpg --batch --yes --pinentry-mode loopback --passphrase "$pass" \
+              --armor --export-secret-keys "$KEY_GRIP_HINT" 2>&1 >/dev/null || true)"
+  unset pass
+  if [ -z "$err" ]; then
+    ok "口令正确（gpg 没有报错，导出成功）"
+    say "现在可以跑: $0 seed"
+  elif printf '%s' "$err" | grep -qE '损坏的密码|bad passphrase'; then
+    bad "口令不对 —— gpg 原话：损坏的密码"
+  elif printf '%s' "$err" | grep -qE 'pinentry'; then
+    bad "gpg 没拿到口令就放弃了（缺少 pinentry）"
+    say "这不等于「口令不对」：通常是有一个 GUI 授权框弹出来后被关掉了，"
+    say "或者这次运行没有可用的 pinentry。先在本机手动签一次让 agent 缓存："
+    say "  gpg --sign  # 弹窗输入一次，之后 24 小时内 agent 会记住"
+  else
+    bad "没能判定，gpg 原话如下："
+    printf '%s\n' "$err" | sed 's/^/         /' >&2
+  fi
 }
 
 # ── install ──────────────────────────────────────────────────────────────────
@@ -328,6 +383,7 @@ cmd_selftest() {
 case "${1:-}" in
   seed)     shift; cmd_seed "$@" ;;
   install)  shift; cmd_install "$@" ;;
+  verify-pass) shift; cmd_verify_pass "$@" ;;
   verify)   shift; cmd_verify "$@" ;;
   local)    shift; cmd_local "$@" ;;
   audit)    shift; cmd_audit "$@" ;;
