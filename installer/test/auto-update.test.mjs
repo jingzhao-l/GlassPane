@@ -520,3 +520,126 @@ test('旧 updater 没回报束的态时，说"没有回报"而不是说"没问�
     fs.rmSync(home, { recursive: true, force: true })
   }
 })
+
+/* ---------------------------------------------------------------------------
+ * §9 的最后一环：安装到盘上的那份 plist **真把束交给了作业**。
+ *
+ * 为什么单独立一条：上面所有用例都把 `refreshCaBundle` / `usableCaBundle` 换成桩，
+ * 于是它们证明的是"安装器说了什么"，不是"launchd 拿到了什么"。桩给的是
+ * `{path: null, certs: 163}` 且**从没往盘上写过那个文件**——`plist.includes('NODE_EXTRA_CA_CERTS')`
+ * 照样绿，而真实作业指向一个不存在的文件，node 只会打一句 Warning 然后照旧连不上。
+ * 这是"手工造输入绕开生产层"那一类（复审 #4③）。
+ *
+ * 这一条不绕：真 `exportCaBundle`（只把 `security` 与探测子进程这两件外部事注入掉，
+ * 不联网、不碰开发机钥匙串）→ 真 writer 落盘 → 真 `usableBundle` 读盘 → `enable` 注册
+ * → 用 **python3 plistlib** 严格解析盘上那份 plist。选 plistlib 而不是 `plutil`：后者对
+ * 结构问题宽容（本仓已经吃过两次"lenient 读者把缺陷藏起来"）。python3 不在场时这条会
+ * **变红而不是跳过**——它要守的正是"作业真的带上了信任"，跳过等于没这条闸。
+ */
+test('盘上那份 plist 的 EnvironmentVariables 真带着写成功的那份束（严格解析）', async () => {
+  const { spawnSync } = await import('node:child_process')
+  const ca = await import(pathToFileURL(path.join(REPO_ROOT, 'updater', 'lib', 'ca-bundle.js')).href)
+  const launchd = await import(pathToFileURL(path.join(REPO_ROOT, 'updater', 'lib', 'launchd.js')).href)
+
+  const home = tempDir('gp-install-ca-')
+  const stateRoot = path.join(home, '.glasspane')
+  const bundlePath = path.join(stateRoot, 'ca-roots.pem')
+  const pem = Array.from({ length: 3 }, (_, i) => `-----BEGIN CERTIFICATE-----\nMIIB${i}INSTALLTEST\n-----END CERTIFICATE-----\n`).join('')
+  const external = []
+  let securityCalls = 0
+  const run = (command, args) => {
+    external.push([command, ...(args ?? [])])
+    if (command === 'security') {
+      securityCalls += 1
+      // 只有第一个钥匙串有东西：系统根与管理员根本来就是分两处装的，
+      // 而张数必须等于 3 而不是 6——两份都返回同一批证书就会把重复计数写进记录。
+      return { status: 0, stdout: securityCalls === 1 ? pem : '', stderr: '' }
+    }
+    return { status: 0, stdout: '', stderr: '' }  // 探测子进程：假装这一次连上了
+  }
+
+  try {
+    const launchctl = fakeLaunchctl()
+    const result = await registerAutoUpdate({
+      rootDir: REPO_ROOT,
+      env: { HOME: home },
+      homeDir: home,
+      uid: '501',
+      runLaunchctl: launchctl.run,
+      now: NOW,
+      say: () => {},
+      updaterDeps: {
+        refreshCaBundle: () => ca.exportCaBundle({ stateRoot, probeUrl: 'https://example.invalid/releases/latest', run }),
+      },
+    })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.equal(result.registered, true)
+    assert.equal(result.caRoots?.status, 'ok', `导出没成 ok，这条就退化成一次字符串检查：${JSON.stringify(result.caRoots)}`)
+    assert.equal(result.caRoots.certs, 3)
+    assert.equal(result.caRoots.path, bundlePath, '记录里的路径就是真写成的那一个')
+    assert.equal(ca.countCertificates(fs.readFileSync(bundlePath, 'utf8')), 3, '束必须真在盘上，不是只在返回值里')
+
+    const plistPath = launchd.agentPlistPath({ homeDir: home })
+    const parsed = spawnSync('python3', ['-c',
+      'import plistlib,json,sys\n'
+      + 'with open(sys.argv[1], "rb") as handle:\n'
+      + '    print(json.dumps(plistlib.load(handle)))\n', plistPath], { encoding: 'utf8' })
+    assert.equal(parsed.status, 0, `plistlib 读不动这份 plist（它比 launchd 严）：${parsed.stderr}`)
+    const job = JSON.parse(parsed.stdout)
+
+    assert.equal(job.Label, launchd.AGENT_LABEL)
+    assert.equal(job.EnvironmentVariables?.NODE_EXTRA_CA_CERTS, bundlePath,
+      '§9.4：束由**作业**带进去，不是靠 updater 自己在进程里设——进程启动后才设的变量改不了任何东西')
+    assert.notEqual(job.EnvironmentVariables?.NODE_EXTRA_CA_CERTS, '',
+      '空串在 node 眼里等于没设；写一个空值还会把操作者从终端带进来的那份信任静默覆盖掉')
+    assert.ok(fs.existsSync(String(job.EnvironmentVariables?.NODE_EXTRA_CA_CERTS ?? '')),
+      '作业指过去的那个文件必须存在——这是桩版本唯一漏掉的事')
+    assert.deepEqual([job.ProgramArguments[0], job.ProgramArguments[1], job.ProgramArguments[3], job.ProgramArguments[4]],
+      ['/bin/sh', '-c', process.execPath, UPDATER_CLI], 'argv 槽位：shell、CLI 都在自己的参数里')
+    assert.equal(job.RunAtLoad, false)
+    assert.ok(!JSON.stringify(job).includes('{{'), '严格解析出来的文档里不该有未替换的 token')
+    assert.deepEqual(
+      external.filter((call) => call[0] === 'security').map((call) => call.slice(0, 4)),
+      ca.KEYCHAIN_SOURCES.map(() => ['security', 'find-certificate', '-a', '-p']),
+      '两个钥匙串各查一次，且用的是那条真参数序列',
+    )
+    assert.equal(external.filter((call) => call[0] === 'security').length, ca.KEYCHAIN_SOURCES.length)
+    assert.ok(external.some((call) => call[0] === process.execPath),
+      '探测确实起了一个 node 子进程（这里只替换它的返回值，形状与真的一条不差）')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('导不出束的那台机器：作业照样注册，但**不带**那个键（而不是带一个空值）', async () => {
+  const { spawnSync } = await import('node:child_process')
+  const launchd = await import(pathToFileURL(path.join(REPO_ROOT, 'updater', 'lib', 'launchd.js')).href)
+  const home = tempDir('gp-install-noca-')
+  try {
+    const launchctl = fakeLaunchctl()
+    const result = await registerAutoUpdate({
+      rootDir: REPO_ROOT,
+      env: { HOME: home },
+      homeDir: home,
+      uid: '501',
+      runLaunchctl: launchctl.run,
+      now: NOW,
+      say: () => {},
+      updaterDeps: {
+        refreshCaBundle: () => ({ status: 'unavailable', certs: 0, path: null, exportedAt: NOW.toISOString(), detail: 'no security tool' }),
+      },
+    })
+    assert.equal(result.registered, true, '导不出证书不是拒绝注册的理由——没被拦截的网络本来就不需要它')
+    const plistPath = launchd.agentPlistPath({ homeDir: home })
+    const got = spawnSync('python3', ['-c',
+      'import plistlib,json,sys\n'
+      + 'with open(sys.argv[1], "rb") as handle:\n'
+      + '    print(json.dumps(plistlib.load(handle)))\n', plistPath], { encoding: 'utf8' })
+    assert.equal(got.status, 0, got.stderr)
+    const job = JSON.parse(got.stdout)
+    assert.ok(!('NODE_EXTRA_CA_CERTS' in (job.EnvironmentVariables ?? {})),
+      '这台机器没有束，就不该出现这个键；出现一个空值等于替操作者取消了他自己的信任')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})

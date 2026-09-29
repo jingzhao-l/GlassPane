@@ -210,18 +210,29 @@
 3. **常态消费者只有两个，且都在进程启动前拿到变量**：launchd agent 的 plist 写
    `EnvironmentVariables.NODE_EXTRA_CA_CERTS`；面板 `Process` 起 CLI 时把同一个变量放进环境。
    node 只在启动时读这份束，所以**不许改 `NODE_TLS_REJECT_UNAUTHORIZED`、不加 `--insecure`、不降级到 http**。
+   这条禁令必须有读者，否则它就只是一句话：`updater/test/trust-inversion.test.mjs` 扫生产代码
+   （`updater/`、`installer/`、`mcp-shell/src/`、面板那几个 Swift 文件、`install.sh`、launchd 模板）里的
+   这些开关，注释里的提及不算（注释不能执行），发布那条路径上还单独禁明文 http。
    唯一被允许的 re-exec 是第 10 条，而且只在"已经失败在证书上"之后发生一次；除此之外，在终端手敲
    `node updater/cli.js check` 的人若没设这个变量，正确行为是**失败并把 remedy 说出来**（见第 6 条）。
-4. **`NODE_EXTRA_CA_CERTS` 是追加而不是替换**：node 仍在验证完整链，Mozilla 束继续有效，只是另外也信任
-   这台机器的管理员已经选择信任的那些根。文档必须这样写，否则读者会把它读成"关了校验"。内容级作者性
+4. **`NODE_EXTRA_CA_CERTS` 是追加而不是替换**：node 仍在验证完整链，Mozilla 束继续有效，只是另外把
+   那两个钥匙串里的**全部**证书也当作信任锚。措辞必须按实测写，不能写成"这台机器的管理员已经选择信任的那些
+   根"——**信任设置不参与过滤**：被显式判为不信任的根、以及为别的目的躺在 `System.keychain` 里的 CA，
+   都会对这个作业生效。作者机器实测 158 + 5 = 163 张，其中 161 张 `CA:TRUE`；两张非 CA 的经实测无害
+   （自签的 `CA:FALSE` 当唯一锚时 OpenSSL 直接 `INVALID_PURPOSE`，链验证不过）。文档写清方向，否则读者会把它
+   读成"关了校验"，或者读成"只信任系统认可的那些"——两种都是错的。内容级作者性
    仍由 §1 第 5、8 道兜住：下载字节必须匹配那份被我们自己的 key 签过的 `SHA256SUMS`，中间人签不出它。
+   为什么不按信任设置过滤：`security dump-trust-settings` 没有机器可读的契约，一次静默漏掉拦截根的过滤，
+   坏的正是本条要保的那次检查；能被看见的失败态才允许存在（第 2 条）。
 5. **刷新点**：`enable` 注册 agent 时（安装器走的就是这条路）、每次 `apply` 成功之后、以及第 10 条的
    证书类失败恢复时。理由很具体：拦截根会轮换（本机那张到 2027-02），只在前两个点刷新等于
    "后来装了新代理的机器永远刷不到那张新根"。
 6. **失败文案必须带真因和可执行 remedy**。`release-unreachable` 现在写 `GET <url> failed: fetch failed`
    ——真因在 `error.cause.code` 里被吞掉了；一个人/代理看到 "fetch failed" 只会去查网络通不通，而浏览器里
-   GitHub 明明打得开。契约：TLS 验证类失败必须报出 `cause` 的 code，并点名
-   `export NODE_EXTRA_CA_CERTS=<stateRoot>/ca-roots.pem`；非 TLS 失败（`ECONNREFUSED`、DNS、4xx）**不得**
+   GitHub 明明打得开。契约：TLS 验证类失败必须报出 `cause` 的 code，并点名**解析后的真路径**
+   （`export NODE_EXTRA_CA_CERTS=/Users/<you>/.glasspane/ca-roots.pem`）；拿不到路径时要说"去 `updater status
+   --json` 的 stateRoot 字段看那个目录"，**不许**在给人或代理的句子里留 `<stateRoot>` 这类模板占位符——一句
+   带尖括号的话粘贴不了，也就不是 remedy。非 TLS 失败（`ECONNREFUSED`、DNS、4xx）**不得**
    套用这句 remedy，要报自己那条原因 —— 否则 remedy 本身成为误导源。
 7. **状态是封闭枚举，不是布尔**。实现与路径由 `updater/lib/ca-bundle.js` 独家持有（单一作者），调用点是
    第 5 条那三处。枚举：
@@ -246,7 +257,9 @@
     机器后来装了新代理 ⇒ 每天定时检查死在第 1 道门上，面板读起来像"没有可用更新"。规则：
     · 判据是**结构化事实** `tlsVerification`（`source.js` 依 `error.cause.code` 判定后随拒绝对象带上），
       不许靠匹配自己写的句子——文案会改，判据不能跟着改；
-    · 调用方已经给了 `NODE_EXTRA_CA_CERTS` 时**不介入**：那份信任是操作者自己指的，方向归他；
+    · 调用方已经把 `NODE_EXTRA_CA_CERTS` 指到**别的路径**时**不介入**：那份信任是他自己指的，方向归他，
+      我们替他改指自己导出的那一份等于静默取消他的选择；他指的就是我们导出的那一份时**照常恢复**
+      （终端里按 remedy 设过变量的人，走的就是这一条）；
     · 只重跑一次：`GLASSPANE_CA_REEXEC=1` 是防循环标记，带标记那次不再重导也不再起子进程；
     · 重跑的 argv 逐字相同（少一个参数就是另一件事），`--json` 那一行**只由子进程写**，父进程一个字都不加；
     · 束导不出来（`empty`/`unavailable`/`write-unverified`）就不重跑，但结论必须落进状态文件；
@@ -267,3 +280,7 @@
 | 探测记录带子进程自己的原因 | 同上 | 丢掉 stderr 首行 ⇒ 那条 match 红 |
 | 渲染出的 plist 能被**严格**解析器读（注释内不得有连续连字符） | `updater/test/launchd.test.mjs` | 把 state-dir 的双连字符写回注释 ⇒ 红；`plutil` 这个宽容 oracle 看不见 |
 | 证书失败重导并重跑：argv 逐字、只一次、信号不返回 0、库调用方不起子进程 | `updater/test/tls-recovery.test.mjs`（8 条） | 删标记判断 ⇒ 循环那条红；空束也重跑 ⇒ 那条红；`status ?? 0` ⇒ 信号那条红；把恢复挪进 `runCommand` ⇒ main 那条红 |
+| 第 3 条的禁令**有读者**：生产代码里不许出现任何关闭校验的开关，注释除外；行号必须指到文件里那一行 | `updater/test/trust-inversion.test.mjs` | 往 `updater/lib/source.js` 塞 `rejectUnauthorized: false` ⇒ 红；把模式表或文件集清空 ⇒ 那条"只扫到 0 个文件"红；把禁令词只放进注释 ⇒ 不许红（自测盯这一对） |
+| 注册到盘上的那份 plist 真带着**写成功的那份束**（python3 plistlib 严格读，不是 `includes`） | `installer/test/auto-update.test.mjs` | `caBundle: null`、写空串、指到一个从没写过的路径、把"能不能用"改成"文件在不在" ⇒ 四条反向变异实测全红 |
+| 给人或代理的句子不留 `<模板>` 占位符，能拿到真路径就写真路径 | `updater/test/ca-bundle.test.mjs` + `engine/Tests/…/UpdatePanelTests.swift` | 把 `<stateRoot>` 或"那份束的路径"放回文案 ⇒ 红 |
+| node 对这个变量的**实测行为**（不是注释里的假设）：空束不致命、缺文件只报一行 Warning、空值等于没设 | `updater/test/ca-bundle.test.mjs`（真起子进程跑 TLS） | node 哪天真的对空束硬失败 ⇒ 这条先红，判据理由随之改写；不许靠记忆维护这段 |

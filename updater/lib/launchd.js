@@ -281,12 +281,15 @@ export function renderAgentPlist({
   }
   let out = body
   for (const [token, value] of Object.entries(values)) {
-    out = out.replaceAll(token, escapePlistString(value))
+    // **函数形式**是必须的：`replaceAll` 会把替换串里的 `$&` / `$1` / `$\`` 当作模式引用展开，
+    // 于是"路径里带 $&"就能把文档前文原样拼回 <string> 里 —— 转义管不了这个，它是字符串
+    // 替换语义而不是 XML 语义。而这些值全部来自另一个进程写的文件（指针 / 状态根）。
+    out = out.replaceAll(token, () => escapePlistString(value))
   }
   // The environment block is markup this function builds (with the path escaped
   // inside it), so it is substituted last and never through the escaping loop —
   // escaping it would put a literal `&lt;key&gt;` into the plist.
-  out = out.replaceAll('{{ENV_BLOCK}}', agentEnvironmentBlock(caBundle))
+  out = out.replaceAll('{{ENV_BLOCK}}', () => agentEnvironmentBlock(caBundle))
   const leftover = /\{\{[A-Z_]+\}\}/.exec(out)
   if (leftover) {
     throw new UpdaterError(CODES.agentPathUnsafe, `the rendered agent still carries ${leftover[0]}: the template asks for a value this function does not fill, and launchd would run the placeholder`)
