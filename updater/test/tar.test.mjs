@@ -94,11 +94,98 @@ test('links and devices in an archive are refused, not created', () => {
     const symlinkArchive = zlib.gzipSync(Buffer.concat([header, raw.subarray(512)]))
 
     const error = capture(() => extractTarGz(symlinkArchive, dest, { allowedRoot: dir }))
-    assert.equal(error.code, CODES.archiveEntryUnsupported)
-    assert.match(error.message, /only files and directories are extracted/)
+    // 链接的**绝对目标**仍然一口回绝，只是理由是"这个链接指向暂存目录之外"，比原先那句
+    // "只解文件与目录"更准（现在同档内的链接会被物化成副本，见下面几条）。
+    assert.equal(error.code, CODES.archiveEntryUnsafe)
+    assert.match(error.message, /absolute path/)
     assert.ok(!fs.existsSync(path.join(dest, 'a.txt')), 'a refused archive writes nothing at all')
   } finally {
     removeDir(dir)
+  }
+})
+
+/**
+ * 真机 2026-09-29 查出来的第二条：`git archive` 会把仓里的符号链接原样打进 release 资产
+ * （本仓 `harness/.../apple-touch-line` 那几张图标就是链接），而当时的解包器对 typeflag `2`
+ * 一律 `archive-entry-unsupported` ⇒ **每一份真实 release 都停在暂存这一步**。
+ * 现在的规则：链接一律**物化成档案里那份字节的副本**，落盘的东西里不再有任何链接；
+ * 绝对目标、跑出暂存目录的目标、档案里没有的目标、指向目录的链接、设备与 FIFO 仍然全拒。
+ */
+test('a link inside the archive becomes a copy of the bytes the archive carries, never a link on disk', () => {
+  const dir = tempDir(`${TMP_PREFIX}tar-deref-`)
+  try {
+    const dest = path.join(dir, 'tree')
+    fs.mkdirSync(dest, { recursive: true })
+    const archive = packTarGz([
+      { name: 'GlassPane-1.5.1/', type: 'dir' },
+      { name: 'GlassPane-1.5.1/apple-touch-icon.png', content: 'ICON-BYTES' },
+      // 反向引用（链接在目标之后）与正向引用（链接在目标之前）都要能物化。
+      { name: 'GlassPane-1.5.1/apple-touch-icon-v3.png', type: 'link', link: 'apple-touch-icon.png', mode: 0o777 },
+      { name: 'GlassPane-1.5.1/sub/', type: 'dir' },
+      { name: 'GlassPane-1.5.1/sub/early.png', type: 'link', link: '../apple-touch-icon.png' },
+      { name: 'GlassPane-1.5.1/hard.txt', type: 'link', flag: '1', link: 'apple-touch-icon.png' },
+    ])
+    const result = extractTarGz(archive, dest, { allowedRoot: dir })
+    const copied = path.join(dest, 'GlassPane-1.5.1/apple-touch-icon-v3.png')
+    const early = path.join(dest, 'GlassPane-1.5.1/sub/early.png')
+    const hard = path.join(dest, 'GlassPane-1.5.1/hard.txt')
+    for (const file of [copied, early, hard]) {
+      assert.equal(fs.readFileSync(file, 'utf8'), 'ICON-BYTES', `${file} 必须是目标那份字节的副本`)
+      assert.equal(fs.lstatSync(file).isFile(), true, `${file} 落盘必须是普通文件，不能还是链接`)
+      assert.equal(fs.lstatSync(file).isSymbolicLink(), false, `${file} 不许是指向别处的符号链接`)
+    }
+    assert.equal(result.entries.filter((e) => e.type === 'link').length, 3, '摘要里要看得见这三条是链接')
+    // 副本不是硬链接：inode 必须各自独立，否则改一个就动了另一个。
+    assert.notEqual(fs.statSync(copied).ino, fs.statSync(path.join(dest, 'GlassPane-1.5.1/apple-touch-icon.png')).ino)
+    // 副本的权限位跟**目标文件**走，不跟链接条目走：tar 把符号链接记成 0777，
+    // 照抄过来就是每台机器上都多一个人人可写的发布字节（真机 v1.5.1 那棵树实测 0777）。
+    assert.equal(fs.statSync(copied).mode & 0o777, fs.statSync(path.join(dest, 'GlassPane-1.5.1/apple-touch-icon.png')).mode & 0o777,
+      '链接副本的 mode 必须等于目标文件的 mode')
+    assert.equal(fs.statSync(copied).mode & 0o022, 0, '不许出现组/其他人可写')
+  } finally {
+    removeDir(dir)
+  }
+})
+
+test('every link that is not a plain in-archive file reference is refused before a byte is written', () => {
+  const cases = [
+    ['absolute', [{ name: 'a.txt', content: 'x' }, { name: 'b.txt', type: 'link', link: '/etc/passwd' }]],
+    ['escapes the tree', [{ name: 'a.txt', content: 'x' }, { name: 'b.txt', type: 'link', link: '../../../../etc/passwd' }]],
+    ['dangling', [{ name: 'a.txt', content: 'x' }, { name: 'b.txt', type: 'link', link: 'nope.txt' }]],
+    ['empty target', [{ name: 'a.txt', content: 'x' }, { name: 'b.txt', type: 'link', link: '' }]],
+    ['to a directory', [{ name: 'd/', type: 'dir' }, { name: 'b.txt', type: 'link', link: 'd' }]],
+    ['to another link', [{ name: 'a.txt', content: 'x' }, { name: 'l1', type: 'link', link: 'a.txt' }, { name: 'l2', type: 'link', link: 'l1' }]],
+    ['hard link to a directory', [{ name: 'd/', type: 'dir' }, { name: 'b', type: 'link', flag: '1', link: 'd' }]],
+  ]
+  for (const [label, entries] of cases) {
+    const dir = tempDir(`${TMP_PREFIX}tar-link-${label}-`)
+    try {
+      const dest = path.join(dir, 'tree')
+      fs.mkdirSync(dest, { recursive: true })
+      const error = capture(() => extractTarGz(packTarGz(entries), dest, { allowedRoot: dir }))
+      assert.ok(error, `${label} 这条链接必须被拒，不能悄悄落盘`)
+      assert.ok([CODES.archiveEntryUnsupported, CODES.archiveEntryUnsafe].includes(error.code),
+        `${label} 拒绝了但换了个没听过的码：${error.code}`)
+      assert.deepEqual(fs.readdirSync(dest), [], `${label}：拒了却已经写了东西——先校验后写这条不成立了`)
+    } finally {
+      removeDir(dir)
+    }
+  }
+})
+
+test('device, FIFO and other exotic entry types stay refused', () => {
+  for (const flag of ['3', '4', '6']) {
+    const dir = tempDir(`${TMP_PREFIX}tar-dev-${flag}-`)
+    try {
+      const dest = path.join(dir, 'tree')
+      fs.mkdirSync(dest, { recursive: true })
+      const error = capture(() => extractTarGz(packTarGz([{ name: 'x', flag, link: '' }]), dest, { allowedRoot: dir }))
+      assert.equal(error.code, CODES.archiveEntryUnsupported, `flag ${flag} 必须拒（拿到 ${error?.code ?? 'no error'}）`)
+      assert.match(error.message, /devices, FIFOs/)
+      assert.deepEqual(fs.readdirSync(dest), [], `flag ${flag} 拒晚了，树里已经有东西`)
+    } finally {
+      removeDir(dir)
+    }
   }
 })
 

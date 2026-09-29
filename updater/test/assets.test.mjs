@@ -12,9 +12,14 @@ import assert from 'node:assert/strict'
 import { SUMS_NAME, TARBALL_NAME, assetIndex, requireAssetPair } from '../lib/assets.js'
 import { CODES } from '../lib/codes.js'
 import { UpdaterError } from '../lib/fsutil.js'
+import { REPO_SLUG } from '../lib/source.js'
 
-const BASE = 'https://api.github.com/repos/jingzhao-l/GlassPane'
-const DOWNLOAD = BASE + '/releases/download/v1.4.0/'
+const BASE = 'https://api.github.com/repos/' + REPO_SLUG
+// 真机形状（2026-09-29 从 `GET releases/latest` 的报文里逐字取的）：GitHub 把资产放在
+// `github.com/<slug>/releases/download/<tag>/<file>`，**不是** api.github.com 那个 origin。
+// 这一行以前写的是 `BASE + '/releases/download/…'` —— 一个 GitHub 不产出的形状，于是钉死源
+// 那条规则在夹具里永远成立、在真机上永远失败。夹具的形状必须来自报文，不是来自我的想象。
+const DOWNLOAD = 'https://github.com/' + REPO_SLUG + '/releases/download/v1.4.0/'
 
 function releaseWith(...names) {
   return { assets: names.map((name) => ({ name, browser_download_url: DOWNLOAD + name })) }

@@ -12,6 +12,31 @@
 - **源**：`https://api.github.com/repos/jingzhao-l/GlassPane/releases/latest`。仓库名是常量，
   不由参数或环境变量决定；`GLASSPANE_UPDATE_BASE` 只能把主机换成 **https** 或 **127.0.0.1**
   （后者仅供测试），换成明文地址即拒绝启动检查而不是降级。
+- **资产可以换了主机，但不能换"是谁的发布"**（2026-09-29 真机查出来的一条：GitHub 报文里的
+  `browser_download_url` 是 `https://github.com/<slug>/releases/download/<tag>/<file>`，与钉死的
+  `api.github.com` 不同 origin；当时的规则只认 same-origin ⇒ 每一份真实 release 都死在这一步，而
+  所有夹具写的是 GitHub 根本不产出的 `api.github.com/.../releases/download/…`）。现在的判据三条同时成立才放行：
+  基址仍是钉死的 `api.github.com`（自建镜像不获得这层放宽，仍按 same-origin）、主机在**显式列出**的
+  GitHub 发布主机集里（不是 `*.github.com` 那种后缀匹配）、且路径解码后属于**这个仓**的那两种形状
+  （`/<slug>/releases/download/<tag>/<file>` 或 `/repos/<slug>/{tarball,zipball}/<ref>`）。
+  同 origin 的 URL 也要过路径形状这一关——`api.github.com` 上不止放着这一个仓。
+- **档案里的链接一律物化成副本，落盘的树里不许有任何链接**：`git archive` 会把仓里的符号链接原样打进
+  release 资产（本仓的图标文件就是），所以 typeflag `1`/`2` 不再一律拒绝，而是**把档案里目标那份字节抄到
+  链接的位置**，mode 跟随目标文件（tar 记的链接 mode 是 0777，照抄就是每台机器上多一个人人可写的发布字节）。
+  仍然全拒：绝对目标、解析后越出暂存目录的目标、档案里不存在的目标、指向目录的链接、链接指向链接、
+  设备与 FIFO。校验顺序仍是"先看全部条目，再一个字节都不写"，所以半棵树不会被留在盘上。
+- **下载有两个时钟**：`stallMs`（默认 30s，**每收到一段字节就重置**）决定"这条连接死没死"，
+  `timeoutMs`（默认 15min）只是兜底，防止永远滴流的服务器把每日作业吊死。单个总时长做不到这两件事——
+  2026-09-29 实测那份 tarball 24 MiB、无人竞争时 39s，而在有竞争的链路上被 120s 总时长掐死，报出去的句子
+  是 `This operation was aborted`（既不说到了哪条时限，也不说收到多少字节）。现在两种停止各自说清
+  "停摆 30s 时已收到 8.4 MiB" 还是 "600s 没下完（已收到 …）"，并且**都不stage 半份内容**。
+- **文档化的每一个 CLI 参数都必须走到用它的那行代码**，且至少有一条用例是**从进程那一侧**进去的。
+  `--state-dir`、`--apps-dir`、`--daemon-bin`、`--socket`、`--at`、`--hour`、`--minute` 曾经被
+  `parseArgs` 写进一个没人读的 `flags.overrides` 袋子，于是六个参数在命令行上全部静默失效——
+  `check --state-dir /var/tmp/x` 实际把整份暂存 release 写进了活的 `~/.glasspane`（自己跑真机验收时撞见）。
+  单元测试当时全绿，因为它们直接构造 `runCommand({ flags: {…} })` 那个消费者形状，从不经过解析器。
+  `--disable`/`--enable` 同理：文案写着"no-op 别名"却什么都不做，比没有这个开关更坏——现在它们真的选择子命令，
+  且拒绝与别的命令同时出现。
 - **八道校验，任一不过就不换版**，并把不过的那条以稳定 code 记进状态文件：
   1. `tag` 必须匹配 `^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$`，且**语义化版本严格大于**当前
      （当前值取本机 `.app` 的 `CFBundleShortVersionString`，与 `glasspaned --version` 读回的值必须
@@ -115,6 +140,10 @@
 | 判据 | 测试 | 反向变异 |
 | --- | --- | --- |
 | 源只能是 https/pinned | `updater/test/source.test.mjs` | 放开明文 ⇒ 红 |
+| 资产主机可以换、但"谁的发布"不能换（GitHub 真形状放行；别的仓、别的族、镜像基址拿到 github.com、同 origin 但路径不属于本仓，全部拒） | `source.test.mjs`（URL 逐字取自真机报文） | 两面路径判据**一起**拆才见血（两处互为冗余）；只拆放宽那面 ⇒ 红 |
+| 档案里的链接物化成副本、mode 随目标；绝对/越界/悬空/指目录/指链接/设备/FIFO 全拒，且拒时一个字节都没写 | `tar.test.mjs` | 退回"链接一律拒" ⇒ 红；按 destDir 解析链接 ⇒ 红；目标不必在档 ⇒ 红；落成真链接 ⇒ 红；抄成 0777 ⇒ 红 |
+| 下载两个时钟：stall 逐段重置、ceiling 兜底，两种停止都说到哪条与收到多少 | `source.test.mjs`（假流按真 fetch 的 abort 语义实现） | 不重置 stall ⇒ 红（慢而活的下载被杀）；`if (fired)` 删掉 ⇒ 红（回到那句 "This operation was aborted"） |
+| CLI 参数走到消费者读的那个键（含从**进程**那一侧进去的用例） | `updater/test/cli-options.test.mjs` | 塞回 `flags.overrides` ⇒ 4 条红；`--disable` 退回装饰品 ⇒ 红 |
 | tag 解析与 semver 严格大于 | `version.test.mjs` | 允许相等 ⇒ 红 |
 | major 不自动应用 | `policy.test.mjs` | 去掉 consent 分支 ⇒ 红 |
 | 双资产必须齐 | `assets.test.mjs` | 缺 SUMS 仍继续 ⇒ 红 |
