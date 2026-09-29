@@ -38,6 +38,17 @@ export const SUBCOMMANDS = ['check', 'apply', 'status', 'rollback', 'enable', 'd
 // 防循环标记：重跑的那一次带着它，于是它自己的 TLS 失败只会如实报出原因，不再往上叠一层子进程。
 export const REEXEC_MARKER = 'GLASSPANE_CA_REEXEC'
 
+/**
+ * §9.8 那一次真机探测要打的 URL。单独成一个函数，是因为 `resolveBase()` 返回的是
+ * `{base, origin, overridden}` —— 第一次我把它整个插进模板字符串，探测就打到了
+ * `[object Object]/releases/latest`，于是每台机器的 `caRoots` 都记成 `probe-failed`
+ * （真机日志里那句 `REJECT TypeError ERR_INVALID_URL` 就是它）。一个能红的小函数
+ * 比一次"看起来合理"的拼接便宜得多。
+ */
+export function releaseProbeUrl(env = {}) {
+  return `${resolveBase(env).base}${RELATIVE_RELEASE_PATH}`
+}
+
 export const USAGE = `usage: node updater/cli.js <command> [options]
 
 commands
@@ -174,8 +185,7 @@ export function defaultDeps({ stateRoot, appsDir, env, flags }) {
     // §9: the root bundle node needs on a TLS-intercepting machine, exported by
     // this module alone and refreshed at the two points that can do it without a
     // person in the loop — registering the agent, and finishing a swap.
-    refreshCaBundle: () =>
-      exportCaBundle({ stateRoot, probeUrl: `${resolveBase(env)}${RELATIVE_RELEASE_PATH}` }),
+    refreshCaBundle: () => exportCaBundle({ stateRoot, probeUrl: releaseProbeUrl(env) }),
     usableCaBundle: () => usableBundle(caBundlePath(stateRoot)),
     now: () => new Date(),
   }
