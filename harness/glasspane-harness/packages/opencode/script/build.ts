@@ -191,14 +191,27 @@ for (const item of targets) {
 }
 
 if (Script.release) {
+  // Upload exactly the archives this run produced.
+  //
+  // The previous form globbed both extensions unconditionally
+  // (`./dist/*.zip ./dist/*.tar.gz`). Each matrix runner builds only its own
+  // platform, so exactly one of the two ever exists — and bun's shell treats a
+  // non-matching glob as an error rather than an empty argument list, so a
+  // macOS runner died on `./dist/*.tar.gz` finding nothing, *after* the binary
+  // had built and passed its smoke test. Collecting the names as they are made
+  // removes the guess and makes the macOS-only product path work.
+  const archives: string[] = []
   for (const key of Object.keys(binaries)) {
     if (key.includes("linux")) {
       await $`tar -czf ../../${key}.tar.gz *`.cwd(`dist/${key}/bin`)
+      archives.push(`./dist/${key}.tar.gz`)
     } else {
       await $`zip -r ../../${key}.zip *`.cwd(`dist/${key}/bin`)
+      archives.push(`./dist/${key}.zip`)
     }
   }
-  await $`gh release upload v${Script.version} ./dist/*.zip ./dist/*.tar.gz --clobber --repo ${process.env.GH_REPO}`
+  if (archives.length === 0) throw new Error("no binaries were built, so there is nothing to upload")
+  await $`gh release upload v${Script.version} ${archives} --clobber --repo ${process.env.GH_REPO}`
 }
 
 export { binaries }

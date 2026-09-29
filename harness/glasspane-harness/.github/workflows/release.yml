@@ -77,7 +77,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: darwin-x64, runner: macos-13 }
+          # `macos-13` was the only x64 label for years and GitHub has retired it:
+          # the darwin-x64 job sat queued forever with no runner, so a release
+          # could never assemble. `macos-15-intel` is the current x64 image.
+          # Both targets are required — product.json's platformTargets lists
+          # darwin/arm64 and darwin/x64, and the wrapper's postinstall picks
+          # between the two platform packages.
+          - { target: darwin-x64, runner: macos-15-intel }
           - { target: darwin-arm64, runner: macos-14 }
     steps:
       - uses: actions/checkout@v4
@@ -214,7 +220,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: darwin-x64, runner: macos-13 }
+          # `macos-13` was the only x64 label for years and GitHub has retired it:
+          # the darwin-x64 job sat queued forever with no runner, so a release
+          # could never assemble. `macos-15-intel` is the current x64 image.
+          # Both targets are required — product.json's platformTargets lists
+          # darwin/arm64 and darwin/x64, and the wrapper's postinstall picks
+          # between the two platform packages.
+          - { target: darwin-x64, runner: macos-15-intel }
           - { target: darwin-arm64, runner: macos-14 }
     steps:
       - uses: actions/checkout@v4
