@@ -16,7 +16,7 @@
  *   · skip the read-back compare              → write-unverified test
  *   · delete the previous file when empty      → "keeps the previous bundle" test
  *   · probe in this process instead of a child → "child, not this process" test
- *   · put the URL inside the `-e` script       → "url rides argv" test
+ *   · put the PROBE_URL inside the `-e` script       → "url rides argv" test
  * `run` is always injected: nothing here touches a developer's keychain or network.
  */
 import { test } from 'node:test'
@@ -36,6 +36,9 @@ import {
   usableBundle,
 } from '../lib/ca-bundle.js'
 import { CODES } from '../lib/codes.js'
+import { DEFAULT_BASE } from '../lib/source.js'
+
+const RELEASE_PATH = '/releases/latest'
 import { modeOf } from '../lib/fsutil.js'
 import { TMP_PREFIX, removeDir, tempDir } from './helpers.mjs'
 
@@ -52,7 +55,7 @@ function scratch(prefix) {
 }
 
 const PEM = (n) => Array.from({ length: n }, (_, i) => `-----BEGIN CERTIFICATE-----\nMIIB${i}FAKE\n-----END CERTIFICATE-----\n`).join('')
-const URL = 'https://api.github.com/repos/jingzhao-l/GlassPane/releases/latest'
+const PROBE_URL = 'https://api.github.com/repos/jingzhao-l/GlassPane/releases/latest'
 
 /** Records every command asked of it and answers by command name. */
 function fakeRun({ keychains = {}, nodeExit = 0, nodeStderr = '', nodeError = null, securityError = null } = {}) {
@@ -77,7 +80,7 @@ test('the bundle is exported from both keychains, written private, and believed 
   const stateRoot = scratch('ca-ok-')
   try {
     const f = fakeRun({ keychains: { [KEYCHAIN_SOURCES[0]]: PEM(3), [KEYCHAIN_SOURCES[1]]: PEM(2) } })
-    const record = exportCaBundle({ stateRoot, probeUrl: URL, run: f.run })
+    const record = exportCaBundle({ stateRoot, probeUrl: PROBE_URL, run: f.run })
     assert.equal(record.status, 'ok', JSON.stringify(record))
     assert.equal(record.certs, 5, 'both keychains contribute: the system roots and the administrator-installed one')
     assert.equal(record.path, caBundlePath(stateRoot))
@@ -156,7 +159,7 @@ test('the probe runs a child node with the bundle in its environment, not this p
   const stateRoot = scratch('ca-probe-')
   try {
     const f = fakeRun({ keychains: { [KEYCHAIN_SOURCES[0]]: PEM(2), [KEYCHAIN_SOURCES[1]]: '' } })
-    const record = exportCaBundle({ stateRoot, probeUrl: URL, run: f.run, nodePath: '/usr/local/bin/node' })
+    const record = exportCaBundle({ stateRoot, probeUrl: PROBE_URL, run: f.run, nodePath: '/usr/local/bin/node' })
     assert.equal(record.status, 'ok')
     const probe = f.calls.at(-1)
     assert.equal(probe.command, '/usr/local/bin/node', 'the probe is a node start-up, because that is the only moment node reads the variable')
@@ -167,15 +170,15 @@ test('the probe runs a child node with the bundle in its environment, not this p
   }
 })
 
-test('the URL rides on argv, never inside the script the child evaluates', () => {
+test('the probe URL rides on argv, never inside the script the child evaluates', () => {
   const stateRoot = scratch('ca-argv-')
   try {
     const hostile = 'https://example.test/$(touch /tmp/pwned)"; rm -rf /'
     const f = fakeRun({ keychains: { [KEYCHAIN_SOURCES[0]]: PEM(1), [KEYCHAIN_SOURCES[1]]: '' } })
     exportCaBundle({ stateRoot, probeUrl: hostile, run: f.run })
     const probe = f.calls.at(-1)
-    assert.equal(probe.args[probe.args.length - 1], hostile, 'the URL is an argv slot the child reads with process.argv[1]')
-    assert.ok(!probe.args[1].includes(hostile), 'a base URL that carried a quote must not become code in the -e script')
+    assert.equal(probe.args[probe.args.length - 1], hostile, 'the PROBE_URL is an argv slot the child reads with process.argv[1]')
+    assert.ok(!probe.args[1].includes(hostile), 'a base PROBE_URL that carried a quote must not become code in the -e script')
   } finally {
     removeDir(stateRoot)
   }
@@ -189,7 +192,7 @@ test('a bundle that still cannot reach the endpoint is probe-failed, which is no
       nodeExit: 21,
       nodeStderr: 'Error: unable to verify the first certificate\n',
     })
-    const record = exportCaBundle({ stateRoot, probeUrl: URL, run: f.run })
+    const record = exportCaBundle({ stateRoot, probeUrl: PROBE_URL, run: f.run })
     assert.equal(record.status, 'probe-failed', 'certs on disk is not "the network path works"; this is the case where the exported bundle did not contain the intercepting root')
     assert.match(record.detail, /unable to verify the first certificate/, 'the child process\'s own reason is what lands in the record — the installer once wrote "TLS or DNS refused" for a bundle that answered 200 ninety seconds later')
     assert.match(describeCa(record).remedy, /add-trusted-cert/, 'the named fix is: that root is not in the two keychains this exports')
@@ -202,7 +205,7 @@ test('a probe that could not start is a failed probe, not a passed one', () => {
   const stateRoot = scratch('ca-nospan-')
   try {
     const f = fakeRun({ keychains: { [KEYCHAIN_SOURCES[0]]: PEM(1), [KEYCHAIN_SOURCES[1]]: '' }, nodeError: Object.assign(new Error('spawn node ENOENT'), { code: 'ENOENT' }) })
-    const record = exportCaBundle({ stateRoot, probeUrl: URL, run: f.run })
+    const record = exportCaBundle({ stateRoot, probeUrl: PROBE_URL, run: f.run })
     assert.equal(record.status, 'probe-failed')
     assert.match(record.detail, /node could not be started/)
   } finally {
@@ -218,7 +221,7 @@ test('an endpoint that answers a non-2xx is not a failed bundle: TLS worked, the
       nodeExit: 20,
       nodeStderr: 'HTTP 403 rate limited',
     })
-    const record = exportCaBundle({ stateRoot, probeUrl: URL, run: f.run })
+    const record = exportCaBundle({ stateRoot, probeUrl: PROBE_URL, run: f.run })
     assert.equal(record.status, 'ok', '403 是端点自己的答复。把它写成 probe-failed，remedy 就会让人去改信任配置 —— 而那恰恰是这里最不该被动的东西')
     assert.match(record.detail, /TLS/, '仍然要说一句：束这条路验过了')
     assert.match(record.detail, /HTTP 403/, '以及端点到底答了什么')
@@ -232,7 +235,7 @@ test('a transport failure with no reason from the child says so, instead of gues
   const stateRoot = scratch('silent-')
   try {
     const f = fakeRun({ keychains: { [KEYCHAIN_SOURCES[0]]: PEM(2), [KEYCHAIN_SOURCES[1]]: '' }, nodeExit: 21, nodeStderr: '' })
-    const record = exportCaBundle({ stateRoot, probeUrl: URL, run: f.run })
+    const record = exportCaBundle({ stateRoot, probeUrl: PROBE_URL, run: f.run })
     assert.equal(record.status, 'probe-failed')
     assert.match(record.detail, /could not reach|refused|exited/, record.detail)
     assert.doesNotMatch(record.detail, /certificate/, '子进程没说"证书"，记录里就不许出现证书 —— 那正是安装那一次把 200 说成证书问题的来源')
@@ -291,4 +294,22 @@ test('a bundle is only ever written inside the state root it was given', () => {
   } finally {
     removeDir(stateRoot)
   }
+})
+
+/* --------------------------------------- §9.8 那个 PROBE_URL 本身（真机踩过 [object Object]） */
+
+test('the probe URL is a real https URL built from the resolved base, not a stringified object', async () => {
+  const { releaseProbeUrl } = await import('../cli.js')
+  const url = releaseProbeUrl({})
+  assert.equal(url, `${DEFAULT_BASE}${RELEASE_PATH}`, url)
+  assert.doesNotMatch(url, /\[object Object\]/, 'resolveBase 返回的是对象；整块插进模板字符串就是这个形状')
+  const parsed = new globalThis.URL(url)
+  assert.equal(parsed.protocol, 'https:')
+  assert.equal(parsed.host, 'api.github.com')
+  assert.equal(parsed.pathname, '/repos/jingzhao-l/GlassPane/releases/latest')
+  // 自建镜像/测试基址也要带上同一条路径（否则探测打到一个不存在的地方，又记成 probe-failed）。
+  assert.equal(
+    releaseProbeUrl({ GLASSPANE_UPDATE_BASE: 'https://mirror.example.test' }),
+    'https://mirror.example.test/repos/jingzhao-l/GlassPane/releases/latest',
+  )
 })
