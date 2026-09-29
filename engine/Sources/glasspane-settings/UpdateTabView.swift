@@ -29,6 +29,7 @@ struct UpdateTabView: View {
                 } else if let error = model.errorText, showsErrorLine {
                     failureCard(error)
                 }
+                trustCard
                 updaterCard
             }
             .padding(20)
@@ -285,6 +286,38 @@ struct UpdateTabView: View {
             get: { model.autoUpdateOn ?? false },
             set: { model.setAutoUpdate($0) }
         )
+    }
+
+    // MARK: - 这台机器的根证书
+
+    /// 更新器跑在 node 上，而 node 只认随它打包的那一份证书束、不读这台机器的钥匙串。
+    /// 被本地代理或企业网关拦下 HTTPS 的机器就得靠这一份导出过的束；它没备好时
+    /// 这一页必须说出来，否则用户看到的"一切正常"里一次都没连上过发布站点。
+    private var trustCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader(
+                title: "这台机器的根证书",
+                subtitle: "检查与安装跑在 node 上，它不读系统的钥匙串，所以这一份得由面板递给它。",
+                systemImage: "lock.shield"
+            )
+            HStack(alignment: .top, spacing: 8) {
+                StatusDotView(tone: caRootsTone)
+                Text(model.caRootsText)
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("gp-update-ca-roots")
+                Spacer(minLength: 0)
+            }
+            PathRowView(label: "证书束", path: model.caBundleFile, identifierKey: "ca-bundle")
+        }
+        .consoleCard(tint: model.snapshot == nil || model.caRootsIsUsable ? nil : .orange)
+    }
+
+    /// 形状 + 文字表达状态，颜色只作辅助：读不出记录时不给一个假装安心的绿点。
+    private var caRootsTone: StatusDotView.Tone {
+        guard model.snapshot != nil else { return .neutral }
+        return model.caRootsIsUsable ? .good : .warning
     }
 
     // MARK: - 更新器在哪

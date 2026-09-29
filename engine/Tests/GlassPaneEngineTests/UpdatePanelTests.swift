@@ -2,7 +2,8 @@ import XCTest
 @testable import glasspane_settings
 
 /// 「更新」页判定层的验收（自动更新规格 §4 用户可见面、§5 默认开一键关、
-/// §7 那一行 JSON 与退出码）。
+/// §7 那一行 JSON 与退出码、§9.3 面板 spawn 带上本机那份根证书束、
+/// §9.7 那份束的五个态与"从没导出过"各有一句说法）。
 ///
 /// 每条测试都写明**什么改动会把它变红**：抓不住反向改动的断言等于没写。
 /// 需要"活的更新器"的地方用的是一个照契约回一行的脚本夹具，
@@ -27,6 +28,17 @@ final class UpdatePanelTests: XCTestCase {
 
     /// 64 位十六进制的暂存校验和（面板原样显示它，供人与发布页核对）。
     private let digest = String(repeating: "0a1b2c3d4e5f6071", count: 4)
+
+    /// 状态文件里 `caRoots.status` 的封闭取值（同样是**测试侧抄的**：
+    /// `updater/lib/ca-bundle.js` 增删成员而面板没接住时必须变红）。
+    private static let contractCaStatuses = ["ok", "empty", "unavailable", "write-unverified", "probe-failed"]
+
+    /// 一张证书的形状就够了：面板数的是 `-----BEGIN CERTIFICATE-----` 的出现次数。
+    private let pemBundle = """
+    -----BEGIN CERTIFICATE-----
+    MIIC T H I S I S A N O N C E R T I F I C A T E F O R A T E S T
+    -----END CERTIFICATE-----
+    """
 
     // MARK: - 封闭枚举
 
@@ -589,6 +601,255 @@ final class UpdatePanelTests: XCTestCase {
         XCTAssertFalse(model.buttons.toggleEnabled)
     }
 
+    // MARK: - 起子进程时那份根证书束（§9.3：面板是束的两个消费者之一）
+
+    /// 反向变异：**把路径按家目录再拼一遍**，或者换个文件名（安装器写的是状态根下
+    /// 那一个 `ca-roots.pem`，面板找错地方就等于每一次都不带这个键）。
+    func testCaBundlePathIsTheStateRootPlusThatOneFileName() {
+        XCTAssertEqual(UpdatePanel.caBundleFileName, "ca-roots.pem")
+        XCTAssertEqual(UpdatePanel.extraCaCertsKey, "NODE_EXTRA_CA_CERTS")
+        XCTAssertEqual(UpdatePanel.caBundleFile(stateRoot: "/tmp/root"), "/tmp/root/ca-roots.pem")
+        XCTAssertEqual(UpdatePanel.caBundleFile(stateRoot: "/tmp/root/"), "/tmp/root/ca-roots.pem")
+        // 束与指针认的是同一个根：两个文件不可能一个在状态根、一个在别的根。
+        let root = UpdatePanel.stateRoot(env: ["GLASSPANE_STATE_DIR": "/tmp/other"])
+        XCTAssertTrue(UpdatePanel.caBundleFile(stateRoot: root).hasPrefix("/tmp/other/"))
+        XCTAssertEqual(UpdatePanel.caBundleFile(stateRoot: root),
+                       (root as NSString).appendingPathComponent(UpdatePanel.caBundleFileName))
+    }
+
+    /// 反向变异：**"文件在"就当能用**（一份 0 字节、或满是空白却没有证书的束被交给
+    /// `NODE_EXTRA_CA_CERTS`，node 在启动期报错——那是把每天失败一次换成每天连启动都启动不了）。
+    func testCaBundleOnDiskIsJudgedByCertificatesNotByPresence() {
+        let pem = """
+        -----BEGIN CERTIFICATE-----
+        MIIB T H I S I S A N O N C E R T I I C A T E
+        -----END CERTIFICATE-----
+        """
+        XCTAssertEqual(UpdatePanel.judgeCaBundle(path: "/r/ca-roots.pem", text: nil), .absent)
+        XCTAssertEqual(UpdatePanel.judgeCaBundle(path: "/r/ca-roots.pem", text: ""),
+                       .empty(path: "/r/ca-roots.pem"), "0 字节不是束")
+        XCTAssertEqual(UpdatePanel.judgeCaBundle(path: "/r/ca-roots.pem", text: "\n\n   \n"),
+                       .empty(path: "/r/ca-roots.pem"), "有字节但一张证书也没有，同样不能交出去")
+        XCTAssertEqual(UpdatePanel.judgeCaBundle(path: "/r/ca-roots.pem", text: pem),
+                       .usable(path: "/r/ca-roots.pem", certificates: 1))
+        XCTAssertEqual(UpdatePanel.judgeCaBundle(path: "/r/ca-roots.pem", text: pem + "\n" + pem),
+                       .usable(path: "/r/ca-roots.pem", certificates: 2), "张数要数对，那句人话指着它")
+    }
+
+    /// 反向变异：**把路径写成别的键**、或**只发这一个键**（子进程没了 PATH 之类的底子，
+    /// 更新器读到的状态根也跟着变）。
+    func testCaBundleEnvironmentHandsThatExactPathOverTheWholeBase() {
+        let bundle = UpdatePanel.caBundleFile(stateRoot: "/tmp/root")
+        let env = UpdatePanel.caBundleEnvironment(
+            base: ["PATH": "/usr/bin:/bin", "GLASSPANE_STATE_DIR": "/tmp/root"],
+            bundle: .usable(path: bundle, certificates: 163)
+        )
+        XCTAssertEqual(env[UpdatePanel.extraCaCertsKey], "/tmp/root/ca-roots.pem")
+        XCTAssertEqual(env["PATH"], "/usr/bin:/bin", "底子要原样带过去，不是只给这一个键")
+        XCTAssertEqual(env["GLASSPANE_STATE_DIR"], "/tmp/root")
+    }
+
+    /// 反向变异：**无条件设置这个键**（束不在也把路径写进去），或**用空串"表示没有"**
+    /// （node 对空值是启动期报错，与不设完全是两件事）。
+    func testCaBundleEnvironmentLeavesTheKeyOutWhenThereIsNoBundle() {
+        for bundle in [UpdatePanel.CaBundleOnDisk.absent,
+                       UpdatePanel.CaBundleOnDisk.empty(path: "/tmp/root/ca-roots.pem")] {
+            let env = UpdatePanel.caBundleEnvironment(base: ["PATH": "/usr/bin"], bundle: bundle)
+            XCTAssertFalse(env.keys.contains(UpdatePanel.extraCaCertsKey),
+                           "\(bundle) 时这个键必须根本不出现，而不是出现一个空值：\(env)")
+            XCTAssertNil(env[UpdatePanel.extraCaCertsKey])
+            XCTAssertEqual(env, ["PATH": "/usr/bin"], "束不在时那份环境一个字都不能改")
+        }
+        // 人从终端带进来的那份信任不由面板代他取消（面板无权替这台机器决定信什么）。
+        let inherited = UpdatePanel.caBundleEnvironment(
+            base: [UpdatePanel.extraCaCertsKey: "/mine/roots.pem"], bundle: .absent
+        )
+        XCTAssertEqual(inherited[UpdatePanel.extraCaCertsKey], "/mine/roots.pem")
+        // 束能用时也不许把人那份悄悄留着不改方向：指向的是状态根下这一份。
+        let handed = UpdatePanel.caBundleEnvironment(
+            base: [UpdatePanel.extraCaCertsKey: "/mine/roots.pem"],
+            bundle: .usable(path: "/tmp/root/ca-roots.pem", certificates: 3)
+        )
+        XCTAssertEqual(handed[UpdatePanel.extraCaCertsKey], "/tmp/root/ca-roots.pem")
+        // 张数为 0 的那一份就算被别的调用点造出来也不许交出去。
+        let zeroed = UpdatePanel.caBundleEnvironment(base: [:], bundle: .usable(path: "/r/ca-roots.pem", certificates: 0))
+        XCTAssertFalse(zeroed.keys.contains(UpdatePanel.extraCaCertsKey), "0 张的束等于没有束：\(zeroed)")
+    }
+
+    /// 真子进程：面板按下「立即检查」，子进程**自己**报它收到的那个环境变量。
+    /// 反向变异：**面板算了环境却没把它交给 `Process`**（`process.environment` 忘了设），
+    /// 或**设的是别的键/别的路径**——这一条只有真起进程才看得见，纯函数看不见。
+    @MainActor
+    func testPanelSpawnHandsTheBundlePathToTheChildProcess() async throws {
+        let sandbox = try makeSandbox()
+        let cli = sandbox.appendingPathComponent("cli.js").path
+        try "".write(toFile: cli, atomically: true, encoding: .utf8)
+        try documentedPointer(in: sandbox, cli: cli).write(toFile: pointerFile(in: sandbox), atomically: true, encoding: .utf8)
+        let bundle = try writeCaBundle(in: sandbox, text: pemBundle)
+        let node = try writeEnvironmentAwareNode(dir: sandbox, jsonLine: documentedLine(
+            command: "check", status: "up-to-date", code: nil, exitCode: 0, ok: true,
+            message: nil, state: ["status": "up-to-date", "current": "1.4.0", "latest": "1.4.0",
+                                  "lastCheckAt": iso(-60), "disabled": false, "autoApply": true]
+        ), exitCode: 0)
+
+        let model = UpdateModel(stateRoot: sandbox.path, nodePath: node.path,
+                                clock: { [self] in self.now },
+                                baseEnvironment: ["PATH": "/usr/bin:/bin"])
+        XCTAssertEqual(model.caBundleFile, bundle, "面板找的那个束就是状态根下这一个")
+        model.checkNow()
+        await waitUntil { !model.isRunning }
+        XCTAssertNil(model.readFailure, "子进程该回话：\(String(describing: model.readFailure))")
+        let log = try readEnvLog(in: sandbox)
+        XCTAssertEqual(log, "ca-present:\(bundle)\n",
+                       "面板必须把那个键连同状态根下那个路径交给子进程：\(log.debugDescription)")
+    }
+
+    /// 束不在、以及束在但 0 字节：子进程**收不到这个键**（不是收到一个空串）。
+    /// 反向变异：**不存在也照样设上这个键**、或**0 字节当有效束交出去**、
+    /// 或**设成空串来表示没有**——三种都把"每天检查失败一次"换成"node 根本起不来"。
+    @MainActor
+    func testPanelSpawnOmitsTheKeyWhenTheBundleIsAbsentOrEmpty() async throws {
+        for caseNamed in ["absent", "empty-bytes"] {
+            let sandbox = try makeSandbox()
+            let cli = sandbox.appendingPathComponent("cli.js").path
+            try "".write(toFile: cli, atomically: true, encoding: .utf8)
+            try documentedPointer(in: sandbox, cli: cli).write(toFile: pointerFile(in: sandbox), atomically: true, encoding: .utf8)
+            if caseNamed == "empty-bytes" {
+                _ = try writeCaBundle(in: sandbox, text: "")
+                XCTAssertTrue(FileManager.default.fileExists(atPath: UpdatePanel.caBundleFile(stateRoot: sandbox.path)),
+                              "这一步要造的就是「文件在但空着」，不然测的是上一条")
+            }
+            let node = try writeEnvironmentAwareNode(dir: sandbox, jsonLine: documentedLine(
+                command: "check", status: "up-to-date", code: nil, exitCode: 0, ok: true,
+                message: nil, state: ["status": "up-to-date", "current": "1.4.0", "latest": "1.4.0",
+                                      "lastCheckAt": iso(-60), "disabled": false, "autoApply": true]
+            ), exitCode: 0)
+            let model = UpdateModel(stateRoot: sandbox.path, nodePath: node.path,
+                                    clock: { [self] in self.now },
+                                    baseEnvironment: ["PATH": "/usr/bin:/bin"])
+            model.checkNow()
+            await waitUntil { !model.isRunning }
+            XCTAssertNil(model.readFailure, "\(caseNamed)：子进程该回话")
+            let log = try readEnvLog(in: sandbox)
+            XCTAssertEqual(log, "ca-absent\n",
+                             "\(caseNamed) 时这个键不能出现在子进程环境里：\(log.debugDescription)")
+        }
+    }
+
+    // MARK: - 束的导出记录怎么显示（§9.7：五个态 + 没记录过，各有一句人话）
+
+    /// 反向变异：**面板这边少接一个成员**（并一个到 `ok`、或漏一个），或**认不出的状态
+    /// 就近映射成某个成员**——被拦的机器就会显示成"一切正常"。
+    func testCaRootsStatusEnumMatchesTheContract() {
+        XCTAssertEqual(UpdatePanel.CaRootsStatus.allCases.map { $0.rawValue }, Self.contractCaStatuses)
+        for raw in Self.contractCaStatuses {
+            XCTAssertNotNil(UpdatePanel.CaRootsStatus.parse(raw), "\(raw) 必须认得")
+        }
+        XCTAssertNil(UpdatePanel.CaRootsStatus.parse("ok-ish"), "枚举外的只能算读不懂")
+        XCTAssertNil(UpdatePanel.CaRootsStatus.parse("verified"))
+        XCTAssertNil(UpdatePanel.CaRootsStatus.parse(nil))
+        XCTAssertNil(UpdatePanel.CaRootsStatus.parse(""))
+    }
+
+    /// 反向变异：**把 `ok` 那句的证书数写死或丢掉**（这一句的全部作用就是让人核对
+    /// "导出了多少张"，实测那台机器是 163 张）。
+    func testCaRootsOkLineShowsTheCertificateCount() throws {
+        let recorded = try caRootsSnapshot(status: "ok", certs: 163, detail: nil)
+        XCTAssertTrue(UpdatePanel.caRootsIsUsable(recorded), "只有 ok 算备好")
+        let text = UpdatePanel.caRootsText(recorded)
+        XCTAssertTrue(text.contains("163"), "张数要在这句里：\(text)")
+        XCTAssertFalse(text.contains("读不到"), "读到了就别说读不到：\(text)")
+        XCTAssertFalse(text.contains("连不上发布站点"), "备好了不该说失败的话：\(text)")
+
+        // 张数没记着也不能编一个数出来。
+        let noCount = try caRootsSnapshot(status: "ok", certs: nil, detail: nil)
+        XCTAssertTrue(UpdatePanel.caRootsIsUsable(noCount))
+        XCTAssertTrue(UpdatePanel.caRootsText(noCount).contains("没写张数"),
+                      "没有张数就如实说没有：\(UpdatePanel.caRootsText(noCount))")
+    }
+
+    /// 反向变异：**四个失败态并成一句**（"束是空的"与"束写坏了"与"写好了仍连不通"是
+    /// 三件不同的事，各自的下一步也不同），或**把 `detail` 原文吞掉**。
+    func testEachCaRootsFailureStateSaysItsOwnThing() throws {
+        let detail = "read back 0 certificate(s) of the 163 written"
+        let distinguishing = [
+            "empty": "一张也没拿到",
+            "unavailable": "没有导出系统根证书所需的工具",
+            "write-unverified": "读回来",
+            "probe-failed": "仍然连不上发布站点",
+        ]
+        var said: [String: String] = [:]
+        for (status, fingerprint) in distinguishing {
+            let snapshot = try caRootsSnapshot(status: status, certs: 7, detail: detail)
+            let text = UpdatePanel.caRootsText(snapshot)
+            XCTAssertFalse(UpdatePanel.caRootsIsUsable(snapshot), "\(status) 不算备好")
+            XCTAssertTrue(text.contains(status), "\(status) 要把状态原样带出来好跟日志核对：\(text)")
+            XCTAssertTrue(text.contains(fingerprint), "\(status) 少了它自己那句：\(text)")
+            XCTAssertTrue(text.contains(detail), "\(status) 把失败原因原文吞了：\(text)")
+            XCTAssertTrue(text.contains("请"), "\(status) 要给一个做得动的下一步：\(text)")
+            said[status] = text
+        }
+        for (a, left) in said {
+            for (b, right) in said where a != b {
+                XCTAssertNotEqual(left, right, "\(a) 与 \(b) 不能并成同一句话")
+            }
+        }
+    }
+
+    /// 反向变异：**把 `null` 读成 `ok`**（这就是这台机器"面板每天看着都正常、
+    /// 其实一次都没连上"的形状），或缺失时显示成"没有这个问题"。
+    func testMissingOrNullCaRootsReadsAsAnOldInstallNotAsFine() throws {
+        let absentRecord = try snapshotWithoutCaRoots()
+        let nulledRecord = try snapshotWithNullCaRoots()
+        for (label, snapshot) in ["缺失": absentRecord, "null": nulledRecord] {
+            XCTAssertNil(snapshot.caRoots, "\(label) 都该读成没有这份记录")
+            XCTAssertFalse(UpdatePanel.caRootsIsUsable(snapshot), "\(label) 不能算备好")
+            let text = UpdatePanel.caRootsText(snapshot)
+            XCTAssertTrue(text.contains("未记录过导出结果"), "\(label) 要说清是没记录过：\(text)")
+            XCTAssertTrue(text.contains("旧安装"), "\(label) 要指出这是旧安装：\(text)")
+            XCTAssertFalse(text.contains("系统根证书（共"), "\(label) 显示成了正常态：\(text)")
+            XCTAssertTrue(text.contains("请"), "\(label) 也要给出下一步：\(text)")
+        }
+        // 连一份状态都没读到，是另外一句——不能借用"旧安装"这句话假装读到了什么。
+        let nothing = UpdatePanel.caRootsText(nil)
+        XCTAssertTrue(nothing.contains("读不到"), "\(nothing)")
+        XCTAssertFalse(nothing.contains("旧安装"))
+    }
+
+    /// 反向变异：**枚举外的状态当 `ok` 显示**，或把它悄悄折算成某个认得的成员。
+    func testUnrecognizedCaRootsStatusIsNotReadAsOk() throws {
+        let snapshot = try caRootsSnapshot(status: "looks-fine", certs: 163, detail: "exporter said so")
+        XCTAssertNil(snapshot.caRoots?.status, "认不出的取值只能读成 nil")
+        XCTAssertEqual(snapshot.caRoots?.rawStatus, "looks-fine", "原文要留着，人才查得动")
+        XCTAssertFalse(UpdatePanel.caRootsIsUsable(snapshot), "认不出来绝不能当成备好")
+        let text = UpdatePanel.caRootsText(snapshot)
+        XCTAssertTrue(text.contains("looks-fine"), "要把原文报出来：\(text)")
+        XCTAssertTrue(text.contains("认不出来"), "\(text)")
+        XCTAssertTrue(text.contains("exporter said so"), "这一态也该看得见原话：\(text)")
+    }
+
+    /// 这一项读不懂时，其余那一行照常有效：不能因为它就把版本与按钮理由一起丢掉。
+    /// 反向变异：**`caRoots` 里多一个没声明的键、或状态认不出，就整行判成读不到**。
+    func testUnreadableCaRootsDoesNotVoidTheWholeLine() throws {
+        let line = documentedLine(
+            command: "status", status: "staged", code: nil, exitCode: 0, ok: true, message: nil,
+            state: [
+                "status": "staged", "current": "1.4.0", "latest": "1.5.0",
+                "lastCheckAt": iso(-60), "disabled": false, "autoApply": true,
+                "staged": ["version": "1.5.0", "dir": "/tmp/stage", "digest": digest, "at": iso(-60)],
+                "caRoots": ["status": "who-knows", "extraKeyNobodyDeclared": true],
+            ]
+        )
+        guard case .success(let snapshot) = UpdatePanel.parseLine(line) else {
+            return XCTFail("这一行其余部分读得出来：\(line)")
+        }
+        XCTAssertEqual(snapshot.reportedStatus, .staged)
+        XCTAssertEqual(snapshot.current, "1.4.0")
+        XCTAssertEqual(snapshot.stagedVersion, "1.5.0")
+        XCTAssertNil(snapshot.caRoots?.status)
+        XCTAssertFalse(UpdatePanel.caRootsIsUsable(snapshot))
+    }
+
     // MARK: - 夹具
 
     private func pointerFile(in sandbox: URL) -> String {
@@ -658,6 +919,84 @@ final class UpdatePanelTests: XCTestCase {
     private func jsonData(_ object: [String: Any]) -> String {
         let data = try! JSONSerialization.data(withJSONObject: object, options: [])
         return String(data: data, encoding: .utf8)!
+    }
+
+    // MARK: - 束与 caRoots 的夹具
+
+    /// 状态根下写一份束，返回面板应当找到的那个路径。
+    private func writeCaBundle(in sandbox: URL, text: String) throws -> String {
+        let path = sandbox.appendingPathComponent(UpdatePanel.caBundleFileName).path
+        try text.write(toFile: path, atomically: true, encoding: .utf8)
+        return path
+    }
+
+    /// 假 node 报回来的那一句：它只说自己有没有收到那个键。
+    private func readEnvLog(in sandbox: URL) throws -> String {
+        try String(contentsOfFile: sandbox.appendingPathComponent("env.log").path, encoding: .utf8)
+    }
+
+    /// 一个"把自己收到的那个变量原样报回来"的假 node。
+    ///
+    /// 与 `writeFixtureNode` 分开写而不是改它：这批测试要看的正是多出来的那一句，
+    /// 而 `${VAR+set}` 分得清"根本没这个键"与"有一个空值"——这两种在 node 眼里是
+    /// 两件事（后者启动期报错），光看 `$VAR` 分不出来。
+    private func writeEnvironmentAwareNode(dir: URL, jsonLine: String, exitCode: Int32) throws -> URL {
+        let path = dir.appendingPathComponent("node").path
+        let body = """
+        #!/bin/sh
+        dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+        if [ -n "${NODE_EXTRA_CA_CERTS+set}" ]; then
+          printf 'ca-present:%s\\n' "$NODE_EXTRA_CA_CERTS" >> "$dir/env.log"
+        else
+          printf 'ca-absent\\n' >> "$dir/env.log"
+        fi
+        printf '%s\\n' '\(shellSingleQuoted(jsonLine))'
+        exit \(exitCode)
+        """
+        try body.write(toFile: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+        return URL(fileURLWithPath: path)
+    }
+
+    /// 那一行里 `caRoots` 的三种存在方式：整个没有（传 nil）、写着 null（传 `NSNull()`）、
+    /// 带着一份记录（传一个字典）。三者走的是同一条真解析路径。
+    private func caStateLine(caRoots: Any?) -> String {
+        var state: [String: Any] = [
+            "status": "up-to-date", "current": "1.4.0", "latest": "1.4.0",
+            "lastCheckAt": iso(-60), "disabled": false, "autoApply": true,
+        ]
+        if let caRoots { state["caRoots"] = caRoots }
+        return documentedLine(command: "status", status: "up-to-date", code: nil, exitCode: 0, ok: true,
+                              message: nil, state: state)
+    }
+
+    /// 投影一律由 `parseLine` 造：手搓 Snapshot 会把"解码这一环"漏在测试外面。
+    private func parsed(_ line: String) throws -> UpdatePanel.Snapshot {
+        var value: UpdatePanel.Snapshot?
+        if case .success(let snapshot) = UpdatePanel.parseLine(line) { value = snapshot }
+        return try XCTUnwrap(value, "这一行该读得出来：\(line)")
+    }
+
+    private func caRootsSnapshot(status: String, certs: Int?, detail: String?) throws -> UpdatePanel.Snapshot {
+        var record: [String: Any] = [
+            "status": status,
+            "path": "/Users/x/.glasspane/ca-roots.pem",
+            "exportedAt": iso(-300),
+        ]
+        // 没给的那个字段写成 JSON `null`（不是把键省掉）：这一项的两面都要被读到过。
+        if let certs { record["certs"] = certs } else { record["certs"] = NSNull() }
+        if let detail { record["detail"] = detail } else { record["detail"] = NSNull() }
+        return try parsed(caStateLine(caRoots: record))
+    }
+
+    private func snapshotWithoutCaRoots() throws -> UpdatePanel.Snapshot {
+        return try parsed(caStateLine(caRoots: nil))
+    }
+
+    /// 这一项整个写着 `null`：契约里它与"没有这一项"是同一个意思，但它是另一种输入，
+    /// 必须单独造一次（把 `null` 读成一份记录、或读成 `ok`，只有这一条抓得住）。
+    private func snapshotWithNullCaRoots() throws -> UpdatePanel.Snapshot {
+        return try parsed(caStateLine(caRoots: NSNull()))
     }
 
     @MainActor

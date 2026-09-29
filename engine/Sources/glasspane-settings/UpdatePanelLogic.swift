@@ -144,6 +144,43 @@ enum UpdatePanel {
         /// 子进程退出码（0/2/3/4/5）；没读到为 nil。
         var exitCode: Int? = nil
         var command: String? = nil
+        /// 这台机器给 node 的那份根证书束的导出记录。nil = 状态里没有这一项，
+        /// 或它写着 `null`——两种都是"这份安装从没导出过"，不是"导出成功了"。
+        var caRoots: CaRootsRecord? = nil
+    }
+
+    // MARK: - 根证书束的导出记录
+
+    /// `caRoots.status` 的封闭枚举（与 `updater/lib/ca-bundle.js` 的 `CA_STATUSES` 一一对应）。
+    ///
+    /// 五个成员各自是一个不同的下场，所以各有一句人话；把它们并成"行/不行"两种，
+    /// 读的人就只能猜是哪一种，而猜错的那个人会去查网络。
+    enum CaRootsStatus: String, CaseIterable {
+        case ok
+        case empty
+        case unavailable
+        case writeUnverified = "write-unverified"
+        case probeFailed = "probe-failed"
+
+        /// 只认得封闭枚举里的写法；其余一律 nil（由文案层如实说"这一项读不懂"）。
+        static func parse(_ raw: String?) -> CaRootsStatus? {
+            guard let raw, !raw.isEmpty else { return nil }
+            return CaRootsStatus(rawValue: raw)
+        }
+    }
+
+    /// 那条记录里面板要呈现的部分。`status` 为 nil 而 `rawStatus` 有值 = 写着枚举外的东西。
+    struct CaRootsRecord: Equatable {
+        var status: CaRootsStatus? = nil
+        var rawStatus: String? = nil
+        var certificates: Int? = nil
+        var path: String? = nil
+        var exportedAt: String? = nil
+        /// 失败原因原文：必须出现在页面上，不能读进来又丢掉。
+        var detail: String? = nil
+
+        /// 只有 `ok` 算可用；其余四态与读不懂都不算。
+        var isUsable: Bool { status == .ok }
     }
 
     // MARK: - 解析
@@ -182,7 +219,19 @@ enum UpdatePanel {
             disabled: state?.disabled == true,
             autoApply: state?.autoApply == true,
             exitCode: document.exitCode,
-            command: document.command
+            command: document.command,
+            // 束的读不懂与状态的读不懂是两件事：这一项读不懂只是这一项没说清，
+            // 把整行判成"读不到更新状态"会连带把版本、按钮理由一起丢掉。
+            caRoots: state?.caRoots.map { record in
+                CaRootsRecord(
+                    status: CaRootsStatus.parse(record.status),
+                    rawStatus: record.status,
+                    certificates: record.certs,
+                    path: record.path,
+                    exportedAt: record.exportedAt,
+                    detail: record.detail
+                )
+            }
         ))
     }
 
@@ -448,6 +497,67 @@ enum UpdatePanel {
         return "\(ConsoleTheme.timestamp(stamp))（\(checkAgeText(lastCheckAt: stamp, now: now))）"
     }
 
+    /// 被拦截的网络上，这一项没备好意味着什么——四个失败态与"没记录"共用这一句后果，
+    /// 省得每一态各说一半、说得还不一样。
+    static let caBundleConsequence = "在这台机器的网络被本地代理或企业网关拦下的时候，每一次检查与安装都会连不上发布站点。"
+
+    /// 把「自动更新」开关关掉再打开一次 = 让更新器重跑一遍导出并重新登记定时任务，
+    /// 这是这一页上人人做得动的动作；另一条路是重装。前面按语境接"请"或"再"。
+    static let caBundleRedo = "重新运行安装程序，或把「自动更新」开关关掉再打开一次，两种都会重新导出这一份。"
+
+    /// 「更新」区里关于这份束的那句人话：**每一态各有一句，每一句都带一个你现在做得动的动作**。
+    ///
+    /// 记录缺失或写着 `null` 说的是"这台机器没记录过导出"，绝不显示成正常——那正是
+    /// "这一页每天看着都在干活，其实一次都没连上发布站点"的形状。
+    /// 认不出的取值也只能如实说认不出，不就近映射到 `ok`。
+    static func caRootsText(_ snapshot: Snapshot?) -> String {
+        guard let snapshot else {
+            return "还没读到更新状态，也就读不到这台机器的根证书导出记录。先点「刷新」或「立即检查」读一次。"
+        }
+        guard let record = snapshot.caRoots else {
+            return "这台机器未记录过导出结果（旧安装）：这份安装从没把系统的根证书导给更新器用。"
+                + caBundleConsequence + "请" + caBundleRedo
+        }
+        // 失败原因的原文一个字都不改、也不丢：它是人与代理唯一能拿去接着查的东西。
+        let detail = record.detail.flatMap { trimmed($0) }.map { " 更新器那句原话：\($0)" } ?? ""
+        switch record.status {
+        case .ok:
+            let count = record.certificates.map { "共 \($0) 张" } ?? "记录里没写张数"
+            let stamp = record.exportedAt.flatMap { trimmed($0) }.map { "，记于 \(ConsoleTheme.timestamp($0))" } ?? ""
+            return "面板与定时任务每一次起更新器，都会带上这台机器导出的系统根证书（\(count)\(stamp)）。"
+        case .empty:
+            return "这台机器导不出任何系统根证书（empty）：导出跑了，一张也没拿到，所以这一份是空的。"
+                + caBundleConsequence + "请先确认证书钥匙串读得到，再" + caBundleRedo + detail
+        case .unavailable:
+            return "这台机器上没有导出系统根证书所需的工具（unavailable），更新器只能带着 node 自带的那份证书束去连，"
+                + "而这台机器另外信任的那些根不在里面。" + caBundleConsequence
+                + "要自己指定一份你信任的证书束，请在启动更新器之前设好 NODE_EXTRA_CA_CERTS=<那份束的路径>。" + detail
+        case .writeUnverified:
+            return "导出的根证书束写盘之后读回来跟写进去的不一样（write-unverified），这一份没有采信，起更新器时不会带上它。"
+                + caBundleConsequence + "请先修好状态目录的权限或腾出空间，再" + caBundleRedo + detail
+        case .probeFailed:
+            let count = record.certificates.map { "\($0) 张" } ?? "那些"
+            return "根证书束已经写好（\(count)），可带着它的更新器仍然连不上发布站点（probe-failed）："
+                + "拦这台机器的那一方还没被系统信任，或者网络是真的断了。"
+                + "请让管理员把拦截用的那张根证书装进系统钥匙串，或自己指定一份信任的证书束后设进 NODE_EXTRA_CA_CERTS。"
+                + detail
+        case nil:
+            let raw = trimmed(record.rawStatus ?? "") ?? ""
+            let written = raw.isEmpty ? "这一项没写是什么状态" : "这一项写着的状态是 \(raw)"
+            return "\(written)，这一页认不出来，只能按没备好对待。" + caBundleConsequence + "请" + caBundleRedo + detail
+        }
+    }
+
+    /// 这一项算不算备好了（呈现用的色调）：**只有 `ok` 算**，其余一律不算。
+    static func caRootsIsUsable(_ snapshot: Snapshot?) -> Bool {
+        snapshot?.caRoots?.isUsable == true
+    }
+
+    private static func trimmed(_ text: String) -> String? {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return clean.isEmpty ? nil : clean
+    }
+
     static func date(from iso: String?) -> Date? {
         guard let iso, !iso.isEmpty else { return nil }
         let withFraction = ISO8601DateFormatter()
@@ -481,9 +591,12 @@ enum UpdatePanel {
     static let pointerFileName = "update-install.json"
 
     static func pointerFile(stateRoot: String) -> String {
-        stateRoot.hasSuffix("/")
-            ? stateRoot + pointerFileName
-            : stateRoot + "/" + pointerFileName
+        inStateRoot(stateRoot, pointerFileName)
+    }
+
+    /// 状态根下的一个文件：指针与根证书束都从这一处拼，两处不得各写一份斜杠规则。
+    private static func inStateRoot(_ stateRoot: String, _ name: String) -> String {
+        stateRoot.hasSuffix("/") ? stateRoot + name : stateRoot + "/" + name
     }
 
     /// 能跑更新器的 node：显式指定的优先，其次 PATH，最后是几个常见安装位置。
@@ -518,6 +631,62 @@ enum UpdatePanel {
     static func resolveNode(candidates: [String], exists: (String) -> Bool) -> String? {
         candidates.first(where: exists)
     }
+
+    // MARK: - 本机给 node 的那份根证书束
+
+    /// 束的文件名：路径永远是「状态根 + 这一个文件名」，与安装器写的、更新器读的是同一个名字。
+    static let caBundleFileName = "ca-roots.pem"
+
+    /// node 只在**进程启动那一刻**读这个变量，所以面板必须在起子进程之前把它放进环境里；
+    /// 起完了再设、或者设给自己看，都改不了已经跑起来的那一个 node。
+    static let extraCaCertsKey = "NODE_EXTRA_CA_CERTS"
+
+    static func caBundleFile(stateRoot: String) -> String {
+        inStateRoot(stateRoot, caBundleFileName)
+    }
+
+    /// 盘上那一份束对面板而言只有三种下场。判据是**里面有几张证书**，不是文件在不在、
+    /// 也不是它多大：一份空文件交给 `NODE_EXTRA_CA_CERTS` 会让 node 在启动期就报错，
+    /// 那是把"每天检查失败一次"换成"每天连启动都启动不了"，比不带这个键更糟。
+    enum CaBundleOnDisk: Equatable {
+        /// 读不出来：不存在、没权限、或不是文本。三种都对面板是同一个结论——不能交给 node。
+        case absent
+        /// 文件在、读得出来，但一张证书也没有。
+        case empty(path: String)
+        case usable(path: String, certificates: Int)
+    }
+
+    private static let certificateMarker = "-----BEGIN CERTIFICATE-----"
+
+    /// 判读本身（纯函数）：交进来的文本读不出来就是 `.absent`，读得出来就数证书。
+    static func judgeCaBundle(path: String, text: String?) -> CaBundleOnDisk {
+        guard let text else { return .absent }
+        let certificates = text.components(separatedBy: certificateMarker).count - 1
+        return certificates > 0 ? .usable(path: path, certificates: certificates) : .empty(path: path)
+    }
+
+    /// 真盘版：读不出内容时落成 `.absent`——那不是"没有失败"，是"这一份交不出去"，
+    /// 结论照旧可见（面板因此不会带上它），只是不存在与读不懂要面板替用户区分也没有意义。
+    static func inspectCaBundle(at path: String) -> CaBundleOnDisk {
+        do {
+            return judgeCaBundle(path: path, text: try String(contentsOfFile: path, encoding: .utf8))
+        } catch {
+            return .absent
+        }
+    }
+
+    /// 起更新器子进程用的环境：**束能用才带上那个键**。
+    ///
+    /// 束不在或空着时返回的就是原环境——**不设**与**设成空串**是两件事（前者的 node 用自己的
+    /// 那份 Mozilla 束照常办事，后者在启动期报错），所以这里不写一个空值去"表示没有"。
+    /// 反过来，从终端把变量带进来的人那份也不被删掉：那份信任是操作者自己给的，
+    /// 面板没有资格替他取消。
+    static func caBundleEnvironment(base: [String: String], bundle: CaBundleOnDisk) -> [String: String] {
+        guard case .usable(let path, let certificates) = bundle, certificates > 0 else { return base }
+        var env = base
+        env[extraCaCertsKey] = path
+        return env
+    }
 }
 
 // MARK: - 更新器那一行 JSON 的形状
@@ -550,6 +719,16 @@ private struct UpdaterState: Decodable {
         let at: String?
     }
 
+    /// 这台机器给 node 的那份根证书束的导出记录（`caRoots`，可为 `null`）。
+    /// `certs` 是张数、`detail` 是失败原因原文——两者都要能被看见。
+    struct CaRoots: Decodable {
+        let status: String?
+        let certs: Int?
+        let path: String?
+        let exportedAt: String?
+        let detail: String?
+    }
+
     let status: String?
     let code: String?
     let current: String?
@@ -559,6 +738,7 @@ private struct UpdaterState: Decodable {
     let autoApply: Bool?
     let staged: Staged?
     let lastError: LastError?
+    let caRoots: CaRoots?
 }
 
 /// 安装器写的指针 `<状态根>/update-install.json`：面板只从它取更新器的位置。
