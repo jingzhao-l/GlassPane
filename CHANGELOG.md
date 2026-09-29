@@ -4,6 +4,44 @@
 
 ## [未发布]
 
+### Fixed — 网络这一跳的信任：node 不读 macOS 信任库，自动更新在拦截机器上必然装死
+
+第一次在真机上跑 `updater/cli.js check`（198 条测试全是假 HTTP 层，这条路一直没被走过）：
+它死在头一道校验之前，报 `release-unreachable — GET … failed: fetch failed`。真因是
+`UNABLE_TO_VERIFY_LEAF_SIGNATURE` —— 这台机器的 HTTPS 被本地工具中间人替换（`api.github.com`
+的证书签发者是一枚本地根），`curl`/`git`/`gh` 都查 macOS 信任库所以一切正常，**只有 node 的
+`fetch` 认自己打包的那份 CA 束**。于是每日 agent 从装好那天起就会天天失败，而面板显示
+"automatic update is on"，看起来完全像在工作。企业网关（Zscaler 那类）与各类加速器是同一个形状。
+
+- `<stateRoot>/ca-roots.pem` 由新模块 `updater/lib/ca-bundle.js` **独家**导出：
+  `security find-certificate` 对系统根钥匙串 + `System.keychain`（拦截根装在后者，出厂根在前者，
+  只导一份就漏），临时文件 + rename + 读回校验，0600。调用点两处：`enable` 注册 agent 时、每次
+  `apply` 成功之后（拦截根会轮换）。安装器不自己实现第二份导出——它注册走的正是 `updater enable`。
+- 消费者是**进程环境**而不是代码：launchd 的 plist 新增 `EnvironmentVariables.NODE_EXTRA_CA_CERTS`
+  （路径经 XML 转义，带 `& < "` 的路径要能原样读回），面板起子进程时带同一个变量。
+  node 只在启动那一刻读它，所以不做 re-exec、不改 `NODE_TLS_REJECT_UNAUTHORIZED`；在终端手敲的人
+  若没设这个变量，正确行为是**失败并说出 remedy**，而不是悄悄可用。这是**追加**信任：node 仍验证
+  完整链，Mozilla 束继续有效；内容安全本来也不靠这条腿——下载字节必须匹配那份由发布 key 签过的
+  `SHA256SUMS`。
+- 结果记进状态文件的新字段 `caRoots`（五态封闭：`ok` / `empty` / `unavailable` /
+  `write-unverified` / `probe-failed`；缺失或 `null` ＝ 旧安装没记录过，不能读成"正常"）。
+  `status`、面板「更新」区、`gp_diagnose` 三处都显示这一态。
+- 失败文案不再吞真因：TLS 类失败报出 `error.cause.code` 并点名
+  `export NODE_EXTRA_CA_CERTS=<那个路径>`；`ECONNREFUSED`、DNS、4xx **不得**套用这句（否则 remedy
+  自己变成误导源）。顺带修掉 `answered undefined undefined` 这种没信息量的文案。
+- 探测起的是**子进程**而不是在当前进程里设变量：后者证明的是一件没有发生的事。URL 走 argv 传给
+  子进程，不进 `-e` 脚本。
+- 新增测试：`updater/test/ca-bundle.test.mjs`（13 条）、`updater/test/enable.test.mjs`（7 条，
+  顺带补上一个此前没人跑过的面——整套测试里 `enable` 从未被 CLI 层驱动过）、`launchd.test.mjs`
+  5 条（含"模板丢了 `{{ENV_BLOCK}}` 槽就不许把束交给 job"）、`source.test.mjs` 6 条、
+  `apply.test.mjs` 3 条；`installer/test/auto-update.test.mjs` 3 条（注册成功要说出导出了多少张、
+  导不出来要转述 updater 的原话、旧 updater 不回报时说"没有回报"而不是给一个看起来可用的默认值），
+  并给 `registerAutoUpdate` 加了 `updaterDeps` 接缝——否则安装器的单测会真的去跑
+  `security find-certificate` 并起子进程联网探测。面板侧 12 条（含真子进程自报
+  `ca-present`/`ca-absent`，分得清"不设"与"设空串"）。
+- 规格新增 §9（导出者是谁、刷新点、五态、探测必须在子进程、绝不降级到 http 或关校验），
+  每条判据配一行能红测试。
+
 ### Fixed — 签名 job 读不到自己那把私钥：`v1.4.0` 发出来仍是无签名的
 
 `v1.4.0` 打出去之后，Release 里只有 `GlassPane-1.4.0.tar.gz` 与 `SHA256SUMS-1.4.0.txt` 两件，没有

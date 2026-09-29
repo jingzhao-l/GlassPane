@@ -15,12 +15,22 @@
 - **安装器怎么接**：`installer/cli.js` 动态 import 本树的 `cli.js`（`resolveStateRoot`/`runCommand`）与
   `lib/state.js`（`writePointer`/`readPointer`）、`lib/launchd.js`（`AGENT_LABEL`、排程常量）——
   标签、plist 与状态文件只有这一处实现。注册/卸载一律走 `runCommand('enable'|'disable')`。
+- **本机 TLS 信任**：`<stateRoot>/ca-roots.pem` 由 `lib/ca-bundle.js` 独家导出（`security find-certificate`
+  对系统根钥匙串 + `System.keychain`），`enable` 注册 agent 时和每次 `apply` 成功后各刷新一次；launchd 的
+  plist 与设置面板起子进程时都带上 `NODE_EXTRA_CA_CERTS`。结果记在状态文件的 `caRoots`（五态封闭：
+  `ok` / `empty` / `unavailable` / `write-unverified` / `probe-failed`；缺失或 `null` ＝ 旧安装没记录过，
+  面板与 `gp_diagnose` 不能说成"正常"）。
 - **它写哪里**：`<stateRoot>/update-state.json`、`update-install.json`、`update-staging/`、
   `update-backup/`、`update.log`。状态根按**口令库里的家目录**解析（`os.userInfo().homedir`），不按 `$HOME`：
   面板与守护进程读的是同一个 `~/.glasspane`，跟着 `$HOME` 走会写出一个谁也看不到的状态。
 
 ## 已知边界（不当成已交付）
 
+- **node 不读 macOS 信任库，这条腿只能靠导出的束**：装了 HTTPS 中间人的机器（企业网关、加速器）上，
+  `curl`/`git`/`gh` 都正常而 `fetch` 拒绝同一条链，因为 node 只认自己打包的 CA 束。本树的处理是导出
+  "这台机器的管理员已经选择信任"的那些根并追加给 node（不是替换、更不是关闭校验）。边界要说清：
+  拦截根若不在这两个钥匙串里，就只能落 `probe-failed` 等人处理；而**内容安全从来不依赖这条腿** ——
+  下载字节必须匹配那份由发布 key 签过的 `SHA256SUMS`，中间人签不出它。
 - **作者性（第 8 条）如今是被检查的，但只检查到"内置 key"这一层**：`verified` 的确切含义是"这份
   `SHA256SUMS` 与随代码分发的那把公钥相符"，不是"发布者是这个组织"——公钥与代码走同一渠道，轮换就是改
   `installer/cli.js` 里那一个导出值（`updater/lib/signature.js` 动态 import 它，`updater/` 下不留第二份，

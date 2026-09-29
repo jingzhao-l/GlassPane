@@ -69,6 +69,19 @@ function fakeLaunchctl({ bootstrapStatus = 0, bootstrapStderr = '' } = {}) {
 
 const NOW = new Date('2026-09-27T04:00:00.000Z')
 
+/**
+ * §9 的联网接缝：注册那一趟会导出系统根证书束（`security find-certificate`）并**起一个 node
+ * 子进程**去探测 release 端点。单元测试不联网，所以这里换掉这两件事；返回值走的是 updater 自己
+ * 的记录形状，字段一个都不省。
+ */
+const CA_RECORD = { status: 'ok', certs: 163, path: null, exportedAt: '2026-09-29T09:00:00.000Z', detail: null }
+const CA_DEPS = {
+  updaterDeps: {
+    refreshCaBundle: () => CA_RECORD,
+    usableCaBundle: () => ({ usable: true, certs: CA_RECORD.certs, reason: null }),
+  },
+}
+
 function mode(file) {
   return fs.statSync(file).mode & 0o777
 }
@@ -84,6 +97,7 @@ test('自动更新接线：指针落进状态根，文件 0600 / 目录 0700，�
     const { launchd, state } = await updaterLibs()
     const launchctl = fakeLaunchctl()
     const result = await registerAutoUpdate({
+      ...CA_DEPS,
       rootDir: REPO_ROOT,
       env: { HOME: home },
       homeDir: home,
@@ -153,6 +167,7 @@ test('--no-auto-update：一次 bootstrap 都不发，状态里记 disabled=true
     assert.ok(usageText().includes('--no-auto-update'), '用法文本要认这个 flag')
 
     const result = await registerAutoUpdate({
+      ...CA_DEPS,
       rootDir: REPO_ROOT,
       env: { HOME: home },
       homeDir: home,
@@ -191,6 +206,7 @@ test('环境变量那一位：判定权在 updater，installer 不读它；结�
       'installer 源码里不许出现这个环境变量的名字：读它是 updater 的活（§7），出现第二处读法就有两套语义')
     const launchctl = fakeLaunchctl()
     const result = await registerAutoUpdate({
+      ...CA_DEPS,
       rootDir: REPO_ROOT,
       env: { HOME: home, GLASSPANE_UPDATE_DISABLE: '1' },
       homeDir: home,
@@ -224,6 +240,7 @@ test('安装树缺 updater/cli.js：不抛错（安装仍成功）、指针不�
   try {
     const launchctl = fakeLaunchctl()
     const result = await registerAutoUpdate({
+      ...CA_DEPS,
       rootDir: root,
       env: { HOME: home },
       homeDir: home,
@@ -271,6 +288,7 @@ test('半棵树（cli.js 在、lib/state.js 不在）同样是如实点名，而
     fs.mkdirSync(path.join(root, 'updater', 'lib'), { recursive: true })
     fs.writeFileSync(path.join(root, 'updater', 'cli.js'), '')
     const result = await registerAutoUpdate({
+      ...CA_DEPS,
       rootDir: root, env: { HOME: home }, homeDir: home, uid: '501',
       runLaunchctl: fakeLaunchctl().run, now: NOW, say: (line) => lines.push(line),
     })
@@ -299,6 +317,7 @@ test('重跑安装幂等：LaunchAgents 里只有一份 plist，指针与作业�
     fs.symlinkSync(path.join(REPO_ROOT, 'updater'), path.join(moved, 'updater'), 'dir')
     const launchctl = fakeLaunchctl()
     const first = await registerAutoUpdate({
+      ...CA_DEPS,
       rootDir: REPO_ROOT, env: { HOME: home }, homeDir: home, uid: '501',
       runLaunchctl: launchctl.run, now: NOW, say: () => {},
     })
@@ -307,6 +326,7 @@ test('重跑安装幂等：LaunchAgents 里只有一份 plist，指针与作业�
     assert.equal(JSON.parse(fs.readFileSync(first.pointerPath, 'utf8')).updaterCli, UPDATER_CLI)
 
     const second = await registerAutoUpdate({
+      ...CA_DEPS,
       rootDir: moved, env: { HOME: home }, homeDir: home, uid: '501',
       runLaunchctl: launchctl.run, now: new Date('2026-09-28T01:02:03.000Z'), say: () => {},
     })
@@ -350,6 +370,7 @@ test('launchd 标签只有 updater 那一处真源：installer 源码里没有�
   const home = tempDir('gp-install-label-')
   try {
     const result = await registerAutoUpdate({
+      ...CA_DEPS,
       rootDir: REPO_ROOT, env: { HOME: home }, homeDir: home, uid: '501',
       runLaunchctl: fakeLaunchctl().run, now: NOW, say: () => {},
     })
@@ -371,6 +392,7 @@ test('launchd 标签只有 updater 那一处真源：installer 源码里没有�
   }
 })
 
+
 test('先开后关：重跑安装带 --no-auto-update 会把已注册的代理卸干净（不留僵尸作业）', async () => {
   const home = tempDir('gp-install-thenoff-')
   try {
@@ -378,6 +400,7 @@ test('先开后关：重跑安装带 --no-auto-update 会把已注册的代理�
     const launchctl = fakeLaunchctl()
     const plistPath = launchd.agentPlistPath({ homeDir: home })
     const on = await registerAutoUpdate({
+      ...CA_DEPS,
       rootDir: REPO_ROOT, env: { HOME: home }, homeDir: home, uid: '501',
       runLaunchctl: launchctl.run, now: NOW, say: () => {},
     })
@@ -385,6 +408,7 @@ test('先开后关：重跑安装带 --no-auto-update 会把已注册的代理�
     assert.ok(fs.existsSync(plistPath), '前置：这一轮确实注册了')
 
     const off = await registerAutoUpdate({
+      ...CA_DEPS,
       rootDir: REPO_ROOT, env: { HOME: home }, homeDir: home, uid: '501',
       autoUpdate: parseArgs(['--no-auto-update']).options.autoUpdate,
       runLaunchctl: launchctl.run, now: NOW, say: () => {},
@@ -416,6 +440,82 @@ test('launchctl 拒绝 bootstrap 时抛错：自动更新注册失败不能被�
     )
     assert.equal(fs.existsSync(launchd.agentPlistPath({ homeDir: home })), false,
       'bootstrap 没成，定义文件也不能留在原地冒充已注册')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+/* ------------------------------------------- §9：束的态必须出现在安装口径里 */
+
+function caDeps(record, { usable = true, withCaRoots = true } = {}) {
+  return {
+    updaterDeps: {
+      refreshCaBundle: () => record,
+      usableCaBundle: () => ({ usable, certs: usable ? record.certs : 0, reason: usable ? null : 'absent' }),
+      ...(withCaRoots ? {} : { __noCaRoots: true }),
+    },
+  }
+}
+
+test('注册成功那行把导出的束说出来（多少张、写进了哪个变量）', async () => {
+  const home = tempDir('gp-install-ca-ok-')
+  try {
+    const lines = []
+    const launchctl = fakeLaunchctl()
+    const result = await registerAutoUpdate({
+      rootDir: REPO_ROOT, env: { HOME: home }, homeDir: home, uid: '501',
+      runLaunchctl: launchctl.run, now: NOW, say: (line) => lines.push(line),
+      ...caDeps({ ...CA_RECORD, path: `${home}/.glasspane/ca-roots.pem` }),
+    })
+    assert.equal(result.registered, true, result.message)
+    assert.equal(result.caRoots.certs, 163)
+    assert.ok(lines.some((l) => l.includes('163 张') && l.includes('NODE_EXTRA_CA_CERTS')),
+      `安装日志要说清 node 被给了什么：${lines.join(' / ')}`)
+    const guide = updateGuidanceText(result).join('\n')
+    assert.match(guide, /163 张/)
+    assert.match(guide, /八道校验/, '校验从七道变八道之后，说明文字不能再写七道')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('束导不出来时安装日志转述 updater 的原话，而不是沉默或自己编一句', async () => {
+  const home = tempDir('gp-install-ca-bad-')
+  try {
+    const lines = []
+    const launchctl = fakeLaunchctl()
+    const result = await registerAutoUpdate({
+      rootDir: REPO_ROOT, env: { HOME: home }, homeDir: home, uid: '501',
+      runLaunchctl: launchctl.run, now: NOW, say: (line) => lines.push(line),
+      ...caDeps({ status: 'unavailable', certs: 0, path: null, exportedAt: NOW.toISOString(), detail: 'no security tool' }, { usable: false }),
+    })
+    assert.equal(result.registered, true, '注册本身没失败：不拦截的机器不需要这份文件')
+    const all = lines.join('\n')
+    assert.match(all, /注意（自动更新的网络这一跳）/)
+    assert.match(all, /"security" tool is not here|security/, '措辞来自 updater 的那一句（唯一作者）， installer 只转述')
+    assert.match(all, /NODE_EXTRA_CA_CERTS/, 'remedy 也在同一句里')
+    assert.match(updateGuidanceText(result).join('\n'), /⚠/, '后续使用说明里也得有这一条，安装日志翻上去的人才能看到')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('旧 updater 没回报束的态时，说"没有回报"而不是说"没问题"', async () => {
+  const home = tempDir('gp-install-ca-none-')
+  try {
+    const lines = []
+    const launchctl = fakeLaunchctl()
+    // 一份不认识这件事的 updater：注册照做，但状态里没有任何 caRoots 记录（不是 null，是键都不在）。
+    const result = await registerAutoUpdate({
+      rootDir: REPO_ROOT, env: { HOME: home }, homeDir: home, uid: '501',
+      runLaunchctl: launchctl.run, now: NOW, say: (line) => lines.push(line),
+      ...caDeps(null, { usable: false }),
+    })
+    assert.equal(result.registered, true)
+    assert.equal(result.caRoots, null, '"没有记录"只有一个形状：null；不许被补成一个看起来可用的默认值')
+    assert.ok(lines.some((l) => l.includes('没有回报')), `缺失要读成"旧版本"，不是读成正常：${lines.join(' / ')}`)
+    assert.match(lines.join('\n'), /enable/, '并给出把它补上的那一条命令')
+    assert.doesNotMatch(updateGuidanceText(result).join('\n'), /163 张/, '没有记录就不许出现一句看起来像证据的数字')
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }

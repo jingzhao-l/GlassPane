@@ -13,7 +13,7 @@ import {
 } from "@iterate/kernel";
 
 import { canonicalJson } from "./canonical.js";
-import { readUpdateState } from "./update-state.js";
+import { readUpdateState, type CaRootsReading } from "./update-state.js";
 import { MAX_FRAME_BYTES } from "./io.js";
 import {
   CALLER_VISIBLE_CEILING_MS,
@@ -1283,7 +1283,19 @@ async function runValidatedTool(
       // old build, so the machine's own freshness goes beside it — read from the
       // updater's state, never written here. The block is a separate content item so
       // the JSON reply an agent parses stays byte-identical.
-      content.push({ type: "text", text: readUpdateState().summary });
+      //
+      // The CA trust bundle rides along in the same block because it is the one fact
+      // that decides whether the updater on this machine can ever reach a release:
+      // "up to date" and "has been failing TLS verification since install" both arrive
+      // as a check that produced nothing. A state this shell could not decode claims
+      // nothing about the bundle — the summary already says the file is unreadable.
+      const reading = readUpdateState();
+      content.push({
+        type: "text",
+        text: reading.kind === "read"
+          ? `${reading.summary}\n${caBundleDiagnosis(reading.ca)}`
+          : reading.summary,
+      });
     }
     return {
       content,
@@ -1309,6 +1321,111 @@ async function runValidatedTool(
       isError: true,
     };
   }
+}
+
+/**
+ * The CA trust bundle line of `gp_diagnose`'s update block.
+ *
+ * Why this deserves its own sentence at all: node verifies the updater's HTTPS
+ * against the CA list compiled into the node binary, not against this machine's
+ * trust store. On a network where something re-signs TLS — a corporate proxy, an
+ * accelerator, a middlebox the user has no way to see — every scheduled update
+ * check then dies at certificate verification while the daemon, the panel and the
+ * agent all keep behaving as though auto-update simply has nothing to report. The
+ * install records which of the five states it landed in; four of them mean the
+ * updater is dead, and each is dead in a different way, so each gets its own
+ * consequence plus one action the reader can actually take.
+ *
+ * `ok` is the only state that means usable, and a record this shell cannot decode
+ * never reaches here: `update-state.ts` folds that into "unreadable" instead of
+ * defaulting it to a friendly state.
+ */
+function caBundleDiagnosis(ca: CaRootsReading): string {
+  // Rendered once so the command an agent can paste reads identically in every branch.
+  const enableCmd = "`node updater/cli.js enable`";
+  if (!ca.recorded) {
+    return "ca trust bundle: this install has never recorded exporting the machine's trusted roots "
+      + "(the state file carries no caRoots), which is NOT the same as \"the bundle is fine\" — an install predating "
+      + "the export step looks exactly like this. node then verifies only against the CA list inside its own binary, "
+      + "so on a machine whose HTTPS is re-signed locally every auto-update run fails certificate verification and "
+      + `nothing on the surface says so. Remedy: re-run the GlassPane installer, or ${enableCmd}, either of which `
+      + `writes the roots to ${ca.bundlePath} and points the launchd agent and the panel at it. For a check run by `
+      + `hand in a terminal: export NODE_EXTRA_CA_CERTS=${ca.bundlePath} — but only once that file exists, and set `
+      + "before node starts, because a running process never picks the variable up.";
+  }
+  // The exporter's own recorded path wins: it is the file the export actually wrote and
+  // read back. The derived one is a fallback so a record without a path still names where
+  // the bundle belongs rather than naming nothing.
+  const target = ca.recordedPath ?? ca.bundlePath;
+  const countClause = ca.certs === null ? "an unrecorded number of certificates" : `${ca.certs} certificates`;
+  let diagnosis: string;
+  switch (ca.status) {
+    case "ok":
+      diagnosis = `ca trust bundle: ok — node will use this exported root bundle (${countClause} at ${target}) for `
+        + "the updater's HTTPS, so a locally re-signed certificate chain on this machine does not stop a check. "
+        + `Nothing to do; the bundle is refreshed by the installer, by ${enableCmd}, and after every successful apply.`;
+      break;
+    case "probe-failed":
+      diagnosis = `ca trust bundle: probe-failed — ${countClause} were written to ${target}, and reaching the `
+        + "release endpoint through them still failed. This is the machine-still-intercepted case: the exported "
+        + "bundle does not contain the root that re-signs this network's TLS, so the scheduled updater is dead on "
+        + "every run exactly as it was before the bundle existed. Remedy: get that root into the System keychain "
+        + `(/Library/Keychains/System.keychain), then refresh the export with ${enableCmd} or a re-run of the `
+        + `installer. Pointing NODE_EXTRA_CA_CERTS at ${target} changes nothing while the signing root is missing.`;
+      break;
+    case "empty": {
+      // The exporter keeps an earlier usable bundle when it has one and records that path;
+      // when it has none, nothing is there at all. Those are two different machine problems,
+      // and telling the reader a file does not exist when it does sends the remedy into a
+      // dead end — so the record's own path decides which sentence is said.
+      const kept = ca.recordedPath !== null;
+      diagnosis = `ca trust bundle: empty — "security find-certificate" ran and produced ${countClause}, so this `
+        + "export published nothing new"
+        + (kept
+          ? `; the bundle already at ${target} was kept and is still what the agent and the panel hand to node, so `
+            + "a check can pass today while this machine's current roots go unrecorded."
+          : `; nothing is at ${target} either, so on a machine whose HTTPS is re-signed locally every check fails `
+            + "certificate verification from here.")
+        + " Remedy: check that both keychains are readable (`security dump-keychain` lists them), then re-run the "
+        + `GlassPane installer or ${enableCmd} to export again.`;
+      break;
+    }
+    case "unavailable":
+      diagnosis = "ca trust bundle: unavailable — the `security` tool was not found on this host, so this machine's "
+        + `trusted roots could not be read and no bundle was written or refreshed at ${target}. Unless something `
+        + "else already put a bundle there, the updater carries only node's built-in list, so on a re-signing "
+        + "network it cannot reach a release at all. Remedy: place a root bundle you trust at a path of your "
+        + "choosing and give that same path to both consumers — "
+        + "`export NODE_EXTRA_CA_CERTS=<that path>` for runs from this terminal, the launchd environment for the "
+        + "scheduled one — then re-run the GlassPane installer so the agent and the panel record it.";
+      break;
+    case "write-unverified":
+      diagnosis = `ca trust bundle: write-unverified — the bytes read back from ${target} were not the bytes the `
+        + `exporter wrote, and the export counted ${countClause}, so whatever sits at that path is not the bundle `
+        + "this install believes in. Verification can fail at any point, including after a partial write. Remedy: "
+        + `re-run the GlassPane installer or ${enableCmd}, which exports again and reads the file back; if it `
+        + `repeats, ${target} sits on a volume that will not hold a private regular file, and auto-update must stay `
+        + "off until that is fixed.";
+      break;
+    default: {
+      // Unreachable while the enum in `update-state.ts` and this switch move together: adding a
+      // status there without giving it a consequence and a remedy here is a compile error, which
+      // is the point — a fifth state with no sentence would otherwise read as no problem.
+      const unhandled: never = ca.status;
+      diagnosis = `ca trust bundle: the state file records ${JSON.stringify(unhandled)}, a state this shell has no `
+        + "sentence for; treat the CA trust bundle as unverified and re-run the GlassPane installer";
+    }
+  }
+  // The exporter's timestamp and its own reason text are stated whatever the state is: a
+  // failure the reader can quote is a failure the reader can report, and printing them in one
+  // branch while three others drop them is how a recorded cause stops being visible.
+  const provenance = [
+    ca.exportedAt === null ? null : `exported ${ca.exportedAt}`,
+    ca.detail === null ? null : `recorded reason: ${ca.detail}`,
+  ].filter((part): part is string => part !== null);
+  return provenance.length === 0
+    ? diagnosis
+    : `${diagnosis} The record itself says: ${provenance.join("; ")}.`;
 }
 
 /**

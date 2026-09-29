@@ -58,6 +58,17 @@ contains no path at all; the paths arrive as positional parameters (`$0`…`$3`)
       <string>{{STATE_FLAG}}</string>
       <string>{{STATE_ROOT}}</string>
     </array>
+    <!--
+      ENV_BLOCK is filled by `agentEnvironmentBlock()` in ../lib/launchd.js: either
+      an EnvironmentVariables dict carrying NODE_EXTRA_CA_CERTS -> the exported
+      system root bundle, or a comment saying this machine has no such bundle.
+      WHY IT BELONGS TO THE JOB AND NOT TO THE CODE: node reads that variable when
+      the process starts, so an updater that sets it later in its own body would be
+      changing nothing. On a machine whose TLS is intercepted by a locally trusted
+      root (corporate gateway, accelerator), a job without this line fails the very
+      first network gate every single day — and looks like a working agent.
+    -->
+    {{ENV_BLOCK}}
     <key>RunAtLoad</key>
     <false/>
     <key>StartCalendarInterval</key>

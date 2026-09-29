@@ -19,6 +19,7 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import { CODES } from './codes.js'
+import { CA_ENV_VAR } from './ca-bundle.js'
 import { UpdaterError, writePrivateFile } from './fsutil.js'
 import { stateDirReadings } from './policy.js'
 
@@ -180,6 +181,37 @@ export function readRunningJob({
 /* --------------------------------------------------------------- the agent */
 
 /**
+ * The `EnvironmentVariables` block, or a comment saying why there is none.
+ *
+ * This is the whole reason the agent can reach GitHub at all on a machine whose
+ * TLS is intercepted: node reads `NODE_EXTRA_CA_CERTS` **at process start**, so a
+ * bundle that exists but is not in the job's environment changes nothing, and the
+ * daily run keeps failing its first network gate while looking alive.
+ *
+ * "No bundle" renders as a comment rather than an empty dict on purpose: the
+ * installed plist is the artifact an operator reads when this goes wrong, and
+ * "this machine has no exported root bundle" is information where an empty dict
+ * reads like a mistake somebody made.
+ */
+export function agentEnvironmentBlock(caBundle) {
+  if (caBundle === null || caBundle === undefined) {
+    return `    <!-- ${CA_ENV_VAR} not set: this machine has no exported system root bundle -->`
+  }
+  if (typeof caBundle !== 'string' || caBundle === '') {
+    throw new UpdaterError(CODES.agentPathUnsafe, `the update agent cannot be rendered: the CA bundle path was ${JSON.stringify(caBundle)}; an unnamed bundle would be a job that trusts nothing while claiming to trust something`)
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000\u000a\u000d]/.test(caBundle)) {
+    throw new UpdaterError(CODES.agentPathUnsafe, `the update agent cannot be rendered: the CA bundle path carries a control character (${JSON.stringify(caBundle)})`)
+  }
+  return '    <key>EnvironmentVariables</key>\n'
+    + '    <dict>\n'
+    + `      <key>${CA_ENV_VAR}</key>\n`
+    + `      <string>${escapePlistString(caBundle)}</string>\n`
+    + '    </dict>'
+}
+
+/**
  * Render the update agent's plist body. The shipped template under
  * `launchd/` carries `{{TOKENS}}`; this is the single place that fills them, so
  * a registered agent and a rendered file in tests come from the same string.
@@ -207,6 +239,7 @@ export function renderAgentPlist({
   minute = DEFAULT_MINUTE,
   logPath = null,
   label = AGENT_LABEL,
+  caBundle = null,
   template,
 } = {}) {
   if (!cliPath) throw new UpdaterError(CODES.stateWriteUnverified, 'the update agent needs an updaterCli path')
@@ -239,9 +272,24 @@ export function renderAgentPlist({
   }
   const body = template ?? agentTemplateText()
   assertNoInterpolatedShellCommand(body)
+  if (caBundle && !body.includes('{{ENV_BLOCK}}')) {
+    // A template that lost the token would render a perfectly valid plist that
+    // simply never hands the job its bundle — the silent shape this whole module
+    // exists to prevent, because the failure it produces looks like a network
+    // problem on a machine where the network is fine.
+    throw new UpdaterError(CODES.agentPathUnsafe, 'the agent template has no {{ENV_BLOCK}} slot, so the exported root bundle could not reach the job; add the slot back rather than registering an agent that will fail its first network gate daily')
+  }
   let out = body
   for (const [token, value] of Object.entries(values)) {
     out = out.replaceAll(token, escapePlistString(value))
+  }
+  // The environment block is markup this function builds (with the path escaped
+  // inside it), so it is substituted last and never through the escaping loop —
+  // escaping it would put a literal `&lt;key&gt;` into the plist.
+  out = out.replaceAll('{{ENV_BLOCK}}', agentEnvironmentBlock(caBundle))
+  const leftover = /\{\{[A-Z_]+\}\}/.exec(out)
+  if (leftover) {
+    throw new UpdaterError(CODES.agentPathUnsafe, `the rendered agent still carries ${leftover[0]}: the template asks for a value this function does not fill, and launchd would run the placeholder`)
   }
   return out
 }

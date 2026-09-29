@@ -1142,3 +1142,99 @@ test('the MCP half refuses a non-JSON line, a wrong-shaped tool list, and a refu
   assert.equal(answered.count, 16)
 })
 
+
+/* ------------------------------------------------ §9: the bundle a swap inherits */
+
+test('a successful swap re-exports the root bundle the new agent runs on', async () => {
+  const fx = fixture('ca-refresh')
+  const kick = await okKick()
+  const socketPath = shortSocketPath(fx.dir, 'ca.sock')
+  const daemon = await startSocketDaemon(socketPath, { behaviour: 'answer', version: '1.4.1' })
+  const calls = []
+  try {
+    const result = await applyUpdate({
+      stateRoot: fx.stateRoot,
+      appsDir: fx.appsDir,
+      bundles: BUNDLES,
+      now: NOW,
+      currentVersion: '1.4.0',
+      socketPath,
+      probe: { socketPath, timeoutMs: 1_000 },
+      job: { ok: true, args: ['glasspaned', '--socket-path', socketPath] },
+      build: okBuild(fx.builtDir),
+      kickstart: kick.fn,
+      toolsList: okTools,
+      npm: okNpm,
+      refreshCa: () => {
+        calls.push('refresh')
+        return { status: 'ok', certs: 163, path: path.join(fx.stateRoot, 'ca-roots.pem'), exportedAt: NOW.toISOString(), detail: null }
+      },
+    })
+    assert.equal(result.status, 'applied', result.message)
+    assert.deepEqual(calls, ['refresh'], 'the interception root rotates; a bundle exported at install time is not permanently valid')
+    const state = loadState(fx.stateRoot).state
+    assert.equal(state.caRoots.status, 'ok')
+    assert.equal(state.caRoots.certs, 163)
+  } finally {
+    await daemon.close()
+    fx.cleanup()
+  }
+})
+
+test('a refresh that could not produce a bundle does not turn a finished swap into a failure', async () => {
+  const fx = fixture('ca-empty')
+  const kick = await okKick()
+  const socketPath = shortSocketPath(fx.dir, 'ca2.sock')
+  const daemon = await startSocketDaemon(socketPath, { behaviour: 'answer', version: '1.4.1' })
+  try {
+    const result = await applyUpdate({
+      stateRoot: fx.stateRoot,
+      appsDir: fx.appsDir,
+      bundles: BUNDLES,
+      now: NOW,
+      currentVersion: '1.4.0',
+      socketPath,
+      probe: { socketPath, timeoutMs: 1_000 },
+      job: { ok: true, args: ['glasspaned', '--socket-path', socketPath] },
+      build: okBuild(fx.builtDir),
+      kickstart: kick.fn,
+      toolsList: okTools,
+      npm: okNpm,
+      refreshCa: () => ({ status: 'probe-failed', certs: 4, path: path.join(fx.stateRoot, 'ca-roots.pem'), exportedAt: NOW.toISOString(), detail: 'still intercepted' }),
+    })
+    assert.equal(result.status, 'applied', 'the version really did change; the CA gap is a next step, not a rollback trigger')
+    assert.equal(loadState(fx.stateRoot).state.caRoots.status, 'probe-failed', '…and it stays on disk, so the panel can keep saying it')
+  } finally {
+    await daemon.close()
+    fx.cleanup()
+  }
+})
+
+test('a refused apply refreshes nothing on disk', async () => {
+  const fx = fixture('ca-refused', { staged: false })
+  const calls = []
+  try {
+    const result = await applyUpdate({
+      stateRoot: fx.stateRoot,
+      appsDir: fx.appsDir,
+      bundles: BUNDLES,
+      now: NOW,
+      currentVersion: '1.4.0',
+      socketPath: shortSocketPath(fx.dir, 'ca3.sock'),
+      probe: { socketPath: shortSocketPath(fx.dir, 'ca3.sock'), timeoutMs: 200 },
+      job: { ok: true, args: ['glasspaned'] },
+      build: okBuild(fx.builtDir),
+      kickstart: async () => ({ ok: true }),
+      toolsList: okTools,
+      npm: okNpm,
+      refreshCa: () => {
+        calls.push('refresh')
+        return { status: 'ok', certs: 1, path: '/x', exportedAt: NOW.toISOString(), detail: null }
+      },
+    })
+    assert.notEqual(result.status, 'applied', result.message)
+    assert.deepEqual(calls, [], 'nothing was swapped, so the machine the agent runs on did not change either')
+  } finally {
+    fx.cleanup()
+  }
+})

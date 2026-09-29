@@ -188,3 +188,58 @@
    一次失败的 `check` 要清掉 `staged`，否则一份过期暂存树能把人手工装好的新版本降回去。
 10. **关闭开关与状态根同一个 home**。`disable`/agent 路径若按 `$HOME` 解析而状态根按口令库记录解析，
     重定向过 `HOME` 的调用会"关掉"一个并不存在的 agent 并报告成功。两处必须同一个来源。
+
+## 9. 网络这一跳的信任从哪来（2026-09-29，第一次在真机跑 `check` 查出的，已升为契约）
+
+真机事实：本机 `api.github.com` 的证书链被替换成 `issuer=CN=SteamTools Certificate, O=BeyondDimension`
+（本地加速器把系统代理指到 `127.0.0.1:15556` 并做 HTTPS 中间人，其根证书装进了 macOS 信任库）。
+`curl` / `git` / `gh` 都查系统信任库因而正常；**node 的 `fetch` 只认自己打包的 Mozilla CA 束，不读钥匙串**，
+于是 `UNABLE_TO_VERIFY_LEAF_SIGNATURE`。实测：把系统根束导出成 PEM（163 张）后，
+`releases/latest` 与 `.asc` 资产下载都恢复。
+
+这不是"某台机器特殊"：企业网的 Zscaler/Netskope 与各类加速器是同一个形状，而"每天定时自动更新"恰恰最容易
+装在这种机器上。第一次真跑就死在第 1 道校验之前，而当时 198 条测试全用假 HTTP 层，没有任何一条测到它。
+
+1. **只有一个作者：`updater/lib/ca-bundle.js`**。安装器**不**自己实现一份导出——它注册 agent 走的就是
+   `updater enable`，那条路上导出一次；这样"信任从哪来"只有一个写的人，路径也只有一个解析口径。
+   命令：`security find-certificate -a -p` 对
+   `/System/Library/Keychains/SystemRootCertificates.keychain` 与 `/Library/Keychains/System.keychain`
+   （管理员装的根在后者），合并写进 `<stateRoot>/ca-roots.pem`。
+2. **写入与其余状态文件同形**：临时文件 + rename + 读回校验，0600。证书计数为 0 ⇒ 判为失败：不留半个
+   文件、不写 agent 的环境变量、安装日志说清哪一步空了。绝不把"导出成功"建立在 `security` 的退出码上。
+3. **消费者只有两个，且都在进程启动前拿到变量**：launchd agent 的 plist 写
+   `EnvironmentVariables.NODE_EXTRA_CA_CERTS`；面板 `Process` 起 CLI 时把同一个变量放进环境。
+   node 只在启动时读这份束，所以**不做 re-exec、不改 `NODE_TLS_REJECT_UNAUTHORIZED`、不加 `--insecure`**。
+   在终端手敲 `node updater/cli.js check` 的人若没设这个变量，唯一正确的行为是**失败并把 remedy 说出来**
+   （见第 6 条），而不是悄悄可用或悄悄不可用。
+4. **`NODE_EXTRA_CA_CERTS` 是追加而不是替换**：node 仍在验证完整链，Mozilla 束继续有效，只是另外也信任
+   这台机器的管理员已经选择信任的那些根。文档必须这样写，否则读者会把它读成"关了校验"。内容级作者性
+   仍由 §1 第 5、8 道兜住：下载字节必须匹配那份被我们自己的 key 签过的 `SHA256SUMS`，中间人签不出它。
+5. **刷新点**：安装时、`enable` 注册 agent 时、每次 `apply` 成功之后。理由很具体：拦截证书的有效期到
+   2027-02，轮换后不刷新就是每天一次 `release-unreachable`。
+6. **失败文案必须带真因和可执行 remedy**。`release-unreachable` 现在写 `GET <url> failed: fetch failed`
+   ——真因在 `error.cause.code` 里被吞掉了；一个人/代理看到 "fetch failed" 只会去查网络通不通，而浏览器里
+   GitHub 明明打得开。契约：TLS 验证类失败必须报出 `cause` 的 code，并点名
+   `export NODE_EXTRA_CA_CERTS=<stateRoot>/ca-roots.pem`；非 TLS 失败（`ECONNREFUSED`、DNS、4xx）**不得**
+   套用这句 remedy，要报自己那条原因 —— 否则 remedy 本身成为误导源。
+7. **状态是封闭枚举，不是布尔**。实现与路径由 `updater/lib/ca-bundle.js` 独家持有（单一作者），调用点是三处：
+   安装时（安装器）、`enable` 注册 agent 时、每次 `apply` 成功之后。枚举：
+   `ok`（写出 N>0 张且探测通过）/ `probe-failed`（文件写出来了，但拿它仍到不了 release 端点——这才是"这台
+   机器还在被拦且束里缺那张根"）/ `empty`（`security` 有输出但 0 张证书）/ `unavailable`（没有 `security`
+   工具，即非 macOS）/ `write-unverified`（读回与写出内容不符）。记进状态文件的字段是 `caRoots`（可为
+   `null` = 这份安装从未导出过，面板与 `gp_diagnose` 要说"旧安装，未记录"而不是"正常"）。
+   `empty`/`unavailable`/`write-unverified`/`probe-failed` 都必须附 remedy；**只有 `ok` 才算可用**。
+8. **导出之后探一次真的 release 端点**（best-effort）：探不通不阻断安装，但必须把原因写进安装日志、状态文件
+   与面板，因为这条不修好，每日 agent 从装好那天起就是死的，而它看起来完全像"在正常工作"。
+9. **绝不因 TLS 不可用而降级**：不放宽 `GLASSPANE_UPDATE_BASE` 的 https 限制、不走 http、不跳过任何一道
+   校验。宁可这一版不更新（停在 needs-consent、面板显示原因），也不在信任链上打洞。
+
+| 判据 | 测试 | 反向变异怎么红 |
+| --- | --- | --- |
+| 0 张证书＝失败，不留文件不写环境变量 | `installer/test/ca-roots.test.mjs` | 桩返回空文本仍写文件 ⇒ 红 |
+| 写后读回校验 mode 与内容 | 同上 | 去掉读回 ⇒ 红 |
+| plist 携带该变量且路径被 XML 转义 | `updater/test/launchd.test.mjs` | 删 `EnvironmentVariables` 或不转义 ⇒ 红 |
+| 面板 spawn 带上同一变量 | `engine/Tests/…/UpdatePanelTests.swift` | 环境不设 ⇒ 红 |
+| TLS 失败文案含 cause code 与 remedy；非 TLS 不含 | `updater/test/source.test.mjs` | 回到 `${error.message}` ⇒ 红 |
+| 五态封闭、各有说法，且 `caRoots:null` 读成"旧安装未记录"而不是"正常" | `updater/test/ca-bundle.test.mjs` + `installer/test/ca-roots.test.mjs` | 把 `probe-failed` 并入 `ok` ⇒ 红 |
+| apply 后刷新 | `updater/test/apply.test.mjs` | 去掉刷新调用 ⇒ 红 |

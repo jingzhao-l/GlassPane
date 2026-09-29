@@ -5,6 +5,8 @@ import GlassPaneEngine
 ///
 /// 职责边界（与 `SettingsModel` 的"面板不代测"同一口径）：
 ///  - 只发 `node <更新器> <子命令> --json`，只读它回的那一行 JSON；
+///  - 每一次起子进程都带上这台机器导出的系统根证书束（`NODE_EXTRA_CA_CERTS`），
+///    束不在盘上或空着就不带这个键——node 只在启动那一刻读它，只有这里能给；
 ///  - 不下载、不校验、不换版、**不重启后台服务**——换版后的重启由更新器在
 ///    它自己确认后台服务空闲之后做，面板抢着重启会打断用户眼前正在跑的动作；
 ///  - 读不到就说读不到：指针缺失、指针指向的脚本没了、node 没了、
@@ -36,17 +38,22 @@ final class UpdateModel: ObservableObject {
     private let stateRootPath: String
     /// node 程序位置；nil 表示每次按 `UpdatePanel.nodeCandidates` 现找。
     private let injectedNodePath: String?
+    /// 起子进程时那份环境的底子。可注入是为了让测试能把"这台机器本来就带着
+    /// NODE_EXTRA_CA_CERTS"这一种情况摆出来；不注入时就是面板自己的那一份。
+    private let baseEnvironment: [String: String]
     /// 在途标记：`isRunning` 是发布给 UI 的副本，这个是判据本身。
     private var inFlight = false
 
     init(
         stateRoot: String = UpdatePanel.stateRoot(),
         nodePath: String? = nil,
-        clock: @escaping () -> Date = Date.init
+        clock: @escaping () -> Date = Date.init,
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         self.stateRootPath = stateRoot
         self.injectedNodePath = nodePath
         self.clock = clock
+        self.baseEnvironment = baseEnvironment
     }
 
     // MARK: - 派生呈现
@@ -56,6 +63,15 @@ final class UpdateModel: ObservableObject {
     var stateRoot: String { stateRootPath }
 
     var pointerFile: String { UpdatePanel.pointerFile(stateRoot: stateRootPath) }
+
+    /// 这台机器给 node 的那份根证书束在哪：状态根下那一个，路径只有一个作者。
+    var caBundleFile: String { UpdatePanel.caBundleFile(stateRoot: stateRootPath) }
+
+    /// 「更新」区里那句关于根证书束的话（每一态各有一句，缺失也有一句）。
+    var caRootsText: String { UpdatePanel.caRootsText(snapshot) }
+
+    /// 这一项是否真的备好了——只有记录写着 `ok` 才算，其余都算没备好。
+    var caRootsIsUsable: Bool { UpdatePanel.caRootsIsUsable(snapshot) }
 
     /// 面板显示用的状态（含 36 小时过期加成）。
     var status: UpdatePanel.Status? { UpdatePanel.effectiveStatus(snapshot, now: now) }
@@ -137,9 +153,17 @@ final class UpdateModel: ObservableObject {
         runningCommand = command
         readFailure = nil
         let arguments = [cli] + Self.arguments(for: command, stateRoot: stateRootPath, extra: extraArguments)
+        // 束的路径现在就定下来，读盘与拼环境放到后台那一趟去做：
+        // 那是一次整文件的读，不该占住主线程（这一页曾被主线程等子进程搞到整窗冻结）。
+        let bundlePath = caBundleFile
+        let base = baseEnvironment
         Task.detached(priority: .userInitiated) {
+            let environment = UpdatePanel.caBundleEnvironment(
+                base: base,
+                bundle: UpdatePanel.inspectCaBundle(at: bundlePath)
+            )
             let outcome = UpdateModel.runUpdater(
-                node: node, arguments: arguments, timeoutSeconds: timeoutSeconds
+                node: node, arguments: arguments, environment: environment, timeoutSeconds: timeoutSeconds
             )
             await MainActor.run {
                 self.inFlight = false
@@ -231,16 +255,22 @@ final class UpdateModel: ObservableObject {
     /// 跑一次更新器：stdout 收成一行交回去，stderr 直接丢弃（人类文案与
     /// 日志按契约走 stderr，面板要的原话在那一行里），超时则终止子进程。
     ///
+    /// `environment` 是子进程那份**完整**环境（不是增量）：`NODE_EXTRA_CA_CERTS`
+    /// 只能在这里进去——node 只在进程启动那一刻读它，面板起完了再设改不了已经跑起来的那一个。
+    /// 束不在或空着时这一份里就没有这个键（不设与设成空串是两件事，见 `caBundleEnvironment`）。
+    ///
     /// `nonisolated static`：分钟级的换版不能占住主线程——面板曾经在主线程
     /// 等子进程，症状是整窗冻结后被系统看门狗杀掉。
     nonisolated static func runUpdater(
         node: String,
         arguments: [String],
+        environment: [String: String] = ProcessInfo.processInfo.environment,
         timeoutSeconds: TimeInterval
     ) -> RunOutcome {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: node)
         process.arguments = arguments
+        process.environment = environment
         let pipe = Pipe()
         process.standardOutput = pipe
         // 更新器的 stderr 可能很啰嗦（每一道校验一行），从不读它就等着管道塞满，

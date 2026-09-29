@@ -159,7 +159,65 @@ export function assertRedirectTarget(finalHref, { requested }) {
 }
 
 /** Default transport: global fetch. Injectable so tests can *not* reach the internet. */
-export function makeFetcher(fetchImpl = globalThis.fetch, { timeoutMs = 20_000 } = {}) {
+/**
+ * Where a transport failure is really about **trust**, not about the network.
+ *
+ * Why this exists as its own thing: node verifies TLS against the CA bundle
+ * compiled into it and never consults the macOS trust store, so on a machine whose
+ * HTTPS is intercepted (corporate gateway, local accelerator) `fetch` rejects a
+ * chain that `curl`, `git` and `gh` all accept on the same host. Reporting that as
+ * `GET … failed: fetch failed` sends whoever reads it off to check their network
+ * connection — which is fine — while the updater fails every single day. The cause
+ * code is the difference between those two sentences, so it goes into the message
+ * and the remedy goes next to it.
+ */
+const TLS_VERIFICATION_CODES = new Set([
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'UNABLE_TO_GET_ISSUER_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'CERT_UNTRUSTED',
+  'CERT_HAS_EXPIRED',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+])
+
+export function isTlsVerificationFailure(code) {
+  return typeof code === 'string' && TLS_VERIFICATION_CODES.has(code)
+}
+
+/**
+ * Turns a thrown transport error into (message, details). A non-TLS failure keeps
+ * its own reason and gets **no** certificate remedy — handing an operator a
+ * plausible-looking fix for a problem they do not have is how a remedy becomes a
+ * new source of confusion.
+ */
+export function describeTransportFailure(url, error, { caBundlePath = null } = {}) {
+  const cause = error && typeof error === 'object' ? error.cause : null
+  const code = cause && typeof cause.code === 'string' ? cause.code : null
+  const causeText = cause && typeof cause.message === 'string' && cause.message.trim() !== '' ? cause.message.trim() : null
+  const own = error && typeof error.message === 'string' && error.message.trim() !== '' ? error.message.trim() : String(error)
+  const head = `GET ${url} failed: ${own}${code ? ` (${code}${causeText ? `: ${causeText}` : ''})` : ''}`
+  if (!isTlsVerificationFailure(code)) return { message: head, details: null }
+  const remedy = caBundlePath
+    ? `node trusts only the CA bundle compiled into it and does not read the macOS keychain, so a machine whose HTTPS is intercepted by a locally trusted root needs that root handed to it: export NODE_EXTRA_CA_CERTS=${caBundlePath} (if that file does not exist yet, re-run the installer or "updater enable" — either exports the machine's own root bundle; nothing verifies less by doing this, it adds the roots this machine's administrator already trusts).`
+    : `node trusts only the CA bundle compiled into it and does not read the macOS keychain, so a machine whose HTTPS is intercepted needs its own root bundle exported: run the installer or "updater enable", then point NODE_EXTRA_CA_CERTS at <stateRoot>/ca-roots.pem.`
+  return { message: head, details: remedy }
+}
+
+/**
+ * A refused HTTP answer, worded so it can be acted on. `statusText` is empty on
+ * plenty of real servers (and undefined on anything that is not a Response), so
+ * printing it unconditionally produced "answered undefined undefined" — a message
+ * that names neither the status nor the fact that the server did answer.
+ */
+function answered(url, response) {
+  const status = Number.isInteger(response && response.status) ? String(response.status) : 'with no status'
+  const text = response && typeof response.statusText === 'string' && response.statusText.trim() !== '' ? ` ${response.statusText.trim()}` : ''
+  return `GET ${url} answered ${status}${text}`
+}
+
+export function makeFetcher(fetchImpl = globalThis.fetch, { timeoutMs = 20_000, caBundlePath = null } = {}) {
   if (typeof fetchImpl !== 'function') {
     throw new UpdaterError(CODES.sourceShape, 'no fetch implementation available on this runtime (Node >= 18 required)')
   }
@@ -173,7 +231,7 @@ export function makeFetcher(fetchImpl = globalThis.fetch, { timeoutMs = 20_000 }
         headers: { accept: 'application/json', 'user-agent': 'glasspane-updater', ...headers },
       })
       if (!response.ok) {
-        throw new UpdaterError(CODES.releaseUnreachable, `GET ${url} answered ${response.status} ${response.statusText}`)
+        throw new UpdaterError(CODES.releaseUnreachable, answered(url, response))
       }
       // The transport follows redirects, so the URL it *ended* at is the only
       // evidence of where the bytes came from. Checked before the body is read.
@@ -181,7 +239,8 @@ export function makeFetcher(fetchImpl = globalThis.fetch, { timeoutMs = 20_000 }
       return await response.json()
     } catch (error) {
       if (error instanceof UpdaterError) throw error
-      throw new UpdaterError(CODES.releaseUnreachable, `GET ${url} failed: ${error.message}`)
+      const { message, details } = describeTransportFailure(url, error, { caBundlePath })
+      throw new UpdaterError(CODES.releaseUnreachable, message, details)
     } finally {
       clearTimeout(timer)
     }
@@ -189,20 +248,21 @@ export function makeFetcher(fetchImpl = globalThis.fetch, { timeoutMs = 20_000 }
 }
 
 /** Binary transport (tarball / SUMS file). Returns bytes; never text-decodes. */
-export function makeBytesFetcher(fetchImpl = globalThis.fetch, { timeoutMs = 120_000 } = {}) {
+export function makeBytesFetcher(fetchImpl = globalThis.fetch, { timeoutMs = 120_000, caBundlePath = null } = {}) {
   return async function fetchBytes(url) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
       const response = await fetchImpl(url, { redirect: 'follow', signal: controller.signal, headers: { 'user-agent': 'glasspane-updater' } })
       if (!response.ok) {
-        throw new UpdaterError(CODES.releaseUnreachable, `GET ${url} answered ${response.status} ${response.statusText}`)
+        throw new UpdaterError(CODES.releaseUnreachable, answered(url, response))
       }
       assertRedirectTarget(response.url, { requested: url })
       return new Uint8Array(await response.arrayBuffer())
     } catch (error) {
       if (error instanceof UpdaterError) throw error
-      throw new UpdaterError(CODES.releaseUnreachable, `GET ${url} failed: ${error.message}`)
+      const { message, details } = describeTransportFailure(url, error, { caBundlePath })
+      throw new UpdaterError(CODES.releaseUnreachable, message, details)
     } finally {
       clearTimeout(timer)
     }
