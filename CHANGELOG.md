@@ -66,6 +66,58 @@ MCP 工具面都没动；动的是文案里的假路径/假话、恢复分支的
 自己设过同一个路径时介入"，那是把 1.5.0 就写进规格的意图修对，不是新增承诺。
 
 
+### Fixed — 真机验收第一次把"确实有新版本可装"这条路走通，四条高危同时现形
+
+上面那批修完之后，本机终于出现"装的比发的旧"的状态（`current=1.5.0`、`latest=1.5.1`），于是
+`check` 第一次真的走到**下载资产**那一步。结果它一条也没走通过——四条缺陷全都只在"有真实的新 release
+且真要下载"时才会露面，此前 271 条 updater 测试没有一条覆盖到那一段：
+
+1. **资产域名钉死把每一份真实 release 都拒了。** 原规则要求资产 URL 与钉死的基址 same-origin
+   （`https://api.github.com`），而 GitHub 报文里的 `browser_download_url` 是
+   `https://github.com/<slug>/releases/download/<tag>/<file>`。所有夹具写的是
+   `api.github.com/.../releases/download/…` —— 一个 GitHub 根本不产出的形状，于是"钉死源"这条判据
+   在测试里永远成立、在真机上永远失败。现在放行需三条同时成立：基址仍是钉死的 GitHub API 主机
+   （自建镜像不获得这层放宽）、主机在显式列出的发布主机集里（不是后缀匹配）、路径解码后属于**这个仓**
+   的那两种形状；同 origin 的 URL 也要过路径这一关，因为 `api.github.com` 上不止放着这一个仓。
+   测试里的 URL 逐字取自真机拿回的报文。
+2. **档案里的符号链接一律拒绝 ⇒ 真实 release 停在暂存这一步。** `git archive` 会把仓里的符号链接
+   原样打进资产（本仓 `harness/…/apple-touch-icon-v3.png` 就是），当时的解包器对 typeflag `2`
+   直接 `archive-entry-unsupported`。现在链接一律**物化成档案里目标那份字节的副本**，落盘的树里
+   一个链接都不剩（真机那份 24 MiB 档案解出来 `find -type l` 计数为 0）；绝对目标、解析后越界、
+   档案里不存在、指向目录、链接指链接、设备与 FIFO 仍全拒，且拒绝发生在写第一个字节之前。
+   副本的 mode 跟随**目标文件**——tar 把链接记成 0777，照抄就是在每台机器上多一个人人可写的发布字节
+   （真机实测就是 0777）。
+3. **六个 CLI 参数从来没生效。** `parseArgs` 把 `--state-dir`/`--apps-dir`/`--daemon-bin`/`--socket`/
+   `--at`/`--hour`/`--minute` 写进 `flags.overrides`，而每个消费者读的是 `flags['state-dir']` 这类裸键，
+   那个袋子没有任何一处读过。**这里要如实交代我造成的后果**：我用 `check --state-dir /var/tmp/...`
+   做真机验收时，它实际解析出的状态根是活的 `~/.glasspane`，于是那份 24 MiB 的暂存树与状态文件的历史
+   被写进了这台机器的活状态根（`apply` 从未运行，什么都没被安装）。事后我把那棵暂存树删掉——
+   `apply` 对"状态说暂存在、盘上没有"的处置是拒绝并等下一次检查重新暂存（设计内路径），所以定时作业
+   不会在无人知会的情况下换版；活的状态文件内容此后未再改动，并在修好之后用 sha256 前后比对证明隔离
+   成立。单元测试当时全绿的原因与第 1 条同形：它们直接构造 `runCommand({flags:{…}})` 那个消费者形状，
+   从不经过解析器。补的 `cli-options.test.mjs` 里两条用例是**起真子进程**跑的。
+   顺带修掉同族的一句假话：`--disable` 的 usage 写着"no-op 别名"却什么都不做——现在它真的选择子命令，
+   并拒绝与别的命令同时出现。
+4. **一个总时长做不了"这条连接死没死"的判据。** 24 MiB 的资产无人竞争时 39s 下得完，在有竞争的链路上
+   被 120s 的 `timeoutMs` 掐死，而报出去的句子是 `GET … failed: This operation was aborted`——既不说
+   到了哪条时限，也不说已经收到多少。现在拆成两个时钟：`stallMs`（30s，**每收到一段就重置**）决定死活，
+   `timeoutMs`（15min）只兜底防止永远滴流吊死每日作业；两种停止各自说出"停摆时已收到 8.4 MiB"还是
+   "600s 没下完（已收到 …）"，都不 stage 半份内容。把"计时器到了"改成能打断假流，靠的是假 `read()`
+   也遵守真 fetch 的 abort 语义——否则那条断言测的是夹具自己。
+
+真机验收（本机，node v26.4.0，代理在该链路上做 MITM）：`check --state-dir <沙盒>` 走完
+下载 → SUMS 严格解析 → sha256 实测 → 内置 key 的 GPG 签名 verified → 该 commit 上 CI 绿 →
+解包（含图标链接的物化）→ 暂存树自己的 `check-version.mjs` ⇒ `status=staged`，退出码 0；
+`caRoots` 记 `ok` 163 张且路径落在沙盒里；§9.10 的证书恢复在这条链上真实触发过一次
+（先 `release-unreachable`，重导带标记重跑后连上）。
+
+反向变异（本轮 15 条，全红）：放宽两面一起拆 / 同 origin 不再校验形状 / 链接退回一律拒 / 按 destDir
+解析链接 / 目标不必在档内 / 指向目录也物化 / 落盘成真链接 / 副本继承 0777 / 不重置停摆计时 /
+停摆与超时不说话 / 参数塞回 overrides / `--disable` 退回装饰品 / 别名与别的命令不再矛盾 等。
+`gate.sh all` 在同一棵树上 failed=0（engine-test 746/4 skip/0 fail、updater 273、installer 90、
+mcp-shell 382、kernel 59、bridge 58、probe 24、signal 自退出且 unlink）。
+
+
 ## [1.5.1] — 2026-09-29
 
 ### Fixed — 探测 URL 拼成了 `[object Object]`，每台机器的 `caRoots` 都被记成 `probe-failed`

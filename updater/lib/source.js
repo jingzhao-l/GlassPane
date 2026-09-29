@@ -63,21 +63,37 @@ export function resolveBase(env = process.env) {
 }
 
 /**
- * The policy every downloaded asset URL passes: same-origin with the pinned
- * base, over https. A release payload is *data from the source*; letting it name
- * an arbitrary cleartext host would let the thing we are verifying decide
- * where its bytes come from.
+ * The policy every downloaded asset URL passes: the same origin as the pinned
+ * base, **or** a release-download URL of the pinned repository on a host GitHub
+ * actually serves releases from — always over https. A release payload is *data
+ * from the source*; letting it name an arbitrary host would let the thing we are
+ * verifying decide where its bytes come from.
  *
- * Loopback is **not** a free exception on its own: it is a property of the
- * *base*, because the only reason a `http://127.0.0.1:<port>` asset exists is
- * the test fixture that also serves the release. The previous form derived
- * `loopback` from the **asset's own host** and then skipped the origin
- * comparison for it, so a release payload could point the bytes at any local
- * (and one character away, any routable) listener while the base was still
- * https GitHub. Reverse mutation: derive `loopback` from `url.hostname` and
- * guard the origin comparison with it — `a release asset cannot name an
- * insecure or off-origin host` and `a loopback base is the only thing that
- * makes a loopback asset legal` both go red.
+ * WHY THE ORIGIN RULE CANNOT BE THE WHOLE RULE (found by running `check` on a real
+ * machine the first time a newer release existed, 2026-09-29): `GET releases/latest`
+ * answers with `browser_download_url = https://github.com/<owner>/<repo>/releases/
+ * download/<tag>/<file>` — origin `https://github.com`, while the pinned base is
+ * `https://api.github.com/repos/<owner>/<repo>`. Requiring same-origin alone therefore
+ * refused **every real release**: the code had been green only because every fixture
+ * invented `api.github.com/.../releases/download/…`, a path GitHub does not use. A
+ * fixture-shaped input that bypasses the shape of the real payload is not a test of the
+ * contract; it is a test of the fixture.
+ *
+ * The widening is bounded by three facts, all of them checked: the base must still be the
+ * pinned GitHub API host (an operator-set `GLASSPANE_UPDATE_BASE` mirror gets strict
+ * same-origin and nothing else), the host must be one of the explicitly pinned GitHub
+ * release hosts (no `*.github.com.evil.test` suffix tricks), and the *path* must carry the
+ * pinned `REPO_SLUG` in one of the two shapes GitHub produces — so a payload cannot steer
+ * the bytes at someone else's repository.
+ *
+ * Loopback is still **not** a free exception: it is a property of the *base*, because the
+ * only reason a `http://127.0.0.1:<port>` asset exists is the fixture that also serves the
+ * release. The previous form derived `loopback` from the **asset's own host** and skipped
+ * the origin comparison for it, so a payload could point the bytes at any local (and one
+ * character away, any routable) listener while the base was still https GitHub. Reverse
+ * mutation: derive `loopback` from `url.hostname` and guard the origin comparison with it —
+ * `a release asset cannot name an insecure or off-origin host` and `a loopback base is the
+ * only thing that makes a loopback asset legal` both go red.
  */
 export function assertAssetUrl(candidate, { base }) {
   let url
@@ -88,10 +104,12 @@ export function assertAssetUrl(candidate, { base }) {
   }
   let baseLoopback = false
   let baseOrigin = null
+  let baseHost = null
   if (base) {
     const baseUrl = new URL(String(base))
     baseLoopback = LOOPBACK_HOSTS.includes(baseUrl.hostname)
     baseOrigin = baseUrl.origin
+    baseHost = baseUrl.hostname
   }
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && baseLoopback)) {
     throw new UpdaterError(
@@ -100,15 +118,51 @@ export function assertAssetUrl(candidate, { base }) {
     )
   }
   if (baseOrigin && url.origin !== baseOrigin) {
-    // GitHub redirects *after* the request to objects.githubusercontent.com;
-    // the *named* URL in the payload still has to be the pinned API origin.
+    const onPinnedGitHub = PINNED_API_HOSTS.includes(baseHost)
+      && url.protocol === 'https:'
+      && GITHUB_DOWNLOAD_HOSTS.includes(url.hostname)
+      && assetPathNamesPinnedRelease(url.pathname)
+    if (!onPinnedGitHub) {
+      throw new UpdaterError(
+        CODES.assetHostUnpinned,
+        `release asset ${url.href} is neither on the pinned update origin ${baseOrigin} nor a ${REPO_SLUG} release URL on a pinned GitHub host: the payload names where its own bytes come from, so an off-family host, another repository, or a mirror that was not given as the update base is refused instead of downloaded`,
+      )
+    }
+  }
+  // Same-origin is not enough on the pinned API host either: `api.github.com` carries
+  // *every* repository's API, so a payload naming `/repos/<someone-else>/…` or a path
+  // that is not one of the two shapes GitHub produces for this release must still fail.
+  // (URL normalization silently eats `..`, which is exactly why the shape is checked on
+  // the decoded pathname rather than on the string that came in.)
+  if (PINNED_API_HOSTS.includes(baseHost) && url.protocol === 'https:' && !assetPathNamesPinnedRelease(url.pathname)) {
     throw new UpdaterError(
       CODES.assetHostUnpinned,
-      `release asset ${url.href} is not on the pinned update origin ${baseOrigin}`,
+      `release asset ${url.href} is on the pinned host but is not a ${REPO_SLUG} release download or source-archive path: this tool only fetches the release it names`,
     )
   }
   return url.href
 }
+
+/**
+ * The two URL shapes a GitHub release payload really names, each with the pinned
+ * repository slug in it: an uploaded asset (`/<slug>/releases/download/<tag>/<file>`)
+ * and the source archive (`/repos/<slug>/{tarball,zipball}/<ref>`). Anything else —
+ * including a GitHub host serving somebody else's release — fails here.
+ */
+export function assetPathNamesPinnedRelease(pathname) {
+  const path = decodeURIComponent(String(pathname ?? ''))
+  const slug = REPO_SLUG.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(?:^|/)${slug}/releases/download/[^/]+/[^/]+$`).test(path)
+    || new RegExp(`(?:^|/)repos/${slug}/(?:tarball|zipball)/[^/]+$`).test(path)
+}
+
+/**
+ * The API host this tool pins by default. Kept separate from GITHUB_DOWNLOAD_HOSTS:
+ * an operator-supplied mirror base must not gain the release-host widening, or
+ * `GLASSPANE_UPDATE_BASE` would become a way to *broaden* which hosts a payload may
+ * name rather than a way to point at a mirror of the same shape.
+ */
+export const PINNED_API_HOSTS = Object.freeze(['api.github.com'])
 
 /**
  * Hosts a GitHub release download may legally land on after the redirect GitHub
@@ -251,26 +305,94 @@ export function makeFetcher(fetchImpl = globalThis.fetch, { timeoutMs = 20_000, 
   }
 }
 
-/** Binary transport (tarball / SUMS file). Returns bytes; never text-decodes. */
-export function makeBytesFetcher(fetchImpl = globalThis.fetch, { timeoutMs = 120_000, caBundlePath = null } = {}) {
+/**
+ * Binary transport (tarball / SUMS file). Returns bytes; never text-decodes.
+ *
+ * Two different clocks, because the release archive is ~24 MiB (measured: 25,126,902
+ * bytes for v1.5.1) and a single total-time cap cannot tell "slow but alive" from
+ * "dead connection". The old 120s cap did neither: on a loaded/proxied link it aborted
+ * a *progressing* download ("GET … failed: This operation was aborted" — seen on a real
+ * machine 2026-09-29, 39s uncontended, >120s under contention), and the message named
+ * neither the deadline nor how much had arrived, so nobody could tell a stalled proxy
+ * from a broken network.
+ *
+ *  · `stallMs` — no bytes at all for this long ⇒ refuse. This is the **sharper** guard:
+ *    a dead connection is now caught in 30s instead of being confused with a slow one.
+ *  · `timeoutMs` — an overall ceiling so a trickling server cannot hold the daily job
+ *    open forever. Raising it is not an accommodation: the stall clock is what decides
+ *    liveness, and both outcomes say which fired and how many bytes arrived.
+ */
+export const DOWNLOAD_STALL_MS = 30_000
+export const DOWNLOAD_CEILING_MS = 900_000
+
+const humanBytes = (n) => (n >= 1024 * 1024
+  ? `${(n / (1024 * 1024)).toFixed(1)} MiB`
+  : `${(n / 1024).toFixed(0)} KiB`)
+
+export function makeBytesFetcher(fetchImpl = globalThis.fetch, {
+  timeoutMs = DOWNLOAD_CEILING_MS,
+  stallMs = DOWNLOAD_STALL_MS,
+  caBundlePath = null,
+} = {}) {
   return async function fetchBytes(url) {
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    let fired = null
+    let received = 0
+    let stallTimer = null
+    const armStall = () => {
+      if (!(stallMs > 0)) return
+      clearTimeout(stallTimer)
+      stallTimer = setTimeout(() => {
+        fired = 'stall'
+        controller.abort()
+      }, stallMs)
+    }
+    const ceiling = setTimeout(() => {
+      fired = 'ceiling'
+      controller.abort()
+    }, timeoutMs)
+    armStall()
     try {
       const response = await fetchImpl(url, { redirect: 'follow', signal: controller.signal, headers: { 'user-agent': 'glasspane-updater' } })
       if (!response.ok) {
         throw new UpdaterError(CODES.releaseUnreachable, answered(url, response))
       }
       assertRedirectTarget(response.url, { requested: url })
-      return new Uint8Array(await response.arrayBuffer())
+      if (!response.body || typeof response.body.getReader !== 'function') {
+        const once = new Uint8Array(await response.arrayBuffer())
+        received = once.length
+        return once
+      }
+      const reader = response.body.getReader()
+      const chunks = []
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (value && value.length) {
+          chunks.push(value)
+          received += value.length
+          armStall()
+        }
+      }
+      return new Uint8Array(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))))
     } catch (error) {
       if (error instanceof UpdaterError) throw error
+      if (fired) {
+        const why = fired === 'stall'
+          ? `no bytes arrived for ${Math.round(stallMs / 1000)}s after ${humanBytes(received)} had been received`
+          : `the whole download did not finish within ${Math.round(timeoutMs / 1000)}s with ${humanBytes(received)} received`
+        throw new UpdaterError(
+          CODES.releaseUnreachable,
+          `GET ${url} was stopped: ${why}. The release is refused and nothing partial is staged, so the next run starts from a clean slate`,
+        )
+      }
       const { message, details, tlsVerification } = describeTransportFailure(url, error, { caBundlePath })
       const wrapped = new UpdaterError(CODES.releaseUnreachable, message, details)
       wrapped.tlsVerification = tlsVerification === true
       throw wrapped
     } finally {
-      clearTimeout(timer)
+      clearTimeout(stallTimer)
+      clearTimeout(ceiling)
     }
   }
 }

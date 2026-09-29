@@ -79,21 +79,23 @@ options
                        unsigned release all refuse
   --at <iso>           override "now" (tests and repro)
   --hour/--minute      schedule for enable (local time, one run per day)
-  --disable            accepted on any command as a no-op alias of disable
+  --disable            alias of the "disable" subcommand; --enable likewise.
+                       They refuse to sit next of a different command — a switch that
+                       promises safety and does nothing is worse than not having it.
   -h, --help
 `
 
 /** Pure argument parse. Returns `{ ok:false, reason }` for anything unusable. */
 export function parseArgs(argv) {
-  const flags = { json: false, auto: false, help: false, consents: [], overrides: {} }
+  const flags = { json: false, auto: false, help: false, consents: [] }
   const positional = []
   for (let i = 0; i < argv.length; i += 1) {
     const token = String(argv[i])
     if (token === '-h' || token === '--help') flags.help = true
     else if (token === '--json') flags.json = true
     else if (token === '--auto') flags.auto = true
-    else if (token === '--disable') flags.overrides.disable = true
-    else if (token === '--enable') flags.overrides.enable = true
+    else if (token === '--disable') flags.disable = true // 选子命令，见下面 parseArgs 末尾的别名处理
+    else if (token === '--enable') flags.enable = true   // 同上；两者同时给是用法错误
     else if (token === '--consent') {
       const value = argv[(i += 1)]
       if (!value) return { ok: false, reason: `--consent needs a value (${CONSENT_KINDS.join(' | ')})` }
@@ -102,7 +104,14 @@ export function parseArgs(argv) {
     else if (['--state-dir', '--state-root', '--apps-dir', '--daemon-bin', '--socket', '--at', '--hour', '--minute'].includes(token)) {
       const value = argv[(i += 1)]
       if (value === undefined) return { ok: false, reason: `${token} needs a value` }
-      flags.overrides[token.replace(/^--/, '')] = value
+      // Onto `flags` itself, keyed by the bare option name — which is exactly how every
+      // consumer reads it (`flags['state-dir']`, `flags.at`, `flags.hour`, `flags.socket`).
+      // These used to land in a separate `flags.overrides` bag that nothing ever read, so
+      // **all six of these CLI options were silently ignored**: `check --state-dir /tmp/x`
+      // resolved the state root to the live `~/.glasspane` and wrote the staged release
+      // *there* (found by running it, 2026-09-29). A documented flag that does nothing is
+      // worse than an absent one — the caller believes they are working on a copy.
+      flags[token.replace(/^--/, '')] = value
     } else if (token.startsWith('--')) {
       return { ok: false, reason: `unknown option ${token}` }
     } else {
@@ -110,7 +119,21 @@ export function parseArgs(argv) {
     }
   }
   if (positional.length > 1) return { ok: false, reason: `expected one command, got ${positional.join(' ')}` }
-  const command = positional[0] ?? null
+  if (flags.disable && flags.enable) {
+    return { ok: false, reason: '--disable and --enable contradict each other; pick one' }
+  }
+  let command = positional[0] ?? null
+  // `--disable` used to be documented as "a no-op alias of disable". A flag that promises
+  // safety and does nothing is worse than not having it — nobody types `updater disable`
+  // afterwards because they believe the switch already fired. It is now a real alias:
+  // it selects the subcommand, and it refuses to sit next of a different one.
+  if (flags.disable || flags.enable) {
+    const alias = flags.disable ? 'disable' : 'enable'
+    if (command !== null && command !== alias) {
+      return { ok: false, reason: `--${alias} cannot be combined with the command ${JSON.stringify(command)}; run "updater ${alias}" on its own` }
+    }
+    command = alias
+  }
   if (command !== null && !SUBCOMMANDS.includes(command)) {
     return { ok: false, reason: `unknown command ${JSON.stringify(command)}; try ${SUBCOMMANDS.join(' | ')}` }
   }
