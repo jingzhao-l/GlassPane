@@ -8,6 +8,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.6.0] - 2026-09-28
+
+### Fixed
+
+- **The session epilogue printed a command that does not resolve.** Exiting a
+  session showed `opencode -s <id>`; this product installs as
+  `glasspane-harness`, so the line a user copies to resume was the wrong binary.
+  It now prints `glasspane-harness -s <id>`.
+- **The epilogue could print `-s undefined`.** `sessionID` is optional, because
+  the session may not have finished loading. The continuation line is now
+  omitted unless there is an id, rather than emitting a literal `undefined` that
+  reads like a runnable command.
+- **The provider dialog kept a dead upstream key** in its description table —
+  unreachable, but shipped. Removed.
+
+### Added
+
+- **Dimension-aware compaction (M4).** A compacted `gp_*` session now carries a
+  coverage line computed by the kernel: which planned review dimensions the
+  engine recorded a decision for, which recorded nothing, and which recorded
+  something the run never planned. A dimension with no decisions is reported as
+  unverified — never dropped, and never described as fine, since only the engine
+  may judge that. The dimension vocabulary is the iterate config's; this side
+  neither enumerates it nor infers one from a method name.
+
+### Internal
+
+- `packages/tui` typechecks clean (11 errors, one root cause: a `createResource`
+  whose `T` could not be inferred, so every consumer lost its element type).
+- Two files that ship user-facing strings were outside the brand-surface
+  ratchet's scan list, which is why the two leaks above reached a release. They
+  are scanned now, and the ratchet is verified to fail on a regression in them.
+
 ## [Unreleased]
 
 Nothing in the product's own surface changed; this batch is about being able to *prove*
