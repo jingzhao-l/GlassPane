@@ -1280,15 +1280,29 @@ function loadedWithCli(cli) {
   return { ok: true, args: ['/bin/sh', '-c', '"$0" "$1" check "$2" "$3" --json', cli] }
 }
 
-async function applyWithRealRuntime(label, { enableOk = true, loaded = null, disabled = false, trigger = 'manual', enableWritesState = null, extraDeps = {} } = {}) {
+/**
+ * The two §11 integration tests used to plant the previous install in a sibling directory
+ * (`<tmp>/previous-install`), so `runtimeVersionOf` answered null for it and **no prune could ever
+ * reach it** — "the old copy is still on disk" was unfalsifiable by the mechanism it named. Now the
+ * previous generation is a real generation of the runtime root, and an orphan newer than it (but
+ * older than this run's version by no accident) is planted alongside: the fix under test is that the
+ * pointed-at generation survives while the orphan goes, and a string-ordered prune would do the
+ * opposite.
+ */
+async function applyWithRealRuntime(label, { enableOk = true, loaded = null, disabled = false, trigger = 'manual', enableWritesState = null, extraDeps = {}, orphanGenerations = ['1.4.9'] } = {}) {
   const fx = fixture(label)
   const kick = await okKick()
   const socketPath = shortSocketPath(fx.dir, 'ok.sock')
   const daemon = await startSocketDaemon(socketPath, { behaviour: 'answer', version: '1.4.1' })
-  const previousRoot = path.join(fx.dir, 'previous-install')
+  const previousRoot = path.join(fx.stateRoot, 'runtime', '1.4.0')
   const previousCli = path.join(previousRoot, 'updater', 'cli.js')
   fs.mkdirSync(path.dirname(previousCli), { recursive: true })
   fs.writeFileSync(previousCli, 'PREVIOUS UPDATER\n')
+  for (const orphan of orphanGenerations) {
+    const dir = path.join(fx.stateRoot, 'runtime', orphan, 'updater')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'cli.js'), 'ORPHAN COPY\n')
+  }
   writePointer(fx.stateRoot, { updaterCli: previousCli, installRoot: previousRoot, agentLabel: AGENT_LABEL }, { now: NOW })
   fs.mkdirSync(path.join(fx.treePath, 'updater'), { recursive: true })
   fs.writeFileSync(path.join(fx.treePath, 'updater', 'cli.js'), 'NEW UPDATER\n')
@@ -1325,14 +1339,14 @@ async function applyWithRealRuntime(label, { enableOk = true, loaded = null, dis
           : loaded),
       }),
     })
-    return { result, fx, previousCli, enableCalls, pointer: readPointer(fx.stateRoot) }
+    return { result, fx, previousCli, previousRoot, enableCalls, pointer: readPointer(fx.stateRoot) }
   } finally {
     await daemon.close()
   }
 }
 
 test('a swap also moves the updater\'s own copy, and the pointer names a file that exists', async () => {
-  const { result, fx, previousCli, enableCalls, pointer } = await applyWithRealRuntime('runtime-happy')
+  const { result, fx, previousCli, previousRoot, enableCalls, pointer } = await applyWithRealRuntime('runtime-happy')
   try {
     assert.equal(result.status, 'applied', result.message)
     assert.equal(result.code, null, `换版本身干净：${result.message}`)
@@ -1345,6 +1359,10 @@ test('a swap also moves the updater\'s own copy, and the pointer names a file th
       '落地的那份必须是被八道校验放过的树里的字节，不是旧安装里翻出来的')
     assert.equal(enableCalls[0], pointer.pointer.updaterCli, '注册要由新那份自己做')
     assert.equal(fs.readFileSync(previousCli, 'utf8'), 'PREVIOUS UPDATER\n', '旧那份不许被就地覆盖——它还在被别的进程执行')
+    assert.equal(fs.existsSync(previousRoot), true,
+      '被指针指过的那一代是**在册清理够得到**的（它就住在 runtime/ 里），所以这条断言真的有牙齿')
+    assert.equal(fs.existsSync(path.join(fx.stateRoot, 'runtime', '1.4.9')), false,
+      '没人指的那一代要清掉；钉住"上一代"不等于不再回收')
     assert.equal(loadState(fx.stateRoot).state.runtime.status, 'refreshed', '面板读的是状态文件，不是返回值')
     fx.cleanup()
   } finally {
