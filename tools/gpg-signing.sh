@@ -128,10 +128,32 @@ cmd_seed() {
     say "       from a swallowed GUI prompt."
     exit 1
   fi
-  security add-generic-password -U -s "$KEYCHAIN_SERVICE" -a private-key -w "$armored" >/dev/null
-  security add-generic-password -U -s "$KEYCHAIN_SERVICE" -a passphrase  -w "$pass"     >/dev/null
+  # Store base64, not the armored text itself. `security -w` hex-encodes a
+  # multi-line argument on this machine: the entry looks fine in the keychain UI
+  # and `find-generic-password` hands back a hex blob, which `gpg --import`
+  # rejects as "no valid OpenPGP data found" with no hint about the cause. That
+  # is not hypothetical — it is how v0.6.1's first run failed. A single-line
+  # value round-trips correctly (verified), so base64 is the transport.
+  kc_put() { local b; b="$(printf '%s' "$2" | base64 | tr -d '\n')"
+             security add-generic-password -U -s "$KEYCHAIN_SERVICE" -a "$1" -w "$b" >/dev/null; }
+  kc_get() { security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$1" -w 2>/dev/null \
+               | base64 -d 2>/dev/null || true; }
+
+  kc_put private-key "$armored"
+  kc_put passphrase  "$pass"
+  # Read back and compare: the only honest check is the bytes that come out.
+  local stored
+  stored="$(kc_get private-key)"
+  if ! printf '%s' "$stored" | grep -q 'BEGIN PGP PRIVATE KEY BLOCK'; then
+    say "error: the keychain entry does not read back as an armored private key."
+    say "       Nothing was installed. This machine's \`security\` may not"
+    say "       round-trip even a base64 value; report it rather than pushing a"
+    say "       secret that cannot be imported."
+    exit 1
+  fi
   unset pass armored
-  ok "private key + passphrase stored in keychain as service '$KEYCHAIN_SERVICE'"
+  ok "private key + passphrase stored (base64) under '$KEYCHAIN_SERVICE'"
+  say "verified by read-back: the stored value really is an armored key"
   say "next: $0 install"
 }
 
@@ -173,11 +195,20 @@ cmd_verify_pass() {
 cmd_install() {
   need gh; need security
   local key pass
-  key="$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a private-key -w 2>/dev/null || true)"
-  pass="$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a passphrase  -w 2>/dev/null || true)"
+  # base64 channel; see the note in cmd_seed for why the raw value is not used.
+  key="$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a private-key -w 2>/dev/null | base64 -d 2>/dev/null || true)"
+  pass="$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a passphrase  -w 2>/dev/null | base64 -d 2>/dev/null || true)"
   if [ -z "$key" ] || [ -z "$pass" ]; then
     say "error: no keychain entry for '$KEYCHAIN_SERVICE' (private-key / passphrase)."
     say "run: $0 seed"
+    exit 1
+  fi
+  # Refuse to push a value that is not a key. Installing a mangled secret is
+  # worse than installing none: `gpg --import` fails at the far end of CI, in a
+  # job that has already spent minutes building, and the log blames the key.
+  if ! printf '%s' "$key" | grep -q 'BEGIN PGP PRIVATE KEY BLOCK'; then
+    say "error: the stored private key is not an armored PGP key (a hex blob was"
+    say "       seen in this exact spot). Refusing to install it. Re-run: $0 seed"
     exit 1
   fi
   local repo dir env
