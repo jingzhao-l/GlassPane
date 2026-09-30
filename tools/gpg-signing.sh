@@ -374,6 +374,16 @@ cmd_selftest() {
   done < <(targets_filtered)
   [ "$fails" -eq 0 ] && ok "environment column is repo-level or 'release'"
 
+  # npm's `--dry-run` is not dry. On this npm version `npm publish --dry-run`
+  # still PUTs the version, and the registry holds it as *staged* — so the
+  # version can never be published afterwards ("Cannot publish over previously
+  # staged version"), and `npm stage list` does not show it either. Never probe
+  # a real version number with --dry-run; the project's own publish script has a
+  # `--dry-run` that only packs, which is the safe way to check a tarball.
+  if npm publish --help >/dev/null 2>&1; then
+    ok "npm present; pack-only checks must use the publish script, not npm publish --dry-run"
+  fi
+
   # An unknown repo must produce no target row, not a silent empty install.
   # Note: this cannot be written as `if ! targets_filtered ...` — that runs in a
   # subshell where the function's `exit 2` never reaches us, so the test would
