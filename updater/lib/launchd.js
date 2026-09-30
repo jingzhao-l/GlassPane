@@ -67,8 +67,21 @@ export function parseArgumentsBlock(printOutput) {
       args.push(inner)
       continue
     }
-    if (line.startsWith('"')) {
-      return { ok: false, args: null, reason: `argument line ${i + 1} opens a quote that never closes (${JSON.stringify(line)})` }
+    // A line that *opens* a quote without closing it is not malformed — it is a bare token that
+    // happens to start with one. Measured on this machine (2026-09-30, `launchctl print
+    // gui/501/com.glasspane.update` with the agent registered for real): launchd prints one argument
+    // per line, raw, with no quoting and no escaping, and this project's own update agent carries the
+    // literal `/bin/sh -c '"$0" "$1" check "$2" "$3" --json && …'`. That line begins with a `"` and
+    // contains more of them, so refusing it made the one job this subsystem registers for itself
+    // permanently unreadable: §11's read-back could never confirm a self-update, and a registration
+    // could never be verified.
+    //
+    // What is actually dangerous is a token carrying the block's own delimiter, because that is what
+    // an embedded `}` used to exploit by ending the list early. That test is kept, below, and it is
+    // the only one that has to be: with one line per argument, no amount of quote characters can hide
+    // a later `--state-dir`.
+    if (line.startsWith('"') && (line.includes(close) || line.includes(open))) {
+      return { ok: false, args: null, reason: `argument line ${i + 1} opens a quote and carries an unquoted ${JSON.stringify(close)} (${JSON.stringify(line)}), so the argument list cannot be decoded` }
     }
     // A bare (unquoted) token carrying the block's own delimiters is where the
     // format stops being describable: `--note=}` cannot be told apart from the
@@ -163,7 +176,7 @@ export function readRunningJob({
       loaded: true,
       program: parseLaunchctlProgram(res.stdout),
       code: CODES.busyOrUnreachable,
-      reason: `the running job names --state-dir more than once (${named.join(', ')}), so which state root it writes is not decidable and no version was swapped`,
+      reason: `the running job names the state-root flag more than once (${named.join(', ')}), so which state root it writes is not decidable and no version was swapped`,
     }
   }
   return {
@@ -334,23 +347,88 @@ export function agentTemplateText() {
 /** Where a user agent lives for this uid. */
 export function agentPlistPath({ label = AGENT_LABEL, homeDir = os.homedir(), uid = null } = {}) {
   void uid
+  // The label is the file *name* here, so this is the same refusal in a second place: a caller that
+  // passed a foreign label would write `~/Library/LaunchAgents/<somebody else>.plist` and have
+  // launchd load it as a login item for that identifier.
+  assertOwnAgentLabel(label)
   return path.join(homeDir, 'Library', 'LaunchAgents', label + '.plist')
+}
+
+/**
+ * The one label this subsystem may ever name a plist after, boot out, or load.
+ *
+ * Every caller passes the constant today, which is exactly why the check lives here: `bootout` and the
+ * plist *file name* both come from this value, so a future caller that took the label from the
+ * installer pointer (`update-install.json`, a file another process writes) would unregister somebody
+ * else's login item and leave its own definition in `~/Library/LaunchAgents` under their name. That is
+ * not a hypothetical shape — §11 already reads a label out of that file to verify its own job. A rule
+ * that only exists in the caller is a comment; this one is a refusal.
+ */
+export function assertOwnAgentLabel(label) {
+  if (label !== AGENT_LABEL) {
+    throw new UpdaterError(
+      CODES.agentPathUnsafe,
+      `the update agent's label was ${JSON.stringify(label)}, and this tool only ever registers ${JSON.stringify(AGENT_LABEL)}: a different label would make launchctl bootout tear down a job that is not GlassPane's and write a plist named after it, so nothing was registered`,
+    )
+  }
+  return label
+}
+
+/**
+ * The schedule a *rendered* agent plist asks for, read back off disk.
+ *
+ * Why this exists: `updater enable` renders the job, and a bare `enable` carries no `--hour`, so the
+ * default would silently move a machine installed with `--hour 3` to midday — every self-update
+ * (`runtime.js` hands over by running the new copy's `enable`) does exactly that, on every version.
+ * Reading the definition that is already installed is what makes re-registration preserve the schedule
+ * instead of re-choosing it. `null` means "this file does not answer", and the caller then says so
+ * rather than pretending the job still runs at the hour the user picked.
+ */
+export function readAgentSchedule({ plistPath, readFile = (p) => fs.readFileSync(p, 'utf8') } = {}) {
+  let text = ''
+  try {
+    text = readFile(plistPath)
+  } catch {
+    return null
+  }
+  const block = /<key>StartCalendarInterval<\/key>\s*<dict>([\s\S]*?)<\/dict>/.exec(text)
+  if (!block) return null
+  const numberAfter = (key) => {
+    const match = new RegExp(`<key>${key}<\\/key>\\s*<(?:integer|string)>([\\s\\S]*?)<\\/(?:integer|string)>`).exec(block[1])
+    return match ? Number.parseInt(match[1].trim(), 10) : null
+  }
+  const hour = numberAfter('Hour')
+  const minute = numberAfter('Minute')
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null
+  return { hour, minute }
 }
 
 /**
  * Install + (re)load the agent. `run` and `writeFile` are injectable so the
  * tests can drive the exact sequence without touching the developer's
  * `~/Library/LaunchAgents`.
+ *
+ * The verdict is not "bootstrap exited 0". launchd keeps the definition it read at bootstrap time, so
+ * a bootout that failed leaves the *old* job loaded while a fresh plist sits on disk; the only thing
+ * that proves the registration took is reading the loaded job back and finding the CLI path this run
+ * rendered. Two different answers come out of that: a book that cannot be read is reported as
+ * unverified (the job may well be right, and refusing here would tell a person their update agent is
+ * off when nothing shows it is), while a book that reads back naming a different command line is a
+ * failure — the swap did not take, and saying "registered" would be the lie this function exists to
+ * prevent.
  */
 export function registerAgent({
   label = AGENT_LABEL,
   plistPath,
   plistText,
+  cliPath = null,
   uid = null,
   run = defaultRun,
   writeFile = (p, text) => writePrivateFile(p, text),
   removeFile = (p) => fs.rmSync(p, { force: true }),
 } = {}) {
+  assertOwnAgentLabel(label)
   const resolvedUid = uid ?? currentUid({ run })
   if (!resolvedUid) {
     return { ok: false, code: CODES.busyOrUnreachable, message: 'the current uid could not be read; the update agent was not registered' }
@@ -358,10 +436,37 @@ export function registerAgent({
   writeFile(plistPath, plistText)
   // A stale definition must be booted out first: launchd caches what it read at
   // bootstrap time, which is how this repo produced EX_CONFIG twice.
-  run('launchctl', ['bootout', `gui/${resolvedUid}/${label}`])
+  const out = run('launchctl', ['bootout', `gui/${resolvedUid}/${label}`])
+  // 3 is "not loaded", which is the state this step wants; anything else is a fact about the next step.
+  const booted = out.status === 0 || out.status === 3
   const boot = run('launchctl', ['bootstrap', `gui/${resolvedUid}`, plistPath])
   if (boot.status === 0 || /already/i.test(String(boot.stderr ?? ''))) {
-    return { ok: true, message: `update agent registered (gui/${resolvedUid}/${label})`, plistPath }
+    const loaded = readRunningJob({ label, uid: resolvedUid, run })
+    if (loaded.unknown === true) {
+      return {
+        ok: true,
+        verified: false,
+        plistPath,
+        message: `update agent loaded (gui/${resolvedUid}/${label}) but the loaded job could not be read back (${loaded.reason}), so this run cannot show which command line launchd is holding${booted ? '' : `; the previous definition also failed to boot out (exit ${out.status}: ${(out.stderr || 'no stderr').trim().slice(0, 120)})`}`,
+      }
+    }
+    const args = Array.isArray(loaded.args) ? loaded.args.map(String) : []
+    const names = cliPath === null ? true : args.some((arg) => arg === cliPath || arg.includes(String(cliPath)))
+    if (!names) {
+      return {
+        ok: false,
+        verified: false,
+        plistPath,
+        code: CODES.busyOrUnreachable,
+        message: `launchctl bootstrap for gui/${resolvedUid}/${label} exited ${boot.status}, but the loaded job names (${args.slice(0, 6).join(' ') || 'no arguments read back'}) and not ${cliPath ?? 'the CLI path this run rendered'}${booted ? '' : `; bootout of the previous definition also failed (exit ${out.status})`}: the update agent was not replaced`,
+      }
+    }
+    return {
+      ok: true,
+      verified: true,
+      plistPath,
+      message: `update agent registered (gui/${resolvedUid}/${label}) and the loaded job names ${cliPath ?? 'the CLI path this run rendered'}`,
+    }
   }
   removeFile(plistPath)
   return {
@@ -380,6 +485,7 @@ export function unregisterAgent({
   run = defaultRun,
   removeFile = (p) => fs.rmSync(p, { force: true }),
 } = {}) {
+  assertOwnAgentLabel(label)
   const resolvedUid = uid ?? currentUid({ run })
   if (!resolvedUid) {
     return { ok: false, code: CODES.busyOrUnreachable, message: 'the current uid could not be read; the update agent was left installed' }

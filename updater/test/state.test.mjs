@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { CODES } from '../lib/codes.js'
+import { CODES, SCHEMA_VERSION } from '../lib/codes.js'
 import { UpdaterError, modeOf, writableRoots } from '../lib/fsutil.js'
 import { HISTORY_LIMIT, OVERDUE_THRESHOLD_MS, emptyState, loadState, nextState, pushHistory, readPointer, saveState, updateSummary, writePointer } from '../lib/state.js'
 import { assertValidState, loadSchema, validate } from '../lib/schema.js'
@@ -23,6 +23,30 @@ const NOW = new Date('2026-09-27T12:00:00.000Z')
 function freshRoot(label) {
   return tempDir(`${TMP_PREFIX}${label}-`)
 }
+
+test("reading a document with a key this version has never seen is still reading", () => {
+  // The same rule as above, but through the seam the CLI uses: write a file that carries §11's
+  // `runtime` object plus a key invented by a later release, then load it. A refusal here is the shape
+  // a machine gets between a deferred handover and the next `enable` — the older updater is the one
+  // with the job, and it has to be able to answer `updater status`.
+  const dir = tempDir(`${TMP_PREFIX}state-future-`)
+  try {
+    const body = { ...emptyState({ now: NOW }), schemaVersion: 99, fromNextRelease: { a: 1 } }
+    // schemaVersion 99 is not a valid value either, so pin the *key* case with a version this schema
+    // accepts and one unknown sibling.
+    body.schemaVersion = SCHEMA_VERSION
+    fs.writeFileSync(path.join(dir, 'update-state.json'), JSON.stringify(body, null, 2) + '\n', { mode: 0o600 })
+    const { state } = loadState(dir)
+    assert.equal(state.status, 'up-to-date', '认得出的字段照常读')
+    assert.equal(state.fromNextRelease.a, 1, '认不出的字段带着走，不是拒绝整份文档')
+
+    // The refusal that must stay: an enum value from a future vocabulary.
+    fs.writeFileSync(path.join(dir, 'update-state.json'), JSON.stringify({ ...body, status: 'awaiting-human' }, null, 2) + '\n', { mode: 0o600 })
+    assert.throws(() => loadState(dir), /state-write-unverified|schema/, '认不出的状态值仍然要拒——那是这台机器的状态，不是别人的注释')
+  } finally {
+    removeDir(dir)
+  }
+})
 
 test('the schema this package ships is the one the state file is checked against', () => {
   const schema = loadSchema()
@@ -60,6 +84,25 @@ test('a status outside the closed enum is never published', () => {
     assert.equal(errors.length, 1)
     assert.match(errors[0], /status/)
     assert.throws(() => assertValidState({ ...emptyState({ now: NOW }), unknownField: 1 }), /not allowed by the schema/)
+
+    // ... and that strictness is for *writing*. §11 hands the launchd job over in two steps: a
+    // scheduled run moves the code and the pointer and writes a newer document, while the job the book
+    // still names is the older updater. If reading refused any key it did not recognize, that older
+    // updater could no longer read its own state file, and the daily check would fail with
+    // `state-write-unverified` about a perfectly valid document. So an unknown property is ignored on
+    // read; a known field holding a value outside its closed enum is still refused, because guessing
+    // past a status would be a verdict this version was never given.
+    const lenient = { ...emptyState({ now: NOW }), unknownField: 1, caRoots: { status: 'ok', certs: 3, path: '/x/ca-roots.pem', exportedAt: NOW.toISOString(), detail: null, fromTheFuture: { nested: 1 } } }
+    assert.equal(assertValidState(lenient, loadSchema(), { ignoreUnknownProperties: true }), lenient)
+    assert.throws(
+      () => assertValidState({ ...emptyState({ now: NOW }), status: 'sunny-side-up' }, loadSchema(), { ignoreUnknownProperties: true }),
+      /not one of|is not/,
+      '忽略认不出的键，不等于接受认不出的值',
+    )
+    assert.throws(
+      () => assertValidState({ ...emptyState({ now: NOW }), history: 'not a list' }, loadSchema(), { ignoreUnknownProperties: true }),
+      /expected array|got string/,
+    )
     assert.throws(() => assertValidState({ ...emptyState({ now: NOW }), digest: 'x', history: [{ at: 'x', action: 'check', result: 'ok' }] }), /missing required property digest/)
     assert.throws(() => assertValidState({ ...emptyState({ now: NOW }), staged: { version: '1.4', dir: '/x', digest: 'y'.repeat(64), at: 'z' } }), /does not match/)
   } finally {

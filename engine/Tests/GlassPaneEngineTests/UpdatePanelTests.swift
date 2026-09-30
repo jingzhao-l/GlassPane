@@ -944,10 +944,13 @@ final class UpdatePanelTests: XCTestCase {
     /// 事，下一步也各不相同），或**把 `detail` 原文吞掉**。
     func testEachRuntimeStateSaysItsOwnThing() throws {
         let detail = "the loaded job still names the old command line"
+        // 每个状态各有一句可以核对的话。`skipped` 那句原来写"这一轮没有去动更新器自身"——可 §11.6 的
+        // 定时分支明明动了代码与指针，只有作业没动；说"没动更新器自身"会把人支去重装，而规格说这一步
+        // 不用重装。指纹跟着那句真话改。
         let distinguishing: [String: String] = [
             "failed": "更新装上了，但更新器自身没换上",
             "kept": "没有登记定时任务",
-            "skipped": "这一轮没有去动更新器自身",
+            "skipped": "这一轮没有重新登记定时任务",
         ]
         var said: [String: String] = [:]
         for (status, fingerprint) in distinguishing {

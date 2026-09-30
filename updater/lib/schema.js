@@ -44,13 +44,13 @@ function describePath(label, key) {
 }
 
 /** Validate `value` against `schema`; returns an array of readable errors. */
-export function validate(schema, value, label = '#') {
+export function validate(schema, value, label = '#', { ignoreUnknownProperties = false } = {}) {
   const errors = []
-  checkNode(schema, value, label, errors)
+  checkNode(schema, value, label, errors, { ignoreUnknownProperties })
   return errors
 }
 
-function checkNode(schema, value, label, errors) {
+function checkNode(schema, value, label, errors, opts = {}) {
   if (!schema || typeof schema !== 'object') return
 
   if (schema.enum !== undefined) {
@@ -85,7 +85,7 @@ function checkNode(schema, value, label, errors) {
       errors.push(`${label}: ${value.length} items below minItems ${schema.minItems}`)
     }
     if (schema.items) {
-      value.forEach((entry, i) => checkNode(schema.items, entry, `${label}/${i}`, errors))
+      value.forEach((entry, i) => checkNode(schema.items, entry, `${label}/${i}`, errors, opts))
     }
   }
   if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
@@ -95,17 +95,33 @@ function checkNode(schema, value, label, errors) {
     const props = schema.properties ?? {}
     for (const [key, child] of Object.entries(value)) {
       if (props[key]) {
-        checkNode(props[key], child, describePath(label, key), errors)
-      } else if (schema.additionalProperties === false) {
+        checkNode(props[key], child, describePath(label, key), errors, opts)
+      } else if (schema.additionalProperties === false && opts.ignoreUnknownProperties !== true) {
         errors.push(`${label}: property ${key} is not allowed by the schema`)
       }
     }
   }
 }
 
-/** Throw with a readable aggregate message when `state` violates the schema. */
-export function assertValidState(state, schema = loadSchema()) {
-  const errors = validate(schema, state)
+/**
+ * Throw with a readable aggregate message when `state` violates the schema.
+ *
+ * Writes are strict and reads are not, and the asymmetry is the point. A document this tool is about
+ * to publish must carry nothing its shipped schema does not declare — that is what keeps
+ * `additionalProperties: false` honest for every *later* reader. A document this tool is *reading* may
+ * legitimately come from a newer writer, and refusing it there is how a normal upgrade turns into a
+ * machine that cannot answer `updater status` at all: §11 hands the launchd job over in two steps (the
+ * scheduled run moves the code and the pointer, the next manual `enable` moves the job), and between
+ * those steps the older updater is still the one the book names. It has to be able to read the state
+ * the newer one left behind, or the daily check fails with `state-write-unverified` about a file that
+ * is perfectly fine.
+ *
+ * What a lenient read still refuses: a missing required field, a wrong type, and any value outside a
+ * closed enum it knows about. Ignoring a key this version has never heard of costs nothing; accepting
+ * `status: "sunny"` would cost the whole judgement.
+ */
+export function assertValidState(state, schema = loadSchema(), opts = {}) {
+  const errors = validate(schema, state, '#', opts)
   if (errors.length > 0) {
     throw new Error(`update-state schema violated: ${errors.join('; ')}`)
   }

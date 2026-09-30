@@ -1276,7 +1276,11 @@ test('a refused apply refreshes nothing on disk', async () => {
  * round found the asset gate, the archive's symlinks and six dead CLI flags all green because a stub
  * stood where production runs.
  */
-async function applyWithRealRuntime(label, { enableOk = true, loaded = null, disabled = false, trigger = 'manual' } = {}) {
+function loadedWithCli(cli) {
+  return { ok: true, args: ['/bin/sh', '-c', '"$0" "$1" check "$2" "$3" --json', cli] }
+}
+
+async function applyWithRealRuntime(label, { enableOk = true, loaded = null, disabled = false, trigger = 'manual', enableWritesState = null, extraDeps = {} } = {}) {
   const fx = fixture(label)
   const kick = await okKick()
   const socketPath = shortSocketPath(fx.dir, 'ok.sock')
@@ -1306,10 +1310,14 @@ async function applyWithRealRuntime(label, { enableOk = true, loaded = null, dis
       npm: okNpm,
       autoDisabled: disabled,
       trigger,
+      ...extraDeps,
       refreshRuntimeImpl: (options) => refreshRuntime({
         ...options,
         runEnable: ({ cliPath }) => {
           enableCalls.push(cliPath)
+          // 真的 `enable` 会写状态（history + caRoots）。要测的就是这一步与父进程那一次写的先后。
+          // 状态根由这里给：测试体里的 `fx` 在 `await` 之前还没初始化，闭包直接引用它只会拿到 TDZ。
+          if (enableWritesState) enableWritesState({ stateRoot: fx.stateRoot })
           return enableOk ? { ok: true, message: null, parsed: { ok: true } } : { ok: false, message: 'the new updater said no' }
         },
         readRunningJob: () => (loaded === null
@@ -1387,6 +1395,115 @@ test('a scheduled swap hands the job over later instead of unregistering itself 
     assert.equal(fs.readFileSync(previousCli, 'utf8'), 'PREVIOUS UPDATER\n', '旧那份仍完整：作业还指着它')
     assert.equal(fs.existsSync(pointer.pointer.updaterCli), true, '新那份也要真在盘上，下一次 enable 才有的可指')
     fx.cleanup()
+  } finally {
+    fx.cleanup()
+  }
+})
+
+test('a rollback that happens after the handover takes the pointer and the job back too', async () => {
+  // §11 moves the updater's own copy *before* apply is finished: re-exporting the root bundle and
+  // retiring the staging tree still sit after it. Either of those can throw, and apply's catch then
+  // restores the two `.app` bundles. If nothing else moved back, the machine ends up on `baseline`
+  // while `update-install.json` and launchd name the version that was just rolled out — and the record
+  // reads "restored and verified", which is true of the app and false of the updater.
+  const fx = fixture('runtime-undo-')
+  const kick = await okKick()
+  const socketPath = shortSocketPath(fx.dir, 'undo.sock')
+  const daemon = await startSocketDaemon(socketPath, { behaviour: 'answer', version: '1.4.1' })
+  const previousRoot = path.join(fx.dir, 'previous-install')
+  const previousCli = path.join(previousRoot, 'updater', 'cli.js')
+  fs.mkdirSync(path.dirname(previousCli), { recursive: true })
+  fs.writeFileSync(previousCli, 'PREVIOUS UPDATER\n')
+  writePointer(fx.stateRoot, { updaterCli: previousCli, installRoot: previousRoot, agentLabel: AGENT_LABEL }, { now: NOW })
+  fs.mkdirSync(path.join(fx.treePath, 'updater'), { recursive: true })
+  fs.writeFileSync(path.join(fx.treePath, 'updater', 'cli.js'), 'NEW UPDATER\n')
+  const enableCalls = []
+  const undoEnableCalls = []
+  try {
+    const result = await applyUpdate({
+      stateRoot: fx.stateRoot,
+      appsDir: fx.appsDir,
+      bundles: BUNDLES,
+      now: NOW,
+      currentVersion: '1.4.0',
+      socketPath,
+      probe: { socketPath, timeoutMs: 1_000 },
+      job: { ok: true, args: ['glasspaned', '--socket-path', socketPath] },
+      build: okBuild(fx.builtDir),
+      kickstart: kick.fn,
+      toolsList: okTools,
+      npm: okNpm,
+      // 交接成功之后才炸的那一步：§9 重新导出根证书束。
+      refreshCa: () => { throw new Error('ca-roots.pem could not be written: the volume refuses chmod') },
+      // 交回去之后要把在册作业读回来核对——这条控制里它是"旧那一份回来了"的唯一证据。正向那一读由
+      // 下面的包装自己管。
+      readRunningJobImpl: () => loadedWithCli(previousCli),
+      // 交回去那一步用的注册（undoHandover 自己也要走一次 `enable`）。正向的注册由下面的包装给。
+      runEnableImpl: ({ cliPath }) => {
+        undoEnableCalls.push(cliPath)
+        return { ok: true, message: null, parsed: { ok: true } }
+      },
+      refreshRuntimeImpl: (options) => refreshRuntime({
+        ...options,
+        runEnable: ({ cliPath }) => {
+          enableCalls.push(cliPath)
+          return { ok: true, message: null, parsed: { ok: true } }
+        },
+        readRunningJob: () => loadedWithCli(enableCalls[enableCalls.length - 1]),
+      }),
+    })
+    assert.ok(['rolled-back', 'rollback-failed'].includes(result.status), `交接之后才炸，答案要落在 §7 的 4/5 段：${result.status}`)
+    assert.equal(result.code, CODES.postSwapFailed, `换的是 .app，回退也要按 §7 的 4/5 段报：${result.code}`)
+    assert.equal(result.ok, false)
+    assert.deepEqual(enableCalls, [path.join(fx.stateRoot, 'runtime', '1.4.1', 'updater', 'cli.js')],
+      `正向注册只该有一次，交接给的是新那一份：${JSON.stringify(enableCalls)}`)
+    assert.deepEqual(undoEnableCalls, [previousCli],
+      `回滚之后要把作业交还给旧那一份，而且只交还一次：${JSON.stringify(undoEnableCalls)}`)
+    const back = readPointer(fx.stateRoot)
+    assert.equal(back.pointer.updaterCli, previousCli, JSON.stringify(back))
+    assert.match(result.message, /the pointer is back at/, `句子里要看得见作业交回去了：${result.message}`)
+    const state = loadState(fx.stateRoot).state
+    assert.equal(state.runtime.status, 'failed', JSON.stringify(state.runtime))
+    assert.equal(state.runtime.agentVerified, true, '这一条说的是"已核对过：在册的是旧那一份"')
+    assert.equal(state.current, '1.4.0', '回退之后 current 要跟着回去')
+    assert.match(fx.installedBytes(), /installed/,
+      '先证明 .app 真的被换回去了（装回的是备份那份）——不然这条控制测的是回滚以外的东西')
+  } finally {
+    await daemon.close()
+    fx.cleanup()
+  }
+})
+
+test('the handover child writes state, and the parent does not overwrite it', async () => {
+  // 生产里 `enable` 会 saveState（它写自己的 history 行，也写它刷新过的 caRoots）。父进程若在交接
+  // 之后拿"交接前那一刻读到的状态"去 stamp applied，子进程那一行就被无声抹掉了——而那几行是一个人在
+  // 面板与日志里唯一能核对"交接到底发生过没有"的痕迹。所以交接之后的那一次写必须先重新读一遍。
+  //
+  // 状态根要从回调的参数拿，不能从测试体的 `fx` 拿：`fx` 在这次 `await` 返回之前还没初始化，闭包里
+  // 直接引用它只会抛 TDZ，于是这一条测的根本不是丢更新（第一版就是这样"红得像是证明了什么"）。
+  const wrote = []
+  const { result, fx, enableCalls } = await applyWithRealRuntime('runtime-lostupdate', {
+    enableWritesState: ({ stateRoot }) => {
+      const fresh = loadState(stateRoot).state
+      wrote.push(saveState(stateRoot, nextState(fresh, {
+        historyEntry: { action: 'enable', result: 'enabled', digest: null, code: null },
+      }, { now: NOW }), { now: NOW }).path)
+    },
+  })
+  try {
+    assert.equal(result.status, 'applied', result.message)
+    assert.equal(wrote.length, 1, '交接那一次注册要真的写过状态文件，否则这条测的是别的东西')
+    assert.equal(enableCalls.length, 1, JSON.stringify(result.runtime))
+    assert.equal(result.runtime?.status, 'refreshed', JSON.stringify(result.runtime))
+    const state = loadState(fx.stateRoot).state
+    const actions = state.history.map((row) => `${row.action}:${row.result}`)
+    assert.ok(actions.includes('enable:enabled'), `交接那一次写进状态的行被父进程抹掉了：${JSON.stringify(actions)}`)
+    assert.ok(actions.includes('apply:applied'), `换版本身的行也要在：${JSON.stringify(actions)}`)
+    assert.ok(actions.indexOf('enable:enabled') < actions.indexOf('apply:applied'),
+      `两行的先后就是这两次写的先后：${JSON.stringify(actions)}`)
+    assert.equal(state.status, 'applied', '父进程的那一次写仍然要赢在版本与状态上')
+    assert.equal(state.current, '1.4.1')
+    assert.equal(state.runtime.status, 'refreshed', JSON.stringify(state.runtime))
   } finally {
     fx.cleanup()
   }

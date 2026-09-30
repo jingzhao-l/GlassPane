@@ -55,13 +55,39 @@ function makeRepoRootWithoutUpdater(prefix) {
 }
 
 /** 假 launchctl：只记账 + 返回可编排的退出码，绝不 exec 真命令。 */
-function fakeLaunchctl({ bootstrapStatus = 0, bootstrapStderr = '' } = {}) {
+function fakeLaunchctl({ bootstrapStatus = 0, bootstrapStderr = '', printedCli = undefined } = {}) {
   const calls = []
   const run = (bin, args) => {
     calls.push([bin, ...args])
     if (bin === 'id') return { status: 0, stdout: '501\n', stderr: '' }
     // bootout 对"本来就没加载"回 3，那是 disable 想要的状态（updater 的口径）。
     if (args[0] === 'bootout') return { status: 3, stdout: '', stderr: 'Could not find service' }
+    // `registerAgent` 装载之后要把在册作业读回来核对"跑的是不是这次渲染的那一份"。这一行的形状是从
+    // 本机 `launchctl print gui/501/com.glasspane.update` 抄的：一行一个参数、原样不加引号——更新器
+    // 自己的那份 `-c` 字面量开头就是引号，解析器若把它当畸形，这个核对就永远做不成。
+    if (args[0] === 'print') {
+      if (printedCli === undefined) return { status: 3, stdout: '', stderr: 'Could not find service' }
+      // 头部用 print 那一问自己带的那串 `gui/<uid>/<label>`：标签由 updater 的常量给，测试里不重打一遍
+      // （抄一份常量就是第二个作者，改了名字这里还是绿的）。
+      return {
+        status: 0,
+        stderr: '',
+        stdout: [
+          `${args[2]} = {`,
+          '\tstate = not running',
+          '\targuments = {',
+          '\t\t/bin/sh',
+          '\t\t-c',
+          '\t\t"$0" "$1" check "$2" "$3" --json && "$0" "$1" apply "$2" "$3" --auto --json',
+          '\t\t/usr/local/bin/node',
+          `\t\t${printedCli}`,
+          '\t\t--state-root',
+          '\t\t/state/root',
+          '\t}',
+          '}',
+        ].join('\n'),
+      }
+    }
     return { status: bootstrapStatus, stdout: '', stderr: bootstrapStderr }
   }
   return { calls, run, verbs: () => calls.map((call) => call[1]) }
@@ -95,7 +121,7 @@ test('自动更新接线：指针落进状态根，文件 0600 / 目录 0700，�
   const lines = []
   try {
     const { launchd, state } = await updaterLibs()
-    const launchctl = fakeLaunchctl()
+    const launchctl = fakeLaunchctl({ printedCli: UPDATER_CLI })
     const result = await registerAutoUpdate({
       ...CA_DEPS,
       rootDir: REPO_ROOT,
@@ -126,12 +152,14 @@ test('自动更新接线：指针落进状态根，文件 0600 / 目录 0700，�
     assert.equal(readBack.ok, true, `读回必须成功：${readBack.message ?? ''}`)
     assert.equal(readBack.pointer.updaterCli, UPDATER_CLI)
 
-    // 注册走的是 updater 自己的 launchd 面：先 bootout 再 bootstrap，plist 落在临时 HOME。
+    // 注册走的是 updater 自己的 launchd 面：先 bootout 再 bootstrap，装载之后把在册作业读回来核对
+    // "跑的是不是这次渲染的那一份"。plist 落在临时 HOME。
     const plistPath = launchd.agentPlistPath({ homeDir: home })
     assert.deepEqual(launchctl.calls, [
       ['launchctl', 'bootout', `gui/501/${launchd.AGENT_LABEL}`],
       ['launchctl', 'bootstrap', 'gui/501', plistPath],
-    ], 'bootout 先于 bootstrap：launchd 缓存 bootstrap 时读到的定义')
+      ['launchctl', 'print', `gui/501/${launchd.AGENT_LABEL}`],
+    ], 'bootout 先于 bootstrap：launchd 缓存 bootstrap 时读到的定义；print 是那句"已注册"的证据')
     assert.equal(mode(plistPath), 0o600)
     const plist = fs.readFileSync(plistPath, 'utf8')
     assert.ok(plist.includes(UPDATER_CLI), '定时代理执行的就是指针那条 CLI（§7 一处实现）')
@@ -333,8 +361,8 @@ test('重跑安装幂等：LaunchAgents 里只有一份 plist，指针与作业�
     const plistPath = launchd.agentPlistPath({ homeDir: home })
     assert.deepEqual(fs.readdirSync(agentsDir), [`${launchd.AGENT_LABEL}.plist`],
       '重跑不许留下第二个作业（append/换名落盘都会在这里红）')
-    assert.deepEqual(launchctl.verbs(), ['bootout', 'bootstrap', 'bootout', 'bootstrap'],
-      '每轮都是 bootout 再 bootstrap：已加载的定义不换掉，新 plist 就不生效')
+    assert.deepEqual(launchctl.verbs(), ['bootout', 'bootstrap', 'print', 'bootout', 'bootstrap', 'print'],
+      '每轮都是 bootout 再 bootstrap，然后把在册作业读回来：已加载的定义不换掉，新 plist 就不生效')
     assert.equal(fs.readdirSync(second.stateRoot).filter((f) => f.startsWith('update-install.json')).length, 1,
       '临时文件必须已被 rename 收掉，不留 .tmp- 残骸')
 
@@ -414,8 +442,8 @@ test('先开后关：重跑安装带 --no-auto-update 会把已注册的代理�
       runLaunchctl: launchctl.run, now: NOW, say: () => {},
     })
     assert.equal(off.registered, false)
-    assert.deepEqual(launchctl.verbs(), ['bootout', 'bootstrap', 'bootout'],
-      '卸载轮只 bootout 已加载的作业，不再 bootstrap 回来')
+    assert.deepEqual(launchctl.verbs(), ['bootout', 'bootstrap', 'print', 'bootout'],
+      '卸载轮只 bootout 已加载的作业，不再 bootstrap 回来（print 是装载那一轮读回在册作业）')
     assert.equal(fs.existsSync(plistPath), false, '定义文件必须一并删掉：只 bootout 不删 plist，下次登录又被 launchd 读回去')
     assert.deepEqual(fs.readdirSync(path.join(home, 'Library', 'LaunchAgents')), [],
       'LaunchAgents 里不能再有第二个同名文件（换个名字落盘就查不出来）')
