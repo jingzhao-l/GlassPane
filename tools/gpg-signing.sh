@@ -183,10 +183,13 @@ cmd_install() {
   local repo dir env
   while IFS='|' read -r repo dir env; do
     printf '%s\n' "$repo"
-    local -a scope=()
-    [ -n "$env" ] && scope=(--env "$env")
-    printf '%s' "$key"  | gh secret set GPG_PRIVATE_KEY  "${scope[@]}" --repo "jingzhao-l/$repo" >/dev/null
-    printf '%s' "$pass" | gh secret set GPG_PASSPHRASE "${scope[@]}" --repo "jingzhao-l/$repo" >/dev/null
+    if [ -n "$env" ]; then
+      printf '%s' "$key"  | gh secret set GPG_PRIVATE_KEY  --env "$env" --repo "jingzhao-l/$repo" >/dev/null
+      printf '%s' "$pass" | gh secret set GPG_PASSPHRASE --env "$env" --repo "jingzhao-l/$repo" >/dev/null
+    else
+      printf '%s' "$key"  | gh secret set GPG_PRIVATE_KEY  --repo "jingzhao-l/$repo" >/dev/null
+      printf '%s' "$pass" | gh secret set GPG_PASSPHRASE --repo "jingzhao-l/$repo" >/dev/null
+    fi
     ok "GPG_PRIVATE_KEY + GPG_PASSPHRASE set${env:+ (environment '$env')}"
   done < <(targets_filtered "$@")
   unset key pass
