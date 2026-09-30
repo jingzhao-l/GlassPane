@@ -329,11 +329,28 @@
 1. **唯一真源不变**：谁在跑更新，由 `<状态根>/update-install.json` 的 `updaterCli` 决定（面板与 launchd
    都从它取位置，§7）。本节只加一件事：换版成功之后，这份指针可以、也必须指向**验证过的发布树**在
    本机上的落地位置 `<状态根>/runtime/<ver>/updater/cli.js`。
-2. **来源只能是被八道校验放过的那棵树**：落地内容取自 §1.6 自检过的暂存树（同一棵已按 sha256 实测、
-   签名 verified、CI 绿、版本线自证的树），不许有第二条取材路径；落地动作发生在 §3.5 全成功之后、
-   暂存目录被清理**之前**。
+2. **来源只能是被八道校验放过的那棵树，但落地的是更新器需要跑的那部分**：取材于 §1.6 自检过的暂存树
+   （同一棵已按 sha256 实测、签名 verified、CI 绿、版本线自证的树），不许有第二条取材路径；落地动作发生在
+   §3.5 全成功之后、暂存目录被清理**之前**。落地的目录清单是封闭的：`updater/`、`installer/`
+   （`updater/lib/signature.js` 要 `import('../../installer/cli.js')` 取签名公钥，少它就是装一个跑不起来的
+   更新器）、发布根的 `package.json`。曾经照"整棵树"复制，代价与风险都不是修辞：`apply` 就在暂存树里
+   `swift build --package-path <暂存>/engine`，产品直接落在它下面——本机实测 `engine/.build` 509 MB，
+   于是"两代上限"实际是半个 GB，还顺带把 SwiftPM 自己造的符号链接搬了进来。清单之外的东西（`engine/`、
+   `mcp-shell/`）是换版**过程**的输入，不是更新器**运行时**的依赖。
 3. **绝不就地覆盖正在执行的那份代码**：落地是"新建一个版本目录"，不是把文件写回旧目录。旧那份原地
    保留，这既是为了让"下一次注册由新代码自己完成"有可回退的目标，也是为了让**回滚**有对象。
+   3a. **落地后的树里不许有任何间接层**。本机实测（2026-09-30）：`fs.cpSync(..., {dereference:false})`
+       **不保留相对符号链接**——`link -> a.txt` 会被重写成 `link -> /private/…/复制来源目录/a.txt`，
+       也就是指向这次运行稍后要清理掉的暂存树。留在 `runtime/` 里的就不是"同一根链接"，而是一根悬空、
+       且指向 `<状态根>/update-staging/<ver>/…` 的链接，而那个路径**下一次 `check` 会用新下载的字节
+       重新造出来**：一台被拒的树的内容，就这样每天被定时作业重新引用一次。所以落地前后都要走
+       `lstat` 检查——目录本身必须真是目录（不能是指向别处的软链），树里每一项必须真是普通文件或目录。
+       任一条不满足 ⇒ 拒绝落地、临时目录一并删掉、指针不动。
+   3b. **"这一代已经在盘上"不是可以跳过的理由**：`runtime/<ver>` 已存在时，重用的那条路要把新装那一路
+       的每一项检查重做一遍（是目录不是链接、无间接层、`updater/cli.js` 读得出且非空、mode 能到 0700）。
+       早先的版本只查"cli.js 存不存在"，于是一次 mode 检查失败的残留，会被下一次同一版本的换版**无条件
+       接受**——一次"这台机器的 chmod 不生效"就永久变成了"这一代是干净的"。mode 检查现在也在标记落地
+       **之前**做：不生效就连根目录一起删掉，绝不留给重用路径。
 4. **换版本身的判定不因它而改**：`.app` 与 npm 都换成功、握手也过 ⇒ `status=applied` 与退出码 0 不变。
    更新器自己没换上是一句**长期可见的降级**：`runtime.status='failed'`、`code=runtime-stale`、
    `lastError` 带原因，面板与 `gp_diagnose` 必须原话说"这次更新器自身没换上，请重跑安装程序"。
@@ -346,7 +363,15 @@
       `node <新 cli.js> enable --state-dir <状态根> --json`。理由不是风格：plist 里那条 CLI 路径的来源就是
       "谁在跑这次注册"（`fileURLToPath(import.meta.url)`），由旧代码去写新路径等于再造一个"两处作者"。
       注册完必须用 `launchctl print` 把**在册**参数读回来校验它真指过去了；读不到或指回旧的 ⇒
-      `agentVerified=false`，这是一句要说出来的失败，不是"大概成功了"。
+      `agentVerified=false`，这是一句要说出来的失败，不是"大概说话了"。
+      这条比较必须是"同一个文件"而不是"同一个字符串"：plist 里那条路径是 node 自己报的模块位置，
+      **node 会先把路径 realpath 化**（实测：通过 `/tmp` 下的软链启动脚本，`import.meta.url` 报的是
+      `/private/tmp/…`），而状态根是 `path.resolve` 出来的字面量。两者在 `/tmp`、`/var/tmp` 或任何带
+      软链的家目录上拼写不同、指向同一份文件——按字符串比就把这套机制在**它自己被验证的那种沙箱**里
+      永久判成失败。
+      `enable` 还要保住这台机器已有的每日时刻：不带 `--hour` 的 `enable`（交接那一次就是）先读盘上
+      那份 plist 的 `StartCalendarInterval`，读到就沿用，读不到才用 §2 的默认值**并说出来**。之前它
+      直接取常量，于是每台自己换过版的机器都在无人告知的情况下被搬回 12:00。
     · **定时触发**（agent 里的 `apply --auto`）——**不**在这次运行里 bootout/bootstrap：本次运行本身就是那个
       作业，`bootout` 会在"包已换、状态未写"之间把它拆掉，最坏形状是作业被卸了却没装上（自动更新静默消失）。
       这一支只做落地 + 换指针，并记 `runtime.status='skipped'`、`code=runtime-registration-pending`、
@@ -355,12 +380,21 @@
 7. **硬关时不注册**：`GLASSPANE_UPDATE_DISABLE=1` 或状态里 `disabled=true` 时，runtime 与指针照刷
    （面板用的就是那份代码，不刷它面板会继续跑旧代码），但**绝不**新建/改写 launchd 作业，并把这句
    原话记进状态（`runtime.status='kept'`）。
-8. **只留还被指着的那几代**：默认两代（新指针那一代 + 上一代），但**凡是有人指着的一律不清**——指针那一代、
-   上一个指针值那一代，以及第 6 条 defer 情况下**在册作业**那一代。删掉作业指着的那一代，形状就是"面板上
-   自动更新是开的，明早却没有作业可跑"（`Cannot find module`，静默）。清理只在状态根内走
-   `removeTreeWithin`，不许越界，失败要说出来，不许报成"已清理"。
-   代价要写出来：一份发布树本机实测 73 MB，所以状态根里这一部分的上限约为**两代 ≈ 150 MB**
-   （defer 尚未接手时短暂为三代）；换版日志与 `gp_diagnose` 都要报清这次删了哪几代。
+8. **只留还被指着的那几代**：默认两代，但**凡是有人指着的一律不清**，而"指着"有三个互相独立的作者：
+   新指针那一代、上一个指针值那一代，以及**在册作业自己那一代**。第三个最容易漏，也唯一致命：连续两次
+   定时换版（用户从不碰开关）时，指针已经是 `1.8.0 → 1.7.0`，而 launchd 的定义里还写着 `1.6.0`——
+   按"指针 + 上一指针"清理就会删掉作业真正要执行的那一棵，明早的每日作业变成 `Cannot find module`，
+   面板上的开关仍然亮着，状态里还写着 `skipped`。所以 defer/kept 两支也必须 `launchctl print` 读回
+   在册参数、把它那一代钉住。
+   **读不回在册作业时不许清理任何东西**："不知道作业在跑哪一代"不能当作"哪一代都没人指"来花。跳过清理
+   的代价是一个版本目录；猜错的代价是这台机器从此不再自动更新。这一句要原话进 `runtime.detail`。
+   "最新的一代"必须由版本号比较决定，不能按字符串排：`1.9.0` 排在 `1.10.0` 前面，于是按字符串留下的
+   回退代可能是谁都没指的那一个，而被删掉的恰是某个进程还在跑的那一个。
+   清理只在状态根内走 `removeTreeWithin`，不许越界，失败要说出来，不许报成"已清理"。
+   代价要写出来（并按第 2 条的封闭清单重算）：本机实测一份完整发布树 73 MB，其中 `updater/` 816 K、
+   `installer/` 184 K，其余是换版**过程**的输入（`engine/` 里 1.8 G 的 `.build`、`mcp-shell/` 33 M）。
+   按清单落地之后，一代就是更新器自己要跑的那些文件；两代的上限不再是半个 GB，而 `gp_diagnose`、
+   换版日志仍要报清这次删了哪几代、为什么没删。
 9. **写它的时机保证读者不会比写者旧**：`apply` 的顺序是先换 `.app`、重启并握手、再装 npm 两个包，
    **最后**才落地更新器自身并写 `runtime`。所以任何一份读到 `runtime` 的读者（面板在 `.app` 里、
    `gp_diagnose` 在 npm 包里）都已经是认识这个字段的版本——反过来（先写字段再换读者）会让已发布的
@@ -371,10 +405,25 @@
    所以四个成员各自绑一个真实分支：`refreshed`（人工触发、已换且在册作业读回核对过）、`failed`（换版成功
    但更新器自身没换上，或被回退）、`kept`（这台机器自己关着定时作业，只换代码与指针）、`skipped`
    （定时那一次有意避让自己——见第 6 条，代码与指针换了，交接留给下一次 `enable`）。
-   反向（旧读者遇到新记录）必须是响地失败而不是静默重置：`loadState` 走 `assertValidState`，读不懂就抛错、
-   命令拒绝执行；它绝不"退回空状态"，那等于把这台机器的更新历史抹掉一次。
+   反向（旧读者遇到新记录）分两种，只有一种该失败：
+   · 认不出**值**（`runtime.status` 是未来版本的某个词）必须响地失败：`loadState` 走 `assertValidState`，
+     读不懂就抛错、命令拒绝执行；它绝不"退回空状态"，那等于把这台机器的更新历史抹掉一次。
+   · 认不出**键**在**读**的路上必须被忽略。第 6 条的 defer 交接正是这个形状：定时那一次写了带新键的状态，
+     而接下来几天跑的还是旧那份代码——旧读者若因"schema 里多了一个不认识的键"拒绝整份文件，这台机器的
+     `updater status` 与每日检查会直接失败，把一台还能工作的机器读成一台坏了的机器。
+   因此**写严格、读宽容**是刻意的不对称：`saveState` 仍按 `additionalProperties:false` 拒绝发布任何
+   自己没声明的字段（否则第 9 条的写序保证就没了），`loadState` 只忽略不认识的键。新增字段仍须先让读者
+   发布、再让写者写；新增**枚举取值**是破坏性变更，必须先换读者。
 11. **装上的第一版仍是旧形状**：本节落地前装出来的机器，指针仍指着那趟浅 clone；它需要**一次**人工重装
     才会进入"由更新器自己换版"的形状。这句话必须写进 CHANGELOG 与 README，不能让人以为升级自动完成。
+12. **回滚只回它换过的东西**：`updater rollback`（§3.6）换回两个 `.app` 并重启校验，但它**不**把
+    `runtime` 与指针换回旧代——那是"上一版更新器的代码"，而回滚的动机通常是新 `.app` 有问题，不是新
+    更新器有问题。这句话要写在这里，否则读代码的人会以为 §11 落地后回滚是整台机器的时间倒退。
+    与之相对：`apply` 自己在**交接之后**才失败的那一条（重新导出根证书束、清理暂存树、写最后那份状态）
+    必须把指针与作业一起交还给旧那一份——因为那一次的动机恰恰是"这次换版没走完"，留着新指针就等于
+    一边说"已还原并核实"，一边让明天的作业跑刚被换出去的那一份。交还由旧那份自己 `enable` 完成，
+    并用 `launchctl print` 读回核对；`registeredAt` 沿用原值，回退不是重新安装。
+    读不回来时记录 `runtime.status='failed'` 并写清"指针可能还指着被换出去的那一份，请重跑安装程序"。
 
 | 判据 | 测试 | 反向变异怎么红 |
 | --- | --- | --- |
@@ -385,5 +434,13 @@
 | 任一失败都把指针与作业指回旧值并说话 | 同上 | 只回滚指针不回滚注册 ⇒ 红；失败后不写 `lastError` ⇒ 红 |
 | 硬关时刷代码不建作业 | 同上 | 去掉 disabled 分支 ⇒ 红 |
 | 换版判定不被它改：applied 与退出码不变，降级长期可见 | `updater/test/apply.test.mjs` | 把它失败改成 `status`/退出码 ⇒ 红；洗成 `code:null` ⇒ 红 |
-| 清理只删没人指的世代（defer 时作业那一代在内） | `updater/test/runtime.test.mjs` | 把 pinned 集合忽略掉 ⇒ '作业还指着的那一代不能被删' 红 |
+| 清理钉住三个作者各自指着的世代；读不回在册作业就一个都不删 | `updater/test/runtime.test.mjs`（`pruning never deletes a generation something still points at`、`a job book that cannot be read leaves every generation on disk`） | 把 `job.gen` 从 pinned 里去掉 ⇒ 那一代被删、红；把"读不到"当成"没人指" ⇒ 跳过清理那条红 |
+| 世代新旧按版本号比，不按字符串 | `updater/test/runtime.test.mjs`（`the newest generation is decided by version, not by how the string sorts`，钉住最旧一代使两种顺序答案相反） | 换回 `.sort().reverse()` ⇒ 删的是 1.10.0 而不是 1.9.0，红 |
+| 落地清单封闭，构建产物不进 runtime | `updater/test/runtime.test.mjs`（`engine/.build`、`mcp-shell/dist` 不在落地树里；`installer/cli.js` 在） | 清单里放回 `engine`/`mcp-shell` ⇒ 排除断言红 |
+| 落地树里不许有间接层，`runtime/<ver>` 本身必须是真目录 | `updater/test/runtime.test.mjs`（`a copied tree that carries a symlink is refused`） | `findIndirection` 改成返回空 ⇒ 红 |
+| 重用已存在的一代要把每一项检查重做 | `updater/test/runtime.test.mjs`（`an existing generation is re-verified, not trusted by name`） | 重用路径只查 cli.js 存在 ⇒ 红 |
+| 在册路径与本地拼写按"同一个文件"比，不按字符串 | `updater/test/runtime.test.mjs`（realpath 拼写的那一代仍认得出世代） | 只比字面量前缀 ⇒ 认不出世代，红 |
+| `enable` 保住盘上已有的每日时刻 | `updater/test/enable.test.mjs`（`a bare enable keeps the daily hour that is already installed`；断言打在**送进渲染器的参数**上，不是打在夹具自己写的文件上） | 常量优先 ⇒ 3:20 变成 12:00，红；读不到又不说 ⇒ 第二条红 |
+| 注册是否成立由读回的在册作业判定 | `updater/test/launchd.test.mjs`（三条：核对过 / 仍指旧的 ⇒ 拒绝 / 读不回 ⇒ 明说未核实） | bootstrap 0 直接算成功 ⇒ "仍指旧的那条"红 |
+| 交接之后才失败的回滚，指针与作业一起交还 | `updater/test/apply.test.mjs`（`a rollback that happens after the handover takes the pointer and the job back too`） | 去掉 undo 调用 ⇒ 交还那一次没发生，红；`runtime` 声明在 try 里 ⇒ catch 抛 ReferenceError，红 |
 | 删除不越界、失败不报成已清理 | `updater/test/runtime.test.mjs` | 去掉 root 约束 ⇒ 红 |

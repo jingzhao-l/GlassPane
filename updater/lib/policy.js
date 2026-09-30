@@ -112,17 +112,29 @@ export function foreignStateDir({ jobArgs, ourStateRoot }) {
   return a === b ? null : a
 }
 
-/** Pull `--state-dir <path>` (or `--state-dir=<path>`) out of an argv list. */
+/**
+ * The two spellings one flag has in this project. `updater/cli.js` accepts both, the daemon's own
+ * option is `--state-root`, and `renderAgentPlist` puts `--state-root` into the job it registers — so
+ * a reader that only knows `--state-dir` is blind to the state root of a job this tool rendered
+ * itself. That is not a cosmetic gap: §2's foreign-root gate answers "which state root does the
+ * running daemon write to", and reading only one spelling means a daemon started with
+ * `--state-root /some/other/place` reports "no flag" and is waved through as ours.
+ */
+export const STATE_ROOT_FLAGS = Object.freeze(['--state-dir', '--state-root'])
+
+/** Pull `--state-dir <path>` / `--state-root=<path>` out of an argv list. */
 export function stateDirFromArgs(args) {
   const list = Array.isArray(args) ? args : []
   for (let i = 0; i < list.length; i += 1) {
     const token = String(list[i])
-    if (token === '--state-dir') {
+    const exact = STATE_ROOT_FLAGS.find((flag) => token === flag)
+    if (exact) {
       const value = list[i + 1]
       if (typeof value === 'string' && !value.startsWith('-')) return value
       return null
     }
-    if (token.startsWith('--state-dir=')) return token.slice('--state-dir='.length)
+    const inline = STATE_ROOT_FLAGS.find((flag) => token.startsWith(`${flag}=`))
+    if (inline) return token.slice(inline.length + 1)
   }
   return null
 }
@@ -140,12 +152,14 @@ export function stateDirReadings(args) {
   const found = []
   for (let i = 0; i < list.length; i += 1) {
     const token = String(list[i])
-    if (token === '--state-dir') {
+    const exact = STATE_ROOT_FLAGS.find((flag) => token === flag)
+    if (exact) {
       const value = list[i + 1]
       found.push(typeof value === 'string' && !value.startsWith('-') ? value : null)
-    } else if (token.startsWith('--state-dir=')) {
-      found.push(token.slice('--state-dir='.length))
+      continue
     }
+    const inline = STATE_ROOT_FLAGS.find((flag) => token.startsWith(`${flag}=`))
+    if (inline) found.push(token.slice(inline.length + 1))
   }
   return [...new Set(found)]
 }

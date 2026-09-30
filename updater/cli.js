@@ -28,7 +28,7 @@ import { effectiveStatus, isOverdue, loadState, nextState, readPointer, saveStat
 import { runCheck } from './lib/check.js'
 import { applyUpdate, buildStagedTree, DEFAULT_BUNDLES, rollbackToBackup } from './lib/apply.js'
 import { probeIdle, resolveEngineSocket } from './lib/idle.js'
-import { AGENT_LABEL, DAEMON_JOB_LABEL, DEFAULT_HOUR, DEFAULT_MINUTE, agentPlistPath, readRunningJob, registerAgent, renderAgentPlist, unregisterAgent } from './lib/launchd.js'
+import { AGENT_LABEL, DAEMON_JOB_LABEL, DEFAULT_HOUR, DEFAULT_MINUTE, agentPlistPath, readAgentSchedule, readRunningJob, registerAgent, renderAgentPlist, unregisterAgent } from './lib/launchd.js'
 import { localVersion } from './lib/version.js'
 import { CONSENT_KINDS } from './lib/policy.js'
 import { makeBytesFetcher, makeFetcher, resolveBase } from './lib/source.js'
@@ -206,6 +206,7 @@ export function defaultDeps({ stateRoot, appsDir, env, flags, exportCa = exportC
     unregisterAgent,
     renderAgentPlist,
     agentPlistPath,
+    readAgentSchedule,
     // §9: the root bundle node needs on a TLS-intercepting machine, exported by
     // this module alone and refreshed at the two points that can do it without a
     // person in the loop — registering the agent, and finishing a swap.
@@ -377,11 +378,24 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         // first network gate every day and still look like a running agent.
         const caRoots = merged.refreshCaBundle()
         const bundle = merged.usableCaBundle()
+        const plistPath = merged.agentPlistPath({ homeDir: deps.homeDir ?? recordHomeDir() })
+        const cliPath = merged.cliPath ?? fileURLToPath(import.meta.url)
+        // The daily hour is *preserved*, not re-chosen. A bare `enable` carries no `--hour`, and this
+        // branch is what §11's handover runs on every self-update — taking the constant here would move
+        // a machine installed with `--hour 3` to midday without a word in any record. An existing
+        // definition that cannot be read falls back to the documented default, and says that it did.
+        const asked = { hour: flags.hour === undefined ? null : Number(flags.hour), minute: flags.minute === undefined ? null : Number(flags.minute) }
+        const standing = asked.hour === null || asked.minute === null ? standingSchedule(merged, plistPath) : null
+        const hour = asked.hour ?? standing?.hour ?? DEFAULT_HOUR
+        const minute = asked.minute ?? standing?.minute ?? DEFAULT_MINUTE
+        const scheduleNote = standing && standing.hour === null
+          ? `the daily time is ${hour}:${String(minute).padStart(2, '0')} because ${standing.why}; pass --hour and --minute to choose one`
+          : null
         const plistText = merged.renderAgentPlist({
-          cliPath: merged.cliPath ?? fileURLToPath(import.meta.url),
+          cliPath,
           stateRoot,
-          hour: Number(flags.hour ?? DEFAULT_HOUR),
-          minute: Number(flags.minute ?? DEFAULT_MINUTE),
+          hour,
+          minute,
           label: AGENT_LABEL,
           // The *file* decides what the job is handed, not this run's export record:
           // an export that produced nothing keeps the previous bundle in place, and
@@ -390,12 +404,20 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         })
         agent = merged.registerAgent({
           label: AGENT_LABEL,
-          plistPath: merged.agentPlistPath({ homeDir: deps.homeDir ?? recordHomeDir() }),
+          plistPath,
           plistText,
+          cliPath,
           uid: merged.uid,
           run: merged.runLaunchctl,
         })
         if (agent.ok) exportedCa = caRoots
+        if (scheduleNote) agent = { ...agent, message: `${agent.message}${agent.message ? '; ' : ''}${scheduleNote}` }
+        // A refused registration writes no state, and that is deliberate even though the root bundle
+        // *file* has already been rewritten by this point: `caRoots` is the record of the trust handed
+        // to a job, and launchd took none — publishing a record here would create the first state file
+        // on a machine where nothing is registered, and the panel would then wait on an agent nobody
+        // installed. The refusal itself (with launchd's own sentence) is what the person is told, and
+        // the next successful `enable` re-exports and records.
       }
       if (!agent.ok) {
         return {
@@ -425,6 +447,11 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         ok: true,
         status: saved.state.status,
         code: null,
+        // Whether the *loaded* job was read back and seen to name this registration. `null` on the
+        // disable path (no job was registered, so there is nothing to verify), `false` when launchd
+        // answered bootstrap 0 but the book could not be read. The installer prints "registered" from
+        // its own template, and it needs this fact to know whether it may say so without a caveat.
+        agentVerified: disable ? null : agent.verified ?? null,
         message: disable
           ? `automatic update is off${agent.message ? ` (${agent.message})` : ''}: "updater check" and "updater apply" still work by hand`
           : `automatic update is on${agent.message ? ` (${agent.message})` : ''}${ca ? `; ${ca.summary} — ${ca.remedy}` : ''}`,
@@ -436,6 +463,28 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
     default:
       return { status: null, code: null, usageError: true, message: `unknown command ${JSON.stringify(command)}` }
   }
+}
+
+/**
+ * The daily time the already-installed definition asks for, or the reason there is no answer.
+ *
+ * Returning the *why* is the point: a silent fallback to 12:00 would be an instruction the person never
+ * gave, said as if it were theirs. The caller puts the reason into the sentence the operator reads.
+ */
+export function standingSchedule(merged, plistPath) {
+  if (typeof merged.readAgentSchedule !== 'function') {
+    return { hour: null, minute: null, why: `${plistPath} could not be consulted (no schedule reader is wired into this build)` }
+  }
+  let got = null
+  try {
+    got = merged.readAgentSchedule({ plistPath })
+  } catch (error) {
+    return { hour: null, minute: null, why: `reading ${plistPath} threw (${error?.message ?? String(error)})` }
+  }
+  if (!got || !Number.isInteger(got.hour) || !Number.isInteger(got.minute)) {
+    return { hour: null, minute: null, why: `${plistPath} carries no readable StartCalendarInterval` }
+  }
+  return { hour: got.hour, minute: got.minute, why: null }
 }
 
 /** `installer-pointer-stale` / missing pointer, mapped onto the closed enum. */
@@ -486,7 +535,9 @@ export function jsonLine(outcome) {
  * 道门上失败，而它看起来像"没有可用更新"。这是真机跑出来的形状，不是假设。
  *
  * 三条边界，都是为了不把"追加信任"变成"擅自改信任"：
- *   · 只在调用方**没有**给 `NODE_EXTRA_CA_CERTS` 时介入。人在终端上自己指了一份，方向就归他；
+ *   · 调用方自己指了**别处**的束就不介入（`wanted !== record.path`）：方向归他，我们刷新不了他的
+ *     信任；指的就是我们自己那份路径的照旧重来——那正是照着 remedy 设过环境变量的人要的那一次恢复。
+ *     防循环靠的是 `GLASSPANE_CA_REEXEC`，不是靠比较路径。
  *   · 只重来一次（`GLASSPANE_CA_REEXEC=1` 是防循环标记，子进程带着它就不会再套一层）；
  *   · 导不出可用的束就不重跑：把这次的导出结果写进状态，原来的拒绝照常返回。
  *

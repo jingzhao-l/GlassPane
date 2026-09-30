@@ -280,7 +280,7 @@ test('usableBundle: a file exists, is empty, or is there — only the last one i
     const target = caBundlePath(stateRoot)
     assert.deepEqual(usableBundle(target), { usable: false, certs: 0, reason: 'absent' })
     fs.writeFileSync(target, '', 'utf8')
-    assert.equal(usableBundle(target).usable, false, 'a 0-byte NODE_EXTRA_CA_CERTS makes node fail at start-up: worse than no bundle')
+    assert.equal(usableBundle(target).usable, false, '一张证书都没有的束不能证明任何事，所以它不是可用的——不是因为 node 会报错')
     assert.equal(usableBundle(target).reason, 'empty')
     fs.writeFileSync(target, PEM(2), 'utf8')
     assert.deepEqual(usableBundle(target), { usable: true, certs: 2, reason: null })

@@ -37,11 +37,11 @@ import { UpdaterError, canonicalPath, ensurePrivateDir, removeTreeWithin, resolv
 import { probeIdle } from './idle.js'
 import { kickstartJob, readRunningJob } from './launchd.js'
 import { mcpToolsList } from './mcp.js'
-import { refreshRuntime } from './runtime.js'
+import { refreshRuntime, undoHandover } from './runtime.js'
 import { bumpKind, parsePlainVersion } from './version.js'
 import { decideSwapPermission, foreignStateDir } from './policy.js'
 import { authorshipNote } from './signature.js'
-import { loadState, nextState, saveState } from './state.js'
+import { loadState, nextState, readPointer, saveState } from './state.js'
 import { stagedTreePresent } from './staging.js'
 
 /** §3.3: the daemon gets this long to answer before the swap is undone. */
@@ -540,14 +540,54 @@ export async function applyUpdate({
   autoDisabled = false,
   readRunningJobImpl = readRunningJob,
   refreshRuntimeImpl = refreshRuntime,
+  undoHandoverImpl = undoHandover,
+  // The same registration step §11's forward path uses, given to the undo as well. Without it the
+  // rollback path could only be driven by spawning a real `node`, which is not what a test of the
+  // sequence is for.
+  runEnableImpl = undefined,
 } = {}) {
   const roots = writableRoots(stateRoot)
   const { state } = loadState(stateRoot)
-  function stamp(patch) {
-    const next = nextState(state, patch, { now })
+  // Read *before* §11 gets the chance to move it: the pointer is the only document that says which
+  // updater this machine was running, and once the handover has flipped it no later read can answer
+  // that question. A rollback that runs after the handover needs the answer.
+  const pointerRead = typeof refreshRuntimeImpl === 'function' ? readPointer(stateRoot) : { ok: false, pointer: null }
+  const pointerBefore = pointerRead.ok ? pointerRead.pointer : null
+  /** Merge `patch` onto `base` and publish it. `stamp` is the ordinary case: this run's own read. */
+  function stampOnto(base, patch) {
+    const next = nextState(base, patch, { now })
     if (writeState) saveState(stateRoot, next, { now })
     return next
   }
+  function stamp(patch) {
+    return stampOnto(state, patch)
+  }
+  /**
+   * The base used for the *last* write of a successful apply — after §11's handover.
+   *
+   * `enable` in the new copy is a separate process, and it writes this very file: its own history row
+   * and, when it re-exports the root bundle, a newer `caRoots`. Merging the applied patch onto the
+   * document read before the swap deletes whatever that child recorded, and the history is the only
+   * thing the panel's two buttons and `gp_diagnose` can quote. So the base is re-read.
+   *
+   * A file that cannot be re-read is not a reason to undo a swap that happened, and it is not a
+   * reason to pretend either: the run falls back to its own earlier read and says so in the record.
+   */
+  function freshestBase(notes) {
+    try {
+      return loadState(stateRoot).state
+    } catch (error) {
+      notes.push(`the state file could not be re-read before the final write (${error?.message ?? String(error)}), so this record was merged onto `
+        + 'the state read at the start of the run: a row the new updater wrote during the handover may be missing from the history')
+      return state
+    }
+  }
+  // What §11's handover may have written that this run cannot see from its own read. Kept as a list so
+  // the catch below can say it too, and never folded into a status by itself.
+  const handoverNotes = []
+  // Only true once the new copy has been asked to register itself: before that, nothing but this
+  // function has touched the state file, and a re-read would only add a claim that is not earned.
+  let handoverRan = false
   const fail = (status, code, message, extra = {}) => {
     // §4: the panel prints `lastError` verbatim, so the sentence that comes back
     // from the gate is stamped into the state file alongside the code — a code
@@ -572,6 +612,7 @@ export async function applyUpdate({
     return fail('deferred', CODES.notStaged, `nothing is staged for update (${staged.reason}): run "updater check" first, and press Install update when it reports a version.`)
   }
   const wantVersion = state.staged.version
+  const appliedDigest = state.staged.digest
   const baseline = currentVersion ?? state.current
   if (!baseline) {
     return fail('deferred', CODES.versionMismatchLocal, 'this machine has no recorded current version, so an update cannot be judged: reinstall GlassPane first')
@@ -698,6 +739,14 @@ export async function applyUpdate({
     )
   }
 
+  // Declared before the post-swap region, not inside it: the catch at the bottom has to be able to see
+  // whether §11 already handed the machine over, because a rollback that runs *after* a successful
+  // handover is only a rollback if the pointer and the loaded job go back with the bundles. An earlier
+  // version of this declared `runtime` inside the try, so that catch threw a ReferenceError instead —
+  // the undo could never run, and the throw escaped to `cli.js`'s generic handler, which answers exit 3
+  // ("nothing changed") about a machine whose bundles had just been swapped and swapped back.
+  let runtime = null
+
   /* ---------------------------------------------------------------- post-swap
    * Everything from here on runs with the NEW bundles already in
    * `appsDir`, so a throw that escaped this region reached `cli.js`'s generic
@@ -819,8 +868,9 @@ export async function applyUpdate({
     // swap, or a release that fixes the updater can never reach the machine it fixes. The source is
     // exactly the tree the eight gates passed, copied into a fresh version directory before the
     // staging tree is retired below — never an overwrite of the code that is running this function.
-    let runtime = state.runtime ?? null
+    runtime = state.runtime ?? null
     if (typeof refreshRuntimeImpl === 'function') {
+      handoverRan = true
       try {
         const outcome = await refreshRuntimeImpl({
           stateRoot,
@@ -829,6 +879,7 @@ export async function applyUpdate({
           env,
           disabled: autoDisabled === true || state.disabled === true,
           readRunningJob: readRunningJobImpl,
+          ...(runEnableImpl === undefined ? {} : { runEnable: runEnableImpl }),
           handover: trigger === 'auto' ? 'defer' : 'now',
           now: () => now,
         })
@@ -867,28 +918,34 @@ export async function applyUpdate({
       : runtime?.status === 'kept'
         ? 'automatic update is switched off here, so no job was registered; the updater code and pointer did move'
         : null
-    const message = [swapped + (standing ? `. ${standing.message}` : ''), runtimeNote].filter(Boolean).join('. ')
+    // The document the applied patch merges onto is re-read here and nowhere else in this function:
+    // this is the one write that runs after another process (`enable`) may have written the file.
+    const base = freshestBase(handoverNotes)
+    const message = [swapped + (standing ? `. ${standing.message}` : ''), runtimeNote, ...handoverNotes].filter(Boolean).join('. ')
     // §9: a swap replaces the very bundles the agent runs from, so the root bundle
     // node is handed has to be re-exported with it. Without this, a rotated
     // interception root turns the daily job dead under an install that just
     // succeeded, and "applied" is the last honest thing the state file says.
-    const caRoots = refreshCa ? refreshCa() : state.caRoots ?? null
-    const saved = stamp({
+    const caRoots = refreshCa ? refreshCa() : base.caRoots ?? null
+    const code = standing?.code ?? (runtimeStalled ? CODES.runtimeStale : null)
+    const saved = stampOnto(base, {
       status: 'applied',
-      code: standing?.code ?? (runtimeStalled ? CODES.runtimeStale : null),
-      message: standing || runtimeNote ? message : null,
+      code,
+      message: code !== null || handoverNotes.length > 0 ? message : null,
       current: wantVersion,
-      latest: state.latest,
+      latest: base.latest,
       staged: null,
       caRoots,
       runtime,
       lastError: null,
-      historyEntry: { action: 'apply', result: 'applied', digest: state.staged.digest, code: standing?.code ?? (runtimeStalled ? CODES.runtimeStale : null) },
+      // The digest of *this* run's offer, read before the swap: `base.staged` belongs to whatever the
+      // handover child left behind, and a history row has to name what was actually put in.
+      historyEntry: { action: 'apply', result: 'applied', digest: appliedDigest, code },
     })
     return {
       ok: true,
       status: 'applied',
-      code: standing?.code ?? (runtimeStalled ? CODES.runtimeStale : null),
+      code,
       message,
       state: saved,
       runtime,
@@ -905,22 +962,76 @@ export async function applyUpdate({
       restored = { ok: false, message: `the restore itself threw (${restoreError.message})` }
       restoreNote = `restoreBackup threw: ${restoreError.stack ?? restoreError.message}`
     }
+    /**
+     * §11 ran, and this throw came after it. Restoring the two bundles is only half the machine going
+     * back: the pointer and the loaded job were handed to the new copy by that step, so without this the
+     * record would read "`baseline` restored and verified" while `update-install.json` names the version
+     * that was just rolled out of `~/Applications`. Undoing it is best effort, and its own failure is
+     * put into the sentence rather than into a second throw.
+     */
+    let undo = null
+    if (handoverRan && runtime && runtime.status !== 'failed') {
+      try {
+        undo = await undoHandoverImpl({
+          stateRoot,
+          previousPointer: pointerBefore,
+          version: wantVersion,
+          env,
+          readRunningJob: readRunningJobImpl,
+          ...(runEnableImpl === undefined ? {} : { runEnable: runEnableImpl }),
+          now: () => now,
+        })
+      } catch (undoError) {
+        undo = {
+          ok: false,
+          record: {
+            status: 'failed',
+            version: String(wantVersion),
+            cliPath: null,
+            previousCliPath: runtime.previousCliPath ?? null,
+            agentVerified: false,
+            at: now.toISOString(),
+            code: CODES.runtimeStale,
+            detail: `putting the updater back after the rollback threw (${undoError?.message ?? String(undoError)}): the pointer may still name the version that was rolled out, so re-run the GlassPane installer`,
+          },
+        }
+      }
+    }
     const status = restored.ok ? 'rolled-back' : 'rollback-failed'
-    const message = `the new bundles were already installed when "${what}" failed; ${baseline} was ${restored.ok ? 'restored and verified' : `NOT restorable (${restored.message}) — re-run the GlassPane installer to put ${appsDir} back`}`
-    const saved = stamp({
-      status,
-      code: CODES.postSwapFailed,
-      message,
-      details: { stage: 'post-swap', error: what, ...(restoreNote ? { restoreNote } : {}) },
-      ...(restored.ok ? { current: baseline } : {}),
-      historyEntry: { action: 'rollback', result: status, digest: state.staged.digest, code: CODES.postSwapFailed },
-    })
+    // The same re-read as the success path, and only when the handover ran: a throw that lands here
+    // *after* §11 means the new copy already wrote its own row, and merging onto this run's read would
+    // delete it while the record says the machine went back.
+    const failedBase = handoverRan ? freshestBase(handoverNotes) : state
+    const undoLine = undo ? ` ${undo.record.detail}.` : ''
+    const message = [`the new bundles were already installed when "${what}" failed; ${baseline} was ${restored.ok ? 'restored and verified' : `NOT restorable (${restored.message}) — re-run the GlassPane installer to put ${appsDir} back`}.${undoLine}${handoverNotes.length ? ` ${handoverNotes.join('. ')}` : ''}`]
+      .filter(Boolean)
+      .join('')
+      .trim()
+    // A record this machine cannot accept is not a reason to throw away the answer: the bundles *did*
+    // change, and an exception escaping here would reach `cli.js`'s generic handler and print exit 3
+    // ("nothing changed") about a machine that was just rolled back.
+    let saved = null
+    let writeFailure = null
+    try {
+      saved = stampOnto(failedBase, {
+        status,
+        code: CODES.postSwapFailed,
+        message,
+        details: { stage: 'post-swap', error: what, ...(restoreNote ? { restoreNote } : {}) },
+        ...(restored.ok ? { current: baseline } : {}),
+        ...(undo ? { runtime: undo.record } : {}),
+        historyEntry: { action: 'rollback', result: status, digest: appliedDigest, code: CODES.postSwapFailed },
+      })
+    } catch (writeError) {
+      writeFailure = `update-state.json could not be written after the rollback (${writeError?.message ?? String(writeError)}): read "updater status" again once the disk is writable, and treat ${baseline} as the version on disk`
+    }
     return {
       ok: false,
       status,
       code: CODES.postSwapFailed,
-      message,
+      message: writeFailure ? `${message} ${writeFailure}` : message,
       state: saved,
+      runtime: undo?.record ?? runtime ?? null,
       rollback: { ok: restored.ok === true, performed: true, reason: restored.message ?? null },
       error: what,
     }

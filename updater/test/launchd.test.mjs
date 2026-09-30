@@ -26,6 +26,7 @@ import {
   agentEnvironmentBlock,
   agentPlistPath,
   kickstartJob,
+  parseArgumentsBlock,
   parseLaunchctlArguments,
   parseLaunchctlProgram,
   parseLaunchctlState,
@@ -78,6 +79,68 @@ test('parenthesised and unquoted variants parse too, because launchctl is not on
     ['glasspaned', '--verbose'],
   )
   assert.deepEqual(parseLaunchctlArguments('arguments = {\n\tglasspaned\n}'), ['glasspaned'])
+})
+
+test('the update agent this tool registers is itself readable back, quotes and all', () => {
+  // Captured verbatim from `launchctl print gui/501/com.glasspane.update` on 2026-09-30, with the
+  // agent registered for real from a sandbox state root. Two facts in those bytes had never been in any
+  // fixture, and each one silently broke a control that looked green:
+  //   · launchd prints arguments raw, one per line, no quotes — so the `-c` literal of our own job
+  //     begins with a `"` and the parser used to refuse the whole block. §11's read-back then could
+  //     never confirm a self-update for the one job this subsystem registers for itself.
+  //   · the flag rendered into that job is `--state-root`, not `--state-dir` — so a reader that only
+  //     knew the other spelling could not see which state root the scheduled job writes to.
+  const PRINTED_AGENT = [
+    'gui/501/com.glasspane.update = {',
+    '\tactive count = 0',
+    '\tpath = /Users/dev/Library/LaunchAgents/com.glasspane.update.plist',
+    '\ttype = LaunchAgent',
+    '\tstate = not running',
+    '',
+    '\tprogram = /bin/sh',
+    '\targuments = {',
+    '\t\t/bin/sh',
+    '\t\t-c',
+    '\t\t"$0" "$1" check "$2" "$3" --json && "$0" "$1" apply "$2" "$3" --auto --json',
+    '\t\t/usr/local/bin/node',
+    '\t\t/Volumes/Eng-Dev/.worktrees/gp-iterate/updater/cli.js',
+    '\t\t--state-root',
+    '\t\t/var/tmp/gp-agent-probe',
+    '\t}',
+    '',
+    '\tstdout path = /var/tmp/gp-agent-probe/update.log',
+    '}',
+  ].join('\n')
+
+  const block = parseArgumentsBlock(PRINTED_AGENT)
+  assert.equal(block.ok, true, block.reason)
+  assert.equal(block.args.length, 7, JSON.stringify(block.args))
+  assert.equal(block.args[2], '"$0" "$1" check "$2" "$3" --json && "$0" "$1" apply "$2" "$3" --auto --json',
+    '壳命令是一整个参数，不是六个')
+
+  const job = readRunningJob({ label: AGENT_LABEL, uid: '501', run: () => ({ status: 0, stdout: PRINTED_AGENT, stderr: '' }) })
+  assert.equal(job.unknown, false, job.reason)
+  assert.deepEqual(stateDirReadings(job.args), ['/var/tmp/gp-agent-probe'],
+    '自己渲染的那种拼法也要读得出来 —— 读不出来就等于放行一个写别处状态根的作业')
+
+  // The guard the fix must not have thrown away. Two shapes, both from the measured format: a bare
+  // token carrying the block's closing brace (the truncation this parser exists for), and a quoted
+  // token that both opens with a quote and carries that brace.
+  const hostileBare = parseArgumentsBlock(PRINTED_AGENT.replace('\t\t--state-root', '\t\t--state-root }'))
+  assert.equal(hostileBare.ok, false, '带 } 的裸参数行必须仍然被拒：' + JSON.stringify(hostileBare.args))
+  assert.match(hostileBare.reason, /cannot be decoded/)
+  // A brace that sits *inside* a fully quoted token is not a boundary risk (the terminator is a line
+  // that is nothing but `}`), so it stays readable — which is why the refusal above is scoped to bare
+  // lines and to quote-led lines that also carry the delimiter.
+  const bracedQuoted = parseArgumentsBlock(PRINTED_AGENT.replace('\t\t--state-root', '\t\t"--state-root } "'))
+  assert.equal(bracedQuoted.ok, true, bracedQuoted.reason)
+  // And what the fix deliberately now accepts: a token that merely contains quotes. Refusing those was
+  // what blinded the read-back; nothing about them can hide a later argument, because the format is
+  // one line per argument. (A token carrying a brace is still refused above — that is the real
+  // boundary-faking risk, and it stays refused even when the braces sit inside quotes.)
+  const quotesOnly = parseArgumentsBlock(PRINTED_AGENT.replace('\t\t--state-root', '\t\t--format="$HOME/bin"'))
+  assert.equal(quotesOnly.ok, true, quotesOnly.reason)
+  assert.ok(quotesOnly.args.includes('--format="$HOME/bin"'), JSON.stringify(quotesOnly.args))
 })
 
 test('a print output with no arguments block is "unknown", not "no arguments"', () => {
@@ -291,8 +354,29 @@ test('the template defaults to one run a day at 12:00 local', () => {
   assert.match(text, /<integer>12<\/integer>/)
 })
 
-test('enable boots out a stale definition before bootstrapping the rendered plist', () => {
+test('enable boots out a stale definition, bootstraps it, and reads the loaded job back', () => {
   const dir = tempDir(`${TMP_PREFIX}launchd-enable-`)
+  const stateRoot = '/Users/dev/.glasspane'
+  const cliPath = `${stateRoot}/runtime/1.5.0/updater/cli.js`
+  // 形状是从这台机器上真跑出来的作业抄的（`launchctl print gui/501/com.glasspane.daemon`）：参数一行
+  // 一个、**不加引号**、Tab 缩进。之前这一版夹具写的是带引号的行，而本模块的解析器对"引号行里还有引号"
+  // 是直接拒绝的，于是这条控制红在解析上，而不是红在它本该问的那件事上。第三行就是更新器那份 shell
+  // 命令字面量——它自己带引号，正好检验解析器不会被它绊倒。
+  const printed = (arg) => [
+    `gui/501/${AGENT_LABEL} = {`,
+    '\tactive count = 1',
+    '\tstate = not running',
+    '',
+    '\targuments = {',
+    '\t\t/bin/sh',
+    '\t\t-c',
+    '\t\t"$0" "$1" check "$2" "$3" --json && "$0" "$1" apply "$2" "$3" --auto --json',
+    `\t\t${arg}`,
+    '\t\t--state-dir',
+    `\t\t${stateRoot}`,
+    '\t}',
+    '}',
+  ].join('\n')
   try {
     const calls = []
     const plistPath = path.join(dir, 'LaunchAgents', `${AGENT_LABEL}.plist`)
@@ -300,23 +384,29 @@ test('enable boots out a stale definition before bootstrapping the rendered plis
       label: AGENT_LABEL,
       plistPath,
       plistText: '<plist>rendered</plist>',
+      cliPath,
       uid: '501',
       run: (bin, args) => {
         calls.push([bin, ...args])
-        return args[0] === 'bootstrap' ? { status: 0, stdout: '', stderr: '' } : { status: 3, stdout: '', stderr: 'No such process' }
+        if (args[0] === 'bootstrap') return { status: 0, stdout: '', stderr: '' }
+        if (args[0] === 'print') return { status: 0, stdout: printed(cliPath), stderr: '' }
+        return { status: 3, stdout: '', stderr: 'No such process' }
       },
     })
-    assert.equal(outcome.ok, true)
+    assert.equal(outcome.ok, true, outcome.message)
+    assert.equal(outcome.verified, true, 'bootstrap 退出 0 不等于作业换成了这一份：必须读回来')
     assert.deepEqual(calls, [
       ['launchctl', 'bootout', `gui/501/${AGENT_LABEL}`],
       ['launchctl', 'bootstrap', 'gui/501', plistPath],
-    ], 'bootout runs first: launchd caches the definition it read at bootstrap time')
+      ['launchctl', 'print', `gui/501/${AGENT_LABEL}`],
+    ], 'bootout runs first: launchd caches the definition it read at bootstrap time; print is the read-back')
     assert.equal(modeOf(plistPath), 0o600, 'a registered agent definition is owner-only')
 
     const failing = registerAgent({
       label: AGENT_LABEL,
       plistPath: path.join(dir, 'other.plist'),
       plistText: 'x',
+      cliPath,
       uid: '501',
       run: () => ({ status: 2, stdout: '', stderr: 'Operation not permitted' }),
       writeFile: () => undefined,
@@ -327,6 +417,73 @@ test('enable boots out a stale definition before bootstrapping the rendered plis
   } finally {
     removeDir(dir)
   }
+})
+
+test('a job that still names the old command line is not reported as replaced', () => {
+  const dir = tempDir(`${TMP_PREFIX}launchd-stale-`)
+  const cliPath = '/Users/dev/.glasspane/runtime/1.5.0/updater/cli.js'
+  try {
+    const outcome = registerAgent({
+      label: AGENT_LABEL,
+      plistPath: path.join(dir, 'LaunchAgents', `${AGENT_LABEL}.plist`),
+      plistText: '<plist>rendered</plist>',
+      cliPath,
+      uid: '501',
+      run: (bin, args) => {
+        if (args[0] === 'print') {
+          return { status: 0, stdout: ['gui/501/com.glasspane.update = {', '    arguments = {', `        "${'/Users/dev/old-install/updater/cli.js'}"`, '    }', '}'].join('\n'), stderr: '' }
+        }
+        return { status: 0, stdout: '', stderr: '' }
+      },
+      writeFile: () => undefined,
+    })
+    assert.equal(outcome.ok, false, 'launchd 手里还是旧那份时，"已注册"是一句假话')
+    assert.match(outcome.message, /was not replaced/)
+    assert.match(outcome.message, /old-install/, '句子里要看得见读回来的那条命令，否则人只能猜')
+  } finally {
+    removeDir(dir)
+  }
+})
+
+test('an unreadable job book is said as unverified instead of either verdict', () => {
+  const dir = tempDir(`${TMP_PREFIX}launchd-unknown-`)
+  try {
+    const outcome = registerAgent({
+      label: AGENT_LABEL,
+      plistPath: path.join(dir, 'LaunchAgents', `${AGENT_LABEL}.plist`),
+      plistText: '<plist>rendered</plist>',
+      cliPath: '/x/cli.js',
+      uid: '501',
+      run: (bin, args) => (args[0] === 'print'
+        ? { status: 5, stdout: '', stderr: 'I/O error' }
+        : { status: 0, stdout: '', stderr: '' }),
+      writeFile: () => undefined,
+    })
+    assert.equal(outcome.ok, true, '作业已经装载，这里拒绝等于告诉用户"自动更新是关的"而没有证据')
+    assert.equal(outcome.verified, false)
+    assert.match(outcome.message, /could not be read back/)
+  } finally {
+    removeDir(dir)
+  }
+})
+
+test('a label that is not this project\'s own is refused before launchctl is asked for anything', () => {
+  // The pointer file is written by another process, and this value decides both which job
+  // `launchctl bootout` tears down and what the plist in ~/Library/LaunchAgents is *named*. A caller
+  // that passed somebody else's label would unregister their login item and leave a plist behind under
+  // their name; the rule has to be a refusal, not a comment in the caller.
+  for (const foreign of ['com.microsoft.autoupdate', 'com.apple.spotlight', 'com.glasspane.updat', 'com.glasspane.extra']) {
+    const calls = []
+    assert.throws(
+      () => registerAgent({ label: foreign, plistPath: '/tmp/nope.plist', plistText: 'x', uid: '501', run: (bin, args) => { calls.push(args); return { status: 0, stdout: '', stderr: '' } } }),
+      (error) => error.code === CODES.agentPathUnsafe && /only ever registers/.test(error.message) && /not GlassPane's/.test(error.message),
+      `${foreign} 不能被当成更新器的作业标签`,
+    )
+    assert.deepEqual(calls, [], '拒绝发生在任何 launchctl 调用之前')
+    assert.throws(() => unregisterAgent({ label: foreign, plistPath: '/tmp/nope.plist', uid: '501', run: () => ({ status: 0, stdout: '', stderr: '' }) }), (error) => error.code === CODES.agentPathUnsafe)
+    assert.throws(() => agentPlistPath({ label: foreign, homeDir: '/Users/dev' }), (error) => error.code === CODES.agentPathUnsafe)
+  }
+  assert.equal(agentPlistPath({ homeDir: '/Users/dev' }), path.join('/Users/dev', 'Library', 'LaunchAgents', 'com.glasspane.update.plist'), '自己那份照旧通过')
 })
 
 test('disable boots the agent out and removes its plist; an unloaded job is already done', () => {
@@ -425,10 +582,14 @@ test('a --state-dir hidden behind an embedded brace still needs consent', () => 
   assert.match(decision.reason, /\/Volumes\/Other/)
 })
 
-test('an unquoted brace, an open quote, and an unclosed block are all "unknown"', () => {
+test('an unquoted brace and an unclosed block are "unknown"; a bare quote is not', () => {
   const cases = {
     'an unquoted } in a bare token': PRINT_HIDDEN_ROOT.replace('"--note=}"', '--note=}'),
-    'a quote that never closes': PRINT_HIDDEN_ROOT.replace('"--state-dir"', '"--state-dir'),
+    // This one used to be a refusal and is now a decodable token — measured on this machine, the
+    // update agent's own `-c` argument *begins* with a quote, so treating an opening quote as damage
+    // made the job this subsystem registers for itself unreadable. The refusal list keeps the shapes
+    // that can actually fake or abort the block boundary.
+    'an unquoted { in a bare token': PRINT_HIDDEN_ROOT.replace('"--state-dir"', '--state-dir {'),
     // Both of these first versions were self-defeating and measured nothing:
     // deleting only the inner `    }` left the outer `}` on its own line, which
     // *is* a legal terminator, and putting `}` on the line before the closer left
@@ -442,8 +603,14 @@ test('an unquoted brace, an open quote, and an unclosed block are all "unknown"'
     assert.equal(job.ok, false, `${label}: undecodable output must not be read as "no arguments"`)
     assert.equal(job.unknown, true, label)
     assert.equal(job.code, CODES.busyOrUnreachable)
-    assert.match(job.reason, /could not be read|not read completely|cannot be decoded|never closes|carries an unquoted/, label)
+    assert.match(job.reason, /could not be read|not read completely|cannot be decoded|carries an unquoted/, label)
   }
+
+  // The case that changed, pinned so a later "be stricter" pass cannot quietly blind the read-back
+  // again: one quotation mark at the start of a line is a token, not a truncation.
+  const openQuote = readRunningJob({ uid: '501', run: () => ({ status: 0, stdout: PRINT_HIDDEN_ROOT.replace('"--state-dir"', '"--state-dir'), stderr: '' }) })
+  assert.equal(openQuote.unknown, false, openQuote.reason)
+  assert.ok(openQuote.args.some((arg) => arg.startsWith('"')), JSON.stringify(openQuote.args))
 })
 
 test('a job that names --state-dir twice is not a job whose root can be read', () => {

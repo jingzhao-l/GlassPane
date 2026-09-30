@@ -933,6 +933,9 @@ export async function registerAutoUpdate({
     pointer: written.pointer,
     pointerPath: written.path,
     message: outcome.message,
+    // updater 有没有把在册作业读回来核对过。`false` 不是失败（作业确实装载了），但也确实没人证明
+    // launchd 手里的是这一份；安装日志要说的是这两者之中的那一个，而不是"已注册"三个字。
+    agentVerified: outcome.agentVerified ?? null,
     // `undefined`（这份 updater 根本不回报）与 `null`（回报了但没有束）对读者是同一句话：
     // 没有证据。合成一个形状，下游就不必为两种"没有"各写一条分支——而两种分支里，
     // 漏掉一种就是崩溃。
@@ -940,6 +943,16 @@ export async function registerAutoUpdate({
   }
   if (registered) {
     say(`每日自动更新已注册（${agentLabel}，默认 ${schedule}，状态根 ${stateRoot}；指针 ${written.path}）——一键关：node "${tree.cli}" disable`)
+    if (summary.agentVerified === false) {
+      say(paint(`注意（每日作业还没被核对过）：${outcome.message}`, 'yellow'))
+      say('   这一步只说明 launchd 接受了装载；这条命令之后有没有真的成为在册作业，上面的原话里说了为什么读不出来。')
+    }
+    // "已注册"这三个字的证据是 updater 把在册作业读回来核对过。launchd 装载成功但读不回在册作业时，
+    // 这句话只能算一半成立，而那另一半（原话）必须跟着说出来——否则这台机器看起来有每日作业，实际
+    // 有没有人跑没人知道。措辞仍来自唯一作者 outcome.message，这里只转述。
+    if (outcome && outcome.agentVerified === false) {
+      say(paint(`注意（定时任务没有读回来核对）：${outcome.message}`, 'yellow'))
+    }
     // §9.8：node 不读 macOS 信任库，装了 HTTPS 中间人的机器上这件事只有 updater 自己能发现。
     // 安装日志必须把它说出来——否则每天失败的是一个看起来在正常工作的代理。措辞与 remedy
     // 都来自 outcome.message（唯一作者），这里只转述，不重写。
