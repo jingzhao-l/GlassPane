@@ -8,6 +8,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.6.1] - 2026-09-30
+
+### Fixed
+
+- **Release assets are now GPG-signed, and the release refuses to publish without
+  them.** v0.6.0 shipped two platform archives and no `SHA256SUMS.txt.asc`:
+  the signing step read `GPG_PRIVATE_KEY` from the `release` environment, where
+  it had never been set, and the step failed after the archives were already
+  uploaded. The two secrets are configured now, and the lane is re-run.
+
+  Consumers can verify provenance, not just integrity:
+
+  ```bash
+  gh release download v0.6.1 -p glasspane-harness-darwin-arm64.zip -p '*.asc'
+  gpg --verify glasspane-harness-darwin-arm64.zip.asc glasspane-harness-darwin-arm64.zip
+  ```
+
+### Internal
+
+- **`script/gpg-signing.sh`** (new) holds how this product and the four other
+  projects in the two ecosystems sign their releases, so the question stops
+  being re-derived: `seed` (one-time, the only interactive step), `install`,
+  `verify`, `verify-pass`, `local`, `audit`, `selftest`. It lives in the product
+  tree rather than the fork's `tools/` because subtree split does not carry the
+  fork's directories into the published repo.
+- `audit` names the release workflows that still sign behind
+  `if: secrets.GPG_PRIVATE_KEY != ''` — a condition under which the step
+  disappears silently and the release publishes unsigned. GlassPane's own v1.4.0
+  shipped that way; this repo's `release.yml` was already migrated to failing
+  loudly with a remedy.
+
 ## [0.6.0] - 2026-09-28
 
 ### Fixed

@@ -1,9 +1,9 @@
 {
-  "$comment": "产品清单 — glasspane-harness 的机器可读真源：发行名、命令名、平台包模板、版本线、安装入口、上游血缘、产品面边界。随 subtree split 走；改任何一处名字先改这里，product-surface.mjs 会核各脚本是否跟上。",
+  "$comment": "\u4ea7\u54c1\u6e05\u5355 \u2014 glasspane-harness \u7684\u673a\u5668\u53ef\u8bfb\u771f\u6e90\uff1a\u53d1\u884c\u540d\u3001\u547d\u4ee4\u540d\u3001\u5e73\u53f0\u5305\u6a21\u677f\u3001\u7248\u672c\u7ebf\u3001\u5b89\u88c5\u5165\u53e3\u3001\u4e0a\u6e38\u8840\u7f18\u3001\u4ea7\u54c1\u9762\u8fb9\u754c\u3002\u968f subtree split \u8d70\uff1b\u6539\u4efb\u4f55\u4e00\u5904\u540d\u5b57\u5148\u6539\u8fd9\u91cc\uff0cproduct-surface.mjs \u4f1a\u6838\u5404\u811a\u672c\u662f\u5426\u8ddf\u4e0a\u3002",
   "name": "glasspane-harness",
   "displayName": "GlassPane Harness",
-  "tagline": "Evidence-honest GUI verification harness for macOS apps — an opencode fork carrying GlassPane's native tool surface",
-  "version": "0.6.0",
+  "tagline": "Evidence-honest GUI verification harness for macOS apps \u2014 an opencode fork carrying GlassPane's native tool surface",
+  "version": "0.6.1",
   "binary": "glasspane-harness",
   "bins": [
     "glasspane-harness",
@@ -28,16 +28,16 @@
       "packages/enterprise",
       "packages/stats",
       "infra/ (upstream's hosted-service SST stack)",
-      "packages/desktop (Electron — second batch: needs signing/notarisation accounts)",
+      "packages/desktop (Electron \u2014 second batch: needs signing/notarisation accounts)",
       "artifacts/ (upstream demo videos)",
-      "packages/web (docs site — upstream content, not shipped yet)"
+      "packages/web (docs site \u2014 upstream content, not shipped yet)"
     ],
-    "note": "产品面（owner 2026-09-25 定）：**macOS 专属**的 CLI + TUI + 内嵌 web 应用 + 仓内 docs/ + 随仓 SDK/plugin。不做 Linux/Windows 适配（分发面随之收成 macOS-only，见 platform.why）；console/enterprise/stats/infra 不做；Electron 桌面 app 第二批；上游文档站尚未私有化（canonical 文档是仓内 docs/）。",
+    "note": "\u4ea7\u54c1\u9762\uff08owner 2026-09-25 \u5b9a\uff09\uff1a**macOS \u4e13\u5c5e**\u7684 CLI + TUI + \u5185\u5d4c web \u5e94\u7528 + \u4ed3\u5185 docs/ + \u968f\u4ed3 SDK/plugin\u3002\u4e0d\u505a Linux/Windows \u9002\u914d\uff08\u5206\u53d1\u9762\u968f\u4e4b\u6536\u6210 macOS-only\uff0c\u89c1 platform.why\uff09\uff1bconsole/enterprise/stats/infra \u4e0d\u505a\uff1bElectron \u684c\u9762 app \u7b2c\u4e8c\u6279\uff1b\u4e0a\u6e38\u6587\u6863\u7ad9\u5c1a\u672a\u79c1\u6709\u5316\uff08canonical \u6587\u6863\u662f\u4ed3\u5185 docs/\uff09\u3002",
     "docsSite": {
       "status": "not-yet-ours",
       "where": "packages/web (upstream Astro/Starlight tree, kept for lineage and still builds)",
       "canonical": "docs/ in this repository",
-      "plan": "replace the site's content with docs/, trim the 14 upstream locales, static output → GitHub Pages"
+      "plan": "replace the site's content with docs/, trim the 14 upstream locales, static output \u2192 GitHub Pages"
     }
   },
   "upstream": {
@@ -45,13 +45,13 @@
     "tag": "v1.18.32",
     "license": "MIT",
     "attribution": "NOTICE",
-    "note": "内部标识（@opencode-ai/* 工作区包名、OPENCODE_* 环境变量、类型与协议名）刻意保留为血缘名，不进产品面；brand-surface.mjs 按基线计数豁免它们。"
+    "note": "\u5185\u90e8\u6807\u8bc6\uff08@opencode-ai/* \u5de5\u4f5c\u533a\u5305\u540d\u3001OPENCODE_* \u73af\u5883\u53d8\u91cf\u3001\u7c7b\u578b\u4e0e\u534f\u8bae\u540d\uff09\u523b\u610f\u4fdd\u7559\u4e3a\u8840\u7f18\u540d\uff0c\u4e0d\u8fdb\u4ea7\u54c1\u9762\uff1bbrand-surface.mjs \u6309\u57fa\u7ebf\u8ba1\u6570\u8c41\u514d\u5b83\u4eec\u3002"
   },
   "glasspane": {
     "daemon": "glasspaned",
     "tools": "gp_*",
     "engineRepo": "https://github.com/jingzhao-l/GlassPane",
-    "note": "gp_* 工具面的前提是 GlassPane 引擎在跑（daemon + 辅助功能权限），安装器要对此说人话。"
+    "note": "gp_* \u5de5\u5177\u9762\u7684\u524d\u63d0\u662f GlassPane \u5f15\u64ce\u5728\u8dd1\uff08daemon + \u8f85\u52a9\u529f\u80fd\u6743\u9650\uff09\uff0c\u5b89\u88c5\u5668\u8981\u5bf9\u6b64\u8bf4\u4eba\u8bdd\u3002"
   },
   "platformTargets": [
     {
@@ -63,7 +63,7 @@
       "arch": "x64"
     }
   ],
-  "platformTargetsNote": "目标矩阵的真源在此（上游把它写死在 script/build.ts 里）。build.ts 读它、publish.ts 用它算 optionalDependencies、product-surface.mjs 核三者一致。第一条发布流水线只覆盖 glibc/darwin/win32 的非 baseline 目标（macOS/Linux/Windows 原生 runner），musl 与 baseline 目标保留在清单里待补 lane。",
+  "platformTargetsNote": "\u76ee\u6807\u77e9\u9635\u7684\u771f\u6e90\u5728\u6b64\uff08\u4e0a\u6e38\u628a\u5b83\u5199\u6b7b\u5728 script/build.ts \u91cc\uff09\u3002build.ts \u8bfb\u5b83\u3001publish.ts \u7528\u5b83\u7b97 optionalDependencies\u3001product-surface.mjs \u6838\u4e09\u8005\u4e00\u81f4\u3002\u7b2c\u4e00\u6761\u53d1\u5e03\u6d41\u6c34\u7ebf\u53ea\u8986\u76d6 glibc/darwin/win32 \u7684\u975e baseline \u76ee\u6807\uff08macOS/Linux/Windows \u539f\u751f runner\uff09\uff0cmusl \u4e0e baseline \u76ee\u6807\u4fdd\u7559\u5728\u6e05\u5355\u91cc\u5f85\u8865 lane\u3002",
   "platform": {
     "os": [
       "darwin"
@@ -73,26 +73,26 @@
       "arm64",
       "x64"
     ],
-    "why": "产品是 macOS 专属（引擎只存在于 macOS，辅助功能/输入监听/屏幕录制三张权限表也都是 macOS 的）。npm 分发随之收成 macOS-only：wrapper 的 os/cpu 字段会让 npm 在非 macOS 上直接拒绝安装，而不是装完再报错。Linux/Windows 的平台包已在 registry 上 **弃用**（不是删除：版本号不可回收，弃用带理由比留个能装的包诚实）。",
+    "why": "\u4ea7\u54c1\u662f macOS \u4e13\u5c5e\uff08\u5f15\u64ce\u53ea\u5b58\u5728\u4e8e macOS\uff0c\u8f85\u52a9\u529f\u80fd/\u8f93\u5165\u76d1\u542c/\u5c4f\u5e55\u5f55\u5236\u4e09\u5f20\u6743\u9650\u8868\u4e5f\u90fd\u662f macOS \u7684\uff09\u3002npm \u5206\u53d1\u968f\u4e4b\u6536\u6210 macOS-only\uff1awrapper \u7684 os/cpu \u5b57\u6bb5\u4f1a\u8ba9 npm \u5728\u975e macOS \u4e0a\u76f4\u63a5\u62d2\u7edd\u5b89\u88c5\uff0c\u800c\u4e0d\u662f\u88c5\u5b8c\u518d\u62a5\u9519\u3002Linux/Windows \u7684\u5e73\u53f0\u5305\u5df2\u5728 registry \u4e0a **\u5f03\u7528**\uff08\u4e0d\u662f\u5220\u9664\uff1a\u7248\u672c\u53f7\u4e0d\u53ef\u56de\u6536\uff0c\u5f03\u7528\u5e26\u7406\u7531\u6bd4\u7559\u4e2a\u80fd\u88c5\u7684\u5305\u8bda\u5b9e\uff09\u3002",
     "dropped": {
-      "linux-*": "不做适配（owner 2026-09-25 决定）",
-      "windows-*": "不做适配；Windows 安装器 install.ps1 已删除",
-      "darwin-x64-baseline": "macOS 13+ 的机器全部有 AVX2，这个目标没有用户"
+      "linux-*": "\u4e0d\u505a\u9002\u914d\uff08owner 2026-09-25 \u51b3\u5b9a\uff09",
+      "windows-*": "\u4e0d\u505a\u9002\u914d\uff1bWindows \u5b89\u88c5\u5668 install.ps1 \u5df2\u5220\u9664",
+      "darwin-x64-baseline": "macOS 13+ \u7684\u673a\u5668\u5168\u90e8\u6709 AVX2\uff0c\u8fd9\u4e2a\u76ee\u6807\u6ca1\u6709\u7528\u6237"
     }
   },
   "npm": {
     "registry": "https://registry.npmjs.org",
     "packages": "glasspane-harness (wrapper) + glasspane-harness-darwin-arm64 / -darwin-x64",
-    "wrapperPostinstall": "node ./postinstall.mjs — 按平台取对应包，把真实二进制放到 bin/（npm ≥ 11 对首次见到的包会提示 allow-scripts；安装器会自动用 --allow-scripts 重试）",
+    "wrapperPostinstall": "node ./postinstall.mjs \u2014 \u6309\u5e73\u53f0\u53d6\u5bf9\u5e94\u5305\uff0c\u628a\u771f\u5b9e\u4e8c\u8fdb\u5236\u653e\u5230 bin/\uff08npm \u2265 11 \u5bf9\u9996\u6b21\u89c1\u5230\u7684\u5305\u4f1a\u63d0\u793a allow-scripts\uff1b\u5b89\u88c5\u5668\u4f1a\u81ea\u52a8\u7528 --allow-scripts \u91cd\u8bd5\uff09",
     "distTags": {
-      "latest": "稳定版",
-      "next": "预发布版（channel != latest 时）"
+      "latest": "\u7a33\u5b9a\u7248",
+      "next": "\u9884\u53d1\u5e03\u7248\uff08channel != latest \u65f6\uff09"
     },
     "publishPolicy": [
-      "版本线 = product.json 的 version（pre-1.0：证据契约不动，产品面可以动）",
-      "发布必须带 provenance（CI 用 Trusted Publisher + staged 兜底；本地手动发布不带 provenance，因此不作为常规路径）",
-      "每个平台包与 wrapper 同版本发布；wrapper 的 optionalDependencies 由 product.json 的 platformTargets 推出，不手写",
-      "发布后跑 verify-published：把已发布的 tarball 装进干净前缀并 --version，不靠'看起来成功'"
+      "\u7248\u672c\u7ebf = product.json \u7684 version\uff08pre-1.0\uff1a\u8bc1\u636e\u5951\u7ea6\u4e0d\u52a8\uff0c\u4ea7\u54c1\u9762\u53ef\u4ee5\u52a8\uff09",
+      "\u53d1\u5e03\u5fc5\u987b\u5e26 provenance\uff08CI \u7528 Trusted Publisher + staged \u515c\u5e95\uff1b\u672c\u5730\u624b\u52a8\u53d1\u5e03\u4e0d\u5e26 provenance\uff0c\u56e0\u6b64\u4e0d\u4f5c\u4e3a\u5e38\u89c4\u8def\u5f84\uff09",
+      "\u6bcf\u4e2a\u5e73\u53f0\u5305\u4e0e wrapper \u540c\u7248\u672c\u53d1\u5e03\uff1bwrapper \u7684 optionalDependencies \u7531 product.json \u7684 platformTargets \u63a8\u51fa\uff0c\u4e0d\u624b\u5199",
+      "\u53d1\u5e03\u540e\u8dd1 verify-published\uff1a\u628a\u5df2\u53d1\u5e03\u7684 tarball \u88c5\u8fdb\u5e72\u51c0\u524d\u7f00\u5e76 --version\uff0c\u4e0d\u9760'\u770b\u8d77\u6765\u6210\u529f'"
     ],
     "packageReadme": "wrapper = the product README (EN + zh-CN); each platform package = a short README saying what the binary is and pointing at the wrapper. Both are asserted by publish.ts --dry-run, so a README-less tarball cannot ship.",
     "trustedPublisher": {
@@ -107,15 +107,15 @@
         "glasspane-harness-darwin-x64"
       ],
       "status": "owner-action: not yet configured (npm CLI token cannot read trust settings: 403)",
-      "note": "npm does not validate this at save time — a mismatch only fails at publish. The publish jobs carry `environment: release` and `id-token: write`, so the field values above are exactly what the workflow presents."
+      "note": "npm does not validate this at save time \u2014 a mismatch only fails at publish. The publish jobs carry `environment: release` and `id-token: write`, so the field values above are exactly what the workflow presents."
     },
-    "versionBurnedNote": "0.5.0 的 wrapper 因一次并发发布被 npm stage（stage list 看不到它，但该版本号会被 registry 拒绝再次发布），因此实际发布的是 0.5.1，内容相同。发布脚本现在有排他锁防止再犯。"
+    "versionBurnedNote": "0.5.0 \u7684 wrapper \u56e0\u4e00\u6b21\u5e76\u53d1\u53d1\u5e03\u88ab npm stage\uff08stage list \u770b\u4e0d\u5230\u5b83\uff0c\u4f46\u8be5\u7248\u672c\u53f7\u4f1a\u88ab registry \u62d2\u7edd\u518d\u6b21\u53d1\u5e03\uff09\uff0c\u56e0\u6b64\u5b9e\u9645\u53d1\u5e03\u7684\u662f 0.5.1\uff0c\u5185\u5bb9\u76f8\u540c\u3002\u53d1\u5e03\u811a\u672c\u73b0\u5728\u6709\u6392\u4ed6\u9501\u9632\u6b62\u518d\u72af\u3002"
   },
   "repoUrl": "https://github.com/jingzhao-l/glasspane-harness",
   "models": {
     "policy": "byok (bring your own key)",
     "catalog": "full models.dev catalog, minus the first-party `opencode` provider (filtered at the catalog boundary in provider.ts)",
-    "why": "上游的第一方 provider 是一条通往 opencode 自家付费云的通道，由登录账号解锁。本产品没有这个账号（第一方账号面已删除），留着就是提供一个用不了的入口。第三方 provider 全部保留，用用户自己的 API key 解锁——这才是'通用编程 harness'该有的样子。",
+    "why": "\u4e0a\u6e38\u7684\u7b2c\u4e00\u65b9 provider \u662f\u4e00\u6761\u901a\u5f80 opencode \u81ea\u5bb6\u4ed8\u8d39\u4e91\u7684\u901a\u9053\uff0c\u7531\u767b\u5f55\u8d26\u53f7\u89e3\u9501\u3002\u672c\u4ea7\u54c1\u6ca1\u6709\u8fd9\u4e2a\u8d26\u53f7\uff08\u7b2c\u4e00\u65b9\u8d26\u53f7\u9762\u5df2\u5220\u9664\uff09\uff0c\u7559\u7740\u5c31\u662f\u63d0\u4f9b\u4e00\u4e2a\u7528\u4e0d\u4e86\u7684\u5165\u53e3\u3002\u7b2c\u4e09\u65b9 provider \u5168\u90e8\u4fdd\u7559\uff0c\u7528\u7528\u6237\u81ea\u5df1\u7684 API key \u89e3\u9501\u2014\u2014\u8fd9\u624d\u662f'\u901a\u7528\u7f16\u7a0b harness'\u8be5\u6709\u7684\u6837\u5b50\u3002",
     "removedFirstParty": [
       "the `opencode` catalog entry (opencode's own model gateway)",
       "`auth login` / `logout` / `switch` CLI commands and the `/org` TUI command with the org switcher",
@@ -123,30 +123,30 @@
       "session sharing to opencode's cloud (share/share-next modules, share endpoints, share/autoshare config keys, the GitHub bot's session card)"
     ],
     "keptIntact": "Anthropic / OpenAI / Google / GitHub Copilot / Bedrock / Azure / OpenRouter and the rest: hundreds of models, each unlocked by the user's own key via env var, `{env:NAME}` config template, or the TUI `/connect` dialog",
-    "accountTables": "the local `account`/`account_state` tables stay in existing databases; drizzle stops managing them. No destructive migration — the rows were console-account rows and are inert.",
+    "accountTables": "the local `account`/`account_state` tables stay in existing databases; drizzle stops managing them. No destructive migration \u2014 the rows were console-account rows and are inert.",
     "docs": "docs/models-and-keys.md"
   },
   "repo": "jingzhao-l/glasspane-harness",
   "repoLayout": {
     "projectDir": ".glasspane-harness/",
-    "why": "仓库自己的 agent/命令/技能/术语表目录用产品自己的名字，这样仓库自己就验证了改名是真的（狗粮自吃）。上游开发时用 `.opencode/`；`.opencode` 作为**读取兼容目标**保留在产品里（老 checkout 必须还能用），由 product-surface 断言双向看守：根目录不许出现 `.opencode`，同时不许把兼容读取删掉。",
+    "why": "\u4ed3\u5e93\u81ea\u5df1\u7684 agent/\u547d\u4ee4/\u6280\u80fd/\u672f\u8bed\u8868\u76ee\u5f55\u7528\u4ea7\u54c1\u81ea\u5df1\u7684\u540d\u5b57\uff0c\u8fd9\u6837\u4ed3\u5e93\u81ea\u5df1\u5c31\u9a8c\u8bc1\u4e86\u6539\u540d\u662f\u771f\u7684\uff08\u72d7\u7cae\u81ea\u5403\uff09\u3002\u4e0a\u6e38\u5f00\u53d1\u65f6\u7528 `.opencode/`\uff1b`.opencode` \u4f5c\u4e3a**\u8bfb\u53d6\u517c\u5bb9\u76ee\u6807**\u4fdd\u7559\u5728\u4ea7\u54c1\u91cc\uff08\u8001 checkout \u5fc5\u987b\u8fd8\u80fd\u7528\uff09\uff0c\u7531 product-surface \u65ad\u8a00\u53cc\u5411\u770b\u5b88\uff1a\u6839\u76ee\u5f55\u4e0d\u8bb8\u51fa\u73b0 `.opencode`\uff0c\u540c\u65f6\u4e0d\u8bb8\u628a\u517c\u5bb9\u8bfb\u53d6\u5220\u6389\u3002",
     "compatRead": [
       ".opencode/ (legacy, read-only, lower precedence than the product dir)"
     ],
     "enforcedBy": "product-surface.mjs :: project-dir"
   },
   "privateSurface": {
-    "rule": "用户可见的产品面不再出现上游项目的名字：**代码、界面文案、请求头、本地文件名、命令行帮助、配置文件、局域网服务名**都由本产品命名。",
-    "envVars": "所有环境变量新增 GLASSPANE_HARNESS_* 名字（product.json → npm 无关；解析点只有一处：packages/core/src/flag/flag.ts 的 read()），旧的 OPENCODE_* 名字继续有效（先读新名，再读旧名）——私有化若让人已经导出的设置静默失效，本身就是缺陷。",
-    "wireIdentity": "给第三方服务发送的标识一律用本产品：X-Title / X-Source / User-Agent / originator / HTTP-Referer / MCP client name / OTLP service name。",
-    "ownFiles": "用户自己的文件用产品命名：glasspane-harness.db（带一次性旧名迁移 rename，绝不让历史'看起来丢了'）、glasspane-harness.log、项目 id 缓存文件。",
-    "mDNS": "局域网服务名 glasspane-harness.local（此前帮助文本说已改名、实际值没改，是文档与行为分裂）。",
-    "skill": "注入每个会话的内置 skill 改名 customize-harness，正文只讲本产品的配置路径（旧名仅在'仍然被读取'的意义上出现）。",
-    "noForeignSchema": "不再向用户文件写入第三方 $schema URL（此前每个配置首行都是 opencode.ai/config.json）。",
-    "gates": "harness/tools/brand-surface.mjs 新增 5 类规则：first-party-gateway / wire-identity / foreign-schema-write / product-file-name / removed-tree；兼容读取处（数据库迁移、旧配置名、旧主题名）走显式白名单，每一条都要在 review 里说明。",
+    "rule": "\u7528\u6237\u53ef\u89c1\u7684\u4ea7\u54c1\u9762\u4e0d\u518d\u51fa\u73b0\u4e0a\u6e38\u9879\u76ee\u7684\u540d\u5b57\uff1a**\u4ee3\u7801\u3001\u754c\u9762\u6587\u6848\u3001\u8bf7\u6c42\u5934\u3001\u672c\u5730\u6587\u4ef6\u540d\u3001\u547d\u4ee4\u884c\u5e2e\u52a9\u3001\u914d\u7f6e\u6587\u4ef6\u3001\u5c40\u57df\u7f51\u670d\u52a1\u540d**\u90fd\u7531\u672c\u4ea7\u54c1\u547d\u540d\u3002",
+    "envVars": "\u6240\u6709\u73af\u5883\u53d8\u91cf\u65b0\u589e GLASSPANE_HARNESS_* \u540d\u5b57\uff08product.json \u2192 npm \u65e0\u5173\uff1b\u89e3\u6790\u70b9\u53ea\u6709\u4e00\u5904\uff1apackages/core/src/flag/flag.ts \u7684 read()\uff09\uff0c\u65e7\u7684 OPENCODE_* \u540d\u5b57\u7ee7\u7eed\u6709\u6548\uff08\u5148\u8bfb\u65b0\u540d\uff0c\u518d\u8bfb\u65e7\u540d\uff09\u2014\u2014\u79c1\u6709\u5316\u82e5\u8ba9\u4eba\u5df2\u7ecf\u5bfc\u51fa\u7684\u8bbe\u7f6e\u9759\u9ed8\u5931\u6548\uff0c\u672c\u8eab\u5c31\u662f\u7f3a\u9677\u3002",
+    "wireIdentity": "\u7ed9\u7b2c\u4e09\u65b9\u670d\u52a1\u53d1\u9001\u7684\u6807\u8bc6\u4e00\u5f8b\u7528\u672c\u4ea7\u54c1\uff1aX-Title / X-Source / User-Agent / originator / HTTP-Referer / MCP client name / OTLP service name\u3002",
+    "ownFiles": "\u7528\u6237\u81ea\u5df1\u7684\u6587\u4ef6\u7528\u4ea7\u54c1\u547d\u540d\uff1aglasspane-harness.db\uff08\u5e26\u4e00\u6b21\u6027\u65e7\u540d\u8fc1\u79fb rename\uff0c\u7edd\u4e0d\u8ba9\u5386\u53f2'\u770b\u8d77\u6765\u4e22\u4e86'\uff09\u3001glasspane-harness.log\u3001\u9879\u76ee id \u7f13\u5b58\u6587\u4ef6\u3002",
+    "mDNS": "\u5c40\u57df\u7f51\u670d\u52a1\u540d glasspane-harness.local\uff08\u6b64\u524d\u5e2e\u52a9\u6587\u672c\u8bf4\u5df2\u6539\u540d\u3001\u5b9e\u9645\u503c\u6ca1\u6539\uff0c\u662f\u6587\u6863\u4e0e\u884c\u4e3a\u5206\u88c2\uff09\u3002",
+    "skill": "\u6ce8\u5165\u6bcf\u4e2a\u4f1a\u8bdd\u7684\u5185\u7f6e skill \u6539\u540d customize-harness\uff0c\u6b63\u6587\u53ea\u8bb2\u672c\u4ea7\u54c1\u7684\u914d\u7f6e\u8def\u5f84\uff08\u65e7\u540d\u4ec5\u5728'\u4ecd\u7136\u88ab\u8bfb\u53d6'\u7684\u610f\u4e49\u4e0a\u51fa\u73b0\uff09\u3002",
+    "noForeignSchema": "\u4e0d\u518d\u5411\u7528\u6237\u6587\u4ef6\u5199\u5165\u7b2c\u4e09\u65b9 $schema URL\uff08\u6b64\u524d\u6bcf\u4e2a\u914d\u7f6e\u9996\u884c\u90fd\u662f opencode.ai/config.json\uff09\u3002",
+    "gates": "harness/tools/brand-surface.mjs \u65b0\u589e 5 \u7c7b\u89c4\u5219\uff1afirst-party-gateway / wire-identity / foreign-schema-write / product-file-name / removed-tree\uff1b\u517c\u5bb9\u8bfb\u53d6\u5904\uff08\u6570\u636e\u5e93\u8fc1\u79fb\u3001\u65e7\u914d\u7f6e\u540d\u3001\u65e7\u4e3b\u9898\u540d\uff09\u8d70\u663e\u5f0f\u767d\u540d\u5355\uff0c\u6bcf\u4e00\u6761\u90fd\u8981\u5728 review \u91cc\u8bf4\u660e\u3002",
     "declaredUpstreamDependency": {
-      "modelsCatalogApi": "packages/core/src/models-dev.ts 读取 https://models.opencode.ai —— 这是模型目录的数据源，是本产品依赖的**第三方公开 API**，不是我们的产品面；记录在此以免被当成疏漏。",
-      "scope": "内部包作用域 @opencode-ai/*、Effect service tag、协议头名等内部标识符仍是 lineage：它们不对用户显示，改动会触及数千行 import。已量化：(scope 4,217 处 / OPENCODE_* 275 处 / 旧配置名 35 处)。"
+      "modelsCatalogApi": "packages/core/src/models-dev.ts \u8bfb\u53d6 https://models.opencode.ai \u2014\u2014 \u8fd9\u662f\u6a21\u578b\u76ee\u5f55\u7684\u6570\u636e\u6e90\uff0c\u662f\u672c\u4ea7\u54c1\u4f9d\u8d56\u7684**\u7b2c\u4e09\u65b9\u516c\u5f00 API**\uff0c\u4e0d\u662f\u6211\u4eec\u7684\u4ea7\u54c1\u9762\uff1b\u8bb0\u5f55\u5728\u6b64\u4ee5\u514d\u88ab\u5f53\u6210\u758f\u6f0f\u3002",
+      "scope": "\u5185\u90e8\u5305\u4f5c\u7528\u57df @opencode-ai/*\u3001Effect service tag\u3001\u534f\u8bae\u5934\u540d\u7b49\u5185\u90e8\u6807\u8bc6\u7b26\u4ecd\u662f lineage\uff1a\u5b83\u4eec\u4e0d\u5bf9\u7528\u6237\u663e\u793a\uff0c\u6539\u52a8\u4f1a\u89e6\u53ca\u6570\u5343\u884c import\u3002\u5df2\u91cf\u5316\uff1a(scope 4,217 \u5904 / OPENCODE_* 275 \u5904 / \u65e7\u914d\u7f6e\u540d 35 \u5904)\u3002"
     }
   },
   "kernel": {
@@ -158,38 +158,38 @@
       "branch": "kernel/decision-log-chain"
     },
     "mode": "vendored",
-    "modeWhy": "记录在案的决定，不是待办：P6 §13（file: 依赖会漏进已发布清单，故内联字节）、P4 §33.2（registry 发布跟 iterate monorepo 自己的发布节奏）；而 fork 以 subtree 方式独立成仓，相对 ../../kernel 的 import 会在第一次发布就断——所以只剩 vendored 或 npm。",
+    "modeWhy": "\u8bb0\u5f55\u5728\u6848\u7684\u51b3\u5b9a\uff0c\u4e0d\u662f\u5f85\u529e\uff1aP6 \u00a713\uff08file: \u4f9d\u8d56\u4f1a\u6f0f\u8fdb\u5df2\u53d1\u5e03\u6e05\u5355\uff0c\u6545\u5185\u8054\u5b57\u8282\uff09\u3001P4 \u00a733.2\uff08registry \u53d1\u5e03\u8ddf iterate monorepo \u81ea\u5df1\u7684\u53d1\u5e03\u8282\u594f\uff09\uff1b\u800c fork \u4ee5 subtree \u65b9\u5f0f\u72ec\u7acb\u6210\u4ed3\uff0c\u76f8\u5bf9 ../../kernel \u7684 import \u4f1a\u5728\u7b2c\u4e00\u6b21\u53d1\u5e03\u5c31\u65ad\u2014\u2014\u6240\u4ee5\u53ea\u5269 vendored \u6216 npm\u3002",
     "switchToNpm": {
-      "cost": "kernel.ts 一行 import，其余不动（该文件头部就是这么写的）",
+      "cost": "kernel.ts \u4e00\u884c import\uff0c\u5176\u4f59\u4e0d\u52a8\uff08\u8be5\u6587\u4ef6\u5934\u90e8\u5c31\u662f\u8fd9\u4e48\u5199\u7684\uff09",
       "needs": [
-        "iterate monorepo 发布 @iterate/kernel@0.1.0",
-        "拥有 @iterate npm scope（跨账号动作）"
+        "iterate monorepo \u53d1\u5e03 @iterate/kernel@0.1.0",
+        "\u62e5\u6709 @iterate npm scope\uff08\u8de8\u8d26\u53f7\u52a8\u4f5c\uff09"
       ],
-      "blockedBy": "kernel 当前 API 还没有 R40 场景需要的东西（dimensionContext、决策日志写入器、invariant 求值）；先发布等于发布一个还没有这些 API 的 draft。"
+      "blockedBy": "kernel \u5f53\u524d API \u8fd8\u6ca1\u6709 R40 \u573a\u666f\u9700\u8981\u7684\u4e1c\u897f\uff08dimensionContext\u3001\u51b3\u7b56\u65e5\u5fd7\u5199\u5165\u5668\u3001invariant \u6c42\u503c\uff09\uff1b\u5148\u53d1\u5e03\u7b49\u4e8e\u53d1\u5e03\u4e00\u4e2a\u8fd8\u6ca1\u6709\u8fd9\u4e9b API \u7684 draft\u3002"
     },
     "enforcedBy": [
-      "harness/glasspane-harness/script/kernel-vendor.mjs --check（23 个文件逐个 sha256）",
-      "harness/glasspane-harness/script/kernel-vendor.mjs --probe（canonical 是否移动/锚点是否还在）",
-      "harness/tools/tool-surface.mjs（按依赖计，不计我们的工具面）"
+      "harness/glasspane-harness/script/kernel-vendor.mjs --check\uff0823 \u4e2a\u6587\u4ef6\u9010\u4e2a sha256\uff09",
+      "harness/glasspane-harness/script/kernel-vendor.mjs --probe\uff08canonical \u662f\u5426\u79fb\u52a8/\u951a\u70b9\u662f\u5426\u8fd8\u5728\uff09",
+      "harness/tools/tool-surface.mjs\uff08\u6309\u4f9d\u8d56\u8ba1\uff0c\u4e0d\u8ba1\u6211\u4eec\u7684\u5de5\u5177\u9762\uff09"
     ],
-    "knownFinding": "已修复（2026-09-27）：canonical 的 kernel/decision-log-chain 分支从未 push 过（Phase B 内核工作——决策日志写入器、evidence→decision 映射、读侧兼容冻结——只存在在一台机器上），所以我们钉的 bb80f97 在远端解析不到。已把该分支 push 到 origin，探针现在报 'no drift'。**但当时的检测器本身是坏的**：它用 git ls-remote 去解析裸 SHA，而 ls-remote 只匹配 ref 名，因此对确定存在的 ref 也报 'ANCHOR UNREACHABLE'（用 main 的 head 做过反证）。结论以 git ls-remote --heads 的独立证据为准，不以探针的判词为准。",
+    "knownFinding": "\u5df2\u4fee\u590d\uff082026-09-27\uff09\uff1acanonical \u7684 kernel/decision-log-chain \u5206\u652f\u4ece\u672a push \u8fc7\uff08Phase B \u5185\u6838\u5de5\u4f5c\u2014\u2014\u51b3\u7b56\u65e5\u5fd7\u5199\u5165\u5668\u3001evidence\u2192decision \u6620\u5c04\u3001\u8bfb\u4fa7\u517c\u5bb9\u51bb\u7ed3\u2014\u2014\u53ea\u5b58\u5728\u5728\u4e00\u53f0\u673a\u5668\u4e0a\uff09\uff0c\u6240\u4ee5\u6211\u4eec\u9489\u7684 bb80f97 \u5728\u8fdc\u7aef\u89e3\u6790\u4e0d\u5230\u3002\u5df2\u628a\u8be5\u5206\u652f push \u5230 origin\uff0c\u63a2\u9488\u73b0\u5728\u62a5 'no drift'\u3002**\u4f46\u5f53\u65f6\u7684\u68c0\u6d4b\u5668\u672c\u8eab\u662f\u574f\u7684**\uff1a\u5b83\u7528 git ls-remote \u53bb\u89e3\u6790\u88f8 SHA\uff0c\u800c ls-remote \u53ea\u5339\u914d ref \u540d\uff0c\u56e0\u6b64\u5bf9\u786e\u5b9a\u5b58\u5728\u7684 ref \u4e5f\u62a5 'ANCHOR UNREACHABLE'\uff08\u7528 main \u7684 head \u505a\u8fc7\u53cd\u8bc1\uff09\u3002\u7ed3\u8bba\u4ee5 git ls-remote --heads \u7684\u72ec\u7acb\u8bc1\u636e\u4e3a\u51c6\uff0c\u4e0d\u4ee5\u63a2\u9488\u7684\u5224\u8bcd\u4e3a\u51c6\u3002",
     "docs": "docs/kernel-integration.md",
     "conformance": {
       "command": "bun harness/glasspane-harness/script/kernel-conformance.mjs [--impl <dir>]",
-      "what": "把镜像到 harness/contracts/kernel-fixtures/ 的 8 个 fixtures 跑过随包发出的内核，逐字节比较。默认只跑 vendored 一侧（这是我们今天真正主张的同一性）；加 --impl 再跑第二份实现（构建产物 / 已安装的 @iterate/kernel），两份必须给出完全相同的答案。",
-      "gate": "CI 的 root workspace lane；kernel-vendor --check 负责 fixtures 的出处（改了会红）",
-      "reversControl": "把第二份实现的 decisionSummaryFromEvidence 改成返回常量 → 5/8 fixtures 红、退出 1"
+      "what": "\u628a\u955c\u50cf\u5230 harness/contracts/kernel-fixtures/ \u7684 8 \u4e2a fixtures \u8dd1\u8fc7\u968f\u5305\u53d1\u51fa\u7684\u5185\u6838\uff0c\u9010\u5b57\u8282\u6bd4\u8f83\u3002\u9ed8\u8ba4\u53ea\u8dd1 vendored \u4e00\u4fa7\uff08\u8fd9\u662f\u6211\u4eec\u4eca\u5929\u771f\u6b63\u4e3b\u5f20\u7684\u540c\u4e00\u6027\uff09\uff1b\u52a0 --impl \u518d\u8dd1\u7b2c\u4e8c\u4efd\u5b9e\u73b0\uff08\u6784\u5efa\u4ea7\u7269 / \u5df2\u5b89\u88c5\u7684 @iterate/kernel\uff09\uff0c\u4e24\u4efd\u5fc5\u987b\u7ed9\u51fa\u5b8c\u5168\u76f8\u540c\u7684\u7b54\u6848\u3002",
+      "gate": "CI \u7684 root workspace lane\uff1bkernel-vendor --check \u8d1f\u8d23 fixtures \u7684\u51fa\u5904\uff08\u6539\u4e86\u4f1a\u7ea2\uff09",
+      "reversControl": "\u628a\u7b2c\u4e8c\u4efd\u5b9e\u73b0\u7684 decisionSummaryFromEvidence \u6539\u6210\u8fd4\u56de\u5e38\u91cf \u2192 5/8 fixtures \u7ea2\u3001\u9000\u51fa 1"
     },
     "publishReadiness": {
-      "status": "可以发，尚未发；剩下一步需要交互式 npm 登录",
+      "status": "\u53ef\u4ee5\u53d1\uff0c\u5c1a\u672a\u53d1\uff1b\u5269\u4e0b\u4e00\u6b65\u9700\u8981\u4ea4\u4e92\u5f0f npm \u767b\u5f55",
       "proved": [
-        "npm pack → 空项目安装 tarball → 8 个 fixtures 与 vendored 逐字节一致",
-        "按模块 exports（不再只有 barrel），MIT，prepublishOnly 构建",
-        "zod 依赖改为 >=3.25.76 <5，与它本来就兼容的 zod 3/4 对齐"
+        "npm pack \u2192 \u7a7a\u9879\u76ee\u5b89\u88c5 tarball \u2192 8 \u4e2a fixtures \u4e0e vendored \u9010\u5b57\u8282\u4e00\u81f4",
+        "\u6309\u6a21\u5757 exports\uff08\u4e0d\u518d\u53ea\u6709 barrel\uff09\uff0cMIT\uff0cprepublishOnly \u6784\u5efa",
+        "zod \u4f9d\u8d56\u6539\u4e3a >=3.25.76 <5\uff0c\u4e0e\u5b83\u672c\u6765\u5c31\u517c\u5bb9\u7684 zod 3/4 \u5bf9\u9f50"
       ],
       "blockedBy": [
-        "@iterate scope 归属无法从本机验证（npm org ls iterate 403）；创建公开 npm 组织属于对外身份动作，需 owner 决定",
-        "canonical kernel 仍是 private:true（误发是要避免的，发布应当是一个显式动作）"
+        "@iterate scope \u5f52\u5c5e\u65e0\u6cd5\u4ece\u672c\u673a\u9a8c\u8bc1\uff08npm org ls iterate 403\uff09\uff1b\u521b\u5efa\u516c\u5f00 npm \u7ec4\u7ec7\u5c5e\u4e8e\u5bf9\u5916\u8eab\u4efd\u52a8\u4f5c\uff0c\u9700 owner \u51b3\u5b9a",
+        "canonical kernel \u4ecd\u662f private:true\uff08\u8bef\u53d1\u662f\u8981\u907f\u514d\u7684\uff0c\u53d1\u5e03\u5e94\u5f53\u662f\u4e00\u4e2a\u663e\u5f0f\u52a8\u4f5c\uff09"
       ],
       "nextCommand": "cd <iterate-skill>/kernel && npm version 0.1.0 && (private:false) && npm publish --provenance --access public"
     }
