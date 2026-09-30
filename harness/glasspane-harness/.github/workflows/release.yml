@@ -288,7 +288,7 @@ jobs:
           # `product.json` from this directory dies with ENOENT, and it dies
           # *after* a full platform build, which is the expensive way to learn it.
           PRODUCT_JSON="../../product.json"
-          pkg="$(node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("product.json","utf8"));const t=p.platformTargets.find(t=>`${t.os==="win32"?"windows":t.os}-${t.arch}`===process.argv[1]);console.log(`${p.name}-${process.argv[1]}${t?.abi?"-"+t.abi:""}`)' '${{ matrix.target }}' "$PRODUCT_JSON")"
+          pkg="$(node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));const t=p.platformTargets.find(t=>`${t.os==="win32"?"windows":t.os}-${t.arch}`===process.argv[1]);console.log(`${p.name}-${process.argv[1]}${t?.abi?"-"+t.abi:""}`)' '${{ matrix.target }}' "$PRODUCT_JSON")"
           ver="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).version" "$PRODUCT_JSON")"
           echo "publishing $pkg@$ver"
           cd "dist/$pkg"
