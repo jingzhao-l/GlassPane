@@ -211,6 +211,49 @@ function inspect(target) {
     }
   }
 
+  // 2c. A `run:` step that reads a relative path must be able to resolve it from
+  //     where the step actually executes. Found 2026-09-30 twice in one day: the
+  //     npm platform step did `cd packages/opencode` and then read a bare
+  //     `product.json`, which lives at the *product root* — it died with ENOENT
+  //     after a full platform build, the expensive way to learn a path is wrong.
+  //     The failure is invisible here until CI pays for it twice.
+  //
+  //     Known limit: this resolves against the step's `working-directory` only.
+  //     A `cd` *inside* the script is not tracked, so a step that does
+  //     `cd packages/opencode` and then reads a bare `product.json` looks fine
+  //     here (the file exists at the root) and still dies in CI. Fixing that
+  //     means modelling shell control flow; until then the two forms are fixed
+  //     by hand, and the literal `../../product.json` spelling — which this rule
+  //     does verify — is the one to reach for.
+  // Built with RegExp for the same reason as RUN_SCRIPT above: the pattern
+  // contains quote characters that are awkward inside a literal, and exec()
+  // returns a single match (or null) — iterating it as if it were an array
+  // silently checks nothing.
+  const READ_LITERAL = new RegExp("readFileSync\\(\\s*['\"`]\\s*([^'\"`]+?)\\s*['\"`]", "g")
+  for (const ref of runRefs) {
+    READ_LITERAL.lastIndex = 0
+    let m
+    while ((m = READ_LITERAL.exec(ref.text)) !== null) {
+      const lit = m[1]
+      // Skip anything computed at runtime; only literal relative paths are checkable.
+      if (lit.includes("$") || lit.startsWith("process.argv")) continue
+      if (path.isAbsolute(lit)) continue
+      // Only path-shaped literals. `readFileSync('utf8')` and module specifiers
+      // like `readFileSync('fs')` are not paths, and a rule that reports those
+      // is a rule people learn to skip.
+      if (!/[/\\]/.test(lit) && !/\.[A-Za-z0-9]+$/.test(lit)) continue
+      const base = path.posix.join(ref.dir, lit)
+      const fromStep = path.join(target.root, base)
+      if (!existsSync(fromStep) && !existsSync(path.join(target.root, lit))) {
+        problems.push(
+          `line ${ref.line}: step reads "${lit}" but it does not exist ` +
+            `relative to ${ref.dir ? `working-directory ${ref.dir}` : "the repo root"} ` +
+            `(looked for ${path.relative(repoRoot, fromStep)})`,
+        )
+      }
+    }
+  }
+
   // 3. a job gated on `inputs.x` that nobody declared is a job that never runs.
   //    Found 2026-09-26: the verify-trusted-publisher job existed, its input did not
   //    (an insert missed the indentation), and the dispatch API rejected the run — a
