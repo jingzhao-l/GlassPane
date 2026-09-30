@@ -26,6 +26,8 @@ export const STAGING_DIR_NAME = 'update-staging'
 export const BACKUP_DIR_NAME = 'update-backup'
 export const STATE_FILE_NAME = 'update-state.json'
 export const POINTER_FILE_NAME = 'update-install.json'
+/** §11: where a verified release tree lands so the updater can update itself. */
+export const RUNTIME_DIR_NAME = 'runtime'
 
 export class UpdaterError extends Error {
   constructor(code, message, details = null) {
@@ -70,13 +72,14 @@ export function resolveWithin(root, candidate, label = 'path') {
   return resolved
 }
 
-/** The three writable locations this subsystem may ever touch. */
+/** The writable locations this subsystem may ever touch. */
 export function writableRoots(stateRoot) {
   const root = canonicalPath(stateRoot)
   return {
     stateRoot: root,
     staging: path.join(root, STAGING_DIR_NAME),
     backup: path.join(root, BACKUP_DIR_NAME),
+    runtime: path.join(root, RUNTIME_DIR_NAME),
     stateFile: path.join(root, STATE_FILE_NAME),
     pointerFile: path.join(root, POINTER_FILE_NAME),
   }

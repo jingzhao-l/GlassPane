@@ -21,6 +21,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -30,9 +31,12 @@ import {
   CA_STATUSES,
   KEYCHAIN_SOURCES,
   caBundlePath,
+  anchorVerdict,
+  certificateBlocks,
   countCertificates,
   describeCa,
   exportCaBundle,
+  filterToAnchors,
   probeWithBundle,
   usableBundle,
 } from '../lib/ca-bundle.js'
@@ -428,4 +432,124 @@ test('the TLS remedy names a real path when we have one, and a real place to loo
   const without = describeTransportFailure('https://api.github.com/x', err, {})
   assert.doesNotMatch(`${without.message} ${without.details}`, /<[a-z][^>]*>/i, `没路径时也不能留模板：${without.details}`)
   assert.match(without.details, /ca-roots\.pem/, '总得说出那个文件叫什么')
+})
+
+/* ------------------------------------ §9.4 收紧：只交得出能当信任锚的那些证书 */
+
+/**
+ * 真证书夹具（只有公钥部分，测试专用，2036 年前有效；生成方式写在 `/var/tmp/gpcerts.*`
+ * 的那次 openssl 调用里）：一张 CA:TRUE、一张自签但声明 CA:FALSE、一张 v3 但没有
+ * basicConstraints。用假 PEM 字符串测不出这件事——`new crypto.X509Certificate()` 读不懂
+ * 我编的正文，于是"剔除非锚证书"这条判据在夹具里永远不生效（本仓栽过的同一类）。
+ */
+const ANCHOR_CA = `-----BEGIN CERTIFICATE-----
+MIIDFTCCAf2gAwIBAgIUK/N3soDCvHYrAj34qrA3Dm3WpKMwDQYJKoZIhvcNAQEL
+BQAwGjEYMBYGA1UEAwwPZ3AgdGVzdCBjYSByb290MB4XDTI2MDkzMDA5MzkyM1oX
+DTM2MDkyNzA5MzkyM1owGjEYMBYGA1UEAwwPZ3AgdGVzdCBjYSByb290MIIBIjAN
+BgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5ylFgWmlAzK0/inCbowtf28v6yif
+eNqDwZPEZCRsPJVknTgXNmqCV7rCVI9X/3Im3eO+oxK/r6hbFmfP3TNksiX9rjP7
+TP4n0C5gPifb7W7C68AO6TyWZD3U52ULT1UkdCQK1jOG7LkSA2+PGm23ygENJTT3
+pst1E9Hho6r2HvUl/4b6rPrP9VXu2x8d93B2zrvAhdcBR9C60/BcJ2x1f8Bsv/g6
+HDvuqmoJHK/oB8CAQAWq7QPzxXYAE0R2tbTM7poQcB04E5Rlx26EtyjQ2t/aNaRA
+yTjgcpIqNvZC9f1+7LhHNMhgF+ZHOSBKkewznlC/K4SUr0o0ncLNma2EXQIDAQAB
+o1MwUTAdBgNVHQ4EFgQUx2jyo+Y8shicx7oqxuIzRIKQ0t8wHwYDVR0jBBgwFoAU
+x2jyo+Y8shicx7oqxuIzRIKQ0t8wDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0B
+AQsFAAOCAQEAPIX1xX8pOgiIBzNDjAmewHN1ZteV66WcfRkVi0WZomD2oh5zzqok
+oUxvoAeZ7pTiPCXMkAImNGRMRMvayA9LASRJX1/YNOp0JUAtdBl/LXV32VP8JELH
+RemsNfo7qDc/guPZebRhl5GLhYWLC1Zmxqmfh4z9/MEG3ZTwEFp40u0y9ifbPIdC
+2iF+qKtzu7ultOM/ZsCY+ylbJ9QHjTB14vPBVjkSqCg8qV+DYZqm2/XslcFfxfu2
+3FKjWqbl7idG8zuJulGWkLlOQaGNO4JWNC//6lEyDb3HA3HMSwx0QHbmQwnBeCVj
+4/Z67nMnk/cSfSfN0XvYmy6cDcqSiXSo6Q==
+-----END CERTIFICATE-----`
+const ANCHOR_NONCA = `-----BEGIN CERTIFICATE-----
+MIIDEDCCAfigAwIBAgIUVSjQFa4LO+eEB4F9LliZPbk04Y4wDQYJKoZIhvcNAQEL
+BQAwGTEXMBUGA1UEAwwOZ3AgdGVzdCBub24tY2EwHhcNMjYwOTMwMDkzOTIzWhcN
+MzYwOTI3MDkzOTIzWjAZMRcwFQYDVQQDDA5ncCB0ZXN0IG5vbi1jYTCCASIwDQYJ
+KoZIhvcNAQEBBQADggEPADCCAQoCggEBAPCX/moDzj6kfep5+1mDuUwDliCjluM4
+T9KtkqXc4m49R/hBlTC5wTbAMxwceG6ffMX3o32x4JarugC6SU67Bmyt7Dq/u8QM
+3IggyojgiJoNsJ83Rx4prW8KOBMseozdfWzpnt+wNwef9DsDFyFsQ90/blSaKaEN
+33piSWDFByp8LUlqzKn99BTEQ/31vDrAfVJ+kv4I3VnhRn/ud7ETAcqZZhSTlLy6
+T34nfAv2LF58rmEMLtQEKIzYtb4EbzVX6G5gOrb6amm3npke98A9jUyBQzwXpk9I
+944NlmGA24+YDe9383p4Xi2Uelp5UusrX667Tm5+7MZIOtHwV1kPfLkCAwEAAaNQ
+ME4wHQYDVR0OBBYEFFc0EKCjDdKeeNy5PUI8JRiuDqi/MB8GA1UdIwQYMBaAFFc0
+EKCjDdKeeNy5PUI8JRiuDqi/MAwGA1UdEwEB/wQCMAAwDQYJKoZIhvcNAQELBQAD
+ggEBAI82DJSHuhnlGDulefr6RSMlQWezbhuHVHg4fHMJDAZpE38pbSR1AO7Eoco/
+9/k5s8jZL2sihAORfwkQ1rujGM6061x0Z0cJLcoeQTWuD+44ggwjbczO+ajdDuHY
+dqae/gMCZApBNIQ1X0jZ8aPwjoT/fhMKBHm65wWTqUJBRCatJ1soRB+YPFmxOrYm
+3hyivQK3GZ1uxdQi6sS6HetcI/7oy+onugwv9StyQxLRpvbHOS6Xc/L7l1I5c99x
+/ryAhY62aRCCUs5/JAmLfRzHEjdku9nnHxdxzQqeZ0XXCxZZThXkLI2wnjzd/CU8
+9XJZP5gw/Q7yO+vH1mS3v4YQVNg=
+-----END CERTIFICATE-----`
+const ANCHOR_NOBC = `-----BEGIN CERTIFICATE-----
+MIIDGjCCAgKgAwIBAgIUGwNZBdnkC3G6x5nc+az2t08rAkswDQYJKoZIhvcNAQEL
+BQAwLzEtMCsGA1UEAwwkZ3AgdGVzdCB2MyB3aXRob3V0IGJhc2ljIGNvbnN0cmFp
+bnRzMB4XDTI2MDkzMDA5NDEzOVoXDTM2MDkyNzA5NDEzOVowLzEtMCsGA1UEAwwk
+Z3AgdGVzdCB2MyB3aXRob3V0IGJhc2ljIGNvbnN0cmFpbnRzMIIBIjANBgkqhkiG
+9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoY6yIBw6hOfb6xhxZu7nA8x9H50JxQUdv9yn
+3yHFgZqZGlJSi+ZTXFbWikwHg42s8ogBtbXTYiVPpdLKsFU3QiIrDFs1t1BVD78C
+I4+QT9xZ+5j1Wb+29RSdBMZ+n1sg4vl5hqdS+QM29kmv4D09y+75wGeEpW82qJOK
+UesEqyzpAHNou5lyhpEzPdlRM2s/io+NOKlJqHRIVAGN/7ywKp/KyKgSOs6HsMPi
+Xa+vsr2tGb7QSSKblfrW9NWXfxnsM/6/CJ8NQAN8ZSRVbo3WqOiW0xl/Mzhih0rf
+lMw2DTpmh+OywsGYrw1HkI3uR0P2oeWgNBGr73ekVqPhXuT5dQIDAQABoy4wLDAL
+BgNVHQ8EBAMCB4AwHQYDVR0OBBYEFMO5cGq4j/rlSU64CWJSiYBdLqVXMA0GCSqG
+SIb3DQEBCwUAA4IBAQAOJ8R5tpHnyDmKN4GaVeGfvV+aGxJHbsEd2yr1KzYz/wp2
+R35QKlwwHqGDqsquPowOgxjBj/0hxi4X3flcV8dsZ08rNUkIyWuDnlfUkAeK13aW
+ME1vkMw67P6a0UDqok4W8lfpfjB1GKbSo8rJt40rJMLEPf3Cjuv43pxw8Np83qFl
+HeeVCf7WKas9v7B3YeGI3JfGmTwCCjr2r1vWWQPGIfB10labLVmJQoVqgWsNqANg
+zoTnSLaI/N/tgkvWXf8E5OlK1R68cZTDJ3rML9bg5yqY3RCRnpBqgAmO+ZrrSNtN
+H2Q7cYjUCb620rhh03joUV91WW23PDY3LfNnRGik
+-----END CERTIFICATE-----`
+
+test('the exporter keeps certificates that can anchor a chain and drops the proven ones that cannot', () => {
+  assert.deepEqual(anchorVerdict(ANCHOR_CA), { keep: true, reason: 'ca' })
+  assert.deepEqual(anchorVerdict(ANCHOR_NONCA), { keep: false, reason: 'not-a-ca' })
+  // 没有 basicConstraints 的旧根：判不了就留。剔错一张真根，坏的正是这份文件存在的理由。
+  assert.deepEqual(anchorVerdict(ANCHOR_NOBC), { keep: true, reason: 'no-basic-constraints' })
+  assert.deepEqual(anchorVerdict('-----BEGIN CERTIFICATE-----\nZm9v\n-----END CERTIFICATE-----'),
+    { keep: true, reason: 'unparsable' }, '读不出的东西加不了信任，也不许被当成"可以随便剔"')
+
+  const mixed = [ANCHOR_CA, ANCHOR_NONCA, ANCHOR_NOBC].join('\n')
+  const got = filterToAnchors(mixed)
+  assert.equal(got.total, 3)
+  assert.equal(got.kept, 2, '三张里两张能用：CA:TRUE 与那张没有 basicConstraints 的')
+  assert.equal(got.dropped, 1)
+  assert.equal(countCertificates(got.pem), 2)
+  assert.ok(got.pem.includes(ANCHOR_CA.trim()) && got.pem.includes(ANCHOR_NOBC.trim()), '留下的两张要原样在')
+  assert.ok(!got.pem.includes(ANCHOR_NONCA.trim()), 'CA:FALSE 那张必须被剔掉')
+
+  // 写出去的每一个字节都要能被 node 再读一遍。这条是被真机教出来的：曾经有一版把块之间的
+  // 换行丢了，写出的束变成 `…END CERTIFICATE------BEGIN CERTIFICATE-----`，node 一句
+  // `PEM routines::bad end line` 把**整份**束拒收 —— 而张数、字节数、读回比对全都还是 163。
+  const reparsed = certificateBlocks(got.pem)
+  assert.equal(reparsed.length, got.kept, '重组出来的块数必须等于留下的张数')
+  for (const block of reparsed) {
+    const cert = new crypto.X509Certificate(block)
+    assert.ok(cert.subject, '留下来的每张都必须能被 node 解析')
+  }
+  assert.match(got.pem, /-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----/,
+    '块与块之间必须有分隔换行，否则整份束在 node 眼里是坏的')
+})
+
+test('exported counts say what was dropped, and a bundle of only non-anchors reads as empty', () => {
+  const stateRoot = scratch('anchors-')
+  try {
+    const f = fakeRun({ keychains: { [KEYCHAIN_SOURCES[0]]: [ANCHOR_CA, ANCHOR_NONCA].join('\n') } })
+    const record = exportCaBundle({ stateRoot, run: f.run })
+    assert.equal(record.status, 'ok', JSON.stringify(record))
+    assert.equal(record.certs, 1, '记进状态的张数是"能用的张数"，不是钥匙串里数出来的张数')
+    assert.match(String(record.detail), /dropped 1 of 2/, record.detail ?? '没有说剔了什么')
+    const written = fs.readFileSync(record.path, 'utf8')
+    assert.equal(countCertificates(written), 1)
+    assert.ok(written.includes(ANCHOR_CA.trim()) && !written.includes(ANCHOR_NONCA.trim()))
+
+    // 全是 CA:FALSE：这就是"这台机器交不出能锚链的根"，走 empty 那一态，并按 §9.2 保留旧束。
+    const allBad = fakeRun({ keychains: { [KEYCHAIN_SOURCES[1]]: ANCHOR_NONCA } })
+    const second = exportCaBundle({ stateRoot, run: allBad.run })
+    assert.equal(second.status, 'empty', JSON.stringify(second))
+    assert.match(String(second.detail), /every one declares CA:FALSE/)
+    assert.equal(second.path, record.path, '旧的那一份要留着：一次导出不该撤销这台机器已有的信任')
+    assert.equal(countCertificates(fs.readFileSync(record.path, 'utf8')), 1, '旧束内容不许被这次失败改动')
+  } finally {
+    removeDir(stateRoot)
+  }
 })

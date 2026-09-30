@@ -300,6 +300,10 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         stateRoot,
         appsDir,
         bundles: merged.bundles,
+        // §11: the updater's own copy moves with a successful swap, and whether a launchd job may be
+        // (re-)registered is this run's answer, not something the step may decide for itself.
+        env,
+        autoDisabled: envDisabled,
         now,
         consents: flags.consents,
         trigger: flags.auto ? 'auto' : 'manual',

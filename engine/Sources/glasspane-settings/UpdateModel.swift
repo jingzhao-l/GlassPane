@@ -73,6 +73,18 @@ final class UpdateModel: ObservableObject {
     /// 这一项是否真的备好了——只有记录写着 `ok` 才算，其余都算没备好。
     var caRootsIsUsable: Bool { UpdatePanel.caRootsIsUsable(snapshot) }
 
+    /// 「更新器自身」那一句人话：每一态各有一句，从没记录过也有一句。
+    var runtimeText: String { UpdatePanel.runtimeText(snapshot) }
+
+    /// 更新器自己那份副本是否真的换上了——只有 `refreshed` 且在册任务核对过才算。
+    var runtimeIsUsable: Bool { UpdatePanel.runtimeIsUsable(snapshot) }
+
+    /// 这一项要多少注意力（配色之外的形状由状态点自己表达）。
+    var runtimeAttention: UpdatePanel.RuntimeAttention { UpdatePanel.runtimeAttention(snapshot) }
+
+    /// 记录里那份真实的更新器脚本路径；没有就返回 nil，页面上不出现猜出来的路径。
+    var runtimeCliPath: String? { snapshot?.runtime?.cliPath.flatMap { $0.isEmpty ? nil : $0 } }
+
     /// 面板显示用的状态（含 36 小时过期加成）。
     var status: UpdatePanel.Status? { UpdatePanel.effectiveStatus(snapshot, now: now) }
 

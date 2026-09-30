@@ -37,6 +37,7 @@ import { UpdaterError, canonicalPath, ensurePrivateDir, removeTreeWithin, resolv
 import { probeIdle } from './idle.js'
 import { kickstartJob, readRunningJob } from './launchd.js'
 import { mcpToolsList } from './mcp.js'
+import { refreshRuntime } from './runtime.js'
 import { bumpKind, parsePlainVersion } from './version.js'
 import { decideSwapPermission, foreignStateDir } from './policy.js'
 import { authorshipNote } from './signature.js'
@@ -533,6 +534,12 @@ export async function applyUpdate({
   socketPath = null,
   writeState = true,
   refreshCa = null,
+  // §11: the updater's own copy. `env`/`autoDisabled` decide whether a job may be registered at all,
+  // and the whole step is injectable because it spawns a process and reads launchd's answer.
+  env = process.env,
+  autoDisabled = false,
+  readRunningJobImpl = readRunningJob,
+  refreshRuntimeImpl = refreshRuntime,
 } = {}) {
   const roots = writableRoots(stateRoot)
   const { state } = loadState(stateRoot)
@@ -807,6 +814,41 @@ export async function applyUpdate({
     }
 
     // §3.5: only a full success moves `current`, and the staging tree is retired.
+    //
+    // §11 first, while that verified tree still exists: the updater's own copy has to move with the
+    // swap, or a release that fixes the updater can never reach the machine it fixes. The source is
+    // exactly the tree the eight gates passed, copied into a fresh version directory before the
+    // staging tree is retired below — never an overwrite of the code that is running this function.
+    let runtime = state.runtime ?? null
+    if (typeof refreshRuntimeImpl === 'function') {
+      try {
+        const outcome = await refreshRuntimeImpl({
+          stateRoot,
+          version: wantVersion,
+          sourceTree: staged.rootPath,
+          env,
+          disabled: autoDisabled === true || state.disabled === true,
+          readRunningJob: readRunningJobImpl,
+          handover: trigger === 'auto' ? 'defer' : 'now',
+          now: () => now,
+        })
+        runtime = outcome?.record ?? outcome ?? null
+      } catch (error) {
+        // The swap already happened; a throw here must not rewrite that verdict (§11.4). It becomes a
+        // stated failure of the updater's own move instead.
+        runtime = {
+          status: 'failed',
+          version: String(wantVersion),
+          cliPath: null,
+          previousCliPath: state.runtime?.cliPath ?? null,
+          agentVerified: null,
+          at: now.toISOString(),
+          code: CODES.runtimeStale,
+          detail: `refreshing the updater's own copy threw (${error?.message ?? String(error)}); the bundles did change, so this is not a rolled-back apply`,
+        }
+      }
+    }
+    const runtimeStalled = runtime?.status === 'failed'
     removeTreeWithin(roots.staging, staged.dir)
     // Gate 8's answer is *not* retired with it. `check` wrote `authorship` for the
     // release it staged, `nextState` carries untouched fields through, so this is
@@ -817,7 +859,15 @@ export async function applyUpdate({
     // date" about an unproven release.
     const standing = authorshipNote(state.authorship, 'applied')
     const swapped = `updated ${baseline} -> ${wantVersion}`
-    const message = standing ? `${swapped}. ${standing.message}` : swapped
+    // §11.4: a swap that did not move the updater's own copy stays a *stated* degradation, exactly the
+    // way an unproven authorship does. Cleaning it to `code: null` would let the panel say "up to date"
+    // about an install whose daily job is still running the code that failed to update itself.
+    const runtimeNote = runtimeStalled
+      ? `the update installed, but the updater itself did not move (${runtime?.detail ?? 'no reason recorded'}): re-run the GlassPane installer to put the new updater in place`
+      : runtime?.status === 'kept'
+        ? 'automatic update is switched off here, so no job was registered; the updater code and pointer did move'
+        : null
+    const message = [swapped + (standing ? `. ${standing.message}` : ''), runtimeNote].filter(Boolean).join('. ')
     // §9: a swap replaces the very bundles the agent runs from, so the root bundle
     // node is handed has to be re-exported with it. Without this, a rotated
     // interception root turns the daily job dead under an install that just
@@ -825,21 +875,23 @@ export async function applyUpdate({
     const caRoots = refreshCa ? refreshCa() : state.caRoots ?? null
     const saved = stamp({
       status: 'applied',
-      code: standing?.code ?? null,
-      message: standing?.message ? message : null,
+      code: standing?.code ?? (runtimeStalled ? CODES.runtimeStale : null),
+      message: standing || runtimeNote ? message : null,
       current: wantVersion,
       latest: state.latest,
       staged: null,
       caRoots,
+      runtime,
       lastError: null,
-      historyEntry: { action: 'apply', result: 'applied', digest: state.staged.digest, code: standing?.code ?? null },
+      historyEntry: { action: 'apply', result: 'applied', digest: state.staged.digest, code: standing?.code ?? (runtimeStalled ? CODES.runtimeStale : null) },
     })
     return {
       ok: true,
       status: 'applied',
-      code: standing?.code ?? null,
+      code: standing?.code ?? (runtimeStalled ? CODES.runtimeStale : null),
       message,
       state: saved,
+      runtime,
       rollback: { ok: true, performed: false },
       backup: { dir: backup.dir, marker: backup.marker },
     }

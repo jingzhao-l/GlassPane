@@ -34,6 +34,22 @@
         "detail": { "type": ["string", "null"] }
       }
     },
+    "runtime": {
+      "description": "Spec 11: whether the updater's own installed copy moved with this swap. The daily job runs the code that update-install.json's updaterCli names, while 3.5 swaps the .app bundles and the npm packages, so a release whose content is 'fix the updater' reaches a machine only if this record says refreshed. Absent or null means this install has never gone through a swap that tried: it is not evidence that the updater is current. `status` is a closed vocabulary; a reader that cannot match it must report 'unreadable', never fall back to refreshed. agentVerified is true only after the loaded launchd job was read back and names the new script.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["status", "version", "cliPath", "agentVerified", "at"],
+      "properties": {
+        "status": { "enum": ["refreshed", "failed", "kept", "skipped"] },
+        "version": { "type": ["string", "null"], "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "cliPath": { "type": ["string", "null"] },
+        "previousCliPath": { "type": ["string", "null"] },
+        "agentVerified": { "type": ["boolean", "null"] },
+        "at": { "type": ["string", "null"] },
+        "code": { "type": ["string", "null"], "pattern": "^[a-z0-9][a-z0-9.-]*$" },
+        "detail": { "type": ["string", "null"] }
+      }
+    },
     "updatedAt": {
       "description": "ISO-8601 instant this file was published.",
       "type": "string"

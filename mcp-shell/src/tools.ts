@@ -13,7 +13,7 @@ import {
 } from "@iterate/kernel";
 
 import { canonicalJson } from "./canonical.js";
-import { readUpdateState, type CaRootsReading } from "./update-state.js";
+import { readUpdateState, runtimeIsUsable, stateRootOf, type CaRootsReading, type RuntimeReading } from "./update-state.js";
 import { MAX_FRAME_BYTES } from "./io.js";
 import {
   CALLER_VISIBLE_CEILING_MS,
@@ -1289,11 +1289,15 @@ async function runValidatedTool(
       // "up to date" and "has been failing TLS verification since install" both arrive
       // as a check that produced nothing. A state this shell could not decode claims
       // nothing about the bundle — the summary already says the file is unreadable.
+      //
+      // The updater's own copy rides along for the mirror-image reason: reaching a
+      // release is only half of it, since the code that runs the next check is the copy
+      // the installer pointer names. `runtime` is what says whether that copy moved.
       const reading = readUpdateState();
       content.push({
         type: "text",
         text: reading.kind === "read"
-          ? `${reading.summary}\n${caBundleDiagnosis(reading.ca)}`
+          ? `${reading.summary}\n${caBundleDiagnosis(reading.ca)}\n${runtimeSelfDiagnosis(reading.runtime, reading.stateFile)}`
           : reading.summary,
       });
     }
@@ -1422,6 +1426,127 @@ function caBundleDiagnosis(ca: CaRootsReading): string {
   const provenance = [
     ca.exportedAt === null ? null : `exported ${ca.exportedAt}`,
     ca.detail === null ? null : `recorded reason: ${ca.detail}`,
+  ].filter((part): part is string => part !== null);
+  return provenance.length === 0
+    ? diagnosis
+    : `${diagnosis} The record itself says: ${provenance.join("; ")}.`;
+}
+
+/**
+ * The updater's-own-copy line of `gp_diagnose`'s update block.
+ *
+ * Why this deserves its own sentence: the daily job runs the copy that
+ * `update-install.json`'s `updaterCli` names, while a version swap replaces the `.app`
+ * bundles and the npm packages and never touches that copy. So a release whose content is
+ * "fix the updater" reaches this machine only if this record says `refreshed`; every other
+ * state means the machine keeps re-running the code that has the old gates, while the line
+ * above it still reads `up-to-date`. Each of the four states fails or succeeds in its own
+ * way, so each gets its own consequence plus the one action that ends it — and the paths
+ * quoted are the ones the record itself names, never a template an agent would have to
+ * guess at. A record this shell could not decode never reaches here: `update-state.ts`
+ * folds that into "unreadable" instead of defaulting it to `refreshed`.
+ */
+function runtimeSelfDiagnosis(runtime: RuntimeReading, stateFile: string): string {
+  // The reinstall, named as the command a person on this machine can actually run.
+  const installerCmd = "`node installer/cli.js` (or the `install.sh` this machine was installed with)";
+  // Re-registering the copy the record names is the one command that ends three of the four
+  // states, and it is built from the record's own path plus the state root this shell already
+  // resolved. No path in the record means no such command exists — only the installer can
+  // put a copy in place then, and that is said out loud instead of naming a file nobody installed.
+  const enableCmd = (cliPath: string | null): string | null =>
+    cliPath === null ? null : `node ${cliPath} enable --state-dir ${stateRootOf(stateFile)} --json`;
+  // How the record names the copy it is about. Both halves are quoted as written and an
+  // absence is said as an absence: a reader that was handed `<path>` would have to go find
+  // the file themselves, which is the one thing this line is supposed to save them.
+  const copy = (version: string | null, cliPath: string | null): string => {
+    if (cliPath === null) {
+      return version === null
+        ? "the record names neither a version nor a path for it"
+        : `version ${version}, and the record names no path for it`;
+    }
+    return version === null ? `${cliPath} (no version recorded)` : `${version} at ${cliPath}`;
+  };
+  if (!runtime.recorded) {
+    return "updater self-update: this install has never recorded moving the updater's own copy — the state file "
+      + `${runtime.writtenAsNull ? "carries \"runtime\": null" : "carries no \"runtime\" record at all"}, which is NOT the same as `
+      + "\"the installed updater is current\". An install that predates the self-swap looks exactly like this, and its "
+      + "daily job still runs the copy the installer first cloned: a release whose content is \"fix the updater\" can "
+      + `never reach this machine by itself. Remedy: re-run the GlassPane installer once, ${installerCmd}. That is a `
+      + "manual step this install needs before self-updating is possible; after it, a successful apply records this line as refreshed.";
+  }
+  const location = copy(runtime.version, runtime.cliPath);
+  let diagnosis: string;
+  switch (runtime.status) {
+    case "refreshed": {
+      if (!runtimeIsUsable(runtime)) {
+        // The claim and the proof are two different fields, and only their pair means the
+        // new copy runs: `agentVerified` is written true solely after `launchctl print` read
+        // the loaded job back and found the new script in it.
+        diagnosis = `updater self-update: refreshed, but not confirmed — the record claims the updater's own copy `
+          + `(${location}) is installed, yet the loaded launchd job was never read back naming that script, so this is `
+          + "not evidence the new copy runs: tomorrow's check may still execute the previous one. Remedy: "
+          + (enableCmd(runtime.cliPath) === null
+            ? `the record names no script to register, so re-run the GlassPane installer, ${installerCmd}`
+            : `have that copy register itself and read the job back with \`${enableCmd(runtime.cliPath)}\`, or re-run the GlassPane installer, ${installerCmd}`)
+          + ". Until this line says refreshed with the job read back, do not treat a release that fixes the updater as delivered here.";
+        break;
+      }
+      diagnosis = `updater self-update: refreshed — the updater's own installed copy (${location}) is in place and the `
+        + "loaded launchd job was read back and names that script, so this machine's daily check runs the same code the "
+        + "last release shipped. Nothing to do: a future release that changes the updater reaches this install without anyone reinstalling.";
+      break;
+    }
+    case "failed":
+      // §11.4's whole point: the swap succeeded, so this is not "the update failed" — it is a
+      // long-lived degradation that decides what code tomorrow's check runs. Collapsing it into
+      // either "update failed" or "up to date" sends the reader to the wrong door.
+      diagnosis = "updater self-update: failed — the update itself installed (the .app bundles and the npm packages did "
+        + `change), but the updater's own copy did not move: the copy this swap tried to install (${location}) is not what `
+        + "the job runs, and the previous copy still does. This is NOT \"the update failed\", and it is not harmless "
+        + "either: the scheduled job keeps running the previous updater with that version's gates, so a release that "
+        + "fixes the updater cannot land here while the line above still reads up-to-date. "
+        + `Remedy: re-run the GlassPane installer, ${installerCmd}, which rewrites the installer pointer and puts a `
+        + "current copy in place"
+        + (enableCmd(runtime.cliPath) === null
+          ? " — this record names no new copy at all, so the installer is the only way out"
+          : `; if the tree already on disk is the one you want running, \`${enableCmd(runtime.cliPath)}\` registers that copy directly`)
+        + ". Do not count the next check as running new code until this line says refreshed.";
+      break;
+    case "kept":
+      diagnosis = "updater self-update: kept — automatic update is switched off on this machine, so the updater's code "
+        + `and the installer pointer moved (${location}) but no launchd job was registered. This is the switch doing `
+        + "what it was set to, not a failure, and not a self-updating install either: nothing will move here by itself, "
+        + "so the settings panel and a hand-run check are the only ways this copy advances. Remedy: switch automatic "
+        + (enableCmd(runtime.cliPath) === null
+          ? `update back on in the settings panel, or re-run the GlassPane installer, ${installerCmd}, which registers the job as it installs`
+          : `update back on in the settings panel, or let that copy register itself with \`${enableCmd(runtime.cliPath)}\`; the installer, ${installerCmd}, does the same as it installs`)
+        + ".";
+      break;
+    case "skipped":
+      diagnosis = "updater self-update: skipped — the last run did not attempt the updater's own swap: a scheduled "
+        + "apply is the very launchd job whose handover would have to be re-registered, so it moves the code and the "
+        + "pointer and leaves the handover to the next `enable`. So treat the updater as whatever the loaded job "
+        + "actually runs, rather than as current" + (runtime.cliPath === null ? "" : `: the copy that would run next is ${location}`)
+        + ". Remedy: switch automatic update off and on again in the settings panel (that runs `enable`), or run "
+        + "`updater enable` from a terminal; if a machine has only ever shown skipped, re-run the GlassPane installer, "
+        + `${installerCmd}, once to put a self-updating copy down.`;
+      break;
+    default: {
+      // Unreachable while the enum in `update-state.ts` and this switch move together: adding a
+      // fifth state there without giving it a consequence and a remedy here is a compile error,
+      // which is the point — a state with no sentence would read as no problem.
+      const unhandled: never = runtime.status;
+      diagnosis = `updater self-update: the state file records ${JSON.stringify(unhandled)}, a state this shell has no `
+        + "sentence for; treat the updater's own copy as unverified and re-run the GlassPane installer";
+    }
+  }
+  // Stated whatever the state, like the bundle line above: the instant, the gate that refused
+  // and the updater's own sentence are the only things a reader can quote when reporting this.
+  const provenance = [
+    runtime.at === null ? null : `recorded at ${runtime.at}`,
+    runtime.code === null ? null : `gate code: ${runtime.code}`,
+    runtime.previousCliPath === null ? null : `previous copy: ${runtime.previousCliPath}`,
+    runtime.detail === null ? null : `recorded reason: ${runtime.detail}`,
   ].filter((part): part is string => part !== null);
   return provenance.length === 0
     ? diagnosis

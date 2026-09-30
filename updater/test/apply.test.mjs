@@ -21,6 +21,9 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { CODES, EXIT, exitCodeFor } from '../lib/codes.js'
+import { refreshRuntime } from '../lib/runtime.js'
+import { AGENT_LABEL } from '../lib/launchd.js'
+import { readPointer, writePointer } from '../lib/state.js'
 import {
   BACKUP_MANIFEST_NAME,
   applyUpdate,
@@ -94,6 +97,28 @@ const okKick = async () => {
   return { calls, fn: async (opts) => { calls.push(opts); return { ok: true, message: 'restarted' } } }
 }
 
+/**
+ * §11's step is injected here so these tests keep measuring what they were written to measure (the
+ * backup → swap → handshake → publish order). The real `refreshRuntime` gets its own file
+ * (`runtime.test.mjs`) plus `a swap also moves the updater's own copy` below, which drives the real
+ * sequencing with only the two external facts (spawn, launchctl) replaced.
+ */
+function refreshedRuntime(version) {
+  return () => ({
+    record: {
+      status: 'refreshed',
+      version,
+      cliPath: '/var/tmp/st/runtime/' + version + '/updater/cli.js',
+      previousCliPath: '/var/tmp/st/updater/cli.js',
+      agentVerified: true,
+      at: NOW.toISOString(),
+      code: null,
+      detail: null,
+    },
+    restored: { attempted: false, ok: true },
+  })
+}
+
 test('a successful apply backs up, swaps, and only then publishes the new current', async () => {
   const fx = fixture('happy')
   const kick = await okKick()
@@ -113,9 +138,11 @@ test('a successful apply backs up, swaps, and only then publishes the new curren
       kickstart: kick.fn,
       toolsList: okTools,
       npm: okNpm,
+      refreshRuntimeImpl: refreshedRuntime('1.4.1'),
     })
     assert.equal(result.status, 'applied', result.message)
     assert.equal(result.code, null)
+    assert.equal(result.runtime.status, 'refreshed', JSON.stringify(result.runtime))
     assert.equal(exitCodeFor(result), EXIT.OK)
     assert.match(fx.installedBytes(), /NEW/)
     const state = loadState(fx.stateRoot).state
@@ -123,6 +150,7 @@ test('a successful apply backs up, swaps, and only then publishes the new curren
     assert.equal(state.status, 'applied')
     assert.equal(state.staged, null)
     assert.ok(!fs.existsSync(fx.stagingDir), 'the staged tree is retired after a successful swap')
+    assert.equal(loadState(fx.stateRoot).state.runtime.status, 'refreshed', '记录必须落进状态文件，面板才看得见')
     assert.equal(kick.calls.length, 1, 'exactly one restart')
     const backup = newestBackup(writableRoots(fx.stateRoot).backup)
     assert.ok(backup, 'a backup exists under <stateRoot>/update-backup')
@@ -173,6 +201,7 @@ async function applyWithAuthorship(label, authorship) {
       kickstart: kick.fn,
       toolsList: okTools,
       npm: okNpm,
+      refreshRuntimeImpl: refreshedRuntime('1.4.1'),
     })
     return { result, state: loadState(fx.stateRoot).state }
   } finally {
@@ -1234,6 +1263,130 @@ test('a refused apply refreshes nothing on disk', async () => {
     })
     assert.notEqual(result.status, 'applied', result.message)
     assert.deepEqual(calls, [], 'nothing was swapped, so the machine the agent runs on did not change either')
+  } finally {
+    fx.cleanup()
+  }
+})
+
+/* ------------------------------------------------------------------ §11 接线 */
+
+/**
+ * The two tests here use the **real** `refreshRuntime`; only the two facts that touch this machine
+ * (the `enable` spawn and `launchctl print`) are replaced. That distinction is the point: an earlier
+ * round found the asset gate, the archive's symlinks and six dead CLI flags all green because a stub
+ * stood where production runs.
+ */
+async function applyWithRealRuntime(label, { enableOk = true, loaded = null, disabled = false, trigger = 'manual' } = {}) {
+  const fx = fixture(label)
+  const kick = await okKick()
+  const socketPath = shortSocketPath(fx.dir, 'ok.sock')
+  const daemon = await startSocketDaemon(socketPath, { behaviour: 'answer', version: '1.4.1' })
+  const previousRoot = path.join(fx.dir, 'previous-install')
+  const previousCli = path.join(previousRoot, 'updater', 'cli.js')
+  fs.mkdirSync(path.dirname(previousCli), { recursive: true })
+  fs.writeFileSync(previousCli, 'PREVIOUS UPDATER\n')
+  writePointer(fx.stateRoot, { updaterCli: previousCli, installRoot: previousRoot, agentLabel: AGENT_LABEL }, { now: NOW })
+  fs.mkdirSync(path.join(fx.treePath, 'updater'), { recursive: true })
+  fs.writeFileSync(path.join(fx.treePath, 'updater', 'cli.js'), 'NEW UPDATER\n')
+  const enableCalls = []
+  const readRunningJobImpl = () => loaded ?? { ok: true, args: [process.execPath, null] }
+  try {
+    const result = await applyUpdate({
+      stateRoot: fx.stateRoot,
+      appsDir: fx.appsDir,
+      bundles: BUNDLES,
+      now: NOW,
+      currentVersion: '1.4.0',
+      socketPath,
+      probe: { socketPath, timeoutMs: 1_000 },
+      job: { ok: true, args: ['glasspaned', '--socket-path', socketPath] },
+      build: okBuild(fx.builtDir),
+      kickstart: kick.fn,
+      toolsList: okTools,
+      npm: okNpm,
+      autoDisabled: disabled,
+      trigger,
+      refreshRuntimeImpl: (options) => refreshRuntime({
+        ...options,
+        runEnable: ({ cliPath }) => {
+          enableCalls.push(cliPath)
+          return enableOk ? { ok: true, message: null, parsed: { ok: true } } : { ok: false, message: 'the new updater said no' }
+        },
+        readRunningJob: () => (loaded === null
+          ? { ok: true, args: [enableCalls[enableCalls.length - 1] ?? previousCli] }
+          : loaded),
+      }),
+    })
+    return { result, fx, previousCli, enableCalls, pointer: readPointer(fx.stateRoot) }
+  } finally {
+    await daemon.close()
+  }
+}
+
+test('a swap also moves the updater\'s own copy, and the pointer names a file that exists', async () => {
+  const { result, fx, previousCli, enableCalls, pointer } = await applyWithRealRuntime('runtime-happy')
+  try {
+    assert.equal(result.status, 'applied', result.message)
+    assert.equal(result.code, null, `换版本身干净：${result.message}`)
+    assert.equal(result.runtime.status, 'refreshed', JSON.stringify(result.runtime))
+    assert.equal(result.runtime.agentVerified, true)
+    assert.equal(fs.existsSync(fx.stagingDir), false, '暂存树仍然要退场')
+    assert.equal(pointer.pointer.updaterCli, result.runtime.cliPath)
+    assert.equal(fs.existsSync(pointer.pointer.updaterCli), true, '指针必须指到一个真在盘上的脚本')
+    assert.equal(fs.readFileSync(pointer.pointer.updaterCli, 'utf8'), 'NEW UPDATER\n',
+      '落地的那份必须是被八道校验放过的树里的字节，不是旧安装里翻出来的')
+    assert.equal(enableCalls[0], pointer.pointer.updaterCli, '注册要由新那份自己做')
+    assert.equal(fs.readFileSync(previousCli, 'utf8'), 'PREVIOUS UPDATER\n', '旧那份不许被就地覆盖——它还在被别的进程执行')
+    assert.equal(loadState(fx.stateRoot).state.runtime.status, 'refreshed', '面板读的是状态文件，不是返回值')
+    fx.cleanup()
+  } finally {
+    fx.cleanup()
+  }
+})
+
+test('when the new copy cannot register itself the swap still stands, the pointer goes back, and the code says so', async () => {
+  const { result, fx, previousCli, enableCalls, pointer } = await applyWithRealRuntime('runtime-fails', { enableOk: false })
+  try {
+    assert.equal(result.status, 'applied', ' bundles did change — this is not a rolled-back apply')
+    assert.equal(result.code, CODES.runtimeStale, `更新器自己没换上必须留下稳定的码：${result.code}`)
+    assert.equal(exitCodeFor(result), EXIT.OK, '退出码是面板与 launchd 唯一的数字契约，不该被一句降级改掉')
+    assert.match(result.message, /did not move/, result.message)
+    assert.equal(pointer.pointer.updaterCli, previousCli, '指针必须回到旧那份，否则下一次作业会跑一个没注册过的脚本')
+    assert.deepEqual(enableCalls, [result.runtime.cliPath, previousCli], '新那份失败之后要用旧那份把作业指回去')
+    const state = loadState(fx.stateRoot).state
+    assert.equal(state.runtime.status, 'failed')
+    assert.equal(state.runtime.agentVerified, false, JSON.stringify(state.runtime))
+    fx.cleanup()
+  } finally {
+    fx.cleanup()
+  }
+})
+
+test('a switched-off machine moves the code and pointer but registers nothing', async () => {
+  const { result, fx, enableCalls, pointer } = await applyWithRealRuntime('runtime-kept', { disabled: true })
+  try {
+    assert.equal(result.status, 'applied', result.message)
+    assert.equal(result.code, null, '§11.6 的 skipped 不是降级：交接留给下一次 enable，这次没失败')
+    assert.equal(result.runtime.status, 'kept', JSON.stringify(result.runtime))
+    assert.deepEqual(enableCalls, [], '关掉自动更新的机器上，这一步绝不注册')
+    assert.equal(fs.existsSync(pointer.pointer.updaterCli), true, '面板跑的就是指针那份，也要真在盘上')
+    fx.cleanup()
+  } finally {
+    fx.cleanup()
+  }
+})
+
+test('a scheduled swap hands the job over later instead of unregistering itself mid-write', async () => {
+  const { result, fx, previousCli, enableCalls, pointer } = await applyWithRealRuntime('runtime-auto', { trigger: 'auto' })
+  try {
+    assert.equal(result.status, 'applied', result.message)
+    assert.equal(result.code, null, '换了代不等于失败：这条是"稍后接手"，不是降级')
+    assert.equal(result.runtime.status, 'skipped', JSON.stringify(result.runtime))
+    assert.equal(result.runtime.agentVerified, false)
+    assert.deepEqual(enableCalls, [], 'scheduled 的那一次绝不能 bootout 自己这个作业')
+    assert.equal(fs.readFileSync(previousCli, 'utf8'), 'PREVIOUS UPDATER\n', '旧那份仍完整：作业还指着它')
+    assert.equal(fs.existsSync(pointer.pointer.updaterCli), true, '新那份也要真在盘上，下一次 enable 才有的可指')
+    fx.cleanup()
   } finally {
     fx.cleanup()
   }

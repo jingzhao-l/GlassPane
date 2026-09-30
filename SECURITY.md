@@ -337,10 +337,14 @@ permission rather than by a secret.
   `System.keychain` for some unrelated purpose, becomes a trust anchor for this job even though the
   operating system would refuse it. This is a widening relative to system policy, and it is the real
   content of this bullet.
-  · **Non-CA certificates in that list are inert.** Measured: a self-signed `CA:FALSE` certificate
-  handed to node as the only extra anchor does not make a chain signed by it verify — OpenSSL refuses
-  with `INVALID_PURPOSE`. So the two Apple service identities the export includes
-  (`com.apple.systemdefault`, `com.apple.kerberos.kdc`) grant nothing.
+  · **Certificates that declare `CA:FALSE` are dropped, and that is provably loss-free.** Measured: a
+  self-signed `CA:FALSE` certificate handed to node as the only extra anchor does not make a chain
+  signed by it verify — OpenSSL refuses with `INVALID_PURPOSE` — so such a certificate could never have
+  been used, and removing it only stops the recorded count from overstating what node will act on.
+  Anything node cannot judge is kept: the two Apple service identities in this machine's export
+  (`com.apple.systemdefault`, `com.apple.kerberos.kdc`) declare **no basic constraints at all** rather
+  than `CA:FALSE`, so the filter leaves them in (measured on this machine: 163 kept of 163, 0 dropped;
+  161 of them declare `CA:TRUE`). Dropping a legacy root on a guess is how the mechanism breaks.
   · **Who could abuse the widening.** Anyone able to add a CA to those keychains already holds
   administrator access to this machine, which is a strictly larger capability than the one described
   here; the residual risk is the pre-existing certificate, not the export. If you want node to trust

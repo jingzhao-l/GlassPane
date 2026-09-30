@@ -168,3 +168,20 @@ test('the process honours --disable: it writes disabled=true into the state it w
     removeDir(sandbox)
   }
 })
+
+/**
+ * `apply` 这一条路上，"这台机器关了自动更新"与"用哪个 env 起子进程"必须由 CLI 交给 §11 那一步。
+ * 这一步在单测里是被直接调用的（`apply.test.mjs` 自己传 `autoDisabled`），所以 CLI 少传一个参数
+ * 不会有任何测试变红——而那正是 §11.7 唯一的执行现场。按源码形状闸住，理由与 `fileURLToPath`
+ * 那一处同形：这种接线只在真跑一次换版时才露面，而换版要动这台机器。
+ */
+test('the apply path hands the runtime refresh the machine answer it needs', () => {
+  const source = fs.readFileSync(path.join(import.meta.dirname, '..', 'cli.js'), 'utf8')
+  const start = source.indexOf('await applyUpdate({')
+  assert.notEqual(start, -1, '找不到 apply 那一条 applyUpdate 调用（结构变了就来看这条闸是否还有效）')
+  const call = source.slice(start, source.indexOf('\n      })', start))
+  assert.ok(call.length > 40 && call.length < 2000, `这一段形状不对，测不到东西：${call.length} 字符`)
+  assert.match(call, /\n\s*env,\n/, '§11 的注册子进程要用这次调用的 env，不是 process.env 的猜测')
+  assert.match(call, /autoDisabled: envDisabled,/,
+    '关掉自动更新的机器必须被说出来，否则换版顺手注册一个刚被主人取消的作业')
+})

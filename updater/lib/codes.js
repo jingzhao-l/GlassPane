@@ -86,6 +86,14 @@ export const CODES = Object.freeze({
   // Anything that threw after the bundles were already swapped in: the answer is
   // 4 or 5, never 3, because the machine did change.
   postSwapFailed: 'post-swap-failed',
+  // §11: the swap succeeded but the updater's own copy did not move. Not a refusal — the machine
+  // *was* updated — so it never changes the exit code; it is a standing degradation the panel and
+  // gp_diagnose have to keep saying until a person re-runs the installer or the next apply lands it.
+  runtimeStale: 'runtime-stale',
+  // §11: the code and the pointer moved, but the launchd job was not handed over during this run —
+  // because a *scheduled* apply is itself that job, and `bootout` would take the job down mid-write.
+  // The handover happens the next time a person (or the panel's switch) runs `enable`.
+  runtimeRegistrationPending: 'runtime-registration-pending',
   // The scheduled agent's plist could not be rendered without a shell interpreting
   // a path it was handed (§2's "do not guess at another installation").
   agentPathUnsafe: 'agent-path-unsafe',

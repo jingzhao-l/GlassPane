@@ -247,8 +247,11 @@
 4. **`NODE_EXTRA_CA_CERTS` 是追加而不是替换**：node 仍在验证完整链，Mozilla 束继续有效，只是另外把
    那两个钥匙串里的**全部**证书也当作信任锚。措辞必须按实测写，不能写成"这台机器的管理员已经选择信任的那些
    根"——**信任设置不参与过滤**：被显式判为不信任的根、以及为别的目的躺在 `System.keychain` 里的 CA，
-   都会对这个作业生效。作者机器实测 158 + 5 = 163 张，其中 161 张 `CA:TRUE`；两张非 CA 的经实测无害
-   （自签的 `CA:FALSE` 当唯一锚时 OpenSSL 直接 `INVALID_PURPOSE`，链验证不过）。文档写清方向，否则读者会把它
+   都会对这个作业生效。作者机器实测 158 + 5 = 163 张，其中 161 张声明 `CA:TRUE`，另 2 张**没有声明 basicConstraints**。
+   导出前按 `filterToAnchors` 筛：**只剔显式声明 `CA:FALSE` 的**（实测这类证书当唯一锚时 OpenSSL 直接
+   `INVALID_PURPOSE`，本来就锚不住任何链，所以剔它是可证明无损的），读不出的与没声明的一律保留——凭猜测
+   剔掉一张旧根，坏掉的正是这条机制本身。本机实测剔 0 张；状态里记的张数从此是"node 真能用的张数"。
+   文档写清方向，否则读者会把它
    读成"关了校验"，或者读成"只信任系统认可的那些"——两种都是错的。内容级作者性
    仍由 §1 第 5、8 道兜住：下载字节必须匹配那份被我们自己的 key 签过的 `SHA256SUMS`，中间人签不出它。
    为什么不按信任设置过滤：`security dump-trust-settings` 没有机器可读的契约，一次静默漏掉拦截根的过滤，
@@ -312,4 +315,75 @@
 | 第 3 条的禁令**有读者**：生产代码里不许出现任何关闭校验的开关，注释除外；行号必须指到文件里那一行 | `updater/test/trust-inversion.test.mjs` | 往 `updater/lib/source.js` 塞 `rejectUnauthorized: false` ⇒ 红；把模式表或文件集清空 ⇒ 那条"只扫到 0 个文件"红；把禁令词只放进注释 ⇒ 不许红（自测盯这一对） |
 | 注册到盘上的那份 plist 真带着**写成功的那份束**（python3 plistlib 严格读，不是 `includes`） | `installer/test/auto-update.test.mjs` | `caBundle: null`、写空串、指到一个从没写过的路径、把"能不能用"改成"文件在不在" ⇒ 四条反向变异实测全红 |
 | 给人或代理的句子不留 `<模板>` 占位符，能拿到真路径就写真路径 | `updater/test/ca-bundle.test.mjs` + `engine/Tests/…/UpdatePanelTests.swift` | 把 `<stateRoot>` 或"那份束的路径"放回文案 ⇒ 红 |
+| 导出的束只留能锚链的证书，且**写出去的字节能被 node 再读一遍**（块间换行丢了会让整份束被 `PEM routines::bad end line` 拒收，而张数与读回比对都看不出来——这条是真机抓的） | `updater/test/ca-bundle.test.mjs`（三张真证书夹具：CA:TRUE / CA:FALSE / 无 basicConstraints） | 改成不剔 ⇒ 张数那条红；把块间换行丢掉 ⇒ 重组与解析那两条红；把「没声明」也剔 ⇒ 保守保留那条红 |
 | node 对这个变量的**实测行为**（不是注释里的假设）：空束不致命、缺文件只报一行 Warning、空值等于没设 | `updater/test/ca-bundle.test.mjs`（真起子进程跑 TLS） | node 哪天真的对空束硬失败 ⇒ 这条先红，判据理由随之改写；不许靠记忆维护这段 |
+
+## 11. 更新器自身的换版（2026-09-30，把 §1/§9 那些修复真正送到用户机器上所必需）
+
+写这一节的原因很具体：§1 那四条真机高危（资产域名钉死、档案里的符号链接、CLI 参数失效、下载时钟）
+与 §9 那一整束，全都住在 `updater/` 与 `installer/` 里 —— 而**每日作业跑的正是安装那趟 clone 里的那份代码**
+（`update-install.json` 的 `updaterCli`）。§3.5 换的是 `.app` 与 npm 两个包，从不碰这份代码。于是
+"修好更新器的那次发版"永远传不到用户机器上：他们的作业会继续用 v1.4.0 那份钉死规则，天天
+`asset-host-unpinned`，而面板写着"已是最新"。**一条机制救不了它自己的缺陷，就等于没修**。
+
+1. **唯一真源不变**：谁在跑更新，由 `<状态根>/update-install.json` 的 `updaterCli` 决定（面板与 launchd
+   都从它取位置，§7）。本节只加一件事：换版成功之后，这份指针可以、也必须指向**验证过的发布树**在
+   本机上的落地位置 `<状态根>/runtime/<ver>/updater/cli.js`。
+2. **来源只能是被八道校验放过的那棵树**：落地内容取自 §1.6 自检过的暂存树（同一棵已按 sha256 实测、
+   签名 verified、CI 绿、版本线自证的树），不许有第二条取材路径；落地动作发生在 §3.5 全成功之后、
+   暂存目录被清理**之前**。
+3. **绝不就地覆盖正在执行的那份代码**：落地是"新建一个版本目录"，不是把文件写回旧目录。旧那份原地
+   保留，这既是为了让"下一次注册由新代码自己完成"有可回退的目标，也是为了让**回滚**有对象。
+4. **换版本身的判定不因它而改**：`.app` 与 npm 都换成功、握手也过 ⇒ `status=applied` 与退出码 0 不变。
+   更新器自己没换上是一句**长期可见的降级**：`runtime.status='failed'`、`code=runtime-stale`、
+   `lastError` 带原因，面板与 `gp_diagnose` 必须原话说"这次更新器自身没换上，请重跑安装程序"。
+   这与 `authorship` 同一处理形状：不把一次不完美的成功洗成干净。
+5. **指针可回退**：写指针仍走 `writePointer`（临时文件 + rename + 读回校验 + mode）；落地/注册任何一步
+   失败，先把指针写回旧值，再用**旧那份** `cli.js enable` 一次把作业指回去（best-effort，失败要写进
+   状态与原话，不许静默）。
+6. **交接（handover）分两种触发，因为定时那一次会把自己拆掉**：
+    · **人工触发**（面板的「立即安装」、终端里的 `updater apply`）——注册由**新那份代码自己做**：
+      `node <新 cli.js> enable --state-dir <状态根> --json`。理由不是风格：plist 里那条 CLI 路径的来源就是
+      "谁在跑这次注册"（`fileURLToPath(import.meta.url)`），由旧代码去写新路径等于再造一个"两处作者"。
+      注册完必须用 `launchctl print` 把**在册**参数读回来校验它真指过去了；读不到或指回旧的 ⇒
+      `agentVerified=false`，这是一句要说出来的失败，不是"大概成功了"。
+    · **定时触发**（agent 里的 `apply --auto`）——**不**在这次运行里 bootout/bootstrap：本次运行本身就是那个
+      作业，`bootout` 会在"包已换、状态未写"之间把它拆掉，最坏形状是作业被卸了却没装上（自动更新静默消失）。
+      这一支只做落地 + 换指针，并记 `runtime.status='skipped'`、`code=runtime-registration-pending`、
+      `agentVerified=false`，原话说清"下一次 `updater enable`（面板开关关再开就是这个）会把它接手"。
+      判据不许在这里含糊：没核实过就不能说核实过。
+7. **硬关时不注册**：`GLASSPANE_UPDATE_DISABLE=1` 或状态里 `disabled=true` 时，runtime 与指针照刷
+   （面板用的就是那份代码，不刷它面板会继续跑旧代码），但**绝不**新建/改写 launchd 作业，并把这句
+   原话记进状态（`runtime.status='kept'`）。
+8. **只留还被指着的那几代**：默认两代（新指针那一代 + 上一代），但**凡是有人指着的一律不清**——指针那一代、
+   上一个指针值那一代，以及第 6 条 defer 情况下**在册作业**那一代。删掉作业指着的那一代，形状就是"面板上
+   自动更新是开的，明早却没有作业可跑"（`Cannot find module`，静默）。清理只在状态根内走
+   `removeTreeWithin`，不许越界，失败要说出来，不许报成"已清理"。
+   代价要写出来：一份发布树本机实测 73 MB，所以状态根里这一部分的上限约为**两代 ≈ 150 MB**
+   （defer 尚未接手时短暂为三代）；换版日志与 `gp_diagnose` 都要报清这次删了哪几代。
+9. **写它的时机保证读者不会比写者旧**：`apply` 的顺序是先换 `.app`、重启并握手、再装 npm 两个包，
+   **最后**才落地更新器自身并写 `runtime`。所以任何一份读到 `runtime` 的读者（面板在 `.app` 里、
+   `gp_diagnose` 在 npm 包里）都已经是认识这个字段的版本——反过来（先写字段再换读者）会让已发布的
+   shell 因为"schema 里多了一个不认识的键"把整份状态读成读不出，那才是真的看不见。
+10. **封闭形状，三个读者**：`runtime` 进 `update-state.schema.json`（`additionalProperties:false`，
+   状态是封闭枚举 `refreshed` / `failed` / `kept`），updater、面板、`gp_diagnose` 三处都读；
+   读不懂的取值只能判成"读不出"，不许就近当 `refreshed`。枚举里**不许躺一个没有调用点的取值**，
+   所以四个成员各自绑一个真实分支：`refreshed`（人工触发、已换且在册作业读回核对过）、`failed`（换版成功
+   但更新器自身没换上，或被回退）、`kept`（这台机器自己关着定时作业，只换代码与指针）、`skipped`
+   （定时那一次有意避让自己——见第 6 条，代码与指针换了，交接留给下一次 `enable`）。
+   反向（旧读者遇到新记录）必须是响地失败而不是静默重置：`loadState` 走 `assertValidState`，读不懂就抛错、
+   命令拒绝执行；它绝不"退回空状态"，那等于把这台机器的更新历史抹掉一次。
+11. **装上的第一版仍是旧形状**：本节落地前装出来的机器，指针仍指着那趟浅 clone；它需要**一次**人工重装
+    才会进入"由更新器自己换版"的形状。这句话必须写进 CHANGELOG 与 README，不能让人以为升级自动完成。
+
+| 判据 | 测试 | 反向变异怎么红 |
+| --- | --- | --- |
+| 落地取自暂存树、发生在清理之前、不就地覆盖旧代码 | `updater/test/runtime.test.mjs` | 先清暂存再落地 ⇒ 红；写回旧目录 ⇒ 红 |
+| 指针换到新路径且盘上真存在 | 同上（读回真文件，不信返回值） | 少写 `updaterCli` 或指到没落地的目录 ⇒ 红 |
+| 注册由新那份跑，在册参数用 `launchctl print` 读回校验 | 同上 | 用旧那份注册 ⇒ 红；把"读不到"当成功 ⇒ 红 |
+| 定时那一次不拆自己：只落地与换指针，并明说尚未接手 | `updater/test/runtime.test.mjs` + `apply.test.mjs`（`trigger:'auto'`） | 去掉 `handover:'defer'` 分支 ⇒ 那两条红（enable 被叫了、状态说成已核实） |
+| 任一失败都把指针与作业指回旧值并说话 | 同上 | 只回滚指针不回滚注册 ⇒ 红；失败后不写 `lastError` ⇒ 红 |
+| 硬关时刷代码不建作业 | 同上 | 去掉 disabled 分支 ⇒ 红 |
+| 换版判定不被它改：applied 与退出码不变，降级长期可见 | `updater/test/apply.test.mjs` | 把它失败改成 `status`/退出码 ⇒ 红；洗成 `code:null` ⇒ 红 |
+| 清理只删没人指的世代（defer 时作业那一代在内） | `updater/test/runtime.test.mjs` | 把 pinned 集合忽略掉 ⇒ '作业还指着的那一代不能被删' 红 |
+| 删除不越界、失败不报成已清理 | `updater/test/runtime.test.mjs` | 去掉 root 约束 ⇒ 红 |
