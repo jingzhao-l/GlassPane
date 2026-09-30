@@ -8,7 +8,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
-## [0.6.1] - 2026-09-30
+## [0.6.3] - 2026-09-30
+
+### Fixed
+
+- **npm 发布通道被两个版本号卡住，现在绕过。** `0.6.1` 与 `0.6.2` 在 npm 侧处于
+  *staged* 状态，`npm publish` 对这两个号一律返回
+  `E409 Cannot publish over previously staged version`，而 `npm stage list`
+  并**不显示**它们。成因是一次误操作：本机这个 npm 版本上
+  `npm publish --dry-run` 仍然真的 PUT 了版本号（dry-run 并不 dry），于是被
+  用来排查的号自己也进了 stage。stage 需要交互式认证才能 reject，因此这一版
+  改发 `0.6.3`。**内容与 `v0.6.1` 的 GitHub release 完全相同**——跳号只影响
+  npm 上的版本号连续性，不含任何功能差异。
+- **GitHub release 的资产现在带 GPG 签名。** `v0.6.1` 起，两个平台归档与
+  `SHA256SUMS.txt` 各带一份 `.asc`；`gpg --verify` 对从 release 下载的文件
+  通过。签名步在 secret 缺失时**拒绝发布**而不是静默跳过——静默跳过正是
+  GlassPane 自己的 v1.4.0 发出无签名产物的原因。
+
+### Internal
+
+- **`script/gpg-signing.sh`** (new) — 签名配置与发布凭据的一处入口，
+  `seed` / `install` / `verify` / `verify-pass` / `local` / `audit` / `selftest`。
+  放在产品树内而非仓外 `tools/`，因为 subtree split 不带走仓外目录。
+- keychain 里的私钥以 **base64** 存放：`security add-generic-password -w`
+  在本机会把**多行**参数 hex 编码，keychain UI 看不出异常，而 CI 拿到的就是
+  那串 hex，`gpg --import` 报 `no valid OpenPGP data found` 且不会提它来自
+  keychain。存后读回比对字节，`install` 推之前拒收非 armored key 的值。
+
+## [0.6.1] - 2026-09-30 (GitHub release only — never reached npm)
+
+The binaries, checksums and GPG signatures for this version are on the GitHub
+release. npm never received it: the version number was left *staged* by a
+misstep (see 0.6.3), and `0.6.2` then went out as an empty placeholder. Both are
+deprecated on npm with an explanation. **Install from npm: use 0.6.3 or 0.5.1.**
 
 ### Fixed
 
