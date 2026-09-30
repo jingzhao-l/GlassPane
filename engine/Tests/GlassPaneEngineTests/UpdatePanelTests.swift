@@ -33,6 +33,14 @@ final class UpdatePanelTests: XCTestCase {
     /// `updater/lib/ca-bundle.js` 增删成员而面板没接住时必须变红）。
     private static let contractCaStatuses = ["ok", "empty", "unavailable", "write-unverified", "probe-failed"]
 
+    /// 状态文件里 `runtime.status` 的封闭取值（**测试侧抄的**：`updater/lib/runtime.js`
+    /// 的 `RUNTIME_STATUSES` 增删成员而面板没接住时必须变红）。
+    private static let contractRuntimeStatuses = ["refreshed", "failed", "kept", "skipped"]
+
+    /// 更新器自己那份副本的落地位置，与换版之前那一份（面板只显示记录里真的写了的）。
+    private static let runtimeCli = "/Users/x/.glasspane/runtime/1.5.2/updater/cli.js"
+    private static let previousRuntimeCli = "/Users/x/GlassPane/updater/cli.js"
+
     /// 一张证书的形状就够了：面板数的是 `-----BEGIN CERTIFICATE-----` 的出现次数。
     private let pemBundle = """
     -----BEGIN CERTIFICATE-----
@@ -875,6 +883,216 @@ final class UpdatePanelTests: XCTestCase {
         XCTAssertFalse(UpdatePanel.caRootsIsUsable(snapshot))
     }
 
+    // MARK: - 更新器自身的换版怎么显示（§11.9：四个态 + 从没记录过，各有一句人话）
+
+    /// 反向变异：**面板这边少接一个成员**（把两个并成一个、或漏一个），或**认不出的状态
+    /// 就近映射成某个成员**——那台机器上"修更新器的那次发版"就会显示成已经送到了，
+    /// 而它每天跑的其实还是装进来那一份。
+    func testRuntimeStatusEnumMatchesTheContract() {
+        XCTAssertEqual(UpdatePanel.RuntimeStatus.allCases.map { $0.rawValue }, Self.contractRuntimeStatuses)
+        for raw in Self.contractRuntimeStatuses {
+            XCTAssertNotNil(UpdatePanel.RuntimeStatus.parse(raw), "\(raw) 必须认得")
+        }
+        XCTAssertNil(UpdatePanel.RuntimeStatus.parse("self-updated"), "枚举外的只能算读不懂")
+        XCTAssertNil(UpdatePanel.RuntimeStatus.parse("ok"), "根证书那一套取值不能串到这里来")
+        XCTAssertNil(UpdatePanel.RuntimeStatus.parse(nil))
+        XCTAssertNil(UpdatePanel.RuntimeStatus.parse(""))
+    }
+
+    /// 反向变异：**只看 `status` 就说"已换上"**（不看在册任务有没有被读回来核对），
+    /// 或**把记录里的真实路径丢掉**（这一句的全部作用就是让人核对跑的是哪一份）。
+    func testRuntimeRefreshedWithVerifiedAgentIsTheOnlyGoodNews() throws {
+        let snapshot = try runtimeSnapshot(runtimeRecord(status: "refreshed", agentVerified: true))
+        XCTAssertEqual(snapshot.runtime?.status, .refreshed)
+        XCTAssertEqual(snapshot.runtime?.agentVerified, true)
+        XCTAssertEqual(snapshot.runtime?.cliPath, Self.runtimeCli, "路径要原样留着，人才查得动")
+        XCTAssertTrue(UpdatePanel.runtimeIsUsable(snapshot), "换上 + 在册任务核对过，只有这一对算换上")
+        XCTAssertEqual(UpdatePanel.runtimeAttention(snapshot), .confirmed)
+        let text = UpdatePanel.runtimeText(snapshot)
+        XCTAssertTrue(text.contains("已换上"), "核对过的 refreshed 就该说换上：\(text)")
+        XCTAssertTrue(text.contains(Self.runtimeCli), "真实路径要在这句里：\(text)")
+        XCTAssertTrue(text.contains("在册的定时任务读回来的就是这一份"), "\(text)")
+        XCTAssertFalse(text.contains("送不到这台机器上"), "换上了不该说失败的话：\(text)")
+        XCTAssertFalse(text.contains("重新运行安装程序"), "换上了不该叫人来一次重装：\(text)")
+    }
+
+    /// 反向变异：**把"记录说换上了"当成"这台机器已经在跑新那一份"**——`agentVerified`
+    /// 写着 false、写着 null、干脆没这个键，三种都不能冒出那句肯定的话。规格点名的正是
+    /// "读不到就当成功"这一条。
+    func testRefreshedWithoutAgentVerificationNeverReadsAsSwappedIn() throws {
+        let notVerified = runtimeRecord(status: "refreshed", agentVerified: false)
+        let nulled = runtimeRecord(status: "refreshed", agentVerified: NSNull())
+        var keyMissing = runtimeRecord(status: "refreshed", agentVerified: true)
+        keyMissing.removeValue(forKey: "agentVerified")
+        for (label, record) in ["false": notVerified, "null": nulled, "缺键": keyMissing] {
+            let snapshot = try runtimeSnapshot(record)
+            XCTAssertEqual(snapshot.runtime?.status, .refreshed, "\(label)：状态本身不许被改写成药能认的那个")
+            XCTAssertNotEqual(snapshot.runtime?.agentVerified, true, "\(label) 都不等于核对过：\(String(describing: snapshot.runtime?.agentVerified))")
+            XCTAssertFalse(UpdatePanel.runtimeIsUsable(snapshot), "\(label) 不能算换上")
+            XCTAssertEqual(UpdatePanel.runtimeAttention(snapshot), .attention, "\(label) 是要人做点什么的")
+            let text = UpdatePanel.runtimeText(snapshot)
+            XCTAssertFalse(text.contains("已换上"), "\(label) 不能出现那句肯定的话：\(text)")
+            XCTAssertTrue(text.contains("refreshed"), "\(label) 要把原值带出来好跟日志核对：\(text)")
+            XCTAssertTrue(text.contains("不能说它已经在跑"), "\(label) 少了它自己那句：\(text)")
+            XCTAssertTrue(text.contains(Self.runtimeCli), "\(label) 也该看得见是哪一份：\(text)")
+            XCTAssertTrue(text.contains("关掉再打开一次"), "\(label) 要给这一页上做得动的动作：\(text)")
+            XCTAssertTrue(text.contains("请重新运行安装程序"), "\(label) 也要给另一条路：\(text)")
+        }
+    }
+
+    /// 反向变异：**三个非好消息并成一句**（"没换上"与"开关关着"与"这轮没尝试"是三件不同的
+    /// 事，下一步也各不相同），或**把 `detail` 原文吞掉**。
+    func testEachRuntimeStateSaysItsOwnThing() throws {
+        let detail = "the loaded job still names the old command line"
+        let distinguishing: [String: String] = [
+            "failed": "更新装上了，但更新器自身没换上",
+            "kept": "没有登记定时任务",
+            "skipped": "这一轮没有去动更新器自身",
+        ]
+        var said: [String: String] = [:]
+        for (status, fingerprint) in distinguishing {
+            let snapshot = try runtimeSnapshot(runtimeRecord(status: status, detail: detail))
+            XCTAssertFalse(UpdatePanel.runtimeIsUsable(snapshot), "\(status) 不算换上")
+            let text = UpdatePanel.runtimeText(snapshot)
+            XCTAssertTrue(text.contains(status), "\(status) 要把状态原样带出来好跟日志核对：\(text)")
+            XCTAssertTrue(text.contains(fingerprint), "\(status) 少了它自己那句：\(text)")
+            XCTAssertTrue(text.contains(detail), "\(status) 把失败原因原文吞了：\(text)")
+            XCTAssertTrue(text.contains("请"), "\(status) 要给一个做得动的下一步：\(text)")
+            XCTAssertFalse(text.contains("已换上"), "\(status) 不能借用核对过那一句：\(text)")
+            said[status] = text
+        }
+        for (a, left) in said {
+            for (b, right) in said where a != b {
+                XCTAssertNotEqual(left, right, "\(a) 与 \(b) 不能并成同一句话")
+            }
+        }
+        // 规格点名的那一句原话：这不是"更新失败"，新版本确实装上了。
+        let failed = said["failed"]!
+        XCTAssertTrue(failed.contains("这不是「更新失败」"), failed)
+        XCTAssertTrue(failed.contains("请重新运行安装程序"), failed)
+        XCTAssertTrue(failed.contains(Self.previousRuntimeCli), "回退目标也要看得见：\(failed)")
+        // `kept` 既不是失败也不是好消息：它说的是这台机器自己的开关。
+        let kept = said["kept"]!
+        XCTAssertTrue(kept.contains("把自动更新关着"), kept)
+        XCTAssertTrue(kept.contains("不是失败"), kept)
+        XCTAssertTrue(kept.contains("请把「自动更新」开关打开"), kept)
+        XCTAssertFalse(kept.contains("重新运行安装程序"), "开关一开就解决了，不必重装：\(kept)")
+        // `skipped`（定时那一次主动跳过交接）：不许被读成换上了，也不许被读成失败，
+        // 但必须说清交接是谁做的——1.6.0 之前这句写的是"下一次装成功"，那是不存在的语义。
+        let skipped = said["skipped"]!
+        XCTAssertTrue(skipped.contains("enable"), "要说清下一次接手靠什么：\(skipped)")
+        XCTAssertTrue(skipped.contains("开关"), "面板上做得动的那一下也要看得见：\(skipped)")
+        XCTAssertFalse(skipped.contains("这不是「更新失败」"), "这一轮压根没尝试，谈不上失败：\(skipped)")
+    }
+
+    /// 反向变异：**没有路径时也印出一个路径**（自己拼一个、或留一个模板），
+    /// 或者干脆什么都不说，让人以为这一项没问题。
+    func testRuntimeWithoutAPathSaysSoInsteadOfNamingOne() throws {
+        let snapshot = try runtimeSnapshot(
+            runtimeRecord(status: "failed", version: nil, cliPath: nil, previousCliPath: nil)
+        )
+        XCTAssertNil(snapshot.runtime?.cliPath)
+        XCTAssertNil(snapshot.runtime?.version)
+        XCTAssertFalse(UpdatePanel.runtimeIsUsable(snapshot))
+        let text = UpdatePanel.runtimeText(snapshot)
+        XCTAssertTrue(text.contains("记录里没有它的路径"), text)
+        XCTAssertFalse(text.contains("/Users/x"), "没记着的路径不能凭空印一个：\(text)")
+        XCTAssertTrue(text.contains("请重新运行安装程序"), text)
+    }
+
+    /// 反向变异：**把 `null` 读成 `refreshed`**（这就是"面板每天看着都正常、其实那份代码
+    /// 从来没换过版"的形状），或缺失时显示成"没有这个问题"。
+    func testMissingOrNullRuntimeReadsAsAnOldInstallNotAsSwappedIn() throws {
+        let absentRecord = try snapshotWithoutRuntime()
+        let nulledRecord = try snapshotWithNullRuntime()
+        for (label, snapshot) in ["缺失": absentRecord, "null": nulledRecord] {
+            XCTAssertNil(snapshot.runtime, "\(label) 都该读成没有这份记录")
+            XCTAssertFalse(UpdatePanel.runtimeIsUsable(snapshot), "\(label) 不能算换上")
+            XCTAssertEqual(UpdatePanel.runtimeAttention(snapshot), .attention,
+                           "\(label) 要人来一次重装，不是中性的一项")
+            let text = UpdatePanel.runtimeText(snapshot)
+            XCTAssertTrue(text.contains("未记录过更新器自身的换版"), "\(label) 要说清是没记录过：\(text)")
+            XCTAssertTrue(text.contains("旧安装"), "\(label) 要指出这是旧安装：\(text)")
+            XCTAssertTrue(text.contains("请重新运行安装程序"), "\(label) 也要给出下一步：\(text)")
+            XCTAssertFalse(text.contains("已换上"), "\(label) 显示成了正常态：\(text)")
+            XCTAssertFalse(text.contains("这一项现在不用管"), "\(label) 不该让人放手：\(text)")
+        }
+        // 连一份状态都没读到，是另外一句——不能借用"旧安装"这句话假装读到了什么。
+        let nothing = UpdatePanel.runtimeText(nil)
+        XCTAssertTrue(nothing.contains("还没读到更新状态"), nothing)
+        XCTAssertFalse(nothing.contains("旧安装"))
+        XCTAssertEqual(UpdatePanel.runtimeAttention(nil), .unknown)
+    }
+
+    /// 反向变异：**枚举外的状态当 `refreshed` 显示**，或把它悄悄折算成某个认得的成员。
+    /// 这里连 `agentVerified: true` 都给了：核对过的那个字段**不能**替一个认不出的状态说话。
+    func testUnrecognizedRuntimeStatusIsNotReadAsRefreshed() throws {
+        let snapshot = try runtimeSnapshot(
+            runtimeRecord(status: "self-updated", agentVerified: true, detail: "updater said so")
+        )
+        XCTAssertNil(snapshot.runtime?.status, "认不出的取值只能读成 nil")
+        XCTAssertEqual(snapshot.runtime?.rawStatus, "self-updated", "原文要留着，人才查得动")
+        XCTAssertFalse(UpdatePanel.runtimeIsUsable(snapshot), "认不出来绝不能当成换上")
+        XCTAssertEqual(UpdatePanel.runtimeAttention(snapshot), .attention)
+        let text = UpdatePanel.runtimeText(snapshot)
+        XCTAssertTrue(text.contains("self-updated"), "要把原文报出来：\(text)")
+        XCTAssertTrue(text.contains("认不出来"), text)
+        XCTAssertFalse(text.contains("已换上"), text)
+        XCTAssertTrue(text.contains("updater said so"), "这一态也该看得见原话：\(text)")
+        XCTAssertTrue(text.contains("请重新运行安装程序"), text)
+    }
+
+    /// 反向变异：**把 `<那份更新器的路径>` 这类占位符留在界面上**（根证书那一卡曾经就这么
+    /// 显示过），或把内部变量名当成给用户看的句子。这一页要么给出真实路径，要么用中文说清
+    /// 去哪儿做；尖括号里的模板字符串一律算违规。
+    func testRuntimeCopyNeverShowsAnAngleBracketPlaceholder() throws {
+        let shapes: [(String, UpdatePanel.Snapshot?)] = [
+            ("refreshed 核对过", try runtimeSnapshot(runtimeRecord(status: "refreshed", agentVerified: true))),
+            ("refreshed 没核对", try runtimeSnapshot(runtimeRecord(status: "refreshed", agentVerified: false))),
+            ("failed", try runtimeSnapshot(runtimeRecord(status: "failed", code: "runtime-stale",
+                                                          detail: "the loaded job still names the old command line"))),
+            ("failed 且没有路径", try runtimeSnapshot(
+                runtimeRecord(status: "failed", version: nil, cliPath: nil, previousCliPath: nil))),
+            ("kept", try runtimeSnapshot(runtimeRecord(status: "kept", code: "auto-disabled"))),
+            ("skipped", try runtimeSnapshot(
+                runtimeRecord(status: "skipped", version: nil, cliPath: nil, previousCliPath: nil))),
+            ("认不出的状态", try runtimeSnapshot(runtimeRecord(status: "looks-refreshed"))),
+            ("旧安装（记录为 null）", try snapshotWithNullRuntime()),
+            ("没读到状态", nil),
+        ]
+        for (label, snapshot) in shapes {
+            let text = UpdatePanel.runtimeText(snapshot)
+            XCTAssertFalse(text.contains("<"), "\(label) 的文案里有尖括号占位符，用户按它做不了任何事：\(text)")
+            XCTAssertFalse(text.contains(">"), "\(label) 的文案里有尖括号占位符：\(text)")
+            XCTAssertFalse(text.contains("stateRoot"), "\(label) 把内部变量名当成了给用户看的句子：\(text)")
+            XCTAssertFalse(text.contains("cliPath"), "\(label) 报的是字段名而不是路径：\(text)")
+            XCTAssertFalse(text.contains("agentVerified"), "\(label) 该用中文说这件事：\(text)")
+        }
+    }
+
+    /// 这一项读不懂时，其余那一行照常有效：不能因为它就把版本与按钮理由一起丢掉
+    /// （与根证书那一卡同一条规矩）。
+    /// 反向变异：**`runtime` 里多一个没声明的键、或状态认不出，就整行判成读不到**。
+    func testUnreadableRuntimeDoesNotVoidTheWholeLine() throws {
+        let line = documentedLine(
+            command: "status", status: "applied", code: nil, exitCode: 0, ok: true, message: nil,
+            state: [
+                "status": "applied", "current": "1.5.2", "latest": "1.5.2",
+                "lastCheckAt": iso(-60), "disabled": false, "autoApply": true,
+                "runtime": ["status": "who-knows", "extraKeyNobodyDeclared": true, "agentVerified": true],
+            ]
+        )
+        guard case .success(let snapshot) = UpdatePanel.parseLine(line) else {
+            return XCTFail("这一行其余部分读得出来：\(line)")
+        }
+        XCTAssertEqual(snapshot.reportedStatus, .applied)
+        XCTAssertEqual(snapshot.current, "1.5.2")
+        XCTAssertNil(snapshot.runtime?.status, "认不出的状态只能读成读不懂")
+        XCTAssertEqual(snapshot.runtime?.rawStatus, "who-knows")
+        XCTAssertFalse(UpdatePanel.runtimeIsUsable(snapshot))
+        XCTAssertFalse(UpdatePanel.runtimeText(snapshot).contains("已换上"))
+    }
+
     // MARK: - 夹具
 
     private func pointerFile(in sandbox: URL) -> String {
@@ -1022,6 +1240,54 @@ final class UpdatePanelTests: XCTestCase {
     /// 必须单独造一次（把 `null` 读成一份记录、或读成 `ok`，只有这一条抓得住）。
     private func snapshotWithNullCaRoots() throws -> UpdatePanel.Snapshot {
         return try parsed(caStateLine(caRoots: NSNull()))
+    }
+
+    // MARK: - runtime 的夹具
+
+    /// 那一行里 `runtime` 的三种存在方式：整个没有（传 nil）、写着 null（传 `NSNull()`）、
+    /// 带着一份记录（传一个字典）。三者走的是同一条真解析路径。
+    private func runtimeStateLine(runtime: Any?) -> String {
+        var state: [String: Any] = [
+            "status": "applied", "current": "1.5.2", "latest": "1.5.2",
+            "lastCheckAt": iso(-60), "disabled": false, "autoApply": true,
+        ]
+        if let runtime { state["runtime"] = runtime }
+        return documentedLine(command: "status", status: "applied", code: nil, exitCode: 0, ok: true,
+                              message: nil, state: state)
+    }
+
+    /// 一份按契约写全的换版记录：必填的五个键都在，没给的字段写成 JSON `null`
+    /// （不是把键省掉）——与 `caRootsSnapshot` 同一做法，两种存在方式都要被读到过。
+    /// 要造"某个键整个不存在"就在返回的字典上 `removeValue(forKey:)`。
+    private func runtimeRecord(status: String,
+                               version: Any? = "1.5.2",
+                               cliPath: Any? = UpdatePanelTests.runtimeCli,
+                               previousCliPath: Any? = UpdatePanelTests.previousRuntimeCli,
+                               agentVerified: Any? = nil,
+                               code: Any? = nil,
+                               detail: Any? = nil) -> [String: Any] {
+        var record: [String: Any] = ["status": status, "at": iso(-300)]
+        record["version"] = version ?? NSNull()
+        record["cliPath"] = cliPath ?? NSNull()
+        record["previousCliPath"] = previousCliPath ?? NSNull()
+        record["agentVerified"] = agentVerified ?? NSNull()
+        record["code"] = code ?? NSNull()
+        record["detail"] = detail ?? NSNull()
+        return record
+    }
+
+    private func runtimeSnapshot(_ record: [String: Any]) throws -> UpdatePanel.Snapshot {
+        try parsed(runtimeStateLine(runtime: record))
+    }
+
+    /// 这份安装是在"更新器自己换版"之前装出来的：状态里根本没有这一项。
+    private func snapshotWithoutRuntime() throws -> UpdatePanel.Snapshot {
+        try parsed(runtimeStateLine(runtime: nil))
+    }
+
+    /// 这一项整个写着 `null`：与"没有这一项"同一意思，但它是另一种输入，必须单独造一次。
+    private func snapshotWithNullRuntime() throws -> UpdatePanel.Snapshot {
+        try parsed(runtimeStateLine(runtime: NSNull()))
     }
 
     @MainActor

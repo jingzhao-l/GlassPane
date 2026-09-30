@@ -254,9 +254,12 @@ GlassPane 不是普通工具库：它**持有** macOS 的高危权限（辅助�
   · **不看信任设置。** `security find-certificate` 列的是证书，不是"macOS 愿意信任什么"。管理员显式
   **不信任**的那张根，或为了别的目的装进 `System.keychain` 的一张 CA，都会对这个作业变成 node 的信任锚，
   哪怕系统本身拒绝它。这一条是本页真正的边界所在。
-  · **名单里那些非 CA 证书是无害的。** 实测：把一张自签的 `CA:FALSE` 证书作为唯一追加锚交给 node，由它签出的
-  链仍然验证不过——OpenSSL 报 `INVALID_PURPOSE`。所以导出里那两张 Apple 本机服务身份
-  （`com.apple.systemdefault`、`com.apple.kerberos.kdc`）什么都没授予。
+  · **声明 `CA:FALSE` 的证书会被剔掉，且这是可证明无损的。** 实测：一张自签的 `CA:FALSE` 证书作为唯一追加锚
+  交给 node，由它签出的链仍然验证不过——OpenSSL 报 `INVALID_PURPOSE`。所以这类证书本来就用不上，剔掉只是让
+  状态里那个数不再虚报"node 会照办"。**判不了的一律保留**：本机导出里那两张 Apple 本机服务身份
+  （`com.apple.systemdefault`、`com.apple.kerberos.kdc`）声明的是**根本没有 basicConstraints**，而不是
+  `CA:FALSE`，所以过滤器留下它们（本机实测 163 张全留、剔 0 张，其中 161 张声明 `CA:TRUE`）。凭猜测剔掉一张
+  旧根，就是这套机制坏掉的方式。
   · **谁能利用这个放宽。** 能往这两个钥匙串加 CA 的人，本来就已经握着这台机器的管理员权限——那比这里描述的
   能力大得多，所以残余风险在于那张早已存在的证书，不在于导出。想让 node 少信任一些：在调用更新器之前把
   `NODE_EXTRA_CA_CERTS` 设成你自己那份束。更新器从不删继承来的值，从不把不是自己导出的路径改指别处，也没有

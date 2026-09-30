@@ -2,6 +2,58 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [未发布]
+
+### Added — §11 更新器自身的换版：这条机制终于能修好它自己
+
+写这一节之前的事实很难看：上一节那四条真机高危（资产钉死、档案链接、CLI 参数、下载时钟）与 §9 那一整束，
+全都住在 `updater/` 与 `installer/` 里，而每日作业跑的正是安装那趟 clone 里的那份代码
+（`update-install.json` 的 `updaterCli`）——§3.5 换版只换 `.app` 与 npm 两个包，从不碰它。于是
+**"修好更新器"的那次发版永远传不到用户机器上**：装了 1.5.0 的机器，其作业会继续用旧的钉死规则天天
+`asset-host-unpinned`，而面板写着"已是最新"。一条机制救不了它自己，就等于没修。
+
+契约（规格新增 §11，十条 + 判据↔测试表）：
+
+- 落地来源只能是八道校验放过的那棵暂存树，且发生在暂存目录退场**之前**；落进
+  `<状态根>/runtime/<版本>/` 这个**新版本目录**——绝不就地覆盖正在执行的那份代码，那是"半换的更新器"
+  怎么诞生的。
+- 指针（`update-install.json`）仍是"下一次谁跑"的唯一真源，换它必须走 `writePointer`
+  （临时文件 + rename + 读回 + mode 校验）；落地/注册任何一步失败都要把指针**写回旧值**，并用旧那份
+  `cli.js` 再 `enable` 一次把作业指回去。
+- 注册由**新那份代码自己**做（`node <新 cli.js> enable --state-dir <状态根> --json`），因为 plist 里那条
+  路径的来源就是"谁在渲染"；再由 `launchctl print` 把**在册**参数读回来核对它真指过去了。读不回来或仍指旧的
+  ⇒ `agentVerified=false`，这是一句要说出来的失败，不是"大概成功了"。
+- 换版判定不被它改动：`.app` 与 npm 都换成了就是 `applied`、退出码仍是 0；更新器自己没换上是一条
+  **长期可见的降级**（`runtime.status='failed'` + `code=runtime-stale` + 原话），与 `authorship`
+  同一处理形状——不把一次不完美的成功洗成干净。
+- 硬关（`GLASSPANE_UPDATE_DISABLE=1` 或状态里 `disabled=true`）时：代码与指针照刷（面板跑的就是指针那份），
+  但**绝不注册作业**，并把这句留在状态里（`runtime.status='kept'`）。
+- 只留两代（指针指的 + 上一代），更老的在状态根内删除；删除失败要说出来，不许报成"已清理"。
+- `runtime` 进状态 schema（封闭枚举 `refreshed`/`failed`/`kept`/`skipped`，`additionalProperties:false`），
+  updater、设置面板、`gp_diagnose` 三个读者都读；认不出的取值只能显示成"读不出"。
+- ⚠ **装上第一版仍需要一次人工重装**：这一版之前的安装把指针钉在那趟浅 clone 上，而"会自己换版的更新器"
+  本身要先进到机器上才能生效。从下一次换版起才是自动的。这句话同时写进规格 §11.11 与本节，别让人以为升级自动完成。
+
+### Changed — §9.4 收紧：导出的束只留能锚链的证书
+
+`filterToAnchors` 在写盘前只剔**显式声明 `CA:FALSE`** 的证书，理由是可证明无损：实测这类证书当唯一锚时
+OpenSSL 直接 `INVALID_PURPOSE`，本来就锚不住任何链，留着只会让状态里"这台机器交了 N 张根"虚报。
+读不出的、以及**没有声明 basicConstraints** 的一律保留——凭猜测剔掉一张旧根，坏掉的正是这条机制本身。
+作者机器实测 158 + 5 = 163 张：161 张 `CA:TRUE`，2 张属于"没有声明"那一类，本机剔除数为 0；
+`caRoots.certs` 从此是"node 真能用的张数"。
+
+写这一条的时候被真机抓出一个我自己的 bug：`certificateBlocks` 把块之间的换行丢了，写出的束变成
+`…END CERTIFICATE------BEGIN CERTIFICATE-----`，node 用一句 `PEM routines::bad end line` 把**整份**束拒收，
+而张数、字节数、写后读回比对全都仍然报 163 —— 三道"看起来严格"的检查没有一个看得见这件事。
+现在按三张**真证书**夹具（CA:TRUE / CA:FALSE / 无 basicConstraints，公钥部分，2036 年前有效）断言：留下的张数、
+重组出来的块数、每块能被 `crypto.X509Certificate` 解析、块间必须有换行。把换行改回去 ⇒ 两条红（实测）。
+
+新增测试：`updater/test/runtime.test.mjs`（12 条：落地/拒绝/世代清理/新代码自注册/读回在册参数/失败退回/
+硬关不注册/缺指针不动手/指针写失败旧值仍在，其中真起子进程那条覆盖 argv 逐字、非零退出、无 JSON、被信号打死、
+指到不存在的脚本五种答案）；`apply.test.mjs` 三条用**真实** `refreshRuntime`（只替换 spawn 与 launchctl 两个
+外部事实）；`ca-bundle.test.mjs` 两条夹具测试。反向变异见 `/var/tmp/gp-iterate-gates/mutate_r12d.py`。
+
+
 ## [1.5.2] — 2026-09-30
 
 ### Fixed — round 12 复审的落点：三处"桩替掉了生产那一段"、一句我编的 node 行为、四条没有读者的禁令
