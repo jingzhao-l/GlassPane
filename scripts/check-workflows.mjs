@@ -62,6 +62,14 @@ if (!targets.length) {
  * get them from indentation rather than a YAML parser so that duplicate keys
  * (which a parser collapses) stay visible.
  */
+// Matches `bun run <name>` / `npm run <name>` at the start of a line or after a
+// chaining operator, capturing the bare script name and any file extension that
+// would make it a path instead.
+const RUN_SCRIPT = new RegExp(
+  "(?:^|[;&|]\\s*)(?:bun|npm|pnpm|yarn)\\s+run\\s+([A-Za-z0-9:_-]+)(\\.[A-Za-z0-9]+)?(?:/|\\s|$)",
+  "g",
+)
+
 function inspect(target) {
   const { dir, file } = target
   const base = path.join(dir, file)
@@ -155,6 +163,50 @@ function inspect(target) {
       const rel = path.posix.join(ref.dir, script)
       if (!existsSync(path.join(target.root, rel))) {
         problems.push(`line ${ref.line}${ref.dir ? ` (working-directory: ${ref.dir})` : ""}: step runs "${script}" but ${rel} does not exist under ${path.relative(repoRoot, target.root) || "."}`)
+      }
+    }
+  }
+
+  // 2b. `bun run <name>` / `npm run <name>` names a *package.json script*, not a
+  //     file, so the rule above cannot see it: a step that ran `bun run build` from
+  //     the workspace root passed this check while the root package.json has no
+  //     `build` script at all. Found 2026-09-30: the npm platform job failed with
+  //     `Script not found "build"` while the binaries job — same command, correct
+  //     working-directory — was already fixed and passing.
+  for (const ref of runRefs) {
+    // Each ref is a single physical line (see where refs are collected), and
+    // whole-line comments are already skipped there. Match within one line, and
+    // only where the command begins — after start-of-line or a chaining
+    // operator — so prose that merely contains "run <word>" is not a script.
+    //
+    // Built with RegExp rather than a literal: the pattern needs a literal `/`
+    // to detect a path argument, which inside a `/.../ ` literal would terminate
+    // the expression.
+    // exec() returns one match object (or null); the `?? []` only guards the
+    // null case, so every element here is a real match.
+    const hits = RUN_SCRIPT.exec(ref.text)
+    for (const m of hits ? [hits] : []) {
+      // `bun run path/to/file.ts` addresses a file bun executes directly; only a
+      // bare name is a package.json script, and the file-existence rule above
+      // already covers the former. The path test must be inside the pattern:
+      // once the name is captured, "script/publish.ts" is already "script",
+      // which is a different — and real — script name.
+      if (m[2] || m[0].includes("/")) continue
+      const name = m[1]
+      if (name.includes("$")) continue
+      const pkgPath = path.join(target.root, ref.dir, "package.json")
+      let pkg
+      try {
+        pkg = JSON.parse(readFileSync(pkgPath, "utf8"))
+      } catch {
+        continue // no package.json here: nothing to assert against
+      }
+      if (!(pkg.scripts ?? {})[name]) {
+        const where = ref.dir ? ` (working-directory: ${ref.dir})` : " (workspace root)"
+        problems.push(
+          `line ${ref.line}${where}: step runs \`run ${name}\` but ` +
+            `${path.posix.join(ref.dir, "package.json") || "package.json"} has no "${name}" script`,
+        )
       }
     }
   }

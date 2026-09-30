@@ -267,7 +267,16 @@ jobs:
         run: npm install -g npm@latest
 
       - name: Build this platform
-        run: bun run build --single
+        # `build` lives in packages/opencode; the workspace-root package.json has
+        # no such script, so running it from here fails with
+        # `Script not found "build"` before anything is compiled. The binaries
+        # job above already carries this; the npm platform job needs the same
+        # working-directory, and it needed it just as much.
+        working-directory: packages/opencode
+        run: |
+          set -euo pipefail
+          export OPENCODE_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('../../product.json','utf8')).version")"
+          bun run build --single
 
       - name: Publish the platform package with provenance (staged-only fallback)
         shell: bash
