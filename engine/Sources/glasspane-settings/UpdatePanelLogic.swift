@@ -147,6 +147,9 @@ enum UpdatePanel {
         /// 这台机器给 node 的那份根证书束的导出记录。nil = 状态里没有这一项，
         /// 或它写着 `null`——两种都是"这份安装从没导出过"，不是"导出成功了"。
         var caRoots: CaRootsRecord? = nil
+        /// 更新器自己那份已安装副本有没有跟着这次换版移动的记录。nil = 状态里没有这一项，
+        /// 或它写着 `null`——两种都是"这台机器从没记录过更新器自身换过版"，不是"已经换上"。
+        var runtime: RuntimeRecord? = nil
     }
 
     // MARK: - 根证书束的导出记录
@@ -181,6 +184,63 @@ enum UpdatePanel {
 
         /// 只有 `ok` 算可用；其余四态与读不懂都不算。
         var isUsable: Bool { status == .ok }
+    }
+
+    // MARK: - 更新器自身的换版记录
+
+    /// `runtime.status` 的封闭枚举（与 `updater/lib/runtime.js` 的 `RUNTIME_STATUSES` 一一对应）。
+    ///
+    /// 为什么这一项值得单独有一张卡：每天跑检查的那份代码是**安装记录指的那一份**，
+    /// 换版换掉的是 `.app` 与 npm 两个包，从不碰它。于是"修好更新器的那次发版"能不能
+    /// 送到这台机器上，只看这一项说不说 refreshed。四个成员各自是一个不同的下场，
+    /// 把它们并成"行/不行"两种，读的人就只能猜是哪一种。
+    enum RuntimeStatus: String, CaseIterable {
+        case refreshed
+        case failed
+        case kept
+        case skipped
+
+        /// 只认得封闭枚举里的写法；其余一律 nil（由文案层如实说"这一项读不懂"）。
+        static func parse(_ raw: String?) -> RuntimeStatus? {
+            guard let raw, !raw.isEmpty else { return nil }
+            return RuntimeStatus(rawValue: raw)
+        }
+    }
+
+    /// 那条记录里面板要呈现的部分。`status` 为 nil 而 `rawStatus` 有值 = 写着枚举外的东西。
+    struct RuntimeRecord: Equatable {
+        var status: RuntimeStatus? = nil
+        var rawStatus: String? = nil
+        /// 换到的是哪一个版本；记录没写就是 nil，不编。
+        var version: String? = nil
+        /// 这份记录说的那一台上真实存在的更新器脚本；nil = 记录没给出路径。
+        var cliPath: String? = nil
+        /// 换版之前那一份（回退的目标），记录给了才显示。
+        var previousCliPath: String? = nil
+        /// 只有 `true` 是"在册的定时任务被读回来、里面写的就是这份新脚本"。
+        /// false 与没写都算没核对过——`refreshed` 的说法因此不能单独成立。
+        var agentVerified: Bool? = nil
+        var at: String? = nil
+        /// 拦住它的那一道门的稳定代号（`runtime-stale` 这一类）。
+        var code: String? = nil
+        /// 失败原因原文：必须出现在页面上，不能读进来又丢掉。
+        var detail: String? = nil
+
+        /// 只有"换上了"与"在册任务读回来核对过"这一对才算换上；
+        /// `kept` 特意不算——那台机器的自动更新是关着的，没有任何任务会去跑它。
+        var isUsable: Bool { status == .refreshed && agentVerified == true }
+    }
+
+    /// 这一项在页面上要的注意力等级。四种说法各归一类，避免"读不懂"与"没问题"共用一个绿点。
+    enum RuntimeAttention: Equatable {
+        /// 确实换上了且核对过。
+        case confirmed
+        /// 按这台机器自己的选择或按流程本来如此（关了自动更新、这一轮没尝试）。
+        case informational
+        /// 要人做点什么：没换上、说换上但没核对、读不懂、这台机器从没记录过。
+        case attention
+        /// 连一份状态都没读到，这一项无从判断。
+        case unknown
     }
 
     // MARK: - 解析
@@ -229,6 +289,20 @@ enum UpdatePanel {
                     certificates: record.certs,
                     path: record.path,
                     exportedAt: record.exportedAt,
+                    detail: record.detail
+                )
+            },
+            // 同一套口径：更新器自身的换版读不懂也只是这一项没说清，不作废那一行。
+            runtime: state?.runtime.map { record in
+                RuntimeRecord(
+                    status: RuntimeStatus.parse(record.status),
+                    rawStatus: record.status,
+                    version: record.version,
+                    cliPath: record.cliPath,
+                    previousCliPath: record.previousCliPath,
+                    agentVerified: record.agentVerified,
+                    at: record.at,
+                    code: record.code,
                     detail: record.detail
                 )
             }
@@ -531,7 +605,7 @@ enum UpdatePanel {
         case .unavailable:
             return "这台机器上没有导出系统根证书所需的工具（unavailable），更新器只能带着 node 自带的那份证书束去连，"
                 + "而这台机器另外信任的那些根不在里面。" + caBundleConsequence
-                + "要自己指定一份你信任的证书束，请在启动更新器之前设好 NODE_EXTRA_CA_CERTS=<那份束的路径>。" + detail
+                + "这一份本机导不出来，所以没有可指的路径；要自己给一份信任的证书束，请在启动更新器之前把它设进 NODE_EXTRA_CA_CERTS。" + detail
         case .writeUnverified:
             return "导出的根证书束写盘之后读回来跟写进去的不一样（write-unverified），这一份没有采信，起更新器时不会带上它。"
                 + caBundleConsequence + "请先修好状态目录的权限或腾出空间，再" + caBundleRedo + detail
@@ -551,6 +625,131 @@ enum UpdatePanel {
     /// 这一项算不算备好了（呈现用的色调）：**只有 `ok` 算**，其余一律不算。
     static func caRootsIsUsable(_ snapshot: Snapshot?) -> Bool {
         snapshot?.caRoots?.isUsable == true
+    }
+
+    // MARK: - 更新器自身那一句人话
+
+    /// 没换上的后果，四个说法共用：这一句说清"这一项跟这台机器每天的动作有什么关系"，
+    /// 省得每一态各说一半、说得还不一样。
+    ///
+    /// 用"可能"不是含糊其辞，是这一句能断言的上限：记录里只有换版的结果，没有那次回退把作业交回去
+    /// 了没有（`enable` 跑成、下一步才失败的那一支，在册的恰恰是新那一份）。确切的那半句在更新器
+    /// 自己的原话里，页面把它原样附在后面。
+    static let runtimeConsequence = "定时检查跑的可能还是旧那一份更新器，"
+        + "专门修更新器的那一次发版可能送不到这台机器上。"
+
+    /// 只有重装能做的那一步：重写安装记录并把新那一份代码落地。
+    /// 调用处按语境自己接"请"或"再"，与根证书那一卡同一写法。
+    static let runtimeReinstall = "重新运行安装程序装一次 GlassPane，它会重写安装记录并把新那一份更新器放到位。"
+
+    /// 这一页做得动的那一步：开关关掉再打开一次 = 让盘上那一份代码自己重新登记定时任务。
+    static let runtimeRedoOnThisPage = "把「自动更新」开关关掉再打开一次，让盘上那一份自己重新登记一次定时任务。"
+
+    /// 记录里那份真实的程序位置：**有就说出来，没有就如实说没有**。
+    /// 页面上出现一个尖括号模板等于什么也没说（这一条是 1.5.1 那次改版定下的规矩）。
+    private static func runtimeCopyClause(_ record: RuntimeRecord) -> String {
+        let which = record.version.flatMap { trimmed($0) }.map { "第 \($0) 版的那一份" } ?? "那一份更新器"
+        guard let path = record.cliPath.flatMap({ trimmed($0) }) else {
+            return "\(which)，记录里没有它的路径"
+        }
+        return "\(which)，路径是 \(path)"
+    }
+
+    /// 换版之前那一份（也是这台机器现在真正在跑的那一份），记录给了才说。
+    private static func runtimePreviousClause(_ record: RuntimeRecord) -> String? {
+        guard let path = record.previousCliPath.flatMap({ trimmed($0) }) else { return nil }
+        return "现在还在跑的是 \(path)。"
+    }
+
+    /// 「更新器自身」那一句人话：**每一态各有一句，每一句都带一个做得动的动作**。
+    ///
+    /// 记录缺失或写着 `null` 说的是"这台机器从没记录过更新器自己换过版"，绝不显示成正常——
+    /// 那正是"面板每天都看着在干活，其实跑的一直是装进来那一份"的形状。
+    /// 认不出的取值也只能如实说认不出，不就近映射到 `refreshed`。
+    /// `refreshed` 还要跟 `agentVerified` 成对才敢说"已换上"：前者是代码说它换了，
+    /// 后者是把在册任务读回来核对过，只有核对过才是真的在跑新那一份。
+    static func runtimeText(_ snapshot: Snapshot?) -> String {
+        guard let snapshot else {
+            return "还没读到更新状态，也就读不到这台机器更新器自身的换版记录。先点「刷新」或「立即检查」读一次。"
+        }
+        guard let record = snapshot.runtime else {
+            return "这台机器未记录过更新器自身的换版（旧安装）：这份安装是在这个能力之前装出来的，"
+                + "定时任务跑的还是安装那一次留下的那一份更新器，它不会自己换版。"
+                + runtimeConsequence + "请" + runtimeReinstall
+                + "这一步要人工做一次；做完之后，每一次装成功都会把这一项重新记下来。"
+        }
+        // 失败原因的原文一个字都不改、也不丢：它是人与代理唯一能拿去接着查的东西。
+        let detail = record.detail.flatMap { trimmed($0) }.map { " 更新器那句原话：\($0)" } ?? ""
+        let gate = record.code.flatMap { trimmed($0) }.map { "记录里拦住的这一道门是 \($0)。" } ?? ""
+        switch record.status {
+        case .refreshed:
+            if record.isUsable {
+                let stamp = record.at.flatMap { trimmed($0) }.map { "，记于 \(ConsoleTheme.timestamp($0))" } ?? ""
+                return "更新器自身已换上并核对过（refreshed）：" + runtimeCopyClause(record)
+                    + "，在册的定时任务读回来的就是这一份\(stamp)。"
+                    + "下一次修更新器的发版会自己送到这台机器上，这一项现在不用管。"
+            }
+            // 两个字段说的是两件事：代码自己说换好了，和有人把在册任务读回来核对过。
+            // 只有成对才敢说"已换上"——这一句里那句肯定的话一次都不出现。
+            let missingCheck = record.agentVerified == false
+                ? "可它读回来的在册任务写的不是这一份新脚本"
+                : "可这份记录没有把在册的定时任务读回来核对过"
+            return "这份记录说更新器自身换到了新那一份（refreshed）：" + runtimeCopyClause(record)
+                + "，" + missingCheck + "，所以不能说它已经在跑：明天那次检查很可能还是旧那一份，"
+                + "修更新器的那一次发版也就还没送到这台机器上。请先" + runtimeRedoOnThisPage
+                + "如果还是这一句，请" + runtimeReinstall + detail
+        case .failed:
+            // 这一句不能断言"在册的定时任务还在跑之前那一份"：记录里只有换版的结果，没有那次回退
+            // 是否把作业也交回去的成功——`enable` 已经跑成、之后一步才失败的那一支，在册的恰恰是新
+            // 那一份。要说的是这一轮没有把更新器自身换到位，以及怎么做才做得动。
+            return "更新装上了，但更新器自身没换上（failed）：" + runtimeCopyClause(record) + "。"
+                + (runtimePreviousClause(record) ?? "")
+                + "这不是「更新失败」：新版本确实装到这台机器上了，要处理的是下一次跑检查的那份代码。"
+                + runtimeConsequence + gate + "请" + runtimeReinstall + detail
+        case .kept:
+            return "这台机器把自动更新关着（kept）：更新器的代码与安装记录已经移到新那一份（"
+                + runtimeCopyClause(record) + "），但没有登记定时任务。"
+                + "这是按这台机器的开关做的，不是失败，也不算已经会自己换版——在打开之前它不会自己动。"
+                + "要让它自己换版，请把「自动更新」开关打开；先不想打开的话，点「立即检查」手动跑一次，"
+                + "用的也是这一份新代码。" + detail
+        case .skipped:
+            // 这一支从"每次定时换版都欠一次 enable"收窄成了"这台机器欠一次迁移"：代码、指针、还有那个
+            // 不随版本变的入口都已就位，缺的只是把在册任务从"按版本点名"换成走那个入口。换过来之后，
+            // 往后的换版就只是一次文件写入，不再需要人做这一步——所以这句话必须把"一次"说出来，否则
+            // 读者会一直等下一轮同样的交代。
+            return "这一轮没有重新登记定时任务（skipped）：定时那一次跑的就是这个作业本身，"
+                + "在它里头重新登记会把自己这个作业拆掉，所以这一轮只换了代码与指针，把交接留给下一次 enable。"
+                + (record.cliPath.flatMap { trimmed($0) } == nil ? "" : "下一代该跑的那一份已经就位：" + runtimeCopyClause(record) + "。")
+                + "这不是失败，但也不能读成这台机器已经在跑新那一份 —— 在册的作业还是按版本点名那一条。"
+                + "请把「自动更新」开关关掉再打开一次（那就会跑一次 enable），或者让它在下一次人工安装时接手；"
+                + "这一步只做这一次，做完以后换版就不需要再动手。"
+                + "如果这台机器翻来覆去只出现这一句，请" + runtimeReinstall + detail
+        case nil:
+            let raw = trimmed(record.rawStatus ?? "") ?? ""
+            let written = raw.isEmpty ? "这一项没写是什么状态" : "这一项写着的状态是 \(raw)"
+            return "\(written)，这一页认不出来，只能按没换上对待："
+                + "既不能说更新器已经换上，也不能说这次更新失败。"
+                + runtimeConsequence + gate + "请" + runtimeReinstall + detail
+        }
+    }
+
+    /// 这一项在页面上要多少注意力：**只有"换上 + 核对过"是好消息**，
+    /// 读不懂与从没记录过都要人做点什么，`kept`/`skipped` 则既不报错也不报功。
+    static func runtimeAttention(_ snapshot: Snapshot?) -> RuntimeAttention {
+        guard let snapshot else { return .unknown }
+        guard let record = snapshot.runtime else { return .attention }
+        if record.isUsable { return .confirmed }
+        switch record.status {
+        case .kept, .skipped:
+            return .informational
+        case .refreshed, .failed, nil:
+            return .attention
+        }
+    }
+
+    /// 这一项算不算真的换上了（呈现用的色调）：**只有 `refreshed` 且核对过在册任务才算**。
+    static func runtimeIsUsable(_ snapshot: Snapshot?) -> Bool {
+        snapshot?.runtime?.isUsable == true
     }
 
     private static func trimmed(_ text: String) -> String? {
@@ -646,8 +845,13 @@ enum UpdatePanel {
     }
 
     /// 盘上那一份束对面板而言只有三种下场。判据是**里面有几张证书**，不是文件在不在、
-    /// 也不是它多大：一份空文件交给 `NODE_EXTRA_CA_CERTS` 会让 node 在启动期就报错，
-    /// 那是把"每天检查失败一次"换成"每天连启动都启动不了"，比不带这个键更糟。
+    /// 也不是它多大。
+    ///
+    /// 为什么空文件也算"不能用"——本机 node v26.4.0 实测：`NODE_EXTRA_CA_CERTS` 指向一份
+    /// 0 字节文件时 node 照常启动、照常握手，只是一张额外的根也没加；文件不存在时也只多打
+    /// 一行 `Warning: Ignoring extra certs …` 而已，**不会**启动失败。所以危险不是"起不来"，
+    /// 而是"看起来做了、其实什么都没做"：被拦截的机器上它的表现与什么都没设一模一样，状态里
+    /// 却会记着"束已导出"。一张证书都没有的束不能当证据用。
     enum CaBundleOnDisk: Equatable {
         /// 读不出来：不存在、没权限、或不是文本。三种都对面板是同一个结论——不能交给 node。
         case absent
@@ -677,8 +881,10 @@ enum UpdatePanel {
 
     /// 起更新器子进程用的环境：**束能用才带上那个键**。
     ///
-    /// 束不在或空着时返回的就是原环境——**不设**与**设成空串**是两件事（前者的 node 用自己的
-    /// 那份 Mozilla 束照常办事，后者在启动期报错），所以这里不写一个空值去"表示没有"。
+    /// 束不在或空着时返回的就是原环境——**不设**与**设成空串**不是同一件事，但原因不是"空串会
+    /// 让 node 崩"（实测 v26.4.0：空值与没设表现一致，都不影响启动）。区别在继承：从终端把变量
+    /// 带进来的人那份会被空串**静默覆盖掉**，而那正是操作者自己给的信任。所以这里宁可不写这个键，
+    /// 也不写一个空值去"表示没有"。
     /// 反过来，从终端把变量带进来的人那份也不被删掉：那份信任是操作者自己给的，
     /// 面板没有资格替他取消。
     static func caBundleEnvironment(base: [String: String], bundle: CaBundleOnDisk) -> [String: String] {
@@ -729,6 +935,19 @@ private struct UpdaterState: Decodable {
         let detail: String?
     }
 
+    /// 更新器自己那份已安装副本的换版记录（`runtime`，可为 `null`）。
+    /// 八个键与状态文件的 schema 一一对应；缺的都显示为"记录里没写"，不猜。
+    struct Runtime: Decodable {
+        let status: String?
+        let version: String?
+        let cliPath: String?
+        let previousCliPath: String?
+        let agentVerified: Bool?
+        let at: String?
+        let code: String?
+        let detail: String?
+    }
+
     let status: String?
     let code: String?
     let current: String?
@@ -739,6 +958,7 @@ private struct UpdaterState: Decodable {
     let staged: Staged?
     let lastError: LastError?
     let caRoots: CaRoots?
+    let runtime: Runtime?
 }
 
 /// 安装器写的指针 `<状态根>/update-install.json`：面板只从它取更新器的位置。

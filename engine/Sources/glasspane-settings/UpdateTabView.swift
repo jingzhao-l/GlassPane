@@ -30,6 +30,7 @@ struct UpdateTabView: View {
                     failureCard(error)
                 }
                 trustCard
+                runtimeCard
                 updaterCard
             }
             .padding(20)
@@ -318,6 +319,50 @@ struct UpdateTabView: View {
     private var caRootsTone: StatusDotView.Tone {
         guard model.snapshot != nil else { return .neutral }
         return model.caRootsIsUsable ? .good : .warning
+    }
+
+    // MARK: - 更新器自己
+
+    /// 每天跑检查的那份代码是「安装记录指的那一份」，换版换掉的是 `.app` 与 npm 两个包，
+    /// 从不碰它。所以"修更新器的那次发版到没到这台机器上"只有这一项能回答——它没换上的时候
+    /// 上面那一行照样能写"已是最新"，这一页必须把这一句单独说出来。
+    private var runtimeCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader(
+                title: "更新器自身",
+                subtitle: "定时检查跑的是这一份程序自己；换版时它也要跟着换，否则修更新器的那次发版送不到这台机器上。",
+                systemImage: "arrow.2.squarepath"
+            )
+            HStack(alignment: .top, spacing: 8) {
+                StatusDotView(tone: runtimeTone)
+                Text(model.runtimeText)
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("gp-update-runtime")
+                Spacer(minLength: 0)
+            }
+            // 路径只在记录真的写了的时候出现：这一页不给一个猜出来的位置。
+            if let cli = model.runtimeCliPath {
+                PathRowView(label: "自身程序", path: cli, identifierKey: "runtime-cli")
+            }
+        }
+        .consoleCard(tint: runtimeTint)
+    }
+
+    /// 只有"换上且核对过在册任务"是绿点；`kept`/`skipped` 是"按这台机器自己的选择如此"，
+    /// 用中性点而不是红点；读不懂、没换上、从没记录过都要人做点什么，用警示点。
+    private var runtimeTone: StatusDotView.Tone {
+        switch model.runtimeAttention {
+        case .confirmed: return .good
+        case .informational: return .neutral
+        case .attention: return .warning
+        case .unknown: return .neutral
+        }
+    }
+
+    private var runtimeTint: Color? {
+        model.runtimeAttention == .attention ? .orange : nil
     }
 
     // MARK: - 更新器在哪

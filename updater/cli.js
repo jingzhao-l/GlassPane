@@ -20,19 +20,21 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
 import { CODES, EXIT, exitCodeFor } from './lib/codes.js'
 import { UpdaterError, canonicalPath } from './lib/fsutil.js'
 import { effectiveStatus, isOverdue, loadState, nextState, readPointer, saveState, updateSummary } from './lib/state.js'
 import { runCheck } from './lib/check.js'
-import { applyUpdate, buildStagedTree, DEFAULT_BUNDLES, rollbackToBackup } from './lib/apply.js'
+import { applyUpdate, buildStagedTree, checkNpmPrefix, DEFAULT_BUNDLES, rollbackToBackup } from './lib/apply.js'
 import { probeIdle, resolveEngineSocket } from './lib/idle.js'
-import { AGENT_LABEL, DAEMON_JOB_LABEL, DEFAULT_HOUR, DEFAULT_MINUTE, agentPlistPath, readRunningJob, registerAgent, renderAgentPlist, unregisterAgent } from './lib/launchd.js'
+import { AGENT_LABEL, DAEMON_JOB_LABEL, DEFAULT_HOUR, DEFAULT_MINUTE, agentPlistPath, readAgentSchedule, readRunningJob, registerAgent, renderAgentPlist, unregisterAgent } from './lib/launchd.js'
 import { localVersion } from './lib/version.js'
 import { CONSENT_KINDS } from './lib/policy.js'
 import { makeBytesFetcher, makeFetcher, resolveBase } from './lib/source.js'
 import { RELATIVE_RELEASE_PATH } from './lib/check.js'
 import { CA_ENV_VAR, caBundlePath, describeCa, exportCaBundle, usableBundle } from './lib/ca-bundle.js'
+import { agentEntryPath, ensureAgentEntry } from './lib/agent-entry.js'
 
 export const SUBCOMMANDS = ['check', 'apply', 'status', 'rollback', 'enable', 'disable']
 // 防循环标记：重跑的那一次带着它，于是它自己的 TLS 失败只会如实报出原因，不再往上叠一层子进程。
@@ -78,21 +80,23 @@ options
                        unsigned release all refuse
   --at <iso>           override "now" (tests and repro)
   --hour/--minute      schedule for enable (local time, one run per day)
-  --disable            accepted on any command as a no-op alias of disable
+  --disable            alias of the "disable" subcommand; --enable likewise.
+                       They refuse to sit next of a different command — a switch that
+                       promises safety and does nothing is worse than not having it.
   -h, --help
 `
 
 /** Pure argument parse. Returns `{ ok:false, reason }` for anything unusable. */
 export function parseArgs(argv) {
-  const flags = { json: false, auto: false, help: false, consents: [], overrides: {} }
+  const flags = { json: false, auto: false, help: false, consents: [] }
   const positional = []
   for (let i = 0; i < argv.length; i += 1) {
     const token = String(argv[i])
     if (token === '-h' || token === '--help') flags.help = true
     else if (token === '--json') flags.json = true
     else if (token === '--auto') flags.auto = true
-    else if (token === '--disable') flags.overrides.disable = true
-    else if (token === '--enable') flags.overrides.enable = true
+    else if (token === '--disable') flags.disable = true // 选子命令，见下面 parseArgs 末尾的别名处理
+    else if (token === '--enable') flags.enable = true   // 同上；两者同时给是用法错误
     else if (token === '--consent') {
       const value = argv[(i += 1)]
       if (!value) return { ok: false, reason: `--consent needs a value (${CONSENT_KINDS.join(' | ')})` }
@@ -101,7 +105,14 @@ export function parseArgs(argv) {
     else if (['--state-dir', '--state-root', '--apps-dir', '--daemon-bin', '--socket', '--at', '--hour', '--minute'].includes(token)) {
       const value = argv[(i += 1)]
       if (value === undefined) return { ok: false, reason: `${token} needs a value` }
-      flags.overrides[token.replace(/^--/, '')] = value
+      // Onto `flags` itself, keyed by the bare option name — which is exactly how every
+      // consumer reads it (`flags['state-dir']`, `flags.at`, `flags.hour`, `flags.socket`).
+      // These used to land in a separate `flags.overrides` bag that nothing ever read, so
+      // **all six of these CLI options were silently ignored**: `check --state-dir /tmp/x`
+      // resolved the state root to the live `~/.glasspane` and wrote the staged release
+      // *there* (found by running it, 2026-09-29). A documented flag that does nothing is
+      // worse than an absent one — the caller believes they are working on a copy.
+      flags[token.replace(/^--/, '')] = value
     } else if (token.startsWith('--')) {
       return { ok: false, reason: `unknown option ${token}` }
     } else {
@@ -109,7 +120,21 @@ export function parseArgs(argv) {
     }
   }
   if (positional.length > 1) return { ok: false, reason: `expected one command, got ${positional.join(' ')}` }
-  const command = positional[0] ?? null
+  if (flags.disable && flags.enable) {
+    return { ok: false, reason: '--disable and --enable contradict each other; pick one' }
+  }
+  let command = positional[0] ?? null
+  // `--disable` used to be documented as "a no-op alias of disable". A flag that promises
+  // safety and does nothing is worse than not having it — nobody types `updater disable`
+  // afterwards because they believe the switch already fired. It is now a real alias:
+  // it selects the subcommand, and it refuses to sit next of a different one.
+  if (flags.disable || flags.enable) {
+    const alias = flags.disable ? 'disable' : 'enable'
+    if (command !== null && command !== alias) {
+      return { ok: false, reason: `--${alias} cannot be combined with the command ${JSON.stringify(command)}; run "updater ${alias}" on its own` }
+    }
+    command = alias
+  }
   if (command !== null && !SUBCOMMANDS.includes(command)) {
     return { ok: false, reason: `unknown command ${JSON.stringify(command)}; try ${SUBCOMMANDS.join(' | ')}` }
   }
@@ -157,7 +182,7 @@ export function resolveAppsDir({ flags = {}, env = process.env, homeDir = record
  * their own `deps` so the suite never touches a developer's home or the
  * internet.
  */
-export function defaultDeps({ stateRoot, appsDir, env, flags }) {
+export function defaultDeps({ stateRoot, appsDir, env, flags, exportCa = exportCaBundle } = {}) {
   const daemonBin = flags['daemon-bin'] ?? env.GLASSPANE_DAEMON_BIN ?? path.join(appsDir, 'GlassPane Daemon.app', 'Contents', 'MacOS', 'glasspaned')
   return {
     env,
@@ -182,10 +207,12 @@ export function defaultDeps({ stateRoot, appsDir, env, flags }) {
     unregisterAgent,
     renderAgentPlist,
     agentPlistPath,
+    ensureAgentEntry,
+    readAgentSchedule,
     // §9: the root bundle node needs on a TLS-intercepting machine, exported by
     // this module alone and refreshed at the two points that can do it without a
     // person in the loop — registering the agent, and finishing a swap.
-    refreshCaBundle: () => exportCaBundle({ stateRoot, probeUrl: releaseProbeUrl(env) }),
+    refreshCaBundle: () => exportCa({ stateRoot, probeUrl: releaseProbeUrl(env) }),
     usableCaBundle: () => usableBundle(caBundlePath(stateRoot)),
     now: () => new Date(),
   }
@@ -276,6 +303,10 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         stateRoot,
         appsDir,
         bundles: merged.bundles,
+        // §11: the updater's own copy moves with a successful swap, and whether a launchd job may be
+        // (re-)registered is this run's answer, not something the step may decide for itself.
+        env,
+        autoDisabled: envDisabled,
         now,
         consents: flags.consents,
         trigger: flags.auto ? 'auto' : 'manual',
@@ -288,6 +319,16 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         helloCall: merged.helloCall,
         toolsList: merged.toolsList,
         npm: merged.npm,
+        /**
+         * The npm pre-flight is named here rather than left to `applyUpdate`'s default, which decides
+         * whether to run itself by asking whether `npm` is the real installer. That default still exists
+         * (it keeps ~20 sequence tests from shelling out to a developer's npm), but a caller this important
+         * must not depend on it: adding `npm:` to `defaultDeps` later would have switched the guard off in
+         * production with nothing red anywhere. `test/cli.test.mjs` drives this seam, and
+         * `test/default-deps.test.mjs` keeps `defaultDeps` itself honest.
+         */
+        preflightNpm: merged.preflightNpm ?? checkNpmPrefix,
+        restoreNpm: merged.restoreNpm,
         copyFn: merged.copyFn,
         refreshCa: merged.refreshCaBundle,
       })
@@ -349,11 +390,32 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         // first network gate every day and still look like a running agent.
         const caRoots = merged.refreshCaBundle()
         const bundle = merged.usableCaBundle()
+        const plistPath = merged.agentPlistPath({ homeDir: deps.homeDir ?? recordHomeDir() })
+        /**
+         * The job is pointed at the stable entry, never at a versioned script — that is what lets §11
+         * move the updater by rewriting one JSON file. `merged.cliPath` is only a fallback for a caller
+         * that cannot install the entry at all (a test double, a read-only state root), and when it is
+         * used the operator hears which of the two shapes got registered, because the two differ in
+         * whether the *next* version will need this command again.
+         */
+        const entry = merged.ensureAgentEntry({ stateRoot })
+        const cliPath = entry.ok ? entry.path : (merged.cliPath ?? fileURLToPath(import.meta.url))
+        // The daily hour is *preserved*, not re-chosen. A bare `enable` carries no `--hour`, and this
+        // branch is what §11's handover runs on every self-update — taking the constant here would move
+        // a machine installed with `--hour 3` to midday without a word in any record. An existing
+        // definition that cannot be read falls back to the documented default, and says that it did.
+        const asked = { hour: flags.hour === undefined ? null : Number(flags.hour), minute: flags.minute === undefined ? null : Number(flags.minute) }
+        const standing = asked.hour === null || asked.minute === null ? standingSchedule(merged, plistPath) : null
+        const hour = asked.hour ?? standing?.hour ?? DEFAULT_HOUR
+        const minute = asked.minute ?? standing?.minute ?? DEFAULT_MINUTE
+        const scheduleNote = standing && standing.hour === null
+          ? `the daily time is ${hour}:${String(minute).padStart(2, '0')} because ${standing.why}; pass --hour and --minute to choose one`
+          : null
         const plistText = merged.renderAgentPlist({
-          cliPath: merged.cliPath ?? new URL(import.meta.url).pathname,
+          cliPath,
           stateRoot,
-          hour: Number(flags.hour ?? DEFAULT_HOUR),
-          minute: Number(flags.minute ?? DEFAULT_MINUTE),
+          hour,
+          minute,
           label: AGENT_LABEL,
           // The *file* decides what the job is handed, not this run's export record:
           // an export that produced nothing keeps the previous bundle in place, and
@@ -362,12 +424,23 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         })
         agent = merged.registerAgent({
           label: AGENT_LABEL,
-          plistPath: merged.agentPlistPath({ homeDir: deps.homeDir ?? recordHomeDir() }),
+          plistPath,
           plistText,
+          cliPath,
           uid: merged.uid,
           run: merged.runLaunchctl,
         })
+        if (agent.ok && !entry.ok) {
+          agent = { ...agent, message: `${agent.message}; the job was registered against a versioned script because ${entry.message} — the next update of the updater itself will need one manual "enable" because of it` }
+        }
         if (agent.ok) exportedCa = caRoots
+        if (scheduleNote) agent = { ...agent, message: `${agent.message}${agent.message ? '; ' : ''}${scheduleNote}` }
+        // A refused registration writes no state, and that is deliberate even though the root bundle
+        // *file* has already been rewritten by this point: `caRoots` is the record of the trust handed
+        // to a job, and launchd took none — publishing a record here would create the first state file
+        // on a machine where nothing is registered, and the panel would then wait on an agent nobody
+        // installed. The refusal itself (with launchd's own sentence) is what the person is told, and
+        // the next successful `enable` re-exports and records.
       }
       if (!agent.ok) {
         return {
@@ -397,6 +470,11 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         ok: true,
         status: saved.state.status,
         code: null,
+        // Whether the *loaded* job was read back and seen to name this registration. `null` on the
+        // disable path (no job was registered, so there is nothing to verify), `false` when launchd
+        // answered bootstrap 0 but the book could not be read. The installer prints "registered" from
+        // its own template, and it needs this fact to know whether it may say so without a caveat.
+        agentVerified: disable ? null : agent.verified ?? null,
         message: disable
           ? `automatic update is off${agent.message ? ` (${agent.message})` : ''}: "updater check" and "updater apply" still work by hand`
           : `automatic update is on${agent.message ? ` (${agent.message})` : ''}${ca ? `; ${ca.summary} — ${ca.remedy}` : ''}`,
@@ -408,6 +486,28 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
     default:
       return { status: null, code: null, usageError: true, message: `unknown command ${JSON.stringify(command)}` }
   }
+}
+
+/**
+ * The daily time the already-installed definition asks for, or the reason there is no answer.
+ *
+ * Returning the *why* is the point: a silent fallback to 12:00 would be an instruction the person never
+ * gave, said as if it were theirs. The caller puts the reason into the sentence the operator reads.
+ */
+export function standingSchedule(merged, plistPath) {
+  if (typeof merged.readAgentSchedule !== 'function') {
+    return { hour: null, minute: null, why: `${plistPath} could not be consulted (no schedule reader is wired into this build)` }
+  }
+  let got = null
+  try {
+    got = merged.readAgentSchedule({ plistPath })
+  } catch (error) {
+    return { hour: null, minute: null, why: `reading ${plistPath} threw (${error?.message ?? String(error)})` }
+  }
+  if (!got || !Number.isInteger(got.hour) || !Number.isInteger(got.minute)) {
+    return { hour: null, minute: null, why: `${plistPath} carries no readable StartCalendarInterval` }
+  }
+  return { hour: got.hour, minute: got.minute, why: null }
 }
 
 /** `installer-pointer-stale` / missing pointer, mapped onto the closed enum. */
@@ -458,25 +558,46 @@ export function jsonLine(outcome) {
  * 道门上失败，而它看起来像"没有可用更新"。这是真机跑出来的形状，不是假设。
  *
  * 三条边界，都是为了不把"追加信任"变成"擅自改信任"：
- *   · 只在调用方**没有**给 `NODE_EXTRA_CA_CERTS` 时介入。人在终端上自己指了一份，方向就归他；
+ *   · 调用方自己指了**别处**的束就不介入（`wanted !== record.path`）：方向归他，我们刷新不了他的
+ *     信任；指的就是我们自己那份路径的照旧重来——那正是照着 remedy 设过环境变量的人要的那一次恢复。
+ *     防循环靠的是 `GLASSPANE_CA_REEXEC`，不是靠比较路径。
  *   · 只重来一次（`GLASSPANE_CA_REEXEC=1` 是防循环标记，子进程带着它就不会再套一层）；
  *   · 导不出可用的束就不重跑：把这次的导出结果写进状态，原来的拒绝照常返回。
  *
  * 返回 null 表示"没有恢复、请按原样输出"；返回数字表示"子进程已经替我把 stdout/退出码
  * 演完了"——`--json` 那一行也只由子进程写一次，契约不被复制第二遍。
  */
-export function recoverFromTlsFailure({ outcome, argv, env, refresh, spawnChild, onRecord } = {}) {
+export function recoverFromTlsFailure({ outcome, argv, env, refresh, spawnChild, onRecord, stderr = null } = {}) {
   // 只读结构化事实。匹配我自己写的句子＝文案一改判据就失效，那正是这一路要避免的形状。
   if (!outcome || outcome.tlsVerification !== true) return null
-  if (String(env[CA_ENV_VAR] ?? '') !== '') return null
   if (String(env[REEXEC_MARKER] ?? '') === '1') return null
   if (typeof refresh !== 'function' || typeof spawnChild !== 'function') return null
 
   const record = refresh()
-  if (typeof onRecord === 'function') onRecord(record)
+  // 写状态失败不能顺手取消重跑，但也不能吞掉：那句话并进结果消息里，读的人看得见"这次没落盘"。
+  let recorded = true
+  if (typeof onRecord === 'function') {
+    try {
+      onRecord(record)
+    } catch (error) {
+      recorded = false
+      record.recordWriteError = String(error?.message ?? error)
+    }
+  }
   if (!record || record.status !== 'ok' || !record.path) return null
-
+  const wanted = String(env[CA_ENV_VAR] ?? '')
+  if (wanted !== '' && wanted !== record.path) {
+    // 操作者自己指到别处的束：重跑只会用他那一份，我们刷新不了他的信任，就不代为决定。
+    // 等号那一侧不是可有可无：终端里照着 remedy 设过同一份路径的人，等的就是这次恢复。
+    return null
+  }
   const child = spawnChild([...argv], { ...env, [CA_ENV_VAR]: record.path, [REEXEC_MARKER]: '1' })
+  if (!recorded) {
+    // 重跑照做（那才是用户要的恢复），但"这次没能在状态里留下证据"必须说出来 ——
+    // 只写 stderr，`--json` 那一行仍然恰好一行、且只由子进程写。
+    stderrFor(stderr).write(`updater: 证书恢复已重跑，但导出结果没能写进状态文件（${record.recordWriteError ?? '原因未知'}）；`
+      + `下一次 \`updater enable\` 之前，面板与 gp_diagnose 看到的 caRoots 仍是上一次的记录。\n`)
+  }
   const status = child && typeof child.status === 'number' ? child.status : null
   if (status === null) {
     // 被信号打断或压根没起来：绝不退 0。一个"看起来完成了每日检查"的 0 会把这次事故抹掉。
@@ -520,9 +641,10 @@ export async function main({ argv = process.argv.slice(2), env = process.env, st
       argv,
       env,
       stateRoot: root,
-      refresh: deps.refreshCaBundle ?? (() => exportCaBundle({ stateRoot: root, probeUrl: null })),
+      refresh: deps.refreshCaBundle ?? (() => exportCaBundle({ stateRoot: root, probeUrl: releaseProbeUrl(env) })),
       spawnChild: deps.spawnChild
-        ?? ((childArgs, childEnv) => spawnSync(process.execPath, [new URL(import.meta.url).pathname, ...childArgs], { env: childEnv, stdio: 'inherit' })),
+        ?? ((childArgs, childEnv) => spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...childArgs], { env: childEnv, stdio: 'inherit' })),
+      stderr,
       onRecord: (record) => {
         // 导不出也要留痕：面板与 gp_diagnose 靠这条说话，否则这台机器的失败只剩一句猜测。
         const stamp = new Date()
@@ -550,7 +672,7 @@ export async function main({ argv = process.argv.slice(2), env = process.env, st
 let invokedDirectly = false
 try {
   invokedDirectly = Boolean(process.argv[1])
-    && fs.realpathSync(process.argv[1]) === fs.realpathSync(new URL(import.meta.url).pathname)
+    && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url))
 } catch {
   invokedDirectly = false
 }

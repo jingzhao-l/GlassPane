@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { DEFAULT_BASE, REPO_SLUG, UPDATE_BASE_ENV, assertAssetUrl, assertRedirectTarget, describeTransportFailure, isTlsVerificationFailure, makeBytesFetcher, makeFetcher, resolveBase } from '../lib/source.js'
+import { DEFAULT_BASE, REPO_SLUG, UPDATE_BASE_ENV, assetPathNamesPinnedRelease, assertAssetUrl, assertRedirectTarget, describeTransportFailure, isTlsVerificationFailure, makeBytesFetcher, makeFetcher, resolveBase } from '../lib/source.js'
 import { CODES } from '../lib/codes.js'
 import { UpdaterError } from '../lib/fsutil.js'
 import { PINNED_PATH, bytesResponse, jsonResponse, startServer } from './helpers.mjs'
@@ -253,4 +253,215 @@ test('an answer with no statusText still names the status it answered with', asy
   const error = await captureAsync(() => fetcher(URL_UNDER_TEST))
   assert.equal(error.message.includes('undefined'), false, `"answered undefined undefined" tells nobody that a server answered ${500}: ${error.message}`)
   assert.match(error.message, /answered 500/)
+})
+
+/**
+ * 真机 2026-09-29 查出来的那条：GitHub 的 `browser_download_url` 是
+ * `https://github.com/<slug>/releases/download/<tag>/<file>`，与钉死的 base（`https://api.github.com/repos/<slug>`）
+ * **不是同一个 origin**。原规则只认 same-origin ⇒ 每一份真实 release 都在资产这一关被拒，
+ * 而当时所有夹具写的是 `api.github.com/.../releases/download/…` —— GitHub 根本不用的形状。
+ * 所以这一节按**真机取回的报文**来断言（下面三条 URL 逐字来自 `GET releases/latest` 的响应）。
+ */
+test('the URL shapes GitHub actually returns are accepted, and the widening stays bounded', () => {
+  const base = 'https://api.github.com/repos/' + REPO_SLUG
+  const realAsset = 'https://github.com/jingzhao-l/GlassPane/releases/download/v1.5.1/GlassPane-1.5.1.tar.gz'
+  const realSums = 'https://github.com/jingzhao-l/GlassPane/releases/download/v1.5.1/SHA256SUMS-1.5.1.txt'
+  const realTarball = 'https://api.github.com/repos/jingzhao-l/GlassPane/tarball/v1.5.1'
+  assert.equal(assertAssetUrl(realAsset, { base }), realAsset, '真实的资产 URL 必须放行，否则自动更新在每一份真实 release 上都是死的')
+  assert.equal(assertAssetUrl(realSums, { base }), realSums)
+  assert.equal(assertAssetUrl(realTarball, { base }), realTarball, '源码包那一形状同属钉死的族')
+
+  // 放宽的三条边界，缺一条就红：
+  // ① 不是钉死的 GitHub API 基址（操作者自建的镜像）⇒ 仍按 same-origin，github.com 的资产要拒。
+  const mirror = 'https://mirror.example.test/repos/' + REPO_SLUG
+  assert.equal(capture(() => assertAssetUrl(realAsset, { base: mirror })).code, CODES.assetHostUnpinned,
+    '镜像基址不该顺手获得"任何 GitHub 主机"这层放宽')
+  assert.equal(assertAssetUrl('https://mirror.example.test/releases/pkg-1.5.1.tar.gz', { base: mirror }),
+    'https://mirror.example.test/releases/pkg-1.5.1.tar.gz', '镜像仍能用——前提是报文指回镜像自己')
+  // ② 在 GitHub 的族里，但路径不是**这个仓**的那两条形状 ⇒ 拒（报文不能替我们决定取谁的仓）。
+  for (const hostile of [
+    'https://github.com/someone-else/GlassPane/releases/download/v1.5.1/GlassPane-1.5.1.tar.gz',
+    'https://github.com/jingzhao-l/other-repo/releases/download/v1.5.1/x.tar.gz',
+    'https://api.github.com/repos/jingzhao-l/GlassPane/releases/download/whatever/../x',
+    'https://objects.githubusercontent.com/anything',
+    'https://github.com/jingzhao-l/GlassPane/releases/download/v1.5.1/',
+    'https://github.evil.test/jingzhao-l/GlassPane/releases/download/v1.5.1/x.tar.gz',
+  ]) {
+    assert.equal(capture(() => assertAssetUrl(hostile, { base })).code, CODES.assetHostUnpinned,
+      `这条该拒：${hostile}`)
+  }
+  // ③ 明文一律拒，哪怕路径形状对。
+  assert.equal(capture(() => assertAssetUrl(realAsset.replace('https://', 'http://'), { base })).code, CODES.assetHostUnpinned)
+
+  // 大小写与百分号编码不许成为绕过口：`/JingZhao-L/glasspane/...` 在 GitHub 上指向同一个仓，
+  // 所以它**要么按同一个规则放行、要么按同一个规则拒绝**——但不能因为正则没解码就静默通过。
+  assert.equal(assetPathNamesPinnedRelease('/jingzhao-l/GlassPane/releases/download/v1/x'), true)
+  assert.equal(assetPathNamesPinnedRelease('/%6Aingzhao-l/GlassPane/releases/download/v1/x'), true,
+    '解码后仍是那个 slug：GitHub 会把它当同一个仓，我们也一样')
+  assert.equal(assetPathNamesPinnedRelease('/other/GlassPane/releases/download/v1/x'), false)
+  assert.equal(assetPathNamesPinnedRelease('/jingzhao-l/GlassPane/releases/download/v1/x/y'), false,
+    '文件名里再藏一层路径不算资产形状')
+})
+
+/* ---------------------------- 下载的两个时钟（真机 09-29 被 120s 总时长掐死过） */
+
+/**
+ * 一个"按节奏吐字节"的假传输，接口形状与 `response.body.getReader()` 一致：
+ * `hangAfter` 之后读操作挂住（收到 abort 信号才失败），这就是"代理活着但不传数据"。
+ * `declaredBytes` 让响应带上一个真 GitHub 资产都带的那个 `content-length`；`endless` 让它在
+ * 声明的长度之后继续滴（那正是"封套说 89 字节却永远流不完"的形状）。
+ */
+function streamingResponse(chunks, { gapMs = 0, hangAfter = null, signal = null, declaredBytes = null, endless = false } = {}) {
+  let index = 0
+  const reader = {
+    read: async () => {
+      if (hangAfter !== null && index >= hangAfter) {
+        return new Promise((_resolve, reject) => {
+          const onAbort = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+          if (signal?.aborted) onAbort()
+          else signal?.addEventListener('abort', onAbort, { once: true })
+        })
+      }
+      if (gapMs) await new Promise((resolve) => setTimeout(resolve, gapMs))
+      // 真 fetch 在 abort 之后读一定失败；假的不失败的话，"计时器到了"这一路就只是空转。
+      if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' })
+      if (index >= chunks.length) {
+        if (!endless) return { done: true, value: undefined }
+        const value = chunks[chunks.length - 1]
+        index += 1
+        return { done: false, value }
+      }
+      const value = chunks[index++]
+      return { done: false, value }
+    },
+  }
+  const headers = declaredBytes === null ? undefined : { get: (name) => String(name).toLowerCase() === 'content-length' ? String(declaredBytes) : null }
+  return { ok: true, status: 200, url: 'https://github.com/jingzhao-l/GlassPane/releases/download/v1.5.1/GlassPane-1.5.1.tar.gz', headers, body: { getReader: () => reader } }
+}
+
+test('a slow-but-alive download is not killed: the stall clock re-arms on every chunk', async () => {
+  const chunk = new Uint8Array(64 * 1024).fill(7)
+  const fetchImpl = async (url, { signal } = {}) => streamingResponse(Array.from({ length: 6 }, () => chunk), { gapMs: 30, signal })
+  // 每段之间停 30ms（总共 180ms），停摆计时是 100ms：逐段重置才活得下来。
+  const fetchBytes = makeBytesFetcher(fetchImpl, { stallMs: 100, timeoutMs: 5_000 })
+  const started = Date.now()
+  const got = await fetchBytes('https://github.com/x/y')
+  const elapsed = Date.now() - started
+  assert.equal(got.length, 6 * 64 * 1024, '六段都要拿到')
+  assert.equal(got.every((byte) => byte === 7), true, '拼起来的字节要按顺序完整')
+  assert.ok(elapsed > 100, `这一趟必须跑过 stallMs（实到 ${elapsed}ms），否则它没有证明"逐段重置"这件事`)
+  assert.ok(elapsed < 5_000, '总时长没到，说明它不是被兜底计时放过的')
+})
+
+test('a stalled download is refused by the stall clock, naming how much arrived', async () => {
+  const started = Date.now()
+  const fetchImpl = async (url, { signal } = {}) => streamingResponse([new Uint8Array(64 * 1024).fill(1)], { hangAfter: 1, signal })
+  const fetchBytes = makeBytesFetcher(fetchImpl, { timeoutMs: 60_000, stallMs: 40 })
+  const error = await fetchBytes('https://github.com/x/y').then(() => null, (e) => e)
+  assert.ok(error, '挂住的传输必须被拒，不能一直挂着')
+  assert.equal(error.code, CODES.releaseUnreachable)
+  assert.match(error.message, /no bytes arrived for/, `要说是"停住了"，不是那句 "This operation was aborted"：${error.message}`)
+  assert.match(error.message, /64 KiB/, `要说清已经收到多少：${error.message}`)
+  assert.ok(Date.now() - started < 5_000, `停住的连接要在 stallMs 内被发现（实际 ${Date.now() - started}ms）`)
+  assert.ok(!error.message.includes('undefined'))
+})
+
+test('an endless trickle still hits the ceiling, so the daily job cannot hang forever', async () => {
+  const started = Date.now()
+  let produced = 0
+  const infinite = async (url, { signal } = {}) => ({
+    ok: true,
+    status: 200,
+    url,
+    body: {
+      getReader: () => ({
+        read: async () => {
+          if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' })
+          await new Promise((resolve) => setTimeout(resolve, 2))
+          if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' })
+          index += 1
+          produced = index
+          return { done: false, value: new Uint8Array(1024) }
+        },
+      }),
+    },
+  })
+  let index = 0
+  const fetchBytes = makeBytesFetcher(infinite, { timeoutMs: 60, stallMs: 10_000 })
+  const error = await fetchBytes('https://github.com/x/y').then(() => null, (e) => e)
+  assert.ok(error, '永远在滴流的服务器不能把每日作业吊死')
+  assert.match(error.message, /did not finish within/, `要说清是总时长到了：${error.message}`)
+  assert.ok(produced > 0, '这一段该确实收到过字节，否则测的是别的东西')
+  assert.ok(Date.now() - started < 5_000, `总时长到了就要说（实际 ${Date.now() - started}ms）`)
+})
+
+test('a transport with no stream body still returns its bytes', async () => {
+  const bytes = new Uint8Array([1, 2, 3, 4])
+  const fetchBytes = makeBytesFetcher(async () => ({
+    ok: true, status: 200, url: 'https://github.com/x/y', arrayBuffer: async () => bytes,
+  }), { timeoutMs: 5_000, stallMs: 5_000 })
+  assert.deepEqual([...await fetchBytes('https://github.com/x/y')], [1, 2, 3, 4])
+})
+
+/* --------- 三个时钟各判各的：停摆 / 太慢 / 兜底总时长（#59：ceiling 不能再当主判据） */
+
+// REVERSE MUTATION: delete the `if (budget > timeoutMs) armCeiling(budget)` widening — this fixture's stream
+// is longer than the ceiling it was handed (200ms) but comfortably above the rate floor, which is exactly the
+// shape that killed a real 26 KiB/s download of the 24 MiB archive at the 900s cap. The refusal wording turns
+// into the ceiling's sentence and `got.length` never gets to 12 KiB.
+test('a download that declares its length gets the time its own rate needs, not the default ceiling', async () => {
+  const declared = 12 * 1024
+  const chunk = new Uint8Array(1024).fill(3)
+  const fetchImpl = async (url, { signal } = {}) => streamingResponse(Array.from({ length: 12 }, () => chunk), { gapMs: 30, signal, declaredBytes: declared })
+  // 1 KiB/s 的下限 × 12 KiB ⇒ 预算 18s；默认兜底只有 200ms，所以这条只能靠"按声明长度反解"活下来。
+  const fetchBytes = makeBytesFetcher(fetchImpl, { timeoutMs: 200, stallMs: 10_000, minRateBps: 1024 })
+  const started = Date.now()
+  const got = await fetchBytes('https://github.com/x/y')
+  assert.equal(got.length, declared, '十二段都要拿到：它没有被兜底计时掐掉')
+  assert.ok(Date.now() - started > 200, `这一趟必须跑过那个默认 ceiling（实到 ${Date.now() - started}ms），否则它没有证明预算被放宽`)
+})
+
+test('a live but crawling download is refused for being too slow, and the sentence says what it measured', async () => {
+  const started = Date.now()
+  const endless = async (url, { signal } = {}) => streamingResponse([new Uint8Array(10).fill(9)], { gapMs: 30, signal, endless: true, declaredBytes: 4096 })
+  const fetchBytes = makeBytesFetcher(endless, { timeoutMs: 5_000, stallMs: 60_000, minRateBps: 1000, rateWindowMs: 40, rateWindowsBeforeRefusal: 2 })
+  const error = await fetchBytes('https://github.com/x/y').then(() => null, (e) => e)
+  assert.ok(error, '一直滴、但慢到这一整天都跑不完的流必须被拒')
+  assert.equal(error.code, CODES.releaseUnreachable)
+  assert.match(error.message, /too slow to be worth finishing/, error.message)
+  assert.match(error.message, /under the 1\.0 KiB\/s/, `要说出下限是多少：${error.message}`)
+  assert.match(error.message, /of 4 KiB declared/, `要说清收到了多少、声明了多少：${error.message}`)
+  assert.ok(!/no bytes arrived/.test(error.message), '这不是停摆：三条判据各说一句，说错就等于没闸')
+  assert.ok(!/did not finish within/.test(error.message), `这也不是兜底总时长：${error.message}`)
+  assert.ok(Date.now() - started < 2_000, `两个窗口就该发现它慢（实际 ${Date.now() - started}ms）`)
+})
+
+test('the rate floor lets a stream that is merely unhurried through', async () => {
+  // 控制对：一条永远正确的"太慢"断言等于没有判据，所以这里放行的必须是同一段代码。
+  const chunk = new Uint8Array(512).fill(5)
+  const fetchImpl = async (url, { signal } = {}) => streamingResponse(Array.from({ length: 6 }, () => chunk), { gapMs: 10, signal, declaredBytes: 6 * 512 })
+  const fetchBytes = makeBytesFetcher(fetchImpl, { timeoutMs: 60_000, stallMs: 60_000, minRateBps: 1000, rateWindowMs: 25, rateWindowsBeforeRefusal: 2 })
+  const got = await fetchBytes('https://github.com/x/y')
+  assert.equal(got.length, 6 * 512)
+})
+
+// REVERSE MUTATION: drop the `Math.min(..., maxCeilingMs)` clamp — 1 GiB at the default floor is 27 hours,
+// so the ceiling below stops being a ceiling. Widening exists to stop the backstop from being the primary
+// criterion; an unbounded widening does not soften it, it removes it.
+test('a widened ceiling is still bounded: an absurd declared length cannot buy hours', async () => {
+  const started = Date.now()
+  // 500 × 1 KiB every 2ms ≈ one second at ~500 KiB/s — comfortably above the floor, and far past the 200ms
+  // cap this call asks for. With the clamp the ceiling fires at 200ms and the refusal names it; with the
+  // clamp removed the ceiling is 27 hours, so the stream simply *finishes* and there is no error at all.
+  // The stream is deliberately **finite**: a control whose failure mode is "hang" would spend the CI job's
+  // whole timeout instead of pointing at the guard that went missing.
+  const chunk = new Uint8Array(1024).fill(1)
+  const lots = async (url, { signal } = {}) => streamingResponse(Array.from({ length: 500 }, () => chunk), { gapMs: 2, signal, declaredBytes: 1024 * 1024 * 1024 })
+  const fetchBytes = makeBytesFetcher(lots, { timeoutMs: 60, maxCeilingMs: 200, stallMs: 60_000, rateWindowMs: 60_000 })
+  const error = await fetchBytes('https://github.com/x/y').then(() => null, (e) => e)
+  assert.ok(error, '离谱的声明长度不许把下载变成没有上限的等待')
+  assert.match(error.message, /did not finish within 200ms/, `要说清真正拦住它的那条上限：${error.message}`)
+  assert.match(error.message, /widened to the 200ms/, `要说预算被放宽过、也到顶了：${error.message}`)
+  assert.match(error.message, /of the 1024\.0 MiB this response declared/, error.message)
+  assert.ok(Date.now() - started < 5_000, `到上限就该停（实际 ${Date.now() - started}ms）`)
 })

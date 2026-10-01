@@ -141,7 +141,15 @@ export function loadState(stateRoot) {
   } catch (error) {
     throw new UpdaterError(CODES.stateWriteUnverified, `update-state.json at ${stateFile} is not valid JSON (${error.message}); re-run the installer if this persists`)
   }
-  assertValidState(parsed)
+  // Reads are lenient about keys this version does not know, writes are not — see `assertValidState`.
+  // The case this is for is §11's two-step handover: the scheduled run writes a newer document and the
+  // job the book still names is the older updater, which has to go on answering rather than failing to
+  // read its own state file.
+  try {
+    assertValidState(parsed, loadSchema(), { ignoreUnknownProperties: true })
+  } catch (error) {
+    throw new UpdaterError(CODES.stateWriteUnverified, `${error.message} — read from ${stateFile}: the file is not a state this version can act on, so nothing was reported from it`)
+  }
   return { state: parsed, existed: true, mode: modeOf(stateFile) }
 }
 

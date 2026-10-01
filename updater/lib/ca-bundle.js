@@ -17,6 +17,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
+import crypto from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 
 import { CODES } from './codes.js'
@@ -59,8 +60,96 @@ export function countCertificates(text) {
 }
 
 /**
- * 这个文件现在能不能交给 node。判据是**内容**不是退出码也不是文件大小：一份 0 字节的
- * `NODE_EXTRA_CA_CERTS` 会让 node 在启动期报错，等于把"每天失败一次"换成"每天启动失败一次"。
+ * ASN.1 for `OBJECT IDENTIFIER 2.5.29.19` (basicConstraints) — 6 bytes, specific
+ * enough that a random hit inside a signature is not a realistic way to misclassify
+ * a certificate. The full marker, not just the OID body, is what makes this a check
+ * about "this certificate declares basic constraints" rather than "these bytes occur".
+ */
+const BASIC_CONSTRAINTS_OID = Buffer.from('0603551d13', 'hex')
+
+/**
+ * Split PEM text into individual certificate blocks (the only unit node can judge), each carrying
+ * its own trailing newline. Joining the result back must reproduce a readable bundle: an earlier
+ * version of this function dropped the newline between blocks, so the written file read
+ * `…END CERTIFICATE------BEGIN CERTIFICATE-----` and node rejected the **whole** bundle
+ * (`PEM routines::bad end line`) — the real machine's probe caught it, my fixtures did not,
+ * because a byte count and a marker count both still said 163.
+ */
+export function certificateBlocks(pem) {
+  const text = String(pem ?? '')
+  const re = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g
+  const out = []
+  let match
+  while ((match = re.exec(text)) !== null) out.push(`${match[0]}\n`)
+  return out
+}
+
+/**
+ * Can this certificate anchor a chain for node?
+ *
+ * `ca` (basicConstraints CA:TRUE) is the only thing OpenSSL's path builder accepts for a
+ * trust anchor. Measured on this machine (2026-09-29, `probe-nonca-anchor.sh`): handing node a
+ * self-signed `CA:FALSE` certificate as the *only* extra anchor does not make the chain it
+ * signed verify — the handshake dies with `INVALID_PURPOSE`. So dropping a proven `CA:FALSE`
+ * certificate removes nothing that could ever have been used, while leaving it in the bundle
+ * makes "this machine trusts N roots" overstate what node will act on.
+ *
+ * Anything we cannot judge stays in: an unparsable block adds no trust anyway (node ignores
+ * it silently, measured), and a certificate that declares no basicConstraints at all — a legacy
+ * root — must not be dropped by a guess. The rule therefore only ever removes what is proven
+ * useless, never what is merely unfamiliar.
+ */
+export function anchorVerdict(block) {
+  let cert
+  try {
+    cert = new crypto.X509Certificate(block)
+  } catch {
+    return { keep: true, reason: 'unparsable' }
+  }
+  if (cert.ca === true) return { keep: true, reason: 'ca' }
+  const declares = Buffer.isBuffer(cert.raw) && cert.raw.includes(BASIC_CONSTRAINTS_OID)
+  if (!declares) return { keep: true, reason: 'no-basic-constraints' }
+  return { keep: false, reason: 'not-a-ca' }
+}
+
+/**
+ * The bundle as node can actually use it, plus the counts that make the filtering auditable.
+ * Order and bytes of the kept blocks are preserved; the join is what gets written and hashed.
+ */
+export function filterToAnchors(pem) {
+  const blocks = certificateBlocks(pem)
+  const kept = []
+  const dropped = []
+  const undetermined = []
+  for (const block of blocks) {
+    const verdict = anchorVerdict(block)
+    if (verdict.keep) {
+      kept.push(block)
+      if (verdict.reason !== 'ca') undetermined.push(verdict.reason)
+    } else {
+      dropped.push(verdict.reason)
+    }
+  }
+  return {
+    pem: kept.join(''),
+    total: blocks.length,
+    kept: kept.length,
+    dropped: dropped.length,
+    undetermined: undetermined.length,
+  }
+}
+
+/**
+ * 这个文件现在能不能交给 node。判据是**里面有几张证书**，不是文件在不在、也不是它多大。
+ *
+ * 理由要说准（本机 node v26.4.0 实测，`probe-ca-env3.sh` 可复现）：一份 0 字节的
+ * `NODE_EXTRA_CA_CERTS` **不会**让 node 在启动期报错——它能正常起、正常做 TLS 握手，只是
+ * 一张额外的根都没加进去；文件根本不存在时 node 也只往 stderr 打一行
+ * `Warning: Ignoring extra certs …`，不崩。把"空束"写成"启动失败"是我编的，已删。
+ *
+ * 那为什么仍然判它不可用：一台真被拦截的机器上，空束的表现与"什么都没做"**一模一样**——检查
+ * 照样倒在第一道门上，而状态里却记着"束已导出"。那种记录会把人支去查网络，而缺的是信任。
+ * 一张都没有的束不能证明任何事，所以它不是 `ok`。
  */
 export function usableBundle(bundlePath, { readFile = (p) => fs.readFileSync(p, 'utf8') } = {}) {
   let text
@@ -78,11 +167,13 @@ export function usableBundle(bundlePath, { readFile = (p) => fs.readFileSync(p, 
  * "束写好了但仍连不通"（拦截根不在这两个钥匙串里，或网络真的断了），后两者是"这台机器上导不出
  * 东西"。把它们混成一句，读的人就只能猜。
  */
-export function describeCa(record) {
+export function describeCa(record, { bundlePath = null } = {}) {
   if (!record) {
     return {
       summary: 'this install has never exported a root bundle for node',
-      remedy: 'run the installer again, or "updater enable": either one re-exports <stateRoot>/ca-roots.pem and re-registers the agent with it.',
+      remedy: bundlePath
+        ? `run the installer again, or "updater enable": either one re-exports ${bundlePath} and re-registers the agent with it.`
+        : 'run the installer again, or "updater enable": either one exports the machine\'s root bundle as ca-roots.pem inside your update state root (the stateRoot field of "updater status --json" names that directory) and re-registers the agent with it.',
     }
   }
   const where = record.path ? ` ${record.path}` : ''
@@ -112,7 +203,7 @@ export function describeCa(record) {
     case 'probe-failed':
       return {
         summary: `${record.certs} root certificate(s) were exported${where}, but a node started with them could not reach the release endpoint (${record.detail ?? 'no reason reported'})`,
-        remedy: 'the intercepting root is not in the system keychains, or the network really is down. Import it ("sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain <root>"), or export NODE_EXTRA_CA_CERTS to a bundle you control before invoking the updater.',
+        remedy: 'the intercepting root is not in the system keychains, or the network really is down. Import it ("sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain /path/to/the-intercepting-root.pem"), or export NODE_EXTRA_CA_CERTS to a bundle you control before invoking the updater.',
       }
     default:
       // 枚举外的一切都是"这份记录读不懂"。当成 ok 就是规格 §9.7 明令禁止的那种静默放行。
@@ -199,8 +290,18 @@ export function exportCaBundle({
     return { status: 'unavailable', certs: 0, path: null, exportedAt: now(), detail: 'the "security" command was not found on this machine' }
   }
 
-  const pem = chunks.join('')
-  const certs = countCertificates(pem)
+  const raw = chunks.join('')
+  // §9.4 按实测收紧（同日写下边界时就该做，做在这里而不是文档里）：那两个钥匙串里还躺着
+  // 不能当信任锚的证书（Apple 的本机服务身份），node 的路径构造器对它们直接 `INVALID_PURPOSE`。
+  // 留着它们只让"这台机器交了 N 张根"这个数虚报；剔掉它们是可证明的无损 —— 一张被声明为
+  // CA:FALSE 的证书本来就不可能锚住任何链。判不了的（读不出、没有 basicConstraints 的旧根）
+  // 一律保留，见 `anchorVerdict`。
+  const anchors = filterToAnchors(raw)
+  const filterNote = anchors.dropped > 0
+    ? `dropped ${anchors.dropped} of ${anchors.total} certificate(s) that declare CA:FALSE; node cannot anchor a chain on them`
+    : null
+  const pem = anchors.pem
+  const certs = anchors.kept
   if (certs === 0) {
     // Nothing was produced, so nothing is written — and the bundle already in place
     // is *kept*: it is the trust this machine has been running on, and a failed
@@ -208,14 +309,15 @@ export function exportCaBundle({
     // panel) can tell "empty because this machine exports nothing" from "empty and
     // no bundle at all".
     const kept = usableBundle(target, { readFile })
+    const why = anchors.total > 0
+      ? `the keychains produced ${anchors.total} certificate(s) and every one declares CA:FALSE, so none of them can anchor a chain`
+      : `neither keychain produced a PEM certificate (${sources.join(', ')})`
     return {
       status: 'empty',
       certs: 0,
       path: kept.usable ? target : null,
       exportedAt: now(),
-      detail: kept.usable
-        ? `neither keychain produced a PEM certificate (${sources.join(', ')}); the ${kept.certs}-certificate bundle already at ${target} was left in place`
-        : `neither keychain produced a PEM certificate (${sources.join(', ')})`,
+      detail: kept.usable ? `${why}; the ${kept.certs}-certificate bundle already at ${target} was left in place` : why,
     }
   }
 
@@ -234,13 +336,13 @@ export function exportCaBundle({
     return { status: 'write-unverified', certs, path: target, exportedAt: now(), detail: `read back ${countCertificates(readBack)} certificate(s) of the ${certs} written` }
   }
 
-  const record = { status: 'ok', certs, path: target, exportedAt: now(), detail: null }
+  const record = { status: 'ok', certs, path: target, exportedAt: now(), detail: filterNote }
   if (!probeUrl) return record
   const probe = probeWithBundle({ bundlePath: target, url: probeUrl, run, nodePath, env })
   if (probe.kind === 'ok') return record
   if (probe.kind === 'answered-non-ok') {
     // 束能用是这条记录要回答的问题；端点自己的答复质量不是它的失败。
-    return { ...record, detail: `the bundle verified TLS; ${probe.detail}` }
+    return { ...record, detail: ['the bundle verified TLS', filterNote, probe.detail].filter(Boolean).join('; ') }
   }
   return { ...record, status: 'probe-failed', detail: probe.detail }
 }

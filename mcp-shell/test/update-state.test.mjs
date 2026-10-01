@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { readUpdateState, updateStateFile, STATE_DIR_ENV, CA_ROOTS_STATUSES } from "../dist/update-state.js";
+import { readUpdateState, runtimeIsUsable, updateStateFile, STATE_DIR_ENV, CA_ROOTS_STATUSES, RUNTIME_STATUSES } from "../dist/update-state.js";
 import { executeTool, TOOL_BY_NAME } from "../dist/tools.js";
 import { makeEngine } from "./helpers.mjs";
 
@@ -28,10 +28,28 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
  * take; a value outside that set reddens the whole file rather than defaulting to the
  * friendly state; and a record that is absent says "this install never exported",
  * which is not "fine".
+ *
+ * `runtime` — whether the **updater's own installed copy** moved with the last
+ * successful swap — is held to the same rules, and it decides a different question:
+ * *which code tomorrow's scheduled check runs*. A machine can show `up-to-date` forever
+ * while its job keeps executing the copy the installer first cloned, so a release that
+ * fixes the updater never lands there. Hence: the four documented states each get their
+ * own consequence plus one action; an unknown state, an undeclared key (the schema closes
+ * the object with `additionalProperties: false`) or a malformed field reddens the whole
+ * file instead of defaulting to `refreshed`; absent and explicit `null` both decode as
+ * `recorded: false` — said as "this install never went through a swap that tried", never
+ * as fine — while `writtenAsNull` keeps the two routes apart for the caller; and a
+ * `refreshed` whose `agentVerified` is not `true` still decodes, because the missing
+ * read-back is something the reader must act on rather than something to discard.
  */
 
 function tempRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "gp-update-state-"));
+}
+
+/** A path used inside a `new RegExp` has to be a literal path, not a pattern that happens to match anything. */
+function escapeRe(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
@@ -67,12 +85,68 @@ async function diagnoseWithCaRoots(caRoots, extra = {}) {
     assert.deepEqual(JSON.parse(outcome.content[0].text), { class: "T1", summary: "ok" },
       "the daemon's reply is passed through byte-for-byte, CA bundle line or not");
     const text = outcome.content[1].text;
-    return { root, bundlePath: path.join(root, "ca-roots.pem"), text, caLine: text.split("\n")[1] ?? "", reading: readUpdateState({}, root) };
+    const lines = text.split("\n");
+    return {
+      root,
+      bundlePath: path.join(root, "ca-roots.pem"),
+      text,
+      caLine: lines[1] ?? "",
+      // The updater self-update line is the third one: the block's order is what makes
+      // `caLine` above the bundle line, so a new paragraph appended by a later change would
+      // silently renumber every assertion below it.
+      runtimeLine: lines[2] ?? "",
+      lineCount: lines.length,
+      // The self-update paragraph is information, not a tool failure: `isError` must stay
+      // false for every state, including a file this shell could not decode.
+      isError: outcome.isError,
+      reading: readUpdateState({}, root),
+    };
   } finally {
     if (saved === undefined) delete process.env[STATE_DIR_ENV];
     else process.env[STATE_DIR_ENV] = saved;
     fs.rmSync(root, { recursive: true, force: true });
   }
+}
+
+/**
+ * The same seam with `runtime` as the field under test: the record goes into the state file
+ * through the real reader and the real tool, because what an agent pastes from `gp_diagnose`
+ * is the contract, not whatever `decodeRuntime` returns.
+ */
+async function diagnoseWithRuntime(runtime, extra = {}) {
+  return diagnoseWithCaRoots(undefined, { runtime, ...extra });
+}
+
+/** Every state that is not "the new copy is running" must hand the reader something to do. */
+function assertRuntimeAction(runtimeLine, status) {
+  assert.match(runtimeLine, new RegExp(`^updater self-update: ${status}`),
+    `the line must name its own state, not ${status} rendered as something else: ${runtimeLine}`);
+  assert.match(runtimeLine, /Remedy:/, `a stale updater without an action reads as an updater that is fine: ${runtimeLine}`);
+  assert.equal(runtimeLine.includes("is in place and the loaded launchd job was read back"), false,
+    `${status} must never be rendered as the confirmed-copy sentence: ${runtimeLine}`);
+}
+
+/** The four documented states, as a closed list read off the module rather than retyped here. */
+const RUNTIME_ROOT = "/Users/x/.glasspane/runtime/1.5.2/updater/cli.js";
+const PREV_ROOT = "/Users/x/GlassPane/updater/cli.js";
+
+/**
+ * A record shaped the way `updater/lib/runtime.js` writes one: every documented key present,
+ * with the fields each state is defined by overridable. A record missing a key is built
+ * explicitly by the tests that care about it — that is the point of those tests.
+ */
+function runtimeRecord(status, over = {}) {
+  return {
+    status,
+    version: status === "refreshed" || status === "kept" || status === "failed" ? "1.5.2" : null,
+    cliPath: RUNTIME_ROOT,
+    previousCliPath: PREV_ROOT,
+    agentVerified: status === "refreshed" ? true : false,
+    at: "2026-09-30T01:02:03.000Z",
+    code: null,
+    detail: null,
+    ...over,
+  };
 }
 
 /** Every non-`ok` state must hand the reader something to do, not just a bad adjective. */
@@ -248,6 +322,236 @@ test("an unreadable state file claims nothing about the CA bundle", () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("runtime: refreshed with the job read back is the one usable state, and it names the copy", async () => {
+  const { runtimeLine, lineCount, caLine, reading } = await diagnoseWithRuntime(runtimeRecord("refreshed"));
+  assert.equal(reading.kind, "read");
+  assert.equal(reading.runtime.recorded, true);
+  assert.equal(reading.runtime.status, "refreshed");
+  assert.equal(reading.runtime.agentVerified, true);
+  assert.equal(reading.runtime.version, "1.5.2");
+  assert.equal(reading.runtime.cliPath, RUNTIME_ROOT);
+  assert.equal(reading.runtime.previousCliPath, PREV_ROOT);
+  assert.equal(reading.runtime.code, null);
+  assert.equal(reading.runtime.detail, null);
+  assert.equal(runtimeIsUsable(reading.runtime), true, "refreshed plus a read-back job is the only pair that is usable");
+  // The paragraph order is part of the block: the summary leads, the bundle line second.
+  assert.equal(lineCount, 3, `summary + bundle line + self-update line: ${JSON.stringify(caLine)}`);
+  assert.match(caLine, /^ca trust bundle: this install has never recorded/);
+  assert.match(runtimeLine, /^updater self-update: refreshed — /);
+  assert.match(runtimeLine, new RegExp(RUNTIME_ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    "the installed copy is named by the path the record wrote, not by a description of one");
+  assert.match(runtimeLine, /the loaded launchd job was read back and seen to go through the stable entry/);
+  assert.match(runtimeLine, /recorded at 2026-09-30T01:02:03\.000Z/, "the stamp is the reader's only age signal");
+  assert.match(runtimeLine, /without anyone reinstalling/);
+});
+
+test("runtime: a refreshed whose agentVerified is not true is decoded, never usable, never read as delivered", async () => {
+  // Three shapes of "the read-back never happened": recorded false, recorded null, and the
+  // key missing altogether. All three decode — the record still says what it attempted — and
+  // none of them may be rendered as the confirmed-copy sentence.
+  const shapes = [
+    ["agentVerified: false", runtimeRecord("refreshed", { agentVerified: false }), false],
+    ["agentVerified: null", runtimeRecord("refreshed", { agentVerified: null }), null],
+  ];
+  for (const [label, record, expectedAgent] of shapes) {
+    const { runtimeLine, reading } = await diagnoseWithRuntime(record);
+    assert.equal(reading.runtime.recorded, true, `${label} is still a record`);
+    assert.equal(reading.runtime.status, "refreshed", `${label} must not be remapped to another state`);
+    assert.equal(reading.runtime.agentVerified, expectedAgent, label);
+    assert.equal(runtimeIsUsable(reading.runtime), false, `${label} cannot be claimed usable`);
+    assert.match(runtimeLine, /^updater self-update: refreshed, but not confirmed — /);
+    assert.match(runtimeLine, /never read back going through that entry/);
+    assert.match(runtimeLine, /may still execute the previous one/);
+    assert.match(runtimeLine, /Remedy:/);
+    assert.equal(runtimeLine.includes("is in place and the loaded launchd job was read back and seen to go through"), false,
+      `${label} must not print the confirmed sentence: ${runtimeLine}`);
+  }
+  // The key absent is the fourth shape: the record has nothing to report, so it reads as
+  // "not verified" rather than as a malformed file.
+  const noKey = { ...runtimeRecord("refreshed") };
+  delete noKey.agentVerified;
+  const { runtimeLine, reading } = await diagnoseWithRuntime(noKey);
+  assert.equal(reading.runtime.recorded, true);
+  assert.equal(reading.runtime.agentVerified, null, "an absent read-back is 'not verified', not false, and never true");
+  assert.equal(runtimeIsUsable(reading.runtime), false);
+  assert.match(runtimeLine, /but not confirmed/);
+});
+
+test("runtime: failed says the update installed and the updater itself did not, with the commands that end it", async () => {
+  const { runtimeLine, reading, root } = await diagnoseWithRuntime(runtimeRecord("failed", {
+    agentVerified: null,
+    code: "runtime-stale",
+    detail: "the loaded job still names the old command line",
+  }));
+  assert.equal(reading.runtime.status, "failed");
+  assert.equal(reading.runtime.code, "runtime-stale");
+  assert.equal(reading.runtime.detail.includes("the loaded job still names the old command line"), true);
+  assert.equal(runtimeIsUsable(reading.runtime), false);
+  assert.match(runtimeLine, /^updater self-update: failed — /);
+  assert.match(runtimeLine, /the update itself installed/);
+  // §11.4: this is a stated degradation on a swap that *succeeded*. Either collapse sends the
+  // reader to the wrong door — "update failed" hides the installed version, "fine" hides this.
+  assert.match(runtimeLine, /This is NOT "the update failed"/);
+  assert.match(runtimeLine, /the previous copy still does/);
+  assert.match(runtimeLine, /node installer\/cli\.js/, "the reinstall has to be the command, not a promise");
+  // The re-register command is built from the record's own script path and the state root
+  // this shell actually resolved, so what an agent pastes is a command for this machine.
+  assert.match(runtimeLine, new RegExp(`node ${escapeRe(RUNTIME_ROOT)} enable --state-dir ${escapeRe(root)} --json`),
+    runtimeLine);
+  assert.match(runtimeLine, /gate code: runtime-stale/);
+  assert.match(runtimeLine, /recorded reason: the loaded job still names the old command line/);
+});
+
+test("runtime: a failed record with no path names no command it cannot mean", async () => {
+  const { runtimeLine, reading } = await diagnoseWithRuntime(runtimeRecord("failed", {
+    version: null, cliPath: null, previousCliPath: null, agentVerified: null, code: "installer-pointer-missing",
+  }));
+  assert.equal(reading.runtime.cliPath, null);
+  assert.equal(runtimeIsUsable(reading.runtime), false);
+  assert.match(runtimeLine, /^updater self-update: failed — /);
+  assert.match(runtimeLine, /names no new copy at all, so the installer is the only way out/);
+  assert.equal(runtimeLine.includes("enable --state-dir"), false,
+    `no enable command may be printed without a script to run: ${runtimeLine}`);
+  assert.match(runtimeLine, /the record names neither a version nor a path/);
+});
+
+test("runtime: kept is the machine's own switch, not a failure and not a delivered update", async () => {
+  const { runtimeLine, reading } = await diagnoseWithRuntime(runtimeRecord("kept", {
+    agentVerified: false, code: "auto-disabled",
+    detail: "automatic update is switched off on this machine, so no launchd job was registered",
+  }));
+  assert.equal(reading.runtime.status, "kept");
+  assert.equal(reading.runtime.agentVerified, false);
+  assert.equal(reading.runtime.code, "auto-disabled");
+  assert.equal(runtimeIsUsable(reading.runtime), false, "a copy nothing will run on its own is not a usable one");
+  assert.match(runtimeLine, /^updater self-update: kept — /);
+  assert.match(runtimeLine, /automatic update is switched off on this machine/);
+  assert.match(runtimeLine, /no launchd job was registered/);
+  assert.match(runtimeLine, /not a failure/);
+  assert.match(runtimeLine, /switch automatic update back on/);
+  // The two things `kept` must never borrow: the failed sentence (it is not a broken swap)
+  // and the refreshed sentence (nothing was registered, so nothing was proven).
+  assert.equal(runtimeLine.includes("did not move"), false, runtimeLine);
+  assert.equal(runtimeLine.includes("was read back and seen to go through the stable entry"), false, runtimeLine);
+  assert.match(runtimeLine, new RegExp(RUNTIME_ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("runtime: skipped says the code and the entry landed and one migration is owed, not that nothing ran", async () => {
+  const { runtimeLine, reading } = await diagnoseWithRuntime(runtimeRecord("skipped", {
+    version: null, cliPath: null, agentVerified: null,
+  }));
+  assert.equal(reading.runtime.status, "skipped");
+  assert.equal(reading.runtime.version, null);
+  assert.equal(reading.runtime.cliPath, null);
+  assert.equal(runtimeIsUsable(reading.runtime), false);
+  assert.match(runtimeLine, /^updater self-update: skipped — /);
+  // 稳定入口之后这一支的真实内容：代码、指针、入口都落了，缺的只是把作业挪到入口上。旧句子
+  // "did not attempt the updater's own swap" 在这台机器上是假的——它会把人支着去等下一轮，而那一步从来不会自己来。
+  assert.match(runtimeLine, /the updater's code, the installer pointer and the stable agent entry all moved/);
+  assert.match(runtimeLine, /owes one migration/);
+  assert.match(runtimeLine, /would unregister the job that is running it/);
+  assert.match(runtimeLine, /rather than as current/);
+  assert.match(runtimeLine, /Remedy/);
+  // "一次"必须是句子的一部分：不这么说，读者会以为每一轮都欠这一次人工动作。
+  assert.match(runtimeLine, /Remedy \(one time\)/);
+  assert.match(runtimeLine, /no future release will ask for this step/);
+  assert.equal(runtimeLine.includes("updater self-update: refreshed"), false, runtimeLine);
+  // 没有新路径时不许凭空印一个
+  assert.equal(/the copy that would run next is (null|undefined)/.test(runtimeLine), false, runtimeLine);
+});
+
+test("runtime: absent and explicit null both read as 'never recorded', and the caller can tell them apart", async () => {
+  const absent = await diagnoseWithCaRoots(undefined, {});
+  const nulled = await diagnoseWithCaRoots(undefined, { runtime: null });
+  assert.equal(absent.reading.runtime.recorded, false, "no key is 'never recorded', not a default state");
+  assert.equal(absent.reading.runtime.writtenAsNull, false);
+  assert.equal(nulled.reading.runtime.recorded, false);
+  assert.equal(nulled.reading.runtime.writtenAsNull, true, "a recorded null is a different route and stays visible");
+  assert.equal("status" in absent.reading.runtime, false,
+    "a record that was never written carries no self-update state, not a default one");
+  for (const { reading } of [absent, nulled]) {
+    assert.equal(runtimeIsUsable(reading.runtime), false);
+  }
+  assert.match(absent.runtimeLine, /^updater self-update: this install has never recorded/);
+  assert.match(absent.runtimeLine, /carries no "runtime" record at all/);
+  assert.match(nulled.runtimeLine, /^updater self-update: this install has never recorded/);
+  assert.match(nulled.runtimeLine, /carries "runtime": null/);
+  assert.notEqual(absent.runtimeLine, nulled.runtimeLine, "the two routes are said differently");
+  for (const line of [absent.runtimeLine, nulled.runtimeLine]) {
+    assert.match(line, /NOT the same as/);
+    assert.match(line, /node installer\/cli\.js/, "one manual reinstall is the only thing that ends this");
+    assert.match(line, /predates|never recorded/);
+    assert.equal(line.includes("updater self-update: refreshed"), false, line);
+  }
+});
+
+test("runtime: a record this shell cannot decode reddens the whole file instead of defaulting to refreshed", async () => {
+  const cases = [
+    // An unknown state: quoted back, never mapped onto the nearest known one.
+    { runtime: runtimeRecord("refreshed", { status: "self-updated" }), expect: /runtime\.status "self-updated" is not one of refreshed, failed, kept, skipped/ },
+    { runtime: { ...runtimeRecord("refreshed"), status: undefined }, expect: /runtime\.status null is not one of/ },
+    { runtime: runtimeRecord(["refreshed"]), expect: /runtime\.status \["refreshed"\] is not one of/ },
+    // `additionalProperties: false` is part of the contract, so an undeclared key is a
+    // record from a writer this shell does not have — not extra information to ignore.
+    { runtime: { ...runtimeRecord("refreshed"), drift: true }, expect: /runtime carries "drift", a key the state schema does not declare/ },
+    // Wrong-typed and malformed fields: each one leaves the reader unable to name the copy.
+    { runtime: runtimeRecord("refreshed", { agentVerified: "true" }), expect: /runtime\.agentVerified is string instead of true, false or null/ },
+    { runtime: runtimeRecord("refreshed", { version: "1.5" }), expect: /runtime\.version "1\.5" is not a version/ },
+    { runtime: runtimeRecord("refreshed", { cliPath: "   " }), expect: /runtime\.cliPath is blank/ },
+    { runtime: runtimeRecord("refreshed", { cliPath: 7 }), expect: /runtime\.cliPath is number/ },
+    { runtime: runtimeRecord("failed", { code: "RUNTIME-STALE" }), expect: /runtime\.code "RUNTIME-STALE" is not a gate code/ },
+    { runtime: runtimeRecord("refreshed", { at: 1234 }), expect: /runtime\.at is number/ },
+    { runtime: [], expect: /runtime is an array instead of the object/ },
+    { runtime: "refreshed", expect: /runtime is string instead of the object/ },
+  ];
+  for (const { runtime, expect } of cases) {
+    const { text, runtimeLine, reading } = await diagnoseWithCaRoots(undefined, { runtime });
+    assert.equal(reading.kind, "unreadable", `${JSON.stringify(runtime)} must not decode as a readable state`);
+    assert.match(reading.summary, expect, JSON.stringify(runtime));
+    assert.match(reading.summary, /unknown/, `an undecodable self-update record leaves the running copy unknown: ${reading.summary}`);
+    assert.match(reading.summary, /re-run the GlassPane installer/, "the refusal still says what ends it");
+    assert.equal(runtimeLine, "", `no self-update line is claimed for a file that cannot be read: ${text}`);
+    assert.equal(text.includes("updater self-update: refreshed"), false, JSON.stringify(runtime));
+    assert.equal(text.includes("ca trust bundle"), false, "an unreadable file renders no paragraph at all");
+  }
+});
+
+test("runtime: the self-update line names a real path or names none, never a template, never a tool failure", async () => {
+  const shapes = [
+    ["refreshed", runtimeRecord("refreshed")],
+    ["refreshed unconfirmed", runtimeRecord("refreshed", { agentVerified: false })],
+    ["failed", runtimeRecord("failed", { code: "runtime-stale" })],
+    ["failed with no path", runtimeRecord("failed", { version: null, cliPath: null, previousCliPath: null })],
+    ["kept", runtimeRecord("kept", { code: "auto-disabled" })],
+    ["skipped", runtimeRecord("skipped", { version: null, cliPath: null })],
+    ["absent", undefined],
+    ["null", null],
+    // A record that cannot be decoded renders no paragraph at all, so the checks below run
+    // against the summary — which is what makes "unreadable, and here is the raw value" the
+    // only thing the reader gets instead of a friendly default.
+    ["unreadable", runtimeRecord("refreshed", { status: "self-updated" })],
+  ];
+  for (const [label, record] of shapes) {
+    const { text, runtimeLine, isError, reading } = await diagnoseWithCaRoots(undefined, { runtime: record });
+    assert.equal(isError, false, `${label} is a fact about the machine, not a tool failure: ${text}`);
+    const line = reading.kind === "read" ? runtimeLine : reading.summary;
+    assert.equal(line.includes("<"), false, `${label} left an angle-bracket template where a real path belongs: ${line}`);
+    assert.equal(line.includes(">"), false, `${label} left an angle-bracket template where a real path belongs: ${line}`);
+    assert.equal(line.includes("stateRoot"), false, `${label} named an internal variable instead of a file: ${line}`);
+    assert.equal(line.includes("cliPath"), false, `${label} named the field instead of the path it holds: ${line}`);
+  }
+});
+
+test("the shell's runtime vocabulary is the updater's", async () => {
+  // Imported from the sibling package on purpose, like the state-root cross-check above:
+  // a fourth status added on the writer's side must redden here rather than be silently
+  // decoded as unreadable data by a shell that never heard of it.
+  const { RUNTIME_STATUSES: updaterStatuses } = await import("../../updater/lib/runtime.js");
+  assert.deepEqual([...RUNTIME_STATUSES], [...updaterStatuses],
+    "the panel, gp_diagnose and the updater read one closed vocabulary");
+  assert.deepEqual([...RUNTIME_STATUSES], ["refreshed", "failed", "kept", "skipped"]);
 });
 
 test("the shell and the updater resolve the same state file for the same inputs", async () => {

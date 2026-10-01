@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import {
   parseArgs,
@@ -37,6 +38,7 @@ async function updaterLibs() {
     launchd: await import(pathToFileURL(path.join(REPO_ROOT, 'updater', 'lib', 'launchd.js')).href),
     state: await import(pathToFileURL(path.join(REPO_ROOT, 'updater', 'lib', 'state.js')).href),
     codes: await import(pathToFileURL(path.join(REPO_ROOT, 'updater', 'lib', 'codes.js')).href),
+    entry: await import(pathToFileURL(path.join(REPO_ROOT, 'updater', 'lib', 'agent-entry.js')).href),
   }
 }
 
@@ -55,16 +57,70 @@ function makeRepoRootWithoutUpdater(prefix) {
 }
 
 /** 假 launchctl：只记账 + 返回可编排的退出码，绝不 exec 真命令。 */
-function fakeLaunchctl({ bootstrapStatus = 0, bootstrapStderr = '' } = {}) {
+function fakeLaunchctl({ bootstrapStatus = 0, bootstrapStderr = '', printedCli = undefined, printFromHome = null } = {}) {
   const calls = []
   const run = (bin, args) => {
     calls.push([bin, ...args])
     if (bin === 'id') return { status: 0, stdout: '501\n', stderr: '' }
     // bootout 对"本来就没加载"回 3，那是 disable 想要的状态（updater 的口径）。
     if (args[0] === 'bootout') return { status: 3, stdout: '', stderr: 'Could not find service' }
+    // `registerAgent` 装载之后要把在册作业读回来核对"跑的是不是这次渲染的那一份"。这一行的形状是从
+    // 本机 `launchctl print gui/501/com.glasspane.update` 抄的：一行一个参数、原样不加引号——更新器
+    // 自己的那份 `-c` 字面量开头就是引号，解析器若把它当畸形，这个核对就永远做不成。
+    if (args[0] === 'print') {
+      // 目标串 `gui/<uid>/<label>` 由**这一问自己带过来**：标签是 updater 的常量，测试里重打一遍就是
+      // 第二个作者（改名时这里照样绿）。真调用是 `run('launchctl', ['print', target])`，所以它是
+      // `args[1]`；按内容找，不按槽位猜。
+      const target = String(args.find((arg) => String(arg).startsWith('gui/')) ?? 'gui/501/unknown')
+      if (printFromHome !== null) {
+        const label = target.split('/').pop()
+        const program = programArgumentsFromPlist(path.join(printFromHome, 'Library', 'LaunchAgents', `${label}.plist`))
+        if (program === null) return { status: 3, stdout: '', stderr: 'Could not find service' }
+        return { status: 0, stderr: '', stdout: launchctlPrintText(target, program) }
+      }
+      if (printedCli === undefined) return { status: 3, stdout: '', stderr: 'Could not find service' }
+      return {
+        status: 0,
+        stderr: '',
+        stdout: launchctlPrintText(target, [
+          '/bin/sh',
+          '-c',
+          '"$0" "$1" check "$2" "$3" --json && "$0" "$1" apply "$2" "$3" --auto --json',
+          '/usr/local/bin/node',
+          printedCli,
+          '--state-root',
+          '/state/root',
+        ]),
+      }
+    }
     return { status: bootstrapStatus, stdout: '', stderr: bootstrapStderr }
   }
   return { calls, run, verbs: () => calls.map((call) => call[1]) }
+}
+
+/** `launchctl print` 的正文：一行一个参数、原样不加引号（本机 2026-09-30 抄下来的形状）。 */
+function launchctlPrintText(target, programArguments) {
+  return [
+    `${target} = {`,
+    '\tstate = not running',
+    '\targuments = {',
+    ...programArguments.map((arg) => `\t\t${arg}`),
+    '\t}',
+    '}',
+  ].join('\n')
+}
+
+/** 读那份真写进盘的 plist 的 ProgramArguments（plistlib 比 launchd 严，读不动就是没注册成）。 */
+function programArgumentsFromPlist(plistPath) {
+  if (!fs.existsSync(plistPath)) return null
+  const got = spawnSync('python3', ['-c',
+    'import plistlib,json,sys\n'
+    + 'with open(sys.argv[1], "rb") as handle:\n'
+    + '    print(json.dumps(plistlib.load(handle).get("ProgramArguments") or []))\n', plistPath], { encoding: 'utf8' })
+  assert.equal(got.status, 0, `plistlib 读不动这份 plist（它比 launchd 严）：${got.stderr}`)
+  const list = JSON.parse(got.stdout)
+  assert.ok(Array.isArray(list), 'ProgramArguments 必须是数组')
+  return list
 }
 
 const NOW = new Date('2026-09-27T04:00:00.000Z')
@@ -94,8 +150,8 @@ test('自动更新接线：指针落进状态根，文件 0600 / 目录 0700，�
   const home = tempDir('gp-install-pointer-')
   const lines = []
   try {
-    const { launchd, state } = await updaterLibs()
-    const launchctl = fakeLaunchctl()
+    const { launchd, state, entry: entryLib } = await updaterLibs()
+    const launchctl = fakeLaunchctl({ printFromHome: home })
     const result = await registerAutoUpdate({
       ...CA_DEPS,
       rootDir: REPO_ROOT,
@@ -126,15 +182,26 @@ test('自动更新接线：指针落进状态根，文件 0600 / 目录 0700，�
     assert.equal(readBack.ok, true, `读回必须成功：${readBack.message ?? ''}`)
     assert.equal(readBack.pointer.updaterCli, UPDATER_CLI)
 
-    // 注册走的是 updater 自己的 launchd 面：先 bootout 再 bootstrap，plist 落在临时 HOME。
+    // 注册走的是 updater 自己的 launchd 面：先 bootout 再 bootstrap，装载之后把在册作业读回来核对
+    // "跑的是不是这次渲染的那一份"。plist 落在临时 HOME。
     const plistPath = launchd.agentPlistPath({ homeDir: home })
     assert.deepEqual(launchctl.calls, [
       ['launchctl', 'bootout', `gui/501/${launchd.AGENT_LABEL}`],
       ['launchctl', 'bootstrap', 'gui/501', plistPath],
-    ], 'bootout 先于 bootstrap：launchd 缓存 bootstrap 时读到的定义')
+      ['launchctl', 'print', `gui/501/${launchd.AGENT_LABEL}`],
+    ], 'bootout 先于 bootstrap：launchd 缓存 bootstrap 时读到的定义；print 是那句"已注册"的证据')
     assert.equal(mode(plistPath), 0o600)
     const plist = fs.readFileSync(plistPath, 'utf8')
-    assert.ok(plist.includes(UPDATER_CLI), '定时代理执行的就是指针那条 CLI（§7 一处实现）')
+    // §7 的一处实现 + 方案 A 的边界：作业跑的是那个**不随版本变**的入口，入口每次运行读指针。
+    // 于是换版只需要改一个 JSON 文件，而这条断言的"可红性"来自两侧——作业里出现任何一条 checkout
+    // 路径（旧的或这次的）都意味着下一次换版又要人工 enable 一次。
+    const entryPath = entryLib.agentEntryPath(result.stateRoot)
+    assert.ok(plist.includes(entryPath), `定时代理执行的必须是稳定入口 ${entryPath}`)
+    assert.ok(!plist.includes(UPDATER_CLI), '作业定义里不许出现 checkout 里的 CLI 路径')
+    assert.ok(fs.existsSync(entryPath), '入口必须真落在那台机器的状态根里，否则作业明天就 Cannot find module')
+    assert.ok(fs.statSync(entryPath).size > 0, '一份空文件在 node 里"能跑"，但它什么都不做')
+    assert.equal(result.agentVerified, true,
+      '在册作业读回来核对过：桩的答复由盘上那份 plist 生成，所以这一条是真的往返，不是两处写死互证')
     assert.ok(!plist.includes('{{'), '渲染不留未替换的 token')
 
     const stateFile = path.join(result.stateRoot, 'update-state.json')
@@ -154,6 +221,52 @@ test('自动更新接线：指针落进状态根，文件 0600 / 目录 0700，�
 // ---------------------------------------------------------------------------
 // §5 一键关：--no-auto-update 与环境变量必须同义
 // ---------------------------------------------------------------------------
+
+test('在册作业读回来跑的不是这次渲染的那一份：安装不许说"已注册"', async () => {
+  // 这条控制的存在理由：launchd 保留 bootstrap 时读到的定义，所以"写了一份新 plist 并且 bootstrap 返回 0"
+  // 完全可能配着一个还在跑旧 CLI 的作业。`printFromHome` 的桩永远自证通过，因此这一条**故意**让答案与
+  // 盘上那份不一致——注册必须被拒绝，而拒绝的原话里要看得见两侧各是什么。
+  const home = tempDir('gp-install-mismatch-')
+  const lines = []
+  try {
+    const launchctl = fakeLaunchctl({ printedCli: path.join(home, 'somewhere-else', 'cli.js') })
+    let thrown = null
+    try {
+      await registerAutoUpdate({
+        ...CA_DEPS,
+        rootDir: REPO_ROOT, env: { HOME: home }, homeDir: home, uid: '501',
+        runLaunchctl: launchctl.run, now: NOW, say: (line) => lines.push(line),
+      })
+    } catch (error) {
+      thrown = error
+    }
+    assert.ok(thrown, '作业没换成这次渲染的那一份时，安装不许静默成功')
+    assert.match(String(thrown.message), /com\.glasspane\.update/, `失败要说清动的是哪个作业：${thrown?.message}`)
+    assert.match(String(thrown.message), /somewhere-else/, `要看得见在册的那一条：${thrown?.message}`)
+    assert.match(String(thrown.message), /agent-entry\.js/, `要看得见这次渲染的那一条：${thrown?.message}`)
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('读不回在册作业时那句告警只打一遍（同一个事实不许有两个作者）', async () => {
+  // `summary.agentVerified` 就是 `outcome.agentVerified` 的副本，两处判断同一个值会打出两行近乎相同的
+  // 告警；而在这个机器上"两行"读起来像两件事出了问题。
+  const home = tempDir('gp-install-caveat-')
+  const lines = []
+  try {
+    const result = await registerAutoUpdate({
+      ...CA_DEPS,
+      rootDir: REPO_ROOT, env: { HOME: home }, homeDir: home, uid: '501',
+      runLaunchctl: fakeLaunchctl().run, now: NOW, say: (line) => lines.push(line),
+    })
+    assert.equal(result.agentVerified, false, '默认的桩答不出在册作业，所以这台机器是"未核对"而不是"失败"')
+    const caveats = lines.filter((line) => line.includes('每日作业还没被核对过'))
+    assert.equal(caveats.length, 1, `告警必须只有一行，且措辞来自 updater 的原话：${JSON.stringify(lines.filter((line) => line.includes('核对')))}`)
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
 
 test('--no-auto-update：一次 bootstrap 都不发，状态里记 disabled=true（面板因此不是"从未检查"）', async () => {
   const home = tempDir('gp-install-off-')
@@ -312,10 +425,10 @@ test('重跑安装幂等：LaunchAgents 里只有一份 plist，指针与作业�
   const home = tempDir('gp-install-idem-')
   const moved = makeRepoRootWithoutUpdater('gp-install-moved-')
   try {
-    const { launchd, state } = await updaterLibs()
+    const { launchd, state, entry: entryLib } = await updaterLibs()
     // "挪了窝的 checkout"：一份新路径下的安装树（updater/ 软链过来，模块只有一份真源）。
     fs.symlinkSync(path.join(REPO_ROOT, 'updater'), path.join(moved, 'updater'), 'dir')
-    const launchctl = fakeLaunchctl()
+    const launchctl = fakeLaunchctl({ printFromHome: home })
     const first = await registerAutoUpdate({
       ...CA_DEPS,
       rootDir: REPO_ROOT, env: { HOME: home }, homeDir: home, uid: '501',
@@ -333,8 +446,8 @@ test('重跑安装幂等：LaunchAgents 里只有一份 plist，指针与作业�
     const plistPath = launchd.agentPlistPath({ homeDir: home })
     assert.deepEqual(fs.readdirSync(agentsDir), [`${launchd.AGENT_LABEL}.plist`],
       '重跑不许留下第二个作业（append/换名落盘都会在这里红）')
-    assert.deepEqual(launchctl.verbs(), ['bootout', 'bootstrap', 'bootout', 'bootstrap'],
-      '每轮都是 bootout 再 bootstrap：已加载的定义不换掉，新 plist 就不生效')
+    assert.deepEqual(launchctl.verbs(), ['bootout', 'bootstrap', 'print', 'bootout', 'bootstrap', 'print'],
+      '每轮都是 bootout 再 bootstrap，然后把在册作业读回来：已加载的定义不换掉，新 plist 就不生效')
     assert.equal(fs.readdirSync(second.stateRoot).filter((f) => f.startsWith('update-install.json')).length, 1,
       '临时文件必须已被 rename 收掉，不留 .tmp- 残骸')
 
@@ -346,8 +459,14 @@ test('重跑安装幂等：LaunchAgents 里只有一份 plist，指针与作业�
     assert.equal(state.readPointer(second.stateRoot).ok, true)
 
     const plist = fs.readFileSync(plistPath, 'utf8')
-    assert.ok(plist.includes(path.join(moved, 'updater', 'cli.js')), '作业必须跑新位置的那条 CLI')
-    assert.ok(!plist.includes(UPDATER_CLI), '旧的、已挪走的 checkout 路径必须从作业定义里消失')
+    // 方案 A 之后，作业定义里既没有新位置也没有旧位置：它跑的是状态根下那个不随版本/位置变的入口，
+    // 由入口每次运行时读指针。"挪了窝"这件事只由指针表达（上面已钉），而这里剩下的两条都还能红：
+    // 定义指到入口，且两条 checkout 路径都不在定义里——留下任何一条，下一次换版就又要人工 enable。
+    const entryPath = entryLib.agentEntryPath(second.stateRoot)
+    assert.ok(plist.includes(entryPath), `作业必须跑稳定入口 ${entryPath}`)
+    assert.ok(!plist.includes(UPDATER_CLI) && !plist.includes(path.join(moved, 'updater', 'cli.js')),
+      '旧的与新的 checkout 路径都不许留在作业定义里：出现一条就说明注册又回到了"按版本点名"')
+    assert.ok(fs.existsSync(entryPath), '入口不在这台机器上，作业明天就是 Cannot find module')
     assert.equal(JSON.parse(fs.readFileSync(path.join(second.stateRoot, 'update-state.json'), 'utf8')).disabled, false)
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
@@ -414,8 +533,8 @@ test('先开后关：重跑安装带 --no-auto-update 会把已注册的代理�
       runLaunchctl: launchctl.run, now: NOW, say: () => {},
     })
     assert.equal(off.registered, false)
-    assert.deepEqual(launchctl.verbs(), ['bootout', 'bootstrap', 'bootout'],
-      '卸载轮只 bootout 已加载的作业，不再 bootstrap 回来')
+    assert.deepEqual(launchctl.verbs(), ['bootout', 'bootstrap', 'print', 'bootout'],
+      '卸载轮只 bootout 已加载的作业，不再 bootstrap 回来（print 是装载那一轮读回在册作业）')
     assert.equal(fs.existsSync(plistPath), false, '定义文件必须一并删掉：只 bootout 不删 plist，下次登录又被 launchd 读回去')
     assert.deepEqual(fs.readdirSync(path.join(home, 'Library', 'LaunchAgents')), [],
       'LaunchAgents 里不能再有第二个同名文件（换个名字落盘就查不出来）')
@@ -516,6 +635,135 @@ test('旧 updater 没回报束的态时，说"没有回报"而不是说"没问�
     assert.ok(lines.some((l) => l.includes('没有回报')), `缺失要读成"旧版本"，不是读成正常：${lines.join(' / ')}`)
     assert.match(lines.join('\n'), /enable/, '并给出把它补上的那一条命令')
     assert.doesNotMatch(updateGuidanceText(result).join('\n'), /163 张/, '没有记录就不许出现一句看起来像证据的数字')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+/* ---------------------------------------------------------------------------
+ * §9 的最后一环：安装到盘上的那份 plist **真把束交给了作业**。
+ *
+ * 为什么单独立一条：上面所有用例都把 `refreshCaBundle` / `usableCaBundle` 换成桩，
+ * 于是它们证明的是"安装器说了什么"，不是"launchd 拿到了什么"。桩给的是
+ * `{path: null, certs: 163}` 且**从没往盘上写过那个文件**——`plist.includes('NODE_EXTRA_CA_CERTS')`
+ * 照样绿，而真实作业指向一个不存在的文件，node 只会打一句 Warning 然后照旧连不上。
+ * 这是"手工造输入绕开生产层"那一类（复审 #4③）。
+ *
+ * 这一条不绕：真 `exportCaBundle`（只把 `security` 与探测子进程这两件外部事注入掉，
+ * 不联网、不碰开发机钥匙串）→ 真 writer 落盘 → 真 `usableBundle` 读盘 → `enable` 注册
+ * → 用 **python3 plistlib** 严格解析盘上那份 plist。选 plistlib 而不是 `plutil`：后者对
+ * 结构问题宽容（本仓已经吃过两次"lenient 读者把缺陷藏起来"）。python3 不在场时这条会
+ * **变红而不是跳过**——它要守的正是"作业真的带上了信任"，跳过等于没这条闸。
+ */
+test('盘上那份 plist 的 EnvironmentVariables 真带着写成功的那份束（严格解析）', async () => {
+  const { spawnSync } = await import('node:child_process')
+  const ca = await import(pathToFileURL(path.join(REPO_ROOT, 'updater', 'lib', 'ca-bundle.js')).href)
+  const launchd = await import(pathToFileURL(path.join(REPO_ROOT, 'updater', 'lib', 'launchd.js')).href)
+  const entryLib = await import(pathToFileURL(path.join(REPO_ROOT, 'updater', 'lib', 'agent-entry.js')).href)
+
+  const home = tempDir('gp-install-ca-')
+  const stateRoot = path.join(home, '.glasspane')
+  const bundlePath = path.join(stateRoot, 'ca-roots.pem')
+  const pem = Array.from({ length: 3 }, (_, i) => `-----BEGIN CERTIFICATE-----\nMIIB${i}INSTALLTEST\n-----END CERTIFICATE-----\n`).join('')
+  const external = []
+  let securityCalls = 0
+  const run = (command, args) => {
+    external.push([command, ...(args ?? [])])
+    if (command === 'security') {
+      securityCalls += 1
+      // 只有第一个钥匙串有东西：系统根与管理员根本来就是分两处装的，
+      // 而张数必须等于 3 而不是 6——两份都返回同一批证书就会把重复计数写进记录。
+      return { status: 0, stdout: securityCalls === 1 ? pem : '', stderr: '' }
+    }
+    return { status: 0, stdout: '', stderr: '' }  // 探测子进程：假装这一次连上了
+  }
+
+  try {
+    const launchctl = fakeLaunchctl({ printFromHome: home })
+    const result = await registerAutoUpdate({
+      rootDir: REPO_ROOT,
+      env: { HOME: home },
+      homeDir: home,
+      uid: '501',
+      runLaunchctl: launchctl.run,
+      now: NOW,
+      say: () => {},
+      updaterDeps: {
+        refreshCaBundle: () => ca.exportCaBundle({ stateRoot, probeUrl: 'https://example.invalid/releases/latest', run }),
+      },
+    })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.equal(result.registered, true)
+    assert.equal(result.caRoots?.status, 'ok', `导出没成 ok，这条就退化成一次字符串检查：${JSON.stringify(result.caRoots)}`)
+    assert.equal(result.caRoots.certs, 3)
+    assert.equal(result.caRoots.path, bundlePath, '记录里的路径就是真写成的那一个')
+    assert.equal(ca.countCertificates(fs.readFileSync(bundlePath, 'utf8')), 3, '束必须真在盘上，不是只在返回值里')
+
+    const plistPath = launchd.agentPlistPath({ homeDir: home })
+    const parsed = spawnSync('python3', ['-c',
+      'import plistlib,json,sys\n'
+      + 'with open(sys.argv[1], "rb") as handle:\n'
+      + '    print(json.dumps(plistlib.load(handle)))\n', plistPath], { encoding: 'utf8' })
+    assert.equal(parsed.status, 0, `plistlib 读不动这份 plist（它比 launchd 严）：${parsed.stderr}`)
+    const job = JSON.parse(parsed.stdout)
+
+    assert.equal(job.Label, launchd.AGENT_LABEL)
+    assert.equal(job.EnvironmentVariables?.NODE_EXTRA_CA_CERTS, bundlePath,
+      '§9.4：束由**作业**带进去，不是靠 updater 自己在进程里设——进程启动后才设的变量改不了任何东西')
+    assert.notEqual(job.EnvironmentVariables?.NODE_EXTRA_CA_CERTS, '',
+      '空串在 node 眼里等于没设；写一个空值还会把操作者从终端带进来的那份信任静默覆盖掉')
+    assert.ok(fs.existsSync(String(job.EnvironmentVariables?.NODE_EXTRA_CA_CERTS ?? '')),
+      '作业指过去的那个文件必须存在——这是桩版本唯一漏掉的事')
+    assert.deepEqual([job.ProgramArguments[0], job.ProgramArguments[1], job.ProgramArguments[3], job.ProgramArguments[4]],
+      ['/bin/sh', '-c', process.execPath, entryLib.agentEntryPath(stateRoot)],
+      'argv 槽位：shell、node、以及**稳定入口**——槽位里出现任何一条 checkout 路径，下一次换版就又要人工 enable')
+    assert.ok(fs.existsSync(entryLib.agentEntryPath(stateRoot)),
+      '严格解析出来的作业指的入口必须真在盘上：不在就是明天早上的 Cannot find module')
+    assert.equal(result.agentVerified, true,
+      '这一条的 print 答复由盘上那份 plist 生成，所以"核对过"是真往返出来的，不是桩写死的')
+    assert.equal(job.RunAtLoad, false)
+    assert.ok(!JSON.stringify(job).includes('{{'), '严格解析出来的文档里不该有未替换的 token')
+    assert.deepEqual(
+      external.filter((call) => call[0] === 'security').map((call) => call.slice(0, 4)),
+      ca.KEYCHAIN_SOURCES.map(() => ['security', 'find-certificate', '-a', '-p']),
+      '两个钥匙串各查一次，且用的是那条真参数序列',
+    )
+    assert.equal(external.filter((call) => call[0] === 'security').length, ca.KEYCHAIN_SOURCES.length)
+    assert.ok(external.some((call) => call[0] === process.execPath),
+      '探测确实起了一个 node 子进程（这里只替换它的返回值，形状与真的一条不差）')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('导不出束的那台机器：作业照样注册，但**不带**那个键（而不是带一个空值）', async () => {
+  const { spawnSync } = await import('node:child_process')
+  const launchd = await import(pathToFileURL(path.join(REPO_ROOT, 'updater', 'lib', 'launchd.js')).href)
+  const home = tempDir('gp-install-noca-')
+  try {
+    const launchctl = fakeLaunchctl()
+    const result = await registerAutoUpdate({
+      rootDir: REPO_ROOT,
+      env: { HOME: home },
+      homeDir: home,
+      uid: '501',
+      runLaunchctl: launchctl.run,
+      now: NOW,
+      say: () => {},
+      updaterDeps: {
+        refreshCaBundle: () => ({ status: 'unavailable', certs: 0, path: null, exportedAt: NOW.toISOString(), detail: 'no security tool' }),
+      },
+    })
+    assert.equal(result.registered, true, '导不出证书不是拒绝注册的理由——没被拦截的网络本来就不需要它')
+    const plistPath = launchd.agentPlistPath({ homeDir: home })
+    const got = spawnSync('python3', ['-c',
+      'import plistlib,json,sys\n'
+      + 'with open(sys.argv[1], "rb") as handle:\n'
+      + '    print(json.dumps(plistlib.load(handle)))\n', plistPath], { encoding: 'utf8' })
+    assert.equal(got.status, 0, got.stderr)
+    const job = JSON.parse(got.stdout)
+    assert.ok(!('NODE_EXTRA_CA_CERTS' in (job.EnvironmentVariables ?? {})),
+      '这台机器没有束，就不该出现这个键；出现一个空值等于替操作者取消了他自己的信任')
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }

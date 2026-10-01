@@ -24,7 +24,8 @@
   `probe-failed` 只在传输/TLS 层失败时出现，且必须带子进程自己报出的原因。
 - **TLS 失败后的一次自我修复**：`main()`（只有可执行入口，不含库接口 `runCommand`）在拿到
   `tlsVerification` 的拒绝时重导一次束，带着 `NODE_EXTRA_CA_CERTS` 与防循环标记
-  `GLASSPANE_CA_REEXEC=1` 把**同一条 argv** 重跑一次；调用方已经给了那个变量就不介入（方向归操作者）；
+  `GLASSPANE_CA_REEXEC=1` 把**同一条 argv** 重跑一次；调用方把那个变量指到**别的路径**时不介入（方向归操作者），
+  他指的就是我们导出的那一份时照常恢复；
   导不出可用束就不重跑但一定留痕；子进程被信号杀死 ⇒ 退出码 `3`，绝不返回 `0`。
 - **它写哪里**：`<stateRoot>/update-state.json`、`update-install.json`、`update-staging/`、
   `update-backup/`、`update.log`。状态根按**口令库里的家目录**解析（`os.userInfo().homedir`），不按 `$HOME`：
@@ -33,10 +34,19 @@
 ## 已知边界（不当成已交付）
 
 - **node 不读 macOS 信任库，这条腿只能靠导出的束**：装了 HTTPS 中间人的机器（企业网关、加速器）上，
-  `curl`/`git`/`gh` 都正常而 `fetch` 拒绝同一条链，因为 node 只认自己打包的 CA 束。本树的处理是导出
-  "这台机器的管理员已经选择信任"的那些根并追加给 node（不是替换、更不是关闭校验）。边界要说清：
-  拦截根若不在这两个钥匙串里，就只能落 `probe-failed` 等人处理；而**内容安全从来不依赖这条腿** ——
-  下载字节必须匹配那份由发布 key 签过的 `SHA256SUMS`，中间人签不出它。
+  `curl`/`git`/`gh` 都正常而 `node fetch` 拒绝同一条链，因为 node 只认自己打包的 CA 束。本树的处理是导出
+  那两个钥匙串里的**全部**证书并**追加**给 node（不是替换、更不是关闭校验）。措辞得按实测来：
+  `security find-certificate` 列的是证书，**不是**"这台机器的管理员选择信任的东西"——信任设置不参与，
+  被管理员显式判为不信任的根、以及为别的目的躺在 `System.keychain` 里的 CA，都会对这个作业变成 node 的
+  信任锚。作者机器实测 158 + 5 = 163 张，其中 161 张声明 `CA:TRUE`，另 2 张（`com.apple.systemdefault`、
+  `com.apple.kerberos.kdc`）**没有声明 basicConstraints**。导出前过一道保守的筛选（`filterToAnchors`）：
+  只剔显式声明 `CA:FALSE` 的（实测这类证书当锚时 OpenSSL 直接 `INVALID_PURPOSE`，本来就锚不住链，剔它是
+  可证明无损的），读不出的与没声明的一律保留——凭猜测剔掉一张旧根，坏的正是这条机制本身。本机实测剔 0 张，
+  状态里记的数因此是"node 真能用的张数"。完整版与理由在 `SECURITY.md` §2.8（中英两份）。其余边界：
+  拦截根若不在这两个钥匙串里，就只能落
+  `probe-failed` 等人处理；而**内容安全从来不依赖这条腿** —— 下载字节必须匹配那份由发布 key 签过的
+  `SHA256SUMS`，中间人签不出它。想少给信任：调用更新器之前把 `NODE_EXTRA_CA_CERTS` 设成你自己那份束
+  （更新器不删继承来的值，也不把不是自己导出的路径改指别处）。
 - **作者性（第 8 条）如今是被检查的，但只检查到"内置 key"这一层**：`verified` 的确切含义是"这份
   `SHA256SUMS` 与随代码分发的那把公钥相符"，不是"发布者是这个组织"——公钥与代码走同一渠道，轮换就是改
   `installer/cli.js` 里那一个导出值（`updater/lib/signature.js` 动态 import 它，`updater/` 下不留第二份，
@@ -50,11 +60,92 @@
   （`lib/assets.js:SIGNATURE_NAME`）。工作流哪天改用 `--output`、换后缀、或者只签 tarball，这条 gate 都会
   把该 release 读成 `unsigned-release`（而不是读成"签名没问题"）——`test/signature.test.mjs` 从工作流原文
   反推这个名字，任一侧改名即红。1.3.1 及更早的 release 永远停在 `unsigned-release`，因为签名 job 是之后加的。
-- 换版仍需在机器上重建 daemon（`swift build -c release` + `engine/scripts/make-app.sh`）：GitHub Release
-  只有源码 tarball，没有预编译二进制。因此一次自动更新可能要几分钟，也依赖本机有 Xcode 工具链。
+- 换版仍需在机器上重建 daemon（`swift build -c release` + `engine/scripts/make-app.sh`）：发布归档里
+  没有预编译的 Swift 二进制。因此一次自动更新可能要几分钟，也依赖本机有 Xcode 工具链。
+  JS 那一层不同：归档**必须**带着 `mcp-shell/dist` 与 `mcp-shell/schemas`（`scripts/make-release-archive.mjs`
+  在缺它们时拒绝打包），因为 `npm pack` 是在暂存树里跑的，源码树的 `bin` 指向并不存在的文件，装上去的
+  就是一个跑不起来的包 —— 2026-10-01 的真机换版正是这么失败并回滚的。`apply` 现在在换任何东西之前先问
+  这件事（`checkStagedNpmCommands`），答"缺哪个命令、是哪份发布产物的问题"。
 - 状态文件不落"上一次退出码"，所以 `apply-failed` 在面板重开后只能按"有没有暂存"判断能否重试；
   真实那次到底是 `4` 还是 `5` 只有当次运行知道。这一条是已知缺口，不是已解决。
 - `--consent state-dir`（守护进程跑在非默认状态根）只能从命令行给，面板**故意**不给这个按钮。
   `--consent unsigned-release` 同样只能从命令行给：面板的「安装更新」今天只在**跨大版本**的
   `needs-consent` 上附带 `--consent major`，所以对一份未签名的补丁版，页面上只有被拒的理由是原话显示的，
   放行动作本身要去终端（见 README「让 GlassPane 保持最新」）。
+
+- **换版的三道门按"能不能测到东西"排序**（2026-10-01 真机第一次跑通时改的）：`hello` 报新版本 →
+  `npm install -g` 两个包并读回版本 → `glasspane-mcp` 应答 `tools/list`。原先后两道是一起问的，而
+  `tools/list` 要的那个全局命令正是第二道才装上的东西 —— checkout 装出来的机器（安装器只跑
+  `npm install`，从不 `-g`）因此永远过不了这道门：每次都换完 `.app`、重启完 daemon 再整体回滚。
+  现在第三道不过时连 npm 层一起按记账退回原版本，句子点名退回哪一版。
+- **npm 那一层的记账先要能答复**（同一轮真机跑出来的）：`apply` 装包之前用一次
+  `npm ls -g --depth=0 --json` 记下"这台机器原来有什么"。**读不出来 ≠ 没有**——旧写法把这个区别写成了一个
+  `null`，于是撤销面对读不出来的前缀会去 `npm uninstall -g` 摘掉用户自己装的包。现在读不出来就在任何一次
+  `npm install -g` 之前拒绝（`npm-version-mismatch`，句子说"没记下可退的版本、什么都没装"）。装完再读回一次：
+  版本不符或读不出答复都要撤销，有记录的装回那一版、原本没有的**取回来**，句子逐包说清是哪一种；第二个包
+  装失败时，已经装上的第一个也一起取回——不然机器上留着一层属于没人正在运行版本的全局包，而记账只说
+  "`.app` 已还原"。这两条撤销都**不许在没接线时 exec 真 npm**（默认答案是"这条没接线，全局层没动"）：
+  本轮就出过一次——一条测试少注入 `uninstall`，真的在开发者机器上跑掉了 `npm uninstall -g glasspane-mcp`。
+  `apply.test.mjs` 因此把 `npm_config_prefix` 指到一个临时前缀，并用最后一条用例证明那里什么都没落下。
+- **换版之前会先问一句"这台机器的 npm 全局目录写得进去吗"**（2026-10-01 真机实测加的预检）：`apply` 的
+  顺序是换 `.app` → 重启 daemon 并握手 → `npm install -g` 两个包 → §11 换更新器自己。这台机器上
+  `/usr/local/lib/node_modules` 属 `root:wheel`，于是每天都是"包已换、daemon 已重启、npm 报 EACCES、再回退、
+  再重启一次"，状态里一句 `post-swap-failed`，版本永远落不下去。现在这一步提前问：
+  `npm config get prefix` + **两个目录**的 `W_OK`（包落下的 `<prefix>/lib/node_modules` 和命令软链过去的
+  `<prefix>/bin`）。只查前者是不够的：照第一次给的 remedy 把 `lib/node_modules` chown 过来之后，真机仍然死在
+  `EACCES: permission denied, symlink … -> '/usr/local/bin/glasspane-install'`——修完仍然失败的 remedy 比没有
+  remedy 更糟，所以现在两个目录都探、也都写进那句 remedy。写不进去就 `deferred` + `npm-prefix-unwritable`，
+  **什么都没换、daemon 一次都没重启**，并说清出路需要一个人（`sudo chown` 或把 prefix 挪进家目录后重跑安装程序）。
+- **§11 落地的形状（2026-09-30 本机实测之后补上的边界，都是实测不是推测）**：
+  · *一代是什么*：封闭清单 `updater/` + `installer/` + 发布根 `package.json`。`installer/` 不是顺手带上的：
+    `updater/lib/signature.js` 用 `import('../../installer/cli.js')` 取签名公钥，少它就是个跑不起来的更新器。
+    曾经按"整棵树"复制——`apply` 就在暂存树里 `swift build --package-path <暂存>/engine`，产品落在
+    `engine/.build`（本机实测 509 MB），"保留两代"于是实际是半个 GB。
+  · *树里不许有间接层*：`fs.cpSync(..., {dereference:false})` 不保留相对符号链接，会把 `link -> a.txt`
+    重写成指回**复制来源**（也就是这次要删掉的暂存树）的绝对链接；悬空之后，下一次 `check` 又用新下载的
+    字节把那条路径填回来，等于让每天的作业引用一份被拒树的内容。落地前后都 `lstat` 检查：`runtime/<ver>`
+    本身必须是真目录，树里每一项必须是普通文件或目录，违者拒绝落地并删净临时目录。
+  · *"这一代已经在盘上"不是跳过的理由*：重用路径要把新装那一路的每一项检查重做（含 0700 的读写回）；
+    mode 检查也移到标记落地之前，不生效就连根删掉，不给下一次留一个"名字对但没核过"的目录。
+  · *作业点名的是入口，不是版本*：launchd 定义里那条 CLI 永远是 `<状态根>/runtime/agent-entry.js`。它在每次
+    运行时读 `update-install.json` 的 `updaterCli` 并 exec 那一份脚本，退出码原样转达，被信号杀死时不返回 0；
+    指针缺失或读不回来时打印一行 JSON 拒绝并以 `3` 结束。于是**换版 = 写一个 JSON 文件**，不再需要向 launchd
+    做任何事。入口文件本身按字节读回校验、mode 0600，源在 `updater/agent-entry.js`（它随 `updater/` 一起被
+    落地清单带上）。
+  · *清理只删没人指的世代，而"指着"最多有三个作者*：新指针、上一个指针值、`launchctl print` 读回的**在册作业**
+    那一代。作业走入口时第三位答案为空（那是好消息：它不指任何一代）；但迁移窗口里它是唯一会致命的一位——
+    一台还没迁到入口的机器连续两次定时换版后，指针已经是 `1.8.0 → 1.7.0`，而定义里还写着 `1.6.0`，只钉那两个
+    就会删掉明早要执行的树。读不回在册作业时**跳过清理**并把这句写进 `runtime.detail`——不知道就一个都别删。
+    世代新旧按版本号比较（`1.10.0 > 1.9.0`），不按字符串排。
+  · *在册路径按"同一个文件"比，不按拼写比*：plist 里那条 CLI 路径是 node 报出的模块位置（已被 realpath），
+    状态根是 `path.resolve` 的字面量；`/tmp`、`/var/tmp` 或任何带软链的家目录上，一次成功的换版会被按字符串
+    的比较永远判成 `runtime-stale`。
+  · *注册成不成功由读回来的作业说了算*：`bootstrap` 退出 0 之后仍要 `launchctl print` 核对在册参数是不是
+    这次渲染的那一份（现在那一份就是入口）。读不回 ⇒ 装载成立但"跑的就是这一份"无证据（`agentVerified=false`，
+    消息原话说明）；读回却指着别的命令 ⇒ 拒绝，注册没换过来。标签不接受外来值：`agentPlistPath`/`registerAgent`/
+    `unregisterAgent` 只认 `com.glasspane.update`，因为标签决定 `bootout` 打掉谁的作业、plist 用谁的名字落盘。
+    `agentVerified` 从此说的是"作业走入口"，不再是"作业指这一版"——版本是指针的事。
+  · *每日时刻是保住的，不是重选的*：不带 `--hour` 的 `enable`（迁移那一次正是这一条）先读盘上定义的
+    `StartCalendarInterval` 并沿用；读不到才用 §2 的默认值，并把"用的是默认值"说出来。
+  · *交接之后才失败的回滚：指针一定要回去，作业看不需要注册*：`apply` 的 catch 会还原两个 `.app`，若不管指针
+    就留下一句"已还原并核实"配上指着被换出去那代的 `update-install.json`。`undoHandover` 做这件事，
+    `registeredAt` 沿用原值（回退不是重新安装）。要不要再动 launchd 由读回来的作业决定：走入口 ⇒ 只写指针；
+    读不回 ⇒ 保守地让旧那份重新注册一次（"不知道"不等于"走入口"）；**定时那一次与硬关的机器都不注册**——
+    前者会 `bootout` 掉正在回滚的自己，后者会把用户刚关掉的开关打开。
+  · *`skipped` 现在只剩一次*：定时作业跑的就是要被换掉的作业，从它内部 `bootout` 会在"包已换、状态未写"之间
+    把它拆掉，所以入口之前那套形状里每一次定时换版都欠一次人工 `enable`。入口把这笔账收成了**一台机器一次**：
+    还在写 `skipped` 说明这台机器的定义还点名版本路径，面板/`gp_diagnose` 给的下一步（开关关掉再打开，或
+    `updater enable`）做完之后，往后的换版不再有这一步。
+  · *`updater rollback` 不回退更新器自身*：它还原两个 `.app` 并读回版本，但不把 `runtime`/指针换回旧代
+    （回滚的动机通常是新 `.app` 有问题，不是新更新器有问题）。这句写进规格 §11.12，别让读代码的人以为
+    回滚是整台机器的时间倒退。
+- **旧安装走到这个形状有两条路，两条都要写清**（§11 的落地代价，不是缺口）：会自己换版的那份更新器，
+  得先被装上才能开始自换。这之前装出来的机器，指针 `updaterCli` 仍指着安装那趟钉在单个 tag 上的浅 clone，
+  跑的是旧代码 —— 旧代码里没有 §11，也不认识入口，所以由它跑的那一趟换版仍把作业指死在版本路径上。
+  · **重跑一次本版的安装程序**（最短）：安装器 import 的就是这份新代码，注册作业时直接指向那个不随版本变的
+    入口，此后每一次换版都只是写一个 JSON 文件，没有任何人工步骤。
+  · **只靠自更新**：第一趟由旧代码跑（作业仍写死版本路径），第二趟由新代码跑才把作业挪到入口；这一趟若是
+    定时那一次，状态里记 `skipped`，人做一次 `enable`（面板把「自动更新」开关关掉再打开）就完成——
+    **这是一台机器一次，不是每一次**。
+  到位之后每一次换版都把更新器自己落到 `<状态根>/runtime/<版本>/` 并改写指针（状态里的 `runtime` 记录说的
+  就是这件事成没成，`gp_diagnose` 与面板都读它）。两条都不需要人改 plist，也不许被说成"升级后什么都不用做"。

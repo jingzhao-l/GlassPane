@@ -79,13 +79,32 @@ export const CODES = Object.freeze({
   handshakeFailed: 'handshake-failed',
   rolledBack: 'rolled-back',
   rollbackFailed: 'rollback-failed',
+  // §3.4's npm gate: a package that does not read back as the version the verified tree claimed — and the
+  // prefix not being readable at all, which is refused *before* anything is installed because a version that
+  // was never recorded has no undo. Both are "the npm layer's version state could not be confirmed", so they
+  // share one code rather than adding a member to a closed enum the readers all have to be re-paired with.
   npmVersionMismatch: 'npm-version-mismatch',
+  // §3.5's pre-flight: npm's global directory is not writable by the account the update runs under.
+  // Measured on a real install (2026-10-01): `/usr/local/lib/node_modules` is root-owned, so
+  // `npm install -g` failed *after* the bundles had been swapped and the daemon restarted, and every
+  // scheduled run rolled the machine back again. Asking before the swap costs one `npm config` call.
+  npmPrefixUnwritable: 'npm-prefix-unwritable',
   // `apply` refused because the staged tree is not newer than what is installed
   // at apply time (§7: `apply` = put the *staged offer* in, not "any tree on disk").
   stagedNotNewer: 'staged-version-not-newer',
   // Anything that threw after the bundles were already swapped in: the answer is
   // 4 or 5, never 3, because the machine did change.
   postSwapFailed: 'post-swap-failed',
+  // §11: the swap succeeded but the updater's own copy did not move. Not a refusal — the machine
+  // *was* updated — so it never changes the exit code; it is a standing degradation the panel and
+  // gp_diagnose have to keep saying until a person re-runs the installer or the next apply lands it.
+  runtimeStale: 'runtime-stale',
+  // §11: the code, the pointer and the stable entry moved, but the registered job still names its own
+  // versioned path — a machine installed before the entry existed. Re-registering inside a *scheduled*
+  // apply is forbidden (that apply is the job, and `bootout` would take it down mid-write), so the one
+  // migration happens the next time a person (or the panel's switch) runs `enable`. After that single
+  // step no version asks again, and this code stops appearing on that machine.
+  runtimeRegistrationPending: 'runtime-registration-pending',
   // The scheduled agent's plist could not be rendered without a shell interpreting
   // a path it was handed (§2's "do not guess at another installation").
   agentPathUnsafe: 'agent-path-unsafe',

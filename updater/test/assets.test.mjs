@@ -12,9 +12,14 @@ import assert from 'node:assert/strict'
 import { SUMS_NAME, TARBALL_NAME, assetIndex, requireAssetPair } from '../lib/assets.js'
 import { CODES } from '../lib/codes.js'
 import { UpdaterError } from '../lib/fsutil.js'
+import { REPO_SLUG } from '../lib/source.js'
 
-const BASE = 'https://api.github.com/repos/jingzhao-l/GlassPane'
-const DOWNLOAD = BASE + '/releases/download/v1.4.0/'
+const BASE = 'https://api.github.com/repos/' + REPO_SLUG
+// 真机形状（2026-09-29 从 `GET releases/latest` 的报文里逐字取的）：GitHub 把资产放在
+// `github.com/<slug>/releases/download/<tag>/<file>`，**不是** api.github.com 那个 origin。
+// 这一行以前写的是 `BASE + '/releases/download/…'` —— 一个 GitHub 不产出的形状，于是钉死源
+// 那条规则在夹具里永远成立、在真机上永远失败。夹具的形状必须来自报文，不是来自我的想象。
+const DOWNLOAD = 'https://github.com/' + REPO_SLUG + '/releases/download/v1.4.0/'
 
 function releaseWith(...names) {
   return { assets: names.map((name) => ({ name, browser_download_url: DOWNLOAD + name })) }
@@ -73,8 +78,34 @@ test('an asset with no download url, and a non-https one, both refuse', () => {
 })
 
 test('assetIndex ignores assets with no name and keeps the payload order', () => {
-  assert.deepEqual(assetIndex({ assets: [{ url: 'x' }, { name: 'a' }] }), [{ name: 'a', url: null }])
+  assert.deepEqual(assetIndex({ assets: [{ url: 'x' }, { name: 'a' }] }), [{ name: 'a', url: null, bytes: null }])
   assert.deepEqual(assetIndex(null), [])
+})
+
+test('the release declares how long each asset is, and that claim is carried through', () => {
+  // Sizes are the ones the API really answers for v1.5.1 (measured: `GET releases/tags/v1.5.1` gives
+  // 25,126,902 for the tarball and 89 for the checksum file). `requireAssetPair` has to hand them to
+  // `check.js`, because the length claim is only a control if the code that reads the body can see it.
+  const release = {
+    assets: [
+      { name: 'GlassPane-1.4.0.tar.gz', browser_download_url: DOWNLOAD + 'GlassPane-1.4.0.tar.gz', size: 25126902 },
+      { name: 'SHA256SUMS-1.4.0.txt', browser_download_url: DOWNLOAD + 'SHA256SUMS-1.4.0.txt', size: 89 },
+    ],
+  }
+  const pair = requireAssetPair(release, { version: '1.4.0', base: BASE })
+  assert.equal(pair.tarballBytes, 25126902)
+  assert.equal(pair.sumsBytes, 89)
+
+  // A payload that says nothing about length must not become a phantom claim: `null` means "nothing to
+  // check against", and the download is judged on its checksum instead.
+  const silent = requireAssetPair(releaseWith('GlassPane-1.4.0.tar.gz', 'SHA256SUMS-1.4.0.txt'), { version: '1.4.0', base: BASE })
+  assert.equal(silent.tarballBytes, null)
+  assert.equal(silent.sumsBytes, null)
+
+  // Garbage is the same as absent — a `size` this code cannot trust must not refuse a real download.
+  for (const junk of ['25126902', -1, 1.5, null, undefined]) {
+    assert.equal(assetIndex({ assets: [{ name: 'x', size: junk }] })[0].bytes, null, `${JSON.stringify(junk)} 不是一个可信的长度`)
+  }
 })
 
 function capture(fn) {

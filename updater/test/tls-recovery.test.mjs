@@ -5,7 +5,8 @@
  * 而 TLS 失败永远走不到 `apply`。机器后来装了新代理 ⇒ 每天定时检查都在第 1 道门上失败，
  * 面板读起来像"没有可用更新"。所以恢复动作不能等人想起点什么。
  *
- * 三条边界同时是三条测试：调用方已经给了 `NODE_EXTRA_CA_CERTS` 就不介入（方向归他）；
+ * 三条边界同时是三条测试：调用方把 `NODE_EXTRA_CA_CERTS` 指到别的路径就不介入（方向归他），
+ * 他指的正好是我们导出的那一份时照常恢复；
  * 只重跑一次（标记位）；导不出可用的束就不重跑，但**必须留痕**（否则这台机器的失败只剩一句猜测）。
  *
  * REVERSE MUTATION（每条都已实测转红，恢复后全绿）：
@@ -79,14 +80,6 @@ test('the marker in the environment stops the recursion, and nothing is re-expor
   assert.equal(code, null, '第二次只许如实报出原因，不再往上叠一层子进程')
   assert.equal(h.refreshCalls(), 0, '连导出都不该再做一次：这一次运行已经证明束帮不上忙')
   assert.deepEqual(h.spawned, [])
-})
-
-test('an operator-supplied NODE_EXTRA_CA_CERTS is not overridden', () => {
-  const h = harness()
-  const code = recoverFromTlsFailure({ outcome: tlsOutcome, argv: ['check'], env: { [CA_ENV_VAR]: '/mine/roots.pem' }, ...h.deps })
-  assert.equal(code, null)
-  assert.equal(h.refreshCalls(), 0, '人已经指定了信任从哪来，方向归他，工具不代他改')
-  assert.match(tlsOutcome.message, /UNABLE_TO_VERIFY/, '原始拒绝仍然照常返回（这里断言的是那条消息没有被"恢复成功"覆盖掉）')
 })
 
 test('a non-certificate failure gets no bundle retry at all', () => {
@@ -192,4 +185,30 @@ test('main() is what performs the recovery, not runCommand: the installer librar
   const written = JSON.parse(fs.readFileSync(`${root}/update-state.json`, 'utf8'))
   assert.equal(written.caRoots.status, 'ok', '写进状态的是这次重导的结果')
   removeDir(root)
+})
+
+test('the operator pointed node at his own bundle: we refresh, but we do not re-run under our path', () => {
+  const h = harness()
+  const code = recoverFromTlsFailure({
+    outcome: tlsOutcome,
+    argv: ['check', '--json'],
+    env: { [CA_ENV_VAR]: '/operator/trust/own-roots.pem' },
+    ...h.deps,
+  })
+  assert.equal(code, null, '方向归他：替他改指我们那份，等于静默取消他自己给的信任')
+  assert.deepEqual(h.spawned, [], '不起子进程——那份 argv 要带的是他的变量值，我们没资格替换')
+  assert.equal(h.refreshCalls(), 1, '但导出照做：拦截根会轮换，刷新束与要不要代为重跑是两件事')
+  assert.deepEqual(h.records.map((r) => r.status), ['ok'], '刷新结果仍要落进状态，面板才看得见')
+
+  // 反过来的那一半同样是契约：他自己指的就是我们那份路径时，重跑才是用户要的动作。
+  const same = harness()
+  const again = recoverFromTlsFailure({
+    outcome: tlsOutcome,
+    argv: ['check', '--json'],
+    env: { [CA_ENV_VAR]: '/var/st/ca-roots.pem' },
+    ...same.deps,
+  })
+  assert.equal(again, EXIT.OK, '操作者的值与我们导出的那一份一致时，这不是别人的信任，就是我们那份')
+  assert.equal(same.spawned.length, 1, JSON.stringify(same.spawned))
+  assert.equal(same.spawned[0].env[CA_ENV_VAR], '/var/st/ca-roots.pem')
 })

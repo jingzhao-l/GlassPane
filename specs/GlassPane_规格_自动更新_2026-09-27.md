@@ -12,6 +12,46 @@
 - **源**：`https://api.github.com/repos/jingzhao-l/GlassPane/releases/latest`。仓库名是常量，
   不由参数或环境变量决定；`GLASSPANE_UPDATE_BASE` 只能把主机换成 **https** 或 **127.0.0.1**
   （后者仅供测试），换成明文地址即拒绝启动检查而不是降级。
+- **资产可以换了主机，但不能换"是谁的发布"**（2026-09-29 真机查出来的一条：GitHub 报文里的
+  `browser_download_url` 是 `https://github.com/<slug>/releases/download/<tag>/<file>`，与钉死的
+  `api.github.com` 不同 origin；当时的规则只认 same-origin ⇒ 每一份真实 release 都死在这一步，而
+  所有夹具写的是 GitHub 根本不产出的 `api.github.com/.../releases/download/…`）。现在的判据三条同时成立才放行：
+  基址仍是钉死的 `api.github.com`（自建镜像不获得这层放宽，仍按 same-origin）、主机在**显式列出**的
+  GitHub 发布主机集里（不是 `*.github.com` 那种后缀匹配）、且路径解码后属于**这个仓**的那两种形状
+  （`/<slug>/releases/download/<tag>/<file>` 或 `/repos/<slug>/{tarball,zipball}/<ref>`）。
+  同 origin 的 URL 也要过路径形状这一关——`api.github.com` 上不止放着这一个仓。
+- **档案里的链接一律物化成副本，落盘的树里不许有任何链接**：`git archive` 会把仓里的符号链接原样打进
+  release 资产（本仓的图标文件就是），所以 typeflag `1`/`2` 不再一律拒绝，而是**把档案里目标那份字节抄到
+  链接的位置**，mode 跟随目标文件（tar 记的链接 mode 是 0777，照抄就是每台机器上多一个人人可写的发布字节）。
+  仍然全拒：绝对目标、解析后越出暂存目录的目标、档案里不存在的目标、指向目录的链接、链接指向链接、
+  设备与 FIFO。校验顺序仍是"先看全部条目，再一个字节都不写"，所以半棵树不会被留在盘上。
+- **下载有三个时钟，各自判一件事**（2026-10-01 改成三条，因为两条时"兜底"变成了主判据）：
+  · `stallMs`（默认 30s，**每收到一段字节就重置**）判"这条连接死没死"；
+  · `minRateBps`（默认 16 KiB/s，按 `rateWindowMs` 分窗量，连续 `rateWindowsBeforeRefusal` 窗低于下限就拒）
+    判"活着但慢到什么程度不值得下完"。这个下限是**算出来的**不是挑出来的：tarball 25,126,902 字节
+    （v1.5.1 实测），16 KiB/s 要 25 分钟，还在一天之内；4 KiB/s 要 100 分钟，下一次每日作业会先到来。
+  · `timeoutMs`（默认 15min）是兜底，防"永远滴流"把作业吊死。**响应声明了长度时它只会被放宽、且放宽有顶**：
+    预算 = `declared / minRateBps × 1.5`，比默认长就用它，但不越过 `maxCeilingMs`（45min；按这个下限算
+    1 GiB 的声明能换来 27 小时，那不是放宽而是把兜底取消）——否则兜底就悄悄成了主判据，而真机上"24 MiB 在
+    26 KiB/s 的活流上被 900s 掐死"正是这么发生的。不声明长度（分块传输、别的源）就保持 `timeoutMs`。
+    句子里打印的必须是**真正拦住它的那条秒数**：放宽过之后还照抄 `timeoutMs`，就是报出一个没发生过的时限。
+    这条预算在生产里够得着：`com.glasspane.update` 的 plist 只有 Label/ProgramArguments/RunAtLoad/StartCalendarInterval/ThrottleInterval/Standard*Path 这些键，**没有 `ExitTimeOut`**（那是卸载/停止时给 SIGTERM 的宽限，不是在跑作业的墙钟上限），而 launchd 按 label 只跑单实例，下一个日历点不会并发起第二个。
+  单个总时长做不到这三件事——2026-09-29 实测那份 tarball 24 MiB、无人竞争时 39s，而在有竞争的链路上被
+  120s 总时长掐死，报出去的句子是 `This operation was aborted`（既不说到了哪条时限，也不说收到多少字节）。
+  现在三种停止各自说清"停摆 30s 时已收到 8.4 MiB"/"平均 3.1 KiB/s，低于每日作业需要的 16.0 KiB/s，
+  按这个速度这份 24.0 MiB 要 X 分钟"/"600s 没下完（已收到 …，共声明 …）"，并且**都不 stage 半份内容**。
+- **发布出去的资产长度是一条要被核对的断言**：`assets[].size`（v1.5.1 实测 tarball 25,126,902、SUMS 89，
+  与 CDN 回的 `content-length` 一致）在**算哈希之前**就要与真正收到的字节数对齐，不符 ⇒ `release-payload-invalid`
+  且不 stage。这一条之所以不能被摘要闸代替：`SHA256SUMS-<ver>.txt` 自己就是断言摘要的那份东西——它少一个字节
+  却仍写着正确那一行时，后面每一道闸都会满意，而那已经不是发布所描述的文件了。载荷里没有 `size`（镜像、旧
+  API）不是失败，只是"没有这条断言"。
+- **文档化的每一个 CLI 参数都必须走到用它的那行代码**，且至少有一条用例是**从进程那一侧**进去的。
+  `--state-dir`、`--apps-dir`、`--daemon-bin`、`--socket`、`--at`、`--hour`、`--minute` 曾经被
+  `parseArgs` 写进一个没人读的 `flags.overrides` 袋子，于是六个参数在命令行上全部静默失效——
+  `check --state-dir /var/tmp/x` 实际把整份暂存 release 写进了活的 `~/.glasspane`（自己跑真机验收时撞见）。
+  单元测试当时全绿，因为它们直接构造 `runCommand({ flags: {…} })` 那个消费者形状，从不经过解析器。
+  `--disable`/`--enable` 同理：文案写着"no-op 别名"却什么都不做，比没有这个开关更坏——现在它们真的选择子命令，
+  且拒绝与别的命令同时出现。
 - **八道校验，任一不过就不换版**，并把不过的那条以稳定 code 记进状态文件：
   1. `tag` 必须匹配 `^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$`，且**语义化版本严格大于**当前
      （当前值取本机 `.app` 的 `CFBundleShortVersionString`，与 `glasspaned --version` 读回的值必须
@@ -56,7 +96,13 @@
   （可与发布页核对），major 一律要人点按钮，一键关闭自动更新。
 - **npm 两个包不走 registry 更新**：从**已校验的暂存树**里 `npm pack` 出 tgz 再
   `npm install -g <该 tgz>`，避免"校验了 A 却装了 B"的双源。安装后必须 `npm ls -g` 读回版本等于
-  `<ver>`，否则 `rollback`。
+  `<ver>`，否则 `rollback`。这条对发布产物有一个硬前提：**归档里必须已经带着 `mcp-shell` 的构建输出**
+  （`dist/`、`schemas/`），因为 `npm pack` 读的是树里现成的文件；纯源码归档打出来的包只在
+  `package.json` 里声明 `bin`，那个文件却不在树里，装上去是个跑不起来的包（2026-10-01 真机实测：tgz
+  里只有三个条目，`npm install -g` 退 0、版本读回也对，MCP 那一半却在 `ENOENT` 上死掉，整次换版回滚）。
+  因此本节原先的"确定性源码 tarball"改口为**发布归档 = 被 tag 的树 + 目标机自己产不出的 JS 构建产物**，
+  由 `scripts/make-release-archive.mjs` 生成、缺构建产物时拒绝打包；Swift 那一半仍旧在目标机上构建
+  （Xcode 是 macOS 更新唯一可以假设存在的重型工具链）。
 
 ## 2. 什么时候才允许换版
 
@@ -78,10 +124,60 @@
    （含版本标记），备份成功后才动现场。
 2. 从暂存树构建（`swift build -c release` + `engine/scripts/make-app.sh`）并安置两个 bundle；
    构建失败 ⇒ 现场未动，`status=staged-build-failed`。
-3. `launchctl kickstart -k gui/<uid>/com.glasspane.daemon` 重启，**再读一次版本**：
-   socket 的 `hello` 必须回 `<ver>`，且 `glasspane-mcp` 的 `tools/list` 可用；15 s 内不成立即
-   `restore backup + kickstart`，状态记 `rolled-back`，并把两侧版本写进 `lastError`。
-4. npm 全局包的安装同样先记录原版本，读回不符就装回原版本。
+3. `launchctl kickstart -k gui/<uid>/com.glasspane.daemon` 重启，**再读一次版本**：socket 的 `hello`
+   必须回 `<ver>`；15 s 内不成立即 `restore backup + kickstart`，状态记 `rolled-back`，并把两侧版本写进
+   `lastError`。**这一道只读 `hello`**，不读 `tools/list`（顺序是本轮真机改的，见 3a）。
+   3a. **MCP 那一半必须在 npm 层落地之后读，不能在此之前**。§3.3 的另一半要求全局命令
+       `glasspane-mcp` 应答 `tools/list`，而 checkout 形态的安装只跑过 `npm install`（workspaces），
+       全局包是**本次 `apply` 自己在下一步装的**。把两半放在一起先问，等于要求"这台机器上存在一个还没
+       装上的命令"——2026-10-01 真机第一次跑通到这一步时就是这样：`.app` 换了、daemon 重启并把
+       `hello` 回了 1.5.1，然后因为 `ENOENT` 整个回滚，句子还自相矛盾（同一句里既说"装上了 1.5.1、
+       跑着的 daemon 报 1.5.1"，又说失败）。所以现在是三道：**`hello` 版本 → npm 装 + 读回 → `tools/list`**，
+       两半都过才允许翻 `current`；第三条不过时**除了 `.app` 还要把 npm 层按记账装回原版本**，
+       并说清退回了哪一版（只说"已回滚"会把人支去翻 `~/Applications`，而走样的其实是 npm）。
+4. npm 全局包的安装同样先记录原版本，读回不符就装回原版本，但**"记录"这一步自己必须先能答复**：
+   记账走一次 `npm ls -g --depth=0 --json`（旧写法每个包各问一次，两问之间机器可能已被 npm 动过），
+   接缝回答的是 `{ok, versions, message}` 而不是一个版本串——因为"这台机器没有这个包"与"我读不出来"
+   是两件事，只有前者有撤销。读不出答复 ⇒ 在**任何一次 `npm install -g` 之前**就拒绝
+   （`code=npm-version-mismatch`，句子说清"没记下可退的版本、什么都没装"）。把这一步做成"读不出来就当作
+   没有"，撤销就会去 `npm uninstall -g` 摘掉用户自己装的包。四种真实形状（npm 11.17.0 实测）钉住这个判据：
+   正常前缀 exit 0 带 `dependencies`；**空前缀 exit 0 只回 `{"resolved": …}`、根本没有 `dependencies` 键**
+   （所以缺键不是故障，否则每台新机器都被拒）；前缀够不着时 exit 254（ENOENT）或 236（ENOTDIR）并回一个
+   **能 parse 的 JSON 错误封套** `{"error":{…}}`——"解析成功"不等于"npm 答了清单"；`lib` 不可读时 npm 仍回
+   exit 0 的空清单，这一类只有 §3.5 的预检看得见。
+   4b. 装完再读回一次：版本不符（**或读不出答复**）就撤销——有记录的装回那一版，原本没有的**取下来**。
+       读不出答复要说成"读不出答复"，不许写成 `reads back null`（那读起来像 npm 答了"没装"，会把人支去
+       查一个不存在的包，而坏掉的是前缀）。半途失败（第二个包 EACCES）也必须把已经装上的第一个取回来，
+       否则记账只说"`.app` 已还原"，机器上却留着一层属于没人正在运行的版本的全局包。撤销的句子要**逐包**
+       说清是"退回 X@1.4.0"还是"取回（这台机器原本没有）"：这句话曾有两个作者，读回那一处的作者对刚被
+       摘掉的包说"已按记录的版本装回"——一个从未存在过的版本。
+   4c. 撤销与安装走同一注入接缝，且**默认值不许 exec 真 npm**：被套用测序列的用例注入了 `npm`/`install`
+       却没有交代撤销时，默认答案必须是"这条没接线，所以全局层没动"（`notWired`）。真实机器上跑过一次
+       反向测试去 `npm install -g` 并死在 `/usr/local/bin` 的 EACCES 上，那已经不是被测行为；而 read-back
+       那条测试少注入一个 `uninstall`，就真的在作者机器上执行了 `npm uninstall -g glasspane-mcp`。这两条
+       都躲得过 `run` 计数（它们走模块自己的 `spawnSync`），所以测试文件另把 `npm_config_prefix` 指向一个
+       临时前缀，并用最后一条用例证明那里什么都没落下。
+   4a. **npm 的 global 目录写不进去 ⇒ 在换任何东西之前就拒绝，不许换完再回退。** 本机实测（2026-10-01）：
+       `/usr/local/lib/node_modules` 属于 `root:wheel`，这个账号从来没装过 GlassPane 的全局包，于是每次
+       `apply` 都是"两个 `.app` 已换、daemon 已重启握手通过、`npm install -g` 报 EACCES、再回退 `.app`、
+       再重启一次 daemon"——一天两次重启、一句 `post-swap-failed`、版本永远落不下去，而且明天同一分钟重演。
+       预检只有一次 `npm config get prefix` 加**两次** `W_OK`：全局包落下的那一层（`<prefix>/lib/node_modules`）
+       和命令被软链过去的那一层（`<prefix>/bin`）都要能写。第一次实现只查了前者，照它给出的 remedy 把
+       `lib/node_modules` chown 过来之后，真机仍然死在 `EACCES: permission denied, symlink
+       '../lib/node_modules/glasspane-install/cli.js' -> '/usr/local/bin/glasspane-install'`——**修完仍失败
+       的 remedy 比没有 remedy 更糟**，所以现在两个目录都探、也都写进那句 remedy。问不出前缀、目录不存在、
+       或其中任何一层写不进去，都在**备份之前**返回 `status=deferred` + `code=npm-prefix-unwritable`，
+       并说清"什么都没换、daemon 没重启"。
+       remedy 要指出这一条需要一个人（`sudo chown -R "$(whoami)" <两个目录>`，或把 prefix 挪进家目录并改 PATH），
+       不能写成 agent 能自己做完的样子。注入过 `npm` 的调用方（测试）自己负责那一层，此时预检默认不起进程——
+       否则每条序列测试都在读开发者机器的 npm 配置，而不是读被测代码。
+   4d. **暂存树里"声明了的命令"必须在树里**，同样在备份之前问。npm 那一步装的是从暂存树 `npm pack`
+       出来的包，而 `npm pack` 只看树里现成的文件：`package.json` 声明 `bin` 却没有那个文件时，
+       `npm install -g` 照样退 0、`npm ls -g` 照样读回版本号，跑起来却是 `ENOENT`（2026-10-01 真机对
+       v1.5.1 实测：tgz 只有 `package.json`/`LICENSE`/`README.md` 三个条目）。这道预检回答的是
+       `code=release-payload-invalid` + "发布者要修的东西在 `scripts/make-release-archive.mjs` 那一侧"，
+       而不是让人对着"包装上了却跑不起来"去查自己的机器。注入过 `npm` 的调用方自己负责那一层，
+       默认值同样是空转。
 5. 一切成功才更新 `current`；历史保留最后 10 次（时间、动作、结论、digest 前 12 位）。
 
 ## 4. 没跑成 / 失败时，用户看得到也能动手
@@ -115,9 +211,21 @@
 | 判据 | 测试 | 反向变异 |
 | --- | --- | --- |
 | 源只能是 https/pinned | `updater/test/source.test.mjs` | 放开明文 ⇒ 红 |
+| 资产主机可以换、但"谁的发布"不能换（GitHub 真形状放行；别的仓、别的族、镜像基址拿到 github.com、同 origin 但路径不属于本仓，全部拒） | `source.test.mjs`（URL 逐字取自真机报文） | 两面路径判据**一起**拆才见血（两处互为冗余）；只拆放宽那面 ⇒ 红 |
+| 档案里的链接物化成副本、mode 随目标；绝对/越界/悬空/指目录/指链接/设备/FIFO 全拒，且拒时一个字节都没写 | `tar.test.mjs` | 退回"链接一律拒" ⇒ 红；按 destDir 解析链接 ⇒ 红；目标不必在档 ⇒ 红；落成真链接 ⇒ 红；抄成 0777 ⇒ 红 |
+| 下载三个时钟各判各的：stall 逐段重置、速率下限判"太慢不值得下完"、兜底总时长在响应声明长度时**只放宽**；三种停止都说到哪条与收到多少 | `source.test.mjs`（假流按真 fetch 的 abort 语义实现，并带上真 GitHub 资产都有的 `content-length`） | 不重置 stall ⇒ 红（慢而活的下载被杀）；`if (fired)` 删掉 ⇒ 红（回到那句 "This operation was aborted"）；删掉按声明长度放宽预算那一行 ⇒ `a download that declares its length gets the time its own rate needs…` 红（它就是真机 26 KiB/s 被 900s 掐死的形状）；拆掉速率下限那块 ⇒ crawling 夹具活到兜底，句子不再是"太慢"；拆掉 `maxCeilingMs` 那层夹取 ⇒ `a widened ceiling is still bounded` 红（它等的是 27 小时而不是 200ms）；而 `the rate floor lets a stream that is merely unhurried through` 保证这条判据不是永远拒 |
+| 资产声明的长度要与收到的字节对齐，且在算哈希之前 | `check.test.mjs`（`a checksum file one byte shorter than the release declares is refused before it is trusted`、`an archive that is not the length the release published is refused — and an honest length still stages`、`a release that publishes no length is not refused for it`）；夹具本身现在按真报文形状带上 `assets[].size` | 删掉 sums 那一句 ⇒ 第一条红（摘要闸看不见：坏的是断言摘要的那份文件本身）；删掉 tarball 那一句 ⇒ 第二条红；把"没声明"当失败 ⇒ 第三条红，且所有端到端用例一起红 |
+| CLI 参数走到消费者读的那个键（含从**进程**那一侧进去的用例） | `updater/test/cli-options.test.mjs` | 塞回 `flags.overrides` ⇒ 4 条红；`--disable` 退回装饰品 ⇒ 红 |
+| 两道读回各自落在"测得到东西"的时刻：`hello` 先、npm 次之、`tools/list` 最后；第三条不过连 npm 一起退回 | `updater/test/apply.test.mjs`（`a machine that has never installed glasspane-mcp still completes the update…`、`an MCP layer that still cannot answer after the install rolls the npm packages back too`） | 把两半挪回 npm 之前 ⇒ 第一条红（并真的把 15 s 预算耗光后回滚，正是真机那次的形状）；把 `restoreNpm` 换成空 ⇒ 第二条红 |
+| npm 层的撤销不许碰真机器 | `updater/test/apply.test.mjs`（两条都注入 `npm`；默认撤销随 `npm` 是否为真装包函数；末条 `this file never moved a real global npm package…` 读那个临时 `npm_config_prefix` 前缀，证明整趟测试一个字都没落下） | 让撤销无条件走 `defaultNpmRestore` ⇒ 第一条红，且末条也红（真 npm 会在沙箱前缀里建出 `lib/node_modules`）；read-back 那处少传 `uninstall` ⇒ `an npm rollback nobody can perform` 红 |
+| 前缀读不出来时不装、读回读不出来时按失败处理并说成"读不出来" | `updater/test/apply.test.mjs`（`an npm layer that cannot be read before installing is not installed into`：`install` 计数器必须是 0；`an npm read-back that fails to answer is a failed install, not an unknown one`；`reading the global npm layer distinguishes "nothing installed" from "could not look"`：四种 npm 真报文形状逐个判） | 删掉装前的拒绝 ⇒ 第一条红；把错误封套当清单（只信退出码）⇒ 第三条红；把"没有 `dependencies` 键"当故障 ⇒ 第三条里空前缀那条红（每台新机器都会被拒） |
+| 撤销的句子逐包说清是"退回哪一版"还是"取回来"，半途失败也取回 | `updater/test/apply.test.mjs`（`the npm undo sentence describes each package the way it was actually undone`、`a global install that fails halfway takes back the package it already put in`、`restoreNpmPackages takes a package back off when this machine had none before`） | 回到那句一刀切的"已按记录的版本装回" ⇒ 第一条红（对刚被摘掉的包说了个从未存在的版本）；半途失败不调撤销 ⇒ 第二条红（`uninstall` 一次都没被叫到）；把"原本没有"再当无法撤销 ⇒ 三条一起红 |
 | tag 解析与 semver 严格大于 | `version.test.mjs` | 允许相等 ⇒ 红 |
 | major 不自动应用 | `policy.test.mjs` | 去掉 consent 分支 ⇒ 红 |
 | 双资产必须齐 | `assets.test.mjs` | 缺 SUMS 仍继续 ⇒ 红 |
+| npm 全局目录写不进去时，在备份与换版**之前**就拒绝，并说清什么都没动；两个目录都算 | `updater/test/apply.test.mjs`（`checkNpmPrefix…`：真目录 + 真 `chmod 0500`；`checkNpmPrefix covers both directories a global install writes into`：只锁 `bin` 也须拒；`a machine that cannot write npm's global directory is refused before a single bundle moves`：构建/kickstart/npm 都是 `assert.fail` 引线） | 删掉那次拒绝 ⇒ 引线炸，红；把 `W_OK` 探测跳过 ⇒ 第一条红（0500 的目录被当成能写）；只探 `lib/node_modules` 不探 `bin` ⇒ 第二条红（正是真机 chown 之后仍然发生的那次 EACCES） |
+| 暂存树里声明了的命令必须真的在树里，否则在备份**之前**就拒绝 | `updater/test/apply.test.mjs`（`a staged release whose package declares a command it does not carry is refused before anything moves`：真暂存树 + 构建/kickstart/npm 引线；`the staged-command pre-flight answers for the tree the release actually ships`：少两条之一即拒、齐了即放行、读不出 manifest 即拒） | 删掉 `commandsReady` 那块 ⇒ 引线全炸；`checkStagedNpmCommands` 缺文件也回 `ok:true` ⇒ "少一个也拒绝"那条红（永远绿的闸与永远拒的闸都不是闸） |
+| 发布归档带着 `npm pack` 需要的构建产物，并且同树两次生成字节一致 | `updater/test/release-archive.test.mjs`（临时 git 仓跑真脚本：解包→`npm pack`→`npm install -g` 到临时 prefix→命令真的能跑；符号链接仍以链接入档） | 从 `REQUIRED_BUILD_OUTPUTS` 里删掉 `mcp-shell/dist` ⇒ 第一条红（那正是 2026-10-01 发出去的形状）；去掉条目排序 ⇒ 复现性那条红 |
 | SUMS 严格解析 | `sums.test.mjs` | 取第一个命中 ⇒ 红 |
 | 实测 sha256 | `digest.test.mjs` | 改用头长度 ⇒ 红 |
 | 暂存树版本线自证 | `selfcheck.test.mjs` | 跳过 check-version ⇒ 红 |
@@ -210,18 +318,32 @@
 3. **常态消费者只有两个，且都在进程启动前拿到变量**：launchd agent 的 plist 写
    `EnvironmentVariables.NODE_EXTRA_CA_CERTS`；面板 `Process` 起 CLI 时把同一个变量放进环境。
    node 只在启动时读这份束，所以**不许改 `NODE_TLS_REJECT_UNAUTHORIZED`、不加 `--insecure`、不降级到 http**。
+   这条禁令必须有读者，否则它就只是一句话：`updater/test/trust-inversion.test.mjs` 扫生产代码
+   （`updater/`、`installer/`、`mcp-shell/src/`、面板那几个 Swift 文件、`install.sh`、launchd 模板）里的
+   这些开关，注释里的提及不算（注释不能执行），发布那条路径上还单独禁明文 http。
    唯一被允许的 re-exec 是第 10 条，而且只在"已经失败在证书上"之后发生一次；除此之外，在终端手敲
    `node updater/cli.js check` 的人若没设这个变量，正确行为是**失败并把 remedy 说出来**（见第 6 条）。
-4. **`NODE_EXTRA_CA_CERTS` 是追加而不是替换**：node 仍在验证完整链，Mozilla 束继续有效，只是另外也信任
-   这台机器的管理员已经选择信任的那些根。文档必须这样写，否则读者会把它读成"关了校验"。内容级作者性
+4. **`NODE_EXTRA_CA_CERTS` 是追加而不是替换**：node 仍在验证完整链，Mozilla 束继续有效，只是另外把
+   那两个钥匙串里的**全部**证书也当作信任锚。措辞必须按实测写，不能写成"这台机器的管理员已经选择信任的那些
+   根"——**信任设置不参与过滤**：被显式判为不信任的根、以及为别的目的躺在 `System.keychain` 里的 CA，
+   都会对这个作业生效。作者机器实测 158 + 5 = 163 张，其中 161 张声明 `CA:TRUE`，另 2 张**没有声明 basicConstraints**。
+   导出前按 `filterToAnchors` 筛：**只剔显式声明 `CA:FALSE` 的**（实测这类证书当唯一锚时 OpenSSL 直接
+   `INVALID_PURPOSE`，本来就锚不住任何链，所以剔它是可证明无损的），读不出的与没声明的一律保留——凭猜测
+   剔掉一张旧根，坏掉的正是这条机制本身。本机实测剔 0 张；状态里记的张数从此是"node 真能用的张数"。
+   文档写清方向，否则读者会把它
+   读成"关了校验"，或者读成"只信任系统认可的那些"——两种都是错的。内容级作者性
    仍由 §1 第 5、8 道兜住：下载字节必须匹配那份被我们自己的 key 签过的 `SHA256SUMS`，中间人签不出它。
+   为什么不按信任设置过滤：`security dump-trust-settings` 没有机器可读的契约，一次静默漏掉拦截根的过滤，
+   坏的正是本条要保的那次检查；能被看见的失败态才允许存在（第 2 条）。
 5. **刷新点**：`enable` 注册 agent 时（安装器走的就是这条路）、每次 `apply` 成功之后、以及第 10 条的
    证书类失败恢复时。理由很具体：拦截根会轮换（本机那张到 2027-02），只在前两个点刷新等于
    "后来装了新代理的机器永远刷不到那张新根"。
 6. **失败文案必须带真因和可执行 remedy**。`release-unreachable` 现在写 `GET <url> failed: fetch failed`
    ——真因在 `error.cause.code` 里被吞掉了；一个人/代理看到 "fetch failed" 只会去查网络通不通，而浏览器里
-   GitHub 明明打得开。契约：TLS 验证类失败必须报出 `cause` 的 code，并点名
-   `export NODE_EXTRA_CA_CERTS=<stateRoot>/ca-roots.pem`；非 TLS 失败（`ECONNREFUSED`、DNS、4xx）**不得**
+   GitHub 明明打得开。契约：TLS 验证类失败必须报出 `cause` 的 code，并点名**解析后的真路径**
+   （`export NODE_EXTRA_CA_CERTS=/Users/<you>/.glasspane/ca-roots.pem`）；拿不到路径时要说"去 `updater status
+   --json` 的 stateRoot 字段看那个目录"，**不许**在给人或代理的句子里留 `<stateRoot>` 这类模板占位符——一句
+   带尖括号的话粘贴不了，也就不是 remedy。非 TLS 失败（`ECONNREFUSED`、DNS、4xx）**不得**
    套用这句 remedy，要报自己那条原因 —— 否则 remedy 本身成为误导源。
 7. **状态是封闭枚举，不是布尔**。实现与路径由 `updater/lib/ca-bundle.js` 独家持有（单一作者），调用点是
    第 5 条那三处。枚举：
@@ -246,7 +368,9 @@
     机器后来装了新代理 ⇒ 每天定时检查死在第 1 道门上，面板读起来像"没有可用更新"。规则：
     · 判据是**结构化事实** `tlsVerification`（`source.js` 依 `error.cause.code` 判定后随拒绝对象带上），
       不许靠匹配自己写的句子——文案会改，判据不能跟着改；
-    · 调用方已经给了 `NODE_EXTRA_CA_CERTS` 时**不介入**：那份信任是操作者自己指的，方向归他；
+    · 调用方已经把 `NODE_EXTRA_CA_CERTS` 指到**别的路径**时**不介入**：那份信任是他自己指的，方向归他，
+      我们替他改指自己导出的那一份等于静默取消他的选择；他指的就是我们导出的那一份时**照常恢复**
+      （终端里按 remedy 设过变量的人，走的就是这一条）；
     · 只重跑一次：`GLASSPANE_CA_REEXEC=1` 是防循环标记，带标记那次不再重导也不再起子进程；
     · 重跑的 argv 逐字相同（少一个参数就是另一件事），`--json` 那一行**只由子进程写**，父进程一个字都不加；
     · 束导不出来（`empty`/`unavailable`/`write-unverified`）就不重跑，但结论必须落进状态文件；
@@ -267,3 +391,167 @@
 | 探测记录带子进程自己的原因 | 同上 | 丢掉 stderr 首行 ⇒ 那条 match 红 |
 | 渲染出的 plist 能被**严格**解析器读（注释内不得有连续连字符） | `updater/test/launchd.test.mjs` | 把 state-dir 的双连字符写回注释 ⇒ 红；`plutil` 这个宽容 oracle 看不见 |
 | 证书失败重导并重跑：argv 逐字、只一次、信号不返回 0、库调用方不起子进程 | `updater/test/tls-recovery.test.mjs`（8 条） | 删标记判断 ⇒ 循环那条红；空束也重跑 ⇒ 那条红；`status ?? 0` ⇒ 信号那条红；把恢复挪进 `runCommand` ⇒ main 那条红 |
+| 第 3 条的禁令**有读者**：生产代码里不许出现任何关闭校验的开关，注释除外；行号必须指到文件里那一行 | `updater/test/trust-inversion.test.mjs` | 往 `updater/lib/source.js` 塞 `rejectUnauthorized: false` ⇒ 红；把模式表或文件集清空 ⇒ 那条"只扫到 0 个文件"红；把禁令词只放进注释 ⇒ 不许红（自测盯这一对） |
+| 注册到盘上的那份 plist 真带着**写成功的那份束**（python3 plistlib 严格读，不是 `includes`） | `installer/test/auto-update.test.mjs` | `caBundle: null`、写空串、指到一个从没写过的路径、把"能不能用"改成"文件在不在" ⇒ 四条反向变异实测全红 |
+| 给人或代理的句子不留 `<模板>` 占位符，能拿到真路径就写真路径 | `updater/test/ca-bundle.test.mjs` + `engine/Tests/…/UpdatePanelTests.swift` | 把 `<stateRoot>` 或"那份束的路径"放回文案 ⇒ 红 |
+| 导出的束只留能锚链的证书，且**写出去的字节能被 node 再读一遍**（块间换行丢了会让整份束被 `PEM routines::bad end line` 拒收，而张数与读回比对都看不出来——这条是真机抓的） | `updater/test/ca-bundle.test.mjs`（三张真证书夹具：CA:TRUE / CA:FALSE / 无 basicConstraints） | 改成不剔 ⇒ 张数那条红；把块间换行丢掉 ⇒ 重组与解析那两条红；把「没声明」也剔 ⇒ 保守保留那条红 |
+| node 对这个变量的**实测行为**（不是注释里的假设）：空束不致命、缺文件只报一行 Warning、空值等于没设 | `updater/test/ca-bundle.test.mjs`（真起子进程跑 TLS） | node 哪天真的对空束硬失败 ⇒ 这条先红，判据理由随之改写；不许靠记忆维护这段 |
+
+## 11. 更新器自身的换版（2026-09-30，把 §1/§9 那些修复真正送到用户机器上所必需）
+
+写这一节的原因很具体：§1 那四条真机高危（资产域名钉死、档案里的符号链接、CLI 参数失效、下载时钟）
+与 §9 那一整束，全都住在 `updater/` 与 `installer/` 里 —— 而**每日作业跑的正是安装那趟 clone 里的那份代码**
+（`update-install.json` 的 `updaterCli`）。§3.5 换的是 `.app` 与 npm 两个包，从不碰这份代码。于是
+"修好更新器的那次发版"永远传不到用户机器上：他们的作业会继续用 v1.4.0 那份钉死规则，天天
+`asset-host-unpinned`，而面板写着"已是最新"。**一条机制救不了它自己的缺陷，就等于没修**。
+
+1. **唯一真源不变，外加一个不随版本变的跳板**：谁在跑更新，由 `<状态根>/update-install.json` 的
+   `updaterCli` 决定（面板与 launchd 都从它取位置，§7）。本节让这份指针可以、也必须指向**验证过的发布树**
+   在本机上的落地位置 `<状态根>/runtime/<ver>/updater/cli.js`；而 launchd 的作业定义**不再点名任何版本**，
+   它指向 `<状态根>/runtime/agent-entry.js` —— 一个每次运行时读 `updaterCli`、再 exec 那一份脚本并把退出码
+   原样转达的入口（源文件 `updater/agent-entry.js`，落地时写入并按字节读回校验，mode 0600）。
+   为什么要这一层间接：定义里写死版本路径时，**每一次换版都要向 launchd 重新注册一次**，而定时那一次不许
+   注册自己（第 6 条）；于是每天跑的还是旧那一份，本节整套机制在它唯一的主路径上不生效。有了入口，换版
+   就是"写一个 JSON 文件"，注册这件事每台机器只做**一次**（迁移），此后不再有。
+   入口自己出错也必须按 §3 的口径说话：指针缺失或读不回来时打印一行 JSON 拒绝、退出码 `3`；子进程被信号
+   杀死时绝不返回 `0`。它不做任何判断，只负责"今天该跑哪一份"由指针说了算这件事。入口文件本身按发布树的字节
+   写入、读回逐字节比对、mode 必须是 0600；**任何一项不合就把那份文件收掉**再说失败——半份 ESM 照样解析，
+   而作业点名的就是这个路径，留着它等于让定时任务每天执行一次"不知道是什么"的东西。
+2. **来源只能是被八道校验放过的那棵树，但落地的是更新器需要跑的那部分**：取材于 §1.6 自检过的暂存树
+   （同一棵已按 sha256 实测、签名 verified、CI 绿、版本线自证的树），不许有第二条取材路径；落地动作发生在
+   §3.5 全成功之后、暂存目录被清理**之前**。落地的目录清单是封闭的：`updater/`、`installer/`
+   （`updater/lib/signature.js` 要 `import('../../installer/cli.js')` 取签名公钥，少它就是装一个跑不起来的
+   更新器）、发布根的 `package.json`。曾经照"整棵树"复制，代价与风险都不是修辞：`apply` 就在暂存树里
+   `swift build --package-path <暂存>/engine`，产品直接落在它下面——本机实测 `engine/.build` 509 MB，
+   于是"两代上限"实际是半个 GB，还顺带把 SwiftPM 自己造的符号链接搬了进来。清单之外的东西（`engine/`、
+   `mcp-shell/`）是换版**过程**的输入，不是更新器**运行时**的依赖。
+3. **绝不就地覆盖正在执行的那份代码**：落地是"新建一个版本目录"，不是把文件写回旧目录。旧那份原地
+   保留，这既是为了让"下一次注册由新代码自己完成"有可回退的目标，也是为了让**回滚**有对象。
+   3a. **落地后的树里不许有任何间接层**。本机实测（2026-09-30）：`fs.cpSync(..., {dereference:false})`
+       **不保留相对符号链接**——`link -> a.txt` 会被重写成 `link -> /private/…/复制来源目录/a.txt`，
+       也就是指向这次运行稍后要清理掉的暂存树。留在 `runtime/` 里的就不是"同一根链接"，而是一根悬空、
+       且指向 `<状态根>/update-staging/<ver>/…` 的链接，而那个路径**下一次 `check` 会用新下载的字节
+       重新造出来**：一台被拒的树的内容，就这样每天被定时作业重新引用一次。所以落地前后都要走
+       `lstat` 检查——目录本身必须真是目录（不能是指向别处的软链），树里每一项必须真是普通文件或目录。
+       任一条不满足 ⇒ 拒绝落地、临时目录一并删掉、指针不动。
+   3b. **"这一代已经在盘上"不是可以跳过的理由**：`runtime/<ver>` 已存在时，重用的那条路要把新装那一路
+       的每一项检查重做一遍（是目录不是链接、无间接层、`updater/cli.js` 读得出且非空、mode 能到 0700）。
+       早先的版本只查"cli.js 存不存在"，于是一次 mode 检查失败的残留，会被下一次同一版本的换版**无条件
+       接受**——一次"这台机器的 chmod 不生效"就永久变成了"这一代是干净的"。mode 检查现在也在标记落地
+       **之前**做：不生效就连根目录一起删掉，绝不留给重用路径。
+4. **换版本身的判定不因它而改**：`.app` 与 npm 都换成功、握手也过 ⇒ `status=applied` 与退出码 0 不变。
+   更新器自己没换上是一句**长期可见的降级**：`runtime.status='failed'`、`code=runtime-stale`、
+   `lastError` 带原因，面板与 `gp_diagnose` 必须原话说"这次更新器自身没换上，请重跑安装程序"。
+   这与 `authorship` 同一处理形状：不把一次不完美的成功洗成干净。
+5. **指针可回退**：写指针仍走 `writePointer`（临时文件 + rename + 读回校验 + mode）；落地/注册任何一步
+   失败，先把指针写回旧值，再用**旧那份** `cli.js enable` 一次把作业指回去（best-effort，失败要写进
+   状态与原话，不许静默）。
+6. **注册只在"这台机器还欠一次迁移"时发生，而定时那一次绝不做它**：
+    · **在册作业已经走入口**（`launchctl print` 读回的参数里有 `<状态根>/runtime/agent-entry.js`）⇒ 这次换版
+      **什么都不向 launchd 做**：指针翻了，明天的作业自然照着它跑。这是入口落地之后每一台的常态，也是本节
+      存在的目的。
+    · **在册作业还点名一条带版本的路径**（本节之前装出来的每一台）⇒ 需要**一次**注册，而且必须由新那份代码
+      自己跑 `node <新 cli.js> enable --state-dir <状态根> --json`。理由不是风格：plist 里那条 CLI 路径的来源
+      就是"谁在跑这次注册"，由旧代码去写新路径等于再造一个"两处作者"。注册完必须把**在册**参数读回来校验它
+      真指到了入口；读不到或仍指旧的 ⇒ `agentVerified=false`，这是一句要说出来的失败，不是"大概说话了"。
+      这一次做完，往后不再有。
+    · **定时触发**（agent 里的 `apply --auto`）在这次运行里绝不 bootout/bootstrap：本次运行本身就是那个作业，
+      `bootout` 会在"包已换、状态未写"之间把它拆掉，最坏形状是作业被卸了却没装上（自动更新静默消失）。所以
+      定时那一次只做三件事：落入口、落地代码、换指针。若在册作业还没走入口，记 `runtime.status='skipped'`、
+      `code=runtime-registration-pending`、`agentVerified=false`，原话说清"把面板的「自动更新」开关关掉再打开
+      （或在终端跑一次 `updater enable`）做这一次迁移，做完以后换版不需要再动手"。
+      判据不许在这里含糊：没核实过就不能说核实过。
+    · **回滚守的是同一条**：`apply` 在交接之后才失败时要把指针交还给旧那一份；是否重新注册取决于在册作业
+      此刻指谁——走入口就不用（指针回去就够了），读不回作业则保守地让旧那份重新注册一次（"不知道作业在跑
+      什么"不等于"作业走入口"）。但**定时那一次的自动回滚绝不注册**：它要做的就是上面被禁止的那件事。
+      硬关的机器没有作业可交还，而 `enable` 正是会把它造出来的那个调用——静默把用户的开关打开。
+6a. 与第 6 条那两处比较有关的两个事实：
+    · 那条比较必须是"**同一个文件**"而不是"同一个字符串"：plist 里那条路径是 node 自己报的模块位置，
+      **node 会先把路径 realpath 化**（实测：通过 `/tmp` 下的软链启动脚本，`import.meta.url` 报的是
+      `/private/tmp/…`），而状态根是 `path.resolve` 出来的字面量。两者在 `/tmp`、`/var/tmp` 或任何带
+      软链的家目录上拼写不同、指向同一份文件——按字符串比就把这套机制在**它自己被验证的那种沙箱**里
+      永久判成失败。
+    · `enable` 还要保住这台机器已有的每日时刻：不带 `--hour` 的 `enable`（迁移那一次就是）先读盘上
+      那份 plist 的 `StartCalendarInterval`，读到就沿用，读不到才用 §2 的默认值**并说出来**。之前它
+      直接取常量，于是每台自己换过版的机器都在无人告知的情况下被搬回 12:00。
+7. **硬关时不注册**：`GLASSPANE_UPDATE_DISABLE=1` 或状态里 `disabled=true` 时，runtime 与指针照刷
+   （面板用的就是那份代码，不刷它面板会继续跑旧代码），但**绝不**新建/改写 launchd 作业，并把这句
+   原话记进状态（`runtime.status='kept'`）。
+8. **只留还被指着的那几代**：默认两代，但**凡是有人指着的一律不清**，而"指着"最多有三个互相独立的作者：
+   新指针那一代、上一个指针值那一代，以及**在册作业自己那一代**。第三个在入口落地之后通常是"没有"——
+   作业指的是那个不随版本变的入口，它不指任何一代，于是这一项答案为空是**好消息**（意味着清理不受限）。
+   它只在迁移窗口里真实存在，而那里漏掉它唯一致命：连续两次定时换版（用户从不碰开关）时，指针已经是
+   `1.8.0 → 1.7.0`，而 launchd 的定义里还写着 `1.6.0`——按"指针 + 上一指针"清理就会删掉作业真正要执行的
+   那一棵，明早的每日作业变成 `Cannot find module`，面板上的开关仍然亮着，状态里还写着 `skipped`。
+   所以 defer/kept 两支也必须 `launchctl print` 读回在册参数、把它那一代钉住。
+   **读不回在册作业时不许清理任何东西**："不知道作业在跑哪一代"不能当作"哪一代都没人指"来花。跳过清理
+   的代价是一个版本目录；猜错的代价是这台机器从此不再自动更新。这一句要原话进 `runtime.detail`。
+   "最新的一代"必须由版本号比较决定，不能按字符串排：`1.9.0` 排在 `1.10.0` 前面，于是按字符串留下的
+   回退代可能是谁都没指的那一个，而被删掉的恰是某个进程还在跑的那一个。
+   清理只在状态根内走 `removeTreeWithin`，不许越界，失败要说出来，不许报成"已清理"。
+   代价要写出来（并按第 2 条的封闭清单重算）：本机实测一份完整发布树 73 MB，其中 `updater/` 816 K、
+   `installer/` 184 K，其余是换版**过程**的输入（`engine/` 里 1.8 G 的 `.build`、`mcp-shell/` 33 M）。
+   按清单落地之后，一代就是更新器自己要跑的那些文件；两代的上限不再是半个 GB，而 `gp_diagnose`、
+   换版日志仍要报清这次删了哪几代、为什么没删。
+9. **写它的时机保证读者不会比写者旧**：`apply` 的顺序是先换 `.app`、重启并握手、再装 npm 两个包，
+   **最后**才落地更新器自身并写 `runtime`。所以任何一份读到 `runtime` 的读者（面板在 `.app` 里、
+   `gp_diagnose` 在 npm 包里）都已经是认识这个字段的版本——反过来（先写字段再换读者）会让已发布的
+   shell 因为"schema 里多了一个不认识的键"把整份状态读成读不出，那才是真的看不见。
+10. **封闭形状，三个读者**：`runtime` 进 `update-state.schema.json`（`additionalProperties:false`，
+   状态是封闭枚举 `refreshed` / `failed` / `kept` / `skipped`），updater、面板、`gp_diagnose` 三处都读；
+   读不懂的取值只能判成"读不出"，不许就近当 `refreshed`。枚举里**不许躺一个没有调用点的取值**，
+   所以四个成员各自绑一个真实分支：`refreshed`（代码与指针都换了，且在册作业读回来确认走那个入口——
+   注意 `agentVerified` 说的从此是"作业走入口"，不再是"作业指这一版"）、`failed`（换版成功
+   但更新器自身没换上，或被回退）、`kept`（这台机器自己关着定时作业，只换代码与指针）、`skipped`
+   （入口与代码与指针都到位，但在册作业还点名旧形状，这台机器欠那**一次**迁移——见第 6 条）。
+   反向（旧读者遇到新记录）分两种，只有一种该失败：
+   · 认不出**值**（`runtime.status` 是未来版本的某个词）必须响地失败：`loadState` 走 `assertValidState`，
+     读不懂就抛错、命令拒绝执行；它绝不"退回空状态"，那等于把这台机器的更新历史抹掉一次。
+   · 认不出**键**在**读**的路上必须被忽略。第 6 条的 defer 交接正是这个形状：定时那一次写了带新键的状态，
+     而接下来几天跑的还是旧那份代码——旧读者若因"schema 里多了一个不认识的键"拒绝整份文件，这台机器的
+     `updater status` 与每日检查会直接失败，把一台还能工作的机器读成一台坏了的机器。
+   因此**写严格、读宽容**是刻意的不对称：`saveState` 仍按 `additionalProperties:false` 拒绝发布任何
+   自己没声明的字段（否则第 9 条的写序保证就没了），`loadState` 只忽略不认识的键。新增字段仍须先让读者
+   发布、再让写者写；新增**枚举取值**是破坏性变更，必须先换读者。
+11. **旧形状装出来的机器有两条路走到新形状，两条都要写清**：本节落地前装出来的机器跑的是旧那份更新器代码——
+    它自己不认识入口，所以由它跑的那一趟换版仍按旧形状把作业指到 `runtime/<新版本>/updater/cli.js`。
+    · **最短的一条**：重跑一次**本版的安装程序**。安装器 import 的就是这份新代码，`enable` 直接把作业注册到
+      入口上，此后每一次换版都只是写一个 JSON 文件，没有任何人工步骤。
+    · **纯靠自更新的一条**：第一趟（旧代码）仍写死版本路径；第二趟由新代码跑，才把作业挪到入口。若这第二趟
+      恰好是定时那一次，它会记 `runtime.status='skipped'` + `code=runtime-registration-pending`，等人做一次
+      `enable`（面板把「自动更新」开关关掉再打开）——做完就再也不出现。
+    两条都不需要人改 plist，也都**不许**被写成"升级之后什么都不用做"；同样不许被说成"每一次换版都要人工"。
+    这两句必须同时进 CHANGELOG 与 README。
+12. **回滚只回它换过的东西**：`updater rollback`（§3.6）换回两个 `.app` 并重启校验，但它**不**把
+    `runtime` 与指针换回旧代——那是"上一版更新器的代码"，而回滚的动机通常是新 `.app` 有问题，不是新
+    更新器有问题。这句话要写在这里，否则读代码的人会以为 §11 落地后回滚是整台机器的时间倒退。
+    与之相对：`apply` 自己在**交接之后**才失败的那一条（重新导出根证书束、清理暂存树、写最后那份状态）
+    必须把指针交还给旧那一份——因为那一次的动机恰恰是"这次换版没走完"，留着新指针就等于一边说"已还原并
+    核实"，一边让明天的作业跑刚被换出去的那一份。交还要不要动 launchd 由第 6 条那三种情况决定：作业走
+    入口就只写指针；读不回来保守地让旧那份重新注册一次；定时那一次与硬关的机器**都不注册**（前者会拆掉
+    正在回滚的自己，后者会把用户刚关掉的开关打开）。`registeredAt` 沿用原值，回退不是重新安装。
+    读不回来时记录 `runtime.status='failed'` 并写清"指针可能还指着被换出去的那一份，请重跑安装程序"。
+
+| 判据 | 测试 | 反向变异怎么红 |
+| --- | --- | --- |
+| 落地取自暂存树、发生在清理之前、不就地覆盖旧代码 | `updater/test/runtime.test.mjs` | 先清暂存再落地 ⇒ 红；写回旧目录 ⇒ 红 |
+| 指针换到新路径且盘上真存在 | 同上（读回真文件，不信返回值） | 少写 `updaterCli` 或指到没落地的目录 ⇒ 红 |
+| 作业定义只许点名那个不随版本变的入口，且入口真落在盘上、字节读得回来 | `updater/test/agent-entry.test.mjs`（7 条，含**真起子进程**跑入口）+ `installer/test/auto-update.test.mjs`（读盘上那份 plist 的 `ProgramArguments`） | 注册时把版本路径写进 plist ⇒ 安装器与 `enable` 两条红；入口写空文件 ⇒ 非空与哨兵那两条红 |
+| 入口每次运行按指针决定跑哪一份，退出码原样转达、拒绝是一行 JSON + `3` | `updater/test/agent-entry.test.mjs`（真子进程：换指针后不改定义就换一代；指针坏了 ⇒ 退出 3；被信号杀死 ⇒ 不是 0） | 让入口硬编码版本 ⇒ "换指针就换一代"那条红；`status ?? 0` ⇒ 信号那条红 |
+| 走入口的换版**一次注册都不做** | `updater/test/runtime.test.mjs`（steady 那条断言 `runEnable` 被调即 `assert.fail`）+ `apply.test.mjs`（`enableCalls` 为空） | 让 steady 分支也注册 ⇒ 那两条红 |
+| 首次迁移由新那份跑注册，在册参数用 `launchctl print` 读回校验它真指到入口 | `updater/test/runtime.test.mjs`（migration 那条）| 用旧那份注册 ⇒ 红；把"读不到"当成功 ⇒ 红 |
+| 定时那一次不拆自己：只落入口 + 落地 + 换指针，并明说这一次是**最后一次** | `updater/test/runtime.test.mjs` + `apply.test.mjs`（`trigger:'auto'`） | 去掉 `handover:'defer'` 分支 ⇒ 那两条红（enable 被叫了、状态说成已核实） |
+| 任一失败都把指针指回旧值，作业只在需要时交还，并把说出来的话写实 | 同上 | 只回滚指针不写回注册 ⇒ 红；失败后不写 `lastError` ⇒ 红 |
+| 硬关时刷代码不建作业 | 同上 | 去掉 disabled 分支 ⇒ 红 |
+| 换版判定不被它改：applied 与退出码不变，降级长期可见 | `updater/test/apply.test.mjs` | 把它失败改成 `status`/退出码 ⇒ 红；洗成 `code:null` ⇒ 红 |
+| 清理钉住每一个作者指着的世代（入口在位的机器上作业那一位答案为空，迁移窗口里才真实）；读不回在册作业就一个都不删 | `updater/test/runtime.test.mjs`（`pruning never deletes a generation something still points at`、`a job book that cannot be read leaves every generation on disk`） | 把 `job.gen` 从 pinned 里去掉 ⇒ 那一代被删、红；把"读不到"当成"没人指" ⇒ 跳过清理那条红 |
+| 世代新旧按版本号比，不按字符串 | `updater/test/runtime.test.mjs`（`the newest generation is decided by version, not by how the string sorts`，钉住最旧一代使两种顺序答案相反） | 换回 `.sort().reverse()` ⇒ 删的是 1.10.0 而不是 1.9.0，红 |
+| 落地清单封闭，构建产物不进 runtime | `updater/test/runtime.test.mjs`（`engine/.build`、`mcp-shell/dist` 不在落地树里；`installer/cli.js` 在） | 清单里放回 `engine`/`mcp-shell` ⇒ 排除断言红 |
+| 落地树里不许有间接层，`runtime/<ver>` 本身必须是真目录 | `updater/test/runtime.test.mjs`（`a copied tree that carries a symlink is refused`） | `findIndirection` 改成返回空 ⇒ 红 |
+| 重用已存在的一代要把每一项检查重做 | `updater/test/runtime.test.mjs`（`an existing generation is re-verified, not trusted by name`） | 重用路径只查 cli.js 存在 ⇒ 红 |
+| 在册路径与本地拼写按"同一个文件"比，不按字符串 | `updater/test/runtime.test.mjs`（realpath 拼写的那一代仍认得出世代） | 只比字面量前缀 ⇒ 认不出世代，红 |
+| `enable` 保住盘上已有的每日时刻 | `updater/test/enable.test.mjs`（`a bare enable keeps the daily hour that is already installed`；断言打在**送进渲染器的参数**上，不是打在夹具自己写的文件上） | 常量优先 ⇒ 3:20 变成 12:00，红；读不到又不说 ⇒ 第二条红 |
+| 注册是否成立由读回的在册作业判定 | `updater/test/launchd.test.mjs`（三条：核对过 / 仍指旧的 ⇒ 拒绝 / 读不回 ⇒ 明说未核实） | bootstrap 0 直接算成功 ⇒ "仍指旧的那条"红 |
+| 交接之后才失败的回滚：走入口只写指针；读不回作业保守交还；**定时那一次与硬关的机器都不注册** | `updater/test/apply.test.mjs`（`a rollback that happens after the handover takes the pointer and the job back too`、`an undo whose book went unreadable…`、`a rollback of a deferred handover…`、`an undo on a switched-off machine registers nothing…`） | 去掉 undo 调用 ⇒ 交还那一次没发生，红；`runtime` 声明在 try 里 ⇒ catch 抛 ReferenceError，红；把 `handoverMode`/`disabled` 漏传给 undo ⇒ 那两条"一次都不许注册"红 |
+| 入口落地要按字节读回比对，且**不一致或 mode 不是 0600 时把那份文件收掉**（半份 ESM 照样解析、照样被每天执行） | `updater/test/agent-entry.test.mjs`（`a file that reads back short is refused…`、mode 那一条同时断言文件已不在） | 去掉逐字节比对 ⇒ 短写那条红；去掉收掉动作 ⇒ 两条红；mode 不回读 ⇒ 0666 那条红 |
+| 删除不越界、失败不报成已清理 | `updater/test/runtime.test.mjs` | 去掉 root 约束 ⇒ 红 |

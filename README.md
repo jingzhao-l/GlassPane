@@ -472,8 +472,9 @@ Acceptance steps that need a real GUI session cannot run in CI by design; they a
 hardware smoke runs in [engine/smoke.md](engine/smoke.md) instead of being silently skipped.
 
 Releases: `node scripts/set-version.mjs <semver>` writes the whole version line; pushing a tag
-produces a GitHub Release with a source tarball and `SHA256SUMS.txt`; npm publishing goes through
-`release.yml` with provenance.
+produces a GitHub Release whose archive is the tagged tree plus the built JavaScript the updater cannot
+produce on the target (`mcp-shell/dist`, `mcp-shell/schemas` — `scripts/make-release-archive.mjs`), together
+with `SHA256SUMS.txt`; npm publishing goes through `release.yml` with provenance.
 
 ## Documentation
 

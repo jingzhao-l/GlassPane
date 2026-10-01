@@ -24,11 +24,12 @@ import { CODES, EXIT } from '../lib/codes.js'
 import { CA_ENV_VAR } from '../lib/ca-bundle.js'
 import { AGENT_LABEL } from '../lib/launchd.js'
 import { loadState } from '../lib/state.js'
+import { ensureAgentEntry as realEnsureAgentEntry } from '../lib/agent-entry.js'
 import { TMP_PREFIX, removeDir, tempDir } from './helpers.mjs'
 
 const PEM = '-----BEGIN CERTIFICATE-----\nMIIBFAKE\n-----END CERTIFICATE-----\n'
 
-function harness({ bundle = true, record = { status: 'ok', certs: 3, path: null, exportedAt: 'now', detail: null }, register = { ok: true, message: 'agent registered' } } = {}) {
+function harness({ bundle = true, record = { status: 'ok', certs: 3, path: null, exportedAt: 'now', detail: null }, register = { ok: true, message: 'agent registered', verified: true }, schedule = { hour: 12, minute: 0 }, entry = null } = {}) {
   // `${TMP_PREFIX}…` and realpathSync: the CLI canonicalises `--state-dir` the way
   // launchd would resolve it, so `/tmp` (a symlink) must be compared as its real
   // path, and the scratch must never be created inside the repository.
@@ -37,6 +38,30 @@ function harness({ bundle = true, record = { status: 'ok', certs: 3, path: null,
   const calls = []
   const fixedRecord = { ...record, path: record.path ?? (bundle ? path.join(stateRoot, 'ca-roots.pem') : null) }
   if (bundle) fs.writeFileSync(fixedRecord.path, PEM, 'utf8')
+  const plistPath = path.join(stateRoot, 'LaunchAgents', `${AGENT_LABEL}.plist`)
+  // `readAgentSchedule` is deliberately NOT stubbed: reading back the schedule is the whole point, and
+  // a stub would let a CLI that never consults it stay green. This is the file the real function reads.
+  if (schedule) {
+    fs.mkdirSync(path.dirname(plistPath), { recursive: true })
+    fs.writeFileSync(plistPath, [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<plist version="1.0">',
+      '  <dict>',
+      '    <key>Label</key>',
+      `    <string>${AGENT_LABEL}</string>`,
+      '    <key>StartCalendarInterval</key>',
+      '    <dict>',
+      '      <key>Hour</key>',
+      `      <integer>${schedule.hour}</integer>`,
+      '      <key>Minute</key>',
+      `      <integer>${schedule.minute}</integer>`,
+      '    </dict>',
+      '  </dict>',
+      '</plist>',
+      '',
+    ].join('\n'), 'utf8')
+  }
+  const rendered = []
   const deps = {
     homeDir: stateRoot,
     uid: '501',
@@ -51,7 +76,20 @@ function harness({ bundle = true, record = { status: 'ok', certs: 3, path: null,
     },
     renderAgentPlist: (options) => {
       calls.push({ render: options.caBundle === undefined ? 'unset' : options.caBundle })
-      return '<plist>stub</plist>'
+      rendered.push(options)
+      return [
+        '<plist version="1.0"><dict>',
+        '  <key>StartCalendarInterval</key>',
+        '  <dict>',
+        '    <key>Hour</key>',
+        `    <integer>${options.hour}</integer>`,
+        '    <key>Minute</key>',
+        `    <integer>${options.minute}</integer>`,
+        '  </dict>',
+        `  <key>ProgramArguments</key><array><string>${options.cliPath}</string></array>`,
+        '</dict></plist>',
+        '',
+      ].join('\n')
     },
     registerAgent: (options) => {
       calls.push({ register: options.plistPath })
@@ -62,11 +100,20 @@ function harness({ bundle = true, record = { status: 'ok', certs: 3, path: null,
       return { ok: true, message: 'agent removed' }
     },
     agentPlistPath: ({ label = AGENT_LABEL }) => path.join(stateRoot, 'LaunchAgents', `${label}.plist`),
+    // The real installer of the entry is used unless a test asks for a refusal: it lands
+    // `updater/agent-entry.js` inside this harness's own scratch state root, so nothing outside is
+    // touched, and the registration assertions below are made against the file that really exists
+    // rather than against a path a stub invented.
+    ensureAgentEntry: (options) => (entry !== null
+      ? entry
+      : realEnsureAgentEntry({ ...options, stateRoot })),
     now: () => new Date('2026-09-29T09:00:00.000Z'),
   }
   return {
     stateRoot,
     calls,
+    plistPath,
+    rendered,
     record: fixedRecord,
     run: (command, flags = {}, env = {}) => runCommand({ command, flags: { 'state-dir': stateRoot, ...flags }, env, deps }),
     // removeDir only deletes under the prefix it created; `stateRoot` is the
@@ -129,6 +176,101 @@ test('a disabled machine is not touched: no export, no registration, no status w
     assert.equal(result.code, CODES.autoDisabled)
     assert.equal(result.exitCode, EXIT.REFUSED)
     assert.deepEqual(h.calls, [], 'exporting a root bundle into somebody\'s state root while telling them automatic update is off is a change they did not ask for')
+  } finally {
+    h.done()
+  }
+})
+
+test('the job is registered against the stable entry, never against the script that is running', async () => {
+  // The one property §11's entry design rests on. If the plist ever goes back to naming a versioned
+  // script, every version move needs a re-registration again — and a scheduled run cannot do that to
+  // itself, which is the whole reason the manual step existed. Asserted on the renderer's argument and
+  // on the file the fake registration writes, because the plist on disk is what launchd reads.
+  const h = harness()
+  try {
+    const result = await h.run('enable')
+    assert.equal(result.ok, true, result.message)
+    const entry = path.join(h.stateRoot, 'runtime', 'agent-entry.js')
+    assert.equal(h.rendered[0].cliPath, entry, `注册的位置必须是稳定入口，不是这一份 cli.js：${h.rendered[0].cliPath}`)
+    assert.notEqual(h.rendered[0].cliPath, new URL('../cli.js', import.meta.url).pathname)
+    assert.ok(fs.existsSync(entry), '入口文件要真在盘上——plist 指到一个不存在的文件就是明天的 Cannot find module')
+    assert.match(fs.readFileSync(entry, 'utf8'), /resolveUpdaterCli/)
+    assert.ok(!result.message.includes('versioned script'), result.message)
+  } finally {
+    h.done()
+  }
+})
+
+test('a machine that cannot install the entry is told which shape it ended up with', async () => {
+  // Falling back to the versioned path is still a working registration; silently, it is a machine that
+  // will ask for a manual enable again on the next version, and only the message can say which happened.
+  const h = harness({ entry: { ok: false, message: 'the state root is mounted read-only' } })
+  try {
+    const result = await h.run('enable')
+    assert.equal(result.ok, true, result.message)
+    assert.match(result.message, /versioned script/, result.message)
+    assert.match(result.message, /one manual "enable"/, `要说清代价：${result.message}`)
+  } finally {
+    h.done()
+  }
+})
+
+test('a bare enable keeps the daily hour that is already installed', async () => {
+  // §11's handover runs `enable` from the new copy with no flags, and the installer's own re-run does
+  // the same. Honouring the constant here would move a machine installed with `--hour 3` to midday on
+  // the first self-update, with nothing in the state file, the history, the panel or `gp_diagnose` to
+  // say the schedule changed — which is §2's "the time is configurable" quietly becoming false.
+  //
+  // The assertion is on what reached the renderer, not on the file at `plistPath`: the harness seeds
+  // that file with the standing schedule, and `registerAgent` is stubbed, so reading the disk here was
+  // satisfied by the fixture itself — a control that could not have failed.
+  const h = harness({ schedule: { hour: 3, minute: 20 } })
+  try {
+    const result = await h.run('enable')
+    assert.equal(result.ok, true, result.message)
+    assert.equal(h.rendered.length, 1, JSON.stringify(h.rendered))
+    assert.equal(h.rendered[0].hour, 3, `装机时刻要保住：送进渲染器的是 ${h.rendered[0].hour}`)
+    assert.equal(h.rendered[0].minute, 20, `分钟也一样：${h.rendered[0].minute}`)
+    assert.ok(!result.message.includes('the daily time is'), `读到了在册时刻就不该再说兜底：${result.message}`)
+  } finally {
+    h.done()
+  }
+})
+
+test('an explicit --hour wins over the installed one, and an unreadable schedule says which was used', async () => {
+  const chosen = harness({ schedule: { hour: 3, minute: 0 } })
+  try {
+    const result = await chosen.run('enable', { hour: '7', minute: '45' })
+    assert.equal(result.ok, true, result.message)
+    assert.equal(chosen.rendered[0].hour, 7, `人当面给的时刻优先，这是 §2 的另一半：${chosen.rendered[0].hour}`)
+    assert.equal(chosen.rendered[0].minute, 45)
+  } finally {
+    chosen.done()
+  }
+
+  const blind = harness({ schedule: null })
+  try {
+    const result = await blind.run('enable')
+    assert.equal(result.ok, true, result.message)
+    assert.equal(blind.rendered[0].hour, 12, '读不到就按文档默认，但这一句必须说')
+    assert.match(result.message, /the daily time is 12:00/, result.message)
+    assert.match(result.message, /pass --hour and --minute/, result.message)
+  } finally {
+    blind.done()
+  }
+})
+
+test('a registration launchd could not be re-read with is reported as unverified, not as registered', async () => {
+  // "已注册"的证据只能是读回来的那份在册作业。读不回来时这一句仍然算成立（bootstrap 成功了，作业
+  // 确实装载了），但 `agentVerified=false` 必须出现在结果里——安装器与面板都靠它决定自己敢不敢说
+  // "每天会跑"。
+  const h = harness({ register: { ok: true, message: 'update agent loaded but the loaded job could not be read back', verified: false } })
+  try {
+    const result = await h.run('enable')
+    assert.equal(result.ok, true)
+    assert.equal(result.exitCode, EXIT.OK)
+    assert.equal(result.agentVerified, false, JSON.stringify(result))
+    assert.match(result.message, /could not be read back/, result.message)
   } finally {
     h.done()
   }

@@ -321,10 +321,49 @@ permission rather than by a secret.
   for as long as that release is what is installed. What the residual leaves you: compare the digest the
   page shows against the release page before installing, keep automatic apply off and install by hand, or
   pin the version and update deliberately.
+- **It hands node extra trust, and that is the part worth weighing.** node does not read the macOS
+  trust store, so on a machine whose HTTPS is re-signed locally (corporate gateway, accelerator) the
+  daily job cannot reach the release endpoint at all. The fix: at registration the updater exports
+  every certificate from `SystemRootCertificates.keychain` and `System.keychain` into
+  `~/.glasspane/ca-roots.pem` and points the job's `NODE_EXTRA_CA_CERTS` at it — measured on the
+  author's machine: 158 + 5 = 163 certificates, 161 of them `CA:TRUE`. The consequences, stated in the
+  direction they actually run:
+  · **Additive only.** The Mozilla bundle stays in force and verification is never turned off — no
+  `NODE_TLS_REJECT_UNAUTHORIZED`, no `--insecure`, no cleartext anywhere on the release path. That is
+  no longer just a sentence here: `updater/test/trust-inversion.test.mjs` scans the shipped code for
+  those switches, comments excluded, and its own self-test has to keep proving it can fail.
+  · **Trust settings are not consulted.** `security find-certificate` lists certificates, not what
+  macOS is willing to trust. A root an administrator explicitly *distrusted*, or a CA sitting in
+  `System.keychain` for some unrelated purpose, becomes a trust anchor for this job even though the
+  operating system would refuse it. This is a widening relative to system policy, and it is the real
+  content of this bullet.
+  · **Certificates that declare `CA:FALSE` are dropped, and that is provably loss-free.** Measured: a
+  self-signed `CA:FALSE` certificate handed to node as the only extra anchor does not make a chain
+  signed by it verify — OpenSSL refuses with `INVALID_PURPOSE` — so such a certificate could never have
+  been used, and removing it only stops the recorded count from overstating what node will act on.
+  Anything node cannot judge is kept: the two Apple service identities in this machine's export
+  (`com.apple.systemdefault`, `com.apple.kerberos.kdc`) declare **no basic constraints at all** rather
+  than `CA:FALSE`, so the filter leaves them in (measured on this machine: 163 kept of 163, 0 dropped;
+  161 of them declare `CA:TRUE`). Dropping a legacy root on a guess is how the mechanism breaks.
+  · **Who could abuse the widening.** Anyone able to add a CA to those keychains already holds
+  administrator access to this machine, which is a strictly larger capability than the one described
+  here; the residual risk is the pre-existing certificate, not the export. If you want node to trust
+  less, set `NODE_EXTRA_CA_CERTS` to your own bundle before invoking the updater — the updater never
+  deletes an inherited value, never retargets a path it did not export, and never sets the key when it
+  has no usable bundle (an empty value would silently cancel yours).
+  · **Why it is not filtered by trust settings.** Filtering means reading `security dump-trust-settings`,
+  which has no machine-readable contract; a filter that silently dropped the intercepting root would
+  break exactly the check this exists for. The failure modes that are visible stay visible: a bundle
+  holding zero certificates is refused and reported, never recorded as `ok`.
 - **The state root became security-relevant.** The job's instructions — including which script to execute —
   come from `~/.glasspane/update-state.json` and `~/.glasspane/update-install.json`, so anything that can
   write the state root or that path pointer can steer an update into `~/Applications` and your global npm
-  packages. Those files are `0600` under a `0700` root: the same gate as section 2.2, which **gates
+  packages. The daily job also executes a file **inside** the state root by name
+  (`~/.glasspane/runtime/agent-entry.js`, the version-independent entry that resolves the pointer each run),
+  so writing that file is scheduling code execution as the user; it is therefore written from the release
+  tree's own bytes, read back and compared byte-for-byte before the registration that names it, kept `0600`
+  under the `0700` root, and never created outside a state root that was actually given. Those files are
+  `0600` under a `0700` root: the same gate as section 2.2, which **gates
   accounts, not your own processes** — same-user code is still the adversary, now holding a schedule and a
   binary-replacement capability, and the `~/.glasspane/` handling rules of section 2.4 apply to them.
 - **It refuses instead of racing the daemon.** Before a swap, and again immediately before *every* restart

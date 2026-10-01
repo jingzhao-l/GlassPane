@@ -412,8 +412,10 @@ CI 还跑**发布形态守卫**：打包 `glasspane-mcp` → 装进干净目录 
 需要真实 GUI 会话的验收项按设计不能进 CI，它们以真机冒烟记录留在
 [engine/smoke.md](engine/smoke.md)，而不是被静默跳过。
 
-发布：`node scripts/set-version.mjs <semver>` 写整条版本线；推 tag 即产出带源码 tarball 与
-`SHA256SUMS.txt` 的 GitHub Release；npm 发布走 `release.yml` 的 provenance 通道。
+发布：`node scripts/set-version.mjs <semver>` 写整条版本线；推 tag 即产出带发布归档（被 tag 的树
++ `mcp-shell/dist`、`mcp-shell/schemas` 两份构建产物）与 `SHA256SUMS.txt` 的 GitHub Release——纯源码归档
+会让 updater 在目标机上 `npm pack` 出一个没有可执行文件的包，2026-10-01 真机因此每次换版都回滚；
+npm 发布走 `release.yml` 的 provenance 通道。
 
 ## 文档
 

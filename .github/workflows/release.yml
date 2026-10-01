@@ -1,8 +1,10 @@
 name: Release
 # 两条独立的发布动作，故意**不**串在一起：
-#   1) GitHub Release（打 tag 即触发，自动）：确定性源码 tarball + SHA256SUMS.txt，
-#      两者各带一份 GPG detached 签名。install.sh / npx 钉的就是这个 tag，用户据此可复现
-#      同一份源码；签名是 updater 第 8 道校验（作者性）的判据，签不出来就不发这一版。
+#   1) GitHub Release（打 tag 即触发，自动）：确定性发布归档 + SHA256SUMS.txt，
+#      两者各带一份 GPG detached 签名。归档 = 被 tag 的那棵树 + updater 自己在目标机上产不出的
+#      JS 构建产物（`mcp-shell/dist`、`mcp-shell/schemas`）——纯源码归档会让 `npm pack` 打出一个
+#      没有可执行文件的包，2026-10-01 真机因此每次换版都回滚。install.sh / npx 钉的就是这个 tag，
+#      用户据此可复现同一份内容；签名是 updater 第 8 道校验（作者性）的判据，签不出来就不发这一版。
 #   2) npm publish（手动 workflow_dispatch，默认 dry）：两个裸名包带 provenance。
 #      不挂在 tag 事件上，因为"发了 tag"不等于"决定对外发版"——发布不可逆，
 #      必须是一次显式操作。
@@ -42,7 +44,7 @@ permissions:
 
 jobs:
   github-release:
-    name: source tarball + SHA256SUMS
+    name: release archive (source + built JavaScript) + SHA256SUMS
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     # 签名私钥配在这个环境里，job 不声明它就读不到 —— v1.4.0 首跑正是因为没声明，
@@ -74,15 +76,48 @@ jobs:
             echo "REF_NAME=$REF_NAME"
             echo "VERSION=$VERSION"
           } >> "$GITHUB_ENV"
-      - name: Build deterministic source archive
+      - name: Build the JavaScript layer the archive has to carry
         run: |
           set -euo pipefail
-          # 从被 tag 的树自己打包，而不是依赖 GitHub 自动生成的 tarball——
-          # 只有自己生成的才配得上同时发布的 SHA256SUMS.txt。
-          git archive --format=tar.gz --prefix="GlassPane-${VERSION}/" \
-            -o "GlassPane-${VERSION}.tar.gz" HEAD
+          # The updater installs the two npm packages by running `npm pack` **inside the unpacked release
+          # tree** (§1: the verified bytes are the installed bytes). A tree without `mcp-shell/dist` therefore
+          # packs a package whose declared command does not exist: measured on a real machine on 2026-10-01,
+          # that tarball had three entries, `npm install -g` exited 0, the version read back fine, and §3.3's
+          # MCP half died on `glasspane-mcp could not run (ENOENT)` — the whole swap rolled back. Building
+          # here is what makes the archive installable at all; the next step refuses to publish if it is missing.
+          npm ci --no-audit --no-fund
+          # The root script is the ordered one (`@iterate/kernel` types first, then the MCP shell that reads
+          # them); calling the two workspaces directly would build them in whatever order this file guesses.
+          npm run build
+          npm run bundle --workspace glasspane-mcp
+      - name: Build the deterministic release archive
+        run: |
+          set -euo pipefail
+          # This used to be `git archive HEAD`, which is pure source and cannot produce a runnable
+          # `glasspane-mcp`. The recipe now lives in `scripts/make-release-archive.mjs` — the same code the
+          # test suite runs — because it has to carry the two build outputs above, keep the tracked tree's
+          # modes, and prove its own reproducibility by packing twice and comparing bytes. Only what this
+          # repo generated goes into `SHA256SUMS-<ver>.txt`, so only what this repo can rebuild may be in it.
+          node scripts/make-release-archive.mjs "$VERSION" "GlassPane-${VERSION}.tar.gz"
           sha256sum "GlassPane-${VERSION}.tar.gz" > "SHA256SUMS-${VERSION}.txt"
           cat "SHA256SUMS-${VERSION}.txt"
+      - name: Prove the archive carries the command it promises
+        run: |
+          set -euo pipefail
+          # The refusal above is the publisher's guard; this one is the CI job noticing that the guard's own
+          # input changed. `tar -tzf` on the artifact answers the question the updater will ask on a customer
+          # machine, and it is cheap enough that there is no excuse for not asking it here.
+          for entry in \
+            "GlassPane-${VERSION}/mcp-shell/dist/index.js" \
+            "GlassPane-${VERSION}/mcp-shell/schemas" \
+            "GlassPane-${VERSION}/installer/cli.js"
+          do
+            if ! tar -tzf "GlassPane-${VERSION}.tar.gz" | grep -q "^${entry}$"; then
+              echo "::error::the release archive does not contain ${entry}"
+              exit 1
+            fi
+          done
+          echo "release archive carries the declared commands and the schemas they read"
       - name: Sign release artifacts with GPG
         # 签名是**必须成功的一步**，不是 best-effort。这一份 `.asc` 是 updater 第 8 道校验
         # （作者性）唯一的判据：没有它，每一次定时更新都会停在 needs-consent，"自动更新"这个
