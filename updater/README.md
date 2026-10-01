@@ -60,8 +60,12 @@
   （`lib/assets.js:SIGNATURE_NAME`）。工作流哪天改用 `--output`、换后缀、或者只签 tarball，这条 gate 都会
   把该 release 读成 `unsigned-release`（而不是读成"签名没问题"）——`test/signature.test.mjs` 从工作流原文
   反推这个名字，任一侧改名即红。1.3.1 及更早的 release 永远停在 `unsigned-release`，因为签名 job 是之后加的。
-- 换版仍需在机器上重建 daemon（`swift build -c release` + `engine/scripts/make-app.sh`）：GitHub Release
-  只有源码 tarball，没有预编译二进制。因此一次自动更新可能要几分钟，也依赖本机有 Xcode 工具链。
+- 换版仍需在机器上重建 daemon（`swift build -c release` + `engine/scripts/make-app.sh`）：发布归档里
+  没有预编译的 Swift 二进制。因此一次自动更新可能要几分钟，也依赖本机有 Xcode 工具链。
+  JS 那一层不同：归档**必须**带着 `mcp-shell/dist` 与 `mcp-shell/schemas`（`scripts/make-release-archive.mjs`
+  在缺它们时拒绝打包），因为 `npm pack` 是在暂存树里跑的，源码树的 `bin` 指向并不存在的文件，装上去的
+  就是一个跑不起来的包 —— 2026-10-01 的真机换版正是这么失败并回滚的。`apply` 现在在换任何东西之前先问
+  这件事（`checkStagedNpmCommands`），答"缺哪个命令、是哪份发布产物的问题"。
 - 状态文件不落"上一次退出码"，所以 `apply-failed` 在面板重开后只能按"有没有暂存"判断能否重试；
   真实那次到底是 `4` 还是 `5` 只有当次运行知道。这一条是已知缺口，不是已解决。
 - `--consent state-dir`（守护进程跑在非默认状态根）只能从命令行给，面板**故意**不给这个按钮。

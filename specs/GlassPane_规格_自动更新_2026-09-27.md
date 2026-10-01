@@ -96,7 +96,13 @@
   （可与发布页核对），major 一律要人点按钮，一键关闭自动更新。
 - **npm 两个包不走 registry 更新**：从**已校验的暂存树**里 `npm pack` 出 tgz 再
   `npm install -g <该 tgz>`，避免"校验了 A 却装了 B"的双源。安装后必须 `npm ls -g` 读回版本等于
-  `<ver>`，否则 `rollback`。
+  `<ver>`，否则 `rollback`。这条对发布产物有一个硬前提：**归档里必须已经带着 `mcp-shell` 的构建输出**
+  （`dist/`、`schemas/`），因为 `npm pack` 读的是树里现成的文件；纯源码归档打出来的包只在
+  `package.json` 里声明 `bin`，那个文件却不在树里，装上去是个跑不起来的包（2026-10-01 真机实测：tgz
+  里只有三个条目，`npm install -g` 退 0、版本读回也对，MCP 那一半却在 `ENOENT` 上死掉，整次换版回滚）。
+  因此本节原先的"确定性源码 tarball"改口为**发布归档 = 被 tag 的树 + 目标机自己产不出的 JS 构建产物**，
+  由 `scripts/make-release-archive.mjs` 生成、缺构建产物时拒绝打包；Swift 那一半仍旧在目标机上构建
+  （Xcode 是 macOS 更新唯一可以假设存在的重型工具链）。
 
 ## 2. 什么时候才允许换版
 
@@ -165,6 +171,13 @@
        remedy 要指出这一条需要一个人（`sudo chown -R "$(whoami)" <两个目录>`，或把 prefix 挪进家目录并改 PATH），
        不能写成 agent 能自己做完的样子。注入过 `npm` 的调用方（测试）自己负责那一层，此时预检默认不起进程——
        否则每条序列测试都在读开发者机器的 npm 配置，而不是读被测代码。
+   4d. **暂存树里"声明了的命令"必须在树里**，同样在备份之前问。npm 那一步装的是从暂存树 `npm pack`
+       出来的包，而 `npm pack` 只看树里现成的文件：`package.json` 声明 `bin` 却没有那个文件时，
+       `npm install -g` 照样退 0、`npm ls -g` 照样读回版本号，跑起来却是 `ENOENT`（2026-10-01 真机对
+       v1.5.1 实测：tgz 只有 `package.json`/`LICENSE`/`README.md` 三个条目）。这道预检回答的是
+       `code=release-payload-invalid` + "发布者要修的东西在 `scripts/make-release-archive.mjs` 那一侧"，
+       而不是让人对着"包装上了却跑不起来"去查自己的机器。注入过 `npm` 的调用方自己负责那一层，
+       默认值同样是空转。
 5. 一切成功才更新 `current`；历史保留最后 10 次（时间、动作、结论、digest 前 12 位）。
 
 ## 4. 没跑成 / 失败时，用户看得到也能动手
@@ -211,6 +224,8 @@
 | major 不自动应用 | `policy.test.mjs` | 去掉 consent 分支 ⇒ 红 |
 | 双资产必须齐 | `assets.test.mjs` | 缺 SUMS 仍继续 ⇒ 红 |
 | npm 全局目录写不进去时，在备份与换版**之前**就拒绝，并说清什么都没动；两个目录都算 | `updater/test/apply.test.mjs`（`checkNpmPrefix…`：真目录 + 真 `chmod 0500`；`checkNpmPrefix covers both directories a global install writes into`：只锁 `bin` 也须拒；`a machine that cannot write npm's global directory is refused before a single bundle moves`：构建/kickstart/npm 都是 `assert.fail` 引线） | 删掉那次拒绝 ⇒ 引线炸，红；把 `W_OK` 探测跳过 ⇒ 第一条红（0500 的目录被当成能写）；只探 `lib/node_modules` 不探 `bin` ⇒ 第二条红（正是真机 chown 之后仍然发生的那次 EACCES） |
+| 暂存树里声明了的命令必须真的在树里，否则在备份**之前**就拒绝 | `updater/test/apply.test.mjs`（`a staged release whose package declares a command it does not carry is refused before anything moves`：真暂存树 + 构建/kickstart/npm 引线；`the staged-command pre-flight answers for the tree the release actually ships`：少两条之一即拒、齐了即放行、读不出 manifest 即拒） | 删掉 `commandsReady` 那块 ⇒ 引线全炸；`checkStagedNpmCommands` 缺文件也回 `ok:true` ⇒ "少一个也拒绝"那条红（永远绿的闸与永远拒的闸都不是闸） |
+| 发布归档带着 `npm pack` 需要的构建产物，并且同树两次生成字节一致 | `updater/test/release-archive.test.mjs`（临时 git 仓跑真脚本：解包→`npm pack`→`npm install -g` 到临时 prefix→命令真的能跑；符号链接仍以链接入档） | 从 `REQUIRED_BUILD_OUTPUTS` 里删掉 `mcp-shell/dist` ⇒ 第一条红（那正是 2026-10-01 发出去的形状）；去掉条目排序 ⇒ 复现性那条红 |
 | SUMS 严格解析 | `sums.test.mjs` | 取第一个命中 ⇒ 红 |
 | 实测 sha256 | `digest.test.mjs` | 改用头长度 ⇒ 红 |
 | 暂存树版本线自证 | `selfcheck.test.mjs` | 跳过 check-version ⇒ 红 |

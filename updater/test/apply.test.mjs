@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url'
 import { CODES, EXIT, exitCodeFor } from '../lib/codes.js'
 import { refreshRuntime } from '../lib/runtime.js'
 import { AGENT_LABEL } from '../lib/launchd.js'
-import { checkNpmPrefix } from '../lib/apply.js'
+import { checkNpmPrefix, checkStagedNpmCommands } from '../lib/apply.js'
 import { readPointer, writePointer } from '../lib/state.js'
 import {
   BACKUP_MANIFEST_NAME,
@@ -2146,6 +2146,99 @@ test('a global install that fails halfway takes back the package it already put 
     assert.match(stuck.message, /glasspane-mcp: npm error code EACCES/, stuck.message)
   } finally {
     removeDir(home)
+  }
+})
+
+// REVERSE MUTATION (#64, lib/apply.js `applyUpdate`): delete the `commandsReady` block. The machine then
+// swaps the bundles, restarts the daemon, installs a package whose declared command does not exist, and is
+// refused only at the MCP half of the handshake — which is exactly what a real machine did on 2026-10-01
+// against v1.5.1, whose archive was pure source. Every fuse below goes red because it is *reached*.
+test('a staged release whose package declares a command it does not carry is refused before anything moves', async () => {
+  const fx = fixture('npm-commands-')
+  const socketPath = shortSocketPath(fx.dir, 'commands.sock')
+  const daemon = await startSocketDaemon(socketPath, { behaviour: 'answer', version: '1.4.1' })
+  // The staged tree the release unpacked: a complete-looking package.json that promises `dist/index.js`,
+  // and no dist. This is the `git archive` shape, not a hypothetical one.
+  fs.mkdirSync(path.join(fx.treePath, 'mcp-shell'), { recursive: true })
+  fs.writeFileSync(path.join(fx.treePath, 'mcp-shell', 'package.json'), JSON.stringify({
+    name: 'glasspane-mcp', version: '1.4.1', bin: { 'glasspane-mcp': 'dist/index.js' },
+  }))
+  fs.mkdirSync(path.join(fx.treePath, 'installer'), { recursive: true })
+  fs.writeFileSync(path.join(fx.treePath, 'installer', 'package.json'), JSON.stringify({
+    name: 'glasspane-install', version: '1.4.1', bin: { 'glasspane-install': './cli.js' },
+  }))
+  fs.writeFileSync(path.join(fx.treePath, 'installer', 'cli.js'), 'export const install = () => {}\n')
+  try {
+    const result = await applyUpdate({
+      stateRoot: fx.stateRoot,
+      appsDir: fx.appsDir,
+      bundles: BUNDLES,
+      now: NOW,
+      currentVersion: '1.4.0',
+      socketPath,
+      probe: { socketPath, timeoutMs: 1_000 },
+      job: { ok: true, args: ['glasspaned', '--socket-path', socketPath] },
+      // The real pre-flight, wired the way production wires it: it reads the staged tree `apply` resolved.
+      preflightNpmCommands: checkStagedNpmCommands,
+      build: () => assert.fail('缺构建产物的 release 连构建都不该起'),
+      kickstart: () => assert.fail('缺构建产物的 release 不许重启 daemon'),
+      toolsList: okTools,
+      npm: () => assert.fail('缺构建产物的 release 不该跑到 npm 那一步'),
+    })
+    assert.equal(result.status, 'deferred', JSON.stringify(result))
+    assert.equal(result.code, CODES.releaseBadPayload, result.message)
+    assert.equal(exitCodeFor(result), EXIT.REFUSED, '什么都没换 ⇒ §7 的那一档是 3')
+    assert.match(result.message, /mcp-shell declares the command "glasspane-mcp" at dist\/index.js, which the staged release does not contain/, result.message)
+    assert.match(result.message, /Nothing was replaced and the daemon was not restarted/, result.message)
+    assert.match(result.message, /publisher/, 'remedy 要说清这是发版产物的问题，不是这台机器的')
+    assert.equal(fs.existsSync(path.join(writableRoots(fx.stateRoot).backup)), false, '连备份都不该建')
+    assert.match(fs.readFileSync(path.join(fx.appsDir, 'GlassPane Daemon.app', 'Contents', 'MacOS', 'binary'), 'utf8'), /1\.4\.0/, '盘上的 bundle 还是原来那份')
+  } finally {
+    await daemon.close()
+    fx.cleanup()
+  }
+})
+
+// REVERSE MUTATION (lib/apply.js `checkStagedNpmCommands`): return `{ok:true}` when a declared target is
+// missing — the "still one short" control below stops refusing and the "all present" control keeps passing,
+// which is what makes the refusal a gate rather than a constant.
+test('the staged-command pre-flight answers for the tree the release actually ships', () => {
+  const dir = tempDir(`${TMP_PREFIX}commands-`)
+  try {
+    const tree = path.join(dir, 'tree')
+    const mk = (rel, body) => {
+      fs.mkdirSync(path.join(tree, rel), { recursive: true })
+      fs.writeFileSync(path.join(tree, rel, 'package.json'), JSON.stringify(body))
+    }
+    mk('mcp-shell', { name: 'glasspane-mcp', version: '1.4.1', bin: { 'glasspane-mcp': 'dist/index.js', 'glasspane-http': 'dist/http-gateway-cli.js' } })
+    mk('installer', { name: 'glasspane-install', version: '1.4.1', bin: { 'glasspane-install': './cli.js' } })
+    fs.writeFileSync(path.join(tree, 'installer', 'cli.js'), 'export const install = () => {}\n')
+
+    const missing = checkStagedNpmCommands({ stagedTree: tree })
+    assert.equal(missing.ok, false, '声明了命令却没有那个文件 ⇒ 这个包装上也跑不起来')
+    assert.match(missing.reason, /mcp-shell declares the command "glasspane-mcp" at dist\/index.js/, missing.reason)
+
+    fs.mkdirSync(path.join(tree, 'mcp-shell', 'dist'), { recursive: true })
+    fs.writeFileSync(path.join(tree, 'mcp-shell', 'dist', 'http-gateway-cli.js'), 'export default 1\n')
+    const stillOne = checkStagedNpmCommands({ stagedTree: tree })
+    assert.equal(stillOne.ok, false, '两条命令里少一条也仍然是拒绝')
+    assert.match(stillOne.reason, /glasspane-mcp/, stillOne.reason)
+
+    fs.writeFileSync(path.join(tree, 'mcp-shell', 'dist', 'index.js'), '#!/usr/bin/env node\n')
+    assert.equal(checkStagedNpmCommands({ stagedTree: tree }).ok, true, '都在 ⇒ 放行，这道闸不许永远拒')
+
+    // A package that promises no command has nothing to check; a manifest that cannot be read is refused
+    // rather than assumed complete.
+    const bare = path.join(dir, 'bare')
+    fs.mkdirSync(path.join(bare, 'mcp-shell'), { recursive: true })
+    fs.writeFileSync(path.join(bare, 'mcp-shell', 'package.json'), JSON.stringify({ name: 'x', version: '1.0.0' }))
+    assert.equal(checkStagedNpmCommands({ stagedTree: bare, packageDirs: ['mcp-shell'] }).ok, true)
+    fs.writeFileSync(path.join(bare, 'mcp-shell', 'package.json'), 'not json')
+    const broken = checkStagedNpmCommands({ stagedTree: bare, packageDirs: ['mcp-shell'] })
+    assert.equal(broken.ok, false, '读不出 package.json 就当它完整，等于没有这道闸')
+    assert.match(broken.reason, /cannot be read/, broken.reason)
+  } finally {
+    removeDir(dir)
   }
 })
 
