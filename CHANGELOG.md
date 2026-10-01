@@ -12,6 +12,27 @@
 是有意的跳过，不是漏发。
 
 
+### Fixed — 发布作业自己也会假红：`tar -tzf | grep -q` 在 `pipefail` 下把成功的检查报成失败
+
+v1.6.0 第一次跑发布作业，红在上一节新加的那道自证步骤上：
+
+> ##[error]the release archive does not contain GlassPane-1.6.0/mcp-shell/dist/index.js
+
+而归档里**确实有**那个条目（同一作业里 `make-release-archive.mjs` 自己打印的 `commands carried` 就在上面两行）。
+原因是步骤写成 `tar -tzf … | grep -q "^…$"`：`grep -q` 命中即退出，GNU tar 随后被 SIGPIPE 打死，
+`set -o pipefail` 把这条管道判成失败。**一条把自身成功报成失败的检查，比没有检查更坏**——它看起来像在守卫，
+实际只是在随机挑一个条目喊狼来了，而这一条正是上一节为了"别再发一个装不动的 release"才加的。
+
+改成 `node scripts/make-release-archive.mjs --verify <归档> <版本>`：判据与打包同一个作者，读的是同一个
+`package.json` 的 `bin` 与 `kernel/schemas` 的清单（**推导出来的要求，不是手抄的列表**——加一条命令或一份
+schema 不需要谁记得改第二处），逐条打印缺哪个、缺几个。测试侧两条：`--verify` 对刚打出来的归档必须全过，
+对**真发过的那种纯源码归档**必须点名缺 `dist/index.js`；另一条断言工作流文本里不再出现拿"`tar … | grep`"
+管道判成败的写法（断言前先把 `#` 注释行剔掉——我自己的注释正好引用了被禁写法，差点又造一次误红，那是本仓
+记过的老形状）。`kernel/schemas` 空得像"没有要求"时也判拒绝：没有清单不等于通过。
+
+控制：`release-archive.test.mjs` 5→7 条；变异 N8（verifier 永远报完整）、N9（步骤退回管道）、N10（空 schemas
+视为无要求）各自变红——N10 第一次跑是绿的，因为当时还没有对应的对照，补上之后才成为一条被证明能红的闸。
+
 ### Fixed — 高危（真机测出）：发布归档没有 JS 构建产物，任何 1.5.x 机器都升不上来
 
 chown 做完之后第一次真跑完整换版（1.5.0 → 1.5.1）拿到的是 `exit 4 / rolled-back`，句子读起来仍然自相矛盾：
