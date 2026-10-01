@@ -328,6 +328,7 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
          * `test/default-deps.test.mjs` keeps `defaultDeps` itself honest.
          */
         preflightNpm: merged.preflightNpm ?? checkNpmPrefix,
+        restoreNpm: merged.restoreNpm,
         copyFn: merged.copyFn,
         refreshCa: merged.refreshCaBundle,
       })

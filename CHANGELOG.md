@@ -91,6 +91,31 @@ GlassPane 的全局包（`npm ls -g` 是空的）。`apply` 的顺序是"换两�
 新增控制两条（都有反向变异实测能红）：`checkNpmPrefix` 用真目录跑（含一次 `chmod 0500` 的"写不进去"），
 序列那条把构建、kickstart、npm 全换成引线——预检失灵就会炸在任何一根上。
 
+### Fixed — §3.3 的 MCP 读回问的是"还没装上的那个命令"：checkout 装出来的机器永远换不了版
+
+`sudo chown` 之后第一次真跑 `apply`（1.5.0 → 1.5.1）拿到的答案是 `exit 4 / rolled-back`，句子读起来自相矛盾：
+
+> after 15000ms the daemon … does not report 1.5.1 (hello said "1.5.1") and the MCP layer answered
+> "unavailable: glasspane-mcp could not run (ENOENT)"; installed 1.5.1, running daemon reports "1.5.1";
+> 1.5.0 was restored and verified
+
+daemon 确实报了新版本；失败的是 §3.3 的另一半 —— 它要求**全局命令** `glasspane-mcp` 应答 `tools/list`。
+而 checkout 形态的安装只跑过 `npm install`（workspaces），全局包是**本次 `apply` 在下一步才装的**：
+那道门把"装它"这件事挡在了自己后面。所以任何这样装出来的机器，每一次自动更新都是"换 `.app` → 重启
+daemon → `hello` 回新版本 → ENOENT → 回滚 → 再重启一次"，永远换不成，而且面板读到的是
+"新版本装上了又退回去"这种没法据以行动的话。npm 全局列表实测为空（`npm ls -g`）是同一件事的另一面。
+
+顺序改成三道，**两半都过才翻 `current`**（§3.3 的语义一点没松，只是把它挪到测得到东西的时刻）：
+`hello` 版本 → npm 装 + 读回 → `tools/list`。第三条现在不过 ⇒ 除了 `.app`，**npm 层也按记账退回原版本**，
+句子里点名退回了哪一版；只说"已回滚"会把人支去翻 `~/Applications`，而走样的其实是 npm。
+
+npm 的撤销与安装走同一个注入接缝：这条是写测试时撞出来的——套序列用例注入了 `npm` 却没交代撤销，
+默认值无条件 `npm install -g`，于是"测试"真的去动开发机的 `/usr/local/bin`（EACCES 才让它停下）。
+测试自己也不许碰真机器。
+
+两条新控制，各自跑了反向变异：把两半挪回 npm 之前 ⇒ 第一条红（并实测把 15 s 握手预算整个耗光后回滚，
+正是真机那次的形状）；把撤销换成空 ⇒ 第二条红。
+
 ### Changed — §9.4 收紧：导出的束只留能锚链的证书
 
 `filterToAnchors` 在写盘前只剔**显式声明 `CA:FALSE`** 的证书，理由是可证明无损：实测这类证书当唯一锚时
