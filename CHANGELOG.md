@@ -2,7 +2,15 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
-## [未发布]
+## [1.6.0] — 2026-09-30
+
+版本判断（记下来免得下次靠记忆争）：这一版里绝大多数是修复，但它**新增了对外的形状**——状态文件多一个
+`runtime` 字段（schema 变化）、设置面板多一卡、`gp_diagnose` 多一段、`apply` 多一条对外可见的行为与一个新
+错误码 `runtime-registration-pending`。按本仓既有口径「对外可见的契约变化按 minor 记」（1.3.0/1.4.0/1.5.0
+都是这么定的），记 **1.6.0**。⚠ 本地曾有一笔 `release: 1.5.2`（939c592）**从未发布到任何地方**：§11 决定
+之后版本号改判到这里，GitHub Release 与 npm 都不会出现 1.5.1/1.5.2 —— npm 从 1.5.0 直接跳 1.6.0，
+是有意的跳过，不是漏发。
+
 
 ### Added — §11 更新器自身的换版：这条机制终于能修好它自己
 
@@ -102,8 +110,6 @@ OpenSSL 直接 `INVALID_PURPOSE`，本来就锚不住任何链，留着只会让
 指到不存在的脚本五种答案）；`apply.test.mjs` 三条用**真实** `refreshRuntime`（只替换 spawn 与 launchctl 两个
 外部事实）；`ca-bundle.test.mjs` 两条夹具测试。反向变异见 `/var/tmp/gp-iterate-gates/mutate_r12d.py`。
 
-
-## [1.5.2] — 2026-09-30
 
 ### Fixed — round 12 复审的落点：三处"桩替掉了生产那一段"、一句我编的 node 行为、四条没有读者的禁令
 
