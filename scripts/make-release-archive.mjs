@@ -29,7 +29,7 @@ import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-import { packTarGz } from '../updater/lib/tar.js'
+import { packTarGz, readTarGz } from '../updater/lib/tar.js'
 
 /** Directories that must exist and are not tracked: the JS build outputs the target machine cannot make. */
 export const REQUIRED_BUILD_OUTPUTS = ['mcp-shell/dist', 'mcp-shell/schemas']
@@ -162,10 +162,52 @@ export function archiveBytes({ root, version }) {
   return { bytes: packTarGz(entries), entries: entries.length, commands: commands.map((c) => `${c.package}:${c.command}`) }
 }
 
+/**
+ * The entries an archive must contain for the updater's npm step to have anything to install.
+ *
+ * Derived, never listed by hand: the two packages' own `bin` fields say which files are commands, and
+ * `kernel/schemas` says what the bundle is supposed to have copied next to them. A hardcoded list would go
+ * stale the first time a command or a schema is added, and a stale list still passes.
+ */
+export function requiredEntries({ root, version }) {
+  const prefix = `GlassPane-${version}/`
+  const wanted = declaredCommands({ root }).map((cmd) => `${prefix}${path.relative(root, cmd.file).split(path.sep).join('/')}`)
+  const schemaDir = path.join(root, 'kernel', 'schemas')
+  if (!fs.existsSync(schemaDir)) fail('kernel/schemas is missing: the bundle step copies it next to the command, so there is nothing to require without it')
+  const schemas = fs.readdirSync(schemaDir)
+    .filter((name) => name.endsWith('.json'))
+    .map((name) => `${prefix}mcp-shell/schemas/${name}`)
+  if (schemas.length === 0) fail('kernel/schemas holds no .json schema, which is not what the bundle step is supposed to copy')
+  return { prefix, required: [...new Set([...wanted, ...schemas])] }
+}
+
+/**
+ * Re-read an archive this script (or anything else) produced and answer the only question the release job
+ * cares about: are the commands the packages declare actually inside?
+ *
+ * This lives here rather than as a `tar -tzf | grep -q` in the workflow because that pipeline is a trap:
+ * `grep -q` exits at the first match, GNU tar then dies of SIGPIPE, and `set -o pipefail` turns a
+ * **successful** check into a failed step — which is how the v1.6.0 release job reddened on 2026-10-01
+ * while naming an entry the archive did contain. One author for the question and one for the answer, and
+ * both read the same `bin` fields.
+ */
+export function verifyArchive({ file, version, root }) {
+  const bytes = fs.readFileSync(file)
+  const entries = readTarGz(bytes).map((entry) => String(entry.name).replace(/\/+$/, ''))
+  const have = new Set(entries)
+  const { required } = requiredEntries({ root, version })
+  const missing = required.filter((name) => !have.has(name))
+  return { entries: entries.length, bytes: bytes.length, required, missing }
+}
+
 function main(argv) {
-  const [version, out] = argv
-  if (!version || !out) {
+  const [firstArg, second, third] = argv
+  const verifying = firstArg === '--verify'
+  const version = verifying ? third : firstArg
+  const target = second
+  if (!version || !target) {
     process.stderr.write('usage: node scripts/make-release-archive.mjs <version> <out-file>\n')
+    process.stderr.write('       node scripts/make-release-archive.mjs --verify <archive-file> <version>\n')
     return 2
   }
   if (!/^\d+\.\d+\.\d+[\w.-]*$/.test(version)) {
@@ -173,22 +215,38 @@ function main(argv) {
     return 2
   }
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+  if (verifying) {
+    let checked
+    try {
+      checked = verifyArchive({ file: target, version, root })
+    } catch (error) {
+      process.stderr.write(`release archive cannot be verified: ${error.message}\n`)
+      return 1
+    }
+    if (checked.missing.length > 0) {
+      for (const name of checked.missing) process.stderr.write(`::error::the release archive does not contain ${name}\n`)
+      process.stderr.write(`release archive is missing ${checked.missing.length} of ${checked.required.length} required entries\n`)
+      return 1
+    }
+    process.stdout.write(`release archive verified: ${checked.entries} entries, ${checked.bytes} bytes, all ${checked.required.length} declared commands and schemas present\n`)
+    return 0
+  }
   let first
-  let second
+  let secondPass
   try {
     first = archiveBytes({ root, version })
-    second = archiveBytes({ root, version })
+    secondPass = archiveBytes({ root, version })
   } catch (error) {
     process.stderr.write(`release archive refused: ${error.message}\n`)
     return 1
   }
-  if (!first.bytes.equals(second.bytes)) {
+  if (!first.bytes.equals(secondPass.bytes)) {
     process.stderr.write('release archive is not reproducible: two passes over the same tree produced different bytes\n')
     return 1
   }
-  fs.writeFileSync(out, first.bytes)
+  fs.writeFileSync(target, first.bytes)
   const digest = crypto.createHash('sha256').update(first.bytes).digest('hex')
-  process.stdout.write(`release archive: ${out}\n`)
+  process.stdout.write(`release archive: ${target}\n`)
   process.stdout.write(`  entries=${first.entries} bytes=${first.bytes.length} sha256=${digest}\n`)
   process.stdout.write(`  commands carried: ${first.commands.join(', ')}\n`)
   return 0

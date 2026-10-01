@@ -22,8 +22,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { archiveBytes, declaredCommands, REQUIRED_BUILD_OUTPUTS } from '../../scripts/make-release-archive.mjs'
-import { extractTarGz, readTarGz } from '../lib/tar.js'
+import { archiveBytes, declaredCommands, requiredEntries, REQUIRED_BUILD_OUTPUTS, verifyArchive } from '../../scripts/make-release-archive.mjs'
+import { extractTarGz, packTarGz, readTarGz } from '../lib/tar.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.resolve(HERE, '..', '..')
@@ -48,6 +48,7 @@ function makeReleaseTree({ withDist = true, commitBuildOutputs = false } = {}) {
   write('scripts/check-version.mjs', 'export const checkVersion = () => true\n')
   write('install.sh', '#!/bin/sh\necho hi\n', 0o755)
   write('engine/Package.swift', '// swift-tools\n')
+  write('kernel/schemas/decision-log-entry.schema.json', '{}\n')
   // The real repository tracks symlinked icon files (harness/public), and the archive has to carry them as
   // links for the unpacker to materialize — the shape that once made every real release stop at the unpack.
   write('docs/logo.png', 'PNG-BYTES\n')
@@ -191,6 +192,51 @@ test('a build output that the repository also commits is carried once, not twice
   } finally {
     tree.cleanup()
   }
+})
+
+test('--verify reads the artifact back and answers the question the updater will ask', () => {
+  const tree = makeReleaseTree()
+  const out = path.join(tree.root, 'GlassPane-1.6.0.tar.gz')
+  try {
+    fs.writeFileSync(out, archiveBytes({ root: tree.root, version: '1.6.0' }).bytes)
+    const ok = verifyArchive({ file: out, version: '1.6.0', root: tree.root })
+    assert.deepEqual(ok.missing, [], JSON.stringify(ok.required))
+    // Derived, not hardcoded: the requirement is the manifest's own `bin` plus what `kernel/schemas` holds,
+    // so adding a command or a schema extends the check without anyone remembering to edit a list.
+    assert.ok(ok.required.includes('GlassPane-1.6.0/mcp-shell/dist/index.js'), JSON.stringify(ok.required))
+
+    // And the same call against the shape that shipped on 2026-10-01 — a source-only archive — must say so.
+    const sourceOnly = path.join(tree.root, 'source-only.tar.gz')
+    fs.writeFileSync(sourceOnly, packTarGz([
+      { name: 'GlassPane-1.6.0/mcp-shell/package.json', content: fs.readFileSync(path.join(tree.root, 'mcp-shell', 'package.json')) },
+      { name: 'GlassPane-1.6.0/installer/package.json', content: fs.readFileSync(path.join(tree.root, 'installer', 'package.json')) },
+      { name: 'GlassPane-1.6.0/installer/cli.js', content: fs.readFileSync(path.join(tree.root, 'installer', 'cli.js')) },
+    ]))
+    const bad = verifyArchive({ file: sourceOnly, version: '1.6.0', root: tree.root })
+    assert.ok(bad.missing.includes('GlassPane-1.6.0/mcp-shell/dist/index.js'), JSON.stringify(bad.missing))
+
+    // An empty `kernel/schemas` means there is nothing to require next to the command, and the archive would
+    // then pass while shipping a package whose runtime schemas are gone. "Nothing listed" is a refusal here,
+    // not a vacuous pass.
+    fs.rmSync(path.join(tree.root, 'kernel', 'schemas', 'decision-log-entry.schema.json'))
+    assert.throws(
+      () => requiredEntries({ root: tree.root, version: '1.6.0' }),
+      /kernel\/schemas holds no \.json schema/,
+      '空清单不能当成"没有要求"',
+    )
+  } finally {
+    tree.cleanup()
+  }
+})
+
+test('the workflow asks that question through the script, not a shell pipeline', () => {
+  // The v1.6.0 release job reddened on `tar -tzf … | grep -q …` under `set -o pipefail`: grep exits at the
+  // first match, GNU tar dies of SIGPIPE, and the step fails while naming an entry the archive contains.
+  // A check that reports its own success wrongly is worse than no check, so the step is one script call now.
+  const text = fs.readFileSync(path.join(REPO, '.github', 'workflows', 'release.yml'), 'utf8')
+    .split('\n').filter((line) => !line.trim().startsWith('#')).join('\n')
+  assert.match(text, /node scripts\/make-release-archive\.mjs --verify/, '发布作业要经由同一个脚本问这个问题')
+  assert.ok(!/tar -tzf[^\n]*\|[^\n]*grep/.test(text), '不许再用 `tar | grep` 的管道判成败：pipefail 会把它变成假红')
 })
 
 test('the script runs against this repository and refuses a version it cannot name an archive with', () => {
