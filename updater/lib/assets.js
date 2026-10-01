@@ -68,12 +68,23 @@ export function findSignatureAsset(release, { version, base }) {
   return { name, url: assertAssetUrl(hits[0].url, { base }) }
 }
 
-/** Normalise a GitHub release payload's asset list to `{ name, url }`. */
+/**
+ * Normalise a GitHub release payload's asset list to `{ name, url, bytes }`.
+ *
+ * `bytes` is `assets[].size`, which the API really carries (measured on v1.5.1: 25,126,902 for the tarball,
+ * 89 for the checksum file — the same numbers the CDN answers in `content-length`). It is kept because it is
+ * the release's own statement of how long each file is, and a body that arrives shorter or longer than that
+ * statement is not the file the release described, whatever its checksum then happens to match.
+ */
 export function assetIndex(release) {
   const assets = Array.isArray(release?.assets) ? release.assets : []
   return assets
     .filter((a) => typeof a?.name === 'string')
-    .map((a) => ({ name: a.name, url: a.browser_download_url ?? a.url ?? null }))
+    .map((a) => ({
+      name: a.name,
+      url: a.browser_download_url ?? a.url ?? null,
+      bytes: Number.isSafeInteger(a?.size) && a.size >= 0 ? a.size : null,
+    }))
 }
 
 /**
@@ -109,5 +120,9 @@ export function requireAssetPair(release, { version, base }) {
     sumsName: wanted[1],
     tarballUrl: found[wanted[0]],
     sumsUrl: found[wanted[1]],
+    // The release's own claim about how long each file is (`null` when the payload says nothing). `check.js`
+    // holds the bytes against it before it spends a hash on them.
+    tarballBytes: index.find((asset) => asset.name === wanted[0])?.bytes ?? null,
+    sumsBytes: index.find((asset) => asset.name === wanted[1])?.bytes ?? null,
   }
 }

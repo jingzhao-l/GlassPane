@@ -40,7 +40,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { runCheck } from '../lib/check.js'
+import { assertDeclaredBytes, runCheck } from '../lib/check.js'
 import { CODES } from '../lib/codes.js'
 import { updateSummary } from '../lib/state.js'
 import { makeBytesFetcher, makeFetcher } from '../lib/source.js'
@@ -118,6 +118,7 @@ async function startSource({
   dropSumsAsset = false,
   assetOrigin = null,
   signature = 'sums',
+  declare = {},
 }) {
   const files = treeFiles ?? defaultTreeFiles(version)
   const archive = tarball ?? packTarGz(files)
@@ -129,12 +130,20 @@ async function startSource({
   // Content is irrelevant to the injected gpg and irrelevant to the digest gates
   // (which never read it); what matters is that the *name* is on the asset list.
   const signatureBytes = Buffer.from('-----BEGIN PGP SIGNATURE-----\n\nfake armored body\n-----END PGP SIGNATURE-----\n')
+  // Real releases carry `assets[].size` (measured on v1.5.1: 25,126,902 and 89), so the fixture carries it
+  // too — otherwise every end-to-end test here would be exercising a branch production never takes.
+  // `declare` lets one test publish a length the served bytes do not have.
+  const sizes = {
+    [tarballName]: declare.tarball ?? archive.length,
+    [sumsName]: declare.sums ?? Buffer.byteLength(sumsText),
+    [signatureName]: signatureName ? signatureBytes.length : null,
+  }
   const routes = {
     [PINNED_PATH + '/releases/latest']: (req, res) => {
       const origin = assetOrigin ?? `http://${req.headers.host}`
-      const assets = [{ name: tarballName, browser_download_url: `${origin}/${tarballName}` }]
-      if (!dropSumsAsset) assets.push({ name: sumsName, browser_download_url: `${origin}/${sumsName}` })
-      if (signatureName) assets.push({ name: signatureName, browser_download_url: `${origin}/${signatureName}` })
+      const assets = [{ name: tarballName, browser_download_url: `${origin}/${tarballName}`, size: sizes[tarballName] }]
+      if (!dropSumsAsset) assets.push({ name: sumsName, browser_download_url: `${origin}/${sumsName}`, size: sizes[sumsName] })
+      if (signatureName) assets.push({ name: signatureName, browser_download_url: `${origin}/${signatureName}`, size: sizes[signatureName] })
       const body = { tag_name: `v${version}`, target_commitish: targetCommitish, assets }
       if (commitId) body.commit_id = commitId
       res.writeHead(200, { 'content-type': 'application/json' })
@@ -375,6 +384,67 @@ test('a tarball whose digest disagrees with SHA256SUMS is refused and its stagin
     await src.server.close()
     machine.cleanup()
   }
+})
+
+test('a checksum file one byte shorter than the release declares is refused before it is trusted', async () => {
+  // REVERSE MUTATION (#59, lib/check.js): delete the `assertDeclaredBytes(pair.sumsName, …)` call. This sums
+  // body lost one byte and still names the right row, so every later gate — digest, unpack, the tree's own
+  // guard — passes and the release stages. That is exactly the hole: the checksum file is what asserts the
+  // digests, so nothing downstream can tell that *it* is not the file the release described. Only the length
+  // the release published for it can say so, and it has to be said before that text is believed.
+  const machine = makeMachine('shortsums')
+  const archive = packTarGz(defaultTreeFiles('1.4.1'))
+  const sumsText = `${crypto.createHash('sha256').update(archive).digest('hex')}  GlassPane-1.4.1.tar.gz\n`
+  const src = await startSource({
+    version: '1.4.1',
+    tarball: archive,
+    sums: sumsText,
+    declare: { sums: Buffer.byteLength(sumsText) - 1 },
+  })
+  try {
+    const result = await check({ machine, server: src.server })
+    assert.equal(result.code, CODES.releaseBadPayload, `长度不符要在它被信任之前说出来：${result.code} / ${result.message}`)
+    assert.match(result.message, /declares SHA256SUMS-1\.4\.1\.txt to be \d+ bytes and the download was \d+/, result.message)
+    assert.equal(loadState(machine.dir).state.staged, null, 'nothing is staged')
+  } finally {
+    await src.server.close()
+    machine.cleanup()
+  }
+})
+
+test('an archive that is not the length the release published is refused — and an honest length still stages', async () => {
+  const machine = makeMachine('shorttar')
+  const good = makeMachine('goodsize')
+  const archive = packTarGz(defaultTreeFiles('1.4.1'))
+  const lying = await startSource({ version: '1.4.1', tarball: archive, declare: { tarball: archive.length + 1 } })
+  const honest = await startSource({ version: '1.4.1', tarball: archive })
+  try {
+    const result = await check({ machine, server: lying.server })
+    assert.equal(result.code, CODES.releaseBadPayload)
+    assert.match(result.message, /GlassPane-1\.4\.1\.tar.gz to be \d+ bytes and the download was \d+/, result.message)
+    assert.equal(fs.existsSync(machine.stagingOf('1.4.1')), false, '那截错长度的字节没留在暂存目录里')
+    // The control that keeps this a gate rather than a broken build: every other end-to-end test here now
+    // carries real `assets[].size` values, and a release whose claims match must still stage.
+    const ok = await check({ server: honest.server, machine: good })
+    assert.equal(ok.status, 'staged', `声明长度与真实长度一致时这道门必须放行：${ok.code} / ${ok.message}`)
+  } finally {
+    await lying.server.close()
+    await honest.server.close()
+    machine.cleanup()
+    good.cleanup()
+  }
+})
+
+test('a release that publishes no length is not refused for it', () => {
+  // `null` is "nothing was claimed", not "the claim failed": a mirror whose payload omits `size` must be
+  // judged on its checksum, not on a requirement this tool invented.
+  assert.doesNotThrow(() => assertDeclaredBytes('GlassPane-1.4.1.tar.gz', 10, null))
+  assert.doesNotThrow(() => assertDeclaredBytes('GlassPane-1.4.1.tar.gz', 10, undefined))
+  assert.doesNotThrow(() => assertDeclaredBytes('GlassPane-1.4.1.tar.gz', 10, 10))
+  assert.throws(
+    () => assertDeclaredBytes('GlassPane-1.4.1.tar.gz', 9, 10),
+    (error) => error.code === CODES.releaseBadPayload && /to be 10 bytes and the download was 9/.test(error.message),
+  )
 })
 
 test('a staged tree whose own guard exits non-zero is refused as version-line-broken', async () => {

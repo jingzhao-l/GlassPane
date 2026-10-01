@@ -308,8 +308,10 @@ test('the URL shapes GitHub actually returns are accepted, and the widening stay
 /**
  * 一个"按节奏吐字节"的假传输，接口形状与 `response.body.getReader()` 一致：
  * `hangAfter` 之后读操作挂住（收到 abort 信号才失败），这就是"代理活着但不传数据"。
+ * `declaredBytes` 让响应带上一个真 GitHub 资产都带的那个 `content-length`；`endless` 让它在
+ * 声明的长度之后继续滴（那正是"封套说 89 字节却永远流不完"的形状）。
  */
-function streamingResponse(chunks, { gapMs = 0, hangAfter = null, signal = null } = {}) {
+function streamingResponse(chunks, { gapMs = 0, hangAfter = null, signal = null, declaredBytes = null, endless = false } = {}) {
   let index = 0
   const reader = {
     read: async () => {
@@ -323,12 +325,18 @@ function streamingResponse(chunks, { gapMs = 0, hangAfter = null, signal = null 
       if (gapMs) await new Promise((resolve) => setTimeout(resolve, gapMs))
       // 真 fetch 在 abort 之后读一定失败；假的不失败的话，"计时器到了"这一路就只是空转。
       if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' })
-      if (index >= chunks.length) return { done: true, value: undefined }
+      if (index >= chunks.length) {
+        if (!endless) return { done: true, value: undefined }
+        const value = chunks[chunks.length - 1]
+        index += 1
+        return { done: false, value }
+      }
       const value = chunks[index++]
       return { done: false, value }
     },
   }
-  return { ok: true, status: 200, url: 'https://github.com/jingzhao-l/GlassPane/releases/download/v1.5.1/GlassPane-1.5.1.tar.gz', body: { getReader: () => reader } }
+  const headers = declaredBytes === null ? undefined : { get: (name) => String(name).toLowerCase() === 'content-length' ? String(declaredBytes) : null }
+  return { ok: true, status: 200, url: 'https://github.com/jingzhao-l/GlassPane/releases/download/v1.5.1/GlassPane-1.5.1.tar.gz', headers, body: { getReader: () => reader } }
 }
 
 test('a slow-but-alive download is not killed: the stall clock re-arms on every chunk', async () => {
@@ -393,4 +401,67 @@ test('a transport with no stream body still returns its bytes', async () => {
     ok: true, status: 200, url: 'https://github.com/x/y', arrayBuffer: async () => bytes,
   }), { timeoutMs: 5_000, stallMs: 5_000 })
   assert.deepEqual([...await fetchBytes('https://github.com/x/y')], [1, 2, 3, 4])
+})
+
+/* --------- 三个时钟各判各的：停摆 / 太慢 / 兜底总时长（#59：ceiling 不能再当主判据） */
+
+// REVERSE MUTATION: delete the `if (budget > timeoutMs) armCeiling(budget)` widening — this fixture's stream
+// is longer than the ceiling it was handed (200ms) but comfortably above the rate floor, which is exactly the
+// shape that killed a real 26 KiB/s download of the 24 MiB archive at the 900s cap. The refusal wording turns
+// into the ceiling's sentence and `got.length` never gets to 12 KiB.
+test('a download that declares its length gets the time its own rate needs, not the default ceiling', async () => {
+  const declared = 12 * 1024
+  const chunk = new Uint8Array(1024).fill(3)
+  const fetchImpl = async (url, { signal } = {}) => streamingResponse(Array.from({ length: 12 }, () => chunk), { gapMs: 30, signal, declaredBytes: declared })
+  // 1 KiB/s 的下限 × 12 KiB ⇒ 预算 18s；默认兜底只有 200ms，所以这条只能靠"按声明长度反解"活下来。
+  const fetchBytes = makeBytesFetcher(fetchImpl, { timeoutMs: 200, stallMs: 10_000, minRateBps: 1024 })
+  const started = Date.now()
+  const got = await fetchBytes('https://github.com/x/y')
+  assert.equal(got.length, declared, '十二段都要拿到：它没有被兜底计时掐掉')
+  assert.ok(Date.now() - started > 200, `这一趟必须跑过那个默认 ceiling（实到 ${Date.now() - started}ms），否则它没有证明预算被放宽`)
+})
+
+test('a live but crawling download is refused for being too slow, and the sentence says what it measured', async () => {
+  const started = Date.now()
+  const endless = async (url, { signal } = {}) => streamingResponse([new Uint8Array(10).fill(9)], { gapMs: 30, signal, endless: true, declaredBytes: 4096 })
+  const fetchBytes = makeBytesFetcher(endless, { timeoutMs: 5_000, stallMs: 60_000, minRateBps: 1000, rateWindowMs: 40, rateWindowsBeforeRefusal: 2 })
+  const error = await fetchBytes('https://github.com/x/y').then(() => null, (e) => e)
+  assert.ok(error, '一直滴、但慢到这一整天都跑不完的流必须被拒')
+  assert.equal(error.code, CODES.releaseUnreachable)
+  assert.match(error.message, /too slow to be worth finishing/, error.message)
+  assert.match(error.message, /under the 1\.0 KiB\/s/, `要说出下限是多少：${error.message}`)
+  assert.match(error.message, /of 4 KiB declared/, `要说清收到了多少、声明了多少：${error.message}`)
+  assert.ok(!/no bytes arrived/.test(error.message), '这不是停摆：三条判据各说一句，说错就等于没闸')
+  assert.ok(!/did not finish within/.test(error.message), `这也不是兜底总时长：${error.message}`)
+  assert.ok(Date.now() - started < 2_000, `两个窗口就该发现它慢（实际 ${Date.now() - started}ms）`)
+})
+
+test('the rate floor lets a stream that is merely unhurried through', async () => {
+  // 控制对：一条永远正确的"太慢"断言等于没有判据，所以这里放行的必须是同一段代码。
+  const chunk = new Uint8Array(512).fill(5)
+  const fetchImpl = async (url, { signal } = {}) => streamingResponse(Array.from({ length: 6 }, () => chunk), { gapMs: 10, signal, declaredBytes: 6 * 512 })
+  const fetchBytes = makeBytesFetcher(fetchImpl, { timeoutMs: 60_000, stallMs: 60_000, minRateBps: 1000, rateWindowMs: 25, rateWindowsBeforeRefusal: 2 })
+  const got = await fetchBytes('https://github.com/x/y')
+  assert.equal(got.length, 6 * 512)
+})
+
+// REVERSE MUTATION: drop the `Math.min(..., maxCeilingMs)` clamp — 1 GiB at the default floor is 27 hours,
+// so the ceiling below stops being a ceiling. Widening exists to stop the backstop from being the primary
+// criterion; an unbounded widening does not soften it, it removes it.
+test('a widened ceiling is still bounded: an absurd declared length cannot buy hours', async () => {
+  const started = Date.now()
+  // 500 × 1 KiB every 2ms ≈ one second at ~500 KiB/s — comfortably above the floor, and far past the 200ms
+  // cap this call asks for. With the clamp the ceiling fires at 200ms and the refusal names it; with the
+  // clamp removed the ceiling is 27 hours, so the stream simply *finishes* and there is no error at all.
+  // The stream is deliberately **finite**: a control whose failure mode is "hang" would spend the CI job's
+  // whole timeout instead of pointing at the guard that went missing.
+  const chunk = new Uint8Array(1024).fill(1)
+  const lots = async (url, { signal } = {}) => streamingResponse(Array.from({ length: 500 }, () => chunk), { gapMs: 2, signal, declaredBytes: 1024 * 1024 * 1024 })
+  const fetchBytes = makeBytesFetcher(lots, { timeoutMs: 60, maxCeilingMs: 200, stallMs: 60_000, rateWindowMs: 60_000 })
+  const error = await fetchBytes('https://github.com/x/y').then(() => null, (e) => e)
+  assert.ok(error, '离谱的声明长度不许把下载变成没有上限的等待')
+  assert.match(error.message, /did not finish within 200ms/, `要说清真正拦住它的那条上限：${error.message}`)
+  assert.match(error.message, /widened to the 200ms/, `要说预算被放宽过、也到顶了：${error.message}`)
+  assert.match(error.message, /of the 1024\.0 MiB this response declared/, error.message)
+  assert.ok(Date.now() - started < 5_000, `到上限就该停（实际 ${Date.now() - started}ms）`)
 })

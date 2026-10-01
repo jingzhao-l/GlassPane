@@ -42,6 +42,25 @@ import { readPointer } from './state.js'
 export const RELATIVE_RELEASE_PATH = '/releases/latest'
 
 /**
+ * The release declares how long each of its assets is (`assets[].size`; measured on v1.5.1: 25,126,902 for
+ * the tarball, 89 for the checksum file, and the CDN answers the same numbers in `content-length`). A body
+ * that arrives at a different length is not the asset that was described.
+ *
+ * Said **before** the digest is computed, because "the checksum matched" over a body whose length the release
+ * never published is a statement about some other file — and a truncating proxy is exactly the shape that
+ * would still match a checksum if the sums file itself were the truncated one. Unknown declared length
+ * (a payload that carries no `size`) is not a refusal: this checks the claim, it is not the claim's author.
+ */
+export function assertDeclaredBytes(what, got, declared) {
+  if (declared === null || declared === undefined) return
+  if (declared === got) return
+  throw new UpdaterError(
+    CODES.releaseBadPayload,
+    `the release declares ${what} to be ${declared} bytes and the download was ${got}: refusing bytes whose length contradicts the release that names them. Nothing was staged`,
+  )
+}
+
+/**
  * Gate 8's two "the proof is missing, and missing is not the same as false"
  * states. They refuse with `needs-consent` rather than `check-failed`, because
  * §4's panel keeps the reason visible with a live button for exactly this case.
@@ -183,7 +202,9 @@ export async function runCheck({
   }
   let authorship = null
   try {
-    const sumsText = Buffer.from(await fetchBytes(pair.sumsUrl)).toString('utf8')
+    const sumsBytes = Buffer.from(await fetchBytes(pair.sumsUrl))
+    assertDeclaredBytes(pair.sumsName, sumsBytes.length, pair.sumsBytes)
+    const sumsText = sumsBytes.toString('utf8')
 
     // Gate 8: who published this? Asked here — after the checksum file is in
     // hand (its bytes are what the signature covers) and before the archive is
@@ -230,6 +251,7 @@ export async function runCheck({
 
     const expected = digestFor(sumsText, pair.tarballName, { source: pair.sumsName })
     const archive = Buffer.from(await fetchBytes(pair.tarballUrl))
+    assertDeclaredBytes(pair.tarballName, archive.length, pair.tarballBytes)
     writeArchive(staging.archivePath, archive, { stagingRoot: roots.staging })
     const verified = await verifyArchiveDigest({
       filePath: staging.archivePath,
