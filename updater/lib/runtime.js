@@ -35,6 +35,7 @@ import {
   tightenMode,
   writableRoots,
 } from './fsutil.js'
+import { agentEntryPath, ensureAgentEntry } from './agent-entry.js'
 import { AGENT_LABEL, agentPlistPath } from './launchd.js'
 import { readPointer, writePointer } from './state.js'
 import { compareVersions } from './version.js'
@@ -411,44 +412,55 @@ export function defaultRunEnable({ cliPath, stateRoot, env = process.env, spawn 
 }
 
 /**
- * Ask launchd which generation of the runtime root the registered agent runs, and whether the book
- * could be read at all.
+ * Ask launchd the two questions its answer can settle, in one read.
+ *
+ * · **does the registered job go through the stable entry?** That is the whole §11 mechanism now: the
+ *   entry resolves `updaterCli` each time it runs, so once the definition names it, no future version
+ *   needs a registration. Anything else in that slot is a machine registered before the entry existed.
+ * · **which generation of `runtime/` does it run?** Only worth asking while the first answer is "no":
+ *   a pre-entry definition is pinned to one generation by name, and pruning that generation is how
+ *   "automatic update is on" quietly becomes `Cannot find module` the next morning.
  *
  * `asked: false` is a different answer from "the job runs no runtime generation", and the difference
  * decides whether disk may be deleted: a job that could not be read is a job that might be about to
  * execute the tree pruning would remove. Skipping the cleanup costs a version directory; guessing
  * costs the daily job.
  */
-function jobGeneration({ stateRoot, readRunningJob: reader, agentLabel }) {
-  if (typeof reader !== 'function') {
-    return { asked: false, gen: null, reason: 'no launchd reader was given, so the registered job was never asked what it runs' }
-  }
+function jobState({ stateRoot, readRunningJob: reader, agentLabel, entryPath }) {
+  const nothing = (reason) => ({ asked: false, gen: null, namesEntry: false, args: [], reason })
+  if (typeof reader !== 'function') return nothing('no launchd reader was given, so the registered job was never asked what it runs')
   let loaded = null
   try {
     loaded = reader({ label: agentLabel })
   } catch (error) {
-    return { asked: false, gen: null, reason: `launchctl print ${agentLabel} threw (${error?.message ?? String(error)})` }
+    return nothing(`launchctl print ${agentLabel} threw (${error?.message ?? String(error)})`)
   }
-  if (!loaded || loaded.unknown === true) {
-    return { asked: false, gen: null, reason: loaded?.reason ?? 'the loaded job answered nothing at all' }
-  }
+  if (!loaded || loaded.unknown === true) return nothing(loaded?.reason ?? 'the loaded job answered nothing at all')
   const args = Array.isArray(loaded.args) ? loaded.args.map(String) : []
+  const namesEntry = Boolean(entryPath) && args.some((arg) => sameRuntimePath(arg, entryPath))
+  let gen = null
   for (const arg of args) {
-    const gen = runtimeVersionOf(arg, runtimeRoot(stateRoot))
-    if (gen) return { asked: true, gen, reason: null }
+    const found = runtimeVersionOf(arg, runtimeRoot(stateRoot))
+    if (found) gen = found
   }
-  // Asked, answered, and what runs is not a runtime generation at all (the installer's clone, a
-  // checkout). Nothing under `runtime/` belongs to it, so the prune may go ahead.
-  return { asked: true, gen: null, reason: `the loaded job names no generation of the runtime root (${args.slice(0, 4).join(' ') || 'no arguments were read'})` }
+  return {
+    asked: true,
+    gen,
+    namesEntry,
+    args,
+    reason: namesEntry
+      ? null
+      : `the loaded job names (${args.slice(0, 4).join(' ') || 'no arguments were read'}) and not the stable entry ${entryPath ?? '(none)'}`,
+  }
 }
-
 /**
  * The §11 sequence, as one function returning the record for the state file.
  *
  * @returns {{record: object, restored: object}} `record.status` is `refreshed` (new copy runs and the
  *          loaded job names it), `kept` (code and pointer moved, no registration because this machine is
  *          switched off for automatic updates), `failed` (with the pointer and job put back), or `skipped`
- *          (a scheduled run that left the handover to the next `enable`).
+ *          (a scheduled run that left the job on its own versioned path — the one-time migration onto the
+ *          stable entry, which no later version asks for again).
  */
 export async function refreshRuntime({
   stateRoot,
@@ -463,6 +475,7 @@ export async function refreshRuntime({
   materialize = materializeRuntime,
   prune = pruneRuntime,
   runEnable = defaultRunEnable,
+  ensureEntry = ensureAgentEntry,
   readRunningJob = null,
   // `handover: 'now'` hands the launchd job over during this run — only safe when a person asked for
   // it (the panel, a terminal). `handover: 'defer'` moves the code and the pointer and stops there,
@@ -516,6 +529,28 @@ export async function refreshRuntime({
     }
   }
 
+  // The stable entry first, before anything that can be seen from outside. It is the path the launchd
+  // definition names, and it resolves the pointer when it runs, so once it is in place a version move
+  // needs no registration at all. Installing it cannot be deferred past the pointer flip: a pointer
+  // the entry cannot read is a daily job that answers "the pointer names nothing on disk" instead of
+  // doing the update.
+  const entry = ensureEntry({ stateRoot })
+  if (!entry.ok) {
+    return {
+      record: {
+        status: 'failed',
+        version: null,
+        cliPath: null,
+        previousCliPath: previousCli,
+        agentVerified: null,
+        at,
+        code: entry.code ?? CODES.stateWriteUnverified,
+        detail: entry.message,
+      },
+      restored: { attempted: false, ok: true },
+    }
+  }
+
   const copied = materialize({ stateRoot, sourceTree, version })
   if (!copied.ok) {
     return {
@@ -551,14 +586,19 @@ export async function refreshRuntime({
     }
   }
 
-  // The generations three separate authorities can name: the pointer this run just wrote, the pointer
-  // value it replaced, and — the one that is easy to miss — the generation the *registered job* still
-  // runs. A deferred handover leaves the job on the copy it was registered with, which after two
-  // scheduled rounds is neither of the two pointer values: pinning only `previousCli` deletes the tree
-  // launchd is pointing at, and the next morning's run is `Cannot find module` behind a panel switch
-  // that still reads ON.
   const root = runtimeRoot(stateRoot)
-  const prunePinned = ({ job, dropNew = false, keepExtra = [] }) => {
+  /**
+   * Which generations of `runtime/` may not be deleted.
+   *
+   * With the stable entry in place, the registered job names *no* generation — it names the entry, and
+   * the entry resolves the pointer every time it runs. So the list is the pointer this run wrote plus the
+   * value it replaced, and the third author (the generation in the book) only exists on a machine whose
+   * definition still predates the entry. That is precisely the window where pruning by pointer alone
+   * would delete the tree launchd is about to execute, so the job's own generation is pinned while it
+   * lasts — and when the book cannot be read at all, nothing is pruned. Skipping the cleanup costs a
+   * version directory; guessing costs the daily job.
+   */
+  const prunePinned = ({ job, dropNew = false }) => {
     if (job.asked !== true) {
       return { removed: [], failed: [], skipped: `nothing was pruned: ${job.reason}` }
     }
@@ -566,51 +606,8 @@ export async function refreshRuntime({
       ...(dropNew ? [] : [String(version)]),
       runtimeVersionOf(previousCli, root),
       job.gen,
-      ...keepExtra,
     ].filter(Boolean)
     return prune({ stateRoot, keep })
-  }
-
-  // A machine that turned automatic updates off must not get a new job. Its *code* still moves, because
-  // the settings panel runs whatever the pointer names, and leaving it on the old copy would be a second,
-  // silent way of not shipping a fix.
-  if (handover === 'defer') {
-    const pruned = prunePinned({ job: jobGeneration({ stateRoot, readRunningJob, agentLabel }) })
-    return {
-      record: {
-        // `skipped`, not `kept`: this machine *is* set to update automatically — the handover is what
-        // this particular run deliberately did not do, because doing it here would unregister the job
-        // we are running inside of. (`kept` stays reserved for the machine that switched it off.)
-        status: 'skipped',
-        version: String(version),
-        cliPath: copied.cliPath,
-        previousCliPath: previousCli,
-        agentVerified: false,
-        at,
-        code: CODES.runtimeRegistrationPending,
-        detail: `this run was the scheduled one, so the launchd job was not re-registered from inside itself; the updater code and pointer moved to ${copied.cliPath}${pruneNote(pruned)}, and the job takes it over the next time "updater enable" runs (the panel's switch off and on does exactly that)`,
-      },
-      restored: { attempted: false, ok: true },
-      pruned,
-    }
-  }
-
-  if (disabled) {
-    const pruned = prunePinned({ job: jobGeneration({ stateRoot, readRunningJob, agentLabel }) })
-    return {
-      record: {
-        status: 'kept',
-        version: String(version),
-        cliPath: copied.cliPath,
-        previousCliPath: previousCli,
-        agentVerified: false,
-        at,
-        code: CODES.autoDisabled,
-        detail: `automatic update is switched off on this machine, so no launchd job was registered; the updater code and pointer moved to ${copied.cliPath}${pruneNote(pruned)}`,
-      },
-      restored: { attempted: false, ok: true },
-      pruned,
-    }
   }
 
   const failAndRestore = (detail, { agentVerified = false, code = CODES.runtimeStale } = {}) => {
@@ -624,24 +621,28 @@ export async function refreshRuntime({
     } catch (error) {
       restore.message = `putting the pointer back failed too (${error?.message ?? String(error)})`
     }
-    // The re-enable runs whether the pointer write-back worked or not. The job is a *launchd* fact, and
-    // the new copy's registration is already in the book from the `enable` that just ran; leaving it
-    // there because a file could not be rewritten would make the recorded failure understate the
-    // machine's state. When the pointer is broken too, that is said in the same sentence.
-    if (previousCli && fs.existsSync(previousCli)) {
+    /**
+     * Whether the job has to be handed back by hand depends on what it names. A job that goes through
+     * the entry needs nothing: the pointer is back on the previous copy, so the entry will resolve that
+     * copy tomorrow by itself — that is the whole point of the indirection, and it is why this path no
+     * longer spawns an `enable` the way the pre-entry shape had to. Anything else re-registers through
+     * the previous copy, and that includes a book this run could not read at all: not knowing what is
+     * loaded is not evidence that it goes through the entry, so the conservative restore is the one
+     * that puts the definition back in the previous copy's hands.
+     */
+    const after = book()
+    if (restore.ok && !after.namesEntry && previousCli && fs.existsSync(previousCli)) {
       const back = runEnable({ cliPath: previousCli, stateRoot, env })
       restore.reEnable = back.ok ? 'the job was re-registered by the previous updater' : `re-registering with the previous updater failed: ${back.message}`
-    } else {
-      restore.reEnable = restore.ok
-        ? null
-        : `the previous updater script ${previousCli ?? '(unnamed)'} is not on disk, so the job could not be handed back to it`
+    } else if (restore.ok && after.namesEntry) {
+      restore.reEnable = 'the loaded job goes through the stable entry, so the pointer being back is what decides what runs next'
     }
-    // The generation this run failed to install may be dropped, but only once the book is read back and
-    // seen to name the *previous* one. Until launchd says so, the new directory is the tree a job might
-    // still execute.
-    const after = jobGeneration({ stateRoot, readRunningJob, agentLabel })
-    if (after.asked === true && after.gen && after.gen !== String(version)) {
-      restore.pruned = prune({ stateRoot, keep: [after.gen, runtimeVersionOf(previousCli, root)] })
+    // The generation this run failed to install may be dropped only once the book has been read: until
+    // launchd answers, the new directory is the tree a job might still execute. `asked: true` with no
+    // generation is a *good* answer (the job goes through the entry, or names a clone outside
+    // `runtime/`), so that case prunes; only a book that never replied at all refuses the cleanup.
+    if (after.asked === true) {
+      restore.pruned = prune({ stateRoot, keep: [after.gen, runtimeVersionOf(previousCli, root)].filter(Boolean) })
     } else {
       restore.pruned = { removed: [], failed: [], skipped: `nothing was pruned: ${after.reason}` }
     }
@@ -661,54 +662,102 @@ export async function refreshRuntime({
     }
   }
 
-  const enabled = runEnable({ cliPath: copied.cliPath, stateRoot, env, agentLabel })
-  if (!enabled.ok) return failAndRestore(enabled.message)
+  const book = () => jobState({ stateRoot, readRunningJob, agentLabel, entryPath: entry.path })
 
-  // §11.6: the loaded job is the only proof that the registration took. Read it back and require the new
-  // path to be the one launchd has; "unknown" is a failure we say out loud, not a default.
-  let loaded = null
-  if (typeof readRunningJob === 'function') {
-    try {
-      loaded = readRunningJob({ label: agentLabel })
-    } catch (error) {
-      loaded = { unknown: true, reason: `launchctl print failed (${error?.message ?? String(error)})` }
+  // A machine that turned automatic updates off must not get a new job. Its *code* still moves, because
+  // the settings panel runs whatever the pointer names, and leaving it on the old copy would be a second,
+  // silent way of not shipping a fix.
+  if (disabled) {
+    const pruned = prunePinned({ job: book() })
+    return {
+      record: {
+        status: 'kept',
+        version: String(version),
+        cliPath: copied.cliPath,
+        previousCliPath: previousCli,
+        agentVerified: false,
+        at,
+        code: CODES.autoDisabled,
+        detail: `automatic update is switched off on this machine, so no launchd job was registered; the updater code and pointer moved to ${copied.cliPath}${pruneNote(pruned)}, and the entry at ${entry.path} is in place for whenever it is switched back on`,
+      },
+      restored: { attempted: false, ok: true },
+      pruned,
     }
-  } else {
-    loaded = { unknown: true, reason: 'no launchd reader was given' }
-  }
-  if (!loaded || loaded.unknown) {
-    return failAndRestore(`the new updater registered itself but the loaded job could not be read back (${loaded?.reason ?? 'no reader'}), so it is not claimed that the new copy runs`)
-  }
-  const args = Array.isArray(loaded.args) ? loaded.args.map(String) : []
-  // The comparison is "same path", not "same spelling". The plist carries the CLI path node itself
-  // reported for the running script — a realpath — while this function's own path is built from a
-  // lexically resolved state root, so on a root with any symlinked component (`/tmp` on this machine
-  // is one) the two strings differ for the same file and a working self-update reads as a failed one.
-  const namesNew = args.some((arg) => sameRuntimePath(arg, copied.cliPath))
-  if (!namesNew) {
-    return failAndRestore(`the loaded job still names the old command line (${args.slice(0, 6).join(' ') || 'no arguments read back'}), so the swap did not take effect`)
   }
 
-  const pruned = prunePinned({ job: { asked: true, gen: runtimeVersionOf(copied.cliPath, root) ?? String(version), reason: null } })
-  return {
-    record: {
-      status: 'refreshed',
-      version: String(version),
-      cliPath: copied.cliPath,
-      previousCliPath: previousCli,
-      agentVerified: true,
-      at,
-      code: null,
-      detail: pruned.failed.length
-        ? `pruned ${pruned.removed.join(', ') || 'nothing'}; ${pruned.failed.map((f) => `${f.version}: ${f.message}`).join('; ')}`
-        : pruned.skipped ?? null,
-    },
-    restored: { attempted: false, ok: true },
-    pruned,
+  /**
+   * The success record. `job` is the read-back that proves the registered definition goes through the
+   * entry; `agentVerified` says exactly that, and nothing more — it is no longer a claim about which
+   * version launchd holds, because with the entry the version is the pointer's business (and the pointer
+   * was verified by `writePointer`'s own read-back).
+   */
+  const finishRefreshed = (job) => {
+    const pruned = prunePinned({ job: { ...job, gen: job.gen ?? runtimeVersionOf(copied.cliPath, root) } })
+    return {
+      record: {
+        status: 'refreshed',
+        version: String(version),
+        cliPath: copied.cliPath,
+        previousCliPath: previousCli,
+        agentVerified: true,
+        at,
+        code: null,
+        detail: pruned.failed.length
+          ? `pruned ${pruned.removed.join(', ') || 'nothing'}; ${pruned.failed.map((f) => `${f.version}: ${f.message}`).join('; ')}`
+          : pruned.skipped ?? null,
+      },
+      restored: { attempted: false, ok: true },
+      pruned,
+    }
   }
+
+  const registered = book()
+  if (registered.namesEntry) {
+    // The definition already goes through the entry, so this run is done: what the next scheduled run
+    // executes is decided by the pointer it just wrote. No bootout, no bootstrap, no child process —
+    // the step that used to be this section's most dangerous one is now a file write.
+    return finishRefreshed(registered)
+  }
+
+  // The job names something else: a machine whose definition was registered before the entry existed, or
+  // no definition at all. That needs exactly one registration through the entry, and it is the last
+  // time any version of this updater will ask for one.
+  if (handover === 'defer') {
+    const pruned = prunePinned({ job: registered })
+    return {
+      record: {
+        // `skipped`, not `kept`: this machine *is* set to update automatically — the registration is
+        // what this run deliberately did not do, because doing it here would unregister the job we are
+        // running inside of. Unlike the pre-entry shape, this is a one-time migration rather than a cost
+        // on every version, and the sentence has to say so or a reader will keep looking for the next one.
+        status: 'skipped',
+        version: String(version),
+        cliPath: copied.cliPath,
+        previousCliPath: previousCli,
+        agentVerified: false,
+        at,
+        code: CODES.runtimeRegistrationPending,
+        detail: `the updater code, the pointer, and the stable entry are all in place, but the registered job still names its own path instead of ${entry.path}, and this run was the scheduled one — re-registering from inside it would tear the job down mid-run. Flip "automatic update" off and on once (or run "updater enable") to move the definition onto the entry; after that single step, no future version needs it${pruneNote(pruned)}.`,
+      },
+      restored: { attempted: false, ok: true },
+      pruned,
+    }
+  }
+
+  const migrated = runEnable({ cliPath: copied.cliPath, stateRoot, env })
+  if (!migrated.ok) return failAndRestore(`registering the stable entry with the new copy failed: ${migrated.message}`)
+  const afterMigration = book()
+  if (!afterMigration.namesEntry) {
+    return failAndRestore(`the new copy ran "enable", but the loaded job still does not name the stable entry ${entry.path} (${afterMigration.reason})`)
+  }
+  return finishRefreshed(afterMigration)
 }
 
-/** How a prune that may have been refused is described in a record's own detail. */
+/**
+ * How a prune that may have been refused is described in a record's own detail. A skipped cleanup is
+ * not the same sentence as an empty one: "nothing was pruned because the book never answered" is the
+ * fact a reader needs before deciding whether to care about the disk.
+ */
 function pruneNote(pruned) {
   if (!pruned) return ''
   if (pruned.skipped) return `, and ${pruned.skipped}`
@@ -728,11 +777,18 @@ export function runtimeAgentPlistPath(homeDir) {
  * re-exporting the root bundle, or the final state write itself are all between the handover and the
  * return. Its catch restores the two `.app` bundles, and if nothing else moved the authority back the
  * record would say "`1.6.0` restored and verified" while `update-install.json` and the loaded job both
- * name the copy that was supposed to be undone. This function is that missing half: pointer back, then
- * the previous copy re-registers its own job.
+ * name the copy that was supposed to be undone. This function is that missing half: the pointer goes back,
+ * and the launchd definition is only re-registered when it actually needs it and this run is allowed to.
  *
  * The caller hands in the pointer it read *before* the handover, because after the flip there is no
  * reading of the pointer that still says what the machine used to be.
+ *
+ * `handover` is the mode the forward step ran in, and it decides what this function is allowed to do to
+ * launchd. Under `'defer'` this run *is* the scheduled job, so registering anything here would `bootout`
+ * the process that is rolling the bundles back — the same reason the forward step stopped at the pointer.
+ * Such a run puts the pointer back and leaves the definition alone; whether the machine is actually
+ * consistent is then decided by the read-back below, not asserted. `disabled` removes the question: a
+ * switched-off machine has no job, and re-registering one would undo the user's own switch.
  */
 export async function undoHandover({
   stateRoot,
@@ -742,6 +798,8 @@ export async function undoHandover({
   runEnable = defaultRunEnable,
   writePointerImpl = writePointer,
   readRunningJob: reader = null,
+  handover = 'now',
+  disabled = false,
   now = () => new Date(),
 } = {}) {
   const at = now().toISOString()
@@ -770,8 +828,33 @@ export async function undoHandover({
   } catch (error) {
     pointerBack = { ok: false, message: `the pointer could not be put back at ${cli} (${error?.message ?? String(error)})` }
   }
+  // A machine whose owner switched automatic update off has no job to hand back, and `enable` is the one
+  // call that would give it one — turning the user's switch back on behind a record that is talking about a
+  // rollback. The pointer still goes back, because the settings panel runs whatever it names.
+  if (disabled) {
+    return {
+      ok: pointerBack.ok,
+      record: record({
+        detail: `the apply was rolled back after the updater had already been handed over: ${pointerBack.message}; automatic update is switched off on this machine, so no job was registered and none needed handing back`,
+      }),
+    }
+  }
+  // Does the registered definition go through the stable entry? If so, putting the pointer back *is*
+  // handing the job back: the entry resolves `updaterCli` every time it runs, so tomorrow's run picks up
+  // the restored path with no launchd call and no child process. Only a pre-entry definition — one that
+  // carries a versioned path in its own text, or a book that would not answer — still needs the old copy
+  // to re-register itself, and only a run that a person asked for may make that call.
+  const entryFile = (() => { try { return agentEntryPath(stateRoot) } catch { return null } })()
+  const book = jobState({ stateRoot, readRunningJob: reader, agentLabel: previousPointer.agentLabel ?? AGENT_LABEL, entryPath: entryFile })
   let reEnable = null
-  if (fs.existsSync(cli)) {
+  if (book.namesEntry) {
+    reEnable = { ok: true, message: 'the loaded job goes through the stable entry, so the pointer being back is what decides what runs next' }
+  } else if (handover === 'defer') {
+    reEnable = {
+      ok: true,
+      message: `this run is the scheduled job, so nothing was re-registered — a registration here would unregister the process rolling the bundles back. The definition keeps the path it already named${book.gen ? ` (generation ${book.gen})` : ''}, and the read-back below is what says whether that is the copy the pointer went back to`,
+    }
+  } else if (fs.existsSync(cli)) {
     const back = runEnable({ cliPath: cli, stateRoot, env })
     reEnable = back.ok
       ? { ok: true, message: 'the previous updater re-registered the job' }
@@ -790,7 +873,7 @@ export async function undoHandover({
     }
   }
   const args = Array.isArray(loaded?.args) ? loaded.args.map(String) : []
-  const verified = loaded && loaded.unknown !== true ? args.some((arg) => sameRuntimePath(arg, cli)) : null
+  const verified = book.namesEntry ? true : loaded && loaded.unknown !== true ? args.some((arg) => sameRuntimePath(arg, cli)) : null
   const detail = `the apply was rolled back after the updater had already been handed over: ${pointerBack.message}; ${reEnable.message}${verified === null ? '; the loaded job was not read back, so this run cannot show which command line launchd holds' : verified ? `; the loaded job names ${cli}` : `; the loaded job still names (${args.slice(0, 6).join(' ') || 'no arguments read back'})`}`
   return {
     ok: pointerBack.ok && reEnable.ok && verified !== false,

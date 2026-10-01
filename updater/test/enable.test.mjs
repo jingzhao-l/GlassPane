@@ -24,11 +24,12 @@ import { CODES, EXIT } from '../lib/codes.js'
 import { CA_ENV_VAR } from '../lib/ca-bundle.js'
 import { AGENT_LABEL } from '../lib/launchd.js'
 import { loadState } from '../lib/state.js'
+import { ensureAgentEntry as realEnsureAgentEntry } from '../lib/agent-entry.js'
 import { TMP_PREFIX, removeDir, tempDir } from './helpers.mjs'
 
 const PEM = '-----BEGIN CERTIFICATE-----\nMIIBFAKE\n-----END CERTIFICATE-----\n'
 
-function harness({ bundle = true, record = { status: 'ok', certs: 3, path: null, exportedAt: 'now', detail: null }, register = { ok: true, message: 'agent registered', verified: true }, schedule = { hour: 12, minute: 0 } } = {}) {
+function harness({ bundle = true, record = { status: 'ok', certs: 3, path: null, exportedAt: 'now', detail: null }, register = { ok: true, message: 'agent registered', verified: true }, schedule = { hour: 12, minute: 0 }, entry = null } = {}) {
   // `${TMP_PREFIX}…` and realpathSync: the CLI canonicalises `--state-dir` the way
   // launchd would resolve it, so `/tmp` (a symlink) must be compared as its real
   // path, and the scratch must never be created inside the repository.
@@ -99,6 +100,13 @@ function harness({ bundle = true, record = { status: 'ok', certs: 3, path: null,
       return { ok: true, message: 'agent removed' }
     },
     agentPlistPath: ({ label = AGENT_LABEL }) => path.join(stateRoot, 'LaunchAgents', `${label}.plist`),
+    // The real installer of the entry is used unless a test asks for a refusal: it lands
+    // `updater/agent-entry.js` inside this harness's own scratch state root, so nothing outside is
+    // touched, and the registration assertions below are made against the file that really exists
+    // rather than against a path a stub invented.
+    ensureAgentEntry: (options) => (entry !== null
+      ? entry
+      : realEnsureAgentEntry({ ...options, stateRoot })),
     now: () => new Date('2026-09-29T09:00:00.000Z'),
   }
   return {
@@ -168,6 +176,40 @@ test('a disabled machine is not touched: no export, no registration, no status w
     assert.equal(result.code, CODES.autoDisabled)
     assert.equal(result.exitCode, EXIT.REFUSED)
     assert.deepEqual(h.calls, [], 'exporting a root bundle into somebody\'s state root while telling them automatic update is off is a change they did not ask for')
+  } finally {
+    h.done()
+  }
+})
+
+test('the job is registered against the stable entry, never against the script that is running', async () => {
+  // The one property §11's entry design rests on. If the plist ever goes back to naming a versioned
+  // script, every version move needs a re-registration again — and a scheduled run cannot do that to
+  // itself, which is the whole reason the manual step existed. Asserted on the renderer's argument and
+  // on the file the fake registration writes, because the plist on disk is what launchd reads.
+  const h = harness()
+  try {
+    const result = await h.run('enable')
+    assert.equal(result.ok, true, result.message)
+    const entry = path.join(h.stateRoot, 'runtime', 'agent-entry.js')
+    assert.equal(h.rendered[0].cliPath, entry, `注册的位置必须是稳定入口，不是这一份 cli.js：${h.rendered[0].cliPath}`)
+    assert.notEqual(h.rendered[0].cliPath, new URL('../cli.js', import.meta.url).pathname)
+    assert.ok(fs.existsSync(entry), '入口文件要真在盘上——plist 指到一个不存在的文件就是明天的 Cannot find module')
+    assert.match(fs.readFileSync(entry, 'utf8'), /resolveUpdaterCli/)
+    assert.ok(!result.message.includes('versioned script'), result.message)
+  } finally {
+    h.done()
+  }
+})
+
+test('a machine that cannot install the entry is told which shape it ended up with', async () => {
+  // Falling back to the versioned path is still a working registration; silently, it is a machine that
+  // will ask for a manual enable again on the next version, and only the message can say which happened.
+  const h = harness({ entry: { ok: false, message: 'the state root is mounted read-only' } })
+  try {
+    const result = await h.run('enable')
+    assert.equal(result.ok, true, result.message)
+    assert.match(result.message, /versioned script/, result.message)
+    assert.match(result.message, /one manual "enable"/, `要说清代价：${result.message}`)
   } finally {
     h.done()
   }

@@ -90,9 +90,11 @@ export const CODES = Object.freeze({
   // *was* updated — so it never changes the exit code; it is a standing degradation the panel and
   // gp_diagnose have to keep saying until a person re-runs the installer or the next apply lands it.
   runtimeStale: 'runtime-stale',
-  // §11: the code and the pointer moved, but the launchd job was not handed over during this run —
-  // because a *scheduled* apply is itself that job, and `bootout` would take the job down mid-write.
-  // The handover happens the next time a person (or the panel's switch) runs `enable`.
+  // §11: the code, the pointer and the stable entry moved, but the registered job still names its own
+  // versioned path — a machine installed before the entry existed. Re-registering inside a *scheduled*
+  // apply is forbidden (that apply is the job, and `bootout` would take it down mid-write), so the one
+  // migration happens the next time a person (or the panel's switch) runs `enable`. After that single
+  // step no version asks again, and this code stops appearing on that machine.
   runtimeRegistrationPending: 'runtime-registration-pending',
   // The scheduled agent's plist could not be rendered without a shell interpreting
   // a path it was handed (§2's "do not guess at another installation").
