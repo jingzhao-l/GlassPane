@@ -103,10 +103,20 @@
    （含版本标记），备份成功后才动现场。
 2. 从暂存树构建（`swift build -c release` + `engine/scripts/make-app.sh`）并安置两个 bundle；
    构建失败 ⇒ 现场未动，`status=staged-build-failed`。
-3. `launchctl kickstart -k gui/<uid>/com.glasspane.daemon` 重启，**再读一次版本**：
-   socket 的 `hello` 必须回 `<ver>`，且 `glasspane-mcp` 的 `tools/list` 可用；15 s 内不成立即
-   `restore backup + kickstart`，状态记 `rolled-back`，并把两侧版本写进 `lastError`。
-4. npm 全局包的安装同样先记录原版本，读回不符就装回原版本。
+3. `launchctl kickstart -k gui/<uid>/com.glasspane.daemon` 重启，**再读一次版本**：socket 的 `hello`
+   必须回 `<ver>`；15 s 内不成立即 `restore backup + kickstart`，状态记 `rolled-back`，并把两侧版本写进
+   `lastError`。**这一道只读 `hello`**，不读 `tools/list`（顺序是本轮真机改的，见 3a）。
+   3a. **MCP 那一半必须在 npm 层落地之后读，不能在此之前**。§3.3 的另一半要求全局命令
+       `glasspane-mcp` 应答 `tools/list`，而 checkout 形态的安装只跑过 `npm install`（workspaces），
+       全局包是**本次 `apply` 自己在下一步装的**。把两半放在一起先问，等于要求"这台机器上存在一个还没
+       装上的命令"——2026-10-01 真机第一次跑通到这一步时就是这样：`.app` 换了、daemon 重启并把
+       `hello` 回了 1.5.1，然后因为 `ENOENT` 整个回滚，句子还自相矛盾（同一句里既说"装上了 1.5.1、
+       跑着的 daemon 报 1.5.1"，又说失败）。所以现在是三道：**`hello` 版本 → npm 装 + 读回 → `tools/list`**，
+       两半都过才允许翻 `current`；第三条不过时**除了 `.app` 还要把 npm 层按记账装回原版本**，
+       并说清退回了哪一版（只说"已回滚"会把人支去翻 `~/Applications`，而走样的其实是 npm）。
+4. npm 全局包的安装同样先记录原版本，读回不符就装回原版本。它的**撤销与安装走同一个注入接缝**：
+   被套用测序列的用例注入了 `npm` 却没有交代撤销，默认值就必须什么机器都不碰——真实机器上跑过一次
+   反向测试去 `npm install -g` 并死在 `/usr/local/bin` 的 EACCES 上，那已经不是被测行为。
    4a. **npm 的 global 目录写不进去 ⇒ 在换任何东西之前就拒绝，不许换完再回退。** 本机实测（2026-10-01）：
        `/usr/local/lib/node_modules` 属于 `root:wheel`，这个账号从来没装过 GlassPane 的全局包，于是每次
        `apply` 都是"两个 `.app` 已换、daemon 已重启握手通过、`npm install -g` 报 EACCES、再回退 `.app`、
@@ -153,6 +163,8 @@
 | 档案里的链接物化成副本、mode 随目标；绝对/越界/悬空/指目录/指链接/设备/FIFO 全拒，且拒时一个字节都没写 | `tar.test.mjs` | 退回"链接一律拒" ⇒ 红；按 destDir 解析链接 ⇒ 红；目标不必在档 ⇒ 红；落成真链接 ⇒ 红；抄成 0777 ⇒ 红 |
 | 下载两个时钟：stall 逐段重置、ceiling 兜底，两种停止都说到哪条与收到多少 | `source.test.mjs`（假流按真 fetch 的 abort 语义实现） | 不重置 stall ⇒ 红（慢而活的下载被杀）；`if (fired)` 删掉 ⇒ 红（回到那句 "This operation was aborted"） |
 | CLI 参数走到消费者读的那个键（含从**进程**那一侧进去的用例） | `updater/test/cli-options.test.mjs` | 塞回 `flags.overrides` ⇒ 4 条红；`--disable` 退回装饰品 ⇒ 红 |
+| 两道读回各自落在"测得到东西"的时刻：`hello` 先、npm 次之、`tools/list` 最后；第三条不过连 npm 一起退回 | `updater/test/apply.test.mjs`（`a machine that has never installed glasspane-mcp still completes the update…`、`an MCP layer that still cannot answer after the install rolls the npm packages back too`） | 把两半挪回 npm 之前 ⇒ 第一条红（并真的把 15 s 预算耗光后回滚，正是真机那次的形状）；把 `restoreNpm` 换成空 ⇒ 第二条红 |
+| npm 层的撤销不许碰真机器 | 同上（两条都注入 `npm`；默认撤销随 `npm` 是否为真装包函数） | 让撤销无条件走 `defaultNpmRestore` ⇒ 测试机上一台 `npm install -g` 就发生（本机实测 EACCES 可见）|
 | tag 解析与 semver 严格大于 | `version.test.mjs` | 允许相等 ⇒ 红 |
 | major 不自动应用 | `policy.test.mjs` | 去掉 consent 分支 ⇒ 红 |
 | 双资产必须齐 | `assets.test.mjs` | 缺 SUMS 仍继续 ⇒ 红 |

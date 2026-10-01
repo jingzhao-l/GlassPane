@@ -353,36 +353,56 @@ export function socketCall({ socketPath, request, timeoutMs = 5_000, connect = (
  * this section exists to catch — so both halves are asked on every poll and the
  * verdict only turns `ok` when both agree in the same poll. Retries until the
  * budget runs out, because a launchd restart takes a moment to serve.
+ *
+ * `daemonVersionVerify` is the same loop with the MCP reading left out, and it exists because of a real
+ * machine (2026-10-01): the MCP half asks a **global** `glasspane-mcp` binary to answer, while a
+ * checkout install only ever ran `npm install` in the workspaces — that global package is what **this very
+ * `apply`** installs, two steps later. Requiring both readings before that step existed made `apply`
+ * unsatisfiable on such a machine: the answer was always `hello said "1.5.1" … the MCP layer answered
+ * "unavailable: glasspane-mcp could not run (ENOENT)"`, in a rollback sentence that contradicts itself.
+ * The pair is still the proof that gates `current`; what moved is the MCP half, to the point where it
+ * measures the artifact that has actually been installed.
  */
-export async function handshakeVerify({
+async function verifyAfterRestart({
   socketPath,
   wantVersion,
   budgetMs = HANDSHAKE_BUDGET_MS,
   pollMs = 500,
   call = socketCall,
-  toolsList = mcpToolsList,
+  toolsList = null,
   deadline = Date.now() + budgetMs,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
 } = {}) {
-  const seen = { hello: null, mcp: null }
+  const seen = { hello: null, mcp: toolsList ? null : undefined }
   while (Date.now() < deadline) {
     const remaining = Math.max(50, deadline - Date.now())
     const hello = await call({ socketPath, request: '{"id":1,"method":"hello"}\n', timeoutMs: Math.min(2_000, remaining) })
     seen.hello = hello.answered ? (hello.frame?.result?.version ?? null) : `unanswered: ${hello.reason}`
     const helloOk = hello.answered === true && hello.frame?.result?.version === wantVersion
-    const mcp = await toolsList({})
-    seen.mcp = mcp.ok ? `${mcp.count} tools` : `unavailable: ${mcp.reason}`
-    if (helloOk && mcp.ok) {
+    let mcpOk = true
+    if (toolsList) {
+      const mcp = await toolsList({})
+      seen.mcp = mcp.ok ? `${mcp.count} tools` : `unavailable: ${mcp.reason}`
+      mcpOk = mcp.ok === true
+    }
+    if (helloOk && mcpOk) {
       return { ok: true, version: wantVersion, seen, message: null }
     }
     await sleep(pollMs)
   }
-  return {
-    ok: false,
-    version: wantVersion,
-    seen,
-    message: `after ${budgetMs}ms the daemon at ${socketPath} does not report ${wantVersion} (hello said ${JSON.stringify(seen.hello)}) and the MCP layer answered "${seen.mcp ?? 'not tried'}"`,
-  }
+  const halves = toolsList
+    ? `does not report ${wantVersion} (hello said ${JSON.stringify(seen.hello)}) and the MCP layer answered "${seen.mcp ?? 'not tried'}"`
+    : `does not report ${wantVersion} (hello said ${JSON.stringify(seen.hello)})`
+  return { ok: false, version: wantVersion, seen, message: `after ${budgetMs}ms the daemon at ${socketPath} ${halves}` }
+}
+
+export function handshakeVerify(options = {}) {
+  return verifyAfterRestart({ toolsList: mcpToolsList, ...options })
+}
+
+/** §3.3's first half alone: the daemon is back up and reports the version that was just installed. */
+export function daemonVersionVerify(options = {}) {
+  return verifyAfterRestart(options)
 }
 
 /* -------------------------------------------------------------- npm layer */
@@ -444,16 +464,11 @@ export function installNpmPackages({
   for (const pkg of wanted) installedNow[pkg.name] = readGlobalVersion(pkg.name)
   const disagreed = wanted.filter((pkg) => installedNow[pkg.name] !== pkg.version)
   if (disagreed.length > 0) {
-    const repairs = []
-    for (const pkg of disagreed) {
-      const from = original[pkg.name]
-      if (!from) {
-        repairs.push({ name: pkg.name, ok: false, message: 'the version this machine had before is unknown, so it cannot be put back' })
-        continue
-      }
-      const back = restore(pkg.name, from)
-      repairs.push({ name: pkg.name, ok: back?.ok === true, message: back?.message ?? null })
-    }
+    const repairs = restoreNpmPackages({
+      original,
+      only: Object.fromEntries(disagreed.map((pkg) => [pkg.name, pkg.version])),
+      restore,
+    }).map((r) => ({ name: r.name, ok: r.ok, message: r.message }))
     const allBack = repairs.every((r) => r.ok)
     const detail = disagreed.map((pkg) => `${pkg.name} reads back ${JSON.stringify(installedNow[pkg.name])} after installing ${pkg.version}`).join('; ')
     return {
@@ -467,6 +482,37 @@ export function installNpmPackages({
     }
   }
   return { ok: true, code: null, message: null, packed, original, installed: installedNow, wanted: Object.fromEntries(wanted.map((pkg) => [pkg.name, pkg.version])) }
+}
+
+/**
+ * Put the global npm layer back at the versions recorded before an install.
+ *
+ * Exported because there are now two places that must do it: `installNpmPackages` itself, when a package
+ * reads back a different version than the verified tree claimed, and `apply`'s post-swap gate when the
+ * freshly installed `glasspane-mcp` still cannot answer `tools/list`. Two authors of that repair is how
+ * one of them ends up not rolling back, so the second caller reuses this one.
+ *
+ * A package with no recorded original is *not* silently uninstalled: "this machine had none" and "this
+ * machine had one we cannot name" are different answers, and the second one has to be said out loud
+ * rather than fixed by removing something the person may still be using.
+ */
+export function restoreNpmPackages({ original = {}, wanted = {}, only = null, restore = defaultNpmRestore } = {}) {
+  // `wanted` is normally the set just installed; a caller that only knows what it recorded (the shape
+  // `apply`'s npm step hands back) still has to get every one of those packages put back, so an empty
+  // `wanted` falls through to `original` rather than quietly restoring nothing.
+  const explicit = only ?? wanted
+  const targets = Object.keys(explicit ?? {}).length > 0 ? explicit : original
+  const out = []
+  for (const name of Object.keys(targets)) {
+    const from = original[name] ?? null
+    if (!from) {
+      out.push({ name, ok: false, message: 'the version this machine had before is unknown, so it cannot be put back' })
+      continue
+    }
+    const back = restore(name, from)
+    out.push({ name, ok: back?.ok === true, message: back?.ok === true ? null : (back?.message ?? 'npm restore returned nothing') })
+  }
+  return out
 }
 
 /** The `package.json` of one staged package: the name and version that were verified. */
@@ -580,6 +626,19 @@ export async function applyUpdate({
   // default here shell out to a real `npm config` would make every one of those tests read the
   // developer's machine instead of the code under test.
   preflightNpm = npm === installNpmPackages ? checkNpmPrefix : () => ({ ok: true, prefix: null, dir: null, reason: null }),
+  /**
+   * The undo for the npm layer, through the same seam as its install.
+   *
+   * Without this the rollback path below reaches for the module's own `defaultNpmRestore`, and a test of
+   * `apply`'s *sequence* — which injects `npm` but says nothing about restoring — ends up running real
+   * `npm install -g` against the developer's machine. That happened: the run died in `/usr/local/bin`
+   * with EACCES while pretending to test a rollback. A caller that injects `npm` owns that layer, so the
+   * default here answers "restored" and touches nothing; production gets the real one because it does not
+   * inject `npm`.
+   */
+  restoreNpm = npm === installNpmPackages
+    ? (info) => restoreNpmPackages({ original: info?.original, wanted: info?.wanted })
+    : () => [{ ok: true, message: null }],
   socketPath = null,
   writeState = true,
   refreshCa = null,
@@ -866,6 +925,97 @@ export async function applyUpdate({
       )
     }
 
+    /**
+     * §3.3's **first** reading, taken before the npm layer exists on this machine.
+     *
+     * The pair used to be read together here, and on a checkout-installed machine that made `apply`
+     * unsatisfiable: `glasspane-mcp` is a global binary, the installer never installs it globally, and the
+     * step that would (the one below) sat behind the gate that asks for it. Every scheduled run swapped the
+     * bundles, restarted the daemon, watched `hello` answer the new version, failed on `ENOENT` from a
+     * binary that cannot exist yet, and rolled the machine back — with a sentence that said both the new
+     * version was running *and* the update failed. Measured on a real machine on 2026-10-01.
+     */
+    const daemonUp = await daemonVersionVerify({
+      socketPath: socketPath ?? probe.socketPath,
+      wantVersion,
+      budgetMs: probe.handshakeBudgetMs ?? HANDSHAKE_BUDGET_MS,
+      call: helloCall,
+    })
+    if (!daemonUp.ok) {
+      const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn })
+      const sides = `installed ${wantVersion}, running daemon reports ${JSON.stringify(daemonUp.seen?.hello ?? null)}`
+      if (!restored.ok) {
+        const message = `${daemonUp.message}; and the backup could not be restored (${restored.message}): re-run the GlassPane installer to put ${appsDir} back`
+        const saved = stamp({
+          status: 'rollback-failed',
+          code: CODES.rollbackFailed,
+          message,
+          details: { wantVersion, hello: daemonUp.seen?.hello ?? null, mcp: null },
+          historyEntry: { action: 'rollback', result: 'rollback-failed', digest: state.staged.digest, code: CODES.rollbackFailed },
+        })
+        return {
+          ok: false,
+          status: 'rollback-failed',
+          code: CODES.rollbackFailed,
+          message,
+          state: saved,
+          rollback: { ok: false, performed: true, reason: restored.message },
+          handshake: daemonUp,
+        }
+      }
+      // §2 again, on the *second* restart: the daemon that just failed its version read-back may have
+      // taken work in the meantime, and a busy `kickstart` cancels it. Files back, restart deferred, and
+      // the sentence says so.
+      const restart = await restartIfIdle()
+      const message = `${daemonUp.message}; ${sides}; ${baseline} was restored and verified${restartLine(restart, 'the daemon was restarted again')}. The npm layer was never touched, so nothing was installed or removed there.`
+      const saved = stamp({
+        status: 'rolled-back',
+        code: CODES.rolledBack,
+        message,
+        details: { wantVersion, hello: daemonUp.seen?.hello ?? null, mcp: null },
+        current: baseline,
+        historyEntry: { action: 'rollback', result: 'rolled-back', digest: state.staged.digest, code: CODES.handshakeFailed },
+      })
+      return {
+        ok: false,
+        status: 'rolled-back',
+        code: CODES.rolledBack,
+        message,
+        state: saved,
+        rollback: { ok: true, performed: true },
+        handshake: daemonUp,
+        restart,
+      }
+    }
+
+    // §3.4: record the original version, install from the verified tree, read the installed version back,
+    // put the recorded one back if it disagrees.
+    const npmResult = await npm({ stagedTree: staged.rootPath, copyFn })
+    if (npmResult?.ok === false) {
+      const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn })
+      const restart = await restartIfIdle()
+      const status = restored.ok ? 'rolled-back' : 'rollback-failed'
+      const message = `${npmResult.message}; the bundles were ${restored.ok ? `restored to ${baseline}${restartLine(restart, 'and the daemon restarted again')}` : `NOT restorable (${restored.message}) — re-run the GlassPane installer`}`
+      const saved = stamp({ status, code: npmResult.code, message, historyEntry: { action: 'rollback', result: status, digest: state.staged.digest, code: npmResult.code } })
+      return {
+        ok: false,
+        status,
+        code: npmResult.code,
+        message,
+        state: saved,
+        rollback: { ok: restored.ok, performed: true },
+        npm: npmResult,
+        restart,
+      }
+    }
+
+    /**
+     * §3.3's **second** reading, taken where it can only measure what this swap installed: the MCP
+     * forwarding layer is now the version packed from the verified tree. Both halves are still required
+     * before `current` moves — a daemon on the new version with a forwarding layer that cannot answer
+     * `tools/list` is the half-installed machine this section exists to refuse — but refusing it now also
+     * has to undo the npm layer, which the old ordering could never reach.
+     */
     const handshake = await handshakeVerify({
       socketPath: socketPath ?? probe.socketPath,
       wantVersion,
@@ -875,11 +1025,15 @@ export async function applyUpdate({
     })
     if (!handshake.ok) {
       const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn })
-      // §3.3: the record names *both* readings — the version that was installed
-      // and the version the running daemon actually reports.
+      const npmBack = restoreNpm(npmResult ?? {})
+      const npmBackLine = npmBack.length === 0
+        ? 'no global package was recorded before this install, so the npm layer was left empty'
+        : npmBack.every((r) => r.ok)
+          ? `the npm packages were put back at ${Object.entries(npmResult?.original ?? {}).map(([k, v]) => `${k}@${v}`).join(', ')}`
+          : `the npm packages were NOT all put back (${npmBack.filter((r) => !r.ok).map((r) => `${r.name}: ${r.message}`).join('; ')}) — run "npm install -g" for those by hand`
       const sides = `installed ${wantVersion}, running daemon reports ${JSON.stringify(handshake.seen?.hello ?? null)}`
       if (!restored.ok) {
-        const message = `${handshake.message}; and the backup could not be restored (${restored.message}): re-run the GlassPane installer to put ${appsDir} back`
+        const message = `${handshake.message}; ${npmBackLine}; and the backup could not be restored (${restored.message}): re-run the GlassPane installer to put ${appsDir} back`
         const saved = stamp({
           status: 'rollback-failed',
           code: CODES.rollbackFailed,
@@ -895,13 +1049,11 @@ export async function applyUpdate({
           state: saved,
           rollback: { ok: false, performed: true, reason: restored.message },
           handshake,
+          npm: { ...npmResult, restored: npmBack },
         }
       }
-      // §2 again, on the *second* restart: the daemon that just failed its
-      // handshake may have taken work in the meantime, and a busy `kickstart`
-      // cancels it. Files back, restart deferred, and the sentence says so.
       const restart = await restartIfIdle()
-      const message = `${handshake.message}; ${sides}; ${baseline} was restored and verified${restartLine(restart, 'the daemon was restarted again')}`
+      const message = `${handshake.message}; ${sides}; ${npmBackLine}; ${baseline} was restored and verified${restartLine(restart, 'the daemon was restarted again')}`
       const saved = stamp({
         status: 'rolled-back',
         code: CODES.rolledBack,
@@ -918,27 +1070,7 @@ export async function applyUpdate({
         state: saved,
         rollback: { ok: true, performed: true },
         handshake,
-        restart,
-      }
-    }
-
-    // npm layer last: the daemon is already healthy, and §3.4's rule is "record
-    // the original version, read it back, put it back if it disagrees".
-    const npmResult = await npm({ stagedTree: staged.rootPath, copyFn })
-    if (npmResult?.ok === false) {
-      const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn })
-      const restart = await restartIfIdle()
-      const status = restored.ok ? 'rolled-back' : 'rollback-failed'
-      const message = `${npmResult.message}; the bundles were ${restored.ok ? `restored to ${baseline}${restartLine(restart, 'and the daemon restarted again')}` : `NOT restorable (${restored.message}) — re-run the GlassPane installer`}`
-      const saved = stamp({ status, code: npmResult.code, message, historyEntry: { action: 'rollback', result: status, digest: state.staged.digest, code: npmResult.code } })
-      return {
-        ok: false,
-        status,
-        code: npmResult.code,
-        message,
-        state: saved,
-        rollback: { ok: restored.ok, performed: true },
-        npm: npmResult,
+        npm: { ...npmResult, restored: npmBack },
         restart,
       }
     }

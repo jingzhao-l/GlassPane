@@ -69,6 +69,11 @@
   `needs-consent` 上附带 `--consent major`，所以对一份未签名的补丁版，页面上只有被拒的理由是原话显示的，
   放行动作本身要去终端（见 README「让 GlassPane 保持最新」）。
 
+- **换版的三道门按"能不能测到东西"排序**（2026-10-01 真机第一次跑通时改的）：`hello` 报新版本 →
+  `npm install -g` 两个包并读回版本 → `glasspane-mcp` 应答 `tools/list`。原先后两道是一起问的，而
+  `tools/list` 要的那个全局命令正是第二道才装上的东西 —— checkout 装出来的机器（安装器只跑
+  `npm install`，从不 `-g`）因此永远过不了这道门：每次都换完 `.app`、重启完 daemon 再整体回滚。
+  现在第三道不过时连 npm 层一起按记账退回原版本，句子点名退回哪一版。
 - **换版之前会先问一句"这台机器的 npm 全局目录写得进去吗"**（2026-10-01 真机实测加的预检）：`apply` 的
   顺序是换 `.app` → 重启 daemon 并握手 → `npm install -g` 两个包 → §11 换更新器自己。这台机器上
   `/usr/local/lib/node_modules` 属 `root:wheel`，于是每天都是"包已换、daemon 已重启、npm 报 EACCES、再回退、

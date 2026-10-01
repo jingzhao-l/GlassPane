@@ -91,7 +91,7 @@ function fixture(label, { staged = true, currentVersion = '1.4.0', stagedVersion
 }
 
 const okBuild = (builtDir) => () => ({ ok: true, builtDir, message: null })
-const okNpm = () => ({ ok: true, code: null, message: null, packed: [], original: { 'glasspane-mcp': '1.4.0', 'glasspane-install': '1.4.0' } })
+const okNpm = () => ({ ok: true, code: null, message: null, packed: [], original: { 'glasspane-mcp': '1.4.0', 'glasspane-install': '1.4.0' }, installed: { 'glasspane-mcp': '1.4.1', 'glasspane-install': '1.4.1' }, wanted: { 'glasspane-mcp': '1.4.1', 'glasspane-install': '1.4.1' } })
 const okTools = async () => ({ ok: true, count: 16, tools: ['gp_probe_status'] })
 const okKick = async () => {
   const calls = []
@@ -978,7 +978,10 @@ test('a rolled-back apply writes both versions into lastError, the way §3.3 ask
     assert.equal(state.lastError.code, CODES.rolledBack)
     assert.match(state.lastError.message, /does not report 1\.4\.1/, 'the version that was put on disk')
     assert.match(state.lastError.message, /hello said "1\.4\.0"/, 'the version that is actually running')
-    assert.deepEqual(JSON.parse(state.lastError.details), { wantVersion: '1.4.1', hello: '1.4.0', mcp: '16 tools' })
+    // 顺序改了之后这一条的形状：版本那一半就没过，MCP 那一半**根本没被问过**，所以 `mcp` 是 null 而不是
+    // "16 tools"。把 null 当成"坏了"读是错的——它说的是"还没走到那一步"，而同一句话里也这么写了。
+    assert.deepEqual(JSON.parse(state.lastError.details), { wantVersion: '1.4.1', hello: '1.4.0', mcp: null })
+    assert.match(state.lastError.message, /The npm layer was never touched/, '没走到 npm 就要这么说，别让读者以为还要去退 npm：' + state.lastError.message)
   } finally {
     await daemon.close()
     fx.cleanup()
@@ -1312,7 +1315,7 @@ function loadedWithArgs(args) {
   return { ok: true, args: ['/bin/sh', '-c', '"$0" "$1" check "$2" "$3" --json', process.execPath, ...args] }
 }
 
-async function applyWithRealRuntime(label, { enableOk = true, loaded = null, disabled = false, trigger = 'manual', enableWritesState = null, extraDeps = {}, orphanGenerations = ['1.4.9'], entryMigrated = true, undoLoaded = null, undoEnableOk = true } = {}) {
+async function applyWithRealRuntime(label, { enableOk = true, loaded = null, disabled = false, trigger = 'manual', enableWritesState = null, extraDeps = {}, orphanGenerations = ['1.4.9'], entryMigrated = true, undoLoaded = null, undoEnableOk = true, handshakeBudgetMs = null } = {}) {
   const fx = fixture(label)
   const kick = await okKick()
   const socketPath = shortSocketPath(fx.dir, 'ok.sock')
@@ -1346,7 +1349,7 @@ async function applyWithRealRuntime(label, { enableOk = true, loaded = null, dis
       now: NOW,
       currentVersion: '1.4.0',
       socketPath,
-      probe: { socketPath, timeoutMs: 1_000 },
+      probe: { socketPath, timeoutMs: 1_000, ...(handshakeBudgetMs === null ? {} : { handshakeBudgetMs }) },
       job: { ok: true, args: ['glasspaned', '--socket-path', socketPath] },
       build: okBuild(fx.builtDir),
       kickstart: kick.fn,
@@ -1761,6 +1764,69 @@ test('a machine that cannot write npm\'s global directory is refused before a si
     assert.match(fx.installedBytes(), /installed/, '装着的还是原来那一份：预检失败之后 ~/Applications 一个字都没动')
   } finally {
     await daemon.close()
+    fx.cleanup()
+  }
+})
+
+/* ------------------------------------------------------------------ §3.3 两道读回的顺序（真机测出来的） */
+
+test('a machine that has never installed glasspane-mcp still completes the update: the pair is read after the npm layer lands', async () => {
+  // Real machine, 2026-10-01, first apply after `sudo chown`: the bundles swapped, the daemon restarted
+  // and answered `hello` with 1.5.1 — and the run rolled back anyway, because §3.3's second reading asks a
+  // **global** `glasspane-mcp` to answer `tools/list`, and the installer only ever ran `npm install` in the
+  // workspaces. The step that would put that binary on the machine sat *behind* the gate that asks for it,
+  // so on a checkout install no `apply` could ever succeed, and the sentence we wrote for it contradicted
+  // itself ("installed 1.5.1, running daemon reports 1.5.1" + a rollback).
+  //
+  // The fake below is that machine: `tools/list` answers ENOENT until the npm step has run. The assertion
+  // is the *order*, and the mutation that reddens it is putting the pair back before `npm`.
+  const order = []
+  const { result, fx, enableCalls } = await applyWithRealRuntime('runtime-mcp-after-npm', {
+    extraDeps: {
+      npm: async (options) => {
+        order.push('npm')
+        return okNpm(options)
+      },
+      toolsList: async () => {
+        order.push('tools/list')
+        return order.includes('npm')
+          ? { ok: true, count: 16, tools: ['gp_probe_status'] }
+          : { ok: false, reason: 'glasspane-mcp could not run (ENOENT)' }
+      },
+    },
+  })
+  try {
+    assert.equal(result.status, 'applied', `npm 之后才问 MCP，这台机器就该换成功：${result.message}`)
+    assert.equal(result.code, null, result.message)
+    assert.deepEqual(order, ['npm', 'tools/list'], `两道读回必须各自落在它测得到东西的时刻：${JSON.stringify(order)}`)
+    assert.deepEqual(enableCalls, [], '作业走入口，换版里不该出现注册')
+    assert.equal(loadState(fx.stateRoot).state.current, '1.4.1', 'current 只能在全绿之后翻')
+  } finally {
+    fx.cleanup()
+  }
+})
+
+test('an MCP layer that still cannot answer after the install rolls the npm packages back too', async () => {
+  // The other half of the same ordering: once the npm step has run, refusing the swap has to undo it as
+  // well — otherwise the machine ends on the old bundles with the new global packages, which is the
+  // half-installed shape §3.3 was written to catch. The message has to say which of the two it put back,
+  // because "rolled back" alone sends a person to look at ~/Applications when the drift is in npm.
+  const { result, fx, pointer } = await applyWithRealRuntime('runtime-mcp-dead-after-npm', {
+    // MCP 那一半永远答不上来，所以这一趟会把握手预算整个耗掉再拒绝——那就是行为本身，300 ms 足够证明它。
+    // 留着默认 15 s 等于让套件为一件已知的事空等四分之一分钟。
+    handshakeBudgetMs: 300,
+    extraDeps: { toolsList: async () => ({ ok: false, reason: 'glasspane-mcp did not answer tools/list within 10000ms' }) },
+  })
+  try {
+    assert.equal(result.status, 'rolled-back', result.message)
+    assert.equal(result.code, CODES.rolledBack, result.message)
+    assert.equal(exitCodeFor(result), EXIT.ROLLED_BACK, '包与全局层都换过了 ⇒ §7 的 4，不是 3')
+    assert.match(result.message, /the npm packages were put back at glasspane-mcp@1\.4\.0/, `要说出 npm 退回哪一版：${result.message}`)
+    assert.ok(result.npm?.restored?.every((r) => r.ok), `两个包都得退回去：${JSON.stringify(result.npm?.restored)}`)
+    assert.match(result.message, /the MCP layer answered "unavailable:/, `要说清是 MCP 那一半没过：${result.message}`)
+    assert.equal(loadState(fx.stateRoot).state.current, '1.4.0', '回滚之后 current 要回去')
+    assert.equal(result.handshake.seen.mcp !== null, true, '这一条的读回确实发生在装了 MCP 之后')
+  } finally {
     fx.cleanup()
   }
 })
