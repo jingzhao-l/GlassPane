@@ -19,6 +19,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
+import { plainTextLine } from '../cli.js'
 import { STATUSES } from '../lib/codes.js'
 
 const CLI = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'cli.js')
@@ -53,6 +54,17 @@ test('node cli.js runs at all: status answers with one JSON line and exit 0', as
   } finally {
     fs.rmSync(stateRoot, { recursive: true, force: true })
   }
+})
+
+test('the plain-text line never answers with nothing', () => {
+  // `check` staged an update and printed `check: `. The cause was two absent notes joined into `''`,
+  // passed through by `??` because an empty string is present. This is the render rule that had to change;
+  // the matching rule in `check.js` is what gave the staged outcome a sentence of its own.
+  assert.equal(plainTextLine({ message: 'updated 1.5.0 -> 1.6.0' }), 'updated 1.5.0 -> 1.6.0')
+  assert.equal(plainTextLine({ message: '', reason: 'the probe timed out' }), 'the probe timed out')
+  const fromState = plainTextLine({ message: '', state: { status: 'staged', summary: { current: '1.4.0', latest: '1.4.1' } } })
+  assert.match(fromState, /^status=staged current=1\.4\.0 latest=1\.4\.1$/, fromState)
+  assert.notEqual(fromState, '', '一条空的输出行读起来像命令没回答')
 })
 
 test('an unknown subcommand is a usage error (exit 2), not a crash', async () => {

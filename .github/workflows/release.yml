@@ -148,7 +148,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          NOTES="Release ${VERSION}. Source archive checksum: see \`SHA256SUMS-${VERSION}.txt\`, which is GPG-signed — \`gpg --verify SHA256SUMS-${VERSION}.txt.asc SHA256SUMS-${VERSION}.txt\`."
+          NOTES="Release ${VERSION}. Release archive checksum: see \`SHA256SUMS-${VERSION}.txt\`, which is GPG-signed — \`gpg --verify SHA256SUMS-${VERSION}.txt.asc SHA256SUMS-${VERSION}.txt\`. The archive is the tagged tree plus the JavaScript build output the updater's npm step needs (\`mcp-shell/dist\`, \`mcp-shell/schemas\`); the Swift app is still built on the target machine."
           NOTES="$NOTES"$'\n\n'"Install (one command, clones this tag): \`curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh | sh\`"
           NOTES="$NOTES"$'\n\n'"See [CHANGELOG.md](https://github.com/jingzhao-l/GlassPane/blob/${REF_NAME}/CHANGELOG.md) for what changed."
           # target 显式钉在被 checkout 的 commit 上：gh 默认会写成分支名，

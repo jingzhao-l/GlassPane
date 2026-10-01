@@ -2,6 +2,24 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [未发布]
+
+### Fixed — `updater check` 成功暂存之后打印的是一行空话
+
+真机跑第一次成功的 1.6.0 换版时看到的：`check` 把所有闸都走通、状态写成 `staged`，终端上打出来的却是
+`check: `——什么也没有。原因是这一句的两个来源（consent 说明、作者性说明）在"干净通过"时都是 `null`，
+两个 null 拼起来是空串；而 CLI 用 `message ?? reason ?? 摘要` 选文本，`??` 只在意 `null`/`undefined`，
+空串被当成"有内容"直接放行。**一行空的输出行读起来就是"这条命令没回答"**，而它偏偏是唯一带着下一步动作
+（"去按安装更新"）的那条结果。两处一起修：干净暂存自己给出一句 `staged <ver> (sha256 <前 12 位>);
+press "Install update" or run "updater apply"`，CLI 的选择规则改成"第一个**非空**"。
+控制：`check.test.mjs` 断言那句话含版本号与摘要且指出下一步；`cli.test.mjs` 新增一条直接测渲染规则的
+（空 message 必须落到状态摘要，绝不落到空串）。
+
+### Changed — 发布说明不再写"source archive"
+
+归档的内容变了（带着 `mcp-shell/dist` 与 `mcp-shell/schemas`），说明文字跟着改，并给 v1.6.0 的 Release
+补上一条版本号说明：`1.5.1` 从未上 npm、`1.5.2` 从未对外存在过，npm 上是 `1.5.0 → 1.6.0` 的**有意跳过**。
+
 ## [1.6.0] — 2026-09-30
 
 版本判断（记下来免得下次靠记忆争）：这一版里绝大多数是修复，但它**新增了对外的形状**——状态文件多一个

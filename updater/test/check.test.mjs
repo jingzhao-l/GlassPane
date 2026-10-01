@@ -212,6 +212,12 @@ test('all eight gates pass: the release is staged and the state records the dige
     assert.equal(result.status, 'staged', result.message)
     assert.equal(result.code, null, 'a verified signature leaves a clean success: no standing authorship note')
     assert.equal(result.ok, true)
+    // A clean stage is still a sentence. Consent notes and authorship notes are both absent here, and joining
+    // two nulls used to produce `''` — which `cli.js` then printed as `check: `, i.e. a command that appears
+    // to answer nothing on the one outcome that has an action attached to it (measured on a real machine
+    // with the first successful 1.6.0 update, 2026-10-01).
+    assert.match(result.message, /^staged 1\.4\.1 \(sha256 [0-9a-f]{12}\)/, JSON.stringify(result.message))
+    assert.match(result.message, /Install update|updater apply/, '要说清下一步按什么')
     assert.equal(result.staged.digest, src.digest, '§1.5: the digest measured off the downloaded file is the one recorded')
     const state = loadState(machine.dir).state
     assert.equal(state.status, 'staged')
