@@ -104,20 +104,12 @@ jobs:
       - name: Prove the archive carries the command it promises
         run: |
           set -euo pipefail
-          # The refusal above is the publisher's guard; this one is the CI job noticing that the guard's own
-          # input changed. `tar -tzf` on the artifact answers the question the updater will ask on a customer
-          # machine, and it is cheap enough that there is no excuse for not asking it here.
-          for entry in \
-            "GlassPane-${VERSION}/mcp-shell/dist/index.js" \
-            "GlassPane-${VERSION}/mcp-shell/schemas" \
-            "GlassPane-${VERSION}/installer/cli.js"
-          do
-            if ! tar -tzf "GlassPane-${VERSION}.tar.gz" | grep -q "^${entry}$"; then
-              echo "::error::the release archive does not contain ${entry}"
-              exit 1
-            fi
-          done
-          echo "release archive carries the declared commands and the schemas they read"
+          # The refusal inside the packing step is the publisher's guard; this one re-reads the artifact that
+          # is about to be published, so a change to either side is noticed. It calls the same script rather
+          # than `tar -tzf | grep -q`: `grep -q` exits at the first match, GNU tar then dies of SIGPIPE, and
+          # `set -o pipefail` turns a passing check into a failing step — which is exactly how this step
+          # reddened on 2026-10-01 while naming an entry the archive did contain.
+          node scripts/make-release-archive.mjs --verify "GlassPane-${VERSION}.tar.gz" "$VERSION"
       - name: Sign release artifacts with GPG
         # 签名是**必须成功的一步**，不是 best-effort。这一份 `.asc` 是 updater 第 8 道校验
         # （作者性）唯一的判据：没有它，每一次定时更新都会停在 needs-consent，"自动更新"这个
