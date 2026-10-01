@@ -114,16 +114,40 @@
        跑着的 daemon 报 1.5.1"，又说失败）。所以现在是三道：**`hello` 版本 → npm 装 + 读回 → `tools/list`**，
        两半都过才允许翻 `current`；第三条不过时**除了 `.app` 还要把 npm 层按记账装回原版本**，
        并说清退回了哪一版（只说"已回滚"会把人支去翻 `~/Applications`，而走样的其实是 npm）。
-4. npm 全局包的安装同样先记录原版本，读回不符就装回原版本。它的**撤销与安装走同一个注入接缝**：
-   被套用测序列的用例注入了 `npm` 却没有交代撤销，默认值就必须什么机器都不碰——真实机器上跑过一次
-   反向测试去 `npm install -g` 并死在 `/usr/local/bin` 的 EACCES 上，那已经不是被测行为。
+4. npm 全局包的安装同样先记录原版本，读回不符就装回原版本，但**"记录"这一步自己必须先能答复**：
+   记账走一次 `npm ls -g --depth=0 --json`（旧写法每个包各问一次，两问之间机器可能已被 npm 动过），
+   接缝回答的是 `{ok, versions, message}` 而不是一个版本串——因为"这台机器没有这个包"与"我读不出来"
+   是两件事，只有前者有撤销。读不出答复 ⇒ 在**任何一次 `npm install -g` 之前**就拒绝
+   （`code=npm-version-mismatch`，句子说清"没记下可退的版本、什么都没装"）。把这一步做成"读不出来就当作
+   没有"，撤销就会去 `npm uninstall -g` 摘掉用户自己装的包。四种真实形状（npm 11.17.0 实测）钉住这个判据：
+   正常前缀 exit 0 带 `dependencies`；**空前缀 exit 0 只回 `{"resolved": …}`、根本没有 `dependencies` 键**
+   （所以缺键不是故障，否则每台新机器都被拒）；前缀够不着时 exit 254（ENOENT）或 236（ENOTDIR）并回一个
+   **能 parse 的 JSON 错误封套** `{"error":{…}}`——"解析成功"不等于"npm 答了清单"；`lib` 不可读时 npm 仍回
+   exit 0 的空清单，这一类只有 §3.5 的预检看得见。
+   4b. 装完再读回一次：版本不符（**或读不出答复**）就撤销——有记录的装回那一版，原本没有的**取下来**。
+       读不出答复要说成"读不出答复"，不许写成 `reads back null`（那读起来像 npm 答了"没装"，会把人支去
+       查一个不存在的包，而坏掉的是前缀）。半途失败（第二个包 EACCES）也必须把已经装上的第一个取回来，
+       否则记账只说"`.app` 已还原"，机器上却留着一层属于没人正在运行的版本的全局包。撤销的句子要**逐包**
+       说清是"退回 X@1.4.0"还是"取回（这台机器原本没有）"：这句话曾有两个作者，读回那一处的作者对刚被
+       摘掉的包说"已按记录的版本装回"——一个从未存在过的版本。
+   4c. 撤销与安装走同一注入接缝，且**默认值不许 exec 真 npm**：被套用测序列的用例注入了 `npm`/`install`
+       却没有交代撤销时，默认答案必须是"这条没接线，所以全局层没动"（`notWired`）。真实机器上跑过一次
+       反向测试去 `npm install -g` 并死在 `/usr/local/bin` 的 EACCES 上，那已经不是被测行为；而 read-back
+       那条测试少注入一个 `uninstall`，就真的在作者机器上执行了 `npm uninstall -g glasspane-mcp`。这两条
+       都躲得过 `run` 计数（它们走模块自己的 `spawnSync`），所以测试文件另把 `npm_config_prefix` 指向一个
+       临时前缀，并用最后一条用例证明那里什么都没落下。
    4a. **npm 的 global 目录写不进去 ⇒ 在换任何东西之前就拒绝，不许换完再回退。** 本机实测（2026-10-01）：
        `/usr/local/lib/node_modules` 属于 `root:wheel`，这个账号从来没装过 GlassPane 的全局包，于是每次
        `apply` 都是"两个 `.app` 已换、daemon 已重启握手通过、`npm install -g` 报 EACCES、再回退 `.app`、
        再重启一次 daemon"——一天两次重启、一句 `post-swap-failed`、版本永远落不下去，而且明天同一分钟重演。
-       预检只有一次 `npm config get prefix` 加一次 `W_OK`：问不出前缀、前缀不存在、或那一层写不进去，
-       都在**备份之前**返回 `status=deferred` + `code=npm-prefix-unwritable`，并说清"什么都没换、daemon 没重启"。
-       remedy 要指出这一条需要一个人（`sudo chown -R "$(whoami)" <目录>`，或把 prefix 挪进家目录并改 PATH），
+       预检只有一次 `npm config get prefix` 加**两次** `W_OK`：全局包落下的那一层（`<prefix>/lib/node_modules`）
+       和命令被软链过去的那一层（`<prefix>/bin`）都要能写。第一次实现只查了前者，照它给出的 remedy 把
+       `lib/node_modules` chown 过来之后，真机仍然死在 `EACCES: permission denied, symlink
+       '../lib/node_modules/glasspane-install/cli.js' -> '/usr/local/bin/glasspane-install'`——**修完仍失败
+       的 remedy 比没有 remedy 更糟**，所以现在两个目录都探、也都写进那句 remedy。问不出前缀、目录不存在、
+       或其中任何一层写不进去，都在**备份之前**返回 `status=deferred` + `code=npm-prefix-unwritable`，
+       并说清"什么都没换、daemon 没重启"。
+       remedy 要指出这一条需要一个人（`sudo chown -R "$(whoami)" <两个目录>`，或把 prefix 挪进家目录并改 PATH），
        不能写成 agent 能自己做完的样子。注入过 `npm` 的调用方（测试）自己负责那一层，此时预检默认不起进程——
        否则每条序列测试都在读开发者机器的 npm 配置，而不是读被测代码。
 5. 一切成功才更新 `current`；历史保留最后 10 次（时间、动作、结论、digest 前 12 位）。
@@ -164,11 +188,13 @@
 | 下载两个时钟：stall 逐段重置、ceiling 兜底，两种停止都说到哪条与收到多少 | `source.test.mjs`（假流按真 fetch 的 abort 语义实现） | 不重置 stall ⇒ 红（慢而活的下载被杀）；`if (fired)` 删掉 ⇒ 红（回到那句 "This operation was aborted"） |
 | CLI 参数走到消费者读的那个键（含从**进程**那一侧进去的用例） | `updater/test/cli-options.test.mjs` | 塞回 `flags.overrides` ⇒ 4 条红；`--disable` 退回装饰品 ⇒ 红 |
 | 两道读回各自落在"测得到东西"的时刻：`hello` 先、npm 次之、`tools/list` 最后；第三条不过连 npm 一起退回 | `updater/test/apply.test.mjs`（`a machine that has never installed glasspane-mcp still completes the update…`、`an MCP layer that still cannot answer after the install rolls the npm packages back too`） | 把两半挪回 npm 之前 ⇒ 第一条红（并真的把 15 s 预算耗光后回滚，正是真机那次的形状）；把 `restoreNpm` 换成空 ⇒ 第二条红 |
-| npm 层的撤销不许碰真机器 | 同上（两条都注入 `npm`；默认撤销随 `npm` 是否为真装包函数） | 让撤销无条件走 `defaultNpmRestore` ⇒ 测试机上一台 `npm install -g` 就发生（本机实测 EACCES 可见）|
+| npm 层的撤销不许碰真机器 | `updater/test/apply.test.mjs`（两条都注入 `npm`；默认撤销随 `npm` 是否为真装包函数；末条 `this file never moved a real global npm package…` 读那个临时 `npm_config_prefix` 前缀，证明整趟测试一个字都没落下） | 让撤销无条件走 `defaultNpmRestore` ⇒ 第一条红，且末条也红（真 npm 会在沙箱前缀里建出 `lib/node_modules`）；read-back 那处少传 `uninstall` ⇒ `an npm rollback nobody can perform` 红 |
+| 前缀读不出来时不装、读回读不出来时按失败处理并说成"读不出来" | `updater/test/apply.test.mjs`（`an npm layer that cannot be read before installing is not installed into`：`install` 计数器必须是 0；`an npm read-back that fails to answer is a failed install, not an unknown one`；`reading the global npm layer distinguishes "nothing installed" from "could not look"`：四种 npm 真报文形状逐个判） | 删掉装前的拒绝 ⇒ 第一条红；把错误封套当清单（只信退出码）⇒ 第三条红；把"没有 `dependencies` 键"当故障 ⇒ 第三条里空前缀那条红（每台新机器都会被拒） |
+| 撤销的句子逐包说清是"退回哪一版"还是"取回来"，半途失败也取回 | `updater/test/apply.test.mjs`（`the npm undo sentence describes each package the way it was actually undone`、`a global install that fails halfway takes back the package it already put in`、`restoreNpmPackages takes a package back off when this machine had none before`） | 回到那句一刀切的"已按记录的版本装回" ⇒ 第一条红（对刚被摘掉的包说了个从未存在的版本）；半途失败不调撤销 ⇒ 第二条红（`uninstall` 一次都没被叫到）；把"原本没有"再当无法撤销 ⇒ 三条一起红 |
 | tag 解析与 semver 严格大于 | `version.test.mjs` | 允许相等 ⇒ 红 |
 | major 不自动应用 | `policy.test.mjs` | 去掉 consent 分支 ⇒ 红 |
 | 双资产必须齐 | `assets.test.mjs` | 缺 SUMS 仍继续 ⇒ 红 |
-| npm 全局目录写不进去时，在备份与换版**之前**就拒绝，并说清什么都没动 | `updater/test/apply.test.mjs`（`checkNpmPrefix…`：真目录 + 真 `chmod 0500`；`a machine that cannot write npm's global directory is refused before a single bundle moves`：构建/kickstart/npm 都是 `assert.fail` 引线） | 删掉那次拒绝 ⇒ 引线炸，红；把 `W_OK` 探测跳过 ⇒ 第一条红（0500 的目录被当成能写） |
+| npm 全局目录写不进去时，在备份与换版**之前**就拒绝，并说清什么都没动；两个目录都算 | `updater/test/apply.test.mjs`（`checkNpmPrefix…`：真目录 + 真 `chmod 0500`；`checkNpmPrefix covers both directories a global install writes into`：只锁 `bin` 也须拒；`a machine that cannot write npm's global directory is refused before a single bundle moves`：构建/kickstart/npm 都是 `assert.fail` 引线） | 删掉那次拒绝 ⇒ 引线炸，红；把 `W_OK` 探测跳过 ⇒ 第一条红（0500 的目录被当成能写）；只探 `lib/node_modules` 不探 `bin` ⇒ 第二条红（正是真机 chown 之后仍然发生的那次 EACCES） |
 | SUMS 严格解析 | `sums.test.mjs` | 取第一个命中 ⇒ 红 |
 | 实测 sha256 | `digest.test.mjs` | 改用头长度 ⇒ 红 |
 | 暂存树版本线自证 | `selfcheck.test.mjs` | 跳过 check-version ⇒ 红 |

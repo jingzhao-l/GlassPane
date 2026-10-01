@@ -417,18 +417,26 @@ export function daemonVersionVerify(options = {}) {
  * The read-back is the gate; `install` returning `ok` is only "npm exited 0",
  * which this machine has already been shown not to mean anything on its own (a
  * failed resolution, a cache hit of an older tarball, a `--force` in somebody's
- * `.npmrc` all answer 0). `defaultReadGlobalVersion` is `npm ls -g --depth=0
- * --json`, i.e. what the global prefix actually holds. Reverse mutation: delete
- * the `wanted`/`disagreed` comparison below — `the npm read-back is the gate: a
- * version that did not land is rolled back` goes red.
+ * `.npmrc` all answer 0). `defaultReadGlobalVersions` is `npm ls -g --depth=0
+ * --json`, i.e. what the global prefix actually holds — and it answers with
+ * `ok:false` when npm did not answer at all, because "this machine has no such
+ * package" and "I could not look" are different facts and only the first one has
+ * an undo. Reverse mutation: delete the `wanted`/`disagreed` comparison below —
+ * `the npm read-back is the gate: a version that did not land is rolled back`
+ * goes red.
  */
 export function installNpmPackages({
   stagedTree,
   packageDirs = ['mcp-shell', 'installer'],
   run = defaultRun,
-  readGlobalVersion = defaultReadGlobalVersion,
+  readGlobalVersions = defaultReadGlobalVersions,
   install = defaultNpmInstall,
-  restore = defaultNpmRestore,
+  // Neither undo may reach for the machine on its own. A caller that injects `install` — every unit test
+  // of this sequence, and CI's ubuntu runner, where a stray `npm -g` would really move packages — gets a
+  // refusal it can see instead of a shell-out it would never notice. Before this existed, the read-back
+  // test's missing `uninstall` quietly ran a real `npm uninstall -g` on the author's machine.
+  restore = install === defaultNpmInstall ? defaultNpmRestore : notWired('restore'),
+  uninstall = install === defaultNpmInstall ? defaultNpmUninstall : notWired('uninstall'),
   readStagedPackageJson = defaultReadStagedPackageJson,
 } = {}) {
   const packed = []
@@ -451,30 +459,73 @@ export function installNpmPackages({
     wanted.push({ name: claim.name, version: claim.version, dir, tgz })
   }
   const original = {}
-  for (const pkg of wanted) original[pkg.name] = readGlobalVersion(pkg.name)
+  const before = readGlobalVersions()
+  if (!before.ok) {
+    // §3.4's rollback records "the version this machine had". If the prefix cannot be read, nothing has
+    // been recorded, so every later failure would have to be reported as "we cannot put this back". Refuse
+    // while the machine is still untouched instead: `apply` restores the bundles, and the message says the
+    // npm layer was never installed into. Treating an unreadable prefix as "absent" is what would let the
+    // undo run `npm uninstall -g` on a package this machine really had.
+    return {
+      ok: false,
+      code: CODES.npmVersionMismatch,
+      message: `the global npm layer could not be read before installing (${before.message}): no version was recorded to roll back to, so nothing was installed`,
+      original: null,
+      installed: [],
+    }
+  }
+  for (const pkg of wanted) original[pkg.name] = before.versions[pkg.name] ?? null
+  const landed = []
   for (const pkg of wanted) {
     const result = install(pkg.tgz)
     if (!result.ok) {
-      return { ok: false, code: CODES.npmVersionMismatch, message: `npm install -g ${pkg.tgz} failed: ${result.message}`, original, installed: [] }
+      // Half of the layer may already be on the machine when a later package fails — the real install
+      // did exactly that (`glasspane-mcp` in, `glasspane-install` refused on the bin symlink). Going
+      // back without undoing those leaves a global forwarding layer for a version nothing else here is
+      // running, and the record would only ever say "the bundles were restored".
+      const repairs = restoreNpmPackages({
+        original,
+        only: Object.fromEntries(landed.map((one) => [one.name, one.version])),
+        restore,
+        uninstall,
+      })
+      const undone = repairs.every((r) => r.ok)
+      const undoLine = landed.length === 0
+        ? 'no package had been installed yet, so the global layer is untouched'
+        : undone
+          ? `the ${landed.length} package(s) already installed (${landed.map((one) => one.name).join(', ')}) were taken back`
+          : `the already-installed ${landed.map((one) => one.name).join(', ')} were NOT all taken back (${undoFailures(repairs)}) — fix that by hand before retrying`
+      return {
+        ok: false,
+        code: CODES.npmVersionMismatch,
+        message: `npm install -g ${pkg.tgz} failed: ${result.message}; ${undoLine}`,
+        original,
+        installed: [],
+        repairs,
+      }
     }
+    landed.push(pkg)
   }
   // §3.4's read-back: every package the staged tree shipped has to answer with
   // the version that tree was verified against.
+  const after = readGlobalVersions()
   const installedNow = {}
-  for (const pkg of wanted) installedNow[pkg.name] = readGlobalVersion(pkg.name)
+  for (const pkg of wanted) installedNow[pkg.name] = after.ok ? (after.versions[pkg.name] ?? null) : null
   const disagreed = wanted.filter((pkg) => installedNow[pkg.name] !== pkg.version)
   if (disagreed.length > 0) {
     const repairs = restoreNpmPackages({
       original,
       only: Object.fromEntries(disagreed.map((pkg) => [pkg.name, pkg.version])),
       restore,
-    }).map((r) => ({ name: r.name, ok: r.ok, message: r.message }))
-    const allBack = repairs.every((r) => r.ok)
-    const detail = disagreed.map((pkg) => `${pkg.name} reads back ${JSON.stringify(installedNow[pkg.name])} after installing ${pkg.version}`).join('; ')
+      uninstall,
+    })
+    const detail = after.ok
+      ? disagreed.map((pkg) => `${pkg.name} reads back ${JSON.stringify(installedNow[pkg.name])} after installing ${pkg.version}`).join('; ')
+      : `the global npm layer could not be read back after installing (${after.message ?? 'no answer'}) — not an answer about what is installed, so the packages are being taken back`
     return {
       ok: false,
       code: CODES.npmVersionMismatch,
-      message: `${detail}; the packages were ${allBack ? 'put back at the versions recorded before the install' : `NOT all put back (${repairs.filter((r) => !r.ok).map((r) => `${r.name}: ${r.message}`).join('; ')}) — re-run "npm install -g" for the GlassPane packages`}`,
+      message: `${detail}; the packages were ${npmUndoLine(repairs, { style: 'recorded', failureTail: ' — re-run "npm install -g" for the GlassPane packages' })}`,
       original,
       installed: installedNow,
       wanted: Object.fromEntries(wanted.map((pkg) => [pkg.name, pkg.version])),
@@ -485,34 +536,76 @@ export function installNpmPackages({
 }
 
 /**
- * Put the global npm layer back at the versions recorded before an install.
+ * Put the global npm layer back to what this machine had before an install.
  *
  * Exported because there are now two places that must do it: `installNpmPackages` itself, when a package
  * reads back a different version than the verified tree claimed, and `apply`'s post-swap gate when the
  * freshly installed `glasspane-mcp` still cannot answer `tools/list`. Two authors of that repair is how
- * one of them ends up not rolling back, so the second caller reuses this one.
+ * one of them ends up not rolling back, so the second caller reuses this one — and the sentence it feeds
+ * comes from `npmUndoLine` for the same reason.
  *
- * A package with no recorded original is *not* silently uninstalled: "this machine had none" and "this
- * machine had one we cannot name" are different answers, and the second one has to be said out loud
- * rather than fixed by removing something the person may still be using.
+ * `original[name] === null` means "npm was read, and this machine has no such package" — `installNpmPackages`
+ * refuses before installing when the prefix cannot be read, so an unknown-ness can never arrive here looking
+ * like an absence. Absence has a real undo: take the package back off.
  */
-export function restoreNpmPackages({ original = {}, wanted = {}, only = null, restore = defaultNpmRestore } = {}) {
+export function restoreNpmPackages({ original = {}, wanted = {}, only = null, restore = defaultNpmRestore, uninstall = defaultNpmUninstall } = {}) {
   // `wanted` is normally the set just installed; a caller that only knows what it recorded (the shape
   // `apply`'s npm step hands back) still has to get every one of those packages put back, so an empty
   // `wanted` falls through to `original` rather than quietly restoring nothing.
+  const recorded = original ?? {}
   const explicit = only ?? wanted
-  const targets = Object.keys(explicit ?? {}).length > 0 ? explicit : original
+  const targets = Object.keys(explicit ?? {}).length > 0 ? explicit : recorded
   const out = []
   for (const name of Object.keys(targets)) {
-    const from = original[name] ?? null
+    const from = recorded[name] ?? null
     if (!from) {
-      out.push({ name, ok: false, message: 'the version this machine had before is unknown, so it cannot be put back' })
+      // Reported as hopeless before 2026-10-01, which is what left `glasspane-mcp@1.5.1` installed globally
+      // on a machine whose bundles had just been rolled back to 1.5.0 — a global layer from a version nothing
+      // else on this machine is running, which is precisely the half-installed shape §3 exists to refuse.
+      const gone = uninstall(name)
+      out.push({
+        name,
+        ok: gone?.ok === true,
+        to: null,
+        message: gone?.ok === true ? null : (gone?.message ?? `removing ${name} returned nothing`),
+      })
       continue
     }
     const back = restore(name, from)
-    out.push({ name, ok: back?.ok === true, message: back?.ok === true ? null : (back?.message ?? 'npm restore returned nothing') })
+    out.push({ name, ok: back?.ok === true, to: from, message: back?.ok === true ? null : (back?.message ?? 'npm restore returned nothing') })
   }
   return out
+}
+
+/** Which packages the undo could *not* do, and what npm said about each. One author, two sentences. */
+function undoFailures(repairs) {
+  return repairs.filter((r) => !r.ok).map((r) => `${r.name}: ${r.message ?? 'the undo returned nothing'}`).join('; ')
+}
+
+/**
+ * What an npm undo did, in the one sentence both call sites tell about it.
+ *
+ * Written twice, and the two copies disagreed: the read-back path said "put back at the versions recorded
+ * before the install" about a package that had no recorded version and had just been *removed*, while
+ * `apply`'s post-swap gate named each package's truth. A rollback report that describes the wrong undo is
+ * the report a person follows when they fix the machine by hand, so there is one author now.
+ *
+ * Called only with a non-empty list: both sites reach here because at least one package must be undone, and
+ * `apply`'s gate says its own "nothing was recorded" sentence when the list is empty.
+ */
+function npmUndoLine(repairs, { style = 'named', failureTail = '' } = {}) {
+  const failed = repairs.filter((r) => !r.ok)
+  if (failed.length > 0) {
+    return `NOT all put back (${undoFailures(repairs)})${failureTail}`
+  }
+  if (!repairs.some((r) => r.to === null || r.to === undefined)) {
+    return style === 'recorded'
+      ? 'put back at the versions recorded before the install'
+      : `put back at ${repairs.map((r) => `${r.name}@${r.to}`).join(', ')}`
+  }
+  return repairs.map((r) => (r.to === null || r.to === undefined
+    ? `${r.name} removed again (this machine had none)`
+    : `${r.name} put back at ${r.to}`)).join('; ')
 }
 
 /** The `package.json` of one staged package: the name and version that were verified. */
@@ -523,6 +616,17 @@ function defaultReadStagedPackageJson(dir) {
   } catch {
     return null
   }
+}
+
+/** The shape of "this run was not given a way to touch the machine", said rather than done. */
+function notWired(what) {
+  return () => ({ ok: false, message: `${what} is not wired into this call, so the global npm layer was left alone` })
+}
+
+/** Take a global package off again — the undo for "this machine did not have it before the install". */
+function defaultNpmUninstall(name) {
+  const res = defaultRun('npm', ['uninstall', '-g', name], { timeoutMs: 300_000 })
+  return res.status === 0 ? { ok: true, message: null } : { ok: false, message: (res.stderr || res.stdout || 'no output').trim().slice(0, 300) }
 }
 
 function defaultNpmInstall(tgz) {
@@ -543,15 +647,57 @@ function defaultNpmRestore(name, version) {
   return res.status === 0 ? { ok: true, message: null } : { ok: false, message: (res.stderr || res.stdout || 'no output').trim().slice(0, 300) }
 }
 
-function defaultReadGlobalVersion(pkg) {
-  const res = defaultRun('npm', ['ls', '-g', '--depth=0', '--json'], { timeoutMs: 60_000 })
-  if (res.status !== 0 && !res.stdout) return null
-  try {
-    const parsed = JSON.parse(res.stdout || '{}')
-    return parsed?.dependencies?.[pkg]?.version ?? null
-  } catch {
-    return null
+/**
+ * What the global npm prefix holds, in one call.
+ *
+ * Answers `{ ok, versions, message }` rather than a bare version string because the two failure shapes are
+ * not the same fact: a listing that simply does not name a package means "this machine has none of it", and
+ * that has an undo (take back off what the install added). An npm call that could not read the prefix means
+ * "I could not look", which has no undo — and reading it as an absence is what would let a rollback run
+ * `npm uninstall -g` against a package the person installed themselves.
+ *
+ * The shapes below are measured against npm 11.17.0, because guessing them is how the two facts get
+ * confused: a healthy prefix answers exit 0 with `dependencies`, and a **fresh empty one answers exit 0 with
+ * `{"resolved":"file:…"}` and no `dependencies` key at all** (so a missing key is not a failure — and a
+ * prefix whose `lib` is unreadable answers the same way, which is why §3.5's `checkNpmPrefix` has to stay in
+ * front of this read), while a prefix npm cannot reach answers **exit 254 (ENOENT) or 236 (ENOTDIR) with a
+ * parseable JSON *error envelope*** — `{"error":{"code":"…","summary":"…"}}`. The envelope parses, which is
+ * exactly why "it parsed" cannot mean "npm answered": read as a listing it looks like an empty prefix.
+ * Known ⇔ exit 0 **and** no error envelope. Every envelope measured here also carried a non-zero exit, so
+ * the second half of that test is defence rather than an observed shape; it stays because an envelope is never
+ * a listing, and the cost of refusing is one skipped update against the cost of uninstalling a package the
+ * person installed themselves.
+ *
+ * One call for the whole prefix, too: the per-package read used to spawn `npm ls -g` once per package, so
+ * the two reads were two different moments on a machine npm could be writing to.
+ *
+ * `run` is injectable so the shapes above can be tested against the strings npm really emits; the production
+ * caller passes nothing and gets the module's own `spawnSync`.
+ */
+export function defaultReadGlobalVersions({ run = defaultRun } = {}) {
+  const res = run('npm', ['ls', '-g', '--depth=0', '--json'], { timeoutMs: 60_000 })
+  const stdout = (res.stdout ?? '').trim()
+  const stderr = (res.stderr ?? '').trim()
+  if (!stdout) {
+    return { ok: false, versions: {}, message: `npm ls -g --json exited ${res.status}${stderr ? `: ${stderr.split('\n')[0]}` : ' with no output'}` }
   }
+  let parsed
+  try {
+    parsed = JSON.parse(stdout)
+  } catch {
+    return { ok: false, versions: {}, message: `npm ls -g --json did not answer with JSON: ${stdout.slice(0, 160)}` }
+  }
+  if (parsed?.error || res.status !== 0) {
+    const detail = parsed?.error?.summary ?? parsed?.error?.code ?? (stderr ? stderr.split('\n')[0] : `exit ${res.status}`)
+    return { ok: false, versions: {}, message: `npm ls -g --json did not answer with a package listing (${detail})` }
+  }
+  const dependencies = parsed?.dependencies ?? {}
+  const versions = {}
+  for (const name of Object.keys(dependencies)) {
+    const entry = dependencies[name]
+    if (typeof entry?.version === 'string') versions[name] = entry.version
+  }
+  return { ok: true, versions, message: null }
 }
 
 /* ------------------------------------------------------------- the sequence */
@@ -587,17 +733,31 @@ export function checkNpmPrefix({ run = defaultRun, fsImpl = fs } = {}) {
       reason: `npm config get prefix answered ${String(got?.status)}${(got?.stderr ?? '').trim() ? `: ${String(got.stderr).trim().slice(0, 160)}` : ''}`,
     }
   }
+  // npm touches **two** places for a global install, and the real machine showed that checking one of
+  // them is not checking the install: `lib/node_modules` is where the package lands, `<prefix>/bin` is
+  // where its commands are symlinked. After `sudo chown -R "$(whoami)" /usr/local/lib/node_modules`
+  // (the remedy this file's own refusal suggests) the first was writable, the second was not, and
+  // `apply` swapped the bundles, restarted the daemon and then died on
+  // `EACCES: permission denied, symlink '../lib/node_modules/glasspane-install/cli.js' -> '/usr/local/bin/glasspane-install'`.
   const globalModules = path.join(prefix, 'lib', 'node_modules')
-  const dir = fsImpl.existsSync(globalModules) ? globalModules : prefix
-  if (!fsImpl.existsSync(dir)) {
-    return { ok: false, prefix, dir, reason: `${dir} does not exist, so there is nowhere for a global package to land` }
+  const binDir = path.join(prefix, 'bin')
+  const roles = [
+    { dir: fsImpl.existsSync(globalModules) ? globalModules : prefix, role: 'where global packages land' },
+    { dir: fsImpl.existsSync(binDir) ? binDir : prefix, role: 'where their commands are linked' },
+  ]
+  const missing = roles.find((r) => !fsImpl.existsSync(r.dir))
+  if (missing) {
+    return { ok: false, prefix, dir: missing.dir, reason: `${missing.dir} does not exist, so there is nowhere ${missing.role}` }
   }
-  try {
-    fsImpl.accessSync(dir, fsImpl.constants.W_OK)
-  } catch (error) {
-    return { ok: false, prefix, dir, reason: `${dir} is not writable by this account (${error?.code ?? error?.message})` }
+  for (const { dir, role } of [...new Map(roles.map((r) => [r.dir, r])).values()]) {
+    try {
+      fsImpl.accessSync(dir, fsImpl.constants.W_OK)
+    } catch (error) {
+      return { ok: false, prefix, dir, reason: `${dir} (${role}) is not writable by this account (${error?.code ?? error?.message})` }
+    }
   }
-  return { ok: true, prefix, dir, reason: null }
+  const first = roles[0]
+  return { ok: true, prefix, dir: first.dir, dirs: [...new Set(roles.map((r) => r.dir))], reason: null }
 }
 
 /**
@@ -637,8 +797,16 @@ export async function applyUpdate({
    * inject `npm`.
    */
   restoreNpm = npm === installNpmPackages
-    ? (info) => restoreNpmPackages({ original: info?.original, wanted: info?.wanted })
-    : () => [{ ok: true, message: null }],
+    ? (info) => restoreNpmPackages({ original: info?.original, wanted: info?.wanted, uninstall: info?.uninstall })
+    : (info) => Object.keys(info?.original ?? {}).map((name) => ({
+        // One entry per recorded package, mirroring the real undo's shape: the caller who stubbed `npm`
+        // owns that layer, and the sentence this feeds has to read the same way whether the layer is real
+        // or not. A bare `[{ok:true}]` here made the rollback message print "undefined removed again".
+        name,
+        ok: true,
+        to: info.original[name] ?? null,
+        message: null,
+      })),
   socketPath = null,
   writeState = true,
   refreshCa = null,
@@ -779,7 +947,7 @@ export async function applyUpdate({
       // one it is recommending and what to press afterwards — an agent can run the chown only if a human
       // authorized it, and it must not be left guessing between two different fixes.
       ? `A person has to do one of these once: hand that directory to this account with `
-        + '`sudo chown -R "$(whoami)" ' + npmReady.dir + '`'
+        + '`sudo chown -R "$(whoami)" ' + (npmReady.dirs ?? [npmReady.dir]).join(' ') + '`'
         + ', or move npm\'s prefix under the home directory (`npm config set prefix ~/.npm-global`, put '
         + '`~/.npm-global/bin` on PATH, then re-run the GlassPane installer so the launcher points at the new one). '
         + 'After that, press "Install update" again.'
@@ -1028,9 +1196,7 @@ export async function applyUpdate({
       const npmBack = restoreNpm(npmResult ?? {})
       const npmBackLine = npmBack.length === 0
         ? 'no global package was recorded before this install, so the npm layer was left empty'
-        : npmBack.every((r) => r.ok)
-          ? `the npm packages were put back at ${Object.entries(npmResult?.original ?? {}).map(([k, v]) => `${k}@${v}`).join(', ')}`
-          : `the npm packages were NOT all put back (${npmBack.filter((r) => !r.ok).map((r) => `${r.name}: ${r.message}`).join('; ')}) — run "npm install -g" for those by hand`
+        : `the npm packages were ${npmUndoLine(npmBack, { failureTail: ' — run "npm install -g" for those by hand' })}`
       const sides = `installed ${wantVersion}, running daemon reports ${JSON.stringify(handshake.seen?.hello ?? null)}`
       if (!restored.ok) {
         const message = `${handshake.message}; ${npmBackLine}; and the backup could not be restored (${restored.message}): re-run the GlassPane installer to put ${appsDir} back`

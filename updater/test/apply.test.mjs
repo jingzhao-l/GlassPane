@@ -30,6 +30,8 @@ import {
   applyUpdate,
   backupBundles,
   buildStagedTree,
+  defaultReadGlobalVersions,
+  restoreNpmPackages,
   handshakeVerify,
   installNpmPackages,
   manifestTree,
@@ -49,6 +51,19 @@ const BUNDLES = [
   { name: 'GlassPane Daemon.app', executable: path.join('Contents', 'MacOS', 'glasspaned') },
 ]
 const MCP_FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'mcp-stub.mjs')
+
+/**
+ * A prefix of this file's own, so an accidental real `npm -g` writes here instead of onto the machine.
+ *
+ * The `run`-counting assertions in this file cannot catch that class of regression: `defaultNpmInstall`,
+ * `defaultNpmRestore` and `defaultNpmUninstall` reach the machine through the module's own `spawnSync`, not
+ * through the injected `run`, so a code path that calls one of them directly would never show up in a count
+ * while quietly moving global packages on whoever ran the tests (it did, on 2026-10-01). npm reads
+ * `npm_config_prefix` from the environment at spawn time, which points those calls at a directory that the
+ * last test in this file proves stayed empty.
+ */
+const SANDBOX_NPM_PREFIX = tempDir(`${TMP_PREFIX}npm-sandbox-`)
+process.env.npm_config_prefix = SANDBOX_NPM_PREFIX
 
 const daemonBinary = (appsDir) => path.join(appsDir, 'GlassPane Daemon.app', 'Contents', 'MacOS', 'binary')
 
@@ -601,7 +616,7 @@ test('installNpmPackages packs the staged tree and records the versions it repla
         }
         return { status: 0, stdout: '', stderr: '' }
       },
-      readGlobalVersion: (pkg) => prefix[pkg] ?? null,
+      readGlobalVersions: () => ({ ok: true, versions: prefix }),
       install: (tgz) => {
         seen.push(['install-from', tgz])
         for (const pkg of Object.keys(prefix)) prefix[pkg] = '1.4.1'
@@ -609,6 +624,9 @@ test('installNpmPackages packs the staged tree and records the versions it repla
       },
       restore: () => {
         throw new Error('the read-back matched, so nothing is being rolled back')
+      },
+      uninstall: () => {
+        throw new Error('the read-back matched, so nothing is being taken off either')
       },
     })
     assert.equal(result.ok, true, result.message)
@@ -655,7 +673,7 @@ test('the npm read-back is the gate: a version that did not land is rolled back'
       },
       // Every install "succeeds" and changes nothing: the stale 1.4.0 is still
       // what the prefix holds when it is read back.
-      readGlobalVersion: (pkg) => prefix[pkg] ?? null,
+      readGlobalVersions: () => ({ ok: true, versions: prefix }),
       install: () => ({ ok: true, message: null }),
       restore: (pkg, version) => {
         restored.push([pkg, version])
@@ -692,16 +710,218 @@ test('an npm rollback nobody can perform says so instead of answering success', 
         fs.writeFileSync(path.join(opts.cwd, file), 'tarball bytes')
         return { status: 0, stdout: file + '\n', stderr: '' }
       },
-      readGlobalVersion: () => null,
+      readGlobalVersions: () => ({ ok: true, versions: {} }),
       install: () => ({ ok: true, message: null }),
       restore: () => ({ ok: true, message: null }),
     })
+    // 这台机器之前没有这个包 ⇒ 撤销不是"装回旧版本"，而是"把它取下来"。两条都要能被拒到，
+    // 而且不许在没接线的时候偷偷去动机器（见下面第二条控制）。
     assert.equal(result.ok, false)
-    assert.match(result.message, /the version this machine had before is unknown/)
-    assert.equal(result.repairs[0].ok, false)
+    assert.match(result.message, /uninstall is not wired into this call/, result.message)
+    assert.equal(result.repairs[0].ok, false, '没有撤销手段就不能报"已退回"')
+
+    const blocked = installNpmPackages({
+      stagedTree,
+      packageDirs: ['mcp-shell'],
+      run: (bin, args, opts) => {
+        const file = 'glasspane-mcp-1.4.1.tgz'
+        fs.writeFileSync(path.join(opts.cwd, file), 'tarball bytes')
+        return { status: 0, stdout: file + '\n', stderr: '' }
+      },
+      readGlobalVersions: () => ({ ok: true, versions: {} }),
+      install: () => ({ ok: true, message: null }),
+      uninstall: () => ({ ok: false, message: 'npm error code EACCES' }),
+    })
+    assert.equal(blocked.ok, false)
+    assert.match(blocked.message, /NOT all put back/, blocked.message)
+    assert.match(blocked.message, /glasspane-mcp: npm error code EACCES/, blocked.message)
   } finally {
     removeDir(dir)
   }
+})
+
+test('an npm undo that was never wired refuses instead of reaching for the machine', () => {
+  // 这一条是给上面那个接缝本身把门的：注入了 `install` 的调用方（每一条序列测试、CI 那台 ubuntu）
+  // 一旦忘了注入撤销，默认值必须**说什么都不做**并把原因报出来，而不是去 exec 真 npm。
+  // 这不是假想的坑：本轮先前的代码就是在 read-back 测试少注入 `uninstall` 时，真在作者机器上跑了一次
+  // `npm uninstall -g glasspane-mcp`——它把一个换版失败留下的半装全局包摘掉了，而没人要求测试做这件事。
+  const dir = tempDir(`${TMP_PREFIX}npmwired-`)
+  try {
+    const stagedTree = path.join(dir, 'tree')
+    fs.mkdirSync(path.join(stagedTree, 'mcp-shell'), { recursive: true })
+    fs.writeFileSync(path.join(stagedTree, 'mcp-shell', 'package.json'), JSON.stringify({ name: 'glasspane-mcp', version: '1.4.1' }))
+    let shellOut = 0
+    const result = installNpmPackages({
+      stagedTree,
+      packageDirs: ['mcp-shell'],
+      // `run` 是 pack 用的；这里它一旦被拿来跑 install/restore/uninstall 就会计数，
+      // 于是"偷偷 exec 真 npm"这条形状会立刻可见。
+      run: (bin, args, opts) => {
+        shellOut += 1
+        const file = 'glasspane-mcp-1.4.1.tgz'
+        fs.writeFileSync(path.join(opts.cwd, file), 'tarball bytes')
+        return { status: 0, stdout: file + '\n', stderr: '' }
+      },
+      readGlobalVersions: () => ({ ok: true, versions: { 'glasspane-mcp': '1.4.0' } }),
+      install: () => ({ ok: true, message: null }),
+    })
+    assert.equal(result.ok, false, '读回不符 ⇒ 必须拒绝')
+    assert.match(result.message, /restore is not wired into this call/, result.message)
+    assert.equal(shellOut, 1, '除了一次 pack，这一趟不许再碰任何外部命令')
+  } finally {
+    removeDir(dir)
+  }
+})
+
+// REVERSE MUTATION (fix 5, lib/apply.js `installNpmPackages`): delete the `!before.ok` refusal — the prefix
+// that could not be read is then read as "this machine has none of these packages", the install runs anyway,
+// and a later failure routes to the undo for absence, i.e. a real `npm uninstall -g` against a package the
+// person installed themselves. Both assertions below go red: the install count, and the sentence that has to
+// say nothing was installed.
+test('an npm layer that cannot be read before installing is not installed into', () => {
+  const dir = tempDir(`${TMP_PREFIX}npmunreadable-`)
+  try {
+    const stagedTree = path.join(dir, 'tree')
+    fs.mkdirSync(path.join(stagedTree, 'mcp-shell'), { recursive: true })
+    fs.writeFileSync(path.join(stagedTree, 'mcp-shell', 'package.json'), JSON.stringify({ name: 'glasspane-mcp', version: '1.4.1' }))
+    let installs = 0
+    const result = installNpmPackages({
+      stagedTree,
+      packageDirs: ['mcp-shell'],
+      run: (bin, args, opts) => {
+        const file = 'glasspane-mcp-1.4.1.tgz'
+        fs.writeFileSync(path.join(opts.cwd, file), 'tarball bytes')
+        return { status: 0, stdout: file + '\n', stderr: '' }
+      },
+      readGlobalVersions: () => ({ ok: false, versions: {}, message: 'npm ls -g --json did not answer with a package listing (ENOENT: no such file or directory, lstat `/usr/local/lib`)' }),
+      install: () => { installs += 1; return { ok: true, message: null } },
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.code, CODES.npmVersionMismatch)
+    assert.equal(installs, 0, '拒绝必须发生在任何一次 npm install 之前')
+    assert.equal(result.original, null, '没读出来就不许伪造一份"原来的版本"')
+    assert.match(result.message, /could not be read before installing/, result.message)
+    assert.match(result.message, /nothing was installed/, result.message)
+  } finally {
+    removeDir(dir)
+  }
+})
+
+test('an npm read-back that fails to answer is a failed install, not an unknown one', () => {
+  // "npm could not tell me what is installed" has to be said as that. Printed as `reads back null` it looks
+  // like npm answered "not installed", which points whoever reads the log at a missing package instead of at
+  // a broken prefix — and the packages still have to be taken back, because nothing about them is confirmed.
+  const dir = tempDir(`${TMP_PREFIX}npmreadfail-`)
+  try {
+    const stagedTree = path.join(dir, 'tree')
+    fs.mkdirSync(path.join(stagedTree, 'mcp-shell'), { recursive: true })
+    fs.writeFileSync(path.join(stagedTree, 'mcp-shell', 'package.json'), JSON.stringify({ name: 'glasspane-mcp', version: '1.4.1' }))
+    let reads = 0
+    const removed = []
+    const result = installNpmPackages({
+      stagedTree,
+      packageDirs: ['mcp-shell'],
+      run: (bin, args, opts) => {
+        const file = 'glasspane-mcp-1.4.1.tgz'
+        fs.writeFileSync(path.join(opts.cwd, file), 'tarball bytes')
+        return { status: 0, stdout: file + '\n', stderr: '' }
+      },
+      readGlobalVersions: () => {
+        reads += 1
+        // Readable before the install (so the refusal does not fire), unreadable after.
+        if (reads === 1) return { ok: true, versions: {} }
+        return { ok: false, versions: {}, message: 'npm ls -g --json did not answer with JSON' }
+      },
+      install: () => ({ ok: true, message: null }),
+      uninstall: (name) => { removed.push(name); return { ok: true, message: null } },
+    })
+    assert.equal(result.ok, false)
+    assert.deepEqual(removed, ['glasspane-mcp'], '取回来是这台机器唯一还成立的撤销')
+    assert.match(result.message, /could not be read back after installing/, result.message)
+    assert.ok(!/reads back null/.test(result.message), '不能把"读不出来"写成"读到了空"')
+    assert.match(result.message, /removed again \(this machine had none\)/, result.message)
+  } finally {
+    removeDir(dir)
+  }
+})
+
+test('the npm undo sentence describes each package the way it was actually undone', () => {
+  // One package existed before (1.4.0), one did not. Both read back wrong. The read-back path used to say
+  // "the packages were put back at the versions recorded before the install" about *both* — a version that
+  // never existed for the first one. `apply`'s post-swap gate already told the truth per package; two
+  // authors of one sentence is how one of them lies.
+  const dir = tempDir(`${TMP_PREFIX}npmundoMixed-`)
+  try {
+    const stagedTree = path.join(dir, 'tree')
+    for (const rel of ['mcp-shell', 'installer']) {
+      fs.mkdirSync(path.join(stagedTree, rel), { recursive: true })
+      fs.writeFileSync(
+        path.join(stagedTree, rel, 'package.json'),
+        JSON.stringify({ name: rel === 'mcp-shell' ? 'glasspane-mcp' : 'glasspane-install', version: '1.4.1' }),
+      )
+    }
+    const calls = []
+    const result = installNpmPackages({
+      stagedTree,
+      run: (bin, args, opts) => {
+        const file = 'glasspane-pkg-1.4.1.tgz'
+        fs.writeFileSync(path.join(opts.cwd, file), 'tarball bytes')
+        return { status: 0, stdout: file + '\n', stderr: '' }
+      },
+      // npm answered, and it answered "only glasspane-install is here".
+      readGlobalVersions: () => ({ ok: true, versions: { 'glasspane-install': '1.4.0' } }),
+      install: () => ({ ok: true, message: null }),
+      restore: (name, version) => { calls.push(['restore', name, version]); return { ok: true, message: null } },
+      uninstall: (name) => { calls.push(['uninstall', name]); return { ok: true, message: null } },
+    })
+    assert.equal(result.ok, false)
+    assert.deepEqual(calls, [['uninstall', 'glasspane-mcp'], ['restore', 'glasspane-install', '1.4.0']], JSON.stringify(calls))
+    assert.match(result.message, /glasspane-mcp removed again \(this machine had none\)/, result.message)
+    assert.match(result.message, /glasspane-install put back at 1\.4\.0/, result.message)
+    assert.ok(!/put back at the versions recorded before the install/.test(result.message), '有一句是假的就整句都不能说')
+  } finally {
+    removeDir(dir)
+  }
+})
+
+/* The four shapes `defaultReadGlobalVersions` has to tell apart, each one copied from what npm 11.17.0
+ * really printed when probed on a machine (healthy prefix, fresh empty prefix, unreachable prefix). */
+test('reading the global npm layer distinguishes "nothing installed" from "could not look"', () => {
+  const read = (status, stdout, stderr = '') => defaultReadGlobalVersions({
+    run: () => ({ status, stdout, stderr }),
+  })
+
+  const healthy = read(0, JSON.stringify({ name: 'lib', dependencies: { npm: { version: '11.17.0' }, 'glasspane-mcp': { version: '1.5.0' } } }))
+  assert.equal(healthy.ok, true)
+  assert.deepEqual(healthy.versions, { npm: '11.17.0', 'glasspane-mcp': '1.5.0' })
+
+  // A prefix that exists and holds no packages answers with `resolved` and NO `dependencies` key. Treating a
+  // missing key as a failure would refuse the update on every fresh machine — which is the shape the
+  // "never installed glasspane-mcp" control above exercises.
+  const fresh = read(0, JSON.stringify({ resolved: 'file:../../private/tmp/sandbox/lib' }))
+  assert.equal(fresh.ok, true, '空前缀是一个答复，不是一个故障')
+  assert.deepEqual(fresh.versions, {})
+
+  // The error envelope parses as JSON. If "it parsed" were the test, this reads as an empty prefix and the
+  // undo would uninstall a package the person had. The stderr here is deliberately the *real* first line
+  // ("npm error code ENOENT"), which does not contain the summary — so the only source for the text asserted
+  // below is the envelope npm printed.
+  const broken = read(254, JSON.stringify({ error: { code: 'ENOENT', summary: "ENOENT: no such file or directory, lstat '/nope/lib'" } }), 'npm error code ENOENT\nnpm error A complete log of this run can be found in: /tmp/_logs/x\n')
+  assert.equal(broken.ok, false)
+  assert.match(broken.message, /did not answer with a package listing/, JSON.stringify(broken))
+  assert.match(broken.message, /no such file or directory, lstat/, broken.message)
+
+  // Defence rather than an observed shape: every envelope npm 11.17.0 printed during this round came with a
+  // non-zero exit (254 ENOENT, 236 ENOTDIR). Should it ever answer 0 with one, that is still not a listing,
+  // and the refusal is the cheap direction — one skipped update against uninstalling somebody's package.
+  const zeroEnvelope = read(0, JSON.stringify({ error: { code: 'EUSAGE', summary: 'usage error' } }))
+  assert.equal(zeroEnvelope.ok, false, '错误封套永远不是清单，退出码也不例外')
+
+  const noisy = read(0, 'npm WARN something\nnot json')
+  assert.equal(noisy.ok, false, '不是 JSON 就不是清单')
+  const silent = read(1, '', 'npm error')
+  assert.equal(silent.ok, false)
+  assert.match(silent.message, /exited 1/, JSON.stringify(silent))
 })
 
 test('a staged tree that is no longer on disk defers instead of swapping', async () => {
@@ -1829,4 +2049,120 @@ test('an MCP layer that still cannot answer after the install rolls the npm pack
   } finally {
     fx.cleanup()
   }
+})
+
+/* ------------------------------------------------------------------ §3.4 npm 层的两处半状态（真机测出） */
+
+test('checkNpmPrefix covers both directories a global install writes into', () => {
+  // Measured, not theorised: after the remedy this module's own refusal suggests
+  // (`sudo chown -R "$(whoami)" /usr/local/lib/node_modules`), the package directory *was* writable and
+  // the run still died — on the symlink into `<prefix>/bin`. A pre-flight that checks one of the two is
+  // a pre-flight that lets the machine swap twice a day and roll back both times.
+  const home = tempDir(`${TMP_PREFIX}prefix2-`)
+  const good = path.join(home, 'g')
+  const binLocked = path.join(home, 'b')
+  fs.mkdirSync(path.join(good, 'lib', 'node_modules'), { recursive: true })
+  fs.mkdirSync(path.join(good, 'bin'), { recursive: true })
+  fs.mkdirSync(path.join(binLocked, 'lib', 'node_modules'), { recursive: true })
+  fs.mkdirSync(path.join(binLocked, 'bin'), { recursive: true })
+  fs.chmodSync(path.join(binLocked, 'bin'), 0o500)
+  try {
+    const ok = checkNpmPrefix({ run: () => ({ status: 0, stdout: `${good}\n`, stderr: '' }) })
+    assert.equal(ok.ok, true, ok.reason)
+    assert.deepEqual([...new Set(ok.dirs)].sort(), [path.join(good, 'bin'), path.join(good, 'lib', 'node_modules')].sort(),
+      '两处都要报出来：remedy 的 chown 必须一次给全，不然下一趟又死在另一个目录上')
+
+    const denied = checkNpmPrefix({ run: () => ({ status: 0, stdout: `${binLocked}\n`, stderr: '' }) })
+    assert.equal(denied.ok, false, '包目录能写、bin 不能写，仍然写不进全局层')
+    assert.equal(denied.dir, path.join(binLocked, 'bin'), '要点名是哪一个：' + JSON.stringify(denied))
+    assert.match(denied.reason, /where their commands are linked/, '要说清那个目录是干什么的：' + denied.reason)
+  } finally {
+    fs.chmodSync(path.join(binLocked, 'bin'), 0o700)
+    removeDir(home)
+  }
+})
+
+test('restoreNpmPackages takes a package back off when this machine had none before', () => {
+  // "unknown previous version" and "this machine had no such package" used to be the same dead end, and
+  // the dead end is what leaves a global `glasspane-mcp@1.5.1` behind on a machine rolled back to 1.5.0.
+  const calls = []
+  const restored = restoreNpmPackages({
+    original: { 'glasspane-mcp': null, 'glasspane-install': '1.5.0' },
+    only: { 'glasspane-mcp': '1.5.1', 'glasspane-install': '1.5.1' },
+    restore: (name, from) => { calls.push(['restore', name, from]); return { ok: true, message: null } },
+    uninstall: (name) => { calls.push(['uninstall', name]); return { ok: true, message: null } },
+  })
+  assert.deepEqual(calls, [['uninstall', 'glasspane-mcp'], ['restore', 'glasspane-install', '1.5.0']], JSON.stringify(calls))
+  assert.ok(restored.every((r) => r.ok), JSON.stringify(restored))
+  assert.equal(restored[0].to, null, 'removed 的那一条要能被上层说成"取回来"，不是"退回 null 版"')
+  assert.equal(restored[1].to, '1.5.0')
+
+  const failed = restoreNpmPackages({
+    original: { 'glasspane-mcp': null },
+    only: { 'glasspane-mcp': '1.5.1' },
+    uninstall: () => ({ ok: false, message: 'npm error code EACCES' }),
+  })
+  assert.equal(failed[0].ok, false, '取不下来就要说取不下来')
+  assert.match(failed[0].message, /EACCES/, JSON.stringify(failed))
+})
+
+test('a global install that fails halfway takes back the package it already put in', async () => {
+  // The real run: `glasspane-mcp` installed, `glasspane-install` refused on the bin symlink, apply
+  // restored the bundles and reported nothing about the package still sitting in the global layer.
+  const home = tempDir(`${TMP_PREFIX}halfnpm-`)
+  const pkgDir = path.join(home, 'lib', 'node_modules')
+  fs.mkdirSync(pkgDir, { recursive: true })
+  const tree = path.join(home, 'tree')
+  for (const rel of ['mcp-shell', 'installer']) {
+    fs.mkdirSync(path.join(tree, rel), { recursive: true })
+    fs.writeFileSync(path.join(tree, rel, 'package.json'), JSON.stringify({ name: `glasspane-${rel === 'mcp-shell' ? 'mcp' : 'install'}`, version: '1.5.1' }))
+  }
+  const removed = []
+  try {
+    const got = await installNpmPackages({
+      stagedTree: tree,
+      run: () => ({ status: 0, stdout: 'glasspane.tgz\n', stderr: '' }),
+      readStagedPackageJson: (dir) => ({ name: path.basename(dir) === 'mcp-shell' ? 'glasspane-mcp' : 'glasspane-install', version: '1.5.1' }),
+      readGlobalVersions: () => ({ ok: true, versions: {} }),
+      install: (tgz) => (tgz.includes('mcp-shell') ? { ok: true, message: null } : { ok: false, message: 'EACCES: /usr/local/bin' }),
+      restore: (name, from) => ({ ok: false, message: `不该走这条（这台机器之前没有 ${name}）` }),
+      uninstall: (name) => { removed.push(name); return { ok: true, message: null } },
+    })
+    assert.equal(got.ok, false, '第二个装不上就是装不上')
+    assert.deepEqual(removed, ['glasspane-mcp'], `第一个必须被取回来：${JSON.stringify(removed)}`)
+    assert.match(got.message, /were taken back/, got.message)
+    assert.ok(got.repairs.every((r) => r.ok), JSON.stringify(got.repairs))
+
+    // And when the undo itself fails, that has to be in the sentence too — a silent "restored" over a
+    // leftover global package is the same lie in the other direction.
+    const stuck = await installNpmPackages({
+      stagedTree: tree,
+      run: () => ({ status: 0, stdout: 'glasspane.tgz\n', stderr: '' }),
+      readGlobalVersions: () => ({ ok: true, versions: {} }),
+      install: (tgz) => (tgz.includes('mcp-shell') ? { ok: true, message: null } : { ok: false, message: 'EACCES' }),
+      uninstall: () => ({ ok: false, message: 'npm error code EACCES' }),
+    })
+    assert.match(stuck.message, /were NOT all taken back/, stuck.message)
+    assert.match(stuck.message, /glasspane-mcp: npm error code EACCES/, stuck.message)
+  } finally {
+    removeDir(home)
+  }
+})
+
+// REVERSE MUTATION (the tripwire itself): unset `npm_config_prefix` at the top of this file and add a call to
+// `defaultNpmInstall` from any path above — every other assertion still passes, because none of them can see
+// a write made through the module's own `spawnSync`. This one can, and it is last so it sees what the whole
+// file did. On 2026-10-01 the missing wire was real: the read-back test ran `npm uninstall -g glasspane-mcp`
+// against the author's machine while nobody was looking for it.
+test('this file never moved a real global npm package, even by accident', () => {
+  const landed = []
+  for (const dir of [path.join(SANDBOX_NPM_PREFIX, 'lib', 'node_modules'), path.join(SANDBOX_NPM_PREFIX, 'bin')]) {
+    try {
+      landed.push(...fs.readdirSync(dir).map((name) => path.join(dir, name)))
+    } catch {
+      // npm only creates these when something is installed into the prefix: absent is the expected answer.
+    }
+  }
+  assert.deepEqual(landed, [], `npm_config_prefix points every accidental global write at ${SANDBOX_NPM_PREFIX}, which must stay empty: ${JSON.stringify(landed)}`)
+  removeDir(SANDBOX_NPM_PREFIX)
 })

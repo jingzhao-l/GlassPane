@@ -12,7 +12,42 @@
 是有意的跳过，不是漏发。
 
 
+### Fixed — 把全局包 chown 过来之后仍然换不了版：npm 那一层的三处真机形状（2026-10-01）
+
+上一节那条预检的 remedy 本身是错的，而且错的方式很典型：它只看了 `<prefix>/lib/node_modules`，可
+`npm install -g` 要写的其实是**两处**——包落进 `lib/node_modules`，命令软链进 `bin`。照 remedy 做完
+`sudo chown -R "$(whoami)" /usr/local/lib/node_modules` 再跑，仍然死在
+`EACCES: permission denied, symlink '../lib/node_modules/glasspane-install/cli.js' -> '/usr/local/bin/glasspane-install'`。
+**一条修完仍然失败的 remedy 比没有 remedy 更糟**：用户做完了所有要求他做的事，却什么都没换来。预检现在两处都探、
+remedy 里两处都点名。
+
+真机那次跑还留下两件事，都在代码里而不是在日志里：
+
+- **换上去的包没被取回来**：`glasspane-install` 在 `bin` 上被拒，`.app` 回滚、状态记 `rolled-back`，
+  可 `npm ls -g` 里 `+-- glasspane-mcp@1.5.1` 一直留着——一层属于"没有任何东西在运行的那个版本"的全局转发
+  代码。半途失败现在把已经装上的逐个取回（取不回来就在句子里点名哪一个、为什么）。
+- **"这台机器原本没有这个包"被当成了无法撤销**：`readGlobalVersion` 的 `null` 同时表示"没有这个包"和
+  "npm 没答上来"，所以撤销只能报"退不回去"。真机上需要的恰恰是后者那一半——没有 ⇒ 把它摘掉。接缝现在回答
+  `{ok, versions, message}`：读不出来就**在任何一次 `npm install -g` 之前**拒绝（没有可退的版本就别改机器），
+  读得出来而包缺席就是"这台机器原本没有"，撤销是卸载。四种 npm 真报文形状钉住这个判据：正常前缀 exit 0 带
+  `dependencies`；**空前缀 exit 0 只回 `{"resolved": …}`、没有 `dependencies` 键**（缺键不是故障，否则每台新机器
+  都被拒）；够不着的前缀 exit 254/236 却回一个**能 parse 的 JSON 错误封套**（"解析成功"≠"npm 答了清单"）；
+  `lib` 不可读时 npm 仍回 exit 0 的空清单——那一类只有预检看得见。
+
+还修了同一轮里两处我自己写坏的东西：read-back 那处撤销**没把 `uninstall` 接缝传进去**，于是默认值在作者机器上
+真的执行了 `npm uninstall -g glasspane-mcp`（它把上面那个半装的 1.5.1 摘掉了，而没有任何测试要求过这件事）；
+撤销的句子曾有两个作者，读回那一处对刚被摘掉的包说"已按记录的版本装回"——一个从未存在过的版本。现在
+未接线的撤销一律回答"这条没接线，全局层没动"，句子由一处生成、逐包说清是"退回 X@1.4.0"还是"取回（原本没有）"，
+`apply.test.mjs` 另把 `npm_config_prefix` 指向临时前缀并在最后一条用例证明那里一个字都没落下——`run` 计数拦不住
+这类调用，它们走的是模块自己的 `spawnSync`。
+
+门禁：11 条反向变异全红（删装前拒绝／把错误封套当清单／把空前缀当故障／"原本没有"再当无法撤销／read-back 少传
+`uninstall`／注入 `install` 却给真 `restore`／一刀切的撤销句子／只探 `lib/node_modules`／半途失败不取回／
+撤销失败清单点不出名字／被 stub 的 npm 层交回一条没有包名的修复记录）。`updater/test/apply.test.mjs` 47→56，
+全套门禁 14 道绿（`node-updater` 343/343）。
+
 ### Added — §11 更新器自身的换版：这条机制终于能修好它自己
+
 
 写这一节之前的事实很难看：上一节那四条真机高危（资产钉死、档案链接、CLI 参数、下载时钟）与 §9 那一整束，
 全都住在 `updater/` 与 `installer/` 里，而每日作业跑的正是安装那趟 clone 里的那份代码
@@ -87,6 +122,9 @@ GlassPane 的全局包（`npm ls -g` 是空的）。`apply` 的顺序是"换两�
 `status=deferred` + `code=npm-prefix-unwritable`，**一个字节都没换、daemon 一次都没重启**，句子里点名写不进去
 的那一层，并给出两条出路（把这层交给这个账号，或把 prefix 挪进家目录后重跑安装程序），同时说清这一步需要一个人
 ——`sudo` 不是 agent 能替用户按下去的那一下。
+
+> 这一节当初的 remedy 少了一个目录，预检本身也少探了一个：见上面「把全局包 chown 过来之后仍然换不了版」。
+> 留在这里不删，是因为"我自己给的出路修不完"这件事本身就是这一版要记住的形状。
 
 新增控制两条（都有反向变异实测能红）：`checkNpmPrefix` 用真目录跑（含一次 `chmod 0500` 的"写不进去"），
 序列那条把构建、kickstart、npm 全换成引线——预检失灵就会炸在任何一根上。

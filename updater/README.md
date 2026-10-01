@@ -74,11 +74,23 @@
   `tools/list` 要的那个全局命令正是第二道才装上的东西 —— checkout 装出来的机器（安装器只跑
   `npm install`，从不 `-g`）因此永远过不了这道门：每次都换完 `.app`、重启完 daemon 再整体回滚。
   现在第三道不过时连 npm 层一起按记账退回原版本，句子点名退回哪一版。
+- **npm 那一层的记账先要能答复**（同一轮真机跑出来的）：`apply` 装包之前用一次
+  `npm ls -g --depth=0 --json` 记下"这台机器原来有什么"。**读不出来 ≠ 没有**——旧写法把这个区别写成了一个
+  `null`，于是撤销面对读不出来的前缀会去 `npm uninstall -g` 摘掉用户自己装的包。现在读不出来就在任何一次
+  `npm install -g` 之前拒绝（`npm-version-mismatch`，句子说"没记下可退的版本、什么都没装"）。装完再读回一次：
+  版本不符或读不出答复都要撤销，有记录的装回那一版、原本没有的**取回来**，句子逐包说清是哪一种；第二个包
+  装失败时，已经装上的第一个也一起取回——不然机器上留着一层属于没人正在运行版本的全局包，而记账只说
+  "`.app` 已还原"。这两条撤销都**不许在没接线时 exec 真 npm**（默认答案是"这条没接线，全局层没动"）：
+  本轮就出过一次——一条测试少注入 `uninstall`，真的在开发者机器上跑掉了 `npm uninstall -g glasspane-mcp`。
+  `apply.test.mjs` 因此把 `npm_config_prefix` 指到一个临时前缀，并用最后一条用例证明那里什么都没落下。
 - **换版之前会先问一句"这台机器的 npm 全局目录写得进去吗"**（2026-10-01 真机实测加的预检）：`apply` 的
   顺序是换 `.app` → 重启 daemon 并握手 → `npm install -g` 两个包 → §11 换更新器自己。这台机器上
   `/usr/local/lib/node_modules` 属 `root:wheel`，于是每天都是"包已换、daemon 已重启、npm 报 EACCES、再回退、
   再重启一次"，状态里一句 `post-swap-failed`，版本永远落不下去。现在这一步提前问：
-  `npm config get prefix` + 那一层的 `W_OK`；写不进去就 `deferred` + `npm-prefix-unwritable`，
+  `npm config get prefix` + **两个目录**的 `W_OK`（包落下的 `<prefix>/lib/node_modules` 和命令软链过去的
+  `<prefix>/bin`）。只查前者是不够的：照第一次给的 remedy 把 `lib/node_modules` chown 过来之后，真机仍然死在
+  `EACCES: permission denied, symlink … -> '/usr/local/bin/glasspane-install'`——修完仍然失败的 remedy 比没有
+  remedy 更糟，所以现在两个目录都探、也都写进那句 remedy。写不进去就 `deferred` + `npm-prefix-unwritable`，
   **什么都没换、daemon 一次都没重启**，并说清出路需要一个人（`sudo chown` 或把 prefix 挪进家目录后重跑安装程序）。
 - **§11 落地的形状（2026-09-30 本机实测之后补上的边界，都是实测不是推测）**：
   · *一代是什么*：封闭清单 `updater/` + `installer/` + 发布根 `package.json`。`installer/` 不是顺手带上的：

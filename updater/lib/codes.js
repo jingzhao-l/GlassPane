@@ -79,6 +79,10 @@ export const CODES = Object.freeze({
   handshakeFailed: 'handshake-failed',
   rolledBack: 'rolled-back',
   rollbackFailed: 'rollback-failed',
+  // §3.4's npm gate: a package that does not read back as the version the verified tree claimed — and the
+  // prefix not being readable at all, which is refused *before* anything is installed because a version that
+  // was never recorded has no undo. Both are "the npm layer's version state could not be confirmed", so they
+  // share one code rather than adding a member to a closed enum the readers all have to be re-paired with.
   npmVersionMismatch: 'npm-version-mismatch',
   // §3.5's pre-flight: npm's global directory is not writable by the account the update runs under.
   // Measured on a real install (2026-10-01): `/usr/local/lib/node_modules` is root-owned, so
