@@ -69,6 +69,12 @@
   `needs-consent` 上附带 `--consent major`，所以对一份未签名的补丁版，页面上只有被拒的理由是原话显示的，
   放行动作本身要去终端（见 README「让 GlassPane 保持最新」）。
 
+- **换版之前会先问一句"这台机器的 npm 全局目录写得进去吗"**（2026-10-01 真机实测加的预检）：`apply` 的
+  顺序是换 `.app` → 重启 daemon 并握手 → `npm install -g` 两个包 → §11 换更新器自己。这台机器上
+  `/usr/local/lib/node_modules` 属 `root:wheel`，于是每天都是"包已换、daemon 已重启、npm 报 EACCES、再回退、
+  再重启一次"，状态里一句 `post-swap-failed`，版本永远落不下去。现在这一步提前问：
+  `npm config get prefix` + 那一层的 `W_OK`；写不进去就 `deferred` + `npm-prefix-unwritable`，
+  **什么都没换、daemon 一次都没重启**，并说清出路需要一个人（`sudo chown` 或把 prefix 挪进家目录后重跑安装程序）。
 - **§11 落地的形状（2026-09-30 本机实测之后补上的边界，都是实测不是推测）**：
   · *一代是什么*：封闭清单 `updater/` + `installer/` + 发布根 `package.json`。`installer/` 不是顺手带上的：
     `updater/lib/signature.js` 用 `import('../../installer/cli.js')` 取签名公钥，少它就是个跑不起来的更新器。

@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url'
 import { CODES, EXIT, exitCodeFor } from '../lib/codes.js'
 import { refreshRuntime } from '../lib/runtime.js'
 import { AGENT_LABEL } from '../lib/launchd.js'
+import { checkNpmPrefix } from '../lib/apply.js'
 import { readPointer, writePointer } from '../lib/state.js'
 import {
   BACKUP_MANIFEST_NAME,
@@ -1663,6 +1664,103 @@ test('the handover child writes state, and the parent does not overwrite it', as
     assert.equal(state.current, '1.4.1')
     assert.equal(state.runtime.status, 'refreshed', JSON.stringify(state.runtime))
   } finally {
+    fx.cleanup()
+  }
+})
+
+/* ------------------------------------------------------------------ §3.5 npm pre-flight */
+
+test('checkNpmPrefix asks npm where global packages go and then asks the filesystem who can write there', () => {
+  // The question is about a real directory's permissions, so the probe runs against real ones: a
+  // `lib/node_modules` this account owns, the same directory with the write bit taken away, a prefix npm
+  // cannot answer for, and a prefix that names a path with nothing under it. A stub that always answered
+  // "writable" would let this whole pre-flight pass while the machine kept swapping and rolling back.
+  const home = tempDir(`${TMP_PREFIX}prefix-`)
+  const good = path.join(home, 'g')
+  const locked = path.join(home, 'l')
+  fs.mkdirSync(path.join(good, 'lib', 'node_modules'), { recursive: true })
+  fs.mkdirSync(path.join(locked, 'lib', 'node_modules'), { recursive: true })
+  fs.chmodSync(path.join(locked, 'lib', 'node_modules'), 0o500)
+  try {
+    const run = (bin, args) => (args[0] === 'config'
+      ? { status: 0, stdout: `${good}\n`, stderr: '' }
+      : { status: 0, stdout: '', stderr: '' })
+    const ok = checkNpmPrefix({ run })
+    assert.equal(ok.ok, true, ok.reason)
+    assert.equal(ok.prefix, good)
+    assert.equal(ok.dir, path.join(good, 'lib', 'node_modules'), '探测的是包真正要落进去的那一层')
+
+    const lockedRun = (bin, args) => ({ status: 0, stdout: `${locked}\n`, stderr: '' })
+    const denied = checkNpmPrefix({ run: lockedRun })
+    assert.equal(denied.ok, false, '这一台机器写不进去，预检必须说不行')
+    assert.match(denied.reason, /is not writable by this account/, JSON.stringify(denied))
+    assert.equal(denied.dir, path.join(locked, 'lib', 'node_modules'))
+
+    const failing = checkNpmPrefix({ run: () => ({ status: 1, stdout: '', stderr: 'npm ERR! enoent' }) })
+    assert.equal(failing.ok, false, '问不出前缀就是问不出，不许当成"能写"')
+    assert.match(failing.reason, /npm config get prefix answered 1/)
+
+    const gone = checkNpmPrefix({ run: () => ({ status: 0, stdout: `${path.join(home, 'nothing-here')}\n`, stderr: '' }) })
+    assert.equal(gone.ok, false, '前缀指向一个不存在的目录，全局包没有地方落')
+    assert.match(gone.reason, /does not exist/)
+
+    // A prefix that exists but has no `lib/node_modules` yet is npm's to create — the probe has to fall
+    // back to the prefix itself, or a first install on a fresh machine would be refused.
+    const fresh = path.join(home, 'f')
+    fs.mkdirSync(fresh)
+    const created = checkNpmPrefix({ run: () => ({ status: 0, stdout: `${fresh}\n`, stderr: '' }) })
+    assert.equal(created.ok, true, created.reason)
+    assert.equal(created.dir, fresh)
+  } finally {
+    fs.chmodSync(path.join(locked, 'lib', 'node_modules'), 0o700)
+    removeDir(home)
+  }
+})
+
+test('a machine that cannot write npm\'s global directory is refused before a single bundle moves', async () => {
+  // Measured on a real install (2026-10-01): `/usr/local/lib/node_modules` belongs to root, the update
+  // account has never installed a GlassPane package, and `apply` therefore swapped the two `.app`
+  // bundles, restarted the daemon, failed at `npm install -g`, and rolled the machine back — every day,
+  // twice a day, with a version that never landed. The refusal has to come *first*, and it has to say
+  // that nothing moved.
+  const fx = fixture('npm-preflight-')
+  const kick = await okKick()
+  const socketPath = shortSocketPath(fx.dir, 'preflight.sock')
+  const daemon = await startSocketDaemon(socketPath, { behaviour: 'answer', version: '1.4.1' })
+  const dir = path.join('/usr', 'local', 'lib', 'node_modules')
+  let copies = 0
+  try {
+    const result = await applyUpdate({
+      stateRoot: fx.stateRoot,
+      appsDir: fx.appsDir,
+      bundles: BUNDLES,
+      now: NOW,
+      currentVersion: '1.4.0',
+      socketPath,
+      probe: { socketPath, timeoutMs: 1_000 },
+      job: { ok: true, args: ['glasspaned', '--socket-path', socketPath] },
+      // Everything after the pre-flight is a tripwire: reaching any of it is the failure this test names.
+      build: () => assert.fail('预检失败之后连构建都不该起'),
+      kickstart: () => assert.fail('预检失败之后不许重启 daemon'),
+      toolsList: okTools,
+      npm: () => assert.fail('预检失败之后不该跑到 npm 那一步'),
+      preflightNpm: () => ({ ok: false, prefix: '/usr/local', dir, reason: `${dir} is not writable by this account (EACCES)` }),
+    })
+    assert.equal(result.status, 'deferred', JSON.stringify(result))
+    assert.equal(result.code, CODES.npmPrefixUnwritable, result.message)
+    assert.equal(exitCodeFor(result), EXIT.REFUSED, '什么都没换 ⇒ §7 的那一档是 3，不是 4/5')
+    assert.equal(fs.existsSync(path.join(writableRoots(fx.stateRoot).backup)), false,
+      '连备份都不该建——建了就说明已经准备换东西了')
+    assert.match(result.message, /Nothing was replaced and the daemon was not restarted/, result.message)
+    assert.match(result.message, new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '句子要点名写不进去的那一层')
+    assert.match(result.message, /sudo chown/, 'remedy 要能做得动，并说清这一步要一个人')
+    assert.match(result.message, /Install update/, '做完之后按哪个按钮也要说')
+    const state = loadState(fx.stateRoot).state
+    assert.equal(state.code, CODES.npmPrefixUnwritable, '面板读的是状态文件')
+    assert.equal(state.staged?.version, '1.4.1', '暂存的那一份仍然算数：这是一次"这台机器现在做不到"，不是这份发布坏了')
+    assert.match(fx.installedBytes(), /installed/, '装着的还是原来那一份：预检失败之后 ~/Applications 一个字都没动')
+  } finally {
+    await daemon.close()
     fx.cleanup()
   }
 })

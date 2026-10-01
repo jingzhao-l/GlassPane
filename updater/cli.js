@@ -26,7 +26,7 @@ import { CODES, EXIT, exitCodeFor } from './lib/codes.js'
 import { UpdaterError, canonicalPath } from './lib/fsutil.js'
 import { effectiveStatus, isOverdue, loadState, nextState, readPointer, saveState, updateSummary } from './lib/state.js'
 import { runCheck } from './lib/check.js'
-import { applyUpdate, buildStagedTree, DEFAULT_BUNDLES, rollbackToBackup } from './lib/apply.js'
+import { applyUpdate, buildStagedTree, checkNpmPrefix, DEFAULT_BUNDLES, rollbackToBackup } from './lib/apply.js'
 import { probeIdle, resolveEngineSocket } from './lib/idle.js'
 import { AGENT_LABEL, DAEMON_JOB_LABEL, DEFAULT_HOUR, DEFAULT_MINUTE, agentPlistPath, readAgentSchedule, readRunningJob, registerAgent, renderAgentPlist, unregisterAgent } from './lib/launchd.js'
 import { localVersion } from './lib/version.js'
@@ -319,6 +319,15 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         helloCall: merged.helloCall,
         toolsList: merged.toolsList,
         npm: merged.npm,
+        /**
+         * The npm pre-flight is named here rather than left to `applyUpdate`'s default, which decides
+         * whether to run itself by asking whether `npm` is the real installer. That default still exists
+         * (it keeps ~20 sequence tests from shelling out to a developer's npm), but a caller this important
+         * must not depend on it: adding `npm:` to `defaultDeps` later would have switched the guard off in
+         * production with nothing red anywhere. `test/cli.test.mjs` drives this seam, and
+         * `test/default-deps.test.mjs` keeps `defaultDeps` itself honest.
+         */
+        preflightNpm: merged.preflightNpm ?? checkNpmPrefix,
         copyFn: merged.copyFn,
         refreshCa: merged.refreshCaBundle,
       })

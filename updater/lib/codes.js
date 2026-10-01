@@ -80,6 +80,11 @@ export const CODES = Object.freeze({
   rolledBack: 'rolled-back',
   rollbackFailed: 'rollback-failed',
   npmVersionMismatch: 'npm-version-mismatch',
+  // §3.5's pre-flight: npm's global directory is not writable by the account the update runs under.
+  // Measured on a real install (2026-10-01): `/usr/local/lib/node_modules` is root-owned, so
+  // `npm install -g` failed *after* the bundles had been swapped and the daemon restarted, and every
+  // scheduled run rolled the machine back again. Asking before the swap costs one `npm config` call.
+  npmPrefixUnwritable: 'npm-prefix-unwritable',
   // `apply` refused because the staged tree is not newer than what is installed
   // at apply time (§7: `apply` = put the *staged offer* in, not "any tree on disk").
   stagedNotNewer: 'staged-version-not-newer',

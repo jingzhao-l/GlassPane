@@ -30,8 +30,14 @@ import path from 'node:path'
 import process from 'node:process'
 import { spawnSync } from 'node:child_process'
 
-const POINTER_FILE_NAME = 'update-install.json'
-const STATE_FLAGS = ['--state-root', '--state-dir']
+/**
+ * Exported only so `test/agent-entry.test.mjs` can pin them against their real sources
+ * (`lib/fsutil.js`'s pointer name and `lib/policy.js`'s flag spellings). This file is copied into the
+ * state root and imports nothing from the repo — so these two literals exist twice by design, and the
+ * parity assertion is the only reader that can see them drift.
+ */
+export const POINTER_FILE_NAME = 'update-install.json'
+export const STATE_FLAGS = ['--state-root', '--state-dir']
 
 /** The precedence `updater/cli.js` uses, reimplemented here on purpose: no shared module to import. */
 export function resolveEntryStateRoot(argv, env) {
