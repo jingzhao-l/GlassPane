@@ -153,17 +153,30 @@ test('--disable / --enable are real aliases for the subcommands, not decorative 
   assert.equal(parseArgs([]).ok, false, '光有 --json 仍然要报"没给命令"')
 })
 
-test('the process honours --disable: it writes disabled=true into the state it was pointed at', () => {
+test('the process honours --disable: it writes disabled=true into the state it was pointed at', (t) => {
   const sandbox = scratch('disable-')
+  const stateFile = path.join(sandbox, 'update-state.json')
   try {
     // `disable` 会 bootout 那个作业——这里用 GLASSPANE_UPDATE_DISABLE 之外的路数没法完全离线，
     // 所以只断言它**走到了那条命令**：状态文件出现在沙盒里、且写着 disabled=true。
     const got = runCli(['disable', '--state-dir', sandbox, '--json'])
+    if (process.platform !== 'darwin') {
+      // CI 的这台 ubuntu 上没有 `launchctl`，所以这里要断言的是**另一件事**，而且必须是真的一件事：
+      // 卸不掉作业的机器不许把 `disabled=true` 写进状态然后自称关掉了。曾经这条在 Linux 上直接要求
+      // `status === 0`，于是"本地绿、CI 红"——那条断言测的从来不是 `--state-dir`，而是跑它的那台机器
+      // 是不是 macOS。
+      assert.notEqual(got.status, 0, `没有 launchd 的机器上 disable 必须拒绝，而不是假装已经卸下作业：${got.stdout} ${got.stderr}`)
+      const wrote = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : null
+      assert.ok(!wrote || wrote.disabled !== true,
+        `拒绝的那一次不许留下一个写着"已关闭"的状态文件：${JSON.stringify(wrote).slice(0, 200)}`)
+      t.skip('这一条真正要验的"状态写进 --state-dir 指的那个根"需要 launchd，CI 的 Linux 上只验到拒绝这一半')
+      return
+    }
     assert.equal(got.status, 0, `disable 在沙盒里应成功：${got.stderr}`)
     const parsed = JSON.parse(got.stdout.trim())
     assert.equal(parsed.command, 'disable')
     assert.equal(parsed.state.disabled, true, JSON.stringify(parsed).slice(0, 200))
-    assert.ok(fs.existsSync(path.join(sandbox, 'update-state.json')), '状态必须落在 --state-dir 指的那个根')
+    assert.ok(fs.existsSync(stateFile), '状态必须落在 --state-dir 指的那个根')
   } finally {
     removeDir(sandbox)
   }
