@@ -511,6 +511,50 @@ function defaultReadGlobalVersion(pkg) {
 /* ------------------------------------------------------------- the sequence */
 
 /**
+ * Can this account actually put a package where npm's global prefix points?
+ *
+ * Why this is asked *before* the swap and not at the npm step: `apply` replaces the two `.app` bundles,
+ * restarts the daemon and waits for a handshake, and only then runs `npm install -g`. On a machine whose
+ * global directory belongs to root (measured on a real install on 2026-10-01: `/usr/local/lib/node_modules`
+ * is `root:wheel`, and this account has never installed a GlassPane package at all), that last step fails
+ * with EACCES — and the failure is *after* the machine changed. The answer comes back `post-swap-failed`,
+ * the bundles get restored, the daemon restarts a second time, and the same thing happens tomorrow at the
+ * same minute. A refusal that costs one `npm config` call beats a swap-and-rollback that costs two daemon
+ * restarts and never lands a version.
+ *
+ * `fs.W_OK` on the directory is the whole question — npm creates package directories inside it, and a
+ * missing `lib/node_modules` under a writable prefix is npm's to make.
+ */
+export function checkNpmPrefix({ run = defaultRun, fsImpl = fs } = {}) {
+  let got = null
+  try {
+    got = run('npm', ['config', 'get', 'prefix'], { timeoutMs: 30_000 })
+  } catch (error) {
+    return { ok: false, prefix: null, dir: null, reason: `asking npm for its global prefix threw (${error?.message ?? String(error)})` }
+  }
+  const prefix = String(got?.stdout ?? '').trim()
+  if (got?.status !== 0 || prefix === '' || prefix.startsWith('-')) {
+    return {
+      ok: false,
+      prefix: prefix === '' ? null : prefix,
+      dir: null,
+      reason: `npm config get prefix answered ${String(got?.status)}${(got?.stderr ?? '').trim() ? `: ${String(got.stderr).trim().slice(0, 160)}` : ''}`,
+    }
+  }
+  const globalModules = path.join(prefix, 'lib', 'node_modules')
+  const dir = fsImpl.existsSync(globalModules) ? globalModules : prefix
+  if (!fsImpl.existsSync(dir)) {
+    return { ok: false, prefix, dir, reason: `${dir} does not exist, so there is nowhere for a global package to land` }
+  }
+  try {
+    fsImpl.accessSync(dir, fsImpl.constants.W_OK)
+  } catch (error) {
+    return { ok: false, prefix, dir, reason: `${dir} is not writable by this account (${error?.code ?? error?.message})` }
+  }
+  return { ok: true, prefix, dir, reason: null }
+}
+
+/**
  * `updater apply`. Everything that can be decided *before* touching the live
  * bundles comes first, so the common refusals (busy, needs consent, stale
  * pointer, missing staged tree) never reach a swap.
@@ -531,6 +575,11 @@ export async function applyUpdate({
   helloCall = socketCall,
   toolsList = mcpToolsList,
   npm = installNpmPackages,
+  // The npm pre-flight runs only when the npm step is the real one. A caller that injects `npm` has
+  // taken responsibility for that layer (that is what tests of the *sequence* do), and letting the
+  // default here shell out to a real `npm config` would make every one of those tests read the
+  // developer's machine instead of the code under test.
+  preflightNpm = npm === installNpmPackages ? checkNpmPrefix : () => ({ ok: true, prefix: null, dir: null, reason: null }),
   socketPath = null,
   writeState = true,
   refreshCa = null,
@@ -659,6 +708,30 @@ export async function applyUpdate({
   const permission = decideSwapPermission({ probe: verdict, jobArgs: job.args, ourStateRoot: stateRoot, consented: consents })
   if (permission.status !== 'allowed') {
     return fail(permission.status === 'deferred' ? 'deferred' : 'needs-consent', permission.code, permission.reason, { details: { probe: verdict.reason } })
+  }
+
+  // §3.5's pre-flight, placed here because everything below this line can change the live machine.
+  // The npm step is the last one and the only one that can need root; finding that out after the
+  // bundles were swapped buys a rollback, two daemon restarts and a version that never lands.
+  const npmReady = preflightNpm()
+  if (!npmReady.ok) {
+    const remedy = npmReady.dir
+      // The two ways out both need a person (a password, or a PATH change), so the sentence says which
+      // one it is recommending and what to press afterwards — an agent can run the chown only if a human
+      // authorized it, and it must not be left guessing between two different fixes.
+      ? `A person has to do one of these once: hand that directory to this account with `
+        + '`sudo chown -R "$(whoami)" ' + npmReady.dir + '`'
+        + ', or move npm\'s prefix under the home directory (`npm config set prefix ~/.npm-global`, put '
+        + '`~/.npm-global/bin` on PATH, then re-run the GlassPane installer so the launcher points at the new one). '
+        + 'After that, press "Install update" again.'
+      : 'Check `npm config get prefix` from this account — the updater will not ask for a password.'
+    return fail('deferred', CODES.npmPrefixUnwritable,
+      'automatic update cannot finish on this machine: '
+      + (npmReady.reason ?? 'the npm global prefix could not be checked')
+      + '. Nothing was replaced and the daemon was not restarted: the two packages `glasspane-mcp` and '
+      + '`glasspane-install` are installed with `npm install -g` *after* the bundles swap, and this account '
+      + 'cannot write where npm would put them. ' + remedy,
+      { details: { prefix: npmReady.prefix, dir: npmReady.dir } })
   }
 
   // From here on the live bundles may change: back them up first.

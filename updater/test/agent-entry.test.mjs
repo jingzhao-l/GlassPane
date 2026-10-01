@@ -141,6 +141,22 @@ test('the state root is resolved in the same precedence the CLI uses', () => {
 
 /* ------------------------------------------------------------------ the installer of the entry */
 
+test('the entry reimplements its two literals, so they are pinned against the real source of truth', async () => {
+  // `updater/agent-entry.js` deliberately imports nothing from this repo: it is copied into the state
+  // root and runs alone, and following `updater/`'s version would put back the very coupling §11 removes.
+  // That makes two literals exist twice — the state-root flags and the pointer file's name. Nothing in the
+  // runtime can notice the two drifting apart, so this is the guard: change the spelling in
+  // `policy.js`/`state.js` and forget the entry, and the daily job would silently read the wrong
+  // directory or find no pointer at all while every in-repo test stayed green.
+  const { STATE_ROOT_FLAGS } = await import('../lib/policy.js')
+  const { POINTER_FILE_NAME } = await import('../lib/fsutil.js')
+  const entry = await import('../agent-entry.js')
+  assert.deepEqual([...entry.STATE_FLAGS].sort(), [...STATE_ROOT_FLAGS].sort(),
+    '入口认的状态根开关必须与 CLI 同一个拼法**集合**（两处作者，这一条是唯一读者；顺序不比，因为两个拼法互不为前缀，谁先match都不改变答案）')
+  assert.equal(entry.POINTER_FILE_NAME, POINTER_FILE_NAME,
+    '入口读的指针文件名必须与 `fsutil.js` 那一个真源同一个')
+})
+
 test('ensureAgentEntry lands the shipped bytes and proves them by reading them back', () => {
   const stateRoot = scratch('write-')
   try {

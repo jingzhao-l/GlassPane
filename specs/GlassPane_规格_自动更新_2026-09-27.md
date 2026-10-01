@@ -107,6 +107,15 @@
    socket 的 `hello` 必须回 `<ver>`，且 `glasspane-mcp` 的 `tools/list` 可用；15 s 内不成立即
    `restore backup + kickstart`，状态记 `rolled-back`，并把两侧版本写进 `lastError`。
 4. npm 全局包的安装同样先记录原版本，读回不符就装回原版本。
+   4a. **npm 的 global 目录写不进去 ⇒ 在换任何东西之前就拒绝，不许换完再回退。** 本机实测（2026-10-01）：
+       `/usr/local/lib/node_modules` 属于 `root:wheel`，这个账号从来没装过 GlassPane 的全局包，于是每次
+       `apply` 都是"两个 `.app` 已换、daemon 已重启握手通过、`npm install -g` 报 EACCES、再回退 `.app`、
+       再重启一次 daemon"——一天两次重启、一句 `post-swap-failed`、版本永远落不下去，而且明天同一分钟重演。
+       预检只有一次 `npm config get prefix` 加一次 `W_OK`：问不出前缀、前缀不存在、或那一层写不进去，
+       都在**备份之前**返回 `status=deferred` + `code=npm-prefix-unwritable`，并说清"什么都没换、daemon 没重启"。
+       remedy 要指出这一条需要一个人（`sudo chown -R "$(whoami)" <目录>`，或把 prefix 挪进家目录并改 PATH），
+       不能写成 agent 能自己做完的样子。注入过 `npm` 的调用方（测试）自己负责那一层，此时预检默认不起进程——
+       否则每条序列测试都在读开发者机器的 npm 配置，而不是读被测代码。
 5. 一切成功才更新 `current`；历史保留最后 10 次（时间、动作、结论、digest 前 12 位）。
 
 ## 4. 没跑成 / 失败时，用户看得到也能动手
@@ -147,6 +156,7 @@
 | tag 解析与 semver 严格大于 | `version.test.mjs` | 允许相等 ⇒ 红 |
 | major 不自动应用 | `policy.test.mjs` | 去掉 consent 分支 ⇒ 红 |
 | 双资产必须齐 | `assets.test.mjs` | 缺 SUMS 仍继续 ⇒ 红 |
+| npm 全局目录写不进去时，在备份与换版**之前**就拒绝，并说清什么都没动 | `updater/test/apply.test.mjs`（`checkNpmPrefix…`：真目录 + 真 `chmod 0500`；`a machine that cannot write npm's global directory is refused before a single bundle moves`：构建/kickstart/npm 都是 `assert.fail` 引线） | 删掉那次拒绝 ⇒ 引线炸，红；把 `W_OK` 探测跳过 ⇒ 第一条红（0500 的目录被当成能写） |
 | SUMS 严格解析 | `sums.test.mjs` | 取第一个命中 ⇒ 红 |
 | 实测 sha256 | `digest.test.mjs` | 改用头长度 ⇒ 红 |
 | 暂存树版本线自证 | `selfcheck.test.mjs` | 跳过 check-version ⇒ 红 |
