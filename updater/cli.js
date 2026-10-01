@@ -34,6 +34,7 @@ import { CONSENT_KINDS } from './lib/policy.js'
 import { makeBytesFetcher, makeFetcher, resolveBase } from './lib/source.js'
 import { RELATIVE_RELEASE_PATH } from './lib/check.js'
 import { CA_ENV_VAR, caBundlePath, describeCa, exportCaBundle, usableBundle } from './lib/ca-bundle.js'
+import { agentEntryPath, ensureAgentEntry } from './lib/agent-entry.js'
 
 export const SUBCOMMANDS = ['check', 'apply', 'status', 'rollback', 'enable', 'disable']
 // 防循环标记：重跑的那一次带着它，于是它自己的 TLS 失败只会如实报出原因，不再往上叠一层子进程。
@@ -206,6 +207,7 @@ export function defaultDeps({ stateRoot, appsDir, env, flags, exportCa = exportC
     unregisterAgent,
     renderAgentPlist,
     agentPlistPath,
+    ensureAgentEntry,
     readAgentSchedule,
     // §9: the root bundle node needs on a TLS-intercepting machine, exported by
     // this module alone and refreshed at the two points that can do it without a
@@ -379,7 +381,15 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
         const caRoots = merged.refreshCaBundle()
         const bundle = merged.usableCaBundle()
         const plistPath = merged.agentPlistPath({ homeDir: deps.homeDir ?? recordHomeDir() })
-        const cliPath = merged.cliPath ?? fileURLToPath(import.meta.url)
+        /**
+         * The job is pointed at the stable entry, never at a versioned script — that is what lets §11
+         * move the updater by rewriting one JSON file. `merged.cliPath` is only a fallback for a caller
+         * that cannot install the entry at all (a test double, a read-only state root), and when it is
+         * used the operator hears which of the two shapes got registered, because the two differ in
+         * whether the *next* version will need this command again.
+         */
+        const entry = merged.ensureAgentEntry({ stateRoot })
+        const cliPath = entry.ok ? entry.path : (merged.cliPath ?? fileURLToPath(import.meta.url))
         // The daily hour is *preserved*, not re-chosen. A bare `enable` carries no `--hour`, and this
         // branch is what §11's handover runs on every self-update — taking the constant here would move
         // a machine installed with `--hour 3` to midday without a word in any record. An existing
@@ -410,6 +420,9 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
           uid: merged.uid,
           run: merged.runLaunchctl,
         })
+        if (agent.ok && !entry.ok) {
+          agent = { ...agent, message: `${agent.message}; the job was registered against a versioned script because ${entry.message} — the next update of the updater itself will need one manual "enable" because of it` }
+        }
         if (agent.ok) exportedCa = caRoots
         if (scheduleNote) agent = { ...agent, message: `${agent.message}${agent.message ? '; ' : ''}${scheduleNote}` }
         // A refused registration writes no state, and that is deliberate even though the root bundle

@@ -204,12 +204,16 @@ function decodeCaRoots(value: unknown, bundlePath: string): { ok: true; ca: CaRo
 
 /**
  * The four states the updater can record for **its own installed copy**, as a closed set:
- * `refreshed` (the new copy landed *and* the loaded launchd job was read back and names it),
+ * `refreshed` (the new copy landed, the pointer names it, and the loaded launchd job was read back and
+ * seen to go through the stable agent entry that resolves that pointer — with the entry in place the job
+ * no longer names a version, so `agentVerified` is a claim about the entry, not about this version),
  * `failed` (the updater's own copy did not move — the `.app`/npm swap may still have
  * succeeded, so this is a stated degradation and emphatically not "the update failed"),
  * `kept` (automatic update is switched off on this machine, so the code and the pointer
  * moved but no job was registered: neither a failure nor something to brag about),
- * `skipped` (not attempted by that run). Only `refreshed` with `agentVerified === true` is
+ * `skipped` (the code, the pointer and the entry all moved, but the registered job still names a
+ * versioned script, so this machine owes the one migration that puts it on the entry — after which no
+ * version asks again). Only `refreshed` with `agentVerified === true` is
  * usable; folding any other state into it is how a machine that has run the same stale
  * updater since install reads as one that fixes itself.
  */

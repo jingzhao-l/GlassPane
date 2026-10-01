@@ -1481,9 +1481,10 @@ function runtimeSelfDiagnosis(runtime: RuntimeReading, stateFile: string): strin
       if (!runtimeIsUsable(runtime)) {
         // The claim and the proof are two different fields, and only their pair means the
         // new copy runs: `agentVerified` is written true solely after `launchctl print` read
-        // the loaded job back and found the new script in it.
+        // the loaded job back and found the stable entry in it — the entry is what resolves the
+        // pointer this version moved, so the job no longer names a versioned script at all.
         diagnosis = `updater self-update: refreshed, but not confirmed — the record claims the updater's own copy `
-          + `(${location}) is installed, yet the loaded launchd job was never read back naming that script, so this is `
+          + `(${location}) is installed, yet the loaded launchd job was never read back going through that entry, so this is `
           + "not evidence the new copy runs: tomorrow's check may still execute the previous one. Remedy: "
           + (enableCmd(runtime.cliPath) === null
             ? `the record names no script to register, so re-run the GlassPane installer, ${installerCmd}`
@@ -1492,8 +1493,9 @@ function runtimeSelfDiagnosis(runtime: RuntimeReading, stateFile: string): strin
         break;
       }
       diagnosis = `updater self-update: refreshed — the updater's own installed copy (${location}) is in place and the `
-        + "loaded launchd job was read back and names that script, so this machine's daily check runs the same code the "
-        + "last release shipped. Nothing to do: a future release that changes the updater reaches this install without anyone reinstalling.";
+        + "loaded launchd job was read back and seen to go through the stable entry that resolves this pointer, so this "
+        + "machine's daily check runs the same code the last release shipped. Nothing to do: a future release that changes "
+        + "the updater reaches this install without anyone reinstalling.";
       break;
     }
     case "failed":
@@ -1523,13 +1525,19 @@ function runtimeSelfDiagnosis(runtime: RuntimeReading, stateFile: string): strin
         + ".";
       break;
     case "skipped":
-      diagnosis = "updater self-update: skipped — the last run did not attempt the updater's own swap: a scheduled "
-        + "apply is the very launchd job whose handover would have to be re-registered, so it moves the code and the "
-        + "pointer and leaves the handover to the next `enable`. So treat the updater as whatever the loaded job "
-        + "actually runs, rather than as current" + (runtime.cliPath === null ? "" : `: the copy that would run next is ${location}`)
-        + ". Remedy: switch automatic update off and on again in the settings panel (that runs `enable`), or run "
-        + "`updater enable` from a terminal; if a machine has only ever shown skipped, re-run the GlassPane installer, "
-        + `${installerCmd}, once to put a self-updating copy down.`;
+      // With the stable agent entry, this state stopped meaning "nothing was tried" and started meaning
+      // "everything landed except the one registration that moves the job onto the entry". The two read
+      // differently to whoever is looking: the first says wait for the next run, the second says do this
+      // one thing and no future version will ask again.
+      diagnosis = "updater self-update: skipped — the updater's code, the installer pointer and the stable agent entry "
+        + "all moved, but the registered launchd job still names a versioned script instead of that entry, so this "
+        + "machine owes one migration. Every scheduled apply stops here until it is done, because re-registering from "
+        + "inside the daily job would unregister the job that is running it"
+        + (runtime.cliPath === null ? "" : `; the copy that would run next is ${location}`)
+        + ". So treat the updater as whatever the loaded job actually runs, rather than as current. Remedy (one time): "
+        + "switch automatic update off and on again in the settings panel, or run `updater enable` from a terminal — "
+        + "after that a version move is a single file write and no future release will ask for this step; if a machine "
+        + `has only ever shown skipped, re-run the GlassPane installer, ${installerCmd}, once to put a self-updating copy down.`;
       break;
     default: {
       // Unreachable while the enum in `update-state.ts` and this switch move together: adding a

@@ -80,6 +80,11 @@ function seedPointer(stateRoot, { updaterCli, installRoot }) {
 const okEnable = () => ({ ok: true, message: null, parsed: { ok: true }, argv: [] })
 const loadedWith = (cli) => ({ ok: true, args: ['/bin/sh', '-c', '"$0" "$1" check', process.execPath, cli] })
 
+/** Where the stable entry has to be for this state root — what the registered job must name. */
+function entryOf(stateRoot) {
+  return path.join(writableRoots(stateRoot).runtime, 'agent-entry.js')
+}
+
 test('the closed enum, the shipped schema, and the four producers are one list', async () => {
   // `RUNTIME_STATUSES` was imported into this file and never used: the vocabulary the writer produces,
   // the vocabulary the shipped schema publishes, and the vocabulary the panel and `gp_diagnose` decode
@@ -139,7 +144,7 @@ function enumCall(kind, fx) {
   return {
     ...fx,
     runEnable: () => ({ ok: true, message: null, parsed: { ok: true } }),
-    readRunningJob: () => loadedWith(path.join(fx.stateRoot, 'runtime', '1.5.0', 'updater', 'cli.js')),
+    readRunningJob: () => loadedWith(entryOf(fx.stateRoot)),
   }
 }
 
@@ -283,8 +288,12 @@ test('only older generations are removed, and the pointer\'s own directory never
 
 /* ------------------------------------------------------------------ refresh */
 
-test('the new copy registers itself, the loaded job is read back, and the pointer names a file that exists', async () => {
-  const stateRoot = root('happy-')
+test('a machine already registered through the entry moves by rewriting one file, and never registers again', async () => {
+  // This is the whole reason §11 points the job at a version-independent path instead of at the
+  // updater's own script: a version move used to require `bootout` + `bootstrap`, which a scheduled run
+  // cannot do to itself. Here the pointer flip is the entire handover, so `runEnable` must not be
+  // reached at all — an implementation that still spawns an `enable` on the steady path fails this.
+  const stateRoot = root('steady-')
   const previous = makeReleaseTree(path.join(root('prev-'), 'updater-parent'), { version: '1.4.0' })
   const source = makeReleaseTree(path.join(root('src3-'), 'GlassPane-1.5.0'))
   const previousCli = path.join(previous, 'updater', 'cli.js')
@@ -299,20 +308,90 @@ test('the new copy registers itself, the loaded job is read back, and the pointe
         calls.push(options.cliPath)
         return okEnable()
       },
-      readRunningJob: () => loadedWith(runtimeCliPath(runtimeTreePath(stateRoot, '1.5.0'))),
+      // The definition goes through the entry, which is the only registration shape that stays correct
+      // across versions — so it is also the shape that needs no re-registration.
+      readRunningJob: () => loadedWith(entryOf(stateRoot)),
       now: NOW,
     })
     assert.equal(record.status, 'refreshed', JSON.stringify(record))
     assert.equal(record.agentVerified, true)
     assert.equal(restored.attempted, false)
+    assert.deepEqual(calls, [], '稳态换版一次都不许注册：那正是这一节要消灭的步骤')
 
     const pointer = readPointer(stateRoot)
     assert.equal(pointer.ok, true, pointer.message)
     assert.equal(pointer.pointer.updaterCli, record.cliPath, '指针与记录必须说同一个路径')
     assert.equal(fs.existsSync(pointer.pointer.updaterCli), true, '指针指的文件必须真在盘上')
     assert.equal(pointer.pointer.installRoot, runtimeTreePath(stateRoot, '1.5.0'))
-    assert.equal(calls[0], pointer.pointer.updaterCli, '注册必须由新那份代码自己做')
-    assert.notEqual(calls[0], previousCli)
+    assert.notEqual(pointer.pointer.updaterCli, previousCli)
+    assert.equal(fs.existsSync(entryOf(stateRoot)), true, '入口不写进去，明天的作业就没有东西可跑')
+    assert.ok(fs.readFileSync(entryOf(stateRoot), 'utf8').includes('resolveUpdaterCli'),
+      '落地的入口必须真是 updater/agent-entry.js 的字节，不是一个占位空文件')
+  } finally {
+    removeDir(stateRoot)
+    removeDir(previous)
+    removeDir(path.dirname(source))
+  }
+})
+
+test('a machine whose job predates the entry is migrated by exactly one enable, and that migration is read back', async () => {
+  const stateRoot = root('migrate-')
+  const previous = makeReleaseTree(path.join(root('prev-m-'), 'updater-parent'), { version: '1.4.0' })
+  const source = makeReleaseTree(path.join(root('src3m-'), 'GlassPane-1.5.0'))
+  const previousCli = path.join(previous, 'updater', 'cli.js')
+  const calls = []
+  let migrated = false
+  try {
+    seedPointer(stateRoot, { updaterCli: previousCli, installRoot: previous })
+    const { record } = await refreshRuntime({
+      stateRoot,
+      version: '1.5.0',
+      sourceTree: source,
+      runEnable: (options) => {
+        calls.push(options.cliPath)
+        migrated = true
+        return okEnable()
+      },
+      // Before the migration the definition names a versioned script; the entry has to be installed by
+      // a registration, and only a read-back showing the switch took counts as done.
+      readRunningJob: () => (migrated ? loadedWith(entryOf(stateRoot)) : loadedWith(previousCli)),
+      now: NOW,
+    })
+    assert.equal(record.status, 'refreshed', JSON.stringify(record))
+    assert.equal(record.agentVerified, true)
+    assert.equal(calls.length, 1, `迁移只该注册一次：${JSON.stringify(calls)}`)
+    assert.equal(calls[0], runtimeCliPath(runtimeTreePath(stateRoot, '1.5.0')),
+      '那一次注册由新落地的代码自己做，plist 里的入口由它写')
+    assert.equal(readPointer(stateRoot).pointer.updaterCli, record.cliPath)
+  } finally {
+    removeDir(stateRoot)
+    removeDir(previous)
+    removeDir(path.dirname(source))
+  }
+})
+
+test('a scheduled run after the migration is an ordinary move: refreshed, no enable, no pending code', async () => {
+  // The property the whole design exists for: the *scheduled* job — the one that used to have to leave
+  // the handover to a human — now completes by itself, because nothing about it names a version.
+  const stateRoot = root('steady-auto-')
+  const previous = makeReleaseTree(path.join(root('prev-sa-'), 'updater-parent'), { version: '1.4.0' })
+  const source = makeReleaseTree(path.join(root('src3sa-'), 'GlassPane-1.5.0'))
+  const previousCli = path.join(previous, 'updater', 'cli.js')
+  try {
+    seedPointer(stateRoot, { updaterCli: previousCli, installRoot: previous })
+    const { record } = await refreshRuntime({
+      stateRoot,
+      version: '1.5.0',
+      sourceTree: source,
+      handover: 'defer',
+      runEnable: () => assert.fail('作业已经走稳定入口，这次运行不需要也不能再注册一次'),
+      readRunningJob: () => loadedWith(entryOf(stateRoot)),
+      now: NOW,
+    })
+    assert.equal(record.status, 'refreshed', JSON.stringify(record))
+    assert.equal(record.code, null, '没有待办的注册，就不该留一个 pending 的码')
+    assert.equal(record.agentVerified, true)
+    assert.equal(readPointer(stateRoot).pointer.updaterCli, path.join(runtimeTreePath(stateRoot, '1.5.0'), 'updater', 'cli.js'))
   } finally {
     removeDir(stateRoot)
     removeDir(previous)
@@ -338,7 +417,7 @@ test('an unreadable loaded job is a stated failure, not a success', async () => 
     })
     assert.equal(record.status, 'failed')
     assert.equal(record.code, CODES.runtimeStale)
-    assert.match(record.detail, /could not be read back/)
+    assert.match(record.detail, /does not name the stable entry/)
     assert.equal(restored.attempted, true, '读不回来就必须退回去，不能留着"新地址 + 没作业"这个形状')
     assert.equal(readPointer(stateRoot).pointer.updaterCli, previousCli, '指针必须回到旧那份')
     assert.deepEqual(calls.map((c) => c === previousCli), [false, true], '第二次注册要用旧那份把作业指回去')
@@ -365,7 +444,7 @@ test('a loaded job that still names the old command line is a failure too', asyn
       now: NOW,
     })
     assert.equal(record.status, 'failed', 'launchd 说的还是旧路径，就不能说换成了新的')
-    assert.match(record.detail, /still names the old command line/)
+    assert.match(record.detail, /does not name the stable entry/)
     assert.equal(readPointer(stateRoot).pointer.updaterCli, previousCli)
   } finally {
     removeDir(stateRoot)
@@ -534,16 +613,20 @@ test('a scheduled run moves the code and the pointer but does not re-register th
       sourceTree: source,
       handover: 'defer',
       runEnable: (o) => { enableCalls.push(o.cliPath); return okEnable() },
-      readRunningJob: () => ({ ok: true, args: [previousCli] }),
+      readRunningJob: () => loadedWith(previousCli),
       now: NOW,
     })
     assert.equal(record.status, 'skipped', JSON.stringify(record))
     assert.equal(record.code, CODES.runtimeRegistrationPending)
-    assert.notEqual(record.status, 'kept', "'kept' 留给这台机器自己关掉的情况；这次是本轮主动跳过交接")
-    assert.equal(record.agentVerified, false, '没有把作业交出去，就不许在状态里说它被核实过')
+    assert.notEqual(record.status, 'kept', "'kept' 留给这台机器自己关掉的情况；这次是本轮主动跳过注册")
+    assert.equal(record.agentVerified, false, '没有把注册换成稳定入口，就不许在状态里说它被核实过')
     assert.deepEqual(enableCalls, [], 'bootout/bootstrap 不许在这次运行里发生：那就是把自己的作业在半路拆掉')
     assert.equal(readPointer(stateRoot).pointer.updaterCli, record.cliPath, '代码与指针照换——面板跑的就是这份')
-    assert.match(record.detail, /the next time "updater enable" runs/, `要说清下一步是谁做的：${record.detail}`)
+    assert.match(record.detail, /or run "updater enable"/, `要说清下一步是谁做的：${record.detail}`)
+    // The sentence a person reads has to distinguish this from the old per-version cost, or they will
+    // keep looking for the next manual step after the one that finished it.
+    assert.match(record.detail, /after that single step, no future version needs it/, record.detail)
+    assert.equal(fs.existsSync(entryOf(stateRoot)), true, '注册留给下一次，但入口本身这次就得写好——否则那次 enable 没有东西可指')
   } finally {
     removeDir(stateRoot)
     removeDir(previous)

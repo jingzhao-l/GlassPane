@@ -326,9 +326,18 @@
 "修好更新器的那次发版"永远传不到用户机器上：他们的作业会继续用 v1.4.0 那份钉死规则，天天
 `asset-host-unpinned`，而面板写着"已是最新"。**一条机制救不了它自己的缺陷，就等于没修**。
 
-1. **唯一真源不变**：谁在跑更新，由 `<状态根>/update-install.json` 的 `updaterCli` 决定（面板与 launchd
-   都从它取位置，§7）。本节只加一件事：换版成功之后，这份指针可以、也必须指向**验证过的发布树**在
-   本机上的落地位置 `<状态根>/runtime/<ver>/updater/cli.js`。
+1. **唯一真源不变，外加一个不随版本变的跳板**：谁在跑更新，由 `<状态根>/update-install.json` 的
+   `updaterCli` 决定（面板与 launchd 都从它取位置，§7）。本节让这份指针可以、也必须指向**验证过的发布树**
+   在本机上的落地位置 `<状态根>/runtime/<ver>/updater/cli.js`；而 launchd 的作业定义**不再点名任何版本**，
+   它指向 `<状态根>/runtime/agent-entry.js` —— 一个每次运行时读 `updaterCli`、再 exec 那一份脚本并把退出码
+   原样转达的入口（源文件 `updater/agent-entry.js`，落地时写入并按字节读回校验，mode 0600）。
+   为什么要这一层间接：定义里写死版本路径时，**每一次换版都要向 launchd 重新注册一次**，而定时那一次不许
+   注册自己（第 6 条）；于是每天跑的还是旧那一份，本节整套机制在它唯一的主路径上不生效。有了入口，换版
+   就是"写一个 JSON 文件"，注册这件事每台机器只做**一次**（迁移），此后不再有。
+   入口自己出错也必须按 §3 的口径说话：指针缺失或读不回来时打印一行 JSON 拒绝、退出码 `3`；子进程被信号
+   杀死时绝不返回 `0`。它不做任何判断，只负责"今天该跑哪一份"由指针说了算这件事。入口文件本身按发布树的字节
+   写入、读回逐字节比对、mode 必须是 0600；**任何一项不合就把那份文件收掉**再说失败——半份 ESM 照样解析，
+   而作业点名的就是这个路径，留着它等于让定时任务每天执行一次"不知道是什么"的东西。
 2. **来源只能是被八道校验放过的那棵树，但落地的是更新器需要跑的那部分**：取材于 §1.6 自检过的暂存树
    （同一棵已按 sha256 实测、签名 verified、CI 绿、版本线自证的树），不许有第二条取材路径；落地动作发生在
    §3.5 全成功之后、暂存目录被清理**之前**。落地的目录清单是封闭的：`updater/`、`installer/`
@@ -358,34 +367,44 @@
 5. **指针可回退**：写指针仍走 `writePointer`（临时文件 + rename + 读回校验 + mode）；落地/注册任何一步
    失败，先把指针写回旧值，再用**旧那份** `cli.js enable` 一次把作业指回去（best-effort，失败要写进
    状态与原话，不许静默）。
-6. **交接（handover）分两种触发，因为定时那一次会把自己拆掉**：
-    · **人工触发**（面板的「立即安装」、终端里的 `updater apply`）——注册由**新那份代码自己做**：
-      `node <新 cli.js> enable --state-dir <状态根> --json`。理由不是风格：plist 里那条 CLI 路径的来源就是
-      "谁在跑这次注册"（`fileURLToPath(import.meta.url)`），由旧代码去写新路径等于再造一个"两处作者"。
-      注册完必须用 `launchctl print` 把**在册**参数读回来校验它真指过去了；读不到或指回旧的 ⇒
-      `agentVerified=false`，这是一句要说出来的失败，不是"大概说话了"。
-      这条比较必须是"同一个文件"而不是"同一个字符串"：plist 里那条路径是 node 自己报的模块位置，
+6. **注册只在"这台机器还欠一次迁移"时发生，而定时那一次绝不做它**：
+    · **在册作业已经走入口**（`launchctl print` 读回的参数里有 `<状态根>/runtime/agent-entry.js`）⇒ 这次换版
+      **什么都不向 launchd 做**：指针翻了，明天的作业自然照着它跑。这是入口落地之后每一台的常态，也是本节
+      存在的目的。
+    · **在册作业还点名一条带版本的路径**（本节之前装出来的每一台）⇒ 需要**一次**注册，而且必须由新那份代码
+      自己跑 `node <新 cli.js> enable --state-dir <状态根> --json`。理由不是风格：plist 里那条 CLI 路径的来源
+      就是"谁在跑这次注册"，由旧代码去写新路径等于再造一个"两处作者"。注册完必须把**在册**参数读回来校验它
+      真指到了入口；读不到或仍指旧的 ⇒ `agentVerified=false`，这是一句要说出来的失败，不是"大概说话了"。
+      这一次做完，往后不再有。
+    · **定时触发**（agent 里的 `apply --auto`）在这次运行里绝不 bootout/bootstrap：本次运行本身就是那个作业，
+      `bootout` 会在"包已换、状态未写"之间把它拆掉，最坏形状是作业被卸了却没装上（自动更新静默消失）。所以
+      定时那一次只做三件事：落入口、落地代码、换指针。若在册作业还没走入口，记 `runtime.status='skipped'`、
+      `code=runtime-registration-pending`、`agentVerified=false`，原话说清"把面板的「自动更新」开关关掉再打开
+      （或在终端跑一次 `updater enable`）做这一次迁移，做完以后换版不需要再动手"。
+      判据不许在这里含糊：没核实过就不能说核实过。
+    · **回滚守的是同一条**：`apply` 在交接之后才失败时要把指针交还给旧那一份；是否重新注册取决于在册作业
+      此刻指谁——走入口就不用（指针回去就够了），读不回作业则保守地让旧那份重新注册一次（"不知道作业在跑
+      什么"不等于"作业走入口"）。但**定时那一次的自动回滚绝不注册**：它要做的就是上面被禁止的那件事。
+      硬关的机器没有作业可交还，而 `enable` 正是会把它造出来的那个调用——静默把用户的开关打开。
+6a. 与第 6 条那两处比较有关的两个事实：
+    · 那条比较必须是"**同一个文件**"而不是"同一个字符串"：plist 里那条路径是 node 自己报的模块位置，
       **node 会先把路径 realpath 化**（实测：通过 `/tmp` 下的软链启动脚本，`import.meta.url` 报的是
       `/private/tmp/…`），而状态根是 `path.resolve` 出来的字面量。两者在 `/tmp`、`/var/tmp` 或任何带
       软链的家目录上拼写不同、指向同一份文件——按字符串比就把这套机制在**它自己被验证的那种沙箱**里
       永久判成失败。
-      `enable` 还要保住这台机器已有的每日时刻：不带 `--hour` 的 `enable`（交接那一次就是）先读盘上
+    · `enable` 还要保住这台机器已有的每日时刻：不带 `--hour` 的 `enable`（迁移那一次就是）先读盘上
       那份 plist 的 `StartCalendarInterval`，读到就沿用，读不到才用 §2 的默认值**并说出来**。之前它
       直接取常量，于是每台自己换过版的机器都在无人告知的情况下被搬回 12:00。
-    · **定时触发**（agent 里的 `apply --auto`）——**不**在这次运行里 bootout/bootstrap：本次运行本身就是那个
-      作业，`bootout` 会在"包已换、状态未写"之间把它拆掉，最坏形状是作业被卸了却没装上（自动更新静默消失）。
-      这一支只做落地 + 换指针，并记 `runtime.status='skipped'`、`code=runtime-registration-pending`、
-      `agentVerified=false`，原话说清"下一次 `updater enable`（面板开关关再开就是这个）会把它接手"。
-      判据不许在这里含糊：没核实过就不能说核实过。
 7. **硬关时不注册**：`GLASSPANE_UPDATE_DISABLE=1` 或状态里 `disabled=true` 时，runtime 与指针照刷
    （面板用的就是那份代码，不刷它面板会继续跑旧代码），但**绝不**新建/改写 launchd 作业，并把这句
    原话记进状态（`runtime.status='kept'`）。
-8. **只留还被指着的那几代**：默认两代，但**凡是有人指着的一律不清**，而"指着"有三个互相独立的作者：
-   新指针那一代、上一个指针值那一代，以及**在册作业自己那一代**。第三个最容易漏，也唯一致命：连续两次
-   定时换版（用户从不碰开关）时，指针已经是 `1.8.0 → 1.7.0`，而 launchd 的定义里还写着 `1.6.0`——
-   按"指针 + 上一指针"清理就会删掉作业真正要执行的那一棵，明早的每日作业变成 `Cannot find module`，
-   面板上的开关仍然亮着，状态里还写着 `skipped`。所以 defer/kept 两支也必须 `launchctl print` 读回
-   在册参数、把它那一代钉住。
+8. **只留还被指着的那几代**：默认两代，但**凡是有人指着的一律不清**，而"指着"最多有三个互相独立的作者：
+   新指针那一代、上一个指针值那一代，以及**在册作业自己那一代**。第三个在入口落地之后通常是"没有"——
+   作业指的是那个不随版本变的入口，它不指任何一代，于是这一项答案为空是**好消息**（意味着清理不受限）。
+   它只在迁移窗口里真实存在，而那里漏掉它唯一致命：连续两次定时换版（用户从不碰开关）时，指针已经是
+   `1.8.0 → 1.7.0`，而 launchd 的定义里还写着 `1.6.0`——按"指针 + 上一指针"清理就会删掉作业真正要执行的
+   那一棵，明早的每日作业变成 `Cannot find module`，面板上的开关仍然亮着，状态里还写着 `skipped`。
+   所以 defer/kept 两支也必须 `launchctl print` 读回在册参数、把它那一代钉住。
    **读不回在册作业时不许清理任何东西**："不知道作业在跑哪一代"不能当作"哪一代都没人指"来花。跳过清理
    的代价是一个版本目录；猜错的代价是这台机器从此不再自动更新。这一句要原话进 `runtime.detail`。
    "最新的一代"必须由版本号比较决定，不能按字符串排：`1.9.0` 排在 `1.10.0` 前面，于是按字符串留下的
@@ -400,11 +419,12 @@
    `gp_diagnose` 在 npm 包里）都已经是认识这个字段的版本——反过来（先写字段再换读者）会让已发布的
    shell 因为"schema 里多了一个不认识的键"把整份状态读成读不出，那才是真的看不见。
 10. **封闭形状，三个读者**：`runtime` 进 `update-state.schema.json`（`additionalProperties:false`，
-   状态是封闭枚举 `refreshed` / `failed` / `kept`），updater、面板、`gp_diagnose` 三处都读；
+   状态是封闭枚举 `refreshed` / `failed` / `kept` / `skipped`），updater、面板、`gp_diagnose` 三处都读；
    读不懂的取值只能判成"读不出"，不许就近当 `refreshed`。枚举里**不许躺一个没有调用点的取值**，
-   所以四个成员各自绑一个真实分支：`refreshed`（人工触发、已换且在册作业读回核对过）、`failed`（换版成功
+   所以四个成员各自绑一个真实分支：`refreshed`（代码与指针都换了，且在册作业读回来确认走那个入口——
+   注意 `agentVerified` 说的从此是"作业走入口"，不再是"作业指这一版"）、`failed`（换版成功
    但更新器自身没换上，或被回退）、`kept`（这台机器自己关着定时作业，只换代码与指针）、`skipped`
-   （定时那一次有意避让自己——见第 6 条，代码与指针换了，交接留给下一次 `enable`）。
+   （入口与代码与指针都到位，但在册作业还点名旧形状，这台机器欠那**一次**迁移——见第 6 条）。
    反向（旧读者遇到新记录）分两种，只有一种该失败：
    · 认不出**值**（`runtime.status` 是未来版本的某个词）必须响地失败：`loadState` 走 `assertValidState`，
      读不懂就抛错、命令拒绝执行；它绝不"退回空状态"，那等于把这台机器的更新历史抹掉一次。
@@ -414,27 +434,38 @@
    因此**写严格、读宽容**是刻意的不对称：`saveState` 仍按 `additionalProperties:false` 拒绝发布任何
    自己没声明的字段（否则第 9 条的写序保证就没了），`loadState` 只忽略不认识的键。新增字段仍须先让读者
    发布、再让写者写；新增**枚举取值**是破坏性变更，必须先换读者。
-11. **装上的第一版仍是旧形状**：本节落地前装出来的机器，指针仍指着那趟浅 clone；它需要**一次**人工重装
-    才会进入"由更新器自己换版"的形状。这句话必须写进 CHANGELOG 与 README，不能让人以为升级自动完成。
+11. **旧形状装出来的机器有两条路走到新形状，两条都要写清**：本节落地前装出来的机器跑的是旧那份更新器代码——
+    它自己不认识入口，所以由它跑的那一趟换版仍按旧形状把作业指到 `runtime/<新版本>/updater/cli.js`。
+    · **最短的一条**：重跑一次**本版的安装程序**。安装器 import 的就是这份新代码，`enable` 直接把作业注册到
+      入口上，此后每一次换版都只是写一个 JSON 文件，没有任何人工步骤。
+    · **纯靠自更新的一条**：第一趟（旧代码）仍写死版本路径；第二趟由新代码跑，才把作业挪到入口。若这第二趟
+      恰好是定时那一次，它会记 `runtime.status='skipped'` + `code=runtime-registration-pending`，等人做一次
+      `enable`（面板把「自动更新」开关关掉再打开）——做完就再也不出现。
+    两条都不需要人改 plist，也都**不许**被写成"升级之后什么都不用做"；同样不许被说成"每一次换版都要人工"。
+    这两句必须同时进 CHANGELOG 与 README。
 12. **回滚只回它换过的东西**：`updater rollback`（§3.6）换回两个 `.app` 并重启校验，但它**不**把
     `runtime` 与指针换回旧代——那是"上一版更新器的代码"，而回滚的动机通常是新 `.app` 有问题，不是新
     更新器有问题。这句话要写在这里，否则读代码的人会以为 §11 落地后回滚是整台机器的时间倒退。
     与之相对：`apply` 自己在**交接之后**才失败的那一条（重新导出根证书束、清理暂存树、写最后那份状态）
-    必须把指针与作业一起交还给旧那一份——因为那一次的动机恰恰是"这次换版没走完"，留着新指针就等于
-    一边说"已还原并核实"，一边让明天的作业跑刚被换出去的那一份。交还由旧那份自己 `enable` 完成，
-    并用 `launchctl print` 读回核对；`registeredAt` 沿用原值，回退不是重新安装。
+    必须把指针交还给旧那一份——因为那一次的动机恰恰是"这次换版没走完"，留着新指针就等于一边说"已还原并
+    核实"，一边让明天的作业跑刚被换出去的那一份。交还要不要动 launchd 由第 6 条那三种情况决定：作业走
+    入口就只写指针；读不回来保守地让旧那份重新注册一次；定时那一次与硬关的机器**都不注册**（前者会拆掉
+    正在回滚的自己，后者会把用户刚关掉的开关打开）。`registeredAt` 沿用原值，回退不是重新安装。
     读不回来时记录 `runtime.status='failed'` 并写清"指针可能还指着被换出去的那一份，请重跑安装程序"。
 
 | 判据 | 测试 | 反向变异怎么红 |
 | --- | --- | --- |
 | 落地取自暂存树、发生在清理之前、不就地覆盖旧代码 | `updater/test/runtime.test.mjs` | 先清暂存再落地 ⇒ 红；写回旧目录 ⇒ 红 |
 | 指针换到新路径且盘上真存在 | 同上（读回真文件，不信返回值） | 少写 `updaterCli` 或指到没落地的目录 ⇒ 红 |
-| 注册由新那份跑，在册参数用 `launchctl print` 读回校验 | 同上 | 用旧那份注册 ⇒ 红；把"读不到"当成功 ⇒ 红 |
-| 定时那一次不拆自己：只落地与换指针，并明说尚未接手 | `updater/test/runtime.test.mjs` + `apply.test.mjs`（`trigger:'auto'`） | 去掉 `handover:'defer'` 分支 ⇒ 那两条红（enable 被叫了、状态说成已核实） |
-| 任一失败都把指针与作业指回旧值并说话 | 同上 | 只回滚指针不回滚注册 ⇒ 红；失败后不写 `lastError` ⇒ 红 |
+| 作业定义只许点名那个不随版本变的入口，且入口真落在盘上、字节读得回来 | `updater/test/agent-entry.test.mjs`（7 条，含**真起子进程**跑入口）+ `installer/test/auto-update.test.mjs`（读盘上那份 plist 的 `ProgramArguments`） | 注册时把版本路径写进 plist ⇒ 安装器与 `enable` 两条红；入口写空文件 ⇒ 非空与哨兵那两条红 |
+| 入口每次运行按指针决定跑哪一份，退出码原样转达、拒绝是一行 JSON + `3` | `updater/test/agent-entry.test.mjs`（真子进程：换指针后不改定义就换一代；指针坏了 ⇒ 退出 3；被信号杀死 ⇒ 不是 0） | 让入口硬编码版本 ⇒ "换指针就换一代"那条红；`status ?? 0` ⇒ 信号那条红 |
+| 走入口的换版**一次注册都不做** | `updater/test/runtime.test.mjs`（steady 那条断言 `runEnable` 被调即 `assert.fail`）+ `apply.test.mjs`（`enableCalls` 为空） | 让 steady 分支也注册 ⇒ 那两条红 |
+| 首次迁移由新那份跑注册，在册参数用 `launchctl print` 读回校验它真指到入口 | `updater/test/runtime.test.mjs`（migration 那条）| 用旧那份注册 ⇒ 红；把"读不到"当成功 ⇒ 红 |
+| 定时那一次不拆自己：只落入口 + 落地 + 换指针，并明说这一次是**最后一次** | `updater/test/runtime.test.mjs` + `apply.test.mjs`（`trigger:'auto'`） | 去掉 `handover:'defer'` 分支 ⇒ 那两条红（enable 被叫了、状态说成已核实） |
+| 任一失败都把指针指回旧值，作业只在需要时交还，并把说出来的话写实 | 同上 | 只回滚指针不写回注册 ⇒ 红；失败后不写 `lastError` ⇒ 红 |
 | 硬关时刷代码不建作业 | 同上 | 去掉 disabled 分支 ⇒ 红 |
 | 换版判定不被它改：applied 与退出码不变，降级长期可见 | `updater/test/apply.test.mjs` | 把它失败改成 `status`/退出码 ⇒ 红；洗成 `code:null` ⇒ 红 |
-| 清理钉住三个作者各自指着的世代；读不回在册作业就一个都不删 | `updater/test/runtime.test.mjs`（`pruning never deletes a generation something still points at`、`a job book that cannot be read leaves every generation on disk`） | 把 `job.gen` 从 pinned 里去掉 ⇒ 那一代被删、红；把"读不到"当成"没人指" ⇒ 跳过清理那条红 |
+| 清理钉住每一个作者指着的世代（入口在位的机器上作业那一位答案为空，迁移窗口里才真实）；读不回在册作业就一个都不删 | `updater/test/runtime.test.mjs`（`pruning never deletes a generation something still points at`、`a job book that cannot be read leaves every generation on disk`） | 把 `job.gen` 从 pinned 里去掉 ⇒ 那一代被删、红；把"读不到"当成"没人指" ⇒ 跳过清理那条红 |
 | 世代新旧按版本号比，不按字符串 | `updater/test/runtime.test.mjs`（`the newest generation is decided by version, not by how the string sorts`，钉住最旧一代使两种顺序答案相反） | 换回 `.sort().reverse()` ⇒ 删的是 1.10.0 而不是 1.9.0，红 |
 | 落地清单封闭，构建产物不进 runtime | `updater/test/runtime.test.mjs`（`engine/.build`、`mcp-shell/dist` 不在落地树里；`installer/cli.js` 在） | 清单里放回 `engine`/`mcp-shell` ⇒ 排除断言红 |
 | 落地树里不许有间接层，`runtime/<ver>` 本身必须是真目录 | `updater/test/runtime.test.mjs`（`a copied tree that carries a symlink is refused`） | `findIndirection` 改成返回空 ⇒ 红 |
@@ -442,5 +473,6 @@
 | 在册路径与本地拼写按"同一个文件"比，不按字符串 | `updater/test/runtime.test.mjs`（realpath 拼写的那一代仍认得出世代） | 只比字面量前缀 ⇒ 认不出世代，红 |
 | `enable` 保住盘上已有的每日时刻 | `updater/test/enable.test.mjs`（`a bare enable keeps the daily hour that is already installed`；断言打在**送进渲染器的参数**上，不是打在夹具自己写的文件上） | 常量优先 ⇒ 3:20 变成 12:00，红；读不到又不说 ⇒ 第二条红 |
 | 注册是否成立由读回的在册作业判定 | `updater/test/launchd.test.mjs`（三条：核对过 / 仍指旧的 ⇒ 拒绝 / 读不回 ⇒ 明说未核实） | bootstrap 0 直接算成功 ⇒ "仍指旧的那条"红 |
-| 交接之后才失败的回滚，指针与作业一起交还 | `updater/test/apply.test.mjs`（`a rollback that happens after the handover takes the pointer and the job back too`） | 去掉 undo 调用 ⇒ 交还那一次没发生，红；`runtime` 声明在 try 里 ⇒ catch 抛 ReferenceError，红 |
+| 交接之后才失败的回滚：走入口只写指针；读不回作业保守交还；**定时那一次与硬关的机器都不注册** | `updater/test/apply.test.mjs`（`a rollback that happens after the handover takes the pointer and the job back too`、`an undo whose book went unreadable…`、`a rollback of a deferred handover…`、`an undo on a switched-off machine registers nothing…`） | 去掉 undo 调用 ⇒ 交还那一次没发生，红；`runtime` 声明在 try 里 ⇒ catch 抛 ReferenceError，红；把 `handoverMode`/`disabled` 漏传给 undo ⇒ 那两条"一次都不许注册"红 |
+| 入口落地要按字节读回比对，且**不一致或 mode 不是 0600 时把那份文件收掉**（半份 ESM 照样解析、照样被每天执行） | `updater/test/agent-entry.test.mjs`（`a file that reads back short is refused…`、mode 那一条同时断言文件已不在） | 去掉逐字节比对 ⇒ 短写那条红；去掉收掉动作 ⇒ 两条红；mode 不回读 ⇒ 0666 那条红 |
 | 删除不越界、失败不报成已清理 | `updater/test/runtime.test.mjs` | 去掉 root 约束 ⇒ 红 |

@@ -553,6 +553,14 @@ export async function applyUpdate({
   // that question. A rollback that runs after the handover needs the answer.
   const pointerRead = typeof refreshRuntimeImpl === 'function' ? readPointer(stateRoot) : { ok: false, pointer: null }
   const pointerBefore = pointerRead.ok ? pointerRead.pointer : null
+  /**
+   * Whether this run may touch launchd, decided once and given to both halves of §11.
+   *
+   * The forward step and the undo have to agree, or a rollback of a scheduled run would make the call the
+   * forward step refused: `bootout` of the job that is running this very process, leaving the machine with
+   * a rolled-back bundle set and no agent at all until the next manual `enable`.
+   */
+  const handoverMode = trigger === 'auto' ? 'defer' : 'now'
   /** Merge `patch` onto `base` and publish it. `stamp` is the ordinary case: this run's own read. */
   function stampOnto(base, patch) {
     const next = nextState(base, patch, { now })
@@ -880,7 +888,7 @@ export async function applyUpdate({
           disabled: autoDisabled === true || state.disabled === true,
           readRunningJob: readRunningJobImpl,
           ...(runEnableImpl === undefined ? {} : { runEnable: runEnableImpl }),
-          handover: trigger === 'auto' ? 'defer' : 'now',
+          handover: handoverMode,
           now: () => now,
         })
         runtime = outcome?.record ?? outcome ?? null
@@ -917,7 +925,13 @@ export async function applyUpdate({
       ? `the update installed, but the updater itself did not move (${runtime?.detail ?? 'no reason recorded'}): re-run the GlassPane installer to put the new updater in place`
       : runtime?.status === 'kept'
         ? 'automatic update is switched off here, so no job was registered; the updater code and pointer did move'
-        : null
+        : runtime?.status === 'skipped'
+          // A owed registration has to reach the sentence, not only the state file: the person reading
+          // `updater apply`'s answer is the only one who can do the step, and a clean "applied" with no
+          // mention of it is how a pending thing stays pending forever. The wording says one time,
+          // because with the stable entry that is literally true — this is the last version that asks.
+          ? 'the updater code, the pointer, and the stable entry all moved, but the registered job still names its own path, so this machine owes one migration: flip "automatic update" off and on once (or run "updater enable"); after that single step, no future version needs it'
+          : null
     // The document the applied patch merges onto is re-read here and nowhere else in this function:
     // this is the one write that runs after another process (`enable`) may have written the file.
     const base = freshestBase(handoverNotes)
@@ -978,6 +992,8 @@ export async function applyUpdate({
           version: wantVersion,
           env,
           readRunningJob: readRunningJobImpl,
+          handover: handoverMode,
+          disabled: autoDisabled === true || state.disabled === true,
           ...(runEnableImpl === undefined ? {} : { runEnable: runEnableImpl }),
           now: () => now,
         })

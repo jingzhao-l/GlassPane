@@ -358,7 +358,12 @@ permission rather than by a secret.
 - **The state root became security-relevant.** The job's instructions — including which script to execute —
   come from `~/.glasspane/update-state.json` and `~/.glasspane/update-install.json`, so anything that can
   write the state root or that path pointer can steer an update into `~/Applications` and your global npm
-  packages. Those files are `0600` under a `0700` root: the same gate as section 2.2, which **gates
+  packages. The daily job also executes a file **inside** the state root by name
+  (`~/.glasspane/runtime/agent-entry.js`, the version-independent entry that resolves the pointer each run),
+  so writing that file is scheduling code execution as the user; it is therefore written from the release
+  tree's own bytes, read back and compared byte-for-byte before the registration that names it, kept `0600`
+  under the `0700` root, and never created outside a state root that was actually given. Those files are
+  `0600` under a `0700` root: the same gate as section 2.2, which **gates
   accounts, not your own processes** — same-user code is still the adversary, now holding a schedule and a
   binary-replacement capability, and the `~/.glasspane/` handling rules of section 2.4 apply to them.
 - **It refuses instead of racing the daemon.** Before a swap, and again immediately before *every* restart

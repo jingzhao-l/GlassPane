@@ -1289,7 +1289,29 @@ function loadedWithCli(cli) {
  * pointed-at generation survives while the orphan goes, and a string-ordered prune would do the
  * opposite.
  */
-async function applyWithRealRuntime(label, { enableOk = true, loaded = null, disabled = false, trigger = 'manual', enableWritesState = null, extraDeps = {}, orphanGenerations = ['1.4.9'] } = {}) {
+/**
+ * §11 has two shapes on a real machine, and the integration tests have to say which one they are
+ * pretending to be:
+ *
+ *  · **migrated** — the registered definition already goes through `runtime/agent-entry.js`, so a
+ *    version move is a pointer write and *nothing* spawns an `enable`. This is the common case from
+ *    here on, and the one that had a manual step in it before.
+ *  · **pre-entry** — the job still names a versioned script (every machine installed before this
+ *    release). Then the move does need one registration, done by the new copy, and it is the last
+ *    version that will ever ask.
+ *
+ * `entryMigrated` picks between them by deciding what the fake `launchctl print` answers.
+ */
+/** The registered job naming the stable entry — the shape that needs no re-registration. */
+function loadedWithEntry(stateRoot) {
+  return loadedWithArgs([path.join(writableRoots(stateRoot).runtime, 'agent-entry.js')])
+}
+
+function loadedWithArgs(args) {
+  return { ok: true, args: ['/bin/sh', '-c', '"$0" "$1" check "$2" "$3" --json', process.execPath, ...args] }
+}
+
+async function applyWithRealRuntime(label, { enableOk = true, loaded = null, disabled = false, trigger = 'manual', enableWritesState = null, extraDeps = {}, orphanGenerations = ['1.4.9'], entryMigrated = true, undoLoaded = null, undoEnableOk = true } = {}) {
   const fx = fixture(label)
   const kick = await okKick()
   const socketPath = shortSocketPath(fx.dir, 'ok.sock')
@@ -1307,7 +1329,14 @@ async function applyWithRealRuntime(label, { enableOk = true, loaded = null, dis
   fs.mkdirSync(path.join(fx.treePath, 'updater'), { recursive: true })
   fs.writeFileSync(path.join(fx.treePath, 'updater', 'cli.js'), 'NEW UPDATER\n')
   const enableCalls = []
-  const readRunningJobImpl = () => loaded ?? { ok: true, args: [process.execPath, null] }
+  const undoEnableCalls = []
+  // `undoLoaded` is what the *rollback* is told the loaded job names, and it is deliberately a separate
+  // knob from `loaded`: the forward step and the undo read the same launchd database at two different
+  // moments, and one constant for both cannot express "the book went unreadable between them" — the case
+  // the conservative restore exists for. With no override the honest default is that nothing re-registered
+  // in between, so the undo sees what the forward step saw.
+  const shapeAnswer = () => (entryMigrated ? loadedWithEntry(fx.stateRoot) : loadedWithArgs([previousCli]))
+  const readRunningJobImpl = () => undoLoaded ?? loaded ?? shapeAnswer()
   try {
     const result = await applyUpdate({
       stateRoot: fx.stateRoot,
@@ -1324,6 +1353,11 @@ async function applyWithRealRuntime(label, { enableOk = true, loaded = null, dis
       npm: okNpm,
       autoDisabled: disabled,
       trigger,
+      readRunningJobImpl,
+      runEnableImpl: ({ cliPath }) => {
+        undoEnableCalls.push(cliPath)
+        return undoEnableOk ? { ok: true, message: null, parsed: { ok: true } } : { ok: false, message: 'the previous updater refused to register' }
+      },
       ...extraDeps,
       refreshRuntimeImpl: (options) => refreshRuntime({
         ...options,
@@ -1334,12 +1368,18 @@ async function applyWithRealRuntime(label, { enableOk = true, loaded = null, dis
           if (enableWritesState) enableWritesState({ stateRoot: fx.stateRoot })
           return enableOk ? { ok: true, message: null, parsed: { ok: true } } : { ok: false, message: 'the new updater said no' }
         },
-        readRunningJob: () => (loaded === null
-          ? { ok: true, args: [enableCalls[enableCalls.length - 1] ?? previousCli] }
-          : loaded),
+        readRunningJob: () => {
+          if (loaded !== null) return loaded
+          if (entryMigrated) return loadedWithEntry(fx.stateRoot)
+          // Pre-entry: the book keeps naming the versioned script until a registration happens, then
+          // it names the entry — which is the only honest way to let the read-back pass.
+          // A failed registration does not move the book; pretending otherwise is how a fixture lets a
+          // broken path look fine.
+          return enableCalls.length === 0 || !enableOk ? loadedWithArgs([previousCli]) : loadedWithEntry(fx.stateRoot)
+        },
       }),
     })
-    return { result, fx, previousCli, previousRoot, enableCalls, pointer: readPointer(fx.stateRoot) }
+    return { result, fx, previousCli, previousRoot, enableCalls, undoEnableCalls, pointer: readPointer(fx.stateRoot) }
   } finally {
     await daemon.close()
   }
@@ -1357,8 +1397,11 @@ test('a swap also moves the updater\'s own copy, and the pointer names a file th
     assert.equal(fs.existsSync(pointer.pointer.updaterCli), true, '指针必须指到一个真在盘上的脚本')
     assert.equal(fs.readFileSync(pointer.pointer.updaterCli, 'utf8'), 'NEW UPDATER\n',
       '落地的那份必须是被八道校验放过的树里的字节，不是旧安装里翻出来的')
-    assert.equal(enableCalls[0], pointer.pointer.updaterCli, '注册要由新那份自己做')
-    assert.equal(fs.readFileSync(previousCli, 'utf8'), 'PREVIOUS UPDATER\n', '旧那份不许被就地覆盖——它还在被别的进程执行')
+    assert.deepEqual(enableCalls, [],
+      '作业已经走稳定入口：这次换版就该只有一次指针写，不该再有注册')
+    assert.equal(fs.existsSync(path.join(fx.stateRoot, 'runtime', 'agent-entry.js')), true,
+      '入口不落地，指针翻了也没人执行它')
+    assert.equal(fs.readFileSync(previousCli, 'utf8'), 'PREVIOUS UPDATER\n', '旧那份不许被就地覆盖——回滚还要靠它')
     assert.equal(fs.existsSync(previousRoot), true,
       '被指针指过的那一代是**在册清理够得到**的（它就住在 runtime/ 里），所以这条断言真的有牙齿')
     assert.equal(fs.existsSync(path.join(fx.stateRoot, 'runtime', '1.4.9')), false,
@@ -1370,15 +1413,16 @@ test('a swap also moves the updater\'s own copy, and the pointer names a file th
   }
 })
 
-test('when the new copy cannot register itself the swap still stands, the pointer goes back, and the code says so', async () => {
-  const { result, fx, previousCli, enableCalls, pointer } = await applyWithRealRuntime('runtime-fails', { enableOk: false })
+test('a machine whose job predates the entry is migrated during the swap, and a migration that fails is a stated degradation', async () => {
+  const { result, fx, previousCli, enableCalls, pointer } = await applyWithRealRuntime('runtime-fails', { enableOk: false, entryMigrated: false })
   try {
     assert.equal(result.status, 'applied', ' bundles did change — this is not a rolled-back apply')
     assert.equal(result.code, CODES.runtimeStale, `更新器自己没换上必须留下稳定的码：${result.code}`)
     assert.equal(exitCodeFor(result), EXIT.OK, '退出码是面板与 launchd 唯一的数字契约，不该被一句降级改掉')
     assert.match(result.message, /did not move/, result.message)
     assert.equal(pointer.pointer.updaterCli, previousCli, '指针必须回到旧那份，否则下一次作业会跑一个没注册过的脚本')
-    assert.deepEqual(enableCalls, [result.runtime.cliPath, previousCli], '新那份失败之后要用旧那份把作业指回去')
+    assert.deepEqual(enableCalls, [result.runtime.cliPath, previousCli],
+      `新那份注册失败之后，要用旧那份把作业指回去：${JSON.stringify(enableCalls)}`)
     const state = loadState(fx.stateRoot).state
     assert.equal(state.runtime.status, 'failed')
     assert.equal(state.runtime.agentVerified, false, JSON.stringify(state.runtime))
@@ -1402,17 +1446,34 @@ test('a switched-off machine moves the code and pointer but registers nothing', 
   }
 })
 
-test('a scheduled swap hands the job over later instead of unregistering itself mid-write', async () => {
-  const { result, fx, previousCli, enableCalls, pointer } = await applyWithRealRuntime('runtime-auto', { trigger: 'auto' })
+test('a scheduled swap on a migrated machine is a completed swap: no pending code, no handover owed', async () => {
+  // This is what the entry design bought. Before it, *every* scheduled version move left the machine
+  // running the previous updater until a person flipped the switch, which is the same failure §11
+  // exists to remove — a release that fixes the updater would keep not arriving.
+  const { result, fx, enableCalls, pointer } = await applyWithRealRuntime('runtime-auto-steady')
   try {
     assert.equal(result.status, 'applied', result.message)
-    assert.equal(result.code, null, '换了代不等于失败：这条是"稍后接手"，不是降级')
+    assert.equal(result.code, null, `定时那一次也不再留待办：${result.code} / ${result.message}`)
+    assert.equal(result.runtime.status, 'refreshed', JSON.stringify(result.runtime))
+    assert.equal(result.runtime.agentVerified, true, JSON.stringify(result.runtime))
+    assert.deepEqual(enableCalls, [], '定时作业里绝不许出现 bootout/bootstrap：那是在半路拆掉自己')
+    assert.equal(fs.existsSync(pointer.pointer.updaterCli), true, '新那份代码要在指针说的位置上')
+  } finally {
+    fx.cleanup()
+  }
+})
+
+test('a scheduled swap on a pre-entry machine is the one-time migration, said as one-time', async () => {
+  const { result, fx, previousCli, enableCalls, pointer } = await applyWithRealRuntime('runtime-auto', { trigger: 'auto', entryMigrated: false })
+  try {
+    assert.equal(result.status, 'applied', result.message)
+    assert.equal(result.code, null, '换了代不等于失败：这条是"注册待迁移"，不是换版降级')
     assert.equal(result.runtime.status, 'skipped', JSON.stringify(result.runtime))
     assert.equal(result.runtime.agentVerified, false)
-    assert.deepEqual(enableCalls, [], 'scheduled 的那一次绝不能 bootout 自己这个作业')
+    assert.deepEqual(enableCalls, [], '注册留到人工那一次：这次运行就是那个作业')
     assert.equal(fs.readFileSync(previousCli, 'utf8'), 'PREVIOUS UPDATER\n', '旧那份仍完整：作业还指着它')
     assert.equal(fs.existsSync(pointer.pointer.updaterCli), true, '新那份也要真在盘上，下一次 enable 才有的可指')
-    fx.cleanup()
+    assert.match(result.message, /no future version needs it/, `要说清这只发生一次：${result.message}`)
   } finally {
     fx.cleanup()
   }
@@ -1435,6 +1496,7 @@ test('a rollback that happens after the handover takes the pointer and the job b
   writePointer(fx.stateRoot, { updaterCli: previousCli, installRoot: previousRoot, agentLabel: AGENT_LABEL }, { now: NOW })
   fs.mkdirSync(path.join(fx.treePath, 'updater'), { recursive: true })
   fs.writeFileSync(path.join(fx.treePath, 'updater', 'cli.js'), 'NEW UPDATER\n')
+  const entry = path.join(writableRoots(fx.stateRoot).runtime, 'agent-entry.js')
   const enableCalls = []
   const undoEnableCalls = []
   try {
@@ -1453,10 +1515,9 @@ test('a rollback that happens after the handover takes the pointer and the job b
       npm: okNpm,
       // 交接成功之后才炸的那一步：§9 重新导出根证书束。
       refreshCa: () => { throw new Error('ca-roots.pem could not be written: the volume refuses chmod') },
-      // 交回去之后要把在册作业读回来核对——这条控制里它是"旧那一份回来了"的唯一证据。正向那一读由
-      // 下面的包装自己管。
-      readRunningJobImpl: () => loadedWithCli(previousCli),
-      // 交回去那一步用的注册（undoHandover 自己也要走一次 `enable`）。正向的注册由下面的包装给。
+      // 这台机器的作业已经走稳定入口：回滚要做的那一件事就是把指针写回去，入口明天自然照它跑旧那份。
+      // 正反两读都答"在册的是入口"，于是任何一次多余的注册都会在这里露出来。
+      readRunningJobImpl: () => loadedWithCli(entry),
       runEnableImpl: ({ cliPath }) => {
         undoEnableCalls.push(cliPath)
         return { ok: true, message: null, parsed: { ok: true } }
@@ -1467,27 +1528,105 @@ test('a rollback that happens after the handover takes the pointer and the job b
           enableCalls.push(cliPath)
           return { ok: true, message: null, parsed: { ok: true } }
         },
-        readRunningJob: () => loadedWithCli(enableCalls[enableCalls.length - 1]),
+        readRunningJob: () => loadedWithCli(entry),
       }),
     })
     assert.ok(['rolled-back', 'rollback-failed'].includes(result.status), `交接之后才炸，答案要落在 §7 的 4/5 段：${result.status}`)
     assert.equal(result.code, CODES.postSwapFailed, `换的是 .app，回退也要按 §7 的 4/5 段报：${result.code}`)
     assert.equal(result.ok, false)
-    assert.deepEqual(enableCalls, [path.join(fx.stateRoot, 'runtime', '1.4.1', 'updater', 'cli.js')],
-      `正向注册只该有一次，交接给的是新那一份：${JSON.stringify(enableCalls)}`)
-    assert.deepEqual(undoEnableCalls, [previousCli],
-      `回滚之后要把作业交还给旧那一份，而且只交还一次：${JSON.stringify(undoEnableCalls)}`)
+    assert.deepEqual(enableCalls, [], `作业走的是稳定入口，换版不该再注册一次：${JSON.stringify(enableCalls)}`)
+    assert.deepEqual(undoEnableCalls, [],
+      `回滚同样不该注册——指针写回去就够了，多出来的那一次是没必要的动作：${JSON.stringify(undoEnableCalls)}`)
     const back = readPointer(fx.stateRoot)
     assert.equal(back.pointer.updaterCli, previousCli, JSON.stringify(back))
-    assert.match(result.message, /the pointer is back at/, `句子里要看得见作业交回去了：${result.message}`)
+    assert.match(result.message, /the pointer is back at/, `句子里要看得见指针回去了：${result.message}`)
+    assert.match(result.message, /goes through the stable entry/, `还要看得见为什么不必重新注册：${result.message}`)
     const state = loadState(fx.stateRoot).state
     assert.equal(state.runtime.status, 'failed', JSON.stringify(state.runtime))
-    assert.equal(state.runtime.agentVerified, true, '这一条说的是"已核对过：在册的是旧那一份"')
+    assert.equal(state.runtime.agentVerified, true, '在册作业核对过：它走稳定入口，入口照回去的指针跑旧那一份')
     assert.equal(state.current, '1.4.0', '回退之后 current 要跟着回去')
     assert.match(fx.installedBytes(), /installed/,
       '先证明 .app 真的被换回去了（装回的是备份那份）——不然这条控制测的是回滚以外的东西')
   } finally {
     await daemon.close()
+    fx.cleanup()
+  }
+})
+
+test('a rollback of a deferred handover puts the pointer back without registering: that run *is* the job', async () => {
+  // §11.12's scheduled shape, which is what a daily apply actually produces on a machine that has not
+  // been migrated yet. The forward step stopped at the pointer *because* registering from inside the
+  // daily job means `bootout` of the process doing the update, so the loaded definition still names the
+  // previous generation. The undo must not repair that by making the call the forward step refused: it
+  // puts the pointer back, leaves the book alone, and lets the read-back decide whether the machine is
+  // consistent rather than asserting that it is.
+  const { result, fx, previousCli, undoEnableCalls, enableCalls, pointer } = await applyWithRealRuntime('runtime-undo-defer', {
+    trigger: 'auto',
+    entryMigrated: false,
+    extraDeps: { refreshCa: () => { throw new Error('ca-roots.pem could not be written: the volume refuses chmod') } },
+  })
+  try {
+    assert.equal(result.code, CODES.postSwapFailed, result.message)
+    assert.equal(result.runtime.status, 'failed', JSON.stringify(result.runtime))
+    assert.deepEqual(enableCalls, [], '定时那一次正反两趟都不许注册：那是在半路拆掉自己')
+    assert.deepEqual(undoEnableCalls, [],
+      `回滚更不许：唯一能在这里注册的理由，就是刚刚被拒绝的那个理由：${JSON.stringify(undoEnableCalls)}`)
+    assert.equal(pointer.pointer.updaterCli, previousCli, JSON.stringify(pointer))
+    assert.equal(fs.readFileSync(previousCli, 'utf8'), 'PREVIOUS UPDATER\n',
+      '在册作业还指着那一代，所以它必须在盘上——回滚把没人指的代删掉就是明天早上的 Cannot find module')
+    assert.match(result.message, /nothing was re-registered/, `要看得见这一步是有意跳过的：${result.message}`)
+    assert.match(result.message, /generation 1\.4\.0/, `在册的那一代要写进句子，读者才知道作业还指着谁：${result.message}`)
+    assert.equal(result.runtime.agentVerified, true,
+      '作业没被换过，而它指的就是指针回去的那一份——这是读回来的，不是假设的')
+    assert.equal(loadState(fx.stateRoot).state.runtime.agentVerified, true, '面板读状态文件，也要读到同一句话')
+  } finally {
+    fx.cleanup()
+  }
+})
+
+test('an undo whose book went unreadable hands the definition back instead of assuming the entry', async () => {
+  // The conservative half of §11.12. The forward step proved the job goes through the entry; then
+  // `launchctl print` stops answering — a domain that is not booted, a job somebody unloaded — and not
+  // knowing what is loaded is not evidence that it is the entry. Saying "the pointer is back, so the
+  // entry will pick it up" about a book that never answered would be the exact lie this function exists
+  // to prevent, so the previous copy is asked to register itself and the record says it could not verify.
+  const unreadable = { ok: false, unknown: true, code: CODES.busyOrUnreachable, reason: 'launchctl print gui/501/com.glasspane.update answered 113: Could not find service' }
+  const { result, fx, previousCli, undoEnableCalls, pointer } = await applyWithRealRuntime('runtime-undo-blind', {
+    undoLoaded: unreadable,
+    extraDeps: { refreshCa: () => { throw new Error('ca-roots.pem could not be written: the volume refuses chmod') } },
+  })
+  try {
+    assert.equal(result.code, CODES.postSwapFailed, result.message)
+    assert.deepEqual(undoEnableCalls, [previousCli],
+      `读不到在册作业时的出路是让旧那份自己重注册：${JSON.stringify(undoEnableCalls)}`)
+    assert.equal(pointer.pointer.updaterCli, previousCli, JSON.stringify(pointer))
+    assert.match(result.message, /re-registered the job/, `那一次注册要在句子里看得见：${result.message}`)
+    assert.equal(result.runtime.agentVerified, false,
+      '读不回来就不能声称核对过——这条控制的全部意义是"未读"和"已核对"是两个答案')
+    assert.match(result.message, /was not read back/, `还要把读不回来这件事说出来：${result.message}`)
+  } finally {
+    fx.cleanup()
+  }
+})
+
+test('an undo on a switched-off machine registers nothing, because the job it would hand back does not exist', async () => {
+  // The forward step's `kept` record says no job was registered, and the machine is that way because the
+  // owner switched automatic update off. `enable` is the one call that would give it a job again — so a
+  // rollback that "restores the agent" here silently turns the user's switch back on and writes a history
+  // row that says they turned it on themselves.
+  const { result, fx, previousCli, undoEnableCalls, pointer } = await applyWithRealRuntime('runtime-undo-off', {
+    disabled: true,
+    extraDeps: { refreshCa: () => { throw new Error('ca-roots.pem could not be written: the volume refuses chmod') } },
+  })
+  try {
+    assert.equal(result.code, CODES.postSwapFailed, result.message)
+    assert.deepEqual(undoEnableCalls, [],
+      `关了自动更新的机器上，回滚这一趟也不许注册：${JSON.stringify(undoEnableCalls)}`)
+    assert.equal(pointer.pointer.updaterCli, previousCli, '面板跑的就是指针那一份，它照样得回去')
+    assert.match(result.message, /switched off on this machine/, `句子要说清为什么没注册：${result.message}`)
+    assert.equal(result.runtime.agentVerified, false, '没有作业可读，就没有核过')
+    assert.equal(fs.readFileSync(previousCli, 'utf8'), 'PREVIOUS UPDATER\n')
+  } finally {
     fx.cleanup()
   }
 })
@@ -1501,6 +1640,7 @@ test('the handover child writes state, and the parent does not overwrite it', as
   // 直接引用它只会抛 TDZ，于是这一条测的根本不是丢更新（第一版就是这样"红得像是证明了什么"）。
   const wrote = []
   const { result, fx, enableCalls } = await applyWithRealRuntime('runtime-lostupdate', {
+    entryMigrated: false,
     enableWritesState: ({ stateRoot }) => {
       const fresh = loadState(stateRoot).state
       wrote.push(saveState(stateRoot, nextState(fresh, {

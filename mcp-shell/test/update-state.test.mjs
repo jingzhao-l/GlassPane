@@ -342,7 +342,7 @@ test("runtime: refreshed with the job read back is the one usable state, and it 
   assert.match(runtimeLine, /^updater self-update: refreshed — /);
   assert.match(runtimeLine, new RegExp(RUNTIME_ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
     "the installed copy is named by the path the record wrote, not by a description of one");
-  assert.match(runtimeLine, /the loaded launchd job was read back and names that script/);
+  assert.match(runtimeLine, /the loaded launchd job was read back and seen to go through the stable entry/);
   assert.match(runtimeLine, /recorded at 2026-09-30T01:02:03\.000Z/, "the stamp is the reader's only age signal");
   assert.match(runtimeLine, /without anyone reinstalling/);
 });
@@ -362,10 +362,10 @@ test("runtime: a refreshed whose agentVerified is not true is decoded, never usa
     assert.equal(reading.runtime.agentVerified, expectedAgent, label);
     assert.equal(runtimeIsUsable(reading.runtime), false, `${label} cannot be claimed usable`);
     assert.match(runtimeLine, /^updater self-update: refreshed, but not confirmed — /);
-    assert.match(runtimeLine, /never read back naming that script/);
+    assert.match(runtimeLine, /never read back going through that entry/);
     assert.match(runtimeLine, /may still execute the previous one/);
     assert.match(runtimeLine, /Remedy:/);
-    assert.equal(runtimeLine.includes("is in place and the loaded launchd job was read back"), false,
+    assert.equal(runtimeLine.includes("is in place and the loaded launchd job was read back and seen to go through"), false,
       `${label} must not print the confirmed sentence: ${runtimeLine}`);
   }
   // The key absent is the fourth shape: the record has nothing to report, so it reads as
@@ -434,11 +434,11 @@ test("runtime: kept is the machine's own switch, not a failure and not a deliver
   // The two things `kept` must never borrow: the failed sentence (it is not a broken swap)
   // and the refreshed sentence (nothing was registered, so nothing was proven).
   assert.equal(runtimeLine.includes("did not move"), false, runtimeLine);
-  assert.equal(runtimeLine.includes("is in place and the loaded launchd job was read back"), false, runtimeLine);
+  assert.equal(runtimeLine.includes("was read back and seen to go through the stable entry"), false, runtimeLine);
   assert.match(runtimeLine, new RegExp(RUNTIME_ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
-test("runtime: skipped says nothing was attempted, and is not read as current", async () => {
+test("runtime: skipped says the code and the entry landed and one migration is owed, not that nothing ran", async () => {
   const { runtimeLine, reading } = await diagnoseWithRuntime(runtimeRecord("skipped", {
     version: null, cliPath: null, agentVerified: null,
   }));
@@ -447,10 +447,19 @@ test("runtime: skipped says nothing was attempted, and is not read as current", 
   assert.equal(reading.runtime.cliPath, null);
   assert.equal(runtimeIsUsable(reading.runtime), false);
   assert.match(runtimeLine, /^updater self-update: skipped — /);
-  assert.match(runtimeLine, /did not attempt the updater's own swap/);
+  // 稳定入口之后这一支的真实内容：代码、指针、入口都落了，缺的只是把作业挪到入口上。旧句子
+  // "did not attempt the updater's own swap" 在这台机器上是假的——它会把人支着去等下一轮，而那一步从来不会自己来。
+  assert.match(runtimeLine, /the updater's code, the installer pointer and the stable agent entry all moved/);
+  assert.match(runtimeLine, /owes one migration/);
+  assert.match(runtimeLine, /would unregister the job that is running it/);
   assert.match(runtimeLine, /rather than as current/);
-  assert.match(runtimeLine, /Remedy:/);
+  assert.match(runtimeLine, /Remedy/);
+  // "一次"必须是句子的一部分：不这么说，读者会以为每一轮都欠这一次人工动作。
+  assert.match(runtimeLine, /Remedy \(one time\)/);
+  assert.match(runtimeLine, /no future release will ask for this step/);
   assert.equal(runtimeLine.includes("updater self-update: refreshed"), false, runtimeLine);
+  // 没有新路径时不许凭空印一个
+  assert.equal(/the copy that would run next is (null|undefined)/.test(runtimeLine), false, runtimeLine);
 });
 
 test("runtime: absent and explicit null both read as 'never recorded', and the caller can tell them apart", async () => {

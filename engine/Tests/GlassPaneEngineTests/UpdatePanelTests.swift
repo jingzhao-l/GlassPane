@@ -986,6 +986,10 @@ final class UpdatePanelTests: XCTestCase {
         XCTAssertTrue(skipped.contains("enable"), "要说清下一次接手靠什么：\(skipped)")
         XCTAssertTrue(skipped.contains("开关"), "面板上做得动的那一下也要看得见：\(skipped)")
         XCTAssertFalse(skipped.contains("这不是「更新失败」"), "这一轮压根没尝试，谈不上失败：\(skipped)")
+        // 稳定入口之后这一支只剩"这台机器欠一次迁移"。不说"一次"，读者会以为每一轮都欠这一次的
+        // 人工动作，于是要么反复开关那个开关，要么去重装——两条都是白做的功。
+        XCTAssertTrue(skipped.contains("只做这一次"), "要说清这一步只发生一次：\(skipped)")
+        XCTAssertTrue(skipped.contains("按版本点名"), "要说清在册的那一条现在长什么样：\(skipped)")
     }
 
     /// 反向变异：**没有路径时也印出一个路径**（自己拼一个、或留一个模板），
