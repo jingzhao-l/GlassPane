@@ -534,6 +534,21 @@ export function humanLine(payload) {
   return bits.join(' ')
 }
 
+/**
+ * The one line a plain (non-`--json`) run prints for an outcome.
+ *
+ * First **non-empty** of `message` / `reason`, then the state summary. Not "first present": `check` used to
+ * stage an update with `message: ''` — the consent note and the authorship note were both absent, and two
+ * nulls joined into an empty string — and `??` passes an empty string through, so the command printed
+ * `check: ` and stopped. On a machine where the honest answer was "1.6.0 is staged, press Install update",
+ * an empty line reads as a command that answered nothing (found by running the real thing on 2026-10-01).
+ */
+export function plainTextLine(outcome = {}) {
+  return [outcome.message, outcome.reason]
+    .find((line) => typeof line === 'string' && line !== '')
+    ?? humanLine(outcome.state ?? {})
+}
+
 /** The exactly-one-line JSON document `--json` prints. */
 export function jsonLine(outcome) {
   const base = outcome.state && typeof outcome.state === 'object' ? outcome.state : {}
@@ -658,8 +673,7 @@ export async function main({ argv = process.argv.slice(2), env = process.env, st
   if (parsed.flags.json) {
     stdout.write(`${jsonLine({ ...outcome, exitCode: code })}\n`)
   } else {
-    const text = outcome.message ?? outcome.reason ?? humanLine(outcome.state ?? {})
-    stderr.write(`${parsed.command}: ${text}\n`)
+    stderr.write(`${parsed.command}: ${plainTextLine(outcome)}\n`)
   }
   return code
 }

@@ -296,6 +296,11 @@ export async function runCheck({
     const message = [needsConsent ? decision.reason : null, standing?.message ?? null]
       .filter((line) => typeof line === 'string' && line !== '')
       .join(' ')
+      // A clean stage has to say so out loud. Without this the sentence is `''`, and `updater check` on a
+      // machine that just staged an update printed `check: ` and nothing else — which reads like the command
+      // produced no answer, when the honest answer is "there is one, and here is what to press" (found by
+      // running the real thing on 2026-10-01, right after the first successful 1.6.0 update).
+      || `staged ${candidate.version} (sha256 ${verified.digest.slice(0, 12)}); press "Install update" or run "updater apply"`
     return finish(
       {
         status: needsConsent ? 'needs-consent' : 'staged',
