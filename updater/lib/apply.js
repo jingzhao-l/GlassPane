@@ -608,14 +608,65 @@ function npmUndoLine(repairs, { style = 'named', failureTail = '' } = {}) {
     : `${r.name} put back at ${r.to}`)).join('; ')
 }
 
-/** The `package.json` of one staged package: the name and version that were verified. */
+/** The `package.json` of one staged package: the name and version that were verified, and what it promises to install as a command. */
 function defaultReadStagedPackageJson(dir) {
   try {
     const parsed = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))
-    return { name: parsed?.name ?? null, version: parsed?.version ?? null }
+    return { name: parsed?.name ?? null, version: parsed?.version ?? null, commands: commandTargets(parsed) }
   } catch {
     return null
   }
+}
+
+/**
+ * The `bin` field as a list of `{command, target}`. npm accepts a bare string (one command, named after the
+ * package) or an object; `./cli.js` and `cli.js` are the same file, so the target is kept as written.
+ */
+export function commandTargets(manifest) {
+  const bin = manifest?.bin
+  if (typeof bin === 'string') return [{ command: manifest?.name ?? 'the package itself', target: bin }]
+  if (bin && typeof bin === 'object') {
+    return Object.entries(bin)
+      .filter(([command, target]) => typeof command === 'string' && typeof target === 'string')
+      .map(([command, target]) => ({ command, target }))
+  }
+  return []
+}
+
+/**
+ * §3.5's other pre-flight: the staged release has to contain the commands its packages declare.
+ *
+ * Measured on a real machine on 2026-10-01: the release archive was `git archive HEAD` — pure source — so the
+ * staged `mcp-shell` had no `dist/`. `npm pack` there produced a package of three entries, `npm install -g`
+ * exited 0, `npm ls -g` read the version back correctly, and §3.3's MCP half then died on
+ * `glasspane-mcp could not run (ENOENT)`. Every one of those answers was honest about a package that could
+ * never run, and the machine paid for it with a swap and a rollback. Asking is two `existsSync` calls, and it
+ * is asked **before** anything moves: this is the same class of fact as "the prefix is not writable", and the
+ * remedy is the same shape — the publisher shipped an archive that cannot produce a runnable package, which
+ * `release-payload-invalid` says without pretending a retry would help.
+ */
+export function checkStagedNpmCommands({
+  stagedTree,
+  packageDirs = ['mcp-shell', 'installer'],
+  fsImpl = fs,
+  readStagedPackageJson = defaultReadStagedPackageJson,
+} = {}) {
+  for (const rel of packageDirs) {
+    const dir = path.join(stagedTree, rel)
+    if (!fsImpl.existsSync(dir)) continue // `installNpmPackages` already refuses a staged tree missing a package
+    const claim = readStagedPackageJson(dir)
+    if (!claim) return { ok: false, dir, reason: `${path.join(dir, 'package.json')} cannot be read: the package this step would install is unknown` }
+    for (const { command, target } of claim.commands ?? []) {
+      if (fsImpl.existsSync(path.join(dir, target))) continue
+      return {
+        ok: false,
+        dir,
+        reason: `${rel} declares the command "${command}" at ${target}, which the staged release does not contain`,
+        remedy: 'the release archive has to carry this file: the build that produces it runs in the publisher (`.github/workflows/release.yml` → `scripts/make-release-archive.mjs`), and an archive that omits it installs a package that cannot run',
+      }
+    }
+  }
+  return { ok: true, dir: null, reason: null, remedy: null }
 }
 
 /** The shape of "this run was not given a way to touch the machine", said rather than done. */
@@ -786,6 +837,14 @@ export async function applyUpdate({
   // default here shell out to a real `npm config` would make every one of those tests read the
   // developer's machine instead of the code under test.
   preflightNpm = npm === installNpmPackages ? checkNpmPrefix : () => ({ ok: true, prefix: null, dir: null, reason: null }),
+  /**
+   * The staged tree's own completeness, asked before the swap and on the same terms as `preflightNpm`: a
+   * caller that injects `npm` owns that layer (every test of the sequence does), so the default here must not
+   * go reading the developer's tree as though it were the release under test.
+   */
+  preflightNpmCommands = npm === installNpmPackages
+    ? checkStagedNpmCommands
+    : () => ({ ok: true, dir: null, reason: null, remedy: null }),
   /**
    * The undo for the npm layer, through the same seam as its install.
    *
@@ -959,6 +1018,20 @@ export async function applyUpdate({
       + '`glasspane-install` are installed with `npm install -g` *after* the bundles swap, and this account '
       + 'cannot write where npm would put them. ' + remedy,
       { details: { prefix: npmReady.prefix, dir: npmReady.dir } })
+  }
+
+  // The other half of the same question: the release may be *installable* by an account that can write its
+  // prefix and still ship a package with nothing to run. Measured on 2026-10-01 against v1.5.1, where the
+  // archive was pure source: `npm pack` produced a three-entry package, `npm install -g` exited 0, the
+  // version read back correctly, and the MCP half of the handshake died on `ENOENT` — after the swap.
+  const commandsReady = preflightNpmCommands({ stagedTree: staged.rootPath })
+  if (!commandsReady.ok) {
+    return fail('deferred', CODES.releaseBadPayload,
+      'the staged release cannot produce a runnable npm package: '
+      + (commandsReady.reason ?? 'a declared command of one of the two packages is missing from the tree')
+      + '. Nothing was replaced and the daemon was not restarted. This is the publisher\'s artifact, not this '
+      + 'machine: ' + (commandsReady.remedy ?? 'the release archive has to carry the file the package declares.'),
+      { details: { dir: commandsReady.dir } })
   }
 
   // From here on the live bundles may change: back them up first.

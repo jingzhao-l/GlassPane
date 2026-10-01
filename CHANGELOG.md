@@ -12,6 +12,44 @@
 是有意的跳过，不是漏发。
 
 
+### Fixed — 高危（真机测出）：发布归档没有 JS 构建产物，任何 1.5.x 机器都升不上来
+
+chown 做完之后第一次真跑完整换版（1.5.0 → 1.5.1）拿到的是 `exit 4 / rolled-back`，句子读起来仍然自相矛盾：
+
+> after 15000ms the daemon … does not report 1.5.1 (hello said "1.5.1") and the MCP layer answered
+> "unavailable: glasspane-mcp could not run (ENOENT)" … the npm packages were glasspane-mcp removed again
+> (this machine had none); glasspane-install removed again (this machine had none)
+
+每一句都是真的，而合起来指向一个上一节没看见的事实：**发布归档是 `git archive HEAD`，纯源码**。
+`mcp-shell` 的 `package.json` 说它的命令是 `dist/index.js`，而 `dist` 是构建产物、没被提交，于是
+`apply` 在暂存树里 `npm pack` 出来的 tgz 只有三个条目（`package.json`/`LICENSE`/`README.md`，
+`tar -tzf` 实测）。npm 装这种包**退 0**，`npm ls -g` 读回**版本也对**，跑起来才是 `ENOENT`。
+上一节把 `tools/list` 挪到 npm 之后，只是让这道门在正确的位置拒绝；包的内容仍然是空的。
+
+这不是"我这台机器的事"：`npm pack` 那段代码已经随 1.5.0/1.5.1 发出去了，所以**任何**用这条路安装的机器
+都无法自动升到任何新版本。两个可选解法被否掉：
+
+- 让 `apply` 在目标机上构建 JS（`npm ci && tsc && esbuild`）⇒ 每次自动更新都要联网装开发依赖、要跑
+  esbuild 的平台 postinstall，把"更新"变成一次构建；
+- 把两个 tgz 作为额外 release 资产、更新器改下载它们 ⇒ 已发布的 1.5.x 代码不认识新资产，旧机器照样升不上来。
+
+采用的解法：**归档本身带着这两份构建产物**。新增 `scripts/make-release-archive.mjs`（用本仓自己的确定性
+tar 写手：uid/gid/mtime 全 0、条目按 git 的字节序、gzip 无时间戳、打包两次比对字节才落盘），内容 = `git ls-files`
+的树 + `mcp-shell/dist` + `mcp-shell/schemas`；缺任何一份构建产物就**拒绝发版**，声明了的 `bin` 不在树里也拒绝。
+`release.yml` 因此先 `npm ci && npm run build && npm run bundle` 再调它，并加一步 `tar -tzf` 自证归档里确实有
+那个命令。规格 §1 里"确定性源码 tarball"这句同步改口：可复现的承诺没有变，变的是**复现的是什么**。
+
+updater 一侧补上与之对称的预检（`checkStagedNpmCommands`，§3.5 的 4d）：暂存树里 `package.json` 声明的命令
+文件不存在 ⇒ **在备份之前** `deferred` + `release-payload-invalid`，句子里说清缺的是哪一个命令、这是发布产物
+的问题。真机那次付出的代价是"换完 `.app`、重启完 daemon、装完全局包"之后才发现跑不起来；现在同样的事实只花
+两次 `existsSync`。
+
+控制：`updater/test/release-archive.test.mjs` 五条，其中一条是**整链**——临时 git 仓 → 真脚本 → 用更新器
+自己的解包器解开 → `npm pack` → `npm install -g` 到临时 prefix → 那个命令真的跑得起来（这条就是当年能拦住
+这个缺陷的那条测试）；`apply.test.mjs` 加两条（换版前的拒绝，带构建/kickstart/npm 三根引线；预检对"少一条"
+"齐了""manifest 读不出"三种形状各自的答案）。反向变异：从必需产物清单里删掉 `mcp-shell/dist`、去掉条目排序、
+删掉 `commandsReady` 那块、让缺文件的预检返回 `ok:true`，各自变红。
+
 ### Fixed — 下载有三个时钟，而兜底那一条不再当主判据；发布声明的资产长度成了一条要核对的断言
 
 `updater` 的下载只有两个时钟：`stallMs`（逐段重置）与 `timeoutMs`（兜底总时长）。设计上兜底不该管事，实测里
