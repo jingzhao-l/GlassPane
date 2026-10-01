@@ -78,8 +78,34 @@ test('an asset with no download url, and a non-https one, both refuse', () => {
 })
 
 test('assetIndex ignores assets with no name and keeps the payload order', () => {
-  assert.deepEqual(assetIndex({ assets: [{ url: 'x' }, { name: 'a' }] }), [{ name: 'a', url: null }])
+  assert.deepEqual(assetIndex({ assets: [{ url: 'x' }, { name: 'a' }] }), [{ name: 'a', url: null, bytes: null }])
   assert.deepEqual(assetIndex(null), [])
+})
+
+test('the release declares how long each asset is, and that claim is carried through', () => {
+  // Sizes are the ones the API really answers for v1.5.1 (measured: `GET releases/tags/v1.5.1` gives
+  // 25,126,902 for the tarball and 89 for the checksum file). `requireAssetPair` has to hand them to
+  // `check.js`, because the length claim is only a control if the code that reads the body can see it.
+  const release = {
+    assets: [
+      { name: 'GlassPane-1.4.0.tar.gz', browser_download_url: DOWNLOAD + 'GlassPane-1.4.0.tar.gz', size: 25126902 },
+      { name: 'SHA256SUMS-1.4.0.txt', browser_download_url: DOWNLOAD + 'SHA256SUMS-1.4.0.txt', size: 89 },
+    ],
+  }
+  const pair = requireAssetPair(release, { version: '1.4.0', base: BASE })
+  assert.equal(pair.tarballBytes, 25126902)
+  assert.equal(pair.sumsBytes, 89)
+
+  // A payload that says nothing about length must not become a phantom claim: `null` means "nothing to
+  // check against", and the download is judged on its checksum instead.
+  const silent = requireAssetPair(releaseWith('GlassPane-1.4.0.tar.gz', 'SHA256SUMS-1.4.0.txt'), { version: '1.4.0', base: BASE })
+  assert.equal(silent.tarballBytes, null)
+  assert.equal(silent.sumsBytes, null)
+
+  // Garbage is the same as absent — a `size` this code cannot trust must not refuse a real download.
+  for (const junk of ['25126902', -1, 1.5, null, undefined]) {
+    assert.equal(assetIndex({ assets: [{ name: 'x', size: junk }] })[0].bytes, null, `${JSON.stringify(junk)} 不是一个可信的长度`)
+  }
 })
 
 function capture(fn) {

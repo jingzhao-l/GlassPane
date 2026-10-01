@@ -308,49 +308,124 @@ export function makeFetcher(fetchImpl = globalThis.fetch, { timeoutMs = 20_000, 
 /**
  * Binary transport (tarball / SUMS file). Returns bytes; never text-decodes.
  *
- * Two different clocks, because the release archive is ~24 MiB (measured: 25,126,902
- * bytes for v1.5.1) and a single total-time cap cannot tell "slow but alive" from
- * "dead connection". The old 120s cap did neither: on a loaded/proxied link it aborted
- * a *progressing* download ("GET … failed: This operation was aborted" — seen on a real
- * machine 2026-09-29, 39s uncontended, >120s under contention), and the message named
- * neither the deadline nor how much had arrived, so nobody could tell a stalled proxy
- * from a broken network.
+ * Three clocks, because the release archive is ~24 MiB (measured: 25,126,902 bytes for v1.5.1 — the same
+ * number the GitHub API declares in `assets[].size` and the CDN answers in `content-length`, both measured
+ * on this machine) and a single total-time cap cannot tell "slow but alive" from "dead connection". The 120s
+ * cap that came first did neither: it aborted a *progressing* download ("GET … failed: This operation was
+ * aborted" — seen on a real machine 2026-09-29, 39s uncontended, >120s under contention) and named neither
+ * the deadline nor how much had arrived.
  *
- *  · `stallMs` — no bytes at all for this long ⇒ refuse. This is the **sharper** guard:
- *    a dead connection is now caught in 30s instead of being confused with a slow one.
- *  · `timeoutMs` — an overall ceiling so a trickling server cannot hold the daily job
- *    open forever. Raising it is not an accommodation: the stall clock is what decides
- *    liveness, and both outcomes say which fired and how many bytes arrived.
+ *  · `stallMs` — no bytes at all for this long ⇒ refuse. The sharpest guard: a dead connection is caught in
+ *    30s instead of being confused with a slow one.
+ *  · `minRateBps` — bytes still arriving, but too slowly to be worth finishing. This is the judge that
+ *    decides what "slow" means, and it is costed rather than picked: at 16 KiB/s the archive needs 25 min,
+ *    which fits inside the day; at 4 KiB/s it needs 100 min, so the next scheduled run arrives before this
+ *    one could finish. A refusal after `rateWindowsBeforeRefusal` consecutive under-floor windows says what
+ *    the rate measured, what the floor is, and what the file would have taken.
+ *  · `timeoutMs` — a ceiling so nothing can hold the daily job open forever. With a declared length the
+ *    ceiling is *raised* to `declared / minRateBps × DOWNLOAD_BUDGET_SLACK` when that is longer, because the
+ *    floor is what judges slowness and the ceiling must not quietly become the primary criterion — which is
+ *    exactly how a live 26 KiB/s stream got cut at 900s. It is never lowered, never raised past
+ *    `maxCeilingMs` (1 GiB declared at this floor would otherwise ask for 27 hours), and a stream that
+ *    declares nothing keeps `timeoutMs`.
+ *
+ * Every refusal names which clock fired and how many bytes had arrived.
  */
 export const DOWNLOAD_STALL_MS = 30_000
 export const DOWNLOAD_CEILING_MS = 900_000
+export const DOWNLOAD_MIN_RATE_BPS = 16 * 1024
+export const DOWNLOAD_RATE_WINDOW_MS = 15_000
+export const DOWNLOAD_RATE_WINDOWS_BEFORE_REFUSAL = 2
+export const DOWNLOAD_BUDGET_SLACK = 1.5
+/**
+ * The most a widened ceiling may ever wait.
+ *
+ * Costed, not picked: at the rate floor (16 KiB/s) 45 minutes covers 43 MiB, and the release archive is
+ * 24 MiB — a legitimate download never needs more, while a `content-length` from a proxy that intends to
+ * trickle forever would otherwise buy itself hours (1 GiB declared at this floor is 27 hours). Widening
+ * exists to stop the ceiling from being the primary criterion; an unbounded widening would instead remove it.
+ */
+export const DOWNLOAD_CEILING_MAX_MS = 2_700_000
 
 const humanBytes = (n) => (n >= 1024 * 1024
   ? `${(n / (1024 * 1024)).toFixed(1)} MiB`
-  : `${(n / 1024).toFixed(0)} KiB`)
+  : n >= 1024
+    ? `${(n / 1024).toFixed(0)} KiB`
+    : `${n} B`)
+
+/**
+ * A rate, with one decimal: the floor is 16 KiB/s and the measurements that matter sit either side of it,
+ * so the two-digit-integer form (`humanBytes`) printed every crawling stream as "0 KiB/s" — a number that
+ * tells the reader nothing while the sentence claims to say what was measured.
+ */
+const humanRate = (bps) => (bps >= 1024 * 1024
+  ? `${(bps / (1024 * 1024)).toFixed(2)} MiB/s`
+  : `${(bps / 1024).toFixed(1)} KiB/s`)
+
+/**
+ * A duration in words. Sub-second values keep a decimal: injected test clocks are milliseconds, and a
+ * refusal that printed "did not finish within 0s" while the clock it used was 200ms would be a message
+ * that misstates the very number it exists to name.
+ */
+const humanSeconds = (ms) => (ms >= 10_000
+  ? `${Math.round(ms / 1000)}s`
+  : ms >= 1_000
+    ? `${(ms / 1000).toFixed(1)}s`
+    : `${Math.round(ms)}ms`)
+
+/**
+ * The length this response declares, or `null` when it declares nothing readable.
+ *
+ * Only used to *widen* a budget, never to judge the bytes themselves: `content-length` describes the
+ * transfer, and a transport that re-encodes the body can honestly answer with a different number than the
+ * release's own `assets[].size`. The length claim that gets the archive refused is checked against the
+ * release payload in `check.js`, where the two numbers are the same kind of thing.
+ */
+function declaredLengthOf(response) {
+  const raw = typeof response?.headers?.get === 'function' ? response.headers.get('content-length') : null
+  const text = String(raw ?? '').trim()
+  if (!/^\d+$/.test(text)) return null
+  const n = Number(text)
+  return Number.isSafeInteger(n) ? n : null
+}
 
 export function makeBytesFetcher(fetchImpl = globalThis.fetch, {
   timeoutMs = DOWNLOAD_CEILING_MS,
   stallMs = DOWNLOAD_STALL_MS,
+  minRateBps = DOWNLOAD_MIN_RATE_BPS,
+  rateWindowMs = DOWNLOAD_RATE_WINDOW_MS,
+  rateWindowsBeforeRefusal = DOWNLOAD_RATE_WINDOWS_BEFORE_REFUSAL,
+  maxCeilingMs = DOWNLOAD_CEILING_MAX_MS,
   caBundlePath = null,
 } = {}) {
   return async function fetchBytes(url) {
     const controller = new AbortController()
+    const startedAt = Date.now()
     let fired = null
     let received = 0
+    let declared = null
+    let lastRate = null
+    let ceilingMs = timeoutMs
     let stallTimer = null
+    let ceilingTimer = null
+    const stop = (why) => {
+      fired = why
+      controller.abort()
+    }
     const armStall = () => {
       if (!(stallMs > 0)) return
       clearTimeout(stallTimer)
-      stallTimer = setTimeout(() => {
-        fired = 'stall'
-        controller.abort()
-      }, stallMs)
+      stallTimer = setTimeout(() => stop('stall'), stallMs)
     }
-    const ceiling = setTimeout(() => {
-      fired = 'ceiling'
-      controller.abort()
-    }, timeoutMs)
+    // Arming from `startedAt` means a re-arm only ever extends what is left, so a slow *header* still dies
+    // on the original ceiling while a declared 24 MiB body gets the longer budget it asked for.
+    const armCeiling = (totalMs) => {
+      if (!(totalMs > 0)) return
+      ceilingMs = totalMs
+      clearTimeout(ceilingTimer)
+      ceilingTimer = setTimeout(() => stop('ceiling'), Math.max(1, totalMs - (Date.now() - startedAt)))
+    }
+    armCeiling(timeoutMs)
     armStall()
     try {
       const response = await fetchImpl(url, { redirect: 'follow', signal: controller.signal, headers: { 'user-agent': 'glasspane-updater' } })
@@ -358,6 +433,13 @@ export function makeBytesFetcher(fetchImpl = globalThis.fetch, {
         throw new UpdaterError(CODES.releaseUnreachable, answered(url, response))
       }
       assertRedirectTarget(response.url, { requested: url })
+      declared = declaredLengthOf(response)
+      if (declared && minRateBps > 0) {
+        // Clamped twice: never below the caller's own ceiling, never above the widest wait this tool will
+        // make — otherwise a `content-length` from something that intends to trickle buys hours.
+        const budget = Math.min(Math.ceil((declared / minRateBps) * 1000 * DOWNLOAD_BUDGET_SLACK), maxCeilingMs)
+        if (budget > timeoutMs) armCeiling(budget)
+      }
       if (!response.body || typeof response.body.getReader !== 'function') {
         const once = new Uint8Array(await response.arrayBuffer())
         received = once.length
@@ -365,6 +447,9 @@ export function makeBytesFetcher(fetchImpl = globalThis.fetch, {
       }
       const reader = response.body.getReader()
       const chunks = []
+      let windowStart = Date.now()
+      let windowBytes = 0
+      let slowWindows = 0
       for (;;) {
         const { done, value } = await reader.read()
         if (done) break
@@ -372,15 +457,36 @@ export function makeBytesFetcher(fetchImpl = globalThis.fetch, {
           chunks.push(value)
           received += value.length
           armStall()
+          if (!(rateWindowMs > 0) || !(minRateBps > 0)) continue
+          const now = Date.now()
+          windowBytes += value.length
+          const elapsed = now - windowStart
+          if (elapsed < rateWindowMs) continue
+          lastRate = (windowBytes / elapsed) * 1000
+          if (lastRate < minRateBps) {
+            slowWindows += 1
+            if (slowWindows >= rateWindowsBeforeRefusal) {
+              stop('rate')
+              throw new UpdaterError(CODES.releaseUnreachable, stoppedForRate(url, { lastRate, minRateBps, received, declared, rateWindowMs }))
+            }
+          } else {
+            slowWindows = 0
+          }
+          windowStart = now
+          windowBytes = 0
         }
       }
       return new Uint8Array(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))))
     } catch (error) {
       if (error instanceof UpdaterError) throw error
       if (fired) {
+        const ofDeclared = declared ? ` of the ${humanBytes(declared)} this response declared` : ''
+        const widened = ceilingMs > timeoutMs
+          ? ` (the ${humanSeconds(timeoutMs)} default, widened to the ${humanSeconds(ceilingMs)} that this response's declared length asked for)`
+          : ''
         const why = fired === 'stall'
-          ? `no bytes arrived for ${Math.round(stallMs / 1000)}s after ${humanBytes(received)} had been received`
-          : `the whole download did not finish within ${Math.round(timeoutMs / 1000)}s with ${humanBytes(received)} received`
+          ? `no bytes arrived for ${humanSeconds(stallMs)} after ${humanBytes(received)} had been received`
+          : `the download did not finish within ${humanSeconds(ceilingMs)}${widened} with ${humanBytes(received)} received${ofDeclared}`
         throw new UpdaterError(
           CODES.releaseUnreachable,
           `GET ${url} was stopped: ${why}. The release is refused and nothing partial is staged, so the next run starts from a clean slate`,
@@ -392,7 +498,14 @@ export function makeBytesFetcher(fetchImpl = globalThis.fetch, {
       throw wrapped
     } finally {
       clearTimeout(stallTimer)
-      clearTimeout(ceiling)
+      clearTimeout(ceilingTimer)
     }
   }
+}
+
+/** The sentence for the rate floor: what it measured, what it needs, what that costs, what arrived. */
+function stoppedForRate(url, { lastRate, minRateBps, received, declared, rateWindowMs }) {
+  const measured = Number.isFinite(lastRate) && lastRate > 0 ? lastRate : minRateBps / 10
+  const wouldTake = declared ? ` at ${humanRate(measured)} that is ${Math.ceil((declared / measured) / 60)} min for this file` : ''
+  return `GET ${url} was stopped: it is alive but too slow to be worth finishing — ${humanRate(measured)} averaged over ${humanSeconds(rateWindowMs)}, under the ${humanRate(minRateBps)} the daily schedule needs${wouldTake}. ${humanBytes(received)} had arrived${declared ? ` of ${humanBytes(declared)} declared` : ''}. The release is refused and nothing partial is staged, so the next run starts from a clean slate`
 }

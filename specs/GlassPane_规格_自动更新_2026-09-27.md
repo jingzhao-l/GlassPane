@@ -25,11 +25,26 @@
   链接的位置**，mode 跟随目标文件（tar 记的链接 mode 是 0777，照抄就是每台机器上多一个人人可写的发布字节）。
   仍然全拒：绝对目标、解析后越出暂存目录的目标、档案里不存在的目标、指向目录的链接、链接指向链接、
   设备与 FIFO。校验顺序仍是"先看全部条目，再一个字节都不写"，所以半棵树不会被留在盘上。
-- **下载有两个时钟**：`stallMs`（默认 30s，**每收到一段字节就重置**）决定"这条连接死没死"，
-  `timeoutMs`（默认 15min）只是兜底，防止永远滴流的服务器把每日作业吊死。单个总时长做不到这两件事——
-  2026-09-29 实测那份 tarball 24 MiB、无人竞争时 39s，而在有竞争的链路上被 120s 总时长掐死，报出去的句子
-  是 `This operation was aborted`（既不说到了哪条时限，也不说收到多少字节）。现在两种停止各自说清
-  "停摆 30s 时已收到 8.4 MiB" 还是 "600s 没下完（已收到 …）"，并且**都不stage 半份内容**。
+- **下载有三个时钟，各自判一件事**（2026-10-01 改成三条，因为两条时"兜底"变成了主判据）：
+  · `stallMs`（默认 30s，**每收到一段字节就重置**）判"这条连接死没死"；
+  · `minRateBps`（默认 16 KiB/s，按 `rateWindowMs` 分窗量，连续 `rateWindowsBeforeRefusal` 窗低于下限就拒）
+    判"活着但慢到什么程度不值得下完"。这个下限是**算出来的**不是挑出来的：tarball 25,126,902 字节
+    （v1.5.1 实测），16 KiB/s 要 25 分钟，还在一天之内；4 KiB/s 要 100 分钟，下一次每日作业会先到来。
+  · `timeoutMs`（默认 15min）是兜底，防"永远滴流"把作业吊死。**响应声明了长度时它只会被放宽、且放宽有顶**：
+    预算 = `declared / minRateBps × 1.5`，比默认长就用它，但不越过 `maxCeilingMs`（45min；按这个下限算
+    1 GiB 的声明能换来 27 小时，那不是放宽而是把兜底取消）——否则兜底就悄悄成了主判据，而真机上"24 MiB 在
+    26 KiB/s 的活流上被 900s 掐死"正是这么发生的。不声明长度（分块传输、别的源）就保持 `timeoutMs`。
+    句子里打印的必须是**真正拦住它的那条秒数**：放宽过之后还照抄 `timeoutMs`，就是报出一个没发生过的时限。
+    这条预算在生产里够得着：`com.glasspane.update` 的 plist 只有 Label/ProgramArguments/RunAtLoad/StartCalendarInterval/ThrottleInterval/Standard*Path 这些键，**没有 `ExitTimeOut`**（那是卸载/停止时给 SIGTERM 的宽限，不是在跑作业的墙钟上限），而 launchd 按 label 只跑单实例，下一个日历点不会并发起第二个。
+  单个总时长做不到这三件事——2026-09-29 实测那份 tarball 24 MiB、无人竞争时 39s，而在有竞争的链路上被
+  120s 总时长掐死，报出去的句子是 `This operation was aborted`（既不说到了哪条时限，也不说收到多少字节）。
+  现在三种停止各自说清"停摆 30s 时已收到 8.4 MiB"/"平均 3.1 KiB/s，低于每日作业需要的 16.0 KiB/s，
+  按这个速度这份 24.0 MiB 要 X 分钟"/"600s 没下完（已收到 …，共声明 …）"，并且**都不 stage 半份内容**。
+- **发布出去的资产长度是一条要被核对的断言**：`assets[].size`（v1.5.1 实测 tarball 25,126,902、SUMS 89，
+  与 CDN 回的 `content-length` 一致）在**算哈希之前**就要与真正收到的字节数对齐，不符 ⇒ `release-payload-invalid`
+  且不 stage。这一条之所以不能被摘要闸代替：`SHA256SUMS-<ver>.txt` 自己就是断言摘要的那份东西——它少一个字节
+  却仍写着正确那一行时，后面每一道闸都会满意，而那已经不是发布所描述的文件了。载荷里没有 `size`（镜像、旧
+  API）不是失败，只是"没有这条断言"。
 - **文档化的每一个 CLI 参数都必须走到用它的那行代码**，且至少有一条用例是**从进程那一侧**进去的。
   `--state-dir`、`--apps-dir`、`--daemon-bin`、`--socket`、`--at`、`--hour`、`--minute` 曾经被
   `parseArgs` 写进一个没人读的 `flags.overrides` 袋子，于是六个参数在命令行上全部静默失效——
@@ -185,7 +200,8 @@
 | 源只能是 https/pinned | `updater/test/source.test.mjs` | 放开明文 ⇒ 红 |
 | 资产主机可以换、但"谁的发布"不能换（GitHub 真形状放行；别的仓、别的族、镜像基址拿到 github.com、同 origin 但路径不属于本仓，全部拒） | `source.test.mjs`（URL 逐字取自真机报文） | 两面路径判据**一起**拆才见血（两处互为冗余）；只拆放宽那面 ⇒ 红 |
 | 档案里的链接物化成副本、mode 随目标；绝对/越界/悬空/指目录/指链接/设备/FIFO 全拒，且拒时一个字节都没写 | `tar.test.mjs` | 退回"链接一律拒" ⇒ 红；按 destDir 解析链接 ⇒ 红；目标不必在档 ⇒ 红；落成真链接 ⇒ 红；抄成 0777 ⇒ 红 |
-| 下载两个时钟：stall 逐段重置、ceiling 兜底，两种停止都说到哪条与收到多少 | `source.test.mjs`（假流按真 fetch 的 abort 语义实现） | 不重置 stall ⇒ 红（慢而活的下载被杀）；`if (fired)` 删掉 ⇒ 红（回到那句 "This operation was aborted"） |
+| 下载三个时钟各判各的：stall 逐段重置、速率下限判"太慢不值得下完"、兜底总时长在响应声明长度时**只放宽**；三种停止都说到哪条与收到多少 | `source.test.mjs`（假流按真 fetch 的 abort 语义实现，并带上真 GitHub 资产都有的 `content-length`） | 不重置 stall ⇒ 红（慢而活的下载被杀）；`if (fired)` 删掉 ⇒ 红（回到那句 "This operation was aborted"）；删掉按声明长度放宽预算那一行 ⇒ `a download that declares its length gets the time its own rate needs…` 红（它就是真机 26 KiB/s 被 900s 掐死的形状）；拆掉速率下限那块 ⇒ crawling 夹具活到兜底，句子不再是"太慢"；拆掉 `maxCeilingMs` 那层夹取 ⇒ `a widened ceiling is still bounded` 红（它等的是 27 小时而不是 200ms）；而 `the rate floor lets a stream that is merely unhurried through` 保证这条判据不是永远拒 |
+| 资产声明的长度要与收到的字节对齐，且在算哈希之前 | `check.test.mjs`（`a checksum file one byte shorter than the release declares is refused before it is trusted`、`an archive that is not the length the release published is refused — and an honest length still stages`、`a release that publishes no length is not refused for it`）；夹具本身现在按真报文形状带上 `assets[].size` | 删掉 sums 那一句 ⇒ 第一条红（摘要闸看不见：坏的是断言摘要的那份文件本身）；删掉 tarball 那一句 ⇒ 第二条红；把"没声明"当失败 ⇒ 第三条红，且所有端到端用例一起红 |
 | CLI 参数走到消费者读的那个键（含从**进程**那一侧进去的用例） | `updater/test/cli-options.test.mjs` | 塞回 `flags.overrides` ⇒ 4 条红；`--disable` 退回装饰品 ⇒ 红 |
 | 两道读回各自落在"测得到东西"的时刻：`hello` 先、npm 次之、`tools/list` 最后；第三条不过连 npm 一起退回 | `updater/test/apply.test.mjs`（`a machine that has never installed glasspane-mcp still completes the update…`、`an MCP layer that still cannot answer after the install rolls the npm packages back too`） | 把两半挪回 npm 之前 ⇒ 第一条红（并真的把 15 s 预算耗光后回滚，正是真机那次的形状）；把 `restoreNpm` 换成空 ⇒ 第二条红 |
 | npm 层的撤销不许碰真机器 | `updater/test/apply.test.mjs`（两条都注入 `npm`；默认撤销随 `npm` 是否为真装包函数；末条 `this file never moved a real global npm package…` 读那个临时 `npm_config_prefix` 前缀，证明整趟测试一个字都没落下） | 让撤销无条件走 `defaultNpmRestore` ⇒ 第一条红，且末条也红（真 npm 会在沙箱前缀里建出 `lib/node_modules`）；read-back 那处少传 `uninstall` ⇒ `an npm rollback nobody can perform` 红 |
