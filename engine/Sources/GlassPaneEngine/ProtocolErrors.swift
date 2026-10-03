@@ -84,7 +84,13 @@ public struct GPError: Error {
         case .restoreStepFailed:
             return "fix the failing step in the steps array (see the failed step index), then retry restore"
         case .projectLimit:
-            return "delete unused projects first (glasspaned --list-projects), then retry"
+            // 这句从前写的是 "delete unused projects first (glasspaned --list-projects)"。
+            // 两个错叠在一起：这一面**没有任何删除动作**，而 `--list-projects` 只打印
+            // 不删除。壳侧的同一条出路早已被改成实话，并由 `mcp-shell/test/tools.test.mjs`
+            // 钉住（它连"引用的每个 daemon 开关都必须真的被解析"都闸了）——但 daemon
+            // 自己这一份没人管，而 `engine-client.ts` 是把 daemon 的 remedy **逐字转达**的，
+            // 所以同一个错误码会从两层得到两句相反的话，且 daemon 那句在命令人做不存在的事。
+            return "this surface offers no delete: nothing in GlassPane removes a registration, so no command here will free a slot. The limit (\(ProjectEntry.maxProjects)) counts the entries stored in projects.json, and gp_project_set with an existing projectId patches that entry while leaving the count where it is. See what is stored with gp_project_list, or without this shell: glasspaned --list-projects prints the same file and changes nothing"
         case .notFound:
             return "check the projectId; use gp_project_list to view available projects"
         case .busyInput:
