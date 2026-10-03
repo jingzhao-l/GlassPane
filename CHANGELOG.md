@@ -2,7 +2,10 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
-## [未发布]
+## [1.6.1] — 2026-10-03
+
+版本判断：两笔都是修复，没有任何对外契约变化——状态文件的字段一个都没动（新增的是 `message` 里的一句
+话，而 `message` 本来就是自由文本）、退出码集合不变、CLI 参数不变。按本仓口径记 **patch**。
 
 ### Fixed — `updater check` 成功暂存之后打印的是一行空话
 
