@@ -27,19 +27,27 @@
   设备与 FIFO。校验顺序仍是"先看全部条目，再一个字节都不写"，所以半棵树不会被留在盘上。
 - **下载有三个时钟，各自判一件事**（2026-10-01 改成三条，因为两条时"兜底"变成了主判据）：
   · `stallMs`（默认 30s，**每收到一段字节就重置**）判"这条连接死没死"；
-  · `minRateBps`（默认 16 KiB/s，按 `rateWindowMs` 分窗量，连续 `rateWindowsBeforeRefusal` 窗低于下限就拒）
-    判"活着但慢到什么程度不值得下完"。这个下限是**算出来的**不是挑出来的：tarball 25,126,902 字节
-    （v1.5.1 实测），16 KiB/s 要 25 分钟，还在一天之内；4 KiB/s 要 100 分钟，下一次每日作业会先到来。
+  · 速率下限（`rateFloorFor`，按 `rateWindowMs` 分窗量，连续 `rateWindowsBeforeRefusal` 窗低于下限就拒）
+    判"活着但慢到什么程度不值得下完"。**下限由预算反解，不绑在某个 payload 尺寸上**：
+    `floor = max(DOWNLOAD_MIN_RATE_FLOOR_BPS, declared / DOWNLOAD_BUDGET_MS)`，`DOWNLOAD_BUDGET_MS` 默认 25min
+    ——一次下载最多占住这条每日作业（和人按下"安装更新"之后愿意等的那一会儿）。原先写死 16 KiB/s 就是把
+    这个解替 24 MiB 的归档算了一遍再抄进代码：24 MiB / 25min ≈ 16 KiB/s（v1.5.1 实测 25,126,902 字节），
+    看起来像"算出来的"，实际不会跟着尺寸走。归档瘦到 345 条目 / 2.1 MiB 量级之后，
+    同一条常数会在 7.3 KiB/s 的链路上把**五分钟就能下完的东西**拒掉——2026-10-03 真机实测：收到 348 KiB
+    即被拒，这台机器因此停在 1.6.0。
+    不声明长度（分块传输、别的源）时才退回那条 16 KiB/s 的保守固定下限；再小的声明长度也不得低于
+    `DOWNLOAD_MIN_RATE_FLOOR_BPS`（1 KiB/s），否则句子里会出现一个没人能据以行动的 "0.0 KiB/s"。
   · `timeoutMs`（默认 15min）是兜底，防"永远滴流"把作业吊死。**响应声明了长度时它只会被放宽、且放宽有顶**：
-    预算 = `declared / minRateBps × 1.5`，比默认长就用它，但不越过 `maxCeilingMs`（45min；按这个下限算
+    预算 = `declared / floor × 1.5`，比默认长就用它，但不越过 `maxCeilingMs`（45min；按这个下限算
     1 GiB 的声明能换来 27 小时，那不是放宽而是把兜底取消）——否则兜底就悄悄成了主判据，而真机上"24 MiB 在
     26 KiB/s 的活流上被 900s 掐死"正是这么发生的。不声明长度（分块传输、别的源）就保持 `timeoutMs`。
     句子里打印的必须是**真正拦住它的那条秒数**：放宽过之后还照抄 `timeoutMs`，就是报出一个没发生过的时限。
     这条预算在生产里够得着：`com.glasspane.update` 的 plist 只有 Label/ProgramArguments/RunAtLoad/StartCalendarInterval/ThrottleInterval/Standard*Path 这些键，**没有 `ExitTimeOut`**（那是卸载/停止时给 SIGTERM 的宽限，不是在跑作业的墙钟上限），而 launchd 按 label 只跑单实例，下一个日历点不会并发起第二个。
   单个总时长做不到这三件事——2026-09-29 实测那份 tarball 24 MiB、无人竞争时 39s，而在有竞争的链路上被
   120s 总时长掐死，报出去的句子是 `This operation was aborted`（既不说到了哪条时限，也不说收到多少字节）。
-  现在三种停止各自说清"停摆 30s 时已收到 8.4 MiB"/"平均 3.1 KiB/s，低于每日作业需要的 16.0 KiB/s，
-  按这个速度这份 24.0 MiB 要 X 分钟"/"600s 没下完（已收到 …，共声明 …）"，并且**都不 stage 半份内容**。
+  现在三种停止各自说清"停摆 30s 时已收到 8.4 MiB"/"平均 7.3 KiB/s，低于这份 24.4 MiB 要在 25min 内下完所
+  要求的 16.4 KiB/s，按这个速度要 57 分钟"/"600s 没下完（已收到 …，共声明 …）"，并且**都不 stage 半份内容**。
+  速率那句必须把**下限是从哪两个数算出来的**一起说出来：只报一个数字，读者无法判断它是判据还是巧合。
 - **发布出去的资产长度是一条要被核对的断言**：`assets[].size`（v1.5.1 实测 tarball 25,126,902、SUMS 89，
   与 CDN 回的 `content-length` 一致）在**算哈希之前**就要与真正收到的字节数对齐，不符 ⇒ `release-payload-invalid`
   且不 stage。这一条之所以不能被摘要闸代替：`SHA256SUMS-<ver>.txt` 自己就是断言摘要的那份东西——它少一个字节
@@ -83,7 +91,12 @@
        "签名自相矛盾"。
      - `unsigned-release`（这个 release 压根没发 `.asc`；签名 job 是 1.3.1 之后加的，那之前的 release
        全是这一态）⇒ `release-unsigned`。
-     - `signature-tool-missing`（这台机器没有 `gpg`，或读不到内置公钥）⇒ `signature-tool-missing`。
+     - `signature-tool-missing`（这台机器**找不到能用的** `gpg`，或读不到内置公钥）⇒ `signature-tool-missing`。
+       "找"是有顺序的：`GLASSPANE_GPG` 指的那份 → `PATH` 上的 `gpg` → 三个已知前缀
+       (`/opt/homebrew/bin`、`/usr/local/bin`、`/opt/local/bin`)。理由是真机测出来的：launchd 给作业的是
+       `/usr/bin:/bin:/usr/sbin:/sbin`，Finder 起的 `.app` 也差不多，于是这台**装着** gnupg 的机器每一次定时
+       检查都回答"没装 gpg"，自动更新永远停在要人点头——句子还是假的。搜过之后不能说"没装"：那句必须把
+       `tried` 与本次 PATH 一起说出来，并给出人能直接做的一步（设 `GLASSPANE_GPG=<绝对路径>`）。
      后两种是"缺证据"而不是"证据为假"：**定时（`--auto`）运行一律拒绝**并落 `needs-consent`；
      人可以用 `updater check --consent unsigned-release` 继续，而状态文件与 `gp_diagnose` 的摘要在此后
      必须**一直**写明这份是"无作者性证明装上的"。次序上这条排在第 4 条之后、下载 tarball 之前，并且
@@ -100,9 +113,21 @@
   （`dist/`、`schemas/`），因为 `npm pack` 读的是树里现成的文件；纯源码归档打出来的包只在
   `package.json` 里声明 `bin`，那个文件却不在树里，装上去是个跑不起来的包（2026-10-01 真机实测：tgz
   里只有三个条目，`npm install -g` 退 0、版本读回也对，MCP 那一半却在 `ENOENT` 上死掉，整次换版回滚）。
-  因此本节原先的"确定性源码 tarball"改口为**发布归档 = 被 tag 的树 + 目标机自己产不出的 JS 构建产物**，
-  由 `scripts/make-release-archive.mjs` 生成、缺构建产物时拒绝打包；Swift 那一半仍旧在目标机上构建
-  （Xcode 是 macOS 更新唯一可以假设存在的重型工具链）。
+  因此本节原先的"确定性源码 tarball"改口为**发布归档 = 被 tag 的树 − `EXCLUDED_PREFIXES` 点名的目录 +
+  目标机自己产不出的 JS 构建产物**，由 `scripts/make-release-archive.mjs` 生成、缺构建产物时拒绝打包；
+  Swift 那一半仍旧在目标机上构建（Xcode 是 macOS 更新唯一可以假设存在的重型工具链）。
+  目前唯一被排除的是 `harness/`（vendored 的 opencode fork：本仓 60.8 MiB tracked 字节里的 54.7 MiB、
+  5,356 个文件里的 5,032 个，2026-10-03 按 `git ls-files` 实测），因为换版路径一行都不读它——`apply` 只读
+  `engine/`（`swift build --package-path`＋`make-app.sh`）、`mcp-shell/` 与 `installer/`（`npm pack`）、
+  `updater/`（§11 自换版那份副本）。排除不是"少装点东西"，它决定这台机器要不要下 24 MiB：排除前 v1.6.1
+  归档 25,534,048 字节 / 5,377 条目（v1.6.1 发布件），排除后同一棵树是 345 条目、2.1 MiB 量级——差 11.5 倍。
+  排除表受 `REQUIRED_IN_ARCHIVE` 约束：**这份清单里的任何一条被排除掉，打包就拒绝**（不是警告），
+  `--verify` 也逐条要求它们出现在归档里——否则"把 `engine/` 一起排除掉"会产出一个每个 `bin` 字段都满足、
+  却根本装不出来的归档。这份清单是**从读者那边抄来的**，不是第二份凭记忆维护的表：`selfcheck.js` 的
+  `VERSION_SITES`（根 `package.json`、`mcp-shell/package.json`、`EngineCore.swift`——§1 的版本线自证就是在
+  暂存树里读它们、并 `node scripts/check-version.mjs` 跑那份守卫）、`apply.js` 按名字打开的
+  `engine/Package.swift` 与 `engine/scripts/make-app.sh`、`updater/cli.js`（§11 指针指的那份），
+  以及两个包各自的 `package.json`。新增一个版本位点或一个包，这条要求自动跟着长。
 
 ## 2. 什么时候才允许换版
 
@@ -213,7 +238,7 @@
 | 源只能是 https/pinned | `updater/test/source.test.mjs` | 放开明文 ⇒ 红 |
 | 资产主机可以换、但"谁的发布"不能换（GitHub 真形状放行；别的仓、别的族、镜像基址拿到 github.com、同 origin 但路径不属于本仓，全部拒） | `source.test.mjs`（URL 逐字取自真机报文） | 两面路径判据**一起**拆才见血（两处互为冗余）；只拆放宽那面 ⇒ 红 |
 | 档案里的链接物化成副本、mode 随目标；绝对/越界/悬空/指目录/指链接/设备/FIFO 全拒，且拒时一个字节都没写 | `tar.test.mjs` | 退回"链接一律拒" ⇒ 红；按 destDir 解析链接 ⇒ 红；目标不必在档 ⇒ 红；落成真链接 ⇒ 红；抄成 0777 ⇒ 红 |
-| 下载三个时钟各判各的：stall 逐段重置、速率下限判"太慢不值得下完"、兜底总时长在响应声明长度时**只放宽**；三种停止都说到哪条与收到多少 | `source.test.mjs`（假流按真 fetch 的 abort 语义实现，并带上真 GitHub 资产都有的 `content-length`） | 不重置 stall ⇒ 红（慢而活的下载被杀）；`if (fired)` 删掉 ⇒ 红（回到那句 "This operation was aborted"）；删掉按声明长度放宽预算那一行 ⇒ `a download that declares its length gets the time its own rate needs…` 红（它就是真机 26 KiB/s 被 900s 掐死的形状）；拆掉速率下限那块 ⇒ crawling 夹具活到兜底，句子不再是"太慢"；拆掉 `maxCeilingMs` 那层夹取 ⇒ `a widened ceiling is still bounded` 红（它等的是 27 小时而不是 200ms）；而 `the rate floor lets a stream that is merely unhurried through` 保证这条判据不是永远拒 |
+| 下载三个时钟各判各的：stall 逐段重置、**速率下限由预算与声明长度反解**、兜底总时长在响应声明长度时**只放宽**；三种停止都说到哪条与收到多少 | `source.test.mjs`（假流按真 fetch 的 abort 语义实现，并带上真 GitHub 资产都有的 `content-length`） | 不重置 stall ⇒ 红（慢而活的下载被杀）；`if (fired)` 删掉 ⇒ 红（回到那句 "This operation was aborted"）；删掉按声明长度放宽预算那一行 ⇒ `a download that declares its length gets the time its own rate needs…` 红（它就是真机 26 KiB/s 被 900s 掐死的形状）；把 `minRateBps` 的默认改回那条写死的 16 KiB/s ⇒ `a small archive is not refused for a rate its own budget affords` 红（真机 2026-10-03 就是被它误拒在 348 KiB）；`rateFloorFor` 不看了声明长度 ⇒ 反解那条与上面那条一起红；拆掉绝对下限 ⇒ `512 B 声明`那条红；拆掉速率下限那块 ⇒ crawling 夹具活到兜底，句子不再是"太慢"；拆掉 `maxCeilingMs` 那层夹取 ⇒ `a widened ceiling is still bounded` 红（它等的是 27 小时而不是 200ms）；而 `the rate floor lets a stream that is merely unhurried through` 保证这条判据不是永远拒；`the same stream is refused once its own declared length asks for more than it delivers` 保证它也不是永远放 |
 | 资产声明的长度要与收到的字节对齐，且在算哈希之前 | `check.test.mjs`（`a checksum file one byte shorter than the release declares is refused before it is trusted`、`an archive that is not the length the release published is refused — and an honest length still stages`、`a release that publishes no length is not refused for it`）；夹具本身现在按真报文形状带上 `assets[].size` | 删掉 sums 那一句 ⇒ 第一条红（摘要闸看不见：坏的是断言摘要的那份文件本身）；删掉 tarball 那一句 ⇒ 第二条红；把"没声明"当失败 ⇒ 第三条红，且所有端到端用例一起红 |
 | CLI 参数走到消费者读的那个键（含从**进程**那一侧进去的用例） | `updater/test/cli-options.test.mjs` | 塞回 `flags.overrides` ⇒ 4 条红；`--disable` 退回装饰品 ⇒ 红 |
 | 两道读回各自落在"测得到东西"的时刻：`hello` 先、npm 次之、`tools/list` 最后；第三条不过连 npm 一起退回 | `updater/test/apply.test.mjs`（`a machine that has never installed glasspane-mcp still completes the update…`、`an MCP layer that still cannot answer after the install rolls the npm packages back too`） | 把两半挪回 npm 之前 ⇒ 第一条红（并真的把 15 s 预算耗光后回滚，正是真机那次的形状）；把 `restoreNpm` 换成空 ⇒ 第二条红 |
@@ -225,7 +250,7 @@
 | 双资产必须齐 | `assets.test.mjs` | 缺 SUMS 仍继续 ⇒ 红 |
 | npm 全局目录写不进去时，在备份与换版**之前**就拒绝，并说清什么都没动；两个目录都算 | `updater/test/apply.test.mjs`（`checkNpmPrefix…`：真目录 + 真 `chmod 0500`；`checkNpmPrefix covers both directories a global install writes into`：只锁 `bin` 也须拒；`a machine that cannot write npm's global directory is refused before a single bundle moves`：构建/kickstart/npm 都是 `assert.fail` 引线） | 删掉那次拒绝 ⇒ 引线炸，红；把 `W_OK` 探测跳过 ⇒ 第一条红（0500 的目录被当成能写）；只探 `lib/node_modules` 不探 `bin` ⇒ 第二条红（正是真机 chown 之后仍然发生的那次 EACCES） |
 | 暂存树里声明了的命令必须真的在树里，否则在备份**之前**就拒绝 | `updater/test/apply.test.mjs`（`a staged release whose package declares a command it does not carry is refused before anything moves`：真暂存树 + 构建/kickstart/npm 引线；`the staged-command pre-flight answers for the tree the release actually ships`：少两条之一即拒、齐了即放行、读不出 manifest 即拒） | 删掉 `commandsReady` 那块 ⇒ 引线全炸；`checkStagedNpmCommands` 缺文件也回 `ok:true` ⇒ "少一个也拒绝"那条红（永远绿的闸与永远拒的闸都不是闸） |
-| 发布归档带着 `npm pack` 需要的构建产物，并且同树两次生成字节一致 | `updater/test/release-archive.test.mjs`（临时 git 仓跑真脚本：解包→`npm pack`→`npm install -g` 到临时 prefix→命令真的能跑；符号链接仍以链接入档） | 从 `REQUIRED_BUILD_OUTPUTS` 里删掉 `mcp-shell/dist` ⇒ 第一条红（那正是 2026-10-01 发出去的形状）；去掉条目排序 ⇒ 复现性那条红 |
+| 发布归档带着 `npm pack` 需要的构建产物、把 90% 体量的 vendored fork 留在外面且**排除不得碰安装路径要读的东西**，同树两次生成字节一致 | `updater/test/release-archive.test.mjs`（临时 git 仓跑真脚本：解包→`npm pack`→`npm install -g` 到临时 prefix→命令真的能跑；符号链接仍以链接入档；夹具里真的放了 `harness/` 两个文件，否则"排除"是在空集上通过的） | 从 `REQUIRED_BUILD_OUTPUTS` 里删掉 `mcp-shell/dist` ⇒ 第一条红（那正是 2026-10-01 发出去的形状）；去掉条目排序 ⇒ 复现性那条红；`EXCLUDED_PREFIXES` 清空或改成"计数但不丢" ⇒ `the vendored fork stays out of the archive` 红；把 `REQUIRED_IN_ARCHIVE` 那道循环掏空 ⇒ `an exclusion that would remove an install input is refused` 红（注入 `engine/`、`updater/`、`installer/` 三种前缀都要拒绝）；`--verify` 不再要安装输入 ⇒ `--verify reads the artifact back…` 红（纯源码归档那份必须同时点名缺 `dist/index.js` 与缺 `engine/Package.swift`） |
 | 发布作业对归档的自证只许经由脚本（`--verify`），要求从 `bin` 与 `kernel/schemas` 推导；不许拿 `tar \| grep` 管道判成败 | 同上（`--verify reads the artifact back…`：新归档全过、真发过的纯源码归档必须点名缺 `dist/index.js`、空 `kernel/schemas` 判拒绝；`the workflow asks that question through the script, not a shell pipeline`，断言前剔注释行） | verifier 永远报完整 ⇒ 第一条红；步骤退回 `tar \| grep -q` ⇒ 第二条红（v1.6.0 首发就是红在这条管道上：`grep -q` 提前退出 + `pipefail` = 成功的检查被判失败）；把"清单为空"当作没有要求 ⇒ 第一条的红分支失效 |
 | SUMS 严格解析 | `sums.test.mjs` | 取第一个命中 ⇒ 红 |
 | 实测 sha256 | `digest.test.mjs` | 改用头长度 ⇒ 红 |
@@ -462,6 +487,14 @@
       `code=runtime-registration-pending`、`agentVerified=false`，原话说清"把面板的「自动更新」开关关掉再打开
       （或在终端跑一次 `updater enable`）做这一次迁移，做完以后换版不需要再动手"。
       判据不许在这里含糊：没核实过就不能说核实过。
+    · **手动 `enable` 的同一种最坏形状也要被堵住**：`registerAgent` 的顺序是"写新 plist → bootout 旧作业 →
+      bootstrap"，所以 bootstrap 一旦被拒，机器上就既没有作业也没有定义——而一次被拒的注册**刻意不写状态**
+      （§5），于是盘上连痕迹都没有。本机 2026-10-03 就是这么看到的：状态最后一笔是 `enable → enabled`
+      （那一趟确实成功、也读回校验过），后来 `launchctl print` 里这个服务根本不存在，
+      `~/Library/LaunchAgents` 里也没有那份 plist。现在这条分支先把**写之前那份定义**原样放回盘上、再
+      `bootstrap` 一次，句子分两种：还原成功 ⇒ "这次要的改动没生效，但之前的作业仍在跑"；还原也失败 ⇒
+      明说"这台机器现在没有更新作业，必须再跑一次 `updater enable`"。没有旧定义可还原（首次注册）时仍删掉
+      那份加载不了的文件，不留半成品。
     · **回滚守的是同一条**：`apply` 在交接之后才失败时要把指针交还给旧那一份；是否重新注册取决于在册作业
       此刻指谁——走入口就不用（指针回去就够了），读不回作业则保守地让旧那份重新注册一次（"不知道作业在跑
       什么"不等于"作业走入口"）。但**定时那一次的自动回滚绝不注册**：它要做的就是上面被禁止的那件事。
@@ -552,7 +585,7 @@
 | 重用已存在的一代要把每一项检查重做 | `updater/test/runtime.test.mjs`（`an existing generation is re-verified, not trusted by name`） | 重用路径只查 cli.js 存在 ⇒ 红 |
 | 在册路径与本地拼写按"同一个文件"比，不按字符串 | `updater/test/runtime.test.mjs`（realpath 拼写的那一代仍认得出世代） | 只比字面量前缀 ⇒ 认不出世代，红 |
 | `enable` 保住盘上已有的每日时刻 | `updater/test/enable.test.mjs`（`a bare enable keeps the daily hour that is already installed`；断言打在**送进渲染器的参数**上，不是打在夹具自己写的文件上） | 常量优先 ⇒ 3:20 变成 12:00，红；读不到又不说 ⇒ 第二条红 |
-| 注册是否成立由读回的在册作业判定 | `updater/test/launchd.test.mjs`（三条：核对过 / 仍指旧的 ⇒ 拒绝 / 读不回 ⇒ 明说未核实） | bootstrap 0 直接算成功 ⇒ "仍指旧的那条"红 |
+| 注册是否成立由读回的在册作业判定；bootstrap 被拒时**先前那份定义要放回盘上并重新加载** | `updater/test/launchd.test.mjs`（四条：核对过 / 仍指旧的 ⇒ 拒绝 / 读不回 ⇒ 明说未核实 / 被拒的重新注册 ⇒ 还原旧定义并再 bootstrap 一次；首次注册被拒 ⇒ 不许留加载不了的 plist） | bootstrap 0 直接算成功 ⇒ "仍指旧的那条"红；删掉 `previous !== null` 那条还原分支 ⇒ `a refused re-registration puts the previous definition back…` 红（盘上留的仍是新那份、bootstrap 也只跑了一次） |
 | 交接之后才失败的回滚：走入口只写指针；读不回作业保守交还；**定时那一次与硬关的机器都不注册** | `updater/test/apply.test.mjs`（`a rollback that happens after the handover takes the pointer and the job back too`、`an undo whose book went unreadable…`、`a rollback of a deferred handover…`、`an undo on a switched-off machine registers nothing…`） | 去掉 undo 调用 ⇒ 交还那一次没发生，红；`runtime` 声明在 try 里 ⇒ catch 抛 ReferenceError，红；把 `handoverMode`/`disabled` 漏传给 undo ⇒ 那两条"一次都不许注册"红 |
 | 入口落地要按字节读回比对，且**不一致或 mode 不是 0600 时把那份文件收掉**（半份 ESM 照样解析、照样被每天执行） | `updater/test/agent-entry.test.mjs`（`a file that reads back short is refused…`、mode 那一条同时断言文件已不在） | 去掉逐字节比对 ⇒ 短写那条红；去掉收掉动作 ⇒ 两条红；mode 不回读 ⇒ 0666 那条红 |
 | 删除不越界、失败不报成已清理 | `updater/test/runtime.test.mjs` | 去掉 root 约束 ⇒ 红 |

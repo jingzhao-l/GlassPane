@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { DEFAULT_BASE, REPO_SLUG, UPDATE_BASE_ENV, assetPathNamesPinnedRelease, assertAssetUrl, assertRedirectTarget, describeTransportFailure, isTlsVerificationFailure, makeBytesFetcher, makeFetcher, resolveBase } from '../lib/source.js'
+import { DEFAULT_BASE, REPO_SLUG, UPDATE_BASE_ENV, DOWNLOAD_BUDGET_MS, DOWNLOAD_MIN_RATE_BPS, DOWNLOAD_MIN_RATE_FLOOR_BPS, assetPathNamesPinnedRelease, assertAssetUrl, assertRedirectTarget, describeTransportFailure, isTlsVerificationFailure, makeBytesFetcher, makeFetcher, rateFloorFor, resolveBase } from '../lib/source.js'
 import { CODES } from '../lib/codes.js'
 import { UpdaterError } from '../lib/fsutil.js'
 import { PINNED_PATH, bytesResponse, jsonResponse, startServer } from './helpers.mjs'
@@ -443,6 +443,62 @@ test('the rate floor lets a stream that is merely unhurried through', async () =
   const fetchBytes = makeBytesFetcher(fetchImpl, { timeoutMs: 60_000, stallMs: 60_000, minRateBps: 1000, rateWindowMs: 25, rateWindowsBeforeRefusal: 2 })
   const got = await fetchBytes('https://github.com/x/y')
   assert.equal(got.length, 6 * 512)
+})
+
+/* --------- 下限由预算与声明长度反解（真机 2026-10-03：7.3 KiB/s 的 2.4 MiB 归档被 16 KiB/s 的旧常数误拒） */
+
+test('the floor is solved from the budget and the length this response declares', () => {
+  // The floor answers one question — "what bytes-per-second does this declared length need to land inside the
+  // budget" — so the control states the same arithmetic, and the assertions below are about what that answer
+  // does to a payload that is 10x smaller than the one the old constant was costed against.
+  const floorFor = (declared) => Math.ceil((declared * 1000) / DOWNLOAD_BUDGET_MS)
+  assert.equal(rateFloorFor({ declared: 24 * 1024 * 1024 }), floorFor(24 * 1024 * 1024))
+  // 那条历史常数不是被推翻的，是被还原成一个尺寸的答案：24 MiB / 25 min 就是 16 KiB/s。
+  const forBigArchive = rateFloorFor({ declared: 24 * 1024 * 1024 })
+  assert.ok(Math.abs(forBigArchive - DOWNLOAD_MIN_RATE_BPS) / DOWNLOAD_MIN_RATE_BPS < 0.05, `${forBigArchive} 应当几乎等于历史常数 ${DOWNLOAD_MIN_RATE_BPS}`)
+  // 小一个数量级的载荷要得起更慢的流；再小也不得低于那条绝对下限，否则句子会出现 "0.0 KiB/s"。
+  assert.equal(rateFloorFor({ declared: 2 * 1024 * 1024 }), Math.max(DOWNLOAD_MIN_RATE_FLOOR_BPS, floorFor(2 * 1024 * 1024)))
+  assert.ok(rateFloorFor({ declared: 2 * 1024 * 1024 }) < DOWNLOAD_MIN_RATE_BPS, '2 MiB 的下限必须低于旧常数，否则这次修复没有发生')
+  assert.equal(rateFloorFor({ declared: 512 }), DOWNLOAD_MIN_RATE_FLOOR_BPS, '极小的声明长度不许把下限压成 0')
+  assert.equal(rateFloorFor({ declared: null }), DOWNLOAD_MIN_RATE_BPS, '没有声明长度的流走保守的固定下限')
+  assert.equal(rateFloorFor({ declared: 0 }), DOWNLOAD_MIN_RATE_BPS)
+})
+
+// REVERSE MUTATION: put `minRateBps = DOWNLOAD_MIN_RATE_BPS` back as the default (the pre-fix shape) —
+// `a small archive is not refused for a rate its own budget affords` goes red, because that 5 KiB/s stream
+// is exactly what the fixed 16 KiB/s floor threw away on the real machine at 348 KiB received.
+test('a small archive is not refused for a rate its own budget affords', async () => {
+  const declared = 12 * 512
+  const chunk = new Uint8Array(512).fill(4)
+  // 512 B 每 100ms ⇒ ≈5 KiB/s：低于旧的固定下限，高于这条 6 KiB 载荷反解出来的下限（绝对下限 1 KiB/s）。
+  const fetchImpl = async (url, { signal } = {}) => streamingResponse(Array.from({ length: 12 }, () => chunk), { gapMs: 100, signal, declaredBytes: declared })
+  const fetchBytes = makeBytesFetcher(fetchImpl, { timeoutMs: 300, stallMs: 60_000, rateWindowMs: 40, rateWindowsBeforeRefusal: 2 })
+  const started = Date.now()
+  const got = await fetchBytes('https://github.com/x/y')
+  assert.equal(got.length, declared, '一条按自己的预算算得过来的流不许被拒')
+  assert.ok(Date.now() - started > 300, `这一趟必须跑过默认 ceiling（实到 ${Date.now() - started}ms），否则它没有走过反解出来的预算`)
+})
+
+test('the same stream is refused once its own declared length asks for more than it delivers', async () => {
+  // 配对控制：改的是同一段代码。把预算压到 1s，同一条 5 KiB/s 的流就不够用了——
+  // 判据跟着预算走，而不是跟着某个 payload 尺寸挑出来的常数走。
+  const declared = 12 * 512
+  const chunk = new Uint8Array(512).fill(4)
+  const fetchImpl = async (url, { signal } = {}) => streamingResponse(Array.from({ length: 12 }, () => chunk), { gapMs: 100, signal, declaredBytes: declared })
+  const fetchBytes = makeBytesFetcher(fetchImpl, {
+    timeoutMs: 60_000,
+    stallMs: 60_000,
+    budgetMs: 1_000,
+    rateWindowMs: 40,
+    rateWindowsBeforeRefusal: 2,
+    maxCeilingMs: 120_000,
+  })
+  const error = await fetchBytes('https://github.com/x/y').then(() => null, (e) => e)
+  assert.ok(error, '预算压到 1s 之后这条流就必须被拒，否则放行是免费的')
+  assert.equal(error.code, CODES.releaseUnreachable)
+  assert.match(error.message, /too slow to be worth finishing/, error.message)
+  assert.match(error.message, /the 6\.0 KiB\/s this 6 KiB file has to hold to land inside 1\.0s/, `要说出下限是多少、由什么算出来：${error.message}`)
+  assert.ok(!/the daily schedule needs/.test(error.message), '那句把常数当判据的旧话不该还在：' + error.message)
 })
 
 // REVERSE MUTATION: drop the `Math.min(..., maxCeilingMs)` clamp — 1 GiB at the default floor is 27 hours,

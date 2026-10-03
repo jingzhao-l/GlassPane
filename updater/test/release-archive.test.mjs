@@ -12,7 +12,9 @@
  * `the archive carries the build output the npm package promises to run` goes red, because the declared
  * command is then missing from the tree the unpacked release hands to `npm pack`. Make the tracked-entry
  * order non-deterministic (reverse the sort) and `packing the same tree twice answers with the same bytes`
- * goes red.
+ * goes red. Widen `EXCLUDED_PREFIXES` to `engine/` and `an exclusion that would remove an install input is
+ * refused, not published` goes red — that mutation is the shape the size fix could have taken by accident,
+ * and it is the reason `archiveBytes` takes `prefixes` as an argument.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -22,8 +24,19 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { archiveBytes, declaredCommands, requiredEntries, REQUIRED_BUILD_OUTPUTS, verifyArchive } from '../../scripts/make-release-archive.mjs'
+import {
+  applyExclusions,
+  archiveBytes,
+  declaredCommands,
+  EXCLUDED_PREFIXES,
+  REQUIRED_IN_ARCHIVE,
+  requiredEntries,
+  REQUIRED_BUILD_OUTPUTS,
+  trackedEntries,
+  verifyArchive,
+} from '../../scripts/make-release-archive.mjs'
 import { extractTarGz, packTarGz, readTarGz } from '../lib/tar.js'
+import { VERSION_SITES } from '../lib/selfcheck.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.resolve(HERE, '..', '..')
@@ -46,9 +59,17 @@ function makeReleaseTree({ withDist = true, commitBuildOutputs = false } = {}) {
   write('README.md', '# GlassPane\n')
   write('package.json', JSON.stringify({ name: 'glasspane', version: '1.6.0', private: true }) + '\n')
   write('scripts/check-version.mjs', 'export const checkVersion = () => true\n')
+  write('scripts/version-sites.mjs', 'export const SITES = []\n')
   write('install.sh', '#!/bin/sh\necho hi\n', 0o755)
   write('engine/Package.swift', '// swift-tools\n')
+  write('engine/scripts/make-app.sh', '#!/bin/sh\necho app\n', 0o755)
+  write('engine/Sources/GlassPaneEngine/EngineCore.swift', 'public let version = "1.6.0"\n')
   write('kernel/schemas/decision-log-entry.schema.json', '{}\n')
+  // The vendored fork the release archive leaves out: 90% of this repository's tracked bytes on the real
+  // tree, and read by no step of the update path. It has to be present in the fixture, or "excluded" would
+  // be tested against an empty set and pass for the wrong reason.
+  write('harness/glasspane-harness/package.json', JSON.stringify({ name: 'fork' }) + '\n')
+  write('harness/glasspane-harness/src/big.js', 'x'.repeat(4096) + '\n')
   // The real repository tracks symlinked icon files (harness/public), and the archive has to carry them as
   // links for the unpacker to materialize — the shape that once made every real release stop at the unpack.
   write('docs/logo.png', 'PNG-BYTES\n')
@@ -139,6 +160,64 @@ test('the archive carries the build output the npm package promises to run', () 
   }
 })
 
+test('the vendored fork stays out of the archive, and by how much is stated', () => {
+  const tree = makeReleaseTree()
+  try {
+    // First prove the exclusion has something to bite on: the tracked tree really carries `harness/`.
+    // Without this the assertion below passes on a fixture that never had the directory, which would be a
+    // guard that has never excluded anything.
+    const tracked = trackedEntries({ root: tree.root })
+    const inTree = tracked.filter((entry) => entry.name.startsWith('harness/'))
+    assert.equal(inTree.length, 2, JSON.stringify(tracked.map((entry) => entry.name)))
+
+    const packed = archiveBytes({ root: tree.root, version: '1.6.0' })
+    const names = readTarGz(packed.bytes).map((entry) => entry.name)
+    assert.ok(!names.some((name) => name.startsWith('GlassPane-1.6.0/harness/')), JSON.stringify(names))
+    assert.equal(packed.excluded.count, 2, '排除条数要说得出，不是"少了一些"')
+    assert.equal(packed.excluded.bytes, inTree.reduce((total, entry) => total + entry.content.byteLength, 0))
+    assert.deepEqual(packed.excluded.prefixes, ['harness/'])
+
+    // Everything the install path reads survives, and the shrink is bounded rather than incidental: the
+    // archive is smaller than the full tree but still carries every required input.
+    for (const need of REQUIRED_IN_ARCHIVE) {
+      assert.ok(names.includes(`GlassPane-1.6.0/${need}`), `${need} 是安装路径要读的，必须仍在档`)
+    }
+    const fullBytes = archiveBytes({ root: tree.root, version: '1.6.0', prefixes: [] }).bytes.length
+    assert.ok(packed.bytes.length < fullBytes, `排除应当真的让归档变小：${packed.bytes.length} vs ${fullBytes}`)
+  } finally {
+    tree.cleanup()
+  }
+})
+
+test('an exclusion that would remove an install input is refused, not published', () => {
+  // REVERSE MUTATION of EXCLUDED_PREFIXES: widen it to `engine/` in the real script and the release step
+  // stops here rather than shipping an archive whose `swift build --package-path <staged>/engine` has
+  // nothing to build. The prefixes are injected because the hostile value is the thing under test.
+  const tree = makeReleaseTree()
+  try {
+    for (const prefix of ['engine/', 'engine/Package.swift', 'updater/', 'installer/', 'scripts/']) {
+      assert.throws(
+        () => archiveBytes({ root: tree.root, version: '1.6.0', prefixes: [prefix] }),
+        (error) => /install-critical/.test(error.message),
+        `排除 ${prefix} 必须让发布拒绝，而不是安静少一个目录`,
+      )
+    }
+    // The self-check's own site table is where part of this list comes from, so a new site is a new
+    // requirement without anyone remembering to edit a second list.
+    for (const site of VERSION_SITES) {
+      assert.ok(REQUIRED_IN_ARCHIVE.includes(site.file.split(path.sep).join('/')), `${site.file} 是 selfcheck 要读的`)
+    }
+    // A prefix that matches nothing is not a refusal — it is reported as an empty exclusion, so the number
+    // the job prints stays the thing a reviewer checks.
+    const harmless = archiveBytes({ root: tree.root, version: '1.6.0', prefixes: ['nope/'] })
+    assert.equal(harmless.excluded.count, 0)
+    assert.deepEqual(harmless.excluded.prefixes, [])
+    assert.deepEqual(applyExclusions({ entries: [], prefixes: [] }).kept, [])
+  } finally {
+    tree.cleanup()
+  }
+})
+
 test('an archive that would contain a command with nothing behind it is refused', () => {
   // The 2026-10-01 shape: the tree is complete except for what the build never ran, and the manifest still
   // promises `dist/index.js`. Publishing that produces an installable, unreadable, un-runnable package.
@@ -202,8 +281,13 @@ test('--verify reads the artifact back and answers the question the updater will
     const ok = verifyArchive({ file: out, version: '1.6.0', root: tree.root })
     assert.deepEqual(ok.missing, [], JSON.stringify(ok.required))
     // Derived, not hardcoded: the requirement is the manifest's own `bin` plus what `kernel/schemas` holds,
-    // so adding a command or a schema extends the check without anyone remembering to edit a list.
+    // so adding a command or a schema extends the check without anyone remembering to edit a list. The
+    // install inputs ride along for the same reason they are checked at build time — an archive that
+    // satisfies every `bin` field but has no `engine/` cannot be installed at all.
     assert.ok(ok.required.includes('GlassPane-1.6.0/mcp-shell/dist/index.js'), JSON.stringify(ok.required))
+    for (const need of REQUIRED_IN_ARCHIVE) {
+      assert.ok(ok.required.includes(`GlassPane-1.6.0/${need}`), `${need} 必须进 required 清单：${JSON.stringify(ok.required)}`)
+    }
 
     // And the same call against the shape that shipped on 2026-10-01 — a source-only archive — must say so.
     const sourceOnly = path.join(tree.root, 'source-only.tar.gz')
@@ -214,6 +298,7 @@ test('--verify reads the artifact back and answers the question the updater will
     ]))
     const bad = verifyArchive({ file: sourceOnly, version: '1.6.0', root: tree.root })
     assert.ok(bad.missing.includes('GlassPane-1.6.0/mcp-shell/dist/index.js'), JSON.stringify(bad.missing))
+    assert.ok(bad.missing.includes('GlassPane-1.6.0/engine/Package.swift'), `安装输入缺席也要点名：${JSON.stringify(bad.missing)}`)
 
     // An empty `kernel/schemas` means there is nothing to require next to the command, and the archive would
     // then pass while shipping a package whose runtime schemas are gone. "Nothing listed" is a refusal here,

@@ -419,6 +419,72 @@ test('enable boots out a stale definition, bootstraps it, and reads the loaded j
   }
 })
 
+test('a refused re-registration puts the previous definition back instead of leaving no agent', () => {
+  // This call booted the working job out before bootstrap failed, so "delete the file and report a refusal"
+  // leaves the machine with neither a job nor a definition — and a refused enable writes no state, so nothing
+  // on the machine records that auto-update just went blind. Measured shape from this machine on 2026-10-03:
+  // the state file's last entry was a successful `enable`, yet `launchctl print` had no such job and
+  // ~/Library/LaunchAgents held no plist. REVERSE MUTATION: drop the `previous !== null` restore branch.
+  const dir = tempDir(`${TMP_PREFIX}launchd-rollback-`)
+  const plistPath = path.join(dir, 'LaunchAgents', `${AGENT_LABEL}.plist`)
+  const previousText = '<plist>previous, working</plist>'
+  fs.mkdirSync(path.dirname(plistPath), { recursive: true })
+  fs.writeFileSync(plistPath, previousText, { mode: 0o600 })
+  const calls = []
+  let bootstraps = 0
+  const outcome = registerAgent({
+    label: AGENT_LABEL,
+    plistPath,
+    plistText: '<plist>new, refused</plist>',
+    cliPath: '/Users/dev/.glasspane/runtime/agent-entry.js',
+    uid: '501',
+    run: (bin, args) => {
+      calls.push(args.join(' '))
+      if (args[0] === 'bootstrap') {
+        bootstraps += 1
+        return bootstraps === 1
+          ? { status: 5, stdout: '', stderr: 'Could not find service in domain' }
+          : { status: 0, stdout: '', stderr: '' }
+      }
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  })
+  assert.equal(outcome.ok, false, '要换的那一份没换成，就不能报成功')
+  assert.equal(outcome.restored, true, outcome.message)
+  assert.match(outcome.message, /previous definition is back|the definition this machine had before/, outcome.message)
+  assert.match(outcome.message, /Could not find service/, 'launchd 的原话要在句子里')
+  assert.equal(fs.readFileSync(plistPath, 'utf8'), previousText, '盘上留下的必须是先前那一份能加载的定义')
+  const steps = calls.filter((line) => line.startsWith('bootout') || line.startsWith('bootstrap'))
+  assert.deepEqual(steps, [
+    `bootout gui/501/${AGENT_LABEL}`,
+    `bootstrap gui/501 ${plistPath}`,
+    `bootstrap gui/501 ${plistPath}`,
+  ], '回滚要真的再 bootstrap 一次，只把文件写回去不算')
+  assert.equal(modeOf(plistPath), 0o600, '重新写回的那份同样是 owner-only')
+  removeDir(dir)
+})
+
+test('a first registration that launchd refuses leaves no unloadable file behind', () => {
+  // The other half of the same branch: with no previous definition there is nothing to put back, and the
+  // file this call wrote is unloadable, so it must go — and the sentence must say the machine has no agent.
+  const dir = tempDir(`${TMP_PREFIX}launchd-fresh-`)
+  const plistPath = path.join(dir, 'LaunchAgents', `${AGENT_LABEL}.plist`)
+  fs.mkdirSync(path.dirname(plistPath), { recursive: true })
+  const outcome = registerAgent({
+    label: AGENT_LABEL,
+    plistPath,
+    plistText: '<plist>new, refused</plist>',
+    cliPath: '/Users/dev/.glasspane/runtime/agent-entry.js',
+    uid: '501',
+    run: (bin, args) => (args[0] === 'bootstrap' ? { status: 5, stdout: '', stderr: 'I/O error' } : { status: 3, stdout: '', stderr: 'Operation not found: 3' }),
+  })
+  assert.equal(outcome.ok, false)
+  assert.equal(outcome.restored, false)
+  assert.equal(fs.existsSync(plistPath), false, '没有旧定义可还原时，不许留一份加载不了的 plist')
+  assert.match(outcome.message, /was left in place only if bootstrap succeeded/, outcome.message)
+  removeDir(dir)
+})
+
 test('a job that still names the old command line is not reported as replaced', () => {
   const dir = tempDir(`${TMP_PREFIX}launchd-stale-`)
   const cliPath = '/Users/dev/.glasspane/runtime/1.5.0/updater/cli.js'

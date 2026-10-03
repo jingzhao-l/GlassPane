@@ -13,10 +13,12 @@
  * `glasspane-mcp could not run (ENOENT)` — the whole swap was refused and rolled back. Every 1.5.x machine
  * attempting this upgrade hits that wall, because the code that packs is already released.
  *
- * So the archive is the tracked tree **plus the build outputs a target machine cannot produce for itself**
- * (`mcp-shell/dist`, `mcp-shell/schemas`) — `engine/` still builds on the target, because Xcode is the one
- * toolchain a macOS update may assume. Missing build outputs are a refusal, not a warning: an archive that
- * cannot produce a runnable package is not a release of this product.
+ * So the archive is the tracked tree — less what `EXCLUDED_PREFIXES` names, which is enforced against
+ * `REQUIRED_IN_ARCHIVE` so an exclusion can never remove something the install path reads — **plus the build
+ * outputs a target machine cannot produce for itself** (`mcp-shell/dist`, `mcp-shell/schemas`). `engine/`
+ * still builds on the target, because Xcode is the one toolchain a macOS update may assume. Missing build
+ * outputs are a refusal, not a warning: an archive that cannot produce a runnable package is not a release of
+ * this product.
  *
  * Determinism is the reason to own the writer rather than shell out to `tar`, whose flags differ between
  * GNU tar and the bsdtar on this machine's PATH: every header here is written with uid 0, gid 0 and mtime 0,
@@ -30,9 +32,50 @@ import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import { packTarGz, readTarGz } from '../updater/lib/tar.js'
+import { VERSION_SITES } from '../updater/lib/selfcheck.js'
 
 /** Directories that must exist and are not tracked: the JS build outputs the target machine cannot make. */
 export const REQUIRED_BUILD_OUTPUTS = ['mcp-shell/dist', 'mcp-shell/schemas']
+
+/**
+ * What stays out of the archive, and why that is a decision rather than an accident.
+ *
+ * `harness/` is the vendored opencode fork: 54.7 MiB of the 60.8 MiB this repository tracks (measured over
+ * `git ls-files` on 2026-10-03 — 5,032 of 5,356 files, 90% of the bytes), and the archive it lands in is
+ * what the updater downloads on every self-update. Measured the same day on a real machine: the v1.6.1
+ * archive is 25,534,048 bytes, the download was refused after 348 KiB because the link was doing 7.3 KiB/s,
+ * and the machine stayed on 1.6.0. Nothing on the update path reads a byte of `harness/` — `apply` builds
+ * `engine/`, packs `mcp-shell/` and `installer/`, and bundles `updater/` (apply.js's `buildStagedTree`,
+ * `checkStagedNpmCommands`, `installNpmPackages`, §11's runtime bundle).
+ *
+ * The exclusions are enforced against `REQUIRED_IN_ARCHIVE` below, so widening this list can only ever be a
+ * loud failure, never a silent shrink of what a target machine needs.
+ */
+export const EXCLUDED_PREFIXES = ['harness/']
+
+/** The package directories the updater packs out of the staged tree. */
+export const PACKAGE_DIRS = ['mcp-shell', 'installer']
+
+/**
+ * What the update path reads out of the unpacked archive.
+ *
+ * Transcribed from the readers, not guessed at: `VERSION_SITES` is the list `updater/lib/selfcheck.js`
+ * refuses a tree without, `scripts/check-version.mjs` is the guard that same step runs *from the staged
+ * tree*, and the rest are the paths `apply.js`'s `buildStagedTree`, `installNpmPackages` and §11's
+ * `runtimeCliPath` open by name. The value of checking this at publish time is that an archive which cannot
+ * install stops here instead of failing on every machine that downloads it — every one of these absences is
+ * loud at the consumer, and "loud at the consumer" is exactly what a release guard exists to prevent.
+ */
+const posix = (rel) => rel.split(path.sep).join('/')
+export const REQUIRED_IN_ARCHIVE = [...new Set([
+  ...VERSION_SITES.map((site) => posix(site.file)), // selfcheck.js: "the staged tree has no <file>"
+  'scripts/check-version.mjs', // runTreeGuard spawns node against this, inside the staged tree
+  'scripts/version-sites.mjs', // the guard above imports its site table from here
+  'engine/Package.swift', // swift build --package-path <staged>/engine
+  'engine/scripts/make-app.sh', // "the staged tree has no engine/scripts/make-app.sh"
+  'updater/cli.js', // runtimeCliPath — the pointer launchd names
+  ...PACKAGE_DIRS.map((dir) => `${dir}/package.json`), // npm pack runs inside each of them
+])]
 
 const MODE_FILE = 0o100644
 const MODE_EXEC = 0o100755
@@ -76,6 +119,31 @@ export function trackedEntries({ root, git = execFileSync }) {
   return entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
 }
 
+/**
+ * Drop the excluded prefixes from a tracked-entry list, and say how much that took out.
+ *
+ * The second half is the point: an archive that quietly gets 90% smaller looks identical to an archive that
+ * quietly lost something needed, until a machine tries to install it. The number is returned so the caller
+ * prints it and the test can assert on it.
+ */
+export function applyExclusions({ entries, prefixes = EXCLUDED_PREFIXES }) {
+  const kept = []
+  const excluded = []
+  for (const entry of entries) {
+    const prefix = prefixes.find((p) => entry.name.startsWith(p))
+    if (prefix) excluded.push({ ...entry, prefix })
+    else kept.push(entry)
+  }
+  return {
+    kept,
+    excluded: {
+      count: excluded.length,
+      bytes: excluded.reduce((total, entry) => total + (entry.content?.byteLength ?? 0), 0),
+      prefixes: [...new Set(excluded.map((entry) => entry.prefix))],
+    },
+  }
+}
+
 /** Every file under `dir`, sorted, as tar entries. Refuses symlinks: a build output that is a link is a build that did not run. */
 export function buildOutputEntries({ root, dir }) {
   const abs = path.join(root, dir)
@@ -115,7 +183,7 @@ export function buildOutputEntries({ root, dir }) {
  */
 export function declaredCommands({ root }) {
   const wanted = []
-  for (const rel of ['mcp-shell', 'installer']) {
+  for (const rel of PACKAGE_DIRS) {
     const manifest = path.join(root, rel, 'package.json')
     if (!fs.existsSync(manifest)) fail(`${rel}/package.json is missing from the tree this archive is built from`)
     const parsed = JSON.parse(fs.readFileSync(manifest, 'utf8'))
@@ -134,11 +202,17 @@ export function declaredCommands({ root }) {
  * Assemble the archive bytes. `prefix` is the top-level directory the unpacker's §3.2 layout expects
  * (`GlassPane-<ver>/`), so this stays interchangeable with what `extractInto` and the self-check read.
  */
-export function archiveBytes({ root, version }) {
+export function archiveBytes({ root, version, prefixes = EXCLUDED_PREFIXES }) {
   const commands = declaredCommands({ root })
-  const tracked = trackedEntries({ root })
+  const trackedAll = trackedEntries({ root })
+  const { kept: tracked, excluded } = applyExclusions({ entries: trackedAll, prefixes })
   const extras = REQUIRED_BUILD_OUTPUTS.flatMap((dir) => buildOutputEntries({ root, dir }))
   const present = new Set([...tracked, ...extras].map((entry) => entry.name))
+  for (const need of REQUIRED_IN_ARCHIVE) {
+    if (!present.has(need)) {
+      fail(`the release archive would not contain ${need}, which the update path reads out of the unpacked tree — an exclusion (or a missing file) has taken something install-critical`)
+    }
+  }
   for (const cmd of commands) {
     const rel = path.relative(root, cmd.file).split(path.sep).join('/')
     if (!present.has(rel)) {
@@ -159,15 +233,18 @@ export function archiveBytes({ root, version }) {
     names.add(name)
     entries.push({ ...entry, name })
   }
-  return { bytes: packTarGz(entries), entries: entries.length, commands: commands.map((c) => `${c.package}:${c.command}`) }
+  return { bytes: packTarGz(entries), entries: entries.length, commands: commands.map((c) => `${c.package}:${c.command}`), excluded }
 }
 
 /**
- * The entries an archive must contain for the updater's npm step to have anything to install.
+ * The entries an archive must contain for the updater's install path to have anything to work with.
  *
- * Derived, never listed by hand: the two packages' own `bin` fields say which files are commands, and
- * `kernel/schemas` says what the bundle is supposed to have copied next to them. A hardcoded list would go
- * stale the first time a command or a schema is added, and a stale list still passes.
+ * Two kinds, deliberately derived from different places. The commands come from the packages' own `bin`
+ * fields and the schemas from `kernel/schemas`, so neither list goes stale when a command or a schema is
+ * added. The install inputs come from `REQUIRED_IN_ARCHIVE`, which is a transcription of what
+ * `updater/lib/apply.js` reads out of the unpacked tree — that one is checked against the archive on purpose,
+ * because an exclusion rule (`EXCLUDED_PREFIXES`) is exactly the shape that can remove `engine/` and still
+ * leave every `bin` field satisfied.
  */
 export function requiredEntries({ root, version }) {
   const prefix = `GlassPane-${version}/`
@@ -178,7 +255,8 @@ export function requiredEntries({ root, version }) {
     .filter((name) => name.endsWith('.json'))
     .map((name) => `${prefix}mcp-shell/schemas/${name}`)
   if (schemas.length === 0) fail('kernel/schemas holds no .json schema, which is not what the bundle step is supposed to copy')
-  return { prefix, required: [...new Set([...wanted, ...schemas])] }
+  const installInputs = REQUIRED_IN_ARCHIVE.map((need) => `${prefix}${need}`)
+  return { prefix, required: [...new Set([...wanted, ...schemas, ...installInputs])] }
 }
 
 /**
@@ -249,6 +327,10 @@ function main(argv) {
   process.stdout.write(`release archive: ${target}\n`)
   process.stdout.write(`  entries=${first.entries} bytes=${first.bytes.length} sha256=${digest}\n`)
   process.stdout.write(`  commands carried: ${first.commands.join(', ')}\n`)
+  process.stdout.write(
+    `  excluded: ${first.excluded.count} entries / ${first.excluded.bytes} raw bytes` +
+      `${first.excluded.prefixes.length > 0 ? ` under ${first.excluded.prefixes.join(', ')}` : ''}\n`,
+  )
   return 0
 }
 

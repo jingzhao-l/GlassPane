@@ -225,9 +225,19 @@ export function fakeGpg({
  */
 export async function startSocketDaemon(socketPath, { behaviour = 'answer', version = '9.9.9', delayMs = 250 } = {}) {
   const replies = []
+  const dropped = []
+  const connections = []
   const mode = () => (typeof behaviour === 'function' ? String(behaviour()) : behaviour)
   const startMode = typeof behaviour === 'function' ? 'answer' : behaviour
   const server = net.createServer((socket) => {
+    connections.push(socket)
+    socket.on('error', (error) => dropped.push(String(error.code ?? error.message)))
+    // A real daemon keeps running when a client hangs up mid-reply, and `handshakeVerify` *does* hang up:
+    // it polls, so each budget expiry closes the socket, and the reply already in flight then writes to a
+    // dead peer. Without this handler that EPIPE escapes as an unhandled socket error and the test fails
+    // with `write EPIPE` from `respond()` — a verdict produced by the harness and the scheduler rather than
+    // by the code under test (measured: red at load average 226, green in isolation on the same commit).
+    // The codes are recorded rather than swallowed so a test that cares can assert on them.
     socket.on('data', (chunk) => {
       replies.push(chunk.toString('utf8').trim())
       const current = mode()
@@ -260,6 +270,8 @@ export async function startSocketDaemon(socketPath, { behaviour = 'answer', vers
   return {
     server,
     requests: replies,
+    dropped,
+    connections,
     close: () => new Promise((resolve) => {
       server.closeAllConnections?.()
       server.close(() => {

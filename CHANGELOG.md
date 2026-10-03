@@ -2,6 +2,53 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [未发布]
+
+### Fixed — 发布归档把 90% 的体量花在没人读的那份 fork 上
+
+真机跑 1.6.1 换版时撞上的：`updater check` 收到 348 KiB 就把这次发布拒了，句子说"7.3 KiB/s 太慢"。
+量出来两件事叠在一起。**其一，归档太大了**：`GlassPane-1.6.1.tar.gz` 25,534,048 字节，而本仓 tracked 的
+60.8 MiB 里 **54.7 MiB 是 `harness/`**（5,356 个文件里的 5,032 个）——那是 vendored 的 opencode fork，
+换版路径一行都不读它（`apply` 只读 `engine/`、`mcp-shell/`、`installer/`、`updater/`）。现在
+`scripts/make-release-archive.mjs` 按 `EXCLUDED_PREFIXES` 把它留在档外，并新增 `REQUIRED_IN_ARCHIVE`
+那道拒绝：**排除规则碰到安装路径要读的任何一条就拒绝发布**，`--verify` 也逐条要求它们在场——否则
+"把 `engine/` 一起排掉"会产出一个每个 `bin` 字段都满足、却根本装不出来的归档。打印的行里带上被排除的条数
+与原始字节数，变小这件事必须看得见。
+
+### Fixed — 速率下限绑在一个 payload 尺寸上，归档一变小就误拒
+
+`minRateBps` 原先是写死的 16 KiB/s。那个数字不是"选出来的"，它是 24 MiB / 25min 的解被抄进代码——所以
+归档瘦到 345 条目 / 2.1 MiB 量级（v1.6.1 发布件是 25,534,048 字节 / 5,377 条目）之后，同一条常数会拒掉
+**五分钟就能下完**的下载（本机 2026-10-03 实测就是被它拦在
+348 KiB，这台机器因此停在 1.6.0）。现在下限由 `rateFloorFor({ declared, budgetMs })` 反解：
+`max(1 KiB/s, declared / 25min)`，25min 是"一次下载最多占住这条每日作业"的预算，句子也把下限是从
+哪两个数算出来的一起说出来。不声明长度仍退回那条 16 KiB/s 的保守值；配对控制保证这条判据既不是永远拒、
+也不是永远放。
+
+### Fixed — 一次被拒的 `enable` 会把这台机器的更新作业整个弄没
+
+`registerAgent` 的顺序是"写新 plist → `bootout` 旧作业 → `bootstrap`"。bootstrap 被拒时旧代码只做一个动作：
+把刚写的文件删掉、报一句失败——**而旧作业已经被它亲手卸了**。一次被拒的注册又刻意不写状态（§5），所以盘上
+连痕迹都没有。本机 2026-10-03 就是这样看到的：状态最后一笔是 `enable → enabled`（那一趟成功且读回校验过），
+15:27 时 `launchctl print` 里这个服务不存在、`~/Library/LaunchAgents` 里也没有 plist，自动更新静默消失。
+现在这条分支先把写入前那份定义原样放回盘上、再 `bootstrap` 一次，并且说清落在哪一种：还原成功 ⇒ "这次要的
+改动没生效，但之前的作业仍在跑"；还原也失败 ⇒ 明说"这台机器现在没有更新作业，必须再跑一次 `updater enable`"。
+首次注册（没有旧定义）仍删掉那份加载不了的文件，不留半成品。
+
+对照：`a refused re-registration puts the previous definition back instead of leaving no agent`（要求盘上留下
+的是先前那份、`bootstrap` 真的跑了两次、mode 仍 0600）与 `a first registration that launchd refuses leaves no
+unloadable file behind`。反向变异=删掉还原分支 ⇒ 前者红。
+
+### Fixed — 装着 gpg 的机器被判定成"没装 gpg"，自动更新因此永远等人点头
+
+gate 8 用 `spawnSync('gpg', …)` 问版本，而 launchd 给定时作业的 PATH 是 `/usr/bin:/bin:/usr/sbin:/sbin`，
+Finder 起的 `.app` 也差不多。本机 gnupg 装在 `/opt/homebrew/bin/gpg`，于是每一次无人值守的检查都答
+`signature-tool-missing`——那是**设计成要 consent 的结论**，所以自动更新在这台机器上根本不会自己走，
+而句子还在说"gpg is not installed"（假话：装着，只是不在那条 PATH 上）。现在按
+`GLASSPANE_GPG` → `PATH` → 三个已知前缀（Homebrew / /usr/local / MacPorts）的顺序找，找到就用绝对路径跑；
+真找不到时句子说的是"试过哪几处、这次 PATH 是哪条"，补救写成人能直接做的一步。真机复核：把 PATH 压成
+launchd 那份，`resolveGpgBinary` 返回 `/opt/homebrew/bin/gpg`，`gpg --version` 退 0。
+
 ## [1.6.1] — 2026-10-03
 
 版本判断：两笔都是修复，没有任何对外契约变化——状态文件的字段一个都没动（新增的是 `message` 里的一句
