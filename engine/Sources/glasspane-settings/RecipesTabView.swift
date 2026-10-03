@@ -118,7 +118,7 @@ struct RecipesTabView: View {
                     }
                     .help("把模板文本加载进编辑器")
                     .disabled(isValidating)
-                    .accessibilityIdentifier("gp-recipe-template-\(template.title)")
+                    .accessibilityIdentifier("gp-recipe-template-\(template.key)")
                 }
                 Spacer()
             }
@@ -338,20 +338,27 @@ struct RecipesTabView: View {
             Button {
                 outcome = .idle
             } label: {
-                Label("刷新", systemImage: "arrow.clockwise")
+                Label("清除结论", systemImage: "xmark.circle")
             }
-            .help("重新进入配方页（内容保存在本机设置里，不会丢失）")
+            // 这一枚原先写着"刷新"配一个转圈箭头，做的却是把上一次的校验结论抹掉：
+            // 字段结构本来就随每次渲染重读盘，这里没有任何可"刷新"的东西。
+            // 按钮说什么，它就得做什么。
+            .help("清掉上一次显示的校验结论（配方内容保存在本机设置里，不会丢失）")
             .disabled(isValidating)
-            .accessibilityIdentifier("gp-refresh-recipes")
+            .accessibilityIdentifier("gp-clear-recipe-verdict")
         }
     }
 }
 
 /// 模板描述（供加载按钮展示）。
+///
+/// `key` 是标识里的那一段 ASCII：无障碍标识里放中文，`act` 按标识就选不中元素
+/// （与 `UpdateTabView.reasonLine` 同一条规矩）。标题给人看，标识给机器按。
 struct RecipeTemplate: Identifiable {
+    let key: String
     let title: String
     let contents: String
-    var id: String { title }
+    var id: String { key }
 }
 
 /// 内置最小合法 recipe 模板。两条都满足 recipe-config.schema.json 的约束
@@ -366,8 +373,8 @@ enum RecipeTemplates {
     }()
 
     static let all: [RecipeTemplate] = [
-        RecipeTemplate(title: "按压并断言", contents: pressAndAssert),
-        RecipeTemplate(title: "最小单步", contents: minStep)
+        RecipeTemplate(key: "press-assert", title: "按压并断言", contents: pressAndAssert),
+        RecipeTemplate(key: "min-step", title: "最小单步", contents: minStep)
     ]
 
     /// 模板一：点按按钮后断言可用。

@@ -356,6 +356,8 @@ struct GuideBannerView: View {
             } label: {
                 Image(systemName: "xmark")
                     .font(.caption.weight(.bold))
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
             .controlSize(.small)
