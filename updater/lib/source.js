@@ -317,26 +317,66 @@ export function makeFetcher(fetchImpl = globalThis.fetch, { timeoutMs = 20_000, 
  *
  *  · `stallMs` — no bytes at all for this long ⇒ refuse. The sharpest guard: a dead connection is caught in
  *    30s instead of being confused with a slow one.
- *  · `minRateBps` — bytes still arriving, but too slowly to be worth finishing. This is the judge that
- *    decides what "slow" means, and it is costed rather than picked: at 16 KiB/s the archive needs 25 min,
- *    which fits inside the day; at 4 KiB/s it needs 100 min, so the next scheduled run arrives before this
- *    one could finish. A refusal after `rateWindowsBeforeRefusal` consecutive under-floor windows says what
- *    the rate measured, what the floor is, and what the file would have taken.
+ *  · `minRate` — bytes still arriving, but too slowly to be worth finishing. It is solved from
+ *    {@link DOWNLOAD_BUDGET_MS} and the length this response declares ({@link rateFloorFor}), not picked: a
+ *    fixed floor is only right for the payload size it was costed against, and after 2026-10-03 the archive is
+ *    345 entries / 2.1 MiB instead of 5,377 entries / 25,534,048 bytes.
+ *    A refusal after `rateWindowsBeforeRefusal` consecutive under-floor windows
+ *    says what the rate measured, what the floor is, what budget produced it, and what the file would have
+ *    taken at that rate.
  *  · `timeoutMs` — a ceiling so nothing can hold the daily job open forever. With a declared length the
- *    ceiling is *raised* to `declared / minRateBps × DOWNLOAD_BUDGET_SLACK` when that is longer, because the
- *    floor is what judges slowness and the ceiling must not quietly become the primary criterion — which is
- *    exactly how a live 26 KiB/s stream got cut at 900s. It is never lowered, never raised past
- *    `maxCeilingMs` (1 GiB declared at this floor would otherwise ask for 27 hours), and a stream that
- *    declares nothing keeps `timeoutMs`.
+ *    ceiling is *raised* to the budget that length asked for, times `DOWNLOAD_BUDGET_SLACK`, because the floor
+ *    is what judges slowness and the ceiling must not quietly become the primary criterion — which is exactly
+ *    how a live 26 KiB/s stream got cut at 900s. It is never lowered, never raised past `maxCeilingMs` (1 GiB
+ *    declared at this budget would otherwise ask for hours), and a stream that declares nothing keeps
+ *    `timeoutMs`.
  *
  * Every refusal names which clock fired and how many bytes had arrived.
  */
 export const DOWNLOAD_STALL_MS = 30_000
 export const DOWNLOAD_CEILING_MS = 900_000
+/**
+ * How long one download may hold the daily job (or a person waiting on the Install button).
+ *
+ * This is the budget the rate floor is *solved from*, not a number attached to a payload: `minRate` exists to
+ * answer "at this speed, does the file land inside the budget", and a fixed floor can only be correct for one
+ * archive size. It was 16 KiB/s because the archive was ~24 MiB (16 KiB/s × 25 min ≈ 24 MiB); the same floor
+ * then refused a 2.1 MiB archive at 7.3 KiB/s even though that finishes in five minutes — a false refusal
+ * measured on this machine on 2026-10-03, where the update stayed undownloadable at 348 KiB received.
+ */
+export const DOWNLOAD_BUDGET_MS = 1_500_000
+/**
+ * The floor's floor. Below this the sentence would be quoting a rate no reader can act on (0.0 KiB/s), and a
+ * stream slower than 1 KiB/s for two full windows is not "a small file finishing", it is a broken link.
+ */
+export const DOWNLOAD_MIN_RATE_FLOOR_BPS = 1024
+/**
+ * What a stream that declares nothing is held to: the answer `rateFloorFor` gives for a 24 MiB payload, which
+ * is the size class a GitHub release asset of this product is in. Undeclared is the exception path, so it
+ * keeps a conservative fixed bar rather than inventing a size.
+ */
 export const DOWNLOAD_MIN_RATE_BPS = 16 * 1024
 export const DOWNLOAD_RATE_WINDOW_MS = 15_000
 export const DOWNLOAD_RATE_WINDOWS_BEFORE_REFUSAL = 2
 export const DOWNLOAD_BUDGET_SLACK = 1.5
+
+/**
+ * The rate a declared payload has to sustain to finish inside the budget.
+ *
+ * `null` declared (a stream that sends no usable `content-length`, or sends one that is not a number) falls
+ * back to `undeclaredBps`; a tiny declared payload is clamped by `floorBps` so the number in the refusal
+ * stays meaningful. Never higher than what the budget allows: a 100 MiB payload at a 25-minute budget asks for
+ * 68 KiB/s, and that is a true statement about the budget rather than a made-up speed.
+ */
+export function rateFloorFor({
+  declared,
+  budgetMs = DOWNLOAD_BUDGET_MS,
+  floorBps = DOWNLOAD_MIN_RATE_FLOOR_BPS,
+  undeclaredBps = DOWNLOAD_MIN_RATE_BPS,
+} = {}) {
+  if (!declared || !(budgetMs > 0)) return undeclaredBps
+  return Math.max(floorBps, Math.ceil((declared * 1000) / budgetMs))
+}
 /**
  * The most a widened ceiling may ever wait.
  *
@@ -365,13 +405,16 @@ const humanRate = (bps) => (bps >= 1024 * 1024
 /**
  * A duration in words. Sub-second values keep a decimal: injected test clocks are milliseconds, and a
  * refusal that printed "did not finish within 0s" while the clock it used was 200ms would be a message
- * that misstates the very number it exists to name.
+ * that misstates the very number it exists to name. Minutes take over above two of them, because the
+ * budget this tool is costed on is stated in minutes and "1500s" makes a reader do arithmetic.
  */
-const humanSeconds = (ms) => (ms >= 10_000
-  ? `${Math.round(ms / 1000)}s`
-  : ms >= 1_000
-    ? `${(ms / 1000).toFixed(1)}s`
-    : `${Math.round(ms)}ms`)
+const humanSeconds = (ms) => (ms >= 120_000
+  ? `${Math.round(ms / 60_000)} min`
+  : ms >= 10_000
+    ? `${Math.round(ms / 1000)}s`
+    : ms >= 1_000
+      ? `${(ms / 1000).toFixed(1)}s`
+      : `${Math.round(ms)}ms`)
 
 /**
  * The length this response declares, or `null` when it declares nothing readable.
@@ -392,7 +435,9 @@ function declaredLengthOf(response) {
 export function makeBytesFetcher(fetchImpl = globalThis.fetch, {
   timeoutMs = DOWNLOAD_CEILING_MS,
   stallMs = DOWNLOAD_STALL_MS,
-  minRateBps = DOWNLOAD_MIN_RATE_BPS,
+  minRateBps = null,
+  budgetMs = DOWNLOAD_BUDGET_MS,
+  rateFloorBps = DOWNLOAD_MIN_RATE_FLOOR_BPS,
   rateWindowMs = DOWNLOAD_RATE_WINDOW_MS,
   rateWindowsBeforeRefusal = DOWNLOAD_RATE_WINDOWS_BEFORE_REFUSAL,
   maxCeilingMs = DOWNLOAD_CEILING_MAX_MS,
@@ -404,6 +449,7 @@ export function makeBytesFetcher(fetchImpl = globalThis.fetch, {
     let fired = null
     let received = 0
     let declared = null
+    let floorBps = minRateBps ?? rateFloorFor({ declared, budgetMs, floorBps: rateFloorBps })
     let lastRate = null
     let ceilingMs = timeoutMs
     let stallTimer = null
@@ -434,10 +480,14 @@ export function makeBytesFetcher(fetchImpl = globalThis.fetch, {
       }
       assertRedirectTarget(response.url, { requested: url })
       declared = declaredLengthOf(response)
-      if (declared && minRateBps > 0) {
+      // The floor is solved once the length is known, before either clock reads it. A caller that passed
+      // `minRateBps` keeps its own number: that knob is how the unit tests pin a rate, and production never
+      // sets it.
+      floorBps = minRateBps ?? rateFloorFor({ declared, budgetMs, floorBps: rateFloorBps })
+      if (declared && floorBps > 0) {
         // Clamped twice: never below the caller's own ceiling, never above the widest wait this tool will
         // make — otherwise a `content-length` from something that intends to trickle buys hours.
-        const budget = Math.min(Math.ceil((declared / minRateBps) * 1000 * DOWNLOAD_BUDGET_SLACK), maxCeilingMs)
+        const budget = Math.min(Math.ceil((declared / floorBps) * 1000 * DOWNLOAD_BUDGET_SLACK), maxCeilingMs)
         if (budget > timeoutMs) armCeiling(budget)
       }
       if (!response.body || typeof response.body.getReader !== 'function') {
@@ -457,17 +507,25 @@ export function makeBytesFetcher(fetchImpl = globalThis.fetch, {
           chunks.push(value)
           received += value.length
           armStall()
-          if (!(rateWindowMs > 0) || !(minRateBps > 0)) continue
+          if (!(rateWindowMs > 0) || !(floorBps > 0)) continue
           const now = Date.now()
           windowBytes += value.length
           const elapsed = now - windowStart
           if (elapsed < rateWindowMs) continue
           lastRate = (windowBytes / elapsed) * 1000
-          if (lastRate < minRateBps) {
+          if (lastRate < floorBps) {
             slowWindows += 1
             if (slowWindows >= rateWindowsBeforeRefusal) {
               stop('rate')
-              throw new UpdaterError(CODES.releaseUnreachable, stoppedForRate(url, { lastRate, minRateBps, received, declared, rateWindowMs }))
+              throw new UpdaterError(CODES.releaseUnreachable, stoppedForRate(url, {
+                lastRate,
+                floorBps,
+                budgetMs,
+                derived: minRateBps === null,
+                received,
+                declared,
+                rateWindowMs,
+              }))
             }
           } else {
             slowWindows = 0
@@ -503,9 +561,12 @@ export function makeBytesFetcher(fetchImpl = globalThis.fetch, {
   }
 }
 
-/** The sentence for the rate floor: what it measured, what it needs, what that costs, what arrived. */
-function stoppedForRate(url, { lastRate, minRateBps, received, declared, rateWindowMs }) {
-  const measured = Number.isFinite(lastRate) && lastRate > 0 ? lastRate : minRateBps / 10
-  const wouldTake = declared ? ` at ${humanRate(measured)} that is ${Math.ceil((declared / measured) / 60)} min for this file` : ''
-  return `GET ${url} was stopped: it is alive but too slow to be worth finishing — ${humanRate(measured)} averaged over ${humanSeconds(rateWindowMs)}, under the ${humanRate(minRateBps)} the daily schedule needs${wouldTake}. ${humanBytes(received)} had arrived${declared ? ` of ${humanBytes(declared)} declared` : ''}. The release is refused and nothing partial is staged, so the next run starts from a clean slate`
+/** The sentence for the rate floor: what it measured, what it needs, where that number comes from, what arrived. */
+function stoppedForRate(url, { lastRate, floorBps, budgetMs, derived, received, declared, rateWindowMs }) {
+  const measured = Number.isFinite(lastRate) && lastRate > 0 ? lastRate : floorBps / 10
+  const wouldTake = declared ? `; at ${humanRate(measured)} that is ${Math.ceil((declared / measured) / 60)} min for this file` : ''
+  const bar = derived
+    ? `the ${humanRate(floorBps)} this ${declared ? `${humanBytes(declared)} ` : ''}file has to hold to land inside ${humanSeconds(budgetMs)}`
+    : `the ${humanRate(floorBps)} floor this caller set`
+  return `GET ${url} was stopped: it is alive but too slow to be worth finishing — ${humanRate(measured)} averaged over ${humanSeconds(rateWindowMs)}, under ${bar}${wouldTake}. ${humanBytes(received)} had arrived${declared ? ` of ${humanBytes(declared)} declared` : ''}. The release is refused and nothing partial is staged, so the next run starts from a clean slate`
 }

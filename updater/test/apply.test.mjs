@@ -39,6 +39,7 @@ import {
   restoreBackup,
   rollbackToBackup,
   snapshotDir,
+  socketCall,
 } from '../lib/apply.js'
 import { mcpToolsList } from '../lib/mcp.js'
 import { emptyState, loadState, nextState, saveState, updateSummary } from '../lib/state.js'
@@ -1077,6 +1078,39 @@ test('handshakeVerify needs both the socket version and a working tools/list, ov
     const wrong = await handshakeVerify({ socketPath, wantVersion: '9.9.9', budgetMs: 120_000, pollMs: 100, toolsList: liveTools })
     assert.equal(wrong.ok, false)
     assert.match(wrong.message, /hello said "1\.4\.1"/)
+  } finally {
+    await daemon.close()
+    fx.cleanup()
+  }
+})
+
+test('a socket error on the daemon stub is recorded, not allowed to end the test run', async () => {
+  // `handshakeVerify` polls, so every expired poll closes the socket while a reply may still be in flight;
+  // on 2026-10-03 that produced `write EPIPE` from `respond()` inside the helper and reddened the
+  // real-process handshake case at load average 226 (green in isolation on the same commit) — a verdict the
+  // code under test never made. The stub now handles socket errors and records them.
+  //
+  // The error is injected rather than provoked through the OS: measured on this machine, destroying the
+  // peer does *not* reliably make the server-side write emit (three shapes tried, zero errors in 400ms of
+  // waiting), so "wait for a real EPIPE" would be a control that passes by luck. What is under test is the
+  // handler's existence, and `emit('error')` asks that question directly: with `socket.on('error', …)`
+  // deleted, this same emit surfaces as an uncaught error and the run dies. REVERSE MUTATION: delete that
+  // line in `helpers.mjs`.
+  const fx = fixture('socketerror')
+  const socketPath = shortSocketPath(fx.dir, 'err.sock')
+  const daemon = await startSocketDaemon(socketPath, { behaviour: 'answer', version: '1.4.1' })
+  try {
+    const first = await socketCall({ socketPath, request: '{"id":1,"method":"hello"}\n', timeoutMs: 3_000 })
+    assert.equal(first.answered, true, first.reason)
+    assert.deepEqual(daemon.dropped, [], '一次正常问答不该被记成连接问题')
+
+    daemon.connections[0].emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))
+    assert.deepEqual(daemon.dropped, ['EPIPE'], `那笔没处写的回复要被记下来，而不是被静默吞掉：${JSON.stringify(daemon.dropped)}`)
+
+    // And the same daemon still serves the next client — the stub survived its own socket error.
+    const second = await socketCall({ socketPath, request: '{"id":1,"method":"hello"}\n', timeoutMs: 3_000 })
+    assert.equal(second.answered, true, second.reason)
+    assert.equal(second.frame?.result?.version, '1.4.1')
   } finally {
     await daemon.close()
     fx.cleanup()

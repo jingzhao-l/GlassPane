@@ -2,6 +2,29 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [未发布]
+
+### Fixed — 发布归档把 90% 的体量花在没人读的那份 fork 上
+
+真机跑 1.6.1 换版时撞上的：`updater check` 收到 348 KiB 就把这次发布拒了，句子说"7.3 KiB/s 太慢"。
+量出来两件事叠在一起。**其一，归档太大了**：`GlassPane-1.6.1.tar.gz` 25,534,048 字节，而本仓 tracked 的
+60.8 MiB 里 **54.7 MiB 是 `harness/`**（5,356 个文件里的 5,032 个）——那是 vendored 的 opencode fork，
+换版路径一行都不读它（`apply` 只读 `engine/`、`mcp-shell/`、`installer/`、`updater/`）。现在
+`scripts/make-release-archive.mjs` 按 `EXCLUDED_PREFIXES` 把它留在档外，并新增 `REQUIRED_IN_ARCHIVE`
+那道拒绝：**排除规则碰到安装路径要读的任何一条就拒绝发布**，`--verify` 也逐条要求它们在场——否则
+"把 `engine/` 一起排掉"会产出一个每个 `bin` 字段都满足、却根本装不出来的归档。打印的行里带上被排除的条数
+与原始字节数，变小这件事必须看得见。
+
+### Fixed — 速率下限绑在一个 payload 尺寸上，归档一变小就误拒
+
+`minRateBps` 原先是写死的 16 KiB/s。那个数字不是"选出来的"，它是 24 MiB / 25min 的解被抄进代码——所以
+归档瘦到 345 条目 / 2.1 MiB 量级（v1.6.1 发布件是 25,534,048 字节 / 5,377 条目）之后，同一条常数会拒掉
+**五分钟就能下完**的下载（本机 2026-10-03 实测就是被它拦在
+348 KiB，这台机器因此停在 1.6.0）。现在下限由 `rateFloorFor({ declared, budgetMs })` 反解：
+`max(1 KiB/s, declared / 25min)`，25min 是"一次下载最多占住这条每日作业"的预算，句子也把下限是从
+哪两个数算出来的一起说出来。不声明长度仍退回那条 16 KiB/s 的保守值；配对控制保证这条判据既不是永远拒、
+也不是永远放。
+
 ## [1.6.1] — 2026-10-03
 
 版本判断：两笔都是修复，没有任何对外契约变化——状态文件的字段一个都没动（新增的是 `message` 里的一句
