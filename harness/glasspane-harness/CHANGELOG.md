@@ -10,9 +10,58 @@ contract does not).
 
 ## [Unreleased]
 
-<!-- 0.6.3 之后尚未发布的内容。此前本节误放在文件中部，且其中 M4 一条与
-     0.6.0 下已发布的同一条重复；重复项已删，留下的两条（kernel conformance /
-     kernel provenance）确实还没随任何版本发出去。 -->
+<!-- 0.6.4 已发布；此处留空以备下一批。 -->
+
+## [0.6.4] - 2026-10-03
+
+这一版的内容全部来自一次全面审查：把 harness 从长期寄生的 worktree 合回主仓
+`main`（形态与 iterate 生态对齐），然后逐道复核它的六把尺子。三个 P0 都是
+「发布出去的东西是坏的」，其中两个在 npm 与 GitHub release 上已存在数日。
+
+### Fixed
+
+- **GitHub release 兜底安装此前从未成功过。** 安装器请求
+  `<product>-<platform>-<version>.tar.gz`，而 `script/build.ts` 上传的是
+  `<product>-<os>-<arch>.zip`：文件名里没有版本号（版本由 URL 里的 tag 承载），
+  且只有 Linux 目标才打成 tar.gz。实测 v0.6.3 / v0.5.1 / v0.4.0 的两种猜法
+  全部 HTTP 404。npm 不可用时（无 Node、无 npm、被代理拦）这条路径只会报
+  "download failed"。
+- **兜底安装不校验任何东西。** 0.6.3 随包发出的 `install.sh` 里
+  sha256 / gpg / asc / checksum 一个都没有——发布链给每个资产签了 `.asc`、
+  发了 `SHA256SUMS.txt`，而收到它们的安装器从不读。现在两个判定都补上：
+  对 `SHA256SUMS.txt` 校验 sha256（完整性；**不匹配直接拒绝安装**，不降级为
+  警告，因为字节不是发布的字节），对 `<asset>.asc` 验签（来源；缺 gpg 或缺
+  签名仍只警告，区分「策略缺口」与「篡改」）。两者不可互相替代。
+  对 v0.6.3 的真实资产实测：sha256 通过、GPG GOODSIG 通过；追加一个字节后
+  sha256 判定拒绝安装。
+- **`verify_asset_gpg` 读全局变量而不是参数。** 它声明了 `local asc` 却用
+  `"$TMP/$ASSET"`，并引用 `$URL`——在 `set -u` 下以非 `$URL` 的 URL 调用会
+  直接 `URL: unbound variable` 而死。改为全部走 `$1/$2/$3`。
+- **版本序崩坏。** CHANGELOG 的章节顺序是 0.6.3 / 0.6.1 / 0.6.0 /
+  `[Unreleased]` / 0.1.0 / 0.2.0 / 0.5.1 / 0.5.0 / 0.4.0 / 0.3.0——`[Unreleased]`
+  卡在文件中部，且 M4 一条在 0.6.0 与 `[Unreleased]` 下逐字重复。改为严格
+  降序、`[Unreleased]` 置顶，删掉重复的那条（它仍在 0.6.0 下）。
+
+### Internal
+
+- **尺子层合回主干，`harness-rulers` 成为主仓 CI 的一条 lane。** 此前
+  `harness/tools`（6 把尺子）与 `harness/contracts`（5 份金样）只存在于一个
+  worktree 的分支里，不在 `main` 的版本控制内——`FORK.md` 却把「分叉必须
+  可测量」列为不可让步纪律并给出 4 条命令，其中 3 条在 `main` 上是
+  `MODULE_NOT_FOUND`，而 `main` 的 CI 里 `grep -c harness` 当时是 0。
+  纪律变成了散文，**两个月里没有任何东西发现**。现在每次 push 先断言 6 把
+  尺子与 5 份金样在树里（就是这次的回归形态），再逐道跑。
+- **三道闸的金样重记**（`fork-diff` / `brand-surface` / `tool-surface`）。逐条
+  查证后重记，不是盖数：`fork-diff` 的 9 条过期项先逐文件比对确认与已发布的
+  0.6.3 逐字节一致；`brand-surface` 的 +1 定位到一处**注释**（同一提交把用户
+  可见的 `opencode -s <id>` 修成了 `glasspane-harness -s <id>`，注释里提到
+  旧名，按字面计数 +1）；`tool-surface` 的两处增长分别是 main 上 1.6.x 的
+  真实产品代码与尺子第一次在有上游参照检出时正确归属我们自己的 `gp_*` 工具面。
+  `surface-semantics` 同批仍 0 hit——判定全部留在 Swift 引擎里，这条才是本棘轮
+  真正要守的不变量。
+- **`FORK.md` 新增第 3 条纪律「尺子必须和 fork 同仓」**，并说明 `subtree split`
+  只带走 `harness/glasspane-harness/` 是对的：尺子量的是主仓里这棵树，不随产品
+  分发。
 
 ### Added
 
@@ -26,7 +75,7 @@ contract does not).
   mirrored fixtures, and both gates live in the product tree so this repository can
   verify itself.
 
-### Fixed
+### Fixed (kernel provenance, shipped in this version)
 
 - The kernel's pinned ref was unresolvable because the canonical branch had never been
   pushed; the branch is now published and the manifest re-anchored to it.
