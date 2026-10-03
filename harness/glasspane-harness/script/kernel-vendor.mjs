@@ -228,7 +228,20 @@ if (mode === "--record") {
       version: canonicalVersion,
     },
     vendoredAt: new Date().toISOString().slice(0, 10),
-    forkPath: path.join(vendorDir().forkRel, vendorRel),
+    // The fork-relative path of the vendored root, derived from the directory we
+    // actually resolved. The previous form, `join(forkRel, vendorRel)`, mixed two
+    // different meanings of `forkRel` and produced a doubled path
+    // (`packages/opencode/vendor/packages/opencode/vendor/kernel`): the in-product
+    // branch sets forkRel to `dirname(vendorRel)` because it is used to find the
+    // monorepo sibling, while the monorepo branch sets it to the whole fork path
+    // from upstream.json. Both callers then appended `vendorRel` again.
+    //
+    // Nothing noticed for as long as no *new* vendored file appeared, because the
+    // only consumer of this field is tool-surface's vendor exclusion, which
+    // degraded to "no exclusion" rather than failing. Deriving it from `dir` is
+    // correct in both branches by construction and cannot drift from where the
+    // files actually are.
+    forkPath: path.relative(repoRoot, vendorDir().dir).split(path.sep).join("/"),
     subdirs: SUBDIRS,
     files: entries,
     totalBytes: entries.reduce((sum, e) => sum + e.bytes, 0),

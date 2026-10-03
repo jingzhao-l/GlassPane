@@ -106,8 +106,31 @@ const surfaceALoc = surfaceAFiles.reduce((s, f) => s + loc(f), 0)
  * "the fork grew its own kernel file" cannot hide behind this exclusion.
  */
 function readVendorExclusion(forkRel) {
-  const manifestFile = path.join(repoRoot, "harness", "contracts", "kernel-vendor.json")
-  if (!existsSync(manifestFile)) return { prefix: null, declared: new Set() }
+  // The kernel-vendor manifest lives with the product it describes, i.e. inside the
+  // fork subtree — it is what the subtree split carries, and `kernel-vendor.mjs`
+  // reads the same file from there. This function used to look for it at
+  // `harness/contracts/kernel-vendor.json`, which does not exist; the `existsSync`
+  // guard below therefore returned `prefix: null, declared: empty` and the vendored
+  // kernel was silently counted as our own surface B. It surfaced the moment a new
+  // vendored file appeared (`vendor/kernel/src/errors.ts`, +5 LOC) — the exclusion
+  // had been dead the whole time and nothing had disturbed the total enough to be
+  // worth re-reading it.
+  //
+  // Both locations are accepted so a moved manifest cannot silently disable the
+  // exclusion again: the one inside the fork wins, because that is the copy that
+  // travels with the product.
+  const candidates = [
+    path.join(repoRoot, "harness", "glasspane-harness", "contracts", "kernel-vendor.json"),
+    path.join(repoRoot, "harness", "contracts", "kernel-vendor.json"),
+  ]
+  const manifestFile = candidates.find((f) => existsSync(f))
+  if (!manifestFile) {
+    // Say so out loud. A silently absent exclusion is exactly the failure mode
+    // this comment exists to prevent, and this tool's own header argues for
+    // printing exclusions so a caliber change cannot go unnoticed.
+    console.error("tool-surface: no kernel-vendor manifest found — vendored kernel lines WILL be counted as our surface B")
+    return { prefix: null, declared: new Set() }
+  }
   const manifest = JSON.parse(readFileSync(manifestFile, "utf8"))
   const forkPath = manifest?.forkPath
   if (typeof forkPath !== "string" || !Array.isArray(manifest?.files)) {
