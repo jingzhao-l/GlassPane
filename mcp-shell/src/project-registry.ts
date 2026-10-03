@@ -456,6 +456,55 @@ function tightenMode(target: string, want: number, kind: "directory" | "file"): 
   }
 }
 
+/**
+ * 这份文件此刻的身份：改一次就变的三个数。文件不在时为 null——
+ * "还没人注册过"与"刚被别人删了"在这一层是同一个观察，两者都不许被盖过去。
+ */
+function fileIdentity(filePath: string): string | null {
+  try {
+    const stat = fs.statSync(filePath);
+    return `${stat.mtimeMs}:${stat.size}:${stat.ino}`;
+  } catch (error) {
+    if (nodeErrorCode(error) === "ENOENT") return null;
+    throw error;
+  }
+}
+
+/**
+ * 读—改—写之间盘上换了哪一份：给出这一句拒绝的理由，没换则 null。
+ *
+ * 单独抽成纯函数是为了能被验红——`projectSet` 是同步的，测试没法在它读到盘与
+ * 写回盘之间插进另一次写，所以"守卫真的会拦"这件事只能把判据本身拿出来测。
+ */
+export function registryDriftReason(
+  filePath: string,
+  openedAs: string | null,
+  now: string | null,
+): string | null {
+  if (now === openedAs) {
+    return null;
+  }
+  return `projects.json at ${filePath} changed between the read that produced this edit and the write that `
+    + `would have published it (was ${openedAs ?? "absent"}, now ${now ?? "absent"}), so this call wrote `
+    + "nothing. Another process — the background service, its CLI, or the settings panel — holds a newer "
+    + "version of this table, and renaming ours over theirs would drop their entry while reporting success. "
+    + `Repeat gp_project_set: it reads the file again, so the second attempt carries what the other writer `
+    + "landed. If it keeps failing, something is writing this registry on a timer — read the file to see "
+    + "what appeared, and do not force the write.";
+}
+
+/**
+ * 落锁要 daemon 那边一起改协议，这里做的是这一层能独立做到的：写之前再看一眼盘，
+ * 身份变了就**拒绝**而不是覆盖，并把重试这条路说清楚。丢更新仍然可能发生在本函数
+ * 返回与 rename 之间那几微秒里，但那已经不是"读到的表和写回的表不是同一份"了。
+ */
+function assertNoConcurrentWrite(filePath: string, openedAs: string | null): void {
+  const reason = registryDriftReason(filePath, openedAs, fileIdentity(filePath));
+  if (reason !== null) {
+    throw new ProjectRegistryError("registry-changed-underneath", reason);
+  }
+}
+
 function saveProjects(filePath: string, entries: ProjectEntry[]): void {
   const dir = path.dirname(filePath);
   // Atomic write: tmp + rename. The temp name is unique per write — three
@@ -535,6 +584,11 @@ export function projectSet(args: ProjectSetArgs): ProjectSetResult {
   assertStorablePid(args.pid);
   const snapshot = loadRegistry(filePath);
   const { projects, discarded } = requireUsableRegistry(filePath, snapshot);
+  // 记下这份表被读进来时盘上是哪一份，写回去之前要认得它。
+  // 取在 `requireUsableRegistry` **之后**：那一步自己就会动文件（读不回的表被挪成
+  // `.unreadable-…` 而不是删掉），把它自己的修复当成"别人插进来写了一次"来拒绝，
+  // 等于让那条逃生门永远走不通。要防的是我们读完之后别人的那一次写。
+  const openedAs = fileIdentity(filePath);
 
   let entry: ProjectEntry;
   const projectId = args.projectId;
@@ -565,6 +619,7 @@ export function projectSet(args: ProjectSetArgs): ProjectSetResult {
     projects.push(entry);
   }
 
+  assertNoConcurrentWrite(filePath, openedAs);
   saveProjects(filePath, projects);
   return {
     ...entry,
