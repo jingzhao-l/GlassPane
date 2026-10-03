@@ -8,13 +8,13 @@
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
   "observedAt": "2026-10-03",
-  "engineLoc": 22370,
+  "engineLoc": 22406,
   "engineFiles": 60,
   "surfaces": {
     "mcpShell": {
-      "loc": 8386,
+      "loc": 8410,
       "files": 13,
-      "ratio": 0.2342
+      "ratio": 0.2344
     },
     "fork": {
       "loc": 5056,
@@ -1040,7 +1040,7 @@
           "lines": 0
         }
       ],
-      "ratio": 0.1412,
+      "ratio": 0.1409,
       "vendorExcluded": {
         "files": 11,
         "lines": 1464
@@ -1051,7 +1051,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 13442,
-  "note": "｜2026-10-03 再记一次，并修掉一个记账缺陷：vendored 内核此前**根本没有**被排除。原因是两处叠加——① tool-surface 读 `harness/contracts/kernel-vendor.json`，而那份清单在 `harness/glasspane-harness/contracts/` 下，读不到就静默返回「无排除」；② 即使读到，清单里的 forkPath 被写成了重复路径 `packages/opencode/vendor/packages/opencode/vendor/kernel`（kernel-vendor.mjs 用 join(forkRel, vendorRel) 拼出来，而两个分支对 forkRel 的含义不同），前缀匹配不上。两处都已修，并让「找不到清单」大声说出来而不是静默降级。修好后 vendored 内核 11 个文件 1464 行被如实排除，面 B 从 6507 降到 **5056（14.12%）**——这不是我们写的代码，是 kernel 的字节，它的完整性由 kernel-vendor.mjs 负责。教训与本棘轮同源：**一道静默失效的排除规则，比没有这条规则更坏**，因为它让测量看起来仍然成立。",
+  "totalToolSurfaceLoc": 13466,
+  "note": "｜2026-10-03 面 A 8386 → 8410（+24）：不是 harness 这批改动，而是并行会话在 main 上落的四个 mcp-shell 正确性修复（ba75cbb 引擎空帧被当成成功 / 94be764 打错的开关被静默丢掉 / d6e41a6 证据报告原样转发 app 的字符串 / 0abea72 未记的更新开关被说成 on-by-default）。棘轮按设计报警，这里只说明来源。**重记是在 origin/main 的干净 worktree 上做的**，因为主工作副本里还有该会话未提交的改动（本地量到 8455）——把别人的在制品记进金样等于替它背书。这条棘轮会在面 A 下次增长时再次转红，那是它该做的事，不是误报。",
   "carried": null
 }
