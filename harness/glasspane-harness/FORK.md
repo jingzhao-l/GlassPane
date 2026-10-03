@@ -9,9 +9,13 @@
 
 1. **判定性验证逻辑 100% 留在 Swift**。本 fork 里可以有 UI、编排、语义层与呈现，但"这次变化是不是这次操作造成的"这类判定只能由 `glasspaned` 通过 local socket 给出。方法表在合并 `origin/main`（f16f8c8）之后是 **13 个**：`hello / attach / act / observe / assert_element / diagnose / last_evidence / snapshot / restore / audit_ui / capture_view / probe_status / shutdown`（真源是 `engine/Sources/GlassPaneEngine/FrameCodec.swift` 的 `enum EngineMethod`；数的时候要展开 `case hello, attach, act, observe` 这类一行多枚举——**该枚举有 8 行 `case`、13 个成员**，按行数会数错。别信任何写死的数字，包括这一句）。错误帧恒 `{code, message, remedy}` 三字段。**这个数是别的会话会改的**（1.1.1 基点上只有 11 个，`audit_ui`、`capture_view` 都是之后合入的）——所以 fork 侧不许把方法名抄成字面量清单，要从 daemon 的 `hello.capabilities` / 协商结果读。fork 侧只做绑定与呈现。工具面 A 已经犯过一次"同一份状态两边各写一份实现"的错（`projects.json` 的 TS/Swift 双写，见 `specs/…审计_2026-09-22`），fork 不允许成为第三份。
 2. **分叉必须可测量**。任何触碰 vendored 树的提交，必须在**同一个提交**里更新 `harness/contracts/fork-diff.json`；不更新就 `fork-diff --check` 红。
-3. **vendored 内核不是我们的代码，也不是可以改的地方**。`packages/opencode/vendor/kernel/` 的真源是 `iterate-skill/kernel`（canonical），经 `tools/sync-kernel.sh --target=fork` 单向同步，逐文件 sha256 钉在 `harness/contracts/kernel-vendor.json`。在这里手改一个字节 = `kernel-vendor --check` 红（CI 也跑）。
+3. **尺子必须和 fork 同仓**。`harness/tools/` 与 `harness/contracts/` 与本目录是同一个仓里的兄弟，不是某个 worktree 的私有财产。这条是 2026-09-28 付了代价才补上的：harness 的开发长期寄生在 worktree（`gp-fork`，分支 `harness/recovered`），把它收编进主仓的提交只带进了 fork 本体，尺子层整体没进版本控制——于是上面 4 条命令里有 3 条在 `main` 上是 `MODULE_NOT_FOUND`，而 `main` 的 CI 里 `grep -c harness` 当时是 0，"分叉必须可测量"这条不可让步纪律变成了散文，**两个月里没人发现**（发现它的是发布出去的安装器被人用坏，不是任何一道闸）。现在 `harness-rulers` lane 在每次 push 上先断言 6 把尺子与 5 份金样在树里再逐道跑。**在 worktree 里改 harness 是不推荐的，但成果必须落回主干**；`git subtree split` 只带走 `harness/glasspane-harness/`，尺子留在主仓是对的（它们量的就是这棵树，不需要随产品分发）。
+4. **vendored 内核不是我们的代码，也不是可以改的地方**。`packages/opencode/vendor/kernel/` 的真源是 `iterate-skill/kernel`（canonical），经 `tools/sync-kernel.sh --target=fork` 单向同步，逐文件 sha256 钉在 `harness/glasspane-harness/contracts/kernel-vendor.json`。在这里手改一个字节 = `kernel-vendor --check` 红（CI 也跑）。
+
+> 命令一律**从仓库根**跑（尺子在 `harness/tools/`，不在本目录里）。本目录随 subtree split 独立成仓后，那些命令在那里不存在——这是设计，不是缺陷：尺子量的是主仓里这棵树加上游参照检出。
 
 ```bash
+# 从仓库根跑
 node harness/tools/fork-diff.mjs --check    # 实际分叉面 vs 记录面（约 2 分钟，逐文件 blob 比对）
 node harness/tools/fork-diff.mjs --record   # 改完上游文件后重记，连同改动一起提交
 node harness/tools/tool-surface.mjs --check # 我们在 fork 里写了多少行（棘轮：只挡没被记录的增长，进 CI）
