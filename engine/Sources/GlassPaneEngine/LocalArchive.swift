@@ -394,8 +394,15 @@ public enum LocalArchive {
 
     /// 修剪结果 → 面板那句话。口径是**命中 ≠ 删掉**：CLI 报得出 `matched/pruned/failed`
     /// 之后，面板不得再把命中数当成功数，也不得在部分成功时说"保持原样"。
+    ///
+    /// `replyShaped` 是"这一行回得就是约定的那份 JSON"。少了它，进程跑起来却**没被
+    /// 理解**（daemon 不认这条命令 → 退出码 64 + 一段帮助文本）会被折算成
+    /// `matched = 0`，面板于是当着一屏"68 条残留"说"没有需要清理的测试残留项目"。
+    /// "没东西可删"与"这条命令不存在"是两件事，混起来的后果是用户以为已经干净了。
     public static func pruneResultMessage(
         cliRan: Bool,
+        replyShaped: Bool,
+        exitCode: Int32,
         loadFailed: Bool,
         matched: Int,
         pruned: Int,
@@ -404,6 +411,11 @@ public enum LocalArchive {
     ) -> String {
         if !cliRan {
             return "清理命令没能跑起来，注册表未改动。请确认后台服务的程序路径可用。"
+        }
+        if !replyShaped {
+            return "后台服务没有按约定的形状回这条清理命令（退出码 \(exitCode)），注册表未改动。"
+                + "这多半是它已经不认得 `--project-prune`——跑一次 `glasspaned --help` 核对。"
+                + "这一句不代表已经干净了：一条都没删，也没人去问过有没有可删的。"
         }
         if loadFailed {
             return "注册表文件读不开，为避免把读不回的条目覆写掉，清理没有执行。修好该文件后重启后台服务再试。"
@@ -419,14 +431,23 @@ public enum LocalArchive {
         return "\(failed) 条都没能清理，注册表保持原样。"
     }
 
-    /// 单条删除结果 → 面板那句话。未知 id 与"拒绝覆写损坏表"是两件事。
+    /// 单条删除结果 → 面板那句话。未知 id、"拒绝覆写损坏表"、以及"这条命令根本
+    /// 不被认识"是三件事。第三种从前会被读成"没找到这个项目"——同一个 `removed: false`，
+    /// 一个说的是用户给错了 id，一个说的是这台机器上没有这条命令。
     public static func removeResultMessage(
         cliRan: Bool,
+        replyShaped: Bool,
+        exitCode: Int32,
         removed: Bool,
         loadFailed: Bool,
         needsRestart: Bool
     ) -> String {
         if !cliRan { return "删除命令没能跑起来，注册表未改动。" }
+        if !replyShaped {
+            return "后台服务没有按约定的形状回这条删除命令（退出码 \(exitCode)），注册表未改动。"
+                + "这多半是它已经不认得 `--project-remove`——跑一次 `glasspaned --help` 核对。"
+                + "这一句不是说该 id 不存在：命令没被理解，还没走到查 id 那一步。"
+        }
         if removed {
             return "已删除该项目。"
                 + (needsRestart ? "重启后台服务后，它内存里的旧列表才会同步。" : "")

@@ -278,23 +278,28 @@ final class LocalArchiveTests: XCTestCase {
     /// 部分失败时对着一份改了一半的注册表讲"已清理"或"保持原样"都是假的。
     func testPruneResultMessageSeparatesMatchedFromPruned() {
         XCTAssertTrue(LocalArchive.pruneResultMessage(
-            cliRan: false, loadFailed: false, matched: 3, pruned: 0, failed: 0, needsRestart: false
+            cliRan: false, replyShaped: true, exitCode: 0,
+            loadFailed: false, matched: 3, pruned: 0, failed: 0, needsRestart: false
         ).contains("注册表未改动"))
         XCTAssertTrue(LocalArchive.pruneResultMessage(
-            cliRan: true, loadFailed: true, matched: 0, pruned: 0, failed: 0, needsRestart: false
+            cliRan: true, replyShaped: true, exitCode: 0,
+            loadFailed: true, matched: 0, pruned: 0, failed: 0, needsRestart: false
         ).contains("读不开"))
         XCTAssertEqual(LocalArchive.pruneResultMessage(
-            cliRan: true, loadFailed: false, matched: 0, pruned: 0, failed: 0, needsRestart: false
+            cliRan: true, replyShaped: true, exitCode: 0,
+            loadFailed: false, matched: 0, pruned: 0, failed: 0, needsRestart: false
         ), "没有需要清理的测试残留项目。")
         let partial = LocalArchive.pruneResultMessage(
-            cliRan: true, loadFailed: false, matched: 5, pruned: 3, failed: 2, needsRestart: true
+            cliRan: true, replyShaped: true, exitCode: 1,
+            loadFailed: false, matched: 5, pruned: 3, failed: 2, needsRestart: true
         )
         XCTAssertTrue(partial.contains("3"), partial)
         XCTAssertTrue(partial.contains("2"), partial)
         XCTAssertFalse(partial.contains("保持原样"), "部分成功后不得说保持原样：\(partial)")
         XCTAssertTrue(partial.contains("仍在列表里"), partial)
         XCTAssertEqual(LocalArchive.pruneResultMessage(
-            cliRan: true, loadFailed: false, matched: 4, pruned: 0, failed: 4, needsRestart: false
+            cliRan: true, replyShaped: true, exitCode: 1,
+            loadFailed: false, matched: 4, pruned: 0, failed: 4, needsRestart: false
         ), "4 条都没能清理，注册表保持原样。")
     }
 
@@ -302,13 +307,48 @@ final class LocalArchiveTests: XCTestCase {
     /// 面板要说的是损坏，不是"没找到"。
     func testRemoveResultMessageSeparatesNotFoundFromRefusedWrite() {
         XCTAssertEqual(LocalArchive.removeResultMessage(
-            cliRan: true, removed: true, loadFailed: false, needsRestart: true
+            cliRan: true, replyShaped: true, exitCode: 0,
+            removed: true, loadFailed: false, needsRestart: true
         ), "已删除该项目。重启后台服务后，它内存里的旧列表才会同步。")
         XCTAssertEqual(LocalArchive.removeResultMessage(
-            cliRan: true, removed: false, loadFailed: false, needsRestart: false
+            cliRan: true, replyShaped: true, exitCode: 3,
+            removed: false, loadFailed: false, needsRestart: false
         ), "没找到这个项目，注册表未改动。")
         XCTAssertTrue(LocalArchive.removeResultMessage(
-            cliRan: true, removed: false, loadFailed: true, needsRestart: false
+            cliRan: true, replyShaped: true, exitCode: 1,
+            removed: false, loadFailed: true, needsRestart: false
         ).contains("读不开"))
+    }
+
+    /// **跑起来了 ≠ 被理解了。**
+    ///
+    /// 这台机器的 daemon 今天已经不认 `--project-prune`（实测退出码 64 + 一段帮助文本），
+    /// 而面板从前把这份输出读成 `matched = 0`，于是当着一屏"68 条注册项指向系统临时目录"
+    /// 回一句"没有需要清理的测试残留项目。"——用户读到的是"已经干净了"。
+    ///
+    /// 反向变异：把 `!replyShaped` 那一支删掉，这一条立刻变红（它会掉进 matched==0
+    /// 那句假清白）；把 `ConsoleModel` 里的 `shaped` 判据写死成 `true`，同样变红——
+    /// 判据必须真的看输出里有没有那几个字段。
+    func testUnrecognisedCommandIsNeverReadAsNothingToClean() {
+        let refused = LocalArchive.pruneResultMessage(
+            cliRan: true, replyShaped: false, exitCode: 64,
+            loadFailed: false, matched: 0, pruned: 0, failed: 0, needsRestart: false
+        )
+        XCTAssertFalse(refused.contains("没有需要清理"), "命令没被认识绝不是\"没有东西可删\"：\(refused)")
+        XCTAssertTrue(refused.contains("64"), "退出码要原样给出去，人才查得动：\(refused)")
+        XCTAssertTrue(refused.contains("注册表未改动"), refused)
+        XCTAssertTrue(refused.contains("--help"), "要给一条做得动的下一步：\(refused)")
+    }
+
+    /// 同一件事在单条删除那一面：`removed: false` 既可能是用户给错了 id，
+    /// 也可能是这台机器上没有这条命令。两句话不能是一句。
+    func testUnrecognisedRemoveIsNeverReadAsProjectNotFound() {
+        let refused = LocalArchive.removeResultMessage(
+            cliRan: true, replyShaped: false, exitCode: 64,
+            removed: false, loadFailed: false, needsRestart: false
+        )
+        XCTAssertFalse(refused.contains("没找到这个项目"), "不许把不认识的命令说成找不到 id：\(refused)")
+        XCTAssertTrue(refused.contains("64"), refused)
+        XCTAssertTrue(refused.contains("注册表未改动"), refused)
     }
 }

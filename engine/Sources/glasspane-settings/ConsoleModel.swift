@@ -231,9 +231,17 @@ final class ConsoleModel: ObservableObject {
             await MainActor.run {
                 self.isRunningPrune = false
                 let output = run?.output ?? ""
+                // "跑起来了"不等于"被理解了"。daemon 不认这条命令时退出码是 64、
+                // 回的是帮助文本，`intField("matched") ?? 0` 会把它读成 0 命中，
+                // 面板于是当着一屏残留说"没有需要清理的项目"。判据是这一行里
+                // 到底有没有约定那几个字段，不是进程有没有回来过。
+                let shaped = Self.intField("matched", in: output) != nil
+                    || Self.boolField("loadFailed", in: output) != nil
                 self.pruneNeedsRestart = Self.boolField("requiresDaemonRestart", in: output) ?? false
                 self.lastActionMessage = LocalArchive.pruneResultMessage(
                     cliRan: run != nil,
+                    replyShaped: shaped,
+                    exitCode: run?.status ?? -1,
                     loadFailed: Self.boolField("loadFailed", in: output) ?? false,
                     matched: Self.intField("matched", in: output) ?? 0,
                     pruned: Self.intField("pruned", in: output) ?? 0,
@@ -256,10 +264,17 @@ final class ConsoleModel: ObservableObject {
             let run = ConsoleModel.runDaemonCLI(binary: binary, arguments: ["--project-remove", projectId])
             await MainActor.run {
                 let output = run?.output ?? ""
+                // 同 prune：退出码 64 的帮助文本会读成 `removed: false`，
+                // 而面板那句话就从"没找到这个项目"开始骗人。
+                let shaped = Self.boolField("removed", in: output) != nil
+                    || Self.boolField("found", in: output) != nil
+                    || Self.boolField("loadFailed", in: output) != nil
                 self.pruneNeedsRestart = Self.boolField("requiresDaemonRestart", in: output) ?? false
                 self.lastActionMessage = LocalArchive.removeResultMessage(
                     cliRan: run != nil,
-                    removed: (Self.intField("removed", in: output) ?? 0) > 0,
+                    replyShaped: shaped,
+                    exitCode: run?.status ?? -1,
+                    removed: Self.boolField("removed", in: output) == true,
                     loadFailed: Self.boolField("loadFailed", in: output) ?? false,
                     needsRestart: self.pruneNeedsRestart
                 )
