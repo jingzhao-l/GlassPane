@@ -15,7 +15,7 @@ struct ProjectsTabView: View {
     var body: some View {
         HSplitView {
             listPane.frame(minWidth: 250, idealWidth: 300, maxWidth: 400)
-            detailPane.frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
+            detailPane.frame(minWidth: 300, idealWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
         }
         .toolbar { toolbarContent }
         .sheet(isPresented: $model.isPruneSheetPresented) { pruneSheet }
@@ -191,6 +191,9 @@ struct ProjectsTabView: View {
                     .consoleCard()
                 }
                 .padding(14)
+                // 与证据页同一条收口：不限行宽时长路径会把这一栏的理想宽度撑爆，
+                // 左侧导航就会被挤出窗口。
+                .frame(maxWidth: 760, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .background(Color(nsColor: .textBackgroundColor).opacity(0.35))

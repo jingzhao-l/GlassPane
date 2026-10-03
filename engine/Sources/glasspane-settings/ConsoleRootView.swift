@@ -60,6 +60,13 @@ struct ConsoleRootView: View {
                 .environmentObject(settings)
                 .environmentObject(console)
                 .environmentObject(updates)
+                // 这一栏必须**自己**声明"我可以被压到 0"。不声明时它把内容的理想
+                // 尺寸当作最小尺寸交给分栏：证据页实测 987×612、审批页 900×1090，
+                // 而窗口只有 900×612 —— 分栏按那个尺寸排完再被窗口裁掉，
+                // 症状是左侧导航整条被挤出左边界（"首次使用"只剩"使用"、图标全不见）。
+                // 收在这里而不是每一页各修各的，是因为每一页的内容形状都会变。
+                .frame(minWidth: 0, idealWidth: 400, maxWidth: .infinity,
+                       minHeight: 0, idealHeight: 400, maxHeight: .infinity)
         }
         // 窗口标题的唯一落点：各页不得再设 navigationTitle，否则会把
         // "GlassPane 设置" 顶掉（P1-C6 真机冒烟按窗口标题定位面板）。
@@ -192,8 +199,11 @@ struct ConsoleRootView: View {
                 console.refreshAll()
                 updates.refresh()
             } label: {
+                // 实测 9×10pt：整页唯一的"全部重测"入口，却小到点不中。
                 Image(systemName: "arrow.clockwise")
                     .font(.caption)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
             .help("重新检测权限、档案与更新状态")
