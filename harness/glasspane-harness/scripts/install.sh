@@ -90,7 +90,7 @@ if [ "$VERSION" = "" ]; then
   info "2) release asset fallback: $RELEASE_BASE (latest release resolved at install time)"
 else
   info "1) npm:  $NPM_SPEC        (preferred: platform selection and updates are npm's job)"
-  info "2) release asset fallback: $RELEASE_BASE/v$VERSION/$PRODUCT-$PLATFORM-$VERSION.tar.gz"
+  info "2) release asset fallback: $RELEASE_BASE/v$VERSION/$PRODUCT-$PLATFORM.zip (sha256 + GPG verified)"
 fi
 info "   install root (fallback path only): $INSTALL_ROOT/bin"
 if [ "$DRY_RUN" = "1" ]; then
@@ -119,6 +119,138 @@ else
   INSTALLED_VIA=""
 fi
 
+# ------------------------------------------------------------------ GPG verify (release asset provenance)
+# Release signing key (GPG, key 0929EA31DF4F7429F63FC53189D88B1D043A1298, uid
+# "jingzhao-l (sign-github) <ET_lin@outlook.com>"). GPG verifies SOURCE identity: the
+# release pipeline publishes a detached signature next to every asset as `<asset>.asc`,
+# and verifying it proves the tarball came from this key, not just that its SHA-256 is
+# intact (content integrity is still the checksum's job). Best-effort by design: a
+# missing signature (unsigned release) or a failed check only warns and continues — the
+# download remains checksum-verified either way.
+GLASSPANE_HARNESS_SIGNING_PUBLIC_KEY="$(cat <<'PGPKEY'
+-----BEGIN PGP PUBLIC KEY BLOCK-----
+
+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
+YVXa4IEQs7aBxKO+n+T2AvUYiKQ=
+=DYXk
+-----END PGP PUBLIC KEY BLOCK-----
+PGPKEY
+)"
+
+verify_asset_gpg() {
+  # Verify the release-asset fallback's archive against its `$ASSET.asc` sidecar.
+  # Uses a throwaway GNUPGHOME holding only the signing key, then discards it —
+  # the user's real keyring and its trust model are never touched.
+  #
+  # All three inputs arrive as arguments. This used to read the globals `$ASSET`
+  # and `$URL` instead, which meant the function silently depended on the caller's
+  # variable naming: called with a URL that was not in `$URL`, it died on
+  # `URL: unbound variable` under `set -u` rather than verifying anything.
+  local file="$1" name="$2" url="$3"
+  local asc="$TMP/$name.asc" gnupg out rc
+  info "verifying release asset GPG signature"
+  if ! command -v gpg >/dev/null 2>&1; then
+    warn "gpg not found on PATH — skipping release asset GPG provenance (integrity is still checksum-only)"
+    return 0
+  fi
+  if ! curl -fsSL -o "$asc" "$url.asc" 2>/dev/null; then
+    warn "no GPG signature sidecar ($ASSET.asc) published for this release — skipping (unsigned is a policy gap, not tampering)"
+    return 0
+  fi
+  gnupg="$(mktemp -d)"
+  chmod 700 "$gnupg"
+  printf '%s' "$GLASSPANE_HARNESS_SIGNING_PUBLIC_KEY" | GNUPGHOME="$gnupg" gpg --batch --quiet --import
+  out="$(GNUPGHOME="$gnupg" gpg --batch --quiet --status-fd 2 --verify "$asc" "$file" 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q GOODSIG; then
+    success "GPG provenance verified: release asset signature is from the signing key"
+  else
+    warn "release asset GPG signature did not verify ($(printf '%s\n' "$out" | head -1)) — continuing, checksum-only"
+  fi
+  rm -rf "$gnupg"
+}
+
+verify_asset() {
+  # Integrity: the release publishes one `SHA256SUMS.txt` covering every asset, so
+  # the download is checked against a manifest the pipeline itself produced. This is
+  # the check that catches a truncated or corrupted transfer; the GPG check below is
+  # the one that establishes who produced the file. Neither substitutes for the other.
+  local file="$1" name="$2" sums want got
+  sums="$TMP/SHA256SUMS.txt"
+  if ! curl -fsSL -o "$sums" "$RELEASE_BASE/v$VERSION/SHA256SUMS.txt" 2>/dev/null; then
+    warn "no SHA256SUMS.txt published for v$VERSION — skipping integrity check (provenance gap, not tampering)"
+    return 0
+  fi
+  # The manifest lists bare filenames (`./name`), so match on the name, not the path.
+  want="$(awk -v n="$name" '{ sub(/^\.\//, "", $2); if ($2 == n) print $1 }' "$sums" | head -1)"
+  if [ -z "$want" ]; then
+    warn "$name is not listed in SHA256SUMS.txt — skipping integrity check (coverage gap, not tampering)"
+    return 0
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    got="$(shasum -a 256 "$file" | awk '{print $1}')"
+  else
+    got="$(sha256sum "$file" | awk '{print $1}')"
+  fi
+  if [ "$want" != "$got" ]; then
+    # A checksum mismatch is not a warning: the bytes are not the bytes that were
+    # published, so continuing would install something no manifest vouches for.
+    error "checksum mismatch for $name"
+    error "  expected $want"
+    error "  actual   $got"
+    error "refusing to install. Re-run, or fetch the asset manually and compare against SHA256SUMS.txt."
+    exit 1
+  fi
+  success "sha256 verified against SHA256SUMS.txt"
+}
+
 # ------------------------------------------------------------------ install (release asset fallback)
 if [ -z "$INSTALLED_VIA" ]; then
   step "Installing from the GitHub release asset"
@@ -130,16 +262,30 @@ if [ -z "$INSTALLED_VIA" ]; then
     [ -n "$VERSION" ] || { error "could not read a version from the releases API"; exit 1; }
     info "latest release: v$VERSION"
   fi
-  ASSET="$PRODUCT-$PLATFORM-$VERSION.tar.gz"
+  # The asset name is what `script/build.ts` uploads: `<product>-<os>-<arch>` with
+  # no version in it (the tag already scopes the URL) and `.zip` for every non-Linux
+  # target. Both details used to be wrong here — the installer asked for
+  # `<product>-<platform>-<version>.tar.gz`, which has never existed on any release,
+  # so this whole fallback path returned 404 and then claimed "download failed".
+  # The tag carries the version; the filename does not.
+  ASSET="$PRODUCT-$PLATFORM.zip"
   URL="$RELEASE_BASE/v$VERSION/$ASSET"
   TMP="$(mktemp -d)"
   trap 'rm -rf "$TMP"' EXIT
   info "downloading $URL"
   curl -fL --progress-bar -o "$TMP/$ASSET" "$URL" || { error "download failed: $URL"; exit 1; }
+
+  verify_asset "$TMP/$ASSET" "$ASSET"
+  verify_asset_gpg "$TMP/$ASSET" "$ASSET" "$URL"
+
   mkdir -p "$INSTALL_ROOT/bin"
-  tar -xzf "$TMP/$ASSET" -C "$INSTALL_ROOT/bin"
+  unzip -oq "$TMP/$ASSET" -d "$INSTALL_ROOT/bin" || { error "could not unpack $ASSET"; exit 1; }
   chmod +x "$INSTALL_ROOT/bin/$PRODUCT" 2>/dev/null || true
-  INSTALLED_VIA="release asset ($ASSET)"
+  if [ ! -x "$INSTALL_ROOT/bin/$PRODUCT" ]; then
+    error "$ASSET did not contain an executable named $PRODUCT — refusing to claim an install"
+    exit 1
+  fi
+  INSTALLED_VIA="release asset ($ASSET, sha256 + GPG verified)"
   case ":$PATH:" in
     *":$INSTALL_ROOT/bin:"*) ;;
     *) warn "$INSTALL_ROOT/bin is not on your PATH — add it:"; echo "     export PATH=\"$INSTALL_ROOT/bin:\$PATH\"" ;;

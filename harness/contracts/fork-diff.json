@@ -2,11 +2,11 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-09-26",
+  "observedAt": "2026-10-03",
   "counts": {
-    "identical": 4677,
-    "edited": 250,
-    "added": 98,
+    "identical": 4670,
+    "edited": 257,
+    "added": 113,
     "deleted": 1705
   },
   "edited": [
@@ -213,6 +213,7 @@
     "packages/tui/src/app.tsx",
     "packages/tui/src/attention.ts",
     "packages/tui/src/component/dialog-model.tsx",
+    "packages/tui/src/component/dialog-move-session.tsx",
     "packages/tui/src/component/dialog-provider.tsx",
     "packages/tui/src/component/use-connected.tsx",
     "packages/tui/src/config/keybind.ts",
@@ -257,7 +258,13 @@
     "packages/tui/src/theme/assets/vercel.json",
     "packages/tui/src/theme/assets/vesper.json",
     "packages/tui/src/theme/assets/zenburn.json",
+    "packages/tui/src/util/presentation.ts",
+    "packages/tui/test/app-lifecycle.test.tsx",
+    "packages/tui/test/cli/cmd/tui/provider-options.test.ts",
     "packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx",
+    "packages/tui/test/fixture/fixture.ts",
+    "packages/tui/test/fixture/tui-sdk.ts",
+    "packages/tui/test/util/presentation.test.ts",
     "script/translate-app.test.ts",
     "script/translate-app.ts"
   ],
@@ -310,6 +317,16 @@
     "SYNCLOG.md",
     "assets/banner.svg",
     "assets/logo.svg",
+    "contracts/kernel-fixtures/decision-log-chain.ok-01.json",
+    "contracts/kernel-fixtures/decision-log-entry.ok-01.json",
+    "contracts/kernel-fixtures/dimension-context.ok-01.json",
+    "contracts/kernel-fixtures/evidence-pack.ok-01.json",
+    "contracts/kernel-fixtures/evidence-pack.ok-02.json",
+    "contracts/kernel-fixtures/evidence-pack.ok-03.json",
+    "contracts/kernel-fixtures/evidence-pack.ok-04-legacy-draft.json",
+    "contracts/kernel-fixtures/evidence-pack.ok-05-pixelbounds-null.json",
+    "contracts/kernel-fixtures/recipe-config.ok-01.json",
+    "contracts/kernel-vendor.json",
     "docs/evidence.md",
     "docs/index.md",
     "docs/install.md",
@@ -337,6 +354,7 @@
     "packages/opencode/test/tool/glasspane-surface.test.ts",
     "packages/opencode/vendor/kernel/fixtures/decision-log-chain.ok-01.json",
     "packages/opencode/vendor/kernel/fixtures/decision-log-entry.ok-01.json",
+    "packages/opencode/vendor/kernel/fixtures/dimension-context.ok-01.json",
     "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-01.json",
     "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-02.json",
     "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-03.json",
@@ -351,6 +369,7 @@
     "packages/opencode/vendor/kernel/src/canonical-json.ts",
     "packages/opencode/vendor/kernel/src/decision-log-entry.ts",
     "packages/opencode/vendor/kernel/src/decision-log.ts",
+    "packages/opencode/vendor/kernel/src/dimension-context.ts",
     "packages/opencode/vendor/kernel/src/errors.ts",
     "packages/opencode/vendor/kernel/src/evidence-decision.ts",
     "packages/opencode/vendor/kernel/src/evidence-pack.ts",
@@ -359,6 +378,9 @@
     "packages/opencode/vendor/kernel/src/recipe-config.ts",
     "packages/opencode/vendor/kernel/src/schemas.ts",
     "product.json",
+    "script/gpg-signing.sh",
+    "script/kernel-conformance.mjs",
+    "script/kernel-vendor.mjs",
     "scripts/install.sh"
   ],
   "deleted": [
@@ -2657,12 +2679,12 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "cd7af72511e77c13c91139489617b41e2e0efbe4"
+      "forkHash": "b55f02376b53421cd2b9ab6b21915731c7bb31c0"
     },
     {
       "file": "packages/opencode/script/build.ts",
       "upstreamHash": "ce45f770f04e8997161e5d746374d3af2374db71",
-      "forkHash": "6bdb535fe91910e7fdf1c63ed0d20b7289ca1ff0"
+      "forkHash": "304975cbb3ba1d7a9dfc7ad24997c469694763f9"
     },
     {
       "file": "packages/opencode/script/postinstall.mjs",
@@ -3075,9 +3097,14 @@
       "forkHash": "00d3bbc38620af80a7c5b759407bb802c92ee7a7"
     },
     {
+      "file": "packages/tui/src/component/dialog-move-session.tsx",
+      "upstreamHash": "21912b273316cbc2e16655a669de8ee79a5c78a5",
+      "forkHash": "f020c7f9d758af138999d609cc32a0aaf3046f0c"
+    },
+    {
       "file": "packages/tui/src/component/dialog-provider.tsx",
       "upstreamHash": "6b86a32e3482a819de0e8985bf49d7e0f7d8537c",
-      "forkHash": "fbb2d2da935f8470a3d415951cc748816686f3d1"
+      "forkHash": "458d6db86c69e3123aa7c0153152b34cf7de3861"
     },
     {
       "file": "packages/tui/src/component/use-connected.tsx",
@@ -3295,9 +3322,39 @@
       "forkHash": "ecd7f08f7be85e8ef652acc2d9dcf1766adad668"
     },
     {
+      "file": "packages/tui/src/util/presentation.ts",
+      "upstreamHash": "cf432bf967ebbd47300596943108d74be84cae0d",
+      "forkHash": "46d620e8759f828685e9214061768aad5af501b7"
+    },
+    {
+      "file": "packages/tui/test/app-lifecycle.test.tsx",
+      "upstreamHash": "8cd40315ccc50b1503a7a9c4959552a0be385d82",
+      "forkHash": "4ae109ae1dc8f20d95bc09929500073535aafde7"
+    },
+    {
+      "file": "packages/tui/test/cli/cmd/tui/provider-options.test.ts",
+      "upstreamHash": "36cc7b6ee4a4aa524f60e794827dfea10508f677",
+      "forkHash": "f6810f455a65859ea325301674c23f2714ece825"
+    },
+    {
       "file": "packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx",
       "upstreamHash": "6da90633ca421fa085fa1c69ffbd5c0c8a3dc0fa",
       "forkHash": "ac8e1a80f678abd51cd6f4f6b941ff1f26c3b27e"
+    },
+    {
+      "file": "packages/tui/test/fixture/fixture.ts",
+      "upstreamHash": "2009fe202ce52f10edae5a2810bed8249e98fa48",
+      "forkHash": "815ec23b182949db1059813b7bc09610d39b73bb"
+    },
+    {
+      "file": "packages/tui/test/fixture/tui-sdk.ts",
+      "upstreamHash": "d1cf3c7dfc2af1c548598bd6c9fc8bdf6f6a3c04",
+      "forkHash": "123dcffc6660a02d68beb1e8dc2d0d32ace43337"
+    },
+    {
+      "file": "packages/tui/test/util/presentation.test.ts",
+      "upstreamHash": "d1aab4ea49b43d52c10d0dd67b14834fded17d96",
+      "forkHash": "85ed2a3670cb1b82d2d2f67df4c55cfe5a847d5e"
     },
     {
       "file": "README.md",

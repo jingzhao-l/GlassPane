@@ -194,6 +194,11 @@ here.
 
 `install.sh` prefers npm and only reaches for a release asset when npm is unavailable. The
 assets are built by the `binaries` job with `OPENCODE_RELEASE=1`; they are named
-`glasspane-harness-<platform>-<version>.tar.gz`. If the asset lane is still queued on
-macOS runners, that is fine: npm is the channel that has to work, and the installer's npm
-path does not depend on it.
+`glasspane-harness-<platform>.zip` — **no version in the filename** (the tag in the URL
+already scopes it) and `.zip` rather than `.tar.gz`, because `script/build.ts` only
+tars up Linux targets. Every asset ships with a `SHA256SUMS.txt` manifest and a
+detached `<asset>.asc` signature, and the installer checks both: the checksum decides
+integrity and refuses to install on mismatch, the signature decides provenance and warns
+if it cannot be established. If the asset lane is still queued on macOS runners, that is
+fine: npm is the channel that has to work, and the installer's npm path does not depend
+on it.
