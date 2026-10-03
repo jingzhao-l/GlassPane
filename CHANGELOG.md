@@ -25,6 +25,20 @@
 哪两个数算出来的一起说出来。不声明长度仍退回那条 16 KiB/s 的保守值；配对控制保证这条判据既不是永远拒、
 也不是永远放。
 
+### Fixed — 一次被拒的 `enable` 会把这台机器的更新作业整个弄没
+
+`registerAgent` 的顺序是"写新 plist → `bootout` 旧作业 → `bootstrap`"。bootstrap 被拒时旧代码只做一个动作：
+把刚写的文件删掉、报一句失败——**而旧作业已经被它亲手卸了**。一次被拒的注册又刻意不写状态（§5），所以盘上
+连痕迹都没有。本机 2026-10-03 就是这样看到的：状态最后一笔是 `enable → enabled`（那一趟成功且读回校验过），
+15:27 时 `launchctl print` 里这个服务不存在、`~/Library/LaunchAgents` 里也没有 plist，自动更新静默消失。
+现在这条分支先把写入前那份定义原样放回盘上、再 `bootstrap` 一次，并且说清落在哪一种：还原成功 ⇒ "这次要的
+改动没生效，但之前的作业仍在跑"；还原也失败 ⇒ 明说"这台机器现在没有更新作业，必须再跑一次 `updater enable`"。
+首次注册（没有旧定义）仍删掉那份加载不了的文件，不留半成品。
+
+对照：`a refused re-registration puts the previous definition back instead of leaving no agent`（要求盘上留下
+的是先前那份、`bootstrap` 真的跑了两次、mode 仍 0600）与 `a first registration that launchd refuses leaves no
+unloadable file behind`。反向变异=删掉还原分支 ⇒ 前者红。
+
 ## [1.6.1] — 2026-10-03
 
 版本判断：两笔都是修复，没有任何对外契约变化——状态文件的字段一个都没动（新增的是 `message` 里的一句

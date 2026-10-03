@@ -427,11 +427,24 @@ export function registerAgent({
   run = defaultRun,
   writeFile = (p, text) => writePrivateFile(p, text),
   removeFile = (p) => fs.rmSync(p, { force: true }),
+  readFile = (p) => fs.readFileSync(p, 'utf8'),
 } = {}) {
   assertOwnAgentLabel(label)
   const resolvedUid = uid ?? currentUid({ run })
   if (!resolvedUid) {
     return { ok: false, code: CODES.busyOrUnreachable, message: 'the current uid could not be read; the update agent was not registered' }
+  }
+  // The definition launchd is *currently* holding, kept before anything is overwritten: a re-registration
+  // that launchd refuses must not leave the machine with neither a job nor a file. Measured on this machine
+  // on 2026-10-03 — the state file said `enable → enabled` (that run was fine, and a refused `enable` writes
+  // no state), yet by 15:27 the job was gone from `launchctl print` and `~/Library/LaunchAgents/` held no
+  // plist. The only path that erases both is this function's own failure branch: `bootout` already took the
+  // working job down, and `removeFile` then deleted its definition.
+  let previous = null
+  try {
+    previous = readFile(plistPath)
+  } catch {
+    previous = null
   }
   writeFile(plistPath, plistText)
   // A stale definition must be booted out first: launchd caches what it read at
@@ -468,10 +481,31 @@ export function registerAgent({
       message: `update agent registered (gui/${resolvedUid}/${label}) and the loaded job names ${cliPath ?? 'the CLI path this run rendered'}`,
     }
   }
+  // launchd refused the new definition — and this call already booted out whatever was loaded. Deleting the
+  // file (the shape this function used to end in) leaves the machine with neither a job nor a definition, and
+  // no state write to explain it, because a refused registration deliberately writes nothing. So the
+  // definition that *was* working goes back on disk and gets loaded again, and the sentence says which of the
+  // two outcomes the machine is now in.
+  if (previous !== null) {
+    writeFile(plistPath, previous)
+    const back = run('launchctl', ['bootstrap', `gui/${resolvedUid}`, plistPath])
+    const restored = back.status === 0 || /already/i.test(String(back.stderr ?? ''))
+    const why = `(launchctl bootstrap exit ${boot.status}: ${(boot.stderr || 'no stderr').trim().slice(0, 200)})`
+    return {
+      ok: false,
+      code: CODES.busyOrUnreachable,
+      plistPath,
+      restored,
+      message: `the update agent could not be loaded ${why}; ` + (restored
+        ? `the definition this machine had before is back on disk and loaded again, so automatic update keeps running that previous job — the change this run asked for did not take`
+        : `putting the previous definition back also failed (launchctl bootstrap exit ${back.status}: ${(back.stderr || 'no stderr').trim().slice(0, 160)}), so this machine has NO update agent registered and "updater enable" has to be run again`),
+    }
+  }
   removeFile(plistPath)
   return {
     ok: false,
     code: CODES.busyOrUnreachable,
+    restored: false,
     message: `the update agent could not be loaded (launchctl bootstrap exit ${boot.status}): ${(boot.stderr || 'no stderr').trim().slice(0, 200)}; ${plistPath} was left in place only if bootstrap succeeded`,
     plistPath,
   }

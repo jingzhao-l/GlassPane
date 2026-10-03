@@ -482,6 +482,14 @@
       `code=runtime-registration-pending`、`agentVerified=false`，原话说清"把面板的「自动更新」开关关掉再打开
       （或在终端跑一次 `updater enable`）做这一次迁移，做完以后换版不需要再动手"。
       判据不许在这里含糊：没核实过就不能说核实过。
+    · **手动 `enable` 的同一种最坏形状也要被堵住**：`registerAgent` 的顺序是"写新 plist → bootout 旧作业 →
+      bootstrap"，所以 bootstrap 一旦被拒，机器上就既没有作业也没有定义——而一次被拒的注册**刻意不写状态**
+      （§5），于是盘上连痕迹都没有。本机 2026-10-03 就是这么看到的：状态最后一笔是 `enable → enabled`
+      （那一趟确实成功、也读回校验过），后来 `launchctl print` 里这个服务根本不存在，
+      `~/Library/LaunchAgents` 里也没有那份 plist。现在这条分支先把**写之前那份定义**原样放回盘上、再
+      `bootstrap` 一次，句子分两种：还原成功 ⇒ "这次要的改动没生效，但之前的作业仍在跑"；还原也失败 ⇒
+      明说"这台机器现在没有更新作业，必须再跑一次 `updater enable`"。没有旧定义可还原（首次注册）时仍删掉
+      那份加载不了的文件，不留半成品。
     · **回滚守的是同一条**：`apply` 在交接之后才失败时要把指针交还给旧那一份；是否重新注册取决于在册作业
       此刻指谁——走入口就不用（指针回去就够了），读不回作业则保守地让旧那份重新注册一次（"不知道作业在跑
       什么"不等于"作业走入口"）。但**定时那一次的自动回滚绝不注册**：它要做的就是上面被禁止的那件事。
@@ -572,7 +580,7 @@
 | 重用已存在的一代要把每一项检查重做 | `updater/test/runtime.test.mjs`（`an existing generation is re-verified, not trusted by name`） | 重用路径只查 cli.js 存在 ⇒ 红 |
 | 在册路径与本地拼写按"同一个文件"比，不按字符串 | `updater/test/runtime.test.mjs`（realpath 拼写的那一代仍认得出世代） | 只比字面量前缀 ⇒ 认不出世代，红 |
 | `enable` 保住盘上已有的每日时刻 | `updater/test/enable.test.mjs`（`a bare enable keeps the daily hour that is already installed`；断言打在**送进渲染器的参数**上，不是打在夹具自己写的文件上） | 常量优先 ⇒ 3:20 变成 12:00，红；读不到又不说 ⇒ 第二条红 |
-| 注册是否成立由读回的在册作业判定 | `updater/test/launchd.test.mjs`（三条：核对过 / 仍指旧的 ⇒ 拒绝 / 读不回 ⇒ 明说未核实） | bootstrap 0 直接算成功 ⇒ "仍指旧的那条"红 |
+| 注册是否成立由读回的在册作业判定；bootstrap 被拒时**先前那份定义要放回盘上并重新加载** | `updater/test/launchd.test.mjs`（四条：核对过 / 仍指旧的 ⇒ 拒绝 / 读不回 ⇒ 明说未核实 / 被拒的重新注册 ⇒ 还原旧定义并再 bootstrap 一次；首次注册被拒 ⇒ 不许留加载不了的 plist） | bootstrap 0 直接算成功 ⇒ "仍指旧的那条"红；删掉 `previous !== null` 那条还原分支 ⇒ `a refused re-registration puts the previous definition back…` 红（盘上留的仍是新那份、bootstrap 也只跑了一次） |
 | 交接之后才失败的回滚：走入口只写指针；读不回作业保守交还；**定时那一次与硬关的机器都不注册** | `updater/test/apply.test.mjs`（`a rollback that happens after the handover takes the pointer and the job back too`、`an undo whose book went unreadable…`、`a rollback of a deferred handover…`、`an undo on a switched-off machine registers nothing…`） | 去掉 undo 调用 ⇒ 交还那一次没发生，红；`runtime` 声明在 try 里 ⇒ catch 抛 ReferenceError，红；把 `handoverMode`/`disabled` 漏传给 undo ⇒ 那两条"一次都不许注册"红 |
 | 入口落地要按字节读回比对，且**不一致或 mode 不是 0600 时把那份文件收掉**（半份 ESM 照样解析、照样被每天执行） | `updater/test/agent-entry.test.mjs`（`a file that reads back short is refused…`、mode 那一条同时断言文件已不在） | 去掉逐字节比对 ⇒ 短写那条红；去掉收掉动作 ⇒ 两条红；mode 不回读 ⇒ 0666 那条红 |
 | 删除不越界、失败不报成已清理 | `updater/test/runtime.test.mjs` | 去掉 root 约束 ⇒ 红 |
