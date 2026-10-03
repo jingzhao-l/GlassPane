@@ -15,6 +15,7 @@ import {
 import {
   GP_E_ENGINE_TIMEOUT,
   GP_E_ENGINE_UNREACHABLE,
+  GP_E_INTERNAL,
   GP_E_PAYLOAD_TOO_LARGE,
   GP_E_UNKNOWN,
 } from "./errors.js";
@@ -853,13 +854,23 @@ export class EngineJsonRpcClient {
   }
 
   private handleMessage(line: string): void {
-    let frame: CallFrame;
+    let parsed: unknown;
     try {
-      frame = JSON.parse(line) as CallFrame;
+      parsed = JSON.parse(line);
     } catch {
       this.report(`engine sent a non-JSON frame, dropped: ${truncate(line)}`);
       return;
     }
+    // 形状也要过这一遍，不能只挡住"不是 JSON"。`null`、数组、一个数字都是合法的
+    // JSON，而下一行就要读 `frame.id` —— 那一次抛错发生在 socket 的 `data` 回调里，
+    // 没有任何东西接得住（`index.ts` 只挂了 SIGINT/SIGTERM），整个壳进程随之退出，
+    // 把所有在途请求一起带走。stdio 那一侧的 `isRequestBody` 早就防到这个形状了，
+    // 引擎这一侧漏了：同一份"对端不可信"的判断，两半必须同一口径。
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      this.report(`engine sent a frame that is not a JSON object, dropped: ${truncate(line)}`);
+      return;
+    }
+    const frame = parsed as CallFrame;
 
     const id = frame.id;
 
@@ -957,9 +968,22 @@ export class EngineJsonRpcClient {
   private settleFromFrame(entry: Pending, frame: CallFrame): void {
     if (frame.error) {
       this.reject(entry, this.engineError(frame.error));
-    } else {
-      this.resolve(entry, frame.result);
+      return;
     }
+    // "没有 result 这个键"与"result 是 undefined"不是一件事。少了这一句，一帧既无
+    // error 又无 result 会被当成**成功**交上去：工具层把 undefined 规范成一条没有
+    // text 的内容项，`isError` 仍是 false——引擎什么都没答，代理读到的却是绿。
+    // 与 `capture_view` 的 `persisted !== false` 同一条规矩：主张必须由引擎说出来，
+    // 壳层不许替它填一个默认值。
+    if (!("result" in frame)) {
+      this.reject(entry, new EngineCallError(
+        GP_E_INTERNAL,
+        `engine answered '${entry.method}' with a frame carrying neither result nor error`,
+        "do not read this call as successful: the engine answered nothing. Retry once, then check the daemon log (stderr) for what it died before answering",
+      ));
+      return;
+    }
+    this.resolve(entry, frame.result);
   }
 
   /**

@@ -1760,3 +1760,74 @@ test("the timeout remedy names the probe of the surface it is delivered on", () 
   // 对称的一半：MCP 文案里不得出现 HTTP 路由，否则这条闸可以靠"两边都写满"通过。
   assert.equal(/POST \/v1\//.test(mcp), false, `MCP 面不得出现 HTTP 路由：${mcp}`);
 });
+
+/* -------- 对端送来的帧：形状与"没答"都不许变成绿 -------- */
+
+/**
+ * 合法 JSON 不等于一个帧。`null`、数组、数字、字符串都能过 `JSON.parse`，
+ * 而下一行就要读 `frame.id` —— 那一次抛错发生在 socket 的 `data` 回调里，
+ * `index.ts` 只挂了 SIGINT/SIGTERM，没有 uncaughtException 接得住，
+ * 于是整个壳进程退出、把所有在途请求一起带走。stdio 那一侧的
+ * `isRequestBody` 早就挡了这个形状，引擎这一侧曾经漏了。
+ *
+ * 反向变异：把 handleMessage 里的形状检查删掉（只留 JSON.parse 的 try/catch），
+ * 这条测试所在的进程会被未捕获的 TypeError 打死，整个文件变红。
+ */
+test("a frame that parses as JSON but is not an object is dropped, not fatal", async () => {
+  const { client, sockets } = socketBackedClient();
+  const notes = [];
+  client.onEngineNote((note) => notes.push(note));
+
+  const promise = client.call("probe_status");
+  sockets[0].emit("connect");
+  const hello = sockets[0].frames().find((frame) => frame.method === "hello");
+  sockets[0].deliver({ id: hello.id, result: { engine: "glasspaned", version: "1.6.2", protocolVersion: "0" } });
+  await nextTick();
+
+  for (const poison of ["null\n", "[1,2]\n", "7\n", "\"a string\"\n", "true\n"]) {
+    sockets[0].push(poison);
+    await nextTick();
+    assert.ok(notes.some((note) => /not a JSON object/.test(note)),
+      `每一样都要留下一句被丢弃的话，不能静默：${poison.trim()} -> ${notes.join(" | ")}`);
+  }
+
+  // 没崩，而且这一帧之后正常答复仍然送达 —— 证明被丢掉的只是那一帧。
+  const ask = sockets[0].frames().find((frame) => frame.method === "probe_status");
+  sockets[0].deliver({ id: ask.id, result: { connected: true } });
+  assert.deepEqual(await promise, { connected: true });
+  client.close();
+});
+
+/**
+ * 既无 `error` 又无 `result` 的一帧不是"答案是空"，是**没答**。
+ *
+ * 少了这个分支，它会被当成成功 resolve 出 `undefined`：工具层把 undefined
+ * 规范成一条没有 `text` 的内容项，`isError` 仍是 false —— 代理读到的是绿。
+ * 实测原样：{"content":[{"type":"text"}],"isError":false}。
+ * 这与 `capture_view` 的 `persisted !== false` 是同一条规矩：主张必须由引擎
+ * 说出来，壳层不许替它填默认值。
+ *
+ * 反向变异：把 `"result" in frame` 那一支删掉，`await promise` 会拿到
+ * undefined 而不是拒绝，这条测试立刻变红。
+ */
+test("a reply frame with neither result nor error fails the call instead of going green", async () => {
+  const { client, sockets } = socketBackedClient();
+  const promise = client.call("probe_status");
+  sockets[0].emit("connect");
+  const hello = sockets[0].frames().find((frame) => frame.method === "hello");
+  sockets[0].deliver({ id: hello.id, result: { engine: "glasspaned", version: "1.6.2", protocolVersion: "0" } });
+  await nextTick();
+
+  const ask = sockets[0].frames().find((frame) => frame.method === "probe_status");
+  sockets[0].push(JSON.stringify({ jsonrpc: "2.0", id: ask.id }) + "\n");
+
+  const error = await promise.then(
+    () => { throw new Error("一个什么都没答的帧不得被当成成功") },
+    (caught) => caught,
+  );
+  assert.equal(error.code, "GP_E_INTERNAL");
+  assert.match(error.message, /neither result nor error/);
+  assert.match(error.message, /probe_status/, "拒绝要说出是哪一次调用没拿到答案");
+  assert.match(error.remedy, /answered nothing/, "出路必须阻止代理把这一轮读成成功");
+  client.close();
+});
