@@ -150,6 +150,63 @@ jobs:
       - name: Check every derived site agrees with root package.json
         run: node scripts/check-version.mjs
 
+  # harness 尺子层守卫。这条 lane 的存在理由是一次真实事故：harness 的开发长期
+  # 寄生在 worktree（gp-fork），收编进主仓时只带进了 fork 本体，harness/tools 与
+  # harness/contracts 整体没进版本控制——而 FORK.md 把「分叉必须可测量」列为不可
+  # 让步纪律并给出 4 条命令，其中 3 条在 main 上是 MODULE_NOT_FOUND。主仓 CI 里
+  # `grep -c harness` 当时是 0，所以没有任何东西会发现这件事，直到发布出的安装器
+  # 被人用。尺子必须和 fork 同仓（harness/README.md 开篇即此意），这条 lane 是
+  # 「尺子丢了」这件事的报警器。
+  #
+  # 不装上游参照检出（.external/opencode，223 MB）：fork-diff 与 tool-surface 在
+  # 没有参照时仍核我们这一侧，并如实打印「上游未在此观测」；hook-liveness 走
+  # --offline，只做金样自洽并声明未观测上游。整包构建 >10 分钟且需要一张本机才有的
+  # 拦截根证书，不进 CI——闸是按包的固定点测试 + 这几把尺子。
+  harness-rulers:
+    name: harness rulers (divergence, surfaces, branding, kernel provenance)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 尺子自己不在仓里时，命令会以 MODULE_NOT_FOUND 失败——这正是要抓的形态，
+      # 所以先断言它们在，再逐个跑。
+      - name: The rulers are in the tree (the 2026-09-28 regression)
+        run: |
+          set -euo pipefail
+          missing=0
+          for f in fork-diff tool-surface brand-surface product-surface surface-semantics hook-liveness; do
+            if [ ! -f "harness/tools/$f.mjs" ]; then echo "::error::harness/tools/$f.mjs is missing from the tree"; missing=1; fi
+          done
+          for f in fork-diff tool-surface brand-surface surface-semantics hook-liveness; do
+            if [ ! -f "harness/contracts/$f.json" ]; then echo "::error::harness/contracts/$f.json is missing from the tree"; missing=1; fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          echo "rulers present"
+
+      - name: Divergence matches the recorded surface (our side)
+        run: node harness/tools/fork-diff.mjs --check
+
+      - name: Tool surfaces did not grow past the recorded baseline
+        run: node harness/tools/tool-surface.mjs --check
+
+      - name: Neither surface started judging evidence semantics
+        run: node harness/tools/surface-semantics.mjs --check
+
+      - name: No unrecorded brand drift
+        run: node harness/tools/brand-surface.mjs --check
+
+      - name: Product manifest, build, publish and installers agree
+        run: node harness/tools/product-surface.mjs
+
+      - name: Extension points are still live at the pinned upstream tag (offline)
+        run: node harness/tools/hook-liveness.mjs --offline
+
+      - name: Vendored kernel still matches its provenance manifest
+        run: node harness/glasspane-harness/script/kernel-vendor.mjs --check
+
   # 工作流可编译性守卫。GitHub 拒绝解析的工作流不产生任何 job 日志：它在解析期整体
   # 作废，之后每次触发只留下一个 0 步、名为文件路径的红色 run。c3797d4 用
   # `if: ${{ secrets.X != '' }}`（secrets 不是 step if 的合法 context）把 Release 链
