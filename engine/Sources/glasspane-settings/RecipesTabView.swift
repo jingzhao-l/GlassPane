@@ -49,7 +49,7 @@ struct RecipesTabView: View {
                 templatesCard
                 editorCard
             }
-            .padding(12)
+            .panelColumn()
         }
         .toolbar { toolbarContent }
     }

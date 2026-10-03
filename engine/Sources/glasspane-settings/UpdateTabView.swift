@@ -33,9 +33,7 @@ struct UpdateTabView: View {
                 runtimeCard
                 updaterCard
             }
-            .padding(20)
-            .frame(maxWidth: 760, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .panelColumn()
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear { model.refresh() }
@@ -314,12 +312,15 @@ struct UpdateTabView: View {
     /// 被本地代理或企业网关拦下 HTTPS 的机器就得靠这一份导出过的束；它没备好时
     /// 这一页必须说出来，否则用户看到的"一切正常"里一次都没连上过发布站点。
     private var trustCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SectionHeader(
-                title: "这台机器的根证书",
-                subtitle: "检查与安装跑在 node 上，它不读系统的钥匙串，所以这一份得由面板递给它。",
-                systemImage: "lock.shield"
-            )
+        PanelCard(
+            key: "update-ca-roots",
+            title: "这台机器的根证书",
+            subtitle: "检查与安装跑在 node 上，它不读系统的钥匙串，所以这一份得由面板递给它。",
+            systemImage: "lock.shield",
+            tint: model.snapshot == nil || model.caRootsIsUsable ? nil : .orange,
+            // 收起来也必须看得见结论：折叠是省地方，不是把状态藏掉。
+            summary: model.snapshot == nil ? "读不到" : (model.caRootsIsUsable ? "已备好" : "没备好")
+        ) {
             HStack(alignment: .top, spacing: 8) {
                 StatusDotView(tone: caRootsTone)
                 Text(model.caRootsText)
@@ -331,7 +332,6 @@ struct UpdateTabView: View {
             }
             PathRowView(label: "证书束", path: model.caBundleFile, identifierKey: "ca-bundle")
         }
-        .consoleCard(tint: model.snapshot == nil || model.caRootsIsUsable ? nil : .orange)
     }
 
     /// 形状 + 文字表达状态，颜色只作辅助：读不出记录时不给一个假装安心的绿点。
@@ -346,12 +346,21 @@ struct UpdateTabView: View {
     /// 从不碰它。所以"修更新器的那次发版到没到这台机器上"只有这一项能回答——它没换上的时候
     /// 上面那一行照样能写"已是最新"，这一页必须把这一句单独说出来。
     private var runtimeCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SectionHeader(
-                title: "更新器自身",
-                subtitle: "定时检查跑的是这一份程序自己；换版时它也要跟着换，否则修更新器的那次发版送不到这台机器上。",
-                systemImage: "arrow.2.squarepath"
-            )
+        PanelCard(
+            key: "update-runtime",
+            title: "更新器自身",
+            subtitle: "定时检查跑的是这一份程序自己；换版时它也要跟着换，否则修更新器的那次发版送不到这台机器上。",
+            systemImage: "arrow.2.squarepath",
+            tint: runtimeTint,
+            summary: {
+                switch model.runtimeAttention {
+                case .confirmed: return "已换上并核对过"
+                case .informational: return "按这台机器的选择如此"
+                case .attention: return "要人做一步"
+                case .unknown: return "读不到"
+                }
+            }()
+        ) {
             HStack(alignment: .top, spacing: 8) {
                 StatusDotView(tone: runtimeTone)
                 Text(model.runtimeText)
@@ -366,7 +375,6 @@ struct UpdateTabView: View {
                 PathRowView(label: "自身程序", path: cli, identifierKey: "runtime-cli")
             }
         }
-        .consoleCard(tint: runtimeTint)
     }
 
     /// 只有"换上且核对过在册任务"是绿点；`kept`/`skipped` 是"按这台机器自己的选择如此"，
@@ -387,12 +395,13 @@ struct UpdateTabView: View {
     // MARK: - 更新器在哪
 
     private var updaterCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SectionHeader(
-                title: "更新器",
-                subtitle: "定时检查与手动按钮走的都是同一个程序。",
-                systemImage: "externaldrive"
-            )
+        PanelCard(
+            key: "update-updater",
+            title: "更新器",
+            subtitle: "定时检查与手动按钮走的都是同一个程序。",
+            systemImage: "externaldrive",
+            summary: model.pointer.isReady ? "位置已认" : "没认出来"
+        ) {
             VStack(alignment: .leading, spacing: 6) {
                 if let cli = model.pointer.cliPath {
                     PathRowView(label: "程序", path: cli, identifierKey: "updater-cli")
@@ -415,6 +424,5 @@ struct UpdateTabView: View {
                 }
             }
         }
-        .consoleCard()
     }
 }

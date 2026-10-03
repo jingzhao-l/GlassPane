@@ -34,9 +34,7 @@ struct SettingsPanelView: View {
                 daemonSection
                 degradationSection
             }
-            .padding(20)
-            .frame(maxWidth: 760, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .panelColumn()
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear(perform: startPolling)

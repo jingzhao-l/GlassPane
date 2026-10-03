@@ -49,6 +49,113 @@ extension View {
     func consoleCard(tint: Color? = nil, padding: CGFloat = ConsoleTheme.cardPadding) -> some View {
         modifier(CardStyle(tint: tint, padding: padding))
     }
+
+    /// 页面正文那一列。
+    ///
+    /// 从前每一页各自写死 `.frame(maxWidth: 760)` 再 `maxWidth: .infinity` 左对齐：
+    /// 窗口拉大时正文一点不长，右边空出一大片死白，而用户没有任何办法把那块空间要回来
+    /// ——"适应性很差"说的就是这个。现在这一列跟着窗口长到可读上限为止。
+    func panelColumn() -> some View {
+        modifier(PanelColumn())
+    }
+}
+
+/// 可以收起来的卡片：标题栏常驻，正文按 key 记住开合。
+///
+/// 面板原先每一张卡都是"要么全占着、要么没有"，一屏里真正要读的常常只有一两张
+/// （权限页四张卡 + 拖拽引导 + 后台服务 + 降级说明；更新页六张卡）。
+/// 收起不读的那几张，比把想读的那张挤到窗口外面去便宜得多——证据页今天就是这么
+/// 把档案列表整个挤出窗口的。
+///
+/// 折叠状态记在本机设置里、按卡片的稳定 key 存：面板重开一次不该把人自己
+/// 收拾好的版面重置掉。折叠时标题与状态色仍在，收起来不等于看不见这件事。
+struct PanelCard<Content: View>: View {
+    let key: String
+    let title: String
+    var subtitle: String? = nil
+    var systemImage: String? = nil
+    var tint: Color? = nil
+    /// 折叠后仍要露出来的那一行结论（不传就只有标题）。诚实要求：收起正文
+    /// 不能顺手把结论也收起——状态点与这一行始终在。
+    var summary: String? = nil
+    @AppStorage private var collapsed: Bool
+    @ViewBuilder var content: Content
+
+    init(
+        key: String,
+        title: String,
+        subtitle: String? = nil,
+        systemImage: String? = nil,
+        tint: Color? = nil,
+        summary: String? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.key = key
+        self.title = title
+        self.subtitle = subtitle
+        self.systemImage = systemImage
+        self.tint = tint
+        self.summary = summary
+        self._collapsed = AppStorage(wrappedValue: false, "glasspane.card.\(key).collapsed")
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                collapsed.toggle()
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 10, alignment: .center)
+                    if let systemImage {
+                        Image(systemName: systemImage)
+                            .font(.callout)
+                            .foregroundStyle(tint ?? Color.secondary)
+                    }
+                    Text(title).font(.callout.weight(.semibold))
+                    if collapsed, let summary {
+                        Text(summary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    Spacer(minLength: 4)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("gp-card-toggle-\(key)")
+            .help(collapsed ? "展开这一栏" : "收起这一栏")
+            if !collapsed {
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                content
+            }
+        }
+        .consoleCard(tint: tint)
+    }
+}
+
+/// 正文列宽：跟着窗口长，最宽到可读上限。
+private struct PanelColumn: ViewModifier {
+    /// 1000pt 是这一列愿意长到的上限。再宽下去一行中文要跨整屏找回，
+    /// 那不是"适应窗口"，那是把人赶去读一条没有边际的线。
+    static let readableMaximum: Double = 1000
+
+    func body(content: Content) -> some View {
+        content
+            .padding(20)
+            .frame(maxWidth: Self.readableMaximum, alignment: .leading)
+            .frame(maxWidth: .infinity)
+    }
 }
 
 /// 小圆角标签（状态、风险等级、schema 版本）。形状 + 文字表达状态，
