@@ -1,6 +1,6 @@
 {
   "name": "glasspane-update",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "private": true,
   "description": "GlassPane auto-update engine: trusted-source check, staged apply, rollback, and the CLI contract shared by the panel and the launchd agent",
   "type": "module",
