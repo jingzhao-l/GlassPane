@@ -20,6 +20,8 @@ import GlassPaneEngine
 ///   glasspaned --permissions
 ///   glasspaned --request-permission <kind>
 ///   glasspaned [--state-dir <path>] --list-projects
+///   glasspaned [--state-dir <path>] --project-prune [--dry-run]
+///   glasspaned [--state-dir <path>] --project-remove <id> [--dry-run]
 ///   glasspaned [--state-dir <path>] --active-project <project-id>
 ///   glasspaned [--state-dir <path>] --approval-audit | --approval-verify
 ///   glasspaned [--state-dir <path>] --prune-evidence [--older-than <days>] [--project <id>] [--dry-run]
@@ -48,6 +50,11 @@ private struct Options {
     var forceProbeSocket = false
     var listProjects = false
     var activeProjectId: String?
+    /// P1 §12.3.1：注册表的两条写入命令。面板的"清理测试残留"与"删除这个项目"
+    /// 只有这一条出口——它自己不写 `projects.json`，因为运行中的 daemon 内存里
+    /// 持有一份表，面板直接覆写会被它下一次写盘静默冲掉。
+    var projectPrune = false
+    var projectRemoveId: String?
     var recipeValidate: String?
     var approvalAudit = false
     var approvalVerify = false
@@ -146,6 +153,14 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             }
             index += 1
             options.activeProjectId = arguments[index]
+        case "--project-prune":
+            options.projectPrune = true
+        case "--project-remove":
+            guard index + 1 < arguments.count else {
+                return .errorCode("--project-remove requires a project ID", 2)
+            }
+            index += 1
+            options.projectRemoveId = arguments[index]
         case "--recipe-validate":
             guard index + 1 < arguments.count else {
                 return .error("--recipe-validate requires a file path")
@@ -224,6 +239,8 @@ private func printUsage() {
         glasspaned --permissions
         glasspaned --request-permission <kind>
         glasspaned [--state-dir <path>] --list-projects
+        glasspaned [--state-dir <path>] --project-prune [--dry-run]
+        glasspaned [--state-dir <path>] --project-remove <project-id> [--dry-run]
         glasspaned [--state-dir <path>] --active-project <project-id>
         glasspaned --recipe-validate <path>
         glasspaned [--state-dir <path>] --approval-audit
@@ -303,6 +320,18 @@ private func printUsage() {
                                  never answers hello, so "a connection can be
                                  established" is how its owner is detected)
         --list-projects        List all registered projects (JSON) and exit
+        --project-prune [--dry-run]
+                               Remove the registry entries that are engine test
+                                 residue (P1 §12.3: sample bundle id AND evidence
+                                 under a system temp root, both required). With
+                                 --dry-run nothing is written and the hit list is
+                                 printed. `pruned` counts entries verified gone
+                                 from disk, not entries matched; partial failure
+                                 exits 1.
+        --project-remove <id> [--dry-run]
+                               Remove exactly one registration. Unknown id exits 3;
+                                 a registry that cannot be read back is refused
+                                 (exit 1) rather than overwritten.
         --active-project <id>  Report whether <id> is a registered project (JSON)
                                  and exit. **This command changes nothing**: the
                                  registry has no active-project field and no
@@ -680,6 +709,174 @@ if let activeId = options.activeProjectId {
         "note": "this command only verified that the projectId is registered; glasspaned keeps no active-project state, so nothing was selected or written. To archive subsequent operations under this project, call attach/gp_attach with projectId=\(entry.projectId)."
     ])
     exit(0)
+}
+
+// MARK: - P1 §12.3.1 registry write surface (prune test residue / remove one entry)
+
+/// 注册表的两条写入命令。它们从前**根本不存在**，而面板一直在调：daemon 回
+/// `unknown argument` + 退出码 64，面板把那段帮助文本读成 `matched = 0`，于是当着一屏
+/// "N 条注册项指向系统临时目录"回一句"没有需要清理的测试残留项目"。这里把缺的
+/// 那一半补上，字段与退出码按 §12.3.1 的表来。
+///
+/// 三条不能弯的口径：
+///  1. 判据只有一份（`LocalArchive.isTestResidue`），面板的预览表与 `--dry-run`
+///     用的是同一个函数，不留第二处"什么算残留"；
+///  2. `pruned` 是**写成功且读回确认已消失**的条数，不是命中条数——把命中当删除数
+///     就是在你问"删了多少"时撒谎；
+///  3. 两条都认 `--dry-run`。带它却不预览、直接真删，是面板"先看清单再动手"承诺的反面。
+private func runProjectPrune(options: Options) -> Never {
+    let stateRoot = resolvedStateRoot(injected: options.stateDir)
+    let registry = ProjectRegistry(stateRoot: stateRoot)
+    let dryRun = options.pruneDryRun
+    let before = registry.all
+
+    if registry.loadFailed {
+        // 读不回的文件一律拒绝覆写（§12.3.2 / A-1 同源）：自动重读会丢掉本次写入，
+        // 照旧覆写会丢掉文件里的真条目，两个方向都是无声丢数据。
+        writeJSON([
+            "command": "--project-prune", "dryRun": dryRun, "loadFailed": true,
+            "total": before.count, "matched": 0, "pruned": 0,
+            "prunedProjectIds": [String](), "failed": 0, "failures": [[String: String]](),
+            "remaining": before.count, "requiresDaemonRestart": false,
+            "projects": [[String: Any]](),
+            "registryPath": registry.filePath,
+            "error": "projects.json cannot be read back, so nothing was written: refusing to overwrite a table we cannot verify",
+            "next": "repair the file (python3 -m json.tool <path>), then restart the daemon"
+        ], to: .standardError)
+        exit(1)
+    }
+
+    let hits = before.filter { LocalArchive.isTestResidue($0) }
+    var failures: [[String: String]] = []
+    if !dryRun {
+        for entry in hits {
+            do {
+                _ = try registry.remove(entry.projectId)
+            } catch {
+                failures.append([
+                    "projectId": entry.projectId,
+                    "reason": (error as? GPError)?.message ?? error.localizedDescription,
+                ])
+            }
+        }
+    }
+
+    // 读回校验：报出去的数字来自盘上现在真的有什么，不来自刚才那几次调用的返回值。
+    let verified = ProjectRegistry(stateRoot: stateRoot)
+    let stillRegistered = Set(verified.all.map { $0.projectId })
+    let prunedIds = dryRun ? [] : hits.map(\.projectId).filter { !stillRegistered.contains($0) }
+    let pruned = prunedIds.count
+    let failedCount = dryRun ? failures.count : hits.count - pruned
+    if verified.loadFailed && !dryRun {
+        writeJSON([
+            "command": "--project-prune", "dryRun": false, "loadFailed": true,
+            "total": before.count, "matched": hits.count, "pruned": 0,
+            "prunedProjectIds": [String](), "failed": hits.count,
+            "failures": [["projectId": "*", "reason": "the registry cannot be read back after the write"]],
+            "remaining": 0, "requiresDaemonRestart": true, "projects": [[String: Any]](),
+            "registryPath": registry.filePath,
+            "error": "the write left projects.json unreadable; the daemon must not keep running on its in-memory copy",
+            "next": "restore the file from \(registry.filePath) backups and restart the daemon"
+        ], to: .standardError)
+        exit(1)
+    }
+
+    let detail: [[String: Any]] = hits.map {
+        ["projectId": $0.projectId, "displayName": $0.displayName,
+         "bundleId": $0.bundleId, "evidenceStoragePath": $0.evidenceStoragePath ?? NSNull()]
+    }
+    writeJSON([
+        "command": "--project-prune", "dryRun": dryRun, "loadFailed": false,
+        "total": before.count, "matched": hits.count, "pruned": pruned,
+        "prunedProjectIds": prunedIds, "failed": failedCount, "failures": failures,
+        "remaining": verified.all.count, "projects": detail,
+        // 真删掉过东西才谈重启：一次预览没有改任何东西，报"要重启"是凭空造一个待办。
+        "requiresDaemonRestart": pruned > 0,
+        "registryPath": registry.filePath,
+    ])
+    // 命中 5 条只删掉 3 条即为 1（§12.3.1）：部分成功不许读成全成就。
+    exit(failedCount > 0 ? 1 : 0)
+}
+
+private func runProjectRemove(projectId: String, options: Options) -> Never {
+    let stateRoot = resolvedStateRoot(injected: options.stateDir)
+    let registry = ProjectRegistry(stateRoot: stateRoot)
+    let dryRun = options.pruneDryRun
+    let before = registry.all
+
+    if registry.loadFailed {
+        writeJSON([
+            "command": "--project-remove", "dryRun": dryRun, "loadFailed": true,
+            "found": false, "removed": false, "wouldRemove": false, "remaining": before.count,
+            "projectId": projectId, "registryPath": registry.filePath,
+            "error": "projects.json cannot be read back, so nothing was written",
+            "next": "repair the file (python3 -m json.tool <path>), then restart the daemon"
+        ], to: .standardError)
+        exit(1)
+    }
+
+    let found = before.contains { $0.projectId == projectId }
+    if dryRun {
+        // 预览面：`--dry-run` 带着却不预览、直接真删，是面板承诺的反面。
+        writeJSON([
+            "command": "--project-remove", "dryRun": true, "loadFailed": false,
+            "found": found, "wouldRemove": found, "removed": false,
+            "remaining": found ? before.count - 1 : before.count,
+            "projectId": projectId, "registryPath": registry.filePath,
+        ])
+        exit(found ? 0 : 3)
+    }
+
+    guard found else {
+        writeJSON([
+            "command": "--project-remove", "dryRun": false, "loadFailed": false,
+            "found": false, "removed": false, "remaining": before.count,
+            "projectId": projectId, "registryPath": registry.filePath,
+            "error": "no project \(projectId) is registered",
+            "next": "glasspaned --list-projects"
+        ], to: .standardError)
+        exit(3)   // §12.3.1：未知 id → 3
+    }
+
+    do {
+        _ = try registry.remove(projectId)
+    } catch let error as GPError {
+        writeJSON([
+            "command": "--project-remove", "dryRun": false, "loadFailed": false,
+            "found": true, "removed": false, "remaining": before.count,
+            "projectId": projectId, "registryPath": registry.filePath,
+            "code": error.code.rawValue, "error": error.message,
+        ], to: .standardError)
+        exit(1)
+    } catch {
+        writeJSON([
+            "command": "--project-remove", "dryRun": false, "loadFailed": false,
+            "found": true, "removed": false, "remaining": before.count,
+            "projectId": projectId, "registryPath": registry.filePath,
+            "error": error.localizedDescription,
+        ], to: .standardError)
+        exit(1)
+    }
+
+    let verified = ProjectRegistry(stateRoot: stateRoot)
+    let gone = !verified.all.contains { $0.projectId == projectId }
+    writeJSON([
+        "command": "--project-remove", "dryRun": false,
+        "loadFailed": verified.loadFailed,
+        // `removed` 说的是盘上现在真的没有它了，不是"remove() 没抛异常"。
+        "found": true, "removed": gone, "remaining": verified.all.count,
+        "projectId": projectId, "registryPath": registry.filePath,
+        "requiresDaemonRestart": gone,
+    ])
+    exit(gone ? 0 : 1)
+}
+
+if options.projectPrune {
+    runProjectPrune(options: options)
+}
+
+if let projectId = options.projectRemoveId {
+    runProjectRemove(projectId: projectId, options: options)
 }
 
 if let recipePath = options.recipeValidate {

@@ -2,6 +2,59 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [Unreleased]
+
+## [1.6.3] — 2026-10-03
+
+版本判断：GlassPane 自身**零产品代码改动**。这一版全部是 harness 子项目的账目与它对主干的连接方式，
+按 patch 记——对消费端没有任何新形状，只是把几件一直在骗人的事改成不骗人。
+
+harness 现在在主仓维护（与 iterate 生态一致），不再是某个 worktree 的私有财产。
+
+### Fixed — 三件「不可让步的纪律」其实是散文
+
+- **尺子层根本不在主干上。** `harness/tools`（6 把闸门）与 `harness/contracts`（5 份金样）此前只存在于
+  一个 worktree 的分支里，不在 `main` 的版本控制内。而 `FORK.md` 把「分叉必须可测量」列为不可让步
+  纪律并给出 4 条命令——其中 3 条在 `main` 上是 `MODULE_NOT_FOUND`，主干 CI 里 `grep -c harness`
+  当时是 0。**两个月里没有任何东西发现**，发现它的是发布出去的安装器被人用坏，不是任何一道闸。
+- **vendored 内核从未被排除在工具面之外。** 两处静默失效叠加：排除规则读一个不存在的路径，
+  清单里的 `forkPath` 又是重复拼出来的。1464 行 kernel 字节一直被算成「我们写的代码」。
+- **GitHub release 兜底安装从未成功过，且不验签。** 安装器请求 `<product>-<platform>-<version>.tar.gz`，
+  而发布链上传的是 `<product>-<os>-<arch>.zip`（文件名里没有版本号，且只有 Linux 目标才打 tar.gz）；
+  实测 v0.6.3 / v0.5.1 / v0.4.0 全部 404。而 0.6.3 随包发出的安装器里 sha256 / gpg / asc 一个都没有——
+  发布链给每个资产签了 `.asc`、发了 `SHA256SUMS.txt`，收到它们的安装器从不读。
+
+### Fixed — CI 里两件「看起来在证明什么、其实什么都没证明」的事
+
+- **`harness-contract.yml` 是一份 GitHub 拒绝解析的工作流**：某个 step 名里有 `: `，YAML 读成嵌套
+  mapping，整份文件在解析期作废，每次触发只留一个 0 步、无日志的红灯。而体检脚本
+  `check-workflows.mjs` 对它报 "clean"——它读 job 名与被引用脚本，从不问 YAML 能不能解析。
+  现在补了规则（未加引号的 `: ` / `?`），反向因果已验。
+- **`check-workflows.mjs --self-test` 此前根本不存在**：脚本完全忽略 argv，CI 里那步一直在跑普通检查
+  然后 exit 0，未知参数同样静默通过。现在它用变异法逐条验每条规则都会红（5 例），未知参数 exit 2。
+
+### Fixed — 三道闸在合并后红了，逐条查证后重记
+
+`fork-diff`（9 条过期项，先逐文件确认与已发布的 0.6.3 逐字节一致）、`brand-surface`（+1 定位到一处
+**注释**，同一提交把用户可见的 `opencode -s <id>` 修成了 `glasspane-harness -s <id>`）、
+`tool-surface`（面 A 是主干上真实的 1.6.x 产品代码；面 B 是尺子第一次在有上游参照检出时正确归属我们
+自己的 `gp_*` 工具面）。`surface-semantics` 同批仍 **0 hit**——判定全部留在 Swift 引擎里，
+这才是这套棘轮真正要守的不变量。
+
+### Added
+
+- **`harness-rulers` 成为主干 CI 的一条 lane**：每次 push 先断言 6 把尺子与 5 份金样在树里
+  （就是这次的回归形态），再逐道跑；上游参照检出按 pinned tag `--depth 1` 拉取并核对 tag 本身。
+
+### Internal
+
+- `FORK.md` 新增第 3 条纪律「尺子必须和 fork 同仓」，并说明 `subtree split` 只带走
+  `harness/glasspane-harness/` 是对的：尺子量的是主仓里这棵树，不随产品分发。
+- 修掉 `tool-surface` 在无参照检出时把「被编辑的测试文件」当成量不出来而中止；`product-surface` 的
+  installer dry-run 改为按平台各断言各自**有文档的行为**（macOS 出计划，其他平台必须说出
+  macOS-only 并点名产品），而不是在 Linux 上把正确的拒绝当成失败。
+- 修掉 `build.ts` 的 `product` 注解缺 `name`——它让 split 仓自己的 typecheck 从 0.6.3 起一直红。
+
 ## [1.6.2] — 2026-10-03
 
 版本判断：四笔全是修复——状态文件的字段没动、退出码集合没动、CLI 参数没动、npm 包的 `bin` 声明没动。
