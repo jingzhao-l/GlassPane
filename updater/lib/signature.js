@@ -195,6 +195,7 @@ export function classifySignature({
   signatureAsset = null,
   toolAvailable = true,
   anchorAvailable = true,
+  toolDetail = null,
   run = null,
   keyFingerprints = [],
   tagVerdict = null,
@@ -206,7 +207,11 @@ export function classifySignature({
   // refuses on for the right reason.
   if (!signatureAsset) return verdict('unsigned-release', want)
   if (!toolAvailable) {
-    return verdict('signature-tool-missing', { ...want, signedAsset: signatureAsset.name, detail: 'gpg is not installed (or "gpg --version" failed), so a detached signature cannot be checked here' })
+    return verdict('signature-tool-missing', {
+      ...want,
+      signedAsset: signatureAsset.name,
+      detail: toolDetail ?? 'gpg is not installed (or "gpg --version" failed), so a detached signature cannot be checked here',
+    })
   }
   if (!anchorAvailable) {
     return verdict('signature-tool-missing', {
@@ -251,20 +256,78 @@ export function classifySignature({
 /* -------------------------------------------------------------------- gpg io */
 
 /**
+ * Where a `gpg` may still live when it is not on PATH.
+ *
+ * Measured on this machine on 2026-10-03: gnupg is installed (`/opt/homebrew/bin/gpg`), yet every scheduled
+ * and GUI-initiated run answered "gpg is not installed" — because launchd hands a job
+ * `/usr/bin:/bin:/usr/sbin:/sbin`, a `.app` launched from Finder gets nearly the same, and gate 8 spawns
+ * `gpg` by name. The verdict was therefore permanently consent-gated on exactly the machines that have
+ * Homebrew gnupg, while the sentence told the person to install a thing they had installed.
+ */
+export const GPG_CANDIDATE_PATHS = Object.freeze([
+  '/opt/homebrew/bin/gpg',
+  '/usr/local/bin/gpg',
+  '/opt/local/bin/gpg',
+])
+
+/**
+ * Find a working gpg: the configured override, then PATH, then the known prefixes.
+ *
+ * Every answer carries `tried`, because the sentence a person reads must say what was looked at. "Not
+ * installed" is only honest after the search was; "on this PATH it is not" is the actionable version.
+ */
+export function resolveGpgBinary({
+  env = process.env,
+  candidates = GPG_CANDIDATE_PATHS,
+  exists = (target) => fs.existsSync(target),
+  probe = (bin) => spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 10_000 }),
+} = {}) {
+  const tried = []
+  const works = (bin) => {
+    tried.push(bin)
+    const answer = probe(bin)
+    return Boolean(answer) && answer.status === 0
+  }
+  const override = String(env.GLASSPANE_GPG ?? '').trim()
+  if (override && works(override)) return { bin: override, tried, source: 'GLASSPANE_GPG' }
+  if (works('gpg')) return { bin: 'gpg', tried, source: 'PATH' }
+  for (const candidate of candidates) {
+    if (!exists(candidate)) continue
+    if (works(candidate)) return { bin: candidate, tried, source: 'known prefix' }
+  }
+  return { bin: null, tried, source: null }
+}
+
+/** The honest sentence for "no working gpg", naming the search rather than guessing at the cause. */
+export function gpgMissingDetail({ tried = [], pathValue = process.env.PATH ?? '' } = {}) {
+  if (tried.length === 0) return 'gpg is not installed (or "gpg --version" failed), so a detached signature cannot be checked here'
+  const where = `PATH=${pathValue || '(empty)'}`
+  return `no working gpg was found after trying ${tried.join(', ')} — this process runs with ${where}, which does not include the directory gpg is installed in (a launchd job or a Finder-launched .app gets this minimal PATH even when your shell has the right one). Set GLASSPANE_GPG=/absolute/path/to/gpg, or add the directory to the job's PATH.`
+}
+
+let resolvedGpg = null
+
+/**
  * The real runner. `--homedir` *and* `GNUPGHOME` are both pinned to the throwaway
  * directory: passing only one leaves a gpg that reads the other still able to
  * consult — and write — the developer's own keyring.
  */
 export function defaultRunGpg(args, { gnupgHome } = {}) {
-  const res = spawnSync('gpg', args, {
+  if (resolvedGpg === null) resolvedGpg = resolveGpgBinary()
+  const bin = resolvedGpg.bin
+  if (bin === null) {
+    // ENOENT / EACCES: the binary is not there. That has to arrive as the
+    // `signature-tool-missing` verdict, not as an exception escaping a gate — with
+    // the search report attached so the sentence can name what was looked at.
+    return { status: null, stdout: '', stderr: `gpg could not be found (tried ${resolvedGpg.tried.join(', ') || 'nothing'})`, tried: [...resolvedGpg.tried] }
+  }
+  const res = spawnSync(bin, args, {
     encoding: 'utf8',
     timeout: 60_000,
     env: { ...process.env, GNUPGHOME: gnupgHome ?? '', LC_ALL: 'C', LANG: 'C' },
   })
   if (res.error && res.status === null && res.stdout === null && res.stderr === null) {
-    // ENOENT / EACCES: the binary is not there. That has to arrive as the
-    // `signature-tool-missing` verdict, not as an exception escaping a gate.
-    return { status: null, stdout: '', stderr: String(res.error.message ?? res.error) }
+    return { status: null, stdout: '', stderr: String(res.error.message ?? res.error), tried: [...resolvedGpg.tried] }
   }
   return { status: res.status, stdout: res.stdout ?? '', stderr: res.stderr ?? (res.error ? String(res.error.message) : '') }
 }
@@ -332,7 +395,13 @@ export async function verifyReleaseSignature({
   const anchor = await loadAnchor()
   const probed = runGpg(['--version'], { gnupgHome: null })
   if (!probed || probed.status !== 0) {
-    return classifySignature({ ...want, signatureAsset, toolAvailable: false, anchorAvailable: anchor.ok })
+    return classifySignature({
+      ...want,
+      signatureAsset,
+      toolAvailable: false,
+      anchorAvailable: anchor.ok,
+      toolDetail: gpgMissingDetail({ tried: probed?.tried ?? [] }),
+    })
   }
   if (!anchor.ok) {
     return classifySignature({ ...want, signatureAsset, toolAvailable: true, anchorAvailable: false })

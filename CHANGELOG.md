@@ -39,6 +39,16 @@
 的是先前那份、`bootstrap` 真的跑了两次、mode 仍 0600）与 `a first registration that launchd refuses leaves no
 unloadable file behind`。反向变异=删掉还原分支 ⇒ 前者红。
 
+### Fixed — 装着 gpg 的机器被判定成"没装 gpg"，自动更新因此永远等人点头
+
+gate 8 用 `spawnSync('gpg', …)` 问版本，而 launchd 给定时作业的 PATH 是 `/usr/bin:/bin:/usr/sbin:/sbin`，
+Finder 起的 `.app` 也差不多。本机 gnupg 装在 `/opt/homebrew/bin/gpg`，于是每一次无人值守的检查都答
+`signature-tool-missing`——那是**设计成要 consent 的结论**，所以自动更新在这台机器上根本不会自己走，
+而句子还在说"gpg is not installed"（假话：装着，只是不在那条 PATH 上）。现在按
+`GLASSPANE_GPG` → `PATH` → 三个已知前缀（Homebrew / /usr/local / MacPorts）的顺序找，找到就用绝对路径跑；
+真找不到时句子说的是"试过哪几处、这次 PATH 是哪条"，补救写成人能直接做的一步。真机复核：把 PATH 压成
+launchd 那份，`resolveGpgBinary` 返回 `/opt/homebrew/bin/gpg`，`gpg --version` 退 0。
+
 ## [1.6.1] — 2026-10-03
 
 版本判断：两笔都是修复，没有任何对外契约变化——状态文件的字段一个都没动（新增的是 `message` 里的一句

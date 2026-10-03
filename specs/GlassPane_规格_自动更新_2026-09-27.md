@@ -91,7 +91,12 @@
        "签名自相矛盾"。
      - `unsigned-release`（这个 release 压根没发 `.asc`；签名 job 是 1.3.1 之后加的，那之前的 release
        全是这一态）⇒ `release-unsigned`。
-     - `signature-tool-missing`（这台机器没有 `gpg`，或读不到内置公钥）⇒ `signature-tool-missing`。
+     - `signature-tool-missing`（这台机器**找不到能用的** `gpg`，或读不到内置公钥）⇒ `signature-tool-missing`。
+       "找"是有顺序的：`GLASSPANE_GPG` 指的那份 → `PATH` 上的 `gpg` → 三个已知前缀
+       (`/opt/homebrew/bin`、`/usr/local/bin`、`/opt/local/bin`)。理由是真机测出来的：launchd 给作业的是
+       `/usr/bin:/bin:/usr/sbin:/sbin`，Finder 起的 `.app` 也差不多，于是这台**装着** gnupg 的机器每一次定时
+       检查都回答"没装 gpg"，自动更新永远停在要人点头——句子还是假的。搜过之后不能说"没装"：那句必须把
+       `tried` 与本次 PATH 一起说出来，并给出人能直接做的一步（设 `GLASSPANE_GPG=<绝对路径>`）。
      后两种是"缺证据"而不是"证据为假"：**定时（`--auto`）运行一律拒绝**并落 `needs-consent`；
      人可以用 `updater check --consent unsigned-release` 继续，而状态文件与 `gp_diagnose` 的摘要在此后
      必须**一直**写明这份是"无作者性证明装上的"。次序上这条排在第 4 条之后、下载 tarball 之前，并且

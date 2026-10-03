@@ -46,7 +46,10 @@ import {
   classifySignature,
   colonFingerprints,
   defaultRunGpg,
+  gpgMissingDetail,
+  GPG_CANDIDATE_PATHS,
   loadTrustAnchor,
+  resolveGpgBinary,
   statusLines,
   validSigFingerprint,
   verifyReleaseSignature,
@@ -187,6 +190,53 @@ test('signature-tool-missing: no gpg on this machine', () => {
   assert.equal(v.code, CODES.signatureToolMissing)
   assert.match(v.message, /gpg is not installed/)
   assert.match(v.message, /authorship is unknown rather than proven/)
+})
+
+test('a gpg that is installed but off PATH is still found, and the search is what gets reported', () => {
+  // launchd gives a job /usr/bin:/bin:/usr/sbin:/sbin and a Finder-launched .app gets nearly the same, so on
+  // this machine (gnupg at /opt/homebrew/bin/gpg) gate 8 answered "gpg is not installed" for every scheduled
+  // run — permanently consent-gated, on a sentence that was false. REVERSE MUTATION: drop the candidate loop
+  // in `resolveGpgBinary` and this needs `bin === null`, which is what made the old behaviour.
+  const seen = []
+  const resolution = resolveGpgBinary({
+    env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' },
+    exists: (target) => target === '/opt/homebrew/bin/gpg',
+    probe: (bin) => {
+      seen.push(bin)
+      return bin === 'gpg' ? { status: 127 } : { status: 0 }
+    },
+  })
+  assert.equal(resolution.bin, '/opt/homebrew/bin/gpg', JSON.stringify(resolution))
+  assert.equal(resolution.source, 'known prefix')
+  assert.deepEqual(seen, ['gpg', '/opt/homebrew/bin/gpg'], 'PATH 先问，问不到才点名那几个前缀')
+
+  const onPath = resolveGpgBinary({ env: {}, exists: () => false, probe: () => ({ status: 0 }) })
+  assert.equal(onPath.bin, 'gpg', 'PATH 上有就别去猜前缀：机器上装了两份时这决定用的是哪一个')
+
+  const configured = resolveGpgBinary({
+    env: { GLASSPANE_GPG: '/opt/extra/bin/gpg' },
+    exists: () => true,
+    probe: (bin) => ({ status: bin === '/opt/extra/bin/gpg' ? 0 : 127 }),
+  })
+  assert.equal(configured.bin, '/opt/extra/bin/gpg', '人的显式回答优先')
+
+  const nothing = resolveGpgBinary({ env: {}, exists: () => false, probe: () => ({ status: 127 }) })
+  assert.equal(nothing.bin, null)
+  assert.deepEqual(nothing.tried, ['gpg'], '不存在的前缀不进 tried，否则句子会报一堆没看过的路径')
+  assert.ok(GPG_CANDIDATE_PATHS.length >= 2, '那几个前缀本身就是这修复的内容')
+})
+
+test('the tool-missing sentence names the search instead of asserting the tool is absent', () => {
+  const detail = gpgMissingDetail({ tried: ['gpg', '/opt/homebrew/bin/gpg'], pathValue: '/usr/bin:/bin' })
+  const v = classify({ toolAvailable: false, run: null, toolDetail: detail })
+  assert.equal(v.outcome, 'signature-tool-missing')
+  assert.match(v.message, /no working gpg was found after trying gpg, \/opt\/homebrew\/bin\/gpg/)
+  assert.match(v.message, /PATH=\/usr\/bin:\/bin/, `要说清这次是用哪条 PATH 跑的：${v.message}`)
+  assert.doesNotMatch(v.message, /gpg is not installed/, '搜过之后不能说"没装"——这台机器就装着，只是不在那条 PATH 上')
+  assert.match(v.message, /GLASSPANE_GPG/, '补救必须是人能直接做的一件事')
+  // The old literal stays as the fallback when nothing was tried, so a caller that never searched still gets a
+  // sentence rather than an empty detail.
+  assert.match(classify({ toolAvailable: false, run: null }).message, /gpg is not installed/)
 })
 
 test('signature-tool-missing: the installer half that owns the key could not be read', () => {
