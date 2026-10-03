@@ -2679,7 +2679,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "b55f02376b53421cd2b9ab6b21915731c7bb31c0"
+      "forkHash": "7da08258065b072fedd0d09ffe8ba65eb84b4ddf"
     },
     {
       "file": "packages/opencode/script/build.ts",
