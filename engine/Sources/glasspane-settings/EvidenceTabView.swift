@@ -15,20 +15,33 @@ struct EvidenceTabView: View {
             listPane
                 .frame(minWidth: 250, idealWidth: 300, maxWidth: 420)
             detailPane
-                .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
+                // `idealWidth` 必须写死：不写时这一栏的理想宽度由内容决定，而详情页
+                // 那排带 `fixedSize` 的标签加起来要 518pt。NavigationSplitView 按理想
+                // 尺寸排整条分栏，窗口只有 900，结果左侧导航被整体挤出窗口——
+                // 实测分栏组 987 宽、左移 44pt，"首次使用"只剩"使用"、图标全部看不见。
+                .frame(minWidth: 300, idealWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
         }
         .toolbar { toolbarContent }
     }
 
     // MARK: - 列表
 
+    /// 列表那一栏：标题与筛选固定在顶部，**趋势卡与档案列表之间是一条可拖的分隔线**。
+    ///
+    /// 此前趋势卡被钉在 `VStack` 顶部且没有任何高度上限：档案一多（真机 582 条、
+    /// 七个诊断分类加七天产量）它自己就要八百多点高，而窗口只有六百一十二点——
+    /// 结果档案列表被整个挤到窗口下沿之外（实测列表滚动区落在 y=797，窗口底在 y=760），
+    /// 用户看到的是"列表不见了"，而那张卡又无处可缩。
     private var listPane: some View {
         VStack(spacing: 0) {
             PageTitleView(title: "证据档案", systemImage: "doc.text.magnifyingglass")
             filterBar
-            EvidenceStatsView()
-            Divider()
-            content
+            VSplitView {
+                EvidenceStatsView()
+                    .frame(minHeight: 90, idealHeight: 210)
+                content
+                    .frame(minHeight: 120)
+            }
         }
     }
 
@@ -179,6 +192,11 @@ struct EvidenceTabView: View {
                     EvidenceDetailView(summary: summary, pack: model.selectedPack)
                 }
                 .padding(14)
+                // 与权限页、更新页同一套收口：先给一个可读的行宽上限，再把剩余空间
+                // 让给窗口。少了上面那一条，长句（"结构摘要是整棵界面树的指纹…"）
+                // 会把这一栏的*理想宽度*撑到整句那么宽，NavigationSplitView 就按理想
+                // 尺寸排整条分栏，症状是左侧导航被挤出窗口、只剩半截字。
+                .frame(maxWidth: 760, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .background(Color(nsColor: .textBackgroundColor).opacity(0.35))
@@ -226,7 +244,7 @@ struct EvidenceRowView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            HStack(spacing: 5) {
+            ChipRowLayout(spacing: 5, lineSpacing: 4) {
                 if summary.contaminated {
                     ChipView(text: "有人同时操作", color: .orange, systemImage: "hand.raised")
                 }

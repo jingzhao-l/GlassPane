@@ -26,6 +26,10 @@ struct EvidenceStatsView: View {
         case unreachable
     }
 
+    /// 标题钉在卡片顶部，正文自己滚。
+    ///
+    /// 这一栏现在由外层 `VSplitView` 决定给多高（可拖），所以正文必须能在更矮的
+    /// 高度里活下来：没有这层 ScrollView 时，把分隔线拖小只会把分布条裁掉。
     var body: some View {
         VStack(alignment: .leading, spacing: ConsoleTheme.gap) {
             SectionHeader(
@@ -33,8 +37,14 @@ struct EvidenceStatsView: View {
                 subtitle: "数据来源分开核实：daemon 统计 与 本地扫描",
                 systemImage: "chart.bar.xaxis"
             )
-            daemonCard
-            localCard
+            ScrollView {
+                VStack(alignment: .leading, spacing: ConsoleTheme.gap) {
+                    daemonCard
+                    localCard
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: .infinity)
         }
         .consoleCard()
         .padding(.horizontal, 10)
@@ -176,16 +186,24 @@ struct EvidenceStatsView: View {
         }
     }
 
+    /// 来源那一行单独占一行。
+    ///
+    /// 原先它和标题挤在同一条 `HStack` 的两端，窄栏里被中段裁成 "dae…tats"——
+    /// 而"这一栏的数字是从哪来的"恰恰是这张卡最需要读得清的一句。
     private func headerRow(title: String, source: String, systemImage: String, tint: Color) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: systemImage)
-                .font(.callout)
-                .foregroundStyle(tint)
-            Text(title).font(.callout.weight(.semibold))
-            Spacer(minLength: 4)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Image(systemName: systemImage)
+                    .font(.callout)
+                    .foregroundStyle(tint)
+                Text(title).font(.callout.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Text(source)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
         }
     }
 
@@ -342,8 +360,13 @@ private struct DistributionBarView: View {
             Text(label)
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
-                .frame(width: 72, alignment: .leading)
                 .lineLimit(1)
+                // 原先写死 72pt 宽：诊断分类里的 `INCONCLUSIVE` 被裁成 "INCONCLU…"，
+                // 而这一栏正是靠这个标签区分分类的——裁掉就等于少了一类。
+                // `fixedSize` 让它按需要占宽，条子那一段自己收窄（GeometryReader 读实际宽度）。
+                .fixedSize()
+                .frame(minWidth: 72, alignment: .leading)
+                .help(label)
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
                     Capsule().fill(tint.opacity(0.12))

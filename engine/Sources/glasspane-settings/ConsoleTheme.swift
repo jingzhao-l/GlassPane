@@ -139,8 +139,13 @@ struct PathRowView: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(path, forType: .string)
             } label: {
+                // 命中区要明显大于字形：这里原先只有一枚 `.font(.caption2)` 的图标，
+                // 实测无障碍尺寸 10×12pt，人手基本点不中（面板自己的 UILayoutAudit
+                // 会把这种目标报成 smallHitTarget）。字形保持小，可点区域撑到 20×20。
                 Image(systemName: "doc.on.doc")
                     .font(.caption2)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
             .help("复制路径")
@@ -232,6 +237,10 @@ struct SectionHeader: View {
                 Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    // 副标题必须能换行。窄栏里（证据页左栏最窄 250pt）它原先被裁成
+                    // "数据来源分开核实：daemon 统计 与 本地…"，那句话恰好是这张卡
+                    // 唯一说明"两个来源不是一回事"的地方。
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .accessibilityAddTraits(.isHeader)
@@ -264,6 +273,68 @@ struct EmptyStateView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(32)
+    }
+}
+
+/// 一行放不下就换行的横向排布（标签条专用）。
+///
+/// 证据列表那一栏最窄只有 250pt，而一条记录最多能同时挂上五枚标签（有人同时操作 /
+/// 降级 3 / 诊断 T5 / 断言未过 / 画面 0.00%）。它们原先挤在同一条 `HStack` 里，
+/// 每枚又各自 `fixedSize`——放不下的那几枚不是变小，是被整枚裁掉。
+/// 标签是"颜色之外"的第二种状态表达，裁掉就等于这个状态没有呈现。
+struct ChipRowLayout: Layout {
+    var spacing: CGFloat = 5
+    var lineSpacing: CGFloat = 4
+
+    /// 换行计算本身：给定每枚标签的尺寸与可用宽度，算出整条要多高、每一枚摆在哪。
+    ///
+    /// 抽成纯函数是为了能被直接验红——视图层进不了单测，而"一枚都不能丢"这条
+    /// 不变式只有在这里才守得住。
+    static func place(sizes: [CGSize], maxWidth: CGFloat, spacing: CGFloat, lineSpacing: CGFloat)
+        -> (size: CGSize, frames: [CGRect]) {
+        var frames: [CGRect] = []
+        frames.reserveCapacity(sizes.count)
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var widest: CGFloat = 0
+        for size in sizes {
+            // 只在"这一行已经有东西"时才折行：一枚本身就比可用宽度还长的标签
+            // 也必须被摆出来，否则它就从界面上消失了。
+            if x > 0, x + size.width > maxWidth {
+                widest = max(widest, x - spacing)
+                x = 0
+                y += rowHeight + lineSpacing
+                rowHeight = 0
+            }
+            frames.append(CGRect(origin: CGPoint(x: x, y: y), size: size))
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+        widest = max(widest, x - spacing)
+        return (CGSize(width: max(0, widest), height: sizes.isEmpty ? 0 : y + rowHeight), frames)
+    }
+
+    private func measure(_ subviews: Subviews, _ maxWidth: CGFloat)
+        -> (size: CGSize, frames: [CGRect]) {
+        Self.place(
+            sizes: subviews.map { $0.sizeThatFits(ProposedViewSize(width: nil, height: nil)) },
+            maxWidth: maxWidth, spacing: spacing, lineSpacing: lineSpacing
+        )
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) -> CGSize {
+        measure(subviews, proposal.width ?? .greatestFiniteMagnitude).size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) {
+        let placed = measure(subviews, bounds.width)
+        for (index, frame) in placed.frames.enumerated() {
+            subviews[index].place(
+                at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                anchor: .topLeading, proposal: ProposedViewSize(frame.size)
+            )
+        }
     }
 }
 
