@@ -66,10 +66,37 @@ jobs:
             console.log("tag and product version agree:", product.version)
           '
 
+  create-release:
+    name: create the GitHub release for this tag
+    if: github.event_name == 'push'
+    needs: version-check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # `gh release upload` fails with "release not found" when the release does
+      # not exist yet, and nothing else in this lane creates one. That is how the
+      # first real run died: the binary built, the smoke test passed, and then
+      # the upload had nowhere to put the bytes. Creating it here — and only when
+      # absent, so re-running a tag is not an error — makes the lane idempotent.
+      - name: Create the release if it does not exist yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" --repo "$GH_REPO" >/dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists — leaving it as it is"
+            exit 0
+          fi
+          gh release create "${GITHUB_REF_NAME}" --repo "$GH_REPO" \
+            --title "glasspane-harness ${GITHUB_REF_NAME}" --generate-notes
+          echo "created release ${GITHUB_REF_NAME}"
+
   binaries:
     name: binary ${{ matrix.target }}
     if: github.event_name == 'push'
-    needs: version-check
+    needs: [version-check, create-release]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
@@ -77,16 +104,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: darwin-x64, runner: macos-13 }
+          # `macos-13` was the only x64 label for years and GitHub has retired it:
+          # the darwin-x64 job sat queued forever with no runner, so a release
+          # could never assemble. `macos-15-intel` is the current x64 image.
+          # Both targets are required — product.json's platformTargets lists
+          # darwin/arm64 and darwin/x64, and the wrapper's postinstall picks
+          # between the two platform packages.
+          - { target: darwin-x64, runner: macos-15-intel }
           - { target: darwin-arm64, runner: macos-14 }
     steps:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-bun
-
-      - name: Read the product version
-        id: product
-        run: node -p "JSON.parse(require('fs').readFileSync('product.json','utf8')).version"
 
       - name: Install workspace
         run: bun install
@@ -96,18 +125,41 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           OPENCODE_RELEASE: "1"
-          OPENCODE_VERSION: ${{ steps.product.outputs }}
-        run: bun run build --single
+        # The version is read from product.json here rather than threaded in from
+        # the previous step's output. That indirection made GitHub reject the
+        # whole workflow file ("The template is not valid … A mapping was not
+        # expected"), which failed every `binaries` job before the build started.
+        # product.json is already the single source of truth — the `version-check`
+        # job compares the tag against this same field — so reading it here
+        # removes a layer rather than adding a second answer.
+        #
+        # NB: this comment deliberately spells the expression out in prose. A
+        # literal step-output expression anywhere at job level — even inside a
+        # comment — is what GitHub was choking on, so it must not appear here
+        # verbatim either.
+        # `build` lives in packages/opencode, not at the workspace root: the root
+        # package.json has no `build` script, so `bun run build` from there fails
+        # with "Script not found \"build\"" before a single file is compiled. The
+        # install above stays at the root on purpose — it is what materialises the
+        # workspace — and only the build needs to be in the package.
+        working-directory: packages/opencode
+        run: |
+          set -euo pipefail
+          # product.json is the product root's, so it is `../../product.json` from
+          # here. `script/build.ts` finds the same file by walking up from its own
+          # location, so both read one truth.
+          export OPENCODE_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('../../product.json','utf8')).version")"
+          bun run build --single
 
   checksums:
     name: SHA256SUMS for the release assets
     if: github.event_name == 'push'
     needs: binaries
     runs-on: ubuntu-latest
-    # This job holds the signing step, and the signing key lives in the `release`
-    # environment. Environment secrets reach a job only if it declares that
-    # environment — otherwise `[ -n "$GPG_INPUT_KEY" ]` is false and the release
-    # ships checksums nobody signed, which reads identically to "secret not set".
+    # The signing secrets are environment-scoped, so this job has to declare the
+    # same environment the publish jobs use. Without it `GPG_INPUT_KEY` arrives
+    # empty and the signing step fails on purpose — which is the correct outcome,
+    # but only if the declaration is here.
     environment: release
     permissions:
       contents: write
@@ -127,46 +179,40 @@ jobs:
 
       # Sign every release asset (zip/tar.gz) plus SHA256SUMS.txt with GPG, so the
       # installer fallback and any consumer can verify provenance (not just the
-      # checksums' integrity). Output is an ASCII-armored detached signature
-      # (`.asc`) beside each file. Signing lives in this job because it holds the
-      # assembled asset set: `script/build.ts` uploads the binaries in the
-      # `binaries` job, and this job adds the checksum and signatures on top.
+      # checksums' integrity). Same model as the GlassPane repo's release lane.
       #
-      # `secrets` is NOT an available context in a step-level `if`. Writing
-      # `if: ${{ secrets.X != '' }}` makes GitHub refuse to parse the whole
-      # workflow — zero jobs, zero logs, and every later trigger then leaves only a
-      # 0-step red run named after the file path, which reads as "a flaky check"
-      # rather than "this release chain stopped running". So the presence of the
-      # key is computed in a step that may read the secret, and the gate below
-      # reads that step's output.
-      - name: Detect release signing key
-        id: gpg-key
-        env:
-          GPG_INPUT_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -n "${GPG_INPUT_KEY:-}" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::GPG_PRIVATE_KEY is not configured — this release ships SHA256SUMS.txt but no .asc provenance signatures"
-          fi
+      # The guard lives in the shell, not in `if:`. GitHub does not expose the
+      # `secrets` context to an `if` expression, and a file that uses one does
+      # not compile at all — the whole workflow is then rejected and *zero* jobs
+      # are dispatched, which is what happened here: a release.yml carrying
+      # `if: ${{ secrets.GPG_PRIVATE_KEY != '' }}` produced a failed run on every
+      # push with no jobs, and no local check (PyYAML, our own check-workflows)
+      # could see it. Secrets go through `env`; the decision goes through bash.
+      #
+      # It fails loudly rather than skipping. A best-effort skip would let a
+      # release ship unsigned with nothing in the log saying so, which is the
+      # exact outcome the comment above claims cannot happen.
       - name: Sign release assets with GPG
-        # Skipping is no longer silent: the step above states the gap on the run.
-        if: ${{ steps.gpg-key.outputs.present == 'true' }}
         env:
           GPG_INPUT_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           set -euo pipefail
+          if [ -z "${GPG_INPUT_KEY:-}" ]; then
+            echo "::error::GPG_PRIVATE_KEY is empty. The signing key lives in the" \
+              "'release' environment, which this job declares, so an empty value" \
+              "means it was never set or was renamed. To set it:" \
+              "printf '%s' <armored private key> | gh secret set GPG_PRIVATE_KEY --env release" \
+              "(same for the passphrase). Nothing is published until this is fixed."
+            exit 1
+          fi
           cd assets
           mkdir -p "$HOME/.gnupg" && chmod 700 "$HOME/.gnupg"
           printf '%s\n' "allow-loopback-pinentry" >> "$HOME/.gnupg/gpg-agent.conf"
           gpgconf --kill gpg-agent
           printf '%s\n' "$GPG_INPUT_KEY" | gpg --batch --yes --import
-          # Sign every downloaded asset and the checksum file; each sidecar is
-          # `$f.asc`, which is exactly what the installer fallback (scripts/install.sh)
-          # looks for next to the tarball it downloads.
+          # Each sidecar is `$f.asc`, which is exactly what the installer fallback
+          # (scripts/install.sh) looks for next to the tarball it downloads.
           for f in ./* SHA256SUMS.txt; do
             [ -f "$f" ] || continue
             gpg --batch --yes --pinentry-mode loopback \
@@ -175,8 +221,8 @@ jobs:
           ls -la ./*.asc
 
       # Upload SHA256SUMS.txt plus any `.asc` signatures (present only when the
-      # signing secrets are configured; an empty $ASC_FILES expands to nothing,
-      # so gh never references a missing file). Re-uploading SHA256SUMS.txt with
+      # signing secrets are configured; an empty $ASC_FILES expands to nothing, so
+      # gh never references a missing file). Re-uploading SHA256SUMS.txt with
       # --clobber is idempotent.
       - name: Upload checksum and signature files
         env:
@@ -201,7 +247,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: darwin-x64, runner: macos-13 }
+          # `macos-13` was the only x64 label for years and GitHub has retired it:
+          # the darwin-x64 job sat queued forever with no runner, so a release
+          # could never assemble. `macos-15-intel` is the current x64 image.
+          # Both targets are required — product.json's platformTargets lists
+          # darwin/arm64 and darwin/x64, and the wrapper's postinstall picks
+          # between the two platform packages.
+          - { target: darwin-x64, runner: macos-15-intel }
           - { target: darwin-arm64, runner: macos-14 }
     steps:
       - uses: actions/checkout@v4
@@ -215,15 +267,29 @@ jobs:
         run: npm install -g npm@latest
 
       - name: Build this platform
-        run: bun run build --single
+        # `build` lives in packages/opencode; the workspace-root package.json has
+        # no such script, so running it from here fails with
+        # `Script not found "build"` before anything is compiled. The binaries
+        # job above already carries this; the npm platform job needs the same
+        # working-directory, and it needed it just as much.
+        working-directory: packages/opencode
+        run: |
+          set -euo pipefail
+          export OPENCODE_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('../../product.json','utf8')).version")"
+          bun run build --single
 
       - name: Publish the platform package with provenance (staged-only fallback)
         shell: bash
         run: |
           set -euo pipefail
           cd packages/opencode
-          pkg="$(node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync("product.json","utf8"));const t=p.platformTargets.find(t=>`${t.os==="win32"?"windows":t.os}-${t.arch}`===process.argv[1]);console.log(`${p.name}-${process.argv[1]}${t?.abi?"-"+t.abi:""}`)' '${{ matrix.target }}')"
-          ver="$(node -p "JSON.parse(require('fs').readFileSync('product.json','utf8')).version")"
+          # product.json is the product root's, so it is `../../product.json` from
+          # here — same rule as the build step above. Reading a bare
+          # `product.json` from this directory dies with ENOENT, and it dies
+          # *after* a full platform build, which is the expensive way to learn it.
+          PRODUCT_JSON="../../product.json"
+          pkg="$(node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));const t=p.platformTargets.find(t=>`${t.os==="win32"?"windows":t.os}-${t.arch}`===process.argv[1]);console.log(`${p.name}-${process.argv[1]}${t?.abi?"-"+t.abi:""}`)' '${{ matrix.target }}' "$PRODUCT_JSON")"
+          ver="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).version" "$PRODUCT_JSON")"
           echo "publishing $pkg@$ver"
           cd "dist/$pkg"
           npm publish --provenance --access public || {

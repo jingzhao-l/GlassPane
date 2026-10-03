@@ -8,12 +8,128 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); the product 
 semantic versioning starting at `0.1.0` (pre-1.0: the surface may still move, the evidence
 contract does not).
 
+## [0.6.3] - 2026-09-30
+
+### Fixed
+
+- **npm 发布通道被两个版本号卡住，现在绕过。** `0.6.1` 与 `0.6.2` 在 npm 侧处于
+  *staged* 状态，`npm publish` 对这两个号一律返回
+  `E409 Cannot publish over previously staged version`，而 `npm stage list`
+  并**不显示**它们。成因是一次误操作：本机这个 npm 版本上
+  `npm publish --dry-run` 仍然真的 PUT 了版本号（dry-run 并不 dry），于是被
+  用来排查的号自己也进了 stage。stage 需要交互式认证才能 reject，因此这一版
+  改发 `0.6.3`。**内容与 `v0.6.1` 的 GitHub release 完全相同**——跳号只影响
+  npm 上的版本号连续性，不含任何功能差异。
+- **GitHub release 的资产现在带 GPG 签名。** `v0.6.1` 起，两个平台归档与
+  `SHA256SUMS.txt` 各带一份 `.asc`；`gpg --verify` 对从 release 下载的文件
+  通过。签名步在 secret 缺失时**拒绝发布**而不是静默跳过——静默跳过正是
+  GlassPane 自己的 v1.4.0 发出无签名产物的原因。
+
+### Internal
+
+- **`script/gpg-signing.sh`** (new) — 签名配置与发布凭据的一处入口，
+  `seed` / `install` / `verify` / `verify-pass` / `local` / `audit` / `selftest`。
+  放在产品树内而非仓外 `tools/`，因为 subtree split 不带走仓外目录。
+- keychain 里的私钥以 **base64** 存放：`security add-generic-password -w`
+  在本机会把**多行**参数 hex 编码，keychain UI 看不出异常，而 CI 拿到的就是
+  那串 hex，`gpg --import` 报 `no valid OpenPGP data found` 且不会提它来自
+  keychain。存后读回比对字节，`install` 推之前拒收非 armored key 的值。
+
+## [0.6.1] - 2026-09-30 (GitHub release only — never reached npm)
+
+The binaries, checksums and GPG signatures for this version are on the GitHub
+release. npm never received it: the version number was left *staged* by a
+misstep (see 0.6.3), and `0.6.2` then went out as an empty placeholder. Both are
+deprecated on npm with an explanation. **Install from npm: use 0.6.3 or 0.5.1.**
+
+### Fixed
+
+- **Release assets are now GPG-signed, and the release refuses to publish without
+  them.** v0.6.0 shipped two platform archives and no `SHA256SUMS.txt.asc`:
+  the signing step read `GPG_PRIVATE_KEY` from the `release` environment, where
+  it had never been set, and the step failed after the archives were already
+  uploaded. The two secrets are configured now, and the lane is re-run.
+
+  Consumers can verify provenance, not just integrity:
+
+  ```bash
+  gh release download v0.6.1 -p glasspane-harness-darwin-arm64.zip -p '*.asc'
+  gpg --verify glasspane-harness-darwin-arm64.zip.asc glasspane-harness-darwin-arm64.zip
+  ```
+
+### Internal
+
+- **`script/gpg-signing.sh`** (new) holds how this product and the four other
+  projects in the two ecosystems sign their releases, so the question stops
+  being re-derived: `seed` (one-time, the only interactive step), `install`,
+  `verify`, `verify-pass`, `local`, `audit`, `selftest`. It lives in the product
+  tree rather than the fork's `tools/` because subtree split does not carry the
+  fork's directories into the published repo.
+- `audit` names the release workflows that still sign behind
+  `if: secrets.GPG_PRIVATE_KEY != ''` — a condition under which the step
+  disappears silently and the release publishes unsigned. GlassPane's own v1.4.0
+  shipped that way; this repo's `release.yml` was already migrated to failing
+  loudly with a remedy.
+
+## [0.6.0] - 2026-09-28
+
+### Fixed
+
+- **The session epilogue printed a command that does not resolve.** Exiting a
+  session showed `opencode -s <id>`; this product installs as
+  `glasspane-harness`, so the line a user copies to resume was the wrong binary.
+  It now prints `glasspane-harness -s <id>`.
+- **The epilogue could print `-s undefined`.** `sessionID` is optional, because
+  the session may not have finished loading. The continuation line is now
+  omitted unless there is an id, rather than emitting a literal `undefined` that
+  reads like a runnable command.
+- **The provider dialog kept a dead upstream key** in its description table —
+  unreachable, but shipped. Removed.
+
+### Added
+
+- **Dimension-aware compaction (M4).** A compacted `gp_*` session now carries a
+  coverage line computed by the kernel: which planned review dimensions the
+  engine recorded a decision for, which recorded nothing, and which recorded
+  something the run never planned. A dimension with no decisions is reported as
+  unverified — never dropped, and never described as fine, since only the engine
+  may judge that. The dimension vocabulary is the iterate config's; this side
+  neither enumerates it nor infers one from a method name.
+
+### Internal
+
+- **The release lane was broken end to end and had been for several releases.**
+  Five separate defects sat between a tag and a published binary, each hiding the
+  next: a `steps.*` expression that made GitHub reject the workflow file (zero
+  jobs dispatched), a `secrets` reference in a step's `if:` (same, and invisible
+  to any local YAML check), a `build` script invoked from the workspace root
+  where it does not exist, an upload that globbed both `.zip` and `.tar.gz` when
+  each runner only ever produces one, and no step creating the GitHub release
+  before the upload. `darwin-x64` additionally never got a runner at all, because
+  its matrix pinned `macos-13`, which GitHub has retired.
+  `check-workflows` now rejects `secrets` in an `if:`, so the second class of
+  failure is caught before it reaches the registry.
+
+- `packages/tui` typechecks clean (11 errors, one root cause: a `createResource`
+  whose `T` could not be inferred, so every consumer lost its element type).
+- Two files that ship user-facing strings were outside the brand-surface
+  ratchet's scan list, which is why the two leaks above reached a release. They
+  are scanned now, and the ratchet is verified to fail on a regression in them.
+
 ## [Unreleased]
 
 Nothing in the product's own surface changed; this batch is about being able to *prove*
 what the product depends on.
 
 ### Added
+
+- **Dimension-aware compaction (M4).** A compacted `gp_*` session now carries a
+  coverage line computed by the kernel: which planned review dimensions the
+  engine actually recorded a decision for, which recorded nothing, and which
+  recorded something the run never planned. A dimension with no decisions is
+  reported as unverified — never dropped, and never described as fine, since
+  only the engine may judge that. The dimension vocabulary is the iterate
+  config's; this side neither enumerates it nor infers one from a method name.
 
 - **Kernel conformance lane** (`bun script/kernel-conformance.mjs`): the kernel's own
   fixtures, mirrored into `contracts/kernel-fixtures/` and hash-pinned, are run through the

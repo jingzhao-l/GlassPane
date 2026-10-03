@@ -63,7 +63,7 @@ const treeSitterWorker = await Bun.file(fileURLToPath(import.meta.resolve("@open
 // meant the npm wrapper's optionalDependencies had to be re-derived by hand.
 const product = (await Bun.file(path.join(import.meta.dirname, "..", "..", "..", "product.json"))
   .json()
-  .catch(() => null)) as { platformTargets?: PlatformTarget[] } | null
+  .catch(() => null)) as { platformTargets?: PlatformTarget[]; repo?: string; homepage?: string } | null
 if (!product?.platformTargets?.length) {
   console.error("product.json is missing or has no platformTargets — refusing to build a product with an unrecorded target matrix")
   process.exit(2)
@@ -178,6 +178,17 @@ for (const item of targets) {
       {
         name,
         version: Script.version,
+        description: `The ${item.os}/${item.arch} binary of ${product.name}. Install the ${product.name} wrapper instead of this package.`,
+        // npm verifies a provenance bundle's repository against the published
+        // manifest and refuses the upload when they disagree:
+        //   E422 "repository.url" is "", expected to match "https://github.com/…"
+        // The wrapper carried this field and the platform packages did not, so
+        // both --provenance and the staged fallback were rejected. Same source of
+        // truth as the wrapper (product.json), so the two cannot drift.
+        ...(product.repo ? { repository: { type: "git", url: `git+https://github.com/${product.repo}.git` } } : {}),
+        ...(product.homepage ? { homepage: product.homepage } : {}),
+        ...(product.repo ? { bugs: { url: `https://github.com/${product.repo}/issues` } } : {}),
+        license: "MIT",
         preferUnplugged: true,
         os: [item.os],
         cpu: [item.arch],
@@ -191,14 +202,27 @@ for (const item of targets) {
 }
 
 if (Script.release) {
+  // Upload exactly the archives this run produced.
+  //
+  // The previous form globbed both extensions unconditionally
+  // (`./dist/*.zip ./dist/*.tar.gz`). Each matrix runner builds only its own
+  // platform, so exactly one of the two ever exists — and bun's shell treats a
+  // non-matching glob as an error rather than an empty argument list, so a
+  // macOS runner died on `./dist/*.tar.gz` finding nothing, *after* the binary
+  // had built and passed its smoke test. Collecting the names as they are made
+  // removes the guess and makes the macOS-only product path work.
+  const archives: string[] = []
   for (const key of Object.keys(binaries)) {
     if (key.includes("linux")) {
       await $`tar -czf ../../${key}.tar.gz *`.cwd(`dist/${key}/bin`)
+      archives.push(`./dist/${key}.tar.gz`)
     } else {
       await $`zip -r ../../${key}.zip *`.cwd(`dist/${key}/bin`)
+      archives.push(`./dist/${key}.zip`)
     }
   }
-  await $`gh release upload v${Script.version} ./dist/*.zip ./dist/*.tar.gz --clobber --repo ${process.env.GH_REPO}`
+  if (archives.length === 0) throw new Error("no binaries were built, so there is nothing to upload")
+  await $`gh release upload v${Script.version} ${archives} --clobber --repo ${process.env.GH_REPO}`
 }
 
 export { binaries }

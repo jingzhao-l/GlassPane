@@ -138,6 +138,58 @@ Things worth knowing, because they are the usual way this is set up wrong:
    one and `npm deprecate` the bad version with the reason in the message. Unpublishing
    burns the version number for everyone who already has it.
 
+## Four failures this lane has actually hit
+
+Each of these cost a full CI cycle to find, and all four are things the workflow
+*looked* correct about. They are listed here so the next person does not pay for
+them again.
+
+**1. `Script not found "build"` — a `run:` step in the wrong directory.**
+`build` is a script in `packages/opencode/package.json`; the workspace root has no
+such script. A step needs `working-directory: packages/opencode`. This has bitten
+both the `binaries` job and the `npm` platform job, because they are separate
+copies of the same step. `scripts/check-workflows.mjs` rule 2b now asserts that
+every `bun run <name>` names a script that exists in the package the step runs in.
+
+**2. `ENOENT: product.json` — a path that is right until you `cd`.**
+`product.json` is the *product root's*. From `packages/opencode` it is
+`../../product.json`. A bare `product.json` dies with ENOENT, and it dies after a
+complete platform build, which is the expensive way to learn a path is wrong.
+Rule 2c checks literal `readFileSync('…')` paths — but it resolves against
+`working-directory` only, so a `cd` *inside* the script is invisible to it. Spell
+the `../../` form explicitly: that is the version the gate can verify.
+
+**3. `E422 … "repository.url" is ""` — provenance is checked against the manifest.**
+npm compares the repository recorded in the provenance bundle with the published
+manifest and rejects the upload when they disagree. The wrapper package carried a
+`repository` field and the platform packages did not, so *both* `--provenance` and
+the staged fallback were refused. The platform manifest is generated in
+`script/build.ts`; it now takes `repository` / `bugs` / `homepage` / `license`
+from `product.json`'s `repo`, the same source the wrapper uses.
+
+**4. `E409 Cannot publish over previously staged version` — a version number you
+can never use again.** Once npm has a version *staged*, that version number is
+unpublishable and `npm stage list` does not show it. Do not probe version numbers
+with `npm publish --dry-run`: on npm ≥ 11 that flag still PUTs the version. Use
+the publish script's own `--dry-run`, which only packs. If a number is already
+lost, increment past it and say so in `CHANGELOG.md` rather than leaving a gap
+that looks like a mistake.
+
+## Pushing to this repository
+
+Use **SSH**, not HTTPS:
+
+```bash
+git push git@github.com:jingzhao-l/glasspane-harness.git HEAD:refs/heads/main
+```
+
+An HTTPS push fails with `refusing to allow an OAuth App to create or update
+workflows` — that is GitHub restricting the OAuth token, not a branch protection
+rule, and no amount of retrying changes it. The repository is a subtree split of
+`GlassPane`'s `harness/glasspane-harness/`, so the source of truth for any change
+is that directory in the monorepo; copy the file(s) into this tree and commit
+here.
+
 ## Assets (the installer's fallback)
 
 `install.sh` prefers npm and only reaches for a release asset when npm is unavailable. The

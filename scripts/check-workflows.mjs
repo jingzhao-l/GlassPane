@@ -1,208 +1,308 @@
 #!/usr/bin/env node
 /**
- * 工作流"解析期就死"检查（CI 门禁 = 本文件，退出码即判定）。
+ * check-workflows.mjs —体检 .github/workflows：重名 job 与被引用的脚本是否存在。
  *
- *   node scripts/check-workflows.mjs
- *   node scripts/check-workflows.mjs --self-test   # 跑守卫自己的对照表
+ * WHY (both failure modes happened in this repository on 2026-09-25):
+ *  1. A cross-base transplant of ci.yml made `git merge` duplicate the whole
+ *     `docs:` job block. A YAML mapping with a repeated key keeps the *last*
+ *     one, so a naive parse still reports one job named `docs` and everything
+ *     looks fine — the guard just quietly exists twice in the file. GitHub
+ *     rejects duplicate keys at worst, accepts a silently-shadowed job at best.
+ *     Either outcome means "the file no longer says what the checks do".
+ *  2. The same transplant referenced `scripts/check-doc-links.mjs`, a file that
+ *     existed on the other base but not on the branch — so the branch shipped a
+ *     CI job that cannot run. A step that errors out on a missing file is at
+ *     least loud; a job skipped because its script vanished is not.
  *
- * 为什么需要它：GitHub 加载不了的工作流不会留下任何 job 日志——文件在解析阶段整体
- * 作废，之后每一次 ref 匹配只生成一个 0 步、无日志、名为文件路径的红色 run。c3797d4
- * 就栽在这：step 级写了 `if: ${{ secrets.GPG_PRIVATE_KEY != '' }}`，而 `secrets` 不是
- * step if 的合法 context，于是 Release 链从 2026-09-27 起再也没法跑，而 main 上连着
- * 六次 push 都"只是多了个看不懂的红灯"，没有任何一处把它指到那一行。
+ * This tool has no dependencies on purpose: it is the thing that verifies the
+ * verifier, so it must not be the thing that can fail to install.
  *
- * 这里只认两类可静态判定的确定形状，不做通用 YAML 求值：
- *   1) 非法 context：`if` / `runs-on` / `uses` / `environment` 里引用 `secrets.`
- *      （`env:` 与 `with:` 是合法位置，不报。）
- *   2) 同一层映射里的重复键：会静默覆盖或直接报错，merge 手抄整块时最容易造出来。
+ * Exit codes: 0 clean, 1 a workflow is broken, 2 no workflows found (caliber
+ * error — refusing to report success over an empty set).
  */
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { join, relative } from 'node:path'
-import { pathToFileURL } from 'node:url'
-import process from 'node:process'
+import { existsSync, readFileSync, readdirSync } from "node:fs"
+import path from "node:path"
+import { fileURLToPath } from "node:url"
 
-const WORKFLOWS_DIR = '.github/workflows'
-// GitHub 在这些位置不提供 secrets context（jobs.*.env / steps.*.env / with 里才给）。
-const NO_SECRETS_KEYS = new Set(['if', 'runs-on', 'uses', 'environment'])
-const KEY_LINE = /^([ \t]*)(-[ \t]+)?([A-Za-z0-9_.-]+):(?:[ \t](.*))?$/
-const BLOCK_SCALAR = /^[|>][+-]?\d*\s*(?:#.*)?$/
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
+// Two workflow roots, because the product lives in a vendored subtree: our own CI,
+// and the fork's (the split repo's own ci.yml/release.yml travel with the subtree).
+// A missing second root is fine (it only exists on the harness line); a present
+// one is scanned with the same rules.
+const wfRoots = [path.join(repoRoot, ".github", "workflows"), path.join(repoRoot, "harness", "glasspane-harness", ".github", "workflows")]
 
-/** 去掉行尾注释，引号内的 `#` 不算注释起始。 */
-function stripComment(value) {
-  let quote = null
-  for (let i = 0; i < value.length; i += 1) {
-    const ch = value[i]
-    if (quote) {
-      if (ch === quote) quote = null
-      continue
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch
-      continue
-    }
-    if (ch === '#' && (i === 0 || /\s/.test(value[i - 1]))) return value.slice(0, i).trimEnd()
-  }
-  return value
+const primary = wfRoots[0]
+if (!existsSync(primary)) {
+  console.error(`check-workflows: ${path.relative(repoRoot, primary)} does not exist — nothing was verified`)
+  process.exit(2)
 }
-
-/** 扫描一个工作流文件，返回 findings 数组（每项 {line, why}）。 */
-export function scanWorkflow(text) {
-  const findings = []
-  // frame = {indent, keys:Map<key, 首次出现的行号>}；栈自外向内记录当前映射层。
-  const stack = []
-  // blockAt = 该 block scalar 所属键的缩进：比它深的行全是字符串内容，不参与结构判定。
-  let blockAt = null
-
-  const lines = text.split(/\r?\n/)
-  for (let index = 0; index < lines.length; index += 1) {
-    const raw = lines[index]
-    const lineNo = index + 1
-
-    if (blockAt !== null) {
-      const indent = raw.match(/^[ \t]*/)[0].length
-      if (raw.trim() === '' || indent > blockAt) continue
-      blockAt = null
-    }
-
-    if (raw.trim() === '' || /^[ \t]*#/.test(raw)) continue
-
-    const match = KEY_LINE.exec(raw)
-    if (!match) continue // 序列标量（`- v*`）、续行等：不是键行。
-
-    const [, indentText, dash, key, rawValue] = match
-    const value = stripComment(rawValue ?? '')
-    const indent = indentText.length
-
-    if (NO_SECRETS_KEYS.has(key) && /(^|[^A-Za-z0-9_.])secrets\s*\./.test(value)) {
-      findings.push({
-        line: lineNo,
-        why: `\`${key}:\` 里引用了 secrets context —— GitHub 解析整个工作流时报 ` +
-          `“Unrecognized named-value: 'secrets'”，工作流从此不产生任何 job。` +
-          `要按 secret 存在与否分支：先把判定写进前一个 step 的 $GITHUB_OUTPUT，再用 steps.<id>.outputs 门控。`
-      })
-    }
-
-    const contentIndent = dash ? indent + dash.length : indent
-    // 序列项（带 `- `）自己就是一层新映射：同缩进的兄弟项必须先出栈，键集才不会被
-    // 上一步的 env/run/if 串成同一层。映射键（无 `- `）只在更深的层出栈。
-    while (stack.length > 0) {
-      const top = stack[stack.length - 1]
-      const pop = dash ? top.indent >= contentIndent : top.indent > contentIndent
-      if (!pop) break
-      stack.pop()
-    }
-    let frame = stack[stack.length - 1]
-    if (!frame || frame.indent !== contentIndent) {
-      frame = { indent: contentIndent, keys: new Map() }
-      stack.push(frame)
-    }
-    const seen = frame.keys.get(key)
-    if (seen !== undefined) {
-      findings.push({
-        line: lineNo,
-        why: `同一层映射里重复的键 \`${key}:\`（首次出现在第 ${seen} 行）—— YAML 取后者，` +
-          `前一块（含 triggers/env/steps）静默失效，merge 时整块手抄最容易出现这种形状。`
-      })
-    } else {
-      frame.keys.set(key, lineNo)
-    }
-
-    if (BLOCK_SCALAR.test(value)) blockAt = indent
+const targets = []
+for (const dir of wfRoots) {
+  if (!existsSync(dir)) continue
+  for (const f of readdirSync(dir).filter((f) => f.endsWith(".yml") || f.endsWith(".yaml")).sort()) {
+    // Script paths in a workflow are resolved against that workflow's *repo root*:
+    // the primary root's root is this repository; the fork subtree's root is the
+    // subtree itself (which becomes the repo root after the subtree split).
+    const isPrimary = dir === wfRoots[0]
+    targets.push({
+      dir,
+      file: f,
+      root: isPrimary ? repoRoot : path.join(repoRoot, "harness", "glasspane-harness"),
+      label: isPrimary ? f : path.relative(repoRoot, path.join(dir, f)),
+    })
   }
-  return findings
 }
-
-function workflowFiles(root) {
-  // 仓库内**所有** `.github/workflows` 副本，不只根目录那一份。理由：harness 收编进主仓后
-  // 自带一份 release.yml，它现在不被 GitHub 加载（嵌套目录），但按既定 subtree split 发布
-  // 的那天它就是那仓的根工作流——同一处 bug 会从第一天起静默停摆，而这里正是它已经在 main
-  // 上静默停摆了一个月才被发现的那类形状。
-  const found = []
-  const skip = new Set(['node_modules', '.git', '.build', 'dist', 'build'])
-  const collect = (dir) => {
-    let entries
-    try {
-      entries = readdirSync(dir, { withFileTypes: true })
-    } catch {
-      return
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory() || skip.has(entry.name)) continue
-      const path = join(dir, entry.name)
-      if (entry.name === '.github') {
-        const workflows = join(path, 'workflows')
-        if (existsSync(workflows) && statSync(workflows).isDirectory()) {
-          for (const file of readdirSync(workflows).sort()) {
-            if (/\.(ya?ml)$/.test(file) && statSync(join(workflows, file)).isFile()) found.push(join(workflows, file))
-          }
-        }
-        continue
-      }
-      collect(path)
-    }
-  }
-  collect(root)
-  return found
+if (!targets.length) {
+  console.error("check-workflows: no workflow files found — refusing to report success over an empty set")
+  process.exit(2)
 }
 
 /**
- * 守卫自己的对照表：每条都指定"该报几处"。合法形状那几行是这条闸能留下来的前提——
- * 一个把注释或 run 正文当缺陷的扫描器，下一个人会为了绿灯把注释删掉，闸就静默没了。
+ * Walk a workflow file line by line. We only need two structural facts, and we
+ * get them from indentation rather than a YAML parser so that duplicate keys
+ * (which a parser collapses) stay visible.
  */
-const SELF_TESTS = [
-  { name: 'step 级 if 引用 secrets', yaml: "jobs:\n  a:\n    steps:\n      - name: S\n        if: ${{ secrets.K != '' }}\n        run: x\n", expect: 1 },
-  { name: 'job 级 if 引用 secrets', yaml: "jobs:\n  a:\n    if: ${{ secrets.K != '' }}\n    steps: []\n", expect: 1 },
-  { name: 'environment 引用 secrets', yaml: "jobs:\n  a:\n    environment: ${{ secrets.E }}\n    steps: []\n", expect: 1 },
-  { name: 'env 里引用 secrets（合法位置）', yaml: "jobs:\n  a:\n    steps:\n      - name: S\n        env:\n          K: ${{ secrets.K }}\n        run: x\n", expect: 0 },
-  { name: 'with 里引用 secrets（合法位置）', yaml: "jobs:\n  a:\n    steps:\n      - uses: a/b@v1\n        with:\n          token: ${{ secrets.T }}\n", expect: 0 },
-  { name: 'steps.*.outputs 门控（本次修复的形状）', yaml: "jobs:\n  a:\n    steps:\n      - id: g\n        run: x\n      - name: S\n        if: ${{ steps.g.outputs.present == 'true' }}\n        run: y\n", expect: 0 },
-  { name: '顶层 on: 重复（merge 手抄整块）', yaml: "name: R\non:\n  push:\n    tags: v*\non:\n  workflow_dispatch:\n", expect: 1 },
-  { name: '同层键重复', yaml: "jobs:\n  a:\n    steps:\n      - name: S\n        env:\n          K: 1\n          K: 2\n        run: x\n", expect: 1 },
-  { name: 'run 正文里的同名行（字符串内容，合法）', yaml: "jobs:\n  a:\n    steps:\n      - name: S\n        run: |\n          FRUIT=apple\n          FRUIT=pear\n          echo \"x: 1\"\n          echo \"x: 2\"\n", expect: 0 },
-  { name: '注释里的 secrets（不得当真）', yaml: "jobs:\n  a:\n    steps:\n      - name: S\n        # if: ${{ secrets.K != '' }}\n        run: x\n", expect: 0 },
-  { name: 'if 值后面的行尾注释（不得当真）', yaml: "jobs:\n  a:\n    steps:\n      - name: S\n        if: ${{ github.ref != '' }} # secrets 不可用\n        run: x\n", expect: 0 },
-]
+// Matches `bun run <name>` / `npm run <name>` at the start of a line or after a
+// chaining operator, capturing the bare script name and any file extension that
+// would make it a path instead.
+const RUN_SCRIPT = new RegExp(
+  "(?:^|[;&|]\\s*)(?:bun|npm|pnpm|yarn)\\s+run\\s+([A-Za-z0-9:_-]+)(\\.[A-Za-z0-9]+)?(?:/|\\s|$)",
+  "g",
+)
 
-function selfTest() {
-  let bad = 0
-  for (const testCase of SELF_TESTS) {
-    const got = scanWorkflow(testCase.yaml).length
-    const ok = got === testCase.expect
-    if (!ok) bad += 1
-    process.stdout.write(`${ok ? '✓' : '≠'} ${testCase.name}: 期望报 ${testCase.expect} 处，实报 ${got} 处\n`)
-  }
-  if (bad > 0) process.stderr.write(`\n守卫自身失真：${bad}/${SELF_TESTS.length} 条对照不符 —— 它现在既会漏报也会误报。\n`)
-  return bad === 0
-}
+function inspect(target) {
+  const { dir, file } = target
+  const base = path.join(dir, file)
+  const text = readFileSync(base, "utf8")
+  const lines = text.split("\n")
+  const problems = []
+  const jobKeys = []
+  let section = null // top-level key we are inside of
+  let inRun = false
+  let runIndent = 0
+  const runRefs = []
+  let stepDir = "" // step-level working-directory, applied to that step's scripts
 
-function main() {
-  if (process.argv.includes('--self-test')) return selfTest() ? 0 : 1
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i]
+    const line = raw.replace(/\s+$/, "")
+    if (!line || line.trimStart().startsWith("#")) continue
 
-  const files = workflowFiles('.')
-  if (files.length === 0) {
-    process.stderr.write('这个仓里一个工作流文件都找不到——门禁无对象可查，判为不可用\n')
-    return 2
-  }
+    const top = /^[A-Za-z0-9_-]+:/.test(line)
+    const job = /^ {2}([A-Za-z0-9_.-]+):/.exec(line)
+    const nested = /^ {4}([A-Za-z0-9_.-]+):/.exec(line)
+    const stepStart = /^ {6}-\s/.test(raw) || /^ {4}-\s/.test(raw)
 
-  let broken = 0
-  for (const file of files) {
-    const findings = scanWorkflow(readFileSync(file, 'utf8'))
-    process.stdout.write(`${relative(process.cwd(), file)}: ${findings.length === 0 ? 'OK' : `${findings.length} 处`}\n`)
-    for (const finding of findings) {
-      broken += 1
-      process.stderr.write(`  ${finding.line}: ${finding.why}\n`)
+    if (stepStart) stepDir = "" // a new step resets the working directory
+
+    if (inRun) {
+      const bodyIndent = raw.search(/\S/)
+      if (bodyIndent > runIndent) {
+        runRefs.push({ text: raw.trim(), line: i + 1, dir: stepDir })
+        continue
+      }
+      inRun = false
+    }
+
+    if (top) {
+      section = line.split(":")[0]
+      continue
+    }
+    if (section === "jobs" && job && !nested) {
+      jobKeys.push({ name: job[1], line: i + 1 })
+      continue
+    }
+    const wd = /^\s*working-directory:\s*(\S+)\s*$/.exec(line)
+    if (wd) {
+      stepDir = wd[1].replace(/^["']|["']$/g, "")
+      continue
+    }
+    const runMatch = /^(\s*)run:\s*(.*)$/.exec(line)
+    if (runMatch) {
+      const [, indent, inline] = runMatch
+      runRefs.push({ text: inline, line: i + 1, dir: stepDir })
+      if (/[|>]/.test(inline)) {
+        inRun = true
+        runIndent = indent.length
+      }
     }
   }
 
-  if (broken > 0) {
-    process.stderr.write(`\n工作流不可编译：${broken} 处。后果不是"少一步"而是整条工作流 0 job、无日志。\n`)
-    return 1
+  // 1. duplicate job keys inside the jobs: section
+  const seen = new Map()
+  for (const j of jobKeys) seen.set(j.name, [...(seen.get(j.name) ?? []), j.line])
+  for (const [name, at] of seen) {
+    if (at.length > 1) {
+      problems.push(`job "${name}" is defined ${at.length} times (lines ${at.join(", ")}) — a YAML mapping keeps only the last, so one of these checks never runs`)
+    }
   }
-  process.stdout.write(`\nOK：${files.length} 个工作流文件通过可编译性检查。\n`)
-  return 0
+
+  // 1b. `secrets` in a step's `if:`. GitHub does not expose the secrets context
+  //     to an `if` expression, and a workflow containing one does not compile:
+  //     the whole file is rejected and *zero* jobs are dispatched, so the run
+  //     shows up as an instant failure with no job to read. PyYAML accepts it and
+  //     so did this file before this rule existed — the release lane was broken
+  //     by exactly this line and nothing local could see it. Secrets belong in
+  //     `env:`; the branch on them belongs in the shell, where a missing value
+  //     can produce a real error message instead of no run at all.
+  for (const match of text.matchAll(/^[ \t]*if:[ \t]*(.+)$/gm)) {
+    if (!match[1].includes("secrets.")) continue
+    const line = text.slice(0, match.index).split("\n").length
+    problems.push(
+      `line ${line}: an \`if:\` uses the secrets context (\`${match[1].trim()}\`) — GitHub does not expose it there, ` +
+        `and the file will not compile: the workflow is rejected whole and no job is dispatched. ` +
+        `Put the secret in \`env:\` and branch on it inside \`run:\`.`,
+    )
+  }
+
+  // 2. repo scripts referenced by run: steps must exist (resolved against the
+  //    step's own working-directory, which is how Actions runs them)
+  for (const ref of runRefs) {
+    for (const script of referencedScripts(ref.text)) {
+      if (script.includes("${") || script.includes("$(")) continue // composed at runtime, not checkable here
+      const rel = path.posix.join(ref.dir, script)
+      if (!existsSync(path.join(target.root, rel))) {
+        problems.push(`line ${ref.line}${ref.dir ? ` (working-directory: ${ref.dir})` : ""}: step runs "${script}" but ${rel} does not exist under ${path.relative(repoRoot, target.root) || "."}`)
+      }
+    }
+  }
+
+  // 2b. `bun run <name>` / `npm run <name>` names a *package.json script*, not a
+  //     file, so the rule above cannot see it: a step that ran `bun run build` from
+  //     the workspace root passed this check while the root package.json has no
+  //     `build` script at all. Found 2026-09-30: the npm platform job failed with
+  //     `Script not found "build"` while the binaries job — same command, correct
+  //     working-directory — was already fixed and passing.
+  for (const ref of runRefs) {
+    // Each ref is a single physical line (see where refs are collected), and
+    // whole-line comments are already skipped there. Match within one line, and
+    // only where the command begins — after start-of-line or a chaining
+    // operator — so prose that merely contains "run <word>" is not a script.
+    //
+    // Built with RegExp rather than a literal: the pattern needs a literal `/`
+    // to detect a path argument, which inside a `/.../ ` literal would terminate
+    // the expression.
+    // exec() returns one match object (or null); the `?? []` only guards the
+    // null case, so every element here is a real match.
+    const hits = RUN_SCRIPT.exec(ref.text)
+    for (const m of hits ? [hits] : []) {
+      // `bun run path/to/file.ts` addresses a file bun executes directly; only a
+      // bare name is a package.json script, and the file-existence rule above
+      // already covers the former. The path test must be inside the pattern:
+      // once the name is captured, "script/publish.ts" is already "script",
+      // which is a different — and real — script name.
+      if (m[2] || m[0].includes("/")) continue
+      const name = m[1]
+      if (name.includes("$")) continue
+      const pkgPath = path.join(target.root, ref.dir, "package.json")
+      let pkg
+      try {
+        pkg = JSON.parse(readFileSync(pkgPath, "utf8"))
+      } catch {
+        continue // no package.json here: nothing to assert against
+      }
+      if (!(pkg.scripts ?? {})[name]) {
+        const where = ref.dir ? ` (working-directory: ${ref.dir})` : " (workspace root)"
+        problems.push(
+          `line ${ref.line}${where}: step runs \`run ${name}\` but ` +
+            `${path.posix.join(ref.dir, "package.json") || "package.json"} has no "${name}" script`,
+        )
+      }
+    }
+  }
+
+  // 2c. A `run:` step that reads a relative path must be able to resolve it from
+  //     where the step actually executes. Found 2026-09-30 twice in one day: the
+  //     npm platform step did `cd packages/opencode` and then read a bare
+  //     `product.json`, which lives at the *product root* — it died with ENOENT
+  //     after a full platform build, the expensive way to learn a path is wrong.
+  //     The failure is invisible here until CI pays for it twice.
+  //
+  //     Known limit: this resolves against the step's `working-directory` only.
+  //     A `cd` *inside* the script is not tracked, so a step that does
+  //     `cd packages/opencode` and then reads a bare `product.json` looks fine
+  //     here (the file exists at the root) and still dies in CI. Fixing that
+  //     means modelling shell control flow; until then the two forms are fixed
+  //     by hand, and the literal `../../product.json` spelling — which this rule
+  //     does verify — is the one to reach for.
+  // Built with RegExp for the same reason as RUN_SCRIPT above: the pattern
+  // contains quote characters that are awkward inside a literal, and exec()
+  // returns a single match (or null) — iterating it as if it were an array
+  // silently checks nothing.
+  const READ_LITERAL = new RegExp("readFileSync\\(\\s*['\"`]\\s*([^'\"`]+?)\\s*['\"`]", "g")
+  for (const ref of runRefs) {
+    READ_LITERAL.lastIndex = 0
+    let m
+    while ((m = READ_LITERAL.exec(ref.text)) !== null) {
+      const lit = m[1]
+      // Skip anything computed at runtime; only literal relative paths are checkable.
+      if (lit.includes("$") || lit.startsWith("process.argv")) continue
+      if (path.isAbsolute(lit)) continue
+      // Only path-shaped literals. `readFileSync('utf8')` and module specifiers
+      // like `readFileSync('fs')` are not paths, and a rule that reports those
+      // is a rule people learn to skip.
+      if (!/[/\\]/.test(lit) && !/\.[A-Za-z0-9]+$/.test(lit)) continue
+      const base = path.posix.join(ref.dir, lit)
+      const fromStep = path.join(target.root, base)
+      if (!existsSync(fromStep) && !existsSync(path.join(target.root, lit))) {
+        problems.push(
+          `line ${ref.line}: step reads "${lit}" but it does not exist ` +
+            `relative to ${ref.dir ? `working-directory ${ref.dir}` : "the repo root"} ` +
+            `(looked for ${path.relative(repoRoot, fromStep)})`,
+        )
+      }
+    }
+  }
+
+  // 3. a job gated on `inputs.x` that nobody declared is a job that never runs.
+  //    Found 2026-09-26: the verify-trusted-publisher job existed, its input did not
+  //    (an insert missed the indentation), and the dispatch API rejected the run — a
+  //    workflow that looks wired and is not.
+  const declared = new Set(lines.map((l) => l.match(/^[ \t]{6}([A-Za-z0-9_]+):[ \t]*$/)?.[1]).filter(Boolean))
+  const referenced = new Set([...(lines.join("\n").match(/inputs\.([A-Za-z0-9_]+)/g) ?? [])].map((m) => m.split(".")[1]))
+  for (const name of referenced) {
+    if (!declared.has(name)) problems.push(`uses inputs.${name} but never declares it under workflow_dispatch.inputs`)
+  }
+
+  return { jobs: [...seen.keys()], problems }
 }
 
-// 只在作为命令执行时扫描仓库；被 import（对照表、别的脚本）时保持零副作用。
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  process.exit(main())
+/**
+ * Pull out `node foo.mjs` / `bash foo.sh` / `sh foo.sh` / `python3 foo.py`
+ * style paths from a single command line. Anything not repo-relative (bare
+ * flags, external binaries, URLs) is ignored — this checks our own files, not
+ * the whole shell language.
+ */
+function referencedScripts(cmd) {
+  const out = []
+  const re = /(?:^|[\s;|&(])(?:node|npx|bash|sh|zsh|python3?)\s+(["']?)(\.?\/?[\w./-]+\.(?:mjs|cjs|js|ts|sh|py))\1/g
+  let m
+  while ((m = re.exec(cmd))) {
+    const p = m[2].replace(/^\.\//, "")
+    if (p.startsWith("/")) continue // absolute: environment, not repository
+    if (/^https?:/.test(p)) continue
+    out.push(p)
+  }
+  return out
 }
+
+let bad = 0
+for (const target of targets) {
+  const { jobs, problems } = inspect(target)
+  if (!jobs.length) {
+    console.error(`check-workflows: ${target.label} declares no jobs at all — nothing verified`)
+    bad++
+    continue
+  }
+  for (const p of problems) {
+    console.error(`  ✗ ${target.label}: ${p}`)
+    bad++
+  }
+  if (!problems.length) console.log(`  ok ${target.label}: ${jobs.length} job(s), every referenced script exists`)
+}
+
+if (bad > 0) {
+  console.error(`check-workflows: ${bad} problem(s) in ${targets.length} workflow file(s).`)
+  process.exit(1)
+}
+console.log(`check-workflows: ${targets.length} workflow file(s) clean`)

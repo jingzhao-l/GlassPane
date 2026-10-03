@@ -7,6 +7,7 @@ import {
   collectEvidenceAnchors,
   injectEvidenceAnchors,
   renderAnchorBlock,
+  renderDimensionCoverage,
 } from "../../src/plugin/glasspane-compaction"
 
 /**
@@ -275,4 +276,77 @@ describe("where the block goes, and what happens when the pull fails", () => {
     expect(output.context[0]).toContain("the host rejected the message pull: Session not found")
   })
 })
+
+
+describe("dimension coverage, computed by the kernel (M4)", () => {
+  const anchors = (dimensions: (string | undefined)[]) =>
+    dimensions.map((dimension, index) => ({
+      method: index % 2 === 0 ? "observe" : "act",
+      ...(dimension !== undefined ? { dimension } : {}),
+      operationId: `op_${index}`,
+    }))
+
+  test("a planned dimension with no decision is reported unverified, not dropped", () => {
+    // The sentence this whole structure exists to produce: the summariser must
+    // be able to learn what was NOT checked without anyone interpreting evidence.
+    const line = renderDimensionCoverage({
+      calls: 5,
+      anchors: anchors(["correctness", "correctness", "ui-ux"]),
+      withoutDecision: 2,
+      plannedDimensions: ["correctness", "security", "ui-ux"],
+    })
+    expect(line).toBe("2/3 dimensions verified, 1 unverified (security), 3 decisions")
+  })
+
+  test("a session with a plan and no decisions at all still produces a line", () => {
+    const line = renderDimensionCoverage({
+      calls: 0,
+      anchors: [],
+      withoutDecision: 0,
+      plannedDimensions: ["security", "correctness"],
+    })
+    expect(line).toBe("0/2 dimensions verified, 2 unverified (security, correctness), 0 decisions")
+  })
+
+  test("a decision recorded against a dimension nobody planned is surfaced", () => {
+    // The engine checked something the run never declared. Silently accepting it
+    // would be the drift the kernel's `unplanned` status exists to prevent.
+    const line = renderDimensionCoverage({
+      calls: 1,
+      anchors: anchors(["concurrency"]),
+      withoutDecision: 0,
+    })
+    expect(line).toBe("0/0 dimensions verified, 1 unplanned (concurrency), 1 decision")
+  })
+
+  test("a method name is never mistaken for a dimension", () => {
+    // "observe" is a method. Treating it as a dimension would invent an
+    // ontology this fork does not own.
+    const line = renderDimensionCoverage({
+      calls: 1,
+      anchors: [{ method: "observe" }],
+      withoutDecision: 1,
+      plannedDimensions: ["security"],
+    })
+    expect(line).toBe("0/1 dimensions verified, 1 unverified (security), 0 decisions")
+  })
+
+  test("no plan and nothing recorded yields no line rather than an invented one", () => {
+    expect(
+      renderDimensionCoverage({ calls: 1, anchors: [{ method: "observe" }], withoutDecision: 1 }),
+    ).toBeUndefined()
+  })
+
+  test("the injected block carries the coverage line", () => {
+    const block = renderAnchorBlock({
+      calls: 3,
+      anchors: anchors(["correctness", "correctness", "security"]),
+      withoutDecision: 0,
+      plannedDimensions: ["correctness", "security"],
+    })
+    expect(block).toContain("dimension coverage:")
+    expect(block).toContain("2/2 dimensions verified")
+  })
+})
+
 

@@ -70,7 +70,19 @@ export function DialogMoveSession(props: DialogMoveSessionProps) {
     return loadedProject()
   })
 
-  const [directories, { refetch }] = createResource(
+  // The type parameters are explicit because the fetcher cannot supply them: its
+  // return type is annotated (so the catch branch may return `info.value`), and
+  // `info.value` is itself typed from `T` — so with inference alone TypeScript
+  // resolves `T` to `unknown` and every consumer of `directories()` loses its
+  // element type.
+  //
+  // `S` is `string`, not `string | undefined`: a nullish source is how Solid
+  // says "do not fetch", so the fetcher is only ever called with a real id. The
+  // source returning `undefined` therefore narrows to `never` at the call site,
+  // which is why the SDK's required `projectID: string` is satisfied without a
+  // cast. Declaring `S` as `string | undefined` would instead push the
+  // `undefined` into the fetcher's parameter and fail on the SDK call.
+  const [directories, { refetch }] = createResource<ProjectDirectory[] | undefined, string>(
     () => (props.initialRemoving ? undefined : props.projectID),
     async (projectID, info): Promise<ProjectDirectory[] | undefined> => {
       try {

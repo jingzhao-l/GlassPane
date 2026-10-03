@@ -54,8 +54,40 @@ import {
 } from "../../../vendor/kernel/src/decision-log.js"
 import type { DecisionLogEntry, DecisionOutcome } from "../../../vendor/kernel/src/decision-log-entry.js"
 import { parseEvidencePackRead } from "../../../vendor/kernel/src/parse.js"
+import { dimensionContext, formatDimensionContext } from "../../../vendor/kernel/src/dimension-context.js"
+import type {
+  DimensionContext,
+  DimensionContextInput,
+  DimensionStatus,
+} from "../../../vendor/kernel/src/dimension-context.js"
 
 export type { DecisionLogEntry, DecisionOutcome, EvidencePack }
+export type { DimensionContext, DimensionContextInput, DimensionStatus }
+
+/**
+ * The dimension coverage of a run, computed by the kernel (M4).
+ *
+ * WHY THIS IS A PASS-THROUGH AND NOT A WRAPPER. The arithmetic — which planned
+ * dimensions the engine actually recorded a decision for, and which recorded
+ * dimensions nobody planned — is the kernel's, so both shells report the same
+ * numbers for the same run. This module's only job is to make the kernel's
+ * function reachable under the subpath import the product binary requires (see
+ * the barrel note above) and to re-export its types.
+ *
+ * The dimension ids are NOT defined here either. The kernel validates their
+ * shape and never enumerates them; the nine canonical ids belong to the iterate
+ * config, locked across six sources by `tests/test_dimension_lock.py`. A
+ * session that was never told which dimensions it was reviewing still gets an
+ * answer — one that says nothing was verified, which is the point.
+ */
+export function dimensionCoverage(input: DimensionContextInput): DimensionContext {
+  return dimensionContext(input)
+}
+
+/** The one-line form for a compaction block or report header. */
+export function describeDimensionCoverage(context: DimensionContext): string {
+  return formatDimensionContext(context)
+}
 
 /** The three-field failure shape every tool surface in this repo already uses. */
 export interface KernelRejection {
