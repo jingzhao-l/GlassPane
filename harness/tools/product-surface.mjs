@@ -188,14 +188,47 @@ check("installer-syntax", (() => {
   }
 })(), "install.sh failed its syntax check")
 check("installer-dry-run", (() => {
+  // The installer is macOS-only **by product decision** (the engine, the permission
+  // model and the evidence pipeline exist only on macOS), so on any other host the
+  // correct outcome is the refusal, not a plan. This rule used to demand a plan
+  // unconditionally, which meant the gate could only ever pass on a Mac — and the
+  // CI lane that runs it is `ubuntu-latest`, where it went red on the honest
+  // refusal. Skipping the check off-platform would be the wrong fix (a skipped
+  // check is how this repo's failures got invisible in the first place), so each
+  // platform asserts its own documented behaviour instead:
+  //
+  //   darwin  → exits 0, prints the plan, names the product, says nothing installed
+  //   other   → exits non-zero AND says why, naming the product (macOS-only)
+  //
+  // The second branch is a real assertion: an installer that failed for any other
+  // reason (a syntax error, a bad path, an unset variable) would not print the
+  // macOS-only sentence, so it still fails here.
+  const script = path.join(forkRoot, "scripts", "install.sh")
+  const isMac = process.platform === "darwin"
   try {
-    const out = execFileSync("bash", [path.join(forkRoot, "scripts", "install.sh"), "--dry-run"], { stdio: "pipe", encoding: "utf8" })
-    return out.includes(product.name) && out.includes("nothing was installed")
-  } catch (error) {
-    problems.push(`[installer-dry-run] install.sh --dry-run failed: ${error.message.split("\n")[0]}`)
+    const out = execFileSync("bash", [script, "--dry-run"], { stdio: "pipe", encoding: "utf8" })
+    if (isMac) return out.includes(product.name) && out.includes("nothing was installed")
+    // Off-platform the installer must NOT have produced a plan; producing one would
+    // mean it is willing to install somewhere it has no build.
+    problems.push(`[installer-dry-run] on ${process.platform} the installer produced an install plan; it is macOS-only and must refuse`)
     return false
+  } catch (error) {
+    const out = `${error.stdout ?? ""}${error.stderr ?? ""}`
+    if (isMac) {
+      problems.push(`[installer-dry-run] install.sh --dry-run failed on macOS: ${error.message.split("\n")[0]}`)
+      return false
+    }
+    // Expect the documented refusal: it names the product and says macOS-only.
+    const refuses = out.includes(product.name) && /macOS-only/.test(out)
+    if (!refuses) {
+      problems.push(
+        `[installer-dry-run] install.sh --dry-run failed on ${process.platform} without saying it is macOS-only: ` +
+          `${error.message.split("\n")[0]}`,
+      )
+    }
+    return refuses
   }
-})(), "install.sh --dry-run did not produce a plan naming the product")
+})(), "install.sh --dry-run did not behave as documented for this platform")
 
 // ---- our own pipelines only, and attribution on disk
 const wfDir = path.join(forkRoot, ".github", "workflows")
