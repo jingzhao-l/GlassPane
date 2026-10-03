@@ -186,7 +186,23 @@ jobs:
           [ "$missing" -eq 0 ] || exit 1
           echo "rulers present"
 
-      - name: Divergence matches the recorded surface (our side)
+      # 上游参照检出（pinned tag，`--depth 1`，不进版本控制）。tool-surface 与
+      # fork-diff 需要它做两件没有它就做不到的事：逐文件 blob 比对，以及识别
+      # 「纯改名」。后者不是优化而是正确性：私有化把 63 个 locale 文件里的上游名
+      # 换成本产品名，那是 2,700 行 find-and-replace 而非谁写的代码；没有参照检出
+      # 就识别不出这些是 move，于是把它们算成我们的行，面 B 从 17% 虚报到 20%。
+      # 该工具在没有参照时**故意**拒绝（"an unmeasured surface cannot be declared
+      # within limits"），所以这里必须提供参照，而不是放宽它。
+      - name: Fetch the pinned upstream reference clone (shallow)
+        run: |
+          set -euo pipefail
+          tag="$(node -p "require('./harness/upstream.json').tag")"
+          echo "pinning upstream at $tag"
+          git clone --quiet --branch "$tag" --depth 1 https://github.com/anomalyco/opencode.git .external/opencode
+          got="$(git -C .external/opencode describe --tags)"
+          [ "$got" = "$tag" ] || { echo "::error::reference clone is at $got, not the pinned $tag"; exit 1; }
+
+      - name: Divergence matches the recorded surface
         run: node harness/tools/fork-diff.mjs --check
 
       - name: Tool surfaces did not grow past the recorded baseline
@@ -201,8 +217,8 @@ jobs:
       - name: Product manifest, build, publish and installers agree
         run: node harness/tools/product-surface.mjs
 
-      - name: Extension points are still live at the pinned upstream tag (offline)
-        run: node harness/tools/hook-liveness.mjs --offline
+      - name: Extension points are still live at the pinned upstream tag
+        run: node harness/tools/hook-liveness.mjs --check
 
       - name: Vendored kernel still matches its provenance manifest
         run: node harness/glasspane-harness/script/kernel-vendor.mjs --check

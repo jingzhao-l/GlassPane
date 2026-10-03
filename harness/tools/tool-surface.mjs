@@ -179,11 +179,18 @@ function measureFork(golden) {
     if (!existsSync(abs)) return fail(`fork-diff says '${rel}' is edited but it is not in the tree`)
     if (!hasRef) {
       const was = prevEdited.get(rel)
-      if (was === undefined) return fail(`no reference clone and no baseline for edited file '${rel}' — cannot attribute surface B`)
+      // An edited TEST file is excluded, never measured — that is the declared
+      // caliber ("tests excluded"), and it must hold on the no-clone path too.
+      // This check used to sit *after* the baseline lookup, so an edited test with
+      // no recorded baseline aborted the whole gate: CI (which has no reference
+      // clone) could not run `tool-surface --check` at all, while the same tree
+      // measured clean locally. Excluding tests needs no reference and no
+      // baseline, so ask that question first and only then look up the baseline.
       if (isTest(rel)) {
-        excludedTests.push({ file: rel, lines: was })
+        if (was !== undefined) excludedTests.push({ file: rel, lines: was })
         continue
       }
+      if (was === undefined) return fail(`no reference clone and no baseline for edited file '${rel}' — cannot attribute surface B`)
       unmeasured.push(rel)
       files.push({ file: rel, kind: "edited", lines: was })
       continue
