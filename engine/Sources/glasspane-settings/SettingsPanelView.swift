@@ -142,25 +142,32 @@ struct SettingsPanelView: View {
     }
 
     private var daemonSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                SectionHeader(title: "后台服务", systemImage: "desktopcomputer")
-                Spacer()
-                if model.isRefreshing {
-                    HStack(spacing: 5) {
+        PanelCard(
+            key: "permissions-daemon",
+            title: "后台服务",
+            systemImage: "desktopcomputer",
+            summary: model.daemon.reachable
+                ? "运行中 \(model.daemon.version ?? "版本号未读到")"
+                : "未运行",
+            // 刷新必须待在折叠按钮外面：一张收起来的卡如果连"重新测一次"都收进去了，
+            // 收起就等于停用了这一页唯一的主动作。
+            accessory: AnyView(
+                HStack(spacing: 5) {
+                    if model.isRefreshing {
                         ProgressView().controlSize(.small)
                         Text("检测中").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Button {
+                            model.refresh()
+                        } label: {
+                            Label("刷新", systemImage: "arrow.clockwise")
+                        }
+                        .controlSize(.small)
+                        .accessibilityIdentifier(PermissionGuide.refreshIdentifier)
                     }
-                } else {
-                    Button {
-                        model.refresh()
-                    } label: {
-                        Label("刷新", systemImage: "arrow.clockwise")
-                    }
-                    .controlSize(.small)
-                    .accessibilityIdentifier(PermissionGuide.refreshIdentifier)
                 }
-            }
+            )
+        ) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
                     StatusDotView(tone: model.daemon.reachable ? .good : .bad)
@@ -199,7 +206,6 @@ struct SettingsPanelView: View {
                     }
                 }
             }
-            .consoleCard()
         }
     }
 

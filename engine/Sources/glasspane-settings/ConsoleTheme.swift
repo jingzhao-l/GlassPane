@@ -78,6 +78,9 @@ struct PanelCard<Content: View>: View {
     /// 折叠后仍要露出来的那一行结论（不传就只有标题）。诚实要求：收起正文
     /// 不能顺手把结论也收起——状态点与这一行始终在。
     var summary: String? = nil
+    /// 标题行右侧常驻的控制件（如"刷新"）。它必须待在折叠按钮**外面**：
+    /// 一个动作被收进"要点开才看得见"里，等于收起卡片时把动作也停了。
+    var accessory: AnyView? = nil
     @AppStorage private var collapsed: Bool
     @ViewBuilder var content: Content
 
@@ -88,6 +91,7 @@ struct PanelCard<Content: View>: View {
         systemImage: String? = nil,
         tint: Color? = nil,
         summary: String? = nil,
+        accessory: AnyView? = nil,
         @ViewBuilder content: () -> Content
     ) {
         self.key = key
@@ -96,40 +100,44 @@ struct PanelCard<Content: View>: View {
         self.systemImage = systemImage
         self.tint = tint
         self.summary = summary
+        self.accessory = accessory
         self._collapsed = AppStorage(wrappedValue: false, "glasspane.card.\(key).collapsed")
         self.content = content()
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Button {
-                collapsed.toggle()
-            } label: {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 10, alignment: .center)
-                    if let systemImage {
-                        Image(systemName: systemImage)
-                            .font(.callout)
-                            .foregroundStyle(tint ?? Color.secondary)
-                    }
-                    Text(title).font(.callout.weight(.semibold))
-                    if collapsed, let summary {
-                        Text(summary)
-                            .font(.caption)
+            HStack(spacing: 6) {
+                Button {
+                    collapsed.toggle()
+                } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
+                            .frame(width: 10, alignment: .center)
+                        if let systemImage {
+                            Image(systemName: systemImage)
+                                .font(.callout)
+                                .foregroundStyle(tint ?? Color.secondary)
+                        }
+                        Text(title).font(.callout.weight(.semibold))
+                        if collapsed, let summary {
+                            Text(summary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        Spacer(minLength: 4)
                     }
-                    Spacer(minLength: 4)
+                    .contentShape(Rectangle())
                 }
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("gp-card-toggle-\(key)")
+                .help(collapsed ? "展开这一栏" : "收起这一栏")
+                accessory
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("gp-card-toggle-\(key)")
-            .help(collapsed ? "展开这一栏" : "收起这一栏")
             if !collapsed {
                 if let subtitle {
                     Text(subtitle)

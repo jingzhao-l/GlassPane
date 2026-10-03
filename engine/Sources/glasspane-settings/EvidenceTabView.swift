@@ -305,22 +305,22 @@ struct EvidenceDetailView: View {
             if let stateDiff = pack.signals.stateDiff {
                 stateSection(stateDiff)
             } else if let reason = PanelChannelFields.reason(for: "stateDiff") {
-                unmeasuredCard(title: "内部状态", systemImage: "number.square", reason: reason)
+                unmeasuredCard(key: "state", title: "内部状态", systemImage: "number.square", reason: reason)
             }
             if let crash = pack.signals.crash {
                 aliveSection(crash)
             } else if let reason = PanelChannelFields.reason(for: "crash") {
-                unmeasuredCard(title: "进程存活", systemImage: "heart.circle", reason: reason)
+                unmeasuredCard(key: "alive", title: "进程存活", systemImage: "heart.circle", reason: reason)
             }
             if let probe = pack.signals.handlerProbe {
                 probeSection(probe)
             } else if let reason = PanelChannelFields.reason(for: "handlerProbe") {
-                unmeasuredCard(title: "探针命中", systemImage: "antenna.radiowaves.left.and.right", reason: reason)
+                unmeasuredCard(key: "probe", title: "探针命中", systemImage: "antenna.radiowaves.left.and.right", reason: reason)
             }
             if let responsiveness = pack.signals.responsiveness {
                 responsivenessSection(responsiveness)
             } else if let reason = PanelChannelFields.reason(for: "responsiveness") {
-                unmeasuredCard(title: "响应性", systemImage: "gauge.with.dots.needle.50percent", reason: reason)
+                unmeasuredCard(key: "responsiveness", title: "响应性", systemImage: "gauge.with.dots.needle.50percent", reason: reason)
             }
         } else {
             HStack(spacing: 8) {
@@ -449,7 +449,7 @@ struct EvidenceDetailView: View {
     // MARK: 各通道
 
     private func actSection(_ pack: EvidencePack) -> some View {
-        DetailCard(title: "操作", systemImage: "cursorarrow.click") {
+        DetailCard(key: "act", title: "操作", systemImage: "cursorarrow.click") {
             DetailRowView(label: "动作", value: EvidenceCopy.action(pack.signals.act.action.rawValue))
             DetailRowView(label: "目标控件", value: selectorText(pack.signals.act.selector))
             if let identifier = pack.signals.act.selector.identifier {
@@ -466,7 +466,8 @@ struct EvidenceDetailView: View {
     @ViewBuilder
     private func structureSection(_ pack: EvidencePack) -> some View {
         if let ax = pack.signals.axEvent {
-            DetailCard(title: "界面结构", systemImage: "list.bullet.indent") {
+            DetailCard(key: "structure", title: "界面结构", systemImage: "list.bullet.indent",
+                           summary: ax.axChanged ? "结构有变化" : "结构未见变化") {
                 DetailRowView(label: "变化", value: ax.axChanged ? "有" : "无",
                               valueColor: ax.axChanged ? .blue : .secondary)
                 DetailRowView(label: "节点数", value: "\(ax.nodeCount)")
@@ -478,7 +479,7 @@ struct EvidenceDetailView: View {
                     .foregroundStyle(.tertiary)
             }
         } else {
-            unmeasuredCard(title: "界面结构", systemImage: "list.bullet.indent",
+            unmeasuredCard(key: "structure", title: "界面结构", systemImage: "list.bullet.indent",
                            reason: "这次操作没有读到界面树（通道未启用或读取失败）。")
         }
     }
@@ -486,7 +487,8 @@ struct EvidenceDetailView: View {
     @ViewBuilder
     private func pixelSection(_ pack: EvidencePack) -> some View {
         if let pixel = pack.signals.pixelDiff {
-            DetailCard(title: "画面像素", systemImage: "photo") {
+            DetailCard(key: "pixel", title: "画面像素", systemImage: "photo",
+                       summary: String(format: "变化 %.4f%%", pixel.changedPixelRatio * 100)) {
                 DetailRowView(
                     label: "变化比例",
                     value: String(format: "%.4f%%", pixel.changedPixelRatio * 100),
@@ -501,13 +503,14 @@ struct EvidenceDetailView: View {
                 }
             }
         } else {
-            unmeasuredCard(title: "画面像素", systemImage: "photo",
+            unmeasuredCard(key: "pixel", title: "画面像素", systemImage: "photo",
                            reason: "屏幕录制未授予或本次未捕获，画面通道没有数据。")
         }
     }
 
     private func attributionSection(_ pack: EvidencePack) -> some View {
-        DetailCard(title: "归因", systemImage: "person.2") {
+        DetailCard(key: "attribution", title: "归因", systemImage: "person.2",
+                   summary: "归因 \(EvidenceCopy.attribution(pack.attribution.level.rawValue))") {
             DetailRowView(label: "强度", value: EvidenceCopy.attribution(pack.attribution.level.rawValue))
             DetailRowView(
                 label: "人机污染",
@@ -522,9 +525,10 @@ struct EvidenceDetailView: View {
 
     private func breakerSection(_ pack: EvidencePack) -> some View {
         DetailCard(
-            title: "性能熔断",
+            key: "breaker", title: "性能熔断",
             systemImage: "gauge.with.dots.needle.bottom.verylow",
-            tint: pack.circuitBreaker.level.rawValue >= 3 ? .red : .orange
+            tint: pack.circuitBreaker.level.rawValue >= 3 ? .red : .orange,
+            summary: EvidenceCopy.breakerLevel(pack.circuitBreaker.level.rawValue)
         ) {
             DetailRowView(
                 label: "等级",
@@ -539,9 +543,10 @@ struct EvidenceDetailView: View {
 
     private func assertionSection(_ assertion: Assertion) -> some View {
         DetailCard(
-            title: "断言",
+            key: "assertion", title: "断言",
             systemImage: assertion.passed ? "checkmark.circle" : "xmark.circle",
-            tint: assertion.passed ? .green : .red
+            tint: assertion.passed ? .green : .red,
+            summary: assertion.passed ? "断言通过" : "断言未通过"
         ) {
             DetailRowView(label: "对象", value: selectorText(assertion.selector))
             DetailRowView(label: "属性", value: EvidenceCopy.property(assertion.property.rawValue))
@@ -553,7 +558,8 @@ struct EvidenceDetailView: View {
     }
 
     private func diagnosisSection(_ diagnosis: Diagnosis) -> some View {
-        DetailCard(title: "诊断", systemImage: "stethoscope", tint: .purple) {
+        DetailCard(key: "diagnosis", title: "诊断", systemImage: "stethoscope", tint: .purple,
+                     summary: "分类 \(diagnosis.class.rawValue)") {
             DetailRowView(label: "分类", value: diagnosis.class.rawValue)
             DetailRowView(label: "异常", value: diagnosis.report.anomaly)
             DetailRowView(label: "依据", value: diagnosis.report.evidence)
@@ -567,7 +573,8 @@ struct EvidenceDetailView: View {
     }
 
     private func stateSection(_ stateDiff: StateDiffSignal) -> some View {
-        DetailCard(title: "内部状态", systemImage: "number.square") {
+        DetailCard(key: "state", title: "内部状态", systemImage: "number.square",
+                   summary: stateDiff.changed ? "状态有变化" : "状态未见变化") {
             DetailRowView(label: "来源", value: stateDiff.source.rawValue)
             DetailRowView(label: "变化", value: stateDiff.changed ? "有" : "无")
             if stateDiff.entries.isEmpty {
@@ -588,9 +595,10 @@ struct EvidenceDetailView: View {
 
     private func aliveSection(_ crash: CrashSignal) -> some View {
         DetailCard(
-            title: "进程存活",
+            key: "alive", title: "进程存活",
             systemImage: crash.processAliveAfter ? "heart.circle" : "heart.circle.slash",
-            tint: crash.processAliveAfter ? .green : .red
+            tint: crash.processAliveAfter ? .green : .red,
+            summary: crash.processAliveAfter ? "操作后仍存活" : "操作后已退出"
         ) {
             DetailRowView(label: "操作前", value: crash.processAliveBefore ? "存活" : "未存活")
             DetailRowView(
@@ -602,7 +610,8 @@ struct EvidenceDetailView: View {
     }
 
     private func probeSection(_ probe: HandlerProbeSignal) -> some View {
-        DetailCard(title: "探针命中", systemImage: "antenna.radiowaves.left.and.right") {
+        DetailCard(key: "probe", title: "探针命中", systemImage: "antenna.radiowaves.left.and.right",
+                     summary: "命中 \(probe.hitCount) 次") {
             DetailRowView(label: "命中次数", value: "\(probe.hitCount)")
             DetailRowView(label: "迟到", value: "\(probe.lateCount)")
             if !probe.handlers.isEmpty {
@@ -616,9 +625,10 @@ struct EvidenceDetailView: View {
 
     private func responsivenessSection(_ responsiveness: ResponsivenessSignal) -> some View {
         DetailCard(
-            title: "响应性",
+            key: "responsiveness", title: "响应性",
             systemImage: "gauge.with.dots.needle.50percent",
-            tint: responsiveness.responsive ? .green : .orange
+            tint: responsiveness.responsive ? .green : .orange,
+            summary: String(format: "往返 %.1f ms", responsiveness.pingMs)
         ) {
             DetailRowView(
                 label: "是否响应",
@@ -629,8 +639,8 @@ struct EvidenceDetailView: View {
         }
     }
 
-    private func unmeasuredCard(title: String, systemImage: String, reason: String) -> some View {
-        DetailCard(title: title, systemImage: systemImage) {
+    private func unmeasuredCard(key: String, title: String, systemImage: String, reason: String) -> some View {
+        DetailCard(key: key, title: title, systemImage: systemImage, summary: "未测量") {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "questionmark.circle")
                     .font(.callout)
@@ -674,23 +684,26 @@ struct EvidenceDetailView: View {
 }
 
 /// 通用详情卡。
+/// 一条通道的卡片。可折叠，折叠状态按 `key` 记在本机设置里。
+///
+/// 一条证据最多摊开十一张这样的卡，而一次核对通常只关心其中两三张
+/// （"结构动没动"、"像素动没动"）。其余九张占着的高度把真正要看的那张
+/// 挤到窗口外面去——这就是"各种卡片无法调节"在这一页的形状。
+///
+/// `summary` 是折叠后仍要露出来的那一行结论。没有它，折叠就把"这条通道说了什么"
+/// 一起收进了要点开才知道——而卡片标题本身不承载任何结论。
 struct DetailCard<Content: View>: View {
+    let key: String
     let title: String
     let systemImage: String
     var tint: Color? = nil
+    var summary: String? = nil
     @ViewBuilder let content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: systemImage)
-                    .font(.callout)
-                    .foregroundStyle(tint ?? Color.secondary)
-                Text(title).font(.callout.weight(.semibold))
-            }
+        PanelCard(key: key, title: title, systemImage: systemImage, tint: tint, summary: summary) {
             content
         }
-        .consoleCard(tint: tint)
     }
 }
 
