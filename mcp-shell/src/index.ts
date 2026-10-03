@@ -42,6 +42,16 @@ function parseArgs(argv: readonly string[]): CliOptions {
       i += 1;
     } else if (arg.startsWith("--socket-path=")) {
       options.socketPath = arg.slice("--socket-path=".length);
+    } else {
+      // 认不出的参数必须当场拒绝。从前这里什么都不做：`--socket-pth /tmp/x` 会被
+      // 静默丢掉，壳照旧连到它自己猜出来的那个默认根，而操作者以为自己点名了另一个
+      // daemon。连错 daemon 意味着 act 落在别的 app、别的机器上——这一句 `else`
+      // 是这条通路唯一还在说话的机会。位置参数同理：它多半是一个打错的开关。
+      throw new Error(
+        `unknown argument: ${arg}\n${USAGE}\n`
+        + "This shell accepts only --help/-h and --socket-path/-s <path>. "
+        + "A flag spelled wrong here is not an error the daemon will ever report.",
+      );
     }
   }
   return options;
