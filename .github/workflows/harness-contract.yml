@@ -140,5 +140,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: canonical kernel: moved? anchor still reachable?
+      - name: "canonical kernel: moved? anchor still reachable?"
         run: node harness/glasspane-harness/script/kernel-vendor.mjs --probe

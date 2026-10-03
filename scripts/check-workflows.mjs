@@ -155,6 +155,42 @@ function inspect(target) {
     )
   }
 
+  // 1c. An unquoted scalar that contains `: ` (colon-space) or a trailing `?`.
+  //     YAML reads `name: canonical kernel: moved? anchor still reachable?` as a
+  //     mapping rather than a string and refuses the whole file. GitHub then
+  //     rejects the workflow at parse time: **zero jobs are dispatched**, and the
+  //     run is reported as "likely failed because of a workflow file issue" with
+  //     no log to read. That is the same silent-total-failure shape as rule 1b,
+  //     and this file was the verifier that did not catch it — the guard read
+  //     names and scripts by regex and never asked whether the YAML *parses*.
+  //     We cannot depend on a YAML parser here (see the header: this tool must
+  //     stay dependency-free), so this asks the narrow question that bit us:
+  //     does a `key: value` line carry a second `: ` or end in `?` outside quotes?
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i]
+    if (/^\s*#/.test(raw)) continue
+    // Only `key: value` lines, and only where the key is a plain identifier —
+    // that is where a value can be misread as a nested mapping.
+    const m = raw.match(/^(\s*)-?\s*([A-Za-z_][A-Za-z0-9_-]*):[ \t]+(.*)$/)
+    if (!m) continue
+    const value = m[3]
+    // Strip a quoted scalar: anything inside matching quotes is literal text.
+    const quoted = value.match(/^(["'])(.*)\1$/)
+    if (quoted) continue
+    // A block scalar or an explicit anchor/tag introduces its own structure.
+    if (/^[>|&*]/.test(value)) continue
+    const hasColonSpace = /:\s/.test(value)
+    const danglingQuestion = /[?:]\s*$/.test(value) || /\?(\s|$)/.test(value)
+    if (hasColonSpace || danglingQuestion) {
+      problems.push(
+        `line ${i + 1}: \`${m[2]}:\` has an unquoted value containing \`: \` or \`?\` ` +
+          `(\`${value.trim()}\`) — YAML reads that as a nested mapping, not a string, and rejects the file. ` +
+          `The workflow is then dispatched as zero jobs and the run reports a workflow-file ` +
+          `problem with no log. Quote the value.`,
+      )
+    }
+  }
+
   // 2. repo scripts referenced by run: steps must exist (resolved against the
   //    step's own working-directory, which is how Actions runs them)
   for (const ref of runRefs) {
@@ -284,6 +320,114 @@ function referencedScripts(cmd) {
     out.push(p)
   }
   return out
+}
+
+// ---------------------------------------------------------------- self-test
+//
+// `--self-test` exists because CI runs it, and it used to do *nothing*: the script
+// ignored its argv entirely, so `node scripts/check-workflows.mjs --self-test`
+// performed the ordinary check and exited 0. An unrecognised flag behaved the same
+// way. That is the worst shape for a guard — a step that looks like it proves the
+// verifier works, and proves nothing.
+//
+// A rule nobody has seen go red is not a rule. So each case below feeds a mutated
+// copy of a real workflow through `inspect()` and asserts the specific problem
+// comes back. The mutations run against a synthetic target in a temp dir, so they
+// never touch the tree.
+if (process.argv.includes("--self-test")) {
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs")
+  const { tmpdir } = await import("node:os")
+
+  const BASE = `name: CI
+on:
+  push:
+    branches: [main]
+jobs:
+  build:
+    name: build the thing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: run the real script
+        run: node scripts/check-version.mjs
+      - name: gated on a secret
+        if: \${{ secrets.NPM_TOKEN != '' }}
+        run: node scripts/check-version.mjs
+`
+
+  const cases = [
+    {
+      id: "duplicate job key",
+      apply: (t) =>
+        t.replace(
+          /\n  build:\n/,
+          "\n  build:\n    name: build the thing\n    runs-on: ubuntu-latest\n    steps: []\n  build:\n",
+        ),
+      expect: /defined 2 times/,
+    },
+    {
+      id: "secrets context in a step's if:",
+      apply: (t) => t, // the BASE already carries it
+      expect: /secrets context/,
+    },
+    {
+      id: "unquoted value containing ': ' (the harness-contract defect)",
+      apply: (t) => t.replace("name: build the thing", "name: canonical kernel: moved? anchor still reachable?"),
+      expect: /unquoted value/,
+    },
+    {
+      id: "referenced script that does not exist",
+      apply: (t) => t.replace("scripts/check-version.mjs", "scripts/does-not-exist.mjs"),
+      expect: /does not exist|not found/,
+    },
+    {
+      id: "undeclared workflow_dispatch input",
+      apply: (t) =>
+        t
+          .replace("on:\n  push:\n    branches: [main]", "on:\n  workflow_dispatch:\n    inputs:\n      probe_tag:\n        required: false")
+          .replace("name: build the thing", "name: probe ${{ inputs.undeclared }}"),
+      expect: /never declares it/,
+    },
+  ]
+
+  const dir = mkdtempSync(path.join(tmpdir(), "check-workflows-selftest-"))
+  mkdirSync(path.join(dir, "scripts"), { recursive: true })
+  mkdirSync(path.join(dir, ".github", "workflows"), { recursive: true })
+  writeFileSync(path.join(dir, "scripts", "check-version.mjs"), "// present\n")
+
+  let failed = 0
+  for (const c of cases) {
+    const text = typeof c.apply === "function" ? c.apply(BASE) : BASE
+    const file = path.join(dir, ".github", "workflows", "ci.yml")
+    writeFileSync(file, text)
+    const { problems } = inspect({
+      dir: path.join(dir, ".github", "workflows"),
+      file: "ci.yml",
+      root: dir,
+      label: "self-test",
+    })
+    const hit = problems.some((p) => c.expect.test(p))
+    if (hit) {
+      console.log(`  ok self-test: ${c.id} is caught`)
+    } else {
+      console.error(`  ✗ self-test: ${c.id} was NOT caught (${problems.length} problem(s) reported)`)
+      failed++
+    }
+  }
+  rmSync(dir, { recursive: true, force: true })
+
+  if (failed > 0) {
+    console.error(`check-workflows --self-test: ${failed} case(s) did not go red.`)
+    process.exit(1)
+  }
+  console.log(`check-workflows --self-test: ${cases.length} case(s) each verified to fail`)
+  process.exit(0)
+}
+
+const unknown = process.argv.slice(2).filter((a) => a !== "--self-test")
+if (unknown.length) {
+  console.error(`check-workflows: unknown argument(s) ${unknown.join(", ")} — the only flag is --self-test`)
+  process.exit(2)
 }
 
 let bad = 0
