@@ -61,9 +61,14 @@ const treeSitterWorker = await Bun.file(fileURLToPath(import.meta.resolve("@open
 // [gp] Product: the target matrix lives in product.json (one truth for build,
 // publish and the product-surface gate). Upstream hard-coded it right here, which
 // meant the npm wrapper's optionalDependencies had to be re-derived by hand.
+// `name` is here because the platform manifest below is named after the product and
+// says so in its own `description`; it was missing from this annotation, so
+// `tsc --noEmit` failed with TS2339 on both uses. That is the typecheck lane in the
+// split repo's own CI — which had been red since the `repository` field landed, so
+// the failure nobody saw was the typecheck itself failing.
 const product = (await Bun.file(path.join(import.meta.dirname, "..", "..", "..", "product.json"))
   .json()
-  .catch(() => null)) as { platformTargets?: PlatformTarget[]; repo?: string; homepage?: string } | null
+  .catch(() => null)) as { name?: string; version?: string; platformTargets?: PlatformTarget[]; repo?: string; homepage?: string } | null
 if (!product?.platformTargets?.length) {
   console.error("product.json is missing or has no platformTargets — refusing to build a product with an unrecorded target matrix")
   process.exit(2)
