@@ -123,6 +123,7 @@ final class UpdateModel: ObservableObject {
             exitCode: snapshot?.exitCode,
             current: snapshot?.current,
             stagedVersion: snapshot?.stagedVersion,
+            code: snapshot?.code ?? snapshot?.lastErrorCode,
             isRunning: inFlight,
             pointerReady: pointer.isReady,
             now: now
@@ -139,6 +140,15 @@ final class UpdateModel: ObservableObject {
     /// 问一次源：拉最新版本、跑七道校验、通过就暂存。
     func checkNow() {
         perform(.check, extraArguments: [], timeoutSeconds: 240)
+    }
+
+    /// 带着"这个人已经认下这个发布"的确认再问一次源。
+    ///
+    /// 作者身份缺口（发布未签名 / 这台机器验不了签名）下，检查在下载之前就停了，
+    /// 盘上没有任何可暂存的东西——所以那一枚按钮要发的不是 `apply` 而是这一条。
+    /// 确认只跟着这一次点击，不写进任何默认值：定时任务永远不带它。
+    func consentedCheck() {
+        perform(.check, extraArguments: buttons.consentArguments, timeoutSeconds: 240)
     }
 
     /// 装那份已校验的暂存版本（换版与重启由更新器在空闲窗口里自己做）。

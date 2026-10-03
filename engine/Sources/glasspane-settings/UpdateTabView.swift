@@ -26,7 +26,7 @@ struct UpdateTabView: View {
                 if let failure = model.readFailure {
                     // 指针没了 / 那一行读不出来：先说这一句，再谈版本。
                     failureCard(UpdatePanel.failureText(failure))
-                } else if let error = model.errorText, showsErrorLine {
+                } else if let error = model.errorText, showsFailureCard {
                     failureCard(error)
                 }
                 trustCard
@@ -78,15 +78,21 @@ struct UpdateTabView: View {
         }
     }
 
-    /// 这一页是否连一份状态都没读到——读到了才把状态文档里的原话摆出来，
-    /// 否则页面上方那句失败原因已经说清了状况。
-    private var showsErrorLine: Bool {
+    /// 这一句要不要开那张红色失败卡。
+    ///
+    /// 判据是"上一次到底坏没坏"，不是"状态要不要人留意"：`.staged` / `.available`
+    /// 回的那一句是好消息（`staged 1.6.3 (sha256 …); press "Install update"`），
+    /// 把它塞进带告警图标的红卡里，等于把"可以装了"渲染成"出故障了"。
+    /// 好消息自有上面的状态卡与提示条说。
+    private var showsFailureCard: Bool {
+        if let message = model.snapshot?.lastErrorMessage, !message.isEmpty { return true }
         guard let status = model.status else { return false }
         switch status {
-        case .upToDate, .applied, .disabled:
-            return false
-        default:
+        case .rolledBack, .checkFailed, .stagedBuildFailed, .applyFailed,
+             .rollbackFailed, .installerPointerStale, .deferred:
             return true
+        case .upToDate, .applied, .disabled, .available, .staged, .needsConsent, .checkOverdue:
+            return false
         }
     }
 
@@ -134,7 +140,10 @@ struct UpdateTabView: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(digest, forType: .string)
                 } label: {
-                    Image(systemName: "doc.on.doc").font(.caption2)
+                    Image(systemName: "doc.on.doc")
+                        .font(.caption2)
+                        .frame(width: 20, height: 20)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.borderless)
                 .help("复制校验和，与发布页上的 SHA256SUMS 核对")
@@ -236,6 +245,16 @@ struct UpdateTabView: View {
                     .disabled(!buttons.applyEnabled)
                     .help(buttons.applyReason ?? "装那份已经校验过的新版本")
 
+                // 作者身份缺口下才有这一枚：那一次检查在下载前就停了，盘上没有
+                // 可装的东西，"安装"按不动是对的，但必须给一个做得动的确认动作，
+                // 否则这一页只剩一句"请先点立即检查"的死循环。
+                if buttons.consentEnabled {
+                    Button("信任这个发布并重新检查") { model.consentedCheck() }
+                        .controlSize(.small)
+                        .accessibilityIdentifier("gp-update-consent-check")
+                        .help("带着你的确认重新问一次源：它会下载并暂存这个发布，同时把缺签名这件事记在状态里")
+                }
+
                 Spacer()
 
                 Toggle(isOn: autoUpdateBinding) {
@@ -257,7 +276,7 @@ struct UpdateTabView: View {
             if !buttons.toggleEnabled, let reason = buttons.toggleReason {
                 reasonLine(key: "auto", title: "自动更新", reason: reason)
             }
-            Text("关掉自动更新后，这两个按钮照样能用；换版成功与否都会写在上面那一行状态里。")
+            Text("关掉自动更新后，上面的按钮照样能用；换版成功与否都会写在上面那一行状态里。")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

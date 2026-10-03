@@ -184,6 +184,99 @@ final class UpdatePanelTests: XCTestCase {
         XCTAssertFalse(UpdatePanel.isMajorBump(current: nil, candidate: "2.0.0"))
     }
 
+    /// 作者身份缺口（发布未签名 / 这台机器验不了签名）也是 `needs-consent`，可它
+    /// 那一次检查在**下载之前**就停了，盘上没有任何可暂存的版本。
+    ///
+    /// 反向变异：把 `needs-consent` 一律当成"等跨大版本那一下"（改动前的实现），
+    /// 于是这一支的「安装更新」永久禁掉，而禁用理由写着"请先点「立即检查」"——
+    /// 检查只会原样再拒一次。这台机器 `update-state.json` 里连着三条
+    /// `check → needs-consent / signature-tool-missing` 就是那个死循环留下的。
+    func testAuthorshipConsentOffersAConsentedCheckInsteadOfADeadEnd() {
+        for gate in ["release-unsigned", "signature-tool-missing"] {
+            let buttons = UpdatePanel.buttons(for: .reading(
+                .needsConsent, staged: false, current: "1.6.2", stagedVersion: "1.6.3", code: gate
+            ))
+            XCTAssertTrue(buttons.consentEnabled, "\(gate)：必须给出做得动的那一枚确认按钮")
+            XCTAssertEqual(buttons.consentArguments, ["--consent", "unsigned-release"],
+                           "\(gate)：确认要落在检查上，不是落在 apply 上")
+            XCTAssertFalse(buttons.applyEnabled, "\(gate)：手上没有暂存版本，安装按不动是对的")
+            XCTAssertFalse(buttons.applyArguments.contains("major"), "\(gate)：不是跨大版本，不附 major")
+        }
+    }
+
+    /// 死循环的形状可以写成一条不变式：**只有跨大版本那一道门，重跑一次「立即检查」
+    /// 才会真的推进状态**（它会去下载并暂存）。另外两道门里，不带确认的检查只会原样
+    /// 再拒一次，所以它们的禁用理由不许把人指回那个按钮。
+    func testNeedsConsentNeverSendsTheUserAroundInACircle() {
+        let codes: [String?] = [
+            nil, "consent-required", "release-unsigned", "signature-tool-missing",
+            "non-default-state-dir", "some-future-code",
+        ]
+        for code in codes {
+            for staged in [false, true] {
+                let buttons = UpdatePanel.buttons(for: .reading(
+                    .needsConsent, staged: staged, current: "1.4.0", stagedVersion: "1.5.0", code: code
+                ))
+                let reason = buttons.applyReason ?? ""
+                if buttons.applyEnabled {
+                    XCTAssertTrue(reason.isEmpty, "按得动的按钮不该同时挂一句按不动的理由")
+                    continue
+                }
+                XCTAssertFalse(reason.isEmpty, "code=\(code ?? "nil")：禁用必须带着理由")
+                if buttons.consentEnabled { continue }  // 已经给出了做得动的那一步
+                if reason.contains("立即检查") {
+                    XCTAssertEqual(
+                        UpdatePanel.consentGate(code: code, current: "1.4.0", stagedVersion: "1.5.0"), .major,
+                        "code=\(code ?? "nil") staged=\(staged)：这道门重跑检查也改变不了什么，却让用户去点「立即检查」＝原地打转：\(reason)"
+                    )
+                }
+            }
+        }
+    }
+
+    /// 面板无权代签的那一道门（例如后台服务要写别人的状态根）：既不能偷偷签字，
+    /// 也不能只留一句"再检查一次"。必须把是哪一道门说出来。
+    func testForeignConsentGateNamesItselfAndSignsNothing() {
+        let buttons = UpdatePanel.buttons(for: .reading(
+            .needsConsent, staged: false, current: "1.6.2", stagedVersion: "1.6.3",
+            code: "non-default-state-dir"
+        ))
+        XCTAssertFalse(buttons.consentEnabled, "不是面板能代签的门")
+        XCTAssertFalse(buttons.applyEnabled)
+        XCTAssertEqual(buttons.applyArguments, [])
+        XCTAssertTrue(buttons.applyReason?.contains("non-default-state-dir") == true,
+                      "要说清是哪一道门：\(buttons.applyReason ?? "")")
+    }
+
+    /// 提示条同样得按门分说法。反向变异：三种门共用"跨大版本升级"那一句——
+    /// 一个只是没签名的发布会被说成"可能改变对外行为"，用户据此按下的确认就不是他要给的那个。
+    func testConsentPromptNamesTheGateThatIsActuallyStandingThere() {
+        let major = UpdatePanel.promptText(
+            snapshot: UpdatePanel.Snapshot(
+                reportedStatus: .needsConsent, storedStatus: .needsConsent, code: "consent-required",
+                current: "1.4.0", latest: "2.0.0", lastCheckAt: nil,
+                stagedVersion: "2.0.0", stagedDigest: digest,
+                lastErrorCode: nil, lastErrorMessage: nil, commandMessage: nil,
+                disabled: false, autoApply: true, exitCode: 0, command: "check"
+            ),
+            status: .needsConsent, now: now
+        ) ?? ""
+        XCTAssertTrue(major.contains("跨大版本"), major)
+
+        let unsigned = UpdatePanel.promptText(
+            snapshot: UpdatePanel.Snapshot(
+                reportedStatus: .needsConsent, storedStatus: .needsConsent, code: "signature-tool-missing",
+                current: "1.6.2", latest: "1.6.3", lastCheckAt: nil,
+                stagedVersion: nil, stagedDigest: nil,
+                lastErrorCode: "signature-tool-missing", lastErrorMessage: nil, commandMessage: nil,
+                disabled: false, autoApply: true, exitCode: 2, command: "check"
+            ),
+            status: .needsConsent, now: now
+        ) ?? ""
+        XCTAssertFalse(unsigned.contains("跨大版本"), "没签名的发布不能被说成跨大版本：\(unsigned)")
+        XCTAssertTrue(unsigned.contains("签名") || unsigned.contains("signature-tool-missing"), unsigned)
+    }
+
     /// 反向变异：**去掉在途闸门**（两次「立即检查」叠着跑，后一轮会踩掉前一轮的
     /// 暂存目录与状态文件）。
     func testInFlightRunBlocksEveryControl() {

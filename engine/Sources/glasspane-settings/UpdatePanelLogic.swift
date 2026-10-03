@@ -392,16 +392,20 @@ enum UpdatePanel {
         var exitCode: Int?
         var current: String?
         var stagedVersion: String?
+        /// 更新器给这一轮结论起的稳定代号（`code`）。`needs-consent` 背后是哪一道门，
+        /// 只有它说得清——只看版本差会把"作者身份缺口"当成"跨大版本"处理。
+        var code: String?
         var isRunning: Bool
         var pointerReady: Bool
         var now: Date
 
         static func reading(_ status: Status?, staged: Bool = false, exitCode: Int? = nil,
                             current: String? = nil, stagedVersion: String? = nil,
+                            code: String? = nil,
                             running: Bool = false, pointerReady: Bool = true,
                             now: Date = Date(timeIntervalSince1970: 0)) -> ButtonContext {
             ButtonContext(status: status, hasStagedOffer: staged, exitCode: exitCode,
-                          current: current, stagedVersion: stagedVersion,
+                          current: current, stagedVersion: stagedVersion, code: code,
                           isRunning: running, pointerReady: pointerReady, now: now)
         }
     }
@@ -415,6 +419,49 @@ enum UpdatePanel {
         var toggleReason: String?
         /// 「安装更新」这一次要额外带的参数（确认跨大版本时是 `--consent major`）。
         var applyArguments: [String]
+        /// 「信任这个发布并重新检查」：作者身份缺口下唯一做得动的确认动作。
+        /// 默认关——只有 `needs-consent` 且门确实是作者身份那一道才开得出来。
+        var consentEnabled: Bool = false
+        var consentReason: String? = nil
+        /// 这一枚按钮要发的那条 `check` 的额外参数（`--consent unsigned-release`）。
+        var consentArguments: [String] = []
+    }
+
+    // MARK: - `needs-consent` 到底是哪一道门
+
+    /// `needs-consent` 不是一件事，是三件：跨大版本、作者身份没证明、以及面板
+    /// 无权代签的那一类（例如后台服务要写别人的状态根）。它们**手上有没有东西可装**
+    /// 都不一样：跨大版本那一次检查已经把新版本暂存好了，缺的只是人按下按钮；
+    /// 作者身份那一次检查在下载之前就拒了，`staged` 是空的。
+    ///
+    /// 早先的面板只认第一种，另外两种落进同一分支后「安装更新」被永久禁掉，
+    /// 而禁用理由又让用户去点「立即检查」——检查只会原样再拒一次。真机上这台机器
+    /// 连着的三次 `check → needs-consent / signature-tool-missing` 就是这个死循环。
+    enum ConsentGate: Equatable {
+        /// 跨大版本：`apply --consent major`，按下即确认。
+        case major
+        /// 发布没签名 / 这台机器验不了签名：得先带着确认重跑一次**检查**才会暂存。
+        case unsignedRelease
+        /// 面板不代签的门，或读不出是哪一道：只能把门说出来，不能给一个按不动的按钮。
+        case none
+    }
+
+    /// 三道门里面板能代签的那两种，各自要 updater 收下的 `--consent` 取值。
+    static let majorConsentArgument = ["--consent", "major"]
+    static let unsignedReleaseConsentArgument = ["--consent", "unsigned-release"]
+
+    /// 按更新器写的代号认门；代号缺失时退回版本差判断（读不出版本就当面板无权代签）。
+    static func consentGate(code: String?, current: String?, stagedVersion: String?) -> ConsentGate {
+        switch code {
+        case "release-unsigned", "signature-tool-missing":
+            return .unsignedRelease
+        case "consent-required":
+            return .major
+        case .some:
+            return .none
+        case nil:
+            return isMajorBump(current: current, candidate: stagedVersion) ? .major : .none
+        }
     }
 
     static let runningText = "上一个操作还在进行，等它结束再点。"
@@ -458,14 +505,39 @@ enum UpdatePanel {
                            toggleEnabled: true, toggleReason: nil,
                            applyArguments: [])
         case .needsConsent:
-            // 跨大版本永不自动应用：必须由人按下这个按钮，所以按钮按下即确认。
-            let major = isMajorBump(current: ctx.current, candidate: ctx.stagedVersion)
-            return Buttons(checkEnabled: true, checkReason: nil,
-                           applyEnabled: staged && major,
-                           applyReason: staged && major ? nil
-                               : "这个新版本要你确认后才会安装，请先点「立即检查」。",
-                           toggleEnabled: true, toggleReason: nil,
-                           applyArguments: (staged && major) ? ["--consent", "major"] : [])
+            // 三道门各有各的动作。把它们并成"等跨大版本那一下"，另外两道就只剩
+            // 一个永远按不动的按钮，而禁用理由还把用户推回「立即检查」——
+            // 检查只会原样再拒一次，这一页就成了死循环。
+            switch consentGate(code: ctx.code, current: ctx.current, stagedVersion: ctx.stagedVersion) {
+            case .major:
+                // 跨大版本永不自动应用：必须由人按下这个按钮，所以按钮按下即确认。
+                return Buttons(checkEnabled: true, checkReason: nil,
+                               applyEnabled: staged,
+                               applyReason: staged ? nil : retryCheck,
+                               toggleEnabled: true, toggleReason: nil,
+                               applyArguments: staged ? Self.majorConsentArgument : [])
+            case .unsignedRelease:
+                // 检查在下载之前就拒了，手上没有任何暂存好的版本：`apply` 按不动是对的，
+                // 但必须给出做得动的那一枚——带着确认再跑一次检查。
+                return Buttons(checkEnabled: true, checkReason: nil,
+                               applyEnabled: false,
+                               applyReason: "这个发布没有可核验的签名，检查在下载前就停了，所以还没有可装的版本。"
+                                   + "要装它，先按下面那枚按钮带着确认重新检查一次。",
+                               toggleEnabled: true, toggleReason: nil,
+                               applyArguments: [],
+                               consentEnabled: true, consentReason: nil,
+                               consentArguments: Self.unsignedReleaseConsentArgument)
+            case .none:
+                // 面板无权代签的那一道（或代号读不出来）：说清是哪一道门，
+                // 绝不写"先点「立即检查」"——那正是把人绕回死循环的那半句。
+                let which = ctx.code ?? "这一页认不出的代号"
+                return Buttons(checkEnabled: true, checkReason: nil,
+                               applyEnabled: false,
+                               applyReason: "拦住更新的是「\(which)」这一道确认，面板不替它签字。"
+                                   + "要看清缺什么、以及怎么把它补上，请跑一次 `updater status` 读更新器那句原话。",
+                               toggleEnabled: true, toggleReason: nil,
+                               applyArguments: [])
+            }
         case .upToDate, .applied:
             return Buttons(checkEnabled: true, checkReason: nil,
                            applyEnabled: false, applyReason: "现在没有要装的新版本。",
@@ -543,7 +615,18 @@ enum UpdatePanel {
         }
         if status == .needsConsent {
             let version = snapshot.stagedVersion ?? snapshot.latest ?? "新版本"
-            return "\(version) 是跨大版本升级，可能改变对外行为，点「安装更新」才装。"
+            switch consentGate(code: snapshot.code, current: snapshot.current,
+                               stagedVersion: snapshot.stagedVersion) {
+            case .major:
+                return "\(version) 是跨大版本升级，可能改变对外行为，点「安装更新」才装。"
+            case .unsignedRelease:
+                return "\(version) 没有可核验的签名（\(snapshot.code ?? "作者身份未证明")）。"
+                    + "自动更新不会替这个发布签字；你核对过发布页的校验和后，"
+                    + "点「信任这个发布并重新检查」才会把它下载并暂存。"
+            case .none:
+                return "\(version) 停在一道需要你本人判断的确认上（\(snapshot.code ?? "代号未给出")），"
+                    + "面板不替它签字。"
+            }
         }
         return nil
     }
