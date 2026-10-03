@@ -462,11 +462,27 @@ export function readUpdateState(env: NodeJS.ProcessEnv = process.env, stateRootO
     `current=${String(parsed.current ?? "unknown")}`,
     `latest=${String(parsed.latest ?? "none-seen")}`,
     `lastCheckAt=${String(parsed.updatedAt ?? "never")}`,
-    `autoUpdate=${parsed.disabled === true ? "off" : parsed.autoApply === true ? "on" : "on-by-default"}`,
+    // `disabled` 缺失与 `disabled: false` 不是一件事：前者是"这份记录没说"，后者是
+    // "记录说了：没关"。从前两者都掉进 `on-by-default`，等于替这台机器宣布自动更新
+    // 开着——而本文件开头立的规矩恰恰是 absent 不许读成友好态。
+    `autoUpdate=${
+      parsed.disabled === true ? "off"
+        : parsed.disabled === false ? "on"
+        : parsed.autoApply === true ? "on"
+        : "unknown(neither disabled nor autoApply is recorded)"
+    }`,
   ];
   const lastError = parsed.lastError as { code?: string; message?: string } | null | undefined;
-  if (lastError && typeof lastError.message === "string") {
-    bits.push(`lastError=${lastError.code ?? "no-code"}: ${lastError.message}`);
+  // 只有 code 没有 message 也要说出来：丢掉 code 就是把"哪一道门拦住的"这个
+  // 唯一可核对的事实扔掉，只因为配套的句子没写。
+  if (lastError && (typeof lastError.code === "string" || typeof lastError.message === "string")) {
+    const code = typeof lastError.code === "string" && lastError.code !== ""
+      ? lastError.code
+      : "no-code";
+    const message = typeof lastError.message === "string" && lastError.message !== ""
+      ? lastError.message
+      : "(the record carries a code with no message: the code is all this shell can honestly say)";
+    bits.push(`lastError=${code}: ${message}`);
   }
   const staged = parsed.staged as { version?: string; digest?: string } | null | undefined;
   if (staged && typeof staged.version === "string") {

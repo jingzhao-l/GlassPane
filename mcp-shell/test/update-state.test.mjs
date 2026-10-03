@@ -680,3 +680,43 @@ test("gp_observe does not gain the update block", async () => {
   assert.equal(outcome.content.length, 1, JSON.stringify(outcome.content));
   assert.equal(outcome.content[0].text.includes("update state"), false);
 });
+
+/* -------- 没记着 ≠ 记着"开着"：autoUpdate 与 lastError 的两处编造 -------- */
+
+/**
+ * 从前是 `disabled === true ? "off" : autoApply === true ? "on" : "on-by-default"`：
+ * 两个字段都不在盘上时，它替这台机器宣布自动更新是开着的。本文件开头给自己立的
+ * 规矩恰恰相反——absent 必须读成自己的那一态，"猜信任的壳比说读不到的壳更糟"。
+ *
+ * 反向变异：把 `unknown(...)` 那一支改回 `"on-by-default"`，第一条变红。
+ */
+function stateSummaryWith(state) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gp-auto-"));
+  try {
+    fs.writeFileSync(path.join(root, "update-state.json"), JSON.stringify(state));
+    return readUpdateState({}, root).summary ?? "";
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("an unrecorded auto-update switch is stated as unknown, never as on", () => {
+  const bare = stateSummaryWith({ schemaVersion: 1, status: "up-to-date", current: "1.6.2", latest: "1.6.2" });
+  assert.ok(bare.includes("autoUpdate=unknown"), `两个字段都没记着时必须说 unknown：${bare}`);
+  assert.equal(bare.includes("on-by-default"), false, `"on-by-default" 是从缺席里编出来的正面主张：${bare}`);
+});
+
+test("an explicit disabled:false is the record speaking, and reads as on", () => {
+  const said = stateSummaryWith({ schemaVersion: 1, status: "up-to-date", disabled: false, autoApply: false });
+  assert.ok(said.includes("autoUpdate=on"), `记录明写了没关，就该读成 on：${said}`);
+  assert.ok(stateSummaryWith({ schemaVersion: 1, status: "up-to-date", disabled: true }).includes("autoUpdate=off"));
+});
+
+/** 只有 code 没有 message 也要说出来：丢掉 code 就是把唯一可核对的事实扔掉。 */
+test("a lastError with a code and no message still names the code", () => {
+  const out = stateSummaryWith({
+    schemaVersion: 1, status: "check-failed",
+    lastError: { code: "release-unreachable", message: null },
+  });
+  assert.ok(out.includes("release-unreachable"), `code 不许因为缺句子就被丢：${out}`);
+});
