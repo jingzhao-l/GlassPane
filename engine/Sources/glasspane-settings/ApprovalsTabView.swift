@@ -156,20 +156,26 @@ struct ApprovalsTabView: View {
     }
 }
 
-/// 单条审批记录。
+/// 单条审批记录。可折叠，折叠状态按 `approvalId` 记在本机设置里。
+///
+/// 台账是一条只增不减的链，一条真实机器上已经有十条以上，而核对时通常只关心
+/// "哪几条是自批的"。每张卡都摊开就得滚动半屏。折叠后风险等级、结论与批准人
+/// 仍在标题行——收起一张记录不该把它说的事一起收掉。
 struct ApprovalRowView: View {
     let index: Int
     let record: ApprovalRecord
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text("\(index + 1)")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.tertiary)
-                .frame(width: 24, alignment: .trailing)
+        PanelCard(
+            key: "approval-\(record.approvalId)",
+            title: "\(index + 1). \(record.operationType)",
+            systemImage: riskIcon,
+            tint: riskColor,
+            summary: "\(riskText) · \(record.decision == .approve ? "已批准" : "已拒绝") · "
+                + (record.approvedBy == ApprovalGate.autoApprover ? "后台服务自批" : "由 \(record.approvedBy) 批准")
+        ) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Text(record.operationType).font(.callout.weight(.semibold))
                     Text(record.operationRef)
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
@@ -199,8 +205,6 @@ struct ApprovalRowView: View {
                 }
             }
         }
-        .padding(10)
-        .consoleCard()
     }
 
     private var riskText: String {
