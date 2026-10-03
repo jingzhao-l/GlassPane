@@ -118,7 +118,7 @@ export function renderMarkdown(pack: EvidencePackReportView, diagnostics: string
     out.push(section.body);
     out.push("");
   }
-  return out.join("\n");
+  return escapeTerminalControl(out.join("\n"));
 }
 
 /** Full HTML view with an operationId anchor; all values escaped. */
@@ -145,7 +145,26 @@ export function renderHTML(pack: EvidencePackReportView, diagnostics: string | u
     out.push(`</section>`);
   }
   out.push(`</div>`);
-  return out.join("\n");
+  // HTML 那半也要过这一道：`gp_export_evidence` 把 HTML 当**文本**交回，
+  // 代理一样会把它打到终端上——`<` 被转义了不代表 ESC 也被转义了。
+  return escapeTerminalControl(out.join("\n"));
+}
+
+/**
+ * 终端控制字符一律转成可见的 `\uXXXX`。
+ *
+ * markdown 这一路从前是原文输出的：`escapeHTML` 只护住了 HTML 那半，而
+ * `gp_export_evidence` 与报告导出默认交回的就是 markdown——代理会把它直接打到
+ * 终端上。报告里的标题、selector 标题、stateDiff 的键值、探针的文件路径全是
+ * app 自己写的字符串：一个窗口标题里塞一段 OSC-52 就能改写用户的剪贴板，
+ * 一段 ANSI 能把光标移走覆盖掉它说过的话。daemon 那一侧为这件事立过规矩
+ * （R5-03：`<0x20` 控制字符一律转义），这里补齐壳这一侧。
+ *
+ * `\t`(0x09) 与 `\n`(0x0a) 保留——它们是这份报告自己的排版，不是外来字符。
+ */
+export function escapeTerminalControl(value: string): string {
+  return value.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, (character) =>
+    `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 
 /**

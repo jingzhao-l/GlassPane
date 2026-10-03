@@ -253,3 +253,40 @@ test("probe values are escaped in HTML and verbatim in Markdown", () => {
     "the before/after arrow escapes along with the rest of the value",
   );
 });
+
+/* ---------------- 终端控制字符：报告是打给终端看的 ---------------- */
+
+/**
+ * `escapeHTML` 只护住了 HTML 那半，而 `gp_export_evidence` / `gp_recent_reports`
+ * 默认交回的是 **markdown 文本**，代理会原样打到终端上。报告里的 selector 标题、
+ * stateDiff 的键值都是 app 自己写的字符串——一个窗口标题塞一段 OSC-52 就能改写
+ * 用户的剪贴板，一段 ANSI 能把光标移走覆盖掉它说过的话。
+ * daemon 那一侧为这件事立过规矩（R5-03：`<0x20` 一律转义），这里补齐壳这一侧。
+ *
+ * 反向变异：把 renderMarkdown 末尾的 `escapeTerminalControl(...)` 去掉，
+ * 第一、二条立刻变红；把 `\n`/`\t` 也纳入替换，第三条变红。
+ */
+test("markdown report carries no raw terminal escape", () => {
+  const ESC = String.fromCharCode(27);
+  const pack = goldenPack();
+  const hostile = structuredClone(pack);
+  hostile.signals.act.selector.title = `Submit${ESC}]52;c;aGVsbG8=${ESC}\\`;
+  const out = renderMarkdown(hostile, undefined);
+  assert.equal(out.includes(ESC), false, "报告里不许出现可执行的 ESC 字节");
+  assert.ok(out.includes("\\u001b"), "要被看见，而不是被悄悄删掉：", out.slice(0, 200));
+});
+
+test("html report carries no raw terminal escape either", () => {
+  const ESC = String.fromCharCode(27);
+  const hostile = structuredClone(goldenPack());
+  hostile.signals.stateDiff.entries[0].after = `${ESC}[2Jpwned`;
+  const out = renderHTML(hostile, undefined);
+  assert.equal(out.includes(ESC), false, "HTML 也是当文本交回的，`<` 被转义不代表 ESC 被转义");
+  assert.ok(out.includes("\\u001b"));
+});
+
+test("the renderer's own newlines and tabs survive", () => {
+  const plain = renderMarkdown(goldenPack(), undefined);
+  assert.ok(plain.includes("\n"), "换行是这份 markdown 自己的排版，不许被吃掉");
+  assert.equal(plain, fixture("report.ok-01.md"), "无控制字符的输入必须逐字节不变（金样仍成立）");
+});
