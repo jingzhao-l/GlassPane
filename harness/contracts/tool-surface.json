@@ -7,14 +7,29 @@
     "fork": "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted",
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
-  "observedAt": "2026-10-03",
-  "engineLoc": 22412,
+  "observedAt": "2026-10-04",
+  "engineLoc": 22803,
   "engineFiles": 60,
   "surfaces": {
     "mcpShell": {
-      "loc": 8455,
+      "loc": 8510,
       "files": 13,
-      "ratio": 0.2354
+      "ratio": 0.234,
+      "byFile": {
+        "mcp-shell/src/tools.ts": 2339,
+        "mcp-shell/src/engine-client.ts": 1361,
+        "mcp-shell/src/http-gateway.ts": 1234,
+        "mcp-shell/src/project-registry.ts": 1098,
+        "mcp-shell/src/update-state.ts": 492,
+        "mcp-shell/src/audit-session.ts": 381,
+        "mcp-shell/src/evidence-report.ts": 364,
+        "mcp-shell/src/dispatch.ts": 357,
+        "mcp-shell/src/io.ts": 325,
+        "mcp-shell/src/http-gateway-cli.ts": 227,
+        "mcp-shell/src/index.ts": 226,
+        "mcp-shell/src/errors.ts": 72,
+        "mcp-shell/src/canonical.ts": 34
+      }
     },
     "fork": {
       "loc": 5056,
@@ -1040,7 +1055,7 @@
           "lines": 0
         }
       ],
-      "ratio": 0.1407,
+      "ratio": 0.139,
       "vendorExcluded": {
         "files": 11,
         "lines": 1464
@@ -1051,7 +1066,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 13511,
-  "note": "2026-10-03 在 harness/recovered 合入 main 之后重记。两处增长都不是新写的判断逻辑，逐条查过：｜surface A（mcp-shell/src 3859→8386）是 main 上 1.6.0–1.6.2 的真实产品代码（http-gateway / update-state 等），此前 harness 线看不到它们，所以旧基线偏低；｜surface B（3812→6502）是尺子第一次在有上游参照检出（.external/opencode）的情况下正确归属了我们自己的 gp_* 工具面——旧基线是在无参照时算的，把一部分我们的代码记在了「无法归属」里。｜两项都只增不减，且 10% 上限本就早于测量、已被长期容忍；棘轮的作用是拦住继续增长，不是追认历史。｜同批 surface-semantics --check 仍为 0 hit：fork 侧没有出现 threshold-comparison / verdict-synthesis / evidence-field-compare，即判定仍然全部留在 Swift 引擎里，这一条才是本棘轮真正要守的不变量。｜｜2026-10-03 再记一次，并修掉一个记账缺陷：vendored 内核此前根本没有被排除。两处叠加——① tool-surface 读 harness/contracts/kernel-vendor.json，而那份清单在 harness/glasspane-harness/contracts/ 下，读不到就静默返回「无排除」；② 即使读到，清单里的 forkPath 被写成重复路径 packages/opencode/vendor/packages/opencode/vendor/kernel（kernel-vendor.mjs 用 join(forkRel, vendorRel) 拼出来，而两个分支对 forkRel 的含义不同），前缀匹配不上。｜两处都已修，并让「找不到清单」大声说出来而不是静默降级。修好后 vendored 内核 11 个文件 1464 行被如实排除，面 B 降到 5056（14.07%）——这不是我们写的代码，是 kernel 的字节，它的完整性由 kernel-vendor.mjs 负责。教训与本棘轮同源：一道静默失效的排除规则，比没有这条规则更坏，因为它让测量看起来仍然成立。｜｜2026-10-03 面 A 8386 → 8455（+69）：全部来自并行会话落在 main 上的 mcp-shell 正确性修复（ba75cbb 引擎空帧被当成成功 / 94be764 打错的开关被静默丢掉 / d6e41a6 证据报告原样转发 app 的字符串 / 0abea72 未记的更新开关被说成 on-by-default），不是 harness 这批改动。棘轮按设计报警，这里只记来源。｜｜一处自我更正：这条曾先按 8410 落盘，那是在一个临时 worktree 里量的，而那个 worktree 是旧提交下的残缺检出，量少了 45 行；CI 与干净主树都量到 8455。最终值在已与 origin/main 一致、且无未提交改动的主工作副本上重记，与 CI 逐字一致。教训：量出来的东西要在量它的那个环境里复核一次，临时 worktree 也会是坏的检出。｜｜这条棘轮会在面 A 下次增长时再次转红。那是它该做的事，不是误报——面 A 与面 B 都已长期高于 10% 的文档上限（上限早于测量），棘轮只挡继续增长。",
+  "totalToolSurfaceLoc": 13566,
+  "note": "2026-10-03 在 harness/recovered 合入 main 之后重记。面 A（mcp-shell/src 3859→8386）是 main 上 1.6.0–1.6.2 的真实产品代码，此前 harness 线看不到它们；面 B（3812→6502）是尺子第一次在有上游参照检出时正确归属了我们自己的 gp_* 工具面。两项都只增不减，10% 上限本就早于测量、已被长期容忍，棘轮的作用是拦住继续增长，不是追认历史。｜2026-10-03 修掉一个记账缺陷：vendored 内核此前根本没有被排除。两处叠加——tool-surface 读 harness/contracts/kernel-vendor.json，而那份清单在 harness/glasspane-harness/contracts/ 下，读不到就静默返回「无排除」；即使读到，清单里的 forkPath 也被 join(forkRel, vendorRel) 拼成重复路径，前缀匹配不上。两处都已修，并让「找不到清单」大声说出来。修好后 vendored 11 文件 1464 行如实排除，面 B 降到 5056。一道静默失效的排除规则比没有这条规则更坏，因为它让测量看起来仍然成立。｜2026-10-03 面 A 8455 → 8510（+55）：全部来自并行会话落在 main 上的 395f13e「gp_project_set 的读—改—写会把别人的写静默盖掉，却报告成功」（mcp-shell/src/project-registry.ts +55），不是 harness 这批改动。棘轮按设计报警，这里只记来源。｜2026-10-03 给面 A 补了逐文件基线（mcpShell.byFile），并让转红时点名是哪个文件长的。此前只有一句「grew: 8455 → 8510 (+55)」，不说是谁长的；在多人共推的分支上，这把「确认这次增长」变成了一道考古题。反向因果已验：给 http-gateway.ts 加 3 行，闸立刻点名 `+3 mcp-shell/src/http-gateway.ts`。｜面 A 与面 B 都已长期高于 10% 的文档上限（上限早于测量）。这条棘轮会在面下次增长时再次转红，那是它该做的事，不是误报。",
   "carried": null
 }

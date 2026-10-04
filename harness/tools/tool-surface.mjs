@@ -89,7 +89,15 @@ if (!engineFiles.length) die(2, "no *.swift under engine/Sources — caliber bro
 if (!surfaceAFiles.length) die(2, "no *.ts under mcp-shell/src — caliber broken, refusing to report a ratio")
 
 const engineLoc = engineFiles.reduce((s, f) => s + loc(f), 0)
-const surfaceALoc = surfaceAFiles.reduce((s, f) => s + loc(f), 0)
+// Surface A's per-file line counts are kept so a ratchet trip can name the file
+// that grew. Without them the message was `surface A grew: 8455 → 8510 (+55)`,
+// which says nothing about *whose* change tripped it — on a branch several people
+// push to, that turns "acknowledge this growth" into a git archaeology exercise.
+// Surface B already attributes per file (that is what the fork-diff golden is for);
+// surface A had no equivalent, and the asymmetry is what made it the harder one to
+// act on. Sorted by size so the largest movers are visible without scrolling.
+const surfaceAByFile = new Map(surfaceAFiles.map((f) => [path.relative(repoRoot, f).split(path.sep).join("/"), loc(f)]))
+const surfaceALoc = [...surfaceAByFile.values()].reduce((s, n) => s + n, 0)
 
 /**
  * Surface B: our own lines inside the fork. Needs the fork-diff golden (which
@@ -362,7 +370,13 @@ function build(golden) {
     engineLoc,
     engineFiles: engineFiles.length,
     surfaces: {
-      mcpShell: { loc: surfaceALoc, files: surfaceAFiles.length, ratio: ratio(surfaceALoc) },
+      mcpShell: {
+        loc: surfaceALoc,
+        files: surfaceAFiles.length,
+        ratio: ratio(surfaceALoc),
+        // Per-file baseline so a growth trip names the file (see surfaceAByFile above).
+        byFile: Object.fromEntries([...surfaceAByFile.entries()].sort((a, b) => b[1] - a[1])),
+      },
       fork: {
         loc: forkLoc,
         files: fork.files,
@@ -425,6 +439,27 @@ for (const [name, now, was] of [
 ]) {
   if (now.loc > was.loc) {
     console.error(`  ✗ ${name} grew: ${was.loc} recorded → ${now.loc} LOC (+${now.loc - was.loc})`)
+    // Name the movers when the baseline knows them. "grew by 55" alone makes the
+    // reader go and diff the tree to find out whose change did it; the whole point of
+    // a ratchet is that a person acknowledges the growth, and you cannot acknowledge
+    // what the message will not identify. Falls back to nothing (rather than
+    // guessing) when the recorded baseline predates per-file data.
+    const before = was.byFile
+    const after = now.byFile
+    if (before && after) {
+      const moved = []
+      for (const [file, lines] of Object.entries(after)) {
+        const was0 = before[file]
+        if (was0 === undefined) moved.push([file, lines, "new file"])
+        else if (lines > was0) moved.push([file, lines - was0, `+${lines - was0}`])
+      }
+      for (const file of Object.keys(before)) {
+        if (after[file] === undefined) moved.push([file, 0, "deleted"])
+      }
+      moved.sort((a, b) => b[1] - a[1])
+      for (const [file, , how] of moved) console.error(`      ${how.padStart(8)}  ${file}`)
+      if (moved.length === 0) console.error("      (no single file grew — the baseline has no per-file data for this surface)")
+    }
     red++
   }
   if (was.ratio <= golden.limit && now.ratio > observed.limit) {
