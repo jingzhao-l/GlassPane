@@ -149,6 +149,16 @@ export function recoverFrameId(prefix: string): number | string | null {
  */
 export interface LineIo {
   writeLine(line: string): void;
+  /**
+   * 已经交给内核、还没被对端读走的字节数。可选：只有真的接在一条 socket/pipe 上
+   * 的传输量得出这个数。
+   *
+   * 它存在的理由是 `writeLine` 不看 `output.write()` 的返回值（stdio 那一侧有
+   * `DrainAwareWriter` 管背压，引擎这一侧从前没有）：daemon 停止读 socket 时，
+   * Node 会把写进去的帧无上限地堆在进程内存里，调用方只看到"还没回"，
+   * 而这一面已经悄悄替它攒了几百 MB。有了这个数，客户端可以选择**不再接活**。
+   */
+  bufferedBytes?(): number;
   onMessage(handler: (line: string) => void): void;
   onClose(handler: () => void): void;
   onError(handler: (error: Error) => void): void;
@@ -187,6 +197,10 @@ export class StreamLineIo implements LineIo {
 
   writeLine(line: string): void {
     this.output.write(line + "\n");
+  }
+
+  bufferedBytes(): number {
+    return this.output.writableLength;
   }
 
   onMessage(handler: (line: string) => void): void {

@@ -270,6 +270,11 @@ export function callerDeadlineMs(
 /** Engine protocol version this shell speaks (daemon `hello.protocolVersion`). */
 export const ENGINE_PROTOCOL_VERSION = "0";
 
+/// 引擎 socket 上允许积压的字节数。超过就不再接受新调用。
+/// 一帧的上限是 `MAX_FRAME_BYTES`，所以这个数约等于"允许排队 N 帧"——
+/// 它不是性能调优，是一条"别替一个卡死的对端攒内存"的界线。
+export const ENGINE_WRITE_BACKLOG_BYTES = 8 * 1024 * 1024;
+
 /** Daemon self-report the shell compares a fresh connection against. */
 export interface EngineIdentityExpectation {
   /**
@@ -777,6 +782,26 @@ export class EngineJsonRpcClient {
       // Node exits and the caller is settled by process death instead of by a
       // diagnosis. It is cleared on every settle path below, so it only
       // survives while the request really is outstanding.
+      // 背压闸：daemon 不读 socket 时，Node 会把写进去的帧无上限地堆在本进程内存里，
+      // 调用方只看到"还没回"。与其替一个卡死的对端越攒越多，不如在超过这一档时
+      // 直接拒掉新请求——拒绝是可诊断的，积压只会把整个壳拖垮。
+      // 注意这不等价于"没有超时"：每一次调用本来就带 deadline，卡死的 daemon
+      // 会以 GP_E_ENGINE_TIMEOUT 现形；这里补的是**内存**那一条，不是等待那一条。
+      const backlog = this.io.bufferedBytes?.() ?? 0;
+      if (backlog > ENGINE_WRITE_BACKLOG_BYTES) {
+        this.pending.delete(id);
+        this.reject(entry, new EngineCallError(
+          GP_E_ENGINE_UNREACHABLE,
+          `not sending '${method}': ${backlog} bytes are already queued for the engine socket and it `
+          + "has not read them",
+          "the background service is accepting the connection but not reading it — it is wedged, not busy. "
+          + `Check it with gp_probe_status; if it stays like this, restart it with the command in `
+          + "`glasspaned --help` (or the panel's 重启后台服务 button). Do not retry this call in a loop: "
+          + "every retry only deepens the queue it is refusing to drain.",
+        ));
+        return;
+      }
+
       this.pending.set(id, entry);
 
       try {
@@ -1267,6 +1292,11 @@ class ReconnectingSocketIo implements LineIo {
 
   writeLine(line: string): void {
     this.connect().writeLine(line);
+  }
+
+  bufferedBytes(): number {
+    // 还没连上时没有积压可报：0 说的是"这一面什么都没堆"，不是"量不出来"。
+    return this.inner?.bufferedBytes() ?? 0;
   }
 
   onMessage(handler: (line: string) => void): void {

@@ -1831,3 +1831,52 @@ test("a reply frame with neither result nor error fails the call instead of goin
   assert.match(error.remedy, /answered nothing/, "出路必须阻止代理把这一轮读成成功");
   client.close();
 });
+
+/**
+ * 引擎 socket 的背压闸。
+ *
+ * daemon 停止读 socket 时，`writeLine` 从前不看 `write()` 的返回值，Node 就把写进去
+ * 的帧无上限地堆在本进程内存里：调用方只看到"还没回"，而壳已经替一个卡死的对端
+ * 攒了几百 MB。stdio 那一侧有 `DrainAwareWriter` 管这件事，引擎这一侧没有。
+ *
+ * 夹具是一个**从不回调 callback 的 Duplex**——这正是"对端接受了连接但不读"的形状。
+ * 反向变异：把 `call()` 里那道 backlog 检查删掉，最后一条断言会等不到拒绝而是继续
+ * 把帧写进黑洞，`wrote` 会一直涨，测试变红。
+ */
+class WedgedSocket extends Duplex {
+  wrote = 0;
+  _write(chunk, _enc, _cb) { this.wrote += chunk.length; /* 永不 cb：对端不读 */ }
+  _read() {}
+}
+
+test("a wedged daemon stops being handed more work once its socket backs up", async () => {
+  const sockets = [];
+  const client = unixSocketEngineClient("/tmp/glasspane-wedged.sock", {
+    open: () => { const s = new WedgedSocket(); sockets.push(s); return s; },
+  });
+  // 先开连接：这道闸是在**发出这一次调用之前**看的，所以积压必须在调用之前就在那儿。
+  const first = client.call("probe_status");
+  first.catch(() => { /* 这一次本来就该被 deadline 收掉，不是本条测试的断言 */ });
+  sockets[0].emit("connect");
+  await nextTick();
+
+  // 把内核的写缓冲撑过 8 MiB 那道线：每帧 1 MiB，写进一个从不消费的 socket。
+  const filler = "x".repeat(1024 * 1024);
+  for (let guard = 0; guard < 40; guard++) {
+    if ((sockets[0].writableLength ?? 0) >= 9 * 1024 * 1024) break;
+    sockets[0].write(filler);
+    await nextTick();
+  }
+  assert.ok((sockets[0].writableLength ?? 0) >= 8 * 1024 * 1024,
+    `夹具没有真的积压起来（writableLength=${sockets[0].writableLength}），这条测试就成了空的`);
+
+  const error = await client.call("observe").then(
+    () => { throw new Error("积压超线时新调用必须被拒绝，不能继续排队") },
+    (caught) => caught,
+  );
+  assert.equal(error.code, "GP_E_ENGINE_UNREACHABLE");
+  assert.match(error.message, /bytes are already queued/);
+  assert.match(error.remedy, /not reading it/, "要说清这是卡死，不是忙：两者的下一步不一样");
+  assert.match(error.remedy, /Do not retry this call in a loop/, "循环重试只会把队列越堆越深");
+  client.close();
+});
