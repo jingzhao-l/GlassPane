@@ -170,25 +170,30 @@ struct ProjectsTabView: View {
                     }
                     .consoleCard()
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        SectionHeader(title: "路径", systemImage: "folder")
+                    PanelCard(
+                        key: "project-paths",
+                        title: "路径",
+                        systemImage: "folder",
+                        summary: pathsSummary(entry),
+                        // 两个动作待在折叠按钮外面：收起一张卡不该把它的动词一起收掉。
+                        accessory: AnyView(
+                            HStack(spacing: 6) {
+                                Button("在访达中打开证据目录") {
+                                    openInFinder(entry.evidenceStoragePath ?? EvidenceStore.defaultDirectory)
+                                }
+                                .controlSize(.small)
+                                Button("复制项目 ID") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(entry.projectId, forType: .string)
+                                }
+                                .controlSize(.small)
+                            }
+                        )
+                    ) {
                         PathRowView(label: "证据目录", path: entry.evidenceStoragePath ?? "未配置（用默认目录）")
                         PathRowView(label: "配方配置", path: entry.recipeConfigPath ?? "未配置")
                         PathRowView(label: "校准资源", path: entry.calibrationAssetsPath ?? "未配置")
-                        HStack(spacing: 6) {
-                            Button("在访达中打开证据目录") {
-                                openInFinder(entry.evidenceStoragePath ?? EvidenceStore.defaultDirectory)
-                            }
-                            .controlSize(.small)
-                            Button("复制项目 ID") {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(entry.projectId, forType: .string)
-                            }
-                            .controlSize(.small)
-                        }
-                        .padding(.top, 2)
                     }
-                    .consoleCard()
                 }
                 .padding(14)
                 // 与证据页同一条收口：不限行宽时长路径会把这一栏的理想宽度撑爆，
@@ -209,6 +214,14 @@ struct ProjectsTabView: View {
     private var currentEntry: ProjectEntry? {
         guard let id = model.selectedProjectId else { return nil }
         return model.projects.first { $0.projectId == id }
+    }
+
+    /// 折叠后仍要说的那一句：配了几条路径。"未配置"是事实，不是缺省值——
+    /// 三条路径全空与三条都配好，收起后必须还能一眼分开。
+    private func pathsSummary(_ entry: ProjectEntry) -> String {
+        let set = [entry.evidenceStoragePath, entry.recipeConfigPath, entry.calibrationAssetsPath]
+            .filter { ($0 ?? "").isEmpty == false }.count
+        return set == 0 ? "三条路径都未配置" : "已配 \(set)／3 条路径"
     }
 
     private func evidenceCountText(_ projectId: String) -> String {
