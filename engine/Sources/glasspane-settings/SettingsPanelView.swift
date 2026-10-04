@@ -529,14 +529,11 @@ struct PermissionCardView: View {
                             .help("系统里已授权，重启 daemon 后生效")
                     }
                 }
-                Text(entry.descriptor.purposeText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("缺少时：" + entry.descriptor.degradationText)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+                PermissionExplain(
+                    kind: entry.kind,
+                    purpose: entry.descriptor.purposeText,
+                    degradation: entry.descriptor.degradationText
+                )
                 if let capabilityLine {
                     // 带时刻的探测结论，与实时席位分列，不互相冒充。结论旁边放一枚
                     // 带标识的图标：Text 内容不进 AXTitle（P6 §0 F6），"到底渲染成
@@ -609,6 +606,59 @@ struct PermissionCardView: View {
                 isTargeted: $isDropTargeted
             )
         )
+    }
+}
+
+/// 权限卡里那两行说明（用途 + 缺了会怎样），可以收起来。
+///
+/// 权限页是面板的默认落点，四张卡各摊两到三行说明，一屏装不下真正要看的东西。
+/// 这里刻意**只**收这两行：徽标、状态注记、实测结论行与那两个按钮都留在卡面上——
+/// 收起说明不该顺手把状态或动作也收掉，而 `Image(systemName: iconName)` 是
+/// P1-C6 真机冒烟定位卡片用的无障碍标识，动它就动了一条不许回退的闸门。
+///
+/// 默认展开：这一页的原文案是给人做"勾或不勾"决定用的，不该由一次改版悄悄藏起来。
+private struct PermissionExplain: View {
+    let kind: PermissionKind
+    let purpose: String
+    let degradation: String
+    @AppStorage private var collapsed: Bool
+
+    init(kind: PermissionKind, purpose: String, degradation: String) {
+        self.kind = kind
+        self.purpose = purpose
+        self.degradation = degradation
+        // 键走 daemon CLI 与面板共用的那份 `cliValue`（ASCII、kebab-case）：
+        // 标识里放中文自动化按不动，而拿枚举名自己拼一套又会与 CLI 字面量漂移。
+        self._collapsed = AppStorage(wrappedValue: false, "glasspane.card.perm-\(kind.cliValue).explainer")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Button {
+                collapsed.toggle()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: collapsed ? "plus.circle" : "minus.circle")
+                        .font(.caption2)
+                    Text(collapsed ? "这项是干什么的、缺了会怎样" : "收起说明")
+                        .font(.caption2)
+                }
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("gp-perm-explainer-\(kind.cliValue)")
+            if !collapsed {
+                Text(purpose)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("缺少时：" + degradation)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }
 
