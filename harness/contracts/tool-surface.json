@@ -8,23 +8,23 @@
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
   "observedAt": "2026-10-04",
-  "engineLoc": 22803,
+  "engineLoc": 22816,
   "engineFiles": 60,
   "surfaces": {
     "mcpShell": {
-      "loc": 8510,
+      "loc": 8554,
       "files": 13,
-      "ratio": 0.234,
+      "ratio": 0.2348,
       "byFile": {
         "mcp-shell/src/tools.ts": 2339,
-        "mcp-shell/src/engine-client.ts": 1361,
+        "mcp-shell/src/engine-client.ts": 1391,
         "mcp-shell/src/http-gateway.ts": 1234,
         "mcp-shell/src/project-registry.ts": 1098,
         "mcp-shell/src/update-state.ts": 492,
         "mcp-shell/src/audit-session.ts": 381,
         "mcp-shell/src/evidence-report.ts": 364,
         "mcp-shell/src/dispatch.ts": 357,
-        "mcp-shell/src/io.ts": 325,
+        "mcp-shell/src/io.ts": 339,
         "mcp-shell/src/http-gateway-cli.ts": 227,
         "mcp-shell/src/index.ts": 226,
         "mcp-shell/src/errors.ts": 72,
@@ -1055,7 +1055,7 @@
           "lines": 0
         }
       ],
-      "ratio": 0.139,
+      "ratio": 0.1388,
       "vendorExcluded": {
         "files": 11,
         "lines": 1464
@@ -1066,7 +1066,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 13566,
-  "note": "2026-10-03 在 harness/recovered 合入 main 之后重记。面 A（mcp-shell/src 3859→8386）是 main 上 1.6.0–1.6.2 的真实产品代码，此前 harness 线看不到它们；面 B（3812→6502）是尺子第一次在有上游参照检出时正确归属了我们自己的 gp_* 工具面。两项都只增不减，10% 上限本就早于测量、已被长期容忍，棘轮的作用是拦住继续增长，不是追认历史。｜2026-10-03 修掉一个记账缺陷：vendored 内核此前根本没有被排除。两处叠加——tool-surface 读 harness/contracts/kernel-vendor.json，而那份清单在 harness/glasspane-harness/contracts/ 下，读不到就静默返回「无排除」；即使读到，清单里的 forkPath 也被 join(forkRel, vendorRel) 拼成重复路径，前缀匹配不上。两处都已修，并让「找不到清单」大声说出来。修好后 vendored 11 文件 1464 行如实排除，面 B 降到 5056。一道静默失效的排除规则比没有这条规则更坏，因为它让测量看起来仍然成立。｜2026-10-03 面 A 8455 → 8510（+55）：全部来自并行会话落在 main 上的 395f13e「gp_project_set 的读—改—写会把别人的写静默盖掉，却报告成功」（mcp-shell/src/project-registry.ts +55），不是 harness 这批改动。棘轮按设计报警，这里只记来源。｜2026-10-03 给面 A 补了逐文件基线（mcpShell.byFile），并让转红时点名是哪个文件长的。此前只有一句「grew: 8455 → 8510 (+55)」，不说是谁长的；在多人共推的分支上，这把「确认这次增长」变成了一道考古题。反向因果已验：给 http-gateway.ts 加 3 行，闸立刻点名 `+3 mcp-shell/src/http-gateway.ts`。｜面 A 与面 B 都已长期高于 10% 的文档上限（上限早于测量）。这条棘轮会在面下次增长时再次转红，那是它该做的事，不是误报。",
+  "totalToolSurfaceLoc": 13610,
+  "note": null,
   "carried": null
 }
