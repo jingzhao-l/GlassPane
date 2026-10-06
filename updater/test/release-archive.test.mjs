@@ -14,7 +14,12 @@
  * order non-deterministic (reverse the sort) and `packing the same tree twice answers with the same bytes`
  * goes red. Widen `EXCLUDED_PREFIXES` to `engine/` and `an exclusion that would remove an install input is
  * refused, not published` goes red — that mutation is the shape the size fix could have taken by accident,
- * and it is the reason `archiveBytes` takes `prefixes` as an argument.
+ * and it is the reason `archiveBytes` takes `prefixes` as an argument. Narrow `EXCLUDED_PREFIXES` back to
+ * `['harness/']` (what it was before `.iterate_decisions.md` was added) and both
+ * `the vendored fork and the developer log stay out of the archive, and by how much is stated` and
+ * `the script runs against this repository and refuses a version it cannot name an archive with` go red —
+ * the second one is the one that matters, because it reads the real tracked tree and the real artifact the
+ * release job publishes.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -70,6 +75,11 @@ function makeReleaseTree({ withDist = true, commitBuildOutputs = false } = {}) {
   // be tested against an empty set and pass for the wrong reason.
   write('harness/glasspane-harness/package.json', JSON.stringify({ name: 'fork' }) + '\n')
   write('harness/glasspane-harness/src/big.js', 'x'.repeat(4096) + '\n')
+  // The developer's own iteration log, tracked at the repository root and read by no step of the update
+  // path. The real one carried four copies of its author's absolute home path and notes on `gh auth` token
+  // scopes, and it shipped in the v1.7.0 archive. It has to be present here, or excluding it is a rule
+  // tested against an empty set.
+  write('.iterate_decisions.md', '# Iterate Decision Log\nworktree /Users/someone/dev/thing\ngh auth scopes: repo\n')
   // The real repository tracks symlinked icon files (harness/public), and the archive has to carry them as
   // links for the unpacker to materialize — the shape that once made every real release stop at the unpack.
   write('docs/logo.png', 'PNG-BYTES\n')
@@ -160,22 +170,36 @@ test('the archive carries the build output the npm package promises to run', () 
   }
 })
 
-test('the vendored fork stays out of the archive, and by how much is stated', () => {
+test('the vendored fork and the developer log stay out of the archive, and by how much is stated', () => {
   const tree = makeReleaseTree()
   try {
-    // First prove the exclusion has something to bite on: the tracked tree really carries `harness/`.
-    // Without this the assertion below passes on a fixture that never had the directory, which would be a
-    // guard that has never excluded anything.
+    // First prove each exclusion has something to bite on: the tracked tree really carries both. Without
+    // this the assertions below pass on a fixture that never had the paths, which would be a guard that has
+    // never excluded anything.
     const tracked = trackedEntries({ root: tree.root })
-    const inTree = tracked.filter((entry) => entry.name.startsWith('harness/'))
-    assert.equal(inTree.length, 2, JSON.stringify(tracked.map((entry) => entry.name)))
+    const fork = tracked.filter((entry) => entry.name.startsWith('harness/'))
+    assert.equal(fork.length, 2, JSON.stringify(tracked.map((entry) => entry.name)))
+    const log = tracked.filter((entry) => entry.name === '.iterate_decisions.md')
+    assert.equal(log.length, 1, '归档里要挡住的是真存在的文件，不是凭空的名')
 
     const packed = archiveBytes({ root: tree.root, version: '1.6.0' })
     const names = readTarGz(packed.bytes).map((entry) => entry.name)
     assert.ok(!names.some((name) => name.startsWith('GlassPane-1.6.0/harness/')), JSON.stringify(names))
-    assert.equal(packed.excluded.count, 2, '排除条数要说得出，不是"少了一些"')
-    assert.equal(packed.excluded.bytes, inTree.reduce((total, entry) => total + entry.content.byteLength, 0))
-    assert.deepEqual(packed.excluded.prefixes, ['harness/'])
+    // The line that goes red if `.iterate_decisions.md` is dropped from EXCLUDED_PREFIXES. This is the
+    // artifact every updater downloads, and the file is the developer's own log — home paths and `gh auth`
+    // scope notes included.
+    assert.ok(
+      !names.includes('GlassPane-1.6.0/.iterate_decisions.md'),
+      `.iterate_decisions.md 被放进了发布归档：${JSON.stringify(names.filter((n) => n.includes('iterate')))}`,
+    )
+    assert.ok(!names.some((name) => name.includes('iterate_decisions')), '归档里不该有任何 iterate 决策日志的痕迹')
+    assert.equal(packed.excluded.count, 3, '排除条数要说得出，不是"少了一些"')
+    const excluded = [...fork, ...log]
+    assert.equal(packed.excluded.bytes, excluded.reduce((total, entry) => total + entry.content.byteLength, 0))
+    // Byte order puts `.iterate_decisions.md` first, so this list is exact rather than set-like: a prefix
+    // silently removed from EXCLUDED_PREFIXES changes it.
+    assert.deepEqual(packed.excluded.prefixes, ['.iterate_decisions.md', 'harness/'])
+    assert.ok(EXCLUDED_PREFIXES.includes('.iterate_decisions.md'), 'EXCLUDED_PREFIXES 必须显式列出开发日志')
 
     // Everything the install path reads survives, and the shrink is bounded rather than incidental: the
     // archive is smaller than the full tree but still carries every required input.
@@ -335,8 +359,28 @@ test('the script runs against this repository and refuses a version it cannot na
     if (built) {
       assert.equal(run.status, 0, run.stdout + run.stderr)
       assert.match(run.stdout, /entries=\d+ bytes=\d+ sha256=[0-9a-f]{64}/)
-      const listing = execFileSync('tar', ['-tzf', out], { encoding: 'utf8' })
-      assert.ok(listing.split('\n').includes('GlassPane-1.6.0/mcp-shell/dist/index.js'), 'the shipped archive must carry the command')
+      const listing = execFileSync('tar', ['-tzf', out], { encoding: 'utf8' }).split('\n')
+      assert.ok(listing.includes('GlassPane-1.6.0/mcp-shell/dist/index.js'), 'the shipped archive must carry the command')
+      // The defect this closes was only visible against the *real* tracked tree. The fixture above proves
+      // the mechanism; `.iterate_decisions.md` is a real file, and the real v1.7.0 artifact shipped it —
+      // four occurrences of its author's absolute home path and notes on `gh auth` token scopes, inside the
+      // archive every updater downloads. Assert on the bytes the release job would publish.
+      assert.ok(
+        !listing.some((name) => name.includes('iterate_decisions')),
+        `真实归档仍带着开发者日志：${JSON.stringify(listing.filter((name) => name.includes('iterate')))}`,
+      )
+      // And it must be *exactly one* entry fewer than the same tree published without the rule — not "somehow
+      // smaller". That is what ties the exclusion to the file and nothing else.
+      const beforeTheRule = archiveBytes({ root: REPO, version: '1.6.0', prefixes: ['harness/'] })
+      const entries = Number(/entries=(\d+)/.exec(run.stdout)[1])
+      assert.equal(entries, beforeTheRule.entries - 1, `排除应当只少这一个条目：${entries} vs ${beforeTheRule.entries}`)
+      // The `--verify` lane still holds over the reduced archive: excluding a file removes an entry, never a
+      // requirement, and the release job's own check must still say so in the same numbers.
+      const verify = spawnSync(process.execPath, [SCRIPT, '--verify', out, '1.6.0'], { encoding: 'utf8' })
+      assert.equal(verify.status, 0, verify.stdout + verify.stderr)
+      assert.match(verify.stdout, /all \d+ declared commands and schemas present/, verify.stdout)
+      assert.equal(Number(/verified: (\d+) entries/.exec(verify.stdout)[1]), entries, '--verify 的条目数要和自己写出的字节一致')
+      assert.match(run.stdout, /excluded: \d+ entries \/ \d+ raw bytes under \.iterate_decisions\.md, harness\//, run.stdout)
     } else {
       assert.equal(run.status, 1, '缺构建产物时要拒绝发版，而不是打出一个三条目包')
       assert.match(run.stderr, /is missing/, run.stderr)

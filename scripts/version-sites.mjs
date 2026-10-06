@@ -93,11 +93,35 @@ export const SITES = [
   },
 ]
 
-/** lockfile 里必须与版本线一致的 workspace 条目（`npm ci` 与 manifest 失配面）。 */
+/**
+ * lockfile 里必须与版本线一致的 workspace 条目（`npm ci` 与 manifest 失配面）。
+ *
+ * key 就是 lock 的 `packages` 表里的键名：`''` 是整档自身，`kernel` / `mcp-shell` /
+ * `installer` 是根 workspace 的成员目录，`../kernel` 是 mcp-shell 那条
+ * `"@iterate/kernel": "file:../kernel"` 的**本地依赖**条目。
+ *
+ * `../kernel` 曾经不在表内，理由值得写下来：`file:` 依赖的 lock 条目到底会不会跟着
+ * `kernel/package.json` 走，是 npm 的行为而不是我们的假设。实测（2026-10-06，npm
+ * 11.17.0：把仓库状态复制到 scratch 目录，只把 scratch 的 `kernel/package.json` 改成
+ * 9.9.9，在 scratch 的 mcp-shell 里跑 set-version 用的同一条
+ * `npm install --package-lock-only --no-workspaces --no-audit --no-fund`）：
+ * `packages["../kernel"].version` 从 1.7.0 写成 9.9.9，且整个 lock 只有那一行变动。
+ * npm 会维护它，所以这条位点可以放心纳入——它守的正是 `npm ci` 时 lock 与 manifest
+ * 对不上的那一面。同一次实测里顺带把根 lock 也跑了一遍（scratch 根目录，只改
+ * `updater/package.json` → 9.9.9，跑
+ * `npm install --package-lock-only --workspaces --include-workspace-root`）：
+ * `packages["updater"].version` 同样跟着改写，且全档只有那一行变动。`updater` 是
+ * `SITES` 里声明过的位点（glasspane-update），它的 lock 条目此前和 `../kernel` 一样
+ * 落在表外——同一个洞的第二处，一并补上。
+ *
+ * 反过来，根 lock 的 `node_modules/glasspane-*` 那几个条目**不是**位点：它们是
+ * `{"resolved": <dir>, "link": true}`，没有 `version` 字段可读，`lockVersions()` 对
+ * link/无 version 的条目本来就跳过。
+ */
 export const LOCKFILES = [
-  { file: 'package-lock.json', keys: ['', 'kernel', 'mcp-shell', 'installer'] },
+  { file: 'package-lock.json', keys: ['', 'kernel', 'mcp-shell', 'installer', 'updater'] },
   { file: 'kernel/package-lock.json', keys: [''] },
-  { file: 'mcp-shell/package-lock.json', keys: [''] },
+  { file: 'mcp-shell/package-lock.json', keys: ['', '../kernel'] },
 ]
 
 function withGlobal(re) {
@@ -164,9 +188,16 @@ export function truthVersion() {
 
 /**
  * 全量核对：返回漂移列表（空数组 = 版本线一致）。
+ *
+ * `locks: false` 只核对 10 个声明位点、跳过 lock 条目。这不是给检查器开的后门，
+ * 而是为了让 `set-version.mjs --no-lock` 不自相矛盾：那个旗标的作用就是**不**重生成
+ * lock，而 ③ 自证一步原先无条件调用 `drift()`，于是带 `--no-lock` 且 lock 是旧的时
+ * 候脚本必然回滚、永远不可能成功——一个 advertised-but-unsatisfiable 的旗标。
+ *
  * @param {string|null} want 期望版本；null 时取真源
+ * @param {{ locks?: boolean }} [options] 是否把 lockfile 条目算进漂移
  */
-export function drift(want = null) {
+export function drift(want = null, { locks = true } = {}) {
   const target = want ?? truthVersion()
   const rows = []
   for (const site of SITES) {
@@ -177,6 +208,7 @@ export function drift(want = null) {
       rows.push({ kind: '位点', where: `${site.id} (${site.file})`, actual, target })
     }
   }
+  if (!locks) return rows
   for (const lock of LOCKFILES) {
     for (const entry of lockVersions(lock)) {
       if (entry.actual !== target) {

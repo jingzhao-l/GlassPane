@@ -13,8 +13,10 @@
  * `glasspane-mcp could not run (ENOENT)` — the whole swap was refused and rolled back. Every 1.5.x machine
  * attempting this upgrade hits that wall, because the code that packs is already released.
  *
- * So the archive is the tracked tree — less what `EXCLUDED_PREFIXES` names, which is enforced against
- * `REQUIRED_IN_ARCHIVE` so an exclusion can never remove something the install path reads — **plus the build
+ * So the archive is the tracked tree — less every entry whose path begins with a prefix
+ * `EXCLUDED_PREFIXES` names (a directory like `harness/`, or a single root file like
+ * `.iterate_decisions.md`), which is enforced against `REQUIRED_IN_ARCHIVE` so an exclusion
+ * can never remove something the install path reads — **plus the build
  * outputs a target machine cannot produce for itself** (`mcp-shell/dist`, `mcp-shell/schemas`). `engine/`
  * still builds on the target, because Xcode is the one toolchain a macOS update may assume. Missing build
  * outputs are a refusal, not a warning: an archive that cannot produce a runnable package is not a release of
@@ -50,8 +52,17 @@ export const REQUIRED_BUILD_OUTPUTS = ['mcp-shell/dist', 'mcp-shell/schemas']
  *
  * The exclusions are enforced against `REQUIRED_IN_ARCHIVE` below, so widening this list can only ever be a
  * loud failure, never a silent shrink of what a target machine needs.
+ *
+ * Entries are matched by **path prefix**, so an item here may be a directory (`harness/`, with its trailing
+ * slash) or a single tracked file at the repository root. `.iterate_decisions.md` is the second shape, and it
+ * is a decision rather than tidiness: it is the developer's own iteration log — the real one at v1.7.0 carried
+ * four occurrences of the author's absolute home path (`/Users/ethanlin`) and notes on `gh auth` token scopes.
+ * The repository is public so the file's existence is not a secret; what matters is that this is the artifact
+ * every updater downloads, and a release archive should not be the delivery mechanism for whoever built it.
+ * Nothing on the update path reads it, which is exactly why dropping it costs nothing and why the
+ * `REQUIRED_IN_ARCHIVE` enforcement below cannot be offended by it.
  */
-export const EXCLUDED_PREFIXES = ['harness/']
+export const EXCLUDED_PREFIXES = ['harness/', '.iterate_decisions.md']
 
 /** The package directories the updater packs out of the staged tree. */
 export const PACKAGE_DIRS = ['mcp-shell', 'installer']
