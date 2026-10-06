@@ -91,12 +91,27 @@ export function decideSwapPermission({ probe, jobArgs, ourStateRoot, consented =
       swapped: false,
     }
   }
+  // §2 的门问的是"这个 daemon 在写哪个状态根"，所以它的输入必须是**全部读数**：只取第一个
+  // 旗标时，`[--state-dir 我们的, --state-dir /other]` 会被判成"是我们的根"并放行，换掉的
+  // 正是别家 daemon 正在用的 bundle（真机形态见 lib/launchd.js 的 `launchctl print` 解析，
+  // 那里早已按 `stateDirReadings` 判 unknown——两道门口径必须一致）。
+  const readings = stateDirReadings(jobArgs)
+  if (readings.length > 1) {
+    return {
+      status: 'unknown',
+      code: CODES.busyOrUnreachable,
+      reason: `the running job names the state-root flag more than once (${readings.map((value) => String(value)).join(', ')}), so which state root its daemon writes to is not decidable and this tool will not swap on a guess. Nothing was replaced: read the job back with \`launchctl print gui/$(id -u)/com.glasspane.daemon\`, put its arguments list down to one state root — then re-run "updater apply" against that root.`,
+      swapped: false,
+    }
+  }
   const foreign = foreignStateDir({ jobArgs, ourStateRoot })
   if (foreign && !consented.includes('state-dir')) {
     return {
       status: 'needs-consent',
       code: CODES.nonDefaultStateDir,
-      reason: `the running daemon writes to ${foreign}, which is not the state root this tool was asked to update (${ourStateRoot}). A swap here would replace bundles that somebody else's daemon is using — do it by hand.`,
+      // 拒绝必须带一个可执行的下一步（对照 lib/signature.js 的 `--consent unsigned-release`
+      // 与 cli.js 里 wired 的 `--consent state-dir`）：光说"do it by hand"的拒绝，agent 无从操作。
+      reason: `the running daemon writes to ${foreign}, which is not the state root this tool was asked to update (${ourStateRoot}). A swap here would replace bundles that somebody else's daemon is using. A person who has checked which install they mean may run "updater apply --state-dir ${ourStateRoot} --consent state-dir" (the panel's "Install update" button does the same thing); an automatic run never carries that flag.`,
       swapped: false,
     }
   }
@@ -105,7 +120,11 @@ export function decideSwapPermission({ probe, jobArgs, ourStateRoot, consented =
 
 /** The `--state-dir` a running job names when it differs from ours. */
 export function foreignStateDir({ jobArgs, ourStateRoot }) {
-  const named = stateDirFromArgs(jobArgs)
+  const readings = stateDirReadings(jobArgs)
+  // 0 个读数＝作业没写旗标，1 个＝唯一答案；多于 1 个是歧义，由 `decideSwapPermission` 判
+  // `unknown`，这里不替它猜一个值。
+  if (readings.length !== 1) return null
+  const named = readings[0]
   if (!named) return null
   const a = stripTrailing(String(named))
   const b = stripTrailing(String(ourStateRoot))

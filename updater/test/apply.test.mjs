@@ -42,6 +42,9 @@ import {
   socketCall,
 } from '../lib/apply.js'
 import { mcpToolsList } from '../lib/mcp.js'
+import { ARCHIVE_FILE_NAME } from '../lib/staging.js'
+import { sha256Bytes } from '../lib/digest.js'
+import { packTarGz } from '../lib/tar.js'
 import { emptyState, loadState, nextState, saveState, updateSummary } from '../lib/state.js'
 import { writableRoots } from '../lib/fsutil.js'
 import { fakeMcpPeer, makeDaemonBinary, makeFakeApp, removeDir, shortSocketPath, startSocketDaemon, tempDir, TMP_PREFIX } from './helpers.mjs'
@@ -79,7 +82,14 @@ function fixture(label, { staged = true, currentVersion = '1.4.0', stagedVersion
   const stagingDir = path.join(writableRoots(dir).staging, stagedVersion)
   const treePath = path.join(stagingDir, 'tree')
   fs.mkdirSync(treePath, { recursive: true, mode: 0o700 })
-  fs.writeFileSync(path.join(treePath, 'package.json'), JSON.stringify({ version: stagedVersion }))
+  // `apply` 现在会拿状态里记着的那个 digest 去**重算**staged 的字节（见 verifyStagedBytes），
+  // 所以这里必须交出一份真的归档：树 = 由这些字节解出来的树。旧固件只写一个 'd'.repeat(64)
+  // 的假 digest，那是"树长什么样"级别的证明，正是这道闸要替换掉的东西。
+  const stagedTreeFiles = [{ name: 'package.json', content: JSON.stringify({ version: stagedVersion }) }]
+  for (const file of stagedTreeFiles) fs.writeFileSync(path.join(treePath, file.name), file.content)
+  const stagedArchive = packTarGz(stagedTreeFiles)
+  fs.writeFileSync(path.join(stagingDir, ARCHIVE_FILE_NAME), stagedArchive)
+  const stagedDigest = sha256Bytes(stagedArchive)
 
   const builtDir = path.join(dir, 'built')
   for (const bundle of BUNDLES) makeFakeApp(builtDir, bundle.name, stagedVersion, { marker: 'NEW' })
@@ -90,7 +100,7 @@ function fixture(label, { staged = true, currentVersion = '1.4.0', stagedVersion
     current: currentVersion,
     latest: stagedVersion,
     lastCheckAt: NOW.toISOString(),
-    staged: staged ? { version: stagedVersion, dir: stagingDir, digest: 'd'.repeat(64), at: NOW.toISOString() } : null,
+    staged: staged ? { version: stagedVersion, dir: stagingDir, digest: stagedDigest, at: NOW.toISOString() } : null,
   }, { now: NOW }), { now: NOW })
 
   return {
@@ -101,9 +111,40 @@ function fixture(label, { staged = true, currentVersion = '1.4.0', stagedVersion
     treePath,
     builtDir,
     stagingDir,
+    treeFiles: stagedTreeFiles,
+    archivePath: path.join(stagingDir, ARCHIVE_FILE_NAME),
+    digest: stagedDigest,
+    // 合法的往树里放东西（§11 要写 updater/cli.js，npm 那道门要看 mcp-shell/installer 的
+    // package.json）必须连同证明一起写：按当前树重出一份归档、把它的 sha256 写回状态，等于
+    // 如实说一句 check 证明过的就是这些字节。不这么做就红，正是这道闸要的形态。
+    sealStagedTree: () => sealStagedTree({ stateRoot: dir, stagingDir, treePath }),
     installedBytes: () => fs.readFileSync(daemonBinary(appsDir), 'utf8'),
     cleanup: () => removeDir(dir),
   }
+}
+
+/** 把 `<stagingDir>/tree` 现在的内容封成归档，并把它的 sha256 写回状态里的 staged.digest。 */
+function sealStagedTree({ stateRoot, stagingDir, treePath }) {
+  const entries = []
+  const walk = (current, rel) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const abs = path.join(current, entry.name)
+      const key = rel ? `${rel}/${entry.name}` : entry.name
+      if (entry.isDirectory()) {
+        entries.push({ name: key, type: 'dir' })
+        walk(abs, key)
+      } else if (entry.isFile()) {
+        entries.push({ name: key, content: fs.readFileSync(abs) })
+      }
+    }
+  }
+  walk(treePath, '')
+  const archive = packTarGz(entries)
+  fs.writeFileSync(path.join(stagingDir, ARCHIVE_FILE_NAME), archive)
+  const digest = sha256Bytes(archive)
+  const { state } = loadState(stateRoot)
+  saveState(stateRoot, nextState(state, { staged: { ...state.staged, digest } }, { now: NOW }), { now: NOW })
+  return digest
 }
 
 const okBuild = (builtDir) => () => ({ ok: true, builtDir, message: null })
@@ -328,7 +369,7 @@ test('a failed handshake leaves the recorded current version alone', async () =>
     assert.equal(state.status, 'rolled-back')
     assert.equal(state.lastError.code, CODES.rolledBack)
     assert.equal(state.history.at(-1).action, 'rollback')
-    assert.equal(state.history.at(-1).digest, 'd'.repeat(12), 'history stores the leading 12 digest characters')
+    assert.equal(state.history.at(-1).digest, fx.digest.slice(0, 12), 'history stores the leading 12 digest characters')
   } finally {
     await daemon.close()
     fx.cleanup()
@@ -1586,6 +1627,7 @@ async function applyWithRealRuntime(label, { enableOk = true, loaded = null, dis
   writePointer(fx.stateRoot, { updaterCli: previousCli, installRoot: previousRoot, agentLabel: AGENT_LABEL }, { now: NOW })
   fs.mkdirSync(path.join(fx.treePath, 'updater'), { recursive: true })
   fs.writeFileSync(path.join(fx.treePath, 'updater', 'cli.js'), 'NEW UPDATER\n')
+  fx.sealStagedTree()
   const enableCalls = []
   const undoEnableCalls = []
   // `undoLoaded` is what the *rollback* is told the loaded job names, and it is deliberately a separate
@@ -1754,6 +1796,7 @@ test('a rollback that happens after the handover takes the pointer and the job b
   writePointer(fx.stateRoot, { updaterCli: previousCli, installRoot: previousRoot, agentLabel: AGENT_LABEL }, { now: NOW })
   fs.mkdirSync(path.join(fx.treePath, 'updater'), { recursive: true })
   fs.writeFileSync(path.join(fx.treePath, 'updater', 'cli.js'), 'NEW UPDATER\n')
+  fx.sealStagedTree()
   const entry = path.join(writableRoots(fx.stateRoot).runtime, 'agent-entry.js')
   const enableCalls = []
   const undoEnableCalls = []
@@ -2202,6 +2245,7 @@ test('a staged release whose package declares a command it does not carry is ref
     name: 'glasspane-install', version: '1.4.1', bin: { 'glasspane-install': './cli.js' },
   }))
   fs.writeFileSync(path.join(fx.treePath, 'installer', 'cli.js'), 'export const install = () => {}\n')
+  fx.sealStagedTree() // 这一条要测的是 npm 那道门，先把树封成被证明过的字节
   try {
     const result = await applyUpdate({
       stateRoot: fx.stateRoot,
@@ -2292,4 +2336,129 @@ test('this file never moved a real global npm package, even by accident', () => 
   }
   assert.deepEqual(landed, [], `npm_config_prefix points every accidental global write at ${SANDBOX_NPM_PREFIX}, which must stay empty: ${JSON.stringify(landed)}`)
   removeDir(SANDBOX_NPM_PREFIX)
+})
+
+/* ------------- #3：staged 的字节在 apply 之前重新证明（check 之后的 TOCTOU） */
+
+/**
+ * `check` 证明过一次不等于树还是那些字节：`stagedTreePresent` 只回答"树还在、形状还对"，
+ * 而 apply 拿这棵树去 `swift build`、`npm pack`，产出的二进制随后被 launchd 用辅助功能席位
+ * 起来。真机口径见 SECURITY.md §2.2（同账户写手）。这一节的三条测试都不重新封档，也就是
+ * "证明之后有人动过 staged"的形状。
+ */
+async function applyAgainstMutatedStaging(label, mutate) {
+  const fx = fixture(label)
+  const kick = await okKick()
+  const socketPath = shortSocketPath(fx.dir, 'toctou.sock')
+  const daemon = await startSocketDaemon(socketPath, { behaviour: 'answer', version: '1.4.1' })
+  const calls = { build: 0, npm: 0 }
+  try {
+    mutate(fx)
+    const result = await applyUpdate({
+      stateRoot: fx.stateRoot,
+      appsDir: fx.appsDir,
+      bundles: BUNDLES,
+      now: NOW,
+      currentVersion: '1.4.0',
+      socketPath,
+      probe: { socketPath, timeoutMs: 1_000 },
+      job: { ok: true, args: ['glasspaned', '--socket-path', socketPath] },
+      build: () => { calls.build += 1; return okBuild(fx.builtDir)() },
+      kickstart: kick.fn,
+      toolsList: okTools,
+      npm: () => { calls.npm += 1; return okNpm() },
+      refreshRuntimeImpl: refreshedRuntime('1.4.1'),
+    })
+    return { fx, result, calls, kick }
+  } finally {
+    await daemon.close()
+  }
+}
+
+test('a staged file rewritten after check is refused before anything is built, packed or swapped', async () => {
+  const { fx, result, calls, kick } = await applyAgainstMutatedStaging('toctou-file', (f) => {
+    // 攻击形态：证明之后往树里改一个源码文件的内容。字节变了，形状没变。
+    fs.writeFileSync(path.join(f.treePath, 'package.json'), JSON.stringify({ version: '1.4.1', injected: true }))
+  })
+  try {
+    assert.equal(result.status, 'deferred', result.message)
+    assert.equal(result.code, CODES.digestMismatch)
+    assert.equal(exitCodeFor(result), EXIT.REFUSED, '什么都没换 ⇒ §7 的那一档是 3')
+    assert.match(result.message, /does not match the tree inside the archive/, result.message)
+    assert.match(result.message, /package\.json/, '拒绝里要指名哪个相对路径不对')
+    assert.match(result.message, /updater check/, '并且给出一条能直接跑的下一步')
+    assert.equal(calls.build, 0, '一次构建都不许发生')
+    assert.equal(calls.npm, 0, '一次 npm pack/install 都不许发生')
+    assert.equal(kick.calls.length, 0, 'daemon 没有被重启')
+    assert.doesNotMatch(fx.installedBytes(), /NEW/, '装着的还是原来那一份')
+    assert.equal(newestBackup(writableRoots(fx.stateRoot).backup), null, '连备份都没做：这台机器一点没动')
+    assert.equal(loadState(fx.stateRoot).state.current, '1.4.0', '记录的当前版本没被推动')
+
+    // 控制对：同一棵树重新封档（＝重新跑过一次 check）之后，同一条路径就要走完。
+    // 这一行是"闸不是无条件拒绝"的唯一证据。
+    fx.sealStagedTree()
+    const again = await applyAgainstSameFx(fx, calls, kick)
+    assert.equal(again.status, 'applied', again.message)
+  } finally {
+    fx.cleanup()
+  }
+})
+
+/** 上面那条控制半段用的第二次调用：复用同一个 fx，不再改动树。 */
+async function applyAgainstSameFx(fx, calls, kick) {
+  const socketPath = shortSocketPath(fx.dir, 'toctou2.sock')
+  const daemon = await startSocketDaemon(socketPath, { behaviour: 'answer', version: '1.4.1' })
+  try {
+    const result = await applyUpdate({
+      stateRoot: fx.stateRoot,
+      appsDir: fx.appsDir,
+      bundles: BUNDLES,
+      now: NOW,
+      currentVersion: '1.4.0',
+      socketPath,
+      probe: { socketPath, timeoutMs: 1_000 },
+      job: { ok: true, args: ['glasspaned', '--socket-path', socketPath] },
+      build: () => { calls.build += 1; return okBuild(fx.builtDir)() },
+      kickstart: kick.fn,
+      toolsList: okTools,
+      npm: () => { calls.npm += 1; return okNpm() },
+      refreshRuntimeImpl: refreshedRuntime('1.4.1'),
+    })
+    return result
+  } finally {
+    await daemon.close()
+  }
+}
+
+test('the staged archive being replaced is caught by the digest, before the tree is even walked', async () => {
+  const { fx, result, calls } = await applyAgainstMutatedStaging('toctou-archive', (f) => {
+    const swapped = packTarGz([{ name: 'package.json', content: '{"version":"1.4.1","evil":true}' }])
+    fs.writeFileSync(f.archivePath, swapped)
+  })
+  try {
+    assert.equal(result.status, 'deferred')
+    assert.equal(result.code, CODES.digestMismatch)
+    assert.match(result.message, /the staged archive now digests/, result.message)
+    assert.equal(calls.build, 0)
+    assert.equal(calls.npm, 0)
+  } finally {
+    fx.cleanup()
+  }
+})
+
+test('a staged tree with no archive left to re-measure against is a refusal, not an assumption', async () => {
+  const { fx, result, calls } = await applyAgainstMutatedStaging('toctou-noarchive', (f) => {
+    fs.rmSync(f.archivePath, { force: true })
+  })
+  try {
+    assert.equal(result.status, 'deferred')
+    assert.equal(result.code, CODES.digestMismatch)
+    assert.match(result.message, /is no longer on disk/, result.message)
+    assert.equal(calls.build, 0)
+    assert.equal(calls.npm, 0)
+    // 状态里那条 staged 没有被悄悄清掉：面板还在说实话，下一步是重新 check。
+    assert.ok(loadState(fx.stateRoot).state.staged, '拒绝不许伪造出"已经没有暂存"的样子')
+  } finally {
+    fx.cleanup()
+  }
 })

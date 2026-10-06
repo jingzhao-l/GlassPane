@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { DEFAULT_BASE, REPO_SLUG, UPDATE_BASE_ENV, DOWNLOAD_BUDGET_MS, DOWNLOAD_MIN_RATE_BPS, DOWNLOAD_MIN_RATE_FLOOR_BPS, assetPathNamesPinnedRelease, assertAssetUrl, assertRedirectTarget, describeTransportFailure, isTlsVerificationFailure, makeBytesFetcher, makeFetcher, rateFloorFor, resolveBase } from '../lib/source.js'
+import { DEFAULT_BASE, REPO_SLUG, UPDATE_BASE_ENV, DOWNLOAD_BUDGET_MS, DOWNLOAD_MAX_BYTES, DOWNLOAD_MIN_RATE_BPS, DOWNLOAD_MIN_RATE_FLOOR_BPS, assetPathNamesPinnedRelease, assertAssetUrl, assertRedirectTarget, describeTransportFailure, isTlsVerificationFailure, makeBytesFetcher, makeFetcher, rateFloorFor, resolveBase } from '../lib/source.js'
 import { CODES } from '../lib/codes.js'
 import { UpdaterError } from '../lib/fsutil.js'
 import { PINNED_PATH, bytesResponse, jsonResponse, startServer } from './helpers.mjs'
@@ -520,4 +520,75 @@ test('a widened ceiling is still bounded: an absurd declared length cannot buy h
   assert.match(error.message, /widened to the 200ms/, `要说预算被放宽过、也到顶了：${error.message}`)
   assert.match(error.message, /of the 1024\.0 MiB this response declared/, error.message)
   assert.ok(Date.now() - started < 5_000, `到上限就该停（实际 ${Date.now() - started}ms）`)
+})
+
+/* --------- 字节上限（#4：只发不结束的流不许把每日作业的内存吃光） */
+
+/**
+ * 一个永不 `done` 的生产者。`declaredBytes` 决定它带不带 `content-length`，`bytes` 决定每段多大，
+ * `produced` 记录它一共被要走了多少字节——"有上限"这件事只能由**被读走的量**来证明，
+ * 单看一句拒绝等于什么都没测（旧实现同样会拒绝，只是要等到 45 min 之后）。
+ */
+function runawayServer({ declaredBytes = null, bytes = 1024 }) {
+  const state = { produced: 0 }
+  const url = 'https://github.com/jingzhao-l/GlassPane/releases/download/v1.5.1/GlassPane-1.5.1.tar.gz'
+  state.fetchImpl = async (_url, { signal } = {}) => ({
+    ok: true,
+    status: 200,
+    url,
+    headers: declaredBytes === null
+      ? undefined
+      : { get: (name) => (String(name).toLowerCase() === 'content-length' ? String(declaredBytes) : null) },
+    body: {
+      getReader: () => ({
+        read: async () => {
+          if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' })
+          // 每段之间让出 1ms：没有字节上限时这一段要真跑满计时器才停得下来，不留间隙的话
+          //  sabotaged 的一次运行会先把半台机器的内存吃掉（实测 12 min 未结束）。
+          await new Promise((resolve) => setTimeout(resolve, 1))
+          if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' })
+          state.produced += bytes
+          return { done: false, value: new Uint8Array(bytes).fill(2) }
+        },
+      }),
+    },
+  })
+  return state
+}
+
+// REVERSE MUTATION: 删掉读循环里 `if (received > capBytes)` 那一段 —— 两条测试一起红：声明过的
+// 那条要等到 60_000ms 的兜底计时（测试先超时），没声明的那条根本停不下来。
+test('a stream that overruns its own declared length is stopped in the read loop, not after it is all buffered', async () => {
+  const declared = 4096
+  const runaway = runawayServer({ declaredBytes: declared, bytes: 1024 })
+  const fetchBytes = makeBytesFetcher(runaway.fetchImpl, { timeoutMs: 5_000, stallMs: 60_000, rateWindowMs: 60_000 })
+  const started = Date.now()
+  const error = await fetchBytes('https://github.com/x/y').then(() => null, (e) => e)
+  assert.ok(error, '比自己的声明还长的流必须被拒')
+  assert.equal(error.code, CODES.releaseBadPayload, '这是"字节与声明对不上"那一档，不是"网络不行"那一档')
+  assert.match(error.message, /more than the 4 KiB this response declared for itself/, error.message)
+  assert.match(error.message, /nothing partial is staged/, '拒绝里要交代这台机器现在的样子')
+  assert.match(error.message, /updater check/, '并且给出一条能直接跑的下一步')
+  assert.ok(Date.now() - started < 5_000, `不许等任何计时器（实际 ${Date.now() - started}ms）`)
+  // 只多读一段就停下：旧实现会把 `chunks` 一直堆到 `DOWNLOAD_CEILING_MAX_MS` 才交给长度比对。
+  assert.ok(runaway.produced <= declared + 1024, `缓冲过的字节必须停在声明值附近（实到 ${runaway.produced}）`)
+})
+
+test('a stream that declares nothing is still bounded by a fixed ceiling', async () => {
+  const maxBytes = 8 * 1024
+  const runaway = runawayServer({ declaredBytes: null, bytes: 1024 })
+  const fetchBytes = makeBytesFetcher(runaway.fetchImpl, {
+    timeoutMs: 5_000,
+    stallMs: 60_000,
+    rateWindowMs: 60_000,
+    maxBytes,
+  })
+  const error = await fetchBytes('https://github.com/x/y').then(() => null, (e) => e)
+  assert.ok(error, '一声不响只往里灌的流同样不许无限要内存')
+  assert.equal(error.code, CODES.releaseBadPayload)
+  assert.match(error.message, /the 8 KiB ceiling this tool puts on a body that declares no length at all/, error.message)
+  assert.ok(runaway.produced <= maxBytes + 1024, `内存上限就是上限（实到 ${runaway.produced}）`)
+  // 生产默认值也必须是一个有限的数：`Infinity` 或 0 都会让这道闸变成注释。
+  assert.ok(Number.isSafeInteger(DOWNLOAD_MAX_BYTES) && DOWNLOAD_MAX_BYTES > 0 && DOWNLOAD_MAX_BYTES < 1024 ** 3,
+    `默认的内存上限要有限、也说得出人话：${DOWNLOAD_MAX_BYTES}`)
 })

@@ -17,6 +17,9 @@ import { CODES } from './codes.js'
 import { UpdaterError, ensurePrivateDir, resolveWithin, removeTreeWithin, tightenMode, writableRoots, STATE_DIR_MODE, STATE_FILE_MODE } from './fsutil.js'
 import { extractTarGz } from './tar.js'
 
+/** The one name the downloaded archive keeps inside a staging directory. */
+export const ARCHIVE_FILE_NAME = 'archive.tar.gz'
+
 /** `<stagingRoot>/<version>` — created `0700`, path checked against escapes. */
 export function prepareStaging({ stateRoot, version }) {
   const { staging } = writableRoots(stateRoot)
@@ -26,7 +29,7 @@ export function prepareStaging({ stateRoot, version }) {
   }
   const dir = resolveWithin(staging, path.join(staging, version), 'staging directory')
   ensurePrivateDir(dir)
-  return { dir, archivePath: path.join(dir, 'archive.tar.gz'), treePath: path.join(dir, 'tree'), stagingRoot: staging }
+  return { dir, archivePath: path.join(dir, ARCHIVE_FILE_NAME), treePath: path.join(dir, 'tree'), stagingRoot: staging }
 }
 
 /** Write the archive bytes with an owner-only mode. */

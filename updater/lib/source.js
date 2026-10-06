@@ -387,6 +387,14 @@ export function rateFloorFor({
  */
 export const DOWNLOAD_CEILING_MAX_MS = 2_700_000
 
+/**
+ * 这个下载器愿意为**一个**响应体留在内存里的字节上限。声明了 `content-length` 就按声明值封顶，
+ * 什么都没声明就按这里这个数：真机 v1.5.1 的 tar 资产是 25,126,902 字节，256 MiB 已经是十倍余量。
+ * 没有这道上限时，一个只发不结束的流可以在 `DOWNLOAD_CEILING_MAX_MS`（45 min）里把每日定时任务
+ * 的内存一路吃光——`check.js` 的长度比对发生在整个 body 缓冲完之后，救不了这一段。
+ */
+export const DOWNLOAD_MAX_BYTES = 256 * 1024 * 1024
+
 const humanBytes = (n) => (n >= 1024 * 1024
   ? `${(n / (1024 * 1024)).toFixed(1)} MiB`
   : n >= 1024
@@ -441,6 +449,7 @@ export function makeBytesFetcher(fetchImpl = globalThis.fetch, {
   rateWindowMs = DOWNLOAD_RATE_WINDOW_MS,
   rateWindowsBeforeRefusal = DOWNLOAD_RATE_WINDOWS_BEFORE_REFUSAL,
   maxCeilingMs = DOWNLOAD_CEILING_MAX_MS,
+  maxBytes = DOWNLOAD_MAX_BYTES,
   caBundlePath = null,
 } = {}) {
   return async function fetchBytes(url) {
@@ -480,6 +489,9 @@ export function makeBytesFetcher(fetchImpl = globalThis.fetch, {
       }
       assertRedirectTarget(response.url, { requested: url })
       declared = declaredLengthOf(response)
+      // 内存上限：声明了长度就按声明值，没声明就按 `maxBytes`；两边再一起被 `maxBytes` 夹住，
+      // 于是一个 `content-length: 500 GiB` 的回答也最多只能要到 256 MiB。
+      const capBytes = declared === null ? maxBytes : Math.min(declared, maxBytes)
       // The floor is solved once the length is known, before either clock reads it. A caller that passed
       // `minRateBps` keeps its own number: that knob is how the unit tests pin a rate, and production never
       // sets it.
@@ -491,6 +503,14 @@ export function makeBytesFetcher(fetchImpl = globalThis.fetch, {
         if (budget > timeoutMs) armCeiling(budget)
       }
       if (!response.body || typeof response.body.getReader !== 'function') {
+        // 这条回退分支没有读循环可守，所以长度上限只能问在缓冲之前：真实 undici 永远给得出
+        // `body.getReader`，走到这里的是假件与不带 body 的响应。
+        if (declared !== null && declared > maxBytes) {
+          throw new UpdaterError(
+            CODES.releaseBadPayload,
+            `GET ${url} declares ${humanBytes(declared)}, more than the ${humanBytes(maxBytes)} this tool will ever hold in memory for one release file, and its answer carries no stream to read a bound out of. Nothing was buffered and nothing is staged: re-run "updater check"; if a published release really is that large, the number to raise is DOWNLOAD_MAX_BYTES in lib/source.js, not the 45-minute timer.`,
+          )
+        }
         const once = new Uint8Array(await response.arrayBuffer())
         received = once.length
         return once
@@ -506,6 +526,13 @@ export function makeBytesFetcher(fetchImpl = globalThis.fetch, {
         if (value && value.length) {
           chunks.push(value)
           received += value.length
+          // 长度比对必须发生在**读循环里**。旧实现把它整个交给 `check.js` 的
+          // `assertDeclaredBytes`，而那一句要等 body 全部缓冲完才跑得起来：一个只发不停、
+          // 或比自己的声明更长的流，因此可以在 45 min 的天花板里把定时任务的内存吃光。
+          if (received > capBytes) {
+            stop('length')
+            throw new UpdaterError(CODES.releaseBadPayload, stoppedForLength(url, { received, declared, capBytes }))
+          }
           armStall()
           if (!(rateWindowMs > 0) || !(floorBps > 0)) continue
           const now = Date.now()
@@ -559,6 +586,17 @@ export function makeBytesFetcher(fetchImpl = globalThis.fetch, {
       clearTimeout(ceilingTimer)
     }
   }
+}
+
+/**
+ * 读循环里超限那一句：量到了多少、上限是谁给的、这台机器下一步做什么。写法对齐
+ * `stoppedForRate`——句子必须把"这不是再等一会儿就能好的"说清楚。
+ */
+function stoppedForLength(url, { received, declared, capBytes }) {
+  const bound = declared
+    ? `the ${humanBytes(declared)} this response declared for itself`
+    : `the ${humanBytes(capBytes)} ceiling this tool puts on a body that declares no length at all`
+  return `GET ${url} was stopped mid-stream: ${humanBytes(received)} had already arrived, which is more than ${bound}. A body that overruns its own length is not a slow download, so no timer would have helped: nothing partial is staged and the next run starts from a clean slate. Re-run "updater check"; if it stops the same way, whatever sits between this machine and GitHub is re-encoding or inventing that body (a proxy, or a host that is not the pinned release CDN), and that is the thing to fix`
 }
 
 /** The sentence for the rate floor: what it measured, what it needs, where that number comes from, what arrived. */

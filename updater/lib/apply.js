@@ -32,7 +32,7 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 import { CODES } from './codes.js'
-import { sha256FileSync } from './digest.js'
+import { sha256File, sha256FileSync } from './digest.js'
 import { UpdaterError, canonicalPath, ensurePrivateDir, removeTreeWithin, resolveWithin, tightenMode, writableRoots, writePrivateFile } from './fsutil.js'
 import { probeIdle } from './idle.js'
 import { kickstartJob, readRunningJob } from './launchd.js'
@@ -42,7 +42,7 @@ import { bumpKind, parsePlainVersion } from './version.js'
 import { decideSwapPermission, foreignStateDir } from './policy.js'
 import { authorshipNote } from './signature.js'
 import { loadState, nextState, readPointer, saveState } from './state.js'
-import { stagedTreePresent } from './staging.js'
+import { ARCHIVE_FILE_NAME, extractInto, releaseTreeRoot, stagedTreePresent } from './staging.js'
 
 /** §3.3: the daemon gets this long to answer before the swap is undone. */
 export const HANDSHAKE_BUDGET_MS = 15_000
@@ -240,6 +240,78 @@ function defaultCopy(source, target) {
   fs.rmSync(target, { recursive: true, force: true })
   fs.mkdirSync(path.dirname(target), { recursive: true })
   fs.cpSync(source, target, { recursive: true, dereference: false })
+}
+
+/* ------------------------------------------- the staged bytes, re-proven at apply time */
+
+/**
+ * `check` proved the staged bytes once. Everything between that proof and this swap
+ * — a leftover build, a second updater run, any process of this account — can rewrite
+ * a source file inside the staging directory, and `apply` would then compile those
+ * bytes into the binary launchd starts with the Accessibility / Screen-Recording seat.
+ * So `apply` re-asks, and it re-asks against the one anchor that is *not* the tree:
+ * the archive digest the release's own checksum file covered (gate 5) and the state
+ * recorded.
+ *
+ * Both halves use machinery this package already has: `sha256File` from `lib/digest.js`
+ * (§1 gate 5's own measurement) and `manifestTree` over the tree `extractInto` unpacks
+ * a second time from those bytes. That is deliberate — the comparison is "the tree on
+ * disk against the tree that comes out of the signed archive", so a file added, removed,
+ * rewritten or swapped for a symlink shows up as a *named* difference instead of a
+ * `staged tree looks shaped right`.
+ */
+export async function verifyStagedBytes({
+  stateRoot,
+  staged,
+  rootPath,
+  hashFile = sha256File,
+  readArchive = (file) => fs.readFileSync(file),
+  existsFn = (file) => fs.existsSync(file),
+}) {
+  const { staging } = writableRoots(stateRoot)
+  const expected = String(staged?.digest ?? '')
+  if (!/^[0-9a-f]{64}$/.test(expected)) {
+    return { ok: false, reason: `the state file records ${JSON.stringify(staged?.digest ?? null)} as the digest of the staged release, which is not a sha256 anything can be re-measured against` }
+  }
+  let archivePath
+  try {
+    archivePath = resolveWithin(staging, path.join(staged.dir, ARCHIVE_FILE_NAME), 'staged archive')
+  } catch (error) {
+    return { ok: false, reason: `the staged archive path ${staged.dir} is not inside this machine's staging root (${error.message})` }
+  }
+  if (!existsFn(archivePath)) {
+    return { ok: false, reason: `${archivePath} is no longer on disk, so ${rootPath} cannot be proven to be the bytes whose digest ${expected.slice(0, 12)}… the release's checksum file named` }
+  }
+  const actual = await hashFile(archivePath)
+  if (actual !== expected) {
+    return { ok: false, reason: `the staged archive now digests ${actual}, while the release's checksum file — and the state — say ${expected}: the bytes under ${staged.dir} are not the bytes that were published` }
+  }
+  const scratch = path.join(staged.dir, `apply-verify-${process.pid}`)
+  try {
+    extractInto({ treePath: scratch, stagingRoot: staging, bytes: readArchive(archivePath) })
+    const unpacked = releaseTreeRoot({ treePath: scratch, version: staged.version })
+    if (!unpacked.ok) {
+      return { ok: false, reason: `the archive in ${staged.dir} no longer unpacks into a ${staged.version} release tree (${unpacked.reason})` }
+    }
+    const fromArchive = manifestTree(unpacked.rootPath)
+    const onDisk = manifestTree(rootPath)
+    if (!manifestsEqual(fromArchive, onDisk)) {
+      return {
+        ok: false,
+        reason: `the tree staged at ${rootPath} does not match the tree inside the archive the digest was taken of (differences: ${firstDifferences(fromArchive, onDisk).join(', ')})`,
+        details: { differences: firstDifferences(fromArchive, onDisk) },
+      }
+    }
+  } catch (error) {
+    return { ok: false, reason: `re-reading the staged archive failed (${error?.message ?? String(error)})` }
+  } finally {
+    try {
+      removeTreeWithin(staging, scratch)
+    } catch {
+      /* the scratch copy is inside the staging root; a failed cleanup cannot un-prove the tree */
+    }
+  }
+  return { ok: true, reason: null, digest: actual }
 }
 
 /* ------------------------------------------------------------------- build */
@@ -993,7 +1065,23 @@ export async function applyUpdate({
   }
   const permission = decideSwapPermission({ probe: verdict, jobArgs: job.args, ourStateRoot: stateRoot, consented: consents })
   if (permission.status !== 'allowed') {
-    return fail(permission.status === 'deferred' ? 'deferred' : 'needs-consent', permission.code, permission.reason, { details: { probe: verdict.reason } })
+    // `unknown` 不是一个 consent 能回答的问题（作业写了哪个状态根本来就读不出来），所以它
+    // 落到 `deferred` 那一档，跟上面 `job.unknown === true` 同一个口径；只有真正"等人点头"
+    // 的拒绝才写成 needs-consent（面板会据此亮出安装按钮）。
+    const refusal = permission.status === 'needs-consent' ? 'needs-consent' : 'deferred'
+    return fail(refusal, permission.code, permission.reason, { details: { probe: verdict.reason } })
+  }
+
+  // Gate §3 / #3（本轮加的）：staged 的字节在动任何真东西之前重新证明一次。`check` 的证明
+  // 发生在几分钟之前，而 `stagedTreePresent` 只回答"树还在、形状还对"——形状对的树里完全可以
+  // 是别人写进来的源码，`swift build` 与 `npm pack` 都照编译照装（见 verifyStagedBytes 的注释）。
+  const proven = await verifyStagedBytes({ stateRoot, staged: state.staged, rootPath: staged.rootPath })
+  if (!proven.ok) {
+    return fail('deferred', CODES.digestMismatch,
+      `the staged release is no longer the bytes "check" verified: ${proven.reason}. Nothing was built, packed, swapped or restarted, and the daemon was left running the version it had. `
+      + 'Run "updater check" to re-download and re-verify the release against its checksum, then press "Install update" again — and if something else on this machine writes into '
+      + `${staged.dir}, that is the thing to fix first.`,
+      { details: proven.details ?? null })
   }
 
   // §3.5's pre-flight, placed here because everything below this line can change the live machine.
