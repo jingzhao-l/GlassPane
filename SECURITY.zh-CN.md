@@ -148,8 +148,14 @@ GlassPane 不是普通工具库：它**持有** macOS 的高危权限（辅助�
   会话里，就会落到你的模型服务商保留的一切，与上面那些 AX 树同级，只是换成像素。用过
   `gp_capture_view` 的会话要按"那个窗口当时的画面已被截走"对待；凡是测量能定的事，优先用
   `gp_audit_ui` / `gp_assert_element`。
-- 导出件是副本：`gp_export_evidence` / `gp_recent_reports` 生成的 HTML/Markdown 报告按调用方指定路径
-  落地，同样含界面文本；Z4.5 Metal 捕获会把 `.gputrace` 文档写进**被测 app** 的临时目录。
+- **两个报告渲染工具没有输出路径，它们渲染出来的文本是交给模型，不是落盘**：`gp_export_evidence` 只收
+  `operationId` 与 `format`（`html` | `markdown`），`gp_recent_reports` 只收 `limit` 与 `format`；两个 schema
+  都是 `additionalProperties: false`——既没有路径参数可传，shell 也不写任何文件。渲染好的 HTML/Markdown 作为
+  工具结果的 **text content** 返回，于是它进了你 agent 宿主的会话记录，也进了你的模型服务商为那次会话保留的
+  一切。这跟"写成一个文件"不是同一种暴露，也不是更小的一种：上面那份证据包里的同一批界面文本，这回是在边界的
+  另一侧，不在你那个 `0700` 的状态根里，已经被别人家的模型读过——`chmod` 和"删掉那个目录"这两招都够不着它。
+  既然这条通路不落盘，下面那段权限位的交代对这两个工具无话可说。Z4.5 Metal 捕获是相反的形状，它确实写文件：
+  把 `.gputrace` 文档写进**被测 app** 的临时目录。
 - **状态根里的权限位，按实测而非按意图交代。** 本页核对时所在的那台机器上：`~/.glasspane` 是 `0700`，
   `engine.sock` 是 `0600`，`approvals.json` 与 `projects.json` 是 `0600`——这些由 daemon 在 bind 时与
   每次启动的收紧扫描里强制。而 `~/.glasspane/installer-daemon.log` 实测是 **`0644`**

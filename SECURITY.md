@@ -201,9 +201,17 @@ permission rather than by a secret.
   trees above but with pixels instead of labels. Treat a session that used `gp_capture_view` as
   containing a screenshot of everything that was on that window, and prefer `gp_audit_ui` /
   `gp_assert_element` for anything a measurement can settle.
-- Exports are copies: the HTML/Markdown reports produced by `gp_export_evidence` / `gp_recent_reports`
-  are written to the path the caller specifies and contain the same interface text. Z4.5 Metal capture
-  writes a `.gputrace` document into the **app under test's** temporary directory.
+- **The two report renderers have no output path, and what they render goes to the model, not to disk.**
+  `gp_export_evidence` accepts only `operationId` and `format` (`html` | `markdown`), `gp_recent_reports`
+  only `limit` and `format`; both schemas are `additionalProperties: false`, so there is no path argument to
+  pass and the shell writes no file. The rendered HTML/Markdown comes back as the tool result's **text
+  content** — so it lands in your agent host's transcript and in whatever your model provider retains for
+  that session. That is a *different* exposure from a file on disk, not a smaller one: the same interface
+  text as the evidence pack above, but on the far side of the boundary instead of inside your `0700` state
+  root, already read by somebody else's model, with no `chmod` and no "delete the directory" remedy that
+  reaches it. Nothing here writes a report copy, so the mode tightening below has nothing to say about these
+  two tools. Z4.5 Metal capture is the opposite shape and does write a file: it puts a `.gputrace` document
+  into the **app under test's** temporary directory.
 - **Modes on the state root, as measured rather than as intended.** On the machine this page was checked
   from: `~/.glasspane` `0700`, `engine.sock` `0600`, `approvals.json` and `projects.json` `0600` — the
   daemon enforces those on bind and on its start-of-run sweep. `~/.glasspane/installer-daemon.log`
