@@ -1061,13 +1061,16 @@ if options.pruneEvidence || options.evidenceStats {
         let removed = options.pruneDryRun
             ? store.countExpired(olderThanDays: options.pruneOlderThanDays)
             : store.prune(olderThanDays: options.pruneOlderThanDays)
-        let payload: [String: Any] = [
-            "pruned": removed,
-            "dryRun": options.pruneDryRun,
-            "project": options.maintenanceProjectId ?? NSNull(),
-            "dir": dir
-        ]
-        writeJSON(payload)
+        // 归档读不了的时候 `prune`/`countExpired` 只能回 0，而那句 0 不是"没有过期的"。
+        // 与 --evidence-stats 同一条规矩：没测出来就写 null，并把失败原因一起发出去。
+        let listFailure = store.listingFailure
+        writeJSON(EvidencePruneReport.payload(
+            pruned: listFailure == nil ? removed : nil,
+            dryRun: options.pruneDryRun,
+            project: options.maintenanceProjectId,
+            dir: dir,
+            listFailure: listFailure
+        ))
         exit(0)
     }
     if options.evidenceStats {

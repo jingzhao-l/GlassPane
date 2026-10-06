@@ -20,6 +20,30 @@ public struct EvidenceArchiveStats: Equatable {
     }
 }
 
+/// `glasspaned --prune-evidence` 的对外形状（spec v1.6 §12.3 的删除侧）。
+///
+/// `pruned == nil` 与 `pruned == 0` 不是一件事：前者是"归档读不了，所以没数出来"，
+/// 后者是"数了，里面没有过期的"。`stats()` 因为同一句话挨过批评（R6-08：读不了的归档
+/// 不许被报成空的），而删除这条路从前把 `.unreadable` 折成 `[]` 之后照旧发布
+/// `{"pruned":0}` + exit 0——一次"其实什么都没删"的清理就这样被读成"清理完成"。
+public enum EvidencePruneReport {
+    public static func payload(
+        pruned: Int?,
+        dryRun: Bool,
+        project: String?,
+        dir: String,
+        listFailure: String?
+    ) -> [String: Any] {
+        [
+            "pruned": pruned.map { $0 as Any } ?? NSNull(),
+            "dryRun": dryRun,
+            "project": project ?? NSNull(),
+            "dir": dir,
+            "listFailure": listFailure ?? NSNull(),
+        ]
+    }
+}
+
 /// File-persisted store for evidence packs. Each operation keeps its own
 /// JSON file (`<dir>/<operationId>.json`) so individual entries are readable,
 /// replaceable and independently corruptible without affecting the rest.
@@ -588,7 +612,9 @@ public final class EvidenceStore {
     /// call, which is how a published `0` turns into "could not count"; internal
     /// serving-thread callers get a `log.error` instead, because a shared flag
     /// there would not say whose listing it described.
-    private(set) var listingFailure: String?
+    /// 最近一次归档列举失败的原因。删除与统计两条 CLI 都要读它，所以对外只读；
+    /// `private(set)` 是必须的——写入只发生在 `archiveListing` 里，别处不许伪造"读失败了"。
+    public private(set) var listingFailure: String?
 
     /// List the archive's entries in the active directory, requesting the given
     /// resource keys. An entry is a file this store created — see
