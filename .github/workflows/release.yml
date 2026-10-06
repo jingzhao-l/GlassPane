@@ -133,9 +133,13 @@ jobs:
           printf '%s\n' "allow-loopback-pinentry" >> "$HOME/.gnupg/gpg-agent.conf"
           gpgconf --kill gpg-agent
           printf '%s\n' "$GPG_INPUT_KEY" | gpg --batch --yes --import
+          # 口令走 `--passphrase-fd 0`（stdin），不走把口令写进 argv 的那种形式：后者在同一台
+          # runner 上 `ps -eww -o args` 就能被读到（本地实测：签名进行中 12 次采样全部读到），
+          # 而 loopback pinentry 本来就是为"从文件描述符喂进来"设计的。
+          # 两份签名件的产出判据仍是下面那两条 `[ -s ]`：gpg 退 0 不等于落盘。
           for f in "GlassPane-${VERSION}.tar.gz" "SHA256SUMS-${VERSION}.txt"; do
-            gpg --batch --yes --pinentry-mode loopback \
-              --passphrase "$GPG_PASSPHRASE" --detach-sign --armor "$f"
+            printf '%s\n' "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback \
+              --passphrase-fd 0 --detach-sign --armor "$f"
           done
           # 两份签名件都得存在且非空：少一份就是这一步没做完，而"做完"的证据只能来自文件系统，
           # 不能来自 gpg 的退出码（空输入、口令不对都可能是退 0 而不落盘）。
@@ -149,7 +153,10 @@ jobs:
         run: |
           set -euo pipefail
           NOTES="Release ${VERSION}. Release archive checksum: see \`SHA256SUMS-${VERSION}.txt\`, which is GPG-signed — \`gpg --verify SHA256SUMS-${VERSION}.txt.asc SHA256SUMS-${VERSION}.txt\`. The archive is the tagged tree less \`harness/\` (the vendored fork no install step reads, 90% of the repository's bytes) plus the JavaScript build output the updater's npm step needs (\`mcp-shell/dist\`, \`mcp-shell/schemas\`); the Swift app is still built on the target machine."
-          NOTES="$NOTES"$'\n\n'"Install (one command, clones this tag): \`curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh | sh\`"
+          # 安装命令钉在 ${REF_NAME} 上，不写 main：上一句刚把 tag 说成可复现性的锚点，
+          # 下一条命令却把人支到一个会移动的分支上——今天照它装到的与这个 tag 的内容
+          # 对不对得上看运气。REF_NAME 由校验过形状的那一步经 GITHUB_ENV 传下来。
+          NOTES="$NOTES"$'\n\n'"Install (one command, clones this tag): \`curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/${REF_NAME}/install.sh | sh\`"
           NOTES="$NOTES"$'\n\n'"See [CHANGELOG.md](https://github.com/jingzhao-l/GlassPane/blob/${REF_NAME}/CHANGELOG.md) for what changed."
           # target 显式钉在被 checkout 的 commit 上：gh 默认会写成分支名，
           # 那样 Release 的 target 就与 tag 内容脱钩，可复现性锚点只剩资产本身。
@@ -197,6 +204,58 @@ jobs:
         run: npm run build
       - name: Version line must be self-consistent before publishing
         run: node scripts/check-version.mjs
+      - name: Refuse to publish a tree no tag vouches for
+        # publish 不可逆，而 `check-version` 只证明这份检出**内部**一致：main 的 HEAD 也
+        # 满足它。真正的锚点是 dispatch 带没带 `--ref v<X.Y.Z>`（tools/prompts/daily-glasspane-main.md
+        # 写的顺序），漏了它这个 job 就把默认分支 HEAD 发上 registry。这里把那件事变成硬前置：
+        # MODE 认得、两个要发的包版本一致、origin 上有这个 tag、且 HEAD 就是 tag 指着的那棵树。
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          case "${MODE:-}" in
+            dry|publish) ;;
+            *)
+              echo "::error::mode 既不是 dry 也不是 publish（现在是「${MODE:-<空>}」）。下面两条发布分支写的是" \
+                "「不等于 dry 就 publish」，空值会直接落进不可逆的那一条。重跑：" \
+                "gh workflow run release.yml --repo ${GITHUB_REPOSITORY} --ref v<包里的版本> -f mode=dry|publish"
+              exit 1 ;;
+          esac
+          VERSION=$(node -p "require('./package.json').version")
+          WANT="v${VERSION}"
+          # registry 上那个版本号来自各包自己的 package.json，不是根那份：对照物要点对面
+          # 真正出现的东西，根一致而这两个不一致时 check-version 会红，这一道闸也得红。
+          for pkg in mcp-shell installer; do
+            GOT=$(node -p "require('./${pkg}/package.json').version")
+            [ "$GOT" = "$VERSION" ] || {
+              echo "::error::${pkg}/package.json 的版本是 ${GOT}，与 tag 应当是的那一条（${WANT}）不一致——" \
+                "发上去的包名版本号就不是 ${WANT}。先跑 node scripts/set-version.mjs 把版本线对齐。"
+              exit 1; }
+          done
+          # tag 的存在与指向都问 origin：actions/checkout@v4 默认 fetch-depth=1 且不取 tag，
+          # 本地 ref 列表在 CI 里基本是空的，拿 `git tag --points-at HEAD` 判会一律判成"没 tag"。
+          LS=$(git ls-remote --tags origin)
+          PEELED=$(printf '%s\n' "$LS" | awk -v r="refs/tags/${WANT}^{}" '$2==r{print $1; exit}')
+          DIRECT=$(printf '%s\n' "$LS" | awk -v r="refs/tags/${WANT}" '$2==r{print $1; exit}')
+          # 附注 tag 用剥到底的那一行（`^{}` 才是 commit），裸 tag 只有 DIRECT。
+          TAG_SHA="${PEELED:-$DIRECT}"
+          [ -n "$TAG_SHA" ] || {
+            echo "::error::origin 上没有 tag ${WANT}——版本线 ${VERSION} 还没打过 tag，发出去的包就没有可复现的" \
+              "锚点（install.sh 与 updater 钉的都是 tag）。按顺序补：push → tag ${WANT} → 用 --ref ${WANT} 重跑。"
+            exit 1; }
+          HEAD_SHA=$(git rev-parse HEAD)
+          [ "$TAG_SHA" = "$HEAD_SHA" ] || {
+            echo "::error::这份检出不是 ${WANT} 指着的那棵树：HEAD=${HEAD_SHA}，${WANT}=${TAG_SHA}。" \
+              "多半是 dispatch 漏了 --ref（这次落在 ${DISPATCH_REF}），于是发的是默认分支 HEAD 的内容。重跑：" \
+              "gh workflow run release.yml --repo ${GITHUB_REPOSITORY} --ref ${WANT} -f mode=${MODE}"
+            exit 1; }
+          # 第三条是同一件事的另一半：provenance 记的是被 dispatch 的那条 ref，树相同而 ref
+          # 不对时发出去的东西事后对不回 ${WANT}。
+          [ "$DISPATCH_REF" = "refs/tags/${WANT}" ] || {
+            echo "::error::dispatch 的 ref 是 ${DISPATCH_REF}，不是 refs/tags/${WANT}。这次的内容虽然与 tag 相同，" \
+              "但 provenance 会记成前者。带上 --ref ${WANT} 重跑。"
+            exit 1; }
+          echo "publish 的对象已核实：${WANT} = ${HEAD_SHA}，mode=${MODE}"
       - name: Publish (or pack-check) glasspane-mcp
         working-directory: mcp-shell
         run: |

@@ -218,30 +218,53 @@ function inspect(target) {
     // Built with RegExp rather than a literal: the pattern needs a literal `/`
     // to detect a path argument, which inside a `/.../ ` literal would terminate
     // the expression.
-    // exec() returns one match object (or null); the `?? []` only guards the
-    // null case, so every element here is a real match.
-    const hits = RUN_SCRIPT.exec(ref.text)
-    for (const m of hits ? [hits] : []) {
+    //
+    // A "g" flag on a module-level regex means `exec()` advances `lastIndex`
+    // *across* calls, and this regex is one object shared by every line. Taking
+    // a single exec per ref therefore checked the first reference in the file and
+    // then skipped alternate lines outright: measured over
+    // ["npm run build", "npm run bundle --workspace glasspane-mcp",
+    //  "npm run test --if-present", "npm run build"] the four single-exec calls
+    // returned ["build", null, "test", null]. So `npm run bundle` (ci.yml:86,
+    // release.yml:92) was never looked at, and renaming that script kept this
+    // guard green while the release build died. Reset before each line and take
+    // **every** match, the way the sibling READ_LITERAL below already does.
+    RUN_SCRIPT.lastIndex = 0
+    let hit
+    while ((hit = RUN_SCRIPT.exec(ref.text)) !== null) {
       // `bun run path/to/file.ts` addresses a file bun executes directly; only a
       // bare name is a package.json script, and the file-existence rule above
       // already covers the former. The path test must be inside the pattern:
       // once the name is captured, "script/publish.ts" is already "script",
       // which is a different — and real — script name.
-      if (m[2] || m[0].includes("/")) continue
-      const name = m[1]
+      if (hit[2] || hit[0].includes("/")) continue
+      const name = hit[1]
       if (name.includes("$")) continue
-      const pkgPath = path.join(target.root, ref.dir, "package.json")
-      let pkg
-      try {
-        pkg = JSON.parse(readFileSync(pkgPath, "utf8"))
-      } catch {
-        continue // no package.json here: nothing to assert against
+      // Which manifest really owns this script. Without a selector it is the
+      // step's own package.json — the behaviour this rule has always had.
+      const owner = scriptOwners({ root: target.root, dir: ref.dir, text: ref.text })
+      if (owner.mode === "skip") continue
+      if (owner.mode === "any") {
+        // `npm run x --workspaces` is satisfied by any workspace that declares it;
+        // an `--if-present` line is already handled above as "skip", which is the
+        // only honest reading of a flag whose whole purpose is to tolerate absence.
+        // Known limit: npm fails when a *subset* of workspaces lacks the script and
+        // `--if-present` was not passed; this answers "nobody has it", not "who lacks it".
+        if (owner.dirs.length && !owner.dirs.some((o) => hasScript(target.root, o.dir, name))) {
+          problems.push(
+            `line ${ref.line}: step runs \`run ${name}\` across workspaces but none of ` +
+              `${owner.dirs.map((o) => o.dir).join(", ")} declares "${name}"`,
+          )
+        }
+        continue
       }
-      if (!(pkg.scripts ?? {})[name]) {
-        const where = ref.dir ? ` (working-directory: ${ref.dir})` : " (workspace root)"
+      for (const o of owner.dirs) {
+        const pkgPath = path.posix.join(o.dir, "package.json")
+        if (!existsSync(path.join(target.root, pkgPath))) continue // no manifest: nothing to assert against
+        if (hasScript(target.root, o.dir, name)) continue
         problems.push(
-          `line ${ref.line}${where}: step runs \`run ${name}\` but ` +
-            `${path.posix.join(ref.dir, "package.json") || "package.json"} has no "${name}" script`,
+          `line ${ref.line}${o.label}: step runs \`run ${name}\` but ` +
+            `${pkgPath || "package.json"} has no "${name}" script`,
         )
       }
     }
@@ -322,6 +345,109 @@ function referencedScripts(cmd) {
   return out
 }
 
+/** True when `<root>/<dir>/package.json` parses and declares `name` as a script. */
+function hasScript(root, dir, name) {
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(root, dir, "package.json"), "utf8"))
+    return Boolean(pkg?.scripts?.[name])
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Which package.json file(s) own `npm run <name>` on this command line.
+ *
+ * Without a selector the answer is the step's own directory, which is what this
+ * rule asserted before `--workspace` support existed. It stopped being the whole
+ * answer the moment scanning reached every match on a line: release.yml:92 is
+ * `npm run bundle --workspace glasspane-mcp`, executed from the repository root,
+ * and the root has no `bundle` script — npm runs it in the workspace the selector
+ * names. Checking that line against the root manifest reports a defect CI runs
+ * green, which is how a guard gets un-fixed; resolving the selector is what makes
+ * the newly-visible reference checkable at all.
+ *
+ * Returns `{ mode, dirs }`:
+ *   `skip`   — nothing provable here, say nothing (npm tolerates the absence, or
+ *              the selector cannot be resolved — this rule never guesses).
+ *   `own`    — assert against `dirs[0]`, the step's own package.json.
+ *   `named`  — assert against each selected workspace.
+ *   `any`    — `--workspaces` plural: at least one workspace must declare it.
+ */
+function scriptOwners({ root, dir, text }) {
+  // `--if-present` is npm's own "do not fail when the script is missing"; a guard
+  // that fails it is asserting a defect that cannot happen.
+  if (/(?:^|\s)--if-present(?:\s|$)/.test(text)) return { mode: "skip", dirs: [] }
+
+  const ownLabel = dir ? ` (working-directory: ${dir})` : " (workspace root)"
+  const specs = [...text.matchAll(/(?:^|\s)(?:--workspace|--ws|-w)(?:\s+|=)(["']?)([^\s"']+)\1/g)].map((m) => m[2])
+  if (specs.length > 0) {
+    const dirs = []
+    for (const spec of specs) {
+      const resolved = resolveWorkspace({ root, spec })
+      if (resolved === null) return { mode: "skip", dirs: [] } // unresolvable selector: not this rule's call
+      dirs.push({ dir: resolved, label: ` (workspace ${spec} → ${resolved})` })
+    }
+    return { mode: "named", dirs }
+  }
+  if (/(?:^|\s)--workspaces(?:\s|$)/.test(text)) {
+    return { mode: "any", dirs: workspaceDirs(root).map((d) => ({ dir: d, label: ` (workspace ${d})` })) }
+  }
+  return { mode: "own", dirs: [{ dir, label: ownLabel }] }
+}
+
+/**
+ * The workspace directories the root manifest declares. npm's own glob support is
+ * one `*` segment here (`packages/*`), so that is all this expands — against the
+ * real directory listing rather than a glob engine this tool must not grow.
+ */
+function workspaceDirs(root) {
+  let pkg
+  try {
+    pkg = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"))
+  } catch {
+    return []
+  }
+  const declared = Array.isArray(pkg.workspaces) ? pkg.workspaces : (pkg.workspaces?.packages ?? [])
+  const dirs = []
+  for (const pattern of declared) {
+    if (typeof pattern !== "string" || pattern.includes("$")) continue
+    if (!pattern.includes("*")) {
+      dirs.push(pattern)
+      continue
+    }
+    const [head, rest] = pattern.split("*")
+    const parent = path.join(root, head)
+    if (!existsSync(parent)) continue
+    for (const name of readdirSync(parent)) {
+      if (name.startsWith(".")) continue
+      const candidate = [head.replace(/\/+$/, ""), name, (rest ?? "").replace(/^\/+/, "")].filter(Boolean).join("/")
+      if (existsSync(path.join(root, candidate, "package.json"))) dirs.push(candidate)
+    }
+  }
+  return [...new Set(dirs)]
+}
+
+/**
+ * Map an npm `--workspace` selector to a directory: by package `name` first (the
+ * spelling our own workflow uses), then by path. Null means "not found", which
+ * the caller turns into no assertion — a wrong selector breaks in CI with npm's
+ * own message, and inventing a second message here is not this guard's job.
+ */
+function resolveWorkspace({ root, spec }) {
+  const bare = spec.replace(/^\.\//, "")
+  const dirs = workspaceDirs(root)
+  if (dirs.includes(bare) || existsSync(path.join(root, bare, "package.json"))) return bare
+  for (const d of dirs) {
+    try {
+      if (JSON.parse(readFileSync(path.join(root, d, "package.json"), "utf8")).name === spec) return d
+    } catch {
+      // a workspace whose manifest will not parse is not a match
+    }
+  }
+  return null
+}
+
 // ---------------------------------------------------------------- self-test
 //
 // `--self-test` exists because CI runs it, and it used to do *nothing*: the script
@@ -388,12 +514,37 @@ jobs:
           .replace("name: build the thing", "name: probe ${{ inputs.undeclared }}"),
       expect: /never declares it/,
     },
+    {
+      // THE lastIndex REGRESSION CASE. This is the one rule-2b mutation the
+      // original harness could not see: with a single `exec()` per line on a
+      // shared "g" flag, the first `npm run` in the file consumed the match state
+      // and every alternate `npm run` line went unchecked — so a second command in
+      // the same step, naming a script that does not exist, produced **no problem
+      // at all**. Delete the `RUN_SCRIPT.lastIndex = 0` reset (or go back to one
+      // exec per ref) and this case is the one that goes red.
+      id: "a second `npm run` line in the same step (the shared-lastIndex defect)",
+      apply: (t) =>
+        t.replace(
+          "      - name: gated on a secret",
+          "      - name: two commands in one step\n" +
+            "        run: |\n" +
+            "          npm run build\n" +
+            "          npm run bundle-that-does-not-exist\n" +
+            "      - name: gated on a secret",
+        ),
+      expect: /no "bundle-that-does-not-exist" script/,
+    },
   ]
 
   const dir = mkdtempSync(path.join(tmpdir(), "check-workflows-selftest-"))
   mkdirSync(path.join(dir, "scripts"), { recursive: true })
   mkdirSync(path.join(dir, ".github", "workflows"), { recursive: true })
   writeFileSync(path.join(dir, "scripts", "check-version.mjs"), "// present\n")
+  // Rule 2b asserts a `run <name>` against the package.json of the step's own
+  // directory, so without a manifest here it has nothing to say and the
+  // lastIndex case below would pass for the wrong reason. `build` exists so the
+  // first line of that step is a clean reference; only the second is the defect.
+  writeFileSync(path.join(dir, "package.json"), `${JSON.stringify({ name: "selftest", version: "0.0.0", scripts: { build: "true" } }, null, 2)}\n`)
 
   let failed = 0
   for (const c of cases) {

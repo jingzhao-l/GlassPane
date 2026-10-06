@@ -83,8 +83,28 @@ jobs:
         # 完成 MCP initialize 握手（file: 依赖泄漏、schemas 缺文件都在这一步现形）。
         working-directory: mcp-shell
         run: |
+          set -euo pipefail
           npm run bundle
           PKG=$(npm pack --silent | tail -1)
+          # Actions 给 run 块的默认 shell 是 `bash -e`，**不带 pipefail**：`npm pack` 失败时
+          # 管道的退出码取自 `tail -1`（它是 0），PKG 就成了空串，下面那个安装路径退化成
+          # `$GITHUB_WORKSPACE/mcp-shell/` —— 一个目录。npm 装目录照样成功，于是这道闸
+          # 测的是工作树源码而不是发布件，末尾照样打印 OK。三道检查按名字点名各自缺的东西。
+          [ -n "$PKG" ] || {
+            echo "::error::npm pack 没有报出文件名（它失败了，或它报的不是文件名）。" \
+              "继续下去安装路径会变成 mcp-shell/ 源码目录本身，这道闸就什么也没测到。" \
+              "先看上面 npm pack 的 stderr 再重跑。"
+            exit 1
+          }
+          [ -f "$GITHUB_WORKSPACE/mcp-shell/$PKG" ] || {
+            echo "::error::npm pack 报出的 $PKG 不在 $GITHUB_WORKSPACE/mcp-shell/ 下——" \
+              "装的就不是这一份打包产物，这道闸测不到发布形态，停下来。"
+            exit 1
+          }
+          case "$PKG" in
+            *.tgz) ;;
+            *) echo "::error::$PKG 不是一个 tarball 文件名；npm pack 的输出形状变了，别再猜它报了哪一行"; exit 1 ;;
+          esac
           rm -rf /tmp/gp-packtest && mkdir -p /tmp/gp-packtest
           cd /tmp/gp-packtest
           printf '{"name":"t","private":true}\n' > package.json
