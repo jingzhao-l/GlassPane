@@ -281,8 +281,13 @@ private func printUsage() {
         --check-accessibility      Print this process's accessibility seat
                                  (granted | notDetermined — AX exposes no
                                  denied visibility) and exit
-        --permissions              Print the daemon's own permission snapshot
-                                 as JSON: {"subject":…,"permissions":…} and exit
+        --permissions              Print this process's TCC seats as JSON:
+                                 {"subject":…,"permissions":…} and exit. Called as a
+                                 one-shot it measures the one-shot — not whichever
+                                 daemon happens to be serving; the `subject` block is
+                                 there so a reader can see whose seats these are
+                                 (`ProtocolErrors` refuses to let a caller read this
+                                 as the daemon's state).
         --request-permission <kind>  Ask for <kind> TCC access **as this very
                                  process** (no pane navigation, no waiting) and
                                  print the resulting JSON. Kinds: accessibility |
