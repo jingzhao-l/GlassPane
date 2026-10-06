@@ -36,9 +36,9 @@ git clone --branch v1.18.32 --depth 1 https://github.com/anomalyco/opencode.git 
 | `tools/product-surface.mjs` | 产品面**一致性**闸（私有化批次 B）：`product.json` ↔ package.json / build / publish / postinstall / bin shim / 安装器 / 工作流逐条对齐，且产品面可执行文本里不许再出现上游 registry（AUR / homebrew tap / ghcr / opencode.ai/install / opencode-ai 包名） |
 | `tools/brand-surface.mjs` | 品牌棘轮（私有化批次 C）：26 个产品面文件 + 2 份 README 里不许再出现上游 npm 名/平台包名/上游 registry/用户可见 "opencode" 字符串；两份 README 的每处 opencode 必须落在署名行（fork/upstream/anomalyco/MIT/上游/血缘/**包路径**）上；另加全树血缘计数（2026-10-06 实测 9,618 处 / 3,309 文件）（排除 fork 自己的血缘文档与 vendored 内核）——**只许减不许增** |
 | `contracts/hook-liveness.json` | 金样：20 声明 → 14 live / 5 structural / **1 dead（`permission.ask`）** |
-| `contracts/fork-diff.json` | 金样：声明过的分叉面（2026-10-03 实测 **`4670 identical / 257 edited / 113 added / 1705 deleted`**，对上游 6,745 个条目；此前本行写的是 `6539 / 36 / 43 / 57`，那是批次 A 之前的形状，早就没人对着树核过——正是这把尺子存在的理由。added 里含 vendored 内核，deleted 是上游 26 个工作流 + locale README 等，批次 A/B 的 SYNCLOG 逐类记了账） |
+| `contracts/fork-diff.json` | 金样：声明过的分叉面（2026-10-07 记 **`4669 identical / 258 edited / 114 added / 1705 deleted`**，对上游 6,746 个条目；此前本行写的是 `6539 / 36 / 43 / 57`，那是批次 A 之前的形状，早就没人对着树核过——正是这把尺子存在的理由。added 里含 vendored 内核，deleted 是上游 26 个工作流 + locale README 等，批次 A/B 的 SYNCLOG 逐类记了账） |
 | `glasspane-harness/contracts/kernel-vendor.json` | 溯源清单（**在 fork 树里，不在本目录**——subtree split 之后独立仓必须自带溯源清单，`kernel-vendor.mjs` 按 `product.json` 所在目录解析它）：canonical 的 repo/ref/branch/version + **25** 个文件的 sha256/字节数 + 9 份镜像 fixture（`--record` 在对不齐时直接拒绝写） |
-| `contracts/tool-surface.json` | 基线（2026-10-06 复算）：engine 23,110 / 面 A 8,601（**23.39%**，已知越限、只挡再长）/ 面 B 5,056（**13.75%**），并逐文件记着被排除的测试与 vendored 依赖行数（本轮实测：测试 26 文件 1,344 行、内核依赖 11 文件 1,464 行） |
+| `contracts/tool-surface.json` | 基线（2026-10-06 复算）：engine 23,110 / 面 A 8,601（**23.08%**，已知越限、只挡再长）/ 面 B 5,548（**14.89%**），并逐文件记着被排除的测试与 vendored 依赖行数（本轮实测：测试 26 文件 1,474 行、内核依赖 11 文件 1,464 行） |
 | `contracts/surface-semantics.json` | 基线（2026-09-26 首记，2026-10-06 复跑）：**0 命中 / 18 个文件**（mcpShell 13 + fork 5；金样里那份 `filesScanned 15` 是 mcp-shell 长出新文件之前的值，`--check` 不比对扫描集，见下文「闸自己被验过吗」）——两个工具面今天都不判证据语义；规则说明逐条进金样 |
 | `spike/` | E1/E2/E5/E6 的运行时探针与离线 mock 模型（`run.sh` 一键；结论见调研方案 §5.0）。E7（决策链对着真 daemon）在 fork 内：`packages/opencode/script/glasspane-e7-ledger.ts`；E8（压缩钩子对着真宿主，不花钱）也在 fork 内：`packages/opencode/script/glasspane-e8-compaction.ts` |
 

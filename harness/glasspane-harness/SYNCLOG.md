@@ -10,14 +10,16 @@
 `git worktree add` 出的隔离树，`.external/opencode` 做成指回主工作树那份的符号链接
 （README 已记过这种接法实测照跑）。
 
-**改动面（fork-diff，对本轮记录的形状）**：`4670/6745 byte-identical, 257 edited,
-113 added, 1705 deleted` → 记完后 added 114（新增 `packages/opencode/script/installer-selftest.sh`），
-edited 257 不变；改动落在 4 个 added 文件（install.sh / kernel-vendor.mjs / product.json /
-CHANGELOG·SYNCLOG·FORK 三份文档）+ 2 个 edited 文件（`config/config.ts`、
-`tool/glasspane/daemon.ts` 属 added、`generate.ts` 属 added）。
-**占比（tool-surface）**：engine 23,110（60 文件）不变；面 A 8,601 = 23.36%（金样记 23.39%，
-分母随主仓并行批次动）；面 B 5,056 → 记完后 <见下行实测>。本轮有意长的行：安装器自测
-脚本、跨读与 declared-mode 两段、传输层四条分支、generate.ts 的校验，全在同批 `--record`。
+**改动面（fork-diff）**：开工 HEAD 上实测 `4670/6745 byte-identical, 257 edited,
+113 added, 1705 deleted`；本轮记完为 **`4669/6746, 258 edited, 114 added, 1705 deleted`**
+（added +1＝新增 `packages/opencode/script/installer-selftest.sh`；edited +1 / identical −1
+＝`packages/opencode/script/generate.ts` 第一次与上游字节不同）。
+**占比（tool-surface）**：engine 23,110（60 文件）不变；面 A 8,601 = **23.08%**（记前金样
+写 23.39%，同一棵树、分母随主仓并行批次动过）；面 B **5,056 → 5,548（+492，14.89%）**。
+排除项照记：测试 26 文件 1,474 行、vendored 内核 11 文件 1,464 行。本轮有意长的行是
+安装器自测脚本、跨读与 declared-mode 两段、传输层四条分支与 generate.ts 的校验，
+同批 `--record`；`fork-diff --record` 拒过第一次（"on disk but not committed"＝新增文件
+还没进树），所以金样落在紧随的第二个提交里，HEAD 上两把尺子都是绿的。
 **血缘（brand-surface）**：26 产品面文件 + 2 份文档，0 命中；lineage **9,618 → 9,627**
 （+9 / +1 文件），增处全部是"写下被改掉的那个名字"的说明与新脚本 usage 头里的路径，
 金样 `lineageNote` 逐条记了；反证成立（再加一处即红，还原后绿）。
