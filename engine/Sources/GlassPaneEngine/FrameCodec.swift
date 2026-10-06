@@ -48,6 +48,19 @@ public struct FrameCodec {
     public var pendingBytes: Int {
         buffer.count
     }
+
+    /// 超长帧正在丢弃中：buffer 已被清空，但对端还停在**同一行**里没写换行。
+    public var isDiscardingOversizeFrame: Bool {
+        discardUntilNewline
+    }
+
+    /// "这一行还没完"的唯一判据。`pendingBytes > 0` 判断不了它：丢弃超长帧时
+    /// buffer 被清零，而 4 MiB 之后的每个字节都还在同一行里。真机上这不只是诊断
+    /// 口径——daemon 一次只服务一个客户端，写满 4 MiB 就停手的对端会把读环永久
+    /// 卡在 read() 上，其余客户端全被锁在门外（B-12）。
+    public var awaitsNewline: Bool {
+        !buffer.isEmpty || discardUntilNewline
+    }
 }
 
 /// One parsed request frame (P0 spec §3.2).
@@ -66,6 +79,22 @@ public enum EngineMethod: String, CaseIterable {
     case captureView = "capture_view" // 一次性视觉审查通道（PNG 到调用方，引擎不落盘）
     case probeStatus = "probe_status" // P6 spec v6.0 §5.4
     case shutdown
+}
+
+extension EngineMethod {
+
+    /// `hello` 的 `capabilities` 清单＝本表去掉两个纯传输方法（`hello` 是承载清单的
+    /// 握手本身，`shutdown` 是运维动作而非代理可使的能力）。这里从前是 EngineCore
+    /// 手抄的字面量，已与真源漂移（报了线上不存在的 `probe`，漏掉 attach/
+    /// last_evidence/probe_status）且没有读者会报错——所以清单只能派生，不许再手抄。
+    public static let capabilityMethods: [EngineMethod] = allCases.filter {
+        $0 != .hello && $0 != .shutdown
+    }
+
+    /// 对外协商的线名（与 `RequestParser` 接受的 `method` 字段同一拼写）。
+    public static var capabilityWireNames: [String] {
+        capabilityMethods.map(\.rawValue)
+    }
 }
 
 /// A request frame that could not be parsed into a valid request. `id` is

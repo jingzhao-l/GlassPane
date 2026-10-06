@@ -76,6 +76,72 @@ final class FrameCodecTests: XCTestCase {
         }
     }
 
+    // MARK: - 半行超时（B-12：超长丢弃态也是"还在同一行里"）
+
+    /// 丢弃超长帧时 buffer 已被清空，所以"还有没有半行"绝不能只问 pendingBytes。
+    func testCodecReportsTheDiscardingStateWhileAnOversizeLineIsUnterminated() {
+        var codec = FrameCodec()
+        let events = codec.append(Data(repeating: 0x61, count: FrameCodec.maxFrameBytes + 1))
+        XCTAssertTrue(events.isEmpty, "没有换行就没有事件：这一行还悬着")
+        XCTAssertEqual(codec.pendingBytes, 0, "丢弃时 buffer 被清空——旧读环据此认定没有半行")
+        XCTAssertTrue(codec.isDiscardingOversizeFrame, "得能问出「正在丢弃超长帧」这个状态")
+        XCTAssertTrue(codec.awaitsNewline, "对端确实还停在同一行里")
+
+        XCTAssertTrue(codec.append(Data(repeating: 0x62, count: 4_096)).isEmpty)
+        XCTAssertTrue(codec.awaitsNewline, "继续滴字节仍然是同一行，不是新的一行")
+
+        XCTAssertEqual(codec.append(Data("\n".utf8)), [.oversize])
+        XCTAssertFalse(codec.isDiscardingOversizeFrame, "换行到了，丢弃结束")
+        XCTAssertFalse(codec.awaitsNewline)
+    }
+
+    /// 写 >maxFrameBytes 然后停手的对端必须在绝对时限里被断开：daemon 一次只服务
+    /// 一个客户端，没有这条时限就是拿整机的一次性通道赌对端的自觉。
+    func testOversizeStreamWithNoNewlineIsTimedOutByThePartialLineDeadline() throws {
+        var codec = FrameCodec()
+        var fakeNow: TimeInterval = 1_000
+        let clock: () -> TimeInterval = { fakeNow }
+
+        _ = codec.append(Data(repeating: 0x61, count: FrameCodec.maxFrameBytes + 1))
+        let deadline = try XCTUnwrap(
+            SocketServer.partialLineDeadline(for: codec, existing: nil, now: clock),
+            "超长丢弃态也必须武装绝对时限"
+        )
+
+        // 对端接着滴字节：每轮都仍在同一行，时限不得被顶后（那是空闲计时器的语义）。
+        for round in 1...10 {
+            fakeNow += 5
+            _ = codec.append(Data(repeating: 0x62, count: 4_096))
+            let held = try XCTUnwrap(
+                SocketServer.partialLineDeadline(for: codec, existing: deadline, now: clock)
+            )
+            XCTAssertEqual(held.elapsed(), TimeInterval(round * 5), accuracy: 1e-9,
+                           "预算按总时长走，不按每轮重置")
+            XCTAssertFalse(held.expired(), "\(SocketServer.partialLineTimeoutSeconds)s 预算还没用完")
+        }
+
+        fakeNow += SocketServer.partialLineTimeoutSeconds
+        XCTAssertNotNil(SocketServer.partialLineDeadline(for: codec, existing: deadline, now: clock))
+        XCTAssertTrue(deadline.expired(), "无换行的超长流最终必须到期，而不是等对端良心发现")
+        XCTAssertEqual(deadline.pollMillis(), 0, "到期后 poll 立即返回，读环据此收口")
+
+        // 对照：一个正常停在半行的对端同样武装（这条旧实现本来就对）。
+        var plain = FrameCodec()
+        _ = plain.append(Data("{\"id\":1".utf8))
+        XCTAssertNotNil(SocketServer.partialLineDeadline(for: plain, existing: nil, now: clock))
+    }
+
+    /// 帧写完（含超长帧的换行到了）时限就撤销——静默的长会话不该被踢。
+    func testPartialLineDeadlineIsWithdrawnOnceTheLineIsComplete() throws {
+        var codec = FrameCodec()
+        let armed = SocketDeadline(seconds: 1)
+        _ = codec.append(Data(repeating: 0x61, count: FrameCodec.maxFrameBytes + 1) + Data("\n".utf8))
+        XCTAssertNil(SocketServer.partialLineDeadline(for: codec, existing: armed))
+        _ = codec.append(Data("{\"id\":2,\"method\":\"hello\"}\n".utf8))
+        XCTAssertNil(SocketServer.partialLineDeadline(for: codec, existing: armed),
+                     "完整帧之间的静默期从不计时，这是既有语义")
+    }
+
     // MARK: - Request parsing
 
     private func parse(_ json: String) -> Result<ParsedRequest, ParseFailure> {

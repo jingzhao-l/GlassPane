@@ -195,6 +195,10 @@ final class ProbeRuntime: @unchecked Sendable {
     static let sendTimeoutMs = 250
     /// How long the reader waits in poll() before re-checking the connection.
     static let receiveTimeoutMs = 2_000
+    /// 一条未完成命令的字节上限，与 daemon 侧 `FrameCodec.maxFrameBytes` 同值。
+    /// 这个读者跑在**被测 app** 里：对端写一条不带换行的流，无界攒字节的 OOM 落在
+    /// 被测量对象身上，测量就此变成对被测应用的攻击面。超限就断开并记账。
+    static let maxInboundLineBytes = 4 * 1024 * 1024
     static let checkpointRetention = 8
     /// How many refusal notes stay readable through `GP.kvcRejections`. Bounded:
     /// a host that registers bad keys in a loop must not be able to grow the
@@ -250,6 +254,8 @@ final class ProbeRuntime: @unchecked Sendable {
     private var droppedWrites = 0
     /// keyPaths refused at registration, lifetime total for this runtime.
     private var rejectedKeys = 0
+    /// 入站超长行被丢弃的次数（对端写了没有换行的一行，超过 maxInboundLineBytes）。
+    private var droppedInboundLines = 0
     /// Their notes, tagged with the object they were refused *for* so `detach`
     /// can undo the bookkeeping symmetrically with the registration.
     private var kvcRejectionNotes: [(subject: ObjectIdentifier, note: String)] = []
@@ -286,6 +292,11 @@ final class ProbeRuntime: @unchecked Sendable {
     var rejectedKeyCount: Int {
         lock.lock(); defer { lock.unlock() }
         return rejectedKeys
+    }
+
+    var droppedInboundLineCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return droppedInboundLines
     }
 
     var kvcRejections: [String] {
@@ -432,6 +443,7 @@ final class ProbeRuntime: @unchecked Sendable {
         let capabilities = currentCapabilitiesLocked()
         let offlineDropped = dropped
         let writeDropped = droppedWrites
+        let inboundDropped = droppedInboundLines
         let appName = appNameValue
         let bundleId = bundleIdValue
         advertisedCapabilities = capabilities
@@ -449,6 +461,9 @@ final class ProbeRuntime: @unchecked Sendable {
             // delivered".
             "droppedEvents": offlineDropped,
             "droppedWrites": writeDropped,
+            // 入站方向同样有丢：daemon 写过一条没有换行的超长行、SDK 断开重连后，
+            // "命令都收到了"必须能被证伪，而不是靠那半行没被执行来侥幸。
+            "droppedInboundLines": inboundDropped,
             // KVC/state registrations the runtime refused (bad keyPath, non-KVC
             // object): a later "state never changed" is only readable against
             // this, or the daemon reports zero for a probe that was never told.
@@ -525,6 +540,14 @@ final class ProbeRuntime: @unchecked Sendable {
                        let dict = object as? [String: Any] {
                         handleCommand(dict)
                     }
+                }
+                // 剩下的只有没收尾的那半行——它与 daemon 侧帧上限同宽时，这条流
+                // 已经不可能被正常解释了：断开这条连接，别在被测进程里继续攒字节。
+                if partial.count > ProbeRuntime.maxInboundLineBytes {
+                    lock.lock()
+                    droppedInboundLines += 1
+                    lock.unlock()
+                    return
                 }
                 continue
             }
@@ -949,6 +972,7 @@ final class ProbeRuntime: @unchecked Sendable {
         offlineBuffer = []
         dropped = 0
         droppedWrites = 0
+        droppedInboundLines = 0
         rejectedKeys = 0
         kvcRejectionNotes = []
         advertisedCapabilities = []

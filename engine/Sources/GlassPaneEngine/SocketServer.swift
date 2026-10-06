@@ -261,7 +261,12 @@ public final class SocketServer {
                 case .ready:
                     break
                 case .timedOut:
-                    log.error("client sent \(codec.pendingBytes) byte(s) with no newline within \(Int(Self.partialLineTimeoutSeconds))s — closing the connection instead of waiting forever")
+                    // 丢弃超长帧时 pendingBytes 恒为 0，照原样打印就成了"客户端
+                    // 一个字节都没发却卡住了我们"——原因恰恰在它发了太多字节。
+                    let buffered = codec.isDiscardingOversizeFrame
+                        ? "an oversize frame being discarded"
+                        : "\(codec.pendingBytes) buffered byte(s)"
+                    log.error("client left an incomplete line (\(buffered)) with no newline within \(Int(Self.partialLineTimeoutSeconds))s — closing the connection instead of waiting forever")
                     return
                 case .failed(let code):
                     log.error("client poll failed: \(BoundedSocket.errnoText(code)) (errno \(code)) — closing connection")
@@ -288,10 +293,21 @@ public final class SocketServer {
                 let response = dispatcher.handle(event)
                 guard writeAll(clientFD, response) else { return }
             }
-            lineDeadline = codec.pendingBytes > 0
-                ? (lineDeadline ?? SocketDeadline(seconds: Self.partialLineTimeoutSeconds))
-                : nil
+            lineDeadline = Self.partialLineDeadline(for: codec, existing: lineDeadline)
         }
+    }
+
+    /// 半行绝对时限的武装判据（纯函数：假时钟可驱动，不必开真 socket）。
+    /// 用 `codec.awaitsNewline` 而不是 `pendingBytes > 0`：超长帧丢弃期间 buffer
+    /// 是空的，对端却确实还停在同一行里。已武装的时限不被后续字节顶掉——那是
+    /// **一次未完成帧的总预算**，不是空闲计时器（见 FrameCodec.awaitsNewline）。
+    static func partialLineDeadline(
+        for codec: FrameCodec,
+        existing: SocketDeadline?,
+        now: @escaping () -> TimeInterval = { Date().timeIntervalSince1970 }
+    ) -> SocketDeadline? {
+        guard codec.awaitsNewline else { return nil }
+        return existing ?? SocketDeadline(seconds: partialLineTimeoutSeconds, now: now)
     }
 
     private func writeAll(_ fd: Int32, _ data: Data) -> Bool {
