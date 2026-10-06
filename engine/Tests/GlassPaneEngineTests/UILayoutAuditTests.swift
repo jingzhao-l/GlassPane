@@ -339,6 +339,25 @@ final class UILayoutAuditTests: XCTestCase {
         }
     }
 
+    /// 没挂接就审计：从前通道回一句 AX 不可用，remedy 于是把人支去"给 daemon 勾
+    /// 辅助功能席位"——真正的原因只是这次会话还没 attach 任何窗口。
+    func testEngineAuditUiBeforeAttachIsNotAnAccessibilitySeatProblem() throws {
+        let channel = ScriptedChannel(fallbackTree: TestTrees.standard)
+        let core = EngineCore(channel: channel, evidenceStore: nil, approvalGate: nil)
+
+        XCTAssertThrowsError(try core.auditUI(maxDepth: 6, minHitTargetPt: nil)) { error in
+            let gp = error as? GPError
+            XCTAssertEqual(gp?.code, .notAttached)
+            XCTAssertEqual(gp?.message, "no app attached")
+            let remedy = (gp?.remedy ?? "").lowercased()
+            XCTAssertFalse(remedy.contains("accessibility"),
+                           "未挂接的 remedy 不许提席位：\(gp?.remedy ?? "")")
+            XCTAssertFalse(remedy.contains("launchctl"), "同上：不许把人支去重启服务")
+            XCTAssertTrue(remedy.contains("attach"), "答案就是先挂接：\(gp?.remedy ?? "")")
+        }
+        XCTAssertEqual(channel.geometryCallCount, 0, "闸必须在发出任何 AX 调用之前")
+    }
+
     func testFrameGeometryMathMatchesScreenSemantics() {
         let window = AxFrame(x: 0, y: 0, width: 100, height: 100)
         XCTAssertTrue(AxFrame(x: 10, y: 10, width: 20, height: 20).contained(in: window))

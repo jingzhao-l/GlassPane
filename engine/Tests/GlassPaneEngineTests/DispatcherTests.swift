@@ -38,9 +38,57 @@ final class DispatcherTests: XCTestCase {
         let result = try XCTUnwrap(response["result"] as? [String: Any])
         XCTAssertEqual(result["engine"] as? String, "glasspaned")
         XCTAssertEqual(result["protocolVersion"] as? String, "0")
-        // P6 §5.3: capabilities gained "probe" (6 → 7); audit_ui → 8; capture_view → 9。
-        // 这条计数是对外协商面：hello 里报的能力少一项，客户端就会去调一个不存在的方法。
-        XCTAssertEqual((result["capabilities"] as? [String])?.count, 9)
+        // 计数是对外协商面：hello 里报的能力少一项，客户端就会去调一个不存在的方法。
+        // 项数由 FrameCodec 的方法表派生（规则见 EngineMethod.capabilityMethods），
+        // 内容的同源判定在 `EngineCoreTests.testAdvertisedCapabilitiesAre…`。
+        XCTAssertEqual((result["capabilities"] as? [String])?.count, EngineMethod.capabilityWireNames.count)
+    }
+
+    /// 最后一道兜底帧也必须守住协议形状：三键 error + 原请求 id。从前它回的是
+    /// `{"id":null,"error":{"code":"GP_E_INTERNAL"}}`——id 丢了（调用方会把这条答案
+    /// 挂到别的在途请求上），message/remedy 也没了（兜底帧自己成了协议违规者）。
+    func testLastResortErrorFrameKeepsTheIdAndAllThreeErrorKeys() throws {
+        let hostileMessage = "response serialization failed for \"payload\"\u{1b}]52;c;abc\u{7}"
+        let data = Dispatcher.lastResortErrorFrame(
+            id: 91, code: .internalError, message: hostileMessage
+        )
+        XCTAssertFalse(data.contains(0x0A), "一帧不含行尾，换行由调用方补一次")
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        XCTAssertEqual(object["id"] as? Int, 91, "兜底帧必须还挂着原来那个请求")
+        XCTAssertEqual(Set(object.keys), ["error", "id"])
+        let error = try XCTUnwrap(object["error"] as? [String: Any])
+        XCTAssertEqual(Set(error.keys), ["code", "message", "remedy"],
+                       "错误帧恰好三键：\(error.keys.sorted())")
+        XCTAssertEqual(error["code"] as? String, "GP_E_INTERNAL")
+        XCTAssertEqual(error["message"] as? String, hostileMessage, "转义必须无损读回")
+        XCTAssertEqual(error["remedy"] as? String, GPError.remedy(for: .internalError))
+        XCTAssertTrue(AgentText.containsTerminalControlText(hostileMessage),
+                      "这条样本真的带控制字符，否则上面那条无损断言什么也没测")
+
+        // id 未知时是 JSON null，而不是把键整个丢掉——形状必须与常规错误帧一致。
+        let unknown = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Dispatcher.lastResortErrorFrame(id: nil, code: .payloadTooLarge, message: "too big")
+            ) as? [String: Any]
+        )
+        XCTAssertTrue(unknown["id"] is NSNull)
+        let unknownError = try XCTUnwrap(unknown["error"] as? [String: Any])
+        XCTAssertEqual(Set(unknownError.keys), ["code", "message", "remedy"])
+        XCTAssertEqual(unknownError["remedy"] as? String, GPError.remedy(for: .payloadTooLarge))
+    }
+
+    /// 兜底帧与常规错误帧同形：同一行 NDJSON，恰好一个换行。
+    func testStructuredErrorLineIsOneLineWithThreeErrorKeys() throws {
+        let line = Dispatcher.structuredErrorLine(id: 7, code: .internalError, message: "boom")
+        XCTAssertEqual(line.count { $0 == 0x0A }, 1, "一行一帧")
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: line) as? [String: Any])
+        XCTAssertEqual(object["id"] as? Int, 7)
+        XCTAssertEqual(
+            Set((try XCTUnwrap(object["error"] as? [String: Any])).keys),
+            ["code", "message", "remedy"]
+        )
     }
 
     func testAttachWithBothBundleIdAndPidFails() throws {

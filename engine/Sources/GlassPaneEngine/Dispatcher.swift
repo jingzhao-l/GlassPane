@@ -215,7 +215,7 @@ public final class Dispatcher {
             // Result objects are built from JSON-serializable values only;
             // if serialization still fails, answer with a structured internal
             // error rather than dropping the response.
-            return structuredError(
+            return Self.structuredErrorLine(
                 id: id,
                 code: .internalError,
                 message: "response serialization failed; "
@@ -223,7 +223,7 @@ public final class Dispatcher {
             )
         }
         guard data.count + 1 <= FrameCodec.maxFrameBytes else {
-            return structuredError(
+            return Self.structuredErrorLine(
                 id: id,
                 code: .payloadTooLarge,
                 message: "response of \(data.count) bytes exceeds \(FrameCodec.maxFrameBytes) byte frame cap; "
@@ -236,7 +236,7 @@ public final class Dispatcher {
     /// Builds a small always-serializable error frame for the two cases where
     /// the caller's payload cannot be used. The text is engine-authored and
     /// bounded, so this path can neither overflow the cap nor recurse.
-    private func structuredError(id: Int64?, code: GPErrorCode, message: String) -> Data {
+    static func structuredErrorLine(id: Int64?, code: GPErrorCode, message: String) -> Data {
         var frame: [String: Any] = [
             "error": [
                 "code": code.rawValue,
@@ -252,7 +252,41 @@ public final class Dispatcher {
         let data = (try? JSONSerialization.data(
             withJSONObject: frame,
             options: [.sortedKeys, .withoutEscapingSlashes]
-        )) ?? Data("{\"id\":null,\"error\":{\"code\":\"GP_E_INTERNAL\"}}".utf8)
+        )) ?? lastResortErrorFrame(id: id, code: code, message: message)
         return data + Data([0x0A])
+    }
+
+    /// 序列化都失败时的最后一帧：手写字节，但**形状不变**——三键 error 加原请求 id。
+    /// 从前这句回的是 `{"id":null,"error":{"code":"GP_E_INTERNAL"}}`：丢 id 会让调用方
+    /// 把答案挂到别的在途请求上，缺 message/remedy 则违反"错误帧恰好三键"（P0 §3.2.1）
+    /// ——兜底帧自己就是协议违规者。
+    static func lastResortErrorFrame(id: Int64?, code: GPErrorCode, message: String) -> Data {
+        let idField = id.map(String.init(describing:)) ?? "null"
+        let error = "{\"code\":\(jsonLiteral(code.rawValue)),"
+            + "\"message\":\(jsonLiteral(message)),"
+            + "\"remedy\":\(jsonLiteral(GPError.remedy(for: code)))}"
+        return Data("{\"error\":\(error),\"id\":\(idField)}".utf8)
+    }
+
+    /// 逐字符转义的 JSON 字符串字面量（含首尾引号）。这里不走 JSONSerialization：
+    /// 兜底路径的唯一要求是"不可能再失败一次"。
+    static func jsonLiteral(_ text: String) -> String {
+        var out = "\""
+        for scalar in text.unicodeScalars {
+            switch scalar {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            default:
+                if scalar.value < 0x20 {
+                    out += String(format: "\\u%04X", scalar.value)
+                } else {
+                    out.unicodeScalars.append(scalar)
+                }
+            }
+        }
+        return out + "\""
     }
 }

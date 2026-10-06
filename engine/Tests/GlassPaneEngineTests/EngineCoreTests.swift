@@ -33,8 +33,30 @@ final class EngineCoreTests: XCTestCase {
         XCTAssertNotNil(result["pid"] as? Int)
         XCTAssertEqual(
             result["capabilities"] as? [String],
-            ["act", "observe", "assert_element", "audit_ui", "capture_view", "diagnose", "snapshot", "restore", "probe"]
+            ["attach", "act", "observe", "assert_element", "diagnose", "last_evidence",
+             "snapshot", "restore", "audit_ui", "capture_view", "probe_status"]
         )
+    }
+
+    /// 能力清单必须由线协议方法表**派生**，不是某个文件里手抄的一份。从前这里是 9 项
+    /// 字面量，与 FrameCodec 的 `EngineMethod` 已漂移到互不相认（报一个线上根本没有的
+    /// `probe`，又漏掉 attach/last_evidence/probe_status），而没有任何读者会因此报错——
+    /// 所以这条闸钉的是"两边永远同源"：以后加方法，就不许再有一处忘记跟着改。
+    func testAdvertisedCapabilitiesAreTheWireMethodTableMinusTransportOnlyMethods() throws {
+        let advertised = try XCTUnwrap(core.hello()["capabilities"] as? [String])
+        XCTAssertEqual(advertised, EngineMethod.capabilityWireNames)
+        XCTAssertEqual(
+            Set(advertised),
+            Set(EngineMethod.allCases.map(\.rawValue)).subtracting(["hello", "shutdown"]),
+            "除 hello/shutdown 之外每个可调用方法都必须在清单里，且一个不多"
+        )
+        // 清单里的每个名字都必须真能被解析成方法（曾经有 `probe` 这种两边都不是的）。
+        for name in advertised {
+            XCTAssertNotNil(EngineMethod(rawValue: name), "hello 报了个 daemon 不认的方法名：\(name)")
+        }
+        XCTAssertFalse(advertised.contains("probe"))
+        XCTAssertFalse(advertised.contains("hello"))
+        XCTAssertFalse(advertised.contains("shutdown"))
     }
 
     func testAttachIsIdempotentForSameAppAndKeepsHistory() throws {

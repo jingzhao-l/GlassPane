@@ -24,7 +24,7 @@ public final class EngineCore {
     /// In-memory snapshot retention cap (P1 spec v1.1 §1.5).
     public static let snapshotHistoryLimit = 8
 
-    public let version = "1.7.0"
+    public let version = "1.8.0"
     public let protocolVersion = "0"
     public private(set) var attachedApp: AttachedApp?
     /// Currently active project (P1 spec v1.4 §1.3). Set via attach with projectId.
@@ -194,7 +194,7 @@ public final class EngineCore {
             "version": version,
             "protocolVersion": protocolVersion,
             "pid": Int(ProcessInfo.processInfo.processIdentifier),
-            "capabilities": ["act", "observe", "assert_element", "audit_ui", "capture_view", "diagnose", "snapshot", "restore", "probe"]
+            "capabilities": EngineMethod.capabilityWireNames
         ]
         // P1 v1.2 §11.2：带上 daemon 自身的授权主体与四类席位（未注入钩子时
         // 整段省略——面板据此如实显示"未验证"，不以面板进程的权限冒充）。
@@ -1282,6 +1282,12 @@ public final class EngineCore {
     /// 界面可操作性审计：一次几何遍历 + `UILayoutAudit` 的确定性规则。
     /// 返回值刻意带 `coverage`：没量到的比例越大，结论越弱；量不到就没有"通过"。
     public func auditUI(maxDepth: Int, minHitTargetPt: Double?) throws -> [String: Any] {
+        // 与 capture_view 同一道闸：没挂接时 `geometrySnapshot` 会给一句 AX 不可用，
+        // 而它的 remedy 讲的是"去给 daemon 勾辅助功能席位"——审计因此把人支去修一个
+        // 根本没坏的东西，真正的原因是这次会话还没 attach 任何窗口。
+        guard attachedApp != nil else {
+            throw GPError(code: .notAttached, message: "no app attached")
+        }
         let snapshot: AxGeometrySnapshot
         do {
             snapshot = try channel.geometrySnapshot(maxDepth: maxDepth)
