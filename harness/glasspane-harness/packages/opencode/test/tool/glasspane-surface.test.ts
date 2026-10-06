@@ -147,6 +147,112 @@ describe("the daemon's error frame, measured against a real dead socket", () => 
   })
 })
 
+describe("what the transport accepts as an answer", () => {
+  // Every case here is a frame the *engine* could send and the client must not
+  // launder into success. A unix-socket peer is used for the same reason the
+  // over-sized-frame test uses one: the rules live in the byte loop, so a fabricated
+  // `DaemonReply` would assert the test's own fixture.
+  const withPeer = async (
+    name: string,
+    serve: (conn: net.Socket, request: string) => void,
+    check: (reply: Daemon.DaemonReply) => void | Promise<void>,
+    timeoutMs = 8_000,
+  ) => {
+    const socket = path.join(tmpdir(), `gp-m1-frame-${name}-${Date.now()}-${Math.random().toString(36).slice(2)}.sock`)
+    const server = net.createServer((conn) => {
+      conn.once("data", (chunk) => serve(conn, chunk.toString("utf8")))
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject)
+      server.listen(socket, resolve)
+    })
+    const previous = process.env.GLASSPANE_SOCKET
+    process.env.GLASSPANE_SOCKET = socket
+    try {
+      await check(await Effect.runPromise(Daemon.call("act", {}, timeoutMs)))
+    } finally {
+      if (previous === undefined) delete process.env.GLASSPANE_SOCKET
+      else process.env.GLASSPANE_SOCKET = previous
+      server.close()
+      try {
+        unlinkSync(socket)
+      } catch {
+        // best effort, as above
+      }
+    }
+  }
+  const refusal = (reply: Daemon.DaemonReply, code: string) => {
+    expect(reply.ok).toBe(false)
+    if (reply.ok) return
+    expect(reply.error.code).toBe(code)
+    expect(reply.error.message.length).toBeGreaterThan(0)
+    expect(reply.error.remedy.length).toBeGreaterThan(0)
+  }
+
+  test("a frame with neither result nor error is a refusal, not a success", async () => {
+    // The shape that used to resolve `{ok: true, result: undefined}` and render as
+    // "gp_act: act ok" — the model reading that the click happened when the engine
+    // answered nothing.
+    await withPeer("empty", (conn) => conn.write(`${JSON.stringify({ id: 1 })}\n`), (reply) => refusal(reply, "GP_E_INTERNAL"))
+  })
+
+  test("an explicit null result is still an answer", async () => {
+    // Presence is the question, not truthiness: "no evidence pack for this id" is a
+    // real result the engine sends, and refusing it would invent a failure.
+    await withPeer("null-result", (conn) => conn.write(`${JSON.stringify({ id: 1, result: null })}\n`), (reply) => {
+      expect(reply.ok).toBe(true)
+      if (!reply.ok) return
+      expect(reply.result).toBeNull()
+    })
+  })
+
+  test("a frame that is not an object is a refusal", async () => {
+    await withPeer("bare", (conn) => conn.write("123\n"), (reply) => refusal(reply, "GP_E_INTERNAL"))
+    await withPeer("nullish", (conn) => conn.write("null\n"), (reply) => refusal(reply, "GP_E_INTERNAL"))
+  })
+
+  test("an answer for another request id is not this call's result", async () => {
+    await withPeer("wrong-id", (conn) => conn.write(`${JSON.stringify({ id: 7, result: { clicked: true } })}\n`), (reply) =>
+      refusal(reply, "GP_E_INTERNAL"),
+    )
+  })
+
+  test("a peer that hangs up without answering fails fast, as unreachable", async () => {
+    // The daemon serves one connection at a time; closing it is a reachable state, and
+    // the old code waited out the whole timeout and then blamed a busy input window.
+    await withPeer(
+      "hangup",
+      (conn) => {
+        conn.destroy()
+      },
+      (reply) => refusal(reply, "GP_E_ENGINE_UNREACHABLE"),
+      8_000,
+    )
+  })
+
+  test("a multi-byte title split across data events survives intact", async () => {
+    // "窗口" in UTF-8 straddles the chunk boundary on purpose. Per-chunk
+    // `chunk.toString("utf8")` cut it into replacement characters, which then either
+    // failed JSON.parse (reported as the daemon sending invalid JSON) or reached the
+    // model as a corrupted window title.
+    const frame = `${JSON.stringify({ id: 1, result: { title: "GlassPane 验收窗口 — 设置" } })}\n`
+    const bytes = Buffer.from(frame, "utf8")
+    const marker = Buffer.from("窗", "utf8")
+    const at = bytes.indexOf(marker)
+    // Cut one byte into a three-byte sequence: the first chunk ends mid-character.
+    const split = bytes.subarray(0, at + 1)
+    const rest = bytes.subarray(at + 1)
+    await withPeer("utf8-boundary", (conn) => {
+      conn.write(split)
+      setTimeout(() => conn.write(rest), 10)
+    }, (reply) => {
+      expect(reply.ok).toBe(true)
+      if (!reply.ok) return
+      expect((reply.result as { title?: string }).title).toBe("GlassPane 验收窗口 — 设置")
+    })
+  })
+})
+
 describe("bounds the surface puts on itself", () => {
   test("an over-sized engine frame is refused in-band with a remedy — never a raised defect", async () => {
     // A real unix-socket peer is used on purpose: the cap is enforced in the

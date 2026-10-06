@@ -244,7 +244,20 @@ const notice = existsSync(path.join(forkRoot, "NOTICE")) ? readFileSync(path.joi
 check("notice-license", notice.includes(product.upstream?.tag ?? "v1.18.32"), "NOTICE does not record the pinned upstream tag")
 check("notice-license", notice.includes("MIT"), "NOTICE does not record the upstream license")
 
-// ---- report
+// ---- postinstall identity, read before the verdict is written
+const shimText = read("packages/opencode/bin/glasspane-harness")
+check("postinstall-identity", shimText.includes(`"${product.name}-" + platform`), "bin shim does not resolve the product's platform packages")
+check("postinstall-identity", shimText.includes(`"${product.binary}"`), "bin shim does not carry the product binary name")
+check("runtime-package-names", has("packages/opencode/src/installation/index.ts", `${product.name}@`), "installation/index.ts does not upgrade the product package")
+check("runtime-package-names", has("packages/opencode/src/cli/cmd/uninstall.ts", `"uninstall", "-g", "${product.name}"`), "uninstall.ts does not uninstall the product package")
+
+// The report and the exit are the LAST thing this script does, and there is exactly one
+// of each. Four assertions used to sit below both of them: they still ran, still pushed
+// into `problems`, and could no longer change anything — the lane printed
+// "pipelines agree" and exited 0 with a real disagreement on the books. This is the
+// second time this file has been caught that way (the first was found because the
+// agreement count went 83 → 86), so the shape of the fix is "one decision point, at the
+// bottom", not "remember to put new checks above line N".
 console.log(`product-surface — ${ok.length} agreement(s) held, ${problems.length} problem(s)`)
 for (const p of problems) console.error(`  ✗ ${p}`)
 if (problems.length > 0) {
@@ -253,9 +266,3 @@ if (problems.length > 0) {
   process.exit(1)
 }
 console.log(`product-surface: ${product.name}@${product.version} — manifest, build, publish, installers and pipelines agree`)
-
-const shim = read("packages/opencode/bin/glasspane-harness")
-check("postinstall-identity", shim.includes(`"${product.name}-" + platform`), "bin shim does not resolve the product's platform packages")
-check("postinstall-identity", shim.includes(`"${product.binary}"`), "bin shim does not carry the product binary name")
-check("runtime-package-names", has("packages/opencode/src/installation/index.ts", `${product.name}@`), "installation/index.ts does not upgrade the product package")
-check("runtime-package-names", has("packages/opencode/src/cli/cmd/uninstall.ts", `"uninstall", "-g", "${product.name}"`), "uninstall.ts does not uninstall the product package")

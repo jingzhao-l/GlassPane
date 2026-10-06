@@ -2,6 +2,69 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-07 · v0.7.0：审查批次（两条泳道 + 六把尺子自查），并把"绿但红不了"的四道闸改回能红
+
+每日任务（10:30 那条）。开工 HEAD `439c6ab`（主仓 main），收口在同一棵树上的分支
+`harness/daily-20261006`。工作树在开工后被项目 1 的并行会话弄脏（`engine/*.swift`、
+`installer/test/*`、根 CHANGELOG 与 SECURITY），按纪律**没有**在那棵树上提交：本轮用
+`git worktree add` 出的隔离树，`.external/opencode` 做成指回主工作树那份的符号链接
+（README 已记过这种接法实测照跑）。
+
+**改动面（fork-diff，对本轮记录的形状）**：`4670/6745 byte-identical, 257 edited,
+113 added, 1705 deleted` → 记完后 added 114（新增 `packages/opencode/script/installer-selftest.sh`），
+edited 257 不变；改动落在 4 个 added 文件（install.sh / kernel-vendor.mjs / product.json /
+CHANGELOG·SYNCLOG·FORK 三份文档）+ 2 个 edited 文件（`config/config.ts`、
+`tool/glasspane/daemon.ts` 属 added、`generate.ts` 属 added）。
+**占比（tool-surface）**：engine 23,110（60 文件）不变；面 A 8,601 = 23.36%（金样记 23.39%，
+分母随主仓并行批次动）；面 B 5,056 → 记完后 <见下行实测>。本轮有意长的行：安装器自测
+脚本、跨读与 declared-mode 两段、传输层四条分支、generate.ts 的校验，全在同批 `--record`。
+**血缘（brand-surface）**：26 产品面文件 + 2 份文档，0 命中；lineage **9,618 → 9,627**
+（+9 / +1 文件），增处全部是"写下被改掉的那个名字"的说明与新脚本 usage 头里的路径，
+金样 `lineageNote` 逐条记了；反证成立（再加一处即红，还原后绿）。
+**一致性（product-surface）**：断言 **84 → 88**（4 条此前落在判决之后），0 问题；
+版本线两处（`product.json` 与 `packages/opencode/package.json`）同为 **0.7.0**。
+**契约（hook-liveness）**：20 → **21** 声明（此前 `[a-zA-Z.]+` 漏掉带下划线的
+`experimental.provider.small_model`；补上后 fire-site 正则又不认带泛型的 `trigger<…>(`，
+把活钩子判成 dead，两处都修），实测 live 15 / structural 5 / dead 仍只有 `permission.ask`。
+
+**闸自己被验过吗**：见 `harness/README.md` 同题的"2026-10-06/07 每日批次"段——每条都给了
+破坏点与具名红/具名绿，包括合成树里 kernel-vendor 的 11 条、tool-surface 的"无参照必须拒"、
+product-surface 的 bin-shim 破坏、hook-liveness 的"声明 21 个、派定点为零 → 16 条红"、
+安装器自测对**改动前** install.sh 的 10+ 条红、传输层 6 条对改动前 daemon.ts 的 5 条红、
+配置优先级对改动前 config.ts 的 `Received: "from-legacy"`。
+
+**跑过什么（隔离树，全部实测）**：六把尺子从主仓根；`kernel-vendor --check`（含
+`KERNEL_SRC=/Volumes/Eng-Dev/iterate-skill` 跨读，25 文件按钉点 `2ed342b` 全对）；
+`kernel-vendor --probe` → **DRIFTED**（分支头 `4541cd1` ≠ pin，见下）；固定点测试 4 个文件
+**73 pass / 0 fail**；`packages/tui` 快照 **23 pass / 0 fail**；typecheck opencode/tui/sdk-js/plugin
+四包均 0；`kernel-conformance` 8 fixture 全 ok（默认只跑 vendored 一侧，`--impl` 未跑）；
+`publish.ts --dry-run` 以 0.7.0 pack 通过；主仓公共闸 `check-workflows --self-test`（6 例各自
+验红）+ `check-workflows`（5 份工作流）+ `check-doc-links`（24 份文档 / 223 内链）全绿；
+`installer-selftest.sh` 31 条全过。日志一律整份读，不 tail 后下结论。
+
+**没跑 / 未观测**：整包构建（>10 分钟且要本机信任锚，本轮只跑 preflight + 按包闸）；
+真模型轮次（这台机器没有可用 provider key，花别人的额度属 owner 决定）；真 TUI 会话里的
+观感；`gp_*` 对真 daemon 的完整轮次（daemon 在跑，但证据成包的 `logged` 分支需要一次真
+GUI 操作，本轮未造）；canonical 已前进到 `4541cd1`（其上有 `iterate-kernel@0.1.1` 发到
+npm，`kernel/decision-log-chain` 未合 main）——换分发形态与 `sync-kernel --target=fork`
+都要 owner 点头，本轮只把"跨读读错对象"这条修好，没动 vendored 一个字节。
+
+**发现但未修（写清楚，不当已通过）**：`surface-semantics` 三条规则仍可被典型写法绕过
+（整数阈值、非 8 词表字段、`status` 主语豁免过宽），且 `--check` 不比对扫描集（金样 15
+文件、实测 18）；`kernel-conformance` 单实现路径的"逐字节比较"只比"各次答案一致"，
+chain fixture 的锚点哈希不在单实现 lane 被断言；`brand-surface` 的 wire-identity 正则不认
+`"User-Agent": \`opencode/…\`` 这种写法，实测 20+ 处对外仍自称 opencode（改它要真 key 才能
+验证 provider 握手不被弄坏，属 owner 取舍）；产品面清单是白名单，`packages/desktop/…/runtime.ts`
+里上游 `curl | bash` 之类不在其视野内（desktop 按 product.json 不进产品）；
+`config.ts` 每次启动向用户目录 `npm install @opencode-ai/plugin`（别人发布的包、跟着上游版本号
+走）——删它会让用户自写插件的 import 断掉，属功能取舍；`release.yml` 的 `publish-platform`
+走裸 `npm publish`（绕过 publish.ts 的 README/chmod 断言，registry 上 0.6.4 平台包
+`readmeFilename` 为空即其证据）、无 `concurrency`、npm 发布与被 tag 的树没有 SHA 绑定、
+`targetCommitish` 仍是分支名 `main`；`tool/glasspane/index.ts` 只对部分方法做能力协商，
+`protocolVersion` 读了没人比；决策日志并发写与毫秒归零两条未动。
+
+
+
 ## 2026-09-26 · kernel 集成状态：把"要不要发 npm"从记忆变成记录，并发现溯源链在锚点处断了
 
 owner 问：kernel 为什么不发布到 npm？做双向集成是不是必须发 npm？

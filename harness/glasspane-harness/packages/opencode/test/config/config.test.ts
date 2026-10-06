@@ -322,6 +322,37 @@ it.effect("creates the product-named global config with schema when no global co
   ),
 )
 
+it.effect("the product's own global config file beats the legacy name in the same directory", () =>
+  Effect.gen(function* () {
+    // Both files exist in one config directory and disagree. Precedence inside a
+    // directory is the order the loader merges them — the same mechanism that puts
+    // `.glasspane-harness` above `.opencode` at the *directory* level, and the promise
+    // product.json's `compatRead` makes about the legacy name. The list used to be
+    // product-first, so a leftover `opencode.jsonc` silently won.
+    //
+    // OPENCODE_CONFIG_DIR is what routes this directory through that merge loop: the
+    // branch fires for a directory ending in `.opencode`/`.glasspane-harness` or for the
+    // configured dir. Pointing it at the temp directory is the only way to reach the code
+    // under test from a tmpdir — a first version of this test left it unset, ran the
+    // *other* path, and passed against the un-fixed source. That is recorded here because
+    // "a test that cannot fail" is the failure this repository keeps having to relearn.
+    const dir = yield* tmpdirScoped()
+    yield* writeConfigEffect(dir, schemaConfig({ username: "from-legacy" }), "opencode.jsonc")
+    yield* writeConfigEffect(dir, schemaConfig({ username: "from-product" }), "glasspane-harness.jsonc")
+    yield* withProcessEnv(
+      "OPENCODE_CONFIG_DIR",
+      dir,
+      Effect.gen(function* () {
+        const info = yield* Config.use
+          .get()
+          .pipe(provideInstanceEffect(dir))
+          .pipe(Effect.provide(testInstanceStoreLayer), Effect.provide(LayerNode.compile(CrossSpawnSpawner.node)))
+        expect(info.username).toBe("from-product")
+      }),
+    )
+  }),
+)
+
 it.effect("does not create global config when OPENCODE_CONFIG_DIR is set", () =>
   Effect.gen(function* () {
     const custom = yield* tmpdirScoped()

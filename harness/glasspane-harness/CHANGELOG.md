@@ -10,7 +10,97 @@ contract does not).
 
 ## [Unreleased]
 
-<!-- 0.6.4 已发布；此处留空以备下一批。 -->
+<!-- 内容归入下一版；此处留空以备下一批。 -->
+
+## [0.7.0] - 2026-10-07
+
+判据（pre-1.0）：**minor** —— 用户可见的安装器 CLI 形状（`--version <值>`、`--help`、
+Intel Mac 的兜底通道）与同目录配置优先级都变了，不是纯修复。证据契约（判定仍全在
+Swift、错误帧仍 `{code,message,remedy}`）一条没动。
+
+这一批同样来自一次全面审查（正确性 + 发布/供应链两条泳道），但重点不在"改了多少行"，
+而在**有几道闸当时是绿的却红不了**——逐条给出破坏证据后才算修完（口径见
+`harness/README.md` 的「闸自己被验过吗」）。
+
+### Fixed — 发给用户的东西
+
+- **兜底安装器在 Intel Mac 上把自己拒了。** `uname -m` 报 `x86_64`，而白名单只收
+  npm 词表里的 `arm64|x64`，于是在写着"this product ships darwin-arm64 and
+  darwin-x64"的那一行拒绝了一台正好是 darwin-x64 的机器。加了 `x86_64→x64` /
+  `aarch64→arm64` 的映射层，其余架构照旧明确拒绝。
+- **安装器宣称它没做过的校验。** 收尾无条件打印 `sha256 + GPG verified`，而
+  无 `SHA256SUMS.txt`、资产未被列出、机器上没有 `gpg`、没有 `.asc` 四种情况各自
+  只 warn 后继续安装。现在结论由实际状态拼出（`sha256: verified (SHA256SUMS.txt);
+  GPG: skipped (no .asc published …)`），两者都没验时额外警告"装上的字节未被完整
+  校验"。缺签名仍只警告不拒装是 0.6.4 定的策（区分"策略缺口"与"篡改"），这一版
+  改的是**别把没做的事说成做过**；校验不匹配照旧直接拒装。
+- **`install.sh --version 0.1.0` 100% 失败**（文件开头就教这条写法）：`for arg in "$@"`
+  里的 `shift` 不影响已展开的循环，版本号随后被当成未知参数报错退出。改成 `while/[ $# ]`
+  循环。`--help` 在 `curl … | bash` 形态下用 `sed "$0"` 打印自身，而那时 `$0` 是
+  `bash`，必失败；改为直接输出用法。
+- **GPG 验签失败会杀死整个安装器。** `set -e` 下 `out="$(gpg --verify …)"` 一失败脚本
+  就地退出，其后的 `rc=$?`、警告分支、`rm -rf "$gnupg"` 全是死代码，用户只看到 gpg 的
+  stderr 和一个泄漏的临时目录。改为在 `if` 里取值，清理先行。
+- **引擎没答话时，工具说"成功了"。** `daemon.ts` 对既无 `error` 又无 `result` 的帧
+  回 `{ok:true, result:undefined}`，TUI 于是渲染成 `gp_act: act ok` ——模型读到"这次
+  点下去了"，而引擎其实什么都没答。改为按帧契约拒绝（`{id,result}` 或 `{id,error}`，
+  `result` 缺席＝缺陷）；`result: null`（"这个 id 没有证据包"）仍算合法回答。
+  同批补：`close`/`end` 事件（守护进程一次只服务一条连接，此前挂断要空等满 30/60 秒
+  超时，remedy 还教 agent"别动鼠标键盘"）、响应 `id` 核对、跨 chunk 的 UTF-8 解码
+  （CJK 窗口标题此前会被截成替换字符，再报成"引擎发的不是合法 JSON"）。
+- **同目录里旧名字的配置赢过新名字。** `~/.config/glasspane-harness/` 下四个候选文件的
+  合并顺序把 `glasspane-harness.jsonc` 排在 `opencode.jsonc` 之前，而"后合并者赢"正是
+  `product.json.compatRead`、`config/paths.ts:26-31` 与本文件自己（项目级那段）写的
+  规则——于是遗留文件静默劫持产品配置。改成遗留在前、产品在后。
+- **构建把第三方响应原文当源码插进二进制。** `script/generate.ts` 取
+  `https://models.dev/api.json` 的响应体**原文**交给 `Bun.build({define})`，而 `define`
+  是源码文本替换：JSON 恰好是合法表达式所以一直没出事。现在要求 2xx、必须是 JSON
+  对象、每个 provider 是对象，再重新序列化——非法响应让构建点名失败，不再可能成为
+  发给所有用户的那份二进制里的代码。
+
+### Fixed — 闸自己（这几条在坏的时候都是绿的）
+
+- **`kernel-vendor` 的跨读读的是"碰巧 checkout 的那一支"，却把结论标成钉点。**
+  实测：canonical 检在 `main`、pin 是 `kernel/decision-log-chain@2ed342b`，25 个与
+  清单逐字节一致的文件报了 9 条红，remedy 写"backflow or drop it"。改为按
+  `git show <ref>:kernel/<file>` 从对象库读；对象不在场时大声声明"未跨读"而不是判红；
+  canonical 工作树脏不再污染测量。`checkDeclaredMode()` 一直在找一条任何布局下都不存在
+  的路径 ⇒ `kernel.mode` 与树的形态是否一致**从未被检查过**，现已执行并两条验红。
+- **`product-surface` 的 4 条断言落在判决之后**（打印与 `process.exit(1)` 都发生在它们
+  之前），把 bin shim / 升级包名 / 卸载包名改回上游写法照样绿。收成底部唯一一处判决，
+  断言计数 **84 → 88**。
+- **`hook-liveness` 缺参照检出时 `TypeError` 退 1**，而 1 的语义是"上游坏了，冻结升级"
+  ——把"这台机器没克隆"报成了上游事故（现退 2 并指向 `--offline`）。钩子名正则不认
+  下划线，`experimental.provider.small_model` 被漏掉（声明 21、金样 20）；补上后又发现
+  fire-site 正则不认带泛型的 `plugin.trigger<"…">(`，会把**活的**钩子判成 dead。
+  金样重记为 21（live 15 / structural 5 / dead 仍只有 `permission.ask`），并加了
+  "声明解析出 0 个名字＝无法测量（退 2）"的兜底。
+- **`tool-surface` 的 `--record` 会在没有参照克隆时把沿用行数盖成新基线**（此后该 lane
+  对 edited 文件的增长永久失明）；无参照时面 B 还会把"上游文件改名而来"算成我们写的行
+  （同一棵树 5,115 vs 6,203）。现在两种都拒绝，且无参照 lane 拒绝断言面 B 在限内。
+- **`brand-surface` 在产品语言目录被搬走时抛 ENOENT 退 1**（会被读成"品牌漂移"），
+  改为退 2 并写明"跑不了不等于过"。
+
+### Internal
+
+- 新增 `packages/opencode/script/installer-selftest.sh`：桩 curl/uname/npm/gpg，把
+  GitHub 兜底通道**离线跑完**（31 条断言，含校验不匹配必须拒装、无清单必须不说"已验"）。
+  此前这条路径没有任何测试碰过，`product-surface` 的 `--dry-run` 也走不到它。
+- 新增固定点测试 7 条：`test/tool/glasspane-surface.test.ts` 传输层 6 条、
+  `test/config/config.test.ts` 同目录优先级 1 条；每条都对**改动前**的源码跑出具名红。
+- `harness/README.md` 的金样数字全部按本轮实测校正（fork-diff 四桶、面 A/面 B、
+  血缘计数、product-surface 断言数、surface-semantics 扫描集），并把 `kernel-vendor`
+  清单与 fixture 的真实路径写对（它们在 fork 树里，不在 `harness/contracts/`）。
+- `FORK.md` 订正两处与代码不符的主张：仓里没有 `--embed-web-ui` 这个 flag（内嵌自
+  2026-09-25 起是默认，反向开关是 `--skip-embed-web-ui`），以及"本 pin 的内核没有
+  `dimensionContext`"——重新钉 pin 后它已在 `vendor/kernel/src/dimension-context.ts:179`。
+
+### 未观测（不写成通过）
+
+真模型轮次仍未跑（这台机器上没有可用的 provider key，且花别人的额度该由 owner 决定）；
+真 TUI 会话里的观感仍未观测（`gp_*` 需要 daemon 席位齐，本轮只跑到无头 `serve` 形态）；
+`packages/{app,session-ui,desktop}` 与 TUI 的关系仍是待决项；canonical kernel 已前进到
+`4541cd1` 并发到 npm（`iterate-kernel@0.1.1`），是否改换分发形态属 owner 裁决。
 
 ## [0.6.4] - 2026-10-03
 

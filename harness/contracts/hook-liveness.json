@@ -7,7 +7,7 @@
     "packages/opencode/src",
     "packages/core/src"
   ],
-  "observedAt": "2026-09-24",
+  "observedAt": "2026-10-06",
   "hooks": [
     {
       "name": "chat.message",
@@ -178,6 +178,21 @@
         {
           "file": "packages/opencode/src/session/llm/request.ts",
           "line": 70
+        }
+      ],
+      "kind": "live"
+    },
+    {
+      "name": "experimental.provider.small_model",
+      "declaredAt": "index.ts:297",
+      "fireSites": [
+        {
+          "file": "packages/opencode/src/provider/provider.ts",
+          "line": 1953
+        },
+        {
+          "file": "packages/opencode/src/provider/provider.ts",
+          "line": 1954
         }
       ],
       "kind": "live"

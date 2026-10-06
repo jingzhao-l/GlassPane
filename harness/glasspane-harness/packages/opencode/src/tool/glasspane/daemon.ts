@@ -26,6 +26,9 @@ export const TIMEOUT_MS = {
 
 export const MAX_FRAME_BYTES = 4 * 1024 * 1024
 
+/** One request per connection, so the id is a constant — and it is echoed back to us. */
+const REQUEST_ID = 1
+
 export interface DaemonError {
   code: string
   message: string
@@ -89,11 +92,47 @@ function rawRequest(method: string, params: object, timeoutMs: number): Promise<
     })
 
     socket.on("connect", () => {
-      socket.write(`${JSON.stringify({ id: 1, method, params })}\n`)
+      socket.write(`${JSON.stringify({ id: REQUEST_ID, method, params })}\n`)
     })
 
-    socket.on("data", (chunk) => {
-      buffer += chunk.toString("utf8")
+    // Decoding is the socket's job, not ours per chunk. `chunk.toString("utf8")` on
+    // every data event splits a multi-byte sequence that straddles the boundary, and
+    // the daemon writes application titles and AX labels — CJK is ordinary input here.
+    // The mangled bytes then either fail `JSON.parse` (reported as the daemon sending
+    // invalid JSON, blaming the engine for our decoder) or parse with U+FFFD baked
+    // into a title the agent reads back as fact.
+    socket.setEncoding("utf8")
+
+    // The daemon serves one connection at a time (SocketServer.swift). When it closes
+    // the pipe without answering, `data` never fires and nothing else does either —
+    // so the request used to sit until the 30s (or 60s) timer expired, then advise the
+    // agent to "stop moving the mouse and keyboard", pointing at an input window for
+    // what was a connection the server had already hung up.
+    socket.on("close", () => {
+      if (buffer.length === 0 || buffer.indexOf("\n") < 0) {
+        finish(
+          failure(
+            "GP_E_ENGINE_UNREACHABLE",
+            `the background service closed the connection before answering "${method}"`,
+            `another client may hold the daemon's single connection slot; check with \`launchctl print gui/$(id -u)/com.glasspane.daemon\` and retry ${method} once it is free`,
+          ),
+        )
+      }
+    })
+    socket.on("end", () => {
+      if (buffer.length === 0 || buffer.indexOf("\n") < 0) {
+        finish(
+          failure(
+            "GP_E_ENGINE_UNREACHABLE",
+            `the background service closed the connection before answering "${method}"`,
+            `another client may hold the daemon's single connection slot; check with \`launchctl print gui/$(id -u)/com.glasspane.daemon\` and retry ${method} once it is free`,
+          ),
+        )
+      }
+    })
+
+    socket.on("data", (chunk: string) => {
+      buffer += chunk
       if (Buffer.byteLength(buffer) > MAX_FRAME_BYTES) {
         finish(failure("GP_E_PAYLOAD_TOO_LARGE", `the daemon sent more than ${MAX_FRAME_BYTES} bytes before a frame boundary`, "retry with a narrower query (smaller maxDepth, or a role filter)"))
         return
@@ -108,7 +147,27 @@ function rawRequest(method: string, params: object, timeoutMs: number): Promise<
         finish(failure("GP_E_INTERNAL", `the daemon sent a frame that is not valid JSON: ${frame.slice(0, 160)}`, "read the daemon log at ~/.glasspane/installer-daemon.log and report the line to the maintainers — the shell cannot repair this"))
         return
       }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        finish(
+          failure(
+            "GP_E_INTERNAL",
+            `the daemon answered "${method}" with something that is not a frame: ${JSON.stringify(parsed)?.slice(0, 160) ?? String(parsed)}`,
+            "the engine's reply is a JSON object carrying `result` or `error`; read ~/.glasspane/installer-daemon.log — this tool will not report success on a frame it cannot read",
+          ),
+        )
+        return
+      }
       const reply = parsed as { id?: unknown; result?: unknown; error?: Partial<DaemonError> }
+      if (reply.id !== REQUEST_ID) {
+        finish(
+          failure(
+            "GP_E_INTERNAL",
+            `the daemon answered id ${JSON.stringify(reply.id)} while this request was id ${REQUEST_ID} ("${method}")`,
+            "the frame in hand is not the answer to this call; reading it as if it were would attribute one method's result to another",
+          ),
+        )
+        return
+      }
       if (reply && typeof reply.error === "object" && reply.error) {
         finish({
           ok: false,
@@ -125,7 +184,24 @@ function rawRequest(method: string, params: object, timeoutMs: number): Promise<
         })
         return
       }
-      finish({ ok: true, result: reply?.result })
+      // `{id, result}` or `{id, error}` — and `result` may legitimately be `null`
+      // ("no evidence pack for this id"), so presence is the question, not truthiness.
+      // A frame carrying neither was, until now, resolved as `{ok: true, result:
+      // undefined}`, which the tool layer renders as "gp_act: act ok": the model reads
+      // that the click happened when the engine answered nothing at all. A transport
+      // that manufactures success out of an empty response is a false green inside the
+      // one component whose whole job is to carry the engine's verdict unchanged.
+      if (!Object.prototype.hasOwnProperty.call(reply, "result")) {
+        finish(
+          failure(
+            "GP_E_INTERNAL",
+            `the daemon answered "${method}" with neither a result nor an error`,
+            "the engine's frame contract is `{id, result}` or `{id, error}`; a frame with neither is an engine-side defect — read ~/.glasspane/installer-daemon.log, and do not treat this call as having done anything",
+          ),
+        )
+        return
+      }
+      finish({ ok: true, result: reply.result })
     })
 
     // Connect only after every listener exists. A pipe that does not exist can

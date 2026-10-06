@@ -454,7 +454,15 @@ const layer = Layer.effect(
           // [gp] Either directory name is a project config dir (product first,
           // legacy kept); the file list inside already prefers the product names.
           if (dir.endsWith(".opencode") || dir.endsWith(".glasspane-harness") || dir === Flag.OPENCODE_CONFIG_DIR) {
-            for (const file of ["glasspane-harness.json", "glasspane-harness.jsonc", "opencode.json", "opencode.jsonc"]) {
+            // Merge order is precedence order: the later file wins (same rule that makes
+            // the product's *directory* win in ConfigPaths.directories, and the same rule
+            // this file obeys for project configs above). The list used to be product
+            // first, legacy last — so inside one directory a stale `opencode.jsonc`
+            // overrode `glasspane-harness.jsonc`, which is the opposite of what
+            // product.json's `compatRead` claims ("lower precedence than the product")
+            // and of the comment at paths.ts:26-31. Legacy names are read for
+            // compatibility, not to win.
+            for (const file of ["opencode.json", "opencode.jsonc", "glasspane-harness.json", "glasspane-harness.jsonc"]) {
               const source = path.join(dir, file)
               yield* Effect.logDebug(`loading config from ${source}`)
               yield* merge(source, yield* loadFile(source, authEnv))

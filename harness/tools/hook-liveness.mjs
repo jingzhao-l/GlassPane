@@ -100,12 +100,18 @@ function parseHooks(file) {
   const body = text.slice(bodyStart + 1, i)
   const names = []
   const lineOf = (idx) => text.slice(0, idx).split("\n").length
-  const re = /^[ \t]{2}"([a-zA-Z.]+)"\??:/gm
+  // Hook names carry dots AND underscores: `experimental.provider.small_model`
+  // (packages/plugin/src/index.ts:297 on the pin) is a declared extension point, and
+  // a `[a-zA-Z.]+` class simply did not match it. Silent non-match is the worst
+  // outcome a name-pattern can have: the checker reported 20 hooks for a declaration
+  // of 21, and had that hook's dispatch site ever disappeared the alarm would have
+  // stayed quiet — this tool exists specifically to catch "declared, never dispatched".
+  const re = /^[ \t]{2}"([a-zA-Z0-9_.]+)"\??:/gm
   let m
   while ((m = re.exec(body)) !== null) {
     names.push({ name: m[1], declaredAt: `${path.basename(file)}:${lineOf(bodyStart + 1 + m.index)}` })
   }
-  const reUn = /^[ \t]{2}([a-zA-Z]+)\??:/gm
+  const reUn = /^[ \t]{2}([a-zA-Z0-9_]+)\??:/gm
   while ((m = reUn.exec(body)) !== null) {
     if (!names.some((n) => n.name === m[1])) {
       names.push({ name: m[1], declaredAt: `${path.basename(file)}:${lineOf(bodyStart + 1 + m.index)}` })
@@ -120,6 +126,13 @@ function parseHooks(file) {
  *   A) `trigger(` ... `"<name>"`   (name may sit on the following line)
  *   B) `hook["<name>"]` / `hooks["<name>"]` bracket lookup by literal
  * Anything else (prose, docs, type-only re-export) is not a fire site.
+ *
+ * A dispatch through a generic — `plugin.trigger<"experimental.provider.small_model">(`
+ * at packages/opencode/src/provider/provider.ts:1953 on the pin — was invisible to the
+ * first pattern, which only allowed `trigger(` or `trigger.x(`. The hook was then
+ * reported DEAD although the engine dispatches it every run, and the only symptom was a
+ * freeze recommendation with no cause. A matcher that reads a live extension point as
+ * dead is as bad as the reverse: both teach people to distrust the verdict.
  */
 function findFireSites(files, name) {
   const quoted = new RegExp(`["']${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`, "g")
@@ -130,7 +143,7 @@ function findFireSites(files, name) {
       quoted.lastIndex = 0
       if (!quoted.test(lines[i])) continue
       const window = lines.slice(Math.max(0, i - 4), Math.min(lines.length, i + 2)).join("\n")
-      const isTrigger = /\btrigger\s*(?:\.\w+)?\s*\(/.test(window)
+      const isTrigger = /\btrigger\s*(?:\.\w+)?\s*(?:<[^()]*?>)?\s*\(/.test(window)
       const isLookup = new RegExp(`\\b(?:hooks?|plugin|p)\\s*\\[\\s*["']${name.replace(/\./g, "\\.")}["']\\s*\\]`).test(
         lines[i],
       )
@@ -165,6 +178,11 @@ function observe(pin, { expectTag = true } = {}) {
   for (const dir of pin.scanDirs) files.push(...walk(path.join(checkout, dir)))
   files.root = checkout
   const declared = parseHooks(hooksFile)
+  // A declaration list that parses to nothing is not "no hooks": it is the pattern
+  // failing to see the hooks, and every downstream answer would be vacuously true.
+  if (declared.length === 0) {
+    fail(2, `parsed 0 hook names out of ${pin.hooksFile} — the Hooks declaration shape changed; fix the parser before trusting any verdict`)
+  }
   return {
     version,
     hooks: declared.map((d) => {
@@ -270,6 +288,19 @@ if (mode === "probe") {
   }
   console.log(`probe ${pin.repo}@${label} vs golden ${pin.tag}: plugin surface intact (${observed.length} hooks)`)
   process.exit(0)
+}
+
+// A missing checkout used to fall straight into the loop below and die on
+// `observed is not iterable` with exit 1 — and exit 1 in this tool means "upstream
+// broke the contract, freeze the upgrade". A machine that simply has no 223 MB
+// reference clone is not evidence about upstream. Say what cannot be measured (exit 2)
+// and point at the lane that can run without it.
+if (!observed) {
+  fail(
+    2,
+    `--check needs the reference checkout at ${process.env.HARNESS_UPSTREAM_CHECKOUT || pin.checkout}; upstream was NOT observed. ` +
+      "Run `node harness/tools/hook-liveness.mjs --offline` for a lane that does not read upstream.",
+  )
 }
 
 let drift = 0

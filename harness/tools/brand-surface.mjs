@@ -286,8 +286,18 @@ function scan() {
   // the built-in skill is injected into every session: its name and body are surface
   if (existsSync(path.join(forkRoot, "packages/core/src/plugin/skill/customize-opencode.md")))
     hits.push({ file: "packages/core/src/plugin/skill/customize-opencode.md", rule: "first-party-gateway", count: 1 })
-  for (const locale of readdirSync(path.join(forkRoot, "packages/app/src/i18n"))) {
-    const text = readFileSync(path.join(forkRoot, "packages/app/src/i18n", locale), "utf8")
+  // The locale directory is a scan input, not a guarantee: when a batch moves it, the
+  // honest answer is "this rule could not run" (exit 2, the code this file already uses
+  // for an empty scan at :370). Reading the tree as "no brand drift" on an ENOENT would
+  // surface one layer up as exit 1 — a *finding* — and the next person would spend the
+  // afternoon hunting a string that was never there.
+  const i18nDir = path.join(forkRoot, "packages/app/src/i18n")
+  if (!existsSync(i18nDir)) {
+    console.error(`brand-surface: no ${path.relative(repoRoot, i18nDir)} — the locale rule cannot run, which is not the same as passing`)
+    process.exit(2)
+  }
+  for (const locale of readdirSync(i18nDir)) {
+    const text = readFileSync(path.join(i18nDir, locale), "utf8")
     // values only: `"key": "... opencode ..."`. Key names are internal identifiers.
     for (const m of text.matchAll(/"[^"]*"\s*:\s*"[^"]*\bopencode\b[^"]*"/gi))
       hits.push({ file: `packages/app/src/i18n/${locale}`, rule: "first-party-gateway", count: 1 })

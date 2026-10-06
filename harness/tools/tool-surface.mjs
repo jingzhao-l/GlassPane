@@ -194,6 +194,11 @@ function measureFork(golden) {
     // private-isation) the diff sees delete + add, and the whole upstream file would
     // land in "lines we wrote" — 1,019 lines of somebody else's code counted as ours.
     // So: if the bytes match a file upstream deleted, it is a move, and it counts 0.
+    //
+    // There is no clone-free form of that test, and carrying the golden's numbers does
+    // not help because a rename is precisely what the golden does *not* contain. So the
+    // offline lane cannot attribute surface B at all, and `observed.carried` below makes
+    // it say so and refuse instead of printing a number inflated by other people's code.
     if (isPureRename(refDir, abs, rel, fd)) {
       renamed.push({ file: rel, lines: loc(abs) })
       continue
@@ -201,9 +206,7 @@ function measureFork(golden) {
     files.push({ file: rel, kind: undeclared ? "undeclared-vendor" : "added", lines: loc(abs) })
   }
 
-  const prevEdited = new Map(
-    (golden?.surfaces?.fork?.files ?? []).filter((f) => f.kind === "edited").map((f) => [f.file, f.lines]),
-  )
+  const prevEdited = new Map((golden?.surfaces?.fork?.files ?? []).filter((f) => f.kind === "edited").map((f) => [f.file, f.lines]))
   for (const rel of fd.edited ?? []) {
     if (!REF_EXTS.includes(path.extname(rel))) continue
     const abs = path.join(forkDir, rel)
@@ -249,8 +252,18 @@ function measureFork(golden) {
     return fail(`${codeish.length} fork file(s) are ours to measure but every one was excluded — the exclusion rules are wrong, not the surface empty`)
   }
 
-  const carried = unmeasured.length
-    ? `reference clone absent (${refRel}): lines attributed to ${unmeasured.join(", ")} are the previous run's, NOT re-measured`
+  // Only the lane that lacks the clone carries. Writing this unconditionally makes the
+  // refusal bite the measuring lane too — caught the first time `--record` was run against
+  // a tree that *does* have `.external/opencode`, which is exactly the shape of the
+  // "guard that fires on the healthy path" defect this file exists to catch.
+  const carriedParts = []
+  if (unmeasured.length) carriedParts.push(`lines attributed to ${unmeasured.length} edited file(s) are the previous run's`)
+  // The added bucket is named because it is the one that cannot be salvaged: an edited
+  // file carried forward still measured *something* last time, while an added file in a
+  // lane with no clone has never been distinguished from a brand rename at all.
+  if (!hasRef) carriedParts.push("added files have never been checked against upstream, so a rename would be billed as authorship")
+  const carried = carriedParts.length
+    ? `reference clone absent (${refRel}): ${carriedParts.join("; ")} — NOT re-measured`
     : null
   return { files, carried, note: null, excluded: vendor.excluded, tests: excludedTests }
 }
@@ -423,6 +436,19 @@ if (mode === "record") {
     console.error("  Fix the attribution first (fork-diff --record declares which files exist).")
     process.exit(1)
   }
+  // The other way a measurement does not exist is quieter: with no reference clone,
+  // every `edited` file's line count is *carried* from the previous golden instead of
+  // being re-derived from the blobs. --check handles that honestly (it says
+  // NOT re-measured), but --record used to stamp it anyway — and a golden made of
+  // carried numbers can never be grown past: each later run compares the tree against
+  // the figure it just copied, so real growth on an edited file stops being able to go
+  // red on exactly the machines that lack the clone.
+  if (observed.carried) {
+    console.error(`tool-surface: refusing to record — ${observed.carried}`)
+    console.error("  A carried baseline reuses the previous golden's line counts instead of measuring them.")
+    console.error("  Record where the reference clone exists (`harness/upstream.json.checkout`), then --check can re-measure everywhere.")
+    process.exit(1)
+  }
   mkdirSync(path.dirname(goldenFile), { recursive: true })
   writeFileSync(goldenFile, JSON.stringify(observed, null, 2) + "\n")
   console.log(`recorded -> ${path.relative(repoRoot, goldenFile)}`)
@@ -475,6 +501,19 @@ if (observed.surfaces.mcpShell.ratio > observed.limit) {
 
 if (observed.note) {
   console.error(`  ✗ surface B cannot be attributed (${observed.note}) — an unmeasured surface cannot be declared within limits.`)
+  red++
+}
+
+// `.github/workflows/ci.yml` states this contract in its own comment: without the
+// reference clone the tool "故意拒绝", because it cannot tell 1,019 lines of upstream
+// code that we renamed a directory around from 1,019 lines we wrote. The printed number
+// still shows what was counted (and what was carried), but the verdict is a refusal with
+// a remedy, not a green lane over a measurement that does not exist.
+if (observed.carried) {
+  console.error(`  ✗ surface B is not a measurement in this lane: ${observed.carried}`)
+  console.error("    An unattributable surface will not be declared within limits, in either direction.")
+  console.error("    Remedy (documented in harness/README.md):")
+  console.error("      git clone --branch <upstream.json.tag> --depth 1 https://github.com/anomalyco/opencode.git .external/opencode")
   red++
 }
 

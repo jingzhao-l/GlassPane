@@ -34,17 +34,39 @@ error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; }
 step()    { echo -e "\n${BOLD}${BLUE}==>${RESET}${BOLD} $*${RESET}"; }
 
 # ------------------------------------------------------------------ arguments
-for arg in "$@"; do
-  case "$arg" in
+# `for arg in "$@"` with a `shift` inside it cannot consume a value argument: the loop
+# iterates the list captured when it started, so `--version 0.1.0` set VERSION, then
+# fell around to the next iteration and died on "Unknown argument: 0.1.0" — the form the
+# header of this file documents. Positional consumption needs a while/$# loop.
+# `--help` used to print itself with `sed -n '2,10p' "$0"`, which cannot work through
+# `curl ... | bash`, where $0 is `bash` and not this script.
+while [ $# -gt 0 ]; do
+  case "$1" in
     --dry-run) DRY_RUN=1 ;;
-    --version) shift; VERSION="${1:-}"; [ -n "$VERSION" ] || { error "--version needs a value"; exit 1; } ;;
-    --version=*) VERSION="${arg#--version=}" ;;
+    --version)
+      shift
+      [ $# -gt 0 ] && [ -n "${1:-}" ] || { error "--version needs a value"; exit 1; }
+      VERSION="$1"
+      ;;
+    --version=*) VERSION="${1#--version=}" ;;
     --help|-h)
-      sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+      cat <<USAGE
+glasspane-harness installer
+
+  bash scripts/install.sh                  install (npm first, GitHub release asset as fallback)
+  bash scripts/install.sh --dry-run        print the plan, touch nothing
+  bash scripts/install.sh --version 0.1.0  pin a version (also --version=0.1.0)
+
+Environment:
+  GLASSPANE_HARNESS_HOME      fallback install root (default \$HOME/.glasspane-harness)
+  GLASSPANE_HARNESS_NPM       npm package to install (default glasspane-harness)
+  GLASSPANE_HARNESS_RELEASES  base URL for release assets (default this repo's releases)
+USAGE
       exit 0
       ;;
-    *) error "Unknown argument: $arg (try --help)"; exit 1 ;;
+    *) error "Unknown argument: $1 (try --help)"; exit 1 ;;
   esac
+  shift
 done
 
 # ------------------------------------------------------------------ banner
@@ -61,14 +83,23 @@ info "GlassPane Harness — evidence-honest GUI verification for macOS apps"
 # ------------------------------------------------------------------ platform
 step "Detecting platform"
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-ARCH="$(uname -m)"
+MACHINE="$(uname -m)"
+# `uname -m` and npm's architecture vocabulary are not the same string: an Intel Mac
+# reports `x86_64` while the release asset and product.json both say `x64`. There was no
+# mapping here, so the fallback path — the one channel that exists when npm is absent —
+# refused the very architecture this product ships for, on the same line that promised
+# "this product ships darwin-arm64 and darwin-x64".
+case "$MACHINE" in
+  arm64 | aarch64) ARCH="arm64" ;;
+  x86_64 | amd64) ARCH="x64" ;;
+  *)
+    error "Unsupported macOS architecture: $MACHINE (this product ships darwin-arm64 and darwin-x64)"
+    exit 1
+    ;;
+esac
 case "$OS" in
   darwin)
     PLATFORM="darwin-$ARCH"
-    case "$ARCH" in
-      arm64 | x64) ;;
-      *) error "Unsupported macOS architecture: $ARCH (this product ships darwin-arm64 and darwin-x64)"; exit 1 ;;
-    esac
     ;;
   *)
     # macOS-only is a product decision (the engine, the permission model and the
@@ -90,7 +121,7 @@ if [ "$VERSION" = "" ]; then
   info "2) release asset fallback: $RELEASE_BASE (latest release resolved at install time)"
 else
   info "1) npm:  $NPM_SPEC        (preferred: platform selection and updates are npm's job)"
-  info "2) release asset fallback: $RELEASE_BASE/v$VERSION/$PRODUCT-$PLATFORM.zip (sha256 + GPG verified)"
+  info "2) release asset fallback: $RELEASE_BASE/v$VERSION/$PRODUCT-$PLATFORM.zip (checks sha256 against SHA256SUMS.txt, GPG against the asset's .asc)"
 fi
 info "   install root (fallback path only): $INSTALL_ROOT/bin"
 if [ "$DRY_RUN" = "1" ]; then
@@ -184,6 +215,9 @@ YVXa4IEQs7aBxKO+n+T2AvUYiKQ=
 PGPKEY
 )"
 
+GPG_STATE="not-run"
+SHA_STATE="not-run"
+
 verify_asset_gpg() {
   # Verify the release-asset fallback's archive against its `$ASSET.asc` sidecar.
   # Uses a throwaway GNUPGHOME holding only the signing key, then discards it —
@@ -194,27 +228,40 @@ verify_asset_gpg() {
   # variable naming: called with a URL that was not in `$URL`, it died on
   # `URL: unbound variable` under `set -u` rather than verifying anything.
   local file="$1" name="$2" url="$3"
-  local asc="$TMP/$name.asc" gnupg out rc
+  local asc="$TMP/$name.asc" gnupg out rc=0
   info "verifying release asset GPG signature"
   if ! command -v gpg >/dev/null 2>&1; then
+    GPG_STATE="skipped (gpg not on PATH)"
     warn "gpg not found on PATH — skipping release asset GPG provenance (integrity is still checksum-only)"
     return 0
   fi
   if ! curl -fsSL -o "$asc" "$url.asc" 2>/dev/null; then
-    warn "no GPG signature sidecar ($ASSET.asc) published for this release — skipping (unsigned is a policy gap, not tampering)"
+    GPG_STATE="skipped (no .asc published for this asset)"
+    warn "no GPG signature sidecar ($name.asc) published for this release — skipping (unsigned is a policy gap, not tampering)"
     return 0
   fi
   gnupg="$(mktemp -d)"
   chmod 700 "$gnupg"
   printf '%s' "$GLASSPANE_HARNESS_SIGNING_PUBLIC_KEY" | GNUPGHOME="$gnupg" gpg --batch --quiet --import
-  out="$(GNUPGHOME="$gnupg" gpg --batch --quiet --status-fd 2 --verify "$asc" "$file" 2>&1)"
-  rc=$?
-  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q GOODSIG; then
-    success "GPG provenance verified: release asset signature is from the signing key"
+  # `out="$(gpg --verify …)"` under `set -e` ended the whole script the moment a
+  # signature failed to verify: the `rc=$?` below it, the warning it was meant to print,
+  # and the `rm -rf "$gnupg"` after it were all unreachable. What the user saw was gpg's
+  # own stderr and a half-deleted temp dir. An assignment that must not abort the run
+  # takes the branch in the `if`, not in the exit status of the substitution.
+  if out="$(GNUPGHOME="$gnupg" gpg --batch --quiet --status-fd 2 --verify "$asc" "$file" 2>&1)"; then
+    rc=0
   else
-    warn "release asset GPG signature did not verify ($(printf '%s\n' "$out" | head -1)) — continuing, checksum-only"
+    rc=1
   fi
   rm -rf "$gnupg"
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q GOODSIG; then
+    GPG_STATE="verified (signing key)"
+    success "GPG provenance verified: release asset signature is from the signing key"
+  else
+    GPG_STATE="FAILED (signature did not verify)"
+    warn "release asset GPG signature did not verify ($(printf '%s\n' "$out" | head -1)) — continuing, checksum-only"
+  fi
+  return 0
 }
 
 verify_asset() {
@@ -225,12 +272,14 @@ verify_asset() {
   local file="$1" name="$2" sums want got
   sums="$TMP/SHA256SUMS.txt"
   if ! curl -fsSL -o "$sums" "$RELEASE_BASE/v$VERSION/SHA256SUMS.txt" 2>/dev/null; then
+    SHA_STATE="skipped (no SHA256SUMS.txt published for v$VERSION)"
     warn "no SHA256SUMS.txt published for v$VERSION — skipping integrity check (provenance gap, not tampering)"
     return 0
   fi
   # The manifest lists bare filenames (`./name`), so match on the name, not the path.
   want="$(awk -v n="$name" '{ sub(/^\.\//, "", $2); if ($2 == n) print $1 }' "$sums" | head -1)"
   if [ -z "$want" ]; then
+    SHA_STATE="skipped ($name is not listed in SHA256SUMS.txt)"
     warn "$name is not listed in SHA256SUMS.txt — skipping integrity check (coverage gap, not tampering)"
     return 0
   fi
@@ -242,12 +291,14 @@ verify_asset() {
   if [ "$want" != "$got" ]; then
     # A checksum mismatch is not a warning: the bytes are not the bytes that were
     # published, so continuing would install something no manifest vouches for.
+    SHA_STATE="FAILED (checksum mismatch)"
     error "checksum mismatch for $name"
     error "  expected $want"
     error "  actual   $got"
     error "refusing to install. Re-run, or fetch the asset manually and compare against SHA256SUMS.txt."
     exit 1
   fi
+  SHA_STATE="verified (SHA256SUMS.txt)"
   success "sha256 verified against SHA256SUMS.txt"
 }
 
@@ -285,7 +336,17 @@ if [ -z "$INSTALLED_VIA" ]; then
     error "$ASSET did not contain an executable named $PRODUCT — refusing to claim an install"
     exit 1
   fi
-  INSTALLED_VIA="release asset ($ASSET, sha256 + GPG verified)"
+  # The claim is built from what actually happened, not from what the script intends.
+  # This line used to read "sha256 + GPG verified" unconditionally, while four separate
+  # states above it (no SHA256SUMS.txt, the asset not listed, no gpg, no .asc) each
+  # continued the install after a bare warning. A user who ended up with an
+  # entirely-unverified binary still read a green `[OK] installed via … verified`, which
+  # is the one thing this installer must never do: manufacture confidence it did not earn.
+  INSTALLED_VIA="release asset ($ASSET; sha256: $SHA_STATE; GPG: $GPG_STATE)"
+  case "$SHA_STATE/$GPG_STATE" in
+    verified*/*verified*) ;;
+    *) warn "the installed bytes were not fully verified — see the two states in the line above" ;;
+  esac
   case ":$PATH:" in
     *":$INSTALL_ROOT/bin:"*) ;;
     *) warn "$INSTALL_ROOT/bin is not on your PATH — add it:"; echo "     export PATH=\"$INSTALL_ROOT/bin:\$PATH\"" ;;

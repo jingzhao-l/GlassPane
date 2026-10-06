@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 /**
  * kernel-vendor.mjs — the provenance and integrity check for the kernel source
- * vendored into the opencode fork (`harness/glasspane-harness/packages/kernel`).
+ * vendored into the opencode fork (`packages/opencode/vendor/kernel`, 25 files).
+ *
+ * The path and the count are written out because the first version of this header named
+ * `packages/kernel` and "23 files": a reader who went to edit the vendor copy followed
+ * the comment into a directory that does not exist, and the count no longer matched the
+ * manifest it claims to describe. A doc string that points at nothing is a defect, not
+ * decoration.
  *
  * WHY. The recorded decision is that @iterate/kernel is not published separately
  * (P6 §13 — a `file:` dep leaks out of a published manifest, so mcp-shell inlines
@@ -11,6 +17,11 @@
  * source, and *this* tool is what keeps "vendored" from silently becoming "ours":
  * every file is pinned by sha256, and any edit inside the vendor directory turns
  * red — in CI, from the manifest alone, no canonical checkout required.
+ *
+ * NOTE (2026-10-06): that decision is now contested — canonical's
+ * `kernel/decision-log-chain` branch publishes `iterate-kernel` to npm. Nothing here
+ * changes because of it: the fork ships the vendored bytes, and until an owner decides
+ * otherwise this gate is what keeps those bytes the canonical ones at the pinned ref.
  *
  * The accounting consequence is enforced elsewhere: `tool-surface.mjs` reads this
  * manifest and counts these files as a dependency, not as our tool surface.
@@ -124,10 +135,19 @@ function vendoredFiles(dir) {
  * product gets the kernel; if the tree disagrees with the declaration, the declaration
  * is the thing that is wrong — and a mode that is only prose drifts the moment
  * somebody publishes or re-vendors.
+ *
+ * The product file is the one that anchored `productRoot` above. It used to be looked
+ * for at `repoRoot/harness/glasspane-harness/product.json`, a path that exists in no
+ * layout this script runs in (discovery puts repoRoot *at* the directory holding
+ * product.json, both in the monorepo and in the split repo), so the whole guard
+ * returned early and never checked anything — green lanes with nothing behind them.
  */
 function checkDeclaredMode() {
-  const productFile = path.join(repoRoot, "harness", "glasspane-harness", "product.json")
-  if (!existsSync(productFile)) return 0
+  const productFile = path.join(repoRoot, "product.json")
+  if (!existsSync(productFile)) {
+    console.error(`  ✗ no product.json at ${path.relative(repoRoot, productFile) || "."} — kernel.mode is undeclared, and the guard that reads it cannot run`)
+    return 1
+  }
   const product = JSON.parse(readFileSync(productFile, "utf8"))
   const declared = product?.kernel?.mode
   if (!declared) {
@@ -300,30 +320,80 @@ for (const rel of recorded.keys()) {
   }
 }
 
-// Optional stronger form: when a canonical checkout is available, re-verify the
-// bytes against it and that the recorded ref is still the checkout's kernel.
+// Optional stronger form: when a canonical checkout is available, re-verify the bytes
+// against the ref the manifest *names*, read out of that repo's object store.
+//
+// Why not the checkout's working tree: a checkout sits on whatever branch whoever ran
+// this last left it, while `canonical.ref` is what our provenance claims. Reading one
+// and labelling the other reported 9 problems on perfectly healthy bytes (2026-10-06:
+// canonical was on `main`, the pin is `kernel/decision-log-chain@2ed342b`, and all 25
+// files matched their recorded sha256 at the pin), and the remedy text it printed told
+// the reader to drop vendored files that agreed with canonical byte for byte. A checker
+// that cries wolf is worse than no checker — it teaches people to override the gate.
+// Reading the pin also makes this immune to an uncommitted canonical working tree, which
+// `--record` already refuses to bless (see the dirty check above).
+//
+// Whether canonical has *moved* is a different question and belongs to --probe, which
+// asks the remote where the branch points. A branch that simply has not merged the pin
+// is not staleness, and this lane must not claim it is.
 const checkout = process.env.KERNEL_SRC
 if (checkout) {
   const srcKernel = path.join(checkout, "kernel")
   if (!existsSync(path.join(srcKernel, "package.json"))) {
     console.error(`  ✗ KERNEL_SRC=${checkout} has no kernel/ — cannot honour the stronger check`)
     bad++
+  } else if (!manifest.canonical?.ref) {
+    console.error("  ✗ the manifest names no canonical.ref — the stronger check has no coordinates to read")
+    bad++
   } else {
-    let drifted = 0
-    for (const [rel, want] of recorded) {
-      const canonicalFile = path.join(srcKernel, rel)
-      if (!existsSync(canonicalFile)) {
-        console.error(`  ✗ canonical no longer has '${rel}' — the vendor is ahead of canonical (backflow or drop it)`)
-        drifted++
-        continue
+    const ref = manifest.canonical.ref
+    const git = (args, encoding) => execFileSync("git", ["-C", checkout, ...args], { encoding, stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024 })
+    let head = ""
+    let branch = ""
+    try {
+      head = git(["rev-parse", "HEAD"], "utf8").trim()
+      branch = git(["rev-parse", "--abbrev-ref", "HEAD"], "utf8").trim()
+    } catch {
+      head = ""
+    }
+    let pinReachable = false
+    try {
+      git(["cat-file", "-e", `${ref}^{commit}`], "utf8")
+      pinReachable = true
+    } catch {
+      pinReachable = false
+    }
+    if (!pinReachable) {
+      console.log(
+        `kernel-vendor: cross-read NOT performed — this checkout (${checkout}${head ? ` @ ${head.slice(0, 7)} on ${branch}` : ""}) does not have the pinned ref ${ref.slice(0, 7)}. ` +
+          "Canonical's bytes were NOT re-read here, so nothing about them is claimed; a clone that has them (or `git fetch`) turns this lane on.",
+      )
+    } else {
+      let wrong = 0
+      for (const [rel, want] of recorded) {
+        let bytes
+        try {
+          bytes = git(["show", `${ref}:kernel/${rel}`], "buffer")
+        } catch {
+          console.error(`  ✗ '${rel}' is declared vendored but canonical @${ref.slice(0, 7)} has no such file — the manifest's provenance does not match the ref it names`)
+          wrong++
+          continue
+        }
+        const got = sha256(bytes)
+        if (got !== want.sha256) {
+          console.error(
+            `  ✗ canonical @${ref.slice(0, 7)} '${rel}' is ${got.slice(0, 12)} but the manifest says ${want.sha256.slice(0, 12)} — ` +
+              "the recorded provenance mislabels its own ref (re-record from the ref the vendor actually came from; never edit the vendor copy)",
+          )
+          wrong++
+        }
       }
-      if (sha256(readFileSync(canonicalFile)) !== want.sha256) {
-        console.error(`  ✗ canonical's '${rel}' differs from the manifest: the vendor is STALE, re-run --target=fork`)
-        drifted++
+      bad += wrong
+      console.log(`kernel-vendor: ${recorded.size} files cross-checked against canonical @ ${ref.slice(0, 7)} (${manifest.canonical.branch}) in ${checkout}, read from the object store`)
+      if (head && head !== ref) {
+        console.log(`  note: this checkout is at ${head.slice(0, 7)} on '${branch}', not at the pin — that is a branch that has not merged the pin, not staleness. --probe answers "has canonical moved".`)
       }
     }
-    bad += drifted
-    console.log(`kernel-vendor: ${recorded.size} files cross-checked against ${checkout} (canonical @ ${manifest.canonical.ref.slice(0, 7)})`)
   }
 } else {
   console.log(`kernel-vendor: ${recorded.size} files checked against the manifest; canonical bytes NOT re-read (KERNEL_SRC unset) — a vendor that is stale-but-untouched is caught by the fork sync, not here`)

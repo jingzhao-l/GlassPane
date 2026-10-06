@@ -1,6 +1,6 @@
 {
-  "observedAt": "2026-10-03",
-  "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）｜2026-10-03 记 9618（+1，0.6.4 发布说明）：CHANGELOG 的 0.6.4 条目里引用了用户可见字符串 `opencode -s <id>`——那正是该版本修掉的泄露（改成 `glasspane-harness -s <id>`）。发布说明要说清「改了什么」，就必须写出旧值，于是按字面计数 +1。与 9616 / 9617 同类：字样出现在「说明它已被改掉」的位置。反证仍成立——把命令名改回 opencode 会转红。",
+  "observedAt": "2026-10-06",
+  "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
   "rules": [
     {
       "id": "upstream-npm-name",
@@ -30,7 +30,8 @@
   ],
   "hits": [],
   "lineage": {
-    "occurrences": 9618,
-    "filesScanned": 3309
-  }
+    "occurrences": 9627,
+    "filesScanned": 3310
+  },
+  "lineageNote": "2026-10-07 re-record 9618 -> 9627 (+9, +1 file). The increase is prose and guards, not a new user-facing name: the daily review batch wrote CHANGELOG/FORK/harness-README sentences that name the upstream identifier precisely where it says what was changed away (`--embed-web-ui` does not exist, upstream Web UI embedding is the default again, the legacy .opencode/ config dir must lose to the product one), generate.ts names OPENCODE_MODELS_DEV in the comment that explains why its raw body may not be inlined, and the new scripts/installer-selftest.sh counts 1 from the path in its own usage header (packages/opencode/script/). Precedent: 9616/9617/9618 on 2026-10-03 for the same shape. The reverse control still holds: adding one more occurrence to a scanned file goes red."
 }
