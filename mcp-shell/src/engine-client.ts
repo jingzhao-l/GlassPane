@@ -13,6 +13,7 @@ import {
   StreamLineIo,
 } from "./io.js";
 import {
+  GP_E_ENGINE_BACKLOG,
   GP_E_ENGINE_TIMEOUT,
   GP_E_ENGINE_UNREACHABLE,
   GP_E_INTERNAL,
@@ -420,6 +421,30 @@ const NARROWING_AUTHORITY: Record<ShellSurface, string> = {
 };
 
 /**
+ * 背压闸的出路。两条禁令各由一条现场证据撑着：探针本身也要过一次 `call()`，会被
+ * 同一道测量原地拒掉，所以旧文本那句"先用 gp_probe_status 查一下"是一件此刻做不到
+ * 第二次的事；这里唯一测到的是**本进程**的字节水位，不是 daemon 的状态，而旧文本
+ * 却挂了 GP_E_ENGINE_UNREACHABLE 那条重启命令——`livenessProbeDecision` 把点名生命
+ * 周期命令的权力只留给 `unreachable`，换一个可能正跑着 act 的 service 会回滚用户屏
+ * 幕上的动作。"每次重试都只会把队列堆得更深"同样不成立：拒绝发生在 `writeLine` 之前。
+ */
+export function writeBacklogRemedy(backlogBytes: number, limitBytes: number): string {
+  return `this shell wrote nothing: ${backlogBytes} bytes — over this gate's ${limitBytes} — are queued in THIS `
+    + "process for the engine socket, and the service accepted the connection and is not reading it. That is a fact "
+    + "about this shell's buffer, not a diagnosis of why: one long operation and a service wedged solid look "
+    + "identical from here, which is why this answer orders neither a restart nor a probe. Stop sending. Do not "
+    + "retry this call in a loop: every attempt is refused by this same measurement, and a refusal writes no bytes, "
+    + "so a loop moves only the clock, not the queue. What is already queued is the service's to read, so wait for "
+    + "the backlog to drain and send again after that — this gate is re-measured per call, so the first call "
+    + "accepted after the wait is the proof that it drained, and it is a first send rather than a second copy of an "
+    + "action, because nothing went out the first time. While waiting, read the daemon's own log: it is the only "
+    + "side that can say what it is stuck on, and this shell cannot see past its own buffer. For the service "
+    + "installed by this repo's installer that log is `~/.glasspane/installer-daemon.log`, the file its stderr is "
+    + "redirected into, in the same directory as the default socket; a daemon started by hand writes wherever its "
+    + "operator pointed its stderr.";
+}
+
+/**
  * What the answer to an *outstanding* request may say when this shell's own client
  * ends while the daemon is still working on it (finding 中-3).
  *
@@ -789,15 +814,14 @@ export class EngineJsonRpcClient {
       // 会以 GP_E_ENGINE_TIMEOUT 现形；这里补的是**内存**那一条，不是等待那一条。
       const backlog = this.io.bufferedBytes?.() ?? 0;
       if (backlog > ENGINE_WRITE_BACKLOG_BYTES) {
+        // 自己的码：GP_E_ENGINE_UNREACHABLE 的出路在这里自相矛盾（它命令重启，而这条
+        // 测量没测到 daemon 的任何事），见 `writeBacklogRemedy`。
         this.pending.delete(id);
         this.reject(entry, new EngineCallError(
-          GP_E_ENGINE_UNREACHABLE,
+          GP_E_ENGINE_BACKLOG,
           `not sending '${method}': ${backlog} bytes are already queued for the engine socket and it `
           + "has not read them",
-          "the background service is accepting the connection but not reading it — it is wedged, not busy. "
-          + `Check it with gp_probe_status; if it stays like this, restart it with the command in `
-          + "`glasspaned --help` (or the panel's 重启后台服务 button). Do not retry this call in a loop: "
-          + "every retry only deepens the queue it is refusing to drain.",
+          writeBacklogRemedy(backlog, ENGINE_WRITE_BACKLOG_BYTES),
         ));
         return;
       }

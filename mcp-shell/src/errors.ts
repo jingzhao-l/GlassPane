@@ -35,6 +35,21 @@ export const GP_E_ENGINE_TIMEOUT = "GP_E_ENGINE_TIMEOUT";
 export const GP_E_PAYLOAD_TOO_LARGE = "GP_E_PAYLOAD_TOO_LARGE";
 
 /**
+ * Shell-only: this process refused to *write* a request, because the bytes it had
+ * already handed the daemon's socket were not being read
+ * (`ENGINE_WRITE_BACKLOG_BYTES` in `engine-client.ts`).
+ *
+ * It is deliberately not `GP_E_ENGINE_UNREACHABLE`, which is what this refusal
+ * used to answer with: that code's remedy orders a daemon restart, and a backlog
+ * measures a memory watermark in *this* process, not the service's state — the
+ * daemon may be mid-`act` on the user's screen, where a SIGTERM cancels and rolls
+ * the action back. The two answers also have different next moves, which is the
+ * real reason to split the code: the unread bytes may drain on their own, while a
+ * socket nobody is listening on never does.
+ */
+export const GP_E_ENGINE_BACKLOG = "GP_E_ENGINE_BACKLOG";
+
+/**
  * Shell-only, and deliberately *not* a daemon code: this is what the shell
  * answers when a daemon error frame arrives with no `code` at all. Naming it
  * here (rather than inlining a string at the one call site, where it used to

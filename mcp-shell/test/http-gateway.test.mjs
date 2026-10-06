@@ -911,8 +911,9 @@ test("a code the daemon authored is never answered as a gateway failure", async 
 
 test("a code the daemon does not declare is never answered as the caller's bad request", async () => {
   // The other direction of the same mapping: the shell-only codes in `errors.ts`
-  // (`GP_E_ENGINE_TIMEOUT`, `GP_E_ENGINE_UNREACHABLE`, `GP_E_UNKNOWN`,
-  // `GP_E_NO_USER_RECORD`) describe this process's side of the boundary, so none
+  // (`GP_E_ENGINE_TIMEOUT`, `GP_E_ENGINE_UNREACHABLE`, `GP_E_ENGINE_BACKLOG`,
+  // `GP_E_UNKNOWN`, `GP_E_NO_USER_RECORD`) describe this process's side of the
+  // boundary, so none
   // of them may land on the 4xx arm the daemon-authored codes default to. A 4xx
   // for one of those tells a caller its request was wrong when the real answer is
   // "this gateway did not finish it" — the same misdirection the 502-on-everything

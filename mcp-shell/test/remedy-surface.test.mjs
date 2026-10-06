@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   GP_E_BAD_PARAMS,
+  GP_E_ENGINE_BACKLOG,
   GP_E_ENGINE_TIMEOUT,
   GP_E_ENGINE_UNREACHABLE,
   GP_E_INTERNAL,
@@ -16,7 +17,13 @@ import {
   GP_E_PROJECT_LIMIT,
   GP_E_UNKNOWN,
 } from "../dist/errors.js";
-import { livenessProbeDecision, slowEngineRemedy } from "../dist/engine-client.js";
+import {
+  daemonUnreachableRemedy,
+  ENGINE_WRITE_BACKLOG_BYTES,
+  livenessProbeDecision,
+  slowEngineRemedy,
+  writeBacklogRemedy,
+} from "../dist/engine-client.js";
 
 /**
  * Two claims this shell makes about error codes, and neither was measured when
@@ -38,6 +45,7 @@ const SHARED = [
   GP_E_PAYLOAD_TOO_LARGE, GP_E_PROJECT_LIMIT,
 ];
 const SHELL_ONLY = [
+  GP_E_ENGINE_BACKLOG,
   GP_E_ENGINE_TIMEOUT, GP_E_ENGINE_UNREACHABLE, GP_E_NO_USER_RECORD, GP_E_UNKNOWN,
 ];
 
@@ -130,6 +138,29 @@ test("the mcp remedy promises the trail, the http remedy promises its own stderr
       `${surface} 侧把迟到回复写成了无条件承诺`);
     assert.match(text, /\b16\b/, "有界窗口必须把界限说出来，而不是只说\"有限\"");
   }
+});
+
+/**
+ * 背压闸的拒绝曾经挂着 GP_E_ENGINE_UNREACHABLE 与它的重启建议，等于把一次**内存水位**
+ * 测量说成 daemon 死亡的证据，而探针（那条出路让代理先做的事）本身也要过一次
+ * `call()`、会被同一道闸原地拒掉。这一条在词表层面钉住"谁能点名生命周期命令"，
+ * 行为那一侧（真的是这一次拒绝产出的码与文本）在 `engine-client.test.mjs`。
+ */
+test("the backlog refusal is its own code and its remedy names neither a probe nor a lifecycle command", () => {
+  const backlog = writeBacklogRemedy(9 * 1024 * 1024, ENGINE_WRITE_BACKLOG_BYTES);
+  // 对照物本身要成立：unreachable 那条确实带着重启命令，否则"只有它能带"是空的。
+  assert.match(daemonUnreachableRemedy(), /--restore-launchd/,
+    "对照的出路不再点名重启命令，下面这些禁令就成了装饰");
+  for (const forbidden of ["--restore-launchd", "launchctl", "kickstart", "bootstrap", "boot-out"]) {
+    assert.ok(!backlog.includes(forbidden),
+      `背压出路又点到生命周期命令 ${forbidden}——它只测到本进程队列的字节数：${backlog.slice(0, 200)}`);
+  }
+  for (const probe of ["gp_probe_status", "probe_status", "/v1/tools/probe_status"]) {
+    assert.ok(!backlog.includes(probe),
+      `背压出路又支了一次过不去的检查（${probe}）：它自己也是一次 call()`) ;
+  }
+  assert.match(backlog, /installer-daemon\.log/,
+    "这一侧唯一读得到的证据是 daemon 自己的日志，出路必须把它指出来");
 });
 
 test("a GP_E_* literal appears in src/ only in errors.ts", () => {

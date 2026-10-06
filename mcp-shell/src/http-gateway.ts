@@ -14,6 +14,7 @@ import {
 } from "./engine-client.js";
 import {
   GP_E_BAD_PARAMS,
+  GP_E_ENGINE_BACKLOG,
   GP_E_ENGINE_TIMEOUT,
   GP_E_ENGINE_UNREACHABLE,
   GP_E_INTERNAL,
@@ -1072,6 +1073,13 @@ function httpStatusForEngineCode(code: string): number {
     case GP_E_PROJECT_LIMIT:
       return 409;
     case GP_E_ENGINE_UNREACHABLE:
+      return 503;
+    case GP_E_ENGINE_BACKLOG:
+      // 503 for the same reason `GP_E_ENGINE_UNREACHABLE` gets it — this gateway
+      // cannot serve the request right now — but it is a separate code because the
+      // two answers tell a caller to do different things: one says the service may
+      // need to be brought back, this one says stop sending and let the queue
+      // drain. Collapsing them would hand a curl caller the restart reading.
       return 503;
     case GP_E_ENGINE_TIMEOUT:
       return 504;

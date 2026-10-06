@@ -1842,6 +1842,10 @@ test("a reply frame with neither result nor error fails the call instead of goin
  * 夹具是一个**从不回调 callback 的 Duplex**——这正是"对端接受了连接但不读"的形状。
  * 反向变异：把 `call()` 里那道 backlog 检查删掉，最后一条断言会等不到拒绝而是继续
  * 把帧写进黑洞，`wrote` 会一直涨，测试变红。
+ *
+ * 出路文本的两条禁令（不指探针、不指重启）是这一轮补的：拒绝发生在 `writeLine`
+ * 之前，所以探针也要过一次 `call()`、被同一道闸原地拒掉——旧文本把代理支去了一件
+ * 此刻做不到第二次的事；而这里测的是本进程的字节水位，不是 daemon 的状态。
  */
 class WedgedSocket extends Duplex {
   wrote = 0;
@@ -1870,13 +1874,32 @@ test("a wedged daemon stops being handed more work once its socket backs up", as
   assert.ok((sockets[0].writableLength ?? 0) >= 8 * 1024 * 1024,
     `夹具没有真的积压起来（writableLength=${sockets[0].writableLength}），这条测试就成了空的`);
 
+  const before = sockets[0].wrote;
   const error = await client.call("observe").then(
     () => { throw new Error("积压超线时新调用必须被拒绝，不能继续排队") },
     (caught) => caught,
   );
-  assert.equal(error.code, "GP_E_ENGINE_UNREACHABLE");
+  // 自己的码：GP_E_ENGINE_UNREACHABLE 的出路命令重启，与这条测量互相矛盾。
+  assert.equal(error.code, "GP_E_ENGINE_BACKLOG");
   assert.match(error.message, /bytes are already queued/);
-  assert.match(error.remedy, /not reading it/, "要说清这是卡死，不是忙：两者的下一步不一样");
-  assert.match(error.remedy, /Do not retry this call in a loop/, "循环重试只会把队列越堆越深");
+  assert.match(error.remedy, /not reading it/, "要说清对端没在读：这是本进程的缓冲事实");
+  assert.match(error.remedy, /Do not retry this call in a loop/, "循环重试什么也改变不了");
+  assert.ok(sockets[0].wrote === before, "被拒的调用一个字节都不该写出去");
+
+  // 禁令一：出路不得把代理支去任何一次探针——探针也是一次 call()，在这里同样被拒。
+  for (const probeName of ["gp_probe_status", "probe_status", "/v1/tools/probe_status"]) {
+    assert.ok(!error.remedy.includes(probeName),
+      `背压出路又支了一次此刻做不到的探针（${probeName}）：${error.remedy.slice(0, 200)}`);
+  }
+  // 禁令二：不得点名任何生命周期命令——这条测的是内存水位，不是 daemon 死了。
+  assert.ok(!LIFECYCLE_COMMANDS.test(error.remedy),
+    `背压出路把字节水位当成了重启依据：${error.remedy.slice(0, 200)}`);
+  assert.ok(!/glasspaned --help|重启后台服务/.test(error.remedy),
+    `背压出路又给出面板/CLI 的那条重启入口：${error.remedy.slice(0, 200)}`);
+
+  // 正面：三条此刻做得动的下一步，缺一条这条路就只剩"别说话"。
+  assert.match(error.remedy, /Stop sending/, "要先说得出的第一步：别再发");
+  assert.match(error.remedy, /wait for the backlog to drain/, "等待积压排空是做得动的一步");
+  assert.match(error.remedy, /installer-daemon\.log/, "读 daemon 自己的日志才是这一侧看得见的证据");
   client.close();
 });
