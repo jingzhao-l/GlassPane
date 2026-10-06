@@ -343,33 +343,58 @@ public enum PermissionReprobe {
         }
     }
 
-    /// 一次性任务脚本正文：调用 daemon 二进制并把 JSON 写到指定路径。
-    /// 路径全部由调用方给（面板把 daemon 自报的 binaryPath 传进来），因此
-    /// 重探的主体恒等于被探测的那个 daemon。
-    public static func script(
+    /// 一次性任务的两件产物：脚本正文 + `launchctl submit` 命令。**必须成对生成**，
+    /// 因为脚本只从位置参数读值（$1 daemon 二进制、$2 输出路径、$3.. 转交 daemon），
+    /// 真值一律由命令的 argv 递进去。
+    public struct Submission: Equatable, Sendable {
+        public let script: String
+        public let command: PermissionGuide.PermissionRequestCommand
+    }
+
+    /// 脚本正文是一个**不含任何外部值**的常量。从前这里把 `daemonBinaryPath` 直接
+    /// 插进 `#!/bin/zsh` 的正文，而那个值来自 `hello.identity`——socket 是 0600，但
+    /// 能写它的是本机同 uid 的任意进程，一个带 `$(…)` 或引号的路径就是"面板请
+    /// launchd 在用户 GUI 会话里执行别人给的代码"。
+    public static let positionalScript = """
+    #!/bin/zsh
+    "$1" "${@:3}" > "$2" 2>&1
+    """
+
+    /// 成对生成上面两件东西；任一路径不合规格（非绝对、含换行/NUL）即返回 nil，
+    /// 调用方不得提交。argv 已经消除了二次解析，这一道拦的是更朴素的一件事：
+    /// daemon 自报的路径恒为绝对路径，不是就说明帧不可信，不该再拿它起任务。
+    public static func submission(
+        scriptPath: String,
+        nonce: String,
         daemonBinaryPath: String,
         outputPath: String,
         arguments: [String] = ["--permissions"]
-    ) -> String {
-        [
-            "#!/bin/zsh",
-            "\"\(daemonBinaryPath)\" \(arguments.joined(separator: " ")) > \"\(outputPath)\" 2>&1",
-            "",
-        ].joined(separator: "\n")
+    ) -> Submission? {
+        guard isSubmittablePath(scriptPath), isSubmittablePath(daemonBinaryPath),
+              isSubmittablePath(outputPath) else {
+            return nil
+        }
+        let label = "com.glasspane.reprobe.\(nonce)"
+        return Submission(
+            script: positionalScript,
+            command: PermissionGuide.PermissionRequestCommand(
+                launchPath: Launchctl.path,
+                arguments: ["submit", "-l", label, "--", scriptPath, daemonBinaryPath, outputPath]
+                    + arguments,
+                jobLabel: label
+            )
+        )
+    }
+
+    /// 绝对、非根、且不含会被 shell/参数边界吃掉的换行与 NUL。空格**是**允许的
+    /// （`GlassPane Daemon.app` 就是真机上的合法路径——这正是旧实现加引号的原因）。
+    static func isSubmittablePath(_ path: String) -> Bool {
+        guard path.hasPrefix("/"), path != "/" else { return false }
+        return !path.unicodeScalars.contains { $0 == "\n" || $0 == "\r" || $0 == "\0" }
     }
 
     /// 调试能力探测的重探参数（P6 §7 的 `--check-developer-tools`）。
     public static let developerToolsArguments = ["--check-developer-tools"]
-
-    /// 提交重探任务（与申请同一条路径：走 launchd，避免面板成为责任父进程）。
-    public static func submitCommand(scriptPath: String, nonce: String) -> PermissionGuide.PermissionRequestCommand {
-        let label = "com.glasspane.reprobe.\(nonce)"
-        return PermissionGuide.PermissionRequestCommand(
-            launchPath: Launchctl.path,
-            arguments: ["submit", "-l", label, "--", scriptPath],
-            jobLabel: label
-        )
-    }
 
     /// 解析重探输出（非法/缺字段 → nil，调用方保持旧读数，不猜）。
     public static func parse(_ text: String) -> Result? {

