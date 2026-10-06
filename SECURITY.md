@@ -215,16 +215,19 @@ permission rather than by a secret.
 - **Modes on the state root, as measured rather than as intended.** On the machine this page was checked
   from: `~/.glasspane` `0700`, `engine.sock` `0600`, `approvals.json` and `projects.json` `0600` — the
   daemon enforces those on bind and on its start-of-run sweep. `~/.glasspane/installer-daemon.log`
-  measured **`0644`** (`stat -f '%Lp' ~/.glasspane/installer-daemon.log` → `644`): world-readable as a
-  file mode, and it is the one file in the state root that no tightening covers — the sweep touches the
-  root, the registry, the approval chain and the evidence packs, not the launchd log. Today the only
-  thing keeping other accounts out of it is the `0700` directory above it, which is not the same
-  protection: it does not travel, so a copy of this file in a shared directory, a sync folder or a CI
-  artifact is readable by everyone who can read that copy. Its contents are the daemon's own stdout and stderr — startup and socket paths, pids,
+  **measured `0644` for a long time and was the one file in the state root that no tightening covered**:
+  the installer created it with `openSync(path, 'a')` (so the process umask decided the mode), and the
+  start-of-run sweep touched the root, the registry, the approval chain and the evidence packs — not the
+  launchd log. Both halves are closed now, and each is *verified* rather than assumed: the installer
+  requests `0600` and re-reads the mode (a chmod that did not stick is reported as a failed write, not a
+  warning), and the daemon's sweep now tightens a pre-existing log on the way up. Measured 2026-10-06 on
+  an isolated state root with the debug daemon: `644` → `600`, root `755` → `700`, and the log's existing
+  bytes left intact — tightening is a `chmod`, not a rewrite. What this does **not** buy: mode does not
+  travel with a copy. This log is the daemon's own stdout and stderr — startup and socket paths, pids,
   client connect/disconnect, input-monitor and permission verdicts, engine error text — enough for
   another account to learn that GlassPane is installed here, which daemon is running and what it has been
-  doing. Tighten it yourself if you would rather it were owner-only: `chmod 600
-  ~/.glasspane/installer-daemon.log`.
+  doing, so a copy dropped into a shared directory, a sync folder or a CI artifact is readable by
+  whoever can read that copy.
 - Cleanup. Size first, then prune by age:
 
   ```sh
