@@ -24,7 +24,7 @@ public final class EngineCore {
     /// In-memory snapshot retention cap (P1 spec v1.1 §1.5).
     public static let snapshotHistoryLimit = 8
 
-    public let version = "1.8.1"
+    public let version = "1.8.2"
     public let protocolVersion = "0"
     public private(set) var attachedApp: AttachedApp?
     /// Currently active project (P1 spec v1.4 §1.3). Set via attach with projectId.
@@ -1732,24 +1732,6 @@ public final class EngineCore {
         // injected clock drives age judgment, keeping TTL deterministic in
         // tests that pin `now`.
         return EvidenceStore(directory: dir, now: clock).prune(olderThanDays: olderThanDays)
-    }
-
-    /// 解析"该动哪个档案目录"。
-    ///
-    /// 绝不回落到 `EvidenceStore.defaultDirectory`：那是一条"核心没有档案，
-    /// 却去删 `~/.glasspane/evidence/`"的路径——从任何一个个测都能触到用户的
-    /// 真实证据档案，而删除是不可逆的（与 A-1 同形状，只是后果更重）。
-    /// 没配 `evidenceStoragePath` 的项目，证据本就写在活跃档案的目录里
-    /// （attach 时的 `setDirectory(path ?? 活跃目录)`，同口径）。
-    private func archiveDirectory(for configured: String?, subject: String) throws -> String {
-        if let configured, !configured.isEmpty { return configured }
-        guard let evidenceStore else {
-            throw GPError(
-                code: .internalError,
-                message: "no evidence archive is configured for this engine; refusing to prune \(subject)"
-            )
-        }
-        return evidenceStore.directory
     }
 
     // MARK: - P1 snapshot/restore (spec v1.1 §1)
