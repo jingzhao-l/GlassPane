@@ -3366,7 +3366,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "2c30934b0c48cb0d7ab9ae2f213f7d1a48528690"
+      "forkHash": "55c04b48de82f1c3b4fb2dbbcf4b62669dcfd3fb"
     },
     {
       "file": "script/translate-app.test.ts",

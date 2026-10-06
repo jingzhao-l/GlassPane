@@ -12,6 +12,22 @@ curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/s
 
 Both commands are available afterwards: `glasspane-harness` and `gp-harness`.
 
+One caveat that is the package manager's, not the product's: the wrapper's `postinstall`
+is what copies the real binary into place, and some managers do not run install scripts
+by default. Measured with 0.7.0: `bun add -g` installs the package and skips that step, so
+the command answers with its own remedy instead of a version — and that remedy is the fix,
+verbatim:
+
+```
+cd node_modules/glasspane-harness && node postinstall.mjs
+```
+
+Run it from wherever the package manager put the package (`bun` puts global packages under
+`$HOME/node_modules`). Verified: after it, `glasspane-harness --version` reports the
+version. With npm 11+ the same gating shows up as an `allow-scripts` warning on a first
+install; there the install still completes and the command works (also measured), and the
+one-click installer retries with `--allow-scripts` when npm refuses.
+
 If npm's global prefix is not writable, either use the one-click installer (it falls back
 to a per-user install root) or:
 

@@ -93,6 +93,11 @@ curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/s
 
 会装出两个命令：**`glasspane-harness`** 与短别名 **`gp-harness`**。
 
+有的包管理器默认不跑安装脚本，而把真二进制放到位的正是 wrapper 的 `postinstall`。
+0.7.0 实测：npm 这条路是好的（npm 11+ 首次安装会打一条 `allow-scripts` 提示，命令照样能跑）；
+`bun add -g` 会跳过那一步，命令于是打印它自己的补救——照它点名的一行执行即可。
+详见 [docs/install.md](docs/install.md)。
+
 **只支持 macOS。** 引擎、权限模型、证据流水线都只存在于 macOS，npm 分发随之收成
 macOS-only：包声明 `os: darwin`，非 macOS 上 npm 直接拒绝安装，而不是给你一个跑不了的
 二进制。**没有 Linux / Windows 构建，这是决定，不是遗漏。**

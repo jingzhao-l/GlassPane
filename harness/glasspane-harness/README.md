@@ -113,6 +113,12 @@ curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/s
 
 Two commands are installed: **`glasspane-harness`** and the short alias **`gp-harness`**.
 
+Some package managers do not run install scripts by default, and the wrapper's
+`postinstall` is what places the real binary. Measured on 0.7.0: npm installs fine (npm 11+
+may print an `allow-scripts` notice on the first install; the command still works), while
+`bun add -g` skips that step and the command then prints its own remedy — run the one line
+it names. See [docs/install.md](docs/install.md#channels).
+
 **macOS only.** The engine, the permission model and the evidence pipeline exist only on
 macOS, so the npm distribution is macOS-only too: the package declares `os: darwin` and
 npm refuses the install elsewhere instead of handing you a binary that cannot run. There
