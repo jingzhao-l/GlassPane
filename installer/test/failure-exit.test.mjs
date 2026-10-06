@@ -45,19 +45,6 @@ function barePathDir() {
   return bin
 }
 
-function hasOnPath(name) {
-  const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean)
-  return dirs.some((d) => {
-    try {
-      const p = path.join(d, name)
-      fs.accessSync(p, fs.constants.X_OK)
-      return true
-    } catch {
-      return false
-    }
-  })
-}
-
 /* --------------------------------------------------------------- (1) 机制 */
 
 /**
@@ -167,11 +154,7 @@ test('端到端 环境预检拒绝：PATH 抽干净后退出码 1，预检清单
 })
 
 test('端到端 真安装失败：走到 install 的拒绝分支时步骤输出不许消失', (t) => {
-  if (!hasOnPath('swift')) {
-    t.skip('本机没有 swift，环境预检会先挡住，走不到 install 的拒绝分支'
-      + '——这条要的是构建产物缺失那一路，不是预检那一路')
-    return
-  }
+  // 一个"看起来像仓库、但没有构建产物"的根目录：够 install() 走到 launchd 那一步再抛。
   const root = tempRoot('repo')
   fs.mkdirSync(path.join(root, 'engine'), { recursive: true })
   fs.mkdirSync(path.join(root, 'mcp-shell'), { recursive: true })
@@ -179,11 +162,21 @@ test('端到端 真安装失败：走到 install 的拒绝分支时步骤输出�
   fs.writeFileSync(path.join(root, 'mcp-shell', 'package.json'), '{}\n')
   try {
     const r = runCli(['--repo', root, '--skip-build', '--no-app', '--no-gui', '--no-daemon'])
+    // 走到哪一支由**产品自己的回话**判定，不由测试猜机器上有什么：上一版用
+    // `PATH 里有没有 swift` 当代理，GitHub 的 ubuntu runner 上它与 installer 的
+    // `checkEnvironment()` 判得不一致，测试因此没跳、把预检拒绝误当成 install 拒绝打红。
+    // 猜不得，就看它说什么：预检挡住就如实声明这一支本机不可达（原因带出来），
+    // 因为这一支的形状已经由上一条（把 PATH 抽干净**主动**逼出预检拒绝）覆盖了。
+    if (r.status === 1 && /环境预检未通过/.test(r.stderr)) {
+      t.skip(`这台机器走不到 install 的拒绝分支，预检先挡了：${r.stderr.trim().slice(0, 160)}`)
+      return
+    }
     assert.equal(r.status, 1, `stdout: ${r.stdout}\nstderr: ${r.stderr}`)
     assert.match(r.stderr, /安装失败/, '必须走的是 install 的拒绝分支')
     assert.match(r.stderr, /daemon 产物不存在|launchd|不存在/, r.stderr)
     assert.match(r.stdout, /项目根目录/, '失败之前已经打出去的那几步不许因为退出方式被吃掉')
     assert.ok(!/安装完成/.test(r.stdout), '失败的安装不许同时打印一句完成')
+    assert.equal(r.stdout.slice(-1), '\n', 'stdout 必须停在一次完整写入的末尾')
   } finally {
     removeRoot(root)
   }
