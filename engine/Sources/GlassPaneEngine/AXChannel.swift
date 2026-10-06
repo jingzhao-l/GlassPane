@@ -278,13 +278,23 @@ public final class AXChannel: RuntimeChannel {
               let rawPosition = positionValue, let rawSize = sizeValue else {
             return .absent
         }
-        guard let valuePosition = rawPosition as! AXValue?, let valueSize = rawSize as! AXValue? else {
+        return Self.geometryRead(position: rawPosition, size: rawSize)
+    }
+
+    /// 两个属性返回值 → 一次几何读数。纯函数（不碰 AXUIElement）。
+    ///
+    /// 从前这里是 `as! AXValue?`：Swift 对 `CFTypeRef → 具体 CF 类`不插任何运行时检查
+    /// （实测它不崩，见 `AXChannelErrorAttributionTests` 的记录），所以那句什么也没验，
+    /// 下面"不是 AXValue"的专用原因永远读不到——CFString 会被报成"点/尺寸解不出来"。
+    static func geometryRead(position: CFTypeRef, size: CFTypeRef) -> GeometryRead {
+        guard CFGetTypeID(position) == AXValueGetTypeID(),
+              CFGetTypeID(size) == AXValueGetTypeID() else {
             return .unread(reason: "geometry came back as something that is not an AXValue")
         }
         var point = CGPoint.zero
         var cgSize = CGSize.zero
-        guard AXValueGetValue(valuePosition, .cgPoint, &point),
-              AXValueGetValue(valueSize, .cgSize, &cgSize) else {
+        guard AXValueGetValue(position as! AXValue, .cgPoint, &point),
+              AXValueGetValue(size as! AXValue, .cgSize, &cgSize) else {
             return .unread(reason: "geometry AXValue could not be decoded into a point and a size")
         }
         return .measured(AxFrame(

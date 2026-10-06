@@ -294,6 +294,55 @@ final class AXChannelErrorAttributionTests: XCTestCase {
         XCTAssertTrue(reason.contains("reading AXTitle"), reason)
     }
 
+    // MARK: - 几何值不是 AXValue 时的原因归属（从前那句 `as!` 让专用分支永不可达）
+
+    /// 目标应用把 kAXPosition/kAXSize 答成一个任意 CFType 时，几何这一条要落在
+    /// **"不是 AXValue"** 那句原因上，而不是被 `AXValueGetValue` 折算成"点/尺寸解不出来"。
+    ///
+    /// 实测记录（macOS 26 / Swift 6.3.3，`swift -e` 跑真 API）：
+    ///  * `("x" as CFString) as! AXValue` **不 trap**——Swift 对 `CFTypeRef → 具体 CF 类`
+    ///    的桥接不插运行时检查（同一句写 `as?` 直接被编译器拒："will always succeed"）；
+    ///  * `AXValueGetValue(<CFString 重解读>, .cgPoint, &p)` 返回 false、不崩。
+    /// 所以旧代码的实际症状不是"daemon 崩在一次 act 中间"，而是那句为这种情况写的
+    /// 原因永不可达，审计里出现一个没发生过的解释。
+    func testGeometryThatIsNotAnAXValueIsReportedByItsOwnReason() throws {
+        let notAnAXValue = "geometry-as-a-string" as CFString
+        let pointValue = try XCTUnwrap(
+            withUnsafePointer(to: CGPoint(x: 10, y: 20)) { AXValueCreate(.cgPoint, $0) }
+        )
+        let sizeValue = try XCTUnwrap(
+            withUnsafePointer(to: CGSize(width: 30, height: 40)) { AXValueCreate(.cgSize, $0) }
+        )
+        let notGeometry = try XCTUnwrap(
+            withUnsafePointer(to: CFRange(location: 1, length: 2)) { AXValueCreate(.cfRange, $0) }
+        )
+
+        // 正面控制：两个真 AXValue 仍要量出来，否则下面的"降级"只是因为整条路坏了。
+        XCTAssertEqual(
+            AXChannel.geometryRead(position: pointValue, size: sizeValue),
+            .measured(AxFrame(x: 10, y: 20, width: 30, height: 40))
+        )
+
+        XCTAssertEqual(
+            AXChannel.geometryRead(position: notAnAXValue, size: notAnAXValue),
+            .unread(reason: "geometry came back as something that is not an AXValue")
+        )
+        // 一侧正常一侧胡答也是同一结局：不允许拿能读的那半拼出一个"看起来量到了"的框。
+        XCTAssertEqual(
+            AXChannel.geometryRead(position: pointValue, size: notAnAXValue),
+            .unread(reason: "geometry came back as something that is not an AXValue")
+        )
+        // 是 AXValue 但装的既不是点也不是尺寸：另一句未知，同样不许折算成 0×0 的框。
+        XCTAssertEqual(
+            AXChannel.geometryRead(position: sizeValue, size: pointValue),
+            .unread(reason: "geometry AXValue could not be decoded into a point and a size")
+        )
+        XCTAssertEqual(
+            AXChannel.geometryRead(position: notGeometry, size: notGeometry),
+            .unread(reason: "geometry AXValue could not be decoded into a point and a size")
+        )
+    }
+
     // MARK: - Helpers
 
     /// 最坏情况模拟：每一次调用都把自己被允许的整段时间用满，返回累计秒数。
