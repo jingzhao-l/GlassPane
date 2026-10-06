@@ -4,6 +4,194 @@
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-10-06
+
+版本判断：**按 minor 记**。判据仍是 1.6.2 条目里本仓自己写下的那一条——patch 要求「状态文件的字段
+没动、退出码集合没动、CLI 参数没动、npm 包的 `bin` 声明没动」。这四样本版确实都没动（daemon 的开关
+表实测仍是 30 条，退出码集合仍是 `{0,1,2,3,64,65}`，两个包的 `bin` 声明没改，状态文件字段没动），
+但本版**动了两处对外可见的契约内容**，所以不走 patch：
+
+- daemon 在 `hello` 里自报的 `capabilities` 从一份手抄清单改成由线协议方法表推导。手抄那份已经与
+  `FrameCodec` 的 `EngineMethod` 互不相认：报着线上根本不存在的 `probe`，又漏掉 `attach`、
+  `last_evidence`、`probe_status`。仓内没有任何读者会因此报错（实测：`mcp-shell/src` 里唯一的
+  `capabilities` 是 MCP 自己的 `tools` 声明），所以漂移是静默的——也正因为它没人读，改它不影响任何
+  现有消费者，但它仍然是对外协议上的一句自述，不该塞进一个 patch 里悄悄发出去。
+- MCP 壳新增一个**只属于壳的**错误码 `GP_E_ENGINE_BACKLOG`（`kernel/schemas/**` 里一个 `GP_E_*`
+  都没有，实测 `grep -c` = 0，因此不构成 schema 变更）。旧行为是拿
+  `GP_E_ENGINE_UNREACHABLE` 回答一件它自己解释不了的事，见下。
+
+本版**没有**合并未发布的版本号：1.7.0 的 tag、GitHub Release 与 npm 两个包本轮实测对齐
+（`npm view glasspane-mcp version` = `npm view glasspane-install version` = 1.7.0；
+`gh release view v1.7.0` 回 `isDraft=false`、target=`acfdbeb…`、4 件资产齐全）。
+全部改动向后兼容：没有删除或改变任何既有开关、字段、退出码或工具的形状。
+
+### Fixed — 四道「守着守着，其实自己看不见自己」的守卫
+
+- **`check-workflows.mjs` 每两行只看一行。** `RUN_SCRIPT` 带着 `g` 却从不重置 `lastIndex`，
+  而调用方对每一行只做一次 `exec()`。实测输入 `["npm run build","npm run bundle …","npm run test …",
+  "npm run build"]` 的逐行结果是 `["build", null, "test", null]`——**跳过的正好是偶数行**。
+  后果：ci.yml:86 与 release.yml:92 的 `npm run bundle` 从来没被核过，把那个 script 改名，守卫照报
+  clean。现在每行扫到没有匹配为止，`--self-test` 从 5 例加到 6 例（新例专门盯这个共享 `lastIndex`
+  的缺陷），并补了 `--workspace` 归属解析——漏检被修掉的当场就把 release.yml 那条
+  `npm run bundle --workspace glasspane-mcp` 顶了出来，逼着这道闸学会"名字在哪个 package.json 里"。
+- **CI 的发布形态守卫会测错东西。** `PKG=$(npm pack --silent | tail -1)` 跑在默认 `bash -e`
+  （无 `pipefail`）里：pack 失败就是 `PKG=""`，下一行 `npm install "$GITHUB_WORKSPACE/mcp-shell/"`
+  装的是**源码目录**，于是一道本该证明"发出去的包能装上并完成 initialize"的闸，测着一个根本不是发布
+  物的东西，还能打出 OK。现在这个 step 显式 `set -euo pipefail` 并要求 `$PKG` 非空、文件存在、
+  形状是 `.tgz`。反向验过：把旧的 step 正文拿去跑同一条被破坏的 `npm pack`，旧版 exit 0，
+  新版三条形状各自 exit 1。
+- **`updater` 的陌生状态根闸门只认第一个 `--state-dir`。** `stateDirReadings` 自己的注释写着"多于一个
+  读数就当作判不出来"，可 `decideSwapPermission` 走的是 `stateDirFromArgs`。于是
+  `[--state-dir 我们的, --state-dir /other]` 被判成"是我们的根"并放行，换掉的正是别家 daemon 在用的
+  bundle。现在两个读数一起看，读不出唯一根就拒，且拒得有名有姓。
+- **`npm-publish` 作业不核对"发的是不是被 tag 的那棵树"。** 提示词与 `tools/prompts` 都写着 dispatch
+  必须显式带 `--ref v<X.Y.Z>`，可这件事一直只靠纪律：忘了带，`actions/checkout` 就落到默认分支 HEAD，
+  `check-version` 还拿 main 的版本线自证，registry 收到一份与任何 tag 都不对应的字节——而 npm 发布
+  不可逆。现在这一步前面多了一道显式拒绝：`github.ref` 必须是 `refs/tags/v<版本>`、远端确有该 tag、
+  它 peel 出来的 sha 等于 HEAD、两个包的 `version` 等于 tag，`mode` 空值也不许落进 publish 分支。
+
+### Fixed — 拒绝语把自己指回一条走不通的路
+
+- **背压闸的出路是不可执行的，并且替一次内存测量批准了重启。** daemon 停止读 socket 时，壳拒绝新调用，
+  remedy 却写着"先用 `gp_probe_status` 查一下"——那本身要再过一次同一个 `call()`，被同一个闸原地拒掉，
+  于是这条建议在对方不读 socket 的整个期间**永远做不到**；接着它点名"用 `glasspaned --help` 里的命令重启
+  （或面板的重启按钮）"，而本文件 `livenessProbeDecision` 的规矩是只有 `unreachable` 才准点名生命周期
+  动作——这里唯一测到的是**本进程**的字节水位，一个正在 `act` 的 daemon 与一个卡死的 daemon 在这个读数
+  上一模一样，SIGTERM 下去毁的是用户屏幕上的在飞动作。现在它有独立的码
+  （`GP_E_ENGINE_BACKLOG`），出路只剩三件真做得到的事：停止发送、等队列排空、读 daemon 自己的日志
+  （点名 `~/.glasspane/installer-daemon.log`）。旧文案里"每次重试都只会把队列堆得更深"也是错的——
+  拒绝发生在 `writeLine` **之前**，一次被拒的调用一个字节都不写；改成了实话。
+- **`needs-consent` 的第三道门只说"你手工做"**，不给命令。同处的 `major` 与 `unsigned-release` 两道
+  都写得出 `--consent <kind>`，而 `--consent state-dir` 是真接了线的选项（`cli.js` 解析、`policy.js`
+  兑现）。一句没有动作的拒绝，代理无从操作。现在它给出完整的 `updater apply --state-dir … --consent state-dir`。
+
+### Fixed — 面板说了一句它没测过的话
+
+- **归因卡在没人看守这个窗口的时候宣称"期间检测到本人操作"。** `EngineCore` 在无监视时把
+  `contaminated` 按保守判 true——那是"缺一次观测"这个事实，不是一次观测。面板把结论当测量印了出来，
+  判净的一侧同样不诚实（无人看守时的 false 出自声明）。现在两侧都按"这个窗口到底被看守过没有"分叉，
+  依据是 daemon 自己写进 `circuitBreaker.reason` 的那两个标签（`input-contamination-not-monitored` /
+  `-monitor-lost`），冻结 schema 里没有 monitor 字段，这是唯一还活着的记录。
+- **一次性 CLI 的 stderr 被丢掉。** `ConsoleModel` 建了 `standardError = Pipe()` 却从不读它，而 daemon
+  把 `--project-prune` / `--project-remove` 的每一条拒绝**只**写到 stderr。于是面板对着一个读不开的
+  `projects.json` 报"后台服务不认得 `--project-prune`"——数据受损Adjacent 的路径上给用户一句错的诊断。
+  现在 stdout/stderr 一起交回，且只在"形状没读出来"时把 daemon 的原话附上。
+- **第一帧 `hello` 回来之前，权限卡就敢写"未请求"。** 初始化态是 `.notDetermined`，面板于是替一个还没
+  问过的 daemon 报了 TCC 三态里的第三态——包括那张按设计必须恒"未验证"的开发者工具卡。现在初始化成
+  无报告态并注明尚未取自报。
+
+### Fixed — 崩溃、卡死与不受界的内存
+
+- **目标进程回一个不是 AXValue 的几何值时，daemon 不是降级而是当场 trap**（服务线程上、一次 act 中间）。
+  订正一处：`as! AXValue?` 在 `CFTypeRef → 具体 CF 类`这条路上**不做任何运行时检查**，所以那句既不会崩
+  也什么都没验，下一行"不是 AXValue"的专用原因永远读不到，一个 CFString 会被报成"点/尺寸解不出来"。
+  现在按 `CFGetTypeID(...)` 判，并把这段抽成不碰 `AXUIElement` 的纯函数以便验红。
+- **超大帧期间，60 秒的部分行超时永不上膛。** `SocketServer` 用 `codec.pendingBytes > 0` 决定要不要上膛，
+  而 codec 进入 `discardUntilNewline` 时 buffer 是空的——客户端写完 4 MiB 后停住，daemon 就永久阻塞在
+  `read()` 上，而这个 daemon 一次只服务一个连接，别的客户端从此全被锁在外面。现在"行未结束"与"正在丢弃"
+  两种状态都上膛。
+- **探针 SDK 的读侧没有帧上限**（daemon 那一侧有 4 MiB 的闸），一条不结束的帧会在被测应用里无限增长。
+- **下载器只在整个 body 缓冲完之后才比长度。** 一个只发不结束的流因此可以在 45 分钟的天花板里把每日
+  定时任务的内存吃光。现在长度比对搬进读循环：声明过长立刻停，什么都没声明则按 256 MiB 的固定上限夹住
+  （真机 v1.5.1 的 tar 资产是 25,126,902 字节，十倍余量）。上限必须由"实际被读走了多少字节"证明，
+  否则一条永远读不完的夹具只会让测试挂住而不是让拒绝变红——这条是本轮实测出来的。
+- **`check` 之后被改写的暂存发布物，`apply` 仍照旧构建并安装。** `apply` 只问"这棵树在不在、形状对不对"，
+  `state.staged.digest` 那个数字一直现成着，只是没人拿它重新测——于是同用户任意进程往暂存目录里写一个
+  文件，它自己的源码就会被编译进 daemon 那份二进制，由 launchd 带着辅助功能与录屏席位启动。现在 apply
+  在任何构建/打包/替换之前重新量一遍：摘要不对、树与归档里的树对不上（点名是哪个文件）、归档不见了，
+  各自拒，且一样都不做。
+
+### Fixed — 发布物与版本线
+
+- **`set-version.mjs` 的回滚快照漏了时序。** lockfile 是在 `npm install --package-lock-only` **跑完之后**
+  才纳入快照的，于是靠后的目录失败时，回滚把 10 个声明位点退回旧版本，而已经重生成的 lock 停在快照里那份
+  新版本上——正是本脚本开头写着"绝不留"的那个"部分统一"。现在快照在重生成之前取，重生成期间新出现的
+  lock 在回滚时被删除。顺带修 `--no-lock`：它此前必然回滚（自证那一步仍把 lock 算作漂移），等于对外
+  advertise 了一个做不到的开关。
+- **两个版本线位点根本没人核。** `mcp-shell/package-lock.json` 的 `"../kernel"` 与根 lock 的
+  `packages["updater"]` 都带着 `version` 字段而不在 `LOCKFILES` 表内。补进表内之前先用真 npm 11.17.0
+  在 scratch 副本上验过这两个字段确实由 `npm install --package-lock-only` 维护（各自只动那一行）——
+  不然这道闸会 permanently 红，那是另一种没交付。同时否掉一条评审结论：根 lock 的
+  `node_modules/glasspane-update` 是 `{"resolved":"updater","link":true}`，**没有** version 字段，
+  不是漏检位点，这条已由测试钉住以免再被"修"一遍。
+- **发布归档里带着 `.iterate_decisions.md`。** 排除表此前只有 `harness/`，而这份开发者自己的迭代日志
+  在 v1.7.0 的归档里含有 4 处作者绝对 home 路径与 `gh auth` token 口径的笔记。仓库本身是 public，
+  所以问题不在"文件存在"，而在"每一个 updater 都会下载的那份产物把构建它的人是谁带了出去"。
+  更新路径上一行都不读它，因此排除它的代价是零——这一点由 `REQUIRED_IN_ARCHIVE` 反向闸保证不会被
+  排除掉安装输入。
+- **SECURITY.md 的一句安全主张指不到代码。** 它写着 `gp_export_evidence` / `gp_recent_reports` 的报告
+  "写到调用方指定的路径"。实测那个工具的 `inputSchema` 只有 `{operationId, format}`（另有
+  `additionalProperties: false`）——**根本没有路径参数**，报告是以工具结果文本回给代理的。双语两侧
+  都改成代码真正做的事，并把真正的暴露面写清楚：屏幕上的界面文本进的是代理会话与模型提供方留存，
+  而不是磁盘上那个没人写过的文件。
+
+### Fixed — 安装器
+
+- **`--restore-launchd` 每次都把健康的作业重启一遍。** `launchdNeedsReregister` 比的是"已加载作业
+  定义的 program 路径"与"本次要装的路径"，而 `desiredProgram` 缺失时那句比较的对象是 `''`——恒为
+  "要重注册"。`--restore-launchd` 恰恰是不传这个值的那个调用方，而它正是 daemon 不可达时安装器交给
+  代理执行的那条命令：一次"恢复"于是 bootout + bootstrap 一个**健康**的作业，杀掉任何在飞的 act，
+  并把 `boot.already` 那支快路径变成永远走不到。现在调用方没给时，`launchctlBootstrap` 自己从本次
+  的 plist 读回要装的程序路径；plist 读不回来时按保守方向走（宁可重注册，不假装一致）。
+- **bootout 失败被读成"注册成功"。** 定义确实变了时要先 bootout 旧作业，而那句 `spawnSync` 的退出
+  状态从来没被检查；bootout 失败后 bootstrap 回 status 5 / "already loaded"，下一段把它映射成
+  `ok: true`——安装器打印"开机自启已注册"，launchd 却还在起**旧**程序，正是这段代码注释里说本设计
+  已经修掉的那个 EX_CONFIG 陷阱。现在 bootout 失败即拒，且 bootout 失败与 bootstrap 失败分开报，
+  代理拿到的下一步不会是一条错的命令。
+- **状态目录 0755、守护进程日志 0644，且"请求了 mode"被当成"贴上了 mode"。** `ensureLogDir` 建
+  目录时不带 mode，日志以 `openSync(path,'a')` 创建，而 daemon 启动时那次收紧遍历管 registry、
+  approvals、evidence，唯独不管这份日志（`SECURITY.md` 早已把这两个数字作为**实测**记在案，是
+  "已记录未修"）。现在目录按 0700、日志按 0600 请求，并核验落盘后的实际 mode——mode 没贴上去就是
+  写失败，不是"警告一下继续"。
+- **失败路径 `process.exit(1)` 截断它自己要给人看的那几行。** 文档里的调用形态是 `curl | sh`，
+  stdout 是管道；stderr 写完就 exit 会把还在队列上的步骤输出截掉。成功路径早就改用
+  `process.exitCode`，失败路径这次对齐。
+
+### Fixed — daemon 的 CLI 诚实性
+
+- **`--prune-evidence` 在归档读不了的时候报 `{"pruned":0}` + exit 0。** `prune`/`countExpired` 把
+  `.unreadable` 折成空列表，删除这条路于是把"什么都没数出来"打印成"没有需要删的"。`--evidence-stats`
+  为同一件事挨过批评（R6-08）并已经改对了，删除侧这次跟上：读不了就发 `"pruned": null` 并带
+  `listFailure` 原话，退出码集合不变。实测过真进程两种真实成因（`evidence` 被换成普通文件 →
+  `Not a directory`；目录 000 → `Permission denied`）都回 null，而可正常列举的对照仍回数字；
+  把接线退回旧写法，同一夹具立刻回 `"pruned":0`。
+
+### Added
+
+- **`GP_E_ENGINE_BACKLOG`**：见上。壳侧码，不是 daemon 码；`remedy-surface` 那道闸把它归进
+  "shell-only"，并钉住它的 remedy 里既不许出现探针调用、也不许出现 `livenessProbeDecision` 那套
+  生命周期命令。
+
+### Internal
+
+- 门禁收口实测（基线 → 本版）：`swift test --package-path engine` 768 → **798 执行 / 3 跳过
+  （按设计的真机 opt-in，不许为了让它变绿而删断言）/ 0 失败**；`engine/probe` 24 → 24 / 0 失败；
+  根 `npm test --workspaces --if-present` 的 ✔ 行 960 → **1011 / 0 ✘**，按 workspace 分：
+  kernel 90、glasspane-mcp 407 → **408**、glasspane-install 92 → **110**、
+  glasspane-update 392 → **403**，各自 0 失败；`pytest -q bridge` 58 通过；`check-doc-links`
+  仍是 24 份文档 / 223 条仓库内链接 / 26 条外链；`check-workflows --self-test` 5 → **6 例各自验红**；
+  发布形态 `npm pack` 仍是 22 个文件，178.5 kB → 180.4 kB（unpacked 609.7 kB）。
+- **本版新增测试的形状值得说一句**：几条关键拒绝是靠真进程 / 真字节证的，不是桩——
+  `--prune-evidence` 用真 `glasspaned` 二进制对着"evidence 被换成普通文件"（`Not a directory`）与
+  "目录 000"（`Permission denied`）两种真实成因各跑一次，并用可读的对照保证它不是恒 null；
+  `verifyStagedBytes` 用 `packTarGz` 产出的真归档与真解出来的树跑；CI 那两条守卫的 step 正文是从
+  工作流文件里逐字抽出来、对着被破坏的 `npm pack` 跑的。
+- 面 A 棘轮因本轮背压闸与 remedy 闸的有意增长而补记基线：`mcp-shell/src` 8554 → **8601 LOC**
+  （`engine-client.ts` +24、`errors.ts` +15、`http-gateway.ts` +8），单独一条 `chore(harness)` 提交，
+  金样与代码同批。口径不变：面 A 仍超文档的 10% 上限（23.48% → 23.39%），那是"上限定得早于测量"
+  的既有事实，棘轮只负责让它不再继续长。面 B（fork 侧）5056 LOC 未动，`harness/tools` 一行未改。
+- `tools/prompts/daily-glasspane-main.md` 的端到端那一步订正：它此前写着
+  `GLASSPANE_STATE_DIR=<临时目录> glasspaned --permissions`，而 daemon 实测**不读**这个环境变量——
+  它打一句"home default"警告后照旧在 `~/.glasspane` 上执行。同一条命令换成 `--prune-evidence`
+  就是在真机上删真档案（事后核对 `~/.glasspane/evidence` 582 条 / 934,255 字节完好——本版默认 TTL
+  下没有过期项，但这不是可以再来一次的操作）。改为要求 `--state-dir`，并记下"归档条目都在单一
+  顶层目录 `GlassPane-<ver>/` 下，锚在 `^harness/` 的检查会空过成绿"这条实测坑。
+- 本轮有两条评审结论经实测**不成立**，记下来免得下一轮再"修"一遍：`glasspaned main.swift` 那句
+  `bundleId` 并不是塞进 `[String: Any]` 的 `Optional`（同段里可选的是 `evidenceStoragePath`，它已经
+  `?? NSNull()`）；"release.yml 从不签 tag，所以安装器的发布 tag 验签永远不可能通过"也不成立——
+  本机 `tag.gpgsign=true`，`git tag -v v1.7.0` 实测回"完好的签名"，密钥与归档 `.asc` 同一把
+  （`0929EA31DF4F7429F63FC53189D88B1D043A1298`）：签 tag 的是发布的人，不是 CI。
+
 ## [1.7.0] — 2026-10-04
 
 版本判断：**按 minor 记**。判据沿用本仓自己在 1.6.2 条目里写下的那一条——patch 要求
