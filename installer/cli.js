@@ -1792,48 +1792,52 @@ export async function install({ options = parseArgs([]).options, env = process.e
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
 
 if (isMain) {
+  // 入口的**每一条**退出都交给事件循环，没有例外。`curl | sh` 是文档里的调用形态，
+  // stdout 接的是管道：`process.exit()` 抢在 flush 之前退，会把刚写出去的那几行
+  // （usage、预检清单、restore 的判定句）连根截掉——而失败时用户能读的正是这几行。
+  // 上一轮只把 install 的 .catch 改成了 `process.exitCode`，参数错误／--help／
+  // --restore-launchd／环境预检这四条还留着 `process.exit()`；Linux runner 上就是
+  // 从这里现形的（那台机器没有 swift，预检拒绝必然走到，而测试原本指望走到 install
+  // 的拒绝分支——一条依赖机器状态的断言）。
   const { options, error } = parseArgs(process.argv.slice(2))
   if (error) {
     process.stderr.write(`\n${paint(`参数错误：${error}`, 'red')}\n\n`)
     process.stderr.write(usageText())
-    process.exit(2)
-  }
-  if (options.help) {
+    process.exitCode = 2
+  } else if (options.help) {
     process.stdout.write(usageText())
-    process.exit(0)
-  }
-
-  if (options.restoreLaunchd) {
+    process.exitCode = 0
+  } else if (options.restoreLaunchd) {
     // 审计项④：恢复 + 校验全机器化，退出码即判定（0=daemon 就位且已按实际
     // 自报如实报告；1=作业/服务面失败），agent 可直接执行并按 message 续办。
     const result = await restoreLaunchd()
     process.stdout.write(`${result.message}\n`)
-    process.exit(result.ok ? 0 : 1)
-  }
-
-  const env = checkEnvironment()
-  const issues = preflightIssues(env)
-  if (issues.length > 0) {
-    process.stderr.write(paint('\n环境预检未通过：\n', 'red'))
-    for (const issue of issues) {
-      process.stderr.write(`  - ${issue}\n`)
-    }
-    process.stderr.write('\n修复后重新运行即可。\n')
-    process.exit(1)
-  }
-
-  install({ options })
-    .then((outcome) => {
-      process.stdout.write('\n')
-      // 退出码 = 收尾校验结论。用 process.exitCode 而不是 process.exit()：让上面的
-      // 说明文本先冲干净（`curl | sh` 常接管道，截断会把"下一步怎么办"整段吃掉）。
-      process.exitCode = outcome.exitCode
-    })
-    .catch((installError) => {
-      process.stderr.write(paint(`\n安装失败：${installError.message}\n`, 'red'))
-      // 与成功路径同一套：用 process.exitCode，不用 process.exit()。`curl | sh` 是文档里的调用
-      // 形态，stdout 接的是管道——exit() 会把还排在队列里的步骤输出连根截掉，而那正是用户
-      // 唯一需要读的一段（哪一步炸的、下一步跑什么）。
+    process.exitCode = result.ok ? 0 : 1
+  } else {
+    const env = checkEnvironment()
+    const issues = preflightIssues(env)
+    if (issues.length > 0) {
+      process.stderr.write(paint('\n环境预检未通过：\n', 'red'))
+      for (const issue of issues) {
+        process.stderr.write(`  - ${issue}\n`)
+      }
+      process.stderr.write('\n修复后重新运行即可。\n')
       process.exitCode = 1
-    })
+    } else {
+      install({ options })
+        .then((outcome) => {
+          process.stdout.write('\n')
+          // 退出码 = 收尾校验结论。用 process.exitCode 而不是 process.exit()：让上面的
+          // 说明文本先冲干净（`curl | sh` 常接管道，截断会把"下一步怎么办"整段吃掉）。
+          process.exitCode = outcome.exitCode
+        })
+        .catch((installError) => {
+          process.stderr.write(paint(`\n安装失败：${installError.message}\n`, 'red'))
+          // 与成功路径同一套：用 process.exitCode，不用 process.exit()。`curl | sh` 是文档里的调用
+          // 形态，stdout 接的是管道——exit() 会把还排在队列里的步骤输出连根截掉，而那正是用户
+          // 唯一需要读的一段（哪一步炸的、下一步跑什么）。
+          process.exitCode = 1
+        })
+    }
+  }
 }
