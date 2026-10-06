@@ -69,7 +69,7 @@ export const INSTALL_SH_URL =
 /** 发布线锚点（版本真源 = 根 package.json，由 scripts/set-version.mjs 统一改写，
  *  勿手改）：npx 形态下本地没有仓库时，引导 clone 的就是这个 tag，与 install.sh
  *  的 `GLASSPANE_RELEASE` 同值——两条一键入口必须拿到同一份源码。 */
-export const RELEASE_VERSION = '1.7.0'
+export const RELEASE_VERSION = '1.8.0'
 /** 发布 ref（tag 名）。GLASSPANE_REF 环境变量可覆盖（追主干用 `main`）。 */
 export const REPO_REF = `v${RELEASE_VERSION}`
 
@@ -529,28 +529,80 @@ export function launchdNeedsReregister({ alreadyLoaded, loadedProgram = null, de
   return loadedProgram !== String(desiredProgram ?? '')
 }
 
+/** 把 plist 文本里的转义还原回真实路径（与 launchdPlistString 的 escapeXml 反向）。
+ *  顺序要紧：先解 &lt;/&gt;，最后才解 &amp;，否则 `&amp;lt;` 会被多解一层。 */
+function unescapeXml(value) {
+  return String(value)
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+}
+
+/** 从 plist 文本取本次要装的程序路径：`Program` 单值，或 `ProgramArguments` 的首项。
+ *  `launchctl print` 报的 `program =` 就是这一个值，所以两边必须同源于渲染出来的 plist——
+ *  restore 路径手上只有 plist 文件，拿不到"我想装什么"。 */
+export function launchdProgramFromPlistText(xml) {
+  const text = String(xml ?? '')
+  const single = /<key>Program<\/key>\s*<string>([\s\S]*?)<\/string>/.exec(text)
+  if (single) return unescapeXml(single[1]).trim()
+  const args = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text)
+  if (!args) return null
+  const first = /<string>([\s\S]*?)<\/string>/.exec(args[1])
+  return first ? unescapeXml(first[1]).trim() : null
+}
+
+/** plist 读不回东西时回 null：`launchdNeedsReregister` 把"读不到定义"一律判成要重来，这是
+ *  保守方向（宁可重注册，也不要在旧定义上假装成功），所以这里不许编一个路径出来。 */
+function readPlistProgram(readFile, plistPath) {
+  try {
+    return launchdProgramFromPlistText(readFile(plistPath))
+  } catch {
+    return null
+  }
+}
+
 /** 注册 launchd 用户代理（幂等）：已加载则跳过，未加载则 bootstrap
- *  gui/<uid>。返回 { ok, already, message }，失败携带真实 stderr。 */
-export function launchctlBootstrap(label, plistPath, { desiredProgram = null } = {}) {
-  const uid = spawnSync('id', ['-u'], { encoding: 'utf8' }).stdout.trim()
+ *  gui/<uid>。返回 { ok, already, message }，失败携带真实 stderr。
+ *
+ *  `desiredProgram` 缺失时**自己从 plist 读**：调用方之一是 `--restore-launchd`，它手里只有
+ *  plist 路径，而它偏偏是安装器交给 agent 的"daemon 不可达"补救命令。以前不传就等于跟 ''
+ *  比，任何已加载作业都被判成"定义变了"→ bootout 一个健康作业（打断正在跑的 act）。 */
+export function launchctlBootstrap(label, plistPath, { desiredProgram = null, spawn = spawnSync, readFile = (file) => fs.readFileSync(file, 'utf8') } = {}) {
+  const uid = spawn('id', ['-u'], { encoding: 'utf8' }).stdout.trim()
   if (!uid) {
     return { ok: false, already: false, message: '无法解析当前 uid（id -u 失败），跳过 launchd 注册' }
   }
   const domain = `gui/${uid}`
-  const probe = spawnSync('launchctl', ['print', domain + '/' + label], { encoding: 'utf8' })
+  const probe = spawn('launchctl', ['print', domain + '/' + label], { encoding: 'utf8' })
+  const wantProgram = desiredProgram ?? readPlistProgram(readFile, plistPath)
   const needsReregister = launchdNeedsReregister({
     alreadyLoaded: probe.status === 0,
     loadedProgram: loadedLaunchdProgram(probe.stdout),
-    desiredProgram,
+    desiredProgram: wantProgram,
   })
   if (probe.status === 0 && !needsReregister) {
     return { ok: true, already: true, message: `launchd 已加载 ${label}（${domain}），跳过 bootstrap` }
   }
   if (probe.status === 0) {
     // 定义变了：先卸掉旧作业，否则新 plist 不生效（真机 EX_CONFIG 的来路）。
-    spawnSync('launchctl', ['bootout', domain + '/' + label])
+    // bootout 的退出码必须判：它失败时紧随的 bootstrap 只会回 5 / "already loaded"，
+    // 而那一支被下面映射成 ok:true —— 于是安装器打印"开机自启已注册"，launchd 却还在
+    // 按旧定义 spawn（正是 L519-525 那段注释说这次设计要消灭的 EX_CONFIG 陷阱）。
+    const out = spawn('launchctl', ['bootout', domain + '/' + label], { encoding: 'utf8' })
+    const outStatus = out?.status ?? null
+    const outError = String(out?.stderr ?? '').trim()
+    if (outStatus !== 0) {
+      return {
+        ok: false,
+        already: false,
+        bootoutFailed: true,
+        message: `launchctl bootout ${domain}/${label} 未成功（退出码 ${outStatus}${outError ? `：${outError}` : ''}），旧作业仍挂在 launchd 上，因此没有继续 bootstrap——此刻在跑的仍是旧定义 ${loadedLaunchdProgram(probe.stdout) ?? '（未读到）'}，而新 plist 写的是 ${wantProgram ?? '（读不到）'}。请按顺序手工执行：launchctl bootout ${domain}/${label}（仍失败就换 launchctl remove ${label}），确认 launchctl print ${domain}/${label} 报 Could not find service，然后重跑 install.sh（或 node installer/cli.js --restore-launchd）。`,
+      }
+    }
   }
-  const boot = spawnSync('launchctl', ['bootstrap', `gui/${uid}`, plistPath], { encoding: 'utf8' })
+  const boot = spawn('launchctl', ['bootstrap', `gui/${uid}`, plistPath], { encoding: 'utf8' })
   const stderr = (boot.stderr ?? '').trim()
   const status = boot.status
   if (status === 0 || status === 5 || /already/i.test(stderr)) {
@@ -645,7 +697,13 @@ export async function restoreLaunchd({
   }
   const boot = bootstrapFn(label, plistPath)
   if (!boot.ok) {
-    return { ok: false, action: 'bootstrap-failed', message: `bootstrap 失败：${boot.message}` }
+    // 两种"没注册上"要分开说：bootout 失败意味着旧作业还在跑旧定义（agent 下一步是把它卸掉），
+    // bootstrap 失败才是"卸干净了但装不上"。合成一句会把人支到错的那条命令上去。
+    return {
+      ok: false,
+      action: boot.bootoutFailed ? 'bootout-failed' : 'bootstrap-failed',
+      message: boot.bootoutFailed ? boot.message : `bootstrap 失败：${boot.message}`,
+    }
   }
   const verify = async () => {
     if (!(await waitFn(socketPath, { timeoutMs: serveTimeoutMs }))) {
@@ -1049,6 +1107,17 @@ export async function confirm(question, { autoYes = false } = {}) {
   }
 }
 
+/** 状态根/日志目录与其里那份日志的模式（与 updater 的 fsutil 同一组数：0700 / 0600）。
+ *  installer 是零依赖单文件，所以这里自己写死，不去 import updater/lib/fsutil.js。 */
+export const STATE_DIR_MODE = 0o700
+export const STATE_FILE_MODE = 0o600
+
+/** 把人话版的八进制模式写全前导零：0o755 打出来是 `0755` 而不是 `755`，拒绝里出现的数
+ *  要能被直接拿去和 ls -l 的答案对。 */
+export function formatMode(mode) {
+  return `0${(Number(mode ?? 0) & 0o777).toString(8).padStart(3, '0')}`
+}
+
 /** 创建日志/socket 目录（`~/.glasspane`），一次性、幂等（A-8 的后半段）。
  *
  *  为什么必须由安装器在**写 plist 之前**做，而不是等 startDetached 顺手 mkdir：
@@ -1060,13 +1129,65 @@ export async function confirm(question, { autoYes = false } = {}) {
  *  launchd，而它要写的目录还不存在。startDetached 里的 mkdirSync 救不了这一枪。
  *
  *  不改变任何文件位置：只建目录，路径口径与 install() 里算出来的完全一致。 */
-export function ensureLogDir(logPath, { mkdir = fs.mkdirSync } = {}) {
+export function ensureLogDir(logPath, { mkdir = fs.mkdirSync, chmod = fs.chmodSync, statMode = (p) => fs.statSync(p).mode & 0o777 } = {}) {
   const dir = path.dirname(logPath)
   try {
-    mkdir(dir, { recursive: true })
-    return { ok: true, dir, error: null }
+    // mode 只作用在**新建**的那一层、还要被 umask 削一刀；目录已经存在时（上一轮安装留下的
+    // 0755）mkdirSync 一个字都不改。这个目录里放着 socket、审批记录、证据和 installer-daemon.log，
+    // 所以 0700 是要求而不是建议：补一次 chmod，再把模式读回来。
+    mkdir(dir, { recursive: true, mode: STATE_DIR_MODE })
+    chmod(dir, STATE_DIR_MODE)
+    const mode = statMode(dir)
+    if (mode !== STATE_DIR_MODE) {
+      // 没落住的 chmod 按**写失败**报告，而不是"我们至少试过了"——与 updater/fsutil.tightenMode
+      // 同一个判据（卷不保存权限位时，owner-only 这件事在这里就做不到）。
+      return {
+        ok: false,
+        dir,
+        mode,
+        error: `日志/socket 目录 ${dir} 在 chmod(0700) 之后仍是 ${formatMode(mode)}：这台机器的卷不保存权限位，owner-only 的 socket 目录做不到，安装在这里中止（不是继续写进去）`,
+      }
+    }
+    return { ok: true, dir, mode, error: null }
   } catch (error) {
     return { ok: false, dir, error: `日志/socket 目录不可用：${dir}（${error.message}）` }
+  }
+}
+
+/** 以 owner-only(0600) 打开或创建 daemon 日志，并把模式**读回来**。
+ *
+ *  为什么不能只 `openSync(logPath, 'a')`：那条口令既没有 mode（新建文件因此拿到 0644 & ~umask），
+ *  也不改**已存在**文件的模式（上一轮安装留下的 0644 就这么留着）。这份日志里是审批与证据线索，
+ *  而 daemon 的启动清扫只收紧 registry/approvals/evidence（engine StateRoot.swift 的那一段），
+ *  从不碰它——SECURITY.md 记的正是这条"量到而未修"。chmod 没落住按写失败报告。 */
+export function openPrivateLog(logPath, {
+  open = (file) => fs.openSync(file, 'a', STATE_FILE_MODE),
+  chmod = fs.fchmodSync,
+  fstat = fs.fstatSync,
+  close = fs.closeSync,
+} = {}) {
+  let fd
+  try {
+    fd = open(logPath)
+  } catch (error) {
+    return { ok: false, fd: null, mode: null, error: `日志文件打不开：${error.message}` }
+  }
+  try {
+    chmod(fd, STATE_FILE_MODE)
+    const mode = Number(fstat(fd).mode ?? 0) & 0o777
+    if (mode !== STATE_FILE_MODE) {
+      try { close(fd) } catch { /* 已经决定失败了 */ }
+      return {
+        ok: false,
+        fd: null,
+        mode,
+        error: `日志文件 ${logPath} 在 chmod(0600) 之后仍是 ${formatMode(mode)}：这台机器的卷不保存权限位，owner-only 的日志做不到（同一次写按失败算，不当成功报告）`,
+      }
+    }
+    return { ok: true, fd, mode, error: null }
+  } catch (error) {
+    try { close(fd) } catch { /* 已经决定失败了 */ }
+    return { ok: false, fd: null, mode: null, error: `日志文件打不开：${error.message}` }
   }
 }
 
@@ -1090,18 +1211,18 @@ export function ensureLogDir(logPath, { mkdir = fs.mkdirSync } = {}) {
  *
  *  日志目录（`~/.glasspane`）由 install() 在建 plist、bootstrap 之前一次性创建
  *  （见 ensureLogDir）；这里的 mkdirSync 只是给直接调用方与单测留的兜底。 */
-export async function startDetached(binPath, args, logPath, { settleMs = LAUNCH_SETTLE_MS, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+export async function startDetached(binPath, args, logPath, { settleMs = LAUNCH_SETTLE_MS, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), openLog = openPrivateLog } = {}) {
   try {
-    fs.mkdirSync(path.dirname(logPath), { recursive: true })
+    fs.mkdirSync(path.dirname(logPath), { recursive: true, mode: STATE_DIR_MODE })
+    fs.chmodSync(path.dirname(logPath), STATE_DIR_MODE)
   } catch (error) {
     return { ok: false, pid: null, error: `日志目录不可用：${error.message}`, exit: null }
   }
-  let logStream
-  try {
-    logStream = fs.openSync(logPath, 'a')
-  } catch (error) {
-    return { ok: false, pid: null, error: `日志文件打不开：${error.message}`, exit: null }
+  const opened = openLog(logPath)
+  if (!opened.ok) {
+    return { ok: false, pid: null, error: opened.error, exit: null }
   }
+  const logStream = opened.fd
   const child = spawn(binPath, args, {
     detached: true,
     stdio: ['ignore', logStream, logStream],
@@ -1710,6 +1831,9 @@ if (isMain) {
     })
     .catch((installError) => {
       process.stderr.write(paint(`\n安装失败：${installError.message}\n`, 'red'))
-      process.exit(1)
+      // 与成功路径同一套：用 process.exitCode，不用 process.exit()。`curl | sh` 是文档里的调用
+      // 形态，stdout 接的是管道——exit() 会把还排在队列里的步骤输出连根截掉，而那正是用户
+      // 唯一需要读的一段（哪一步炸的、下一步跑什么）。
+      process.exitCode = 1
     })
 }
