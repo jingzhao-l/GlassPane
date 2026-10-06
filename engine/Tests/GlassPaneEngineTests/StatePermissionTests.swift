@@ -86,6 +86,10 @@ final class StatePermissionTests: XCTestCase {
         try writeFile("{}", at: entry, mode: 0o664)
         let foreign = root.evidenceDirectory + "/notes.txt"
         try writeFile("mine", at: foreign, mode: 0o664)
+        // The launchd log: created by whoever started the job, so an
+        // `installer-daemon.log` that launchd itself opened sits at the process
+        // umask (0644) and used to be the one file in this root no sweep covered.
+        try writeFile("daemon started\n", at: root.installerDaemonLogFile, mode: 0o644)
 
         XCTAssertEqual(mode(of: rootPath), 0o755)
         let notes = root.tightenPermissions(log: EngineLog(quiet: true))
@@ -95,6 +99,8 @@ final class StatePermissionTests: XCTestCase {
         XCTAssertEqual(mode(of: root.projectsFile), 0o600)
         XCTAssertEqual(mode(of: root.approvalsFile), 0o600)
         XCTAssertEqual(mode(of: entry), 0o600)
+        XCTAssertEqual(mode(of: root.installerDaemonLogFile), 0o600,
+                       "SECURITY.md 曾把这份日志列为「实测 0644、状态根里唯一不被收紧扫描覆盖」，这条钉住它不再是那个形状")
         XCTAssertEqual(
             mode(of: foreign), 0o664,
             "a file that is not an archive entry is not this sweep's to touch"
@@ -127,6 +133,24 @@ final class StatePermissionTests: XCTestCase {
         let root = StateRoot(path: TestSandbox.directory("root-absent") + "/later")
         XCTAssertTrue(root.tightenPermissions(log: EngineLog(quiet: true)).isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+    }
+
+    /// A launchd job that has never run leaves no log: "not there yet" is not a
+    /// defect, and the sweep must not create the file while checking for it
+    /// (a zero-byte `installer-daemon.log` would then be the daemon's own output
+    /// path, indistinguishable from one launchd actually opened).
+    func testTightenPermissionsCoversAnAbsentLogWithoutCreatingIt() throws {
+        let rootPath = TestSandbox.directory("root-nolog")
+        let root = StateRoot(path: rootPath)
+        try FileManager.default.createDirectory(atPath: root.evidenceDirectory, withIntermediateDirectories: true)
+        try writeFile("[]", at: root.projectsFile, mode: 0o600)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.installerDaemonLogFile))
+        let notes = root.tightenPermissions(log: EngineLog(quiet: true))
+        XCTAssertTrue(notes.isEmpty, "缺日志不是缺陷，也不该被报成缺陷：\(notes)")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: root.installerDaemonLogFile),
+            "扫描不许为了检查而创建 launchd 的输出路径"
+        )
     }
 
     // MARK: - the writers themselves

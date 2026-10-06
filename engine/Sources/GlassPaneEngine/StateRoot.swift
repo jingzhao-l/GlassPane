@@ -68,6 +68,15 @@ public struct StateRoot: Equatable {
     /// The approval hash chain.
     public var approvalsFile: String { child("approvals.json") }
 
+    /// launchd 那份 daemon 日志（`installer/cli.js` 的 `DAEMON_LOG_NAME` 是同一个名字，
+    /// 由 `installer/test/log-modes.test.mjs` 反向钉住不许漂移）。它是状态根里唯一
+    /// 由**别的进程**创建的文件：安装器现在按 0600 建，但 launchd 自己创建时走的是
+    /// 进程 umask（实测 0644），而这份日志的内容是 daemon 的启动行、socket 路径、
+    /// pid、连接/断开与权限判定——够另一个账号读出这台机器跑了什么。
+    /// 从前这趟扫描管根目录、登记表、审批链与证据包，唯独不管它，文档只能请人手工
+    /// chmod；现在它是被扫的对象之一。
+    public var installerDaemonLogFile: String { child("installer-daemon.log") }
+
     /// Default probe listener path (`--probe-socket-path` overrides it).
     public var probeSocketFile: String { child("probe.sock") }
 
@@ -188,7 +197,7 @@ public struct StateRoot: Equatable {
             log.info("state root \(path) does not exist yet — nothing to tighten")
             return []
         }
-        let files = [projectsFile, approvalsFile]
+        let files = [projectsFile, approvalsFile, installerDaemonLogFile]
             + (Self.jsonFiles(in: evidenceDirectory))
         for file in files {
             if let defect = Self.isolateFile(at: file) {

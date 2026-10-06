@@ -6,7 +6,8 @@
  *     **新建**的那一层——上一轮安装留下的 `~/.glasspane` 是 0755，这一轮一个字都不改。
  *  2) `startDetached` 的 `fs.openSync(logPath, 'a')` 同样没有 mode（新建即 0644），而且它不会
  *     改**已存在**文件的模式。daemon 的启动清扫（engine/Sources/GlassPaneEngine/StateRoot.swift
- *     的 tighten 那一段）收紧 registry / approvals / evidence，唯独不碰这个日志。
+ *     的 tighten 那一段）从前收紧 registry / approvals / evidence，唯独不碰这个日志——
+ *     写侧由本文件管，别人（launchd）创建的那一份由最后那条跨语言漂移闸保证仍被扫到。
  *
  * 判据沿用本仓库既有的那一条（`updater/lib/fsutil.js` 的 `tightenMode` 与 release-archive 的
  * 同名测试）：**没落住的 chmod 按写失败报告**，不是"至少我们试过了"。
@@ -19,6 +20,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   DAEMON_LOG_NAME,
@@ -158,4 +160,19 @@ test('startDetached: 日志模式做不到时不启动子进程', async () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('跨语言漂移闸：daemon 的启动扫描必须认这同一个日志名', () => {
+  // 这一条不是装饰。安装器按 `DAEMON_LOG_NAME` 建 0600，daemon 的
+  // `StateRoot.tightenPermissions` 负责把**别人**（launchd 自己）按 umask 创建的那份收紧。
+  // 两边各写一个文件名字面量，任何一侧改名都会让另一侧静默失效——那正是
+  // "SECURITY.md 里那条已被覆盖"变成谎话的形状，所以名字只能有一份真源被两头核。
+  const stateRoot = fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "engine", "Sources", "GlassPaneEngine", "StateRoot.swift"),
+    "utf8",
+  )
+  assert.match(stateRoot, new RegExp(`child\\("${DAEMON_LOG_NAME}"\\)`),
+    `engine/Sources/GlassPaneEngine/StateRoot.swift 里找不到 child("${DAEMON_LOG_NAME}")：扫描不再覆盖这份日志`)
+  assert.match(stateRoot, /installerDaemonLogFile\s*\]\s*\n?\s*\+ \(Self\.jsonFiles/,
+    "这个名字必须真在被收紧的那张表里，而不是只定义了一个属性")
 })
