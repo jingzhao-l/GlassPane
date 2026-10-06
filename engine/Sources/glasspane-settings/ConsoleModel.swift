@@ -230,23 +230,14 @@ final class ConsoleModel: ObservableObject {
             let run = ConsoleModel.runDaemonCLI(binary: binary, arguments: ["--project-prune"])
             await MainActor.run {
                 self.isRunningPrune = false
-                let output = run?.output ?? ""
-                // "跑起来了"不等于"被理解了"。daemon 不认这条命令时退出码是 64、
-                // 回的是帮助文本，`intField("matched") ?? 0` 会把它读成 0 命中，
-                // 面板于是当着一屏残留说"没有需要清理的项目"。判据是这一行里
-                // 到底有没有约定那几个字段，不是进程有没有回来过。
-                let shaped = Self.intField("matched", in: output) != nil
-                    || Self.boolField("loadFailed", in: output) != nil
-                self.pruneNeedsRestart = Self.boolField("requiresDaemonRestart", in: output) ?? false
-                self.lastActionMessage = LocalArchive.pruneResultMessage(
+                self.pruneNeedsRestart = Self.boolField(
+                    "requiresDaemonRestart", in: Self.cliReply(run)
+                ) ?? false
+                self.lastActionMessage = Self.pruneActionMessage(
                     cliRan: run != nil,
-                    replyShaped: shaped,
-                    exitCode: run?.status ?? -1,
-                    loadFailed: Self.boolField("loadFailed", in: output) ?? false,
-                    matched: Self.intField("matched", in: output) ?? 0,
-                    pruned: Self.intField("pruned", in: output) ?? 0,
-                    failed: Self.intField("failed", in: output) ?? 0,
-                    needsRestart: self.pruneNeedsRestart
+                    stdout: run?.output ?? "",
+                    stderr: run?.errorOutput ?? "",
+                    exitCode: run?.status ?? -1
                 )
                 self.reloadProjects()
             }
@@ -263,20 +254,13 @@ final class ConsoleModel: ObservableObject {
         Task.detached(priority: .userInitiated) {
             let run = ConsoleModel.runDaemonCLI(binary: binary, arguments: ["--project-remove", projectId])
             await MainActor.run {
-                let output = run?.output ?? ""
-                // 同 prune：退出码 64 的帮助文本会读成 `removed: false`，
-                // 而面板那句话就从"没找到这个项目"开始骗人。
-                let shaped = Self.boolField("removed", in: output) != nil
-                    || Self.boolField("found", in: output) != nil
-                    || Self.boolField("loadFailed", in: output) != nil
-                self.pruneNeedsRestart = Self.boolField("requiresDaemonRestart", in: output) ?? false
-                self.lastActionMessage = LocalArchive.removeResultMessage(
+                let reply = Self.cliReply(run)
+                self.pruneNeedsRestart = Self.boolField("requiresDaemonRestart", in: reply) ?? false
+                self.lastActionMessage = Self.removeActionMessage(
                     cliRan: run != nil,
-                    replyShaped: shaped,
-                    exitCode: run?.status ?? -1,
-                    removed: Self.boolField("removed", in: output) == true,
-                    loadFailed: Self.boolField("loadFailed", in: output) ?? false,
-                    needsRestart: self.pruneNeedsRestart
+                    stdout: run?.output ?? "",
+                    stderr: run?.errorOutput ?? "",
+                    exitCode: run?.status ?? -1
                 )
                 if self.selectedProjectId == projectId { self.selectedProjectId = nil }
                 self.reloadProjects()
@@ -284,11 +268,13 @@ final class ConsoleModel: ObservableObject {
         }
     }
 
-    /// 跑一次 daemon 一次性 CLI，返回它的 stdout 与退出码；起不来/超时才回 nil。
+    /// 跑一次 daemon 一次性 CLI，返回它的 stdout、stderr 与退出码；起不来/超时才回 nil。
     ///
     /// **非 0 退出也要把 JSON 交回去**：这些命令的报告体本身就是结论（部分修剪成功
     /// 时 `pruned` 与 `matched` 不同），按退出码把输出丢掉会让面板只剩一句
     /// "没执行成功"，然后对着一份已经改了一半的注册表说"保持原样"——那就是撒谎。
+    /// **stderr 同样必须交回去**：这些命令在拒绝执行时（注册表读不开、参数不合规格）
+    /// 把整份报告写到 stderr，只看 stdout 的那条结论就会读成空。
     /// 这些命令只读写 `~/.glasspane` 下的普通文件，不涉及 TCC 席位，
     /// 因此以面板进程直接执行即可——不像权限申请必须落在 daemon 自己身上。
     /// `nonisolated static`：调用方一律放后台队列，主线程不等子进程。
@@ -296,27 +282,36 @@ final class ConsoleModel: ObservableObject {
         binary: String?,
         arguments: [String],
         timeoutSeconds: TimeInterval = 20
-    ) -> (output: String, status: Int32)? {
+    ) -> (output: String, errorOutput: String, status: Int32)? {
         guard let binary else { return nil }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binary)
         process.arguments = arguments
         let pipe = Pipe()
+        let errorPipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = Pipe()
+        process.standardError = errorPipe
         do {
             try process.run()
         } catch {
             return nil
         }
         // 先读到 EOF 再等退出：反过来时子进程输出超过管道缓冲会互相死等。
-        // 但仍要有上限——子进程卡住不能把后台队列永久占住。
-        let readQueue = DispatchQueue(label: "glasspane.console.cli-reader")
-        let box = MutexBox<Data>(Data())
+        // 但仍要有上限——子进程卡住不能把后台队列永久占住。两路管道各占一条并发
+        // 队列：串行读会让"写满第一路才写第二路"的子进程卡死。
         let group = DispatchGroup()
+        let outBox = MutexBox<Data>(Data())
+        let errBox = MutexBox<Data>(Data())
+        let readerQueue = DispatchQueue(label: "glasspane.console.cli-reader")
+        let errorQueue = DispatchQueue(label: "glasspane.console.cli-error-reader")
         group.enter()
-        readQueue.async {
-            box.value = pipe.fileHandleForReading.readDataToEndOfFile()
+        readerQueue.async {
+            outBox.value = pipe.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+        group.enter()
+        errorQueue.async {
+            errBox.value = errorPipe.fileHandleForReading.readDataToEndOfFile()
             group.leave()
         }
         if group.wait(timeout: .now() + timeoutSeconds) == .timedOut {
@@ -324,11 +319,100 @@ final class ConsoleModel: ObservableObject {
             return nil
         }
         process.waitUntilExit()
-        guard let text = String(data: box.value, encoding: .utf8) else { return nil }
-        return (text, process.terminationStatus)
+        guard let text = String(data: outBox.value, encoding: .utf8),
+              let errorText = String(data: errBox.value, encoding: .utf8) else { return nil }
+        return (text, errorText, process.terminationStatus)
     }
 
-    private static func intField(_ key: String, in json: String) -> Int? {
+    /// 两路输出里"被理解的那一份"：带 JSON 对象形状的优先，stdout 在前
+    /// （正常回话就在 stdout），两路都没有形状才退回 stdout 的原文。
+    nonisolated static func cliReply(_ run: (output: String, errorOutput: String, status: Int32)?) -> String {
+        guard let run else { return "" }
+        for candidate in [run.output, run.errorOutput] {
+            guard !candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let data = candidate.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  !object.isEmpty else { continue }
+            return candidate
+        }
+        return run.output
+    }
+
+    /// prune 的结论。**判据是这一行里到底有没有约定那几个字段**，不是进程有没有
+    /// 回来过：daemon 不认这条命令时退出码 64、回的是帮助文本，`matched ?? 0` 会把
+    /// 它读成"0 命中"，面板于是当着一屏残留说"没有需要清理的项目"。而字段在 stderr
+    /// 时（拒绝路径）也算"有形状"——从前这里只看 stdout，于是"注册表读不开"被报成
+    /// "它已经不认得 --project-prune"，一个根本没发生过的原因。
+    nonisolated static func pruneActionMessage(
+        cliRan: Bool, stdout: String, stderr: String, exitCode: Int32
+    ) -> String {
+        let reply = replyText(stdout: stdout, stderr: stderr)
+        let shaped = intField("matched", in: reply) != nil || boolField("loadFailed", in: reply) != nil
+        let message = LocalArchive.pruneResultMessage(
+            cliRan: cliRan,
+            replyShaped: shaped,
+            exitCode: exitCode,
+            loadFailed: boolField("loadFailed", in: reply) ?? false,
+            matched: intField("matched", in: reply) ?? 0,
+            pruned: intField("pruned", in: reply) ?? 0,
+            failed: intField("failed", in: reply) ?? 0,
+            needsRestart: boolField("requiresDaemonRestart", in: reply) ?? false
+        )
+        return shaped || !cliRan ? message : message + quoteDaemonWords(stderr)
+    }
+
+    /// remove 的结论，同一判据：未知 id、"拒绝覆写损坏表"与"这条命令不被认识"是
+    /// 三件事，而 stderr 里那份 `loadFailed` 报告属于第二件。
+    nonisolated static func removeActionMessage(
+        cliRan: Bool, stdout: String, stderr: String, exitCode: Int32
+    ) -> String {
+        let reply = replyText(stdout: stdout, stderr: stderr)
+        let shaped = boolField("removed", in: reply) != nil
+            || boolField("found", in: reply) != nil
+            || boolField("loadFailed", in: reply) != nil
+        let message = LocalArchive.removeResultMessage(
+            cliRan: cliRan,
+            replyShaped: shaped,
+            exitCode: exitCode,
+            removed: boolField("removed", in: reply) == true,
+            loadFailed: boolField("loadFailed", in: reply) ?? false,
+            needsRestart: boolField("requiresDaemonRestart", in: reply) ?? false
+        )
+        return shaped || !cliRan ? message : message + quoteDaemonWords(stderr)
+    }
+
+    /// 结论取哪一路文本：先看 stdout，形状不成才看 stderr（daemon 的拒绝报告在
+    /// 那里），两路都不成时才把 stdout 交给上游去判"没被理解"。
+    nonisolated static func replyText(stdout: String, stderr: String) -> String {
+        func isJsonObject(_ text: String) -> Bool {
+            guard let data = text.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return false
+            }
+            return !object.isEmpty
+        }
+        return isJsonObject(stdout) ? stdout : (isJsonObject(stderr) ? stderr : stdout)
+    }
+
+    /// 把后台服务真正说过的话附在结论后面。控制字符一律折成可见形式——这句会
+    /// 被复制进终端和报告（R5-03），而它不是本进程写的。
+    nonisolated static func quoteDaemonWords(_ text: String) -> String {
+        var visible = ""
+        for scalar in text.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars {
+            if scalar.value < 0x20 || scalar.value == 0x7f {
+                visible += "\\u\(String(format: "%04X", scalar.value))"
+            } else {
+                visible.unicodeScalars.append(scalar)
+            }
+        }
+        guard !visible.isEmpty else { return "" }
+        if visible.count > 240 {
+            visible = String(visible.prefix(240)) + "…（已截断）"
+        }
+        return " 后台服务的原话：\(visible)"
+    }
+
+    nonisolated private static func intField(_ key: String, in json: String) -> Int? {
         guard let data = json.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
@@ -336,7 +420,7 @@ final class ConsoleModel: ObservableObject {
         return object[key] as? Int
     }
 
-    private static func boolField(_ key: String, in json: String) -> Bool? {
+    nonisolated private static func boolField(_ key: String, in json: String) -> Bool? {
         guard let data = json.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil

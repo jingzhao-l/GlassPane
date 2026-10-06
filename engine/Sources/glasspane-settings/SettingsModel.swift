@@ -71,6 +71,22 @@ final class SettingsModel: ObservableObject {
     /// daemon 未运行 / 旧 daemon 不上报时的卡片注记。
     static let noDaemonReportNote = "后台服务未在运行或版本过旧，暂时读不到它的授权状态"
 
+    /// 第一帧 hello 回来**之前**的卡片状态。从前这里初始化成 `.notDetermined`
+    /// （面板上写"未请求"），那是对一个还没问过的 daemon 声称它没请求过授权——
+    /// 面板进程自己更不曾替它请求。三者（未验证 / 未在运行 / 未请求）必须各说各话，
+    /// 与 `rebuildEntries()` 里"daemon 没上报"那一支同判据；开发者工具一项按设计
+    /// 恒为未验证（TCC 无公开查询接口），它的注记同样不该先斩后奏。
+    static func entriesBeforeDaemonReport() -> [PermissionEntry] {
+        PermissionDescriptor.all.map { descriptor in
+            PermissionEntry(
+                kind: descriptor.kind,
+                descriptor: descriptor,
+                status: .unverifiable,
+                statusNote: descriptor.kind == .developerTools ? nil : noDaemonReportNote
+            )
+        }
+    }
+
     /// 顶部图标的拖拽源：daemon 有 bundle 身份时提供 **daemon 真身 .app**
     /// 的 fileURL（可直接拖进系统设置列表并显示图标）；daemon 未上报身份时
     /// 只提供纯文本导航——把设置面板自己的 .app 拖进去会授权错主体。
@@ -111,9 +127,7 @@ final class SettingsModel: ObservableObject {
             pid: nil,
             subject: nil
         )
-        entries = PermissionDescriptor.all.map { descriptor in
-            PermissionEntry(kind: descriptor.kind, descriptor: descriptor, status: .notDetermined, statusNote: nil)
-        }
+        entries = Self.entriesBeforeDaemonReport()
         if refreshOnAppear {
             refresh()
         }
@@ -262,12 +276,20 @@ final class SettingsModel: ObservableObject {
         let directory = NSTemporaryDirectory()
         let scriptPath = directory + "glasspane-reprobe-\(nonce).zsh"
         let outputPath = directory + "glasspane-reprobe-\(nonce).json"
-        let script = PermissionReprobe.script(daemonBinaryPath: binaryPath, outputPath: outputPath)
-        let command = PermissionReprobe.submitCommand(scriptPath: scriptPath, nonce: nonce)
+        guard let submission = PermissionReprobe.submission(
+            scriptPath: scriptPath, nonce: nonce,
+            daemonBinaryPath: binaryPath, outputPath: outputPath
+        ) else {
+            // 路径不合规格＝这帧 hello 不可信（或 daemon 换了形态）。宁可不动。
+            return reprobed
+        }
         // 一次性任务轮询是阻塞调用——必须在主 actor 之外执行，否则面板整窗
         // 冻结（launchd 挂起 UI 进程会被看门狗杀掉，用户侧症状就是"点了没反应"）。
         let outcome = await Task.detached(priority: .utility) {
-            Self.runOneShot(script: script, scriptPath: scriptPath, outputPath: outputPath, command: command)
+            Self.runOneShot(
+                script: submission.script, scriptPath: scriptPath,
+                outputPath: outputPath, command: submission.command
+            )
         }.value
         let result: PermissionReprobe.Result?
         if case .text(let text) = outcome { result = PermissionReprobe.parse(text) } else { result = nil }
@@ -296,18 +318,25 @@ final class SettingsModel: ObservableObject {
         let directory = NSTemporaryDirectory()
         let scriptPath = directory + "glasspane-devtools-\(nonce).zsh"
         let outputPath = directory + "glasspane-devtools-\(nonce).json"
-        let script = PermissionReprobe.script(
-            daemonBinaryPath: binaryPath,
-            outputPath: outputPath,
+        guard let submission = PermissionReprobe.submission(
+            scriptPath: scriptPath, nonce: nonce,
+            daemonBinaryPath: binaryPath, outputPath: outputPath,
             arguments: PermissionReprobe.developerToolsArguments
-        )
-        let command = PermissionReprobe.submitCommand(scriptPath: scriptPath, nonce: nonce)
+        ) else {
+            // daemon 自报的路径不是绝对路径（或含换行）——这帧 hello 不可信，
+            // 也不该把它交给 launchd 去执行。如实记失败，不改脚本形态去"绕一下"。
+            recordProbeFailure(
+                .writeFailed,
+                "后台服务自报的程序路径不合规格（需为绝对路径），本次验证未提交：\(binaryPath)"
+            )
+            return
+        }
         // 同 reprobeSeats：分钟级的实测等待绝不占用主线程。
         let timeout = Self.capabilityProbeTimeout
         let outcome = await Task.detached(priority: .utility) {
             Self.runOneShot(
-                script: script, scriptPath: scriptPath, outputPath: outputPath, command: command,
-                timeoutSeconds: timeout
+                script: submission.script, scriptPath: scriptPath, outputPath: outputPath,
+                command: submission.command, timeoutSeconds: timeout
             )
         }.value
         switch outcome {

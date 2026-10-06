@@ -514,7 +514,10 @@ struct EvidenceDetailView: View {
             DetailRowView(label: "强度", value: EvidenceCopy.attribution(pack.attribution.level.rawValue))
             DetailRowView(
                 label: "人机污染",
-                value: pack.attribution.contaminated ? "期间检测到本人操作" : "未检测到本人操作",
+                value: EvidenceCopy.contamination(
+                    contaminated: pack.attribution.contaminated,
+                    breakerReason: pack.circuitBreaker.reason
+                ),
                 valueColor: pack.attribution.contaminated ? .orange : .secondary
             )
             Text("归因回答的是「这次界面变化是不是这次操作造成的」；弱归因表示证据不足以断定。")
@@ -730,6 +733,35 @@ enum EvidenceCopy {
         case "weak": return "很弱"
         default: return raw
         }
+    }
+
+    /// 无监视的两个标签（EngineCore 写进 `circuitBreaker.reason` 的同名串，
+    /// 由 `EngineCoreTests` 按包内实值钉住）。
+    static let monitorAbsenceLabels = [
+        "input-contamination-not-monitored", "input-contamination-monitor-lost",
+    ]
+
+    /// 这个窗口有没有真的被看守过。冻结的证据 schema 里没有 monitor 字段，唯一
+    /// 还活着的记录就是上面那两个标签：EngineCore 在无监视时**必定**写它
+    /// （`testDaemonAlwaysStatesAReasonWhenNoMonitorRuns` 钉的就是这条）。
+    static func wasWatched(breakerReason: String?) -> Bool {
+        guard let reason = breakerReason else { return true }
+        return !monitorAbsenceLabels.contains { reason.contains($0) }
+    }
+
+    /// 污染行的措辞。`attribution.contaminated` 是**结论**，不是测量：EngineCore
+    /// 在没人看守这个窗口时按保守判 true（见其 contaminationBasis 那段），从前这里
+    /// 对 true 一律印"期间检测到本人操作"——面板于是替引擎声称了一次引擎刻意拒绝
+    /// 做出的测量，比错字严重一档。判净的一侧同理：无人看守时的 false 是声明。
+    static func contamination(contaminated: Bool, breakerReason: String?) -> String {
+        guard contaminated else {
+            return wasWatched(breakerReason: breakerReason)
+                ? "未检测到本人操作"
+                : "未监测（无人看守该窗口，判净出自声明而非测量）"
+        }
+        return wasWatched(breakerReason: breakerReason)
+            ? "期间检测到本人操作"
+            : "未监测（无人看守该窗口，按保守判污）"
     }
 
     static func breakerLevel(_ raw: Int) -> String {
