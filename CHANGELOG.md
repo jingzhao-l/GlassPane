@@ -4,6 +4,52 @@
 
 ## [Unreleased]
 
+## [1.8.2] — 2026-10-06
+
+版本判断：**按 patch 记**。四条判据都没动：状态文件的字段没加没改（`update-state.json` 的
+`status` 闭集与 `code` 表原样）、daemon 退出码集合仍是 `{0,1,2,3,64,65}`、CLI 参数一个没增删
+（`--help` 里那句改的是**说明文字**，不是开关）、两个 npm 包的 `bin` 声明没变，也没新增任何
+用户可见控制件。本版是三处收口 + 一份"明确决定不做"的记录。
+
+**发版凭据是 CI**（用户 2026-09-26 选定的口径）：本地这一批跑的时候，同一台机器上另一个会话的
+harness 每日任务正把 load average 顶在 160–200，`npm test --workspaces` 里两条 mcp-shell
+传输用例因此红成了"连接被拖到超时"（`GP_E_ENGINE_TIMEOUT`）而不是它们断言的"连不上"
+（`GP_E_ENGINE_UNREACHABLE`），另有安装器一条端到端用例因预检被负载挤退而**按设计声明跳过**。
+这三处都不是本版代码的形状（本版未触碰 `mcp-shell/src`），也**不许**用改判据或加超时去洗——
+所以本地那两条红按"负载假红"记录，判定交给 GitHub 上干净的 runner。
+
+### Fixed — 1.8.1 之后的 owner 授权批次（"全部你决定"）
+
+- **`installer-daemon.log` 不再是"文档里承认没修"的那一个。** 写侧上一轮已改（安装器按 0600 建并读回
+  比对，chmod 没落住按写失败报告），但**由 launchd 自己创建**的那一份仍走进程 umask（0644），而
+  daemon 的启动扫描管根目录、登记表、审批链与证据包，唯独不管它，SECURITY.md 只能请人自己 `chmod`。
+  现在它进了那张被扫的表：`StateRoot.installerDaemonLogFile` 定义在名字的唯一出处，
+  `tightenPermissions` 一并收紧。真机实测（隔离状态根、debug daemon）：`644 → 600`、根 `755 → 700`，
+  日志原有 15 字节一个没动——收紧是 `chmod`，不是重写。双语 SECURITY.md 已从"实测未修"改成这份实测
+  口径，并保留那条真正的残余风险：**模式不随副本走**（复制到共享目录/同步盘/CI 制品后由目标位置说话）。
+  跨语言漂移由 `installer/test/log-modes.test.mjs` 最后一条钉住：两侧名字必须同源，且那个名字必须真在
+  被收紧的列表里——反向验红：把 `installerDaemonLogFile` 从列表里拿掉，Swift 侧
+  `testTightenPermissionsBringsAPreExistingRootToOwnerOnly` 红、那条漂移闸也红（
+  `这个名字必须真在被收紧的那张表里，而不是只定义了一个属性`）。
+- **`glasspaned --help` 不再邀请一句误读。** `--permissions` 的说明从前写"the daemon's own permission
+  snapshot"，而它测的是**本次调用进程**的席位；`ProtocolErrors` 那边明令不得把它读成 daemon 状态，
+  帮助文本却正好在教人这么读。现在改成"this process's TCC seats"，并说清一次性调用测的不是在服务的
+  那个 daemon、`subject` 段就是给人看这是谁的席位的。
+- **删掉 `EngineCore.archiveDirectory(for:subject:)`。** 实测无任何调用方（`grep -rn "archiveDirectory("`
+  只命中定义本身），而它那条"绝不回落到 `defaultDirectory` 去删 `~/.glasspane/evidence/`"的规矩，在真正
+  会删东西的那条路上已由 `pruneEvidence` 的 `noStoreArchiveRefusal` 强制并注释在册（1706-1711）。
+  留一份没人执行的守卫，只会让人以为这条不变量由它守着。
+
+### 明确决定不做（同批记录，免得下一轮再问一遍）
+
+- engine socket 的 peer 鉴权、probe socket 抢绑、ad-hoc 签名 DR 不含 cdhash、Developer ID + 公证：
+  这四条是同一种性质——前两条是协议与信任模型的重设计（要同时改 daemon、壳、面板与三方消费者），
+  后两条要一个付费的 Apple Developer 账号与 owner 的签名身份，都不是无人值守任务该替产品定的事。
+- 面板一次性 CLI 不传 `--state-dir`：正解是让 daemon 在 `hello` 里回它实际用的状态根，那是对外契约
+  的增量，与 §三处镜像同级，需 owner 定形状。
+- 已推送的 `v1.8.0` tag 与对外的 GitHub Release 不删不移（本任务无权做不可逆的对外删除），
+  只在那条 Release 的说明里加一行指向 1.8.1。
+
 ## [1.8.1] — 2026-10-06
 
 版本判断：**按 patch 记**。判据仍是 1.6.2 那四条：状态文件的字段没动、退出码集合没动
