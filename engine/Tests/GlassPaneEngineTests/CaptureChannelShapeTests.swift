@@ -81,6 +81,29 @@ final class CaptureChannelShapeTests: XCTestCase {
                       "这个 SDK 形态里唯一可用的登记签名带队列参数；漏掉它等于没登记")
     }
 
+    /// 首帧的像素格式必须由代码核过，不能建在"默认值大概是 BGRA"上。
+    ///
+    /// 这条是本轮把自己改绿之后才补的：登记帧输出之前，这条路从来没跑过一帧，所以
+    /// "把缓冲当单平面 BGRA 抄一遍"这个假设**从未被任何一次运行验证过**。修好登记之后
+    /// 它第一次变成活路径——如果那时 SCK 给的是 `420v` 之类的平面格式，抄出来的会是一张
+    /// 绿色/噪声图，而它带着一个看似真实的像素差进档案。那比修复前更坏：修复前至少是
+    /// 如实的"测不到"。所以三件事一起要：显式声明要的格式、按核过的格式再转、以及
+    /// "等到了但转不出来"和"没等到"必须分两句说（后一句要是唯一解释，读的人会去加超时）。
+    /// REVERSE：把 `config.pixelFormat` 或那道格式护栏删掉 → 本条红。
+    func testFirstFrameFormatIsDeclaredAndCheckedNotAssumed() throws {
+        let source = codeOnly(try read("engine/Sources/GlassPaneEngine/SCKCapturer.swift"))
+        XCTAssertTrue(source.contains("config.pixelFormat = kCVPixelFormatType_32BGRA"),
+                      "流配置没有点名像素格式：转换按 BGRA 写，喂进来别的格式就是一次静默的错图")
+        XCTAssertTrue(source.contains("CVPixelBufferGetPixelFormatType(buffer)"),
+                      "缓冲的真实格式没被核过——那句注释就成了唯一的守卫，而注释不执行")
+        XCTAssertTrue(source.contains("case .unexpectedFormat"),
+                      "格式不对必须单独说；混进\"超时\"里就是让下一个人去调超时")
+        XCTAssertTrue(source.contains("case .conversionFailed"),
+                      "\"等到了但转不出来\"与\"没等到\"是两件事，不能共用一句话")
+        XCTAssertTrue(source.contains("fourCC"),
+                      "拒绝的话要给出可查的 fourCC，一个十进制整数没人抄得动")
+    }
+
     /// 登记失败必须当场说话，不许伪装成一次超时。
     /// REVERSE：把 `catch` 里的 `pixelCaptureDenied` 改成继续往下走 → 本条红。
     func testStreamOutputRegistrationFailureIsNotReportedAsATimeout() throws {
