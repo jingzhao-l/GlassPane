@@ -12,6 +12,21 @@ contract does not).
 
 <!-- 内容归入下一版；此处留空以备下一批。 -->
 
+### Changed — 依赖升 0.1.3，行为闸不再与自己比较
+
+- **`iterate-kernel` 0.1.2 → 0.1.3。** 升这一版不是为了新功能，是为了让随包语料里的转录契约
+  （`evidence-decision.ok-01.json`）进到本仓 CI：停在 0.1.2，那条 fixture 不在包内，下面那条
+  oracle 分支永远不触发，"两侧同一套转录"就只剩 iterate 一边的证据。出处清单重记为 15 个契约文件。
+- **`script/kernel-conformance.mjs` 的比较对象补齐。** 单实现模式此前把实现与它自己比，恒真，
+  而 CI 正是这么跑的。现在三方可指认：`contracts/kernel-conformance.json` 记下每条 fixture 的
+  答案摘要，fixture 自带期望的优先按期望断言（`dimension-context` 的 `expected`/`expectedLine`、
+  `evidence-decision` 的 8 个 case），加 `--impl` 才是双方逐字节对照。每行报告写明这条是靠什么
+  比的（`[oracle+golden+impl×N]`），一样都没有就打 `?!`；金样不在时拒绝跑绿，`--record` 在
+  oracle 违反时拒绝盖章。被拒的样本也不再印成通过：`REJECTED …` + 行尾 `rejected` 身份。
+  `evidence-pack` 那类改走产品实际消费的读侧契约 `parseEvidencePackRead`。
+- 一条 `kindOf` 前缀表 + "包发了但本 lane 不驱动任何 kind"的守卫：`dimension-context` 就是因为
+  判成 null 而整份语料白带着走了一轮。
+
 ### Changed — 共享内核改为依赖，仓内副本退役
 
 - **内核不再是抄进仓里的源码。** `packages/opencode/vendor/kernel/`（25 个文件：11 份源码、3 份 schema、11 份 fixture）连同镜像到 `contracts/kernel-fixtures/` 的契约语料一起删除。`glasspane-harness` 现在把 **`iterate-kernel@0.1.2`** 当作 `packages/opencode` 的普通依赖，从 npm 解析，解析结果与完整性记在 `bun.lock`。运行时的行为与 vendored 时期一致：同一份内核、同一套 schema、同一个契约语料。

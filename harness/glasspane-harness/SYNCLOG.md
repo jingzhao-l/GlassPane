@@ -2,6 +2,40 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-09 · 依赖升 0.1.3，行为闸从"自己比自己"改成 oracle + 金样 + 双方对照
+
+**触发**：并入并行会话那 35 笔（v1.9.0 + fork 0.7.1）时，他们那份尺子自检点名了本 lane 一条
+挂账缺陷——`kernel-conformance.mjs` 不带 `--impl` 时是 `answers.every(a => a === answers[0])`，
+第一份就是它自己，**恒真**，而 CI 恰恰不带 `--impl` 跑。哈希闸只证字节、行为闸只证自己，两把叠
+起来等于语义面无人看。同批还发现 `dimension-context.ok-01.json` 带着 `expected` 却被 `kindOf()`
+判成 null、从不驱动。
+
+**改了什么**：新增金样 `contracts/kernel-conformance.json`（每条 fixture 的答案摘要 + 判答/被拒
+身份）；fixture 自带期望优先当 oracle（`dimension-context` 的 `expected`/`expectedLine`、
+`evidence-decision` 的 8 个 case）；`kindOf` 改前缀表并加"包发了但没有 kind 驱动它"的守卫；
+被拒样本从 `THREW …` 打进 ok 列改成显式 `rejected` 身份；evidence-pack 那类改走读侧契约
+`parseEvidencePackRead`（产品实际消费的那条）。报告每行标 `[oracle]` / `[golden]` /
+`[impl×N]` 的组合，一方都没有就打 `?!`；缺金样直接拒绝跑绿，`--record` 在 oracle 违反时拒绝盖章。
+
+**依赖**：`iterate-kernel` 0.1.2 → **0.1.3**（0.1.3 才把转录契约 `evidence-decision.ok-01.json`
+打进 tarball）。不升这一版，fork 侧的 oracle 分支拿到的是空集——"两侧同转录"就只剩 iterate 一边
+的证据。`contracts/kernel-pin.json` 重记为 **15** 个契约文件（12 fixtures + 3 schemas）。
+
+**负例（三条都实测红过再还原）**：金样摘要伪写 `000000000000` → 点名 "behaviour moved"；删一条
+金样条目 → "present in the package but not in the golden"；把第二份实现的
+`decisionSummaryFromEvidence` 改成返回常量 → 14 条问题、逐条点名是哪个 case，行标显示
+`[oracle+golden+impl×2]`。
+
+**金样**：`fork-diff` `4666 / 261 edited / 82 added / 1705 deleted` @6,714（上一记 `4668 / 259 /
+81` @6,713；added +1 是新增的 conformance 金样，edited +2 是本批改过的
+`script/kernel-conformance.mjs` 与依赖行）；`tool-surface` 面 A 8,658 / 22.84%、面 B 5,953 /
+15.70%（conformance 脚本自己那几十行进面 B，它是我们的代码）；`brand-surface` 扫描面 3,303
+文件（先因退役 vendored 树降到 3,302，又因新增这份金样回到 3,303——按"覆盖率与数字同进退"
+那条新规则两次都显式重记并写下增减原因，不让计数自己漂）。
+
+**未跑**：`bun run build` 全量、真模型轮次、真 TUI 会话观感；本批只跑闸与 fork 的 58 条
+glasspane 绑定/插件测试。
+
 ## 2026-10-09 · 每日批次（harness 线）：两条审查泳道 + 三把尺子自检，发 0.7.1
 
 - **开工态**：本地 main 落后 origin/main 三笔（上一轮本线的 [gp] 提交），`git merge --ff-only` 重新对齐到 580be9a 后才开工。工作树在开工约 25 分钟后被**并行会话**改成 dirty（`vendor/kernel/**` 与 `contracts/kernel-fixtures/*` 被 staged 删除、`kernel-vendor.mjs` 改名 `kernel-pin.mjs`、`kernel.ts` 改吃 npm `iterate-kernel`、CI 两份 yml 与 `tool-surface.mjs` 同时在改）。按纪律不混提、不 `checkout`/`reset`/`stash` 别人的文件：本轮全部改动与提交都在隔离工作树 `/Volumes/Eng-Dev/.worktrees/gp-harness-daily-20261008`（分支 `gp-harness-daily-20261008`，基线 580be9a），`.external/opencode` 做成指回主树那份的**符号链接**（不各存 223 MB）。收口时再 `git merge origin/main`（那三笔之外，主仓 1.9.0 那批 engine/mcp-shell/installer/updater 也进来，合并干净、零冲突）。

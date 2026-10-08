@@ -4,9 +4,9 @@
   "referenceClone": ".external/opencode",
   "observedAt": "2026-10-08",
   "counts": {
-    "identical": 4667,
-    "edited": 260,
-    "added": 114,
+    "identical": 4666,
+    "edited": 261,
+    "added": 82,
     "deleted": 1705
   },
   "edited": [
@@ -19,6 +19,7 @@
     "README.md",
     "SECURITY.md",
     "bun.lock",
+    "bunfig.toml",
     "package.json",
     "packages/app/src/components/dialog-connect-provider.stories.tsx",
     "packages/app/src/components/dialog-connect-provider.tsx",
@@ -320,16 +321,8 @@
     "SYNCLOG.md",
     "assets/banner.svg",
     "assets/logo.svg",
-    "contracts/kernel-fixtures/decision-log-chain.ok-01.json",
-    "contracts/kernel-fixtures/decision-log-entry.ok-01.json",
-    "contracts/kernel-fixtures/dimension-context.ok-01.json",
-    "contracts/kernel-fixtures/evidence-pack.ok-01.json",
-    "contracts/kernel-fixtures/evidence-pack.ok-02.json",
-    "contracts/kernel-fixtures/evidence-pack.ok-03.json",
-    "contracts/kernel-fixtures/evidence-pack.ok-04-legacy-draft.json",
-    "contracts/kernel-fixtures/evidence-pack.ok-05-pixelbounds-null.json",
-    "contracts/kernel-fixtures/recipe-config.ok-01.json",
-    "contracts/kernel-vendor.json",
+    "contracts/kernel-conformance.json",
+    "contracts/kernel-pin.json",
     "docs/evidence.md",
     "docs/index.md",
     "docs/install.md",
@@ -352,39 +345,15 @@
     "packages/opencode/src/tool/glasspane/index.ts",
     "packages/opencode/src/tool/glasspane/kernel.ts",
     "packages/opencode/test/config/project-config-dirs.test.ts",
+    "packages/opencode/test/lib/kernel-contract.ts",
     "packages/opencode/test/plugin/glasspane-compaction.test.ts",
     "packages/opencode/test/plugin/glasspane-decision-log.test.ts",
     "packages/opencode/test/tool/glasspane-kernel.test.ts",
     "packages/opencode/test/tool/glasspane-surface.test.ts",
-    "packages/opencode/vendor/kernel/fixtures/decision-log-chain.ok-01.json",
-    "packages/opencode/vendor/kernel/fixtures/decision-log-entry.ok-01.json",
-    "packages/opencode/vendor/kernel/fixtures/dimension-context.ok-01.json",
-    "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-01.json",
-    "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-02.json",
-    "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-03.json",
-    "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-04-legacy-draft.json",
-    "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-05-pixelbounds-null.json",
-    "packages/opencode/vendor/kernel/fixtures/recipe-config.ok-01.json",
-    "packages/opencode/vendor/kernel/fixtures/report.ok-01.html",
-    "packages/opencode/vendor/kernel/fixtures/report.ok-01.md",
-    "packages/opencode/vendor/kernel/schemas/decision-log-entry.schema.json",
-    "packages/opencode/vendor/kernel/schemas/evidence-pack.schema.json",
-    "packages/opencode/vendor/kernel/schemas/recipe-config.schema.json",
-    "packages/opencode/vendor/kernel/src/canonical-json.ts",
-    "packages/opencode/vendor/kernel/src/decision-log-entry.ts",
-    "packages/opencode/vendor/kernel/src/decision-log.ts",
-    "packages/opencode/vendor/kernel/src/dimension-context.ts",
-    "packages/opencode/vendor/kernel/src/errors.ts",
-    "packages/opencode/vendor/kernel/src/evidence-decision.ts",
-    "packages/opencode/vendor/kernel/src/evidence-pack.ts",
-    "packages/opencode/vendor/kernel/src/index.ts",
-    "packages/opencode/vendor/kernel/src/parse.ts",
-    "packages/opencode/vendor/kernel/src/recipe-config.ts",
-    "packages/opencode/vendor/kernel/src/schemas.ts",
     "product.json",
     "script/gpg-signing.sh",
     "script/kernel-conformance.mjs",
-    "script/kernel-vendor.mjs",
+    "script/kernel-pin.mjs",
     "scripts/install.sh"
   ],
   "deleted": [
@@ -2118,7 +2087,12 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "63900bbae9b8f94ff1f66a1eae5039b91c2c441c"
+      "forkHash": "cfcc6890416b4a3a3a624730f09b288f03dccb68"
+    },
+    {
+      "file": "bunfig.toml",
+      "upstreamHash": "c506ff57c4bf3fa3a6bd3501b8ce2fc29122accb",
+      "forkHash": "5aaf7a6a85d22cb0d46c1cd075b03efa8e05b73a"
     },
     {
       "file": "CONTEXT.md",
@@ -2683,7 +2657,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "79af88f6b6d2eaa8a2bb22e55be823baee0d8107"
+      "forkHash": "e5aff3c98a72106073256dea44116081ba439f35"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -3378,7 +3352,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "55c04b48de82f1c3b4fb2dbbcf4b62669dcfd3fb"
+      "forkHash": "fd85deb3dfc972fcccc53bbbfc24b4f52f5a0db9"
     },
     {
       "file": "script/translate-app.test.ts",
@@ -3393,7 +3367,7 @@
     {
       "file": "SECURITY.md",
       "upstreamHash": "e7e59f4a27ac2bd2ed5005f8851dcb946c08f914",
-      "forkHash": "87f18249d8ae2f8442625829c4df103029c00064"
+      "forkHash": "1a4313caffdc6879ceb7e5e6bb7bb4b3e42f7b8f"
     }
   ]
 }

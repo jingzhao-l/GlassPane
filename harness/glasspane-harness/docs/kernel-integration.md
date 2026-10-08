@@ -31,7 +31,7 @@ kernel instead of in each shell.
 
 The kernel is **not vendored**. `packages/opencode/vendor/kernel/` (25 files — 11 sources,
 3 schemas, 11 fixtures) was deleted, and `packages/opencode` now resolves `iterate-kernel`
-as a normal dependency at an exact pin (`0.1.2`), recorded with registry resolution and
+as a normal dependency at an exact pin (`0.1.3`), recorded with registry resolution and
 integrity in `bun.lock`.
 
 Two gates carry what `kernel-vendor.mjs` used to carry — one replaced outright, one rewritten
@@ -60,7 +60,7 @@ Three accounting consequences are worth naming:
 
 - `tool-surface.mjs` no longer excludes any kernel lines, because there are none in the tree:
   the vendored exclusion is **0 files / 0 lines** (it was 11 files / 1,464 lines). The golden
-  now records `kernel: iterate-kernel@0.1.2` so the change of caliber is readable on the ruler
+  now records `kernel: iterate-kernel@0.1.3` so the change of caliber is readable on the ruler
   rather than only in a commit message. And the guard inverted: `measureFork` **refuses** the
   tree if `packages/opencode/vendor/kernel` reappears, because its 1,464 dependency lines
   would be billed as our authorship with nothing left to exclude them.
@@ -152,7 +152,7 @@ for any R40 scenario; every one of them was blocked on kernel API work first.
 - **Consumption side: done and measured.** One module touches the kernel, and it resolves a
   registry package whose version, lock integrity and 14 contract files are pinned by
   `contracts/kernel-pin.json`.
-- **Publishing: done, by the iterate side, and consumed.** `iterate-kernel@0.1.2`.
+- **Publishing: done, by the iterate side, and consumed.** `iterate-kernel@0.1.3` (0.1.1 → 0.1.2 added the contract corpus to the tarball; 0.1.2 → 0.1.3 added `evidence-decision.ok-01.json`, the transcription contract the Python half of iterate-harness is written against).
 - **Behaviour parity: measured across two implementations.** Nine fixtures produce identical
   answers through the installed `dist` and through a canonical kernel checkout
   (`kernel-conformance --impl`), with the zod-major error-prose difference reported as a note.

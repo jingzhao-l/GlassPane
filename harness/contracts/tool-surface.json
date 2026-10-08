@@ -14,7 +14,7 @@
     "mcpShell": {
       "loc": 8658,
       "files": 13,
-      "ratio": 0.2281,
+      "ratio": 0.2284,
       "byFile": {
         "mcp-shell/src/tools.ts": 2339,
         "mcp-shell/src/engine-client.ts": 1415,
@@ -32,7 +32,7 @@
       }
     },
     "fork": {
-      "loc": 6007,
+      "loc": 5953,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -82,7 +82,7 @@
         {
           "file": "packages/opencode/src/tool/glasspane/kernel.ts",
           "kind": "added",
-          "lines": 295
+          "lines": 296
         },
         {
           "file": "script/gpg-signing.sh",
@@ -92,12 +92,12 @@
         {
           "file": "script/kernel-conformance.mjs",
           "kind": "added",
-          "lines": 247
+          "lines": 396
         },
         {
-          "file": "script/kernel-vendor.mjs",
+          "file": "script/kernel-pin.mjs",
           "kind": "added",
-          "lines": 438
+          "lines": 234
         },
         {
           "file": "scripts/install.sh",
@@ -1070,19 +1070,23 @@
           "lines": 0
         }
       ],
-      "ratio": 0.1582,
+      "ratio": 0.157,
       "vendorExcluded": {
-        "files": 11,
-        "lines": 1464
+        "files": 0,
+        "lines": 0
       },
       "testsExcluded": {
-        "files": 27,
-        "lines": 1718
+        "files": 28,
+        "lines": 1788
       },
-      "vendorManifest": "harness/glasspane-harness/contracts/kernel-vendor.json"
+      "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
+      "kernel": {
+        "package": "iterate-kernel",
+        "version": "0.1.3"
+      }
     }
   },
-  "totalToolSurfaceLoc": 14665,
+  "totalToolSurfaceLoc": 14611,
   "note": null,
   "carried": null
 }

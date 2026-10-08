@@ -174,6 +174,16 @@
   `chore(harness)` 提交。除此之外 `harness/` 与 `kernel/` 一字未改。
 - 本轮审查提出但**未改**的产品面问题（含证据、面板、installer、bridge、workflows 各侧）记在
   本次任务汇报的"未修清单"，不在本版里悄悄做一半。
+### Internal — fork 的内核依赖升 0.1.3，行为闸的比较对象补齐
+
+`harness/glasspane-harness/script/kernel-conformance.mjs` 在不带 `--impl` 时是拿实现对它自己比
+（`every(a => a === answers[0])`），恒真，而 CI 恰恰就是这么跑的——这条由并行泳道的尺子自检点破，
+本批修掉：新增金样 `contracts/kernel-conformance.json` 钉每条 fixture 的答案摘要与判/拒身份，
+fixture 自带期望的优先当 oracle，每行报告标 `[oracle+golden+impl×N]`，缺金样拒绝跑绿。
+`iterate-kernel` 同时从 0.1.2 升到 0.1.3（0.1.3 才把转录契约 `evidence-decision.ok-01.json`
+打进 tarball；不升，fork 侧的 oracle 分支拿到的是空集）。三把尺子随批重记，数字见 fork 的
+`SYNCLOG.md`。判红口径未变：变的是"这道闸现在真的能红"。
+
 ### Internal — harness fork 的内核改为依赖，它的尺子跟着换
 
 **判据没动**：本批全在 `harness/`（fork 的内核分发形态与量它的闸），`engine/`、`mcp-shell/`、
