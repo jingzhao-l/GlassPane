@@ -56,7 +56,11 @@ assert_code() {
 # `script/build.ts` puts in the release.
 ASSET_DIR="$SCRATCH/asset"
 mkdir -p "$ASSET_DIR"
-printf '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "glasspane-harness 9.9.9"; exit 0; fi\nexit 0\n' > "$ASSET_DIR/glasspane-harness"
+# The real published binary prints the bare version string on stdout and nothing else —
+# measured against the published 0.7.0 (`--version` → "0.7.0", exit 0). A fixture that
+# prints "glasspane-harness 9.9.9" would test a shape the product does not have, and the
+# installer's version assertion would then be judging a fiction.
+printf '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "9.9.9"; exit 0; fi\nexit 0\n' > "$ASSET_DIR/glasspane-harness"
 chmod 755 "$ASSET_DIR/glasspane-harness"
 (cd "$ASSET_DIR" && zip -q -r "$FIX/glasspane-harness-darwin-arm64.zip" glasspane-harness) || { echo "FAIL  could not build the fixture zip"; exit 1; }
 # `<hash>  ./<name>` — the form the release pipeline writes. Built with printf, not by
@@ -74,9 +78,11 @@ cat > "$STUB/curl" <<'STUBCURL'
 #!/usr/bin/env bash
 out=""
 url=""
+fmt=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
+    -w) fmt="$2"; shift 2 ;;
     --progress-bar|-fsSL|-fL|-sS|-L|-f|--fail) shift ;;
     -*) shift ;;
     *) url="$1"; shift ;;
@@ -84,8 +90,33 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$url" ] || exit 2
 base="$(basename "$url")"
-[ -n "$out" ] || { cat "$FIX_DIR/$base" 2>/dev/null && exit 0 || exit 22; }
-if [ -f "$FIX_DIR/$base" ]; then cp "$FIX_DIR/$base" "$out"; exit 0; fi
+# A scenario can demand that the *signature* fetch fail with a status that is not 404,
+# which is the case `curl -f` used to erase. It applies to the .asc only, so the asset and
+# the manifest keep answering normally.
+case "$base" in
+  *.asc)
+    if [ -n "${STUB_CURL_HTTP:-}" ]; then
+      printf '%s' "$STUB_CURL_HTTP"
+      [ "$STUB_CURL_HTTP" = "200" ] && exit 0
+      exit 0
+    fi
+    ;;
+esac
+# The stub answers with an HTTP status the way the real endpoint does, because the
+# installer now branches on it: "404, nobody published a signature" and "the fetch of a
+# published signature was blocked or rewritten" are different facts, and collapsing them
+# (which `curl -f` does) buys an unverified install a reassuring word for it.
+if [ -f "$FIX_DIR/$base" ]; then
+  [ -n "$out" ] && cp "$FIX_DIR/$base" "$out"
+  [ "$fmt" = "%{http_code}" ] && printf '200'
+  [ -n "$out" ] || cat "$FIX_DIR/$base" 2>/dev/null
+  exit 0
+fi
+if [ "${STUB_CURL_HTTP:-}" = "500" ] && [ "$fmt" = "%{http_code}" ]; then
+  printf '500'
+  exit 0
+fi
+[ "$fmt" = "%{http_code}" ] && printf '404'
 exit 22
 STUBCURL
 chmod +x "$STUB/curl"
@@ -109,10 +140,32 @@ chmod +x "$STUB/npm"
 # function are reachable without a keyring.
 cat > "$STUB/gpg" <<'STUBGPG'
 #!/usr/bin/env bash
+# Real gpg answers `--status-fd 2` with a VALIDSIG line whose third field is the full
+# 40-hex fingerprint of the key that made the signature. The installer now requires that
+# fingerprint to equal the one it ships, so the stub has to carry it: a fixture that only
+# prints GOODSIG would let "signed by some key" and "signed by THIS key" look identical,
+# which is the exact confusion the check exists to remove.
+if [ "$STUB_GPG_RESULT" = "importfail" ] || { [ "$STUB_GPG_RESULT" = "good" ] && [ "${STUB_GPG_IMPORT_FAILS:-}" = "1" ]; }; then
+  if [ "${1:-}" = "--import" ] || printf '%s' "$*" | grep -q -- "--import"; then
+    echo "gpg: keyblock resize failed" >&2
+    exit 1
+  fi
+fi
 if [ "${1:-}" = "--import" ] || printf '%s' "$*" | grep -q -- "--import"; then exit 0; fi
 if [ "$STUB_GPG_RESULT" = "good" ]; then
   echo "gpg: Signature made Thu 01 Jan 2026 00:00:00 UTC" >&2
-  echo "[GNUPG:] GOODSIG ABCDEF0123456789 jingzhao-l (sign-github)" >&2
+  echo "[GNUPG:] GOODSIG 0929EA31DF4F7429F63FC53189D88B1D043A1298 jingzhao-l (sign-github)" >&2
+  echo "[GNUPG:] VALIDSIG 0929EA31DF4F7429F63FC53189D88B1D043A1298 2026-01-01 2026-01-01 0 3 0 1 22 0929EA31DF4F7429F63FC53189D88B1D043A1298" >&2
+  echo "[GNUPG:] Good signature" >&2
+  exit 0
+fi
+if [ "$STUB_GPG_RESULT" = "otherkey" ]; then
+  # A well-formed signature made by a DIFFERENT key. This is the shape that `grep -q
+  # GOODSIG` alone cannot tell from a genuine one, and the case a replaced
+  # GPG_PRIVATE_KEY in the release environment produces.
+  echo "gpg: Signature made Thu 01 Jan 2026 00:00:00 UTC" >&2
+  echo "[GNUPG:] GOODSIG DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF someone-else <other@mail.invalid>" >&2
+  echo "[GNUPG:] VALIDSIG DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF 2026-01-01 2026-01-01 0 3 0 1 22 DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF" >&2
   exit 0
 fi
 echo "[GNUPG:] BADSIG ABCDEF0123456789 jingzhao-l (sign-github)" >&2
@@ -131,6 +184,10 @@ run_install() {
     export PATH="${RUN_PATH:-$STUB:$PATH}"
     export STUB_UNAME_M="${SCENARIO_UNAME_M:-arm64}"
     export STUB_GPG_RESULT="${SCENARIO_GPG:-good}"
+    export STUB_CURL_HTTP="${SCENARIO_CURL_HTTP:-}"
+    export STUB_GPG_IMPORT_FAILS="${SCENARIO_GPG_IMPORT_FAILS:-}"
+    export TMPDIR="${SCENARIO_TMPDIR:-/tmp}"
+    mkdir -p "$TMPDIR"
     export GLASSPANE_HARNESS_HOME="$SCRATCH/root-$(basename "$log")"
     export GLASSPANE_HARNESS_RELEASES="https://stub.invalid/releases/download"
     bash "$INSTALL_SH" "$@"
@@ -175,7 +232,9 @@ run_install "$SCRATCH/verify-ok.log" --version 9.9.9
 assert_code "the fallback installs when the checksum matches" "$?" "0"
 assert_has "sha256 is verified against SHA256SUMS.txt" "$SCRATCH/verify-ok.log" "sha256 verified"
 assert_has "the summary reports sha256 as verified" "$SCRATCH/verify-ok.log" "sha256: verified (SHA256SUMS.txt)"
-assert_has "the summary reports GPG as verified" "$SCRATCH/verify-ok.log" "GPG: verified (signing key)"
+assert_has "the summary reports GPG as verified" "$SCRATCH/verify-ok.log" "GPG: verified (signing key"
+assert_has "and names the fingerprint it accepted" "$SCRATCH/verify-ok.log" "0929EA31DF4F7429F63FC53189D88B1D043A1298"
+assert_has "the installed command is verified at the path this channel wrote" "$SCRATCH/verify-ok.log" "glasspane-harness --version -> 9.9.9"
 
 # ---------------------------------------------------------------- 4: a mismatch refuses
 cp "$FIX/glasspane-harness-darwin-arm64.zip" "$SCRATCH/keep.zip"
@@ -197,12 +256,17 @@ mv "$SCRATCH/SHA256SUMS.txt.hold" "$FIX/SHA256SUMS.txt"
 
 # ---------------------------------------------------------------- 6: a failed signature
 # Under `set -e` the old `out="$(gpg --verify …)"` killed the script here, so the warning,
-# the state and the temp-dir cleanup below it were all unreachable.
+# the state and the temp-dir cleanup below it were all unreachable — and once that was
+# fixed, the branch it reached *warned and installed anyway*. A signature that does not
+# verify is the tampering signal, and the one remaining check (SHA256SUMS.txt) is fetched
+# from the same origin as the asset it lists, so continuing left the user vouched for only
+# by the thing being attacked. This is now fatal.
 SCENARIO_GPG=bad
 run_install "$SCRATCH/gpg-bad.log" --version 9.9.9
-assert_code "a bad signature does not abort the installer" "$?" "0"
-assert_has "a bad signature is reported as FAILED, not as verified" "$SCRATCH/gpg-bad.log" "GPG: FAILED (signature did not verify)"
-assert_has "the checksum result is still stated" "$SCRATCH/gpg-bad.log" "sha256: verified (SHA256SUMS.txt)"
+assert_code "a bad signature refuses the install" "$?" "1"
+assert_has "a bad signature is named as a signature that did not verify" "$SCRATCH/gpg-bad.log" "signature did not verify"
+assert_has "and the refusal says the checksum cannot vouch alone" "$SCRATCH/gpg-bad.log" "checksum alone cannot tell"
+assert_not_has "it does not claim the install succeeded" "$SCRATCH/gpg-bad.log" "[OK]    installed via"
 SCENARIO_GPG=good
 
 # ---------------------------------------------------------------- 7: no gpg binary
@@ -225,6 +289,78 @@ assert_not_has "it never prints the unconditional verified claim" "$SCRATCH/unve
 assert_has "it prints both skipped states" "$SCRATCH/unverified.log" "sha256: skipped"
 mv "$SCRATCH/s.hold" "$FIX/SHA256SUMS.txt"
 mv "$SCRATCH/a.hold" "$FIX/glasspane-harness-darwin-arm64.zip.asc"
+
+# ---------------------------------------------------------------- 9..13: the guards added on top
+# Rebuild the fixture asset with a given `--version` behaviour and keep SHA256SUMS.txt
+# honest about it, so the checksum gate stays satisfied and only the thing under test moves.
+swap_asset() {
+  rm -rf "$SCRATCH/swap" && mkdir -p "$SCRATCH/swap"
+  printf '%s\n' "$1" > "$SCRATCH/swap/glasspane-harness"
+  chmod 755 "$SCRATCH/swap/glasspane-harness"
+  rm -f "$FIX/glasspane-harness-darwin-arm64.zip"
+  (cd "$SCRATCH/swap" && zip -q -r "$FIX/glasspane-harness-darwin-arm64.zip" glasspane-harness)
+  h="$(cd "$FIX" && shasum -a 256 glasspane-harness-darwin-arm64.zip | awk '{print $1}')"
+  printf '%s  ./%s\n' "$h" "glasspane-harness-darwin-arm64.zip" > "$FIX/SHA256SUMS.txt"
+}
+restore_asset() {
+  rm -f "$FIX/glasspane-harness-darwin-arm64.zip"
+  (cd "$ASSET_DIR" && zip -q -r "$FIX/glasspane-harness-darwin-arm64.zip" glasspane-harness)
+  # Recompute, do not reuse FIXTURE_HASH: zip stamps mtimes into the archive, so re-zipping
+  # the same file yields different bytes and the old hash would fail the checksum gate for
+  # a reason that has nothing to do with the behaviour under test.
+  h="$(cd "$FIX" && shasum -a 256 glasspane-harness-darwin-arm64.zip | awk '{print $1}')"
+  printf '%s  ./%s\n' "$h" "glasspane-harness-darwin-arm64.zip" > "$FIX/SHA256SUMS.txt"
+}
+
+# 9 — a well-formed signature from the wrong key.
+SCENARIO_GPG=otherkey
+run_install "$SCRATCH/gpg-otherkey.log" --version 9.9.9
+assert_code "a good signature from a different fingerprint is refused" "$?" "1"
+assert_has "it names both fingerprints it compared" "$SCRATCH/gpg-otherkey.log" "expected fingerprint 0929EA31DF4F7429F63FC53189D88B1D043A1298"
+assert_has "and shows what actually signed the bytes" "$SCRATCH/gpg-otherkey.log" "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF"
+assert_not_has "the wrong key never prints an installed verdict" "$SCRATCH/gpg-otherkey.log" "[OK]    installed via"
+SCENARIO_GPG=good
+
+# 10 — the .asc fetch fails for a reason that is not "it isn't there".
+SCENARIO_CURL_HTTP=500 run_install "$SCRATCH/gpg-fetch500.log" --version 9.9.9
+assert_code "a blocked or rewritten signature fetch refuses the install" "$?" "1"
+assert_has "it says the signature could not be fetched" "$SCRATCH/gpg-fetch500.log" "could not be fetched (HTTP 500)"
+assert_not_has "and it never dresses a transport failure up as an unsigned release" "$SCRATCH/gpg-fetch500.log" "no .asc published"
+SCENARIO_CURL_HTTP=""
+
+# 11 — gpg cannot import the embedded key: loud refusal, and the throwaway keyring is
+# not left on disk (the old bare pipeline died under `set -e` with no message and the
+# temp dir still there, because the cleanup below it was unreachable).
+KEYRING_PARENT="$SCRATCH/tmpdir-import"
+mkdir -p "$KEYRING_PARENT"
+SCENARIO_GPG=importfail SCENARIO_TMPDIR="$KEYRING_PARENT" run_install "$SCRATCH/gpg-import.log" --version 9.9.9
+assert_code "a failed key import refuses the install" "$?" "1"
+assert_has "and says so in its own words, not gpg's stderr alone" "$SCRATCH/gpg-import.log" "could not import"
+leftovers="$(find "$KEYRING_PARENT" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+if [ "$leftovers" = "0" ]; then pass "no throwaway GNUPGHOME left behind"; else fail "the keyring leaked: $leftovers dir(s) under $KEYRING_PARENT"; fi
+SCENARIO_GPG=good
+
+# 12 — the placeholder binary. This is the false success that made the rest of the file
+# untrustworthy: the shipped stub prints an apology to stderr and exits 1, and the verdict
+# line read `... --version 2>&1 | head -1` under `|| true`, so the apology became the
+# payload of an [OK] line and the installer exited 0.
+swap_asset 'if [ "$1" = "--version" ]; then echo "Error: glasspane-harness'"'"'s postinstall script was not run." >&2; exit 1; fi; exit 0'
+run_install "$SCRATCH/stub-binary.log" --version 9.9.9
+stub_rc=$?
+assert_code "a command that does not run fails the install" "$stub_rc" "1"
+assert_not_has "the placeholder is never announced as a success" "$SCRATCH/stub-binary.log" "[OK]    glasspane-harness --version"
+assert_has "it says the installed command does not run" "$SCRATCH/stub-binary.log" "does not run"
+assert_has "and the remedy names the npm flag that caused it" "$SCRATCH/stub-binary.log" "--allow-scripts=glasspane-harness"
+restore_asset
+
+# 13 — a version that is not the one asked for.
+swap_asset 'if [ "$1" = "--version" ]; then echo "9.9.8"; exit 0; fi; exit 0'
+run_install "$SCRATCH/version-mismatch.log" --version 9.9.9
+assert_code "a pinned install that got a different version is refused" "$?" "1"
+assert_has "and it says which two numbers disagree" "$SCRATCH/version-mismatch.log" "reports 9.9.8, but this installer asked for 9.9.9"
+restore_asset
+run_install "$SCRATCH/restored.log" --version 9.9.9
+assert_code "the fixture swap is reversible — the same run is green again" "$?" "0"
 
 echo ""
 if [ "$FAILURES" -gt 0 ]; then
