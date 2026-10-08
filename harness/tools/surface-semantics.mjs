@@ -25,7 +25,10 @@
  *              comparison in code against a decimal is a threshold
  *
  * RULES
- *   threshold-comparison    `<`/`<=`/`>`/`>=` against a decimal literal
+ *   threshold-comparison    `<`/`<=`/`>`/`>=` against a decimal literal, in either
+ *                           operand order (`ratio > 0.5` and `0.5 < ratio` are the
+ *                           same threshold); integers stay out of the caliber — a `> 0`
+ *                           on a count is not an evidence threshold
  *   verdict-synthesis       pass/fail chosen by a ternary or an equality test in
  *                           code (an object field like `status: "failed"` is a
  *                           write's own status, not a verdict about the app)
@@ -57,8 +60,14 @@ const RULES = [
   {
     id: "threshold-comparison",
     scope: "arithmetic",
-    why: "a decimal literal on the other side of a comparison is a threshold; thresholds belong to the engine",
-    count: (text) => (text.match(/(?:[<>]=?|===?\s*)[\s]*\d*\.\d+/g) ?? []).length,
+    why: "a decimal literal on either side of a comparison is a threshold; thresholds belong to the engine",
+    // Both operand orders. The caliber is unchanged — a *decimal* literal only, never
+    // an integer (`> 0` on a count is not an evidence threshold, and widening it would
+    // flood the baseline). The first alternative is the literal on the right
+    // (`ratio > 0.5`, the form this rule used to match alone); the second is the literal
+    // on the left (`0.5 < ratio`, `0.02 <= pack.changedPixelRatio`), which hit zero
+    // before and let a surface hide a threshold behind nothing but an operand swap.
+    count: (text) => (text.match(/(?:[<>]=?|={2,3})\s*\d*\.\d+|\d*\.\d+\s*(?:[<>]=?|={2,3})/g) ?? []).length,
   },
   {
     id: "verdict-synthesis",
