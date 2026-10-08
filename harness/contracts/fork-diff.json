@@ -4,8 +4,8 @@
   "referenceClone": ".external/opencode",
   "observedAt": "2026-10-08",
   "counts": {
-    "identical": 4669,
-    "edited": 258,
+    "identical": 4667,
+    "edited": 260,
     "added": 114,
     "deleted": 1705
   },
@@ -158,6 +158,7 @@
     "packages/opencode/src/cli/cmd/upgrade.ts",
     "packages/opencode/src/cli/cmd/web.ts",
     "packages/opencode/src/cli/network.ts",
+    "packages/opencode/src/cli/upgrade.ts",
     "packages/opencode/src/config/config.ts",
     "packages/opencode/src/config/managed.ts",
     "packages/opencode/src/config/paths.ts",
@@ -205,6 +206,7 @@
     "packages/opencode/test/config/config.test.ts",
     "packages/opencode/test/config/v2-compat.test.ts",
     "packages/opencode/test/fixture/config.ts",
+    "packages/opencode/test/installation/installation.test.ts",
     "packages/opencode/test/plugin/trigger.test.ts",
     "packages/opencode/test/plugin/workspace-adapter.test.ts",
     "packages/opencode/test/server/httpapi-experimental.test.ts",
@@ -2811,7 +2813,7 @@
     {
       "file": "packages/opencode/src/cli/cmd/upgrade.ts",
       "upstreamHash": "3c1604a0b8354c49fa06a93e825e4b11041cc5dd",
-      "forkHash": "c7623eff0b91684f7ff469f94f9edcad9e2aea29"
+      "forkHash": "3d6fdd9407191b4ad7bd4953f42849bdf60f6bb5"
     },
     {
       "file": "packages/opencode/src/cli/cmd/web.ts",
@@ -2822,6 +2824,11 @@
       "file": "packages/opencode/src/cli/network.ts",
       "upstreamHash": "22040ed41015849f47dc39c0340e3e0986116e85",
       "forkHash": "a7345fd10a02b3c0c259c28bf1d3fbef7231cf03"
+    },
+    {
+      "file": "packages/opencode/src/cli/upgrade.ts",
+      "upstreamHash": "62b230a6336471aa735f82cfb24a4ae2b0c8c31a",
+      "forkHash": "f2a4179d35869d4336c7305b9d7bb8a4b1058670"
     },
     {
       "file": "packages/opencode/src/config/config.ts",
@@ -2876,7 +2883,7 @@
     {
       "file": "packages/opencode/src/installation/index.ts",
       "upstreamHash": "4300220255b3ba717eeb229afd26f5e745c330ed",
-      "forkHash": "79eee56a39b1249ddd11457376a89982f10fe4cd"
+      "forkHash": "2311fce36999a39943ca8c2b7071a36c25ae49e7"
     },
     {
       "file": "packages/opencode/src/mcp/index.ts",
@@ -3059,6 +3066,11 @@
       "forkHash": "cff4839bcc1f79b5f75f70eafe576368605241ec"
     },
     {
+      "file": "packages/opencode/test/installation/installation.test.ts",
+      "upstreamHash": "3d4b4cba31a604851216a67c08a3b9cb2a5986f7",
+      "forkHash": "04d53121b72d05743d66033c47418e86c0134cef"
+    },
+    {
       "file": "packages/opencode/test/plugin/trigger.test.ts",
       "upstreamHash": "07fd8e2f21bc51e80ecdfcb61c1851c7fd057db1",
       "forkHash": "72e706c8f2d343e3e761edf1c73e2132be74dfb3"
@@ -3161,7 +3173,7 @@
     {
       "file": "packages/tui/src/routes/session/index.tsx",
       "upstreamHash": "2b54f21671b3889e6752175b1c2b0f36d189d3b9",
-      "forkHash": "44fab1cef5e5d08ec89214e64425f99bdd5b056f"
+      "forkHash": "88f76598f574a5acf885446785ccba50fbd28d7e"
     },
     {
       "file": "packages/tui/src/theme/assets/aura.json",
@@ -3346,7 +3358,7 @@
     {
       "file": "packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx",
       "upstreamHash": "6da90633ca421fa085fa1c69ffbd5c0c8a3dc0fa",
-      "forkHash": "ac8e1a80f678abd51cd6f4f6b941ff1f26c3b27e"
+      "forkHash": "463aa0800bcbbfedbb5b8f906749634e20739715"
     },
     {
       "file": "packages/tui/test/fixture/fixture.ts",
@@ -3381,7 +3393,7 @@
     {
       "file": "SECURITY.md",
       "upstreamHash": "e7e59f4a27ac2bd2ed5005f8851dcb946c08f914",
-      "forkHash": "ba310882a45d62719d21c228e06dda9fd054c4ea"
+      "forkHash": "87f18249d8ae2f8442625829c4df103029c00064"
     }
   ]
 }

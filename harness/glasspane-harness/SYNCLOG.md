@@ -2,6 +2,14 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-09 · 每日批次（harness 线）：两条审查泳道 + 三把尺子自检，发 0.7.1
+
+- **开工态**：本地 main 落后 origin/main 三笔（上一轮本线的 [gp] 提交），`git merge --ff-only` 重新对齐到 580be9a 后才开工。工作树在开工约 25 分钟后被**并行会话**改成 dirty（`vendor/kernel/**` 与 `contracts/kernel-fixtures/*` 被 staged 删除、`kernel-vendor.mjs` 改名 `kernel-pin.mjs`、`kernel.ts` 改吃 npm `iterate-kernel`、CI 两份 yml 与 `tool-surface.mjs` 同时在改）。按纪律不混提、不 `checkout`/`reset`/`stash` 别人的文件：本轮全部改动与提交都在隔离工作树 `/Volumes/Eng-Dev/.worktrees/gp-harness-daily-20261008`（分支 `gp-harness-daily-20261008`，基线 580be9a），`.external/opencode` 做成指回主树那份的**符号链接**（不各存 223 MB）。收口时再 `git merge origin/main`（那三笔之外，主仓 1.9.0 那批 engine/mcp-shell/installer/updater 也进来，合并干净、零冲突）。
+- **前置**：`bun` = 1.3.14 == `packageManager` 钉值；参照检出 `describe` == pin `v1.18.32`、`fsck` 无错、工作树干净；`glasspane-preflight.sh` 两条方向都实测（163 张束 OK/exit 0，158 张系统根 FAILED/exit 1）；构建与发布命令一律带 `NODE_EXTRA_CA_CERTS=/var/tmp/glasspane-harness/ca-bundle.pem`，**没有**使用任何跳过校验的开关。
+- **本轮没跑成的一半**：`bun run build` 整包未跑（>10 分钟，按纪律不进改动循环），所以"构建产物与当前树一致"这句**不成立**，要用 dist/ 前先重建。真模型轮次、真 TUI 会话观感、`gp_*` 对活 daemon 的完整轮次仍**未观测**（`glasspaned` 在跑，但一次带判定成包的真轮次需要模型额度与人工发起）。M2 决策日志的 `logged` 分支、musl/baseline 目标的 CI lane、`packages/{app,session-ui,desktop}` 会不会取代 TUI——都还是挂账项，本轮未收口。
+- **尺子自检（改完重新验它能红，不是沿用旧结论）**：金样伪写 `tool-surface.json` fork `loc` 5548→5549 → 变红；删金样 → `no golden … run --record`（不是绿）；藏参照（只挪本工作树的符号链接，主树未动）→ `hook-liveness` 大声声明 `upstream was NOT observed`、`fork-diff` 仍核我们这一侧并逐文件点名 `our content moved`。结论写进 `harness/README.md`「闸自己被验过吗」2026-10-09 段。
+- **被抓到但本轮没修的（列全，不当已修）**：`kernel-conformance.mjs` 单实现模式把实现与**它自己**比对，`agree` 恒真、CI 正是这么跑的（不带 `--impl`），且 `THREW …` 打进 `ok` 列，`fixturesCandidates` 在第 173 行未定义（那条"没夹具就会假过"的守卫自己崩），`dimension-context.ok-01.json` 带 `expected` 却被 `kindOf()` 判 null 而**从不驱动**——这四条与并行会话的内核迁移是同一批文件，不在此处重复改。`harness-contract.yml` 的上游探针 `out="$(… || true)"` 再 `grep -q drift` 定胜负（`--probe` 三条 exit 2 的"测不了"路径都不含 drift 字样 → 绿）。`tool-surface` 面 B 增长从不点名文件（`byFile` 对 B 恒缺）、`LIMIT`/`caliber` 从不与金样比对（把 0.1 改成 0.25 全绿）、平台包发布绕过 publish.ts 的校验、`checksums` 仍从 GitHub 供回的字节算、CI 不证明发布私钥就是那把指纹、`bunfig.toml` 把 `gitlab-ai-provider`/`opencode-gitlab-auth` 这类鉴权侧包排除在 `minimumReleaseAge` 之外、`packages/app` 的 `ghostty-web` 走 `github:anomalyco/…` 且 `@opencode-ai/client@1.17.13` 以提交的 .tgz 内嵌（与 fork 的 1.18.32 版本错位）。
+
 ## 2026-10-07 · v0.7.0：审查批次（两条泳道 + 六把尺子自查），并把"绿但红不了"的四道闸改回能红
 
 每日任务（10:30 那条）。开工 HEAD `439c6ab`（主仓 main），收口在同一棵树上的分支

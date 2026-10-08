@@ -4,7 +4,7 @@
   "caliber": {
     "engine": "lines of every *.swift under engine/Sources",
     "mcpShell": "lines of every *.ts under mcp-shell/src",
-    "fork": "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted",
+    "fork": "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted, and one deleted line excuses at most one re-added line (pairing is one-to-one, so 40 copies of a rebranded line bill 39)",
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
   "observedAt": "2026-10-08",
@@ -14,7 +14,7 @@
     "mcpShell": {
       "loc": 8652,
       "files": 13,
-      "ratio": 0.2313,
+      "ratio": 0.2285,
       "byFile": {
         "mcp-shell/src/tools.ts": 2339,
         "mcp-shell/src/engine-client.ts": 1415,
@@ -32,7 +32,7 @@
       }
     },
     "fork": {
-      "loc": 5548,
+      "loc": 6007,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -47,17 +47,17 @@
         {
           "file": "packages/opencode/script/glasspane-preflight.sh",
           "kind": "added",
-          "lines": 83
+          "lines": 93
         },
         {
           "file": "packages/opencode/script/installer-selftest.sh",
           "kind": "added",
-          "lines": 235
+          "lines": 371
         },
         {
           "file": "packages/opencode/script/verify-published.ts",
           "kind": "added",
-          "lines": 97
+          "lines": 151
         },
         {
           "file": "packages/opencode/src/plugin/glasspane-compaction.ts",
@@ -72,12 +72,12 @@
         {
           "file": "packages/opencode/src/tool/glasspane/daemon.ts",
           "kind": "added",
-          "lines": 258
+          "lines": 291
         },
         {
           "file": "packages/opencode/src/tool/glasspane/index.ts",
           "kind": "added",
-          "lines": 288
+          "lines": 304
         },
         {
           "file": "packages/opencode/src/tool/glasspane/kernel.ts",
@@ -102,7 +102,7 @@
         {
           "file": "scripts/install.sh",
           "kind": "added",
-          "lines": 383
+          "lines": 480
         },
         {
           "file": "packages/app/src/components/dialog-connect-provider.stories.tsx",
@@ -642,7 +642,7 @@
         {
           "file": "packages/opencode/script/publish.ts",
           "kind": "edited",
-          "lines": 180
+          "lines": 198
         },
         {
           "file": "packages/opencode/src/acp/service.ts",
@@ -752,7 +752,7 @@
         {
           "file": "packages/opencode/src/cli/cmd/upgrade.ts",
           "kind": "edited",
-          "lines": 0
+          "lines": 17
         },
         {
           "file": "packages/opencode/src/cli/cmd/web.ts",
@@ -763,6 +763,11 @@
           "file": "packages/opencode/src/cli/network.ts",
           "kind": "edited",
           "lines": 4
+        },
+        {
+          "file": "packages/opencode/src/cli/upgrade.ts",
+          "kind": "edited",
+          "lines": 3
         },
         {
           "file": "packages/opencode/src/config/config.ts",
@@ -817,7 +822,7 @@
         {
           "file": "packages/opencode/src/installation/index.ts",
           "kind": "edited",
-          "lines": 28
+          "lines": 74
         },
         {
           "file": "packages/opencode/src/mcp/index.ts",
@@ -1052,7 +1057,7 @@
         {
           "file": "packages/tui/src/routes/session/index.tsx",
           "kind": "edited",
-          "lines": 181
+          "lines": 210
         },
         {
           "file": "packages/tui/src/util/presentation.ts",
@@ -1065,18 +1070,19 @@
           "lines": 0
         }
       ],
-      "ratio": 0.1483,
+      "ratio": 0.1586,
       "vendorExcluded": {
         "files": 11,
         "lines": 1464
       },
       "testsExcluded": {
-        "files": 26,
-        "lines": 1474
-      }
+        "files": 27,
+        "lines": 1718
+      },
+      "vendorManifest": "harness/glasspane-harness/contracts/kernel-vendor.json"
     }
   },
-  "totalToolSurfaceLoc": 14200,
+  "totalToolSurfaceLoc": 14659,
   "note": null,
   "carried": null
 }

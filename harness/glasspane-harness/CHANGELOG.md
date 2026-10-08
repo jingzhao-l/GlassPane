@@ -12,6 +12,136 @@ contract does not).
 
 <!-- 内容归入下一版；此处留空以备下一批。 -->
 
+## [0.7.1] - 2026-10-09
+
+判据（pre-1.0）：**patch** —— 本轮没有新增命令、没有改 CLI 形状、没有动参数；改的全是
+"报告与实测不一致"。产品面与安装通道形状不变，证据契约（判定仍全在 Swift、错误帧仍
+`{code,message,remedy}`）一条没动；`brand-surface` 血缘计数 9,627 → **9,617**（减 10，
+去掉 brew/choco/scoop 与上游仓库那些字面），棘轮只许减不许增，方向对。
+
+这一批来自两条审查泳道（定制面正确性 + 发布/供应链）与一次尺子自检。重点仍是**有几道闸
+绿着却红不了**，以及**有几处把没做过的事说成做过**。每条修复都给反向证据（破坏被修的点 →
+具名用例或某把尺子必须变红），口径见 `harness/README.md`「闸自己被验过吗」的 2026-10-09 段。
+
+### Fixed — 发给模型与用户的话
+
+- **升级路径向上游的基础设施要版本号。** `installation/index.ts` 的 `latest()` 在非
+  npm 通道上落到 `api.github.com/repos/anomalyco/opencode/releases/latest` 并回上游的
+  `tag_name`；而 `method()` 对我们自己的 install.sh 兜底装出来的位置正好回 `"curl"`，
+  且 `cli/upgrade.ts` 在 `method === "unknown"` 守卫**之前**就发了这个请求，`upgrade()`
+  每次 TUI 启动都跑。于是产品把上游的发布号当"可更新版本"报给自己装出去的用户。同段还去查
+  `formulae.brew.sh/.../glasspane-harness.json`（我们没发这个 formula）、Chocolatey
+  `Id eq 'opencode'`、Scoop 桶 `opencode.json`（后两个是上游包名）。现在只认两条真发过的
+  通道（npm 家族读配置 registry 上的本产品包，curl 读 `jingzhao-l/glasspane-harness` 自己的
+  releases），其余通道回 `NoUpdateChannelError`，**请求根本不出进程**。
+  `docs/migrate-from-opencode.md` 那句"curl 自升级路径已去掉"与代码不符，按实测改写。
+- **引擎忙 = 告诉模型"这个方法这个引擎没有"。** `requireCapability` 把
+  `probeCapabilities() → null` 一律映射成写死的 `GP_E_CAPABILITY_UNAVAILABLE` 加
+  "start or update the background service"；但 `hello()` 对任何非 ok 回帧都回 null，
+  **包括** `GP_E_ENGINE_TIMEOUT`，而 daemon 是单连接的——槽位一忙，每条 `gp_*` 都被说成
+  能力缺失，还被指去重启一个正常运行的服务。现在引擎给了什么就转达什么，只有真正确认过
+  "没宣布过"才说不支持。`daemon.ts` 里 `{"error": "<字符串>"}` 那种帧被记成"既不是结果也
+  不是错误"的错账，一并改正（拒绝不变，指错的条款变对）。
+- **TUI 把没有引擎结论的一行画成有结论。** `glasspaneRow` 只对 `meta.ok === false` 走
+  拒绝分支，其余一律 `success`；`registry.ts` 给任何插件工具塞
+  `metadata: {...metadata, truncated}`，一个返回字符串的 `gp_*` 插件工具到手就是 `{}`，
+  而 `toolDisplay` 把所有 `gp_` 开头的 id 都送进这条分支。新增 `no-verdict` 态（`?` +
+  warning 色），只转达"这里没有结论"；判定仍然只在 `glasspaned` 那一侧。
+- **curl 那条拒绝的话写在跑不到的字段上。** `upgradeCurl` 把 remedy 写进 `stderr`，统一
+  出口随后用 `upgradeFailure(m, upgradeResult)` 覆盖成 `Upgrade failed for curl (exit code 1).`
+  ——为"过滤抓来的脚本输出"而设的净化器把产品自己的那句话也滤掉了。现在原样送达；
+  `cli/cmd/upgrade.ts` 那个无守卫的 `await Installation.latest()` 也不再让新错误从 yargs
+  `.fail()` 裸抛。
+
+### Fixed — 装到用户机器上的东西
+
+- **兜底安装给一条根本没跑起来的命令打 [OK]。** 收尾用 `command -v` 验 PATH 上最先撞见的
+  那份拷贝（本机实测：它指着一次旧安装给了绿，而这次装进去的是占位桩），再
+  `"$BIN" --version 2>&1 | head -1` 配 `|| true`——管道状态是 `head` 的，连那个也丢了。
+  占位桩往 stderr 道歉并 exit 1，于是打成 `[OK] … --version -> Error: … postinstall was
+  not run.` 且退出 0。现在按安装通道定位这次真写进去的文件，退出码取命令本身。
+- **验签失败照样装。** `GPG_STATE="FAILED (…)"` 后面只 warn 就 return 0，而这条路径上另一
+  道检查 SHA256SUMS.txt 与资产同源。"没发布 .asc / 机器没 gpg"照旧是策略缺口（只警告，
+  0.6.4 定的策不变）；"验不过"、"不是那把钥匙"、"拉签名不是 404 地失败"三类现在是篡改
+  信号，拒装。`.asc` 的 404 与传输失败此前被 `curl -f` 折成同一件事，现按 HTTP 状态分开。
+- **指纹只在注释里，没人断言。** 装钥与验签只要求 `grep -q GOODSIG`，任何一把能做出好签名
+  的钥匙都算过。`VALIDSIG` 的完整 40 位现在必须等于安装器自带的指纹，不等就点名两把指纹
+  并拒装。`gpg --import` 那条裸管道在 `set -e` 下会让安装器只留一句 gpg 的 stderr 就死掉且
+  把临时钥匙环留在盘上，照 `--verify` 已有的写法收进 `if`，从创建起每条出口都清理。
+  安装器自检从 31 条断言扩到 **51 条**，全部实测；三处旧夹具改为真形状（curl 桩回 HTTP
+  状态码、gpg 桩补 `VALIDSIG` 全指纹行、发布物里的二进制打纯版本号——对已发布 0.7.0 实测
+  `--version` 就输出 `0.7.0`）。
+
+### Fixed — 发布链路与尺子
+
+- **任何发布失败都被说成"staged-only 拒了直接发布"。** 平台包那条 `npm publish || { notice;
+  npm stage publish .; }`、wrapper 那条 `if ! publish.ts; then …`，把 E401/404/5xx/打包问题/
+  E409 重复版本（0.5.0 真踩过）全折进同一分支；而 `product.json` 记着 trusted publisher
+  至今是 `owner-action: not yet configured`，也就是说这句归因当前从来不是真因。现在留住退出码
+  与原始输出，只有日志真说"staged/trusted publisher"才降级，且明写 `STAGED, NOT PUBLISHED`。
+- **checksums 把下载失败吞了**（`gh release download … || true` + 只判目录非空），两平台只
+  到一个也能产出一份看着完整的清单；现去掉 `|| true` 并按 `product.json` 的 platformTargets
+  逐个点名，缺一个就拒写。清单同时写明它**不**证明什么：算的是 GitHub 供回来的字节，
+  担保"存的就是这些"，不担保"构建产出的就是这些"。
+- **`gh release create` 没有 `--target`**，Release 记的是分支不是被 tag 的 commit（v0.6.4
+  实测 `targetCommitish=main`）。现钉到 `$GITHUB_SHA`。四条 job 级 `if` 全部显式写成
+  `success() && …`——"显式 `if` 是否替换隐式 needs 成功条件"这一条本轮没能从官方文档取证，
+  所以不依赖那个未证实语义。
+- **publish.ts 的校验只在 `--dry-run` 跑**，真正发布那条路一条断言都不做（而它自己的注释写着
+  "checked before it can be published"）。现在两条路径都校验。反证：造一个有 package.json、
+  无 `bin/glasspane-harness` 的平台包 → `--dry-run` exit 1 并点名缺件。
+  残留如实记：wrapper 那几个文件是 publish.ts 自己写完再查自己，删掉 README 也会被重新生成，
+  所以这条对 wrapper 近于自证；真正能咬的是 build.ts 产出的平台包——而 release.yml 现在仍用裸
+  `npm publish` 发平台包，绕过 publish.ts，那一侧的闸本轮没接上。
+- **npm 钉住了，而且是有证据地钉。** 上一条提交写"0.7.0 用的哪个 npm 已从 job log 查不出来"，
+  只对一半：log 里没有，registry 有——已发布 0.7.0 wrapper 的元数据记着
+  `_npmVersion: 12.2.0`、`_npmUser: GitHub Actions <npm-oidc-no-reply@github.com>`。
+  三个发布 job 据此钉到 `npm@12.2.0`，版本仍照打。
+- **verify-published 三条"过不了也报过"**：非 macOS 分支原断言 `exitCode !== 0`，离线/代理/
+  404/npm 不存在(127) 全满足 → 改为显式拒答（exit 2，"什么都没验证"）；只查 `product.binary`
+  一个命令 → 改为遍历 `product.bins` 并要求 `--version` exit 0 且等于版本号；"内嵌 web 已供出"
+  原来正文里有 `<html` 就算过（错误页也满足）→ 改为 content-type + doctype + `/assets/…` 三项。
+  registry 显式点名，integrity 断言与 provenance 分开写。对本机已发布的 0.7.0 实跑：全绿，
+  `dist.attestations.provenance` 挂着 SLSA v1 predicateType。
+- **preflight 的 `openssl verify` 只吃链里第一张证书**，中间证书既没当 untrusted 也没当 CA，
+  一条本可通过的链会读成 FAILED；改为 leaf + `-untrusted`，并删掉算了却没用的 `issuer`，
+  把 `ghostty-web` 的出处从 `build.ts` 改对到 `packages/app`。两条方向都实测：163 张束 → OK/0，
+  158 张系统根 → FAILED/1 并给出正确 remedy。
+- **三把尺子的假绿口径**：`tool-surface` 里 `let ri = 0` 从不前进，一条删除行可以免掉任意多
+  条新增行（40 份改了品牌的复制行记 0）；面 B 越过书面 10% 却没人说（跨限判定对已超限的基线
+  恒假，那句 "already over" 只写给面 A）；排除清单的出处打在屏幕上是**不存在的路径**。
+  `brand-surface` 的 `--record` 会把"这个文件没被扫到"写成绿色基线，`--check` 从不比对扫描
+  覆盖（子树消失＝血缘计数下降＝看着像进步）。`surface-semantics` 的阈值规则只认一种操作数
+  顺序（`ratio > 0.5` 命中，`0.5 < ratio` 记 0）——两侧都认之后本树仍 0 命中/18 文件，
+  **没有**为此重记金样。
+- **SECURITY.md 那句 "npm releases carry provenance in CI (Trusted Publisher, staged-only)"
+  三个限定词两个半不成立**，按实测改写；并补上此前四份文档里一个都没出现的"怎么验你装到的
+  东西"（SHA256SUMS、`.asc`、GPG、`npm audit signatures`），以及一条边界：CI 那边仍是
+  "secret 里是什么就用什么"，**没有任何一步证明发布用的私钥就是安装器断言的那把**，所以
+  安装器是执法点而不是 CI 步骤。
+
+### Measured — 本轮收口时各闸的实际数字
+
+engine 23,209 LOC / 60 files；面 A `mcp-shell/src` 8,652 LOC = 22.85%；面 B（fork 内我们写的）
+6,007 LOC = 15.86%（书面限制 10%，两面都超限且如实标注"跨限判定已用尽，还在守它的是 LOC
+棘轮"）；测试排除 27 files / 1,718 lines；vendored 排除 11 files / 1,464 lines（清单出处
+`harness/glasspane-harness/contracts/kernel-vendor.json`）。
+`fork-diff`：4,667/6,746 byte-identical，260 edited，114 added，1,705 deleted。
+`brand-surface`：26 product files + 2 docs，0 hit，血缘 9,617 / 3,310 files（覆盖不变）。
+`surface-semantics`：0 hit / 18 files。`product-surface`：88 agreement / 0 problem @ 0.7.1。
+`hook-liveness`：21 hooks against v1.18.32，no drift。`kernel-vendor`：25 files / 84,308 bytes
+@ `2ed342b`，与溯源清单一致。`kernel-conformance`：8 fixtures ok。
+固定点测试：`packages/opencode` 80 pass / 0 fail（305 expect），`test/installation`
+13 pass / 0 fail，`packages/tui` 24 pass / 0 fail（8 snapshots，67 expect）；
+四个发布包 `tsgo --noEmit` 各 exit 0。安装器自检 51 条断言全过。
+
+金样本轮**同批 --record 两次**并在此说清长了多少、为什么：`fork-diff.json` 的 edited
+258 → 260（`script/verify-published.ts` 与 `src/cli/cmd/upgrade.ts` 首次进入分叉记录面），
+`tool-surface.json` 面 B 5,548 → 6,007（+459：其中约 +23 是**配对规则修正后重新计费**的
+既有重复行，不是新写的代码；其余是本轮 install.sh/publish.ts/verify-published/尺子与测试
+的真实新增）。面 A 的 +51 来自同日 main 上 1.9.0 那批 mcp-shell 改动，不是本线。
+
+
 ## [0.7.0] - 2026-10-07
 
 判据（pre-1.0）：**minor** —— 用户可见的安装器 CLI 形状（`--version <值>`、`--help`、
