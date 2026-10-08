@@ -137,7 +137,8 @@ GlassPane 不是普通工具库：它**持有** macOS 的高危权限（辅助�
 - 位置：`~/.glasspane/evidence/<operationId>.json`（一操作一文件，默认归档上限 10000 份，
   `EvidenceStore.defaultMaxFiles = 10_000`）、`~/.glasspane/projects.json`、
   `~/.glasspane/approvals.json`、`~/.glasspane/installer-daemon.log`（launchd 的 stdout 与 stderr 都写
-  这里）。
+  这里），以及每日更新作业自己的 `~/.glasspane/update.log`——launchd 打开它的方式与上面那份完全一样。
+  它的内容是这台机器装了什么、更新到哪一步：版本号、暂存路径、摘要、tag、GPG 判定，以及每一次拒绝的理由。
 - 内容：操作 selector（role/title/identifier —— **标题是被测 app 自己的文本**）、动作与确认位、AX 树摘要与
   节点数、像素差异比例与窗口几何/窗口号、响应性与存活信号、handler 命中的 file:line、状态变更的
   before/after 规范化字符串（各 ≤1 KiB）、分类结论与归因。**证据通路不落任何原始截图**（只存派生量），
@@ -162,7 +163,12 @@ GlassPane 不是普通工具库：它**持有** macOS 的高危权限（辅助�
   唯一不被任何收紧扫描覆盖的文件**：安装器用 `openSync(path, 'a')` 创建它（模式由进程 umask 决定），
   而那趟扫描处理根目录、登记表、审批链与证据包，不处理 launchd 日志。两头现在都闭合了，而且都是
   **核验过**而不是假设的：安装器按 `0600` 申请并读回比对（chmod 没落住就按写失败报告，不是警告一句
-  继续），daemon 的启动扫描把已存在的日志一并收紧。2026-10-06 在隔离状态根上用 debug daemon 实测：
+  继续），daemon 的启动扫描把已存在的日志一并收紧。1.9.0 起同一对措施也覆盖更新作业自己的
+  `~/.glasspane/update.log`：`registerAgent` 在把定义交给 launchd 之前按 `0600` 建它并读回（权限位存不住的
+  卷一律**拒绝注册**，而不是装出一份人人可读的审计线索），`StateRoot.updateLogFile` 把这个名字放进启动
+  扫描。这一轮**没有**对真机上的 launchd 作业重测 `update.log` 的实际模式——注册一个真作业不是例行任务该
+  替别人的机器做的决定——所以 `0644` 这个数字是从它那位兄弟的实测搬过来的，不是这里新测的。
+  2026-10-06 在隔离状态根上用 debug daemon 实测：
   `644` → `600`，根 `755` → `700`，日志原有字节一个没动——收紧是 `chmod`，不是重写。这**买不到**的
   是：模式不随副本走。这份日志是 daemon 自己的 stdout 与 stderr——启动行与 socket 路径、pid、客户端
   连接/断开、输入监听与权限判定、引擎错误文本——足够让本机另一个账号知道这台机器装了 GlassPane、

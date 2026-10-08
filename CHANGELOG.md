@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+- **文档补记（在 `v1.9.0` 打 tag 之后落到 main，因此 1.9.0 的发布归档里还是旧文）。**
+  SECURITY 双语 §2.4 之前只列了 `installer-daemon.log` 这一份 launchd 写的日志，本版把
+  `~/.glasspane/update.log` 也纳进了"什么在盘上"的清单与收紧交代，并写明 `0644` 那个数字是从它
+  那位兄弟的实测搬过来的、这一轮没有对真机 launchd 作业重测。代码侧的措施（`AGENT_LOG_NAME` →
+  `StateRoot.updateLogFile` → 注册前 0600）确实随 1.9.0 发出，缺的只是这份文档的同步。
+
 ## [1.9.0] — 2026-10-08
 
 版本判断：**按 minor 记**。1.6.2 那四条 patch 判据实测都没动——状态文件的字段一个没加没改
