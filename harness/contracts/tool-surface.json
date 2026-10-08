@@ -8,17 +8,17 @@
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
   "observedAt": "2026-10-08",
-  "engineLoc": 23209,
+  "engineLoc": 23295,
   "engineFiles": 60,
   "surfaces": {
     "mcpShell": {
-      "loc": 8652,
+      "loc": 8658,
       "files": 13,
-      "ratio": 0.2285,
+      "ratio": 0.2281,
       "byFile": {
         "mcp-shell/src/tools.ts": 2339,
         "mcp-shell/src/engine-client.ts": 1415,
-        "mcp-shell/src/http-gateway.ts": 1273,
+        "mcp-shell/src/http-gateway.ts": 1279,
         "mcp-shell/src/project-registry.ts": 1098,
         "mcp-shell/src/update-state.ts": 492,
         "mcp-shell/src/audit-session.ts": 381,
@@ -1070,7 +1070,7 @@
           "lines": 0
         }
       ],
-      "ratio": 0.1586,
+      "ratio": 0.1582,
       "vendorExcluded": {
         "files": 11,
         "lines": 1464
@@ -1082,7 +1082,7 @@
       "vendorManifest": "harness/glasspane-harness/contracts/kernel-vendor.json"
     }
   },
-  "totalToolSurfaceLoc": 14659,
+  "totalToolSurfaceLoc": 14665,
   "note": null,
   "carried": null
 }
