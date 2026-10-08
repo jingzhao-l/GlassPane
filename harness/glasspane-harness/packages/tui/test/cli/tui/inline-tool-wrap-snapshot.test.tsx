@@ -272,6 +272,44 @@ describe("TUI inline tool wrapping", () => {
     expect(row.detail).toContain("remedy: call gp_act first")
   })
 
+  test("glasspaneRow gives a missing engine verdict its own state, apart from success and refusal", () => {
+    // Reachable, not hypothetical: `registry.ts` gives any plugin or custom tool
+    // `metadata: {...metadata, truncated}`, so a `gp_`-prefixed plugin tool that
+    // returns a string arrives with `{}` — and `toolDisplay` routes anything starting
+    // with `gp_` into this branch. Painting that "success" would tell the person
+    // watching the terminal that the engine answered when it answered nothing.
+    const missing = glasspaneRow({ tool: "gp_act", status: "completed", metadata: {} })
+    expect(missing.state).toBe("no-verdict")
+    expect(missing.line).toBe("no engine verdict")
+    expect(missing.detail).toBeUndefined() // no verdict to expand, and none invented
+
+    const success = glasspaneRow({
+      tool: "gp_act",
+      status: "completed",
+      metadata: { ok: true, method: "act", result: { actConfirmed: true } },
+    })
+    const refusal = glasspaneRow({
+      tool: "gp_act",
+      status: "completed",
+      metadata: { ok: false, method: "act", code: "GP_E_NO_EVIDENCE", message: "no pack", remedy: "call gp_act" },
+    })
+    // Three different rows, all three from a completed tool call.
+    expect(success.state).toBe("success")
+    expect(refusal.state).toBe("engine-failure")
+    expect(new Set([missing.state, success.state, refusal.state]).size).toBe(3)
+    expect(missing.line).not.toBe(success.line)
+    expect(missing.line).not.toBe(refusal.line)
+
+    // A non-boolean `ok` is the same absence, not a verdict of its own.
+    for (const ok of [undefined, null, "true", 1]) {
+      expect(glasspaneRow({ tool: "gp_act", status: "completed", metadata: { ok, method: "act" } }).state).toBe(
+        "no-verdict",
+      )
+    }
+    // A refusal on a call that never finished is still the call error's story.
+    expect(glasspaneRow({ tool: "gp_act", status: "error", error: "socket closed", metadata: {} }).state).toBe("call-error")
+  })
+
   test("glasspaneRow distinguishes a thrown call error and a permission denial", () => {
     const denied = glasspaneRow({ tool: "gp_act", status: "error", error: "user rejected permission", metadata: {} })
     expect(denied.state).toBe("denied")

@@ -1829,17 +1829,23 @@ function GlassPaneTool(props: ToolProps) {
   })
 
   const failed = createMemo(() => row().state === "engine-failure" || row().state === "call-error")
+  // Three looks, and the middle one is the point: a row with no engine verdict must
+  // not borrow the muted "the engine answered" style, and it must not be drawn as a
+  // refusal either — it is neither. `complete` here means "this call is finished",
+  // which is what stops InlineToolRow from painting the in-flight tilde instead.
+  const noVerdict = createMemo(() => row().state === "no-verdict")
   const complete = createMemo(() => row().state === "success")
   const fg = createMemo(() => {
     if (permission()) return theme.warning
     if (failed()) return theme.error
+    if (noVerdict()) return theme.warning
     if (complete()) return theme.textMuted
     return theme.text
   })
 
   return (
     <InlineToolRow
-      icon={failed() ? "✗" : "◈"}
+      icon={failed() ? "✗" : noVerdict() ? "?" : "◈"}
       iconColor={failed() ? theme.error : undefined}
       color={fg()}
       errorColor={theme.error}
@@ -1847,7 +1853,7 @@ function GlassPaneTool(props: ToolProps) {
       denied={row().state === "denied"}
       error={row().detail}
       errorExpanded={errorExpanded()}
-      complete={complete()}
+      complete={complete() || noVerdict()}
       pending={row().pending}
       spinner={row().state === "pending"}
       onMouseUp={() => {
@@ -2669,14 +2675,14 @@ function numberValue(value: unknown) {
  * evidence means the UI *worked* is the kernel's verdict
  * (`decisionOutcomeFromEvidence`), not the TUI's to render.
  * ------------------------------------------------------------------ */
-export type GlassPaneRowState = "pending" | "success" | "engine-failure" | "call-error" | "denied"
+export type GlassPaneRowState = "pending" | "success" | "no-verdict" | "engine-failure" | "call-error" | "denied"
 
 export type GlassPaneRow = {
   /** What colour/icon the row gets. */
   state: GlassPaneRowState
   /** The engine method, e.g. "act" — never the `gp_`-prefixed tool name. */
   method: string
-  /** Row body: the success summary, or the failure headline. */
+  /** Row body: the success summary, the failure headline, or the missing verdict. */
   line: string
   /** Expandable failure detail: the engine message plus its remedy, or the call error. */
   detail?: string
@@ -2768,6 +2774,17 @@ export function glasspaneRow(input: {
     // surfacing it on click (not only in the output string) is the point of M5.
     const detail = [message, remedy ? `remedy: ${remedy}` : undefined].filter(Boolean).join("\n")
     return { state: "engine-failure", method, line: `${input.tool}${code ? ` ${code}` : ""}`, detail, pending }
+  }
+
+  // No `ok` from the engine at all: neither true nor false. This is reachable —
+  // `registry.ts` hands any plugin or custom tool `metadata: {...metadata,
+  // truncated}`, so a `gp_`-prefixed plugin tool that returns a string arrives with
+  // no engine fields, and `toolDisplay` routes anything starting with `gp_` here.
+  // Calling that "success" would paint an answer the engine never gave, and deciding
+  // what the row *should* say is the engine's job, not the TUI's. So the row
+  // transcribes the absence and nothing more.
+  if (meta.ok !== true) {
+    return { state: "no-verdict", method, line: "no engine verdict", pending }
   }
 
   return { state: "success", method, line: glasspaneSummary(method, recordValue(meta.result)), pending }

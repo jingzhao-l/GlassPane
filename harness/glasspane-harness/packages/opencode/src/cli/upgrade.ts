@@ -9,6 +9,10 @@ export async function upgrade() {
   const config = await AppRuntime.runPromise(Config.Service.use((cfg) => cfg.getGlobal()))
   if (config.autoupdate === false || Flag.OPENCODE_DISABLE_AUTOUPDATE) return
   const method = await Installation.method()
+  // Ask first whether this copy has a channel at all. Checking that after the fetch
+  // meant a network round trip on every startup for installs this product cannot
+  // update, and whatever it returned was not this product's version.
+  if (method === "unknown") return
   const latest = await Installation.latest(method).catch(() => {})
   if (!latest) return
 
@@ -38,7 +42,6 @@ export async function upgrade() {
     return
   }
 
-  if (method === "unknown") return
   await Installation.upgrade(method, latest)
     .then(() =>
       GlobalBus.emit("event", {

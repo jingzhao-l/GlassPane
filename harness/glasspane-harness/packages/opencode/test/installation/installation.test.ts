@@ -68,22 +68,54 @@ function testLayer(
 
 describe("installation", () => {
   describe("latest", () => {
-    testEffect(testLayer(() => jsonResponse({ tag_name: "v1.2.3" }))).effect(
-      "reads release version from GitHub releases",
-      () =>
-        Effect.gen(function* () {
-          const result = yield* Installation.use.latest("unknown")
-          expect(result).toBe("1.2.3")
-        }),
+    // The update path may only ever resolve a version from infrastructure this
+    // product owns. Every case below records the URLs the code actually asked for,
+    // because the defect being pinned was a correct-looking version number that came
+    // from upstream's release feed: the answer was only half the claim, the source was
+    // the other half.
+    const collect = () => {
+      const urls: string[] = []
+      return {
+        urls,
+        record: (request: HttpClientRequest.HttpClientRequest) => {
+          urls.push(request.url)
+        },
+        // No case here may resolve upstream's repository, whatever it resolves instead.
+        asksNothingOfUpstream: () => expect(urls.some((url) => url.includes("api.github.com/repos/anomalyco/"))).toBe(false),
+      }
+    }
+
+    const curlFeed = collect()
+    testEffect(
+      testLayer((request) => {
+        curlFeed.record(request)
+        return jsonResponse({ tag_name: "v0.7.1" })
+      }),
+    ).effect("a curl install reads this product's own releases, and strips the v prefix", () =>
+      Effect.gen(function* () {
+        const result = yield* Installation.use.latest("curl")
+        expect(result).toBe("0.7.1")
+        expect(curlFeed.urls).toEqual(["https://api.github.com/repos/jingzhao-l/glasspane-harness/releases/latest"])
+        curlFeed.asksNothingOfUpstream()
+      }),
     )
 
-    testEffect(testLayer(() => jsonResponse({ tag_name: "v4.0.0-beta.1" }))).effect(
-      "strips v prefix from GitHub release tag",
-      () =>
-        Effect.gen(function* () {
-          const result = yield* Installation.use.latest("curl")
-          expect(result).toBe("4.0.0-beta.1")
-        }),
+    const curlUnreachable = collect()
+    testEffect(
+      testLayer((request) => {
+        curlUnreachable.record(request)
+        return new Response("no such release", { status: 404 })
+      }),
+    ).effect("a curl install whose own feed is unreachable resolves to no version at all", () =>
+      Effect.gen(function* () {
+        // Absent, not guessed: the caller's `catch` is what turns this into "no
+        // update to report", and the previous behaviour here was to fall through to
+        // upstream's feed and report that number as ours.
+        const exit = yield* Effect.exit(Installation.use.latest("curl"))
+        expect(exit._tag).toBe("Failure")
+        expect(curlUnreachable.urls).toEqual(["https://api.github.com/repos/jingzhao-l/glasspane-harness/releases/latest"])
+        curlUnreachable.asksNothingOfUpstream()
+      }),
     )
 
     const npmCalls: string[] = []
@@ -96,7 +128,7 @@ describe("installation", () => {
       Effect.gen(function* () {
         const result = yield* Installation.use.latest("npm")
         expect(result).toBe("1.5.0")
-        expect(npmCalls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
+        expect(npmCalls).toContain(`https://registry.npmjs.org/glasspane-harness/${InstallationChannel}`)
       }),
     )
 
@@ -110,7 +142,7 @@ describe("installation", () => {
       Effect.gen(function* () {
         const result = yield* Installation.use.latest("bun")
         expect(result).toBe("1.6.0")
-        expect(bunCalls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
+        expect(bunCalls).toContain(`https://registry.npmjs.org/glasspane-harness/${InstallationChannel}`)
       }),
     )
 
@@ -124,61 +156,32 @@ describe("installation", () => {
       Effect.gen(function* () {
         const result = yield* Installation.use.latest("pnpm")
         expect(result).toBe("1.7.0")
-        expect(pnpmCalls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
+        expect(pnpmCalls).toContain(`https://registry.npmjs.org/glasspane-harness/${InstallationChannel}`)
       }),
     )
 
-    testEffect(testLayer(() => jsonResponse({ version: "2.3.4" }))).effect("reads scoop manifest versions", () =>
-      Effect.gen(function* () {
-        const result = yield* Installation.use.latest("scoop")
-        expect(result).toBe("2.3.4")
-      }),
-    )
-
-    testEffect(testLayer(() => jsonResponse({ d: { results: [{ Version: "3.4.5" }] } }))).effect(
-      "reads chocolatey feed versions",
-      () =>
-        Effect.gen(function* () {
-          const result = yield* Installation.use.latest("choco")
-          expect(result).toBe("3.4.5")
+    // brew, Chocolatey and Scoop carry no `glasspane-harness` package. Upstream's code
+    // queried them anyway — Chocolatey and Scoop by upstream's *package id* — so each
+    // of these used to hand back a version number for something this product never
+    // published. There is no such channel, and saying so is the whole answer.
+    for (const method of ["scoop", "choco", "brew", "yarn", "unknown"] as const) {
+      const asked: string[] = []
+      testEffect(
+        testLayer((request) => {
+          asked.push(request.url)
+          return jsonResponse({ version: "9.9.9", tag_name: "v9.9.9", versions: { stable: "9.9.9" }, d: { results: [{ Version: "9.9.9" }] } })
         }),
-    )
-
-    testEffect(
-      testLayer(
-        () => jsonResponse({ versions: { stable: "2.0.0" } }),
-        (cmd, args) => {
-          // getBrewFormula: return core formula (no tap)
-          if (cmd === "brew" && args.includes("--formula") && args.includes("anomalyco/tap/opencode")) return ""
-          if (cmd === "brew" && args.includes("--formula") && args.includes("opencode")) return "opencode"
-          return ""
-        },
-      ),
-    ).effect("reads brew formulae API versions", () =>
-      Effect.gen(function* () {
-        const result = yield* Installation.use.latest("brew")
-        expect(result).toBe("2.0.0")
-      }),
-    )
-
-    const brewInfoJson = JSON.stringify({
-      formulae: [{ versions: { stable: "2.1.0" } }],
-    })
-    testEffect(
-      testLayer(
-        () => jsonResponse({}), // HTTP not used for tap formula
-        (cmd, args) => {
-          if (cmd === "brew" && args.includes("anomalyco/tap/opencode") && args.includes("--formula")) return "opencode"
-          if (cmd === "brew" && args.includes("--json=v2")) return brewInfoJson
-          return ""
-        },
-      ),
-    ).effect("reads brew tap info JSON via CLI", () =>
-      Effect.gen(function* () {
-        const result = yield* Installation.use.latest("brew")
-        expect(result).toBe("2.1.0")
-      }),
-    )
+      ).effect(`${method} is not a channel this product publishes: no version, and no request`, () =>
+        Effect.gen(function* () {
+          const error = yield* Effect.flip(Installation.use.latest(method))
+          expect(error).toBeInstanceOf(Installation.NoUpdateChannelError)
+          expect(error.method).toBe(method)
+          expect(error.remedy).toContain("npm install -g glasspane-harness")
+          expect(error.message).toBe(error.remedy)
+          expect(asked).toEqual([])
+        }),
+      )
+    }
   })
 
   describe("upgrade", () => {

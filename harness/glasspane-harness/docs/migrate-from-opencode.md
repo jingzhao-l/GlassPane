@@ -20,8 +20,11 @@ except what this table lists; the evidence surface is additive.
 - `--version` now prints the product's manifest version verbatim. (It used to inherit
   upstream's release-time patch bump and could print a version that was never built.)
 - `upgrade` / `uninstall` act on the product package. The curl self-upgrade path is gone:
-  it used to fetch and execute `opencode.ai/install`; use `npm install -g glasspane-harness`
-  or `scripts/install.sh`.
+  it used to fetch and execute `opencode.ai/install`. A curl-installed copy now reads this
+  product's own releases to say whether an update exists, and applying it says so plainly —
+  re-run `scripts/install.sh` or use `npm install -g glasspane-harness`. Homebrew,
+  Chocolatey and Scoop carry no `glasspane-harness` package, so `upgrade` reports no version
+  for them at all rather than quoting another project's.
 - The hosted console / enterprise stack and the publishing paths that pushed to upstream
   registries (docker, AUR, Homebrew tap) are gone from this product.
 - **There is no account to log into, and no first-party model gateway** (0.4.0). Removed:

@@ -157,7 +157,7 @@ function rawRequest(method: string, params: object, timeoutMs: number): Promise<
         )
         return
       }
-      const reply = parsed as { id?: unknown; result?: unknown; error?: Partial<DaemonError> }
+      const reply = parsed as { id?: unknown; result?: unknown; error?: unknown }
       if (reply.id !== REQUEST_ID) {
         finish(
           failure(
@@ -168,18 +168,26 @@ function rawRequest(method: string, params: object, timeoutMs: number): Promise<
         )
         return
       }
-      if (reply && typeof reply.error === "object" && reply.error) {
+      // The contract says `error` is an object with three fields, and `FrameCodec`
+      // writes it that way. A bare string is a degraded error frame, and it is still
+      // an error: it used to fall past this branch into the "neither a result nor an
+      // error" refusal below, which told the reader the frame carried no error when
+      // the engine had put one in it. The engine's text survives; only the missing
+      // fields are named as missing.
+      if (reply.error !== undefined && reply.error !== null) {
+        const error: Partial<DaemonError> = typeof reply.error === "string" ? { message: reply.error } : reply.error
+        const code = typeof error.code === "string" ? error.code : "GP_E_INTERNAL"
         finish({
           ok: false,
           error: {
-            code: typeof reply.error.code === "string" ? reply.error.code : "GP_E_INTERNAL",
-            message: typeof reply.error.message === "string" ? reply.error.message : "the daemon reported an error without a message",
+            code,
+            message: typeof error.message === "string" ? error.message : "the daemon reported an error without a message",
             // A missing remedy is an engine-side contract violation, and the
             // agent reading this needs to know who to blame, so say so.
             remedy:
-              typeof reply.error.remedy === "string" && reply.error.remedy.length > 0
-                ? reply.error.remedy
-                : `the daemon sent ${reply.error.code ?? "an unnamed"} error with no remedy — the failure is in the background service, not in this tool call; read ~/.glasspane/installer-daemon.log`,
+              typeof error.remedy === "string" && error.remedy.length > 0
+                ? error.remedy
+                : `the daemon sent ${code} with no remedy — the failure is in the background service, not in this tool call; read ~/.glasspane/installer-daemon.log`,
           },
         })
         return
@@ -239,20 +247,45 @@ export interface Capabilities {
 }
 
 /**
- * Read the daemon's self-report. Returning `null` (rather than assuming) is what
- * lets a tool say "the engine did not tell me it supports this" instead of
- * pretending the call will work.
+ * What a capability check can learn from `hello`, with the two answers kept apart:
+ * the engine advertised a list, or the engine did not answer that question. A
+ * caller that collapses these into `Capabilities | null` cannot tell "the running
+ * engine does not support this method" from "the engine was busy", and the second
+ * one is not a statement about the method.
+ */
+export type CapabilityProbe = { readonly ok: true; readonly report: Capabilities } | { readonly ok: false; readonly error: DaemonError }
+
+/**
+ * Read the daemon's self-report. A failed `hello` returns the engine's own
+ * `{code, message, remedy}` rather than `null`: the daemon serves one connection at
+ * a time, so a timed-out or hung-up hello is a busy service talking, and its remedy
+ * ("the slot is taken, retry once it is free") is the one the agent should get.
  */
 export function probeCapabilities() {
-  return Effect.map(hello(), (reply) => {
-    if (!reply.ok || typeof reply.result !== "object" || reply.result === null) return null
+  return Effect.map(hello(), (reply): CapabilityProbe => {
+    if (!reply.ok) return { ok: false, error: reply.error }
+    if (typeof reply.result !== "object" || reply.result === null) return { ok: false, error: noCapabilityList(reply.result) }
     const report = reply.result as Partial<Capabilities>
-    if (!Array.isArray(report.capabilities)) return null
+    if (!Array.isArray(report.capabilities)) return { ok: false, error: noCapabilityList(report) }
     return {
-      version: typeof report.version === "string" ? report.version : "unknown",
-      protocolVersion: typeof report.protocolVersion === "string" ? report.protocolVersion : "unknown",
-      capabilities: report.capabilities.filter((item): item is string => typeof item === "string"),
-      permissions: (report.permissions ?? {}) as Record<string, string>,
-    } satisfies Capabilities
+      ok: true,
+      report: {
+        version: typeof report.version === "string" ? report.version : "unknown",
+        protocolVersion: typeof report.protocolVersion === "string" ? report.protocolVersion : "unknown",
+        capabilities: report.capabilities.filter((item): item is string => typeof item === "string"),
+        permissions: (report.permissions ?? {}) as Record<string, string>,
+      },
+    }
   })
+}
+
+/** `hello` answered but not with a capability list. The engine said nothing about
+ *  what it supports, so nothing has been established about any method — say what
+ *  the reply was, never what it means for the capability being asked about. */
+function noCapabilityList(given: unknown): DaemonError {
+  return {
+    code: "GP_E_INTERNAL",
+    message: `the background service answered hello without a capability list: ${JSON.stringify(given)?.slice(0, 160) ?? String(given)}`,
+    remedy: "run gp_probe_status to read the engine's self-report, and read ~/.glasspane/installer-daemon.log if it is empty — no capability is assumed until hello advertises one",
+  }
 }

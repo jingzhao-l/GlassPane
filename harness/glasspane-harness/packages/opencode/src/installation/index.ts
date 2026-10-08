@@ -61,22 +61,34 @@ export class UpgradeFailedError extends Schema.TaggedErrorClass<UpgradeFailedErr
   }
 }
 
+/**
+ * [gp] Product: there is no version to report on a channel this product does not
+ * publish. Asking another project's release feed for a number and showing it to the
+ * user as an available update is worse than saying nothing, so the answer is the way
+ * out instead.
+ */
+export class NoUpdateChannelError extends Schema.TaggedErrorClass<NoUpdateChannelError>()("NoUpdateChannelError", {
+  method: Schema.String,
+  remedy: Schema.String,
+}) {
+  override get message() {
+    return this.remedy
+  }
+}
+
+// [gp] Product: this product's releases are its own repository's, and that feed is
+// the only place its update path may read a version from. (Lineage: the fork's
+// upstream is `anomalyco/opencode`, whose releases answer for a different program.)
+const ReleaseRepo = "jingzhao-l/glasspane-harness"
+
 // Response schemas for external version APIs
 const GitHubRelease = Schema.Struct({ tag_name: Schema.String })
 const NpmPackage = Schema.Struct({ version: Schema.String })
-const BrewFormula = Schema.Struct({ versions: Schema.Struct({ stable: Schema.String }) })
-const BrewInfoV2 = Schema.Struct({
-  formulae: Schema.Array(Schema.Struct({ versions: Schema.Struct({ stable: Schema.String }) })),
-})
-const ChocoPackage = Schema.Struct({
-  d: Schema.Struct({ results: Schema.Array(Schema.Struct({ Version: Schema.String })) }),
-})
-const ScoopManifest = NpmPackage
 
 export interface Interface {
-  readonly info: () => Effect.Effect<Info>
+  readonly info: () => Effect.Effect<Info, NoUpdateChannelError>
   readonly method: () => Effect.Effect<Method>
-  readonly latest: (method?: Method) => Effect.Effect<string>
+  readonly latest: (method?: Method) => Effect.Effect<string, NoUpdateChannelError>
   readonly upgrade: (method: Method, target: string) => Effect.Effect<void, UpgradeFailedError>
 }
 
@@ -159,6 +171,29 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
       }
     })
 
+    // [gp] Product: the two channels this product actually publishes to. A curl
+    // install reads this product's own releases; an npm-family install reads this
+    // product's own package on the configured registry. Nothing here asks another
+    // project's infrastructure what version it is.
+    const latestFromChannel = Effect.fnUntraced(function* (detectedMethod: Method) {
+      if (detectedMethod === "npm" || detectedMethod === "bun" || detectedMethod === "pnpm") {
+        const response = yield* httpOk.execute(
+          HttpClientRequest.get(
+            `${yield* NpmConfig.registry(process.cwd())}/glasspane-harness/${InstallationChannel}`,
+          ).pipe(HttpClientRequest.acceptJson),
+        )
+        const data = yield* HttpClientResponse.schemaBodyJson(NpmPackage)(response)
+        return data.version
+      }
+      const response = yield* httpOk.execute(
+        HttpClientRequest.get(`https://api.github.com/repos/${ReleaseRepo}/releases/latest`).pipe(
+          HttpClientRequest.acceptJson,
+        ),
+      )
+      const data = yield* HttpClientResponse.schemaBodyJson(GitHubRelease)(response)
+      return data.tag_name.replace(/^v/, "")
+    }, Effect.orDie)
+
     const result: Interface = {
       info: Effect.fn("Installation.info")(function* () {
         return {
@@ -203,60 +238,23 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
       latest: Effect.fn("Installation.latest")(function* (installMethod?: Method) {
         const detectedMethod = installMethod || (yield* result.method())
 
-        if (detectedMethod === "brew") {
-          const formula = yield* getBrewFormula()
-          if (formula.includes("/")) {
-            const infoJson = yield* text(["brew", "info", "--json=v2", formula])
-            const info = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(BrewInfoV2))(infoJson)
-            return info.formulae[0].versions.stable
-          }
-          const response = yield* httpOk.execute(
-            HttpClientRequest.get("https://formulae.brew.sh/api/formula/glasspane-harness.json").pipe(
-              HttpClientRequest.acceptJson,
-            ),
-          )
-          const data = yield* HttpClientResponse.schemaBodyJson(BrewFormula)(response)
-          return data.versions.stable
+        // [gp] Product: brew, Chocolatey and Scoop carry no `glasspane-harness`
+        // package, and an install this product cannot identify is not a channel
+        // either. Upstream's code asked those registries (and upstream's own release
+        // feed) anyway, so a user on any of them was shown another program's version
+        // number as an available update. No request leaves this process for them.
+        if (detectedMethod !== "curl" && detectedMethod !== "npm" && detectedMethod !== "bun" && detectedMethod !== "pnpm") {
+          return yield* new NoUpdateChannelError({
+            method: detectedMethod,
+            remedy:
+              detectedMethod === "unknown"
+                ? "glasspane-harness cannot tell how this copy was installed, so it has no version to check against — update with `npm install -g glasspane-harness`, or re-run the installer from https://github.com/jingzhao-l/glasspane-harness"
+                : `glasspane-harness publishes no ${detectedMethod} package, so there is no ${detectedMethod} version to check against — update with \`npm install -g glasspane-harness\`, or re-run the installer from https://github.com/jingzhao-l/glasspane-harness`,
+          })
         }
 
-        if (detectedMethod === "npm" || detectedMethod === "bun" || detectedMethod === "pnpm") {
-          const response = yield* httpOk.execute(
-            HttpClientRequest.get(
-              `${yield* NpmConfig.registry(process.cwd())}/glasspane-harness/${InstallationChannel}`,
-            ).pipe(HttpClientRequest.acceptJson),
-          )
-          const data = yield* HttpClientResponse.schemaBodyJson(NpmPackage)(response)
-          return data.version
-        }
-
-        if (detectedMethod === "choco") {
-          const response = yield* httpOk.execute(
-            HttpClientRequest.get(
-              "https://community.chocolatey.org/api/v2/Packages?$filter=Id%20eq%20%27opencode%27%20and%20IsLatestVersion&$select=Version",
-            ).pipe(HttpClientRequest.setHeaders({ Accept: "application/json;odata=verbose" })),
-          )
-          const data = yield* HttpClientResponse.schemaBodyJson(ChocoPackage)(response)
-          return data.d.results[0].Version
-        }
-
-        if (detectedMethod === "scoop") {
-          const response = yield* httpOk.execute(
-            HttpClientRequest.get(
-              "https://raw.githubusercontent.com/ScoopInstaller/Main/master/bucket/opencode.json",
-            ).pipe(HttpClientRequest.setHeaders({ Accept: "application/json" })),
-          )
-          const data = yield* HttpClientResponse.schemaBodyJson(ScoopManifest)(response)
-          return data.version
-        }
-
-        const response = yield* httpOk.execute(
-          HttpClientRequest.get("https://api.github.com/repos/anomalyco/opencode/releases/latest").pipe(
-            HttpClientRequest.acceptJson,
-          ),
-        )
-        const data = yield* HttpClientResponse.schemaBodyJson(GitHubRelease)(response)
-        return data.tag_name.replace(/^v/, "")
-      }, Effect.orDie),
+        return yield* latestFromChannel(detectedMethod)
+      }),
       upgrade: Effect.fn("Installation.upgrade")(function* (m: Method, target: string) {
         let upgradeResult: { code: number; stdout: string; stderr: string } | undefined
         switch (m) {

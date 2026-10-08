@@ -26,14 +26,7 @@ import * as Daemon from "./daemon"
  *  `glasspaneRow` in M5): the remedy-in-output rule is the invariant worth pinning,
  *  and a test can only pin what it can name. */
 export function present(tool: string, method: string, reply: Daemon.DaemonReply, summary: (result: unknown) => string): Tool.ExecuteResult {
-  if (!reply.ok) {
-    const { code, message, remedy } = reply.error
-    return {
-      title: `${tool}: ${code}`,
-      output: `${message}\nremedy: ${remedy}`,
-      metadata: { ok: false, method, code, message, remedy, result: null },
-    }
-  }
+  if (!reply.ok) return refused(tool, method, reply.error)
   return {
     title: `${tool}: ${method} ok`,
     output: summary(reply.result),
@@ -41,28 +34,51 @@ export function present(tool: string, method: string, reply: Daemon.DaemonReply,
   }
 }
 
-/** The one failure this surface can produce without reaching the daemon.
- *  Exported for the M1 fixed-point tests, for the same reason as `present`. */
-export function unavailable(method: string, message: string): Tool.ExecuteResult {
-  const remedy = "start or update the GlassPane background service, then call gp_probe_status to see what the engine advertises"
+/**
+ * Render a refusal. The three fields are transcribed from the daemon's own error
+ * frame, which is the only source of them: a surface that re-worded an engine
+ * failure would be answering "why did this not work" with its own guess, and the
+ * remedy the engine attached — the one it knows is executable — would be lost.
+ * Exported for the M1 fixed-point tests, for the same reason as `present`.
+ */
+export function refused(tool: string, method: string, error: Daemon.DaemonError): Tool.ExecuteResult {
   return {
-    title: `gp_${method}: unavailable`,
-    output: `${message}\nremedy: ${remedy}`,
-    metadata: { ok: false, method, code: "GP_E_CAPABILITY_UNAVAILABLE", message, remedy, result: null },
+    title: `${tool}: ${error.code}`,
+    output: `${error.message}\nremedy: ${error.remedy}`,
+    metadata: { ok: false, method, code: error.code, message: error.message, remedy: error.remedy, result: null },
   }
 }
+
+/** The remedy this surface writes for itself, because the engine has not answered
+ *  yet and there is one thing the agent can still do: ask the engine what it
+ *  advertises. */
+const CAPABILITY_REMEDY = "start or update the GlassPane background service, then call gp_probe_status to see what the engine advertises"
 
 /**
  * Refuse a method the running engine has not announced. Reading capabilities from
  * `hello` instead of a hard-coded list is deliberate: the method table grows
  * (`audit_ui` landed after this file was written), and a copied list would let the
  * harness claim support it does not have.
+ *
+ * The two refusals here are not the same claim, and only one of them is ours to
+ * word. When `hello` advertised a list and the capability is not in it, "does not
+ * advertise" is measured. When `hello` itself failed — timed out, found the
+ * daemon's single connection slot taken, came back without a list — nothing has been
+ * established about the method, and the engine already said what is wrong and what
+ * to do about it, so its code, message and remedy go to the model unchanged.
+ * Relabelling a busy engine as `GP_E_CAPABILITY_UNAVAILABLE` told the model the
+ * daemon does not speak this method, and sent the user off to restart a service that
+ * was fine.
  */
-const requireCapability = (method: string, capability: string) =>
-  Effect.map(Daemon.probeCapabilities(), (caps) => {
-    if (!caps) return `the background service did not report capabilities, so ${method} cannot be assumed available`
-    if (caps.capabilities.includes(capability)) return undefined
-    return `engine ${caps.version} does not advertise the "${capability}" capability that ${method} needs`
+export const requireCapability = (tool: string, method: string, capability: string) =>
+  Effect.map(Daemon.probeCapabilities(), (probe): Tool.ExecuteResult | undefined => {
+    if (!probe.ok) return refused(tool, method, probe.error)
+    if (probe.report.capabilities.includes(capability)) return undefined
+    return refused(tool, method, {
+      code: "GP_E_CAPABILITY_UNAVAILABLE",
+      message: `engine ${probe.report.version} does not advertise the "${capability}" capability that ${method} needs`,
+      remedy: CAPABILITY_REMEDY,
+    })
   })
 
 const json = (value: unknown) => JSON.stringify(value, null, 2)
@@ -108,9 +124,9 @@ export const ProbeStatusTool = Tool.define(
           yield* ctx.ask({ permission: "glasspane", patterns: ["probe_status"], always: ["*"], metadata: { reads: "daemon self-report only" } })
           const probe = yield* Daemon.call("probe_status", {}, 8000)
           const caps = yield* Daemon.probeCapabilities()
-          const head = caps
-            ? `engine ${caps.version} / protocol ${caps.protocolVersion}\ncapabilities: ${caps.capabilities.join(", ")}\npermissions: ${json(caps.permissions)}`
-            : "engine self-report unavailable — the payload below is all the daemon gave"
+          const head = caps.ok
+            ? `engine ${caps.report.version} / protocol ${caps.report.protocolVersion}\ncapabilities: ${caps.report.capabilities.join(", ")}\npermissions: ${json(caps.report.permissions)}`
+            : `engine self-report unavailable (${caps.error.code}) — the payload below is all the daemon gave`
           return present("gp_probe_status", "probe_status", probe, (result) => `${head}\n\nprobe_status: ${json(result)}`)
         }),
     }
@@ -131,8 +147,8 @@ export const AttachTool = Tool.define(
       parameters: AttachParams,
       execute: (params: Schema.Schema.Type<typeof AttachParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {
-          const blocked = yield* requireCapability("attach", "observe")
-          if (blocked) return unavailable("attach", blocked)
+          const blocked = yield* requireCapability("gp_attach", "attach", "observe")
+          if (blocked) return blocked
           yield* ctx.ask({ permission: "glasspane", patterns: ["attach"], always: ["*"], metadata: params })
           const reply = yield* Daemon.call("attach", params)
           return present("gp_attach", "attach", reply, (result) => `attached: ${json(result)}`)
@@ -164,8 +180,8 @@ export const ObserveTool = Tool.define(
       parameters: ObserveParams,
       execute: (params: Schema.Schema.Type<typeof ObserveParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {
-          const blocked = yield* requireCapability("observe", "observe")
-          if (blocked) return unavailable("observe", blocked)
+          const blocked = yield* requireCapability("gp_observe", "observe", "observe")
+          if (blocked) return blocked
           yield* ctx.ask({ permission: "glasspane", patterns: ["observe"], always: ["*"], metadata: params })
           const body: Record<string, unknown> = {}
           if (params.maxDepth !== undefined) body.maxDepth = params.maxDepth
@@ -203,8 +219,8 @@ export const ActTool = Tool.define(
       parameters: ActParams,
       execute: (params: Schema.Schema.Type<typeof ActParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {
-          const blocked = yield* requireCapability("act", "act")
-          if (blocked) return unavailable("act", blocked)
+          const blocked = yield* requireCapability("gp_act", "act", "act")
+          if (blocked) return blocked
           yield* ctx.ask({
             permission: "glasspane",
             patterns: [`act:${params.selector.role}:${params.action}`],
