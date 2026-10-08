@@ -137,12 +137,9 @@ export function check() {
   let external = 0
   for (const doc of present) {
     const text = read(doc)
-    const codeFences = new Set()
-    let inFence = false
-    text.split('\n').forEach((line, i) => {
-      if (/^\s*(```|~~~)/.test(line)) inFence = !inFence
-      if (inFence) codeFences.add(i)
-    })
+    // 代码块里的相对路径**照旧检查**。从前这里算过一个 `codeFences` 集合，算完没人
+    // 读——一个"声称豁免、其实没豁免"的计算比没有更坏，因为它让下一个人以为围栏内
+    // 是安全的。安装片段里抄错的路径也是抄错的路径。
     for (const m of text.matchAll(/\[[^\]]*\]\(\s*([^)\s]+)\s*\)/g)) {
       const url = m[1]
       if (url.startsWith('mailto:')) continue
