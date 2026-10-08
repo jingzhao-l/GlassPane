@@ -52,20 +52,23 @@ async function publish(dir: string, name: string, version: string) {
   // GitHub artifact downloads can drop the executable bit, and Docker uses the
   // unpacked dist binaries directly rather than the published tarball.
   if (process.platform !== "win32") await $`chmod -R 755 .`.cwd(dir)
+  if (dryRun) await $`bun pm pack --dry-run`.cwd(dir)
+  // These assertions gate the live path too. They used to sit inside the `dryRun`
+  // branch, so the run that actually published checked nothing, while the comment on
+  // `validateTarball` promised they were "checked before it can be published".
+  const problems = await validateTarball(dir, name, version)
+  if (problems.length) {
+    console.error(`  ✗ ${name}@${version} ${dryRun ? "would publish" : "will not publish"} with problems:`)
+    for (const p of problems) console.error(`      - ${p}`)
+    process.exitCode = 1
+    return
+  }
   if (dryRun) {
-    await $`bun pm pack --dry-run`.cwd(dir)
-    const problems = await validateTarball(dir, name, version)
-    if (problems.length) {
-      console.error(`  ✗ ${name}@${version} would publish with problems:`)
-      for (const p of problems) console.error(`      - ${p}`)
-      process.exitCode = 1
-    } else {
-      console.log(`  ok ${name}@${version} packs cleanly (not published: --dry-run)`)
-    }
+    console.log(`  ok ${name}@${version} packs cleanly (not published: --dry-run)`)
     return
   }
   if (await published(name, version)) {
-    console.log(`already published ${name}@${version}`)
+    console.log(`  already published ${name}@${version} — this call published nothing`)
     return
   }
   await $`bun pm pack`.cwd(dir)
@@ -88,8 +91,11 @@ async function writePlatformReadme(dir: string, name: string) {
     `npm install -g ${pkg.name}`,
     "```",
     "",
-    `The wrapper resolves the right platform package for the machine, verifies it and places the`,
-    `binary on your PATH. See ${product.repoUrl}#readme for the product README, docs and the`,
+    `The wrapper resolves the right platform package for the machine and places the binary on`,
+    `your PATH. The bytes themselves are vouched for by npm's registry integrity (the tarball`,
+    `is fetched against its recorded sha512); the install step then runs \`--version\` to confirm`,
+    `the binary it placed actually starts, and nothing further is verified on this channel. See`,
+    `${product.repoUrl}#readme for the product README, docs and the`,
     "macOS permission setup.",
     "",
   ].join("\n")

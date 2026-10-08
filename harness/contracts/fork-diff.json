@@ -2,7 +2,7 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-10-06",
+  "observedAt": "2026-10-08",
   "counts": {
     "identical": 4669,
     "edited": 258,
@@ -2701,7 +2701,7 @@
     {
       "file": "packages/opencode/script/publish.ts",
       "upstreamHash": "ac1cafff56f46e9611a9ff78aa05217d21a907ef",
-      "forkHash": "5a53a4bbf48d0529c2f7096575897986c4c30b09"
+      "forkHash": "2e4da22b067cdd0b4093dcd82bc328fb4bc1e715"
     },
     {
       "file": "packages/opencode/src/acp/service.ts",
@@ -3381,7 +3381,7 @@
     {
       "file": "SECURITY.md",
       "upstreamHash": "e7e59f4a27ac2bd2ed5005f8851dcb946c08f914",
-      "forkHash": "1d92d4ba1f689bbe745a1b191e46e807db6dfe61"
+      "forkHash": "ba310882a45d62719d21c228e06dda9fd054c4ea"
     }
   ]
 }

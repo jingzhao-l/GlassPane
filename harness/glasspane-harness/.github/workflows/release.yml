@@ -52,7 +52,7 @@ permissions:
 jobs:
   version-check:
     name: tag matches the product version
-    if: github.event_name == 'push'
+    if: success() && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -68,7 +68,7 @@ jobs:
 
   create-release:
     name: create the GitHub release for this tag
-    if: github.event_name == 'push'
+    if: success() && github.event_name == 'push'
     needs: version-check
     runs-on: ubuntu-latest
     permissions:
@@ -89,13 +89,20 @@ jobs:
             echo "release ${GITHUB_REF_NAME} already exists — leaving it as it is"
             exit 0
           fi
+          # `--target` names the commit the release is *of*. Without it GitHub records
+          # the default branch, and the branch head moves: v0.6.4's release came out
+          # with targetCommitish = "main" while the assets were built from the tag's
+          # commit, so the release's own metadata pointed at bytes nobody shipped.
+          # An idempotent re-run (the branch above) will not repair an old release that
+          # was created without this — it needs `gh release edit --target`.
           gh release create "${GITHUB_REF_NAME}" --repo "$GH_REPO" \
+            --target "$GITHUB_SHA" \
             --title "glasspane-harness ${GITHUB_REF_NAME}" --generate-notes
           echo "created release ${GITHUB_REF_NAME}"
 
   binaries:
     name: binary ${{ matrix.target }}
-    if: github.event_name == 'push'
+    if: success() && github.event_name == 'push'
     needs: [version-check, create-release]
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -153,7 +160,7 @@ jobs:
 
   checksums:
     name: SHA256SUMS for the release assets
-    if: github.event_name == 'push'
+    if: success() && github.event_name == 'push'
     needs: binaries
     runs-on: ubuntu-latest
     # The signing secrets are environment-scoped, so this job has to declare the
@@ -171,8 +178,27 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # Read the target matrix before descending into assets/, so this is the repo
+          # root's product.json and not a path guessed from a child directory.
+          wanted="$(node -e 'const p=require("./product.json");for(const t of p.platformTargets)console.log(`${p.name}-${t.os}-${t.arch}${t.abi?"-"+t.abi:""}`)')"
           mkdir -p assets && cd assets
-          gh release download --repo "$GH_REPO" --pattern '*.zip' --pattern '*.tar.gz' || true
+          gh release download --repo "$GH_REPO" --pattern '*.zip' --pattern '*.tar.gz'
+          # A dropped or partial download used to be tolerated (`|| true`) as long as
+          # *something* arrived, and SHA256SUMS.txt then vouched authoritatively for only
+          # the assets that happened to be present — a release could ship one platform and
+          # a manifest that looked complete. Coverage is asserted against product.json's
+          # own target matrix, so the manifest cannot be narrower than the product.
+          # Note what this step still does not prove: the sums are computed from the bytes
+          # GitHub serves, so they certify what is stored, not that the build step put it
+          # there. Closing that needs the sums taken from the build's own artifacts.
+          missing=""
+          for name in $wanted; do
+            ls "$name".* >/dev/null 2>&1 || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::release asset(s) missing, refusing to write a manifest over an incomplete release:$missing"
+            exit 1
+          fi
           if [ -z "$(ls -A)" ]; then echo "::error::no release assets found to checksum"; exit 1; fi
           sha256sum ./* > SHA256SUMS.txt
           cat SHA256SUMS.txt
@@ -264,7 +290,14 @@ jobs:
         run: bun install
 
       - name: Upgrade npm (staged publishing needs >= 11.15)
-        run: npm install -g npm@latest
+        # `npm@latest` on the machine holding the OIDC token is third-party code pulled
+        # without a pin, minutes before an irreversible publish. It is not pinned here yet
+        # because the version that actually published 0.7.0 is not recoverable from that
+        # run's log, and swapping an untested npm into the publish step is its own risk.
+        # Printing the version makes the next pin an evidenced choice instead of a guess.
+        run: |
+          npm install -g npm@latest
+          echo "npm in this publish lane: $(npm --version)"
 
       - name: Build this platform
         # `build` lives in packages/opencode; the workspace-root package.json has
@@ -292,15 +325,34 @@ jobs:
           ver="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).version" "$PRODUCT_JSON")"
           echo "publishing $pkg@$ver"
           cd "dist/$pkg"
-          npm publish --provenance --access public || {
-            echo "::notice::direct publish refused (staged-only trusted publisher) — staging instead"
-            npm stage publish . --provenance
-            echo "::notice::owner approves with: npm stage approve <stage-id> (ids: npm stage list)"
-          }
+          # The fallback used to be an unconditional `||`: E401, E404, a registry 5xx,
+          # a tarball problem and the E409 duplicate-version shape that burned 0.5.0 all
+          # took the same branch and printed a notice naming a cause that was not true —
+          # then, if `npm stage publish` returned 0, the job went green having published
+          # nothing. Staging is for one situation only: the registry refusing a *direct*
+          # publish because the package is configured for staged/trusted publishing.
+          # Anything else is a failure, and it has to stay a failure.
+          log="$(mktemp)"
+          rc=0
+          npm publish --provenance --access public >"$log" 2>&1 || rc=$?
+          cat "$log"
+          if [ "$rc" -ne 0 ]; then
+            if grep -qiE "staged publishing|only allowed through (the )?oidc|trusted publisher|publishing directly is not allowed" "$log"; then
+              echo "::notice::the registry refused a direct publish for $pkg@$ver — staging instead"
+              npm stage publish . --provenance
+              echo "::notice::owner approves with: npm stage approve <stage-id> (ids: npm stage list)"
+              echo "STAGED, NOT PUBLISHED: $pkg@$ver is waiting for owner approval."
+            else
+              echo "::error::$pkg@$ver failed to publish (exit $rc) and nothing in the output says the registry refused a direct publish — not staging blindly"
+              rm -f "$log"
+              exit "$rc"
+            fi
+          fi
+          rm -f "$log"
 
   publish-wrapper:
     name: npm glasspane-harness (wrapper)
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
+    if: success() && github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
     needs: publish-platform
     runs-on: ubuntu-latest
     environment: release
@@ -316,19 +368,43 @@ jobs:
         run: bun install
 
       - name: Upgrade npm (staged publishing needs >= 11.15)
-        run: npm install -g npm@latest
+        # `npm@latest` on the machine holding the OIDC token is third-party code pulled
+        # without a pin, minutes before an irreversible publish. It is not pinned here yet
+        # because the version that actually published 0.7.0 is not recoverable from that
+        # run's log, and swapping an untested npm into the publish step is its own risk.
+        # Printing the version makes the next pin an evidenced choice instead of a guess.
+        run: |
+          npm install -g npm@latest
+          echo "npm in this publish lane: $(npm --version)"
 
       - name: Assemble and publish the wrapper (optionalDependencies come from product.json)
         working-directory: packages/opencode
         shell: bash
         run: |
           set -euo pipefail
-          if ! bun run script/publish.ts --wrapper-only; then
-            echo "::notice::direct publish refused (staged-only trusted publisher) — staging instead"
-            cd dist/glasspane-harness
-            npm stage publish . --provenance
-            echo "::notice::owner approves with: npm stage approve <stage-id> (ids: npm stage list)"
+          # Same rule as the platform lane, and it matters more here: `publish.ts` exits
+          # non-zero for two very different reasons — the tarball failed its shape checks,
+          # or the registry refused a direct publish. The old `if !` could not tell them
+          # apart and staged the package in both cases, which would publish bytes that
+          # this very pipeline just refused. Only the registry refusal may stage.
+          log="$(mktemp)"
+          rc=0
+          bun run script/publish.ts --wrapper-only >"$log" 2>&1 || rc=$?
+          cat "$log"
+          if [ "$rc" -ne 0 ]; then
+            if grep -qiE "staged publishing|only allowed through (the )?oidc|trusted publisher|publishing directly is not allowed" "$log"; then
+              echo "::notice::the registry refused a direct publish of the wrapper — staging instead"
+              cd dist/glasspane-harness
+              npm stage publish . --provenance
+              echo "::notice::owner approves with: npm stage approve <stage-id> (ids: npm stage list)"
+              echo "STAGED, NOT PUBLISHED: the wrapper is waiting for owner approval."
+            else
+              echo "::error::the wrapper lane failed (exit $rc) without a registry refusal — nothing was published or staged"
+              rm -f "$log"
+              exit "$rc"
+            fi
           fi
+          rm -f "$log"
 
   # Does the npm trusted publisher actually work? Proved, not assumed.
   #
@@ -355,7 +431,14 @@ jobs:
         run: bun install
 
       - name: Upgrade npm (staged publishing needs >= 11.15)
-        run: npm install -g npm@latest
+        # `npm@latest` on the machine holding the OIDC token is third-party code pulled
+        # without a pin, minutes before an irreversible publish. It is not pinned here yet
+        # because the version that actually published 0.7.0 is not recoverable from that
+        # run's log, and swapping an untested npm into the publish step is its own risk.
+        # Printing the version makes the next pin an evidenced choice instead of a guess.
+        run: |
+          npm install -g npm@latest
+          echo "npm in this publish lane: $(npm --version)"
 
       - name: Stage the wrapper through OIDC, then reject it
         working-directory: packages/opencode
