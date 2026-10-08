@@ -107,49 +107,35 @@ const surfaceALoc = [...surfaceAByFile.values()].reduce((s, n) => s + n, 0)
  * the 17.78% happened in the first place.
  */
 /**
- * Provenance of the vendored kernel inside the fork. Vendored third-party source
- * is a **dependency**, so its lines do not count as our tool surface — but only
- * while `harness/contracts/kernel-vendor.json` declares each file. A file that
- * lives under the vendor directory without being declared is counted as ours, so
- * "the fork grew its own kernel file" cannot hide behind this exclusion.
+ * The kernel is a **dependency** now (`iterate-kernel`, resolved through the fork's
+ * lockfile and pinned by `contracts/kernel-pin.json`), so there are no vendored kernel
+ * lines left to exclude from surface B. This function used to read the vendor manifest
+ * and drop those files from our authorship count.
+ *
+ * The failure mode inverted, and the guard moved with it: kernel source re-appearing
+ * under `packages/opencode/vendor/kernel` would now drop several thousand dependency
+ * lines into *our* surface with nothing left to exclude them. `measureFork` refuses that
+ * tree outright. A missing pin manifest is likewise not silent: the dependency then
+ * cannot be attributed, and the tool says so instead of printing a number.
  */
-function readVendorExclusion(forkRel) {
-  // The kernel-vendor manifest lives with the product it describes, i.e. inside the
-  // fork subtree — it is what the subtree split carries, and `kernel-vendor.mjs`
-  // reads the same file from there. This function used to look for it at
-  // `harness/contracts/kernel-vendor.json`, which does not exist; the `existsSync`
-  // guard below therefore returned `prefix: null, declared: empty` and the vendored
-  // kernel was silently counted as our own surface B. It surfaced the moment a new
-  // vendored file appeared (`vendor/kernel/src/errors.ts`, +5 LOC) — the exclusion
-  // had been dead the whole time and nothing had disturbed the total enough to be
-  // worth re-reading it.
-  //
-  // Both locations are accepted so a moved manifest cannot silently disable the
-  // exclusion again: the one inside the fork wins, because that is the copy that
-  // travels with the product.
+function readKernelDependency() {
   const candidates = [
-    path.join(repoRoot, "harness", "glasspane-harness", "contracts", "kernel-vendor.json"),
-    path.join(repoRoot, "harness", "contracts", "kernel-vendor.json"),
+    path.join(repoRoot, "harness", "glasspane-harness", "contracts", "kernel-pin.json"),
+    path.join(repoRoot, "harness", "contracts", "kernel-pin.json"),
   ]
   const manifestFile = candidates.find((f) => existsSync(f))
   if (!manifestFile) {
-    // Say so out loud. A silently absent exclusion is exactly the failure mode
-    // this comment exists to prevent, and this tool's own header argues for
-    // printing exclusions so a caliber change cannot go unnoticed.
-    console.error("tool-surface: no kernel-vendor manifest found — vendored kernel lines WILL be counted as our surface B")
-    return { prefix: null, declared: new Set() }
+    console.error(
+      "tool-surface: no contracts/kernel-pin.json — the kernel dependency cannot be attributed; run script/kernel-pin.mjs --record",
+    )
+    return null
   }
   const manifest = JSON.parse(readFileSync(manifestFile, "utf8"))
-  const forkPath = manifest?.forkPath
-  if (typeof forkPath !== "string" || !Array.isArray(manifest?.files)) {
-    return { prefix: null, declared: new Set() }
+  if (manifest?.package !== "iterate-kernel" || typeof manifest?.version !== "string") {
+    console.error("tool-surface: contracts/kernel-pin.json does not describe an iterate-kernel pin")
+    return null
   }
-  // The manifest stores repo-relative paths; fork-diff lists fork-relative ones.
-  // Compare in one space, not two — that mismatch alone would silently disable
-  // the exclusion and start counting vendored lines as our own.
-  const relTo = forkPath.startsWith(`${forkRel}/`) ? forkPath.slice(forkRel.length + 1) : forkPath
-  const prefix = relTo.endsWith("/") ? relTo : `${relTo}/`
-  return { prefix, declared: new Set(manifest.files.map((f) => `${prefix}${f.file}`)) }
+  return manifest
 }
 
 function measureFork(golden) {
@@ -164,7 +150,14 @@ function measureFork(golden) {
   if (!existsSync(forkDir)) return fail(`fork tree not found at ${forkRel}`)
   const refDir = path.join(repoRoot, refRel)
   const hasRef = existsSync(path.join(refDir, ".git"))
-  const vendor = { ...readVendorExclusion(forkRel), excluded: [] }
+  const kernel = readKernelDependency()
+  // Vendored kernel source must not come back: the exclusion that used to keep its
+  // lines out of our authorship count is gone by design.
+  if (existsSync(path.join(forkDir, "packages", "opencode", "vendor", "kernel"))) {
+    return fail(
+      "packages/opencode/vendor/kernel exists again — the kernel ships as the iterate-kernel dependency; delete the tree or re-record the pin with a documented reason",
+    )
+  }
 
   // Surface A is measured as `mcp-shell/src`, tests excluded. Counting B's tests
   // would compare two different things, so test files are excluded here too —
@@ -180,15 +173,10 @@ function measureFork(golden) {
     if (!REF_EXTS.includes(path.extname(rel))) continue
     const abs = path.join(forkDir, rel)
     if (!existsSync(abs)) return fail(`fork-diff says '${rel}' is ours but it is not in the tree`)
-    if (vendor.declared.has(rel)) {
-      vendor.excluded.push({ file: rel, lines: loc(abs) })
-      continue
-    }
     if (isTest(rel)) {
       excludedTests.push({ file: rel, lines: loc(abs) })
       continue
     }
-    const undeclared = vendor.prefix !== null && rel.startsWith(vendor.prefix)
     // A pure rename is not authorship. When a file is relocated (upstream's
     // `.opencode/plugins/x.tsx` becoming `.glasspane-harness/plugins/x.tsx` in the
     // private-isation) the diff sees delete + add, and the whole upstream file would
@@ -203,7 +191,7 @@ function measureFork(golden) {
       renamed.push({ file: rel, lines: loc(abs) })
       continue
     }
-    files.push({ file: rel, kind: undeclared ? "undeclared-vendor" : "added", lines: loc(abs) })
+    files.push({ file: rel, kind: "added", lines: loc(abs) })
   }
 
   const prevEdited = new Map((golden?.surfaces?.fork?.files ?? []).filter((f) => f.kind === "edited").map((f) => [f.file, f.lines]))
@@ -247,7 +235,7 @@ function measureFork(golden) {
   // zero, so refuse instead: `(^|\/test\/)` once matched the empty string at
   // position 0 and classified every single file as a test, which reported
   // surface B as 14 LOC and looked like a plausible number.
-  const codeish = (fd.added ?? []).filter((rel) => REF_EXTS.includes(path.extname(rel)) && !vendor.declared.has(rel))
+  const codeish = (fd.added ?? []).filter((rel) => REF_EXTS.includes(path.extname(rel)))
   if (codeish.length > 0 && files.length === 0) {
     return fail(`${codeish.length} fork file(s) are ours to measure but every one was excluded — the exclusion rules are wrong, not the surface empty`)
   }
@@ -265,7 +253,7 @@ function measureFork(golden) {
   const carried = carriedParts.length
     ? `reference clone absent (${refRel}): ${carriedParts.join("; ")} — NOT re-measured`
     : null
-  return { files, carried, note: null, excluded: vendor.excluded, tests: excludedTests }
+  return { files, carried, note: null, excluded: [], tests: excludedTests, kernel }
 }
 
 const fail = (note) => ({ files: [], carried: null, note, excluded: [], tests: [] })
@@ -396,6 +384,7 @@ function build(golden) {
         ratio: ratio(forkLoc),
         vendorExcluded: vendorSummary(fork.excluded),
         testsExcluded: vendorSummary(fork.tests),
+        kernel: fork.kernel ? { package: fork.kernel.package, version: fork.kernel.version } : null,
       },
     },
     totalToolSurfaceLoc: surfaceALoc + forkLoc,
@@ -420,7 +409,12 @@ if (observed.surfaces.fork.testsExcluded.files > 0) {
   console.log(`  tests excluded from surface B (surface A is measured as src/ only): ${observed.surfaces.fork.testsExcluded.files} files, ${observed.surfaces.fork.testsExcluded.lines} lines — counted out loud so the caliber can be audited`)
 }
 if (observed.surfaces.fork.vendorExcluded.files > 0) {
-  console.log(`  vendored dependency excluded from surface B per harness/contracts/kernel-vendor.json: ${observed.surfaces.fork.vendorExcluded.files} files, ${observed.surfaces.fork.vendorExcluded.lines} lines (not our surface; kernel-vendor.mjs owns their integrity)`)
+  console.log(`  vendored dependency excluded from surface B: ${observed.surfaces.fork.vendorExcluded.files} files, ${observed.surfaces.fork.vendorExcluded.lines} lines (not our surface)`)
+}
+if (observed.surfaces.fork.kernel) {
+  console.log(
+    `  kernel is a dependency, not our surface: ${observed.surfaces.fork.kernel.package}@${observed.surfaces.fork.kernel.version} (integrity and contract corpus pinned in contracts/kernel-pin.json; the vendored-source exclusion was retired with vendor/kernel)`,
+  )
 }
 if (observed.carried) console.log(`  note: ${observed.carried}`)
 if (observed.note) console.log(`  note: ${observed.note}`)

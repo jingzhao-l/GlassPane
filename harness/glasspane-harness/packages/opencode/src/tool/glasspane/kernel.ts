@@ -1,15 +1,16 @@
 /**
- * kernel.ts — the fork's only doorway to `@iterate/kernel` (M3), plus the
+ * kernel.ts — the fork's only doorway to `iterate-kernel` (M3), plus the
  * decision-ledger plumbing the evidence plugin builds on (M2).
  *
- * WHY ONE FILE. The recorded release policy for the kernel is "not published
- * separately; consumers inline it" (P6 §13, and P4 §33.2 defers registry
- * publishing to the iterate monorepo's own rhythm). So the bytes live in
- * `packages/opencode/vendor/kernel`, pinned by
- * `harness/contracts/kernel-vendor.json` and checked by
- * `harness/glasspane-harness/script/kernel-vendor.mjs`. Everything that touches them goes through
- * this module, so the day the package is published, switching to a semver
- * dependency is one import line here and nothing else.
+ * WHY ONE FILE. Everything that touches the shared kernel goes through this module,
+ * so the kernel's delivery form is somebody else's decision. It used to be vendored
+ * source under `packages/opencode/vendor/kernel`, pinned per file by
+ * `script/kernel-vendor.mjs`, because the recorded release policy was "not published
+ * separately; consumers inline it" (P6 §13, P4 §33.2). That policy was reversed on the
+ * iterate side: the kernel is `iterate-kernel` on npm, and this file now resolves it as
+ * a semver dependency (`0.1.2`, pinned by `contracts/kernel-pin.json`). The switch was
+ * one import line here — which is the claim this comment used to make as a hope and can
+ * now make as a fact.
  *
  * WHAT THIS MODULE MAY NOT DO. It transcribes; it never judges. The outcome and
  * the summary it reports come from `decisionOutcomeFromEvidence` /
@@ -30,20 +31,20 @@ import path from "node:path"
 
 import { Global } from "@opencode-ai/core/global"
 
-// Per-module imports, NOT the kernel's `index.js` barrel — and that is a
-// product requirement, not a style choice. The barrel re-exports `schemas.ts`,
-// which loads the three JSON Schemas at module init through
-// `createRequire(import.meta.url)("../schemas/….json")`: a *runtime file read*
-// next to the module. That works from source (E8, the fixed points) and cannot
-// work in the single-file binary the release ships — the product died at startup
-// with `Cannot find module '../schemas/evidence-pack.schema.json'`, found by
-// script/build.ts's own smoke test. Every export we use below lives in its own
-// module; `schemas.ts` is only reachable through the barrel, and we use none of
-// its exports. The mirror stays untouched (kernel-vendor.mjs stays green), and
-// `tool/glasspane-kernel.test.ts` pins that the barrel import never comes back.
-import { KernelSchemaError } from "../../../vendor/kernel/src/errors.js"
-import type { EvidencePack } from "../../../vendor/kernel/src/evidence-pack.js"
-import { decisionOutcomeFromEvidence, decisionSummaryFromEvidence } from "../../../vendor/kernel/src/evidence-decision.js"
+// Per-module imports, NOT the kernel's `index` barrel — and that is a product
+// requirement, not a style choice. The barrel re-exports `schemas`, which loads the
+// three JSON Schemas at module init through `createRequire(import.meta.url)`: a
+// *runtime file read* next to the module. That works from a directory install and
+// cannot work in the single-file binary the release ships — the product died at
+// startup with `Cannot find module '../schemas/evidence-pack.schema.json'`, found by
+// script/build.ts's own smoke test. Every export used below lives in its own subpath
+// export (`iterate-kernel/parse` and friends), and `schemas` is reachable only through
+// the barrel, which we do not import. `test/tool/glasspane-kernel.test.ts` pins that
+// this import shape stays this way; `script/kernel-pin.mjs` pins the version and the
+// contract corpus we resolve against.
+import { KernelSchemaError } from "iterate-kernel/errors"
+import type { EvidencePack } from "iterate-kernel/evidence-pack"
+import { decisionOutcomeFromEvidence, decisionSummaryFromEvidence } from "iterate-kernel/evidence-decision"
 import {
   appendDecisionLogEntry,
   decisionLogEntryHash,
@@ -51,15 +52,15 @@ import {
   readDecisionLog,
   verifyDecisionLogText,
   KernelDecisionLogError,
-} from "../../../vendor/kernel/src/decision-log.js"
-import type { DecisionLogEntry, DecisionOutcome } from "../../../vendor/kernel/src/decision-log-entry.js"
-import { parseEvidencePackRead } from "../../../vendor/kernel/src/parse.js"
-import { dimensionContext, formatDimensionContext } from "../../../vendor/kernel/src/dimension-context.js"
+} from "iterate-kernel/decision-log"
+import type { DecisionLogEntry, DecisionOutcome } from "iterate-kernel/decision-log-entry"
+import { parseEvidencePackRead } from "iterate-kernel/parse"
+import { dimensionContext, formatDimensionContext } from "iterate-kernel/dimension-context"
 import type {
   DimensionContext,
   DimensionContextInput,
   DimensionStatus,
-} from "../../../vendor/kernel/src/dimension-context.js"
+} from "iterate-kernel/dimension-context"
 
 export type { DecisionLogEntry, DecisionOutcome, EvidencePack }
 export type { DimensionContext, DimensionContextInput, DimensionStatus }
@@ -290,6 +291,6 @@ export function verifyLedger(ledgerPath: string): { ok: boolean; entries: number
   }
 }
 
-/** Re-exported so a consumer can prove a chain link without importing the vendor directly. */
+/** Re-exported so a consumer can prove a chain link without importing the kernel package directly. */
 export const entryHashOf = decisionLogEntryHash
 export const verifyLedgerText = verifyDecisionLogText

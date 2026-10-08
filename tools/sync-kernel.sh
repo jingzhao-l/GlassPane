@@ -56,7 +56,19 @@ for arg in "$@"; do
     --dry-run) dry_run=1 ;;
     --allow-deletions) allow_deletions=1 ;;
     --target=repo) target=repo ;;
-    --target=fork) target=fork ;;
+    --target=fork)
+      # The fork no longer vendors the kernel: it resolves the `iterate-kernel`
+      # dependency through its own lockfile. Provenance there is recorded and checked
+      # by harness/glasspane-harness/script/kernel-pin.mjs (--record / --check), and
+      # behaviour parity by script/kernel-conformance.mjs. Copying bytes into
+      # packages/opencode/vendor/kernel would recreate the third copy of the contract
+      # that this retirement was meant to remove — so this leg refuses instead of
+      # half-working. `--target=repo` (the mcp-shell mirror) is unaffected.
+      echo "error: --target=fork is retired. The fork consumes iterate-kernel as a dependency;" >&2
+      echo "       bump the dependency line in packages/opencode/package.json, run \`bun install\`," >&2
+      echo "       then: node harness/glasspane-harness/script/kernel-pin.mjs --record" >&2
+      echo "        and: bun harness/glasspane-harness/script/kernel-conformance.mjs --impl <canonical kernel checkout>" >&2
+      exit 2 ;;
     --target=*) echo "error: unknown --target value '${arg#--target=}' (supported: repo, fork)" >&2; exit 2 ;;
     *) echo "error: unknown argument '$arg' (supported: --target=repo|fork, --dry-run, --allow-deletions)" >&2; exit 2 ;;
   esac

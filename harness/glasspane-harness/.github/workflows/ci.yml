@@ -60,16 +60,17 @@ jobs:
         working-directory: packages/opencode
         run: bun run script/publish.ts --dry-run
 
-      # 出处：随包发出的 vendored 内核，以及镜像下来的契约 fixtures，都必须还是
-      # kernel-vendor.json 里记下的那些字节。改了任何一个而不重录，就是"我们悄悄
-      # 改了自己的语义内核"。
-      - name: Kernel provenance (vendored bytes + mirrored fixtures)
-        run: node script/kernel-vendor.mjs --check
+      # 出处：装进来的 iterate-kernel 必须还是 kernel-pin.json 记下的那个版本、那条
+      # lock 完整性、以及那 14 个契约文件（11 fixtures + 3 schemas）。语义内核换了字
+      # 节而不重录，就是"我们悄悄改了共享契约"。vendored 那棵树已经退役——内核现在是
+      # 依赖，不是我们抄进仓里的源码。
+      - name: Kernel provenance (installed version + lock integrity + shipped corpus)
+        run: node script/kernel-pin.mjs --check
 
-      # 行为：把 fixtures 跑过**我们随包发出的那份源码**。哈希只证明字节没变；这条
-      # 证明我们依赖的那些答案还是那些答案。将来若把 vendored 换成 npm 依赖，加
-      # --impl <已安装的包目录> 就是那条证明"换的只是分发方式"的证据。
-      - name: Kernel conformance (mirrored fixtures through the shipped kernel)
+      # 行为：把随包发出的 fixtures 跑过**装进来的那份内核**。哈希只证明字节没变；这条
+      # 证明我们依赖的那些答案还是那些答案。要证明"换的只是分发方式"，本地加
+      # --impl <canonical kernel checkout> 跑一次即可（两条 zod major 同答案是实测过的）。
+      - name: Kernel conformance (shipped corpus through the installed kernel)
         run: bun script/kernel-conformance.mjs
 
       - name: Product manifest agrees with the package it ships

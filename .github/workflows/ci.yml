@@ -240,8 +240,8 @@ jobs:
       - name: Extension points are still live at the pinned upstream tag
         run: node harness/tools/hook-liveness.mjs --check
 
-      - name: Vendored kernel still matches its provenance manifest
-        run: node harness/glasspane-harness/script/kernel-vendor.mjs --check
+      - name: The kernel dependency still matches its provenance manifest
+        run: node harness/glasspane-harness/script/kernel-pin.mjs --check
 
   # 工作流可编译性守卫。GitHub 拒绝解析的工作流不产生任何 job 日志：它在解析期整体
   # 作废，之后每次触发只留下一个 0 步、名为文件路径的红色 run。c3797d4 用

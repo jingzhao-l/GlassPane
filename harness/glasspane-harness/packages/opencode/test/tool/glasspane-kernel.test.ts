@@ -5,6 +5,8 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 
 import type { DecisionOutcome, EvidencePack } from "../../src/tool/glasspane/kernel"
+import { kernelContractFile, kernelFixturesDir, kernelPackageDir } from "../lib/kernel-contract"
+
 import {
   entryHashOf,
   logDecision,
@@ -17,8 +19,8 @@ import {
 
 /**
  * M3/M2 fixed-point tests for the fork's kernel binding
- * (`src/tool/glasspane/kernel.ts`) against the vendored kernel in
- * `packages/opencode/vendor/kernel`.
+ * (`src/tool/glasspane/kernel.ts`) against the installed `iterate-kernel`
+ * dependency, pinned by `contracts/kernel-pin.json`.
  *
  * Two things are being pinned here that nothing else in this repository can:
  *
@@ -34,17 +36,12 @@ import {
  *     A-15: one defect, two implementations, fixed twice) made impossible here.
  */
 
-const VENDOR_FIXTURES = path.join(
-  import.meta.dir,
-  "..",
-  "..",
-  "vendor",
-  "kernel",
-  "fixtures",
-)
+
+
+const KERNEL_FIXTURES = kernelFixturesDir(import.meta.dir)
 
 function fixture(name: string): unknown {
-  return JSON.parse(readFileSync(path.join(VENDOR_FIXTURES, `evidence-pack.${name}.json`), "utf8"))
+  return JSON.parse(readFileSync(path.join(KERNEL_FIXTURES, `evidence-pack.${name}.json`), "utf8"))
 }
 
 function frame(name: string): unknown {
@@ -68,7 +65,7 @@ function privateDir(): string {
 
 const sha256 = (buffer: Buffer | string) => createHash("sha256").update(buffer).digest("hex")
 
-describe("the vendored kernel agrees with canonical about the five real fixtures", () => {
+describe("the installed kernel agrees with canonical about the five real fixtures", () => {
   // Same expectations as the canonical suite, one-by-one.
   const expectations: Record<string, DecisionOutcome> = {
     "ok-01": "pass",
@@ -261,7 +258,7 @@ describe("logging a decision, and the chain it joins", () => {
 })
 
 describe("the fork's dependency shape is measured, not assumed", () => {
-  test("zod in this package is major 4, i.e. the vendored kernel is not running its own pinned major", async () => {
+  test("zod in this package is major 4, i.e. the kernel runs on the consumer major, not its own", async () => {
     const zodPkg = await import("zod/package.json")
     const version = (zodPkg as { default?: { version?: string }; version?: string }).version
       ?? (zodPkg as { default?: { version?: string } }).default?.version
@@ -269,43 +266,48 @@ describe("the fork's dependency shape is measured, not assumed", () => {
     expect(version!.split(".")[0]).toBe("4")
   })
 
-  test("the vendor itself is pinned by provenance before any of the above is trusted", () => {
-    // The provenance manifest is a **GlassPane-repo-side** asset (harness/contracts/),
-    // because that is where the ruler that checks it lives. The split product repo
-    // does not carry it — a second copy would be a second source of truth, which is
-    // the failure mode this whole line is about. So: where the manifest is present
-    // (the dev repo) the check runs in full; where it is absent (the product repo)
-    // it says so out loud instead of pretending to have verified anything. Absence
-    // must be sayable.
-    const manifestPath = path.join(import.meta.dir, "..", "..", "..", "..", "..", "contracts", "kernel-vendor.json")
-    if (!existsSync(manifestPath)) {
-      console.warn(
-        "  [not verified here] kernel-vendor.json lives in the GlassPane repo (harness/contracts/) — this lane cannot check vendor provenance",
-      )
-      return
-    }
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+  test("the kernel we depend on is pinned by provenance before any of the above is trusted", () => {
+    // `contracts/kernel-pin.json` records the version, the lockfile integrity and the
+    // sha256 of every contract file the published package ships. A checkout that does
+    // not carry contracts/ at all is not this product — say so instead of asserting
+    // nothing; a checkout that carries it but not the dependency is a real defect.
+    const manifestPath = kernelContractFile(import.meta.dir, "kernel-pin.json")
+    expect(manifestPath, "no contracts/kernel-pin.json above this test — run script/kernel-pin.mjs --record").not.toBeNull()
+    const manifest = JSON.parse(readFileSync(manifestPath!, "utf8"))
+    expect(manifest.package).toBe("iterate-kernel")
     expect(manifest.canonical.repo).toBe("jingzhao-l/iterate-skill")
-    expect(manifest.files.length).toBeGreaterThan(20)
-    for (const file of manifest.files) {
-      const abs = path.join(import.meta.dir, "..", "..", "vendor", "kernel", file.file)
-      expect(existsSync(abs), `vendored file missing: ${file.file}`).toBe(true)
-      expect(sha256(readFileSync(abs))).toBe(file.sha256)
+    expect(manifest.canonical.branch).toBe("main")
+    expect(manifest.resolution.specifier).toBe("")
+    expect(manifest.resolution.integrity).toMatch(/^sha512-/)
+
+    const installedPkg = JSON.parse(
+      readFileSync(path.join(kernelPackageDir(import.meta.dir), "package.json"), "utf8"),
+    ) as { version: string }
+    expect(installedPkg.version, "installed kernel != the pinned kernel").toBe(manifest.version)
+
+    // The corpus is the contract for every consumer that cannot import TypeScript, so
+    // the pin has to cover the bytes, not just the version label.
+    expect(manifest.corpus.length).toBeGreaterThan(8)
+    for (const entry of manifest.corpus) {
+      const abs = path.join(kernelPackageDir(import.meta.dir), entry.file)
+      expect(existsSync(abs), `${entry.file} is pinned but the package does not ship it`).toBe(true)
+      expect(sha256(readFileSync(abs)), `${entry.file} bytes moved under the pin`).toBe(entry.sha256)
     }
   })
 })
 
 describe("the binding's import shape (a product requirement, not a style choice)", () => {
   test("it does not import the kernel barrel, whose schemas.ts cannot survive compilation", () => {
-    // The kernel's index.js re-exports schemas.ts, which reads
-    // `../schemas/*.json` off disk at module init. Fine from source; fatal in the
-    // single-file binary (the product would not start — this exact failure was
-    // found by script/build.ts's smoke test after the private-ization batches).
-    // The mirror must stay byte-identical (kernel-vendor.mjs), so the fix lives
-    // here: per-module imports, pinned by this test so a future "tidy-up" cannot
-    // quietly reintroduce a binary that cannot boot.
+    // The kernel's index re-exports `schemas`, which reads `../schemas/*.json` off
+    // disk at module init. Fine from a directory install; fatal in the single-file
+    // binary (the product would not start — this exact failure was found by
+    // script/build.ts's own smoke test). The published version is immutable, so the
+    // fix has to live here: subpath imports only, pinned by this test so a future
+    // "tidy-up" cannot quietly reintroduce a binary that cannot boot.
     const binding = readFileSync(path.join(import.meta.dirname, "..", "..", "src", "tool", "glasspane", "kernel.ts"), "utf8")
-    expect(binding).not.toMatch(/vendor\/kernel\/src\/index\.js/)
-    expect(binding).toContain("vendor/kernel/src/parse.js")
+    expect(binding, "the barrel pulls schemas.ts and the single-file binary cannot start").not.toMatch(
+      /from\s+"iterate-kernel"(?!\/)/,
+    )
+    expect(binding).toContain('from "iterate-kernel/parse"')
   })
 })

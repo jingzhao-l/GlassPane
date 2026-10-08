@@ -6,6 +6,8 @@ import path from "node:path"
 import { GlasspaneDecisionLogPlugin, decisionLogWarning, recordToolExecution } from "../../src/plugin/glasspane-decision-log"
 import { verifyLedger } from "../../src/tool/glasspane/kernel"
 
+import { kernelFixturesDir } from "../lib/kernel-contract"
+
 /**
  * M2 fixed points — the evidence plugin's contract with the ledger.
  *
@@ -16,7 +18,10 @@ import { verifyLedger } from "../../src/tool/glasspane/kernel"
  * that logs nothing.
  */
 
-const FIXTURES = path.join(import.meta.dir, "..", "..", "vendor", "kernel", "fixtures")
+// The contract corpus ships inside the installed kernel; the path is resolved by
+// walking up (see test/lib/kernel-contract.ts) rather than hard-coded into a tree that
+// no longer exists.
+const FIXTURES = kernelFixturesDir(import.meta.dir)
 const pack = (name: string) => JSON.parse(readFileSync(path.join(FIXTURES, `evidence-pack.${name}.json`), "utf8"))
 
 function ledgerEnv() {

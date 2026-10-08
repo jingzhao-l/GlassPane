@@ -5,7 +5,7 @@ import { logDecision, readEvidenceFrame } from "../tool/glasspane/kernel"
 /**
  * M2 — the fork's evidence plugin: every `gp_*` call that comes back carrying a
  * real evidence pack gets one decision-log entry, written through the kernel's
- * chain (`kernel.ts`, vendored kernel in `vendor/kernel`).
+ * chain (`kernel.ts`, dependency `iterate-kernel`).
  *
  * Why it lives here rather than inside each tool: the tools' job is to answer
  * the model, and their tests assert that answer. A ledger is a *record of the

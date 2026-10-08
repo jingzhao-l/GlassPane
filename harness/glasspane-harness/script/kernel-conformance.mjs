@@ -1,29 +1,28 @@
 #!/usr/bin/env bun
-// kernel-conformance — do the kernel we ship and the kernel canonical publishes
-// answer the same questions the same way?
+// kernel-conformance — does the kernel we install answer the questions the contract
+// says it answers?
 //
-// WHY THIS EXISTS. The fork currently *vendors* the kernel's source and pins it by
-// per-file hash, which proves the bytes have not changed. It does not prove the
-// behaviour we depend on is still the behaviour we get. A move to `@iterate/kernel`
-// on npm would change the *delivery* of the kernel, not its meaning — and the only
-// thing that can tell us the meaning survived is running the same fixtures through
-// both forms and demanding identical answers.
+// WHY THIS EXISTS. `kernel-pin.mjs --check` proves the installed bytes are the bytes we
+// recorded. Bytes are not behaviour: the thing the two shells depend on is that the same
+// fixture produces the same verdict, the same transcription and the same chain hash —
+// because that answer is also what iterate-harness (Python) and the Swift engine reproduce
+// from the same corpus. So this lane *runs* the corpus through the kernel and compares.
 //
-// The fixtures are mirrored from canonical into harness/contracts/kernel-fixtures/
-// and hashed by kernel-vendor.mjs --check, so a change upstream surfaces as a diff
-// in this repo instead of silently changing behaviour.
+// The corpus is no longer mirrored into this repo. It ships inside `iterate-kernel`
+// (`fixtures/`), pinned by sha256 in `contracts/kernel-pin.json` — a mirror was a second
+// source of truth, and it had already drifted (9 files here, 11 published).
 //
-// RUN WITH BUN, not node: one of the implementations under test is TypeScript source
-// (vendor/kernel/src/*.ts), which only bun can import directly.
+// RUN WITH BUN, not node: a second implementation may be TypeScript *source* (a canonical
+// kernel checkout without a build), which only bun can import directly.
 //
 //   bun harness/glasspane-harness/script/kernel-conformance.mjs
-//       The identity we make today: the vendored kernel against the mirrored
-//       fixtures. Needs nothing but this repo.
+//       The identity we make today: the installed package against its own shipped corpus.
+//       Needs nothing but this repo.
 //
-//   bun harness/glasspane-harness/script/kernel-conformance.mjs --impl /path/to/publishable/kernel
-//       A second implementation (a checkout with a built dist/, or the directory an
-//       installed @iterate/kernel lives in). Every fixture must produce a
-//       byte-identical result in both, or this fails.
+//   bun harness/glasspane-harness/script/kernel-conformance.mjs --impl /path/to/kernel
+//       A second implementation (a canonical checkout with src/, or another build). Every
+//       fixture must produce a byte-identical answer in both, or this fails — that is the
+//       check to run *before* bumping the kernel version.
 //
 
 import { readFileSync, readdirSync, existsSync } from "node:fs"
@@ -31,10 +30,8 @@ import { createHash } from "node:crypto"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-// Root discovery, same rule as kernel-vendor.mjs: walk up to the directory that holds
+// Root discovery, same rule as kernel-pin.mjs: walk up to the directory that holds
 // product.json, so the same file works from the product repo and from the monorepo.
-// Fixtures live next to the manifest in the product tree, because that is the tree
-// that ships the vendored kernel.
 const here = path.dirname(fileURLToPath(import.meta.url))
 let repoRoot = here
 for (let i = 0; i < 6 && !existsSync(path.join(repoRoot, "product.json")); i++) {
@@ -44,8 +41,30 @@ if (!existsSync(path.join(repoRoot, "product.json"))) {
   console.error(`kernel-conformance: cannot find product.json above ${here}`)
   process.exit(2)
 }
-const fixturesDir = path.join(repoRoot, "contracts/kernel-fixtures")
-const vendoredKernel = path.join(repoRoot, "packages/opencode/vendor/kernel")
+
+/** The installed `iterate-kernel`: bun hoists, so it may sit at either level. */
+function installedKernel() {
+  const candidates = [
+    path.join(repoRoot, "node_modules/iterate-kernel"),
+    path.join(repoRoot, "packages/opencode/node_modules/iterate-kernel"),
+  ]
+  const found = candidates.filter((dir) => existsSync(path.join(dir, "package.json")))
+  if (found.length === 0) {
+    console.error(
+      "kernel-conformance: iterate-kernel is not installed — run `bun install`. This lane must not fall back to a local copy: the point is to measure what the product actually resolves.",
+    )
+    process.exit(2)
+  }
+  if (found.length > 1 && readFileSync(path.join(found[0], "package.json"), "utf8") !== readFileSync(path.join(found[1], "package.json"), "utf8")) {
+    console.error(`kernel-conformance: two different iterate-kernel installs (${found.join(", ")}) — which one does the product resolve?`)
+    process.exit(2)
+  }
+  return found[0]
+}
+
+const kernelDir = installedKernel()
+const kernelVersion = JSON.parse(readFileSync(path.join(kernelDir, "package.json"), "utf8")).version
+const fixturesDir = path.join(kernelDir, "fixtures")
 
 /** Canonical JSON: keys sorted, no insignificant whitespace. Byte equality or nothing. */
 function canonical(value) {
@@ -68,6 +87,7 @@ async function loadImpl(label, dir) {
     decisionEntry: await import(sub("decision-log-entry")),
     decisionLog: await import(sub("decision-log")),
     evidenceDecision: await import(sub("evidence-decision")),
+    dimension: await import(sub("dimension-context")),
   }
 }
 
@@ -97,6 +117,14 @@ function drive(impl, fixture, kind) {
     // chains onto.
     out.push(impl.decisionLog.serializeDecisionLogEntry(entry))
     out.push(impl.decisionLog.decisionLogEntryHash(entry))
+  } else if (kind === "dimension-context") {
+    // The fork renders this into a compacted session, and iterate-harness re-implements
+    // the same arithmetic in Python. Both must land on the same line, so the answer here
+    // is the structure *and* the sentence.
+    const context = impl.dimension.dimensionContext(fixture.input)
+    out.push(canonical(context))
+    out.push(impl.dimension.formatDimensionContext(context))
+    out.push(context.totals.verified + context.totals.unverified === context.totals.planned ? "totals-consistent" : "totals-BROKEN")
   } else if (kind === "decision-log-chain") {
     // The fixture is a cross-implementation anchor: `lines` are canonical entries and
     // `hashes` are their chain hashes. Re-deriving both is what proves an
@@ -115,7 +143,9 @@ function drive(impl, fixture, kind) {
 }
 
 const kindOf = (name) =>
-  name.startsWith("evidence-pack")
+  name.startsWith("dimension-context")
+    ? "dimension-context"
+    : name.startsWith("evidence-pack")
     ? "evidence-pack"
     : name.startsWith("recipe-config")
       ? "recipe-config"
@@ -135,7 +165,7 @@ for (let i = 0; i < args.length; i++) {
   }
 }
 
-const impls = [{ label: "vendored (source, hash-pinned)", dir: vendoredKernel }]
+const impls = [{ label: `installed (iterate-kernel@${kernelVersion}, dist)`, dir: kernelDir }]
 for (const dir of extra) {
   if (!existsSync(dir)) {
     console.error(`kernel-conformance: --impl ${dir} does not exist`)
@@ -152,6 +182,7 @@ const REQUIRED = {
   parse: ["parseEvidencePack", "parseRecipeConfig", "parseDecisionLogEntry"],
   decisionLog: ["serializeDecisionLogEntry", "decisionLogEntryHash"],
   evidenceDecision: ["decisionOutcomeFromEvidence", "decisionSummaryFromEvidence"],
+  dimension: ["dimensionContext", "formatDimensionContext"],
 }
 
 const loaded = []
@@ -170,7 +201,7 @@ for (const i of impls) {
 
 const files = readdirSync(fixturesDir).filter((f) => f.endsWith(".json") && kindOf(f)).sort()
 if (files.length === 0) {
-  console.error(`kernel-conformance: no fixtures found in ${fixturesCandidates.join(" or ")} — this would pass while proving nothing`)
+  console.error(`kernel-conformance: no contract fixtures found in ${fixturesDir} — this lane would run green while measuring nothing`)
   process.exit(1)
 }
 
@@ -225,9 +256,9 @@ for (const file of files) {
 
 if (loaded.length === 1) {
   console.log(
-    `\nkernel-conformance: ${compared} fixture(s) run through the vendored kernel. This proves the kernel we\n` +
-      `  ship still answers as the mirrored fixtures say. It does NOT compare against any published\n` +
-      `  form — run with --impl <dir> before changing how the kernel is delivered.`,
+    `\nkernel-conformance: ${compared} fixture(s) run through iterate-kernel@${kernelVersion} as installed. This\n` +
+      `  proves the bytes we ship still answer as the shipped corpus says. It does NOT compare against\n` +
+      `  a canonical checkout — run with --impl <dir> before bumping the kernel version.`,
   )
 } else {
   console.log(`\nkernel-conformance: ${compared} fixture(s) through ${loaded.length} implementations.`)
