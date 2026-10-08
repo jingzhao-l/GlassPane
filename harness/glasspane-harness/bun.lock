@@ -381,7 +381,7 @@
     },
     "packages/opencode": {
       "name": "glasspane-harness",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "bin": {
         "glasspane-harness": "./bin/glasspane-harness",
         "gp-harness": "./bin/glasspane-harness",
@@ -462,7 +462,7 @@
         "htmlparser2": "8.0.2",
         "ignore": "7.0.5",
         "immer": "11.1.4",
-        "iterate-kernel": "0.1.2",
+        "iterate-kernel": "0.1.3",
         "jsonc-parser": "3.3.1",
         "mime-types": "3.0.2",
         "minimatch": "10.0.3",
@@ -2765,7 +2765,7 @@
 
     "isomorphic-ws": ["isomorphic-ws@5.0.0", "", { "peerDependencies": { "ws": "*" } }, "sha512-muId7Zzn9ywDsyXgTIafTry2sV3nySZeUDe6YedVd1Hvuuep5AsIlqK+XefWpYTyJG5e503F2xIuT2lcU6rCSw=="],
 
-    "iterate-kernel": ["iterate-kernel@0.1.2", "", { "dependencies": { "zod": ">=3.25.76 <5" } }, "sha512-Mxu7gMD3Zn+i3lpMgChHC7w1OYgtQtjuaElh71/IkXRkXIdr8EsYi0rs9rmqAEUMq8jrJRMZG98HoPBuMDU9uQ=="],
+    "iterate-kernel": ["iterate-kernel@0.1.3", "", { "dependencies": { "zod": ">=3.25.76 <5" } }, "sha512-pBn1xn5y3ZbBtQf0HqstW2nPKKUd3WI1j95XhRHlPNF980jIFteSRu4QXBlWPbUXCguuAUOwUrI7nzfybipvUA=="],
 
     "jackspeak": ["jackspeak@4.2.3", "", { "dependencies": { "@isaacs/cliui": "^9.0.0" } }, "sha512-ykkVRwrYvFm1nb2AJfKKYPr0emF6IiXDYUaFx4Zn9ZuIH7MrzEZ3sD5RlqGXNRpHtvUHJyOnCEFxOlNDtGo7wg=="],
 
