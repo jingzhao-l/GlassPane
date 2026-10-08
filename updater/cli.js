@@ -28,7 +28,7 @@ import { effectiveStatus, isOverdue, loadState, nextState, readPointer, saveStat
 import { runCheck } from './lib/check.js'
 import { applyUpdate, buildStagedTree, checkNpmPrefix, DEFAULT_BUNDLES, rollbackToBackup } from './lib/apply.js'
 import { probeIdle, resolveEngineSocket } from './lib/idle.js'
-import { AGENT_LABEL, DAEMON_JOB_LABEL, DEFAULT_HOUR, DEFAULT_MINUTE, agentPlistPath, readAgentSchedule, readRunningJob, registerAgent, renderAgentPlist, unregisterAgent } from './lib/launchd.js'
+import { AGENT_LABEL, DAEMON_JOB_LABEL, DEFAULT_HOUR, DEFAULT_MINUTE, agentLogPath, agentPlistPath, readAgentSchedule, readRunningJob, registerAgent, renderAgentPlist, unregisterAgent } from './lib/launchd.js'
 import { localVersion } from './lib/version.js'
 import { CONSENT_KINDS } from './lib/policy.js'
 import { makeBytesFetcher, makeFetcher, resolveBase } from './lib/source.js'
@@ -428,6 +428,9 @@ export async function runCommand({ command, flags, env = process.env, deps = {},
           plistText,
           cliPath,
           uid: merged.uid,
+          // The same name the rendered plist was handed; registration creates it
+          // owner-only before launchd opens it at the process umask.
+          logPath: agentLogPath(stateRoot),
           run: merged.runLaunchctl,
         })
         if (agent.ok && !entry.ok) {
