@@ -203,7 +203,18 @@ export function describeCa(record, { bundlePath = null } = {}) {
     case 'probe-failed':
       return {
         summary: `${record.certs} root certificate(s) were exported${where}, but a node started with them could not reach the release endpoint (${record.detail ?? 'no reason reported'})`,
-        remedy: 'the intercepting root is not in the system keychains, or the network really is down. Import it ("sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain /path/to/the-intercepting-root.pem"), or export NODE_EXTRA_CA_CERTS to a bundle you control before invoking the updater.',
+        // The agent-side half comes first because it is the one an agent may
+        // actually run: pointing NODE_EXTRA_CA_CERTS at a bundle it already
+        // trusts needs no privileges. The keychain half used to be spelled out
+        // as a ready-to-run `sudo security add-trusted-cert -d -r trustRoot
+        // -k /Library/Keychains/System.keychain …` — and remedies in this product
+        // are consumed *as commands* by design, so that line turned every
+        // `probe-failed` into an invitation to install a root of trust
+        // machine-wide, permanently, for every app on the box, from a message
+        // written by a process that cannot know whether the cert is the
+        // intercepting one or a forgery. Naming the tool is enough for a person;
+        // the decision and the terminal are theirs.
+        remedy: 'export NODE_EXTRA_CA_CERTS to a bundle you control before invoking the updater — that is the agent-side fix, and it needs no privileges. If the real cause is that the intercepting root is missing from the system keychains, adding it with `security add-trusted-cert` into /Library/Keychains/System.keychain takes admin privileges and is a machine-wide trust decision: a person runs it at a terminal, and this tool will not hand the elevated command out as a remedy.',
       }
     default:
       // 枚举外的一切都是"这份记录读不懂"。当成 ok 就是规格 §9.7 明令禁止的那种静默放行。
