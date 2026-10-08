@@ -183,8 +183,10 @@ permission rather than by a secret.
 
 - Location: `~/.glasspane/evidence/<operationId>.json` (one file per operation; archive cap 10,000 packs
   by default, `EvidenceStore.defaultMaxFiles = 10_000`), `~/.glasspane/projects.json`,
-  `~/.glasspane/approvals.json`, and `~/.glasspane/installer-daemon.log` — launchd sends both stdout and
-  stderr there.
+  `~/.glasspane/approvals.json`, `~/.glasspane/installer-daemon.log` — launchd sends both stdout and
+  stderr there — and `~/.glasspane/update.log`, the daily update agent's own log, which launchd opens
+  the same way. Its content is what this machine has installed and updated: versions, staging paths,
+  digests, tags, GPG verdicts and the reason every refusal happened.
 - Content: the operation's selector (role / title / identifier — **titles are text from the app under
   test's own UI**), the action and its confirmation bit, an AX tree summary and node count, the
   changed-pixel ratio plus window geometry and window id, responsiveness and liveness signals, the
@@ -220,7 +222,14 @@ permission rather than by a secret.
   start-of-run sweep touched the root, the registry, the approval chain and the evidence packs — not the
   launchd log. Both halves are closed now, and each is *verified* rather than assumed: the installer
   requests `0600` and re-reads the mode (a chmod that did not stick is reported as a failed write, not a
-  warning), and the daemon's sweep now tightens a pre-existing log on the way up. Measured 2026-10-06 on
+  warning), and the daemon's sweep now tightens a pre-existing log on the way up. Since 1.9.0 the same
+  pair of measures covers the update agent's `~/.glasspane/update.log` as well: `registerAgent` creates it
+  `0600` and re-reads it before launchd is handed the definition (a volume that will not hold the bit
+  refuses the registration rather than installing a world-readable audit trail), and
+  `StateRoot.updateLogFile` puts the name in the start-of-run sweep. What that sweep re-reads on this
+  machine has not been re-measured against a live launchd job this round — registering one is not a
+  decision a routine task makes on somebody's machine — so the `0644` figure for `update.log` is carried
+  from its sibling's measurement, not from a fresh one here. Measured 2026-10-06 on
   an isolated state root with the debug daemon: `644` → `600`, root `755` → `700`, and the log's existing
   bytes left intact — tightening is a `chmod`, not a rewrite. What this does **not** buy: mode does not
   travel with a copy. This log is the daemon's own stdout and stderr — startup and socket paths, pids,

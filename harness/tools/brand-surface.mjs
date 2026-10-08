@@ -36,6 +36,10 @@
  *                            that also says fork / upstream / anomalyco / MIT /
  *                            上游 / 血缘 — an attribution line, not a product claim
  *   lineage-growth           the global occurrence count may shrink, never grow
+ *   lineage-coverage         the file count the occurrences are summed over is stated
+ *                            every run; a SHRINK is drift (a subtree leaving the tree
+ *                            lowers the sum without any branding being fixed), growth
+ *                            is stated and allowed
  *   first-party-gateway      no shipped code may offer, wire-identify as, or link
  *                            to opencode's own paid cloud (`opencode`/`opencode-go`
  *                            providers, "opencodeZen" copy, opencode.ai/zen)
@@ -53,8 +57,13 @@
  *                            come back
  *
  * MODES
- *   --record  write harness/contracts/brand-surface.json (the baseline)
- *   --check   fail on any unrecorded hit or lineage growth, or if nothing was scanned
+ *   --record  write harness/contracts/brand-surface.json (the baseline). Refuses over a
+ *             `missing-product-file` — a file the run could not read must not be
+ *             stamped as a green baseline — unless the separate, explicit
+ *             --ack-missing-product-file is passed, which records the hole and prints
+ *             it every later run.
+ *   --check   fail on any unrecorded hit, lineage growth, or a shrink of the scanned
+ *             coverage; exit 2 if nothing was scanned
  *
  * This is a ratchet: a legitimate new hit must be recorded in the same commit and
  * is then visible in review. Removing hits is always allowed.
@@ -347,6 +356,40 @@ function scan() {
   return { hits, lineage: { occurrences, filesScanned: files.length } }
 }
 
+/** Coverage, stated every run. The lineage number is a SUM, so it only means
+ *  something against a baseline that summed over the same amount of tree; naming the
+ *  file count next to the occurrence count is what makes a shrink visible instead of
+ *  readable as progress. A baseline without a coverage figure is said so out loud
+ *  rather than treated as a pass. */
+function reportCoverage(golden) {
+  const now = observed.lineage.filesScanned
+  const was = golden?.lineage?.filesScanned
+  if (!Number.isFinite(was)) {
+    console.log(`  lineage coverage: this run scanned ${now} file(s); the baseline records no coverage figure, so coverage cannot be compared — re-record to make it checkable`)
+    return
+  }
+  const delta = now - was
+  const move = delta === 0 ? "unchanged" : `${delta > 0 ? "grew" : "shrank"} ${Math.abs(delta)} file(s)`
+  console.log(`  lineage coverage: recorded ${was} file(s) → now ${now} file(s) (${move})${delta < 0 ? " — the occurrence count is a sum over a SMALLER tree" : ""}`)
+}
+
+/** Only one direction of coverage movement invalidates the number: a shrink. Growth is
+ *  ordinary work and stays green on purpose — growth in the *count* is already red via
+ *  the lineage ratchet, and blocking all coverage movement would get the guard turned
+ *  off. */
+function coverageProblem(golden) {
+  const was = golden?.lineage?.filesScanned
+  if (!Number.isFinite(was)) return null
+  const now = observed.lineage.filesScanned
+  if (now >= was) return null
+  const dropped = was - now
+  const occ = observed.lineage.occurrences
+  const howToReadIt = occ < golden.lineage.occurrences
+    ? `lineage reads ${golden.lineage.occurrences} → ${occ}; that is NOT brand progress, it is ${dropped} fewer file(s) being looked at`
+    : `lineage ${golden.lineage.occurrences} → ${occ}`
+  return `lineage coverage shrank ${was} → ${now} file(s) (−${dropped}): ${howToReadIt}. What this rule scans is part of the caliber — restore the subtree, or re-record and say what left the tree`
+}
+
 const observed = {
   observedAt: new Date().toISOString().slice(0, 10),
   source: "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
@@ -360,7 +403,35 @@ console.log(`brand-surface — ${observed.productFiles} product file(s) + ${DOC_
 for (const hit of observed.hits) console.log(`    ${hit.rule} ×${hit.count}  ${hit.file}`)
 
 if (mode === "record") {
+  // A `missing-product-file` is not a brand finding: it is this tool reporting that a
+  // scan input is gone. Recording it as an ordinary baseline hit would turn "we
+  // stopped looking at this file" into a permanently green number — the installer,
+  // product.json or a bin shim gets renamed and the ratchet then protects nothing,
+  // which is the same failure this layer already refuses elsewhere: a record must not
+  // be written when attribution failed (`tool-surface --record` over an unmeasured
+  // surface, `kernel-vendor --record` over a mirror that disagrees with canonical).
+  const missing = observed.hits.filter((h) => h.rule === "missing-product-file")
+  const acknowledged = process.argv.includes("--ack-missing-product-file")
+  if (missing.length && !acknowledged) {
+    console.error(`brand-surface: refusing to record — ${missing.length} listed file(s) do not exist, so this run did not read them:`)
+    for (const m of missing) console.error(`  · ${m.file}`)
+    console.error("  Stamping that as a baseline makes an unscanned file permanently green. Either restore the")
+    console.error("  file or move the list with it (PRODUCT_FILES / DOC_FILES in this file, same commit), and")
+    console.error("  if the hole is a deliberate interim decision, say so explicitly:")
+    console.error("    node harness/tools/brand-surface.mjs --record --ack-missing-product-file")
+    process.exit(1)
+  }
+  if (missing.length) {
+    // Recording anyway, but not quietly: the golden keeps carrying the
+    // `missing-product-file` hit, and every later --check re-states the hole.
+    console.error(`brand-surface: recording WITH ${missing.length} file(s) NOT SCANNED (explicitly acknowledged): ${missing.map((m) => m.file).join(", ")}`)
+  }
   mkdirSync(path.dirname(goldenFile), { recursive: true })
+  // Coverage travels with the occurrence count. The lineage number is only comparable
+  // against a baseline that looked at the same amount of tree, so `--record` prints
+  // the coverage move it is blessing instead of leaving it implicit.
+  const prior = existsSync(goldenFile) ? JSON.parse(readFileSync(goldenFile, "utf8")) : null
+  reportCoverage(prior)
   writeFileSync(goldenFile, JSON.stringify(observed, null, 2) + "\n")
   console.log(`recorded -> ${path.relative(repoRoot, goldenFile)}`)
   process.exit(0)
@@ -386,10 +457,25 @@ if (observed.lineage.filesScanned === 0) {
   console.error("brand-surface: scanned zero files — refusing to report success")
   process.exit(2)
 }
+// Coverage is part of the caliber. The occurrence count is a sum over the files this
+// run actually read, so when the set of read files shrinks the sum can fall for a
+// reason that has nothing to do with branding: a subtree disappearing reads as brand
+// progress. Only a SHRINK is asserted against — a file being added is normal work and
+// stays green on purpose, because the ratchet that guards growth is the occurrence
+// count above. Coverage is always stated, and stated with its direction and size.
+const covProblem = coverageProblem(golden)
+if (covProblem) problems.push(covProblem)
+reportCoverage(golden)
+// A recorded `missing-product-file` is a hole the baseline blessed (only reachable via
+// the explicit acknowledgement). --check says it every run so it cannot age into
+// looking like a scanned-and-clean file.
+for (const h of golden.hits?.filter((h) => h.rule === "missing-product-file") ?? []) {
+  console.log(`  ! ${h.file} is in the golden as NOT SCANNED (missing-product-file); this run ${observed.hits.some((o) => o.file === h.file && o.rule === h.rule) ? "still cannot read it" : "can read it again — re-record to close the hole"}`)
+}
 if (problems.length > 0) {
   console.error(`brand-surface: ${problems.length} drift(s):`)
   for (const p of problems) console.error(`  ✗ ${p}`)
   process.exit(1)
 }
-console.log(`brand-surface: no unrecorded brand drift; lineage ${observed.lineage.occurrences} (baseline ${golden.lineage.occurrences})`)
+console.log(`brand-surface: no unrecorded brand drift; lineage ${observed.lineage.occurrences} (baseline ${golden.lineage.occurrences}) over ${observed.lineage.filesScanned} scanned file(s) (baseline ${golden.lineage?.filesScanned ?? "unknown"})`)
 

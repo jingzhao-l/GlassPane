@@ -3,7 +3,7 @@
   "name": "glasspane-harness",
   "displayName": "GlassPane Harness",
   "tagline": "Evidence-honest GUI verification harness for macOS apps \u2014 an opencode fork carrying GlassPane's native tool surface",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "binary": "glasspane-harness",
   "bins": [
     "glasspane-harness",

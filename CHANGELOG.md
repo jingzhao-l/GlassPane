@@ -4,6 +4,176 @@
 
 ## [Unreleased]
 
+- **`glasspaned --version`（下一版按 minor 记，因为 CLI 参数动了）。** 更新器把"本机装的是什么版本"
+  交代成两条读数必须一致：bundle 的 `CFBundleShortVersionString` 与 `glasspaned --version`
+  （`updater/lib/version.js` 的表头就这么写的）。1.9.0 及以前**后一条腿在真机上从来是空的**——
+  `grep '"--version"' engine/Sources` 零命中，真二进制回的是 `unknown argument` + usage + 退出码 64；
+  而套件一直绿，因为 `updater/test/helpers.mjs` 的那个桩**对任何参数都 echo 版本号**，替一个不存在的
+  开关作了背书（桩里跑过的守卫等于没验）。本版起：daemon 的 `--version` 打印 `hello` 里同一个字面量
+  并退 0，且不碰状态根；那份字面量收成单一无出处的 `EngineCore.buildVersion`（`hello`、`--version`
+  与位点表都读它，两处抄写从此没法各说各话）；测试桩改成与真解析器一致（只认 `--version`，其余按
+  `unknown argument` + 64 拒绝）；`updater/lib/selfcheck.js` 两种形状都认得，并有一条用例专门钉住
+  "那一行搬家了"不许成为拒掉一份正常暂存树的理由——那是这个工具自己掐自己的升级路径。
+  新增闸：`DaemonVersionFlagTests`（真起一次 debug 二进制核那两句话、并核解析表与 usage 互逆）、
+  `selfcheck.test.mjs` 的形状对照（旧形状、新形状、两种都没有必须把两处都点名）。
+- **文档补记（在 `v1.9.0` 打 tag 之后落到 main，因此 1.9.0 的发布归档里还是旧文）。**
+  SECURITY 双语 §2.4 之前只列了 `installer-daemon.log` 这一份 launchd 写的日志，本版把
+  `~/.glasspane/update.log` 也纳进了"什么在盘上"的清单与收紧交代，并写明 `0644` 那个数字是从它
+  那位兄弟的实测搬过来的、这一轮没有对真机 launchd 作业重测。代码侧的措施（`AGENT_LOG_NAME` →
+  `StateRoot.updateLogFile` → 注册前 0600）确实随 1.9.0 发出，缺的只是这份文档的同步。
+
+- ⚠ 同批两处由复审（对已合并 diff 的 fresh-eyes 一遍）抓出来的：
+  - `selfcheck.js` 先认两种字面量形状时用的是一个"两种都匹配"的正则，于是**读哪个由行序决定**：
+    一份两份都在的树会读到实例那一份。改成先找权威出处 `public static let buildVersion`，
+    找不到才回落 `public let version`。测试补一份"两份都在、instance 排前面"的树，
+    读回 1.10.0 才算过。
+  - `ProjectRegistry.removalVerdict` 在**文件整个不见**时回 `(answerable: true, removed: true)`：
+    `load()` 把缺文件当成"还没注册"，那对读侧对，对写后回读是同一种撒谎的另一张脸（一次没落盘的写
+    与一张被删掉的表都给出一样的形状），于是命令报"确认已删除"并退 0。现在缺文件与读不开走同一条
+    不回答的路，CLI 回 exit 1 + `loadFailed`。用例：`testRemovalVerdictRefusesWhenTheFileIsGoneAfterTheWrite`。
+- 另有一条复审指控被实测**推翻**：`glasspaned --state-dir relative/path --version` 并不会像它说的
+  退 0——`--state-dir` 的绝对路径校验发生在解析循环里，两种参数顺序实测都退 64。记录在此，
+  免得下一轮把同一条指控再当缺陷报一次。
+
+- **首帧的像素格式从"假设默认值是 BGRA"改成显式声明 + 逐帧核对。** 这是把 macOS 13 那条流
+  通路修好之后**才出现的**新风险：登记了帧输出，这条路第一次真的会收到缓冲，而下面的拷贝按
+  单平面 BGRA 写、`SCStreamConfiguration.pixelFormat` 从来没被设置过（全仓 `grep pixelFormat`
+  零命中）。默认值若不是 BGRA，抄出来是一张绿色/噪声图，带着一个看似真实的像素差进证据包——
+  比修复前更坏，因为修复前至少是如实的"测不到"。现在三态分开说：没等到（才是超时）/
+  格式不是这条路能转的（给出可查的 fourCC）/ 转不出来。同批把 `waitForFirstFrame` 的
+  `nil` 一途拆掉，"等到了但转不出来"从此不再冒充计时抖动。
+- **网关关停改为有顶，并删掉一条跑不到的"旧 Node 回落"。** `closeIdleConnections` 与
+  `closeAllConnections` 都出自 Node v18.2.0，本包声明 `engines: >=18`，"只有其中一个"的运行时
+  不存在——那条分支唯一会做的事就是把刚修好的在飞 `act` 再拆一次。真正的洞是另一边：一个永不
+  变空闲的连接会让 `close()` 永远不落地，SIGTERM 后进程挂死。现在到
+  `CALLER_VISIBLE_CEILING_MS`（50s，那一刻调用方早就收到 `GP_E_ENGINE_TIMEOUT` + "别重发"）
+  仍关不掉，就先说一句"放弃了什么"再强拆。
+- **两处我自己写的闸/报文被复审抓出来**：`--list-projects` 的拒绝报文里留着
+  `"projects": []` 与 `"count": 0`（正是要消灭的那两个键）；`RegistryVerdictTests` 那条
+  `exit(1)` 断言的切片一直切到文件尾，被后面八条别的 `exit(1)` 满足——"把拒绝改回 exit(0)"
+  照样绿。两处都改成有界窗口 + 反向验红。
+- **假 daemon 的拒绝也被钉住了。** 上一笔把 `makeDaemonBinary` 改成只认 `--version`，但没人
+  钉住这个拒绝：它退化回有求必应，上面那批用例照样绿。现在三种非 `--version` 参数各自要求
+  退出码 64、stdout 空、stderr 说 `unknown argument`。
+
+这四条与上面 `--version` 那一批同属"下一版带上"。面 A 因关停/格式那两笔再长 +6 LOC
+（8652 → 8658），同批 `--record`。
+
+## [1.9.0] — 2026-10-08
+
+版本判断：**按 minor 记**。1.6.2 那四条 patch 判据实测都没动——状态文件的字段一个没加没改
+（`projects.json`、`update-state.json` 的字段原样）、daemon 退出码集合仍是 `{0,1,2,3,64,65}`
+（本版两条新拒绝都落在已有的 1）、CLI 参数没增删（`--help` 里 30 条开关与解析表实测一一对称，
+`scripts` 里没有一处只在一侧出现）、两个 npm 包的 `bin` 声明没变，也没有新增任何用户可见控制件。
+按 minor 走的是 **1.8.0 自己定下的那条口径**：动了对外可见的契约内容就不塞进 patch。本版动了两处：
+
+- `assert_element` 的结果里多了 `evidencePersisted`——与 `act` 已有的同一个键、同一句语义
+  （`store()` 的落盘结论）。从前 `act` 转达这句话，`assert_element` 把它丢掉却照样报
+  `evidenceId`，那是对外结果形状上的一处真实变化；
+- 更新器 `probe-failed` 的 remedy 从一句可直接执行的 `sudo security add-trusted-cert …`
+  改成把特权动作明确交回给人（同一段仍然点名工具，`ca-bundle.test.mjs` 里"必须点名修复办法"
+  那条断言照旧绿）。remedy 在本产品里就是给调用方执行的命令（SECURITY.md §3 的口径），
+  这条不该由一个 patch 悄悄改掉。
+
+本版**没有**合并未发布的版本号：开工实测 `v1.8.2` 指向 fdabb83、`npm view glasspane-mcp version`
+与 `npm view glasspane-install version` 都回 1.8.2、根 `package.json` 也是 1.8.2，三者对齐。
+期间 origin 前进了三笔（90e73ff / a2a3a23 / 580be9a），实测 `git diff --name-only` 那三笔**全部
+只碰 `harness/`**，与产品面零重叠；本轮改动在基于 origin/main=580be9a 的隔离工作树里做
+（`/Volumes/Eng-Dev/.worktrees/gp-daily-20261008`，分支 `daily/main-20261008`），没有碰别人
+的未提交批次。**发版凭据仍是 CI**：本机与 GitHub runner 的分工沿 1.8.2 的口径。
+
+### Fixed — 证据与通道：三处"绿着却什么都没测"
+
+- **macOS 13 的像素通道一次也没有测到过。** `SCKCapturer.snapViaStream` 把
+  `StreamFrameBridge` 只交给了 `SCStream(delegate:)`——那个委托只收生命周期回调，**不收帧**；
+  全仓 `grep addStreamOutput` 零命中，于是 `waitForFirstFrame()` 每回都把
+  `captureTimeoutSeconds`（5s）烧完再回 nil，每次 act 在这条候选上付 5s × 窗口 × before/after，
+  最终恒抛 `pixelCaptureDenied("SCStream first frame timed out…")`。诚实方向没错（测不到就说不测到），
+  但这条通道自始至终没有产出过一个读数，而它是 `Package.swift` 那个 `.macOS(.v13)` 下唯一的像素路径。
+  现在在 start 之前登记 `.screen` 帧输出，登记失败当场说"没挂上"，不许再伪装成一次超时。
+  闸：`CaptureChannelShapeTests` 两条（登记必须早于等待、类型与队列参数在位、失败分支点名）。
+  **macOS 13 上的真值仍属待真机复跑**——本仓的 SCK 诊断用例一直是 opt-in、默认 skip，
+  运行时证据要真窗口与屏幕录制席位，CI 与本机都造不出来。
+- **信号闸跑在真的状态根上。** `engine/.signal_smoke.py` 从前只点名 `--socket-path` /
+  `--probe-socket-path`，**没有** `--state-dir`：daemon 于是把状态根解析成家目录默认根，启动扫描
+  随之把**这台机器上的** `~/.glasspane` 收紧（根 →0700，`projects.json`、`approvals.json`、
+  `installer-daemon.log` 与每一条证据档案 →0600），而文件头一直写着"隔离…不碰现网"。本轮基线
+  真跑过一次，`~/.glasspane/engine.sock` 的 mtime 就停在那一分钟。这是唯一接进 CI 的冒烟，
+  每台开发机、每次 push 都在动真状态。现在 socket 由被点名的根推导，另加两条只有"`--state-dir`
+  确实传到子进程"才成立、撤掉就同时红的断言（根由脚本建的 0755 被 daemon 收紧成 0700；
+  两个 socket 出现在那个根里）。同一棵树里的 `.t9_smoke.py` 早就这么跑，这道闸一直没采纳。
+- **`assert_element` 把落盘结论丢了。** `store(pack)` 回的是 `Bool?`（`nil`＝没有档案存储这回事，
+  `false`＝写了但没落到盘上）；`act` 早就按 R1-07 转达这句话，`assert_element` 却把返回值丢掉、
+  照样报 `evidenceId`——写被拒（非 0700 目录、隔离不过、盘满）时调用方拿着一个重启后
+  `GP_E_NO_EVIDENCE` 的 id，以为这条断言的证据已经存好了。补齐同一条出口，缺席仍是"未测"而非 `false`。
+
+### Fixed — 一次性 CLI 的两处假清白
+
+- **`--list-projects` 把读不开的注册表报成"什么都没注册"并退 0。** `ProjectRegistry.all` 在
+  `loadFailed` 时是空的，而类型自己的注释就写着"check the flag before presenting this as
+  'no projects registered'"；这条命令恰是 agent 被指来回答"注册了什么"的那一条（`mcp-shell`
+  的 remedy 原文点名它）。损坏的 `projects.json` → stdout `[]` + 退出码 0 → 读者照空表重建登记，
+  而真条目还在文件里。同一份文件在 `--project-prune` / `--project-remove` 那里是拒绝覆写的
+  （§12.3.2），读侧不该比写侧更容易蒙混。
+- **`--project-remove` 在写后读不回时报 `removed: true` 并退 0。** `gone = !verified.all.contains{…}`
+  在 `verified.loadFailed` 时恒为真——`removed` 那句注释承诺的是"盘上现在真的没有它了"，
+  实际报的是"我看不见盘"。`runProjectPrune` 对同一种状况 exit(1)，写侧两条命令不能一个拒、一个报喜。
+- 两处判据都挪进 `ProjectRegistry.listing()` / `removalVerdict(projectId:)`（可单测），并用两条
+  源码形状闸钉住 daemon 真的调了它们——否则"测过的判据"与"跑着的判据"又是两张皮。
+  `RegistryVerdictTests` 里那条"合法空表 vs 读不开"与"盘上还有 vs 真没了 vs 读不回"三态对照
+  都能红也能过：拒绝分支不是恒真，也不是够不着。
+
+### Fixed — 状态根里第二份没人管的文件，与一条越权的 remedy
+
+- **`~/.glasspane/update.log`。** 每日更新作业的 `StandardOutPath`/`StandardErrorPath`，由
+  **launchd** 创建——与 `installer-daemon.log` 同一个来源（那一份本仓实测过：launchd 自己建时走
+  进程 umask，0644）。这一份的具体模式本轮**没有在真机上重测**：重测要往这台机器注册一个真
+  launchd 作业，那不是无人值守任务该做的动作；未重测的是"它今天确实是 0644"，不是"该不该管"。
+  要管的内容是真的：它是更新器每次 check/apply 的输出，记的是这台机器装了什么、更新到哪一步、
+  每一次拒绝的理由。daemon 的启动扫描管根目录、登记表、审批链、安装器日志与证据包，唯独不管它；
+  `updater` 的 `fsutil` 把自己写的每个文件都收紧，唯独不建这个（写的人不是它）。两道一起补：
+  注册前按 0600 建并读回（chmod 落不住＝**拒注册**，一次 `launchctl` 都不碰——这条拒绝分支有
+  测试真走到）；名字进 daemon 被收紧的那张表。
+  `installer-daemon.log` 那条"唯一不被覆盖的文件"从此不再成立。
+  跨语言漂移闸由"核一个名字"改成核一张表（`installer/test/log-modes.test.mjs`），
+  两侧各测：`StatePermissionTests` 两条（0644→0600 且字节不动；缺文件不顺手创建）、
+  `updater/test/agent-log.test.mjs` 五条、`CaptureChannelShapeTests` 一条。
+- **`probe-failed` 的 remedy 里那句 sudo。** 它写的是
+  `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain …`。
+  remedy 是被当作命令消费的（`engine-client.ts` 转发、`tools.ts` 渲染），于是任何被注入的一轮
+  都能照着它把一张根证书装成**全机**信任——比 SECURITY.md §2.8 那条反复权衡过的放宽大得多，
+  而且是不可逆的。现在把 agent 侧那条无特权的出路（`NODE_EXTRA_CA_CERTS`）放在前面，
+  系统钥匙串那条点名工具、写明"由人在终端执行的决定"。闸：`updater/test/remedy-surface.test.mjs`
+  扫每条 remedy 的升权命令形状，负例里**留着**当年那一句原文——扫描器必须能拒绝它。
+
+### Fixed — MCP 壳与网关：三处调用方拿不到答案
+
+- **网关关停打断在飞的 `act`。** `close()` 走 `closeAllConnections()`，把**已经有请求在跑**的
+  连接一起销毁。实测在发布产物上：一次尚未返回的 `POST /v1/tools/act` 回 `ECONNRESET`——没有状态码、
+  没有 `{code,message,remedy}`，"do NOT re-issue `act`" 那句 remedy 永远送不到，而 daemon 那边
+  手指还在用户屏幕上。现在只销毁空闲连接，并在关停期间持续回收"事后才变空闲"的那些。
+- **超限报文的拒绝不可达。** `readBody` 在 `req.destroy()` 之后才 reject，于是
+  `GP_HTTP_PAYLOAD_TOO_LARGE` + "shrink the request payload and retry" 对 100% 的超限请求都
+  读不到（实测 300 KiB 的 POST 回连接重置）——调用方拿着一个"连接断了"去原样重发。现在停读不拆链。
+- **两个入口对认不出的参数态度不一致。** `tools/call` 不带 `arguments` 是合法 MCP，壳却把它
+  喂进 `strictObject` 校验，回 `GP_E_BAD_PARAMS … : Required`——remedy 指着一个发布 schema 里
+  并不存在的 `required`，空路径还渲染成一句多余的 `": Required"`。网关入口则把 `--socket-pth`、
+  `--prot`、裸位置参数**静默丢掉**，照旧桥接到它自己猜的那个根，而操作者以为点名了另一个 daemon
+  （stdio 入口早就为此加了那条 `else { throw }`）。
+
+### Fixed — 一条声称豁免、其实没豁免的计算
+
+- `scripts/check-doc-links.mjs` 每份文档都算一个 `codeFences` 集合，然后**从来没人读它**。
+  围栏内的相对链接一直是被检查的——那不是缺陷，是这条死计算把一个不存在的行为写进了读者的预期。
+  删掉它，并在原位写明"安装片段里抄错的路径也是抄错的路径"。
+
+### 同批记录
+
+- `harness/tools/tool-surface.mjs` 的面 A 基线因本版 `mcp-shell/src` 的有意增长（+51 LOC：
+  关停语义、停读不拆链、两个入口的入参态度）由 `--record` 重记，单独一条
+  `chore(harness)` 提交。除此之外 `harness/` 与 `kernel/` 一字未改。
+- 本轮审查提出但**未改**的产品面问题（含证据、面板、installer、bridge、workflows 各侧）记在
+  本次任务汇报的"未修清单"，不在本版里悄悄做一半。
 ### Internal — harness fork 的内核改为依赖，它的尺子跟着换
 
 **判据没动**：本批全在 `harness/`（fork 的内核分发形态与量它的闸），`engine/`、`mcp-shell/`、

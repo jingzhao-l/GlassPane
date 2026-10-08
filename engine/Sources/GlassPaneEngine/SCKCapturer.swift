@@ -513,6 +513,11 @@ public enum SCKCapturer {
                                       sourceRect: CGRect?,
                                       windowFrame: CGRect) throws -> CGImage {
         let config = SCStreamConfiguration()
+        // 像素格式在这里点名，不交给默认值：下面的转换是按单平面 BGRA 写的，
+        // 而 `SCStreamConfiguration.pixelFormat` 的默认值不是这条契约的一部分。
+        // 13 那条流路径在本仓历史上从来没产出过帧（帧输出从前没登记），所以这个假设
+        // 从未在那条路上被运行验证过；让它显式，是"证据不能建在一个没核过的默认值上"。
+        config.pixelFormat = kCVPixelFormatType_32BGRA
         let region = sourceRect ?? windowFrame
         let scale = streamPixelScale(for: region)
         if let rect = sourceRect { config.sourceRect = rect }
@@ -526,13 +531,59 @@ public enum SCKCapturer {
         // 资源释放从 stream 存在的那一刻起登记：start 抛错或超时时采集会话已经建好，
         // 登记在 awaitStreamStart 之后就等于 macOS 13 路径每次失败泄漏一个 SCStream。
         defer { stream.stopCapture(completionHandler: { _ in }) }
-        try awaitStreamStart(of: stream)
-        guard let image = bridge.waitForFirstFrame() else {
+        // `delegate` 只收流的生命周期回调（停止/出错），**不**收帧。帧要靠
+        // `addStreamOutput(_:type:)` 登记成一个 `SCStreamOutput`；从前这一句不存在，
+        // 于是 `bridge` 永远收不到帧、`waitForFirstFrame()` 每次都把
+        // `captureTimeoutSeconds` 烧完再回 nil，macOS 13 的像素通道因此**永远**抛
+        // `pixelCaptureDenied("SCStream first frame timed out…")`。方向和诚实性都对
+        // （没测到就说不测到），但这条通道一次也没被测到过，而每次 act 都要为它付
+        // 5s × 候选窗口 × before/after 的等待。登记必须在 start 之前，这是 API 的顺序。
+        do {
+            try addStreamOutput(bridge, to: stream)
+        } catch {
+            // 帧输出没挂上，就永远不会有第一帧——继续等 `captureTimeoutSeconds`
+            // 只是把一个已经知道的原因伪装成一次超时。
             throw ChannelError.pixelCaptureDenied(
-                reason: "SCStream first frame timed out after \(captureTimeoutSeconds)s or stream stopped"
+                reason: "SCStream frame output could not be attached: \(error.localizedDescription); no frame can arrive on this path"
             )
         }
-        return image
+        try awaitStreamStart(of: stream)
+        let firstFrame = bridge.waitForFirstFrame()
+        // 帧是流内部的对象，而 `bridge` 在这个作用域末尾就死了；`stopCapture` 是异步
+        // 的，所以最后一帧可能在 bridge 看起来无人引用之后才落到它身上。显式把寿命延长到
+        // 这段判定结束，不去赌 SCStream 是不是强持有它的输出。
+        return try withExtendedLifetime(bridge) {
+            switch firstFrame {
+            case .image(let image):
+                return image
+            case .timedOut:
+                throw ChannelError.pixelCaptureDenied(
+                    reason: "SCStream first frame timed out after \(captureTimeoutSeconds)s or stream stopped"
+                )
+            case .unexpectedFormat(let fourCC):
+                // 一个非 BGRA 的缓冲**不能**悄悄按 BGRA 抄一遍：那会得到一张绿色/噪声图，
+                // 再把它的像素差当成一次真实测量写进证据包。宁可拒测。
+                throw ChannelError.pixelCaptureDenied(
+                    reason: "SCStream delivered a \(fourCC) buffer; this capture path converts single-planar BGRA only, and a wrong-format copy would be a fabricated pixel diff"
+                )
+            case .conversionFailed(let fourCC):
+                throw ChannelError.pixelCaptureDenied(
+                    reason: "SCStream delivered a \(fourCC) buffer that could not be converted into an image"
+                )
+            }
+        }
+    }
+
+    /// 把帧输出登记到流上。`SCStream(delegate:)` 只收生命周期回调，**不收帧**：
+    /// 这一句从前不存在，于是 `waitForFirstFrame()` 每次只能等到超时，macOS 13 的
+    /// 像素通道一次也没有被测到过（方向和诚实性都对——没测到就说不测到，但每次
+    /// act 都要为它付 5s × 候选窗口 × before/after 的等待）。登记须在 start 之前。
+    @available(macOS 13.0, *)
+    private static func addStreamOutput(_ bridge: StreamFrameBridge, to stream: SCStream) throws {
+        try stream.addStreamOutput(
+            bridge, type: .screen,
+            sampleHandlerQueue: DispatchQueue(label: "glasspane.sck.stream-output")
+        )
     }
 
     /// 启动是异步回调；bridge 到同步帧并带上超时。startCapture 的 async 重载只在
@@ -591,17 +642,45 @@ public enum SCKCapturer {
             signal.signal()
         }
 
-        /// 阻塞等待首帧并转换为 CGImage；超时或提前停止返回 nil。
-        func waitForFirstFrame() -> CGImage? {
+        /// 首帧的三种结局。**"没等到"与"等到了但这条路转不了"必须分开说**：把后者报成
+        /// 一次超时，就是拿一个已知原因去伪装计时抖动，而读的人会去加超时——那是往错的
+        /// 方向修。三种都在这里判，调用方没有机会把格式问题读成慢。
+        enum FirstFrame {
+            case image(CGImage)
+            case timedOut
+            case unexpectedFormat(fourCC: String)
+            case conversionFailed(fourCC: String)
+        }
+
+        func waitForFirstFrame() -> FirstFrame {
             _ = signal.wait(timeout: timeout)
             lock.lock()
             defer { lock.unlock() }
-            guard let buffer = frame else { return nil }
-            return Self.image(from: buffer)
+            guard let buffer = frame else { return .timedOut }
+            let fourCC = Self.fourCC(CVPixelBufferGetPixelFormatType(buffer))
+            guard CVPixelBufferGetPixelFormatType(buffer) == FourCharCode(kCVPixelFormatType_32BGRA) else {
+                return .unexpectedFormat(fourCC: fourCC)
+            }
+            guard let image = Self.image(from: buffer) else {
+                return .conversionFailed(fourCC: fourCC)
+            }
+            return .image(image)
         }
 
-        /// 把 BGRA(YCbCr 转出后的标准 4 通道)像素缓冲拷贝进位图上下文，生成
-        /// 独立生命周期的 CGImage，避免持有流内部缓冲。
+        /// 一个 fourCC 要能被抄进 issue：`1145396224` 这种十进制没人查得动。
+        private static func fourCC(_ code: UInt32) -> String {
+            let characters = [
+                Character(UnicodeScalar((code >> 24) & 0xFF) ?? "?"),
+                Character(UnicodeScalar((code >> 16) & 0xFF) ?? "?"),
+                Character(UnicodeScalar((code >> 8) & 0xFF) ?? "?"),
+                Character(UnicodeScalar(code & 0xFF) ?? "?"),
+            ]
+            return String(characters)
+        }
+
+        /// 把**单平面 BGRA** 像素缓冲拷贝进位图上下文，生成独立生命周期的 CGImage，
+        /// 避免持有流内部缓冲。格式由 `waitForFirstFrame` 在调用之前核过：这条拷贝
+        /// 对任何别的格式都会得出一张错的图，而错的图会带着一个看似真实的像素差进档案。
         private static func image(from buffer: CVPixelBuffer) -> CGImage? {
             let width = CVPixelBufferGetWidth(buffer)
             let height = CVPixelBufferGetHeight(buffer)
@@ -611,7 +690,8 @@ public enum SCKCapturer {
             guard let baseAddress = CVPixelBufferGetBaseAddress(buffer) else { return nil }
             let sourceStride = CVPixelBufferGetBytesPerRow(buffer)
             let colorSpace = CGColorSpaceCreateDeviceRGB()
-            // PremultipliedFirst + little-endian == BGRA，与 SCK 默认输出一致。
+            // PremultipliedFirst + little-endian == BGRA。这一句只在调用方已经核过
+            // `CVPixelBufferGetPixelFormatType` 时成立——`waitForFirstFrame` 就是那道核。
             let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
             guard let context = CGContext(
                 data: nil,

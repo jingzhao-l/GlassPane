@@ -59,6 +59,12 @@ private struct Options {
     var approvalAudit = false
     var approvalVerify = false
     var pruneEvidence = false
+    /// `--version` — print the same literal `hello` reports, and exit. The updater
+    /// pairs this reading with the bundle's `CFBundleShortVersionString`
+    /// (`updater/lib/version.js`); until 1.10.0 the daemon never answered it, so
+    /// that pairing had exactly one live leg and the tests were covering the other
+    /// one with a shell stub that printed a version for *any* argument.
+    var printVersion = false
     var pruneOlderThanDays = 30
     var maintenanceProjectId: String?
     var pruneDryRun = false
@@ -88,6 +94,8 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
         switch argument {
         case "--help", "-h":
             return .help
+        case "--version":
+            options.printVersion = true
         case "--verbose", "-v":
             options.verbose = true
         case "--grant-accessibility":
@@ -237,6 +245,7 @@ private func printUsage() {
         glasspaned --check-input-permission
         glasspaned --check-accessibility
         glasspaned --permissions
+        glasspaned --version
         glasspaned --request-permission <kind>
         glasspaned [--state-dir <path>] --list-projects
         glasspaned [--state-dir <path>] --project-prune [--dry-run]
@@ -281,6 +290,10 @@ private func printUsage() {
         --check-accessibility      Print this process's accessibility seat
                                  (granted | notDetermined — AX exposes no
                                  denied visibility) and exit
+        --version                  Print `glasspaned <version>` and exit 0 — the same literal the
+                                 `hello` frame reports, which is the reading
+                                 `updater/lib/version.js` pairs with the bundle plist. Reads no state,
+                                 so it takes no state root.
         --permissions              Print this process's TCC seats as JSON:
                                  {"subject":…,"permissions":…} and exit. Called as a
                                  one-shot it measures the one-shot — not whichever
@@ -609,6 +622,13 @@ case .parsed(let parsed):
     options = parsed
 }
 
+if options.printVersion {
+    // 一行、一个出处、退出码 0：读的就是 `hello` 里那个 `version`。这一句不碰状态根，
+    // 所以它既不会创建目录，也不会触发那次收紧扫描——与 `--permissions` 同一个道理。
+    print("glasspaned \(EngineCore.buildVersion)")
+    exit(0)
+}
+
 if options.grantAccessibility {
     runGrantAccessibilityFlow()
     exit(0)
@@ -670,6 +690,24 @@ if let kind = options.requestPermission {
 if options.listProjects {
     let stateRoot = resolvedStateRoot(injected: options.stateDir)
     let registry = ProjectRegistry(stateRoot: stateRoot)
+    // 读不回的文件一律拒答，不许回 `[]` + 退出码 0。判据在
+    // `ProjectRegistry.listing()`（那里可单测），这里只负责把两种"看起来一样"的形状
+    // 分开说：真没注册任何东西，和这份文件读不出注册了什么。这条命令恰是 agent 被指来
+    // 回答"注册了什么"的那一条（mcp-shell 的 remedy 原文点名它），而 `ProjectRegistry.all`
+    // 自己的注释就写着读回失败时不许当成空表；同一份文件在 --project-prune /
+    // --project-remove 那里是拒绝覆写的（§12.3.2），读侧不该比写侧更容易蒙混。
+    if case .unreadable(let reason) = registry.listing() {
+        // 拒绝报文里不给 `projects`，也不给 `count`：读不开的时候这两个值都是编的，
+        // 而它们恰好就是这条命令被误读成"什么都没注册"的那两个键。少给一个键，比给一
+        // 个看起来像答案的零诚实。
+        writeJSON([
+            "command": "--list-projects", "loadFailed": true,
+            "registryPath": registry.filePath,
+            "error": reason,
+            "next": "make the file readable again (python3 -m json.tool \(registry.filePath), or restore it from a copy), then restart the background service so it re-reads"
+        ], to: .standardError)
+        exit(1)
+    }
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
     if let data = try? encoder.encode(registry.all) {
@@ -864,7 +902,24 @@ private func runProjectRemove(projectId: String, options: Options) -> Never {
     }
 
     let verified = ProjectRegistry(stateRoot: stateRoot)
-    let gone = !verified.all.contains { $0.projectId == projectId }
+    // 判据在 `ProjectRegistry.removalVerdict`（那里可单测）：读不回时 `all` 是空的，
+    // 于是裸的 `!all.contains(…)` 恒为真——这条命令会在"根本看不见盘"的情况下报一次
+    // 成功并退 0。`runProjectPrune` 对同一种状况是 exit(1)（§12.3.2 同源），写侧两条
+    // 命令不能一个拒、一个报喜。这里不给 remaining：读不回时任何条数都是编的。
+    let verdict = verified.removalVerdict(projectId: projectId)
+    if !verdict.answerable {
+        writeJSON([
+            "command": "--project-remove", "dryRun": false, "loadFailed": true,
+            "found": true, "removed": false,
+            "projectId": projectId, "registryPath": registry.filePath,
+            // 盘与 daemon 内存此刻已经不一致，重启确实需要——这里不夸大。
+            "requiresDaemonRestart": true,
+            "error": verified.unreadableReport ?? "the registry cannot be read back after the write",
+            "next": "make the file readable again (python3 -m json.tool \(registry.filePath), or restore it from a copy) and restart the daemon"
+        ], to: .standardError)
+        exit(1)
+    }
+    let gone = verdict.removed
     writeJSON([
         "command": "--project-remove", "dryRun": false,
         "loadFailed": verified.loadFailed,

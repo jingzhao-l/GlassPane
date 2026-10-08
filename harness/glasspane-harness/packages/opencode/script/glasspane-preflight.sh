@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # glasspane-preflight.sh — check the build environment BEFORE `bun run build`.
 #
-# Why: `script/build.ts` internally runs `bun add ghostty-web@github:…`. On a
+# Why: `packages/app` declares `ghostty-web` as a `github:` dependency
+# (packages/app/package.json), so resolving it reaches github.com/objects.githubusercontent.com
+# during install and during the app phase that `script/build.ts` drives. On a
 # machine whose network presents an intercepting TLS root for
 # objects.githubusercontent.com, that resolution fails — but only after the ~10
 # minute Vite phase, with `UNABLE_TO_VERIFY_LEAF_SIGNATURE` and no hint that the
@@ -32,7 +34,6 @@ if [ -z "$chain" ]; then
   say "$DEP_HOST" "unreachable — build will fail regardless; fix network first"
   exit 1
 fi
-issuer=$(printf '%s' "$chain" | grep -m1 -E "^ *1 s:|^ *i:" | sed -E 's/.*CN=//' | head -1)
 leaf_issuer=$(echo | openssl s_client -connect "$DEP_HOST:443" -servername "$DEP_HOST" 2>/dev/null | grep -m1 "i:" | sed 's/.*CN=//')
 say "leaf issued by" "${leaf_issuer:-unknown}"
 
@@ -62,9 +63,18 @@ count=$(grep -c "BEGIN CERTIFICATE" "$bundle")
 say "bundle" "$bundle ($count certs)"
 
 # Prove the bundle can validate the chain bun will see — leaf + intermediates.
+# `openssl verify FILE` validates only the FIRST certificate in FILE and ignores the
+# rest, so a chain handed over as one blob is judged on its leaf alone: an intermediate
+# signed by a root in the bundle reads FAILED even though the chain is fine. That is a
+# false negative, which is the safe direction, but it still sends someone chasing a
+# broken bundle. Split it: verify the leaf with the intermediates passed as -untrusted.
 tmp=$(mktemp -d)
 printf '%s' "$chain" | sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' > "$tmp/chain.pem"
-if openssl verify -CAfile "$bundle" "$tmp/chain.pem" > "$tmp/verify.out" 2>&1; then
+awk '/-----BEGIN CERTIFICATE-----/{n++} n==1' "$tmp/chain.pem" > "$tmp/leaf.pem"
+awk '/-----BEGIN CERTIFICATE-----/{n++} n>=2' "$tmp/chain.pem" > "$tmp/inter.pem"
+verify_args=(-CAfile "$bundle")
+[ -s "$tmp/inter.pem" ] && verify_args+=(-untrusted "$tmp/inter.pem")
+if openssl verify "${verify_args[@]}" "$tmp/leaf.pem" > "$tmp/verify.out" 2>&1; then
   say "verification" "OK — bundle validates $DEP_HOST"
 else
   say "verification" "FAILED — bundle does not contain the needed root"

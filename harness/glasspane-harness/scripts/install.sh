@@ -151,13 +151,28 @@ else
 fi
 
 # ------------------------------------------------------------------ GPG verify (release asset provenance)
-# Release signing key (GPG, key 0929EA31DF4F7429F63FC53189D88B1D043A1298, uid
-# "jingzhao-l (sign-github) <ET_lin@outlook.com>"). GPG verifies SOURCE identity: the
-# release pipeline publishes a detached signature next to every asset as `<asset>.asc`,
-# and verifying it proves the tarball came from this key, not just that its SHA-256 is
-# intact (content integrity is still the checksum's job). Best-effort by design: a
-# missing signature (unsigned release) or a failed check only warns and continues — the
-# download remains checksum-verified either way.
+# Release signing key (GPG). GPG verifies SOURCE identity: the release pipeline
+# publishes a detached signature next to every asset as `<asset>.asc`, and verifying
+# it proves the tarball came from this key, not just that its SHA-256 is intact
+# (content integrity is still the checksum's job).
+#
+# The policy splits three ways, and the split is the point:
+#   - no `.asc` published at all, or no gpg on the machine  -> a POLICY GAP. Warn and
+#     continue. This is the 0.6.4 decision and it still stands: an unsigned release is
+#     not evidence of tampering.
+#   - `.asc` there but it does not verify, or it verifies under a DIFFERENT key
+#     fingerprint  -> a TAMPERING SIGNAL. Refuse. The only other check in this path is
+#     SHA256SUMS.txt, fetched from the same origin as the asset it lists, so both
+#     vouchings come from one source; a signature that fails to verify is the single
+#     piece of evidence that cannot be produced by that same source.
+#   - `.asc` could not be fetched for a reason that is not "it isn't there" (TLS
+#     interception, 403, a rewritten response) -> NOT the same as unsigned. Refuse.
+#     Collapsing that into "no .asc published" would let a blocked signature fetch buy
+#     an unverified install with a reassuring word for it.
+#
+# The fingerprint is data here, not prose: a comment naming a key has never verified
+# anything, and `GOODSIG` alone is satisfied by whichever key made the signature.
+GLASSPANE_HARNESS_SIGNING_FPR="0929EA31DF4F7429F63FC53189D88B1D043A1298"
 GLASSPANE_HARNESS_SIGNING_PUBLIC_KEY="$(cat <<'PGPKEY'
 -----BEGIN PGP PUBLIC KEY BLOCK-----
 
@@ -228,21 +243,45 @@ verify_asset_gpg() {
   # variable naming: called with a URL that was not in `$URL`, it died on
   # `URL: unbound variable` under `set -u` rather than verifying anything.
   local file="$1" name="$2" url="$3"
-  local asc="$TMP/$name.asc" gnupg out rc=0
+  local asc="$TMP/$name.asc" gnupg out rc=0 http fpr
   info "verifying release asset GPG signature"
   if ! command -v gpg >/dev/null 2>&1; then
     GPG_STATE="skipped (gpg not on PATH)"
     warn "gpg not found on PATH — skipping release asset GPG provenance (integrity is still checksum-only)"
     return 0
   fi
-  if ! curl -fsSL -o "$asc" "$url.asc" 2>/dev/null; then
+  # The status code is read from curl, not inferred from a non-zero exit: `-f` folds
+  # "not published", "blocked by the network", and "answered with something else" into
+  # one failure, and only the first of those is a policy gap we agree to tolerate.
+  # `|| true` rather than `|| echo 000`: curl prints the code it got *and* fails, so the
+  # fallback would append to it and produce a status like `404000` — a made-up value fed
+  # into the comparison that is supposed to be about the real one.
+  http="$(curl -sS -o "$asc" -w '%{http_code}' "$url.asc" 2>/dev/null || true)"
+  [ -n "$http" ] || http="000"
+  if [ "$http" = "404" ]; then
     GPG_STATE="skipped (no .asc published for this asset)"
     warn "no GPG signature sidecar ($name.asc) published for this release — skipping (unsigned is a policy gap, not tampering)"
     return 0
   fi
+  if [ "$http" != "200" ] || [ ! -s "$asc" ]; then
+    GPG_STATE="FAILED (could not fetch the signature: HTTP $http)"
+    error "the signature for $name could not be fetched (HTTP $http) — this is not the same as it being unpublished"
+    error "refusing to install bytes whose provenance check could not be run. Re-run, or fetch $url.asc yourself and verify it."
+    exit 1
+  fi
   gnupg="$(mktemp -d)"
   chmod 700 "$gnupg"
-  printf '%s' "$GLASSPANE_HARNESS_SIGNING_PUBLIC_KEY" | GNUPGHOME="$gnupg" gpg --batch --quiet --import
+  # `set -e` + a bare pipeline here meant an import failure ended the whole installer
+  # with nothing but gpg's raw stderr on screen, and the throwaway keyring created above
+  # stayed on disk: the `rm -rf "$gnupg"` further down was already unreachable. Every
+  # exit path from here on removes it.
+  if ! printf '%s' "$GLASSPANE_HARNESS_SIGNING_PUBLIC_KEY" | GNUPGHOME="$gnupg" gpg --batch --quiet --import >/dev/null 2>&1; then
+    rm -rf "$gnupg"
+    GPG_STATE="FAILED (could not import the embedded signing key)"
+    error "gpg could not import this product's embedded signing key — provenance cannot be established"
+    error "refusing to install. Check that gpg works: gpg --version"
+    exit 1
+  fi
   # `out="$(gpg --verify …)"` under `set -e` ended the whole script the moment a
   # signature failed to verify: the `rc=$?` below it, the warning it was meant to print,
   # and the `rm -rf "$gnupg"` after it were all unreachable. What the user saw was gpg's
@@ -254,12 +293,26 @@ verify_asset_gpg() {
     rc=1
   fi
   rm -rf "$gnupg"
-  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q GOODSIG; then
-    GPG_STATE="verified (signing key)"
+  # A good signature from a key that is not THE key is exactly the case `GOODSIG` cannot
+  # see: the armored block above decides which key is trusted, so verify that the one
+  # that made this signature is the one whose fingerprint this file names.
+  fpr="$(printf '%s\n' "$out" | awk '/^\[GNUPG:\] VALIDSIG /{print toupper($3); exit}')"
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q GOODSIG \
+    && [ "$fpr" = "$GLASSPANE_HARNESS_SIGNING_FPR" ]; then
+    GPG_STATE="verified (signing key $fpr)"
     success "GPG provenance verified: release asset signature is from the signing key"
+  elif [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q GOODSIG; then
+    GPG_STATE="FAILED (good signature from an unexpected key: ${fpr:-no VALIDSIG line})"
+    error "the signature verifies, but not under this product's signing key"
+    error "  expected fingerprint $GLASSPANE_HARNESS_SIGNING_FPR"
+    error "  actual fingerprint   ${fpr:-unknown}"
+    error "refusing to install: a replaced key plus a replaced asset is precisely what a signature is for."
+    exit 1
   else
     GPG_STATE="FAILED (signature did not verify)"
-    warn "release asset GPG signature did not verify ($(printf '%s\n' "$out" | head -1)) — continuing, checksum-only"
+    error "release asset GPG signature did not verify: $(printf '%s\n' "$out" | head -1)"
+    error "refusing to install tampering-suspect bytes. The checksum alone cannot tell a swapped asset from a faithful one."
+    exit 1
   fi
   return 0
 }
@@ -355,14 +408,58 @@ fi
 
 # ------------------------------------------------------------------ verify
 step "Verifying"
-BIN="$(command -v "$PRODUCT" || echo "$INSTALL_ROOT/bin/$PRODUCT")"
+# This block used to be a green light with nothing behind it. It resolved
+# `command -v $PRODUCT` — i.e. whichever copy happened to be first on PATH, which on a
+# machine with an older install is not the bytes this run just installed — then ran
+# `"$BIN" --version 2>&1 | head -1` under `|| true`. The pipeline's status is `head`'s,
+# and even that was discarded, so the placeholder binary that npm leaves when it blocks a
+# lifecycle script (it prints an apology to stderr and exits 1) rendered as:
+#     [OK]    glasspane-harness --version -> Error: … postinstall script was not run.
+# and the installer exited 0. The status now comes from the command itself, and the
+# artifact checked is the one this channel wrote.
+BIN=""
+case "$INSTALLED_VIA" in
+  npm*)
+    NPMPREFIX="$(npm prefix -g 2>/dev/null || true)"
+    [ -n "$NPMPREFIX" ] && BIN="$NPMPREFIX/bin/$PRODUCT"
+    ;;
+esac
+[ -n "$BIN" ] || BIN="$INSTALL_ROOT/bin/$PRODUCT"
 if [ ! -x "$BIN" ]; then
-  error "$PRODUCT is not on PATH after install — installed via $INSTALLED_VIA but no executable was found"
+  error "$PRODUCT is not where this install put it ($BIN) — installed via ${INSTALLED_VIA:-nothing}"
+  error "  Remedy: re-run the channel directly and read its own output; do not trust a command found elsewhere on PATH."
   exit 1
 fi
-VERSION_OUT="$("$BIN" --version 2>&1 | head -1)" || true
+# The exit status is taken in the `if`, exactly as the gpg call above does it. Both the
+# `|| true` and the `| head -1` in the old line threw that status away — and the nested
+# `$( (cmd) )` form that "fixes" it is not parseable by the bash 3.2 macOS still ships.
+if VERSION_OUT="$("$BIN" --version 2>&1)"; then VERSION_RC=0; else VERSION_RC=$?; fi
+# First line only. `${VAR%%$'\n'*}` is the clever form and bash 3.2 (the bash macOS still
+# ships) cannot parse `$'\n'` inside a double-quoted expansion — it leaves the quote open
+# to end of file. The pipeline's status is not being read here: VERSION_RC above is the
+# exit code of the command itself, which is the thing that used to be lost.
+VERSION_FIRST="$(printf '%s\n' "$VERSION_OUT" | head -1)"
+if [ "$VERSION_RC" -ne 0 ]; then
+  error "$PRODUCT --version exited $VERSION_RC — the command that was installed does not run"
+  printf '%s\n' "$VERSION_OUT" | sed 's/^/    /' >&2
+  error "  If that is the placeholder ('postinstall script was not run'), npm gated the lifecycle script. Remedy:"
+  error "    npm install -g --allow-scripts=$PRODUCT ${NPM_SPEC:-$PRODUCT}"
+  error "  Or install the release asset instead: bash $0"
+  exit 1
+fi
+case "$VERSION_FIRST" in
+  [0-9]*.[0-9]*) ;;
+  *)
+    error "$PRODUCT --version printed something that is not a version: '$VERSION_FIRST'"
+    exit 1
+    ;;
+esac
+if [ -n "$VERSION" ] && [ "$VERSION_FIRST" != "$VERSION" ]; then
+  error "installed command reports $VERSION_FIRST, but this installer asked for $VERSION"
+  exit 1
+fi
 success "installed via $INSTALLED_VIA"
-success "$PRODUCT --version -> ${VERSION_OUT:-<no version output>}"
+success "$PRODUCT --version -> $VERSION_FIRST"
 
 # ------------------------------------------------------------------ next steps (the part a generic installer cannot know)
 step "Next steps"

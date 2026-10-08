@@ -4,9 +4,9 @@
   "referenceClone": ".external/opencode",
   "observedAt": "2026-10-08",
   "counts": {
-    "identical": 4668,
-    "edited": 259,
-    "added": 81,
+    "identical": 4667,
+    "edited": 260,
+    "added": 114,
     "deleted": 1705
   },
   "edited": [
@@ -19,7 +19,6 @@
     "README.md",
     "SECURITY.md",
     "bun.lock",
-    "bunfig.toml",
     "package.json",
     "packages/app/src/components/dialog-connect-provider.stories.tsx",
     "packages/app/src/components/dialog-connect-provider.tsx",
@@ -159,6 +158,7 @@
     "packages/opencode/src/cli/cmd/upgrade.ts",
     "packages/opencode/src/cli/cmd/web.ts",
     "packages/opencode/src/cli/network.ts",
+    "packages/opencode/src/cli/upgrade.ts",
     "packages/opencode/src/config/config.ts",
     "packages/opencode/src/config/managed.ts",
     "packages/opencode/src/config/paths.ts",
@@ -206,6 +206,7 @@
     "packages/opencode/test/config/config.test.ts",
     "packages/opencode/test/config/v2-compat.test.ts",
     "packages/opencode/test/fixture/config.ts",
+    "packages/opencode/test/installation/installation.test.ts",
     "packages/opencode/test/plugin/trigger.test.ts",
     "packages/opencode/test/plugin/workspace-adapter.test.ts",
     "packages/opencode/test/server/httpapi-experimental.test.ts",
@@ -319,7 +320,16 @@
     "SYNCLOG.md",
     "assets/banner.svg",
     "assets/logo.svg",
-    "contracts/kernel-pin.json",
+    "contracts/kernel-fixtures/decision-log-chain.ok-01.json",
+    "contracts/kernel-fixtures/decision-log-entry.ok-01.json",
+    "contracts/kernel-fixtures/dimension-context.ok-01.json",
+    "contracts/kernel-fixtures/evidence-pack.ok-01.json",
+    "contracts/kernel-fixtures/evidence-pack.ok-02.json",
+    "contracts/kernel-fixtures/evidence-pack.ok-03.json",
+    "contracts/kernel-fixtures/evidence-pack.ok-04-legacy-draft.json",
+    "contracts/kernel-fixtures/evidence-pack.ok-05-pixelbounds-null.json",
+    "contracts/kernel-fixtures/recipe-config.ok-01.json",
+    "contracts/kernel-vendor.json",
     "docs/evidence.md",
     "docs/index.md",
     "docs/install.md",
@@ -342,15 +352,39 @@
     "packages/opencode/src/tool/glasspane/index.ts",
     "packages/opencode/src/tool/glasspane/kernel.ts",
     "packages/opencode/test/config/project-config-dirs.test.ts",
-    "packages/opencode/test/lib/kernel-contract.ts",
     "packages/opencode/test/plugin/glasspane-compaction.test.ts",
     "packages/opencode/test/plugin/glasspane-decision-log.test.ts",
     "packages/opencode/test/tool/glasspane-kernel.test.ts",
     "packages/opencode/test/tool/glasspane-surface.test.ts",
+    "packages/opencode/vendor/kernel/fixtures/decision-log-chain.ok-01.json",
+    "packages/opencode/vendor/kernel/fixtures/decision-log-entry.ok-01.json",
+    "packages/opencode/vendor/kernel/fixtures/dimension-context.ok-01.json",
+    "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-01.json",
+    "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-02.json",
+    "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-03.json",
+    "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-04-legacy-draft.json",
+    "packages/opencode/vendor/kernel/fixtures/evidence-pack.ok-05-pixelbounds-null.json",
+    "packages/opencode/vendor/kernel/fixtures/recipe-config.ok-01.json",
+    "packages/opencode/vendor/kernel/fixtures/report.ok-01.html",
+    "packages/opencode/vendor/kernel/fixtures/report.ok-01.md",
+    "packages/opencode/vendor/kernel/schemas/decision-log-entry.schema.json",
+    "packages/opencode/vendor/kernel/schemas/evidence-pack.schema.json",
+    "packages/opencode/vendor/kernel/schemas/recipe-config.schema.json",
+    "packages/opencode/vendor/kernel/src/canonical-json.ts",
+    "packages/opencode/vendor/kernel/src/decision-log-entry.ts",
+    "packages/opencode/vendor/kernel/src/decision-log.ts",
+    "packages/opencode/vendor/kernel/src/dimension-context.ts",
+    "packages/opencode/vendor/kernel/src/errors.ts",
+    "packages/opencode/vendor/kernel/src/evidence-decision.ts",
+    "packages/opencode/vendor/kernel/src/evidence-pack.ts",
+    "packages/opencode/vendor/kernel/src/index.ts",
+    "packages/opencode/vendor/kernel/src/parse.ts",
+    "packages/opencode/vendor/kernel/src/recipe-config.ts",
+    "packages/opencode/vendor/kernel/src/schemas.ts",
     "product.json",
     "script/gpg-signing.sh",
     "script/kernel-conformance.mjs",
-    "script/kernel-pin.mjs",
+    "script/kernel-vendor.mjs",
     "scripts/install.sh"
   ],
   "deleted": [
@@ -2084,12 +2118,7 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "f10b94430d0a6e07e4fe0cd0edf1a231bb0efa24"
-    },
-    {
-      "file": "bunfig.toml",
-      "upstreamHash": "c506ff57c4bf3fa3a6bd3501b8ce2fc29122accb",
-      "forkHash": "5aaf7a6a85d22cb0d46c1cd075b03efa8e05b73a"
+      "forkHash": "63900bbae9b8f94ff1f66a1eae5039b91c2c441c"
     },
     {
       "file": "CONTEXT.md",
@@ -2654,7 +2683,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "098a9685b5a5252f27a43ffd8c1375c23984e339"
+      "forkHash": "79af88f6b6d2eaa8a2bb22e55be823baee0d8107"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -2674,7 +2703,7 @@
     {
       "file": "packages/opencode/script/publish.ts",
       "upstreamHash": "ac1cafff56f46e9611a9ff78aa05217d21a907ef",
-      "forkHash": "5a53a4bbf48d0529c2f7096575897986c4c30b09"
+      "forkHash": "2e4da22b067cdd0b4093dcd82bc328fb4bc1e715"
     },
     {
       "file": "packages/opencode/src/acp/service.ts",
@@ -2784,7 +2813,7 @@
     {
       "file": "packages/opencode/src/cli/cmd/upgrade.ts",
       "upstreamHash": "3c1604a0b8354c49fa06a93e825e4b11041cc5dd",
-      "forkHash": "c7623eff0b91684f7ff469f94f9edcad9e2aea29"
+      "forkHash": "3d6fdd9407191b4ad7bd4953f42849bdf60f6bb5"
     },
     {
       "file": "packages/opencode/src/cli/cmd/web.ts",
@@ -2795,6 +2824,11 @@
       "file": "packages/opencode/src/cli/network.ts",
       "upstreamHash": "22040ed41015849f47dc39c0340e3e0986116e85",
       "forkHash": "a7345fd10a02b3c0c259c28bf1d3fbef7231cf03"
+    },
+    {
+      "file": "packages/opencode/src/cli/upgrade.ts",
+      "upstreamHash": "62b230a6336471aa735f82cfb24a4ae2b0c8c31a",
+      "forkHash": "f2a4179d35869d4336c7305b9d7bb8a4b1058670"
     },
     {
       "file": "packages/opencode/src/config/config.ts",
@@ -2849,7 +2883,7 @@
     {
       "file": "packages/opencode/src/installation/index.ts",
       "upstreamHash": "4300220255b3ba717eeb229afd26f5e745c330ed",
-      "forkHash": "79eee56a39b1249ddd11457376a89982f10fe4cd"
+      "forkHash": "2311fce36999a39943ca8c2b7071a36c25ae49e7"
     },
     {
       "file": "packages/opencode/src/mcp/index.ts",
@@ -3032,6 +3066,11 @@
       "forkHash": "cff4839bcc1f79b5f75f70eafe576368605241ec"
     },
     {
+      "file": "packages/opencode/test/installation/installation.test.ts",
+      "upstreamHash": "3d4b4cba31a604851216a67c08a3b9cb2a5986f7",
+      "forkHash": "04d53121b72d05743d66033c47418e86c0134cef"
+    },
+    {
       "file": "packages/opencode/test/plugin/trigger.test.ts",
       "upstreamHash": "07fd8e2f21bc51e80ecdfcb61c1851c7fd057db1",
       "forkHash": "72e706c8f2d343e3e761edf1c73e2132be74dfb3"
@@ -3134,7 +3173,7 @@
     {
       "file": "packages/tui/src/routes/session/index.tsx",
       "upstreamHash": "2b54f21671b3889e6752175b1c2b0f36d189d3b9",
-      "forkHash": "44fab1cef5e5d08ec89214e64425f99bdd5b056f"
+      "forkHash": "88f76598f574a5acf885446785ccba50fbd28d7e"
     },
     {
       "file": "packages/tui/src/theme/assets/aura.json",
@@ -3319,7 +3358,7 @@
     {
       "file": "packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx",
       "upstreamHash": "6da90633ca421fa085fa1c69ffbd5c0c8a3dc0fa",
-      "forkHash": "ac8e1a80f678abd51cd6f4f6b941ff1f26c3b27e"
+      "forkHash": "463aa0800bcbbfedbb5b8f906749634e20739715"
     },
     {
       "file": "packages/tui/test/fixture/fixture.ts",
@@ -3354,7 +3393,7 @@
     {
       "file": "SECURITY.md",
       "upstreamHash": "e7e59f4a27ac2bd2ed5005f8851dcb946c08f914",
-      "forkHash": "1d92d4ba1f689bbe745a1b191e46e807db6dfe61"
+      "forkHash": "87f18249d8ae2f8442625829c4df103029c00064"
     }
   ]
 }

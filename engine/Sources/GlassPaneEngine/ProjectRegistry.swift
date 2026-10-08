@@ -72,6 +72,40 @@ public final class ProjectRegistry {
     /// flag before presenting this as "no projects registered".
     public var all: [ProjectEntry] { projects }
 
+    /// What a reader may actually publish about the table. Two shapes that look
+    /// identical through `all` — "nothing is registered" and "the file cannot be
+    /// read" — are separated here, because every surface that prints a list has
+    /// to say which of the two it measured. `glasspaned --list-projects` used to
+    /// print `[]` + exit 0 for the second case.
+    public enum RegistryListing {
+        case registered([ProjectEntry])
+        case unreadable(reason: String)
+    }
+
+    public func listing() -> RegistryListing {
+        if loadFailed {
+            return .unreadable(reason: unreadableReport ?? "projects.json at \(filePath) could not be read")
+        }
+        return .registered(projects)
+    }
+
+    /// The read-back verdict a destructive command is allowed to report:
+    /// `removed` may only ever mean "this process re-read the disk and the entry
+    /// is not on it". An unreadable read-back answers nothing, and reporting
+    /// `removed: true` there is the false success this function exists to stop —
+    /// `all` is empty in exactly that case, so a bare `!all.contains(…)` is
+    /// always true when nothing can be seen.
+    public func removalVerdict(projectId: String) -> (answerable: Bool, removed: Bool) {
+        if loadFailed { return (false, false) }
+        // 读不回文件不等于看见它空了。`load()` 把"文件不存在"当成"还没注册任何东西"，
+        // 那对**读侧**（`--list-projects` 刚开机时确实没表）是对的；对**写后回读**是同一种
+        // 撒谎的另一张脸：一次没落盘的写、或事后被人整份删掉的表，都会让 `projects` 是空的，
+        // 于是 `!contains` 恒真，命令就报"确认已删除"并退 0。看不见盘的时候，唯一诚实的回答
+        // 是不回答——CLI 那侧回的是 exit 1 + `loadFailed`，与读不开同一条路径。
+        guard FileManager.default.fileExists(atPath: filePath) else { return (false, false) }
+        return (true, !projects.contains { $0.projectId == projectId })
+    }
+
     /// Current count.
     public var count: Int { projects.count }
 

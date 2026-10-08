@@ -43,7 +43,23 @@ export const UpgradeCommand = {
       }
     }
     prompts.log.info("Using method: " + method)
-    const target = args.target ? args.target.replace(/^v/, "") : await Installation.latest()
+    // `latest()` now refuses for a channel this product does not publish to, instead of
+    // reading some other project's release feed. The refusal carries the sentence the user
+    // needs, so it is delivered as a warning and the command ends — not as an exception
+    // through yargs' `.fail()`, which is what an unguarded `await` would have done.
+    let target: string
+    if (args.target) {
+      target = args.target.replace(/^v/, "")
+    } else {
+      const latest = await Installation.latest().catch((err) => err)
+      if (latest instanceof Installation.NoUpdateChannelError) {
+        prompts.log.warn(latest.message)
+        prompts.outro("Done")
+        return
+      }
+      if (latest instanceof Error) throw latest
+      target = latest
+    }
 
     if (InstallationVersion === target) {
       prompts.log.warn(`glasspane-harness upgrade skipped: ${target} is already installed`)

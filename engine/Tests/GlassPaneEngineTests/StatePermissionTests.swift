@@ -90,6 +90,10 @@ final class StatePermissionTests: XCTestCase {
         // `installer-daemon.log` that launchd itself opened sits at the process
         // umask (0644) and used to be the one file in this root no sweep covered.
         try writeFile("daemon started\n", at: root.installerDaemonLogFile, mode: 0o644)
+        // 每日更新作业的那一份：同一个形状、同一个来源（launchd 按 umask 建），
+        // 从前也只被文档请人自己 chmod。它记的是这台机器装了什么、更新到哪一步、
+        // 每次拒绝的理由——另一个账号读它就读到了这些。
+        try writeFile("update check\n", at: root.updateLogFile, mode: 0o644)
 
         XCTAssertEqual(mode(of: rootPath), 0o755)
         let notes = root.tightenPermissions(log: EngineLog(quiet: true))
@@ -101,6 +105,8 @@ final class StatePermissionTests: XCTestCase {
         XCTAssertEqual(mode(of: entry), 0o600)
         XCTAssertEqual(mode(of: root.installerDaemonLogFile), 0o600,
                        "SECURITY.md 曾把这份日志列为「实测 0644、状态根里唯一不被收紧扫描覆盖」，这条钉住它不再是那个形状")
+        XCTAssertEqual(mode(of: root.updateLogFile), 0o600,
+                       "更新作业那份日志与 launchd 那份同病（0644 来自 umask），从前这张表里没有它")
         XCTAssertEqual(
             mode(of: foreign), 0o664,
             "a file that is not an archive entry is not this sweep's to touch"
@@ -145,11 +151,16 @@ final class StatePermissionTests: XCTestCase {
         try FileManager.default.createDirectory(atPath: root.evidenceDirectory, withIntermediateDirectories: true)
         try writeFile("[]", at: root.projectsFile, mode: 0o600)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.installerDaemonLogFile))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.updateLogFile))
         let notes = root.tightenPermissions(log: EngineLog(quiet: true))
         XCTAssertTrue(notes.isEmpty, "缺日志不是缺陷，也不该被报成缺陷：\(notes)")
         XCTAssertFalse(
             FileManager.default.fileExists(atPath: root.installerDaemonLogFile),
             "扫描不许为了检查而创建 launchd 的输出路径"
+        )
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: root.updateLogFile),
+            "同理：更新作业那份日志也不许被扫描顺手创建出来"
         )
     }
 

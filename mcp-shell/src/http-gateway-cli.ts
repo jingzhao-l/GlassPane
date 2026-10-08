@@ -87,6 +87,19 @@ function parseArgs(argv: readonly string[]): CliOptions {
       i += 1;
     } else if (arg.startsWith("--port=")) {
       options.port = parsePort(arg.slice("--port=".length), "--port");
+    } else {
+      // Same rule `index.ts` states for the stdio entry: an argument this loop
+      // does not recognise is refused, not skipped. Dropping it meant
+      // `--socket-pth /tmp/x` and `--prot 8788` silently left the gateway
+      // bridging the socket it *guessed*, while the operator believed they had
+      // named another daemon — and a stray positional is almost always a typo
+      // of a flag. Pointing a bridge at the wrong daemon puts every act on
+      // somebody else's screen.
+      throw new Error(
+        `unknown argument: ${arg}\n${USAGE}\n`
+        + "This entrypoint accepts only --help/-h, --socket-path/-s <path> and --port/-p <n>. "
+        + "A flag spelled wrong here is not an error the daemon will ever report.",
+      );
     }
   }
   return options;

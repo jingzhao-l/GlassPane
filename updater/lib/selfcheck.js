@@ -4,8 +4,10 @@
  * Two halves, both required:
  *
  * 1. Three version constants read straight out of the tree: root
- *    `package.json`, `mcp-shell/package.json`, and the daemon's own
- *    `public let version` in `engine/Sources/GlassPaneEngine/EngineCore.swift`.
+ *    `package.json`, `mcp-shell/package.json`, and the daemon's own version
+ *    literal in `engine/Sources/GlassPaneEngine/EngineCore.swift` —
+ *    `public let version` up to 1.9.x, `public static let buildVersion` from
+ *    1.10.0, where it became the single source `hello` and `--version` both read.
  *    All three must equal the release version.
  * 2. The tree runs **its own** `node scripts/check-version.mjs`. This repository
  *    keeps a single version line, so the release carries the very CI guard that
@@ -52,9 +54,21 @@ export function siteVersion(stagedDir, site, { readText } = {}) {
     }
     return requirePlainVersion(parsed?.version, site.file)
   }
-  const match = /public let version = "([^"]+)"/.exec(text)
+  // 1.10.0 起 daemon 那份字面量收成了单一出处的 static（`public static let buildVersion = "…"`，
+  // 实例属性只是转读它），好让 `hello` 与 `glasspaned --version` 说不出两套话。而一份 1.9.x
+  // 及更早的暂存树里写的还是 `public let version = "…"`。一个比目标发布更新的 updater 必须两种
+  // 都认得：因为"那一行搬家了"就拒掉一份完全正常的暂存树，等于这个工具亲手掐断自己的升级路径。
+  //
+  // 顺序不是任意的：**先找 static，找不到才回落 instance**。实测一份两份都在的树，按"文件里第一个
+  // 字面量"取会随两行谁在前面而读到不同的数字——那份多出来的常量是谁写的都说不清，而权威出处只有
+  // static 一个。按位置取第一个，等于让行序决定版本号。
+  const authoritative = /public static let buildVersion = "([^"]+)"/.exec(text)
+  const match = authoritative ?? /public let version = "([^"]+)"/.exec(text)
   if (!match) {
-    throw new UpdaterError(CODES.versionLineBroken, `${site.file} in the staged tree has no \`public let version\` constant`)
+    throw new UpdaterError(
+      CODES.versionLineBroken,
+      `${site.file} in the staged tree carries neither \`public static let buildVersion\` nor \`public let version\``,
+    )
   }
   return requirePlainVersion(match[1], site.file)
 }

@@ -33,7 +33,7 @@ export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = [
   "2025-03-26",
   MCP_PROTOCOL_VERSION,
 ] as const;
-export const SERVER_INFO = { name: "glasspane-mcp", version: "1.8.2" } as const;
+export const SERVER_INFO = { name: "glasspane-mcp", version: "1.9.0" } as const;
 
 export const PARSE_ERROR = -32700;
 export const INVALID_REQUEST = -32600;
@@ -227,7 +227,14 @@ export class McpServer {
       return this.error(INVALID_PARAMS, `Unknown tool: ${name}`, id);
     }
 
-    const outcome = await executeTool(spec, params.arguments, this.deps.engine, this.session);
+    // `arguments` is optional in the MCP `tools/call` shape: a tool with no
+    // required inputs (`gp_observe`, `gp_probe_status`, `gp_project_list`…) is
+    // legally called without it. Passing `undefined` into a `z.strictObject`
+    // schema produced "invalid arguments … | remedy: … : Required" — a remedy
+    // naming a cause the published schema (`properties: {}`, no `required`)
+    // denies, and an empty issue path that renders as a stray `": Required"`.
+    // Absent means empty here, exactly what the `{"arguments":{}}` twin sends.
+    const outcome = await executeTool(spec, params.arguments ?? {}, this.deps.engine, this.session);
     return this.result(id, { content: outcome.content, isError: outcome.isError });
   }
 

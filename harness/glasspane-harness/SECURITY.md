@@ -46,5 +46,37 @@ binding refuses that path by design.
   pin manifest.
 - Dependabot is disabled on purpose: an auto-bump can pass this repo's CI and still
   invalidate the recorded divergence surface.
-- npm releases carry provenance in CI (Trusted Publisher, staged-only); the install path
-  is `npm install -g glasspane-harness` or the reviewed one-click installer.
+- npm releases are published from this repo's Release workflow with `--provenance`, so the
+  registry records a signed provenance statement tying the published tarball to the commit
+  and workflow run that built it. What is **not** in place is npm's repository-side Trusted
+  Publisher setting: publishing currently authenticates with the workflow's OIDC identity
+  per-run, and a run that reports "staged, not published" has published nothing. `npm view
+  glasspane-harness@<version>` and `npm audit signatures` are the checks, not a green job.
+- Release assets (`glasspane-harness-darwin-<arch>.zip`) carry a `SHA256SUMS.txt` manifest
+  and a detached GPG signature per asset (`.asc`). The signing key's full fingerprint is
+  asserted, not just mentioned: `scripts/install.sh` carries both the armored public key and
+  the fingerprint it requires a `VALIDSIG` to match. What is **not** yet asserted is that the
+  release lane's `GPG_PRIVATE_KEY` secret *is* that key — CI signs with whatever the secret
+  holds, so the installer's check is the enforcement point, not a CI step.
+
+## Verifying what you installed
+
+A version string that prints is not evidence the bytes are the bytes that were published.
+Both channels have a check, and neither check is performed on your behalf unless you ask:
+
+```bash
+# npm channel: does the registry vouch for these bytes, and does the attestation resolve?
+npm audit signatures --prefix "$(npm root -g)/.."   # provenance + registry signatures
+
+# release-asset channel: checksum, then signature, then the identity of the signer
+shasum -a 256 -c SHA256SUMS.txt                     # integrity of the downloaded bytes
+gpg --verify glasspane-harness-darwin-arm64.zip.asc \
+           glasspane-harness-darwin-arm64.zip
+gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt     # the manifest itself is signed too
+```
+
+A checksum answers "did the transfer arrive intact"; only the signature answers "who made
+this", and `SHA256SUMS.txt` is served from the same origin as the asset it lists — so on its
+own it cannot survive a replaced release. An **absent** `.asc` is a policy gap and the
+installer says so and continues; a signature that **does not verify**, or one made by a key
+other than the fingerprint above, is a tampering signal and the installer refuses it.

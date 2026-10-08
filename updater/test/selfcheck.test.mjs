@@ -58,6 +58,60 @@ test('three version sites and the tree guard are what self-checking means', () =
   }
 })
 
+test('daemon 位点两种形状都读得出来——搬家不许掐断升级路径', () => {
+  // 1.9.x 及以前的树写 `public let version = "…"`；1.10.0 起收成单一无出处
+  // `public static let buildVersion = "…"`，实例属性转读它。一个更新的 updater 去校验
+  // 一份较旧的暂存树（或反之）是升级路径上正常会发生的事：因为"那一行搬家了"就拒掉一份
+  // 完全正常的树，等于这个工具亲手把自己无法再更新别人。
+  const dir = tempDir(`${TMP_PREFIX}selfcheck-shapes-`)
+  try {
+    const legacy = path.join(dir, 'legacy')
+    makeTree(legacy, '1.9.0')
+    assert.equal(siteVersion(legacy, VERSION_SITES.find((s) => s.id === 'daemon-hello')), '1.9.0',
+      '旧形状读不出来')
+
+    const moved = path.join(dir, 'moved')
+    makeTree(moved, '1.10.0', {
+      driftSite: {
+        file: path.join('engine', 'Sources', 'GlassPaneEngine', 'EngineCore.swift'),
+        content: 'public final class EngineCore {\n    public static let buildVersion = "1.10.0"\n    public let version = EngineCore.buildVersion\n}\n',
+      },
+    })
+    assert.equal(siteVersion(moved, VERSION_SITES.find((s) => s.id === 'daemon-hello')), '1.10.0',
+      '新形状读不出来')
+
+    // 两份字面量都在的树：读哪个**不能由行序决定**。半搬过来的、或在 static 之外又留了一份
+    // 实例常量的树，按"文件里第一个带引号的版本"取会读到后面那一处，而权威出处只有 static。
+    const both = path.join(dir, 'both-literals')
+    makeTree(both, '1.10.0', {
+      driftSite: {
+        file: path.join('engine', 'Sources', 'GlassPaneEngine', 'EngineCore.swift'),
+        content: 'public final class EngineCore {\n    public let version = "9.9.9"\n    public static let buildVersion = "1.10.0"\n    public let versionAliased = EngineCore.buildVersion\n}\n',
+      },
+    })
+    assert.equal(siteVersion(both, VERSION_SITES.find((s) => s.id === 'daemon-hello')), '1.10.0',
+      'instance 那份排在前面就被读走了：版本号由行序决定，而不是由权威出处决定')
+
+    // 对照必须也能红：两种形状都没有的树，仍然要说"读不到"而不是回一个 null。
+    const broken = path.join(dir, 'broken')
+    makeTree(broken, '1.10.0', {
+      driftSite: {
+        file: path.join('engine', 'Sources', 'GlassPaneEngine', 'EngineCore.swift'),
+        content: 'public final class EngineCore {\n    public let version = EngineCore.buildVersion\n}\n',
+      },
+    })
+    assert.throws(
+      () => siteVersion(broken, VERSION_SITES.find((s) => s.id === 'daemon-hello')),
+      (error) => error.code === CODES.versionLineBroken
+        && /neither/.test(error.message)
+        && /public static let buildVersion/.test(error.message),
+      '两种形状都没有时，拒绝的话必须把两处都点名，否则读的人找不到该改哪里',
+    )
+  } finally {
+    removeDir(dir)
+  }
+})
+
 test('a tree whose own guard exits non-zero is refused', () => {
   const dir = tempDir(`${TMP_PREFIX}selfcheck-guard-`)
   try {

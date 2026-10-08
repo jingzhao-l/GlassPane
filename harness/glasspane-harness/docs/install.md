@@ -50,11 +50,35 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ```bash
 glasspane-harness --version        # the product's manifest version, verbatim
+gp-harness --version               # the second shipped command, same binary
 ```
 
 Then, inside a session, ask for `gp_probe_status`. It reports the engine version,
 advertised capabilities, and the four permission seats. Every remedy the tool surface
 emits points back at that call, so it is the first thing to read when something is off.
+
+A version that prints is not evidence the bytes are the bytes that were published, so the
+two delivery channels each have their own check. Neither one runs on your behalf unless
+you ask:
+
+```bash
+# npm channel — does the registry vouch for these bytes, and is there an attestation?
+npm audit signatures --prefix "$(npm prefix -g)"
+
+# release-asset channel — checksum, then signature, then *which key* made it
+shasum -a 256 -c SHA256SUMS.txt
+gpg --verify glasspane-harness-darwin-arm64.zip.asc glasspane-harness-darwin-arm64.zip
+```
+
+The `curl` channel runs both of those itself. What it does with each outcome is the part
+worth knowing: a release that publishes no `.asc`, or a machine with no `gpg`, is a policy
+gap — it warns, names the gap, and installs, because an unsigned release is not evidence
+of tampering. A signature that **does not verify**, one made by a key other than the
+fingerprint the installer itself carries, or a signature fetch
+that fails for a reason that is not 404, is a tampering signal — it refuses and exits.
+That distinction matters because `SHA256SUMS.txt` is downloaded from the same origin as the
+asset it lists, so on its own it cannot survive a swapped release; the signature is the one
+check whose answer the other side cannot produce.
 
 The web app is embedded: `glasspane-harness serve --port 4096` serves it from the same
 process (a build made with `--skip-embed-web-ui` starts and says the UI is absent).

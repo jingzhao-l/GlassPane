@@ -24,7 +24,13 @@ public final class EngineCore {
     /// In-memory snapshot retention cap (P1 spec v1.1 §1.5).
     public static let snapshotHistoryLimit = 8
 
-    public let version = "1.8.2"
+    /// The one release-version literal in this target. `scripts/version-sites.mjs`
+    /// keys its daemon site on exactly this line's shape, `hello` reads it, and
+    /// `glasspaned --version` reads it — so the version a client sees on the socket
+    /// and the version a one-shot process prints cannot drift apart.
+    public static let buildVersion = "1.9.0"
+
+    public let version = EngineCore.buildVersion
     public let protocolVersion = "0"
     public private(set) var attachedApp: AttachedApp?
     /// Currently active project (P1 spec v1.4 §1.3). Set via attach with projectId.
@@ -1407,13 +1413,19 @@ public final class EngineCore {
                 passed: passed
             )
         )
-        store(pack)
-        return [
+        let persistence = store(pack)
+        var result: [String: Any] = [
             "passed": passed,
             "actual": Self.wireValue(actual),
             "operationId": operationId,
             "evidenceId": operationId
         ]
+        // R1-07 的同一条规矩，act 已经有、assert_element 从前没有：`evidenceId`
+        // 没落到档案里就不是审计线索，只报一个查无此档的 id 等于让 agent 以为
+        // 这条断言的证据已经存好了。缺字段只发生在"根本没有档案存储"的时候，
+        // 所以这里同样是"缺席即未测"，不编一个 false。
+        if let persistence { result["evidencePersisted"] = persistence }
+        return result
     }
 
     public func diagnose(operationId: String?) throws -> [String: Any] {

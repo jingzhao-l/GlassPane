@@ -301,26 +301,56 @@ export function createHttpGateway(options: HttpGatewayOptions): HttpGateway {
   const close = (): Promise<void> =>
     new Promise((resolve, reject) => {
       client.close?.();
+      // Node only fires server.close's callback once every connection is gone.
+      // What must never be broken is a connection with a request in flight, so
+      // idle keep-alive sockets are reaped until the close actually lands —
+      // including the ones that only *become* idle after close was asked for.
+      const reaper = setInterval(() => closeIdleKeepAliveConnections(server), IDLE_REAP_MS);
+      reaper.unref();
+      // 到这条上限为止，调用方早就拿到了那句 `GP_E_ENGINE_TIMEOUT` + "别重发"，这条连接
+      // 上不会再有谁读的回答；把进程一直挂住对谁都没好处。但要说清楚拆的是什么——
+      // 一句假装干净的关闭，比一句承认放弃了在飞的活更坏。
+      const deadline = setTimeout(() => {
+        report(
+          `shutdown is giving up on a connection that never went idle after ${CALLER_VISIBLE_CEILING_MS}ms;`
+          + " any engine work it carried may still be running — do not re-issue it",
+        );
+        server.closeAllConnections?.();
+      }, CALLER_VISIBLE_CEILING_MS);
+      deadline.unref();
       server.close((error) => {
+        clearInterval(reaper);
+        clearTimeout(deadline);
         if (error) {
           reject(error);
         } else {
           resolve();
         }
       });
-      // Node only fires server.close's callback once every connection is gone;
-      // keep the promise from hanging on a keep-alive client.
-      forceCloseConnections(server);
+      closeIdleKeepAliveConnections(server);
     });
 
   return { server, close };
 }
 
-function forceCloseConnections(server: Server): void {
-  const withCloseAll = server as Server & { closeAllConnections?: () => void };
-  if (typeof withCloseAll.closeAllConnections === "function") {
-    withCloseAll.closeAllConnections();
-  }
+/** How often a closing gateway re-checks for connections that have gone idle. */
+const IDLE_REAP_MS = 200;
+
+function closeIdleKeepAliveConnections(server: Server): void {
+  // Idle-only, deliberately. `closeAllConnections()` — what this called before —
+  // also destroys a socket with a request in flight: measured against the
+  // shipped bundle, a `POST /v1/tools/act` whose daemon call had not returned
+  // came back as `ECONNRESET` with no frame at all, so the caller never learned
+  // the act had happened, never received the "do NOT re-issue `act`" remedy, and
+  // the daemon kept performing that act on the user's screen. That is the B-02
+  // doctrine this gateway is written to hold, broken by the shutdown path.
+  //
+  // No older-Node fallback here, on purpose: `closeIdleConnections` and
+  // `closeAllConnections` both landed in Node v18.2.0 and this package declares
+  // `engines: node >=18`, so a runtime with one and not the other does not
+  // exist. A branch that cannot run is not defensive — and if it could run, the
+  // only thing it would do is re-import the bug above.
+  server.closeIdleConnections?.();
 }
 
 /* ------------------------------------------------------------------ *
@@ -1231,7 +1261,14 @@ function readBody(req: IncomingMessage, limit: number): Promise<string> {
     req.on("data", (chunk: Buffer) => {
       size += chunk.length;
       if (size > limit) {
-        req.destroy();
+        // Stop reading, but keep the socket. The 400 that names this limit is
+        // the only thing telling the caller *why* it was refused, and destroying
+        // the connection here made every oversized body an ECONNRESET with no
+        // `{code,message,remedy}` at all — measured with a 300 KiB POST — so the
+        // remedy "shrink the request payload and retry" never reached anyone and
+        // the caller retried the same oversized body.
+        chunks.length = 0;
+        req.pause();
         reject(new HTTPPayloadTooLargeError(limit));
         return;
       }

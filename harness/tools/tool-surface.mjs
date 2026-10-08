@@ -107,16 +107,18 @@ const surfaceALoc = [...surfaceAByFile.values()].reduce((s, n) => s + n, 0)
  * the 17.78% happened in the first place.
  */
 /**
- * The kernel is a **dependency** now (`iterate-kernel`, resolved through the fork's
- * lockfile and pinned by `contracts/kernel-pin.json`), so there are no vendored kernel
- * lines left to exclude from surface B. This function used to read the vendor manifest
- * and drop those files from our authorship count.
+ * The kernel is a **dependency** now: `iterate-kernel`, resolved through the fork's own
+ * lockfile, with its version, integrity and contract corpus pinned by
+ * `contracts/kernel-pin.json`. There are therefore no vendored kernel lines left to
+ * exclude from surface B — the exclusion this function used to implement is gone by design.
  *
- * The failure mode inverted, and the guard moved with it: kernel source re-appearing
- * under `packages/opencode/vendor/kernel` would now drop several thousand dependency
- * lines into *our* surface with nothing left to exclude them. `measureFork` refuses that
- * tree outright. A missing pin manifest is likewise not silent: the dependency then
- * cannot be attributed, and the tool says so instead of printing a number.
+ * What remains of its job, in the same spirit as the vendor era: the manifest path that
+ * was actually read is printed with the dependency line (`observed.surfaces.fork.kernelPin`),
+ * because naming a path that does not exist is how a provenance claim goes unverifiable
+ * (that is exactly how the old exclusion sat dead while naming `harness/contracts/…`), and
+ * the failure mode inverted — kernel source re-appearing under `packages/opencode/vendor/kernel`
+ * would now drop several thousand dependency lines into *our* authorship count with nothing
+ * left to exclude them, so `measureFork` refuses that tree outright.
  */
 function readKernelDependency() {
   const candidates = [
@@ -132,10 +134,10 @@ function readKernelDependency() {
   }
   const manifest = JSON.parse(readFileSync(manifestFile, "utf8"))
   if (manifest?.package !== "iterate-kernel" || typeof manifest?.version !== "string") {
-    console.error("tool-surface: contracts/kernel-pin.json does not describe an iterate-kernel pin")
-    return null
+    console.error(`tool-surface: ${manifestFile} does not describe an iterate-kernel pin`)
+    return { manifestFile }
   }
-  return manifest
+  return { package: manifest.package, version: manifest.version, manifestFile }
 }
 
 function measureFork(golden) {
@@ -151,8 +153,6 @@ function measureFork(golden) {
   const refDir = path.join(repoRoot, refRel)
   const hasRef = existsSync(path.join(refDir, ".git"))
   const kernel = readKernelDependency()
-  // Vendored kernel source must not come back: the exclusion that used to keep its
-  // lines out of our authorship count is gone by design.
   if (existsSync(path.join(forkDir, "packages", "opencode", "vendor", "kernel"))) {
     return fail(
       "packages/opencode/vendor/kernel exists again — the kernel ships as the iterate-kernel dependency; delete the tree or re-record the pin with a documented reason",
@@ -256,7 +256,7 @@ function measureFork(golden) {
   return { files, carried, note: null, excluded: [], tests: excludedTests, kernel }
 }
 
-const fail = (note) => ({ files: [], carried: null, note, excluded: [], tests: [] })
+const fail = (note) => ({ files: [], carried: null, note, excluded: [], tests: [], manifest: null })
 
 /**
  * Lines of *authorship*, not lines of difference.
@@ -292,16 +292,29 @@ function debrand(text) {
 
 function countAuthoredLines(diff) {
   const lines = diff.split("\n")
-  const removed = lines.filter((l) => l.startsWith("-") && !l.startsWith("---"))
-  let ri = 0
+  // One-to-one pairing, spent as a *count*. Each removal excuses at most one
+  // addition: a hunk that deletes one line and re-adds it 40 times with the brand
+  // swapped is 39 lines of copy-paste, not a rebranding. The previous form kept a
+  // `ri` cursor that was initialised and never advanced, so `removed.slice(ri)`
+  // was the whole removal set for every addition and a single deleted line excused
+  // an unlimited number of added ones (that shape billed 40 copies as 0 authored).
+  // Pairing is still per-file rather than per-hunk, exactly as before — only the
+  // "each removal is consumed once" part changes.
+  const excusable = new Map()
+  for (const line of lines) {
+    if (!line.startsWith("-") || line.startsWith("---")) continue
+    const key = debrand(line.slice(1))
+    excusable.set(key, (excusable.get(key) ?? 0) + 1)
+  }
   let authored = 0
   for (const line of lines) {
     if (!line.startsWith("+") || line.startsWith("+++")) continue
     const added = debrand(line.slice(1))
-    // Pair this addition with the next removal; if it is the same sentence with the
-    // brand swapped, it is a rebranding rather than something we wrote.
-    const match = removed.slice(ri).find((r) => debrand(r.slice(1)) === added)
-    if (match !== undefined) continue
+    const left = excusable.get(added)
+    if (left) {
+      excusable.set(added, left - 1)
+      continue
+    }
     authored += 1
   }
   return authored
@@ -364,7 +377,7 @@ function build(golden) {
     caliber: {
       engine: "lines of every *.swift under engine/Sources",
       mcpShell: "lines of every *.ts under mcp-shell/src",
-      fork: "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted",
+      fork: "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted, and one deleted line excuses at most one re-added line (pairing is one-to-one, so 40 copies of a rebranded line bill 39)",
       ratio: "surface / (engine + mcp-shell + fork)",
     },
     observedAt: new Date().toISOString().slice(0, 10),
@@ -384,7 +397,10 @@ function build(golden) {
         ratio: ratio(forkLoc),
         vendorExcluded: vendorSummary(fork.excluded),
         testsExcluded: vendorSummary(fork.tests),
-        kernel: fork.kernel ? { package: fork.kernel.package, version: fork.kernel.version } : null,
+        // The path that was ACTUALLY read, repo-relative, so the dependency line
+        // cannot name a manifest that does not exist. Null when nothing was found.
+        kernelPin: fork.kernel?.manifestFile ? path.relative(repoRoot, fork.kernel.manifestFile).split(path.sep).join("/") : null,
+        kernel: fork.kernel?.package ? { package: fork.kernel.package, version: fork.kernel.version } : null,
       },
     },
     totalToolSurfaceLoc: surfaceALoc + forkLoc,
@@ -396,8 +412,36 @@ function build(golden) {
 const golden = existsSync(goldenFile) ? JSON.parse(readFileSync(goldenFile, "utf8")) : null
 const observed = build(golden)
 
+// The limit is a documented number, so a surface sitting over it is a fact the
+// report must state whatever it is doing — not a fact only surface A gets to say.
+const pct = (n) => `${(n * 100).toFixed(2)}%`
+const overLimit = (s) => s.ratio > observed.limit
 const show = (name, s) =>
-  console.log(`  ${name}: ${s.loc} LOC, ${(s.ratio * 100).toFixed(2)}% (documented limit ${(observed.limit * 100).toFixed(0)}%)`)
+  console.log(
+    `  ${name}: ${s.loc} LOC, ${pct(s.ratio)} (documented limit ${(observed.limit * 100).toFixed(0)}%)${overLimit(s) ? "  ← OVER LIMIT" : ""}`,
+  )
+
+/**
+ * Announce every surface that is over the documented limit, with its recorded ratio
+ * next to the current one, and say whether the *crossing* check for that surface is
+ * still live or already spent. The crossing check (`recorded <= limit && now > limit`)
+ * can fire once per surface, ever: a baseline that was already over the limit makes it
+ * permanently false, which is exactly the "gate that cannot go red" shape. The number
+ * of the ratchet is unchanged here — this is reporting, not a new verdict.
+ */
+function announceOverLimit(pairs) {
+  for (const [name, now, was] of pairs) {
+    if (!overLimit(now)) continue
+    console.log(`  ! ${name} is over the documented limit: recorded ${was ? pct(was.ratio) : "(no baseline yet)"} → now ${pct(now.ratio)} (> ${(observed.limit * 100).toFixed(0)}%).`)
+    if (was && overLimit(was)) {
+      console.log(`    The crossing check for this surface is ALREADY SPENT: the baseline itself sits over the limit, so "was within, now crossed" can never fire for it again. What still guards it is the LOC ratchet (any growth past the recorded baseline is red) — nothing here makes the surface legal.`)
+    } else if (was && now.ratio > was.ratio) {
+      console.log(`    The crossing check for this surface is LIVE and fired on this run — it is reported red above.`)
+    } else {
+      console.log(`    Known and tolerated: the limit predates the measurement. The gate stops it growing further.`)
+    }
+  }
+}
 
 console.log(`tool-surface — engine ${observed.engineLoc} LOC across ${observed.engineFiles} files`)
 show("surface A  mcp-shell/src", observed.surfaces.mcpShell)
@@ -409,11 +453,16 @@ if (observed.surfaces.fork.testsExcluded.files > 0) {
   console.log(`  tests excluded from surface B (surface A is measured as src/ only): ${observed.surfaces.fork.testsExcluded.files} files, ${observed.surfaces.fork.testsExcluded.lines} lines — counted out loud so the caliber can be audited`)
 }
 if (observed.surfaces.fork.vendorExcluded.files > 0) {
-  console.log(`  vendored dependency excluded from surface B: ${observed.surfaces.fork.vendorExcluded.files} files, ${observed.surfaces.fork.vendorExcluded.lines} lines (not our surface)`)
+  // Nothing should land here now — the exclusion list is empty by construction. If it
+  // ever is not, a vendored tree came back, and the number says so in the open.
+  console.log(`  files excluded from surface B: ${observed.surfaces.fork.vendorExcluded.files} files, ${observed.surfaces.fork.vendorExcluded.lines} lines`)
 }
 if (observed.surfaces.fork.kernel) {
+  // Name the manifest actually resolved, not a hardcoded path: a wrong provenance string
+  // is unfalsifiable by reading, and the reader cannot tell a live pin from a dead one.
+  const manifest = observed.surfaces.fork.kernelPin ?? "no pin resolved"
   console.log(
-    `  kernel is a dependency, not our surface: ${observed.surfaces.fork.kernel.package}@${observed.surfaces.fork.kernel.version} (integrity and contract corpus pinned in contracts/kernel-pin.json; the vendored-source exclusion was retired with vendor/kernel)`,
+    `  kernel is a dependency, not our surface: ${observed.surfaces.fork.kernel.package}@${observed.surfaces.fork.kernel.version}, pinned by ${manifest} (version, lock integrity and the shipped contract corpus; the vendored-source exclusion was retired with vendor/kernel)`,
   )
 }
 if (observed.carried) console.log(`  note: ${observed.carried}`)
@@ -444,6 +493,14 @@ if (mode === "record") {
     process.exit(1)
   }
   mkdirSync(path.dirname(goldenFile), { recursive: true })
+  // Saying it before writing it: the golden about to be written blesses a surface
+  // that is over the documented limit, and from that commit the crossing check for
+  // it is spent. The record is still allowed (this is a ratchet, not a ban) — but
+  // not silently.
+  announceOverLimit([
+    ["surface A (mcp-shell/src)", observed.surfaces.mcpShell, golden?.surfaces?.mcpShell ?? null],
+    ["surface B (fork, ours)", observed.surfaces.fork, golden?.surfaces?.fork ?? null],
+  ])
   writeFileSync(goldenFile, JSON.stringify(observed, null, 2) + "\n")
   console.log(`recorded -> ${path.relative(repoRoot, goldenFile)}`)
   process.exit(0)
@@ -453,10 +510,11 @@ if (!golden) die(2, `no golden at ${path.relative(repoRoot, goldenFile)} — run
 if (!golden.surfaces?.mcpShell || !golden.surfaces?.fork) die(2, "golden is missing a surface — re-record")
 
 let red = 0
-for (const [name, now, was] of [
+const pairs = [
   ["surface A (mcp-shell/src)", observed.surfaces.mcpShell, golden.surfaces.mcpShell],
   ["surface B (fork, ours)", observed.surfaces.fork, golden.surfaces.fork],
-]) {
+]
+for (const [name, now, was] of pairs) {
   if (now.loc > was.loc) {
     console.error(`  ✗ ${name} grew: ${was.loc} recorded → ${now.loc} LOC (+${now.loc - was.loc})`)
     // Name the movers when the baseline knows them. "grew by 55" alone makes the
@@ -482,16 +540,18 @@ for (const [name, now, was] of [
     }
     red++
   }
+  // Fires only while the recorded baseline is *within* the limit: once a surface has
+  // been recorded over it, this check is spent for that surface forever. That is not
+  // changed here (it would change what counts as red); it is stated out loud by
+  // announceOverLimit below so the reader is not left thinking the crossing guard is
+  // still protecting a surface it can no longer reach.
   if (was.ratio <= golden.limit && now.ratio > observed.limit) {
     console.error(`  ✗ ${name} crossed the documented limit: ${(was.ratio * 100).toFixed(2)}% → ${(now.ratio * 100).toFixed(2)}% (> ${(observed.limit * 100).toFixed(0)}%)`)
     red++
   }
 }
 
-if (observed.surfaces.mcpShell.ratio > observed.limit) {
-  console.log(`  ! surface A is already over the documented limit (${(observed.surfaces.mcpShell.ratio * 100).toFixed(2)}% > ${(observed.limit * 100).toFixed(0)}%).`)
-  console.log("    Known and tolerated: the limit predates the measurement. The gate stops it growing further.")
-}
+announceOverLimit(pairs)
 
 if (observed.note) {
   console.error(`  ✗ surface B cannot be attributed (${observed.note}) — an unmeasured surface cannot be declared within limits.`)
