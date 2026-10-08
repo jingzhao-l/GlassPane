@@ -24,7 +24,13 @@ public final class EngineCore {
     /// In-memory snapshot retention cap (P1 spec v1.1 §1.5).
     public static let snapshotHistoryLimit = 8
 
-    public let version = "1.9.0"
+    /// The one release-version literal in this target. `scripts/version-sites.mjs`
+    /// keys its daemon site on exactly this line's shape, `hello` reads it, and
+    /// `glasspaned --version` reads it — so the version a client sees on the socket
+    /// and the version a one-shot process prints cannot drift apart.
+    public static let buildVersion = "1.9.0"
+
+    public let version = EngineCore.buildVersion
     public let protocolVersion = "0"
     public private(set) var attachedApp: AttachedApp?
     /// Currently active project (P1 spec v1.4 §1.3). Set via attach with projectId.

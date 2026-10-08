@@ -70,8 +70,11 @@ export const SITES = [
   {
     id: 'daemon hello version',
     file: 'engine/Sources/GlassPaneEngine/EngineCore.swift',
-    regex: /(public let version = ")([^"]+)(")/,
-    hint: 'glasspaned 自报版本（设置面板与证据包同源）',
+    // 1.10.0 起这一处改成 `EngineCore.buildVersion` 这一个字面量：`hello` 帧、
+    // `glasspaned --version` 与更新器读的都是它。实例属性 `public let version` 现在
+    // 只是转读它，不再自己带一份字符串——两处字面量迟早会漂。
+    regex: /(public static let buildVersion = ")([^"]+)(")/,
+    hint: 'glasspaned 自报版本（hello、--version、设置面板与证据包同源）',
   },
   {
     id: 'CFBundleShortVersionString',

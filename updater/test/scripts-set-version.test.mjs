@@ -51,7 +51,10 @@ const SITE_TEMPLATES = {
   'updater/package.json': (v) => `${JSON.stringify({ name: 'glasspane-update', version: v, private: true }, null, 2)}\n`,
   'kernel/package.json': (v) => `${JSON.stringify({ name: '@iterate/kernel', version: v, private: true }, null, 2)}\n`,
   'mcp-shell/src/dispatch.ts': (v) => `export const SERVER_INFO = { name: "glasspane-mcp", version: "${v}" }\n`,
-  'engine/Sources/GlassPaneEngine/EngineCore.swift': (v) => `public let version = "${v}"\n`,
+  // 1.10.0 起这份位点写的是 static，实例属性转读它——夹具要按生产形状来，
+  // 否则这里绿的是一套字面量、发出去的树是另一套。
+  'engine/Sources/GlassPaneEngine/EngineCore.swift': (v) =>
+    `public static let buildVersion = "${v}"\n    public let version = EngineCore.buildVersion\n`,
   'engine/scripts/make-app.sh': (v) => `#!/bin/sh\ncat <<XML\n<key>CFBundleShortVersionString</key>\n        <string>${v}</string>\nXML\n`,
   'install.sh': (v) => `#!/bin/sh\nGLASSPANE_RELEASE="v${v}"\n`,
   'installer/cli.js': (v) => `export const RELEASE_VERSION = '${v}'\n`,

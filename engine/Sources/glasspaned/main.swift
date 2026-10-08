@@ -59,6 +59,12 @@ private struct Options {
     var approvalAudit = false
     var approvalVerify = false
     var pruneEvidence = false
+    /// `--version` — print the same literal `hello` reports, and exit. The updater
+    /// pairs this reading with the bundle's `CFBundleShortVersionString`
+    /// (`updater/lib/version.js`); until 1.10.0 the daemon never answered it, so
+    /// that pairing had exactly one live leg and the tests were covering the other
+    /// one with a shell stub that printed a version for *any* argument.
+    var printVersion = false
     var pruneOlderThanDays = 30
     var maintenanceProjectId: String?
     var pruneDryRun = false
@@ -88,6 +94,8 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
         switch argument {
         case "--help", "-h":
             return .help
+        case "--version":
+            options.printVersion = true
         case "--verbose", "-v":
             options.verbose = true
         case "--grant-accessibility":
@@ -237,6 +245,7 @@ private func printUsage() {
         glasspaned --check-input-permission
         glasspaned --check-accessibility
         glasspaned --permissions
+        glasspaned --version
         glasspaned --request-permission <kind>
         glasspaned [--state-dir <path>] --list-projects
         glasspaned [--state-dir <path>] --project-prune [--dry-run]
@@ -281,6 +290,10 @@ private func printUsage() {
         --check-accessibility      Print this process's accessibility seat
                                  (granted | notDetermined — AX exposes no
                                  denied visibility) and exit
+        --version                  Print `glasspaned <version>` and exit 0 — the same literal the
+                                 `hello` frame reports, which is the reading
+                                 `updater/lib/version.js` pairs with the bundle plist. Reads no state,
+                                 so it takes no state root.
         --permissions              Print this process's TCC seats as JSON:
                                  {"subject":…,"permissions":…} and exit. Called as a
                                  one-shot it measures the one-shot — not whichever
@@ -607,6 +620,13 @@ case .errorCode(let message, let code):
         exit(code)
 case .parsed(let parsed):
     options = parsed
+}
+
+if options.printVersion {
+    // 一行、一个出处、退出码 0：读的就是 `hello` 里那个 `version`。这一句不碰状态根，
+    // 所以它既不会创建目录，也不会触发那次收紧扫描——与 `--permissions` 同一个道理。
+    print("glasspaned \(EngineCore.buildVersion)")
+    exit(0)
 }
 
 if options.grantAccessibility {
