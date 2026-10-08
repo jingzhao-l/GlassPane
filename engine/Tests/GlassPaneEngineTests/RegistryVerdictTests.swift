@@ -157,12 +157,24 @@ final class RegistryVerdictTests: XCTestCase {
                       "拒绝分支不见了：`.listing()` 被调了却没被判定")
         // 不许 `!`：这段要找的正是"拒绝分支还在不在"，用强制解包会在它消失时把整条
         // xctest 打成 signal 5——红要红成一条具名失败，不是红成一次环境故障。
+        // 窗口必须有界。整段切到文件尾的话，`exit(1)` 会被后面八条别的 `exit(1)` 满足，
+        // 于是"把拒绝改成 exit(0)"这条变异照样绿——一条只会通过的断言不是断言。
         guard let refusalStart = block.range(of: "case .unreadable") else {
             return XCTFail("拒绝分支的起点找不到")
         }
-        let refusal = block[refusalStart.lowerBound...]
+        let windowEnd = block.range(of: "let encoder", range: refusalStart.upperBound..<block.endIndex)?.lowerBound
+            ?? block.endIndex
+        let refusal = block[refusalStart.lowerBound..<windowEnd]
         XCTAssertTrue(refusal.contains("exit(1)"),
                       "拒绝却退出码 0：读不开仍然被读成\"注册表是空的\"")
+        XCTAssertFalse(refusal.contains("exit(0)"),
+                       "拒绝分支里出现 exit(0)：这条闸的窗口又漂回文件尾了")
+        // 拒绝的那份 JSON 不许带着 `"count": 0` 或 `"projects": []` 出门：读不开的时候
+        // 这两个值都是编的，而它们恰好是这条命令被误读成"什么都没注册"的那两个键。
+        XCTAssertFalse(refusal.contains("\"count\""),
+                       "拒绝报文里还在给一个数不出来的计数")
+        XCTAssertFalse(refusal.contains("\"projects\""),
+                       "拒绝报文里还在给一个看不见的表")
     }
 
     /// `--project-remove` 的 `removed` 只能来自 `removalVerdict`，不许再自己数 `all`。

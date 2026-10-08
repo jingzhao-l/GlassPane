@@ -697,9 +697,11 @@ if options.listProjects {
     // 自己的注释就写着读回失败时不许当成空表；同一份文件在 --project-prune /
     // --project-remove 那里是拒绝覆写的（§12.3.2），读侧不该比写侧更容易蒙混。
     if case .unreadable(let reason) = registry.listing() {
+        // 拒绝报文里不给 `projects`，也不给 `count`：读不开的时候这两个值都是编的，
+        // 而它们恰好就是这条命令被误读成"什么都没注册"的那两个键。少给一个键，比给一
+        // 个看起来像答案的零诚实。
         writeJSON([
             "command": "--list-projects", "loadFailed": true,
-            "projects": [[String: Any]](), "count": 0,
             "registryPath": registry.filePath,
             "error": reason,
             "next": "make the file readable again (python3 -m json.tool \(registry.filePath), or restore it from a copy), then restart the background service so it re-reads"
