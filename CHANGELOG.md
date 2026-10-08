@@ -4,6 +4,36 @@
 
 ## [Unreleased]
 
+### Internal — harness fork 的内核改为依赖，它的尺子跟着换
+
+**判据没动**：本批全在 `harness/`（fork 的内核分发形态与量它的闸），`engine/`、`mcp-shell/`、
+`installer/`、`updater/`、`bridge/` 与根版本线一个文件没碰。
+
+- **fork 不再 vendored 共享内核。** `harness/glasspane-harness/packages/opencode/vendor/kernel/`
+  （25 个文件）与镜像语料 `harness/contracts/kernel-fixtures/`（9 个文件，已经和发布出去的 11 个漂了）
+  一起删除；`packages/opencode` 现在把 **`iterate-kernel@0.1.2`** 当普通依赖，从 registry 解析，
+  `bun.lock` 记 integrity。换得动的前提是 kernel 侧先发了 0.1.2 并把 fixtures 打进 tarball（0.1.1
+  一个没打，`npm pack` 实测）——在那之前 vendoring 是消费者唯一能握住契约字节的形态。
+- **出处现在由 `harness/glasspane-harness/contracts/kernel-pin.json` 钉住**，`script/kernel-pin.mjs --check`
+  验四件事：装进来的版本 == pin、`bun.lock` 那条 specifier 为空（＝registry 解析，不是 `file:`/`link:`）、
+  lock integrity == pin、随包发出的 14 个契约文件（11 fixtures + 3 schemas）逐个 sha256 == pin；
+  `--probe` 从 `git ls-remote` 改成问 registry。它替换的是 `kernel-vendor.mjs` + `kernel-vendor.json`。
+  行为面另有一把：`script/kernel-conformance.mjs` 把随包语料跑过装进来的 `dist`，并把 fork 一直在消费、
+  此前没有任何 fixture 校过的 `dimension-context` 纳进检查——实测 9 条 fixture 对 canonical 检出同答案，
+  zod major 造成的报错文案差异由工具打印成 note。三处 CI 引用（fork `ci.yml`、根 `ci.yml`、
+  `harness-contract.yml`）改到新闸。
+- **顺手修掉一处"绿着却什么都没验"**：`test/tool/glasspane-kernel.test.ts` 按固定层数向上找出处清单，
+  落在一个从来不存在的路径上，缺文件时只 `console.warn` 后 return。位置解析现收在
+  `test/lib/kernel-contract.ts`（逐级上溯直到找到；缺 pin 即红）。
+- **口径变化在两把尺子上可读**：`fork-diff` 重记为 `4668 identical / 259 edited / 81 added / 1705 deleted`
+  （全树 6,713 个条目；上一记 `4669 / 258 / 114 / 1705`，6,746），少的 33 个 added 就是退役掉的 vendored
+  树与它的旧尺子、加回 3 个新文件；`tool-surface` 面 B `5,548 → 5,376` 行（`14.89% → 14.50%`），面 A
+  行数未变（比例 23.19% 随分母而动），**vendored 排除项 11 文件 / 1,464 行 → 0 文件 / 0 行**，金样另记
+  `kernel: iterate-kernel@0.1.2`。`tools/sync-kernel.sh --target=fork` 改为明确拒绝并指向新的三步
+  （bump 依赖 + `bun install` → `kernel-pin.mjs --record` → `kernel-conformance.mjs --impl <checkout>`）；
+  `--target=repo`（mcp-shell 那份 `kernel/` 镜像）本批未动。单文件产物这条不变量重跑过：
+  `script/build.ts --single --skip-install --skip-embed-web-ui` 编译并 boot smoke 通过（`0.7.0`）。
+
 ## [1.8.2] — 2026-10-06
 
 版本判断：**按 patch 记**。四条判据都没动：状态文件的字段没加没改（`update-state.json` 的

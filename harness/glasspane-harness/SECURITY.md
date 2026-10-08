@@ -34,8 +34,16 @@ binding refuses that path by design.
 - Upstream opencode is **pinned** (`v1.18.32`) and the divergence from that pin is
   measured, not described: `harness/tools/fork-diff.mjs` and the weekly
   `harness-contract` workflow.
-- The vendored `@iterate/kernel` mirror is pinned by per-file sha256 with a provenance
-  manifest.
+- The shared kernel is a **registry dependency** (`iterate-kernel`, exact-pinned in
+  `packages/opencode/package.json`, resolved through the fork's lockfile). Its provenance is
+  checked, not assumed: `script/kernel-pin.mjs --check` verifies the installed version, that
+  `bun.lock` resolved it from the registry rather than a `file:`/`link:` path, the recorded
+  lock integrity, and the per-file sha256 of the 14 contract files the package ships
+  (`contracts/kernel-pin.json`). Since 2026-10-08 there is no vendored copy of the kernel in
+  this tree — `tool-surface.mjs` refuses the old `packages/opencode/vendor/kernel` path
+  reappearing. The dependency is exempted from the 3-day `minimumReleaseAge` window because
+  its upstream is the same maintainer, and its bytes remain pinned by lock integrity plus the
+  pin manifest.
 - Dependabot is disabled on purpose: an auto-bump can pass this repo's CI and still
   invalidate the recorded divergence surface.
 - npm releases carry provenance in CI (Trusted Publisher, staged-only); the install path

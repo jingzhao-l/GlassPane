@@ -12,6 +12,25 @@ contract does not).
 
 <!-- 内容归入下一版；此处留空以备下一批。 -->
 
+### Changed — 共享内核改为依赖，仓内副本退役
+
+- **内核不再是抄进仓里的源码。** `packages/opencode/vendor/kernel/`（25 个文件：11 份源码、3 份 schema、11 份 fixture）连同镜像到 `contracts/kernel-fixtures/` 的契约语料一起删除。`glasspane-harness` 现在把 **`iterate-kernel@0.1.2`** 当作 `packages/opencode` 的普通依赖，从 npm 解析，解析结果与完整性记在 `bun.lock`。运行时的行为与 vendored 时期一致：同一份内核、同一套 schema、同一个契约语料。
+- **出处由新清单钉住。** `contracts/kernel-pin.json` 记下版本、registry 解析坐标（`lockKey`/`specifier`/`integrity`）与随包发出的 **14** 个契约文件（11 fixtures + 3 schemas）的 sha256；`script/kernel-pin.mjs --check` 逐条验证——装的版本 == pin、`bun.lock` 那条 specifier 为空（即来自 registry，而不是只在本地存在的 `file:`/`link:` 目录）、lock integrity == pin、契约字节 == pin。`--probe` 改为问 registry（`npm view iterate-kernel version`）。旧的 `kernel-vendor.mjs` / `kernel-vendor.json` 退役。
+- **新增一条行为闸，覆盖面更广。** `script/kernel-conformance.mjs` 把随包发出的 fixtures 跑过**装进来的那份内核**；哈希只证明字节没变，这条证明产品实际依赖的那些答案还是那些答案。它现在也驱动 `dimension-context`——会话压缩里那条维度覆盖线用的就是它，此前没有任何 fixture 校过它。加 `--impl <canonical checkout>` 会再跑第二份实现并要求逐字节同答案：实测 9 条 fixture 两侧同答案，zod major 不同导致的**报错文案**差异被打印成 note，而不是抹平。
+- **单文件二进制的 import 形状是产品要求。** 内核绑定模块只走 per-module 子路径（`iterate-kernel/parse` 这类），不 import barrel：barrel 会在模块加载时读包旁边的 schema 文件，而单文件产物满足不了那次读取。改依赖形态后重跑了这条通道——`bun run script/build.ts --single --skip-install --skip-embed-web-ui` 编译通过，其自带 boot smoke 通过（`glasspane-harness --version` → `0.7.0`）。
+- **安装策略一处例外，随包说明。** `bunfig.toml` 的 `minimumReleaseAgeExcludes` 列出 `iterate-kernel`，与同列的 `@opentui/*`、`@ff-labs/*` 同理：三日冷静期挡的是上游发布窗口被投毒，而这个包的发布方就是本产品线的维护者，且它的字节仍由 lock integrity 与 pin 清单钉住。
+
+### Fixed
+
+- **一条一直绿着却什么都没验的测试。** `test/tool/glasspane-kernel.test.ts` 检查内核出处时按固定层数向上找清单文件，落在一个从来不存在的路径上；文件不在时它打印一条警告然后返回，于是测试通过而断言数为零。出处与包位置的解析现在收在 `test/lib/kernel-contract.ts`（逐级上溯直到找到；缺 pin 直接判红，不再是一句警告），同一条规则被三个测试文件共用。
+
+### Internal
+
+- 更新内核的唯一合法路径变成三步：在 `packages/opencode/package.json` bump 版本并 `bun install` → `node script/kernel-pin.mjs --record` → `bun script/kernel-conformance.mjs --impl <canonical kernel checkout>`。`tools/sync-kernel.sh --target=fork` 现在拒绝执行并打印这三步；`--target=repo`（mcp-shell 用的那份镜像）本批未动。
+- 三道 CI 引用改到新闸：本仓 `.github/workflows/ci.yml`、GlassPane 根 `.github/workflows/ci.yml`、`.github/workflows/harness-contract.yml`。
+- 两把尺子的基线随本批重记：`fork-diff` 对 `v1.18.32` 为 **`4668 identical / 259 edited / 81 added / 1705 deleted`**（全树 6,713 个条目）；`tool-surface` 面 A 8,601 行未变（**23.19%**）、面 B **5,376 行 / 14.50%**，vendored 排除项由 11 文件 / 1,464 行归零——内核现在是依赖，不再是需要从产品自有行数里剔出去的抄本，金样因此记下 `kernel: iterate-kernel@0.1.2`。
+- 文档同批对齐：`FORK.md`、`SYNCLOG.md`、`docs/kernel-integration.md`、`NOTICE`、两份 README、`SECURITY.md` 与 `harness/README.md` 里的内核形态、闸名与数字。
+
 ## [0.7.0] - 2026-10-07
 
 判据（pre-1.0）：**minor** —— 用户可见的安装器 CLI 形状（`--version <值>`、`--help`、

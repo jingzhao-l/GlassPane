@@ -2,6 +2,30 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-08 · 内核不再是 vendored：`iterate-kernel@0.1.2` 成为依赖，`kernel-vendor` 那把尺子退役成 `kernel-pin`
+
+两个提交：`22de725`（改依赖 + 尺子替换）与 `58be696`（`fork-diff` / `tool-surface` 金样随同重记）。
+
+**为什么现在换得动**：kernel 侧先发了 `iterate-kernel@0.1.2`，把 fixtures 打进 tarball——`0.1.1` 一个都没打（`npm pack` 实测）。在那之前 vendoring 是消费者唯一能握住"同一份契约字节"的形态，所以 `packages/opencode/vendor/kernel/`（25 文件：src 11 + schemas 3 + fixtures 11）不是偏好，是当时唯一的解。这条解现在退役，第四份契约副本随之消失。
+
+**改动面（fork-diff）**：`4669/6746, 258 edited, 114 added, 1705 deleted` → **`4668 identical / 259 edited / 81 added / 1705 deleted`，全树 6,713 个条目**。逐条对得上：added 净 −33 ＝ 删掉 36 个（`vendor/kernel` 25 文件 + `contracts/kernel-fixtures` 9 镜像 fixture + `contracts/kernel-vendor.json` + `script/kernel-vendor.mjs`）再加回 3 个（`script/kernel-pin.mjs`、`contracts/kernel-pin.json`、`packages/opencode/test/lib/kernel-contract.ts`）；identical −1 / edited +1 是同一件事——`bunfig.toml` 因 `minimumReleaseAgeExcludes` 第一次成为被改过的上游文件。
+**占比（tool-surface）**：面 A 仍是 8,601 行（**未变**），比例 23.08% → **23.19%**（分母随主仓并行批次与面 B 变小）；面 B **5,548 → 5,376 行，14.89% → 14.50%**；**vendored 排除项 11 文件 / 1,464 行 → 0 文件 / 0 行**——内核现在是依赖，不再是需要从"我们写的行数"里剔出去的抄本。金样为此新增 `kernel: iterate-kernel@0.1.2` 字段，让这次口径变化在尺子上可读，而不只写在提交信息里。测试排除 27 文件 / 1,544 行照旧打印并进金样。
+
+**尺子的替换关系**：
+- `script/kernel-vendor.mjs` + `harness/glasspane-harness/contracts/kernel-vendor.json` 删除，替换者是 `script/kernel-pin.mjs` + `contracts/kernel-pin.json`。`--check` 验四件事：装进来的版本 == pin（`0.1.2`）、`bun.lock` 那条 specifier 为空（＝registry 解析，不是 `file:`/`link:`——否则产品装的是一个只在本地存在的目录）、lock integrity == pin（记的是 `sha512-Mxu7gMD3Zn+i3…`）、随包发出的 **14** 个契约文件（11 fixtures + 3 schemas）逐个 sha256 == pin。`--probe` 不再 `git ls-remote` 追分支头，改成问 registry（`npm view iterate-kernel version`）。
+- 镜像语料 `contracts/kernel-fixtures/`（9 文件）删除——它和发布出去的（11 个）**已经漂移了**，镜像就是第二个真源。语料现在取自装进来的包内部，由 `kernel-pin.json` 按 sha256 钉住。
+- `script/kernel-conformance.mjs` 跑随包语料过**装进来的 dist**，并把 `dimension-context` 纳进驱动面（fork 自己消费它，此前没有任何 fixture 校过它）。实测 `--impl <canonical checkout>`：9 条 fixture 两侧同答案，工具把 zod major 不同导致的**报错文案**差异打印成 note 而不是掩盖它。
+- 三处 CI 引用改到 `kernel-pin`：`harness/glasspane-harness/.github/workflows/ci.yml`、根 `.github/workflows/ci.yml`、`.github/workflows/harness-contract.yml`。
+
+**依赖形态，和那条不能碰的 import 形状**：`src/tool/glasspane/kernel.ts` 只走 per-module 子路径（`iterate-kernel/parse` 这类），不 import barrel——barrel 带进 `schemas`，后者在模块加载时用 `createRequire` 读包旁边的 schema 文件，单文件二进制起不来。这条不是推理：`bun run script/build.ts --single --skip-install --skip-embed-web-ui` 编译通过，且它自带的 boot smoke 通过（`dist/glasspane-harness-darwin-arm64/bin/glasspane-harness --version` → `0.7.0`）。换分发形态必须重跑这条，否则"能构建"只是上一批的结论。
+`bunfig.toml` 把 `iterate-kernel` 加进 `minimumReleaseAgeExcludes`：三日冷静期防的是上游发布窗口被投毒，而这个包的"上游"就是同一批维护者，且它的字节仍由 lock integrity + `kernel-pin.json` 钉住。`tools/sync-kernel.sh --target=fork` 改为**明确拒绝**并打印新的合法路径（bump 依赖 + `bun install` → `kernel-pin.mjs --record` → `kernel-conformance.mjs --impl <canonical checkout>`）；`--target=repo`（mcp-shell 那份 `kernel/` 镜像）本批未动。
+
+**顺手修掉的静默失效**：`test/tool/glasspane-kernel.test.ts` 的出处检查用五层 `../` 上溯，落在从来不存在的路径上（`harness/contracts/kernel-vendor.json`），`existsSync` 为假 ⇒ `console.warn` + return，于是那条测试一直绿而什么都没验。位置解析现在收在 `packages/opencode/test/lib/kernel-contract.ts`（逐级上溯直到找到；pin 缺失＝红，不再是一句警告）。
+
+**没跑 / 未观测**：整包多平台构建（只跑了 `--single` 那条 + boot smoke）；真模型轮次照旧没做；`--target=repo` 那条镜像仍在退役队列里，本批没动它，所以它文档里那句"mcp-shell 镜像"今天还是事实。
+
+
+
 ## 2026-10-07 · v0.7.0：审查批次（两条泳道 + 六把尺子自查），并把"绿但红不了"的四道闸改回能红
 
 每日任务（10:30 那条）。开工 HEAD `439c6ab`（主仓 main），收口在同一棵树上的分支

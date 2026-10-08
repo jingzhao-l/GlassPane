@@ -45,12 +45,12 @@ SDK 与 plugin API。为了塞下内核，没有任何功能被砍掉。
 `harness/tools/fork-diff.mjs` 每次改动都会把本树与那个 tag 逐文件对比：
 
 ```
-fork-diff vs v1.18.32: 6527/6687 byte-identical, 51 edited, 55 added, 54 deleted
+fork-diff vs v1.18.32: 4668/6713 byte-identical, 259 edited, 81 added, 1705 deleted
 ```
 
-上游树约 98% 逐字节保持上游原样。改动集中在 config/paths/品牌、`gp_*` 工具面、内核绑定、
-压缩钩子和打包脚本；删掉的是上游**自己的**发布管道（ghcr 镜像、AUR、Homebrew tap、
-托管 console 账号）——外加 0.4.0 里下面说的第一方账号面。
+上游发来的 6,632 个文件里 4,668 个仍逐字节保持上游原样。改动（259 个）集中在 config/paths/品牌、
+`gp_*` 工具面、内核绑定、压缩钩子和打包脚本；删掉的是上游**自己的**发布管道（ghcr 镜像、AUR、
+Homebrew tap、托管 console 账号）——外加 0.4.0 里下面说的第一方账号面。
 
 "加法"在实践中的含义：上游后续版本发布的功能，这个 fork 接得住——因为功能还在那里。
 
@@ -166,7 +166,7 @@ bun test --timeout 30000    # 固定点测试（在 packages/opencode 里跑）
 bun run build --single      # 产品构建：CLI + TUI + 内嵌 web 应用
 ```
 
-仓侧的闸住在 GlassPane 仓的 `harness/`（hook-liveness、fork-diff、kernel-vendor、
+仓侧的闸住在 GlassPane 仓的 `harness/`（hook-liveness、fork-diff、kernel-pin、
 tool-surface、surface-semantics、product-surface、brand-surface），理由、反向控制与已知边界
 写在 `harness/README.md`。我们每个定制提交都带 `[gp]` 前缀。
 

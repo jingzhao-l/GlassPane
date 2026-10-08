@@ -25,20 +25,21 @@ git clone --branch v1.18.32 --depth 1 https://github.com/anomalyco/opencode.git 
 | 路径 | 作用 |
 |---|---|
 | `glasspane-harness/` | fork 本体。M1 的 `gp_*` 工具面在 `packages/opencode/src/tool/glasspane/`，M2 的决策日志插件在 `packages/opencode/src/plugin/glasspane-decision-log.ts`；被改的 vendored 文件有两个（`tool/registry.ts`、`plugin/index.ts`），各 3 / 2 个 hunk |
-| `glasspane-harness/packages/opencode/vendor/kernel/` | **vendored 的 @iterate/kernel 源**（M3）。真源是 `iterate-skill/kernel`，这里只是同步目标，手改一处即被 `kernel-vendor --check` 判红 |
+| `glasspane-harness/packages/opencode` 的 `iterate-kernel` 依赖 | **M3 的内核形态（2026-10-08 起它是依赖，不是副本）**：`packages/opencode/vendor/kernel/`（25 文件：src 11 + schemas 3 + fixtures 11）已删除，fork 从 registry 解析 `iterate-kernel@0.1.2`，`bun.lock` 记 integrity。入口仍只有一个文件（`src/tool/glasspane/kernel.ts`），且只走 per-module 子路径——barrel 会带进 `schemas`，它在模块加载时 `createRequire` 读包旁边的 schema 文件，单文件二进制因此起不来 |
 | `glasspane-harness/FORK.md` / `SYNCLOG.md` | fork 自己的坐标、不可让步的纪律、每次同步/每批定制的实测数字 |
 | `upstream.json` | 上游坐标真源：repo / **pinned tag** / license / 发布节奏 / fork 位置 / 参照检出位置 / 该扫哪些目录 |
 | `tools/hook-liveness.mjs` | 契约闸：从 `Hooks` 声明反推每个钩子是否真被引擎派发 |
 | `tools/fork-diff.mjs` | 分叉尺子：fork 全树 vs 参照，逐文件 blob 哈希，四桶清单 + 每个 edited 文件的**双侧内容哈希** |
-| `glasspane-harness/script/kernel-vendor.mjs` | 溯源尺子（**在 fork 树里**，因为 split 出的独立仓必须能自证溯源）：vendored 内核的每个文件必须等于清单里的 sha256；`KERNEL_SRC` 在场时按**钉点**跨读（读的是 `git show <ref>:kernel/<file>`，不是碰巧 checkout 的那一支），缺该对象时大声声明"未跨读" |
+| `glasspane-harness/script/kernel-pin.mjs` | 溯源尺子（**在 fork 树里**，因为 split 出的独立仓必须能自证溯源；取代 2026-10-08 退役的 `kernel-vendor.mjs`）：`--check` 验四件事——装进来的版本 == pin、`bun.lock` 那条 specifier **为空**（＝registry 解析，不是 `file:`/`link:`）、lock integrity == pin、随包发出的 14 个契约文件（11 fixtures + 3 schemas）逐个 sha256 == pin。`--probe` 问 registry（`npm view iterate-kernel version`），不再 `git ls-remote` 追分支头；`--record` 只在故意 bump 时写 |
+| `glasspane-harness/script/kernel-conformance.mjs` | 行为尺子：把**随包发出**的语料跑过装进来的 `dist`，逐条比较答案；`--impl <canonical checkout>` 再跑第二份实现，两侧必须同答案（实测 9 条 fixture 同答案，zod major 造成的**报错文案**差异由工具打印成 note 而不是抹平）。它与溯源闸互为补充：哈希只证明字节没变，这条证明那些答案还是那些答案 |
 | `tools/tool-surface.mjs` | 工具面占比棘轮：engine 与两个工具面的 LOC 比例，只挡"没被记录的增长" |
 | `tools/surface-semantics.mjs` | 工具面**语义**棘轮（方案 §9-6）：阈值比较 / pass-fail 合成 / 证据字段比较，只挡"没被记录的新命中" |
 | `tools/product-surface.mjs` | 产品面**一致性**闸（私有化批次 B）：`product.json` ↔ package.json / build / publish / postinstall / bin shim / 安装器 / 工作流逐条对齐，且产品面可执行文本里不许再出现上游 registry（AUR / homebrew tap / ghcr / opencode.ai/install / opencode-ai 包名） |
-| `tools/brand-surface.mjs` | 品牌棘轮（私有化批次 C）：26 个产品面文件 + 2 份 README 里不许再出现上游 npm 名/平台包名/上游 registry/用户可见 "opencode" 字符串；两份 README 的每处 opencode 必须落在署名行（fork/upstream/anomalyco/MIT/上游/血缘/**包路径**）上；另加全树血缘计数（2026-10-06 实测 9,618 处 / 3,309 文件）（排除 fork 自己的血缘文档与 vendored 内核）——**只许减不许增** |
+| `tools/brand-surface.mjs` | 品牌棘轮（私有化批次 C）：26 个产品面文件 + 2 份 README 里不许再出现上游 npm 名/平台包名/上游 registry/用户可见 "opencode" 字符串；两份 README 的每处 opencode 必须落在署名行（fork/upstream/anomalyco/MIT/上游/血缘/**包路径**）上；另加全树血缘计数（2026-10-06 实测 9,618 处 / 3,309 文件）（排除 fork 自己的血缘文档；代码里"排除 vendored 内核目录"那条规则还在，但那个目录已随 2026-10-08 那批改依赖退役，于是它现在匹配不到任何东西——装进来的包在 `node_modules`，本来就不在扫描集里）——**只许减不许增** |
 | `contracts/hook-liveness.json` | 金样：20 声明 → 14 live / 5 structural / **1 dead（`permission.ask`）** |
-| `contracts/fork-diff.json` | 金样：声明过的分叉面（2026-10-07 记 **`4669 identical / 258 edited / 114 added / 1705 deleted`**，对上游 6,746 个条目；此前本行写的是 `6539 / 36 / 43 / 57`，那是批次 A 之前的形状，早就没人对着树核过——正是这把尺子存在的理由。added 里含 vendored 内核，deleted 是上游 26 个工作流 + locale README 等，批次 A/B 的 SYNCLOG 逐类记了账） |
-| `glasspane-harness/contracts/kernel-vendor.json` | 溯源清单（**在 fork 树里，不在本目录**——subtree split 之后独立仓必须自带溯源清单，`kernel-vendor.mjs` 按 `product.json` 所在目录解析它）：canonical 的 repo/ref/branch/version + **25** 个文件的 sha256/字节数 + 9 份镜像 fixture（`--record` 在对不齐时直接拒绝写） |
-| `contracts/tool-surface.json` | 基线（2026-10-06 复算）：engine 23,110 / 面 A 8,601（**23.08%**，已知越限、只挡再长）/ 面 B 5,548（**14.89%**），并逐文件记着被排除的测试与 vendored 依赖行数（本轮实测：测试 26 文件 1,474 行、内核依赖 11 文件 1,464 行） |
+| `contracts/fork-diff.json` | 金样：声明过的分叉面（2026-10-08 记 **`4668 identical / 259 edited / 81 added / 1705 deleted`**，全树 6,713 个条目；上一记是 2026-10-07 的 `4669 / 258 / 114 / 1705`，6,746 个条目——差的 33 个 added 就是退役掉的 vendored 内核树与它的旧尺子，加回 3 个新文件。再往前本行写过 `6539 / 36 / 43 / 57`，那是批次 A 之前的形状，早就没人对着树核过——正是这把尺子存在的理由。added 里**不再有** vendored 内核（内核是依赖，不在树里），deleted 是上游 26 个工作流 + locale README 等，批次 A/B 的 SYNCLOG 逐类记了账） |
+| `glasspane-harness/contracts/kernel-pin.json` | 出处清单（**在 fork 树里，不在本目录**——subtree split 之后独立仓必须自带溯源清单；`kernel-pin.mjs` 靠"向上找到 `product.json` 那一层"定位它，`tool-surface.mjs` 则在 `harness/glasspane-harness/contracts/` 与 `harness/contracts/` 两处里找第一个存在的）：`package`/`version` + registry 解析坐标（`lockKey` / `specifier` / `integrity`）+ canonical 的 repo/path/branch + 随包 **14** 个契约文件（11 fixtures + 3 schemas）的 sha256。此前这行写的是 `kernel-vendor.json`：25 个 vendored 文件的 sha256 + 9 份镜像 fixture——镜像已删（本仓 9 个 vs 随包发布的 11 个，早就漂移了），语料现在只从包内部取 |
+| `contracts/tool-surface.json` | 基线（2026-10-08 复算）：engine 23,106 / 面 A 8,601（**23.19%**，LOC 未变、已知越限、只挡再长）/ 面 B **5,376**（**14.50%**，上一记 5,548 / 14.89%），并逐文件记着被排除的测试行数（本轮实测：测试 27 文件 1,544 行）；**vendored 内核排除项现在是 0 文件 / 0 行**（上一记 11 文件 / 1,464 行）——内核改依赖后树里没有它的字节可剔，金样因此另记 `kernel: iterate-kernel@0.1.2`，让这次口径变化在尺子上可读 |
 | `contracts/surface-semantics.json` | 基线（2026-09-26 首记，2026-10-06 复跑）：**0 命中 / 18 个文件**（mcpShell 13 + fork 5；金样里那份 `filesScanned 15` 是 mcp-shell 长出新文件之前的值，`--check` 不比对扫描集，见下文「闸自己被验过吗」）——两个工具面今天都不判证据语义；规则说明逐条进金样 |
 | `spike/` | E1/E2/E5/E6 的运行时探针与离线 mock 模型（`run.sh` 一键；结论见调研方案 §5.0）。E7（决策链对着真 daemon）在 fork 内：`packages/opencode/script/glasspane-e7-ledger.ts`；E8（压缩钩子对着真宿主，不花钱）也在 fork 内：`packages/opencode/script/glasspane-e8-compaction.ts` |
 
@@ -56,9 +57,9 @@ afterAll 要 dispose runtime + 删临时目录，5 秒默认超时会把它打�
 
 **fork-diff** — iterate 侧的真实教训不是"改了 144 个文件"，而是"文档写 8 处定点、树里 144 处、且没有任何机器检查发现这件事"。定制多少不是问题，**不知道定制了多少才是问题**。所以每个文件比 blob 哈希（"只改了空白"藏不住，符号链接与模式也算），四桶清单进金样，漂移即红。**光有名单还不够**：名单以文件名为单位，"已经在名单里的文件又长几行"它天生看不见（实测如此，见下条负例）。金样因此对每个 edited 文件另钉**上游哈希 + 我们的哈希**，内容漂移与名单变化同级现形。
 
-**tool-surface** — 三条架构铁律里唯一带数字的那条（工具面 <10% 代码量）此前只是散文：实测工具面 A = 3,719 / 21,455 = **17.8%**（合流与 M2/M3 之后是 3,859 / 23,252 = 16.60%），而仓库里没有任何东西能发现。做成**棘轮**：允许增长，不允许没人注意到——超基线即红，出路是同批 `--record` 并在提交里说清为什么。A 的越限是既有事实，金样如实记着，闸只保证它不再变大。**口径对称性**：面 A 从来只量 `src/`，所以面 B 也不把测试算成工具面（5 个文件 952 行，M4 批后），vendored 依赖同样排除（10 个代码文件 1,150 行，由溯源清单判定）；两个排除都被打印并计入金样，因为**不报出来的排除就是偷改口径**。
+**tool-surface** — 三条架构铁律里唯一带数字的那条（工具面 <10% 代码量）此前只是散文：实测工具面 A = 3,719 / 21,455 = **17.8%**（合流与 M2/M3 之后是 3,859 / 23,252 = 16.60%），而仓库里没有任何东西能发现。做成**棘轮**：允许增长，不允许没人注意到——超基线即红，出路是同批 `--record` 并在提交里说清为什么。A 的越限是既有事实，金样如实记着，闸只保证它不再变大。**口径对称性**：面 A 从来只量 `src/`，所以面 B 也不把测试算成工具面（本轮实测 27 文件 1,544 行）。曾经还需要排除**vendored 内核**（最后一次 11 文件 1,464 行，由溯源清单判定），2026-10-08 内核改成 `iterate-kernel` 依赖后这一项归零——树里没有它的字节了。两项排除都被打印并计入金样，因为**不报出来的排除就是偷改口径**；而排除项归零同样是个要记账的口径变化，所以金样另钉 `kernel: iterate-kernel@0.1.2`。这道闸的方向因此翻了：`measureFork` 现在**拒绝** `packages/opencode/vendor/kernel` 重新出现——那份树若回来，它那 1,464 行依赖字节会整份被算成我们写的，而已经没有清单能把它们剔出去。
 
-**kernel-vendor** — `@iterate/kernel` 不单独发布（P6 §13），所以它以 **vendored 源**的形式活在 fork 里；而 subtree split 之后的独立仓又够不到 `../../kernel`。"vendored" 与"我们自己的第二份实现"只差一条清单：`contracts/kernel-vendor.json` 记 canonical 的 repo/ref/branch/version 和每个文件的 sha256，`--check` 在**没有 canonical 的 CI 里**也能抓到任何手改、新增或删除。它和 fork-diff 是两种不同的红：改一行 vendored 内容 → 占比闸**不动**（那不是我们的行），溯源闸**变红**。
+**kernel-pin / kernel-conformance** — `@iterate/kernel` 今天以 **registry 依赖** `iterate-kernel@0.1.2` 的形态活在 fork 里：`packages/opencode/vendor/kernel/` 那 25 个文件的副本已删除，`tools/sync-kernel.sh --target=fork` 也**明确拒绝**（它打印新的合法路径：bump 依赖 + `bun install` → `kernel-pin.mjs --record` → `kernel-conformance.mjs --impl <canonical checkout>`）。"依赖"与"今天随手装到的那个东西"只差一条清单：`contracts/kernel-pin.json` 记版本、registry 解析坐标与随包 14 个契约文件的 sha256，`--check` 在**没有 canonical 的 CI 里**就能抓到版本漂移、`file:`/`link:` 伪装成依赖的解析、被换掉的 artifact，以及包内部契约字节的改动。哈希只证明字节没变，所以行为面另有一把：`kernel-conformance.mjs` 把随包语料跑过装进来的 `dist`（`--impl` 再对一份实现），并且从 2026-10-08 起把 fork 一直在消费、此前却没有任何 fixture 校过的 `dimension-context` 一起驱动。它和 fork-diff 仍是两种不同的红：内核换了字节 → 占比闸**不动**（那不是我们的行），溯源与行为闸**变红**。
 
 **surface-semantics** — 占比闸量的是"长厚了多少"，它量的是"长的还是不是**判**"：铁律"工具面不得自行判定任何证据语义"此前同样只是散文，而判定悄悄外移到 shell 的失败模式是**编译通过、测试全绿**，另外三把尺子一条都看不见。所以扫两个工具面（`mcp-shell/src` + fork 的 `src/tool/glasspane/**` 与 `src/plugin/glasspane-*.ts`），三条规则——小数阈值比较、pass/fail 的三元/相等**合成**（按主语判：`x.status !== "failed"` 是台账记账，`ok ? "pass" : "fail"` 才是判定）、证据字段比较（`!== undefined` 在场检查豁免，因为"缺席必须说得出"），同样做成棘轮 + 基线金样。**首次基线 0 命中**：两个工具面今天都不判证据语义，三条反向因果已验可红。校准记录在 `SYNCLOG.md`：第一版规则把本仓 `status: "failed"` 与 `pixelDiff !== undefined` 判成命中，基线一度 6 命中——**先校准规则再记基线**，否则金样记的是规则的噪声。
 
@@ -83,12 +84,16 @@ node harness/tools/surface-semantics.mjs --record # 有意新增命中（并说�
 node harness/tools/product-surface.mjs --check   # 产品面各件与 product.json 一致？（CI 每跑，含 sh -n + --dry-run）
 node harness/tools/brand-surface.mjs --check     # 没有新的未记录品牌漂移？（CI 每跑）
 node harness/tools/brand-surface.mjs --record    # 有意新增（并说清为什么合法）
-node harness/glasspane-harness/script/kernel-vendor.mjs --check    # vendored 内核 == 溯源清单？（CI 每跑，不需要 canonical）
-KERNEL_SRC=/path/to/iterate-skill node harness/glasspane-harness/script/kernel-vendor.mjs --check  # 更强：连 canonical 一起跨读
-KERNEL_SRC=/path/to/iterate-skill tools/sync-kernel.sh --target=fork            # 唯一的合法更新路径
+node harness/glasspane-harness/script/kernel-pin.mjs --check    # 装进来的内核 == 它的出处清单？（CI 每跑，不需要 canonical）
+node harness/glasspane-harness/script/kernel-pin.mjs --probe    # registry 有没有发出更新的一版（只读，不改任何东西）
+bun harness/glasspane-harness/script/kernel-conformance.mjs     # 随包语料跑过装进来的 dist（行为，不只是字节）
+bun harness/glasspane-harness/script/kernel-conformance.mjs --impl /path/to/iterate-skill/kernel  # 再对一份实现，两侧必须同答案
+node harness/glasspane-harness/script/kernel-pin.mjs --record   # 只在故意 bump 版本时写
+KERNEL_SRC=/path/to/iterate-skill tools/sync-kernel.sh --target=fork            # 已退役：这条现在直接拒绝（exit 2）并打印上面那三步
+KERNEL_SRC=/path/to/iterate-skill tools/sync-kernel.sh --target=repo            # mcp-shell 那份 kernel/ 镜像照旧（本批未动）
 ```
 
-退出码：**0** 通过（含如实的离线跳过）；**1** 契约/分叉/占比漂移；**2** 工具做不了事（缺 `upstream.json`、缺金样、检出版本与 pin 混用）。
+退出码：**0** 通过（含如实的离线跳过）；**1** 契约/分叉/占比漂移；**2** 工具做不了事（缺 `upstream.json`、缺金样、缺装进来的 `iterate-kernel` 或读不到 registry、检出版本与 pin 混用）。
 
 ## 闸自己被验过吗
 
@@ -97,9 +102,10 @@ KERNEL_SRC=/path/to/iterate-skill tools/sync-kernel.sh --target=fork            
 - hook-liveness：① `--check`/`--probe` 对 pin 绿；② `--offline` 绿但**明确声明未观测上游**；③ 金样伪写成 `permission.ask` 是活的 → `--check` 与 `--probe` 双双 exit 1；④ 删金样 → exit 2 并指名 `--record`；⑤ `--record` 重跑与仓内金样**逐字节相同**。
 - fork-diff：未记录的自有新增 → 报 `added` 并 exit 1；`--record` 后转绿；给 vendored 文件加一行 → 报 `1 edited` 且**点名该文件**；从参照还原 → 转绿。**内容级**：给已在名单里的 `registry.ts` 再加 3 行，名单不变但金样钉着的 fork 侧哈希变了 → **exit 1 点名 "our content moved"**（同一步在加哈希钉之前是绿的，日志 `/var/tmp/glasspane-harness/blind-spot.log`）；拿**没有哈希字段的老金样**跑 → exit 1 并指名 `--record`。把参照克隆藏掉（＝CI 形态）后仍核我们这一侧：清树 exit 0 并报 `1 edited hash-checked, 5 added present`、`registry.ts` 加 2 行 exit 1、金样被剥掉哈希 → **exit 1 直说"这条 lane 无事可控"**、删一个 added 文件 → exit 1。参照克隆被中途杀过，所以另验 `git fsck` 无错 + 工作树干净 + `describe` == pin。
 - tool-surface：给 `mcp-shell/src/tools.ts` 加 3 行 → A 报 `+3` exit 1；给我们的 fork 文件加 20 行 → B 报 `+20` exit 1；给 **edited** 的 `registry.ts` 加 3 行 → B 报 `+3` exit 1（证明 `+N` 是真的对着参照重算的）；还原 → 转绿；藏掉参照克隆 → exit 0 但**打印 "NOT re-measured"**；删 `fork-diff.json` → **exit 1**（量不到 ≠ 过关）；`--record` 重跑逐字节相同。三条文件 MD5 前后一致，`git status` 零残留。**它自己被抓出来两个错**：① 排除测试的正则写成 `/(^|\/test\/)/`，那个 `^` 匹配空串 ⇒ 所有文件都被当成测试、面 B 一度只剩 14 行；② `--record` 会在归因失败时照样写金样（差点把 B = 0 记成基线）。现在正则修成 `/(^|\/)test\//`，并加了两条兜底：**该有内容的清单被排除空了＝红**、**归因失败时拒绝 record**。
-- kernel-vendor（vendored 内核的溯源闸）：清树绿；改一个 vendored 源文件 → exit 1 点名新旧哈希；删一个 → exit 1；**新增**一个清单没声明的文件 → exit 1 并说"fork 长出了自己的内核文件"；`KERNEL_SRC` 在场时跨读 canonical，镜像落后 → exit 1 并说"STALE，重跑同步"；`--record` 在镜像与 canonical 不一致时**拒绝盖章**。两条控制与占比闸咬合：往清单声明的 vendored 文件里加 6 行 → 占比**不动**（1058 依旧）、溯源**变红**；往同一目录塞一个未声明文件并把它记进分叉名单 → 占比把它算成**我们的行**并变红（`/var/tmp/glasspane-harness/vendor-accounting2.log`）。
+- kernel-vendor（vendored 内核的溯源闸；**2026-10-08 随 vendored 树一起退役，替换者是 `kernel-pin.mjs` + `kernel-conformance.mjs`**，以下是对旧形态的历史记录）：清树绿；改一个 vendored 源文件 → exit 1 点名新旧哈希；删一个 → exit 1；**新增**一个清单没声明的文件 → exit 1 并说"fork 长出了自己的内核文件"；`KERNEL_SRC` 在场时跨读 canonical，镜像落后 → exit 1 并说"STALE，重跑同步"；`--record` 在镜像与 canonical 不一致时**拒绝盖章**。两条控制与占比闸咬合：往清单声明的 vendored 文件里加 6 行 → 占比**不动**（1058 依旧）、溯源**变红**；往同一目录塞一个未声明文件并把它记进分叉名单 → 占比把它算成**我们的行**并变红（`/var/tmp/glasspane-harness/vendor-accounting2.log`）。
+- kernel-pin / kernel-conformance（上面那条的现任）：闸问的不再是"树里的字节 == 清单"，而是"装到的东西 == 我们记下的那一次发布"——版本、`bun.lock` 的 registry 解析（specifier 必须为空，`file:`/`link:` 即红）、lock integrity、随包 14 个契约文件的 sha256。改 pin 的版本号、改随包契约文件的字节，两条都实测红（2026-10-08 那批记录的负例）。行为面另有一把：`kernel-conformance --impl` 要求两份实现对每条 fixture 给**逐字节相同**的答案，实测 9 条同答案，zod major 造成的报错文案差异由工具打印成 note 而不是抹平。占比闸的咬合换了方向：`vendor/kernel` 重新出现 → `tool-surface` **拒绝测量**（那份树的行已经没有清单可以把它们从我们的行数里剔出去）。
 - surface-semantics：`mcp-shell/src/tools.ts` 加 `ratio > 0.95` → threshold-comparison 红；`glasspane-decision-log.ts` 加 `ok ? "pass" : "fail"` → verdict-synthesis 红；`mcp-shell/src/evidence-report.ts` 加 `pack.signals.pixelDiff >= 0.5` → 两条规则同红（都点名文件与规则计数）；删金样 → exit 2 并指名 `--record`；还原三处 → 转绿。**校准也是负例**：第一版规则把本仓 `status: "failed"` 与 `pixelDiff !== undefined` 判成命中（基线一度 6 命中），按"按主语判合成 / 在场检查豁免"收窄后回到 0 命中——先校准再记基线，否则金样记的是规则的噪声。
-- `tools/sync-kernel.sh --target=fork`：一道红闸（用 `BUN=/usr/bin/false` 强制）→ 回滚后镜像 23 个文件、内容签名、溯源清单三项都在，**没有任何东西被删**；这条控制是补出来的——脚本的第一版回滚用 `git clean`，在首次 vendoring（路径还没进版本控制）时把刚 vendor 进来的 23 个文件删掉了，而触发它的根本不是代码问题，是 `bun: command not found`。**"缺工具"与"闸红"现在分开处理**：找不到 bun 就明说哪两道闸没跑，并在成功行里保留警告。
+- `tools/sync-kernel.sh --target=fork`（**该 leg 已于 2026-10-08 改为直接拒绝**，以下是它还在 vendoring 时的控制记录）：一道红闸（用 `BUN=/usr/bin/false` 强制）→ 回滚后镜像 23 个文件、内容签名、溯源清单三项都在，**没有任何东西被删**；这条控制是补出来的——脚本的第一版回滚用 `git clean`，在首次 vendoring（路径还没进版本控制）时把刚 vendor 进来的 23 个文件删掉了，而触发它的根本不是代码问题，是 `bun: command not found`。**"缺工具"与"闸红"分开处理**这条现在仍活在 `--target=repo`（mcp-shell 那份镜像）上：找不到 bun 就明说哪两道闸没跑，并在成功行里保留警告。
 
 **2026-10-06/07 每日批次的反向控制**（破坏脚本同样不落仓，在 `/var/tmp/glasspane-harness/`；这一批全部是"先证明它能红，再说它守住了"）：
 

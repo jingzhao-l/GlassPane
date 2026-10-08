@@ -52,14 +52,14 @@ That is a measured claim, not a promise. The fork tracks upstream
 change:
 
 ```
-fork-diff vs v1.18.32: 6527/6687 byte-identical, 51 edited, 55 added, 54 deleted
+fork-diff vs v1.18.32: 4668/6713 byte-identical, 259 edited, 81 added, 1705 deleted
 ```
 
-Roughly 98% of the upstream tree is byte-for-byte upstream. The edits are concentrated in
-config/paths/branding, the `gp_*` tool surface, the kernel binding, the compaction hook,
-and the packaging scripts. The deleted files are upstream's own publish plumbing for
-channels this product does not use (ghcr images, AUR, a Homebrew tap, a hosted console
-account) — plus, in 0.4.0, the first-party account surface described below.
+Most of what upstream ships is still byte-for-byte upstream — 4,668 of its 6,632 files. The
+259 edits are concentrated in config/paths/branding, the `gp_*` tool surface, the kernel
+binding, the compaction hook, and the packaging scripts. The deleted files are upstream's own
+publish plumbing for channels this product does not use (ghcr images, AUR, a Homebrew tap, a
+hosted console account) — plus, in 0.4.0, the first-party account surface described below.
 
 What "additive" means in practice: if upstream ships a feature in a later release, this
 fork can take it, because the feature is still here to take.
@@ -189,8 +189,9 @@ Details: [`docs/evidence.md`](docs/evidence.md).
   customisation changed, and what deliberately stayed
 - [`docs/release.md`](docs/release.md) — cutting a release, and the npm trusted-publisher
   setup
-- [`docs/kernel-integration.md`](docs/kernel-integration.md) — the shared kernel, why it is
-  not on npm, and how much of the two-way integration exists today
+- [`docs/kernel-integration.md`](docs/kernel-integration.md) — the shared kernel, how it
+  reaches this fork as a pinned `iterate-kernel` dependency, and how much of the two-way
+  integration exists today
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — engine unreachable, permission
   denials, the `GP_E_*` codes
 - [`FORK.md`](FORK.md) / [`SYNCLOG.md`](SYNCLOG.md) — the fork's coordinates, discipline
@@ -208,7 +209,7 @@ bun run build --single      # product build: CLI + TUI + embedded web app
 ```
 
 The repo-side gates live in the GlassPane repository under `harness/` (hook-liveness,
-fork-diff, kernel-vendor, tool-surface, surface-semantics, product-surface,
+fork-diff, kernel-pin, tool-surface, surface-semantics, product-surface,
 brand-surface); their rationale, negative controls and known boundaries are documented in
 `harness/README.md`. Every customisation commit carries the `[gp]` prefix.
 

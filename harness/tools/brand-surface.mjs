@@ -16,8 +16,11 @@
  *                   strings, the TUI theme + clientInfo + upsell switch)
  *   docs            README.md / README.zh-CN.md — the two a user reads first
  *   lineage count   every case-insensitive "opencode" occurrence across the fork's
- *                   tracked text (minus node_modules/artifacts/.git and the
- *                   vendored kernel mirror, which kernel-vendor.mjs owns)
+ *                   tracked text (minus node_modules/artifacts/.git; the vendored
+ *                   kernel mirror this used to exclude was retired on 2026-10-08 —
+ *                   the kernel is now the iterate-kernel dependency, pinned by
+ *                   script/kernel-pin.mjs, and its installed copy lives under
+ *                   node_modules, which is already out of the scan set)
  *
  * RULES (zero-tolerance on product files unless the golden says otherwise):
  *   upstream-npm-name        the string "opencode-ai" as a package (dist, install,
@@ -173,8 +176,10 @@ const LINEAGE_DOCS = new Set([
 ])
 
 /** Every tracked text file under the fork, minus build output, deps, the
- *  vendored kernel mirror (kernel-vendor.mjs owns that copy's identity) and the
- *  lineage documents above. */
+ *  packages/opencode/vendor directory the vendored kernel used to live in (that copy
+ *  was retired on 2026-10-08 in favour of the iterate-kernel dependency, pinned by
+ *  script/kernel-pin.mjs; the skip stays so a re-appearing vendor tree is not silently
+ *  counted as our lineage) and the lineage documents above. */
 function forkTextFiles(dir = forkRoot, out = []) {
   for (const entry of readdirSync(dir)) {
     if (entry === "node_modules" || entry === "artifacts" || entry === ".git" || entry === "dist") continue
