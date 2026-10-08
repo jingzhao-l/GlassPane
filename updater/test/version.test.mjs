@@ -11,6 +11,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 
 import {
   bumpKind,
@@ -55,6 +56,29 @@ test('comparison is strictly greater, so equal and older are not updates', () =>
 test('numeric comparison does not go lexical', () => {
   assert.equal(isStrictlyNewer(parsePlainVersion('1.10.0'), '1.9.3'), true)
   assert.equal(isStrictlyNewer(parsePlainVersion('10.0.0'), '9.9.9'), true)
+})
+
+test('这个桩只认 --version：它不许再替一个不存在的开关背书', () => {
+  // `makeDaemonBinary` 从前对**任何**参数都 echo 版本号。那正是 `glasspaned --version`
+  // 这个当时根本不存在的能力能带着"两读数必须一致"长期全绿的原因——桩答得越慷慨，
+  // 缺的能力藏得越深。所以拒绝这条也要有一条用例钉住：桩自己退化回有求必应时，
+  // 这里必须先红，而不是让上面那些用例继续绿。
+  const dir = tempDir(`${TMP_PREFIX}stub-refusal-`)
+  try {
+    const exe = makeDaemonBinary(dir, '1.4.0', 'GlassPane Daemon.app')
+    const answering = spawnSync(exe, ['--version'], { encoding: 'utf8' })
+    assert.equal(answering.status, 0, answering.stderr)
+    assert.match(answering.stdout, /^glasspaned 1\.4\.0\s*$/, '认得出的参数要照真 daemon 的样子回答')
+
+    for (const arg of ['--help', '--permissions', '']) {
+      const refused = spawnSync(exe, [arg], { encoding: 'utf8' })
+      assert.equal(refused.status, 64, `${arg || '(空)'} 被这个桩接下了：它又开始替不存在的能力背书`)
+      assert.equal(refused.stdout, '', '拒绝时不许吐出版本号')
+      assert.match(refused.stderr, /unknown argument/, '拒绝的话要和真 daemon 同形')
+    }
+  } finally {
+    removeDir(dir)
+  }
 })
 
 test('the two readings of "current" come off this machine: Info.plist and glasspaned --version', () => {
