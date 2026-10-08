@@ -57,12 +57,16 @@ final class DaemonVersionFlagTests: XCTestCase {
 
     /// `--version` 不读状态：它既不该建状态根，也不该触发那次收紧扫描。
     func testVersionFlagTouchesNoStateRoot() throws {
-        let root = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("gp-version-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: root) }
-        let outcome = try spawn(["--state-dir", root.path, "--version"])
+        // 地点走 `TestSandbox`——本仓的隔离闸（`TestIsolationGateTests`）把测试自己手拼
+        // 临时目录记成一条违规。这里必须是 `pendingDirectory` 而不是 `directory`：后者会
+        // 把目录**建好**再交出来，那"daemon 有没有创建状态根"就永远只有一个答案，
+        // 而且是夹具给的答案，不是被测代码给的。
+        let rootPath = TestSandbox.pendingDirectory("version-no-state")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: rootPath),
+            "夹具自己把状态根建出来了，这条断言从此只会重复夹具的话")
+        let outcome = try spawn(["--state-dir", rootPath, "--version"])
         XCTAssertEqual(outcome.status, 0, outcome.output)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path),
+        XCTAssertFalse(FileManager.default.fileExists(atPath: rootPath),
             "只报一个版本号的调用不该把状态根创建出来（更不该顺手 chmod 别人的目录）")
     }
 
