@@ -213,12 +213,15 @@ describe("installation", () => {
           return ""
         },
       ),
-    ).effect("returns sanitized typed errors when the curl install script fails", () =>
+    ).effect("does not run a fetched install script, and leaks nothing from it", () =>
       Effect.gen(function* () {
+        // The stub still serves a script body containing a token, because that is the
+        // shape this lane used to execute. It asserts the two things that now matter: the
+        // refusal is the product's own sentence, and nothing from the fetched body — not
+        // the token, not the raw text — reaches the user.
         const error = yield* Effect.flip(Installation.use.upgrade("curl", "9.9.9"))
         expect(error).toBeInstanceOf(Installation.UpgradeFailedError)
-        expect(error.stderr).toBe("Upgrade failed for curl (exit code 1).")
-        expect(error.message).toBe(error.stderr)
+        expect(error.stderr).toContain("does not self-upgrade over curl")
         expect(error.stderr).not.toContain("secret")
         expect(error.stderr).not.toContain("script output")
       }),
@@ -234,9 +237,18 @@ describe("installation", () => {
           return ""
         },
       ),
-    ).effect("falls back to sh when bash is unavailable during curl upgrade", () =>
+    ).effect("refuses to self-upgrade over curl, and the refusal still reaches the user", () =>
       Effect.gen(function* () {
-        yield* Installation.use.upgrade("curl", "9.9.9")
+        // This case used to assert a `bash → sh` fallback for running the fetched install
+        // script. This fork does not fetch and execute an install script at all, so the
+        // premise is gone; what is worth pinning is the replacement behaviour — and that
+        // the sanitisation which drops raw script output does not also drop the sentence
+        // telling the user which two channels actually exist.
+        const error = yield* Effect.flip(Installation.use.upgrade("curl", "9.9.9"))
+        expect(error).toBeInstanceOf(Installation.UpgradeFailedError)
+        expect(error.message).toContain("does not self-upgrade over curl")
+        expect(error.message).toContain("scripts/install.sh")
+        expect(error.message).toContain("npm install -g glasspane-harness")
       }),
     )
   })

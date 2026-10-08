@@ -42,11 +42,13 @@ if (process.platform !== "darwin") {
 
 /** Reported, never asserted: whether the registry can show a provenance attestation. */
 async function reportProvenance() {
-  // `quiet("ignore")`: a release log that buries its own verdict under the registry's
-  // whole metadata blob is a log nobody reviews. The value is still read from stdout.
+  // `.quiet(true)`: a release log that buries its own verdict under the registry's whole
+  // metadata blob is a log nobody reviews. The value is still read from stdout. (This bun's
+  // typings take a boolean here, not the `"ignore"` string; `bun run typecheck` caught the
+  // string form and it is fixed rather than cast.)
   const meta = await $`npm view ${product.name}@${version} --registry ${registry} --json`
     .nothrow()
-    .quiet("ignore")
+    .quiet(true)
   if (meta.exitCode !== 0) {
     console.log("note: could not read registry metadata — provenance NOT checked here")
     return
@@ -105,7 +107,7 @@ try {
     // about who built it — hence the separate note below.
     const dist = await $`npm view ${product.name}@${version} dist.integrity --registry ${registry}`
       .nothrow()
-      .quiet("ignore")
+      .quiet(true)
     check(
       "the published version carries a registry integrity hash",
       dist.exitCode === 0 && dist.stdout.toString().trim().startsWith("sha512-"),

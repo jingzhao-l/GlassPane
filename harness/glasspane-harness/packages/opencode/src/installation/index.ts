@@ -288,7 +288,15 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
             return yield* new UpgradeFailedError({ stderr: `Unknown installation method: ${m}` })
         }
         if (!upgradeResult || upgradeResult.code !== 0) {
-          return yield* new UpgradeFailedError({ stderr: upgradeFailure(m, upgradeResult) })
+          // The sanitizer below exists to keep *fetched script output* — and any token in
+          // it — out of the user's face. The curl leg has no fetched output any more, and
+          // what it returns instead is this product's own refusal, carrying the way out.
+          // Re-sanitizing that threw the sentence away, so the refusal the code wrote was
+          // a refusal nobody could read: the user got "Upgrade failed for curl (exit code
+          // 1)." with no hint that curl is not a self-upgrade channel here at all.
+          const reason =
+            m === "curl" && upgradeResult?.stderr ? upgradeResult.stderr : upgradeFailure(m, upgradeResult)
+          return yield* new UpgradeFailedError({ stderr: reason })
         }
         yield* Effect.logInfo("upgraded", {
           method: m,
