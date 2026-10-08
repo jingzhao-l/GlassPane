@@ -97,6 +97,12 @@ public final class ProjectRegistry {
     /// always true when nothing can be seen.
     public func removalVerdict(projectId: String) -> (answerable: Bool, removed: Bool) {
         if loadFailed { return (false, false) }
+        // 读不回文件不等于看见它空了。`load()` 把"文件不存在"当成"还没注册任何东西"，
+        // 那对**读侧**（`--list-projects` 刚开机时确实没表）是对的；对**写后回读**是同一种
+        // 撒谎的另一张脸：一次没落盘的写、或事后被人整份删掉的表，都会让 `projects` 是空的，
+        // 于是 `!contains` 恒真，命令就报"确认已删除"并退 0。看不见盘的时候，唯一诚实的回答
+        // 是不回答——CLI 那侧回的是 exit 1 + `loadFailed`，与读不开同一条路径。
+        guard FileManager.default.fileExists(atPath: filePath) else { return (false, false) }
         return (true, !projects.contains { $0.projectId == projectId })
     }
 

@@ -118,6 +118,29 @@ final class RegistryVerdictTests: XCTestCase {
                        "盘上确实没有它了——这一半也必须是能过的，否则拒绝只是恒真")
     }
 
+    /// 第三种"看不见盘"：文件整个不在。`load()` 把缺文件当成"还没注册"，这对读侧是对的；
+    /// 写在后面的回读如果只看见"文件不在"，那既可能是写没落盘也可能是表被删了——两种都不能
+    /// 报"确认已删除"。REVERSE：把 `removalVerdict` 里那句 `fileExists` 护栏删掉 → 本条红。
+    func testRemovalVerdictRefusesWhenTheFileIsGoneAfterTheWrite() throws {
+        let path = TestSandbox.filePath("registry-remove-vanished")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let seeded = ProjectRegistry(filePath: path)
+        let entry = try seeded.create(
+            displayName: "Vanishing", bundleId: "com.example.vanish",
+            now: { Date(timeIntervalSince1970: 1_700_000_000) }
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path), "先确认前提：表本来在盘上")
+        try FileManager.default.removeItem(atPath: path)
+
+        let after = ProjectRegistry(filePath: path)
+        XCTAssertFalse(after.loadFailed, "缺文件不算「读不开」，所以这一格只能由回读自己判")
+        XCTAssertTrue(after.all.isEmpty)
+        let verdict = after.removalVerdict(projectId: entry.projectId)
+        XCTAssertFalse(verdict.answerable,
+                       "文件不在盘上时「没有它」不是一次可以报出去的确认")
+        XCTAssertFalse(verdict.removed)
+    }
+
     // MARK: - daemon 确实把判据接上了
 
     /// `--list-projects` 必须走 `listing()`，且在拒绝分支上非零离场。撤掉那次调用
