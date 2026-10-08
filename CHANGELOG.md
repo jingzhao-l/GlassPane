@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+- **`glasspaned --version`（下一版按 minor 记，因为 CLI 参数动了）。** 更新器把"本机装的是什么版本"
+  交代成两条读数必须一致：bundle 的 `CFBundleShortVersionString` 与 `glasspaned --version`
+  （`updater/lib/version.js` 的表头就这么写的）。1.9.0 及以前**后一条腿在真机上从来是空的**——
+  `grep '"--version"' engine/Sources` 零命中，真二进制回的是 `unknown argument` + usage + 退出码 64；
+  而套件一直绿，因为 `updater/test/helpers.mjs` 的那个桩**对任何参数都 echo 版本号**，替一个不存在的
+  开关作了背书（桩里跑过的守卫等于没验）。本版起：daemon 的 `--version` 打印 `hello` 里同一个字面量
+  并退 0，且不碰状态根；那份字面量收成单一无出处的 `EngineCore.buildVersion`（`hello`、`--version`
+  与位点表都读它，两处抄写从此没法各说各话）；测试桩改成与真解析器一致（只认 `--version`，其余按
+  `unknown argument` + 64 拒绝）；`updater/lib/selfcheck.js` 两种形状都认得，并有一条用例专门钉住
+  "那一行搬家了"不许成为拒掉一份正常暂存树的理由——那是这个工具自己掐自己的升级路径。
+  新增闸：`DaemonVersionFlagTests`（真起一次 debug 二进制核那两句话、并核解析表与 usage 互逆）、
+  `selfcheck.test.mjs` 的形状对照（旧形状、新形状、两种都没有必须把两处都点名）。
 - **文档补记（在 `v1.9.0` 打 tag 之后落到 main，因此 1.9.0 的发布归档里还是旧文）。**
   SECURITY 双语 §2.4 之前只列了 `installer-daemon.log` 这一份 launchd 写的日志，本版把
   `~/.glasspane/update.log` 也纳进了"什么在盘上"的清单与收紧交代，并写明 `0644` 那个数字是从它
