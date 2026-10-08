@@ -1,20 +1,30 @@
 #!/usr/bin/env bash
 # sync-kernel.sh — mirror kernel/ from its canonical home into this repository,
-# in one of two shapes:
+# in one supported shape:
 #
 #   --target=repo  $root/kernel                the build-local mirror mcp-shell
 #                                              consumes via file:../kernel (P0 §5.4)
-#   --target=fork  harness/glasspane-harness/packages/opencode/vendor/kernel
-#                                             the *vendored source* the opencode
-#                                             fork consumes (M3), plus a
-#                                             provenance manifest + hash check
+#   --target=fork  RETIRED 2026-10-08. The opencode fork no longer vendors the kernel:
+#                                              it resolves the `iterate-kernel` npm
+#                                              dependency, whose provenance lives in
+#                                              harness/glasspane-harness/contracts/kernel-pin.json
+#                                              and is checked by script/kernel-pin.mjs.
+#                                              The flag now refuses; see the paragraph
+#                                              below on the unreachable fork-leg code.
 #
 # Since 2026-09-22 (P0 §5.4) the single edit entry point for @iterate/kernel is
 # the iterate-skill monorepo (jingzhao-l/iterate-skill, top-level kernel/).
 # GlassPane keeps a build-local mirror so mcp-shell's file:../kernel, the C35
 # fixtures and both CI lanes keep working unchanged.
 #
-# WHY THE FORK TARGET VENDORS SOURCE INSTEAD OF DECLARING AN NPM DEP. The
+# THE FORK LEG IS RETIRED (2026-10-08); only --target=repo is live below.
+# The fork used to vendor the kernel because the recorded release policy was "not published
+# separately" (P6 S13, P4 S33.2) and a relative ../../kernel import would break the first time
+# the fork was subtree-split into its own repository. That policy was reversed on the iterate
+# side: the kernel is `iterate-kernel` on npm, the fork resolves it as a dependency, and
+# `--target=fork` now refuses. The fork-side code paths kept below are therefore UNREACHABLE —
+# they are not a supported mode, and they go away in the batch that retires this script's last
+# consumer (mcp-shell still reads the repo mirror via file:../kernel). Do not "fix" them.
 # ecosystem's recorded decision is that kernel is *not* published separately
 # (P6 §13: a `file:` dependency leaks out of the published manifest, so
 # mcp-shell inlines it; P4 §33.2: registry publishing follows the iterate

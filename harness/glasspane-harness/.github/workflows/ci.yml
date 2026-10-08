@@ -2,7 +2,7 @@ name: CI
 
 # The product's functional lane: it can install, typecheck and run the fixed-point
 # tests on the packages we actually ship (CLI + TUI + SDK + plugin). The strict
-# harness gates (hook-liveness / fork-diff / kernel-vendor / tool-surface /
+# harness gates (hook-liveness / fork-diff / kernel-pin / tool-surface /
 # surface-semantics / product-surface / brand-surface) live one level up in the
 # GlassPane repo's `harness/` — that is where the fork is developed, and the
 # split repo is a distribution of its results, not a second source of truth.

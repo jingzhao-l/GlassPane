@@ -77,6 +77,25 @@ for (const bin of product.bins ?? []) {
   }
 }
 
+// ---- kernel provenance (the kernel is a dependency, not a copy in our tree)
+// product.json used to duplicate the kernel's package/version/mode. It went stale the day the
+// vendored tree was retired, and nothing read it — a machine-readable "truth" with no reader is
+// a rumour. So product.json now points at contracts/kernel-pin.json, and these checks are the
+// reader: the pointer resolves, the pin agrees with the dependency line the build actually
+// installs, and the vendored copy stays gone.
+const kernelPointer = product.kernel?.provenance
+const pinRel = "contracts/kernel-pin.json"
+check("kernel-provenance", kernelPointer === pinRel, `product.json kernel.provenance is ${JSON.stringify(kernelPointer)}, expected "${pinRel}"`)
+if (kernelPointer === pinRel) {
+  const pin = JSON.parse(read(pinRel))
+  check("kernel-provenance", pin.package === "iterate-kernel", `kernel-pin.json declares package ${pin.package}, expected iterate-kernel`)
+  const declared = manifest.dependencies?.[pin.package]
+  check("kernel-provenance", typeof declared === "string", `packages/opencode/package.json has no "${pin.package}" dependency — the pin describes something the product does not install`)
+  check("kernel-provenance", declared === pin.version, `dependency line says ${declared}, kernel-pin.json pins ${pin.version}`)
+  check("kernel-provenance", !existsSync(path.join(pkgDir, "vendor", "kernel")), "packages/opencode/vendor/kernel is back — the kernel ships as a dependency; the vendored copy was retired with its ruler")
+  check("kernel-provenance", (pin.corpus ?? []).length > 8, `kernel-pin.json pins ${String((pin.corpus ?? []).length)} contract file(s); the published package ships 14 — a pin with no corpus cannot catch drift`)
+}
+
 // ---- platform naming
 const template = product.platformPackage ?? ""
 check("platform-template", ["{name}", "{os}", "{arch}"].every((token) => template.includes(token)), `platformPackage "${template}" must contain {name}, {os}, {arch}`)
