@@ -45,8 +45,11 @@ binding refuses that path by design.
   per-run, and a run that reports "staged, not published" has published nothing. `npm view
   glasspane-harness@<version>` and `npm audit signatures` are the checks, not a green job.
 - Release assets (`glasspane-harness-darwin-<arch>.zip`) carry a `SHA256SUMS.txt` manifest
-  and a detached GPG signature per asset (`.asc`), signed by the key whose full fingerprint
-  is recorded in `product.json` and embedded in `scripts/install.sh`.
+  and a detached GPG signature per asset (`.asc`). The signing key's full fingerprint is
+  asserted, not just mentioned: `scripts/install.sh` carries both the armored public key and
+  the fingerprint it requires a `VALIDSIG` to match. What is **not** yet asserted is that the
+  release lane's `GPG_PRIVATE_KEY` secret *is* that key — CI signs with whatever the secret
+  holds, so the installer's check is the enforcement point, not a CI step.
 
 ## Verifying what you installed
 
