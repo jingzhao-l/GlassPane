@@ -42,7 +42,11 @@ if (process.platform !== "darwin") {
 
 /** Reported, never asserted: whether the registry can show a provenance attestation. */
 async function reportProvenance() {
-  const meta = await $`npm view ${product.name}@${version} --registry ${registry} --json`.nothrow()
+  // `quiet("ignore")`: a release log that buries its own verdict under the registry's
+  // whole metadata blob is a log nobody reviews. The value is still read from stdout.
+  const meta = await $`npm view ${product.name}@${version} --registry ${registry} --json`
+    .nothrow()
+    .quiet("ignore")
   if (meta.exitCode !== 0) {
     console.log("note: could not read registry metadata — provenance NOT checked here")
     return
@@ -99,7 +103,9 @@ try {
     // What the registry vouches for these exact bytes. Integrity, not provenance: it says
     // the downloaded tarball is the one the registry records for this version, and nothing
     // about who built it — hence the separate note below.
-    const dist = await $`npm view ${product.name}@${version} dist.integrity --registry ${registry}`.nothrow()
+    const dist = await $`npm view ${product.name}@${version} dist.integrity --registry ${registry}`
+      .nothrow()
+      .quiet("ignore")
     check(
       "the published version carries a registry integrity hash",
       dist.exitCode === 0 && dist.stdout.toString().trim().startsWith("sha512-"),

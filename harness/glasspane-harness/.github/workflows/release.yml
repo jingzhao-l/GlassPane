@@ -290,13 +290,15 @@ jobs:
         run: bun install
 
       - name: Upgrade npm (staged publishing needs >= 11.15)
-        # `npm@latest` on the machine holding the OIDC token is third-party code pulled
-        # without a pin, minutes before an irreversible publish. It is not pinned here yet
-        # because the version that actually published 0.7.0 is not recoverable from that
-        # run's log, and swapping an untested npm into the publish step is its own risk.
-        # Printing the version makes the next pin an evidenced choice instead of a guess.
+        # Pinned, with the evidence for the number: the registry metadata for the published
+        # 0.7.0 wrapper records `_npmVersion: 12.2.0` and
+        # `_npmUser: GitHub Actions <npm-oidc-no-reply@github.com>` — that is the npm that
+        # actually produced the provenance-attested publish from this lane. `npm@latest`
+        # here would be third-party code pulled without a pin onto the machine holding the
+        # OIDC token, minutes before an irreversible publish. Print the version anyway: a
+        # drift between the pin and reality must not be readable as a successful publish.
         run: |
-          npm install -g npm@latest
+          npm install -g npm@12.2.0
           echo "npm in this publish lane: $(npm --version)"
 
       - name: Build this platform
@@ -368,13 +370,15 @@ jobs:
         run: bun install
 
       - name: Upgrade npm (staged publishing needs >= 11.15)
-        # `npm@latest` on the machine holding the OIDC token is third-party code pulled
-        # without a pin, minutes before an irreversible publish. It is not pinned here yet
-        # because the version that actually published 0.7.0 is not recoverable from that
-        # run's log, and swapping an untested npm into the publish step is its own risk.
-        # Printing the version makes the next pin an evidenced choice instead of a guess.
+        # Pinned, with the evidence for the number: the registry metadata for the published
+        # 0.7.0 wrapper records `_npmVersion: 12.2.0` and
+        # `_npmUser: GitHub Actions <npm-oidc-no-reply@github.com>` — that is the npm that
+        # actually produced the provenance-attested publish from this lane. `npm@latest`
+        # here would be third-party code pulled without a pin onto the machine holding the
+        # OIDC token, minutes before an irreversible publish. Print the version anyway: a
+        # drift between the pin and reality must not be readable as a successful publish.
         run: |
-          npm install -g npm@latest
+          npm install -g npm@12.2.0
           echo "npm in this publish lane: $(npm --version)"
 
       - name: Assemble and publish the wrapper (optionalDependencies come from product.json)
@@ -431,13 +435,15 @@ jobs:
         run: bun install
 
       - name: Upgrade npm (staged publishing needs >= 11.15)
-        # `npm@latest` on the machine holding the OIDC token is third-party code pulled
-        # without a pin, minutes before an irreversible publish. It is not pinned here yet
-        # because the version that actually published 0.7.0 is not recoverable from that
-        # run's log, and swapping an untested npm into the publish step is its own risk.
-        # Printing the version makes the next pin an evidenced choice instead of a guess.
+        # Pinned, with the evidence for the number: the registry metadata for the published
+        # 0.7.0 wrapper records `_npmVersion: 12.2.0` and
+        # `_npmUser: GitHub Actions <npm-oidc-no-reply@github.com>` — that is the npm that
+        # actually produced the provenance-attested publish from this lane. `npm@latest`
+        # here would be third-party code pulled without a pin onto the machine holding the
+        # OIDC token, minutes before an irreversible publish. Print the version anyway: a
+        # drift between the pin and reality must not be readable as a successful publish.
         run: |
-          npm install -g npm@latest
+          npm install -g npm@12.2.0
           echo "npm in this publish lane: $(npm --version)"
 
       - name: Stage the wrapper through OIDC, then reject it
