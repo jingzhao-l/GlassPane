@@ -7,25 +7,25 @@
     "fork": "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted",
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
-  "observedAt": "2026-10-06",
-  "engineLoc": 23110,
+  "observedAt": "2026-10-08",
+  "engineLoc": 23209,
   "engineFiles": 60,
   "surfaces": {
     "mcpShell": {
-      "loc": 8601,
+      "loc": 8652,
       "files": 13,
-      "ratio": 0.2308,
+      "ratio": 0.2313,
       "byFile": {
         "mcp-shell/src/tools.ts": 2339,
         "mcp-shell/src/engine-client.ts": 1415,
-        "mcp-shell/src/http-gateway.ts": 1242,
+        "mcp-shell/src/http-gateway.ts": 1273,
         "mcp-shell/src/project-registry.ts": 1098,
         "mcp-shell/src/update-state.ts": 492,
         "mcp-shell/src/audit-session.ts": 381,
+        "mcp-shell/src/dispatch.ts": 364,
         "mcp-shell/src/evidence-report.ts": 364,
-        "mcp-shell/src/dispatch.ts": 357,
         "mcp-shell/src/io.ts": 339,
-        "mcp-shell/src/http-gateway-cli.ts": 227,
+        "mcp-shell/src/http-gateway-cli.ts": 240,
         "mcp-shell/src/index.ts": 226,
         "mcp-shell/src/errors.ts": 87,
         "mcp-shell/src/canonical.ts": 34
@@ -1065,7 +1065,7 @@
           "lines": 0
         }
       ],
-      "ratio": 0.1489,
+      "ratio": 0.1483,
       "vendorExcluded": {
         "files": 11,
         "lines": 1464
@@ -1076,7 +1076,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 14149,
+  "totalToolSurfaceLoc": 14200,
   "note": null,
   "carried": null
 }
