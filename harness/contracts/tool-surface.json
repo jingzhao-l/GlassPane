@@ -7,14 +7,14 @@
     "fork": "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted",
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
-  "observedAt": "2026-10-06",
-  "engineLoc": 23110,
+  "observedAt": "2026-10-08",
+  "engineLoc": 23106,
   "engineFiles": 60,
   "surfaces": {
     "mcpShell": {
       "loc": 8601,
       "files": 13,
-      "ratio": 0.2308,
+      "ratio": 0.2319,
       "byFile": {
         "mcp-shell/src/tools.ts": 2339,
         "mcp-shell/src/engine-client.ts": 1415,
@@ -32,7 +32,7 @@
       }
     },
     "fork": {
-      "loc": 5548,
+      "loc": 5376,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -82,7 +82,7 @@
         {
           "file": "packages/opencode/src/tool/glasspane/kernel.ts",
           "kind": "added",
-          "lines": 295
+          "lines": 296
         },
         {
           "file": "script/gpg-signing.sh",
@@ -92,12 +92,12 @@
         {
           "file": "script/kernel-conformance.mjs",
           "kind": "added",
-          "lines": 247
+          "lines": 278
         },
         {
-          "file": "script/kernel-vendor.mjs",
+          "file": "script/kernel-pin.mjs",
           "kind": "added",
-          "lines": 438
+          "lines": 234
         },
         {
           "file": "scripts/install.sh",
@@ -1065,18 +1065,22 @@
           "lines": 0
         }
       ],
-      "ratio": 0.1489,
+      "ratio": 0.145,
       "vendorExcluded": {
-        "files": 11,
-        "lines": 1464
+        "files": 0,
+        "lines": 0
       },
       "testsExcluded": {
-        "files": 26,
-        "lines": 1474
+        "files": 27,
+        "lines": 1544
+      },
+      "kernel": {
+        "package": "iterate-kernel",
+        "version": "0.1.2"
       }
     }
   },
-  "totalToolSurfaceLoc": 14149,
+  "totalToolSurfaceLoc": 13977,
   "note": null,
   "carried": null
 }
