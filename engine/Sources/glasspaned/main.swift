@@ -670,6 +670,22 @@ if let kind = options.requestPermission {
 if options.listProjects {
     let stateRoot = resolvedStateRoot(injected: options.stateDir)
     let registry = ProjectRegistry(stateRoot: stateRoot)
+    // 读不回的文件一律拒答，不许回 `[]` + 退出码 0。判据在
+    // `ProjectRegistry.listing()`（那里可单测），这里只负责把两种"看起来一样"的形状
+    // 分开说：真没注册任何东西，和这份文件读不出注册了什么。这条命令恰是 agent 被指来
+    // 回答"注册了什么"的那一条（mcp-shell 的 remedy 原文点名它），而 `ProjectRegistry.all`
+    // 自己的注释就写着读回失败时不许当成空表；同一份文件在 --project-prune /
+    // --project-remove 那里是拒绝覆写的（§12.3.2），读侧不该比写侧更容易蒙混。
+    if case .unreadable(let reason) = registry.listing() {
+        writeJSON([
+            "command": "--list-projects", "loadFailed": true,
+            "projects": [[String: Any]](), "count": 0,
+            "registryPath": registry.filePath,
+            "error": reason,
+            "next": "make the file readable again (python3 -m json.tool \(registry.filePath), or restore it from a copy), then restart the background service so it re-reads"
+        ], to: .standardError)
+        exit(1)
+    }
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
     if let data = try? encoder.encode(registry.all) {
@@ -864,7 +880,24 @@ private func runProjectRemove(projectId: String, options: Options) -> Never {
     }
 
     let verified = ProjectRegistry(stateRoot: stateRoot)
-    let gone = !verified.all.contains { $0.projectId == projectId }
+    // 判据在 `ProjectRegistry.removalVerdict`（那里可单测）：读不回时 `all` 是空的，
+    // 于是裸的 `!all.contains(…)` 恒为真——这条命令会在"根本看不见盘"的情况下报一次
+    // 成功并退 0。`runProjectPrune` 对同一种状况是 exit(1)（§12.3.2 同源），写侧两条
+    // 命令不能一个拒、一个报喜。这里不给 remaining：读不回时任何条数都是编的。
+    let verdict = verified.removalVerdict(projectId: projectId)
+    if !verdict.answerable {
+        writeJSON([
+            "command": "--project-remove", "dryRun": false, "loadFailed": true,
+            "found": true, "removed": false,
+            "projectId": projectId, "registryPath": registry.filePath,
+            // 盘与 daemon 内存此刻已经不一致，重启确实需要——这里不夸大。
+            "requiresDaemonRestart": true,
+            "error": verified.unreadableReport ?? "the registry cannot be read back after the write",
+            "next": "make the file readable again (python3 -m json.tool \(registry.filePath), or restore it from a copy) and restart the daemon"
+        ], to: .standardError)
+        exit(1)
+    }
+    let gone = verdict.removed
     writeJSON([
         "command": "--project-remove", "dryRun": false,
         "loadFailed": verified.loadFailed,

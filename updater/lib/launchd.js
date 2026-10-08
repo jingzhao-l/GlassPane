@@ -20,12 +20,16 @@ import { fileURLToPath } from 'node:url'
 
 import { CODES } from './codes.js'
 import { CA_ENV_VAR } from './ca-bundle.js'
-import { UpdaterError, writePrivateFile } from './fsutil.js'
+import { UpdaterError, STATE_FILE_MODE, writePrivateFile } from './fsutil.js'
 import { stateDirReadings } from './policy.js'
 
 export const AGENT_LABEL = 'com.glasspane.update'
 export const DAEMON_JOB_LABEL = 'com.glasspane.daemon'
 export const AGENT_PLIST_NAME = `${AGENT_LABEL}.plist`
+/// The daily job's own log, named once. launchd creates it at the process umask,
+/// so the daemon's startup sweep (`StateRoot.updateLogFile`) has to know this
+/// exact name — `installer/test/log-modes.test.mjs` is the drift gate between them.
+export const AGENT_LOG_NAME = 'update.log'
 export const DEFAULT_HOUR = 12
 export const DEFAULT_MINUTE = 0
 
@@ -225,7 +229,65 @@ export function agentEnvironmentBlock(caBundle) {
 }
 
 /**
- * Render the update agent's plist body. The shipped template under
+ * The job's own log file, named in **one** place. `StandardOutPath`/
+ * `StandardErrorPath` in the rendered plist and the pre-creation below have to
+ * agree on the same name, and `StateRoot.updateLogFile` on the Swift side is the
+ * third reader of it — `installer/test/log-modes.test.mjs` pins all three
+ * against drift.
+ */
+export function agentLogPath(stateRoot) {
+  return typeof stateRoot === 'string' && stateRoot !== '' ? path.join(stateRoot, AGENT_LOG_NAME) : null
+}
+
+/**
+ * Create the job's log owner-only, *before* launchd is handed the definition.
+ *
+ * launchd opens `StandardOutPath` itself, at the process umask — measured 0644 —
+ * and this file is a record of what this machine has installed and updated:
+ * versions, staging paths, digests, tags, GPG verdicts and the reason every
+ * refusal happened. The daemon's startup sweep now tightens the name too, but a
+ * log created *after* the daemon started would wait for the next restart; the
+ * writer gets there first. Same posture as the installer's log: a `chmod` that
+ * does not stick is a **write failure**, not a success with a note.
+ */
+export function preparePrivateLogFile(logPath, {
+  open = (p) => fs.openSync(p, 'a'),
+  chmod = (fd, mode) => fs.fchmodSync(fd, mode),
+  fstat = (fd) => fs.fstatSync(fd),
+  close = (fd) => fs.closeSync(fd),
+} = {}) {
+  if (typeof logPath !== 'string' || logPath === '') {
+    return { ok: false, mode: null, error: 'the update agent needs a log path before it can be registered' }
+  }
+  let fd
+  try {
+    fd = open(logPath)
+  } catch (error) {
+    return { ok: false, mode: null, error: `the agent log ${logPath} could not be opened: ${error.message}` }
+  }
+  try {
+    chmod(fd, STATE_FILE_MODE)
+    const mode = Number(fstat(fd).mode ?? 0) & 0o777
+    if (mode !== STATE_FILE_MODE) {
+      return {
+        ok: false,
+        mode,
+        error: `the agent log ${logPath} is still ${(mode & 0o777).toString(8)} after chmod(0600): this volume does not hold permission bits, so an owner-only log is not achievable here`,
+      }
+    }
+    return { ok: true, mode, error: null }
+  } catch (error) {
+    return { ok: false, mode: null, error: `the agent log ${logPath} could not be tightened: ${error.message}` }
+  } finally {
+    try {
+      close(fd)
+    } catch {
+      /* already decided; a leaking fd on a refused registration is the lesser fact */
+    }
+  }
+}
+
+/**
  * `launchd/` carries `{{TOKENS}}`; this is the single place that fills them, so
  * a registered agent and a rendered file in tests come from the same string.
  *
@@ -259,8 +321,7 @@ export function renderAgentPlist({
   // The log path is derived from the state root, so it is derived *after* the
   // state root has been named: `path.join(null, …)` used to throw a TypeError out
   // of a function whose refusals are supposed to be `UpdaterError`s with a code.
-  const resolvedLog = logPath
-    ?? (typeof stateRoot === 'string' && stateRoot !== '' ? path.join(stateRoot, 'update.log') : null)
+  const resolvedLog = logPath ?? agentLogPath(stateRoot)
   const values = {
     '{{LABEL}}': label,
     '{{NODE_PATH}}': nodePath,
@@ -424,6 +485,8 @@ export function registerAgent({
   plistText,
   cliPath = null,
   uid = null,
+  logPath = null,
+  prepareLog = (p) => preparePrivateLogFile(p),
   run = defaultRun,
   writeFile = (p, text) => writePrivateFile(p, text),
   removeFile = (p) => fs.rmSync(p, { force: true }),
@@ -433,6 +496,21 @@ export function registerAgent({
   const resolvedUid = uid ?? currentUid({ run })
   if (!resolvedUid) {
     return { ok: false, code: CODES.busyOrUnreachable, message: 'the current uid could not be read; the update agent was not registered' }
+  }
+  // The log is tightened before launchd ever opens it. A registration that
+  // cannot produce an owner-only log is refused rather than completed with a
+  // world-readable audit trail attached: the daily job writes what this machine
+  // has installed and why each update was refused, and "it will be fixed at the
+  // next daemon restart" is not a mode that exists today.
+  if (logPath !== null) {
+    const prepared = prepareLog(logPath)
+    if (!prepared?.ok) {
+      return {
+        ok: false,
+        code: CODES.stateWriteUnverified,
+        message: `the update agent was not registered: ${prepared?.error ?? 'the agent log could not be prepared'}`,
+      }
+    }
   }
   // The definition launchd is *currently* holding, kept before anything is overwritten: a re-registration
   // that launchd refuses must not leave the machine with neither a job nor a file. Measured on this machine

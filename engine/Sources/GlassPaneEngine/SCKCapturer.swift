@@ -526,6 +526,22 @@ public enum SCKCapturer {
         // 资源释放从 stream 存在的那一刻起登记：start 抛错或超时时采集会话已经建好，
         // 登记在 awaitStreamStart 之后就等于 macOS 13 路径每次失败泄漏一个 SCStream。
         defer { stream.stopCapture(completionHandler: { _ in }) }
+        // `delegate` 只收流的生命周期回调（停止/出错），**不**收帧。帧要靠
+        // `addStreamOutput(_:type:)` 登记成一个 `SCStreamOutput`；从前这一句不存在，
+        // 于是 `bridge` 永远收不到帧、`waitForFirstFrame()` 每次都把
+        // `captureTimeoutSeconds` 烧完再回 nil，macOS 13 的像素通道因此**永远**抛
+        // `pixelCaptureDenied("SCStream first frame timed out…")`。方向和诚实性都对
+        // （没测到就说不测到），但这条通道一次也没被测到过，而每次 act 都要为它付
+        // 5s × 候选窗口 × before/after 的等待。登记必须在 start 之前，这是 API 的顺序。
+        do {
+            try addStreamOutput(bridge, to: stream)
+        } catch {
+            // 帧输出没挂上，就永远不会有第一帧——继续等 `captureTimeoutSeconds`
+            // 只是把一个已经知道的原因伪装成一次超时。
+            throw ChannelError.pixelCaptureDenied(
+                reason: "SCStream frame output could not be attached: \(error.localizedDescription); no frame can arrive on this path"
+            )
+        }
         try awaitStreamStart(of: stream)
         guard let image = bridge.waitForFirstFrame() else {
             throw ChannelError.pixelCaptureDenied(
@@ -533,6 +549,18 @@ public enum SCKCapturer {
             )
         }
         return image
+    }
+
+    /// 把帧输出登记到流上。`SCStream(delegate:)` 只收生命周期回调，**不收帧**：
+    /// 这一句从前不存在，于是 `waitForFirstFrame()` 每次只能等到超时，macOS 13 的
+    /// 像素通道一次也没有被测到过（方向和诚实性都对——没测到就说不测到，但每次
+    /// act 都要为它付 5s × 候选窗口 × before/after 的等待）。登记须在 start 之前。
+    @available(macOS 13.0, *)
+    private static func addStreamOutput(_ bridge: StreamFrameBridge, to stream: SCStream) throws {
+        try stream.addStreamOutput(
+            bridge, type: .screen,
+            sampleHandlerQueue: DispatchQueue(label: "glasspane.sck.stream-output")
+        )
     }
 
     /// 启动是异步回调；bridge 到同步帧并带上超时。startCapture 的 async 重载只在

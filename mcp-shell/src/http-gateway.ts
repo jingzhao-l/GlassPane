@@ -301,25 +301,49 @@ export function createHttpGateway(options: HttpGatewayOptions): HttpGateway {
   const close = (): Promise<void> =>
     new Promise((resolve, reject) => {
       client.close?.();
+      // Node only fires server.close's callback once every connection is gone.
+      // What must never be broken is a connection with a request in flight, so
+      // idle keep-alive sockets are reaped until the close actually lands —
+      // including the ones that only *become* idle after close was asked for.
+      const reaper = setInterval(() => closeIdleKeepAliveConnections(server), IDLE_REAP_MS);
+      reaper.unref();
       server.close((error) => {
+        clearInterval(reaper);
         if (error) {
           reject(error);
         } else {
           resolve();
         }
       });
-      // Node only fires server.close's callback once every connection is gone;
-      // keep the promise from hanging on a keep-alive client.
-      forceCloseConnections(server);
+      closeIdleKeepAliveConnections(server);
     });
 
   return { server, close };
 }
 
-function forceCloseConnections(server: Server): void {
-  const withCloseAll = server as Server & { closeAllConnections?: () => void };
-  if (typeof withCloseAll.closeAllConnections === "function") {
-    withCloseAll.closeAllConnections();
+/** How often a closing gateway re-checks for connections that have gone idle. */
+const IDLE_REAP_MS = 200;
+
+function closeIdleKeepAliveConnections(server: Server): void {
+  const handles = server as Server & {
+    closeIdleConnections?: () => void;
+    closeAllConnections?: () => void;
+  };
+  if (typeof handles.closeIdleConnections === "function") {
+    // Idle-only, deliberately. `closeAllConnections()` — what this called before —
+    // also destroys a socket with a request in flight: measured against the
+    // shipped bundle, a `POST /v1/tools/act` whose daemon call had not returned
+    // came back as `ECONNRESET` with no frame at all, so the caller never learned
+    // the act had happened, never received the "do NOT re-issue `act`" remedy, and
+    // the daemon kept performing that act on the user's screen. That is the B-02
+    // doctrine this gateway is written to hold, broken by the shutdown path.
+    handles.closeIdleConnections();
+    return;
+  }
+  if (typeof handles.closeAllConnections === "function") {
+    // Node < 18.2 has no idle-only close; hanging the promise is the honest
+    // failure here, not a reset of somebody's in-flight act.
+    handles.closeAllConnections();
   }
 }
 
@@ -1231,7 +1255,14 @@ function readBody(req: IncomingMessage, limit: number): Promise<string> {
     req.on("data", (chunk: Buffer) => {
       size += chunk.length;
       if (size > limit) {
-        req.destroy();
+        // Stop reading, but keep the socket. The 400 that names this limit is
+        // the only thing telling the caller *why* it was refused, and destroying
+        // the connection here made every oversized body an ECONNRESET with no
+        // `{code,message,remedy}` at all — measured with a 300 KiB POST — so the
+        // remedy "shrink the request payload and retry" never reached anyone and
+        // the caller retried the same oversized body.
+        chunks.length = 0;
+        req.pause();
         reject(new HTTPPayloadTooLargeError(limit));
         return;
       }

@@ -32,6 +32,10 @@ import {
   startDetached,
 } from '../cli.js'
 
+// 更新器那份日志的名字必须从**它自己的真源**读，不能在测试里再抄一遍字面量——
+// 抄了就等于用第二个副本去验第一个副本。
+import { AGENT_LOG_NAME } from '../../updater/lib/launchd.js'
+
 const modeOf = (target) => fs.statSync(target).mode & 0o777
 
 function tempRoot(label) {
@@ -162,17 +166,35 @@ test('startDetached: 日志模式做不到时不启动子进程', async () => {
   }
 })
 
-test('跨语言漂移闸：daemon 的启动扫描必须认这同一个日志名', () => {
-  // 这一条不是装饰。安装器按 `DAEMON_LOG_NAME` 建 0600，daemon 的
-  // `StateRoot.tightenPermissions` 负责把**别人**（launchd 自己）按 umask 创建的那份收紧。
-  // 两边各写一个文件名字面量，任何一侧改名都会让另一侧静默失效——那正是
-  // "SECURITY.md 里那条已被覆盖"变成谎话的形状，所以名字只能有一份真源被两头核。
+test('跨语言漂移闸：daemon 的启动扫描必须认这两份 launchd 日志的同一个名字', () => {
+  // 这一条不是装饰。写侧各有一个名字（安装器的 `DAEMON_LOG_NAME`、更新器的
+  // `AGENT_LOG_NAME`），而**别人**（launchd 自己）按 umask 创建的那一份要靠 daemon 的
+  // `StateRoot.tightenPermissions` 收紧。两边各写一个文件名字面量，任何一侧改名都会让
+  // 另一侧静默失效——那正是"SECURITY.md 里那条已被覆盖"变成谎话的形状，所以名字必须
+  // 被两头核，而且必须核到**那张被收紧的表**里，不是只核到一个属性定义了它。
+  //
+  // `update.log` 是这一轮补进来的第二份：它和 `installer-daemon.log` 同病（launchd 建、
+  // 走 umask、0644），内容却是这台机器装了什么、更新到哪一步、每次拒绝的理由。
+  const here = path.dirname(fileURLToPath(import.meta.url))
   const stateRoot = fs.readFileSync(
-    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "engine", "Sources", "GlassPaneEngine", "StateRoot.swift"),
+    path.join(here, "..", "..", "engine", "Sources", "GlassPaneEngine", "StateRoot.swift"),
     "utf8",
   )
-  assert.match(stateRoot, new RegExp(`child\\("${DAEMON_LOG_NAME}"\\)`),
-    `engine/Sources/GlassPaneEngine/StateRoot.swift 里找不到 child("${DAEMON_LOG_NAME}")：扫描不再覆盖这份日志`)
-  assert.match(stateRoot, /installerDaemonLogFile\s*\]\s*\n?\s*\+ \(Self\.jsonFiles/,
-    "这个名字必须真在被收紧的那张表里，而不是只定义了一个属性")
+  const swept = /\bfiles\s*=\s*\[([^\]]*)\]/.exec(stateRoot)
+  assert.ok(swept, "StateRoot.swift 里找不到那张被收紧的文件表，这条闸已经不作数了")
+
+  const pairs = [
+    { leaf: DAEMON_LOG_NAME, swift: 'installerDaemonLogFile' },
+    { leaf: AGENT_LOG_NAME, swift: 'updateLogFile' },
+  ]
+  for (const { leaf, swift } of pairs) {
+    assert.match(stateRoot, new RegExp(`child\\("${leaf}"\\)`),
+      `engine/Sources/GlassPaneEngine/StateRoot.swift 里找不到 child("${leaf}")：扫描不再覆盖这份日志`)
+    assert.ok(
+      swept[1].split(',').map((name) => name.trim()).includes(swift),
+      `${swift} 只定义了一个属性、却没进被收紧的那张表（表里是 ${swept[1].trim()}）`,
+    )
+  }
+  assert.notEqual(DAEMON_LOG_NAME, AGENT_LOG_NAME,
+    "两份 launchd 日志若同名，上面那张表就只剩一条真正被核过")
 })

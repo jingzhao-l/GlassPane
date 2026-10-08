@@ -77,6 +77,14 @@ public struct StateRoot: Equatable {
     /// chmod；现在它是被扫的对象之一。
     public var installerDaemonLogFile: String { child("installer-daemon.log") }
 
+    /// 每日更新作业自己的日志（`updater/lib/launchd.js` 的 `update.log` 是同一个名字，
+    /// 由 `installer/test/log-modes.test.mjs` 反向钉住不许漂移）。和上面那份同源同病：
+    /// 它由 **launchd** 按进程 umask 创建（实测 0644），而它的内容是更新器每次
+    /// check/apply 的 JSON——已装版本、暂存路径、摘要、tag、GPG 判定与拒绝理由，
+    /// 另一个账号读它就读到了这台机器装了什么、更新到哪一步、被什么挡住。
+    /// 更新器自己的 `fsutil` 收紧它写的所有文件，唯独不建这个：写的人是 launchd。
+    public var updateLogFile: String { child("update.log") }
+
     /// Default probe listener path (`--probe-socket-path` overrides it).
     public var probeSocketFile: String { child("probe.sock") }
 
@@ -197,7 +205,7 @@ public struct StateRoot: Equatable {
             log.info("state root \(path) does not exist yet — nothing to tighten")
             return []
         }
-        let files = [projectsFile, approvalsFile, installerDaemonLogFile]
+        let files = [projectsFile, approvalsFile, installerDaemonLogFile, updateLogFile]
             + (Self.jsonFiles(in: evidenceDirectory))
         for file in files {
             if let defect = Self.isolateFile(at: file) {
