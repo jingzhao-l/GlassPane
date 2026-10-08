@@ -37,11 +37,26 @@ export function makeFakeApp(appsDir, name, version, { marker = 'old' } = {}) {
   return root
 }
 
-/** An executable that really prints `glasspaned <version>`. */
+/**
+ * An executable that really prints `glasspaned <version>` — and, like the real
+ * parser, refuses everything else with `unknown argument` and exit 64.
+ *
+ * It used to echo the version for **any** argument. That is how a fixture became
+ * a co-conspirator: the daemon had no `--version` at all until 1.10.0, so the
+ * second leg of `localVersion`'s "the two readings have to agree" was permanently
+ * empty on every real machine, while the suite stayed green by asking a stub that
+ * answered whatever it was handed.
+ */
 export function makeDaemonBinary(appsDir, version, name = 'GlassPane Daemon.app') {
   const exe = path.join(appsDir, name, 'Contents', 'MacOS', 'glasspaned')
   fs.mkdirSync(path.dirname(exe), { recursive: true })
-  fs.writeFileSync(exe, `#!/bin/sh\necho "glasspaned ${version}"\n`)
+  fs.writeFileSync(
+    exe,
+    '#!/bin/sh\n'
+    + 'if [ "$1" = "--version" ]; then echo "glasspaned ' + version + '"; exit 0; fi\n'
+    + 'echo "glasspaned: unknown argument: $1" >&2\n'
+    + 'exit 64\n',
+  )
   fs.chmodSync(exe, 0o755)
   return exe
 }
