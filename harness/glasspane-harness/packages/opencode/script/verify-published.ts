@@ -22,6 +22,7 @@ import path from "node:path"
 import product from "../../../product.json"
 
 const version = process.argv[2] ?? product.version
+const registry = product.npm?.registry ?? "https://registry.npmjs.org"
 const failures: string[] = []
 const check = (label: string, ok: boolean, detail = "") => {
   console.log(`${ok ? "ok  " : "FAIL"}  ${label}${detail ? ` — ${detail}` : ""}`)
@@ -29,62 +30,107 @@ const check = (label: string, ok: boolean, detail = "") => {
 }
 
 if (process.platform !== "darwin") {
-  // The product is macOS-only; on another host the install is refused by npm's own
-  // os field, which is itself worth asserting rather than skipping.
-  console.log(`note: host is ${process.platform}; verifying the refusal path instead`)
-  const out = await $`npm install -g --dry-run --prefix ${tmpdir()}/gp-verify ${product.name}@${version}`.nothrow()
-  check(
-    "npm refuses the install on a non-macOS host (os field)",
-    out.exitCode !== 0,
-    `exit ${out.exitCode}`,
+  // This used to assert `install.exitCode !== 0` and call that "npm refuses because of
+  // the os field". Any failure satisfies that — offline, a TLS proxy, a 404, npm missing
+  // (exit 127) — so the lane printed a green check for a cause it had not established, on
+  // every non-macOS host. The product is macOS-only, so on another host the honest output
+  // is "nothing was verified here", with its own exit code.
+  console.error(`verify-published: host is ${process.platform}; this product is macOS-only and NOTHING was verified`)
+  console.error("  Run it on macOS to exercise the install path a user actually takes.")
+  process.exit(2)
+}
+
+/** Reported, never asserted: whether the registry can show a provenance attestation. */
+async function reportProvenance() {
+  const meta = await $`npm view ${product.name}@${version} --registry ${registry} --json`.nothrow()
+  if (meta.exitCode !== 0) {
+    console.log("note: could not read registry metadata — provenance NOT checked here")
+    return
+  }
+  console.log(
+    /\bprovenance\b/.test(meta.stdout.toString())
+      ? "note: the registry lists a provenance attestation for this version (the attestation's own content is not checked by this lane)"
+      : "note: the registry lists NO provenance attestation for this version",
   )
-  process.exit(failures.length > 0 ? 1 : 0)
 }
 
 const prefix = mkdtempSync(path.join(tmpdir(), "gp-verify-"))
 try {
-  console.log(`installing the published ${product.name}@${version} into a throwaway prefix`)
+  // The registry is named explicitly: "the registry I happen to be pointed at serves
+  // something runnable" is a weaker claim than "the published artifact installs", and an
+  // ambient mirror or a lagging read replica must not be what a release verdict rests on.
+  console.log(`installing the published ${product.name}@${version} from ${registry} into a throwaway prefix`)
   // `-g --prefix`, not a bare `--prefix`: a local install creates **no** bin links,
-  // so "is the command there?" would fail for a reason that has nothing to do with
-  // the package. (The first run of this script failed exactly that way, which is
-  // the reason the comment exists.)
-  const install = await $`npm install -g --prefix ${prefix} ${product.name}@${version}`.nothrow()
+  // so "is the command there?" would fail for a reason that has nothing to do with the
+  // package. (The first run of this script failed exactly that way, which is the reason
+  // the comment exists.)
+  const install = await $`npm install -g --registry ${registry} --prefix ${prefix} ${product.name}@${version}`.nothrow()
   if (install.exitCode !== 0) {
     check("npm install of the published package", false, install.stderr.toString().split("\n").slice(-3).join(" "))
     throw new Error("install failed")
   }
   check("npm install of the published package", true)
 
-  const bin = path.join(prefix, "bin", product.binary)
-  check("the command exists in the prefix", existsSync(bin), bin)
-  if (!existsSync(bin)) throw new Error("no binary")
+  // Every command the product ships, not just the first. `gp-harness` is a second bin of
+  // the same binary; a wrapper whose extra bin still resolves to the placeholder is a
+  // release that half works, and the old single-`product.binary` check could not see it.
+  const bins = product.bins?.length ? product.bins : [product.binary]
+  for (const binName of bins) {
+    const bin = path.join(prefix, "bin", binName)
+    check(`the command ${binName} exists in the prefix`, existsSync(bin), bin)
+    if (!existsSync(bin)) continue
+    const run = await $`${bin} --version`.nothrow()
+    const shown = run.stdout.toString().trim()
+    // The placeholder `publish.ts` leaves behind prints an apology on stderr and exits 1
+    // when postinstall never ran. Reading stdout only made that an empty version string;
+    // the exit code is asserted as well, so a stub cannot pass by being quiet.
+    check(
+      `${binName} --version reports the published version`,
+      run.exitCode === 0 && shown === version,
+      `exit ${run.exitCode}, output ${shown || "(none)"}`,
+    )
+    if (binName !== product.binary) continue
 
-  const shown = (await $`${bin} --version`.nothrow()).stdout.toString().trim()
-  check("`--version` reports the published version", shown === version, shown || "(no output)")
-  check(
-    "the package's os/cpu gate matches the product's platform block",
-    product.platform?.os?.includes("darwin") === true,
-    `os=${JSON.stringify(product.platform?.os)}`,
-  )
+    check(
+      "the package's os/cpu gate matches the product's platform block",
+      product.platform?.os?.includes("darwin") === true,
+      `os=${JSON.stringify(product.platform?.os)}`,
+    )
+    // What the registry vouches for these exact bytes. Integrity, not provenance: it says
+    // the downloaded tarball is the one the registry records for this version, and nothing
+    // about who built it — hence the separate note below.
+    const dist = await $`npm view ${product.name}@${version} dist.integrity --registry ${registry}`.nothrow()
+    check(
+      "the published version carries a registry integrity hash",
+      dist.exitCode === 0 && dist.stdout.toString().trim().startsWith("sha512-"),
+      dist.stdout.toString().trim() || `exit ${dist.exitCode}`,
+    )
+    await reportProvenance()
 
-  // The embedded web app: the companion surface that only exists if the bundle
-  // really travelled into the binary.
-  const port = 4500 + Math.floor(Math.random() * 300)
-  const server = Bun.spawn([bin, "serve", "--port", String(port)], { stdout: "pipe", stderr: "pipe" })
-  try {
-    let served = false
-    for (let i = 0; i < 30; i++) {
-      await Bun.sleep(500)
-      const response = await fetch(`http://127.0.0.1:${port}/`).catch(() => undefined)
-      if (response?.ok) {
+    // The embedded web app: the companion surface that only exists if the bundle
+    // really travelled into the binary.
+    const port = 4500 + Math.floor(Math.random() * 300)
+    const server = Bun.spawn([bin, "serve", "--port", String(port)], { stdout: "pipe", stderr: "pipe" })
+    try {
+      let served = false
+      let detail = "no response"
+      for (let i = 0; i < 30; i++) {
+        await Bun.sleep(500)
+        const response = await fetch(`http://127.0.0.1:${port}/`).catch(() => undefined)
+        if (!response?.ok) continue
         const body = await response.text()
-        served = body.includes("<!doctype html") || body.includes("<html")
+        const type = response.headers.get("content-type") ?? ""
+        // `<html` alone is satisfied by an error page. The doctype plus a bundled asset
+        // reference is what this binary serves when the web assets really are embedded.
+        const hasAssets = /(?:src|href)="\/?assets\//i.test(body)
+        served = type.includes("text/html") && /<!doctype html>/i.test(body) && hasAssets
+        detail = `content-type=${type || "(none)"} doctype=${/<!doctype html>/i.test(body)} assets=${hasAssets ? "referenced" : "absent"}`
         if (served) break
       }
+      check("the installed binary serves the embedded web app", served, detail)
+    } finally {
+      server.kill()
     }
-    check("the installed binary serves the embedded web app", served)
-  } finally {
-    server.kill()
   }
 } finally {
   rmSync(prefix, { recursive: true, force: true })
@@ -94,4 +140,4 @@ if (failures.length > 0) {
   console.error(`verify-published: ${failures.length} check(s) failed — the release is NOT good, regardless of what npm said`)
   process.exit(1)
 }
-console.log(`verify-published: ${product.name}@${version} installs, reports its version, and serves the web app`)
+console.log(`verify-published: ${product.name}@${version} installs, every shipped command reports its version, and the web app is served`)
