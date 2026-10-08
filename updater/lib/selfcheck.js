@@ -58,11 +58,16 @@ export function siteVersion(stagedDir, site, { readText } = {}) {
   // 实例属性只是转读它），好让 `hello` 与 `glasspaned --version` 说不出两套话。而一份 1.9.x
   // 及更早的暂存树里写的还是 `public let version = "…"`。一个比目标发布更新的 updater 必须两种
   // 都认得：因为"那一行搬家了"就拒掉一份完全正常的暂存树，等于这个工具亲手掐断自己的升级路径。
-  const match = /public (?:static )?let (?:buildVersion|version) = "([^"]+)"/.exec(text)
+  //
+  // 顺序不是任意的：**先找 static，找不到才回落 instance**。实测一份两份都在的树，按"文件里第一个
+  // 字面量"取会随两行谁在前面而读到不同的数字——那份多出来的常量是谁写的都说不清，而权威出处只有
+  // static 一个。按位置取第一个，等于让行序决定版本号。
+  const authoritative = /public static let buildVersion = "([^"]+)"/.exec(text)
+  const match = authoritative ?? /public let version = "([^"]+)"/.exec(text)
   if (!match) {
     throw new UpdaterError(
       CODES.versionLineBroken,
-      `${site.file} in the staged tree carries neither \`public let version\` nor \`public static let buildVersion\``,
+      `${site.file} in the staged tree carries neither \`public static let buildVersion\` nor \`public let version\``,
     )
   }
   return requirePlainVersion(match[1], site.file)

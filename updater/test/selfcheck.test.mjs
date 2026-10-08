@@ -80,6 +80,18 @@ test('daemon 位点两种形状都读得出来——搬家不许掐断升级路�
     assert.equal(siteVersion(moved, VERSION_SITES.find((s) => s.id === 'daemon-hello')), '1.10.0',
       '新形状读不出来')
 
+    // 两份字面量都在的树：读哪个**不能由行序决定**。半搬过来的、或在 static 之外又留了一份
+    // 实例常量的树，按"文件里第一个带引号的版本"取会读到后面那一处，而权威出处只有 static。
+    const both = path.join(dir, 'both-literals')
+    makeTree(both, '1.10.0', {
+      driftSite: {
+        file: path.join('engine', 'Sources', 'GlassPaneEngine', 'EngineCore.swift'),
+        content: 'public final class EngineCore {\n    public let version = "9.9.9"\n    public static let buildVersion = "1.10.0"\n    public let versionAliased = EngineCore.buildVersion\n}\n',
+      },
+    })
+    assert.equal(siteVersion(both, VERSION_SITES.find((s) => s.id === 'daemon-hello')), '1.10.0',
+      'instance 那份排在前面就被读走了：版本号由行序决定，而不是由权威出处决定')
+
     // 对照必须也能红：两种形状都没有的树，仍然要说"读不到"而不是回一个 null。
     const broken = path.join(dir, 'broken')
     makeTree(broken, '1.10.0', {
