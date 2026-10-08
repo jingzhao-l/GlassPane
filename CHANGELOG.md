@@ -22,6 +22,19 @@
   那位兄弟的实测搬过来的、这一轮没有对真机 launchd 作业重测。代码侧的措施（`AGENT_LOG_NAME` →
   `StateRoot.updateLogFile` → 注册前 0600）确实随 1.9.0 发出，缺的只是这份文档的同步。
 
+- ⚠ 同批两处由复审（对已合并 diff 的 fresh-eyes 一遍）抓出来的：
+  - `selfcheck.js` 先认两种字面量形状时用的是一个"两种都匹配"的正则，于是**读哪个由行序决定**：
+    一份两份都在的树会读到实例那一份。改成先找权威出处 `public static let buildVersion`，
+    找不到才回落 `public let version`。测试补一份"两份都在、instance 排前面"的树，
+    读回 1.10.0 才算过。
+  - `ProjectRegistry.removalVerdict` 在**文件整个不见**时回 `(answerable: true, removed: true)`：
+    `load()` 把缺文件当成"还没注册"，那对读侧对，对写后回读是同一种撒谎的另一张脸（一次没落盘的写
+    与一张被删掉的表都给出一样的形状），于是命令报"确认已删除"并退 0。现在缺文件与读不开走同一条
+    不回答的路，CLI 回 exit 1 + `loadFailed`。用例：`testRemovalVerdictRefusesWhenTheFileIsGoneAfterTheWrite`。
+- 另有一条复审指控被实测**推翻**：`glasspaned --state-dir relative/path --version` 并不会像它说的
+  退 0——`--state-dir` 的绝对路径校验发生在解析循环里，两种参数顺序实测都退 64。记录在此，
+  免得下一轮把同一条指控再当缺陷报一次。
+
 ## [1.9.0] — 2026-10-08
 
 版本判断：**按 minor 记**。1.6.2 那四条 patch 判据实测都没动——状态文件的字段一个没加没改
