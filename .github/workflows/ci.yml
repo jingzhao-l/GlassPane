@@ -240,8 +240,51 @@ jobs:
       - name: Extension points are still live at the pinned upstream tag
         run: node harness/tools/hook-liveness.mjs --check
 
+      # 内核改依赖之后，出处检查要看得到装出来的那份包。第一次 CI 跑这段时它红了：
+      # `kernel-pin: iterate-kernel is not installed — run 'bun install' …`，退出码 2。
+      # 那不是回归而是这道闸的正确行为——测不到被测量物时它拒绝说绿。这里的修法是给它
+      # 需要的安装，而不是放宽判据。bun 版本从 fork 自己的 packageManager 单点解析，
+      # 不在这个文件里再写一个字面量（写了就会有"CI 装的 bun 与产品钉的不一样"这种账）。
+      - name: "Resolve the pinned bun version (single source: the fork's packageManager)"
+        id: bunver
+        run: |
+          set -euo pipefail
+          pm="$(node -p "require('./harness/glasspane-harness/package.json').packageManager")"
+          case "$pm" in
+            bun@*) ;;
+            *) echo "::error::packageManager is not a bun pin: $pm"; exit 1 ;;
+          esac
+          echo "version=${pm#bun@}" >> "$GITHUB_OUTPUT"
+
+      - name: Install the pinned bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ steps.bunver.outputs.version }}
+
+      - name: Install the fork workspace (frozen lockfile)
+        working-directory: harness/glasspane-harness
+        run: bun install --frozen-lockfile
+
+      - name: The installed bun is the pinned bun
+        env:
+          WANT_BUN: ${{ steps.bunver.outputs.version }}
+        run: |
+          set -euo pipefail
+          got="$(bun --version)"
+          if [ "$got" != "$WANT_BUN" ]; then
+            echo "::error::bun $got on PATH, packageManager pins $WANT_BUN"
+            exit 1
+          fi
+          echo "bun $got matches the pin"
+
       - name: The kernel dependency still matches its provenance manifest
         run: node harness/glasspane-harness/script/kernel-pin.mjs --check
+
+      # 哈希只证明装到的是那一份；这条证明那份的行为还是我们依赖的那些答案——10 条
+      # fixture 对着 contracts/kernel-conformance.json 的摘要与 fixture 自带的期望跑。
+      - name: Kernel behaviour answers as recorded (fixtures through the installed kernel)
+        working-directory: harness/glasspane-harness
+        run: bun script/kernel-conformance.mjs
 
   # 工作流可编译性守卫。GitHub 拒绝解析的工作流不产生任何 job 日志：它在解析期整体
   # 作废，之后每次触发只留下一个 0 步、名为文件路径的红色 run。c3797d4 用
