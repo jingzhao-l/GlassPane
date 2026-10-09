@@ -263,7 +263,18 @@ jobs:
 
       - name: Install the fork workspace (frozen lockfile)
         working-directory: harness/glasspane-harness
-        run: bun install --frozen-lockfile
+        # `--ignore-scripts` because this job measures provenance and behaviour, not native
+        # builds. Without it the install runs a dependency's node-gyp build
+        # (`tree-sitter-powershell`) and that is exactly what turned red on the first run of
+        # this step — the fork's own CI lane dodges the same rock by putting Node 24 first
+        # (node-gyp@13 needs >=22), while this job pins Node 20 for the rulers. Skipping
+        # lifecycle scripts also means this lane executes no third-party code, which is the
+        # right posture for a job whose whole subject is "is this the artifact we recorded".
+        # Verified against a clean `git archive` copy of the fork at this commit: 2920
+        # packages installed, no gyp, and both `kernel-pin --check` (15 contract files) and
+        # `kernel-conformance` (10 fixtures) pass on that tree — the kernel resolves from
+        # `packages/opencode/node_modules`, which `kernel-pin.mjs` looks for explicitly.
+        run: bun install --frozen-lockfile --ignore-scripts
 
       - name: The installed bun is the pinned bun
         env:
