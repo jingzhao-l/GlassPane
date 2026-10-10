@@ -338,6 +338,17 @@ public final class DegradationTracker {
         }
         guard points.count >= 2 else { return nil }
         let count = Double(points.count)
+        // 跨度为零必须在这里就拒掉，而且判据要用 x 的极差，不能用 `centredXX > 0`：六个**同一个**
+        // epoch 相加再除以六，商与那个 epoch 并不严格相等（`6*e` 自己要舍入），于是每个
+        // `x − meanX` 是 1e-7 量级的残渣，平方和刚过零判据，一条没有时间跨度的窗口被算出一个
+        // `0.0` 的斜率——那还是"除出来的数"冒充"测不出"，只是分母换了外衣。
+        var minX = points[0].x
+        var maxX = points[0].x
+        for point in points {
+            if point.x < minX { minX = point.x }
+            if point.x > maxX { maxX = point.x }
+        }
+        guard maxX > minX else { return nil }
         let meanX = points.reduce(0) { $0 + $1.x } / count
         let meanY = points.reduce(0) { $0 + $1.y } / count
         var centredXX = 0.0
