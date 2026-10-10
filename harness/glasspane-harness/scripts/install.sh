@@ -253,10 +253,16 @@ verify_asset_gpg() {
   # The status code is read from curl, not inferred from a non-zero exit: `-f` folds
   # "not published", "blocked by the network", and "answered with something else" into
   # one failure, and only the first of those is a policy gap we agree to tolerate.
+  # `-L` is not optional: a GitHub release-asset URL answers 302 and points at the real
+  # storage host, so without it every published signature reads as "could not be fetched
+  # (HTTP 302)" and the installer refuses a perfectly good release — measured on v0.7.1
+  # the first time this path ran against the real thing. The status recorded is the FINAL
+  # one after redirects, which is what distinguishes 404 (not published) from a blocked or
+  # rewritten response.
   # `|| true` rather than `|| echo 000`: curl prints the code it got *and* fails, so the
   # fallback would append to it and produce a status like `404000` — a made-up value fed
   # into the comparison that is supposed to be about the real one.
-  http="$(curl -sS -o "$asc" -w '%{http_code}' "$url.asc" 2>/dev/null || true)"
+  http="$(curl -sSL -o "$asc" -w '%{http_code}' "$url.asc" 2>/dev/null || true)"
   [ -n "$http" ] || http="000"
   if [ "$http" = "404" ]; then
     GPG_STATE="skipped (no .asc published for this asset)"
