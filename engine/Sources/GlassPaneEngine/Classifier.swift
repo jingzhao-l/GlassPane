@@ -170,6 +170,12 @@ public enum Classifier {
         if text.contains("pixel-capture-window-resized") {
             return "the window changed size during the operation, so the two captures share no pixel domain: replay and compare against the AX tree, or snapshot a baseline (gp_snapshot) before the act"
         }
+        // `EngineCore` emits this when the window kept its size but moved: two crops
+        // of two different screen areas are not one pixel domain either, so the ratio
+        // would have been computed across a translation the reader cannot see.
+        if text.contains("pixel-capture-window-moved") {
+            return "the window moved between the two captures, so the before/after pictures are crops of different screen areas: replay with the window held in place (or gp_snapshot a baseline first) and report the pixel channel as not measured"
+        }
         if text.contains("pixel-capture-no-onscreen-window") {
             return "the target owned no on-screen window at capture time — unminimise or reopen it (or attach to the pid that owns it) and replay; the Screen Recording seat is not the cause here"
         }

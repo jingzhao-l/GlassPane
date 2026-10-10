@@ -297,6 +297,10 @@ final class ApprovalGateTests: XCTestCase {
         XCTAssertTrue(gate.verifyChain().valid)
     }
 
+    /// The staged name is unique per write (see
+    /// `ReviewStorageTests.testStagedTempNameIsUniquePerWriteAndNeverConsumesAPrePlantedFile`),
+    /// so "no residue" has to be measured as *no sibling of the ledger's name*,
+    /// not as the absence of one name somebody else could have chosen.
     func testAtomicWriteLeavesNoTmpResidue() throws {
         let dir = try makeTempDir("approval-tmp")
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -304,8 +308,13 @@ final class ApprovalGateTests: XCTestCase {
 
         let gate = makeGate(path: fileURL.path)
         _ = appendChain(gate, count: 2)
-        let leftover = dir.appendingPathComponent("approvals.json.tmp")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: leftover.path))
+        let base = fileURL.lastPathComponent
+        let siblings = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        XCTAssertEqual(
+            siblings.filter { $0 != base }, [],
+            "no staged copy and no swap artifact may sit beside the ledger: \(siblings)"
+        )
+        XCTAssertTrue(siblings.contains(base))
     }
 
     func testInMemoryGateHasNoDiskSideEffect() {
@@ -427,9 +436,12 @@ final class ApprovalGateTests: XCTestCase {
     /// this checkout, the temp write and the atomic rewrite both succeed with the
     /// production verdict (mode 0644 in between), so the refusal below is the
     /// judgment and not the fixture. Driving the fallback any other way was
-    /// measured and does not work here — a directory squatting on
-    /// `approvals.json.tmp` does **not** make the primary write throw, because
-    /// unlike `EvidenceStore` this one is not `.atomic`.
+    /// measured and does not work here — and since this round the staged name is
+    /// unique per write (see
+    /// `testStagedTempNameIsUniquePerWriteAndNeverConsumesAPrePlantedFile`), a
+    /// directory squatting on a name the test picked cannot be reached by the
+    /// production code at all, which leaves the injected verdict as the only
+    /// route to this branch.
     func testFallbackIsolationFailureIsRecordedToo() throws {
         let dir = TestSandbox.directory("ledger-isolate-fallback")
         let path = dir + "/approvals.json"
@@ -449,8 +461,9 @@ final class ApprovalGateTests: XCTestCase {
             approvedBy: "daemon:auto",
             reason: "landed world-readable"
         ))
+        let staged = try XCTUnwrap(judged.first)
         XCTAssertEqual(
-            judged, [path + ".tmp", path],
+            judged, [staged, path],
             "the primary judges the temporary name, its verdict throws into the fallback, and the fallback judges the published ledger: \(judged)"
         )
         let failure = try XCTUnwrap(
@@ -521,7 +534,14 @@ final class ApprovalGateEngineIntegrationTests: XCTestCase {
             ApprovalGate.autoApprover, "daemon:auto",
             "自批身份是台账审计口径的一部分：改这个值要过规格，不能顺手改常量"
         )
-        XCTAssertEqual(record.reason, "restore executed: compare")
+        // 只比对不回滚，台账就不许写成"执行过"。这句话从前是
+        // "restore executed: compare"——同一段里兄弟路径都说"planned only"/"failed at step N"，
+        // 只有这一条用了 executed 字样，读台账的人会以为真回滚过。
+        XCTAssertEqual(record.reason, "restore compared only, no step rolled back: compare")
+        XCTAssertFalse(
+            record.reason.contains("executed"),
+            "比对没有回滚任何东西，reason 里不许出现 executed：\(record.reason)"
+        )
         XCTAssertTrue(gate.verifyChain().valid)
     }
 

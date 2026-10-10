@@ -702,7 +702,17 @@ final class EngineCoreRound1Tests: XCTestCase {
         )
         XCTAssertEqual(gate.count, 1)
         let reason = try XCTUnwrap(gate.chain().first?.reason)
-        XCTAssertTrue(reason.hasPrefix("restore executed:"), "existing ledger contract unchanged")
+        // 比较那一支一步也没回滚，链上就不许写 "restore executed:"（措辞与档 1 的
+        // "planned only" 同一口径）；括号里那个 "compare executed" 是 mode 标签文本，
+        // 不是结局陈述。
+        XCTAssertTrue(
+            reason.hasPrefix("restore compared only, no step rolled back:"),
+            "compare-only 的结局必须由 reason 开头说清；got \(reason)"
+        )
+        XCTAssertFalse(
+            reason.lowercased().contains("executed: compare"),
+            "回滚没发生过，链上不能出现 \"executed: compare\"：\(reason)"
+        )
         XCTAssertFalse(
             reason.contains("human-approved"),
             "the hash-chained record must not carry agent-authored audit prose; got \(reason)"

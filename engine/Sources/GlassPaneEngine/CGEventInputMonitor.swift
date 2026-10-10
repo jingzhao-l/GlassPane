@@ -58,7 +58,8 @@ public final class CGEventInputMonitor: InputEventSource, InputSourceMonitoring 
     private var lastFault: String?
 
     /// 装 tap 并把它挂到**当前**线程的 run loop 上。返回 false = 没装成
-    /// （权限被拒 / 拿不到 run loop source），此时调用方必须按"未监测"降级。
+    /// （权限被拒 / 拿不到 run loop source / `CGEventTapIsEnabled` 读回 false），
+    /// 此时调用方必须按"未监测"降级。
     /// Only `.human` events are enqueued: the AX-synthesized `.agent` events
     /// are attributed by the engine already and must not count as real user
     /// input (spec v2.0 §15.2).
@@ -107,15 +108,26 @@ public final class CGEventInputMonitor: InputEventSource, InputSourceMonitoring 
             CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         }
         CGEvent.tapEnable(tap: tap, enable: true)
+        // 存活位以读回为准（与 `noteTapDisabled` 重装分支同一条判据）：
+        // `CGEventTapEnable` 没有返回值，而**创建时**就被系统停用的 tap 不会发
+        // disable 回调——那种停用只有在这里才看得见。
+        let enabled = CGEvent.tapIsEnabled(tap: tap)
         // 没有 source 的 tap 挂在空的循环上永不投递 —— 那也是"没在测"。
-        tapAlive = source != nil
+        let pumped = source != nil
+        tapAlive = pumped && enabled
         eventTap = tap
         runLoopSource = source
-        ownsRunLoop = pumpedByMonitorThread && source != nil
-        runLoop = source == nil ? nil : RunLoop.current
-        lastFault = source == nil ? "tap has no run loop source: no pump, no events" : nil
+        ownsRunLoop = pumpedByMonitorThread && pumped
+        runLoop = pumped ? RunLoop.current : nil
+        if !pumped {
+            lastFault = "tap has no run loop source: no pump, no events"
+        } else if !enabled {
+            lastFault = "CGEventTapEnable did not enable the tap: CGEventTapIsEnabled read false at creation"
+        } else {
+            lastFault = nil
+        }
         stateLock.unlock()
-        return source != nil
+        return pumped && enabled
     }
 
     fileprivate func enqueue(_ event: CGEvent) {

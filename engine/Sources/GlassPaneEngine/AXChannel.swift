@@ -64,6 +64,10 @@ public final class AXChannel: RuntimeChannel {
         var value: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value)
         let elapsedMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
+        // 超时这一支带不走 `elapsedMs`：`ChannelError.pingTimeout` 是个无载荷的
+        // case（`RuntimeChannel` 的协议面，改它就等于改线协议错误表）。所以实测
+        // 时长由调用方自己计时（`EngineCore.act` 的 ping 分支），这里不做补偿、
+        // 也不在这里发明一个"看起来像测量"的数字。
         switch error {
         case .success, .attributeUnsupported, .noValue, .notImplemented:
             // Any answer — even "no role" — proves the app's AX server is
@@ -679,7 +683,10 @@ public final class AXChannel: RuntimeChannel {
     }
 
     /// Accepts "AXButton", "button" and "Button" spellings for the same role.
-    private static func roleMatches(selectorRole: String, axRole: String) -> Bool {
+    /// Not private: `EngineCore.prune` (the observe role filter) **must** use
+    /// this same rule, or a spelling the selector path accepts answers an empty
+    /// tree there — "there are no buttons" for a tree full of them.
+    static func roleMatches(selectorRole: String, axRole: String) -> Bool {
         let expected = selectorRole.lowercased()
         let actual = axRole.lowercased()
         return actual == expected || actual == "ax" + expected || expected == "ax" + actual

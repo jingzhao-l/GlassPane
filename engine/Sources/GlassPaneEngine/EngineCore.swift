@@ -752,12 +752,24 @@ public final class EngineCore {
         let aliveBefore = channel.isProcessAlive()
 
         // AX responsiveness probe.
+        // The timeout arm reports the **measured** elapsed time, not the budget:
+        // `ChannelError.pingTimeout` carries no payload (`AXChannel` measures the
+        // round trip and can only hand back a number on the success path), so the
+        // elapsed is read off the operation's own start stamp — `started` is taken
+        // one line above the liveness lookup and the ping, so what it times is
+        // this probe attempt plus the two daemon-side calls in front of it, never
+        // the settle or the captures. Writing `Self.pingTimeoutMs` into `pingMs`
+        // was a fabricated answer time: the classifier prints that field as how
+        // long the app took to answer, and on this path the app never answered.
         var responsiveness: ResponsivenessSignal
         do {
             let pingMs = try channel.ping()
             responsiveness = ResponsivenessSignal(responsive: true, pingMs: pingMs)
         } catch let error as ChannelError where error == .pingTimeout {
-            responsiveness = ResponsivenessSignal(responsive: false, pingMs: Self.pingTimeoutMs)
+            responsiveness = ResponsivenessSignal(
+                responsive: false,
+                pingMs: max(0, clock().timeIntervalSince(started) * 1000)
+            )
         } catch let error as ChannelError {
             // R1-04: every other channel fault (Accessibility seat revoked
             // mid-session, `apiDisabled`, …) maps onto its protocol code like
@@ -929,6 +941,30 @@ public final class EngineCore {
             pixelChanged = nil
             let raw = "the frontmost window changed between captures: before=\(before.windowId) after=\(after.windowId)"
             pixelDiffFailure = "\(Self.pixelCaptureFailureLabel(reason: raw)): \(raw)"
+        } else if let before = captureBefore, let after = captureAfter,
+                  !Self.captureBoundsMatch(before.bounds, after.bounds) {
+            // 同一个 `windowId` 只说"截的还是那个窗口"，不说"截的是同一块屏幕"。
+            // `WindowCapture.bounds` 是每次采集各自解析的：窗口在操作中间被拖走
+            // （尺寸没动）时，SCKCapturer 按**当时**的 frame 裁屏，两张图于是是两块
+            // 不同屏幕区域的裁剪。逐像素比出来的仍然是一个 0...1 的数字，可它说的是
+            // "两块区域的差别"，不是"这次操作改变了界面"——同一个窗口号不足以让它
+            // 变成一次同域比较，所以这里同样只能报"未测量"并命名成因。
+            pixelDiff = nil
+            pixelChanged = nil
+            let area0 = before.bounds
+            let area1 = after.bounds
+            let raw: String
+            if abs(area0.width - area1.width) > Self.captureBoundsTolerancePoints
+                || abs(area0.height - area1.height) > Self.captureBoundsTolerancePoints {
+                raw = "the two captures of window \(before.windowId) have no common pixel domain: "
+                    + "the window resized (before=\(area0.width)x\(area0.height) at \(area0.x),\(area0.y), "
+                    + "after=\(area1.width)x\(area1.height) at \(area1.x),\(area1.y)); no ratio was measured"
+            } else {
+                raw = "the capture area of window \(before.windowId) moved between the two captures "
+                    + "(window moved, same size): before=\(area0.width)x\(area0.height) at \(area0.x),\(area0.y), "
+                    + "after=\(area1.width)x\(area1.height) at \(area1.x),\(area1.y); no ratio was measured"
+            }
+            pixelDiffFailure = "\(Self.pixelCaptureFailureLabel(reason: raw)): \(raw)"
         } else if let before = captureBefore, let after = captureAfter {
             do {
                 let outcome = try PixelDiffer.diff(before: before.image, after: after.image)
@@ -970,7 +1006,13 @@ public final class EngineCore {
             reasons.append("process-exited")
         } else if !responsiveness.responsive {
             level = .actFailedChannelAlive
-            reasons.append("ax-ping-timeout")
+            // `pingMs` 现在装的是实测值，所以"超时"这个结论必须把预算一起带在
+            // 文本里——没有预算，2000 以下的一个数字读起来就像一次普通过慢回答。
+            reasons.append(
+                "ax-ping-timeout: the app answered no accessibility call within the "
+                    + "\(Int(Self.pingTimeoutMs))ms budget (measured "
+                    + "\(Int(responsiveness.pingMs.rounded()))ms elapsed)"
+            )
         } else if !actConfirmed {
             level = .actFailedChannelAlive
             if let actRejectReason { reasons.append(actRejectReason) }
@@ -983,7 +1025,7 @@ public final class EngineCore {
                 level = .degraded
                 reasons.append("ax-after-capture-failed: \(axAfterCaptureFailure)")
             }
-            if pixelDiff == nil, treeBefore != nil {
+            if pixelDiff == nil {
                 level = .degraded
                 // X-6: whichever pixel-channel fact actually happened, in its
                 // own words. `captureBefore == nil` used to mean exactly one
@@ -991,6 +1033,10 @@ public final class EngineCore {
                 // out, an app with no on-screen window and a window outside
                 // every display were all reported (and diagnosed) as a missing
                 // Screen Recording seat.
+                // 这一条从前还多带一个 `treeBefore != nil`：树**也**失败的时候，
+                // 像素通道的名字（席位被拒/超时/取不到图）整句消失，只剩下面那句
+                // `ax-tree-capture-failed`。这个 `else` 分支里捕获一定被发过，所以
+                // 它有没有结果是一个独立成立的事实，不与树的状态做与运算。
                 reasons.append(
                     captureBeforeFailure ?? captureAfterFailure ?? pixelDiffFailure ?? "pixel-capture-failed"
                 )
@@ -1017,7 +1063,11 @@ public final class EngineCore {
         if latencyMs > Self.performanceLatencyBudgetMs {
             finalLevel = CircuitBreakerLevel(rawValue: max(level.rawValue, CircuitBreakerLevel.degraded.rawValue)) ?? level
             let perfReason = "performance-act-latency-over-budget: \(Int(latencyMs.rounded()))ms > \(Int(Self.performanceLatencyBudgetMs))ms"
-            finalReason = reason.map { "performance|" + $0 } ?? perfReason
+            // 量到的那句耗时必须留在文本里：从前有既有原因时它被整个换成
+            // "performance|" 这个前缀，于是"这一轮跑了 NNNNms、超预算" 这件
+            // 实测到的事实从证据里消失了，读者只剩一个没有数字的标记。
+            // 规格 v1.1 §2 要求的是 `performance|` **可解析前缀**，前缀保留。
+            finalReason = reason.map { "performance|" + perfReason + "; " + $0 } ?? perfReason
         } else {
             finalLevel = level
             finalReason = reason
@@ -1355,7 +1405,12 @@ public final class EngineCore {
         if let role {
             roots = EngineCore.prune(snapshot.roots, matchingRole: role)
             nodeCount = TreeDigest.nodeCount(roots)
-            digest = (try? TreeDigest.digest(roots)) ?? snapshot.digest
+            // 摘要算不出来时不许借用**未过滤**那棵树的摘要：`digest` 与
+            // `nodeCount`/`axTree` 是同一个标签下的同一棵树，混进一棵别的树的
+            // 摘要就是两条事实共用一个名字。这一层本来就 throws，让它如实抛出
+            // ——`Dispatcher.observe` 原样向上递，调用方得到一次失败，而不是
+            // 一次带假摘要的成功回答。
+            digest = try TreeDigest.digest(roots)
         } else {
             roots = snapshot.roots
             nodeCount = snapshot.nodeCount
@@ -1961,7 +2016,10 @@ public final class EngineCore {
             let consistent = tree.digest == snapshot.treeDigest
             registerRestoreApproval(
                 snapshotId: snapshotId, mode: mode, hasSteps: false,
-                outcome: "executed"
+                // 这一支一步也没回滚：它只把当前树的摘要与基线**比了一次**。
+                // 与档 1 那句 "planned only (no execution surface)" 同一口径——
+                // 不可抵赖的链上不能把一次比较写成一次回滚。
+                outcome: "compared only, no step rolled back"
             )
             return [
                 "snapshotId": snapshot.snapshotId,
@@ -1981,8 +2039,14 @@ public final class EngineCore {
                 let outcome = try act(selector: step.0, action: step.1)
                 // act() throws GP_E_ACT_FAILED on rejection; reaching here
                 // means the step was confirmed.
+                // 选择器里**没给的**字段要缺席，不能写成空串：空串读起来像
+                // "断言它等于空"，而那是一次从未做出的约束（仓里别处也按
+                // absent ≠ empty 区分）。
+                var selectorFields: [String: Any] = ["role": step.0.role]
+                if let title = step.0.title { selectorFields["title"] = title }
+                if let identifier = step.0.identifier { selectorFields["identifier"] = identifier }
                 stepResults.append([
-                    "selector": ["role": step.0.role, "title": step.0.title ?? "", "identifier": step.0.identifier ?? ""],
+                    "selector": selectorFields,
                     "action": step.1.rawValue,
                     "actConfirmed": true,
                     "operationId": outcome["operationId"] as? String ?? ""
@@ -2021,8 +2085,9 @@ public final class EngineCore {
 
     /// P5 §3.5: registers one high-risk approval record for an executed
     /// restore. Best-effort and non-blocking by design.
-    /// 登记一次高风险 restore。`outcome` 由**实际结局**生成（executed /
-    /// failed at step N / planned only），不再由调用前的猜测写死。
+    /// 登记一次高风险 restore。`outcome` 由**实际结局**生成（executed N/M steps /
+    /// failed at step N / planned only / compared only），不再由调用前的猜测写死；
+    /// "executed" 只留给真的一步一步跑完过的那条路。
     private func registerRestoreApproval(
         snapshotId: String,
         mode: String?,
@@ -2265,6 +2330,12 @@ public final class EngineCore {
         if lowered.contains("window-changed") || lowered.contains("window changed") {
             return "pixel-capture-window-changed"
         }
+        // 同一个窗口、采集区域被拖走（尺寸没动）：两张图是两块屏幕区域的裁剪。
+        // 它既不是换窗（id 相同）也不是 resize（尺寸相同），而这三者的下一步不一样，
+        // 所以它要自己的标签，不能借用上面两个。
+        if lowered.contains("window-moved") || lowered.contains("window moved") {
+            return "pixel-capture-window-moved"
+        }
         if lowered.contains("window-resized") || lowered.contains("no common pixel domain") {
             return "pixel-capture-window-resized"
         }
@@ -2290,6 +2361,17 @@ public final class EngineCore {
             return "screen-recording-denied"
         }
         return "pixel-capture-failed"
+    }
+
+    /// 同一次操作的前后两张图，采集区域是不是**同一块屏幕**。半分点：亚像素的抖动
+    /// 不值得把一次真实测量作废，而一次真正的移动至少是整点级的。
+    static let captureBoundsTolerancePoints: Double = 0.5
+
+    static func captureBoundsMatch(_ first: Bounds, _ second: Bounds) -> Bool {
+        abs(first.x - second.x) <= captureBoundsTolerancePoints
+            && abs(first.y - second.y) <= captureBoundsTolerancePoints
+            && abs(first.width - second.width) <= captureBoundsTolerancePoints
+            && abs(first.height - second.height) <= captureBoundsTolerancePoints
     }
 
     /// 像素失败被**抛成错误**时，调用方自己补一句"这次失败对你那条通路意味着什么"。
@@ -2371,6 +2453,8 @@ public final class EngineCore {
                 advice = "the window is on screen — the daemon resolved it through SCShareableContent — but no picture of it exists: another window covers it and the window-isolated capture failed too. Nothing is minimised and no permission is missing, so there is nothing to re-grant here; bring the target above whatever covers it (raise it, click its title bar, or move the covering window aside) and retry. Until a capture succeeds the visual channel is not measured: read the structure with gp_observe and report the visual check as not-done rather than as passed"
             case "pixel-capture-window-changed":
                 advice = "the frontmost window differed between the two captures, so there is no pixel pair to compare: keep the target window frontmost for the whole operation (a mid-operation click that moves focus re-triggers this) and retry; gp_observe confirms which window is frontmost without needing a capture"
+            case "pixel-capture-window-moved":
+                advice = "the same window was captured twice but at two different screen areas (its frame moved while its size stayed), so the two crops have no common domain and no pixel ratio exists for this operation: keep the window where it is — or move it back to the same origin — and retry. The Screen Recording seat is not the cause here and nothing about the seat or the daemon process is involved; until one and the same area is captured twice, report the visual channel as not measured"
             case "pixel-capture-window-resized":
                 advice = "the window changed size during the operation, so the two captures share no pixel domain: retry while the window keeps its size — a live-autosizing or animating window will keep hitting this — or take a baseline with gp_snapshot before the operation and compare against the AX tree when the size cannot be held"
             case "pixel-capture-failed":
@@ -2407,10 +2491,15 @@ public final class EngineCore {
     }
 
     /// Keeps subtrees rooted at nodes whose role matches (observe role filter).
+    /// 角色拼法与选择器**同一套判据**（`AXChannel.roleMatches` 同时接受
+    /// `button`/`Button`/`AXButton`）。逐字比较时这里会返回空数组，而选择器那条
+    /// 路同一个拼法能命中——于是 `gp_observe {role:"button"}` 对着一棵满是按钮的
+    /// 树答 `axTree: []`、`nodeCount: 0` 加一个"空树"的摘要：一句凭空造出来的
+    /// "这里没有按钮"。
     static func prune(_ roots: [AxNode], matchingRole role: String) -> [AxNode] {
         var result: [AxNode] = []
         for node in roots {
-            if node.role == role {
+            if AXChannel.roleMatches(selectorRole: role, axRole: node.role) {
                 result.append(node)
             } else {
                 result.append(contentsOf: prune(node.children, matchingRole: role))

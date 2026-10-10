@@ -348,41 +348,59 @@ public enum SCKCapturer {
     private struct SurfacePlan {
         var candidates: [SurfaceCapture] = []
         var occludedBy: [Int] = []
+        /// 邻居到底**没数出来**（`occludingWindows` 回了 nil）：不知道有没有东西
+        /// 盖着，也就不能把"没有东西盖着"当成默认值去重新允许那张会撒谎的裁剪。
+        var occlusionUncountable = false
     }
 
-    /// On-screen windows in front of `targetNumber` whose bounds intersect its frame.
+    /// On-screen windows in front of `targetNumber` whose bounds intersect its frame,
+    /// or `nil` when that set could not be counted — the window list itself was
+    /// unreadable, a neighbour's bounds could not be placed, or the target never
+    /// appeared in the list (then nothing is known about what sits above it).
     ///
     /// `CGWindowListCopyWindowInfo` is ordered front-to-back, so everything before
     /// the target's own number sits above it. Negative layers (wallpaper, dock
     /// backing, menu-bar shadows) are ignored: they do not cover an app window's
-    /// content. An entry without usable bounds is not counted either — this decides
-    /// whether to *refuse a measurement*, so a neighbour that cannot be placed must
-    /// not turn a valid capture into a refused one.
-    static func occludingWindows(inFrontOf targetNumber: Int, frame: CGRect) -> [Int] {
+    /// content. An entry whose bounds cannot be parsed is skipped *and* makes the
+    /// count unreliable: this decides whether to offer the display crop, and the
+    /// `?? 0` it replaces answered "nothing covers it" from a window this file never
+    /// placed — the lie R6-11 exists to refuse. Skipping it without naming it keeps
+    /// an unmeasured neighbour out of `occludedBy`, so a refusal never accuses a
+    /// window it did not measure.
+    static func occludingWindows(inFrontOf targetNumber: Int, frame: CGRect) -> [Int]? {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-            return []
+            return nil
         }
         var inFront: [Int] = []
+        var foundTarget = false
+        var countable = true
         for entry in list {
             guard let number = entry[kCGWindowNumber as String] as? Int else { continue }
-            if number == targetNumber { break }
+            if number == targetNumber {
+                foundTarget = true
+                break
+            }
             guard number > 0,
-                  let layer = entry[kCGWindowLayer as String] as? Int, layer >= 0,
-                  let raw = entry[kCGWindowBounds as String] as? [String: Any] else { continue }
-            let other = CGRect(
-                x: (raw["X"] as? CGFloat) ?? 0, y: (raw["Y"] as? CGFloat) ?? 0,
-                width: (raw["Width"] as? CGFloat) ?? 0, height: (raw["Height"] as? CGFloat) ?? 0
-            )
-            if other.intersects(frame) { inFront.append(number) }
+                  let layer = entry[kCGWindowLayer as String] as? Int, layer >= 0 else { continue }
+            guard let raw = entry[kCGWindowBounds as String] as? [String: Any],
+                  let x = raw["X"] as? CGFloat, let y = raw["Y"] as? CGFloat,
+                  let width = raw["Width"] as? CGFloat, let height = raw["Height"] as? CGFloat else {
+                countable = false
+                continue
+            }
+            if CGRect(x: x, y: y, width: width, height: height).intersects(frame) { inFront.append(number) }
         }
+        guard foundTarget, countable else { return nil }
         return inFront
     }
 
     /// The candidates, best first. The display crop is offered **only when nothing
     /// covers the target**: with something on top, the two candidates would disagree
     /// about the app's appearance and the fallback is the one that lies, so nothing
-    /// is measured at all and the refusal names what is in the way.
+    /// is measured at all and the refusal names what is in the way. The same rule
+    /// makes an *uncountable* neighbour set refuse the crop: "could not tell" is not
+    /// "told: nothing".
     private static func surfacePlan(
         context: (window: SCWindow, display: SCDisplay)
     ) -> SurfacePlan {
@@ -392,7 +410,15 @@ public enum SCKCapturer {
                 sourceRect: nil, label: "window-surface"
             )]
         )
-        let covered = occludingWindows(inFrontOf: Int(context.window.windowID), frame: context.window.frame)
+        guard let covered = occludingWindows(inFrontOf: Int(context.window.windowID), frame: context.window.frame) else {
+            // 窗口自己的面照旧可试（那不是裁剪，不会替别人说话）；这里只把整屏
+            // 裁剪那条候选收回来，并把"数不出来"这件事写成拒绝的理由。
+            plan.occlusionUncountable = true
+            let note = "glasspaned: pixel capture of window " + String(context.window.windowID)
+                + " could not count the windows in front of it (the CG window list held no such window, or a neighbour's bounds were unreadable), so no display-region crop is offered (R6-11)\n"
+            FileHandle.standardError.write(Data(note.utf8))
+            return plan
+        }
         plan.occludedBy = covered
         if covered.isEmpty {
             plan.candidates.append(SurfaceCapture(
@@ -417,6 +443,10 @@ public enum SCKCapturer {
         context: (window: SCWindow, display: SCDisplay), plan: SurfacePlan
     ) -> String {
         let window = String(context.window.windowID)
+        if plan.occlusionUncountable {
+            return "no capture surface available for window " + window
+                + "; whether another window covers it could not be counted (the CG window list did not contain the target, or a neighbour's bounds were unreadable), so no display crop was offered (R6-11)"
+        }
         guard !plan.occludedBy.isEmpty else {
             return "no capture surface available for window " + window
                 + " (neither its own surface nor a display crop produced an image)"
