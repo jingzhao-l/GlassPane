@@ -36,6 +36,10 @@
 **未跑**：`bun run build` 全量、真模型轮次、真 TUI 会话观感；本批只跑闸与 fork 的 58 条
 glasspane 绑定/插件测试。
 
+- **split 仓需要一次有人签字的覆盖（未自动做）**：本轮两条修复先推上主仓 `main`（`5f0fb54..d872523`，含并行批次的内核迁移基线），再 `git subtree split`，tree 哈希等式实测 `HEAD:harness/glasspane-harness = c178962… == split tree = c178962…` 成立。但普通 push 被拒（non-fast-forward）：这条新 split 线是从 cherry-pick 后的提交派生的，不含我自己一小时前推上去的 `91c00db`/`e7363e0`。要让它成为 main 必须 `--force-with-lease=split/glasspane-harness:<显式 SHA>` 覆盖**已发布的提交**，且覆盖后 tag `v0.7.1`（=`2f380fc`）不再位于 main 的祖先链上。丢别人提交＝停下汇报；这里虽然丢的是我自己的两笔，仍属"覆盖已发布历史"，故不自动做。已把这颗树原样推到旁枝 **`split-next-20261011`**（不覆盖任何东西），下一次发版要么由 owner 决定是否以显式 SHA 覆盖 main，要么直接从 `split-next-20261011` 打 tag。split 仓 main 现在是 `e7363e0`，**两条修复都已在其中**，用户侧 `curl | bash` 不受影响。
+- **v0.7.1 发布物实测**：npm 三个包 `0.7.1` 全部可解析（registry 读副本滞后约 5 分钟，其间平台包 404 而 CI 已绿——正是"job 绿 ≠ 装得上"），`dist-tags.latest = 0.7.1`。`verify-published.ts 0.7.1` 十条断言全 ok（两个 bin 各自 `--version` exit 0 且等于版本号、内嵌 web 以 content-type+doctype+`/assets/` 三项判定、registry sha512 完整性 ok、provenance 有 attestation）。GitHub 发布物按用户视角实测：`shasum -a 256 -c SHA256SUMS.txt` 两条 OK，arm64/x64/SHA256SUMS 三个 `.asc` 的 `VALIDSIG` 全指纹等于安装器锚定值。清单缺陷当场纠正（本地锚定私钥重签 + `--clobber` 上传），残留 `logo.svg.asc`/`banner.svg.asc` 两个孤儿签名未删（删发布资产需口令）。
+- **三通道端到端**：`npm install -g --prefix "$HOME/.local"` → 两个命令都回 `0.7.1`；curl 兜底通道（把 npm 从 PATH 藏掉、真网络真 gpg真发布物）→ sha256 OK + 指纹级 GPG OK + exit 0 + 二进制可跑；`bun add -g` → 装得上但 bun 跳过 postinstall，命令回占位桩的自述报错并 exit 1（与 docs/install.md 写明的行为一致，也正好是被本轮那条"[OK] 不再为不运行的命令打勾"的判据接住的对象）。
+
 ## 2026-10-09 · 每日批次（harness 线）：两条审查泳道 + 三把尺子自检，发 0.7.1
 
 - **开工态**：本地 main 落后 origin/main 三笔（上一轮本线的 [gp] 提交），`git merge --ff-only` 重新对齐到 580be9a 后才开工。工作树在开工约 25 分钟后被**并行会话**改成 dirty（`vendor/kernel/**` 与 `contracts/kernel-fixtures/*` 被 staged 删除、`kernel-vendor.mjs` 改名 `kernel-pin.mjs`、`kernel.ts` 改吃 npm `iterate-kernel`、CI 两份 yml 与 `tool-surface.mjs` 同时在改）。按纪律不混提、不 `checkout`/`reset`/`stash` 别人的文件：本轮全部改动与提交都在隔离工作树 `/Volumes/Eng-Dev/.worktrees/gp-harness-daily-20261008`（分支 `gp-harness-daily-20261008`，基线 580be9a），`.external/opencode` 做成指回主树那份的**符号链接**（不各存 223 MB）。收口时再 `git merge origin/main`（那三笔之外，主仓 1.9.0 那批 engine/mcp-shell/installer/updater 也进来，合并干净、零冲突）。
