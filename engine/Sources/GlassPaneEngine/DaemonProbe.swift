@@ -262,17 +262,7 @@ public final class DaemonProbe: @unchecked Sendable {
         var noSigpipe: Int32 = 1
         _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, socklen_t(MemoryLayout<Int32>.size))
 
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
-        let copied = socketPath.withCString { source -> Bool in
-            withUnsafeMutableBytes(of: &address.sun_path) { destination in
-                guard let base = destination.baseAddress else { return false }
-                _ = strncpy(base.assumingMemoryBound(to: CChar.self), source, destination.count)
-                return true
-            }
-        }
-        guard copied else {
+        guard var address = UnixSocketAddress.address(for: socketPath) else {
             // 路径连 sockaddr_un 都装不下，这个名字后面不可能有监听者。
             return .noListener(reason: "socket path does not fit sockaddr_un: \(socketPath)")
         }

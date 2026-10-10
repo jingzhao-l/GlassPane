@@ -733,18 +733,13 @@ public final class ProbeSocketServer {
     }
 
     /// `sockaddr_un` for this server's path, nil when the path does not fit.
+    /// The fit is now actually checked: `strncpy` truncates a too-long name
+    /// silently and reports success, so the version that built the address by
+    /// hand returned an address for a name nobody had asked for — and
+    /// `ProbeServerError.invalidPath`, which this is the only caller of, stayed
+    /// unreachable for exactly the case its text describes.
     private func socketAddress() -> sockaddr_un? {
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
-        let copied = socketPath.withCString { source in
-            withUnsafeMutableBytes(of: &address.sun_path) { destination in
-                guard let base = destination.baseAddress else { return false }
-                _ = strncpy(base.assumingMemoryBound(to: CChar.self), source, destination.count)
-                return true
-            }
-        }
-        return copied ? address : nil
+        UnixSocketAddress.address(for: socketPath)
     }
 
     /// bind() at startup and connect() at shutdown need the same sockaddr
