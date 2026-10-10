@@ -90,46 +90,202 @@ final class DaemonVersionFlagTests: XCTestCase {
                       "daemon 位点的正则不再指向那一行——下一次 set-version 会悄悄漏改这个位点")
     }
 
-    /// 解析表与 usage 必须互逆：只在一侧出现的开关，一边是"能用但没人知道"，
+    /// 解析表、usage 与文件头注释块必须互逆：只在一侧出现的开关，一边是"能用但没人知道"，
     /// 另一边是"说了却用不了"（后者会回 unknown argument + 64）。
+    ///
+    /// 三张列表，不是两张。文件头那截 `/// Usage:` 注释从前根本没进这条闸，而它是
+    /// 读代码的人（和复审）第一个看到的开关表——它漏了 `--version`、`--no-c33`、
+    /// `--force-socket`、`--recipe-validate`、`--check-input-permission` 五处而一直没人
+    /// 发现，正是"闸只数两张表"的代价。短形态 `-v` 同理：旧的正则只认 `--[a-z][a-z0-9-]+`，
+    /// 一个字母的开关对这条闸**结构性不可见**，于是 `-v` 能用、`--help` 从不提它，闸还
+    /// 一直是绿的。抽取规则现在收 `-{1,2}` 两种形态，三张表逐对比较，并且由
+    /// `testTheParityGateReportsAFlagMissingFromOneList` 拿合成源码把每一条拒绝分支跑一遍。
     func testParsedFlagsAndUsageTextListTheSameFlags() throws {
         let path = repoRoot + "/engine/Sources/glasspaned/main.swift"
         guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
             throw XCTSkip("读不到 main.swift；这一条对照不作数")
         }
-        let parsed = capture(#"case\s+"(--[a-z][a-z0-9-]*)""#, in: text)
+        let parsed = DaemonFlagParity.parsedFlags(text)
         XCTAssertGreaterThanOrEqual(parsed.count, 30,
             "只解析出 \(parsed.count) 个开关，这条闸已经看不见东西")
-        let documented = capture(#"(--[a-z][a-z0-9-]+)"#, in: usageBlock(text))
+        let documented = DaemonFlagParity.usageFlags(text)
         XCTAssertFalse(documented.isEmpty, "usage 里一个开关都没抠出来，这条闸已经不作数了")
+        XCTAssertGreaterThanOrEqual(documented.count, 30,
+            "usage 只抠出 \(documented.count) 个开关，短形态八成是被正则丢掉了")
+        let header = DaemonFlagParity.headerFlags(text)
+        XCTAssertFalse(header.isEmpty, "文件头注释块里一个开关都没抠出来，这张表已经不在闸的视野里了")
+
         let undocumented = parsed.subtracting(documented).sorted()
         let unparseable = documented.subtracting(parsed).sorted()
         XCTAssertEqual(undocumented, [], "这些开关能用但 --help 没说：\(undocumented.joined(separator: " "))")
         XCTAssertEqual(unparseable, [], "这些开关 --help 说了但 daemon 不认（回 unknown argument + 64）：\(unparseable.joined(separator: " "))")
+        let headerMissing = parsed.subtracting(header).sorted()
+        let headerInvented = header.subtracting(parsed).sorted()
+        XCTAssertEqual(headerMissing, [], "这些开关 daemon 认，但文件头的开关表没列（读代码的人只会信那张表）：\(headerMissing.joined(separator: " "))")
+        XCTAssertEqual(headerInvented, [], "文件头那注释块说了这些开关，而解析表里根本没有：\(headerInvented.joined(separator: " "))")
+        // 三条差集都空才算互逆；把这条留着，是为了上面四行被人删掉其中一行时还有声音。
+        XCTAssertEqual(DaemonFlagParity.differences(text), [], "开关表三张对不上（见上面逐条断言的措辞）")
     }
 
-    /// usage 是 `printUsage()` 里那段三引号字符串。
-    private func usageBlock(_ text: String) -> String {
+    /// 拒绝分支必须真的会拒绝：这条闸的判据被喂进合成源码，缺一张表就得红。
+    /// 本仓的规矩是"跑不到拒绝分支的闸不是闸"（见 `TestIsolationGateTests`），
+    /// 三张表的抽取规则都在这里各跑一次"只在一侧"的形态。
+    func testTheParityGateReportsAFlagMissingFromOneList() throws {
+        // 一张"本来互逆"的最小源码：一个长开关 + 一个短开关，三张表都列全。
+        let whole = DaemonFlagParity.syntheticMain(
+            parsed: ["--recipe-validate", "--verbose", "-v"],
+            usage: ["--recipe-validate <path>", "--verbose", "-v"],
+            header: ["--recipe-validate", "--verbose", "-v"]
+        )
+        XCTAssertEqual(DaemonFlagParity.differences(whole), [], "合成夹具自己都不互逆，下面的断言就全是假的")
+
+        // (1) 解析表里有、usage 没有 —— 就是 `-v` 当初的形状。
+        let missingFromUsage = DaemonFlagParity.syntheticMain(
+            parsed: ["--recipe-validate", "--verbose", "-v"],
+            usage: ["--recipe-validate <path>", "--verbose"],
+            header: ["--recipe-validate", "--verbose", "-v"]
+        )
+        XCTAssertTrue(
+            DaemonFlagParity.differences(missingFromUsage).contains { $0.contains("-v") },
+            "短开关只写在解析表里时这条闸必须报它（旧的正则根本看不见它）：\(DaemonFlagParity.differences(missingFromUsage))")
+
+        // (2) usage 里有、解析表没有 —— 用户会拿到 unknown argument + 64。
+        let missingFromParser = DaemonFlagParity.syntheticMain(
+            parsed: ["--recipe-validate", "--verbose"],
+            usage: ["--recipe-validate <path>", "--verbose", "-v"],
+            header: ["--recipe-validate", "--verbose", "-v"]
+        )
+        XCTAssertTrue(
+            DaemonFlagParity.differences(missingFromParser).contains { $0.contains("-v") },
+            "usage 说了 `-v` 而解析表不认时必须有声音：\(DaemonFlagParity.differences(missingFromParser))")
+
+        // (3) 文件头那张表漏一个 —— 五处漏报就是这么攒起来的。
+        let missingFromHeader = DaemonFlagParity.syntheticMain(
+            parsed: ["--recipe-validate", "--verbose", "-v"],
+            usage: ["--recipe-validate <path>", "--verbose", "-v"],
+            header: ["--verbose", "-v"]
+        )
+        XCTAssertTrue(
+            DaemonFlagParity.differences(missingFromHeader).contains { $0.contains("--recipe-validate") },
+            "文件头注释块漏列开关时必须报它：\(DaemonFlagParity.differences(missingFromHeader))")
+
+        // (4) 抽取规则必须只认开关，别把注释里的破折号当成 `-x` 开关：真是那样的话
+        // 这张闸会红在一句散文上，而读者的第一反应是改散文。
+        let prose = DaemonFlagParity.syntheticMain(
+            parsed: ["--verbose", "-v"],
+            usage: ["--verbose", "-v", "(no-op when already granted)"],
+            header: ["--verbose", "-v"]
+        )
+        XCTAssertEqual(DaemonFlagParity.differences(prose), [],
+                       "散文里的 `no-op` 不该被当成一个叫 `-o` 的开关")
+        XCTAssertFalse(DaemonFlagParity.usageFlags(prose).contains("-o"),
+                       "短形态的抽取正则吃进了散文里的连字符")
+
+        // (5) 解析表只数 `case "…"` 那一行的字面量，别把 usage 散文里的开关也算成
+        // "daemon 认的开关"（否则 `--help` 说的话就永远查不出错）。
+        XCTAssertEqual(
+            DaemonFlagParity.parsedFlags(missingFromHeader).count, 3,
+            "解析表应当只来自 `case` 标签，实得 \(DaemonFlagParity.parsedFlags(missingFromHeader))")
+    }
+}
+
+/// `DaemonVersionFlagTests` 的抽取规则，单独成一个类型而不是留在测试类里：
+/// 同一段代码既要跑真文件（`testParsedFlagsAndUsageTextListTheSameFlags`），
+/// 也要跑合成源码（`testTheParityGateReportsAFlagMissingFromOneList`）。
+/// 闸的"能拒绝"只有第二种跑法能证明，而两种跑法必须共用判据，否则证的是另一件事。
+enum DaemonFlagParity {
+
+    /// 解析表：`parseArguments` 里 `case "…":` 的字符串字面量，长短线都要收。
+    /// 旧实现的正则是 `case\s+"(--[a-z][a-z0-9-]*)"`，一个字母的短形态对它是
+    /// 结构性不可见的；按行取字面量再筛形状，`case "--help", "-h":` 的两个都能拿到。
+    static func parsedFlags(_ source: String) -> Set<String> {
+        var out: Set<String> = []
+        for line in source.components(separatedBy: "\n") {
+            let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+            guard trimmed.hasPrefix("case ") else { continue }
+            for literal in capture("\"([^\"]+)\"", in: line) {
+                if fullMatch("^-{1,2}[a-z][a-z0-9-]*$", in: literal) { out.insert(literal) }
+            }
+        }
+        return out
+    }
+
+    /// `printUsage()` 那段三引号文本里的开关（长 + 短）。
+    static func usageFlags(_ source: String) -> Set<String> {
+        flagsIn(usageBlock(source))
+    }
+
+    /// 文件头那截 `///` 注释块里的开关（长 + 短）——读代码的人第一个看到的表。
+    static func headerFlags(_ source: String) -> Set<String> {
+        let marker = "private struct Options"
+        let head = source.range(of: marker).map { String(source[..<$0.lowerBound]) } ?? source
+        let comments = head.components(separatedBy: "\n")
+            .filter { $0.drop(while: { $0 == " " || $0 == "\t" }).hasPrefix("///") }
+            .joined(separator: "\n")
+        return flagsIn(comments)
+    }
+
+    /// 三张表的逐对差集，带说明文字；空集就是互逆。
+    static func differences(_ source: String) -> [String] {
+        let parsed = parsedFlags(source)
+        let usage = usageFlags(source)
+        let header = headerFlags(source)
+        var out: [String] = []
+        for flag in parsed.subtracting(usage).sorted() { out.append("解析表有、usage 没有: \(flag)") }
+        for flag in usage.subtracting(parsed).sorted() { out.append("usage 有、解析表没有: \(flag)") }
+        for flag in parsed.subtracting(header).sorted() { out.append("解析表有、文件头注释块没有: \(flag)") }
+        for flag in header.subtracting(parsed).sorted() { out.append("文件头注释块有、解析表没有: \(flag)") }
+        return out
+    }
+
+    /// 合成一份"三张表"的最小 main.swift，给拒绝分支用。
+    static func syntheticMain(parsed: [String], usage: [String], header: [String]) -> String {
+        var text = ""
+        for flag in header { text += "///   \(flag)\n" }
+        text += "\nprivate struct Options {\n}\n"
+        for flag in parsed { text += "    case \"\(flag)\":\n        break\n" }
+        text += "\nprivate func printUsage() {\n    let usage = \"\"\"\n"
+        for flag in usage { text += "        \(flag)\n" }
+        text += "    \"\"\"\n}\n"
+        return text
+    }
+
+    // MARK: - Shared extraction
+
+    /// 一段文本里的开关集合：长形态按 `--x-y` 抓，短形态只认"一个字母、自成词"的
+    /// `-x`——散文里的连字符（`no-op`、`per-user`）不是开关，抓进来这张闸就会红在
+    /// 说明文字上。
+    private static func flagsIn(_ text: String) -> Set<String> {
+        var out = Set(capture("(--[a-z][a-z0-9-]+)", in: text))
+        for letter in capture("(?:^|[\\s(])-([a-z])(?=[\\s,)\\]]|$)", in: text) {
+            out.insert("-" + letter)
+        }
+        return out
+    }
+
+    /// `printUsage()` 里那段三引号字符串。
+    private static func usageBlock(_ text: String) -> String {
         guard let start = text.range(of: "private func printUsage()"),
               let open = text.range(of: "\"\"\"", range: start.upperBound..<text.endIndex),
               let close = text.range(of: "\"\"\"", range: open.upperBound..<text.endIndex) else {
-            XCTFail("找不到 printUsage 的字符串块，这条对照已不作数")
             return ""
         }
         return String(text[open.upperBound..<close.lowerBound])
     }
 
-    private func capture(_ pattern: String, in source: String) -> Set<String> {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            XCTFail("正则写坏了：\(pattern)")
-            return []
-        }
-        var out: Set<String> = []
+    private static func capture(_ pattern: String, in source: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        var out: [String] = []
         regex.enumerateMatches(in: source, range: NSRange(source.startIndex..., in: source)) { match, _, _ in
             guard let match, match.numberOfRanges > 1,
                   let group = Range(match.range(at: 1), in: source) else { return }
-            out.insert(String(source[group]))
+            out.append(String(source[group]))
         }
         return out
+    }
+
+    private static func fullMatch(_ pattern: String, in text: String) -> Bool {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
+        return regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
     }
 }

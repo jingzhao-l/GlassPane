@@ -13,7 +13,7 @@ import GlassPaneEngine
 /// `--state-dir`; every subcommand resolves the same root.
 ///
 /// Usage:
-///   glasspaned [--state-dir <path>] [--socket-path <path>] [--verbose]
+///   glasspaned [--state-dir <path>] [--socket-path <path>] [--verbose|-v]
 ///   glasspaned --grant-accessibility
 ///   glasspaned --check-screen-permission
 ///   glasspaned --guide-screen-permission
@@ -26,7 +26,28 @@ import GlassPaneEngine
 ///   glasspaned [--state-dir <path>] --approval-audit | --approval-verify
 ///   glasspaned [--state-dir <path>] --prune-evidence [--older-than <days>] [--project <id>] [--dry-run]
 ///   glasspaned [--state-dir <path>] --evidence-stats [--project <id>]
-///   glasspaned --help
+///   glasspaned --recipe-validate <path>
+///   glasspaned [--no-probe] [--probe-socket-path <path>] [--no-c33]
+///   glasspaned [--state-dir <path>] [--force-socket] [--force-probe-socket]
+///   glasspaned --version
+///   glasspaned -h
+///
+/// Every flag the parser accepts, exhaustively (what each one does is what
+/// `--help` prints; this line exists because the block above is a synopsis and
+/// a synopsis drifts — it used to omit `--version`, `--no-c33`, `--force-socket`,
+/// `--recipe-validate` and `--check-input-permission`, which is how a maintainer
+/// reading this file ended up with a flag list that was wrong three ways at
+/// once. `DaemonVersionFlagTests.testParsedFlagsAndUsageTextListTheSameFlags`
+/// now compares this line, the `case` labels of `parseArguments` and
+/// `printUsage()` as three sets that have to be equal, short forms included):
+///   --active-project, --approval-audit, --approval-verify, --check-accessibility,
+///   --check-developer-tools, --check-input-permission, --check-screen-permission,
+///   --dry-run, --evidence-stats, --force-probe-socket, --force-socket,
+///   --grant-accessibility, --guide-screen-permission, -h, --help, --list-projects,
+///   --no-c33, --no-probe, --older-than, --permissions, --probe-socket-path,
+///   --project, --project-prune, --project-remove, --prune-evidence,
+///   --recipe-validate, --request-permission, --socket-path, --state-dir,
+///   --unattended-window, -v, --verbose, --version
 ///
 /// The permission commands above read no state, so they take no state root;
 /// every other line resolves exactly one, and `--state-dir` is how it is named.
@@ -130,8 +151,18 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
         case "--no-probe":
             options.probeEnabled = false
         case "--probe-socket-path":
-            guard index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") else {
-                return .error("--probe-socket-path requires a file path")
+            // X-22's rule, now also for the named sockets: `SocketPathArgument`
+            // forwards to `StateRootArgument`, so a value that is another flag
+            // and a relative path are refused the same way for both socket flags
+            // and for `--state-dir`. Decided here, at the parse, because a
+            // relative value is not harmless: the listener chmods its own parent
+            // directory to 0700, so `--socket-path ./s.sock` from ~/Documents
+            // tightens ~/Documents and keeps it tightened even when the bind
+            // later fails and this run exits (see `SocketPathArgument`).
+            if let reason = SocketPathArgument.rejection(
+                for: index + 1 < arguments.count ? arguments[index + 1] : nil
+            ) {
+                return .error("--probe-socket-path \(reason)")
             }
             index += 1
             options.probeSocketPath = arguments[index]
@@ -201,16 +232,24 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
         case "--dry-run":
             options.pruneDryRun = true
         case "--socket-path":
-            guard index + 1 < arguments.count else {
-                return .error("--socket-path requires a value")
+            // Absolute-path rule at the parse (X-22 sibling, above) — nothing
+            // above this line may touch a directory, and this one is reached
+            // before `prepareSocketDirectory` could chmod it.
+            if let reason = SocketPathArgument.rejection(
+                for: index + 1 < arguments.count ? arguments[index + 1] : nil
+            ) {
+                return .error("--socket-path \(reason)")
             }
             index += 1
             options.socketPath = arguments[index]
         default:
             if argument.hasPrefix("--socket-path=") {
                 let value = String(argument.dropFirst("--socket-path=".count))
-                guard !value.isEmpty else {
-                    return .error("--socket-path requires a value")
+                // Same `--key=value` shape as `--state-dir`, same validation:
+                // one rule set decides both spellings, so the two cannot
+                // disagree about what counts as a socket path.
+                if let reason = SocketPathArgument.rejection(for: value) {
+                    return .error("--socket-path \(reason)")
                 }
                 options.socketPath = value
             } else if argument.hasPrefix("--state-dir=") {
@@ -238,7 +277,7 @@ private func printUsage() {
     glasspaned — GlassPane P0 engine daemon
 
     USAGE:
-        glasspaned [--state-dir <path>] [--socket-path <path>] [--verbose]
+        glasspaned [--state-dir <path>] [--socket-path <path>] [--verbose|-v]
         glasspaned --grant-accessibility
         glasspaned --check-screen-permission
         glasspaned --guide-screen-permission
@@ -278,8 +317,17 @@ private func printUsage() {
                                  line to stderr saying the home default was used.
         --socket-path <path>   Unix socket path (default: ~/.glasspane/engine.sock,
                                  or <state-dir>/daemon.sock when --state-dir names
-                                 a root)
-        --verbose             Log frames and state transitions to stderr
+                                 a root). Must be an **absolute** path: this run
+                                 chmods the socket's parent directory to 0700, so
+                                 a relative value would tighten whichever
+                                 directory the daemon happened to be started in
+                                 and keep it tightened even after a failed bind.
+                                 Anything else is a usage error (exit 64), decided
+                                 before a single directory is touched. The name
+                                 must also be free or already a socket: a regular
+                                 file, a directory or a symlink here is a fatal
+                                 refusal and is never removed.
+        --verbose, -v         Log frames and state transitions to stderr
         --grant-accessibility  Onboarding: prompt for accessibility permission
         --check-screen-permission   Print screen recording permission state
                                  (granted | denied | notDetermined) and exit
@@ -329,7 +377,15 @@ private func printUsage() {
         --no-probe           Disable the P6 probe socket (Z5 black-box only;
                                  handlerProbe/stateDiff signals stay null)
         --probe-socket-path <path>  Probe listener path (default: <state-dir>/probe.sock,
-                                 which is ~/.glasspane/probe.sock when no root is named)
+                                 which is ~/.glasspane/probe.sock when no root is
+                                 named). Same rules as --socket-path: an
+                                 **absolute** path or a usage error (exit 64), and
+                                 the directory holding it is brought to 0700 and
+                                 must belong to this account — a probe name inside
+                                 a directory another account can write is one
+                                 `unlink` away from being rebound by that account,
+                                 which is why binding there is refused rather than
+                                 degraded silently.
         --force-socket       Take over the engine socket even when a live daemon
                                  is already serving it (default: refuse and exit 65)
         --force-probe-socket Take over probe.sock even when another listener owns
@@ -1194,7 +1250,27 @@ case .preempt(let incumbent):
     log.error("--force-socket: taking \(socketPath) over from \(incumbent); the previous instance keeps running but loses the socket")
 case .bind:
     if case .noListener(let reason) = engineLiveness {
-        log.info("nothing listens on \(socketPath) (\(reason)) — binding it")
+        // X-24: "no listener" is a statement about **listeners**, not a
+        // permission to delete what is here. A regular file answers connect with
+        // ECONNREFUSED/ENOTSOCK, so `--socket-path ~/.ssh/id_rsa` used to reach
+        // this branch, print "binding it", unlink the private key and bind a
+        // socket in its place. `SocketServer` now refuses that takeover in front
+        // of every unlink; saying "nothing listens — binding it" here would be
+        // announcing a plan this run is about to refuse, so the two statements
+        // are split by what the inode actually is.
+        if let kind = SocketServer.nonSocketInodeKind(at: socketPath) {
+            // Not through EngineLog: quiet mode swallows it, and a run that is
+            // about to exit having said nothing is the shape A-18 removed for
+            // the probe listener.
+            FileHandle.standardError.write(Data(("""
+            glasspaned: refusing to take over \(socketPath) — it is \(kind), not a socket.
+              Nothing was unlinked and this run will not bind here.
+              - point --socket-path at a name that is free (or let --state-dir derive it), or
+              - remove \(socketPath) yourself first.
+            """ + "\n").utf8))
+        } else {
+            log.info("nothing listens on \(socketPath) (\(reason)) — binding it")
+        }
     }
 }
 

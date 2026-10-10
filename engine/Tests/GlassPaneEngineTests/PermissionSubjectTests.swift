@@ -856,23 +856,32 @@ final class PermissionSubjectTests: XCTestCase {
                       "有主的名字不许被 unlink——这正是 A-18 脑裂的成因")
     }
 
-    func testProbeStartClearsDemonstrablyUnownedName() throws {
-        // 残留：名字处是个普通文件（bind 必 EADDRINUSE）。判定为 noListener 时必须
-        // 清掉残留并成功 bind——A-18 里合法的另一半：无主的名字本来就该清。
-        // connect 对普通文件的 errno 有平台歧义（ECONNREFUSED/ENOTSOCK 之外的
-        // 分类风险），所以判定注入而非真探；真探侧的三态本身已由
-        // HumanInterventionAuditTests 钉住。
+    func testProbeStartRefusesToDeleteARegularFileAtItsName() throws {
+        // 这条从前钉的是"名字处是个普通文件⇒判为 noListener 就清掉再 bind"，而那正是
+        // 本轮抓出的 P0：`--probe-socket-path`（与 `--socket-path`）接受任意路径，
+        // connect 到普通文件回 ECONNREFUSED/ENOTSOCK，被归类成"没有监听者"，于是
+        // `glasspaned --socket-path ~/.ssh/id_rsa` 会**删掉用户的文件**再在那里建 socket。
+        // "无主"说的是没有监听者，从来不是"这个 inode 可以删"。清残留的合法性只延伸到
+        // 真的是 socket 文件的名字（对照用例见 ReviewLifecycleTests）。
         let path = try makeProbeTestPath("stale")
         let listenerDir = (path as NSString).deletingLastPathComponent
         defer { try? FileManager.default.removeItem(atPath: listenerDir) }
-        FileManager.default.createFile(atPath: path, contents: Data())
+        let marker = Data("do not delete me".utf8)
+        FileManager.default.createFile(atPath: path, contents: marker)
         let server = ProbeSocketServer(
             socketPath: path, inbox: ProbeInbox(), log: EngineLog(quiet: true),
             livenessProbe: { _ in .noListener(reason: "connect: connection refused") }
         )
-        XCTAssertNoThrow(try server.start())
-        XCTAssertTrue(FileManager.default.fileExists(atPath: path), "重绑后名字归新监听者")
-        server.stop()
+        XCTAssertThrowsError(try server.start()) { error in
+            let text = String(describing: error)
+            XCTAssertTrue(text.lowercased().contains("regular file"),
+                          "拒绝要说清它是什么（不是残留、不是占用者），实得 \(text)")
+            XCTAssertTrue(text.lowercased().contains("refusing to remove")
+                || text.lowercased().contains("nothing was unlinked"),
+                          "拒绝必须说清一个名字都没被删，实得 \(text)")
+        }
+        let stillThere = try XCTUnwrap(FileManager.default.contents(atPath: path))
+        XCTAssertEqual(stillThere, marker, "拒绝路径上一个字节都不许少")
     }
 
     func testProbeForceFlagPreemptsWithoutConsultingTheProbe() throws {
