@@ -180,6 +180,20 @@ public final class EvidenceStore {
     /// internal for the same reason.
     var isolationCheck: (String) -> String? = StateRoot.isolateFile(at:)
 
+    /// 临时名怎么起。默认带 pid 与 UUID：这份档案柜有多个写者（daemon，以及对着
+    /// 同一个 `--state-dir` 跑的一次性 CLI），共用 `<file>.tmp` 允许一个写者把另一个
+    /// 写者半开的缓冲 rename 到位；而且 `.tmp` 结尾过不了 `isEntryName`，`clear()`、
+    /// 两种 prune 与 `stats()` 都会把崩溃留下的那个当不存在。
+    ///
+    /// 可注入，与 `isolationCheck` 同一个理由：`StatePermissionTests` 要走到
+    /// "临时名不可用而最终名可写"那条 fallback 分支，非 root 环境里唯一的造法就是在
+    /// 一个**已知的**临时名上放目录；名字随机之后那个夹具再也指不到东西，而它守着的
+    /// 是 fallback 的拒绝分支——没有夹具等于那条分支没人测过。注入只改名字的
+    /// **形状**，不改"独占创建、写前收紧、写坏即删"这套落盘判定。
+    var temporaryPath: (String) -> String = {
+        $0 + ".tmp-\(getpid())-\(UUID().uuidString)"
+    }
+
     /// The archive lives where the caller says it lives — there is no default.
     ///
     /// - Parameters:
@@ -328,7 +342,14 @@ public final class EvidenceStore {
             log.error("evidence entry \(filePath) exists but is not an archive entry this store wrote — refusing to write, and leaving it exactly as found")
             return false
         }
-        let tmpPath = filePath + ".tmp"
+        // The temp name is unique per write, for the same reason `ProjectRegistry.save`
+        // moved off `<file>.tmp`: this archive is written by more than one process
+        // (the daemon, and a one-shot CLI run against the same `--state-dir`), and a
+        // shared temp name lets one writer rename another's half-written buffer into
+        // place. The old fixed name also left an orphan nothing reclaims — `.tmp`
+        // fails `isEntryName`, so `clear()`, both prunes and `stats()` walk straight
+        // past whatever it left behind.
+        let tmpPath = temporaryPath(filePath)
         do {
             try data.write(to: URL(fileURLWithPath: tmpPath), options: .atomic)
             // Owner-only *before* the rename, so an evidence pack is never — not
@@ -359,8 +380,7 @@ public final class EvidenceStore {
                 removeAfterRefusal(filePath)
                 return false
             }
-            pruneIfNeeded()
-            pruneExpiredIfNeeded()
+            reportRetention(capRemoved: pruneIfNeeded(), ttlRemoved: pruneExpiredIfNeeded())
             return true
         } catch {
             // Fallback: direct write (see ProjectRegistry.save). Reached when the
@@ -377,8 +397,7 @@ public final class EvidenceStore {
                 removeAfterRefusal(filePath)
                 return false
             }
-            pruneIfNeeded()
-            pruneExpiredIfNeeded()
+            reportRetention(capRemoved: pruneIfNeeded(), ttlRemoved: pruneExpiredIfNeeded())
             return true
         }
     }
@@ -394,6 +413,30 @@ public final class EvidenceStore {
         _ path: String, defect: String, route: String
     ) -> String {
         "evidence pack \(path) is not owner-only after the \(route) write: \(defect) — permission judgment, not a full disk: the bytes landed and were then withdrawn from \(directory), which is on a volume that will not isolate a file it is given (read-only mount, ACL or immutable flag). Nothing was left published; re-run after the directory is owner-only writable, or point the run at such a root with --state-dir"
+    }
+
+    /// 自动留存删掉的东西必须说出来。`write` 回 true 让 `EngineCore` 报
+    /// `evidencePersisted: true`——那一句说的是**这一次的操作**存下了，是诚实的；
+    /// 但同一次调用还顺手删掉了 N 份旧档案，而 CLI 那条路（`--prune-evidence`）
+    /// 是逐条报数的。静默删除审计档案与"删了并说出来"在事后读起来是两件事。
+    private func reportRetention(capRemoved: Int, ttlRemoved: Int) {
+        guard let notice = Self.retentionNotice(
+            capRemoved: capRemoved, ttlRemoved: ttlRemoved,
+            maxFiles: maxFiles, maxAgeDays: maxAgeDays, directory: directory
+        ) else { return }
+        log.info(notice)
+    }
+
+    /// 留存结论的折算（纯函数，供单测）：没删东西就回 nil，删了多少就按各自的
+    /// 判据说多少条——命中数与删除数在两个方向上都不许互相冒充。
+    nonisolated static func retentionNotice(
+        capRemoved: Int, ttlRemoved: Int, maxFiles: Int, maxAgeDays: Int?, directory: String
+    ) -> String? {
+        var removed: [String] = []
+        if capRemoved > 0 { removed.append("\(capRemoved) over the \(maxFiles)-entry cap") }
+        if ttlRemoved > 0, let maxAgeDays { removed.append("\(ttlRemoved) older than \(maxAgeDays) day(s)") }
+        guard !removed.isEmpty else { return nil }
+        return "automatic retention removed \(removed.joined(separator: " and ")) from \(directory); the archive the panel and gp_export_evidence read is smaller than it was before this write"
     }
 
     /// Undo a publication the isolation verdict refused, and say so out loud

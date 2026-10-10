@@ -231,6 +231,10 @@ final class StatePermissionTests: XCTestCase {
         let store = EvidenceStore(directory: dir)
         let pack = pack(createdAt: "2026-09-23T00:00:00.000Z", seed: 21)
         let filePath = dir + "/" + pack.operationId + ".json"
+        // 临时名注入成旧的可预测形状：这一条要走到 fallback，靠的就是"已知的那个
+        // 临时名上蹲着一个目录"。生产的默认名带 pid+UUID（防两个写者互相 rename），
+        // 那个名字在这里指不到任何东西—— seam 的说明见 `EvidenceStore.temporaryPath`。
+        store.temporaryPath = { $0 + ".tmp" }
         try FileManager.default.createDirectory(
             atPath: filePath + ".tmp", withIntermediateDirectories: true
         )
@@ -289,10 +293,14 @@ final class StatePermissionTests: XCTestCase {
             "someone else's data",
             "…with its contents"
         )
-        XCTAssertFalse(
-            FileManager.default.fileExists(atPath: filePath + ".tmp"),
-            "a refused write leaves no temporary litter either"
-        )
+        // 拒绝之后档案里不许多出任何"以这个条目名开头"的东西：从前只查 `<file>.tmp`
+        // 这一个名字，而生产的临时名现在带 pid+UUID——只查固定名的那条断言会绿着
+        // 放过每一种残留形状。
+        let siblings = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+        let litter = siblings.filter {
+            $0 != (filePath as NSString).lastPathComponent && $0.hasPrefix((filePath as NSString).lastPathComponent)
+        }
+        XCTAssertTrue(litter.isEmpty, "a refused write leaves no temporary litter either: \(litter)")
     }
 
     /// The allowed case next to it, so the guard above cannot turn into "never
