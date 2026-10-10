@@ -2,7 +2,19 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
-## [Unreleased]
+## [1.10.0] — 2026-10-10
+
+**版本判断：minor。** 判据沿用本仓自己在 1.6.2 条目里写下那一条：patch 要求"状态文件的字段
+没动、退出码集合没动、CLI 参数没动、npm 包的 `bin` 声明没动"。这四条本版都没动；动的是
+**新增用户可见控制件**——控制台多了一条动作结论横幅（`gp-action-message`，带「关闭」入口），
+权限页与项目页各多一行重启实测结论。按那一条交代，这升 minor 而非 patch。
+**本版合并了 `v1.9.0` 打 tag 之后落在 main 的全部未发布改动**（下面第一段起就是那些记录，
+原样归入，未作删改；其中 `glasspaned --version` 那条自己写明"下一版按 minor 记"，与本版判据一致）。
+`harness/` 与 `kernel/` 不在本版发布面：harness 的目录、尺子与金样一律未动，kernel 的源码与
+`kernel/schemas/**` 也未动——只有 `scripts/set-version.mjs` 这一个入口按版本线把
+`kernel/package.json` 与 `kernel/package-lock.json` 的**版本号字段**从 1.9.0 写成 1.10.0
+（它是本仓版本线的位点之一，`check-version` 要求十处一致）；`@iterate/kernel` 未发布、
+其 npm 通道与 pin 未动。归档照旧减去 `harness/`。
 
 - **`glasspaned --version`（下一版按 minor 记，因为 CLI 参数动了）。** 更新器把"本机装的是什么版本"
   交代成两条读数必须一致：bundle 的 `CFBundleShortVersionString` 与 `glasspaned --version`
@@ -58,6 +70,121 @@
 
 这四条与上面 `--version` 那一批同属"下一版带上"。面 A 因关停/格式那两笔再长 +6 LOC
 （8652 → 8658），同批 `--record`。
+
+### Fixed — 面板（设置 / 控制台）
+
+- **「确认清理」「删除这个项目」按下去没有结果（P0）。** `ConsoleModel.lastActionMessage`
+  把每一种结局都算好了——删了几条、失败在哪、要不要重启——`ConsoleCliChannelTests` 还逐条测过
+  它算得对不对，而**没有任何视图读它**（`git grep lastActionMessage -- engine` 只有声明一行加
+  四处写入）。于是"确认清理"点下去只是关掉确认表，屏幕上不多一个字：消息算得越仔细、测试越绿，
+  界面上就越安静。这一条正是本仓给 `gp-confirm-prune` 定过的那类 P0——控件指得到 daemon 真命令，
+  却给不出任何可核对的结果。现在结论挂在控制台页签之外的一行里
+  （`ConsoleRootView.actionOutcomeStrip`，标识 `gp-action-message`，带「关闭」）；`confirmPrune`
+  也补上与另两个动作同形的 `guard canRunDaemonCLI`——从前它在读不到 daemon 程序路径时照样关掉
+  确认表，把"没有可执行入口"演成"已经执行完了"。新增闸：`PanelActionReadoutTests`（扫面板模型里
+  每一个 `@Published` 状态，逐个要求它有读者；注释先行剥除——把结论写在注释里不算有人读了它）。
+  **这条闸是被自己的反向破坏修出来的**：第一轮变异只把横幅从视图树上摘掉，两条断言全绿——
+  "读到过那个名字"与"它真被渲染出来"是两件事，于是补上挂点断言 `{ actionOutcomeStrip }`，
+  同一变异才落成具名红。
+- **「重启后台服务」不再凭空点亮。** `restartDaemon()` 从前是 `runSystemBinary` 里一句
+  `try? process.run()`：不取退出码、不读 stderr，然后调用方无条件清掉 `pruneNeedsRestart`——
+  kickstart 失败（作业没加载、标签不对）与重启成功在屏幕上长成同一个样子，而此刻面板正该说
+  "注册表还没换新表"。现在 launchctl 的退出码与重启后 hello 报回的进程号一起折算成
+  `DaemonRestartOutcome`，横幅只在实测到进程号换过时收起；每个失败分支自己给出下一步
+  （`launchctl print gui/<uid>/com.glasspane.daemon`、再点一次、或手动退出重开），读不到回话
+  按"没确认"处理，绝不折算成成功。新增闸：`DaemonRestartOutcomeTests`（`pidAfter: nil` 那一条
+  不许回 `.confirmed`；launchctl 那一步与 pid 对照那一步分开判；每个失败文案必须含一个可执行动作，
+  且指得到真实作业标签）。顺带让引擎里那句 `PermissionGuide.manualRestartHint` 第一次有了读者。
+- **「打开报告」落盘的那份副本，权限与名字都不对，而 SECURITY 页写着它不存在。** 从前是一句
+  `try? data.write(to: 临时目录/glasspane-evidence-<operationId>.html)`：模式由进程 umask 决定
+  （`0644`——本机任意进程都能读被测应用的界面文本），名字人人可猜（谁先占住那个名字、包括放一个
+  symlink，就照着写），而且它永远不落进 `~/.glasspane` 那套被收紧扫描覆盖的位置。SECURITY 双语
+  同一节又写着"Nothing here writes a report copy"。现在落盘走
+  `EvidenceReportGenerator.writePrivateHTMLReport`：`0600` + `O_EXCL | O_NOFOLLOW` + 每次写入随机名，
+  并拒绝落进同组/其他人可写或不属于本用户的目录；写不成把原因和下一步交给动作横幅，写成也报出
+  落在哪里（状态根之外，没人替你删）。SECURITY 双语那节按实测形态改写。新增闸：
+  `ReportWriteIsolationTests`（0600 实测、字节数核回、预置 16 个 symlink 的抢占负例、0777 目录的
+  拒绝分支、"合格目录必须放行"这条防一路拒绝）。
+
+### Fixed — daemon 与 MCP 壳的同一句谎话
+
+- **`GP_E_PROJECT_LIMIT` 的出路两层都在命令一件不存在的事。** daemon 侧（`ProtocolErrors.swift`）
+  写着"这一面没有任何删除动作"，壳侧（`tools.ts`）更进一步，让 agent 去手改 `projects.json`——
+  而 `main.swift` 自己写着手改的那一份会被运行中 daemon 的下一次写盘静默冲掉。两句都过期了：
+  `--project-remove <id>` 与 `--project-prune` 自 1.7.0 起就在那张解析表里，而 `engine-client.ts`
+  是把 daemon 的 remedy **逐字转达**的，所以同一个错误码从两层得到两句相反的话，恰好是 daemon
+  那句在命令人做不存在的事。现在两侧都点名真实的删除命令、`--dry-run` 预览、未知 id 退 3，并说清
+  "删除要重启才生效"（报文的 `requiresDaemonRestart`）与"不要手改那个文件"。新增闸：
+  `mcp-shell/test/tools.test.mjs` 的 `the daemon's own project-limit remedy names the same removals`
+  （把 daemon 源码里那段出路抠出来与壳侧对照，两层不许各说各话）。原有那条"引用的每个
+  `glasspaned --flag` 都必须真被解析"继续生效；钉"不许出现 no delete"的那半改成了钉"必须出现真实
+  删除命令、且不许出现手改文件"——**判据换方向是因为能力变了**，不是为了让它过，两侧都由变异验过
+  能红（把 `--project-remove` 改成 daemon 不解析的 `--project-forget` ⇒ 两条具名红）。
+
+### Fixed — 引擎（闸能红的那一类）
+
+- **socket 名字超长时，那条写着"too long or invalid"的拒绝永远走不到。** 四个 bind/connect 点都是
+  同一段：`strncpy` 拷进 `sun_path` 后检查"拷没拷成功"——`strncpy` 对超长输入**静默截断**并返回
+  目标指针，那个检查于是恒为真。bind 那侧绑成一个截短的名字，随后 `chmod(0600)` 与 `unlink` 都打在
+  调用方给的全名上双双 ENOENT（截短出来的套接字文件留在盘上）；connect 那侧报"没有监听者"而真名上
+  确实有人。现在容量判定收进 `UnixSocketAddress`（长度按 `sun_path` 实测、含 NUL 的名字一并拒、
+  写完读回比对槽里装的确实是那个名字），`SocketServer`/`ProbeSocketServer`/`DaemonProbe` 三处走它，
+  探针包内那份加了同一判定。新增闸：`SocketPathCapacityTests` —— `testProbeServerRefusesANameThatDoesNotFit`
+  是这条错误路径**第一次真的被走到**；变异验过：去掉读回比对 ⇒ 该条与 `testOverlongAndEmbeddedNulNames
+  AreRefused` 双红，失败输出里那条被截到 104 字节的路径就是原缺陷本尊。`testNoProductionSite
+  CopiesIntoSunPathByHand` 挡住下一个手搓拷贝的站点。
+- **自动留存删掉的审计档案不再静默。** `write()` 成功后调 `pruneIfNeeded()` 与
+  `pruneExpiredIfNeeded()`，两个都 `@discardableResult` 回"真删了几条"，两处调用点却都把数丢掉；
+  于是 `EngineCore` 对着一次"存下这条、同时抹掉 N 条旧档"的操作报 `evidencePersisted: true`。
+  同一条命令走 CLI（`--prune-evidence`）时是逐条报数的，两条路的诚实度不该不一样。现在按各自判据
+  把条数与判据名（条数上限 / 按龄几天）写进日志，什么都没删就什么都不说。新增闸：
+  `EvidenceRetentionNoticeTests`（含"删了 0 条不许出一句清理"的负例与一处结构闸；变异验过：把任一处
+  改回丢弃返回值 ⇒ `testEveryRetentionCallUsesTheCountItGetsBack` 具名红）。
+- **证据包的临时名不再共用。** `<entry>.json.tmp` 换成 `<entry>.json.tmp-<pid>-<uuid>`，与
+  `ProjectRegistry` 同一个理由：这份档案柜有多个写者（daemon，以及对着同一个 `--state-dir` 跑的一次性
+  CLI），共用临时名允许一个写者把另一个写者半开的缓冲 rename 到位；而 `.tmp` 结尾过不了
+  `isEntryName`，`clear()`、两种 prune 与 `stats()` 都会把崩溃留下的那个当不存在。名字生成抽成
+  `EvidenceStore.temporaryPath`（与既有 `isolationCheck` 同一类注入缝）：`StatePermissionTests`
+  走到 fallback 拒绝分支的夹具靠的就是"一个已知的临时名上蹲着目录"。**两条既有断言同时被改强**：
+  `EngineP1Batch6Tests` 与 `StatePermissionTests` 从前只查固定的 `<entry>.json.tmp` 那一个名字，
+  随机名之后它们会绿着放过每一种残留形状——现在判据是"条目名的任何兄弟都不许在"。
+  这一条没有行为级闸（跨进程撞名要两个真进程才露面），记在此处以免被当成已验证。
+
+### Fixed — 安装器与更新器（各自那道挡不住的门）
+
+- **安装器对"签名在、验不过"从告警继续改为停下。** 从前 `verified` 之外一律黄字"——继续安装"，
+  然后照跑 `npm install`、`swift build` 并注册 launchd 作业；而 `classifyTagVerify` 明明把
+  `invalid`（`gpg: BAD signature`、公钥对不上）与 `unsigned`/`unavailable`（只是缺证明）分开判。
+  自动更新那一面对 `invalid` 是硬拒且 `--consent` 洗不掉（`updater/lib/check.js` 的门 8），两条路
+  按两种诚实度处理同一件事，而安装是更不可逆的那条。判据抽成纯函数 `tagVerifyDecision`（埋在
+  `main()` 里的那一段没有测试能指到），并且**安装器不认识的新判据一律拒**——把"没见过"当成
+  "没签名"放过，等于每加一种失败模式就自动退回继续安装。新增闸：`installer/test/cli.test.mjs` 的
+  `tagVerifyDecision: 只有缺证明才继续，签不上就停下`（三种判据各一条；拒签报文必须说清哪些不可逆的
+  事没做、并给得出 `git tag -v` 与 `GLASSPANE_REF=` 两条下一步；四个未知判据全拒。变异验过：把
+  `invalid` 分支改成 warn ⇒ 该条具名红）。
+- **`--consent` 拼错不再被静默收下。** `parseArgs` 从前对值不作判定，任何字符串都进
+  `flags.consents`，政策侧按 `consented.includes(kind)` 判——于是拼错一个字母的那一次什么都不批，
+  而调用方以为自己已经批了。现在两种写法（`--consent <kind>` / `--consent=<kind>`）都只对
+  `CONSENT_KINDS` 放行，其余按用法错误退出并把可用的三种说出来。新增闸：
+  `updater/test/cli-options.test.mjs` 三条（6 个负例样本 + 一条真子进程：拒绝必须到达 stderr、
+   stdout 不许吐 JSON、状态根里不许留文件。变异验过：撤掉那道 includes 判定 ⇒ 两条具名红）。
+
+### 未修（记在这里，免得下一轮重复发现）
+
+- 面板的项目预览仍用面板侧的 `LocalArchive.isTestResidue` 过滤，没走 daemon
+  `--project-prune --dry-run`。daemon 那份 dry-run 报文**已经**带着需要的东西（`main.swift` 的
+  `projects` 就是命中清单），缺的只是面板去用它。
+- 安装器仍按 `process.env.HOME` 组 socket 与日志路径，而 daemon 的默认状态根来自
+  `NSHomeDirectory()`（`StateRoot.swift` 自己写过它不吃 `$HOME` 覆盖），启动参数里只给
+  `--socket-path` 不给 `--state-dir`。`HOME` 与账号 home 不一致时两者分裂。要修先得定
+  "哪个根是 canonical"，属决策类，留给 owner。
+- 一次性 launchd 脚本落 `NSTemporaryDirectory()` 前没有做属主/位判定（`SocketServer
+  .prepareSocketDirectory` 那套），输出名含时钟派生的 nonce。
+- 面板把 daemon `hello` 报的 `binaryPath` 原样交给 `launchctl submit` 执行；同 uid 的代码本来就能
+  执行它，增量是责任上下文与登录会话，但没有把那个路径钉回安装器注册的 bundle。
+- 证据详情页没有上下翻页（`ConsoleModel.selectedIndex` 那种"为翻页而存在却没人读"的东西本轮已删）；
+  面板也不提供 snapshot/restore/audit_ui 等 daemon 能力的入口。GUI 增件需要登录 GUI 会话的 AX 验收，
+  本轮无人值守做不到，故未动。
 
 ## [1.9.0] — 2026-10-08
 
