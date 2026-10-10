@@ -86,8 +86,10 @@ out of scope.
   register as the probe for its own pid and inject handler/state signals; because a present probe signal
   upgrades attribution from `soft` to `strong`, **attribution strength is forgeable by a same-user
   process**. This is known, labelled here as such, and it is not a cross-user escalation.
-- The daemon offers `--force-socket`, which can take over an already-occupied socket, and
-  `--replace-daemon`, which terminates the running instance first. An older or maliciously started
+- The daemon offers `--force-socket`, which can take over an already-occupied socket. Ending the running
+  instance is another tool's job: `--replace-daemon` belongs to `glasspane-install` (`installer/cli.js`),
+  and `glasspaned` rejects it as an unknown argument (exit 64) — an agent told to hand that flag to the
+  daemon gets a refusal, not a takeover. An older or maliciously started
   instance can displace the granted principal. After installing, check the panel's "Daemon status →
   subject" against the binary path that is actually running.
 - How a caller finds the socket, and why the last resort is a guess it is meant to lose: `GLASSPANE_ENGINE_SOCK`,
@@ -171,8 +173,10 @@ shared bearer token, and that token is the whole boundary.
 - **Late replies are raw engine content.** When an answer lands after its caller was already given a
   deadline, the gateway writes that body to its own stderr, unredacted, capped at 64 KiB per reply with
   the un-logged remainder counted in a marker (`LOG_BODY_CHARS`). If you redirect that stderr into a
-  file, it takes the mode that whatever started the gateway gave it — section 2.4 documents a
-  world-readable file in the state root that exists today.
+  file, it takes the mode that whatever started the gateway gave it — the world-readable log that §2.4
+  used to point at is closed and measured (section 2.4 records its history and today's numbers, not a
+  hole that is still open), but the gateway's own stderr is not in the daemon's tightening sweep: where
+  it lands, and with which bits, is decided by whoever starts it.
 
 Practical consequences: do not leave this running when nothing is using it; treat the token as a
 password (environment, not a command line or a shell history line); and prefer the MCP path or the
@@ -428,12 +432,12 @@ permission rather than by a secret.
 
 | Version | Supported |
 |---|---|
-| 1.1.x | ✅ current release line (1.1.0 and 1.1.1 tagged and published); security fixes ship here |
-| 1.0.x | ❌ no longer patched (the release lines were unified onto 1.1.x) |
+| 1.10.x | ✅ current release line (`1.10.0` is the tag this page ships with); security fixes ship here |
+| 1.9.x and every earlier 1.x | ❌ no longer patched (the release lines were unified, and only the current line is patched) |
 | 0.x (releases before `glasspane-mcp@0.1.0` / `glasspane-install@1.0.0`) | ❌ no patches — upgrade |
 
 **No fix-time commitment (SLA) yet**: one maintainer, no security team, so there is no "responds within
 X days / fixed within Y days" promise to make. What can be promised: private advisories are read and
-answered, confirmed issues are fixed on the `1.1.x` line, and the impact range plus workarounds are
+answered, confirmed issues are fixed on the current release line, and the impact range plus workarounds are
 stated in the Release notes and CHANGELOG. If you need a temporary workaround, the two most effective are
 stopping the launchd jobs (`launchctl bootout`, sections 2.5 and 2.8) and removing the granted TCC seats.

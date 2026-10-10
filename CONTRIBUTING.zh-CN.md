@@ -33,9 +33,9 @@ GlassPane 是 **macOS 上给 AI 编程代理用的 GUI 测试与验证层**：�
 | [spike/](./spike/) | 可行性实验与实测留档 | 不入门禁 |
 | [specs/](./specs/) | 中文实施规格与验收文档（PRD、P0–P6、5.6/5.7/5.8 项目综述）＝**设计真值** | 文档改动本身就是 PR |
 
-## 3. 门禁：七条 CI 通道，先在本地跑绿
+## 3. 门禁：九条 CI 通道，先在本地跑绿
 
-[.github/workflows/ci.yml](./.github/workflows/ci.yml) 共七条 job。CI 只是同一套东西的重复——先在本地把它们跑绿。
+[.github/workflows/ci.yml](./.github/workflows/ci.yml) 共九条 job。CI 只是同一套东西的重复——先在本地把它们跑绿。
 
 | CI job | Runner | 测什么 |
 |---|---|---|
@@ -46,6 +46,8 @@ GlassPane 是 **macOS 上给 AI 编程代理用的 GUI 测试与验证层**：�
 | `install-gate` | ubuntu-latest | 发布形态所依据的根布局：安装器单测、kernel → mcp-shell 构建、全部 workspace 测试 |
 | `version-line` | ubuntu-latest | 每个版本位点与根 manifest 是否一致 |
 | `docs` | ubuntu-latest | 对外文档体检：相对链接可达、页内/跨页锚点存在、双语两侧都在位（`node scripts/check-doc-links.mjs`） |
+| `harness-rulers` | ubuntu-latest | `harness/` 那套已记录基线：fork 分歧度、工具面与产品面、品牌漂移、pinned 上游 tag 上的扩展点存活、内核出处（`node harness/tools/*.mjs --check`）。这一条读的是 `harness/**`，而发布归档里从不带它 |
+| `workflow-lint` | ubuntu-latest | workflow 文件本身：`node scripts/check-workflows.mjs` 拒掉 GitHub 根本不会加载的写法（重名 job、`if:` 里引用 `secrets`、未加引号的 `value: `、指向不存在脚本的步骤、未声明就使用的 `workflow_dispatch` 输入） |
 
 运行时接受的命令是 [iterate.config.yaml](./iterate.config.yaml) → `validation.commands` 里的封闭清单，**逐字**匹配：加参数或换目录都会被拒绝。
 
