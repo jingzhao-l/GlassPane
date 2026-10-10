@@ -22,6 +22,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { parseArgs, runCommand } from '../cli.js'
+import { CONSENT_KINDS } from '../lib/policy.js'
 import { emptyState, nextState, saveState } from '../lib/state.js'
 import { DEFAULT_HOUR, DEFAULT_MINUTE } from '../lib/launchd.js'
 import { TMP_PREFIX, removeDir, tempDir } from './helpers.mjs'
@@ -197,4 +198,52 @@ test('the apply path hands the runtime refresh the machine answer it needs', () 
   assert.match(call, /\n\s*env,\n/, '§11 的注册子进程要用这次调用的 env，不是 process.env 的猜测')
   assert.match(call, /autoDisabled: envDisabled,/,
     '关掉自动更新的机器必须被说出来，否则换版顺手注册一个刚被主人取消的作业')
+})
+
+/**
+ * `--consent` 的值必须落在那三种里。拼错一个字母从前照收：它进 `flags.consents`，
+ * 政策侧按 `consented.includes(kind)` 判定，于是什么都不批——调用方以为自己已经
+ * 批过了，而更新仍被拒。这一节把"拒绝要出声"钉住（空格分隔与 `=` 两种写法都测，
+ * 并含一条真子进程：拒绝必须到达 stderr，不是只写进一个没人读的返回值）。
+ */
+test('--consent accepts only the three kinds it documents', () => {
+  for (const kind of CONSENT_KINDS) {
+    const parsed = parseArgs(['apply', '--consent', kind])
+    assert.equal(parsed.ok, true, `${kind} 是文档里明列的同意类型，必须被接受：${parsed.reason}`)
+    assert.deepEqual(parsed.flags.consents, [kind], `${kind} 必须落在 flags.consents 上`)
+  }
+  const equals = parseArgs(['apply', '--consent=unsigned-release'])
+  assert.equal(equals.ok, true, equals.reason)
+  assert.deepEqual(equals.flags.consents, ['unsigned-release'], '--consent=<kind> 与 --consent <kind> 必须同解')
+})
+
+test('--consent refuses a value that would grant nothing', () => {
+  // 负例表：这些都在从前被静默收下，然后什么也不批。
+  for (const typo of ['majour', 'major ', 'MAJOR', 'state_root', 'unsigned', '']) {
+    const parsed = parseArgs(['apply', '--consent', typo])
+    assert.equal(parsed.ok, false, `--consent ${JSON.stringify(typo)} 不该被当成一次同意`)
+    for (const kind of CONSENT_KINDS) {
+      assert.ok(parsed.reason.includes(kind), `拒绝理由必须把可用的三种说出来，缺 ${kind}：${parsed.reason}`)
+    }
+    const equals = parseArgs(['apply', `--consent=${typo}`])
+    assert.equal(equals.ok, false, `--consent=${JSON.stringify(typo)} 同样不该被收下`)
+  }
+  const missing = parseArgs(['apply', '--consent'])
+  assert.equal(missing.ok, false, '--consent 后面没有值必须是用法错误')
+})
+
+test('the CLI as a process: a misspelled consent exits with the refusal out loud', () => {
+  const sandbox = scratch('consent-')
+  try {
+    const got = runCli(['apply', '--state-dir', sandbox, '--consent', 'majour', '--json'])
+    assert.notEqual(got.status, 0, `拼错的同意类型必须非 0 退出，实到 ${got.status}：${got.stdout}`)
+    assert.equal(got.stdout.trim(), '', `用法错误不许往 stdout 吐 JSON：${got.stdout}`)
+    assert.match(got.stderr, /--consent/, `stderr 要说清是哪条参数：${got.stderr}`)
+    for (const kind of CONSENT_KINDS) {
+      assert.ok(got.stderr.includes(kind), `拒绝时必须给出可用的种类，缺 ${kind}：${got.stderr}`)
+    }
+    assert.deepEqual(fs.readdirSync(sandbox), [], '被拒的这次调用不该在状态根里留下任何东西')
+  } finally {
+    removeDir(sandbox)
+  }
 })

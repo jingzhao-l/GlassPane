@@ -88,6 +88,20 @@ options
 
 /** Pure argument parse. Returns `{ ok:false, reason }` for anything unusable. */
 export function parseArgs(argv) {
+  // `--consent` 的值必须落在这三种里。拼错一个字母的那一条从前照收：它进
+  // `flags.consents`，政策侧按 `consented.includes(kind)` 判定，于是**什么都不批**，
+  // 而调用方以为自己也批过了——一道 promises safety 却什么都不做的开关，
+  // 按这文件自己的说法（见 --disable 那一段）比没有它更糟。
+  const consent = (value) => {
+    if (!value) return { ok: false, reason: `--consent needs a value (${CONSENT_KINDS.join(' | ')})` }
+    if (!CONSENT_KINDS.includes(value)) {
+      return {
+        ok: false,
+        reason: `--consent does not know "${value}" — it grants nothing, so the update would still be refused while you believe you approved it. Kinds: ${CONSENT_KINDS.join(' | ')}`,
+      }
+    }
+    return { ok: true, value }
+  }
   const flags = { json: false, auto: false, help: false, consents: [] }
   const positional = []
   for (let i = 0; i < argv.length; i += 1) {
@@ -98,11 +112,14 @@ export function parseArgs(argv) {
     else if (token === '--disable') flags.disable = true // 选子命令，见下面 parseArgs 末尾的别名处理
     else if (token === '--enable') flags.enable = true   // 同上；两者同时给是用法错误
     else if (token === '--consent') {
-      const value = argv[(i += 1)]
-      if (!value) return { ok: false, reason: `--consent needs a value (${CONSENT_KINDS.join(' | ')})` }
-      flags.consents.push(value)
-    } else if (token.startsWith('--consent=')) flags.consents.push(token.slice('--consent='.length))
-    else if (['--state-dir', '--state-root', '--apps-dir', '--daemon-bin', '--socket', '--at', '--hour', '--minute'].includes(token)) {
+      const accepted = consent(argv[(i += 1)])
+      if (!accepted.ok) return accepted
+      flags.consents.push(accepted.value)
+    } else if (token.startsWith('--consent=')) {
+      const accepted = consent(token.slice('--consent='.length))
+      if (!accepted.ok) return accepted
+      flags.consents.push(accepted.value)
+    } else if (['--state-dir', '--state-root', '--apps-dir', '--daemon-bin', '--socket', '--at', '--hour', '--minute'].includes(token)) {
       const value = argv[(i += 1)]
       if (value === undefined) return { ok: false, reason: `${token} needs a value` }
       // Onto `flags` itself, keyed by the bare option name — which is exactly how every
