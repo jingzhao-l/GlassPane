@@ -373,17 +373,129 @@ final class SettingsModel: ObservableObject {
         return nil
     }
 
+    /// 「重启后台服务」的结局。每个非 `idle` 的取值都来自一次实测：要么拿到
+    /// `launchctl` 的退出码，要么读到重启后 hello 报回来的进程号。
+    /// 从前这个动作只有 `try? process.run()` 一句，成败都不落进状态，
+    /// 于是调用方一律按"重启好了"处理——那是面板自己点亮一个没测过的指示器。
+    enum DaemonRestartOutcome: Equatable {
+        case idle
+        case inFlight
+        case confirmed(previousPid: Int?, currentPid: Int)
+        case unchanged(pid: Int?)
+        case launchctlFailed(status: Int32, detail: String)
+        case spawnFailed
+    }
+
+    @Published private(set) var restartOutcome: DaemonRestartOutcome = .idle
+    private var restartInFlight = false
+
+    /// 重启后读回 hello 的次数与间隔。`kickstart -k` 换进程不是瞬时的，一次
+    /// 1.5s 的采样会把"还没起来"读成"没重启"；但也只采样这么多次——
+    /// 读不到就如实说读不到，不无限等。
+    static let restartReadbackAttempts = 4
+    static let restartReadbackInterval: TimeInterval = 1.5
+
+    /// pid 对照是这条结论里唯一的判定，抽成纯函数供单测：换了进程号才算重启
+    /// 成功；同一个进程号回话说明没换过；没读到回话不许点亮。
+    nonisolated static func restartVerdict(pidBefore: Int?, pidAfter: Int?) -> DaemonRestartOutcome {
+        guard let pidAfter else { return .unchanged(pid: pidBefore) }
+        if pidAfter == pidBefore { return .unchanged(pid: pidAfter) }
+        return .confirmed(previousPid: pidBefore, currentPid: pidAfter)
+    }
+
+    /// `launchctl` 那一步的结局折算（退出码非 0 / 起不了进程都是"没重启"，
+    /// 不是"重启中"）。与 pid 对照分开，两层失败才能各说各话。
+    nonisolated static func restartLaunchStepOutcome(
+        _ run: (output: String, errorOutput: String, status: Int32)?
+    ) -> DaemonRestartOutcome? {
+        guard let run else { return .spawnFailed }
+        guard run.status == 0 else {
+            return .launchctlFailed(status: run.status, detail: run.errorOutput)
+        }
+        return nil
+    }
+
+    /// 面板上那一句重启结论：说实测到了什么，并给出下一步。nil = 这一面还没重启过。
+    /// 抽成纯函数（入参就是那个结局），这样"失败态必须给得出动作"这条能单测——
+    /// 单测不该为了读一句文案去构造一个会去查 TCC 席位的模型。
+    nonisolated static func restartOutcomeText(
+        for outcome: DaemonRestartOutcome, uid: Int, jobLabel: String
+    ) -> String? {
+        let jobPath = "launchctl print gui/\(uid)/\(jobLabel)"
+        switch outcome {
+        case .idle:
+            return nil
+        case .inFlight:
+            return "正在重启后台服务，等它回话确认换了进程……"
+        case .confirmed(let previous, let current):
+            return previous == nil
+                ? "后台服务已在新进程上运行（pid \(current)），注册表从这一刻起按新表加载。"
+                : "后台服务已换新进程（pid \(previous!) → \(current)），注册表从这一刻起按新表加载。"
+        case .unchanged(let pid):
+            return pid == nil
+                ? "重启指令发出去了，但后台服务一直没回话，读不到它的进程号就没法确认换过进程。核对作业是否还在：\(jobPath)；不在了就重新安装。"
+                : "后台服务还是同一个进程（pid \(pid!)）：它没被换掉，注册表仍是旧表。再点一次「重启后台服务」；仍是同一个进程就手动退出它再重新打开。"
+        case .launchctlFailed(let status, let detail):
+            let quoted = ConsoleModel.quoteDaemonWords(detail)
+            return "没有重启成功：launchctl 退出码 \(status)\(quoted.isEmpty ? "" : "，原话：\(quoted)")。后台服务仍是原来那个进程，注册表还没换新表。先核对作业：\(jobPath)。"
+        case .spawnFailed:
+            // 引擎里那份"手动退出再重新打开"的说明终于有读者了：它从前是一段
+            // 没有任何界面引用的常量，而这一条恰是它唯一成立的情形——
+            // launchctl 都起不来，就没有"再点一次重启"可推荐。
+            return PermissionGuide.manualRestartHint
+        }
+    }
+
+    var restartOutcomeText: String? {
+        Self.restartOutcomeText(for: restartOutcome, uid: Int(getuid()), jobLabel: Self.launchdLabel)
+    }
+
+    /// 重启在途：按钮据此禁用，禁用理由由 `restartOutcomeText` 给出。
+    var isRestartInFlight: Bool { restartOutcome == .inFlight }
+
     /// 重启 launchd 托管的 daemon 让授权生效。会打断正在进行的 act，
     /// 因此只作为用户显式点击的动作提供，绝不自动执行。
+    ///
+    /// 结论一律由实测折算：`launchctl` 的退出码，加上重启后 hello 报回来的
+    /// 进程号是否变了。调用方（项目页的重启横幅）只在 `.confirmed` 时才收起
+    /// "需要重启"的提示。
     func restartDaemon() {
+        guard !restartInFlight else { return }
+        restartInFlight = true
+        restartOutcome = .inFlight
+        let pidBefore = daemon.pid
         let command = PermissionGuide.daemonRestartCommand(label: Self.launchdLabel, uid: Int(getuid()))
-        runSystemBinary(command.launchPath, arguments: command.arguments)
         reprobed = nil
         reprobeIntervalNow = Self.reprobeInterval
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            if let summary = await helloSummary() {
-                applyDaemonSummary(summary)
+        Task.detached(priority: .userInitiated) {
+            // 管道读取与超时交给 ConsoleModel.runDaemonCLI（同一条已单测的一过性
+            // 执行通道），这里不再复制第二份。
+            let run = ConsoleModel.runDaemonCLI(
+                binary: command.launchPath,
+                arguments: command.arguments,
+                timeoutSeconds: 10
+            )
+            await MainActor.run {
+                if let failure = Self.restartLaunchStepOutcome(run) {
+                    self.restartInFlight = false
+                    self.restartOutcome = failure
+                    return
+                }
+                Task { @MainActor in
+                    var summary: DaemonProbe.Summary?
+                    for _ in 0..<Self.restartReadbackAttempts {
+                        try? await Task.sleep(
+                            nanoseconds: UInt64(Self.restartReadbackInterval * 1_000_000_000))
+                        if let answer = await self.helloSummary() {
+                            summary = answer
+                            break
+                        }
+                    }
+                    if let summary { self.applyDaemonSummary(summary) }
+                    self.restartInFlight = false
+                    self.restartOutcome = Self.restartVerdict(
+                        pidBefore: pidBefore, pidAfter: summary?.pid)
+                }
             }
         }
     }

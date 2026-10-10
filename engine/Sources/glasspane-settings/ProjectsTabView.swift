@@ -34,6 +34,11 @@ struct ProjectsTabView: View {
             }
             content
         }
+        // "需要重启"的提示只在实测到进程号换过之后才收起：从前点一下就清旗，
+        // 于是 kickstart 失败与重启成功在屏幕上长成同一个样子。
+        .onChange(of: settings.restartOutcome) { outcome in
+            if case .confirmed = outcome { model.pruneNeedsRestart = false }
+        }
     }
 
     /// 测试残留提示：说清是什么、有多少、能一键清掉。
@@ -59,18 +64,30 @@ struct ProjectsTabView: View {
     }
 
     private var restartBanner: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(.blue)
-            Text("注册表已改动，重启后台服务后它才会用新表。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Button("重启后台服务") {
-                settings.restartDaemon()
-                model.pruneNeedsRestart = false
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(.blue)
+                Text("注册表已改动，重启后台服务后它才会用新表。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("重启后台服务") {
+                    settings.restartDaemon()
+                }
+                .controlSize(.small)
+                .disabled(settings.isRestartInFlight)
+                .help(settings.isRestartInFlight ? "上一次重启还在等后台服务回话" : "让后台服务重新加载注册表")
+                .accessibilityIdentifier("gp-restart-after-prune")
             }
-            .controlSize(.small)
-            .accessibilityIdentifier("gp-restart-after-prune")
+            // 重启的实测结论就在横幅里，收起横幅的条件由它决定：失败时横幅留着，
+            // 并把下一步（核对作业 / 手动退出重开）写在同一屏上。
+            if let outcome = settings.restartOutcomeText {
+                Text(outcome)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("gp-restart-outcome")
+            }
         }
         .padding(10)
         .background(Color.blue.opacity(0.08))

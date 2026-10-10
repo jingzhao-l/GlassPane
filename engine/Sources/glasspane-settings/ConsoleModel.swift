@@ -68,6 +68,10 @@ final class ConsoleModel: ObservableObject {
     @Published var isRunningPrune = false
     /// 修剪后是否需要重启后台服务（daemon 内存里还是旧表）。
     @Published var pruneNeedsRestart = false
+    /// 上一次写入动作（清理／删除）的结论。**必须被渲染**：这条曾经只被写入、
+    /// 没有任何读者，于是"确认清理"点下去只是关掉确认表，删了几条、失败在哪、
+    /// 要不要重启全都看不见——而消息本身算得好好的，测试也全绿。
+    /// `PanelActionReadoutTests` 闸住"写了没人读"这个形状。
     @Published var lastActionMessage: String?
 
     // MARK: - approvals
@@ -200,12 +204,6 @@ final class ConsoleModel: ObservableObject {
         }
     }
 
-    /// 选中项在列表里的位置（详情页上下翻页用）。
-    var selectedIndex: Int? {
-        guard let operationId = selectedOperationId else { return nil }
-        return filteredSummaries.firstIndex { $0.operationId == operationId }
-    }
-
     // MARK: - 写入动作（一律经 daemon CLI）
 
     /// 先跑 dry-run，把"将要删除哪些"摊开给人确认，绝不直接删。
@@ -223,6 +221,14 @@ final class ConsoleModel: ObservableObject {
     /// "点了没反应"直到系统看门狗把窗口杀掉。
     func confirmPrune() {
         guard !isRunningPrune else { return }
+        // 没有 daemon 二进制就没有可执行入口。从前这里不设闸：确认表照样关掉，
+        // `runDaemonCLI` 回 nil，结论算好了却没人显示，用户看到的就只剩
+        // "点了一下，什么都没发生"。
+        guard canRunDaemonCLI else {
+            isPruneSheetPresented = false
+            lastActionMessage = "还没连上后台服务：读不到它的程序路径，清理动作无法执行。点「刷新」恢复后重试。"
+            return
+        }
         isRunningPrune = true
         isPruneSheetPresented = false
         let binary = daemonBinaryPath
@@ -266,6 +272,12 @@ final class ConsoleModel: ObservableObject {
                 self.reloadProjects()
             }
         }
+    }
+
+    /// 收起上一条动作结论。渲染它的横幅必须有关闭入口，否则一次结论会一直
+    /// 挂在页面上，下一次动作的新结论到底换没换都看不出来。
+    func dismissActionMessage() {
+        lastActionMessage = nil
     }
 
     /// 跑一次 daemon 一次性 CLI，返回它的 stdout、stderr 与退出码；起不来/超时才回 nil。

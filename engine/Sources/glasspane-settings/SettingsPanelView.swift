@@ -85,17 +85,30 @@ struct SettingsPanelView: View {
             // 授权已落但运行实例读不到（TCC 判定按进程缓存）→ 给出重启入口。
             // 不自动重启：那会中断正在进行的 act，必须由用户点。
             if !model.kindsNeedingRestart.isEmpty {
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: "arrow.triangle.2.circlepath.circle")
-                        .foregroundStyle(.orange)
-                    Text(model.restartHint)
-                        .font(.callout)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer()
-                    Button("重启后台服务") { model.restartDaemon() }
-                        .controlSize(.small)
-                        .accessibilityIdentifier(PermissionGuide.restartDaemonIdentifier)
-                        .help("立即重启后台服务（会打断正在执行的操作）")
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "arrow.triangle.2.circlepath.circle")
+                            .foregroundStyle(.orange)
+                        Text(model.restartHint)
+                            .font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Button("重启后台服务") { model.restartDaemon() }
+                            .controlSize(.small)
+                            .disabled(model.isRestartInFlight)
+                            .accessibilityIdentifier(PermissionGuide.restartDaemonIdentifier)
+                            .help(model.isRestartInFlight
+                                ? "上一次重启还在等后台服务回话"
+                                : "立即重启后台服务（会打断正在执行的操作）")
+                    }
+                    // 实测结论：换过进程号才算重启成，读不到就留在屏幕上说读不到。
+                    if let outcome = model.restartOutcomeText {
+                        Text(outcome)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("gp-permission-restart-outcome")
+                    }
                 }
                 .padding(10)
                 .background(Color.orange.opacity(0.08))

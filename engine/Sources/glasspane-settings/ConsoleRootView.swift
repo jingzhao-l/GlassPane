@@ -67,6 +67,7 @@ struct ConsoleRootView: View {
                 // 收在这里而不是每一页各修各的，是因为每一页的内容形状都会变。
                 .frame(minWidth: 0, idealWidth: 400, maxWidth: .infinity,
                        minHeight: 0, idealHeight: 400, maxHeight: .infinity)
+                .safeAreaInset(edge: .top, spacing: 0) { actionOutcomeStrip }
         }
         // 窗口标题的唯一落点：各页不得再设 navigationTitle，否则会把
         // "GlassPane 设置" 顶掉（P1-C6 真机冒烟按窗口标题定位面板）。
@@ -92,6 +93,32 @@ struct ConsoleRootView: View {
     private func syncFromSettings() {
         if console.daemonBinaryPath == nil {
             console.daemonBinaryPath = settings.daemon.subject?.binaryPath
+        }
+    }
+
+    // MARK: - 动作结论
+
+    /// 上一次动作的结论挂在页签之外：清理、删除、导出报告都从这一行说话。
+    /// 它存在的原因是一次静默失效——`ConsoleModel.lastActionMessage` 把每种结果
+    /// 都算好了，却没有任何视图读它，于是"确认清理"点下去只是关掉确认表。
+    /// 图标取中性：这一行既装"删了 3 条"也装"没删成"，按文案猜成败等于把判定
+    /// 交给字符串匹配。
+    @ViewBuilder
+    private var actionOutcomeStrip: some View {
+        if let message = console.lastActionMessage {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "info.circle").foregroundStyle(.secondary)
+                Text(message)
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 6)
+                Button("关闭") { console.dismissActionMessage() }
+                    .controlSize(.small)
+                    .accessibilityIdentifier("gp-dismiss-action-message")
+            }
+            .padding(10)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .accessibilityIdentifier("gp-action-message")
         }
     }
 
