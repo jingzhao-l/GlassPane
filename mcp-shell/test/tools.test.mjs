@@ -1614,12 +1614,16 @@ function daemonCliFlags() {
 }
 
 test("the project-limit remedy orders only actions this surface can perform", async () => {
-  // MUTATION THIS PINS: `return "delete unused projects first (\`glasspaned
-  // --list-projects\` prints the registered set), then retry"` in
-  // `projectErrorRemedy`. Nothing in this project removes a registration — the
-  // three `gp_project_*` tools read, `gp_project_set` creates or patches, and the
-  // daemon CLI parses no delete flag — so the sentence ordered an action no caller
-  // has, and quoted a flag that only prints.
+  // MUTATION THIS PINS: a remedy that names no removal, or that sends the agent
+  // to edit projects.json by hand. Both halves have already been wrong here, in
+  // opposite directions: first it ordered `glasspaned --list-projects` ("delete
+  // unused projects first") when that flag only prints; then, after 1.7.0 put
+  // `--project-remove` / `--project-prune` back, the corrective "this surface
+  // offers no delete" became the false claim — and the hand-edit it recommended
+  // is silently overwritten by the running daemon's next save (main.swift says so
+  // itself). So this asserts the removals ARE named, that the restart that makes
+  // one stick is named, that no hand-edit is named, and — as before — that every
+  // `glasspaned --flag` quoted is one the daemon's parser accepts.
   await withProjectsFile(async () => {
     const { engine } = makeEngine();
     const setTool = TOOL_BY_NAME.get("gp_project_set");
@@ -1634,14 +1638,19 @@ test("the project-limit remedy orders only actions this surface can perform", as
     const text = outcome.content[0].text;
     assert.ok(text.startsWith("GP_E_PROJECT_LIMIT"), text);
     assert.ok(!/delete unused projects/i.test(text), text);
-    assert.ok(/this surface offers no delete/i.test(text),
-      `上限的出路必须承认这里没有删除动作：${text}`);
+    for (const removal of ["--project-remove", "--project-prune"]) {
+      assert.ok(text.includes(removal), `上限的出路必须点名真实存在的删除命令 ${removal}：${text}`);
+    }
+    assert.ok(/requiresDaemonRestart|重启|restart/i.test(text),
+      `删除要配重启才算生效，出路不能只说删：${text}`);
+    assert.ok(!/json\.tool|removing an entry from that file/i.test(text),
+      `不许再把 agent 指去手改 projects.json——运行中的 daemon 会静默覆写它：${text}`);
     assert.ok(text.includes(`(${MAX_PROJECTS})`), `上限要说成可核对的数字：${text}`);
     // The two moves that do exist are named, by their real tool names.
     assert.ok(text.includes("gp_project_list") && text.includes("gp_project_set"), text);
     assert.match(text, /patches that entry and leaves the count/);
     // Anything the remedy tells the agent to run must be a command the shipped
-    // binary accepts: `--project-remove` would have read perfectly and answered
+    // binary accepts: a renamed or dropped flag reads perfectly and answers
     // "unknown argument".
     const flags = daemonCliFlags();
     const quoted = [...text.matchAll(/glasspaned\s+(--[a-z-]+)/g)].map((match) => match[1]);
@@ -1649,6 +1658,29 @@ test("the project-limit remedy orders only actions this surface can perform", as
     assert.deepEqual(quoted.filter((flag) => !flags.has(flag)), [],
       `remedy 报了 daemon 不解析的开关：${quoted.join(", ")}`);
   });
+});
+
+test("the daemon's own project-limit remedy names the same removals", () => {
+  // `engine-client.ts` relays the daemon's remedy verbatim, so the two layers
+  // must not tell an agent opposite stories. The daemon's text lives in Swift;
+  // this reads it out of the source the shipped binary is built from.
+  const source = fs.readFileSync(
+    path.resolve(HERE, "..", "..", "engine", "Sources", "GlassPaneEngine", "ProtocolErrors.swift"),
+    "utf8",
+  );
+  const block = /case \.projectLimit:[\s\S]*?return "([\s\S]*?)"/.exec(source);
+  assert.ok(block, "读不到 daemon 的 GP_E_PROJECT_LIMIT 出路，这条对照已经不作数");
+  const remedy = block[1];
+  for (const removal of ["--project-remove", "--project-prune"]) {
+    assert.ok(remedy.includes(removal), `daemon 的出路没点名 ${removal}：${remedy.slice(0, 200)}`);
+  }
+  assert.ok(!/this surface offers no delete/i.test(remedy),
+    "daemon 还在说这一面没有删除动作，而它自己就解析 --project-remove");
+  const flags = daemonCliFlags();
+  const quoted = [...remedy.matchAll(/glasspaned\s+(--[a-z-]+)/g)].map((match) => match[1]);
+  assert.ok(quoted.length >= 2, `daemon 的出路没引用可核对的开关：${quoted.join(", ")}`);
+  assert.deepEqual(quoted.filter((flag) => !flags.has(flag)), [],
+    `daemon 的出路报了自己不解析的开关：${quoted.join(", ")}`);
 });
 
 test("the limit the remedy quotes is the limit the daemon enforces", () => {

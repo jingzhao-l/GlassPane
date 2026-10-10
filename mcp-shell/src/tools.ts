@@ -1840,17 +1840,17 @@ function mapProjectError(error: unknown): ToolResult {
  */
 function projectErrorRemedy(code: string): string {
   if (code === GP_E_PROJECT_LIMIT) {
-    // What is actually possible. The old sentence was "delete unused projects
-    // first (`glasspaned --list-projects` prints the registered set), then
-    // retry", which ordered an action nothing here performs: this surface adds
-    // and patches entries (`gp_project_set`) and reads them (`gp_project_list`,
-    // `gp_project_get`), and the daemon CLI's project-shaped flags
-    // (`--list-projects`, `--active-project`, and the evidence-only
-    // `--prune-evidence`/`--project`) print or prune archives — none removes a
-    // registration. `test/tools.test.mjs` pins both halves: the remedy names no
-    // delete on this surface, and every `glasspaned --flag` it quotes is one the
-    // daemon's own argument parser accepts.
-    return `the limit (${MAX_PROJECTS}) counts the entries stored in the projects file named above, so a new registration cannot be made to fit by changing an existing one: gp_project_set with an existing projectId patches that entry and leaves the count where it is. See what is stored with gp_project_list, then free a slot by removing an entry from that file itself (read it first with \`python3 -m json.tool <that path>\`; this surface offers no delete, so this is a repair of the file the message names, the same route a damaged registry takes) and retry. To read the same set without this shell: glasspaned --list-projects prints the file the service loads by default`;
+    // What is actually possible. This sentence has been wrong twice in opposite
+    // directions: first it ordered `glasspaned --list-projects` ("delete unused
+    // projects first") when that flag only prints; then, once 1.7.0 put
+    // `--project-remove` / `--project-prune` back, the corrective
+    // "this surface offers no delete" became the lie — it told an agent at the
+    // ceiling that no command frees a slot, then sent it to hand-edit
+    // projects.json, which the running daemon silently overwrites on its next
+    // save (`main.swift` says so). `test/tools.test.mjs` pins both halves again:
+    // the remedy names the removals that exist and the restart that makes one
+    // stick, names no hand-edit, and quotes only flags the daemon parses.
+    return `the limit (${MAX_PROJECTS}) counts the entries stored in the projects file named above, so a new registration cannot be made to fit by changing an existing one: gp_project_set with an existing projectId patches that entry and leaves the count where it is. See what is stored with gp_project_list, then free a slot with a removal this product does implement: \`glasspaned --project-remove <projectId>\` removes exactly one registration, and \`glasspaned --project-prune\` removes only the engine's own test residue — both take \`--dry-run\` to preview and print JSON, and an unknown id exits 3. A running daemon keeps its own copy of the table, so the removal only sticks after it is restarted (the reply's requiresDaemonRestart says whether one is pending; \`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon\`). Do NOT hand-edit the projects file: the next daemon save overwrites it. To read the same set without this shell: glasspaned --list-projects prints the file the service loads by default`;
   }
   if (code === GP_E_NOT_FOUND) {
     return "check the projectId; use gp_project_list to view available projects";

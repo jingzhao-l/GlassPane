@@ -84,13 +84,13 @@ public struct GPError: Error {
         case .restoreStepFailed:
             return "fix the failing step in the steps array (see the failed step index), then retry restore"
         case .projectLimit:
-            // 这句从前写的是 "delete unused projects first (glasspaned --list-projects)"。
-            // 两个错叠在一起：这一面**没有任何删除动作**，而 `--list-projects` 只打印
-            // 不删除。壳侧的同一条出路早已被改成实话，并由 `mcp-shell/test/tools.test.mjs`
-            // 钉住（它连"引用的每个 daemon 开关都必须真的被解析"都闸了）——但 daemon
-            // 自己这一份没人管，而 `engine-client.ts` 是把 daemon 的 remedy **逐字转达**的，
-            // 所以同一个错误码会从两层得到两句相反的话，且 daemon 那句在命令人做不存在的事。
-            return "this surface offers no delete: nothing in GlassPane removes a registration, so no command here will free a slot. The limit (\(ProjectEntry.maxProjects)) counts the entries stored in projects.json, and gp_project_set with an existing projectId patches that entry while leaving the count where it is. See what is stored with gp_project_list, or without this shell: glasspaned --list-projects prints the same file and changes nothing"
+            // 这句的历史：479a11c 之后 `--project-remove`/`--project-prune` 一度被拿掉，
+            // 于是这里改成实话"这一面没有删除动作"。1.7.0 把两条命令加回来了，实话就
+            // 变成了谎话——而 `engine-client.ts` 是把 daemon 的 remedy **逐字转达**的，
+            // 一个撞上限的 agent 因此被告知"没有任何命令能腾出名额"，接着被指去手改
+            // projects.json（`main.swift` 自己写着手改的那一份会被运行中 daemon 的下一次
+            // 写盘静默冲掉）。出路必须指得到真命令，并且说清它要重启才生效。
+            return "the limit (\(ProjectEntry.maxProjects)) counts the entries stored in projects.json, and gp_project_set with an existing projectId patches that entry while leaving the count where it is — changing an existing entry cannot make room. Free a slot with one of the two removals this binary does implement: `glasspaned --project-remove <projectId>` removes exactly one registration (an unknown id exits 3, a registry it cannot read back is refused rather than overwritten), and `glasspaned --project-prune` removes only the engine's own test residue; both accept --dry-run to preview and print JSON. A running daemon keeps its own copy of the table, so the removal only sticks once it is restarted — the reply's requiresDaemonRestart says whether one is pending (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`, or press 重启后台服务 in the settings panel). See what is stored with gp_project_list, or without this shell: glasspaned --list-projects prints the same file and changes nothing. Do not edit projects.json by hand: the running daemon overwrites it"
         case .notFound:
             return "check the projectId; use gp_project_list to view available projects"
         case .busyInput:
