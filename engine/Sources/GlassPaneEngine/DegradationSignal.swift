@@ -321,6 +321,10 @@ public final class DegradationTracker {
 
     /// 最小二乘线性回归斜率（y 随 x = timestamp 变化）；样本 <2 或 x 跨度为 0
     /// 时返回 nil（不足统计）。
+    ///
+    /// x 先减均值再求和：用原始累加式 `n*Σxy - Σx*Σy` 时，epoch 时间戳（~1.8e9）
+    /// 让分母成为"两个 ~2e20 的数相减要留下 ~5e3"，对消之后剩下的只有舍入噪声，
+    /// 而这根斜率的符号就是 T9 熔断档位的输入。
     private static func slope(
         samples: [DegradationSample],
         value: (DegradationSample) -> Double?
@@ -334,12 +338,16 @@ public final class DegradationTracker {
         }
         guard points.count >= 2 else { return nil }
         let count = Double(points.count)
-        let sumX = points.reduce(0) { $0 + $1.x }
-        let sumY = points.reduce(0) { $0 + $1.y }
-        let sumXY = points.reduce(0) { $0 + $1.x * $1.y }
-        let sumXX = points.reduce(0) { $0 + $1.x * $1.x }
-        let denominator = count * sumXX - sumX * sumX
-        guard abs(denominator) > Double.ulpOfOne else { return nil }
-        return (count * sumXY - sumX * sumY) / denominator
+        let meanX = points.reduce(0) { $0 + $1.x } / count
+        let meanY = points.reduce(0) { $0 + $1.y } / count
+        var centredXX = 0.0
+        var centredXY = 0.0
+        for point in points {
+            let deltaX = point.x - meanX
+            centredXX += deltaX * deltaX
+            centredXY += deltaX * (point.y - meanY)
+        }
+        guard centredXX > 0 else { return nil }
+        return centredXY / centredXX
     }
 }
