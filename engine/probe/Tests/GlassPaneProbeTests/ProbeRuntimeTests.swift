@@ -131,19 +131,156 @@ final class ProbeRuntimeTests: XCTestCase {
     }
 
     func testMirrorWalkBoundedDepthAndBudget() {
-        struct Nest { var depth: Int; var child: AnyObject? }
-        final class Deep: NSObject { var value = 0 }
-        var root = Deep()
-        var current = root
-        for _ in 0..<20 {
-            let child = Deep()
-            current.value = 1 // keeps each level non-empty
-            current = child
+        // P6 §Z2 fixes the bounds (深度 ≤8、节点 ≤4000) and the export site is
+        // supposed to carry exactly them. Pinned as documented values first: a
+        // bound that nobody pins can be widened out of the wire contract while
+        // every test below keeps passing against the new number.
+        XCTAssertEqual(ProbeRuntime.mirrorMaxDepth, 8, "P6 §Z2: Mirror 深度 ≤8")
+        XCTAssertEqual(ProbeRuntime.mirrorMaxNodes, 4000, "P6 §Z2: Mirror 节点 ≤4000")
+
+        // A *linked* chain (each node names its successor), three links longer
+        // than the depth limit, driven through the production export path so the
+        // bounds the export site passes are the ones under test. Held strongly:
+        // the probe registers roots weakly, and a fixture the app has already
+        // released is a fixture that exports nothing.
+        let chain = mirrorChain(levels: ProbeRuntime.mirrorMaxDepth + 3)
+        let wide = mirrorTree(depth: 7)
+        GP.registerMirrorRoot(label: "chain", object: chain)
+        // A tree with room to spare past the node budget (see `mirrorTree`):
+        // 43689 measurable children against a budget of 4000. The walk runs out
+        // of budget inside the graph it is allowed to reach, so this root proves
+        // the *node* bound, and its seventh level is leaves — the depth limit is
+        // never the reason anything stopped here.
+        GP.registerMirrorRoot(label: "wide", object: wide)
+
+        let out = withExtendedLifetime([chain, wide]) { GP.runtime.exportMirrorState() }
+        let isMarker = { (key: String) in
+            key.hasSuffix(".\(MirrorWalk.depthMarkerKey)") || key.hasSuffix(".\(MirrorWalk.budgetMarkerKey)")
         }
-        var out: [String: String] = [:]
-        MirrorWalk.flatten(root, label: "n", maxDepth: 8, maxNodes: 4000, into: &out)
-        XCTAssertFalse(out.isEmpty)
-        XCTAssertTrue(out.keys.allSatisfy { $0.hasPrefix("n.") })
+        let markers = out.keys.filter(isMarker)
+        let measured = Set(out.keys.filter { !isMarker($0) })
+
+        // Depth: the walk stops with the limit still un-reached — the chain's
+        // tail is never measured, so a daemon must not read its absence as
+        // "the object ends here".
+        XCTAssertEqual(measured.filter { $0.hasPrefix("chain.") }.count,
+                       2 * ProbeRuntime.mirrorMaxDepth,
+                       "a chain deeper than the limit must contribute exactly maxDepth levels of two-key nodes")
+        XCTAssertFalse(measured.contains { $0.hasPrefix("chain.") && $0.hasSuffix(".tail") },
+                       "the chain's tail sits past the depth limit; measuring it means the bound moved")
+        let deepestChainLevel = measured.filter { $0.hasPrefix("chain.") }
+            .map { $0.split(separator: ".").count }.max() ?? 0
+        XCTAssertEqual(deepestChainLevel, ProbeRuntime.mirrorMaxDepth + 1,
+                       "the deepest key is the root label plus maxDepth hops, never deeper")
+        XCTAssertEqual(markers.filter { $0.hasPrefix("chain.") }, ["chain.\(MirrorWalk.depthMarkerKey)"],
+                       "the depth cut has to be reported, or truncated state reads as complete state")
+        XCTAssertFalse(markers.contains { $0.hasPrefix("chain.") && $0.contains(MirrorWalk.budgetMarkerKey) },
+                       "16 keys is nowhere near the node budget")
+
+        // Budget: the walk stops mid-graph and says where.
+        XCTAssertEqual(measured.filter { $0.hasPrefix("wide.") }.count, ProbeRuntime.mirrorMaxNodes,
+                       "the node budget is the walk's own ceiling: it must be exactly exhausted, not approximate")
+        XCTAssertEqual(markers.filter { $0.hasPrefix("wide.") }, ["wide.\(MirrorWalk.budgetMarkerKey)"],
+                       "a budget-exhausted export must name itself, or 'no more keys' reads as 'no more state'")
+        XCTAssertFalse(markers.contains { $0.hasPrefix("wide.") && $0.contains(MirrorWalk.depthMarkerKey) },
+                       "this fixture is shallower than maxDepth; only the budget may fire")
+
+        // Keys stay inside their root's namespace (multi-root export shares one
+        // table; a key escaping it would attribute one object's state to another).
+        XCTAssertTrue(measured.allSatisfy { $0.hasPrefix("chain.") || $0.hasPrefix("wide.") },
+                      "stray keys: \(measured.filter { !$0.hasPrefix("chain.") && !$0.hasPrefix("wide.") })")
+        XCTAssertTrue(out.values.allSatisfy { $0.count <= ProbeRuntime.stateValueCharCap })
+    }
+
+    func testMirrorExportCapsContainerValuesTheWayItCapsLeaves() throws {
+        // The finding: the leaf arm truncated at 1 KiB and the non-leaf arm did
+        // not, so one host object with a megabyte `description` produced a state
+        // frame bigger than the daemon's `FrameCodec.maxFrameBytes` — and the
+        // daemon drops the *whole* state channel, not the one oversized key.
+        let loud = MirrorLoudRoot()
+        GP.registerMirrorRoot(label: "loud", object: loud)
+        let out = withExtendedLifetime(loud) { GP.runtime.exportMirrorState() }
+
+        XCTAssertEqual(out["loud.big"]?.count, ProbeRuntime.stateValueCharCap,
+                       "the container arm is the one that used to be stored verbatim")
+        XCTAssertEqual(out["loud.speech"]?.count, ProbeRuntime.stateValueCharCap,
+                       "and the leaf arm stays capped with it")
+        for (key, value) in out {
+            XCTAssertFalse(value.count > ProbeRuntime.stateValueCharCap, "\(key) escaped the cap")
+        }
+
+        // Same 4.5 MB description on both arms: capped, the export fits in one
+        // frame; uncapped (the bug), it is past the wire's limit.
+        let payload = try JSONSerialization.data(withJSONObject: out, options: [.sortedKeys])
+        XCTAssertLessThan(payload.count, ProbeRuntime.maxInboundLineBytes,
+                          "an export that cannot fit a frame is an export the daemon throws away")
+    }
+
+    func testCaptureResultHookTravelsThroughTheRuntimeNotAGlobal() throws {
+        // Z4.5's host hook is assigned by the app and read by the probe's
+        // connection thread. What this can prove without a running app is that
+        // the storage is the runtime's locked field: a value set on another
+        // thread is what the capture path fires, and clearing it takes effect.
+        // The race itself is only visible under TSan inside a host process.
+        final class Seen {
+            var results: [(path: String?, error: String?)] = []
+        }
+        let seen = Seen()
+        let host = DispatchQueue(label: "glasspane.test.host-thread")
+        host.sync { GP.onMetalCaptureResult = { path, error in seen.results.append((path, error)) } }
+        XCTAssertNotNil(GP.onMetalCaptureResult, "the getter answers with what the host set")
+
+        GP.runtime.handleCommand(["t": "capture_end"]) // no capture in progress
+        XCTAssertEqual(seen.results.count, 1, "the hook fires once per capture frame")
+        let frame = try XCTUnwrap(
+            GP.runtime.debugOfflineSnapshot().last { ($0["t"] as? String) == "capture" },
+            "the capture frame and the hook are the same event, seen from two sides"
+        )
+        XCTAssertEqual(seen.results.first?.error, frame["error"] as? String,
+                       "the host must see exactly what the daemon is told")
+
+        host.sync { GP.onMetalCaptureResult = nil }
+        GP.runtime.handleCommand(["t": "capture_end"])
+        XCTAssertEqual(seen.results.count, 1, "a hook the host cleared must not keep firing")
+
+        // Storage proof: the hook belongs to the runtime that reads it, so a
+        // runtime reset takes it with everything else the probe registered. A
+        // loose `GP` global survived resets and kept firing into whichever
+        // runtime came next.
+        host.sync { GP.onMetalCaptureResult = { _, _ in seen.results.append((nil, nil)) } }
+        GP.runtime.resetForTests()
+        XCTAssertNil(GP.onMetalCaptureResult, "the hook is runtime state, not a process global")
+    }
+
+    func testSharedNestedKeyPathIsMarkedAmbiguousInsteadOfGuessed() throws {
+        // KVO delivers a nested keyPath from the *tail* object, which belongs to
+        // neither registration. Picking the first match — the old fallback —
+        // labels one model's change with the other model's name.
+        let first = ProbeKVCModel()
+        let second = ProbeKVCModel()
+        first.child = ProbeKVCChild()
+        second.child = ProbeKVCChild()
+        GP.registerKVCObject(first, label: "first", keys: ["child.title", "count"])
+        GP.registerKVCObject(second, label: "second", keys: ["child.title", "count"])
+
+        first.child?.title = "moved"
+        let frames = stateFrames()
+        XCTAssertEqual(frames.count, 1, "one change is one event; the tie is about attribution, not volume")
+        let key = try XCTUnwrap(frames.first?["key"] as? String)
+        XCTAssertTrue(key.hasSuffix(".child.title"), "the keyPath survives the tie: \(key)")
+        XCTAssertEqual(key, "\(KVCObserver.ambiguousLabel).child.title",
+                       "two registrations claim this tail object, so neither may be reported as the owner")
+        XCTAssertFalse(key.hasPrefix("first."), "mis-attributed to the model that did not change: \(key)")
+        XCTAssertFalse(key.hasPrefix("second."), "mis-attributed to the model that did not change: \(key)")
+        XCTAssertEqual(frames.first?["after"] as? String, "moved", "the value is still the value")
+
+        // The same tie broken by identity, not by guesswork: a plain keyPath
+        // arrives from the object that changed, so it keeps its own label even
+        // while another model observes the same key.
+        second.count = 7
+        let plain = try XCTUnwrap(stateFrames().last?["key"] as? String)
+        XCTAssertEqual(plain, "second.count",
+                       "the observed object is the owner here — the other model must not steal it")
     }
 
     // MARK: Host-safety and delivery (connect options, backpressure, reconnect)
@@ -604,6 +741,67 @@ private final class ProbeKVCModel: NSObject {
 private final class ProbeKVCLimitModel: NSObject {
     var swiftOnly = 0
     @objc dynamic var observable = 0
+}
+
+// MARK: Z2 Mirror fixtures
+//
+// Shapes the walk has to earn its bounds on: a *linked* chain (the old fixture
+// had no child property at all, so there was no depth to truncate), a tree with
+// more children than the node budget, and an object whose `description` alone is
+// bigger than one wire frame. Stored `AnyObject` children rather than optionals:
+// an optional hop is a different graph shape from the one the limits guard.
+
+private final class MirrorChainEnd: NSObject {
+    var tail = 0
+}
+
+private final class MirrorChainNode: NSObject {
+    var index = 0
+    var child: AnyObject
+
+    init(_ child: AnyObject) { self.child = child }
+}
+
+private func mirrorChain(levels: Int) -> AnyObject {
+    var node: AnyObject = MirrorChainEnd()
+    for _ in 0..<levels { node = MirrorChainNode(node) }
+    return node
+}
+
+private final class MirrorBranchNode: NSObject {
+    var index = 0
+    var left: AnyObject
+    var center: AnyObject
+    var right: AnyObject
+    var far: AnyObject
+
+    init(_ left: AnyObject, _ center: AnyObject, _ right: AnyObject, _ far: AnyObject) {
+        self.left = left
+        self.center = center
+        self.right = right
+        self.far = far
+    }
+}
+
+/// `depth` levels of four-way branching: five measurable children per branch and
+/// a leaf tip at the bottom, so the graph offers 5*(1+4+…+4^6) + 4^7 = 43689 keys
+/// — ten times the documented budget of 4000, and all of them inside the depth
+/// the walk is allowed to reach. Only the node budget can stop this walk, and the
+/// tip level (seventh) has nothing left to recurse into, so the depth limit stays
+/// clean of it: exactly one marker, `∅truncated-budget`, is expected.
+private func mirrorTree(depth: Int) -> AnyObject {
+    guard depth > 0 else { return MirrorChainEnd() }
+    let child = mirrorTree(depth: depth - 1)
+    return MirrorBranchNode(child, child, child, child)
+}
+
+private final class MirrorLoudValue: NSObject {
+    override var description: String { String(repeating: "x", count: 4_500_000) }
+}
+
+private final class MirrorLoudRoot: NSObject {
+    var big = MirrorLoudValue() // the non-leaf arm
+    var speech = String(repeating: "y", count: 4_500_000) // the leaf arm
 }
 
 /// Reads the probe's NDJSON off a socket, keeping a torn tail buffered exactly

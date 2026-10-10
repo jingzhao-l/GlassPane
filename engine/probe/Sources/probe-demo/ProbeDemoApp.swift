@@ -295,7 +295,7 @@ enum CaptureScenarioRunner {
                     results[label] = info
                     let snapshot = results
                     resultsLock.unlock()
-                    writeManifest(manifestPath, snapshot)
+                    publish(manifestPath, snapshot)
                     next()
                 }
             }
@@ -312,7 +312,9 @@ enum CaptureScenarioRunner {
                     runScenario(label: "C-invalid-dest",
                                 dest: URL(fileURLWithPath: "/nonexistent-dir-xyz/gp-capture-C.gputrace"),
                                 holdMs: 400, animate: false) {
-                        exit(0)  // scenario mode: the manifest is the only output
+                        // 场景模式唯一的产物是 manifest：读不回来说明这次采集
+                        // 根本没落地，不能以 0 收场。
+                        finish(manifestPath: manifestPath)
                     }
                 }
             }
@@ -322,15 +324,43 @@ enum CaptureScenarioRunner {
     private static let resultsLock = NSLock()
     private static var results: [String: Any] = [:]
 
-    private static func writeManifest(_ path: String, _ results: [String: Any]) {
+    /// 场景模式唯一的产物就是 manifest，写失败即本次采集失败：给一行原因、以非 0
+    /// 退出。原来两处 `try?` 把"manifest 根本没落地"和"三个场景都过了"糊成同一种
+    /// 结局，而冒烟脚本读的是退出码。
+    private static func publish(_ path: String, _ snapshot: [String: Any]) {
+        do {
+            try writeManifest(path, snapshot)
+        } catch {
+            fail("manifest \(path) not written: \(error.localizedDescription)")
+        }
+    }
+
+    private static func writeManifest(_ path: String, _ results: [String: Any]) throws {
         let payload: [String: Any] = [
             "channel": "z4.5-baseline",
             "sdk": "gp-probe/0.1.0",
             "scenarios": results,
         ]
-        guard let data = try? JSONSerialization.data(withJSONObject: payload,
-                                                     options: [.prettyPrinted, .sortedKeys])
-        else { return }
-        try? data.write(to: URL(fileURLWithPath: path))
+        let data = try JSONSerialization.data(withJSONObject: payload,
+                                              options: [.prettyPrinted, .sortedKeys])
+        // Atomic: a CI script that reads mid-write must never see a half manifest
+        // it can parse.
+        try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+    }
+
+    /// The run's last word is the manifest it can hand back: re-read it, and a
+    /// missing or unparseable file is a failure, not an `exit(0)`.
+    private static func finish(manifestPath: String) -> Never {
+        let url = URL(fileURLWithPath: manifestPath)
+        guard let data = try? Data(contentsOf: url),
+              (try? JSONSerialization.jsonObject(with: data)) != nil else {
+            fail("manifest \(manifestPath) is missing or unreadable after the last scenario")
+        }
+        exit(0)
+    }
+
+    private static func fail(_ reason: String) -> Never {
+        FileHandle.standardError.write(Data("probe-demo capture scenarios failed: \(reason)\n".utf8))
+        exit(1)
     }
 }

@@ -131,7 +131,12 @@ public enum GP {
 
     /// Z4.5 capture 结果监听（进程内自动化用：帧照常发往 daemon，钩子让
     /// spike/冒烟能在 app 侧记录 path/error，无需第二个 daemon 方法面）。
-    public static var onMetalCaptureResult: ((String?, String?) -> Void)?
+    /// 存取都走 runtime 的锁：宿主在任意线程赋值，探针的连接线程读它，
+    /// 裸 `static var` 就是被测进程里的 data race。
+    public static var onMetalCaptureResult: ((String?, String?) -> Void)? {
+        get { runtime.captureResultHook }
+        set { runtime.captureResultHook = newValue }
+    }
 
     /// Z4.5: programmatic Metal capture via MTLCaptureManager.
     public static func beginMetalCapture(destinationURL: URL? = nil) {
@@ -204,6 +209,18 @@ final class ProbeRuntime: @unchecked Sendable {
     /// a host that registers bad keys in a loop must not be able to grow the
     /// probe's memory. `rejectedKeyCount` keeps the whole total either way.
     static let rejectionNoteLimit = 16
+    /// Z2's documented bounds (P6 §Z2: 深度 ≤8、节点 ≤4000). Named, not inline
+    /// literals at the call site: a bound nobody can reference is a bound nobody
+    /// can prove is still there, and these two numbers are what keep the worst
+    /// case of a host object graph inside one frame.
+    static let mirrorMaxDepth = 8
+    static let mirrorMaxNodes = 4000
+    /// Character cap on every value the probe reports as state: the `state`
+    /// frame's before/after (§2.2: "≤1 KiB 截断") and each Mirror export value,
+    /// leaf *or* container. One cap because one budget — a single oversized
+    /// value is what pushes a frame past the daemon's `FrameCodec.maxFrameBytes`,
+    /// and the daemon drops the whole state channel for the pid, not just the key.
+    static let stateValueCharCap = 1024
 
     /// Backoff after a failed attempt inside one cycle (P6 §2.1: 1s, 2s, 3s).
     static func attemptBackoffMs(afterFailedAttempt attempt: Int) -> Int {
@@ -745,7 +762,9 @@ final class ProbeRuntime: @unchecked Sendable {
         lock.unlock()
         var exported: [String: String] = [:]
         for root in roots {
-            MirrorWalk.flatten(root.object, label: root.label, maxDepth: 8, maxNodes: 4000, into: &exported)
+            MirrorWalk.flatten(root.object, label: root.label,
+                              maxDepth: ProbeRuntime.mirrorMaxDepth,
+                              maxNodes: ProbeRuntime.mirrorMaxNodes, into: &exported)
         }
         for checkpoint in checkpointGets {
             for (key, value) in checkpoint.get() {
@@ -778,9 +797,10 @@ final class ProbeRuntime: @unchecked Sendable {
     }
 
     func emitState(key: String, before: String, after: String, source: String) {
+        let cap = ProbeRuntime.stateValueCharCap
         writeFrame([
             "t": "state", "key": key,
-            "before": String(before.prefix(1024)), "after": String(after.prefix(1024)),
+            "before": String(before.prefix(cap)), "after": String(after.prefix(cap)),
             "source": source, "ts": Date().timeIntervalSince1970
         ])
     }
@@ -983,6 +1003,8 @@ final class ProbeRuntime: @unchecked Sendable {
         checkpoints = []
         retainedCheckpoints = []
         lastMirrorExport = [:]
+        metalCaptureURL = nil
+        captureResultHookStorage = nil
         lock.unlock()
         // Detach rather than orphan: dropping the reference leaves the KVO
         // registrations alive on live objects, and the orphan keeps emitting
@@ -1001,8 +1023,24 @@ final class ProbeRuntime: @unchecked Sendable {
     /// Active capture file path, reported back on capture_end (nil = none).
     private var metalCaptureURL: URL?
 
+    /// Z4.5 result hook, *stored* here rather than in a loose `GP` global: the
+    /// host assigns it (main thread, or wherever it sets up instrumentation) and
+    /// the probe's connection thread reads it to fire the callback, so it crosses
+    /// threads exactly like `fd`, `offlineBuffer` and the registration tables —
+    /// and it is guarded by the same `lock`. An unsynchronised `static var` here
+    /// is a data race inside the app under test, on a path the daemon drives.
+    var captureResultHook: ((String?, String?) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return captureResultHookStorage }
+        set { lock.lock(); captureResultHookStorage = newValue; lock.unlock() }
+    }
+    private var captureResultHookStorage: ((String?, String?) -> Void)?
+
     private func emitCapture(path: String?, error: String?) {
-        let hook = GP.onMetalCaptureResult
+        // Snapshot under the lock, call outside it: the hook is the host's code,
+        // and it may re-enter the SDK (`GP.recordHandler`, a registration) — a
+        // callback made while holding `lock` would deadlock the host against
+        // itself.
+        let hook = captureResultHook
         var frame: [String: Any] = ["t": "capture"]
         frame["path"] = path ?? NSNull()
         frame["error"] = error ?? NSNull()
@@ -1302,15 +1340,37 @@ final class KVCObserver: NSObject {
         // the path, which is not the one the app registered — falling back to
         // "kvc" there would rename the whole evidence domain (and let two models
         // collide inside it), so the registered owner of that keyPath is asked
-        // for its label instead.
-        let label = targets.first { $0.object === object }?.label
-            ?? targets.first { $0.keys.contains(keyPath) }?.label
-            ?? "kvc"
+        // for its label instead. Owner means object *and* keyPath: a plain
+        // keyPath must have arrived from the registered object itself (another
+        // model's `count` is not this model's `count`), and only a nested one may
+        // be claimed through a tail object this probe cannot identify.
+        let owners = targets.filter { $0.keys.contains(keyPath) && ($0.object === object || keyPath.contains(".")) }
         emitLock.unlock()
+        let label = Self.label(for: owners)
         let before = change?[.oldKey].map { stringify($0) } ?? "∅"
         let after = change?[.newKey].map { stringify($0) } ?? "∅"
         emit("\(label).\(keyPath)", before, after)
     }
+
+    /// The label an observation may claim: zero owners is an unattributed
+    /// channel, one owner is that registration, and more than one is a tie the
+    /// probe must not break by guessing. Two models registering the same nested
+    /// keyPath both claim the tail object's notification, and picking the first
+    /// would ship one model's change under the other's name — evidence that
+    /// points at the wrong object is worse than evidence that says it cannot
+    /// tell.
+    private static func label(for owners: [Target]) -> String {
+        switch owners.count {
+        case 0: return unattributedLabel
+        case 1: return owners[0].label
+        default: return ambiguousLabel
+        }
+    }
+
+    /// Nobody registered this (object, keyPath) pair — the pre-existing catch-all.
+    static let unattributedLabel = "kvc"
+    /// More than one registration claims the notification: the frame says so.
+    static let ambiguousLabel = "∅ambiguous"
 
     private func stringify(_ value: Any) -> String {
         if let number = value as? NSNumber { return number.stringValue }
@@ -1321,6 +1381,23 @@ final class KVCObserver: NSObject {
 // MARK: - Mirror walk (Z2)
 
 enum MirrorWalk {
+    /// Character cap on *every* exported value, leaf or container — the same
+    /// `ProbeRuntime.stateValueCharCap` the `state` frame applies, so neither
+    /// channel can be the one that overflows a frame. An uncapped container
+    /// value is not a cosmetic problem: one host object whose `description`
+    /// runs to megabytes makes a single op_end frame bigger than the daemon's
+    /// `FrameCodec.maxFrameBytes`, and the daemon drops the whole state channel
+    /// for that pid, not the one oversized key.
+    private static var valueCharCap: Int { ProbeRuntime.stateValueCharCap }
+
+    /// Sentinel keys a walk writes when a bound actually cut it short (one per
+    /// root and reason, appended to the root label). Without them a truncated
+    /// export is indistinguishable from an object that simply has no more state
+    /// — the daemon would report "nothing deeper" for state that was never
+    /// measured.
+    static let depthMarkerKey = "∅truncated-depth"
+    static let budgetMarkerKey = "∅truncated-budget"
+
     static func flatten(
         _ root: AnyObject,
         label: String,
@@ -1328,8 +1405,24 @@ enum MirrorWalk {
         maxNodes: Int,
         into out: inout [String: String]
     ) {
-        var budget = maxNodes
-        flatten(Mirror(reflecting: root), path: label, depth: 0, maxDepth: maxDepth, budget: &budget, into: &out)
+        var walk = Walk(budget: maxNodes)
+        flatten(Mirror(reflecting: root), path: label, depth: 0, maxDepth: maxDepth, walk: &walk, into: &out)
+        if walk.depthCuts > 0 {
+            out["\(label).\(Self.depthMarkerKey)"] =
+                "not measured: \(walk.depthCuts) nested value(s) sit below the depth limit \(maxDepth)"
+        }
+        if let exhaustedAt = walk.budgetCutPath {
+            out["\(label).\(Self.budgetMarkerKey)"] =
+                "not measured: node budget \(maxNodes) exhausted at \(exhaustedAt); the values below it were never visited"
+        }
+    }
+
+    /// What one walk gave up on, so the truncation can be reported once per root
+    /// instead of as a sentinel under every abandoned subtree.
+    private struct Walk {
+        var budget: Int
+        var depthCuts = 0
+        var budgetCutPath: String?
     }
 
     private static func flatten(
@@ -1337,26 +1430,39 @@ enum MirrorWalk {
         path: String,
         depth: Int,
         maxDepth: Int,
-        budget: inout Int,
+        walk: inout Walk,
         into out: inout [String: String]
     ) {
-        guard depth < maxDepth, budget > 0 else { return }
+        guard depth < maxDepth else { return }
+        guard walk.budget > 0 else {
+            if walk.budgetCutPath == nil { walk.budgetCutPath = path }
+            return
+        }
         for (maybeLabel, value) in mirror.children {
             // Anonymous children (ObjC `__p` pointers, unlabeled tuple
             // elements) get no stable key — skip rather than emit
             // `Optional("...")` noise into a wire-format key.
             guard let label = maybeLabel, !label.hasPrefix("__") else { continue }
-            guard budget > 0 else { return }
-            budget -= 1
+            guard walk.budget > 0 else {
+                if walk.budgetCutPath == nil { walk.budgetCutPath = path }
+                return
+            }
+            walk.budget -= 1
             let key = "\(path).\(label)"
             let display = String(describing: value)
-            // Leaf scalars are recorded verbatim; containers/objects recurse.
+            let truncated = String(display.prefix(valueCharCap))
+            // Leaf scalars are recorded verbatim (capped); containers/objects recurse.
             switch value {
             case let nested as AnyObject where isReflectionWorthwhile(nested):
-                out[key] = display
-                flatten(Mirror(reflecting: nested), path: key, depth: depth + 1, maxDepth: maxDepth, budget: &budget, into: &out)
+                out[key] = truncated
+                if depth + 1 < maxDepth {
+                    flatten(Mirror(reflecting: nested), path: key, depth: depth + 1, maxDepth: maxDepth,
+                            walk: &walk, into: &out)
+                } else {
+                    walk.depthCuts += 1
+                }
             default:
-                out[key] = String(display.prefix(1024))
+                out[key] = truncated
             }
         }
     }
