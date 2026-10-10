@@ -565,6 +565,82 @@ final class UpdatePanelTests: XCTestCase {
         XCTAssertNil(UpdatePanel.autoUpdateOn(nil), "什么都没读到时不假装它是开着的")
     }
 
+    /// 反向变异：**连一份状态都没读到时照样放开开关**（发现 2 的那处），于是滑块
+    /// 画在"关"那一格、还能按——用户正对着一个从没测过的位置做开关动作。
+    /// 这一页另一条老规矩不许破：不可用是**带着理由**的禁用，理由还得给出下一步。
+    func testUnreadStateDisablesTheAutoSwitchAndSaysWhy() {
+        let buttons = UpdatePanel.buttons(for: .reading(nil))
+        XCTAssertFalse(buttons.toggleEnabled, "读不到位置就不许给一个能按的开关")
+        XCTAssertNotNil(buttons.toggleReason, "灰掉而不解释，用户读到的是界面坏了")
+        let reason = buttons.toggleReason!
+        XCTAssertFalse(reason.trimmingCharacters(in: .whitespaces).isEmpty)
+        XCTAssertFalse(reason.contains("关着"), "读不到不能被写成「关着」：\(reason)")
+        XCTAssertTrue(reason.contains("读不到") || reason.contains("还没读到"),
+                      "要先承认没测到：\(reason)")
+        XCTAssertTrue(reason.contains("立即检查"), "禁用理由要给出做得动的那一步：\(reason)")
+        // 这一支的「立即检查」仍然可用——把唯一自救的路一起关掉就成了死循环。
+        XCTAssertTrue(buttons.checkEnabled)
+        // 反过来：真的读到 disabled: true / false 时开关照旧能按。
+        var off = UpdatePanel.Snapshot(reportedStatus: .disabled, storedStatus: .disabled)
+        off.disabled = true
+        XCTAssertTrue(UpdatePanel.buttons(for: .reading(.disabled, staged: false)).toggleEnabled)
+        XCTAssertNil(UpdatePanel.buttons(for: .reading(.disabled, staged: false)).toggleReason)
+        XCTAssertFalse(UpdatePanel.autoUpdateOn(off)!)
+    }
+
+    /// 反向变异：**`autoUpdateOn == nil` 时显示值折算成 `false`**（发现 2 的视图那一半，
+    /// 由 ReviewPanelTests 的 Shape 条钉住文案）；这里钉判定层：nil 就是 nil。
+    func testNilSnapshotKeepsTheSwitchPositionUnknown() {
+        XCTAssertNil(UpdatePanel.autoUpdateOn(nil), "一份状态都没读到时不许猜一个位置")
+        XCTAssertNotNil(UpdatePanel.autoUpdateOn(UpdatePanel.Snapshot()),
+                        "读到了那一格就得给位置，不能连读到的也一起说成不知道")
+    }
+
+    // MARK: - 读不到 ≠ 没有（发现 3）
+
+    /// 反向变异：**`snapshot == nil` 时印「没有」/「没有已暂存的版本」**——一次读失败
+    /// 被写成"这台机器上没有待装版本"，而同一张卡上方两行已经诚实写着读不到。
+    func testUnreadPendingVersionIsNotReportedAsNothingPending() {
+        XCTAssertEqual(UpdatePanel.stagedVersionText(nil), "读不到")
+        XCTAssertFalse(UpdatePanel.stagedVersionText(nil).contains("没有"),
+                       "读不到与没有是两件事：\(UpdatePanel.stagedVersionText(nil))")
+        XCTAssertTrue(UpdatePanel.stagedDigestText(nil).contains("读不到"),
+                      UpdatePanel.stagedDigestText(nil))
+
+        let read = UpdatePanel.Snapshot(reportedStatus: .upToDate, storedStatus: .upToDate)
+        XCTAssertEqual(UpdatePanel.stagedVersionText(read), "没有", "读到了、确实没有，才说没有")
+        XCTAssertEqual(UpdatePanel.stagedDigestText(read), "没有已暂存的版本")
+
+        var staged = read
+        staged.stagedVersion = "1.6.3"
+        XCTAssertEqual(UpdatePanel.stagedVersionText(staged), "1.6.3")
+    }
+
+    /// 反向变异：**禁用理由把人指向一个这台机器上不存在的 `updater` 命令**（发现 10
+    /// 的第一项）：那是这一屏唯一的下一步，指错就等于没有下一步。
+    func testConsentGateNextStepNamesTheProgramThisPageActuallyShows() {
+        let path = "/Users/x/.glasspane/runtime/1.6.0/updater/cli.js"
+        let text = UpdatePanel.consentGateNextStepText(updaterPath: path)
+        XCTAssertTrue(text.contains(path), "要点名这一页写出的那一份程序：\(text)")
+        XCTAssertFalse(text.contains("`updater status`"),
+                       "这台机器上没有叫 updater 的可执行文件：\(text)")
+        XCTAssertFalse(text.contains("<"), "不许留占位符：\(text)")
+
+        let unknown = UpdatePanel.consentGateNextStepText(updaterPath: nil)
+        XCTAssertFalse(unknown.contains(path))
+        XCTAssertFalse(unknown.contains("updater status"), unknown)
+        XCTAssertFalse(unknown.trimmingCharacters(in: .whitespaces).isEmpty, "没认出路径也要给一句话")
+
+        let buttons = UpdatePanel.buttons(for: .reading(
+            .needsConsent, staged: false, current: "1.6.2", stagedVersion: "1.6.3",
+            code: "some-future-code", updaterPath: path
+        ))
+        XCTAssertFalse(buttons.applyEnabled)
+        XCTAssertTrue(buttons.applyReason?.contains(path) == true,
+                      "理由里要看得见那一份程序：\(buttons.applyReason ?? "")")
+        XCTAssertTrue(buttons.applyReason?.contains("some-future-code") == true)
+    }
+
     /// 面板只说这五条子命令：它不重启后台服务，也不自己实现下载或换版。
     /// 反向变异：**面板加一条 `kickstart`/`restart` 之类的第六个子命令**。
     func testPanelOnlySpeaksTheDocumentedSubcommands() {

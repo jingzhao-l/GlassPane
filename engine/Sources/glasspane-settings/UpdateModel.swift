@@ -126,6 +126,7 @@ final class UpdateModel: ObservableObject {
             code: snapshot?.code ?? snapshot?.lastErrorCode,
             isRunning: inFlight,
             pointerReady: pointer.isReady,
+            updaterPath: pointer.cliPath,
             now: now
         )
     }

@@ -87,6 +87,9 @@ struct EvidenceTabView: View {
     }
 
     private var summaryLine: String {
+        // 读不出条数的时候不许印 0：那一句就在"档案读不了"旁边，两个零会被读成
+        // "这里确实没有东西"。
+        if case .failed = model.evidenceState { return "条数未测得" }
         if !model.unreadableFiles.isEmpty {
             return "\(model.summaries.count) 条 · \(model.unreadableFiles.count) 个文件读不开"
         }
@@ -110,23 +113,25 @@ struct EvidenceTabView: View {
                 actionTitle: "重试",
                 action: { model.reloadEvidence() }
             )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .accessibilityIdentifier("gp-evidence-unreadable")
+        case .empty:
+            EmptyStateView(
+                systemImage: "tray",
+                title: "还没有证据档案",
+                message: model.archiveExists
+                    ? "档案目录读过了，里面一条档案也没有。每次操作确认后都会在这里留下一条可回放的档案。目录：\(model.evidenceDirectoryPath)"
+                    : "档案目录还没出现。每次操作确认后都会在这里留下一条可回放的档案。目录应在：\(model.evidenceDirectoryPath)",
+                actionTitle: "重新检查",
+                action: { model.reloadEvidence() }
+            )
         case .loaded:
-            if !model.archiveExists {
-                EmptyStateView(
-                    systemImage: "tray",
-                    title: "还没有证据档案",
-                    message: "每次操作确认后都会在这里留下一条可回放的档案。档案目录：\(model.evidenceDirectoryPath)",
-                    actionTitle: "重新检查",
-                    action: { model.reloadEvidence() }
-                )
-            } else if model.filteredSummaries.isEmpty {
+            if model.filteredSummaries.isEmpty {
                 EmptyStateView(
                     systemImage: "magnifyingglass",
                     title: "没有符合条件的记录",
-                    message: model.summaries.isEmpty
-                        ? "档案目录是空的。"
-                        : "共 \(model.summaries.count) 条记录，换一个筛选或搜索词试试。",
-                    actionTitle: model.summaries.isEmpty ? nil : "清除筛选",
+                    message: "共 \(model.summaries.count) 条记录，换一个筛选或搜索词试试。",
+                    actionTitle: "清除筛选",
                     action: { self.clearFilters() }
                 )
             } else {
@@ -158,11 +163,14 @@ struct EvidenceTabView: View {
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .automatic) {
             Button {
+                // 「刷新」是这一页唯一的"再测一次"入口，它必须把两个来源都重测：
+                // 从前它只重扫本地目录，顶部那张 daemon 统计卡再也没被碰过。
                 model.reloadEvidence()
+                model.refreshDaemonStats()
             } label: {
                 Label("刷新", systemImage: "arrow.clockwise")
             }
-            .help("重新扫描档案目录")
+            .help("重新扫描档案目录，并再向后台服务要一次统计")
             .accessibilityIdentifier("gp-refresh-evidence")
             .disabled(model.evidenceState == .loading)
 
@@ -189,7 +197,9 @@ struct EvidenceTabView: View {
         if let summary = currentSummary {
             ScrollView {
                 VStack(alignment: .leading, spacing: ConsoleTheme.gap) {
-                    EvidenceDetailView(summary: summary, pack: model.selectedPack)
+                    EvidenceDetailView(summary: summary, pack: model.selectedPack, packLoad: model.packLoad) {
+                        model.reloadSelectedPack()
+                    }
                 }
                 .padding(14)
                 // 与权限页、更新页同一套收口：先给一个可读的行宽上限，再把剩余空间
@@ -289,6 +299,12 @@ struct EvidenceRowView: View {
 struct EvidenceDetailView: View {
     let summary: EvidenceSummary
     let pack: EvidencePack?
+    /// 这条档案的读取结局：`pack == nil` 同时可能是"还在读"与"读不出"，
+    /// 这两件事必须各说各话——对着一个读不出的档案永远转圈，等于宣称
+    /// "再过一会儿就有答案"，而那正是没测过的一种。
+    var packLoad: ConsoleModel.PackLoad = .none
+    /// 失败分支给出的那一步：对同一条档案再读一次。
+    var onRetry: () -> Void = {}
 
     var body: some View {
         header
@@ -323,6 +339,34 @@ struct EvidenceDetailView: View {
                 unmeasuredCard(key: "responsiveness", title: "响应性", systemImage: "gauge.with.dots.needle.50percent", reason: reason)
             }
         } else {
+            packPendingOrFailed
+        }
+    }
+
+    /// 整包还没到手的那一块：在途 / 读不出各有各的说法，读不出必须能重试。
+    @ViewBuilder
+    private var packPendingOrFailed: some View {
+        switch packLoad {
+        case .failed(let reason):
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                    Text(reason)
+                        .font(.callout)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Button("重试") { onRetry() }
+                    .controlSize(.small)
+                    .accessibilityIdentifier("gp-retry-evidence-pack")
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .consoleCard(tint: .orange)
+            .accessibilityIdentifier("gp-evidence-pack-failed")
+        case .none, .loading:
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
                 Text("正在读取这条档案……").font(.callout).foregroundStyle(.secondary)
@@ -330,6 +374,15 @@ struct EvidenceDetailView: View {
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .consoleCard()
+        case .loaded:
+            // `pack` 就是从这儿来的，走到这里说明这一帧的两次读数不一致：
+            // 不猜哪一种对，如实说这条还没读到。
+            Text("这条档案的内容这一帧没读到，点「刷新」重读一次。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .consoleCard()
         }
     }
 

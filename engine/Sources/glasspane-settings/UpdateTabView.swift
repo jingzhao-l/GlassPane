@@ -112,7 +112,7 @@ struct UpdateTabView: View {
             DetailRowView(label: "当前版本", value: model.snapshot?.current ?? "读不到")
             DetailRowView(label: "最新版本", value: model.snapshot?.latest ?? "读不到")
             DetailRowView(label: "上次检查", value: model.lastCheckText)
-            DetailRowView(label: "待装版本", value: model.snapshot?.stagedVersion ?? "没有")
+            DetailRowView(label: "待装版本", value: UpdatePanel.stagedVersionText(model.snapshot))
             digestRow
         }
         .consoleCard(tint: cardTint)
@@ -147,9 +147,12 @@ struct UpdateTabView: View {
                 .help("复制校验和，与发布页上的 SHA256SUMS 核对")
                 .accessibilityIdentifier("gp-copy-update-digest")
             } else {
-                Text("没有已暂存的版本")
+                // 读不到状态 ≠ 没有已暂存的版本：前者这一格写"读不到"，
+                // 后者才写"没有"（与上面当前/最新两行同一口径）。
+                Text(UpdatePanel.stagedDigestText(model.snapshot))
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("gp-update-digest-absent")
             }
             Spacer(minLength: 0)
         }
@@ -255,14 +258,31 @@ struct UpdateTabView: View {
 
                 Spacer()
 
-                Toggle(isOn: autoUpdateBinding) {
-                    Text("自动更新").font(.callout)
+                // 读不到位置时不画开关：滑块停在"关"那一格，就是替这台机器说了一句
+                // 它没说过的话（它可能正每天自动换版）。这一格只能写"读不到"。
+                if let on = model.autoUpdateOn {
+                    // 开关的读值永远来自状态文档：点下去之后由更新器回的那一行决定
+                    // 它是开还是关，面板不自作主张先把滑块挪过去。
+                    Toggle(isOn: Binding(get: { on }, set: { model.setAutoUpdate($0) })) {
+                        Text("自动更新").font(.callout)
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .disabled(!buttons.toggleEnabled)
+                    .help(buttons.toggleReason ?? "每天到点自动检查并安装（跨大版本不算，它永远等你按按钮）")
+                    .accessibilityIdentifier("gp-update-auto")
+                } else {
+                    HStack(spacing: 6) {
+                        Text("自动更新").font(.callout)
+                        ChipView(
+                            text: UpdatePanel.autoSwitchUnknownText,
+                            color: .secondary,
+                            systemImage: "questionmark.circle",
+                            identifier: "gp-update-auto-unknown"
+                        )
+                    }
+                    .accessibilityIdentifier("gp-update-auto-unknown-row")
                 }
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .disabled(!buttons.toggleEnabled)
-                .help(buttons.toggleReason ?? "每天到点自动检查并安装（跨大版本不算，它永远等你按按钮）")
-                .accessibilityIdentifier("gp-update-auto")
             }
             // 不可用的理由必须看得见：只把按钮灰掉，用户读到的是"界面坏了"。
             if !buttons.checkEnabled, let reason = buttons.checkReason {
@@ -295,15 +315,6 @@ struct UpdateTabView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("gp-update-reason-\(key)")
         }
-    }
-
-    /// 开关的读值永远来自状态文档：点下去之后由更新器回的那一行决定
-    /// 它是开还是关，面板不自作主张先把滑块挪过去。
-    private var autoUpdateBinding: Binding<Bool> {
-        Binding(
-            get: { model.autoUpdateOn ?? false },
-            set: { model.setAutoUpdate($0) }
-        )
     }
 
     // MARK: - 这台机器的根证书

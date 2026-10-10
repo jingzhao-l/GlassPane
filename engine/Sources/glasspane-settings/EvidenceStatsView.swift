@@ -5,26 +5,17 @@ import GlassPaneEngine
 ///
 /// 数据源分两类，**来源必须分开标注，绝不混为一谈**：
 ///  - daemon 统计：经 `--evidence-stats` 一次性 CLI 拿到的是整个档案目录的
-///    `{count, totalBytes, listFailure, dir}`（见 main.swift 里 `--evidence-stats`
-///    的实现）。它没有按 level / class / 时间分布的字段，所以那些分布不能从
-///    daemon 造出来，只能标注来源为本地扫描。
+///    `{count, totalBytes, listFailure, dir}`（那一侧由 `ConsoleModel` 发起并解析，
+///    这一张卡只负责如实呈现）。它没有按 level / class / 时间分布的字段，
+///    所以那些分布不能从 daemon 造出来，只能标注来源为本地扫描。
 ///  - 本地扫描：ConsoleModel 已把本地 evidence 目录聚合进 `summaries`；熔断级别、
 ///    诊断分类、按天产量从本地摘要如实聚合，标注"本地扫描"。
 ///
-/// 诚实口径：daemon 不可达 / 超时 → 显示"未测得"，不折算成零；daemon 报了
-/// `listFailure`（档案读不了）→ 同样显示"未测得" + 原因，绝不把两个零当"空档案"。
+/// 诚实口径：还没问过 daemon → 显示"还没实测过"，不写成"不可达"；daemon 不可达 /
+/// 超时 → "未测得"；daemon 报了 `listFailure`（档案读不了）→ "未测得" + 原因，
+/// 绝不把两个零当"空档案"。
 struct EvidenceStatsView: View {
     @EnvironmentObject private var model: ConsoleModel
-
-    /// daemon `--evidence-stats` 的结果。nil = 尚未发起请求。
-    @State private var daemonResult: DaemonStatsResult?
-
-    enum DaemonStatsResult: Equatable {
-        /// 已连上并拿到 JSON，但档案读不了（`listFailure` 非空）或读到实数。
-        case loaded(count: Int?, totalBytes: Int?, listFailure: String?, dir: String?)
-        /// daemon 起不来 / 超时 / 输出不是约定的 JSON 形状。
-        case unreachable
-    }
 
     /// 标题钉在卡片顶部，正文自己滚。
     ///
@@ -49,7 +40,10 @@ struct EvidenceStatsView: View {
         .consoleCard()
         .padding(.horizontal, 10)
         .padding(.bottom, 8)
-        .onAppear(perform: refreshDaemonStats)
+        // 进这一页时问一次；路径到了或换了由模型自己重问（见
+        // `ConsoleModel.adoptDaemonReport`）——从前只有这一句 `.onAppear`，而那次
+        // 触发时 hello 还没落地、程序路径还是 nil，这一栏就永远停在"不可达"。
+        .onAppear { model.refreshDaemonStats() }
     }
 
     // MARK: - daemon 来源
@@ -58,8 +52,11 @@ struct EvidenceStatsView: View {
     private var daemonCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             headerRow(title: "档案目录统计", source: "daemon --evidence-stats", systemImage: "server.rack", tint: .blue)
-            switch daemonResult {
-            case .none:
+            switch model.daemonStats {
+            case .notAsked:
+                unmeasuredLine("还没向后台服务问过：它的程序路径还没实测到。点「刷新」恢复连接后这一栏才会实起来。")
+                retryButton
+            case .asking:
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("正在向后台服务请求统计……")
@@ -68,9 +65,11 @@ struct EvidenceStatsView: View {
                 }
             case .unreachable:
                 unmeasuredLine("后台服务不可达或超时，未从 daemon 测得统计。")
+                retryButton
             case .loaded(let count, let totalBytes, let listFailure, let dir):
                 if let listFailure {
                     unmeasuredLine("后台服务读不了档案：\(listFailure)")
+                    retryButton
                 } else if let count {
                     HStack(alignment: .firstTextBaseline, spacing: 12) {
                         StatValueView(label: "档案条数", value: "\(count)")
@@ -88,9 +87,22 @@ struct EvidenceStatsView: View {
                     }
                 } else {
                     unmeasuredLine("后台服务返回的统计为空（count 未测得）。")
+                    retryButton
                 }
             }
         }
+    }
+
+    /// 每一句"没测得"后面都跟着一个做得动的动作：只报失败而不给重试，
+    /// 用户能做的就只有把这页关掉再开一次。
+    private var retryButton: some View {
+        Button {
+            model.refreshDaemonStats()
+        } label: {
+            Label("重新问一次", systemImage: "arrow.clockwise")
+        }
+        .controlSize(.small)
+        .accessibilityIdentifier("gp-refresh-daemon-stats")
     }
 
     // MARK: - 本地扫描来源（分布）
@@ -99,7 +111,11 @@ struct EvidenceStatsView: View {
     private var localCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             headerRow(title: "分布", source: "本地扫描（按已读摘要聚合）", systemImage: "opticaldisc", tint: .secondary)
-            if !model.archiveExists {
+            if case .failed(let message) = model.evidenceState {
+                // 读不出条数与"这里没有档案"是两件事：把前者印成"目录是空的"，
+                // 这张分布条就替一次失败的读取报了平安。
+                unmeasuredLine("本地扫描没有可聚合的摘要，而这不是空目录：\(message)")
+            } else if !model.archiveExists {
                 unmeasuredLine("本地证据目录不存在，无摘要可聚合。")
             } else if model.summaries.isEmpty {
                 unmeasuredLine("本地证据目录是空的，无分布可统计。")
@@ -216,38 +232,8 @@ struct EvidenceStatsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("gp-daemon-stats-unmeasured")
         }
-    }
-
-    // MARK: - 触发
-
-    private func refreshDaemonStats() {
-        let binary = model.daemonBinaryPath
-        daemonResult = .none
-        Task.detached(priority: .userInitiated) {
-            let run = ConsoleModel.runDaemonCLI(binary: binary, arguments: ["--evidence-stats"])
-            let result: DaemonStatsResult
-            if let run {
-                result = Self.parseDaemonStats(run.output)
-            } else {
-                result = .unreachable
-            }
-            await MainActor.run { self.daemonResult = result }
-        }
-    }
-
-    /// 解析 `--evidence-stats` 的 JSON（字段名以 main.swift 的实现为准，严禁猜）。
-    nonisolated private static func parseDaemonStats(_ text: String) -> DaemonStatsResult {
-        guard let data = text.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return .unreachable
-        }
-        return .loaded(
-            count: object["count"] as? Int,
-            totalBytes: object["totalBytes"] as? Int,
-            listFailure: object["listFailure"] as? String,
-            dir: object["dir"] as? String
-        )
     }
 }
 

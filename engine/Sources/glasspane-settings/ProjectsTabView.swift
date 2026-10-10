@@ -61,13 +61,27 @@ struct ProjectsTabView: View {
     private var restartBanner: some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(.blue)
-            Text("注册表已改动，重启后台服务后它才会用新表。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("注册表已改动，重启后台服务后它才会用新表。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                // 这一按的真实结局：kickstart 没成（比如这台机器的后台服务不是
+                // launchd 托管的）时，横幅留在原处而不是一按就消失——那句手动
+                // 重启的话是唯一还做得动的动作。
+                if let hint = settings.daemonRestartHint {
+                    Text(hint)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("gp-restart-manual-hint")
+                }
+            }
             Spacer()
             Button("重启后台服务") {
+                // 这里不许顺手把 `pruneNeedsRestart` 抹掉：按下不等于重启成功，
+                // 那句话只能在后台服务**重新应门**之后撤（见 ConsoleModel.adoptDaemonReport）。
                 settings.restartDaemon()
-                model.pruneNeedsRestart = false
             }
             .controlSize(.small)
             .accessibilityIdentifier("gp-restart-after-prune")
@@ -280,13 +294,20 @@ struct ProjectsTabView: View {
                 Spacer()
                 Button("取消") { model.isPruneSheetPresented = false }
                     .keyboardShortcut(.cancelAction)
-                Button(model.prunePreview.isEmpty ? "知道了" : "清理 \(model.prunePreview.count) 条") {
-                    model.confirmPrune()
+                // 一份可清理的都没有时，这一枚不能是一个"灰掉的破坏性动作"还写着
+                // 一句收下了的话：那读起来像是已经处理过了，而其实什么都没发生。
+                // 死路那一支给的是"关掉这一屏"，它按得动，也只关掉这一屏。
+                if model.prunePreview.isEmpty {
+                    Button("知道了") { model.isPruneSheetPresented = false }
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("gp-prune-sheet-close")
+                } else {
+                    Button("清理 \(model.prunePreview.count) 条") { model.confirmPrune() }
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("gp-confirm-prune")
                 }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
-                .disabled(model.prunePreview.isEmpty)
-                .accessibilityIdentifier("gp-confirm-prune")
             }
         }
         .padding(18)

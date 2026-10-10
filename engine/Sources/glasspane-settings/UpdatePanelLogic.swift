@@ -397,16 +397,22 @@ enum UpdatePanel {
         var code: String?
         var isRunning: Bool
         var pointerReady: Bool
+        /// 这一页「更新器」那张卡写明的程序路径（nil = 还没认出来）。禁用理由要点
+        /// 到这一个真实路径：这台机器上没有一个叫 `updater` 的可执行文件，
+        /// 让人去跑 `updater status` 是一条走不通的路。
+        var updaterPath: String? = nil
         var now: Date
 
         static func reading(_ status: Status?, staged: Bool = false, exitCode: Int? = nil,
                             current: String? = nil, stagedVersion: String? = nil,
                             code: String? = nil,
                             running: Bool = false, pointerReady: Bool = true,
+                            updaterPath: String? = nil,
                             now: Date = Date(timeIntervalSince1970: 0)) -> ButtonContext {
             ButtonContext(status: status, hasStagedOffer: staged, exitCode: exitCode,
                           current: current, stagedVersion: stagedVersion, code: code,
-                          isRunning: running, pointerReady: pointerReady, now: now)
+                          isRunning: running, pointerReady: pointerReady,
+                          updaterPath: updaterPath, now: now)
         }
     }
 
@@ -466,6 +472,18 @@ enum UpdatePanel {
 
     static let runningText = "上一个操作还在进行，等它结束再点。"
 
+    /// "面板不替它签字"之后的那一步该去哪儿读原话：**这一页真的写出来的那一份程序**。
+    ///
+    /// 从前这里写的是"跑一次 `updater status`"，而这台机器上没有任何叫 `updater`
+    /// 的可执行文件——那句话指的路人走不通，而它是这一屏唯一给出的下一步。
+    static func consentGateNextStepText(updaterPath: String?) -> String {
+        if let updaterPath, !updaterPath.isEmpty {
+            return "要看清缺什么、以及怎么把它补上，就把下面「更新器」那一栏记着的这一份读一次状态："
+                + "node \(updaterPath) status"
+        }
+        return "要看清缺什么、以及怎么把它补上，得先让这一页认出更新器在哪（看下面「更新器」那一栏），再读它那句原话。"
+    }
+
     /// 按钮开关的唯一实现：不可用是**带着理由的禁用**，不是把按钮藏掉。
     static func buttons(for ctx: ButtonContext) -> Buttons {
         if ctx.isRunning {
@@ -484,9 +502,14 @@ enum UpdatePanel {
                            applyArguments: [])
         }
         guard let status = ctx.status else {
+            // 一份状态都没读到时，开关的当前位置也就无从知道。这里以前给的是
+            // `toggleEnabled = true`：于是滑块按"关"那一格画出来，而用户正对着
+            // 一个没测过的位置做开关动作。
             return Buttons(checkEnabled: true, checkReason: nil,
                            applyEnabled: false, applyReason: "还没读到更新状态：先点「立即检查」。",
-                           toggleEnabled: true, toggleReason: nil,
+                           toggleEnabled: false,
+                           toggleReason: "还没读到这台机器的更新状态，所以「自动更新」现在是开是关都无从知道。"
+                               + "先点「立即检查」读回这一轮的结论，再决定开或关。",
                            applyArguments: [])
         }
         let staged = ctx.hasStagedOffer
@@ -534,7 +557,7 @@ enum UpdatePanel {
                 return Buttons(checkEnabled: true, checkReason: nil,
                                applyEnabled: false,
                                applyReason: "拦住更新的是「\(which)」这一道确认，面板不替它签字。"
-                                   + "要看清缺什么、以及怎么把它补上，请跑一次 `updater status` 读更新器那句原话。",
+                                   + consentGateNextStepText(updaterPath: ctx.updaterPath),
                                toggleEnabled: true, toggleReason: nil,
                                applyArguments: [])
             }
@@ -646,6 +669,26 @@ enum UpdatePanel {
         guard let snapshot else { return nil }
         return snapshot.disabled != true
     }
+
+    /// 开关位置读不到时那一格写什么。读不到 ≠ 关：这台机器可能正每天自动换版，
+    /// 画成一个停在"关"上的滑块就是替这台机器编了一个它没说过的决定。
+    static let autoSwitchUnknownText = "读不到"
+
+    /// 「待装版本」那一格：`snapshot == nil` 是读不到，不是"没有待装的版本"。
+    /// 同卡上方"当前版本/最新版本"两行已经是这个口径，这两行不许反过来。
+    static func stagedVersionText(_ snapshot: Snapshot?) -> String {
+        guard let snapshot else { return unreadableValueText }
+        return snapshot.stagedVersion ?? "没有"
+    }
+
+    /// 「暂存校验和」那一格的第二种说法（没有校验和时才用）。
+    static func stagedDigestText(_ snapshot: Snapshot?) -> String {
+        guard snapshot != nil else { return unreadableValueText + "（还没读到更新状态）" }
+        return "没有已暂存的版本"
+    }
+
+    /// "这一项没读到"那一句的取值（与"读到了，答案是零/没有"严格分开）。
+    static let unreadableValueText = "读不到"
 
     /// 上一次检查的时间（读不出就明说读不出，绝不编一个）。
     static func lastCheckText(_ snapshot: Snapshot?, now: Date) -> String {

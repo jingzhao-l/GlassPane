@@ -48,4 +48,55 @@ final class SettingsPreHelloCardsTests: XCTestCase {
             XCTAssertTrue(preHello.hasSuffix("unverifiable"))
         }
     }
+
+    // MARK: - 存活那一行的三句人话（同一判据的另一半：灯）
+
+    /// 反向变异：**"应门但没回话"被并进"运行中"或"未运行"**（发现 1 的那处折叠），
+    /// 或者三态里任何两态共用一句文案——那一枚灯就又成了一句没测过的断言。
+    func testTheThreeMeasuredAnswersGetThreeDifferentSentences() {
+        let running = SettingsModel.livenessCaption(.answering, footer: true)
+        let absent = SettingsModel.livenessCaption(.notRunning, footer: true)
+        let silent = SettingsModel.livenessCaption(.presentButSilent(reason: "r"), footer: true)
+        XCTAssertEqual(running, "后台服务运行中")
+        XCTAssertEqual(absent, "后台服务未运行")
+        XCTAssertNotEqual(silent, running, "有人应门但没回话不是运行中")
+        XCTAssertNotEqual(silent, absent, "它也不是未运行：那个名字后面确实有进程")
+        XCTAssertTrue(silent.contains("没回话"), silent)
+        // 卡内标题不带主语（那一张卡自己就叫「后台服务」）。
+        XCTAssertTrue(SettingsModel.livenessCaption(.presentButSilent(reason: "r"), footer: false).contains("应门"))
+    }
+
+    /// 反向变异：**把版本号写死在文案里**，或者没实测到回话还印出版本号——
+    /// 那一行就成了上一帧 hello 的遗照。
+    func testSummaryLineOnlyNamesAVersionItActuallyHeard() {
+        let entry = SettingsModel.DaemonEntry(
+            socketPath: "/tmp/x.sock", liveness: .answering,
+            version: "1.9.0", protocolVersion: "1.1", pid: 1, subject: nil
+        )
+        XCTAssertEqual(SettingsModel.daemonSummaryLine(entry), "运行中 1.9.0")
+
+        var silent = entry
+        silent.liveness = .presentButSilent(reason: "r")
+        silent.version = nil
+        XCTAssertFalse(SettingsModel.daemonSummaryLine(silent).contains("1.9.0"))
+        XCTAssertTrue(SettingsModel.daemonSummaryLine(silent).contains("没回话"))
+
+        var noVersion = entry
+        noVersion.version = nil
+        XCTAssertEqual(SettingsModel.daemonSummaryLine(noVersion), "运行中",
+                       "没读到版本号就只说状态，不编一个占位数")
+    }
+
+    /// 反向变异：**"应门不回话"那一支借用了"未在运行"那句注记**——四张卡会把人
+    /// 支去重启一个其实还活着的进程。
+    func testTheSilentStateHasItsOwnCardNote() {
+        XCTAssertNotEqual(SettingsModel.silentDaemonReportNote, SettingsModel.noDaemonReportNote)
+        XCTAssertTrue(SettingsModel.silentDaemonReportNote.contains("没回话"),
+                      SettingsModel.silentDaemonReportNote)
+        XCTAssertTrue(SettingsModel.noDaemonReportNote.contains("未在运行"),
+                      SettingsModel.noDaemonReportNote)
+        for note in [SettingsModel.silentDaemonReportNote, SettingsModel.noDaemonReportNote] {
+            XCTAssertFalse(note.contains("§"), "给人读的注记里不许有内部编号：\(note)")
+        }
+    }
 }

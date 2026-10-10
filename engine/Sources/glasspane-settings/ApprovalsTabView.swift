@@ -35,7 +35,12 @@ struct ApprovalsTabView: View {
                         EmptyStateView(
                             systemImage: "checkmark.seal",
                             title: report.fileExists ? "台账是空的" : "还没有台账文件",
-                            message: "执行过一次高风险操作（如回滚）后，这里会出现带签名链的审批记录。"
+                            message: report.fileExists
+                                ? "执行过一次高风险操作（如回滚）后，这里会出现带签名链的审批记录。"
+                                // 顶部那枚「台账文件」这时也是按不动的，这里给出同一个原因，
+                                // 不留"灰着但没人解释"的控件。
+                                : "这台机器上还没有 approvals.json：执行过一次高风险操作（如回滚）之后它才会出现，"
+                                    + "那时上面的「台账文件」也才有地方可去。"
                         )
                     } else {
                         chainBanner(report)
@@ -55,6 +60,8 @@ struct ApprovalsTabView: View {
                 .accessibilityIdentifier("gp-refresh-approvals")
             }
             ToolbarItem(placement: .automatic) {
+                // 没有台账文件时这一枚按下去什么都不发生（访达里没有一个去处可显示）。
+                // 所以它按不动，并把"去哪儿做到有这一步"写在理由里。
                 Button {
                     NSWorkspace.shared.selectFile(
                         nil, inFileViewerRootedAtPath: (ApprovalGate.defaultPath as NSString).deletingLastPathComponent
@@ -62,7 +69,11 @@ struct ApprovalsTabView: View {
                 } label: {
                     Label("台账文件", systemImage: "folder")
                 }
-                .help("在访达中显示 approvals.json")
+                .help(model.canRevealApprovalLedger
+                      ? "在访达中显示 approvals.json"
+                      : "「台账文件」现在按不动：\(model.approvalLedgerUnavailableReason)")
+                .disabled(!model.canRevealApprovalLedger)
+                .accessibilityIdentifier("gp-reveal-approval-ledger")
             }
         }
     }

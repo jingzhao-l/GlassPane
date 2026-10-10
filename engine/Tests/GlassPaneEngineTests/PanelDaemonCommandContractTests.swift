@@ -97,6 +97,42 @@ final class PanelDaemonCommandContractTests: XCTestCase {
         XCTAssertTrue(invoked.contains("--project-prune"), "面板不再调 --project-prune：清理按钮成了死的")
         XCTAssertTrue(invoked.contains("--project-remove"), "面板不再调 --project-remove：删除按钮成了死的")
     }
+
+    /// 「档案读不了」这件事在两侧必须用**同一个键名**说话。
+    ///
+    /// 面板的统计卡与档案列表页读的是 daemon `--evidence-stats` 回的那个
+    /// `listFailure`；引擎侧 `EvidenceArchiveScan.listFailure` 是同一个意思的第二个
+    /// 出处。自己拼一个别名（`list_failed`、`listingError`…）就等于两侧各自判读，
+    /// 而"读不出条数"最终又会被折成"档案目录是空的"。这条闸只认源码文本。
+    func testTheUnreadableArchiveKeyIsSpelledTheSameOnBothSides() throws {
+        let daemon = try read("engine/Sources/glasspaned/main.swift")
+        XCTAssertTrue(daemon.contains("\"listFailure\""),
+                      "daemon 不再用 listFailure 报「档案读不了」了，而面板还在读这个键")
+        let engine = try read("engine/Sources/GlassPaneEngine/LocalArchive.swift")
+        XCTAssertTrue(engine.contains("listFailure"),
+                      "引擎侧扫描结果丢了 listFailure：面板这一侧就只能把没看过说成没有")
+
+        for panel in ["engine/Sources/glasspane-settings/ConsoleModel.swift",
+                      "engine/Sources/glasspane-settings/EvidenceStatsView.swift"] {
+            let source = try read(panel)
+            XCTAssertTrue(source.contains("listFailure"), "\(panel) 不再读这个键：读不了会掉回空档案那一支")
+        }
+        // 反向的一半：不许有人在这里给同一个意思起第二个名字。
+        let aliases = ["listFailed", "list_failed", "listingError", "listError", "readFailure"]
+        let settings = try read("engine/Sources/glasspane-settings/ConsoleModel.swift")
+        for alias in aliases {
+            XCTAssertFalse(settings.contains(alias), "面板给同一个字段起了别名 \(alias)：两侧就不再是同一件事")
+        }
+    }
+
+    /// 面板问统计时发的是 daemon 真解析的那条命令，而不是自己扫一份冒充 daemon 的数。
+    func testStatsComesFromTheDaemonCommandItParses() throws {
+        let parsed = try daemonFlags()
+        XCTAssertTrue(parsed.contains("--evidence-stats"), "daemon 不再解析 --evidence-stats 了")
+        let invoked = Set(try panelInvocations().map { $0.flag })
+        XCTAssertTrue(invoked.contains("--evidence-stats"),
+                      "面板不再向后台服务要统计：那一栏的数字就没有了来源，只能靠本地扫一份冒充")
+    }
 }
 
 private extension Sequence where Element: Hashable {

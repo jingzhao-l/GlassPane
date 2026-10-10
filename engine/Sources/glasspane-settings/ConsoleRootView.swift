@@ -71,8 +71,13 @@ struct ConsoleRootView: View {
         // 窗口标题的唯一落点：各页不得再设 navigationTitle，否则会把
         // "GlassPane 设置" 顶掉（P1-C6 真机冒烟按窗口标题定位面板）。
         .navigationTitle("GlassPane 设置")
-        .onAppear(perform: syncFromSettings)
-        .onChange(of: settings.daemon.subject?.binaryPath) { _ in syncFromSettings() }
+        .onAppear { syncFromSettings(liveness: settings.daemon.liveness) }
+        // 每一帧实测的 hello 都要重新对一次账：后台服务重装/重开之后自报了新的
+        // 程序路径，控制台的清理/删除/校验/统计必须跟着换，否则一直在 exec 那份
+        // 已经退役的二进制；"注册表改动要重启才生效"也只等服务重新应门之后才撤。
+        .onChange(of: settings.daemon.liveness) { liveness in
+            syncFromSettings(liveness: liveness)
+        }
         .onChange(of: selection) { section in
             // 进某一页时按需重读该页数据：档案是外部进程随时会写的，
             // 但也不该在用户没看的时候反复扫盘。
@@ -89,10 +94,11 @@ struct ConsoleRootView: View {
         }
     }
 
-    private func syncFromSettings() {
-        if console.daemonBinaryPath == nil {
-            console.daemonBinaryPath = settings.daemon.subject?.binaryPath
-        }
+    private func syncFromSettings(liveness: SettingsModel.DaemonLiveness) {
+        console.adoptDaemonReport(
+            binaryPath: settings.daemon.subject?.binaryPath,
+            answered: liveness == .answering
+        )
     }
 
     // MARK: - 侧栏
@@ -180,17 +186,23 @@ struct ConsoleRootView: View {
         }
     }
 
-    /// 侧栏底部：后台服务的存活状态。面板不猜——读不到就是读不到。
+    /// 侧栏底部：后台服务的**实测**存活结局（一次 hello 握手）。面板不猜——
+    /// 没实测过就说没实测过，应门不回话就说应门不回话。
     private var daemonFooter: some View {
         HStack(spacing: 7) {
-            StatusDotView(tone: settings.daemon.reachable ? .good : .bad)
+            StatusDotView(tone: settings.daemonTone)
             VStack(alignment: .leading, spacing: 1) {
-                Text(settings.daemon.reachable ? "后台服务运行中" : "后台服务未运行")
+                Text(settings.daemonFooterCaption)
                     .font(.caption)
+                    .accessibilityIdentifier(settings.daemonLivenessIdentifier)
                 if let version = settings.daemon.version {
                     Text("glasspaned \(version)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                } else if case .presentButSilent = settings.daemon.liveness {
+                    Text(SettingsModel.silentDaemonReportNote)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
                 }
             }
             Spacer()

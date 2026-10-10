@@ -84,13 +84,34 @@ struct SettingsPanelView: View {
             )
             // 授权已落但运行实例读不到（TCC 判定按进程缓存）→ 给出重启入口。
             // 不自动重启：那会中断正在进行的 act，必须由用户点。
-            if !model.kindsNeedingRestart.isEmpty {
+            // 重启没成时这条也必须留在原处（带着手动重启那句话）——一按下就让它消失，
+            // 等于对着一次失败的动作报平安。
+            if !model.kindsNeedingRestart.isEmpty || model.daemonRestartHint != nil {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "arrow.triangle.2.circlepath.circle")
                         .foregroundStyle(.orange)
-                    Text(model.restartHint)
-                        .font(.callout)
-                        .fixedSize(horizontal: false, vertical: true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        if !model.restartHint.isEmpty {
+                            Text(model.restartHint)
+                                .font(.callout)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        // 上一按的真实结局：kickstart 没成时这句才是现在做得动的那一步，
+                        // 只留一个灰按钮和一句"重启后生效"等于让人再点一次没用的东西。
+                        if let hint = model.daemonRestartHint {
+                            HStack(alignment: .top, spacing: 5) {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                                Text(hint)
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .accessibilityIdentifier("gp-restart-manual-hint")
+                        }
+                    }
                     Spacer()
                     Button("重启后台服务") { model.restartDaemon() }
                         .controlSize(.small)
@@ -146,9 +167,7 @@ struct SettingsPanelView: View {
             key: "permissions-daemon",
             title: "后台服务",
             systemImage: "desktopcomputer",
-            summary: model.daemon.reachable
-                ? "运行中 \(model.daemon.version ?? "版本号未读到")"
-                : "未运行",
+            summary: SettingsModel.daemonSummaryLine(model.daemon),
             // 刷新必须待在折叠按钮外面：一张收起来的卡如果连"重新测一次"都收进去了，
             // 收起就等于停用了这一页唯一的主动作。
             accessory: AnyView(
@@ -170,9 +189,10 @@ struct SettingsPanelView: View {
         ) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    StatusDotView(tone: model.daemon.reachable ? .good : .bad)
-                    Text(model.daemon.reachable ? "运行中" : "未运行")
+                    StatusDotView(tone: model.daemonTone)
+                    Text(model.daemonCaption)
                         .font(.callout.weight(.medium))
+                        .accessibilityIdentifier(model.daemonLivenessIdentifier)
                     if let version = model.daemon.version {
                         ChipView(text: "glasspaned \(version)", color: .secondary)
                     }
@@ -183,6 +203,23 @@ struct SettingsPanelView: View {
                         ChipView(text: "PID \(pid)", color: .secondary, systemImage: "number")
                     }
                     Spacer()
+                }
+                // "有人应门但没回话"是第三种实测结局，不是"运行中"的另一种写法：
+                // 这一支必须自己说清下一步做什么，否则用户只能对着橙色点猜。
+                if case .presentButSilent(let reason) = model.daemon.liveness {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(SettingsModel.silentDaemonReportNote + "：先点「刷新」再实测一次；"
+                             + "一直如此说明占着这个名字的进程已经不应门了，需要手动把它结束掉。")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text("实测到的原因：\(reason)")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("gp-daemon-silent-reason")
+                    }
                 }
                 PathRowView(label: "Socket", path: model.daemon.socketPath, identifierKey: "socket")
                 if let subject = model.daemon.subject {
@@ -411,13 +448,17 @@ struct PermissionCardView: View {
 
     @State private var isDropTargeted = false
 
-    /// 开发者工具卡：一旦有"验证调试能力"的实测结论，徽标改按实测状态显示
+    /// 徽标一次算全：文字、形状图标、无障碍标识必须来自**同一个** status。
+    /// 开发者工具卡上，一旦有"验证调试能力"的实测结论，整套改按实测状态显示
     /// （系统没有查询接口 ≠ 不能实测；实测结论必须让用户看得见，而不是永远
-    /// 灰在"未验证"）。其余卡恒按 daemon 自报席位。
-    private var displayStatus: PermissionStatus { verifiedStatus ?? entry.status }
+    /// 灰在"未验证"）；其余卡恒按 daemon 自报席位。从前文字跟着实测状态走、
+    /// 图标与标识跟着自报席位走，于是一张卡说了两件事。
+    private var badge: PermissionBadge {
+        PermissionBadge.make(kind: entry.kind, reported: entry.status, measured: verifiedStatus)
+    }
 
     private var badgeColor: Color {
-        switch displayStatus {
+        switch badge.status {
         case .granted:
             return .green
         case .denied:
@@ -426,19 +467,6 @@ struct PermissionCardView: View {
             return .secondary
         case .unverifiable:
             return .secondary
-        }
-    }
-
-    private var badgeText: String {
-        switch displayStatus {
-        case .granted:
-            return verifiedStatus != nil ? "可用（实测）" : "已授权"
-        case .denied:
-            return verifiedStatus != nil ? "被拒绝（实测）" : "已拒绝"
-        case .notDetermined:
-            return "未请求"
-        case .unverifiable:
-            return "未验证"
         }
     }
 
@@ -514,12 +542,10 @@ struct PermissionCardView: View {
                 HStack(spacing: 7) {
                     Text(entry.descriptor.displayName).font(.callout.bold())
                     BadgeView(
-                        text: badgeText,
+                        text: badge.text,
                         color: badgeColor,
-                        statusIcon: PermissionGuide.statusIcon(for: entry.status),
-                        statusIdentifier: PermissionGuide.statusIdentifier(
-                            kind: entry.kind, status: entry.status
-                        )
+                        statusIcon: badge.icon,
+                        statusIdentifier: badge.identifier
                     )
                     if entry.statusNote != nil {
                         Image(systemName: "arrow.clockwise.circle")
@@ -740,6 +766,41 @@ struct PermissionCardDropDelegate: DropDelegate {
             }
         }
         return url.deletingPathExtension().lastPathComponent
+    }
+}
+
+/// 一枚权限徽标的全部表达，一次算全。
+///
+/// 三件东西（给人读的文字、表达形状的图标、给自动化读的标识）必须由**同一个**
+/// 状态折算出来：从前文字读实测结论、图标与标识读 daemon 自报席位，人看到的
+/// "可用（实测）"与冒烟脚本读到的 `gp-perm-developer-tools-unverifiable`
+/// 是同一张卡上的两个答案——按标识判读的那一方会以为这张卡什么都没说。
+struct PermissionBadge: Equatable {
+    let status: PermissionStatus
+    let text: String
+    let icon: String
+    let identifier: String
+
+    static func make(
+        kind: PermissionKind,
+        reported: PermissionStatus,
+        measured: PermissionStatus? = nil
+    ) -> PermissionBadge {
+        let status = measured ?? reported
+        let measuredText: Bool = measured != nil
+        let text: String
+        switch status {
+        case .granted: text = measuredText ? "可用（实测）" : "已授权"
+        case .denied: text = measuredText ? "被拒绝（实测）" : "已拒绝"
+        case .notDetermined: text = "未请求"
+        case .unverifiable: text = "未验证"
+        }
+        return PermissionBadge(
+            status: status,
+            text: text,
+            icon: PermissionGuide.statusIcon(for: status),
+            identifier: PermissionGuide.statusIdentifier(kind: kind, status: status)
+        )
     }
 }
 
