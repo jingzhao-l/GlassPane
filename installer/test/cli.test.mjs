@@ -17,6 +17,7 @@ import {
   RELEASE_VERSION,
   REPO_URL,
   classifyTagVerify,
+  tagVerifyDecision,
   repoHasRef,
   verifyCloneTagGpg,
 } from '../cli.js'
@@ -387,5 +388,42 @@ test('verifyCloneTagGpg: 仓库无该 tag → unavailable，不触发 gpg', () =
     assert.equal(res.status, 'unavailable')
   } finally {
     fs.rmSync(repo, { recursive: true, force: true })
+  }
+})
+
+/**
+ * 验签结论落成安装动作。修之前 main() 里是一个两分支的 if：`invalid`（签名在、
+ * 验不过）与 `unsigned`（只是没签名）都走同一句"——继续安装"，然后照跑
+ * npm install、swift build 并注册 launchd。自动更新那面对 `invalid` 是硬拒且
+ * consent 洗不掉，两条路的诚实度不该不一样——而安装是更不可逆的那条。
+ * 判据抽成 `tagVerifyDecision` 之后才有测试可指：埋在 main() 里的那一段没法单测。
+ */
+test('tagVerifyDecision: 只有缺证明才继续，签不上就停下', () => {
+  const repoDir = '/repo'
+  const decide = (status, detail = 'd') => tagVerifyDecision({ sig: { status, detail }, pinRef: 'v1.2.3', repoDir })
+
+  assert.equal(decide('verified').action, 'pass')
+  assert.match(decide('verified').text, /签名验证通过/)
+
+  // 缺证明：黄字继续，但话说清是"缺增量"，不许写成"验签通过"。
+  for (const status of ['unsigned', 'unavailable']) {
+    const warn = decide(status)
+    assert.equal(warn.action, 'warn', `${status} 只是缺证明，应当继续`)
+    assert.match(warn.text, /继续安装/, `${status} 的文案要说明确实继续`)
+    assert.ok(!/签名验证通过/.test(warn.text), `${status} 不许冒充验签通过`)
+  }
+
+  // 签不上：停下，并且说清哪些不可逆的事**没做**、下一步做什么。
+  const refusal = decide('invalid', 'gpg: BAD signature from ...')
+  assert.equal(refusal.action, 'refuse')
+  assert.match(refusal.text, /没有跑 npm install/)
+  assert.match(refusal.text, /没有注册 launchd/)
+  assert.ok(!/继续安装/.test(refusal.text), '拒签的报文里不许出现"继续安装"')
+  assert.match(refusal.text, /git -C "\/repo" tag -v v1\.2\.3/, '拒绝必须给得出可执行的核对步骤')
+  assert.match(refusal.text, /GLASSPANE_REF=/, '拒绝必须给得出下一步怎么继续安装')
+
+  // 负例的另一半：安装器不认识的新判据不许被当成"没签名"放过。
+  for (const status of ['failed', 'ok', '', undefined]) {
+    assert.equal(decide(status).action, 'refuse', `${JSON.stringify(status)} 是安装器没见过的判据，必须停下`)
   }
 })
