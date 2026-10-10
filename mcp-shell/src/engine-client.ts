@@ -993,9 +993,23 @@ export class EngineJsonRpcClient {
           return;
         }
         if (frame.error) {
-          // This frame *is* that request's answer, so stop tracking it.
-          this.pending.delete(target.id);
+          // This frame *is* that request's answer, so its caller is settled with
+          // it — but the entry is *not* deleted, and that is finding 中-4 read on
+          // the unsettled side (review 2026-10-09 finding 2), where it was worse:
+          // the attribution here is only a guess by arrival order, so the request
+          // this frame was spent on may not be the one the daemon was answering
+          // (an `act` whose frame parsed fine can be given another request's
+          // failure), and deleting the entry at the same moment threw away the one
+          // route back — the daemon's real reply, which does echo the id. That
+          // reply then read as "a frame this client never issued", the operationId
+          // never reached the trail, and an agent holding `GP_E_NO_EVIDENCE … run
+          // gp_act first` pressed the action a second time on the user's screen.
+          // `reject()` settles the caller, so the echoed reply takes the late-reply
+          // path above and is still attributed and recorded; marking the entry
+          // spends the guess for arrival-order purposes only.
           this.reject(target, attribute(this.engineError(frame.error), target));
+          target.arrivalOrderConsumed = true;
+          this.retainForLateReply();
           return;
         }
         // A result frame with no id is not something the daemon's own paths
@@ -1126,8 +1140,20 @@ export class EngineJsonRpcClient {
       );
       return;
     }
+    // The body is deliberately *not* written here, and the reason is said in the
+    // line itself so the next reader does not "helpfully" put it back: this is raw
+    // engine content — the accessibility tree of the user's screen, whose
+    // `title`/`value`/`description` fields are whatever is on-screen right now
+    // (document titles, form fields, message text) — and stderr is captured by
+    // whoever launched this server, so dumping a reply copied an on-screen secret
+    // into a log nobody asked for (review 2026-10-09 finding 3). The trail sink
+    // below still receives the body, because that is what an evidence record needs;
+    // this line keeps the part that is diagnostic — which request, how big — and
+    // states plainly that the engine did answer. The reverse mutation is to
+    // re interpolate the frame here, which is what this comment exists to refuse.
+    const bodyBytes = Buffer.byteLength(jsonOrString(frame.result), "utf8");
     this.report(
-      `late engine reply for '${entry.method}' (id ${entry.id}), ${entry.deadlineMs}ms deadline already reported: ${truncate(jsonOrString(frame.result))}${byOrder}`,
+      `late engine reply for '${entry.method}' (id ${entry.id}), ${entry.deadlineMs}ms deadline already reported: the engine did answer, with a ${bodyBytes}-byte body that is raw engine content (an accessibility tree whose title/value fields are on-screen data), so its text is not written to this log${byOrder}`,
     );
     if (frame.result === undefined) {
       // A frame with neither `result` nor `error` is not an answer this sink can
@@ -1357,9 +1383,23 @@ class ReconnectingSocketIo implements LineIo {
     const io = new StreamLineIo(socket, socket);
     io.onMessage((line) => this.messageHandler?.(line));
     io.onError((error) => {
-      // Forget this transport first, and drop its socket: the next call must
-      // open a new one rather than write into a dead fd forever.
-      if (this.inner === io) {
+      // An oversize frame is a *per-frame* verdict and this transport survives
+      // it: `LineReader` discarded exactly the remainder of that one line and
+      // resumed at its newline, which is the same shape the daemon's own
+      // `FrameCodec` keeps (drop-to-EOL, `discardUntilNewline` cleared, socket
+      // still serving). So it is forwarded to the client, which fails only the
+      // request that frame belonged to, and the socket is neither forgotten nor
+      // closed. Forgetting it here used to close the fd, the close handler ran,
+      // and `teardown` answered *every other* in-flight request with
+      // `GP_E_ENGINE_UNREACHABLE` plus a remedy ordering a daemon restart — a
+      // SIGTERM against a daemon that may be mid-`act` on the user's screen —
+      // while the oversize call's own text claimed the connection was intact.
+      // One bad frame therefore destroyed unrelated concurrent calls
+      // (review 2026-10-09 finding 1). A real transport error still takes the
+      // original route below — there the framing *is* lost, so this transport is
+      // forgotten first and its socket dropped, and the next call opens a new
+      // one rather than writing into a dead fd forever.
+      if (!(error instanceof OversizeFrameError) && this.inner === io) {
         this.inner = null;
         io.close();
       }

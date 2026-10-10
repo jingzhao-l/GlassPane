@@ -1,4 +1,7 @@
 import { z } from "zod";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   SELECTOR_MAX_LENGTH,
   ActionSchema,
@@ -68,8 +71,16 @@ import {
 const PID_INT32_MAX = 2_147_483_647;
 const OptionalPidSchema = z.number().int().min(1).max(PID_INT32_MAX).optional();
 const OptionalDepthSchema = z.number().int().min(1).max(10).optional();
-const OptionalRoleSchema = z.string().max(128).optional();
-const OptionalBundleIdSchema = z.string().max(256).optional();
+/* `observe.role` and `attach.bundleId` are capped at the **daemon's** own bounds,
+ * not at shorter ones invented here: `Dispatcher.handleObserve` reads `role` with
+ * `ParamValidation.selectorMaxLength` (512) and `Dispatcher.handleAttach` reads
+ * `bundleId` with `maxLength: 512`. A tighter shell bound is not a safety margin —
+ * it refuses, with `GP_E_BAD_PARAMS` from this shell, a frame the daemon would have
+ * accepted and answered, so the agent loses the daemon's own verdict. The pair is
+ * gated by `test/consumer-consistency.test.mjs`, which reads both numbers out of
+ * `Dispatcher.swift` and fails if either side moves. */
+const OptionalRoleSchema = z.string().max(SELECTOR_MAX_LENGTH).optional();
+const OptionalBundleIdSchema = z.string().max(512).optional();
 /**
  * The id grammar, in one place: `op_` + 26 Crockford base32 characters
  * (P0 §4.1, mirrored by `ParamValidation.operationIdPattern` on the daemon side
@@ -82,6 +93,20 @@ const OptionalBundleIdSchema = z.string().max(256).optional();
  */
 const OPERATION_ID_PATTERN = /^op_[0-9A-HJKMNP-TV-Z]{26}$/;
 const OptionalOperationIdSchema = z.string().regex(OPERATION_ID_PATTERN).optional();
+/**
+ * `attach.projectId` is the one place this shell stays **stricter** than the daemon,
+ * deliberately and with a gate: `Dispatcher.handleAttach` reads it with
+ * `ParamValidation.optString(params, "projectId", maxLength: 64)` — a length bound
+ * and nothing else — so the service would accept `"x"`, a 64-character path, or any
+ * other shape. A `prj_` + 26 Crockford-base32 id is what this project's own registry
+ * mints (`project-registry.ts`), and an id that is not one of those is a value no
+ * tool here can later read back with `gp_project_get`, so the wider shape buys a
+ * stored entry nothing can address. `test/consumer-consistency.test.mjs` reads the
+ * daemon's 64 and asserts this grammar's longest accepted value still fits inside it
+ * — if the daemon ever tightens below 30 characters, or grows a pattern of its own,
+ * that gate reddens instead of this decision quietly becoming a bug (review
+ * 2026-10-09 finding 9).
+ */
 const OptionalProjectIdSchema = z.string().regex(/^prj_[0-9A-HJKMNP-TV-Z]{26}$/).optional();
 
 const ExpectSchema = z.union([z.string().max(512), z.boolean()]);
@@ -326,7 +351,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       type: "object",
       additionalProperties: false,
       properties: {
-        bundleId: { type: "string", maxLength: 256 },
+        bundleId: { type: "string", maxLength: 512 },
         pid: { type: "integer", minimum: 1, maximum: PID_INT32_MAX },
         projectId: { type: "string", pattern: "^prj_[0-9A-HJKMNP-TV-Z]{26}$" },
       },
@@ -346,7 +371,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       additionalProperties: false,
       properties: {
         maxDepth: { type: "integer", minimum: 1, maximum: 10 },
-        role: { type: "string", maxLength: 128 },
+        role: { type: "string", maxLength: SELECTOR_MAX_LENGTH },
       },
     },
     validate: zodBridge(ObserveArgs),
@@ -1177,6 +1202,53 @@ async function readTrail(
   }
 }
 
+/**
+ * The remedy for a fault raised by *this shell*, on a call to `engineMethod`.
+ *
+ * This replaced "see the MCP server logs and retry" at all three internal-fault
+ * sites, and both halves of that sentence were wrong (review 2026-10-09 finding
+ * 8). "See the MCP server logs" is not something the caller can do: this process's
+ * stderr is held by whoever started the server, and a fault raised here is in no
+ * daemon log either, so the instruction sent the agent to look at a file that
+ * cannot contain the answer. And "retry" is an order to put a second copy of the
+ * request on the wire for methods whose re-issue this shell already refuses to
+ * endorse — `act`/`restore`/`attach` may still be performing their change on the
+ * user's screen, and a shell-side fault says nothing about whether the first copy
+ * went out. The classification is read from the transport's own lists
+ * ({@link isReplayUnsafeMethod}, {@link isNarrowableByRetryMethod}) rather than a
+ * third copy of the names, which is what keeps this answer from drifting back into
+ * "just retry the click".
+ */
+export function shellFaultRemedy(engineMethod: string): string {
+  const readRoute = "read what happened instead of performing it again: gp_recent_reports lists the operations "
+    + "this session recorded, gp_last_evidence {operationId} returns one in full, and gp_probe_status reads the "
+    + "daemon's own self-report on this same connection — all three are requests this shell does not treat as "
+    + "unsafe to repeat";
+  const reportRoute = "this fault was raised inside the MCP shell, so it is in no daemon log: this process's stderr "
+    + "belongs to whoever started this server, and that line is the only text naming the failure, so hand it to "
+    + "them verbatim. A daemon restart is not authorised by an answer the daemon never made";
+  if (isReplayUnsafeMethod(engineMethod)) {
+    return `this is a defect in this shell, not an answer from the engine, so it measures nothing about whether `
+      + `'${engineMethod}' reached the daemon or the user's screen. Do NOT re-issue ${engineMethod}: a re-issue `
+      + "can perform the same action a second time on the user's screen (and for attach, re-point the daemon and "
+      + "discard the trail an outstanding request is being recorded in), and this failure does not establish that "
+      + `the first copy did nothing. ${readRoute}. ${reportRoute}`;
+  }
+  if (!isNarrowableByRetryMethod(engineMethod)) {
+    // `snapshot`: repeating it is not a side-effect-free read, it is a new entry in
+    // the daemon's bounded ring, which can evict the baseline the caller's *own*
+    // earlier snapshot returned and that `gp_restore` needs later.
+    return `this is a defect in this shell, not an answer from the engine. '${engineMethod}' is a method whose `
+      + "re-issue writes daemon state — a fresh request appends to the bounded snapshot ring and can evict a "
+      + "baseline this caller already received — so treat it as a question to read around rather than one to send "
+      + `again: gp_snapshot lists stored ids, and ${readRoute}. ${reportRoute}`;
+  }
+  return `this is a defect in this shell, not an answer from the engine. '${engineMethod}' is not one of the `
+    + "methods this shell classifies as unsafe to repeat (the no-replay set is act/restore/attach, plus snapshot, "
+    + `whose re-issue writes daemon state), so sending this tool again is a real option rather than a side effect: `
+    + `do that once. If the fault repeats, ${readRoute}. ${reportRoute}`;
+}
+
 /* ------------------------------------------------------------------ *
  * Tools/call execution (spec §6.2): pre-validate -> forward -> map error.
  * ------------------------------------------------------------------ */
@@ -1195,8 +1267,32 @@ export async function executeTool(
   spec: ToolSpec,
   args: unknown,
   engine: EngineJsonRpcClient,
-  session: EvidenceAuditSession = new EvidenceAuditSession(),
+  /**
+   * The session whose trail this call records into and reads back. **Required**,
+   * and it used to be `= new EvidenceAuditSession()`: a caller that omitted the
+   * argument then recorded its `operationId` into a trail nobody else held a
+   * reference to, so the next `gp_recent_reports` answered
+   * `GP_E_NO_EVIDENCE … no operations recorded in this session` for an `act` that
+   * had really run — the reading that makes an agent press it a second time on the
+   * user's screen. That is the same defect `dispatch.ts`'s `McpServerDeps.session`
+   * documents as removed, and it is checked at runtime for the same reason: every
+   * meaningful caller here is JavaScript (`dist` consumers, the smoke scripts, the
+   * tests), where an omitted argument compiles forever and fails silently.
+   */
+  session: EvidenceAuditSession,
 ): Promise<ToolResult> {
+  if (!session) {
+    return {
+      content: [{ type: "text", text: formatToolError(
+        GP_E_INTERNAL,
+        `executeTool was called for ${spec.name} without the session's trail`,
+        "this shell recorded nothing for this call: executeTool requires the shared EvidenceAuditSession "
+        + "the server was built with (dispatch.ts's createTrackedMcpServer), because a trail handed to one "
+        + "call only is invisible to gp_recent_reports. Pass the server's session rather than omitting it",
+      ) }],
+      isError: true,
+    };
+  }
   const checked = spec.validate(args);
   if (!checked.ok) {
     return {
@@ -1297,7 +1393,7 @@ async function runValidatedTool(
       content.push({
         type: "text",
         text: reading.kind === "read"
-          ? `${reading.summary}\n${caBundleDiagnosis(reading.ca)}\n${runtimeSelfDiagnosis(reading.runtime, reading.stateFile)}`
+          ? `${reading.summary}\n${caBundleDiagnosis(reading.ca, updaterEnableCommand(reading.runtime))}\n${runtimeSelfDiagnosis(reading.runtime, reading.stateFile)}`
           : reading.summary,
       });
     }
@@ -1320,7 +1416,7 @@ async function runValidatedTool(
       content: [{ type: "text", text: formatToolError(
         GP_E_INTERNAL,
         `internal shell error: ${String(error)}`,
-        "see the MCP server logs and retry",
+        shellFaultRemedy(spec.engineMethod),
       ) }],
       isError: true,
     };
@@ -1328,7 +1424,64 @@ async function runValidatedTool(
 }
 
 /**
- * The CA trust bundle line of `gp_diagnose`'s update block.
+ * Quote a path for a shell only when it needs it, so a pasted command reads as the
+ * single argument it is.
+ */
+function shellPath(text: string): string {
+  return /[\s"'`\\]/.test(text) ? JSON.stringify(text) : text;
+}
+
+/**
+ * A `node <path> …` command the reader can actually run.
+ *
+ * The two remedy lines this feeds used to print `node updater/cli.js enable` and
+ * `node installer/cli.js` — relative to *whatever working directory the reader
+ * happens to be in*, which for an agent inside an MCP host is nowhere near this
+ * repository, so the command named an action nobody could take (review 2026-10-09
+ * finding 12). A path is only named when it is absolute: either the install record
+ * itself says where the copy lives, or this build sits in the checkout beside the
+ * script, which is exactly the check `engine-client.ts`'s `daemonUnreachableRemedy`
+ * already makes. `null` means no such command exists for this machine, and the
+ * branches say that instead of printing a path that resolves elsewhere.
+ */
+function absoluteNodeCommand(cliPath: string | null, suffix: string): string | null {
+  if (cliPath === null || !path.isAbsolute(cliPath)) {
+    return null;
+  }
+  return `node ${shellPath(cliPath)}${suffix}`;
+}
+
+/** This build's own location, for finding the scripts shipped beside it. */
+function repoScript(name: string): string | null {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidate = path.resolve(here, "..", "..", name);
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
+/**
+ * The updater's `enable` step, worded as something this machine can run.
+ *
+ * Preferred is the path the install record itself names (it is the copy the loaded
+ * launchd job runs); failing that, the `updater/cli.js` shipped beside this build,
+ * the same lookup `daemonUnreachableRemedy` makes. Failing both, the sentence admits
+ * that no command exists to print — which is what the old
+ * "`node updater/cli.js enable`" was: a command resolved against a working directory
+ * the reader is almost certainly not in.
+ */
+function updaterEnableCommand(runtime: RuntimeReading): string {
+  const named = runtime.recorded ? runtime.cliPath : null;
+  const command = absoluteNodeCommand(named, " enable")
+    ?? absoluteNodeCommand(repoScript(path.join("updater", "cli.js")), " enable");
+  return command === null
+    ? "the `enable` step of this install's updater copy — its path is the `runtime.cliPath` the record names "
+      + "(printed on the line below, when the record carries one), and neither that record nor this build's own "
+      + "location gives an absolute path, so this remedy prints no command rather than one that resolves "
+      + "against a directory you are not standing in"
+    : `\`${command}\``;
+}
+
+/**
+ * The `ca trust bundle` line of `gp_diagnose`'s update block.
  *
  * Why this deserves its own sentence at all: node verifies the updater's HTTPS
  * against the CA list compiled into the node binary, not against this machine's
@@ -1344,9 +1497,11 @@ async function runValidatedTool(
  * never reaches here: `update-state.ts` folds that into "unreadable" instead of
  * defaulting it to a friendly state.
  */
-function caBundleDiagnosis(ca: CaRootsReading): string {
-  // Rendered once so the command an agent can paste reads identically in every branch.
-  const enableCmd = "`node updater/cli.js enable`";
+function caBundleDiagnosis(ca: CaRootsReading, enableCmd: string): string {
+  // Rendered once, by the caller, so the command an agent can paste reads
+  // identically in every branch — and is an absolute path or an honest admission
+  // that this machine names none, rather than `node updater/cli.js` resolved against
+  // a working directory the reader is not in.
   if (!ca.recorded) {
     return "ca trust bundle: this install has never recorded exporting the machine's trusted roots "
       + "(the state file carries no caRoots), which is NOT the same as \"the bundle is fine\" — an install predating "
@@ -1447,14 +1602,30 @@ function caBundleDiagnosis(ca: CaRootsReading): string {
  * folds that into "unreadable" instead of defaulting it to `refreshed`.
  */
 function runtimeSelfDiagnosis(runtime: RuntimeReading, stateFile: string): string {
-  // The reinstall, named as the command a person on this machine can actually run.
-  const installerCmd = "`node installer/cli.js` (or the `install.sh` this machine was installed with)";
+  // The reinstall, named as a command a person on this machine can actually run.
+  // `node installer/cli.js` was resolved against *the reader's* working directory,
+  // which for an agent inside an MCP host is nowhere near this repository, so the
+  // instruction could not be carried out at all (review 2026-10-09 finding 12). The
+  // absolute path is taken from this build's own location when the two are shipped
+  // beside each other, and its absence is said out loud rather than printed as a
+  // relative guess.
+  const installerCommand = absoluteNodeCommand(repoScript("installer/cli.js"), "");
+  const installScript = repoScript("install.sh");
+  const installerCmd = installerCommand === null
+    ? "the installer of the GlassPane checkout this machine was installed from — this build is not shipped "
+      + "beside it, so no absolute path can be named from here, and every command in that tree has to be run "
+      + "from inside it"
+    : installScript === null
+      ? `\`${installerCommand}\``
+      : `\`${installerCommand}\` (or \`${shellPath(installScript)}\`)`;
   // Re-registering the copy the record names is the one command that ends three of the four
   // states, and it is built from the record's own path plus the state root this shell already
   // resolved. No path in the record means no such command exists — only the installer can
   // put a copy in place then, and that is said out loud instead of naming a file nobody installed.
+  // A relative recorded path is refused the same way: it is a command for some other process's
+  // working directory, not for this one.
   const enableCmd = (cliPath: string | null): string | null =>
-    cliPath === null ? null : `node ${cliPath} enable --state-dir ${stateRootOf(stateFile)} --json`;
+    absoluteNodeCommand(cliPath, ` enable --state-dir ${shellPath(stateRootOf(stateFile))} --json`);
   // How the record names the copy it is about. Both halves are quoted as written and an
   // absence is said as an absence: a reader that was handed `<path>` would have to go find
   // the file themselves, which is the one thing this line is supposed to save them.
@@ -1670,9 +1841,24 @@ async function captureView(
         isError: true,
       };
     }
-    const mimeType = typeof body.mimeType === "string" && body.mimeType.length > 0
-      ? body.mimeType
-      : "image/png";
+    // The same rule as `persisted` directly above, for the same reason, and it was
+    // applied to one field and not the other: the daemon always states a `mimeType`
+    // (`EngineCore.swift`'s capture reply), so a frame that omits it is a frame this
+    // shell has no authority to complete. `?? "image/png"` told the caller's model
+    // which format it was looking at on this shell's own say-so — a value the engine
+    // never answered, and one a wrong guess would have made the image unreadable
+    // while every number beside it still looked fine (review 2026-10-09 finding 11).
+    if (typeof body.mimeType !== "string" || body.mimeType.length === 0) {
+      return {
+        content: [{ type: "text", text: formatToolError(
+          GP_E_INTERNAL,
+          `capture_view answered without a mimeType (got ${JSON.stringify(body.mimeType ?? null)})`,
+          "do not read this image as any particular format: the engine did not name one, and this shell will not fill the field in. This is a read-only capture, so sending it again performs nothing — if it repeats, report the frame shape, which is a protocol disagreement between two builds rather than a dead daemon",
+        ) }],
+        isError: true,
+      };
+    }
+    const mimeType = body.mimeType;
     const summary = canonicalJson({
       mimeType,
       byteCount: body.byteCount,
@@ -1704,7 +1890,7 @@ async function captureView(
       content: [{ type: "text", text: formatToolError(
         GP_E_INTERNAL,
         `internal shell error: ${String(error)}`,
-        "see the MCP server logs and retry",
+        shellFaultRemedy("capture_view"),
       ) }],
       isError: true,
     };
@@ -1850,7 +2036,7 @@ function projectErrorRemedy(code: string): string {
     // registration. `test/tools.test.mjs` pins both halves: the remedy names no
     // delete on this surface, and every `glasspaned --flag` it quotes is one the
     // daemon's own argument parser accepts.
-    return `the limit (${MAX_PROJECTS}) counts the entries stored in the projects file named above, so a new registration cannot be made to fit by changing an existing one: gp_project_set with an existing projectId patches that entry and leaves the count where it is. See what is stored with gp_project_list, then free a slot by removing an entry from that file itself (read it first with \`python3 -m json.tool <that path>\`; this surface offers no delete, so this is a repair of the file the message names, the same route a damaged registry takes) and retry. To read the same set without this shell: glasspaned --list-projects prints the file the service loads by default`;
+    return `the limit (${MAX_PROJECTS}) counts the entries stored in the projects file named above, so a new registration cannot be made to fit by changing an existing one: gp_project_set with an existing projectId patches that entry and leaves the count where it is. See what is stored with gp_project_list, then free a slot by removing an entry from that file itself (read it first with \`/usr/bin/plutil -p <that path>\`, which prints a JSON file as it stands and says plainly when it is not one, or \`/bin/cat <that path>\` for the exact bytes — both are absolute, so they run from whatever directory the reader is in and need nothing on PATH; this surface offers no delete, so this is a repair of the file the message names, the same route a damaged registry takes) and retry. To read the same set without this shell: glasspaned --list-projects prints the file the service loads by default`;
   }
   if (code === GP_E_NOT_FOUND) {
     return "check the projectId; use gp_project_list to view available projects";
@@ -1863,7 +2049,7 @@ function projectErrorRemedy(code: string): string {
     return "this process has no entry in the password database, so neither it nor the daemon can know which user's state directory is meant; run the shell as a user that has one (`id -u` / `dscl . -read /Users/<name> NFSHomeDirectory`). Nothing in ~/.glasspane needs repairing for this";
   }
   if (code === GP_E_INTERNAL) {
-    return `the projects file is the problem, not your arguments: the message above names its path, so read it with \`python3 -m json.tool <that path>\`, repair or restore the damaged entry, and retry — or set ${FORCE_OVERWRITE_ENV}=1 and call gp_project_set to rebuild the registry from scratch (the unloadable file is moved aside as <path>.unreadable-<id>, never deleted, and every entry still in it is lost). Do not retry the same read-only call unchanged: it will keep failing.`;
+    return `the projects file is the problem, not your arguments: the message above names its path, so read it with \`/usr/bin/plutil -p <that path>\` or \`/bin/cat <that path>\` — both absolute, so they run from whatever directory the reader is in and need nothing that may be off PATH — repair or restore the damaged entry, and retry — or set ${FORCE_OVERWRITE_ENV}=1 and call gp_project_set to rebuild the registry from scratch (the unloadable file is moved aside as <path>.unreadable-<id>, never deleted, and every entry still in it is lost). Do not retry the same read-only call unchanged: it will keep failing.`;
   }
   return "check the tool's input schema and retry";
 }
@@ -2007,7 +2193,12 @@ function renderTrailIds(ids: readonly string[], format: "html" | "markdown"): st
 /** One fetch failure, in the one line a partial report has room for. */
 function describeFetchFailure(error: unknown): string {
   if (error instanceof EngineCallError) {
-    return `${error.code}: ${error.message}`;
+    // The daemon's remedy travels with its code and message. This used to render
+    // `${code}: ${message}` and drop the third field, so a partial report carried
+    // an error with no `{code, message, remedy}` shape — the one invariant every
+    // other site in this file keeps, and the reason an agent reading a failed
+    // fetch has an next move rather than a diagnosis (review 2026-10-09 finding 5).
+    return formatToolErrorShape(error.toBody());
   }
   const mapped = mapEvidenceReadError(error);
   if (mapped !== undefined) {
@@ -2194,11 +2385,20 @@ async function recentReports(
   }
 
   if (packs.length === 0) {
+    // Every id this shell sent came back `GP_E_NO_EVIDENCE`. That is the daemon
+    // saying its bounded history holds no pack for the id — it is *not* a
+    // statement that the operation never ran, and the trail this report was built
+    // from is this session's own record that those calls were admitted. The
+    // sentence this branch used to carry stated a cause nothing here measures ("the
+    // engine may have restarted") and its remedy ordered "re-run gp_act", i.e. a
+    // second press of an action the trail already records as performed, which
+    // contradicts the timeout branch above and the failure note below, both of
+    // which forbid exactly that (review 2026-10-09 finding 4).
     return {
       content: [{ type: "text", text: formatToolError(
         GP_E_NO_EVIDENCE,
-        "no recent evidence is reachable in the daemon history",
-        "the engine may have restarted; re-run gp_act / gp_assert_element to regenerate evidence",
+        `no pack is reachable in the daemon history for any of the ${ids.length} ${ids.length === 1 ? "operation" : "operations"} this shell asked about: each was answered GP_E_NO_EVIDENCE (${renderTrailIds(skipped, format)})`,
+        "these operations are recorded in this session's trail, and the daemon holding no pack for them is a fact about its bounded history, not evidence that they did not run — this call measured nothing about a restart, so no cause is claimed here. Read one of them by id with gp_last_evidence {operationId} / gp_export_evidence {operationId}, or ask again with a smaller limit (gp_recent_reports advertises 1…20). Do not re-run gp_act to regenerate what the trail already holds",
       ) }],
       isError: true,
     };
@@ -2248,8 +2448,16 @@ async function recentReports(
   return { content: [{ type: "text", text: sections.join("\n") }], isError: false };
 }
 
-/** Error mapping shared by the audit tools (spec v1.3 §10.3 / P0 §3.4). */
-function mapAuditError(error: unknown): ToolResult {
+/**
+ * Error mapping shared by the audit tools (spec v1.3 §10.3 / P0 §3.4).
+ *
+ * `engineMethod` names the engine request the audit tool was making when the fault
+ * arose (`last_evidence` for both callers today), because the remedy has to know
+ * whether repeating this call is a read or a re-issue — the tool's own pseudo-method
+ * `recent_reports` appears in no classification list and would answer "safe to
+ * repeat" for a call whose inner frame was an `act`.
+ */
+function mapAuditError(error: unknown, engineMethod = "last_evidence"): ToolResult {
   if (error instanceof EngineCallError) {
     return {
       content: [{ type: "text", text: formatToolErrorShape(error.toBody()) }],
@@ -2264,7 +2472,7 @@ function mapAuditError(error: unknown): ToolResult {
     content: [{ type: "text", text: formatToolError(
       GP_E_INTERNAL,
       `internal shell error: ${String(error)}`,
-      "see the MCP server logs and retry",
+      shellFaultRemedy(engineMethod),
     ) }],
     isError: true,
   };

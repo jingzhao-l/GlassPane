@@ -6,6 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { readUpdateState, runtimeIsUsable, updateStateFile, STATE_DIR_ENV, CA_ROOTS_STATUSES, RUNTIME_STATUSES } from "../dist/update-state.js";
+import { EvidenceAuditSession } from "../dist/audit-session.js";
 import { executeTool, TOOL_BY_NAME } from "../dist/tools.js";
 import { makeEngine } from "./helpers.mjs";
 
@@ -76,7 +77,7 @@ async function diagnoseWithCaRoots(caRoots, extra = {}) {
     fs.writeFileSync(path.join(root, "update-state.json"), JSON.stringify(body), { mode: 0o600 });
     const spec = TOOL_BY_NAME.get("gp_diagnose");
     const { engine, io } = makeEngine();
-    const promise = executeTool(spec, {}, engine);
+    const promise = executeTool(spec, {}, engine, new EvidenceAuditSession());
     io.lastFrame();
     io.respond({ class: "T1", summary: "ok" });
     const outcome = await promise;
@@ -194,7 +195,9 @@ test("caRoots: probe-failed says the bundle landed and still could not reach a r
   // §6 of the update spec: a remedy that is wrong for the state becomes a new source of
   // misdirection. Telling this reader to export the variable would be exactly that.
   assert.match(caLine, /changes nothing while the signing root is missing/);
-  assert.match(caLine, /node updater\/cli\.js enable/);
+  assert.match(caLine, /node \/[^`\s]+\/updater\/cli\.js enable/,
+    "review 2026-10-09 finding 12: the enable step has to be an absolute path, not `node updater/cli.js` resolved against whatever directory the reader is standing in");
+  assert.doesNotMatch(caLine, /`node updater\/cli\.js/, caLine);
 });
 
 test("caRoots: empty with a bundle kept from an earlier export says the bundle is stale, not missing", async () => {
@@ -264,7 +267,9 @@ test("caRoots: null reads as this install never exported, never as fine", async 
   assert.match(caLine, /NOT the same as "the bundle is fine"/);
   assert.match(caLine, /every auto-update run fails certificate verification/);
   assert.match(caLine, /Remedy:/);
-  assert.match(caLine, /node updater\/cli\.js enable/);
+  assert.match(caLine, /node \/[^`\s]+\/updater\/cli\.js enable/,
+    "review 2026-10-09 finding 12: the enable step has to be an absolute path, not `node updater/cli.js` resolved against whatever directory the reader is standing in");
+  assert.doesNotMatch(caLine, /`node updater\/cli\.js/, caLine);
   assert.match(caLine, new RegExp(`export NODE_EXTRA_CA_CERTS=${bundlePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
     "the terminal remedy has to name the file it would point at");
   assert.match(caLine, /before node starts/,
@@ -395,7 +400,8 @@ test("runtime: failed says the update installed and the updater itself did not, 
   // reader to the wrong door — "update failed" hides the installed version, "fine" hides this.
   assert.match(runtimeLine, /This is NOT "the update failed"/);
   assert.match(runtimeLine, /the previous copy still does/);
-  assert.match(runtimeLine, /node installer\/cli\.js/, "the reinstall has to be the command, not a promise");
+  assert.match(runtimeLine, /node \/[^`\s]+\/installer\/cli\.js/,
+    "the reinstall has to be the command, not a promise — and an absolute one (review 2026-10-09 finding 12)");
   // The re-register command is built from the record's own script path and the state root
   // this shell actually resolved, so what an agent pastes is a command for this machine.
   assert.match(runtimeLine, new RegExp(`node ${escapeRe(RUNTIME_ROOT)} enable --state-dir ${escapeRe(root)} --json`),
@@ -481,7 +487,9 @@ test("runtime: absent and explicit null both read as 'never recorded', and the c
   assert.notEqual(absent.runtimeLine, nulled.runtimeLine, "the two routes are said differently");
   for (const line of [absent.runtimeLine, nulled.runtimeLine]) {
     assert.match(line, /NOT the same as/);
-    assert.match(line, /node installer\/cli\.js/, "one manual reinstall is the only thing that ends this");
+    assert.match(line, /node \/[^`\s]+\/installer\/cli\.js/,
+      "one manual reinstall is the only thing that ends this, so the line has to name a runnable absolute command");
+    assert.doesNotMatch(line, /`node installer\/cli\.js/, line);
     assert.match(line, /predates|never recorded/);
     assert.equal(line.includes("updater self-update: refreshed"), false, line);
   }
@@ -653,7 +661,7 @@ test("gp_diagnose carries the update state as a separate block, leaving the JSON
     process.env[STATE_DIR_ENV] = root;
     const { engine, io } = makeEngine();
     const spec = TOOL_BY_NAME.get("gp_diagnose");
-    const promise = executeTool(spec, {}, engine);
+    const promise = executeTool(spec, {}, engine, new EvidenceAuditSession());
     io.lastFrame();
     io.respond({ class: "T1", summary: "ok" });
     const outcome = await promise;
@@ -673,7 +681,7 @@ test("gp_observe does not gain the update block", async () => {
   // this half, "append it to every forwarded reply" would pass the test above.
   const { engine, io } = makeEngine();
   const spec = TOOL_BY_NAME.get("gp_observe");
-  const promise = executeTool(spec, { maxDepth: 2 }, engine);
+  const promise = executeTool(spec, { maxDepth: 2 }, engine, new EvidenceAuditSession());
   io.lastFrame();
   io.respond({ tree: {} });
   const outcome = await promise;

@@ -461,13 +461,20 @@ test("a timed-out call keeps its entry so the late reply is still delivered", as
   assert.ok(notes.some((note) => /still in flight/.test(note)), notes.join(" | "));
 
   // The daemon finishes the work after the shell already answered: the real
-  // result must reach the log instead of being dropped on the floor, and a
-  // later call on the same client must still work.
+  // result must reach the late-reply sink — the one place that can put its
+  // operationId into a trail — instead of being dropped on the floor, and the log
+  // line says only that an answer came and how big it was (review 2026-10-09
+  // finding 3: that body is the user's screen, and stderr is not where it goes).
+  const lateBodies = [];
+  client.onLateReply((reply) => lateBodies.push(reply));
   io.send(JSON.stringify({ id: frame.id, result: { tree: "the-real-answer" } }));
+  await new Promise((resolve) => setImmediate(resolve));
   const late = notes.find((note) => /late engine reply/.test(note));
   assert.ok(late, `expected a late-reply note, saw: ${notes.join(" | ")}`);
   assert.match(late, /'observe'/);
-  assert.match(late, /the-real-answer/);
+  assert.match(late, /\d+-byte body/, late);
+  assert.doesNotMatch(late, /the-real-answer/, `a reply body reached stderr: ${late}`);
+  assert.deepEqual(lateBodies.map((reply) => reply.result), [{ tree: "the-real-answer" }]);
 
   const survivor = client.call("snapshot");
   io.respond({ snapshotId: "snap_OK" });
@@ -839,13 +846,25 @@ test("an act that outlives the ceiling is answered with the timeout code and rem
   );
   assert.ok(notes.some((note) => /still in flight/.test(note)), notes.join(" | "));
 
-  // Answering early must not throw the reply away — this is where an agent (or
-  // a human reading the log) finds out what the click actually did.
+  // Answering early must not throw the reply away — and the place the reply's
+  // *content* has to survive is the late-reply sink (the audit trail reads the
+  // operationId out of it), not this process's stderr. Review 2026-10-09 finding 3
+  // moved the body out of the log line, because an `observe`/`act` reply is the
+  // accessibility tree of the user's screen and stderr is captured by whoever
+  // started this server; the note keeps which request, which id, and how big.
+  const seen = [];
+  client.onLateReply((reply) => seen.push(reply));
   const actFrame = sockets[0].frames()[0];
   sockets[0].deliver({ id: actFrame.id, result: { operationId: "op_X", actConfirmed: true } });
+  await nextTick();
   const late = notes.find((note) => /late engine reply for 'act'/.test(note));
   assert.ok(late, `expected a late-reply note, saw: ${notes.join(" | ")}`);
-  assert.match(late, /actConfirmed/);
+  assert.match(late, /'act'/);
+  assert.match(late, /\(id 0\)/);
+  assert.match(late, /\d+-byte body/);
+  assert.doesNotMatch(late, /actConfirmed|op_X/, `屏幕上的内容不能整段抄进日志：${late}`);
+  assert.equal(seen.length, 1, "the body still travels to the sink the trail reads from");
+  assert.equal(seen[0].result.operationId, "op_X");
 
   // And the same client keeps serving cheap calls after the capped one settled.
   const status = client.call("probe_status");

@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { AGENT_PATH_PROTECTION } from "../dist/project-registry.js";
+import { EvidenceAuditSession } from "../dist/audit-session.js";
 import {
   FORCE_OVERWRITE_ENV,
   PROJECTS_FILE_ENV,
@@ -526,7 +527,7 @@ test("gp_project_set surfaces the restart requirement in the tool result", async
   const reg = useRegistry();
   try {
     const { engine } = makeEngine();
-    const outcome = await executeTool(TOOL_BY_NAME.get("gp_project_set"), baseArgs, engine);
+    const outcome = await executeTool(TOOL_BY_NAME.get("gp_project_set"), baseArgs, engine, new EvidenceAuditSession());
     assert.equal(outcome.isError, false, outcome.content[0].text);
     const parsed = JSON.parse(outcome.content[0].text);
     assert.equal(parsed.project.requiresDaemonRestart, true);
@@ -537,6 +538,7 @@ test("gp_project_set surfaces the restart requirement in the tool result", async
       TOOL_BY_NAME.get("gp_project_set"),
       { ...baseArgs, evidenceStoragePath: "/tmp" },
       engine,
+      new EvidenceAuditSession(),
     );
     assert.equal(bad.isError, true);
     assert.ok(bad.content[0].text.startsWith("GP_E_BAD_PARAMS"), bad.content[0].text);
@@ -547,6 +549,7 @@ test("gp_project_set surfaces the restart requirement in the tool result", async
       TOOL_BY_NAME.get("gp_project_set"),
       { displayName: "Notes", pid: 3_000_000_000 },
       engine,
+      new EvidenceAuditSession(),
     );
     assert.equal(overflow.isError, true);
     assert.ok(overflow.content[0].text.startsWith("GP_E_BAD_PARAMS"), overflow.content[0].text);
@@ -604,6 +607,7 @@ test("an explicit null switches the identity and clears a path field; omitting k
       TOOL_BY_NAME.get("gp_project_set"),
       { ...baseArgs, evidenceStoragePath: reg.storageDir, recipeConfigPath: recipe },
       engine,
+      new EvidenceAuditSession(),
     );
     assert.equal(created.isError, false, created.content[0].text);
     const projectId = JSON.parse(created.content[0].text).project.projectId;
@@ -613,6 +617,7 @@ test("an explicit null switches the identity and clears a path field; omitting k
       TOOL_BY_NAME.get("gp_project_set"),
       { projectId, displayName: "Notes", bundleId: null, pid: 4242 },
       engine,
+      new EvidenceAuditSession(),
     );
     assert.equal(switched.isError, false, switched.content[0].text);
     const entry = JSON.parse(switched.content[0].text).project;

@@ -80,7 +80,8 @@ test("gp_act forwards degrade and rejects a non-boolean value", async () => {
   const promise = executeTool(
     act,
     { selector: { role: "button", title: "Submit" }, action: "press", degrade: true },
-    engine
+    engine,
+    new EvidenceAuditSession()
   );
   const frame = io.lastFrame();
   assert.equal(frame.params.degrade, true);
@@ -90,7 +91,8 @@ test("gp_act forwards degrade and rejects a non-boolean value", async () => {
   const bad = await executeTool(
     act,
     { selector: { role: "button" }, action: "press", degrade: "yes" },
-    engine
+    engine,
+    new EvidenceAuditSession()
   );
   assert.equal(bad.isError, true);
   assert.ok(bad.content[0].text.startsWith("GP_E_BAD_PARAMS"));
@@ -99,7 +101,7 @@ test("gp_act forwards degrade and rejects a non-boolean value", async () => {
 test("executeTool rejects invalid arguments as GP_E_BAD_PARAMS isError", async () => {
   const { engine } = makeEngine();
   const act = TOOL_BY_NAME.get("gp_act");
-  const outcome = await executeTool(act, { selector: { role: "button" } }, engine); // missing action
+  const outcome = await executeTool(act, { selector: { role: "button" } }, engine, new EvidenceAuditSession()); // missing action
   assert.equal(outcome.isError, true);
   const text = outcome.content[0].text;
   assert.ok(text.startsWith("GP_E_BAD_PARAMS"));
@@ -112,7 +114,7 @@ test("executeTool forwards valid arguments and returns canonical JSON result", a
   const { engine, io } = makeEngine();
   const result = { operationId: "op_0123456789ABCDEFGHJKMNPQRS", actConfirmed: true };
   const act = TOOL_BY_NAME.get("gp_act");
-  const promise = executeTool(act, { selector: { role: "button", title: "Submit" }, action: "press" }, engine);
+  const promise = executeTool(act, { selector: { role: "button", title: "Submit" }, action: "press" }, engine, new EvidenceAuditSession());
   const frame = io.lastFrame();
   assert.equal(frame.method, "act");
   assert.equal(frame.params.selector.title, "Submit");
@@ -126,7 +128,7 @@ test("executeTool forwards valid arguments and returns canonical JSON result", a
 test("executeTool maps an engine error frame to isError with GP_E prefix", async () => {
   const { engine, io } = makeEngine();
   const diag = TOOL_BY_NAME.get("gp_diagnose");
-  const promise = executeTool(diag, {}, engine);
+  const promise = executeTool(diag, {}, engine, new EvidenceAuditSession());
   io.respondError({ code: "GP_E_NOT_ATTACHED", message: "no app attached", remedy: "call attach first" });
   const outcome = await promise;
   assert.equal(outcome.isError, true);
@@ -137,7 +139,7 @@ test("executeTool maps an engine error frame to isError with GP_E prefix", async
 test("last_evidence passes through a valid evidence pack (spec §6.3)", async () => {
   const { engine, io } = makeEngine();
   const lv = TOOL_BY_NAME.get("gp_last_evidence");
-  const promise = executeTool(lv, {}, engine);
+  const promise = executeTool(lv, {}, engine, new EvidenceAuditSession());
   io.respond({
     evidencePack: {
       schemaVersion: "glasspane.evidence/0.1",
@@ -164,7 +166,7 @@ test("last_evidence passes through a valid evidence pack (spec §6.3)", async ()
 test("last_evidence passes through a probe-carrying pack (P6 §3.1 null→object)", async () => {
   const { engine, io } = makeEngine();
   const lv = TOOL_BY_NAME.get("gp_last_evidence");
-  const promise = executeTool(lv, {}, engine);
+  const promise = executeTool(lv, {}, engine, new EvidenceAuditSession());
   io.respond({
     evidencePack: {
       schemaVersion: "glasspane.evidence/0.1",
@@ -194,7 +196,7 @@ test("last_evidence passes through a probe-carrying pack (P6 §3.1 null→object
 test("gp_probe_status forwards an argument-less probe_status call (P6 §5.4)", async () => {
   const { engine, io } = makeEngine();
   const tool = TOOL_BY_NAME.get("gp_probe_status");
-  const promise = executeTool(tool, {}, engine);
+  const promise = executeTool(tool, {}, engine, new EvidenceAuditSession());
   const frame = io.lastFrame();
   assert.equal(frame.method, "probe_status");
   io.respond({ probes: [{ pid: 4242, appName: "probe-demo", probeVersion: "gp-probe/0.1.0", capabilities: ["z1", "z3", "checkpoint"], eventsSeen: 7 }], attachedHasProbe: true });
@@ -206,7 +208,7 @@ test("gp_probe_status forwards an argument-less probe_status call (P6 §5.4)", a
 test("last_evidence rejects a schema-violating pack as isError (spec §6.3)", async () => {
   const { engine, io } = makeEngine();
   const lv = TOOL_BY_NAME.get("gp_last_evidence");
-  const promise = executeTool(lv, {}, engine);
+  const promise = executeTool(lv, {}, engine, new EvidenceAuditSession());
   // operationId violates the op_ pattern and createdAt is not ISO-8601 UTC.
   io.respond({ evidencePack: { schemaVersion: "nope", operationId: "bad", createdAt: "x", attribution: {}, circuitBreaker: {}, signals: {} } });
   const outcome = await promise;
@@ -221,7 +223,7 @@ test("last_evidence rejects a schema-violating pack as isError (spec §6.3)", as
 test("last_evidence rejects a malformed frame (no evidencePack) as isError", async () => {
   const { engine, io } = makeEngine();
   const lv = TOOL_BY_NAME.get("gp_last_evidence");
-  const promise = executeTool(lv, {}, engine);
+  const promise = executeTool(lv, {}, engine, new EvidenceAuditSession());
   io.respond({ unexpected: true });
   const outcome = await promise;
   assert.equal(outcome.isError, true);
@@ -232,7 +234,7 @@ test("gp_snapshot forwards maxDepth and returns the snapshot result", async () =
   const { engine, io } = makeEngine();
   const snap = TOOL_BY_NAME.get("gp_snapshot");
   const result = { snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS", treeDigest: "d".repeat(32), nodeCount: 12, capturedAt: "2026-09-16T00:00:00.000Z", latencyMs: 3 };
-  const promise = executeTool(snap, { maxDepth: 4 }, engine);
+  const promise = executeTool(snap, { maxDepth: 4 }, engine, new EvidenceAuditSession());
   const frame = io.lastFrame();
   assert.equal(frame.method, "snapshot");
   assert.equal(frame.params.maxDepth, 4);
@@ -245,7 +247,7 @@ test("gp_snapshot forwards maxDepth and returns the snapshot result", async () =
 test("gp_snapshot rejects out-of-range maxDepth as GP_E_BAD_PARAMS", async () => {
   const { engine, io } = makeEngine();
   const snap = TOOL_BY_NAME.get("gp_snapshot");
-  const outcome = await executeTool(snap, { maxDepth: 11 }, engine);
+  const outcome = await executeTool(snap, { maxDepth: 11 }, engine, new EvidenceAuditSession());
   assert.equal(outcome.isError, true);
   assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"));
   assert.equal(engine.io.sent.length, 0);
@@ -258,7 +260,7 @@ test("gp_restore forwards snapshotId, steps and mode, returning restore result",
   const promise = executeTool(restore, {
     snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS",
     steps: [{ selector: { role: "AXButton" }, action: "press" }],
-  }, engine);
+  }, engine, new EvidenceAuditSession());
   const frame = io.lastFrame();
   assert.equal(frame.method, "restore");
   assert.equal(frame.params.snapshotId, "snap_0123456789ABCDEFGHJKMNPQRS");
@@ -272,7 +274,7 @@ test("gp_restore forwards snapshotId, steps and mode, returning restore result",
 test("gp_restore rejects a malformed snapshotId as GP_E_BAD_PARAMS", async () => {
   const { engine, io } = makeEngine();
   const restore = TOOL_BY_NAME.get("gp_restore");
-  const outcome = await executeTool(restore, { snapshotId: "op_0123456789ABCDEFGHJKMNPQRS" }, engine);
+  const outcome = await executeTool(restore, { snapshotId: "op_0123456789ABCDEFGHJKMNPQRS" }, engine, new EvidenceAuditSession());
   assert.equal(outcome.isError, true);
   assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"));
   assert.equal(engine.io.sent.length, 0);
@@ -282,7 +284,7 @@ test("gp_restore rejects steps beyond 64 entries as GP_E_BAD_PARAMS", async () =
   const { engine, io } = makeEngine();
   const restore = TOOL_BY_NAME.get("gp_restore");
   const steps = Array.from({ length: 65 }, () => ({ selector: { role: "AXButton" }, action: "press" }));
-  const outcome = await executeTool(restore, { snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS", steps }, engine);
+  const outcome = await executeTool(restore, { snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS", steps }, engine, new EvidenceAuditSession());
   assert.equal(outcome.isError, true);
   assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"));
   assert.equal(engine.io.sent.length, 0);
@@ -332,7 +334,7 @@ const T3_DIAGNOSIS = {
 test("gp_export_evidence renders the four-section markdown report", async () => {
   const { engine, io } = makeEngine();
   const exportTool = TOOL_BY_NAME.get("gp_export_evidence");
-  const promise = executeTool(exportTool, { operationId: OP_A }, engine);
+  const promise = executeTool(exportTool, { operationId: OP_A }, engine, new EvidenceAuditSession());
   const frame = io.lastFrame();
   assert.equal(frame.method, "last_evidence");
   assert.equal(frame.params.operationId, OP_A);
@@ -351,7 +353,7 @@ test("gp_export_evidence renders the four-section markdown report", async () => 
 test("gp_export_evidence renders HTML when format=html", async () => {
   const { engine, io } = makeEngine();
   const exportTool = TOOL_BY_NAME.get("gp_export_evidence");
-  const promise = executeTool(exportTool, { operationId: OP_A, format: "html" }, engine);
+  const promise = executeTool(exportTool, { operationId: OP_A, format: "html" }, engine, new EvidenceAuditSession());
   io.respond(evidenceFrame(OP_A, T3_DIAGNOSIS));
   const outcome = await promise;
   assert.equal(outcome.isError, false);
@@ -363,7 +365,7 @@ test("gp_export_evidence renders HTML when format=html", async () => {
 test("gp_export_evidence rejects a malformed operationId as GP_E_BAD_PARAMS", async () => {
   const { engine } = makeEngine();
   const exportTool = TOOL_BY_NAME.get("gp_export_evidence");
-  const outcome = await executeTool(exportTool, { operationId: "nope" }, engine);
+  const outcome = await executeTool(exportTool, { operationId: "nope" }, engine, new EvidenceAuditSession());
   assert.equal(outcome.isError, true);
   assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"));
   assert.equal(engine.io.sent.length, 0);
@@ -372,7 +374,7 @@ test("gp_export_evidence rejects a malformed operationId as GP_E_BAD_PARAMS", as
 test("gp_export_evidence rejects an unknown format as GP_E_BAD_PARAMS", async () => {
   const { engine } = makeEngine();
   const exportTool = TOOL_BY_NAME.get("gp_export_evidence");
-  const outcome = await executeTool(exportTool, { operationId: OP_A, format: "pdf" }, engine);
+  const outcome = await executeTool(exportTool, { operationId: OP_A, format: "pdf" }, engine, new EvidenceAuditSession());
   assert.equal(outcome.isError, true);
   assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"));
   assert.equal(engine.io.sent.length, 0);
@@ -381,7 +383,7 @@ test("gp_export_evidence rejects an unknown format as GP_E_BAD_PARAMS", async ()
 test("gp_export_evidence maps engine GP_E_NO_EVIDENCE through to the agent", async () => {
   const { engine, io } = makeEngine();
   const exportTool = TOOL_BY_NAME.get("gp_export_evidence");
-  const promise = executeTool(exportTool, { operationId: OP_A }, engine);
+  const promise = executeTool(exportTool, { operationId: OP_A }, engine, new EvidenceAuditSession());
   io.respondError({ code: "GP_E_NO_EVIDENCE", message: "unknown operationId op_...", remedy: "check the operationId" });
   const outcome = await promise;
   assert.equal(outcome.isError, true);
@@ -391,7 +393,7 @@ test("gp_export_evidence maps engine GP_E_NO_EVIDENCE through to the agent", asy
 test("gp_export_evidence rejects a schema-violating pack as GP_E_INTERNAL", async () => {
   const { engine, io } = makeEngine();
   const exportTool = TOOL_BY_NAME.get("gp_export_evidence");
-  const promise = executeTool(exportTool, { operationId: OP_A }, engine);
+  const promise = executeTool(exportTool, { operationId: OP_A }, engine, new EvidenceAuditSession());
   io.respond({ evidencePack: { operationId: "bad", createdAt: "x", attribution: {}, circuitBreaker: {}, signals: {} } });
   const outcome = await promise;
   assert.equal(outcome.isError, true);
@@ -609,7 +611,7 @@ test("the trail-ordered set is the tools whose frames build the trail", () => {
 test("gp_recent_reports with no recorded operations is GP_E_NO_EVIDENCE", async () => {
   const { engine } = makeEngine();
   const recent = TOOL_BY_NAME.get("gp_recent_reports");
-  const outcome = await executeTool(recent, {}, engine);
+  const outcome = await executeTool(recent, {}, engine, new EvidenceAuditSession());
   assert.equal(outcome.isError, true);
   assert.ok(outcome.content[0].text.startsWith("GP_E_NO_EVIDENCE"));
   assert.equal(engine.io.sent.length, 0);
@@ -618,10 +620,10 @@ test("gp_recent_reports with no recorded operations is GP_E_NO_EVIDENCE", async 
 test("gp_recent_reports limits out of 1–20 as GP_E_BAD_PARAMS", async () => {
   const { engine } = makeEngine();
   const recent = TOOL_BY_NAME.get("gp_recent_reports");
-  const outcome = await executeTool(recent, { limit: 0 }, engine);
+  const outcome = await executeTool(recent, { limit: 0 }, engine, new EvidenceAuditSession());
   assert.equal(outcome.isError, true);
   assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"));
-  const outcomeMax = await executeTool(recent, { limit: 21 }, engine);
+  const outcomeMax = await executeTool(recent, { limit: 21 }, engine, new EvidenceAuditSession());
   assert.equal(outcomeMax.isError, true);
   assert.ok(outcomeMax.content[0].text.startsWith("GP_E_BAD_PARAMS"));
 });
@@ -797,7 +799,7 @@ test("gp_project_list returns an empty registry", async () => {
   const { engine } = makeEngine();
   await withProjectsFile(async () => {
     const tool = TOOL_BY_NAME.get("gp_project_list");
-    const outcome = await executeTool(tool, {}, engine);
+    const outcome = await executeTool(tool, {}, engine, new EvidenceAuditSession());
     assert.equal(outcome.isError, false);
     const parsed = JSON.parse(outcome.content[0].text);
     assert.deepEqual(parsed.projects, []);
@@ -810,20 +812,20 @@ test("gp_project_set creates a project and gp_project_get / list read it back", 
   const { engine } = makeEngine();
   await withProjectsFile(async () => {
     const setTool = TOOL_BY_NAME.get("gp_project_set");
-    const setOutcome = await executeTool(setTool, { displayName: "Notes", bundleId: "com.notes" }, engine);
+    const setOutcome = await executeTool(setTool, { displayName: "Notes", bundleId: "com.notes" }, engine, new EvidenceAuditSession());
     assert.equal(setOutcome.isError, false);
     const setParsed = JSON.parse(setOutcome.content[0].text);
     const project = setParsed.project;
     assert.match(project.projectId, /^prj_[0-9A-HJKMNP-TV-Z]{26}$/);
 
     const getTool = TOOL_BY_NAME.get("gp_project_get");
-    const getOutcome = await executeTool(getTool, { projectId: project.projectId }, engine);
+    const getOutcome = await executeTool(getTool, { projectId: project.projectId }, engine, new EvidenceAuditSession());
     assert.equal(getOutcome.isError, false);
     const getParsed = JSON.parse(getOutcome.content[0].text);
     assert.equal(getParsed.project.displayName, "Notes");
     assert.equal(getParsed.project.bundleId, "com.notes");
 
-    const listOutcome = await executeTool(TOOL_BY_NAME.get("gp_project_list"), {}, engine);
+    const listOutcome = await executeTool(TOOL_BY_NAME.get("gp_project_list"), {}, engine, new EvidenceAuditSession());
     const listParsed = JSON.parse(listOutcome.content[0].text);
     assert.equal(listParsed.projects.length, 1);
   });
@@ -833,15 +835,15 @@ test("gp_project_set updates an existing project by projectId", async () => {
   const { engine } = makeEngine();
   await withProjectsFile(async () => {
     const setTool = TOOL_BY_NAME.get("gp_project_set");
-    const created = await executeTool(setTool, { displayName: "A", pid: 111 }, engine);
+    const created = await executeTool(setTool, { displayName: "A", pid: 111 }, engine, new EvidenceAuditSession());
     const { projectId } = JSON.parse(created.content[0].text).project;
 
-    const updated = await executeTool(setTool, { projectId, displayName: "A2", pid: 222 }, engine);
+    const updated = await executeTool(setTool, { projectId, displayName: "A2", pid: 222 }, engine, new EvidenceAuditSession());
     const updatedProject = JSON.parse(updated.content[0].text).project;
     assert.equal(updatedProject.displayName, "A2");
     assert.equal(updatedProject.pid, 222);
 
-    const get = await executeTool(TOOL_BY_NAME.get("gp_project_get"), { projectId }, engine);
+    const get = await executeTool(TOOL_BY_NAME.get("gp_project_get"), { projectId }, engine, new EvidenceAuditSession());
     assert.equal(JSON.parse(get.content[0].text).project.displayName, "A2");
   });
 });
@@ -850,7 +852,7 @@ test("gp_project_get unknown id maps to GP_E_NOT_FOUND", async () => {
   const { engine } = makeEngine();
   await withProjectsFile(async () => {
     const getTool = TOOL_BY_NAME.get("gp_project_get");
-    const outcome = await executeTool(getTool, { projectId: "prj_99999999999999999999999999" }, engine);
+    const outcome = await executeTool(getTool, { projectId: "prj_99999999999999999999999999" }, engine, new EvidenceAuditSession());
     assert.equal(outcome.isError, true);
     assert.ok(outcome.content[0].text.startsWith("GP_E_NOT_FOUND"));
   });
@@ -860,7 +862,7 @@ test("gp_project_set rejects missing bundleId/pid as GP_E_BAD_PARAMS", async () 
   const { engine } = makeEngine();
   await withProjectsFile(async () => {
     const setTool = TOOL_BY_NAME.get("gp_project_set");
-    const outcome = await executeTool(setTool, { displayName: "No Target" }, engine);
+    const outcome = await executeTool(setTool, { displayName: "No Target" }, engine, new EvidenceAuditSession());
     assert.equal(outcome.isError, true);
     assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"));
     assert.equal(engine.io.sent.length, 0);
@@ -871,7 +873,7 @@ test("gp_project_set rejects empty displayName as GP_E_BAD_PARAMS", async () => 
   const { engine } = makeEngine();
   await withProjectsFile(async () => {
     const setTool = TOOL_BY_NAME.get("gp_project_set");
-    const outcome = await executeTool(setTool, { displayName: "", bundleId: "com.x" }, engine);
+    const outcome = await executeTool(setTool, { displayName: "", bundleId: "com.x" }, engine, new EvidenceAuditSession());
     assert.equal(outcome.isError, true);
     assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"));
   });
@@ -881,7 +883,7 @@ test("gp_project_get rejects malformed projectId as GP_E_BAD_PARAMS", async () =
   const { engine } = makeEngine();
   await withProjectsFile(async () => {
     const getTool = TOOL_BY_NAME.get("gp_project_get");
-    const outcome = await executeTool(getTool, { projectId: "op_0123456789ABCDEFGHJKMNPQRS" }, engine);
+    const outcome = await executeTool(getTool, { projectId: "op_0123456789ABCDEFGHJKMNPQRS" }, engine, new EvidenceAuditSession());
     assert.equal(outcome.isError, true);
     assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"));
     assert.equal(engine.io.sent.length, 0);
@@ -919,7 +921,7 @@ function withCorruptRegistry(t) {
 test("gp_project_list answers an unreadable registry as a structured GP_E_INTERNAL", async () => {
   const { engine } = makeEngine();
   await withCorruptRegistry(async (tmp) => {
-    const outcome = await executeTool(TOOL_BY_NAME.get("gp_project_list"), {}, engine);
+    const outcome = await executeTool(TOOL_BY_NAME.get("gp_project_list"), {}, engine, new EvidenceAuditSession());
     assert.equal(outcome.isError, true, "the tool must answer, never reject");
     const text = outcome.content[0].text;
     assert.ok(text.startsWith("GP_E_INTERNAL"), text);
@@ -933,9 +935,13 @@ test("gp_project_list answers an unreadable registry as a structured GP_E_INTERN
 test("the list remedy repairs the file instead of sending the agent to the logs", async () => {
   const { engine } = makeEngine();
   await withCorruptRegistry(async (tmp) => {
-    const text = (await executeTool(TOOL_BY_NAME.get("gp_project_list"), {}, engine)).content[0].text;
+    const text = (await executeTool(TOOL_BY_NAME.get("gp_project_list"), {}, engine, new EvidenceAuditSession())).content[0].text;
     const remedy = text.slice(text.indexOf("| remedy:"));
-    assert.ok(remedy.includes("python3 -m json.tool"), remedy);
+    // Review 2026-10-09 finding 12: a remedy has to run from wherever the reader
+    // is, so the file is read through an absolute binary rather than `python3`
+    // (a PATH guess) or a repo-relative script.
+    assert.ok(/\/usr\/bin\/plutil -p|\/bin\/cat/.test(remedy), remedy);
+    assert.ok(!remedy.includes("python3"), `a PATH-dependent command is back in the remedy: ${remedy}`);
     assert.ok(remedy.includes(FORCE_OVERWRITE_ENV), `the documented escape hatch must be named: ${remedy}`);
     assert.ok(!remedy.includes("MCP server logs"), `the old default remedy points away from the damage: ${remedy}`);
     assert.ok(!remedy.includes("input schema"), `a read failure is not a parameter problem: ${remedy}`);
@@ -949,6 +955,7 @@ test("gp_project_get maps the unreadable registry the same way", async () => {
       TOOL_BY_NAME.get("gp_project_get"),
       { projectId: "prj_0123456789ABCDEFGHJKMNPQRS" },
       engine,
+      new EvidenceAuditSession(),
     );
     assert.equal(outcome.isError, true);
     const text = outcome.content[0].text;
@@ -964,6 +971,7 @@ test("gp_project_set refuses the overwrite through the tool surface and leaves t
       TOOL_BY_NAME.get("gp_project_set"),
       { displayName: "Notes", bundleId: "com.notes" },
       engine,
+      new EvidenceAuditSession(),
     );
     assert.equal(outcome.isError, true);
     assert.ok(outcome.content[0].text.startsWith("GP_E_INTERNAL"), outcome.content[0].text);
@@ -1396,7 +1404,7 @@ test("no advice names a parameter the tool does not advertise", async () => {
 async function evidenceReadFailureText(frame) {
   const { engine, io } = makeEngine();
   const tool = TOOL_BY_NAME.get("gp_last_evidence");
-  const promise = executeTool(tool, {}, engine);
+  const promise = executeTool(tool, {}, engine, new EvidenceAuditSession());
   io.respond(frame);
   const outcome = await promise;
   assert.equal(outcome.isError, true);
@@ -1624,11 +1632,11 @@ test("the project-limit remedy orders only actions this surface can perform", as
     const { engine } = makeEngine();
     const setTool = TOOL_BY_NAME.get("gp_project_set");
     for (let i = 0; i < MAX_PROJECTS; i++) {
-      const filled = await executeTool(setTool, { displayName: `Filler ${i}`, bundleId: `com.filler.${i}` }, engine);
+      const filled = await executeTool(setTool, { displayName: `Filler ${i}`, bundleId: `com.filler.${i}` }, engine, new EvidenceAuditSession());
       assert.equal(filled.isError, false, `第 ${i} 次注册必须成功，否则这条闸测的不是上限：${filled.content[0].text}`);
     }
     const outcome = await executeTool(
-      setTool, { displayName: "The one that does not fit", bundleId: "com.real.newapp" }, engine,
+      setTool, { displayName: "The one that does not fit", bundleId: "com.real.newapp" }, engine, new EvidenceAuditSession(),
     );
     assert.equal(outcome.isError, true);
     const text = outcome.content[0].text;
@@ -2419,7 +2427,7 @@ test("the shell refuses an empty selector.role instead of paying a round trip fo
   const act = TOOL_BY_NAME.get("gp_act");
   for (const selector of [{ role: "" }, { role: "", title: "Submit" }]) {
     const { engine } = makeEngine();
-    const outcome = await executeTool(act, { selector, action: "press" }, engine);
+    const outcome = await executeTool(act, { selector, action: "press" }, engine, new EvidenceAuditSession());
     assert.equal(rules.roleMustBeNonEmpty, true, "daemon 不再要求非空 role 了——这条判据要重读");
     assert.equal(outcome.isError, true, `role:"" 必须由壳层拒掉：${outcome.content[0].text}`);
     assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"), outcome.content[0].text);
@@ -2442,7 +2450,7 @@ test("an empty selector.title is refused because the evidence would print it as 
 
   const act = TOOL_BY_NAME.get("gp_act");
   const { engine } = makeEngine();
-  const outcome = await executeTool(act, { selector: { role: "AXButton", title: "" }, action: "press" }, engine);
+  const outcome = await executeTool(act, { selector: { role: "AXButton", title: "" }, action: "press" }, engine, new EvidenceAuditSession());
   assert.equal(outcome.isError, true);
   assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"), outcome.content[0].text);
   assert.equal(engine.io.sent.length, 0);
@@ -2452,13 +2460,13 @@ test("an empty selector.title is refused because the evidence would print it as 
   const stepped = await executeTool(restore, {
     snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS",
     steps: [{ selector: { role: "AXButton", title: "" }, action: "press" }],
-  }, engine);
+  }, engine, new EvidenceAuditSession());
   assert.ok(stepped.content[0].text.startsWith("GP_E_BAD_PARAMS"), stepped.content[0].text);
 
   // `identifier` is the field this rule deliberately does NOT extend to: an empty
   // identifier can only fail to resolve, so nothing here disagrees with anything.
   const ok = makeEngine();
-  const keptPromise = executeTool(act, { selector: { role: "AXButton", identifier: "" }, action: "press" }, ok.engine);
+  const keptPromise = executeTool(act, { selector: { role: "AXButton", identifier: "" }, action: "press" }, ok.engine, new EvidenceAuditSession());
   await flush();
   ok.io.respond({ operationId: OP_A, actConfirmed: true });
   const kept = await keptPromise;

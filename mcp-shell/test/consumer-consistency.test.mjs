@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 
 import {
   EVIDENCE_PACK_JSON_SCHEMA,
+  SELECTOR_MAX_LENGTH,
   SelectorSchema,
   parseEvidencePack,
   parseEvidencePackRead,
@@ -122,7 +123,7 @@ for (const file of EVIDENCE_FIXTURES) {
     const { engine, io } = makeEngine();
     const value = fixture(file);
     const tool = TOOL_BY_NAME.get("gp_last_evidence");
-    const promise = executeTool(tool, {}, engine);
+    const promise = executeTool(tool, {}, engine, new EvidenceAuditSession());
     // The daemon wraps the pack body in the last_evidence result frame.
     io.respond({ evidencePack: value });
     const outcome = await promise;
@@ -142,7 +143,7 @@ for (const file of EVIDENCE_FIXTURES) {
 test("failure/kernel-api: a schema-violating pack body fails zod with the C35 remedy", async () => {
   const { engine, io } = makeEngine();
   const tool = TOOL_BY_NAME.get("gp_last_evidence");
-  const promise = executeTool(tool, {}, engine);
+  const promise = executeTool(tool, {}, engine, new EvidenceAuditSession());
   io.respond({ evidencePack: { operationId: "bad" } });
   const outcome = await promise;
   assert.equal(outcome.isError, true);
@@ -172,7 +173,7 @@ test("failure/consumer-glue: a structurally broken frame is not reported as fixt
   for (const [frame, detail] of brokenFrames) {
     const { engine, io } = makeEngine();
     const tool = TOOL_BY_NAME.get("gp_last_evidence");
-    const promise = executeTool(tool, {}, engine);
+    const promise = executeTool(tool, {}, engine, new EvidenceAuditSession());
     io.respond(frame);
     const outcome = await promise;
     assert.equal(outcome.isError, true);
@@ -203,7 +204,7 @@ test("consumer-glue keeps the legacy archive byte-for-byte in the agent's answer
   const { engine, io } = makeEngine();
   const value = fixture("evidence-pack.ok-04-legacy-draft.json");
   const tool = TOOL_BY_NAME.get("gp_last_evidence");
-  const promise = executeTool(tool, {}, engine);
+  const promise = executeTool(tool, {}, engine, new EvidenceAuditSession());
   io.respond({ evidencePack: value });
   const outcome = await promise;
   assert.equal(outcome.isError, false);
@@ -217,7 +218,7 @@ test("consumer-glue gp_export_evidence renders a pack whose pixelDiff has no bou
   const { engine, io } = makeEngine();
   const value = fixture("evidence-pack.ok-05-pixelbounds-null.json");
   const tool = TOOL_BY_NAME.get("gp_export_evidence");
-  const promise = executeTool(tool, { operationId: value.operationId }, engine);
+  const promise = executeTool(tool, { operationId: value.operationId }, engine, new EvidenceAuditSession());
   io.respond({ evidencePack: value });
   const outcome = await promise;
   assert.equal(outcome.isError, false);
@@ -242,6 +243,7 @@ test("a legacy pack's report states the measured label and what it was read as",
     TOOL_BY_NAME.get("gp_export_evidence"),
     { operationId: value.operationId },
     engine,
+    new EvidenceAuditSession(),
   );
   io.respond({ evidencePack: value });
   const outcome = await promise;
@@ -311,7 +313,7 @@ test("gp_attach refuses pids outside the daemon's Int32 domain without a frame",
   const spec = TOOL_BY_NAME.get("gp_attach");
   for (const pid of [lower - 1, lower - 2, 1.5, upper + 1, 3_000_000_000]) {
     const { engine, io } = makeEngine();
-    const outcome = await executeTool(spec, { pid }, engine);
+    const outcome = await executeTool(spec, { pid }, engine, new EvidenceAuditSession());
     assert.equal(outcome.isError, true, `pid ${pid} must not reach the daemon`);
     assert.ok(
       outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"),
@@ -326,7 +328,7 @@ test("gp_attach accepts the boundary pids the daemon can hold", async () => {
   const spec = TOOL_BY_NAME.get("gp_attach");
   for (const pid of [lower, upper]) {
     const { engine, io } = makeEngine();
-    const promise = executeTool(spec, { pid }, engine);
+    const promise = executeTool(spec, { pid }, engine, new EvidenceAuditSession());
     io.respond({ pid, bundleId: "com.example.app", appName: "Example" });
     const outcome = await promise;
     assert.equal(outcome.isError, false, `pid ${pid} is inside the daemon's domain`);
@@ -385,7 +387,7 @@ test("gp_restore refuses a mode the daemon does not accept, without sending a fr
   const snapshotId = "snap_0123456789ABCDEFGHJKMNPQRS";
   for (const mode of ["restore executed: everything", "FFWD", "rollback", "compare ", ""]) {
     const { engine, io } = makeEngine();
-    const outcome = await executeTool(spec, { snapshotId, mode }, engine);
+    const outcome = await executeTool(spec, { snapshotId, mode }, engine, new EvidenceAuditSession());
     assert.equal(outcome.isError, true, `mode ${JSON.stringify(mode)} must not reach the daemon`);
     assert.ok(outcome.content[0].text.startsWith("GP_E_BAD_PARAMS"), outcome.content[0].text);
     assert.equal(io.sent.length, 0, "a refused mode never touches the socket");
@@ -397,7 +399,7 @@ test("every advertised restore mode passes the validator and is forwarded verbat
   const snapshotId = "snap_0123456789ABCDEFGHJKMNPQRS";
   for (const mode of daemonRestoreModes()) {
     const { engine, io } = makeEngine();
-    const promise = executeTool(spec, { snapshotId, mode }, engine);
+    const promise = executeTool(spec, { snapshotId, mode }, engine, new EvidenceAuditSession());
     const frame = io.lastFrame();
     assert.equal(frame.method, "restore");
     assert.equal(frame.params.mode, mode);
@@ -1586,4 +1588,184 @@ test("selector emptiness: the daemon's guard, the published schema and the kerne
     );
   }
   assert.equal(verdicts.length, 9, "每个字段的三面比对都要留下记录，少一面就是这条闸少读了一面");
+});
+
+/* ------------------------------------------------------------------ *
+ * Review 2026-10-09 finding 9 — the Dispatcher's own string bounds, read out
+ * of the Swift that applies them, against the shell's zod *and* its
+ * `tools/list` advertisement.
+ *
+ * The selector half that had a gate was `selector.role`, decided in
+ * `ParamValidation.optSelector`. `attach.bundleId`, `observe.role` and
+ * `attach.projectId` are bounded somewhere else — `Dispatcher.handleAttach` and
+ * `Dispatcher.handleObserve` — and nothing read those numbers at all. Three rules
+ * therefore disagreed with the daemon, in both directions at once: `bundleId` 256
+ * against the daemon's 512 and `observe.role` 128 against 512 (this shell refusing,
+ * with a `GP_E_BAD_PARAMS` of its own, frames the service would have answered, so the
+ * agent never learns the daemon's verdict), and `projectId` a 30-character grammar
+ * against a length-only 64.
+ *
+ * The comparison is behavioural, not textual. The bound is *derived* from the
+ * handler's own `optString(params, "key", maxLength: X)` call, with `X` resolved
+ * through the evaluator the pid gate already uses (because `handleObserve` names
+ * `ParamValidation.selectorMaxLength` rather than repeating its digits), and each
+ * side is then probed at exactly N and N+1 against the real validator, checking
+ * whether a frame reaches the wire. A digits-copy in this file could not notice
+ * either side moving; a boundary probe can. Both halves of the shell are measured:
+ * the zod that decides and the schema that promises, because a drift between those
+ * two is the form an agent can act on.
+ * ------------------------------------------------------------------ */
+
+const DISPATCHER_FILE = "../../engine/Sources/GlassPaneEngine/Dispatcher.swift";
+
+/**
+ * Every `optString(params, "<key>", maxLength: <token>)` one Dispatcher handler
+ * applies, as a map from parameter name to the token the Swift writes.
+ */
+function dispatcherStringBounds(handler) {
+  const code = sourceReader(DISPATCHER_FILE).code;
+  const opened = code.indexOf(`private func ${handler}(`);
+  assert.notEqual(opened, -1,
+    `${DISPATCHER_FILE} no longer defines ${handler}(): this gate read a parameter bound out of that function, so `
+    + "either the bound moved elsewhere or the gate is comparing nothing — move it with the code and say where the bound lives now");
+  const rest = code.slice(opened + 1);
+  const closed = rest.search(/\n {4}(?:private |public |internal )?func /);
+  const body = closed === -1 ? rest : rest.slice(0, closed);
+  const bounds = new Map();
+  for (const match of body.matchAll(/optString\(\s*params\s*,\s*"([A-Za-z0-9_]+)"\s*,\s*maxLength:\s*([A-Za-z0-9_.]+)/g)) {
+    bounds.set(match[1], match[2]);
+  }
+  assert.ok(bounds.size > 0,
+    `${handler} no longer bounds any parameter through optString(maxLength:) — re-read how it validates strings`);
+  return { bounds, body };
+}
+
+/** Resolve one bound token to the number the daemon actually enforces. */
+function daemonBound(token, where) {
+  assert.notEqual(token, undefined, `${where}: this gate expected that parameter to be length-bounded; re-read it`);
+  if (/^\d+$/.test(token)) {
+    return Number(token);
+  }
+  const named = /^ParamValidation\.([A-Za-z0-9_]+)$/.exec(token);
+  assert.ok(named,
+    `the daemon bounds a parameter with \`${token}\`, which this gate cannot resolve to a number — resolve it and `
+    + "say what it evaluates to, rather than letting the comparison go quiet");
+  return sourceReader(PARAM_VALIDATION_FILE).integer(named[1]);
+}
+
+/**
+ * Run one tool against the fake transport and report both halves of the verdict:
+ * whether the shell answered with an error, and whether anything went on the wire.
+ * A refusal that still writes a frame is a different defect from one that does not.
+ *
+ * When a frame does go out it is answered, because an unanswered request on the fake
+ * ends in `GP_E_ENGINE_TIMEOUT` at the client's 500 ms and would read as a refusal of
+ * the parameter — the exact mistake this helper exists to avoid making.
+ */
+async function shellVerdict(toolName, params, reply = { tree: [] }) {
+  const { engine, io } = makeEngine();
+  const promise = executeTool(TOOL_BY_NAME.get(toolName), params, engine, new EvidenceAuditSession());
+  if (io.sent.length > 0) {
+    io.respond(reply);
+  }
+  const outcome = await promise;
+  const sentFrames = io.sent.length;
+  engine.close();
+  return { isError: outcome.isError, text: outcome.content.map((item) => item.text ?? "").join("\n"), sentFrames };
+}
+
+test("attach.bundleId is bounded by the Dispatcher's own number, in the zod and in the advertisement", async () => {
+  const bound = daemonBound(
+    dispatcherStringBounds("handleAttach").bounds.get("bundleId"),
+    "Dispatcher.handleAttach bundleId",
+  );
+  const spec = TOOL_BY_NAME.get("gp_attach");
+  for (const [length, admitted] of [[bound, true], [bound + 1, false]]) {
+    const bundleId = `com.example.${"x".repeat(length - "com.example.".length)}`;
+    assert.equal(bundleId.length, length, "the probe has to sit exactly on the boundary");
+    const verdict = await shellVerdict("gp_attach", { bundleId }, { attached: true, pid: 4321, appName: "Example" });
+    assert.equal(verdict.isError, !admitted,
+      `a ${length}-character bundleId against the daemon's ${bound}: ${verdict.text.slice(0, 200)}`);
+    assert.equal(verdict.sentFrames, admitted ? 1 : 0,
+      `a ${length}-character bundleId must ${admitted ? "reach the daemon" : "die here, never on the wire"}`);
+  }
+  assert.equal(spec.inputSchema.properties.bundleId.maxLength, bound,
+    `tools/list advertises ${spec.inputSchema.properties.bundleId.maxLength} for attach.bundleId while the `
+    + `validator enforces the daemon's ${bound}: the agent is promised one rule and given another`);
+});
+
+test("observe.role is bounded by the daemon's selectorMaxLength, wherever that number is declared", async () => {
+  const token = dispatcherStringBounds("handleObserve").bounds.get("role");
+  const bound = daemonBound(token, "Dispatcher.handleObserve role");
+  // The daemon names the selector constant instead of repeating its digits, so the
+  // number this gate compares against is the one ParamValidation declares — and the
+  // kernel publishes that same fact as `SELECTOR_MAX_LENGTH`, which `tools.ts` uses.
+  assert.equal(
+    bound,
+    SELECTOR_MAX_LENGTH,
+    `the daemon reads observe.role with \`${token}\` = ${bound} while the kernel publishes ${SELECTOR_MAX_LENGTH} `
+    + "for the selector fields — one rule, two answers, and the shell's role bound is whichever one it read",
+  );
+  for (const [length, admitted] of [[bound, true], [bound + 1, false]]) {
+    const role = `AX${"x".repeat(length - 2)}`;
+    assert.equal(role.length, length, "the probe has to sit exactly on the boundary");
+    const verdict = await shellVerdict("gp_observe", { role }, { tree: [] });
+    assert.equal(verdict.isError, !admitted,
+      `a ${length}-character role against the daemon's ${bound}: ${verdict.text.slice(0, 200)}`);
+    assert.equal(verdict.sentFrames, admitted ? 1 : 0,
+      `a ${length}-character role must ${admitted ? "be forwarded" : "be refused here"} (daemon bound ${bound})`);
+  }
+  assert.equal(
+    TOOL_BY_NAME.get("gp_observe").inputSchema.properties.role.maxLength,
+    bound,
+    "the advertised ceiling for observe.role is not the rule the validator applies",
+  );
+});
+
+test("attach.projectId stays stricter than the daemon as a stated choice, not as an unnoticed drift", async () => {
+  const { bounds, body } = dispatcherStringBounds("handleAttach");
+  const daemonCeiling = daemonBound(bounds.get("projectId"), "Dispatcher.handleAttach projectId");
+  // Read, do not assume, that the daemon's rule for this parameter is a length bound
+  // and nothing else. If it grows a pattern, the shell's grammar may have become the
+  // looser side, and a divergence nobody re-reads is how the two stop being one rule.
+  assert.doesNotMatch(
+    body,
+    /projectId[^)\n]*(?:pattern|regex|matches:)/i,
+    "Dispatcher.swift now validates projectId against a pattern of its own: re-read which side is stricter and "
+    + "whether keeping the shell's grammar is still the narrower choice rather than a second answer",
+  );
+  const optStringSignature = /static func optString\(([\s\S]*?)\)\s*throws/.exec(
+    sourceReader(PARAM_VALIDATION_FILE).code,
+  );
+  assert.ok(optStringSignature,
+    "ParamValidation.optString's signature moved, so this gate can no longer see that it is length-only");
+  assert.doesNotMatch(optStringSignature[1], /pattern/i,
+    "optString grew a pattern parameter, so the daemon is no longer the looser side for projectId");
+
+  const exact = "prj_0123456789ABCDEFGHJKMNPQRS";
+  assert.equal(exact.length, 30, "the shell's grammar is 4 + 26; this gate's subset check is stated in those digits");
+  assert.ok(exact.length <= daemonCeiling,
+    `the shell admits ${exact.length}-character projectIds while the daemon refuses anything over `
+    + `${daemonCeiling}: this shell would forward an id the service rejects, which is the direction a divergence `
+    + "stops being a choice and becomes a bug",
+  );
+  const admitted = await shellVerdict("gp_attach", { bundleId: "com.example.app", projectId: exact });
+  assert.equal(admitted.isError, false, admitted.text);
+  assert.equal(admitted.sentFrames, 1, "a registry id the daemon accepts has to reach it");
+
+  // The other half of the choice: a value the daemon would store and this shell will
+  // not, said as an error from *this* side before any frame goes out.
+  const refused = await shellVerdict("gp_attach", { bundleId: "com.example.app", projectId: "notes" });
+  assert.equal(refused.isError, true,
+    "the daemon takes any string of up to 64 characters here; this shell refuses it, and that has to stay visible");
+  assert.match(refused.text, /GP_E_BAD_PARAMS/);
+  assert.equal(refused.sentFrames, 0, "the refusal is this shell's, so it must not spend a round trip to learn it");
+
+  // And the choice is stated beside the rule it implements, not only in this test.
+  const toolsSource = executableSource(readFileSync(new URL(TOOLS_FILE, import.meta.url), "utf8"));
+  assert.ok(
+    toolsSource.includes(`projectId`) && toolsSource.includes(String(daemonCeiling)),
+    `OptionalProjectIdSchema is stricter than Dispatcher.handleAttach's maxLength: ${daemonCeiling} without `
+    + "the daemon's number anywhere near the rule, so the next reader cannot tell a decision from an oversight",
+  );
 });

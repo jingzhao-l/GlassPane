@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import fs from "node:fs";
 import process from "node:process";
 
 import { canonicalJson } from "./canonical.js";
@@ -91,6 +92,63 @@ A daemon started by hand with --state-dir has no launchd job to read: pass it
 /** How long a blocked stdout may stay blocked before the stall is reported. */
 const DRAIN_WAIT_MS = 30_000;
 
+/** How long one synchronous wait for a full pipe lasts, and how often it repeats. */
+const WRITE_STALL_MS = 10;
+const WRITE_STALL_LIMIT = 1_000;
+
+/**
+ * Write a whole string to a descriptor and do not return until the kernel has
+ * taken all of it.
+ *
+ * The startup and argument paths below write a message and then call
+ * `process.exit()` on the next line. `process.stderr`/`process.stdout` are
+ * *asynchronous* whenever the destination is a pipe — which is how every MCP host
+ * captures this server, and how every `glasspane-mcp … | tee` runs it — so a
+ * `write()` on a piped stream only queues a libuv request, `process.exit()` never
+ * runs the loop that would flush it, and the reader is handed a bare exit code
+ * with the explanation cut off mid-buffer (measured here: a 256 KiB piped stderr
+ * write stops at the 64 KiB pipe capacity, its tail gone). `fs.writeSync` issues a
+ * real blocking write instead, and the loop is what carries a message past the pipe
+ * capacity rather than assuming one syscall takes it all.
+ */
+function writeDescriptor(fd: 1 | 2, text: string): void {
+  const buffer = Buffer.from(text, "utf8");
+  let offset = 0;
+  let stalls = 0;
+  while (offset < buffer.length) {
+    let written: number;
+    try {
+      written = fs.writeSync(fd, buffer, offset, buffer.length - offset);
+    } catch (error) {
+      // A piped stdio descriptor is *non-blocking* in this process — Node hands
+      // the fd to libuv that way as soon as stdout/stderr are pipes, which is how
+      // every MCP host and every `glasspane-mcp … | tee` runs it — so once the
+      // 64 KiB pipe buffer is full `writeSync` does not wait, it throws `EAGAIN`.
+      // Letting that escape killed the process on an uncaught exception (exit 1,
+      // message cut at the pipe capacity), and returning quietly would have cut it
+      // the same way while claiming the message had gone out. Retry after a short
+      // synchronous block so the reader gets its turn, and bound the retries so a
+      // pipe nobody drains cannot wedge the exit.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EAGAIN" && stalls < WRITE_STALL_LIMIT) {
+        stalls++;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, WRITE_STALL_MS);
+        continue;
+      }
+      // EPIPE, EBADF, or the retry ceiling: a descriptor that will not take the
+      // message leaves nowhere to report it (the same last resort as `logNote`).
+      return;
+    }
+    // A zero-length return means the descriptor took nothing without saying so;
+    // continuing would spin.
+    if (written <= 0) {
+      return;
+    }
+    offset += written;
+    stalls = 0;
+  }
+}
+
 /** stderr is the only logging channel an MCP stdio server may use freely. */
 function logNote(text: string): void {
   try {
@@ -118,12 +176,15 @@ function main(): void {
   try {
     options = parseArgs(process.argv.slice(2));
   } catch (error) {
-    process.stderr.write(String(error) + "\n\n" + USAGE);
+    // Synchronous, and the whole message: this is the path an operator who
+    // misspelled a flag lands on, and a truncated one reads as "the shell printed
+    // nothing and exited 2".
+    writeDescriptor(2, String(error) + "\n\n" + USAGE);
     process.exit(2);
   }
 
   if (options.help) {
-    process.stdout.write(USAGE);
+    writeDescriptor(1, USAGE);
     process.exit(0);
   }
 
@@ -139,7 +200,8 @@ function main(): void {
       identity: { version: SERVER_INFO.version },
     });
   } catch (error) {
-    process.stderr.write(
+    writeDescriptor(
+      2,
       `failed to create engine client on ${options.socketPath}: ${String(error)}\n`,
     );
     process.exit(2);
@@ -213,7 +275,14 @@ function main(): void {
   process.stdin.on("data", (chunk: string) => reader.push(chunk));
   process.stdin.on("error", (error) => {
     logNote(`stdin failed: ${error.message}`);
-    shutdown();
+    // Queued exactly like the `close` path below, and that agreement is the whole
+    // fix. `shutdown()` ends the engine client and calls `stdout.end()`; run
+    // straight from this handler it jumped *ahead* of the replies `queue` had
+    // already taken but not yet written, so each one landed on an ended stream —
+    // write-after-end, dropped, and the caller held nothing while the daemon had
+    // really answered. The close path already knew a shutdown has to wait its turn
+    // behind pending bytes (review 2026-10-09 finding 7).
+    queue.push(async () => shutdown());
   });
   // The queue now orders writes only, so an in-flight request is not part of
   // this chain: stdin closing tears the session down while the daemon may still

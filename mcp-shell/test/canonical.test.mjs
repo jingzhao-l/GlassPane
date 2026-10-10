@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { canonicalJson } from "../dist/canonical.js";
+import { EvidenceAuditSession } from "../dist/audit-session.js";
 import { executeTool, TOOL_BY_NAME } from "../dist/tools.js";
 import { makeEngine } from "./helpers.mjs";
 
@@ -75,7 +76,7 @@ test("the forwarded daemon reply keeps the member the agent is shown", async () 
   // have — not a formatting detail.
   const { engine, io } = makeEngine();
   const spec = TOOL_BY_NAME.get("gp_observe");
-  const promise = executeTool(spec, { maxDepth: 3 }, engine);
+  const promise = executeTool(spec, { maxDepth: 3 }, engine, new EvidenceAuditSession());
   io.lastFrame();
   const reply = JSON.parse(String.raw`{"tree":{"role":"AXWindow","__proto__":"attr-name"},"count":1}`);
   io.respond(reply);
