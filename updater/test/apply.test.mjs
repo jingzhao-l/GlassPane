@@ -2053,7 +2053,17 @@ test('a machine that cannot write npm\'s global directory is refused before a si
       '连备份都不该建——建了就说明已经准备换东西了')
     assert.match(result.message, /Nothing was replaced and the daemon was not restarted/, result.message)
     assert.match(result.message, new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '句子要点名写不进去的那一层')
-    assert.match(result.message, /sudo chown/, 'remedy 要能做得动，并说清这一步要一个人')
+    // 这条断言原来钉的是 `/sudo chown/`——也就是钉住"remedy 给出一句可执行的升权命令"。
+    // 那个形状本身是漏洞：路径来自 `npm config get prefix`，而同账户任意进程都能写
+    // `~/.npmrc`，于是下一句 remedy 就成了攻击者选的 shell 以 root 跑。SECURITY.md §3 的
+    // 口径是"点名动作，不替人写好命令"。现在钉的是**新**形状：既不许出现 sudo，也要照旧
+    // 点名那个路径、并说清这一步只能由一个人去终端做。
+    assert.doesNotMatch(result.message, /\bsudo\b/, 'remedy 里不许再出现任何一句可执行的升权命令')
+    assert.doesNotMatch(result.message, /\b(chmod|chown)\s+-[a-zA-Z]*R\b/, '点名动作不等于把递归改权限的命令行交给读者')
+    assert.ok(result.message.includes(JSON.stringify(dir)), `路径要原样、可界定地出现在句子里（JSON 引起来），否则读者不知道自己被要求改谁：${result.message}`)
+    assert.match(result.message, /at a terminal/, '要说清这一步只有一个人去终端做')
+    assert.match(result.message, /will not run a privileged command/, '也要说清这个程序自己不跑它，更不会把它交给 agent')
+    assert.match(result.message, /npm config get prefix/, '路径是从 npm 读来的这件事必须交代，人才会去核')
     assert.match(result.message, /Install update/, '做完之后按哪个按钮也要说')
     const state = loadState(fx.stateRoot).state
     assert.equal(state.code, CODES.npmPrefixUnwritable, '面板读的是状态文件')

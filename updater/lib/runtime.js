@@ -30,8 +30,10 @@ import {
   UpdaterError,
   canonicalPath,
   ensurePrivateDir,
+  realWithin,
   removeTreeWithin,
   resolveWithin,
+  sameRuntimePath,
   tightenMode,
   writableRoots,
 } from './fsutil.js'
@@ -289,33 +291,13 @@ export function materializeRuntime({ stateRoot, sourceTree, version, copy = defa
 }
 
 /**
- * The realpath of `p` when the filesystem can answer, its lexical form when it cannot.
- *
- * node hands a running script's own module URL back *realpath'd* (measured: starting
- * `/private/var/…/gp-linkprobe-link/cli.mjs` through a symlinked directory reports the `…-real`
- * path), while `canonicalPath` is a lexical `path.resolve`. Comparing the two directly is how a
- * self-update could never verify itself on exactly the machines this feature is tested on — a state
- * root under `/tmp` or `/var/tmp`, or any `GLASSPANE_STATE_DIR` that goes through a link.
+ * `realWithin` and `sameRuntimePath` live in `lib/fsutil.js` since 2026-10-09: the
+ * registration check in `lib/launchd.js` had to make the *same* path-identity
+ * comparison, and importing this module from there would have made a cycle
+ * (`runtime.js` already imports `launchd.js`). They are re-exported here because the
+ * runtime surface's readers name them this way.
  */
-function realWithin(p) {
-  const text = String(p ?? '')
-  if (text === '') return text
-  try {
-    return fs.realpathSync(text)
-  } catch {
-    return text
-  }
-}
-
-/** Do these two spellings name the same path, allowing for a symlinked component on either side? */
-export function sameRuntimePath(a, b) {
-  const left = canonicalPath(a)
-  const right = canonicalPath(b)
-  if (left === right) return true
-  const realLeft = realWithin(left)
-  const realRight = realWithin(right)
-  return realLeft === realRight && realLeft !== ''
-}
+export { realWithin, sameRuntimePath }
 
 /** Which generation of the runtime root a CLI path belongs to, or null when it is not one (a clone). */
 export function runtimeVersionOf(cliPath, runtimeDir) {

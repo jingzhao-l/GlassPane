@@ -58,6 +58,49 @@ export function isWithin(root, candidate) {
 }
 
 /**
+ * The realpath of `p` when the filesystem can answer, its lexical form when it cannot.
+ *
+ * node hands a running script's own module URL back *realpath'd* (measured: starting
+ * `/private/var/…/gp-linkprobe-link/cli.mjs` through a symlinked directory reports the `…-real`
+ * path), while `canonicalPath` is a lexical `path.resolve`. Comparing the two directly is how a
+ * self-update could never verify itself on exactly the machines this feature is tested on — a state
+ * root under `/tmp` or `/var/tmp`, or any `GLASSPANE_STATE_DIR` that goes through a link.
+ *
+ * (Moved here from `lib/runtime.js` on 2026-10-09, because a second reader of the same fact —
+ * `launchd.js`'s registration check — needed it and importing `runtime.js` from `launchd.js` would
+ * have made the two modules a cycle: `runtime.js` already imports `launchd.js`.)
+ */
+export function realWithin(p) {
+  const text = String(p ?? '')
+  if (text === '') return text
+  try {
+    return fs.realpathSync(text)
+  } catch {
+    return text
+  }
+}
+
+/**
+ * Do these two spellings name the same path, allowing for a symlinked component on either side?
+ *
+ * This is the strict answer to "is this argument *the* path we named".
+ * `arg === cliPath || arg.includes(String(cliPath))` — the shape `registerAgent` used
+ * until 2026-10-09 — is not: anything that merely *contains* the named path verifies, so
+ * `/tmp/dropin/<cliPath>` or a `sh -c` line that quotes it reports the job as registered
+ * while launchd is holding something else entirely. `lib/runtime.js`'s reader of the same
+ * book has always demanded this function, which is what made the two disagree: one said
+ * `verified`, the other said the loaded job names something else, about one definition.
+ */
+export function sameRuntimePath(a, b) {
+  const left = canonicalPath(a)
+  const right = canonicalPath(b)
+  if (left === right) return true
+  const realLeft = realWithin(left)
+  const realRight = realWithin(right)
+  return realLeft === realRight && realLeft !== ''
+}
+
+/**
  * Resolve `candidate` and refuse it unless it is inside `root`.
  * Returns the resolved absolute path.
  */

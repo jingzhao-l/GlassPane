@@ -21,6 +21,44 @@ import { UpdaterError, resolveWithin, tightenMode } from './fsutil.js'
 
 const BLOCK = 512
 
+/**
+ * What one archive is allowed to become once inflated.
+ *
+ * `zlib.gunzipSync(buffer)` without `maxOutputLength` sizes its output from the stream
+ * alone, so a few kilobytes of deflate payload — well inside the 256 MiB
+ * (`DOWNLOAD_MAX_BYTES`, `lib/source.js`) the download half will accept — can ask for
+ * unbounded memory, in a process whose whole job is to run unattended on somebody's
+ * laptop. A zip bomb is not a trust question, it is the same *availability* question the
+ * download cap already answers, and it needed its own number because the two bound
+ * different things.
+ *
+ * 1 GiB, i.e. **4× the compressed cap**. The ratio is measured, not guessed: this
+ * machine still holds the real v1.5.1 staging directory, `archive.tar.gz` 25,126,902
+ * bytes compressed and 67,399,680 bytes inflated — 2.7×. So the cap leaves a legitimate
+ * release more than fifteen times its own inflated size to grow into, while a bomb is
+ * refused at one gigabyte instead of being allocated.
+ */
+export const MAX_DECOMPRESSED_BYTES = 1024 * 1024 * 1024
+
+/**
+ * The mode a staged member may land with.
+ *
+ * `& 0o777` strips setuid/setgid/sticky and nothing else, so a release that declares
+ * `0666` lands world-writable — and `apply` then copies that tree into the runtime the
+ * daemon runs from and into `~/Applications`. Group/other **write** bits are not
+ * something an archive gets to ask for: the owner keeps whatever they chose, the rest of
+ * the machine gets read and execute. (Same reasoning as `lib/runtime.js`'s refusal to
+ * land a generation looser than 0700: an owner-only tree is the promise, and read-back
+ * mode is part of it.)
+ */
+export function stagedMode(value, fallback) {
+  const declared = Number(value)
+  // `0`, absent and unparseable all mean "the archive declared nothing", which is the
+  // caller's fallback — not "make this file unreadable to everybody including us".
+  const base = Number.isInteger(declared) && declared > 0 ? declared : fallback
+  return (base & 0o777) & ~0o022
+}
+
 function decodeString(bytes) {
   const end = bytes.indexOf(0)
   const slice = end === -1 ? bytes : bytes.subarray(0, end)
@@ -99,11 +137,22 @@ function parsePax(text) {
  * Entries from a `.tar.gz`. Returns `[{ name, type, mode, bytes }]` with the
  * bytes already checked against the declared size.
  */
-export function readTarGz(buffer) {
+export function readTarGz(buffer, { maxOutputLength = MAX_DECOMPRESSED_BYTES } = {}) {
   let tar
   try {
-    tar = zlib.gunzipSync(buffer)
+    tar = zlib.gunzipSync(buffer, { maxOutputLength })
   } catch (error) {
+    // The two answers are different facts and must not share a sentence: "this is not
+    // gzip" says the release published garbage; "this is gzip asking for more than the
+    // cap" says the release published something this machine will not inflate. Whoever
+    // reads the second one needs to know it was a choice, and what the choice was about.
+    if (error?.code === 'ERR_BUFFER_TOO_LARGE') {
+      const cap = `${(maxOutputLength / (1024 * 1024)).toFixed(1)} MiB`
+      throw new UpdaterError(
+        CODES.archiveUnreadable,
+        `archive is gzip, but inflating it asks for more than the ${cap} this tool will hold for one release archive (the compressed stream itself is ${(buffer.length / 1024).toFixed(0)} KiB): that ratio is a compression bomb, not a release tree, and it is refused by name. Nothing was extracted.`,
+      )
+    }
     throw new UpdaterError(CODES.archiveUnreadable, `archive is not valid gzip data (${error.message})`)
   }
   const entries = []
@@ -238,10 +287,10 @@ export function safeLinkTarget(destDir, entryTarget, linkName) {
  * entries are validated in a first pass so a trap halfway through the archive
  * cannot leave a partially written tree behind.
  */
-export function extractTarGz(buffer, destDir, { allowedRoot } = {}) {
+export function extractTarGz(buffer, destDir, { allowedRoot, maxOutputLength = MAX_DECOMPRESSED_BYTES } = {}) {
   const root = allowedRoot ?? destDir
   resolveWithin(root, destDir, 'staging directory')
-  const entries = readTarGz(buffer)
+  const entries = readTarGz(buffer, { maxOutputLength })
   const targets = entries.map((entry) => ({ entry, target: safeEntryTarget(destDir, entry.name) }))
 
   // First pass: no filesystem writes. Every link is resolved against the archive's own
@@ -282,11 +331,12 @@ export function extractTarGz(buffer, destDir, { allowedRoot } = {}) {
       // `tightenMode` rather than `chmodSync`: the staged tree is where unverified
       // release bytes land before any gate has finished with them, and a mode that
       // did not stick has to be a refusal, not a line in a log.
-      tightenMode(target, (entry.mode || 0o755) & 0o777, 'staged directory')
+      tightenMode(target, stagedMode(entry.mode, 0o755), 'staged directory')
     } else {
       fs.mkdirSync(path.dirname(target), { recursive: true })
-      fs.writeFileSync(target, entry.bytes, { mode: (entry.mode || 0o644) & 0o777 })
-      tightenMode(target, (entry.mode || 0o644) & 0o777, 'staged file')
+      const mode = stagedMode(entry.mode, 0o644)
+      fs.writeFileSync(target, entry.bytes, { mode })
+      tightenMode(target, mode, 'staged file')
     }
     written.push(target)
   }
@@ -302,7 +352,7 @@ export function extractTarGz(buffer, destDir, { allowedRoot } = {}) {
     // release byte (measured on the real v1.5.1 tree: the icon link came in 0777).
     // `+x` is the one bit inherited from the link itself, and only when the target is
     // already executable — the archive's file entry decides whether this is a script.
-    const mode = (source.mode || 0o644) & 0o777
+    const mode = stagedMode(source.mode, 0o644)
     fs.writeFileSync(target, source.bytes, { mode })
     tightenMode(target, mode, 'staged file')
     written.push(target)

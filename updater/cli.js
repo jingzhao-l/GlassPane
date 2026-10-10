@@ -139,6 +139,27 @@ export function parseArgs(argv) {
     return { ok: false, reason: `unknown command ${JSON.stringify(command)}; try ${SUBCOMMANDS.join(' | ')}` }
   }
   if (!command && !flags.help) return { ok: false, reason: 'no command given' }
+  /**
+   * `--hour` / `--minute` are range-checked **on the write path**, which is the half this
+   * parser used to skip. `Number('25')` is a number, so `enable --hour 25` rendered a
+   * syntactically valid plist whose `StartCalendarInterval` can never fire, launchd
+   * loaded it without a word, and the state file went on recording "automatic update is
+   * on" — a job that does not exist described as one that does. `readAgentSchedule`
+   * already refuses out-of-range values on the *read* side (`lib/launchd.js`), so the
+   * two readers of one fact disagreed: reading back what writing accepted was impossible.
+   */
+  for (const [name, limit] of [['hour', 23], ['minute', 59]]) {
+    if (flags[name] === undefined) continue
+    const value = Number(flags[name])
+    if (!Number.isInteger(value) || value < 0 || value > limit) {
+      return {
+        ok: false,
+        reason: `--${name} ${JSON.stringify(flags[name])} is not a ${name}: ${name === 'hour' ? 'hour' : 'minute'} must be a whole number from 0 to ${limit} `
+          + `(launchd's StartCalendarInterval ${name === 'hour' ? 'Hour' : 'Minute'}). `
+          + 'Nothing was registered: a value outside that range renders a plist whose daily job never fires, while the state file would still say automatic updates are on.',
+      }
+    }
+  }
   return { ok: true, command, flags }
 }
 

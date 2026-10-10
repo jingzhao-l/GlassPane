@@ -41,6 +41,18 @@
  * we ship", so key rotation means editing one exported string in
  * `installer/cli.js`, and both surfaces start agreeing or disagreeing with it
  * together.
+ *
+ * And what it did not claim **until 2026-10-09**, which was the hole: that the key
+ * the release archive happens to carry is the key anyone meant. `installer/` is
+ * copied into the runtime *from the release archive* (`lib/runtime.js`'s
+ * `RUNTIME_COPY_INCLUDES`), so the key authenticating release N+1 was delivered by
+ * release N — one unsigned release accepted with `--consent unsigned-release` installs
+ * somebody else's key, after which every later release of theirs reads `verified` and
+ * both the standing warning and the gate disappear without a sound. The anchor for
+ * that is no longer allowed to be self-issued: {@link PINNED_PRIMARY_FINGERPRINT}
+ * names the primary fingerprint in this file, and a signature verifies only when the
+ * imported key carries it **and** `VALIDSIG` names it. Anything else is `invalid`,
+ * which is the state `lib/check.js` refuses even with consent offered.
  */
 import fs from 'node:fs'
 import os from 'node:os'
@@ -71,6 +83,46 @@ export const TRUST_ANCHOR_EXPORTS = Object.freeze({
 /** Resolved relative to *this file*, so it follows the install tree, not the CWD. */
 export const INSTALLER_MODULE = '../../installer/cli.js'
 
+/**
+ * The pinned primary fingerprint of the key gate 8 authenticates with.
+ *
+ * Why the *fingerprint* has to be pinned somewhere other than the file that
+ * carries the key: the armored block lives in `installer/cli.js`, and `installer/`
+ * is copied into the runtime **from the release archive**
+ * (`lib/runtime.js`'s `RUNTIME_COPY_INCLUDES`). So the key that authenticates
+ * release N+1 is delivered by release N. Without a pin, one release published
+ * without a working signature — waved through by a person with
+ * `--consent unsigned-release` — installs an attacker's key, and from then on every
+ * attacker release reads `verified`: the standing warning (`authorshipNote`), the
+ * refusal of `--consent`, and the whole of gate 8 vanish silently, because the
+ * thing that was supposed to be checked is what the checked bytes chose.
+ *
+ * Pinning the fingerprint moves the judgement out of the payload: `installer/` may
+ * ship any key it likes, and a signature made by it classifies `invalid` unless the
+ * key it imports *is* this fingerprint **and** the `VALIDSIG` line names it.
+ *
+ * The value is not invented here and it is not a copy of the key. Measured on this
+ * machine with the real binary: importing `installer/cli.js`'s
+ * `GLASSPANE_SIGNING_PUBLIC_KEY` into a throwaway keyring reports primary
+ * `0929EA31DF4F7429F63FC53189D88B1D043A1298` (keyid `89D88B1D043A1298`, uid
+ * `jingzhao-l (sign-github)`), and the published v1.9.0 `SHA256SUMS-1.9.0.txt.asc`
+ * answers `[GNUPG:] VALIDSIG 0929EA31DF4F7429F63FC53189D88B1D043A1298 …` against it.
+ * `test/review-2026-10-09.test.mjs` re-derives this constant from the armored block
+ * with gpg, so the day the two disagree is a red test and not a silent one.
+ *
+ * Key rotation therefore means *editing this line and saying why*. A second value
+ * to keep in sync? No: this one is checked against the other by a test, which is
+ * the opposite of the "two files that must agree with nothing checking it" drift
+ * this repository has already fixed twice.
+ */
+export const PINNED_PRIMARY_FINGERPRINT = '0929EA31DF4F7429F63FC53189D88B1D043A1298'
+
+/** A pin only means something if it is a fingerprint: 40 hex, the V4 primary form. */
+export function normalizePinnedFingerprint(value) {
+  const text = String(value ?? '').trim().toUpperCase()
+  return /^[0-9A-F]{40}$/.test(text) ? text : null
+}
+
 /** Outcome → the code stamped in the state file. `verified` refuses nothing. */
 export const OUTCOME_CODES = Object.freeze({
   verified: null,
@@ -95,7 +147,7 @@ function verdict(outcome, { version = null, sumsName = null, detail = null, sign
   // the world for whoever reads this, but not the same sentence about the release.
   const gap = signedAsset ? `publishes a ${name} that carries no signature at all (${detail ?? 'gpg: no signature found'})` : `publishes no ${name}`
   const messages = {
-    verified: `${who}'s ${name} verifies against the key this program ships (fingerprint ${keyFingerprint ?? 'unread'}), so the checksum file that gates 4 and 5 take their digest from is the publisher's own statement — authorship established to that key, which is all "verified" claims here and nothing more.`,
+    verified: `${who}'s ${name} verifies against the key this program ships (fingerprint ${keyFingerprint ?? 'unread'}, the primary fingerprint pinned in this file rather than one this release chose for itself), so the checksum file that gates 4 and 5 take their digest from is the publisher's own statement — authorship established to that key, which is all "verified" claims here and nothing more.`,
     invalid: `${who} publishes ${name}, and that signature does not check against the key this program ships. ${detail ?? 'Nothing more can be said about why.'} Nothing was staged, and no consent can override a bad signature: "updater check --consent unsigned-release" is the answer to "nobody signed this release", never to "the signature contradicts itself". This release is refused outright.`,
     'unsigned-release': `${who} ${gap}, so nothing proves who wrote its checksum file: the digest, version-line and CI gates buy integrity and build traceability, not authorship (the release-signing job was added after 1.3.1, so every release tagged before it reads like this one). An automatic run stops here. A person who has compared the sha256 "updater status" reports against the release page may run "updater check --consent unsigned-release" to stage it with the missing proof recorded in the state file.`,
     'signature-tool-missing': `${who}'s ${name} could not be checked on this machine: ${detail ?? 'no verification tool is available'}, so its authorship is unknown rather than proven. An automatic run stops here; "updater check --consent unsigned-release" proceeds with the gap recorded in the state file.`,
@@ -199,6 +251,7 @@ export function classifySignature({
   run = null,
   keyFingerprints = [],
   tagVerdict = null,
+  pinnedFingerprint = PINNED_PRIMARY_FINGERPRINT,
 } = {}) {
   const want = { version, sumsName }
   // A release that published nothing to verify is decided before the machine's
@@ -229,22 +282,50 @@ export function classifySignature({
     // and the same state of the world for a person reading either surface.
     return verdict('unsigned-release', { ...want, signedAsset: signatureAsset.name, detail: 'the published .asc carries no signature at all' })
   }
+  // The pin is asked about *before* anything gpg answered: a caller that hands in a
+  // value which is not a fingerprint has not loosened this gate, it has broken it,
+  // and "no pin" is deliberately not a state that can pass. An override nobody
+  // refuses is how a fix of this class becomes a paper fix.
+  const pinned = normalizePinnedFingerprint(pinnedFingerprint)
+  if (pinned === null) {
+    return verdict('invalid', {
+      ...want,
+      signedAsset: signatureAsset.name,
+      detail: `this build was asked to authenticate against the pinned primary fingerprint ${JSON.stringify(pinnedFingerprint)}, and that is not a 40-character hex fingerprint, so there is no key to authenticate against. A gate with no anchor is not a gate: this release is refused outright.`,
+    })
+  }
   const trusted = keyFingerprints.map((fpr) => String(fpr).toUpperCase())
   const fingerprint = validSigFingerprint(run.stdout)
-  if (run.status === 0 && fingerprint && trusted.includes(fingerprint)) {
+  // Two halves, and both have to hold:
+  //   (a) the key the anchor *imported* carries this fingerprint — otherwise the
+  //       bytes this release delivered chose the key now authenticating the next one
+  //       (see {@link PINNED_PRIMARY_FINGERPRINT});
+  //   (b) the signature reads back *as* that fingerprint — otherwise a valid
+  //       signature made by somebody else's key is believed because it was valid.
+  // A signature made by a bound *subkey* of the pinned primary fails (b) and is
+  // refused here on purpose: measured against the published v1.9.0 `.asc`, the
+  // release signature is made by the primary key itself, so widening to subkeys buys
+  // nothing and re-opens the "any fingerprint in the ring" reading this table had.
+  const anchorIsPinned = trusted.includes(pinned)
+  if (run.status === 0 && anchorIsPinned && fingerprint === pinned) {
     return verdict('verified', { ...want, signedAsset: signatureAsset.name, keyFingerprint: fingerprint })
   }
   // Why, in the sentence the person reads. The installer's `tagVerdict` is not
   // quoted here: its prose is about `git verify-tag` and in the installer's
   // language, and what this surface shares with it is the *word*, not the string.
   let detail
-  if (run.status === 0) {
+  if (!anchorIsPinned) {
+    // The worst shape of the four, because everything downstream still *looks*
+    // green: the shipped keyring holds a key nobody pinned, so whoever made that key
+    // signs every later release into `verified`.
+    detail = `the key ${INSTALLER_MODULE} exports imported as ${trusted.join(' or ') || 'a keyring with no readable fingerprint'}, and none of those is the pinned primary fingerprint ${pinned} this program ships. ${INSTALLER_MODULE} arrives inside the release archive, so an unverified release that a person waved through could swap the key and make every later release read "verified" — this signature is refused instead, and the pin is the thing that refuses it.`
+  } else if (run.status === 0) {
     detail = fingerprint
       // A well-formed signature made by somebody else's key. This keyring only
       // ever holds the embedded key, so getting here means a different
       // installation of this program or a hand-built keyring is in play; either
       // way it is not our publisher, and it is not a consent question.
-      ? `The signature is well formed but reads back under ${fingerprint}, and the key this program ships is ${trusted.join(' or ') || 'unreadable'}.`
+      ? `The signature is well formed but reads back under ${fingerprint}, and the key this program ships is the pinned ${pinned} (the imported keyring reads ${trusted.join(' or ')}).`
       : 'gpg answered that the signature is good without naming which key made it.'
   } else {
     const tail = text.trim().split('\n').filter((line) => line !== '').slice(-2).join(' / ')
@@ -374,6 +455,12 @@ function writeVerificationFile(dir, name, bytes) {
  * Everything environmental is injected (`runGpg`, `loadAnchor`, `fetchBytes`,
  * `mkdtemp`), so the suite drives all four states without a gpg on the machine —
  * and one test in `test/signature.test.mjs` uses the real binary when it is there.
+ *
+ * `pinnedFingerprint` joins that list for exactly one reason: a test that generates a
+ * throwaway key has to be able to name *that* key as the anchor. It is not an escape
+ * hatch. No production call site passes it (`test/review-2026-10-09.test.mjs` reads the
+ * source to prove it, and the same test drives the default end to end), and a value
+ * that is not a fingerprint classifies `invalid` rather than turning the check off.
  */
 export async function verifyReleaseSignature({
   version,
@@ -386,6 +473,7 @@ export async function verifyReleaseSignature({
   runGpg = defaultRunGpg,
   loadAnchor = loadTrustAnchor,
   mkdtemp = fs.mkdtempSync,
+  pinnedFingerprint = PINNED_PRIMARY_FINGERPRINT,
   log = () => {},
 } = {}) {
   const want = { version, sumsName }
@@ -426,7 +514,8 @@ export async function verifyReleaseSignature({
     const sigPath = writeVerificationFile(home, sigName, signatureBytes)
     const run = runGpg(['--homedir', home, '--batch', '--yes', '--status-fd', '1', '--verify', sigPath, sumsPath], { gnupgHome: home })
     const tagVerdict = anchor.classifyTagVerify({ status: run?.status ?? null, stdout: run?.stdout ?? '', stderr: run?.stderr ?? '' })
-    log(`gate 8: ${sigName} over ${sumsName ?? 'SHA256SUMS'} with ${keyFingerprints.length} embedded fingerprint(s) -> gpg exit ${run?.status ?? 'null'} (${tagVerdict?.status ?? 'unreadable'})`)
+    const pinned = normalizePinnedFingerprint(pinnedFingerprint)
+    log(`gate 8: ${sigName} over ${sumsName ?? 'SHA256SUMS'} with ${keyFingerprints.length} embedded fingerprint(s)${pinned && !keyFingerprints.includes(pinned) ? `, none pinned-matching (${pinned})` : ''} -> gpg exit ${run?.status ?? 'null'} (${tagVerdict?.status ?? 'unreadable'})`)
     return classifySignature({
       ...want,
       signatureAsset: { ...signatureAsset, name: sigName },
@@ -435,6 +524,7 @@ export async function verifyReleaseSignature({
       run,
       keyFingerprints,
       tagVerdict,
+      pinnedFingerprint,
     })
   } finally {
     if (stagingDir) {

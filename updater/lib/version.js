@@ -94,12 +94,39 @@ export function readBundleVersion(appPath, { readFile = (p) => fs.readFileSync(p
   return parsePlainVersion(match[1]).version
 }
 
-/** `glasspaned --version` -> `x.y.z` (the line is `glasspaned 1.2.3`). */
+/**
+ * `glasspaned --version` -> `x.y.z`.
+ *
+ * Two conditions, both of which the first version of this function left out, and
+ * both of which are the difference between "a reading" and "a number somebody else
+ * chose for us":
+ *
+ * · **exit 0.** The documented answer of this binary to an argument it does not know
+ *   is a usage banner on fd 1 and **exit 64** (`engine/Sources/glasspaned/main.swift`,
+ *   and `DaemonVersionFlagTests` for the flag that does exist). A banner for an
+ *   *unknown* argument can carry a dotted triple — the version of the software
+ *   printing it, of `--version` itself, of anything in the text — and this function
+ *   used to read `result.stdout` without ever looking at `result.ok`. That number then
+ *   becomes the baseline of the newer/downgrade decision, so an install that does not
+ *   answer the question gets to decide which releases count as upgrades.
+ * · **the line the real binary prints.** `main.swift` emits exactly
+ *   `glasspaned <version>` (the same literal `hello` reports), so the parse is anchored
+ *   to that shape. An unanchored `(\d+\.\d+\.\d+)` anywhere in stdout would also match
+ *   a log line, a path, a dependency table, or `0.0.0` inside a URL.
+ *
+ * Anything else stays "no reading" (`null`), which `localVersion` already handles: the
+ * bundle plist is the reading that usually answers, and a missing reading is honest
+ * while a borrowed one is not.
+ */
 export function readDaemonVersion(executable, { run = defaultRun } = {}) {
   const result = run(executable, ['--version'])
+  // `defaultRun` publishes `ok`; a caller that hands back a raw spawn answer has a
+  // `status`. Either way: exit 0 or no reading — never a number off a refusal.
+  const answered = result?.ok === true || (result?.ok === undefined && result?.status === 0)
+  if (!answered) return null
   const text = String(result?.stdout ?? '')
-  const match = /(?:^|\s)(\d+\.\d+\.\d+)(?:\s|$)/m.exec(text)
-  if (match) return parsePlainVersion(match[1]).version
+  const match = /^glasspaned[ \t]+(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?![.\d])/m.exec(text)
+  if (match) return `${match[1]}.${match[2]}.${match[3]}`
   // Measured 2026-09-27 against a real install: the daemon on this machine is 0.1.0
   // and answers `--version` with `unknown argument` + usage on fd 1, exit 64. The
   // flag is newer than the install, so *this is the normal case for exactly the

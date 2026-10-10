@@ -192,8 +192,20 @@ export const GITHUB_DOWNLOAD_HOSTS = Object.freeze([
  * on one port, and a redirect off it is not a test.
  */
 export function assertRedirectTarget(finalHref, { requested }) {
-  const text = String(finalHref ?? '')
-  if (text === '') return requested
+  const text = String(finalHref ?? '').trim()
+  if (text === '') {
+    // Fail closed. The old answer was `requested`, i.e. "the transport could not tell us
+    // where the bytes came from, so assume they came from where we asked" — which turns
+    // the post-redirect host pin into a check that disappears exactly when the thing it
+    // checks is unavailable: a transport (or a wrapper around one) that reports no final
+    // URL can redirect to any host at all and get `ok`. Not being able to read the answer
+    // is not an answer, and this is the same `download-host-unpinned` shape every other
+    // refusal here uses.
+    throw new UpdaterError(
+      CODES.downloadHostUnpinned,
+      `the download of ${requested} reported no final URL, so where its bytes came from cannot be checked: the redirect target stays unpinned and nothing was staged. Refused rather than assumed — "no answer" is not "the pinned host".`,
+    )
+  }
   let final
   let from
   try {

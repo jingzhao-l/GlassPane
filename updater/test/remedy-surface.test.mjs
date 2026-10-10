@@ -127,3 +127,74 @@ test('状态分支与这份夹具一一对应，新增一个状态不许悄悄�
   assert.deepEqual(missing, [], `这些状态分支没有被扫到：${missing.join(', ')}——给它们补一条夹具，而不是删掉断言`)
   assert.ok(branches.size >= 5, `只认出 ${branches.size} 个状态分支，这条对照已不作数`)
 })
+
+/* ------------------------------------------------------------------ 整条 lib */
+
+/**
+ * 2026-10-09 复审把这条闸的覆盖面从 `ca-bundle.js` 一个文件扩到**整个 lib**，因为它
+ * 当年就是只盯着一份文件才漏掉的：`lib/apply.js` 的 `npm-prefix-unwritable` remedy 把
+ * `sudo chown -R "$(whoami)" <dir>` 交给了读者，而 `<dir>` 逐字来自
+ * `npm config get prefix`（也就是来自 `~/.npmrc`，同账户任意进程都写得动）。那句话会
+ * 进 `lastError.message`，面板原样打印、`mcp-shell` 原样转发给 agent —— 等于把一段
+ * 攻击者选的 shell 以 root 交出去。SECURITY.md §3 的口径是：升权动作只**点名**，不替
+ * 人写好命令。
+ *
+ * REVERSE MUTATION：把 apply.js 那句 remedy 换回 `sudo chown -R …` → 下面第 1、2 条一起红。
+ */
+
+/** 注释要剥掉：这些文件把当年那几句原文**留在注释里**当教训，扫描器把它们当成交出去的
+ *  话就会红在自己身上——那不是这条闸想说的话。剥法沿用上面 `describeCa` 那一条。 */
+function codeOnly(raw) {
+  return raw
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('//'))
+    .join('\n')
+}
+
+/** 会被交给读者/agent 的字符串字面量（长的才是句子，短的是键名与片段）。 */
+function spokenLiterals(code) {
+  return [...code.matchAll(/'((?:[^'\\]|\\[\s\S])*)'|"((?:[^"\\]|\\[\s\S])*)"|`((?:[^`\\]|\\[\s\S])*)`/g)]
+    .map((m) => [m[1], m[2], m[3]].find((s) => s !== undefined))
+    .filter((s) => s.length > 30)
+}
+
+const LIB_JS = fs.readdirSync(path.join(HERE, '..', 'lib')).filter((name) => name.endsWith('.js')).sort()
+
+test('整个 lib 的代码（剥掉注释）里，一句 sudo 都不许出现', () => {
+  assert.ok(LIB_JS.includes('apply.js') && LIB_JS.includes('source.js'),
+    `这条闸必须真的盖到 apply.js 与 source.js，扫到的却是：${LIB_JS.join(', ')}`)
+  assert.ok(LIB_JS.length >= 15, `只认出 ${LIB_JS.length} 份 lib 文件，这条对照已经看不见东西`)
+  for (const name of LIB_JS) {
+    const code = codeOnly(fs.readFileSync(path.join(HERE, '..', 'lib', name), 'utf8'))
+    assert.ok(code.length > 200, `lib/${name} 抠不出代码体，这条闸对它不作数`)
+    assert.doesNotMatch(code, /\bsudo\b/, `lib/${name} 的代码里出现了 sudo：升权命令不许出现在任何交给读者的话里`)
+    const offenders = OFFENDING(code)
+    assert.deepEqual(offenders, [], `lib/${name} 交出升权命令的形状：${offenders.join(', ')}`)
+  }
+})
+
+test('整个 lib 交出去的每一句长字符串，都不是可以照着执行的升权命令', () => {
+  let spoken = 0
+  for (const name of LIB_JS) {
+    const code = codeOnly(fs.readFileSync(path.join(HERE, '..', 'lib', name), 'utf8'))
+    for (const literal of spokenLiterals(code)) {
+      spoken += 1
+      assert.deepEqual(OFFENDING(literal), [],
+        `lib/${name} 里一句话把升权动作写成了可执行命令：${literal.slice(0, 140)}`)
+    }
+  }
+  assert.ok(spoken >= 300, `只认出 ${spoken} 条要交给读者的话，这条对照已经不作数`)
+})
+
+test('换成"点名动作"之后，那条 remedy 仍然点得出工具与路径，并说清不许 agent 代跑', () => {
+  // 这条是第 1、2 条的对照面：一道只会拒绝的闸会把 remedy 削成"找个人看看"，那同样是
+  // 产品规则的失守（读者必须知道要改**哪一个**目录、这件事只能**谁**去做）。
+  const code = codeOnly(fs.readFileSync(path.join(HERE, '..', 'lib', 'apply.js'), 'utf8'))
+  const npmRemedy = spokenLiterals(code).join('\n')
+  assert.ok(/terminal|privileged/.test(npmRemedy), 'apply.js 里找不到那条点名动作的 npm-prefix remedy')
+  assert.match(npmRemedy, /at a terminal/, '要说清这一步只能由一个人在终端做')
+  assert.match(npmRemedy, /will not run a privileged command/, '也要说清程序自己不跑，更不会把它交给 agent')
+  assert.ok(code.includes('JSON.stringify'), '路径必须 JSON 引起来，读者才知道路径在哪里结束')
+  assert.ok(code.includes('npm config get prefix'), '路径是从 npm 读来的这件事必须交代，人才会去核')
+})

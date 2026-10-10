@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url'
 
 import { CODES } from './codes.js'
 import { CA_ENV_VAR } from './ca-bundle.js'
-import { UpdaterError, STATE_FILE_MODE, writePrivateFile } from './fsutil.js'
+import { UpdaterError, STATE_FILE_MODE, sameRuntimePath, writePrivateFile } from './fsutil.js'
 import { stateDirReadings } from './policy.js'
 
 export const AGENT_LABEL = 'com.glasspane.update'
@@ -305,6 +305,36 @@ export function preparePrivateLogFile(logPath, {
  *    regressed to that shape, so the fix cannot be undone by editing only the
  *    plist file.
  */
+/**
+ * One component of `StartCalendarInterval`, in the form launchd has to be given.
+ *
+ * `readAgentSchedule` has always refused an out-of-range hour or minute on the *read*
+ * side; the write side took whatever `Number()` the caller could spell. That mismatch is
+ * the whole finding: `enable --hour 25` renders a syntactically valid plist that launchd
+ * loads, never fires, and leaves the state file saying automatic updates are on — while
+ * the next `enable` reading that schedule back gets `null` ("no readable
+ * StartCalendarInterval") about a file that plainly exists. Checking it at the render is
+ * what makes the two readers of one fact agree, and it holds for every caller, not just
+ * the CLI parser that now also refuses earlier.
+ */
+function assertScheduleComponent(value, name, limit) {
+  const text = typeof value === 'number' || typeof value === 'string' ? String(value).trim() : ''
+  if (!/^\d+$/.test(text)) {
+    throw new UpdaterError(
+      CODES.agentPathUnsafe,
+      `the update agent cannot be rendered: ${name} was ${JSON.stringify(value)}, and it has to be a whole number from 0 to ${limit} — a negative, fractional or unparseable value is not a time launchd can hold`,
+    )
+  }
+  const number = Number(text)
+  if (number > limit) {
+    throw new UpdaterError(
+      CODES.agentPathUnsafe,
+      `the update agent cannot be rendered: ${name} ${number} is outside 0…${limit}. That plist loads and never fires, so this machine would go on reporting "automatic update is on" for a daily job that cannot run; nothing was registered`,
+    )
+  }
+  return number
+}
+
 export function renderAgentPlist({
   nodePath = process.execPath,
   cliPath,
@@ -322,14 +352,16 @@ export function renderAgentPlist({
   // state root has been named: `path.join(null, …)` used to throw a TypeError out
   // of a function whose refusals are supposed to be `UpdaterError`s with a code.
   const resolvedLog = logPath ?? agentLogPath(stateRoot)
+  const askedHour = assertScheduleComponent(hour, 'Hour', 23)
+  const askedMinute = assertScheduleComponent(minute, 'Minute', 59)
   const values = {
     '{{LABEL}}': label,
     '{{NODE_PATH}}': nodePath,
     '{{CLI_PATH}}': cliPath,
     '{{STATE_FLAG}}': daemonFlag,
     '{{STATE_ROOT}}': stateRoot,
-    '{{HOUR}}': String(hour),
-    '{{MINUTE}}': String(minute),
+    '{{HOUR}}': String(askedHour),
+    '{{MINUTE}}': String(askedMinute),
     '{{LOG_PATH}}': resolvedLog,
   }
   for (const [token, value] of Object.entries(values)) {
@@ -542,7 +574,14 @@ export function registerAgent({
       }
     }
     const args = Array.isArray(loaded.args) ? loaded.args.map(String) : []
-    const names = cliPath === null ? true : args.some((arg) => arg === cliPath || arg.includes(String(cliPath)))
+    // Same comparison `lib/runtime.js`'s `jobState` makes against the same book: an
+    // argument that merely *contains* the path we named used to verify here, so
+    // `/tmp/dropin/<cliPath>` — or a wrapper whose `-c` string quotes it — produced
+    // `verified: true` about a job launchd was holding for something else, while the
+    // runtime reader of that very argument list said "the loaded job names … not the
+    // stable entry". One fact, two answers. `sameRuntimePath` is exact (with a symlinked
+    // component allowed for, which is why `includes` looked necessary and is not).
+    const names = cliPath === null ? true : args.some((arg) => sameRuntimePath(arg, cliPath))
     if (!names) {
       return {
         ok: false,
