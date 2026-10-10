@@ -178,10 +178,21 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Read the target matrix before descending into assets/, so this is the repo
-          # root's product.json and not a path guessed from a child directory.
+          # Read the target matrix before descending into the working directory, so this is
+          # the repo root's product.json and not a path guessed from a child directory.
           wanted="$(node -e 'const p=require("./product.json");for(const t of p.platformTargets)console.log(`${p.name}-${t.os}-${t.arch}${t.abi?"-"+t.abi:""}`)')"
-          mkdir -p assets && cd assets
+          # The scratch dir must NOT be a repo-relative `assets/`: this repository already
+          # tracks a directory by that name (the product's logo.svg / banner.svg), so
+          # `mkdir -p assets && cd assets` was a no-op that landed inside the checkout and
+          # `sha256sum ./*` then vouched for two committed repository files that are not
+          # release assets at all. The published v0.7.1 manifest showed the result: 4 lines,
+          # 2 of them unresolvable, and two orphan `.asc` sidecars uploaded for files the
+          # release does not carry — a user following `shasum -a 256 -c SHA256SUMS.txt`
+          # failed out of the box.
+          work="${RUNNER_TEMP:-/tmp}/release-assets"
+          rm -rf "$work"
+          mkdir -p "$work"
+          cd "$work"
           gh release download --repo "$GH_REPO" --pattern '*.zip' --pattern '*.tar.gz'
           # A dropped or partial download used to be tolerated (`|| true`) as long as
           # *something* arrived, and SHA256SUMS.txt then vouched authoritatively for only
@@ -202,6 +213,18 @@ jobs:
           if [ -z "$(ls -A)" ]; then echo "::error::no release assets found to checksum"; exit 1; fi
           sha256sum ./* > SHA256SUMS.txt
           cat SHA256SUMS.txt
+          # A manifest is only worth something if every line resolves. Assert both
+          # directions: no listed file missing from this directory, and no file in this
+          # directory missing from the manifest.
+          while read -r _ name; do
+            f="${name#./}"
+            [ -f "$f" ] || { echo "::error::SHA256SUMS.txt lists $f which is not a downloaded release asset"; exit 1; }
+          done < SHA256SUMS.txt
+          for f in ./*; do
+            b="${f#./}"
+            [ "$b" = "SHA256SUMS.txt" ] && continue
+            grep -qF "./$b" SHA256SUMS.txt || { echo "::error::$b is present but unlisted in SHA256SUMS.txt"; exit 1; }
+          done
 
       # Sign every release asset (zip/tar.gz) plus SHA256SUMS.txt with GPG, so the
       # installer fallback and any consumer can verify provenance (not just the
