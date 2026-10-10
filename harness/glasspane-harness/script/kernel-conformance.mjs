@@ -88,6 +88,7 @@ async function loadImpl(label, dir) {
     decisionLog: await import(sub("decision-log")),
     evidenceDecision: await import(sub("evidence-decision")),
     dimension: await import(sub("dimension-context")),
+    runPlan: await import(sub("run-plan")),
   }
 }
 
@@ -130,6 +131,14 @@ function drive(impl, fixture, kind) {
     out.push(canonical(context))
     out.push(impl.dimension.formatDimensionContext(context))
     out.push(context.totals.verified + context.totals.unverified === context.totals.planned ? "totals-consistent" : "totals-BROKEN")
+  } else if (kind === "run-plan") {
+    // A plan is only useful across the two shells if its digest is reproducible: the
+    // ledger records the digest, so a consumer that computes a different one for the
+    // same bytes breaks the audit link. Planned order is part of the answer, not
+    // incidental — sorting it here would let a re-ordered plan pass as the same plan.
+    const plan = impl.runPlan.RunPlanSchema.parse(fixture.input)
+    out.push(impl.runPlan.runPlanDigest(plan))
+    out.push(impl.runPlan.plannedIds(plan).join(","))
   } else if (kind === "evidence-decision") {
     // A case list: each entry is a pack plus the outcome and sentence the transcription
     // must produce. Driving all of them into the answer is what makes the digest protective;
@@ -164,6 +173,7 @@ function drive(impl, fixture, kind) {
  */
 const KINDS = [
   "dimension-context",
+  "run-plan",
   "evidence-decision",
   "evidence-pack",
   "recipe-config",
@@ -213,6 +223,26 @@ function oracleFailures(impl, fixture, kind) {
       bad.push(`rendered line != expectedLine:\n      got      ${impl.dimension.formatDimensionContext(context)}\n      expected ${fixture.expectedLine}`)
     }
   }
+  if (kind === "run-plan" && (fixture.expectedDigest || fixture.expectedIds)) {
+    checked++
+    const plan = impl.runPlan.RunPlanSchema.parse(fixture.input)
+    if (fixture.expectedDigest && impl.runPlan.runPlanDigest(plan) !== fixture.expectedDigest) {
+      bad.push(`digest ${impl.runPlan.runPlanDigest(plan)} != the fixture's own ${fixture.expectedDigest}`)
+    }
+    if (fixture.expectedIds && impl.runPlan.plannedIds(plan).join(",") !== fixture.expectedIds.join(",")) {
+      bad.push(`planned ids ${impl.runPlan.plannedIds(plan).join(",")} != ${fixture.expectedIds.join(",")}`)
+    }
+    for (const item of fixture.cases ?? []) {
+      let error = null
+      try {
+        impl.runPlan.RunPlanSchema.parse(item.input)
+      } catch (caught) {
+        error = caught
+      }
+      if (item.expect === "refused" && error === null) bad.push(`${item.name}: accepted, the contract says refuse`)
+      if (item.expect === "accepted" && error !== null) bad.push(`${item.name}: refused (${String(error?.message ?? error).slice(0, 80)})`)
+    }
+  }
   if (kind === "evidence-decision" && Array.isArray(fixture.cases)) {
     checked += fixture.cases.length
     for (const item of fixture.cases) {
@@ -244,7 +274,15 @@ const REQUIRED = {
   decisionLog: ["serializeDecisionLogEntry", "decisionLogEntryHash"],
   evidenceDecision: ["decisionOutcomeFromEvidence", "decisionSummaryFromEvidence"],
   dimension: ["dimensionContext", "formatDimensionContext"],
+  runPlan: ["plannedIds", "runPlanDigest"],
 }
+
+/**
+ * Things a module must also expose that are not functions. Kept apart from REQUIRED
+ * because the two are checked differently: a zod schema is an object carrying `parse`,
+ * and asking whether it `typeof === "function"` reports a working build as broken.
+ */
+const REQUIRED_SCHEMAS = { runPlan: ["RunPlanSchema"] }
 
 const loaded = []
 for (const i of impls) {
@@ -252,6 +290,13 @@ for (const i of impls) {
   const missing = Object.entries(REQUIRED).flatMap(([mod, names]) =>
     names.filter((n) => typeof impl[mod]?.[n] !== "function").map((n) => `${mod}.${n}`),
   )
+  // parseRunPlan is the entry point consumers actually call; assert it exists so a
+  // kernel that ships the schema but forgets the parse wrapper cannot pass.
+  if (typeof impl.parse?.parseRunPlan !== "function") missing.push("parse.parseRunPlan")
+  const missingSchemas = Object.entries(REQUIRED_SCHEMAS).flatMap(([mod, names]) =>
+    names.filter((n) => typeof impl[mod]?.[n]?.parse !== "function").map((n) => `${mod}.${n}.parse`),
+  )
+  missing.push(...missingSchemas)
   if (missing.length > 0) {
     console.error(`kernel-conformance: ${i.label} is missing ${missing.join(", ")}`)
     console.error("  Either the kernel moved a function, or this is a broken/incomplete build.")
