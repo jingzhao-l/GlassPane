@@ -9,6 +9,8 @@ import {
   mcpClientConfigSnippet,
   nextStepsText,
   repoMissingText,
+  resolvePinRef,
+  bootstrapPlan,
   REPO_URL,
   INSTALL_SH_URL,
   RELEASE_VERSION,
@@ -66,13 +68,15 @@ test('install.sh: 当前目录即仓库 → cwd 分支命中', () => {
 test('install.sh: 无仓库 → dry-run 只规划 clone，绝不落盘', () => {
   const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'glasspane-bare-'))
   const cloneDir = path.join(bare, 'clone-target')
+  // 覆盖位现在要过 scheme 白名单（finding 3）：scp 式 git@host:path 与 `ext::sh -c …`
+  // 落在同一个"看不出会做什么"的形状里，所以这里用 https:// 形态演示"覆盖仍可用"。
   const result = runInstallSh({
     cwd: bare,
-    env: { GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: cloneDir, GLASSPANE_REPO_URL: 'git@example.invalid:repo.git' },
+    env: { GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: cloneDir, GLASSPANE_REPO_URL: 'https://example.invalid/repo.git' },
   })
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /\[dry-run\].*git clone/)
-  assert.ok(result.stdout.includes('git@example.invalid:repo.git'), 'clone URL 可被环境变量覆盖')
+  assert.ok(result.stdout.includes('https://example.invalid/repo.git'), 'clone URL 可被环境变量覆盖')
   assert.equal(fs.existsSync(cloneDir), false, 'dry-run 不得实际 clone')
 })
 
@@ -143,13 +147,25 @@ test('install.sh: GLASSPANE_REF 显式覆盖（追主干要明说）', () => {
   assert.match(result.stdout, /--branch main/)
 })
 
-test('install.sh: GLASSPANE_REF 置空退回 main，且与 installer 常量同源', () => {
+test('install.sh: GLASSPANE_REF 置空 = 钉发布 tag，与 installer 常量真的同源（两侧同测）', () => {
   const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'glasspane-bare-ref3-'))
   const result = runInstallSh({
     cwd: bare,
     env: { GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: path.join(bare, 'ct'), GLASSPANE_REF: '' },
   })
-  assert.match(result.stdout, /--branch main/)
+  assert.equal(result.status, 0, result.stderr)
+  // 旧行为：install.sh 把空值读成 main，installer/cli.js 把同一个空值读成钉住的 tag——
+  // 同一条 `GLASSPANE_REF=` 在两条一键入口上拿到两份源码，而这条用例的标题写着"同源"。
+  assert.ok(!/--branch main/.test(result.stdout), `空值不该再退回 main：${result.stdout}`)
+  assert.ok(
+    result.stdout.includes(`--branch v${RELEASE_VERSION}`),
+    `install.sh 一侧空值应钉 v${RELEASE_VERSION}，实际：${result.stdout}`,
+  )
+  // 另一侧：同一个 env 交给 installer 的口径函数，必须给出同一个 ref。
+  assert.equal(resolvePinRef({ GLASSPANE_REF: '' }), `v${RELEASE_VERSION}`, 'installer 侧空值同样钉发布 tag')
+  assert.equal(resolvePinRef({ GLASSPANE_REF: '' }), resolvePinRef({}), '未设置与置空同义（两侧都是）')
+  assert.equal(bootstrapPlan({ homeDir: bare, installDir: path.join(bare, 'ct'), ref: resolvePinRef({ GLASSPANE_REF: '' }) }).ref,
+    `v${RELEASE_VERSION}`, 'bootstrapPlan 拿这个 ref 时也是同一个 tag')
 })
 
 test('repoMissingText: 三条路径齐全且与 install.sh 地址真源一致', () => {

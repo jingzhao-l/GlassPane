@@ -268,9 +268,9 @@ test('bootstrapPlan: 默认把发布 tag clone 到 ~/glasspane', () => {
   assert.equal(plan.targetDir, path.join('/Users/tester', 'glasspane'))
   assert.equal(plan.ref, `v${RELEASE_VERSION}`)
   assert.deepEqual(plan.gitArgs, [
-    'clone', '--branch', `v${RELEASE_VERSION}`, '--depth', '1',
+    'clone', '--branch', `v${RELEASE_VERSION}`, '--depth', '1', '--',
     REPO_URL, path.join('/Users/tester', 'glasspane'),
-  ])
+  ], '位置参数前必须有 -- ：值以 - 开头时会被 git 当成选项（finding 3）')
 })
 
 test('bootstrapPlan: GLASSPANE_REF/installDir 覆盖生效（钉 main 可追主干）', () => {

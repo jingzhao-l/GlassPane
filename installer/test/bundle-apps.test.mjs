@@ -20,6 +20,8 @@ import {
   daemonStartCommand,
   guiStartCommand,
   installBundles,
+  bundlesToReplace,
+  panelOpenHint,
   nextStepsText,
   startDetached,
   ensureLogDir,
@@ -109,8 +111,8 @@ test('installBundles: 覆盖式安置两个 .app，源缺失即跳过且不报�
   const plan = bundlePlan({ homeDir: '/Users/dev', buildDir: BUILD_DIR })
   const removed = []
   const copied = []
-  const existsSources = new Set([plan.builtSettingsApp]) // 只有面板产物存在
-  const installed = installBundles({
+  const existsSources = new Set([plan.builtSettingsApp, plan.settingsApp]) // 只有面板产物存在（且目标已有一份旧的）
+  const { installed, declined } = installBundles({
     plan,
     exists: (p) => existsSources.has(p),
     remove: (target) => removed.push(target),
@@ -118,8 +120,30 @@ test('installBundles: 覆盖式安置两个 .app，源缺失即跳过且不报�
     mkdir: () => {},
   })
   assert.deepEqual(installed, [plan.settingsApp])
+  assert.deepEqual(declined, [], 'allowReplace 默认放行：覆盖是既有语义')
   assert.deepEqual(removed, [plan.settingsApp], '覆盖安装：先删旧目标再拷')
   assert.deepEqual(copied, [[plan.builtSettingsApp, plan.settingsApp]])
+})
+
+test('installBundles: allowReplace=false 时目标已存在的那一份不被动，并如实进 declined', () => {
+  const plan = bundlePlan({ homeDir: '/Users/dev', buildDir: BUILD_DIR })
+  const removed = []
+  const copied = []
+  const existsSources = new Set([plan.builtSettingsApp, plan.settingsApp])
+  const { installed, declined } = installBundles({
+    plan,
+    allowReplace: false,
+    exists: (p) => existsSources.has(p),
+    remove: (target) => removed.push(target),
+    copy: (source, target) => copied.push([source, target]),
+    mkdir: () => {},
+  })
+  assert.deepEqual(installed, [])
+  assert.deepEqual(declined, [plan.settingsApp], '没拿到替换许可必须被点名，而不是静默跳过')
+  assert.deepEqual(removed, [], 'rm 一次都没执行')
+  assert.deepEqual(copied, [])
+  assert.deepEqual(bundlesToReplace({ plan, exists: (p) => existsSources.has(p) }), [plan.settingsApp],
+    '安装器就是靠这份清单决定要不要问人')
 })
 
 test('installBundles: 真实临时目录落盘可复核（幂等重跑）', () => {
@@ -132,9 +156,9 @@ test('installBundles: 真实临时目录落盘可复核（幂等重跑）', () =
   fs.writeFileSync(path.join(sourceApp, 'Contents', 'Info.plist'), '<plist/>')
 
   const plan = bundlePlan({ homeDir: root, buildDir, appsDir })
-  const first = installBundles({ plan })
+  const first = installBundles({ plan }).installed
   assert.deepEqual(first, [plan.settingsApp])
-  const second = installBundles({ plan })
+  const second = installBundles({ plan }).installed
   assert.deepEqual(second, [plan.settingsApp], '重跑幂等')
   assert.ok(fs.existsSync(path.join(plan.settingsApp, 'Contents', 'MacOS')), 'bundle 结构完整')
   fs.rmSync(root, { recursive: true, force: true })
@@ -152,7 +176,19 @@ test('launchd plist 指向 bundle 内可执行时路径原样写入（授权主�
   assert.ok(!xml.includes(BUILD_DIR), '开机自启不得再指向 .build 隐藏目录')
 })
 
-test('nextStepsText: bundle 形态与裸二进制形态的条目名各自如实', () => {
+/** 从说明文本里抠出所有被双引号包住的绝对路径（finding 8 的闸：印出来的必须真存在）。 */
+function quotedPaths(text) {
+  return [...String(text).matchAll(/"(\/[^"]*)"/g)].map((m) => m[1])
+}
+
+test('nextStepsText: bundle 形态与裸二进制形态的条目名各自如实，且印出的路径真的存在', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-panel-text-'))
+  const barePanelBin = path.join(root, 'glasspane-settings')
+  fs.writeFileSync(barePanelBin, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  const realApp = path.join(root, SETTINGS_APP_NAME)
+  fs.mkdirSync(path.join(realApp, 'Contents', 'MacOS'), { recursive: true })
+  const emptyDir = path.join(root, 'never-built') // 刻意不创建：这就是 --no-app 那一档
+
   const plan = bundlePlan({ homeDir: '/Users/dev', buildDir: BUILD_DIR })
   const bundled = nextStepsText({
     rootDir: '/repo',
@@ -160,6 +196,7 @@ test('nextStepsText: bundle 形态与裸二进制形态的条目名各自如实'
     guiOpened: true,
     daemon: { path: plan.daemonExecutable, viaBundle: true },
     settingsApp: plan.settingsApp,
+    panel: { viaBundle: true, executable: barePanelBin, app: realApp, exists: true },
   })
   assert.ok(bundled.includes('GlassPane Daemon'), 'bundle 形态应给出带图标的条目名')
   assert.ok(bundled.includes('面板已打开'))
@@ -167,17 +204,36 @@ test('nextStepsText: bundle 形态与裸二进制形态的条目名各自如实'
   assert.ok(bundled.includes('授权勾选必须人工'), '诚实边界：TCC 不程序化')
   assert.ok(bundled.includes(plan.daemonExecutable), '给出 --permissions 验证命令的完整路径')
   assert.ok(bundled.includes('--permissions'))
+  assert.ok(bundled.includes(`open "${realApp}"`), 'bundle 形态的再起一次命令要指向那个 .app')
+  for (const p of quotedPaths(bundled).filter((x) => x.endsWith('.app'))) {
+    assert.ok(fs.existsSync(p), `说明里印给读者的 open 目标必须存在：${p}`)
+  }
 
   const bare = nextStepsText({
     rootDir: '/repo',
     socketPath: '/s.sock',
     guiOpened: false,
     daemon: { path: '/repo/engine/.build/release/glasspaned', viaBundle: false },
+    // finding 8：说明里的面板路径来自 settingsLaunchPath 的结果，测试保证它**真的存在**。
+    panel: { viaBundle: false, executable: barePanelBin, app: null, exists: true },
   })
   assert.ok(bare.includes('裸二进制形态'), '裸二进制必须如实说明条目只显示文件名')
   assert.ok(bare.includes('glasspaned'))
-  assert.ok(bare.includes('open "'), '未开面板时给出打开指引')
-  assert.ok(bare.includes(SETTINGS_APP_NAME))
+  assert.ok(bare.includes(barePanelBin), `应把面板裸二进制路径交给读者：${bare}`)
+  assert.ok(fs.existsSync(barePanelBin), '前置条件：这条路径确实存在')
+
+  // 什么都没安置（--no-app，或 make-app.sh 没产出 bundle）时不许印一条没人能跑的 open。
+  const nothing = nextStepsText({
+    rootDir: '/repo',
+    socketPath: '/s.sock',
+    guiOpened: false,
+    daemon: { path: '/repo/engine/.build/release/glasspaned', viaBundle: false },
+    panel: { viaBundle: false, executable: path.join(emptyDir, PANEL_EXE_NAME), app: path.join(emptyDir, SETTINGS_APP_NAME), exists: false },
+  })
+  assert.ok(!/open "/.test(nothing), `没有可执行面板产物时不许印 open "…"：${nothing}`)
+  assert.ok(nothing.includes('没有可执行的面板产物'), '必须明说这一步没有可执行的指引')
+  assert.ok(nothing.includes(path.join(emptyDir, PANEL_EXE_NAME)), '要把查过的那个路径点出来')
+  fs.rmSync(root, { recursive: true, force: true })
 })
 
 test('parseArgs: --replace-daemon 默认关闭、显式可开', () => {
@@ -350,15 +406,48 @@ test('nextStepsText: daemon 未通过 hello 校验时先给失败告警与补救
   assert.ok(!verified.includes('未通过 hello 校验'), '校验通过时不该出现告警')
 })
 
-test('nextStepsText: 面板没打开时不谎称"面板已打开"', () => {
+test('nextStepsText: 面板没打开时给的是**真能跑**的打开命令（不是字面量 open）', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-panel-open-'))
+  const app = path.join(root, SETTINGS_APP_NAME)
+  fs.mkdirSync(path.join(app, 'Contents', 'MacOS'), { recursive: true })
+
   const text = nextStepsText({
     rootDir: '/repo',
     socketPath: '/s.sock',
     guiOpened: false,
     daemon: { path: '/repo/glasspaned', viaBundle: true },
+    panel: { viaBundle: true, executable: path.join(app, 'Contents', 'MacOS', PANEL_EXE_NAME), app, exists: true },
   })
   assert.ok(!text.includes('面板已打开'))
-  assert.ok(text.includes('open "'), '给出手工打开面板的命令')
+  const command = /open "([^"]+)"/.exec(text)
+  assert.ok(command, `应给出一条 open 命令：${text}`)
+  assert.ok(fs.existsSync(command[1]), `open 的目标必须真的存在，实为 ${command[1]}`)
+
+  // 产物不存在时换成裸二进制说明，而不是把不存在的路径塞进 open。
+  const missing = nextStepsText({
+    rootDir: '/repo',
+    socketPath: '/s.sock',
+    guiOpened: false,
+    daemon: { path: '/repo/glasspaned', viaBundle: true },
+    panel: { viaBundle: true, executable: null, app: path.join(root, '缺失.app'), exists: false },
+  })
+  assert.ok(!/open "/.test(missing), '没有产物时不许印 open')
+  assert.ok(missing.includes('没有可执行的面板产物'), missing)
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('panelOpenHint: bundle/裸二进制两形态与"什么都没有"那一档分得清', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-panel-hint-'))
+  const bin = path.join(root, PANEL_EXE_NAME)
+  fs.writeFileSync(bin, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  const bare = panelOpenHint({ panel: { viaBundle: false, executable: bin, app: null, exists: fs.existsSync(bin) } })
+  assert.equal(bare.runnable, true)
+  assert.ok(bare.text.includes(bin), '裸二进制形态给的是**直接执行**那条，不是 open')
+  assert.ok(!bare.text.startsWith('open '), '裸二进制不经 open')
+  const gone = panelOpenHint({ panel: { viaBundle: false, executable: path.join(root, 'nope'), app: null, exists: false } })
+  assert.equal(gone.runnable, false)
+  assert.ok(!gone.text.includes('open "'), '没东西可开时不许印 open')
+  fs.rmSync(root, { recursive: true, force: true })
 })
 
 test('startDetached: 启动器不存在时报错，而不是打印 PID undefined', async () => {
