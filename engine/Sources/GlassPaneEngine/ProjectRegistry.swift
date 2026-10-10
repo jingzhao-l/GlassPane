@@ -35,6 +35,16 @@ public final class ProjectRegistry {
     /// Why the load failed, phrased for the agent-facing message.
     public private(set) var loadFailure: String?
 
+    /// The cheap identity of the bytes this process last read: modification time
+    /// (to the nanosecond) plus size. nil when there was no file at load.
+    ///
+    /// `save()` serialises the *whole* table and `verifySaved` can only compare
+    /// the count this process just wrote, so without a baseline here a file
+    /// changed by another writer in between — `glasspaned --project-prune` is a
+    /// documented one — was silently reverted by the long-lived daemon's next
+    /// create/update, and that create still reported success.
+    private var loadedIdentity: OnDiskIdentity?
+
     /// The table lives where the caller says it lives — there is no default.
     ///
     /// `filePath:` is required (P8, the shape `EvidenceStore.init(directory:)`
@@ -268,6 +278,12 @@ public final class ProjectRegistry {
             loadFailure = "cannot be read (\(error))"
             return
         }
+        // The identity is taken from the bytes just read, so a refusal can only
+        // be raised for a change this process did not make itself. A write that
+        // lands between the read and this stat is not seen: this narrows the
+        // window from "the whole life of the daemon" to one read, it does not
+        // close it.
+        loadedIdentity = Self.identity(ofPath: filePath)
         do {
             projects = try JSONDecoder().decode([ProjectEntry].self, from: data)
         } catch {
@@ -275,6 +291,64 @@ public final class ProjectRegistry {
             // flag makes "empty" mean "unreadable" everywhere it is used.
             loadFailed = true
             loadFailure = "is not a decodable project list (\(error))"
+        }
+    }
+
+    /// What "changed since this process read it" is measured against: mtime to
+    /// the nanosecond plus size. Nothing is hashed — a full-table prune is
+    /// microseconds of work next to a `replaceItemAt`, and the pair is enough to
+    /// notice a rewrite by someone else.
+    private struct OnDiskIdentity: Equatable {
+        let modificationNs: Int64
+        let size: Int64
+    }
+
+    /// nil when the path cannot be stat'ed — which is "the file is gone", and
+    /// that is a change too (see `requireUnchangedSinceLoad`).
+    private static func identity(ofPath path: String) -> OnDiskIdentity? {
+        var info = stat()
+        guard stat(path, &info) == 0 else { return nil }
+        return OnDiskIdentity(
+            modificationNs: Int64(info.st_mtimespec.tv_sec) * 1_000_000_000
+                + Int64(info.st_mtimespec.tv_nsec),
+            size: Int64(info.st_size)
+        )
+    }
+
+    /// Refuse to publish the in-memory table over bytes this process never read.
+    ///
+    /// The other writer here is not hypothetical: `glasspaned --project-prune`
+    /// and `--project-remove` are one-shot processes over the same file, and the
+    /// reply they print already says `requiresDaemonRestart`. Renaming over their
+    /// result would put the pruned registrations back and report the create as
+    /// verified, because `verifySaved` only counts what this process wrote.
+    private func requireUnchangedSinceLoad() throws {
+        let current = Self.identity(ofPath: filePath)
+        guard current != loadedIdentity else { return }
+        throw ConcurrentWriteRefusal(
+            detail: current == nil
+                ? "it is gone: the file this process read (\(loadedIdentity.map { "\($0.size) bytes" } ?? "no file at all")) is no longer there"
+                : "it now holds \(current?.size ?? -1) bytes with a newer modification time than the \(loadedIdentity.map { "\($0.size) bytes" } ?? "file this process read did not exist") it was read with"
+        )
+    }
+
+    /// The refusal itself, carried as its own type so the generic `catch` below
+    /// — which reports disk faults and rolls the table back — cannot rewrite "a
+    /// concurrent writer owns this file now" into "the write failed".
+    private struct ConcurrentWriteRefusal: Error {
+        let detail: String
+    }
+
+    /// Drop the staged copy on the way out of a failed write, reporting the case
+    /// where even that does not work instead of swallowing it — a `.tmp-*` left
+    /// in the state root is a table nobody asked for.
+    private func discardStagedCopy(_ tmpPath: String) -> String {
+        guard FileManager.default.fileExists(atPath: tmpPath) else { return "" }
+        do {
+            try FileManager.default.removeItem(atPath: tmpPath)
+            return ""
+        } catch let cleanupError {
+            return "; the partial temporary file \(tmpPath) could not be removed either (\(cleanupError))"
         }
     }
 
@@ -332,10 +406,17 @@ public final class ProjectRegistry {
                     remedy: "the directory holding \(filePath) is on a volume that ignores chmod (read-only mount, ACL or immutable flag): make the directory owner-only writable, or move the state root with --state-dir to one that honors permissions; the registry was not written either way"
                 )
             }
+            // Last look before the item is published: everything above this line
+            // touched only our own temporary name.
+            try requireUnchangedSinceLoad()
             // `replaceItemAt` is the primitive this repo already uses for
             // registry/approval-ledger writes: it moves the temp item into
             // place and hands back the previous contents as a backup URL.
             let backup = try FileManager.default.replaceItemAt(destination, withItemAt: tmpURL)
+            // The table on disk is now *this* process's bytes, so the baseline
+            // moves with them — otherwise the next legitimate write would refuse
+            // against a change this registry itself made.
+            loadedIdentity = Self.identity(ofPath: filePath)
             // Drop only a *genuinely different* superseded copy. On a first write
             // (no previous file) the URL handed back can name the item that was
             // just placed; removing it silently destroyed the write while every
@@ -349,21 +430,23 @@ public final class ProjectRegistry {
             // hears "saved" — an in-memory-only registry is invisible to the next
             // process and evaporates on restart.
             try verifySaved(destination, expecting: projects.count)
+        } catch let clash as ConcurrentWriteRefusal {
+            // The refusal is the outcome, so it is reported as itself: the staged
+            // copy goes, the file stays exactly as the other writer left it, and
+            // the in-memory table is rolled back by the caller (`create`,
+            // `update`, `remove` all undo a throwing write).
+            throw GPError(
+                code: .internalError,
+                message: "project registry write to \(filePath) refused: the file changed after this process read it (\(clash.detail)) — nothing was published, because renaming the \(projects.count) entry/entries this process holds over it would silently revert the other writer's result while every caller was told this write verified. Writes stay refused until a process re-reads the file\(discardStagedCopy(tmpPath))",
+                remedy: "re-read the table (`glasspaned --list-projects`) and repeat the change against what is on disk now; the background service has to restart to pick the file up (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`, or the restart button in the GlassPane panel). Do not delete \(filePath) — the newer registrations are only in it"
+            )
         } catch {
             // No silent fallback write: the caller hears that the registry did
             // not reach disk, and our own half-written temp file is removed (or
             // the removal failure is reported inline rather than swallowed).
-            var litter = ""
-            if FileManager.default.fileExists(atPath: tmpPath) {
-                do {
-                    try FileManager.default.removeItem(atPath: tmpPath)
-                } catch let cleanupError {
-                    litter = "; the partial temporary file \(tmpPath) could not be removed either (\(cleanupError))"
-                }
-            }
             throw GPError(
                 code: .internalError,
-                message: "project registry write to \(filePath) failed (\(error)); the file on disk is unchanged and the change was rolled back in memory\(litter)",
+                message: "project registry write to \(filePath) failed (\(error)); the file on disk is unchanged and the change was rolled back in memory\(discardStagedCopy(tmpPath))",
                 remedy: "check that the directory is writable and has free space (`ls -ld \(destination.deletingLastPathComponent().path)`, `df -k \(destination.deletingLastPathComponent().path)`), fix it, then repeat the call — until then the registry in the running daemon and the file disagree"
             )
         }

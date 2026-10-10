@@ -209,11 +209,17 @@ final class StatePermissionTests: XCTestCase {
     /// rename route cannot be used at all, so `write` falls back to publishing
     /// the pack under its final name and that finished file refuses `0600`.
     ///
-    /// The fallback is driven for real: a directory squatting on `<entry>.tmp`
-    /// makes the temporary write throw (measured on this checkout:
-    /// `NSCocoaErrorDomain Code=512`), which is exactly the "the temp name is
-    /// unusable" condition the fallback exists for, and the pack then lands at
-    /// its final name (measured: `Code=512` on the temp, fallback write succeeds).
+    /// The fallback is driven for real: a directory squatting on **the name the
+    /// store stages under** makes the temporary write throw (measured on this
+    /// checkout: `NSCocoaErrorDomain Code=512` for the rename onto a directory),
+    /// which is exactly the "the temp name is unusable" condition the fallback
+    /// exists for, and the pack then lands at its final name (measured: the
+    /// fallback write succeeds). That name is unique per write in production — a
+    /// shared `<entry>.tmp` is the hazard `ReviewStorageTests` pins — so the test
+    /// pins the staging name through `store.stagePath`, the same kind of seam
+    /// `isolationCheck` is and injectable for the same reason: without it this
+    /// refusal could not be executed by any test.
+    ///
     /// The *isolation verdict* is injected, because no non-root test can build
     /// that volume — measured candidate space, all of which fail to reach the
     /// branch: a directory, a non-empty directory, a `uchg`-flagged file, a FIFO,
@@ -231,9 +237,9 @@ final class StatePermissionTests: XCTestCase {
         let store = EvidenceStore(directory: dir)
         let pack = pack(createdAt: "2026-09-23T00:00:00.000Z", seed: 21)
         let filePath = dir + "/" + pack.operationId + ".json"
-        try FileManager.default.createDirectory(
-            atPath: filePath + ".tmp", withIntermediateDirectories: true
-        )
+        let staged = dir + "/staged-under-a-directory-name"
+        store.stagePath = { _ in staged }
+        try FileManager.default.createDirectory(atPath: staged, withIntermediateDirectories: true)
 
         var judged: [String] = []
         store.isolationCheck = { path in

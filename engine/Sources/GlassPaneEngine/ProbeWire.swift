@@ -95,6 +95,25 @@ public enum ProbeWire {
         return number
     }
 
+    /// A whole number the daemon can actually hold, or nil.
+    ///
+    /// `intValue` then `.int32Value` is two truncations posing as one check: a
+    /// frame carrying 4294967297 (2^32 + 1) came back as pid **1**, registering a
+    /// probe against somebody else's process, and every later "hitCount: 0" was a
+    /// measurement about that process. The engine side refuses the same shape for
+    /// the same reason (`ParamValidation.pidLower`/`pidUpper`), so the range is
+    /// read from there rather than restated.
+    static func boundedInt32(_ value: Any?, in range: ClosedRange<Int32>) -> Int32? {
+        guard let number = scalar(value),
+              let whole = number.int64ValueExact,
+              let candidate = Int32(exactly: whole) else { return nil }
+        return range.contains(candidate) ? candidate : nil
+    }
+
+    /// `pid_t` is `Int32`, and a pid of 0 or below names no process.
+    static let pidRange: ClosedRange<Int32> =
+        Int32(ParamValidation.pidLower)...Int32(ParamValidation.pidUpper)
+
     /// Decode one frame payload (no trailing newline). Never throws: bad
     /// frames come back as `.malformed` so the socket layer can log + skip.
     public static func decode(_ data: Data) -> ProbeInboundFrame {
@@ -107,14 +126,16 @@ public enum ProbeWire {
         }
         switch type {
         case "hello":
-            guard let pidNumber = scalar(dict["pid"]), pidNumber.intValue > 0,
+            guard let pid = boundedInt32(dict["pid"], in: pidRange),
                   let appName = dict["appName"] as? String,
                   let probeVersion = dict["probeVersion"] as? String else {
-                return .malformed(reason: "hello requires pid>0, appName, probeVersion")
+                return .malformed(
+                    reason: "hello requires pid in \(pidRange), appName, probeVersion"
+                )
             }
             let capabilities = (dict["capabilities"] as? [String]) ?? []
             return .hello(ProbeHello(
-                pid: pidNumber.int32Value,
+                pid: pid,
                 bundleId: dict["bundleId"] as? String,
                 appName: appName,
                 probeVersion: probeVersion,
@@ -124,13 +145,16 @@ public enum ProbeWire {
                 rejectedKeys: Self.counter(dict["rejectedKeys"])
             ))
         case "handler":
+            // `line` is a source position the probe reports; past Int32 there is
+            // no such file, and the same truncation that folded a 2^32+1 pid onto
+            // 1 would fold a nonsense line onto something readable.
             guard let file = dict["file"] as? String,
-                  let line = (scalar(dict["line"]))?.intValue, line >= 0 else {
-                return .malformed(reason: "handler requires file and line>=0")
+                  let line = boundedInt32(dict["line"], in: 0...(Int32.max)) else {
+                return .malformed(reason: "handler requires file and line in 0…\(Int32.max)")
             }
             return .handler(
                 file: file,
-                line: line,
+                line: Int(line),
                 ts: (scalar(dict["ts"]))?.doubleValue ?? 0,
                 durationNs: (scalar(dict["durationNs"]))?.intValue
             )

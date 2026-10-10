@@ -73,6 +73,16 @@ public struct RecipeLoader {
     /// The step kinds the contract allows (kernel `RecipeStepKindSchema`).
     public static let stepKinds: [String] = ["act", "observe", "assert", "diagnose"]
 
+    /// How much of a caller-supplied value an error message may echo, in **code
+    /// points** (the unit `nameMaxLength` counts, for the same reason: the grapheme
+    /// count under-reads exactly where the text stops being ASCII).
+    ///
+    /// The bytes being validated come from a cloned repository, and
+    /// `--recipe-validate` prints these strings to an agent, so an unbounded echo
+    /// turns one 4 KiB key into 4 KiB of terminal — and into the log line of
+    /// whoever read the tool call.
+    public static let errorEchoMaxLength = 120
+
     /// A step is exactly `{kind, params}` — the contract is `strictObject`, so
     /// an extra key is a violation, not a detail to ignore.
     public static let stepKeys: [String] = ["kind", "params"]
@@ -113,7 +123,7 @@ public struct RecipeLoader {
 
         // 2. Unknown top-level keys (strictObject).
         for key in root.keys.sorted() where !configKeys.contains(key) {
-            errors.append("unknown top-level key '\(key)' (the contract allows only \(configKeys.joined(separator: ", ")))")
+            errors.append("unknown top-level key '\(capped(key))' (the contract allows only \(configKeys.joined(separator: ", ")))")
         }
 
         // 3. schemaVersion: the contract's literal, and nothing else. A number
@@ -125,7 +135,7 @@ public struct RecipeLoader {
         case let value as String where value == schemaVersion:
             break
         case let value as String:
-            errors.append("'schemaVersion' is \"\(value)\"; the contract requires exactly \"\(schemaVersion)\"")
+            errors.append("'schemaVersion' is \"\(capped(value))\"; the contract requires exactly \"\(schemaVersion)\"")
         case let value:
             errors.append("'schemaVersion' must be the string \"\(schemaVersion)\", got \(describe(value))")
         }
@@ -187,7 +197,7 @@ public struct RecipeLoader {
             return
         }
         for key in stepDict.keys.sorted() where !stepKeys.contains(key) {
-            errors.append("'steps[\(index)]' has unknown key '\(key)' (the contract allows only \(stepKeys.joined(separator: ", ")); selector and action belong inside 'params')")
+            errors.append("'steps[\(index)]' has unknown key '\(capped(key))' (the contract allows only \(stepKeys.joined(separator: ", ")); selector and action belong inside 'params')")
         }
         switch stepDict["kind"] {
         case .none:
@@ -195,7 +205,7 @@ public struct RecipeLoader {
         case let value as String where stepKinds.contains(value):
             break
         case let value as String:
-            errors.append("'steps[\(index)].kind' is \"\(value)\"; the contract allows \(stepKinds.joined(separator: ", "))")
+            errors.append("'steps[\(index)].kind' is \"\(capped(value))\"; the contract allows \(stepKinds.joined(separator: ", "))")
         case let value:
             errors.append("'steps[\(index)].kind' must be a string, got \(describe(value))")
         }
@@ -204,6 +214,19 @@ public struct RecipeLoader {
         } else if !(stepDict["params"] is [String: Any]) {
             errors.append("'steps[\(index)].params' must be an object, got \(describe(stepDict["params"]))")
         }
+    }
+
+    /// A caller-supplied value quoted into an error message, capped at
+    /// `errorEchoMaxLength` code points with the truncation said out loud — a
+    /// clipped value that looks complete is the same dishonesty in a smaller
+    /// font, and the reader has to be able to tell the two apart.
+    private static func capped(_ value: String) -> String {
+        let codePoints = value.unicodeScalars.count
+        guard codePoints > errorEchoMaxLength else { return value }
+        // Truncating by *scalar* is the point: a code-unit cut can leave half an
+        // astral character in the message, a scalar cut never can.
+        let kept = String(String.UnicodeScalarView(value.unicodeScalars.prefix(errorEchoMaxLength)))
+        return kept + "… (\(codePoints) code points total, first \(kept.unicodeScalars.count) shown)"
     }
 
     /// A value's JSON shape, for error text that cannot be guessed.

@@ -180,6 +180,20 @@ public final class EvidenceStore {
     /// internal for the same reason.
     var isolationCheck: (String) -> String? = StateRoot.isolateFile(at:)
 
+    /// The name a pack is staged under before `replaceItemAt` publishes it: unique
+    /// per write (`ProjectRegistry.save`'s shape), because a shared `<entry>.tmp`
+    /// is a name any local account that can write this directory may pre-create —
+    /// and this store would then chmod *their* bytes 0600 and rename them into the
+    /// audit trail as the pack for that operationId.
+    ///
+    /// Injectable for the same measured reason as `isolationCheck` above: the
+    /// fallback branch of `write` runs only when the staged write throws, and a
+    /// name a test cannot predict is a name it cannot squat a directory on, which
+    /// would leave that refusal reachable only in prose.
+    var stagePath: (String) -> String = { path in
+        "\(path).tmp-\(getpid())-\(UUID().uuidString)"
+    }
+
     /// The archive lives where the caller says it lives — there is no default.
     ///
     /// - Parameters:
@@ -328,7 +342,7 @@ public final class EvidenceStore {
             log.error("evidence entry \(filePath) exists but is not an archive entry this store wrote — refusing to write, and leaving it exactly as found")
             return false
         }
-        let tmpPath = filePath + ".tmp"
+        let tmpPath = stagePath(filePath)
         do {
             try data.write(to: URL(fileURLWithPath: tmpPath), options: .atomic)
             // Owner-only *before* the rename, so an evidence pack is never — not

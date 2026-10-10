@@ -19,10 +19,17 @@ enum ParamValidation {
     /// nicety (P0 §3.3).
     static let pidLower = 1
     static let pidUpper = Int(Int32.max)
-    /// Crockford base32 body shared by op_/snap_ ids (§1.2 / P0 §4.1).
-    private static let idBodyPattern = "[0-9A-HJKMNP-TV-Z]{26}"
-    static let snapshotIdPattern = "^snap_" + idBodyPattern + "$"
-    static let operationIdPattern = "^op_" + idBodyPattern + "$"
+    /// Crockford base32 body shared by op_/snap_ ids (§1.2 / P0 §4.1), built from
+    /// `OperationID` — the only generator of these ids — so an alphabet or length
+    /// change there cannot leave this pattern describing the old one. The same
+    /// literal is still spelled by hand in `EvidenceModels.swift`
+    /// (`operationIdRegex`, `entryIdRegex`) and in `mcp-shell/src/tools.ts`;
+    /// neither file is reachable from this one, so both are reported rather than
+    /// edited here.
+    private static let idBodyPattern =
+        "[\(String(OperationID.crockfordAlphabet))]{\(OperationID.totalLength)}"
+    static let snapshotIdPattern = "^" + OperationID.snapshotPrefix + idBodyPattern + "$"
+    static let operationIdPattern = "^" + OperationID.prefix + idBodyPattern + "$"
     static let restoreModeMaxLength = 32
 
     /// Closed set for `restore.mode` (P1 v1.1 §1.2, P5 v5.0 §6.4): the two

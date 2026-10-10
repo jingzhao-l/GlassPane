@@ -13,6 +13,8 @@ import Foundation
 //
 // 诚实口径（与 README「拿不到数据就显示未验证」同源）：
 //  - 读不到目录 ≠ 空档案，`directoryExists` 如实区分；
+//  - 目录在但列不出来 ≠ 空档案，扫描结果用 `listFailure` 说这句（与
+//    `EvidenceStore.stats()` 的 `listFailure` 同口径）；
 //  - 单个文件解码失败不静默跳过，计入 `unreadableFiles` 并呈现条数；
 //  - 未测量的通道（如无屏幕录制时的 pixelDiff）保持 nil，不折算成"没变化"。
 
@@ -176,27 +178,37 @@ public enum EvidenceFilter: String, CaseIterable, Identifiable {
 
 /// evidence 目录一次扫描的结局。`directoryExists == false` 与"目录在但是空的"
 /// 必须分开：前者是"还没有档案"，后者是"档案被清过"，面板措辞不同。
+/// 第三态是 `listFailure`：目录在、却列不出来。此时 `summaries` 的空是"没看过"
+/// 的空，把它当"档案是空的"呈现就是本轮反复在拆的那句话（对照
+/// `EvidenceStore.archiveListing`/`EvidenceArchiveStats.listFailure`）。
 public struct EvidenceArchiveScan: Equatable {
     public let summaries: [EvidenceSummary]
     /// 存在但解不开的文件名（不静默丢，条数要呈现）。
     public let unreadableFiles: [String]
     public let directoryExists: Bool
     public let totalBytes: Int
+    /// nil = 列举**真的完成了**，所以 `summaries.isEmpty` 说的是"里面没有档案"。
+    /// 非 nil = 目录存在却读不了，理由在这里；把它折回空档案等于把"我看不了"
+    /// 说成"那里没有"。
+    public let listFailure: String?
 
     public init(
         summaries: [EvidenceSummary],
         unreadableFiles: [String],
         directoryExists: Bool,
-        totalBytes: Int
+        totalBytes: Int,
+        listFailure: String? = nil
     ) {
         self.summaries = summaries
         self.unreadableFiles = unreadableFiles
         self.directoryExists = directoryExists
         self.totalBytes = totalBytes
+        self.listFailure = listFailure
     }
 
     public static let empty = EvidenceArchiveScan(
-        summaries: [], unreadableFiles: [], directoryExists: false, totalBytes: 0
+        summaries: [], unreadableFiles: [], directoryExists: false, totalBytes: 0,
+        listFailure: nil
     )
 }
 
@@ -256,17 +268,21 @@ public enum LocalArchive {
             return .empty
         }
         let names: [String]
-        if let listed = try? FileManager.default.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: [.fileSizeKey],
-            options: [.skipsHiddenFiles]
-        ) {
-            names = listed
+        // 列不出来是一次**失败**，不是"里面没有档案"：`names = []` 在这里会让
+        // `directoryExists: true` 配上一份空摘要，把"我看不了"呈现成"档案是空的"。
+        var listFailure: String?
+        do {
+            names = try FileManager.default.contentsOfDirectory(
+                at: url,
+                includingPropertiesForKeys: [.fileSizeKey],
+                options: [.skipsHiddenFiles]
+            )
                 .map { $0.lastPathComponent }
                 .filter { $0.hasSuffix("." + EvidenceStore.fileExtension) }
                 .sorted()
-        } else {
+        } catch {
             names = []
+            listFailure = "cannot list the evidence archive at \(directory) (\(error)) — the archive was never read, so an empty result here means nothing was seen, not that nothing is there"
         }
         var summaries: [EvidenceSummary] = []
         var unreadable: [String] = []
@@ -292,7 +308,8 @@ public enum LocalArchive {
             summaries: summaries,
             unreadableFiles: unreadable,
             directoryExists: true,
-            totalBytes: total
+            totalBytes: total,
+            listFailure: listFailure
         )
     }
 
