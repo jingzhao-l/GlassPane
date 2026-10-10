@@ -287,6 +287,9 @@ struct EvidenceRowView: View {
 
 /// 详情页：一条证据能证明什么，就完整摊开什么；未测量的通道明说"未测量"。
 struct EvidenceDetailView: View {
+    /// 动作结论的唯一出口：报告写不成要把原因交给控制台那一条横幅，
+    /// 而不是 `return` 掉——"点了没反应"正是这一面修过的那类缺陷。
+    @EnvironmentObject private var model: ConsoleModel
     let summary: EvidenceSummary
     let pack: EvidencePack?
 
@@ -389,7 +392,7 @@ struct EvidenceDetailView: View {
             } label: {
                 Image(systemName: "doc.richtext")
             }
-            .help("用浏览器打开这条证据的报告")
+            .help("用浏览器打开这条证据的报告：会在系统临时目录写一份 0600 的副本，看完可自行删除")
             .disabled(pack == nil)
             .accessibilityIdentifier("gp-open-evidence-report")
         }
@@ -664,13 +667,25 @@ struct EvidenceDetailView: View {
     }
 
     /// 用引擎里同一份渲染器出 HTML 报告（与 MCP 侧导出同源，两侧不会长得不一样）。
+    ///
+    /// 落盘判定在引擎里（`writePrivateHTMLReport`）：0600、独占创建、不跟 symlink，
+    /// 且只往一个属于本用户、同组/其他人写不动的目录里写。从前这里是一句
+    /// `try? data.write(to:)`——umask 给 0644、名字人人可猜，写坏了还不吭声。
+    /// 写不成必须把原因说出来：把「没写成」演成「已经打开了」是这一面修过的那类缺陷。
     private func openHTMLReport() {
         guard let pack else { return }
         let html = EvidenceReportGenerator.renderHTML(pack: pack, diagnostics: nil)
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("glasspane-evidence-\(pack.operationId).html")
-        guard let data = html.data(using: .utf8), (try? data.write(to: url)) != nil else { return }
-        NSWorkspace.shared.open(url)
+        switch EvidenceReportGenerator.writePrivateHTMLReport(html, operationId: pack.operationId) {
+        case .written(let path):
+            // 落盘这件事要交代去哪儿了：这一份在状态根之外，任何清理扫描都够不着，
+            // 不说的话它就永远是屏幕上看不见的一个残留。
+            model.lastActionMessage = "报告已写入 \(path)（0600，只有你能读）。它在状态根之外，不会被自动清理——看完请自行删除。"
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        case .directoryUnusable(let defect):
+            model.lastActionMessage = "报告没有写出来：\(defect)。下一步：确认系统临时目录归当前用户且同组/其他人不可写（ls -ld 那个目录）。"
+        case .refused:
+            model.lastActionMessage = "报告没有写出来：独占创建试了 16 次都没能在临时目录里占住一个名字。下一步：腾出可写的临时目录，或直接从 MCP 侧用 gp_export_evidence 取文本。"
+        }
     }
 
     private func selectorText(_ selector: GlassPaneEngine.Selector) -> String {
