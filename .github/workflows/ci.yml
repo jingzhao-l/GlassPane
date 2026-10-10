@@ -6,6 +6,16 @@ on:
   pull_request:
     branches: [main]
 
+# 最小权限（与 release.yml、harness-contract.yml 同一口径）：这里不声明，每个 PR 触发的
+# job 就继承仓库默认权限（组织级常为 write）。逐 job 核过：swift / bridge / kernel /
+# mcp-shell / install-gate / docs / version-line / harness-rulers / workflow-lint 这 9 个
+# job 用到的 action 只有 checkout 与 setup-python/setup-node，全文没有 upload-artifact、
+# 没有 GITHUB_TOKEN、没有 `gh pr|api|release`、没有 git push/tag、没有评论或 release 写入。
+# harness-rulers 里的 `git clone` 拉的是公开的上游参照仓，匿名即可完成，不需要 token；
+# 其余步骤只读工作树、跑本地脚本。所以顶层一条 `contents: read` 覆盖全部 job。
+permissions:
+  contents: read
+
 jobs:
   swift:
     name: engine (Swift)
