@@ -30,8 +30,10 @@ real-machine smoke only (§7.5), never faked into unit tests.
 """
 
 import argparse
+import base64
 import json
 import os
+import secrets
 import shlex
 import signal
 import socket
@@ -40,6 +42,20 @@ import sys
 
 SENTINEL_BEGIN = "GPBRIDGE<<"
 SENTINEL_END = ">>GPBRIDGE"
+#: R30 标记的每次运行随机前缀。固定标记是**可预先伪造**的：被调试目标的 stdout 就
+#: 流同一条 lldb stdout（`bridge/crashcanary.swift` 每次跑都打印，
+#: `test_bridge.py` 的噪声用例也是这个形状），任何被测进程都能先吐一对
+#: `GPBRIDGE<<{…}>>GPBRIDGE` 把 threads/status 换掉，或夹一对畸形 JSON 让真载荷
+#: 读成"没有载荷"。父进程生成 nonce、只经子进程环境交给 lldb 内的那个脚本，
+#: 匹配时要求它——剩下的残余风险只有一个会读自己环境变量的被测目标，
+#: 而"取最后一个可解析的完整对"正是为那种情形兜底。
+SENTINEL_NONCE_ENV = "GPBRIDGE_SENTINEL_NONCE"
+SENTINEL_NONCE_BYTES = 16
+#: `gp-watch add` 的读写档：只有这三形。`x`（或任何别的）会落成
+#: read=False, write=False —— 一次都不可能被触发的监视点，还要占掉四个硬件槽
+#: 之一，并在账本里报告"已武装"。
+WATCH_MODES = ("r", "w", "rw")
+DEFAULT_WATCH_MODE = "w"
 
 MAX_FRAMES = 64
 MAX_LOCALS = 16
@@ -451,6 +467,24 @@ def parse_trace_request(command, default=TRACE_SAMPLES):
     return requested, None
 
 
+def parse_watch_mode(raw, default=DEFAULT_WATCH_MODE):
+    """`gp-watch add` 的读写档：只认 r / w / rw（纯函数，可单测）。
+
+    以前 `argv[3]` 是不经验证直接进账本的，于是 `gp-watch add 0x… 8 x` 会武装一个
+    read=False、write=False 的监视点：它一次都不可能被触发，却占掉四个硬件槽之一，
+    并且账本报告"已武装"。拒绝它，且**不登记任何请求**。
+    """
+    if raw is None or not str(raw).strip():
+        return default, None
+    mode = str(raw).strip().lower()
+    if mode not in WATCH_MODES:
+        return None, ("gp-watch add wants a mode of %s, got %r: a mode with neither read "
+                      "nor write can never fire, and it would still burn one of the %d "
+                      "hardware watchpoint slots — nothing was requested"
+                      % (" or ".join(WATCH_MODES), raw, HW_WATCHPOINT_SLOTS))
+    return mode, None
+
+
 def build_timeline(observations, requested, stop_note=None):
     """Fold per-sample observations into the T2 timeline (A-22).
 
@@ -531,20 +565,99 @@ def assemble_result(mode, target, status, threads, registers=None, stop_reason=N
     }
 
 
-def extract_sentinel(stdout_text):
-    """Pull the payload between sentinels out of noisy lldb stdout.
-    Returns (payload_dict | None, raw_text)."""
-    start = stdout_text.find(SENTINEL_BEGIN)
-    if start < 0:
-        return None, stdout_text
-    rest = stdout_text[start + len(SENTINEL_BEGIN):]
-    end = rest.find(SENTINEL_END)
-    if end < 0:
-        return None, stdout_text
-    try:
-        return json.loads(rest[:end]), rest[:end]
-    except json.JSONDecodeError:
-        return None, stdout_text
+def new_sentinel_nonce():
+    """Per-run marker nonce (hex). Unguessable, never read from the target."""
+    return secrets.token_hex(SENTINEL_NONCE_BYTES // 2)
+
+
+def sentinel_nonce_from_env():
+    """The nonce this process was handed by the outer bridge, if any.
+
+    Sanitised: this value is read out of the environment and lands *inside the
+    marker*, so a stray whitespace/quote in someone's export would otherwise
+    break the framing for the whole run (and hand the outer bridge a stream it
+    cannot read). Anything outside the hex-plus-dash set is dropped, and an
+    over-long value is clipped — what is left is either a usable nonce or none.
+    """
+    raw = (os.environ.get(SENTINEL_NONCE_ENV) or "").strip()
+    cleaned = "".join(ch for ch in raw if ch.isalnum() or ch in "._-")[:64]
+    return cleaned or None
+
+
+def sentinel_begin(nonce=None):
+    """The begin marker for a run: plain when no nonce is in play."""
+    nonce = (nonce or "").strip()
+    return SENTINEL_BEGIN if not nonce else "GPBRIDGE<%s<<" % nonce
+
+
+def wrap_sentinel(text, nonce=None):
+    """Render one emission around already-rendered JSON text."""
+    return "%s%s%s" % (sentinel_begin(nonce), text, SENTINEL_END)
+
+
+def extract_sentinel(stdout_text, nonce=None):
+    """Pull the payload out of noisy lldb stdout: the LAST parseable pair wins.
+
+    Two rules, both learned from a real shape rather than theory:
+      * last, not first — the bridge emits its payload after the target has run,
+        so an earlier pair is noise or a forgery by construction;
+      * parseable — "last" alone would let a late malformed pair mask the real
+        payload and read as "no payload", so a candidate that does not complete
+        (no end marker) or does not parse is skipped, and the scan keeps going
+        leftwards.
+    `nonce` narrows the marker to this run's random prefix, so a target that only
+    knows the fixed text cannot be matched at all. Returns (payload | None, raw).
+    """
+    begin = sentinel_begin(nonce)
+    cursor = len(stdout_text)
+    while True:
+        start = stdout_text.rfind(begin, 0, cursor)
+        if start < 0:
+            return None, stdout_text
+        cursor = start  # next candidate sits strictly left of this one
+        body = stdout_text[start + len(begin):]
+        end = body.find(SENTINEL_END)
+        if end < 0:
+            continue
+        try:
+            return json.loads(body[:end]), body[:end]
+        except json.JSONDecodeError:
+            continue
+
+
+def sentinel_absence_clue(stdout_text, nonce=None):
+    """Say *which* failure it was: no marker at all, or markers that were useless.
+
+    The two have different fixes (the inner script never ran vs. it ran and its
+    payload could not be read), and collapsing them is how a green-looking
+    "no payload" message hides a regression.
+    """
+    begin = sentinel_begin(nonce)
+    seen = stdout_text.count(begin)
+    if not seen:
+        if nonce:
+            return ("no %s marker carrying this run's nonce appeared in lldb's stdout "
+                    "(%d fixed-marker pair(s) were present but untrusted); the in-lldb "
+                    "script did not inherit %s, or never emitted"
+                    % (begin, stdout_text.count(SENTINEL_BEGIN), SENTINEL_NONCE_ENV))
+        return "no %s…%s marker appeared in lldb's stdout at all" % (SENTINEL_BEGIN, SENTINEL_END)
+    return ("%d marker(s) carrying this run's nonce appeared, none of them a complete, "
+            "JSON-parseable payload (truncated stdout, or a target that learned this "
+            "run's nonce and emitted a broken pair)" % seen)
+
+
+def encode_capture_spec(spec):
+    """JSON then base64 — so the spec can ride into a *Python* expression.
+
+    `shlex.quote` is POSIX-SHELL quoting, but the `-o script …` text is evaluated
+    by lldb's Python: an exe path with an apostrophe came out as the shell splice
+    `'\\''`, which Python reads as a SyntaxError. The capture then died with no
+    payload at all (it failed closed, so this was a correctness defect rather
+    than an injection, but every path with a quote in it was uncapturable).
+    base64's alphabet carries no quote, no space and no shell metacharacter.
+    """
+    text = json.dumps(spec, ensure_ascii=True, sort_keys=True)
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
 def build_lldb_argv(bridge_path, mode, pid=None, exe=None, exe_args=None,
@@ -565,10 +678,10 @@ def build_lldb_argv(bridge_path, mode, pid=None, exe=None, exe_args=None,
         if exe and pid is None:
             # SB-API driver: batch would end the session at the crash stop,
             # so one script command does launch+wait+collect+emit.
-            spec = json.dumps({"exe": exe, "args": exe_args, "mode": "capture",
-                               "budget_s": max(30.0, float(os.environ.get("GPBRIDGE_BUDGET", "60")))},
-                              ensure_ascii=False)
-            argv += ["-o", "script glasspane_bridge.run_capture_cli(%s)" % shlex.quote(spec)]
+            spec = {"exe": exe, "args": exe_args, "mode": "capture",
+                    "budget_s": max(30.0, float(os.environ.get("GPBRIDGE_BUDGET", "60")))}
+            argv += ["-o", "script glasspane_bridge.run_capture_cli_b64('%s')"
+                     % encode_capture_spec(spec)]
         else:
             argv += ["-o", "gp-capture"]
     elif mode == "trace":
@@ -613,6 +726,43 @@ def emit(payload, out_path=None, send_sock=None, timeout_s=None):
             client.close()
 
 
+def run_child_captured(argv, timeout, env=None):
+    """Spawn the lldb child and drain it: **lossy** decode, whole-group kill.
+
+    `errors="replace"` 是契约的一部分而不是风格：`text=True` 的默认解码是严格的，
+    而这条 stdout 里同时流着 lldb 自己**与被调试目标**的输出——一个非 UTF-8 字节就
+    会在 `communicate()` 内部抛 UnicodeDecodeError，那里没有任何分支接得住它，于是
+    桥以一段 traceback 离场、零载荷，正违背 §6.2「失败也以 JSON 离场」。坏字节换成
+    U+FFFD，哨兵对里的载荷照旧解析得出来。
+
+    `start_new_session=True` + 到期 `killpg`：debugserver 是 lldb 的**子进程**
+    且继承了同一对管道。`subprocess.run(timeout=)` 超时只 kill 直接子进程，
+    随后仍会无时限地 `communicate()` 等管道 EOF——而管道被活着的 debugserver
+    握着，于是"永不静默挂起"的注释不成立，且被 attach 的目标进程会常驻
+    SIGSTOP（用户的被测应用被冻死在这里）。自成进程组才能整组收掉。
+
+    Returns (completed, timed_out). `OSError` 原样上抛，由调用方决定报什么形状。
+    """
+    proc = subprocess.Popen(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, errors="replace", start_new_session=True, env=env,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return _Completed(proc.returncode, out, err), False
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            out, err = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, err = "", ""
+        return _Completed(proc.returncode, out, err), True
+
+
 def run_outer(args):
     """Parent-process path: exec lldb, extract payload, re-emit per §6.2."""
     bridge_path = os.path.abspath(__file__)
@@ -626,35 +776,16 @@ def run_outer(args):
         samples=args.samples,
         extra_script=args.setup,
     )
-    # `start_new_session=True` + 到期 `killpg`：debugserver 是 lldb 的**子进程**
-    # 且继承了同一对管道。`subprocess.run(timeout=)` 超时只 kill 直接子进程，
-    # 随后仍会无时限地 `communicate()` 等管道 EOF——而管道被活着的 debugserver
-    # 握着，于是"永不静默挂起"的注释不成立，且被 attach 的目标进程会常驻
-    # SIGSTOP（用户的被测应用被冻死在这里）。自成进程组才能整组收掉。
-    timed_out = False
+    # 本轮的哨兵 nonce 只经**子进程环境**交给 lldb 内的那个脚本：被调试目标若自己
+    # 打印一对固定标记，它匹配不上带 nonce 的 begin，也就不可能被当成载荷（加上
+    # extract_sentinel 的"最后一个可解析对"，两路都堵上）。
+    nonce = new_sentinel_nonce()
     try:
-        proc = subprocess.Popen(
-            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=True,
-        )
+        completed, timed_out = run_child_captured(
+            argv, args.timeout, env=dict(os.environ, **{SENTINEL_NONCE_ENV: nonce}))
     except OSError as error:
         sys.stderr.write("cannot spawn lldb: %s\n" % error)
         return 2
-    try:
-        out, err = proc.communicate(timeout=args.timeout)
-        completed = _Completed(proc.returncode, out, err)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-        try:
-            out, err = proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            out, err = "", ""
-        completed = _Completed(proc.returncode, out, err)
     if timed_out:
         # F5: lldb --batch can hang pre-timeout on machines where debug attach
         # is gated or cold-started. Structured refusal, never a silent hang.
@@ -678,7 +809,7 @@ def run_outer(args):
             sys.stderr.write("send-sock delivery failed: %s\n" % error)
             return 2
         return 1
-    payload, _raw = extract_sentinel(completed.stdout)
+    payload, _raw = extract_sentinel(completed.stdout, nonce=nonce)
     if payload is None:
         stderr_tail = completed.stderr[-2000:] if completed.stderr else ""
         payload = assemble_result(
@@ -687,10 +818,12 @@ def run_outer(args):
             status="failed",
             threads=[],
             errors=[
-                "lldb produced no capture payload (exit %d). Common cause: "
+                "lldb produced no capture payload (exit %d). %s. Common cause: "
                 "developer-tools permission gates attach/launch on this machine — "
                 "grant System Settings > Privacy & Security > Developer Tools to the "
-                "calling process (P6 §7.1). lldb stderr tail: %s" % (completed.returncode, stderr_tail),
+                "calling process (P6 §7.1). lldb stderr tail: %s"
+                % (completed.returncode,
+                   sentinel_absence_clue(completed.stdout, nonce), stderr_tail),
             ],
         )
     try:
@@ -1014,7 +1147,12 @@ def _arm_watchpoint(debugger, entry):
     target = debugger.GetSelectedTarget()
     if not target or not target.IsValid():
         return (False, "no valid target to hold a watchpoint")
-    mode = entry.get("mode") or "w"
+    mode = entry.get("mode") or DEFAULT_WATCH_MODE
+    if mode not in WATCH_MODES:
+        # 第二道闸：账本里的条目未必都来自 cmd_watch 的校验路径。
+        return (False, "watch mode %r is not one of %s — arming it would take a hardware "
+                       "slot for a watchpoint that can never fire"
+                % (mode, "/".join(WATCH_MODES)))
     error = lldb.SBError()
     try:
         watchpoint = target.WatchAddress(
@@ -1295,8 +1433,34 @@ def run_capture_cli(spec_json):
         pass
 
 
+def run_capture_cli_b64(spec_b64):
+    """`-o "script glasspane_bridge.run_capture_cli_b64('<base64 of the spec>')"`。
+
+    base64 而不是 shell 引号：这段文本是**Python** 求值的（见 `encode_capture_spec`）。
+    解不开、载荷不是 JSON、或采集本身抛了异常，都必须以模块自己的 JSON 错误形状离场
+    (§6.2「失败也要有形状」)，而不是在 lldb 里留一段 traceback——那在外层桥看来就是
+    "没有载荷"，什么也不指认。
+    """
+    try:
+        spec_json = base64.b64decode(spec_b64, validate=True).decode("utf-8")
+    except Exception as error:
+        print(_sentinel(assemble_result(
+            mode="capture", target={}, status="failed", threads=[],
+            errors=["capture spec could not be decoded: %r" % (error,)])))
+        return
+    try:
+        run_capture_cli(spec_json)
+    except Exception as error:
+        print(_sentinel(assemble_result(
+            mode="capture", target={}, status="failed", threads=[],
+            errors=["capture driver raised %r before emitting a payload" % (error,)])))
+
+
 def _sentinel(payload):
-    return "%s%s%s" % (SENTINEL_BEGIN, render_json(payload), SENTINEL_END)
+    """Emission used *inside* lldb: carries this run's nonce when it was handed
+    one (`run_outer` puts it in the child's environment), so only the outer
+    bridge can trust it."""
+    return wrap_sentinel(render_json(payload), nonce=sentinel_nonce_from_env())
 
 
 def _now():
@@ -1306,8 +1470,7 @@ def _now():
 
 def cmd_capture(debugger, command, result, internal_dict):
     payload = _payload_via_debugger(debugger, mode="capture")
-    text = render_json(payload)
-    print("%s%s%s" % (SENTINEL_BEGIN, text, SENTINEL_END))
+    print(_sentinel(payload))
 
 
 def _async_mode(debugger):
@@ -1414,8 +1577,7 @@ def cmd_trace(debugger, command, result, internal_dict):
         errors=[] if timeline["measured"] else ["trace timeline not measured: %s" % timeline["reason"]],
     )
     payload["timeline"] = timeline
-    text = render_json(payload)
-    print("%s%s%s" % (SENTINEL_BEGIN, text, SENTINEL_END))
+    print(_sentinel(payload))
 
 
 def cmd_watch(debugger, command, result, internal_dict):
@@ -1441,7 +1603,11 @@ def cmd_watch(debugger, command, result, internal_dict):
                              "nothing was requested" % address)
         return
     size = int(argv[2]) if len(argv) > 2 and argv[2].isdigit() else 8
-    mode = argv[3] if len(argv) > 3 else "w"
+    mode, refusal = parse_watch_mode(argv[3] if len(argv) > 3 else None)
+    if refusal:
+        # 拒绝在**登记之前**：账本里不会留下一个永不触发却占着硬件槽的请求。
+        result.AppendMessage(refusal)
+        return
     spec = {"addr": "0x%x" % address, "size": size, "mode": mode}
     outcome, detail = _WATCH_QUEUE.add(dict(spec))
     if outcome == "armed":

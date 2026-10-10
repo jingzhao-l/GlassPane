@@ -31,6 +31,7 @@ SIGTERM/socket-unlink 闸门变成永久什么都不证明的 no-op。确实要�
 """
 
 import os
+import re
 import shutil
 import signal
 import socket
@@ -73,7 +74,9 @@ def binary_problem(path):
     return None
 
 
-def wait_for_socket(path, timeout=10.0):
+def wait_for_socket(path, timeout=10.0, poll=None):
+    """`poll` 是无参 callable，返回子进程退出码（已离场）或 None（还在跑）。
+    子进程已经退出时立刻收手：再等满预算不产生任何信息，只把闸门拖慢。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         if os.path.exists(path):
@@ -85,26 +88,106 @@ def wait_for_socket(path, timeout=10.0):
                 return True
             except OSError:
                 pass
+        if poll is not None and poll() is not None:
+            return False
         time.sleep(0.15)
     return False
 
 
-def shutdown_stall_diagnosis(engine_sock, probe_sock):
+#: stderr 尾巴的上限：诊断要能说话，但不能把一次红门变成几千行的日志倾倒。
+STDERR_TAIL_BYTES = 1200
+
+
+def read_stderr_tail(path, limit=STDERR_TAIL_BYTES):
+    """有界地读出子进程留下的 stderr；读不出也要如实说读不出。"""
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except OSError as error:
+        return "（stderr 读不出：%r）" % (error,)
+    if not raw:
+        return "（stderr 为空——拒绝启动却不留话的二进制，本身就是一种红）"
+    dropped = max(0, len(raw) - limit)
+    text = raw[-limit:].decode("utf-8", errors="replace")
+    if dropped:
+        text = "…%d 字节被截去…%s" % (dropped, text)
+    return text.replace("\n", " / ").strip()
+
+
+def reap(child, grace=5.0):
+    """收割子进程并交回退出码；负数是信号，None 是连 SIGKILL 都没收掉。
+
+    从前这条路径是 `child.kill(); child.wait()` 然后把返回值扔掉——退出码是"二进制
+    拒绝启动"与"状态根没被采纳"之间最锋利的那块证据，扔掉它，报文就只能靠猜。
+    """
+    code = child.poll()
+    if code is not None:
+        return code
+    child.kill()
+    try:
+        return child.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def startup_failure_text(engine_sock, state_dir, code, stderr_tail, waited):
+    """socket 没起来时报什么：两种可能 + 本次能拿到的判别证据，不含糊。
+
+    旧报文把这一眼写成"它没有用被点名的状态根"，而它手上一个证据都没有：那次红其实
+    可能是退出码 64 的用法回归（`EX_USAGE`），也可能是崩在 bind 之前。状态根的断言
+    并没有被削弱——真没采纳根的时候，下面的 (a) 照样会带着"进程活着、退出码读不出"
+    的形状点出来。
+    """
+    hypotheses = (
+        "两种可能：(a) 它没有采纳被点名的状态根 %s（socket 落在别处——缺 --state-dir "
+        "的旧形状就是落在真的 ~/.glasspane）；(b) 二进制本身拒绝启动（用法/权限回归，"
+        "或崩在 bind 之前）。分辨它们靠退出码与 stderr：只有 (a) 才会留下一个活着且"
+        "不自行退场的进程。" % state_dir)
+    if code is None:
+        evidence = ("证据：%.0fs 内它一直活着，SIGKILL 之后仍收不到退出码 ⇒ 偏向 (a)，"
+                    "但 (b) 里「起来了又卡死」的形状与它不可分辨" % waited)
+    elif code < 0:
+        evidence = ("证据：它被信号 %d 打死、没有自行退出 ⇒ 偏向 (b)（没活到 bind 那一步），"
+                    "崩溃现场见 stderr" % -code)
+    else:
+        evidence = "证据：它自行离场，退出码 %d ⇒ 这是 (b)「拒绝启动」的形状，不是状态根问题" % code
+        if code == 64:
+            evidence += "（64 = EX_USAGE：参数用法回归的惯用码）"
+    return ("daemon 未能在 %.0fs 内于 %s 起 socket。本闸不猜根因，把两种可能和证据一起交出："
+            "\n      %s\n      %s\n      stderr 尾：%s"
+            % (waited, engine_sock, hypotheses, evidence, stderr_tail))
+
+
+def shutdown_stall_diagnosis(engine_sock, probe_sock, probe_existed=True):
     """超时那一刻还能看见什么，就说什么——两类失败的修法不一样。
 
-    `startShutdownWaiter` 的收尾顺序是"先 unlink socket，再 exit(0)"
+    `startShutdownWaiter` 的收尾顺序是"先 unlink 注册表里的名字，再 exit(0)"
     （`engine/Sources/glasspaned/main.swift` 里 sigwait 分支那两行，改那里必须同步
-    这里），所以超时还没退出时，socket 文件在不在就是"信号有没有被消费"的可见证据：
-      - 两个文件都没了 ⇒ 信号吃到了，慢在 exit(0) 或调度；
-      - 还有文件留着 ⇒ sigwait 没吃到信号，这才是 SIGTERM 哑火那一族（F10/R5-07 修的洞）。
+    这里）。注册表只登记**真的绑上过**的名字（probe 那一半要过 `--no-probe`、A-18
+    护栏与 `server.start()` 三道闸才 `shutdownSockets.register`），所以现场是三态：
+      - 两个文件都没了、且 probe 这趟绑上过 ⇒ unlink 这一步跑完了，慢在 exit(0)/调度；
+      - 两个都还在 ⇒ 登记着的名字一个都没少，与"sigwait 未消费信号"的形状一致；
+      - 只少了一个 ⇒ 既不是"全没消费"也不是"全消费"，现场不足以判定信号——多半是
+        注册表本来就只有那一个名字（probe 降级）或收尾在两次 unlink 之间中断。
+    从前这里把"任何一个残留"都说成"sigwait 未消费信号"，那是把没测到的东西讲成测到的。
     把这两种压成一句"6s 内未退出"，红的那一次就只能靠重跑去猜——本仓为"失败被包装成
     听起来合理的解释"付过一次让像素通道死十天的代价，这条闸不许再来一次。
     """
     leftovers = [name for name in (engine_sock, probe_sock) if os.path.exists(name)]
+    names = lambda rows: ", ".join(os.path.basename(one) for one in rows)
+    if len(leftovers) == 2:
+        return ("两个 socket 文件都还在（%s）——与「sigwait 未消费信号」的形状一致：收尾第一步"
+                "就是 unlink 已登记的名字，一个都没少说明那段代码没跑到（F10/R5-07 一族）"
+                % names(leftovers))
     if leftovers:
-        return ("sigwait 未消费信号（socket 文件仍在：%s）——属 SIGTERM 哑火一族"
-                % ", ".join(os.path.basename(one) for one in leftovers))
-    return "信号已消费（两个 socket 均已被 unlink），慢在 exit(0)/调度"
+        gone = [one for one in (engine_sock, probe_sock) if one not in leftovers]
+        return ("现场不齐：%s 还在、%s 已消失——这只证明收尾没有全部完成，不足以判定 sigwait"
+                "有没有消费信号（probe 降级时注册表本就只有 engine 一个名字，也会是这个样子）"
+                % (names(leftovers), names(gone)))
+    if probe_existed:
+        return "信号已消费（两个 socket 均已被 unlink），慢在 exit(0)/调度"
+    return ("信号已消费（engine socket 已被 unlink；probe.sock 这趟从未绑上，"
+            "那一半无从验证），慢在 exit(0)/调度")
 
 
 _STUB_SOURCE = """
@@ -116,13 +199,15 @@ open(probe, "w").close()
 
 def arrived(signum, frame):
     # 'consumed' 复现真收尾的顺序：先 unlink 再退出，然后卡在退出这一步；
-    # 'ignored' 只表示" socket 文件还在"——分类只看现场，不看它为什么不动。
-    if mode == "consumed":
-        for path in (engine, probe):
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+    # 'partial' 只 unlink 掉注册表里的第一个名字（probe 降级、或收尾在两次 unlink 之间
+    #   中断的形状）——诊断对它只能说"现场不齐"，不许再断言信号没被消费；
+    # 'ignored' 什么都不动，只表示"socket 文件还在"——分类只看现场，不看它为什么不动。
+    for path in ((engine, probe) if mode == "consumed"
+                 else (engine,) if mode == "partial" else ()):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
     time.sleep(30)
 
 
@@ -133,17 +218,20 @@ time.sleep(30)
 
 
 def self_test_diagnosis(work):
-    """判据自己得能被红色检验：用两个 stub 各造一种超时形态。
+    """判据自己得能被红色检验：用三个 stub 各造一种超时形态。
 
     一个只在真出问题时才说话的诊断，等于没有诊断——这里主动制造"信号已消费但没退出"
-    与"socket 还在"两种现场，各要求诊断说对一次。说错或 stub 压根没卡住（＝这条
-    判据今天没被检验过）都算失败。
+    "socket 一个都没少"与"只少了一个"三种现场，各要求诊断**以它那一句开头**。说错、
+    说得含混、或 stub 压根没卡住（＝这条判据今天没被检验过）都算失败。第三种现场是
+    诊断收窄之后新增的分支：没有它，"现场不齐"这句话就和它替换掉的那句一样从未经过检验。
     """
     stub = os.path.join(work, "shutdown-stub.py")
     with open(stub, "w", encoding="utf-8") as handle:
         handle.write(_STUB_SOURCE)
     problems = []
-    for tag, expect_consumed in (("consumed", True), ("ignored", False)):
+    for tag, expect_prefix in (("consumed", "信号已消费"),
+                               ("ignored", "两个 socket 文件都还在"),
+                               ("partial", "现场不齐")):
         engine_sock = os.path.join(work, "self-%s-engine.sock" % tag)
         probe_sock = os.path.join(work, "self-%s-probe.sock" % tag)
         for path in (engine_sock, probe_sock):
@@ -172,8 +260,9 @@ def self_test_diagnosis(work):
                 pass
         if not stalled:
             problems.append("自检 stub（%s）没能在信号后卡住 ⇒ 诊断分支今天没有被检验过" % tag)
-        elif (diagnosis.startswith("信号已消费")) != expect_consumed:
-            problems.append("自检 %s 诊断与现场不符 ⇒ %s" % (tag, diagnosis))
+        elif not diagnosis.startswith(expect_prefix):
+            problems.append("自检 %s 诊断与现场不符（期望以 %r 开头）⇒ %s"
+                            % (tag, expect_prefix, diagnosis))
     return problems
 
 
@@ -207,17 +296,22 @@ def run_case(binary, tag, state_dir, signum, inherit_ignored=False):
     def pre_spawn():
         if inherit_ignored and signum == signal.SIGINT:
             signal.signal(signal.SIGINT, signal.SIG_IGN)
-    child = subprocess.Popen(
-        [binary, "--state-dir", state_dir, "--no-c33"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=pre_spawn,
-    )
+    err_log = state_dir + ".stderr.log"
+    # stderr 落文件而不是 PIPE：PIPE 满了会把 daemon 顶在写日志上，那是一次我们
+    # 自己造出来的超时。文件在 main() 的临时根里，随 rmtree 一起清掉。
+    with open(err_log, "wb") as err_handle:
+        child = subprocess.Popen(
+            [binary, "--state-dir", state_dir, "--no-c33"],
+            stdout=subprocess.DEVNULL, stderr=err_handle, preexec_fn=pre_spawn,
+        )
     failures = []
-    if not wait_for_socket(engine_sock):
-        child.kill()
-        child.wait()
-        return ["daemon 未能在 %.0fs 内于 %s 起 socket：它没有用被点名的状态根"
-                "（缺 --state-dir 的形状就是这个样子——socket 落在真的 ~/.glasspane）"
-                % (10.0, engine_sock)]
+    started = time.time()
+    if not wait_for_socket(engine_sock, poll=child.poll):
+        # 先收割它、读出它留下的话，再说现场允许说的话：这条路径从前扔掉退出码、
+        # stderr 记成 DEVNULL，却 confidently 断言"它没有用被点名的状态根"——
+        # 崩溃和 exit 64 的用法回归都会被它误诊成状态根问题。
+        return [startup_failure_text(engine_sock, state_dir, reap(child),
+                                     read_stderr_tail(err_log), time.time() - started)]
     if not os.path.isdir(state_dir):
         return failures + ["被点名的状态根 %s 没有被创建：daemon 用的不是它，"
                            "不碰现网的承诺落空" % state_dir]
@@ -226,11 +320,25 @@ def run_case(binary, tag, state_dir, signum, inherit_ignored=False):
         failures.append(
             "被点名的状态根 %s 是 %s，不是 0700：启动扫描没有收紧这个根，"
             "说明 daemon 用的不是它" % (state_dir, oct(root_mode)))
+    # 发信号之前先证明 probe.sock 存在过，否则"两个 socket 均被 unlink"里 probe
+    # 那一半只是没东西可残留。绑定条件出自 engine/Sources/glasspaned/main.swift：
+    # `options.probeEnabled`（本闸不传 --no-probe）且 A-18 护栏放行
+    # （`probeListenerAllowed`：名字有主就不抢）且 `server.start()` 成功——三条都在
+    # `shutdownSockets.register(probeSocketPath)` 之前，而注册表才是收尾会 unlink 的
+    # 那份名单。被点名的根是刚建好的空目录，不会有现任监听者，所以这里理应绑上。
+    probe_existed = wait_for_socket(probe_sock, timeout=3.0, poll=child.poll)
+    if not probe_existed:
+        failures.append(
+            "发 %s 之前 %s 就不存在：probe 监听者这一趟没有绑上（降级会把原因写到 stderr）。"
+            "这一趟对『两个 socket 均被 unlink』里的 probe 那一半无从验证，被证明的只有 "
+            "engine socket。stderr 尾：%s"
+            % (tag, os.path.basename(probe_sock), read_stderr_tail(err_log)))
     os.kill(child.pid, signum)
     try:
         code = child.wait(timeout=EXIT_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
-        diagnosis = shutdown_stall_diagnosis(engine_sock, probe_sock)
+        diagnosis = shutdown_stall_diagnosis(engine_sock, probe_sock,
+                                             probe_existed=probe_existed)
         child.kill()
         child.wait()
         try:
@@ -239,10 +347,12 @@ def run_case(binary, tag, state_dir, signum, inherit_ignored=False):
         except OSError:
             context = "负载读不出"
         # 现场先记下来再说话：红一次如果只能靠重跑去猜，那次红就等于没发生。
-        return ["%s 后 %.0fs 内未退出：%s（%s）"
-                % (tag, EXIT_TIMEOUT_SECONDS, diagnosis, context)]
+        return ["%s 后 %.0fs 内未退出：%s（%s；stderr 尾：%s）"
+                % (tag, EXIT_TIMEOUT_SECONDS, diagnosis, context,
+                   read_stderr_tail(err_log))]
     if code != 0:
-        failures.append("%s 后退出码 %d（期望 0）" % (tag, code))
+        failures.append("%s 后退出码 %d（期望 0）；stderr 尾：%s"
+                        % (tag, code, read_stderr_tail(err_log)))
     for leftover in (engine_sock, probe_sock):
         if os.path.exists(leftover):
             failures.append("%s 后 socket 文件残留：%s" % (tag, os.path.basename(leftover)))
@@ -280,7 +390,15 @@ def main(argv):
         problems += run_case(binary, "SIGINT", os.path.join(work, "state-sigint-ignored"),
                              2, inherit_ignored=True)
     finally:
+        # 清场覆盖 work 下的一切：三个自检 stub 的 socket、`shutdown-stub.py` 本身、
+        # 三个被点名的状态根，以及每次起停留下的 `state-*.stderr.log`（它写在
+        # `state_dir + ".stderr.log"`，也就是 work 里面，不是外面）。
+        # `ignore_errors=True` 会把"没清掉"这件事整个吞了——那等于把一次现场留在
+        # /tmp 里没人知道，所以清完必须回头看一眼，清不掉就说。
         shutil.rmtree(work, ignore_errors=True)
+        if os.path.exists(work):
+            print("WARN: 运行目录没能清干净，现场仍在 %s（里面有状态根与 daemon stderr "
+                  "留档；这不是断言失败，但别把 /tmp 越跑越满当成正常）" % work)
     if problems:
         print("SIGNAL SMOKE FAILED（%d 项）：" % len(problems))
         for detail in problems:

@@ -13,13 +13,18 @@ composition, socket回传, 退出码判据). No debug permission needed.
 用例，直跑与 unittest discover 两种口径都不会执行（曾有两例栽在这里）。
 """
 
+import base64
+import contextlib
+import io
 import json
 import os
 import socket
 import sys
 import tempfile
 import threading
+import types
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -152,6 +157,188 @@ class SentinelExtraction(unittest.TestCase):
         found, _raw = gb.extract_sentinel(stdout)
         self.assertIsNone(found)
 
+    def test_forged_earlier_pair_loses_to_the_real_payload(self):
+        """B-27: the target's own stdout shares lldb's stdout (crashcanary.swift
+        prints every run), so a pair emitted *before* the bridge's must not win —
+        the old first-match `find` handed back the forgery and flipped the verdict."""
+        forged = {"mode": "capture", "status": "eStateStopped",
+                  "threads": [{"id": 1, "frames": [{"fake": True}]}]}
+        real = {"mode": "capture", "status": "eStateStopped",
+                "threads": [{"id": 7, "frames": [{"function": "real"}]}]}
+        stdout = ("(lldb) run\n" + gb.wrap_sentinel(json.dumps(forged)) +
+                  "\ntarget noise\n" + gb.wrap_sentinel(json.dumps(real)) + "\n(lldb) quit\n")
+        found, _raw = gb.extract_sentinel(stdout)
+        self.assertEqual(found, real)
+        self.assertTrue(gb.capture_succeeded(found))
+
+    def test_late_malformed_pair_does_not_mask_the_real_payload(self):
+        """"Last" means last *parseable*: a broken pair appended after the real one
+        must not turn the capture into "no payload"."""
+        real = {"mode": "capture", "status": "eStateStopped", "threads": [{"id": 7}]}
+        stdout = (gb.wrap_sentinel(json.dumps(real)) + "\n" +
+                  gb.wrap_sentinel("{truncated by the pipe"))
+        found, _raw = gb.extract_sentinel(stdout)
+        self.assertEqual(found, real)
+
+    def test_marker_must_carry_this_runs_nonce(self):
+        """The fixed marker is public: any captured process can print it. A run
+        nonce makes the real pair unguessable, and the nonce-less forgery inert."""
+        nonce = gb.new_sentinel_nonce()
+        forged = {"mode": "capture", "status": "eStateStopped",
+                  "threads": [{"id": 1, "frames": [{"fake": True}]}]}
+        real = {"mode": "capture", "status": "eStateStopped",
+                "threads": [{"id": 7, "frames": [{"function": "real"}]}]}
+        stdout = ("target noise\n" + gb.wrap_sentinel(json.dumps(forged)) + "\n" +
+                  gb.wrap_sentinel(json.dumps(real), nonce=nonce))
+        found, _raw = gb.extract_sentinel(stdout, nonce=nonce)
+        self.assertEqual(found, real)
+        # ...and a pair carrying the *wrong* nonce is not trusted either.
+        self.assertIsNone(gb.extract_sentinel(
+            gb.wrap_sentinel(json.dumps(forged), nonce="deadbeef"), nonce=nonce)[0])
+
+    def test_inner_emission_carries_the_nonce_the_outer_side_demands(self):
+        """The two halves of R30 have to agree: `run_outer` puts the nonce in the
+        child's environment, `_sentinel` (inside lldb) reads it back out of it."""
+        previous = os.environ.get(gb.SENTINEL_NONCE_ENV)
+        os.environ[gb.SENTINEL_NONCE_ENV] = "cafe1234"
+        try:
+            nonce = gb.sentinel_nonce_from_env()
+            emission = gb._sentinel({"mode": "capture", "status": "eStateStopped"})
+        finally:
+            if previous is None:
+                os.environ.pop(gb.SENTINEL_NONCE_ENV, None)
+            else:
+                os.environ[gb.SENTINEL_NONCE_ENV] = previous
+        self.assertEqual(nonce, "cafe1234")
+        self.assertTrue(emission.startswith("GPBRIDGE<cafe1234<<"), emission)
+        self.assertTrue(emission.endswith(gb.SENTINEL_END))
+        self.assertEqual(gb.extract_sentinel(emission, nonce=nonce)[0],
+                         {"mode": "capture", "status": "eStateStopped"})
+        # The same emission is inert for a run that demanded a different nonce.
+        self.assertIsNone(gb.extract_sentinel(emission, nonce="other-nonce")[0])
+
+    def test_a_stray_env_nonce_cannot_break_the_marker_shape(self):
+        """The inner half reads its nonce out of the environment and puts it *inside*
+        the marker, so whitespace and marker characters must not survive the read."""
+        previous = os.environ.get(gb.SENTINEL_NONCE_ENV)
+        os.environ[gb.SENTINEL_NONCE_ENV] = " ab cd\n<<evil>> "
+        try:
+            nonce = gb.sentinel_nonce_from_env()
+        finally:
+            if previous is None:
+                os.environ.pop(gb.SENTINEL_NONCE_ENV, None)
+            else:
+                os.environ[gb.SENTINEL_NONCE_ENV] = previous
+        self.assertEqual(nonce, "abcdevil")
+        emission = gb.wrap_sentinel('{"a": 1}', nonce=nonce)
+        self.assertTrue(emission.startswith("GPBRIDGE<abcdevil<<"), emission)
+        self.assertEqual(emission.count(gb.SENTINEL_END), 1)
+        # A value that sanitises to nothing is "no nonce", not a broken marker.
+        os.environ[gb.SENTINEL_NONCE_ENV] = "  \n "
+        try:
+            self.assertIsNone(gb.sentinel_nonce_from_env())
+            self.assertEqual(gb.sentinel_begin(None), gb.SENTINEL_BEGIN)
+        finally:
+            if previous is None:
+                os.environ.pop(gb.SENTINEL_NONCE_ENV, None)
+            else:
+                os.environ[gb.SENTINEL_NONCE_ENV] = previous
+
+    def test_run_nonce_round_trips_through_a_real_child_process(self):
+        """The whole R30 loop across the boundary it actually crosses: `run_outer`
+        puts the nonce in the child's env, the in-lldb half reads it back out of
+        that env, the parent extracts with it. A forged fixed-marker pair in the
+        same stream must not be the one that parses."""
+        nonce = gb.new_sentinel_nonce()
+        script = (
+            "import sys, os; sys.path.insert(0, %r); import glasspane_bridge as gb; "
+            "sys.stdout.write(gb.SENTINEL_BEGIN + '{\"status\": \"forged\"}' + gb.SENTINEL_END + "
+            "'\\n' + gb._sentinel({'mode': 'capture', 'status': 'eStateStopped'}) + '\\n')"
+            % os.path.dirname(os.path.abspath(__file__)))
+        completed, timed_out = gb.run_child_captured(
+            [sys.executable, "-c", script], timeout=30,
+            env=dict(os.environ, **{gb.SENTINEL_NONCE_ENV: nonce}))
+        self.assertFalse(timed_out)
+        found, _raw = gb.extract_sentinel(completed.stdout, nonce=nonce)
+        self.assertEqual(found, {"mode": "capture", "status": "eStateStopped"})
+
+    def test_absence_clue_names_which_failure_it_was(self):
+        """The failure stays JSON-shaped, but says whether the marker never came or
+        came and was unusable — those two have different fixes."""
+        nonce = gb.new_sentinel_nonce()
+        silent = gb.sentinel_absence_clue("(lldb) quit\n", nonce=nonce)
+        self.assertIn("no ", silent)
+        self.assertIn(gb.SENTINEL_NONCE_ENV, silent)
+        unusable = gb.sentinel_absence_clue(gb.wrap_sentinel("{broken", nonce=nonce),
+                                            nonce=nonce)
+        self.assertIn("none of them a complete", unusable)
+
+
+class ChildOutputDecoding(unittest.TestCase):
+    """B-28: the pipe carries lldb's *and the target's* bytes; text=True decodes
+    strictly, so one non-UTF-8 byte killed the bridge with a traceback inside
+    communicate() — no payload, contradicting §6.2."""
+
+    def test_non_utf8_byte_still_yields_a_json_shaped_result(self):
+        payload = {"mode": "capture", "status": "eStateStopped", "threads": [{"id": 3}]}
+        script = ("import sys; sys.stdout.buffer.write(b'\\xff\\xfeprefix noise ' "
+                  "+ %r + b'\\n'); sys.stdout.flush()" % gb.wrap_sentinel(json.dumps(payload)).encode("utf-8"))
+        completed, timed_out = gb.run_child_captured(
+            [sys.executable, "-c", script], timeout=30)
+        self.assertFalse(timed_out)
+        found, _raw = gb.extract_sentinel(completed.stdout)
+        self.assertEqual(found, payload)
+        # The bad bytes really went through this pipe (and really were not dropped
+        # by an exception): the replacement character is the evidence.
+        self.assertIn("\ufffd", completed.stdout)
+
+
+class WatchModeValidation(unittest.TestCase):
+    """B-29: argv[3] used to reach the ledger unvalidated, so `gp-watch add 0x… 8 x`
+    armed read=False, write=False — never firable, one of four hardware slots gone,
+    and the ledger reported it armed.
+
+    These drive `cmd_watch` itself (the SB-API call is stubbed, never faked with a
+    fake debugger — §6.6 leaves that surface to real-machine smoke), so the test is
+    red if the mode stops being checked *at the command line*, not only in a helper
+    nobody calls.
+    """
+
+    def _run(self, command):
+        queue = gb.WatchQueue()
+        armed = []
+        messages = []
+
+        def fake_arm(debugger, entry):
+            armed.append(dict(entry))
+            return (True, "1")
+
+        result = types.SimpleNamespace(AppendMessage=messages.append)
+        with mock.patch.object(gb, "_WATCH_QUEUE", queue), \
+                mock.patch.object(gb, "_arm_watchpoint", side_effect=fake_arm):
+            gb.cmd_watch(None, command, result, {})
+        return messages, queue, armed
+
+    def test_a_mode_that_can_never_fire_is_refused(self):
+        messages, queue, armed = self._run("add 0x1000 8 x")
+        self.assertEqual([], armed, "an unfireable mode must not reach WatchAddress")
+        self.assertEqual([], queue.armed)
+        self.assertEqual([], queue.queued)
+        self.assertEqual([], queue.records(), "the ledger must not claim a request")
+        refusal = "\n".join(messages)
+        self.assertIn("nothing was requested", refusal)
+        self.assertIn("never fire", refusal)
+
+    def test_r_w_and_rw_are_armed_with_the_mode_they_asked_for(self):
+        for mode in ("r", "w", "rw"):
+            messages, queue, armed = self._run("add 0x1000 8 %s" % mode)
+            self.assertEqual([mode], [one["mode"] for one in armed], messages)
+            self.assertEqual(1, len(queue.armed))
+
+    def test_absent_mode_keeps_the_documented_default(self):
+        _messages, _queue, armed = self._run("add 0x1000")
+        self.assertEqual(["w"], [one["mode"] for one in armed])
+
 
 class ArgvComposition(unittest.TestCase):
     def test_launch_capture_uses_sb_driver_script(self):
@@ -175,6 +362,44 @@ class ArgvComposition(unittest.TestCase):
     def test_trace_forwards_sample_count(self):
         argv = gb.build_lldb_argv("/b.py", mode="trace", pid=1, samples=9)
         self.assertTrue(any("gp-trace --samples 9" in token for token in argv))
+
+    def test_apostrophe_in_the_exe_path_does_not_break_the_python_expression(self):
+        """B-30: `-o script glasspane_bridge.run_capture_cli('…')` is evaluated by
+        PYTHON, but `shlex.quote` speaks POSIX shell — an apostrophe in a path came
+        out as the shell splice `'\\''`, which Python reads as a SyntaxError, so every
+        capture of such a path died with no payload. base64 has no quotes at all.
+
+        The eval below is the honest shape of the check: the expression is this
+        test's own `build_lldb_argv` output from a literal path, i.e. exactly the
+        string lldb's Python evaluates. Nothing untrusted reaches it.
+        """
+        exe = "/tmp/we'ird app/crash me"
+        argv = gb.build_lldb_argv("/b.py", mode="capture", exe=exe)
+        token = next(item for item in argv[1:] if "run_capture_cli" in item)
+        expression = token[len("script "):]
+        try:
+            code = compile(expression, "<lldb -o script>", "eval")
+        except SyntaxError as error:
+            self.fail("the -o script token must be valid Python, and it is not: %s" % error)
+        seen = {}
+        namespace = {"glasspane_bridge": types.SimpleNamespace(
+            run_capture_cli_b64=lambda spec: seen.update(spec=spec))}
+        eval(code, namespace)
+        self.assertRegex(seen["spec"], r"^[A-Za-z0-9+/]+={0,2}$",
+                         "the spec must arrive base64: no quote, no space, no metacharacter")
+        self.assertEqual(json.loads(base64.b64decode(seen["spec"], validate=True).decode("utf-8"))["exe"],
+                         exe)
+
+    def test_a_broken_capture_spec_leaves_as_json_never_as_a_traceback(self):
+        """§6.2: failure surfaces as the module's JSON error shape — the b64 entry
+        point is reached before lldb is imported, so this runs in plain python3."""
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            gb.run_capture_cli_b64("not-base64-at-all!")
+        found, _raw = gb.extract_sentinel(buffer.getvalue())
+        self.assertIsNotNone(found, buffer.getvalue())
+        self.assertEqual(found["status"], "failed")
+        self.assertTrue(any("decoded" in error for error in found["errors"]))
 
 
 class SocketDelivery(unittest.TestCase):
