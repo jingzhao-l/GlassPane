@@ -583,4 +583,58 @@ final class ReviewPanelTests: XCTestCase {
         }
         _ = condition()
     }
+
+    /// 真起一个进程，把它收到的 argv 记下来。上一条只证明"源码里写了"，这一条证明
+    /// "真的发出去了"。桩与真解析器同形：不是第一个参数就点 `--state-dir` 就
+    /// `unknown argument` + 64——对任何参数都答话的桩，正是这类缺陷此前一路绿的原因。
+    @MainActor
+    func testConsoleActuallySpawnsWithTheNamedRoot() async throws {
+        let dir = TestSandbox.directory("console-spawn")
+        let movedRoot = dir + "/moved"
+        try FileManager.default.createDirectory(atPath: movedRoot, withIntermediateDirectories: true)
+        let argvFile = dir + "/argv.txt"
+        let spy = dir + "/glasspaned"
+        let script = """
+        #!/bin/sh
+        printf '%s\\n' "$@" > '\(argvFile)'
+        if [ "$1" != "--state-dir" ] || [ -z "$2" ]; then
+          echo "glasspaned: unknown argument: $1" >&2
+          exit 64
+        fi
+        shift 2
+        case "$1" in
+          --evidence-stats|--project-prune) echo '{}' ;;
+          --project-remove)
+            if [ -z "$2" ]; then
+              echo "glasspaned: --project-remove requires a project ID" >&2
+              exit 2
+            fi
+            echo '{}' ;;
+          *)
+            echo "glasspaned: unknown argument: $1" >&2
+            exit 64 ;;
+        esac
+        """
+        try script.write(toFile: spy, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: spy)
+
+        let console = ConsoleModel(daemonBinaryPath: spy, env: ["GLASSPANE_STATE_DIR": movedRoot])
+        XCTAssertEqual(console.displayedStateRoot, movedRoot,
+                       "面板认的根必须就是它发出去的那个根")
+        console.removeProject("p-1")
+
+        var seen: [String] = []
+        for _ in 0..<200 {
+            if let text = try? String(contentsOfFile: argvFile, encoding: .utf8) {
+                seen = text.split(separator: "\n").map(String.init)
+                if !seen.isEmpty { break }
+            }
+            usleep(50_000)
+        }
+        XCTAssertEqual(Array(seen.prefix(2)), ["--state-dir", movedRoot],
+                       "argv 的前两位就该是把根点名给 daemon，实得：\(seen)")
+        XCTAssertTrue(seen.contains("--project-remove"), "\(seen)")
+        XCTAssertTrue(seen.contains("p-1"), "\(seen)")
+    }
+
 }
