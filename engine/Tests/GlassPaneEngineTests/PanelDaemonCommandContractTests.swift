@@ -137,20 +137,32 @@ final class PanelDaemonCommandContractTests: XCTestCase {
         XCTAssertTrue(invoked.contains("--evidence-stats"),
                       "面板不再向后台服务要统计：那一栏的数字就没有了来源，只能靠本地扫一份冒充")
     }
-    /// 三条一次性命令都必须带着**面板自己认的那个根**。
+    /// 每一条一次性 daemon 命令都必须带着**面板自己认的那个根**。
     ///
     /// 从前这三处递的是裸数组（`arguments: ["--project-prune"]`），daemon 于是按它自己的
     /// 家目录默认根解析——面板显示一个根，点"清理/删除"改的却是另一个根里的真注册表。
-    /// 这里两个方向都数：带根的组装调用必须 = 3，且一处裸数组都不许留。只数前者的话，
-    /// 后来加一条不带根的第四处调用照样绿。
+    ///
+    /// 判据原来写死 `== 3`。那是把"当前有几条命令"当成了不变量：2026-10-11 清理预览也改成
+    /// 经 daemon 干一次 `--project-prune --dry-run`（第四处，带根，正确行为），这条闸就红了
+    /// ——数字变了而规则没变。现在数的是**关系**：每个 `runDaemonCLI` 调用点都要有一次
+    /// `daemonCLIArguments` 组装，且每一次组装都显式点名根；条数只留下限（≥3），
+    /// 裸数组仍一处都不许留。加一条不带根的调用 ⇒ 组装次数与调用次数不等，红。
     func testEveryConsoleCommandCarriesThePanelsOwnStateRoot() throws {
         let source = try read("engine/Sources/glasspane-settings/ConsoleModel.swift")
-        let built = captures(#"(daemonCLIArguments\(\[)"#, in: source)
-        XCTAssertEqual(built.count, 3,
-            "面板的三条 daemon 命令都该经 daemonCLIArguments 组装，实得 \(built.count) 处")
+        let calls = captures(#"(ConsoleModel\.runDaemonCLI\(binary:)"#, in: source)
+        // 数调用点而不是函数名：`daemonCLIArguments` 的定义行也含那个名字，
+        // 把它算进"组装次数"会让计数比调用点多一，于是这条闸永远只能靠写死数字过。
+        let built = captures(#"(ConsoleModel\.daemonCLIArguments\()"#, in: source)
         let withRoot = captures(#"(stateRoot: stateRoot\.path\))"#, in: source)
-        XCTAssertEqual(withRoot.count, 3,
-            "三条组装调用都要显式带上面板认的状态根，实得 \(withRoot.count) 处")
+        XCTAssertGreaterThanOrEqual(calls.count, 3,
+            "只找到 \(calls.count) 处 daemon 一次性调用，这条闸已经在看不到东西的地方")
+        XCTAssertGreaterThanOrEqual(built.count, 3,
+            "只有 \(built.count) 处经 daemonCLIArguments 组装，低于已知的三条")
+        XCTAssertEqual(built.count, calls.count,
+            "有 \(calls.count) 处一次性调用却只有 \(built.count) 处组装：多出来的那一支不点名状态根，"
+            + "就会在家目录默认根上执行")
+        XCTAssertEqual(withRoot.count, built.count,
+            "\(built.count) 处组装里只有 \(withRoot.count) 处显式带上面板认的状态根")
         XCTAssertFalse(source.contains("arguments: [\"--"),
             "还有一处把开关数组直接递给 daemon——它会在家目录默认根上执行")
     }
