@@ -73,6 +73,81 @@ stderr: glasspaned: refusing to take over /var/tmp/…/state/daemon.sock.
 所以已发布的 `v1.12.0` 归档与 GitHub Release 带的是修之前的那句 announce。不移 tag、不重发：
 挪已公开的 tag 属于需要 owner 点头的动作。这一条留给下一版。
 
+### 2026-10-11 主仓每日线：收三条遗留 —— **本段未发版**
+
+**没发版，且不是忘了。** 收口时 `origin/main` tip 的 CI 在 `harness rulers → fork-diff` 这一步红：
+harness 那一路的 `c3c98af [gp] release(harness): 0.7.4` 改了 fork 里的 `script/publish.ts`，
+而 `harness/contracts/fork-diff.json` 的金样没跟着重记。本地复现同一条红：
+`edited list changed (261 recorded → 262 actual)` / `+ script/publish.ts` /
+`has no recorded content hash (golden predates hash recording) — re-run --record`。
+本线的改动没有一个字节落在 `harness/` 或 fork 里，这条红不是本线造成的；但发版凭据是
+"**该 tip 的 CI 全绿**"，而修它要动的恰是本线禁止改动的面。所以下面三条进 `[未发布]`，
+版本线留在 1.12.0，不打 tag、不发 npm。金样重记之后这三条按 **patch** 出：状态文件的字段没动、
+退出码集合没动（本轮只是把程序早已会回的 `2` 补进 `--help`，没改哪条路径回哪个码）、
+CLI 参数没动、两个 npm 包的 `bin` 没动。反面考虑过 minor：确认表多出一行橙色交代与一个禁用态，
+但那是既有控件的状态，不是新的用户可见控制件。
+
+#### Fixed — 清理预览的清单改由 daemon 的 `--project-prune --dry-run` 产生
+
+`previewTestResiduePrune()` 的注释写着"先跑 dry-run，把将要删除哪些摊开给人确认"，代码做的却是
+面板本地过滤（`prunePreview = projects.filter { LocalArchive.isTestResidue($0) }`）。确认表上那句
+"将删除 N 条注册项"因此是**面板的主张**，而按下确认之后执行删除的是 daemon 那份判定，两者之间
+没有任何保证，界面却把它们说成同一件事。现在这一步真的起一次 daemon CLI，表格读回话里的
+`projects`；四种回话都不摊清单并说明原因：缺 `matched`（daemon 认不出这条命令时回 usage + 64，
+折成"0 命中"就等于当着一屏残留说没有残留）、`loadFailed:true`（注册表读不开）、`dryRun:false`
+（要的是预览、它说已经删过）、以及 `matched` 与 `projects` 条数自相矛盾。面板读到的条数与
+daemon 答复不一致时两个数都显示，写清以后者为准（删除按后者执行）。表行收成 `PrunePreviewRow`：
+只带 daemon 报的那四个字段，不补 `createdAt`——补就是编一个它没说过的东西。
+
+#### Fixed — `--help` 把六个退出码说全，并让这张表自己不能漂移
+
+程序能回 `2`（`--project-remove` 缺值、`--older-than` 缺值/非数、`--recipe-validate` 的文件读不开），
+而使用文本只在四处散着 64/65/1/3，从没提过 2——一个必须按返回值分叉的调用方读到的是四码之表。
+本轮**不改**哪条路径回哪个码（统一到 64 是 CLI 契约变更，留给 owner），只把六个码写全，并让
+`DaemonExitCodeTests` 两个方向对照：从源码抠 `exit(N)`（含 `exit(cond ? 1 : 0)` 的三元分支）与
+`.errorCode(…, N)`，与 `EXIT CODES` 一节比——能回却没文档红，文档里有个程序回不出的码也红。
+写这道闸时自己踩了一次：内层正则少写捕获组，`captures` 只收 group 1，抽取器静默交出空表，
+两侧都空＝全绿；这正是这类闸的典型死法，所以加了"抠不到 ≥5 个码 / ≥20 处退出点就红"的反向闸。
+
+#### Fixed — 一次性 launchd 脚本落盘之前先判临时目录
+
+面板把脚本写进 `NSTemporaryDirectory()`、chmod 0755，再 `launchctl submit -l <label> -- <script>
+<daemonBinary> <outputPath> --permissions` 执行——那一趟带的是 **daemon 自己的责任上下文**
+（`SettingsModel` 顶部对权限模型就是这么交代的）。而落盘之前没有任何一步问"这个目录是谁的、
+别人能不能写"：`$TMPDIR` 被改指到共享位置时（agent 宿主、launchd 起的进程都可能），含时钟 nonce
+的脚本名与输出名别的账号能预置，面板照写不误。判定收成一份 `StateRoot.directoryIsolation`
+（只读，不去 chmod 不属于自己的目录），一次性任务与证据报告共用——此前这两处各自手搓过一套
+权限位算法，第三处压根没有。不合格回独立结局 `directoryUnsafe(reason)`，文案给下一步
+（换一个本用户专有、同组与其他人写不动的临时目录），不与 `writeFailed` 混成一条：那是"重试一次"，
+这是"换目录"。
+
+#### 两处是 rebase 到上游之后才露出来的（都改了）
+
+- 新增的预览调用漏了上游刚立的规矩：`e2a749f` 把控制台三条命令的 argv 收成
+  `daemonCLIArguments(_:stateRoot:)`（根放在命令之前、不因"看着像默认值"而省略），而我的新调用点
+  写的是裸 `["--project-prune", "--dry-run"]`——预览于是读 daemon 默认根里那张表，这一页显示的是
+  面板认的那个根，摊给人确认的清单来自另一个实例。改走同一个函数。
+- `ConsoleModel.selectedIndex`（注释"详情页上下翻页用"）是 1.10.0 删掉的死读数，被上游两次并行
+  merge 又搬了回来。它不是 `@Published`，"写了没人读"那条扫描抓不到，所以在扫描里补了点名断言：
+  再要翻页，就带着读者一起进来。
+
+#### 新增闸与反向验证（本轮 5 个变异，各有具名红）
+
+`PrunePreviewSourceTests`（9 例，报文形状取自 2026-10-10 真二进制在隔离状态根上回的
+`--project-prune --dry-run`，含 `evidenceStoragePath: null` 的写法）、`DaemonExitCodeTests`（3 例，
+双向对照）、`TempDirectoryGuardTests`（4 例）。变异：`EXIT CODES` 里删掉 `2` 那一行 ⇒
+`testUsageDocumentsExactlyTheExitCodesTheBinaryCanReturn`；预览的 `--dry-run` 摘掉 ⇒
+`testPreviewNowComesFromTheDaemonNotAPanelSideFilter`；整块目录守卫摘掉 ⇒
+`testOneShotChecksTheDirectoryBeforeItWritesTheScript`；把报告路径的判定改成恒回 nil ⇒
+`testThePanelHasNoHandRolledOwnershipCheck` 与 `ReportWriteIsolationTests
+.testSharedOrMissingDirectoryIsRefusedNotWritten`（后者是行为红）。
+两条结构断言起初只查裸标识符 `StateRoot.directoryIsolation`，反向破坏证明**注释也能把它喂绿**——
+改成要求调用式 `directoryIsolation(at:` 与 `return .directoryUnsafe(` 之后才落成红。
+撤销一律用快照 + `shasum -a 256 -c`，五个文件全部 OK 后复跑全量套件。
+
+跨进程性质（两个写者不再互相覆写）仍没有行为级闸，此处不声称验过；面板新流程的 AX 实点
+（`gp-prune-count-disagrees`、`directoryUnsafe` 那句文案）要登录 GUI 会话，本轮未做，见各条。
+
 ## [1.12.0] — 2026-10-11
 
 **版本判断：minor。** 判据沿用 1.6.2 写下、1.9.0 与 1.11.0 沿用的那四条，逐条实测：状态文件的
