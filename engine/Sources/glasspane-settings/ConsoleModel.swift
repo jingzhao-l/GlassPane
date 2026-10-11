@@ -138,6 +138,14 @@ final class ConsoleModel: ObservableObject {
     /// daemon 可执行文件路径：由面板在 hello 拿到 daemon 身份后回填。
     /// 没有它，清理/删除这类写入动作就没有可执行入口。
     @Published var daemonBinaryPath: String?
+    /// 面板认的状态根。三条腿以前各走各的：更新器那侧读 `GLASSPANE_STATE_DIR`，
+    /// 这一侧的 `evidenceDirectory` / `projectsPath` / `approvalsPath` 一律是
+    /// **家目录默认根**的常量，而三个 daemon 写入命令（`--evidence-stats`、
+    /// `--project-prune`、`--project-remove`）连根都不传，于是 daemon 也按它自己的
+    /// 默认根解析。用户把状态根挪过（`glasspaned --state-dir …`）之后，这一页显示的是
+    /// 新根、点"清理/删除"改的是 `~/.glasspane` 里那份**另一个实例的真注册表**——
+    /// 而屏幕上的字还写着"档案目录：<新根>"。现在四个数来自同一个根，CLI 也带着它。
+    private let stateRoot: StateRoot
     private let evidenceDirectory: String
     private let projectsPath: String
     private let approvalsPath: String
@@ -153,19 +161,36 @@ final class ConsoleModel: ObservableObject {
 
     init(
         daemonBinaryPath: String? = nil,
-        evidenceDirectory: String = EvidenceStore.defaultDirectory,
-        projectsPath: String = ProjectRegistry.defaultProjectsPath,
-        approvalsPath: String = ApprovalGate.defaultPath,
+        env: [String: String] = ProcessInfo.processInfo.environment,
+        home: String = NSHomeDirectory(),
+        evidenceDirectory: String? = nil,
+        projectsPath: String? = nil,
+        approvalsPath: String? = nil,
         evidenceScanner: ((String) -> EvidenceScanOutcome)? = nil,
         packReader: ((String) -> EvidencePack?)? = nil
     ) {
+        // 与更新器同一份口径（`UpdatePanel.stateRoot`）：环境变量优先，否则家目录默认根。
+        // 不是"也写一遍相似的规则"，而是同一个函数——两条腿各写一遍正是这条缺陷的来源。
+        let rootPath = UpdatePanel.stateRoot(env: env, home: home)
+        let root = StateRoot(path: rootPath)
         self.daemonBinaryPath = daemonBinaryPath
-        self.evidenceDirectory = evidenceDirectory
-        self.projectsPath = projectsPath
-        self.approvalsPath = approvalsPath
+        self.stateRoot = root
+        self.evidenceDirectory = evidenceDirectory ?? root.evidenceDirectory
+        self.projectsPath = projectsPath ?? root.projectsFile
+        self.approvalsPath = approvalsPath ?? root.approvalsFile
         self.evidenceScanner = evidenceScanner ?? { ConsoleModel.scanArchiveDirectory($0) }
         self.packReader = packReader ?? { ConsoleModel.readPackFile(at: $0) }
     }
+
+    /// 控制台三类 daemon 调用的 argv 组装（纯函数，可单测）：根**必须**显式点名，
+    /// 放在命令之前，且不因为"根看起来就是默认值"而省略——省略一次，这条命令就会
+    /// 在另一个实例的根上执行。
+    static func daemonCLIArguments(_ command: [String], stateRoot: String) -> [String] {
+        ["--state-dir", stateRoot] + command
+    }
+
+    /// 面板这一页认的状态根（供文案点名"这数字是从哪儿读的"）。
+    var displayedStateRoot: String { stateRoot.path }
 
     /// daemon 二进制路径是否已知——决定"清理/删除"这类写入动作可用与否。
     var canRunDaemonCLI: Bool { daemonBinaryPath != nil }
@@ -314,8 +339,9 @@ final class ConsoleModel: ObservableObject {
         guard !daemonStatsInFlight else { return }
         daemonStatsInFlight = true
         daemonStats = .asking
+        let statsArgs = ConsoleModel.daemonCLIArguments(["--evidence-stats"], stateRoot: stateRoot.path)
         Task.detached(priority: .userInitiated) {
-            let run = ConsoleModel.runDaemonCLI(binary: binary, arguments: ["--evidence-stats"])
+            let run = ConsoleModel.runDaemonCLI(binary: binary, arguments: statsArgs)
             let result = ConsoleModel.foldDaemonStats(fromCLIReply: run)
             await MainActor.run {
                 self.daemonStatsInFlight = false
@@ -469,8 +495,9 @@ final class ConsoleModel: ObservableObject {
         isRunningPrune = true
         isPruneSheetPresented = false
         let binary = daemonBinaryPath
+        let pruneArgs = ConsoleModel.daemonCLIArguments(["--project-prune"], stateRoot: stateRoot.path)
         Task.detached(priority: .userInitiated) {
-            let run = ConsoleModel.runDaemonCLI(binary: binary, arguments: ["--project-prune"])
+            let run = ConsoleModel.runDaemonCLI(binary: binary, arguments: pruneArgs)
             await MainActor.run {
                 self.isRunningPrune = false
                 self.pruneNeedsRestart = Self.boolField(
@@ -494,8 +521,9 @@ final class ConsoleModel: ObservableObject {
             return
         }
         let binary = daemonBinaryPath
+        let removeArgs = ConsoleModel.daemonCLIArguments(["--project-remove", projectId], stateRoot: stateRoot.path)
         Task.detached(priority: .userInitiated) {
-            let run = ConsoleModel.runDaemonCLI(binary: binary, arguments: ["--project-remove", projectId])
+            let run = ConsoleModel.runDaemonCLI(binary: binary, arguments: removeArgs)
             await MainActor.run {
                 let reply = Self.cliReply(run)
                 self.pruneNeedsRestart = Self.boolField("requiresDaemonRestart", in: reply) ?? false

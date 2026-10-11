@@ -66,7 +66,11 @@ final class PanelDaemonCommandContractTests: XCTestCase {
         var found: [(String, Int)] = []
         for (offset, lineText) in source.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
             let line = String(lineText)
-            guard line.contains("runDaemonCLI") || line.contains("arguments:") else { continue }
+            // argv 现在由 `daemonCLIArguments(_:stateRoot:)` 组装，开关字面量因此落在
+            // 那一行而不是 `arguments:` 那一行——提取器跟着走，否则这条闸会看不见东西
+            // （它自己会报"一个都没抠出来"，这一轮就是这么被抓出来的）。
+            guard line.contains("runDaemonCLI") || line.contains("arguments:")
+                || line.contains("daemonCLIArguments(") else { continue }
             for flag in captures(#""(--[a-z][a-z0-9-]*)""#, in: line) {
                 found.append((flag, offset + 1))
             }
@@ -133,6 +137,24 @@ final class PanelDaemonCommandContractTests: XCTestCase {
         XCTAssertTrue(invoked.contains("--evidence-stats"),
                       "面板不再向后台服务要统计：那一栏的数字就没有了来源，只能靠本地扫一份冒充")
     }
+    /// 三条一次性命令都必须带着**面板自己认的那个根**。
+    ///
+    /// 从前这三处递的是裸数组（`arguments: ["--project-prune"]`），daemon 于是按它自己的
+    /// 家目录默认根解析——面板显示一个根，点"清理/删除"改的却是另一个根里的真注册表。
+    /// 这里两个方向都数：带根的组装调用必须 = 3，且一处裸数组都不许留。只数前者的话，
+    /// 后来加一条不带根的第四处调用照样绿。
+    func testEveryConsoleCommandCarriesThePanelsOwnStateRoot() throws {
+        let source = try read("engine/Sources/glasspane-settings/ConsoleModel.swift")
+        let built = captures(#"(daemonCLIArguments\(\[)"#, in: source)
+        XCTAssertEqual(built.count, 3,
+            "面板的三条 daemon 命令都该经 daemonCLIArguments 组装，实得 \(built.count) 处")
+        let withRoot = captures(#"(stateRoot: stateRoot\.path\))"#, in: source)
+        XCTAssertEqual(withRoot.count, 3,
+            "三条组装调用都要显式带上面板认的状态根，实得 \(withRoot.count) 处")
+        XCTAssertFalse(source.contains("arguments: [\"--"),
+            "还有一处把开关数组直接递给 daemon——它会在家目录默认根上执行")
+    }
+
 }
 
 private extension Sequence where Element: Hashable {
@@ -140,4 +162,7 @@ private extension Sequence where Element: Hashable {
         var seen = Set<Element>()
         return filter { seen.insert($0).inserted }
     }
+
+
+
 }

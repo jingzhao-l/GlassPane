@@ -4,6 +4,35 @@
 
 ## [未发布]
 
+### Fixed — 控制台那三条 daemon 命令不带状态根：显示一个根，改的是另一个根
+
+面板的三条一次性 daemon 调用（`--evidence-stats`、`--project-prune`、`--project-remove`）
+从前发的是**裸数组**，`ConsoleModel` 的 `evidenceDirectory` / `projectsPath` / `approvalsPath`
+也一律取家目录默认根的常量；而更新器那一侧走的是另一套（`UpdatePanel.stateRoot()`：
+`GLASSPANE_STATE_DIR` 优先，否则家目录默认根）。两套口径的后果不是显示问题：用户把状态根挪过
+（`glasspaned --state-dir …`）之后，这一页统计与档案列表报的是新根，而点「清理测试残留 / 删除项目」
+起的是一次**不带根**的 daemon 调用——它在 `~/.glasspane` 那份**另一个实例的真注册表**上写入，
+屏幕上那行字还写着"档案目录：<新根>"。同族的旧事故是 2026-10-06 那次拿 `GLASSPANE_STATE_DIR`
+当隔离、结果对默认根跑了 `--prune-evidence`。
+
+现在四个数来自同一个根：`ConsoleModel` 用**同一个函数**（`UpdatePanel.stateRoot`，不是再抄一遍
+相似规则）解析根，三条命令统一经 `daemonCLIArguments(_:stateRoot:)` 组装，把
+`--state-dir <根>` 放在命令之前。
+
+闸两条：
+- `testEveryConsoleCommandCarriesThePanelsOwnStateRoot`（源码侧，两个方向都数：带根的组装调用
+  必须 = 3，且一处裸数组都不许留——只数前者的话，日后加一条不带根的第四处照样绿）。
+- `testConsoleActuallySpawnsWithTheNamedRoot`（真起进程）：面板以 `GLASSPANE_STATE_DIR` 指向
+  沙箱里的根，真 spawn 一个 argv 桩，读回它**收到的** argv，前两位必须就是 `--state-dir <那个根>`。
+  桩与真解析器同形：不是以 `--state-dir <值>` 开头就 `unknown argument` + 64。
+- 契约闸的提取器跟着走：`PanelDaemonCommandContractTests` 原先只从含 `runDaemonCLI` /
+  `arguments:` 的行里抠开关，argv 一旦由别的函数组装，它就以"面板里一个 daemon 开关都没抠出来"
+  宣布自己不作数——**这条自证在真实改动下响了**，不是被绕过去的。
+
+反向验证（私有备份 + sha 核回 `e992f8e0…5acb48f` match=YES）：把组装器改回"原样返回命令、
+不带根" → `testConsoleActuallySpawnsWithTheNamedRoot` 具名红（源码侧那条照旧绿，正是它证明
+"源码写了"与"真发出去了"必须是两条闸）。
+
 ### Fixed — daemon 在 bind 之前就说"我在监听"
 
 `main.swift` 那一句 `glasspaned <version> listening on <path>` 打在 `server.run()` **之前**，
@@ -178,9 +207,15 @@ MCP 壳一组：一条超长回音此前把所有在飞请求一起判成"daemon
 `consumer-consistency.test.mjs` 直接从 Swift 源码读这两个数字来闸）。设置面板一组：存活只由三态
 `liveness` 决定（此前 `reachable == fileExists`，崩掉而留下 socket 文件的 daemon 点亮绿点）；
 五处 nil 折成假值（自动更新开关、待装版本快照、验证失败后的徽标、`daemonBinaryPath` 重装后仍
-exec 退役的那份、档案卡只在 `.onAppear` 取数）；控制台四条 CLI 调用显式点名 `--state-dir`（此前按
-家目录默认根跑，清理按钮删的是**另一个根里的真档案**）。桥一侧：哨兵取最后一个可解析对 + 每次跑
+exec 退役的那份、档案卡只在 `.onAppear` 取数）。桥一侧：哨兵取最后一个可解析对 + 每次跑
 独立 nonce，捕获规格走 base64，`watch` 模式只认 `r|w|rw`。
+
+⚠ 本条目原先还写着"控制台四条 CLI 调用显式点名 `--state-dir`（清理按钮删的是另一个根里的真档案）"
+——**这一句当时不成立**：收口复核时实测 `ConsoleModel` 的三处调用（`--evidence-stats`、
+`--project-prune`、`--project-remove`）发的都是不带根的裸数组，`evidenceDirectory` /
+`projectsPath` / `approvalsPath` 也全是家目录默认根的常量；带根点名只存在于**更新器**那一侧
+（`UpdateModel.argv`）。写在发布说明里而代码里没有，就是本仓最反对的那种"说了没做"。
+实际落地在 `## [未发布]` 第一条，本版（1.12.0）不带它。
 
 ### 门禁与证据（本版实测）
 
