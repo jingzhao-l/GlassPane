@@ -10,10 +10,9 @@ import Darwin
 final class DailyRound20261011Tests: XCTestCase {
 
     private func tempRoot(_ tag: String) throws -> URL {
-        // 路径要短：sun_path 只有 104 字节，长 temp 路径会让 bind 在测试里先失败，
-        // 那时红的是夹具而不是被测的那条规矩。
-        let base = URL(fileURLWithPath: "/tmp", isDirectory: true)
-            .appendingPathComponent("gp-\(tag)-\(UUID().uuidString.prefix(6))", isDirectory: true)
+        // 由 TestSandbox 给位置（本仓的隔离闸不许测试自己伸手摸临时目录）。路径要短：sun_path 只有
+        // 104 字节，长 temp 路径会让 bind 在测试里先失败，那时红的是夹具而不是被测的那条规矩。
+        let base = URL(fileURLWithPath: TestSandbox.directory("dr11-\(tag.prefix(8))"), isDirectory: true)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base
     }

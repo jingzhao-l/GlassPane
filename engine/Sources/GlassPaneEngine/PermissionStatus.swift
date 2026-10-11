@@ -499,11 +499,15 @@ public enum DeveloperToolsCapability {
             self.observedAt = observedAt
         }
 
-        /// granted → 已授权；被系统明确拒绝 → 已拒绝；timeout / spawnFailed 等
-        /// 未知失败 → 不可判定（绝不折算成任一权限结论）。
+        /// 卡片上那盏灯怎么点：**先认实测到的拒绝**，再认 `granted`。
+        ///
+        /// `granted` 是两个探测的**或**（`DebugCapabilityProbe` 里那行），所以
+        /// `launch:"ok", attach:"denied"` 也算 granted——而这张卡存在的意义就是"能不能让调试器
+        /// 附加到进程"：附加被系统明确拒绝却点绿，等于把一次实测的拒绝折算成一次授权。
+        /// 顺序就是这条判据本身；把它挪回 `if granted` 在前，`PermissionCardDenialWins` 那条会红。
         public var status: PermissionStatus {
-            if granted { return .granted }
             if launch == "denied" || attach == "denied" { return .denied }
+            if granted { return .granted }
             return .unverifiable
         }
 

@@ -242,6 +242,19 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
                 return .error("--socket-path \(reason)")
             }
             index += 1
+            // 值长得像下一个开关就得拒：从前 `glasspaned --socket-path --force-socket` 把
+            // `--force-socket` 当路径吃掉，于是那个"接管已占用 socket"的开关**静默失效**，
+            // 而 daemon 在当前目录里真建了一个名叫 `--force-socket` 的 socket。`--state-dir` 早就
+            // 有同样的守卫（StateRoot 里那条），这里补齐它的手足。
+            guard !arguments[index].hasPrefix("--") else {
+                return .error("--socket-path requires a path, not another flag (got \(arguments[index]))")
+            }
+            // 没有目录分量的值（`--socket-path gp.sock`）会在**当前工作目录**绑定，而
+            // `prepareSocketDirectory` 对 `deletingLastPathComponent == ""` 直接 return——
+            // 于是 SECURITY 里那句"父目录收不到 0700 就拒绝服务"对这一整条形状是空的。
+            guard arguments[index].contains("/") else {
+                return .error("--socket-path must name a parent directory (absolute, or with a component): a bare file name binds in the current working directory, whose mode this run will not verify. Use --state-dir <root>, or --socket-path <root>/engine.sock.")
+            }
             options.socketPath = arguments[index]
         default:
             if argument.hasPrefix("--socket-path=") {
@@ -251,6 +264,14 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
                 // disagree about what counts as a socket path.
                 if let reason = StateRootArgument.rejection(for: value) {
                     return .error("--socket-path \(reason)")
+                }
+                // 两种拼写必须同一条判据，否则 `--socket-path=x` 就绕开上面那两道（开关样的值、
+                // 没有目录分量）。`--state-dir` 两边共用 `StateRootArgument` 就是这个道理。
+                guard !value.hasPrefix("--") else {
+                    return .error("--socket-path requires a path, not another flag (got \(value))")
+                }
+                guard value.contains("/") else {
+                    return .error("--socket-path must name a parent directory (absolute, or with a component): a bare file name binds in the current working directory, whose mode this run will not verify. Use --state-dir <root>, or --socket-path <root>/engine.sock.")
                 }
                 options.socketPath = value
             } else if argument.hasPrefix("--state-dir=") {
@@ -868,12 +889,16 @@ private func runProjectPrune(options: Options) -> Never {
     let pruned = prunedIds.count
     let failedCount = dryRun ? failures.count : hits.count - pruned
     if verified.loadFailed && !dryRun {
+        // 这一份是拒绝的载荷，但它仍然在被读：`remaining: 0` 与 `projects: []` 说的是"台账现在空了"，
+        // 而这条分支同时在讲"读不回来"。同一句里既说看不见、又报出一个看不见的数字，读者只会记住数字。
+        // `--project-remove` 那条同样的分支当初就是因此把这两个键删掉的（见 908 行附近）——这里对齐它：
+        // 看不见就别说看见了什么。
         writeJSON([
             "command": "--project-prune", "dryRun": false, "loadFailed": true,
             "total": before.count, "matched": hits.count, "pruned": 0,
             "prunedProjectIds": [String](), "failed": hits.count,
             "failures": [["projectId": "*", "reason": "the registry cannot be read back after the write"]],
-            "remaining": 0, "requiresDaemonRestart": true, "projects": [[String: Any]](),
+            "requiresDaemonRestart": true,
             "registryPath": registry.filePath,
             "error": "the write left projects.json unreadable; the daemon must not keep running on its in-memory copy",
             "next": "restore the file from \(registry.filePath) backups and restart the daemon"
