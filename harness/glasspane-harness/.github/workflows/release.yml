@@ -350,6 +350,19 @@ jobs:
           export OPENCODE_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('../../product.json','utf8')).version")"
           bun run build --single
 
+      - name: Validate this platform package with the product's own pack checks
+        # This lane used to run a bare `npm publish` on the built directory, so the product's
+        # own validator — bin present and executable in the tarball, a README so the npm page is
+        # not a bare version string, and (since bd690a9) that the dist carries THIS product
+        # version rather than a leftover from the previous release — never saw the bytes this
+        # job publishes. The wrapper job already runs publish.ts; making the platform packages
+        # answer to the same ruler is the difference between "the build worked" and "we checked
+        # what is about to become installable". `--dry-run` packs and validates every dist found
+        # here and publishes nothing; the not-all-targets line stays a note in dry-run, because
+        # one runner builds one target by design.
+        working-directory: packages/opencode
+        run: bun run script/publish.ts --dry-run
+
       - name: Publish the platform package with provenance (staged-only fallback)
         shell: bash
         run: |

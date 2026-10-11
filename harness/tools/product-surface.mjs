@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * product-surface.mjs — the packaging ruler: one product truth, checked everywhere.
  *
@@ -18,6 +19,7 @@
  *   binary-name-in-build / wrapper-name-in-publish       product name reaches the artifacts
  *   no-upstream-registries                               no ghcr/AUR/tap/opencode.ai/install anywhere product-facing
  *   postinstall-identity / runtime-package-names          the shim + install/upgrade/uninstall speak the product name
+ *   cli-text-names-product-env                               src/cli/cmd strings name GLASSPANE_HARNESS_*, not the legacy fallback
  *   state-root / config-names                            XDG root + config file names (product first, legacy kept)
  *   installer-urls / installer-syntax / installer-dry-run the one-click scripts point at the product and actually parse/plan
  *   workflows / notice-license                            our own pipelines only; attribution on disk
@@ -302,6 +304,28 @@ check("postinstall-identity", shimText.includes(`"${product.name}-" + platform`)
 check("postinstall-identity", shimText.includes(`"${product.binary}"`), "bin shim does not carry the product binary name")
 check("runtime-package-names", readCode("packages/opencode/src/installation/index.ts").includes(`${product.name}@`), "installation/index.ts does not upgrade the product package")
 check("runtime-package-names", readCode("packages/opencode/src/cli/cmd/uninstall.ts").includes(`"uninstall", "-g", "${product.name}"`), "uninstall.ts does not uninstall the product package")
+
+// ---- the CLI's own words name the product's environment variables
+// Every variable gained a GLASSPANE_HARNESS_* name that is read first, with the upstream
+// OPENCODE_* name kept as a legacy fallback (product.json -> privateSurface.envVars). Reading
+// the fallback is code; PRINTING it is a product claim. Four strings did: `serve` and `web`
+// warned about OPENCODE_SERVER_PASSWORD, and `attach` / `run` --help named both credentials as
+// the default source. No ruler had ever looked at a string literal under src/cli/cmd/, so the
+// fix could have come back silently — this is the reader. It scans literals only, which is why
+// the legitimate compat reads (Flag.OPENCODE_SERVER_PASSWORD, Config.string("OPENCODE_..."))
+// stay code and do not trip it.
+const cliDir = "packages/opencode/src/cli/cmd"
+for (const entry of readdirSync(path.join(forkRoot, cliDir)).filter((x) => x.endsWith(".ts")).sort()) {
+  const code = readCode(`${cliDir}/${entry}`)
+  const literal = (code.match(/(["'`])(?:\\\1.|(?!\1)[^\\\n])*\1/g) ?? []).find(
+    (s) => /(defaults to|Warning|is not set)[^\n]*(OPENCODE_[A-Z0-9_]+|opencode\.ai|@opencode-ai\/)/.test(s),
+  )
+  check(
+    "cli-text-names-product-env",
+    !literal,
+    `${cliDir}/${entry} shows the user ${JSON.stringify((literal ?? "").slice(0, 78))} — name the product's own variable; the upstream one is a fallback that gets read, not printed`,
+  )
+}
 
 // The report and the exit are the LAST thing this script does, and there is exactly one
 // of each. Four assertions used to sit below both of them: they still ran, still pushed

@@ -2,6 +2,41 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-11（第三次会话）· 文案还在替上游说话、平台包发布没跑自家校验，发 0.7.5
+
+**接着收口。** 上一份汇报里我自己点名却没做的三条，按内容判据核过：
+
+- **产品给用户看的文案在念上游的变量名**。`serve.ts:16`、`web.ts:41` 的告警与 `attach.ts:38/43`、
+  `run.ts:197/202` 的 `--help` 一共五处（我先只改了 attach 那两处，grep 把 run.ts 也揪了出来）。
+  产品的每个变量都有 `GLASSPANE_HARNESS_*` 的名字且先读它（`packages/core/src/flag/flag.ts` 的
+  `read()` 是唯一点，前缀常量 `PRODUCT_PREFIX = "GLASSPANE_HARNESS_"`），旧名只是兼容回退——
+  **读**回退是代码，**打印**它就是替上游作产品主张。代码标识（`Flag.OPENCODE_SERVER_PASSWORD`）不动。
+- **六把尺子里没有任何一把看过 `src/cli/cmd/` 的字符串字面量**，所以这五处改完仍可以悄悄长回来。
+  `product-surface` 加 `cli-text-names-product-env`：扫该目录 `*.ts` 剥注释后的字面量，"defaults
+  to / Warning / is not set" 里出现 `OPENCODE_`/`opencode.ai`/`@opencode-ai/` 即红并点名文件与原文。
+  断言 **98 → 123**。双向控制实测：那三个字母只进**注释** ⇒ exit 0 不命中（规则不被注释顶替）；
+  进**打印的字符串** ⇒ `cli-text-names-product-env] …/serve.ts shows the user "Warning: OPENCODE_…`
+  exit 1；还原 sha 核回 ⇒ 绿。
+- **`publish-platform` 的 `npm publish` 前不跑任何产品校验**（校验器 `validateTarball` 的三条——
+  bin 在不在且可执行、README 在不在、dist 的版本是不是本次产品版本——过去只在 wrapper job 上生效）。
+  现在该 job 在构建之后、发布之前跑 `bun run script/publish.ts --dry-run`；`--dry-run` 下
+  "其余声明目标未构建"按设计仍是 note（一台 runner 只建一个目标），不会把 job 判红。
+
+**明确不做并写下理由**：`checksums` 仍对 **GitHub 供回的字节**求和（它的注释自陈"证的是存的是什么、
+不是构建产的是什么"）。要真接上得让 `binaries` 用 job output 交出构建目录里算的 sha256、再由
+`checksums` 双向断言"下载回来的 == 构建时算的 == 清单里写的"，改的是两处 job 的 `needs`/outputs
+接线。本轮不冒——接错的代价又是一次半个的发布，而这一批的起因正是"失败模式不是红，是没收口"。
+列为下一轮的第一条。
+
+**一次真实的 scratch 撞车**（值得入档，因为它改了仓库里的文件）：写 0.7.5 的 CHANGELOG 条目时，
+`/var/tmp/gp-daily-20261009/cl-075.cjs` 的内容与本次会话写下的不一致（并行会话在同一路径放过脚本），
+执行后把**脚本源码**混进了 CHANGELOG 正文。表现不是红：`check-doc-links` 照样绿（标题还在）、
+`product-surface` 照样绿（它不看 CHANGELOG 正文）。发现方式是我 grep 标题顺序时看见第 17 行是
+`const changelog = \`## [0.7.5]`。处理：`git checkout HEAD -- CHANGELOG.md`（HEAD 是干净的，
+损伤未提交）→ 用一次性唯一路径重插 → 正则剥残留 → 断言"标题顺序 = Unreleased/0.7.5/0.7.4/0.7.3/0.7.2
+且脚本 token 归零" → `check-doc-links` 绿。以后本 lane 的 scratch 一律带会话名。
+
+**闸（0.7.5 收口，从主仓根跑；每条退出码单独取，不再用循环尾值）**：product-surface **123 条一致 / 0 问题**（@0.7.5）；brand-surface 0 命中、血缘 **9,623 / 3,303** 与基线同（改掉的五处字面量本就不在这把尺子的扫描面里——正是它需要新读者的理由之一）；surface-semantics 0 命中 / 18 文件；hook-liveness 21 钩子无漂移；kernel-pin `iterate-kernel@0.1.5` + 24 契约文件；kernel-conformance 14 条全答对（14 条 / 2 实现的双方对照是 0.7.4 收口时实测的，本批没动内核与那把闸）；`probe-lane-selftest` 三态可分；`installer-selftest` 全过；`check-workflows` 5 份干净（含改过的 release.yml）；`check-doc-links` 24 份 / 225 内链；typecheck opencode / tui / sdk-js / plugin 各自 exit 0；固定点测试 **88 pass / 0 fail**（392 expect）。fork-diff 与 tool-surface 在提交之后重记——`fork-diff` 量的是已提交的树，0.7.4 那节记下了这个顺序坑。
 ## 2026-10-11（第二次会话）· 收上一轮的遗留：并回 `gp-harness-orphan-20261010` 未落地四条，发 0.7.4
 
 **开工自检按新提示词第 2 条做**：`git fetch --prune` 后拿内容判据（`git cherry` + 逐文件比对，不

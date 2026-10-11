@@ -12,9 +12,46 @@ contract does not).
 
 <!-- 内容归入下一版；此处留空以备下一批。 -->
 
-const fs = require("fs")
+## [0.7.5] - 2026-10-11
 
-const changelog = `## [0.7.4] - 2026-10-11
+判据（pre-1.0）：**patch**。没有新增命令、没改形状、没动参数与目标矩阵；改的是三句**文案**、
+一条**六把尺子没看到的用户可见文本**、以及发布链路上一次**没跑自家校验的发布**。
+
+### Fixed — 产品还在替上游项目说话的地方
+
+- **`serve` / `web` 的告警与 `attach` / `run` 的 `--help` 报的是上游的变量名。** 四条字符串写着
+  `OPENCODE_SERVER_PASSWORD` / `OPENCODE_SERVER_USERNAME`，而本产品每个变量都有
+  `GLASSPANE_HARNESS_*` 的名字且**先读它**（旧名只是兼容回退：`product.json` →
+  `privateSurface.envVars`，唯一解析点在 `packages/core/src/flag/flag.ts` 的 `read()`）。
+  读回退是代码，把它**打印给用户**就是替上游作产品主张。代码里的 `Flag.OPENCODE_SERVER_PASSWORD`
+  这类标识**没动**——那是血缘，也是兼容读取真正落地的地方。
+- **六把尺子此前从不看 `src/cli/cmd/` 里的字符串字面量**，所以这个改名可以悄悄退回去而无人说。
+  `product-surface` 新增 `cli-text-names-product-env`：扫 `packages/opencode/src/cli/cmd/*.ts`
+  **剥掉注释之后**的字符串字面量，凡 "defaults to / Warning / is not set" 这类话里出现上游变量名、
+  `opencode.ai` 或 `@opencode-ai/` 即红，点名文件与原文。断言数 98 → **123**。
+  双向控制实测：把那几个字母只塞进**注释** ⇒ 规则照旧 exit 0 且不命中（证明它不被注释顶替）；
+  塞回**打印的字符串** ⇒ `cli-text-names-product-env] …/serve.ts shows the user "Warning:
+  OPENCODE_SERVER_PASSWORD is not set;`、exit 1；还原按 sha256 核回 ⇒ 绿。
+
+### Fixed — 平台包发布这一步此前没跑过产品自己的校验
+
+`publish-platform` 直接对构建目录 `npm publish`：没有任何一步问过"这个塔式包里的 `bin/` 在不在、
+可不可执行、有没有 README（否则 npm 页面只剩一个裸版本号）、它的 `package.json` 是不是**本次**产品
+的版本"。最后一问正是 `bd690a9` 给 `validateTarball` 装上的牙——但那条校验过去只在 wrapper job 上
+跑，平台包这条路是裸的。现在该 job 在构建之后、发布之前跑 `bun run script/publish.ts --dry-run`，
+按产品自己的校验器过一遍再交给 registry。`--dry-run` 下"其余声明目标未构建"仍按设计打 note
+（一台 runner 只建一个目标），不会把这条 job 判红。
+
+### 明确记一条本轮没收口的
+
+`checksums` job 求和用的仍是 **GitHub 供回的字节**（它自己的注释写明了边界：证的是"存的是什么"，
+不是"构建产的是什么"）。要接成 `binaries` 用 job output 交出构建目录里算的 sha256、`checksums`
+双向断言"下载回来的 == 构建时算的 == 清单里写的"，得改两处 job 的 `needs`/outputs 接线。本轮不冒
+这个险——接错的代价又是一次半个的发布，而"失败模式不是红，是没收口"正是这批活的起因。写在这里作为
+下一轮的明确任务。
+
+## [0.7.4] - 2026-10-11
+
 
 判据（pre-1.0）：**patch**。没有新增命令、没改 CLI/TUI 形状、没动参数与目标矩阵。唯一的使用者可见
 变化是**兜底安装通道变得更严格**：清单取不到时它现在拒绝安装并报告 HTTP 状态，而不是"当作这个版本

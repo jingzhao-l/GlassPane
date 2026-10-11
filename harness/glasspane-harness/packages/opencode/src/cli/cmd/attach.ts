@@ -35,12 +35,12 @@ export const AttachCommand = cmd({
       .option("password", {
         alias: ["p"],
         type: "string",
-        describe: "basic auth password (defaults to OPENCODE_SERVER_PASSWORD)",
+        describe: "basic auth password (defaults to GLASSPANE_HARNESS_SERVER_PASSWORD)",
       })
       .option("username", {
         alias: ["u"],
         type: "string",
-        describe: "basic auth username (defaults to OPENCODE_SERVER_USERNAME or 'glasspane-harness')",
+        describe: "basic auth username (defaults to GLASSPANE_HARNESS_SERVER_USERNAME or 'glasspane-harness')",
       })
       .option("mini", {
         type: "boolean",
