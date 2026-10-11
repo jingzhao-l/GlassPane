@@ -140,6 +140,19 @@ export function parseArgs(argv) {
   if (flags.disable && flags.enable) {
     return { ok: false, reason: '--disable and --enable contradict each other; pick one' }
   }
+  // `--auto` means "the schedule ran this, not a person", and every consent this tool
+  // accepts is by definition a person's judgement. The pair used to be accepted silently:
+  // `runCheck` never read `trigger` at all, so `check --auto --consent unsigned-release`
+  // staged a release with no authorship proof while this file's own USAGE promised an
+  // unsigned release "refuses" under `--auto`, and `signature.js` promised "an automatic
+  // run stops here". Refusing the combination is also better than quietly dropping the
+  // consent — a caller who typed it must learn their flag was not used.
+  if (flags.auto && flags.consents.length > 0) {
+    return {
+      ok: false,
+      reason: `--auto is the scheduled run and a schedule cannot speak for a person: drop --auto to consent yourself, or drop --consent ${flags.consents.join(' --consent ')} to let the scheduled run refuse as documented`,
+    }
+  }
   let command = positional[0] ?? null
   // `--disable` used to be documented as "a no-op alias of disable". A flag that promises
   // safety and does nothing is worse than not having it — nobody types `updater disable`

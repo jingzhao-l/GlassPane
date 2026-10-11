@@ -166,27 +166,14 @@ curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.s
 # 2) 经 npm（自己引导 clone 钉住的 tag）
 npx glasspane-install
 
-# 3) 自己管源码——tag 从"决定它的那一处"取，别再把版本号抄进文档里（本文曾经就这么漂过）。
-PIN=$(curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh \
-  | sed -n 's/^GLASSPANE_RELEASE="\(.*\)"/\1/p')
-git clone --branch "$PIN" https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
+# 3) 自己管源码：`install.sh` 钉的是本次发布那一个 tag（它的 `GLASSPANE_RELEASE` 默认值，
+#    每次发版由 `scripts/set-version.mjs` 改写）——要装未发布的树才去 `main`。下面那个号是
+#    本版的，用之前对一下 install.sh。
+git clone --branch v1.11.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
 
-钉的是哪个 tag 只由 `install.sh` 的那一行 `GLASSPANE_RELEASE` 决定（它与 `installer/cli.js` 的
-`RELEASE_VERSION` / `REPO_REF` 由 `scripts/set-version.mjs` 一起改写，并由
-`installer/test/install-sh.test.mjs` 钉成相等）。本 README 刻意**不带自己的版本号**：
-"文档写 v1.1.1、脚本钉 v1.9.0"就是这么来的。
-
-`GLASSPANE_REF=<tag>` 指定其他发布版；**未设置与显式置空**（`GLASSPANE_REF=`）都钉发布 tag——两条一键
-入口同一条规则。`GLASSPANE_REF=main` 追主干（它不是固定产物）。`GLASSPANE_REPO_URL` 只接受
-`https://`、`ssh://`、`file://` 三种地址：不带 scheme 的值（例如 `ext::sh -c …`）会被 git 当成**需要执行**
-的传输，以 `-` 开头的值会被当成选项，两者都在 `git clone` 跑起来之前被拒；要用 scp 式地址请写
-`ssh://git@host/path`。
-
-`--no-prompt --no-gui` 为静默安装：`--no-prompt` 跳过拦住三件破坏性动作的确认（结束在跑的实例、
-bootout 已加载的 launchd 作业、覆盖已存在的 `~/Applications/*.app`）。既没有 `--no-prompt` 又没有终端时，
-这三步是**被跳过**而不是被默认同意；`install.sh` 在 stdin 非 TTY 时会替你补上这个 flag。
-`--help` 列全部选项。
+`GLASSPANE_REF=<tag>` 指定其他发布版；`GLASSPANE_REF=main` 追主干（它不是固定产物）。
+`--no-prompt --no-gui` 为静默安装；`--help` 列全部选项。
 
 ### 必须人工完成的事
 

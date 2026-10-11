@@ -52,6 +52,17 @@ const mode = process.argv.includes("--record") ? "record" : "check"
 
 const LIMIT = 0.1 // "<10% 代码量", one of the three architecture iron laws
 const LIMIT_SOURCE = "三条架构铁律（specs/GlassPane_Design_Decisions.md）"
+/**
+ * What each counted number means. Named so `--check` can compare it against the golden
+ * before anything is measured: the golden records the caliber it was measured under, and
+ * a caliber that moved silently is a different number wearing the same name.
+ */
+const CALIBER = {
+  engine: "lines of every *.swift under engine/Sources",
+  mcpShell: "lines of every *.ts under mcp-shell/src",
+  fork: "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted, and one deleted line excuses at most one re-added line (pairing is one-to-one, so 40 copies of a rebranded line bill 39)",
+  ratio: "surface / (engine + mcp-shell + fork)",
+}
 const REF_EXTS = [".ts", ".tsx", ".js", ".mjs", ".sh"] // surface B counts code only
 
 function die(code, msg) {
@@ -374,12 +385,7 @@ function build(golden) {
   return {
     limit: LIMIT,
     limitSource: LIMIT_SOURCE,
-    caliber: {
-      engine: "lines of every *.swift under engine/Sources",
-      mcpShell: "lines of every *.ts under mcp-shell/src",
-      fork: "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted, and one deleted line excuses at most one re-added line (pairing is one-to-one, so 40 copies of a rebranded line bill 39)",
-      ratio: "surface / (engine + mcp-shell + fork)",
-    },
+    caliber: CALIBER,
     observedAt: new Date().toISOString().slice(0, 10),
     engineLoc,
     engineFiles: engineFiles.length,
@@ -410,6 +416,33 @@ function build(golden) {
 }
 
 const golden = existsSync(goldenFile) ? JSON.parse(readFileSync(goldenFile, "utf8")) : null
+
+// The documented limit, its cited source, and the caliber are constants *in this file*,
+// and the golden carries the ones that were in force when the baseline was recorded.
+// Nothing compared the two, so `LIMIT = 0.1` → `0.25` was a green commit: both over-limit
+// surfaces became "legal" and the `← OVER LIMIT` announcements disappeared with the
+// honesty that came with them. A measurement script does not get to redefine the
+// architecture law it guards — that number lives in LIMIT_SOURCE, and changing it is a
+// decision for the owner, not a side effect of editing a ruler. Checked before `build()`
+// because a guard that costs a full tree walk is a guard people route around.
+if (golden && mode === "check") {
+  if (golden.limit !== LIMIT) {
+    die(
+      1,
+      `the documented limit moved without a re-record: golden ${(golden.limit * 100).toFixed(0)}% → code ${(LIMIT * 100).toFixed(0)}%. ` +
+        `Its source is ${LIMIT_SOURCE}; if that document genuinely changed, change it first, then run --record.`,
+    )
+  }
+  if (golden.limitSource !== LIMIT_SOURCE) {
+    die(1, `the limit's cited source moved: golden "${golden.limitSource}" → code "${LIMIT_SOURCE}" — a ratchet that cites a different document is measuring a different claim.`)
+  }
+  const caliberMoved = Object.keys(CALIBER).filter((k) => golden.caliber?.[k] !== CALIBER[k])
+  if (caliberMoved.length) {
+    die(1, `the measurement caliber changed (${caliberMoved.join(", ")}) while the golden still records the old one. ` +
+      "A different caliber is a different number: restate what the surface is, then --record with the code.")
+  }
+}
+
 const observed = build(golden)
 
 // The limit is a documented number, so a surface sitting over it is a fact the
@@ -510,6 +543,7 @@ if (!golden) die(2, `no golden at ${path.relative(repoRoot, goldenFile)} — run
 if (!golden.surfaces?.mcpShell || !golden.surfaces?.fork) die(2, "golden is missing a surface — re-record")
 
 let red = 0
+
 const pairs = [
   ["surface A (mcp-shell/src)", observed.surfaces.mcpShell, golden.surfaces.mcpShell],
   ["surface B (fork, ours)", observed.surfaces.fork, golden.surfaces.fork],
@@ -522,9 +556,17 @@ for (const [name, now, was] of pairs) {
     // a ratchet is that a person acknowledges the growth, and you cannot acknowledge
     // what the message will not identify. Falls back to nothing (rather than
     // guessing) when the recorded baseline predates per-file data.
-    const before = was.byFile
-    const after = now.byFile
-    if (before && after) {
+    // Surface A records `byFile`; surface B records a `files` list of
+    // `{file, kind, lines}`. Reading only `byFile` meant surface B — the one that is
+    // *ours*, and the one a reader most needs attributed — grew with no name attached,
+    // while the comment above this block claimed surface B was already attributed.
+    // Both shapes are normalized into one map here rather than duplicating the diff.
+    const asMap = (surf) =>
+      surf?.byFile ??
+      Object.fromEntries((surf?.files ?? []).map((f) => [`${f.kind} ${f.file}`, f.lines]))
+    const before = asMap(was)
+    const after = asMap(now)
+    if (Object.keys(before).length > 0 && Object.keys(after).length > 0) {
       const moved = []
       for (const [file, lines] of Object.entries(after)) {
         const was0 = before[file]

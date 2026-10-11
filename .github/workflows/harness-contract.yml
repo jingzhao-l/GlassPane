@@ -108,36 +108,35 @@ jobs:
         run: |
           set -eu
           pinned="$(node -p "require('./harness/upstream.json').tag")"
-          # 退出码是这个工具唯一的权威判决（见 harness/tools/hook-liveness.mjs 文件头：
-          # 0＝面板完好或如实的离线跳过，1＝契约漂移，2＝这次测不了）。从前这里 `|| true`
-          # 把它抹平，只留一条 `grep -q "drift"` 当红灯，于是两个方向都错：probe 崩溃时
-          # traceback 里没有 "drift" ⇒ 这条计划任务**绿着放行**一个没人验证过的升级；
-          # 而干净路径自己打印 "no drift"，子串照样命中 ⇒ 同一道闸又能假红。
-          status=0
-          out="$(node harness/tools/hook-liveness.mjs --probe 2>&1)" || status=$?
+          # The verdict is the tool's exit code, not the presence of a word in its output.
+          # This used to be `out="$(… || true)"` followed by `grep -q "drift"`, which made
+          # the lane unable to fail: --probe answers 1 for drift, 2 for "cannot measure"
+          # (no checkout at $HARNESS_UPSTREAM_CHECKOUT, unreadable golden, thrown error),
+          # and none of those exit-2 messages contain the string "drift" — so a probe that
+          # never ran printed its own failure and went green. "没有漂移" and "上游没被观测"
+          # are different claims and must not be purchasable with the same word.
+          rc=0
+          out="$(node harness/tools/hook-liveness.mjs --probe 2>&1)" || rc=$?
           printf '%s\n' "$out"
           {
-            echo "### 上游探查 $pinned → $PROBED_TAG"
+            echo "### 上游探查 $pinned → $PROBED_TAG (exit $rc)"
             echo '```'
             printf '%s\n' "$out"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          # 判决行按 `--probe` 的两条固定输出锚到行首/行尾，不吃子串：
-          #   干净：probe <repo>@<label> vs golden <tag>: plugin surface intact (N hooks)
-          #   漂移：probe <repo>@<label> vs golden <tag>: <N> drift — 上游坏. …
-          if [ "$status" -eq 0 ] \
-            && printf '%s\n' "$out" | grep -Eq '^probe .+: plugin surface intact \([0-9]+ hooks\)$'; then
-            echo "hook-liveness: verdict line present and exit 0 — plugin surface intact at $PROBED_TAG"
+          if [ "$rc" -eq 0 ]; then
+            echo "probe clean: $PROBED_TAG keeps the plugin surface"
             exit 0
           fi
-          if printf '%s\n' "$out" | grep -Eq '^probe .+: [0-9]+ drift'; then
-            echo "::error title=上游换了插件地板::hook-liveness 在 $PROBED_TAG 上漂移（退出码 1 且判决行已锚定）。按综述 R34 归因＝上游坏：冻结升级，不要在本仓打补丁绕过。"
+          if [ "$rc" -eq 1 ]; then
+            echo "::error title=上游换了插件地板::hook-liveness 在 $PROBED_TAG 上漂移。按综述 R34 归因＝上游坏：冻结升级，不要在本仓打补丁绕过。"
             exit 1
           fi
-          # 走到这里：退出码非 0，或 0 却没有那句判决——两种都不算验证过。
-          # 尤其"0 而无判决行"正是本步从前会放过的形状（工具改成只写文件、或 stdout 被
-          # 换成 traceback 时，grep 子串既不会红也不会解释）。NOT RUN ≠ PASS。
-          echo "::error title=上游探查没有给出可判定的结论::hook-liveness --probe 退出码 $status，且输出里没有锚定的 plugin-surface-intact 判决行（也没有锚定的 drift 判决）。这一步拒绝把「没测到」当成「测过且没事」——2＝没有参照检出（NOT RUN），其它非零＝工具崩溃。"
+          echo "::error title=上游探查没有跑成（这不等于没有漂移）::--probe 以 exit $rc 拒绝测量（\$HARNESS_UPSTREAM_CHECKOUT 指向的检出缺失或不可读）。这条 lane 唯一的职责就是回答上游有没有换地板，测不了必须红，不能绿。"
+          {
+            echo ""
+            echo "**未观测**：探查没有测量到任何东西（exit $rc）。这不构成「上游没漂移」。"
+          } >> "$GITHUB_STEP_SUMMARY"
           exit 1
 
       - name: Offline self-consistency (always, cheap)
@@ -145,6 +144,10 @@ jobs:
         run: |
           node harness/tools/hook-liveness.mjs --offline
           node -e "const j=require('./harness/contracts/hook-liveness.json');const dead=j.hooks.filter(h=>h.kind==='dead').map(h=>h.name);console.log('known dead hooks:', JSON.stringify(dead));if(!(dead.length===1&&dead[0]==='permission.ask')){console.error('金样的死钩子集与调研结论不符');process.exit(1)}"
+          # 这条 lane 自己的判决逻辑也在闸面上：探针改为吃 exit 码之后，"测不了"必须还能
+          # 把 step 判红。这个自测从下面那段真 run 正文里抽代码跑三种退出码，所以改了
+          # 判决就会咬，不需要谁记得来手动验。
+          sh harness/tools/probe-lane-selftest.sh
 
   # The shared kernel lives in another repository, pinned by ref. Asking "has it moved,
   # and is our anchor still reachable?" on the same weekly schedule as the upstream probe

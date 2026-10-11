@@ -131,8 +131,11 @@ async function validateTarball(dir: string, name: string, version: string): Prom
       }
     }
   } else {
-    // a platform package: the binary itself
-    const binary = name.endsWith("-darwin-x64") ? "glasspane-harness" : "glasspane-harness"
+    // a platform package: the binary itself. Every target names it after the product —
+    // this used to be `name.endsWith("-darwin-x64") ? "glasspane-harness" : "glasspane-harness"`,
+    // a branch whose two arms are the same string, which reads as if the x64 tarball held
+    // a differently named binary and would quietly mis-validate the next target added here.
+    const binary = product.bins[0]
     if (!existsSync(path.join(dir, "bin", binary))) problems.push(`bin/${binary} is missing from the tarball`)
     if (!existsSync(path.join(dir, "README.md"))) problems.push("README.md is missing — the npm page would render as a bare version string")
     const stat = existsSync(path.join(dir, "bin", binary)) ? (await Bun.file(path.join(dir, "bin", binary)).stat?.()) : undefined
@@ -189,9 +192,29 @@ if (distExists) {
     process.exit(2)
   }
 }
-console.log(wrapperOnly || dryRun ? "wrapper-only mode" : "binaries", binaries)
+// The label used to say "wrapper-only mode" for every `--dry-run`, including a default
+// all-targets run — so the reader of the release log was told platform packages were not
+// in scope at the exact moment the run was packing them.
+console.log(`${dryRun ? "dry-run, every dist found here" : wrapperOnly ? "wrapper-only mode" : "binaries"} ${JSON.stringify(binaries)}`)
 const missing = Object.keys(declaredPlatforms).filter((name) => !wrapperOnly && !binaries[name])
-if (missing.length && distExists) console.log(`note: ${missing.length} declared target(s) are not built in this run: ${missing.join(", ")}`)
+if (missing.length && distExists) {
+  const detail = `${missing.length} declared target(s) are not built in this run: ${missing.join(", ")}`
+  // A note is honest while nothing is being published. On the live path it is a broken
+  // release: the wrapper's optionalDependencies are computed from product.json's target
+  // matrix (not from this machine's dists), so it would go out naming a version of a
+  // platform package that no build in this run produced. The machine for that target
+  // then installs the wrapper and gets no binary — and npm reports the install as a
+  // success because the dependency was optional.
+  if (!dryRun) {
+    console.error(`publish: refusing to publish — ${detail}`)
+    console.error("  The wrapper would declare a platform package this run never built.")
+    console.error("  Remedy: build every declared target, or publish the wrapper with")
+    console.error("    bun run script/publish.ts --wrapper-only")
+    console.error("  from the lane that holds them all (.github/workflows/release.yml, publish-wrapper).")
+    process.exit(2)
+  }
+  console.log(`note: ${detail}`)
+}
 
 await $`mkdir -p ./dist/${pkg.name}`
 await $`mkdir -p ./dist/${pkg.name}/bin`
@@ -264,10 +287,30 @@ await Bun.file(`./dist/${pkg.name}/package.json`).write(
 if (!wrapperOnly) {
   // In --dry-run this loop validates instead of publishing (publish() returns
   // before it touches the registry), so a PR can prove every tarball's shape.
-  const tasks = Object.entries(binaries).map(async ([name]) => {
-    if (name !== pkg.name) await writePlatformReadme(`./dist/${name}`, name)
-    await publish(`./dist/${name}`, name, binaries[name])
-  })
+  //
+  // The wrapper's own `dist/<product>` directory is excluded: it is left behind by a
+  // previous run, so scanning `dist/*/package.json` picked the wrapper up as if it were
+  // one of the platform packages and published it *inside* this batch — before the
+  // platform packages its optionalDependencies name. That ordering is the one thing the
+  // release lane guarantees (publish-wrapper carries `needs: publish-platform`), and the
+  // duplicate number here was already visible in the dry-run as two identical
+  // "ok glasspane-harness@… packs cleanly" lines.
+  const tasks = Object.entries(binaries)
+    .filter(([name]) => name !== pkg.name)
+    .map(async ([name]) => {
+      await writePlatformReadme(`./dist/${name}`, name)
+      // The version a platform tarball must carry is the product's, not the one its own
+      // dist manifest happens to say. `binaries[name]` was read out of that same
+      // package.json a few lines above, so handing it to validateTarball() made its first
+      // assertion compare a file with itself — it could never fire. A stale `dist/` from
+      // the previous release therefore packed, printed "ok … packs cleanly", and would
+      // have published under the OLD version while the wrapper published under the new
+      // one; the wrapper's optionalDependencies name the new version, so the machine that
+      // needs it resolves nothing and installs without a binary. Measured on this machine
+      // before the fix: dist said glasspane-harness-darwin-arm64@0.7.0 against a 0.7.1
+      // wrapper, and --dry-run called that clean.
+      await publish(`./dist/${name}`, name, version)
+    })
   await Promise.all(tasks)
 }
 // [gp] Product: the wrapper publishes under the product name itself

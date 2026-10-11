@@ -321,10 +321,6 @@ public final class DegradationTracker {
 
     /// 最小二乘线性回归斜率（y 随 x = timestamp 变化）；样本 <2 或 x 跨度为 0
     /// 时返回 nil（不足统计）。
-    ///
-    /// x 先减均值再求和：用原始累加式 `n*Σxy - Σx*Σy` 时，epoch 时间戳（~1.8e9）
-    /// 让分母成为"两个 ~2e20 的数相减要留下 ~5e3"，对消之后剩下的只有舍入噪声，
-    /// 而这根斜率的符号就是 T9 熔断档位的输入。
     private static func slope(
         samples: [DegradationSample],
         value: (DegradationSample) -> Double?
@@ -337,28 +333,23 @@ public final class DegradationTracker {
             }
         }
         guard points.count >= 2 else { return nil }
+        // 先减均值再累加，绝不在原始 x 上算 `count*sumXX - sumX*sumX`。生产把这行的 x 喂的是
+        // `clock().timeIntervalSince1970`（~1.79e9），两个累加项都在 1e21 量级，而双精度在这一档
+        // 的间距约 2e5：实测 64 样本、跨度 31.5s（真跨度 349440）会被量化成 2e6 的整数倍，分子
+        // 同样被舍入吃掉——288 个时钟相位里 115 个直接回 nil，其余给出 −335…+336 B/s，全都落在
+        // 512 B/s 地板之下，于是一条真实的泄漏被 `judged:true` 认证成"量过了，健康"，而 T9 升级
+        // （`tier == .degrading`）在密采样节奏下永远不可能触发。中心化之后两项都是小量级之差。
         let count = Double(points.count)
-        // 跨度为零必须在这里就拒掉，而且判据要用 x 的极差，不能用 `centredXX > 0`：六个**同一个**
-        // epoch 相加再除以六，商与那个 epoch 并不严格相等（`6*e` 自己要舍入），于是每个
-        // `x − meanX` 是 1e-7 量级的残渣，平方和刚过零判据，一条没有时间跨度的窗口被算出一个
-        // `0.0` 的斜率——那还是"除出来的数"冒充"测不出"，只是分母换了外衣。
-        var minX = points[0].x
-        var maxX = points[0].x
-        for point in points {
-            if point.x < minX { minX = point.x }
-            if point.x > maxX { maxX = point.x }
-        }
-        guard maxX > minX else { return nil }
         let meanX = points.reduce(0) { $0 + $1.x } / count
         let meanY = points.reduce(0) { $0 + $1.y } / count
-        var centredXX = 0.0
-        var centredXY = 0.0
+        var sumXX = 0.0
+        var sumXY = 0.0
         for point in points {
-            let deltaX = point.x - meanX
-            centredXX += deltaX * deltaX
-            centredXY += deltaX * (point.y - meanY)
+            let dx = point.x - meanX
+            sumXX += dx * dx
+            sumXY += dx * (point.y - meanY)
         }
-        guard centredXX > 0 else { return nil }
-        return centredXY / centredXX
+        guard sumXX > 0 else { return nil }
+        return sumXY / sumXX
     }
 }

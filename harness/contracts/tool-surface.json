@@ -8,16 +8,16 @@
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
   "observedAt": "2026-10-11",
-  "engineLoc": 24760,
+  "engineLoc": 23630,
   "engineFiles": 61,
   "surfaces": {
     "mcpShell": {
-      "loc": 8975,
+      "loc": 8658,
       "files": 13,
-      "ratio": 0.2261,
+      "ratio": 0.2256,
       "byFile": {
-        "mcp-shell/src/tools.ts": 2547,
-        "mcp-shell/src/engine-client.ts": 1455,
+        "mcp-shell/src/tools.ts": 2339,
+        "mcp-shell/src/engine-client.ts": 1415,
         "mcp-shell/src/http-gateway.ts": 1279,
         "mcp-shell/src/project-registry.ts": 1098,
         "mcp-shell/src/update-state.ts": 492,
@@ -25,14 +25,14 @@
         "mcp-shell/src/dispatch.ts": 364,
         "mcp-shell/src/evidence-report.ts": 364,
         "mcp-shell/src/io.ts": 339,
-        "mcp-shell/src/index.ts": 295,
         "mcp-shell/src/http-gateway-cli.ts": 240,
+        "mcp-shell/src/index.ts": 226,
         "mcp-shell/src/errors.ts": 87,
         "mcp-shell/src/canonical.ts": 34
       }
     },
     "fork": {
-      "loc": 5959,
+      "loc": 6088,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -92,7 +92,7 @@
         {
           "file": "script/kernel-conformance.mjs",
           "kind": "added",
-          "lines": 396
+          "lines": 480
         },
         {
           "file": "script/kernel-pin.mjs",
@@ -642,7 +642,7 @@
         {
           "file": "packages/opencode/script/publish.ts",
           "kind": "edited",
-          "lines": 198
+          "lines": 243
         },
         {
           "file": "packages/opencode/src/acp/service.ts",
@@ -1070,7 +1070,7 @@
           "lines": 0
         }
       ],
-      "ratio": 0.1501,
+      "ratio": 0.1586,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
@@ -1082,11 +1082,11 @@
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
         "package": "iterate-kernel",
-        "version": "0.1.3"
+        "version": "0.1.4"
       }
     }
   },
-  "totalToolSurfaceLoc": 14934,
+  "totalToolSurfaceLoc": 14746,
   "note": null,
   "carried": null
 }

@@ -194,39 +194,20 @@ curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.s
 # 2) Through npm (bootstraps its own clone of the pinned tag)
 npx glasspane-install
 
-# 3) From a checkout you manage — take the tag from the place that decides it, so this
-#    snippet cannot outlive the release like a hand-copied number did.
-PIN=$(curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh \
-  | sed -n 's/^GLASSPANE_RELEASE="\(.*\)"/\1/p')
-git clone --branch "$PIN" https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
+# 3) From a checkout you manage. `install.sh` pins one release tag (its `GLASSPANE_RELEASE` default,
+#    rewritten by `scripts/set-version.mjs` on every release) — clone that tag, not `main`, unless you
+#    mean to install an unreleased tree. The number below is this release's; verify it against install.sh.
+git clone --branch v1.11.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
 
-`install.sh` reads that tag from one line, `GLASSPANE_RELEASE` (kept equal to `installer/cli.js`'s
-`RELEASE_VERSION` / `REPO_REF` by `scripts/set-version.mjs`, and pinned equal by
-`installer/test/install-sh.test.mjs`). The README deliberately carries no version of its own: a
-literal copied here is how "the doc says v1.1.1 while the script pins v1.9.0" got written in the
-first place.
-
-`GLASSPANE_REF=<tag>` selects another release; unset **and** explicitly empty (`GLASSPANE_REF=`) both
-pin the release tag — the same rule on both one-command entry points. `GLASSPANE_REF=main` tracks the
-trunk, which is not a fixed artifact. `GLASSPANE_REPO_URL` may only be an `https://`, `ssh://` or
-`file://` URL: git treats a scheme-less value such as `ext::sh -c …` as a transport it must **execute**,
-and a value starting with `-` as an option, so both are refused before `git clone` runs (write
-`ssh://git@host/path` instead of `git@host:path`).
-
-`--no-prompt --no-gui` is a silent install: `--no-prompt` skips the confirmations that gate the three
-destructive steps (ending running instances, booting the loaded launchd job out, overwriting an existing
-`~/Applications/*.app`). With no `--no-prompt` and no terminal, those steps are skipped rather than
-auto-approved; `install.sh` adds the flag for you when stdin is not a TTY. `--help` lists every flag.
+`GLASSPANE_REF=<tag>` selects another release; `GLASSPANE_REF=main` tracks the trunk, which is not a
+fixed artifact. `--no-prompt --no-gui` is a silent install; `--help` lists every flag.
 
 ### What you have to do by hand
 
 1. **TCC permission ticks.** The grant subject is the daemon bundle (`GlassPane Daemon`) — not your
    terminal, not the settings window.
-2. **Confirming the destructive steps.** With `--replace-daemon` the installer offers to end running
-   instances; re-registering launchd means booting the loaded job out (it interrupts an act in flight);
-   placing the bundles means overwriting an existing `~/Applications/GlassPane*.app`. Each of those asks
-   once in a terminal (`Enter` continues, `n` skips); `--no-prompt` answers for you.
+2. **Confirming a destructive step** — replacing an older running instance.
 
 ### First launch and Gatekeeper
 

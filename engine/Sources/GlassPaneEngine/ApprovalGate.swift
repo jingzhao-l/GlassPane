@@ -64,9 +64,8 @@ public struct ApprovalRecord: Codable, Equatable {
 /// - Pure in-memory when `path` is nil (test default);
 /// - File-persisted (atomic tmp + rename) when `path` is non-nil: loads the
 ///   chain on init, appends atomically after every record;
-/// - A corrupt or unreadable ledger loads as an empty chain with `loadFailed`
-///   set, and every append is then **refused** — the bytes on disk stay the audit
-///   trail, and an empty chain renamed over them would destroy them.
+/// - A corrupt or unreadable ledger loads as an empty chain — never as a
+///   silently-valid one — so `--approval-verify` exposes the damage.
 public final class ApprovalGate {
 
 /// Default daemon ledger path: the approvals file of the home-derived state
@@ -86,10 +85,9 @@ public final class ApprovalGate {
     /// In-memory chain, head = oldest. Append order defines the linkage.
     public private(set) var records: [ApprovalRecord]
     /// True when a non-nil path pointed at an existing file that failed to
-    /// decode. The ledger loads as empty (§3.4), this flag lets the CLI surface
-    /// the damage instead of presenting an empty-but-valid ledger as evidence of
-    /// a healthy audit trail, and it latches the append refusal below: an empty
-    /// chain renamed over that file would delete the records it still holds.
+    /// decode. The ledger loads as empty (§3.4) but this flag lets the CLI
+    /// surface the damage honestly instead of presenting an empty-but-valid
+    /// ledger as evidence of a healthy audit trail.
     public private(set) var loadFailed = false
     /// The last persistence attempt that did **not** leave this chain on disk as
     /// an owner-only file, with the concrete reason and the target path; cleared
@@ -106,9 +104,6 @@ public final class ApprovalGate {
     /// reported to its caller as recorded, the chain kept verifying, and the
     /// record simply was not in the audit trail. A reader that needs to know
     /// "this approval exists only in RAM" has to be able to ask.
-    ///
-    /// A refused append (`loadFailed`) is published here too, on the same ground:
-    /// the caller asked for a record and the disk did not get one.
     public private(set) var persistFailed: String?
     /// Where persistence failures go. Both the primary write and its fallback
     /// can fail, and the ledger's contract ("the disk side is simply stale,
@@ -117,22 +112,6 @@ public final class ApprovalGate {
     /// in-process reader believed were appended (the chain still verifies; it
     /// just stops containing things that happened).
     private let log: EngineLog
-
-    /// Why an append is refused while `loadFailed` stands, naming the ledger file
-    /// and the recovery that has to happen first.
-    ///
-    /// `records` is empty *because nothing could be read*, not because the ledger
-    /// is empty: appending would compute `prevHash = tailHash()` == "" (a fresh
-    /// genesis) and `persist()` would rename this one-record chain over the file,
-    /// deleting every record still on it — after which `--approval-verify` replays
-    /// the survivor and reports `valid: true`. That is the posture
-    /// `ProjectRegistry.requireWritable()` already refuses (§B-1), for the same
-    /// reason. The remedy never orders a delete: the damaged bytes are the only
-    /// copy of the history.
-    private var unreadableAppendRefusal: String {
-        let ledger = path ?? "<in-memory ledger>"
-        return "approval ledger \(ledger) exists but could not be decoded, so this process holds an empty chain — the append was REFUSED and nothing was written to \(ledger), because publishing an empty chain over the file would delete every approval record still on disk and leave `--approval-verify` certifying the single record that replaced them. Inspect the file (`python3 -m json.tool \(ledger)`); the chain is recoverable by hand from the bytes that are there, so do not delete or truncate it. Repair the file, then restart the process that appends: writes stay refused until it re-reads."
-    }
 
     /// The isolation verdict for a finished ledger, as one named step — the same
     /// seam `EvidenceStore.isolationCheck` is, for the same measured reason: the
@@ -155,11 +134,9 @@ public final class ApprovalGate {
         self.clock = clock
         self.log = log
         if let path {
-            // File exists → decode; missing → empty chain. An existing file that
-            // does **not** decode loads empty *and* latches `loadFailed`: the
-            // bytes are still the audit trail, so the honest answer about them is
-            // "I could not look", and `append` refuses while that stands (see
-            // `unreadableAppendRefusal`) instead of re-anchoring from genesis.
+            // File exists → decode; missing or corrupt → empty chain (honest:
+            // a corrupt ledger is never presented as a valid one — verify
+            // exposes it, and the next append re-anchors from scratch).
             if FileManager.default.fileExists(atPath: path),
                let data = FileManager.default.contents(atPath: path),
                let decoded = try? JSONDecoder().decode([ApprovalRecord].self, from: data) {
@@ -220,9 +197,7 @@ public final class ApprovalGate {
 
     /// Append a new approval. `approvalId`/`timestamp`/`prevHash`/`hash` are
     /// auto-completed per §3.3. Returns the appended record, or nil when the
-    /// reason exceeds `reasonMaxLength` or the ledger could not be read at init
-    /// (nothing is appended, and nothing is written to the file, on either
-    /// rejection — the reason goes to `persistFailed`).
+    /// reason exceeds `reasonMaxLength` (nothing is appended on rejection).
     @discardableResult
     public func append(
         operationRef: String,
@@ -233,13 +208,15 @@ public final class ApprovalGate {
         reason: String
     ) -> ApprovalRecord? {
         guard reason.count <= Self.reasonMaxLength else { return nil }
-        // The unreadable-ledger refusal, before anything is computed: `prevHash`
-        // below is `tailHash()`, which on a chain that failed to load is "" — so
-        // without this guard the record would re-anchor from genesis and
-        // `persist()` would rename the one-record chain over the file that still
-        // holds the real history.
-        if loadFailed {
-            reportPersistenceFailure(unreadableAppendRefusal)
+        // 读失败的台账不是"空台账"。这时候追加会以一条空链重新锚定 `prevHash`，
+        // `persist()` 再把内存里的样子整个覆写回文件——那条读不出来的链就此被销毁；
+        // 而 `--approval-verify` 读的是覆写后的文件，形状完好，于是它给一份刚被本次
+        // 运行截断过的审计链判"通过"。同 `ProjectRegistry.requireWritable` 的口径：
+        // 读不出来就拒绝写，而不是从"没有"重新记起。
+        if loadFailed, let path {
+            reportPersistenceFailure(
+                "approval ledger at \(path) could not be read when the daemon started, so nothing was appended: a chain that cannot be read must not be re-anchored from an empty in-memory view (the old file is left untouched)"
+            )
             return nil
         }
         let timestamp = isoString(clock())
@@ -352,13 +329,9 @@ public final class ApprovalGate {
             )
             return
         }
-        // Unique per write, exactly as `ProjectRegistry.save` does: a shared
-        // `<file>.tmp` in the state root is a name any local account that can
-        // write that directory may pre-create, and this daemon would then chmod
-        // *their* bytes 0600 and rename them into the audit ledger.
-        let tmpPath = "\(path).tmp-\(getpid())-\(UUID().uuidString)"
+        let tmpPath = path + ".tmp"
         do {
-            try data.write(to: URL(fileURLWithPath: tmpPath), options: .atomic)
+            try data.write(to: URL(fileURLWithPath: tmpPath))
             // The mode is set while the bytes are still under the temporary
             // name, so the published name is never *created* group- or
             // world-readable; the check after the rename below is what covers the

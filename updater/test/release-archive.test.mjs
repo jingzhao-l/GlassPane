@@ -392,3 +392,53 @@ test('the script runs against this repository and refuses a version it cannot na
     fs.rmSync(path.dirname(out), { recursive: true, force: true })
   }
 })
+
+test('归档的字节取自 HEAD 的树，不是取自磁盘——脏工作树进不了发布物', () => {
+  // 这条闸盯的是发布通道上最贵的一种谎：`git ls-files -s` 明明给出 blob 号，从前却被丢掉，
+  // 内容改从磁盘读。checkout 之后任何进程改脏一个被追踪的文件（构建往 src 里写、残留的编辑、
+  // 钩子），归档就带上"tag 里根本没有的字节"，而 updater 之后把这份的 SHA256 呈现成"发布者
+  // 签过的那份"。`--verify` 抓不到：它只数条目在不在，不看里面是什么。
+  const tree = makeReleaseTree()
+  try {
+    // 对照的一半：同一棵树没被改脏时必须打得开，否则下面的拒绝可能红在别的原因上。
+    const clean = trackedEntries({ root: tree.root })
+    assert.ok(clean.length > 10, `干净树要能列出条目，实得 ${clean.length}`)
+
+    const rel = 'engine/Sources/GlassPaneEngine/EngineCore.swift'
+    const committed = 'public let version = "1.6.0"\n'
+    const find = (entries) => entries.find((entry) => entry.name === rel)
+
+    tree.write(rel, 'public let version = "1.6.0-DIRTY-BY-A-STRAY-BUILD"\n')
+    const afterDirty = trackedEntries({ root: tree.root })
+    // 归档说的永远是 tag 那棵树：磁盘被改脏，进档的仍必须是已提交的那一份。
+    assert.equal(find(afterDirty).content.toString('utf8'), committed, `磁盘脏了以后归档仍须带已提交字节，实得 ${find(afterDirty).content.toString('utf8')}`)
+    assert.ok(!find(afterDirty).content.toString('utf8').includes('DIRTY'), '脏字节必须在档外')
+
+    // 工作树里消失的文件不能因此从发布物里消失——那条字节属于 HEAD 的树。
+    fs.rmSync(path.join(tree.root, rel))
+    assert.equal(find(trackedEntries({ root: tree.root })).content.toString('utf8'), committed, '工作树删掉的文件仍按 HEAD 的字节进档')
+
+    // 只 staged 未 commit 的东西不属于任何 tag，因此也不属于归档。
+    tree.write('staged-only.txt', 'not in any tag\n')
+    tree.git('add', 'staged-only.txt')
+    assert.equal(
+      trackedEntries({ root: tree.root }).some((entry) => entry.name === 'staged-only.txt'),
+      false,
+      '只暂存不提交的文件不得进档',
+    )
+
+    // 符号链接同理：blob 存的就是目标字符串，磁盘上换了目标也不许进档。
+    fs.rmSync(path.join(tree.root, 'docs', 'icon.png'))
+    fs.symlinkSync('logo.png?v=2', path.join(tree.root, 'docs', 'icon.png'))
+    const link = trackedEntries({ root: tree.root }).find((entry) => entry.name === 'docs/icon.png')
+    assert.equal(link.type, 'link')
+    assert.equal(link.link, 'logo.png', '归档里那条 link 必须是 tag 里的那条目标，不是屏幕上这一条')
+
+    // 顶到真正产出字节的入口：磁盘脏成什么样都打得开，且档内那一条仍是已提交的字节。
+    const packed = archiveBytes({ root: tree.root, version: '1.6.0' })
+    const inArchive = readTarGz(packed.bytes).find((entry) => String(entry.name).endsWith(rel))
+    assert.equal(inArchive.bytes.toString('utf8'), committed, '打包结果里必须是已提交字节，不是磁盘上那一份')
+  } finally {
+    tree.cleanup()
+  }
+})

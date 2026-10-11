@@ -2,7 +2,7 @@
   "_comment": "What the shipped kernel answers, per contract fixture. Written by script/kernel-conformance.mjs --record and asserted by the default (CI) mode. A digest mismatch is not automatically a regression: it means the answer moved, and the person bumping the kernel decides whether that is the point. What this file makes impossible is the lane running green while comparing an implementation to itself.",
   "kernel": {
     "package": "iterate-kernel",
-    "version": "0.1.3",
+    "version": "0.1.4",
     "pinnedBy": "contracts/kernel-pin.json"
   },
   "answers": {
@@ -54,6 +54,11 @@
     "recipe-config.ok-01.json": {
       "kind": "recipe-config",
       "digest": "af4f0e19b321",
+      "verdict": "answered"
+    },
+    "run-plan.ok-01.json": {
+      "kind": "run-plan",
+      "digest": "7c08db6c64fb",
       "verdict": "answered"
     }
   }

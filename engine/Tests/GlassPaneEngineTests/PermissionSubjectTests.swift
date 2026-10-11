@@ -856,32 +856,28 @@ final class PermissionSubjectTests: XCTestCase {
                       "有主的名字不许被 unlink——这正是 A-18 脑裂的成因")
     }
 
-    func testProbeStartRefusesToDeleteARegularFileAtItsName() throws {
-        // 这条从前钉的是"名字处是个普通文件⇒判为 noListener 就清掉再 bind"，而那正是
-        // 本轮抓出的 P0：`--probe-socket-path`（与 `--socket-path`）接受任意路径，
-        // connect 到普通文件回 ECONNREFUSED/ENOTSOCK，被归类成"没有监听者"，于是
-        // `glasspaned --socket-path ~/.ssh/id_rsa` 会**删掉用户的文件**再在那里建 socket。
-        // "无主"说的是没有监听者，从来不是"这个 inode 可以删"。清残留的合法性只延伸到
-        // 真的是 socket 文件的名字（对照用例见 ReviewLifecycleTests）。
-        let path = try makeProbeTestPath("stale")
+    func testProbeStartRefusesToClearANonSocketName() throws {
+        // 名字处是个普通文件。从前这条用例断言的正好相反："connect 对普通文件的 errno 有平台
+        // 歧义，所以判定注入而非真探"，于是它把"探针说没人应答"当成"这文件可以删"，测的是
+        // 清掉残留并成功 bind——而 macOS 实测 `connect()` 对普通文件回 ENOTSOCK，`isNoListener`
+        // 认它，真跑起来就会静默 `unlink()` 掉别人放在那儿的文件（SocketServer 文件头承诺的是
+        // "只在确实证明无主时才移除"）。现在删除前必须 `lstat` 看见 S_IFSOCK。
+        let path = try makeProbeTestPath("nons-name")
         let listenerDir = (path as NSString).deletingLastPathComponent
         defer { try? FileManager.default.removeItem(atPath: listenerDir) }
-        let marker = Data("do not delete me".utf8)
-        FileManager.default.createFile(atPath: path, contents: marker)
+        FileManager.default.createFile(atPath: path, contents: Data())
         let server = ProbeSocketServer(
             socketPath: path, inbox: ProbeInbox(), log: EngineLog(quiet: true),
-            livenessProbe: { _ in .noListener(reason: "connect: connection refused") }
+            livenessProbe: { _ in .noListener(reason: "connect: not a socket") }
         )
         XCTAssertThrowsError(try server.start()) { error in
-            let text = String(describing: error)
-            XCTAssertTrue(text.lowercased().contains("regular file"),
-                          "拒绝要说清它是什么（不是残留、不是占用者），实得 \(text)")
-            XCTAssertTrue(text.lowercased().contains("refusing to remove")
-                || text.lowercased().contains("nothing was unlinked"),
-                          "拒绝必须说清一个名字都没被删，实得 \(text)")
+            guard case ProbeServerError.nameOccupied(let detail) = error else {
+                return XCTFail("普通文件占名必须报 nameOccupied，实得 \(error)")
+            }
+            XCTAssertTrue(detail.contains("regular file"), "句子要说清那是什么：\(detail)")
         }
-        let stillThere = try XCTUnwrap(FileManager.default.contents(atPath: path))
-        XCTAssertEqual(stillThere, marker, "拒绝路径上一个字节都不许少")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path),
+                      "不是 socket 的名字一律不许删——这是本条修复的全部内容")
     }
 
     func testProbeForceFlagPreemptsWithoutConsultingTheProbe() throws {

@@ -255,7 +255,13 @@ jobs:
               "(same for the passphrase). Nothing is published until this is fixed."
             exit 1
           fi
-          cd assets
+          # Must be the SAME scratch dir the manifest was written into. This used to be
+          # `cd assets`, which silently pointed at the repo-tracked `assets/` after the
+          # checksum step moved to $RUNNER_TEMP — and the release then died on
+          # "no matches found for `SHA256SUMS.txt`": the manifest and every signature were
+          # uploaded from a directory that did not contain them. A path that two steps
+          # disagree about is a bug in the path, not in the file.
+          cd "${RUNNER_TEMP:-/tmp}/release-assets"
           mkdir -p "$HOME/.gnupg" && chmod 700 "$HOME/.gnupg"
           printf '%s\n' "allow-loopback-pinentry" >> "$HOME/.gnupg/gpg-agent.conf"
           gpgconf --kill gpg-agent
@@ -279,9 +285,17 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          cd assets
+          # Must be the SAME scratch dir the manifest was written into. This used to be
+          # `cd assets`, which silently pointed at the repo-tracked `assets/` after the
+          # checksum step moved to $RUNNER_TEMP — and the release then died on
+          # "no matches found for `SHA256SUMS.txt`": the manifest and every signature were
+          # uploaded from a directory that did not contain them. A path that two steps
+          # disagree about is a bug in the path, not in the file.
+          cd "${RUNNER_TEMP:-/tmp}/release-assets"
           ASC_FILES=""
           if ls ./*.asc >/dev/null 2>&1; then ASC_FILES="$(ls ./*.asc | tr '\n' ' ')"; fi
+          # Say which expectation broke instead of letting gh report "no matches found".
+          [ -f SHA256SUMS.txt ] || { echo "::error::SHA256SUMS.txt is not in ${RUNNER_TEMP:-/tmp}/release-assets — the checksum step wrote it somewhere else"; exit 1; }
           gh release upload "${{ github.ref_name }}" SHA256SUMS.txt $ASC_FILES --clobber --repo "$GH_REPO"
 
   publish-platform:

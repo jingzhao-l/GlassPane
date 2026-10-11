@@ -124,26 +124,14 @@ public final class ProbeSocketServer {
     /// how a second daemon stole probe.sock while the first kept serving
     /// engine.sock, splitting attribution across two processes. An occupied
     /// name is removed only when the tri-state probe demonstrates nobody owns
-    /// it **and** the name measures as a socket (X-24 — "no listener" describes
-    /// listeners, not inodes: a regular file has no listener either), or when
-    /// `preemptsExistingSocket` carries explicit operator intent
-    /// (`--force-probe-socket`, wired in main.swift).
-    ///
-    /// X-25: the directory rule set (0700, owner, mode read-back, refusal) is
-    /// `SocketServer.ensureIsolatedSocketDirectory`, the engine socket's own —
-    /// a probe name in a directory another account can write is a hijackable
-    /// name, not a private one.
+    /// it (stale file), or when `preemptsExistingSocket` carries explicit
+    /// operator intent (`--force-probe-socket`, wired in main.swift).
     public func start() throws {
-        // X-25 / X-24, both at the earliest point that can touch the name: the
-        // directory has to be one only this account can write into, and the name
-        // itself has to be measured before any path below (or inside
-        // `rebindAfterOwnershipCheck`) can remove it. `createDirectory(attributes:)`
-        // alone was neither — it is a no-op for a directory that already exists.
-        try SocketServer.ensureIsolatedSocketDirectory(
-            directory: (socketPath as NSString).deletingLastPathComponent,
-            log: log
+        let directory = (socketPath as NSString).deletingLastPathComponent
+        try FileManager.default.createDirectory(
+            atPath: directory, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
         )
-        try SocketServer.refuseNonSocketNameAtTakeover(site: socketPath)
         if preemptsExistingSocket {
             // --force-probe-socket: main.swift has already named the incumbent
             // this run is displacing, so removing a live name *is* the intent.
@@ -227,12 +215,11 @@ public final class ProbeSocketServer {
             guard case .noListener(let reason) = incumbent else {
                 throw ProbeServerError.nameOccupied(bindDetail)
             }
-            // X-24: `.noListener` is a statement about *listeners*. A regular
-            // file (or a symlink, or a directory) also has nobody behind it and
-            // answers connect with ECONNREFUSED/ENOTSOCK, so the takeover rule
-            // is re-measured at this unlink site instead of inherited from the
-            // liveness verdict.
-            try SocketServer.refuseNonSocketNameAtTakeover(site: socketPath)
+            // 与 `SocketServer` 同一条规矩：探针说"没人应答"，删之前还得亲眼确认这名字是个
+            // socket——普通文件、目录、FIFO、悬空链接在 macOS 上都回 ENOTSOCK，会被当成无主残留。
+            guard DaemonProbe.nameIsClearableSocketName(socketPath) else {
+                throw ProbeServerError.nameOccupied(DaemonProbe.nonSocketNameDescription(socketPath))
+            }
             log.info("removing stale probe socket \(socketPath) (\(reason))")
             unlink(socketPath)
             // One retry only: a second EADDRINUSE is a real race with

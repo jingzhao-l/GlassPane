@@ -69,25 +69,16 @@ export const INSTALL_SH_URL =
 /** 发布线锚点（版本真源 = 根 package.json，由 scripts/set-version.mjs 统一改写，
  *  勿手改）：npx 形态下本地没有仓库时，引导 clone 的就是这个 tag，与 install.sh
  *  的 `GLASSPANE_RELEASE` 同值——两条一键入口必须拿到同一份源码。 */
-export const RELEASE_VERSION = '1.10.0'
+export const RELEASE_VERSION = '1.11.0'
 /** 发布 ref（tag 名）。GLASSPANE_REF 环境变量可覆盖（追主干用 `main`）。 */
 export const REPO_REF = `v${RELEASE_VERSION}`
-
-/** 发布签名公钥的 key id（下面那块公钥注释里的同一串）。拒绝文案要点名它，
- *  人要拿它去 `gpg --list-keys` / GitHub 上比对指纹（审计轮 3 finding 2）。 */
-export const GLASSPANE_SIGNING_KEY_ID = '0929EA31DF4F7429F63FC53189D88B1D043A1298'
-
-/** 发布公钥的 uid（同一块公钥注释里的另一串）：拒绝文案里 key id 与 uid 要成对出现，
- *  读者才知道自己该比对的是哪一把钥匙。 */
-export const GLASSPANE_SIGNING_KEY_UID = 'jingzhao-l (sign-github) <ET_lin@outlook.com>'
 
 /** 发布签名公钥（GPG，key 0929EA31DF4F7429F63FC53189D88B1D043A1298，uid
  *  jingzhao-l (sign-github) <ET_lin@outlook.com>）。与 npm 安装链的 Integrity 不同，
  *  GPG 校验的是"来源/作者身份"而不是"内容哈希"：clone 到的发布 tag 若带 GPG 签名，
  *  用这把公钥验签通过，才能确证源码出自发布者之手（而非同名 tag 或中间人）。
- *  恒为 best-effort 的是**缺签名**那一档：未签名/不可用只告警不阻断，因为 HTTPS clone
- *  + tag 钉版本已保证内容完整性，GPG 是额外的一层来源证明。而"tag 带签名却验不过"
- *  （`invalid`）不是缺证明，是正面篡改证据——那一档是硬拒，判据与文案都在 `tagVerifyDecision`。 */
+ *  恒为 best-effort：未签名/不可用只告警不阻断，因为 HTTPS clone + tag 钉版本已保证
+ *  内容完整性，GPG 是额外的一层来源证明。 */
 export const GLASSPANE_SIGNING_PUBLIC_KEY = [
   '-----BEGIN PGP PUBLIC KEY BLOCK-----',
   '',
@@ -266,42 +257,23 @@ export function nodeMajorVersion(nodePath = process.execPath) {
   }
 }
 
-/** 需要"探测命令本身跑成功"的工具（审计轮 3 finding 6）。
- *
- *  macOS 把 `/usr/bin/swift` 与 `/usr/bin/git` 装成 **Command Line Tools 的 shim**：文件
- *  确实在、也确实可执行（`accessSync(..., X_OK)` 通过），但 CLT 不在的时候它们**一跑就失败**
- *  （xcode-select 报 "no developer tools were found"）。所以"文件在"对这两个工具不构成
- *  存在性证明——旧实现据此把预检报成"依赖齐全"，然后死在真正的 `swift build` 上。
- *  对这些工具只认探测命令自己的退出码，不做 `/usr/bin/<bin>` 文件退化检查。 */
-export const SHIM_PROBE_COMMANDS = {
-  swift: { cmd: 'xcode-select', args: ['-p'] },
-  git: { cmd: 'git', args: ['--version'] },
-}
-
-/** 检查命令是否存在：优先 `<bin> --version`；shim 易感工具（swift/git）改由
- *  SHIM_PROBE_COMMANDS 里那条探测命令的退出码决定；其余（open 等不支持 --version）
- *  才退化到 /usr/bin 下的可执行文件。真实探测，不伪造。 */
-export function commandAvailable(bin, {
-  spawn = spawnSync,
-  access = (file) => fs.accessSync(file, fs.constants.X_OK),
-} = {}) {
-  const succeeds = (cmd, args) => {
+/** 检查命令是否存在：优先 `<bin> --version`，失败时退化检查 /usr/bin/<bin>
+ *  可执行文件（覆盖 open 等不支持 --version 的命令）。真实探测，不伪造。 */
+export function commandAvailable(bin) {
+  const byVersion = (() => {
     try {
-      return spawn(cmd, args, { stdio: 'ignore', timeout: 5000 }).status === 0
+      const result = spawnSync(bin, ['--version'], { stdio: 'ignore', timeout: 5000 })
+      return result.status === 0
     } catch {
       return false
     }
-  }
-  if (succeeds(bin, ['--version'])) {
+  })()
+  if (byVersion) {
     return true
   }
-  const probe = SHIM_PROBE_COMMANDS[bin]
-  if (probe) {
-    // 到这一支为止：文件存在对 shim 易感工具不构成证据（见 SHIM_PROBE_COMMANDS 注释）。
-    return succeeds(probe.cmd, probe.args)
-  }
   try {
-    access(path.join('/usr/bin', bin))
+    const absolute = path.join('/usr/bin', bin)
+    fs.accessSync(absolute, fs.constants.X_OK)
     return true
   } catch {
     return false
@@ -462,133 +434,29 @@ export function launchdKickstartArgs({ label, uid }) {
   return ['kickstart', '-k', `gui/${uid}/${label}`]
 }
 
-/** 判一次 `kill` 的失败到底是"进程不在了"还是"我没权动它"（finding 5）。
- *  `/bin/kill` 对两者都给退出码 1，能分开的只有 stderr 文案：
- *  `Operation not permitted` = EPERM（进程活着、属于别人，典型就是 root 拉起的老 daemon）。
- *  认不出来的失败按"不在"处理（与旧实现 `status === 0` 才算活着同向），因为真正的兜底闸
- *  是收尾那次 hello 版本核对——旧进程只要还在服务 socket，那里就会把它露出来。 */
-export function classifyKillResult({ status, stderr = '', error = null } = {}) {
-  if (error) return 'unknown'
-  if (status === 0) return 'alive'
-  // 连退出码都没有（kill 自己没跑成、或被信号打死）= **没观测到这个进程**，不许当成"不在了"。
-  if (status === null || status === undefined) return 'unknown'
-  const text = String(stderr ?? '')
-  if (/not permitted|permission denied|eperm/i.test(text)) return 'denied'
-  // /bin/kill 对"进程不存在"必定打印 No such process；认不出的失败按"不在"处理（与旧实现
-  // 同向），真正的兜底闸是收尾那次版本核对——旧进程只要还在服务 socket，那里就会把它露出来。
-  return 'gone'
-}
-
-/** 这个 pid 是不是**僵尸**（已死、等父进程回收）：`kill -0` 对僵尸回 0，光靠信号探测会把
- *  一个已经不服务 socket 的进程报成"还活着、请你 sudo kill"。状态读不出来时保守回 false
- *  （宁可多报一个幸存者，也不放走真的还在跑的进程）。 */
-export function isZombiePid(pid, { spawn = spawnSync } = {}) {
-  try {
-    const res = spawn('ps', ['-o', 'state=', '-p', String(pid)], { encoding: 'utf8' })
-    return String(res?.stdout ?? '').trim().startsWith('Z')
-  } catch {
-    return false
-  }
-}
-
 /** 向指定 PID 发 SIGTERM（daemon 侧装有信号处理 → 清理 socket 后退出；
  *  launchd 托管时异常退出会按新 plist 重新拉起）。1s 后仍存活的补 SIGKILL：
  *  实测存在收不到/不响应 SIGTERM 的旧 daemon 实例（主循环未跑起来时
- *  SIG_IGN 生效而 handler 永不执行），它们占着 socket 却是死身份，必须清掉。
- *
- *  结论口径（finding 5）：**只有 SIGKILL 之后再探一次仍不在，才算结束**。
- *  旧实现把 kill 的退出码全丢掉、直接 `terminated: [...pids]`，于是安装器无权发信号的
- *  进程（root 所有的陈旧 daemon，`kill` 与 `kill -0` 都回 EPERM）被报成"已结束既有实例"，
- *  而它还在服务同一个 socket。这类 pid 现在进 `survivors`，调用方必须按失败说。 */
-export function terminatePids(pids, { spawn = spawnSync, sleepMs = 1000, reprobeMs = 150, sleep = null } = {}) {
-  const run = (args) => {
-    try {
-      return spawn('kill', args, { encoding: 'utf8' })
-    } catch (error) {
-      return { status: null, stderr: error?.message ?? String(error), error }
-    }
-  }
-  const signal = (pid, sig) => run(sig ? ['-' + sig, String(pid)] : [String(pid)])
-  const state = (pid) => classifyKillResult(signal(pid, '0'))
-  const terminated = []
+ *  SIG_IGN 生效而 handler 永不执行），它们占着 socket 却是死身份，必须清掉。 */
+export function terminatePids(pids, { spawn = spawnSync } = {}) {
+  const kill = (pid, signal) => spawn('kill', signal ? ['-' + signal, String(pid)] : [String(pid)])
+  for (const pid of pids) kill(pid)
+  spawn('sleep', ['1'])
   const forced = []
-  const survivors = []
-  for (const pid of pids) signal(pid)
-  // 给 SIGTERM 一个收尾窗口（daemon 侧 handler 会清 socket 再退出）。可注入 sleep，
-  // 免得单测每跑一次真等一秒；默认仍是旧的 /bin/sleep 有界等待。
-  if (sleep) sleep(sleepMs)
-  else spawn('sleep', [String(Math.ceil(sleepMs / 1000))], { encoding: 'utf8' })
   for (const pid of pids) {
-    const before = state(pid)
-    if (before === 'denied') {
-      survivors.push({ pid, reason: 'SIGTERM 被拒（EPERM）：该进程不属于当前用户，安装器无权结束它' })
-      continue
-    }
-    if (before === 'gone') {
-      terminated.push(pid)
-      continue
-    }
-    forced.push(pid)
-    signal(pid, '9')
-    let after = state(pid)
-    if (after !== 'gone') {
-      // 刚被 SIGKILL 的进程要等它的父进程回收（父进程正 `wait` 着的话是毫秒级）；
-      // 立刻探一次会把它读成"还活着"，于是红字让人去 sudo kill 一个已经没了的 pid。
-      // 给一次**有界**的再探窗口，只有窗口过后还在的才算幸存者。
-      if (sleep) sleep(reprobeMs)
-      else spawn('sleep', [String(reprobeMs / 1000)], { encoding: 'utf8' })
-      after = state(pid)
-      // 还"活着"但状态是 Z = 它已经死了，只差父进程 wait() 收尸：这种东西不持有 socket、
-      // 不需要人去 sudo kill，报成幸存者就是把人支到一条没用的命令上。
-      if (after === 'alive' && isZombiePid(pid, { spawn })) after = 'gone'
-    }
-    if (after === 'gone') {
-      terminated.push(pid)
-    } else if (after === 'denied') {
-      survivors.push({ pid, reason: 'SIGKILL 被拒（EPERM）：该进程不属于当前用户，安装器无法结束它' })
-    } else {
-      survivors.push({ pid, reason: `SIGKILL 后再探一次（+${reprobeMs}ms）它仍存在（${after}）` })
+    if (kill(pid, '0').status === 0) {
+      kill(pid, '9')
+      forced.push(pid)
     }
   }
-  return { terminated, forced, survivors }
-}
-
-/** 幸存者（安装器发不动信号的进程）的红字（finding 5，纯函数）。
- *  这里给的必须是**人能直接执行**的动作，而不是"请检查权限"：安装器没有 root 权限，
- *  所以只有坐在键盘前的这个人能 `sudo kill -9`；他知道 pid、知道为什么必须他做、
- *  也知道做完要重跑什么。socket 还挂在这些 pid 上，所以本轮的产物从未接管——
- *  收尾那次版本核对（daemonVersionVerdict）会把这件事再钉一次。 */
-export function survivorText(survivors, { socketPath } = {}) {
-  const pids = survivors.map((entry) => entry.pid).join(' ')
-  return [
-    `未能结束既有实例（它仍在服务 ${socketPath ?? 'engine.sock'}）：`
-    + survivors.map((entry) => `pid ${entry.pid} — ${entry.reason}`).join('；'),
-    `安装器无权向这些进程发信号（它们不属于当前账号，典型是 root 拉起的旧 daemon）。`
-    + `上面"已结束"那句只对确实已经不在的 pid 成立，不含这些。`,
-    `由人来收尾：先看清是谁起的 \`ps -o pid=,user=,lstart=,command= -p ${pids}\`，`
-    + `再 \`sudo kill -9 ${pids}\`，然后重跑本安装器并加 --replace-daemon。`,
-  ].join('\n')
+  return { terminated: [...pids], forced }
 }
 
 /** 把 make-app.sh 的两个 bundle 安置到 ~/Applications（覆盖式，幂等）。
- *  返回 `{ installed, declined }`（finding 11）：
- *  - `installed` = 本轮真的写进去的条目；
- *  - `declined` = 目标**已存在**而 `allowReplace=false`（人回答 n，或非交互环境没给
- *    `--no-prompt`）因此没有覆盖的条目——留着的是上一轮的旧 bundle，daemon 启动路径
- *    会照旧选中它。这不是"无所谓"的分支：收尾那次版本核对（见 daemonVersionVerdict）
- *    正是靠它拦住"装了新版、跑的还是旧版"。
- *  源缺失即跳过（--no-app 或构建产物不全时不报错）。 */
-export function installBundles({
-  plan,
-  exists = fs.existsSync,
-  remove = fs.rmSync,
-  copy = fs.cpSync,
-  mkdir = fs.mkdirSync,
-  allowReplace = true,
-} = {}) {
+ *  返回实际安置的条目；源缺失即跳过（--no-app 或构建产物不全时不报错）。 */
+export function installBundles({ plan, exists = fs.existsSync, remove = fs.rmSync, copy = fs.cpSync, mkdir = fs.mkdirSync } = {}) {
   const installed = []
-  const declined = []
-  if (!plan?.appsDir) return { installed, declined }
+  if (!plan?.appsDir) return installed
   mkdir(plan.appsDir, { recursive: true })
   const pairs = [
     [plan.builtSettingsApp, plan.settingsApp],
@@ -596,29 +464,12 @@ export function installBundles({
   ]
   for (const [source, target] of pairs) {
     if (!source || !target || !exists(source)) continue
-    if (exists(target) && !allowReplace) {
-      declined.push(target)
-      continue
-    }
     remove(target, { recursive: true, force: true })
     copy(source, target, { recursive: true })
     installed.push(target)
   }
-  return { installed, declined }
+  return installed
 }
-
-/** 本轮会覆盖掉哪些**已存在**的 bundle（install() 拿这份清单去问人，findings 11）。
- *  纯函数：只查文件系统，不做任何写入。 */
-export function bundlesToReplace({ plan, exists = fs.existsSync } = {}) {
-  if (!plan?.appsDir) return []
-  return [
-    [plan.builtSettingsApp, plan.settingsApp],
-    [plan.builtDaemonApp, plan.daemonApp],
-  ]
-    .filter(([source, target]) => source && target && exists(source) && exists(target))
-    .map(([, target]) => target)
-}
-
 
 /** 生成 launchd 用户代理 plist（纯函数，零副作用；XML 转义防路径注入）。
  *  KeepAlive 采用 SuccessfulExit=false：仅异常退出时由 launchd 重启，
@@ -712,44 +563,13 @@ function readPlistProgram(readFile, plistPath) {
   }
 }
 
-/** 只读探测：launchd 此刻 holding 的是哪个定义、本轮的 plist 是否需要重新注册
- *  （= bootstrap 之前先问一句"这一步会不会打断一个健康作业"，finding 11）。
- *  读不到 uid 时按"不需要"回——那是 launchctlBootstrap 自己会如实报的分支。 */
-export function launchdReregisterProbe(desiredProgram, { label = LAUNCHD_LABEL, spawn = spawnSync } = {}) {
-  const uid = String(spawn('id', ['-u'], { encoding: 'utf8' })?.stdout ?? '').trim()
-  if (!uid) return { loaded: false, program: null, uid: null, needsReregister: false }
-  const probe = spawn('launchctl', ['print', `gui/${uid}/${label}`], { encoding: 'utf8' })
-  const loaded = probe.status === 0
-  const program = loadedLaunchdProgram(probe.stdout)
-  return {
-    loaded,
-    program,
-    uid,
-    needsReregister: launchdNeedsReregister({
-      alreadyLoaded: loaded,
-      loadedProgram: program,
-      desiredProgram,
-    }),
-  }
-}
-
 /** 注册 launchd 用户代理（幂等）：已加载则跳过，未加载则 bootstrap
  *  gui/<uid>。返回 { ok, already, message }，失败携带真实 stderr。
- *
- *  `allowBootout=false`（finding 11：bootout 会打断一个正在跑的健康作业）时**什么都不做**
- *  并回 `bootoutDeclined`——绝不"先卸了再问"，也绝不在旧定义还挂着的时候假装注册上了。
- *  默认 true：`--restore-launchd` 那条机器化补救路径不受确认门影响（它本身就是安装器
- *  交给 agent 的命令，把它改成需要人工回答等于给 remedy 加一条走不通的路）。
  *
  *  `desiredProgram` 缺失时**自己从 plist 读**：调用方之一是 `--restore-launchd`，它手里只有
  *  plist 路径，而它偏偏是安装器交给 agent 的"daemon 不可达"补救命令。以前不传就等于跟 ''
  *  比，任何已加载作业都被判成"定义变了"→ bootout 一个健康作业（打断正在跑的 act）。 */
-export function launchctlBootstrap(label, plistPath, {
-  desiredProgram = null,
-  spawn = spawnSync,
-  readFile = (file) => fs.readFileSync(file, 'utf8'),
-  allowBootout = true,
-} = {}) {
+export function launchctlBootstrap(label, plistPath, { desiredProgram = null, spawn = spawnSync, readFile = (file) => fs.readFileSync(file, 'utf8') } = {}) {
   const uid = spawn('id', ['-u'], { encoding: 'utf8' }).stdout.trim()
   if (!uid) {
     return { ok: false, already: false, message: '无法解析当前 uid（id -u 失败），跳过 launchd 注册' }
@@ -766,14 +586,6 @@ export function launchctlBootstrap(label, plistPath, {
     return { ok: true, already: true, message: `launchd 已加载 ${label}（${domain}），跳过 bootstrap` }
   }
   if (probe.status === 0) {
-    if (!allowBootout) {
-      return {
-        ok: false,
-        already: false,
-        bootoutDeclined: true,
-        message: `没有卸载已加载的 ${label}（本轮未获得确认，${domain}）：launchd 里现在跑的是 ${loadedLaunchdProgram(probe.stdout) ?? '（未读到）'}，本轮要装的定义是 ${wantProgram ?? '（读不到）'}，两者不一致而 bootout 是破坏性动作——因此**没有**写新 plist 也**没有**继续 bootstrap，什么都没改。要让新定义生效：在交互终端重跑本命令并回答继续，或在脚本/自动化里显式加 --no-prompt。`,
-      }
-    }
     // 定义变了：先卸掉旧作业，否则新 plist 不生效（真机 EX_CONFIG 的来路）。
     // bootout 的退出码必须判：它失败时紧随的 bootstrap 只会回 5 / "already loaded"，
     // 而那一支被下面映射成 ok:true —— 于是安装器打印"开机自启已注册"，launchd 却还在
@@ -867,10 +679,8 @@ export function socketHello(
  */
 export async function restoreLaunchd({
   label = LAUNCHD_LABEL,
-  env = process.env,
-  uid = typeof process.getuid === 'function' ? process.getuid() : null,
-  plistPath = null,
-  socketPath = null,
+  plistPath = path.join(process.env.HOME ?? '', ...LAUNCHD_DIR_NAME.split('/'), LAUNCHD_FILE_NAME),
+  socketPath = path.join(process.env.HOME ?? '', SOCKET_DIR_NAME, SOCKET_FILE_NAME),
   bootstrapFn = launchctlBootstrap,
   kickstartFn = launchctlKickstart,
   waitFn = waitForSocket,
@@ -878,24 +688,14 @@ export async function restoreLaunchd({
   existsFn = (p) => fs.existsSync(p),
   serveTimeoutMs = 10000,
 } = {}) {
-  // finding 4：这条路径也是拿 HOME 拼出来的（旧代码在参数默认值里读 process.env.HOME ?? ''，
-  // HOME 缺失时它变成 `Library/LaunchAgents/…` 这种相对位置，然后照实去 bootstrap 一个
-  // StandardOutPath 是相对路径的作业）。显式传了 plistPath/socketPath 的调用方（单测、
-  // 以及任何知道自己要修哪个文件的人）不受这条闸影响。
-  const paths = installGuard({ home: env.HOME ?? '', uid })
-  const resolvedPlist = plistPath ?? (paths.ok ? path.join(paths.home, ...LAUNCHD_DIR_NAME.split('/'), LAUNCHD_FILE_NAME) : null)
-  const resolvedSocket = socketPath ?? (paths.ok ? path.join(paths.home, SOCKET_DIR_NAME, SOCKET_FILE_NAME) : null)
-  if (!resolvedPlist || !resolvedSocket) {
-    return { ok: false, action: 'bad-home', verified: null, message: paths.error ?? '无法确定 plist/socket 路径（HOME 不可用且未显式传入）' }
-  }
-  if (!existsFn(resolvedPlist)) {
+  if (!existsFn(plistPath)) {
     return {
       ok: false,
       action: 'missing-plist',
-      message: `launchd plist 不存在（${resolvedPlist}）：从未安装或已被删除，请重跑 install.sh 完整安装`,
+      message: `launchd plist 不存在（${plistPath}）：从未安装或已被删除，请重跑 install.sh 完整安装`,
     }
   }
-  const boot = bootstrapFn(label, resolvedPlist)
+  const boot = bootstrapFn(label, plistPath)
   if (!boot.ok) {
     // 两种"没注册上"要分开说：bootout 失败意味着旧作业还在跑旧定义（agent 下一步是把它卸掉），
     // bootstrap 失败才是"卸干净了但装不上"。合成一句会把人支到错的那条命令上去。
@@ -906,10 +706,10 @@ export async function restoreLaunchd({
     }
   }
   const verify = async () => {
-    if (!(await waitFn(resolvedSocket, { timeoutMs: serveTimeoutMs }))) {
+    if (!(await waitFn(socketPath, { timeoutMs: serveTimeoutMs }))) {
       return { reachable: false, accessibility: null, pid: null, version: null }
     }
-    const result = await helloFn(resolvedSocket)
+    const result = await helloFn(socketPath)
     return {
       reachable: result != null,
       accessibility: result?.permissions?.accessibility ?? null,
@@ -923,7 +723,7 @@ export async function restoreLaunchd({
       ok: false,
       action: boot.already ? 'already-loaded' : 'bootstrapped',
       verified: checked,
-      message: `launchd 作业就位（${boot.message}），但 ${serveTimeoutMs}ms 内 daemon socket 未服务/未回 hello（${resolvedSocket}）`,
+      message: `launchd 作业就位（${boot.message}），但 ${serveTimeoutMs}ms 内 daemon socket 未服务/未回 hello（${socketPath}）`,
     }
   }
   let restarted = false
@@ -953,16 +753,13 @@ export async function restoreLaunchd({
  *  （invalid）。退出码 0 = 用已导入的发布公钥验签通过。 */
 export function classifyTagVerify({ status, stdout = '', stderr = '' } = {}) {
   const text = `${stdout ?? ''}\n${stderr ?? ''}`
-  // `raw` 是 git/gpg 的原话，硬拒那条要引用它（finding 2）：结论之外还得给读者可复核的
-  // 一手证据，只留一句"签名无法确证"等于让人去猜是 BAD signature 还是公钥没找到。
-  const raw = text.trim()
   if (status === 0) {
-    return { status: 'verified', detail: '发布 tag 的 GPG 签名有效，出自发布者私钥', raw }
+    return { status: 'verified', detail: '发布 tag 的 GPG 签名有效，出自发布者私钥' }
   }
   if (/no signature found/i.test(text)) {
-    return { status: 'unsigned', detail: '该发布 tag 未做 GPG 签名（不是内容被篡改，只是缺签名层）', raw }
+    return { status: 'unsigned', detail: '该发布 tag 未做 GPG 签名（不是内容被篡改，只是缺签名层）' }
   }
-  return { status: 'invalid', detail: `git verify-tag 失败（退出码 ${status}），签名无法确证`, raw }
+  return { status: 'invalid', detail: `git verify-tag 失败（退出码 ${status}），签名无法确证` }
 }
 
 /**
@@ -985,18 +782,11 @@ export function tagVerifyDecision({ sig, pinRef, repoDir }) {
     return {
       action: 'refuse',
       text: `发布 tag ${pinRef} 带着 GPG 签名，但签名验不过：${sig.detail}\n`
-        + (String(sig.raw ?? '').trim()
-          ? `git verify-tag 原话：${String(sig.raw).trim()}\n`
-          : '（git verify-tag 没有留下原话；上面那句是判据本身）\n')
         + '这不是"没签名"。签名在而校验失败，说明眼前这份 tag 指向的字节不是发布者签过的那一份。'
         + '安装到此为止：没有跑 npm install，没有 swift build，没有注册 launchd 作业。\n'
-        + `内置公钥：key ${GLASSPANE_SIGNING_KEY_ID}（uid ${GLASSPANE_SIGNING_KEY_UID}），`
-        + '就是本文件里那份 GLASSPANE_SIGNING_PUBLIC_KEY——要比对的是这一把，不是随便哪把签过名的。\n'
         + `下一步：核对远端与这个 tag（git -C "${repoDir}" remote -v；git -C "${repoDir}" tag -v ${pinRef}）；`
         + '确认仓库与发布者公钥都无误后改用更新的发布 tag（GLASSPANE_REF=v<版本> 重跑）。'
-        + '要装开发主线用 GLASSPANE_REF=main（那条路不做 tag 验签，会如实告警）。\n'
-        + '该看的地方：SECURITY.md 的 "What the checks prove, and what they do not"——'
-        + '这一档写明是"任何同意都不覆盖的硬拒"，所以这里既没有 flag 也没有确认能放行。',
+        + '要装开发主线用 GLASSPANE_REF=main（那条路不做 tag 验签，会如实告警）。',
     }
   }
   if (sig.status === 'unsigned' || sig.status === 'unavailable') {
@@ -1019,6 +809,46 @@ export function tagVerifyDecision({ sig, pinRef, repoDir }) {
 /** 仓库里是否存在指定 tag ref（IO 探测，纯判定）。 */
 export function repoHasRef(repoDir, ref, { spawn = spawnSync } = {}) {
   return spawn('git', ['-C', repoDir, 'rev-parse', '--verify', `refs/tags/${ref}`], { stdio: 'ignore' }).status === 0
+}
+
+/**
+ * 要构建的这棵树，是不是被验签的那个 tag 本身（IO 探测，纯判定）。
+ *
+ * 存在的理由：`rootDir` 可以来自 `--repo`、`GLASSPANE_REPO`、当前目录或既有 clone，而
+ * `install.sh` 自己就写着"既有 clone 不会被自动切到 $REF"。那条绿字说的若是
+ * "签名验证通过"，它证明的却只是 *tag 对象* 的签名——签的不是 HEAD 加一堆本地改动。
+ * 签名与产物之间这层对应关系一旦断，绿字就成了对没签过的字节作保。
+ */
+export function tagTreeAgreement({ repoDir, ref, spawn = spawnSync } = {}) {
+  const head = spawn('git', ['-C', repoDir, 'rev-parse', '--verify', 'HEAD'], { encoding: 'utf8' })
+  const tagged = spawn('git', ['-C', repoDir, 'rev-parse', '--verify', `${ref}^{commit}`], { encoding: 'utf8' })
+  if (head.status !== 0 || tagged.status !== 0) {
+    return { ok: false, same: false, changed: null, head: null, tagCommit: null }
+  }
+  const work = spawn('git', ['-C', repoDir, 'status', '--porcelain'], { encoding: 'utf8' })
+  const changed = String(work.stdout ?? '').split('\n').filter((line) => line !== '').length
+  const headSha = String(head.stdout ?? '').trim()
+  const tagSha = String(tagged.stdout ?? '').trim()
+  return { ok: true, same: headSha === tagSha && changed === 0, changed, head: headSha, tagCommit: tagSha }
+}
+
+/**
+ * "签名有效" 与 "要装的就是被签的那棵树" 是两件事，绿字必须两件事都说得出。
+ * 树对不上时不拒装（装开发主线本来就合法），但绝不能沿用那句"验证通过"。
+ */
+export function tagVerifyAgainstTree({ verdict, tree, pinRef, repoDir }) {
+  if (verdict.action !== 'pass') return verdict
+  if (tree.ok && tree.same) return verdict
+  const why = !tree.ok
+    ? '读不出这棵树的 HEAD 与该 tag 指向的 commit'
+    : `HEAD 是 ${String(tree.head ?? '').slice(0, 7)}，tag 指向 ${String(tree.tagCommit ?? '').slice(0, 7)}，另有 ${tree.changed} 处未提交改动`
+  return {
+    action: 'warn',
+    text: `发布 tag ${pinRef} 的 GPG 签名有效，但它签的不是本次要装的这棵树：${why}。\n`
+      + '安装继续，装出来的是这棵树的内容，不是那个已签名发布的内容——这句不说清楚，屏幕上那行绿字就是替没验过的字节作保。\n'
+      + `下一步（要装被签的那一版）：git -C "${repoDir}" checkout ${pinRef} 后重跑，或用一键安装脚本从发布 tag 另起一份：`
+      + `curl -fsSL ${INSTALL_SH_URL} | sh`,
+  }
 }
 
 /** 对 clone 下来的发布 tag 做 GPG 验签（best-effort，不抛错）。
@@ -1347,32 +1177,10 @@ export function run(cmd, args, { cwd } = {}) {
   })
 }
 
-/** 破坏性步骤的人工确认（finding 11）。三档，缺一不可：
- *  1) `--no-prompt`（→ autoYes）：**显式**放弃确认，直接放行。脚本/CI/`curl | sh` 走
- *     这一档（install.sh 在 stdin 非 TTY 时就是来补这个 flag 的）。
- *  2) 交互终端：真的问一句 `(Enter 继续 / n 跳过)`。
- *  3) 非交互**且没有** `--no-prompt`：回 false —— 既不阻塞（管道里 question() 永远
- *     等不到答案），也不"默认同意"（那等于把 `--no-prompt` 的语义白送给没传它的人）。
- *     调用方必须跳过这一步并打印"要显式加 --no-prompt"。
- *
- *  旧实现是 `autoYes || !isTTY → true`，而且**生产路径一次都没调用过它**：于是
- *  README 与 `--help` 承诺的"跳过每步确认"对应的活代码不存在，install.sh 的
- *  `[ -t 0 ]` 也跟着失去意义。现在被它拦住的是两件破坏性动作：卸载 launchd 上
- *  **已加载**的 daemon 作业（会打断正在跑的 act），以及覆盖 ~/Applications 里
- *  **已存在**的 .app。 */
-export async function confirm(question, {
-  autoYes = false,
-  interactive = Boolean(process.stdin.isTTY),
-  ask = null,
-} = {}) {
-  if (autoYes) {
+/** 暂停询问；非 TTY 或 --no-prompt 时自动视为同意（不阻塞自动化）。 */
+export async function confirm(question, { autoYes = false } = {}) {
+  if (autoYes || !process.stdin.isTTY) {
     return true
-  }
-  if (!interactive) {
-    return false
-  }
-  if (ask) {
-    return Boolean(await ask(question))
   }
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   try {
@@ -1382,7 +1190,6 @@ export async function confirm(question, {
     rl.close()
   }
 }
-
 
 /** 状态根/日志目录与其里那份日志的模式（与 updater 的 fsutil 同一组数：0700 / 0600）。
  *  installer 是零依赖单文件，所以这里自己写死，不去 import updater/lib/fsutil.js。 */
@@ -1588,13 +1395,7 @@ export function usageText() {
     '',
     '选项:',
     '  --repo <目录>      指定项目根目录（默认自动向上查找）',
-    '  --no-prompt        跳过破坏性步骤的确认（脚本/自动化场景）。被它拦住的是三件：',
-    '                     ① bootout 已加载的 launchd daemon 作业（会打断正在跑的 act）；',
-    '                     ② 覆盖 ~/Applications 里已存在的 .app；③ --replace-daemon 结束',
-    '                     已在跑的实例。交互终端会逐条问；非交互（stdin 不是终端）**且没给**本 flag 时',
-    '                     这三步一律不执行（不阻塞等待、也不默认同意）并打印红字说明——',
-    '                     所以 CI / e2e / `curl | sh` 这类调用必须显式带 --no-prompt',
-    '                     （install.sh 在 stdin 非 TTY 时已经自动补上）。',
+    '  --no-prompt        跳过每步确认（脚本/自动化场景）',
     '  --no-daemon        不启动 glasspaned',
     '  --replace-daemon   先结束已在跑的 glasspaned 实例（旧构建的 daemon 会继续占',
     '                     socket，让系统设置里的授权条目与实际服务实例对不上）',
@@ -1653,15 +1454,10 @@ export function nextStepsText({
   daemonVerified = true,
   daemon = { viaBundle: false, path: null },
   settingsApp = null,
-  panel = null,
   update = null,
 }) {
-  // finding 8：面板那一句"再打开一次"必须落在**真存在**的东西上。旧写法在这里另拼一个
-  // `~/Applications/GlassPane.app`（--no-app 时根本没安置）或
-  // `<rootDir>/engine/.build/release/GlassPane.app`（make-app.sh 的产物在 .build 里，
-  // 从没构建过时它不存在），于是 `open "…"` 是一条没人能跑通的命令，而
-  // bundle-apps.test.mjs 只断言字面量 `open "` 出现过——测试跟着文案一起撒了谎。
-  const panelHint = panelOpenHint({ panel, rootDir, settingsApp })
+  const settingsAppHint =
+    settingsApp ?? path.join(rootDir, 'engine', '.build', 'release', SETTINGS_APP_NAME)
   const entryName = daemon.viaBundle ? 'GlassPane Daemon' : 'glasspaned'
   return [
     paint('后续使用说明', 'bold'),
@@ -1689,12 +1485,10 @@ export function nextStepsText({
     ...(guiOpened ? [
       '   面板已打开（口径：启动命令已发出且在观察窗口内未报错退出——bundle 形态走的',
       '   `open` 在目标 bundle 缺失时会非零退出，未报错即产物确实在；窗口外的失败看不',
-      `   到，所以没看到窗口属正常（-g 不抢焦点），再起一次：${panelHint.text}${panelHint.runnable ? '' : '（本轮没有可重开的产物，见下一条）'}）。`,
+      `   到，所以没看到窗口属正常（-g 不抢焦点），再起一次：open "${settingsAppHint}"）。`,
       '   点权限卡「授权」会让 daemon 以自身身份发起申请并跳转到对应系统面板。',
-    ] : panelHint.runnable ? [
-      `   打开面板：${panelHint.text}（点权限卡「授权」即由 daemon 自身发起申请）。`,
     ] : [
-      `   ${panelHint.text}`,
+      `   打开面板：open "${settingsAppHint}"（点权限卡「授权」即由 daemon 自身发起申请）。`,
     ]),
     `   验证 daemon 自报的席位与主体：${daemon.path ?? path.join(rootDir, 'engine', '.build', 'release', DAEMON_EXE_NAME)} --permissions`,
     '   口径提醒：daemon 必须由 launchd/登录项拉起，权限自报才等于真实席位；从终端或',
@@ -1734,18 +1528,10 @@ export function bootstrapPlan({
       error: `目标目录已存在且不是 GlassPane 仓库：${targetDir}（用 --repo 指定仓库，或清理该目录后重试）`,
     }
   }
-  // finding 3：GLASSPANE_REPO_URL / GLASSPANE_REF 是文档里的覆盖位，值直接进 git argv。
-  // 不校验就等于把"clone 时执行任意命令"交给一个环境变量（`ext::sh -c …` /
-  // 以 `-` 开头的 ref 被 git 当选项，如 --upload-pack=…）。
-  const clone = safeGitCloneArgs({ repoUrl, ref, targetDir })
-  if (clone.error) {
-    return { error: `${clone.error}` }
-  }
   return {
     targetDir,
-    ref: clone.ref,
-    repoUrl: clone.url,
-    gitArgs: clone.args,
+    ref,
+    gitArgs: ['clone', '--branch', ref, '--depth', '1', repoUrl, targetDir],
   }
 }
 
@@ -1772,6 +1558,55 @@ export function installOutcome({ verified = false, daemonExpected = true } = {})
   return { ok, exitCode: ok ? 0 : 1, verified: Boolean(verified), daemonExpected }
 }
 
+/**
+ * 收尾那句"实测校验通过"到底能说什么，取决于两件事：有没有 daemon 应答，以及应答的那一份
+ * **是不是本轮刚构建的产物**。从前这里只看 `hello?.version` 有没有值——旧实例占着 socket 时
+ * （上面那条"daemon 已在监听…跳过启动"分支）应答的是上一版构建，新构建从未被启动也从未被验证，
+ * 安装器却打印"实测校验通过…安装完成"并退 0，而 `install.sh` 是 exec 委托：按退出码办事的
+ * agent 只看到 0。
+ */
+export function installVerification({
+  arrived = false,
+  helloVersion = null,
+  builtVersion = null,
+  servedByEarlierInstance = false,
+} = {}) {
+  if (!arrived || !helloVersion) return { verified: false, note: null }
+  if (!builtVersion) {
+    return {
+      verified: false,
+      note: '读不出本轮构建产物的版本（`glasspaned --version` 没给出可解析的一行），'
+        + '所以无法证明应答 hello 的那一份就是本轮构建——本次不算校验通过。',
+    }
+  }
+  if (helloVersion !== builtVersion) {
+    return {
+      verified: false,
+      note: `应答 hello 的 daemon 自报 ${helloVersion}，本轮构建产物是 ${builtVersion}：socket 被旧实例占着，`
+        + '这一轮的构建从未被验证。用 --replace-daemon 重跑（它会先收拢在跑的实例）。',
+    }
+  }
+  if (servedByEarlierInstance) {
+    return {
+      verified: true,
+      note: `版本号一致（${builtVersion}），但应答的实例在本次安装之前就已经在服务：同一版本号只能说明它是`
+        + '同一版本，不能证明它是本轮构建出来的那一份。要确证，用 --replace-daemon 重跑一次。',
+    }
+  }
+  return { verified: true, note: null }
+}
+
+/** 本轮构建产物自报的版本（`glasspaned --version` 那一行）；读不出返回 null，不猜。 */
+export function builtDaemonVersion({ daemonBin, spawn = spawnSync } = {}) {
+  const res = spawn(daemonBin, ['--version'], { encoding: 'utf8' })
+  if (res.error || res.status !== 0) return null
+  const line = String(res.stdout ?? '')
+    .split('\n')
+    .map((text) => text.trim())
+    .find((text) => /^\d+\.\d+\.\d+/.test(text))
+  return line ? line.split(/\s+/)[0] : null
+}
+
 /** 未通过校验时的提示行（纯函数，可单测）。必须自带**用户真能执行**的补救命令，
  *  并点明退出码非零——只说"安装未完成"的话，脚本调用方什么也拿不到。 */
 export function verificationFailureText({
@@ -1791,317 +1626,11 @@ export function verificationFailureText({
   ].join('\n')
 }
 
-/** GLASSPANE_REF 的唯一口径（finding 10，与 install.sh 同源）：**未设置**与**显式置空**
- *  都钉发布 tag；要追主干必须显式写 `main`。旧行为是 install.sh 把空值读成 `main`、
- *  本文件把同一个空值读成 tag——同一条 `GLASSPANE_REF=` 在两条一键入口上会拿到两份源码，
- *  而 install-sh.test.mjs 那条用例的标题还写着"与 installer 常量同源"。 */
-export function resolvePinRef(env = process.env) {
-  const raw = env?.GLASSPANE_REF
-  if (raw === undefined || raw === null) return REPO_REF
-  const trimmed = String(raw).trim()
-  return trimmed ? trimmed : REPO_REF
-}
-
-/** 允许的 clone 地址前缀（finding 3）。`https://` 是文档里那条一键安装；`ssh://` 给
- *  自带镜像的人；`file://` 保留 specs 里记着的离线/本地 clone 用法（P4-J3）。
- *  刻意**不**收 scp 式 `git@host:path`——它没有 scheme，正好和 `ext::sh -c …` 落在同一
- *  个无法白名单判定的形状里，需要它的人改写成 `ssh://git@host/path` 即可。 */
-export const ALLOWED_GIT_URL_PREFIXES = ['https://', 'ssh://', 'file://']
-
-/** ref / URL / 目录三类"要被拼进 git argv"的值的形状检查（纯函数）。
- *  拒绝的正是两类注入：以 `-` 开头（被 git 当成选项，`--upload-pack=…` 直接起进程），
- *  以及不带 scheme 的 `ext::sh -c …`（git 的 ext 传输执行任意命令）。 */
-function unsafeArgvValue(value, label) {
-  const text = String(value ?? '')
-  if (!text) return `${label} 为空`
-  if (text.startsWith('-')) return `${label} 以 "-" 开头，会被 git 当成命令行选项而不是值：${text}`
-  if (/[\s\u0000-\u001f]/.test(text)) return `${label} 含空白/控制字符：${JSON.stringify(text)}`
-  if (text.startsWith('+')) return `${label} 以 "+" 开头（强推语义），这里不收：${text}`
-  return null
-}
-
-export function validateGitRepoUrl(repoUrl) {
-  const text = String(repoUrl ?? '')
-  // 顺序按"读者的病因"排：以 - 开头是选项注入、不带 scheme 是 ext:: 执行入口——这两条才是
-  // 拒绝的理由。空白/控制字符只是同一批病因的**手段**，排在它们后面才不会把 `ext::sh -c …`
-  // 报成一句"含空白字符"，让读者看不出真正被挡的是 ext 传输。
-  if (!text) {
-    return { ok: false, error: `GLASSPANE_REPO_URL 为空。只接受这些地址形式：${ALLOWED_GIT_URL_PREFIXES.join('、')}` }
-  }
-  if (text.startsWith('-')) {
-    return { ok: false, error: `GLASSPANE_REPO_URL 以 "-" 开头，会被 git 当成命令行选项而不是值：${text}` }
-  }
-  const lower = text.toLowerCase()
-  if (!ALLOWED_GIT_URL_PREFIXES.some((prefix) => lower.startsWith(prefix))) {
-    return {
-      ok: false,
-      error: `GLASSPANE_REPO_URL 必须以 ${ALLOWED_GIT_URL_PREFIXES.join('、')} 之一开头（实为「${text}」）。`
-        + '不带 scheme 的值会被 git 当成传输扩展名（`ext::…` 会直接执行后面的命令），因此一律拒绝；'
-        + '本地/镜像 clone 请写 file:///<绝对路径>，scp 式 git@host:path 请写 ssh://git@host/path。',
-    }
-  }
-  if (/[\s\u0000-\u001f]/.test(text)) {
-    return { ok: false, error: `GLASSPANE_REPO_URL 含空白/控制字符：${JSON.stringify(text)}` }
-  }
-  return { ok: true, url: text }
-}
-
-export function validateGitRef(ref) {
-  const shape = unsafeArgvValue(ref, 'GLASSPANE_REF')
-  if (shape) return { ok: false, error: `${shape}。ref 只能是 tag/分支名字面量（要追主干就写 main）` }
-  if (!/^[A-Za-z0-9][A-Za-z0-9._/@+-]*$/.test(String(ref))) {
-    return { ok: false, error: `GLASSPANE_REF 含不被接受的字符：${JSON.stringify(String(ref))}` }
-  }
-  return { ok: true, ref: String(ref) }
-}
-
-/** 拼一条**不会被选项注入**的 `git clone` 参数（finding 3）：三个位置参数前面都放 `--`。
- *  返回 `{ args }` 或 `{ error }`——error 里带着是哪一个值、为什么。 */
-export function safeGitCloneArgs({ repoUrl = REPO_URL, ref = REPO_REF, targetDir } = {}) {
-  const urlCheck = validateGitRepoUrl(repoUrl)
-  if (!urlCheck.ok) return { error: urlCheck.error }
-  const refCheck = validateGitRef(ref)
-  if (!refCheck.ok) return { error: refCheck.error }
-  const dirCheck = unsafeArgvValue(targetDir, 'clone 目标目录')
-  if (dirCheck) return { error: `${dirCheck}（GLASSPANE_INSTALL_DIR/--repo 指定的目录不能以 "-" 开头）` }
-  return {
-    args: ['clone', '--branch', refCheck.ref, '--depth', '1', '--', urlCheck.url, String(targetDir)],
-    ref: refCheck.ref,
-    url: urlCheck.url,
-  }
-}
-
-/** 开跑前的两条硬闸（finding 4）。旧代码把 `process.env.HOME ?? ''` 直接拼进每一条路径：
- *  HOME 没设置时状态根变成 `./.glasspane`、LaunchAgents 的 plist 落进当前目录，而 launchd
- *  会拒收相对的 StandardOutPath；`sudo` 下整棵安装无声无息落进 /var/root（授权主体、
- *  socket、面板产物没有一样在用户手里）。两条都必须在**任何写入之前**拒绝。 */
-export function installGuard({ home = '', uid = null } = {}) {
-  const homeText = String(home ?? '')
-  if (!homeText) {
-    return {
-      ok: false,
-      error:
-        'HOME 未设置：安装产物、socket 与 ~/Library/LaunchAgents 的路径全部由它拼出来，'
-        + '缺了它这些会落到**当前目录**的相对位置（./.glasspane、./Library/LaunchAgents/…），'
-        + '而 launchd 直接拒收相对的 StandardOutPath——本轮没有写入任何东西。'
-        + '补救：在自己的登录 shell 里重跑（必要时 export HOME=/Users/<你>）；'
-        + '不要用 `sudo -u 某用户` / `env -u HOME` 这类形态起安装器。',
-    }
-  }
-  if (!path.isAbsolute(homeText)) {
-    return {
-      ok: false,
-      error: `HOME 必须是绝对路径，实为「${homeText}」：相对 HOME 会把状态根拼成 ${path.join(homeText, SOCKET_DIR_NAME)}，`
-        + 'plist 里的 StandardOutPath 也是相对的，launchd 不会收。补救：export HOME 成绝对路径后重跑。',
-    }
-  }
-  if (uid !== null && uid !== undefined && Number(uid) === 0) {
-    return {
-      ok: false,
-      error:
-        '当前是 uid 0（root / sudo）：GlassPane 是**用户级** launchd 代理与 TCC 授权，整棵安装会以 root 身份'
-        + '落进 /var/root（产物、socket、plist 都不是你登录账号的那一份），辅助功能授权主体也永远对不上。'
-        + '本安装不需要 sudo。补救：去掉 sudo 直接重跑同一条命令'
-        + '（curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh | sh，'
-        + '或 node installer/cli.js）。',
-    }
-  }
-  return { ok: true, home: homeText }
-}
-
-/** 读**本轮装出来的这一份**二进制自报的版本（finding 1）。
- *  `glasspaned --version` 从 1.9.0 起存在，打印 `glasspaned <version>`，与 hello 帧里的
- *  `version` 同源（engine/EngineCore.buildVersion，见 DaemonVersionFlagTests 的对称性闸）。
- *  只传 `--version`：真二进制对别的参数回 `unknown argument` + 退出码 64，夹具必须一样。
- *  有界超时（默认 5s）——读不到就如实说读不到，绝不编一个版本号。 */
-export function daemonBinaryVersion(binPath, { spawn = spawnSync, timeoutMs = 5000 } = {}) {
-  if (!binPath) return { ok: false, version: null, error: '没有可执行文件路径可查（产物缺失？）' }
-  let result
-  try {
-    result = spawn(binPath, ['--version'], { encoding: 'utf8', timeout: timeoutMs })
-  } catch (error) {
-    return { ok: false, version: null, error: `执行 ${binPath} --version 抛出 ${error?.message ?? error}` }
-  }
-  if (result?.error) {
-    return { ok: false, version: null, error: `执行 ${binPath} --version 失败（${result.error.code ?? result.error.message}）` }
-  }
-  if (result?.status !== 0) {
-    const first = String(result?.stderr ?? '').trim().split('\n')[0] || String(result?.stdout ?? '').trim().split('\n')[0] || '（无输出）'
-    return {
-      ok: false,
-      version: null,
-      error: `退出码 ${result?.status ?? 'null'}：${first}`
-        + '（1.9.0 之前的 glasspaned 不认 --version，正是这个形状——它报的 64 就是"unknown argument"）',
-    }
-  }
-  const line = String(result.stdout ?? '').trim()
-  const match = /^glasspaned\s+(\S+)$/.exec(line) ?? /^(\S+)$/.exec(line)
-  if (!match) {
-    return { ok: false, version: null, error: `${binPath} --version 的输出里读不出版本号：${JSON.stringify(line)}` }
-  }
-  return { ok: true, version: match[1], raw: line, binPath }
-}
-
-/** 收尾校验的真判据（finding 1）：**应答 hello 的那个 daemon 必须就是本轮装出来的这一份**。
- *  旧判据 `Boolean(arrived && hello?.version)` 对"陈旧 daemon 还占着 engine.sock"这件事
- *  完全失明——那正是 `--replace-daemon` 文档里描述的场景：安装器打印"daemon 已在监听…跳过启动"，
- *  hello.version 非空，于是打印"安装完成（退出码 0）"，而刚构建的那份从未起过。 */
-export function daemonVersionVerdict({ arrived = false, hello = null, binary = null } = {}) {
-  const helloVersion = hello?.version ?? null
-  if (!arrived || !helloVersion) {
-    return { verified: false, kind: 'no-hello', helloVersion, binaryVersion: binary?.version ?? null }
-  }
-  if (!binary?.ok) {
-    return { verified: false, kind: 'uncheckable', helloVersion, binaryVersion: null, detail: binary?.error ?? '未知原因' }
-  }
-  if (String(binary.version) !== String(helloVersion)) {
-    return { verified: false, kind: 'mismatch', helloVersion, binaryVersion: String(binary.version) }
-  }
-  return { verified: true, kind: 'match', helloVersion, binaryVersion: String(binary.version) }
-}
-
-/** 判据 → 屏幕上的话（纯函数）。三种"没通过"各说各的，措辞里不许有"通过"两个字。 */
-export function daemonVersionText({ kind, helloVersion, binaryVersion, detail, socketPath, daemonBin, cliPath, exitCode = 1 } = {}) {
-  const code = `本命令退出码 ${exitCode}：install.sh 与调用它的脚本/agent 按安装失败处理。`
-  if (kind === 'mismatch') {
-    return [
-      `安装未完成：应答 hello 的 daemon 自报 version=${helloVersion}，`
-      + `而本轮装出来的可执行文件 ${daemonBin} 自报 ${binaryVersion}——两者不是同一份产物。`,
-      `也就是说 ${socketPath} 上还挂着一个**旧构建**的 daemon，本轮构建/安置的那份从未接管。`,
-      `补救（先收拢旧实例，再让本轮产物接管）：node "${cliPath}" --replace-daemon`,
-      code,
-    ].join('\n')
-  }
-  if (kind === 'uncheckable') {
-    return [
-      `无法核对版本：应答 hello 的 daemon 自报 version=${helloVersion}，`
-      + `但本轮产物 ${daemonBin} 的 --version 读不出来（${detail}）。`,
-      '这一项检查**没有做成**，因此本轮不算校验通过——这不是"通过"，也不是"没通过"，是"没人验过"。',
-      `先确认产物：ls -l "${daemonBin}" 与 "${daemonBin}" --version（应打印 glasspaned <版本>），`
-      + `修好后重跑：node "${cliPath}" --replace-daemon`,
-      code,
-    ].join('\n')
-  }
-  return null
-}
-
-/** daemon 的 LaunchAgents plist 按 updater 同规格写：owner-only + 模式读回（finding 7）。
- *  旧写法 0644 把同一份文件（里面是本机装了哪些可执行、日志与 socket 的确切路径）摊给
- *  同机所有账号读；`updater/lib/launchd.js` 给自己的代理 plist 早就写 0600 并读回核对。
- *  chmod 没落住按**写失败**处理（与 ensureLogDir/openPrivateLog、updater 的 tightenMode 同一判据）。 */
-export function writePrivatePlist(plistPath, xml, {
-  write = (file, text) => fs.writeFileSync(file, text, { mode: STATE_FILE_MODE }),
-  chmod = fs.chmodSync,
-  statMode = (file) => fs.statSync(file).mode & 0o777,
-} = {}) {
-  try {
-    write(plistPath, xml)
-    chmod(plistPath, STATE_FILE_MODE)
-    const mode = statMode(plistPath)
-    if (mode !== STATE_FILE_MODE) {
-      return {
-        ok: false,
-        mode,
-        error: `${plistPath} 在 chmod(0600) 之后仍是 ${formatMode(mode)}：这台机器的卷不保存权限位，`
-          + 'owner-only 的 LaunchAgent 做不到（同一次写按失败算，不当成功报告）',
-      }
-    }
-    return { ok: true, mode, error: null }
-  } catch (error) {
-    return { ok: false, mode: null, error: `launchd plist 写不进去：${plistPath}（${error.message}）` }
-  }
-}
-
-/** 面板那一句"再起一次"必须落在真存在的东西上（finding 8）。
- *  `panel` 由 install() 用**已经算好的** settingsLaunchPath 结果传进来：
- *  `{ viaBundle, executable, app, exists }`。缺省时这里按同一口径自己去文件系统查一次——
- *  不是为了兼容旧调用方而放宽，而是因为"印一条没人能跑的 open"本身就是这条要修的 bug。 */
-export function panelOpenHint({ panel, rootDir, settingsApp = null, exists = (p) => fs.existsSync(p) } = {}) {
-  const fallbackExecutable = path.join(rootDir ?? '', 'engine', '.build', 'release', PANEL_EXE_NAME)
-  const fallbackApp = settingsApp ?? path.join(rootDir ?? '', 'engine', '.build', 'release', SETTINGS_APP_NAME)
-  const info = panel ?? {
-    viaBundle: Boolean(settingsApp),
-    executable: fallbackExecutable,
-    app: settingsApp ?? fallbackApp,
-  }
-  const target = info.viaBundle ? (info.app ?? fallbackApp) : (info.executable ?? fallbackExecutable)
-  const there = info.exists ?? Boolean(target && exists(target))
-  if (!there) {
-    return {
-      runnable: false,
-      target,
-      looked: [info.app ?? fallbackApp, info.executable ?? fallbackExecutable],
-      text: `本轮没有可执行的面板产物：找过 ${info.app ?? fallbackApp}（GlassPane.app）与 `
-        + `${info.executable ?? fallbackExecutable}（裸二进制 glasspane-settings），两个都不存在——`
-        + `没有 open 命令可给（用了 --no-app，或 make-app.sh 没有产出 bundle）。`
-        + '去掉 --no-app 重跑安装即可得到面板；在那之前权限引导只能人工在系统设置里做。',
-    }
-  }
-  return {
-    runnable: true,
-    target,
-    text: info.viaBundle
-      ? `open "${target}"`
-      : `直接执行裸二进制面板："${target}"（当前没有 .app bundle，所以不经 open、没有 bundle 身份）`,
-  }
-}
-
-/** clone 失败的归因（finding 9）：把 **git 自己的原话**交给读者，而不是把任何非零退出
- *  都算成"网络不可达或该发布 tag 不存在"。"destination path … already exists and is not an
- *  empty directory" 是真能走到的（bootstrapPlan 只拒绝"存在且父目录也不是仓库"的那种），
- *  被归因成网络问题时读者会一直重试一条永远不通的路。 */
-export function cloneFailureText({ ref, status, stderr = '', targetDir }) {
-  const detail = String(stderr ?? '').trim()
-  const head = `git clone 失败（ref '${ref}'，目标 ${targetDir}，退出码 ${status ?? 'null'}）。`
-  if (/already exists and is not an empty directory/i.test(detail)) {
-    return [
-      head,
-      `git 的原话：${detail}`,
-      `原因不是网络：目标目录已存在且不是空目录（${targetDir}）。`,
-      `补救：换目标目录（GLASSPANE_INSTALL_DIR=<空目录>，或 installer 用 --repo <目录>）重跑；`
-        + '确认该目录可以删除后再自行清理。',
-    ].join('\n')
-  }
-  if (detail) {
-    return [
-      head,
-      `git 的原话：${detail}`,
-      `（ref '${ref}' 不存在或网络不可达只是这份原话**可能**的成因之一，以原话为准。）`,
-    ].join('\n')
-  }
-  return [
-    head,
-    'git 没有留下 stderr，无法进一步归因；按 ref 不存在 / 网络不可达 / 目标目录不可写三条依次排查。',
-    `可用 GLASSPANE_REF=main 追主干，或 GLASSPANE_REF=<tag> 指定发布版。`,
-  ].join('\n')
-}
-
 /** 主安装流程；所有副作用步骤均记录真实执行结果，失败即抛错终止。
- *  返回值是收尾校验结论（`installOutcome`），入口守卫据此设退出码。
- *
- *  `uid` / `home` 是**测试接缝**（finding 4）：真实调用读 `process.getuid()` 与
- *  `env.HOME`；单测注入 uid=0 就能在不真的当 root 的前提下走同一条拒绝分支——
- *  这也是唯一能让"sudo 下静默装进 /var/root"这条可单测的地方。 */
-export async function install({
-  options = parseArgs([]).options,
-  env = process.env,
-  uid = typeof process.getuid === 'function' ? process.getuid() : null,
-} = {}) {
-
+ *  返回值是收尾校验结论（`installOutcome`），入口守卫据此设退出码。 */
+export async function install({ options = parseArgs([]).options, env = process.env } = {}) {
   const explicitRoot = options.repoDir ? path.resolve(options.repoDir) : null
   const envRoot = env.GLASSPANE_REPO ? path.resolve(env.GLASSPANE_REPO) : null
-
-  // finding 4：在任何写入/clone 之前先闸掉两种 HOME/uid 形态。旧代码直接把
-  // `process.env.HOME ?? ''` 拼进每一条路径，HOME 缺失或相对时状态根成了
-  // `./.glasspane`、plist 落进当前目录（launchd 拒收相对 StandardOutPath），
-  // 而 sudo 下整棵安装无声无息落进 /var/root。
-  const guard = installGuard({ home: env.HOME ?? '', uid })
-  if (!guard.ok) {
-    throw new Error(guard.error)
-  }
-  const homeDir = guard.home
-  const pinRef = resolvePinRef(env)
-
   let rootDir = explicitRoot ?? envRoot ?? resolveProjectRoot()
 
   if (!rootDir || !fs.existsSync(rootDir)) {
@@ -2109,29 +1638,19 @@ export async function install({
       throw new Error(repoMissingText())
     }
     const plan = bootstrapPlan({
-      homeDir,
+      homeDir: env.HOME ?? process.env.HOME ?? '',
       installDir: env.GLASSPANE_INSTALL_DIR ?? null,
-      repoUrl: env.GLASSPANE_REPO_URL ?? REPO_URL,
-      ref: pinRef,
+      ref: env.GLASSPANE_REF || REPO_REF,
     })
     if (plan.error) {
       throw new Error(`${plan.error}\n\n${repoMissingText()}`)
     }
     printStep(`未定位到本地仓库，引导 clone：${plan.targetDir}（ref: ${plan.ref}）……`)
-    // stderr 要留着归因（finding 9）：任何非零都算"网络不可达或 tag 不存在"会把
-    // "目标目录已存在且非空"这类本地故障说成网络问题，读者据此一直重试同一条死路。
-    const clone = spawnSync('git', plan.gitArgs, {
-      stdio: ['inherit', 'inherit', 'pipe'],
-      encoding: 'utf8',
-    })
+    const clone = spawnSync('git', plan.gitArgs, { stdio: 'inherit' })
     if (clone.status !== 0) {
       throw new Error(
-        `${cloneFailureText({
-          ref: plan.ref,
-          status: clone.status,
-          stderr: clone.stderr ?? clone.error?.message ?? '',
-          targetDir: plan.targetDir,
-        })}\n\n${repoMissingText()}`,
+        `git clone 失败（ref '${plan.ref}'，退出码 ${clone.status ?? 'null'}）：`
+        + '网络不可达或该发布 tag 不存在。\n\n' + repoMissingText(),
       )
     }
     if (resolveProjectRoot(plan.targetDir) === null) {
@@ -2141,27 +1660,32 @@ export async function install({
   }
 
   // 发布 tag GPG 验签：动作怎么落由 `tagVerifyDecision` 判（纯函数，有单测）。
-  // `pinRef` 沿用上面 `resolvePinRef(env)` 那一次读取——合并时这里曾各自再读一遍
-  // （`env.GLASSPANE_REF || REPO_REF`），那份把"置空 GLASSPANE_REF"读成追主干，与
-  // install.sh 侧不同源；一个事实只留一处读法。
+  const pinRef = env.GLASSPANE_REF || REPO_REF
   if (pinRef !== 'main' && repoHasRef(rootDir, pinRef)) {
     const sig = verifyCloneTagGpg({ repoDir: rootDir, ref: pinRef })
-    const verdict = tagVerifyDecision({ sig, pinRef, repoDir: rootDir })
+    // 先判"签名对不对"，再判"要装的是不是被签的那棵树"——两问分开，绿字才只在对得上时出现。
+    const verdict = tagVerifyAgainstTree({
+      verdict: tagVerifyDecision({ sig, pinRef, repoDir: rootDir }),
+      tree: tagTreeAgreement({ repoDir: rootDir, ref: pinRef }),
+      pinRef,
+      repoDir: rootDir,
+    })
     if (verdict.action === 'refuse') throw new Error(verdict.text)
     printStep(paint(verdict.text, verdict.action === 'pass' ? 'green' : 'yellow'))
   }
 
   const engineDir = path.join(rootDir, 'engine')
   const buildDir = path.join(engineDir, '.build', 'release')
-  const socketPath = path.join(homeDir, SOCKET_DIR_NAME, SOCKET_FILE_NAME)
-  const daemonBin = path.join(buildDir, DAEMON_EXE_NAME)
-  const settingsBin = path.join(buildDir, PANEL_EXE_NAME)
-  const daemonLog = path.join(homeDir, SOCKET_DIR_NAME, DAEMON_LOG_NAME)
+  const socketPath = path.join(process.env.HOME ?? '', SOCKET_DIR_NAME, SOCKET_FILE_NAME)
+  const daemonBin = path.join(buildDir, 'glasspaned')
+  const settingsBin = path.join(buildDir, 'glasspane-settings')
+  const daemonLog = path.join(process.env.HOME ?? '', SOCKET_DIR_NAME, DAEMON_LOG_NAME)
+  // 收尾那句"实测校验通过"要说实话，就得知道应答的实例是不是本次安装启动/重启的那一份。
+  let servedByEarlierInstance = false
   // bundle 安置计划（P1 v1.2 §11.1）：--no-app 时 appPackaged=false，后续一律
-  // 回退裸二进制并如实告警。路径一律用**闸过的** homeDir（旧代码在这里和 1630 行
-  // 各读一次 process.env.HOME，与上面 env.HOME 的 clone 口径是三套）。
+  // 回退裸二进制并如实告警。
   const plan = bundlePlan({
-    homeDir,
+    homeDir: process.env.HOME ?? '',
     buildDir,
     appPackaged: options.app,
   })
@@ -2212,31 +1736,11 @@ export async function install({
     ], { cwd: engineDir })
     // 安置到 ~/Applications：TCC 条目要能被用户在系统设置的「+」选择器与
     // Finder 里找到，隐藏目录 `.build` 里的产物做不到这一点（P1 v1.2 §11.1）。
-    //
-    // finding 12：`rm -rf ~/Applications/GlassPane*.app` 是本流程里两件破坏性动作之一
-    // （另一件是结束在跑的实例 / bootout 已加载作业）。`--no-prompt` 过去是**惰性**的
-    // ——confirm() 没有任何调用方，README 与 --help 却写着"跳过每步确认"。现在它真的有
-    // 一档可跳过：交互终端里会问一句；`--no-prompt` 直接放行；非交互又没给 flag 则不覆盖
-    // （install.sh 在 stdin 非 TTY 时本来就会补 --no-prompt，CI/e2e 与 `curl | sh` 行为不变）。
-    const replaceTargets = bundlesToReplace({ plan })
-    let allowReplace = true
-    if (replaceTargets.length > 0) {
-      allowReplace = await confirm(
-        `将用本轮产物覆盖已存在的 .app：${replaceTargets.join('、')}`,
-        { autoYes: options.prompt === false },
-      )
-      if (!allowReplace) {
-        printStep(paint('未确认覆盖：保留现有 .app，本轮不安置新 bundle（脚本场景请加 --no-prompt）', 'yellow'))
-      }
-    }
-    const bundles = installBundles({ plan, allowReplace })
-    for (const app of bundles.installed) {
+    const installed = installBundles({ plan })
+    for (const app of installed) {
       printStep(`已安置：${app}`)
     }
-    for (const app of bundles.declined) {
-      printStep(paint(`未覆盖（回答跳过）：${app}——里面还是上一轮的产物`, 'yellow'))
-    }
-    if (bundles.installed.length === 0 && bundles.declined.length === 0) {
+    if (installed.length === 0) {
       printStep('未安置任何 .app（make-app.sh 未产出 bundle），后续按裸二进制形态运行')
     }
   }
@@ -2260,7 +1764,7 @@ export async function install({
   // 下面这份 plist 的 StandardOutPath/StandardErrorPath 就写在那个目录里，而
   // RunAtLoad 让 launchd 成为第一个往那里写的 spawner（全新机器上目录原本不存在）。
   if (options.launchd) {
-    const launchAgentsDir = path.join(homeDir, ...LAUNCHD_DIR_NAME.split('/'))
+    const launchAgentsDir = path.join(process.env.HOME ?? '', ...LAUNCHD_DIR_NAME.split('/'))
     const plistPath = path.join(launchAgentsDir, LAUNCHD_FILE_NAME)
     fs.mkdirSync(launchAgentsDir, { recursive: true })
     if (!fs.existsSync(daemonLaunch.path)) {
@@ -2272,45 +1776,12 @@ export async function install({
       socketPath,
       logPath: daemonLog,
     })
-    // finding 12：bootout 一个**已加载且健康**的作业会打断它正在跑的 act，这一步和
-    // 覆盖 .app 一样是破坏性的。先只读探一次（launchdReregisterProbe），只有真的会
-    // 卸掉在跑的东西才问；不需要 bootout 的常规 bootstrap 照旧不问。
-    // **顺序要紧**：确认在写盘之前。反过来先写 plist 再问，人回答"跳过"之后磁盘上就是
-    // 新定义、launchd 里还是旧定义——那正是本文件 L~620 注释里 EX_CONFIG 的来路，而
-    // bootoutDeclined 那句"什么都没改"也会当场变成假话。
-    let allowBootout = true
-    const probe = launchdReregisterProbe(daemonLaunch.path)
-    if (probe.loaded && probe.needsReregister) {
-      allowBootout = await confirm(
-        `launchd 里已加载 ${LAUNCHD_LABEL}（程序：${probe.program ?? '（未读到）'}），`
-        + '卸载它才能换新定义——这会打断正在跑的 daemon',
-        { autoYes: options.prompt === false },
-      )
-      if (!allowBootout) {
-        throw new Error(`开机自启未重注册，且**没有**改写 ${plistPath}：未确认 bootout 已加载的 `
-          + `${LAUNCHD_LABEL}（launchd 里跑的还是 ${probe.program ?? '（未读到）'}）。`
-          + '要保留旧作业就什么都不用做；要让新定义生效，在交互终端重跑本命令并回答继续，'
-          + '或在脚本/自动化里显式加 --no-prompt。')
-      }
-    }
-    // finding 7：这份 plist 写的是本机装了哪些可执行、socket 与日志的确切路径，
-    // 过去以 0644 落在 ~/Library/LaunchAgents（同机任何账号可读），而
-    // updater/lib/launchd.js 给自己的代理 plist 早就写 0600 并把模式读回。
-    // 现在同规格：0600 + 读回核对，读不回来说的是**实际模式**而不是"应该已经私有"。
-    const plistWrite = writePrivatePlist(plistPath, plistXml)
-    if (!plistWrite.ok) {
-      printStep(paint(`launchd plist 未能写成 owner-only：${plistWrite.error}`, 'red'))
-    }
+    fs.writeFileSync(plistPath, plistXml, { mode: 0o644 })
     const bootstrapResult = launchctlBootstrap(LAUNCHD_LABEL, plistPath, {
       desiredProgram: daemonLaunch.path,
-      allowBootout,
     })
     if (!bootstrapResult.ok) {
-      throw new Error(
-        bootstrapResult.bootoutDeclined
-          ? `launchd 未重注册（未确认 bootout）：${bootstrapResult.message}`
-          : `launchd 注册失败：${bootstrapResult.message}`,
-      )
+      throw new Error(`launchd 注册失败：${bootstrapResult.message}`)
     }
     printStep(bootstrapResult.already ? bootstrapResult.message : `开机自启已注册（${plistPath}）`)
   }
@@ -2340,43 +1811,23 @@ export async function install({
     if (staleDaemons.length > 0 || stalePanels.length > 0) {
       const summary = `daemon ${staleDaemons.join(',') || '无'}｜面板 ${stalePanels.join(',') || '无'}`
       if (options.replaceDaemon) {
-        // finding 12：结束在跑的实例是第二件破坏性动作（它会打断正在进行的 act，
-        // 而 daemon 侧的 SIGTERM 收尾是"清理 socket 后退出"）。`--no-prompt` 放行、
-        // 交互终端问一句、非交互且没给 flag 则不动别人的进程。
-        const mayTerminate = await confirm(
-          `将结束已在跑的实例（${summary}），其间正在执行的 act 会被打断`,
-          { autoYes: options.prompt === false },
+        const result = terminatePids([...staleDaemons, ...stalePanels])
+        printStep(
+          result.forced.length > 0
+            ? `既有实例已收拢（SIGTERM 未生效、已强杀：${result.forced.join(', ')}）`
+            : `已结束既有实例：${result.terminated.join(', ')}`,
         )
-        if (!mayTerminate) {
-          printStep(paint('未确认：没有结束任何在跑的实例（脚本场景请加 --no-prompt）', 'yellow'))
-        } else {
-          const result = terminatePids([...staleDaemons, ...stalePanels])
-          // finding 5：`terminated` 现在只含**SIGKILL 之后再探一次确实不在**的 pid。
-          // 旧实现把每条 kill 的退出码丢掉、直接报"已结束既有实例：<全部 pid>"，于是
-          // root 所有的陈旧 daemon（kill 与 kill -0 都回 EPERM）被说成已经结束，而它还在
-          // 服务同一个 socket。这类 pid 进 survivors，必须单独用红字点名。
-          printStep(
-            result.forced.length > 0
-              ? `既有实例已收拢（SIGTERM 未生效、已强杀：${result.forced.join(', ')}）`
-              : `已结束既有实例：${result.terminated.join(', ')}`,
-          )
-          if (result.survivors.length > 0) {
-            for (const line of survivorText(result.survivors, { socketPath }).split('\n')) {
-              printStep(paint(line, 'red'))
-            }
-          }
-          // 收拢旧实例后主动让 launchd 接管：TERM 现在是 clean exit 0，KeepAlive
-          // (SuccessfulExit=false) 语义下 launchd 不会自动复活，必须 kickstart。
-          // 不这么做就会退化成"手动实例持有 socket"，开机自启那份配置形同虚设。
-          if (staleDaemons.length > 0 && options.launchd) {
-            const runUid = String(spawnSync('id', ['-u'], { encoding: 'utf8' }).stdout.trim())
-            if (runUid) {
-              spawnSync('launchctl', launchdKickstartArgs({ label: LAUNCHD_LABEL, uid: runUid }))
-              relaunchedByLaunchd = await waitForSocket(socketPath)
-              printStep(relaunchedByLaunchd
-                ? 'launchd 已按新配置接管 daemon（kickstart）'
-                : 'launchd 未在时限内接管，改由安装器直接启动')
-            }
+        // 收拢旧实例后主动让 launchd 接管：TERM 现在是 clean exit 0，KeepAlive
+        // (SuccessfulExit=false) 语义下 launchd 不会自动复活，必须 kickstart。
+        // 不这么做就会退化成"手动实例持有 socket"，开机自启那份配置形同虚设。
+        if (staleDaemons.length > 0 && options.launchd) {
+          const uid = String(spawnSync('id', ['-u'], { encoding: 'utf8' }).stdout.trim())
+          if (uid) {
+            spawnSync('launchctl', launchdKickstartArgs({ label: LAUNCHD_LABEL, uid }))
+            relaunchedByLaunchd = await waitForSocket(socketPath)
+            printStep(relaunchedByLaunchd
+              ? 'launchd 已按新配置接管 daemon（kickstart）'
+              : 'launchd 未在时限内接管，改由安装器直接启动')
           }
         }
       } else {
@@ -2390,6 +1841,9 @@ export async function install({
       }
     }
     if (relaunchedByLaunchd || await socketReachable(socketPath)) {
+      // launchd 刚 kickstart 起来的那一份算"本次重启的"；纯粹是 socket 早就有人听着，
+      // 就是别人（很可能是上一版）在服务。
+      servedByEarlierInstance = !relaunchedByLaunchd
       printStep(`daemon 已在监听 ${socketPath}，跳过启动（若为旧构建实例，用 --replace-daemon 重跑）`)
     } else {
       const start = daemonStartCommand({ daemonLaunch, daemonApp: plan.daemonApp, socketPath })
@@ -2412,21 +1866,10 @@ export async function install({
     }
   }
 
-  // 面板的真实落点（finding 8）：bundle 优先/裸二进制兜底**在这里**算一次，GUI 启动与
-  // 「后续使用说明」共用这一份结论。旧代码只在 options.gui 分支里算，说明文本另拼一个
-  // `~/Applications/GlassPane.app` 或从没构建过的 `.build/release/GlassPane.app`——
-  // `--no-app`/什么都没安置时印出来的那句 `open "…"` 指的是一条不存在的路径。
-  const guiLaunch = settingsLaunchPath({ plan, bareBin: settingsBin })
-  const panel = {
-    viaBundle: guiLaunch.viaBundle,
-    executable: guiLaunch.path,
-    app: plan.settingsApp,
-    exists: Boolean(guiLaunch.path) && fs.existsSync(guiLaunch.path),
-  }
-
   let guiOpened = false
   if (options.gui) {
-    if (!panel.exists) {
+    const guiLaunch = settingsLaunchPath({ plan, bareBin: settingsBin })
+    if (!fs.existsSync(guiLaunch.path)) {
       throw new Error(`设置面板产物不存在：${guiLaunch.path}`)
     }
     const guiStart = guiStartCommand({ guiLaunch, settingsApp: plan.settingsApp })
@@ -2451,41 +1894,25 @@ export async function install({
   const daemonExpected = Boolean(options.daemon || options.launchd)
   const arrived = await waitForSocket(socketPath, { timeoutMs: daemonExpected ? 12000 : 1 })
   const hello = arrived ? await socketHello(socketPath) : null
-  // finding 1（P0）：`Boolean(arrived && hello?.version)` 对"陈旧 daemon 还占着 socket"
-  // 完全失明——那正是 --replace-daemon 文档里描述的场景：hello.version 非空 → 打印
-  // "安装完成（退出码 0）"，而本轮刚构建的那份从未起过。现在拿**本轮产物自己**当对照：
-  // `glasspaned --version` 打印的就是 hello 帧里那个 version（同源于 EngineCore.buildVersion），
-  // 两者不一致 = 服务 socket 的不是这一份 → verified=false。产物跑不起来时说的是
-  // "这项检查没做成"，同样 verified=false，绝不把它当成通过。
-  const binaryProbe = arrived && hello?.version
-    ? daemonBinaryVersion(daemonLaunch.path)
-    : { ok: false, version: null, error: 'socket 没人应答 hello，没有可对照的另一边' }
-  const verdict = daemonVersionVerdict({ arrived, hello, binary: binaryProbe })
-  const verified = verdict.verified
+  const builtVersion = builtDaemonVersion({ daemonBin })
+  const { verified, note } = installVerification({
+    arrived,
+    helloVersion: hello?.version ?? null,
+    builtVersion,
+    servedByEarlierInstance,
+  })
   const outcome = installOutcome({ verified, daemonExpected })
-  const cliPath = path.join(rootDir, 'installer', 'cli.js')
   if (verified) {
-    printStep(`实测校验通过：daemon 在 ${socketPath} 应答 hello（version=${hello.version}，与本轮产物 ${daemonLaunch.path} 自报的 ${verdict.binaryVersion} 一致${hello.pid ? `，pid=${hello.pid}` : ''}）`)
+    printStep(`实测校验通过：daemon 在 ${socketPath} 应答 hello（version=${hello.version}${hello.pid ? `，pid=${hello.pid}` : ''}，本轮构建产物=${builtVersion}）`)
+    if (note) printStep(paint(note, 'yellow'))
     printStep(`安装完成（退出码 ${outcome.exitCode}）。`)
-  } else if (daemonExpected && (verdict.kind === 'mismatch' || verdict.kind === 'uncheckable')) {
-    for (const line of daemonVersionText({
-      kind: verdict.kind,
-      helloVersion: verdict.helloVersion,
-      binaryVersion: verdict.binaryVersion,
-      detail: verdict.detail,
-      socketPath,
-      daemonBin: daemonLaunch.path,
-      cliPath,
-      exitCode: outcome.exitCode,
-    }).split('\n')) {
-      printStep(paint(line, 'red'))
-    }
   } else if (daemonExpected) {
+    if (note) printStep(paint(note, 'red'))
     for (const line of verificationFailureText({
       arrived,
       socketPath,
       daemonLog,
-      cliPath,
+      cliPath: path.join(rootDir, 'installer', 'cli.js'),
       exitCode: outcome.exitCode,
     }).split('\n')) {
       printStep(paint(line, 'red'))
@@ -2504,10 +1931,6 @@ export async function install({
     daemonVerified: verified,
     daemon: daemonLaunch,
     settingsApp: plan.settingsApp ?? undefined,
-    // finding 8：面板那句"再起一次 open …"必须落在真的存在的东西上。这里给的是
-    // **已经算好的** settingsLaunchPath 结果（bundle 优先、裸二进制兜底 + 实测存在），
-    // 不是猜出来的路径。
-    panel,
     update,
   })}\n`)
   return outcome

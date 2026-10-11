@@ -11,13 +11,6 @@ import Foundation
 /// existing name is only removed when it demonstrably has no listener behind it,
 /// or when the operator passed the explicit force flag (`preemptsExistingSocket`,
 /// wired from `--force-socket`).
-///
-/// "No listener" is **not** the same claim as "safe to remove" (X-24): a regular
-/// file, a directory or a symlink also has no listener behind it — a regular file
-/// answers `connect()` with ECONNREFUSED/ENOTSOCK, which is exactly what
-/// `DaemonProbe` classifies as `.noListener`. So every unlink site here is
-/// preceded by an `lstat` that requires `S_ISSOCK`; anything else is a fatal
-/// refusal that names the path and says what it is, and is never removed.
 public final class SocketServer {
 
     public let socketPath: String
@@ -110,10 +103,6 @@ public final class SocketServer {
     /// retry. Every failure path closes only the descriptor it created and
     /// throws, and none of them touches `listenFD`.
     private func openListenSocket() throws -> Int32 {
-        // X-24 (P0): measure the name **before** any path that can remove it,
-        // including the force path — `--force-socket` is intent to displace a
-        // *listener*, not intent to delete whatever happens to live here.
-        try SocketServer.refuseNonSocketNameAtTakeover(site: socketPath)
         if preemptsExistingSocket {
             // --force-socket: main.swift has already named the incumbent this
             // run is displacing, so removing a live name *is* the intent.
@@ -129,11 +118,12 @@ public final class SocketServer {
                 guard case .noListener(let reason) = incumbent else {
                     throw SocketErrorResponse.nameOccupied(detail)
                 }
-                // Re-measured at the unlink site on purpose: `takeoverDecision`
-                // maps `.noListener` to `.bind`, and a *regular file* answers a
-                // connect with ECONNREFUSED/ENOTSOCK — so "no listener" is a
-                // statement about listeners, never permission to delete an inode.
-                try SocketServer.refuseNonSocketNameAtTakeover(site: socketPath)
+                // "没有 daemon 在应答" 不等于 "这是个可以删的残留 socket"。ENOTSOCK 也被算进
+                // noListener，而普通文件/目录/FIFO/悬空链接都回它——这一眼 lstat 是本方法与
+                // 文件头那句承诺（只在"确实证明无主"时才移除）之间唯一的差别。
+                guard DaemonProbe.nameIsClearableSocketName(socketPath) else {
+                    throw SocketErrorResponse.nameOccupied(DaemonProbe.nonSocketNameDescription(socketPath))
+                }
                 log.info("removing stale socket \(socketPath) (\(reason))")
                 unlink(socketPath)
                 // One retry only: a second EADDRINUSE is a real race with
@@ -195,9 +185,7 @@ public final class SocketServer {
 
     // MARK: - Directory isolation (R5-04)
 
-    /// Enforce the 0700 isolation this type's documentation claims. This call
-    /// site is a thin wrapper over `ensureIsolatedSocketDirectory`, which
-    /// `ProbeSocketServer` runs through the same rules (X-25).
+    /// Enforce the 0700 isolation this type's documentation claims.
     ///
     /// `createDirectory(attributes:)` only applies to directories **this call
     /// creates**; ~/.glasspane is normally already there (the mcp-shell registry
@@ -214,23 +202,7 @@ public final class SocketServer {
     /// need of isolation (a maintenance run under `/var/folders` or `/tmp`)
     /// skipping it while still binding the socket.
     private func prepareSocketDirectory() throws {
-        try SocketServer.ensureIsolatedSocketDirectory(
-            directory: (socketPath as NSString).deletingLastPathComponent,
-            log: log
-        )
-    }
-
-    /// The one implementation of the socket-directory rule set (R5-04), shared
-    /// with `ProbeSocketServer` instead of copied into it (X-25).
-    ///
-    /// Why this is a **refusal** and not a best-effort chmod: a probe listener
-    /// sitting in a directory another account can write to is not merely
-    /// observable, it is *hijackable* — that account can unlink `probe.sock`
-    /// and bind the name itself, so the app-under-test's probe stream goes to
-    /// the attacker while the daemon keeps reporting "no probe attached",
-    /// silently disabling attribution and checkpoint rollback. Serving from such
-    /// a directory is therefore worse than not binding it.
-    static func ensureIsolatedSocketDirectory(directory: String, log: EngineLog) throws {
+        let directory = (socketPath as NSString).deletingLastPathComponent
         guard !directory.isEmpty else { return }
         try FileManager.default.createDirectory(
             atPath: directory,
@@ -242,13 +214,7 @@ public final class SocketServer {
             log.info("socket directory \(directory) is outside \(home) — isolating it by ownership, not by home scope")
         }
         guard chmod(directory, 0o700) == 0 else {
-            let code = errno
-            // Still measure the directory: "chmod failed" alone leaves the reader
-            // guessing whether this is a 0755 folder or someone else's.
-            throw SocketErrorResponse.insecureDirectory(
-                directory,
-                "chmod(0700) failed: \(String(cString: strerror(code))); permission is \(measuredPermission(of: directory)) and cannot be set to 0700"
-            )
+            throw SocketErrorResponse.system(errno, "chmod(0700) \(directory)")
         }
         let attributes = (try? FileManager.default.attributesOfItem(atPath: directory)) ?? [:]
         guard !attributes.isEmpty else {
@@ -270,67 +236,6 @@ public final class SocketServer {
             throw SocketErrorResponse.insecureDirectory(
                 directory, "permission is \(String(format: "%04o", Int(mode))) and cannot be set to 0700")
         }
-    }
-
-    /// The permission bits actually on disk, as measured — never as intended.
-    private static func measuredPermission(of path: String) -> String {
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
-              let mode = (attributes[.posixPermissions] as? NSNumber)?.int16Value else {
-            return "unreadable"
-        }
-        return String(format: "%04o", Int(mode))
-    }
-
-    // MARK: - Takeover measurement (X-24)
-
-    /// What is actually sitting at `path`, or nil when the name is free or is
-    /// genuinely a socket.
-    ///
-    /// `lstat`, not `stat`: a **symlink** has to answer as itself. Following it
-    /// would let a planted link resolve to some other account's socket, which is
-    /// exactly the object the takeover must never unlink.
-    ///
-    /// An `lstat` that fails for any reason other than "no such file" also
-    /// answers non-nil (with the errno, so the reader can tell a permission
-    /// problem from a missing directory): undetermined means unprotected, and
-    /// the only safe action for a name we cannot classify is to leave it alone.
-    public static func nonSocketInodeKind(at path: String) -> String? {
-        var info = stat()
-        guard lstat(path, &info) == 0 else {
-            let code = errno
-            if code == ENOENT { return nil }
-            return "a name that cannot be inspected (lstat: \(String(cString: strerror(code))))"
-        }
-        // `S_IFMT`/`S_IF*` come in as `Int32` on Darwin while `st_mode` is a
-        // `mode_t` (`UInt16`), so the masking is done in `Int` — the widths only
-        // line up that way (verified against a standalone `lstat` fixture).
-        let inodeType = Int(info.st_mode) & Int(S_IFMT)
-        switch inodeType {
-        case Int(S_IFSOCK): return nil
-        case Int(S_IFDIR): return "a directory"
-        case Int(S_IFLNK): return "a symlink"
-        case Int(S_IFREG): return "a regular file"
-        case Int(S_IFCHR): return "a character device"
-        case Int(S_IFBLK): return "a block device"
-        case Int(S_IFIFO): return "a FIFO"
-        default: return "a non-socket inode (S_IFMT 0o\(String(inodeType, radix: 8)))"
-        }
-    }
-
-    /// The guard in front of **every** unlink of a name this run is about to
-    /// take over: a regular file, a directory, a symlink or anything else that
-    /// is not a socket is a fatal refusal, and it is never removed.
-    ///
-    /// The reachable defect this closes is not theoretical — `installer/cli.js`
-    /// writes a caller-supplied `--socket-path` straight into the launchd plist,
-    /// so `glasspaned --socket-path ~/.ssh/id_rsa` used to reach
-    /// `DaemonProbe`'s "no listener" verdict (a regular file answers connect
-    /// with ECONNREFUSED/ENOTSOCK, which is precisely what that classification
-    /// accepts), unlink the private key and bind a socket in its place. The
-    /// shutdown `sigwait` path unlinked it again.
-    static func refuseNonSocketNameAtTakeover(site path: String) throws {
-        guard let kind = SocketServer.nonSocketInodeKind(at: path) else { return }
-        throw SocketErrorResponse.notASocket(path, kind)
     }
 
     // MARK: - Connection service
@@ -430,9 +335,6 @@ public enum SocketErrorResponse: Error, CustomStringConvertible {
     case nameOccupied(String)
     /// The socket directory cannot be brought to (or kept at) 0700.
     case insecureDirectory(String, String)
-    /// The name we would have to remove in order to bind is **not a socket**
-    /// (X-24). Removing it is deleting a file the daemon was never given.
-    case notASocket(String, String)
 
     public var description: String {
         switch self {
@@ -443,40 +345,10 @@ public enum SocketErrorResponse: Error, CustomStringConvertible {
         case .nameOccupied(let detail):
             return "socket name in use: \(detail) — refusing to unlink a live socket; pass --force-socket to pre-empt explicitly"
         case .insecureDirectory(let path, let detail):
-            return "socket directory \(path) is not isolated: \(detail) — refusing to serve from it, because evidence archives, the approval chain and the project registry would be readable by other accounts and a socket name in a directory somebody else can write is a name they can unlink and rebind for themselves"
-        case .notASocket(let path, let kind):
-            return "socket path \(path) is \(kind), not a socket — refusing to remove it and refusing to bind here. Nothing was unlinked; move this run's --socket-path to a name that is free, or remove \(path) yourself."
+            return "socket directory \(path) is not isolated: \(detail) — refusing to serve, because evidence archives, the approval chain and the project registry would be readable by other accounts"
         }
     }
 }
 
 /// Legacy-compatible error name.
 typealias SocketServerError = SocketErrorResponse
-
-/// The `--socket-path` / `--probe-socket-path` value rule (X-22's sibling for
-/// named sockets).
-///
-/// Why the *parser* has to decide this, before any directory is touched: a
-/// socket path is a path whose **parent this run chmods to 0700**
-/// (`SocketServer.ensureIsolatedSocketDirectory`). A relative value therefore
-/// tightens whatever directory the daemon happened to be started in —
-/// `glasspaned --socket-path ./s.sock` from ~/Documents chmods ~/Documents to
-/// 0700 — and that chmod **survives** the later bind failure and the exit, so
-/// the user is left with a locked-down Documents folder and no daemon. Same
-/// reason `--state-dir` has demanded an absolute path since X-22: a relative
-/// location means "wherever this process was started from", which is not a
-/// location anybody named.
-///
-/// The rule set is `StateRootArgument`'s, deliberately: the two spellings of a
-/// named location must not be able to disagree about what counts as a path, so
-/// this type only forwards and never re-states the checks. Exposed as a pure
-/// function because `main.swift` is an executable target a unit test cannot
-/// reach — the daemon calls it and the test calls the same code.
-public enum SocketPathArgument {
-
-    /// Why `raw` cannot name a socket path, or nil when it can. The reason is
-    /// phrased to follow the flag name, exactly like `--state-dir`'s.
-    public static func rejection(for raw: String?) -> String? {
-        StateRootArgument.rejection(for: raw)
-    }
-}

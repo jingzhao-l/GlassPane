@@ -82,22 +82,39 @@ Things worth knowing, because they are the usual way this is set up wrong:
    node ../../tools/fork-diff.mjs --record
    node ../../tools/tool-surface.mjs --record
    node ../../tools/brand-surface.mjs --record
-   git add -A && git commit -m "harness: v0.4.0"
+   # Stage by name, never `git add -A`: this monorepo is routinely held dirty by a
+   # parallel lane (the engine/MCP-shell daily run works in the same checkout), and an
+   # `-A` here commits their half-finished work under my message. `git status --porcelain`
+   # before and after, and the after-list must contain only the files this batch touched.
+   git add ../../harness/contracts/fork-diff.json ../../harness/contracts/tool-surface.json
+   git add packages/opencode/script/publish.ts ../../.github/workflows/harness-contract.yml
+   git commit -F /var/tmp/gp-release-commit-message
    ```
 
 3. **Push, then sync the split** (the published repository is a subtree of this monorepo):
 
    ```bash
-   git push origin harness/fork-import
+   git push origin main
    git subtree split --prefix=harness/glasspane-harness -b split/glasspane-harness
-   git push --force https://github.com/jingzhao-l/glasspane-harness.git \
+   # Prove the split before publishing it: the branch's tree must be byte-for-byte the
+   # directory in this commit. A previous release lost seven files that were on disk but
+   # never committed, and every fork-side check still passed because the four-bucket
+   # comparison runs against the working tree.
+   test "$(git rev-parse split/glasspane-harness^{tree})" = "$(git rev-parse HEAD:harness/glasspane-harness)"
+   # Then a normal push. `--force` is not the default step: the split branch is
+   # fast-forward whenever nobody rewrote it, and an unconditional force silently
+   # discards commits the remote had that this one does not. Only if the remote genuinely
+   # moved ahead — and only after writing down in SYNCLOG.md which commits are being
+   # overwritten and why — use a lease that names the expected SHA:
+   git push https://github.com/jingzhao-l/glasspane-harness.git \
      split/glasspane-harness:refs/heads/main
+   # fallback: --force-with-lease=split/glasspane-harness:<expected-remote-sha>
    ```
 
 4. **Tag** the same tree that is on `main` — the tag *is* the release identity:
 
    ```bash
-   git push --force https://github.com/jingzhao-l/glasspane-harness.git \
+   git push https://github.com/jingzhao-l/glasspane-harness.git \
      split/glasspane-harness:refs/tags/v0.4.0
    ```
 
