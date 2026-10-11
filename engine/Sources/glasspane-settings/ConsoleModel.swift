@@ -467,11 +467,6 @@ final class ConsoleModel: ObservableObject {
     }
 
     /// 选中项在列表里的位置（详情页上下翻页用）。
-    var selectedIndex: Int? {
-        guard let operationId = selectedOperationId else { return nil }
-        return filteredSummaries.firstIndex { $0.operationId == operationId }
-    }
-
     // MARK: - 写入动作（一律经 daemon CLI）
 
     /// 先向 daemon 要一次 `--project-prune --dry-run`，把**它的**命中清单摊开给人确认。
@@ -485,9 +480,12 @@ final class ConsoleModel: ObservableObject {
         guard !isPreparingPrunePreview else { return }
         isPreparingPrunePreview = true
         let binary = daemonBinaryPath
+        // 状态根必须显式点名（与另三条控制台命令同一个组装函数）：预览读的是哪张表，
+        // 就得是面板这一页正在显示的那张根，否则摊给人看的清单来自另一个实例。
+        let args = ConsoleModel.daemonCLIArguments(
+            ["--project-prune", "--dry-run"], stateRoot: stateRoot.path)
         Task.detached(priority: .userInitiated) {
-            let run = ConsoleModel.runDaemonCLI(
-                binary: binary, arguments: ["--project-prune", "--dry-run"])
+            let run = ConsoleModel.runDaemonCLI(binary: binary, arguments: args)
             await MainActor.run {
                 self.isPreparingPrunePreview = false
                 switch Self.prunePreviewOutcome(
