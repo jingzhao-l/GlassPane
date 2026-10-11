@@ -60,6 +60,15 @@ const CAPABILITY_REMEDY = "start or update the GlassPane background service, the
  * (`audit_ui` landed after this file was written), and a copied list would let the
  * harness claim support it does not have.
  *
+ * The capability asked for is the **method's own wire name**, and that is a fact about the
+ * engine, not a convention we chose: `hello.capabilities` is derived from its method table
+ * (`FrameCodec.swift`, `EngineMethod.capabilityWireNames` = every method except `hello` and
+ * `shutdown`), so "does this engine do M" and "does hello advertise M" are the same
+ * question. Taking the capability as a separate argument is how `gp_attach` ended up gated on
+ * `"observe"` — a check that answered a different question than the one being asked, refusing
+ * an engine that supports attach-without-observe and waving through the reverse. Callers who
+ * need a different capability string need a reason the engine can state; there is none today.
+ *
  * The two refusals here are not the same claim, and only one of them is ours to
  * word. When `hello` advertised a list and the capability is not in it, "does not
  * advertise" is measured. When `hello` itself failed — timed out, found the
@@ -70,13 +79,13 @@ const CAPABILITY_REMEDY = "start or update the GlassPane background service, the
  * daemon does not speak this method, and sent the user off to restart a service that
  * was fine.
  */
-export const requireCapability = (tool: string, method: string, capability: string) =>
+export const requireCapability = (tool: string, method: string) =>
   Effect.map(Daemon.probeCapabilities(), (probe): Tool.ExecuteResult | undefined => {
     if (!probe.ok) return refused(tool, method, probe.error)
-    if (probe.report.capabilities.includes(capability)) return undefined
+    if (probe.report.capabilities.includes(method)) return undefined
     return refused(tool, method, {
       code: "GP_E_CAPABILITY_UNAVAILABLE",
-      message: `engine ${probe.report.version} does not advertise the "${capability}" capability that ${method} needs`,
+      message: `engine ${probe.report.version} does not advertise the "${method}" capability this call needs`,
       remedy: CAPABILITY_REMEDY,
     })
   })
@@ -147,7 +156,7 @@ export const AttachTool = Tool.define(
       parameters: AttachParams,
       execute: (params: Schema.Schema.Type<typeof AttachParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {
-          const blocked = yield* requireCapability("gp_attach", "attach", "observe")
+          const blocked = yield* requireCapability("gp_attach", "attach")
           if (blocked) return blocked
           yield* ctx.ask({ permission: "glasspane", patterns: ["attach"], always: ["*"], metadata: params })
           const reply = yield* Daemon.call("attach", params)
@@ -180,7 +189,7 @@ export const ObserveTool = Tool.define(
       parameters: ObserveParams,
       execute: (params: Schema.Schema.Type<typeof ObserveParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {
-          const blocked = yield* requireCapability("gp_observe", "observe", "observe")
+          const blocked = yield* requireCapability("gp_observe", "observe")
           if (blocked) return blocked
           yield* ctx.ask({ permission: "glasspane", patterns: ["observe"], always: ["*"], metadata: params })
           const body: Record<string, unknown> = {}
@@ -219,7 +228,7 @@ export const ActTool = Tool.define(
       parameters: ActParams,
       execute: (params: Schema.Schema.Type<typeof ActParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {
-          const blocked = yield* requireCapability("gp_act", "act", "act")
+          const blocked = yield* requireCapability("gp_act", "act")
           if (blocked) return blocked
           yield* ctx.ask({
             permission: "glasspane",
@@ -253,6 +262,11 @@ export const DiagnoseTool = Tool.define(
   "gp_diagnose",
   Effect.gen(function* () {
     return {
+      // Not capability-gated, on purpose. `hello` costs a second connection to a daemon that
+      // serves one at a time, so gating is only worth it where the surface would otherwise
+      // *claim* something; here an engine without `diagnose` answers with its own
+      // unknown-method `{code, message, remedy}` frame, which is a better answer than this
+      // file could write about a method it has never seen.
       description:
         "Ask the engine why an operation did not produce the expected change. Returns a classification plus a four-part report (path taken, anomaly, evidence, next action). Defaults to the most recent operation when no id is given.",
       parameters: DiagnoseParams,

@@ -111,7 +111,8 @@ try {
     try {
       const installed = await Bun.file(installedManifest).json()
       gateSeen = `os=${JSON.stringify(installed.os)} cpu=${JSON.stringify(installed.cpu)} version=${JSON.stringify(installed.version)}`
-      const same = (a: unknown, b: unknown) => JSON.stringify([...(a ?? [])].sort()) === JSON.stringify(b)
+      const same = (given: unknown, want: string[]) =>
+        JSON.stringify(Array.isArray(given) ? given.map(String).sort() : []) === JSON.stringify(want)
       const mismatches: string[] = []
       if (!same(installed.os, wantOs)) mismatches.push(`os is ${JSON.stringify(installed.os)}, product declares ${JSON.stringify(wantOs)}`)
       if (!same(installed.cpu, wantCpu)) mismatches.push(`cpu is ${JSON.stringify(installed.cpu)}, product declares ${JSON.stringify(wantCpu)}`)

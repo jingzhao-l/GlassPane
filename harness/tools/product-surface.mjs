@@ -139,10 +139,10 @@ check("wrapper-name-in-publish", !publish.includes('pkg.name + "-ai"'), "publish
 
 // ---- the fork root's upstream orchestrator stays a dead end
 // Upstream's root `script/publish.ts` stamped a version into every package.json in the tree,
-// npm-published `@opencode-ai/sdk` / `-plugin` / `-ui` (three packages this product does not
-// own) and force-pushed tags with `--no-verify`. The [gp] version refuses with exit 2 and
-// names the real lane; this rule is the reader for the promise written in that file's own
-// header, which until now pointed at a rule that did not exist. Comments are stripped, so a
+// published the scoped sdk/plugin/ui packages to the public registry under **upstream's own
+// npm scope** (packages this product does not own) and force-pushed tags with `--no-verify`.
+// The [gp] version refuses with exit 2 and names the real lane; this rule is the reader for
+// the promise written in that file's own header. Comments are stripped, so a
 // sentence *describing* the removed body cannot satisfy it — only the absence of the body can.
 const rootPublish = stripComments(read("script/publish.ts"))
 check("no-foreign-publish", /process\.exit\(2\)/.test(rootPublish), "script/publish.ts (fork root) no longer refuses — it must exit 2 before it can publish")

@@ -241,7 +241,12 @@ const expectedDead = golden.hooks.filter((h) => h.kind === "dead").map((h) => h.
 
 if (mode === "offline") {
   // No upstream source in this lane. Say so instead of pretending it was checked.
-  console.log(`hook-liveness: upstream checkout absent (${pin.checkout}) — upstream NOT observed in this run.`)
+  // This used to print "upstream checkout absent" as a fact about the machine, which is not
+  // what --offline means: the operator chose a lane that does not read upstream, and the
+  // checkout may well be sitting right there (in a worktree it usually is, as a symlink). A
+  // degraded output stated as a measurement is the failure mode this file exists to catch.
+  console.log(`hook-liveness: --offline — this lane does not read upstream, so upstream was NOT observed.`)
+  console.log(`  (${pin.checkout} was not opened; nothing here says whether it exists.)`)
   console.log(
     `  golden self-consistency: ${golden.hooks.length} hooks, ${golden.hooks.filter((h) => h.kind === "live").length} live, dead set = [${expectedDead.join(", ")}]`,
   )

@@ -79,7 +79,20 @@ if (!noId.ok && !withId.ok) {
     `${noId.error.code} (no id) and ${withId.error.code} (id ${operationId}) — while ${archived.length} entries sit in ${archiveDir}. The daemon's replay path and its writers disagree about where the archive is; engine-side work, recorded so a missing ledger entry is never the only clue.`,
   )
 } else {
-  check("gp_last_evidence replays the newest archive entry", withId.ok && !noId.ok ? false : true, "see the branch above")
+  // The predicate here used to be `withId.ok && !noId.ok ? false : true`, which is true
+  // whenever `withId` failed — so under the documented current engine state (both calls
+  // refused) this line printed PASS for a check whose label claims a replay happened. Each
+  // call now asserts its own outcome, so the label and the reading are the same fact.
+  check(
+    "gp_last_evidence replays an entry named by operationId",
+    withId.ok,
+    withId.ok ? "the daemon handed a frame back" : `${withId.error.code}: ${withId.error.message}`,
+  )
+  check(
+    "gp_last_evidence answers the no-id call with the most recent entry",
+    noId.ok,
+    noId.ok ? "the daemon handed a frame back" : `${noId.error.code}: ${noId.error.message}`,
+  )
 }
 
 // 4. the frame the engine wrote must transcribe into the chain, unchanged
