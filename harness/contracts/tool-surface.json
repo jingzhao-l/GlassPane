@@ -8,13 +8,13 @@
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
   "observedAt": "2026-10-11",
-  "engineLoc": 24734,
+  "engineLoc": 24749,
   "engineFiles": 62,
   "surfaces": {
     "mcpShell": {
       "loc": 8975,
       "files": 13,
-      "ratio": 0.2225,
+      "ratio": 0.2224,
       "byFile": {
         "mcp-shell/src/tools.ts": 2547,
         "mcp-shell/src/engine-client.ts": 1455,

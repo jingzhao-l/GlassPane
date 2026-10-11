@@ -2658,7 +2658,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "cd6b1c221fa77b4e8d10ca348b4a2cb8d40b9eaf"
+      "forkHash": "5ac2c50a94d8d06485c43d074af5b6fce1765d2e"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -2708,7 +2708,7 @@
     {
       "file": "packages/opencode/src/cli/cmd/attach.ts",
       "upstreamHash": "6f5aea6a1248dc5cf511365082800cdc07fd53d6",
-      "forkHash": "c103c2eabe9dce3d346cf2799a4f7444dae8d620"
+      "forkHash": "fb204176c6ec64752a192a7f3de6875d9cafa771"
     },
     {
       "file": "packages/opencode/src/cli/cmd/debug/index.ts",
@@ -2753,7 +2753,7 @@
     {
       "file": "packages/opencode/src/cli/cmd/run.ts",
       "upstreamHash": "cccc2550179f87bb74763004910028f79ade60c9",
-      "forkHash": "d7c371433e6b00fa118dd8f02986b15604b23429"
+      "forkHash": "88b8b2ec7141809b87d74ae3da71d1d57af15893"
     },
     {
       "file": "packages/opencode/src/cli/cmd/run/demo.ts",
@@ -2773,7 +2773,7 @@
     {
       "file": "packages/opencode/src/cli/cmd/serve.ts",
       "upstreamHash": "c0f62b3ca0714a74b6280f0f0197621ece8d9312",
-      "forkHash": "940e4c032fcb1432206c7632f83d6ac04b265649"
+      "forkHash": "385f3e3aaafaf3fc3174163dcedc28f4c27f8f99"
     },
     {
       "file": "packages/opencode/src/cli/cmd/tui.ts",
@@ -2793,7 +2793,7 @@
     {
       "file": "packages/opencode/src/cli/cmd/web.ts",
       "upstreamHash": "69a981aada493fa2089b015e3dd84aff9a6396ae",
-      "forkHash": "39ef7c3b71d06a27f41d53e0c41120c5d6ae1c78"
+      "forkHash": "f2a270f174247200f8655aad0181a75bf95d06bc"
     },
     {
       "file": "packages/opencode/src/cli/network.ts",
