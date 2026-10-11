@@ -215,7 +215,7 @@ public final class ApprovalGate {
         // 读不出来就拒绝写，而不是从"没有"重新记起。
         if loadFailed, let path {
             reportPersistenceFailure(
-                "approval ledger at \(path) could not be read when the daemon started, so nothing was appended: a chain that cannot be read must not be re-anchored from an empty in-memory view (the old file is left untouched)"
+                "approval ledger \(path) exists but could not be decoded, so this process holds an empty chain — the append was REFUSED and nothing was written to \(path), because publishing an empty chain over the file would delete every approval record still on disk and leave `--approval-verify` certifying the single record that replaced them. Inspect the file (`python3 -m json.tool \(path)`); the chain is recoverable by hand from the bytes that are there, so do not delete or truncate it. Repair the file, then restart the process that appends: writes stay refused until it re-reads."
             )
             return nil
         }
@@ -329,7 +329,11 @@ public final class ApprovalGate {
             )
             return
         }
-        let tmpPath = path + ".tmp"
+        // `<file>.tmp` lets one writer rename another's half-written buffer into
+        // the published name (two `glasspaned --approval-*` runs on one state root
+        // are enough), and a `.tmp` orphan is never reclaimed by anything. Unique
+        // per write, same convention as ProjectRegistry / EvidenceStore.
+        let tmpPath = "\(path).tmp-\(getpid())-\(UUID().uuidString)"
         do {
             try data.write(to: URL(fileURLWithPath: tmpPath))
             // The mode is set while the bytes are still under the temporary

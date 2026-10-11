@@ -105,7 +105,14 @@ public final class SocketServer {
     private func openListenSocket() throws -> Int32 {
         if preemptsExistingSocket {
             // --force-socket: main.swift has already named the incumbent this
-            // run is displacing, so removing a live name *is* the intent.
+            // run is displacing, so removing a live *socket* is the intent. It is
+            // never an intent to delete somebody's file: the flag says "take this
+            // name over", and a regular file / directory / symlink under that name
+            // is not a name the daemon ever owned. Same lstat as the stale-socket
+            // path below, applied before the unlink instead of after a failed bind.
+            guard DaemonProbe.nameIsClearableSocketName(socketPath) else {
+                throw SocketErrorResponse.nameOccupied(DaemonProbe.nonSocketNameDescription(socketPath))
+            }
             unlink(socketPath)
             return try bindAndListen()
         }
@@ -204,37 +211,14 @@ public final class SocketServer {
     private func prepareSocketDirectory() throws {
         let directory = (socketPath as NSString).deletingLastPathComponent
         guard !directory.isEmpty else { return }
-        try FileManager.default.createDirectory(
-            atPath: directory,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
         let home = NSHomeDirectory()
         if directory != home, !directory.hasPrefix(home + "/") {
             log.info("socket directory \(directory) is outside \(home) — isolating it by ownership, not by home scope")
         }
-        guard chmod(directory, 0o700) == 0 else {
-            throw SocketErrorResponse.system(errno, "chmod(0700) \(directory)")
-        }
-        let attributes = (try? FileManager.default.attributesOfItem(atPath: directory)) ?? [:]
-        guard !attributes.isEmpty else {
-            throw SocketErrorResponse.insecureDirectory(directory, "attributes unreadable after chmod")
-        }
-        guard attributes[.type] as? FileAttributeType == .typeDirectory else {
-            throw SocketErrorResponse.insecureDirectory(directory, "not a directory")
-        }
-        let owner = attributes[.ownerAccountName] as? String ?? "an unknown account"
-        guard owner == NSUserName() else {
-            // Someone else planted the directory we are about to publish into.
-            throw SocketErrorResponse.insecureDirectory(directory, "owned by \(owner), not \(NSUserName())")
-        }
-        let mode = (attributes[.posixPermissions] as? NSNumber)?.int16Value ?? -1
-        guard mode == 0o700 else {
-            // chmod claimed success yet the directory is still reachable by
-            // group/other (read-only volume, immutable flag, ACL override):
-            // serving from it would publish evidence to other accounts.
-            throw SocketErrorResponse.insecureDirectory(
-                directory, "permission is \(String(format: "%04o", Int(mode))) and cannot be set to 0700")
+        // 判据本体在 `SocketDirectoryRule`，与探针监听者共用一份（X-25）：两条路过去各
+        // 写一遍，探针那份连 chmod 都没有。
+        if let defect = SocketDirectoryRule.enforce(directory: directory) {
+            throw SocketErrorResponse.insecureDirectory(directory, defect)
         }
     }
 

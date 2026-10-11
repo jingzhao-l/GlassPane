@@ -143,7 +143,7 @@ test('installBundles: allowReplace=false 时目标已存在的那一份不被动
   assert.deepEqual(removed, [], 'rm 一次都没执行')
   assert.deepEqual(copied, [])
   assert.deepEqual(bundlesToReplace({ plan, exists: (p) => existsSources.has(p) }), [plan.settingsApp],
-    '安装器就是靠这份清单决定要不要问人')
+    '安装器就是靠这份清单决定要不要问人——问的和覆盖的必须是同一份')
 })
 
 test('installBundles: 真实临时目录落盘可复核（幂等重跑）', () => {

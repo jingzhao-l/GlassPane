@@ -128,13 +128,23 @@ public final class ProbeSocketServer {
     /// operator intent (`--force-probe-socket`, wired in main.swift).
     public func start() throws {
         let directory = (socketPath as NSString).deletingLastPathComponent
-        try FileManager.default.createDirectory(
-            atPath: directory, withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
+        // X-25: the probe listener answers hello/handler/state frames that the daemon
+        // later upgrades into strong attribution, so its listen directory is held to
+        // the *engine socket's* rule — one shared implementation, because the copy
+        // this used to be (`createDirectory(attributes: 0o700)` alone) is a no-op on a
+        // directory that already exists, and 0700 was therefore never enforced here.
+        if let defect = SocketDirectoryRule.enforce(directory: directory) {
+            throw ProbeServerError.insecureDirectory(directory, defect)
+        }
         if preemptsExistingSocket {
             // --force-probe-socket: main.swift has already named the incumbent
-            // this run is displacing, so removing a live name *is* the intent.
+            // this run is displacing, so removing a live *socket* is the intent.
+            // A regular file / directory / symlink under this name is not a name
+            // this daemon ever owned, and the flag does not license deleting it
+            // (same rule `rebindAfterOwnershipCheck` applies on the non-force path).
+            guard DaemonProbe.nameIsClearableSocketName(socketPath) else {
+                throw ProbeServerError.nameOccupied(DaemonProbe.nonSocketNameDescription(socketPath))
+            }
             unlink(socketPath)
         }
         let fd: Int32
@@ -839,6 +849,9 @@ public enum ProbeServerError: Error, CustomStringConvertible {
     case invalidPath(String)
     /// Another listener owns the name and was not forcibly displaced (A-18).
     case nameOccupied(String)
+    /// The listen directory cannot be brought to 0700 (X-25) — binding into it would
+    /// hand the probe's frame injection surface to every account on the machine.
+    case insecureDirectory(String, String)
 
     public var description: String {
         switch self {
@@ -846,6 +859,8 @@ public enum ProbeServerError: Error, CustomStringConvertible {
         case .invalidPath(let path): return "invalid probe socket path: \(path)"
         case .nameOccupied(let detail):
             return "probe socket name in use: \(detail) — refusing to unlink a name a live listener owns; pass --force-probe-socket to pre-empt explicitly"
+        case .insecureDirectory(let path, let detail):
+            return "probe socket directory \(path) is not isolated: \(detail) — nothing was bound and no name was created"
         }
     }
 }

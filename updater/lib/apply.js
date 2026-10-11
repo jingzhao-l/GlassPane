@@ -32,7 +32,7 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 import { CODES } from './codes.js'
-import { sha256File, sha256FileSync } from './digest.js'
+import { sha256Bytes, sha256File, sha256FileSync } from './digest.js'
 import { UpdaterError, canonicalPath, ensurePrivateDir, removeTreeWithin, resolveWithin, tightenMode, writableRoots, writePrivateFile } from './fsutil.js'
 import { probeIdle } from './idle.js'
 import { kickstartJob, readRunningJob } from './launchd.js'
@@ -236,10 +236,110 @@ export function restoreBackup({ backupDir, appsDir, bundles = DEFAULT_BUNDLES, c
   return { ok: true, message: 'the previous version is back in place and verified file-by-file' }
 }
 
-function defaultCopy(source, target) {
-  fs.rmSync(target, { recursive: true, force: true })
-  fs.mkdirSync(path.dirname(target), { recursive: true })
-  fs.cpSync(source, target, { recursive: true, dereference: false })
+/**
+ * Move a freshly built bundle onto its live name without ever leaving the live
+ * name holding a half copy: rename the old one aside, rename the new one in,
+ * and put the old one back if that second rename fails. The window is one
+ * syscall wide; what is *not* survivable is the old order (rm the target, then
+ * copy into it), where an interrupted or failing copy leaves the installed app
+ * deleted and nothing at its name.
+ */
+function renameDirectoryIntoPlace(sourceDir, targetDir) {
+  const parent = path.dirname(targetDir)
+  if (!fs.existsSync(targetDir)) {
+    fs.renameSync(sourceDir, targetDir)
+    return null
+  }
+  const aside = path.join(parent, `${path.basename(targetDir)}.old-${process.pid}`)
+  fs.renameSync(targetDir, aside)
+  try {
+    fs.renameSync(sourceDir, targetDir)
+  } catch (error) {
+    // The name is only free for the length of one syscall; if taking the new tree in
+    // failed, the old one goes straight back and the caller hears about the failure.
+    try {
+      fs.renameSync(aside, targetDir)
+      throw error
+    } catch (restoreError) {
+      if (restoreError === error) throw error
+      throw new UpdaterError(
+        CODES.swapFailed,
+        `${error?.message ?? String(error)}; and ${aside} could not be put back at ${targetDir} (${restoreError?.message ?? String(restoreError)}), so the previous copy is on disk under ${aside} while ${targetDir} is missing`,
+      )
+    }
+  }
+  try {
+    fs.rmSync(aside, { recursive: true, force: true })
+    return null
+  } catch (error) {
+    // Disk, not trust: the landed tree is complete and the leftover is a stale copy
+    // the next run's cleanup (or `discardStaging`) takes with the directory it sits in.
+    return `${aside} could not be removed after the swap (${error?.message ?? String(error)})`
+  }
+}
+
+/**
+ * Remove in-flight copies of *this* name that belong to processes which are gone.
+ *
+ * A run that is SIGKILLed between the copy and the rename leaves
+ * `<bundle>.new-<pid>` sitting in `~/Applications`. Renaming a fresh copy over a
+ * name is only safe when that name is free, so the sweep runs before every copy;
+ * a *live* other pid is left alone (it is mid-copy right now), which is why the
+ * probe distinguishes ESRCH from EPERM.
+ */
+function sweepStaleCopies(parent, base) {
+  let entries = []
+  try {
+    entries = fs.readdirSync(parent)
+  } catch {
+    return
+  }
+  const pattern = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.new-(\\d+)$`)
+  for (const name of entries) {
+    const match = pattern.exec(name)
+    if (!match) continue
+    const pid = Number(match[1])
+    if (pid !== process.pid) {
+      let alive = false
+      try {
+        process.kill(pid, 0)
+        alive = true
+      } catch (error) {
+        alive = error?.code === 'EPERM'
+      }
+      if (alive) continue
+    }
+    try {
+      fs.rmSync(path.join(parent, name), { recursive: true, force: true })
+    } catch {
+      /* leftover disk is bad; a target that is a half bundle is worse, so keep going */
+    }
+  }
+}
+
+/**
+ * The bundle copier `installBundles` and `backupBundles` run by default, exported
+ * because "what happens when this is interrupted" is only answerable by interrupting
+ * it — `test/review-2026-10-09.test.mjs` kills a real child process in the middle of a
+ * real copy and reads the target back.
+ */
+export function defaultCopy(source, target) {
+  const parent = path.dirname(target)
+  const base = path.basename(target)
+  fs.mkdirSync(parent, { recursive: true })
+  sweepStaleCopies(parent, base)
+  const staged = path.join(parent, `${base}.new-${process.pid}`)
+  try {
+    fs.cpSync(source, staged, { recursive: true, dereference: false })
+  } catch (error) {
+    try {
+      fs.rmSync(staged, { recursive: true, force: true })
+    } catch {
+      /* a half copy we could not delete is still not a half *target* */
+    }
+    throw error
+  }
+  renameDirectoryIntoPlace(staged, target)
 }
 
 /* ------------------------------------------- the staged bytes, re-proven at apply time */
@@ -253,18 +353,25 @@ function defaultCopy(source, target) {
  * the archive digest the release's own checksum file covered (gate 5) and the state
  * recorded.
  *
- * Both halves use machinery this package already has: `sha256File` from `lib/digest.js`
- * (§1 gate 5's own measurement) and `manifestTree` over the tree `extractInto` unpacks
- * a second time from those bytes. That is deliberate — the comparison is "the tree on
- * disk against the tree that comes out of the signed archive", so a file added, removed,
- * rewritten or swapped for a symlink shows up as a *named* difference instead of a
- * `staged tree looks shaped right`.
+ * Both halves use machinery this package already has: `sha256Bytes` over the one
+ * buffer the proof reads, and `manifestTree` over the tree `extractInto` unpacks
+ * from *that same buffer*. Two things were wrong with the earlier shape and are the
+ * reason for both words above:
+ *  · **one read.** Hashing `archivePath` with `sha256File` and then calling
+ *    `readArchive(archivePath)` for the unpack is two reads of a file any process of
+ *    this account can replace in between; the proof then certifies bytes it does not
+ *    install, so the re-read gates nothing.
+ *  · **the tree that gets built is the tree just proven.** Comparing the unpacked tree
+ *    with the on-disk one and then building the *on-disk* one leaves the same window
+ *    open a second later. So the freshly unpacked tree is renamed over `rootPath`
+ *    ({@link renameDirectoryIntoPlace}) and returned, and `applyUpdate` builds, packs
+ *    and copies from that returned path. The comparison is still made first, because a
+ *    person refused mid-way has to be told *which* relative path disagreed.
  */
 export async function verifyStagedBytes({
   stateRoot,
   staged,
   rootPath,
-  hashFile = sha256File,
   readArchive = (file) => fs.readFileSync(file),
   existsFn = (file) => fs.existsSync(file),
 }) {
@@ -282,13 +389,15 @@ export async function verifyStagedBytes({
   if (!existsFn(archivePath)) {
     return { ok: false, reason: `${archivePath} is no longer on disk, so ${rootPath} cannot be proven to be the bytes whose digest ${expected.slice(0, 12)}… the release's checksum file named` }
   }
-  const actual = await hashFile(archivePath)
+  // The only read of the archive anywhere in this proof: one buffer, hashed and unpacked.
+  const archiveBytes = readArchive(archivePath)
+  const actual = sha256Bytes(archiveBytes)
   if (actual !== expected) {
     return { ok: false, reason: `the staged archive now digests ${actual}, while the release's checksum file — and the state — say ${expected}: the bytes under ${staged.dir} are not the bytes that were published` }
   }
   const scratch = path.join(staged.dir, `apply-verify-${process.pid}`)
   try {
-    extractInto({ treePath: scratch, stagingRoot: staging, bytes: readArchive(archivePath) })
+    extractInto({ treePath: scratch, stagingRoot: staging, bytes: archiveBytes })
     const unpacked = releaseTreeRoot({ treePath: scratch, version: staged.version })
     if (!unpacked.ok) {
       return { ok: false, reason: `the archive in ${staged.dir} no longer unpacks into a ${staged.version} release tree (${unpacked.reason})` }
@@ -302,10 +411,17 @@ export async function verifyStagedBytes({
         details: { differences: firstDifferences(fromArchive, onDisk) },
       }
     }
+    // Proven *and* landed: after this line the only bytes at `rootPath` are the ones
+    // `extractInto` wrote from the buffer whose digest was just measured, and they are
+    // what `build`, `npm pack` and the runtime copy downstream are handed.
+    renameDirectoryIntoPlace(unpacked.rootPath, rootPath)
+    return { ok: true, reason: null, digest: actual, rootPath }
   } catch (error) {
     return { ok: false, reason: `re-reading the staged archive failed (${error?.message ?? String(error)})` }
   } finally {
     try {
+      // Normal path already renamed this directory into place; this is the refusal
+      // path's cleanup, and a refused proof must not cost disk either.
       removeTreeWithin(staging, scratch)
     } catch {
       /* the scratch copy is inside the staging root; a failed cleanup cannot un-prove the tree */
@@ -1092,6 +1208,15 @@ export async function applyUpdate({
       + `${staged.dir}, that is the thing to fix first.`,
       { details: proven.details ?? null })
   }
+  /**
+   * From here on the tree everything downstream reads is **the tree this proof just
+   * unpacked from the bytes it just hashed**, not "whatever is sitting at
+   * `staged.rootPath`". They are the same path — `verifyStagedBytes` renamed the fresh
+   * one into place — but naming one variable here is what keeps a later edit from
+   * re-introducing the old split, where the proof looked at one tree and the build got
+   * another.
+   */
+  const provenTree = proven.rootPath
 
   // §3.5's pre-flight, placed here because everything below this line can change the live machine.
   // The npm step is the last one and the only one that can need root; finding that out after the
@@ -1127,7 +1252,7 @@ export async function applyUpdate({
   // prefix and still ship a package with nothing to run. Measured on 2026-10-01 against v1.5.1, where the
   // archive was pure source: `npm pack` produced a three-entry package, `npm install -g` exited 0, the
   // version read back correctly, and the MCP half of the handshake died on `ENOENT` — after the swap.
-  const commandsReady = preflightNpmCommands({ stagedTree: staged.rootPath })
+  const commandsReady = preflightNpmCommands({ stagedTree: provenTree })
   if (!commandsReady.ok) {
     return fail('deferred', CODES.releaseBadPayload,
       'the staged release cannot produce a runnable npm package: '
@@ -1154,7 +1279,7 @@ export async function applyUpdate({
   // §1.6/§3.2's paths are all *relative to the release root*, which for this
   // project's archive is one folder below `tree/`. Building out of `tree/`
   // directly is how a correctly staged release reads as "no engine/ directory".
-  const built = build(staged.rootPath, {})
+  const built = build(provenTree, {})
   if (!built.ok) {
     // §3.2: the build failed before anything moved — site untouched.
     const message = `${built.message}; the installed ${baseline} is still in place because nothing was swapped`
@@ -1334,7 +1459,7 @@ export async function applyUpdate({
 
     // §3.4: record the original version, install from the verified tree, read the installed version back,
     // put the recorded one back if it disagrees.
-    const npmResult = await npm({ stagedTree: staged.rootPath, copyFn })
+    const npmResult = await npm({ stagedTree: provenTree, copyFn })
     if (npmResult?.ok === false) {
       const restored = restoreBackup({ backupDir: backup.dir, appsDir, bundles, copyFn })
       const restart = await restartIfIdle()
@@ -1430,7 +1555,7 @@ export async function applyUpdate({
         const outcome = await refreshRuntimeImpl({
           stateRoot,
           version: wantVersion,
-          sourceTree: staged.rootPath,
+          sourceTree: provenTree,
           env,
           disabled: autoDisabled === true || state.disabled === true,
           readRunningJob: readRunningJobImpl,

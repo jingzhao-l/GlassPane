@@ -27,17 +27,16 @@ import {
   SHIM_PROBE_COMMANDS,
   STATE_FILE_MODE,
   bootstrapPlan,
+  builtDaemonVersion,
   classifyKillResult,
   cloneFailureText,
   commandAvailable,
   confirm,
-  daemonBinaryVersion,
-  daemonVersionText,
-  daemonVersionVerdict,
   formatMode,
   install,
   installGuard,
   installOutcome,
+  installVerification,
   launchctlBootstrap,
   nextStepsText,
   panelOpenHint,
@@ -45,12 +44,13 @@ import {
   preflightIssues,
   resolvePinRef,
   safeGitCloneArgs,
-  tagVerifyDecision,
   survivorText,
+  tagVerifyDecision,
   terminatePids,
   usageText,
   validateGitRef,
   validateGitRepoUrl,
+  verificationFailureText,
   writePrivatePlist,
 } from '../cli.js'
 
@@ -232,8 +232,8 @@ test('finding1: 陈旧 daemon 占着 socket 时（hello 1.0.0 / 本轮产物 9.9
     if (preflightBlocked(r)) { t.skip(`这台机器预检先挡了：${r.stderr.trim().slice(0, 120)}`); return }
     assert.notEqual(r.status, 0, `应答的不是本轮产物却退出 0：${r.stdout}\n${r.stderr}`)
     assert.match(r.stdout, /已在监听/, '前置：走的就是"跳过启动"那一支（正是旧代码报成功的场景）')
-    assert.match(r.stdout, /version=1\.0\.0/, '必须点名应答方自报的版本')
-    assert.match(r.stdout, /9\.9\.9/, '必须点名本轮产物自报的版本')
+    assert.match(r.stdout, /自报 1\.0\.0/, '必须点名应答方自报的版本')
+    assert.match(r.stdout, /本轮构建产物是 9\.9\.9/, '必须点名本轮产物自报的版本')
     assert.match(r.stdout, /--replace-daemon/, '补救必须是读者真能跑的那条')
     assert.ok(!/安装完成（退出码 0）/.test(r.stdout), `不许打印成功结论：${r.stdout}`)
     assert.ok(!r.stdout.includes('实测校验通过'), '版本对不上时"实测校验通过"这句话不成立')
@@ -263,27 +263,27 @@ test('finding1: hello 与本轮产物版本一致时才报完成（退出码 0�
 
 test('finding1: 产物读不出版本时说的是"这项检查没做成"，不是通过也不是版本不符', (t) => {
   // 1.9.0 之前的 glasspaned 根本没有 --version：真机上它就是回 unknown argument + 64。
+  // 合并后读数的实现取上游 `builtDaemonVersion`（读不出→null），这里钉的是同一件事的
+  // 三种读数：读不出、不通过、以及"没做成"不能被写成"通过"。
   const dir = tempDir('v1-oldbin')
   const bin = fakeGlasspanedBin(dir, { version: null })
   try {
-    const got = daemonBinaryVersion(bin)
-    assert.equal(got.ok, false, '拒绝 64 的产物必须读不成')
-    assert.match(got.error, /退出码 64/)
-    const verdict = daemonVersionVerdict({ arrived: true, hello: { version: '1.0.0' }, binary: got })
+    assert.equal(builtDaemonVersion({ daemonBin: bin }), null, '拒绝 64 的产物必须读不成')
+    const verdict = installVerification({ arrived: true, helloVersion: '1.0.0', builtVersion: null })
     assert.equal(verdict.verified, false, '读不出来 ≠ 通过')
-    assert.equal(verdict.kind, 'uncheckable')
-    const text = daemonVersionText({
-      ...verdict, socketPath: '/s.sock', daemonBin: bin, cliPath: CLI, exitCode: 1,
+    assert.match(verdict.note, /读不出/, `要说的是"这项检查没做成"：${verdict.note}`)
+    assert.match(verdict.note, /无法证明/, verdict.note)
+    const text = verificationFailureText({
+      arrived: true, socketPath: '/s.sock', daemonLog: '/l.log', cliPath: CLI, exitCode: 1,
     })
-    assert.match(text, /无法核对版本/)
-    assert.match(text, /没有做成/, '必须说"检查没能做成"，而不是给出一个通过/不通过的假二元')
+    assert.match(text, /--restore-launchd/, '失败提示要给真能跑的补救命令')
     assert.ok(!text.includes('安装完成'), text)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('finding1: --version 读数只认真参数；桩像生产一样拒绝 --help/--bogus', () => {
+test('finding1: --version 读数只认真参数，且探测必须带界', () => {
   const dir = tempDir('v1-args')
   const bin = fakeGlasspanedBin(dir, { version: '9.9.9' })
   try {
@@ -293,30 +293,42 @@ test('finding1: --version 读数只认真参数；桩像生产一样拒绝 --hel
       assert.equal(r.status, 64, `${arg} 必须按生产口径拒（unknown argument + 64），实得 ${r.status}`)
       assert.match(r.stderr, /unknown argument/)
     }
-    assert.equal(daemonBinaryVersion(bin).version, '9.9.9')
+    assert.equal(builtDaemonVersion({ daemonBin: bin }), '9.9.9')
     // 只传 --version：调用方拼不出第二个参数，也就没法被"对什么都答版本号"的桩糊过去。
     const seen = []
-    const got = daemonBinaryVersion(bin, { spawn: (cmd, args, opts) => {
+    const got = builtDaemonVersion({ daemonBin: bin, spawn: (cmd, args, opts) => {
       seen.push([cmd, args])
       assert.ok(Number.isInteger(opts?.timeout) && opts.timeout > 0,
         `探测必须带**有界**超时，否则一个卡死的产物会把整次安装挂在这里：${JSON.stringify(opts)}`)
       return spawnSync(cmd, args, opts)
     } })
-    assert.equal(got.ok, true)
+    assert.equal(got, '9.9.9')
     assert.deepEqual(seen, [[bin, ['--version']]],
       '探测必须是恰好一次、恰好只带 --version')
-    // 跑不起来的产物（不存在）说的也是"读不出来"。
-    assert.equal(daemonBinaryVersion(path.join(dir, 'nope')).ok, false)
+    // 跑不起来的产物（不存在）说的也是"读不出来"，不是"版本 0"。
+    assert.equal(builtDaemonVersion({ daemonBin: path.join(dir, 'nope') }), null)
+    // 产物路径缺失（--no-app 且裸二进制也没建出来）不许 spawn 一个空字符串。
+    let spawned = 0
+    assert.equal(builtDaemonVersion({ daemonBin: null, spawn: () => { spawned += 1; return spawnSync('true', []) } }), null)
+    assert.equal(spawned, 0, '没有路径可查时不该起进程')
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('finding1: hello 缺席时判据仍是 no-hello（不拿版本核对冒充握手）', () => {
-  assert.equal(daemonVersionVerdict({ arrived: false, hello: null, binary: { ok: true, version: '1.9.0' } }).kind, 'no-hello')
-  assert.equal(daemonVersionVerdict({ arrived: true, hello: {}, binary: { ok: true, version: '1.9.0' } }).kind, 'no-hello')
-  assert.equal(daemonVersionVerdict({ arrived: true, hello: { version: '1.9.0' }, binary: { ok: true, version: '1.9.0' } }).verified, true)
-  assert.equal(daemonVersionVerdict({ arrived: true, hello: { version: '1.0.0' }, binary: { ok: true, version: '1.9.0' } }).kind, 'mismatch')
+test('finding1: hello 缺席时判据仍是"没验到"（不拿版本核对冒充握手）', () => {
+  assert.equal(installVerification({ arrived: false, helloVersion: null, builtVersion: '1.9.0' }).verified, false)
+  assert.equal(installVerification({ arrived: true, helloVersion: null, builtVersion: '1.9.0' }).verified, false)
+  assert.equal(installVerification({ arrived: true, helloVersion: '1.9.0', builtVersion: '1.9.0' }).verified, true)
+  const mismatch = installVerification({ arrived: true, helloVersion: '1.0.0', builtVersion: '1.9.0' })
+  assert.equal(mismatch.verified, false)
+  assert.match(mismatch.note, /旧实例占着/, '版本不符要说清是旧实例占着 socket')
+  assert.match(mismatch.note, /--replace-daemon/, `补救必须是 agent 能直接加的 flag：${mismatch.note}`)
+  // 版本一致但应答的实例在本次安装之前就在服务：这也不能算"本轮构建已验证"。
+  const earlier = installVerification({
+    arrived: true, helloVersion: '1.9.0', builtVersion: '1.9.0', servedByEarlierInstance: true,
+  })
+  assert.match(earlier.note ?? '', /不能证明/, earlier.note)
 })
 
 /* ---------------------------------------------------------------------------
@@ -379,7 +391,8 @@ test('finding2: 别人签的同名 tag → install() 硬拒，且拒绝发生在
     await assert.rejects(
       install({ options, env: { HOME: home, GLASSPANE_REPO: '', GLASSPANE_REF: 'v1.9.0' }, uid: 501 }),
       (error) => {
-        assert.match(error.message, /拒绝安装|硬拒/, error.message)
+        assert.match(error.message, /签名验不过/, error.message)
+        assert.match(error.message, /安装到此为止/, '这句才是"硬拒"的落地形态：' + error.message)
         assert.match(error.message, /v1\.9\.0/, error.message)
         assert.match(error.message, /0929EA31DF4F7429F63FC53189D88B1D043A1298/, error.message)
         assert.match(error.message, /SECURITY\.md/, error.message)

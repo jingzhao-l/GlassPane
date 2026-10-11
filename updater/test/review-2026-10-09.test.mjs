@@ -426,17 +426,21 @@ test('真把拷贝进程 SIGKILL 掉，目标要么完整旧要么完整新，�
  */
 test('npm-prefix 那条 remedy 点名路径、交给一个人，且不交出任何命令行', () => {
   const raw = fs.readFileSync(path.join(UPDATER_ROOT, 'lib', 'apply.js'), 'utf8')
-  const from = raw.indexOf('const unwritableDirs')
+  // 合并后这条 remedy 的载体是 `const remedy = npmReady.dir`（两条出路写在字符串里）。
+  // 锚点跟着走，断言盯的还是这条 finding 的实质：路径要点名、动作要交给人、程序自己不跑，
+  // 而**不许**出现一句可以直接抄去执行的升权命令。
+  const from = raw.indexOf('const remedy = npmReady.dir')
   assert.ok(from > 0, 'apply.js 里找不到那条点名目录的 remedy 了')
   const block = raw.slice(from, from + 1600)
     .split('\n')
     .filter((line) => !line.trim().startsWith('//'))
     .join('\n')
-  assert.match(block, /at a terminal/, '要写清这一步只能由一个人在终端做')
-  assert.match(block, /will not run a privileged command/, '也要写清这个程序自己不跑，更不会把命令交给 agent')
-  assert.match(block, /JSON\.stringify/, '路径要 JSON 引起来，读者才知道路径在哪一行结束')
+  assert.match(block, /entered by hand with a password/, '要写清这一步只能由一个人在终端做')
+  assert.match(block, /will not run it for them/, '也要写清这个程序自己不跑，更不会把命令交给 agent')
+  assert.match(block, /`"\$\{dir\}"`|map\(\(dir\) => `"\$\{dir\}"`\)/, '路径要各自引起来，读者才知道路径在哪一行结束')
   assert.match(block, /npm config get prefix/, '要交代路径是从 npm 读来的，人才会去核')
   assert.doesNotMatch(block, /\bsudo\b/, '这段里不许出现任何一句可执行的升权命令')
+  assert.doesNotMatch(block, /chown\s+-R/, '也不许把递归 chown 写成一句可直接执行的话')
 })
 
 /* ===================================================================== * finding 5 */

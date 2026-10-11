@@ -152,6 +152,10 @@ final class ReviewLifecycleTests: XCTestCase {
     /// `String(describing:)`, not `localizedDescription`: this enum is
     /// `CustomStringConvertible`, and the NSError bridge would replace the whole
     /// sentence with "The operation couldn't be completed."
+    ///
+    /// 载荷是 `nameOccupied(一句话)`（上游实现）而不是一个带 kind 的独立 case，所以这里
+    /// 断言的是那句话里**必须同时出现**路径与测到的 inode 类别——少一样，这条拒绝就退回成
+    /// "名字被占了"，而读者真正需要知道的是"这是一份不属于你的普通文件，daemon 没删它"。
     private func assertNotASocketRefusal(
         _ error: Error?,
         path expectedPath: String,
@@ -162,13 +166,27 @@ final class ReviewLifecycleTests: XCTestCase {
         guard let error else {
             return XCTFail("必须致命拒绝而不是 unlink+bind", file: file, line: line)
         }
-        guard case SocketErrorResponse.notASocket(let refusedPath, let measured) = error else {
+        // 两个监听者各有各的错误类型，同一条判据走的是同一份 `nonSocketNameDescription`，
+        // 所以这里按类型各取一次载荷——写成只认 engine 那份，探针侧那条对照就会把
+        // "确实拒绝了"读成"报错了但形状不对"。
+        let detail: String
+        switch error {
+        case SocketErrorResponse.nameOccupied(let engineDetail):
+            detail = engineDetail
+        case ProbeServerError.nameOccupied(let probeDetail):
+            detail = probeDetail
+        default:
             return XCTFail(
-                "必须报 notASocket（普通文件/目录/符号链接都不许被删），实得 \(error)",
+                "必须报 nameOccupied（普通文件/目录/符号链接都不许被删），实得 \(error)",
                 file: file, line: line)
         }
-        XCTAssertEqual(refusedPath, expectedPath, "拒绝理由要点名那个路径", file: file, line: line)
-        XCTAssertEqual(measured, expectedKind, "拒绝理由要说清测到的到底是什么", file: file, line: line)
+        XCTAssertTrue(detail.contains(expectedPath), "拒绝理由要点名那个路径：\(detail)",
+                      file: file, line: line)
+        XCTAssertTrue(detail.contains(expectedKind), "拒绝理由要说清测到的到底是什么：\(detail)",
+                      file: file, line: line)
+        XCTAssertTrue(detail.contains("not a socket"),
+                      "要说的是「这不是 socket」，不是笼统的「名字被占」：\(detail)",
+                      file: file, line: line)
         let message = String(describing: error)
         XCTAssertTrue(message.contains(expectedPath), "运维看到的一句话里必须有路径：\(message)",
                       file: file, line: line)
@@ -292,21 +310,33 @@ final class ReviewLifecycleTests: XCTestCase {
 
     func testRelativeSocketPathIsRefusedByTheSameRuleThatRefusesARelativeStateDir() {
         for relative in ["./s.sock", "s.sock", "../up.sock", ""] {
-            XCTAssertNotNil(SocketPathArgument.rejection(for: relative),
+            XCTAssertNotNil(StateRootArgument.rejection(for: relative),
                             "相对路径 \(relative) 必须在解析期就被拒绝")
         }
-        XCTAssertNotNil(SocketPathArgument.rejection(for: nil), "开关后面什么都没有也要拒绝")
-        XCTAssertNotNil(SocketPathArgument.rejection(for: "--force-socket"),
+        XCTAssertNotNil(StateRootArgument.rejection(for: nil), "开关后面什么都没有也要拒绝")
+        XCTAssertNotNil(StateRootArgument.rejection(for: "--force-socket"),
                         "把另一个开关当成路径同样要拒绝")
-        XCTAssertNil(SocketPathArgument.rejection(for: "/abs/dir/s.sock"), "绝对路径放行")
-        if let reason = SocketPathArgument.rejection(for: "./s.sock") {
+        XCTAssertNil(StateRootArgument.rejection(for: "/abs/dir/s.sock"), "绝对路径放行")
+        if let reason = StateRootArgument.rejection(for: "./s.sock") {
             XCTAssertTrue(reason.contains("absolute"), "拒绝理由说的是绝对路径，实得：\(reason)")
         }
-        // 同源判据：与 `--state-dir` 逐字一致，否则两个 flag 会对"什么算路径"各说各话。
-        for probe in [nil, "", "./s.sock", "--force-socket", "/abs/dir/s.sock"] {
-            XCTAssertEqual(SocketPathArgument.rejection(for: probe),
-                           StateRootArgument.rejection(for: probe),
-                           "socket 路径与状态根的路径判据分叉了：\(String(describing: probe))")
+        // `main.swift` reaches this rule set through two accessors: the socket
+        // flags use `rejection(for:)`, `--state-dir` switches on `init(raw:)`.
+        // One rule set behind two spellings is only true while the two agree, so
+        // the equality is measured per sample — a diverging pair would let
+        // `--socket-path ./s.sock` pass while `--state-dir ./s` is refused.
+        for probe in [nil, "", "./s.sock", "../up.sock", "--force-socket", "/abs/dir/s.sock"] {
+            let direct = StateRootArgument.rejection(for: probe)
+            let viaInit: StateRootArgument = StateRootArgument(raw: probe)
+            switch (direct, viaInit) {
+            case (.none, .named):
+                break
+            case (.some(let reason), .rejected(let sameReason)):
+                XCTAssertEqual(reason, sameReason,
+                               "同一判据的两个入口给出了两条理由：\(String(describing: probe))")
+            default:
+                XCTFail("两个入口对 \(String(describing: probe)) 一个放行一个拒绝：\(String(describing: direct)) / \(String(describing: viaInit))")
+            }
         }
     }
 
@@ -319,7 +349,7 @@ final class ReviewLifecycleTests: XCTestCase {
             let block = try XCTUnwrap(
                 caseBlock(for: flag, in: source),
                 "解析表里找不到 \(flag) 的 case 块，这条对照已经看不见东西")
-            XCTAssertTrue(block.contains("SocketPathArgument.rejection"),
+            XCTAssertTrue(block.contains("StateRootArgument.rejection"),
                           "\(flag) 必须在解析期就按绝对路径判据过一遍：监听者会把 socket 的父目录收成 0700，相对值 chmod 的是当前工作目录")
         }
         // 等号形态与空格形态共用一份判据，两种拼写不能对同一个值给两个答案。
@@ -328,10 +358,15 @@ final class ReviewLifecycleTests: XCTestCase {
                                            range: equalsStart..<source.endIndex)?.lowerBound else {
             return XCTFail("找不到 --socket-path= 的等号分支，这条对照看不见它")
         }
-        XCTAssertTrue(source[equalsStart..<equalsEnd].contains("SocketPathArgument.rejection"),
+        XCTAssertTrue(source[equalsStart..<equalsEnd].contains("StateRootArgument.rejection"),
                       "等号形态绕开判据，就等于同一 flag 有两种拼写两套答案")
+        // 三个 flag 只有一份判据：`--state-dir` 那一段也必须落在同一个类型上。
+        let stateDirBlock = try XCTUnwrap(caseBlock(for: "--state-dir", in: source),
+                                          "解析表里找不到 --state-dir 的 case 块")
+        XCTAssertTrue(stateDirBlock.contains("StateRootArgument"),
+                      "状态根换了判据类型，socket 路径的\"同源\"这句就没人保证了")
         // 顺序：第一次绝对路径判定必须早于状态根解析——那之后的第一步就是动目录。
-        let firstRejection = source.range(of: "SocketPathArgument.rejection")?.lowerBound ?? source.endIndex
+        let firstRejection = source.range(of: "StateRootArgument.rejection")?.lowerBound ?? source.endIndex
         let resolvesPath = source.range(of: "StateRoot.engineSocketPath(")?.lowerBound ?? source.endIndex
         XCTAssertTrue(firstRejection < resolvesPath,
                       "绝对路径判据必须跑在解析出 socket 路径之前，否则先动的就是目录")
@@ -373,6 +408,38 @@ final class ReviewLifecycleTests: XCTestCase {
                        "拒绝之后工作目录里既不该有 socket，也不该多出别的文件")
         XCTAssertFalse(FileManager.default.fileExists(atPath: state),
                        "解析期就拒绝的这一次调用连状态根都不该创建")
+    }
+
+    /// The pre-bind statement has to agree with what the run is about to do.
+    /// Before the `lstat` split, a daemon aimed at somebody's regular file logged
+    /// "nothing listens … — binding it" and *then* refused: two contradictory
+    /// promises from one process, the second one about a file it must not touch.
+    /// Pinned against the built binary — the refusal wording, the absence of the
+    /// promise, and the file's bytes.
+    func testDaemonBinaryAnnouncesRefusalNotBindingWhenItsNameIsARegularFile() throws {
+        let binary = repoRoot + "/engine/.build/debug/glasspaned"
+        guard FileManager.default.isExecutableFile(atPath: binary) else {
+            throw XCTSkip("没有 \(binary)；这一条要的是真启动（produce it with: cd engine && swift build）。")
+        }
+        let state = TestSandbox.pendingDirectory("takeoverfile")
+        let socketName = state + "/engine.sock"
+        let secret = Data("not a socket".utf8)
+        try FileManager.default.createDirectory(atPath: state, withIntermediateDirectories: true)
+        try secret.write(to: URL(fileURLWithPath: socketName))
+        defer { try? FileManager.default.removeItem(atPath: state) }
+        let outcome = try spawnDaemon(
+            binary: binary,
+            arguments: ["--state-dir", state, "--socket-path", socketName, "--no-probe"],
+            workingDirectory: state
+        )
+        XCTAssertFalse(outcome.served,
+                       "普通文件占着 socket 名，这一次启动不许把自己当成服务：\(outcome.text)")
+        XCTAssertTrue(outcome.text.contains("not a socket"),
+                      "拒绝要说出测到的 inode 类别：\(outcome.text)")
+        XCTAssertFalse(outcome.text.contains("binding it"),
+                       "同一次运行既宣布拒绝又宣布要绑，等于对着别人的文件许诺：\(outcome.text)")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: socketName)), secret,
+                       "被拒之后那个文件必须一个字节都没动")
     }
 
     // MARK: - X-25: the probe listener runs the engine socket's directory rules

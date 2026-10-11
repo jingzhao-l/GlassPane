@@ -151,15 +151,16 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
         case "--no-probe":
             options.probeEnabled = false
         case "--probe-socket-path":
-            // X-22's rule, now also for the named sockets: `SocketPathArgument`
-            // forwards to `StateRootArgument`, so a value that is another flag
-            // and a relative path are refused the same way for both socket flags
-            // and for `--state-dir`. Decided here, at the parse, because a
-            // relative value is not harmless: the listener chmods its own parent
-            // directory to 0700, so `--socket-path ./s.sock` from ~/Documents
-            // tightens ~/Documents and keeps it tightened even when the bind
-            // later fails and this run exits (see `SocketPathArgument`).
-            if let reason = SocketPathArgument.rejection(
+            // X-22's rule, now also for the named sockets, and from the same
+            // function: `--socket-path` / `--probe-socket-path` are refused by
+            // `StateRootArgument.rejection`, the one rule set `--state-dir`
+            // uses, so the three flags cannot disagree about what counts as a
+            // path. Decided here, at the parse, because a relative value is not
+            // harmless: the listener chmods its own parent directory to 0700, so
+            // `--socket-path ./s.sock` from ~/Documents tightens ~/Documents and
+            // keeps it tightened even when the bind later fails and this run
+            // exits.
+            if let reason = StateRootArgument.rejection(
                 for: index + 1 < arguments.count ? arguments[index + 1] : nil
             ) {
                 return .error("--probe-socket-path \(reason)")
@@ -235,7 +236,7 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             // Absolute-path rule at the parse (X-22 sibling, above) — nothing
             // above this line may touch a directory, and this one is reached
             // before `prepareSocketDirectory` could chmod it.
-            if let reason = SocketPathArgument.rejection(
+            if let reason = StateRootArgument.rejection(
                 for: index + 1 < arguments.count ? arguments[index + 1] : nil
             ) {
                 return .error("--socket-path \(reason)")
@@ -248,7 +249,7 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
                 // Same `--key=value` shape as `--state-dir`, same validation:
                 // one rule set decides both spellings, so the two cannot
                 // disagree about what counts as a socket path.
-                if let reason = SocketPathArgument.rejection(for: value) {
+                if let reason = StateRootArgument.rejection(for: value) {
                     return .error("--socket-path \(reason)")
                 }
                 options.socketPath = value
@@ -1258,15 +1259,16 @@ case .bind:
         // of every unlink; saying "nothing listens — binding it" here would be
         // announcing a plan this run is about to refuse, so the two statements
         // are split by what the inode actually is.
-        if let kind = SocketServer.nonSocketInodeKind(at: socketPath) {
+        if !DaemonProbe.nameIsClearableSocketName(socketPath) {
             // Not through EngineLog: quiet mode swallows it, and a run that is
             // about to exit having said nothing is the shape A-18 removed for
-            // the probe listener.
+            // the probe listener. The sentence is the same one `SocketServer`
+            // throws on its refusal path, so the pre-bind statement and the
+            // bind-time refusal cannot describe the inode differently.
             FileHandle.standardError.write(Data(("""
-            glasspaned: refusing to take over \(socketPath) — it is \(kind), not a socket.
+            glasspaned: refusing to take over \(socketPath).
+              \(DaemonProbe.nonSocketNameDescription(socketPath))
               Nothing was unlinked and this run will not bind here.
-              - point --socket-path at a name that is free (or let --state-dir derive it), or
-              - remove \(socketPath) yourself first.
             """ + "\n").utf8))
         } else {
             log.info("nothing listens on \(socketPath) (\(reason)) — binding it")

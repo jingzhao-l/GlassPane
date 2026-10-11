@@ -186,61 +186,33 @@ final class ReviewFixes20261009Tests: XCTestCase {
     }
 
     // MARK: - 5. 接管一个名字之前：那不是 socket 的 inode 一律拒绝，且绝不删
+    //
+    // 判定本体与"删/不删"的行为由 `DaemonProbe.nameIsClearableSocketName`（上游实现）
+    // 和 ReviewLifecycleTests 起真监听/真 argv 的用例覆盖。这里只钉这一轮新增的那一句：
+    // 拒绝的**措辞**必须把测到的类别、那个名字和一条 agent 能照做的下一步一起说清——
+    // 否则调用方收到的是"占用了"，而不是"这是一份不属于你的普通文件"。
 
-    func testNonSocketInodeKindsAreNamedAndAbsentIsSilent() throws {
+    func testNonSocketNameDescriptionNamesKindPathAndNextStep() throws {
         let directory = TestSandbox.directory("socket-name")
+
         let regular = directory + "/id_rsa"
         let secret = Data("secret".utf8)
         try secret.write(to: URL(fileURLWithPath: regular))
-        XCTAssertEqual(SocketServer.nonSocketInodeKind(at: regular), "a regular file")
+        XCTAssertFalse(DaemonProbe.nameIsClearableSocketName(regular), "普通文件不许被当成可清残留")
+        let text = DaemonProbe.nonSocketNameDescription(regular)
+        XCTAssertTrue(text.contains("id_rsa"), "拒绝必须点名那个名字：\(text)")
+        XCTAssertTrue(text.contains("a regular file"), "要说的是测到的 inode 类别：\(text)")
+        XCTAssertTrue(text.contains("not a socket"), "一句「占用了」不够：\(text)")
+        XCTAssertTrue(text.contains("--socket-path"), "下一步必须 agent 可执行：\(text)")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: regular)), secret,
+                       "读这一眼不许动那个名字")
 
-        // 拒绝路径本身也必须把文件留在原地；真正"接管前不 unlink"由
-        // ReviewLifecycleTests 起真监听的用例证明。
-        XCTAssertThrowsError(try SocketServer.refuseNonSocketNameAtTakeover(site: regular)) { error in
-            let text = String(describing: error)
-            XCTAssertTrue(text.contains("id_rsa"), "拒绝必须点名那个名字：\(text)")
-            XCTAssertTrue(text.lowercased().contains("regular"), text)
-        }
-        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: regular)), secret)
-
-        let missing = directory + "/nothing-here"
-        XCTAssertNil(SocketServer.nonSocketInodeKind(at: missing), "不存在＝没有名字，不是拒绝")
-        XCTAssertEqual(SocketServer.nonSocketInodeKind(at: directory), "a directory")
-
+        // 三种事故不能共用一句话：类别没量出来就等于没说为什么被拒。
+        XCTAssertTrue(DaemonProbe.nonSocketNameDescription(directory).contains("a directory"),
+                      "目录要有自己的措辞")
         let link = directory + "/link.sock"
         try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: regular)
-        XCTAssertEqual(SocketServer.nonSocketInodeKind(at: link), "a symlink")
-
-        // 真 socket 必须放行，否则这条闸只是把 bind 关掉。路径超出 sockaddr_un 容限时
-        // 如实跳过并说话，而不是让对照静默默成"通过"。
-        let realSocket = directory + "/engine.sock"
-        guard realSocket.utf8.count < MemoryLayout.size(ofValue: sockaddr_un().sun_path) else {
-            throw XCTSkip("沙箱路径 \(realSocket.utf8.count) 字节，超出 sun_path 容量，"
-                + "这条对照在本环境跑不了（不是通过）")
-        }
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        XCTAssertGreaterThan(fd, 0)
-        defer { close(fd) }
-        boundTestSocket(fd: fd, path: realSocket)
-        XCTAssertNil(SocketServer.nonSocketInodeKind(at: realSocket))
-    }
-
-    /// 用真 bind 造一个真 socket，免得"是 socket 就放行"那半边只是断言的空转。
-    private func boundTestSocket(fd: Int32, path: String) {
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        addr.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
-        path.withCString { source in
-            withUnsafeMutableBytes(of: &addr.sun_path) { destination in
-                _ = strncpy(destination.baseAddress!.assumingMemoryBound(to: CChar.self),
-                            source, destination.count)
-            }
-        }
-        let bound = withUnsafePointer(to: &addr) { typed in
-            typed.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
-                Darwin.bind(fd, generic, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        XCTAssertEqual(bound, 0, "真 socket 没 bind 上，这条对照就是空的（errno \(errno)）")
+        XCTAssertTrue(DaemonProbe.nonSocketNameDescription(link).contains("a symlink"),
+                      "符号链接要有自己的措辞——删它等于删别人的名字")
     }
 }
