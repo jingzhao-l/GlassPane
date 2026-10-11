@@ -158,6 +158,12 @@ final class PanelActionReadoutTests: XCTestCase {
                 $0.contains("guard canRunDaemonCLI else")
             }.count, 3,
             "写入动作里只有部分设了 daemon 闸：剩下的那一条会在读不到程序路径时静默关掉确认表")
+        // `selectedIndex` 是 1.10.0 删掉的"为翻页而存在、却没人读"的属性，被上游一次
+        // merge 又搬回来过（`git grep selectedIndex -- engine/Sources` 只剩定义一行）。
+        // 它不是 @Published，上面那条扫描抓不到它，所以这里点名钉住：
+        // 再要翻页，就带着读者一起进来。
+        XCTAssertFalse(model.contains("var selectedIndex"),
+            "又一个写了没人读的计算属性回到了控制台模型")
     }
 }
 

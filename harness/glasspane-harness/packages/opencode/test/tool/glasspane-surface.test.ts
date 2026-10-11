@@ -7,7 +7,8 @@ import { Agent } from "@/agent/agent"
 import * as Truncate from "@/tool/truncate"
 import { Effect, Layer } from "effect"
 
-import { glasspaneDefs, present, refused, requireCapability } from "../../src/tool/glasspane/index"
+import { engineBody, glasspaneDefs, present, refused, requireCapability } from "../../src/tool/glasspane/index"
+import { DIMENSION_ID_LIMITS, validateDimension } from "../../src/tool/glasspane/kernel"
 import * as Daemon from "../../src/tool/glasspane/daemon"
 
 /**
@@ -451,3 +452,138 @@ describe("bounds the surface puts on itself", () => {
   })
 })
 
+describe("the declared review dimension (scenario 2, recorded half)", () => {
+  test("the ids a run plan uses are the ids a call may declare", () => {
+    // One vocabulary, checked against the other side's own validator: coverage only
+    // counts a planned dimension when a recorded decision carries the same id, so two
+    // spellings of the shape would report a verified session as 0 verified. These ids
+    // are the published run-plan fixture's own.
+    for (const id of ["correctness", "security", "spec-compliance", "style-tests", "frontend-backend", "ui-ux"]) {
+      const read = validateDimension(id)
+      expect(read.ok, `${id} should be a well-formed dimension id`).toBe(true)
+      if (read.ok) expect(read.dimension).toBe(id)
+    }
+  })
+
+  test("a malformed id is refused with the surface's own three fields", () => {
+    for (const bad of ["Security", "SPEC", "spec_compliance", "spec compliance", "spec--compliance", "-security", "security-", "x".repeat(65), 42, {}, []]) {
+      const read = validateDimension(bad)
+      expect(read.ok, `${JSON.stringify(bad)} should not be accepted`).toBe(false)
+      if (read.ok) continue
+      expect(read.error.code).toBe("GP_E_DIMENSION")
+      // Actionable, not descriptive: the caller has to be able to fix the call from this
+      // text without opening the source.
+      expect(read.error.remedy.length).toBeGreaterThan(20)
+    }
+  })
+
+  test("absent means absent, and is never read as a dimension", () => {
+    for (const absent of [undefined, null]) {
+      const read = validateDimension(absent)
+      expect(read.ok).toBe(true)
+      if (read.ok) expect(read.dimension).toBeUndefined()
+    }
+  })
+
+  test("present() puts the declaration where the transcript will keep it", () => {
+    const reply: Daemon.DaemonReply = { ok: true, result: { operationId: "op_AAAAAAAAAAAAAAAAAAAAAAAAAA" } }
+    const declared = present("gp_act", "act", reply, () => "ok", "security")
+    expect((declared.metadata as Record<string, unknown>).dimension).toBe("security")
+    const undeclared = present("gp_act", "act", reply, () => "ok")
+    expect((undeclared.metadata as Record<string, unknown>).dimension).toBeNull()
+  })
+
+  test("the model-facing parameter schema takes the id and drops an absent one", async () => {
+    // This is the boundary the model actually hits, so it is asserted at the schema and
+    // not only at validateDimension: a declaration the host cannot even carry is a
+    // parameter that exists in prose only.
+    const { Schema } = await import("effect")
+    const { ActParams } = await import("../../src/tool/glasspane/index")
+    const decode = Schema.decodeUnknownSync(ActParams)
+    const declared = decode({ selector: { role: "AXButton" }, action: "press", dimension: "spec-compliance" })
+    expect((declared as { dimension?: string }).dimension).toBe("spec-compliance")
+    const absent = decode({ selector: { role: "AXButton" }, action: "press" })
+    expect((absent as { dimension?: string }).dimension).toBeUndefined()
+  })
+
+  test("a malformed id never reaches the model-facing schema as a valid call", async () => {
+    // The annotation is optional, so the schema cannot reject a bad id by itself — which
+    // is exactly why validateDimension sits in front of every daemon call instead of the
+    // model being trusted to spell it right. Pinned here so the two halves are not
+    // mistaken for one another.
+    const { Schema } = await import("effect")
+    const { ActParams } = await import("../../src/tool/glasspane/index")
+    const decode = Schema.decodeUnknownSync(ActParams)
+    expect(() => decode({ selector: { role: "AXButton" }, action: "press", dimension: "Spec Compliance" })).not.toThrow()
+    expect(validateDimension("Spec Compliance").ok).toBe(false)
+  })
+
+  test("the metadata shape stays one shape, refusal included", () => {
+    // Upstream infers the tool's metadata type from what `execute` returns, so a key
+    // present on one branch and absent on the other becomes a union the registry cannot
+    // carry — the failure this file already pins for the other six fields.
+    const ok = present("gp_act", "act", { ok: true, result: {} }, () => "ok", "security")
+    const bad = refused("gp_act", "act", { code: "GP_E_TEST", message: "m", remedy: "r" }, "security")
+    expect(Object.keys(ok.metadata as object).sort()).toEqual(Object.keys(bad.metadata as object).sort())
+  })
+
+  test("the engine is never told about our annotation", () => {
+    const body = engineBody({ selector: { role: "AXButton" }, action: "press", degrade: true, dimension: "security" })
+    expect(Object.keys(body).sort()).toEqual(["action", "degrade", "selector"])
+    expect(JSON.stringify(body)).not.toContain("security")
+    // Stripping must not eat a real parameter either.
+    expect((body.selector as { role: string }).role).toBe("AXButton")
+  })
+
+  test("every tool that can yield a decision declares the parameter, and the one that cannot does not", () => {
+    // gp_probe_status returns a self-report with no evidence frame, so no decision can
+    // ever be attributed to it; a parameter nobody can read is how a surface starts
+    // claiming coverage it does not have.
+    const source = readFileSync(path.join(import.meta.dirname, "..", "..", "src", "tool", "glasspane", "index.ts"), "utf8")
+    for (const name of ["AttachParams", "ObserveParams", "ActParams", "DiagnoseParams", "LastEvidenceParams"]) {
+      expect(structBody(source, name), `${name} must accept a declared dimension`).toContain("dimension: DimensionArg")
+    }
+    expect(structBody(source, "ProbeStatusParams")).not.toContain("DimensionArg")
+
+    // And each of the five validates before the daemon is asked to do anything: a call
+    // that reached the engine with a bad id would produce evidence attributed to nothing.
+    for (const method of ["attach", "observe", "act", "diagnose", "last_evidence"]) {
+      const at = source.indexOf(`Daemon.call("${method}"`)
+      expect(at, `${method} call site not found`).toBeGreaterThan(-1)
+      const guard = source.lastIndexOf(`if (!declared.ok) return refused("gp_${method}"`, at)
+      expect(guard, `${method} must validate the dimension before calling the daemon`).toBeGreaterThan(-1)
+      expect(guard).toBeLessThan(at)
+    }
+  })
+
+  test("the annotation is validated against the kernel, not a local copy of its regex", () => {
+    // The pattern's owner is the kernel's dimension contract; a local regex is a second
+    // source that can drift, and the drift shows up as declarations that never match a
+    // plan rather than as an error.
+    const source = readFileSync(path.join(import.meta.dirname, "..", "..", "src", "tool", "glasspane", "index.ts"), "utf8")
+    expect(source).toContain('import { DIMENSION_ID_LIMITS, validateDimension')
+    const binding = readFileSync(path.join(import.meta.dirname, "..", "..", "src", "tool", "glasspane", "kernel.ts"), "utf8")
+    expect(binding).toContain("DIMENSION_ID_MAX_LENGTH, DIMENSION_ID_PATTERN } from \"iterate-kernel/dimension-context\"")
+    expect(DIMENSION_ID_LIMITS.pattern.source).toBe("^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    expect(DIMENSION_ID_LIMITS.maxLength).toBe(64)
+  })
+})
+
+function structBody(source: string, name: string): string {
+  // Brace-matched, not "up to the first `})`": a one-line `Schema.Struct({})` would
+  // otherwise be read through the next struct, and the assertion would be measuring
+  // this helper instead of the source.
+  const head = `export const ${name} = Schema.Struct({`
+  const start = source.indexOf(head)
+  expect(start, `${name} is not declared where this test expects`).toBeGreaterThan(-1)
+  let depth = 1
+  for (let i = start + head.length; i < source.length; i++) {
+    const ch = source[i]
+    if (ch === "{") depth++
+    else if (ch === "}") {
+      depth--
+      if (depth === 0) return source.slice(start, i + 1)
+    }
+  }
+  throw new Error(`${name}: unbalanced Schema.Struct`)
+}

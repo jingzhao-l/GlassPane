@@ -435,6 +435,23 @@ private func printUsage() {
         --evidence-stats        Print evidence archive stats (JSON) and exit
         --help, -h            Show this help
 
+    EXIT CODES (the whole set this binary can return; `DaemonExitCodeTests`
+    reads them out of this file's own `exit(...)`/`.errorCode(..., N)` sites and
+    refuses to let one go undocumented — a caller that has to branch on the
+    answer cannot read a usage block that names four of the six):
+        0   success, including a read-only answer that reports nothing found
+        1   the operation was refused or only partly succeeded (a registry that
+                cannot be read back, a project path the store would refuse to
+                archive into, partial removal in --project-prune)
+        2   a value-taking flag was given no usable value (--project-remove,
+                --older-than) or --recipe-validate named a file that cannot be
+                read. NOT a usage error in the 64 sense: the flag was understood,
+                its argument was not
+        3   --project-remove named an id that is not registered
+        64  usage error: an unknown argument, or a missing/malformed
+                --request-permission kind
+        65   a live instance already owns the socket (refuse to displace it)
+
     PROTOCOL:
         Newline-delimited JSON over the socket; see specs/GlassPane_P0_实施规格_v1.0.md §3.
 

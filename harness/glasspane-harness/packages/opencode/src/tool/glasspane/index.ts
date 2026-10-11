@@ -19,18 +19,53 @@
 import { Effect, Schema } from "effect"
 import * as Tool from "../tool"
 import * as Daemon from "./daemon"
+import { DIMENSION_ID_LIMITS, validateDimension } from "./kernel"
+
+/**
+ * The review dimension this call was made for, as the model declares it.
+ *
+ * It is a harness-side annotation, never engine input: the Swift daemon has no idea what
+ * "spec-compliance" means, so `engineBody()` strips it before anything leaves the
+ * process. What it buys is the recorded half of dimension coverage — the compaction block
+ * can only count a planned dimension as verified when some call says which one it served.
+ * Absent is legitimate and means "this call served no declared dimension", which coverage
+ * then reports as unverified rather than inventing one; a malformed id is refused before
+ * the call, because a typo would be counted as an unplanned dimension and silently rename
+ * what the session claims it covered.
+ */
+const DimensionArg = Schema.optional(
+  Schema.String.annotate({
+    description: `the review dimension this call serves, kebab-case (e.g. "security", "spec-compliance"); omit it when the call was not made for a dimension`,
+    pattern: DIMENSION_ID_LIMITS.pattern.source,
+    maxLength: DIMENSION_ID_LIMITS.maxLength,
+  }),
+)
+
+/** Drop the harness-side annotation from what the daemon is asked to do.
+ *  Exported for the M1 fixed-point tests: "the engine never sees our annotation" is
+ *  the invariant worth pinning, and a test can only pin what it can name. */
+export function engineBody(params: Record<string, unknown>): Record<string, unknown> {
+  const { dimension: _dimension, ...rest } = params
+  return rest
+}
 
 /** One fixed metadata shape: upstream infers the tool's metadata type from what
  *  `execute` returns, so a union of shapes there becomes a union the registry
  *  cannot carry. Exported for the M1 fixed-point tests (same reason as
  *  `glasspaneRow` in M5): the remedy-in-output rule is the invariant worth pinning,
  *  and a test can only pin what it can name. */
-export function present(tool: string, method: string, reply: Daemon.DaemonReply, summary: (result: unknown) => string): Tool.ExecuteResult {
-  if (!reply.ok) return refused(tool, method, reply.error)
+export function present(
+  tool: string,
+  method: string,
+  reply: Daemon.DaemonReply,
+  summary: (result: unknown) => string,
+  dimension: string | null = null,
+): Tool.ExecuteResult {
+  if (!reply.ok) return refused(tool, method, reply.error, dimension)
   return {
     title: `${tool}: ${method} ok`,
     output: summary(reply.result),
-    metadata: { ok: true, method, code: null, message: null, remedy: null, result: reply.result as object },
+    metadata: { ok: true, method, code: null, message: null, remedy: null, dimension, result: reply.result as object },
   }
 }
 
@@ -41,11 +76,11 @@ export function present(tool: string, method: string, reply: Daemon.DaemonReply,
  * remedy the engine attached — the one it knows is executable — would be lost.
  * Exported for the M1 fixed-point tests, for the same reason as `present`.
  */
-export function refused(tool: string, method: string, error: Daemon.DaemonError): Tool.ExecuteResult {
+export function refused(tool: string, method: string, error: Daemon.DaemonError, dimension: string | null = null): Tool.ExecuteResult {
   return {
     title: `${tool}: ${error.code}`,
     output: `${error.message}\nremedy: ${error.remedy}`,
-    metadata: { ok: false, method, code: error.code, message: error.message, remedy: error.remedy, result: null },
+    metadata: { ok: false, method, code: error.code, message: error.message, remedy: error.remedy, dimension, result: null },
   }
 }
 
@@ -122,6 +157,9 @@ export const ProbeStatusTool = Tool.define(
       execute: (_params: Schema.Schema.Type<typeof ProbeStatusParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {
           yield* ctx.ask({ permission: "glasspane", patterns: ["probe_status"], always: ["*"], metadata: { reads: "daemon self-report only" } })
+          // No `dimension` here on purpose: a self-report produces no evidence frame, so it
+          // can never yield a decision for a dimension to be counted against. A parameter with
+          // no reader is how a tool surface starts lying about what it records.
           const probe = yield* Daemon.call("probe_status", {}, 8000)
           const caps = yield* Daemon.probeCapabilities()
           const head = caps.ok
@@ -136,6 +174,7 @@ export const ProbeStatusTool = Tool.define(
 export const AttachParams = Schema.Struct({
   bundleId: Schema.optional(Schema.String.annotate({ description: "CFBundleIdentifier, e.g. com.apple.Notes" })),
   pid: Schema.optional(Schema.NumberFromString.annotate({ description: "process id, when several instances run and the bundle id is ambiguous" })),
+  dimension: DimensionArg,
 })
 
 export const AttachTool = Tool.define(
@@ -150,8 +189,10 @@ export const AttachTool = Tool.define(
           const blocked = yield* requireCapability("gp_attach", "attach", "observe")
           if (blocked) return blocked
           yield* ctx.ask({ permission: "glasspane", patterns: ["attach"], always: ["*"], metadata: params })
-          const reply = yield* Daemon.call("attach", params)
-          return present("gp_attach", "attach", reply, (result) => `attached: ${json(result)}`)
+          const declared = validateDimension(params.dimension)
+          if (!declared.ok) return refused("gp_attach", "attach", declared.error)
+          const reply = yield* Daemon.call("attach", engineBody(params))
+          return present("gp_attach", "attach", reply, (result) => `attached: ${json(result)}`, params.dimension ?? null)
         }),
     }
   }),
@@ -169,6 +210,7 @@ export const ObserveParams = Schema.Struct({
     }),
   ),
   role: Schema.optional(Schema.String.annotate({ description: "filter to one role, e.g. AXButton" })),
+  dimension: DimensionArg,
 })
 
 export const ObserveTool = Tool.define(
@@ -186,11 +228,13 @@ export const ObserveTool = Tool.define(
           const body: Record<string, unknown> = {}
           if (params.maxDepth !== undefined) body.maxDepth = params.maxDepth
           if (params.role !== undefined) body.role = params.role
+          const declared = validateDimension(params.dimension)
+          if (!declared.ok) return refused("gp_observe", "observe", declared.error)
           const reply = yield* Daemon.call("observe", body, Daemon.TIMEOUT_MS.observe)
           return present("gp_observe", "observe", reply, (result) => {
             const tree = fields(result)
             return `nodes=${text(tree.nodeCount, "unknown")} digest=${text(tree.digest, "unknown")}\n${json(tree.axTree ?? result)}`
-          })
+          }, params.dimension ?? null)
         }),
     }
   }),
@@ -208,6 +252,7 @@ export const ActParams = Schema.Struct({
   degrade: Schema.optional(Schema.Boolean).annotate({
     description: "allow the engine to act while an input window is busy; the resulting evidence is marked contaminated",
   }),
+  dimension: DimensionArg,
 })
 
 export const ActTool = Tool.define(
@@ -227,7 +272,9 @@ export const ActTool = Tool.define(
             always: [],
             metadata: fields(params),
           })
-          const reply = yield* Daemon.call("act", params, Daemon.TIMEOUT_MS.act)
+          const declared = validateDimension(params.dimension)
+          if (!declared.ok) return refused("gp_act", "act", declared.error)
+          const reply = yield* Daemon.call("act", engineBody(params), Daemon.TIMEOUT_MS.act)
           return present("gp_act", "act", reply, (result) => {
             const out = fields(result)
             const opId = text(out.operationId, "none")
@@ -239,7 +286,7 @@ export const ActTool = Tool.define(
               "",
               `If that is not the change you expected, call gp_diagnose with operationId=${opId} before retrying — do not re-click and hope.`,
             ].join("\n")
-          })
+          }, params.dimension ?? null)
         }),
     }
   }),
@@ -247,6 +294,7 @@ export const ActTool = Tool.define(
 
 export const DiagnoseParams = Schema.Struct({
   operationId: Schema.optional(Schema.String.annotate({ description: "operation id from gp_act; omit to diagnose the most recent operation" })),
+  dimension: DimensionArg,
 })
 
 export const DiagnoseTool = Tool.define(
@@ -259,12 +307,14 @@ export const DiagnoseTool = Tool.define(
       execute: (params: Schema.Schema.Type<typeof DiagnoseParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {
           yield* ctx.ask({ permission: "glasspane", patterns: ["diagnose"], always: ["*"], metadata: params })
-          const reply = yield* Daemon.call("diagnose", params)
+          const declared = validateDimension(params.dimension)
+          if (!declared.ok) return refused("gp_diagnose", "diagnose", declared.error)
+          const reply = yield* Daemon.call("diagnose", engineBody(params))
           return present("gp_diagnose", "diagnose", reply, (result) => {
             const out = fields(result)
             const report = fields(out.report)
             return `class=${text(out.class, "unknown")}\npath: ${text(report.path, "-")}\nanomaly: ${text(report.anomaly, "-")}\nevidence: ${text(report.evidence, "-")}\nnext: ${text(report.next, "-")}`
-          })
+          }, params.dimension ?? null)
         }),
     }
   }),
@@ -272,6 +322,7 @@ export const DiagnoseTool = Tool.define(
 
 export const LastEvidenceParams = Schema.Struct({
   operationId: Schema.optional(Schema.String.annotate({ description: "omit for the most recent operation" })),
+  dimension: DimensionArg,
 })
 
 export const LastEvidenceTool = Tool.define(
@@ -284,8 +335,10 @@ export const LastEvidenceTool = Tool.define(
       execute: (params: Schema.Schema.Type<typeof LastEvidenceParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {
           yield* ctx.ask({ permission: "glasspane", patterns: ["last_evidence"], always: ["*"], metadata: params })
-          const reply = yield* Daemon.call("last_evidence", params)
-          return present("gp_last_evidence", "last_evidence", reply, (result) => json(result))
+          const declared = validateDimension(params.dimension)
+          if (!declared.ok) return refused("gp_last_evidence", "last_evidence", declared.error)
+          const reply = yield* Daemon.call("last_evidence", engineBody(params))
+          return present("gp_last_evidence", "last_evidence", reply, (result) => json(result), params.dimension ?? null)
         }),
     }
   }),

@@ -172,6 +172,37 @@ public struct StateRoot: Equatable {
         return nil
     }
 
+    /// Whether a directory is safe to *receive* a file this process is about to
+    /// hand to another executor (a `launchctl submit` one-shot, a report the
+    /// browser will open). Read-only by design: it never chmods, because a
+    /// directory the caller does not own is not the caller's to rewrite.
+    ///
+    /// This exists as one predicate because two of its consumers had already
+    /// grown separate hand-rolled versions of the same four checks, and the
+    /// third (`runOneShot`, which writes a script that launchd then executes
+    /// under the daemon's own responsibility context) had **none** — it created
+    /// the directory with the process umask and trusted whatever name it picked,
+    /// so a `$TMPDIR` redirected into a shared location let any other account
+    /// pre-plant the script or output path that the daemon would then write.
+    public enum DirectoryIsolation: Equatable {
+        case usable
+        case missing
+        case notADirectory
+        case ownedBy(uid: UInt32)
+        case sharedWritable(mode: Int)
+    }
+
+    public static func directoryIsolation(at path: String) -> DirectoryIsolation {
+        var info = stat()
+        guard stat(path, &info) == 0 else { return .missing }
+        guard info.st_mode & S_IFMT == S_IFDIR else { return .notADirectory }
+        guard info.st_uid == getuid() else { return .ownedBy(uid: info.st_uid) }
+        guard info.st_mode & 0o022 == 0 else {
+            return .sharedWritable(mode: Int(info.st_mode & 0o777))
+        }
+        return .usable
+    }
+
     /// Bring the root, its archive directory and the state files inside them to
     /// owner-only, reporting every step. Called once at daemon start, so the
     /// long-lived process that writes the archive is also the one that closes
