@@ -6,21 +6,31 @@
 
 ## 提示词正文
 
-请对 `/Volumes/Eng-Dev/GlassPane` 项目（GlassPane 主仓库）执行每日例行「全面审查 + 修复 + 发版」任务。本任务在全新会话中无人值守执行，请自主完整完成，勿遗漏，勿在中途向我确认。
+请对 `/Volumes/Eng-Dev/GlassPane` 项目（GlassPane 主仓库）执行每日例行「全面审查 + 修复 + 发版」任务。**这是无人值守场景**：全程没有人在旁边，任何正常情况下需要我决策的地方都由你自己判断并执行到底，不许中途停下来问我，也不许把任何事项留成"待裁决/待补/下一轮再看"。
+
+【无人值守：零遗留与全线发布授权（本节优先级最高）】
+
+- **授权范围**：审查、改代码、加测试、提交、推送 `origin main`、升版本线、打 tag、触发并观察 GitHub Release 与 npm 两条发布通道、`gh workflow run -f mode=publish` 真的发 npm、改 `.github/workflows/*`、重记棘轮金样、以及（在你判定必要且已证明被覆盖内容不丢的前提下）对 split/远端分支的覆盖推送。这些都不必再问我。
+- **收口定义（不成立就是本轮失败，不是"差一点"）**：① 本轮全部改动已落在 **main** 上并推送，`git status --porcelain` 为空；② 该发的版已发完——版本号进 5 处派生位点与 lock、CHANGELOG 有条目、tag 已推、GitHub Release 非草稿且资产/签名核过、registry 两个包的版本号等于新号；③ 没有任何属于你的半成品留在临时分支、worktree 或未提交状态里。**把发版做在 `daily/main-<date>` 这类自己开的分支上而没并进 main，等于没收口**（这件事真发生过）；④ 你判定的缺陷要么修完，要么明确写成"决定不修 + 理由"，不许只挂账。
+- **替你做的决定要留痕**：取号判断、要不要动风险区文件、修到哪一层、棘轮是否重记、契约是否升级——每个决定在提交正文或 `CHANGELOG.md`/`specs/` 新增记录里写下依据，汇报里再汇总一条「本轮决定 → 依据 → 回滚命令」。我不需要你问我，我需要我能复查你决定了什么。
+- **只有两件事是物理上做不到的**，别把它们当决策遗留：`npm stage approve`（要你的 2FA）与 Apple 公证（要付费账号）。碰上时先把其余一切做完，再把确切补救命令写进汇报最上方（含 stage-id、包名、版本）。除此之外，汇报里不许出现"需要你决定/需要你确认"。
+- **范围纪律**：不得为了"清零"而擅自扩大产品面（新增对外 `gp_*` 工具、改发布平台矩阵、改产品定位）。那是范围变更而不是遗留项；按最小正确修法收口，需要扩面也照此自己决定并留痕。
+- **诚实性优先于零遗留**：两者冲突时选诚实——测不出就写"未观测"。但"如实标注"不是不做完的理由：能在本机做的（含真机项：面板走 AX `kAXPressAction`、权限走 `glasspaned --permissions`、状态复现走隔离 `GLASSPANE_STATE_DIR`）必须做完。
 
 【审查范围】
 
 - 只审查主仓产品面：`engine/`（Swift：`Sources/GlassPaneEngine`、`Sources/glasspaned`、`Sources/glasspane-settings`、`probe/`、`scripts/make-app.sh`、`.signal_smoke.py`、`smoke.md`）、`mcp-shell/`（TypeScript MCP 壳）、`installer/`（`glasspane-install`）、`updater/`（自动更新引擎）、`bridge/`（Python LLDB 桥）、`scripts/`、`.github/workflows/`、`install.sh`、根 `package.json` 与各 workspace 的 `package.json`/lockfile、`CHANGELOG.md`、`README.md`/`README.zh-CN.md`/`SECURITY.md`/`SECURITY.zh-CN.md`/`CONTRIBUTING.md`/`CONTRIBUTING.zh-CN.md`、`ITERATE.md`、`iterate.config.yaml`。
 - 明确忽略 `harness/` 整个目录（`harness/glasspane-harness` fork 本体 + `harness/tools` 六把尺子 + `harness/contracts` 金样 + `harness/upstream.json`）。它有独立的每日任务与独立发布通道，不审查、不修改、不发版，不得把 `harness/*` 纳入任何改动与发布包。
-- `kernel/` 只读：它的 canonical 编辑入口是 `/Volumes/Eng-Dev/iterate-skill/kernel`，本仓 `kernel/` 是镜像；`kernel/schemas/**` 是跨语言契约真源。本轮若得出"必须改 schema/kernel 才能修掉某个缺陷"的结论，不要动手，列进汇报的「待裁决」。唯一合法的镜像更新路径是 `KERNEL_SRC=/Volumes/Eng-Dev/iterate-skill tools/sync-kernel.sh --target=repo`，且只在 canonical 已前进时跑。
+- `kernel/` 与本仓 `kernel/schemas/**` 是跨语言契约真源的**镜像**，canonical 编辑入口在 `/Volumes/Eng-Dev/iterate-skill/kernel`。本轮若判定"必须改契约才能修掉缺陷"，你有权限自己决定并做完：在 canonical 侧改、跑它的门禁与发版，再经 `KERNEL_SRC=/Volumes/Eng-Dev/iterate-skill tools/sync-kernel.sh --target=repo` 回写本仓镜像，两侧同轮落地——**不许把它列成「待裁决」了事**。判定"不改契约、在本层解决"也是一种决定，写下理由即可。除此之外不要单边手改 `kernel/schemas/**`（那是复制品，手改必被同步判红）。
 - 禁区：`specs/**`（验收台账与决策记录，不得改写历史结论，只可新增本轮记录）、`LICENSE`、`.external/`。
 - 风险区（可以改，但必须在汇报里单独点名并给出证据）：`engine/Sources/GlassPaneEngine/`（归因与证据语义）、`engine/Sources/glasspaned/main.swift`（信号与 socket 生命周期；sigwait + 早期 `pthread_sigmask` 的方案已被真机证伪过替代方案，别改回去）、`mcp-shell/src/tools.ts`（对外 MCP 工具契约，三处镜像：kernel schema / daemon `FrameCodec` / mcp-shell）、`.github/workflows/release.yml`（不可逆发布通道）、`scripts/version-sites.mjs`（版本线位点表）。
 
 【开工前先确认工作树】
 
 1. 整树 `git status --porcelain`（不要只看子目录），并记下开工 HEAD sha。
-2. 主仓常被并行会话以 dirty 状态占用，可能存在**别人未提交的批次**。这时：不要混提、不要 `git add -A`、绝不 `git checkout --`/`reset`/`stash` 别人的文件。改用隔离工作树做本轮改动与提交（`git worktree add`，基于 main 的 HEAD），未提交批次留给它的会话，只在汇报里点名它存在。
-3. 对每个要改的文件先复制到 scratch 目录（如 `/var/tmp/glasspane-main-check/`）留快照——这是唯一回滚点。
+2. **环境余量先查**：`df -k /Volumes/Eng-Dev`（或 `/`）看可用空间。本任务的构建（Swift `.build`、`npm ci`、`node --test`、临时归档）会吃盘，而 2026-10-10/10-11 那两轮就是被 ENOSPC 半路杀掉的（任务记录只留 `session-failed`，不说为什么）。可用空间低于 ~4 GiB 就先清可再生物：`engine/.build`、`*/node_modules` + 重装、`npm cache`（必要时 `sudo npm cache clean --force`）、`/var/tmp` 下往轮归档与临时前缀。清完仍不够就**如实按"环境不足"终止**并在汇报最上方给出确切数字与补救命令——那是物理边界，不是遗留项；但别硬跑到会话被杀，留一堆未提交改动给别人。
+3. 主仓常被并行会话以 dirty 状态占用，可能存在**别人未提交的批次**。这时：不要混提、不要 `git add -A`、绝不 `git checkout --`/`reset`/`stash` 别人的文件。改用隔离工作树做本轮改动与提交（`git worktree add`，基于 main 的 HEAD）。那不是本轮该清的遗留项（那是别人正在做的工作），但你必须在汇报里点名它、并给出判断：它是否和本轮改动重叠、会不会让本轮收口变成半真半假。
+4. 对每个要改的文件先复制到 scratch 目录（如 `/var/tmp/glasspane-main-check/`）留快照——这是唯一回滚点。
 
 【执行流程】
 
@@ -52,8 +62,8 @@
    g. 复核发布物：`gh release view v<X.Y.Z> --json isDraft,targetCommitish,assets`（draft=false、target==本轮 commit）；归档自证用 `node scripts/make-release-archive.mjs --verify <archive> <X.Y.Z>` 而不是 `tar -tzf | grep -q`（`grep -q` 首个命中就退出，tar 死于 SIGPIPE，`pipefail` 会把一条通过的检查判成失败——本仓真栽过）。确认归档确实不含 harness：`tar -tzf <archive> | grep -c '^harness/'` 应为 0（数数用 `grep -c`，不要用 `grep -q`）。
    h. npm 发布（**与 tag 是两条独立动作**）：先 `gh workflow run release.yml --repo jingzhao-l/GlassPane --ref v<X.Y.Z> -f mode=dry` 验打包形态，再 `--ref v<X.Y.Z> -f mode=publish` 发两个裸名包（`glasspane-mcp`、`glasspane-install`，带 provenance；trusted publisher 直发已实测可成，被 staged-only 拒时 `npm stage approve <stage-id>` 是需要 owner 2FA 的人工动作，列进汇报别硬闯）。**`--ref` 必须显式写成被发的那个 tag**：`npm-publish` job 的 `actions/checkout` 取的是 dispatch 的 ref，不传就落到默认分支 HEAD——那样 registry 上的字节与被 tag 的树不对应，`check-version` 还会拿 main 的版本线去自证。顺序固定为：push → tag → `--ref v<X.Y.Z>` dry → 看绿 → `--ref v<X.Y.Z>` publish。
    i. **tag ≠ npm**：job 绿了不算发完，必须回查 registry：`npm view glasspane-mcp version`、`npm view glasspane-install version` 都要等于新版本；registry 在 publish 刚过的几分钟里可能返回读副本的旧值，所以按版本号点名再带 `--prefer-online`：`npm view glasspane-mcp@<X.Y.Z> version --prefer-online`、`npm view glasspane-install@<X.Y.Z> version --prefer-online`；`npm view glasspane-mcp versions --json | tail` 复算一次。
-   j. 端到端实测（能本机做的就做完）：把发布归档解到临时目录 → 在树内 `npm pack` → 装进干净前缀 → 用 stdin 打一条 MCP `initialize` 断言回包含 `glasspane-mcp`；daemon 冒烟写 `engine/.build/debug/glasspaned --state-dir <临时根> --permissions`。**不要写 `GLASSPANE_STATE_DIR=<临时目录> glasspaned --permissions`**：2026-10-06 实测 daemon 不读那个环境变量，它照旧落到 home 默认根 `/Users/<you>/.glasspane` 并打一句"state is read and written under the home default"的警告后继续跑——同一条命令换成 `--prune-evidence` 就是在真机上删真档案（本轮差点就这么干了，事后核对 `~/.glasspane/evidence` 582 条完好）。归档类检查一律带 `--state-dir`。另外归档内容的判定要用 `grep -cE "(^|/)harness/"`：tar 里所有条目都在单一顶层目录 `GlassPane-<ver>/` 下，锚在 `^harness/` 的检查一条不中、会**空过成绿**。**CI 承载不了真机验收**（无障碍、事件监听、屏幕录制需登录 GUI 会话与已勾权限，记录在 `engine/smoke.md`），这类结论只能标「待真机复跑」，不得标「已验证」。面板验证别用 cliclick（点不动裸可执行文件），走 AX `kAXPressAction` 按 `gp-*` 标识。
-5. 全程只要有文件更新，都必须及时提交并推送 GitHub；收口时整树 `git status --porcelain` 应为空。
+   j. 端到端实测（能本机做的就做完）：把发布归档解到临时目录 → 在树内 `npm pack` → 装进干净前缀 → 用 stdin 打一条 MCP `initialize` 断言回包含 `glasspane-mcp`；daemon 冒烟写 `engine/.build/debug/glasspaned --state-dir <临时根> --permissions`。**不要写 `GLASSPANE_STATE_DIR=<临时目录> glasspaned --permissions`**：2026-10-06 实测 daemon 不读那个环境变量，它照旧落到 home 默认根 `/Users/<you>/.glasspane` 并打一句"state is read and written under the home default"的警告后继续跑——同一条命令换成 `--prune-evidence` 就是在真机上删真档案（本轮差点就这么干了，事后核对 `~/.glasspane/evidence` 582 条完好）。归档类检查一律带 `--state-dir`。另外归档内容的判定要用 `grep -cE "(^|/)harness/"`：tar 里所有条目都在单一顶层目录 `GlassPane-<ver>/` 下，锚在 `^harness/` 的检查一条不中、会**空过成绿**。**CI 承载不了真机验收**（无障碍、事件监听、屏幕录制需登录 GUI 会话与已勾权限，记录在 `engine/smoke.md`），但**这条任务就跑在有 GUI 会话的本机上**，所以真机项属于"你能做就做完"，不是"标给别人"：用 AX `kAXPressAction` 按 `gp-*` 标识点面板控件、用 `--state-dir <临时根>` 复现状态、跑 `glasspaned --permissions` 核对读数，做完把实测结果写进汇报与 `engine/smoke.md` 的本轮记录。只有当这台机器确实没有登录会话/权限没勾时才允许写"未观测"，且必须附一句"补上它需要哪一条人工动作 + 为什么本轮跑不了"。**不得把未验证写成已验证。**
+5. 全程只要有文件更新，都必须及时提交并推送 GitHub，**且推的是 `main`**：临时分支、worktree 分支只能是你的工作台，不能是交付终点。收口时 `git status --porcelain` 为空、`git log origin/main -1` 就是本轮最后一笔。
 
 【不可让步的诚实性红线】
 
@@ -68,9 +78,9 @@
 - 每次执行任何终端命令前，必须先执行：`export PATH="/opt/homebrew/bin:/opt/miniconda3/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"`。禁止在未恢复 PATH 时直接调用 git、npm、node、swift、python3、pytest、gh 等命令；仍不可用就改用绝对路径（实测本机：`swift`=/usr/bin/swift、`node`=/usr/local/bin/node、`gh`=/opt/homebrew/bin/gh、`pytest`=/opt/miniconda3/bin/pytest）。禁止依赖 `source ~/.zshrc` 恢复环境。
 - 本机会话的 zsh tmux 钩子会杀掉管道（症状是 `command not found: tmux` + exit 127，不是 PATH 问题）：多段命令改用 `/bin/bash -c '…'` 跑。写 heredoc 用引号形式（`<<'EOF'`），否则反引号会被执行。
 - 推送涉及 `.github/workflows/**` 被 token scope 拒时，改用 SSH remote 形式（`git@github.com:jingzhao-l/GlassPane.git`）；需要 `--force-with-lease` 时必须写显式 SHA 形式，否则恒报 "stale info"。
-- 已授权（本任务内不必再问）：提交、推送 `origin main`、打 tag、触发与观察 release.yml、npm 发布、改动上述产品面文件与测试。仍需我点头、不得自动做：合并到其他分支、强推覆盖别人的提交、删除 Release/包/tag、改 GitHub secrets 与仓库设置、启用公证流程、动 `harness/` 与 `kernel/` 的内容或版本、`--record` 洗掉非本轮造成的红。
-- 若审查中发现 `harness/` 或 `kernel/` 相关问题，仅在最终汇报中列出而不改动。
+- 授权见开头【无人值守：零遗留与全线发布授权】那一节，那一条覆盖本节。这里只留两条不是"决策"而是"别做错"的纪律：`--record` 只用于本轮自己的有意增长，不许拿来洗掉非本轮造成的红；要覆盖任何远端分支或丢弃提交之前，必须先证明被覆盖的内容已在别处落地（`git merge-base --is-ancestor` 或逐文件内容比对），并留一条记录说清覆盖了什么。
+- `harness/` 的问题不在本轮范围内动手（它有 10:30 那条独立任务与独立发布通道，你改它会和那条线撞车）；把发现写进汇报，并**明确给出该不该由那条线修、判据是什么**——只列出发现不给结论，就是遗留项。
 
 【最终汇报】
 
-简明列出：开工/收口 HEAD 与是否用了隔离工作树；版本判断依据与 `set-version` 前后位点核对结果；每条门禁命令的**实际计数**（不是"全绿"两个字）；改了哪些文件、对应哪条提交；发布物实测值（tag、Release 是否 draft=false 与 target sha、归档是否含 harness、registry 两个包的版本号）；做过哪些反向验证（破坏哪一处、哪条具名用例变红）；未修清单（待真机复跑 / 待我裁决 / harness 与 kernel 侧问题）。不要贴大段日志。
+简明列出，按这个顺序：① **收口证据**——main 的收口 HEAD、`git status --porcelain` 为空、tag/Release（draft=false、target sha、归档是否含 harness）/registry 两个包的版本号实测值；② 版本判断依据与 `set-version` 前后位点核对；③ 每条门禁命令的**实际计数**（不是"全绿"两个字）；④ 改了哪些文件、对应哪条提交；⑤ 做过哪些反向验证（破坏哪一处、哪条具名用例变红）；⑥ **本轮我替你做了哪些决定**（含依据与回滚命令）——一项都没有通常意味着你把该决定的东西推给了别人；⑦ 未观测/未修项，每条必须写明"为什么本机做不了"与"补上它的确切一条命令"，不许写成"待你确认"。不要贴大段日志。
