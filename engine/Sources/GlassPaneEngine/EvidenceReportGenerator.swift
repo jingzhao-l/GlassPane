@@ -200,19 +200,16 @@ public enum EvidenceReportGenerator {
 
     /// 这份报告允许落在哪儿：必须是本 uid 拥有、且 group/other 都写不动的目录。
     /// `$TMPDIR` 被改指到共享目录（agent 宿主、launchd 上下文都干过）时回缺陷，
-    /// 由调用方如实说"没写成"，不是照写不误。
+    /// 由调用方如实说"没写成"，不是照写不误。判定本身在 `StateRoot.directoryIsolation`
+    /// ——同一份规矩不许有两个实现（一次性 launchd 脚本那边从前根本没有这道判定）。
     static func reportDirectoryDefect(_ path: String) -> String? {
-        var info = stat()
-        guard stat(path, &info) == 0 else {
-            return "报告目录不存在或读不到：\(path)"
+        switch StateRoot.directoryIsolation(at: path) {
+        case .usable: return nil
+        case .missing: return "报告目录不存在或读不到：\(path)"
+        case .notADirectory: return "报告目录不是目录：\(path)"
+        case .ownedBy(let uid): return "报告目录不属于当前用户（uid \(uid)）：\(path)"
+        case .sharedWritable(let mode): return "报告目录同组或其他人可写（\(String(format: "%04o", mode))）：\(path)"
         }
-        if info.st_mode & S_IFMT != S_IFDIR { return "报告目录不是目录：\(path)" }
-        if info.st_uid != getuid() { return "报告目录不属于当前用户（uid \(info.st_uid)）：\(path)" }
-        if info.st_mode & 0o022 != 0 {
-            return String(format: "报告目录同组或其他人可写（%o）：%@",
-                          Int(info.st_mode & 0o777), path)
-        }
-        return nil
     }
 
     /// operationId 只用来让文件名对人友好；字符集按档案条目名的规矩收紧，

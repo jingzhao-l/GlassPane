@@ -429,6 +429,11 @@ final class SettingsModel: ObservableObject {
             recordProbeFailure(.spawnFailed)
         case .timedOut:
             recordProbeFailure(.timedOut)
+        case .directoryUnsafe(let reason):
+            // 阶段仍记作 writeFailed（脚本确实一个字都没落盘），但文案要说清这是
+            // 目录不合格，不是磁盘写不进：下一步是换临时目录，不是重试。
+            recordProbeFailure(.writeFailed,
+                "调试能力没有实测：\(reason) 下一步：确认 TMPDIR 指向本用户专有、同组与其他人都写不动的目录（ls -ld 那个目录），或清掉 TMPDIR 让系统回到默认的每用户临时目录后重试。")
         }
     }
 
@@ -600,6 +605,10 @@ final class SettingsModel: ObservableObject {
         case writeFailed
         case spawnFailed
         case timedOut
+        /// 临时目录本身不合格（别人拥有、同组/其他人可写、或那个位置不是目录）。
+        /// 单列一态：它的下一步不是"重试一次"，而是换一个可隔离的临时目录——
+        /// 与 `writeFailed`（磁盘/权限抛错）混成一条，排查方向就错了。
+        case directoryUnsafe(String)
     }
 
     /// 一次性 launchd 任务的执行面（后台队列）：落脚本 → submit → 轮询读回
@@ -612,6 +621,26 @@ final class SettingsModel: ObservableObject {
         timeoutSeconds: TimeInterval = 6
     ) -> OneShotOutcome {
         let url = URL(fileURLWithPath: scriptPath)
+        let directory = url.deletingLastPathComponent().path
+        // 这个脚本随后由 `launchctl submit` **以 daemon 自己的责任上下文**执行，
+        // outputPath 也在那一趟里被写入。从前这里只 mkdir 就开写：$TMPDIR 被改指到
+        // 共享目录（agent 宿主、launchd 上下文都干过）时，含时钟 nonce 的脚本名与
+        // 输出名别的账号能预置，面板却照写不误。判定与证据报告共用
+        // `StateRoot.directoryIsolation`——同一份规矩不许有两个实现。
+        if StateRoot.directoryIsolation(at: directory) == .missing {
+            try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        }
+        switch StateRoot.directoryIsolation(at: directory) {
+        case .usable, .missing: break  // missing 交给下面的写：抛错就是 writeFailed
+        case .notADirectory:
+            return .directoryUnsafe("临时目录的位置被一个非目录占住：\(directory)")
+        case .ownedBy(let uid):
+            return .directoryUnsafe("临时目录不属于当前用户（uid \(uid)）：\(directory)")
+        case .sharedWritable(let mode):
+            return .directoryUnsafe(
+                "临时目录同组或其他人可写（\(String(format: "%04o", mode))）：\(directory)——"
+                + "一次性任务的脚本名与输出名在那里都能被预置。")
+        }
         do {
             // NSTemporaryDirectory() 对非 sandbox 进程可能指向尚未创建的目录，
             // 不先 mkdir 时原子写直接抛错、一次性任务从未提交（面板侧表现为
