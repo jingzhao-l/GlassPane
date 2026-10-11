@@ -42,7 +42,7 @@ to aim at the installed package:
   specifier for that resolution is **empty**, i.e. it came from the registry and not from
   `file:`/`link:` (a local-path resolution would mean the product ships a directory nobody
   else can install); the lock integrity equals the pinned integrity; and the sha256 of the
-  **14 contract files the package ships** (11 fixtures + 3 schemas) equals what the manifest
+  **17 contract files the package ships** (13 fixtures + 4 schemas) equals what the manifest
   records. `--probe` asks the registry (`npm view iterate-kernel version`) rather than
   `git ls-remote`, because the thing that goes stale now is the published line, not a branch
   head.
@@ -60,7 +60,7 @@ Three accounting consequences are worth naming:
 
 - `tool-surface.mjs` no longer excludes any kernel lines, because there are none in the tree:
   the vendored exclusion is **0 files / 0 lines** (it was 11 files / 1,464 lines). The golden
-  now records `kernel: iterate-kernel@0.1.3` so the change of caliber is readable on the ruler
+  now records `kernel: iterate-kernel@0.1.4` so the change of caliber is readable on the ruler
   rather than only in a commit message. And the guard inverted: `measureFork` **refuses** the
   tree if `packages/opencode/vendor/kernel` reappears, because its 1,464 dependency lines
   would be billed as our authorship with nothing left to exclude them.
@@ -150,7 +150,7 @@ for any R40 scenario; every one of them was blocked on kernel API work first.
 ## What exists today (2026-10-08, measured)
 
 - **Consumption side: done and measured.** One module touches the kernel, and it resolves a
-  registry package whose version, lock integrity and 14 contract files are pinned by
+  registry package whose version, lock integrity and 17 contract files are pinned by
   `contracts/kernel-pin.json`.
 - **Publishing: done, by the iterate side, and consumed.** `iterate-kernel@0.1.3` (0.1.1 → 0.1.2 added the contract corpus to the tarball; 0.1.2 → 0.1.3 added `evidence-decision.ok-01.json`, the transcription contract the Python half of iterate-harness is written against).
 - **Behaviour parity: measured across two implementations.** Nine fixtures produce identical
