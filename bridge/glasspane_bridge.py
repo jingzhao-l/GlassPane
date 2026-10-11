@@ -56,6 +56,7 @@ SENTINEL_NONCE_BYTES = 16
 #: 之一，并在账本里报告"已武装"。
 WATCH_MODES = ("r", "w", "rw")
 DEFAULT_WATCH_MODE = "w"
+DEFAULT_WATCH_SIZE = 8  # 显式命名：它从前是藏在 `else 8` 里的一个魔法数
 
 MAX_FRAMES = 64
 MAX_LOCALS = 16
@@ -483,6 +484,33 @@ def parse_watch_mode(raw, default=DEFAULT_WATCH_MODE):
                       "hardware watchpoint slots — nothing was requested"
                       % (" or ".join(WATCH_MODES), raw, HW_WATCHPOINT_SLOTS))
     return mode, None
+
+
+def parse_watch_size_token(raw, default=DEFAULT_WATCH_SIZE):
+    """`gp-watch add` 的字节数档（纯函数）：**size 位上的非数字一律拒，不许顺延**。
+
+    `parse_watch_mode` 补上了 mode 位那一半，size 位这一半还漏着：调用点是
+    `size = int(argv[2]) if argv[2].isdigit() else 8`。于是
+    `gp-watch add 0x4000 r`——一个把读写档放在第二位、没写 size 的合法直觉写法——
+    "r" 过不了 `isdigit()`，size 静默落回 8，而 argv[3] 根本不存在，mode 又静默落回
+    默认 "w"：**要读的人拿到一个写观察点**，账本还按请求地址报告"已武装"。
+    位置不能靠猜：要么按 `<addr> [size] [mode]` 写全，要么当场拒，并给出那条形式。
+    """
+    if raw is None:
+        return default, None
+    text = str(raw).strip()
+    if not text:
+        return default, None
+    if not text.isdigit():
+        return None, ("gp-watch add wants a byte size before the mode, got %r "
+                      "(form: gp-watch add <addr> [size] [%s]); a mode belongs in the slot "
+                      "after the size, and nothing was armed"
+                      % (raw, "/".join(WATCH_MODES)))
+    value = int(text)
+    if value <= 0:
+        return None, ("gp-watch add wants a positive byte size, got %d: a zero or negative "
+                      "width cannot be watched — nothing was armed" % value)
+    return value, None
 
 
 def build_timeline(observations, requested, stop_note=None):
@@ -1602,7 +1630,12 @@ def cmd_watch(debugger, command, result, internal_dict):
         result.AppendMessage("gp-watch add cannot watch a negative address (%d); "
                              "nothing was requested" % address)
         return
-    size = int(argv[2]) if len(argv) > 2 and argv[2].isdigit() else 8
+    size, size_refusal = parse_watch_size_token(argv[2] if len(argv) > 2 else None)
+    if size_refusal:
+        # size 位的非数字必须当场拒：静默落回 8、再让 mode 位因为"没有第四个 token"
+        # 落回 "w"，就是把一次读请求装成了一次写请求。
+        result.AppendMessage(size_refusal)
+        return
     mode, refusal = parse_watch_mode(argv[3] if len(argv) > 3 else None)
     if refusal:
         # 拒绝在**登记之前**：账本里不会留下一个永不触发却占着硬件槽的请求。

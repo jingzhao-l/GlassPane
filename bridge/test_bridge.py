@@ -931,5 +931,77 @@ class CaptureExitCodeGuard(unittest.TestCase):
             {"status": attached, "threads": [{"id": 9}]}))
 
 
+class SentinelCannotBeForgedEarlier(unittest.TestCase):
+    """被调试进程的 stdout 与哨兵共用管道，所以它也能写出哨兵形状（§审查 2026-10-11）。
+
+    从前取**第一对**：一个提前出现的 `GPBRIDGE<<…>>GPBRIDGE` 就顶掉了真结果，一个
+    光秃秃的 `>>GPBRIDGE` 会把真 JSON 截断在前半段。本进程写的那一条在最后，
+    所以现在从后往前取第一对能解析成 JSON 的。
+    """
+
+    def test_debuggee_forged_marker_does_not_answer_for_the_real_result(self):
+        forged = {"status": "stopped", "note": "printed by the app under test"}
+        real = {"mode": "capture", "status": "crashed", "frames": 3}
+        stdout = (
+            "(lldb) run\n"
+            + gb.SENTINEL_BEGIN + json.dumps(forged) + gb.SENTINEL_END + "\n"
+            + "Process 7 stopped\n"
+            + gb.SENTINEL_BEGIN + json.dumps(real) + gb.SENTINEL_END + "\n(lldb) quit\n"
+        )
+        found, _ = gb.extract_sentinel(stdout)
+        self.assertEqual(found, real, "取到的必须是我们最后写出的那一条，不是被调试进程冒充的")
+
+    def test_stray_end_marker_earlier_does_not_truncate_the_real_payload(self):
+        real = {"mode": "capture", "status": "stopped"}
+        stdout = "the app echoed: " + gb.SENTINEL_END + "\n" + gb.SENTINEL_BEGIN + json.dumps(real) + gb.SENTINEL_END
+        found, _ = gb.extract_sentinel(stdout)
+        self.assertEqual(found, real)
+
+    def test_no_parseable_pair_returns_none_rather_than_a_guess(self):
+        stdout = gb.SENTINEL_BEGIN + "not json at all" + gb.SENTINEL_END
+        found, raw = gb.extract_sentinel(stdout)
+        self.assertIsNone(found)
+        self.assertEqual(raw, stdout, "解析不出要把原文交回调用方，不能编一个形状")
+
+    def test_single_clean_sentinel_still_extracts(self):
+        # 对照：收紧扫描不能把正常那一条判没。
+        payload = {"mode": "capture", "status": "stopped"}
+        stdout = "noise\n" + gb.SENTINEL_BEGIN + json.dumps(payload) + gb.SENTINEL_END + "\n"
+        found, _ = gb.extract_sentinel(stdout)
+        self.assertEqual(found, payload)
+
+
+class WatchRequestParsing(unittest.TestCase):
+    """size 位上的非数字不许顺延成默认值。上游的 `WatchModeValidation` 管住了 mode 位，
+    这一半是漏的：调用点从前写 `size = int(argv[2]) if argv[2].isdigit() else 8`，
+    于是 `gp-watch add 0x4000 r` 里 "r" 过不了 isdigit（size 静默落回 8），argv[3] 又不存在
+    （mode 静默落回默认 "w"）——**要读的人拿到一个写观察点**，账本还按请求地址报告"已武装"。
+    """
+
+    def test_mode_in_the_size_slot_is_refused_not_shifted(self):
+        # 这条就是那次倒置：旧代码在此静默给出 (8, "w")。
+        size, refusal = gb.parse_watch_size_token("r")
+        self.assertIsNone(size, "size 位上的 r 必须当场拒，不许顺延成 8")
+        self.assertIn("before the mode", refusal or "", "拒绝要给出正确形式")
+
+    def test_explicit_size_and_absent_size_both_work(self):
+        # 对照：这条闸不能只会拒绝。
+        self.assertEqual(gb.parse_watch_size_token("16"), (16, None))
+        self.assertEqual(gb.parse_watch_size_token(None), (gb.DEFAULT_WATCH_SIZE, None))
+        self.assertEqual(gb.parse_watch_size_token(""), (gb.DEFAULT_WATCH_SIZE, None))
+
+    def test_non_positive_size_is_refused(self):
+        size, refusal = gb.parse_watch_size_token("0")
+        self.assertIsNone(size)
+        self.assertTrue(refusal)
+
+    def test_mode_slot_still_refuses_garbage(self):
+        self.assertEqual(gb.parse_watch_mode("r"), ("r", None))
+        self.assertEqual(gb.parse_watch_mode(None), (gb.DEFAULT_WATCH_MODE, None))
+        mode, refusal = gb.parse_watch_mode("sometimes")
+        self.assertIsNone(mode)
+        self.assertTrue(refusal)
+
+
 if __name__ == "__main__":
     unittest.main()
