@@ -202,7 +202,7 @@ const withPeer = (
 
 /** The capability gate `gp_act` runs before it sends anything, against `serve`. */
 const withGate = (name: string, serve: (conn: net.Socket, request: string) => void) =>
-  withDaemonPeer(name, serve, () => Effect.runPromise(requireCapability("gp_act", "act", "act")))
+  withDaemonPeer(name, serve, () => Effect.runPromise(requireCapability("gp_act", "act")))
 
 const refusal = (reply: Daemon.DaemonReply, code: string) => {
   expect(reply.ok).toBe(false)
@@ -343,7 +343,7 @@ describe("what the capability gate says when hello could not answer", () => {
     const previous = process.env.GLASSPANE_SOCKET
     process.env.GLASSPANE_SOCKET = path.join(tmpdir(), "gp-m1-gate-no-such-daemon.sock")
     try {
-      const blocked = await Effect.runPromise(requireCapability("gp_act", "act", "act"))
+      const blocked = await Effect.runPromise(requireCapability("gp_act", "act"))
       expect(blocked?.metadata).toMatchObject({ ok: false, code: "GP_E_ENGINE_UNREACHABLE" })
       if (!blocked) return
       expect(blocked.output.split("\n")).toHaveLength(2) // message and remedy, always both
@@ -362,6 +362,28 @@ describe("what the capability gate says when hello could not answer", () => {
     expect(blocked?.metadata).toMatchObject({ ok: false, code: "GP_E_CAPABILITY_UNAVAILABLE" })
     expect(blocked?.output).toContain('engine 0.9.1 does not advertise the "act" capability')
     expect(blocked?.output).toContain("gp_probe_status") // the surface's own remedy names a real next step
+  })
+
+  test("the capability the gate asks for is the method's own wire name", async () => {
+    // Regression. `gp_attach` used to be gated on `"observe"`: an engine advertising
+    // observe-without-attach was waved through to a method it does not have, and an engine
+    // advertising attach-without-observe was refused one it does. The separate capability
+    // argument is gone from the signature (the typechecker now refuses a call site that
+    // names anything but the method), and this case pins both directions of the mismatch.
+    const refusedNoAttach = await withDaemonPeer(
+      "attach-not-advertised",
+      helloAdvertises({ version: "0.9.1", protocolVersion: "1", capabilities: ["observe"], permissions: {} }),
+      () => Effect.runPromise(requireCapability("gp_attach", "attach")),
+    )
+    expect(refusedNoAttach?.metadata).toMatchObject({ ok: false, code: "GP_E_CAPABILITY_UNAVAILABLE" })
+    expect(refusedNoAttach?.output).toContain('does not advertise the "attach" capability')
+
+    const allowed = await withDaemonPeer(
+      "attach-advertised",
+      helloAdvertises({ version: "0.9.1", protocolVersion: "1", capabilities: ["attach"], permissions: {} }),
+      () => Effect.runPromise(requireCapability("gp_attach", "attach")),
+    )
+    expect(allowed).toBeUndefined()
   })
 
   test("an advertised list that carries the capability lets the call through", async () => {

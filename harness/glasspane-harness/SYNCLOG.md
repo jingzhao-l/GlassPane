@@ -2,6 +2,74 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-12 · 每日批次（harness 线，第四次会话）：能力闸问错了对象、被拒的调用画成"还在跑"，发 0.7.6
+
+**开工态**：主树 HEAD 开工时 `5f0fb54`（== origin/main）、整树干净；约一小时后并行会话把 main 推到
+`2e83542` 并持续写入，**我第一轮闸读数被它的未提交编辑污染**（`kernel-conformance.mjs` 396→441、
+`publish.ts` authored 198→240 全是它手上的活），于是改用隔离工作树
+`/Volumes/Eng-Dev/.worktrees/gp-harness-daily-20261010`（`.external/opencode` 做成指回主树的符号链接，
+不各存 223 MB）。中途该工作树被并行会话 `git switch` 走去做 `gp-harness-orphan-20261010`（`a054fdc`）的
+收口，我那两笔 `install.sh` / `installer-selftest.sh` 被那笔 wip 提交收走。
+**取号过程**：按新提示词第 2 条以内容判据重取基准（`git fetch --prune` + 逐文件比对，不看分支名也不看
+提交信息）→ `c3dbfee` → 再到 `185c095`。我这九处里**五处主线已有另一种实现**（根 `script/publish.ts`
+死路、`no-foreign-publish`、`readCode`、corpus 形状、`verify-published` 读已装 manifest）——不重复、
+不覆盖；并的是主线仍缺的六处。`0.7.5` 被同日第三次会话占用，而它当时"已提交未发布"（split 无 tag、
+npm live 仍 0.7.4），同号并发＝当年 0.5.0 那笔版本号被 stage 烧掉的成因，所以本批先挂 `[Unreleased]`
+让号；随后实测 `v0.7.5` 两条通道全部落地（npm 三个包均 0.7.5；Release 两条 run completed/success），
+通道空出才按 patch 取 **0.7.6**。
+
+**前置**：bun 1.3.14 == `packageManager` 钉值；参照检出 `describe` == pin `v1.18.32`、`fsck` 无错、
+工作树干净；preflight 不带 `NODE_EXTRA_CA_CERTS=/var/tmp/glasspane-harness/ca-bundle.pem`（163 张）时
+exit 1、带它 exit 0，两条方向都实测；全程没有使用任何跳过证书校验的开关。
+
+**改了哪些**：`tool/glasspane/index.ts`（能力闸第三参删除，`gp_attach` 不再被 `"observe"` 代表；
+`gp_diagnose`/`gp_last_evidence` 不加闸的理由写进代码）、`packages/tui/src/routes/session/index.tsx`
+（row→props 映射抽成导出的纯函数 `glasspaneRowLook`，`denied` 算已结束、⊘ + warning + 可按开）、
+`script/glasspane-e7-ledger.ts`（恒真谓词拆两条）、`plugin/glasspane-compaction.ts`（维度覆盖声明按
+as-shipped 改写 + 一条走真路径的钉子测试）、`harness/tools/hook-liveness.mjs`（`--offline` 不再谎报
+"检出缺席"）、fork `release.yml`（注释不再声称五个原生目标）、`CHANGELOG.md`（0.7.4 条目里 116 处
+模板字面量转义剥掉，全文转义残留 0）、版本线两处 + `bun.lock` 那条停在 0.7.3 的包 `"version"`。
+
+**改动面数字**：`fork-diff --record` 对 `v1.18.32` = **4665 identical / 262 edited / 82 added /
+1705 deleted**；`tool-surface --record` 面 A **8975 行 / 22.20%**（未变；比例降只因分母动）、面 B
+**6736 行 / 16.66%**（记录值随本批的行上调，逐文件归因见下）、测试排除 28 文件 / 2027 行、
+`iterate-kernel@0.1.5` 作为依赖不计入面 B；`brand-surface` 血缘 **9623 / 3303 文件**，与基线逐字相同
+（0 命中、覆盖率未变，故不重记）。面 B 的增量全部来自本轮点名的四个文件：
+`packages/tui/src/routes/session/index.tsx`、`packages/opencode/src/tool/glasspane/index.ts`、
+`packages/opencode/script/glasspane-e7-ledger.ts`、`packages/opencode/src/plugin/glasspane-compaction.ts`
+——`--record` 是在"整棵树只有我这一笔"的隔离工作树里做的，别人未提交的行没被洗进基线。
+
+**跑了哪些闸**：`product-surface` **123 条一致 / 0 问题**（98 → 123 是第三次会话新增的断言，不是本批）；
+`surface-semantics` 0 命中 / 18 文件；`hook-liveness` 21 钩子对齐 pin 无漂移；`kernel-pin --check`
+0.1.5 + 24 契约文件逐条 sha256 对、`--probe` 回"0.1.5 就是已发布的最新"；`kernel-conformance` 14 条
+fixture 全对；`installer-selftest.sh` 全过（含三条"跟随重定向"的 fetch 断言）；`packages/tui` 固定点
+**26 pass / 0 fail**；`packages/opencode` **90 pass / 1 fail**——唯一那条是下面这条不稳定对照；
+typecheck opencode 绿；主仓 `check-workflows --self-test` 6/6 各证能红、`check-workflows` 5 个
+workflow 干净、`check-doc-links` 24 文档 / 225 内链 OK。
+
+**一条判为不稳定对照、没有修掉的计时断言**：`test/tool/glasspane-surface.test.ts` 的
+"an over-sized engine frame is refused in-band"。同一棵树上多次读数：旧基准两次绿（单条 24.19s /
+26.96s，距它自己的 30s 预算只剩 3 秒）、旧基准整包一次红、新基准整包红（30121ms）、新基准单跑也红
+（两条用例花 199s）。红时的形状都是 `Daemon.call(…, 30_000)` 先到期 → 报 `GP_E_ENGINE_TIMEOUT`
+而不是期望的 `GP_E_PAYLOAD_TOO_LARGE`，也就是那 4 MiB 帧在本机负载下没能在预算内写完。
+**判据没改、超时没加**：加超时只会让计时器照样先到，改判据等于把它要问的问题扔掉；把它写成
+"复跑证明是假红"就是本仓最常见的那种自我原谅。发版凭据因此取**该 sha 在干净 runner 上的 CI**
+（fork `.github/workflows/ci.yml:49` 正是这条命令），而不是高负载下的本地读数。
+
+**尺子自身的反向路径**（本批改过的尺子只有 `hook-liveness`，三条重验，不沿用旧结论）：金样伪写
+`permission.ask` 为 live → `--check` exit 1 点名 `dead-hook set changed: golden=[] now=[permission.ask]`
+加 2 条 drift——**第一次的 perl 没落地，那条控制当场作废重做**（`grep` 证明 dead 计数没变，才承认
+控制生效）；删金样 → exit 2 指名 `--record`，不是绿；藏本工作树的参照符号链接 → `--check` exit 2 给出
+`--offline` 出路，`--offline` exit 0 且明说"那个路径没被打开过"，还原后重新绿在 21 钩子无漂移。
+撤销一律自建备份 + sha256 核回，不用 `git checkout`/`stash`；`/var/tmp/gp-harness-daily-20261010/mut/`
+留着每一步前后日志。
+
+**没跑 / 未观测**：整包构建（>10 分钟，闸的形状不含它）；`kernel-conformance --impl`（本轮没读
+canonical 检出）；真 TUI 会话里的观感（含本批新画的 ⊘ 拒绝行）；真模型轮次；`gp_*` 对活 daemon 的
+实跑（daemon 在跑，但本轮没驱动任何 `gp_*` 调用）。继续挂账的功能缺口：引擎方法表 11 个可使能力里
+fork 只发了 6 个（缺 `assert_element`/`audit_ui`/`capture_view`/`snapshot`/`restore`），而
+`gp_observe` 的文案正叫模型"别用眼睛比树"——新增工具属产品面变化＝minor，不在 patch 这批里做。
+
 ## 2026-10-11（第三次会话）· 文案还在替上游说话、平台包发布没跑自家校验，发 0.7.5
 
 **接着收口。** 上一份汇报里我自己点名却没做的三条，按内容判据核过：
