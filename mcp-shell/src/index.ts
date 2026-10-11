@@ -15,6 +15,7 @@ import {
   unixSocketEngineClient,
 } from "./engine-client.js";
 import { GP_E_PAYLOAD_TOO_LARGE } from "./errors.js";
+import { DAEMON_FORWARDED_METHODS } from "./tools.js";
 import {
   DrainAwareWriter,
   LineReader,
@@ -198,6 +199,9 @@ function main(): void {
     // permanent condition that contradicts the remedy we hand out.
     engine = unixSocketEngineClient(options.socketPath, {
       identity: { version: SERVER_INFO.version },
+      // `hello.capabilities` 的读者在这一层接线：清单由 daemon 派生、由这里与 TOOL_SPECS
+      // 对账，两边谁漂了都会有人说，而不是各自安静地活着。
+      expectedDaemonMethods: DAEMON_FORWARDED_METHODS,
     });
   } catch (error) {
     writeDescriptor(

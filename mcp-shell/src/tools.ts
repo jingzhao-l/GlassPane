@@ -40,6 +40,7 @@ import {
   GP_E_NO_USER_RECORD,
   GP_E_PAYLOAD_TOO_LARGE,
   GP_E_PROJECT_LIMIT,
+  GP_E_REGISTRY_DRIFT,
 } from "./errors.js";
 import { EvidenceAuditSession, type TrailTurn } from "./audit-session.js";
 import { renderHTML, renderMarkdown, escapeHTML } from "./evidence-report.js";
@@ -79,7 +80,10 @@ const OptionalDepthSchema = z.number().int().min(1).max(10).optional();
  * accepted and answered, so the agent loses the daemon's own verdict. The pair is
  * gated by `test/consumer-consistency.test.mjs`, which reads both numbers out of
  * `Dispatcher.swift` and fails if either side moves. */
-const OptionalRoleSchema = z.string().max(SELECTOR_MAX_LENGTH).optional();
+// `.min(1)`：daemon 的 observe role 是一条纯等值过滤（`EngineCore.prune(_:matchingRole:)`），
+// 空串永远匹配不到任何节点，却会回 `isError:false` + `nodeCount:0` —— 那是对着一屏元素说出
+// "这个 app 没有无障碍内容"。同一层的 selector.role 早已按这条拒过，这里是它漏掉的那一半。
+const OptionalRoleSchema = z.string().min(1).max(SELECTOR_MAX_LENGTH).optional();
 const OptionalBundleIdSchema = z.string().max(512).optional();
 /**
  * The id grammar, in one place: `op_` + 26 Crockford base32 characters
@@ -646,6 +650,17 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     execute: projectGetTool,
   },
 ];
+
+/**
+ * The daemon methods this shell forwards, derived from {@link TOOL_SPECS} rather
+ * than written out. This is the list `hello.capabilities` is reconciled against
+ * (`engine-client.describeCapabilityDrift`): a hand-copied second truth is the
+ * exact drift the reader exists to catch, and the gateway already derives its own
+ * forwardable set from `execute === undefined` for the same reason.
+ */
+export const DAEMON_FORWARDED_METHODS: readonly string[] = TOOL_SPECS
+  .filter((spec) => spec.execute === undefined)
+  .map((spec) => spec.engineMethod);
 
 export const TOOL_BY_NAME: ReadonlyMap<string, ToolSpec> = new Map(
   TOOL_SPECS.map((spec) => [spec.name, spec]),
@@ -2040,6 +2055,11 @@ function projectErrorRemedy(code: string): string {
   }
   if (code === GP_E_NOT_FOUND) {
     return "check the projectId; use gp_project_list to view available projects";
+  }
+  if (code === GP_E_REGISTRY_DRIFT) {
+    // 这条拒绝说的不是"参数不对"——参数已经过了 zod 校验。把它交给 "check the tool's
+    // input schema and retry" 的兜底，等于指回它刚刚排除掉的成因。
+    return "the projects file changed between the read that produced this reply and the write it attempted, so nothing was written: re-run the same gp_project_set — what this refusal wants is a second read, not different arguments. If it repeats, another writer owns that file (the daemon's maintenance CLI and the settings panel both rewrite it): read the table with `glasspaned --list-projects`, and remember a removal only sticks after the daemon restarts. `GLASSPANE_PROJECTS_FORCE_OVERWRITE=1` moves a file aside before writing, and nothing is overwritten without it.";
   }
   if (code === GP_E_NO_USER_RECORD) {
     // Distinct from GP_E_INTERNAL on purpose: this failure names no file, and

@@ -10,6 +10,7 @@ import {
   GP_E_NOT_FOUND,
   GP_E_NO_USER_RECORD,
   GP_E_PROJECT_LIMIT,
+  GP_E_REGISTRY_DRIFT,
 } from "./errors.js";
 import { daemonUnreachableRemedy } from "./engine-client.js";
 
@@ -501,7 +502,7 @@ export function registryDriftReason(
 function assertNoConcurrentWrite(filePath: string, openedAs: string | null): void {
   const reason = registryDriftReason(filePath, openedAs, fileIdentity(filePath));
   if (reason !== null) {
-    throw new ProjectRegistryError("registry-changed-underneath", reason);
+    throw new ProjectRegistryError(GP_E_REGISTRY_DRIFT, reason);
   }
 }
 

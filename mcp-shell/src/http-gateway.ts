@@ -23,6 +23,7 @@ import {
   GP_E_NOT_FOUND,
   GP_E_PAYLOAD_TOO_LARGE,
   GP_E_PROJECT_LIMIT,
+  GP_E_REGISTRY_DRIFT,
   GP_E_UNKNOWN,
 } from "./errors.js";
 import { escapeHTML, renderHTML, renderMarkdown } from "./evidence-report.js";
@@ -1113,6 +1114,11 @@ function httpStatusForEngineCode(code: string): number {
       return 503;
     case GP_E_ENGINE_TIMEOUT:
       return 504;
+    case GP_E_REGISTRY_DRIFT:
+      // 503，不是 4xx：这一码说的是"另一个写者在我们读与写之间改过盘，所以这次什么都没写"。
+      // 说成调用方的错（走 default 的 422）会让 curl 那一侧去改它本来就没错的参数，
+      // 而真正的动作是再读一次盘、把同一次登记重发一遍。
+      return 503;
     case GP_E_PAYLOAD_TOO_LARGE:
       return 502;
     case GP_E_INTERNAL:

@@ -701,7 +701,9 @@ test("gp_observe does not gain the update block", async () => {
 function stateSummaryWith(state) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "gp-auto-"));
   try {
-    fs.writeFileSync(path.join(root, "update-state.json"), JSON.stringify(state));
+    // 0600 与生产一致（`updater/lib/state.js` 对这份文件就是按 0600 判的）；不带模式写出来的
+    // 0644 现在会被读者拒——那条判据见下面 `a group-readable state file` 一例。
+    fs.writeFileSync(path.join(root, "update-state.json"), JSON.stringify(state), { mode: 0o600 });
     return readUpdateState({}, root).summary ?? "";
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

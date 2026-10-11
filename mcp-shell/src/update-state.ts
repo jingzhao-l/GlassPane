@@ -403,6 +403,40 @@ export function readUpdateState(env: NodeJS.ProcessEnv = process.env, stateRootO
         + "the installed GlassPane is current; run \`node updater/cli.js check\` (or use the settings panel) to find out",
     };
   }
+  // 文件头把"a mode that is not owner-only"写进 unreadable 那一档已经很久了，但这里从来没
+  // 执行过：任何本机进程把这份文件留成 0644，它照样被读、照样由 gp_diagnose 当事实念出来
+  // （包括那句 "Nothing to do"）。同仓的 sibling `project-registry.ts` 对它的状态文件是
+  // "核模式、读回来、不合格就拒"（tightenMode），这里对齐那条口径：判据落在读之前，
+  // 拒绝的那句话说得出路径、当前模式和可执行的修法。
+  let stat: ReturnType<typeof fs.statSync>;
+  try {
+    stat = fs.statSync(stateFile);
+  } catch (error) {
+    return {
+      kind: "unreadable",
+      stateFile,
+      summary: `update state: ${stateFile} exists but could not be stat-ed (${String(error)}); freshness is unknown, `
+        + "which is not the same as up to date",
+    };
+  }
+  if (!stat.isFile()) {
+    return {
+      kind: "unreadable",
+      stateFile,
+      summary: `update state: ${stateFile} is not a regular file (mode ${(stat.mode & 0o777).toString(8)}), so nothing `
+        + "was parsed from it; freshness is unknown, which is not the same as up to date",
+    };
+  }
+  if ((stat.mode & 0o077) !== 0) {
+    return {
+      kind: "unreadable",
+      stateFile,
+      summary: `update state: ${stateFile} is mode ${(stat.mode & 0o777).toString(8)} — group/world readable, so this `
+        + "reader will not present it as the owner-only document it claims to be. Run "
+        + `\`chmod 600 ${stateFile}\` (the updater writes it 0600) and read again; freshness stays unknown, `
+        + "which is not the same as up to date",
+    };
+  }
   let text: string;
   try {
     text = fs.readFileSync(stateFile, "utf8");

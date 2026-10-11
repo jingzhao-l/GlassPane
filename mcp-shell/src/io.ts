@@ -265,18 +265,30 @@ export class OrderedReplyQueue {
 }
 
 /**
+ * 回包在 stdout 队列里允许的积压上限。镜像方向的同一件事早就有闸（`engine-client.ts` 的
+ * `ENGINE_WRITE_BACKLOG_BYTES` + 自己的错误码），stdio 这一侧却只说过"有 DrainAwareWriter
+ * 管背压"——串行化不等于**有界**：30s 的 drain 看门狗一响，后面的 `write()` 照样继续往
+ * Node 的队列里塞，一个不读了客户端就能把 `gp_recent_reports`（20 × 4 MiB，且这层没有
+ * 出站帧长上限）变成无界内存。到线就丢这一帧、点名丢了谁、说清为什么，比让进程被 OOM
+ * 杀掉后再也答不出第 21 条更好。
+ */
+export const STDIO_WRITE_BACKLOG_BYTES = 32 * 1024 * 1024;
+
+/**
  * Writes with backpressure honoured and a dead pipe survived: an ignored
  * `write()` return lets replies pile up in memory, and an unlistened `error`
  * (EPIPE when the MCP client goes away) kills the process outright.
  */
 export class DrainAwareWriter {
   private dead: Error | null = null;
+  private dropped = 0;
 
   constructor(
     private readonly sink: Writable,
     private readonly report: (note: string) => void,
     private readonly drainWaitMs: number,
     private readonly onDead: (error: Error) => void,
+    private readonly backlogLimitBytes: number = STDIO_WRITE_BACKLOG_BYTES,
   ) {
     sink.on("error", (error) => {
       if (this.dead) {
@@ -292,9 +304,20 @@ export class DrainAwareWriter {
     return this.dead !== null;
   }
 
+  /** How many replies this writer refused to queue. `gp_diagnose` reads it: a
+   * silently-shrinking answer is the failure mode this ceiling replaces. */
+  get droppedFrames(): number {
+    return this.dropped;
+  }
+
   /** @param text already framed, including its trailing newline. */
   async write(text: string): Promise<boolean> {
     if (this.failed) {
+      return false;
+    }
+    if (this.sink.writableLength >= this.backlogLimitBytes) {
+      this.dropped += 1;
+      this.report(`reply dropped, not queued: stdout already holds ${this.sink.writableLength} bytes past the ${this.backlogLimitBytes} ceiling — the reader on the other end stopped consuming, so this frame (and ${this.dropped - 1} earlier one(s)) will not be delivered`);
       return false;
     }
     let flowing = true;
