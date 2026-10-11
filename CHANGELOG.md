@@ -2,6 +2,48 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [未发布]
+
+### Fixed — daemon 在 bind 之前就说"我在监听"
+
+`main.swift` 那一句 `glasspaned <version> listening on <path>` 打在 `server.run()` **之前**，
+而 bind 是 `run()` 里才发生的。真产物实测（发布归档里那份 1.12.0 二进制，`--force-socket`
+指向一个 12 字节的普通文件）：
+
+```
+stdout: glasspaned 1.12.0 listening on /var/tmp/…/state/daemon.sock
+stderr: glasspaned: refusing to take over /var/tmp/…/state/daemon.sock.
+          …/daemon.sock is a regular file, not a socket — the daemon refused to delete it. …
+          Nothing was unlinked and this run will not bind here.
+退出码 1；那个名字仍是 -rw-r--r-- 的普通文件、内容一个字节没变；拿它去 connect 回 ECONNREFUSED。
+```
+
+拒绝是对的、字节是活的、退出码是非零的——唯独 stdout 上那句先说出口了。读 stdout 的人拿到的
+是一个它自己马上否决的事实：脚本、面板、以及**本仓自己的 `.signal_smoke.py`**（它就是从这一行
+里取 socket 路径再去连的），都会照着那个路径找一个不存在的服务。这一族"先宣布再测量"本仓已经
+修过三轮（重启读回、权限快照、面板存活），这次轮到最外层这一句。
+
+现在这句由 `SocketServer.onBound` 负责——即 bind 成功、名字归这一次运行之后才打印，与
+`shutdownSockets.register` 同一个回调，所以"登记这个名字会被清理"和"宣称在监听"是同一时刻的
+两件事。
+
+闸两条，互为正反：
+- `testDaemonBinaryAnnouncesRefusalNotBindingWhenItsNameIsARegularFile`：抢名被拒的那一次
+  不许出现 "listening on"，也不许出现 "binding it"，且那个文件的字节必须原样活着。
+- `testDaemonBinaryAnnouncesListeningOnlyOnceItActuallyBound`：真绑上的那一次**必须**打印
+  这一句，且在它打印时那个名字已经是一个 `S_IFSOCK`、模式 0600、父目录 0700；退出时 unlink。
+  没有这一条，前一条可以由"把 announce 整句删掉"来满足——那等于把修缺陷做成删功能。
+
+反向验证（`/var/tmp/glasspane-main-check/mut-announce.sh`，私有备份 + sha 核回
+`0aaed868…f0010c7` match=YES）：把那句搬回 `run()` 之前 →
+`testDaemonBinaryAnnouncesRefusalNotBindingWhenItsNameIsARegularFile` 具名红，正面那条照旧绿
+（它测的不是顺序，而是"绑上就该说"）。engine 全套 928 例 / 3 跳过 / 0 失败；
+`.signal_smoke.py` 仍 OK（ announce 仍在，只是晚到 bind 成功之后）。
+
+⚠ 落点与版本：这一笔打在 **tag `v1.12.0` 之后**（tag 指向 `c10f610`，其 CI 九道全绿是发版凭据），
+所以已发布的 `v1.12.0` 归档与 GitHub Release 带的是修之前的那句 announce。不移 tag、不重发：
+挪已公开的 tag 属于需要 owner 点头的动作。这一条留给下一版。
+
 ## [1.12.0] — 2026-10-11
 
 **版本判断：minor。** 判据沿用 1.6.2 写下、1.9.0 与 1.11.0 沿用的那四条，逐条实测：状态文件的

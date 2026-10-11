@@ -1436,11 +1436,19 @@ let server = SocketServer(
 // 而且登记的时机由 `SocketServer` 在 bind 成功之后回调决定——在 `run()` 之前登记会
 // 给"抢名失败的那一方去 unlink 现任的 socket"留出窗口，而那正是 A-18 三条状态判定要
 // 消灭的形状。
-server.onBound = { shutdownSockets.register(server.socketPath) }
-
-FileHandle.standardOutput.write(
-    Data("glasspaned \(core.version) listening on \(socketPath)\n".utf8)
-)
+//
+// "listening on" 那一句同一个回调负责。它此前打在 `run()` **之前**，于是有一次
+// `--force-socket` 指向一个普通文件的运行（实测）：stdout 先说
+// `glasspaned 1.12.0 listening on /…/daemon.sock`，stderr 随后说"这个我不删、也不会绑"，
+// 退出码 1，那个名字上没有任何服务（connect 回 ECONNREFUSED）。读 stdout 的人——脚本、
+// 面板、以及本仓自己的冒烟脚本，它就是从那一句里取 socket 路径的——拿到的是一个从未成立的事实。
+// 同一句"先宣布再测量"的形状本仓已经修过三轮，这次轮到最外层这一句。
+server.onBound = {
+    shutdownSockets.register(server.socketPath)
+    FileHandle.standardOutput.write(
+        Data("glasspaned \(core.version) listening on \(socketPath)\n".utf8)
+    )
+}
 
 do {
     try server.run()

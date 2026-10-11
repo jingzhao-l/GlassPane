@@ -438,8 +438,60 @@ final class ReviewLifecycleTests: XCTestCase {
                       "拒绝要说出测到的 inode 类别：\(outcome.text)")
         XCTAssertFalse(outcome.text.contains("binding it"),
                        "同一次运行既宣布拒绝又宣布要绑，等于对着别人的文件许诺：\(outcome.text)")
+        // 最外层那一句也一样：`glasspaned … listening on <path>` 从前打在 bind **之前**，
+        // 于是这一次运行在 stdout 上宣称了一个它自己马上就要否决的事实。读 stdout 的脚本
+        // （含本仓的 .signal_smoke.py，它就从这一行里取 socket 路径）会照那个路径去 connect。
+        XCTAssertFalse(outcome.text.contains("listening on"),
+                       "抢名失败的那一次不许说自己在监听：\(outcome.text)")
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: socketName)), secret,
                        "被拒之后那个文件必须一个字节都没动")
+    }
+
+    /// 上一条的正面一半：真正绑上了的那一次**必须**说得出"在监听"，而且说的时候那个名字
+    /// 已经是 socket 了。没有这条对照，上面那条拒绝侧的断言可以由"把 announce 整个删掉"
+    /// 来满足——那等于把修缺陷做成删功能。
+    func testDaemonBinaryAnnouncesListeningOnlyOnceItActuallyBound() throws {
+        let binary = repoRoot + "/engine/.build/debug/glasspaned"
+        guard FileManager.default.isExecutableFile(atPath: binary) else {
+            throw XCTSkip("没有 \(binary)；这一条要的是真启动（produce it with: cd engine && swift build）。")
+        }
+        let state = TestSandbox.pendingDirectory("claim")
+        try FileManager.default.createDirectory(atPath: state, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: state) }
+        let socket = state + "/daemon.sock"
+        XCTAssertLessThan(socket.utf8.count, 104, "socket path exceeds sun_path: \(socket)")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: binary)
+        process.arguments = ["--state-dir", state, "--no-probe"]
+        process.currentDirectoryURL = URL(fileURLWithPath: state)
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+
+        // 名字出现的最长等待：绑不上（或被拒）的那一次永远不会出现，所以这一条不能白等。
+        let deadline = Date().addingTimeInterval(8)
+        while !FileManager.default.fileExists(atPath: socket), Date() < deadline {
+            usleep(50_000)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: socket),
+                      "这一次本应绑上：8 s 内 \(socket) 没出现")
+        var info = stat()
+        XCTAssertEqual(lstat(socket, &info), 0)
+        XCTAssertEqual(info.st_mode & S_IFMT, S_IFSOCK, "绑上的必须是个 socket  inode")
+        XCTAssertEqual(Int(info.st_mode & 0o777), 0o600, "engine socket 的 0600 是硬不变量")
+        XCTAssertEqual(posixMode(of: state) & 0o777, 0o700, "状态根必须收到 0700")
+
+        process.terminationHandler = nil
+        process.terminate()
+        let stopped = Date().addingTimeInterval(5)
+        while process.isRunning, Date() < stopped { usleep(50_000) }
+        let text = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertTrue(text.contains("listening on"),
+                      "绑上了就必须 announce，否则拒绝侧那条对照是删文案删出来的：\(text)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: socket),
+                       "退出时那个名字要被 unlink（A-18 的另一半）：\(text)")
     }
 
     // MARK: - X-25: the probe listener runs the engine socket's directory rules
