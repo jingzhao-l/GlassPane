@@ -12,10 +12,14 @@
 它是发布者本地的打包脚本、不是产品 CLI；(b) `glasspaned` 的 stdout 在"抢名被拒"那一跑里少了一行
 `listening on …`——那一行本来就是说谎，删掉它改变的是"说了什么"，不是参数或退出码。按本仓口径记 patch。
 
-**本版包含 `v1.12.0` 的全部内容**（`v1.12.0` 这一串是它的祖先），且 **npm 上从未有过 1.12.0**：
-1.12.0 的 npm 那半程因发布凭证没有 `workflow` scope 而走不到（见 task 汇报）。所以 registry 版本号
-将从 **1.11.0 直接到 1.12.1**，中间那一格是有意的空洞——与 1.8.0 那次同样的记法（当时 1.8.0 有
-tag 与 Release、故意不发 npm）。要发 npm 就用 `--ref v1.12.1`，不必也不该再补 1.12.0。
+**本版包含 `v1.12.0` 的全部内容**（`v1.12.0` 这一串是它的祖先）。npm 那条线在本版收口期间动了：
+`1.12.0` 已于 2026-10-11T14:51:55Z 上 registry（两包 `latest=1.12.0`，带 SLSA v1 provenance，
+即由有 `workflow` scope 的一方走 `release.yml` 发的——本会话这把 token 没有那一档，实测 `gh auth status`
+scopes 仍是 `admin:public_key, gist, read:org, repo`）。所以这里**没有**"有意空洞"：1.12.0 在 npm 上是
+真实存在的一格，本版 **1.12.1 尚未发 npm**，要补就一条命令：
+`gh workflow run release.yml --ref v1.12.1 -f mode=dry` → 同 ref `-f mode=publish`。
+⚠ 已公开的 tag 说明（`git tag -v v1.12.1` 的正文）里写着"1.12.0 从未发出"，那是它写就之时的事实，
+几分钟后被推翻；tag 不改（挪公开 tag 属需 owner 点头的动作），以本条为准。
 
 **为什么有这一版**：`v1.12.0` 打 tag 之后又落了三处修到 main，都是这一轮量出来的：面板控制台在
 另一个根上写注册表（P1）、`glasspaned` 在 bind 之前宣布"我在监听"（同一族"先宣布再测量"）、
@@ -118,6 +122,15 @@ stderr: glasspaned: refusing to take over /var/tmp/…/state/daemon.sock.
 "还没有注册项目"）；对照之下 `~/.glasspane/projects.json` 与 `evidence/`（582 条）mtime 未变——
 即面板动的确实是被 `--state-dir` 点名的那一个根。版本号本身与 UI 判据无关（那一行来自
 `glasspaned --version`，本版只是它的读数换了），因此不再重跑一次同样的复验。
+
+**发布物实测（v1.12.1）**：签名 annotated tag（`git verify-tag` 完好的签名，key
+`0929EA31DF4F7429F63FC53189D88B1D043A1298`）→ GitHub Release `isDraft=false`、target `01f3dfc4`、
+四件资产 → 归档 `--verify` rc=0：**566 条目 / 2,652,501 字节 / 15 条声明的 bin 与 schema 全在**，
+`grep -cE "(^|/)harness/"` = **0**，本机重下的 sha256 与 gh API 的 `assets[].digest` 逐位一致，
+`SHA256SUMS` 自核 OK，两枚 `.asc` 均对内置发布公钥验过。端到端从**发布档**（不是工作树）跑：
+解档 → 四处版本位点全为 1.12.1（`package.json`、`EngineCore.buildVersion`、`SERVER_INFO`、
+`RELEASE_VERSION`、`GLASSPANE_RELEASE`）→ 树内 `npm pack` → 干净前缀装成 → stdio `initialize`
+回 `glasspane-mcp@1.12.1`、`tools/list` 16 个 `gp_*`。npm 那一格见上面那段：本版尚未上 registry。
 
 ## [1.12.0] — 2026-10-11
 
