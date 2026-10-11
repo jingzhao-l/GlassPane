@@ -442,8 +442,17 @@ final class ReviewPanelTests: XCTestCase {
         let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         XCTAssertFalse(source.contains("prunePreview.isEmpty ? \"知道了\""),
                        "「知道了」又变成一枚灰掉的破坏性按钮")
-        XCTAssertFalse(source.contains("model.pruneNeedsRestart = false"),
-                       "按钮里再顺手抹一次状态，就是点一下就算重启好了")
+        // 合并后这里允许出现清除，但**必须带实测前提**：`if case .confirmed = outcome`
+        // 才算重启成功。无条件抹掉这句（点一下就算重启好了）才是这一条要挡的形状。
+        let clears = lines.filter {
+            $0.contains("pruneNeedsRestart = false") && $0.contains("model.")
+        }
+        XCTAssertFalse(clears.isEmpty,
+                       "重启确认之后总得有人撤掉这句横幅；一条清除都没有就是另一回事了")
+        for line in clears {
+            XCTAssertTrue(line.contains("case .confirmed"),
+                          "抹掉这句只能凭实测确认，不能凭一次点击：\(line)")
+        }
         let index = try XCTUnwrap(
             lines.firstIndex { $0.contains("知道了") && $0.contains("Button(") },
             "那一枚按钮不见了"

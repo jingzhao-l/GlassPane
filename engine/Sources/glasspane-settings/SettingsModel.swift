@@ -569,19 +569,25 @@ final class SettingsModel: ObservableObject {
                     return
                 }
                 Task { @MainActor in
-                    var summary: DaemonProbe.Summary?
+                    // 本轮把存活判定换成了 `probeLiveness()` 三态（`.answered` 才算活），
+                    // 上游这段读回原来走的是 `helloSummary()` + `applyDaemonSummary()`。
+                    // 接同一把来源，不在这里留第二条"只要拿到摘要就算活着"的判定：
+                    // pid 回读的对比对象是 `.answered` 里那份自报摘要。
+                    var answered: DaemonProbe.Liveness?
                     for _ in 0..<Self.restartReadbackAttempts {
                         try? await Task.sleep(
                             nanoseconds: UInt64(Self.restartReadbackInterval * 1_000_000_000))
-                        if let answer = await self.helloSummary() {
-                            summary = answer
+                        if case .answered(let summary)? = await self.probeLiveness() {
+                            answered = .answered(summary)
                             break
                         }
                     }
-                    if let summary { self.applyDaemonSummary(summary) }
+                    if let answered { self.applyLiveness(answered) }
                     self.restartInFlight = false
+                    var pidAfter: Int?
+                    if case .answered(let summary)? = answered { pidAfter = summary.pid }
                     self.restartOutcome = Self.restartVerdict(
-                        pidBefore: pidBefore, pidAfter: summary?.pid)
+                        pidBefore: pidBefore, pidAfter: pidAfter)
                 }
             }
         }

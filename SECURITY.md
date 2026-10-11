@@ -439,8 +439,8 @@ permission rather than by a secret.
 
 | Version | Supported |
 |---|---|
-| 1.10.x | ✅ current release line (`1.10.0` is the tag this page ships with); security fixes ship here |
-| 1.9.x and every earlier 1.x | ❌ no longer patched (the release lines were unified, and only the current line is patched) |
+| 1.11.x | ✅ current release line (`1.11.0` is the tag this page ships with); security fixes ship here |
+| 1.10.x and every earlier 1.x | ❌ no longer patched (only the current line is patched) |
 | 0.x (releases before `glasspane-mcp@0.1.0` / `glasspane-install@1.0.0`) | ❌ no patches — upgrade |
 
 **No fix-time commitment (SLA) yet**: one maintainer, no security team, so there is no "responds within

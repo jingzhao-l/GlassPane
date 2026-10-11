@@ -26,32 +26,6 @@ target `5f0fb54` + npm 两包 1.10.0 + 归档 `(^|/)harness/` 计数 0，都复�
 `kernel/package.json` 与 lockfile 的版本号字段）；面 A 因本轮有意增长 +317 LOC 做了
 `--record`，单独一条 `chore(harness)` 提交，与代码同批。
 
-
-
-本轮（2026-10-09 定时任务）的代码审查、安全审查、UX/功能缺口分析与修复全部记在这里。**没有给它取
-版本号，也没有发版**：开工实测 tag / npm 两包 / 仓库版本线都是 1.9.0；运行期间另一路并行任务把
-`v1.10.0` 打出去、两个 npm 包也升到 1.10.0，其中至少四笔与本轮的**同一处缺陷**各自写了一遍——
-`4e18bc8`（签名在而验不过不再"继续安装"＝本轮安装器第 2 条，同改 `installer/cli.js`）、
-`95f0007`（证据包临时名不再共用＝本轮存储第 2 条，同改 `EvidenceStore.swift`）、
-`2b7fae5`（面板结论必须有读者、重启结论只能由实测点亮＝本轮面板第 6/9 条，同改
-`ConsoleModel/SettingsModel/SettingsPanelView/ProjectsTabView`）、`3eac88a`（`sun_path` 容量判定＝
-本轮 socket 那批的邻处，同改 `SocketServer/ProbeSocketServer/DaemonProbe`）。两侧从未在一起跑过
-门禁：把本树并进已发布线上再打 tag，等于发一份**没有被联合验证过**的字节。这一步连同取号一起
-留给用户裁决。
-
-取号时的判据（在本分支的树上实测）：状态文件字段未动；daemon 退出码集合仍是 `{0,1,2,3,64,65}`
-（`grep -oE "exit\([0-9]+\)"` 实测六个，新增拒绝都落在已有的 1 与 64 上）；两个 npm 包的 `bin`
-未动（`glasspane-mcp`→`dist/index.js`+`dist/http-gateway-cli.js`，`glasspane-install`→`./cli.js`）；
-**动的是对外可见的契约内容**——`--socket-path` / `--probe-socket-path` 新增相对路径拒绝与非 socket
-名字硬拒，面板新增一个存活三态与第三种措辞，`--evidence-stats` 的 `listFailure` 有了读者，MCP 壳把
-`attach.bundleId` / `observe.role` 的上界由 256/128 对齐到 daemon 自己的 512。按 1.6.2 写下、1.9.0
-沿用的口径（动契约就不塞 patch），**应记 minor**。
-
-面 A 基线本轮**没有** `--record`：实测 `mcp-shell/src` 由金样的 8,658 LOC 涨到 8,847（+189，
-全部是本轮有意改动），`node harness/tools/tool-surface.mjs --check` 因此转红。这属于本轮自己的
-增长、本该同批补记，但本轮不发版、且上游那笔并行改动同样在动这个面，此时 `--record` 会把两条线
-的计数混进同一份金样——留给发版那一步与用户裁决一起处理。
-
 ### Fixed — 证据语义：测不到的地方不许替它答
 
 - **退化趋势的斜率一直是舍入噪声，不是测量**（P0）。`DegradationSignal.slope` 用原始 epoch 秒做
