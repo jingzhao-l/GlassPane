@@ -1539,9 +1539,16 @@ internal func configureSocket(_ descriptor: Int32) -> Bool {
 private func connect(to path: String) -> Int32 {
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
     guard fd >= 0 else { return -1 }
+    // sun_path 装不下就等于这个名字不存在：strncpy 会静默截断，然后连到别的
+    // 名字上去。探针不能替调用方把"连不上"说成"对方没答话"。
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)
     address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+    guard path.utf8.count < MemoryLayout.size(ofValue: address.sun_path),
+          !path.utf8.contains(0) else {
+        close(fd)
+        return -1
+    }
     let ok = path.withCString { source in
         withUnsafeMutableBytes(of: &address.sun_path) { destination in
             guard let base = destination.baseAddress else { return false }

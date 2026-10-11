@@ -213,7 +213,7 @@ final class ReviewStorageTests: XCTestCase {
     /// must not be able to rename each other's half-written buffer into place.
     func testStagedNamesDifferPerWrite() throws {
         let store = TestSandbox.evidenceStore(at: TestSandbox.directory("archive-staging-unique"))
-        let names = (1...8).map { _ in store.stagePath("/state/projects.json") }
+        let names = (1...8).map { _ in store.temporaryPath("/state/projects.json") }
         XCTAssertEqual(Set(names).count, 8, names.joined(separator: "\n"))
         for name in names {
             XCTAssertFalse(name.hasSuffix("/projects.json.tmp"), name)

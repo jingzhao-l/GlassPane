@@ -69,11 +69,8 @@ export const INSTALL_SH_URL =
 /** 发布线锚点（版本真源 = 根 package.json，由 scripts/set-version.mjs 统一改写，
  *  勿手改）：npx 形态下本地没有仓库时，引导 clone 的就是这个 tag，与 install.sh
  *  的 `GLASSPANE_RELEASE` 同值——两条一键入口必须拿到同一份源码。 */
-export const RELEASE_VERSION = '1.9.0'
-/** 发布 ref（tag 名）。GLASSPANE_REF 环境变量可覆盖（追主干用 `main`）。
- *  置空（`GLASSPANE_REF=`）与不设同义——都回到这个钉住的 tag；想追主干要显式写
- *  `main`。同一句话由 install.sh 的 `GLASSPANE_RELEASE` 与本常量共同兑现，
- *  `resolvePinRef` 是两侧唯一的读法（见 test/install-sh.test.mjs 的同源断言）。 */
+export const RELEASE_VERSION = '1.10.0'
+/** 发布 ref（tag 名）。GLASSPANE_REF 环境变量可覆盖（追主干用 `main`）。 */
 export const REPO_REF = `v${RELEASE_VERSION}`
 
 /** 发布签名公钥的 key id（下面那块公钥注释里的同一串）。拒绝文案要点名它，
@@ -90,7 +87,7 @@ export const GLASSPANE_SIGNING_KEY_UID = 'jingzhao-l (sign-github) <ET_lin@outlo
  *  用这把公钥验签通过，才能确证源码出自发布者之手（而非同名 tag 或中间人）。
  *  恒为 best-effort 的是**缺签名**那一档：未签名/不可用只告警不阻断，因为 HTTPS clone
  *  + tag 钉版本已保证内容完整性，GPG 是额外的一层来源证明。而"tag 带签名却验不过"
- *  （`invalid`）不是缺证明，是正面篡改证据——那一档是硬拒，见 signatureRefusalText。 */
+ *  （`invalid`）不是缺证明，是正面篡改证据——那一档是硬拒，判据与文案都在 `tagVerifyDecision`。 */
 export const GLASSPANE_SIGNING_PUBLIC_KEY = [
   '-----BEGIN PGP PUBLIC KEY BLOCK-----',
   '',
@@ -966,6 +963,57 @@ export function classifyTagVerify({ status, stdout = '', stderr = '' } = {}) {
     return { status: 'unsigned', detail: '该发布 tag 未做 GPG 签名（不是内容被篡改，只是缺签名层）', raw }
   }
   return { status: 'invalid', detail: `git verify-tag 失败（退出码 ${status}），签名无法确证`, raw }
+}
+
+/**
+ * 验签结论怎么落成安装动作。三种结局各说各话：
+ *  - `verified`   绿字继续；
+ *  - `unsigned` / `unavailable`  黄字继续——缺的是来源证明的**增量**：被验的 tag 与
+ *    装进构建的源码是同一个 ref，HTTPS + tag 钉版本已经保证内容完整；
+ *  - `invalid`    签名在、验不过，那说的不是"缺证明"而是"这份字节不是发布者签过的
+ *    那一份"，必须**停下**。自动更新那一面对它是硬拒且 `--consent` 洗不掉
+ *    （updater/lib/check.js 的门 8）；安装这一面从前只黄字一句"继续安装"就往下跑
+ *    npm install、swift build 并注册 launchd——同一件事在两条路上按两种诚实度处理，
+ *    而安装是更不可逆的那条。
+ * 判据放在纯函数里：这一段从前埋在 main() 的 if 里，没有一条测试能指到它。
+ */
+export function tagVerifyDecision({ sig, pinRef, repoDir }) {
+  if (sig.status === 'verified') {
+    return { action: 'pass', text: `发布 tag ${pinRef} GPG 签名验证通过` }
+  }
+  if (sig.status === 'invalid') {
+    return {
+      action: 'refuse',
+      text: `发布 tag ${pinRef} 带着 GPG 签名，但签名验不过：${sig.detail}\n`
+        + (String(sig.raw ?? '').trim()
+          ? `git verify-tag 原话：${String(sig.raw).trim()}\n`
+          : '（git verify-tag 没有留下原话；上面那句是判据本身）\n')
+        + '这不是"没签名"。签名在而校验失败，说明眼前这份 tag 指向的字节不是发布者签过的那一份。'
+        + '安装到此为止：没有跑 npm install，没有 swift build，没有注册 launchd 作业。\n'
+        + `内置公钥：key ${GLASSPANE_SIGNING_KEY_ID}（uid ${GLASSPANE_SIGNING_KEY_UID}），`
+        + '就是本文件里那份 GLASSPANE_SIGNING_PUBLIC_KEY——要比对的是这一把，不是随便哪把签过名的。\n'
+        + `下一步：核对远端与这个 tag（git -C "${repoDir}" remote -v；git -C "${repoDir}" tag -v ${pinRef}）；`
+        + '确认仓库与发布者公钥都无误后改用更新的发布 tag（GLASSPANE_REF=v<版本> 重跑）。'
+        + '要装开发主线用 GLASSPANE_REF=main（那条路不做 tag 验签，会如实告警）。\n'
+        + '该看的地方：SECURITY.md 的 "What the checks prove, and what they do not"——'
+        + '这一档写明是"任何同意都不覆盖的硬拒"，所以这里既没有 flag 也没有确认能放行。',
+    }
+  }
+  if (sig.status === 'unsigned' || sig.status === 'unavailable') {
+    return {
+      action: 'warn',
+      text: `发布 tag ${pinRef} 没有可核验的 GPG 签名（${sig.status}：${sig.detail}）`
+        + '——继续安装：缺的是来源证明的增量，不是篡改迹象',
+    }
+  }
+  // 没见过的新判据一律停下：把"不认识"当成"没签名"放过，等于每加一种失败模式
+  // 就自动退回成"继续安装"。
+  return {
+    action: 'refuse',
+    text: `发布 tag ${pinRef} 的验签回了一个安装器不认识的判据（${sig.status}：${sig.detail}）。`
+      + '安装到此为止：不认识的判据不许当成"没签名"放过。\n'
+      + `下一步：手动核对（git -C "${repoDir}" tag -v ${pinRef}），确认无误后重新安装。`,
+  }
 }
 
 /** 仓库里是否存在指定 tag ref（IO 探测，纯判定）。 */
@@ -2028,24 +2076,6 @@ export function cloneFailureText({ ref, status, stderr = '', targetDir }) {
   ].join('\n')
 }
 
-/** 发布 tag **签名对不上**时的硬拒（finding 2）。SECURITY.md §"What the checks prove"：
- *  "a signature that is published and **does not check** is a hard refusal that no consent
- *  overrides"——`invalid` 不是"少一层证明"，是正面证据说这份 tag 被换过；继续安装等于
- *  把克隆到的源码当发布版装进 launchd。`unsigned` / `unavailable`（没签、没 gpg）仍是告警。 */
-export function signatureRefusalText({ ref, keyId, keyUid, detail, stderr = '', repoDir }) {
-  return [
-    `拒绝安装：tag ${ref}（在 ${repoDir}）**带**GPG 签名，而用内置发布公钥验不过。`,
-    `git verify-tag 原话：${String(stderr ?? '').trim() || detail}`,
-    `内置公钥：key ${keyId}（uid ${keyUid}），见 installer/cli.js 的 GLASSPANE_SIGNING_PUBLIC_KEY。`,
-    '这与"没签名"是两件事：未签名只是作者身份无从确证，签名对不上则是**正面篡改证据**'
-    + '（同名 tag 被换、或被中间人替换）。SECURITY.md 明说这一档是"任何同意都不覆盖的硬拒"，'
-    + '所以这一档没有任何可以覆盖它的开关——既不是 flag，也不是交互确认。',
-    '该看的地方：SECURITY.md 的 "What the checks prove, and what they do not"；'
-    + '自己复核 `git verify-tag <tag>` 与 `gpg --recv-keys` 后的指纹，'
-    + '确认与仓库里那份公钥一致；不一致就**不要**装这一份源码，并按 SECURITY.md 的报告渠道反馈。',
-  ].join('\n')
-}
-
 /** 主安装流程；所有副作用步骤均记录真实执行结果，失败即抛错终止。
  *  返回值是收尾校验结论（`installOutcome`），入口守卫据此设退出码。
  *
@@ -2110,32 +2140,15 @@ export async function install({
     rootDir = plan.targetDir
   }
 
-  // 发布 tag GPG 验签：定位/clone 到的根目录若含发布 tag，就用内置发布公钥验签其签名。
-  // 三档分开处理（finding 2）：
-  //  - verified   → 绿字，正常继续；
-  //  - unsigned / unavailable（没签名、没有 gpg、仓库里没这个 tag）→ 黄字继续：作者身份
-  //    "无从确证"而不是"被证伪"，SECURITY.md 同一节明说这一档是 unknown-not-proven，
-  //    HTTPS clone + tag 钉版本已经保证内容完整；
-  //  - **invalid**（tag 带签名而验不过）→ **硬拒**。SECURITY.md："a signature that is
-  //    published and does not check is a hard refusal that no consent overrides"。
-  //    这是正面篡改证据，而旧实现在这里打一行黄字继续装——且此刻被 clone 下来的 cli.js
-  //    已经跑起来了，等于把"检出被替换"当告警处理。
+  // 发布 tag GPG 验签：动作怎么落由 `tagVerifyDecision` 判（纯函数，有单测）。
+  // `pinRef` 沿用上面 `resolvePinRef(env)` 那一次读取——合并时这里曾各自再读一遍
+  // （`env.GLASSPANE_REF || REPO_REF`），那份把"置空 GLASSPANE_REF"读成追主干，与
+  // install.sh 侧不同源；一个事实只留一处读法。
   if (pinRef !== 'main' && repoHasRef(rootDir, pinRef)) {
     const sig = verifyCloneTagGpg({ repoDir: rootDir, ref: pinRef })
-    if (sig.status === 'verified') {
-      printStep(paint(`发布 tag ${pinRef} GPG 签名验证通过`, 'green'))
-    } else if (sig.status === 'invalid') {
-      throw new Error(signatureRefusalText({
-        ref: pinRef,
-        keyId: GLASSPANE_SIGNING_KEY_ID,
-        keyUid: GLASSPANE_SIGNING_KEY_UID,
-        detail: sig.detail,
-        stderr: sig.raw ?? '',
-        repoDir: rootDir,
-      }))
-    } else {
-      printStep(paint(`发布 tag ${pinRef} 未通过 GPG 验签（${sig.status}：${sig.detail}）——继续安装（未签名 ≠ 签名被证伪，见 SECURITY.md）`, 'yellow'))
-    }
+    const verdict = tagVerifyDecision({ sig, pinRef, repoDir: rootDir })
+    if (verdict.action === 'refuse') throw new Error(verdict.text)
+    printStep(paint(verdict.text, verdict.action === 'pass' ? 'green' : 'yellow'))
   }
 
   const engineDir = path.join(rootDir, 'engine')

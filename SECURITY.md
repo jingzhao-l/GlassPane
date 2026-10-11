@@ -215,9 +215,16 @@ permission rather than by a secret.
   that session. That is a *different* exposure from a file on disk, not a smaller one: the same interface
   text as the evidence pack above, but on the far side of the boundary instead of inside your `0700` state
   root, already read by somebody else's model, with no `chmod` and no "delete the directory" remedy that
-  reaches it. Nothing here writes a report copy, so the mode tightening below has nothing to say about these
-  two tools. Z4.5 Metal capture is the opposite shape and does write a file: it puts a `.gputrace` document
-  into the **app under test's** temporary directory.
+  reaches it. Neither tool writes a report copy, so the mode tightening below has nothing to say about these
+  two tools. The settings panel's 打开报告 button is a **different writer and does put a file on disk**, and this
+  page used to say "nothing here writes a report copy" while it did:
+  `EvidenceReportGenerator.writePrivateHTMLReport` creates the HTML `0600`, under a per-write random name, with
+  `O_EXCL | O_NOFOLLOW`, and refuses a temp directory that is group- or world-writable or not owned by you — a
+  pre-planted name is therefore refused instead of written through, which is what the old predictable
+  `glasspane-evidence-<operationId>.html` at the umask default allowed. That copy sits outside `~/.glasspane`,
+  so the state-root tightening and the cleanup rules above do not reach it and nothing deletes it for you; the
+  button tells you where it went. Z4.5 Metal capture is the third writer and a different shape again: it puts a
+  `.gputrace` document into the **app under test's** temporary directory.
 - **Modes on the state root, as measured rather than as intended.** On the machine this page was checked
   from: `~/.glasspane` `0700`, `engine.sock` `0600`, `approvals.json` and `projects.json` `0600` — the
   daemon enforces those on bind and on its start-of-run sweep. `~/.glasspane/installer-daemon.log`

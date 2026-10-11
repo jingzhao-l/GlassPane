@@ -81,10 +81,15 @@ final class EngineP1Batch6Tests: XCTestCase {
             return XCTFail("read back nil after successful write")
         }
         XCTAssertEqual(pack, read, "roundtripped evidence must equal original")
-        // Atomic write must not leave a .tmp behind.
-        XCTAssertFalse(FileManager.default.fileExists(
-            atPath: groupURL(dir).appendingPathComponent(pack.operationId + ".json.tmp").path
-        ))
+        // 原子写不许留下任何临时残留。判据按"条目名的兄弟"而不是固定的 `<entry>.json.tmp`
+        // 那一个名字：生产的临时名带 pid+UUID（两个写者不许互相 rename 到位），
+        // 只查固定名的话，这一条会对着新名字一路绿下去而什么都不核。
+        let entryName = pack.operationId + ".json"
+        let siblings = try FileManager.default.contentsOfDirectory(atPath: dir)
+        XCTAssertEqual(
+            siblings.filter { $0.hasPrefix(entryName) }, [entryName],
+            "一次写入之后，条目名旁边不许有任何临时形状"
+        )
     }
 
     func testStoreReadMissingReturnsNil() {

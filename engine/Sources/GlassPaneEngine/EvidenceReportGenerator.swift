@@ -155,6 +155,75 @@ public enum EvidenceReportGenerator {
         return out.joined(separator: "\n")
     }
 
+    // MARK: - The one report copy this product writes
+
+    /// 设置面板「打开报告」那颗按钮的落盘方式：独占创建、0600、名字不可预测，
+    /// 并且只往一个**属于当前用户、且不是 group/other 可写**的目录里写。
+    ///
+    /// 从前这里是一句 `try? data.write(to: url)`：umask 给出 0644，文件名是
+    /// `glasspane-evidence-<operationId>.html`——人人可猜，谁先占住那个名字
+    /// （包括放一个 symlink）就照着写，于是被测应用的界面文本长期躺在一个
+    /// 本机任意进程可读、还可能被写进别处的文件里。SECURITY §2.4 当年那句
+    /// "Nothing here writes a report copy" 同时说错了两件事：确有这一份，
+    /// 而它当时没有权限交代。判定放在引擎里，面板只负责按下与打开。
+    public enum ReportWriteOutcome: Equatable {
+        case written(path: String)
+        case directoryUnusable(String)
+        case refused
+    }
+
+    public static func writePrivateHTMLReport(
+        _ html: String,
+        operationId: String,
+        directory: URL = FileManager.default.temporaryDirectory
+    ) -> ReportWriteOutcome {
+        let path = directory.path
+        if let defect = reportDirectoryDefect(path) {
+            return .directoryUnusable(defect)
+        }
+        let bytes = Array(html.utf8)
+        for _ in 0..<16 {
+            // 随机后缀：撞名不是靠重试解决，而是靠"名字猜不到"让抢占无从下手。
+            let name = "glasspane-evidence-\(sanitizeOperationId(operationId))-\(UUID().uuidString).html"
+            let target = (path as NSString).appendingPathComponent(name)
+            let fd = open(target, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+            guard fd != -1 else { continue }
+            let written = bytes.withUnsafeBufferPointer { buffer in
+                write(fd, buffer.baseAddress, buffer.count)
+            }
+            close(fd)
+            if written == bytes.count { return .written(path: target) }
+            unlink(target)  // 写坏了就撤掉，不留一份残缺报告
+        }
+        return .refused
+    }
+
+    /// 这份报告允许落在哪儿：必须是本 uid 拥有、且 group/other 都写不动的目录。
+    /// `$TMPDIR` 被改指到共享目录（agent 宿主、launchd 上下文都干过）时回缺陷，
+    /// 由调用方如实说"没写成"，不是照写不误。
+    static func reportDirectoryDefect(_ path: String) -> String? {
+        var info = stat()
+        guard stat(path, &info) == 0 else {
+            return "报告目录不存在或读不到：\(path)"
+        }
+        if info.st_mode & S_IFMT != S_IFDIR { return "报告目录不是目录：\(path)" }
+        if info.st_uid != getuid() { return "报告目录不属于当前用户（uid \(info.st_uid)）：\(path)" }
+        if info.st_mode & 0o022 != 0 {
+            return String(format: "报告目录同组或其他人可写（%o）：%@",
+                          Int(info.st_mode & 0o777), path)
+        }
+        return nil
+    }
+
+    /// operationId 只用来让文件名对人友好；字符集按档案条目名的规矩收紧，
+    /// 不让一个外来的 id 变成路径。
+    private static func sanitizeOperationId(_ raw: String) -> String {
+        let allowed = CharacterSet(charactersIn:
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+        let kept = String(String.UnicodeScalarView(raw.unicodeScalars.filter { allowed.contains($0) }))
+        return kept.isEmpty ? "report" : String(kept.prefix(64))
+    }
+
     // MARK: - Private
 
     private struct ReportSection {

@@ -337,18 +337,14 @@ final class ReviewPanelTests: XCTestCase {
         XCTAssertTrue(message.contains("cannot read the evidence archive to count it"), message)
     }
 
-    // MARK: - 重启结局（发现 9）：非 0 退出要说「这一步得人来」
+    // MARK: - 重启结局（发现 9）：本轮的两条断言让给了上游那份更完整的实现
 
-    /// 反向变异：**把 kickstart 的结果丢掉、`try?` 到底**（发现的那处），或者退出码
-    /// 非 0 也说成没事——服务不是 launchd 托管的机器上按下什么也不发生。
-    func testKickstartFailureHandsTheUserTheManualStep() {
-        XCTAssertNil(SettingsModel.restartOutcomeHint(exitStatus: 0), "重启成了就不该再让人手动来一次")
-        XCTAssertEqual(SettingsModel.restartOutcomeHint(exitStatus: 1), PermissionGuide.manualRestartHint,
-                       "非 0 退出等于没重启")
-        XCTAssertEqual(SettingsModel.restartOutcomeHint(exitStatus: nil), PermissionGuide.manualRestartHint,
-                       "launchctl 没起来也等于没重启")
-        XCTAssertFalse(PermissionGuide.manualRestartHint.contains("§"))
-    }
+    // 本轮这里原有两条：`restartOutcomeHint(exitStatus:)` 的三档，与"hint 必须被渲染"
+    // 的形状闸。合并时上游那版重启判定是超集（`restartVerdict` 用 pid 回读、
+    // `restartLaunchStepOutcome` 把 launchctl 那一层分开、失败态一律给得出下一步、
+    // `manualRestartHint` 终于有读者），且 `PanelActionReadoutTests` 逐条钉住
+    // （nil→.spawnFailed、每个失败态点名下一步、pid 没变不算确认）。同一个修复不留两把闸，
+    // 两条随之删除；删的是重复的测试，不是被护住的行为。
 
     // MARK: - 徽标同源（发现 10c）：一张卡不许说两件事
 
@@ -425,16 +421,19 @@ final class ReviewPanelTests: XCTestCase {
                       "详情页不能再只看 pack 是不是 nil")
     }
 
-    /// 形状闸：重启失败那句话真的被渲染（发现 9 的视图那一半）。
-    func testShapeManualRestartHintIsRendered() throws {
+    /// 形状闸：重启结论那句必须真的被渲染（发现 9 的视图那一半）。上游把状态换成了
+    /// `restartOutcomeText` + `gp-restart-outcome`，这里跟着改指它——留这条而不是删掉，
+    /// 是因为 `PanelActionReadoutTests` 的"发布态有没有读者"扫的是模型属性被读，
+    /// 而这一条要钉的是**两页都渲染了它**（权限页与项目页各一处）。
+    func testShapeRestartOutcomeIsRenderedOnBothPages() throws {
         let panel = try readSource("engine/Sources/glasspane-settings/SettingsPanelView.swift")
         let projects = try readSource("engine/Sources/glasspane-settings/ProjectsTabView.swift")
-        XCTAssertTrue(panel.contains("model.daemonRestartHint"),
-                      "权限页要把重启失败那句话渲染出来，否则它又是一句写好了却没人接的话")
-        XCTAssertTrue(projects.contains("settings.daemonRestartHint"),
+        XCTAssertTrue(panel.contains("model.restartOutcomeText"),
+                      "权限页要把重启结局渲染出来，否则它又是一句写好了却没人接的话")
+        XCTAssertTrue(projects.contains("settings.restartOutcomeText"),
                       "项目页那枚「重启后台服务」同样要看得见失败")
-        XCTAssertTrue(panel.contains("model.daemonRestartHint != nil"),
-                      "重启没成之后横幅不许一按就消失")
+        XCTAssertTrue(projects.contains("gp-restart-outcome"),
+                      "结论要有可指认的标识，自动化才测得到它现身")
     }
 
     /// 形状闸：项目页那枚死路按钮不再挂着破坏性动作（发现 10e）。

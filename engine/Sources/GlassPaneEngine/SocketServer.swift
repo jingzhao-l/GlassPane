@@ -154,17 +154,10 @@ public final class SocketServer {
             throw SocketErrorResponse.system(errno, "socket()")
         }
 
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
-        let copied = socketPath.withCString { source -> Bool in
-            withUnsafeMutableBytes(of: &address.sun_path) { destination in
-                guard let base = destination.baseAddress else { return false }
-                _ = strncpy(base.assumingMemoryBound(to: CChar.self), source, destination.count)
-                return true
-            }
-        }
-        guard copied else {
+        // 容量判定在 `UnixSocketAddress` 里：`strncpy` 对超长名字是静默截断，
+        // 截断后 bind() 会成功，但绑的是**另一个**名字——随后 chmod/unlink 打在
+        // 全名上双双 ENOENT，而这条路径原本承诺回 `invalidPath`。
+        guard var address = UnixSocketAddress.address(for: socketPath) else {
             close(fd)
             throw SocketErrorResponse.invalidPath(socketPath)
         }

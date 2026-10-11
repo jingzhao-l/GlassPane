@@ -28,7 +28,7 @@ public final class EngineCore {
     /// keys its daemon site on exactly this line's shape, `hello` reads it, and
     /// `glasspaned --version` reads it — so the version a client sees on the socket
     /// and the version a one-shot process prints cannot drift apart.
-    public static let buildVersion = "1.9.0"
+    public static let buildVersion = "1.10.0"
 
     public let version = EngineCore.buildVersion
     public let protocolVersion = "0"

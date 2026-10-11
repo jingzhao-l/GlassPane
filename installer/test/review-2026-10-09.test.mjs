@@ -45,7 +45,7 @@ import {
   preflightIssues,
   resolvePinRef,
   safeGitCloneArgs,
-  signatureRefusalText,
+  tagVerifyDecision,
   survivorText,
   terminatePids,
   usageText,
@@ -324,15 +324,19 @@ test('finding1: hello 缺席时判据仍是 no-hello（不拿版本核对冒充�
  * ------------------------------------------------------------------------- */
 
 test('finding2: 硬拒文案点名 tag、公钥与该看的地方（纯函数）', () => {
-  const text = signatureRefusalText({
-    ref: 'v1.9.0',
-    keyId: '0929EA31DF4F7429F63FC53189D88B1D043A1298',
-    keyUid: 'jingzhao-l (sign-github) <ET_lin@outlook.com>',
-    detail: 'git verify-tag 失败（退出码 1），签名无法确证',
-    stderr: "gpg: BAD signature from 'jingzhao-l'",
+  // 合并时这一档的实现取上游那份（`tagVerifyDecision`：三档判据 + 单一出口），
+  // 本轮多出来的三条信息（用的是哪把钥匙、git 的一手原话、该看哪儿）并进它的文案。
+  const verdict = tagVerifyDecision({
+    sig: {
+      status: 'invalid',
+      detail: 'git verify-tag 失败（退出码 1），签名无法确证',
+      raw: "gpg: BAD signature from 'jingzhao-l'",
+    },
+    pinRef: 'v1.9.0',
     repoDir: '/Users/dev/glasspane',
   })
-  assert.match(text, /拒绝安装/)
+  assert.equal(verdict.action, 'refuse')
+  const text = verdict.text
   assert.match(text, /v1\.9\.0/, '点名是哪个 tag')
   assert.match(text, /BAD signature/, '把 git/gpg 的一手原话交出来')
   assert.match(text, /0929EA31DF4F7429F63FC53189D88B1D043A1298/, '点名用的是哪把钥匙')
@@ -392,13 +396,19 @@ test('finding2: 别人签的同名 tag → install() 硬拒，且拒绝发生在
 
 test('finding2: 未签名（unsigned）仍按文档口径继续，不硬拒', () => {
   // 这一条钉住"三档分得开"：unsigned 是作者身份无从确证，不是被证伪。
-  const cls = { status: 'unsigned', detail: '该发布 tag 未做 GPG 签名' }
-  assert.equal(cls.status, 'unsigned')
-  assert.doesNotThrow(() => signatureRefusalText.length)
+  const say = (status) => tagVerifyDecision({
+    sig: { status, detail: 'd' }, pinRef: 'v1.9.0', repoDir: '/Users/dev/glasspane',
+  })
+  assert.equal(say('invalid').action, 'refuse', '签名对不上必须停下')
+  assert.equal(say('unsigned').action, 'warn', '没签名只是缺那一层证明，不是被证伪')
+  assert.equal(say('unavailable').action, 'warn', '没有 gpg 同样是"这一档测不了"，不是"验不过"')
+  assert.match(say('unsigned').text, /继续安装/, '告警那句要明说自己放行')
+  assert.ok(!say('invalid').text.includes('继续安装'), '硬拒的文案里不许出现放行')
+  // 一个不认识的新判据不得默默退回"没签名"那一档（上游那份的第四支，本轮保住它）
+  assert.equal(say('whatever-comes-next').action, 'refuse')
   const source = fs.readFileSync(CLI, 'utf8')
-  assert.match(source, /sig\.status === 'invalid'[\s\S]{0,200}throw new Error\(signatureRefusalText/,
-    'install() 里只有 invalid 走 throw；unsigned/unavailable 仍是告警')
-  assert.match(source, /继续安装（未签名 ≠ 签名被证伪/, '告警那句要把两档的区别说清楚')
+  assert.match(source, /verdict\.action === 'refuse'\) throw new Error\(verdict\.text/,
+    'install() 只有一个出口：判到 refuse 就 throw')
 })
 
 /* ---------------------------------------------------------------------------
