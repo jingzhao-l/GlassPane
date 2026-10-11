@@ -1049,8 +1049,17 @@ export async function applyUpdate({
       clearStaged: true,
     })
   }
-  if (kind === 'major' && !consents.includes('major')) {
-    return fail('needs-consent', CODES.consentRequired, `version ${wantVersion} is a major upgrade from ${baseline}. Press "Install update" in the GlassPane panel to confirm you want it.`)
+  // A scheduled run has no person behind it, so it inherits no consents. `cli.js` refuses
+  // `--auto --consent <kind>` at the boundary; this is the same rule for anything that
+  // imports `apply` around the CLI. Before this, both consent gates below read `consents`
+  // regardless of `trigger`, so `apply --auto --consent major` swapped a major upgrade while
+  // the USAGE text said majors refuse under `--auto`.
+  const humanConsents = trigger === 'auto' ? [] : consents
+  if (kind === 'major' && !humanConsents.includes('major')) {
+    return fail('needs-consent', CODES.consentRequired, `version ${wantVersion} is a major upgrade from ${baseline}. Press "Install update" in the GlassPane panel to confirm you want it.`
+      + (trigger === 'auto' && consents.length > 0
+        ? ' This run came in as the scheduled run (--auto), so the consent on its command line was not used: a schedule cannot confirm on a person\'s behalf.'
+        : ''))
   }
   if (trigger === 'auto' && (state.disabled === true || state.autoApply === false)) {
     // §5: the switch really stops the swap. A manual invocation (the panel
@@ -1063,7 +1072,7 @@ export async function applyUpdate({
   if (job.unknown === true) {
     return fail('deferred', CODES.busyOrUnreachable, `the running daemon job could not be identified (${job.reason}), so no version was swapped`)
   }
-  const permission = decideSwapPermission({ probe: verdict, jobArgs: job.args, ourStateRoot: stateRoot, consented: consents })
+  const permission = decideSwapPermission({ probe: verdict, jobArgs: job.args, ourStateRoot: stateRoot, consented: humanConsents })
   if (permission.status !== 'allowed') {
     // `unknown` 不是一个 consent 能回答的问题（作业写了哪个状态根本来就读不出来），所以它
     // 落到 `deferred` 那一档，跟上面 `job.unknown === true` 同一个口径；只有真正"等人点头"
@@ -1090,14 +1099,20 @@ export async function applyUpdate({
   const npmReady = preflightNpm()
   if (!npmReady.ok) {
     const remedy = npmReady.dir
-      // The two ways out both need a person (a password, or a PATH change), so the sentence says which
-      // one it is recommending and what to press afterwards — an agent can run the chown only if a human
-      // authorized it, and it must not be left guessing between two different fixes.
-      ? `A person has to do one of these once: hand that directory to this account with `
-        + '`sudo chown -R "$(whoami)" ' + (npmReady.dirs ?? [npmReady.dir]).join(' ') + '`'
-        + ', or move npm\'s prefix under the home directory (`npm config set prefix ~/.npm-global`, put '
-        + '`~/.npm-global/bin` on PATH, then re-run the GlassPane installer so the launcher points at the new one). '
-        + 'After that, press "Install update" again.'
+      // The two ways out are not equal, and the sentence used to lead with the dangerous one:
+      // `sudo chown -R "$(whoami)" /usr/local/lib/node_modules /usr/local/bin` — a recursive ownership
+      // sweep across every *other* global package and every binary in /usr/local/bin, printed verbatim by
+      // the panel and by `gp_diagnose` because `lastError.message` is what they show. This product's rule
+      // (test/remedy-surface.test.mjs, and the shape lib/ca-bundle.js was corrected to) is that a remedy may
+      // *name* the tool a person would use but must not hand out an executable escalation. Relocating npm's
+      // prefix needs no escalation at all and an agent can run it, so it comes first.
+      ? 'Two ways out, and the first one an agent can run by itself: move npm\'s prefix under the home '
+        + 'directory (`npm config set prefix ~/.npm-global`, put `~/.npm-global/bin` on PATH, then re-run the '
+        + 'GlassPane installer so the launcher points at the new one). The other is a person\'s call, and this '
+        + 'tool will not run it for them: hand '
+        + (npmReady.dirs ?? [npmReady.dir]).map((dir) => `"${dir}"`).join(' and ')
+        + ' to this account, which means a `chown` of those directories entered by hand with a password. '
+        + 'After either one, press "Install update" again.'
       : 'Check `npm config get prefix` from this account — the updater will not ask for a password.'
     return fail('deferred', CODES.npmPrefixUnwritable,
       'automatic update cannot finish on this machine: '

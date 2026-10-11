@@ -111,7 +111,10 @@ export function decideSwapPermission({ probe, jobArgs, ourStateRoot, consented =
       code: CODES.nonDefaultStateDir,
       // 拒绝必须带一个可执行的下一步（对照 lib/signature.js 的 `--consent unsigned-release`
       // 与 cli.js 里 wired 的 `--consent state-dir`）：光说"do it by hand"的拒绝，agent 无从操作。
-      reason: `the running daemon writes to ${foreign}, which is not the state root this tool was asked to update (${ourStateRoot}). A swap here would replace bundles that somebody else's daemon is using. A person who has checked which install they mean may run "updater apply --state-dir ${ourStateRoot} --consent state-dir" (the panel's "Install update" button does the same thing); an automatic run never carries that flag.`,
+      // 这句从前还补了一句"面板上「安装更新」按钮干的是同一件事"——那是假的：`non-default-state-dir`
+      // 不在 UpdatePanelLogic 的 consentGate 表里，落到 `.none` 那一档，而那一档写死
+      // `applyEnabled: false`（UpdatePanelTests 钉着）。把人说往一个按不动的按钮，比不说更糟。
+      reason: `the running daemon writes to ${foreign}, which is not the state root this tool was asked to update (${ourStateRoot}). A swap here would replace bundles that somebody else's daemon is using. A person who has checked which install they mean may run "updater apply --state-dir ${ourStateRoot} --consent state-dir"; an automatic run never carries that flag.`,
       swapped: false,
     }
   }
