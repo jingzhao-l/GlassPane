@@ -160,34 +160,43 @@ try {
       }
       void drain(server.stdout)
       void drain(server.stderr)
-      const waits = 30
-      for (let i = 0; i < waits; i++) {
+      const listeningCap = 360 // 180s, and it is a give-up bound, not the criterion
+      let listening = false
+      for (let i = 0; i < listeningCap && !(listening = logged.join("").includes("listening on")); i++) {
         await Bun.sleep(500)
+      }
+      let served = false
+      let detail = "no response"
+      const polls = listening ? 40 : 0
+      for (let i = 0; i < polls; i++) {
         const response = await fetch(`http://127.0.0.1:${port}/`).catch(() => undefined)
-        if (!response?.ok) continue
-        const body = await response.text()
-        const type = response.headers.get("content-type") ?? ""
-        // `<html` alone is satisfied by an error page. The doctype plus a bundled asset
-        // reference is what this binary serves when the web assets really are embedded.
-        const hasAssets = /(?:src|href)="\/?assets\//i.test(body)
-        served = type.includes("text/html") && /<!doctype html>/i.test(body) && hasAssets
-        detail = `waited ${(i + 1) * 0.5}s, content-type=${type || "(none)"} doctype=${/<!doctype html>/i.test(body)} assets=${hasAssets ? "referenced" : "absent"}`
-        if (served) break
+        if (response?.ok) {
+          const body = await response.text()
+          const type = response.headers.get("content-type") ?? ""
+          // `<html` alone is satisfied by an error page. The doctype plus a bundled asset
+          // reference is what this binary serves when the web assets really are embedded.
+          const hasAssets = /(?:src|href)="\/?assets\//i.test(body)
+          served = type.includes("text/html") && /<!doctype html>/i.test(body) && hasAssets
+          detail = `content-type=${type || "(none)"} doctype=${/<!doctype html>/i.test(body)} assets=${hasAssets ? "referenced" : "absent"}`
+          if (served) break
+        }
+        await Bun.sleep(500)
       }
       if (!served) {
-        // "no response" used to be the whole report, which made two very different outcomes
-        // look identical: a release whose binary cannot serve the web app at all, and a
-        // machine too busy to start a 108 MB single file inside the wait window. Measured on
-        // 2026-10-11: the same published 0.7.3 binary answered after 8s when driven by hand
-        // with an 80s window, while this lane — 30 × 500 ms — printed "no response" and called
-        // the release bad. The verdict stays red (a release we could not observe is not a
-        // release we verified), but the message now says which of the two it was and what to
-        // run instead.
-        const started = logged.join("").includes("listening on")
+        // Two earlier versions of this check both confused the machine with the release.
+        // The first printed only "no response"; the second kept the same 30 × 500 ms wall
+        // budget and merely *described* the difference — so on a loaded host it still called
+        // a good release bad. Measured 2026-10-11 on the published 0.7.5: the binary answers
+        // with a real 2,884-byte `<!doctype html>` page, but it took **36s** to get there
+        // while nine concurrent `tool-surface` runs pushed the load average past 70, and
+        // the 15s budget expired. The criterion is now the server's own "listening on" line
+        // (an event, so a slow boot cannot fake it or defeat it); only the HTTP content
+        // check runs on a clock, and only once the server has said it is up. The cap is a
+        // give-up bound and is reported as such rather than as a verdict about the bundle.
         const tail = logged.join("").trim().split("\n").slice(-3).join(" / ").slice(0, 300)
-        detail = started
-          ? `waited ${waits * 0.5}s after the server reported it was listening on :${port} — that is a real serving failure, not a slow start`
-          : `waited ${waits * 0.5}s and the server never reported a listening port — INCONCLUSIVE on a loaded machine, not evidence the bundle is missing. Re-run when the load average is down, or: ${bin} serve --port 4814 and curl -sI http://127.0.0.1:4814/`
+        detail = listening
+          ? `the server reported listening on :${port} but ${polls * 0.5}s of polling produced no valid embedded page — ${detail || "no response"}; that is a real serving failure`
+          : `no "listening on" line within ${(listeningCap * 0.5) | 0}s, so the page was never even attempted — INCONCLUSIVE about the bundle, not evidence it is missing. Re-run on a quieter machine, or by hand: ${bin} serve --port 4814; curl -s http://127.0.0.1:4814/ | head -c 200`
         detail += tail ? ` (server output: ${tail})` : " (no server output captured)"
       }
       check("the installed binary serves the embedded web app", served, detail)

@@ -36,6 +36,25 @@
 损伤未提交）→ 用一次性唯一路径重插 → 正则剥残留 → 断言"标题顺序 = Unreleased/0.7.5/0.7.4/0.7.3/0.7.2
 且脚本 token 归零" → `check-doc-links` 绿。以后本 lane 的 scratch 一律带会话名。
 
+**0.7.5 的发布实测**：tree 哈希等式再一次成立（`split^{tree}` = `HEAD:harness/glasspane-harness` =
+`aa090742d69a9659fd44ef678279795aa2d712b7`）才推；split main 快进 `5163bc7..61b15d6`，**没有强推**。
+第一次推被 GitHub 拒了两次：`refusing to allow an OAuth App to create or update workflow
+.github/workflows/release.yml` —— 本批改了 release.yml，HTTPS+token 没有 workflow scope（既有
+教训 `git-push-token-scope-and-lease`），改 SSH 后即通过。tag `v0.7.5` → run 38162298984 全绿含
+`checksums`；npm dispatch run 38162885122 三条 publish job 全 success，且**新加的那步真跑了**
+（job 日志里 `Run bun run script/publish.ts --dry-run` 之后才是 `npm publish`）——平台包在变成
+可安装之前，先按产品自己的校验器过了一遍。registry 点名三个都回 `0.7.5`，`latest` = 0.7.5。
+发布物：两 zip + 两 `.asc` + `SHA256SUMS.txt` + 其 `.asc`，`isDraft=false`、target 是被 tag 的 commit。
+
+**这条闸自己又被负载证伪了一次，改的是判据而不是超时。** `verify-published 0.7.5` 先报
+`FAIL … waited 15s and the server never reported a listening port — INCONCLUSIVE`（我上一批写的
+新报告语，第一次在野外就派上用场：它给出手测出路，我照做）。手测已发布产物：
+`serve --port` 后 **36s** 供出 2,884 字节的真 `<!doctype html`，即**发布物没问题、窗口是坏的**
+——此刻机上有 9 个并发 `tool-surface`、load average >70。于是把判据从"15 秒墙钟内答完"换成
+"以服务器自己打的 `listening on` 行为事件门，之后才用有限轮询验内容"：起不动 → 红且明写
+INCONCLUSIVE + 复跑命令；起来了但页面不对 → 红且说是真失败。上一版的错误不在于"没写清楚"，
+在于**用机器的快慢去裁产品的好坏**；那只加超时治不了它。
+
 **闸（0.7.5 收口，从主仓根跑；每条退出码单独取，不再用循环尾值）**：product-surface **123 条一致 / 0 问题**（@0.7.5）；brand-surface 0 命中、血缘 **9,623 / 3,303** 与基线同（改掉的五处字面量本就不在这把尺子的扫描面里——正是它需要新读者的理由之一）；surface-semantics 0 命中 / 18 文件；hook-liveness 21 钩子无漂移；kernel-pin `iterate-kernel@0.1.5` + 24 契约文件；kernel-conformance 14 条全答对（14 条 / 2 实现的双方对照是 0.7.4 收口时实测的，本批没动内核与那把闸）；`probe-lane-selftest` 三态可分；`installer-selftest` 全过；`check-workflows` 5 份干净（含改过的 release.yml）；`check-doc-links` 24 份 / 225 内链；typecheck opencode / tui / sdk-js / plugin 各自 exit 0；固定点测试 **88 pass / 0 fail**（392 expect）。fork-diff 与 tool-surface 在提交之后重记——`fork-diff` 量的是已提交的树，0.7.4 那节记下了这个顺序坑。
 ## 2026-10-11（第二次会话）· 收上一轮的遗留：并回 `gp-harness-orphan-20261010` 未落地四条，发 0.7.4
 
