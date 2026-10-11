@@ -2,6 +2,89 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.12.2] — 2026-10-12
+
+**版本判断：patch。** 那四条逐条实测：状态文件的字段没动；CLI 参数没动；两个 npm 包的
+`bin` 没动；退出码**集合**没动——本轮只把程序早已会回的 `2` 补进 `--help`（哪条路径回哪个码
+一个字没改；把缺值路径统一到 64 属契约变更，留给 owner）。反面考虑过 minor 并否掉：
+确认表多出的那行橙色交代与一个禁用态是既有控件的状态，不是新的用户可见控制件。
+
+**取号经过，如实记。** 本线开工时发布态是 `v1.10.0`；跑到中途并行线把 `v1.11.0`、`v1.12.0`、
+`v1.12.1` 依次发掉，而本线在 `1.12.0` 之上判号时也算到 **1.12.1**（判据相同：四条都没动）——
+tag 被并行线先占，本线因此让到 **1.12.2**，不重号、不覆盖。同一段里 `npm` 与 `tag` 的错位
+也是量出来的：本线把 `v1.12.0` 的 npm 半程补完（dry → publish，registry 两包到 1.12.0），
+`v1.12.1` 的 npm 半程在推送这一刻由并行线自己在跑（`Release` 三连 dispatch），本线不碰。
+
+**还记一笔本线自己踩的运维坑（不改代码，改习惯）：** 每日任务的 scratch 路径
+`/var/tmp/glasspane-main-check/` 是按任务名固定的，两条每日线共用。本线把自己的
+`gates.sh` 留在那条路径后，被并行会话**同名覆盖**（内容指向它的 worktree），本线照原路径又跑了
+一次——等于**在它的树上跑我的门禁**，日志随后被它覆盖。发现方式是命名不对（我的日志是
+`01-…21-` 前缀，看到的却是 `npm-build.log` 一套）。之后本线一切 scratch 换成
+`/var/tmp/gp-daily-mine-<日期>/`，并在每次跑闸前核对脚本里的 `WT=` 指向本线 worktree。
+
+### Fixed — 清理预览的清单改由 daemon 的 `--project-prune --dry-run` 产生
+
+`previewTestResiduePrune()` 的注释写着"先跑 dry-run，把将要删除哪些摊开给人确认"，代码做的却是
+面板本地过滤（`prunePreview = projects.filter { LocalArchive.isTestResidue($0) }`）。确认表上那句
+"将删除 N 条注册项"因此是**面板的主张**，而按下确认之后执行删除的是 daemon 那份判定，两者之间
+没有任何保证，界面却把它们说成同一件事。现在这一步真的起一次 daemon CLI，表格读回话里的
+`projects`；四种回话都不摊清单并说明原因：缺 `matched`（daemon 认不出这条命令时回 usage + 64，
+折成"0 命中"就等于当着一屏残留说没有残留）、`loadFailed:true`（注册表读不开）、`dryRun:false`
+（要的是预览、它说已经删过）、以及 `matched` 与 `projects` 条数自相矛盾。面板读到的条数与
+daemon 答复不一致时两个数都显示，写清以后者为准（删除按后者执行）。表行收成 `PrunePreviewRow`：
+只带 daemon 报的那四个字段，不补 `createdAt`——补就是编一个它没说过的东西。
+这一条调用同时接上并行线立的规矩：经 `daemonCLIArguments(_:stateRoot:)` 组装，把
+`--state-dir <面板认的根>` 放在命令之前；漏了它，预览读的是默认根里**另一个实例**的注册表。
+
+### Fixed — `--help` 把六个退出码说全，并让这张表自己不能漂移
+
+程序能回 `2`（`--project-remove` 缺值、`--older-than` 缺值/非数、`--recipe-validate` 的文件读不开），
+而使用文本只在四处散着 64/65/1/3，从没提过 2——一个必须按返回值分叉的调用方读到的是四码之表。
+现在六个码全部写进 `--help`，并由 `DaemonExitCodeTests` **两个方向**对照：从源码抠
+`exit(N)`（含 `exit(cond ? 1 : 0)` 的三元分支）与 `.errorCode(…, N)`，与 `EXIT CODES` 一节比——
+能回却没文档红，文档里有个程序回不出的码也红。抽取带反向闸（抠不到 ≥5 个码 / ≥20 处退出点就红）：
+写这道闸时自己踩了一次空转——内层正则少写捕获组，`captures` 只收 group 1，抽取器静默交出空表，
+两侧都空＝全绿，这正是这类闸的典型死法。
+
+### Fixed — 一次性 launchd 脚本落盘之前先判临时目录
+
+面板把脚本写进 `NSTemporaryDirectory()`、chmod 0755，再 `launchctl submit -l <label> -- <script>
+<daemonBinary> <outputPath> --permissions` 执行——那一趟带的是 **daemon 自己的责任上下文**
+（`SettingsModel` 顶部对权限模型就是这么交代的）。而落盘之前没有任何一步问"这个目录是谁的、
+别人能不能写"：`$TMPDIR` 被改指到共享位置时（agent 宿主、launchd 起的进程都可能），含时钟 nonce
+的脚本名与输出名别的账号能预置，面板照写不误。判定收成一份 `StateRoot.directoryIsolation`
+（只读，不去 chmod 不属于自己的目录），一次性任务与证据报告共用——此前这两处各自手搓过一套
+权限位算法，第三处压根没有。不合格回独立结局 `directoryUnsafe(reason)`，文案给下一步
+（换一个本用户专有、同组与其他人写不动的临时目录），不与 `writeFailed` 混成一条：那是"重试一次"，
+这是"换目录"。
+
+### Fixed — 一条把"当前有几条命令"当不变量的闸
+
+`PanelDaemonCommandContractTests.testEveryConsoleCommandCarriesThePanelsOwnStateRoot` 把组装次数
+写死成 `== 3`。本线加的第四处合法调用（预览，带根）让它红了——变的是条数，不是规则。判据换成
+数**关系**：`runDaemonCLI` 调用点数 == `daemonCLIArguments` 组装次数，且每次组装都显式
+`stateRoot: …`；条数只留下限，裸数组仍一处不许留。加一条不带根的调用 ⇒ 两个数不等，红
+（这比写死 3 更强：写死的版本只数得出现在有几条）。顺带修抽取式：原先数 `daemonCLIArguments(`
+把**定义行**也算进去，计数恒比调用点多一，只能靠写死数字过；两处都改成点名 `ConsoleModel.` 前缀。
+
+### 新增闸、反向破坏与没有验的
+
+新增 `PrunePreviewSourceTests`（9 例；报文形状取自 2026-10-10 真二进制在隔离状态根上回的
+`--project-prune --dry-run`，含 `evidenceStoragePath: null` 的写法）、`DaemonExitCodeTests`（3 例，
+双向）、`TempDirectoryGuardTests`（4 例）。变异与具名红：`EXIT CODES` 删掉 `2` 那一行 ⇒
+`testUsageDocumentsExactlyTheExitCodesTheBinaryCanReturn`；预览摘掉 `--dry-run` ⇒
+`testPreviewNowComesFromTheDaemonNotAPanelSideFilter`；整块目录守卫摘掉 ⇒
+`testOneShotChecksTheDirectoryBeforeItWritesTheScript`；报告路径判定改成恒回 nil ⇒
+`testThePanelHasNoHandRolledOwnershipCheck` 与 `ReportWriteIsolationTests
+.testSharedOrMissingDirectoryIsRefusedNotWritten`（后者是行为红）。两条结构断言起初只查裸标识符
+`StateRoot.directoryIsolation`，反向破坏证明**注释也能把它喂绿**——改成要求调用式
+`directoryIsolation(at:` 与 `return .directoryUnsafe(` 之后才落成红。
+
+没验的，别当验过：跨进程"两个写者不再互相覆写"没有行为级闸（要两个真进程才露面）；
+面板这一页的新元素（`gp-prune-count-disagrees`、`directoryUnsafe` 那句文案）需要登录 GUI 会话
+按 `gp-*` 标识实点，本轮无人值守没做；`--project-remove` 缺值回 2 而 `--active-project` 缺值回 64
+的不一致仍在（本轮只把现实写进文档）。
+
 ## [1.12.1] — 2026-10-11
 
 **版本判断：patch。** 四条判据逐条实测：状态文件的字段没动（审批台账/更新状态/注册表的 JSON 形状都不变；
