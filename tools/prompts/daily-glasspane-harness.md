@@ -27,10 +27,11 @@
 【开工前先确认工作树与前置条件】
 
 1. 整树 `git status --porcelain`，记下开工 HEAD。主仓常被并行会话以 dirty 状态占用（项目 1 的任务就在同一棵树上跑），一旦发现不属于本任务的未提交批次：不混提、不 `git add -A`、绝不 `git checkout --`/`reset`/`stash` 别人的文件；改用隔离工作树（`git worktree add`，基于 main 的 HEAD）做本轮改动与提交。worktree 里 `.external/opencode` 做成指回主工作树那份的符号链接，别各存 223 MB。
-2. **环境余量先查**：`df -k /Volumes/Eng-Dev` 看可用空间。`bun install`（4,671 个包）、`bun run build --single`、参照检出 223 MB 都要吃盘，而 2026-10-10 那轮就是在盘满时被 ENOSPC 半路杀掉（任务记录只留 `session-failed`，不写原因）。低于 ~4 GiB 先清可再生物：`harness/glasspane-harness/packages/*/node_modules`、`dist/`、`/var/tmp/glasspane-harness/` 下往轮临时前缀与归档；清完仍不够就按"环境不足"如实终止并在汇报最上方给数字与补救命令，别硬跑到会话被杀、把半成品丢在树里。
-3. 工具链：`bun` 必须是 `packageManager` 钉的 **1.3.14**（`~/.bun/bin/bun`）。**缺工具不等于闸红**——找不到 bun 就明说哪几道闸没跑，不许把"没跑"写成"通过"。
-4. 参照检出必须在钉点上：`node -p "require('./harness/upstream.json').tag"` 得到 pin，`git -C .external/opencode describe --tags` 必须等于它，且 `git -C .external/opencode fsck` 无错、工作树干净。缺失时按 `harness/README.md` 的命令 clone：`git clone --branch <pin> --depth 1 https://github.com/anomalyco/opencode.git .external/opencode`。
-5. 任何整包构建前先跑 preflight（秒级）：`sh harness/glasspane-harness/packages/opencode/script/glasspane-preflight.sh`（在 fork 目录里则是 `sh packages/opencode/script/glasspane-preflight.sh`）。本机对 `objects.githubusercontent.com` 的 TLS 由拦截代理签发（`CN=SteamTools Certificate`），curl/git 过得去而自带 CA 的 bun 正确拒绝，所以构建必须把信任锚传给子进程：`export NODE_EXTRA_CA_CERTS=<钥匙串导出的 PEM 束>`（本机约定路径 `/var/tmp/glasspane-harness/ca-bundle.pem`，完整钥匙串束 163 张；只给 158 张系统根会 verification FAILED——那正是 bun 失败时的配置）。**任何"跳过证书校验"的开关一律不用。** 整包构建单次 >10 分钟，别放进每条改动后的复跑里：闸是按包的 typecheck + 固定点测试 + 六把尺子。
+2. **先找上一轮没收口的活**：`git fetch origin --prune` 后逐条判定「已落地 / 被后续提交取代 / 真没落地」，判据用内容而不是分支名或提交信息（`git cherry`、逐文件比对）。已知的一笔：**`gp-harness-orphan-20261010`**（远端已有）保住了 10-10 那轮被 ENOSPC 杀掉时留在未提交状态的五个文件——`verify-published.ts`（把"拿 `product.json` 的声明跟自己比"的自回显 os/cpu 断言改成读**已安装**包清单的 `os`/`cpu`/`version`）、`scripts/install.sh`（兜底通道的签名抓取与资产校验面）、`installer-selftest.sh`、`script/publish.ts`、`harness/tools/product-surface.mjs`。main 上那句自回显断言现在仍在（`grep -n "platform block" -A3 harness/glasspane-harness/packages/opencode/script/verify-published.ts` 可复查）。本轮把它带证明地并回 main、补齐 fork-diff/CHANGELOG/SYNCLOG 与所有闸，再决定它是否触发一次发版；判定不并也要写下理由。**"上一轮的遗留"不是输入，是待办。**
+3. **环境余量先查**：`df -k /Volumes/Eng-Dev` 看可用空间。`bun install`（4,671 个包）、`bun run build --single`、参照检出 223 MB 都要吃盘，而 2026-10-10 那轮就是在盘满时被 ENOSPC 半路杀掉（任务记录只留 `session-failed`，不写原因）。低于 ~4 GiB 先清可再生物：`harness/glasspane-harness/packages/*/node_modules`、`dist/`、`/var/tmp/glasspane-harness/` 下往轮临时前缀与归档；清完仍不够就按"环境不足"如实终止并在汇报最上方给数字与补救命令，别硬跑到会话被杀、把半成品丢在树里。
+4. 工具链：`bun` 必须是 `packageManager` 钉的 **1.3.14**（`~/.bun/bin/bun`）。**缺工具不等于闸红**——找不到 bun 就明说哪几道闸没跑，不许把"没跑"写成"通过"。
+5. 参照检出必须在钉点上：`node -p "require('./harness/upstream.json').tag"` 得到 pin，`git -C .external/opencode describe --tags` 必须等于它，且 `git -C .external/opencode fsck` 无错、工作树干净。缺失时按 `harness/README.md` 的命令 clone：`git clone --branch <pin> --depth 1 https://github.com/anomalyco/opencode.git .external/opencode`。
+6. 任何整包构建前先跑 preflight（秒级）：`sh harness/glasspane-harness/packages/opencode/script/glasspane-preflight.sh`（在 fork 目录里则是 `sh packages/opencode/script/glasspane-preflight.sh`）。本机对 `objects.githubusercontent.com` 的 TLS 由拦截代理签发（`CN=SteamTools Certificate`），curl/git 过得去而自带 CA 的 bun 正确拒绝，所以构建必须把信任锚传给子进程：`export NODE_EXTRA_CA_CERTS=<钥匙串导出的 PEM 束>`（本机约定路径 `/var/tmp/glasspane-harness/ca-bundle.pem`，完整钥匙串束 163 张；只给 158 张系统根会 verification FAILED——那正是 bun 失败时的配置）。**任何"跳过证书校验"的开关一律不用。** 整包构建单次 >10 分钟，别放进每条改动后的复跑里：闸是按包的 typecheck + 固定点测试 + 六把尺子。
 
 【执行流程】
 
@@ -77,7 +78,7 @@
 
 【环境约束】
 
-- 每次执行任何终端命令前，必须先执行：`export PATH="/opt/homebrew/bin:/opt/miniconda3/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/.bun/bin:$PATH"`。禁止在未恢复 PATH 时直接调用 git、bun、node、npm、gh、python3 等命令；仍不可用就用绝对路径（本机 `bun`=/Users/ethanlin/.bun/bin/bun、`gh`=/opt/homebrew/bin/gh）。禁止依赖 `source ~/.zshrc`。构建/发布类命令要同时带上 `NODE_EXTRA_CA_CERTS`（见前置第 5 条）。
+- 每次执行任何终端命令前，必须先执行：`export PATH="/opt/homebrew/bin:/opt/miniconda3/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/.bun/bin:$PATH"`。禁止在未恢复 PATH 时直接调用 git、bun、node、npm、gh、python3 等命令；仍不可用就用绝对路径（本机 `bun`=/Users/ethanlin/.bun/bin/bun、`gh`=/opt/homebrew/bin/gh）。禁止依赖 `source ~/.zshrc`。构建/发布类命令要同时带上 `NODE_EXTRA_CA_CERTS`（见前置第 6 条）。
 - zsh 的 tmux 钩子会杀掉管道（症状 `command not found: tmux` + exit 127，不是 PATH 问题）：多段命令用 `/bin/bash -c '…'` 跑；heredoc 一律用引号形式 `<<'EOF'`，否则反引号会被执行；BSD `grep -o` 有 255 字符上限，长行匹配别依赖它。
 - 长时间命令（`fork-diff`、整包构建、`bun install` 4,671 个包）用后台跑并轮询状态，别在前台等超时；超时不等于失败，先看日志再判定。
 - 授权见开头【无人值守：零遗留与全线发布授权】那一节，那一条覆盖本节；这里只留三条不是"决策"而是"别做错"的纪律：`--record` 只用于本轮自己造成的有意变化，`product-surface` 永远不许 `--record`（它没有基线）；覆盖任何远端分支前先逐条证明被覆盖内容不丢；本轮不改主仓产品代码与主仓版本线，也不手改 `node_modules/iterate-kernel/` 或 `kernel/schemas/**` 这类复制品（要动语义就走 canonical 再 pin/同步）。

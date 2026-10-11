@@ -28,9 +28,10 @@
 【开工前先确认工作树】
 
 1. 整树 `git status --porcelain`（不要只看子目录），并记下开工 HEAD sha。
-2. **环境余量先查**：`df -k /Volumes/Eng-Dev`（或 `/`）看可用空间。本任务的构建（Swift `.build`、`npm ci`、`node --test`、临时归档）会吃盘，而 2026-10-10/10-11 那两轮就是被 ENOSPC 半路杀掉的（任务记录只留 `session-failed`，不说为什么）。可用空间低于 ~4 GiB 就先清可再生物：`engine/.build`、`*/node_modules` + 重装、`npm cache`（必要时 `sudo npm cache clean --force`）、`/var/tmp` 下往轮归档与临时前缀。清完仍不够就**如实按"环境不足"终止**并在汇报最上方给出确切数字与补救命令——那是物理边界，不是遗留项；但别硬跑到会话被杀，留一堆未提交改动给别人。
-3. 主仓常被并行会话以 dirty 状态占用，可能存在**别人未提交的批次**。这时：不要混提、不要 `git add -A`、绝不 `git checkout --`/`reset`/`stash` 别人的文件。改用隔离工作树做本轮改动与提交（`git worktree add`，基于 main 的 HEAD）。那不是本轮该清的遗留项（那是别人正在做的工作），但你必须在汇报里点名它、并给出判断：它是否和本轮改动重叠、会不会让本轮收口变成半真半假。
-4. 对每个要改的文件先复制到 scratch 目录（如 `/var/tmp/glasspane-main-check/`）留快照——这是唯一回滚点。
+2. **先找上一轮没收口的活**：`git fetch origin --prune` 后列出没并进 main 的本线分支（`git branch -r --list "origin/daily/main-*"`、`git worktree list`），逐条判定「已落地 / 被后续提交取代 / 真没落地」——判据是内容而不是分支名或提交信息（`git cherry` 或逐文件比对）。真没落地的，本轮就把它并回 main 跑齐闸后一起收口；决定不并也要写下理由。**"上一轮的遗留"不是本轮的输入，是本轮的待办。**
+3. **环境余量先查**：`df -k /Volumes/Eng-Dev`（或 `/`）看可用空间。本任务的构建（Swift `.build`、`npm ci`、`node --test`、临时归档）会吃盘，而 2026-10-10/10-11 那两轮就是被 ENOSPC 半路杀掉的（任务记录只留 `session-failed`，不说为什么）。可用空间低于 ~4 GiB 就先清可再生物：`engine/.build`、`*/node_modules` + 重装、`npm cache`（必要时 `sudo npm cache clean --force`）、`/var/tmp` 下往轮归档与临时前缀。清完仍不够就**如实按"环境不足"终止**并在汇报最上方给出确切数字与补救命令——那是物理边界，不是遗留项；但别硬跑到会话被杀，留一堆未提交改动给别人。
+4. 主仓常被并行会话以 dirty 状态占用，可能存在**别人未提交的批次**。这时：不要混提、不要 `git add -A`、绝不 `git checkout --`/`reset`/`stash` 别人的文件。改用隔离工作树做本轮改动与提交（`git worktree add`，基于 main 的 HEAD）。那不是本轮该清的遗留项（那是别人正在做的工作），但你必须在汇报里点名它、并给出判断：它是否和本轮改动重叠、会不会让本轮收口变成半真半假。
+5. 对每个要改的文件先复制到 scratch 目录（如 `/var/tmp/glasspane-main-check/`）留快照——这是唯一回滚点。
 
 【执行流程】
 
