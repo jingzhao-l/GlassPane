@@ -127,6 +127,32 @@ describe("what the hook preserves", () => {
     expect(block).toContain("does not re-judge")
   })
 
+  test("what the production path actually reaches, so the dimension lane is not claimed twice", () => {
+    // The coverage-line tests above hand-build an `AnchorCollection` with
+    // `plannedDimensions` and per-anchor `dimension`. Nothing on the real path fills either
+    // field in: `collectEvidenceAnchors` transcribes the daemon's frames and the M2 receipt,
+    // and neither carries a review dimension (`decision-log-entry.schema.json` has
+    // entryId/sequence/prevEntryHash/operationId/summary/outcome/createdAt, and
+    // `evidence-pack.schema.json` has none either). So today the injected block has no
+    // coverage line, and saying otherwise in the module header would be this file's own
+    // version of "a fixture endorsing a capability the product does not have".
+    //
+    // This test is the ratchet for that claim: wire a real plan source — the kernel's
+    // `run-plan` contract is the candidate, it has the `dimensions` field — and the
+    // assertions below go red, which is when the header comment and `FORK.md` get to say the
+    // lane is live.
+    const collected = collectEvidenceAnchors([
+      message("gp_act", { metadata: okMetadata({ decisionLog: receipt() }) }),
+      message("gp_observe", { metadata: okMetadata({ decisionLog: receipt() }) }),
+    ])
+    expect(collected.plannedDimensions).toBeUndefined()
+    expect(collected.anchors.every((anchor) => anchor.dimension === undefined)).toBe(true)
+    const block = renderAnchorBlock(collected)
+    expect(block).toBeDefined()
+    expect(block).toContain("decisions recorded: 2")
+    expect(block).not.toContain("dimension coverage:")
+  })
+
   test("the block is appended to the context array, and the note names the target", async () => {
     const output: { context: string[]; prompt?: string } = { context: [] }
     const note = await injectEvidenceAnchors("ses_1", output, async () => [

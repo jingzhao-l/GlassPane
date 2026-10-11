@@ -12,71 +12,141 @@ contract does not).
 
 <!-- 内容归入下一版；此处留空以备下一批。 -->
 
-const fs = require("fs")
+## [0.7.5] - 2026-10-11
 
-const changelog = `## [0.7.4] - 2026-10-11
+判据（pre-1.0）：**patch**。没有新增命令、没改 CLI/TUI 形状与参数、没动目标矩阵。使用者可见的两处
+是"行为被修对"而非"新形状"：`gp_attach` 的能力闸从此问的是 attach，TUI 里被权限拒绝的 `gp_*` 调用
+不再画成还在跑。
+
+本批来自 `gp-harness-daily-20261010-batch`（`7a7695d`）——10-10 那轮两条审查泳道（定制面正确性 +
+发布/供应链）产出的九处修复。按内容判据逐条核 origin/main（不看分支名也不看提交信息）：其中**五处**
+已由并行的 0.7.3/0.7.4 批次以另一种实现落地（根 `script/publish.ts` 的死路、`no-foreign-publish`
+读者、`readCode`、corpus 形状、`verify-published` 读已安装 manifest），本版收的是主线仍缺的**六处**，
+外加一处 CHANGELOG 自身的损坏。
+
+### Fixed — 断言问的并不是它标签上那个问题
+
+- **`gp_attach` 的能力闸问的是 `"observe"`。** `requireCapability(tool, method, capability)` 收第三个
+  参数，于是调用点可以写成一个与方法无关的能力名，而它确实写错了：引擎 advertise `observe` 而不
+  advertise `attach` 时被放行（走到一个它没有的方法上），反过来 advertise `attach` 而不 `observe`
+  时被误拒——一个说"引擎不支持"的拒绝，是对一个支持的引擎编造的指控。`hello` 的 capabilities 就是
+  引擎方法表的线名（`FrameCodec.swift` 的 `EngineMethod.capabilityWireNames`＝全表去掉 `hello` 与
+  `shutdown`），所以第三参删除、闸按方法名自查，写错字符串从此过不了类型检查。`gp_diagnose` /
+  `gp_last_evidence` 明确不加闸并写明成本理由：daemon 只服务一条连接，多一次 `hello` 是有代价的，
+  而未知方法的回答本来就是引擎自己的 `{code, message, remedy}`。
+  固定点测试：`test/tool/glasspane-surface.test.ts` 新增一条双向用例（只列 observe → 拒绝且点名
+  "attach"；列出 attach → 放行）。
+- **被权限拒绝的 `gp_*` 调用渲染成"Performing action…"。** `state: "denied"` 既不给 `complete` 也不给
+  `failed`，于是 `InlineToolRow` 落到 in-flight 分支：对一次永远不会发生的调用说"还在跑"，工具名也
+  一起丢了——而这正是这条面承诺过的"引擎拒绝必须读得出是拒绝"。row→props 的映射抽成导出的纯函数
+  `glasspaneRowLook`（组件本身要 theme/sync provider，当不了断言面），拒绝与两种失败同样算已结束，
+  图标 ⊘、warning 色、可按开看理由。固定点测试两条：映射四态四张脸 + 渲染帧，并留旧形态的反例夹具
+  证明断言能红。
+- **e7 台账那条恒真谓词。** `check("gp_last_evidence replays the newest archive entry", withId.ok &&
+  !noId.ok ? false : true)` 在两次调用都失败时（当前 daemon 的真实形态：`GP_E_NO_EVIDENCE`）打印
+  PASS——标签主张"重放成功"，谓词从不检查 `withId.ok`。拆成两条各问各的断言。
+- **compaction 的维度覆盖声明与实际相反。** 头部注释写"没有计划的会话也会产出一行覆盖度"，而
+  `renderDimensionCoverage` 对那种情形返回 `undefined`；更实际的是生产路径从不填字段——
+  `collectEvidenceAnchors` 只转录 daemon 的帧与 M2 的回单，两份引擎 schema
+  （`decision-log-entry`、`evidence-pack`）里都没有 dimension，`run-plan` 那份倒是有 `dimensions`，
+  而 fork 还没接。所以那行覆盖度在产品里根本不出现，只有测试手工喂字段时才存在。改成按 as-shipped
+  写清，并加一条走真路径的固定点测试（真采集 → 块里没有 coverage 行、`plannedDimensions` 为
+  undefined），把"以后接上 run-plan 才改这段声明"钉在测试上——本轮的功能够这样判：闸能红才算数。
+- **`hook-liveness --offline` 把"本 lane 不读上游"打印成"upstream checkout absent"。** 那是关于机器的
+  断言，而并行 worktree 里那份检出通常是存在的（指回主树的符号链接）。降级输出不许写成测量结论：
+  现在说"这一 lane 不读上游，因此上游未被观测"，并明写那个路径没被打开过、不对它作任何断言。
+- **fork `release.yml` 的注释声称 binaries lane 覆盖五个原生目标、musl/baseline"声明了但没有
+  lane"。** `product.json` 的矩阵只有 `darwin-arm64`/`darwin-x64`，其余是被有意 drop 的（见
+  `platform.dropped`）——"没有 lane"是因为"没有目标"。注释改成陈述实测形状，否则下一个人会照注释
+  去补 runner，而补出来的就是分发面上的假承诺。
+
+### Fixed — 文档自己也得能被机器读
+
+- **CHANGELOG 的 0.7.4 条目里留着写它的那段 JS。** 那一版是通过 JS 模板字面量写进文件的，于是
+  `const fs = require("fs")`、`const changelog = \`` 和整段 `\`` 转义一起留在了 markdown 里——
+  条目内容完好，但它包在一个从没闭合的字符串字面量里。本轮删掉那两行、剥掉 0.7.4 段的转义，
+  并把这一条记在这里，是因为"发布说明本身是发布物"：split 仓把它当仓库门面供出去。
+
+### Tests / 闸
+
+- `packages/opencode` 四个 glasspane 文件 **82 pass / 0 fail**，`packages/tui` 的
+  `inline-tool-wrap-snapshot.test.tsx` **26 pass / 0 fail**（本批 +4 条用例）。
+- `installer-selftest.sh` 61 PASS / 0 FAIL；`kernel-pin --check`、`kernel-conformance`（14 条 fixture
+  对 0.1.5）、`surface-semantics` 0 命中/18 文件、`brand-surface` 0 命中、`product-surface` 与
+  `hook-liveness` 见 SYNCLOG 本节的实测数。
+- 尺子自身的三条反向路径本轮重验（`hook-liveness` 是本批改过的尺子）：金样伪写 `permission.ask=live`
+  → `--check` 具名红 exit 1（第一次尝试的 perl 没落地，那条控制作废后重做才算）；删金样 → exit 2 并
+  指名 `--record`；藏参照检出 → `--check` exit 2 给出 `--offline` 出路，`--offline` exit 0 且明说未观测。
+- **一条没清掉的计时断言**：`glasspane-surface.test.ts` 的 "an over-sized engine frame is refused
+  in-band" 在同一棵树上两次红、两次绿——红时是 30s 内没写完那 4 MiB 帧，`Daemon.call(…, 30_000)` 先到期，
+  报成 `GP_E_ENGINE_TIMEOUT` 而非期望的 `GP_E_PAYLOAD_TOO_LARGE`；绿的那次单条就花了 26.96s，只剩 3 秒余量。
+  判据不改、超时不加（加超时只会让计时器照样先到），于是它按本仓口径归成**不稳定对照**并进未修清单，
+  而不是写成"复跑证明是假红"。
+
+
+## [0.7.4] - 2026-10-11
 
 判据（pre-1.0）：**patch**。没有新增命令、没改 CLI/TUI 形状、没动参数与目标矩阵。唯一的使用者可见
 变化是**兜底安装通道变得更严格**：清单取不到时它现在拒绝安装并报告 HTTP 状态，而不是"当作这个版本
 没发清单"然后装上一个没有任何完整性校验的二进制——先前拿到"unverified install + 一个具体但错误的
 解释"的那类主机，这次会拿到一次失败与一条出路。这是修掉的行为，不是新形状。
 
-这一批是**收上一轮没收口的活**：\`gp-harness-orphan-20261010\`（\`a054fdc\`）保住了 10-10 那轮被
-ENOSPC 杀掉时留在未提交状态的五个文件。按内容判据逐条核（\`git cherry\` + 逐文件比对，不看分支名
-也不看提交信息）：\`install.sh\` 里"签名抓取跟随重定向"那半**已经在 main 上**（\`b9409d7\` 落过），
+这一批是**收上一轮没收口的活**：`gp-harness-orphan-20261010`（`a054fdc`）保住了 10-10 那轮被
+ENOSPC 杀掉时留在未提交状态的五个文件。按内容判据逐条核（`git cherry` + 逐文件比对，不看分支名
+也不看提交信息）：`install.sh` 里"签名抓取跟随重定向"那半**已经在 main 上**（`b9409d7` 落过），
 本轮不重复；其余四条真没落地，全部并回并各自补了双向控制。
 
 ### Fixed — 三条"绿着但从未能红"的发布/安装面
 
-- **\`verify-published.ts\` 的 os/cpu 闸拿 \`product.json\` 跟自己比。** 它断言的是
-  \`product.platform.os.includes("darwin")\`，即产品的声明与声明本身比较，且**从没读过 \`cpu\`**——
+- **`verify-published.ts` 的 os/cpu 闸拿 `product.json` 跟自己比。** 它断言的是
+  `product.platform.os.includes("darwin")`，即产品的声明与声明本身比较，且**从没读过 `cpu`**——
   而"wrapper 的 os/cpu 字段让 npm 在非 macOS 上直接拒绝安装"正是这个产品的分发裁决。发出去的包
-  少了 \`os\` 字段也照样报 ok。现在读的是**装进临时前缀的那份 package.json** 的 \`os\`/\`cpu\`/\`version\`。
-  反向控制实测：把 \`product.json\` 的 \`platform.arch\` 改成 \`["arm64"]\`（真发布物是
-  \`["arm64","x64"]\`）→ \`FAIL the installed package's os/cpu/version gates … cpu is
-  ["arm64","x64"], product declares ["arm64"]\`、exit 1；还原按 sha256 核回。
-- **\`scripts/install.sh\` 把传输失败化妆成"这个版本没发清单"。** 兜底通道求 \`SHA256SUMS.txt\` 用的是
-  \`curl -fsSL\` + \`if ! …\`，于是"未发布""被拦截/重写""答了别的东西"三种情况共用一个出口，而该出口是
+  少了 `os` 字段也照样报 ok。现在读的是**装进临时前缀的那份 package.json** 的 `os`/`cpu`/`version`。
+  反向控制实测：把 `product.json` 的 `platform.arch` 改成 `["arm64"]`（真发布物是
+  `["arm64","x64"]`）→ `FAIL the installed package's os/cpu/version gates … cpu is
+  ["arm64","x64"], product declares ["arm64"]`、exit 1；还原按 sha256 核回。
+- **`scripts/install.sh` 把传输失败化妆成"这个版本没发清单"。** 兜底通道求 `SHA256SUMS.txt` 用的是
+  `curl -fsSL` + `if ! …`，于是"未发布""被拦截/重写""答了别的东西"三种情况共用一个出口，而该出口是
   *警告 + 继续安装*。在本机这种由本地根重签 TLS 的主机上（本产品维护机就是），一次被挡的清单抓取
   换来的是**完全没做完整性校验的安装 + 一句具体而假的解释**。现在只有 404 算"政策缺口"（照旧如实
-  标注并继续），其余一律 exit 1 并报出状态码与出路。反向控制：\`installer-selftest.sh\` 跑在**改动前**
+  标注并继续），其余一律 exit 1 并报出状态码与出路。反向控制：`installer-selftest.sh` 跑在**改动前**
   的 install.sh 上 → 5 条具名红（含 "it did say: no SHA256SUMS.txt published"、
   "nothing is installed on that path — it did say: [OK] installed via"），跑在改动后 → 全过。
-- **fork 根的 \`script/publish.ts\` 是一个可用的上游发布编排。** 它会 rewrite 全树 version、
-  \`npm publish\` \`@opencode-ai/sdk\` / \`-plugin\` / \`-ui\`（三个不属于本产品的包、别人的 scope），
-  再 \`git push --force-with-lease --no-verify\` 推 tag、\`git push HEAD:dev --no-verify\`、
-  \`gh release edit --draft=false\`。纪律 5 说的是"不往我们不拥有的基础设施推"，而这个入口距产品
-  发布脚本只差一个 \`cd\`，且**没有任何闸看着它**。现在它是一具拒绝体：打印原因与真路径后
-  \`exit 2\`（实测退出码 2）；文件保留而非删除，是为了让未来的上游同步落在一个会说明理由的拒绝上，
-  而不是悄悄重新拿到一个往别人名字下推东西的脚本。读者是 \`product-surface\` 新增的
-  \`no-foreign-publish\` 三条规则。
+- **fork 根的 `script/publish.ts` 是一个可用的上游发布编排。** 它会 rewrite 全树 version、
+  `npm publish` `@opencode-ai/sdk` / `-plugin` / `-ui`（三个不属于本产品的包、别人的 scope），
+  再 `git push --force-with-lease --no-verify` 推 tag、`git push HEAD:dev --no-verify`、
+  `gh release edit --draft=false`。纪律 5 说的是"不往我们不拥有的基础设施推"，而这个入口距产品
+  发布脚本只差一个 `cd`，且**没有任何闸看着它**。现在它是一具拒绝体：打印原因与真路径后
+  `exit 2`（实测退出码 2）；文件保留而非删除，是为了让未来的上游同步落在一个会说明理由的拒绝上，
+  而不是悄悄重新拿到一个往别人名字下推东西的脚本。读者是 `product-surface` 新增的
+  `no-foreign-publish` 三条规则。
 
 ### Fixed — 尺子自己的两处假绿
 
-- **规则不再被注释顶替**：\`product-surface.mjs\` 的产品同一性规则此前用 \`read()\`（不剥注释）——
-  把 \`postinstall.mjs\` 里那行平台包模板**改成注释**，规则照样绿，因为字符串还在文件里。现在
-  这类规则统一走 \`readCode()\`（与 \`no-upstream-registries\` 早就在用的剥注释同一条路）。反向
-  控制实测：改注释 → \`postinstall-identity\` 具名红、exit 1；还原 → 绿。
-- **\`kernel-provenance\` 的 \`corpus.length > 8\` 是魔法数**：它自己那句话写着"the published package
+- **规则不再被注释顶替**：`product-surface.mjs` 的产品同一性规则此前用 `read()`（不剥注释）——
+  把 `postinstall.mjs` 里那行平台包模板**改成注释**，规则照样绿，因为字符串还在文件里。现在
+  这类规则统一走 `readCode()`（与 `no-upstream-registries` 早就在用的剥注释同一条路）。反向
+  控制实测：改注释 → `postinstall-identity` 具名红、exit 1；还原 → 绿。
+- **`kernel-provenance` 的 `corpus.length > 8` 是魔法数**：它自己那句话写着"the published package
   ships 14"，而 pin 当时记 15、0.1.4 发 17、0.1.5 发 **24**——每次 bump 都让这句话变成谎，而少掉
   八个契约文件仍然绿。改成形状断言：每条必须点名文件并带 64 位十六进制 sha256，且同一文件不得
   出现两次（否则其中一条哈希永远读不到）。断言数 **94 → 98**。
 
 ### Changed — 内核 0.1.5 与出处
 
-\`packages/opencode/package.json\` 与 \`contracts/kernel-pin.json\` 已由并行批次推到 **0.1.5**，而这棵
-树的 \`node_modules\` 还停在 0.1.4——\`kernel-pin --check\` 正确地报了
-"installed 0.1.4 but the manifest pins 0.1.5"。按文档路径 \`bun install\` 之后：24 个契约文件逐条
-sha256 对得上，行为闸 **14 条 fixture 全答对**，且 **\`--impl\` 直接指 canonical 检出就能跑**——
-\`iterate-skill\` 的 \`main\` 已带 0.1.5 的全部 15 个模块，与 \`kernel/npm-canonical\` 的 \`kernel/src\`
-逐字节同内容。上一轮汇报里那条"已发布产物的源码不在清单坐标（\`canonical.branch: main\`）上、按它
-复现不出来"的 canonical 侧问题，本轮实测已不成立（分支被合了），文档相应改掉；\`--impl\` 的缺模块
+`packages/opencode/package.json` 与 `contracts/kernel-pin.json` 已由并行批次推到 **0.1.5**，而这棵
+树的 `node_modules` 还停在 0.1.4——`kernel-pin --check` 正确地报了
+"installed 0.1.4 but the manifest pins 0.1.5"。按文档路径 `bun install` 之后：24 个契约文件逐条
+sha256 对得上，行为闸 **14 条 fixture 全答对**，且 **`--impl` 直接指 canonical 检出就能跑**——
+`iterate-skill` 的 `main` 已带 0.1.5 的全部 15 个模块，与 `kernel/npm-canonical` 的 `kernel/src`
+逐字节同内容。上一轮汇报里那条"已发布产物的源码不在清单坐标（`canonical.branch: main`）上、按它
+复现不出来"的 canonical 侧问题，本轮实测已不成立（分支被合了），文档相应改掉；`--impl` 的缺模块
 报告（exit 3）保留，因为这种分叉在两个月里发生过三次（0.1.2 / 0.1.3 / 0.1.4）。
 
 ### 记录
 
 血缘 9,619 → **9,622**（+3）：新增字样全部落在"写下被改掉的那个名字"的位置——新的拒绝体点名它
-拒绝发布的那三个上游包。按既有先例（9616/9617/9618）\`--record\` 并在金样 \`source\`/\`lineageNote\`
+拒绝发布的那三个上游包。按既有先例（9616/9617/9618）`--record` 并在金样 `source`/`lineageNote`
 写明；反证仍成立（再新增一处即红）。
 
 ## [0.7.3] - 2026-10-11

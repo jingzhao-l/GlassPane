@@ -2088,7 +2088,7 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "37f392ccfbb180329ebe42fb75bf754d79393416"
+      "forkHash": "1828ed68727da06d7cb68f417087ee6a68aba48d"
     },
     {
       "file": "bunfig.toml",
@@ -2658,7 +2658,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "cd6b1c221fa77b4e8d10ca348b4a2cb8d40b9eaf"
+      "forkHash": "5ac2c50a94d8d06485c43d074af5b6fce1765d2e"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -3148,7 +3148,7 @@
     {
       "file": "packages/tui/src/routes/session/index.tsx",
       "upstreamHash": "2b54f21671b3889e6752175b1c2b0f36d189d3b9",
-      "forkHash": "88f76598f574a5acf885446785ccba50fbd28d7e"
+      "forkHash": "5dbe3af94b7f860cf3fb2567132d2e0dfa3e567e"
     },
     {
       "file": "packages/tui/src/theme/assets/aura.json",
@@ -3333,7 +3333,7 @@
     {
       "file": "packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx",
       "upstreamHash": "6da90633ca421fa085fa1c69ffbd5c0c8a3dc0fa",
-      "forkHash": "463aa0800bcbbfedbb5b8f906749634e20739715"
+      "forkHash": "08ff57f146042379894abf0b37748e85f1f2e6e6"
     },
     {
       "file": "packages/tui/test/fixture/fixture.ts",

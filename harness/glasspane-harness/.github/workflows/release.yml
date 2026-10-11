@@ -20,9 +20,12 @@ name: Release
 # enabled. No NPM_TOKEN is configured here on purpose: an empty token written by
 # setup-node would defeat OIDC.
 #
-# First lane covers the five native targets (linux x64/arm64, darwin x64/arm64,
-# win32 x64). The musl and baseline targets are declared in product.json but have
-# no CI lane yet — an honest gap, recorded in SYNCLOG.md, not a silent omission.
+# The binaries lane builds the targets `product.json` declares — today `darwin-arm64`
+# and `darwin-x64`, one runner each. Linux, Windows, musl and `darwin-x64-baseline` are
+# not "declared with no lane": they were dropped from `platformTargets` by the macOS-only
+# decision (see product.json `platform.dropped` and `platformTargetsNote`), so there is
+# nothing here to add a lane for. Re-declaring a target here without a runner would be the
+# silent omission this note claims not to have.
 
 on:
   push:

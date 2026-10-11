@@ -16,6 +16,7 @@ import {
   alwaysSeparate,
   toolDisplay,
   glasspaneRow,
+  glasspaneRowLook,
 } from "../../../src/routes/session"
 
 let testSetup: Awaited<ReturnType<typeof testRender>> | undefined
@@ -210,6 +211,26 @@ function FailedCompleteToolFixture() {
   )
 }
 
+function DeniedGlassPaneToolFixture() {
+  // The props the session row passes for `state: "denied"`: finished, not failed, not
+  // success — with the denial's own reason available on click.
+  return (
+    <InlineToolRow icon="⊘" complete={true} denied={true} pending="Performing action…" error="user rejected permission">
+      gp_act
+    </InlineToolRow>
+  )
+}
+
+function InFlightGlassPaneToolFixture() {
+  // The look a denial used to get: `complete` false, so InlineToolRow paints the
+  // unfinished tilde line and drops the tool entirely. Kept as the counter-example that
+  // proves the assertions below can fail — a fixture only the fixed props satisfy is not
+  // evidence, and this row is the one place the user reads whether the engine said no.
+  return (
+    <InlineToolRow icon="◈" complete={false} denied={true} pending="Performing action…">gp_act</InlineToolRow>
+  )
+}
+
 async function renderFrame(component: () => JSX.Element, options: { width: number; height: number }) {
   testSetup = await testRender(component, options)
   await testSetup.renderOnce()
@@ -358,6 +379,44 @@ describe("TUI inline tool wrapping", () => {
     const frame = await renderFrame(() => <FailedCompleteToolFixture />, { width: 72, height: 3 })
     expect(frame).toContain("Read src/index.ts")
     expect(frame).not.toContain("Read failed")
+  })
+
+  test("a denied call is drawn as finished history, not as a call still running", async () => {
+    const denied = await renderFrame(() => <DeniedGlassPaneToolFixture />, { width: 72, height: 3 })
+    expect(denied).toContain("gp_act")
+    expect(denied).not.toContain("Performing action")
+
+    const inFlight = await renderFrame(() => <InFlightGlassPaneToolFixture />, { width: 72, height: 3 })
+    expect(inFlight).toContain("Performing action")
+    expect(inFlight).not.toContain("gp_act")
+  })
+
+  test("the row wiring gives a denial the same finishedness as a failure", () => {
+    // `glasspaneRow` was always right about the state; the component's mapping of that state
+    // to `InlineToolRow`'s props is what made a refusal look like a call still in flight.
+    // This drives the exported mapping, so reversing `complete` or the icon goes red here —
+    // the fixture test above only pins what `InlineToolRow` does with props it is handed.
+    const look = (input: Parameters<typeof glasspaneRow>[0]) => glasspaneRowLook(glasspaneRow(input), input.tool)
+    const denied = look({ tool: "gp_act", status: "error", error: "user rejected permission", metadata: {} })
+    expect(denied.denied).toBe(true)
+    expect(denied.failed).toBe(false)
+    expect(denied.complete).toBe(true)
+    expect(denied.spinner).toBe(false)
+    expect(denied.icon).toBe("⊘")
+    expect(denied.color).toBe("warning")
+    expect(denied.label).toBe("gp_act")
+
+    const four = [
+      look({ tool: "gp_act", status: "running", metadata: {} }),
+      look({ tool: "gp_act", status: "completed", metadata: { ok: true, method: "act", operationId: "op_1" } }),
+      look({ tool: "gp_act", status: "error", error: "socket closed", metadata: {} }),
+      denied,
+    ]
+    expect(four[0].spinner).toBe(true)
+    expect(four[0].complete).toBe(false)
+    expect(four[1].complete).toBe(true)
+    expect(four[2].failed).toBe(true)
+    expect(new Set(four.map((l) => `${l.icon}|${l.failed}|${l.denied}|${l.noVerdict}|${l.complete}|${l.spinner}|${l.color}`)).size).toBe(4)
   })
 
   test("filters malformed nested tool wire data", () => {

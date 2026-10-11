@@ -2,6 +2,62 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-11（第三次会话）· 每日批次（harness 线）：并回 `7a7695d` 的六处，发 0.7.5
+
+**开工态**：主树开工时 HEAD `5f0fb54`（== origin/main）、整树干净；开工约一小时后并行会话把 main 推到
+`2e83542` 并继续写入，**我第一轮闸读数因此被它的未提交编辑污染**（`kernel-conformance.mjs`
+396→441、`publish.ts` authored 198→240 都是它手上的活），随后改用隔离工作树
+`.worktrees/gp-harness-daily-20261010`（`.external/opencode` 做成指回主树的符号链接，不各存 223 MB）。
+中途该工作树被并行会话 `git switch` 到 `gp-harness-orphan-20261010`（`a054fdc`），我那两笔
+`scripts/install.sh` / `installer-selftest.sh` 被它的 wip 提交收走。收口基准按新提示词第 2 条重取：
+`git fetch --prune` 后按**内容**判据逐条核 origin/main（`c3dbfee`，kernel 已到 0.1.5、0.7.4 已发），
+九处里**五处主线已有另一种实现**（根 `script/publish.ts` 死路、`no-foreign-publish`、`readCode`、
+corpus 形状、`verify-published` 读已装 manifest）——不重复、不覆盖，只并主线缺的六处。
+
+**前置**：bun 1.3.14 == `packageManager` 钉值；参照检出 `describe` == pin `v1.18.32`、`fsck` 无错、
+工作树干净；preflight 不带 `NODE_EXTRA_CA_CERTS=/var/tmp/glasspane-harness/ca-bundle.pem`（163 张）
+时 exit 1、带它 exit 0，两条方向都实测；全程未使用任何跳过证书校验的开关。npm live 实测 0.7.4，
+split 仓 main == `e8c5e1e`、tag `v0.7.4` 已在——发布通道此刻空闲，本轮才动它。
+
+**改动面数字**（`fork-diff --record` 后）：对 `v1.18.32` 为 **4665 identical / 262 edited / 82 added /
+1705 deleted**（上一记 4666/261/82/1705；+1 edited 是 `packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx`，
+本轮第一次改这个上游测试文件）。`tool-surface` 面 B **6623 → 6699（+76，16.57%）**，逐文件归因只有四处、
+全是我本轮的行：`packages/tui/src/routes/session/index.tsx` 210→252（+42）、
+`packages/opencode/src/tool/glasspane/index.ts` 304→318（+14）、
+`packages/opencode/script/glasspane-e7-ledger.ts` 142→155（+13）、
+`packages/opencode/src/plugin/glasspane-compaction.ts` 339→346（+7）。面 A **8975 行未变**，其比例
+22.25%→22.20% 只因分母动（engine 24734→24749 / 62 文件，是主仓 Swift 那侧的漂移，不是改进）；
+测试排除项 28 文件 / 2027 行；血缘 9623 → **9623 未变**（0 命中，覆盖率 3303 未变，故未重记）。
+
+**跑了哪些闸**：`product-surface` **98 条一致 / 0 问题**（版本线两处 0.7.4→0.7.5 后仍一致）；
+`surface-semantics` 0 命中 / 18 文件；`brand-surface` 0 命中；`hook-liveness` 21 钩子对齐 pin 无漂移；
+`kernel-pin --check` iterate-kernel@0.1.5 + 24 契约文件逐条 sha256 对；`kernel-conformance` 14 条 fixture
+全对；`installer-selftest.sh` 61 PASS / 0 FAIL；固定点测试 `packages/opencode` 四文件 **90 条**、
+`packages/tui` **26 pass / 0 fail**（83 expect，107s——负载下）；`typecheck` opencode / tui / plugin 绿。
+主仓公共闸 `check-workflows --self-test` 6/6 各证能红、`check-workflows` 5 个 workflow 干净、
+`check-doc-links` 24 文档 / 225 内链 OK。
+
+**一条负载敏感的计时断言，本轮判为"不稳定对照"，没清掉**：`glasspane-surface.test.ts` 的
+"an over-sized engine frame is refused in-band" 在同一棵树上跑了四次：**两次红**（30s 内没写完那 4 MiB
+帧，`Daemon.call(…, 30_000)` 先到期，报成 `GP_E_ENGINE_TIMEOUT` 而不是 `GP_E_PAYLOAD_TOO_LARGE`）、
+**两次绿**（其中一次该用例单独就花 26.96s，距 30s 只剩 3 秒余量）。判据没改、超时没加——加超时只会让
+计时器照样先到，改判据等于把它要问的问题扔掉。按本仓的口径（只在负载下红的计时断言＝坏对照），它的
+身份是不稳定对照，进未修清单；把它写成"复跑证明是假红"就是本仓最常见的那种自我原谅。
+
+**尺子自身的反向路径**（本轮改过的尺子只有 `hook-liveness`，重验三条，不沿用旧结论）：金样伪写
+`permission.ask` 为 live → `--check` exit 1 并点名 `dead-hook set changed: golden=[] now=[permission.ask]`
+＋2 条 drift（**第一次尝试的 perl 没落地，那条控制当场作废**——`grep` 证明 dead 计数仍是 1，重做后才算）；
+删金样 → exit 2 指名 `--record`；藏参照检出 → `--check` exit 2 并给出 `--offline` 出路、`--offline` exit 0
+且明说"本 lane 不读上游，那个路径没被打开过"。撤销一律用自建备份 + sha256 核回，不用
+`git checkout`/`stash`。`mut/` 下留着每一步的前后日志。
+
+**没跑 / 没做的，照实写**：本轮**没跑**整包构建（>10 分钟，且闸的形状是"按包 typecheck + 固定点 +
+六把尺子"）；`kernel-conformance --impl` 未指 canonical 检出（本轮没读 `/Volumes/Eng-Dev/iterate-skill`）；
+真 TUI 会话观感、真模型轮次、`gp_*` 对活 daemon 的实跑仍**未观测**（daemon 在跑，但本轮未驱动任何
+`gp_*` 调用）。功能缺口那条继续挂账：引擎方法表 11 个可使能力里 fork 只发了 6 个
+（缺 `assert_element`/`audit_ui`/`capture_view`/`snapshot`/`restore`），而 `gp_observe` 的文案正叫模型
+"别用眼睛比树"——新增工具属产品面变化（minor），本轮是 patch，不在同号相撞的窗口里做。
+
 ## 2026-10-11（第二次会话）· 收上一轮的遗留：并回 `gp-harness-orphan-20261010` 未落地四条，发 0.7.4
 
 **开工自检按新提示词第 2 条做**：`git fetch --prune` 后拿内容判据（`git cherry` + 逐文件比对，不
