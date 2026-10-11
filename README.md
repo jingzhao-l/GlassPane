@@ -194,8 +194,10 @@ curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.s
 # 2) Through npm (bootstraps its own clone of the pinned tag)
 npx glasspane-install
 
-# 3) From a checkout you manage (v1.1.1 is the tag install.sh currently pins)
-git clone --branch v1.1.1 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
+# 3) From a checkout you manage. `install.sh` pins one release tag (its `GLASSPANE_RELEASE` default,
+#    rewritten by `scripts/set-version.mjs` on every release) — clone that tag, not `main`, unless you
+#    mean to install an unreleased tree. The number below is this release's; verify it against install.sh.
+git clone --branch v1.11.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
 
 `GLASSPANE_REF=<tag>` selects another release; `GLASSPANE_REF=main` tracks the trunk, which is not a

@@ -95,6 +95,13 @@ export async function runCheck({
   const roots = writableRoots(stateRoot)
   const previous = loadState(stateRoot).state
   const currentAutoApply = autoApply ?? previous.autoApply
+  // A scheduled run has no person behind it, so it has no consents — even if a caller
+  // handed some over. `cli.js` refuses the `--auto --consent` pair at the boundary; this
+  // is the same rule where an importer (the installer, a test, a future entry point)
+  // bypasses that boundary. Before this, `trigger` was destructured and never read: gate
+  // 8's "an automatic run stops here" (lib/signature.js) and this file's own header were
+  // both unpaid, and `check --auto --consent unsigned-release` staged an unproven release.
+  const humanConsents = trigger === 'auto' ? [] : consents
   const base = safeGate(() => resolveBase({ ...env }), { base: DEFAULT_BASE, origin: new URL(DEFAULT_BASE).origin })
 
   const finish = (patch, historyEntry) => {
@@ -176,7 +183,7 @@ export async function runCheck({
   }
 
   // Gates 1c + 2: strictly newer, and the consent policy on top of that.
-  const decision = decideUpdate({ currentVersion, tag: release.tag_name, autoApply: currentAutoApply, consents })
+  const decision = decideUpdate({ currentVersion, tag: release.tag_name, autoApply: currentAutoApply, consents: humanConsents })
   if (decision.status === 'up-to-date') {
     return finish(
       { status: 'up-to-date', code: null, current: currentVersion, latest: candidate.version, lastCheckAt: now.toISOString(), staged: null, message: decision.reason ?? null },
@@ -234,7 +241,7 @@ export async function runCheck({
       signature: signature.outcome,
       signedAsset: signature.signedAsset,
       keyFingerprint: signature.keyFingerprint,
-      consented: signature.outcome !== 'verified' && consents.includes(UNSIGNED_CONSENT_KIND),
+      consented: signature.outcome !== 'verified' && humanConsents.includes(UNSIGNED_CONSENT_KIND),
       at: now.toISOString(),
     }
     if (signature.outcome !== 'verified') {
@@ -243,9 +250,14 @@ export async function runCheck({
       // offered `--consent unsigned-release`. The two "the proof is simply absent"
       // states are the ones a person may accept, and only a person: the scheduled
       // run never carries the flag.
-      const humanAccepted = consents.includes(UNSIGNED_CONSENT_KIND)
+      const humanAccepted = humanConsents.includes(UNSIGNED_CONSENT_KIND)
       if (signature.outcome === 'invalid' || !humanAccepted) {
-        throw new UpdaterError(signature.code, signature.message)
+        // The scheduled run that was *offered* a consent has to be told its offer was not
+        // used, otherwise the state file reads like nobody was asked.
+        const scheduled = trigger === 'auto' && consents.length > 0
+          ? ' This run came in as the scheduled run (--auto), so the consent given on its command line was not used: a schedule cannot accept on a person\'s behalf.'
+          : ''
+        throw new UpdaterError(signature.code, `${signature.message}${scheduled}`)
       }
     }
 

@@ -174,6 +174,42 @@ public final class DaemonProbe: @unchecked Sendable {
         }
     }
 
+    /// unlink 之前必须证明这个名字后面**是个 socket**。
+    ///
+    /// `isNoListener` 把 ENOTSOCK 也算作"无监听者"——那是探针该说的（"这儿没有 daemon 在应答"），
+    /// 却不是删除的依据：macOS 上 `connect()` 对普通文件、目录、FIFO 与悬空符号链接一律回
+    /// ENOTSOCK(38)（实测），于是 `.bind` 分支会去 `unlink()` 一个从来不是 socket 的文件。
+    /// 探针回答不了"这个名字是谁的"，`lstat` 能。名字已消失算可清（没有东西要删，bind 会自己
+    /// 重建）；其余一律不可清。残余竞态如实记下：lstat 与 unlink 之间不是原子的，本机能做的是
+    /// "不在没看过的东西上赌"，不是"抢到零窗口"。
+    public static func nameIsClearableSocketName(_ path: String) -> Bool {
+        var info = stat()
+        guard lstat(path, &info) == 0 else {
+            return errno == ENOENT
+        }
+        return (info.st_mode & S_IFMT) == S_IFSOCK
+    }
+
+    /// 名字读出来不是 socket 时，给人和 agent 都能照做的一句：谁占的、daemon 没动它、下一步做什么。
+    public static func nonSocketNameDescription(_ path: String) -> String {
+        var info = stat()
+        let kind: String
+        if lstat(path, &info) == 0 {
+            switch info.st_mode & S_IFMT {
+            case S_IFDIR: kind = "a directory"
+            case S_IFLNK: kind = "a symlink"
+            case S_IFIFO: kind = "a FIFO"
+            case S_IFREG: kind = "a regular file"
+            default: kind = "not a socket (mode 0o\(String(info.st_mode & S_IFMT, radix: 8)))"
+            }
+        } else {
+            kind = "unreadable"
+        }
+        return "\(path) is \(kind), not a socket — the daemon refused to delete it. "
+            + "Inspect it with `ls -l \(path)`; move it aside yourself only if it is yours, "
+            + "or point the daemon at another name with `--socket-path <path>` (or `--state-dir <root>`)."
+    }
+
     /// 解析 `{"result":{...},"id":0}` 形态的 hello 响应（纯逻辑，独立可测）。
     ///
     /// 与既有口径一致，解析层只认字段形状（`engine` 名不在此层硬校验，见

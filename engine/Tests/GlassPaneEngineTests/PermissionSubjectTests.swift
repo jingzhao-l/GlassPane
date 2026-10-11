@@ -856,23 +856,28 @@ final class PermissionSubjectTests: XCTestCase {
                       "有主的名字不许被 unlink——这正是 A-18 脑裂的成因")
     }
 
-    func testProbeStartClearsDemonstrablyUnownedName() throws {
-        // 残留：名字处是个普通文件（bind 必 EADDRINUSE）。判定为 noListener 时必须
-        // 清掉残留并成功 bind——A-18 里合法的另一半：无主的名字本来就该清。
-        // connect 对普通文件的 errno 有平台歧义（ECONNREFUSED/ENOTSOCK 之外的
-        // 分类风险），所以判定注入而非真探；真探侧的三态本身已由
-        // HumanInterventionAuditTests 钉住。
-        let path = try makeProbeTestPath("stale")
+    func testProbeStartRefusesToClearANonSocketName() throws {
+        // 名字处是个普通文件。从前这条用例断言的正好相反："connect 对普通文件的 errno 有平台
+        // 歧义，所以判定注入而非真探"，于是它把"探针说没人应答"当成"这文件可以删"，测的是
+        // 清掉残留并成功 bind——而 macOS 实测 `connect()` 对普通文件回 ENOTSOCK，`isNoListener`
+        // 认它，真跑起来就会静默 `unlink()` 掉别人放在那儿的文件（SocketServer 文件头承诺的是
+        // "只在确实证明无主时才移除"）。现在删除前必须 `lstat` 看见 S_IFSOCK。
+        let path = try makeProbeTestPath("nons-name")
         let listenerDir = (path as NSString).deletingLastPathComponent
         defer { try? FileManager.default.removeItem(atPath: listenerDir) }
         FileManager.default.createFile(atPath: path, contents: Data())
         let server = ProbeSocketServer(
             socketPath: path, inbox: ProbeInbox(), log: EngineLog(quiet: true),
-            livenessProbe: { _ in .noListener(reason: "connect: connection refused") }
+            livenessProbe: { _ in .noListener(reason: "connect: not a socket") }
         )
-        XCTAssertNoThrow(try server.start())
-        XCTAssertTrue(FileManager.default.fileExists(atPath: path), "重绑后名字归新监听者")
-        server.stop()
+        XCTAssertThrowsError(try server.start()) { error in
+            guard case ProbeServerError.nameOccupied(let detail) = error else {
+                return XCTFail("普通文件占名必须报 nameOccupied，实得 \(error)")
+            }
+            XCTAssertTrue(detail.contains("regular file"), "句子要说清那是什么：\(detail)")
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path),
+                      "不是 socket 的名字一律不许删——这是本条修复的全部内容")
     }
 
     func testProbeForceFlagPreemptsWithoutConsultingTheProbe() throws {

@@ -208,6 +208,17 @@ public final class ApprovalGate {
         reason: String
     ) -> ApprovalRecord? {
         guard reason.count <= Self.reasonMaxLength else { return nil }
+        // 读失败的台账不是"空台账"。这时候追加会以一条空链重新锚定 `prevHash`，
+        // `persist()` 再把内存里的样子整个覆写回文件——那条读不出来的链就此被销毁；
+        // 而 `--approval-verify` 读的是覆写后的文件，形状完好，于是它给一份刚被本次
+        // 运行截断过的审计链判"通过"。同 `ProjectRegistry.requireWritable` 的口径：
+        // 读不出来就拒绝写，而不是从"没有"重新记起。
+        if loadFailed, let path {
+            reportPersistenceFailure(
+                "approval ledger at \(path) could not be read when the daemon started, so nothing was appended: a chain that cannot be read must not be re-anchored from an empty in-memory view (the old file is left untouched)"
+            )
+            return nil
+        }
         let timestamp = isoString(clock())
         let prevHash = tailHash()
         let record = ApprovalRecord(

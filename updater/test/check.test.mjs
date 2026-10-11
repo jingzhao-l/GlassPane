@@ -186,7 +186,10 @@ assert.equal(LOCAL.ok, true, 'the fixture machine must be internally consistent 
  * else on this path — the fetches, the digest, the unpack, the guard script —
  * stays real.
  */
-function check({ machine, server, consents = [], env = {}, trigger = 'auto', local = LOCAL, gpg = fakeGpg() }) {
+function check({ machine, server, consents = [], env = {}, trigger = 'manual', local = LOCAL, gpg = fakeGpg() }) {
+  // 这个夹具的默认从前是 `trigger:'auto'`，而带着 `consents` 的几条用例说的是"一个人点了头"——
+  // 于是它一边声称自己在测定时跑，一边替定时跑背书。`trigger` 真正接上之后（见
+  // 下面 `--auto` 那两条），默认必须回到"人"，否则每一个 consent 用例都会被自己的标签否掉。
   return runCheck({
     stateRoot: machine.dir,
     env: { GLASSPANE_UPDATE_BASE: server.origin, ...env },
@@ -806,6 +809,40 @@ test('a major that is also unsigned refuses for both reasons, and the authorship
     const state = loadState(machine.dir).state
     assert.equal(state.authorship.signature, 'unsigned-release')
     assert.equal(state.authorship.version, '2.0.0')
+  } finally {
+    await src.server.close()
+    machine.cleanup()
+  }
+})
+
+test('定时跑带着人的同意来也不放行：--auto 就不该有资格替人点头', async () => {
+  // 这条是 `trigger` 真正接进 gate 8 之后才存在的闸。从前 `runCheck` 解构了 `trigger` 却从不读它，
+  // 于是 `check --auto --consent unsigned-release` 会把一份没有作者证明的发布暂存下来并在状态里
+  // 记 `consented:true`——而 `cli.js` 的 USAGE 写着 "an unsigned release all refuse"，
+  // `lib/signature.js` 写着 "An automatic run stops here"。两张空头支票。
+  // 反向破坏：把 `lib/check.js` 的 `humanConsents` 改回 `consents`，本条与
+  // `the same unsigned release stages when a person consents…` 的另一半（人工那一侧）立刻变红。
+  const machine = makeMachine('auto-cannot-consent')
+  const src = await startSource({ version: '1.4.1', signature: null })
+  try {
+    const scheduled = await check({
+      machine,
+      server: src.server,
+      consents: ['unsigned-release'],
+      trigger: 'auto',
+    })
+    assert.equal(scheduled.ok, false, '定时跑不得因为 consent 而放行')
+    assert.equal(scheduled.code, CODES.releaseUnsigned)
+    assert.equal(scheduled.staged, null, '拒绝之后状态文件里不能有可装的暂存')
+    assert.match(scheduled.message, /--auto/, '句子要说明是"这一跑不是人"挡住了，而不是没人被问过')
+    assert.equal(loadState(machine.dir).state.authorship.consented, false,
+      'consented 不得被定时跑的命令行点亮')
+
+    // 同一份发布、同一个 consent，人跑的那一次仍然放行——否则这条闸只是永远拒绝。
+    const person = await check({ machine, server: src.server, consents: ['unsigned-release'] })
+    assert.equal(person.status, 'staged', person.message)
+    assert.equal(person.staged.version, '1.4.1')
+    assert.equal(loadState(machine.dir).state.authorship.consented, true)
   } finally {
     await src.server.close()
     machine.cleanup()
