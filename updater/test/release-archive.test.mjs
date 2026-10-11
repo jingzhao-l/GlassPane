@@ -39,6 +39,7 @@ import {
   REQUIRED_BUILD_OUTPUTS,
   trackedEntries,
   verifyArchive,
+  assertBundleShape,
 } from '../../scripts/make-release-archive.mjs'
 import { extractTarGz, packTarGz, readTarGz } from '../lib/tar.js'
 import { VERSION_SITES } from '../lib/selfcheck.js'
@@ -438,6 +439,64 @@ test('归档的字节取自 HEAD 的树，不是取自磁盘——脏工作树�
     const packed = archiveBytes({ root: tree.root, version: '1.6.0' })
     const inArchive = readTarGz(packed.bytes).find((entry) => String(entry.name).endsWith(rel))
     assert.equal(inArchive.bytes.toString('utf8'), committed, '打包结果里必须是已提交字节，不是磁盘上那一份')
+  } finally {
+    tree.cleanup()
+  }
+})
+
+test('发布档拒绝 tsc 形状的 dist：它入口裸 import 未声明的 @iterate/kernel，装上去就跑不起来', () => {
+  // 我自己踩出来的：归档取的是磁盘上的 mcp-shell/dist。bundle 之后只要再跑一次 `npm test`
+  // （mcp-shell 的 test 脚本 = `npm run build && node --test`，tsc 会把 dist 重铺），dist 就退回
+  // 逐模块形状；那形状里入口仍 import "@iterate/kernel"，而 glasspane-mcp 的 dependencies 只有 zod
+  // （kernel 是 devDependency 的 file:../kernel）。pack 出来照样装、照样报版本号，第一条 MCP 请求
+  // 就 ERR_MODULE_NOT_FOUND。`npm pack --dry-run` 与 publish-shape lane 全看不见——dry-run 不装不跑。
+  const tree = makeReleaseTree()
+  const manifestOf = () => JSON.parse(fs.readFileSync(path.join(tree.root, 'mcp-shell', 'package.json'), 'utf8'))
+  const distWrite = (rel, body) => {
+    const abs = path.join(tree.root, 'mcp-shell', 'dist', rel)
+    fs.mkdirSync(path.dirname(abs), { recursive: true })
+    fs.writeFileSync(abs, body, { mode: 0o644 })
+  }
+  try {
+    // 对照的一半：夹具本来就只带三个入口之一，必须过——否则这条闸只会拒绝。
+    const clean = archiveBytes({ root: tree.root, version: '1.6.0' })
+    assert.ok(clean.entries > 10, `干净 bundle 形状要能打包，实得 ${clean.entries}`)
+
+    // 形状：多出一个 bundler 不写的 .js（tsc 逐模块输出的样子）。
+    distWrite('tools.js', 'import { z } from "zod"\nexport const x = 1\n')
+    assert.throws(
+      () => archiveBytes({ root: tree.root, version: '1.6.0' }),
+      /tsc output.*@iterate\/kernel.*run bundle/s,
+      '非入口 .js 必须被点名拒绝，并说清下一步跑 bundle',
+    )
+    fs.rmSync(path.join(tree.root, 'mcp-shell', 'dist', 'tools.js'))
+
+    // 依赖面：入口 import 一个没声明的裸包，即使形状是三个入口也要拒。
+    distWrite('index.js', '#!/usr/bin/env node\nimport { RunPlan } from "@iterate/kernel/plan"\nconsole.log("glasspane-mcp")\n')
+    assert.throws(
+      () => assertBundleShape({
+        entries: [{ name: 'mcp-shell/dist/index.js', content: fs.readFileSync(path.join(tree.root, 'mcp-shell', 'dist', 'index.js')) }],
+        manifest: manifestOf(),
+      }),
+      /imports package\(s\) the manifest does not declare: @iterate\/kernel/,
+      '未声明依赖的裸 import 必须点名到包名与文件',
+    )
+
+    // 声明了就不许再拒（这条防的是把闸写成永远红）。
+    const withDep = manifestOf()
+    withDep.dependencies = { ...withDep.dependencies, '@iterate/kernel': 'file:../kernel' }
+    const ok = assertBundleShape({
+      entries: [{ name: 'mcp-shell/dist/index.js', content: fs.readFileSync(path.join(tree.root, 'mcp-shell', 'dist', 'index.js')) }],
+      manifest: withDep,
+    })
+    assert.equal(ok.jsEntries, 1)
+
+    // node: 内建与相对路径不算。
+    const builtin = assertBundleShape({
+      entries: [{ name: 'mcp-shell/dist/index.js', content: Buffer.from('import fs from "node:fs"\nimport "./io.js"\n') }],
+      manifest: { dependencies: {} },
+    })
+    assert.deepEqual(builtin.declared, [], 'node: 与相对 import 不得被算成未声明依赖')
   } finally {
     tree.cleanup()
   }

@@ -65,10 +65,14 @@ function makeWorkflowTree({ rootScripts, workspaceScripts = {}, workspaces = ['w
   return { root, write }
 }
 
+// 夹具与真 workflow 同形：顶层必须声明 permissions——闸本身现在就要求这一点，
+// 夹具不带它就会在每个用例里先红一条与断言无关的问题（那等于测试在自己的桩里翻车）。
 const HEADER = `name: CI
 on:
   push:
     branches: [main]
+permissions:
+  contents: read
 jobs:
   build:
     name: build the thing
@@ -207,12 +211,14 @@ test('a bare name is a package.json script and a name followed by a path is not'
   assert.equal(checked.status, 0, checked.output)
 })
 
-test('check-workflows --self-test verifies six cases, including the lastIndex one', () => {
+test('check-workflows --self-test verifies seven cases, including the lastIndex one', () => {
   // The self-test exists to prove each rule can go red; the count in its output line
   // is what CI reads. A case silently dropped from the list would still exit 0.
   const checked = spawnSync(process.execPath, [SCRIPT, '--self-test'], { cwd: REPO, encoding: 'utf8' })
   const output = `${checked.stdout}${checked.stderr}`
   assert.equal(checked.status, 0, output)
-  assert.match(output, /--self-test: 6 case\(s\) each verified to fail/, output)
+  assert.match(output, /--self-test: 7 case\(s\) each verified to fail/, output)
+  // 新增的那一档：顶层 permissions 缺失必须能被证红（这条规则的来路见 f12b241）。
+  assert.match(output, /no top-level permissions block is caught/, output)
   assert.match(output, /shared-lastIndex defect\) is caught/, output)
 })

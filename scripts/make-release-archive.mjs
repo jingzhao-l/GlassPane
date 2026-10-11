@@ -233,6 +233,52 @@ export function buildOutputEntries({ root, dir }) {
 }
 
 /**
+ * The three files `mcp-shell`'s own `bundle` script writes. A `dist` holding any other `.js` was produced by
+ * `tsc`, not by the bundler — and that is not a cosmetic difference: `glasspane-mcp` declares only `zod` as a
+ * dependency (the kernel sits in `devDependencies` as `file:../kernel`), so a tsc-shaped `dist` still carries
+ * `import "@iterate/kernel"` in its entry points. Such a package installs cleanly, reports its version
+ * correctly, and dies on the first `ERR_MODULE_NOT_FOUND` when the agent runs it — found by packing an archive
+ * whose `dist` had been rebuilt by `npm test` after the bundle step, then installing that archive's own tarball
+ * in a clean prefix. `npm pack --dry-run` cannot see it because a dry run never installs and never executes.
+ */
+const BUNDLE_ENTRIES = ['index.js', 'http-gateway.js', 'http-gateway-cli.js']
+
+/** Prove the packed `mcp-shell/dist` is the bundle, and that nothing it imports is undeclared. */
+export function assertBundleShape({ entries, manifest }) {
+  const declared = new Set(Object.keys(manifest.dependencies ?? {}))
+  const js = entries.filter((entry) => entry.name.startsWith('mcp-shell/dist/') && entry.name.endsWith('.js'))
+  if (js.length === 0) fail('mcp-shell/dist carries no .js at all — there is nothing for the declared bin targets to run')
+  const unbundled = js
+    .filter((entry) => !BUNDLE_ENTRIES.includes(entry.name.split('/').pop()))
+    .map((entry) => entry.name)
+  if (unbundled.length > 0) {
+    fail(`mcp-shell/dist holds ${unbundled.length} file(s) the bundler does not write (${unbundled.slice(0, 6).join(', ')}): this is tsc output, its entry points still import "@iterate/kernel" which glasspane-mcp does not declare, and the installed package dies on ERR_MODULE_NOT_FOUND. Run "npm --workspace glasspane-mcp run bundle" as the LAST step touching dist before packing (npm test rebuilds it with tsc).`)
+  }
+  const missing = new Set()
+  for (const entry of js) {
+    const text = (entry.content ?? Buffer.alloc(0)).toString('utf8')
+    // 只认行首的 ESM import/export。捆绑输出里嵌着大量给面板与 agent 读的文案，里面出现过
+    // `from "` 这样的片段——早先不限行首、又允许跨行的正则把整段文案当成模块名，
+    // 于是一条真 bundle 被拒在一份不存在的依赖上（"over this gate (imported by …)"）。
+    const specifiers = [
+      ...[...text.matchAll(/^[ \t]*(?:import|export)\b[^\n]*?\bfrom\s*["']([^"'\n]+)["']/gm)].map((m) => m[1]),
+      ...[...text.matchAll(/^[ \t]*import\s*["']([^"'\n]+)["']/gm)].map((m) => m[1]),
+    ]
+    for (const specifier of specifiers) {
+      if (specifier.startsWith('.') || specifier.startsWith('node:') || !/^[^./]/.test(specifier)) continue
+      const packageName = specifier.startsWith('@')
+        ? specifier.split('/').slice(0, 2).join('/')
+        : specifier.split('/')[0]
+      if (!declared.has(packageName)) missing.add(`${packageName} (imported by ${entry.name})`)
+    }
+  }
+  if (missing.size > 0) {
+    fail(`mcp-shell/dist imports package(s) the manifest does not declare: ${[...missing].sort().join(', ')} — npm will install it happily and the first run will fail to resolve them`)
+  }
+  return { jsEntries: js.length, declared: [...declared].sort() }
+}
+
+/**
  * The commands the shipped packages promise: every path a `bin` field names, resolved inside its package.
  *
  * Checked here rather than left to the updater because this is where the bytes are assembled: a package whose
@@ -277,6 +323,13 @@ export function archiveBytes({ root, version, prefixes = EXCLUDED_PREFIXES }) {
       fail(`${cmd.package} declares the command "${cmd.command}" at ${cmd.target}, which this tree does not contain — the installed package would have nothing to run`)
     }
   }
+  // The bundle shape is checked on the same bytes that go into the tar, and *after* the install-critical
+  // presence checks above so each guard keeps its own refusal: a missing `dist/index.js` must read as
+  // "the declared command has nothing behind it", not as "this is tsc output".
+  assertBundleShape({
+    entries: extras,
+    manifest: JSON.parse(fs.readFileSync(path.join(root, 'mcp-shell', 'package.json'), 'utf8')),
+  })
   // A build output that is *also* tracked (a repository that one day commits `dist`) is one entry, not a
   // collision: the tracked bytes come from git, and the requirement this script guards is that the file
   // exists, which both sources agree on. Anything else that lands twice is an internal bug and refused.
