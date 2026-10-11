@@ -97,11 +97,30 @@ try {
     )
     if (binName !== product.binary) continue
 
-    check(
-      "the package's os/cpu gate matches the product's platform block",
-      product.platform?.os?.includes("darwin") === true,
-      `os=${JSON.stringify(product.platform?.os)}`,
-    )
+    // The gate has to read the bytes that were *installed*. This asserted
+    // `product.platform.os.includes("darwin")` — the product's declaration compared with
+    // itself, red only if someone edited product.json (which breaks the build anyway), and
+    // it never looked at `cpu` despite saying so in its own label. A wrapper published with a
+    // missing or wrong `os` field — the thing that makes npm refuse Linux/Windows installs for
+    // this product — passed here.
+    const installedManifest = path.join(prefix, "lib", "node_modules", product.name, "package.json")
+    const wantOs = [...(product.platform?.os ?? [])].sort()
+    const wantCpu = [...(product.platform?.arch ?? [])].sort()
+    let gate = ""
+    let gateSeen = `no manifest at ${installedManifest}`
+    try {
+      const installed = await Bun.file(installedManifest).json()
+      gateSeen = `os=${JSON.stringify(installed.os)} cpu=${JSON.stringify(installed.cpu)} version=${JSON.stringify(installed.version)}`
+      const same = (a: unknown, b: unknown) => JSON.stringify([...(a ?? [])].sort()) === JSON.stringify(b)
+      const mismatches: string[] = []
+      if (!same(installed.os, wantOs)) mismatches.push(`os is ${JSON.stringify(installed.os)}, product declares ${JSON.stringify(wantOs)}`)
+      if (!same(installed.cpu, wantCpu)) mismatches.push(`cpu is ${JSON.stringify(installed.cpu)}, product declares ${JSON.stringify(wantCpu)}`)
+      if (installed.version !== version) mismatches.push(`the manifest says ${installed.version}, the version asked for was ${version}`)
+      gate = mismatches.join("; ")
+    } catch (error) {
+      gate = `unreadable: ${error instanceof Error ? error.message : String(error)}`
+    }
+    check("the installed package's os/cpu/version gates match the product's platform block", gate === "", `${gateSeen}${gate ? ` — ${gate}` : ""}`)
     // What the registry vouches for these exact bytes. Integrity, not provenance: it says
     // the downloaded tarball is the one the registry records for this version, and nothing
     // about who built it — hence the separate note below.

@@ -256,7 +256,15 @@ verify_asset_gpg() {
   # `|| true` rather than `|| echo 000`: curl prints the code it got *and* fails, so the
   # fallback would append to it and produce a status like `404000` — a made-up value fed
   # into the comparison that is supposed to be about the real one.
-  http="$(curl -sS -o "$asc" -w '%{http_code}' "$url.asc" 2>/dev/null || true)"
+  # `-L` is load-bearing, not decoration. GitHub's `/releases/download/` URLs answer 302
+  # and hand the bytes from `objects.githubusercontent.com` (measured against the published
+  # v0.7.1 asset: 302 without `-L`, 200 with it). Without it the status read below is 302,
+  # which is neither 404 nor 200 — so a correctly signed release from this very repository
+  # was refused as "the provenance check could not be run" on every machine that has gpg
+  # installed. The asset and the manifest both followed redirects; only the signature did
+  # not, which made the fallback channel unusable exactly where its one job (provenance)
+  # could be done.
+  http="$(curl -sSL -o "$asc" -w '%{http_code}' "$url.asc" 2>/dev/null || true)"
   [ -n "$http" ] || http="000"
   if [ "$http" = "404" ]; then
     GPG_STATE="skipped (no .asc published for this asset)"
@@ -322,12 +330,26 @@ verify_asset() {
   # the download is checked against a manifest the pipeline itself produced. This is
   # the check that catches a truncated or corrupted transfer; the GPG check below is
   # the one that establishes who produced the file. Neither substitutes for the other.
-  local file="$1" name="$2" sums want got
+  local file="$1" name="$2" sums want got http
   sums="$TMP/SHA256SUMS.txt"
-  if ! curl -fsSL -o "$sums" "$RELEASE_BASE/v$VERSION/SHA256SUMS.txt" 2>/dev/null; then
+  # Same discipline as the signature lane above, and the same reason: `curl -f` folds "not
+  # published", "the fetch was blocked or rewritten" and "it answered with something else"
+  # into one exit code, and only the first is a policy gap we agree to tolerate. This used to
+  # treat *any* failure as "the release carries no manifest", warn, and install — so on a host
+  # whose TLS is re-signed by a local root (this product's maintainer machine is one), a
+  # blocked manifest fetch bought an entirely unverified install a specific, false explanation.
+  http="$(curl -sSL -o "$sums" -w '%{http_code}' "$RELEASE_BASE/v$VERSION/SHA256SUMS.txt" 2>/dev/null || true)"
+  [ -n "$http" ] || http="000"
+  if [ "$http" = "404" ]; then
     SHA_STATE="skipped (no SHA256SUMS.txt published for v$VERSION)"
     warn "no SHA256SUMS.txt published for v$VERSION — skipping integrity check (provenance gap, not tampering)"
     return 0
+  fi
+  if [ "$http" != "200" ] || [ ! -s "$sums" ]; then
+    SHA_STATE="FAILED (could not fetch SHA256SUMS.txt: HTTP $http)"
+    error "the checksum manifest for v$VERSION could not be fetched (HTTP $http) — this is not the same as it being unpublished"
+    error "refusing to install bytes that no manifest vouches for. Re-run, or fetch $RELEASE_BASE/v$VERSION/SHA256SUMS.txt yourself and compare it to the download."
+    exit 1
   fi
   # The manifest lists bare filenames (`./name`), so match on the name, not the path.
   want="$(awk -v n="$name" '{ sub(/^\.\//, "", $2); if ($2 == n) print $1 }' "$sums" | head -1)"

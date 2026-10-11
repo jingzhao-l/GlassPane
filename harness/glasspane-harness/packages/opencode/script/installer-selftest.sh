@@ -72,52 +72,72 @@ printf '%s  ./%s\n' "$FIXTURE_HASH" "glasspane-harness-darwin-arm64.zip" > "$FIX
 printf 'not a real signature\n' > "$FIX/glasspane-harness-darwin-arm64.zip.asc"
 
 # ---------------------------------------------------------------- stubs
-# curl answers from $FIX by basename; anything unmapped fails like a 404 (exit 22), which
-# is how "the release did not publish that file" reaches the installer.
+# curl answers from $FIX by basename, and it answers *the way the real endpoint does for
+# the argv it was given*: a `/releases/download/` URL without `-L` is a 302 with a redirect
+# page (measured against the published v0.7.1 asset — 302 without `-L`, 200 with it), and
+# `-f` is what turns a bad status into exit 22. A stub that answered every argv with 200
+# endorsed a missing `-L` and an `-f` that swallowed a blocked fetch, which is how the two
+# defects fixed here stayed invisible while every assertion in this file stayed green.
 cat > "$STUB/curl" <<'STUBCURL'
 #!/usr/bin/env bash
 out=""
 url=""
 fmt=""
+flags=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
     -w) fmt="$2"; shift 2 ;;
-    --progress-bar|-fsSL|-fL|-sS|-L|-f|--fail) shift ;;
-    -*) shift ;;
+    --location) flags="$flags-L" ; shift ;;
+    --fail|--fail-with-body) flags="$flags-f"; shift ;;
+    --progress-bar) shift ;;
+    -*) flags="$flags$1"; shift ;;
     *) url="$1"; shift ;;
   esac
 done
 [ -n "$url" ] || exit 2
+follow=0; case "$flags" in *L*) follow=1 ;; esac
+failmode=0; case "$flags" in *f*) failmode=1 ;; esac
 base="$(basename "$url")"
+answer() {
+  # $1 = status code, $2 = fixture file to hand back ("" for none).
+  local code="$1" src="$2"
+  if [ "$code" = "200" ] && [ -n "$src" ]; then
+    [ -n "$out" ] && cp "$src" "$out"
+    [ "$fmt" = "%{http_code}" ] && printf '200'
+    if [ -z "$out" ]; then cat "$src" 2>/dev/null; fi
+    exit 0
+  fi
+  [ "$fmt" = "%{http_code}" ] && printf '%s' "$code"
+  if [ "$failmode" = "1" ]; then exit 22; fi
+  exit 0
+}
 # A scenario can demand that the *signature* fetch fail with a status that is not 404,
-# which is the case `curl -f` used to erase. It applies to the .asc only, so the asset and
-# the manifest keep answering normally.
+# which is the case `curl -f` used to erase. Same for the manifest: "no SHA256SUMS.txt was
+# published" and "we could not read the one that was" are different facts, and the
+# installer now has to keep them apart.
 case "$base" in
   *.asc)
-    if [ -n "${STUB_CURL_HTTP:-}" ]; then
-      printf '%s' "$STUB_CURL_HTTP"
-      [ "$STUB_CURL_HTTP" = "200" ] && exit 0
-      exit 0
-    fi
+    if [ -n "${STUB_CURL_HTTP:-}" ]; then answer "$STUB_CURL_HTTP" ""; fi
+    ;;
+  SHA256SUMS.txt)
+    if [ -n "${STUB_SUMS_HTTP:-}" ]; then answer "$STUB_SUMS_HTTP" ""; fi
     ;;
 esac
-# The stub answers with an HTTP status the way the real endpoint does, because the
-# installer now branches on it: "404, nobody published a signature" and "the fetch of a
-# published signature was blocked or rewritten" are different facts, and collapsing them
-# (which `curl -f` does) buys an unverified install a reassuring word for it.
-if [ -f "$FIX_DIR/$base" ]; then
-  [ -n "$out" ] && cp "$FIX_DIR/$base" "$out"
-  [ "$fmt" = "%{http_code}" ] && printf '200'
-  [ -n "$out" ] || cat "$FIX_DIR/$base" 2>/dev/null
+# GitHub answers a release download for a published file with a redirect. Asking without
+# `-L` is not the same request, so it is not the same answer.
+if [ "$follow" = "0" ] && printf '%s' "$url" | grep -q "/releases/download/"; then
+  if [ -n "$out" ]; then printf 'Found. Redirecting.\n' > "$out"; fi
+  [ "$fmt" = "%{http_code}" ] && printf '302'
+  if [ "$failmode" = "1" ]; then exit 22; fi
   exit 0
 fi
+if [ -f "$FIX_DIR/$base" ]; then answer 200 "$FIX_DIR/$base"; fi
 if [ "${STUB_CURL_HTTP:-}" = "500" ] && [ "$fmt" = "%{http_code}" ]; then
   printf '500'
   exit 0
 fi
-[ "$fmt" = "%{http_code}" ] && printf '404'
-exit 22
+answer 404 ""
 STUBCURL
 chmod +x "$STUB/curl"
 
@@ -185,6 +205,7 @@ run_install() {
     export STUB_UNAME_M="${SCENARIO_UNAME_M:-arm64}"
     export STUB_GPG_RESULT="${SCENARIO_GPG:-good}"
     export STUB_CURL_HTTP="${SCENARIO_CURL_HTTP:-}"
+    export STUB_SUMS_HTTP="${SCENARIO_SUMS_HTTP:-}"
     export STUB_GPG_IMPORT_FAILS="${SCENARIO_GPG_IMPORT_FAILS:-}"
     export TMPDIR="${SCENARIO_TMPDIR:-/tmp}"
     mkdir -p "$TMPDIR"
@@ -361,6 +382,41 @@ assert_has "and it says which two numbers disagree" "$SCRATCH/version-mismatch.l
 restore_asset
 run_install "$SCRATCH/restored.log" --version 9.9.9
 assert_code "the fixture swap is reversible — the same run is green again" "$?" "0"
+
+# ---------------------------------------------------------------- 14: the manifest fetch is blocked
+# The mirror image of 10, on the other lane. `curl -fsSL` erased the status, so any failure —
+# a re-signed TLS chain, a 403, a rewritten response — printed "no SHA256SUMS.txt published
+# for v9.9.9" and installed anyway. That sentence is a claim about the *release*, and it was
+# being used to describe this machine's network. Now the two states are separate: 404 skips
+# with the policy wording (test 5), anything else refuses the install.
+SCENARIO_SUMS_HTTP=500 run_install "$SCRATCH/sums-blocked.log" --version 9.9.9
+assert_code "a blocked or rewritten manifest fetch refuses the install" "$?" "1"
+assert_has "it says the manifest could not be fetched, with the status" "$SCRATCH/sums-blocked.log" "could not be fetched (HTTP 500)"
+assert_not_has "and it never dresses a transport failure up as an unpublished manifest" "$SCRATCH/sums-blocked.log" "no SHA256SUMS.txt published"
+assert_not_has "nothing is installed on that path" "$SCRATCH/sums-blocked.log" "[OK]    installed via"
+SCENARIO_SUMS_HTTP=""
+
+# ---------------------------------------------------------------- 15: a true 404 still skips
+# Not a repeat of 5: there the file was absent from the fixture dir, here the endpoint answers
+# 404 for a manifest that exists. Both must reach the same honest skip, which is what keeps
+# the refusal in 14 from being a "everything is fatal now" over-correction.
+printf 'gone\n' > "$SCRATCH/sums.hold"
+mv "$FIX/SHA256SUMS.txt" "$SCRATCH/sums.real"
+SCENARIO_SUMS_HTTP=404 run_install "$SCRATCH/sums-404.log" --version 9.9.9
+assert_code "a manifest that genuinely is not published still installs" "$?" "0"
+assert_has "and names it as unpublished" "$SCRATCH/sums-404.log" "sha256: skipped (no SHA256SUMS.txt published for v9.9.9)"
+assert_not_has "it does not claim a checksum verification it did not do" "$SCRATCH/sums-404.log" "sha256: verified"
+mv "$SCRATCH/sums.real" "$FIX/SHA256SUMS.txt"
+
+# ---------------------------------------------------------------- 16: redirect discipline
+# Every lane that reads a release asset has to follow the redirect GitHub answers there —
+# the asset, its manifest and its signature. The stub answers 302 for any `/releases/download/`
+# request that did not ask for `-L`, so this run is green only while all three fetches follow
+# redirects; drop `-L` from the signature fetch and test 3 plus this one both go red, which is
+# the shape the shipped installer had (it refused its own correctly signed releases).
+grep -q 'curl -fL' "$INSTALL_SH" && pass "install.sh fetches the asset following redirects" || fail "install.sh no longer follows redirects for the asset"
+grep -q 'curl -sSL -o "$sums"' "$INSTALL_SH" && pass "install.sh fetches the manifest following redirects" || fail "install.sh no longer follows redirects for SHA256SUMS.txt"
+grep -q 'curl -sSL -o "$asc"' "$INSTALL_SH" && pass "install.sh fetches the signature following redirects" || fail "install.sh no longer follows redirects for the .asc"
 
 echo ""
 if [ "$FAILURES" -gt 0 ]; then
