@@ -2,6 +2,148 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.12.0] — 2026-10-11
+
+**版本判断：minor。** 判据沿用 1.6.2 写下、1.9.0 与 1.11.0 沿用的那四条，逐条实测：状态文件的
+字段没动（审批台账的 JSON 形状不变，变的是它落盘时**暂存名**的形状）；daemon 退出码集合没动
+（本轮新增的拒绝全部落在已有的 1 / 64 / 65 上）；两个 npm 包的 `bin` 声明没动。动的是对外可见的
+契约内容，六处：`--force-socket` / `--force-probe-socket` 的语义收窄（不再授权删除一个从来不是
+socket 的名字）；探针监听者新增一条 socket 目录硬拒（目录收不到 0700 就不登记那个名字）；安装器的
+`--no-prompt` 从"没有对应能力"变成真拦住三件破坏性动作；launchd plist 的落盘模式 0644 → 0600 并
+读回核对；`glasspaned --socket-path` / `--probe-socket-path` 与 `--state-dir` 共用同一套绝对路径
+判据；以及收尾校验的产物版本读数从"永远读不出"变成读得出——这一条改变**每一次真安装**的退出码。
+
+**本轮与 `v1.11.0` 的碰撞同样是量出来的。** 开工时发布态是 1.10.0，跑的过程中另一路并行任务把
+`v1.11.0` 全链发掉（tag + Release + npm 两包），其中七条修复与本轮**改的是同一处缺陷、各写各的**
+（斜率的 epoch 舍入、台账读坏被覆写、删非 socket 的名字、`--auto` 那道读不到的闸、remedy 里的
+递归 `chown`、安装器"签名有效"与"有人在应答"两句、README/SECURITY 那两处命令）。两次合并共 25 处
+内容冲突，一律**取上游已发布实现**并删掉本轮的重复实现与重复闸——上游那份是超集（重启读回还额外
+分了 launchctl 层与 pid 层）。代价是本轮十几条判据跟着被换掉的实现一起消失：测试留在树里而实现没
+了，于是红的不是行为而是符号名。下面第一组就是这笔收口，分类逐条回代码复核过。
+
+`harness/**` 只动了面 A 的金样（一条 `chore(harness)`，见文末）；`kernel/**` 的内容与版本一字未动，
+只有 `set-version` 按版本线改写 `kernel/package.json` 与 lockfile 的版本号字段。归档照旧减 `harness/`。
+
+### Fixed — 合并收口：取上游之后，本轮的判据逐条接回上游实现里
+
+- **零跨度的斜率拒绝会自己消失又自己回来**（P1，量出来的）。`DegradationSignal.slope` 判"这条窗口
+  没有时间跨度"用的是中心化之后的 `Σx² > 0`——不成立：六个同一个 epoch 秒相加再除以六，商与那个
+  epoch 并不严格相等（`6*e` 自己要舍入），于是每个 `x − meanX` 是 1e-7 量级的残渣，平方和刚过
+  `> 0` 这道判据，一条没有时间跨度的窗口被算出一个 `0.0` 的斜率：那还是"除出来的数"冒充"测不出来"，
+  而 `0.0` 与 `nil` 在下游是两种话（前者进 `drivers` 的比较、后者进 `unread` 与
+  "no slope for …"）。是否发生**取决于当下这个时钟相位落在哪**——本轮同一棵树上第一次全量跑绿、
+  版本升 1.12.0 之后重跑就红，两次都不是巧合。现在按 x 的极差判跨度，用例另加 2500+ 个相位的扫描，
+  使这条红不再依赖随机性。闸：`testSlopeStillRefusesASinglePointAndAZeroTimeSpan`
+  （反向验证：摘掉极差判据 → 具名红，含"相位 +0.0 上没有跨度却给出了斜率"）。
+
+- **`--force-socket` / `--force-probe-socket` 抢名字时无条件 `unlink`**（P0，安全）。`SocketServer`
+  的 force 分支直接删名字再 bind，`ProbeSocketServer` 同形——那个旗是"顶掉一个正在监听的名字"的
+  授权，不是"删掉这个位置上的任何东西"的授权：`--socket-path ~/.ssh/id_rsa --force-socket` 删的就是
+  私钥。两条 force 路径都补了删除前那一眼 `lstat`（复用 1.11.0 已有的 `nameIsClearableSocketName`），
+  并各配一条"字节必须原样活着"的断言。闸：`testForceSocketFlagGrantsNoPermissionToDeleteARegularFile`、
+  `testProbeForceFlagGrantsNoPermissionToDeleteARegularFile`。
+- **探针监听者没有目录隔离判据**（P0，安全）：它只 `createDirectory(attributes: 0700)` 就绑，
+  而那一句对**已存在**的目录是空操作——组可写的 `~/.glasspane`、别人预先建好的目录、只读卷上粘不住
+  模式的目录，都能长期供着 `probe.sock`：攻击者随时 unlink 再自绑，被测 app 的探针流经攻击者的套接字，
+  而 daemon 一直报"没有探针连接"。现在 engine 与 probe 共用一份 `SocketDirectoryRule`（**一份实现**，
+  不是抄两遍——抄第二遍正是这条缺陷活下来的原因），拒绝里带**实测到的模式**。闸三条：绑不了的目录必
+  须具名拒且一个名字都不建（`testProbeBindRefusesADirectoryItCannotBringTo0700AndNamesTheMeasuredMode`）、
+  engine 侧同判据（`testEngineBindRefusesTheSameUnprotectableDirectory`）、以及**能收紧的 0770 目录照旧
+  绑上**（`testProbeBindTightensAGroupWritableDirectoryItOwnsAndBinds`，否则前两条只是把 bind 关掉）。
+- **台账的暂存名回退成固定的 `<file>.tmp`**（P1）：同一状态根上并跑的 `glasspaned --approval-*`
+  会让一个写者把另一个半开的缓冲 rename 进正名，而 `.tmp` 孤儿没有任何回收者（它连
+  `isEntryName` 都过不了）。改回每次写唯一（`pid + uuid`），与 `ProjectRegistry` / `EvidenceStore`
+  同一约定。闸 `testStagedTempNameIsUniquePerWriteAndNeverConsumesAPrePlantedFile` 同时钉住"预置内容
+  不许被收成台账"。
+- **读不出的审计链，那句拒绝少了三件事实**（P1）：1.11.0 把拒绝做对了，但话术换成一句
+  "could not be read when the daemon started"，读者拿不到"是**解不开**还是读不了"、没有任何可执行的
+  下一步、也没有"别删它——那些字节是唯一的历史"。现在三件都在（`python3 -m json.tool <台账路径>`
+  点名到真路径）。
+- **安装器**：`--` 分隔 git 位置参数 + URL/ref/目录三条形状闸（`ext::sh -c` 与以 `-` 打头的值在
+  克隆那一刻就是执行入口）、`GLASSPANE_REPO_URL` 这个文档化覆盖项重新被 `cli.js` 认（此前只有
+  `install.sh` 认，同一条环境变量两条入口拿两份源码）、`resolvePinRef` 重新存在（`install.sh` 里
+  "与 installer/cli.js 的 resolvePinRef 同源"那句此前指向一个不存在的符号）、`installGuard`（HOME
+  未设 / 相对 HOME / uid 0 三条在任何一次写入之前拒绝，且 `uid` 是测试接缝——真 root 没法在门禁里
+  演）、plist 0600 + 模式读回（同机任何账号此前可读"本机装了哪些可执行、socket 与日志的确切路径"）、
+  `cloneFailureText`（交出 git 的原话，而不是把任何非零都说成"网络不可达或 tag 不存在"——
+  "destination path … already exists" 是真能走到的那条）、CLT shim 探测（`/usr/bin/swift`、
+  `/usr/bin/git` 是 shim：文件在、一跑就死，预检却报"依赖齐全"然后死在 `swift build`）。
+- **`--no-prompt` 重新有东西可跳过**（P1）：上游的 `confirm()` 全仓零调用，而 `--help` 与
+  `install.sh` 都写着"跳过每步确认 / 非 TTY 时补 --no-prompt"——一句关于不存在能力的承诺，而且
+  它的旧语义是"非 TTY 自动同意"，等于 `curl | sh` 替每一条破坏性动作点了"是"。现在三处真各问一次
+  （覆盖已存在的 `.app`、bootout 已加载的作业、`--replace-daemon` 收拢在跑实例），三档语义
+  （显式放行 / 交互问 / 非交互没给旗就**不做也不挂**），确认排在**写盘之前**（反过来先写 plist 再问，
+  人答"跳过"之后磁盘是新定义、launchd 里是旧定义，而拒绝话术里那句"什么都没改"会当场变假话）。
+  `install.sh` 在非 TTY 补旗，因此 `curl | sh` 与 CI 的行为不变。
+- **更新器：证明与构建必须读同一棵树**（P0，安全）。`verifyStagedBytes` 此前 `sha256File(路径)`
+  与 `readArchive(同一路径)` **读两次**，比对的是"盘上那棵"，然后交给 `swift build` 的还是"盘上那棵"
+  ——同账户的任一进程都能在两次读之间换包，证明认证的是它并不安装的那份字节。现在只读一次、哈希与
+  解包用同一个缓冲，证明通过后把刚解出来的那棵 rename 到位并**返回它的根**，下游
+  build / npm / sourceTree 全部改用返回的那个路径（一个具名变量，防止下一次编辑把两边拆开）。
+  `defaultCopy` 同步改回"拷进唯一临时名再 rename 到位"：它此前先 `rm` 目标再就地 `cp`，中途失败
+  等于把装机文件删了、正名上什么都不剩。闸是一例真进程实验：真起一个孩子跑真拷贝、半路 SIGKILL，
+  再回读目标——它必须还是完整的上一版。
+
+### Fixed — 本机量出来的产品缺陷：收尾校验永远读不出本轮产物的版本
+
+`builtDaemonVersion` 找版本行的判据是"这一行以数字开头"，而真产物打的是 `glasspaned 1.11.0`
+（`--version` 的形状由 `DaemonVersionFlagTests` 钉着）。实测本机二进制：
+
+```
+$ engine/.build/debug/glasspaned --version
+glasspaned 1.11.0
+```
+
+于是 `builtDaemonVersion` 对**每一份真 daemon** 返回 `null`，`installVerification` 走"读不出产物
+版本"那一档——1.11.0 自己新加的那条诚实判据永远不会通过，每一次真安装的退出码恒 1，而屏幕说的是
+"本轮构建从未被验证"。这不是测试形状的缺陷：夹具打的是 `glasspaned 9.9.9`（与真产物同形），是
+生产解析器对不上生产打印器。现在取行内独立的那个版本记号（不把 `v1.2.3`、`1.2.3.4` 读成版本），
+并补上**有界超时**——原实现没有超时，一个卡死的产物会把整次安装挂死在收尾，那里连"安装失败"都
+说不到。闸：`finding1: --version 读数只认真参数，且探测必须带界`（桩对非 `--version` 一律
+`unknown argument` + 64；断言恰好一次、恰好只带 `--version`、断言 `timeout` 是正整数）。
+
+### Fixed — 其余本轮修复（上游未覆盖的那一半）
+
+证据语义一组：窗口在两次采集之间被拖走时那个像素比说的是两块屏幕（`pixel-capture-window-moved`
+新成因，`windowId` 相同只证明"还截那个窗口"，不证明"截的是同一块区域"）；事件 tap 的活性此前等于
+"句柄不是 nil"（`CGEvent.tapCreate` 成功返回一个从未启用的 tap 是文档化结果，现在只认
+`CGEvent.tapIsEnabled` 的回读且每 tick 再读）；遮挡邻居读不出边界时不许折成空矩形；ping 超时不许
+把预算当成回答时间；`--evidence-stats` 的 `listFailure` 现在有三个读者（daemon 两条 + 面板三态）。
+存储与协议一组：`CanonicalJSON` 此前与 `JSON.stringify` 在 NaN/±Infinity 与大整数上给出**两种字节**，
+而 `treeDigest` 两侧都算它；注册表在盘上模式被放宽时拒写（load 记实测模式、publish 前重新 lstat）。
+MCP 壳一组：一条超长回音此前把所有在飞请求一起判成"daemon 失联"（还给出一条会 SIGTERM 正在 `act`
+的 daemon 的重启命令），现在只结算它自己那一路；无 id 的错误帧不再删最早那个在飞条目；迟到回音不再
+把 AX 树原样写进 stderr；`shellFaultRemedy` 不许对不可重放的方法命令"重跑 gp_act"（由一张表闸住）；
+契约上界对着 daemon 取齐（`attach.bundleId` 256→512、`observe.role` 128→`SELECTOR_MAX_LENGTH`，
+`consumer-consistency.test.mjs` 直接从 Swift 源码读这两个数字来闸）。设置面板一组：存活只由三态
+`liveness` 决定（此前 `reachable == fileExists`，崩掉而留下 socket 文件的 daemon 点亮绿点）；
+五处 nil 折成假值（自动更新开关、待装版本快照、验证失败后的徽标、`daemonBinaryPath` 重装后仍
+exec 退役的那份、档案卡只在 `.onAppear` 取数）；控制台四条 CLI 调用显式点名 `--state-dir`（此前按
+家目录默认根跑，清理按钮删的是**另一个根里的真档案**）。桥一侧：哨兵取最后一个可解析对 + 每次跑
+独立 nonce，捕获规格走 base64，`watch` 模式只认 `r|w|rw`。
+
+### 门禁与证据（本版实测）
+
+合并树上重跑全套（数字取自本树这一次跑，不是开工基线）：`npm test --workspaces --if-present`
+四包全绿 —— kernel 90、mcp-shell 428、installer 149、updater 436（合计 1103 例 / 0 失败）；
+`swift test --package-path engine` 927 例 / 3 跳过 / 0 失败；`swift test --package-path engine/probe`
+27 例 / 0 失败；`pytest -q bridge` 71 例；信号闸 OK（SIGTERM / SIGINT 各自退出码 0 且 socket 被
+unlink，跑在脚本点名的隔离状态根里）；`npm run bundle` 与 `npm pack --dry-run` OK；四条产品面闸
+（`surface-semantics` / `product-surface` / `brand-surface` / `hook-liveness`）绿；
+`check-version` 十处 + 三份 lockfile 一致；`check-doc-links` 24 份 / 225 条仓库内链接 / 26 条外链
+无死链、双语成对；`check-workflows` 5 份 workflow 干净。
+面 A（`mcp-shell/src`）本轮**没有**新的有意增长之外的一切——那 +317 行全部是本轮 MCP 壳那组修复
+自己造成的（`tools.ts` +208、`index.ts` +69、`engine-client.ts` +40，逐文件归因过），而 1.11.0 的
+金样里没有它（第二次合并把金样取回了上游那份），故 `--record` 一次，单独一条 `chore(harness)`
+与代码同批提交。面 B（fork）本轮**未增长**：它的占比从 15.86% 降到 15.31%，降的原因是分母里
+引擎那一侧变大了，不是我们自己往 fork 里加了行。
+反向破坏（每处"接回"都要证明它接的是活的东西）：摘掉 force 路径的 lstat →
+`testForceSocketFlagGrantsNoPermissionToDeleteARegularFile` 具名红；把 `SocketDirectoryRule`
+退回"只 mkdir 就绑" → 探针那两条拒与那条对照同时红（证明它不是只会拒绝）；台账暂存名改回固定
+`.tmp` → `testStagedTempName…` 红；`confirm()` 的调用点摘掉一处 → 对应那一条红；
+`verifyStagedBytes` 去掉 rename-and-return（保留比对） → 构建读到旧树那一条红；
+`builtDaemonVersion` 的解析退回 `^<数字>` → 两条端到端（陈旧 daemon / 版本一致）同时红。
+
 ## [1.11.0] — 2026-10-11
 
 **版本判断：minor。** 判据沿用本仓在 1.6.2 条目里写下那一条：patch 要求"状态文件的字段没动、退出码
