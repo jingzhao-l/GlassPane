@@ -273,6 +273,10 @@ final class ProbeRuntime: @unchecked Sendable {
     private var rejectedKeys = 0
     /// 入站超长行被丢弃的次数（对端写了没有换行的一行，超过 maxInboundLineBytes）。
     private var droppedInboundLines = 0
+    /// 收不完的一次入站帧：收到了、却解析不出对象。它和超长行是两种失败——超长行是
+    /// 带宽，这一条是"对方发的东西我读不懂"。没有计数时，一次"发了命令却没回音"
+    /// 在这台机器上不留任何痕迹，而这条 socket 按设计不校验对端身份。
+    private var droppedInboundFrames = 0
     /// Their notes, tagged with the object they were refused *for* so `detach`
     /// can undo the bookkeeping symmetrically with the registration.
     private var kvcRejectionNotes: [(subject: ObjectIdentifier, note: String)] = []
@@ -309,6 +313,12 @@ final class ProbeRuntime: @unchecked Sendable {
     var rejectedKeyCount: Int {
         lock.lock(); defer { lock.unlock() }
         return rejectedKeys
+    }
+
+    var droppedInboundFrameCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return droppedInboundFrames
     }
 
     var droppedInboundLineCount: Int {
@@ -461,6 +471,7 @@ final class ProbeRuntime: @unchecked Sendable {
         let offlineDropped = dropped
         let writeDropped = droppedWrites
         let inboundDropped = droppedInboundLines
+        let framesDropped = droppedInboundFrames
         let appName = appNameValue
         let bundleId = bundleIdValue
         advertisedCapabilities = capabilities
@@ -481,6 +492,7 @@ final class ProbeRuntime: @unchecked Sendable {
             // 入站方向同样有丢：daemon 写过一条没有换行的超长行、SDK 断开重连后，
             // "命令都收到了"必须能被证伪，而不是靠那半行没被执行来侥幸。
             "droppedInboundLines": inboundDropped,
+            "droppedInboundFrames": framesDropped,
             // KVC/state registrations the runtime refused (bad keyPath, non-KVC
             // object): a later "state never changed" is only readable against
             // this, or the daemon reports zero for a probe that was never told.
@@ -556,6 +568,11 @@ final class ProbeRuntime: @unchecked Sendable {
                     if let object = try? JSONSerialization.jsonObject(with: Data(line)),
                        let dict = object as? [String: Any] {
                         handleCommand(dict)
+                    } else {
+                        // 行是完整的（收到了 \n），只是不是 JSON 对象：这一条命令永远不会被回答。
+                        lock.lock()
+                        droppedInboundFrames += 1
+                        lock.unlock()
                     }
                 }
                 // 剩下的只有没收尾的那半行——它与 daemon 侧帧上限同宽时，这条流
@@ -993,6 +1010,7 @@ final class ProbeRuntime: @unchecked Sendable {
         dropped = 0
         droppedWrites = 0
         droppedInboundLines = 0
+        droppedInboundFrames = 0
         rejectedKeys = 0
         kvcRejectionNotes = []
         advertisedCapabilities = []

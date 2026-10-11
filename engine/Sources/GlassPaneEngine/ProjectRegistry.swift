@@ -514,3 +514,24 @@ public final class ProjectRegistry {
         Self.isoFormatter.string(from: date)
     }
 }
+
+extension ProjectRegistry {
+    /// `glasspaned --project-prune` 在"写完却读不回来"时交给调用方的那份拒绝载荷
+    /// （纯函数，所以它有闸：这份载荷从前拼在 `main.swift` 里，谁也测不到它）。
+    ///
+    /// 关键在于**不写** `remaining` 与 `projects`：那条分支同时在说"我看不见这张表"
+    /// 和"表里剩下 0 条"，而读者只会记住数字。`pruned: 0` 是真的（没有任何一条被
+    /// 确认删掉），`failed: matched` 也是真的（每一条都算没做成）。
+    public static func pruneUnreadablePayload(total: Int, matched: Int, registryPath: String) -> [String: Any] {
+        [
+            "command": "--project-prune", "dryRun": false, "loadFailed": true,
+            "total": total, "matched": matched, "pruned": 0,
+            "prunedProjectIds": [String](), "failed": matched,
+            "failures": [["projectId": "*", "reason": "the registry cannot be read back after the write"]],
+            "requiresDaemonRestart": true,
+            "registryPath": registryPath,
+            "error": "the write left projects.json unreadable; the daemon must not keep running on its in-memory copy",
+            "next": "restore the file from \(registryPath) backups and restart the daemon",
+        ]
+    }
+}

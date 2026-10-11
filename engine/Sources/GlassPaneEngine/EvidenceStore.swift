@@ -752,6 +752,18 @@ public final class EvidenceStore {
             // which directory was tightened by whom.
             log.info("evidence directory \(path) is outside \(home) — isolating it by ownership instead of by home scope")
         }
+        // chmod 会跟着符号链接走。`fileExists` 与 `createDirectory` 同样跟：一个被放在这里的
+        // 链接能让这一层把 0700 加到链接**指向**的那份目录上——那是声明半径之外的一次改动，
+        // 而且证据会落进一个不再由这条路径保证属主的目录。同文件的 `isDeletableEntry` 早就
+        // 按 `isSymbolicLink` 判过条目，这里把它补到目录本身。
+        guard Self.nameIsUsableArchiveDirectory(path) else {
+            var info = stat()
+            let kind = lstat(path, &info) == 0
+                ? ((info.st_mode & S_IFMT) == S_IFLNK ? "a symlink" : "not a directory (mode 0o\(String(info.st_mode & S_IFMT, radix: 8)))")
+                : "unreadable (lstat: \(String(cString: strerror(errno))))"
+            log.error("evidence directory \(path) is \(kind) — refusing to chmod through it or archive into it; move that name aside, or point the daemon at another root with --state-dir")
+            return false
+        }
         guard chmod(path, 0o700) == 0 else {
             log.error("chmod(0700) \(path) failed: \(String(cString: strerror(errno))) — refusing to write evidence other accounts could read")
             return false
@@ -787,5 +799,20 @@ public final class EvidenceStore {
 
     private func path(for operationId: String) -> String {
         directory + "/" + operationId + "." + EvidenceStore.fileExtension
+    }
+}
+extension EvidenceStore {
+    /// 这个名字能不能由本层接管为档案目录（纯 IO 谓词，可单测）。
+    ///
+    /// 判据只有一条：`lstat` 看见的是**目录本身**。符号链接一律不算——`chmod`、
+    /// `fileExists`、`createDirectory` 都会跟着链接走，于是"把档案目录收紧到 0700"
+    /// 会变成去改链接指向的那一份（声明半径之外），而证据落进的目录也不再由这条路径
+    /// 保证属主。名字不存在算可用：下面就是 `createDirectory`，没有东西会被碰到。
+    public static func nameIsUsableArchiveDirectory(_ path: String) -> Bool {
+        var info = stat()
+        guard lstat(path, &info) == 0 else {
+            return errno == ENOENT
+        }
+        return (info.st_mode & S_IFMT) == S_IFDIR
     }
 }

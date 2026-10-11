@@ -143,7 +143,13 @@ public enum RequestParser {
               let method = EngineMethod(rawValue: rawMethod) else {
             return .failure(ParseFailure(
                 id: id,
-                error: GPError(code: .methodNotFound, message: "method '\(String(describing: dict["method"]))' is not in the whitelist")
+                // 句子必须自己指到真源：从前只说 "is not in the whitelist"，既不点名是
+                // 哪份清单，也不给下一步，而 `hello.capabilities` 里就是这张表（同文件的
+                // `capabilityWireNames`，由 `EngineMethod` 派生，不手抄）。
+                error: GPError(
+                    code: .methodNotFound,
+                    message: "method '\(String(describing: dict["method"]))' is not one the engine implements; the methods it does answer are \(EngineMethod.capabilityWireNames.joined(separator: ", ")) (also listed in the `capabilities` field of the hello response — call hello to read them from the running daemon rather than from this message)"
+                )
             ))
         }
 
