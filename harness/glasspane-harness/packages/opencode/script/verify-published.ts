@@ -145,8 +145,6 @@ try {
     const port = 4500 + Math.floor(Math.random() * 300)
     const server = Bun.spawn([bin, "serve", "--port", String(port)], { stdout: "pipe", stderr: "pipe" })
     try {
-      let served = false
-      let detail = "no response"
       // Drained in the background so a chatty server cannot fill the pipe and stall.
       const logged: string[] = []
       const drain = async (stream: ReadableStream<Uint8Array>) => {
