@@ -86,6 +86,36 @@ $ node <prefix>/lib/node_modules/glasspane-install/cli.js --help → 2,623 字�
 同一份文件按真路径跑同样是 2,622 字节。装好的包 `package.json` 与 `cli.js` 里的
 `RELEASE_VERSION` 都读回 `1.12.3`。修之前这三条在交付形状下全是 0 字节 / 退出 0。
 
+### 发布实测（本版收口那一刻量到的，不是推断）
+
+- tag `v1.12.3` 打在 `d45fd88`，`git tag -v` 回 **完好的签名**（RSA 钥 `0929EA31…043A1298`）。
+- GitHub Release 非草稿，4 份资产。用 `gh api` 的 `assets[].digest` 与本机重下的一份逐字节比：
+  **四份全部 MATCH**（归档 2,676,128 字节；`.asc` 各 833 字节；`SHA256SUMS-1.12.3.txt` 90 字节）。
+  `shasum -a 256 -c` 对着那份被签名的清单跑 → `GlassPane-1.12.3.tar.gz: OK`；两份 `.asc` 都验出好签名。
+- 归档内容：569 条目；`(^|/)harness/` 计数 **0**；`mcp-shell/dist` 16 条、`mcp-shell/schemas` 3 条。
+  档内五个 `package.json` 都是 `1.12.3`，`installer/cli.js` 的 `RELEASE_VERSION = '1.12.3'`，
+  `dispatch.ts` 的 `version: "1.12.3"`，`EngineCore.buildVersion = "1.12.3"`，`install.sh` 钉
+  `GLASSPANE_RELEASE="v1.12.3"`。修复本体在档内：`invokedAsEntrypoint` 与 `invokedAsCommand` 都在，
+  旧写法只剩注释里那一处提及。
+- 归档内再走一遍交付链：`npm ci`/`build`/`bundle`/两次 `npm pack` 全 rc=0
+  （`glasspane-install-1.12.3.tgz` 55,541 字节、`glasspane-mcp-1.12.3.tgz` 185,891 字节）→
+  装进干净前缀 → 三个 bin 都在、`glasspane-install` 确为相对符号链接 → 直接执行它：
+  `--help` 2,622 字节 / 退出 0；未知参数 2,686 字节 / 退出 2；`serverInfo` 回
+  `{"name":"glasspane-mcp","version":"1.12.3"}`；档内无 `harness/`。
+- npm 两格：dry run 38161623043 先打印「publish 的对象已核实：v1.12.3 = d45fd88…，mode=dry」并为两个包
+  出 `npm pack --dry-run`（mcp 185.9 kB / 22 文件；install 55.5 kB / 4 文件）；publish run 38162718459
+  回 `+ glasspane-mcp@1.12.3` 与 `+ glasspane-install@1.12.3`，两个包各签了一条 provenance 并进 sigstore
+  transparency log（logIndex 3212146532 / 3212148874）。直连 registry 复量：两包 `dist-tags.latest` 都是
+  **1.12.3**，`dist.attestations.provenance.predicateType` 都是 `https://slsa.dev/provenance/v1`，
+  `bin` 声明逐字未变（`glasspane-mcp`→`dist/index.js` + `glasspane-http`→`dist/http-gateway-cli.js`；
+  `glasspane-install`→`cli.js`）。
+- **从 registry 装的最后一次端到端**（这才是"发给用户的那一份"）：`npm install -g --prefer-online` 两个包
+  1.12.3 → 三个 bin、`bin/glasspane-install` 是符号链接 → `--help` 2,622 字节 / 0、未知参数 2,706 字节 / 2
+  且第一句是人话、不存在的 `--version` 回 2 + 2,689 字节；装好的两个 `package.json` 都读回 1.12.3，
+  schemas 三份齐；stdio 握手回 `serverInfo … version 1.12.3`、`tools/list` 回 16 个 `gp_*`。
+  第一次尝试时 `tools/list` 回 0 条——9 秒窗口在本机 load 71–85 下没等够模块初始化，把窗口放宽并改成
+  "答了就走"之后 5 秒就答了（10,697 字节），所以那是夹具的时间预算，不是发布物的缺陷。
+
 ### 未修与实测边界
 
 - `glasspane-mcp` 的两个 bin（`glasspane-mcp`、`glasspane-http`）**没有**这一族问题：那两个入口没有
