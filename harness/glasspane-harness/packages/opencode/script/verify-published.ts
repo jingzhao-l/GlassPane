@@ -97,11 +97,36 @@ try {
     )
     if (binName !== product.binary) continue
 
-    check(
-      "the package's os/cpu gate matches the product's platform block",
-      product.platform?.os?.includes("darwin") === true,
-      `os=${JSON.stringify(product.platform?.os)}`,
-    )
+    // The gate has to read the bytes that were *installed*. This asserted
+    // `product.platform.os.includes("darwin")` — the product's declaration compared with
+    // itself, red only if someone edited product.json (which breaks the build anyway), and
+    // it never looked at `cpu` despite saying so in its own label. A wrapper published with a
+    // missing or wrong `os` field — the thing that makes npm refuse Linux/Windows installs for
+    // this product — passed here.
+    const installedManifest = path.join(prefix, "lib", "node_modules", product.name, "package.json")
+    const wantOs = [...(product.platform?.os ?? [])].sort()
+    const wantCpu = [...(product.platform?.arch ?? [])].sort()
+    let gate = ""
+    let gateSeen = `no manifest at ${installedManifest}`
+    try {
+      const installed = await Bun.file(installedManifest).json()
+      gateSeen = `os=${JSON.stringify(installed.os)} cpu=${JSON.stringify(installed.cpu)} version=${JSON.stringify(installed.version)}`
+      // Both sides go through the same normalisation: a field the tarball dropped entirely
+      // reads as `[]` (a mismatch, not a crash), and neither side wins by having been
+      // pre-sorted already. The form this replaced spread an `unknown` — tsgo refused it
+      // (`TS2488: Type '{}' must have a [Symbol.iterator]()`) and the package's typecheck
+      // went red, which is the gate this product runs per-package on every batch.
+      const norm = (v: unknown) => JSON.stringify((Array.isArray(v) ? v : []).slice().sort())
+      const same = (a: unknown, b: unknown) => norm(a) === norm(b)
+      const mismatches: string[] = []
+      if (!same(installed.os, wantOs)) mismatches.push(`os is ${JSON.stringify(installed.os)}, product declares ${JSON.stringify(wantOs)}`)
+      if (!same(installed.cpu, wantCpu)) mismatches.push(`cpu is ${JSON.stringify(installed.cpu)}, product declares ${JSON.stringify(wantCpu)}`)
+      if (installed.version !== version) mismatches.push(`the manifest says ${installed.version}, the version asked for was ${version}`)
+      gate = mismatches.join("; ")
+    } catch (error) {
+      gate = `unreadable: ${error instanceof Error ? error.message : String(error)}`
+    }
+    check("the installed package's os/cpu/version gates match the product's platform block", gate === "", `${gateSeen}${gate ? ` — ${gate}` : ""}`)
     // What the registry vouches for these exact bytes. Integrity, not provenance: it says
     // the downloaded tarball is the one the registry records for this version, and nothing
     // about who built it — hence the separate note below.
@@ -150,14 +175,14 @@ try {
         if (served) break
       }
       if (!served) {
-        // "no response" used to be the whole report, which made two very different
-        // outcomes look identical: a release whose binary cannot serve the web app at
-        // all, and a machine too busy to start a 108 MB single file inside the wait
-        // window. Measured on 2026-10-11: the same published 0.7.3 binary answered on
-        // port 4814 after 8s when driven by hand with an 80s window, while this lane
-        // — 30 × 500 ms — printed "no response" and called the release bad. The
-        // verdict stays red (a release we could not observe is not a release we
-        // verified), but the message now says which of the two it was and what to run.
+        // "no response" used to be the whole report, which made two very different outcomes
+        // look identical: a release whose binary cannot serve the web app at all, and a
+        // machine too busy to start a 108 MB single file inside the wait window. Measured on
+        // 2026-10-11: the same published 0.7.3 binary answered after 8s when driven by hand
+        // with an 80s window, while this lane — 30 × 500 ms — printed "no response" and called
+        // the release bad. The verdict stays red (a release we could not observe is not a
+        // release we verified), but the message now says which of the two it was and what to
+        // run instead.
         const started = logged.join("").includes("listening on")
         const tail = logged.join("").trim().split("\n").slice(-3).join(" / ").slice(0, 300)
         detail = started

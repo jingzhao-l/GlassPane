@@ -48,8 +48,13 @@ function read(rel) {
   if (!existsSync(abs)) die(2, `missing ${path.relative(repoRoot, abs)} — cannot measure the product surface`)
   return readFileSync(abs, "utf8")
 }
-function has(rel, needle) {
-  return read(rel).includes(needle)
+/**
+ * The executable text of a file. Every "does this file still speak the product name" rule
+ * has to read through this, or a comment that quotes the product name satisfies a rule about
+ * the code — the same reason `no-upstream-registries` strips comments before searching.
+ */
+function readCode(rel) {
+  return stripComments(read(rel))
 }
 
 const product = (() => {
@@ -93,7 +98,23 @@ if (kernelPointer === pinRel) {
   check("kernel-provenance", typeof declared === "string", `packages/opencode/package.json has no "${pin.package}" dependency — the pin describes something the product does not install`)
   check("kernel-provenance", declared === pin.version, `dependency line says ${declared}, kernel-pin.json pins ${pin.version}`)
   check("kernel-provenance", !existsSync(path.join(pkgDir, "vendor", "kernel")), "packages/opencode/vendor/kernel is back — the kernel ships as a dependency; the vendored copy was retired with its ruler")
-  check("kernel-provenance", (pin.corpus ?? []).length > 8, `kernel-pin.json pins ${String((pin.corpus ?? []).length)} contract file(s); the published package ships 14 — a pin with no corpus cannot catch drift`)
+  // Shape, not a magic count. This line used to read `length > 8` while its own message
+  // asserted "ships 14", the pin held 15, and 0.1.4 ships 17 — so a corpus that lost eight
+  // contract files stayed green and every bump made the sentence a lie. What the rule can
+  // actually know is what makes the pin usable: every entry names a file and carries a sha256
+  // that `script/kernel-pin.mjs --check` can compare against the installed bytes.
+  const corpus = Array.isArray(pin.corpus) ? pin.corpus : []
+  const malformed = corpus.filter((entry) => typeof entry?.file !== "string" || entry.file.length === 0 || !/^[0-9a-f]{64}$/.test(String(entry.sha256 ?? ""))).length
+  check(
+    "kernel-provenance",
+    corpus.length > 0 && malformed === 0,
+    `kernel-pin.json corpus has ${corpus.length} entr(ies), ${malformed} without a "file" + 64-hex sha256 — a corpus that does not name and hash its files cannot catch a swapped artifact`,
+  )
+  check(
+    "kernel-provenance",
+    new Set(corpus.map((entry) => entry?.file)).size === corpus.length,
+    "kernel-pin.json lists the same contract file twice — one of the two sha256s would never be read",
+  )
 }
 
 // ---- platform naming
@@ -115,6 +136,18 @@ const publish = read("packages/opencode/script/publish.ts")
 check("wrapper-name-in-publish", publish.includes("await publish(`./dist/${pkg.name}`, pkg.name"), "publish.ts must publish the wrapper under the product name (upstream appended -ai)")
 check("wrapper-name-in-publish", publish.includes("--wrapper-only"), "publish.ts has no --wrapper-only mode (the release lane's wrapper job needs it)")
 check("wrapper-name-in-publish", !publish.includes('pkg.name + "-ai"'), "publish.ts still derives an -ai suffixed wrapper name")
+
+// ---- the fork root's upstream orchestrator stays a dead end
+// Upstream's root `script/publish.ts` stamped a version into every package.json in the tree,
+// npm-published `@opencode-ai/sdk` / `-plugin` / `-ui` (three packages this product does not
+// own) and force-pushed tags with `--no-verify`. The [gp] version refuses with exit 2 and
+// names the real lane; this rule is the reader for the promise written in that file's own
+// header, which until now pointed at a rule that did not exist. Comments are stripped, so a
+// sentence *describing* the removed body cannot satisfy it — only the absence of the body can.
+const rootPublish = stripComments(read("script/publish.ts"))
+check("no-foreign-publish", /process\.exit\(2\)/.test(rootPublish), "script/publish.ts (fork root) no longer refuses — it must exit 2 before it can publish")
+check("no-foreign-publish", !/packages\/(sdk\/js|plugin|ui)\/script\/publish\.ts/.test(rootPublish), "script/publish.ts invokes a per-package publish script again — that lane npm-publishes under upstream's scope")
+check("no-foreign-publish", !/npm publish/.test(rootPublish), "script/publish.ts runs `npm publish` from the fork root")
 
 // ---- nothing product-facing may talk to upstream's infrastructure
 const forbidden = [
@@ -146,7 +179,7 @@ for (const file of forbiddenFiles) {
 }
 
 // ---- the shim and the runtime install paths speak the product
-const postinstall = read("packages/opencode/script/postinstall.mjs")
+const postinstall = readCode("packages/opencode/script/postinstall.mjs")
 check("postinstall-identity", postinstall.includes(`\`${product.name}-\${platform}-\${arch}\``), "postinstall.mjs does not resolve the product's platform packages")
 check("postinstall-identity", postinstall.includes(product.binary), "postinstall.mjs does not carry the product binary name")
 
@@ -264,11 +297,11 @@ check("notice-license", notice.includes(product.upstream?.tag ?? "v1.18.32"), "N
 check("notice-license", notice.includes("MIT"), "NOTICE does not record the upstream license")
 
 // ---- postinstall identity, read before the verdict is written
-const shimText = read("packages/opencode/bin/glasspane-harness")
+const shimText = readCode("packages/opencode/bin/glasspane-harness")
 check("postinstall-identity", shimText.includes(`"${product.name}-" + platform`), "bin shim does not resolve the product's platform packages")
 check("postinstall-identity", shimText.includes(`"${product.binary}"`), "bin shim does not carry the product binary name")
-check("runtime-package-names", has("packages/opencode/src/installation/index.ts", `${product.name}@`), "installation/index.ts does not upgrade the product package")
-check("runtime-package-names", has("packages/opencode/src/cli/cmd/uninstall.ts", `"uninstall", "-g", "${product.name}"`), "uninstall.ts does not uninstall the product package")
+check("runtime-package-names", readCode("packages/opencode/src/installation/index.ts").includes(`${product.name}@`), "installation/index.ts does not upgrade the product package")
+check("runtime-package-names", readCode("packages/opencode/src/cli/cmd/uninstall.ts").includes(`"uninstall", "-g", "${product.name}"`), "uninstall.ts does not uninstall the product package")
 
 // The report and the exit are the LAST thing this script does, and there is exactly one
 // of each. Four assertions used to sit below both of them: they still ran, still pushed

@@ -2657,7 +2657,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "4cb15abb623974b71ff722430558d983f96461c6"
+      "forkHash": "cd6b1c221fa77b4e8d10ca348b4a2cb8d40b9eaf"
     },
     {
       "file": "packages/opencode/script/build.ts",

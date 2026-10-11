@@ -1,5 +1,5 @@
 {
-  "observedAt": "2026-10-08",
+  "observedAt": "2026-10-11",
   "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
   "rules": [
     {
@@ -30,7 +30,8 @@
   ],
   "hits": [],
   "lineage": {
-    "occurrences": 9619,
+    "occurrences": 9623,
     "filesScanned": 3303
-  }
+  },
+  "lineageNote": "undefined 2026-10-11（0.7.4）再 +1：CHANGELOG/SYNCLOG 写下这条修复时点名它拒发的 @opencode-ai/{sdk,plugin,ui}——同样是“字样出现在说明它已被改掉的位置”；金样的 9,622 与 9,623 两步都是本批有意增长，反证仍成立（再多一处即红）。"
 }

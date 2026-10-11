@@ -12,7 +12,75 @@ contract does not).
 
 <!-- 内容归入下一版；此处留空以备下一批。 -->
 
+const fs = require("fs")
+
+const changelog = `## [0.7.4] - 2026-10-11
+
+判据（pre-1.0）：**patch**。没有新增命令、没改 CLI/TUI 形状、没动参数与目标矩阵。唯一的使用者可见
+变化是**兜底安装通道变得更严格**：清单取不到时它现在拒绝安装并报告 HTTP 状态，而不是"当作这个版本
+没发清单"然后装上一个没有任何完整性校验的二进制——先前拿到"unverified install + 一个具体但错误的
+解释"的那类主机，这次会拿到一次失败与一条出路。这是修掉的行为，不是新形状。
+
+这一批是**收上一轮没收口的活**：\`gp-harness-orphan-20261010\`（\`a054fdc\`）保住了 10-10 那轮被
+ENOSPC 杀掉时留在未提交状态的五个文件。按内容判据逐条核（\`git cherry\` + 逐文件比对，不看分支名
+也不看提交信息）：\`install.sh\` 里"签名抓取跟随重定向"那半**已经在 main 上**（\`b9409d7\` 落过），
+本轮不重复；其余四条真没落地，全部并回并各自补了双向控制。
+
+### Fixed — 三条"绿着但从未能红"的发布/安装面
+
+- **\`verify-published.ts\` 的 os/cpu 闸拿 \`product.json\` 跟自己比。** 它断言的是
+  \`product.platform.os.includes("darwin")\`，即产品的声明与声明本身比较，且**从没读过 \`cpu\`**——
+  而"wrapper 的 os/cpu 字段让 npm 在非 macOS 上直接拒绝安装"正是这个产品的分发裁决。发出去的包
+  少了 \`os\` 字段也照样报 ok。现在读的是**装进临时前缀的那份 package.json** 的 \`os\`/\`cpu\`/\`version\`。
+  反向控制实测：把 \`product.json\` 的 \`platform.arch\` 改成 \`["arm64"]\`（真发布物是
+  \`["arm64","x64"]\`）→ \`FAIL the installed package's os/cpu/version gates … cpu is
+  ["arm64","x64"], product declares ["arm64"]\`、exit 1；还原按 sha256 核回。
+- **\`scripts/install.sh\` 把传输失败化妆成"这个版本没发清单"。** 兜底通道求 \`SHA256SUMS.txt\` 用的是
+  \`curl -fsSL\` + \`if ! …\`，于是"未发布""被拦截/重写""答了别的东西"三种情况共用一个出口，而该出口是
+  *警告 + 继续安装*。在本机这种由本地根重签 TLS 的主机上（本产品维护机就是），一次被挡的清单抓取
+  换来的是**完全没做完整性校验的安装 + 一句具体而假的解释**。现在只有 404 算"政策缺口"（照旧如实
+  标注并继续），其余一律 exit 1 并报出状态码与出路。反向控制：\`installer-selftest.sh\` 跑在**改动前**
+  的 install.sh 上 → 5 条具名红（含 "it did say: no SHA256SUMS.txt published"、
+  "nothing is installed on that path — it did say: [OK] installed via"），跑在改动后 → 全过。
+- **fork 根的 \`script/publish.ts\` 是一个可用的上游发布编排。** 它会 rewrite 全树 version、
+  \`npm publish\` \`@opencode-ai/sdk\` / \`-plugin\` / \`-ui\`（三个不属于本产品的包、别人的 scope），
+  再 \`git push --force-with-lease --no-verify\` 推 tag、\`git push HEAD:dev --no-verify\`、
+  \`gh release edit --draft=false\`。纪律 5 说的是"不往我们不拥有的基础设施推"，而这个入口距产品
+  发布脚本只差一个 \`cd\`，且**没有任何闸看着它**。现在它是一具拒绝体：打印原因与真路径后
+  \`exit 2\`（实测退出码 2）；文件保留而非删除，是为了让未来的上游同步落在一个会说明理由的拒绝上，
+  而不是悄悄重新拿到一个往别人名字下推东西的脚本。读者是 \`product-surface\` 新增的
+  \`no-foreign-publish\` 三条规则。
+
+### Fixed — 尺子自己的两处假绿
+
+- **规则不再被注释顶替**：\`product-surface.mjs\` 的产品同一性规则此前用 \`read()\`（不剥注释）——
+  把 \`postinstall.mjs\` 里那行平台包模板**改成注释**，规则照样绿，因为字符串还在文件里。现在
+  这类规则统一走 \`readCode()\`（与 \`no-upstream-registries\` 早就在用的剥注释同一条路）。反向
+  控制实测：改注释 → \`postinstall-identity\` 具名红、exit 1；还原 → 绿。
+- **\`kernel-provenance\` 的 \`corpus.length > 8\` 是魔法数**：它自己那句话写着"the published package
+  ships 14"，而 pin 当时记 15、0.1.4 发 17、0.1.5 发 **24**——每次 bump 都让这句话变成谎，而少掉
+  八个契约文件仍然绿。改成形状断言：每条必须点名文件并带 64 位十六进制 sha256，且同一文件不得
+  出现两次（否则其中一条哈希永远读不到）。断言数 **94 → 98**。
+
+### Changed — 内核 0.1.5 与出处
+
+\`packages/opencode/package.json\` 与 \`contracts/kernel-pin.json\` 已由并行批次推到 **0.1.5**，而这棵
+树的 \`node_modules\` 还停在 0.1.4——\`kernel-pin --check\` 正确地报了
+"installed 0.1.4 but the manifest pins 0.1.5"。按文档路径 \`bun install\` 之后：24 个契约文件逐条
+sha256 对得上，行为闸 **14 条 fixture 全答对**，且 **\`--impl\` 直接指 canonical 检出就能跑**——
+\`iterate-skill\` 的 \`main\` 已带 0.1.5 的全部 15 个模块，与 \`kernel/npm-canonical\` 的 \`kernel/src\`
+逐字节同内容。上一轮汇报里那条"已发布产物的源码不在清单坐标（\`canonical.branch: main\`）上、按它
+复现不出来"的 canonical 侧问题，本轮实测已不成立（分支被合了），文档相应改掉；\`--impl\` 的缺模块
+报告（exit 3）保留，因为这种分叉在两个月里发生过三次（0.1.2 / 0.1.3 / 0.1.4）。
+
+### 记录
+
+血缘 9,619 → **9,622**（+3）：新增字样全部落在"写下被改掉的那个名字"的位置——新的拒绝体点名它
+拒绝发布的那三个上游包。按既有先例（9616/9617/9618）\`--record\` 并在金样 \`source\`/\`lineageNote\`
+写明；反证仍成立（再新增一处即红）。
+
 ## [0.7.3] - 2026-10-11
+
 
 判据（pre-1.0）：**patch** —— 一条发布链路的修复，产品面、CLI 形状、证据契约、目标矩阵全部不动。
 

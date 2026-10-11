@@ -2,7 +2,60 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
-## 2026-10-11 · 0.7.2 发坏了，0.7.3 发对了：checksums 那三步活在两个目录里
+## 2026-10-11（第二次会话）· 收上一轮的遗留：并回 `gp-harness-orphan-20261010` 未落地四条，发 0.7.4
+
+**开工自检按新提示词第 2 条做**：`git fetch --prune` 后拿内容判据（`git cherry` + 逐文件比对，不
+看分支名）判那笔遗留——`+ a054fdc` 说明整笔没进 main，但其中 `install.sh` 的"签名抓取跟随重定向"
+**已被 `b9409d7` 单独落过**（main 第 265 行已是 `curl -sSL -o "$asc" `），所以只并余下四条，不重复
+也不覆盖。
+
+**并回的四条与各自的双向控制**：
+- `verify-published.ts`：os/cpu 断言此前是 `product.platform.os.includes("darwin")`＝声明与声明
+  自己比，且从不读 `cpu`。改成读**装进临时前缀的那份 package.json** 的 `os`/`cpu`/`version`。
+  变异实测：`product.json` 的 `platform.arch` → `["arm64"]` ⇒
+  `FAIL … cpu is ["arm64","x64"], product declares ["arm64"]`、exit 1；还原按 sha256 核回后绿。
+- `scripts/install.sh`：清单抓取 `if ! curl -fsSL` 把"未发布 / 被拦截重写 / 答了别的东西"压成一个
+  出口，而那个出口是 warn + **继续安装**（零完整性校验）。现在 404 才算政策缺口，其余 exit 1 并报
+  状态码。`installer-selftest.sh` 跑在**改动前**的 install.sh 上 ⇒ 5 条具名红（含
+  "it did say: no SHA256SUMS.txt published"、"nothing is installed on that path — it did say:
+  [OK] installed via"、"install.sh no longer follows redirects for SHA256SUMS.txt"）；跑在改动后 ⇒ 全过。
+- `script/publish.ts`（fork 根）：它原本是**可用的**上游发布编排——rewrite 全树版本、
+  `npm publish @opencode-ai/{sdk,plugin,ui}`（别人的 scope、本产品不发的那三个包）、
+  `git push --force-with-lease --no-verify` 推 tag、`git push HEAD:dev --no-verify`。改成拒绝体
+  （实测 exit 2）并保留文件，让未来的上游同步落在一个会自陈理由的拒绝上；读者是 product-surface 的
+  三条 `no-foreign-publish`（它扫的是**剥掉注释后**的代码，所以拒绝体的说明文字不会替它顶罪）。
+- `product-surface.mjs`：`readCode()` 让"这条规则还认不认得这个产品"不再能被一行注释满足——变异
+  实测：把 `postinstall.mjs` 的平台包模板行改成注释 ⇒ `postinstall-identity` 具名红、exit 1，
+  还原 ⇒ 绿（旧实现两样都绿）。另把 `kernel-provenance` 的 `corpus.length > 8` 换成形状断言
+  （每条点名文件 + 64-hex sha256；同一文件不得出现两次）。断言数 **94 → 98**。
+
+**内核 0.1.5 的半记状态**：`package.json` 与 `contracts/kernel-pin.json` 已是 0.1.5，而这棵树的
+`node_modules` 还停在 0.1.4 ⇒ `kernel-pin --check` 报 "installed 0.1.4 but the manifest pins 0.1.5"
+（闸做对了）。按文档路径 `bun install` 后：24 个契约文件逐条 sha256 通过，行为闸 **14 条 fixture 全
+答对**；`--impl` 指 canonical 检出**现在跑得起来**（`iterate-skill` 的 `main` 已有 0.1.5 的 15 个
+模块，与 `kernel/npm-canonical` 的 `kernel/src` 同内容，14 条两侧逐字节一致）——上一轮我报的
+"产物出处不在清单坐标上"这条在 canonical 侧已被合并解决，FORK.md / harness/README.md 里那两句按实测
+改掉，`--impl` 的缺模块报告（exit 3）保留：这种分叉两个月里发生过三次（0.1.2/0.1.3/0.1.4）。
+
+**血缘**：9,619 → **9,622**（+3），三处都是"写下被改掉的那三个上游包名"的位置（新拒绝体的注释与
+console.error），按 9616/9617/9618 先例 `--record` 并在金样 `source`/`lineageNote` 写明；反证
+仍成立——再新增一处即红。**本轮没有为了换绿而删任何注释。**
+
+**闸（0.7.4 收口，从主仓根跑）**：fork-diff vs v1.18.32 = 4666/6714 identical / 261 edited / 82 added / 1705 deleted（金样同批重记）；tool-surface engine 24,706 行 / 62 文件，面 A 8,975 / **22.29%**、面 B **6,585 / 16.35%**（记前 6,488：+97 逐文件归因到本批并回的三个文件——installer-selftest.sh +56、verify-published.ts +25、install.sh +16；面 A 与 engine 的变化来自并行批次，不是本批的口径动作），排除测试 28 文件 / 1,920 行，两条面仍如实挂 `← OVER LIMIT`；brand-surface 血缘 **9,623** / 3,303 文件（+3 与 +1 都是"写下被改掉的那个名字"的位置，金样 `source`/`lineageNote` 记明，反证仍成立）；product-surface **98 条一致 / 0 问题**（@0.7.4）；surface-semantics 0 命中 / 18 文件；hook-liveness 21 钩子无漂移；kernel-pin `iterate-kernel@0.1.5` + **24 个契约文件**，`--probe` 回"是已发布的最新一版"；kernel-conformance **14 条 / 1 实现**绿、**14 条 / 2 实现**绿（`--impl` 指 canonical 检出）；固定点测试 **88 pass / 0 fail**（392 expect，并行批次把套件加到 88 条）；tui 快照 24 pass / 0 fail；`installer-selftest.sh` **61 条 PASS**；`probe-lane-selftest.sh` 三态可分；`check-workflows --self-test` 6 例各自验红 + 5 份工作流干净；`check-doc-links` 24 份 / 225 内链；按 `--single --skip-install --skip-embed-web-ui` 那条 lane 重建 dist，boot smoke `--version` → **0.7.4**，`publish.ts --dry-run` 绿（诚实报 x64 未在本机构建，wrapper 只打一次）。
+
+**typecheck 记一条被包装脚本吞掉的红**：采纳 orphan 版 `verify-published.ts` 后 opencode 包
+typecheck 是 exit 2（`TS2488: Type '{}' must have a [Symbol.iterator]()` —— 它把 `unknown` 直接展开），
+而我的批处理脚本按包循环只取最后一个包的退出码，整条报 0。是自己那条"别信包装退出码、日志整份读"
+的规矩把它抓回来的。修法是把比较两侧走同一个归一（缺字段读成 `[]`＝不匹配而不是崩溃），typecheck
+回到 0，且 **os/cpu 的负向控制重跑仍然咬得住**（改 `product.json` 的 arch ⇒ 具名红）。这条也说明
+`readCode()` 那类"规则读代码"的改动为什么必须连着按包 typecheck 一起跑。
+
+**未观测 / 未做**：真模型轮次、真 TUI 会话观感、`gp_*` 对活 daemon 的一次证据成包真轮次；
+`bun add -g` 通道本轮未重跑（0.7.3 那次的结论是 bun 拦 postinstall ⇒ 命令是给出路的 stub）；
+本地重下发布物做 `shasum -c` 仍不可信（代理截断，见上一节的处理办法：用 gh API 的
+`assets[].digest`）。
+
+，0.7.3 发对了：checksums 那三步活在两个目录里
 
 **触发**：本轮把 0.7.2 推上 split 仓并打 tag（run 38100151152 之前的 38098337688），Release run
 在 `SHA256SUMS for the release assets` 这一步 **失败**：`no matches found for `SHA256SUMS.txt``
