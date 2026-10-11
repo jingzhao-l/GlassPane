@@ -170,6 +170,16 @@ jobs:
     environment: release
     permissions:
       contents: write
+    # One directory, named once, for all three steps of this job. The scratch dir was moved
+    # out of the checkout in f36748b (comment below) but only the first step followed:
+    # `Sign release assets` and `Upload checksum and signature files` still said `cd assets`
+    # — and `assets/` is a *tracked* directory holding logo.svg and banner.svg. The v0.7.2
+    # run showed both halves of that: the sign step signed the two committed images, and the
+    # upload step died with `no matches found for SHA256SUMS.txt` (exit 1), leaving a release
+    # with binaries but no manifest and no signature. A path shared across steps belongs in
+    # one variable, not in three copies.
+    env:
+      ASSET_DIR: ${{ runner.temp }}/release-assets
     steps:
       - uses: actions/checkout@v4
       - name: Download every release asset and checksum it
@@ -189,10 +199,9 @@ jobs:
           # 2 of them unresolvable, and two orphan `.asc` sidecars uploaded for files the
           # release does not carry — a user following `shasum -a 256 -c SHA256SUMS.txt`
           # failed out of the box.
-          work="${RUNNER_TEMP:-/tmp}/release-assets"
-          rm -rf "$work"
-          mkdir -p "$work"
-          cd "$work"
+          rm -rf "$ASSET_DIR"
+          mkdir -p "$ASSET_DIR"
+          cd "$ASSET_DIR"
           gh release download --repo "$GH_REPO" --pattern '*.zip' --pattern '*.tar.gz'
           # A dropped or partial download used to be tolerated (`|| true`) as long as
           # *something* arrived, and SHA256SUMS.txt then vouched authoritatively for only
@@ -255,7 +264,7 @@ jobs:
               "(same for the passphrase). Nothing is published until this is fixed."
             exit 1
           fi
-          cd assets
+          cd "$ASSET_DIR"
           mkdir -p "$HOME/.gnupg" && chmod 700 "$HOME/.gnupg"
           printf '%s\n' "allow-loopback-pinentry" >> "$HOME/.gnupg/gpg-agent.conf"
           gpgconf --kill gpg-agent
@@ -279,7 +288,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          cd assets
+          cd "$ASSET_DIR"
           ASC_FILES=""
           if ls ./*.asc >/dev/null 2>&1; then ASC_FILES="$(ls ./*.asc | tr '\n' ' ')"; fi
           gh release upload "${{ github.ref_name }}" SHA256SUMS.txt $ASC_FILES --clobber --repo "$GH_REPO"
