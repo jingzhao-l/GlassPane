@@ -340,6 +340,15 @@ public final class DegradationTracker {
         // 512 B/s 地板之下，于是一条真实的泄漏被 `judged:true` 认证成"量过了，健康"，而 T9 升级
         // （`tier == .degrading`）在密采样节奏下永远不可能触发。中心化之后两项都是小量级之差。
         let count = Double(points.count)
+        // 跨度判据看的是 x 的**极差**，不是中心化之后的 `Σx²`。这半行曾经被删掉过一次，
+        // 删它的理由是"中心化之后 sumXX 为 0 就是零跨度"——不成立：六个同一个 epoch 秒相加
+        // 再除以六，商与那个 epoch 并不严格相等（`6*e` 自己要舍入），于是每个 `x − meanX`
+        // 是 1e-7 量级的残渣，平方和刚过 `> 0` 这道判据，一条**没有时间跨度**的窗口被算出
+        // 一个 `0.0` 的斜率：那还是"除出来的数"冒充"测不出来"。它是否发生取决于当下这个
+        // 时钟相位落在哪，所以这条红会自己消失又自己回来——按极差判就不看时钟相位。
+        let span = points.lazy.map(\.x).max()
+        let minSpan = points.lazy.map(\.x).min()
+        guard let span, let minSpan, span > minSpan else { return nil }
         let meanX = points.reduce(0) { $0 + $1.x } / count
         let meanY = points.reduce(0) { $0 + $1.y } / count
         var sumXX = 0.0

@@ -108,19 +108,36 @@ final class ReviewCoreATests: XCTestCase {
 
         // 同一时刻的六个样本：跨度为 0，必须拒答而不是拿一个除出来的数当斜率。
         // 节流阀在这里关掉，否则这条用例测的是节流阀。
-        let flat = DegradationTracker(
-            minimumSamplesForTrend: 2, minSampleIntervalSeconds: 0, minimumTrendSpanSeconds: 0
-        )
-        for _ in 0..<6 {
-            _ = flat.record(DegradationSample(
-                timestamp: epoch, pingMs: 10, memoryBytes: 1_000, handleCount: 10
-            ))
+        func zeroSpan(_ base: Double) -> DegradationVerdict {
+            let tracker = DegradationTracker(
+                minimumSamplesForTrend: 2, minSampleIntervalSeconds: 0, minimumTrendSpanSeconds: 0
+            )
+            for _ in 0..<6 {
+                _ = tracker.record(DegradationSample(
+                    timestamp: base, pingMs: 10, memoryBytes: 1_000, handleCount: 10
+                ))
+            }
+            return tracker.verdict()
         }
-        let stalled = flat.verdict()
+        let stalled = zeroSpan(epoch)
         XCTAssertTrue(stalled.judged, stalled.basis)
         XCTAssertNil(stalled.memorySlopeBytesPerSec, "no x span must refuse, not divide")
         XCTAssertNil(stalled.handleSlopePerSec)
         XCTAssertNil(stalled.pingSlopeMsPerSec)
+
+        // 这条拒绝**不许看时钟相位**。旧实现把跨度判据建立在中心化之后的 `Σx²` 上，
+        // 而六个同一个 epoch 的均值不严格等于那个 epoch——残渣是 1e-7 量级、刚过 `> 0`，
+        // 于是同一个断言在某些秒值下绿、在另一些下拿到一个 `0.0`：一条会自己消失又自己回来
+        // 的红，正是这类"除法冒充测量"最难抓的形态。扫一段相位，每一格都必须拒答。
+        var phases = 0
+        for step in stride(from: 0.0, to: 300.0, by: 0.1) {
+            let verdict = zeroSpan(epoch + step)
+            XCTAssertNil(verdict.memorySlopeBytesPerSec, "相位 +\(step) 上没有跨度却给出了斜率")
+            XCTAssertNil(verdict.handleSlopePerSec)
+            XCTAssertNil(verdict.pingSlopeMsPerSec)
+            phases += 1
+        }
+        XCTAssertGreaterThan(phases, 2_500, "相位扫描必须真的跑满，否则这条对照是空的")
     }
 
     // MARK: - Finding 2: an unmeasured pixel channel cannot answer for T3
