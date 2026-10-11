@@ -287,17 +287,42 @@ function runShell(args, stderrSink) {
 }
 
 test("a bad argument writes the whole message before exiting, through a pipe", async () => {
-  // The unknown argument is itself 200 KB, so the *message* it produces is longer
+  // The unknown argument is echoed into the message, so the message ends up longer
   // than the 64 KB pipe capacity: a queued (asynchronous) piped write followed by
   // `process.exit()` loses exactly the tail these assertions read.
-  const long = "x".repeat(200_000);
+  //
+  // 长度是 100 KB 而不是更大：Linux 对**单个** argv 项有 128 KiB 的硬上限
+  // （`MAX_ARG_STRLEN`），200 KB 的项在 CI 的 ubuntu runner 上连进程都起不来
+  // （`spawn E2BIG`——macOS 没有这条限制，所以本机绿、CI 红）。64 KiB 的管道容量两边都
+  // 存在，100 KB 依旧越过它，这条对照在两个平台上测的还是同一件事。
+  const long = "x".repeat(100_000);
   let seen = "";
   const { code } = await runShell([long], (chunk) => { seen += chunk; });
   assert.equal(code, 2);
   assert.match(seen, /unknown argument/);
   assert.match(seen, /usage: glasspane-mcp/);
   assert.ok(seen.includes("<state-dir>/daemon.sock."), `管道里的用法文本被截断了（收到 ${seen.length} 字节）`);
-  assert.ok(seen.length > 200_000, `长消息必须整条送达，收到 ${seen.length} 字节`);
+  assert.ok(seen.length > 100_000, `长消息必须整条送达，收到 ${seen.length} 字节`);
+
+  /* 上面那半条在 macOS 上**不是**能红的对照——本轮实测证明：把这一支改回
+   * `process.stderr.write(...)` + `process.exit(2)`（也就是缺陷本体），100 KB 照样整条到达。
+   * 原因在平台之间不一样：管道写满时 POSIX 的 `write()` 会阻塞在 libuv 线程池里，而
+   * Linux 的 `process.exit()` 会丢掉还在排的写请求、macOS 的则往往已经落完。所以"能不能
+   * 观测到截断"是机器事实，不是代码事实——把它当判据，得到的就是一条永远绿的假闸。
+   *
+   * 因此这条修复由**形状**把关：读退出通路的那一段源码，要求它走同步 fd 写、并且不许在
+   * `process.exit` 前面留一句排队式的 `process.stderr.write`。这与同文件里 stdin error
+   * 那条的口径一致（能跑的跑，跑不稳的钉写法，两种都写清楚自己是哪一种）。 */
+  const source = fs.readFileSync(path.resolve(HERE, "..", "src", "index.ts"), "utf8");
+  const parseCatch = /options = parseArgs\(process\.argv\.slice\(2\)\);[\s\S]{0,120}?catch \(error\) \{([\s\S]{0,600}?)\n  \}/.exec(source);
+  assert.ok(parseCatch, "读不到 parseArgs 的 catch 分支，这条对照已经看不见东西");
+  assert.match(parseCatch[1], /writeDescriptor\(2,/, "参数错误必须由同步 fd 写出去：process.exit 不等队列里的写");
+  assert.doesNotMatch(parseCatch[1], /process\.stderr\.write\(/, "这一支里不许留排队式的 stderr 写（那正是被修掉的那一句）");
+  // 同步写不是"写完就走"：管道满时它拿 EAGAIN，所以必须有界地重试，而不是转成一次静默丢弃。
+  const writer = /function writeDescriptor\([\s\S]{0,2600}?\n\}/.exec(source);
+  assert.ok(writer, "读不到 writeDescriptor 本体");
+  assert.match(writer[0], /fs\.writeSync\(/, "写必须是同步的");
+  assert.match(writer[0], /"EAGAIN"/, "管道满（EAGAIN）必须被认出来，而不是当成写成功");
 });
 
 /* ------------------------------------------------------------------ *

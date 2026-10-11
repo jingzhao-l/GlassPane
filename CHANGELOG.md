@@ -84,7 +84,25 @@ socket 的名字）；探针监听者新增一条 socket 目录硬拒（目录�
   等于把装机文件删了、正名上什么都不剩。闸是一例真进程实验：真起一个孩子跑真拷贝、半路 SIGKILL，
   再回读目标——它必须还是完整的上一版。
 
+### Fixed — 一条"永远绿"的对照：管道截断那半条在 macOS 上根本红不了
+
+`mcp-shell` 的用法文本经管道不许被截，这条修复本轮配了一条端到端用例（真 spawn、真管道、
+200 KB 的未知参数）。反向破坏时它**没有红**：把退出通路改回 `process.stderr.write(...)` +
+`process.exit(2)`（缺陷本体），100 KB 照样整条到达。原因是"能不能观测到截断"是**机器事实**
+而不是代码事实——管道满时 POSIX 的 `write()` 会阻塞在 libuv 线程池里，而 `process.exit()`
+在 Linux 上丢掉还在排的写请求、在 macOS 上往往已经落完。同一笔 CI 还以另一种方式证明了这条
+用例不该那么写：CI 的 ubuntu runner 上它是 `spawn E2BIG` 红的——Linux 对**单个** argv 项有
+128 KiB 硬上限，200 KB 的那一项连进程都起不来（本机绿、CI 红，正是本仓记过的那类坏对照）。
+
+现在两半分开、各自说清自己是哪一半：行为那半降到 100 KB（两边都还越过 64 KiB 的管道容量，
+仍是一条防回归），并由**形状**承担对照——读 `parseArgs` 的 catch 分支，要求它走
+`writeDescriptor(2, …)`、不许留排队式的 `process.stderr.write`，另核 `writeDescriptor` 本体
+确实 `fs.writeSync` 且认 `EAGAIN`（不认就成了"写了一半就当成功"）。反向验证：同处再改回异步
+写 → `a bad argument writes the whole message before exiting, through a pipe` 具名红
+（私有备份 + sha 核回 `13ec649…32ecf2` match=YES）。mcp-shell 全套 428 例 / 0 失败。
+
 ### Fixed — 本机量出来的产品缺陷：收尾校验永远读不出本轮产物的版本
+
 
 `builtDaemonVersion` 找版本行的判据是"这一行以数字开头"，而真产物打的是 `glasspaned 1.11.0`
 （`--version` 的形状由 `DaemonVersionFlagTests` 钉着）。实测本机二进制：
@@ -143,6 +161,13 @@ unlink，跑在脚本点名的隔离状态根里）；`npm run bundle` 与 `npm 
 `.tmp` → `testStagedTempName…` 红；`confirm()` 的调用点摘掉一处 → 对应那一条红；
 `verifyStagedBytes` 去掉 rename-and-return（保留比对） → 构建读到旧树那一条红；
 `builtDaemonVersion` 的解析退回 `^<数字>` → 两条端到端（陈旧 daemon / 版本一致）同时红。
+
+⚠ 本版第一次推上 `main` 的那个 tip（`60f89d8`）**CI 是红的**，红在 `mcp-shell` 那一套里的
+管道用例：CI 的 ubuntu runner 报 `spawn E2BIG`（Linux 对单个 argv 项有 128 KiB 硬上限，
+本轮那条喂的是 200 KB——本机绿、CI 红，正是"断言的前提是机器事实"那一类）。诊断它的时候
+发现同一处更糟的另一半：把缺陷本体改回去，这条在 macOS 上也不红，于是它是一条永远绿的假闸。
+两处一起修（见上面那一组），**第二个 tip 才用来打 tag**。这条记录留在这儿是因为
+"CI 全绿才打 tag"这条规矩在这一版真的拦下了一次发布。
 
 ## [1.11.0] — 2026-10-11
 
