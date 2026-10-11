@@ -14,15 +14,17 @@ schema）；退出码的**声明**没动（`usageText` 那三档 0/1/2 一字未
 
 **取号经过，如实记。** 本线开工时发布态是 `v1.12.1`（tag/Release/npm 三格齐）。跑到中途，并行线把
 `v1.12.2` 的 tag 与 Release 发掉了（`gh release list` 里 `GlassPane 1.12.2 … v1.12.2 2026-10-11T17:00:29Z`，
-`release.yml` 两条 run 38157791383 push / 38158048290 dispatch 都 completed success），而 registry 这一刻
-仍是 `glasspane-mcp latest=1.12.1`、`1.12.2` 不在版本表里——那半程还没跑或正在跑。tag 被占就让号，
-本线因此取 **1.12.3**，不重号、不覆盖，也不去动别人那一格的 npm 半程。
-⚠ 于是 npm 上留着一格 `1.12.2` 的空洞（本仓不是第一次有洞：`1.8.0` 就有意未发 npm）。更具体的风险也写在这
-里：若并行线随后补发 `1.12.2`，那条 workflow 用默认 `latest` 打 tag，npm 的 `latest` 会**倒退**到 1.12.2。
-补救是一条命令，谁补发谁执行——`npm dist-tag add glasspane-mcp@<更高版本> latest` 与
-`npm dist-tag add glasspane-install@<更高版本> latest`（或补发时直接 `npm publish --tag`）。发完请回查
-`registry.npmjs.org/<包>` 的 `dist-tags.latest`，别信本机 `npm view`：它会把旧 packument 从缓存里端出来
-（本轮实测——`npm view glasspane-mcp@1.12.1` 报 ABSENT 的同一时刻，直连 registry 已是 `latest=1.12.1`）。
+`release.yml` 两条 run 38157791383 push / 38158048290 dispatch 都 completed success）。**本线写下这段时
+registry 还只到 1.12.1**（`1.12.2` 不在版本表里），因此预判会留出一格空洞；收口时再量一次，那一格已经被
+并行线自己补上：两包 `dist-tags.latest` 都是 `1.12.2`，版本表尾 `1.11.0, 1.12.0, 1.12.1, 1.12.2`。
+所以 **npm 上没有空洞**，那句预判按实测作废、留在这是为了记住"发布态要收口时再量一次"。
+tag 被占就让号：本线取 **1.12.3**，不重号、不覆盖，也不去替别人那一格跑 npm 半程。
+⚠ 还剩一条真实的顺序风险：`release.yml` 的 npm 那一步用默认 `latest` 打 tag，所以**谁最后发，`latest`
+就归谁**——若更低的版本号在 `1.12.3` 之后被补发，`latest` 会倒退。补救是一条命令，由补发的那个人执行：
+`npm dist-tag add glasspane-mcp@<更高版本> latest`、`npm dist-tag add glasspane-install@<更高版本> latest`
+（或补发时直接带 `--tag`）。发完请回查 `registry.npmjs.org/<包>` 的 `dist-tags.latest`，别信本机 `npm view`：
+它会把旧 packument 从缓存里端出来（本轮实测——`npm view glasspane-mcp@1.12.1` 报 ABSENT 的同一时刻，
+直连 registry 已是 `latest=1.12.1`；加 `--prefer-online` 才肯重取）。
 
 **为什么有这一版**：`v1.12.1` 补发 npm 之后的收口验证量出来的，不是猜的。把 `glasspane-install@1.12.1`
 从 registry 装进一个干净前缀（`/Users/…`，非链接路径）之后：
@@ -74,6 +76,15 @@ $ node <prefix>/lib/node_modules/glasspane-install/cli.js --help → 2,623 字�
 （`…named through a symlink to the file`、`…symlinked directory`），原 9 条全绿。这个反差就是这 4 条闸
 存在的全部理由。两份源码改回后都按备份字节核回（`installer/cli.js` sha `4a9e231a…`、
 `updater/agent-entry.js` sha `3483c62d…`）。
+
+**交付形状的正证（不是"应该能跑"，是照用户那条命令跑了一遍）**：`npm pack` 出
+`glasspane-install-1.12.3.tgz`（55,541 字节）→ 装进干净前缀 → `bin/glasspane-install` 确实是
+`../lib/node_modules/glasspane-install/cli.js` 那条符号链接 → 直接执行它：
+`--help` 回 **2,622 字节**、退出 **0**（第一行 `GlassPane 一键安装器`）；
+未知参数回 **2,706 字节**、退出 **2**，第一句是「参数错误：未知参数：--definitely-not-an-option（--help 查看用法）」；
+`--version` 这个**并不存在**的开关回退出 **2** + 2,689 字节的人话（不再是空 0）；
+同一份文件按真路径跑同样是 2,622 字节。装好的包 `package.json` 与 `cli.js` 里的
+`RELEASE_VERSION` 都读回 `1.12.3`。修之前这三条在交付形状下全是 0 字节 / 退出 0。
 
 ### 未修与实测边界
 
