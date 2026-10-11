@@ -166,8 +166,10 @@ curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.s
 # 2) 经 npm（自己引导 clone 钉住的 tag）
 npx glasspane-install
 
-# 3) 自己管源码（v1.1.1 就是 install.sh 当前钉住的 tag）
-git clone --branch v1.1.1 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
+# 3) 自己管源码：`install.sh` 钉的是本次发布那一个 tag（它的 `GLASSPANE_RELEASE` 默认值，
+#    每次发版由 `scripts/set-version.mjs` 改写）——要装未发布的树才去 `main`。下面那个号是
+#    本版的，用之前对一下 install.sh。
+git clone --branch v1.11.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
 
 `GLASSPANE_REF=<tag>` 指定其他发布版；`GLASSPANE_REF=main` 追主干（它不是固定产物）。

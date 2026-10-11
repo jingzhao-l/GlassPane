@@ -86,8 +86,10 @@ out of scope.
   register as the probe for its own pid and inject handler/state signals; because a present probe signal
   upgrades attribution from `soft` to `strong`, **attribution strength is forgeable by a same-user
   process**. This is known, labelled here as such, and it is not a cross-user escalation.
-- The daemon offers `--force-socket`, which can take over an already-occupied socket, and
-  `--replace-daemon`, which terminates the running instance first. An older or maliciously started
+- The daemon offers `--force-socket`, which can take over an already-occupied socket. Displacing a
+  *running* instance is not one of its flags — that is the installer's `node installer/cli.js
+  --replace-daemon`, which terminates the running instance first; `glasspaned --replace-daemon` is an
+  unknown argument and exits 64. An older or maliciously started
   instance can displace the granted principal. After installing, check the panel's "Daemon status →
   subject" against the binary path that is actually running.
 - How a caller finds the socket, and why the last resort is a guess it is meant to lose: `GLASSPANE_ENGINE_SOCK`,
