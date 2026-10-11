@@ -7,17 +7,17 @@
     "fork": "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted, and one deleted line excuses at most one re-added line (pairing is one-to-one, so 40 copies of a rebranded line bill 39)",
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
-  "observedAt": "2026-10-08",
-  "engineLoc": 23295,
-  "engineFiles": 60,
+  "observedAt": "2026-10-11",
+  "engineLoc": 24760,
+  "engineFiles": 61,
   "surfaces": {
     "mcpShell": {
-      "loc": 8658,
+      "loc": 8975,
       "files": 13,
-      "ratio": 0.2284,
+      "ratio": 0.2261,
       "byFile": {
-        "mcp-shell/src/tools.ts": 2339,
-        "mcp-shell/src/engine-client.ts": 1415,
+        "mcp-shell/src/tools.ts": 2547,
+        "mcp-shell/src/engine-client.ts": 1455,
         "mcp-shell/src/http-gateway.ts": 1279,
         "mcp-shell/src/project-registry.ts": 1098,
         "mcp-shell/src/update-state.ts": 492,
@@ -25,14 +25,14 @@
         "mcp-shell/src/dispatch.ts": 364,
         "mcp-shell/src/evidence-report.ts": 364,
         "mcp-shell/src/io.ts": 339,
+        "mcp-shell/src/index.ts": 295,
         "mcp-shell/src/http-gateway-cli.ts": 240,
-        "mcp-shell/src/index.ts": 226,
         "mcp-shell/src/errors.ts": 87,
         "mcp-shell/src/canonical.ts": 34
       }
     },
     "fork": {
-      "loc": 5953,
+      "loc": 5959,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -102,7 +102,7 @@
         {
           "file": "scripts/install.sh",
           "kind": "added",
-          "lines": 480
+          "lines": 486
         },
         {
           "file": "packages/app/src/components/dialog-connect-provider.stories.tsx",
@@ -1070,7 +1070,7 @@
           "lines": 0
         }
       ],
-      "ratio": 0.157,
+      "ratio": 0.1501,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
@@ -1086,7 +1086,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 14611,
+  "totalToolSurfaceLoc": 14934,
   "note": null,
   "carried": null
 }
