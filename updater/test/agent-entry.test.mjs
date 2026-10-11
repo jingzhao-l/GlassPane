@@ -14,6 +14,9 @@
  *   · answer the missing-pointer case with a stack trace (throw)      → `refuses in data`
  *   · accept an empty source in `ensureAgentEntry`                    → `an empty source is refused`
  *   · skip the read-back comparison in `ensureAgentEntry`             → `a file that reads back short`
+ *   · revert the entry guard to comparing `argv[1]` without realpath  → the two `…through a symlink…`
+ *     controls (npm-style link, and a symlinked directory component) — with the naive guard both report
+ *     an empty stdout and exit 0, i.e. a daily job that claims it ran
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -74,6 +77,79 @@ test('the entry forwards every argument to the copy the pointer names, and its e
   } finally {
     removeDir(stateRoot)
     removeDir(path.dirname(path.dirname(path.dirname(target))))
+  }
+})
+
+/* ------------------------------------------------------------------ how launchd actually reaches it */
+
+/**
+ * The tests above spawn `node <repo>/agent-entry.js` — a real path with no link in it. What launchd
+ * actually reaches is never that clean: the job's `ProgramArguments` spells the state root however the
+ * installer wrote it, and any component of it may be a symlink (`/var/…`, a home or a volume mounted
+ * through a link), or the delivered file may itself be named through a link the way npm names a `bin`.
+ *
+ * node loads an ESM entry by its **real** path, so through a link `process.argv[1]` and
+ * `import.meta.url` are two different strings. A guard that compares them directly skips the whole
+ * entry block: exit 0, nothing printed, no pointer read — a daily update job that reports success while
+ * doing nothing. Both shapes below are reproduced on Linux and macOS alike (the link is created by the
+ * fixture, not inherited from `/var`), so neither is a machine fact.
+ *
+ * REVERSE MUTATION: revert the guard to `path.resolve(process.argv[1]) === path.resolve(pathname)` →
+ * both tests below go red by name with an empty stdout and status 0, while every test above stays green.
+ */
+function pointedCopy(stateRoot, label) {
+  const targetRoot = scratch(`${label}target-`)
+  const target = path.join(targetRoot, 'updater', 'cli.js')
+  fs.mkdirSync(path.dirname(target), { recursive: true })
+  fs.writeFileSync(target, [
+    "#!/usr/bin/env node",
+    "process.stdout.write('reached through the link\\n')",
+    "process.exit(4)",
+    "",
+  ].join('\n'))
+  seedPointer(stateRoot, { updaterCli: target, installRoot: path.dirname(path.dirname(target)), agentLabel: 'com.glasspane.update' })
+  return { target, targetRoot }
+}
+
+test('the entry still runs when it is named through a symlink to the file', () => {
+  const stateRoot = scratch('filelink-')
+  const linkDir = scratch('filelink-bin-')
+  const link = path.join(linkDir, 'agent-entry.js')
+  const copy = pointedCopy(stateRoot, 'filelink-')
+  try {
+    fs.symlinkSync(ENTRY, link)
+    const got = spawnSync(NODE, [link, 'check', '--state-root', stateRoot, '--json'], { encoding: 'utf8' })
+    assert.equal(got.stdout, 'reached through the link\n',
+      `空 stdout + 退出 0 = 入口守卫把符号链接当成"不是被直接运行"，整块没执行：${got.status} ${got.stderr}`)
+    assert.equal(got.status, 4, `退出码仍须是那份被点名 CLI 的：${got.status}`)
+  } finally {
+    removeDir(copy.targetRoot)
+    removeDir(stateRoot)
+    removeDir(linkDir)
+  }
+})
+
+test('the entry still runs when a component of its path is a symlinked directory', () => {
+  const stateRoot = scratch('dirlink-')
+  const box = scratch('dirlink-box-')
+  const realDir = path.join(box, 'real')
+  const linkDir = path.join(box, 'linked')
+  const copy = pointedCopy(stateRoot, 'dirlink-')
+  try {
+    fs.mkdirSync(realDir, { recursive: true })
+    const landing = path.join(realDir, 'agent-entry.js')
+    fs.copyFileSync(ENTRY, landing)
+    fs.chmodSync(landing, 0o755)
+    fs.symlinkSync(realDir, linkDir, 'dir')
+    const throughLink = path.join(linkDir, 'agent-entry.js')
+    const got = spawnSync(NODE, [throughLink, 'check', '--state-root', stateRoot, '--json'], { encoding: 'utf8' })
+    assert.equal(got.stdout, 'reached through the link\n',
+      `状态根写法里有一段链接就该照样执行；空输出说明守卫比的是两种拼法：${got.status} ${got.stderr}`)
+    assert.equal(got.status, 4)
+  } finally {
+    removeDir(copy.targetRoot)
+    removeDir(stateRoot)
+    removeDir(box)
   }
 })
 

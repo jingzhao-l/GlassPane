@@ -19,7 +19,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { createInterface } from 'node:readline/promises'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -69,7 +69,7 @@ export const INSTALL_SH_URL =
 /** 发布线锚点（版本真源 = 根 package.json，由 scripts/set-version.mjs 统一改写，
  *  勿手改）：npx 形态下本地没有仓库时，引导 clone 的就是这个 tag，与 install.sh
  *  的 `GLASSPANE_RELEASE` 同值——两条一键入口必须拿到同一份源码。 */
-export const RELEASE_VERSION = '1.12.2'
+export const RELEASE_VERSION = '1.12.3'
 /** 发布 ref（tag 名）。GLASSPANE_REF 环境变量可覆盖（追主干用 `main`）。 */
 export const REPO_REF = `v${RELEASE_VERSION}`
 
@@ -2512,8 +2512,28 @@ export async function install({
   return outcome
 }
 
-/** 入口守卫：直接用 node 运行本文件时才走安装流程（测试导入仅取函数）。 */
-const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+/** 入口守卫：直接用 node 运行本文件时才走安装流程（测试导入仅取函数）。
+ *
+ * 两侧都必须 realpath。`npm install -g` 和 `npx` 交付的是**符号链接**形式的 bin
+ * （`<prefix>/bin/glasspane-install` → `../lib/node_modules/glasspane-install/cli.js`），
+ * 而 node 把 ESM 入口按 realpath 载入，于是 `import.meta.url` 是被链接的那份、
+ * `process.argv[1]` 是链接本身。只比 `pathToFileURL(process.argv[1]).href` 时两者恒不相等，
+ * 下面整块 `if (isMain)` 一步都不走——退出码 0、stdout 与 stderr 全空：一条 README 里写着
+ * "一键安装"的命令，在 npm/npx 这两条文档路径上安静地什么都不做。
+ * realpathSync 对不存在的路径会抛，而这段在 import 期就执行，所以包起来：比不成＝
+ * "不是被直接运行"，不是"崩掉整个模块"。
+ */
+function invokedAsEntrypoint() {
+  const entry = process.argv[1]
+  if (!entry) return false
+  try {
+    return fs.realpathSync(entry) === fs.realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
+
+const isMain = invokedAsEntrypoint()
 
 if (isMain) {
   // 入口的**每一条**退出都交给事件循环，没有例外。`curl | sh` 是文档里的调用形态，

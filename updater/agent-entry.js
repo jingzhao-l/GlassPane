@@ -29,6 +29,7 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
 /**
  * Exported only so `test/agent-entry.test.mjs` can pin them against their real sources
@@ -114,6 +115,28 @@ export function main(argv = process.argv.slice(2), { env = process.env, spawn = 
 }
 
 // Run only when executed as a command, so the tests can drive `main` without a process each time.
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {
+//
+// Both sides must be realpath-resolved, not merely resolved against the cwd. node loads an ESM entry
+// by its real path, while `process.argv[1]` keeps whatever spelling the caller used — and the caller
+// here is launchd, whose `ProgramArguments` entry is the path the installer wrote. If any component of
+// the state root is a symlink (`/var/…`, a home or volume mounted through a link), the two strings
+// differ and the whole block is skipped: the daily job exits 0 having resolved no pointer, exec'd
+// nothing, and written nothing. A silently inert updater is worse than a failing one, because exit 0
+// is what every reader here treats as "this morning's update ran". realpathSync throws for paths that
+// do not exist yet, and this runs at import time, so the comparison is wrapped: uncomparable means
+// "not invoked as a command", never "crash the entry". The URL is decoded with `fileURLToPath` rather
+// than read through `.pathname`, which leaves a state root containing a space or a CJK character
+// percent-encoded (`…/%E5%BC%A0…`) and therefore never equal to the path launchd passed in.
+function invokedAsCommand() {
+  const entry = process.argv[1]
+  if (!entry) return false
+  try {
+    return fs.realpathSync(entry) === fs.realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
+
+if (invokedAsCommand()) {
   process.exitCode = main()
 }

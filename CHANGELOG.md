@@ -2,6 +2,118 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.12.3] — 2026-10-12
+
+**版本判断：patch。** 四条判据逐条实测：状态文件字段没动（`installer` 与 `agent-entry` 都不写任何状态
+schema）；退出码的**声明**没动（`usageText` 那三档 0/1/2 一字未改）；CLI 参数面没动（没加、没删、没改任何
+开关语义——`--version` 这个开关仍然不存在，经链接调用时它现在如实回 2 与一句"未知参数"，那是声明里的
+行为，实测见下面第 4 层那两条闸）；两个 npm 包的 `bin` **声明**没动（`installer/package.json` 与
+`mcp-shell/package.json` 在本次 diff 里只被 `set-version` 改了 `version` 那一行，`bin` 字段逐字未变）。
+如实记下但不在那四条里：经符号链接调用时，**实测**退出码集合从 `{0}`（入口整块不跑）变成声明里的
+`{0,1,2}`——这一格变化正是本版要修的东西本身：那条命令从前对任何参数都只回一个 0。
+
+**取号经过，如实记。** 本线开工时发布态是 `v1.12.1`（tag/Release/npm 三格齐）。跑到中途，并行线把
+`v1.12.2` 的 tag 与 Release 发掉了（`gh release list` 里 `GlassPane 1.12.2 … v1.12.2 2026-10-11T17:00:29Z`，
+`release.yml` 两条 run 38157791383 push / 38158048290 dispatch 都 completed success）。**本线写下这段时
+registry 还只到 1.12.1**（`1.12.2` 不在版本表里），因此预判会留出一格空洞；收口时再量一次，那一格已经被
+并行线自己补上：两包 `dist-tags.latest` 都是 `1.12.2`，版本表尾 `1.11.0, 1.12.0, 1.12.1, 1.12.2`。
+所以 **npm 上没有空洞**，那句预判按实测作废、留在这是为了记住"发布态要收口时再量一次"。
+tag 被占就让号：本线取 **1.12.3**，不重号、不覆盖，也不去替别人那一格跑 npm 半程。
+⚠ 还剩一条真实的顺序风险：`release.yml` 的 npm 那一步用默认 `latest` 打 tag，所以**谁最后发，`latest`
+就归谁**——若更低的版本号在 `1.12.3` 之后被补发，`latest` 会倒退。补救是一条命令，由补发的那个人执行：
+`npm dist-tag add glasspane-mcp@<更高版本> latest`、`npm dist-tag add glasspane-install@<更高版本> latest`
+（或补发时直接带 `--tag`）。发完请回查 `registry.npmjs.org/<包>` 的 `dist-tags.latest`，别信本机 `npm view`：
+它会把旧 packument 从缓存里端出来（本轮实测——`npm view glasspane-mcp@1.12.1` 报 ABSENT 的同一时刻，
+直连 registry 已是 `latest=1.12.1`；加 `--prefer-online` 才肯重取）。
+
+**为什么有这一版**：`v1.12.1` 补发 npm 之后的收口验证量出来的，不是猜的。把 `glasspane-install@1.12.1`
+从 registry 装进一个干净前缀（`/Users/…`，非链接路径）之后：
+
+```
+$ <prefix>/bin/glasspane-install --help            → stdout 0 字节 / stderr 0 字节 / 退出 0
+$ <prefix>/bin/glasspane-install --no-such-flag    → stdout 0 字节 / stderr 0 字节 / 退出 0（声明是 2）
+$ node <prefix>/lib/node_modules/glasspane-install/cli.js --help → 2,623 字节 usage / 退出 0
+```
+
+同一条命令，用**真路径**跑就正常。根因是入口守卫：node 按 realpath 载入 ESM 入口，
+`import.meta.url` 是被链接指向的那份文件，而 `process.argv[1]` 是链接本身；
+`installer/cli.js` 写的是 `import.meta.url === pathToFileURL(process.argv[1]).href`，两个字符串在有链接
+的调用形态下恒不相等，于是整块 `if (isMain)` 一步都不走——退出码 0、什么都不打印。`npm install -g`
+与 `npx` 交付给用户的正是那种链接形式的 bin，也就是 `installer/README.md:18` 与
+`mcp-shell/README.md:15` 写着的那两条路径。**影响面是这一个包的全部已发布版本**：registry 上
+`glasspane-install` 有 19 个版本（`1.0.0` → `1.12.1`，首发 2026-09-21T14:14:31Z），而那个守卫自安装器的
+第一笔提交 `88c5bfa` 就是这个写法。没人发现是因为仓库内所有安装动作走的都是
+`install.sh` → `node installer/cli.js`（真路径）。
+
+### Fixed — 安装器与更新代理入口在"经符号链接调用"时静默空转
+
+- `installer/cli.js`：入口守卫改为两侧都 `fs.realpathSync` 再比（与 `updater/cli.js:742` 那条早已如此
+  写下的形态对齐），并保留"比不成＝不是被直接运行，而不是崩掉模块"的包裹。
+- `updater/agent-entry.js`：同族第二处，写的是 `path.resolve(argv[1]) === path.resolve(pathname)`——
+  `path.resolve` 不解析链接，所以 launchd 的 `ProgramArguments` 里只要有任何一段是链接（`/var/…`、
+  经链接挂载的家目录或卷），每日更新作业就退 0 而**不读指针、不 exec 任何东西**；退 0 恰是本仓各处
+  读者眼里"今早的更新跑过了"的记号。同一次改动还换掉了 `new URL(...).pathname`：它不解百分号编码，
+  状态根路径里有空格或中文时两个字符串永远不同。改用 `fileURLToPath(import.meta.url)` + 两侧 realpath。
+
+### 闸（这一族的形状此前测不到，是因为端到端用的是真路径）
+
+`installer/test/failure-exit.test.mjs` 原本已有端到端层，跑的是 `node <repo>/installer/cli.js --help`
+——真路径，守卫比得上，所以修之前它全绿；`parseArgs` 的进程内单测答得出 `{help:true}`，那与"入口到底
+有没有执行"是两件事。本版加的是**交付形状**那一层，四个新闸：
+
+- 安装器侧 2 条：复刻 `npm install -g` 落地的目录（`lib/node_modules/<包名>/cli.js` 置 0755，
+  `bin/<包名>` 是**相对**符号链接），bin 目标从 `installer/package.json` 的声明里读、不写死文件名；
+  然后按用户那样直接执行那条链接，要求 `--help` 的 usage 一个字节都不少（>1000 字节、末字节是换行）、
+  未知参数仍是退出码 2 且后面跟着整份 usage。
+- 更新器侧 2 条：一条把入口做成**文件级链接**再跑，一条把入口放进**目录级链接**里再跑。两条都由夹具
+  自己造链接，Linux 与 macOS 同形——不是"本机才有"的机器事实。断言看的是那份被指针点名的 CLI 的
+  stdout 与退出码 4 是否原样到达；空 stdout + 退 0 正是入口没跑的签名，失败信息里就这么写。
+
+**反向破坏证据**（两处独立，sha256 核回备份）：把 `installer/cli.js` 的守卫换回
+`pathToFileURL(process.argv[1]).href` 那一版 → `failure-exit.test.mjs` 8 条里**只有新增那 2 条**具名变红
+（`经 npm 的 bin 符号链接：--help…`、`…未知参数仍是退出码 2…`），原 6 条全绿；把
+`updater/agent-entry.js` 的守卫换回 `path.resolve` 版 → 11 里**只有新增那 2 条**具名变红
+（`…named through a symlink to the file`、`…symlinked directory`），原 9 条全绿。这个反差就是这 4 条闸
+存在的全部理由。两份源码改回后都按备份字节核回（`installer/cli.js` sha `4a9e231a…`、
+`updater/agent-entry.js` sha `3483c62d…`）。
+
+**交付形状的正证（不是"应该能跑"，是照用户那条命令跑了一遍）**：`npm pack` 出
+`glasspane-install-1.12.3.tgz`（55,541 字节）→ 装进干净前缀 → `bin/glasspane-install` 确实是
+`../lib/node_modules/glasspane-install/cli.js` 那条符号链接 → 直接执行它：
+`--help` 回 **2,622 字节**、退出 **0**（第一行 `GlassPane 一键安装器`）；
+未知参数回 **2,706 字节**、退出 **2**，第一句是「参数错误：未知参数：--definitely-not-an-option（--help 查看用法）」；
+`--version` 这个**并不存在**的开关回退出 **2** + 2,689 字节的人话（不再是空 0）；
+同一份文件按真路径跑同样是 2,622 字节。装好的包 `package.json` 与 `cli.js` 里的
+`RELEASE_VERSION` 都读回 `1.12.3`。修之前这三条在交付形状下全是 0 字节 / 退出 0。
+
+### 未修与实测边界
+
+- `glasspane-mcp` 的两个 bin（`glasspane-mcp`、`glasspane-http`）**没有**这一族问题：那两个入口没有
+  守卫，import 即 `main()`。已实测（都经 `/var/tmp` 那条链接装出来的 bin 直接执行；`/var` 在 macOS 上是
+  `/private/var` 的链接，正是能压出这一族问题的调用形状）：`glasspane-mcp` 走 stdio 握手回
+  `serverInfo {"name":"glasspane-mcp","version":"1.12.1"}`、`tools/list` 回 16 个 `gp_*`；
+  `glasspane-http --help` 回 1,605 字节 usage。仓库里带 `bin` 声明的一共就这三个入口，`glasspane-update`
+  没有 `bin`（按路径被调用），根包与 `kernel` 也不发布 `bin`。
+- `scripts/make-release-archive.mjs:449` 也是 `path.resolve` 不比链接的同型写法。不改：它是发布者本地的
+  打包脚本，只以 `node scripts/…` 真路径调用，不进入任何交付物或作业定义。
+- 本版没有实跑经链接交付的那条 `glasspane-install` 的**完整安装**（那要真编译 Swift、真注册 launchd）；
+  测的是入口被跑到、且两条拒绝路径（usage / 参数错误）按声明到达。完整安装的证据仍来自真路径那三条
+  端到端与 `install.sh` 的 dry-run 套件。
+- ⚠ 本机在收口这一小时里 load 长期 60–85（并行线的 tool-surface/hook-liveness 并发同时跑）。全套 workspace
+  测试在这一负载下出现过 4 条**计时类**具名红，逐条隔离复跑后的结论分两种，如实分开记：
+  ① `installer` 的 `startDetached: 窗口内非零退出/被信号终止…` 与 `updater` 的
+  `handshakeVerify needs both the socket version and a working tools/list, over real processes`（跑了 164 秒）
+  ——**隔离复跑转绿**（`bundle-apps` 32/32、`apply.test.mjs` 62/62），而且第二次复跑时红的那条换成了它的同胞
+  `窗口内 0 退出…`（报 `null` 而非 `{code:0}`）：红的位置会移动，这是测到调度器的形状。
+  ② `mcp-shell` 的 `call rejects on transport error as GP_E_ENGINE_UNREACHABLE` 与
+  `tools/call engine unreachable maps to isError with GP_E_ENGINE_UNREACHABLE` ——**隔离复跑仍红**
+  （`engine-client` 58 条 1 红、`dispatch` 32 条 1 红），实际回的码是 `GP_E_ENGINE_TIMEOUT`。这两条所在文件
+  不在本轮 diff 里（本轮只动 `installer/cli.js`、`updater/agent-entry.js` 与两份测试），且**同一份内容**在
+  CI 上是绿的（`e178c53` 的 `mcp-shell (TypeScript)` 与 `root workspace gate` 两个 check run 都 success）。
+  所以本轮把它们记为"本机在此负载下不可复现判定"，不写成已验证。按本仓口径这属于"只在负载下红的计时
+  断言＝坏对照"那一类：修法应是让判据接受"实测哪一档就答哪一档"，或改用不会被延迟的桩，而不是加超时。
+  本轮没有动它们——在本机这个负载下改完也无法证明改对了。**待真机低负载复跑。**
+
 ## [1.12.2] — 2026-10-12
 
 **版本判断：patch。** 那四条逐条实测：状态文件的字段没动；CLI 参数没动；两个 npm 包的
@@ -96,11 +208,20 @@ daemon 答复不一致时两个数都显示，写清以后者为准（删除按�
 `listening on …`——那一行本来就是说谎，删掉它改变的是"说了什么"，不是参数或退出码。按本仓口径记 patch。
 
 **本版包含 `v1.12.0` 的全部内容**（`v1.12.0` 这一串是它的祖先）。npm 那条线在本版收口期间动了：
-`1.12.0` 已于 2026-10-11T14:51:55Z 上 registry（两包 `latest=1.12.0`，带 SLSA v1 provenance，
-即由有 `workflow` scope 的一方走 `release.yml` 发的——本会话这把 token 没有那一档，实测 `gh auth status`
-scopes 仍是 `admin:public_key, gist, read:org, repo`）。所以这里**没有**"有意空洞"：1.12.0 在 npm 上是
-真实存在的一格，本版 **1.12.1 尚未发 npm**，要补就一条命令：
-`gh workflow run release.yml --ref v1.12.1 -f mode=dry` → 同 ref `-f mode=publish`。
+`1.12.0` 已于 2026-10-11T14:51:55Z 上 registry（两包 `latest=1.12.0`，带 SLSA v1 provenance）。
+⚠ 这一段原先写着"本会话这把 token 没有 `workflow` scope，所以 1.12.1 发不了"——**那句是错的，按实测改过来**：
+`gh auth status` 的 scopes 行确实只列出 `admin:public_key, gist, read:org, repo`，但同一把 token 三次派发
+`workflow_dispatch` 全部成功（dry run 38153919299 / 38153930051，publish run 38154042755）。真正拦住的是
+传参形状：`gh api …/dispatches -f mode=dry` 把 input 放在顶层，GitHub 回 **422**「"mode" is not a permitted
+key」，那次报错被误读成了权限不足。正确写法 `gh workflow run release.yml --ref v<ver> -f mode=dry|publish`，
+走 API 则把 input 嵌进 `inputs` 里。**权限结论以能不能派发为准，不以 scopes 那一行为准。**
+`1.12.1` 已于 2026-10-11T16:06:53Z 发出：两包 `latest` 都是 1.12.1，各自带 SLSA v1 provenance——
+CI 那一步为两个包都打了 `Provenance statement published to transparency log`（logIndex 3210343839 =
+`glasspane-mcp`、3210344268 = `glasspane-install`），registry 的 `dist.attestations` 里两包的
+`provenance.predicateType` 都是 `https://slsa.dev/provenance/v1`；拉下 `glasspane-mcp` 那份 attestation
+解出的 subject 是 `pkg:npm/glasspane-mcp@1.12.1` 配 sha512 摘要。registry 上的 `bin` 声明逐字与 1.12.0 相同。
+**而正是这次发布把 `[1.12.3]` 那一节要修的缺陷量了出来**：干净前缀装好后
+`<prefix>/bin/glasspane-install --help` 回 0 字节、退出 0。
 ⚠ 已公开的 tag 说明（`git tag -v v1.12.1` 的正文）里写着"1.12.0 从未发出"，那是它写就之时的事实，
 几分钟后被推翻；tag 不改（挪公开 tag 属需 owner 点头的动作），以本条为准。
 

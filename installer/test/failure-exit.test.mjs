@@ -8,17 +8,19 @@
  * swift，预检拒绝**必然**走到，而原来的端到端测试却指望走到 install 的拒绝分支——
  * 一条依赖机器状态的断言，本机绿、CI 红。
  *
- * 所以这里分三层，每层都不许问"这台机器有什么"：
+ * 所以这里分四层，每层都不许问"这台机器有什么"：
  *  (1) 机制——同一段大输出，`process.exit()` 是否真丢字节由本机**实测**，量不到就如实说
  *      "本机不可观测"并跳过；这条永远不是产品闸，只是存在性证明。
  *  (2) 形状——入口那一段里一个 `process.exit(` 都不许留（静态、跨平台、每个 CI 都跑）。
  *  (3) 端到端——三条在**任何**平台都走得到的拒绝路径（--help、参数错误、把 PATH 抽干净逼出
  *      环境预检拒绝），各看退出码与"已经写出去的字节一个都不许少"；真安装失败那一条要等
  *      swift 在场才可达，按前置条件跳过并说明原因。
+ *  (4) 交付形状——按 `npm install -g` 落地的目录与**符号链接形式的 bin**跑一遍 --help 与
+ *      参数错误；第 (3) 层用真路径，测不到用户实际敲的那条命令（见该层注释里的实测数字）。
  *
  * REVERSE MUTATION：把入口任意一条改回 `process.exit(` → 第 (2) 层红；把 --help 那条的
  * `process.exitCode = 0` 换成 `process.exit(0)`，在会出现截断的平台上第 (3) 层的 usage
- * 完整性断言一起红。
+ * 完整性断言一起红；把入口守卫换回不比 realpath 的那版 → 只有第 (4) 层两条红。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -179,5 +181,78 @@ test('端到端 真安装失败：走到 install 的拒绝分支时步骤输出�
     assert.equal(r.stdout.slice(-1), '\n', 'stdout 必须停在一次完整写入的末尾')
   } finally {
     removeRoot(root)
+  }
+})
+
+/* ---------------------------------- (4) npm 交付的形状：bin 是一条符号链接 */
+
+/**
+ * 上面四条端到端都用**真路径**跑 `node <CLI> …`，而用户手里那条 `glasspane-install` 不是真路径：
+ * `npm install -g` 在 `<prefix>/bin/` 放的是一条相对符号链接，指向
+ * `lib/node_modules/glasspane-install/cli.js`；`npx glasspane-install` 走的是 `.bin/` 下同一种链。
+ * node 按 realpath 载入 ESM 入口，于是 `process.argv[1]` 是链本身、`import.meta.url` 是被指向的文件，
+ * 两个字符串恒不相等。守卫若直接比这两个，整块 `if (isMain)` 一步都不走：退出码 0，stdout 与 stderr
+ * 全空——README 里写着"一键安装"的命令，在 npm 与 npx 这两条**文档里给的路径**上安静地什么都不做，
+ * 而真路径的测试全绿。2026-10-12 从 registry 装 1.12.1 到干净前缀实测：`--help` 0 字节 / rc 0，
+ * 未知参数也是 0 字节 / rc 0（本该是 2）。
+ *
+ * 夹具就得长成产品交付的样子：目录布局、相对链接写法、目标文件的可执行位、bin 路径从
+ * package.json 读（改了声明这条闸会跟着走，不会钉死在旧文件名上）。
+ *
+ * REVERSE MUTATION：把入口守卫换回 `import.meta.url === pathToFileURL(process.argv[1]).href`
+ * → 下面两条具名变红，而第 (3) 层那三条仍绿；这个反差正是这条闸存在的理由。
+ */
+function npmInstalledCli() {
+  const root = tempRoot('npmprefix')
+  const pkgSrc = path.dirname(CLI)
+  const manifest = JSON.parse(fs.readFileSync(path.join(pkgSrc, 'package.json'), 'utf8'))
+  const binTarget = typeof manifest.bin === 'string' ? manifest.bin : manifest.bin[manifest.name]
+  assert.ok(binTarget, `package.json 没给 ${manifest.name} 声明 bin，这条闸就无处安放`)
+  const pkgDir = path.join(root, 'lib', 'node_modules', manifest.name)
+  const binDir = path.join(root, 'bin')
+  fs.mkdirSync(pkgDir, { recursive: true })
+  fs.mkdirSync(binDir, { recursive: true })
+  for (const file of ['cli.js', 'package.json']) {
+    fs.copyFileSync(path.join(pkgSrc, file), path.join(pkgDir, file))
+  }
+  fs.chmodSync(path.join(pkgDir, binTarget.replace(/^\.\//, '')), 0o755)
+  const link = path.join(binDir, manifest.name)
+  fs.symlinkSync(path.relative(binDir, path.join(pkgDir, binTarget)), link)
+  // PATH 只留 node：`--help` 与参数错误两支都在环境预检之前返回，不该被这台机器有什么拖累。
+  return { root, link, env: { PATH: path.dirname(process.execPath), HOME: tempRoot('home'), GLASSPANE_NO_COLOR: '1' } }
+}
+
+function runInstalled(cli, args) {
+  return spawnSync(cli.link, args, { encoding: 'utf8', env: cli.env, timeout: 120_000 })
+}
+
+test('端到端 经 npm 的 bin 符号链接：--help 的 usage 一个字节都不许少', () => {
+  const cli = npmInstalledCli()
+  try {
+    const r = runInstalled(cli, ['--help'])
+    assert.equal(r.status, 0, `stdout=${r.stdout}\nstderr=${r.stderr}`)
+    assert.ok(r.stdout.length > 1000,
+      `实到 ${r.stdout.length} 字节——0 字节意味着入口守卫判成"不是直接运行"，`
+      + `整块 if (isMain) 没执行（argv[1] 是链接路径，import.meta.url 是被指向文件的 realpath）：${r.stdout}`)
+    assert.match(r.stdout, /用法|USAGE/, r.stdout.slice(0, 200))
+    assert.equal(r.stdout.slice(-1), '\n', '最后一行必须完整')
+  } finally {
+    removeRoot(cli.env.HOME)
+    removeRoot(cli.root)
+  }
+})
+
+test('端到端 经 npm 的 bin 符号链接：未知参数仍是退出码 2 并说人话', () => {
+  const cli = npmInstalledCli()
+  try {
+    const r = runInstalled(cli, ['--definitely-not-an-option'])
+    assert.equal(r.status, 2,
+      `参数错误必须退出 2；实得 ${r.status}（stdout=${r.stdout.length} 字节，stderr=${r.stderr.length} 字节）`
+      + `——0 字节 + 0 退出正是入口没跑的签名\nstderr: ${r.stderr}`)
+    assert.match(r.stderr, /参数错误/, r.stderr)
+    assert.ok(r.stderr.length > 500, `参数错误后面该跟着整份 usage，实到 ${r.stderr.length} 字节`)
+  } finally {
+    removeRoot(cli.env.HOME)
+    removeRoot(cli.root)
   }
 })
