@@ -4,8 +4,8 @@
   "referenceClone": ".external/opencode",
   "observedAt": "2026-10-11",
   "counts": {
-    "identical": 4666,
-    "edited": 261,
+    "identical": 4665,
+    "edited": 262,
     "added": 82,
     "deleted": 1705
   },
@@ -269,6 +269,7 @@
     "packages/tui/test/fixture/fixture.ts",
     "packages/tui/test/fixture/tui-sdk.ts",
     "packages/tui/test/util/presentation.test.ts",
+    "script/publish.ts",
     "script/translate-app.test.ts",
     "script/translate-app.ts"
   ],
@@ -3353,6 +3354,11 @@
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
       "forkHash": "fd85deb3dfc972fcccc53bbbfc24b4f52f5a0db9"
+    },
+    {
+      "file": "script/publish.ts",
+      "upstreamHash": "31117b045e11b9ba9e0a0a87e34b3e02819a2d75",
+      "forkHash": "081790fdfa164574db621a889fcc299a9f80ae2d"
     },
     {
       "file": "script/translate-app.test.ts",
