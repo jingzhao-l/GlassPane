@@ -73,19 +73,29 @@ stderr: glasspaned: refusing to take over /var/tmp/…/state/daemon.sock.
 所以已发布的 `v1.12.0` 归档与 GitHub Release 带的是修之前的那句 announce。不移 tag、不重发：
 挪已公开的 tag 属于需要 owner 点头的动作。这一条留给下一版。
 
-### 2026-10-11 主仓每日线：收三条遗留 —— **本段未发版**
+## [1.12.1] — 2026-10-11
 
-**没发版，且不是忘了。** 收口时 `origin/main` tip 的 CI 在 `harness rulers → fork-diff` 这一步红：
-harness 那一路的 `c3c98af [gp] release(harness): 0.7.4` 改了 fork 里的 `script/publish.ts`，
-而 `harness/contracts/fork-diff.json` 的金样没跟着重记。本地复现同一条红：
-`edited list changed (261 recorded → 262 actual)` / `+ script/publish.ts` /
-`has no recorded content hash (golden predates hash recording) — re-run --record`。
-本线的改动没有一个字节落在 `harness/` 或 fork 里，这条红不是本线造成的；但发版凭据是
-"**该 tip 的 CI 全绿**"，而修它要动的恰是本线禁止改动的面。所以下面三条进 `[未发布]`，
-版本线留在 1.12.0，不打 tag、不发 npm。金样重记之后这三条按 **patch** 出：状态文件的字段没动、
-退出码集合没动（本轮只是把程序早已会回的 `2` 补进 `--help`，没改哪条路径回哪个码）、
-CLI 参数没动、两个 npm 包的 `bin` 没动。反面考虑过 minor：确认表多出一行橙色交代与一个禁用态，
-但那是既有控件的状态，不是新的用户可见控制件。
+### 收三条遗留（主仓每日线）—— 版本判断：patch
+
+**这一版一度按"不发版"收口，两条事实都留在记录里。** 写下这段时 `origin/main` 的 CI 在
+`harness rulers → fork-diff` 上红：harness 那一路的 `c3c98af [gp] release(harness): 0.7.4`
+改了 fork 里的 `script/publish.ts`，而 `harness/contracts/fork-diff.json` 的金样没跟着重记。
+本线在本地复现过同一条红：`edited list changed (261 recorded → 262 actual)` /
+`+ script/publish.ts` / `has no recorded content hash (golden predates hash recording) — re-run --record`。
+本线的改动没有一个字节落在 `harness/` 或 fork 里，这条红不是本线造成的；而发版凭据是
+"**该 tip 的 CI 全绿**"，修它要动的恰是本线禁止改动的面——所以当时判定不发。
+红是**上游自己合流修掉的**（`7fe3be0`/`c3dbfee`）；本线 rebase 之后 21 道闸连 fork-diff 一起绿，
+base `c3dbfee` 的 CI 也是绿的，于是这一版照发。凭据缺失时不该发，凭据回来了也不该装作没这回事。
+
+**判据逐条实测**（1.6.2 写下、1.9.0 / 1.11.0 / 1.12.0 沿用的那四条）：状态文件的字段没动；
+CLI 参数没动；两个 npm 包的 `bin` 没动；退出码**集合**没动——本轮只把程序早已会回的 `2`
+补进 `--help`，哪条路径回哪个码一个字没改（统一到 64 属契约变更，留给 owner）。
+反面考虑过 minor 并否掉：确认表多出一行橙色交代与一个禁用态，那是既有控件的状态，
+不是新的用户可见控制件，且它服务的是一条缺陷修复。
+
+同版另收一处口径合流：`PanelDaemonCommandContractTests` 把"当前恰好三条组装调用"换成关系判据
+（`runDaemonCLI` 调用点数 == `daemonCLIArguments` 组装次数，且每次组装都点名状态根），
+因为本线第四处合法调用（预览）让写死的 `== 3` 红了——变的是条数，不是规则。
 
 #### Fixed — 清理预览的清单改由 daemon 的 `--project-prune --dry-run` 产生
 
