@@ -543,6 +543,7 @@ if (!golden) die(2, `no golden at ${path.relative(repoRoot, goldenFile)} — run
 if (!golden.surfaces?.mcpShell || !golden.surfaces?.fork) die(2, "golden is missing a surface — re-record")
 
 let red = 0
+
 const pairs = [
   ["surface A (mcp-shell/src)", observed.surfaces.mcpShell, golden.surfaces.mcpShell],
   ["surface B (fork, ours)", observed.surfaces.fork, golden.surfaces.fork],
@@ -555,9 +556,17 @@ for (const [name, now, was] of pairs) {
     // a ratchet is that a person acknowledges the growth, and you cannot acknowledge
     // what the message will not identify. Falls back to nothing (rather than
     // guessing) when the recorded baseline predates per-file data.
-    const before = was.byFile
-    const after = now.byFile
-    if (before && after) {
+    // Surface A records `byFile`; surface B records a `files` list of
+    // `{file, kind, lines}`. Reading only `byFile` meant surface B — the one that is
+    // *ours*, and the one a reader most needs attributed — grew with no name attached,
+    // while the comment above this block claimed surface B was already attributed.
+    // Both shapes are normalized into one map here rather than duplicating the diff.
+    const asMap = (surf) =>
+      surf?.byFile ??
+      Object.fromEntries((surf?.files ?? []).map((f) => [`${f.kind} ${f.file}`, f.lines]))
+    const before = asMap(was)
+    const after = asMap(now)
+    if (Object.keys(before).length > 0 && Object.keys(after).length > 0) {
       const moved = []
       for (const [file, lines] of Object.entries(after)) {
         const was0 = before[file]
