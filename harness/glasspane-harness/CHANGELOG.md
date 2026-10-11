@@ -12,6 +12,48 @@ contract does not).
 
 <!-- 内容归入下一版；此处留空以备下一批。 -->
 
+## [0.7.3] - 2026-10-11
+
+判据（pre-1.0）：**patch** —— 一条发布链路的修复，产品面、CLI 形状、证据契约、目标矩阵全部不动。
+
+### Fixed — `checksums` 那条 job 的三个步骤活在两个目录里
+
+`v0.7.2` 的 Release run 把这条抓了出来（run 38098337688）：两个平台的 `binary` job 与
+`create-release` 都绿，`SHA256SUMS for the release assets` **失败**在最后一步
+`no matches found for SHA256SUMS.txt`（exit 1）——于是 0.7.2 有二进制、**没有清单也没有签名**。
+
+成因是上一批（`f36748b`）把下载+求和那一步的工作目录从仓库里的 `assets/` 挪到了
+`${RUNNER_TEMP}/release-assets`（理由写在注释里：`assets/` 是被版本控制的目录，装着
+`logo.svg`/`banner.svg`，`cd assets` 是个 no-op，`sha256sum ./*` 于是给两个跟发布无关的
+仓库文件作保），但**只挪了一步**：紧随的 `Sign release assets with GPG` 与
+`Upload checksum and signature files` 仍然写着 `cd assets`。后果分两半，都在那次 run 里发生：
+签名步签的是那两张已提交的 svg，上传步在自己的目录里找不到 `SHA256SUMS.txt` 而退出。
+0.7.1 的资产列表里那对 `logo.svg.asc`/`banner.svg.asc`（下载数 0）就是同一件事的化石。
+
+修法（今天树里实际长的样子）：下载/求和、签名、上传三步都指向同一个
+`${RUNNER_TEMP:-/tmp}/release-assets`，并把"这条路径两步不一致就是路径本身的 bug"写进注释。并行
+lane 独立提交了同一处修复（`a51b96f`，三步各写一次路径 + 因果注释），我这边先提交的是 job 级
+`env: ASSET_DIR`（`bd690a9`）；合并时冲突取 trunk 那份，等价修法不并排放两份，`ASSET_DIR` 那两处
+非冲突 hunk 一并撤掉，不给树留一个没人读的变量。
+
+### Fixed — 一条会误报的发布闸（改的是报告，不是判据）
+
+`script/verify-published.ts 0.7.3` 在这台机器上 exit 1，失败项写作
+`the installed binary serves the embedded web app — no response`。读代码：等待窗口是
+30 × 500ms = 15s，而子进程的 stdout/stderr 被丢掉不看——于是"负载太重、108MB 单文件 15s 内没起来"
+与"这份产物里没有内嵌 web"共用同一句话。手测同一条通道：`serve --port 4814` 起来后
+`curl http://127.0.0.1:4814/` 在 **8s** 内回 2,883 字节真 HTML，所以那次红是环境而不是发布物。
+现在失败报告会写明等了多久、服务器有没有报出监听端口，并带出它输出的最后三行；从未报出监听端口
+的那种情形明写 `INCONCLUSIVE` 并给出复跑办法。**判据一条没放宽**：观察不到仍然不绿。
+
+### 0.7.2 的发布物状态（如实记，不当作已具备的保证）
+
+GitHub Release `v0.7.2` 存在且带着 `glasspane-harness-darwin-arm64.zip` /
+`-darwin-x64.zip`，**但没有 `SHA256SUMS.txt`、没有 `.asc`**；npm 上没有 0.7.2（publish 两条
+job 在 push 触发的 run 里全部 `skipped`）。curl 兜底安装器对 0.7.2 会走"清单缺失"那条拒绝
+分支——这是坏发布，不是噪声。0.7.3 才是这一版内容应有的发布物；0.7.2 的 tag 与 Release 保留
+原地（版本号与 tag 不回收、不删），本节就是它的说明。
+
 ## [0.7.2] - 2026-10-10
 
 判据（pre-1.0）：**patch** —— 本轮没有新增命令、没有改 CLI/TUI 形状、没有动参数；改的全是

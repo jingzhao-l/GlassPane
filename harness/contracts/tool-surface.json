@@ -8,13 +8,13 @@
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
   "observedAt": "2026-10-11",
-  "engineLoc": 24689,
+  "engineLoc": 24698,
   "engineFiles": 62,
   "surfaces": {
     "mcpShell": {
       "loc": 8975,
       "files": 13,
-      "ratio": 0.2258,
+      "ratio": 0.2256,
       "byFile": {
         "mcp-shell/src/tools.ts": 2547,
         "mcp-shell/src/engine-client.ts": 1455,
@@ -32,7 +32,7 @@
       }
     },
     "fork": {
-      "loc": 6088,
+      "loc": 6118,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -57,7 +57,7 @@
         {
           "file": "packages/opencode/script/verify-published.ts",
           "kind": "added",
-          "lines": 151
+          "lines": 181
         },
         {
           "file": "packages/opencode/src/plugin/glasspane-compaction.ts",
@@ -1070,7 +1070,7 @@
           "lines": 0
         }
       ],
-      "ratio": 0.1531,
+      "ratio": 0.1538,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
@@ -1086,7 +1086,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 15063,
+  "totalToolSurfaceLoc": 15093,
   "note": null,
   "carried": null
 }
