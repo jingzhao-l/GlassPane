@@ -118,6 +118,12 @@ public final class SocketServer {
                 guard case .noListener(let reason) = incumbent else {
                     throw SocketErrorResponse.nameOccupied(detail)
                 }
+                // "没有 daemon 在应答" 不等于 "这是个可以删的残留 socket"。ENOTSOCK 也被算进
+                // noListener，而普通文件/目录/FIFO/悬空链接都回它——这一眼 lstat 是本方法与
+                // 文件头那句承诺（只在"确实证明无主"时才移除）之间唯一的差别。
+                guard DaemonProbe.nameIsClearableSocketName(socketPath) else {
+                    throw SocketErrorResponse.nameOccupied(DaemonProbe.nonSocketNameDescription(socketPath))
+                }
                 log.info("removing stale socket \(socketPath) (\(reason))")
                 unlink(socketPath)
                 // One retry only: a second EADDRINUSE is a real race with
