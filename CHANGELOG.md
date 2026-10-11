@@ -2,7 +2,26 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
-## [未发布]
+## [1.12.1] — 2026-10-11
+
+**版本判断：patch。** 四条判据逐条实测：状态文件的字段没动（审批台账/更新状态/注册表的 JSON 形状都不变；
+面板那处改的是它调用 daemon 时**点名哪个根**，不是任何一个状态文件的 schema）；daemon 与安装器的
+退出码集合没动（`glasspaned` 仍是 `{0,1,2,3,64,65}`，被拒的抢名跑依旧退 1）；CLI 参数面没动（一个开关
+都没加、没删、没改语义）；两个 npm 包的 `bin` 声明没动。两处如实记下、但它们不在那四条里：
+(a) 发布工具 `scripts/make-release-archive.mjs` 新增一条拒绝（`mcp-shell/dist` 是 tsc 形状就不出档），
+它是发布者本地的打包脚本、不是产品 CLI；(b) `glasspaned` 的 stdout 在"抢名被拒"那一跑里少了一行
+`listening on …`——那一行本来就是说谎，删掉它改变的是"说了什么"，不是参数或退出码。按本仓口径记 patch。
+
+**本版包含 `v1.12.0` 的全部内容**（`v1.12.0` 这一串是它的祖先），且 **npm 上从未有过 1.12.0**：
+1.12.0 的 npm 那半程因发布凭证没有 `workflow` scope 而走不到（见 task 汇报）。所以 registry 版本号
+将从 **1.11.0 直接到 1.12.1**，中间那一格是有意的空洞——与 1.8.0 那次同样的记法（当时 1.8.0 有
+tag 与 Release、故意不发 npm）。要发 npm 就用 `--ref v1.12.1`，不必也不该再补 1.12.0。
+
+**为什么有这一版**：`v1.12.0` 打 tag 之后又落了三处修到 main，都是这一轮量出来的：面板控制台在
+另一个根上写注册表（P1）、`glasspaned` 在 bind 之前宣布"我在监听"（同一族"先宣布再测量"）、
+以及从并行那条 `daily/main-20261011` 分支搬回的两块真没落地的闸（归档拒 tsc 形状的 `dist`、
+ci 顶层 `permissions` 的会红闸）。让已修的缺陷停在"main 绿但没有对应版本"，就是本仓最反对的
+没收口。
 
 ### Fixed — 控制台那三条 daemon 命令不带状态根：显示一个根，改的是另一个根
 
@@ -72,6 +91,33 @@ stderr: glasspaned: refusing to take over /var/tmp/…/state/daemon.sock.
 ⚠ 落点与版本：这一笔打在 **tag `v1.12.0` 之后**（tag 指向 `c10f610`，其 CI 九道全绿是发版凭据），
 所以已发布的 `v1.12.0` 归档与 GitHub Release 带的是修之前的那句 announce。不移 tag、不重发：
 挪已公开的 tag 属于需要 owner 点头的动作。这一条留给下一版。
+
+### 门禁与证据（本版实测）
+
+本版在 `origin/main` 的 `c3dbfee`（含并行线那两笔合流）上复跑全套，逐条计数取自本树日志：
+`npm test --workspaces --if-present` —— kernel 90、mcp-shell 428、installer 149、updater 437，
+合计 1104 例 / 0 失败；`swift test --package-path engine` 932 例 / 3 跳过 / 0 失败；
+`swift test --package-path engine/probe` 27 例 / 0 失败；`pytest -q bridge` 79 例；
+信号闸 OK（SIGTERM / SIGINT 各自退出码 0 且 socket 被 unlink，跑在脚本点名的隔离根里）；
+`npm run bundle` + `npm pack --dry-run` OK；`fork-diff --check`、`tool-surface --check`（面 A 8975、
+面 B 6118，两句"超 10%"是既有饱和）、`surface-semantics` / `product-surface` / `brand-surface` /
+`hook-liveness` 全 rc=0；`check-version` 12 处位点 + 5 份 lockfile 一致；`check-doc-links`
+24 份 / 225 条仓库内链接 / 26 条外链无死链、双语成对；`check-workflows` 5 份干净，
+其新增那一档（顶层 `permissions` 缺失必须能红）实测过：把真 `ci.yml` 的那一块摘掉 → rc=1 并点名，
+装回去 → rc=0（私有备份 + sha 核回）。
+
+契约面按 patch 判据逐条量的：`glasspaned` 的退出码集合在 `v1.12.0` 与本版同为
+`{0,1,2,3,64,65}`（`grep -oE "exit\([0-9]+\)"` 数出来），安装器入口同为 `{0,1,2}`，
+两个包的 `bin` 声明一字未改，面板那处改动不涉及任何状态文件 schema。
+
+面板这一版是**真机 AX 复验**过的（不是只跑单测）：连一台跑在隔离根里的 daemon，`gp_ax` 助手读到
+`gp-daemon-liveness-answering`＝"运行中"、`glasspaned 1.12.0`（量在版本升 1.12.1 之前，读数按当时
+那份产物原样记）、四张权限卡读数
+（accessibility / inputMonitoring / screenRecording = granted，developerTools = `…-unverifiable`），
+按 `gp-nav-evidence` / `gp-nav-projects` 真切换并显示那个被点名根里的读数（"0 条 · 0 B"、
+"还没有注册项目"）；对照之下 `~/.glasspane/projects.json` 与 `evidence/`（582 条）mtime 未变——
+即面板动的确实是被 `--state-dir` 点名的那一个根。版本号本身与 UI 判据无关（那一行来自
+`glasspaned --version`，本版只是它的读数换了），因此不再重跑一次同样的复验。
 
 ## [1.12.0] — 2026-10-11
 
@@ -215,7 +261,7 @@ exec 退役的那份、档案卡只在 `.onAppear` 取数）。桥一侧：哨�
 `--project-prune`、`--project-remove`）发的都是不带根的裸数组，`evidenceDirectory` /
 `projectsPath` / `approvalsPath` 也全是家目录默认根的常量；带根点名只存在于**更新器**那一侧
 （`UpdateModel.argv`）。写在发布说明里而代码里没有，就是本仓最反对的那种"说了没做"。
-实际落地在 `## [未发布]` 第一条，本版（1.12.0）不带它。
+实际落地在 **1.12.1**（上面那组"控制台那三条 daemon 命令不带状态根"），本版（1.12.0）不带它。
 
 ### 门禁与证据（本版实测）
 
