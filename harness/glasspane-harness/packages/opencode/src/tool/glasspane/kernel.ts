@@ -56,7 +56,7 @@ import {
 import type { DecisionLogEntry, DecisionOutcome } from "iterate-kernel/decision-log-entry"
 import { parseEvidencePackRead, parseRunPlan } from "iterate-kernel/parse"
 import { plannedIds, runPlanDigest } from "iterate-kernel/run-plan"
-import { dimensionContext, formatDimensionContext } from "iterate-kernel/dimension-context"
+import { dimensionContext, formatDimensionContext, DIMENSION_ID_MAX_LENGTH, DIMENSION_ID_PATTERN } from "iterate-kernel/dimension-context"
 import type {
   DimensionContext,
   DimensionContextInput,
@@ -221,6 +221,66 @@ export interface LoggedDecision {
   readonly hash: string
   readonly line: number
   readonly path: string
+}
+
+/** What the tool surface accepts as a declared review dimension. */
+export const DIMENSION_ID_LIMITS = {
+  pattern: DIMENSION_ID_PATTERN,
+  maxLength: DIMENSION_ID_MAX_LENGTH,
+}
+
+/**
+ * Validate one declared dimension.
+ *
+ * WHY THIS EXISTS AT ALL. `dimensionContext` counts a planned dimension as verified only
+ * when a recorded decision carries that id, and the recorder here is the tool call: an
+ * agent says which dimension a `gp_act` was serving, the shell echoes it into the tool
+ * result's metadata, and compaction turns the pair into "2/3 verified". Without the
+ * declared id the arithmetic is honest but blind — which is exactly why the absence is
+ * accepted. A declared-but-malformed id is not: it would be counted as an *unplanned*
+ * dimension, and a typo that silently renames a dimension is a false statement about what
+ * this session covered.
+ *
+ * The shape is the kernel's, not a local guess: `DIMENSION_ID_PATTERN` is what
+ * `PlannedDimensionSchema` validates plan ids against, so a plan and a declaration cannot
+ * be spelled two ways. What the id *means* still belongs to whoever configured the run —
+ * this refuses malformed tokens, it does not know or check the nine canonical names.
+ */
+export function validateDimension(
+  value: unknown
+): { ok: true; dimension?: string } | { ok: false; error: KernelRejection } {
+  if (value === undefined || value === null) return { ok: true }
+  if (typeof value !== "string") {
+    return {
+      ok: false,
+      error: {
+        code: "GP_E_DIMENSION",
+        message: `dimension must be a string, got ${typeof value}`,
+        remedy: "pass one kebab-case id like 'security' or 'spec-compliance', or omit the argument",
+      },
+    }
+  }
+  if (value.length > DIMENSION_ID_MAX_LENGTH) {
+    return {
+      ok: false,
+      error: {
+        code: "GP_E_DIMENSION",
+        message: `dimension '${value}' is ${value.length} characters, over the kernel's ${DIMENSION_ID_MAX_LENGTH}`,
+        remedy: "shorten the id; it is a dimension name, not a description of what was checked",
+      },
+    }
+  }
+  if (!DIMENSION_ID_PATTERN.test(value)) {
+    return {
+      ok: false,
+      error: {
+        code: "GP_E_DIMENSION",
+        message: `dimension '${value}' is not a kebab-case id`,
+        remedy: "lowercase letters, digits and single hyphens (the same shape the run plan uses); 'Spec Compliance' and 'spec_compliance' are both refused and neither would ever match a planned dimension",
+      },
+    }
+  }
+  return { ok: true, dimension: value }
 }
 
 /**
