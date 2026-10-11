@@ -45,29 +45,29 @@ final class DailyRound20261011Batch2Tests: XCTestCase {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 
+        // 判据现在归 `StateRootArgument`（与 --state-dir 同一套，两种拼写共用）。
         // 从前：`--socket-path --force-socket` 把后者当路径吃下，接管开关静默失效，
         // 还在那个目录里真建出一个名为 `--force-socket` 的 socket。
         let eaten = run(["--socket-path", "--force-socket", "--state-dir", dir.path])
         XCTAssertNotEqual(eaten.status, 0, "开关样的值必须报错，不能静默接管：\(eaten.out)")
-        XCTAssertTrue(eaten.err.contains("not another flag") || eaten.err.contains("requires a path"),
-                      "要给出能照做的句子：\(eaten.err)")
+        XCTAssertTrue(eaten.err.contains("looks like another argument"), "要给出能照做的句子：\(eaten.err)")
 
-        // 从前：`--socket-path gp.sock`（无目录分量）绕过 prepareSocketDirectory 的全部检查，
+        // 从前：`--socket-path gp.sock`（相对路径）绕过 prepareSocketDirectory 的全部检查，
         // SECURITY 那句"父目录收不到 0700 就拒绝服务"对这一形状是空的。
         let bare = run(["--socket-path", "gp.sock", "--state-dir", dir.path])
-        XCTAssertNotEqual(bare.status, 0, "光文件名必须拒：\(bare.out)")
-        XCTAssertTrue(bare.err.contains("parent directory"), bare.err)
+        XCTAssertNotEqual(bare.status, 0, "相对路径必须拒：\(bare.out)")
+        XCTAssertTrue(bare.err.contains("must be an absolute path"), bare.err)
 
-        // 等号拼写走的是同一道判据（两种拼写不许对什么是一个根各说各话）。
+        // 等号拼写走的是同一道判据（两种拼写不许对什么是合法路径各说各话）。
         let equals = run(["--socket-path=gp.sock", "--state-dir", dir.path])
         XCTAssertNotEqual(equals.status, 0, "--socket-path= 形式同样不得绕过")
-        XCTAssertTrue(equals.err.contains("parent directory"), equals.err)
+        XCTAssertTrue(equals.err.contains("must be an absolute path"), equals.err)
 
-        // 对照：带目录分量的合法路径必须**不被这两道闸拒**，否则这条修复只是永远报错。
+        // 对照：绝对路径必须**不被这道闸拒**，否则这条修复只是永远报错。
         let good = run(["--state-dir", dir.path, "--socket-path", dir.appendingPathComponent("engine.sock").path,
                         "--list-projects"])
         XCTAssertEqual(good.status, 0, "合法路径要能过解析：\(good.err)")
-        XCTAssertFalse(good.err.contains("parent directory"), good.err)
+        XCTAssertFalse(good.err.contains("absolute path"), good.err)
     }
 
     // MARK: - 开发者工具卡：实测到的系统拒绝不得折成"已授权"

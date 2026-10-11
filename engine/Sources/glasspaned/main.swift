@@ -236,25 +236,19 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             // Absolute-path rule at the parse (X-22 sibling, above) — nothing
             // above this line may touch a directory, and this one is reached
             // before `prepareSocketDirectory` could chmod it.
+            // `StateRootArgument.classify` already refuses (a) a token that is
+            // another flag and (b) a relative path, which is exactly the pair this
+            // run needed: `--socket-path --force-socket` used to eat the takeover
+            // flag and bind a socket named `--force-socket` in the CWD, and a bare
+            // file name skipped the 0700-parent enforcement entirely because
+            // `deletingLastPathComponent` was empty. Both go through the shared
+            // validator now, so the two spellings cannot disagree.
             if let reason = StateRootArgument.rejection(
                 for: index + 1 < arguments.count ? arguments[index + 1] : nil
             ) {
                 return .error("--socket-path \(reason)")
             }
             index += 1
-            // 值长得像下一个开关就得拒：从前 `glasspaned --socket-path --force-socket` 把
-            // `--force-socket` 当路径吃掉，于是那个"接管已占用 socket"的开关**静默失效**，
-            // 而 daemon 在当前目录里真建了一个名叫 `--force-socket` 的 socket。`--state-dir` 早就
-            // 有同样的守卫（StateRoot 里那条），这里补齐它的手足。
-            guard !arguments[index].hasPrefix("--") else {
-                return .error("--socket-path requires a path, not another flag (got \(arguments[index]))")
-            }
-            // 没有目录分量的值（`--socket-path gp.sock`）会在**当前工作目录**绑定，而
-            // `prepareSocketDirectory` 对 `deletingLastPathComponent == ""` 直接 return——
-            // 于是 SECURITY 里那句"父目录收不到 0700 就拒绝服务"对这一整条形状是空的。
-            guard arguments[index].contains("/") else {
-                return .error("--socket-path must name a parent directory (absolute, or with a component): a bare file name binds in the current working directory, whose mode this run will not verify. Use --state-dir <root>, or --socket-path <root>/engine.sock.")
-            }
             options.socketPath = arguments[index]
         default:
             if argument.hasPrefix("--socket-path=") {
@@ -264,14 +258,6 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
                 // disagree about what counts as a socket path.
                 if let reason = StateRootArgument.rejection(for: value) {
                     return .error("--socket-path \(reason)")
-                }
-                // 两种拼写必须同一条判据，否则 `--socket-path=x` 就绕开上面那两道（开关样的值、
-                // 没有目录分量）。`--state-dir` 两边共用 `StateRootArgument` 就是这个道理。
-                guard !value.hasPrefix("--") else {
-                    return .error("--socket-path requires a path, not another flag (got \(value))")
-                }
-                guard value.contains("/") else {
-                    return .error("--socket-path must name a parent directory (absolute, or with a component): a bare file name binds in the current working directory, whose mode this run will not verify. Use --state-dir <root>, or --socket-path <root>/engine.sock.")
                 }
                 options.socketPath = value
             } else if argument.hasPrefix("--state-dir=") {
