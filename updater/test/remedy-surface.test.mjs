@@ -127,3 +127,37 @@ test('状态分支与这份夹具一一对应，新增一个状态不许悄悄�
   assert.deepEqual(missing, [], `这些状态分支没有被扫到：${missing.join(', ')}——给它们补一条夹具，而不是删掉断言`)
   assert.ok(branches.size >= 5, `只认出 ${branches.size} 个状态分支，这条对照已不作数`)
 })
+
+test('整条 updater 交出去的话术里都不许出现可照抄执行的升权形状', () => {
+  // 上面两条从前是这道闸的全部覆盖面，而它只盯着 `describeCa` 一个函数。产品里每一条 remedy 都会
+  // 被面板与 `gp_diagnose` 原样印出去：`apply` 的 npm-prefix 那条就写着
+  // `sudo chown -R "$(whoami)" /usr/local/lib/node_modules /usr/local/bin`——把整台机器上别人装的
+  // 全局包和 /usr/local/bin 里的每个二进制一起端走，而扫它的人正好看不见它（这条测试新增时它就在，
+  // 并立刻红在该句上；修完之后它靠"扫描面计数"继续守着）。
+  const libDir = path.join(HERE, '..', 'lib')
+  const files = fs.readdirSync(libDir).filter((name) => name.endsWith('.js')).sort()
+  assert.ok(files.length >= 8, `只认出 ${files.length} 个 lib 文件，这条闸已经不作数了`)
+  let scanned = 0
+  const offenders = []
+  for (const name of files) {
+    const raw = fs.readFileSync(path.join(libDir, name), 'utf8')
+    // 注释要剥掉：本仓把当年那句原文留在注释里当教训（见本文件第 2 条），扫描器把它当成交出去的话
+    // 就会红在自己身上——那不是这条闸想说的话。
+    const body = raw
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n')
+    const literals = [...body.matchAll(/'((?:[^'\\]|\\[\s\S])*)'|"((?:[^"\\]|\\[\s\S])*)"|`((?:[^`\\]|\\[\s\S])*)`/g)]
+      .map((m) => [m[1], m[2], m[3]].find((s) => s !== undefined))
+      .filter((s) => typeof s === 'string' && s.length > 30)
+    scanned += literals.length
+    for (const literal of literals) {
+      const hit = OFFENDING(literal)
+      if (hit.length > 0) offenders.push(`${name}: ${hit.join(', ')} → ${literal.slice(0, 140)}`)
+    }
+  }
+  assert.deepEqual(offenders, [], `这些交出去的话把升权动作写成了可照抄执行的命令：\n${offenders.join('\n')}`)
+  // 计数闸：扫描面缩到看不见东西时，上面那条会悄悄"通过"。这里用绝对下界把门钉住。
+  assert.ok(scanned >= 300, `整条 lib 只认出 ${scanned} 条话术，扫描面已经塌了`)
+})

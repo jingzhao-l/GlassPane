@@ -2053,7 +2053,10 @@ test('a machine that cannot write npm\'s global directory is refused before a si
       '连备份都不该建——建了就说明已经准备换东西了')
     assert.match(result.message, /Nothing was replaced and the daemon was not restarted/, result.message)
     assert.match(result.message, new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '句子要点名写不进去的那一层')
-    assert.match(result.message, /sudo chown/, 'remedy 要能做得动，并说清这一步要一个人')
+    assert.match(result.message, /npm config set prefix/, '两条出路里必须给出 agent 自己能跑的那一条')
+    assert.match(result.message, /chown/, '要人手做的那一步仍要点名工具，否则人到现场还是没有线索（只许提名，不许给可执行形状）')
+    assert.doesNotMatch(result.message, /\bsudo\b/, 'remedy 不得把升权动作写成可照抄执行的命令（与 ca-bundle 同口径）')
+    assert.doesNotMatch(result.message, /\bchown\s+-[a-zA-Z]*R\b/, '递归改所有权会把别人装的全局包一起端走——这条从前就写在这句 remedy 里')
     assert.match(result.message, /Install update/, '做完之后按哪个按钮也要说')
     const state = loadState(fx.stateRoot).state
     assert.equal(state.code, CODES.npmPrefixUnwritable, '面板读的是状态文件')

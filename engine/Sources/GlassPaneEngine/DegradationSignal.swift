@@ -333,13 +333,23 @@ public final class DegradationTracker {
             }
         }
         guard points.count >= 2 else { return nil }
+        // 先减均值再累加，绝不在原始 x 上算 `count*sumXX - sumX*sumX`。生产把这行的 x 喂的是
+        // `clock().timeIntervalSince1970`（~1.79e9），两个累加项都在 1e21 量级，而双精度在这一档
+        // 的间距约 2e5：实测 64 样本、跨度 31.5s（真跨度 349440）会被量化成 2e6 的整数倍，分子
+        // 同样被舍入吃掉——288 个时钟相位里 115 个直接回 nil，其余给出 −335…+336 B/s，全都落在
+        // 512 B/s 地板之下，于是一条真实的泄漏被 `judged:true` 认证成"量过了，健康"，而 T9 升级
+        // （`tier == .degrading`）在密采样节奏下永远不可能触发。中心化之后两项都是小量级之差。
         let count = Double(points.count)
-        let sumX = points.reduce(0) { $0 + $1.x }
-        let sumY = points.reduce(0) { $0 + $1.y }
-        let sumXY = points.reduce(0) { $0 + $1.x * $1.y }
-        let sumXX = points.reduce(0) { $0 + $1.x * $1.x }
-        let denominator = count * sumXX - sumX * sumX
-        guard abs(denominator) > Double.ulpOfOne else { return nil }
-        return (count * sumXY - sumX * sumY) / denominator
+        let meanX = points.reduce(0) { $0 + $1.x } / count
+        let meanY = points.reduce(0) { $0 + $1.y } / count
+        var sumXX = 0.0
+        var sumXY = 0.0
+        for point in points {
+            let dx = point.x - meanX
+            sumXX += dx * dx
+            sumXY += dx * (point.y - meanY)
+        }
+        guard sumXX > 0 else { return nil }
+        return sumXY / sumXX
     }
 }

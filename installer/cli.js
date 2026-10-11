@@ -69,7 +69,7 @@ export const INSTALL_SH_URL =
 /** 发布线锚点（版本真源 = 根 package.json，由 scripts/set-version.mjs 统一改写，
  *  勿手改）：npx 形态下本地没有仓库时，引导 clone 的就是这个 tag，与 install.sh
  *  的 `GLASSPANE_RELEASE` 同值——两条一键入口必须拿到同一份源码。 */
-export const RELEASE_VERSION = '1.10.0'
+export const RELEASE_VERSION = '1.11.0'
 /** 发布 ref（tag 名）。GLASSPANE_REF 环境变量可覆盖（追主干用 `main`）。 */
 export const REPO_REF = `v${RELEASE_VERSION}`
 
@@ -811,6 +811,46 @@ export function repoHasRef(repoDir, ref, { spawn = spawnSync } = {}) {
   return spawn('git', ['-C', repoDir, 'rev-parse', '--verify', `refs/tags/${ref}`], { stdio: 'ignore' }).status === 0
 }
 
+/**
+ * 要构建的这棵树，是不是被验签的那个 tag 本身（IO 探测，纯判定）。
+ *
+ * 存在的理由：`rootDir` 可以来自 `--repo`、`GLASSPANE_REPO`、当前目录或既有 clone，而
+ * `install.sh` 自己就写着"既有 clone 不会被自动切到 $REF"。那条绿字说的若是
+ * "签名验证通过"，它证明的却只是 *tag 对象* 的签名——签的不是 HEAD 加一堆本地改动。
+ * 签名与产物之间这层对应关系一旦断，绿字就成了对没签过的字节作保。
+ */
+export function tagTreeAgreement({ repoDir, ref, spawn = spawnSync } = {}) {
+  const head = spawn('git', ['-C', repoDir, 'rev-parse', '--verify', 'HEAD'], { encoding: 'utf8' })
+  const tagged = spawn('git', ['-C', repoDir, 'rev-parse', '--verify', `${ref}^{commit}`], { encoding: 'utf8' })
+  if (head.status !== 0 || tagged.status !== 0) {
+    return { ok: false, same: false, changed: null, head: null, tagCommit: null }
+  }
+  const work = spawn('git', ['-C', repoDir, 'status', '--porcelain'], { encoding: 'utf8' })
+  const changed = String(work.stdout ?? '').split('\n').filter((line) => line !== '').length
+  const headSha = String(head.stdout ?? '').trim()
+  const tagSha = String(tagged.stdout ?? '').trim()
+  return { ok: true, same: headSha === tagSha && changed === 0, changed, head: headSha, tagCommit: tagSha }
+}
+
+/**
+ * "签名有效" 与 "要装的就是被签的那棵树" 是两件事，绿字必须两件事都说得出。
+ * 树对不上时不拒装（装开发主线本来就合法），但绝不能沿用那句"验证通过"。
+ */
+export function tagVerifyAgainstTree({ verdict, tree, pinRef, repoDir }) {
+  if (verdict.action !== 'pass') return verdict
+  if (tree.ok && tree.same) return verdict
+  const why = !tree.ok
+    ? '读不出这棵树的 HEAD 与该 tag 指向的 commit'
+    : `HEAD 是 ${String(tree.head ?? '').slice(0, 7)}，tag 指向 ${String(tree.tagCommit ?? '').slice(0, 7)}，另有 ${tree.changed} 处未提交改动`
+  return {
+    action: 'warn',
+    text: `发布 tag ${pinRef} 的 GPG 签名有效，但它签的不是本次要装的这棵树：${why}。\n`
+      + '安装继续，装出来的是这棵树的内容，不是那个已签名发布的内容——这句不说清楚，屏幕上那行绿字就是替没验过的字节作保。\n'
+      + `下一步（要装被签的那一版）：git -C "${repoDir}" checkout ${pinRef} 后重跑，或用一键安装脚本从发布 tag 另起一份：`
+      + `curl -fsSL ${INSTALL_SH_URL} | sh`,
+  }
+}
+
 /** 对 clone 下来的发布 tag 做 GPG 验签（best-effort，不抛错）。
  *  隔离 GNUPGHOME 并临时导入发布公钥，`git verify-tag` 只看退出码与 stderr；不动
  *  用户钥匙环、无网络依赖。返回 classifyTagVerify 的口径（verified/unsigned/invalid/
@@ -1518,6 +1558,55 @@ export function installOutcome({ verified = false, daemonExpected = true } = {})
   return { ok, exitCode: ok ? 0 : 1, verified: Boolean(verified), daemonExpected }
 }
 
+/**
+ * 收尾那句"实测校验通过"到底能说什么，取决于两件事：有没有 daemon 应答，以及应答的那一份
+ * **是不是本轮刚构建的产物**。从前这里只看 `hello?.version` 有没有值——旧实例占着 socket 时
+ * （上面那条"daemon 已在监听…跳过启动"分支）应答的是上一版构建，新构建从未被启动也从未被验证，
+ * 安装器却打印"实测校验通过…安装完成"并退 0，而 `install.sh` 是 exec 委托：按退出码办事的
+ * agent 只看到 0。
+ */
+export function installVerification({
+  arrived = false,
+  helloVersion = null,
+  builtVersion = null,
+  servedByEarlierInstance = false,
+} = {}) {
+  if (!arrived || !helloVersion) return { verified: false, note: null }
+  if (!builtVersion) {
+    return {
+      verified: false,
+      note: '读不出本轮构建产物的版本（`glasspaned --version` 没给出可解析的一行），'
+        + '所以无法证明应答 hello 的那一份就是本轮构建——本次不算校验通过。',
+    }
+  }
+  if (helloVersion !== builtVersion) {
+    return {
+      verified: false,
+      note: `应答 hello 的 daemon 自报 ${helloVersion}，本轮构建产物是 ${builtVersion}：socket 被旧实例占着，`
+        + '这一轮的构建从未被验证。用 --replace-daemon 重跑（它会先收拢在跑的实例）。',
+    }
+  }
+  if (servedByEarlierInstance) {
+    return {
+      verified: true,
+      note: `版本号一致（${builtVersion}），但应答的实例在本次安装之前就已经在服务：同一版本号只能说明它是`
+        + '同一版本，不能证明它是本轮构建出来的那一份。要确证，用 --replace-daemon 重跑一次。',
+    }
+  }
+  return { verified: true, note: null }
+}
+
+/** 本轮构建产物自报的版本（`glasspaned --version` 那一行）；读不出返回 null，不猜。 */
+export function builtDaemonVersion({ daemonBin, spawn = spawnSync } = {}) {
+  const res = spawn(daemonBin, ['--version'], { encoding: 'utf8' })
+  if (res.error || res.status !== 0) return null
+  const line = String(res.stdout ?? '')
+    .split('\n')
+    .map((text) => text.trim())
+    .find((text) => /^\d+\.\d+\.\d+/.test(text))
+  return line ? line.split(/\s+/)[0] : null
+}
+
 /** 未通过校验时的提示行（纯函数，可单测）。必须自带**用户真能执行**的补救命令，
  *  并点明退出码非零——只说"安装未完成"的话，脚本调用方什么也拿不到。 */
 export function verificationFailureText({
@@ -1574,7 +1663,13 @@ export async function install({ options = parseArgs([]).options, env = process.e
   const pinRef = env.GLASSPANE_REF || REPO_REF
   if (pinRef !== 'main' && repoHasRef(rootDir, pinRef)) {
     const sig = verifyCloneTagGpg({ repoDir: rootDir, ref: pinRef })
-    const verdict = tagVerifyDecision({ sig, pinRef, repoDir: rootDir })
+    // 先判"签名对不对"，再判"要装的是不是被签的那棵树"——两问分开，绿字才只在对得上时出现。
+    const verdict = tagVerifyAgainstTree({
+      verdict: tagVerifyDecision({ sig, pinRef, repoDir: rootDir }),
+      tree: tagTreeAgreement({ repoDir: rootDir, ref: pinRef }),
+      pinRef,
+      repoDir: rootDir,
+    })
     if (verdict.action === 'refuse') throw new Error(verdict.text)
     printStep(paint(verdict.text, verdict.action === 'pass' ? 'green' : 'yellow'))
   }
@@ -1585,6 +1680,8 @@ export async function install({ options = parseArgs([]).options, env = process.e
   const daemonBin = path.join(buildDir, 'glasspaned')
   const settingsBin = path.join(buildDir, 'glasspane-settings')
   const daemonLog = path.join(process.env.HOME ?? '', SOCKET_DIR_NAME, DAEMON_LOG_NAME)
+  // 收尾那句"实测校验通过"要说实话，就得知道应答的实例是不是本次安装启动/重启的那一份。
+  let servedByEarlierInstance = false
   // bundle 安置计划（P1 v1.2 §11.1）：--no-app 时 appPackaged=false，后续一律
   // 回退裸二进制并如实告警。
   const plan = bundlePlan({
@@ -1744,6 +1841,9 @@ export async function install({ options = parseArgs([]).options, env = process.e
       }
     }
     if (relaunchedByLaunchd || await socketReachable(socketPath)) {
+      // launchd 刚 kickstart 起来的那一份算"本次重启的"；纯粹是 socket 早就有人听着，
+      // 就是别人（很可能是上一版）在服务。
+      servedByEarlierInstance = !relaunchedByLaunchd
       printStep(`daemon 已在监听 ${socketPath}，跳过启动（若为旧构建实例，用 --replace-daemon 重跑）`)
     } else {
       const start = daemonStartCommand({ daemonLaunch, daemonApp: plan.daemonApp, socketPath })
@@ -1794,12 +1894,20 @@ export async function install({ options = parseArgs([]).options, env = process.e
   const daemonExpected = Boolean(options.daemon || options.launchd)
   const arrived = await waitForSocket(socketPath, { timeoutMs: daemonExpected ? 12000 : 1 })
   const hello = arrived ? await socketHello(socketPath) : null
-  const verified = Boolean(arrived && hello?.version)
+  const builtVersion = builtDaemonVersion({ daemonBin })
+  const { verified, note } = installVerification({
+    arrived,
+    helloVersion: hello?.version ?? null,
+    builtVersion,
+    servedByEarlierInstance,
+  })
   const outcome = installOutcome({ verified, daemonExpected })
   if (verified) {
-    printStep(`实测校验通过：daemon 在 ${socketPath} 应答 hello（version=${hello.version}${hello.pid ? `，pid=${hello.pid}` : ''}）`)
+    printStep(`实测校验通过：daemon 在 ${socketPath} 应答 hello（version=${hello.version}${hello.pid ? `，pid=${hello.pid}` : ''}，本轮构建产物=${builtVersion}）`)
+    if (note) printStep(paint(note, 'yellow'))
     printStep(`安装完成（退出码 ${outcome.exitCode}）。`)
   } else if (daemonExpected) {
+    if (note) printStep(paint(note, 'red'))
     for (const line of verificationFailureText({
       arrived,
       socketPath,

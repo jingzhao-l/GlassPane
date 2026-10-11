@@ -62,7 +62,9 @@ GlassPane 不是普通工具库：它**持有** macOS 的高危权限（辅助�
   内核对这条连接的视角校验，**不校验任何代码身份**。因此一个配合或撒谎的同用户 app 可以以自己的
   真实 pid 注册成探针、注入 handler/state 信号；而探针信号在场时会把归因从 `soft` 升级为 `strong`——
   即**归因强度可被同用户进程伪造**（已知、如实标注，不构成跨用户越权）。
-- daemon 提供 `--force-socket` 可接管已被占用的 socket；`--replace-daemon` 会先结束在跑的实例。旧的或
+- daemon 提供 `--force-socket` 可接管已被占用的 socket；但"收拢一个**正在跑**的实例"不是它的开关——
+  那是安装器的 `node installer/cli.js --replace-daemon`，它会先结束在跑的实例；
+  `glasspaned --replace-daemon` 是不认识的参数，退出码 64。旧的或
   恶意拉起的实例可能顶替授权主体，安装完成后请核对面板「Daemon 状态 → 主体」与实际二进制路径。
 - 调用方怎么找到 socket，以及为什么最后那一级是「故意让它输」的猜测：先看 `GLASSPANE_ENGINE_SOCK`，
   再看显式 `--socket-path`，最后才退到 `$HOME/.glasspane/engine.sock`。这个兜底**刻意**读 `$HOME`，

@@ -215,6 +215,11 @@ public final class ProbeSocketServer {
             guard case .noListener(let reason) = incumbent else {
                 throw ProbeServerError.nameOccupied(bindDetail)
             }
+            // 与 `SocketServer` 同一条规矩：探针说"没人应答"，删之前还得亲眼确认这名字是个
+            // socket——普通文件、目录、FIFO、悬空链接在 macOS 上都回 ENOTSOCK，会被当成无主残留。
+            guard DaemonProbe.nameIsClearableSocketName(socketPath) else {
+                throw ProbeServerError.nameOccupied(DaemonProbe.nonSocketNameDescription(socketPath))
+            }
             log.info("removing stale probe socket \(socketPath) (\(reason))")
             unlink(socketPath)
             // One retry only: a second EADDRINUSE is a real race with
