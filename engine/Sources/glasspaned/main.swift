@@ -236,6 +236,13 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             // Absolute-path rule at the parse (X-22 sibling, above) — nothing
             // above this line may touch a directory, and this one is reached
             // before `prepareSocketDirectory` could chmod it.
+            // `StateRootArgument.classify` already refuses (a) a token that is
+            // another flag and (b) a relative path, which is exactly the pair this
+            // run needed: `--socket-path --force-socket` used to eat the takeover
+            // flag and bind a socket named `--force-socket` in the CWD, and a bare
+            // file name skipped the 0700-parent enforcement entirely because
+            // `deletingLastPathComponent` was empty. Both go through the shared
+            // validator now, so the two spellings cannot disagree.
             if let reason = StateRootArgument.rejection(
                 for: index + 1 < arguments.count ? arguments[index + 1] : nil
             ) {
@@ -868,12 +875,16 @@ private func runProjectPrune(options: Options) -> Never {
     let pruned = prunedIds.count
     let failedCount = dryRun ? failures.count : hits.count - pruned
     if verified.loadFailed && !dryRun {
+        // 这一份是拒绝的载荷，但它仍然在被读：`remaining: 0` 与 `projects: []` 说的是"台账现在空了"，
+        // 而这条分支同时在讲"读不回来"。同一句里既说看不见、又报出一个看不见的数字，读者只会记住数字。
+        // `--project-remove` 那条同样的分支当初就是因此把这两个键删掉的（见 908 行附近）——这里对齐它：
+        // 看不见就别说看见了什么。
         writeJSON([
             "command": "--project-prune", "dryRun": false, "loadFailed": true,
             "total": before.count, "matched": hits.count, "pruned": 0,
             "prunedProjectIds": [String](), "failed": hits.count,
             "failures": [["projectId": "*", "reason": "the registry cannot be read back after the write"]],
-            "remaining": 0, "requiresDaemonRestart": true, "projects": [[String: Any]](),
+            "requiresDaemonRestart": true,
             "registryPath": registry.filePath,
             "error": "the write left projects.json unreadable; the daemon must not keep running on its in-memory copy",
             "next": "restore the file from \(registry.filePath) backups and restart the daemon"

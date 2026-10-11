@@ -356,6 +356,13 @@ test('the script runs against this repository and refuses a version it cannot na
     // `build` + `bundle`; CI's updater job checks out without either) can the real repository pass. Say which
     // of the two was measured, so a passing run is never a silent skip.
     const built = REQUIRED_BUILD_OUTPUTS.every((dir) => fs.existsSync(path.join(REPO, dir)))
+    if (built) {
+      // 这条用例量的是**可发布形状**的工作树，而 `assertBundleShape` 现在会拒 tsc 形状的 dist
+      // （入口裸 import 未声明的 @iterate/kernel，装上就死）。`npm test` 里 mcp-shell 那一步就是
+      // `npm run build`（tsc），它跑在本套件之前，所以这里必须先把 bundle 补回最后一步——
+      // 与 release.yml 的 `npm ci && npm run build && npm run bundle` 同一顺序，不是在绕过判据。
+      execFileSync('npm', ['--workspace', 'glasspane-mcp', 'run', 'bundle'], { cwd: REPO, stdio: 'pipe' })
+    }
     const run = spawnSync(process.execPath, [SCRIPT, '1.6.0', out], { encoding: 'utf8' })
     if (built) {
       assert.equal(run.status, 0, run.stdout + run.stderr)
