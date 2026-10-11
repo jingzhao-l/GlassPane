@@ -97,21 +97,41 @@ function fail(message) {
   throw new Error(message)
 }
 
+/** git's own blob hash for these bytes: `sha1("blob <len>\0" + content)`. */
+function gitBlobHash(content) {
+  return crypto.createHash('sha1').update(`blob ${content.byteLength}\0`).update(content).digest('hex')
+}
+
 /**
  * The tracked tree as tar entries, in git's own byte order, with git's own modes.
  *
  * Unmerged paths and submodule gitlinks are refused rather than guessed at: `git archive` would have failed
  * on the first and silently dropped the second, and a release whose content depends on which tool noticed is
  * not a release anyone can reproduce.
+ *
+ * Every entry's bytes are proven against the blob the index recorded, because the content comes off **disk**
+ * while the listing comes from the **index**. Anything that rewrites a tracked file between checkout and pack
+ * — a build writing into `src`, a hook, a leftover edit — used to ride along silently, and the archive is the
+ * artifact whose SHA256 the updater later presents as "the bytes the publisher signed". `--verify` cannot catch
+ * it either: it checks that an entry exists, not what is inside it. A mismatch is refused by name.
  */
 export function trackedEntries({ root, git = execFileSync }) {
+  // The index is allowed to differ from HEAD only by being *equal* to it. The archive is packed off a
+  // checkout of the released commit, so "staged but never committed" is a tree that no tag points at, and
+  // `git status`'s untracked half is deliberately not asked about — build outputs are untracked on purpose
+  // and enter the archive through buildOutputEntries, not here.
+  const staged = String(git('git', ['diff', '--cached', '--name-only', '-z', 'HEAD'], { cwd: root, encoding: 'utf8' }))
+    .split('\0').filter((rel) => rel !== '')
+  if (staged.length > 0) {
+    fail(`${staged.length} path(s) are staged but not committed (${staged.slice(0, 5).join(', ')}); the archive is the committed tree, so these bytes would be left out while the SHA256 story claims the tagged tree`)
+  }
   const listing = git('git', ['ls-files', '-z', '-s'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
   const lines = String(listing).split('\0').filter((line) => line !== '')
   const entries = []
   const seen = new Set()
   for (const line of lines) {
     const [meta, stagePath] = line.split('\t')
-    const [modeOctal, , stage] = String(meta).split(' ')
+    const [modeOctal, blobId, stage] = String(meta).split(' ')
     const rel = stagePath
     if (!rel) continue
     if (stage !== '0') fail(`${rel} is unmerged (stage ${stage}); refusing to publish a tree with conflicts`)
@@ -121,11 +141,30 @@ export function trackedEntries({ root, git = execFileSync }) {
     seen.add(rel)
     const abs = path.join(root, rel)
     if (mode === MODE_LINK) {
-      entries.push({ name: rel, type: 'link', link: fs.readlinkSync(abs), mode: 0o777 })
+      // A symlink is checked with lstat, not existsSync: a link into a path that does not
+      // exist is still the index's link, and existsSync would call it missing.
+      let stat
+      try {
+        stat = fs.lstatSync(abs)
+      } catch {
+        fail(`${rel} is in the index but not on disk`)
+      }
+      if (!stat.isSymbolicLink()) fail(`${rel} is in the index as a symlink but on disk it is not one`)
+      const link = fs.readlinkSync(abs)
+      const actual = gitBlobHash(Buffer.from(link, 'utf8'))
+      if (actual !== blobId) {
+        fail(`${rel} is a symlink to ${JSON.stringify(link)} on disk, which hashes to ${actual} — the index has ${blobId}. The archive would ship a link that is not in the tagged tree`)
+      }
+      entries.push({ name: rel, type: 'link', link, mode: 0o777 })
       continue
     }
     if (!fs.existsSync(abs)) fail(`${rel} is in the index but not on disk`)
-    entries.push({ name: rel, content: fs.readFileSync(abs), mode: mode === MODE_EXEC ? 0o755 : 0o644 })
+    const content = fs.readFileSync(abs)
+    const actual = gitBlobHash(content)
+    if (actual !== blobId) {
+      fail(`${rel} differs between the working tree (${actual}) and git's index (${blobId}); refusing to publish an archive whose bytes are not the tagged tree — commit it or restore it, then re-pack`)
+    }
+    entries.push({ name: rel, content, mode: mode === MODE_EXEC ? 0o755 : 0o644 })
   }
   return entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
 }

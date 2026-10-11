@@ -392,3 +392,46 @@ test('the script runs against this repository and refuses a version it cannot na
     fs.rmSync(path.dirname(out), { recursive: true, force: true })
   }
 })
+
+test('归档的每一个字节都必须等于 index 记下的那一份——脏工作树不许被说成 tagged tree', () => {
+  // 这条闸盯的是发布通道上最贵的一种谎：`git ls-files -s` 明明给出 blob 号，从前却被丢掉，
+  // 内容改从磁盘读。checkout 之后任何进程改脏一个被追踪的文件（构建往 src 里写、残留的编辑、
+  // 钩子），归档就带上"tag 里根本没有的字节"，而 updater 之后把这份的 SHA256 呈现成"发布者
+  // 签过的那份"。`--verify` 抓不到：它只数条目在不在，不看里面是什么。
+  const tree = makeReleaseTree()
+  try {
+    // 对照的一半：同一棵树没被改脏时必须打得开，否则下面的拒绝可能红在别的原因上。
+    const clean = trackedEntries({ root: tree.root })
+    assert.ok(clean.length > 10, `干净树要能列出条目，实得 ${clean.length}`)
+
+    tree.write('engine/Sources/GlassPaneEngine/EngineCore.swift', 'public let version = "1.6.0-dirty"\n')
+    assert.throws(
+      () => trackedEntries({ root: tree.root }),
+      /differs between the working tree .* and git's index .*refusing to publish an archive whose bytes are not the tagged tree/,
+      '被改脏的追踪文件必须被点名拒绝，而不是静静进档',
+    )
+
+    // 符号链接走同一扇门：blob 存的是目标字符串，换目标就是改内容。
+    const linkTree = makeReleaseTree()
+    try {
+      fs.rmSync(path.join(linkTree.root, 'docs', 'icon.png'))
+      fs.symlinkSync('logo.png?v=2', path.join(linkTree.root, 'docs', 'icon.png'))
+      assert.throws(
+        () => trackedEntries({ root: linkTree.root }),
+        /is a symlink to .* which hashes to .* the index has /,
+        '换了目标的符号链接必须被拒——归档里那条 link 不是 tag 里的那条',
+      )
+    } finally {
+      linkTree.cleanup()
+    }
+
+    // 拒绝要一路顶到脚本：打归档那条命令不能只警告一下就写出文件。
+    const out = path.join(fs.realpathSync(os.tmpdir()), 'gp-dirty-archive-probe.tar.gz')
+    const run = spawnSync(process.execPath, [SCRIPT, 'HEAD', out], { cwd: tree.root, encoding: 'utf8' })
+    assert.equal(run.status, 1, `脏树必须非零退出：\n${run.stdout}\n${run.stderr}`)
+    assert.match(run.stderr, /differs between the working tree/, run.stderr)
+    assert.equal(fs.existsSync(out), false, '拒绝之后不能留下半个归档')
+  } finally {
+    tree.cleanup()
+  }
+})
