@@ -1,12 +1,12 @@
 {
   "_comment": "Provenance of the iterate-kernel dependency this fork ships. Written by script/kernel-pin.mjs --record when the version is deliberately bumped; checked by --check in CI. The kernel's canonical home is iterate-skill/kernel, published as `iterate-kernel`; the vendored mirror under packages/opencode/vendor/kernel was retired with this file.",
   "package": "iterate-kernel",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "resolution": {
     "from": "registry",
-    "lockKey": "iterate-kernel@0.1.4",
+    "lockKey": "iterate-kernel@0.1.5",
     "specifier": "",
-    "integrity": "sha512-4nf9aLUBU2rHf45Tghd8Fq+yka3HsRU88/LAT7RMOHtp/V0dq9c9gqkkbiu109/4hM07igNJB4ozAmYhpakH+g=="
+    "integrity": "sha512-1urn3VbCXNobsCUW8x+BSybGsvE7BOCcu+akgSWGnVZjCpNQMyctzhTdej56WFL0uZPtekddYGom5vRM067v8w=="
   },
   "canonical": {
     "repo": "jingzhao-l/iterate-skill",
@@ -14,8 +14,12 @@
     "branch": "main",
     "npmPublish": "npm publish from the kernel/ directory of that repo"
   },
-  "recordedAt": "2026-10-10",
+  "recordedAt": "2026-10-11",
   "corpus": [
+    {
+      "file": "fixtures/convergence.ok-01.json",
+      "sha256": "dd619ba508a0ab68023abf9be818ff5b12750246d0fc6d44ee924315eb2b1685"
+    },
     {
       "file": "fixtures/decision-log-chain.ok-01.json",
       "sha256": "eb4586b0ee0cfc5224ba9a985c37fc25eeaaffe5bd8f34c83284d01a05aca4bd"
@@ -53,6 +57,14 @@
       "sha256": "325bf0b7bacb9d9200fe705713cf34c9eb31fe79e31a2ca7c7aef91e743c417e"
     },
     {
+      "file": "fixtures/invariant-report.ok-01.json",
+      "sha256": "384b88ba60d2ffe8fcd776847ea29fcb2edc6e20841a7e8997192b30ea04ab16"
+    },
+    {
+      "file": "fixtures/provider-registration.ok-01.json",
+      "sha256": "e7cc0fcc74336a44928ed84fd6240a2820c13fe2ea3f3516b3b38d068e669cec"
+    },
+    {
       "file": "fixtures/recipe-config.ok-01.json",
       "sha256": "68613bcabf45cf059d7086ead38c099ef0dd9b678bb67d5a5e31da77b6ca3549"
     },
@@ -66,7 +78,11 @@
     },
     {
       "file": "fixtures/run-plan.ok-01.json",
-      "sha256": "5ad58ada2a4e0918836e11dadee31af08e13f93562f9d28d834d1f17fd2ec085"
+      "sha256": "a7f52399c8501e34c27fcc0293f52d796f0724c92cd0dbfecc3ebf8e4871972f"
+    },
+    {
+      "file": "schemas/convergence-round-state.schema.json",
+      "sha256": "42281abd439d116249d023e13dc9cf1d5908b36ac1f70d71d1659f56e76bd1cd"
     },
     {
       "file": "schemas/decision-log-entry.schema.json",
@@ -77,8 +93,20 @@
       "sha256": "2cf6c929cd221bfbc36e1aff53e7078b33484674947de33b56f7f677e3c747c4"
     },
     {
+      "file": "schemas/invariant-report.schema.json",
+      "sha256": "51d876938e7a8e167183f33d023f027a4ea9e29a258f08504650bded7b68e712"
+    },
+    {
+      "file": "schemas/provider-registration.schema.json",
+      "sha256": "c150f5e06ea6acc13f3984057fd53a00e809a9c469b4080392afca74adbfcf12"
+    },
+    {
       "file": "schemas/recipe-config.schema.json",
       "sha256": "688c2a061c91c04557fb847d21e2cadcb95d16033843dc5b03efb1467393dcfb"
+    },
+    {
+      "file": "schemas/reverification-request.schema.json",
+      "sha256": "b55cb33e485b793b083ceb541e04ad9de07840359b91f98def791c0eea9008f4"
     },
     {
       "file": "schemas/run-plan.schema.json",

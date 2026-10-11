@@ -94,6 +94,9 @@ const MODULES = {
   evidenceDecision: "evidence-decision",
   dimension: "dimension-context",
   runPlan: "run-plan",
+  invariantReport: "invariant-report",
+  convergence: "convergence",
+  provider: "provider-registration",
 }
 
 /** A directory with src/ is source; dist/ is built. Same rule for every module. */
@@ -178,6 +181,78 @@ function drive(impl, fixture, kind) {
       out.push(impl.decisionLog.serializeDecisionLogEntry(entry))
       prev = recomputed
     })
+  } else if (kind === "invariant-report") {
+    // Scenario 1's artifact: the report the other harness reads when a claim breaks.
+    // The digest is the answer that matters across the boundary — a re-verification
+    // cites the failure by digest — so it is driven, along with the verdict of every
+    // case the fixture states (the refusals included: they are the contract's teeth).
+    const report = impl.invariantReport.InvariantReportSchema.parse(fixture.input)
+    out.push(impl.invariantReport.invariantReportDigest(report))
+    out.push(impl.invariantReport.failingChecks(report).join(","))
+    for (const item of fixture.cases ?? []) {
+      let error = null
+      let digest = ""
+      try {
+        const parsed = impl.invariantReport.InvariantReportSchema.parse(item.input)
+        digest = impl.invariantReport.invariantReportDigest(parsed)
+      } catch (caught) {
+        error = caught
+      }
+      out.push(`${item.name}\t${error === null ? "accepted" : "refused"}${digest}`)
+    }
+    for (const item of fixture.reverificationCases ?? []) {
+      let verdict = "accepted"
+      let targets = ""
+      try {
+        const request = impl.invariantReport.reVerificationRequestFrom(report, item.targets)
+        targets = request === null ? "null" : canonical(request.targets)
+      } catch {
+        verdict = "refused"
+      }
+      out.push(`${item.name}\t${verdict}${targets}`)
+    }
+  } else if (kind === "convergence") {
+    // Scenario 4's rules. The point is that two harnesses agree on what happens next,
+    // so every case's action AND reason are in the answer: the same action for a
+    // different reason is a different decision, and a loop that disagrees about the
+    // reason will disagree about the next round too.
+    out.push(canonical(impl.convergence.convergenceDecision(fixture.input)))
+    for (const item of fixture.cases ?? []) {
+      let answer = ""
+      try {
+        answer = canonical(impl.convergence.convergenceDecision(item.state))
+      } catch {
+        answer = "refused"
+      }
+      out.push(`${item.name}\t${answer}`)
+    }
+  } else if (kind === "provider-registration") {
+    // Scenario 5's metadata. Registration *semantics* are driven, not just the shape:
+    // refusing an overwrite, refusing to guess on resolve, and the ids two harnesses
+    // share are exactly the things that would otherwise drift per product.
+    const provider = impl.provider.ProviderRegistrationSchema.parse(fixture.input)
+    out.push(canonical(provider))
+    for (const item of fixture.cases ?? []) {
+      let verdict = "accepted"
+      try {
+        impl.provider.ProviderRegistrationSchema.parse(item.input)
+      } catch {
+        verdict = "refused"
+      }
+      out.push(`${item.name}\t${verdict}`)
+    }
+    const reg = fixture.registry ?? {}
+    const build = (list) =>
+      (list ?? []).reduce((acc, p) => impl.provider.registerProvider(acc, p), impl.provider.emptyProviderRegistry())
+    const glasspane = build(reg.glasspane)
+    const iterate = build(reg.iterate)
+    out.push(`disjoint\t${impl.provider.providerIdsInCommon(glasspane, iterate).join(",")}`)
+    const a = build(reg.collision?.a)
+    const b = build(reg.collision?.b)
+    out.push(`collision\t${impl.provider.providerIdsInCommon(a, b).join(",")}`)
+    out.push(
+      `offers\t${impl.provider.requireMethod(a, "glasspane-ae", "diagnose").requires.join(",")}|${impl.provider.requireMethod(b, "glasspane-ae", "diagnose").requires.join(",")}`,
+    )
   }
   return out.join("\n")
 }
@@ -196,6 +271,9 @@ const KINDS = [
   "recipe-config",
   "decision-log-chain",
   "decision-log-entry",
+  "invariant-report",
+  "convergence",
+  "provider-registration",
 ]
 
 const kindOf = (name) => KINDS.find((kind) => name.startsWith(kind)) ?? null
@@ -270,6 +348,142 @@ function oracleFailures(impl, fixture, kind) {
       if (summary !== item.expectedSummary) bad.push(`${item.name}: summary differs\n      got      ${summary}\n      expected ${item.expectedSummary}`)
     }
   }
+  if (kind === "invariant-report") {
+    // The fixture states its own answers for the reference report and for each case;
+    // those are the oracle, so this lane can fail with no golden and no second
+    // implementation present.
+    if (fixture.expectedDigest || fixture.expectedFailingChecks || Array.isArray(fixture.cases)) {
+      checked++
+      const report = impl.invariantReport.InvariantReportSchema.parse(fixture.input)
+      if (fixture.expectedDigest && impl.invariantReport.invariantReportDigest(report) !== fixture.expectedDigest) {
+        bad.push(`digest ${impl.invariantReport.invariantReportDigest(report)} != the fixture's own ${fixture.expectedDigest}`)
+      }
+      if (fixture.expectedFailingChecks && impl.invariantReport.failingChecks(report).join(",") !== fixture.expectedFailingChecks.join(",")) {
+        bad.push(`failing checks ${impl.invariantReport.failingChecks(report).join(",")} != ${fixture.expectedFailingChecks.join(",")}`)
+      }
+      if (fixture.passDigest && impl.invariantReport.invariantReportDigest(impl.invariantReport.InvariantReportSchema.parse(fixture.passInput)) !== fixture.passDigest) {
+        bad.push("the passing report's digest moved")
+      }
+      if (fixture.errorDigest && impl.invariantReport.invariantReportDigest(impl.invariantReport.InvariantReportSchema.parse(fixture.errorInput)) !== fixture.errorDigest) {
+        bad.push("the erroring report's digest moved")
+      }
+      for (const item of fixture.cases ?? []) {
+        let error = null
+        let parsed = null
+        try {
+          parsed = impl.invariantReport.InvariantReportSchema.parse(item.input)
+        } catch (caught) {
+          error = caught
+        }
+        if (item.expect === "refused" && error === null) bad.push(`${item.name}: accepted, the contract says refuse`)
+        if (item.expect === "accepted" && error !== null) bad.push(`${item.name}: refused (${String(error?.message ?? error).slice(0, 80)})`)
+        if (item.expect === "accepted" && parsed !== null && item.digest) {
+          if (impl.invariantReport.invariantReportDigest(parsed) !== item.digest) bad.push(`${item.name}: digest moved`)
+        }
+        if (item.expect === "accepted" && parsed !== null && item.failingChecks) {
+          if (impl.invariantReport.failingChecks(parsed).join(",") !== item.failingChecks.join(",")) bad.push(`${item.name}: failing checks differ`)
+        }
+      }
+      // A pass must schedule nothing, and an error must refuse rather than launder.
+      const passReport = impl.invariantReport.InvariantReportSchema.parse(fixture.passInput)
+      if (impl.invariantReport.reVerificationRequestFrom(passReport, { dimensions: ["security"] }) !== null) {
+        bad.push("a passing report produced a re-verification request")
+      }
+      let errored = null
+      let threw = null
+      try {
+        errored = impl.invariantReport.reVerificationRequestFrom(impl.invariantReport.InvariantReportSchema.parse(fixture.errorInput), { dimensions: ["security"] })
+      } catch (caught) {
+        threw = caught
+      }
+      if (errored !== null || threw === null) bad.push("an error report did not refuse with a named code")
+      if (threw !== null && threw.code !== "KERNEL_E_REVERIFY_UNMEASURED") bad.push(`error report refused with ${threw.code}, not KERNEL_E_REVERIFY_UNMEASURED`)
+      for (const item of fixture.reverificationCases ?? []) {
+        let error = null
+        try {
+          impl.invariantReport.reVerificationRequestFrom(report, item.targets)
+        } catch (caught) {
+          error = caught
+        }
+        if (item.expect === "refused" && error === null) bad.push(`target set ${item.name}: accepted, the contract says refuse`)
+        if (item.expect === "accepted" && error !== null) bad.push(`target set ${item.name}: refused`)
+      }
+      if (fixture.request) {
+        const built = impl.invariantReport.reVerificationRequestFrom(report, fixture.request.targets)
+        if (canonical(built) !== canonical(fixture.request)) bad.push("the request the fixture states is not the request built from it")
+      }
+    }
+  }
+  if (kind === "convergence") {
+    checked++
+    const decision = impl.convergence.convergenceDecision(fixture.input)
+    if (fixture.expectedDecision && canonical(decision) !== canonical(fixture.expectedDecision)) {
+      bad.push(`decision ${canonical(decision)} != the fixture's own ${canonical(fixture.expectedDecision)}`)
+    }
+    for (const item of fixture.cases ?? []) {
+      if (item.expect === "refused") {
+        let error = null
+        try {
+          impl.convergence.convergenceDecision(item.state)
+        } catch (caught) {
+          error = caught
+        }
+        if (error === null) bad.push(`${item.name}: accepted, the contract says refuse`)
+        continue
+      }
+      let answer = null
+      try {
+        answer = canonical(impl.convergence.convergenceDecision(item.state))
+      } catch (caught) {
+        bad.push(`${item.name}: refused (${String(caught?.message ?? caught).slice(0, 80)})`)
+        continue
+      }
+      if (answer !== canonical(item.expect)) bad.push(`${item.name}: ${answer} != ${canonical(item.expect)}`)
+    }
+    // Completeness, not prose: every reason the rules can give must be exercised.
+    const seen = new Set((fixture.cases ?? []).filter((c) => c.expect !== "refused").map((c) => c.expect.reason))
+    if (fixture.expectedDecision) seen.add(fixture.expectedDecision.reason)
+    const documented = Object.values(impl.convergence.CONVERGENCE_REASONS ?? {})
+    if (documented.length === 0) bad.push("CONVERGENCE_REASONS is not exported, so completeness cannot be checked")
+    const untested = documented.filter((r) => !seen.has(r))
+    if (untested.length > 0) bad.push(`reasons with no case: ${untested.join(", ")}`)
+  }
+  if (kind === "provider-registration") {
+    checked++
+    const provider = impl.provider.ProviderRegistrationSchema.parse(fixture.input)
+    if (fixture.expectedMethods && provider.methods.map((m) => m.name).join(",") !== fixture.expectedMethods.join(",")) {
+      bad.push(`methods ${provider.methods.map((m) => m.name).join(",")} != ${fixture.expectedMethods.join(",")}`)
+    }
+    for (const item of fixture.cases ?? []) {
+      let error = null
+      try {
+        impl.provider.ProviderRegistrationSchema.parse(item.input)
+      } catch (caught) {
+        error = caught
+      }
+      if (item.expect === "refused" && error === null) bad.push(`${item.name}: accepted, the contract says refuse`)
+      if (item.expect === "accepted" && error !== null) bad.push(`${item.name}: refused (${String(error?.message ?? error).slice(0, 80)})`)
+    }
+    const reg = fixture.registry ?? {}
+    const build = (list) =>
+      (list ?? []).reduce((acc, p) => impl.provider.registerProvider(acc, p), impl.provider.emptyProviderRegistry())
+    if (reg.glasspane && reg.iterate) {
+      const common = impl.provider.providerIdsInCommon(build(reg.glasspane), build(reg.iterate))
+      if (common.join(",") !== (reg.idsInCommon ?? []).join(",")) bad.push(`ids in common ${common.join(",")} != ${reg.idsInCommon?.join(",")}`)
+      // The refusal has to be the *named* one, or "it threw something" would pass.
+      let dup = null
+      try {
+        impl.provider.registerProvider(build(reg.glasspane), reg.glasspane[0])
+      } catch (caught) {
+        dup = caught
+      }
+      if (dup?.code !== impl.provider.PROVIDER_CODES.duplicateId) bad.push("re-registering an id did not raise KERNEL_E_PROVIDER_DUPLICATE")
+    }
+    if (reg.collision) {
+      const common = impl.provider.providerIdsInCommon(build(reg.collision.a), build(reg.collision.b))
+      if (common.join(",") !== reg.collision.expect.join(",")) bad.push(`collision ids ${common.join(",")} != ${reg.collision.expect.join(",")}`)
+    }
+  }
   return { checked, violations: bad }
 }
 
@@ -287,11 +501,23 @@ for (const dir of extra) {
 // broken — instead of surfacing as a TypeError from a call site and being blamed on
 // the driver.
 const REQUIRED = {
-  parse: ["parseEvidencePack", "parseEvidencePackRead", "parseRecipeConfig", "parseDecisionLogEntry"],
+  parse: [
+    "parseEvidencePack",
+    "parseEvidencePackRead",
+    "parseRecipeConfig",
+    "parseDecisionLogEntry",
+    "parseInvariantReport",
+    "parseReverificationRequest",
+    "parseRoundState",
+    "parseProviderRegistration",
+  ],
   decisionLog: ["serializeDecisionLogEntry", "decisionLogEntryHash"],
   evidenceDecision: ["decisionOutcomeFromEvidence", "decisionSummaryFromEvidence"],
   dimension: ["dimensionContext", "formatDimensionContext"],
   runPlan: ["plannedIds", "runPlanDigest"],
+  invariantReport: ["invariantReportDigest", "failingChecks", "reVerificationRequestFrom"],
+  convergence: ["convergenceDecision"],
+  provider: ["emptyProviderRegistry", "registerProvider", "resolveProvider", "requireMethod", "providerIdsInCommon"],
 }
 
 /**
@@ -299,7 +525,23 @@ const REQUIRED = {
  * because the two are checked differently: a zod schema is an object carrying `parse`,
  * and asking whether it `typeof === "function"` reports a working build as broken.
  */
-const REQUIRED_SCHEMAS = { runPlan: ["RunPlanSchema"] }
+const REQUIRED_SCHEMAS = {
+  runPlan: ["RunPlanSchema"],
+  invariantReport: ["InvariantReportSchema"],
+  convergence: ["RoundStateSchema"],
+  provider: ["ProviderRegistrationSchema"],
+}
+
+/**
+ * Third kind of requirement: the constant maps an oracle iterates over. Neither a
+ * function nor a schema, so they get their own check — otherwise a kernel that renamed
+ * one surfaces as a TypeError and the driver gets blamed for the kernel's move.
+ */
+const REQUIRED_CONSTS = {
+  convergence: ["CONVERGENCE_REASONS"],
+  provider: ["PROVIDER_CODES"],
+  invariantReport: ["REVERIFICATION_CODES"],
+}
 
 const loaded = []
 for (const i of impls) {
@@ -335,7 +577,10 @@ for (const i of impls) {
   const missingSchemas = Object.entries(REQUIRED_SCHEMAS).flatMap(([mod, names]) =>
     names.filter((n) => typeof impl[mod]?.[n]?.parse !== "function").map((n) => `${mod}.${n}.parse`),
   )
-  missing.push(...missingSchemas)
+  const missingConsts = Object.entries(REQUIRED_CONSTS).flatMap(([mod, names]) =>
+    names.filter((n) => impl[mod]?.[n] === undefined || typeof impl[mod][n] !== "object").map((n) => `${mod}.${n}`),
+  )
+  missing.push(...missingSchemas, ...missingConsts)
   if (missing.length > 0) {
     console.error(`kernel-conformance: ${i.label} is missing ${missing.join(", ")}`)
     console.error("  Either the kernel moved a function, or this is a broken/incomplete build.")

@@ -2087,7 +2087,7 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "0fe2e39298f68309afd0f88f75526dbcc6a4275b"
+      "forkHash": "37f392ccfbb180329ebe42fb75bf754d79393416"
     },
     {
       "file": "bunfig.toml",
@@ -2657,7 +2657,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "1b8d295187020e016ff0883047a6cad85ca4f0c7"
+      "forkHash": "4cb15abb623974b71ff722430558d983f96461c6"
     },
     {
       "file": "packages/opencode/script/build.ts",
