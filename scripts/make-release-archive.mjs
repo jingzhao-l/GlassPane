@@ -109,60 +109,68 @@ function gitBlobHash(content) {
  * on the first and silently dropped the second, and a release whose content depends on which tool noticed is
  * not a release anyone can reproduce.
  *
- * Every entry's bytes are proven against the blob the index recorded, because the content comes off **disk**
- * while the listing comes from the **index**. Anything that rewrites a tracked file between checkout and pack
- * — a build writing into `src`, a hook, a leftover edit — used to ride along silently, and the archive is the
- * artifact whose SHA256 the updater later presents as "the bytes the publisher signed". `--verify` cannot catch
- * it either: it checks that an entry exists, not what is inside it. A mismatch is refused by name.
+ * The bytes come from **git**, not from disk. `git ls-tree -r --full-tree HEAD` names the blobs of the commit
+ * that was checked out, and one `git cat-file --batch` reads exactly those objects. Reading the file off disk
+ * instead — which is what this did, discarding the blob id `ls-files` had just handed it — means anything that
+ * rewrites a tracked file between checkout and pack (a build writing into `src`, a hook, a leftover edit, a
+ * smudge filter) rides into the archive, while the SHA256 the updater later presents as "the bytes the
+ * publisher signed" describes a tree nobody tagged. `--verify` cannot catch that: it counts entries, never
+ * reads one. The working tree still supplies everything it is supposed to — the build outputs enter through
+ * `buildOutputEntries`, because those are exactly what the build just produced.
  */
 export function trackedEntries({ root, git = execFileSync }) {
-  // The index is allowed to differ from HEAD only by being *equal* to it. The archive is packed off a
-  // checkout of the released commit, so "staged but never committed" is a tree that no tag points at, and
-  // `git status`'s untracked half is deliberately not asked about — build outputs are untracked on purpose
-  // and enter the archive through buildOutputEntries, not here.
-  const staged = String(git('git', ['diff', '--cached', '--name-only', '-z', 'HEAD'], { cwd: root, encoding: 'utf8' }))
-    .split('\0').filter((rel) => rel !== '')
-  if (staged.length > 0) {
-    fail(`${staged.length} path(s) are staged but not committed (${staged.slice(0, 5).join(', ')}); the archive is the committed tree, so these bytes would be left out while the SHA256 story claims the tagged tree`)
-  }
+  // The index is still consulted, but only for the two shapes that must stop a release outright.
   const listing = git('git', ['ls-files', '-z', '-s'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
-  const lines = String(listing).split('\0').filter((line) => line !== '')
+  for (const line of String(listing).split('\0').filter((entry) => entry !== '')) {
+    const [meta, listedPath] = line.split('\t')
+    const [modeOctal, , stage] = String(meta).split(' ')
+    if (!listedPath) continue
+    if (stage !== '0') fail(`${listedPath} is unmerged (stage ${stage}); refusing to publish a tree with conflicts`)
+    if (Number.parseInt(modeOctal, 8) === MODE_GITLINK) fail(`${listedPath} is a submodule gitlink; the release archive has no content for it — vendor it or drop it`)
+  }
+
+  const treeListing = git('git', ['ls-tree', '-r', '-z', '--full-tree', 'HEAD'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  const wanted = String(treeListing).split('\0').filter((entry) => entry !== '').map((line) => {
+    const [meta, rel] = line.split('\t')
+    const [modeOctal, type, objectId] = String(meta).split(' ')
+    if (!rel) fail(`git ls-tree handed back a record with no path (${JSON.stringify(line)})`)
+    if (type !== 'blob') fail(`${rel} is a ${type} in HEAD's tree, not a blob; refusing to publish an entry whose bytes this script would have to invent`)
+    return { rel, mode: Number.parseInt(modeOctal, 8), objectId }
+  })
+  if (wanted.length === 0) fail("HEAD's tree lists no files — there is nothing to publish, and an empty archive is not a release")
+
+  // One process for all of them: per-file `git cat-file` is one spawn per tracked path (5,500+ on the real
+  // tree), and a pack step that slow is a pack step someone skips.
+  const batch = Buffer.from(git('git', ['cat-file', '--batch'], {
+    cwd: root,
+    input: wanted.map((entry) => entry.objectId).join('\n'),
+    maxBuffer: 512 * 1024 * 1024,
+  }))
   const entries = []
   const seen = new Set()
-  for (const line of lines) {
-    const [meta, stagePath] = line.split('\t')
-    const [modeOctal, blobId, stage] = String(meta).split(' ')
-    const rel = stagePath
-    if (!rel) continue
-    if (stage !== '0') fail(`${rel} is unmerged (stage ${stage}); refusing to publish a tree with conflicts`)
-    const mode = Number.parseInt(modeOctal, 8)
-    if (mode === MODE_GITLINK) fail(`${rel} is a submodule gitlink; the release archive has no content for it — vendor it or drop it`)
-    if (seen.has(rel)) fail(`${rel} appears twice in git's index`)
+  let cursor = 0
+  for (const { rel, mode, objectId } of wanted) {
+    if (seen.has(rel)) fail(`${rel} appears twice in HEAD's tree`)
     seen.add(rel)
-    const abs = path.join(root, rel)
-    if (mode === MODE_LINK) {
-      // A symlink is checked with lstat, not existsSync: a link into a path that does not
-      // exist is still the index's link, and existsSync would call it missing.
-      let stat
-      try {
-        stat = fs.lstatSync(abs)
-      } catch {
-        fail(`${rel} is in the index but not on disk`)
-      }
-      if (!stat.isSymbolicLink()) fail(`${rel} is in the index as a symlink but on disk it is not one`)
-      const link = fs.readlinkSync(abs)
-      const actual = gitBlobHash(Buffer.from(link, 'utf8'))
-      if (actual !== blobId) {
-        fail(`${rel} is a symlink to ${JSON.stringify(link)} on disk, which hashes to ${actual} — the index has ${blobId}. The archive would ship a link that is not in the tagged tree`)
-      }
-      entries.push({ name: rel, type: 'link', link, mode: 0o777 })
-      continue
+    const newline = batch.indexOf(0x0a, cursor)
+    if (newline < 0) fail(`git cat-file --batch ended after ${entries.length} of ${wanted.length} objects; refusing to publish a half-read tree`)
+    const [echoed, type, sizeText] = batch.subarray(cursor, newline).toString('utf8').split(' ')
+    cursor = newline + 1
+    if (type === 'missing') fail(`git cannot read object ${objectId} for ${rel} — HEAD's tree names bytes this repository does not have`)
+    if (type !== 'blob') fail(`${rel} came back as a ${type} object, not a blob`)
+    if (echoed !== objectId) fail(`${rel}: asked for blob ${objectId} and git answered ${echoed}; refusing to guess which bytes belong to which path`)
+    const size = Number.parseInt(sizeText, 10)
+    if (!Number.isInteger(size) || size < 0 || batch.byteLength < cursor + size) {
+      fail(`${rel}: git announced ${sizeText} bytes and the stream holds ${batch.byteLength - cursor}; refusing to publish a truncated tree`)
     }
-    if (!fs.existsSync(abs)) fail(`${rel} is in the index but not on disk`)
-    const content = fs.readFileSync(abs)
+    const content = batch.subarray(cursor, cursor + size)
+    cursor += size + 1 // every record is followed by a newline
+    // Belt and braces: bytes that do not hash to the object name they were read under are not that object.
     const actual = gitBlobHash(content)
-    if (actual !== blobId) {
-      fail(`${rel} differs between the working tree (${actual}) and git's index (${blobId}); refusing to publish an archive whose bytes are not the tagged tree — commit it or restore it, then re-pack`)
+    if (actual !== objectId) fail(`${rel}: the bytes read from git hash to ${actual}, not the ${objectId} HEAD's tree records`)
+    if (mode === MODE_LINK) {
+      entries.push({ name: rel, type: 'link', link: content.toString('utf8'), mode: 0o777 })
+      continue
     }
     entries.push({ name: rel, content, mode: mode === MODE_EXEC ? 0o755 : 0o644 })
   }

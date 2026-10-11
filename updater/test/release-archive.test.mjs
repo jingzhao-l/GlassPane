@@ -393,7 +393,7 @@ test('the script runs against this repository and refuses a version it cannot na
   }
 })
 
-test('归档的每一个字节都必须等于 index 记下的那一份——脏工作树不许被说成 tagged tree', () => {
+test('归档的字节取自 HEAD 的树，不是取自磁盘——脏工作树进不了发布物', () => {
   // 这条闸盯的是发布通道上最贵的一种谎：`git ls-files -s` 明明给出 blob 号，从前却被丢掉，
   // 内容改从磁盘读。checkout 之后任何进程改脏一个被追踪的文件（构建往 src 里写、残留的编辑、
   // 钩子），归档就带上"tag 里根本没有的字节"，而 updater 之后把这份的 SHA256 呈现成"发布者
@@ -404,33 +404,40 @@ test('归档的每一个字节都必须等于 index 记下的那一份——脏�
     const clean = trackedEntries({ root: tree.root })
     assert.ok(clean.length > 10, `干净树要能列出条目，实得 ${clean.length}`)
 
-    tree.write('engine/Sources/GlassPaneEngine/EngineCore.swift', 'public let version = "1.6.0-dirty"\n')
-    assert.throws(
-      () => trackedEntries({ root: tree.root }),
-      /differs between the working tree .* and git's index .*refusing to publish an archive whose bytes are not the tagged tree/,
-      '被改脏的追踪文件必须被点名拒绝，而不是静静进档',
+    const rel = 'engine/Sources/GlassPaneEngine/EngineCore.swift'
+    const committed = 'public let version = "1.6.0"\n'
+    const find = (entries) => entries.find((entry) => entry.name === rel)
+
+    tree.write(rel, 'public let version = "1.6.0-DIRTY-BY-A-STRAY-BUILD"\n')
+    const afterDirty = trackedEntries({ root: tree.root })
+    // 归档说的永远是 tag 那棵树：磁盘被改脏，进档的仍必须是已提交的那一份。
+    assert.equal(find(afterDirty).content.toString('utf8'), committed, `磁盘脏了以后归档仍须带已提交字节，实得 ${find(afterDirty).content.toString('utf8')}`)
+    assert.ok(!find(afterDirty).content.toString('utf8').includes('DIRTY'), '脏字节必须在档外')
+
+    // 工作树里消失的文件不能因此从发布物里消失——那条字节属于 HEAD 的树。
+    fs.rmSync(path.join(tree.root, rel))
+    assert.equal(find(trackedEntries({ root: tree.root })).content.toString('utf8'), committed, '工作树删掉的文件仍按 HEAD 的字节进档')
+
+    // 只 staged 未 commit 的东西不属于任何 tag，因此也不属于归档。
+    tree.write('staged-only.txt', 'not in any tag\n')
+    tree.git('add', 'staged-only.txt')
+    assert.equal(
+      trackedEntries({ root: tree.root }).some((entry) => entry.name === 'staged-only.txt'),
+      false,
+      '只暂存不提交的文件不得进档',
     )
 
-    // 符号链接走同一扇门：blob 存的是目标字符串，换目标就是改内容。
-    const linkTree = makeReleaseTree()
-    try {
-      fs.rmSync(path.join(linkTree.root, 'docs', 'icon.png'))
-      fs.symlinkSync('logo.png?v=2', path.join(linkTree.root, 'docs', 'icon.png'))
-      assert.throws(
-        () => trackedEntries({ root: linkTree.root }),
-        /is a symlink to .* which hashes to .* the index has /,
-        '换了目标的符号链接必须被拒——归档里那条 link 不是 tag 里的那条',
-      )
-    } finally {
-      linkTree.cleanup()
-    }
+    // 符号链接同理：blob 存的就是目标字符串，磁盘上换了目标也不许进档。
+    fs.rmSync(path.join(tree.root, 'docs', 'icon.png'))
+    fs.symlinkSync('logo.png?v=2', path.join(tree.root, 'docs', 'icon.png'))
+    const link = trackedEntries({ root: tree.root }).find((entry) => entry.name === 'docs/icon.png')
+    assert.equal(link.type, 'link')
+    assert.equal(link.link, 'logo.png', '归档里那条 link 必须是 tag 里的那条目标，不是屏幕上这一条')
 
-    // 拒绝要一路顶到脚本：打归档那条命令不能只警告一下就写出文件。
-    const out = path.join(fs.realpathSync(os.tmpdir()), 'gp-dirty-archive-probe.tar.gz')
-    const run = spawnSync(process.execPath, [SCRIPT, 'HEAD', out], { cwd: tree.root, encoding: 'utf8' })
-    assert.equal(run.status, 1, `脏树必须非零退出：\n${run.stdout}\n${run.stderr}`)
-    assert.match(run.stderr, /differs between the working tree/, run.stderr)
-    assert.equal(fs.existsSync(out), false, '拒绝之后不能留下半个归档')
+    // 顶到真正产出字节的入口：磁盘脏成什么样都打得开，且档内那一条仍是已提交的字节。
+    const packed = archiveBytes({ root: tree.root, version: '1.6.0' })
+    const inArchive = readTarGz(packed.bytes).find((entry) => String(entry.name).endsWith(rel))
+    assert.equal(inArchive.bytes.toString('utf8'), committed, '打包结果里必须是已提交字节，不是磁盘上那一份')
   } finally {
     tree.cleanup()
   }
