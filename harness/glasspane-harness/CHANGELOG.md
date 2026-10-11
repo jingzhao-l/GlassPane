@@ -30,8 +30,21 @@ contract does not).
 签名步签的是那两张已提交的 svg，上传步在自己的目录里找不到 `SHA256SUMS.txt` 而退出。
 0.7.1 的资产列表里那对 `logo.svg.asc`/`banner.svg.asc`（下载数 0）就是同一件事的化石。
 
-修法：这个 job 声明一个 `env: ASSET_DIR: ${{ runner.temp }}/release-assets`，三步共用。
-一个跨步骤共享的路径属于一个变量，不属于三份副本。
+修法（今天树里实际长的样子）：下载/求和、签名、上传三步都指向同一个
+`${RUNNER_TEMP:-/tmp}/release-assets`，并把"这条路径两步不一致就是路径本身的 bug"写进注释。并行
+lane 独立提交了同一处修复（`a51b96f`，三步各写一次路径 + 因果注释），我这边先提交的是 job 级
+`env: ASSET_DIR`（`bd690a9`）；合并时冲突取 trunk 那份，等价修法不并排放两份，`ASSET_DIR` 那两处
+非冲突 hunk 一并撤掉，不给树留一个没人读的变量。
+
+### Fixed — 一条会误报的发布闸（改的是报告，不是判据）
+
+`script/verify-published.ts 0.7.3` 在这台机器上 exit 1，失败项写作
+`the installed binary serves the embedded web app — no response`。读代码：等待窗口是
+30 × 500ms = 15s，而子进程的 stdout/stderr 被丢掉不看——于是"负载太重、108MB 单文件 15s 内没起来"
+与"这份产物里没有内嵌 web"共用同一句话。手测同一条通道：`serve --port 4814` 起来后
+`curl http://127.0.0.1:4814/` 在 **8s** 内回 2,883 字节真 HTML，所以那次红是环境而不是发布物。
+现在失败报告会写明等了多久、服务器有没有报出监听端口，并带出它输出的最后三行；从未报出监听端口
+的那种情形明写 `INCONCLUSIVE` 并给出复跑办法。**判据一条没放宽**：观察不到仍然不绿。
 
 ### 0.7.2 的发布物状态（如实记，不当作已具备的保证）
 

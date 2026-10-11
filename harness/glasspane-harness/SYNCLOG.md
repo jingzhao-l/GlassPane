@@ -2,6 +2,73 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-11 · 0.7.2 发坏了，0.7.3 发对了：checksums 那三步活在两个目录里
+
+**触发**：本轮把 0.7.2 推上 split 仓并打 tag（run 38100151152 之前的 38098337688），Release run
+在 `SHA256SUMS for the release assets` 这一步 **失败**：`no matches found for `SHA256SUMS.txt``
+(exit 1)。两个平台的 binary job 与 create-release 都绿，于是 0.7.2 的 GitHub Release 带着两个 zip、
+**没有清单、没有签名**，npm 上也没有 0.7.2（publish 两条 job 在 push 触发的 run 里全 skipped）。
+这是坏发布，不是噪声。
+
+**根因（一条被两半各自实现的修复）**：`f36748b` 把"下载+求和"那一步的工作目录从仓库里的
+`assets/` 挪到 `${RUNNER_TEMP}/release-assets`——理由是对的：`assets/` 是被版本控制的目录，装着
+`logo.svg`/`banner.svg`，`cd assets` 是个 no-op，`sha256sum ./*` 于是给两个跟发布无关的仓库文件
+作保。但它**只挪了一步**：`Sign release assets with GPG` 与 `Upload checksum and signature files`
+仍然 `cd assets`。后果两半都在那次 run 里发生：签名步签的是那两张已提交的 svg（0.7.1 资产里那对
+下载数 0 的 `logo.svg.asc`/`banner.svg.asc` 是同一件事的化石），上传步在自己的目录里找不到
+`SHA256SUMS.txt` 就退出。
+
+**修法与冲突处理**：我这边（`bd690a9`）先改成 job 级 `env: ASSET_DIR` 让三步共用一个名字；并行
+lane 同时独立修了同一处（`a51b96f`，每步各写一次路径 + 把因果写进注释）。合并时 `release.yml`
+两处冲突，**取 trunk 那份**：两套并存正是 `993977e` 刚清掉的那种重复逻辑，我那两个非冲突 hunk
+（job env 与第一步的变量名）随之撤掉，不留一个没人用的 `ASSET_DIR`。`tool-surface.mjs` 自动合并
+的结果逐行复核过：LIMIT/limitSource/caliber 三条比对只剩一处（425-441），没有第二份拷贝。
+
+**0.7.3 的发布物（实测）**：run 38100151152 全绿，含 `checksums`。资产 =
+`glasspane-harness-darwin-arm64.zip`(46,397,302) + `.asc`、`-darwin-x64.zip`(48,582,877) + `.asc`、
+`SHA256SUMS.txt`(204B，**恰好两行，0 个 svg 孤儿**) + `.asc`；`isDraft=false`、
+`targetCommitish=b0212c08169cc179b3e985330cc17100d51c929d`（是 commit 不是分支名）。
+npm 侧 run 38100638921 三条 publish job 全 success，registry 点名复核（`--prefer-online`）：
+`glasspane-harness@0.7.3`、`glasspane-harness-darwin-arm64@0.7.3`、
+`glasspane-harness-darwin-x64@0.7.3` 三个都回 0.7.3。
+
+**端到端**：`npm install -g --prefix "$HOME/.local" glasspane-harness` 装上后
+`glasspane-harness --version` 与 `gp-harness --version` **都是 0.7.3**；npm ≥11 的
+`allow-scripts` 警告照打、安装照成。内嵌 web 用手测：`serve --port 4814` 起来后
+`curl http://127.0.0.1:4814/` 在 8s 内回 2,883 字节真 HTML。
+
+**一条会误报的闸（本轮改掉它的措辞，不改判据）**：`script/verify-published.ts 0.7.3` 在这台机器上
+**exit 1**，失败项是 `the installed binary serves the embedded web app — no response`。逐字看代码：
+它的等待窗口是 30 × 500ms = 15s，且把子进程的 stdout/stderr 丢掉不看——于是"这台机器 15s 内没把
+108MB 单文件拉起来"与"这份产物里没有内嵌 web"输出同一句话。手测同一条通道 8s 就通了，所以那次红
+是环境。**判据没有放宽**（不绿仍然不绿），改的是报告：现在打印等了多久、服务器有没有报出监听端口、
+并把最后三行服务器输出带出来；"从未报出监听端口"这种情形明写 INCONCLUSIVE + 给出复跑办法。typecheck
+opencode 包 = 0。
+
+**闸（合并后的树，全部从主仓根跑）**：fork-diff vs v1.18.32 = `4666/6714 identical / 261 edited /
+82 added / 1705 deleted`（金样三次随批重记：0.7.2 那笔、0.7.3 那笔、以及取 trunk 的 release.yml
+之后一次——最后一次 `--record` 与主干已有一致，所以那笔合并提交里 `fork-diff.json` 没有再变）；
+tool-surface engine 23,698 行 / 61 文件，面 A 8,658 / **22.52%**、面 B 6,088 / **15.84%**（行数一条
+没涨，占比随并行批次把 engine 变大而**下降**——棘轮看行数，这是设计而非侥幸）；product-surface
+94 条一致 / 0 问题（@0.7.3）；surface-semantics 0 命中 / 18 文件；brand-surface 26+2 文件 0 命中、
+血缘 9,619 / 3,303；hook-liveness 21 钩子无漂移；kernel-pin `iterate-kernel@0.1.4` + 17 契约文件；
+`kernel-conformance` 11 条 / 1 实现绿，加 `--impl`（真构建的第二份实现）11 条 / 2 实现绿，坏实现
+exit 3；`probe-lane-selftest.sh` 三态可分；`check-workflows --self-test` 6 例各自验红 +
+5 份工作流干净；`check-doc-links` 24 份 / 225 内链；`publish.ts --dry-run` 按重建后的 dist 绿
+（boot smoke `--version` → 0.7.2/0.7.3 视那一次构建的版本）。
+
+**没跑成 / 未观测（照实写）**：`bun test` 的 4 份 glasspane 固定点用例在极端负载下报 2 条超时红
+（同一条 `over-sized engine frame` 基线 280ms、本轮 30,139ms 撞 `--timeout 30000`；另一条是
+`test/preload.ts` 的钩子 252s 超时）——**没有**为此加超时或改判据，语义面没有来源：本批一行都没落在
+`src/tool/glasspane/` 或 `src/plugin/`。curl 兜底通道：npm 故意失败后确实进入 release-asset 分支并
+开始下载真发布物，但本机到 `objects.githubusercontent.com` 这一段经拦截代理极慢，SHA256/GPG 的
+最终判定**未观测**；`bun add -g` 同理未跑完。真模型轮次、真 TUI 会话观感、`gp_*` 对活 daemon 的一次
+证据成包真轮次、M2 决策日志 `logged` 分支照旧未观测。
+
+**环境**：本轮期间系统卷一度 100% 写满（`No space left on device` 先后杀过一次 `tool-surface
+--record`、`brand-surface` 与两个子代理泳道），load average 长时间 165–378。所有耗时数字按这条打折看；
+两条审查泳道（bugbot / security）在跑到一半时被日额度打断，之后的审查由主代理逐文件重做——**这条要
+写进汇报**，因为"两条泳道审过"在本轮不成立。
 ## 2026-10-10 · 每日批次（harness 线）：发布链路里那条"版本自己跟自己比"的恒真断言，发 0.7.2
 
 - **开工态**：HEAD `cfcfc45`（== origin/main），整树 `git status --porcelain` **干净**，所以本轮没有另开工作树。开工约一小时后并行会话把 main 推进到 `2e83542`（内核依赖升 0.1.4、行为闸开始驱动 RunPlan），并且正在 `/Volumes/Eng-Dev/.worktrees/gp-014-goldens` 里跑 `fork-diff --record` / `tool-surface --record`。本轮只按文件挑自己的改动提交（`publish.ts`、`tool-surface.mjs`、`kernel-conformance.mjs`、`.github/workflows/harness-contract.yml`、三份文档、两处版本线、一把新闸），他们那批一个文件没动、没混提、没有 `git checkout/reset/stash` 别人的东西。收口 HEAD 见本节末尾。

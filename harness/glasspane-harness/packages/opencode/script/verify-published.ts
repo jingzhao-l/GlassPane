@@ -122,7 +122,21 @@ try {
     try {
       let served = false
       let detail = "no response"
-      for (let i = 0; i < 30; i++) {
+      // Drained in the background so a chatty server cannot fill the pipe and stall.
+      const logged: string[] = []
+      const drain = async (stream: ReadableStream<Uint8Array>) => {
+        const decoder = new TextDecoder()
+        const reader = stream.getReader()
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          logged.push(decoder.decode(value, { stream: true }))
+        }
+      }
+      void drain(server.stdout)
+      void drain(server.stderr)
+      const waits = 30
+      for (let i = 0; i < waits; i++) {
         await Bun.sleep(500)
         const response = await fetch(`http://127.0.0.1:${port}/`).catch(() => undefined)
         if (!response?.ok) continue
@@ -132,8 +146,24 @@ try {
         // reference is what this binary serves when the web assets really are embedded.
         const hasAssets = /(?:src|href)="\/?assets\//i.test(body)
         served = type.includes("text/html") && /<!doctype html>/i.test(body) && hasAssets
-        detail = `content-type=${type || "(none)"} doctype=${/<!doctype html>/i.test(body)} assets=${hasAssets ? "referenced" : "absent"}`
+        detail = `waited ${(i + 1) * 0.5}s, content-type=${type || "(none)"} doctype=${/<!doctype html>/i.test(body)} assets=${hasAssets ? "referenced" : "absent"}`
         if (served) break
+      }
+      if (!served) {
+        // "no response" used to be the whole report, which made two very different
+        // outcomes look identical: a release whose binary cannot serve the web app at
+        // all, and a machine too busy to start a 108 MB single file inside the wait
+        // window. Measured on 2026-10-11: the same published 0.7.3 binary answered on
+        // port 4814 after 8s when driven by hand with an 80s window, while this lane
+        // — 30 × 500 ms — printed "no response" and called the release bad. The
+        // verdict stays red (a release we could not observe is not a release we
+        // verified), but the message now says which of the two it was and what to run.
+        const started = logged.join("").includes("listening on")
+        const tail = logged.join("").trim().split("\n").slice(-3).join(" / ").slice(0, 300)
+        detail = started
+          ? `waited ${waits * 0.5}s after the server reported it was listening on :${port} — that is a real serving failure, not a slow start`
+          : `waited ${waits * 0.5}s and the server never reported a listening port — INCONCLUSIVE on a loaded machine, not evidence the bundle is missing. Re-run when the load average is down, or: ${bin} serve --port 4814 and curl -sI http://127.0.0.1:4814/`
+        detail += tail ? ` (server output: ${tail})` : " (no server output captured)"
       }
       check("the installed binary serves the embedded web app", served, detail)
     } finally {
