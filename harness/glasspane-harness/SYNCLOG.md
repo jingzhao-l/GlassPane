@@ -50,6 +50,23 @@ typecheck 是 exit 2（`TS2488: Type '{}' must have a [Symbol.iterator]()` —�
 回到 0，且 **os/cpu 的负向控制重跑仍然咬得住**（改 `product.json` 的 arch ⇒ 具名红）。这条也说明
 `readCode()` 那类"规则读代码"的改动为什么必须连着按包 typecheck 一起跑。
 
+**0.7.4 的发布实测（本批收口）**：split 推送前先证 tree 哈希等式 ——
+`git rev-parse split/glasspane-harness^{tree}` = `45701d6ffa9cbdbc4a60866627f73eeb4647be25` =
+`git rev-parse HEAD:harness/glasspane-harness`，逐字相等才推；split main 是快进（`d5433e1..e8c5e1e`），
+**没有用 force**。tag `v0.7.4` → run 38141720392 全绿含 `checksums`；发布物 =
+两个 zip（46,400,796 / 48,587,409）+ 两个 `.asc` + `SHA256SUMS.txt`（**两行、0 个孤儿**）+ 其 `.asc`，
+`isDraft=false`、`targetCommitish=e8c5e1e`（commit 而非分支名）。清单的独立复核：两行与 GitHub API 自算的
+`assets[].digest` 逐字相符，`gpg --verify` 验到发布私钥
+`0929EA31DF4F7429F63FC53189D88B1D043A1298`（"jingzhao-l (sign-github)"）。npm 侧 run 38142520702 三条
+publish job success，registry 点名三个都回 **0.7.4**、`latest` = 0.7.4 —— 中间有一次假象：wrapper 那条
+`npm view` 先 404、`latest` 还写着 0.7.3，而 job 日志里 `+ glasspane-harness@0.7.4` 与
+"package is being processed" 都在；等 90s 再查即一致（**结论仍然只认 registry 与 verify-published**）。
+`script/verify-published.ts 0.7.4` 九项全 ok：两条命令都报 0.7.4、**新的 os/cpu/version 闸打印的是装进去那份
+清单的实测值**（`os=["darwin"] cpu=["arm64","x64"] version="0.7.4"`）、registry integrity 在、内嵌 web
+3.5s 内供出真 HTML。curl 兜底通道：npm 故意失败后进入 release-asset 分支，清单抓取与验签逻辑已按本批改动走
+（改动前的化妆行为由 `installer-selftest.sh` 的 5 条具名红钉住）；本机到 `objects.githubusercontent.com`
+下载 46MB 资产这一段仍受代理截断影响，最终"装成 0.7.4"的判定以该 run 的日志为准，见本轮汇报。
+
 **未观测 / 未做**：真模型轮次、真 TUI 会话观感、`gp_*` 对活 daemon 的一次证据成包真轮次；
 `bun add -g` 通道本轮未重跑（0.7.3 那次的结论是 bun 拦 postinstall ⇒ 命令是给出路的 stub）；
 本地重下发布物做 `shasum -c` 仍不可信（代理截断，见上一节的处理办法：用 gh API 的
