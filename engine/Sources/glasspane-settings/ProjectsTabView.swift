@@ -55,6 +55,10 @@ struct ProjectsTabView: View {
             Spacer()
             Button("清理") { model.previewTestResiduePrune() }
                 .controlSize(.small)
+                .disabled(model.isPreparingPrunePreview)
+                .help(model.isPreparingPrunePreview
+                    ? "在向后台服务要预览清单（--project-prune --dry-run）"
+                    : "先向后台服务要一份将删除的清单，再确认")
                 .accessibilityIdentifier("gp-prune-projects")
         }
         .padding(10)
@@ -265,6 +269,15 @@ struct ProjectsTabView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            // 面板读到的条数与后台服务答复的清单不一致时，两个数都留在屏幕上，
+            // 并说清以哪一份为准——不许悄悄用一个覆盖另一个。
+            if !model.prunePreview.isEmpty, model.prunePreview.count != model.testResidueCount {
+                Text("面板在这台机器上读到 \(model.testResidueCount) 条，后台服务的预览答 \(model.prunePreview.count) 条；以下这张表是后台服务自己的答复，删除也按它执行。")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("gp-prune-count-disagrees")
+            }
 
             if !model.prunePreview.isEmpty {
                 ScrollView {

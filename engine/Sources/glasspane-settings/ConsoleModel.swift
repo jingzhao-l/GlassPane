@@ -118,8 +118,13 @@ final class ConsoleModel: ObservableObject {
     /// projectId → 该项目证据目录里的档案条数（nil = 目录不存在）。
     @Published private(set) var projectEvidenceCounts: [String: Int?] = [:]
     @Published var selectedProjectId: String?
-    /// 待确认的清理清单（dry-run 结果 → 确认表 → 真删）。
-    @Published var prunePreview: [ProjectEntry] = []
+    /// 待确认的清理清单。**必须由 daemon 的 `--project-prune --dry-run` 产生**：
+    /// 从前这里是面板自己按 `LocalArchive.isTestResidue` 过滤本地读到的注册表，
+    /// 而确认之后真删的是 daemon——两份判定之间没有保证，表格上摊开的"N 条"
+    /// 就成了面板的主张而不是后台服务的答复。字段只取 daemon 报回来的那四个，
+    /// 不补 `createdAt`（补了就是编一个它没说过的东西）。
+    @Published var prunePreview: [PrunePreviewRow] = []
+    @Published var isPreparingPrunePreview = false
     @Published var isPruneSheetPresented = false
     @Published var isRunningPrune = false
     /// 修剪后是否需要重启后台服务（daemon 内存里还是旧表）。
@@ -469,14 +474,87 @@ final class ConsoleModel: ObservableObject {
 
     // MARK: - 写入动作（一律经 daemon CLI）
 
-    /// 先跑 dry-run，把"将要删除哪些"摊开给人确认，绝不直接删。
+    /// 先向 daemon 要一次 `--project-prune --dry-run`，把**它的**命中清单摊开给人确认。
+    /// 从前这一步是面板本地过滤：表格上写的"N 条"是面板的主张，而按确认之后删的是
+    /// daemon 那份判定，两边可以各说各话。CLI 在后台队列跑（主线程等子进程 = 看门狗杀窗口）。
     func previewTestResiduePrune() {
         guard canRunDaemonCLI else {
             lastActionMessage = "还没连上后台服务：读不到它的程序路径，清理动作无法执行。点「刷新」恢复后重试。"
             return
         }
-        prunePreview = projects.filter { LocalArchive.isTestResidue($0) }
-        isPruneSheetPresented = true
+        guard !isPreparingPrunePreview else { return }
+        isPreparingPrunePreview = true
+        let binary = daemonBinaryPath
+        Task.detached(priority: .userInitiated) {
+            let run = ConsoleModel.runDaemonCLI(
+                binary: binary, arguments: ["--project-prune", "--dry-run"])
+            await MainActor.run {
+                self.isPreparingPrunePreview = false
+                switch Self.prunePreviewOutcome(
+                    cliRan: run != nil,
+                    stdout: run?.output ?? "",
+                    stderr: run?.errorOutput ?? "",
+                    exitCode: run?.status ?? -1
+                ) {
+                case .rows(let rows):
+                    self.prunePreview = rows
+                    self.isPruneSheetPresented = true
+                case .refused(let message):
+                    // 读不到就不摊清单：确认表面前一条空表与"没读出来"必须能分开。
+                    self.prunePreview = []
+                    self.isPruneSheetPresented = false
+                    self.lastActionMessage = message
+                }
+            }
+        }
+    }
+
+    /// dry-run 回话怎么折算成清单（纯函数，供单测）。判据与 `pruneActionMessage`
+    /// 同一条：**这一行里到底有没有约定那几个字段**，不是进程有没有回来过。
+    /// `dryRun:false` 的回话单独拦——面板要的是预览，daemon 却报"已经删过了"，
+    /// 那必须说出来而不是当成清单显示。
+    nonisolated static func prunePreviewOutcome(
+        cliRan: Bool, stdout: String, stderr: String, exitCode: Int32
+    ) -> PrunePreviewOutcome {
+        guard cliRan else {
+            return .refused("清理预览没有执行：读不到后台服务的程序路径，或它没在时限内回话。点「刷新」恢复后重试。")
+        }
+        let reply = replyText(stdout: stdout, stderr: stderr)
+        guard let matched = intField("matched", in: reply) else {
+            return .refused(
+                "后台服务没有按约定回答清理预览（退出码 \(exitCode)，回文里没有 matched 字段）。"
+                + "清单不显示，任何删除都不会执行——它原话：\(quoteDaemonWords(stderr.isEmpty ? stdout : stderr))")
+        }
+        if boolField("loadFailed", in: reply) == true {
+            return .refused("注册表读不开（loadFailed:true），预览与删除都不可信；先修 \(registryPath(in: reply)) 再试。")
+        }
+        if boolField("dryRun", in: reply) == false {
+            return .refused(
+                "要的是预览（--dry-run），后台服务回的是 `dryRun:false`——它说这一趟已经动过注册表了。"
+                + "先查它报了哪些结果（matched/pruned/remaining），别在这里点确认。")
+        }
+        var rows: [PrunePreviewRow] = []
+        if let data = reply.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let projects = object["projects"] as? [[String: Any]] {
+            for item in projects {
+                guard let projectId = item["projectId"] as? String,
+                      let displayName = item["displayName"] as? String else { continue }
+                rows.append(PrunePreviewRow(
+                    projectId: projectId,
+                    displayName: displayName,
+                    bundleId: item["bundleId"] as? String,
+                    evidenceStoragePath: (item["evidenceStoragePath"] as? String) ?? nil
+                ))
+            }
+        }
+        // 命中数与清单条数不符：报出来，不折成"没有"也不静默截短。
+        if rows.count != matched {
+            return .refused(
+                "后台服务的预览自相矛盾：`matched` 说 \(matched) 条，`projects` 给了 \(rows.count) 条。"
+                + "清单不显示，任何删除都不会执行。")
+        }
+        return .rows(rows)
     }
 
     /// 确认清理：真正执行 `--project-prune`，随后如实告知是否需要重启。
@@ -705,6 +783,17 @@ final class ConsoleModel: ObservableObject {
         return object[key] as? Bool
     }
 
+    /// 报文里那份"哪张表"。缺它时不说成一个空路径——那会让下一步的
+    /// `cat`/`ls` 指到一个不存在的位置，出路就成了假的。
+    nonisolated private static func registryPath(in json: String) -> String {
+        guard let data = json.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let path = object["registryPath"] as? String, !path.isEmpty else {
+            return "（回话没给出注册表路径）"
+        }
+        return path
+    }
+
     // MARK: - 档案辅助呈现
 
     /// 档案目录的完整路径（空状态里告诉用户去哪儿看，不让人猜）。
@@ -733,4 +822,20 @@ final class ConsoleModel: ObservableObject {
         }
         return "这台机器上还没有 approvals.json：执行过一次高风险操作（如回滚）之后它才会出现。"
     }
+}
+
+/// 清理确认表的一行。**字段就是 daemon `--project-prune --dry-run` 报文里那几个**：
+/// 面板不替它补 `createdAt` 之类它没说过的东西，也不带 `ProjectEntry` 那种
+/// 本地注册表才有的完整形状。
+struct PrunePreviewRow: Equatable {
+    let projectId: String
+    let displayName: String
+    let bundleId: String?
+    let evidenceStoragePath: String?
+}
+
+/// 清理预览的两种结局：拿到清单，或者**不摊清单并说清为什么**。
+enum PrunePreviewOutcome: Equatable {
+    case rows([PrunePreviewRow])
+    case refused(String)
 }
