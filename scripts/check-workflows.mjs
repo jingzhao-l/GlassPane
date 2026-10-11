@@ -82,6 +82,7 @@ function inspect(target) {
   let runIndent = 0
   const runRefs = []
   let stepDir = "" // step-level working-directory, applied to that step's scripts
+  let hasTopPermissions = false // a top-level `permissions:` block; see the check at the end
 
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i]
@@ -106,6 +107,7 @@ function inspect(target) {
 
     if (top) {
       section = line.split(":")[0]
+      if (section === "permissions") hasTopPermissions = true
       continue
     }
     if (section === "jobs" && job && !nested) {
@@ -323,6 +325,15 @@ function inspect(target) {
     if (!declared.has(name)) problems.push(`uses inputs.${name} but never declares it under workflow_dispatch.inputs`)
   }
 
+  // A workflow without a top-level `permissions:` runs with whatever the repository hands
+  // the default token — historically `contents: write`. Every job in it can then push a ref
+  // or write a release, including the jobs that `npm ci` a lockfile nobody reviewed. The rule
+  // is "declare the minimum", even when the minimum is only `contents: read`: silence here is
+  // a decision made by the repository settings, not by this file's author.
+  if (!hasTopPermissions) {
+    problems.push(`${base}: no top-level "permissions:" block — this workflow inherits the repository's default token scope (often contents: write) instead of declaring the minimum it needs`)
+  }
+
   return { jobs: [...seen.keys()], problems }
 }
 
@@ -468,6 +479,8 @@ if (process.argv.includes("--self-test")) {
 on:
   push:
     branches: [main]
+permissions:
+  contents: read
 jobs:
   build:
     name: build the thing
@@ -490,6 +503,13 @@ jobs:
           "\n  build:\n    name: build the thing\n    runs-on: ubuntu-latest\n    steps: []\n  build:\n",
         ),
       expect: /defined 2 times/,
+    },
+    {
+      id: "no top-level permissions block",
+      // BASE 带着 `permissions: contents: read`；这里把它整块抹掉，规则必须因此变红。
+      // 没有这一条的话，"缺 permissions" 是一道只能靠人记得的规矩——而 ci.yml 正是忘了的那份。
+      apply: (t) => t.replace("permissions:\n  contents: read\n", ""),
+      expect: /no top-level "permissions:" block/,
     },
     {
       id: "secrets context in a step's if:",
