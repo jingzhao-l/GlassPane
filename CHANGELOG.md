@@ -2,6 +2,116 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.11.0] — 2026-10-11
+
+**版本判断：minor。** 判据沿用本仓在 1.6.2 条目里写下那一条：patch 要求"状态文件的字段没动、退出码
+集合没动、CLI 参数没动、npm 包的 `bin` 声明没动"。这四条里**参数面**动了语义：`updater … --auto` 从前
+接受 `--consent <kind>`（并接受它），本版把这一组合判为用法错误——一个脚本若原来靠 `check --auto
+--consent unsigned-release` 拿到暂存，本版会拿到 64 与一句解释。状态文件字段、退出码集合、`bin` 声明
+都没动（新增的拒绝都落在已有的 `needs-consent` / `check-failed` / `deferred` 与既有代号上）。没有新增
+用户可见控制件；本版全部改动是"把已经说出口的承诺真的做到"。`harness/` 与 `kernel/` 不在发布面：
+harness 的目录、尺子与金样一律未动；`kernel/package.json` 与它的 lockfile 只按版本线被
+`scripts/set-version.mjs` 改写版本号字段，`kernel/schemas/**` 未动。归档照旧减去 `harness/`。
+
+本版**只合并 `[Unreleased]` 里本轮的记录**（该段开工时为空，未合并任何未发布的既有条目）。
+
+### Fixed — `--auto` 是一道读不到的闸（更新器）
+
+`cli.js` 把 `--auto` 翻成 `trigger` 传进 `runCheck`，USAGE 写着 "majors, a disabled state root and an
+unsigned release all refuse"，`lib/signature.js` 写着 "An automatic run stops here"——而 `check.js`
+解构了 `trigger` 之后**从不读它**（该标识符在全文件只出现在默认值那一行）。于是
+`updater check --auto --consent unsigned-release` 会把一份没有作者证明的发布下载、暂存，并在状态里记
+`consented:true`；`apply.js` 同样无条件认下 `major` 与 `state-dir` 两道 consent。本仓自己的话写在
+`cli.js` 里："a switch that promises safety and does nothing is worse than not having it"。
+现在：`cli.js` 在边界上拒 `--auto` 与 `--consent` 同现（悄悄丢掉调用方的 flag 也是一种谎，宁可让它红并
+给两条出路）；`check.js`/`apply.js` 各自把 consent 收拢成 `humanConsents`，定时跑一律为空—— installer
+那样绕开 CLI 直接 import 的调用者也补不上这扇门；拒绝那句点名 `--auto`，让人知道是"这一跑不是人"挡的。
+`check.test.mjs` 的夹具默认从前是 `trigger:'auto'`，而带 consent 的用例说的都是"一个人点了头"——它一边
+声称测定时跑、一边替定时跑背书；默认改回 `manual`，另加一例同时钉住两侧（定时带同意不放行、人工同一份
+仍放行）。
+
+### Fixed — remedy 把一次整机递归改权写成人家能照抄的命令（更新器）
+
+`npm-prefix-unwritable` 那句给出 `sudo chown -R "$(whoami)" /usr/local/lib/node_modules /usr/local/bin`，
+而 `lastError.message` 会被面板与 `gp_diagnose` 原样印出来：那是对整机所有全局包、以及 `/usr/local/bin`
+里每个二进制做递归改属主。本仓早有口径（`lib/ca-bundle.js` 被纠正成"点名工具但不给可执行形状"），
+问题是那道扫描闸 `remedy-surface.test.mjs` 只抠 `describeCa` 一个函数——看不见 `apply.js`，而
+`apply.test.mjs` 有一条**断言 `/sudo chown/ 必须存在**，是在给这句危险文案作背书。现在 remedy 先给
+agent 自己能跑的那条（把 npm prefix 挪进 home），chown 降级为"由人手工输入、本工具不代跑"；扫描闸扩到
+整个 `updater/lib/` 并带扫描条数下界（防止它哪天悄悄塌成看不见东西），那条背书断言改为断言升权形状
+**必须不存在**。
+
+### Fixed — 一句 consent 把人支去一枚按不动的按钮（更新器）
+
+`non-default-state-dir` 的拒绝写着 "the panel's 'Install update' button does the same thing"。该代号不在
+`UpdatePanelLogic` 的 consentGate 表里，落到 `.none` 那一档，而那一档写死 `applyEnabled:false`
+（`UpdatePanelTests` 钉着）。删掉那半句，留下真能执行的 `updater apply --state-dir … --consent state-dir`。
+
+### Fixed — 安装器把"签名有效"说成"装的是被签的那棵树"，又把"有人在应答"说成"本轮产物在服务"
+
+两处都落在退出码这条机器可读通道上（`install.sh` 是 `exec node installer/cli.js`，`curl | sh` 与按退出码
+办事的 agent 只看见数字）。其一：守卫只有 `repoHasRef`（rev-parse 一下 `refs/tags/<ref>`），而
+`rootDir` 可来自 `--repo`/`GLASSPANE_REPO`/当前目录/既有 clone，`install.sh` 自己就写着"既有 clone 不会
+被自动切到 $REF"——签名的是 tag 对象，构建的是 HEAD 加一堆本地改动，屏幕照打绿字"发布 tag vX GPG 签名
+验证通过"。现在 `tagTreeAgreement`（真 HEAD、真 `ref^{commit}`、真 `status --porcelain`）+
+`tagVerifyAgainstTree`：对不上降级成黄字，点名两个 sha 与未提交条数，并给真能执行的下一步；`invalid`
+那一档仍是拒装，不因树对得上而软化。其二：`verified = Boolean(arrived && hello?.version)` 只看版本号
+**有没有**，不看**对不对**；没有 `--replace-daemon` 时旧实例占着 socket（那条分支明写"跳过启动"），
+新构建从未启动也从未握手，却打"实测校验通过…安装完成"退 0。现在 `builtDaemonVersion`（跑
+`glasspaned --version`，读不出返回 null，不编）+ `installVerification`：不一致判未验证并点名
+`--replace-daemon`，读不出产物版本同样判未验证，版本一致但应答实例早于本次安装则算通过并补一句
+"同版本号只能说明同一版本，不能证明它是本轮构建的那一份"。新测试 `installer/test/install-honesty.test.mjs`
+6 例，夹具是一棵真 git 仓库与一个 argv 面与真解析器一致的可执行 stub；含对照例（树对得上时绿字仍须出现、
+版本一致且本次启动时须算通过），否则这条闸只是永远拒绝。
+
+### Fixed — daemon 会删掉一个从来不是 socket 的名字（引擎）
+
+三态探针回答"这儿有没有 daemon 在应答"，而 `BoundedSocket.isNoListener` 把 ENOTSOCK 也算无监听者；
+macOS 实测 `connect()` 对普通文件、目录、FIFO、悬空符号链接一律回 ENOTSOCK(38)，于是 bind 失败后的
+`.bind` 分支直接 `unlink()` 别人放在 `~/.glasspane/engine.sock` 上的文件——`SocketServer` 文件头承诺的是
+"只在确实证明无主时才移除"。`SocketServer` 与 `ProbeSocketServer` 两处同形。现在删除前必须 `lstat` 看见
+`S_IFSOCK`（`DaemonProbe.nameIsClearableSocketName`），否则报 name-occupied 并点名那是什么、下一步做什么；
+名字已消失仍算可清。既有的 `testProbeStartClearsDemonstrablyUnownedName` 断言的正是错的半边（造一个普通
+文件、注入 noListener、要求 start() 成功），理由写的是"errno 有平台歧义所以注入而非真探"——那条歧义已被
+实测掉；改写为 `testProbeStartRefusesToClearANonSocketName`。
+
+### Fixed — 读不出的审计链被本次运行销毁，随后 `--approval-verify` 判它"通过"（引擎）
+
+`ApprovalGate` 有 `loadFailed` 旗标而 `append()`/`persist()` 从不读它：台账损坏时内存是空的，第一次追加
+就以空链重锚 `prevHash`，`persist()` 再把内存覆写回文件——那条读不出来的链被销毁，而
+`--approval-verify` 读的是覆写结果，形状完好，于是给刚被截断的台账盖章。`ProjectRegistry.requireWritable`
+早就是这个口径（`ProjectRegistryTests` 里甚至写着"与 `ApprovalGate.loadFailed` 同口径"，而那个守卫并不
+存在）。现在读失败一律拒追加、原因落进 `persistFailed`（面板与 CLI 都有读者），原文件不碰。
+
+### Fixed — 退化斜率在原始 epoch 上做最小二乘，量程被舍入吃光（引擎）
+
+生产喂给 x 的是 `clock().timeIntervalSince1970`（~1.79e9），`count*sumXX - sumX*sumX` 两项都在 1e21 量级，
+双精度在这一档的间距约 2e5：默认 64 样本 / 0.5s 节奏（真跨度 349440）被量化成 2e6 的整数倍，分子同样被
+吃掉——实测 288 个时钟相位里 115 个直接回 nil，其余给出 −335…+336 B/s，全部落在 512 B/s 噪声地板之下。
+于是 `verdict()` 照回 `judged:true, tier:.healthy`，`probe_status` 照发这个读数，T9 升级
+（`tier == .degrading`）在密采样节奏下永远不可能触发：一条真实的内存泄漏被认证成"量过了，健康"。改为先减
+均值再累加。既有夹具一律用小 x（`VariableClock(start: 1_000)`），因此这条缺陷从未被照进真形状；新例同时
+跑小 x 与 epoch x，要求两侧给出同一个数。
+
+### Docs — 两处文档指示的命令跑不通
+
+`README`（双语）写着 "v1.1.1 就是 install.sh 当前钉住的 tag"，而 `install.sh` 钉的是本版发布 tag
+（1.10.0，本版 1.11.0）——照文档 clone 会装上一台落后九个小版本的引擎。现在句子把真源指回
+`GLASSPANE_RELEASE` 与 `scripts/set-version.mjs`。`SECURITY`（双语）把 `--replace-daemon` 算成 daemon 的
+开关，而它是安装器的（`glasspaned --replace-daemon` 回 unknown argument、退出码 64）。
+
+### 门禁与证据（本版实测）
+
+开工基线（HEAD `6074023`）：`swift test --package-path engine` 837 例 / 3 跳过 / 0 失败；
+`swift test --package-path engine/probe` 24 例 / 0 失败；`pytest -q bridge` 58 例；
+`npm test --workspaces --if-present` 90+414+115+417 = 1036 例；信号闸 OK；`npm pack --dry-run` 181.3 kB /
+22 文件；版本线绿。收口：引擎 841 例 / 3 跳过 / 0 失败（+4），安装器 121 例（+6），更新器与发布档另计。
+反向破坏（每处修复都削掉守卫、要求具名用例变红）：`testProbeClearsARealStaleSocketButRefusesARegularFile`、
+`testProbeStartRefusesToClearANonSocketName`（"did not throw an error"）、
+`testMemorySlopeIsTheSameNumberAtEpochAndAtSmallTimestamps`、
+`testCorruptLedgerIsNeverReanchoredAndTheFileSurvivesAnAppendAttempt`，以及 JS 侧
+`release-archive`/`--auto`/`remedy-surface` 三组；`tool-surface` 的面 A 棘轮另用 +2 行探针证过能红。
+
 ## [1.10.0] — 2026-10-10
 
 **版本判断：minor。** 判据沿用本仓自己在 1.6.2 条目里写下那一条：patch 要求"状态文件的字段
