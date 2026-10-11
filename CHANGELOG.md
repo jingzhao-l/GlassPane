@@ -2,6 +2,97 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.13.0] — 2026-10-12
+
+**版本判断：minor。** 四条判据逐条对过：状态文件字段没动；CLI 参数面没动（没加、没删、没改开关语义）；
+两个 npm 包的 `bin` 声明没动；**退出码这一条动了**——不是新增档位，而是**新增了一个对外错误码**
+`GP_E_REGISTRY_DRIFT`（丢更新的拒绝从前抛字面量 `registry-changed-underneath`，越出 `GP_E_*` 词表），
+并且 HTTP 网关为它新增一档 `503`（从前未列出的码一律落 `default: 422`，即"你的请求错了"）。
+另一处对外可见的形状是探针 `hello` 多了一个字段 `droppedInboundFrames`（与既有的
+`droppedInboundLines` 同口径）。两处都是**加法**而不是破坏，但它们改变消费端能收到的形状，
+按 1.9.0 那条"下一版按 minor 记"的先例记 **minor**。本版不含 `[Unreleased]`（开工时该段为空），
+也不重复 1.12.x 已经发出去的条目（归档形状闸 `assertBundleShape`、`check-workflows` 的
+`permissions:` 判据、桥的 `gp-watch` size 位与哨兵、`--socket-path` 的绝对路径判据都在那儿）。
+`harness/` 与 `kernel/` 仍不在发布面：本轮未动 harness 的目录、尺子与金样；`kernel/package.json`
+与它的 lockfile 只由 `scripts/set-version.mjs` 改写版本号字段。归档照旧减去 `harness/`。
+
+### Fixed — `hello.capabilities` 有了第一个读者（壳）
+
+daemon 从 `EngineMethod` 派生这 11 条能力（`FrameCodec.capabilityWireNames`），可**没有任何一方读它**：
+面板解析器只取 version/protocolVersion/pid/identity/permissions，壳只比 protocolVersion，而且没有
+`gp_hello` 工具。没有读者就等于没有镜像——三处真源（`kernel/schemas`、daemon 方法表、
+`mcp-shell/src/tools.ts`）漂了也不会有人说一句。新增 `describeCapabilityDrift`（纯函数）与由
+`index.ts` 注入的 `DAEMON_FORWARDED_METHODS`——后者**从 `TOOL_SPECS` 派生**，因为一份手抄的清单
+正是这条读者要抓的那种漂移。三种结局各说各话：清单缺失＝"这一场会话里每条工具结果都没对着方法表
+核过"；壳转发而 daemon 不列＝"那条调用会被 methodNotFound，两边已经漂了"；daemon 有而壳不暴露＝
+"不是错误，但 MCP 面到不了"。测试里另有一条静态对照：从真 `FrameCodec.swift` 读出方法表，要求
+壳转发的每个名字都在表里，且每条能力都有某个 `gp_*` 工具指着它（当年 `checkpoint` 就是这么在线上
+失踪的）。
+
+### Fixed — 丢更新的拒绝回到词表，remedy 不再指回它刚排除的成因（壳）
+
+`assertNoConcurrentWrite` 从前抛字面量 `registry-changed-underneath`：`tools.ts` 没有这一臂，于是
+agent 拿到的是兜底句 "check the tool's input schema and retry"——而参数**早已过了 zod 校验**，
+这句话把守卫刚刚排除掉的成因又指回去，还命令重发一次写。现在用 `GP_E_REGISTRY_DRIFT`（并入
+`test/remedy-surface.test.mjs` 的 `SHELL_ONLY` 集合），remedy 点名真动作：再读一次盘、把同一次登记
+重发、`GLASSPANE_PROJECTS_FORCE_OVERWRITE=1` 的移动语义、以及"删条目要重启 daemon 才生效"。
+网关那一侧同源补 `503`：`httpStatusForEngineCode` 是显式表，未列出的码默认 **422**——把"网关没做完"
+说成"调用方的请求错"，正是本仓反复拒绝的那种反向误导。发现它的不是我，是既有的那条动态用例
+（它自己从 `errors.ts` 枚举 shell-only 码），这也说明"表要显式"这件事本身有代价。
+判据为什么测不了端到端：`projectSet` 是同步的，读盘与写盘之间插不进第二次写——这条模块注释自己
+就写了"只能把判据本身拿出来测"，于是 `registryDriftReason` 三态真验（含"必须能过"的那一态），
+抛出点与状态码用结构断言核对。
+
+### Fixed — 三处"看不见的东西被说成空的/没危险"（壳）
+
+- `gp_observe {role:""}` 从前被收下：daemon 的 role 是纯等值过滤，空串永远匹配不到节点，于是回
+  `isError:false` + `nodeCount:0` —— 对着满屏元素说"这个 app 没有无障碍内容"。同层
+  `selector.role` 早就按这条拒过（`min(1)` + `GP_E_BAD_PARAMS`），这是它漏掉的那一半。
+- `update-state.ts` 文件头把"不是属主独占的模式"列进 `unreadable` 已经很久了，**但从来没执行过**：
+  谁把这份文件留成 0644，它照样被读、照样被 `gp_diagnose` 当事实念出来。生产侧
+  `updater/lib/state.js` 本来就按 0600 判（真机那份实测 `-rw-------`），所以这里对齐同仓 sibling：
+  非普通文件与 group/world 可读一律拒，句子带实测模式与 `chmod 600 <path>`。三条既有夹具因不带
+  模式写文件（默认 0644）而变红——那是判据在抓自己的地基，改正它们不是给判据开后门。
+- stdio 回包从前没有积压上限：30s 的 drain 看门狗只**报告**，之后的 `write()` 照样往队列里塞，
+  一个不再读的客户端就能把 `gp_recent_reports`（20 × 4 MiB，且这层没有出站帧长上限）变成无界
+  内存——而 `io.ts` 的注释写着"stdio 那一侧有 DrainAwareWriter 管背压"（串行化不等于有界）。
+  镜像方向早就有 `ENGINE_WRITE_BACKLOG_BYTES`，这一侧补 `STDIO_WRITE_BACKLOG_BYTES`：到线就丢
+  这一帧、点名丢了几帧（`droppedFrames` 有读者）、说清上限是多少。
+
+### Fixed — 引擎与探针：绝对预算、被发明的计数、被跟随的符号链接、被丢掉的坏帧
+
+1. `SocketServer` 的写侧只管单次 syscall：`SO_SNDTIMEO` 每轮重置，所以一个每 29s 读走 1 字节的对端
+   可以把这个**单客户端** daemon 无限期钉在同一条回包里，而注释写着这条超时"bounds write() against
+   a client that stops reading"。读侧早有绝对时限（`partialLineDeadline`），写侧现在一次回复一个总
+   预算（30s 与 `SO_SNDTIMEO` 同值：那条管"这一笔 syscall 肯等多久"，这条管"这次回复一共允许花多久"），
+   每次写前 `poll(POLLOUT, remaining)`，`EAGAIN` 不算失败而是回到同一预算里等。判据抽成不带实例的
+   `SocketServer.writeBounded` ——藏在实例方法里就没人测得到。
+2. `--project-prune` "写完却读不回来"那份载荷里的 `remaining: 0` 与 `projects: []`，是同一句话里既说
+   "看不见这张表"又报"表里剩 0 条"，而读者只会记住数字。载荷抽成库里的纯函数
+   `ProjectRegistry.pruneUnreadablePayload`：它从前拼在 `main.swift` 里，executable target 不可
+   import，所以这条分支**从来没有闸**——现在有，并且 `pruned: 0`/`failed: matched` 留着（那是真话）。
+3. `methodNotFound` 从前只说 "is not in the whitelist"：不点名是哪份清单、不给下一步，而
+   `hello.capabilities` 里就是这张表。现在逐项数出来并指回 hello（读的是派生表，不手抄）。
+4. 档案目录如果是符号链接：`fileExists`/`createDirectory`/`chmod` 全都跟着它走，于是这一层把 0700
+   加到链接**指向**的那份目录（声明半径之外的一次改动），并把证据落进一个不再由此路径保证属主的目录。
+   判据抽成 `EvidenceStore.nameIsUsableArchiveDirectory`（只认 `lstat` 的 S_IFDIR，名字不存在算可用）。
+   同文件的 `isDeletableEntry` 早就有这条纪律，缺的是目录本身。
+5. `EvidenceReportGenerator` 念的是"0600，只有你能读"，从前只核字节数。建文件时
+   `O_CREAT|O_EXCL|O_NOFOLLOW` 已经是 0600（这不是说谎的常态），但 `O_CREAT` 的 mode 要过 umask，
+   而承诺出自这份代码——现在 `close` 之前 `fstat` 回读，模式不对就 `unlink` 并按失败处理。
+6. 探针入站帧解析不出的那一支从前什么都不留（`try?` 丢弃，无计数无错误帧），而这条 socket 按设计
+   不校验对端身份——"发了命令却没回音"就无从归因。超长行本来有计数并在 `hello` 里报出来，坏帧现在
+   同口径补 `droppedInboundFrames` + `hello` 字段 + 复位。
+
+### 测试与门禁
+
+新增 `mcp-shell/test/daily-20261011.test.mjs` 6 例、`engine/Tests/GlassPaneEngineTests/DailyRound20261012Tests.swift`
+4 例；每条都配"必须能过"的对照（0600 那份照读、正常回包照发、能力两边一致时无话可说、真目录可用、
+正常写出报告）。两处假绿的坑是实测抓出来的：`SocketDeadline` 的假时钟必须是**会跳的**（常量时钟让
+`elapsed` 恒为 0，那条时限永远不会到期）；结构断言必须跑在**编译产物**上（源码里那个字面量已经不在，
+只有 `dist` 能证明抛出点换过了）。基线与收口计数见仓库外的本轮汇报（高负载下整树复跑的计时类用例会
+假红，凭据以该 sha 的 CI 为准）。
+
 ## [1.12.3] — 2026-10-12
 
 **版本判断：patch。** 四条判据逐条实测：状态文件字段没动（`installer` 与 `agent-entry` 都不写任何状态
