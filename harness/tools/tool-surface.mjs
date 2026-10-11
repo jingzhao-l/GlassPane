@@ -510,6 +510,29 @@ if (!golden) die(2, `no golden at ${path.relative(repoRoot, goldenFile)} — run
 if (!golden.surfaces?.mcpShell || !golden.surfaces?.fork) die(2, "golden is missing a surface — re-record")
 
 let red = 0
+
+// The tool's own constants are part of what the golden records, so they have to be
+// compared. They were not: editing `LIMIT` from 0.1 to 0.25 keeps every lane green and
+// silently re-labels the documented iron law, and editing a `caliber` string changes what
+// is counted while every number in the baseline still reads as "unchanged". A ratchet
+// whose units or measuring rule can be moved by the code it is supposed to constrain is
+// not a ratchet.
+for (const [key, label] of [["limit", "documented limit"], ["limitSource", "limit source"]]) {
+  if (golden[key] !== observed[key]) {
+    console.error(`  ✗ ${label} moved: the golden holds ${JSON.stringify(golden[key])}, this build measures against ${JSON.stringify(observed[key])}`)
+    console.error("    Either the constant in the tool changed (re-record and say why in the same commit) or the golden was hand-edited — a golden is only ever written by --record.")
+    red++
+  }
+}
+for (const [k, v] of Object.entries(observed.caliber ?? {})) {
+  if (golden.caliber?.[k] !== v) {
+    console.error(`  ✗ the caliber for "${k}" moved — the rule that decides what gets counted changed since the golden was recorded`)
+    console.error(`      recorded: ${golden.caliber?.[k] ?? "(absent)"}`)
+    console.error(`      now:      ${v}`)
+    console.error("    Re-record only with a stated reason: a caliber change invalidates every number the baseline already holds.")
+    red++
+  }
+}
 const pairs = [
   ["surface A (mcp-shell/src)", observed.surfaces.mcpShell, golden.surfaces.mcpShell],
   ["surface B (fork, ours)", observed.surfaces.fork, golden.surfaces.fork],
@@ -522,9 +545,17 @@ for (const [name, now, was] of pairs) {
     // a ratchet is that a person acknowledges the growth, and you cannot acknowledge
     // what the message will not identify. Falls back to nothing (rather than
     // guessing) when the recorded baseline predates per-file data.
-    const before = was.byFile
-    const after = now.byFile
-    if (before && after) {
+    // Surface A records `byFile`; surface B records a `files` list of
+    // `{file, kind, lines}`. Reading only `byFile` meant surface B — the one that is
+    // *ours*, and the one a reader most needs attributed — grew with no name attached,
+    // while the comment above this block claimed surface B was already attributed.
+    // Both shapes are normalized into one map here rather than duplicating the diff.
+    const asMap = (surf) =>
+      surf?.byFile ??
+      Object.fromEntries((surf?.files ?? []).map((f) => [`${f.kind} ${f.file}`, f.lines]))
+    const before = asMap(was)
+    const after = asMap(now)
+    if (Object.keys(before).length > 0 && Object.keys(after).length > 0) {
       const moved = []
       for (const [file, lines] of Object.entries(after)) {
         const was0 = before[file]
