@@ -76,20 +76,37 @@ function canonical(value) {
 
 const sha = (text) => createHash("sha256").update(text).digest("hex")
 
-/** Load one implementation's modules. A directory with src/ is source; dist/ is built. */
+/**
+ * The kernel modules this lane needs, keyed by the name the driver uses. One table for
+ * both the existence check below and the imports: the guard and the import could
+ * otherwise drift apart, and the drift is the bug — an implementation missing a module
+ * used to die in `import()` with a bare ERR_MODULE_NOT_FOUND *before* the "this kernel
+ * is missing X" report at the bottom of the file could run. So the one message that
+ * explains what is wrong was unreachable exactly when it was needed. Measured: pointing
+ * `--impl` at a canonical checkout whose branch predates these modules produced
+ * `Cannot find module '…/kernel/dist/decision-log.js'` and nothing else.
+ */
+const MODULES = {
+  evidencePack: "evidence-pack",
+  parse: "parse",
+  decisionEntry: "decision-log-entry",
+  decisionLog: "decision-log",
+  evidenceDecision: "evidence-decision",
+  dimension: "dimension-context",
+  runPlan: "run-plan",
+}
+
+/** A directory with src/ is source; dist/ is built. Same rule for every module. */
+function modulePath(dir, mod) {
+  return existsSync(path.join(dir, "src", `${mod}.ts`)) ? `${dir}/src/${mod}.ts` : `${dir}/dist/${mod}.js`
+}
+
+/** Load one implementation's modules. Call `requireModules` first — this assumes they are there. */
 async function loadImpl(label, dir) {
-  const sub = (m) =>
-    existsSync(path.join(dir, "src", `${m}.ts`)) ? `${dir}/src/${m}.ts` : `${dir}/dist/${m}.js`
-  return {
-    label,
-    evidencePack: await import(sub("evidence-pack")),
-    parse: await import(sub("parse")),
-    decisionEntry: await import(sub("decision-log-entry")),
-    decisionLog: await import(sub("decision-log")),
-    evidenceDecision: await import(sub("evidence-decision")),
-    dimension: await import(sub("dimension-context")),
-    runPlan: await import(sub("run-plan")),
-  }
+  const sub = (m) => modulePath(dir, m)
+  const impl = { label }
+  for (const [key, mod] of Object.entries(MODULES)) impl[key] = await import(sub(mod))
+  return impl
 }
 
 /**
@@ -286,6 +303,28 @@ const REQUIRED_SCHEMAS = { runPlan: ["RunPlanSchema"] }
 
 const loaded = []
 for (const i of impls) {
+  // Existence first, and out loud. Without this the run dies inside `import()` with a
+  // bare ERR_MODULE_NOT_FOUND, which is the only form of failure that the "this kernel
+  // is missing X" report below cannot reach.
+  const absent = Object.values(MODULES).filter((mod) => !existsSync(modulePath(i.dir, mod)))
+  if (absent.length > 0) {
+    console.error(`kernel-conformance: ${i.label} does not provide these kernel modules: ${absent.join(", ")}`)
+    console.error(`  looked under ${i.dir} for src/<module>.ts or dist/<module>.js`)
+    console.error(`  The pinned artifact (iterate-kernel@${kernelVersion}) does ship them — a checkout that`)
+    console.error("  lacks them is on a ref from before them, so it is not a second implementation of what")
+    console.error("  the product depends on, and comparing it would prove nothing. contracts/kernel-pin.json")
+    try {
+      const pin = JSON.parse(readFileSync(path.join(repoRoot, "contracts", "kernel-pin.json"), "utf8"))
+      console.error(`  records canonical ${pin.canonical?.repo}:${pin.canonical?.branch} for ${pin.version}; if this`)
+      console.error(`  checkout is that ref, the pin's coordinates are not where the artifact was built,`)
+      console.error(`  and that is the thing to fix before re-running the comparison.`)
+    } catch {
+      console.error("  records no readable contracts/kernel-pin.json, so which ref published the artifact is unknown.")
+    }
+    console.error("  Remedy: build the ref that published the pinned version and point --impl at that kernel/")
+    console.error("  directory, or run this lane without --impl (the golden carries the recorded answers).")
+    process.exit(3)
+  }
   const impl = await loadImpl(i.label, i.dir)
   const missing = Object.entries(REQUIRED).flatMap(([mod, names]) =>
     names.filter((n) => typeof impl[mod]?.[n] !== "function").map((n) => `${mod}.${n}`),

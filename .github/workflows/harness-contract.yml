@@ -108,24 +108,46 @@ jobs:
         run: |
           set -eu
           pinned="$(node -p "require('./harness/upstream.json').tag")"
-          out="$(node harness/tools/hook-liveness.mjs --probe 2>&1 || true)"
+          # The verdict is the tool's exit code, not the presence of a word in its output.
+          # This used to be `out="$(… || true)"` followed by `grep -q "drift"`, which made
+          # the lane unable to fail: --probe answers 1 for drift, 2 for "cannot measure"
+          # (no checkout at $HARNESS_UPSTREAM_CHECKOUT, unreadable golden, thrown error),
+          # and none of those exit-2 messages contain the string "drift" — so a probe that
+          # never ran printed its own failure and went green. "没有漂移" and "上游没被观测"
+          # are different claims and must not be purchasable with the same word.
+          rc=0
+          out="$(node harness/tools/hook-liveness.mjs --probe 2>&1)" || rc=$?
           printf '%s\n' "$out"
           {
-            echo "### 上游探查 $pinned → $PROBED_TAG"
+            echo "### 上游探查 $pinned → $PROBED_TAG (exit $rc)"
             echo '```'
             printf '%s\n' "$out"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          if printf '%s' "$out" | grep -q "drift"; then
+          if [ "$rc" -eq 0 ]; then
+            echo "probe clean: $PROBED_TAG keeps the plugin surface"
+            exit 0
+          fi
+          if [ "$rc" -eq 1 ]; then
             echo "::error title=上游换了插件地板::hook-liveness 在 $PROBED_TAG 上漂移。按综述 R34 归因＝上游坏：冻结升级，不要在本仓打补丁绕过。"
             exit 1
           fi
+          echo "::error title=上游探查没有跑成（这不等于没有漂移）::--probe 以 exit $rc 拒绝测量（\$HARNESS_UPSTREAM_CHECKOUT 指向的检出缺失或不可读）。这条 lane 唯一的职责就是回答上游有没有换地板，测不了必须红，不能绿。"
+          {
+            echo ""
+            echo "**未观测**：探查没有测量到任何东西（exit $rc）。这不构成「上游没漂移」。"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
       - name: Offline self-consistency (always, cheap)
         if: matrix.purpose == 'pinned'
         run: |
           node harness/tools/hook-liveness.mjs --offline
           node -e "const j=require('./harness/contracts/hook-liveness.json');const dead=j.hooks.filter(h=>h.kind==='dead').map(h=>h.name);console.log('known dead hooks:', JSON.stringify(dead));if(!(dead.length===1&&dead[0]==='permission.ask')){console.error('金样的死钩子集与调研结论不符');process.exit(1)}"
+          # 这条 lane 自己的判决逻辑也在闸面上：探针改为吃 exit 码之后，"测不了"必须还能
+          # 把 step 判红。这个自测从下面那段真 run 正文里抽代码跑三种退出码，所以改了
+          # 判决就会咬，不需要谁记得来手动验。
+          sh harness/tools/probe-lane-selftest.sh
 
   # The shared kernel lives in another repository, pinned by ref. Asking "has it moved,
   # and is our anchor still reachable?" on the same weekly schedule as the upstream probe

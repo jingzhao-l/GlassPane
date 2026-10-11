@@ -7,14 +7,14 @@
     "fork": "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted, and one deleted line excuses at most one re-added line (pairing is one-to-one, so 40 copies of a rebranded line bill 39)",
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
-  "observedAt": "2026-10-08",
-  "engineLoc": 23295,
-  "engineFiles": 60,
+  "observedAt": "2026-10-10",
+  "engineLoc": 23630,
+  "engineFiles": 61,
   "surfaces": {
     "mcpShell": {
       "loc": 8658,
       "files": 13,
-      "ratio": 0.2284,
+      "ratio": 0.2256,
       "byFile": {
         "mcp-shell/src/tools.ts": 2339,
         "mcp-shell/src/engine-client.ts": 1415,
@@ -32,7 +32,7 @@
       }
     },
     "fork": {
-      "loc": 5953,
+      "loc": 6082,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -92,7 +92,7 @@
         {
           "file": "script/kernel-conformance.mjs",
           "kind": "added",
-          "lines": 396
+          "lines": 480
         },
         {
           "file": "script/kernel-pin.mjs",
@@ -642,7 +642,7 @@
         {
           "file": "packages/opencode/script/publish.ts",
           "kind": "edited",
-          "lines": 198
+          "lines": 243
         },
         {
           "file": "packages/opencode/src/acp/service.ts",
@@ -1070,7 +1070,7 @@
           "lines": 0
         }
       ],
-      "ratio": 0.157,
+      "ratio": 0.1585,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
@@ -1082,11 +1082,11 @@
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
         "package": "iterate-kernel",
-        "version": "0.1.3"
+        "version": "0.1.4"
       }
     }
   },
-  "totalToolSurfaceLoc": 14611,
+  "totalToolSurfaceLoc": 14740,
   "note": null,
   "carried": null
 }

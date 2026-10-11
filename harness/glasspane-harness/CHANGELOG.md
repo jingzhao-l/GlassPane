@@ -12,7 +12,81 @@ contract does not).
 
 <!-- 内容归入下一版；此处留空以备下一批。 -->
 
+## [0.7.2] - 2026-10-10
+
+判据（pre-1.0）：**patch** —— 本轮没有新增命令、没有改 CLI/TUI 形状、没有动参数；改的全是
+"发布链路会发出装不上的包"与"闸绿着却红不了"。证据契约一条没动（判定仍全在 Swift、错误帧仍
+`{code,message,remedy}`），三条安装通道的形状没动，`product.json` 的目标矩阵没动。内核依赖升到
+0.1.4 是依赖形态的变化，不是产品面。
+
+**npm 这条通道欠了一次发布，本版一并了结。** `v0.7.1` 有 tag、有 GitHub Release 与 GPG 签名资产，
+但从未发到 npm：那一次 Release run 是 **push** 触发的，而两条 publish job 的条件是
+`workflow_dispatch && publish_npm && confirm`，于是它们全部 `skipped`（实测 run 37813349574 的 job
+列表：`npm darwin-arm64`/`npm darwin-x64`/`npm wrapper` = skipped，registry 至今回
+`glasspane-harness@0.7.0`）。不补发 0.7.1：版本号不可回收，而 0.7.2 的内容包含 0.7.1，装 0.7.0 的
+人升到 0.7.2 拿到的是同一批字节。这条差距记进 `docs/release.md` 与 `SYNCLOG.md`，别让它只在
+提交信息里存在过。
+
+### Fixed — 发布链路：会发出装不上的包的那三条
+
+- **平台包与 wrapper 的版本互检是恒真的。** `script/publish.ts` 把 `binaries[name]` 交给
+  `validateTarball()`，而 `binaries` 就是从同一个 `dist/<pkg>/package.json` 里读出来的，于是
+  `manifest.version !== version` 比的是"这个文件和它自己"，永远不会成立。本机就是现场：`dist/`
+  还停在 0.7.0 而 `product.json` 已是 0.7.1，`--dry-run` 照样报
+  `ok glasspane-harness-darwin-arm64@0.7.0 packs cleanly`。真发一次的后果是 wrapper@新版本点名一个
+  没人构建过的平台包版本，而平台包那次 `npm publish` 会回"already published"什么也不发 ——
+  wrapper 的 `optionalDependencies` 是 optional，npm 于是"安装成功、命令没有"。现在平台包按
+  **产品版本**验收：同一棵树、同一条命令改报
+  `✗ … package.json version 0.7.0 != product version 0.7.1` 并 exit 1。
+- **wrapper 被平台循环当成平台包发了第二次。** `dist/<product>/` 是上一次运行留下的目录，
+  `dist/*/package.json` 的扫描把它算进 `binaries`，于是 wrapper 在平台包**之前**就发了 —— 正好是
+  `publish-wrapper` 用 `needs: publish-platform` 保证的那个顺序。`--dry-run` 里
+  `ok glasspane-harness@… packs cleanly` 打了两遍就是这件事的现场；现在这条循环只处理平台包。
+- **"声明的目标没构建"从 note 改成拒绝（live 路径）。** `--dry-run` 打条 note 是诚实的；真发的时候
+  它意味着 wrapper 会引用一个本次没人产出的平台包版本，现在它 exit 2 并给出出路（构建全部目标，
+  或用 `--wrapper-only` 由持有全部产物的那条 lane 发）。
+- 顺带一条会说谎的输出：`--dry-run` 不管是不是 wrapper-only 都打 `wrapper-only mode`，读发布日志的
+  人被告知"平台包不在范围内"，而那一刻它正在打包平台包。
+
+### Fixed — 闸自己被验过吗：两条绿着红不了的
+
+- **`harness contract` 的上游探针把"测不了"报成"没漂移"。** 那条 step 是
+  `out="$(… --probe 2>&1 || true)"` 再 `grep -q "drift"` 定胜负：`--probe` 的 exit 2（参照检出不在
+  `$HARNESS_UPSTREAM_CHECKOUT`、金样读不到、抛错）三条路径的文案里都没有 "drift" 字样，于是这条
+  lane 唯一的职责失效时它是绿的。现在判决吃 **exit 码**（0 干净 / 1 漂移 / 其余一律红，且在
+  step 摘要里写明"未观测"，不构成"上游没漂移"）。新闸
+  `harness/tools/probe-lane-selftest.sh` 不做复制品：它从 YAML 里**抽出真 step 正文**，用桩喂三种
+  退出码。反向证据实测 —— 把改动前的正文喂给它：`exit 2 → step exit 0` 等三条全红；改动后：绿。
+- **`tool-surface` 的架构铁律数字由脚本自己说了算。** `LIMIT`（<10% 那条）、`LIMIT_SOURCE`、
+  `caliber` 都是脚本里的常量，金样记了它们却没人比对：把 `0.1` 改成 `0.25` 是一笔**全绿**的提交，
+  效果是两条越限的面（A 22.84% / B 15.70%）当场"合法"，连 `← OVER LIMIT` 那句自报一起消失。现在
+  `--check` 先比这三样，任一不同就 red 并点名金样值与代码值。实测：改成 0.25 → 具名红；改
+  `caliber.engine` 的措辞 → 具名红；还原 → 绿。量尺不配重新定义它守的那条铁律。
+- **`kernel-conformance --impl` 的"这份实现缺模块"守卫跑不到。** `loadImpl()` 在 REQUIRED 检查之前
+  就 `import()`，而把 `--impl` 指向 canonical 的 `main`（它没有
+  `decision-log`/`evidence-decision`/`dimension-context`/`run-plan`）时，结果是裸的
+  `Cannot find module '…/dist/decision-log.js'` —— 唯一能解释发生了什么的报告正好在唯一的失败路径
+  上不可达。现在先验存在性，再导入，具名缺哪几个模块、指出 `contracts/kernel-pin.json` 记的
+  canonical 坐标与产物出处不一致，exit 3。
+
+### Changed — 文档与树对表
+
+- `FORK.md`、`harness/README.md`、`docs/kernel-integration.md` 里"现在是什么"的那几句按实测改：随包
+  契约文件 **14（11 fixtures + 3 schemas）→ 17（13 fixtures + 4 schemas）**；"今天以依赖形态活着的
+  是 `iterate-kernel@0.1.2`/`0.1.3`" → **0.1.4**（历史叙述段保持原样，不改写已发生过的事）。
+- 两条实测事实入档：**已发布的内核源码不在 canonical 的 `main` 上。** `iterate-kernel@0.1.4` 出自
+  分支 `kernel/npm-canonical`（比 `main` 前 29 笔；`main` 的 `kernel/package.json` 仍是
+  `0.1.0-draft.1`，`kernel/src` 里没有 decision-log / evidence-decision / dimension-context /
+  run-plan），而 `contracts/kernel-pin.json` 的 `canonical.branch` 是 `--record` 里写死的
+  `"main"` —— 出处清单指得到一个从未含过所发字节的 ref。`pin.canonical` 只被写不被读，所以这条
+  不一致没有任何闸能看到。本轮不改 canonical（那是 iterate-skill 的决定），把 `--impl` 的失败改成
+  会说话，并列进汇报的待裁决。
+- 把 `main..kernel/npm-canonical` 真构建出来跑双方对照（`--impl` 指向那份
+  `kernel/`）：**11 条 fixture 两侧逐字节同答案**，fork 跑 zod 4.1.8、canonical 跑 zod 3.25.76。
+  这是这条通道第一次在有参照实现的情况下测成，之前的"9 条同答案"记的是别的组合。
+
 ### Changed — 依赖升 0.1.3，行为闸不再与自己比较
+
 
 - **`iterate-kernel` 0.1.2 → 0.1.3。** 升这一版不是为了新功能，是为了让随包语料里的转录契约
   （`evidence-decision.ok-01.json`）进到本仓 CI：停在 0.1.2，那条 fixture 不在包内，下面那条
