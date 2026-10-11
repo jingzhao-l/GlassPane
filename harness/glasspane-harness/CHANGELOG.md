@@ -19,13 +19,13 @@ contract does not).
 `{code,message,remedy}`），三条安装通道的形状没动，`product.json` 的目标矩阵没动。内核依赖升到
 0.1.4 是依赖形态的变化，不是产品面。
 
-**npm 这条通道欠了一次发布，本版一并了结。** `v0.7.1` 有 tag、有 GitHub Release 与 GPG 签名资产，
-但从未发到 npm：那一次 Release run 是 **push** 触发的，而两条 publish job 的条件是
-`workflow_dispatch && publish_npm && confirm`，于是它们全部 `skipped`（实测 run 37813349574 的 job
-列表：`npm darwin-arm64`/`npm darwin-x64`/`npm wrapper` = skipped，registry 至今回
-`glasspane-harness@0.7.0`）。不补发 0.7.1：版本号不可回收，而 0.7.2 的内容包含 0.7.1，装 0.7.0 的
-人升到 0.7.2 拿到的是同一批字节。这条差距记进 `docs/release.md` 与 `SYNCLOG.md`，别让它只在
-提交信息里存在过。
+**一条通道会被"绿着的 Release run"悄悄漏掉。** `v0.7.1` 打 tag 那一次 run 是 **push** 触发的
+（run 37813349574），而两条 publish job 的条件是 `workflow_dispatch && publish_npm && confirm`：
+`version-check`/`create-release`/`binaries`/`checksums` 全绿，`npm darwin-arm64`、`npm darwin-x64`、
+`npm wrapper` 三条 `skipped`——整条 run 报 success，npm 上却一个字节都没动。本轮 20:49 实测
+registry 仍是 `glasspane-harness@0.7.0`。这条在 23:1x 由并行 lane 补发掉（实测 registry 回到
+`0.7.1`），所以 0.7.2 **不是**来补这个洞的；洞的成因留着：一个 `skipped` 的 job 在 GitHub 的
+run 结论里不计成失败，于是"发布成功"与"发出去了"是两件事。`docs/release.md` 第 5 步写的是显式 dispatch，本轮把这条也补进 `SYNCLOG.md`。
 
 ### Fixed — 发布链路：会发出装不上的包的那三条
 
