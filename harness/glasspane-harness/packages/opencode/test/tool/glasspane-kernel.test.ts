@@ -1,17 +1,18 @@
 import { describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
 import type { DecisionOutcome, EvidencePack } from "../../src/tool/glasspane/kernel"
-import { kernelContractFile, kernelFixturesDir, kernelPackageDir } from "../lib/kernel-contract"
+import { kernelContractFile, kernelFixture, kernelFixturesDir, kernelPackageDir } from "../lib/kernel-contract"
 
 import {
   entryHashOf,
   logDecision,
   outcomeOf,
   readEvidenceFrame,
+  readRunPlan,
   resolveLedger,
   summaryOf,
   verifyLedger,
@@ -309,5 +310,90 @@ describe("the binding's import shape (a product requirement, not a style choice)
       /from\s+"iterate-kernel"(?!\/)/,
     )
     expect(binding).toContain('from "iterate-kernel/parse"')
+  })
+})
+
+describe("the run-plan channel (scenario 2, planned half)", () => {
+  /** The plan the iterate side writes for a real session, read from the shipped corpus. */
+  function planFile(dir: string, value: unknown): string {
+    const file = path.join(dir, "run-plan.json")
+    writeFileSync(file, JSON.stringify(value))
+    return file
+  }
+
+  test("with no GLASSPANE_RUN_PLAN there is no plan, and that is not an error", () => {
+    const read = readRunPlan({ HOME: "/home/tester" })
+    expect(read.ok).toBe(true)
+    if (!read.ok) return
+    // Absent must stay absent: substituting a default plan would render "0/9 verified"
+    // against a plan nobody ran, which reads as a measurement and is not one.
+    expect(read.plan).toBeNull()
+  })
+
+  test("a declared plan is read, digested and its ids come out in the caller's order", () => {
+    const dir = privateDir()
+    const corpus = kernelFixture<{ input: unknown; expectedIds: string[]; expectedDigest: string }>(
+      import.meta.dir,
+      "run-plan.ok-01",
+    )
+    const file = planFile(dir, corpus.input)
+    const read = readRunPlan({ HOME: "/home/tester", GLASSPANE_RUN_PLAN: file })
+    expect(read.ok).toBe(true)
+    if (!read.ok || read.plan === null) return
+    expect(read.plan.ids).toEqual(corpus.expectedIds)
+    // The digest is the kernel's own, computed over the same bytes the producer hashed:
+    // this is the value a ledger line cites, so a mismatch breaks the audit link rather
+    // than merely changing a sentence.
+    expect(read.plan.digest).toBe(corpus.expectedDigest)
+    expect(read.plan.path).toBe(file)
+  })
+
+  test("a relative plan path is refused, not resolved against wherever the agent stood", () => {
+    const read = readRunPlan({ HOME: "/home/tester", GLASSPANE_RUN_PLAN: "state/run-plan.json" })
+    expect(read.ok).toBe(false)
+    if (read.ok) return
+    expect(read.error.code).toBe("GP_E_RUN_PLAN_PATH")
+    expect(read.error.remedy).toContain("absolute")
+  })
+
+  test("a plan inside the engine's state root is refused — the same one-writer rule as the ledger", () => {
+    const home = privateDir()
+    const state = path.join(home, ".glasspane")
+    mkdirSync(state, { recursive: true })
+    const file = planFile(state, { schemaVersion: "iterate.run-plan/0.1", dimensions: [{ id: "security" }] })
+    const read = readRunPlan({ HOME: home, GLASSPANE_RUN_PLAN: file })
+    expect(read.ok).toBe(false)
+    if (read.ok) return
+    expect(read.error.code).toBe("GP_E_RUN_PLAN_PATH")
+    expect(read.error.message).toContain(".glasspane")
+  })
+
+  test("a declared plan that cannot be honoured is reported, not treated as absent", () => {
+    const dir = privateDir()
+    const missing = path.join(dir, "not-written.json")
+    const unreadable = readRunPlan({ HOME: "/home/tester", GLASSPANE_RUN_PLAN: missing })
+    expect(unreadable.ok).toBe(false)
+    if (unreadable.ok) return
+    expect(unreadable.error.code).toBe("GP_E_RUN_PLAN_READ")
+
+    // Written raw, not through planFile: JSON.stringify of a string produces a *valid*
+    // JSON document, and the assertion would then be exercising the schema branch while
+    // claiming to exercise the syntax one.
+    const junk = path.join(dir, "junk.json")
+    writeFileSync(junk, "{ not json")
+    const badJson = readRunPlan({ HOME: "/home/tester", GLASSPANE_RUN_PLAN: junk })
+    expect(badJson.ok).toBe(false)
+    if (badJson.ok) return
+    expect(badJson.error.code).toBe("GP_E_RUN_PLAN_JSON")
+
+    // A well-formed JSON document that is not a plan: refused by the kernel, and the
+    // refusal names the field, because "your plan is unreadable" and "you have no plan"
+    // must not collapse into the same line in a summary.
+    writeFileSync(junk, JSON.stringify({ schemaVersion: "iterate.run-plan/0.1", dimensions: [] }))
+    const empty = readRunPlan({ HOME: "/home/tester", GLASSPANE_RUN_PLAN: junk })
+    expect(empty.ok).toBe(false)
+    if (empty.ok) return
+    expect(empty.error.code).toBe("GP_E_RUN_PLAN_SCHEMA")
+    expect(empty.error.message).toContain("dimensions")
   })
 })

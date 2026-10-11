@@ -1,6 +1,10 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 
-import { describeDimensionCoverage, dimensionCoverage, readEvidenceFrame } from "../tool/glasspane/kernel"
+import { describeDimensionCoverage, dimensionCoverage, readEvidenceFrame, readRunPlan } from "../tool/glasspane/kernel"
+import type { KernelRejection, RunPlanRef } from "../tool/glasspane/kernel"
+
+/** What `readRunPlan` answered for this session: a plan, no plan, or a refusal. */
+export type PlanRead = { ok: true; plan: RunPlanRef | null } | { ok: false; error: KernelRejection }
 
 /**
  * M4 — the fork's compaction plugin: when a session that used the GlassPane tool
@@ -131,6 +135,11 @@ export function collectEvidenceAnchors(messages: unknown): AnchorCollection {
       const metadata = isRecord(state.metadata) ? state.metadata : {}
       const method = text(metadata.method) ?? tool.slice(GLASSPANE_TOOL_PREFIX.length)
       const note = isRecord(metadata.decisionLog) ? metadata.decisionLog : undefined
+      // The dimension the caller declared on this call, echoed back by the shell in
+      // the result metadata. It is the caller's claim about which review dimension the
+      // call served, not an engine measurement — which is exactly why an absent one
+      // stays absent rather than being guessed from the method name.
+      const dimension = text(metadata.dimension)
       // The note is M2's ledger receipt. No receipt = the chain holds no entry for
       // this call (status-only method, or a call the engine refused) — that is
       // counted, not papered over with a guessed outcome.
@@ -141,6 +150,7 @@ export function collectEvidenceAnchors(messages: unknown): AnchorCollection {
       const read = readEvidenceFrame(metadata.result)
       anchors.push({
         method,
+        dimension,
         operationId: read.ok ? read.pack.operationId : undefined,
         outcome: text(note.outcome),
         ledgerLine: numberOf(note.line),
@@ -161,9 +171,21 @@ export function collectEvidenceAnchors(messages: unknown): AnchorCollection {
  * failure this whole structure exists to prevent. Every other case produces a
  * line, including `0/3 dimensions verified, 3 unverified (…), 0 decisions`,
  * which is the most useful sentence in the block.
+ *
+ * The plan comes from `GLASSPANE_RUN_PLAN` when it is set, because that is the
+ * channel the two shells share: whoever configured the run writes the plan file and
+ * digests it, and this side reads the same bytes rather than growing its own idea of
+ * what was planned. With no plan declared it falls back to whatever the host attached
+ * to the collection (unchanged behaviour for a host that configures dimensions in
+ * process). A plan that was declared but cannot be honoured is reported, not ignored:
+ * "no plan" and "your plan is unreadable" have to be distinguishable in the summary,
+ * or a broken channel reads as an unreviewed session.
  */
-export function renderDimensionCoverage(collected: AnchorCollection): string | undefined {
-  const planned = collected.plannedDimensions ?? []
+export function renderDimensionCoverage(
+  collected: AnchorCollection,
+  plan: PlanRead = { ok: true, plan: null },
+): string | undefined {
+  const planned = plan.ok && plan.plan ? [...plan.plan.ids] : (collected.plannedDimensions ?? [])
   const recorded: Record<string, { decisions: number }> = {}
   for (const anchor of collected.anchors) {
     // Only an explicitly recorded dimension counts. Falling back to the method
@@ -174,13 +196,19 @@ export function renderDimensionCoverage(collected: AnchorCollection): string | u
     const current = recorded[anchor.dimension]
     recorded[anchor.dimension] = { decisions: (current?.decisions ?? 0) + 1 }
   }
+  if (!plan.ok) {
+    // The code travels with the sentence: a summary that only carries prose cannot be
+    // grouped, counted, or matched against the refusal a later run hit.
+    return `dimension coverage NOT computed — ${plan.error.code}: ${plan.error.message} (remedy: ${plan.error.remedy})`
+  }
   if (planned.length === 0 && Object.keys(recorded).length === 0) return undefined
 
   const context = dimensionCoverage({
     planned: planned.map((id) => ({ id })),
     recorded,
   })
-  return describeDimensionCoverage(context)
+  const line = describeDimensionCoverage(context)
+  return plan.ok && plan.plan ? `${line} [plan ${plan.plan.digest} @ ${plan.plan.path}]` : line
 }
 
 /**
@@ -189,7 +217,7 @@ export function renderDimensionCoverage(collected: AnchorCollection): string | u
  * touch it always gets a block — including "decisions recorded: 0", because an
  * absent record must be readable as absent, not left to be assumed absent.
  */
-export function renderAnchorBlock(collected: AnchorCollection): string | undefined {
+export function renderAnchorBlock(collected: AnchorCollection, plan: PlanRead = { ok: true, plan: null }): string | undefined {
   if (collected.calls === 0) return undefined
 
   const shown = collected.anchors.slice(-MAX_ANCHORS)
@@ -204,7 +232,7 @@ export function renderAnchorBlock(collected: AnchorCollection): string | undefin
     "",
     `gp_* calls: ${collected.calls} · decisions recorded: ${collected.anchors.length} · without a decision record: ${collected.withoutDecision}`,
   ]
-  const coverage = renderDimensionCoverage(collected)
+  const coverage = renderDimensionCoverage(collected, plan)
   if (coverage !== undefined) {
     lines.push(
       `- dimension coverage: ${coverage}`,
@@ -267,11 +295,12 @@ export async function injectEvidenceAnchors(
   sessionID: string,
   output: { context: string[]; prompt?: string },
   pull: PullSessionMessages,
+  readPlan: () => ReturnType<typeof readRunPlan> = () => readRunPlan(),
 ): Promise<CompactionNote> {
   try {
     const messages = await pull(sessionID)
     const collected = collectEvidenceAnchors(messages)
-    const block = renderAnchorBlock(collected)
+    const block = renderAnchorBlock(collected, readPlan())
     if (!block) return { status: "skipped", reason: "no gp_* tool calls in this session" }
     const target = appendBlock(output, block)
     return { status: "injected", calls: collected.calls, anchors: collected.anchors.length, target, block }

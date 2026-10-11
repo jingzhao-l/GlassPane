@@ -25,7 +25,7 @@
  * double-write that produced audit findings B-1 and A-15 — one defect, two
  * copies, fixed twice).
  */
-import { existsSync, mkdirSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
@@ -54,7 +54,8 @@ import {
   KernelDecisionLogError,
 } from "iterate-kernel/decision-log"
 import type { DecisionLogEntry, DecisionOutcome } from "iterate-kernel/decision-log-entry"
-import { parseEvidencePackRead } from "iterate-kernel/parse"
+import { parseEvidencePackRead, parseRunPlan } from "iterate-kernel/parse"
+import { plannedIds, runPlanDigest } from "iterate-kernel/run-plan"
 import { dimensionContext, formatDimensionContext } from "iterate-kernel/dimension-context"
 import type {
   DimensionContext,
@@ -220,6 +221,101 @@ export interface LoggedDecision {
   readonly hash: string
   readonly line: number
   readonly path: string
+}
+
+/**
+ * The run plan this session was configured with, read through the kernel.
+ *
+ * WHY A FILE AND NOT AN ENVIRONMENT VALUE FULL OF IDS. The plan is not one string:
+ * it is ids, optional labels, per-dimension focus text, and a declared source, and
+ * `dimensionContext` refuses to invent any of it. Whoever configures the run owns
+ * that vocabulary (locked across six sources by `test_dimension_lock.py` on the
+ * iterate side); this side only reads what it was handed. `GLASSPANE_RUN_PLAN` is
+ * therefore a path, following the same rule as `GLASSPANE_DECISION_LOG`: absolute,
+ * and outside the engine's state root, because a second writer in `~/.glasspane` is
+ * the projects.json failure again.
+ *
+ * WHY ABSENT IS NOT AN ERROR. A session that was never given a plan has no coverage
+ * to claim, and `renderDimensionCoverage` says exactly that. Silently substituting a
+ * default plan would render "0/9 verified" against a plan nobody ran — a number that
+ * looks like a measurement. So the refusal shape is reserved for a plan that WAS
+ * declared and cannot be honoured: unreadable, or not conforming to the contract.
+ */
+export interface RunPlanRef {
+  readonly path: string
+  readonly digest: string
+  readonly ids: readonly string[]
+}
+
+export function readRunPlan(
+  env: NodeJS.ProcessEnv = process.env
+): { ok: true; plan: RunPlanRef | null } | { ok: false; error: KernelRejection } {
+  const override = env.GLASSPANE_RUN_PLAN
+  if (typeof override !== "string" || override.length === 0) return { ok: true, plan: null }
+  if (!path.isAbsolute(override)) {
+    return {
+      ok: false,
+      error: {
+        code: "GP_E_RUN_PLAN_PATH",
+        message: `GLASSPANE_RUN_PLAN='${override}' is not absolute`,
+        remedy: "point it at an absolute path to the plan file the runner wrote (iterate-harness writes one with `write_run_plan`); a relative one is read wherever the agent happened to be",
+      },
+    }
+  }
+  const state = engineStateRoot(env)
+  const resolved = path.resolve(override)
+  if (resolved === state || resolved.startsWith(state + path.sep)) {
+    return {
+      ok: false,
+      error: {
+        code: "GP_E_RUN_PLAN_PATH",
+        message: `GLASSPANE_RUN_PLAN='${resolved}' is inside the engine's state root ${state}`,
+        remedy: "choose a path outside ~/.glasspane — the engine owns that tree, and the plan belongs to whoever configured the run",
+      },
+    }
+  }
+  let raw: string
+  try {
+    raw = readFileSync(resolved, "utf8")
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: "GP_E_RUN_PLAN_READ",
+        message: `cannot read the run plan at ${resolved} (${(error as Error).message})`,
+        remedy: "write the plan before the session starts, or unset GLASSPANE_RUN_PLAN so coverage is reported as unplanned rather than half-read",
+      },
+    }
+  }
+  let document: unknown
+  try {
+    document = JSON.parse(raw)
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: "GP_E_RUN_PLAN_JSON",
+        message: `${resolved} is not JSON (${(error as Error).message})`,
+        remedy: "the plan file is the kernel's `iterate.run-plan/0.1` document; emit it with JSON.stringify, not as YAML or prose",
+      },
+    }
+  }
+  try {
+    const plan = parseRunPlan(document)
+    return { ok: true, plan: { path: resolved, digest: runPlanDigest(plan), ids: plannedIds(plan) } }
+  } catch (error) {
+    if (error instanceof KernelSchemaError) {
+      return {
+        ok: false,
+        error: {
+          code: "GP_E_RUN_PLAN_SCHEMA",
+          message: `${resolved} is not a run plan the kernel accepts (${error.issues.map((issue) => `${issue.path || "<root>"}: ${issue.message}`).join("; ")})`,
+          remedy: "regenerate the plan from the config it came from; do not hand-edit it — the digest both shells compare is computed over these exact bytes",
+        },
+      }
+    }
+    throw error
+  }
 }
 
 /**

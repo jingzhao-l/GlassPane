@@ -95,6 +95,28 @@ describe("what the hook preserves", () => {
     ])
   })
 
+  test("the dimension the caller declared is what coverage counts, and nothing else is", () => {
+    // The carry-through is the point of the tool parameter: a call recorded without a
+    // dimension contributes to no dimension, and one recorded with a bad name is refused
+    // upstream rather than silently matching a planned id.
+    const collected = collectEvidenceAnchors([
+      message("gp_act", { metadata: okMetadata({ method: "act", dimension: "security", decisionLog: receipt() }) }),
+      message("gp_observe", { metadata: okMetadata({ decisionLog: receipt() }) }),
+    ])
+    expect(collected.anchors[0]?.dimension).toBe("security")
+    expect(collected.anchors[1]?.dimension).toBeUndefined()
+    const line = renderDimensionCoverage({
+      calls: collected.calls,
+      anchors: collected.anchors,
+      withoutDecision: collected.withoutDecision,
+      plannedDimensions: ["security", "ui-ux"],
+    })
+    // One decision, not two: the kernel counts decisions per dimension, and a call that
+    // declared no dimension contributes nothing to the arithmetic. Saying "2" here would
+    // make an unattributed call read as coverage of something.
+    expect(line).toBe("1/2 dimensions verified, 1 unverified (ui-ux), 1 decision")
+  })
+
   test("the rendered block quotes those fields and points back at the ledger", () => {
     const collected = collectEvidenceAnchors([message("gp_observe", { metadata: okMetadata({ decisionLog: receipt() }) })])
     const block = renderAnchorBlock(collected)
@@ -322,6 +344,30 @@ describe("dimension coverage, computed by the kernel (M4)", () => {
       withoutDecision: 0,
     })
     expect(line).toBe("0/0 dimensions verified, 1 unplanned (concurrency), 1 decision")
+  })
+
+  test("the declared plan, not the host's field, decides what was planned", () => {
+    // Scenario 2's shared channel: the plan file is what both shells read, so the
+    // coverage line must follow it even when the host attached no dimensions.
+    const line = renderDimensionCoverage(
+      { calls: 2, anchors: anchors(["security"]), withoutDecision: 1 },
+      { ok: true, plan: { path: "/var/tmp/plan.json", digest: "rp_a".repeat(8).slice(0, 67), ids: ["security", "correctness"] } },
+    )
+    expect(line).toContain("1/2 dimensions verified, 1 unverified (correctness), 1 decision")
+    expect(line).toContain("[plan rp_")
+    expect(line).toContain("/var/tmp/plan.json")
+  })
+
+  test("a plan the fork could not read is said out loud, not rendered as zero coverage", () => {
+    // "no plan" and "your plan is unreadable" are different facts; collapsing them
+    // turns a broken channel into an unreviewed session.
+    const line = renderDimensionCoverage(
+      { calls: 1, anchors: anchors(["security"]), withoutDecision: 0, plannedDimensions: ["security"] },
+      { ok: false, error: { code: "GP_E_RUN_PLAN_SCHEMA", message: "dimensions.0.id: bad", remedy: "regenerate the plan" } },
+    )
+    expect(line).toContain("dimension coverage NOT computed")
+    expect(line).toContain("GP_E_RUN_PLAN_SCHEMA")
+    expect(line).not.toMatch(/verified/)
   })
 
   test("a method name is never mistaken for a dimension", () => {
