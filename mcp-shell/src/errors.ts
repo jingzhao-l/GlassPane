@@ -9,6 +9,12 @@ export const GP_E_NO_EVIDENCE = "GP_E_NO_EVIDENCE";
 export const GP_E_INTERNAL = "GP_E_INTERNAL";
 export const GP_E_PROJECT_LIMIT = "GP_E_PROJECT_LIMIT";
 export const GP_E_NOT_FOUND = "GP_E_NOT_FOUND";
+/** Shell-only: the table changed between our read and our write, so we refused
+ * to overwrite. The daemon has no such code (it owns one writer), and every other
+ * code this shell raises for itself is listed with it in
+ * `test/remedy-surface.test.mjs`'s SHELL_ONLY set — a code outside the vocabulary
+ * with no remedy arm reads to an agent as "retry the same write". */
+export const GP_E_REGISTRY_DRIFT = "GP_E_REGISTRY_DRIFT";
 
 /**
  * Codes this shell raises for itself, in one place so a string literal cannot

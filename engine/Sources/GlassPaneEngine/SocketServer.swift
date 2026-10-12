@@ -293,9 +293,40 @@ public final class SocketServer {
         return existing ?? SocketDeadline(seconds: partialLineTimeoutSeconds, now: now)
     }
 
-    private func writeAll(_ fd: Int32, _ data: Data) -> Bool {
+    /// 一次回包的**总**预算。`SO_SNDTIMEO` 是单次 syscall 的超时并且每轮重置，所以从前
+    /// 一个每 29s 读走 1 字节的对端可以把这个只有单一客户端的 daemon  indefinitely 钉在
+    /// 同一条回包里——读侧早就有绝对时限（`partialLineDeadline`），写侧没有。30s 与
+    /// `SO_SNDTIMEO` 同值：那条继续负责"这一笔 syscall 愿意等多久"，这条负责"这次回复
+    /// 一共允许花多久"。
+    static let replyWriteBudgetSeconds: TimeInterval = 30
+
+    /// 把 `data` 写进 `fd`，只允许在 `deadline` 之前写完。**这是判据本体**：抽成不带实例的
+    /// 静态函数，是为了让它能被真 socketpair + 假时钟确定性验红（"另一端不读时必须到点就停"
+    /// 这件事，藏在实例方法里就没人测得到）。返回 false 意味着这一帧没写完，调用方必须
+    /// 关掉这条连接——继续等下去就是把单客户端的位置交给一个不读的对端。
+    static func writeBounded(
+        _ fd: Int32,
+        _ data: Data,
+        deadline: SocketDeadline,
+        budgetSeconds: TimeInterval,
+        note: (String) -> Void = { _ in }
+    ) -> Bool {
         var offset = data.startIndex
+        func gaveUp(_ why: String, _ sent: Int) -> Bool {
+            note("reply not fully sent \(why) after \(sent)/\(data.count) bytes within \(budgetSeconds)s of absolute budget — closing connection rather than holding the single client slot")
+            return false
+        }
         while offset < data.endIndex {
+            let sent = data.distance(from: data.startIndex, to: offset)
+            if deadline.expired() { return gaveUp("stalled", sent) }
+            switch BoundedSocket.wait(fd, events: Int16(POLLOUT), deadline: deadline) {
+            case .ready:
+                break
+            case .timedOut:
+                return gaveUp("waiting for writability", sent)
+            case .failed(let code):
+                return gaveUp("after poll(POLLOUT) failed (\(BoundedSocket.errnoText(code)))", sent)
+            }
             let written = data.withUnsafeBytes { raw -> Int in
                 let base = raw.baseAddress!.advanced(by: data.distance(from: data.startIndex, to: offset))
                 return write(fd, base, data.distance(from: offset, to: data.endIndex))
@@ -303,12 +334,24 @@ public final class SocketServer {
             if written <= 0 {
                 let code = errno
                 if code == EINTR { continue }
-                log.error("write failed: \(BoundedSocket.errnoText(code)) (errno \(code)) — reply not fully sent, closing connection")
+                // 单次 syscall 到点（`SO_SNDTIMEO`）不再算失败：回到 poll 继续等，
+                // 但等的是同一个绝对预算——这正是"串行化不等于有界"要补的那一课。
+                if code == EAGAIN || code == EWOULDBLOCK { continue }
+                note("write failed: \(BoundedSocket.errnoText(code)) (errno \(code)) — reply not fully sent, closing connection")
                 return false
             }
             offset = data.index(offset, offsetBy: written)
         }
         return true
+    }
+
+    /// 不是 `private`：绝对预算这条判据必须能被确定性验红（真 socketpair + 不读的那一端），
+    /// 而 `@testable` 只到 internal。
+    func writeAll(_ fd: Int32, _ data: Data, budgetSeconds: TimeInterval = SocketServer.replyWriteBudgetSeconds) -> Bool {
+        SocketServer.writeBounded(fd, data,
+                                 deadline: SocketDeadline(seconds: budgetSeconds),
+                                 budgetSeconds: budgetSeconds,
+                                 note: { message in self.log.error(message) })
     }
 }
 

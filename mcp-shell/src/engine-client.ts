@@ -222,7 +222,37 @@ export function isReplayUnsafeMethod(method: string): boolean {
 export const REPLAY_UNSAFE_METHOD_NAMES: readonly string[] = Object.keys(REPLAY_UNSAFE_REASONS);
 
 /**
- * Methods whose re-issue writes daemon state the *caller* depends on, even though
+ * `hello.capabilities` 的第一个读者（2026-10-11）。
+ *
+ * 这份清单由 daemon 从 `EngineMethod` 派生（`FrameCodec.capabilityWireNames`），可此前
+ * **没有任何一方读它**：面板的解析器只取 version/protocolVersion/pid/identity/permissions，
+ * 这一层只比 protocolVersion。没有读者就等于没有镜像——三处真源（kernel schema、daemon 方法表、
+ * 本壳的 TOOL_SPECS）漂了也不会有人说一句，而"清单存在但没人核"正是这份代码在别处反复拒绝的
+ * 那种自证。返回 null 表示无话可说（两边一致），否则给出要说的那句话。
+ */
+export function describeCapabilityDrift(
+  advertised: readonly string[] | null,
+  forwarded: readonly string[],
+): string | null {
+  if (advertised === null) {
+    return "engine self-report carries no capabilities list, so this shell cannot say which daemon methods it measured; every tool result in this session is unverified against the daemon's own method table (an engine older than the capability list, or a hello that was cut short)";
+  }
+  const missing = forwarded.filter((method) => !advertised.includes(method));
+  const unexposed = advertised.filter((method) => !forwarded.includes(method));
+  if (missing.length === 0 && unexposed.length === 0) {
+    return null;
+  }
+  const parts: string[] = [];
+  if (missing.length > 0) {
+    parts.push(`this shell forwards ${missing.join(", ")} but the daemon's hello does not list it/them — that call will be answered methodNotFound, so the tool surface and the engine method table have drifted`);
+  }
+  if (unexposed.length > 0) {
+    parts.push(`the daemon offers ${unexposed.join(", ")} which this shell does not expose as a tool — not an error, but the agent cannot reach it from MCP`);
+  }
+  return `capability reconciliation: ${parts.join("; ")}`;
+}
+
+/**
  * replaying them is not unsafe in the sense {@link REPLAY_UNSAFE_REASONS} means
  * (no operation of the user's is performed a second time). They are the other half
  * of the answer to "may this be narrowed by sending it again?", and they are kept
@@ -700,6 +730,14 @@ export class EngineJsonRpcClient {
     private readonly callerCeilingMs: number = CALLER_VISIBLE_CEILING_MS,
     /** Whom a timeout's remedy is being written for; see {@link ShellSurface}. */
     private readonly surface: ShellSurface = "mcp",
+    /**
+     * The daemon methods this shell forwards, injected by the composition root
+     * from `TOOL_SPECS` (never hand-copied — a copied list is the drift this
+     * exists to catch). Empty means "no expectation was wired", and the
+     * reconciliation stays silent rather than reporting every capability as
+     * unexposed; `index.ts` supplies the real list.
+     */
+    private readonly expectedDaemonMethods: readonly string[] = [],
   ) {
     this.io.onMessage((line) => this.handleMessage(line));
     this.io.onError((error) => {
@@ -1275,7 +1313,7 @@ export class EngineJsonRpcClient {
       this.report("engine answered hello without an object result — protocol compatibility could not be measured");
       return;
     }
-    const report = result as { engine?: unknown; version?: unknown; protocolVersion?: unknown };
+    const report = result as { engine?: unknown; version?: unknown; protocolVersion?: unknown; capabilities?: unknown };
     const protocol = typeof report.protocolVersion === "string" ? report.protocolVersion : null;
     if (protocol === null) {
       this.report(`engine self-report has no protocolVersion (engine=${jsonOrString(report.engine)}); expected '${expected}' — compatibility unverified`);
@@ -1289,6 +1327,15 @@ export class EngineJsonRpcClient {
     const wantVersion = this.identity?.version;
     if (version !== null && wantVersion !== undefined && version !== wantVersion) {
       this.report(`version mismatch: engine self-reports '${version}', this MCP shell ships '${wantVersion}' (single version line) — one side is stale`);
+    }
+    if (this.expectedDaemonMethods.length > 0) {
+      const advertised = Array.isArray(report.capabilities)
+        ? (report.capabilities as unknown[]).filter((item): item is string => typeof item === "string")
+        : null;
+      const drift = describeCapabilityDrift(advertised, this.expectedDaemonMethods);
+      if (drift !== null) {
+        this.report(drift);
+      }
     }
   }
 }
@@ -1433,6 +1480,8 @@ export function unixSocketEngineClient(
     callerCeilingMs?: number;
     /** Pass `"http"` from the gateway: its callers have no operation trail. */
     surface?: ShellSurface;
+    /** Daemon methods this shell forwards; see {@link EngineJsonRpcClient}'s last parameter. */
+    expectedDaemonMethods?: readonly string[];
   } = {},
 ): EngineJsonRpcClient {
   const open: EngineTransportOpener = options.open
@@ -1443,6 +1492,7 @@ export function unixSocketEngineClient(
     options.identity ?? null,
     options.callerCeilingMs ?? CALLER_VISIBLE_CEILING_MS,
     options.surface ?? "mcp",
+    options.expectedDaemonMethods ?? [],
   );
 }
 

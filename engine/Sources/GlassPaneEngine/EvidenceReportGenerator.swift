@@ -191,9 +191,14 @@ public enum EvidenceReportGenerator {
             let written = bytes.withUnsafeBufferPointer { buffer in
                 write(fd, buffer.baseAddress, buffer.count)
             }
+            // 面板念的是"0600，只有你能读"，那这句就得由这份代码自己核：O_CREAT 的 mode 要过
+            // umask，而 fsync 之前的 fstat 是唯一还来不及被换掉的时机。写坏了要撤，模式不对也要撤。
+            var fileInfo = stat()
+            let probed = fstat(fd, &fileInfo)
+            let actualMode = probed == 0 ? Int(fileInfo.st_mode & 0o777) : -1
             close(fd)
-            if written == bytes.count { return .written(path: target) }
-            unlink(target)  // 写坏了就撤掉，不留一份残缺报告
+            if written == bytes.count && actualMode == 0o600 { return .written(path: target) }
+            unlink(target)  // 写坏了、或模式不是那句承诺的 0600，就撤掉，不留一份说谎的报告
         }
         return .refused
     }

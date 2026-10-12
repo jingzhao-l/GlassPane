@@ -892,20 +892,11 @@ private func runProjectPrune(options: Options) -> Never {
     let pruned = prunedIds.count
     let failedCount = dryRun ? failures.count : hits.count - pruned
     if verified.loadFailed && !dryRun {
-        // 这一份是拒绝的载荷，但它仍然在被读：`remaining: 0` 与 `projects: []` 说的是"台账现在空了"，
-        // 而这条分支同时在讲"读不回来"。同一句里既说看不见、又报出一个看不见的数字，读者只会记住数字。
-        // `--project-remove` 那条同样的分支当初就是因此把这两个键删掉的（见 908 行附近）——这里对齐它：
-        // 看不见就别说看见了什么。
-        writeJSON([
-            "command": "--project-prune", "dryRun": false, "loadFailed": true,
-            "total": before.count, "matched": hits.count, "pruned": 0,
-            "prunedProjectIds": [String](), "failed": hits.count,
-            "failures": [["projectId": "*", "reason": "the registry cannot be read back after the write"]],
-            "requiresDaemonRestart": true,
-            "registryPath": registry.filePath,
-            "error": "the write left projects.json unreadable; the daemon must not keep running on its in-memory copy",
-            "next": "restore the file from \(registry.filePath) backups and restart the daemon"
-        ], to: .standardError)
+        // 载荷本身在库里（`ProjectRegistry.pruneUnreadablePayload`），因为那份形状要有闸：
+        // 它不写 `remaining`/`projects` —— 这条分支说的是"看不见这张表"，不能同时报"表里剩 0 条"。
+        writeJSON(ProjectRegistry.pruneUnreadablePayload(
+            total: before.count, matched: hits.count, registryPath: registry.filePath
+        ), to: .standardError)
         exit(1)
     }
 
