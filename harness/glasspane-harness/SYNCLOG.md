@@ -2,7 +2,34 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
-## 2026-10-12 · 每日批次（harness 线，10:30 那份提示词）：能力闸问错了对象、被拒的调用画成"还在跑"，发 0.7.6
+## 2026-10-12（第五次会话）· 依赖升 `iterate-kernel` 0.1.6：转录层进契约，Swift 那条腿欠着
+
+**开工态**：隔离工作树 `/Volumes/Eng-Dev/.worktrees/gp-kernel-015`，从 `origin/main`
+（`009e65a`，即 0.7.6 收口那笔）ff-only 前进而来，开工时整树干净。主树
+`/Volumes/Eng-Dev/GlassPane` 本批未动（一次误编辑已按自己的备份 + sha 核回，恢复后 `git status`
+为空）。
+
+**动了什么**：`packages/opencode/package.json` 依赖 0.1.5→0.1.6、`bun.lock`（解析器把
+`iterate-kernel@0.1.6` 的 specifier 记为空串＝registry 来源，integrity
+`sha512-5B3CY7R8…`，与 npm publish 输出逐字一致）；`script/kernel-conformance.mjs` 加第四个
+被驱动模块（转录档案走 oracle+golden）；两份金样重记。
+
+**测量**：`kernel-pin --record` → 26 份契约档案；`kernel-pin --check` / `kernel-conformance`
+（16 份档案）绿；`packages/opencode` 的 `glasspane-kernel.test.ts` 31 pass；
+`bun run typecheck` 干净。八把尺子里 `hook-liveness` / `surface-semantics` / `brand-surface` /
+`product-surface` / `tool-surface` / `kernel-pin` / `kernel-conformance` 七把 0，只有
+`fork-diff` 红在我动的两个文件上（它拒绝让"已声明分位的文件内容变了"混过名单检查），按它自己的
+remedy 同批重记——金样差值就是那两条 forkHash。面 B 的 +55 行逐笔归因到自己
+（`script/kernel-conformance.mjs` 725→780），不是并行 lane 洗进来的。
+
+**这一批故意没做完的**：Swift 的 `DecisionLogEntry`（C35 第三条绑定腿）还没加
+`kind/round/dimension/payload`。引擎不写账本，所以不影响产品行为；但 `JSONDecoder` 对未声明字段
+是静默忽略，往返测试恰好拿规范字节比对——已写好红灯用例
+`testExtendedDecisionLogRoundtripsThroughCanonicalJSON`（打在新增的
+`decision-log-entry.ok-02.json` 上），留在本工作树
+`engine/Tests/GlassPaneEngineTests/EvidenceRoundtripTests.swift`，与实现和一次干净的
+`swift test` 同批提交；本工作树没有 `.build`，从零编译会与本线其它测量抢 27 GiB 的盘。
+
 
 **开工态**：主树 HEAD 开工时 `5f0fb54`（== origin/main）、整树干净；约一小时后并行会话把 main 推到
 `2e83542` 并持续写入，**我第一轮闸读数被它的未提交编辑污染**（`kernel-conformance.mjs` 396→441、

@@ -12,6 +12,29 @@ contract does not).
 
 <!-- 内容归入下一版；此处留空以备下一批。 -->
 
+### Changed — 依赖 `iterate-kernel` 0.1.5 → 0.1.6（决策日志条目收下生产者词汇）
+
+- 内核 0.1.6 把 `DecisionLogEntry` 扩了四个**可选**字段（`kind` / `round` / `dimension` /
+  `payload`）并新增 `decision-log-transcribe`。对本 fork 的实际意义：场景②"recorded 半边"的
+  维度归属现在可以走共享账本，而不是只活在 fork 自己的工具元数据里；场景③两侧日志有了同一
+  个可对照的形状。既有链节不受影响——新字段缺席即不进规范字节，`kernel-conformance` 对
+  `decision-log-entry.ok-01.json` 的摘要读数一字未动。
+- 本批实测：`kernel-pin --record`（26 份契约档案、lock integrity `sha512-5B3CY7R8…`、
+  registry 侧复核 0.1.6 已 live）、`kernel-conformance --record` 16 份档案（新增两份：
+  扩展条目 + 转录档案，后者走 oracle+golden 双通道）；`packages/opencode` 的
+  `glasspane-kernel.test.ts` 31 条全绿；`bun run typecheck` 干净；八把尺子里只有
+  `fork-diff` 因我动的两个文件（`bun.lock`、`packages/opencode/package.json`）变红，
+  按它自己的 remedy 在同批重记金样（金样差值只有那两条 forkHash）。面 B 因
+  `script/kernel-conformance.mjs` +55 行（我本批加的转录驱动与 oracle）重记，
+  `tool-surface.json` 差值逐笔可归属自己：loc 6974→7029、该文件 725→780、ratio 两项随之。
+- **未随本批落地，点名留着**：Swift 侧 `DecisionLogEntry`（`engine/Sources/GlassPaneEngine/
+  EvidenceModels.swift`，C35 第三条绑定腿）还没有这四个字段。它不影响产品行为（引擎不写账本，
+  全仓 `Sources/` 里除定义处无人使用该类型），但 `JSONDecoder` 对未声明字段是**静默忽略**，
+  所以解码仍"成功"、重编码就把这些决定丢了——而它自己的往返测试正是拿规范字节比对的。
+  已写好红灯用例 `testExtendedDecisionLogRoundtripsThroughCanonicalJSON`（打在
+  `decision-log-entry.ok-02.json` 上），与实现同批提交；它需要一次干净的 engine 构建，
+  本批所在的隔离工作树没有 `.build`，从零编译会与本线其它测量抢磁盘，故拆到下一批做。
+
 ### Fixed — 0.7.6 端到端真跑才暴露的两处
 
 - **`verify-published` 从不确认 wrapper 点名的平台包是否真在 registry 上。** 它验已装包的

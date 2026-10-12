@@ -97,6 +97,7 @@ const MODULES = {
   invariantReport: "invariant-report",
   convergence: "convergence",
   provider: "provider-registration",
+  decisionRecord: "decision-log-transcribe",
 }
 
 /** A directory with src/ is source; dist/ is built. Same rule for every module. */
@@ -181,6 +182,23 @@ function drive(impl, fixture, kind) {
       out.push(impl.decisionLog.serializeDecisionLogEntry(entry))
       prev = recomputed
     })
+  } else if (kind === "decision-record-transcription") {
+    // Scenario 3's convergence point: a record the iterate ledgers ALREADY write becomes a
+    // canonical draft. `entryId` arrives per case from the fixture on purpose — a transcriber
+    // that minted its own ids could not be compared across implementations at all, and this
+    // function is allowed to be pure (no clock, no id generation, no disk).
+    for (const item of fixture.cases) {
+      const record = structuredClone(item.record)
+      if (typeof item.blobRepeat === "number") record.data[item.blobKey ?? "blob"] = "x".repeat(item.blobRepeat)
+      if (typeof item.summaryRepeat === "number") record.data.summary = "s".repeat(item.summaryRepeat)
+      try {
+        out.push(`${item.id}\t${canonical(impl.decisionRecord.decisionLogDraftFromRecord(record, item.entryId))}`)
+      } catch (error) {
+        // The refusal CODE is part of the shared contract here (KERNEL_E_* on both sides),
+        // unlike the provider module where each language keeps its own code vocabulary.
+        out.push(`${item.id}\trefused:${error?.code ?? error?.name}`)
+      }
+    }
   } else if (kind === "invariant-report") {
     // Scenario 1's artifact: the report the other harness reads when a claim breaks.
     // The digest is the answer that matters across the boundary — a re-verification
@@ -271,6 +289,7 @@ const KINDS = [
   "recipe-config",
   "decision-log-chain",
   "decision-log-entry",
+  "decision-record-transcription",
   "invariant-report",
   "convergence",
   "provider-registration",
@@ -414,6 +433,40 @@ function oracleFailures(impl, fixture, kind) {
       }
     }
   }
+  if (kind === "decision-record-transcription") {
+    checked++
+    for (const item of fixture.cases) {
+      const record = structuredClone(item.record)
+      if (typeof item.blobRepeat === "number") record.data[item.blobKey ?? "blob"] = "x".repeat(item.blobRepeat)
+      if (typeof item.summaryRepeat === "number") record.data.summary = "s".repeat(item.summaryRepeat)
+      let answer = null
+      let refusal = null
+      try {
+        answer = impl.decisionRecord.decisionLogDraftFromRecord(record, item.entryId)
+      } catch (error) {
+        refusal = error
+      }
+      if (item.expectError !== undefined) {
+        if (refusal === null) {
+          bad.push(`${item.id}: accepted, the anchor says refuse with ${item.expectError}`)
+          continue
+        }
+        if (refusal.code !== item.expectError) bad.push(`${item.id}: refused with ${refusal.code}, anchor says ${item.expectError}`)
+        if (!refusal.remedy) bad.push(`${item.id}: a refusal without a remedy is not actionable`)
+        continue
+      }
+      if (refusal !== null) {
+        bad.push(`${item.id}: refused (${String(refusal.message).slice(0, 90)}) where the anchor expects a draft`)
+        continue
+      }
+      for (const [field, expected] of Object.entries(item.expect)) {
+        if (canonical(answer[field]) !== canonical(expected)) bad.push(`${item.id}.${field}: ${canonical(answer[field])} != anchor ${canonical(expected)}`)
+      }
+      for (const field of ["kind", "round", "dimension", "operationId", "payload"]) {
+        if (!(field in item.expect) && field in answer) bad.push(`${item.id}.${field}: present in the draft, absent in the anchor — a null here would re-hash every chain line`)
+      }
+    }
+  }
   if (kind === "convergence") {
     checked++
     const decision = impl.convergence.convergenceDecision(fixture.input)
@@ -518,6 +571,7 @@ const REQUIRED = {
   invariantReport: ["invariantReportDigest", "failingChecks", "reVerificationRequestFrom"],
   convergence: ["convergenceDecision"],
   provider: ["emptyProviderRegistry", "registerProvider", "resolveProvider", "requireMethod", "providerIdsInCommon"],
+  decisionRecord: ["decisionLogDraftFromRecord", "isLegacyDecisionRecord"],
 }
 
 /**
@@ -541,6 +595,7 @@ const REQUIRED_CONSTS = {
   convergence: ["CONVERGENCE_REASONS"],
   provider: ["PROVIDER_CODES"],
   invariantReport: ["REVERIFICATION_CODES"],
+  decisionRecord: ["DECISION_TRANSCRIBE_CODES"],
 }
 
 const loaded = []

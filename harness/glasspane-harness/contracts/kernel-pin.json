@@ -1,12 +1,12 @@
 {
   "_comment": "Provenance of the iterate-kernel dependency this fork ships. Written by script/kernel-pin.mjs --record when the version is deliberately bumped; checked by --check in CI. The kernel's canonical home is iterate-skill/kernel, published as `iterate-kernel`; the vendored mirror under packages/opencode/vendor/kernel was retired with this file.",
   "package": "iterate-kernel",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "resolution": {
     "from": "registry",
-    "lockKey": "iterate-kernel@0.1.5",
+    "lockKey": "iterate-kernel@0.1.6",
     "specifier": "",
-    "integrity": "sha512-1urn3VbCXNobsCUW8x+BSybGsvE7BOCcu+akgSWGnVZjCpNQMyctzhTdej56WFL0uZPtekddYGom5vRM067v8w=="
+    "integrity": "sha512-5B3CY7R8FIcEewWRA+eq1CM38ao6oU2RVxhLSC3Mi8+jYYDdo6/J9qqZOSfFfxkEVk1LSZuVk/SaU++lEDkbCg=="
   },
   "canonical": {
     "repo": "jingzhao-l/iterate-skill",
@@ -14,7 +14,7 @@
     "branch": "main",
     "npmPublish": "npm publish from the kernel/ directory of that repo"
   },
-  "recordedAt": "2026-10-11",
+  "recordedAt": "2026-10-12",
   "corpus": [
     {
       "file": "fixtures/convergence.ok-01.json",
@@ -27,6 +27,14 @@
     {
       "file": "fixtures/decision-log-entry.ok-01.json",
       "sha256": "0215a26e60c2c44475fd0072a394469c75ed39c14737cde39d4fe2c49eb85bf2"
+    },
+    {
+      "file": "fixtures/decision-log-entry.ok-02.json",
+      "sha256": "d68a3730ac7a9fa766795e2567bb2bb5fdf7d103196aa8d665e76e65151410b1"
+    },
+    {
+      "file": "fixtures/decision-record-transcription.ok-01.json",
+      "sha256": "6b2d0e954319f8df0c722e388abbfbc32c937521e8481dcfb2fb6a3b11b75611"
     },
     {
       "file": "fixtures/dimension-context.ok-01.json",
@@ -86,7 +94,7 @@
     },
     {
       "file": "schemas/decision-log-entry.schema.json",
-      "sha256": "bac8e3667421f9918733f24236fd374415530a84bf92b5a0de770d2eec493741"
+      "sha256": "0602f0bf0f2f1a5787db6d42f61a6e3e47a6c519d7bac869b5552fdcc9130f3a"
     },
     {
       "file": "schemas/evidence-pack.schema.json",
