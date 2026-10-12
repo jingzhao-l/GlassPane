@@ -2,6 +2,50 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-13（第六次会话）· 0.7.7：占位符那句道歉修成可执行的，前两条端到端修复一起入版
+
+**开工态**：仍在隔离工作树 `/Volumes/Eng-Dev/.worktrees/gp-harness-daily-20261010`
+（`.external/opencode` 是指回主树的符号链接），分支 `gp-harness-unreleased-076` 起点 `009e65a`；
+`git fetch` 后并行线已把 main 推到 `f98ca8d`（`iterate-kernel` 0.1.6），本批 rebase 到它之上、
+无冲突，整树干净。参照克隆 `describe --tags` = `v1.18.32` = `harness/upstream.json` 的 pin。
+**开局一处假红是我自己的**：主仓公共闸我用 `node $c` 传 `"scripts/check-workflows.mjs --self-test"`，
+整串被当成一个参数 ⇒ `MODULE_NOT_FOUND`、退出 1。分开重跑后是 **7 个用例各自验证会失败、退出 0**；
+红的是我的调用形状，不是闸。
+
+**动了什么**（发版批）：`packages/opencode/script/publish.ts`（占位符文本重写 + `validateTarball`
+新增对 wrapper bin 条目的四条检查）、`product.json`/`packages/opencode/package.json`/`bun.lock`
+版本线 0.7.6→0.7.7、`CHANGELOG.md`（把 `[Unreleased]` 三块并进 `[0.7.7]`，含并行线的 0.1.6 一块，
+原文未改）、`README.md`/`README.zh-CN.md`/`docs/install.md`（那条补救的实测形状：文档此前把
+`cd node_modules/glasspane-harness` 当"照抄即可"的答案抄进了 install 指南，而全局安装没有这个位置）。
+
+**测量**：`fork-diff` 4665/6714 byte-identical、262 edited、82 added、1705 deleted；红的是四个
+文件的 forkHash（`bun.lock`、`packages/opencode/package.json`、`publish.ts`、`README.md`），
+重记后金样差值就是那四条，逐条都是本批自己动的。`tool-surface` 面 B 7029→**7100**（+71），
+`--record` 前后逐字段比对：只有 `packages/opencode/script/publish.ts` 一条 243→314；面 A 行数一字未动，
+它 22.13%→22.09% 纯粹是分母被我涨了（`totalToolSurfaceLoc` 16148→16219）。`surface-semantics`
+18 个文件 0 命中；`brand-surface` 血缘 **9623**（基线 9623）、覆盖 3303/3303 不变、0 hits；
+`product-surface` **123 条一致 / 0 条问题**（无 `--record`）；`hook-liveness` 21 个钩子无漂移；
+`kernel-pin --check` 0.1.6 + 26 份契约档案（本工作树的 `node_modules/iterate-kernel` 还是 0.1.5，
+是并行线在他们工作树里装的——`bun install` 之后转绿，`bun.lock` 字节一字未变）；
+`kernel-conformance` 16 份档案全对。测试：`packages/opencode` 四条固定点泳道 **100 pass / 0 fail**，
+`packages/tui` 快照泳道 **26 pass / 0 fail**；四个发布包 typecheck 全清（0 条 `error TS`）；
+`installer-selftest.sh` **71 PASS / 0 FAIL**；`publish.ts --dry-run` 对 0.7.7 报 packs cleanly。
+主仓公共闸：`check-workflows`（5 份 workflow 的脚本引用都在）、`--self-test` 7 例、
+`check-doc-links`（24 份文档 / 225 条仓内链接 / 26 条外链不请求）全绿。
+
+**尺子的反向路径（本批新增那四条各被打红过，变异用自有备份 + sha256 核回，未用 git checkout/stash）**：
+删 shebang ⇒ `has no shebang` ＋ `could not be spawned …: ENOEXEC`（同一条变异让两检查具名变红）；
+补救退回相对路径 ⇒ `prints no absolute "cd <dir> && node postinstall.mjs" remedy`；目录算少一层 ⇒
+`sends the reader to …/bin, which does not hold postinstall.mjs`；把那行 chmod 换成 `644` ⇒
+`is not executable in the tarball (mode 644)`；`exit 1`→`exit 0` ⇒ `exits 0 when run`。
+第一次试"抹掉可执行位"用的是 `chmod -R 644 .`，它在 `publish()` 里先把目录权限也砸了、ShellError
+直接崩在断言之前——那不算红，换成只针对该文件的 644 才拿到具名红。
+
+**没跑（照实写）**：`bun run build` 的整包构建（发布走的是 CI 的 `--single` lane，本机不重复占盘）；
+`kernel-conformance --impl`（要 canonical 内核工作树，本批未挂）；真 `glasspaned` 上的 `gp_*` 会话与
+真模型的 TUI 观感（引擎侧另有会话在测量）；上游 13 条时序敏感全量用例（既有口径：本机不可靠，
+不改判据、不加超时）。
+
 ## 2026-10-12（第五次会话）· 依赖升 `iterate-kernel` 0.1.6：转录层进契约，Swift 那条腿欠着
 
 **开工态**：隔离工作树 `/Volumes/Eng-Dev/.worktrees/gp-kernel-015`，从 `origin/main`

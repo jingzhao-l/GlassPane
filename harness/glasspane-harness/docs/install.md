@@ -15,16 +15,20 @@ Both commands are available afterwards: `glasspane-harness` and `gp-harness`.
 One caveat that is the package manager's, not the product's: the wrapper's `postinstall`
 is what copies the real binary into place, and some managers do not run install scripts
 by default. Measured with 0.7.0: `bun add -g` installs the package and skips that step, so
-the command answers with its own remedy instead of a version — and that remedy is the fix,
-verbatim:
+the command answers with its own remedy instead of a version. From 0.7.7 that remedy names
+**this install's own directory**, so the printed line is the fix verbatim — measured from an
+unrelated working directory (`/`), where the answer was
 
 ```
-cd node_modules/glasspane-harness && node postinstall.mjs
+cd "/Users/you/node_modules/glasspane-harness" && node postinstall.mjs
 ```
 
-Run it from wherever the package manager put the package (`bun` puts global packages under
-`$HOME/node_modules`). Verified: after it, `glasspane-harness --version` reports the
-version. With npm 11+ the same gating shows up as an `allow-scripts` warning on a first
+(`bun` put the global package under `$HOME/node_modules` on that machine), and running it
+left `glasspane-harness --version` reporting the version. On 0.7.6 and earlier the same
+message named a path relative to a project root — a global install has no such place, so the
+line only worked if you happened to already stand in the right directory. The message also
+offers `bun pm trust glasspane-harness`, measured to run the same postinstall for a project
+install. With npm 11+ the same gating shows up as an `allow-scripts` warning on a first
 install; there the install still completes and the command works (also measured), and the
 one-click installer retries with `--allow-scripts` when npm refuses.
 

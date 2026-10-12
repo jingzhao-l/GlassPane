@@ -95,7 +95,8 @@ curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/s
 
 有的包管理器默认不跑安装脚本，而把真二进制放到位的正是 wrapper 的 `postinstall`。
 0.7.0 实测：npm 这条路是好的（npm 11+ 首次安装会打一条 `allow-scripts` 提示，命令照样能跑）；
-`bun add -g` 会跳过那一步，命令于是打印它自己的补救——照它点名的一行执行即可。
+`bun add -g` 会跳过那一步，命令于是打印它自己的补救——0.7.7 起那一句点名的是**这一份安装自己
+的目录**，所以照抄执行就是修法。
 详见 [docs/install.md](docs/install.md)。
 
 **只支持 macOS。** 引擎、权限模型、证据流水线都只存在于 macOS，npm 分发随之收成

@@ -12,6 +12,15 @@ contract does not).
 
 <!-- 内容归入下一版；此处留空以备下一批。 -->
 
+## [0.7.7] - 2026-10-13
+
+判据（pre-1.0）：**patch**。没有新增命令，CLI/TUI 的形状与参数一字未动，目标矩阵仍是 darwin
+arm64/x64；一处是依赖升级且新字段全部可选（旧字节不变），其余三条是使用可见的"行为被修对"
+（发布验证、兜底下载、占位符那条道歉）。取号说明：开工时实测上一版三格齐——split 仓 tag
+`v0.7.6` = `063e32e`、Release 非草稿带签名、registry 上 wrapper 与两个平台包的 `latest` 都是
+`0.7.6`——`v0.7.7` 与 npm 的 `0.7.7` 均无人占用，按 patch 取号。版本线两处：`product.json`（真源）
+与 `packages/opencode/package.json`，`bun.lock` 里那条包自身 `"version"` 一并跟上。
+
 ### Changed — 依赖 `iterate-kernel` 0.1.5 → 0.1.6（决策日志条目收下生产者词汇）
 
 - 内核 0.1.6 把 `DecisionLogEntry` 扩了四个**可选**字段（`kind` / `round` / `dimension` /
@@ -49,6 +58,33 @@ contract does not).
   失败时报告 curl 自己的退出码与原话，并给出 `--http1.1`、"手工取回后对着 `SHA256SUMS.txt` 校"、
   "改走 npm 那条"三条出路。退出码必须是真码：`if ! curl …; then rc=$?` 读的是取反后的 0。
   `installer-selftest.sh` 新增一条以 curl 形状退出的资产场景（**71 PASS / 0 FAIL**，此前 61）。
+
+### Fixed — 装不上时那句道歉，本来就打印不出来
+
+- **占位符 `bin/glasspane-harness.exe` 没有 shebang，而它的补救是一条相对项目根的路径。**
+  这一份文件是 npm/bun 把生命周期脚本闸掉之后，用户 PATH 上唯一还在的东西。两处都在 0.7.6 的
+  端到端里实测过：
+  *不经 shell 直接 execve 它的启动器拿不到任何字*——node 的 `spawnSync` 回
+  `error: ENOEXEC`（stdout 是 `undefined`），bun 的 `spawnSync` 抛
+  `ENOEXEC: unknown error, posix_spawn`（errno `-8`），而同一份文本加上 `#!/bin/sh` 之后两条路径
+  都照常打印并退 1；`sh -c` 那类会自己回落到 `/bin/sh` 的调用才看得到这段话，所以只有人肉在终端里
+  试的时候它显得没病。补救那句写的是 `cd node_modules/glasspane-harness && node postinstall.mjs`，
+  可是本机那个 `bun add -g` 的包落在 `$HOME/node_modules/glasspane-harness`——全局安装没有"项目根"
+  这个位置，那行字从任何别处都解析不出来。
+  现在由脚本自己算位置：`$0` 是启动器实际所用的 PATH 项（sh、bash、zsh、node `spawnSync` 四条路径
+  实测都给出绝对路径），顺符号链接链解到本文件再取上一层，打印的是**这一份安装**的目录。补救另给
+  两条实测跑得通的命令（`bun pm trust glasspane-harness` 在 scratch 项目里 1 script ran、之后
+  `--version` 回 `0.7.6`；`npm install -g --allow-scripts=…` 被 npm 11.17 在 `-g` 下接受，dry-run
+  退 0），其中 `$(npm root -g)` 保持单引号交给使用者的 shell 展开——免得只有 bun 的机器上打出空路径。
+  端到端复测：把新文本装进那个 bun 全局安装，从 cwd `/` 逐字执行它打印的那行，postinstall 退 0、
+  `glasspane-harness --version` 回 `0.7.6`。
+- **`validateTarball` 从不看 wrapper 自己 bin 条目的字节。** 平台包那支早就查可执行位，wrapper 这支
+  只查"文件在不在"。现在补齐四条，且每条都被反向变异打红过：删掉 shebang ⇒
+  `has no shebang` ＋ `could not be spawned …: ENOEXEC`；把补救退回相对路径 ⇒
+  `prints no absolute "cd <dir> && node postinstall.mjs" remedy`；目录算少一层 ⇒
+  `sends the reader to …/bin, which does not hold postinstall.mjs`；把 `chmod -R 755` 换成对该文件
+  `chmod 644` ⇒ `is not executable in the tarball (mode 644)`；`exit 1` 改 `exit 0` ⇒
+  `exits 0 when run`。检查是把那份文本**从无关目录 spawn 一次**再读它的输出，不是比字面。
 
 ## [0.7.6] - 2026-10-12
 

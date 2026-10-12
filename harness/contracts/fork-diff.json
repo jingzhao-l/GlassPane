@@ -2088,7 +2088,7 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "9861d5b913ca6a6f15bd32019a818a95da8c06fb"
+      "forkHash": "32f11dfc5618428095dbe074565c27d009c7e2c0"
     },
     {
       "file": "bunfig.toml",
@@ -2658,7 +2658,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "ee65109456992faaa34dfd289ea7b8af75f9f6d7"
+      "forkHash": "16204a5eca12aabdc1cd3bb1bdabd4bcf39a6b5a"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -2678,7 +2678,7 @@
     {
       "file": "packages/opencode/script/publish.ts",
       "upstreamHash": "ac1cafff56f46e9611a9ff78aa05217d21a907ef",
-      "forkHash": "cce0e79c8af63765c1bf6e6099353b6c3992c002"
+      "forkHash": "69a62ab61b33d2ac6ebaa96b341bae3f4dc072ec"
     },
     {
       "file": "packages/opencode/src/acp/service.ts",
@@ -3353,7 +3353,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "fd85deb3dfc972fcccc53bbbfc24b4f52f5a0db9"
+      "forkHash": "28c281ea1cef39cbfbe65f53b568ccc1074ffe22"
     },
     {
       "file": "script/publish.ts",
