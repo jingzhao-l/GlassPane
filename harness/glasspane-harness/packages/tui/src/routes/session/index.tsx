@@ -1828,40 +1828,34 @@ function GlassPaneTool(props: ToolProps) {
     return callID === props.part.callID
   })
 
-  const failed = createMemo(() => row().state === "engine-failure" || row().state === "call-error")
-  // Three looks, and the middle one is the point: a row with no engine verdict must
-  // not borrow the muted "the engine answered" style, and it must not be drawn as a
-  // refusal either — it is neither. `complete` here means "this call is finished",
-  // which is what stops InlineToolRow from painting the in-flight tilde instead.
-  const noVerdict = createMemo(() => row().state === "no-verdict")
-  const complete = createMemo(() => row().state === "success")
+  // The look itself is computed by the exported pure `glasspaneRowLook` (fixed-point tested
+  // without mounting a Session); this component only resolves its role names against the
+  // theme and wires the session chrome.
+  const look = createMemo(() => glasspaneRowLook(row(), props.tool, permission()))
   const fg = createMemo(() => {
-    if (permission()) return theme.warning
-    if (failed()) return theme.error
-    if (noVerdict()) return theme.warning
-    if (complete()) return theme.textMuted
-    return theme.text
+    const role = look().color
+    return role === "error" ? theme.error : role === "warning" ? theme.warning : role === "muted" ? theme.textMuted : theme.text
   })
 
   return (
     <InlineToolRow
-      icon={failed() ? "✗" : noVerdict() ? "?" : "◈"}
-      iconColor={failed() ? theme.error : undefined}
+      icon={look().icon}
+      iconColor={look().failed ? theme.error : undefined}
       color={fg()}
       errorColor={theme.error}
-      failed={failed()}
-      denied={row().state === "denied"}
+      failed={look().failed}
+      denied={look().denied}
       error={row().detail}
       errorExpanded={errorExpanded()}
-      complete={complete() || noVerdict()}
+      complete={look().complete}
       pending={row().pending}
-      spinner={row().state === "pending"}
+      spinner={look().spinner}
       onMouseUp={() => {
         if (renderer.getSelection()?.getSelectedText()) return
-        if (failed()) setErrorExpanded((value) => !value)
+        if (look().failed || look().denied) setErrorExpanded((value) => !value)
       }}
     >
-      {failed() && !complete() ? row().line : `${props.tool} ${row().line}`}
+      {look().label}
     </InlineToolRow>
   )
 }
@@ -2015,7 +2009,7 @@ export function InlineToolRow(props: {
           </Show>
         </Match>
       </Switch>
-      <Show when={props.failed && props.errorExpanded}>
+      <Show when={(props.failed || props.denied) && props.errorExpanded}>
         <box paddingLeft={INLINE_TOOL_ICON_WIDTH}>
           <text fg={props.errorColor}>{props.error}</text>
         </box>
@@ -2739,6 +2733,53 @@ function glasspaneSummary(method: string, result: Record<string, unknown> | unde
   }
   // probe_status and anything unrecognised: no invented shape, just the method.
   return method
+}
+
+export type GlassPaneRowLook = {
+  icon: string
+  failed: boolean
+  denied: boolean
+  noVerdict: boolean
+  /** "this call is finished", which is what stops `InlineToolRow` drawing the in-flight tilde. */
+  complete: boolean
+  spinner: boolean
+  /** Named by role, not by `theme.*`: the theme only exists inside a mounted component. */
+  color: "error" | "warning" | "muted" | "text"
+  label: string
+}
+
+/**
+ * The pure half of the row wiring: {@link GlassPaneRow} → the props `InlineToolRow` receives.
+ * Exported because the wiring is where a permission denial used to fall through to the
+ * in-flight look — `~ Performing action…` for a call that will never happen — and a mapping
+ * that only exists inside a component needing theme/sync providers cannot be the only place
+ * that claim is checkable. Same reasoning as {@link glasspaneRow} above it.
+ */
+export function glasspaneRowLook(row: GlassPaneRow, toolName: string, permissionPending = false): GlassPaneRowLook {
+  const failed = row.state === "engine-failure" || row.state === "call-error"
+  const denied = row.state === "denied"
+  const noVerdict = row.state === "no-verdict"
+  const settled = row.state === "success"
+  return {
+    // Three looks and a fourth for the denial: a row with no engine verdict must not borrow
+    // the muted "the engine answered" style, and must not be drawn as a refusal either.
+    icon: denied ? "⊘" : failed ? "✗" : noVerdict ? "?" : "◈",
+    failed,
+    denied,
+    noVerdict,
+    complete: settled || noVerdict || denied,
+    spinner: row.state === "pending",
+    color: permissionPending
+      ? "warning"
+      : failed
+        ? "error"
+        : denied || noVerdict
+          ? "warning"
+          : settled
+            ? "muted"
+            : "text",
+    label: failed || denied ? row.line : `${toolName} ${row.line}`,
+  }
 }
 
 export function glasspaneRow(input: {

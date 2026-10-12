@@ -152,6 +152,22 @@ KERNEL_SRC=/path/to/iterate-skill tools/sync-kernel.sh --target=repo            
 - **brand-surface：`--record` 不许把"没扫"盖成基线，`--check` 不许把"扫得少"读成进步**。① `missing-product-file` 此前作为普通 hit 进 `hits`，`--record` 照写——installer/product.json/bin shim 一旦改名或删除，"这个文件不再被看"就永久变绿。现在 `--record` 遇其直接拒（exit 1，逐个点名，与"归因失败不得写金样"同一条纪律），确要留洞必须另给显式开关 `--ack-missing-product-file`，且之后每次 `--check` 都重播 `! … is in the golden as NOT SCANNED`。实测：把我备份的 `packages/tui/src/context/editor.ts` 移开 → `--record` 退 1 并点名该文件、**仓内金样 md5 未变**（`laneC/task4-record-refusal.log`）；同状态 `--check` 双红（`missing-product-file ×1 … is new (no baseline)` + 覆盖率那条，`task4-check-missing.log`）；带 ack 的 record 只写 `/var/tmp` 的 probe 金样，随后 `--check` 转绿但把洞重播出来（`task4-ack-record.log`、`task4-ack-check.log`）；`cp` 备份还原后 editor.ts 与 HEAD 逐字节一致、真闸转绿。② 金样钉着 `filesScanned 3310`，`--check` 过去只比 `occurrences` 与 0 命中，**从不比扫描规模**——于是一棵子树消失＝血缘"变好"。取舍：**减才红，增不红**（新增文件是正常干活，红它只会逼人关掉守卫；而增量本来已由 occurrences 棘轮看着），并且**每次都说清覆盖率与方向**：`  lineage coverage: recorded 3310 file(s) → now 3309 file(s) (shrank 1 file(s)) — the occurrence count is a sum over a SMALLER tree` 配 `✗ lineage coverage shrank 3310 → 3309 file(s) (−1): lineage reads 9627 → 9615; that is NOT brand progress, it is 1 fewer file(s) being looked at`；合成金样 `filesScanned 3200`（覆盖率 +110）实测 exit 0 且照打印 `grew 110 file(s)`，金样没有该字段时打印"无法比较，请重记"而不判红（`task4-coverage-grew-clean.log`、`task4-coverage-unknown.log`）。本轮真实树里 occurrences 9,627 → 9,617 而覆盖率仍 3,310——现在这条下降是**可核对的下降**，不再是同一句话的猜测。
 - **surface-semantics `threshold-comparison` 操作数顺序**：口径仍是"和小数字面量比较"，但正则只认字面量在右。合成 6 条实测（临时把 `mcp-shell/src/evidence-report.ts` 尾部加一个探针函数，`cp` 备份还原后 md5 逐字节一致）：**改动前 `threshold-comparison ×3`、改动后 `×6`**，`✗ mcpShell: mcp-shell/src/evidence-report.ts — threshold-comparison ×6 (not in the baseline)` 具名红；三条新增咬合的正是原来零命中的 `if (0.5 < ratio)`、`if (0.02 <= changed)` 与 `0.5 < pack.pixelDiff`（`laneC/task5-headlogic-mutated.log` vs `task5-fixedlogic-mutated.log`）。整数仍不 entry：`if (count > 0)`、`if (0 < count)` 改前改后都 0（`laneC/residual-probe.log`），免得淹基线。**现树复跑：0 命中 / 18 文件不变，金样未重记**——这次收窄没有在我们自己的代码里挖出新判定，是干净结果；若挖出来就属于架构信号而非尺子信号。
 
+- **2026-10-11（第三次会话，harness 日更）复验**：本轮改动的尺子只有 `hook-liveness`（`--offline` 原先打印
+  "upstream checkout absent"，那是关于机器的断言，而并行 worktree 里那份检出通常存在——降级输出不许写成
+  测量结论）。三条反向路径重验：① 金样伪写 `permission.ask` 为 live → `--check` exit 1，点名
+  `dead-hook set changed: golden=[] now=[permission.ask]` 加 2 条 drift；**这条控制第一次没落地**（perl 的
+  多行模式与 JSON 实际排版不符，`grep` 证明 dead 计数没变），当场作废重做才算——"改完看着绿"不等于
+  "控制生效"，这条记在这里因为它正是本仓反复犯的形状；② 删金样 → exit 2 并指名 `--record`，不是绿；
+  ③ 藏本工作树的参照符号链接 → `--check` exit 2 给出 `--offline` 出路，`--offline` exit 0 且明说"本 lane
+  不读上游、那个路径没被打开过"，还原后重新绿在 21 钩子无漂移。撤销一律自建备份 + sha256 核回。
+  `product-surface` 的 `no-foreign-publish` / `readCode` / corpus 形状三条随 0.7.4 那批已在主线上，本轮
+  不重记、只重跑（98 条一致 / 0 问题）。
+  同一轮另记一条**负载敏感的计时断言，本轮没清掉**：`glasspane-surface.test.ts` 的 oversized-frame 用例
+  在同一棵树上跑了四次——前两次红（30s 内没把 4 MiB 帧写完，`Daemon.call(..., 30_000)` 的计时器先到，
+  报成 `GP_E_ENGINE_TIMEOUT` 而非 `GP_E_PAYLOAD_TOO_LARGE`），后两次绿（其中一次单跑耗时 26.96s，离 30s
+  只剩 3 秒余量）。判据没改、超时没加：加超时只会让计时器照样先到，改判据就是把它真正要问的东西扔掉。
+  它现在的身份是**不稳定对照**，挂在未修清单上，不是"已复跑证明是假红"。
+
 一条如实挂账的分工：**CI 没有参照克隆，那里能核的只有"我们这一侧"**——`fork-diff --check` 无克隆时比对金样钉着的 fork 侧哈希与 added 文件是否还在（改内容照样红，实测 1 秒，所以它进了 `install-gate`）；`tool-surface` 在离线时把行数降级为上次记录并打印 `NOT re-measured`，而 2026-10-07 起它进一步**拒绝把面 B 断言成在限内**——降级到旧行数的"不假绿"仍然需要一个能被证明为旧的测量，改名识别做不到这件事。**上游字节的复测（6,632 个哈希 + 参照 `ls-files`，约 2 分钟、要背 223 MB 克隆）只在本地/发布前与同步上游时跑**，那是 `SYNCLOG.md` 每次必须留痕的原因。这个分工是设计而不是妥协：把 223 MB 参照塞进 PR CI 的结局是被人关掉守卫。
 
 上游侧那条真检测（新 release → `--probe` → 漂移即冻结）在 `.github/workflows/harness-contract.yml`：每周一次 + 手动可触发，手动输入的 tag 先钳成 `vMAJOR.MINOR.PATCH` 形状、事件数据只经环境变量下发。**这个机制今天在全球范围内都还没有先例**（iterate 侧只有文档承诺），所以它是这条线最先要立住的东西，而不是 fork 代码本身。

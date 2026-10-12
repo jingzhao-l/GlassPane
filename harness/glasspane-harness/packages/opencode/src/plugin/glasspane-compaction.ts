@@ -32,8 +32,15 @@ export type PlanRead = { ok: true; plan: RunPlanRef | null } | { ok: false; erro
  *    dimension ids the caller was configured with and does the accounting; the
  *    vocabulary itself belongs to the iterate config (nine ids, locked across
  *    six sources by `test_dimension_lock.py`), so this module never declares an
- *    ontology of its own. A session with no plan still produces a coverage line,
- *    and that line says nothing was verified rather than staying silent.
+ *    ontology of its own. As shipped, the production path reaches this with no plan and no
+ *    recorded dimensions — `collectEvidenceAnchors` transcribes daemon frames and M2
+ *    receipts, and neither carries a dimension — so `renderDimensionCoverage` returns
+ *    `undefined` and the block simply omits the line. A session with a plan and zero
+ *    decisions would get "0/N dimensions verified", which is the useful sentence; a session
+ *    with no plan gets silence, because there is no coverage to state. Wiring the plan
+ *    (the kernel's `run-plan` contract carries `dimensions`) is open work, and
+ *    test/plugin/glasspane-compaction.test.ts pins the as-shipped shape so this paragraph
+ *    cannot quietly drift back into a claim.
  *  - It may not break compaction. A failed message pull appends a visible note
  *    and returns; it never throws into the host's compaction path, and it never
  *    replaces `output.prompt` (replacing it would silently discard the default
