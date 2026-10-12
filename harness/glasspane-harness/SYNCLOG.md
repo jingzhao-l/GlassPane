@@ -2,7 +2,76 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
-## 2026-10-11（第三次会话）· 文案还在替上游说话、平台包发布没跑自家校验，发 0.7.5
+## 2026-10-12（第四次会话）· 面 B 那 90 分钟有了成因；发布闸不再用墙钟裁产品；本轮不发版
+
+**收的是上一轮的尾**：0.7.5 发完之后 main 上还压着三笔未记录/未验证的变化（b004813 改了
+`verify-published.ts` 的判据、d8b1892 修我自己推上去的 3× TS2451、金样因"一趟 90 分钟"一直
+没补）。这一批全在**闸与尺子**这一侧，产品字节一行未动。
+
+**决定：不发新版本**（依据与回滚都在下面，不留成"待裁决"）。`0.7.5` 的 tag / GitHub Release /
+registry 三格不动，因为发布物里没有任何一行变化；把 dev-only 的发布脚本改动记成一次
+产品 patch 会让用户拿到同一份字节却看见一个新号，而 npm 的版本号不可回收。
+`0.7.6` 是另一条线的：`gp-harness-release-076`（c54ada1，"能力闸问的就是方法名；被权限拒绝的
+调用不再画成还在跑"，自陈**待闸**）仍占着那个号，本轮内容与它零交集——**让号不是让产品**。
+回滚本轮只需 `git revert f9a0fb2 d10e99e`（尺子层与发布脚本各自独立，无发布动作需要撤）。
+
+**面 B 的 90 分钟找到了成因**（`harness/tools/ref-batch.mjs`，d10e99e）。不是负载，是**成本模型**：
+`tool-surface` 每问一句上游就 spawn 一次 `git show`——216 个 `edited` 各一次，"这是不是一次纯
+改名"的探针又把**每个同扩展名的上游删除文件**按 `added` 文件逐个重读（3,829 次），合计
+**4,045 个子进程覆盖 682 个不同 blob（10.0 MB）**。load 88 时单 spawn ≈1.3 s ⇒ 一趟 ≈90 分钟，
+且 `build()` 之前一行不打印，无人值守时与"卡死"不可区分（另一支同一命令跑到 4 h 50 m 无输出，
+上一轮的 `--record` 记成"77 min 墙钟 / 3 min CPU"也是这同一条）。改管道不改判据：
+`cat-file --batch-check` + `cat-file --batch` 两次子进程按 size 分帧读回，其余（utf8 落临时文件、
+`diff -u`、去品牌一对一配对、缺路径读 `null`）一字未动。实测同一棵树 **7 分钟**出全量报告。
+等价性两条都取了指纹：① `ref-batch-selftest.mjs` 从 fork-diff 金样定步长抽 24 条
+（`edited`/`deleted` 各 12、覆盖 9 种扩展名）与 `git show HEAD:<path>` **逐字节相等**，缺路径＝
+`null` 而非 0 字节；两条反向控制各自具名红（期望值翻 1 bit、把分帧前进量 `+size+1` 写成 `+size`
+的阉割版解析器）——实测 rc=0。② 整树对账：新实现报出的 **216 个 edited + 14 个 added 的每一个
+行数，与旧实现当年记进金样的数相同**，`--check` 全场只点一个动过的文件。
+
+**发布闸的第三种答案**（`packages/opencode/script/verify-published.ts`，f9a0fb2）。旧形状两次把
+一次好发布判成坏发布：墙钟 15 s 那版印 `no response`，事件门 180 s 那版印
+`no "listening on" line within 180s` 却仍走 exit 1 并写"the release is NOT good"。本轮把
+**已发布的 0.7.5** 手测一遍：`listening on` 在 **326 s** 后出现（load 88），随后
+`Content-Type: text/html` + 2,884 字节 `<!doctype html>` + 2 处 `/assets/` 引用——发布物是好的，
+错的是拿墙钟裁它的判据（日志 `/var/tmp/gp-sess4-handserve.log`）。现在三态：
+exit 0＝听到 listening 且页面是打包产物；exit 1＝听到 listening 却供不出页面（坏发布，别重跑）；
+exit 2＝`NOT OBSERVED`（机器的成因，沿用本文件已有的"这台机什么都验不了"语义），预算 900 s。
+`GLASSPANE_VERIFY_LISTENING_POLLS` 只能把预算改**短**——改短只会少看见，不可能造出假绿。
+`--prefix <dir>` 是为了让 FAIL 分支**可执行**才加的（npm 安装实测 21 分钟，错误页没法靠真发布物
+造出来），它会打印自己跳过了安装。`harness/tools/verify-published-selftest.sh` 用三个假前缀
+驱动三条分支 + 一条"位置参数真被吃了"的控制，实测 8 条断言全中 rc=0；
+把页面判据阉成 `/<html/i` 的副本（`VP_GATE=` 指过去，真文件不动）喂同一条测试 ⇒
+**2 条具名红 + rc=1**（`/var/tmp/gp-sess4-mut.log`）。
+这条测试自己红过两次，两处都留在测试里并写明：`run_case` 漏赋值 `$1..$3` ⇒
+`grep -qF ""` 对任何输出都成立、三个用例跑的其实是同一个假发布物还报绿（现在期望串为空即判
+FAIL——**夹具必须能拒绝**）；断言改用 shell 子串匹配而不是 `grep`，因为闸的文案里有 em dash，
+grep 会把这种管道输入当"二进制"而停止匹配。
+同一笔里还抓出我自己刚写进去的解析 bug：`--prefix` 缺席时 `flagAt == -1`，无条件
+`i !== flagAt + 1` 会把位置参数当标志值丢掉 ⇒ `verify-published.ts 0.7.5` 会去验
+`product.json` 的版本却打印 0.7.5；由那条 9.9.9 控制钉住。
+
+**金样（本笔同批，`harness/contracts/`）**：`fork-diff` 四桶 **4,665/6,714 逐字节相同、262 edited、
+82 added、1,705 deleted**（桶计数与 d8b1892 上那次 `--check` 相同——本轮没增删 fork 树里的文件，
+`ref-batch*` 与 `verify-published-selftest.sh` 都在尺子层）；`tool-surface` 记
+**engine 25,033 / 62 文件，面 A 9,119 LOC（22.26%）、面 B 6,817 LOC（16.64%）**。
+两面相对上一记都动了，**逐文件归因是算出来的不是写来的**（对旧金样重算差值）：
+面 B **只有一个文件动**——`packages/opencode/script/verify-published.ts` 206 → 287（+81），
+即 b004813 的 +7 与本笔的 +74，全是我这条 lane 写的；面 A 的 +144（8,975 → 9,119）分 8 个文件
+（`engine-client.ts` +50、`update-state.ts` +34、`io.ts` +23、`tools.ts` +20、`http-gateway.ts` +6、
+`errors.ts` +6、`index.ts` +4、`project-registry.ts` +1）**没有一行是我写的**，是并入的
+`origin/main`（1.13.0 那批）；分母里 engine 相对金样 +284（24,749 → 25,033），同一批。
+`--record` 在这里不是掩盖：这些增长都已经进了 main 的树，闸的职责是
+"增长不许没人注意到"，注意到的方式就是把归属逐文件写进这一行。
+
+**发布面读数（复核，不是本轮动作）**：split 仓 `main` = `61b15d6` = tag `v0.7.5`；
+registry `glasspane-harness` / `-darwin-arm64` / `-darwin-x64` 三格实测 **0.7.5**、
+`latest` 0.7.5；`verify-published 0.7.5` 在本机（load ~104）跑出的结果是安装/两条命令
+`--version`/已安装包清单的 os·cpu·version/registry integrity 全 ok，web 那一条
+`NOT OBSERVED`（exit 2）——**这一格由手测补**，见上。
+本轮之后 main 又前进了三笔，split 仓的 `main` 需要跟着同步（不含新 tag、不触发发布）。
+
+
 
 **接着收口。** 上一份汇报里我自己点名却没做的三条，按内容判据核过：
 
