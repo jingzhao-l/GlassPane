@@ -163,12 +163,17 @@ fork 包内：固定点 `packages/opencode` 四份 **100 pass / 0 fail**、`pack
 **1 秒**（去掉的是 4,045 次子进程），`fork-diff --check` 1 秒，`typecheck`(opencode) 24 秒
 ——上一轮那 1 h 45 m 不是它自己的成本，是负载（本机 load 全程实测 88 → 155 → 310，峰值来自
 与本项目无关的 GUI/浏览器进程堆）。判据一条未放宽，超时一条未加。
-**一处如实的红（本笔无法清，且它红得对）**：`script/publish.ts --dry-run` 报
+**一处先红后绿的：`script/publish.ts --dry-run`**。第一次跑报
 `glasspane-harness-darwin-arm64 … package.json version 0.7.4 != product version 0.7.6`——
 本机 `dist/` 里还是 0.7.4 那次的产物，而 main 上的号已被那条线取到 0.7.6。这正是上一批把
-"dist 自己跟自己比"改成"dist 对 `product.json` 比"之后才可能看见的东西；出路是发版前重建
-（`cd packages/opencode && NODE_EXTRA_CA_CERTS=/var/tmp/glasspane-harness/ca-bundle.pem bun run build --single`），
-不是把断言关掉，也不是把 dist 手改成 0.7.6。
+"dist 自己跟自己比"改成"dist 对 `product.json` 比"之后才可能看见的东西；出路是重建而不是
+关断言：`bun run build --single`（带 `NODE_EXTRA_CA_CERTS`，`build rc=0`，自带 smoke test
+打印 `Smoke test passed: 0.7.6`）之后同一条命令 **rc=0**，两包
+`packs cleanly (not published: --dry-run)`，并如实带一句
+`note: 1 declared target(s) are not built in this run: glasspane-harness-darwin-x64`
+（一台机只建一个目标，这是设计）。构建期间 `bun` 把 `packages/opencode/package.json` 里
+`description` 的 `\u2014` 写成了字面 `—`——那不是本轮的意图，已 `git checkout HEAD --` 收回，
+没有让一次本地构建在产品清单里留下无主 diff。
 
 **发布面读数（复核，不是本轮动作）**：split 仓 `main` = `61b15d6` = tag `v0.7.5`；registry
 `glasspane-harness` / `-darwin-arm64` / `-darwin-x64` 三格实测 **0.7.5**、`latest` 0.7.5；
