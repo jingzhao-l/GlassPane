@@ -2,13 +2,20 @@
 /**
  * verify-published.ts — "published" is not "works".
  *
- *   cd packages/opencode && bun run script/verify-published.ts [version]
+ *   cd packages/opencode && bun run script/verify-published.ts [version] [--prefix <dir>]
  *
  * A release lane that only checks `npm publish`'s exit code has verified nothing a
  * user cares about: the wrapper's postinstall resolves a platform package, places
  * the real binary, and the command runs. This script does exactly the user's path:
  * install the **published tarball** into a throwaway prefix, run `--version`, and
  * (on macOS) confirm the embedded web app is actually served by that binary.
+ *
+ * `--prefix <dir>` runs the same checks against an install that already exists, and says
+ * out loud that the install step was skipped. It exists because the install is the slow
+ * part (21 minutes measured on the 2026-10-12 run) and because the web-app verdict needs a
+ * negative control: the only way to show the check can go red is to point it at a prefix
+ * whose server serves something that is not the embedded app. `harness/tools/
+ * verify-published-selftest.sh` does exactly that with a fake prefix.
  *
  * Why it is not in CI by default: it needs the registry and a writable temp prefix,
  * so it belongs to the release lane (and to any release done by hand), not to a PR.
@@ -21,12 +28,47 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import product from "../../../product.json"
 
-const version = process.argv[2] ?? product.version
+// `--prefix` is a flag with a value, so it must not be read as the version. Everything
+// positional that is not the flag's argument is the version, and a second one is refused:
+// silently ignoring `verify-published.ts 0.7.5 0.7.4` would verify one release and name
+// another in the log.
+const argv = process.argv.slice(2)
+const flagAt = argv.indexOf("--prefix")
+const givenPrefix = flagAt === -1 ? undefined : argv[flagAt + 1]
+if (flagAt !== -1 && !givenPrefix) {
+  console.error("verify-published: --prefix needs a directory")
+  process.exit(2)
+}
+// The flag's own argument is not positional, but only when the flag is present: `flagAt + 1`
+// is `0` when it is not, and a filter that excluded index 0 unconditionally would drop the
+// version from `verify-published.ts 0.7.5` and then verify `product.json`'s version while
+// printing the one it was handed. `harness/tools/verify-published-selftest.sh` carries a case
+// that names a version the manifest does not have, which is what catches that shape.
+const positional = argv.filter((a, i) => a !== "--prefix" && !(flagAt !== -1 && i === flagAt + 1))
+if (positional.length > 1) {
+  console.error(`verify-published: more than one version named (${positional.join(", ")}) — verify one release per run`)
+  process.exit(2)
+}
+
+const version = positional[0] ?? product.version
 const registry = product.npm?.registry ?? "https://registry.npmjs.org"
 const failures: string[] = []
+const unobserved: string[] = []
 const check = (label: string, ok: boolean, detail = "") => {
   console.log(`${ok ? "ok  " : "FAIL"}  ${label}${detail ? ` — ${detail}` : ""}`)
   if (!ok) failures.push(label)
+}
+/**
+ * A check the machine made impossible. It is neither a pass nor a bad release, and calling
+ * it either of those twice did damage: a 15s wall budget reported the published 0.7.5 as a
+ * bad release on a loaded host (2026-10-11), and the day before that the same check said
+ * "no response" about a binary that answered after 36s. A release lane that cries wolf gets
+ * its red ignored, so the honest third verdict gets its own exit code — the one this file
+ * already uses when the host cannot run the product at all.
+ */
+const cannotObserve = (label: string, detail: string) => {
+  console.log(`NOT OBSERVED  ${label} — ${detail}`)
+  unobserved.push(label)
 }
 
 if (process.platform !== "darwin") {
@@ -60,22 +102,29 @@ async function reportProvenance() {
   )
 }
 
-const prefix = mkdtempSync(path.join(tmpdir(), "gp-verify-"))
+const prefix = givenPrefix === undefined ? mkdtempSync(path.join(tmpdir(), "gp-verify-")) : path.resolve(givenPrefix)
+const ownPrefix = givenPrefix === undefined
 try {
-  // The registry is named explicitly: "the registry I happen to be pointed at serves
-  // something runnable" is a weaker claim than "the published artifact installs", and an
-  // ambient mirror or a lagging read replica must not be what a release verdict rests on.
-  console.log(`installing the published ${product.name}@${version} from ${registry} into a throwaway prefix`)
-  // `-g --prefix`, not a bare `--prefix`: a local install creates **no** bin links,
-  // so "is the command there?" would fail for a reason that has nothing to do with the
-  // package. (The first run of this script failed exactly that way, which is the reason
-  // the comment exists.)
-  const install = await $`npm install -g --registry ${registry} --prefix ${prefix} ${product.name}@${version}`.nothrow()
-  if (install.exitCode !== 0) {
-    check("npm install of the published package", false, install.stderr.toString().split("\n").slice(-3).join(" "))
-    throw new Error("install failed")
+  if (ownPrefix) {
+    // The registry is named explicitly: "the registry I happen to be pointed at serves
+    // something runnable" is a weaker claim than "the published artifact installs", and an
+    // ambient mirror or a lagging read replica must not be what a release verdict rests on.
+    console.log(`installing the published ${product.name}@${version} from ${registry} into a throwaway prefix`)
+    // `-g --prefix`, not a bare `--prefix`: a local install creates **no** bin links,
+    // so "is the command there?" would fail for a reason that has nothing to do with the
+    // package. (The first run of this script failed exactly that way, which is the reason
+    // the comment exists.)
+    const install = await $`npm install -g --registry ${registry} --prefix ${prefix} ${product.name}@${version}`.nothrow()
+    if (install.exitCode !== 0) {
+      check("npm install of the published package", false, install.stderr.toString().split("\n").slice(-3).join(" "))
+      throw new Error("install failed")
+    }
+    check("npm install of the published package", true)
+  } else {
+    console.log(
+      `verifying the existing install at ${prefix} — the npm install step is skipped because --prefix named it, and the package it holds is NOT re-checked against the registry`,
+    )
   }
-  check("npm install of the published package", true)
 
   // Every command the product ships, not just the first. `gp-harness` is a second bin of
   // the same binary; a wrapper whose extra bin still resolves to the placeholder is a
@@ -158,7 +207,18 @@ try {
       }
       void drain(server.stdout)
       void drain(server.stderr)
-      const listeningCap = 360 // 180s, and it is a give-up bound, not the criterion
+      // A give-up bound, not the criterion. Measured on the published 0.7.5 at load average
+      // 88 (2026-10-12, 07:00): the same binary that answers with a real 2,884-byte
+      // `<!doctype html>` page took **326s** to print its `listening on` line, because
+      // paging in a 108 MB single-file build competes with two typechecks and a fork-diff.
+      // So the wait is long enough for a loaded machine to be given the benefit of the
+      // doubt, and when it expires the answer is "not observed", never "the release is bad"
+      // — the bundle question is only answerable once the server has spoken.
+      const listeningCap = Number(process.env.GLASSPANE_VERIFY_LISTENING_POLLS ?? 1800) // 900s
+      if (!Number.isFinite(listeningCap) || listeningCap < 1) {
+        console.error(`verify-published: GLASSPANE_VERIFY_LISTENING_POLLS=${process.env.GLASSPANE_VERIFY_LISTENING_POLLS} is not a poll count`)
+        process.exit(2)
+      }
       let listening = false
       for (let i = 0; i < listeningCap && !(listening = logged.join("").includes("listening on")); i++) {
         await Bun.sleep(500)
@@ -175,7 +235,7 @@ try {
           // reference is what this binary serves when the web assets really are embedded.
           const hasAssets = /(?:src|href)="\/?assets\//i.test(body)
           served = type.includes("text/html") && /<!doctype html>/i.test(body) && hasAssets
-          detail = `content-type=${type || "(none)"} doctype=${/<!doctype html>/i.test(body)} assets=${hasAssets ? "referenced" : "absent"}`
+          detail = `waited ${(i + 1) * 0.5}s, content-type=${type || "(none)"} doctype=${/<!doctype html>/i.test(body)} assets=${hasAssets ? "referenced" : "absent"}`
           if (served) break
         }
         await Bun.sleep(500)
@@ -187,27 +247,41 @@ try {
         // a good release bad. Measured 2026-10-11 on the published 0.7.5: the binary answers
         // with a real 2,884-byte `<!doctype html>` page, but it took **36s** to get there
         // while nine concurrent `tool-surface` runs pushed the load average past 70, and
-        // the 15s budget expired. The criterion is now the server's own "listening on" line
-        // (an event, so a slow boot cannot fake it or defeat it); only the HTTP content
-        // check runs on a clock, and only once the server has said it is up. The cap is a
-        // give-up bound and is reported as such rather than as a verdict about the bundle.
+        // the 15s budget expired. The criterion is the server's own "listening on" line (an
+        // event, so a slow boot cannot fake it), and the two ways to not get there are now
+        // two different verdicts: the server said it was listening and still will not serve
+        // the page is a bad release; the server never said anything is an unobserved claim.
         const tail = logged.join("").trim().split("\n").slice(-3).join(" / ").slice(0, 300)
-        detail = listening
-          ? `the server reported listening on :${port} but ${polls * 0.5}s of polling produced no valid embedded page — ${detail || "no response"}; that is a real serving failure`
-          : `no "listening on" line within ${(listeningCap * 0.5) | 0}s, so the page was never even attempted — INCONCLUSIVE about the bundle, not evidence it is missing. Re-run on a quieter machine, or by hand: ${bin} serve --port 4814; curl -s http://127.0.0.1:4814/ | head -c 200`
-        detail += tail ? ` (server output: ${tail})` : " (no server output captured)"
+        if (listening) {
+          detail = `the server reported listening on :${port} but ${polls * 0.5}s of polling produced no valid embedded page — ${detail || "no response"}; that is a real serving failure${tail ? ` (server output: ${tail})` : ""}`
+          check("the installed binary serves the embedded web app", false, detail)
+        } else {
+          cannotObserve(
+            "the installed binary serves the embedded web app",
+            `no "listening on" line within ${listeningCap * 0.5}s, so the page was never even attempted. This says nothing about the bundle. Re-run on a quieter machine, or by hand: ${bin} serve --port 4814; curl -s http://127.0.0.1:4814/ | head -c 200${tail ? ` (server output: ${tail})` : ""}`,
+          )
+        }
+      } else {
+        check("the installed binary serves the embedded web app", true, detail)
       }
-      check("the installed binary serves the embedded web app", served, detail)
     } finally {
       server.kill()
     }
   }
 } finally {
-  rmSync(prefix, { recursive: true, force: true })
+  if (ownPrefix) rmSync(prefix, { recursive: true, force: true })
 }
 
 if (failures.length > 0) {
   console.error(`verify-published: ${failures.length} check(s) failed — the release is NOT good, regardless of what npm said`)
   process.exit(1)
+}
+if (unobserved.length > 0) {
+  // Exit 2 with the checks that did pass listed, because "the install works" and "the bundle
+  // was seen" are different claims and a lane that collapses them has already lied once.
+  console.error(`verify-published: ${unobserved.length} check(s) could not be observed on this machine — NOTHING is concluded about them, and this is not a pass`)
+  console.error(`  observed good: ${product.name}@${version} installed and reported its version`)
+  console.error("  Re-run this lane when the load average is down, or run the hand command printed above.")
+  process.exit(2)
 }
 console.log(`verify-published: ${product.name}@${version} installs, every shipped command reports its version, and the web app is served`)

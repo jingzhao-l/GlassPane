@@ -151,6 +151,25 @@ Things worth knowing, because they are the usual way this is set up wrong:
    `--version`, and checks the embedded web app is served by that binary. A green publish
    with a red `verify-published` is a broken release, not a noisy one.
 
+   It answers with three verdicts, because two different things can go wrong and only one of
+   them is the release's fault:
+
+   - **exit 0** — the installed binary served the embedded page (doctype plus bundled
+     `/assets/` references). This is the only output that means "the release works".
+   - **exit 1** — a `FAIL` line naming what is wrong. If the server printed its
+     `listening on` line and still will not serve the page, that is a bad release: stop and
+     fix the artifact, do not re-run the lane.
+   - **exit 2** — `NOT OBSERVED`. The server never said it was listening inside the wait
+     budget (900 s; measured 326 s for the published 0.7.5 on a machine at load average 88,
+     because a 108 MB single-file binary has to page in before it binds). Nothing is
+     concluded about the bundle — this is not a pass, and it is not a red release either.
+
+   Re-run exit 2 on a quieter machine, or take the hand command it prints. `--prefix <dir>`
+   re-checks an install you already made (the npm install is the slow step) and prints that
+   the registry comparison was skipped. The gate itself is under
+   `harness/tools/verify-published-selftest.sh`, which drives it with three fake prefixes —
+   the one serving an error page is what proves a red release still reads red.
+
 7. **Deprecate, do not unpublish.** If a version turns out to be broken, publish a fixed
    one and `npm deprecate` the bad version with the reason in the message. Unpublishing
    burns the version number for everyone who already has it.
