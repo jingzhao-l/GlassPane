@@ -70,6 +70,54 @@ test("call rejects on transport error as GP_E_ENGINE_UNREACHABLE", async () => {
   });
 });
 
+/**
+ * The control for the fixture itself, and it does not depend on how loaded the machine is.
+ *
+ * `call()` registers the pending entry and arms its 500 ms deadline synchronously. The refusal used
+ * to be delivered with a bare `setImmediate` — the **check** phase — while an expired deadline sits
+ * in the **timers** phase, which node drains first in the next loop pass. So a single loop iteration
+ * that outlasted the budget flipped the verdict from `GP_E_ENGINE_UNREACHABLE` to
+ * `GP_E_ENGINE_TIMEOUT`: measured on a machine at load 60–137, where two named controls
+ * (`call rejects on transport error…`, `tools/call engine unreachable maps to isError…`) went red for
+ * a reason that had nothing to do with the code under test. A control whose answer is decided by the
+ * scheduler is not measuring the product.
+ *
+ * Here the stall is manufactured rather than waited for: block this stack for 700 ms — longer than
+ * the armed 500 ms deadline — and the classification must still come back as "refused". With
+ * nextTick ordering the refusal is already delivered when the stack unwinds, so this is deterministic
+ * on an idle machine too.
+ *
+ * REVERSE MUTATION: put `FakeLineIo.emitError` (test/helpers.mjs) back to a bare
+ * `setImmediate(() => this.#errorHandler?.(error))` → this test goes red by name with
+ * `GP_E_ENGINE_TIMEOUT`, on any machine, without needing load.
+ */
+test("拒绝的送达顺序不许由调度器决定：堵住事件循环 700ms，判决仍是 UNREACHABLE", async () => {
+  const io = new FakeLineIo();
+  const client = engineClientOver(io, 500);
+  const promise = client.call("act", {});
+  io.emitError(new Error("connect ECONNREFUSED"));
+  const until = Date.now() + 700;
+  while (Date.now() < until) {
+    // 有意自旋：deadline(500ms) 在这段里已经过期，恢复事件循环时 timers 相本会先跑
+  }
+  await assert.rejects(promise, (err) => {
+    assert.equal(err.code, "GP_E_ENGINE_UNREACHABLE",
+      `堵住循环后判决换了，说明它测的是调度器：${err.code} / ${err.message}`);
+    return true;
+  });
+});
+
+/**
+ * Written first and then removed, and the reason is recorded so nobody re-adds it as a freebie: a
+ * second control for the *queued* ordering (refusal emitted before any frame exists, then the same
+ * 700 ms stall) stayed GREEN with the old `setImmediate` fixture. Which phase the test body itself
+ * began in decided the outcome, so that shape cannot discriminate — a control that cannot go red is
+ * not evidence. The queued path is instead covered by `dispatch.test.mjs` (whose
+ * `tools/call engine unreachable…` control was one of the two that went red under load and is green
+ * with this fixture), and by `consumer-consistency.test.mjs`, which still proves a deadline really
+ * does answer a caller.
+ */
+
 test("a deadline overrun settles the call with a diagnosis", async () => {
   const io = new FakeLineIo();
   const client = new EngineJsonRpcClient(io, 30); // short timeout
