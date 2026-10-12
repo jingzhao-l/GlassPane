@@ -42,6 +42,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, wr
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { readRefBlobs } from "./ref-batch.mjs"
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(here, "..", "..")
@@ -164,6 +165,22 @@ function measureFork(golden) {
   const refDir = path.join(repoRoot, refRel)
   const hasRef = existsSync(path.join(refDir, ".git"))
   const kernel = readKernelDependency()
+  // Every upstream blob this measurement can ask about, in one pass. The set is a superset
+  // on purpose: all `edited` files plus all `deleted` files that carry a counted extension,
+  // whether or not the loops below end up probing them. Narrowing it to the exact probes
+  // would make the read depend on the classification, and a spec missing from the map reads
+  // as "upstream has no such file" — which under-bills authorship instead of refusing.
+  let blobs = new Map()
+  if (hasRef) {
+    const specs = [...new Set([...(fd.edited ?? []), ...(fd.deleted ?? [])].filter((rel) => REF_EXTS.includes(path.extname(rel))))]
+    try {
+      blobs = readRefBlobs(refDir, specs)
+    } catch (err) {
+      return fail(`upstream reference could not be read: ${err.message}`)
+    }
+    const read = [...blobs.values()].filter((b) => b !== null).length
+    process.stderr.write(`  surface B: ${read}/${blobs.size} upstream blobs read in one git pass\n`)
+  }
   if (existsSync(path.join(forkDir, "packages", "opencode", "vendor", "kernel"))) {
     return fail(
       "packages/opencode/vendor/kernel exists again — the kernel ships as the iterate-kernel dependency; delete the tree or re-record the pin with a documented reason",
@@ -198,7 +215,7 @@ function measureFork(golden) {
     // not help because a rename is precisely what the golden does *not* contain. So the
     // offline lane cannot attribute surface B at all, and `observed.carried` below makes
     // it say so and refuse instead of printing a number inflated by other people's code.
-    if (isPureRename(refDir, abs, rel, fd)) {
+    if (isPureRename(blobs, abs, rel, fd)) {
       renamed.push({ file: rel, lines: loc(abs) })
       continue
     }
@@ -228,7 +245,7 @@ function measureFork(golden) {
       files.push({ file: rel, kind: "edited", lines: was })
       continue
     }
-    const n = addedLinesAgainstRef(refDir, rel, abs)
+    const n = addedLinesAgainstRef(blobs, rel, abs)
     if (!Number.isFinite(n)) return fail(`reference clone at ${refRel} has no '${rel}' at HEAD — cannot attribute surface B`)
     if (isTest(rel)) {
       // An edited TEST file is excluded exactly like an added one: the caliber
@@ -331,15 +348,11 @@ function countAuthoredLines(diff) {
   return authored
 }
 
-function addedLinesAgainstRef(refDir, rel, forkAbs) {
-  let before
-  try {
-    before = execFileSync("git", ["-C", refDir, "show", `HEAD:${rel}`], { encoding: "utf8", maxBuffer: 512 * 1024 * 1024 })
-  } catch {
-    return NaN
-  }
+function addedLinesAgainstRef(blobs, rel, forkAbs) {
+  const before = blobs.get(rel)
+  if (before === undefined || before === null) return NaN
   const tmp = path.join(tmpdir(), `tool-surface-${rel.replace(/[^A-Za-z0-9]+/g, "_")}.before`)
-  writeFileSync(tmp, before)
+  writeFileSync(tmp, before.toString("utf8"))
   try {
     let diff = ""
     try {
@@ -361,17 +374,13 @@ function vendorSummary(excluded) {
 }
 
 /** Does this "added" file have identical bytes to something upstream deleted? */
-function isPureRename(refDir, abs, rel, fd) {
-  if (!refDir || !existsSync(path.join(refDir, ".git"))) return false
+function isPureRename(blobs, abs, rel, fd) {
+  if (blobs.size === 0) return false
   const here = createHash("sha256").update(readFileSync(abs)).digest("hex")
   for (const gone of fd.deleted ?? []) {
     if (path.extname(gone) !== path.extname(rel)) continue
-    let before
-    try {
-      before = execFileSync("git", ["-C", refDir, "show", `HEAD:${gone}`], { encoding: "buffer", maxBuffer: 512 * 1024 * 1024 })
-    } catch {
-      continue
-    }
+    const before = blobs.get(gone)
+    if (before === undefined || before === null) continue
     if (createHash("sha256").update(before).digest("hex") === here) return true
   }
   return false
