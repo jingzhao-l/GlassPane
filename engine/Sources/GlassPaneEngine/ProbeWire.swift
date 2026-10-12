@@ -22,6 +22,12 @@ public struct ProbeHello: Equatable {
     public let droppedEvents: Int?
     public let droppedWrites: Int?
     public let rejectedKeys: Int?
+    /// Frames the probe could not parse at all — distinct from `droppedEvents`,
+    /// which are well-formed frames discarded for volume.
+    public let droppedInboundFrames: Int?
+    /// The read side gave up on a connection whose unterminated remainder passed
+    /// the inbound line cap, so the rest of that stream was never framed.
+    public let droppedInboundLines: Int?
 
     public init(
         pid: Int32,
@@ -31,7 +37,9 @@ public struct ProbeHello: Equatable {
         capabilities: [String],
         droppedEvents: Int? = nil,
         droppedWrites: Int? = nil,
-        rejectedKeys: Int? = nil
+        rejectedKeys: Int? = nil,
+        droppedInboundFrames: Int? = nil,
+        droppedInboundLines: Int? = nil
     ) {
         self.pid = pid
         self.bundleId = bundleId
@@ -41,6 +49,8 @@ public struct ProbeHello: Equatable {
         self.droppedEvents = droppedEvents
         self.droppedWrites = droppedWrites
         self.rejectedKeys = rejectedKeys
+        self.droppedInboundFrames = droppedInboundFrames
+        self.droppedInboundLines = droppedInboundLines
     }
 }
 
@@ -142,7 +152,9 @@ public enum ProbeWire {
                 capabilities: capabilities,
                 droppedEvents: Self.counter(dict["droppedEvents"]),
                 droppedWrites: Self.counter(dict["droppedWrites"]),
-                rejectedKeys: Self.counter(dict["rejectedKeys"])
+                rejectedKeys: Self.counter(dict["rejectedKeys"]),
+                droppedInboundFrames: Self.counter(dict["droppedInboundFrames"]),
+                droppedInboundLines: Self.counter(dict["droppedInboundLines"])
             ))
         case "handler":
             // `line` is a source position the probe reports; past Int32 there is

@@ -1,7 +1,7 @@
 import XCTest
 @testable import GlassPaneEngine
 
-/// X-3, closed: three probe-side counters used to have no reader at all — the
+/// X-3, closed: the probe-side counters used to have no reader at all — the
 /// SDK reported them, the daemon's decoder dropped them at the wire boundary, and
 /// nothing surfaced them, so "0 handler hits" and "the probe lost 400 frames" were
 /// the same observable. The rule this file pins is the one that makes that
@@ -14,7 +14,9 @@ final class ProbeCounterTests: XCTestCase {
         capabilities: [String] = ["z1"],
         droppedEvents: Int? = nil,
         droppedWrites: Int? = nil,
-        rejectedKeys: Int? = nil
+        rejectedKeys: Int? = nil,
+        droppedInboundFrames: Int? = nil,
+        droppedInboundLines: Int? = nil
     ) -> ProbeHello {
         ProbeHello(
             pid: pid,
@@ -24,7 +26,9 @@ final class ProbeCounterTests: XCTestCase {
             capabilities: capabilities,
             droppedEvents: droppedEvents,
             droppedWrites: droppedWrites,
-            rejectedKeys: rejectedKeys
+            rejectedKeys: rejectedKeys,
+            droppedInboundFrames: droppedInboundFrames,
+            droppedInboundLines: droppedInboundLines
         )
     }
 
@@ -33,7 +37,8 @@ final class ProbeCounterTests: XCTestCase {
     func testHelloCountersDecodeWhenReported() throws {
         let json = """
         {"t":"hello","pid":4242,"appName":"Example","probeVersion":"gp-probe/0.1.0",\
-        "capabilities":["z1"],"droppedEvents":12,"droppedWrites":3,"rejectedKeys":1}
+        "capabilities":["z1"],"droppedEvents":12,"droppedWrites":3,"rejectedKeys":1,\
+        "droppedInboundFrames":7,"droppedInboundLines":2}
         """
         guard case let .hello(decoded) = ProbeWire.decode(Data(json.utf8)) else {
             return XCTFail("expected a hello frame")
@@ -41,6 +46,8 @@ final class ProbeCounterTests: XCTestCase {
         XCTAssertEqual(decoded.droppedEvents, 12)
         XCTAssertEqual(decoded.droppedWrites, 3)
         XCTAssertEqual(decoded.rejectedKeys, 1)
+        XCTAssertEqual(decoded.droppedInboundFrames, 7)
+        XCTAssertEqual(decoded.droppedInboundLines, 2)
     }
 
     /// A probe that predates the keys, or whose `hello` never carried them, must
@@ -58,6 +65,8 @@ final class ProbeCounterTests: XCTestCase {
         XCTAssertNil(decoded.droppedEvents)
         XCTAssertNil(decoded.droppedWrites)
         XCTAssertNil(decoded.rejectedKeys)
+        XCTAssertNil(decoded.droppedInboundFrames)
+        XCTAssertNil(decoded.droppedInboundLines)
     }
 
     func testNonsenseCounterValuesAreUnreportedNotGuessed() throws {
@@ -132,7 +141,7 @@ final class ProbeCounterTests: XCTestCase {
 
     func testStatusRowsCarryReportedCountersAndOmitUnreportedOnes() throws {
         let inbox = ProbeInbox(now: { Date(timeIntervalSince1970: 1_800_000_000) })
-        XCTAssertTrue(inbox.register(hello(pid: 11, droppedEvents: 40, droppedWrites: 2, rejectedKeys: 1)))
+        XCTAssertTrue(inbox.register(hello(pid: 11, droppedEvents: 40, droppedWrites: 2, rejectedKeys: 1, droppedInboundFrames: 7, droppedInboundLines: 2)))
         XCTAssertTrue(inbox.register(hello(pid: 22)))
 
         let rows = inbox.statusJSON()
@@ -141,9 +150,11 @@ final class ProbeCounterTests: XCTestCase {
         XCTAssertEqual(reported["droppedEvents"] as? Int, 40)
         XCTAssertEqual(reported["droppedWrites"] as? Int, 2)
         XCTAssertEqual(reported["rejectedKeys"] as? Int, 1)
+        XCTAssertEqual(reported["droppedInboundFrames"] as? Int, 7)
+        XCTAssertEqual(reported["droppedInboundLines"] as? Int, 2)
 
         let silent = try XCTUnwrap(rows.first { ($0["pid"] as? Int) == 22 })
-        for key in ["droppedEvents", "droppedWrites", "rejectedKeys"] {
+        for key in ["droppedEvents", "droppedWrites", "rejectedKeys", "droppedInboundFrames", "droppedInboundLines"] {
             XCTAssertNil(
                 silent[key],
                 "\(key): a probe that never reported it must not be shown as 0"
@@ -210,7 +221,7 @@ final class ProbeCounterTests: XCTestCase {
 
     func testProbeStatusRowsReachTheAgentWithTheirCounters() throws {
         let inbox = ProbeInbox(now: { Date() })
-        XCTAssertTrue(inbox.register(hello(pid: 77, droppedWrites: 5)))
+        XCTAssertTrue(inbox.register(hello(pid: 77, droppedWrites: 5, droppedInboundFrames: 3, droppedInboundLines: 1)))
         let core = EngineCore(
             channel: ScriptedChannel(fallbackTree: TestTrees.standard),
             settle: {},
@@ -219,6 +230,12 @@ final class ProbeCounterTests: XCTestCase {
         let rows = try XCTUnwrap(core.probeStatus()["probes"] as? [[String: Any]])
         let row = try XCTUnwrap(rows.first { ($0["pid"] as? Int) == 77 })
         XCTAssertEqual(row["droppedWrites"] as? Int, 5)
+        XCTAssertEqual(
+            row["droppedInboundFrames"] as? Int,
+            3,
+            "a counter the probe publishes has to leave the daemon on the same row as the others"
+        )
+        XCTAssertEqual(row["droppedInboundLines"] as? Int, 1)
     }
 
     // MARK: - a second hello for the same pid
@@ -231,7 +248,7 @@ final class ProbeCounterTests: XCTestCase {
     /// to keep the credit for having measured them.
     func testRehelloThatOmitsCountersCarriesForwardTheEarlierMeasurement() throws {
         let inbox = ProbeInbox(now: { Date(timeIntervalSince1970: 1_800_000_000) })
-        XCTAssertTrue(inbox.register(hello(pid: 33, droppedEvents: 40, droppedWrites: 2, rejectedKeys: 1)))
+        XCTAssertTrue(inbox.register(hello(pid: 33, droppedEvents: 40, droppedWrites: 2, rejectedKeys: 1, droppedInboundFrames: 7, droppedInboundLines: 2)))
         XCTAssertTrue(inbox.register(hello(pid: 33, capabilities: ["z1", "kvc"])))
 
         let rows = inbox.statusJSON()
@@ -240,6 +257,8 @@ final class ProbeCounterTests: XCTestCase {
         XCTAssertEqual(row["droppedEvents"] as? Int, 40)
         XCTAssertEqual(row["droppedWrites"] as? Int, 2)
         XCTAssertEqual(row["rejectedKeys"] as? Int, 1)
+        XCTAssertEqual(row["droppedInboundFrames"] as? Int, 7)
+        XCTAssertEqual(row["droppedInboundLines"] as? Int, 2)
         // The counters are the only fields that merge: capabilities keep the
         // "the newest announcement is authoritative" semantics, so this fix must
         // not be read as a general sticky-hello rule.
@@ -282,6 +301,7 @@ final class ProbeCounterTests: XCTestCase {
         XCTAssertEqual(row["droppedEvents"] as? Int, 40)
         XCTAssertEqual(row["rejectedKeys"] as? Int, 1)
         XCTAssertNil(row["droppedWrites"], "nil merged with nil stays nil")
+        XCTAssertNil(row["droppedInboundFrames"], "and the same for the inbound counters")
     }
 
     /// The carry-forward belongs to one live registration, not to a pid slot: a
