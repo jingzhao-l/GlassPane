@@ -12,6 +12,21 @@ contract does not).
 
 <!-- 内容归入下一版；此处留空以备下一批。 -->
 
+### Fixed — 0.7.6 端到端真跑才暴露的两处
+
+- **`verify-published` 从不确认 wrapper 点名的平台包是否真在 registry 上。** 它验已装包的
+  `os`/`cpu`/`version`、registry 的 integrity、内嵌 web，唯独没问 `optionalDependencies` 里那条
+  `glasspane-harness-darwin-x64@<ver>` 存不存在——可选依赖解析不到时 npm 不报错，只是那台机器
+  拿不到二进制。于是 Intel Mac 可以"安装成功、命令不存在"，而本机（arm64）这条通道全程绿灯。
+  现在逐个 `npm view` 声明到的平台包版本，任一取不到即 FAIL；`optionalDependencies` 整个为空也算红。
+- **兜底安装通道对半路断流既不重试也说不出出路。** 对已发布的 v0.7.6 资产实测：本机那个 TLS 拦截代理
+  （响应头 `server: WattToolkit`）在 ~47 MB 的流上把它掐断，curl 退 **92**
+  （`HTTP/2 stream 1 was not closed cleanly`），只落 473 KB；安装器原本只打
+  `download failed: <url>`。现在带 `--retry 5 --retry-all-errors --continue-at -`（续传比重试更要紧），
+  失败时报告 curl 自己的退出码与原话，并给出 `--http1.1`、"手工取回后对着 `SHA256SUMS.txt` 校"、
+  "改走 npm 那条"三条出路。退出码必须是真码：`if ! curl …; then rc=$?` 读的是取反后的 0。
+  `installer-selftest.sh` 新增一条以 curl 形状退出的资产场景（**71 PASS / 0 FAIL**，此前 61）。
+
 ## [0.7.6] - 2026-10-12
 
 判据（pre-1.0）：**patch**。没有新增命令、没改 CLI/TUI 形状与参数、没动目标矩阵；使用者可见的两处是

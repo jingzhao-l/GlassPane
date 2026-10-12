@@ -2,7 +2,7 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
-## 2026-10-12 · 每日批次（harness 线，第四次会话）：能力闸问错了对象、被拒的调用画成"还在跑"，发 0.7.6
+## 2026-10-12 · 每日批次（harness 线，10:30 那份提示词）：能力闸问错了对象、被拒的调用画成"还在跑"，发 0.7.6
 
 **开工态**：主树 HEAD 开工时 `5f0fb54`（== origin/main）、整树干净；约一小时后并行会话把 main 推到
 `2e83542` 并持续写入，**我第一轮闸读数被它的未提交编辑污染**（`kernel-conformance.mjs` 396→441、
@@ -69,6 +69,28 @@ canonical 检出）；真 TUI 会话里的观感（含本批新画的 ⊘ 拒绝
 实跑（daemon 在跑，但本轮没驱动任何 `gp_*` 调用）。继续挂账的功能缺口：引擎方法表 11 个可使能力里
 fork 只发了 6 个（缺 `assert_element`/`audit_ui`/`capture_view`/`snapshot`/`restore`），而
 `gp_observe` 的文案正叫模型"别用眼睛比树"——新增工具属产品面变化＝minor，不在 patch 这批里做。
+
+**0.7.6 发布实测入档**（发的是 `69a27e8`，随附的 `9a28ad8` 是发完之后落的两条端到端缺陷修复）：
+主仓 CI 在该 sha 上 `--exit-status` 退 0（含 `harness rulers`、`engine (Swift)`、`version line` 九条 lane），
+`Harness contract` 三条 job 绿——这条 CI 就是那把负载敏感计时对照的凭据（本地 load ~101 时它红过，
+负载 14 时 `100 pass / 0 fail`）。`git subtree split --prefix=harness/glasspane-harness` 出 `063e32e`，
+**tree 哈希等式成立**：`git rev-parse HEAD:harness/glasspane-harness` 与 `split^{tree}` 同为
+`57fdcfe03a9801ac753a0af7f34314c7f99ea5a5`，逐字相等才推；split 仓 main 当时是 `61b15d6`，
+是我这条 split 的祖先，所以**普通 push 就 fast-forward**（`61b15d6..063e32e`），没有用 force。
+tag `v0.7.6` 指向同一个 `063e32e`。tag 推送触发的 Release：`tag matches the product version` ✓、
+`create the GitHub release` ✓、`binary darwin-arm64` 2m32s ✓、`binary darwin-x64` 4m59s ✓、
+`SHA256SUMS for the release assets` 10s ✓；`gh release view` 实测 `isDraft=false`、
+`targetCommitish=063e32e`（**是 commit 而不是分支名**——v0.6.4 那条"可复现性锚点是分支名"的挂账至此实测不成立）、
+六份资产齐（两 zip + 两 `.asc` + `SHA256SUMS.txt` 与其 `.asc`）。
+npm 侧 `gh workflow run release.yml --ref v0.7.6 -f publish_npm=true -f confirm=true`，三条 job 全
+success（x64 那条 11m8s）。registry 回查一度出现**只有两个包可见**的状态：x64 的 `0.7.6` 在元数据里
+缺席约二十分钟（`versions` 到 0.7.5、`latest: 0.7.5`），而 job 早已打
+`+ glasspane-harness-darwin-x64@0.7.6` 且 provenance 已进 sigstore 透明日志——这就是 npm 自己那句
+"may take a few minutes to become available"，**不能当失败、更不能当成功**：最后按元数据核到
+三个包 `latest=0.7.6` 且 `has 0.7.6=True` 才算数。
+`verify-published 0.7.6` 整跑 rc=0（临时前缀装的是**已发布** tarball，两个命令都回 `0.7.6`，
+内嵌 web 由那份二进制真的供了出来）。curl 兜底通道第一次端到端实跑**失败**并被入档：见下面
+`9a28ad8` 那条——这是"跑用户走的那条路"才拿得到的东西，静态闸一条都没抓到。
 
 ## 2026-10-12（第四次会话）· 面 B 那 90 分钟有了成因；发布闸不再用墙钟裁产品；本轮不发版
 
