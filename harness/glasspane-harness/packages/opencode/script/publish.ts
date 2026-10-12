@@ -118,6 +118,37 @@ async function validateTarball(dir: string, name: string, version: string): Prom
     for (const [bin, target] of Object.entries(manifest.bin ?? {})) {
       if (!existsSync(path.join(dir, target as string))) problems.push(`bin "${bin}" points at ${target}, which is not in the tarball`)
     }
+    // What the wrapper ships in its bin entries is the apology script, not a binary:
+    // postinstall replaces it at install time. Nothing checked those bytes, so a tarball could
+    // go out with a placeholder that cannot be exec'd, or that points its reader at a directory
+    // that does not exist — and the release lane called that clean. Each check below is the
+    // shape of one of those two failures, and each was seen red by deleting the thing it
+    // guards (the shebang, the resolved path, the exec bit).
+    const scripts = new Set<string>(Object.values(manifest.bin ?? {}).map((target) => path.join(dir, target as string)))
+    for (const file of scripts) {
+      if (!existsSync(file)) continue
+      const label = path.relative(dir, file)
+      const stat = await Bun.file(file).stat?.()
+      if (stat && (stat.mode & 0o111) === 0) problems.push(`${label} is not executable in the tarball (mode ${(stat.mode & 0o777).toString(8)}) — the command would answer "permission denied" instead of its remedy`)
+      const first = (await Bun.file(file).text()).split("\n", 1)[0]
+      if (!first.startsWith("#!")) problems.push(`${label} has no shebang (first line is ${JSON.stringify(first)}) — a launcher that execs it without a shell gets ENOEXEC and no message`)
+      // The remedy has to be actionable from wherever the reader is standing, which is the
+      // whole point of the file and the thing it used to get wrong. Run it the way a tool
+      // runs it — spawned directly, from an unrelated directory — and ask the output for the
+      // directory it tells the reader to cd into.
+      if (process.platform !== "win32") {
+        try {
+          const run = Bun.spawnSync([path.resolve(file)], { cwd: "/", stdout: "pipe", stderr: "pipe" })
+          const seen = run.stderr.toString()
+          if (run.exitCode === 0) problems.push(`${label} exits 0 when run — the placeholder reports success while installing nothing`)
+          const named = seen.match(/cd "(\/[^"]*)" && node postinstall\.mjs/)
+          if (!named) problems.push(`${label} prints no absolute "cd <dir> && node postinstall.mjs" remedy — a relative one does not resolve from a global install`)
+          else if (!existsSync(path.join(named[1], "postinstall.mjs"))) problems.push(`${label} sends the reader to ${named[1]}, which does not hold postinstall.mjs`)
+        } catch (error) {
+          problems.push(`${label} could not be spawned from another directory: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+    }
     if (!existsSync(path.join(dir, "postinstall.mjs"))) problems.push("postinstall.mjs is missing — the platform binary would never be placed")
     if (!existsSync(path.join(dir, "LICENSE"))) problems.push("LICENSE is missing")
     if (!existsSync(path.join(dir, "README.md"))) problems.push("README.md is missing — the npm page would render as a bare version string")
@@ -230,17 +261,54 @@ await Bun.file(`./dist/${pkg.name}/LICENSE`).write(await Bun.file("../../LICENSE
 // packages/opencode), so the paths climb two levels.
 await Bun.file(`./dist/${pkg.name}/README.md`).write(await Bun.file("../../README.md").text())
 await Bun.file(`./dist/${pkg.name}/README.zh-CN.md`).write(await Bun.file("../../README.zh-CN.md").text())
+// The apology a user reads when their package manager gated the lifecycle script. Two
+// shapes here were wrong and both were measured on 0.7.6:
+//   * no shebang. npm and bun symlink their bin entry onto this file, and a launcher that
+//     execs it without a shell gets nothing back — node's spawnSync returned an ENOEXEC
+//     error with no stdout, bun's spawnSync threw (`errno -8, posix_spawn`), and a script
+//     with a shebang run the same way printed and exited 1. So the one person who needed
+//     the remedy — an agent or tool spawning the command directly — saw no message at all.
+//   * the remedy was a path relative to a project root ("cd node_modules/glasspane-harness"),
+//     which is exactly the install that has no project root. Reproduced with `bun add -g`:
+//     the package landed in $HOME/node_modules/glasspane-harness and the printed line was
+//     unresolvable from anywhere else. The fix is to resolve this script's own location:
+//     $0 is the PATH entry the launcher used, measured identical under sh, bash, zsh and
+//     node's spawnSync, so following the symlink chain names *this* install's directory.
 await Bun.file(`./dist/${pkg.name}/bin/${pkg.name}.exe`).write(
   [
+    "#!/bin/sh",
+    "self=$0",
+    "i=0",
+    'while [ -L "$self" ] && [ $i -lt 8 ]; do',
+    '  t=$(readlink "$self")',
+    "  case $t in",
+    "    /*) self=$t ;;",
+    '    *) self=$(CDPATH= cd -P -- "$(dirname -- "$self")" && printf \'%s/%s\' "$PWD" "$t") ;;',
+    "  esac",
+    "  i=$((i + 1))",
+    "done",
+    'here=$(CDPATH= cd -P -- "$(dirname -- "$self")/.." 2>/dev/null && pwd)',
     `echo "Error: ${pkg.name}'s postinstall script was not run." >&2`,
     'echo "" >&2',
-    'echo "This occurs when using --ignore-scripts during installation, or when using a" >&2',
-    'echo "package manager like pnpm that does not run postinstall scripts by default." >&2',
+    'echo "The command on your PATH is still the placeholder the tarball ships, not the" >&2',
+    'echo "binary. Managers leave it in place when they gate lifecycle scripts: bun blocks a" >&2',
+    'echo "dependency\'s scripts until you trust it, npm skips them under --ignore-scripts," >&2',
+    'echo "and some managers skip them by default." >&2',
     'echo "" >&2',
-    'echo "To fix this, run the postinstall script manually:" >&2',
-    `echo "  cd node_modules/${pkg.name} && node postinstall.mjs" >&2`,
+    'if [ -n "$here" ]; then',
+    '  echo "Run this install\'s own postinstall step:" >&2',
+    '  echo "  cd \\"$here\\" && node postinstall.mjs" >&2',
+    '  echo "" >&2',
+    "fi",
+    'echo "Or let the package manager run it:" >&2',
+    // Single-quoted on purpose: $(npm root -g) must expand in the reader's shell, not in
+    // this script. Expanding here would run npm from inside the apology and print an empty
+    // path on a machine that has only bun.
+    `echo '  cd "$(npm root -g)/${pkg.name}" && node postinstall.mjs   # npm global install' >&2`,
+    `echo "  bun pm trust ${pkg.name}                        # in the project you installed into" >&2`,
     'echo "" >&2',
-    `echo "Or reinstall ${pkg.name} without the --ignore-scripts flag." >&2`,
+    'echo "Either way the check afterwards is the same, and only a version number means it" >&2',
+    `echo "worked: ${pkg.name} --version" >&2`,
     "exit 1",
     "",
   ].join("\n"),
