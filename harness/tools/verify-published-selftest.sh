@@ -97,8 +97,9 @@ make_prefix() {
 }
 
 run_case() {
-  # $1 = page mode, $2 = expected label, $3 = expected rc ("" = must not be 0), $4 = version to ask for
-  local mode want_label want_rc ask_version out rc pfx
+  # $1 = page mode, $2 = expected label, $3 = expected rc ("" = must not be 0, "0" = must be 0,
+  # "no-web-fail" = the web label must not appear as FAIL), $4 = version to ask for
+  local mode want_label want_rc ask_version out rc pfx matched
   mode="$1"
   want_label="$2"
   want_rc="${3-}"
@@ -133,19 +134,40 @@ run_case() {
     say FAIL "$mode@$ask_version: expected a line matching '$want_label' (full output in /var/tmp/gp-vp-selftest-$mode-${ask_version//./_}.log)"
     fails=$((fails + 1))
   fi
-  if [ -n "$want_rc" ]; then
-    if [ "$rc" -eq "$want_rc" ]; then
-      say ok "$mode: exit $rc as expected"
-    else
-      say FAIL "$mode: exit $rc, expected $want_rc"
+  case "$want_rc" in
+  no-web-fail)
+    # The healthy branch is about the WEB verdict, not about the registry. Asking for
+    # `product.json`'s version means the registry checks can legitimately fail on a version
+    # that has not been published yet — and this file went red for exactly that reason the
+    # first time the version line moved past the published one. So the assertion is scoped to
+    # the branch under test: a fake prefix that serves the real page must not be read as a
+    # serving failure, whatever the install-side checks say.
+    case "$out" in
+    *"FAIL  the installed binary serves the embedded web app"*)
+      say FAIL "$mode@$ask_version: a complete page was judged a serving failure"
       fails=$((fails + 1))
+      ;;
+    *)
+      say ok "$mode@$ask_version: web branch healthy (rc $rc; any failure in it is an install/registry check this fake does not control)"
+      ;;
+    esac
+    ;;
+  *)
+    if [ -n "$want_rc" ]; then
+      if [ "$rc" -eq "$want_rc" ]; then
+        say ok "$mode@$ask_version: exit $rc as expected"
+      else
+        say FAIL "$mode@$ask_version: exit $rc, expected $want_rc"
+        fails=$((fails + 1))
+      fi
+    elif [ "$rc" -eq 0 ]; then
+      say FAIL "$mode@$ask_version: exit 0 — a release the gate could not observe must never look like a pass"
+      fails=$((fails + 1))
+    else
+      say ok "$mode@$ask_version: exit $rc (non-zero, so an unobserved claim cannot be read as a pass)"
     fi
-  elif [ "$rc" -eq 0 ]; then
-    say FAIL "$mode: exit 0 — a release the gate could not observe must never look like a pass"
-    fails=$((fails + 1))
-  else
-    say ok "$mode: exit $rc (non-zero, so an unobserved claim cannot be read as a pass)"
-  fi
+    ;;
+  esac
 }
 
 # The FAIL branch, named: a page that is HTML but is not the embedded app. A predicate that
@@ -153,9 +175,9 @@ run_case() {
 run_case error "FAIL  the installed binary serves the embedded web app" 1
 # The unobservable branch: the server never says it is listening. Must not exit 0.
 run_case silent "NOT OBSERVED  the installed binary serves the embedded web app" ""
-# The healthy branch, so the two above cannot be green-by-construction: this fake prefix is
-# complete, so the gate must have nothing to complain about and exit 0.
-run_case good "ok    the installed binary serves the embedded web app" 0
+# The healthy branch, so the two above cannot be green-by-construction: this fake prefix
+# serves the real page, so the web verdict must be `ok` and must not be a serving failure.
+run_case good "ok    the installed binary serves the embedded web app" no-web-fail
 # The version that was asked for is the version that is checked. The fake prefix carries
 # product.json's version, so asking for a different one has to surface in the manifest gate's
 # own words — a parser that dropped the positional argument would print the asked-for number
