@@ -79,11 +79,14 @@ fork 只发了 6 个（缺 `assert_element`/`audit_ui`/`capture_view`/`snapshot`
 **决定：不发新版本**（依据与回滚都在下面，不留成"待裁决"）。本轮内容与发布物字节零交集
 （改的是尺子层与 dev-only 的发布脚本），所以不该占用一个用户可见的号。
 **并进来时那条线已把号取到 0.7.6**（`product.json` 与 `packages/opencode/package.json` 两处都是
-0.7.6，在 main 上），但**实测它还没落地**：split 仓 `main` 与 tag 仍是 `61b15d6` = `v0.7.5`，
-registry 上 `glasspane-harness` / `-darwin-arm64` 的读数也仍是 **0.7.5**。于是当前的形状是
-"main 领先发布面一个号"，那一个号归它的批次（能力闸 + 被拒调用的呈现），我的两笔 `[gp]` 排在
-它后面进树、随下一次发布一起出去——**不是我另取一个号**：两条线共用一条版本线，同号并发正是
-当年 0.5.0 那笔版本号被 stage 烧掉的成因。
+0.7.6，在 main 上）。本 lane 中途第一次读数（≈21:15 本地）是"split `main` 与 tag 都还停在
+`61b15d6` = `v0.7.5`、registry 三个包 0.7.5"；**到 22:20 复看时它已经发了**：tag `v0.7.6` =
+`063e32e`、Release 非草稿、六件资产带签名，而 **npm 那一格仍未跑**（`latest` 还是 0.7.5）。
+两次读数都写进日志，后一次覆盖前一次的结论——版本线是共用的，一条 lane 写"还没落地"而另一条
+已经推了 tag，这种窗口本身就是需要被看见的事实，不是可以事后抹平的措辞。
+于是当前的形状是"main 领先发布面若干笔、npm 落后 tag 一格"：那一个号与那一格归它的批次，
+我的两笔 `[gp]` 排在它后面进树、随下一次发布一起出去——**不是我另取一个号**：两条线共用一条
+版本线，同号并发正是当年 0.5.0 那笔版本号被 stage 烧掉的成因。
 回滚本轮只需 `git revert f9a0fb2 d10e99e`（尺子层与发布脚本各自独立，无发布动作需要撤）。
 
 **面 B 的 90 分钟找到了成因**（`harness/tools/ref-batch.mjs`，d10e99e）。不是负载，是**成本模型**：
@@ -175,11 +178,28 @@ fork 包内：固定点 `packages/opencode` 四份 **100 pass / 0 fail**、`pack
 `description` 的 `\u2014` 写成了字面 `—`——那不是本轮的意图，已 `git checkout HEAD --` 收回，
 没有让一次本地构建在产品清单里留下无主 diff。
 
-**发布面读数（复核，不是本轮动作）**：split 仓 `main` = `61b15d6` = tag `v0.7.5`；registry
-`glasspane-harness` / `-darwin-arm64` / `-darwin-x64` 三格实测 **0.7.5**、`latest` 0.7.5；
-`verify-published 0.7.5` 在本机（load ~104）跑出的结果是安装、两条命令 `--version`、已安装包清单的
-os·cpu·version、registry integrity 全 ok，web 那一条 `NOT OBSERVED`（exit 2）——**这一格由手测补**，见上。
-本轮之后 main 又前进了三笔，split 仓的 `main` 需要跟着同步（不含新 tag、不触发发布）。
+**发布面读数（写到实测为止，不是写到假设）**：本 lane 不做发布，但把 split 仓同步了——
+`git subtree split --prefix=harness/glasspane-harness -b split/glasspane-harness` 之后断言
+`split/glasspane-harness^{tree}` == `HEAD:harness/glasspane-harness` == **`ead85cc5e1e4dfd4772cda9c896d19b657a1315a`**
+（逐字相等才推），远端 `main` 当时是 `063e32e`（＝那条线的 `v0.7.6`）且**是本分支的祖先**，
+所以是 fast-forward、**没有强推、没有新 tag、没有触发发布**：`063e32e..ffd565d`，走 SSH
+（本轮并进来的 fork `.github/workflows/release.yml` 改动使 token 形式会被拒）。
+`v0.7.6` 那条线自己的发布读数：tag = `063e32e`，Release `isDraft=false`、资产 6 件齐全
+（arm64/x64 的 `.zip` + 各自 `.asc` + `SHA256SUMS.txt` + 其 `.asc`），`Release` workflow
+run `38259929076` completed/success（5 m 33 s）。**registry 上 0.7.6 还不存在**：
+`glasspane-harness` / `-darwin-arm64` / `-darwin-x64` 三个包的 `latest` 实测仍是 **0.7.5**，
+`npm view glasspane-harness@0.7.6 version` 报错退出。tag ≠ npm——那一格的补法是
+`gh workflow run release.yml --repo jingzhao-l/glasspane-harness --ref v0.7.6 -f publish_npm=true -f confirm=true`，
+归取这个号的批次做，本 lane 不代跑（发出去的是别人的字节）。
+`verify-published 0.7.5`（本 lane 上一次发的号）在新三态判据下的整跑结果记在本节末尾。
+
+**`verify-published 0.7.5` 整跑 rc=0**（22:25 本地，同一条命令在 21:00 前那次是 exit 2）：
+安装 4 s（registry 缓存热）、两条命令 `--version` 均 0.7.5、已装包清单的 os/cpu/version 对上
+`product.json`、registry integrity 是 `sha512-pRZbdGf…`、provenance 有注记，web 那一条
+`ok … waited 0.5s, content-type=text/html doctype=true assets=referenced`。
+这一条同时给三态判据作了反向印证：**上一轮那条红从来不是产品坏，是机器忙**——同一份已发布
+产物在负载 88 时要 326 s 才 bind、在空闲时要 0.5 s 就供出同一页；判据（页面的 doctype +
+`/assets/` 引用）一字未改，改的是"等待"属于谁。
 
 
 **未观测 / 未做，每条给"为什么"和补它的确切一条命令**：
