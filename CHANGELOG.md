@@ -2,6 +2,68 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.14.0] — 2026-10-12
+
+**版本判断：minor。** 四条 patch 判据逐条实测：状态文件的字段没动（本轮不写任何状态 schema）；退出码集合
+没动；CLI 参数面没动（没加、没删、没改任何开关语义）；两个 npm 包的 `bin` 声明没动，也没有新增任何用户
+可见控制件。判 minor 走的是 **1.9.0 立下的那条口径**（源头是 1.8.0 自己定的"动了对外可见的契约内容就不
+塞进 patch"）：那一版就是为"`assert_element` 的结果里多了 `evidencePersisted`"这一个键记的 minor，而本版
+同样是在一个已发布方法的结果里加键——`probe_status` 的一行多了两个消费端能收到的字段
+`droppedInboundFrames` 与 `droppedInboundLines`。那是加法、不破坏任何人，但它改变对外契约的内容。
+同一版本的对外文案（`gp_probe_status` 的 description）把这两个键一并点名。
+顺带把一处引用纠一下：1.13.0 那一段写作"按 1.9.0 那条'下一版按 minor 记'的先例"，那句话的出处其实是
+1.10.0 里 `glasspaned --version` 那条自述；1.9.0 的真先例是同键不同名的那一条（上面引的
+`evidencePersisted`）。结论不变，引用的句子该纠正在这里说清。
+本版不含 `[Unreleased]`（开工时该段为空），也不重复 1.13.0 已发出的内容。`harness/` 一行未动；
+`kernel/package.json` 与其 lockfile 只由 `scripts/set-version.mjs` 改写版本号字段（该包
+`private: true`，不在发布面）。归档照旧减去 `harness/`。
+
+### Fixed — 探针自报的两个入站丢帧计数器没有读者
+
+**失效模式。** 探针在 `hello` 里上报五个自测量，daemon 的 `ProbeHello` 只有三个（`droppedEvents` /
+`droppedWrites` / `rejectedKeys`）：`droppedInboundLines`（一条没收尾的半行超限，读侧放弃整条连接）与
+`droppedInboundFrames`（收到了完整行，但不是 JSON 对象，这条命令永远不会被回答）在解码时被当未知字段
+容忍掉，于是从 `probe_status` 到代理之间没有一条路径能读出它们。后果不是"少看一个数字"：被测进程已经
+不再解释命令了，daemon 却还在往那条没人读的 socket 写，每条回包要等满 30 s 绝对预算才失败；而代理此时
+能读到的只有 `eventsSeen: 0`——那正是本项目排在日常 bug 之上的那一类错答：把"没采到"说成"没发生"。
+探针那侧的注释（`GlassPaneProbe.swift` 的 §入站方向同样有丢）写的是"必须能被证伪"，可证伪的东西发布
+了一半。
+
+**修法。** 两个键走解码器已有的 `ProbeWire.counter()`，因此布尔、负数、`"many"` 一律记为"未上报"而不是
+`0`；`ProbeInbox` 的 re-hello 合并沿用"新值缺失则沿用旧值"（能力变更公告往往不带计数器，不能把已经做过
+的测量抹回未上报）；`statusJSON()` 的行只在探针报过的时候加键——缺席是"没测"，`0` 是"测出来没丢"，
+这两个方向都由既有那三条对照守住。对外文案同步点名，免得一个在场的数字没人知道可以读。
+
+**证据。** `ProbeCounterTests` 16 例逐名绿；全量 `swift test --package-path engine` 952 例 0 失败
+3 跳过。三处反向破坏各自打在断言真正读的那个量上：解码返回 `nil` → 具名
+`testHelloCountersDecodeWhenReported` 的两条断言变红（其余"缺席≠0"的对照仍绿，说明红因是这条修复而不是
+整体变坏）；`statusJSON()` 不转发 → 具名 3 例变红（含端到端那条 `probe_status` 行的）；re-hello 合并
+不沿用旧值 → 具名 `testRehelloThatOmitsCountersCarriesForwardTheEarlierMeasurement` 变红。撤销变异用
+文件自带备份并以 sha256 核回，核回后复跑 16/16 绿。
+
+**诚实边界。** 本轮只证明了"探针报了就能被读到、没报就不会被写成 0"。这两个计数器**非零**时的真机读数
+仍未观测——要一条真的超限半行或坏帧才会出现（daemon 侧的 `writeBounded` 与探针读侧都只在异常形状下才
+计数），属"待真机复跑/未观测"，不写成本轮已验证。
+
+### 记两笔账（不改代码，只把数落到看得见的地方）
+
+**面 A 本轮没再涨。** 上一版发出后 CI 与本线各自实测：`surface A 8,975 recorded → 9,119 LOC (+144)`，
+逐文件归因之和恰为 +144（`engine-client +50`、`update-state +34`、`io +23`、`tools +20`、
+`http-gateway +6`、`errors +6`、`index +4`、`project-registry +1`），全属 1.13.0 那两批有意修复。
+本版只在 `tools.ts` 既有那一行描述字符串内加字，`mcp-shell/src` 复测仍是 9,119——棘轮因此不因本版移动。
+
+**`--record` 本线不跑，理由有三条，都落在看得见的地方。**
+其一，那条授权只给"本轮自己的有意增长"，而 `tool-surface --record` 一次写**两面**金样：本线若执行，
+就会替面 B 的那 7 行签字——那 7 行不是本线写的。其二，归因是实测的：`packages/opencode/script/`
+`verify-published.ts` 206 → 213，来自 `b004813`（03:46）与 `d8b1892`（04:30），两笔都晚于 harness 线自己
+最后一次重记 `f3f8ca5`（00:55），之后没再跟一次 `--record`；本线用钉在 `v1.18.32` 的参照克隆把面 B
+整树复测过一遍，得 **6,743**，与 CI 那条 carried 读法同值——数字没有争议，缺的只是它那次签字。
+其三，有一处现场必须说出来：`f3f8ca5` 把面 B 记成 **6,623**，而它测的那棵树不含 `f910e41` 自己那 `+113`
+（该笔说"面 B 6,736，+113 逐笔仍是自己那两处"，6,623 + 113 + 7 = 6,743 恰好对上），两笔互不为祖先，
+merge 后 main 上留下的是 6,736 那一支。**两条并行线各自从自己的部分树 `--record` 同一份绝对金样，
+合起来不可加**——这次数值侥幸对得上，下次未必。该由 harness 线在一棵已合并的树上重记，判据是 `fork-diff`
+与 `tool-surface` 两把尺子在同一棵树上互相印证。本线不代记，也不动 `harness/` 的任何一行。
+
 ## [1.13.0] — 2026-10-12
 
 **版本判断：minor。** 四条判据逐条对过：状态文件字段没动；CLI 参数面没动（没加、没删、没改开关语义）；
