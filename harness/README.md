@@ -167,6 +167,14 @@ KERNEL_SRC=/path/to/iterate-skill tools/sync-kernel.sh --target=repo            
   报成 `GP_E_ENGINE_TIMEOUT` 而非 `GP_E_PAYLOAD_TOO_LARGE`），后两次绿（其中一次单跑耗时 26.96s，离 30s
   只剩 3 秒余量）。判据没改、超时没加：加超时只会让计时器照样先到，改判据就是把它真正要问的东西扔掉。
   它现在的身份是**不稳定对照**，挂在未修清单上，不是"已复跑证明是假红"。
+- **2026-10-13（第六次会话，0.7.7）验的是发布形态闸自己**：`packages/opencode/script/publish.ts` 的
+  `validateTarball` 原先对 wrapper 的 bin 条目只问"文件在不在"，本轮加上可执行位、shebang、以及
+  **把那份文本从无关目录 spawn 一次**再看它打印的 `cd "<目录>"` 是否真存在——四条检查各自被反向变异打红：
+  删 shebang（同时拿到 `has no shebang` 与 `ENOEXEC … posix_spawn` 两条具名红）、补救退回相对路径、
+  目录算少一层、对该文件 `chmod 644`、`exit 1`→`exit 0`。其中第一次试"抹掉可执行位"用的是
+  `chmod -R 644 .`：它先砸了目录权限，`publish()` 里的 `$` 直接抛 ShellError 崩在断言之前——
+  **进程非零退出不是变红**，控制必须落在被检的那条断言上，换成只 chmod 那一个文件才拿到真红。
+  这类"闸问的到底是不是它标签上那个问题"的形状，正是 `fork-diff` 与 `tool-surface` 反复记的那一条。
 
 一条如实挂账的分工：**CI 没有参照克隆，那里能核的只有"我们这一侧"**——`fork-diff --check` 无克隆时比对金样钉着的 fork 侧哈希与 added 文件是否还在（改内容照样红，实测 1 秒，所以它进了 `install-gate`）；`tool-surface` 在离线时把行数降级为上次记录并打印 `NOT re-measured`，而 2026-10-07 起它进一步**拒绝把面 B 断言成在限内**——降级到旧行数的"不假绿"仍然需要一个能被证明为旧的测量，改名识别做不到这件事。**上游字节的复测（6,632 个哈希 + 参照 `ls-files`，约 2 分钟、要背 223 MB 克隆）只在本地/发布前与同步上游时跑**，那是 `SYNCLOG.md` 每次必须留痕的原因。这个分工是设计而不是妥协：把 223 MB 参照塞进 PR CI 的结局是被人关掉守卫。
 

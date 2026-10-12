@@ -46,6 +46,45 @@
 真模型的 TUI 观感（引擎侧另有会话在测量）；上游 13 条时序敏感全量用例（既有口径：本机不可靠，
 不改判据、不加超时）。
 
+**0.7.7 发布实测入档**（同一批的收口，另加一条本轮没赶上的文案）：
+
+- 主仓 CI 在 `df7112d` 上 **9 条 lane 全 success**（含 `harness rulers`），`Harness contract` 亦绿。
+  split 发布前 tree 等式成立：`git rev-parse split/glasspane-harness^{tree}` =
+  `8b8fcb43acf336ebacd4e71791c4c61776e7d2d2` = `git rev-parse HEAD:harness/glasspane-harness`；
+  `9dc4d35`（远端 split main）是本分支祖先 ⇒ 普通 push 走 fast-forward（`9dc4d35..6a1acdc`），
+  **未使用强推**；tag `v0.7.7` = `6a1acdc`（lightweight，与 `v0.7.6` 同形）。
+- Release run `38275373107`（tag push）全 job 绿、6m40s；`gh release view` 读回
+  `isDraft=false`、`targetCommitish=6a1acdc…`（是被 tag 的 commit，不是分支名——v0.6.4 那条
+  可复现性锚点这次从一开始就对）、6 件资产带 `digest` 与 `.asc`。npm 那条独立跑
+  `38276190062`（`--ref v0.7.7 -f publish_npm=true -f confirm=true`），两个平台包 + wrapper
+  三个 job 全绿（wrapper 1m9s）。
+- **registry 有读副本延迟**：publish 过后约 12 分钟首读仍 `latest=0.7.6`（`glasspane-harness`
+  与 `-darwin-x64` 都查不到 0.7.7），16:34Z 三个包都点名成功。这是既有的处理延迟，不是发坏；
+  判据按版本号点名 + `--prefer-online` 复查看。
+- `bun run script/verify-published.ts 0.7.7` 退出 0：临时前缀装上、两个命令都报 0.7.7、
+  已装清单 `os=["darwin"] cpu=["arm64","x64"] version="0.7.7"`、integrity 有值、内嵌 web 被供出，
+  **且本批发出去的那条新断言真的工作**——`ok every platform package the wrapper declares is
+  published at the version it names`。
+- npm 通道：`npm install -g --prefix "$HOME/.local" glasspane-harness` ⇒ `glasspane-harness
+  --version` 与 `gp-harness --version` 均 0.7.7。
+- **bun 通道装到了已发布的 0.7.7，本轮修的那句道歉第一次在真发布物上跑通**：`bun add -g` 照例
+  把 postinstall 拦下（`Blocked 1 postinstall`），从 cwd `/` 调用全局命令得到退出 1 与
+  `cd "/Users/ethanlin/node_modules/glasspane-harness" && node postinstall.mjs`——是这一份安装的
+  绝对目录。新测到的事实：`bun pm -g trust glasspane-harness`（带包名的 `-g` 形式）在 1.3.14 上
+  有效，`1 script ran`、二进制落位、命令回 0.7.7；此前我试的是不带包名的 `bun pm -g trust`，
+  bun 把 `trust` 当成包名解析并报"不存在"，那次测量因此是错的。已发布的文案里没有 `-g` 那一行
+  （它给的是全局可用的绝对路径行 + 标注为项目作用域的项目形式），要不要再加一行是文案增补，
+  代价是再烧一个版本号与一次 145 MB×3 的重发——本批不做，记在这里，随下一次真正的产品改动一起走。
+- 兜底通道（一键安装器的 release-asset 支路）本机这一晚**没跑完**：`bash scripts/install.sh
+  --version 0.7.7` 在 npm 侧撞上上面那段 registry 延迟（`ETARGET`）后如实转入 asset 支路，
+  但本机那个拦截代理此刻把这条 46 MB 的流限到约 **8.5 KB/s**（15 秒采样 126,976 字节），
+  按此速率还要 ~90 分钟，故记为未观测而不是通过。改用的完整性核对不依赖本机下载：
+  `SHA256SUMS.txt`（204 B）与其 `.asc` 取回后 `gpg --verify` 得"完好的签名，来自于
+  jingzhao-l (sign-github)，密钥 `0929EA31DF4F7429F63FC53189D88B1D043A1298`，绝对信任"，
+  且文件里两条 sha256（`36b151ec…`、`fcb9d39a…`）与 `gh release view` 的 `assets[].digest`
+  **逐字相等**——即签名覆盖的清单与 GitHub 实际供给的字节一致。补跑这一支的确切命令：
+  `GLASSPANE_HARNESS_HOME=/tmp/inst bash scripts/install.sh --version 0.7.7`（网络不经过本机代理时）。
+
 ## 2026-10-12（第五次会话）· 依赖升 `iterate-kernel` 0.1.6：转录层进契约，Swift 那条腿欠着
 
 **开工态**：隔离工作树 `/Volumes/Eng-Dev/.worktrees/gp-kernel-015`，从 `origin/main`
