@@ -128,7 +128,7 @@ public final class ProbeInbox {
             // 否则每次公告都会抹掉在途 act 的命中，证据里的 `hitCount: 0` 就又变成
             // 一个"没采到"被说成"没命中"的假负结论（round-1 协调项 X-1）。
             // capabilities 取新值：SDK 每次发的是当前全集，替换才是权威语义。
-            // 三个自报计数器是这条"替换"规则唯一的例外，因为它们在 hello 上是
+            // 这些自报计数器是这条"替换"规则唯一的例外，因为它们在 hello 上是
             // 可选字段：能力变更公告往往只带 capabilities，若整体换掉 hello，先报过
             // `droppedEvents: 40` 的探针就会被这一帧更啰嗦、但对该键更沉默的公告
             // 抹回"未上报"。方向上仍诚实（缺席不等于 0），可那次真测量白白蒸发了。
@@ -145,7 +145,9 @@ public final class ProbeInbox {
                     capabilities: hello.capabilities,
                     droppedEvents: hello.droppedEvents ?? existing.hello.droppedEvents,
                     droppedWrites: hello.droppedWrites ?? existing.hello.droppedWrites,
-                    rejectedKeys: hello.rejectedKeys ?? existing.hello.rejectedKeys
+                    rejectedKeys: hello.rejectedKeys ?? existing.hello.rejectedKeys,
+                    droppedInboundFrames: hello.droppedInboundFrames ?? existing.hello.droppedInboundFrames,
+                    droppedInboundLines: hello.droppedInboundLines ?? existing.hello.droppedInboundLines
                 ),
                 connectedAt: existing.connectedAt,
                 eventsSeen: existing.eventsSeen
@@ -658,7 +660,9 @@ public final class ProbeInbox {
     /// through a channel this daemon cannot read".
     ///
     /// The probe's own drop counters (`droppedEvents`, `droppedWrites`,
-    /// `rejectedKeys`) follow the **opposite** rule: they are added only when the
+    /// `rejectedKeys`, `droppedInboundFrames`, `droppedInboundLines`) follow the
+    /// **opposite** rule: they
+    /// are added only when the
     /// probe reported them, because a probe that predates them, or one whose
     /// `hello` never arrived, has not measured anything. Writing `0` there would
     /// turn "unknown" into the project's most expensive kind of wrong answer — a
@@ -687,6 +691,12 @@ public final class ProbeInbox {
             }
             if let rejectedKeys = connection.hello.rejectedKeys {
                 entry["rejectedKeys"] = rejectedKeys
+            }
+            if let droppedInbound = connection.hello.droppedInboundFrames {
+                entry["droppedInboundFrames"] = droppedInbound
+            }
+            if let droppedInboundLine = connection.hello.droppedInboundLines {
+                entry["droppedInboundLines"] = droppedInboundLine
             }
             return entry
         }
