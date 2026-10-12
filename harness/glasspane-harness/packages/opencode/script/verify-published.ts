@@ -157,6 +157,7 @@ try {
     const wantCpu = [...(product.platform?.arch ?? [])].sort()
     let gate = ""
     let gateSeen = `no manifest at ${installedManifest}`
+    const optional: Array<[string, string]> = []
     try {
       const installed = await Bun.file(installedManifest).json()
       gateSeen = `os=${JSON.stringify(installed.os)} cpu=${JSON.stringify(installed.cpu)} version=${JSON.stringify(installed.version)}`
@@ -172,10 +173,34 @@ try {
       if (!same(installed.cpu, wantCpu)) mismatches.push(`cpu is ${JSON.stringify(installed.cpu)}, product declares ${JSON.stringify(wantCpu)}`)
       if (installed.version !== version) mismatches.push(`the manifest says ${installed.version}, the version asked for was ${version}`)
       gate = mismatches.join("; ")
+      for (const [dep, depVersion] of Object.entries((installed.optionalDependencies ?? {}) as Record<string, string>)) {
+        optional.push([dep, depVersion])
+      }
     } catch (error) {
       gate = `unreadable: ${error instanceof Error ? error.message : String(error)}`
     }
     check("the installed package's os/cpu/version gates match the product's platform block", gate === "", `${gateSeen}${gate ? ` — ${gate}` : ""}`)
+    // Every platform package the wrapper *names* has to exist at that version, or the
+    // optionalDependency is silently unsatisfiable: npm installs the wrapper successfully,
+    // places no binary for that machine, and every gate that only looks at this host stays
+    // green. Measured on the real 0.7.6 publish — the job printed
+    // `+ glasspane-harness-darwin-x64@0.7.6`, its provenance reached the sigstore transparency
+    // log, the run exited 0, and the registry's own metadata for that package still listed
+    // `latest: 0.7.5` with no 0.7.6 at all. On an Intel Mac that is an install with no
+    // command, and `verify-published` passing on arm64 could not have seen it.
+    const missing: string[] = []
+    for (const [dep, depVersion] of optional) {
+      const seen = await $`npm view ${dep}@${depVersion} version --registry ${registry}`.nothrow().quiet(true)
+      if (seen.exitCode !== 0) missing.push(`${dep}@${depVersion} (npm view exit ${seen.exitCode})`)
+      else if (seen.stdout.toString().trim() !== depVersion) missing.push(`${dep}@${depVersion} (registry answers ${JSON.stringify(seen.stdout.toString().trim())})`)
+    }
+    check(
+      "every platform package the wrapper declares is published at the version it names",
+      optional.length > 0 && missing.length === 0,
+      optional.length === 0
+        ? "the installed wrapper declares no optionalDependencies at all — nothing resolves a binary for any platform"
+        : missing.join("; "),
+    )
     // What the registry vouches for these exact bytes. Integrity, not provenance: it says
     // the downloaded tarball is the one the registry records for this version, and nothing
     // about who built it — hence the separate note below.

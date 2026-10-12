@@ -399,7 +399,31 @@ if [ -z "$INSTALLED_VIA" ]; then
   TMP="$(mktemp -d)"
   trap 'rm -rf "$TMP"' EXIT
   info "downloading $URL"
-  curl -fL --progress-bar -o "$TMP/$ASSET" "$URL" || { error "download failed: $URL"; exit 1; }
+  # Retried, and resumed rather than restarted. Measured on this product's own maintainer
+  # machine: the local TLS-intercepting proxy (its header answers `server: WattToolkit`) breaks
+  # the ~47 MB asset stream mid-transfer, and curl leaves with exit 92
+  # (`HTTP/2 stream 1 was not closed cleanly: PROTOCOL_ERROR`) after 473 KB. A first-byte
+  # failure and a mid-stream truncation are the same class — the bytes are not all there — and
+  # the old single attempt turned them into `download failed: <url>` with nothing to do about it.
+  # `-C -` matters as much as `--retry`: resuming keeps a flaky 47 MB download from having to
+  # start over on every attempt.
+  curl_args="--fail --location --retry 5 --retry-all-errors --retry-delay 2 --continue-at -"
+  # `if ! curl …; then rc=$?` reads the *negated* status — 0 — so the code this message exists
+  # to report would be wrong on every failure. Capture first, judge after, same shape as the
+  # gpg call above.
+  dlc=0
+  curl $curl_args --progress-bar -o "$TMP/$ASSET" "$URL" 2>"$TMP/download.err" || dlc=$?
+  if [ "$dlc" -ne 0 ]; then
+    err="$(tr '\r' '\n' < "$TMP/download.err" | grep -v '^[[:space:]]*[#=-]*[[:space:]]*[0-9.]*%*$' | grep -v '^[[:space:]]*$' | head -1)"
+    error "download failed (curl exit $dlc): $URL"
+    [ -n "$err" ] && error "  curl said: $err"
+    error "  Remedy: retry the same command (a truncated stream is usually transient), or fetch it over"
+    error "    HTTP/1.1 — a TLS-intercepting proxy on this network may break HTTP/2 asset streams:"
+    error "    curl --http1.1 -fL -o /tmp/$ASSET $URL"
+    error "  Then verify it yourself before installing: compare against $RELEASE_BASE/v$VERSION/SHA256SUMS.txt"
+    error "  Or take the npm channel instead: npm install -g $NPM_PACKAGE@$VERSION"
+    exit 1
+  fi
 
   verify_asset "$TMP/$ASSET" "$ASSET"
   verify_asset_gpg "$TMP/$ASSET" "$ASSET" "$URL"

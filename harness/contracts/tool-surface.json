@@ -8,13 +8,13 @@
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
   "observedAt": "2026-10-12",
-  "engineLoc": 25033,
+  "engineLoc": 25055,
   "engineFiles": 62,
   "surfaces": {
     "mcpShell": {
       "loc": 9119,
       "files": 13,
-      "ratio": 0.2222,
+      "ratio": 0.2216,
       "byFile": {
         "mcp-shell/src/tools.ts": 2567,
         "mcp-shell/src/engine-client.ts": 1505,
@@ -32,7 +32,7 @@
       }
     },
     "fork": {
-      "loc": 6893,
+      "loc": 6974,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -52,12 +52,12 @@
         {
           "file": "packages/opencode/script/installer-selftest.sh",
           "kind": "added",
-          "lines": 427
+          "lines": 459
         },
         {
           "file": "packages/opencode/script/verify-published.ts",
           "kind": "added",
-          "lines": 287
+          "lines": 312
         },
         {
           "file": "packages/opencode/src/plugin/glasspane-compaction.ts",
@@ -102,7 +102,7 @@
         {
           "file": "scripts/install.sh",
           "kind": "added",
-          "lines": 502
+          "lines": 526
         },
         {
           "file": "packages/app/src/components/dialog-connect-provider.stories.tsx",
@@ -1075,7 +1075,7 @@
           "lines": 0
         }
       ],
-      "ratio": 0.1679,
+      "ratio": 0.1695,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
@@ -1091,7 +1091,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 16012,
+  "totalToolSurfaceLoc": 16093,
   "note": null,
   "carried": null
 }

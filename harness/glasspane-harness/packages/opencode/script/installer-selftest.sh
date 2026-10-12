@@ -123,6 +123,17 @@ case "$base" in
   SHA256SUMS.txt)
     if [ -n "${STUB_SUMS_HTTP:-}" ]; then answer "$STUB_SUMS_HTTP" ""; fi
     ;;
+  *.zip)
+    # The asset lane has its own scenario: a transport that dies mid-stream. On the maintainer
+    # machine that is a TLS-intercepting proxy breaking the HTTP/2 stream after a few hundred
+    # KB of a ~47 MB asset — curl's exit 92, not an HTTP status at all, which is why the
+    # installer's message has to carry the code rather than a status.
+    if [ -n "${STUB_CURL_ASSET_FAIL:-}" ]; then
+      printf 'curl: (%s) HTTP/2 stream 1 was not closed cleanly: PROTOCOL_ERROR (err %s)\n' \
+        "$STUB_CURL_ASSET_FAIL" "$STUB_CURL_ASSET_FAIL" >&2
+      exit "$STUB_CURL_ASSET_FAIL"
+    fi
+    ;;
 esac
 # GitHub answers a release download for a published file with a redirect. Asking without
 # `-L` is not the same request, so it is not the same answer.
@@ -206,6 +217,7 @@ run_install() {
     export STUB_GPG_RESULT="${SCENARIO_GPG:-good}"
     export STUB_CURL_HTTP="${SCENARIO_CURL_HTTP:-}"
     export STUB_SUMS_HTTP="${SCENARIO_SUMS_HTTP:-}"
+    export STUB_CURL_ASSET_FAIL="${SCENARIO_CURL_ASSET_FAIL:-}"
     export STUB_GPG_IMPORT_FAILS="${SCENARIO_GPG_IMPORT_FAILS:-}"
     export TMPDIR="${SCENARIO_TMPDIR:-/tmp}"
     mkdir -p "$TMPDIR"
@@ -414,9 +426,29 @@ mv "$SCRATCH/sums.real" "$FIX/SHA256SUMS.txt"
 # request that did not ask for `-L`, so this run is green only while all three fetches follow
 # redirects; drop `-L` from the signature fetch and test 3 plus this one both go red, which is
 # the shape the shipped installer had (it refused its own correctly signed releases).
-grep -q 'curl -fL' "$INSTALL_SH" && pass "install.sh fetches the asset following redirects" || fail "install.sh no longer follows redirects for the asset"
+grep -q -- "--location" "$INSTALL_SH" && pass "install.sh fetches the asset following redirects" || fail "install.sh no longer follows redirects for the asset"
 grep -q 'curl -sSL -o "$sums"' "$INSTALL_SH" && pass "install.sh fetches the manifest following redirects" || fail "install.sh no longer follows redirects for SHA256SUMS.txt"
 grep -q 'curl -sSL -o "$asc"' "$INSTALL_SH" && pass "install.sh fetches the signature following redirects" || fail "install.sh no longer follows redirects for the .asc"
+
+# ---------------------------------------------------------------- 17: a truncated asset download
+# The maintainer machine's TLS-intercepting proxy breaks big HTTP/2 streams mid-transfer
+# (`server: WattToolkit`, curl exit 92 after a few hundred KB of a ~47 MB asset). Measured against
+# the published v0.7.6 asset, the single-attempt installer printed `download failed: <url>` — true,
+# and useless: no retry, no cause, no next action for an agent to take. This scenario drives the
+# same shape through the stub: a transport error with a *code*, no HTTP status involved.
+SCENARIO_CURL_ASSET_FAIL=92 run_install "$SCRATCH/asset-truncated.log" --version 9.9.9
+assert_code "a mid-stream download failure refuses the install" "$?" "1"
+assert_has "the message carries curl's own exit code, not a made-up one" "$SCRATCH/asset-truncated.log" "download failed (curl exit 92)"
+assert_has "and quotes what curl actually said" "$SCRATCH/asset-truncated.log" "PROTOCOL_ERROR"
+assert_has "it names the HTTP/1.1 way around an intercepting proxy" "$SCRATCH/asset-truncated.log" "--http1.1"
+assert_has "it names the checksum manifest to verify a hand-fetched asset against" "$SCRATCH/asset-truncated.log" "SHA256SUMS.txt"
+assert_has "and it offers the other channel instead of dead-ending" "$SCRATCH/asset-truncated.log" "npm install -g"
+assert_not_has "nothing is installed on that path" "$SCRATCH/asset-truncated.log" "[OK]    installed via"
+SCENARIO_CURL_ASSET_FAIL=""
+grep -q -- "--retry-all-errors" "$INSTALL_SH" && pass "install.sh retries a transient download" || fail "install.sh no longer retries the asset fetch"
+grep -q -- "--continue-at" "$INSTALL_SH" && pass "install.sh resumes instead of restarting a partial download" || fail "install.sh no longer resumes with --continue-at"
+run_install "$SCRATCH/after-truncated.log" --version 9.9.9
+assert_code "the same run is green again once the transport stops failing" "$?" "0"
 
 echo ""
 if [ "$FAILURES" -gt 0 ]; then
