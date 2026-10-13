@@ -23,12 +23,14 @@ DRY_RUN="${GLASSPANE_INSTALL_DRY_RUN:-0}"
 # 旧写法在这里把空值读成 main，而 installer 把同一个空值读成上面那个 tag——同一条
 # `GLASSPANE_REF=` 在两条一键入口上会拿到两份源码，而 install-sh.test.mjs 的用例标题
 # 还写着"与 installer 常量同源"。
-REF="${GLASSPANE_REF-${GLASSPANE_RELEASE}}"
 # resolvePinRef 对值先 trim，所以 `GLASSPANE_REF='   '` 在它那里等价于"没设"＝钉发布 tag。
 # 这一度是两条入口上两种结果：installer 安静地装发布版，这里把同一个值送进
 # assert_no_option_smuggling 的形状闸（空白是 ext:: 起 shell 的必要成分），报"含空白字符"
 # 退出 1。形状闸本身是对的，问题在口径：上面那句"与 resolvePinRef 同源"当时并不成立。
-# 先按同源口径裁掉首尾空白，裁完为空才落回发布 tag；带内部空白的值照旧由形状闸拒。
+# 下面裁的是首尾空白，裁完为空才落回发布 tag；带内部空白的值照旧由形状闸拒。
+# （installer/test/review-2026-10-09.test.mjs 的 finding10 要求那行赋值与这条例外回退相邻，
+#  注释不许插在两者中间——所以这段话写在上头。那是用例的口径，本行不改它。）
+REF="${GLASSPANE_REF-${GLASSPANE_RELEASE}}"
 REF="${REF#"${REF%%[![:space:]]*}"}"
 REF="${REF%"${REF##*[![:space:]]}"}"
 [ -n "$REF" ] || REF="$GLASSPANE_RELEASE"
