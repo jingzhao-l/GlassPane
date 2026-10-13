@@ -8,7 +8,7 @@ import * as Truncate from "@/tool/truncate"
 import { Effect, Layer } from "effect"
 
 import { engineBody, glasspaneDefs, present, refused, requireCapability } from "../../src/tool/glasspane/index"
-import { DIMENSION_ID_LIMITS, validateDimension } from "../../src/tool/glasspane/kernel"
+import { DIMENSION_ID_LIMITS, validateDimension, validateSelector } from "../../src/tool/glasspane/kernel"
 import * as Daemon from "../../src/tool/glasspane/daemon"
 
 /**
@@ -588,6 +588,43 @@ describe("the declared review dimension (scenario 2, recorded half)", () => {
     expect(binding).toContain("DIMENSION_ID_MAX_LENGTH, DIMENSION_ID_PATTERN } from \"iterate-kernel/dimension-context\"")
     expect(DIMENSION_ID_LIMITS.pattern.source).toBe("^[a-z0-9]+(?:-[a-z0-9]+)*$")
     expect(DIMENSION_ID_LIMITS.maxLength).toBe(64)
+  })
+})
+
+describe("what the permission plane is handed", () => {
+  const surface = readFileSync(path.join(import.meta.dirname, "..", "..", "src", "tool", "glasspane", "index.ts"), "utf8")
+
+  test("no read-only tool mints a rule over the whole glasspane namespace", () => {
+    // The six gp_* tools share one permission namespace, so `always` is not "always this call":
+    // it is the pattern list that gets stored as an allow rule for `glasspane`. A `*` there also
+    // answers gp_act's `act:<role>:<action>`, and the user who clicked "Always allow" on a
+    // self-report would never be asked before the harness drove a real app again.
+    expect(surface).not.toContain(`always: ["*"]`)
+    for (const method of ["probe_status", "attach", "observe", "diagnose", "last_evidence"]) {
+      expect(surface, `${method} must scope always to its own pattern`).toContain(
+        `patterns: ["${method}"], always: ["${method}"]`,
+      )
+    }
+    // gp_act keeps `always: []`: no answer to its prompt may authorize every later action.
+    expect(surface).toContain("always: [],")
+  })
+
+  test("the model cannot pick which rule gp_act is evaluated against", () => {
+    // The permission key is `act:<role>:<action>` and Wildcard.match reads the stored rule as the
+    // glob, so a role holding `*` or `:` is not a typo — it chooses the rule the request matches.
+    expect(validateSelector("AXButton").ok).toBe(true)
+    for (const role of ["*", "AX*", "AXButton:press", "a?b", "x[y]", "a\\b"]) {
+      const read = validateSelector(role)
+      expect(read.ok, `${role} must be refused`).toBe(false)
+      if (!read.ok) expect(read.error.code).toBe("GP_E_SELECTOR")
+    }
+    // refused before the human is asked, and before the engine is called
+    const guard = surface.indexOf("validateSelector(params.selector.role)")
+    const key = surface.indexOf("patterns: [`act:")
+    const call = surface.indexOf('Daemon.call("act"')
+    expect(guard).toBeGreaterThan(-1)
+    expect(guard).toBeLessThan(key)
+    expect(guard).toBeLessThan(call)
   })
 })
 

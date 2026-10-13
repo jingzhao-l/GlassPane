@@ -183,6 +183,37 @@ if [ "$STUB_GPG_RESULT" = "importfail" ] || { [ "$STUB_GPG_RESULT" = "good" ] &&
   fi
 fi
 if [ "${1:-}" = "--import" ] || printf '%s' "$*" | grep -q -- "--import"; then exit 0; fi
+# Argv discipline. This stub used to print GOODSIG for *any* --verify, which endorsed three
+# wrong states as "signature verified": verifying the checksum manifest instead of the asset,
+# verifying with no data file passed at all, and verifying a file this release never served.
+# Real gpg answers only for the (signature, file) pair it is handed, so the stub now refuses
+# anything that is not `--verify <asset>.asc <asset>` with both files present and the asset
+# actually in the fixture directory. Drop `-f "$file"` from install.sh's call and the verified
+# lane goes red here instead of staying green.
+case "$*" in
+  *--verify*)
+    sig="${@: -2:1}"
+    data="${@: -1}"
+    base="$(basename "$data")"
+    if [ ! -f "$sig" ] || [ ! -f "$data" ]; then
+      echo "stub gpg: --verify needs an existing (signature, file) pair, got '$sig' '$data'" >&2
+      echo "[GNUPG:] ERRSIG 0929EA31DF4F7429F63FC53189D88B1D043A1298 1 22 01 1791862019 1 0929EA31DF4F7429F63FC53189D88B1D043A1298" >&2
+      exit 1
+    fi
+    case "$sig" in
+      "$data".asc) ;;
+      *)
+        echo "stub gpg: signature '$sig' does not pair with the file '$data'" >&2
+        echo "[GNUPG:] ERRSIG 0929EA31DF4F7429F63FC53189D88B1D043A1298 1 22 01 1791862019 1 0929EA31DF4F7429F63FC53189D88B1D043A1298" >&2
+        exit 1 ;;
+    esac
+    if [ ! -f "$FIX_DIR/$base" ]; then
+      echo "stub gpg: '$base' is not an asset this release carries" >&2
+      echo "[GNUPG:] NO_PUBKEY 0929EA31DF4F7429F63FC53189D88B1D043A1298" >&2
+      exit 1
+    fi
+    ;;
+esac
 if [ "$STUB_GPG_RESULT" = "good" ]; then
   echo "gpg: Signature made Thu 01 Jan 2026 00:00:00 UTC" >&2
   echo "[GNUPG:] GOODSIG 0929EA31DF4F7429F63FC53189D88B1D043A1298 jingzhao-l (sign-github)" >&2
@@ -449,6 +480,34 @@ grep -q -- "--retry-all-errors" "$INSTALL_SH" && pass "install.sh retries a tran
 grep -q -- "--continue-at" "$INSTALL_SH" && pass "install.sh resumes instead of restarting a partial download" || fail "install.sh no longer resumes with --continue-at"
 run_install "$SCRATCH/after-truncated.log" --version 9.9.9
 assert_code "the same run is green again once the transport stops failing" "$?" "0"
+
+# ---------------------------------------------------------------- 18: HTTP 200 that is not a manifest
+# A mirror, a captive portal, or a re-signed TLS chain can answer the manifest URL with 200 and
+# an HTML body. That is not "the release carries no manifest": the bytes simply are not a
+# manifest, and the old code read the parse failure as a coverage gap and installed the asset
+# with no integrity check at all. The distinction is the whole point of the lane.
+cp "$FIX/SHA256SUMS.txt" "$SCRATCH/sums.real"
+printf '<!DOCTYPE html><html><head><title>Sign in</title></head><body>log in first</body></html>\n' > "$FIX/SHA256SUMS.txt"
+run_install "$SCRATCH/sums-html.log" --version 9.9.9
+assert_code "a 200 that is not a checksum manifest refuses the install" "$?" "1"
+assert_has "and says the manifest could not be parsed" "$SCRATCH/sums-html.log" "is not a checksum manifest"
+assert_not_has "it never calls a rewritten response a missing file" "$SCRATCH/sums-html.log" "no SHA256SUMS.txt published"
+assert_not_has "and nothing is installed on that path" "$SCRATCH/sums-html.log" "[OK]    installed via"
+
+# ---------------------------------------------------------------- 19: a real manifest that omits this asset
+# The mirror image: well-formed bytes, one valid `<64 hex>  ./other.zip` line, and our asset not
+# in it. The release lane now refuses to publish a manifest whose asset set is not exactly the
+# product's target matrix, so an omission here means the bytes in front of us are not the bytes
+# that release carries — that is a refusal, not a skip.
+printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  ./glasspane-harness-other-asset.zip\n' > "$FIX/SHA256SUMS.txt"
+run_install "$SCRATCH/sums-unlisted.log" --version 9.9.9
+assert_code "a parsed manifest that does not list the asset refuses the install" "$?" "1"
+assert_has "and names the asset it could not find" "$SCRATCH/sums-unlisted.log" "does not list glasspane-harness-darwin-arm64.zip"
+assert_not_has "it does not dress the refusal up as a skipped check" "$SCRATCH/sums-unlisted.log" "sha256: skipped"
+assert_not_has "and nothing is installed" "$SCRATCH/sums-unlisted.log" "[OK]    installed via"
+cp "$SCRATCH/sums.real" "$FIX/SHA256SUMS.txt"
+run_install "$SCRATCH/after-unlisted.log" --version 9.9.9
+assert_code "the same run is green again once the real manifest is back" "$?" "0"
 
 echo ""
 if [ "$FAILURES" -gt 0 ]; then

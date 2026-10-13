@@ -12,6 +12,103 @@ contract does not).
 
 <!-- 内容归入下一版；此处留空以备下一批。 -->
 
+
+## [0.7.8] - 2026-10-13
+
+判据（pre-1.0）：**patch**。没有新增或删除命令，CLI 参数与 `gp_*` 工具面的形状一字未动，目标矩阵仍是
+darwin arm64/x64；本批全是"使用可见但此前说错/不做/拦不住"的修复。取号说明：开工时实测上一版三格齐
+——split 仓 `v0.7.7` = `6a1acdc`、Release 非草稿且 6 份资产带签名、registry 三个包
+（wrapper + darwin-arm64 + darwin-x64）都读到 0.7.7——`0.7.8` 无人占用。版本线三处一起跟上：
+`product.json`（真源）、`packages/opencode/package.json`、`bun.lock` 里包自身那条 `version`。
+
+### Fixed — 权限面：对只读工具点"Always allow"会永久放行 `gp_act`
+
+- 六个 `gp_*` 工具共用**同一个** permission 命名空间 `glasspane`，而五个只读工具照抄了上游的
+  `always: ["*"]`。上游那么写无害，因为 `read`/`edit`/`glob` 各自占一个命名空间；在这里
+  `Permission.reply` 会把 `"*"` 作为 `{permission:"glasspane", pattern:"*"}` 记进会话，
+  `evaluate` 把**规则**一侧当 glob（`Wildcard.match` ⇒ `^.*$`），于是它同样命中
+  `gp_act` 的 `act:<role>:<action>`，`needsAsk` 保持 false。一次对 `gp_probe_status`
+  自报状态的"总是允许"之后，代理就能不打招呼地驱动真实 App——这与本文件开头第 3 条纪律、
+  `gp_act` 自己的描述与 `SECURITY.md` 直接矛盾。改成每条调用只授权它自己的 pattern。
+- 顺带把 `validateDimension`（与本批新增的 `validateSelector`）挪到 `ctx.ask` **之前**：
+  一个由我们自己就能拒绝的请求，不该先花掉人一次回答。
+- 新增 `selector.role` 的 glob 字符拒绝（`GP_E_SELECTOR`）。权限键是 `act:<role>:<action>`，
+  role 里一个 `*` 或 `:` 就不是笔误而是"由模型挑选自己被哪条规则评估"。AX role 不含这些字符，
+  所以合法调用不受影响。
+- 证据：`test/permission/next.test.ts` 新增一条**行为**固定点——对 `observe` 答"always"之后，
+  `observe` 仍免问而 `act:AXButton:press` 必须仍然排队等人；`test/tool/glasspane-surface.test.ts`
+  新增两条源码级棘轮（任何 `always: ["*"]` 复现即红、guard 必须排在 ask 与 daemon 之前）。
+  反向验证：把 `observe` 一处改回 `["*"]` ⇒ 具名用例红；把 `SELECTOR_FORBIDDEN` 换成永不匹配
+  ⇒ 具名用例红；把测试输入自己改成 `["*"]` ⇒ 那条行为用例红（证明它不是恒真断言）。
+
+### Fixed — TUI 把引擎量到的东西画成"不知道"
+
+- `observe` 行恒显 `nodes=?`：`nodeCount` 在绳上是 `Int`（`EngineCore.swift:1403`），
+  旧代码用只认字符串的 `stringValue` 读它，于是每一次成功的树读取都把引擎的头条测量显示成未知，
+  而模型侧文案是对的——只有人类被误导。
+- `attach` 行从不显 App 名：引擎发的是 `appName`（`EngineCore.swift:2160-2168`），
+  旧代码找的是 `app`/`name` 两个不存在的字段，于是要么只剩 `bundleId`、要么只剩 `pid`，
+  而 `gp_attach` 的描述承诺"引擎解析出的 App 名与 pid"。
+- 两条各配一条用真引擎字段形状的快照用例（`nodes=207 digest=…`、`Notes · pid 4242`）。
+  反向验证：把 `numberValue` 换回 `stringValue` ⇒ 具名用例红。
+
+### Fixed — 兜底安装通道把"解析失败"当成"策略性跳过"
+
+- 清单（`SHA256SUMS.txt`）此前只要 HTTP 200 就算取到，随后用 awk 匹配资产名；返回 HTML
+  （登录页、强制门户、被重签的 TLS 链）时匹配不到任何行，旧代码把这件事分类成
+  "该资产没被列进清单 ⇒ 覆盖率缺口，不是篡改"，**警告一声就装**——一个解析失败换来了完全未校验的安装。
+  现在先验清单形状（每行必须 `<64 hex>  <path>`），形状不符即拒绝并说明"200 回的东西不是清单"；
+  而一份**形状正确**却不含本资产的清单也改为拒绝（发布链现在保证清单资产集与
+  `product.json` 的矩阵逐字相等，见下），跳过只留给真正的 404。
+- `installer-selftest.sh` 的 gpg 桩此前对**任何** `--verify` 都打 GOODSIG，只按 `--import`
+  区分 argv。那等于替三种错误状态作保：验的是清单而不是资产、根本没带数据文件、资产从未被下载过。
+  桩现在要求 `--verify <asset>.asc <asset>` 且两个文件都真实存在、资产在供物目录里。
+- 新增场景 18（200 但非清单）、19（清单里没这个资产），**71 PASS → 80 PASS / 0 FAIL**。
+  反向验证：把形状检查改成恒假 ⇒ 场景 18 的具名断言红；把 install.sh 的 `--verify "$asc"
+  "$file"` 改成 `--verify "$asc" "$asc"` ⇒ "GPG verified"与指纹那条一起红（此前它们红不了）。
+
+### Fixed — 发布与供应链
+
+- `script/postinstall.mjs` 自愈下载此前不点名 registry。npm 会读 `npm_config_registry`
+  （npm 自己把 `npm_config_*` 注入 lifecycle 脚本）、环境变量、`~/.npmrc` 与项目 `.npmrc`，
+  所以"取来并 chmod 0755 执行的字节来自哪个源"其实由环境决定，而那个源的 integrity 是它自己担保的。
+  现在显式 `--registry`，值由 `product-surface` 钉住等于 `product.json` 的 `npm.registry`
+  （断言 123 → 124 条）。
+- `packages/opencode/script/build.ts` 的构建内烟测此前只要 `--version` 退 0 就打
+  "Smoke test passed"。本工作树实测：不带版本 define 直接跑源码时它回答 `local`，而烟测照样绿——
+  `FORK.md` 把这条输出当作"可证是从本树构建"的证据，所以它必须比对数字。现在不等即 exit 1。
+- split 仓 `release.yml`：
+  `${{ github.ref_name }}` 曾被直接插进签名 job 的 shell 命令（git ref 允许 `$`、反引号、`;`、`&`，
+  而该 job 由任意 `v*` tag 推送触发）。改为经 `env` 传入并先校验 `v[0-9]*` 形状。
+  `--passphrase` 从 argv 改成 `--passphrase-fd 0`（主仓那条线早已改过并留了实测）；每份 `.asc`
+  落盘用 `[ -s ]` 断言，不再靠事后一句 `ls`。
+  `checksums` 那两条"清单里每行都存在 / 目录里每个文件都被列出"是自回显——清单就是上一行
+  从同一个目录 `sha256sum ./*` 生成的，永远为真；改成与 `product.json` 目标矩阵的**集合相等**，
+  外加 `sha256sum --strict --check` 重读文件本身。多余资产此前会被一起校验、签名、背书，现在红。
+  发布链新增 `publish-gate`：npm 两条 job 之前没有任何"这棵树就是被 tag 的那棵树"的判据，
+  而 `actions/checkout` 取 dispatch 的 ref——漏 `--ref` 就把 `main` 的 HEAD 按 `product.json`
+  的版本号发上 registry。现在四个具名断言（两个版本线一致、origin 上有该 tag、HEAD == tag SHA、
+  dispatch ref == `refs/tags/v<ver>`）先跑，`publish-platform` 依赖它。
+- `ci.yml` / `release.yml` 五处 `bun install` 一律 `--frozen-lockfile`；`bunfig.toml` 的
+  `minimumReleaseAge` 只挡新解析的版本，不拒绝重解析。
+
+### Changed — 尺子层：`fork-diff` 此前对我们自己的文件只记名字
+
+- `added` 那 82 个条目（包括整个 `gp_*` 工具面）在金样里没有内容哈希。实测：在
+  `tool/glasspane/{index,kernel}.ts` 带着 +44 行未提交改动的工作树里跑 `--check`，它照样打
+  "divergence matches the recorded surface"（同期 `tool-surface` 是红的）。这把尺子的立身之语是
+  "已在名单里的文件又长几行也咬"，而那句话此前只对 `edited` 成立。金样现在对 `added` 也逐文件钉
+  `forkHash`。
+- 记录与比对一律读**已提交**的树（`git ls-tree HEAD`），不再读磁盘：一个"被 tracked 又被就地改"
+  的文件同时出现在两份名单里，因此既不算"磁盘上有而提交里没有"、也不算"提交里有而磁盘没有"，
+  旧代码就把它的工作树字节洗成了契约。新增第三条判定（tracked-but-modified），`--record` 遇到它
+  直接拒绝并给出先提交再重记的步骤；`--check` 只如实打印条数，不改判。
+- 缺参照那条降级泳道此前用 `golden.counts.edited` 当期望值，而那个数字就在被删改的同一个文件里：
+  同时删掉 `editedDetail` 与 `counts.edited` 就 exit 0 并宣布"0 edited file(s) hash-checked"。
+  期望值改为取自金样的**名单长度**，并要求 `editedDetail`/`addedDetail` 与名单逐条等长。
+- `SECURITY.md`、`NOTICE`、`ci.yml` 里"那 14 个契约文件（11 fixtures + 3 schemas）"这类句子
+  本来就是错的（11+3=14，而 `kernel-pin --check` 实测 26 条 = 18 fixtures + 8 schemas）。改成
+  以清单与 `--check` 的输出为准。
 ## [0.7.7] - 2026-10-13
 
 判据（pre-1.0）：**patch**。没有新增命令，CLI/TUI 的形状与参数一字未动，目标矩阵仍是 darwin

@@ -34,7 +34,7 @@ jobs:
       - uses: ./.github/actions/setup-bun
 
       - name: Install workspace
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Typecheck the shipped packages
         run: |
@@ -61,7 +61,8 @@ jobs:
         run: bun run script/publish.ts --dry-run
 
       # 出处：装进来的 iterate-kernel 必须还是 kernel-pin.json 记下的那个版本、那条
-      # lock 完整性、以及那 14 个契约文件（11 fixtures + 3 schemas）。语义内核换了字
+      # lock 完整性、以及随包契约文件的逐文件 sha256（清单里有几条就验几条，`--check` 打条数；
+      # 2026-10-13 实测 26 条 = 18 fixtures + 8 schemas）。语义内核换了字
       # 节而不重录，就是"我们悄悄改了共享契约"。vendored 那棵树已经退役——内核现在是
       # 依赖，不是我们抄进仓里的源码。
       - name: Kernel provenance (installed version + lock integrity + shipped corpus)

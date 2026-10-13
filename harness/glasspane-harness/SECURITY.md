@@ -38,8 +38,8 @@ binding refuses that path by design.
   `packages/opencode/package.json`, resolved through the fork's lockfile). Its provenance is
   checked, not assumed: `script/kernel-pin.mjs --check` verifies the installed version, that
   `bun.lock` resolved it from the registry rather than a `file:`/`link:` path, the recorded
-  lock integrity, and the per-file sha256 of the 14 contract files the package ships
-  (`contracts/kernel-pin.json`). Since 2026-10-08 there is no vendored copy of the kernel in
+  lock integrity, and the per-file sha256 of every contract file the package ships
+  (`contracts/kernel-pin.json`; `--check` prints how many that is — 26 measured 2026-10-13). Since 2026-10-08 there is no vendored copy of the kernel in
   this tree — `tool-surface.mjs` refuses the old `packages/opencode/vendor/kernel` path
   reappearing. The dependency is exempted from the 3-day `minimumReleaseAge` window because
   its upstream is the same maintainer, and its bytes remain pinned by lock integrity plus the

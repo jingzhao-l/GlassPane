@@ -169,6 +169,12 @@ const ref = observeReference()
 // reported by name instead of being silently counted as identical.
 const uncommitted = [...fork.keys()].filter((rel) => !forkCommitted.has(rel)).sort()
 const missingFromWorktree = [...forkCommitted.keys()].filter((rel) => !fork.has(rel)).sort()
+// Tracked, present on both sides, and *different*: neither of the two lists above catches it, so
+// this is the third way the working tree can disagree with the tree a release ships.
+const dirty = [...forkCommitted.keys()].filter((rel) => {
+  const disk = fork.get(rel)
+  return disk !== undefined && disk.hash !== forkCommitted.get(rel).hash
+}).sort()
 
 if (!ref) {
   if (mode === "record") die(2, `--record needs the reference clone at ${refRel} (git clone --branch ${pin.tag})`)
@@ -184,12 +190,21 @@ if (!ref) {
   // the patched files accumulated changes nobody could see — the iterate-side
   // failure, reproduced with extra steps.
   const detail = golden.editedDetail ?? []
-  if (!detail.length && (golden.counts?.edited ?? 0) > 0) {
-    die(1, `golden records ${(golden.counts.edited)} edited file(s) but no content hashes — this lane has nothing to check. Re-run --record with the reference clone present.`)
+  const wantEdited = (golden.edited ?? []).length
+  // The expectation comes from the golden's *name list*, not from `counts.edited` — a number in
+  // the very file being stripped. With both keys cut together this lane used to exit 0 while
+  // printing that it had hash-checked nothing.
+  if (detail.length !== wantEdited) {
+    die(1, `golden declares ${wantEdited} edited file(s) but carries content hashes for ${detail.length} — this lane has nothing meaningful to check. Re-run --record with the reference clone present.`)
+  }
+  const addedDetail = golden.addedDetail ?? []
+  const wantAdded = (golden.added ?? []).length
+  if (addedDetail.length !== wantAdded) {
+    die(1, `golden declares ${wantAdded} of our file(s) but carries content hashes for ${addedDetail.length} — re-run --record with the reference clone present.`)
   }
   let offlineDrift = 0
   for (const d of detail) {
-    const now = fork.get(d.file)
+    const now = forkCommitted.get(d.file)
     if (!now) {
       console.error(`  ✗ '${d.file}' is declared edited but is missing from the fork tree`)
       offlineDrift++
@@ -197,6 +212,18 @@ if (!ref) {
     }
     if (now.hash !== d.forkHash) {
       console.error(`  ✗ '${d.file}': our content moved (${d.forkHash.slice(0, 8)} → ${now.hash.slice(0, 8)}) — re-record with the clone present so the divergence is reviewed`)
+      offlineDrift++
+    }
+  }
+  for (const d of addedDetail) {
+    const now = forkCommitted.get(d.file)
+    if (!now) {
+      console.error(`  ✗ '${d.file}' is declared as ours but is not committed in the fork tree`)
+      offlineDrift++
+      continue
+    }
+    if (now.hash !== d.forkHash) {
+      console.error(`  ✗ '${d.file}': our own file moved (${d.forkHash.slice(0, 8)} → ${now.hash.slice(0, 8)}) — re-record with the clone present so the change is reviewed`)
       offlineDrift++
     }
   }
@@ -214,7 +241,7 @@ if (!ref) {
     console.error(`fork-diff: ${offlineDrift} mismatch(es) between the tree and ${path.relative(repoRoot, goldenFile)} (our side).`)
     process.exit(1)
   }
-  console.log(`  our side matches the record: ${detail.length} edited file(s) hash-checked, ${(golden.added ?? []).length} added file(s) present`)
+  console.log(`  our side matches the record: ${detail.length} edited file(s) hash-checked, ${addedDetail.length} added file(s) hash-checked (both lists match the golden's name lists exactly)`)
   console.log("  OK (offline). Upstream bytes are checked by the local/pre-release full run and by harness-contract.yml, not here.")
   process.exit(0)
 }
@@ -245,13 +272,42 @@ const observed = {
   // exact way the iterate-side fork lost control of its own patch surface. So
   // every edited file is pinned by both hashes: what upstream has, and what we
   // put in its place.
+  //
+  // `forkCommitted`, never `fork`: the contract describes what a release ships. A tracked file
+  // that is merely *modified* appears in both maps, so reading the disk copy here stamped
+  // whatever the working tree happened to hold — measured 2026-10-13, +44 uncommitted lines sat
+  // inside the fork's tool surface while this lane stayed green and `--record` would have
+  // laundered them into the contract.
   editedDetail: edited
-    .map((rel) => ({ file: rel, upstreamHash: ref.get(rel).hash, forkHash: fork.get(rel).hash }))
+    .map((rel) => ({ file: rel, upstreamHash: ref.get(rel).hash, forkHash: forkCommitted.get(rel).hash }))
+    .sort((a, b) => a.file.localeCompare(b.file)),
+  // Our own files are pinned by content too, for the same reason. Before this, the 82 `added`
+  // entries — which include the whole `gp_*` tool surface, i.e. most of what this fork exists to
+  // carry — were declared by name only, so any edit to them was invisible to this ruler.
+  addedDetail: added
+    .map((rel) => ({ file: rel, forkHash: forkCommitted.get(rel).hash }))
     .sort((a, b) => a.file.localeCompare(b.file)),
 }
 
 const total = ref.size + added.length
 console.log(`fork-diff vs ${pin.tag}: ${identical.length}/${total} byte-identical, ${edited.length} edited, ${added.length} added, ${deleted.length} deleted`)
+
+if (dirty.length && mode === "record") {
+  for (const rel of dirty.slice(0, 20)) console.error(`  ✗ tracked but modified in the working tree, not yet in any commit: ${rel}`)
+  if (dirty.length > 20) console.error(`      … ${dirty.length - 20} more`)
+  console.error("fork-diff: refusing to record. The golden pins the committed tree, so a recording run")
+  console.error("  that reads uncommitted bytes would write a contract no commit satisfies. Commit the")
+  console.error("  source change first, then re-record and fold the golden into that same commit:")
+  console.error("    git add <the files you changed> && git commit -F <msg>")
+  console.error("    node harness/tools/fork-diff.mjs --record")
+  console.error("    git add harness/contracts/fork-diff.json && git commit --amend --no-edit")
+  process.exit(1)
+}
+if (dirty.length) {
+  // In --check this is a fact about the working tree, not about the contract: the verdict below
+  // reads commits, so these lines are reported and do not turn the lane red.
+  console.log(`  note: ${dirty.length} tracked file(s) carry uncommitted edits in this worktree (not measured against the golden)`)
+}
 
 if (uncommitted.length || missingFromWorktree.length) {
   for (const rel of uncommitted) console.error(`  ✗ on disk but not committed: ${rel}`)
@@ -318,6 +374,32 @@ for (const d of observed.editedDetail) {
 for (const file of wasDetail.keys()) {
   if (!observed.edited.includes(file)) {
     console.error(`  ✗ '${file}' was declared edited but no longer differs from upstream — re-record`)
+    drift++
+  }
+}
+
+// The golden must describe the whole declared surface, not a subset of it. Compared against the
+// *name lists* (also in the golden, but stripped only together with them), so a golden edited
+// down to `editedDetail: []` with `counts.edited` left intact cannot walk this lane away claiming
+// it hash-checked nothing.
+if (observed.editedDetail.length !== observed.edited.length) {
+  console.error(`  ✗ ${observed.edited.length} file(s) are declared edited but only ${observed.editedDetail.length} carry content hashes — re-run --record`)
+  drift++
+}
+if (observed.addedDetail.length !== observed.added.length) {
+  console.error(`  ✗ ${observed.added.length} file(s) are declared added but only ${observed.addedDetail.length} carry content hashes — re-run --record`)
+  drift++
+}
+const wasAddedDetail = new Map((golden.addedDetail ?? []).map((d) => [d.file, d]))
+for (const d of observed.addedDetail) {
+  const was = wasAddedDetail.get(d.file)
+  if (!was) {
+    console.error(`  ✗ '${d.file}' is one of our files but has no recorded content hash (golden predates added-file hashing) — re-run --record`)
+    drift++
+    continue
+  }
+  if (was.forkHash !== d.forkHash) {
+    console.error(`  ✗ '${d.file}': our own file moved (${was.forkHash.slice(0, 8)} → ${d.forkHash.slice(0, 8)}) — it is not upstream's bytes in either direction, so this is our surface changing; re-record so the change is reviewed`)
     drift++
   }
 }

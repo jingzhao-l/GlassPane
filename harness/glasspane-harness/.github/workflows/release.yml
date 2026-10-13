@@ -128,7 +128,7 @@ jobs:
       - uses: ./.github/actions/setup-bun
 
       - name: Install workspace
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Build this platform and attach it to the release
         env:
@@ -214,20 +214,25 @@ jobs:
             exit 1
           fi
           if [ -z "$(ls -A)" ]; then echo "::error::no release assets found to checksum"; exit 1; fi
+          # Set equality, both directions, against the product's own target matrix. The two
+          # one-way loops this replaces could not fail: the manifest was generated from `./*`
+          # one line earlier, so "every listed file exists" and "every file here is listed" were
+          # true by construction. An extra asset sitting in the release (any actor with
+          # contents:write can upload one) used to be checksummed, signed and endorsed instead of
+          # refused; now it is a red build.
+          stems="$(for f in ./*; do b="${f#./}"; printf '%s\n' "$b"; done | sed -E 's#\.(zip|tar\.gz|tar\.xz|dmg|exe)$##' | sort -u)"
+          want="$(printf '%s\n' $wanted | sort -u)"
+          if [ "$stems" != "$want" ]; then
+            echo "::error::the downloaded asset set is not the product's target matrix"
+            diff <(printf '%s\n' "$want") <(printf '%s\n' "$stems") || true
+            exit 1
+          fi
           sha256sum ./* > SHA256SUMS.txt
           cat SHA256SUMS.txt
-          # A manifest is only worth something if every line resolves. Assert both
-          # directions: no listed file missing from this directory, and no file in this
-          # directory missing from the manifest.
-          while read -r _ name; do
-            f="${name#./}"
-            [ -f "$f" ] || { echo "::error::SHA256SUMS.txt lists $f which is not a downloaded release asset"; exit 1; }
-          done < SHA256SUMS.txt
-          for f in ./*; do
-            b="${f#./}"
-            [ "$b" = "SHA256SUMS.txt" ] && continue
-            grep -qF "./$b" SHA256SUMS.txt || { echo "::error::$b is present but unlisted in SHA256SUMS.txt"; exit 1; }
-          done
+          # Re-read every file against the manifest that was just written: this catches a file
+          # that changed under the checksum step (and a manifest truncated mid-write), which no
+          # comparison of the manifest to itself can see.
+          sha256sum --strict --check SHA256SUMS.txt
 
       # Sign every release asset (zip/tar.gz) plus SHA256SUMS.txt with GPG, so the
       # installer fallback and any consumer can verify provenance (not just the
@@ -273,8 +278,15 @@ jobs:
           # (scripts/install.sh) looks for next to the tarball it downloads.
           for f in ./* SHA256SUMS.txt; do
             [ -f "$f" ] || continue
-            gpg --batch --yes --pinentry-mode loopback \
-              --passphrase "$GPG_PASSPHRASE" --detach-sign --armor "$f"
+            # The passphrase goes on a file descriptor, not into argv: while gpg runs, a
+            # process's argv is readable on the runner, and this is the production signing key's
+            # passphrase. The main repo's lane made exactly this change and recorded the
+            # measurement; `gpg --version`-style probing does not show it, so it stays here.
+            printf '%s\n' "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback \
+              --passphrase-fd 0 --detach-sign --armor "$f"
+            # `gpg` returning 0 is not the same as the sidecar landing. A release used to go out
+            # with no `.asc` files and only an incidental `ls` noticing afterwards.
+            [ -s "${f}.asc" ] || { echo "::error::gpg exited 0 but ${f}.asc is missing or empty"; exit 1; }
           done
           ls -la ./*.asc
 
@@ -286,8 +298,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          # Never `${{ github.ref_name }}` inline: a git ref may contain `$`, backticks, `;`
+          # and `&`, and this job runs on any `v*` tag push, so interpolating it into the shell
+          # would let a crafted tag name execute inside the signing job. The shape check is the
+          # second half — the value arrives through the environment, and only a release tag
+          # reaches the command.
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          case "$TAG" in
+            v[0-9]*) ;;
+            *) echo "::error::refusing to upload for a ref that is not a release tag: $TAG"; exit 1 ;;
+          esac
           # Must be the SAME scratch dir the manifest was written into. This used to be
           # `cd assets`, which silently pointed at the repo-tracked `assets/` after the
           # checksum step moved to $RUNNER_TEMP — and the release then died on
@@ -299,11 +321,54 @@ jobs:
           if ls ./*.asc >/dev/null 2>&1; then ASC_FILES="$(ls ./*.asc | tr '\n' ' ')"; fi
           # Say which expectation broke instead of letting gh report "no matches found".
           [ -f SHA256SUMS.txt ] || { echo "::error::SHA256SUMS.txt is not in ${RUNNER_TEMP:-/tmp}/release-assets — the checksum step wrote it somewhere else"; exit 1; }
-          gh release upload "${{ github.ref_name }}" SHA256SUMS.txt $ASC_FILES --clobber --repo "$GH_REPO"
+          gh release upload "$TAG" SHA256SUMS.txt $ASC_FILES --clobber --repo "$GH_REPO"
+
+  publish-gate:
+    name: Refuse to publish a tree no tag vouches for
+    # The two publish jobs are the only irreversible steps in this repository, and they run on
+    # `workflow_dispatch` — whose `actions/checkout` takes whatever ref the dispatch carried.
+    # Without `--ref v<X.Y.Z>` that is the split repo's default branch HEAD, so the lane would
+    # publish today's `main` under whatever version `product.json` names, and the provenance
+    # attestation would record the branch instead of the tag. The main repo added exactly these
+    # assertions after that incident (its `SYNCLOG.md` records it); this lane had nothing.
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The dispatched ref must be the tag this version was cut from
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./product.json').version")"
+          WANT="v${VERSION}"
+          PKG="$(node -p "require('./packages/opencode/package.json').version")"
+          [ "$PKG" = "$VERSION" ] || {
+            echo "::error::packages/opencode/package.json says ${PKG} but product.json says ${VERSION} — the wrapper would be published under a version no tag names. Run the version bump in both places."
+            exit 1; }
+          LS="$(git ls-remote --tags origin)"
+          PEELED="$(printf '%s\n' "$LS" | awk -v r="refs/tags/${WANT}^{}" '$2==r{print $1; exit}')"
+          DIRECT="$(printf '%s\n' "$LS" | awk -v r="refs/tags/${WANT}" '$2==r{print $1; exit}')"
+          TAG_SHA="${PEELED:-$DIRECT}"
+          [ -n "$TAG_SHA" ] || {
+            echo "::error::origin has no tag ${WANT}. A publish with no tag behind it is unreproducible: the installers and docs both point at a tag. Push the tag first, then dispatch with --ref ${WANT}."
+            exit 1; }
+          HEAD_SHA="$(git rev-parse HEAD)"
+          [ "$TAG_SHA" = "$HEAD_SHA" ] || {
+            echo "::error::this checkout is not the tree ${WANT} points at: HEAD=${HEAD_SHA}, ${WANT}=${TAG_SHA}. Almost certainly the dispatch omitted --ref and checkout landed on the default branch. Re-run: gh workflow run release.yml --repo ${GITHUB_REPOSITORY} --ref ${WANT} -f publish_npm=true -f confirm=true"
+            exit 1; }
+          [ "$DISPATCH_REF" = "refs/tags/${WANT}" ] || {
+            echo "::error::the dispatched ref is ${DISPATCH_REF}, not refs/tags/${WANT}. Same bytes, different provenance: the attestation would name the former. Re-run with --ref ${WANT}."
+            exit 1; }
+          echo "publish target verified: ${WANT} = ${HEAD_SHA}, dispatched as ${DISPATCH_REF}"
 
   publish-platform:
     name: npm ${{ matrix.target }}
     if: github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
+    needs: publish-gate
     runs-on: ${{ matrix.runner }}
     environment: release
     permissions:
@@ -327,7 +392,7 @@ jobs:
       - uses: ./.github/actions/setup-bun
 
       - name: Install workspace
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Upgrade npm (staged publishing needs >= 11.15)
         # Pinned, with the evidence for the number: the registry metadata for the published
@@ -420,7 +485,7 @@ jobs:
       - uses: ./.github/actions/setup-bun
 
       - name: Install workspace
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Upgrade npm (staged publishing needs >= 11.15)
         # Pinned, with the evidence for the number: the registry metadata for the published
@@ -485,7 +550,7 @@ jobs:
       - uses: ./.github/actions/setup-bun
 
       - name: Install workspace
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Upgrade npm (staged publishing needs >= 11.15)
         # Pinned, with the evidence for the number: the registry metadata for the published

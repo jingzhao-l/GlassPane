@@ -170,7 +170,17 @@ for (const item of targets) {
     console.log(`Running smoke test: ${binaryPath} --version`)
     try {
       const versionOutput = await $`${binaryPath} --version`.text()
-      console.log(`Smoke test passed: ${versionOutput.trim()}`)
+      // The smoke test's whole claim is "this binary is the one this tree built", and that claim
+      // is only checked by the number it answers with. Exit status alone passes on a binary that
+      // prints the development fallback: running this source without the version define answers
+      // `local` (measured in the worktree on 2026-10-13), and the lane called that a pass —
+      // FORK.md cites this very output as the proof the build came from this tree.
+      const got = versionOutput.trim()
+      if (got !== Script.version) {
+        console.error(`Smoke test failed: ${binaryPath} --version answers ${JSON.stringify(got)}, this build declares ${JSON.stringify(Script.version)}`)
+        process.exit(1)
+      }
+      console.log(`Smoke test passed: ${got}`)
     } catch (e) {
       console.error(`Smoke test failed for ${name}:`, e)
       process.exit(1)

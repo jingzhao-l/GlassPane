@@ -284,6 +284,33 @@ export function validateDimension(
 }
 
 /**
+ * The accessibility role `gp_act` is about to be authorized under.
+ *
+ * `gp_act`'s permission pattern is `act:<role>:<action>`, and `Wildcard.match` reads the
+ * *stored rule's* pattern as the glob — so the role is not only a selector for the engine, it
+ * is half of the key the authorization decision is looked up by. A role of `*` matches an
+ * allow rule the user granted for a different element; a `:` moves the boundary between the
+ * role and the action, so `role: "AXButton:press\", {action:"*"` reads as a different request
+ * than the one being made. No AX role contains either character, so refusing them costs no
+ * legitimate call. This is argument validation, not judgement: the engine still decides
+ * whether the action happened.
+ */
+const SELECTOR_FORBIDDEN = /[*?:[\]\\]/
+
+export function validateSelector(role: string): { ok: true } | { ok: false; error: KernelRejection } {
+  if (!SELECTOR_FORBIDDEN.test(role)) return { ok: true }
+  return {
+    ok: false,
+    error: {
+      code: "GP_E_SELECTOR",
+      message: `selector.role '${role}' would change which permission rule gp_act is evaluated against`,
+      remedy:
+        "pass the role exactly as the observed tree reports it (e.g. 'AXButton'); '*', '?', '[' ']' ':' and '\\\\' are glob or separator characters inside the permission pattern 'act:<role>:<action>'",
+    },
+  }
+}
+
+/**
  * The run plan this session was configured with, read through the kernel.
  *
  * WHY A FILE AND NOT AN ENVIRONMENT VALUE FULL OF IDS. The plan is not one string:

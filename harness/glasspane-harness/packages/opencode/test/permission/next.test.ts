@@ -805,6 +805,54 @@ it.instance(
 )
 
 it.instance(
+  "reply - a read-only glasspane approval does not authorize the act pattern",
+  () =>
+    Effect.gen(function* () {
+      // All six gp_* tools ask under the single `glasspane` namespace, so the `always` list a
+      // read-only tool carries decides what "Always allow" widens. A namespace-wide `*` answers
+      // every pattern in it — including gp_act's `act:<role>:<action>` — which is why upstream's
+      // identical `always: ["*"]` is safe (each of its tools owns its namespace) and ours was not.
+      const read = yield* ask({
+        id: PermissionV1.ID.make("per_gp_observe"),
+        sessionID: SessionID.make("session_glasspane"),
+        permission: "glasspane",
+        patterns: ["observe"],
+        metadata: {},
+        always: ["observe"],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+
+      yield* waitForPending(1)
+      yield* reply({ requestID: PermissionV1.ID.make("per_gp_observe"), reply: "always" })
+      yield* Fiber.join(read)
+
+      const again = yield* ask({
+        sessionID: SessionID.make("session_glasspane"),
+        permission: "glasspane",
+        patterns: ["observe"],
+        metadata: {},
+        always: [],
+        ruleset: [],
+      })
+      expect(again, "the tree read it was granted for stays granted").toBeUndefined()
+
+      const act = yield* ask({
+        id: PermissionV1.ID.make("per_gp_act"),
+        sessionID: SessionID.make("session_glasspane"),
+        permission: "glasspane",
+        patterns: ["act:AXButton:press"],
+        metadata: {},
+        always: [],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+      const pending = yield* waitForPending(1)
+      expect(pending.map((item) => String(item.id))).toContain("per_gp_act")
+      yield* Fiber.interrupt(act)
+    }),
+  { git: true },
+)
+
+it.instance(
   "reply - reject cancels all pending for same session",
   () =>
     Effect.gen(function* () {

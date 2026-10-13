@@ -2705,7 +2705,12 @@ function glasspaneSummary(method: string, result: Record<string, unknown> | unde
     return `confirmed=${glasspaneBool(result.actConfirmed)} tree=${glasspaneBool(result.axChanged)} pixels=${glasspaneBool(result.pixelChanged)}${op ? ` · op ${op}` : ""}`
   }
   if (method === "observe") {
-    return `nodes=${stringValue(result.nodeCount) ?? "?"} digest=${stringValue(result.digest) ?? "?"}`
+    // `nodeCount` is an `Int` on the wire (`EngineCore.swift:1403`), so it has to be read as a
+    // number: rendered through the string form it is always absent, and every successful tree
+    // read showed `nodes=?` — the headline measurement of the call, displayed as unknown
+    // while the engine had reported it.
+    const nodes = numberValue(result.nodeCount)
+    return `nodes=${nodes !== undefined ? nodes : "?"} digest=${stringValue(result.digest) ?? "?"}`
   }
   if (method === "diagnose") {
     const cls = stringValue(result.class) ?? "?"
@@ -2713,7 +2718,10 @@ function glasspaneSummary(method: string, result: Record<string, unknown> | unde
     return next ? `${cls} · next: ${next}` : cls
   }
   if (method === "attach") {
-    const app = stringValue(result.app) ?? stringValue(result.name) ?? stringValue(result.bundleId)
+    // `attachResult` reports `appName` (`EngineCore.swift:2160-2168`); the two names this line
+    // used to try are not fields the engine sends, so the one human-readable identity of the
+    // attached app was dropped and only `bundleId` or the bare pid survived.
+    const app = stringValue(result.appName) ?? stringValue(result.bundleId)
     const pid = numberValue(result.pid)
     return [app, pid !== undefined ? `pid ${pid}` : undefined].filter(Boolean).join(" · ") || "attached"
   }

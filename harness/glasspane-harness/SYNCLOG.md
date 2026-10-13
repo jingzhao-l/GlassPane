@@ -2,6 +2,87 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-13（第七次会话）· 0.7.8：权限面那条"总是允许"会连带放行 gp_act；fork-diff 对我们自己的文件只记名字
+
+**开工态**：主工作树 `/Volumes/Eng-Dev/GlassPane` 被项目 1 的线以 35 个未提交文件占用
+（`engine/`、`mcp-shell/`、`updater/`、`bridge/`——没有一个在 `harness/` 下），按纪律不混提、
+不 checkout/reset/stash，本轮全部改动落在隔离工作树
+`/Volumes/Eng-Dev/.worktrees/gp-harness-daily-20261013`，分支 `gp-harness-daily-20261013`，
+起点 main `113d8e3`（`git fetch` 后 `origin/main` == 本地 main，0/0）。参照克隆
+`describe --tags` = `v1.18.32` = `harness/upstream.json` 的 pin，`fsck` 静默、工作树干净。
+`df -k /Volumes/Eng-Dev` 开工 26,037,572 KB（≈24.8 GiB）可用，未触发清理。bun = 1.3.14，
+`NODE_EXTRA_CA_CERTS=/var/tmp/glasspane-harness/ca-bundle.pem`（163 张，钥匙串全束）；
+`glasspane-preflight.sh` 在不带该变量时如实拒绝并打印 remedy，带上后通过。
+依赖在隔离树里重装：`bun install --frozen-lockfile` 2,920 包 / 198 s。
+
+**上一轮遗留逐条判定（按内容，不按分支名或提交信息）**：提示词点名的 `gp-harness-orphan-20261010`
+（`a054fdc`，父 `2e83542`）**已经落地**。判据是把该提交引入的每一条非空新增行回到当前文件里点名：
+`verify-published.ts` 24 条里 23 条在 main（唯一缺席的那条 `same()` 被更严的 `norm()`+`same()`
+形式取代）、`script/publish.ts` 38/38、`scripts/install.sh` 25/25、`product-surface.mjs` 39/39
+（`no-foreign-publish` 三条与 `readCode`/`stripComments` 都在）、`installer-selftest.sh` 74 条里
+73 条在（缺席那条被改写：main 用 `grep -q -- "--location"` 而不是 `grep -q 'curl -fL'`，
+`install.sh:410` 的 `curl_args="--fail --location …"` 正是它的对照物）。所以本轮**不再并它**，
+也没有新分支要保。顺带把那条"自回显断言"的历史结论核回代码：`verify-published.ts:155-182`
+现在读的是**已安装**包清单的 `os`/`cpu`/`version`。
+
+**动了什么**（三条审查泳道 + 一把尺子的返修，全部本批）：
+`packages/opencode/src/tool/glasspane/index.ts`（五处 `always` 收成本条 pattern、guard 移到
+`ctx.ask` 之前、`gp_act` 新增 role 校验）、`kernel.ts`（新增 `validateSelector`/`GP_E_SELECTOR`）、
+`packages/tui/src/routes/session/index.tsx`（`observe` 的 `nodeCount` 按数字读、`attach` 读 `appName`）、
+`packages/opencode/script/postinstall.mjs`（`--registry`）、`packages/opencode/script/build.ts`
+（烟测比对版本）、`scripts/install.sh`（清单形状判定 + "形状对但不含本资产"改拒绝）、
+`packages/opencode/script/installer-selftest.sh`（gpg 桩讲 argv + 新增场景 18/19）、
+split 仓 `.github/workflows/release.yml`（`ref_name` 走 env + 形状校验、`--passphrase-fd 0`、
+`.asc` 落盘断言、清单集合相等、新增 `publish-gate`）与 `ci.yml`（`--frozen-lockfile`）、
+`harness/tools/fork-diff.mjs`（`added` 逐文件钉 hash、一律读已提交树、新增 tracked-but-modified
+拒绝、降级泳道的期望值改取名单长度）、`harness/tools/product-surface.mjs`（+1 条 registry 断言）、
+`SECURITY.md`/`NOTICE`/`docs`（契约文件那条错数）、`product.json`+`packages/opencode/package.json`+
+`bun.lock` 版本线 0.7.7→0.7.8、`CHANGELOG.md`、`harness/contracts/*.json` 重记。测试新增 5 条
+（权限行为 1、工具面源码棘轮 2、TUI 快照 2），`test/permission/next.test.ts` 79 → 80 条全绿。
+
+**测量**（改动前 → 改动后，全部从主仓根跑）：`tool-surface` 面 A 9119 LOC 22.09%→**22.01%**
+（行数一字未动，是分母被我涨了）、面 B 7100→**7254 LOC**（+154，`--record` 前红，逐文件归因见下）、
+`surface-semantics` 18 个文件 0 命中不变、`brand-surface` 血缘 **9623**（基线 9623）覆盖 3303/3303
+不变、0 hits（本批 CHANGELOG 里那两处上游字样没有进计数，实测未增）、`product-surface`
+123 → **124 条一致 / 0 条问题**（无 `--record`）、`hook-liveness` 21 钩子无漂移、
+`kernel-pin --check` `iterate-kernel@0.1.6` + **26** 份契约档案（提示词写的 14 是旧事实：
+`kernel-pin.json` 实测 18 fixtures + 8 schemas，本轮把 SECURITY/NOTICE/ci.yml 那句错话改掉）、
+`kernel-conformance` 16 份档案：**单实现绿**；`--impl` 对 canonical 时**本机第一次量到两侧同答**——
+本地 canonical checkout 落后 origin/main 11 笔（缺 `decision-log-transcribe`，它由 `be06484`
+即 0.1.6 那笔引入），所以取 `git archive origin/main kernel` 到 `/var/tmp` 并把 canonical 自己的
+`node_modules` 软链进去跑：装进来的 artifact 解析到 **zod 4.1.8**，canonical 源码解析到
+**zod 3.25.76**，16 条 fixture 两侧逐字同答、退出 0。
+测试：`packages/opencode` 四条固定点泳道 100 → **102 pass / 0 fail**；`packages/tui` 26 →
+**28 pass / 0 fail**；`test/permission/next.test.ts` **80 pass / 0 fail**；
+`installer-selftest.sh` 71 → **80 PASS / 0 FAIL**；四个发布包 typecheck 各 **0 条 `error TS`**；
+`publish.ts --dry-run` 对 0.7.8 报 packs cleanly（7 个文件）；主仓公共闸 `check-workflows`
+5 份 workflow（split `release.yml` 因新增 `publish-gate` 从 7 → **8 job**）、`--self-test`
+**9 例各自验证会失败**、`check-doc-links` 24 份文档 / 225 条仓内链接全活。
+
+**尺子自己被验过的部分（本批新增/改动的三条）**：
+① `fork-diff` 的 `added` 内容钉——金样重记后，往任一 `added` 文件加一行 ⇒ `--check` 具名红
+（`'<file>': our own file moved (…)`）；② 降级（无参照）泳道的期望值：把 `golden.editedDetail`
+与 `golden.counts.edited` 一起删空，此前 exit 0 并自称"0 edited file(s) hash-checked"，
+现在 `die(1)`；③ `installer-selftest` 的 gpg 桩：把 `install.sh` 的
+`--verify "$asc" "$file"` 改成 `--verify "$asc" "$asc"`，"GPG verified"与指纹那条**一起红**
+——这正是它此前红不了的那个形状。变异一律用自有备份 + sha256 核回，未用 git checkout/stash。
+`tool-surface` 面 B 的 +154 逐条可归属自己：金样差值只有 7 个 `edited` 文件的 `forkHash` 移动
+（`bun.lock`、`packages/opencode/package.json`、`script/build.ts`、`script/postinstall.mjs`、
+`packages/tui/src/routes/session/index.tsx`、`packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx`、
+`SECURITY.md`）＋ 1 个从 byte-identical 转为 edited 的文件（`test/permission/next.test.ts`，本批给它加了
+一条用例，于是 262 edited → **263**、4665 identical → **4664**），其余全在 `added` 那 82 条里。
+面 A 9119 行一字未动，22.09%→22.01% 纯粹是分母被我涨了。`fork-diff --record` 还第一次写出
+`addedDetail`（0 → **82** 条 forkHash），这正是上面第①条反向验证的前提。
+
+**本轮替你做的决定**（依据与回滚见最终汇报）：取号 0.7.8（patch）；不并 10-10 orphan（已落地，
+逐行证据在上）；`split` 用 fast-forward 推、不覆盖；棘轮面 B 同批 `--record`；内核 pin **不升**
+（0.1.6 仍是 registry 上最新，`--probe` 见下）；产品边界维持现状（`product.json` 的
+`platformTargets` 已是 macOS-only，"musl/baseline 没有 CI lane"这条旧挂账按 `platform.dropped`
+的理由不再成立）；`release` 环境**不加** required reviewers（理由：本产品线是无人值守定时任务，
+加了就把每日发布锁死在人工批准上；替代控制是 `publish-gate` 那四条树==tag 的断言）；
+`docs/install.md` 的 curl 一行仍指 `main` 分支（把信任根换成 tag 钉法是本轮未做的那条，
+在"未观测/未修"里给了确切命令）。
+
 ## 2026-10-13（第六次会话）· 0.7.7：占位符那句道歉修成可执行的，前两条端到端修复一起入版
 
 **开工态**：仍在隔离工作树 `/Volumes/Eng-Dev/.worktrees/gp-harness-daily-20261010`

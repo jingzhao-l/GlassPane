@@ -9,7 +9,11 @@
  *     go into that string, not only into `metadata` (measured in `harness/spike`:
  *     a metadata-only remedy is invisible to the model);
  *  3. a call that moves a real app goes through the harness permission plane
- *     first, so `gp_act` cannot click silently.
+ *     first, so `gp_act` cannot click silently. Upstream's tools ask under their own
+ *     namespace (`read`, `edit`, `glob`), which is why a namespace-wide `always` there is
+ *     harmless; all six `gp_*` tools share the single namespace `glasspane`, so an `always`
+ *     is a rule over the whole namespace — a read-only tool must not mint one, which would
+ *     answer `act:<role>:<action>` too. Each `always` is the call's own pattern.
  *
  * Parameter types come from the schemas (`Schema.Schema.Type<…>`) rather than
  * being written by hand, exactly like the upstream tools do — a hand-written
@@ -19,7 +23,7 @@
 import { Effect, Schema } from "effect"
 import * as Tool from "../tool"
 import * as Daemon from "./daemon"
-import { DIMENSION_ID_LIMITS, validateDimension } from "./kernel"
+import { DIMENSION_ID_LIMITS, validateDimension, validateSelector } from "./kernel"
 
 /**
  * The review dimension this call was made for, as the model declares it.
@@ -165,7 +169,7 @@ export const ProbeStatusTool = Tool.define(
       parameters: ProbeStatusParams,
       execute: (_params: Schema.Schema.Type<typeof ProbeStatusParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {
-          yield* ctx.ask({ permission: "glasspane", patterns: ["probe_status"], always: ["*"], metadata: { reads: "daemon self-report only" } })
+          yield* ctx.ask({ permission: "glasspane", patterns: ["probe_status"], always: ["probe_status"], metadata: { reads: "daemon self-report only" } })
           // No `dimension` here on purpose: a self-report produces no evidence frame, so it
           // can never yield a decision for a dimension to be counted against. A parameter with
           // no reader is how a tool surface starts lying about what it records.
@@ -197,9 +201,9 @@ export const AttachTool = Tool.define(
         Effect.gen(function* () {
           const blocked = yield* requireCapability("gp_attach", "attach")
           if (blocked) return blocked
-          yield* ctx.ask({ permission: "glasspane", patterns: ["attach"], always: ["*"], metadata: params })
           const declared = validateDimension(params.dimension)
           if (!declared.ok) return refused("gp_attach", "attach", declared.error)
+          yield* ctx.ask({ permission: "glasspane", patterns: ["attach"], always: ["attach"], metadata: params })
           const reply = yield* Daemon.call("attach", engineBody(params))
           return present("gp_attach", "attach", reply, (result) => `attached: ${json(result)}`, params.dimension ?? null)
         }),
@@ -233,12 +237,12 @@ export const ObserveTool = Tool.define(
         Effect.gen(function* () {
           const blocked = yield* requireCapability("gp_observe", "observe")
           if (blocked) return blocked
-          yield* ctx.ask({ permission: "glasspane", patterns: ["observe"], always: ["*"], metadata: params })
+          const declared = validateDimension(params.dimension)
+          if (!declared.ok) return refused("gp_observe", "observe", declared.error)
+          yield* ctx.ask({ permission: "glasspane", patterns: ["observe"], always: ["observe"], metadata: params })
           const body: Record<string, unknown> = {}
           if (params.maxDepth !== undefined) body.maxDepth = params.maxDepth
           if (params.role !== undefined) body.role = params.role
-          const declared = validateDimension(params.dimension)
-          if (!declared.ok) return refused("gp_observe", "observe", declared.error)
           const reply = yield* Daemon.call("observe", body, Daemon.TIMEOUT_MS.observe)
           return present("gp_observe", "observe", reply, (result) => {
             const tree = fields(result)
@@ -275,14 +279,19 @@ export const ActTool = Tool.define(
         Effect.gen(function* () {
           const blocked = yield* requireCapability("gp_act", "act")
           if (blocked) return blocked
+          // Both guards sit before the prompt. A request this surface is going to refuse anyway
+          // must not spend a human's answer, and the string below *is* the permission key —
+          // looking at it only after asking would mean authorizing a pattern we have not read.
+          const selector = validateSelector(params.selector.role)
+          if (!selector.ok) return refused("gp_act", "act", selector.error)
+          const declared = validateDimension(params.dimension)
+          if (!declared.ok) return refused("gp_act", "act", declared.error)
           yield* ctx.ask({
             permission: "glasspane",
             patterns: [`act:${params.selector.role}:${params.action}`],
             always: [],
             metadata: fields(params),
           })
-          const declared = validateDimension(params.dimension)
-          if (!declared.ok) return refused("gp_act", "act", declared.error)
           const reply = yield* Daemon.call("act", engineBody(params), Daemon.TIMEOUT_MS.act)
           return present("gp_act", "act", reply, (result) => {
             const out = fields(result)
@@ -320,9 +329,9 @@ export const DiagnoseTool = Tool.define(
       parameters: DiagnoseParams,
       execute: (params: Schema.Schema.Type<typeof DiagnoseParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {
-          yield* ctx.ask({ permission: "glasspane", patterns: ["diagnose"], always: ["*"], metadata: params })
           const declared = validateDimension(params.dimension)
           if (!declared.ok) return refused("gp_diagnose", "diagnose", declared.error)
+          yield* ctx.ask({ permission: "glasspane", patterns: ["diagnose"], always: ["diagnose"], metadata: params })
           const reply = yield* Daemon.call("diagnose", engineBody(params))
           return present("gp_diagnose", "diagnose", reply, (result) => {
             const out = fields(result)
@@ -348,9 +357,9 @@ export const LastEvidenceTool = Tool.define(
       parameters: LastEvidenceParams,
       execute: (params: Schema.Schema.Type<typeof LastEvidenceParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {
-          yield* ctx.ask({ permission: "glasspane", patterns: ["last_evidence"], always: ["*"], metadata: params })
           const declared = validateDimension(params.dimension)
           if (!declared.ok) return refused("gp_last_evidence", "last_evidence", declared.error)
+          yield* ctx.ask({ permission: "glasspane", patterns: ["last_evidence"], always: ["last_evidence"], metadata: params })
           const reply = yield* Daemon.call("last_evidence", engineBody(params))
           return present("gp_last_evidence", "last_evidence", reply, (result) => json(result), params.dimension ?? null)
         }),

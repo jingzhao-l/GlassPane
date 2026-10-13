@@ -184,6 +184,16 @@ for (const file of forbiddenFiles) {
 const postinstall = readCode("packages/opencode/script/postinstall.mjs")
 check("postinstall-identity", postinstall.includes(`\`${product.name}-\${platform}-\${arch}\``), "postinstall.mjs does not resolve the product's platform packages")
 check("postinstall-identity", postinstall.includes(product.binary), "postinstall.mjs does not carry the product binary name")
+// The self-heal in postinstall fetches a package and runs it. npm reads `npm_config_registry`
+// (which npm exports into lifecycle scripts), the environment, `~/.npmrc` and a project
+// `.npmrc`, so a spawn that names no registry downloads — and then executes — whatever bytes the
+// ambient mirror chooses, with integrity self-attested by that mirror. The registry is a
+// product-level fact (`product.json`), so it is asserted here rather than left to chance.
+check(
+  "postinstall-registry",
+  postinstall.includes('"--registry"') && postinstall.includes(`"${product.registry}"`),
+  `postinstall.mjs resolves the platform package without naming ${product.registry} — an ambient npmrc would decide which bytes get executed`,
+)
 
 // ---- state root + config names (product first, legacy kept)
 const globalTs = read("packages/core/src/global.ts")

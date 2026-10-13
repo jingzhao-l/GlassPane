@@ -28,6 +28,9 @@ const arch = archMap[os.arch()] ?? os.arch()
 // keeps these constants in step with it (this file ships inside the npm wrapper).
 const base = `glasspane-harness-${platform}-${arch}`
 const sourceBinary = platform === "windows" ? "glasspane-harness.exe" : "glasspane-harness"
+// Same rule as the names above: the value lives in product.json (`npm.registry`), and
+// harness/tools/product-surface.mjs is what keeps this literal from drifting away from it.
+const REGISTRY = "https://registry.npmjs.org"
 const targetBinary = path.join(__dirname, "bin", "glasspane-harness.exe")
 
 function supportsAvx2() {
@@ -133,7 +136,23 @@ function installPackage(name) {
   try {
     const result = childProcess.spawnSync(
       "npm",
-      ["install", "--ignore-scripts", "--no-save", "--loglevel=error", "--prefix", temp, `${name}@${version}`],
+      [
+        "install",
+        "--ignore-scripts",
+        "--no-save",
+        "--loglevel=error",
+        // The registry has to be named. npm resolves `npm_config_registry` (which npm exports
+        // into lifecycle scripts), `NPM_CONFIG_REGISTRY`, `~/.npmrc` and a project `.npmrc`, so
+        // without this the bytes fetched here — then chmod 0755 and executed — come from
+        // whatever mirror the ambient config names, and the package's integrity hash is
+        // self-attested by that same mirror. `script/verify-published.ts` passes `--registry`
+        // for exactly this reason; the install path is the one that runs on a user's machine.
+        "--registry",
+        REGISTRY,
+        "--prefix",
+        temp,
+        `${name}@${version}`,
+      ],
       { stdio: "inherit", windowsHide: true },
     )
     if (result.status !== 0) return

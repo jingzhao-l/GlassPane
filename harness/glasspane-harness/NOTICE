@@ -41,7 +41,8 @@ dependencies listed in the workspace `package.json` files). Those licenses apply
 published by their respective projects. The shared semantic kernel is one of them: since
 2026-10-08 this product resolves `iterate-kernel` from npm as an ordinary dependency of
 `packages/opencode` (no source copy in this tree), and its provenance — the pinned version,
-the lockfile integrity, and the sha256 of the 14 contract files the package ships — is
+the lockfile integrity, and the sha256 of every contract file the package ships (26,
+recorded individually) — is
 recorded in `harness/glasspane-harness/contracts/kernel-pin.json`. Its canonical home is
 the `kernel/` directory of the iterate-skill repository (jingzhao-l/iterate-skill), from
 which the package is published.

@@ -360,6 +360,35 @@ describe("TUI inline tool wrapping", () => {
     expect(row.line).toBe("attribution strong, contaminated · cb 2 · assertion failed")
   })
 
+  test("glasspaneRow renders observe's node count as the number the engine sends", () => {
+    // `nodeCount: Int` (EngineCore.swift:1403). Read as a string it is always absent, and every
+    // successful tree read painted `nodes=?` — the measurement was there, the row said unknown.
+    const row = glasspaneRow({
+      tool: "gp_observe",
+      status: "completed",
+      metadata: { ok: true, method: "observe", result: { nodeCount: 207, digest: "9f3ac1" } },
+    })
+    expect(row.state).toBe("success")
+    expect(row.line).toBe("nodes=207 digest=9f3ac1")
+  })
+
+  test("glasspaneRow names the attached app with the field the engine reports", () => {
+    // `attachResult` sends appName (EngineCore.swift:2160-2168); a bundle id alone is not the
+    // app name the row claims to show, and a target without one showed only its pid.
+    const named = glasspaneRow({
+      tool: "gp_attach",
+      status: "completed",
+      metadata: { ok: true, method: "attach", result: { pid: 4242, appName: "Notes", bundleId: "com.apple.Notes" } },
+    })
+    expect(named.line).toBe("Notes · pid 4242")
+    const noBundle = glasspaneRow({
+      tool: "gp_attach",
+      status: "completed",
+      metadata: { ok: true, method: "attach", result: { pid: 7, appName: "Calculator" } },
+    })
+    expect(noBundle.line).toBe("Calculator · pid 7")
+  })
+
   test("glasspaneRow never invents a shape for unknown methods or missing results", () => {
     expect(glasspaneRow({ tool: "gp_probe_status", status: "running", metadata: {} }).state).toBe("pending")
     const unknown = glasspaneRow({ tool: "gp_future", status: "completed", metadata: { ok: true, method: "future" } })

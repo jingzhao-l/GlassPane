@@ -351,12 +351,32 @@ verify_asset() {
     error "refusing to install bytes that no manifest vouches for. Re-run, or fetch $RELEASE_BASE/v$VERSION/SHA256SUMS.txt yourself and compare it to the download."
     exit 1
   fi
+  # A manifest only means something if it parses as one. Before this, an HTTP 200 carrying HTML
+  # (a captive portal, a login page from a re-signed TLS chain, a mirror that answers everything)
+  # fell straight into the "not listed" branch below: awk matched no line, the installer called
+  # that a coverage gap, warned, and installed the binary with *no* integrity check. The parse
+  # failure was being reported as a policy gap — the one condition this lane agrees to tolerate,
+  # so the tolerance was being granted by somebody else's response.
+  lines="$(grep -c '[^[:space:]]' "$sums" 2>/dev/null || true)"
+  shaped="$(grep -cE '^[0-9a-f]{64}[[:space:]]' "$sums" 2>/dev/null || true)"
+  [ -n "$lines" ] || lines=0
+  [ -n "$shaped" ] || shaped=0
+  if [ "$lines" -gt 0 ] && [ "$shaped" -ne "$lines" ]; then
+    SHA_STATE="FAILED (SHA256SUMS.txt is not a checksum manifest)"
+    error "SHA256SUMS.txt for v$VERSION is not a checksum manifest: $((lines - shaped)) of $lines line(s) do not match '<64 hex>  <path>' — the endpoint answered HTTP 200 with something else"
+    error "refusing to install bytes whose manifest we cannot parse. Fetch it yourself and compare: $RELEASE_BASE/v$VERSION/SHA256SUMS.txt"
+    exit 1
+  fi
   # The manifest lists bare filenames (`./name`), so match on the name, not the path.
   want="$(awk -v n="$name" '{ sub(/^\.\//, "", $2); if ($2 == n) print $1 }' "$sums" | head -1)"
   if [ -z "$want" ]; then
-    SHA_STATE="skipped ($name is not listed in SHA256SUMS.txt)"
-    warn "$name is not listed in SHA256SUMS.txt — skipping integrity check (coverage gap, not tampering)"
-    return 0
+    # Fatal, not a skip: the release lane now refuses to publish a manifest whose asset set is
+    # not exactly the product's target matrix, so a parsed manifest that omits this asset means
+    # the bytes in front of us are not the bytes that release carries.
+    SHA_STATE="FAILED ($name is not listed in SHA256SUMS.txt)"
+    error "SHA256SUMS.txt for v$VERSION was fetched and parses, but does not list $name"
+    error "refusing to install an asset the release's own manifest does not vouch for. Check the --version you asked for, or compare $RELEASE_BASE/v$VERSION/SHA256SUMS.txt against the download yourself."
+    exit 1
   fi
   if command -v shasum >/dev/null 2>&1; then
     got="$(shasum -a 256 "$file" | awk '{print $1}')"
