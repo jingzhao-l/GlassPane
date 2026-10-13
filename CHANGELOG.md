@@ -2,6 +2,21 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [Unreleased]
+
+### Fixed — `tools/sync-kernel.sh` 的枚举临时文件在 GNU mktemp 上恒退 1（v1.14.1 的归档里带着这个形状）
+
+本轮新加的 `updater/test/tools-sync-kernel.test.mjs` 第一次在 CI（ubuntu runner）上跑就把它撞出来了：
+`mktemp -t sync-kernel-enumerate` 在 BSD/macOS 上是"以该名字为前缀建临时文件"，而 GNU coreutils
+把 `-t` 当作已废弃、直接把参数当模板并要求末尾至少两个 `X`，于是同一行在 Linux 上是
+`mktemp: too few X's in template 'sync-kernel-enumerate'`、退 1——守卫 1 的"枚举自己的健康检查"
+于是永远走"拒绝当作没什么可删"那条分支。**本地 macOS 恒过，所以这条只有 CI 看得见**，
+而它属于"同一份脚本在两条 OS 上给出两种判定"那一类。改成自带 `XXXXXX` 的显式模板，两侧都接受。
+
+不在 v1.14.1 里：`v1.14.1` 的 tag 与签名发布物指向 `f132af9`，那一棵树上这个 bug 还在。
+它不在任何用户路径上（`sync-kernel.sh` 是维护者的回写入口，不进 npm 包、不被 install/update 执行），
+所以不为它重切 tag；下一版随版本线带走。
+
 ## [1.14.1] — 2026-10-13
 
 **版本判断：patch。** 四条判据逐条实测，不是引用旧条目：状态文件的字段没动（本轮没有触碰任何 schema、

@@ -133,7 +133,11 @@ enumerate() { # $1 = dry | real
 # silently deletes a fixture also deletes the assertion that fixture carries.
 # The enumeration's own health is asserted: an rsync that died must not be read
 # as "nothing to delete".
-err_file="$(mktemp -t sync-kernel-enumerate)"
+# 模板要自己带尾部的 X：`mktemp -t NAME` 在 BSD(macOS) 上是"用 NAME 当前缀"，而 GNU coreutils
+# 把 `-t` 当已废弃、直接把参数当模板并要求末尾至少两个 X，于是同一行在 Linux runner 上
+# 是 `mktemp: too few X's in template 'sync-kernel-enumerate'`，退 1。
+# 这条不是推测：新增的 tools-sync-kernel 测试在 CI 上第一次跑就撞到了它（本地 macOS 恒过）。
+err_file="$(mktemp "${TMPDIR:-/var/tmp}/sync-kernel-enumerate.XXXXXX")"
 if ! plan="$(enumerate dry 2>"$err_file")"; then
   echo "error: guard 1 could not enumerate the sync plan; refusing to treat that as 'nothing to delete'." >&2
   sed 's/^/  rsync: /' "$err_file" >&2
