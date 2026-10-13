@@ -48,7 +48,7 @@
 # quietly deletes a fixture also deletes the assertion that fixture carries.
 #
 # Usage:
-#   KERNEL_SRC=/path/to/iterate-skill tools/sync-kernel.sh [--target=repo|fork] [--dry-run]
+#   KERNEL_SRC=/path/to/iterate-skill tools/sync-kernel.sh [--dry-run]
 #   # only if you genuinely intend to drop mirror-only files:
 #   ... tools/sync-kernel.sh --allow-deletions
 # Then review `git diff` and commit as:
@@ -79,8 +79,8 @@ for arg in "$@"; do
       echo "       then: node harness/glasspane-harness/script/kernel-pin.mjs --record" >&2
       echo "        and: bun harness/glasspane-harness/script/kernel-conformance.mjs --impl <canonical kernel checkout>" >&2
       exit 2 ;;
-    --target=*) echo "error: unknown --target value '${arg#--target=}' (supported: repo, fork)" >&2; exit 2 ;;
-    *) echo "error: unknown argument '$arg' (supported: --target=repo|fork, --dry-run, --allow-deletions)" >&2; exit 2 ;;
+    --target=*) echo "error: unknown --target value '${arg#--target=}' (supported: repo)" >&2; exit 2 ;;
+    *) echo "error: unknown argument '$arg' (supported: --target=repo, --dry-run, --allow-deletions)" >&2; exit 2 ;;
   esac
 done
 
@@ -166,8 +166,11 @@ fi
 # `0.1.0-draft.1 != 1.1.1` blocks legitimate work and protects nothing. What
 # actually breaks the build is a missing export a consumer imports — so that is
 # what gets checked, and the version is re-stamped after the copy.
-src_version="$(node -p "require('$SRC/kernel/package.json').version")"
-root_version="$(node -p "require('$root/package.json').version")"
+# The path goes in as an argument, never inside the evaluated string: interpolating it meant
+# a KERNEL_SRC containing a single quote — an ordinary directory name like /Users/o'brien —
+# broke the JS literal and the sync died on a SyntaxError instead of reading a version.
+src_version="$(node -e 'console.log(require(process.argv[1]).version)' "$SRC/kernel/package.json")"
+root_version="$(node -e 'console.log(require(process.argv[1]).version)' "$root/package.json")"
 for symbol in parseEvidencePack parseEvidencePackRead parseDecisionLogEntry parseRecipeConfig; do
   grep -q "\b$symbol\b" "$SRC/kernel/src/index.ts" || {
     echo "error: canonical kernel does not export '$symbol', which $root/kernel/src/index.ts exports today." >&2

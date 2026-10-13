@@ -168,6 +168,34 @@ test('install.sh: GLASSPANE_REF 置空 = 钉发布 tag，与 installer 常量真
     `v${RELEASE_VERSION}`, 'bootstrapPlan 拿这个 ref 时也是同一个 tag')
 })
 
+test('install.sh: GLASSPANE_REF 只有空白 = 与置空同义；含内部空白仍被形状闸拒', () => {
+  // 这条用例补的是"同源"那句话的另一半。上面那条测了 `GLASSPANE_REF=`，但 resolvePinRef 对值
+  // 是先 trim 的，`GLASSPANE_REF='   '` 在它那里就是"没设"＝钉发布 tag；install.sh 当时没有
+  // trim，同一个值走进 assert_no_option_smuggling（空白正是 ext:: 起 shell 的必要成分）被拒，
+  // 退出 1。于是一条入口安静装发布版、另一条报错——两边都"有道理"，合起来不是同一份口径。
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'glasspane-bare-ref4-'))
+  const result = runInstallSh({
+    cwd: bare,
+    env: { GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: path.join(bare, 'ct'), GLASSPANE_REF: '   ' },
+  })
+  assert.equal(result.status, 0, result.stderr)
+  assert.ok(
+    result.stdout.includes(`--branch v${RELEASE_VERSION}`),
+    `空白值该与置空同义、钉 v${RELEASE_VERSION}，实际：${result.stdout}`,
+  )
+  assert.equal(resolvePinRef({ GLASSPANE_REF: '   ' }), `v${RELEASE_VERSION}`, 'installer 侧同一形状同结论')
+  assert.equal(resolvePinRef({ GLASSPANE_REF: '   ' }), resolvePinRef({ GLASSPANE_REF: '' }), '裁完为空即"没设"')
+  // 对照：裁首尾空白不等于放宽形状闸。带内部空白的值仍是 ext:: 的形状，必须照旧被拒——
+  // 没有这一条，上面的 trim 就同时可以是"把危险值裁绿"的做法。
+  const smuggle = runInstallSh({
+    cwd: bare,
+    env: { GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: path.join(bare, 'ct2'), GLASSPANE_REF: 'v1 x' },
+  })
+  assert.notEqual(smuggle.status, 0, '含内部空白的 ref 必须仍被拒')
+  assert.match(`${smuggle.stderr}${smuggle.stdout}`, /含空白字符/)
+  assert.ok(!/--branch v1 x/.test(smuggle.stdout), '被拒的值不许进到 clone 行')
+})
+
 test('repoMissingText: 三条路径齐全且与 install.sh 地址真源一致', () => {
   const text = repoMissingText()
   assert.ok(text.includes(INSTALL_SH_URL))
