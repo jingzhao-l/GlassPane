@@ -12,6 +12,16 @@ contract does not).
 
 <!-- 内容归入下一版；此处留空以备下一批。 -->
 
+- **`run --share` 删除（未随 0.7.8 发布：tag 已先切）。** `product.json` 把会话共享列在
+  `removedFirstParty` 里，而 `run --help` 仍把它当能力 advertised；对本地起的服务实测
+  `POST /session/<id>/share` 返回 **HTTP 200 + 内嵌 web 的 HTML**（该路由不存在，被 SPA 兜底吃掉），
+  于是 `sdk.session.share()` 不报错、`share.url` 取不到、什么都不打印，命令照样退 0——一个替
+  已删除能力作保的入口。现在删掉该 option 与那条永不生效的 `share()`（及其在 `runtime.ts` 的
+  注入位），`product-surface` 新增 `no-removed-capability-entry` 规则钉住它不许回来
+  （125 条一致 / 0 条问题；把 option 加回去即具名变红，实测）。
+  残留一条没做：未知 `/session/*` API 路径被内嵌 web 兜底成 200，客户端无法从状态码分辨
+  "端点不存在"——那是 server 路由顺序的问题，另批处理。
+
 
 ## [0.7.8] - 2026-10-13
 

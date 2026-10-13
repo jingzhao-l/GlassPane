@@ -4,8 +4,8 @@
   "referenceClone": ".external/opencode",
   "observedAt": "2026-10-13",
   "counts": {
-    "identical": 4664,
-    "edited": 263,
+    "identical": 4663,
+    "edited": 264,
     "added": 82,
     "deleted": 1705
   },
@@ -152,6 +152,7 @@
     "packages/opencode/src/cli/cmd/run.ts",
     "packages/opencode/src/cli/cmd/run/demo.ts",
     "packages/opencode/src/cli/cmd/run/footer.command.tsx",
+    "packages/opencode/src/cli/cmd/run/runtime.ts",
     "packages/opencode/src/cli/cmd/run/trace.ts",
     "packages/opencode/src/cli/cmd/serve.ts",
     "packages/opencode/src/cli/cmd/tui.ts",
@@ -2754,7 +2755,7 @@
     {
       "file": "packages/opencode/src/cli/cmd/run.ts",
       "upstreamHash": "cccc2550179f87bb74763004910028f79ade60c9",
-      "forkHash": "88b8b2ec7141809b87d74ae3da71d1d57af15893"
+      "forkHash": "08d1299e23cf68241ca19cf78d0e1a65fe01f0a4"
     },
     {
       "file": "packages/opencode/src/cli/cmd/run/demo.ts",
@@ -2765,6 +2766,11 @@
       "file": "packages/opencode/src/cli/cmd/run/footer.command.tsx",
       "upstreamHash": "3176c1724f006867683a5996044c195b99193b97",
       "forkHash": "97fe508a01a7a1bbca0020376b741f64a2c6f9f6"
+    },
+    {
+      "file": "packages/opencode/src/cli/cmd/run/runtime.ts",
+      "upstreamHash": "90cddffa2222f7075f608c5236e7a61e42d5e71c",
+      "forkHash": "2c05c81830c5fd449cd027c134ff80feeb8ecabb"
     },
     {
       "file": "packages/opencode/src/cli/cmd/run/trace.ts",
@@ -3557,7 +3563,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "faf6ddd12df74d4dd55d45ae0ff079337cb8ffc3"
+      "forkHash": "7da4a4fde32358a02d5256264c51eb0a42d5299b"
     },
     {
       "file": "contracts/kernel-conformance.json",
@@ -3709,7 +3715,7 @@
     },
     {
       "file": "SYNCLOG.md",
-      "forkHash": "8400d823461e7c0791baacdcc8017b00c0ea2f87"
+      "forkHash": "8ca4451f2dd67455d4a3f87ea5a0484c0fa678ea"
     }
   ]
 }

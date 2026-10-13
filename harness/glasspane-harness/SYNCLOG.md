@@ -83,6 +83,15 @@ split 仓 `.github/workflows/release.yml`（`ref_name` 走 env + 形状校验、
 `docs/install.md` 的 curl 一行仍指 `main` 分支（把信任根换成 tag 钉法是本轮未做的那条，
 在"未观测/未修"里给了确切命令）。
 
+**tag 之后又落的一条（未随 0.7.8 发布）**：删掉 `run --share` 与那条永不生效的 `share()`
+（含 `runtime.ts` 的注入位与两处调用）。实测本地服务的 `POST /session/<id>/share` 返回 200 +
+内嵌 web 的 HTML（路由不存在，被 SPA 兜底），旧代码既不报错也不打印、命令退 0——等于替一个
+`product.json` 记录为已删除的能力作保。`product-surface` 新增 `no-removed-capability-entry`
+钉住它不许回来（124 → **125 条一致 / 0 条问题**；把 option 加回去即具名红，自有备份 + sha256
+核回）。金样随之再记一次：`run.ts`/`runtime.ts` 两条 `forkHash` 移动。残留一条没做：未知
+`/session/*` 路径被内嵌 web 兜底成 200，客户端无法用状态码分辨"端点不存在"——那是 server
+路由顺序的问题，另批处理，判据就是上面那条 curl 探针。
+
 ## 2026-10-13（第六次会话）· 0.7.7：占位符那句道歉修成可执行的，前两条端到端修复一起入版
 
 **开工态**：仍在隔离工作树 `/Volumes/Eng-Dev/.worktrees/gp-harness-daily-20261010`

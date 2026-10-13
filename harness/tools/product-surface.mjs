@@ -195,6 +195,19 @@ check(
   `postinstall.mjs resolves the platform package without naming ${product.registry} — an ambient npmrc would decide which bytes get executed`,
 )
 
+// ---- a removed first-party capability must not keep a user-visible entry
+// `product.json` lists session sharing among what this product does not have (no account, no
+// cloud). `run` still advertised `--share` for it, and the call it made resolves to no route at
+// all — measured 2026-10-13 against a live server: `POST /session/<id>/share` answers HTTP 200
+// with the embedded web app's HTML, so nothing was printed and the run still exited 0. A flag
+// that advertises a capability the product deleted is the same failure as a stub that answers
+// every request: it endorses something that is not there.
+check(
+  "no-removed-capability-entry",
+  !readCode("packages/opencode/src/cli/cmd/run.ts").includes(`option("share"`),
+  'run.ts advertises --share again for a capability product.json records as removed',
+)
+
 // ---- state root + config names (product first, legacy kept)
 const globalTs = read("packages/core/src/global.ts")
 check("state-root", globalTs.includes(`const app = "${product.name}"`), "packages/core/src/global.ts does not use the product as the state-root name")

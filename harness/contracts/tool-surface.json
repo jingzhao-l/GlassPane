@@ -730,6 +730,11 @@
           "lines": 2
         },
         {
+          "file": "packages/opencode/src/cli/cmd/run/runtime.ts",
+          "kind": "edited",
+          "lines": 0
+        },
+        {
           "file": "packages/opencode/src/cli/cmd/run/trace.ts",
           "kind": "edited",
           "lines": 2
