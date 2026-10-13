@@ -146,6 +146,11 @@ jobs:
           cache-dependency-path: package-lock.json
       - name: Install workspace deps from root
         run: npm ci
+      # 镜像语料必须等于 pin 记录的已发布语料：Swift 的 C35 腿（TestSupport.swift）直读
+      # kernel/fixtures，镜像落后 pin 就等于引擎侧对之后的契约全盲——本批实测踩过一次，
+      # 报错还是"文件不存在"这种看起来像测试写错的样子。
+      - name: Kernel corpus matches the pin (Swift C35 leg's truth source)
+        run: node scripts/check-kernel-corpus.mjs
       - name: Installer unit tests (parse/env/plist/app args)
         run: npm test --workspace glasspane-install
       - name: Build all TS workspaces (kernel → mcp-shell)
