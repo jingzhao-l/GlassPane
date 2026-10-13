@@ -12,10 +12,10 @@
 
 - **授权范围**：审查与改 fork 定制面、改尺子层与金样（`--record` 按纪律）、加/改测试、提交并推送主仓 `main`、`subtree split` 推到 `jingzhao-l/glasspane-harness` 的 `main`、打 tag 并推（触发 binaries + checksums + 签名）、`gh workflow run -f publish_npm=true -f confirm=true` 真的发 npm（wrapper + 平台包）、改 split 仓与主仓的 `.github/workflows/*`、以及在需要覆盖时用带显式 SHA 的 `--force-with-lease`。这些不必再问我。
 - **收口定义（不成立就是本轮失败）**：① 本轮改动全部落在主仓 **main** 上并推送，`git status --porcelain` 为空；② split 仓的 `main` 与 tag `v<X.Y.Z>` 都在，Release 非草稿、资产带签名；③ registry 上 wrapper 与平台包的版本号实测等于新号；④ `SYNCLOG.md`/`CHANGELOG.md` 已留痕；⑤ 没有属于你的半成品留在临时分支、worktree 或未提交状态里。**把发版做在 `gp-harness-daily-<date>` 这类分支上而没并进 main，等于没收口**（2026-10-10 那轮就是栽在这，5 个文件的真修复挂在未提交状态里）；⑥ 工作区与两个远端已按下面【收口清理】做完，不再留下游离分支与工作树。
-- **发现问题必须完全解决，"记录在案"不算解决**：本轮审出的每个缺陷收口时只能是「已修复 + 有固定点测试 + 已进 main（该发版的随本版发出）」或「判定不属于本轮并写下判据（点名该由哪条线哪一步收）」。"已知未修""待补实现""下一轮再看"一律不合格；**半修更糟**——改了呈现面而判定/契约面还按旧行为走（例如 `verify-published` 那句拿 `product.json` 跟自己比的自回显断言、注册表加了工具而 `hello.capabilities` 没跟上），它把缺陷伪装成进展。若完整修复要跨到 canonical 内核或主仓产品面，本轮就跨过去做完（改 canonical → 跑它门禁发版 → 升级 pin / 通知主仓那条线），不要切成两半。
+- **发现问题必须完全解决，而且只允许一种终态**：本轮审出的每个缺陷收口时只能是「已修复 + 有固定点测试 + 已进 main（该发版的随本版发出）」。**"判定不属于本轮"这个出口不存在**——缺陷长在哪条线就跨到哪条线修完：要改 canonical 内核就在 `/Volumes/Eng-Dev/iterate-skill/kernel` 改、跑它门禁、发版、再升级 fork 的 pin；属主仓产品面的就在主仓那层修（同轮提交推送，按那条线的节奏发版）。"已知未修""待补实现""下一轮再看""已在案"一律不合格；**半修更糟**——改了呈现面而判定/契约面还按旧行为走（例如 `verify-published` 那句拿 `product.json` 跟自己比的自回显断言、注册表加了工具而 `hello.capabilities` 没跟上），它把缺陷伪装成进展。收口后唯一还能存在的未完成项是物理边界那一类（见下面那条）。下一轮可以发现新问题，但本轮发现的问题必须本轮清零。
 - **替你做的决定要留痕**：取号判断、split 是否需要覆盖、棘轮重记、契约 pin 是否升级、产品边界是否调整——每个决定写进 `SYNCLOG.md`/提交正文，汇报里汇总一条「本轮决定 → 依据 → 回滚命令」。
 - **物理上做不到的只有两件**：`npm stage approve`（要你的 2FA）与上游参照网络不可达时的构建。碰上先把其余一切做完，再给出确切补救命令（stage-id、包名、版本）。除此之外汇报里不许出现"需要你决定"。
-- **范围纪律**：不得为了"清零"擅自扩产品面（把 Electron 桌面 app、上游文档站、Web UI 内嵌拉进发布，或给 `product.json` 加新平台目标却没有对应 CI lane）。那属于范围变更；要做就连同代价、构建通道、brand/product 闸一起做完并留痕，否则按最小正确修法收口。
+- **范围纪律**：不得为了"清零"擅自扩产品面（把 Electron 桌面 app、上游文档站、Web UI 内嵌拉进发布，或给 `product.json` 加新平台目标却没有对应 CI lane）。那属于范围变更；要做就连同代价、构建通道、brand/product 闸一起做完并留痕，否则按最小正确修法收口。**这条限制的是产品形状，不是缺陷处置**：已发现的问题仍要本轮修完，只是修的时候别顺手加没人要的新能力。
 - **诚实性优先于零遗留**：测不出的（真模型轮次、真 TUI 观感、musl/baseline 目标）照实写"未观测"，但仍要给出"补它的确切一条命令 + 为什么本轮没跑"。"如实标注"不等于可以不做。
 
 【收口清理：每轮必做的最后一步（属收口硬条件）】
@@ -24,7 +24,7 @@
 
 1. **列清单**：`git fetch origin --prune` 与 `git fetch <split-url> --prune` 两边的分支都要盘；`git worktree list`、`git for-each-ref refs/heads`、`git branch -r`；split 仓侧另有 `git ls-remote --heads <split-url>` 与 `gh pr list --repo jingzhao-l/glasspane-harness --state open`。
 2. **判去向用内容不用分支名**：`git cherry main <b>` 对 squash 合并过的分支会误报"未落地"，证实/证伪用 `git log --oneline main..<b>` 与逐文件 `git diff main <b> -- <路径>`。`split/*` 是 `git subtree split` 的搬运产物，其内容已由 tag 与 split 仓承载，不参与这个判定，但**用完的那条要删**。
-3. **删除**：证实在 main 里 → `git branch -d`（只用 `-d`；要用 `-D` 就说明第 2 步没做扎实），远端同名 `git push origin --delete <b>` / 同理删 split 仓侧分支；本轮自建 worktree 在确认 `git -C <wt> status --porcelain` 为空后 `git worktree remove`，最后 `git worktree prune`。**别的线（主仓 07:30 那条、canonical iterate-skill）正在用的不清**，但要在汇报里点名并写清由哪条线的哪一步收。
+3. **删除**：证实在 main 里 → `git branch -d`（只用 `-d`；要用 `-D` 就说明第 2 步没做扎实），远端同名 `git push origin --delete <b>` / 同理删 split 仓侧分支；本轮自建 worktree 在确认 `git -C <wt> status --porcelain` 为空后 `git worktree remove`，最后 `git worktree prune`。**内容未落地的分支不许"留着"**：本轮把它并回 main、跑齐闸、修完再删；已被 main 的更新版本取代的，用第 2 步的字节比对证明"取代"，再删。唯一例外是**别的线（主仓 07:30 那条、canonical iterate-skill）正在飞的未提交批次**：不替别人提交、不 checkout/reset/stash，保持原状并点名，给出与本轮改动是否重叠的判断；但那批内容里若含你已发现的缺陷，缺陷本身仍要本轮修完——"等它的会话"不是不修的理由。
 4. **快照分支**（`backup/*`、`safety/pre-harness-merge`）是一批未提交工作的唯一回滚点，只在该批已收口后才删，删前把判据写进 `SYNCLOG.md`。
 5. **临时件**：`/var/tmp/glasspane-harness/`（含往轮 `ca-bundle.pem` 之外的临时前缀、拆分归档、`split-*` 工作目录）、`harness/glasspane-harness/packages/*/dist/`、往轮 worktree 的目录残留。`node_modules`（4,671 个包）与 `.external/opencode`（223 MB 参照克隆）**不是遗留项**，是环境，别为"数量好看"去删——磁盘不足时按前置第 3 条处理。
 6. **台账类遗留也算遗留**：`CHANGELOG.md` 的 `[Unreleased]` 归入本版；`SYNCLOG.md` 本轮条目已写；fork-diff/tool-surface/brand 金样与本轮改动同批且 `--check` 复跑绿；split 仓 CI 最新一条 success；无悬挂 draft Release；无待批 staged publish；本轮开的 PR 已合并或给出去向。
@@ -99,8 +99,8 @@
 - zsh 的 tmux 钩子会杀掉管道（症状 `command not found: tmux` + exit 127，不是 PATH 问题）：多段命令用 `/bin/bash -c '…'` 跑；heredoc 一律用引号形式 `<<'EOF'`，否则反引号会被执行；BSD `grep -o` 有 255 字符上限，长行匹配别依赖它。
 - 长时间命令（`fork-diff`、整包构建、`bun install` 4,671 个包）用后台跑并轮询状态，别在前台等超时；超时不等于失败，先看日志再判定。
 - 授权见开头【无人值守：零遗留与全线发布授权】那一节，那一条覆盖本节；这里只留三条不是"决策"而是"别做错"的纪律：`--record` 只用于本轮自己造成的有意变化，`product-surface` 永远不许 `--record`（它没有基线）；覆盖任何远端分支前先逐条证明被覆盖内容不丢；本轮不改主仓产品代码与主仓版本线，也不手改 `node_modules/iterate-kernel/` 或 `kernel/schemas/**` 这类复制品（要动语义就走 canonical 再 pin/同步）。
-- 发现主仓产品面或 canonical 内核的问题时，不是"列进汇报"就完事：你要判断**该由哪条线修**（主仓那条每日任务 07:30 跑 / canonical 在 iterate-skill 侧），给出依据与最小复现证据；如果本轮就能修且修法明确（例如改 canonical 再 pin 升级），那就自己修完并两侧发版。
+- 发现主仓产品面或 canonical 内核的问题时，**不是"列进汇报"或"交给那条线"就完事**：那仍是本轮要修掉的缺陷。修法是你直接在所属那一层改（canonical 侧改完跑它门禁并发版、再升级 fork 的 pin；主仓侧的改动按主仓那条线的口径提交推送并随其发版），并在汇报里给出改了哪层、跑了哪些闸、两侧版本号是多少。写"该由哪条线修"只允许作为**执行路径的说明**，不允许作为不修的出口。
 
 【最终汇报】
 
-简明列出，按这个顺序：① **收口证据**——主仓 main 的收口 HEAD、`git status --porcelain` 为空、split 仓 `main` 与 `v<X.Y.Z>` tag 都在、Release 是否 draft=false 及资产清单、registry 三个版本号（wrapper + darwin-arm64 + darwin-x64）实测值；② pin 与参照检出状态（`describe` == pin？）；③ 版本判断依据与两处版本线核对结果；④ 每条闸的**实际数字**（面 A/面 B 行数与占比、血缘计数、product-surface 断言条数、固定点用例通过/失败/跳过、`fork-diff` 四桶计数）；⑤ 改了哪些文件、对应哪条 `[gp]` 提交；⑥ split 发布的 tree-hash 等式证据；⑦ 端到端安装与验签结果；⑧ 反向验证证据（破坏哪一处、哪条具名用例或哪把尺子变红）；⑨ **本轮我替你做了哪些决定**（含依据与回滚命令）——一项都没有通常意味着你把该决定的东西推给了别人；⑩ 未观测/未修项，每条写明"为什么本机做不了"与"补上它的确切一条命令"；⑪ **清理盘点**——主仓与 split 仓各自的 `git worktree list` 行数与分支条数，加一张「删了什么 / 留下什么 / 各自去向与判据」的表（留下的必须写清由哪条线的哪一步收）。不要贴大段日志。
+简明列出，按这个顺序：① **收口证据**——主仓 main 的收口 HEAD、`git status --porcelain` 为空、split 仓 `main` 与 `v<X.Y.Z>` tag 都在、Release 是否 draft=false 及资产清单、registry 三个版本号（wrapper + darwin-arm64 + darwin-x64）实测值；② pin 与参照检出状态（`describe` == pin？）；③ 版本判断依据与两处版本线核对结果；④ 每条闸的**实际数字**（面 A/面 B 行数与占比、血缘计数、product-surface 断言条数、固定点用例通过/失败/跳过、`fork-diff` 四桶计数）；⑤ 改了哪些文件、对应哪条 `[gp]` 提交；⑥ split 发布的 tree-hash 等式证据；⑦ 端到端安装与验签结果；⑧ 反向验证证据（破坏哪一处、哪条具名用例或哪把尺子变红）；⑨ **本轮我替你做了哪些决定**（含依据与回滚命令）——一项都没有通常意味着你把该决定的东西推给了别人；⑩ **未观测项**——只限物理边界那一类，每条写明"为什么本机做不了"与"补上它的确切一条命令"；**"未修项"这一格必须为空**，非空就是本轮没收口（发现 N 条就要有 N 条修复与固定点测试，数量要在汇报里对得上）；⑪ **清理盘点**——主仓与 split 仓各自的 `git worktree list` 行数与分支条数，加一张「删了什么 / 留下什么 / 各自去向与判据」的表（合法的"留下"只有两类：别人正在飞的未提交批次，与物理边界；其余一律不许留）。不要贴大段日志。

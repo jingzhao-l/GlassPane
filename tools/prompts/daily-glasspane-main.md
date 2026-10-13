@@ -11,11 +11,11 @@
 【无人值守：零遗留与全线发布授权（本节优先级最高）】
 
 - **授权范围**：审查、改代码、加测试、提交、推送 `origin main`、升版本线、打 tag、触发并观察 GitHub Release 与 npm 两条发布通道、`gh workflow run -f mode=publish` 真的发 npm、改 `.github/workflows/*`、重记棘轮金样、以及（在你判定必要且已证明被覆盖内容不丢的前提下）对 split/远端分支的覆盖推送。这些都不必再问我。
-- **收口定义（不成立就是本轮失败，不是"差一点"）**：① 本轮全部改动已落在 **main** 上并推送，`git status --porcelain` 为空；② 该发的版已发完——版本号进 5 处派生位点与 lock、CHANGELOG 有条目、tag 已推、GitHub Release 非草稿且资产/签名核过、registry 两个包的版本号等于新号；③ 没有任何属于你的半成品留在临时分支、worktree 或未提交状态里。**把发版做在 `daily/main-<date>` 这类自己开的分支上而没并进 main，等于没收口**（这件事真发生过）；④ 你判定的缺陷要么修完，要么明确写成"决定不修 + 理由"，不许只挂账；⑤ 工作区与远端已按下面【收口清理】那节做完，本轮不再留下游离的分支、工作树与临时件。
-- **发现问题必须完全解决，"记录在案"不算解决**：本轮审查发现的每一个缺陷，收口时只能处于两种状态之一——**已修复（有测试、已进 main 并随本版发布）**，或**你判定它不属于本轮范围并写下判据**（例如属于 harness 那条线或 canonical 内核，并点名由哪条线的哪一步收）。中间态不存在："已知的未修项""待补实现""留到下一轮"这些写法一律不合格。半修尤其不合格：改了 A 面而 B 面还指着旧行为（GUI 有控件而 daemon 无命令、schema 加了字段而读侧没管、remedy 指着一个不存在的开关）比不修更糟，因为它把缺陷伪装成进展。若一个缺陷的完整修复需要跨仓或跨层，那就在本轮把它做完（canonical 侧改 + 回写镜像 + 两侧发版），别把它切成两半留给明天。
+- **收口定义（不成立就是本轮失败，不是"差一点"）**：① 本轮全部改动已落在 **main** 上并推送，`git status --porcelain` 为空；② 该发的版已发完——版本号进 5 处派生位点与 lock、CHANGELOG 有条目、tag 已推、GitHub Release 非草稿且资产/签名核过、registry 两个包的版本号等于新号；③ 没有任何属于你的半成品留在临时分支、worktree 或未提交状态里。**把发版做在 `daily/main-<date>` 这类自己开的分支上而没并进 main，等于没收口**（这件事真发生过）；④ **本轮发现的缺陷全部已修完**，数量对得上——发现 N 条就要有 N 条的修复提交与测试，不存在"决定不修"这一格；⑤ 工作区与远端已按下面【收口清理】那节做完，本轮不再留下游离的分支、工作树与临时件。
+- **发现问题必须完全解决，而且只允许一种终态**：本轮审出的每一个缺陷，收口时必须已经是**已修复（有测试、已进 main、该发版的随本版一起发出）**。**"判定不属于本轮"这个出口不存在**：缺陷长在哪条线上就跨到哪条线去修完——要改 canonical 内核就在 `/Volumes/Eng-Dev/iterate-skill/kernel` 改、跑它门禁、发版、再回写本仓镜像；判定语义的问题就修到 Swift 那一层；安装器/发布链的缺陷就修脚本本身。中间态一律不合格："已知的未修项""待补实现""留到下一轮""已在案"。半修尤其不合格：改了 A 面而 B 面还指着旧行为（GUI 有控件而 daemon 无命令、schema 加了字段而读侧没管、remedy 指着一个不存在的开关）比不修更糟，因为它把缺陷伪装成进展。收口之后还能存在的未完成项只有一类：物理上做不到的（见下面那条），且必须写成一条可执行的人工动作而不是"未修"。**下一轮可以发现新问题，但本轮发现的问题必须本轮清零。**
 - **替你做的决定要留痕**：取号判断、要不要动风险区文件、修到哪一层、棘轮是否重记、契约是否升级——每个决定在提交正文或 `CHANGELOG.md`/`specs/` 新增记录里写下依据，汇报里再汇总一条「本轮决定 → 依据 → 回滚命令」。我不需要你问我，我需要我能复查你决定了什么。
 - **只有两件事是物理上做不到的**，别把它们当决策遗留：`npm stage approve`（要你的 2FA）与 Apple 公证（要付费账号）。碰上时先把其余一切做完，再把确切补救命令写进汇报最上方（含 stage-id、包名、版本）。除此之外，汇报里不许出现"需要你决定/需要你确认"。
-- **范围纪律**：不得为了"清零"而擅自扩大产品面（新增对外 `gp_*` 工具、改发布平台矩阵、改产品定位）。那是范围变更而不是遗留项；按最小正确修法收口，需要扩面也照此自己决定并留痕。
+- **范围纪律**：不得为了"清零"而擅自扩大产品面（新增对外 `gp_*` 工具、改发布平台矩阵、改产品定位）。那是范围变更而不是遗留项；按最小正确修法收口，需要扩面也照此自己决定并留痕。**但这条不是"可以不修"的出口**：它限制的是产品形状，不是缺陷处置——已发现的问题仍要本轮修完，只是修的时候别顺手加没人要的新能力。
 - **诚实性优先于零遗留**：两者冲突时选诚实——测不出就写"未观测"。但"如实标注"不是不做完的理由：能在本机做的（含真机项：面板走 AX `kAXPressAction`、权限走 `glasspaned --permissions`、状态复现走隔离 `GLASSPANE_STATE_DIR`）必须做完。
 
 【收口清理：每轮必做的最后一步（属收口硬条件，不是收尾礼貌）】
@@ -24,7 +24,7 @@
 
 1. **列清单**：`git fetch origin --prune` → `git worktree list` → `git for-each-ref --format="%(refname:short)" refs/heads`（本地）→ `git branch -r`（远端）。逐条分类：本轮我建的 / 往轮我这条线建的 / 别的线（harness、canonical、并行会话）建的 / 发布锚点。
 2. **判定去向用内容，不用分支名**：`git cherry main <b>` 对 **squash 合并**的分支会误报成"未落地"（`release/1.6.0`、`release/1.6.0-pr` 就是这样，内容其实经 cherry-pick 进了 main），所以证实/证伪要用 `git diff main <b> -- <路径>` 或 `git log --oneline main..<b>` 看具体提交；`split/*` 是 subtree 搬运产物，其内容由 tag 与 split 仓承载，不参与这个判定。
-3. **删除规则**：证实在 main 里的分支 → `git branch -d <b>`（**只用 `-d`**；需要 `-D` 就说明判据不成立，回去做第 2 步），远端同名用 `git push origin --delete <b>`；真没落地的 → 本轮并回 main 修完再删，或按第 4 步作废；本轮自己建的 worktree → 先确认里面没有未提交内容（`git -C <wt> status --porcelain` 为空），再 `git worktree remove <wt>`，最后 `git worktree prune`。**别的线正在用的东西不清**（判据：worktree 还挂在该线分支上、或提交内容真未落地且属 harness/canonical）——但必须在汇报里点名并写清"该由哪条线的哪一步收"，不许让它变成无声的存量。
+3. **删除规则**：证实在 main 里的分支 → `git branch -d <b>`（**只用 `-d`**；需要 `-D` 就说明判据不成立，回去做第 2 步），远端同名用 `git push origin --delete <b>`；本轮自己建的 worktree → 先确认里面没有未提交内容（`git -C <wt> status --porcelain` 为空），再 `git worktree remove <wt>`，最后 `git worktree prune`。**内容未落地的分支不许"留着"**：那是本线该收的活——本轮并回 main、跑齐闸、把缺陷修完再删；若它已被 main 的更新版本取代，就用第 2 步的字节比对证明"取代"，然后删。唯一的例外是**别人正在飞的未提交批次**：不替别人提交、不 checkout/reset/stash，保持原状并在汇报里点名，给出它与本轮改动是否重叠的判断；但那一批里若含你已经发现的缺陷，缺陷本身仍要本轮修掉（在所属那层的代码里修完并证明），"等它的会话"不是不修的理由。
 4. **快照分支（`backup/*`、`safety/*`）是有条件的例外**：它们是某批未提交工作的唯一回滚点。只在该批已收口、且本轮不再需要回滚点时才删；删前把 `git log -1 --format=%s <b>` 与内容比对结果写进汇报，别顺手清掉别人的保险。
 5. **临时件**：`/var/tmp/glasspane-main-check/` 快照、往轮临时前缀与归档、`engine/.build` 之外的本轮产物、`.worktrees/` 下已 remove 的目录残留，一并清掉。`npm cache`/`node_modules` 只在空间不足时清（那是环境不是遗留）。
 6. **台账侧的遗留同样算遗留**：`CHANGELOG.md` 的 `[Unreleased]` 归入本版；本轮记录已进 `specs/`（只新增，不改历史结论）；`gh pr list --repo jingzhao-l/GlassPane --state open` 为空或每条都给出去向；GitHub 上没有悬挂的 draft Release；npm 没有待批的 staged publish（有就按物理边界处理并写明）；CI 最新一条为 success。
@@ -37,7 +37,7 @@
 
 - 只审查主仓产品面：`engine/`（Swift：`Sources/GlassPaneEngine`、`Sources/glasspaned`、`Sources/glasspane-settings`、`probe/`、`scripts/make-app.sh`、`.signal_smoke.py`、`smoke.md`）、`mcp-shell/`（TypeScript MCP 壳）、`installer/`（`glasspane-install`）、`updater/`（自动更新引擎）、`bridge/`（Python LLDB 桥）、`scripts/`、`.github/workflows/`、`install.sh`、根 `package.json` 与各 workspace 的 `package.json`/lockfile、`CHANGELOG.md`、`README.md`/`README.zh-CN.md`/`SECURITY.md`/`SECURITY.zh-CN.md`/`CONTRIBUTING.md`/`CONTRIBUTING.zh-CN.md`、`ITERATE.md`、`iterate.config.yaml`。
 - 明确忽略 `harness/` 整个目录（`harness/glasspane-harness` fork 本体 + `harness/tools` 六把尺子 + `harness/contracts` 金样 + `harness/upstream.json`）。它有独立的每日任务与独立发布通道，不审查、不修改、不发版，不得把 `harness/*` 纳入任何改动与发布包。
-- `kernel/` 与本仓 `kernel/schemas/**` 是跨语言契约真源的**镜像**，canonical 编辑入口在 `/Volumes/Eng-Dev/iterate-skill/kernel`。本轮若判定"必须改契约才能修掉缺陷"，你有权限自己决定并做完：在 canonical 侧改、跑它的门禁与发版，再经 `KERNEL_SRC=/Volumes/Eng-Dev/iterate-skill tools/sync-kernel.sh --target=repo` 回写本仓镜像，两侧同轮落地——**不许把它列成「待裁决」了事**。判定"不改契约、在本层解决"也是一种决定，写下理由即可。除此之外不要单边手改 `kernel/schemas/**`（那是复制品，手改必被同步判红）。
+- `kernel/` 与本仓 `kernel/schemas/**` 是跨语言契约真源的**镜像**，canonical 编辑入口在 `/Volumes/Eng-Dev/iterate-skill/kernel`。本轮若判定"必须改契约才能修掉缺陷"，你有权限自己决定并做完：在 canonical 侧改、跑它的门禁与发版，再经 `KERNEL_SRC=/Volumes/Eng-Dev/iterate-skill tools/sync-kernel.sh --target=repo` 回写本仓镜像，两侧同轮落地——**不许把它列成「待裁决」了事**。你也可以决定不动契约、在本层把缺陷修掉，那同样是修复；但**"缺陷存在、本轮不处理"不是选项**。除此之外不要单边手改 `kernel/schemas/**`（那是复制品，手改必被同步判红）。
 - 禁区：`specs/**`（验收台账与决策记录，不得改写历史结论，只可新增本轮记录）、`LICENSE`、`.external/`。
 - 风险区（可以改，但必须在汇报里单独点名并给出证据）：`engine/Sources/GlassPaneEngine/`（归因与证据语义）、`engine/Sources/glasspaned/main.swift`（信号与 socket 生命周期；sigwait + 早期 `pthread_sigmask` 的方案已被真机证伪过替代方案，别改回去）、`mcp-shell/src/tools.ts`（对外 MCP 工具契约，三处镜像：kernel schema / daemon `FrameCodec` / mcp-shell）、`.github/workflows/release.yml`（不可逆发布通道）、`scripts/version-sites.mjs`（版本线位点表）。
 
@@ -101,4 +101,4 @@
 
 【最终汇报】
 
-简明列出，按这个顺序：① **收口证据**——main 的收口 HEAD、`git status --porcelain` 为空、tag/Release（draft=false、target sha、归档是否含 harness）/registry 两个包的版本号实测值；② 版本判断依据与 `set-version` 前后位点核对；③ 每条门禁命令的**实际计数**（不是"全绿"两个字）；④ 改了哪些文件、对应哪条提交；⑤ 做过哪些反向验证（破坏哪一处、哪条具名用例变红）；⑥ **本轮我替你做了哪些决定**（含依据与回滚命令）——一项都没有通常意味着你把该决定的东西推给了别人；⑦ 未观测/未修项，每条必须写明"为什么本机做不了"与"补上它的确切一条命令"，不许写成"待你确认"；⑧ **清理盘点**——收口后的 `git worktree list` 行数与 `git branch -a` 条数，加一张「删了什么 / 留下什么 / 各自去向与判据」的表（留下的必须写清由哪条线的哪一步收）。不要贴大段日志。
+简明列出，按这个顺序：① **收口证据**——main 的收口 HEAD、`git status --porcelain` 为空、tag/Release（draft=false、target sha、归档是否含 harness）/registry 两个包的版本号实测值；② 版本判断依据与 `set-version` 前后位点核对；③ 每条门禁命令的**实际计数**（不是"全绿"两个字）；④ 改了哪些文件、对应哪条提交；⑤ 做过哪些反向验证（破坏哪一处、哪条具名用例变红）；⑥ **本轮我替你做了哪些决定**（含依据与回滚命令）——一项都没有通常意味着你把该决定的东西推给了别人；⑦ **未观测项**——只限物理边界那一类，每条写明"为什么本机做不了"与"补上它的确切一条命令"；**"未修项"这一格必须为空**，非空就是本轮没收口（发现 N 条就要有 N 条修复，数量要在汇报里对得上）；⑧ **清理盘点**——收口后的 `git worktree list` 行数与 `git branch -a` 条数，加一张「删了什么 / 留下什么 / 各自去向与判据」的表（留下的只有两类合法：别人正在飞的未提交批次，与物理边界；其余一律不许留）。不要贴大段日志。
