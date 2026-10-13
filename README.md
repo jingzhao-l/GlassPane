@@ -279,8 +279,10 @@ to, swaps in the new version. The page that drives it is the **更新** (Updates
   `gpg` on the machine — the daily run stops and says so on the page; you may proceed once by hand with
   `updater check --consent unsigned-release`, and the state file and `gp_diagnose` keep reporting that
   release as installed **without authorship proof**. A signature that is published and does not check is
-  refused outright: no consent overrides it. The 「安装更新」 button does not grant this one (only
-  `--consent major` is wired to it today), so grant it at a terminal.
+  refused outright: no consent overrides it. The 「安装更新」 button does not grant this one — it only ever
+  carries `--consent major` — but you do not need a terminal for it: when that gate is the reason the check
+  stopped, the same page offers 「信任这个发布并重新检查」, and pressing it is `updater check --consent
+  unsigned-release`. The terminal form remains the fallback for a headless machine.
 - **Turn automatic update off for good** — any one of these, and the last is the strongest:
 
   ```bash

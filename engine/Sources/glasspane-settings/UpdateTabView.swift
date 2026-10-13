@@ -60,7 +60,7 @@ struct UpdateTabView: View {
                     .accessibilityIdentifier("gp-update-refresh")
                 }
             }
-            Text("这台机器上装的 GlassPane 每天自动检查一次并装新版本。到点时电脑是关着的、或者装上后没通过自检，都会在这一页告诉你，并给出你现在能按的按钮。")
+            Text("这台机器上装的 GlassPane 每天自动检查一次，并把校验通过的新版本在你空闲时装上。两件事它从不自作主张：跨大版本、以及没有可核验签名的发布——那两种都会在这一页告诉你拦下来的是哪一道门，并给出你现在能按的按钮。到点时电脑是关着的、或者装上后没通过自检，也同样写在这一页。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

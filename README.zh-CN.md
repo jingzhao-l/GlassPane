@@ -244,7 +244,9 @@ node installer/cli.js --restore-launchd
   没有 `gpg`——定时运行会停下并在页面上写明原因；人可以自己放行一次：
   `updater check --consent unsigned-release`，此后状态文件与 `gp_diagnose` 会一直写明这一版是
   **无作者性证明装上的**。签名发了却对不上则是直接硬拒，任何 consent 都不能覆盖。「安装更新」这个按钮
-  给不了这条确认（它今天只带 `--consent major`），要到终端里给。
+  给不了这条确认（它今天只带 `--consent major`），但也用不上终端：检查正是因为这道门停下来的时候，同一页
+  会给出「信任这个发布并重新检查」，按下它就是 `updater check --consent unsigned-release`。终端那条写法留给
+  没有图形会话的机器。
 - **永久关掉自动更新**，下面三条任一即可，最后一条最硬：
 
   ```bash
