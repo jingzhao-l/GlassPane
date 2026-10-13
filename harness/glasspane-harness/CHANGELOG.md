@@ -127,6 +127,29 @@ arm64/x64；一处是依赖升级且新字段全部可选（旧字节不变）�
 `v0.7.6` = `063e32e`、Release 非草稿带签名、registry 上 wrapper 与两个平台包的 `latest` 都是
 `0.7.6`——`v0.7.7` 与 npm 的 `0.7.7` 均无人占用，按 patch 取号。版本线两处：`product.json`（真源）
 与 `packages/opencode/package.json`，`bun.lock` 里那条包自身 `"version"` 一并跟上。
+### Fixed — 0.1.7 re-pin、镜像语料追平，与 Swift 那条欠下的 C35 腿
+
+- **依赖再升 `iterate-kernel@0.1.7`**（内核侧修了发布契约的一个真缺陷：`$defs.selector.role/.title`
+  缺 `minLength: 1`，zod 也缺 `.min(1)`，而 daemon 拒空 role——契约对 agent 许的诺与执行它的规则
+  是两个答案）。`kernel-pin --record` 得 26 份契约档案、`kernel-conformance --record` 16 份，
+  `mcp-shell` 全量 435 pass（其中"daemon / 已发布 schema / 内核 zod 三处同规则"那条正是抓出这个
+  缺陷的闸）。
+- **根仓 `kernel/` 镜像的语料按已发布包追平**（13 份 → 26 份，逐文件 sha256 与 pin 对过）。
+  这一步不是清理：Swift 的 C35 腿 `TestSupport.swift:461` 直读 `kernel/fixtures`，镜像停在
+  09-28 就意味着**引擎侧对之后发布的所有契约全盲**——新写的往返用例第一次跑就是
+  "文件不存在"而不是"字段丢了"，被这个陈旧咬了一口。
+- **`DecisionLogEntry`（Swift 绑定）补上 0.1.6 的四个可选字段**：`kind` / `round` / `dimension`
+  / `payload`，加 `validateInvariants` 的对应判据（snake_case kind、round ≥ 0、dimension 用内核
+  同一套 id 规则、payload 限 8192 字符**规范形式**）。`payload` 需要任意 JSON 类型而引擎没有，
+  新增 `JSONValue`：数字走 `Double` 但**整数值不带小数位**编码——链哈希盖的是规范字节，
+  把 `1` 重印成 `1.0` 等于改掉每条链节的摘要。
+  红灯先行有档：实现前该用例红在 `321 bytes != 713 bytes —— 扩展条目在重编码时丢了字段`
+  （`JSONDecoder` 对未声明字段静默忽略，解码"成功"、重编码即丢决定）；实现后连同两条新守卫用例
+  24/24 绿，`decision-log-entry.ok-01` 的旧链节字节一字未动（"缺席"编成 `null` 会全部换摘要）。
+- **本批仍没做完的（点名，不含糊）**：镜像只追平了 `fixtures/`+`schemas/`，`kernel/src`、
+  `kernel/test`、`kernel/package.json` 仍是 09-28 的陈旧代码，mcp-shell 也还挂在
+  `"@iterate/kernel": "file:../kernel"` 上——Step 0b 的正题（镜像退役、mcp-shell 吃 npm 裸名、
+  发布机器那 40+ 处）没做。`fork-diff` 金样按本批重记（两条 forkHash + observedAt）。
 
 ### Changed — 依赖 `iterate-kernel` 0.1.5 → 0.1.6（决策日志条目收下生产者词汇）
 

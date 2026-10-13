@@ -567,8 +567,61 @@ public enum DecisionOutcome: String, Codable {
     case pass, fail, blocked, inconclusive
 }
 
+/// Structured detail a decision carries alongside its summary — the ledger's `payload`.
+///
+/// WHY AN EXPLICIT JSON MODEL. The engine has no arbitrary-JSON type, and the shortcuts all
+/// corrupt the thing they store: `[String: Any]` is not `Codable`, and letting the decoder read
+/// numbers straight as `Double` would reprint the kernel's `1` as `1.0` — the ledger hashes an
+/// entry's *canonical bytes*, so re-spelling a number changes what every line hashes to and what
+/// the next entry links against. `number` therefore carries a `Double` and prints integral values
+/// bare, which is precisely the rule `canonicalJson` states for both TypeScript and Swift:
+/// shortest roundtrip form, integral values without a fraction.
+public indirect enum JSONValue: Codable, Equatable {
+    case string(String)
+    case number(Double)
+    case bool(Bool)
+    case null
+    case array([JSONValue])
+    case object([String: JSONValue])
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() { self = .null; return }
+        if let flag = try? container.decode(Bool.self) { self = .bool(flag); return }
+        if let text = try? container.decode(String.self) { self = .string(text); return }
+        if let value = try? container.decode(Double.self) { self = .number(value); return }
+        if let items = try? container.decode([JSONValue].self) { self = .array(items); return }
+        if let fields = try? container.decode([String: JSONValue].self) { self = .object(fields); return }
+        throw DecodingError.dataCorruptedError(
+            in: container, debugDescription: "not a JSON value the ledger can store"
+        )
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .string(let text): try container.encode(text)
+        case .bool(let flag): try container.encode(flag)
+        case .null: try container.encodeNil()
+        case .array(let items): try container.encode(items)
+        case .object(let fields): try container.encode(fields)
+        case .number(let value):
+            if value.rounded() == value, abs(value) < 9.007_199_254_740_992e14 {
+                try container.encode(Int(value))
+            } else {
+                try container.encode(value)
+            }
+        }
+    }
+}
+
 public struct DecisionLogEntry: Codable, Equatable {
     public static let summaryMaxLength = 2048
+
+    /// Mirror of `PAYLOAD_MAX_CANONICAL_LENGTH` in the kernel: a line whose payload can grow
+    /// without bound is a line whose digest has no bound, so the cap belongs to the entry.
+    public static let payloadMaxCanonicalLength = 8192
+
 
     public let entryId: String        // ^dl_[0-9A-HJKMNP-TV-Z]{26}$
     public let sequence: Int          // ≥ 0
@@ -577,6 +630,14 @@ public struct DecisionLogEntry: Codable, Equatable {
     public let summary: String        // ≤ summaryMaxLength
     public let outcome: DecisionOutcome
     public let createdAt: String      // ISO-8601 毫秒 UTC
+    // The four fields 0.1.6 added. All optional, and *absent* (not null) when unset — Codable's
+    // synthesized `encodeIfPresent` omits them, which is what keeps the canonical bytes of every
+    // pre-0.1.6 line unchanged. Without them the ledger cannot say which round a decision belongs
+    // to, which kind it was, or which dimension it served.
+    public let kind: String?          // ^[a-z][a-z0-9_]{0,31}$，生产者的词汇，内核不枚举
+    public let round: Int?            // ≥ 0
+    public let dimension: String?     // 内核 dimension id 规则，≤ 64
+    public let payload: JSONValue?
 
     public init(
         entryId: String,
@@ -585,7 +646,11 @@ public struct DecisionLogEntry: Codable, Equatable {
         operationId: String? = nil,
         summary: String,
         outcome: DecisionOutcome,
-        createdAt: String
+        createdAt: String,
+        kind: String? = nil,
+        round: Int? = nil,
+        dimension: String? = nil,
+        payload: JSONValue? = nil
     ) {
         self.entryId = entryId
         self.sequence = sequence
@@ -594,8 +659,13 @@ public struct DecisionLogEntry: Codable, Equatable {
         self.summary = summary
         self.outcome = outcome
         self.createdAt = createdAt
+        self.kind = kind
+        self.round = round
+        self.dimension = dimension
+        self.payload = payload
     }
 }
+
 
 // MARK: - Decision log entry invariants (patterns Codable cannot express)
 
@@ -606,7 +676,13 @@ public enum DecisionLogEntryError: Error, Equatable {
     case badCreatedAt(String)
     case badSequence(Int)
     case summaryTooLong(Int)
+    case badKind(String)
+    case badRound(Int)
+    case badDimension(String)
+    case payloadTooLong(Int)
+    case payloadNotAnObject
 }
+
 
 public extension DecisionLogEntry {
     private static let entryIdRegex = try! NSRegularExpression(
@@ -621,6 +697,11 @@ public extension DecisionLogEntry {
     private static let createdAtRegex = try! NSRegularExpression(
         pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
     )
+    // The producer's own decision vocabulary: snake_case, bounded, deliberately not enumerated.
+    private static let kindRegex = try! NSRegularExpression(pattern: "^[a-z][a-z0-9_]{0,31}$")
+    /// Same id rule as `DIMENSION_ID_PATTERN` / `DIMENSION_ID_MAX_LENGTH` in the kernel.
+    private static let dimensionRegex = try! NSRegularExpression(pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    public static let dimensionMaxLength = 64
 
     /// Validates the pattern/const invariants the JSON Schema enforces on the
     /// TS side (mirror of `kernel/schemas/decision-log-entry.schema.json`).
@@ -645,6 +726,31 @@ public extension DecisionLogEntry {
         }
         guard Self.matches(Self.createdAtRegex, createdAt) else {
             throw DecisionLogEntryError.badCreatedAt(createdAt)
+        }
+        if let kind {
+            guard Self.matches(Self.kindRegex, kind) else {
+                throw DecisionLogEntryError.badKind(kind)
+            }
+        }
+        if let round {
+            guard round >= 0 else {
+                throw DecisionLogEntryError.badRound(round)
+            }
+        }
+        if let dimension {
+            guard Self.matches(Self.dimensionRegex, dimension), dimension.count <= Self.dimensionMaxLength else {
+                throw DecisionLogEntryError.badDimension(dimension)
+            }
+        }
+        if let payload {
+            // The bound is on the canonical form — the same bytes the chain hashes. Measuring
+            // the encoder's output would let key order or spacing hide an oversized payload.
+            let data = try EvidencePack.encoder.encode(payload)
+            let decoded = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+            let canonical = CanonicalJSON.stringify(decoded)
+            guard canonical.utf16.count <= Self.payloadMaxCanonicalLength else {
+                throw DecisionLogEntryError.payloadTooLong(canonical.utf16.count)
+            }
         }
     }
 

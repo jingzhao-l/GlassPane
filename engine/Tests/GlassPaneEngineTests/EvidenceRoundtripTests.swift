@@ -207,6 +207,69 @@ final class EvidenceRoundtripTests: XCTestCase {
         XCTAssertLessThanOrEqual(entry.summary.count, DecisionLogEntry.summaryMaxLength)
     }
 
+    /// The 0.1.6 fixture: an entry that carries the producer's own vocabulary — `kind`,
+    /// `round`, `dimension` and a structured `payload` — which is what lets the iterate
+    /// ledgers become this shape instead of sitting beside it.
+    ///
+    /// This test is the Swift-side guard against the quiet failure mode of an optional field:
+    /// `JSONDecoder` ignores what a struct does not declare, so an engine binding that never
+    /// learned the new fields still *decodes fine* — and then re-encodes a ledger line with
+    /// those decisions removed from it. Canonical comparison catches exactly that, because the
+    /// hash the chain covers is made of these bytes.
+    /// The extended entry must also *validate*: decoding a `kind` the kernel would refuse is
+    /// how a third binding quietly becomes a place to smuggle bad ledger lines.
+    func testExtendedDecisionLogRejectsVocabularyTheKernelRefuses() throws {
+        let base = try XCTUnwrap(
+            try JSONSerialization.jsonObject(
+                with: try KernelFixtures.data("decision-log-entry.ok-02.json")
+            ) as? [String: Any]
+        )
+        let cases: [(String, Any)] = [
+            ("kind", "Review Result"),        // not snake_case
+            ("round", -1),                    // a round cannot be negative
+            ("dimension", "UI Consistency"),  // not a kernel dimension id
+        ]
+        for (field, value) in cases {
+            var mutated = base
+            mutated[field] = value
+            let data = try JSONSerialization.data(withJSONObject: mutated)
+            XCTAssertThrowsError(
+                try DecisionLogEntry.decodeAndValidate(data),
+                "\(field) fell through the Swift leg"
+            )
+        }
+        var oversized = base
+        oversized["payload"] = ["blob": String(repeating: "x", count: 9000)]
+        XCTAssertThrowsError(
+            try DecisionLogEntry.decodeAndValidate(try JSONSerialization.data(withJSONObject: oversized)),
+            "the payload bound is part of the entry, not a suggestion"
+        )
+    }
+
+    /// A pre-0.1.6 line must re-encode to the bytes it came in as — the chain hashes those bytes,
+    /// so writing `"kind": null` would re-hash every ledger written before this field existed.
+    func testLegacyDecisionLogStillEncodesWithoutTheNewKeys() throws {
+        let fixture = try KernelFixtures.data("decision-log-entry.ok-01.json")
+        let entry = try DecisionLogEntry.decodeAndValidate(fixture)
+        let encoded = try entry.jsonData()
+        let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        for field in ["kind", "round", "dimension", "payload"] {
+            XCTAssertNil(object?[field], "\(field) must be absent, not null")
+        }
+        XCTAssertEqual(try canonicalJSON(encoded), try canonicalJSON(fixture))
+    }
+
+    func testExtendedDecisionLogRoundtripsThroughCanonicalJSON() throws {
+        let fixture = try KernelFixtures.data("decision-log-entry.ok-02.json")
+        let entry = try DecisionLogEntry.decodeAndValidate(fixture)
+        let reencoded = try entry.jsonData()
+        XCTAssertEqual(
+            try canonicalJSON(reencoded),
+            try canonicalJSON(fixture),
+            "the extended entry lost a field on re-encode: the Swift leg would rewrite an audit line"
+        )
+    }
+
     func testDecisionLogRejectsBadEntryId() throws {
         var object = try decisionLogObject()
         object["entryId"] = "dl_short"
