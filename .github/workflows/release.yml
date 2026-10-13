@@ -53,9 +53,16 @@ jobs:
     environment: release
     permissions:
       contents: write
+    # Pinned, and `check-workflows.mjs` now enforces that this file stays pinned: this job
+    # declares `environment: release`, so it is the one place a mutable action ref has
+    # something worth stealing — it reads `secrets.GPG_PRIVATE_KEY` and holds `contents: write`.
+    # A retagged `@v4` would run attacker code there, sign an attacker archive with the real
+    # key, and the updater's 8th gate (authorship) would accept it, because that gate checks
+    # the fingerprint, not the bytes' provenance. `ci.yml`'s read-only lanes are not pinned
+    # yet; they hold no secrets, so the rule is scoped to jobs that declare an environment.
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
       - name: Validate tag and version line
@@ -186,13 +193,29 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: release
+    # Two publishers for the same tag must not interleave: the second `npm publish` of a
+    # version is refused by the registry, but the first one's provenance attestation and the
+    # second one's attempt are not ordered by anything else, and a re-dispatch while a run is
+    # still in flight is how a half-published pair gets made. Queued rather than cancelled —
+    # this is the irreversible channel, so nothing may throw away an in-flight publish.
+    concurrency:
+      group: npm-publish-${{ github.ref_name }}
+      cancel-in-progress: false
+    # A job-level `permissions:` block REPLACES the workflow-level one, and any scope it does
+    # not name becomes `none` for this job — it is not inherited from line 42. `actions/checkout`
+    # authenticates the default token, and the refusal check below runs `git ls-remote --tags
+    # origin` with it, so a block that names only `id-token` asks the job to read the repository
+    # with `contents: none`. Public repositories fall back to anonymous fetches, which is why
+    # every publish so far worked; the day this repository is private, or GitHub stops that
+    # fallback, the first step dies and the whole npm channel silently stops existing.
     permissions:
+      contents: read
       id-token: write
     env:
       MODE: ${{ github.event.inputs.mode }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org

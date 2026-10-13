@@ -49,6 +49,7 @@ for (const dir of wfRoots) {
       file: f,
       root: isPrimary ? repoRoot : path.join(repoRoot, "harness", "glasspane-harness"),
       label: isPrimary ? f : path.relative(repoRoot, path.join(dir, f)),
+      primary: isPrimary,
     })
   }
 }
@@ -334,7 +335,105 @@ function inspect(target) {
     problems.push(`${base}: no top-level "permissions:" block — this workflow inherits the repository's default token scope (often contents: write) instead of declaring the minimum it needs`)
   }
 
+  // 3b. The same rule has a second half that the check above cannot see, because it lives
+  //     *inside* a job: a job-level `permissions:` block REPLACES the workflow-level one, and
+  //     every scope it does not name becomes `none` for that job. So a job that narrows
+  //     `id-token` — the shape a provenance publish needs — and nothing else silently loses
+  //     `contents: read`, and then `actions/checkout` in that job has no readable repository
+  //     and `git ls-remote` has no credentials. `release.yml`'s `npm-publish` job was written
+  //     exactly that way and passed every publish so far, because a PUBLIC repository lets the
+  //     fetch fall back to anonymous; that fallback is not this file's promise, and the day it
+  //     stops the irreversible channel dies at step one with nothing local able to see it.
+  //     Indentation-based, like the rest of this walker: a job is a 2-space key under `jobs:`,
+  //     its own `permissions:` block is a 4-space key, and its scopes are 6-space keys.
+  //     Rule 3c rides the same walk, but only for this repository's own workflows: the fork
+  //     subtree under `harness/` is scanned by the same loop (a workflow that references a
+  //     script must still resolve), while its publish channel belongs to the harness release
+  //     line — the rule that stops the pin check from reaching it is the `primary` flag set at
+  //     the target list, and the finding is reported to that line, not fixed from here.
+  problems.push(...jobPolicyProblems(lines, { enforcePins: target.primary === true }))
+
   return { jobs: [...seen.keys()], problems }
+}
+
+/**
+ * For every job that both declares its own `permissions:` block and reads the repository
+ * (through `actions/checkout`, or by presenting the default token to `git`/`gh`), require the
+ * block to name `contents`. Returns problem lines; a job with no `permissions:` block is not
+ * this rule's business — it correctly inherits the workflow-level minimum.
+ *
+ * The same walk also serves the second rule: a job that declares an `environment:` is the job
+ * that can read secrets, so every action it runs must be addressed by commit SHA. A retagged
+ * `@v4` inside such a job is arbitrary code with the signing key in its `env:` — and the
+ * product's own trust chain cannot detect the consequence, because the updater's 8th gate
+ * checks the fingerprint on the signature, which a stolen key satisfies. Jobs with no
+ * environment are out of scope for that rule on purpose: the pin is cheap exactly where the
+ * payload is irreversible, and widening it to the read-only CI lanes is a separate change.
+ */
+function jobPolicyProblems(lines, { enforcePins = true } = {}) {
+  const out = []
+  let inJobs = false
+  let current = null
+  const jobs = new Map()
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i]
+    const line = raw.replace(/\s+$/, "")
+    if (!line || line.trimStart().startsWith("#")) continue
+    if (/^[A-Za-z0-9_-]+:/.test(line)) {
+      inJobs = line.split(":")[0] === "jobs"
+      current = null
+      continue
+    }
+    if (!inJobs) continue
+    const jobMatch = /^ {2}([A-Za-z0-9_.-]+):/.exec(line)
+    if (jobMatch) {
+      current = { name: jobMatch[1], line: i + 1, scopes: null, readsRepo: false, environment: null, unpinned: [] }
+      jobs.set(current.name, current)
+      continue
+    }
+    if (!current) continue
+    const env = /^ {4}environment:\s*(\S+)/.exec(line)
+    if (env) {
+      current.environment = env[1].replace(/^["']|["']$/g, "")
+      continue
+    }
+    if (/^ {4}permissions:\s*$/.test(line)) {
+      const scopes = new Set()
+      for (let j = i + 1; j < lines.length; j++) {
+        const scope = /^ {6}([A-Za-z0-9_-]+):/.exec(lines[j].replace(/\s+$/, ""))
+        if (scope) scopes.add(scope[1].toLowerCase())
+        else if (!/^\s*$/.test(lines[j]) && lines[j].search(/\S/) <= 4) break
+      }
+      current.scopes = scopes
+      continue
+    }
+    if (/uses:\s*actions\/checkout\b/.test(line) || /\bgithub\.token\b/.test(line) || /git ls-remote/.test(line)) {
+      current.readsRepo = true
+    }
+    const used = /^\s*(?:-\s*)?uses:\s*(\S+)/.exec(line)
+    if (used && current.environment && !/@[0-9a-f]{40}/.test(used[1])) {
+      current.unpinned.push({ ref: used[1], line: i + 1 })
+    }
+  }
+
+  for (const job of jobs.values()) {
+    if (job.scopes && job.readsRepo && !job.scopes.has("contents")) {
+      out.push(
+        `job "${job.name}" (line ${job.line}) declares its own "permissions:" block without "contents", while it checks out the repository — ` +
+          `a job-level block replaces the workflow-level one and unlisted scopes become none, so this job has no readable repository. ` +
+          `Add "contents: read" (or write) to the block at line ${job.line}.`,
+      )
+    }
+    if (enforcePins && job.environment && job.unpinned.length) {
+      out.push(
+        `job "${job.name}" declares "environment: ${job.environment}" (so it can read that environment's secrets) but runs ${job.unpinned
+          .map((u) => `${u.ref} at line ${u.line}`)
+          .join(", ")} by mutable tag — pin every "uses:" in this job to a 40-hex commit SHA.`,
+      )
+    }
+  }
+  return out
 }
 
 /**
@@ -512,6 +611,32 @@ jobs:
       expect: /no top-level "permissions:" block/,
     },
     {
+      id: "job-level permissions block that silently drops contents",
+      // The defect `release.yml`'s npm-publish job actually shipped with: a job-level block
+      // REPLACES the workflow-level one, so naming only `id-token` leaves `contents: none` in a
+      // job whose first step checks the repository out. The top-level rule above cannot see it
+      // — the file still has its `permissions:` block — so without this case the class is only
+      // catchable by remembering it, which is exactly how it survived every publish so far.
+      apply: (t) =>
+        t.replace(
+          "  build:\n    name: build the thing\n    runs-on: ubuntu-latest\n",
+          "  build:\n    name: build the thing\n    runs-on: ubuntu-latest\n    permissions:\n      id-token: write\n",
+        ),
+      expect: /without "contents"/,
+    },
+    {
+      id: "environment job running a mutable action tag",
+      // `environment:` is what makes the job interesting: it is the job that can read the
+      // signing key. Turn on an environment in BASE (whose steps run `actions/checkout@v4`)
+      // and the pin rule must fire on that ref.
+      apply: (t) =>
+        t.replace(
+          "  build:\n    name: build the thing\n    runs-on: ubuntu-latest\n",
+          "  build:\n    name: build the thing\n    runs-on: ubuntu-latest\n    environment: release\n",
+        ),
+      expect: /pin every "uses:"/,
+    },
+    {
       id: "secrets context in a step's if:",
       apply: (t) => t, // the BASE already carries it
       expect: /secrets context/,
@@ -576,6 +701,7 @@ jobs:
       file: "ci.yml",
       root: dir,
       label: "self-test",
+      primary: true,
     })
     const hit = problems.some((p) => c.expect.test(p))
     if (hit) {
