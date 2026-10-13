@@ -11,11 +11,27 @@
 【无人值守：零遗留与全线发布授权（本节优先级最高）】
 
 - **授权范围**：审查、改代码、加测试、提交、推送 `origin main`、升版本线、打 tag、触发并观察 GitHub Release 与 npm 两条发布通道、`gh workflow run -f mode=publish` 真的发 npm、改 `.github/workflows/*`、重记棘轮金样、以及（在你判定必要且已证明被覆盖内容不丢的前提下）对 split/远端分支的覆盖推送。这些都不必再问我。
-- **收口定义（不成立就是本轮失败，不是"差一点"）**：① 本轮全部改动已落在 **main** 上并推送，`git status --porcelain` 为空；② 该发的版已发完——版本号进 5 处派生位点与 lock、CHANGELOG 有条目、tag 已推、GitHub Release 非草稿且资产/签名核过、registry 两个包的版本号等于新号；③ 没有任何属于你的半成品留在临时分支、worktree 或未提交状态里。**把发版做在 `daily/main-<date>` 这类自己开的分支上而没并进 main，等于没收口**（这件事真发生过）；④ 你判定的缺陷要么修完，要么明确写成"决定不修 + 理由"，不许只挂账。
+- **收口定义（不成立就是本轮失败，不是"差一点"）**：① 本轮全部改动已落在 **main** 上并推送，`git status --porcelain` 为空；② 该发的版已发完——版本号进 5 处派生位点与 lock、CHANGELOG 有条目、tag 已推、GitHub Release 非草稿且资产/签名核过、registry 两个包的版本号等于新号；③ 没有任何属于你的半成品留在临时分支、worktree 或未提交状态里。**把发版做在 `daily/main-<date>` 这类自己开的分支上而没并进 main，等于没收口**（这件事真发生过）；④ 你判定的缺陷要么修完，要么明确写成"决定不修 + 理由"，不许只挂账；⑤ 工作区与远端已按下面【收口清理】那节做完，本轮不再留下游离的分支、工作树与临时件。
+- **发现问题必须完全解决，"记录在案"不算解决**：本轮审查发现的每一个缺陷，收口时只能处于两种状态之一——**已修复（有测试、已进 main 并随本版发布）**，或**你判定它不属于本轮范围并写下判据**（例如属于 harness 那条线或 canonical 内核，并点名由哪条线的哪一步收）。中间态不存在："已知的未修项""待补实现""留到下一轮"这些写法一律不合格。半修尤其不合格：改了 A 面而 B 面还指着旧行为（GUI 有控件而 daemon 无命令、schema 加了字段而读侧没管、remedy 指着一个不存在的开关）比不修更糟，因为它把缺陷伪装成进展。若一个缺陷的完整修复需要跨仓或跨层，那就在本轮把它做完（canonical 侧改 + 回写镜像 + 两侧发版），别把它切成两半留给明天。
 - **替你做的决定要留痕**：取号判断、要不要动风险区文件、修到哪一层、棘轮是否重记、契约是否升级——每个决定在提交正文或 `CHANGELOG.md`/`specs/` 新增记录里写下依据，汇报里再汇总一条「本轮决定 → 依据 → 回滚命令」。我不需要你问我，我需要我能复查你决定了什么。
 - **只有两件事是物理上做不到的**，别把它们当决策遗留：`npm stage approve`（要你的 2FA）与 Apple 公证（要付费账号）。碰上时先把其余一切做完，再把确切补救命令写进汇报最上方（含 stage-id、包名、版本）。除此之外，汇报里不许出现"需要你决定/需要你确认"。
 - **范围纪律**：不得为了"清零"而擅自扩大产品面（新增对外 `gp_*` 工具、改发布平台矩阵、改产品定位）。那是范围变更而不是遗留项；按最小正确修法收口，需要扩面也照此自己决定并留痕。
 - **诚实性优先于零遗留**：两者冲突时选诚实——测不出就写"未观测"。但"如实标注"不是不做完的理由：能在本机做的（含真机项：面板走 AX `kAXPressAction`、权限走 `glasspaned --permissions`、状态复现走隔离 `GLASSPANE_STATE_DIR`）必须做完。
+
+【收口清理：每轮必做的最后一步（属收口硬条件，不是收尾礼貌）】
+
+发完版不等于结束。截至 2026-10-11 本仓积下 **18 个 worktree、41 条本地分支、7 条远端分支**，其中 `daily/main-*`、`gp-harness-*`、`fix/*`、`backup/*`、`split/*` 大多是历轮任务"做完就走"留下的——这正是你要消灭的形态。收口前按这个顺序清：
+
+1. **列清单**：`git fetch origin --prune` → `git worktree list` → `git for-each-ref --format="%(refname:short)" refs/heads`（本地）→ `git branch -r`（远端）。逐条分类：本轮我建的 / 往轮我这条线建的 / 别的线（harness、canonical、并行会话）建的 / 发布锚点。
+2. **判定去向用内容，不用分支名**：`git cherry main <b>` 对 **squash 合并**的分支会误报成"未落地"（`release/1.6.0`、`release/1.6.0-pr` 就是这样，内容其实经 cherry-pick 进了 main），所以证实/证伪要用 `git diff main <b> -- <路径>` 或 `git log --oneline main..<b>` 看具体提交；`split/*` 是 subtree 搬运产物，其内容由 tag 与 split 仓承载，不参与这个判定。
+3. **删除规则**：证实在 main 里的分支 → `git branch -d <b>`（**只用 `-d`**；需要 `-D` 就说明判据不成立，回去做第 2 步），远端同名用 `git push origin --delete <b>`；真没落地的 → 本轮并回 main 修完再删，或按第 4 步作废；本轮自己建的 worktree → 先确认里面没有未提交内容（`git -C <wt> status --porcelain` 为空），再 `git worktree remove <wt>`，最后 `git worktree prune`。**别的线正在用的东西不清**（判据：worktree 还挂在该线分支上、或提交内容真未落地且属 harness/canonical）——但必须在汇报里点名并写清"该由哪条线的哪一步收"，不许让它变成无声的存量。
+4. **快照分支（`backup/*`、`safety/*`）是有条件的例外**：它们是某批未提交工作的唯一回滚点。只在该批已收口、且本轮不再需要回滚点时才删；删前把 `git log -1 --format=%s <b>` 与内容比对结果写进汇报，别顺手清掉别人的保险。
+5. **临时件**：`/var/tmp/glasspane-main-check/` 快照、往轮临时前缀与归档、`engine/.build` 之外的本轮产物、`.worktrees/` 下已 remove 的目录残留，一并清掉。`npm cache`/`node_modules` 只在空间不足时清（那是环境不是遗留）。
+6. **台账侧的遗留同样算遗留**：`CHANGELOG.md` 的 `[Unreleased]` 归入本版；本轮记录已进 `specs/`（只新增，不改历史结论）；`gh pr list --repo jingzhao-l/GlassPane --state open` 为空或每条都给出去向；GitHub 上没有悬挂的 draft Release；npm 没有待批的 staged publish（有就按物理边界处理并写明）；CI 最新一条为 success。
+7. **不许删的**：任何 tag（发布锚点，`install.sh` 与 updater 钉的就是它）、别人的活跃分支、内容未证实落地的分支、以及为"数量好看"而删掉的任何历史。
+8. **收口快照进汇报**：清理后的 `git worktree list` 行数、`git branch -a` 条数，以及一张「删了什么 / 留下什么 / 各自去向与判据」的表。
+
+
 
 【审查范围】
 
@@ -65,6 +81,7 @@
    i. **tag ≠ npm**：job 绿了不算发完，必须回查 registry：`npm view glasspane-mcp version`、`npm view glasspane-install version` 都要等于新版本；registry 在 publish 刚过的几分钟里可能返回读副本的旧值，所以按版本号点名再带 `--prefer-online`：`npm view glasspane-mcp@<X.Y.Z> version --prefer-online`、`npm view glasspane-install@<X.Y.Z> version --prefer-online`；`npm view glasspane-mcp versions --json | tail` 复算一次。
    j. 端到端实测（能本机做的就做完）：把发布归档解到临时目录 → 在树内 `npm pack` → 装进干净前缀 → 用 stdin 打一条 MCP `initialize` 断言回包含 `glasspane-mcp`；daemon 冒烟写 `engine/.build/debug/glasspaned --state-dir <临时根> --permissions`。**不要写 `GLASSPANE_STATE_DIR=<临时目录> glasspaned --permissions`**：2026-10-06 实测 daemon 不读那个环境变量，它照旧落到 home 默认根 `/Users/<you>/.glasspane` 并打一句"state is read and written under the home default"的警告后继续跑——同一条命令换成 `--prune-evidence` 就是在真机上删真档案（本轮差点就这么干了，事后核对 `~/.glasspane/evidence` 582 条完好）。归档类检查一律带 `--state-dir`。另外归档内容的判定要用 `grep -cE "(^|/)harness/"`：tar 里所有条目都在单一顶层目录 `GlassPane-<ver>/` 下，锚在 `^harness/` 的检查一条不中、会**空过成绿**。**CI 承载不了真机验收**（无障碍、事件监听、屏幕录制需登录 GUI 会话与已勾权限，记录在 `engine/smoke.md`），但**这条任务就跑在有 GUI 会话的本机上**，所以真机项属于"你能做就做完"，不是"标给别人"：用 AX `kAXPressAction` 按 `gp-*` 标识点面板控件、用 `--state-dir <临时根>` 复现状态、跑 `glasspaned --permissions` 核对读数，做完把实测结果写进汇报与 `engine/smoke.md` 的本轮记录。只有当这台机器确实没有登录会话/权限没勾时才允许写"未观测"，且必须附一句"补上它需要哪一条人工动作 + 为什么本轮跑不了"。**不得把未验证写成已验证。**
 5. 全程只要有文件更新，都必须及时提交并推送 GitHub，**且推的是 `main`**：临时分支、worktree 分支只能是你的工作台，不能是交付终点。收口时 `git status --porcelain` 为空、`git log origin/main -1` 就是本轮最后一笔。
+6. 发版与验证都完成后，执行上面【收口清理】那一节的八步，把工作区与远端清干净——**这一步没做完，本轮就不算完**。
 
 【不可让步的诚实性红线】
 
@@ -84,4 +101,4 @@
 
 【最终汇报】
 
-简明列出，按这个顺序：① **收口证据**——main 的收口 HEAD、`git status --porcelain` 为空、tag/Release（draft=false、target sha、归档是否含 harness）/registry 两个包的版本号实测值；② 版本判断依据与 `set-version` 前后位点核对；③ 每条门禁命令的**实际计数**（不是"全绿"两个字）；④ 改了哪些文件、对应哪条提交；⑤ 做过哪些反向验证（破坏哪一处、哪条具名用例变红）；⑥ **本轮我替你做了哪些决定**（含依据与回滚命令）——一项都没有通常意味着你把该决定的东西推给了别人；⑦ 未观测/未修项，每条必须写明"为什么本机做不了"与"补上它的确切一条命令"，不许写成"待你确认"。不要贴大段日志。
+简明列出，按这个顺序：① **收口证据**——main 的收口 HEAD、`git status --porcelain` 为空、tag/Release（draft=false、target sha、归档是否含 harness）/registry 两个包的版本号实测值；② 版本判断依据与 `set-version` 前后位点核对；③ 每条门禁命令的**实际计数**（不是"全绿"两个字）；④ 改了哪些文件、对应哪条提交；⑤ 做过哪些反向验证（破坏哪一处、哪条具名用例变红）；⑥ **本轮我替你做了哪些决定**（含依据与回滚命令）——一项都没有通常意味着你把该决定的东西推给了别人；⑦ 未观测/未修项，每条必须写明"为什么本机做不了"与"补上它的确切一条命令"，不许写成"待你确认"；⑧ **清理盘点**——收口后的 `git worktree list` 行数与 `git branch -a` 条数，加一张「删了什么 / 留下什么 / 各自去向与判据」的表（留下的必须写清由哪条线的哪一步收）。不要贴大段日志。

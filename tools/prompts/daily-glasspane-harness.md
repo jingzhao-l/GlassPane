@@ -11,11 +11,27 @@
 【无人值守：零遗留与全线发布授权（本节优先级最高）】
 
 - **授权范围**：审查与改 fork 定制面、改尺子层与金样（`--record` 按纪律）、加/改测试、提交并推送主仓 `main`、`subtree split` 推到 `jingzhao-l/glasspane-harness` 的 `main`、打 tag 并推（触发 binaries + checksums + 签名）、`gh workflow run -f publish_npm=true -f confirm=true` 真的发 npm（wrapper + 平台包）、改 split 仓与主仓的 `.github/workflows/*`、以及在需要覆盖时用带显式 SHA 的 `--force-with-lease`。这些不必再问我。
-- **收口定义（不成立就是本轮失败）**：① 本轮改动全部落在主仓 **main** 上并推送，`git status --porcelain` 为空；② split 仓的 `main` 与 tag `v<X.Y.Z>` 都在，Release 非草稿、资产带签名；③ registry 上 wrapper 与平台包的版本号实测等于新号；④ `SYNCLOG.md`/`CHANGELOG.md` 已留痕；⑤ 没有属于你的半成品留在临时分支、worktree 或未提交状态里。**把发版做在 `gp-harness-daily-<date>` 这类分支上而没并进 main，等于没收口**（2026-10-10 那轮就是栽在这，5 个文件的真修复挂在未提交状态里）。
+- **收口定义（不成立就是本轮失败）**：① 本轮改动全部落在主仓 **main** 上并推送，`git status --porcelain` 为空；② split 仓的 `main` 与 tag `v<X.Y.Z>` 都在，Release 非草稿、资产带签名；③ registry 上 wrapper 与平台包的版本号实测等于新号；④ `SYNCLOG.md`/`CHANGELOG.md` 已留痕；⑤ 没有属于你的半成品留在临时分支、worktree 或未提交状态里。**把发版做在 `gp-harness-daily-<date>` 这类分支上而没并进 main，等于没收口**（2026-10-10 那轮就是栽在这，5 个文件的真修复挂在未提交状态里）；⑥ 工作区与两个远端已按下面【收口清理】做完，不再留下游离分支与工作树。
+- **发现问题必须完全解决，"记录在案"不算解决**：本轮审出的每个缺陷收口时只能是「已修复 + 有固定点测试 + 已进 main（该发版的随本版发出）」或「判定不属于本轮并写下判据（点名该由哪条线哪一步收）」。"已知未修""待补实现""下一轮再看"一律不合格；**半修更糟**——改了呈现面而判定/契约面还按旧行为走（例如 `verify-published` 那句拿 `product.json` 跟自己比的自回显断言、注册表加了工具而 `hello.capabilities` 没跟上），它把缺陷伪装成进展。若完整修复要跨到 canonical 内核或主仓产品面，本轮就跨过去做完（改 canonical → 跑它门禁发版 → 升级 pin / 通知主仓那条线），不要切成两半。
 - **替你做的决定要留痕**：取号判断、split 是否需要覆盖、棘轮重记、契约 pin 是否升级、产品边界是否调整——每个决定写进 `SYNCLOG.md`/提交正文，汇报里汇总一条「本轮决定 → 依据 → 回滚命令」。
 - **物理上做不到的只有两件**：`npm stage approve`（要你的 2FA）与上游参照网络不可达时的构建。碰上先把其余一切做完，再给出确切补救命令（stage-id、包名、版本）。除此之外汇报里不许出现"需要你决定"。
 - **范围纪律**：不得为了"清零"擅自扩产品面（把 Electron 桌面 app、上游文档站、Web UI 内嵌拉进发布，或给 `product.json` 加新平台目标却没有对应 CI lane）。那属于范围变更；要做就连同代价、构建通道、brand/product 闸一起做完并留痕，否则按最小正确修法收口。
 - **诚实性优先于零遗留**：测不出的（真模型轮次、真 TUI 观感、musl/baseline 目标）照实写"未观测"，但仍要给出"补它的确切一条命令 + 为什么本轮没跑"。"如实标注"不等于可以不做。
+
+【收口清理：每轮必做的最后一步（属收口硬条件）】
+
+本线跨**两个远端**（主仓 + split 仓），游离物会双倍积累。截至 2026-10-11 主仓积下 18 个 worktree、41 条本地分支、7 条远端分支，其中 `gp-harness-daily-*`、`gp-harness-orphan-*`、`gp-harness-port-*`、`split/*`、`harness/daily-*` 全是历轮任务"做完就走"的产物——你要消灭的就是这个形态。收口前按八步走：
+
+1. **列清单**：`git fetch origin --prune` 与 `git fetch <split-url> --prune` 两边的分支都要盘；`git worktree list`、`git for-each-ref refs/heads`、`git branch -r`；split 仓侧另有 `git ls-remote --heads <split-url>` 与 `gh pr list --repo jingzhao-l/glasspane-harness --state open`。
+2. **判去向用内容不用分支名**：`git cherry main <b>` 对 squash 合并过的分支会误报"未落地"，证实/证伪用 `git log --oneline main..<b>` 与逐文件 `git diff main <b> -- <路径>`。`split/*` 是 `git subtree split` 的搬运产物，其内容已由 tag 与 split 仓承载，不参与这个判定，但**用完的那条要删**。
+3. **删除**：证实在 main 里 → `git branch -d`（只用 `-d`；要用 `-D` 就说明第 2 步没做扎实），远端同名 `git push origin --delete <b>` / 同理删 split 仓侧分支；本轮自建 worktree 在确认 `git -C <wt> status --porcelain` 为空后 `git worktree remove`，最后 `git worktree prune`。**别的线（主仓 07:30 那条、canonical iterate-skill）正在用的不清**，但要在汇报里点名并写清由哪条线的哪一步收。
+4. **快照分支**（`backup/*`、`safety/pre-harness-merge`）是一批未提交工作的唯一回滚点，只在该批已收口后才删，删前把判据写进 `SYNCLOG.md`。
+5. **临时件**：`/var/tmp/glasspane-harness/`（含往轮 `ca-bundle.pem` 之外的临时前缀、拆分归档、`split-*` 工作目录）、`harness/glasspane-harness/packages/*/dist/`、往轮 worktree 的目录残留。`node_modules`（4,671 个包）与 `.external/opencode`（223 MB 参照克隆）**不是遗留项**，是环境，别为"数量好看"去删——磁盘不足时按前置第 3 条处理。
+6. **台账类遗留也算遗留**：`CHANGELOG.md` 的 `[Unreleased]` 归入本版；`SYNCLOG.md` 本轮条目已写；fork-diff/tool-surface/brand 金样与本轮改动同批且 `--check` 复跑绿；split 仓 CI 最新一条 success；无悬挂 draft Release；无待批 staged publish；本轮开的 PR 已合并或给出去向。
+7. **不许删**：tag（发布锚点与 provenance 起点）、未证实落地的分支、别人的活跃分支、split 仓 `main` 的历史。
+8. **收口快照进汇报**：清理后主仓与 split 仓各自的 `git worktree list` 行数、分支条数，加一张「删了什么 / 留下什么 / 各自去向与判据」。
+
+
 
 【审查范围】
 
@@ -64,6 +80,7 @@
    h. 复核发布物与 registry（**tag ≠ npm，"publish 退 0" ≠ "装得上跑得通"**）：`gh release view v<X.Y.Z> --repo jingzhao-l/glasspane-harness --json isDraft,targetCommitish,assets`（资产应含 `glasspane-harness-darwin-arm64.zip`、`glasspane-harness-darwin-x64.zip`、各自 `.asc`、`SHA256SUMS.txt` 与其 `.asc`）；registry 在 publish 刚过的几分钟里可能返回读副本旧值，所以按版本号点名再带 `--prefer-online`：`npm view glasspane-harness@<X.Y.Z> version --prefer-online`、`npm view glasspane-harness-darwin-arm64@<X.Y.Z> version --prefer-online`、`npm view glasspane-harness-darwin-x64@<X.Y.Z> version --prefer-online`；最后跑发布专有的那一条（它走的就是用户的路径：把**已发布**的 tarball 装进临时前缀、跑 `--version`、在 macOS 上确认那份二进制真在供内嵌 web）：`cd harness/glasspane-harness/packages/opencode && bun run script/verify-published.ts <X.Y.Z>`——publish 绿而这条红，就是一个坏发布，不是噪声。另记一条实测事实：v0.6.4 那次 `targetCommitish` 是分支名 `main` 而不是被 tag 的 commit（split 仓的 `create-release` 步没显式 `--target`），本轮如实核对并把这条可复现性锚点的改进项列进汇报，别把它当成已具备的保证。
    i. 端到端实测（"一键下载"真正成立的那一步）：`npm install -g --prefix "$HOME/.local" glasspane-harness` → `glasspane-harness --version` 与 `gp-harness --version` 都等于新版本；curl 兜底通道装到临时前缀并**真的校验** SHA256SUMS 与 `.asc`（0.6.4 之前的这条路径从未成功过且不验签）；`bun add -g` 同理。npm ≥ 11 对首次见到的包会打 `allow-scripts` 警告（安装仍成功）与全局前缀不可写时给确切补救，这两条文案要与 `scripts/install.sh`、README 一致。`gp_*` 工具面需要 `glasspaned` 在跑（daemon 权限席位齐），起不来就如实标"未观测"，不得声称通过。
    j. `SYNCLOG.md` 留痕（本轮的测量数字、红过又修好的项、未观测的边界），主仓与 split 仓收口时 `git status --porcelain` 均为空；只要有文件更新就及时提交推送。
+5. 上面全部完成后，执行【收口清理】那八步——主仓与 split 仓两边的分支、worktree、临时件与台账都要盘，**这一步没做完本轮就不算完**。
 
 【不可让步的纪律】
 
@@ -86,4 +103,4 @@
 
 【最终汇报】
 
-简明列出，按这个顺序：① **收口证据**——主仓 main 的收口 HEAD、`git status --porcelain` 为空、split 仓 `main` 与 `v<X.Y.Z>` tag 都在、Release 是否 draft=false 及资产清单、registry 三个版本号（wrapper + darwin-arm64 + darwin-x64）实测值；② pin 与参照检出状态（`describe` == pin？）；③ 版本判断依据与两处版本线核对结果；④ 每条闸的**实际数字**（面 A/面 B 行数与占比、血缘计数、product-surface 断言条数、固定点用例通过/失败/跳过、`fork-diff` 四桶计数）；⑤ 改了哪些文件、对应哪条 `[gp]` 提交；⑥ split 发布的 tree-hash 等式证据；⑦ 端到端安装与验签结果；⑧ 反向验证证据（破坏哪一处、哪条具名用例或哪把尺子变红）；⑨ **本轮我替你做了哪些决定**（含依据与回滚命令）——一项都没有通常意味着你把该决定的东西推给了别人；⑩ 未观测/未修项，每条写明"为什么本机做不了"与"补上它的确切一条命令"。不要贴大段日志。
+简明列出，按这个顺序：① **收口证据**——主仓 main 的收口 HEAD、`git status --porcelain` 为空、split 仓 `main` 与 `v<X.Y.Z>` tag 都在、Release 是否 draft=false 及资产清单、registry 三个版本号（wrapper + darwin-arm64 + darwin-x64）实测值；② pin 与参照检出状态（`describe` == pin？）；③ 版本判断依据与两处版本线核对结果；④ 每条闸的**实际数字**（面 A/面 B 行数与占比、血缘计数、product-surface 断言条数、固定点用例通过/失败/跳过、`fork-diff` 四桶计数）；⑤ 改了哪些文件、对应哪条 `[gp]` 提交；⑥ split 发布的 tree-hash 等式证据；⑦ 端到端安装与验签结果；⑧ 反向验证证据（破坏哪一处、哪条具名用例或哪把尺子变红）；⑨ **本轮我替你做了哪些决定**（含依据与回滚命令）——一项都没有通常意味着你把该决定的东西推给了别人；⑩ 未观测/未修项，每条写明"为什么本机做不了"与"补上它的确切一条命令"；⑪ **清理盘点**——主仓与 split 仓各自的 `git worktree list` 行数与分支条数，加一张「删了什么 / 留下什么 / 各自去向与判据」的表（留下的必须写清由哪条线的哪一步收）。不要贴大段日志。
