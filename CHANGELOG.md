@@ -2,6 +2,212 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.14.1] — 2026-10-13
+
+**版本判断：patch。** 四条判据逐条实测，不是引用旧条目：状态文件的字段没动（本轮没有触碰任何 schema、
+`projects.json`、`update-state.json`、evidence 载荷）；退出码集合没动（`glasspaned` 的参数面与那台
+`DaemonExitCodeTests` 比对的码表逐字未改，`swift test` 复跑证明）；CLI 参数没动（没加、没删、没改任何开关
+语义——`GLASSPANE_REF` 是环境变量而非开关，且本轮把它改成"与已文档化的口径一致"而不是发明新语义，详见下面
+第二条 Fixed）；两个 npm 包的 `bin` 声明没动，没有新增用户可见控制件，也没有新增对外 `gp_*` 工具。
+本版**不含** `[Unreleased]`（开工时该段为空），不重复 1.14.0 已发出的内容。`harness/` 一行未动。
+取号判断：`v1.14.1` 未被占用（`git tag --sort=-v:refname` 实测顶格是 `v1.14.0`，`git ls-remote --tags origin`
+无 `v1.14.1`），registry 两包 `latest` 都是 `1.14.0`，三条线一致，因此顺序取号、无需让号。
+
+### Fixed — `npm-publish` 这个 job 从来没有被授予读仓库的权限
+
+**失效模式。** `release.yml` 顶层写着 `permissions: contents: read`，而 `npm-publish` 自己又写了
+`permissions: id-token: write`。GitHub 对 job 级 `permissions:` 是**替换**顶层，不是叠加：块里没点名的
+scope 一律降为 `none`。于是这个 job 带着 `contents: none` 跑 `actions/checkout`，下面的
+"拒绝发布一棵没有 tag 担保的树"那一步还额外跑 `git ls-remote --tags origin`——两条都要用默认 token 读仓库，
+而那个 token 在这一步没有读权限。今天能过，只因为本仓是公开仓、拉取会匿名兜底；兜底不是这份文件的承诺。
+仓库转私有、或 Actions 停止那一次兜底的当天，这条唯一的 npm 通道会死在第一步，而 15 道闸里没有一道看得见它
+（同文的 `github-release` job 早就写了 `contents: write`，形状一直是对的，只是没人把两处对齐）。
+
+**修法。** `npm-publish` 的块里补 `contents: read`；同文顺带给两个 job 各加一条 job-level
+`concurrency`（group 带 `ref_name`、`cancel-in-progress: false`）：同一个 tag 被重推或被重复 dispatch 时，
+后一个 run 只能排队，不得取消在飞的发布——`github-release` 那半边归档可以 `--clobber`，可签名签的是上一次
+签的字节，覆盖后 updater 的第 8 道校验会在每台机器上把这个 Release 拒掉；registry 那半边有 npm 的重复版本
+规则兜着，GitHub Release 这半边没有。
+
+**闸。** `scripts/check-workflows.mjs` 新增两条，与既有那条共用一次按缩进走的 job 遍历：
+3b 声明了 job-level `permissions:` 又 checkout/使用默认 token 的 job，块里必须点名 `contents`
+（旧的顶层规则看不见这一层——这正是它活到今天的原因）；3c 声明了 `environment:`（＝读得到那个环境的
+secrets）的 job，每条 `uses:` 必须钉 40 位 commit SHA，因此 `release.yml` 的
+`actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4` 与
+`actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4` 一并钉死。SHA 是把 `v4` 这个 ref
+剥到底实测确认它是 commit 而不是 annotated tag object——tag object 的 sha 写进 `uses:` 会 404。
+3c 只对 primary 工作流生效（判据见下条"记两笔账"）。
+
+**反向破坏（打在真文件上，不是合成夹具）。** 撤掉那行 `contents: read` →
+`✗ release.yml: job "npm-publish" (line 191) declares its own "permissions:" block without "contents"…`，
+rc=1；把 `github-release` 的一处 `uses:` 还原成 `@v4` →
+`✗ release.yml: job "github-release" declares "environment: release"…pin every "uses:"`，rc=1。
+两次都用本次改动自带副本还原并 `sha256` 核回，核回后 5 个文件 clean。
+`--self-test` 从 7 档增至 **9 档、每档各自证红过一次**；`updater/test/scripts-check-workflows.test.mjs`
+里那条写死用例数的断言随之改成 9 并点名两条新案——数量写死是刻意的，偷偷删一个用例仍会退 0。
+
+### Fixed — `GLASSPANE_REF` 的"同源"口径在空白值上不成立
+
+`install.sh` 注释与 `installer/cli.js:1752 resolvePinRef` 都写着两侧同源，实测差一半：`resolvePinRef`
+对值先 `trim()`，所以 `GLASSPANE_REF='   '` 在它那里等价于"没设"＝钉发布 tag；`install.sh` 不 trim，同一个值
+走进 `assert_no_option_smuggling` 的形状闸（空白正是 git `ext::` 起 shell 的必要成分）被判"含空白字符"、退 1。
+同一条命令，一条入口安静装发布版，另一条报错退出。形状闸本身是对的，错的是口径，所以修在 trim 那一侧：
+裁首尾空白、裁完为空才落回发布 tag，**带内部空白的值照旧被形状闸拒**（这条对照写进了用例，否则"修 trim"
+与"把危险值裁绿"在闸上看不出区别）。
+
+`tools/sync-kernel.sh` 两处同类：版本号那两行把 `KERNEL_SRC` 插进 `node -p "require('…')"` 的字符串字面量，
+路径含单引号（`/Users/o'brien/iterate-skill` 这种普通家目录）就是 JS 语法错误，`set -e` 让回写第一步就死在
+读版本上；改成走 `process.argv`，路径不再被当源码解析。另外 `--target=fork` 早在 2026-10-08 退役成 exit 2，
+两条拒绝报文与头部用法还写着 `supported: repo, fork` / `[--target=repo|fork]`——照抄那句话的人只会拿到
+第二次拒绝。三处文案一并改口。新增 `updater/test/tools-sync-kernel.test.mjs`（3 例）：夹具是仓库 `kernel/`
+镜像的真副本（守卫 1 比对文件集、守卫 2 从 `src/index.ts` 读消费者契约，桩形状过不了这两道），带撇号与
+不带撇号各跑一遍，后者是对照——缺了它，前一条可能因为某个守卫短路而空过成绿。
+
+### Fixed — 两处对外文案把代码没做的事说成做了
+
+1. README 双语那句"「安装更新」这个按钮给不了这条确认，要到终端里给"与代码相反：
+   `UpdateTabView.swift:252-257` 的 `gp-update-consent-check` 就是干这件事的，
+   `UpdateModel.swift:151 consentedCheck()` → `UpdatePanelLogic.swift:457`
+   `unsignedReleaseConsentArgument = ["--consent", "unsigned-release"]`。前半句（安装更新只带
+   `--consent major`）仍然成立，保留；错的是"只能去终端"，它把有图形会话的人支到命令行去按一个页面上
+   就有的按钮。终端那条写法改标为"没有图形会话的机器的兜底"。
+2. 面板 `UpdateTabView.swift:63` 的"每天自动检查一次并装新版本"过度声称：同一页的逻辑里，跨大版本走
+   `applyArguments = --consent major`（必须人按），作者身份门连 `staged` 都是空的、`applyEnabled: false`
+   （`UpdatePanelLogic.swift:530-563`），`README.md` 自己也是这么写的。文案改成"检查照做；这两件事它
+   从不自作主张"。这两条都没配文本闸——"断言某句 UI 文案含有某个中文串"的闸会被改写绕过，本仓记录过
+   那一类弱对照；正确性由上面点名的代码位置保证，且 grep 确认没有任何测试固定过旧的错误句子。
+
+### Fixed — 文档数量闸把 fork 的口径算到主仓头上，并且在被 import 时静默自杀
+
+`scripts/check-doc-links.mjs` 的"文档抄写的工具数必须等于代码里的真实数"这道判据，扫描集合
+`DOCS` 里含 `...FORK_DOCS`。`realToolCount()` 数的是 `glasspane-mcp` 对外的 `gp_*` 工具（现值 16），
+而 fork 文档在 `harness/glasspane-harness/SYNCLOG.md:107` 记的是另一件事：它实测 opencode 的
+`/experimental/tool/ids` 响应，把 harness 线自己那批 `gp_*` 工具与上游 id 一并数了一遍。两份互不
+相干的 surface 被同一把尺子要求报同一个数，于是 main 从 16:41 起恒红，而红的原因不是任何人写错了
+数字。判据的作用域收回到主仓文档；`harness/` 的内容一行未动（要真修那句，归属是 harness 线；
+本轮修的是量错对象的尺子）。
+
+同一次改动里另一个更糟的形状：这个文件把 CLI 主体写在模块顶层且无条件执行，末尾还有
+`process.exit(0)`。任何 `import` 它的测试子进程都会在登记用例之前被带走——
+`node --test updater/test/scripts-check-doc-links.test.mjs` 当时报的是 **tests 1 / pass 1**，
+而那个文件写了 4 条用例：**一份以零条用例的身份通过的门禁**。现在 CLI 只在被直接执行时运行，
+同一命令实测变成 tests 4 / pass 4。这条与本轮另一个错误同族（见末段"关于本轮流程自身的结论"），
+都是"绿"没落到具体用例名上。
+
+新增 `updater/test/scripts-check-doc-links.test.mjs`（4 例，夹具是临时根里的真形状 `tools.ts`）：
+主仓抄错数必须具名报错（并检查报文给出原句——旧写法的 `${m[1]}` 被反斜杠留在普通字符串里，
+读者只看到一行模板残骸）；数量对得上时必须不报（对照，防判据只会红）；fork 文档里那句在主仓
+口径下必须不报，而把扫描集合退回含 fork 的形状时**必须**报——证明收窄是刻意的作用域而不是正则失效。
+
+顺带一条自证：这道新闸第一次跑就抓住了**本条目自己**——上面那段最初把 fork 那句原样抄了进来，
+于是 `CHANGELOG.md`（主仓文档）因为一个引用句被判成"抄错了工具数"。改的是那句的写法（把被引用的
+数字改成描述），不是判据。
+
+### 门禁实测（本版收口时的计数，不是"全绿"两个字）
+
+`npm ci`/`npm run build` 退 0；`npm test --workspaces --if-present`：`@iterate/kernel` 90/90、
+`glasspane-mcp` 435/435、`glasspane-install` **152**/152（基线 151，+1 是本轮那条空白值用例）、
+`glasspane-update` **446**/446（基线 439，+3 sync-kernel、+4 doc-links）；
+`check-version 1.14.1` 10 个位点 + 8 条 lock 条目齐；`check-doc-links` 24 份文档 / 225 条内链 /
+26 条外链，0 问题；`check-workflows --self-test` **9** 档各证红一次（基线 7）后 5 份工作流 clean；
+`swift test --package-path engine` **952 例 / 0 失败 / 3 跳过**（那 3 条是按设计跳过的 opt-in 真机项，
+未删断言、未补模拟数据）；`swift test --package-path engine/probe` 27/27；`pytest -q bridge` 79 passed；
+`sh -n install.sh` 退 0；信号闸 `SIGNAL SMOKE OK`（SIGTERM/SIGINT 自退且 socket 被 unlink）；
+发布形态闸 `npm pack --dry-run` 正常出包；`tool-surface --check` 对主仓面 A 记录值 9119 LOC **零增长**
+（本轮未改 `mcp-shell/src`，那一层的改动全被封存在待发补丁里，见下一节）。
+
+**一处必须写下来的假绿与一处假红。** 假红：`AXWindowLookupTests.testLiveWindowListIsSelectableByThe
+CurrentKeysAndLayerRules` 在多线程并行那一次整套件里红过（它读的是**当前桌面上真开着窗口**的层号直方图，
+同机并发构建/冒烟会改窗口状态）；隔离复跑该类 6/6 绿、整套件 952/0/3 绿，判据与超时一字未改。
+假绿：新写的 doc-links 测试第一次跑时 `node --test` 报 **tests 1 / pass 1**，而文件里有 4 条用例——
+被测脚本在模块顶层自跑并 `process.exit(0)`，把测试子进程在用例登记前带走了。这条见上面那节，
+修法是给 CLI 主体加直接执行守卫，修后同一条命令报 tests 4 / pass 4。
+
+### 本轮审查发现但**没有**进这一版（逐条给去向，不挂空账）
+
+
+
+本轮按 `tools/prompts/daily-glasspane-main.md` 做了全量代码审查（9 条泳道：证据/归因、socket 与权限、
+引擎核心与 daemon CLI、MCP 壳、安装与 CI、更新器、桥与探针、UX 与功能缺口、安全）。审查产出 30 余条
+带 `file:line` 与触发条件的缺陷，其中多数是 P1/P2 级的真问题。修法各泳道已经写出来（含测试与反向破坏），
+但**三条实现泳道都在轮次上限处中断、未来得及交出复核**，而本轮收口要求发一个签名 Release。
+把 ~1800 行未经我逐条复跑的改动放进带签名的发布物，正是这个产品对外拒绝的那件事。所以这一版只带上面
+四组**我亲自验证过反向破坏**的改动，其余改动原样封存、未丢弃：
+
+```
+补丁：/var/tmp/gp-daily-main-20261013/lane-work-parked/lanes.patch（3712 行）
+新增测试文件（同目录 files/ 下）：engine/Tests/GlassPaneEngineTests/SocketDirectoryRuleTests.swift、
+  mcp-shell/test/daily-20261013.test.mjs、mcp-shell/test/support/daemon-capabilities.mjs
+套用：cd /Volumes/Eng-Dev/GlassPane && git apply /var/tmp/gp-daily-main-20261013/lane-work-parked/lanes.patch
+```
+
+判据归属：那些缺陷**仍在本轮清单上，没有被降级为"不是缺陷"**。下面是最该先接的几条，按严重度：
+
+- **P1（已被本轮实测确认，非推断）** `engine/Sources/glasspaned/main.swift:812`（`--active-project`）与
+  `:1148`：`projects.json` 存在但解不开时，`registry.get()` 返回 nil，两条命令于是报
+  `"no project <id> is registered"`——一个它从没测过的确定性否定。我用真二进制实测过：
+  `glasspaned --state-dir <截断过的 projects.json> --active-project prj_01M34567890123456789012A`
+  回 `found:false` + "no project … is registered"、退 1；同一棵树上的 `--list-projects` 却正确回
+  `loadFailed:true` 与真实 DecodeError。`ProjectRegistry.swift:30-32` 写的就是这个规矩，
+  `main.swift:780/:857/:926` 已经是正确写法，只有这两处漏。
+- **P1** `ProbeInbox.swift:488`：`stateDiff` 的 `changed: !list.isEmpty`——"报了条目"被当成"值动了"。
+  探针报 `model.count before:"3" after:"3"` 时 `changed` 仍为 true，于是 `Classifier` 的 T5（要求
+  "handler 命中且状态变化"）在空操作上开火，T4/T7（要求 `stateChanged == false`）**永久不可达**，
+  面板写"状态有变化"。这是本仓禁的那一类，且方向是过度声称。
+- **P1** `DaemonProbe.swift:360-382`：读循环只在 EAGAIN 分支查 `deadline.expired()`，对端每秒滴一个字节
+  就永远不走那条分支，绝对时限形同虚设；面板 `probeInFlight` 会长期停在旧读数上。
+- **P1** `SocketDirectoryRule.swift:24-31`：把 socket 的父目录 `chmod 0700` 且永不还原。
+  `--socket-path /Users/me/Public/Drop Box/x.sock` 会把用户的 0777 投递目录收紧；`StateRoot.classify`
+  接受 `/`，因此以 root 跑 `--state-dir /` 时 `chmod("/", 0700)` 会成功并通过这条规则。
+- **P1** `OperationID.swift:78`：`UInt64(Date().timeIntervalSince1970 * 1000)` 在 1970 之前的墙上时钟
+  （NVRAM 重置、回拨 NTP）直接 trap，第一个 `gp_act` 就把 daemon 打死在半次操作上；TS 侧那份镜像
+  （`kernel/src/decision-log.ts:129`）是防住的。
+- **P1** `EvidenceStore.swift:383/:400 → :570 → :616`：`maxAgeDays` 生效时，写盘后的 TTL 清扫会把刚
+  发布的那份档案删掉（它保留原 `createdAt`），而 `write()` 仍回 true → `evidencePersisted:true`，
+  下一次读得到 `GP_E_NO_EVIDENCE`。指示器点亮在没有字节的地方。
+- **P1** `EvidenceStore.swift:378-381 + :447`：改名成功、改模式被拒的卷上，`replaceItemAt` 已经毁掉旧档案，
+  随后的隔离失败又把目标 unlink，而日志写"Nothing was left published / existing entries were left untouched"
+  ——对重写而言这句是假的。
+- **P1** `PermissionStatus.swift:508-512`：只在字面 `"denied"` 上降级，所以 `attach.state == "spawnFailed"`
+  在面板仍显示「可用（实测）」，而这张卡的用途写的是"让调试器附加到进程"。`engine/smoke.md` 还把这个
+  读数记成绿过。
+- **P1（架构）** `mcp-shell/src/tools.ts:661-663`：`DAEMON_FORWARDED_METHODS` 按 `execute === undefined`
+  推导，把有 `execute` 的 `gp_capture_view` 排除掉，而 daemon 在 `FrameCodec.swift:73-97` 确实广播
+  `capture_view` → `describeCapabilityDrift` 在**每一次**握手都报一条假漂移。一道恒红的闸什么都挡不住。
+- **P1** `mcp-shell/src/io.ts:307-311`：注释写"`gp_diagnose` 读它"，实际 `index.ts:232`
+  从没把 `replies` writer 交给 server，`droppedFrames` 在生产路径上没有任何读者——被丢弃的回包
+  （宿主不再消费 stdout 时）在这个产品专门用来诊断的那条工具里是隐形的。
+- **P2/P3** 更新器 `apply.js:1311-1323`（kickstart 失败仍写"and the daemon was restarted"）、`apply.js:1641-1726`
+  （回滚不撤销 npm 那层，却写"restored and verified"）、`apply.js:158-237`（备份清单与它校验的树同源）、
+  `check.js:268-290`（摘要取文件、执行取缓冲）；桥的 `capture_succeeded` 不校验载荷形状（无 frames 也退 0）、
+  哨兵**结束**标记未绑 nonce（线程名里一个 `>>GPBRIDGE` 就永久读不到载荷）、Ctrl-C 遗留 attach 中的 lldb 与被
+  SIGSTOP 的目标；`Dispatcher.swift:110` 的 `observe` 收空 `role` 于是把"没有元素"报成测量结果；
+  `engine-client.ts` 的 stale-close 拆掉新连接、空 `GLASSPANE_ENGINE_SOCK` 报成"daemon 没起来去重启它"、
+  无 remedy 的帧被补成"…and retry"（`act` 那类不可重放的方法也被写进重试指令）；
+  `ProjectRegistry.swift:450/:467/:491` 的 remedy 把路径不加引号拼进命令（状态根带空格时那条命令改的是
+  两个错误的参数，用户却被告知隐私缺陷已修）；`SCKCapturer` 丢掉 `didStop` 把已知死因报成超时；
+  `ProbeSocketServer.stop()` 无条件 unlink 会删掉赢家的 socket；`main.swift:446-450` 的退出码表与逐旗标
+  实际码不符（`--active-project`/`--project`/`--recipe-validate` 缺值是 64 而非 2）。
+
+**harness 线该接的两条（判据：文件归谁拥有，不是谁先看见）**
+① `harness/glasspane-harness/.github/workflows/release.yml` 的 4 个 `environment: release` job 全跑在
+   可重标的 `actions/checkout@v4` 上（`checksums`/`publish-platform`/`publish-wrapper`/
+   `verify-trusted-publisher`，另含两个本地 `./.github/actions/setup-bun`）。判据就是我本轮 3c 那条：
+   声明了 environment 的 job 里每条 `uses:` 必须钉 SHA。3c 刻意不对 `harness/**` 生效——那条线 10:30
+   有自己的任务与发布通道，我改它的工作流会撞车；实测这一版 `check-workflows` 对它是**只报不挡**的：
+   跑 `node scripts/check-workflows.mjs` 若把那规则对 fork 打开，会立刻红 4 条。
+   ② fork-diff/gp_* 命名空间那两条结构性缺陷不在本轮范围内重新提出（已由 harness 线记录）。
+
+**一处必须留档的、关于本轮流程自身的结论。** 我在 `install.sh` 上加注释时只跑了改动所在的那一个测试文件
+（`install-sh.test.mjs`，12/12），没跑整工作区，于是 CI 的 root workspace gate 红了一条
+`installer/test/review-2026-10-09.test.mjs` 的 `finding10`——它用一条 `[\s\S]{0,220}` 邻近性断言守着
+"`REF=` 赋值行与 `[ -n "$REF" ] ||` 回退行不许被拆开"，我的 5 行注释把它撑破了。**这一条 CI 是对的，
+我是错的**：修的位置在注释而不是判据（注释整体挪到两行之前，并在文中点名该口径来自哪个用例），
+判据强度一点没放宽。教训写在这里：本仓有大量"源码形状"断言，改任何被测试读取的文件
+（`install.sh`、`release.yml`、`*.mjs` 脚本）之后必须跑**读取它的那个工作区的全部用例**，
+不是只跑我新加的那个文件——`node --test "installer/test/*.test.mjs"` 152/152 才是那条口径。
+
+
 ## [1.14.0] — 2026-10-12
 
 **版本判断：minor。** 四条 patch 判据逐条实测：状态文件的字段没动（本轮不写任何状态 schema）；退出码集合

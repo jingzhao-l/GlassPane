@@ -39,7 +39,7 @@ const FORK_DOCS = [
   'harness/glasspane-harness/.github/ISSUE_TEMPLATE/feature-request.yml',
 ]
 
-const DOCS = [
+const MAIN_DOCS = [
   'README.md',
   'README.zh-CN.md',
   'SECURITY.md',
@@ -49,8 +49,9 @@ const DOCS = [
   'CHANGELOG.md',
   'ITERATE.md',
   '.github/pull_request_template.md',
-  ...FORK_DOCS,
 ]
+
+const DOCS = [...MAIN_DOCS, ...FORK_DOCS]
 
 /** 成对文档：任一侧缺失即漂移（双语约定不能只留一条腿）。 */
 const MIRROR_PAIRS = [
@@ -88,29 +89,40 @@ function headingsOf(text) {
   return out
 }
 
-function read(rel) {
-  return fs.readFileSync(path.join(ROOT, rel), 'utf8')
+function read(rel, rootDir = ROOT) {
+  return fs.readFileSync(path.join(rootDir, rel), 'utf8')
 }
 
 /** 从 mcp-shell 源码里数出真实工具数（不依赖构建产物）。 */
-function realToolCount() {
-  const src = path.join(ROOT, 'mcp-shell', 'src', 'tools.ts')
+function realToolCount(rootDir = ROOT) {
+  const src = path.join(rootDir, 'mcp-shell', 'src', 'tools.ts')
   if (!fs.existsSync(src)) return null
   return (fs.readFileSync(src, 'utf8').match(/^\s*name:\s*"gp_[a-z_]+",/gm) ?? []).length
 }
 
-/** 扫描文档中"\d+ (MCP|个) tools/工具"式表述，与真实数量比对。 */
-function toolCountDrift() {
-  const real = realToolCount()
+/**
+ * 扫描文档中"\d+ (MCP|个) tools/工具"式表述，与真实数量比对。
+ * `docs`/`rootDir` 可注入，是为了让这条判据的两个方向都能被测试证红（见
+ * `updater/test/scripts-check-doc-links.test.mjs`）：主仓写错数必须红，fork 文档里的
+ * 另一个数不许红——后者若被并回扫描集合，main 会因为别人文档里一句真话而恒红。
+ */
+export function toolCountDrift({ docs = MAIN_DOCS, rootDir = ROOT } = {}) {
+  const real = realToolCount(rootDir)
   if (real === null) return ['无法从 mcp-shell/src/tools.ts 数出工具数量']
   const out = []
   const pattern = /(\d+)\s*(?:MCP tools|`gp_\*` MCP tools|个 MCP 工具|个 `gp_\*`|个工具)/g
-  for (const doc of DOCS.filter((d) => fs.existsSync(path.join(ROOT, d)))) {
-    const text = read(doc)
+  // 只对主仓文档判这道口径：`realToolCount()` 数的是 `glasspane-mcp` 对外的 `gp_*` 工具，
+  // 而 fork 自己那 6 个 `gp_*` 是 opencode 的 tool id（harness/…/SYNCLOG.md:107 那句
+  // "`/experimental/tool/ids` 实测 20 个 id 含全部 6 个 `gp_*`" 说的就是它，而且那个数字是
+  // 上游一次真实响应，不是抄来的主张）。把主仓的数量断言套到 fork 文档上，等于要求两份互不
+  // 相干的 surfaces 报同一个数——2026-10-13 0.7.8 那笔文档提交进来之后，这道闸就是这样在
+  // main 上恒红的，而红的原因不是任何人写错了数字。
+  for (const doc of docs.filter((d) => fs.existsSync(path.join(rootDir, d)))) {
+    const text = read(doc, rootDir)
     for (const m of text.matchAll(pattern)) {
       if (m[0].includes('gp_act') || m[0].includes('动词')) continue
       if (Number(m[1]) !== real) {
-        out.push(`${doc}: 写了 ${m[1]} 个工具，代码里实际是 ${real} 个（"\${m[1]} …"）`)
+        out.push(`${doc}: 写了 ${m[1]} 个工具，代码里实际是 ${real} 个（原句 "${m[0]}"）`)
       }
     }
   }
@@ -172,12 +184,18 @@ export function check() {
   return { docs: present.length, links, external, problems }
 }
 
-const { docs, links, external, problems } = check()
-process.stdout.write(`文档 ${docs} 份 | 仓库内链接 ${links} 条 | 外链 ${external} 条（不请求）\n`)
-if (problems.length === 0) {
-  process.stdout.write('OK：无死链、无失效锚点、双语成对完整。\n')
-  process.exit(0)
+// 只有被当成命令直接执行时才跑 CLI。这段此前是无条件执行的：`import` 它的那条测试子进程
+// 会在登记任何用例之前就被 `process.exit(0)` 带走，于是 `node --test` 报
+// "tests 1 / pass 1"——一份写了 4 条用例的文件以零条用例的身份通过。lint 脚本必须可以
+// 被安全 import（判据本身要能被单测注入），这条守卫是那道前提。
+if (process.argv[1] && path.resolve(process.argv[1]) === path.join(import.meta.dirname, 'check-doc-links.mjs')) {
+  const { docs, links, external, problems } = check()
+  process.stdout.write(`文档 ${docs} 份 | 仓库内链接 ${links} 条 | 外链 ${external} 条（不请求）\n`)
+  if (problems.length === 0) {
+    process.stdout.write('OK：无死链、无失效锚点、双语成对完整。\n')
+    process.exit(0)
+  }
+  process.stderr.write(`发现 ${problems.length} 处问题：\n`)
+  for (const p of problems) process.stderr.write(`  - ${p}\n`)
+  process.exit(1)
 }
-process.stderr.write(`发现 ${problems.length} 处问题：\n`)
-for (const p of problems) process.stderr.write(`  - ${p}\n`)
-process.exit(1)
