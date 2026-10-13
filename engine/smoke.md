@@ -507,3 +507,99 @@ X-6 把未测通道改写成 `"标签: 原文"`，且整串 reason 是 `"; "` �
 `specs/GlassPane_P4_实施规格_v4.0_收口与里程碑一致性.md` §33.1 观察 3；
 另 `kernel/fixtures/evidence-pack.ok-02.json` 的 `circuitBreaker.reason` 也是裸字面量
 （冻结 schema 的 golden 档案，同样只报不改）。
+
+---
+
+## 每日真机核对 · 2026-10-13（v1.14.1 收口轮）
+
+本机有登录 GUI 会话、四张席位里三张已勾，所以本轮把"能本机做完"的真机项全部做完，逐条留读数。
+
+### 1. daemon 自报权限（`--state-dir` 隔离根，绝不用环境变量）
+
+```
+engine/.build/debug/glasspaned --state-dir /var/tmp/gp-daily-main-20261013/stateA --permissions
+{"permissions":{"accessibility":"granted","developerTools":"unverifiable",
+ "inputMonitoring":"granted","screenRecording":"granted"},
+ "subject":{"binaryPath":"…/engine/.build/debug/glasspaned","entryName":"glasspaned","hasBundleIdentity":false}}
+rc=0
+```
+四张卡与面板逐项一致（见下面第 3 条）。`developerTools` 恒 `unverifiable` 是设计，不是本轮未观测。
+
+### 2. 一处被实测**推翻**的 P0 指控（记下来，因为它差点被当成本轮要修的洞）
+
+审查泳道提出：`--project-prune` 的预览载荷把裸 `Optional` 的 `bundleId` 放进 `[String: Any]`，
+`JSONSerialization` 会拒 → `AgentText.jsonLine` 回 nil → `writeJSON` 一个字都不写、退 0，
+于是面板「清理」按钮"恰好在有余烬时是死的"。用真二进制跑真状态根：
+
+```
+projects.json = [ …, {"bundleId":"com.example.app","evidenceStoragePath":"/private/tmp/gp-residue-evidence",…} ]
+glasspaned --state-dir <tmp> --project-prune --dry-run
+{"command":"--project-prune","dryRun":true,…,"matched":1,"projects":[{"bundleId":"com.example.app",…}],
+ "remaining":2,"total":2}   rc=0
+```
+按钮不是死的。两处独立原因叠加使那个形状不可达：`LocalArchive.isTestResidue`（`LocalArchive.swift:321-328`）
+先要求 `bundleId == "com.example.app"`，所以 `hits` 里的 `bundleId` 永远是 `.some`；且本机实测
+`JSONSerialization` 会把装箱的 Optional 写成 `null`/值（`["a": String?(nil)]` → `{"a":null}`），
+不是它声称会抛。**结论：不改代码。** 同一条判据在 `--project-prune` 的 `evidenceStoragePath` 上
+已经用了 `?? NSNull()`，那是一致性而非缺陷修复，本轮不动它。
+
+### 3. 一处被实测**确认**的缺陷（进待发清单，不在本版）
+
+同一棵树上把 `projects.json` 截断成非法 JSON：
+
+```
+glasspaned --state-dir <tmp> --active-project prj_01M34567890123456789012A
+{"command":"--active-project","error":"no project prj_… is registered","found":false,…}  rc=1
+glasspaned --state-dir <tmp> --list-projects        # 同一棵树
+{"command":"--list-projects","loadFailed":true,"error":"… is not a decodable project list …"}  rc=1
+```
+读侧对同一个不可读状态给出两种答案：一个报"看不见这张表"，一个报"确定没这个项目"——
+后者是它从没测过的确定性否定，违反 `ProjectRegistry.swift:30-32` 自己写下的规矩。
+`--prune-evidence`/`--evidence-stats --project`（`main.swift:1148`）同形。
+
+### 4. 设置面板真机走查（AX `kAXPressAction`，按 `gp-*` 标识）
+
+裸可执行文件起（`GLASSPANE_STATE_DIR` 指向临时根），递归按 `AXIdentifier` 取元素：
+
+- 窗口几何：`window[0] pos=(60,60) size=1360x796`，`AXSplitGroup pos=(60,60) size=1360x796`
+  **完全相等 → 无溢出**（这条判据是唯一抓出过"趋势卡把档案列表挤出窗口"的手段）。
+  六个页签逐个切过（权限/证据档案/项目/审批台账/配方/更新），每次两帧都等值。
+- 按下并确认 `kAXPressAction` 成功（PERFORMED）的控件：`gp-refresh-all`、`gp-nav-updates`、
+  `gp-update-refresh`。刻意没按的：`gp-prune-projects`、`gp-confirm-prune`、`gp-remove-project`、
+  `gp-update-apply`、`gp-update-auto`、`gp-update-ca-roots`、`gp-restart-after-prune`、
+  `gp-guide-*`（会去动系统设置）、`gp-verify-developer-tools`。
+- 权限页读数与第 1 条逐字一致：`gp-perm-accessibility-granted`、`gp-perm-input-monitoring-granted`、
+  `gp-perm-screen-recording-granted`、`gp-perm-developer-tools-unverifiable`。面板没有代测、没有借用。
+- 更新页三条禁用理由都**写在页面上**（不是只有 hover）：「立即检查」「安装更新」「自动更新」
+  各一行 `…现在按不动：没有找到可用的更新器（installer-pointer-stale）。请重新运行安装程序装一次 GlassPane。`
+- 本版改的那句文案在真窗口里按新样子渲染（截图 `/var/tmp/gp-daily-main-20261013/panel-updates-real.png`，
+  window id 908）："每天自动检查一次，并把校验通过的新版本在你空闲时装上。两件事它从不自作主张：
+  跨大版本、以及没有可核验签名的发布…"。
+- **顺带在真机上看到的一处结构性事实**（记下来，不改）：面板底部写"后台服务运行中 glasspaned 1.6.2"，
+  而本轮发的是 1.14.1——launchd 上跑的确实是 `~/Applications/GlassPane Daemon.app`（1.6.2 那套 runtime，
+  `launchctl print gui/$(id -u)/com.glasspane.daemon` 的 `program =` 行可查）。面板报的是它真问到的东西，
+  这是诚实读数的样子，不是缺陷；缺陷在另一处：我把 `GLASSPANE_STATE_DIR` 指到临时根，面板的更新状态读的是
+  临时根，而它问的 daemon 仍守着默认根 `~/.glasspane`——**同一个界面上并排显示两个状态根的数据，
+  且没有任何一处说它们不是同一个根**（`hello` 里没有根字段可比对）。这就是审查泳道标的那条 P1，
+  本轮实测复现，未修，去向见 CHANGELOG。
+
+### 5. 发布物端到端（真归档 → 真 pack → 真前缀 → 真握手）
+
+`GlassPane-1.14.1.tar.gz` 解到临时目录 → 树内 `npm pack` 出 `glasspane-mcp-1.14.1.tgz`（190145 B）
+→ 装进干净前缀 → `prefix/bin/glasspane-mcp` 是符号链接（1.12.x 那个 P0 的形状，这次它**能回话**）→
+stdin 打一条 `initialize`：
+
+```
+{"id":1,"jsonrpc":"2.0","result":{"capabilities":{"tools":{"listChanged":false}},
+ "protocolVersion":"2024-11-05","serverInfo":{"name":"glasspane-mcp","version":"1.14.1"}}}
+```
+归档结构用仓库自己的尺子核：`node scripts/make-release-archive.mjs --verify <archive> 1.14.1`
+→ `573 entries, 2722525 bytes, all 15 declared commands and schemas present`；
+`tar -tzf … | grep -cE "(^|/)harness/"` → **0**（数数用 `grep -c`，不用 `grep -q`）。
+资产摘要按 GitHub API 的 `assets[].digest` 比对（本机重下会被静默截断）：
+`sha256:823cefb0…b185` 与 `SHA256SUMS-1.14.1.txt` 里那一行逐字相同。
+
+### 6. 真实状态面在整轮之后未被动过
+
+`~/.glasspane/evidence` 收口计数 **582**（开工时同为 582），`projects.json` 仍是 3 条。
+所有归档类检查一律带 `--state-dir`；本轮没有任何一条命令以 `--prune-evidence` 跑在默认根上。
