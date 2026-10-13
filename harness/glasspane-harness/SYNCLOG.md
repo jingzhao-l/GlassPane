@@ -74,6 +74,41 @@ split 仓 `.github/workflows/release.yml`（`ref_name` 走 env + 形状校验、
 面 A 9119 行一字未动，22.09%→22.01% 纯粹是分母被我涨了。`fork-diff --record` 还第一次写出
 `addedDetail`（0 → **82** 条 forkHash），这正是上面第①条反向验证的前提。
 
+**发布实测（0.7.8 全链）**：split 发布前先把等价性证明跑齐——`git subtree split` 出的
+`split/glasspane-harness` tip `46d131e` 的 tree = `57bd3c366e6ccce167dc687e10e7cf9eecc3e5cc`，
+`git rev-parse HEAD:harness/glasspane-harness` = **同一个哈希**，两侧各 5009 个文件；远端
+`06241ad` 是本 tip 的祖先，所以普通 push 就过（fast-forward，**没有覆盖任何东西**，
+`--force-with-lease` 本轮不需要）。tag `v0.7.8` 由 split tip 推出。Release 跑
+`38345796379`：version-check 6s、create-release 4s、darwin-x64 5m55s、darwin-arm64 3m12s、
+checksums+签名 12s，整跑 success；`gh release view` 回读 `draft=false`、
+**`targetCommitish` = `46d131e…`（是被 tag 的那个 commit，不再是分支名——0.6.4 那条锚点缺陷
+已在真发布物上复验）**，6 份资产齐（两份 zip、三份 `.asc`、`SHA256SUMS.txt`）。
+npm 那条是独立的 dispatch：`gh workflow run release.yml --ref v0.7.8 -f publish_npm=true
+-f confirm=true`（run `38346586838`），本批新加的 `publish-gate` 在真发布路径上 7s 通过，
+两个平台包 + wrapper 三个 job 全 success。registry 按版本号点名回读
+（`--prefer-online`）：`glasspane-harness@0.7.8`、`glasspane-harness-darwin-arm64@0.7.8`、
+`glasspane-harness-darwin-x64@0.7.8` 三格实测都是 **0.7.8**；publish 刚过的那几分钟里
+`latest` 还读得到 0.7.7、按版本点名是 E404，与 0.7.7 那批记录的读副本延迟同形（约两分钟后可见）。
+`verify-published.ts 0.7.8` 退 0，逐条具名绿：装得上、两个命令都答 0.7.8、
+**已安装包清单的 `os=["darwin"] cpu=["arm64","x64"] version="0.7.8"`**（就是 10-10 那轮改掉的
+自回显断言，这次在真发布物上第一次跑到）、wrapper 点名的每个平台包都在它说的版本上、
+registry integrity `sha512-PbqGSayh…`、内嵌 web 真在供（`content-type=text/html doctype=true`）。
+三条安装通道端到端：`npm install -g --prefix $HOME/.local` → 两个命令 0.7.8，且如文案所说打了
+`allow-scripts` 警告而安装仍成功；`bun add -g` → 0.7.8；curl 兜底通道用 npm 失败的桩强制走
+release 资产，对着**真**资产跑完 `sha256: verified (SHA256SUMS.txt)` +
+`GPG: verified (signing key 0929EA31…043A1298)`，落地二进制 `--version` = 0.7.8；另外用自有
+临时 keyring 独立验了 `SHA256SUMS.txt.asc`，VALIDSIG 的指纹与安装器内置的那条逐字相同。
+本机 `/usr/local` 前缀此前还留着上一轮的 0.7.6（PATH 先命中它，会把产品版本读成旧号），
+一并升到 0.7.8。gp_* 面：`glasspaned` 在跑（pid 48075），用 fork **自己的** daemon 客户端
+直连真 socket 拿到 `hello`：version 1.6.2、capabilities `act observe assert_element audit_ui
+capture_view diagnose snapshot restore probe`、权限三席 granted + developerTools unverifiable，
+`probe_status` 回真帧（`degradation.judged=false`，"0 samples in the window, 6 needed"）。
+未观测的仍是同一批：真模型的 `gp_act` 证据成包轮次（本机只有 Ollama qwen3:8b，一轮里它
+声称工具不在它的函数表里——而 `/experimental/tool/ids` 实测 20 个 id 含全部 6 个 `gp_*`，
+所以这是模型侧的说法，不是产品事实）、真 TUI 观感、musl/baseline（已随平台裁决没有目标）。
+`--ref` 那条纪律之外还有一条如实记着：`--share` 的删除落在 tag 之后，因此**不在 0.7.8 的
+发布物里**，随下一版出（main 与 split main 的差就是这一笔）。
+
 **本轮替你做的决定**（依据与回滚见最终汇报）：取号 0.7.8（patch）；不并 10-10 orphan（已落地，
 逐行证据在上）；`split` 用 fast-forward 推、不覆盖；棘轮面 B 同批 `--record`；内核 pin **不升**
 （0.1.6 仍是 registry 上最新，`--probe` 见下）；产品边界维持现状（`product.json` 的
