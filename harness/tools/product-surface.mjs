@@ -150,6 +150,19 @@ const rootPublish = stripComments(read("script/publish.ts"))
 check("no-foreign-publish", /process\.exit\(2\)/.test(rootPublish), "script/publish.ts (fork root) no longer refuses — it must exit 2 before it can publish")
 check("no-foreign-publish", !/packages\/(sdk\/js|plugin|ui)\/script\/publish\.ts/.test(rootPublish), "script/publish.ts invokes a per-package publish script again — that lane npm-publishes under upstream's scope")
 check("no-foreign-publish", !/npm publish/.test(rootPublish), "script/publish.ts runs `npm publish` from the fork root")
+// The rule above read ONE file: the root orchestrator. The two per-package publishers it
+// used to call kept their live `npm publish *.tgz --access public` bodies — for packages
+// named @opencode-ai/plugin and @opencode-ai/sdk — and no needle that only looks at
+// script/publish.ts could ever see that. A dead root entry point with live per-package
+// entry points one `cd` away is the same door left open. These read the files themselves
+// and assert the refusal shape, the absence of the publish call, and the absence of the
+// upstream-scope identifier in executable text — the name shape the old needles missed.
+for (const rel of ["packages/plugin/script/publish.ts", "packages/sdk/js/script/publish.ts"]) {
+  const code = readCode(rel)
+  check("no-foreign-publish", /process\.exit\(2\)/.test(code), `${rel} no longer refuses — it must exit 2 before it can publish`)
+  check("no-foreign-publish", !/npm publish|--access public/.test(code), `${rel} runs a live public-registry publish again`)
+  check("no-foreign-publish", !/@opencode-ai\//.test(code), `${rel} names an upstream-scope package (@opencode-ai/...) in executable text — a live publish body is back`)
+}
 
 // ---- nothing product-facing may talk to upstream's infrastructure
 const forbidden = [
@@ -251,7 +264,16 @@ const sh = stripComments(read("scripts/install.sh"))
 check("installer-urls", (product.install?.curl ?? "").includes(`raw.githubusercontent.com/${product.repo}/`), "product.json install.curl does not point at the product's own raw script URL")
 check("installer-urls", (product.install?.npm ?? "").includes(product.name), "product.json install.npm does not install the product package")
 check("installer-urls", sh.includes("releases/download") && sh.includes(product.repo), "install.sh does not point at the product's release assets (repo + /releases/download)")
-check("installer-urls", sh.includes(`npm install -g "$NPM_SPEC"`), "install.sh does not install the npm package (npm must be the primary lane)")
+check("installer-urls", sh.includes('npm install -g --registry "$NPM_REGISTRY" "$NPM_SPEC"'), "install.sh does not install the npm package through the pinned registry (npm must be the primary lane, named registry included)")
+// The npm lane used to be the weaker channel: postinstall.mjs pins --registry because a
+// bare `npm install` lets ~/.npmrc / npm_config_registry pick the mirror whose bytes then
+// get installed (and, for postinstall, executed) — while install.sh's primary lane named
+// no registry at all. The literal here is the same product fact as postinstall's; product.json
+// is its source, hence a rule and not a coincidence. The second needle keeps the honest
+// state on the npm success line: the installer checks no sha256/GPG on that channel, and
+// the line must say so instead of printing a bare "installed via npm".
+check("installer-registry", sh.includes('NPM_REGISTRY="${GLASSPANE_HARNESS_REGISTRY:-' + product.registry + '}"'), `install.sh does not default its npm registry to product.json's ${product.registry}`)
+check("installer-registry", sh.includes("sha256/GPG: not checked on this channel"), "install.sh's npm success line dropped its verification state — the channel that checks nothing must not read like one that does")
 check("installer-urls", sh.includes("GlassPane engine"), "install.sh does not tell the user that gp_* needs the GlassPane engine running")
 check("installer-urls", sh.includes(`REPO=\"` + product.repo + `\"`) || sh.includes(`REPO="${product.repo}"`), "install.sh REPO is not the product's repo")
 check("installer-urls", existsSync(path.join(forkRoot, "scripts", "install.ps1")) === false, "a Windows installer exists — the product is macOS-only (owner decision); one that half-works is worse than none")

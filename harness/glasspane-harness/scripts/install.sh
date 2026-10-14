@@ -19,6 +19,13 @@ DRY_RUN=0
 INSTALL_ROOT="${GLASSPANE_HARNESS_HOME:-$HOME/.glasspane-harness}"
 # Allow a fork/mirror to be installed from by pinning the source explicitly.
 NPM_PACKAGE="${GLASSPANE_HARNESS_NPM:-$PRODUCT}"
+# The npm lane names its registry, same rule as the wrapper's postinstall
+# (packages/opencode/script/postinstall.mjs pins --registry for the platform package it
+# downloads AND executes): npm otherwise resolves the registry from npm_config_registry,
+# the environment, ~/.npmrc or a project .npmrc, so an ambient mirror decides which bytes
+# get installed. The literal is kept in step with product.json's `registry` by
+# harness/tools/product-surface.mjs (rule installer-registry).
+NPM_REGISTRY="${GLASSPANE_HARNESS_REGISTRY:-https://registry.npmjs.org}"
 RELEASE_BASE="${GLASSPANE_HARNESS_RELEASES:-https://github.com/$REPO/releases/download}"
 
 # ------------------------------------------------------------------ colors
@@ -60,6 +67,7 @@ glasspane-harness installer
 Environment:
   GLASSPANE_HARNESS_HOME      fallback install root (default \$HOME/.glasspane-harness)
   GLASSPANE_HARNESS_NPM       npm package to install (default glasspane-harness)
+  GLASSPANE_HARNESS_REGISTRY  npm registry for the install lane (default https://registry.npmjs.org)
   GLASSPANE_HARNESS_RELEASES  base URL for release assets (default this repo's releases)
 USAGE
       exit 0
@@ -117,10 +125,10 @@ info "platform: $PLATFORM"
 step "Install plan"
 NPM_SPEC="$NPM_PACKAGE${VERSION:+@$VERSION}"
 if [ "$VERSION" = "" ]; then
-  info "1) npm:  $NPM_SPEC        (preferred: platform selection and updates are npm's job)"
+  info "1) npm:  $NPM_SPEC        (registry: $NPM_REGISTRY; preferred: platform selection and updates are npm's job)"
   info "2) release asset fallback: $RELEASE_BASE (latest release resolved at install time)"
 else
-  info "1) npm:  $NPM_SPEC        (preferred: platform selection and updates are npm's job)"
+  info "1) npm:  $NPM_SPEC        (registry: $NPM_REGISTRY; preferred: platform selection and updates are npm's job)"
   info "2) release asset fallback: $RELEASE_BASE/v$VERSION/$PRODUCT-$PLATFORM.zip (checks sha256 against SHA256SUMS.txt, GPG against the asset's .asc)"
 fi
 info "   install root (fallback path only): $INSTALL_ROOT/bin"
@@ -137,10 +145,15 @@ if command -v npm >/dev/null 2>&1; then
   # product: the warning appeared and the install still worked — but a global
   # prefix the user cannot write to fails the install outright (EACCES), so the
   # retry below covers both real failure modes instead of assuming either.
-  if npm install -g "$NPM_SPEC"; then
-    INSTALLED_VIA="npm ($NPM_SPEC)"
-  elif npm install -g --allow-scripts="$NPM_PACKAGE" "$NPM_SPEC" 2>/dev/null; then
-    INSTALLED_VIA="npm ($NPM_SPEC, scripts allowed)"
+  # The success line carries its verification state, same shape as the release-asset line
+  # below: this channel ran NO sha256/GPG check itself — npm's tarball hash against the
+  # pinned registry's metadata is the only integrity evidence here, and the verify step
+  # further down proves the command runs, not where the bytes came from. Saying
+  # "installed via npm" alone manufactured confidence this installer did not earn.
+  if npm install -g --registry "$NPM_REGISTRY" "$NPM_SPEC"; then
+    INSTALLED_VIA="npm ($NPM_SPEC from $NPM_REGISTRY; sha256/GPG: not checked on this channel)"
+  elif npm install -g --registry "$NPM_REGISTRY" --allow-scripts="$NPM_PACKAGE" "$NPM_SPEC" 2>/dev/null; then
+    INSTALLED_VIA="npm ($NPM_SPEC from $NPM_REGISTRY, scripts allowed; sha256/GPG: not checked on this channel)"
   else
     warn "npm install failed (global prefix not writable? try: npm install -g --prefix \"\$HOME/.local\" $NPM_SPEC)"
     INSTALLED_VIA=""
@@ -461,6 +474,9 @@ if [ -z "$INSTALLED_VIA" ]; then
   # continued the install after a bare warning. A user who ended up with an
   # entirely-unverified binary still read a green `[OK] installed via … verified`, which
   # is the one thing this installer must never do: manufacture confidence it did not earn.
+  # (A 2026-10-14 edit to the npm channel above briefly rewrote this line back to a literal
+  # "sha256: verified; GPG: verified" while `$SHA_STATE`/`$GPG_STATE` still carried the real
+  # states; `installer-selftest.sh` went red on 10 named checks for exactly that reason.)
   INSTALLED_VIA="release asset ($ASSET; sha256: $SHA_STATE; GPG: $GPG_STATE)"
   case "$SHA_STATE/$GPG_STATE" in
     verified*/*verified*) ;;
