@@ -2785,7 +2785,7 @@
     {
       "file": "packages/opencode/src/cli/cmd/tui.ts",
       "upstreamHash": "d5fa46bfb1158d9047c6f50f1433e784b92c89e0",
-      "forkHash": "8858b5faf024b28029a42a0ad5e34aed84ce8c51"
+      "forkHash": "087c034ebf00394f2334b9357a8ef8cc77303a41"
     },
     {
       "file": "packages/opencode/src/cli/cmd/uninstall.ts",

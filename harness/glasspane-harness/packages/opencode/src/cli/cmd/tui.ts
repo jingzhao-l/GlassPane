@@ -203,6 +203,13 @@ export const TuiThreadCommand = cmd({
         process.chdir(next)
       } catch {
         UI.error("Failed to change directory to " + next)
+        // Same convention as the `--fork requires --continue` branch a few lines above and as
+        // `run.ts`'s identical chdir failure (`process.exit(1)`): a message this product prints
+        // on a path it did not take must not come out of the process as success. Measured on the
+        // published 0.7.8 binary: `glasspane-harness nosuchcommand` resolves the positional as a
+        // directory, printed the error above and exited 0 — so an agent scripting the CLI saw a
+        // green run that did nothing.
+        process.exitCode = 1
         return
       }
       const cwd = Filesystem.resolve(process.cwd())
