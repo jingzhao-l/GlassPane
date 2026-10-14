@@ -14,7 +14,7 @@
     "mcpShell": {
       "loc": 9232,
       "files": 13,
-      "ratio": 0.2174,
+      "ratio": 0.2154,
       "byFile": {
         "mcp-shell/src/tools.ts": 2647,
         "mcp-shell/src/engine-client.ts": 1505,
@@ -32,7 +32,7 @@
       }
     },
     "fork": {
-      "loc": 7337,
+      "loc": 7743,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -85,9 +85,14 @@
           "lines": 493
         },
         {
+          "file": "packages/tui/src/util/tool-denial.ts",
+          "kind": "added",
+          "lines": 77
+        },
+        {
           "file": "script/gpg-signing.sh",
           "kind": "added",
-          "lines": 336
+          "lines": 492
         },
         {
           "file": "script/kernel-conformance.mjs",
@@ -102,7 +107,7 @@
         {
           "file": "scripts/install.sh",
           "kind": "added",
-          "lines": 546
+          "lines": 562
         },
         {
           "file": "packages/app/src/components/dialog-connect-provider.stories.tsx",
@@ -498,6 +503,11 @@
           "file": "packages/app/src/wsl/settings-model.ts",
           "kind": "edited",
           "lines": 8
+        },
+        {
+          "file": "packages/cli/script/publish.ts",
+          "kind": "edited",
+          "lines": 34
         },
         {
           "file": "packages/core/src/config.ts",
@@ -975,9 +985,19 @@
           "lines": 2
         },
         {
+          "file": "packages/plugin/script/publish.ts",
+          "kind": "edited",
+          "lines": 31
+        },
+        {
           "file": "packages/script/src/index.ts",
           "kind": "edited",
           "lines": 22
+        },
+        {
+          "file": "packages/sdk/js/script/publish.ts",
+          "kind": "edited",
+          "lines": 31
         },
         {
           "file": "packages/server/src/auth.ts",
@@ -1062,12 +1082,17 @@
         {
           "file": "packages/tui/src/routes/session/index.tsx",
           "kind": "edited",
-          "lines": 260
+          "lines": 288
         },
         {
           "file": "packages/tui/src/util/presentation.ts",
           "kind": "edited",
           "lines": 20
+        },
+        {
+          "file": "packages/ui/script/publish.ts",
+          "kind": "edited",
+          "lines": 33
         },
         {
           "file": "script/publish.ts",
@@ -1080,14 +1105,14 @@
           "lines": 0
         }
       ],
-      "ratio": 0.1728,
+      "ratio": 0.1806,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
       },
       "testsExcluded": {
         "files": 29,
-        "lines": 2419
+        "lines": 2547
       },
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
@@ -1096,7 +1121,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 16569,
+  "totalToolSurfaceLoc": 16975,
   "note": null,
   "carried": null
 }

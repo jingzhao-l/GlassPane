@@ -12,6 +12,36 @@ contract does not).
 
 <!-- 内容归入下一版；此处留空以备下一批。 -->
 
+## [0.7.9] - 2026-10-14
+
+判据：纯修复，无产品面形状变化 ⇒ patch。本轮把"能红"这件事补在了三个层次上：
+**工具面对自己文档里的调用直接失败**、**错误出口把代理指去找人**、**发布链路上游命名空间**
+**还能被真 publish** —— 三处都不是新缺陷，是各自闸看不见的位置。
+
+- fix(tui): 拒绝判定从错误类本身读出，不再 grep 上游文案（改前测试喂的正是实现自己搜的那串字，
+  是自我认证）；`gp_*` 呈现按家族前缀派生，写死的六个方法名不再冒充全表。
+- fix(harness): `gp_observe({maxDepth:6})` / `gp_attach({pid:1234})` 不再被 `NumberFromString`
+  拒掉；1-10 的界面对数字与字符串两种形态同时生效。
+- fix(harness): 三处 remedy 从"报告给维护者 / 当作未验证 / 去查 client-server 对"改成可执行命令；
+  其中 malformed-frame 那条走真 unix socket 断言**发出去的那一帧**，不留"删注释换绿"的口子。
+- fix(harness): 压缩器不再把本文件的渲染缺陷报成"读不到会话消息"（pull 与 render 两段各自定罪）。
+- fix(harness): 决策日志 `createdAt` 不再把毫秒伪造成 `.000Z`（schema 只要三位数字，任何值都行）；
+  E7 实测两条相隔 4ms 的决策现在拿到两个不同时间戳，改前它们是同一个字符串。
+- fix(harness): 认不出的命令不再以退出码 0 收场（与同函数六行之上、与 `run.ts` 同一失败分支一致）。
+- fix(harness): `kernel-pin --check` 的 remedy 按"到底哪一侧不一致"分流，`--record` 在"装的版本 !=
+  锁解析的版本"时直接拒绝 —— 此前它对四种病开同一张方子，而那张方子会建议把正确金样洗成旧产物。
+- fix(harness): 尺子的覆盖面进契约（surface-semantics 比扫描集/caliber/规则 id；tool-surface 拒绝在
+  脏树上 record）；两条变异各自具名红，其中一条**第一次没落地却报绿**，已按"变异须证明落地"重做。
+- fix(harness): `@opencode-ai/plugin`/`-sdk`/`-cli`/`-ui` 四个 per-package 发布脚本此前是**真能 publish
+  到上游命名空间**的活门；现在四处一律拒绝并指向本产品的发布泳道，`product-surface` 的规则从写死两份
+  改成遍历 `packages/**/script/publish.ts`（漏一个就是静默放行）。125 → 144 条一致。
+- fix(harness): `release.yml` 的 publish-platform 补 `success()` —— 此前 tag/HEAD 不一致那道闸红了它照跑；
+  `gpg-signing.sh` 口令与私钥不再进 argv（`--passphrase-fd 0` / 无值 `-w` 从 stdin 读），环境级 secret
+  读不到不再退回仓库级还打 `ok`；`install.sh` 的 npm 通道钉住 registry（与 wrapper postinstall 同一条
+  纪律，此前 `~/.npmrc`/`npm_config_registry` 能决定装谁的字节）。
+- docs(harness): `installer-selftest.sh` 进 CI lane；`ci.yml` 打包那条注释不再自称"pack every artifact"
+  （该 lane 不构建，平台包在这里根本没被验过，形状验证在 release.yml 的 binaries lane）。
+
 - **`run --share` 删除（未随 0.7.8 发布：tag 已先切）。** `product.json` 把会话共享列在
   `removedFirstParty` 里，而 `run --help` 仍把它当能力 advertised；对本地起的服务实测
   `POST /session/<id>/share` 返回 **HTTP 200 + 内嵌 web 的 HTML**（该路由不存在，被 SPA 兜底吃掉），

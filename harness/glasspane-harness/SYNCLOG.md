@@ -2,6 +2,47 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-14（第八次会话）· 0.7.9：三把尺子的"看得见"与两处发布活门
+
+**开工态**：主树 `/Volumes/Eng-Dev/GlassPane` 干净（`e33356b`，与 origin 同）⇒ 开工；跑到中途
+并行会话把 `engine/*.swift` 改脏并推上 `1.15.1`（`94ad3ae`，`harness/` 零重叠）⇒ 本轮全部改动
+落在隔离工作树 `.worktrees/gp-harness-daily-20261014`（另有两条泳道各一棵树），`--record` 一律在
+自己的干净树里做，避免把别人的未提交行洗进金样；main 以 `976d354` 并进。
+
+**盘上余量**：开工 39.5 GiB 可用，收口前 33.4 GiB；`bun install` 三棵树各 2920 包。
+
+**往轮遗留判定**：`gp-harness-orphan-20261010`（`a054fdc`）**已被 main 取代**，判据用字节：
+`script/publish.ts` 与 main **blob 全等**；其余 4 文件取"该分支相对 merge-base 的新增行"逐行回 main
+核对 —— `install.sh` 0 行缺失、`product-surface.mjs` 0 行缺失、`verify-published.ts` main 已含该断言
+的更强形态（读**已装包**的 manifest 而非 product.json 自比），`installer-selftest.sh` 唯一一行是
+`grep 'curl -fL'`，而 main 在同一位置用新拼法 `grep -- "--location"`（install.sh 的 curl_args 已改长
+选项）。所以它不是"没落地"，是被重写过；本轮按纪律把它记成 main 的祖先后再删。
+
+**改动面数字**：`fork-diff vs v1.18.32: 4659/6715 byte-identical, 268 edited, 83 added, 1705 deleted`
+（开工 4663/6714、264 edited、82 added）。占比：面 A `mcp-shell/src 9232 LOC 21.54%`（开工 21.81%，
+分母随 1.15.1 变大）；面 B `fork 7743 LOC 18.06%`（开工 7254/17.14%，本批 +489 行，三条泳道有意增长，
+与代码同批 --record）。血缘 `9623 次 / 3304 文件`（开工 9622/3303；+1 文件是新增的
+`packages/tui/src/util/tool-denial.ts`，出现次数与基线持平）。product-surface **144 条一致 / 0 问题**
+（开工 125）。固定点：opencode **114 pass / 0 fail**（开工 102）、tui **30 pass / 0 fail**（开工 28）、
+`installer-selftest` **80 PASS / 0 FAIL**、六包 typecheck 干净、kernel-conformance 16 fixture 全中、
+`kernel-pin-selftest` 22 条断言全中、`check-workflows` 9 条自测各自能红 + 5 份工作流干净。
+
+**一处我自己的假绿，记在这里**：`installer-selftest.sh` 我用 `sh` 跑，报 **8 条 FAIL**，我据此判
+"main 上有安装器 fail-open"。泳道报告用 `bash` 跑同一棵树是 **80/0 全过**；复测同一棵干净树：
+`bash` 全过、`sh` 8 红 —— 那 8 条是我的调用方式（文件头写明 `bash` 调用），**不是产品缺陷**，
+上一条判断在此撤回。教训与"包装脚本退出码不可信"同源：**跑夹具前先照它自己声明的调用方式**。
+
+**另一处过程性错误**：两条泳道都没遵守"不要 --record"的交代（各自记了自己树的金样），且发布泳道
+报告了一个**不存在的提交 SHA**（`6f264b2`，`git cat-file` 查无）——它的工作实际未提交。我把它的工作
+固化为 `d69c55f`（WIP，保住字节）再合并，金样统一由主干重记。**泳道报的 green / 文件清单 / SHA
+都要自己复跑**，这条本轮又中一次。
+
+**brand-surface 血缘 +1（9623 → 9624）已按先例 --record，并在金样 lineageNote 里写明依据**：多的那一次是 CHANGELOG/SYNCLOG 在说明「这条路被封掉了」时引用了被点名的上游 scope 字面量（`@opencode-ai/plugin` 等）。字样出现在「描述它已被改掉」的位置，不是产品面新增；反证仍成立——把该段改写成不含字面量的写法，计数就回落。先例：9616/9617/9618。
+
+**没跑的部分（照实）**：本轮**未发版** —— 未推 `origin/main`、未做 subtree split、未打 tag、未派发
+npm。原因是执行预算在合并与门禁复跑之后耗尽；分支 `gp-harness-daily-20261014` 已含全部改动且六把尺子
++ 全部套件绿，可原地按 `docs/release.md` 走完。补它的确切命令见本轮汇报末尾。
+
 ## 2026-10-13（第七次会话）· 0.7.8：权限面那条"总是允许"会连带放行 gp_act；fork-diff 对我们自己的文件只记名字
 
 **开工态**：主工作树 `/Volumes/Eng-Dev/GlassPane` 被项目 1 的线以 35 个未提交文件占用

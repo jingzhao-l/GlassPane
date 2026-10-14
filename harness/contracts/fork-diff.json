@@ -4,9 +4,9 @@
   "referenceClone": ".external/opencode",
   "observedAt": "2026-10-14",
   "counts": {
-    "identical": 4663,
-    "edited": 264,
-    "added": 82,
+    "identical": 4659,
+    "edited": 268,
+    "added": 83,
     "deleted": 1705
   },
   "edited": [
@@ -104,6 +104,7 @@
     "packages/app/src/utils/terminal-websocket-url.test.ts",
     "packages/app/src/wsl/settings-model.test.ts",
     "packages/app/src/wsl/settings-model.ts",
+    "packages/cli/script/publish.ts",
     "packages/core/src/config.ts",
     "packages/core/src/database/database.ts",
     "packages/core/src/flag/flag.ts",
@@ -213,7 +214,9 @@
     "packages/opencode/test/plugin/trigger.test.ts",
     "packages/opencode/test/plugin/workspace-adapter.test.ts",
     "packages/opencode/test/server/httpapi-experimental.test.ts",
+    "packages/plugin/script/publish.ts",
     "packages/script/src/index.ts",
+    "packages/sdk/js/script/publish.ts",
     "packages/server/src/auth.ts",
     "packages/server/src/routes.ts",
     "packages/tui/src/app.tsx",
@@ -271,6 +274,7 @@
     "packages/tui/test/fixture/fixture.ts",
     "packages/tui/test/fixture/tui-sdk.ts",
     "packages/tui/test/util/presentation.test.ts",
+    "packages/ui/script/publish.ts",
     "script/publish.ts",
     "script/translate-app.test.ts",
     "script/translate-app.ts"
@@ -353,6 +357,7 @@
     "packages/opencode/test/plugin/glasspane-decision-log.test.ts",
     "packages/opencode/test/tool/glasspane-kernel.test.ts",
     "packages/opencode/test/tool/glasspane-surface.test.ts",
+    "packages/tui/src/util/tool-denial.ts",
     "product.json",
     "script/gpg-signing.sh",
     "script/kernel-conformance.mjs",
@@ -2528,6 +2533,11 @@
       "forkHash": "999674dee584268ace8fab1917da324598809f54"
     },
     {
+      "file": "packages/cli/script/publish.ts",
+      "upstreamHash": "d2855413ca6290bddced34db11e54dc4524360ea",
+      "forkHash": "5502e73db91ad06a7668fbf793093ba6b219469f"
+    },
+    {
       "file": "packages/core/src/config.ts",
       "upstreamHash": "c76486968b0784d57dab102e2d51a7e18f57b7f5",
       "forkHash": "a880e1d46409ce3f7492464ad403b376cdb1f7b9"
@@ -2660,7 +2670,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "04b11ce7fc859bfd8f2043b2b24f6fe508eb97f6"
+      "forkHash": "0947c152bd0830d829c3bb9c27f79c81df88b2f9"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -3073,9 +3083,19 @@
       "forkHash": "9f95e8b69422eccde867e8f774f8c40a976b3605"
     },
     {
+      "file": "packages/plugin/script/publish.ts",
+      "upstreamHash": "fea8c7230cf1ec69360285da04934153a7a24cc0",
+      "forkHash": "de1a2de2e4239ded5df2a90a7d4ba0f685954fc4"
+    },
+    {
       "file": "packages/script/src/index.ts",
       "upstreamHash": "d148ce0d2b708763d201e64152f9d0cb8cb0a28c",
       "forkHash": "c7292e8d3d9e30dd5a34930bd82669e2c1afd822"
+    },
+    {
+      "file": "packages/sdk/js/script/publish.ts",
+      "upstreamHash": "29426a41b7ddb3c196f8d5d6041944749a293805",
+      "forkHash": "28128f4807a7605fe54e0424598ea0b7eef804b2"
     },
     {
       "file": "packages/server/src/auth.ts",
@@ -3160,7 +3180,7 @@
     {
       "file": "packages/tui/src/routes/session/index.tsx",
       "upstreamHash": "2b54f21671b3889e6752175b1c2b0f36d189d3b9",
-      "forkHash": "52176e987596aa34dd3c9d3535581f5a32985363"
+      "forkHash": "8b553afe3f1c7cbf5e6476598a9d58d805db1dea"
     },
     {
       "file": "packages/tui/src/theme/assets/aura.json",
@@ -3345,7 +3365,7 @@
     {
       "file": "packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx",
       "upstreamHash": "6da90633ca421fa085fa1c69ffbd5c0c8a3dc0fa",
-      "forkHash": "6ef1da2e002a1663db89f2e2b5d6afacf7a58fcc"
+      "forkHash": "ba33438e7c09442fc8597422283bdfab37f49f41"
     },
     {
       "file": "packages/tui/test/fixture/fixture.ts",
@@ -3361,6 +3381,11 @@
       "file": "packages/tui/test/util/presentation.test.ts",
       "upstreamHash": "d1aab4ea49b43d52c10d0dd67b14834fded17d96",
       "forkHash": "85ed2a3670cb1b82d2d2f67df4c55cfe5a847d5e"
+    },
+    {
+      "file": "packages/ui/script/publish.ts",
+      "upstreamHash": "ba81ab7dfee881a9a5984983c3fd68d231818b8b",
+      "forkHash": "bd96e4731fb4ae943d0fe5fdb3b90538dcc4fbcf"
     },
     {
       "file": "README.md",
@@ -3391,11 +3416,11 @@
   "addedDetail": [
     {
       "file": ".github/workflows/ci.yml",
-      "forkHash": "8c3db16a6bd0963a8be46ac696d6c32ef58f0a2e"
+      "forkHash": "dd8824bd10509e3147dfe9e2a201341418ab14fe"
     },
     {
       "file": ".github/workflows/release.yml",
-      "forkHash": "b54c9f0845003618f875eba83a350cfb4d69eafa"
+      "forkHash": "3366f969c035517f018e5fb537363a794ae8b2b3"
     },
     {
       "file": ".glasspane-harness/.gitignore",
@@ -3563,7 +3588,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "207e306cf2361276615b37883d6828ceccfd803b"
+      "forkHash": "08edb75a12c7410248da82eea5c889d4b89b8642"
     },
     {
       "file": "contracts/kernel-conformance.json",
@@ -3690,8 +3715,12 @@
       "forkHash": "ec6c68e77d2952c2c248200eb07a62e98a8edccd"
     },
     {
+      "file": "packages/tui/src/util/tool-denial.ts",
+      "forkHash": "f27f67693f04a11134fdcca6206c38825873835a"
+    },
+    {
       "file": "product.json",
-      "forkHash": "79b0634f69771a143cbc07475a28af8b4e987af9"
+      "forkHash": "a99dceb51c1a0f52fb55970aad30cf2170ef7227"
     },
     {
       "file": "README.zh-CN.md",
@@ -3699,7 +3728,7 @@
     },
     {
       "file": "script/gpg-signing.sh",
-      "forkHash": "bd56372cae6a1a7cb92422409be926c87e320d55"
+      "forkHash": "78ed34a165776dde4fbe4047b0820b561f85c62b"
     },
     {
       "file": "script/kernel-conformance.mjs",
@@ -3711,11 +3740,11 @@
     },
     {
       "file": "scripts/install.sh",
-      "forkHash": "4680aa83856e32dee9f9f808c3f403c363e69bc9"
+      "forkHash": "b93a94009c43f17192e14a5bfbde065bab859b40"
     },
     {
       "file": "SYNCLOG.md",
-      "forkHash": "039567fc2776c3f374334f2697e6013160f93624"
+      "forkHash": "3d9b7afe56e47e0d845d89f8623ed473a8bdde41"
     }
   ]
 }
