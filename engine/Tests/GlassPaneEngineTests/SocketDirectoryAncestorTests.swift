@@ -51,6 +51,29 @@ final class SocketDirectoryAncestorTests: XCTestCase {
         XCTAssertNil(SocketDirectoryRule.ancestorDefect(for: leaf), "the rule reads the mode, not a memory of it")
     }
 
+    /// The wiring, not just the predicate: `enforce` is what both listeners call, and
+    /// a table test on `ancestorIsIsolated` stays green even if the call is dropped.
+    /// REVERSE: make `enforce` return nil after the leaf checks → this reddens.
+    func testEnforceItselfRefusesABadAncestor() throws {
+        let parent = TestSandbox.directory("enforce-parent")
+        let leaf = parent + "/sock"
+        XCTAssertNoThrow(try FileManager.default.createDirectory(atPath: leaf, withIntermediateDirectories: true))
+        chmod(parent, 0o700)
+        XCTAssertNil(SocketDirectoryRule.enforce(directory: leaf), "\(SocketDirectoryRule.enforce(directory: leaf) ?? "nil")")
+
+        chmod(parent, 0o777)
+        let defect = SocketDirectoryRule.enforce(directory: leaf)
+        XCTAssertNotNil(defect, "enforce stopped asking the ancestor rule")
+        XCTAssertTrue(defect?.contains(parent) == true, "must name the level: \(defect ?? "nil")")
+
+        chmod(parent, 0o1777)
+        XCTAssertNil(
+            SocketDirectoryRule.enforce(directory: leaf),
+            "sticky world-writable is the /tmp shape and must not be refused: \(SocketDirectoryRule.enforce(directory: leaf) ?? "nil")"
+        )
+        chmod(parent, 0o700)
+    }
+
     func testHomeDefaultPassesTheAncestorRule() throws {
         // The documented default is `~/.glasspane`. Refusing it would be a P0 of its
         // own (every installed daemon fails to start), so this is checked, not assumed.
