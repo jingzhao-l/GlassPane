@@ -148,8 +148,61 @@ check("wrapper-name-in-publish", !publish.includes('pkg.name + "-ai"'), "publish
 // sentence *describing* the removed body cannot satisfy it — only the absence of the body can.
 const rootPublish = stripComments(read("script/publish.ts"))
 check("no-foreign-publish", /process\.exit\(2\)/.test(rootPublish), "script/publish.ts (fork root) no longer refuses — it must exit 2 before it can publish")
-check("no-foreign-publish", !/packages\/(sdk\/js|plugin|ui)\/script\/publish\.ts/.test(rootPublish), "script/publish.ts invokes a per-package publish script again — that lane npm-publishes under upstream's scope")
 check("no-foreign-publish", !/npm publish/.test(rootPublish), "script/publish.ts runs `npm publish` from the fork root")
+// The two rules above read ONE file: the root orchestrator. The per-package publishers it
+// used to call kept their live `npm publish … --access public` bodies, and no needle that
+// only looks at script/publish.ts can ever see a file it does not open. A dead root entry
+// point with live per-package entry points one `cd` away is the same door left open — and
+// the door was wider than the report: four such publishers existed (`@opencode-ai/plugin`,
+// `-sdk`, `-ui`, `-cli`), each with its own live publish line, none of them named in
+// product.json, none of them protected by `private` or a `publishConfig` gate.
+//
+// The set is DISCOVERED, not remembered: walking `packages/**/script/publish.ts` means an
+// upstream sync that lands a fifth publisher trips this rule without anyone editing it,
+// which is exactly the failure a hardcoded file list repeats. The product's own publisher is
+// the one file allowed to still contain a publish call, so it is excluded by path.
+const publisherFiles = (() => {
+  const found = []
+  const walk = (rel, depth) => {
+    if (depth > 4) return
+    for (const entry of readdirSync(path.join(forkRoot, rel), { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name === "node_modules" || entry.name.startsWith(".")) continue
+      const child = path.join(rel, entry.name)
+      if (entry.name === "script" && existsSync(path.join(forkRoot, child, "publish.ts"))) {
+        found.push(`${child}/publish.ts`)
+      }
+      walk(child, depth + 1)
+    }
+  }
+  walk("packages", 0)
+  return found
+})()
+
+const productPublisher = "packages/opencode/script/publish.ts"
+const foreignPublishers = publisherFiles.filter((f) => f !== productPublisher).sort()
+// A broken walk disables this whole section while still printing green, so the discovery is
+// asserted on its own: the four known dead ends must all still be found. If one goes missing
+// because it moved, this names it; if all four go missing, the walk is broken.
+check("no-foreign-publish", publisherFiles.includes(productPublisher), "the product's own publisher (packages/opencode/script/publish.ts) is not discovered — the walk is broken")
+for (const want of [
+  "packages/cli/script/publish.ts",
+  "packages/plugin/script/publish.ts",
+  "packages/sdk/js/script/publish.ts",
+  "packages/ui/script/publish.ts",
+]) {
+  check("no-foreign-publish", foreignPublishers.includes(want), `${want} is not discovered as a per-package publisher — it moved (update the dead-end list) or the walk broke`)
+}
+check(
+  "no-foreign-publish",
+  !foreignPublishers.some((rel) => rootPublish.includes(rel)),
+  "script/publish.ts invokes a per-package publish script again — that lane npm-publishes under upstream's scope",
+)
+for (const rel of foreignPublishers) {
+  const code = readCode(rel)
+  check("no-foreign-publish", /process\.exit\(2\)/.test(code), `${rel} no longer refuses — it must exit 2 before it can publish`)
+  check("no-foreign-publish", !/npm publish|--access public/.test(code), `${rel} runs a live public-registry publish again`)
+  check("no-foreign-publish", !/@opencode-ai\//.test(code), `${rel} names an upstream-scope package (@opencode-ai/...) in executable text — a live publish body is back`)
+}
 
 // ---- nothing product-facing may talk to upstream's infrastructure
 const forbidden = [
@@ -251,7 +304,16 @@ const sh = stripComments(read("scripts/install.sh"))
 check("installer-urls", (product.install?.curl ?? "").includes(`raw.githubusercontent.com/${product.repo}/`), "product.json install.curl does not point at the product's own raw script URL")
 check("installer-urls", (product.install?.npm ?? "").includes(product.name), "product.json install.npm does not install the product package")
 check("installer-urls", sh.includes("releases/download") && sh.includes(product.repo), "install.sh does not point at the product's release assets (repo + /releases/download)")
-check("installer-urls", sh.includes(`npm install -g "$NPM_SPEC"`), "install.sh does not install the npm package (npm must be the primary lane)")
+check("installer-urls", sh.includes('npm install -g --registry "$NPM_REGISTRY" "$NPM_SPEC"'), "install.sh does not install the npm package through the pinned registry (npm must be the primary lane, named registry included)")
+// The npm lane used to be the weaker channel: postinstall.mjs pins --registry because a
+// bare `npm install` lets ~/.npmrc / npm_config_registry pick the mirror whose bytes then
+// get installed (and, for postinstall, executed) — while install.sh's primary lane named
+// no registry at all. The literal here is the same product fact as postinstall's; product.json
+// is its source, hence a rule and not a coincidence. The second needle keeps the honest
+// state on the npm success line: the installer checks no sha256/GPG on that channel, and
+// the line must say so instead of printing a bare "installed via npm".
+check("installer-registry", sh.includes('NPM_REGISTRY="${GLASSPANE_HARNESS_REGISTRY:-' + product.registry + '}"'), `install.sh does not default its npm registry to product.json's ${product.registry}`)
+check("installer-registry", sh.includes("sha256/GPG: not checked on this channel"), "install.sh's npm success line dropped its verification state — the channel that checks nothing must not read like one that does")
 check("installer-urls", sh.includes("GlassPane engine"), "install.sh does not tell the user that gp_* needs the GlassPane engine running")
 check("installer-urls", sh.includes(`REPO=\"` + product.repo + `\"`) || sh.includes(`REPO="${product.repo}"`), "install.sh REPO is not the product's repo")
 check("installer-urls", existsSync(path.join(forkRoot, "scripts", "install.ps1")) === false, "a Windows installer exists — the product is macOS-only (owner decision); one that half-works is worse than none")

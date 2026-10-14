@@ -1,26 +1,34 @@
 #!/usr/bin/env bun
-
-import { Script } from "@opencode-ai/script"
-import { $ } from "bun"
-import { rm } from "node:fs/promises"
-import { fileURLToPath } from "node:url"
-import { pack } from "./pack"
-
-process.chdir(fileURLToPath(new URL("..", import.meta.url)))
-
-const pkg = (await Bun.file("package.json").json()) as { name: string; version: string }
-const tarball = `${pkg.name.replace("@", "").replace("/", "-")}-${pkg.version}.tgz`
-
-if ((await $`npm view ${pkg.name}@${pkg.version} version`.nothrow()).exitCode === 0) {
-  console.log(`already published ${pkg.name}@${pkg.version}`)
-  process.exit(0)
-}
-
-try {
-  await $`bun run typecheck`
-  await $`bun run test`
-  await pack()
-  await $`npm publish ${tarball} --access public --tag ${Script.channel}`
-} finally {
-  await rm(tarball, { force: true })
-}
+/**
+ * [gp] Refused. This is upstream's publisher for this package, and this product does not ship it.
+ *
+ * What the upstream body did: typechecked, tested, packed the directory and ran the real
+ * registry publish — `npm publish <tarball> --access public` — for the package named
+ * `@opencode-ai/ui`, whose own manifest carries `publishConfig.access: "public"`. This fork
+ * does not own that scope; publishing into it from a fork is supply-chain impersonation, not
+ * distribution. The product's npm surface is exactly three packages (the wrapper + the two
+ * macOS platform packages), built and validated by `packages/opencode/script/publish.ts` and
+ * dispatched only by `.github/workflows/release.yml` (`product.json` → `npm.publishPolicy`,
+ * FORK.md 纪律 5).
+ *
+ * The workspace still consumes this package by name through `workspace:*` — that is local
+ * resolution, never the registry — so the manifest keeps its name and this script keeps its
+ * path as a dead end: a future upstream sync lands on a refusal that says why, instead of
+ * silently re-acquiring a publisher for someone else's names. `./pack` stays where it is;
+ * the product's own validator imports nothing from here.
+ * `harness/tools/product-surface.mjs` rule `no-foreign-publish` discovers this file by
+ * walking the packages tree for per-package publish scripts and asserts the refusal holds,
+ * in code, with no publish call and no upstream-scope identifier left in the executable text.
+ *
+ * Remedy — the product's own release lane, from the fork root:
+ *   cd packages/opencode && bun run script/publish.ts --dry-run
+ *   docs: docs/release.md
+ */
+console.error("glasspane-harness: this script does not publish anything, on purpose.")
+console.error("  It is upstream's publisher for this package: it would put a stranger-scope")
+console.error("  name on the public registry from a fork. This product ships only the names")
+console.error("  product.json declares.")
+console.error("  Remedy (the product's own release lane):")
+console.error("    cd packages/opencode && bun run script/publish.ts --dry-run")
+console.error("    docs: docs/release.md")
+process.exit(2)

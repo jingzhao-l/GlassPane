@@ -367,7 +367,11 @@ jobs:
 
   publish-platform:
     name: npm ${{ matrix.target }}
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
+    # `success() &&` is load-bearing: a `needs:` edge alone does NOT gate the job when its
+    # `if:` is an explicit expression — GitHub runs it even when publish-gate failed, and
+    # the tag/HEAD agreement this job exists to enforce would then have guarded nothing.
+    # publish-wrapper already carries it (see its `if:`); this job was the bypass.
+    if: success() && github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
     needs: publish-gate
     runs-on: ${{ matrix.runner }}
     environment: release
