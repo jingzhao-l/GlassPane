@@ -271,6 +271,36 @@ test("a failed evidence fetch keeps the daemon's remedy in the partial report", 
   assert.ok(text.includes(remedy), `daemon 的出路被 describeFetchFailure 丢了：${text.slice(0, 400)}`);
 });
 
+/**
+ * The partial report's failure line (review 2026-10-09 finding 5, the render half).
+ *
+ * The test above answers the *first* id with an error, so `packs.length === 0` and
+ * the whole call collapses to the daemon's own error frame — a path that never
+ * touches the report renderer. The defect lived in the renderer: when the first id
+ * answers a pack and a *later* id answers an error frame, the report renders the
+ * fetched pack and appends a failure note, and that note used to run the failure
+ * line through `renderForeign`, the trail-id escaper — whose 64-char cap truncated
+ * the remedy and whose `|`→`·` substitution destroyed the `| remedy:` separator the
+ * fix had just restored. Reverting the note to `renderForeign` reddens both
+ * assertions below (the remedy is longer than the cap and contains the separator).
+ */
+test("the failure line of a partial report keeps its remedy untruncated and its | separator intact", async () => {
+  // Long enough to cross RENDERED_ID_MAX_CHARS (64) so the id escaper's cap bites.
+  const remedy = "read this operation on its own with gp_last_evidence {operationId}, which answers inside its own deadline; do not re-run gp_act to regenerate what the trail already holds";
+  const text = await recentReportsWith(
+    answerEveryFrame((id, index) => (index === 0
+      ? resultFrame(id, evidenceFrame(OP_A))
+      : errorFrame(id, "GP_E_NOT_ATTACHED", "no app attached", remedy))),
+    [OP_A, OP_B],
+  );
+  // The pack rendered (report is not collapsed to a single error) — so this is the
+  // branch that goes through the failure-note renderer.
+  assert.match(text, /GlassPane recent reports \(1\)/);
+  assert.match(text, /GP_E_NOT_ATTACHED/);
+  assert.ok(text.includes(`| remedy: ${remedy}`),
+    `失败行的 | remedy: 分隔符或长出路被 trail-id 转义器毁了（截到 64 或把 | 换成 ·）：${text.slice(text.indexOf("GP_E_NOT_ATTACHED"), text.indexOf("GP_E_NOT_ATTACHED") + 240)}`);
+});
+
 /* ------------------------------------------------------------------ *
  * Finding 6 — the argument error has to survive a pipe.
  * ------------------------------------------------------------------ */

@@ -94,6 +94,21 @@ export const SITES = [
     regex: /(export const RELEASE_VERSION = ')([^']+)(')/,
     hint: 'npx 引导 clone 的发布 tag',
   },
+  {
+    // 文档里的 clone 命令以前是一个没人管的浮字：README 写 v1.11.0、install.sh 已经
+    // 走到 v1.14.1，而 README 那句话自己写着"这个数字请对着 install.sh 核"——没人核。
+    // 2026-10-14 的审查量到的就是这条漂移（两处语言各一份）。
+    id: 'README 钉 ref（英）',
+    file: 'README.md',
+    regex: /(git clone --branch v)([0-9][0-9.]*)( )/,
+    hint: '对外文档里那条 clone 命令钉的发布 tag',
+  },
+  {
+    id: 'README 钉 ref（中）',
+    file: 'README.zh-CN.md',
+    regex: /(git clone --branch v)([0-9][0-9.]*)( )/,
+    hint: '与英文版同一条 clone 命令',
+  },
 ]
 
 /**

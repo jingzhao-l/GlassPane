@@ -229,14 +229,18 @@ function main(): void {
   // One shared audit session plus the late-reply sink; see
   // `createTrackedMcpServer` for why that wiring is a production seam and not
   // four lines in here.
-  const server = createTrackedMcpServer(engine, logNote).server;
+  const server = createTrackedMcpServer(engine, logNote, () => replies.droppedFrames).server;
 
   /** One framed reply on stdout; a notification/blank line has none to write. */
   const writeResponse = async (response: unknown): Promise<void> => {
     if (response === null) {
       return;
     }
-    await replies.write(canonicalJson(response) + "\n");
+    // The id is handed to the writer so a dropped reply names which request was
+    // lost, and the boolean is not discarded: `false` means this reply will never
+    // reach stdout, which `gp_diagnose` then surfaces from the writer's counter.
+    const id = (response as { id?: number | string | null }).id;
+    await replies.write(canonicalJson(response) + "\n", id);
   };
 
   const reader = new LineReader({
@@ -292,8 +296,13 @@ function main(): void {
   // this chain: stdin closing tears the session down while the daemon may still
   // be working on a request whose client has already gone away.
   process.stdin.on("close", () => queue.push(async () => shutdown()));
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  // Signals join the stdin error/close paths in `queue.push`, for the reason
+  // documented there: `shutdown()` ends stdout, and run straight from a signal
+  // handler it jumped ahead of the replies the queue had already taken but not yet
+  // written — the same loss finding 7 closed on stdin, reachable instead through
+  // Ctrl-C. A signal now waits its turn behind the bytes in flight.
+  process.on("SIGINT", () => queue.push(async () => shutdown()));
+  process.on("SIGTERM", () => queue.push(async () => shutdown()));
 }
 
 main();

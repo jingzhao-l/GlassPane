@@ -304,20 +304,29 @@ export class DrainAwareWriter {
     return this.dead !== null;
   }
 
-  /** How many replies this writer refused to queue. `gp_diagnose` reads it: a
-   * silently-shrinking answer is the failure mode this ceiling replaces. */
+  /**
+   * How many replies this writer refused to queue. `gp_diagnose` reads it and
+   * surfaces it in-band (a reply dropped to a stalled stdout otherwise has no
+   * reader outside the logs): a silently-shrinking answer is the failure mode this
+   * ceiling replaces.
+   */
   get droppedFrames(): number {
     return this.dropped;
   }
 
-  /** @param text already framed, including its trailing newline. */
-  async write(text: string): Promise<boolean> {
+  /**
+   * @param text already framed, including its trailing newline.
+   * @param requestId the JSON-RPC id the frame answers, so a drop names *which*
+   * reply the agent lost rather than only that one went missing.
+   */
+  async write(text: string, requestId?: number | string | null): Promise<boolean> {
     if (this.failed) {
       return false;
     }
     if (this.sink.writableLength >= this.backlogLimitBytes) {
       this.dropped += 1;
-      this.report(`reply dropped, not queued: stdout already holds ${this.sink.writableLength} bytes past the ${this.backlogLimitBytes} ceiling — the reader on the other end stopped consuming, so this frame (and ${this.dropped - 1} earlier one(s)) will not be delivered`);
+      const who = requestId === undefined || requestId === null ? "a reply" : `reply ${JSON.stringify(requestId)}`;
+      this.report(`${who} dropped, not queued: stdout already holds ${this.sink.writableLength} bytes past the ${this.backlogLimitBytes} ceiling — the reader on the other end stopped consuming, so this frame (and ${this.dropped - 1} earlier one(s)) will not be delivered`);
       return false;
     }
     let flowing = true;

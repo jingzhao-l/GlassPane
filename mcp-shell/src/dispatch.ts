@@ -84,6 +84,13 @@ export interface McpServerDeps {
    * request it refers to stayed in flight and kept acting on the user's screen.
    */
   report?: (note: string) => void;
+  /**
+   * Reads how many replies this shell's stdout writer dropped because the pipe
+   * stopped draining. `gp_diagnose` surfaces it so a dropped reply is visible
+   * in-band rather than only in the log channel; it is wired from `index.ts`,
+   * where the `DrainAwareWriter` that counts them lives.
+   */
+  stdoutDroppedFrames?: () => number;
 }
 
 export class McpServer {
@@ -234,7 +241,13 @@ export class McpServer {
     // naming a cause the published schema (`properties: {}`, no `required`)
     // denies, and an empty issue path that renders as a stray `": Required"`.
     // Absent means empty here, exactly what the `{"arguments":{}}` twin sends.
-    const outcome = await executeTool(spec, params.arguments ?? {}, this.deps.engine, this.session);
+    const outcome = await executeTool(
+      spec,
+      params.arguments ?? {},
+      this.deps.engine,
+      this.session,
+      this.deps.stdoutDroppedFrames,
+    );
     return this.result(id, { content: outcome.content, isError: outcome.isError });
   }
 
@@ -281,6 +294,7 @@ export class McpServer {
 export function createTrackedMcpServer(
   engine: EngineJsonRpcClient,
   report: (note: string) => void,
+  stdoutDroppedFrames?: () => number,
 ): { server: McpServer; session: EvidenceAuditSession } {
   const session = new EvidenceAuditSession();
   engine.onLateReply(({ method, result, correlation, attribution }) => {
@@ -348,7 +362,7 @@ export function createTrackedMcpServer(
       },
     );
   });
-  return { server: new McpServer({ engine, session, report }), session };
+  return { server: new McpServer({ engine, session, report, stdoutDroppedFrames }), session };
 }
 
 /** The attach result's app, phrased for a log line; never a guessed identity. */

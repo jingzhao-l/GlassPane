@@ -282,6 +282,15 @@ export interface ToolSpec {
    * packs and render them through the report generator.
    */
   execute?: (args: Record<string, unknown>, context: ToolExecuteContext) => Promise<ToolResult>;
+  /**
+   * True for a tool that has its own `execute` yet still puts a real daemon
+   * method on the wire (`gp_capture_view`'s executor calls `capture_view`), so
+   * `hello.capabilities` reconciliation must count its `engineMethod` as
+   * forwarded. Left unset on genuinely shell-only tools (`gp_recent_reports`,
+   * the project tools), whose `engineMethod` is a pseudo-method the daemon does
+   * not advertise and would answer with `methodNotFound`.
+   */
+  reachesDaemon?: true;
 }
 
 export interface ToolExecuteContext {
@@ -375,7 +384,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       additionalProperties: false,
       properties: {
         maxDepth: { type: "integer", minimum: 1, maximum: 10 },
-        role: { type: "string", maxLength: SELECTOR_MAX_LENGTH },
+        role: { type: "string", minLength: 1, maxLength: SELECTOR_MAX_LENGTH },
       },
     },
     validate: zodBridge(ObserveArgs),
@@ -468,6 +477,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     validate: zodBridge(CaptureViewArgs),
     execute: captureView,
+    reachesDaemon: true,
   },
   {
     name: "gp_diagnose",
@@ -657,9 +667,18 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
  * (`engine-client.describeCapabilityDrift`): a hand-copied second truth is the
  * exact drift the reader exists to catch, and the gateway already derives its own
  * forwardable set from `execute === undefined` for the same reason.
+ *
+ * `execute === undefined` alone under-counts: `gp_capture_view` has its own
+ * executor, yet that executor calls `capture_view` on the wire, so the daemon
+ * advertises a method the agent *can* reach and the reconciliation would report
+ * as unreachable from MCP. `reachesDaemon` marks exactly those executor tools
+ * that still forward a real daemon method; `test/shell-2026-defects.test.mjs`
+ * cross-checks this set against both the daemon's advertised capability names and
+ * the literal `.call("…")` sites so neither a new omission nor a stale pseudo-
+ * method survives silently.
  */
 export const DAEMON_FORWARDED_METHODS: readonly string[] = TOOL_SPECS
-  .filter((spec) => spec.execute === undefined)
+  .filter((spec) => spec.execute === undefined || spec.reachesDaemon === true)
   .map((spec) => spec.engineMethod);
 
 export const TOOL_BY_NAME: ReadonlyMap<string, ToolSpec> = new Map(
@@ -1295,6 +1314,13 @@ export async function executeTool(
    * tests), where an omitted argument compiles forever and fails silently.
    */
   session: EvidenceAuditSession,
+  /**
+   * Reads how many replies this shell's stdout writer dropped under backpressure,
+   * so `gp_diagnose` can surface a lost reply in-band. Optional: only `index.ts`
+   * owns the writer, and a caller without one (tests, the HTTP gateway) leaves it
+   * undefined and the tool stays silent.
+   */
+  stdoutDroppedFrames?: () => number,
 ): Promise<ToolResult> {
   if (!session) {
     return {
@@ -1330,13 +1356,13 @@ export async function executeTool(
   // carry the knob the caller actually set (see {@link engineWithPayloadAdvice}).
   const advised = engineWithPayloadAdvice(engine, spec, checked.value);
   if (!trailScopedTool(spec)) {
-    return runValidatedTool(spec, checked.value, advised, session, INERT_TRAIL_TURN);
+    return runValidatedTool(spec, checked.value, advised, session, INERT_TRAIL_TURN, stdoutDroppedFrames);
   }
   // Claimed here, before any `await`, so the claim order is the order the
   // frames arrived in.
   const turn = session.claimTrailTurn();
   try {
-    return await runValidatedTool(spec, checked.value, advised, session, turn);
+    return await runValidatedTool(spec, checked.value, advised, session, turn, stdoutDroppedFrames);
   } finally {
     // Idempotent backstop: a mutation site that threw between `acquire()` and
     // its own release must not leave every later trail-scoped call waiting.
@@ -1350,6 +1376,7 @@ async function runValidatedTool(
   engine: EngineJsonRpcClient,
   session: EvidenceAuditSession,
   turn: TrailTurn,
+  stdoutDroppedFrames?: () => number,
 ): Promise<ToolResult> {
   if (spec.execute !== undefined) {
     return spec.execute(value, { engine, session, turn });
@@ -1411,6 +1438,22 @@ async function runValidatedTool(
           ? `${reading.summary}\n${caBundleDiagnosis(reading.ca, updaterEnableCommand(reading.runtime))}\n${runtimeSelfDiagnosis(reading.runtime, reading.stateFile)}`
           : reading.summary,
       });
+      // A reply this shell dropped because stdout stopped draining never reaches
+      // the agent, so the only place it can be told about it is a later call —
+      // and a diagnosis of "the last operation" is exactly where an agent asks
+      // whether a missing answer means the work is gone. The count is this
+      // process's own stdout fact, read from the writer's counter (never written
+      // here), and surfaced only when it is nonzero so the ordinary reply shape
+      // stays byte-identical.
+      if (stdoutDroppedFrames !== undefined) {
+        const dropped = stdoutDroppedFrames();
+        if (dropped > 0) {
+          content.push({
+            type: "text",
+            text: `stdout backlog: this shell dropped ${dropped} ${dropped === 1 ? "reply" : "replies"} since startup because the reader on the other end stopped consuming them, so an answer you expected to receive may never have been written. The operation itself is unaffected — this is the byte stream, not the daemon. Drain stdout (close whatever is holding the pipe), then re-read the specific operation with gp_last_evidence {operationId}; do not re-run gp_act to regenerate work the trail already records`,
+          });
+        }
+      }
     }
     return {
       content,
@@ -2210,8 +2253,31 @@ function renderTrailIds(ids: readonly string[], format: "html" | "markdown"): st
   return ids.map((id) => renderTrailId(id, format)).join(", ");
 }
 
-/** One fetch failure, in the one line a partial report has room for. */
-function describeFetchFailure(error: unknown): string {
+/**
+ * One error line as a partial report prints it — not an id, so it must not go
+ * through {@link renderForeign}. That renderer caps at `RENDERED_ID_MAX_CHARS`
+ * and folds `|` into `·`, both designed for bounded trail ids; applied to a
+ * fetch-failure line it truncates the remedy and destroys the `| remedy:`
+ * separator `describeFetchFailure` just restored (review 2026-10-09 finding 5).
+ * Text-only escaping stays: control characters are neutralised, HTML entities are
+ * escaped for the HTML report, and Markdown structure is folded except the `|`
+ * that carries the remedy — a report line cannot restructure the contract field.
+ */
+function renderErrorLine(text: string, format: "html" | "markdown"): string {
+  const stripped = text.replace(/[\u0000-\u001f\u007f]/g, "·");
+  return format === "html"
+    ? escapeHTML(stripped)
+    : stripped.replace(/[`[\]<>#*\\]/g, "·");
+}
+
+/**
+ * One fetch failure, in the one line a partial report has room for.
+ * Exported for `test/shell-2026-defects.test.mjs`, which pins the
+ * `{code, message, remedy}` shape of the fallback arm: that arm is what a
+ * non-daemon, non-shape error reaches, and a two-field string there is an error
+ * frame leaving the shell with no next move.
+ */
+export function describeFetchFailure(error: unknown): string {
   if (error instanceof EngineCallError) {
     // The daemon's remedy travels with its code and message. This used to render
     // `${code}: ${message}` and drop the third field, so a partial report carried
@@ -2225,7 +2291,14 @@ function describeFetchFailure(error: unknown): string {
     const [first] = mapped.content;
     return first !== undefined && first.type === "text" ? first.text : "the evidence read failed";
   }
-  return `${GP_E_INTERNAL}: ${String(error)}`;
+  return formatToolError(
+    GP_E_INTERNAL,
+    String(error),
+    "a fetch inside gp_recent_reports failed for a reason that is neither a daemon error frame nor an evidence-shape "
+    + "refusal, so this shell cannot name the cause from here. Read that operation on its own with "
+    + "gp_last_evidence {operationId} — it answers inside its own deadline and reports the fault by itself — or ask "
+    + "again with a smaller limit. Do not re-run gp_act to regenerate what the trail already holds",
+  );
 }
 
 async function recentReports(
@@ -2371,7 +2444,14 @@ async function recentReports(
     const [first] = hardFailure.mapped.content;
     const base = first !== undefined && first.type === "text"
       ? first.text
-      : `${GP_E_INTERNAL}: the evidence read failed`;
+      : formatToolError(
+        GP_E_INTERNAL,
+        "the evidence read failed",
+        "the fetch mapped to an answer this shell could not render as text, so no more than the failure itself is "
+        + "known here. Read the operation on its own with gp_last_evidence {operationId}, which reports its own "
+        + "fault with a remedy, or ask again with a smaller limit. Do not re-run gp_act to regenerate what the "
+        + "trail already holds",
+      );
     const extras: string[] = [];
     if (notFetched.length > 0) {
       extras.push(`${notFetched.length} further ${notFetched.length === 1 ? "entry" : "entries"} never fetched: `
@@ -2452,7 +2532,7 @@ async function recentReports(
   const failureNote = hardFailure === null
     ? ""
     : note("gp-fetch-failed", `the report stops here: ${renderTrailId(hardFailure.id, format)} failed with `
-      + `${renderForeign(hardFailure.line, format)}. The ${packs.length} ${packs.length === 1 ? "pack" : "packs"} above were fetched and are `
+      + `${renderErrorLine(hardFailure.line, format)}. The ${packs.length} ${packs.length === 1 ? "pack" : "packs"} above were fetched and are `
       + "rendered; read the failed one on its own with gp_last_evidence {operationId}. Do not re-run gp_act to "
       + "regenerate what the trail already holds");
   const separator = format === "html" ? "\n<hr>\n" : "\n\n---\n";
