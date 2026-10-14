@@ -99,7 +99,8 @@ GlassPane 给代理装上带账本的眼睛和手：
   阻塞；命中目标过小、被裁切、互相重叠判提示。量不到的部分永远不计入"通过"，重叠扫描被截断时它自己会
   说明。大界面上遍历可能按预算提前停止：那时它交出已测到的部分并标 `complete: false`，而不是什么都不给。
 - **数值化像素验证** —— 目标区域变了多少、变在哪，本机算出；这条测量通路不存储、也不外发截图。
-- **有强度等级的归因** —— 默认 `weak`；被测应用内嵌探针 SDK 并确认处理器跑过时才 `strong`。
+- **有强度等级的归因** —— 默认 `soft`；被测应用内嵌探针 SDK 并确认处理器跑过时才 `strong`，
+  只有操作期间被检测到人手介入才降为 `weak`。
 - **污染检测** —— 操作中途有人手介入，测量会如实这么说，而不是悄悄把变化算给代理的那一次点击。
 - **检查点与回滚** —— 记录基线，按录制的步骤重放回到基线。
 - **崩溃与运行时采集** —— [LLDB 调试桥](bridge) 附挂进程，取无障碍层看不到的现场。
@@ -167,9 +168,10 @@ curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.s
 npx glasspane-install
 
 # 3) 自己管源码：`install.sh` 钉的是本次发布那一个 tag（它的 `GLASSPANE_RELEASE` 默认值，
-#    每次发版由 `scripts/set-version.mjs` 改写）——要装未发布的树才去 `main`。下面那个号是
-#    本版的，用之前对一下 install.sh。
-git clone --branch v1.11.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
+#    每次发版由 `scripts/set-version.mjs` 改写）——要装未发布的树才去 `main`。下面那个 tag 不靠人眼
+#    核对：它是 `scripts/version-sites.mjs` 登记的派生位点，一旦与 install.sh 不一致，
+#    `scripts/check-doc-links.mjs` 就把这一页判红。
+git clone --branch v1.14.1 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
 
 `GLASSPANE_REF=<tag>` 指定其他发布版；`GLASSPANE_REF=main` 追主干（它不是固定产物）。
@@ -238,10 +240,12 @@ node installer/cli.js --restore-launchd
 - **跨大版本永不自动应用。** 它只是停在页面上等着，并写清理由（跨大版本升级，可能改变对外行为），
   由你按下「安装更新」这一下才算确认；这个确认的作用就是 `--consent major`，而定时运行没有它。
   它不是被悄悄跳过了。
-- **没人签名的 release 也不会被定时装上。** 每个 release 现在都为它的校验文件附上一份 detached GPG
-  签名，更新器用随程序分发的那把公钥验签——"这是谁发布的"从此由假设变成可检查的主张（它的准确含义只是
-  "与我们发布的 key 相符"）。没什么可验的时候——release 压根没发签名（`v1.3.1` 早于签名 job），或这台机器
-  没有 `gpg`——定时运行会停下并在页面上写明原因；人可以自己放行一次：
+- **没人签名的 release 也不会被定时装上。** 自 `v1.5.0` 起的每一个 release 都为它的校验文件附上一份
+  detached GPG 签名，而签名是发布工作流跨不过去的一步：签名没产出、或落盘的是空文件，Release 就不会被
+  创建。更新器用随程序分发的那把公钥验签——"这是谁发布的"从此由假设变成可检查的主张（它的准确含义只是
+  "与我们发布的 key 相符"）。没什么可验的只有更早的那些 tag——`v1.4.0` 当次 CI 没发出签名（签名步被静默
+  跳过，两份 `.asc` 是事后用同一把 key 手工补签的），`v1.3.1` 早于签名 job。所以：release 压根没发签名，
+  或这台机器没有 `gpg`——定时运行会停下并在页面上写明原因；人可以自己放行一次：
   `updater check --consent unsigned-release`，此后状态文件与 `gp_diagnose` 会一直写明这一版是
   **无作者性证明装上的**。签名发了却对不上则是直接硬拒，任何 consent 都不能覆盖。「安装更新」这个按钮
   给不了这条确认（它今天只带 `--consent major`），但也用不上终端：检查正是因为这道门停下来的时候，同一页
@@ -287,7 +291,7 @@ node installer/cli.js --restore-launchd
 
 ## 接入 MCP 客户端
 
-两种等价写法：
+**给 MCP 客户端**的两种等价写法（这个包还装了第三个命令，见本节末尾）：
 
 ```jsonc
 // 仓库产物 —— 安装器打印的就是这个
@@ -299,6 +303,12 @@ node installer/cli.js --restore-launchd
 
 `npm i -g glasspane-mcp` **只装转发层**，服务仍要上面那个安装器产出。服务不可达或权限缺失时，
 工具调用返回带补救命令的结构化错误——照命令执行即可，不必翻文档。
+
+同一个包还装第二个命令 `glasspane-http`（并以 `./http-gateway` 公开，实测自
+`mcp-shell/package.json` 的 `bin` 与 `exports`）。它不是第三种 MCP 写法：把 HTTP/REST 调用方
+桥到**同一个** daemon socket 上，除了你自己没人会启动它；它的信任边界——只绑 loopback、
+必须自带 bearer token、以及 `act`/`attach`/`restore`/`snapshot` 都在这张面上——写在
+[SECURITY.zh-CN.md](SECURITY.zh-CN.md) §2.3。
 
 ## 工具清单
 
@@ -333,7 +343,8 @@ node installer/cli.js --restore-launchd
 - **目标选择器** —— 元素是怎么被识别出来的，不只是显示名；
 - **前后无障碍树**与两者结构差异；
 - **像素差异实测**（比例与区域；原始截图不落盘）；
-- **归因结论**：默认 `weak`，只有目标应用内在线的 [GlassPaneProbe](engine/probe) 确认处理器跑过才 `strong`；
+- **归因结论**：默认 `soft`，只有目标应用内在线的 [GlassPaneProbe](engine/probe) 确认处理器跑过才 `strong`，
+  操作窗口内量到人手介入时才降为 `weak`；
 - 操作期间有其他输入进来时的**污染标记**；
 - `gp_restore` 需要重放的**检查点步骤**。
 
@@ -394,7 +405,7 @@ GlassPane/
 ├── scripts/            set-version / check-version —— 单一版本线
 ├── specs/              实施规格与验收记录（PRD、P0–P6、审查记录）
 ├── ITERATE.md          本仓自己的 iterate onboarding 知识库
-└── .github/workflows/  ci.yml（7 条 lane + 发布形态守卫）、release.yml
+└── .github/workflows/  ci.yml（9 条 lane；发布形态守卫是其中一条里的一个步骤）、release.yml
 ```
 
 ## 开发
@@ -417,7 +428,8 @@ CI 还跑**发布形态守卫**：打包 `glasspane-mcp` → 装进干净目录 
 [engine/smoke.md](engine/smoke.md)，而不是被静默跳过。
 
 发布：`node scripts/set-version.mjs <semver>` 写整条版本线；推 tag 即产出带发布归档（被 tag 的树，
-**减去 `harness/`**——那是换版路径一行都不读的 vendored fork，却占本仓 90% 的字节；再加
+**减去 `harness/`**——那是换版路径一行都不读的 vendored fork，却占本仓已跟踪字节的 87.8%（这条数可以
+复算：`git ls-tree -r -l HEAD` 按路径累加 blob 大小）；再加
 `mcp-shell/dist`、`mcp-shell/schemas` 两份构建产物）与 `SHA256SUMS.txt` 的 GitHub Release——纯源码归档
 会让 updater 在目标机上 `npm pack` 出一个没有可执行文件的包，2026-10-01 真机因此每次换版都回滚；
 npm 发布走 `release.yml` 的 provenance 通道。

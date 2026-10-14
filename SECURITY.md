@@ -437,12 +437,12 @@ permission rather than by a secret.
 
 | Version | Supported |
 |---|---|
-| 1.1.x | ✅ current release line (1.1.0 and 1.1.1 tagged and published); security fixes ship here |
-| 1.0.x | ❌ no longer patched (the release lines were unified onto 1.1.x) |
+| 1.14.x | ✅ current release line; security fixes ship here. **Measurement (2026-10-14):** root `package.json` is `1.14.1`, the newest tag is `v1.14.1`, and `npm view glasspane-mcp dist-tags` / `npm view glasspane-install dist-tags` both answer `latest = 1.14.1` |
+| 1.13.x and older (including the `1.0.x` / `1.1.x` lines the release lines were unified onto) | ❌ no longer patched — one version line moves forward; each release replaces the previous |
 | 0.x (releases before `glasspane-mcp@0.1.0` / `glasspane-install@1.0.0`) | ❌ no patches — upgrade |
 
 **No fix-time commitment (SLA) yet**: one maintainer, no security team, so there is no "responds within
 X days / fixed within Y days" promise to make. What can be promised: private advisories are read and
-answered, confirmed issues are fixed on the `1.1.x` line, and the impact range plus workarounds are
+answered, confirmed issues are fixed on the current line (`1.14.x` as measured above), and the impact range plus workarounds are
 stated in the Release notes and CHANGELOG. If you need a temporary workaround, the two most effective are
 stopping the launchd jobs (`launchctl bootout`, sections 2.5 and 2.8) and removing the granted TCC seats.

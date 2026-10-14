@@ -50,8 +50,13 @@ printf '%s\n' \
 | 3 | observe 返回 `axTree`（role/title/identifier/children）、`nodeCount`、`digest`（32 hex）、`latencyMs` |
 | 4 | assert_element 返回 `passed`、`actual`、`operationId`、`evidenceId` |
 | 5 | diagnose 返回 `class`（T0–T9/NO_ANOMALY/INCONCLUSIVE 之一）与四字段报告（path/anomaly/evidence/next） |
-| 6 | last_evidence 返回完整 evidence 包：`schemaVersion="glasspane.evidence/0.1-draft"`、`operationId`、`attribution.level="soft"`、`circuitBreaker.level` 0–3、`signals.act` 必填、`handlerProbe`/`stateDiff` 为显式 null |
+| 6 | last_evidence 返回完整 evidence 包：`schemaVersion="glasspane.evidence/0.1"`（写入端恒用 `EvidencePack.schemaVersionConst`）、`operationId`、`attribution.level="soft"`、`circuitBreaker.level` 0–3、`signals.act` 必填、`handlerProbe`/`stateDiff` 为显式 null |
 | 7 | shutdown 返回 `{bye: true}`，daemon 进程随后退出，socket 文件被清理 |
+
+> 第 6 行的那个号曾经是 `glasspane.evidence/0.1-draft`。冻结之后写入端只发
+> `glasspane.evidence/0.1`，draft 那串**只在读取端仍被接受**（`EvidenceModels.swift` 的
+> `legacySchemaVersions`），为的是历史落盘包还能解码。照旧断言 draft 会让这条真机项
+> 每次都假红——它量的到的东西已经不再被写出。
 
 ## 常见失败形态
 

@@ -13,7 +13,11 @@ GlassPane 是 macOS 上面向 AI 代理的**运行时验证引擎**：代理经 
 好看而点亮指示器。任何改动若在这一点上让步，即使测试全绿也算失败。
 
 两条对外分发面：npm 两个裸名包（`glasspane-mcp` 转发层 / `glasspane-install` 安装器）
-与 GitHub Release 源码 tarball；对外部用户首次启动会被 Gatekeeper 拦（ad-hoc 签名、
+与 GitHub Release 源码 tarball。裸名包是两个，**命令是三个**：`glasspane-mcp` 的 `bin` 同时发
+`glasspane-mcp`（stdio 壳，`dist/index.js`）与 `glasspane-http`（loopback HTTP 网关，
+`dist/http-gateway-cli.js`），并把 `./http-gateway` 作为 export 公开（实测：
+`mcp-shell/package.json` 的 `bin` 与 `exports` 两节）；它不是第三条分发面，而是同一个 daemon
+socket 的另一个入口，其信任边界写在 `SECURITY.md` §2.3。对外部用户首次启动会被 Gatekeeper 拦（ad-hoc 签名、
 未公证，是用户 2026-09-22 拍板暂缓的决策，不是遗漏）。
 
 ## 技术栈 / Tech Stack
@@ -43,7 +47,8 @@ npm 包里不得残留 `file:` 引用（CI 的 publish-shape 守卫专抓这个�
 - `engine/Sources/glasspane-settings/` — SwiftUI 面板；权限卡只展示 daemon 实测结果。
 - `engine/scripts/make-app.sh` — 两个 `.app` 的打包与 ad-hoc 签名（identifier 型 DR，
   让 TCC 席位跨重签存活）。
-- `mcp-shell/src/` — `dispatch`（JSON-RPC）、`tools`（16 个工具契约）、`engine-client`。
+- `mcp-shell/src/` — `dispatch`（JSON-RPC）、`tools`（16 个工具契约）、`engine-client`、
+  `http-gateway` / `http-gateway-cli`（同一 daemon socket 的 loopback HTTP 面，第二个 bin）。
 - `installer/cli.js` — 环境预检→构建→打包安置→launchd→面板→使用说明；纯函数与副作用
   严格分离以便 `node:test` 覆盖。
 - `bridge/` — LLDB 附挂采集；`spike/` — 可行性实验与留档结果。
@@ -69,7 +74,8 @@ npm 包里不得残留 `file:` 引用（CI 的 publish-shape 守卫专抓这个�
    `swift test --package-path engine/probe`、`python3 -m pytest -q bridge`、`node scripts/check-doc-links.mjs`、
    `npm run build`、`npm test --workspaces --if-present`、`node scripts/check-version.mjs`。
    加参数、换目录、串 `&&` 都会被运行时拒绝。
-2. **`swift test` 有 1 条按设计跳过**（opt-in 真机项）。基线是"374 通过 / 0 失败 / 1 跳过"，
+2. **`swift test` 有 3 条按设计跳过**（opt-in 真机项）。最近一次收口计数是
+   "952 例 / 0 失败 / 3 跳过"（`CHANGELOG.md` 的 `[1.14.1]`「门禁实测」一节，量于 2026-10-13），
    别为了让它变绿而删断言或补模拟数据。
 3. **CI 不能承载真机验收**：无障碍、事件监听、屏幕录制需要登录 GUI 会话与已勾权限，
    记录在 `engine/smoke.md`。修到这类面时，结论只能标"待真机复跑"，不能标"已验证"。
@@ -78,7 +84,10 @@ npm 包里不得残留 `file:` 引用（CI 的 publish-shape 守卫专抓这个�
 5. **改指示器文案前先读 daemon 自报**：面板不得代测、不得借用别的卡读数；
    开发者工具卡恒"未验证"是设计（P1 v1.2 §11.2）。
 6. **版本只走脚本**：`node scripts/set-version.mjs <semver>`。手改单个 `package.json`
-   会让 9 个位点漂移，CI 的 `version-line` 任务直接红。
+   会让全部声明位点漂移（位点表在 `scripts/version-sites.mjs` 的 `SITES`，条数由
+   `node scripts/check-version.mjs` 自己打印——这里不写数字：上一版写的"9"漂移成了 10，
+   本轮加进 README 两个 clone-tag 位点后又是 12，一个写死的数字每轮都要红一次）。
+   CI 的 `version-line` 任务直接红。
 7. **kernel 是生态契约层**：schema 改动要同步 Swift/TS 双侧绑定与共享 fixture，
    并且——上游真源正在迁往 iterate-skill 主仓，本仓 `kernel/` 将降为镜像。
 
@@ -114,7 +123,10 @@ npm 包里不得残留 `file:` 引用（CI 的 publish-shape 守卫专抓这个�
 - 尚未做 `known_intentional` 登记（需要真实 `file:line`，凭记忆填行号属伪造证据）。
 - 公证（Apple Developer ID + notarytool）为**用户决策项**，未启用；不要在任何文档里
   把它写成已完成。
-- npm 上 `1.1.0` 是否已存在，取决于 owner 是否已 `npm stage approve`（见
-  `.github/workflows/release.yml` 头部与 CHANGELOG 的 1.1.0 Notes）。
+- npm 上从来没有 `1.1.0` 这一档：`npm view glasspane-mcp@1.1.0` 与
+  `npm view glasspane-install@1.1.0` 都回 404（本轮实测），已发布序列是
+  `0.1.0 → 1.1.1 → 1.1.2 → 1.2.0 …`。当年那句"取决于 owner 是否已 `npm stage approve`"问的是
+  一个已经被版本线远远抛下的号，不再是一条待办——现在两个包的 `latest` 都是 `1.14.1`
+  （`npm view <pkg> dist-tags`，2026-10-14 实测）。
 
 <!-- ITERATE:USER-OWNED:END -->

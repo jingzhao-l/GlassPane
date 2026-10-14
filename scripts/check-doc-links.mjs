@@ -3,10 +3,17 @@
  * 对外文档的死链与锚点检查（CI 门禁 = 本文件，退出码即判定）。
  *
  * 面向陌生读者的文档一旦改名/拆分就会留死链，而这只有真去点才会发现——所以把
- * "点一遍"变成机器动作。检查三类目标：
+ * "点一遍"变成机器动作。检查四类目标：
  *   1) 仓库内相对路径（含 specs/ 的中文文件名，需 URL 解码后比对磁盘）；
  *   2) 同文档/跨文档的 #锚点（按 GitHub 的标题 slug 规则就地复算）；
- *   3) 语言镜像对偶文件是否存在（README.md ↔ README.zh-CN.md 等成对约定）。
+ *   3) 语言镜像对偶文件是否存在（README.md ↔ README.zh-CN.md 等成对约定）；
+ *   4) 抄在文档里的**可复算主张**（版本线、钉住的 tag、CI 通道数、工具数、
+ *      无障碍动作数、归因默认值）——既对真源核，也对另一语言那一侧核。
+ *
+ * (4) 是 2026-10-14 那轮文档审查补进来的。此前这道闸只问"对偶文件在不在"，
+ * 于是 README 写 `weak` 而 SECURITY 写 `soft`、README 钉 v1.11.0 而 install.sh 钉
+ * v1.14.1、两份 README 说 7 条 lane 而 ci.yml 有 9 个 job，全都绿着过闸——漂移的
+ * 从来不是文件存在性，是句子。
  *
  * 外部 http(s) 链接只统计数量，不请求（CI 网络抖动不该红掉文档检查）。
  */
@@ -48,6 +55,9 @@ const MAIN_DOCS = [
   'CONTRIBUTING.zh-CN.md',
   'CHANGELOG.md',
   'ITERATE.md',
+  // 2026-10-14 登记。这份是真机验收的 procedure，读者照着它核对断言——它写错一个
+  // schemaVersion 就是一条必然假红的步骤，而从前它不在任何闸的视野里。
+  'engine/smoke.md',
   '.github/pull_request_template.md',
 ]
 
@@ -71,15 +81,34 @@ export function slug(heading) {
     .replace(/\s+/g, '-')
 }
 
-/** 收集一个 md 文件里所有标题锚点（含 GitHub 对重名标题的 -1/-2 后缀）。 */
-function headingsOf(text) {
+/**
+ * 收集一个 md 文件里所有标题锚点（含 GitHub 对重名标题的 -1/-2 后缀）。
+ *
+ * **围栏内的行不是标题。** 从前这里逐行匹配 `^#{1,6}\s+`，于是 README 的 bash 片段里
+ * `# 1) One-liner`、`# 2) Through npm` 这类注释行被当成真标题：既造出 `1-one-liner` 这种
+ * GitHub 上根本不存在的锚点（链接到它=假绿），又把 `-1/-2` 的去重编号往后错位（真标题
+ * 的第二份本来该叫 `install-1`，被假标题占了号，链接到它就变成假红）。GitHub 的
+ * slug 只在渲染后的正文里算，围栏里的行从来不参与——这里跟着它走。
+ */
+export function headingsOf(text) {
   const seen = new Map()
   const out = new Set()
+  let fence = null
   for (const line of text.split('\n')) {
+    const open = /^\s{0,3}(`{3,}|~{3,})/.exec(line)
+    if (fence !== null) {
+      const close = /^\s{0,3}(`{3,}|~{3,})\s*$/.exec(line)
+      if (close && close[1][0] === fence[0] && close[1].length >= fence.length) fence = null
+      continue
+    }
+    if (open) {
+      // 带 info string 的开栏（```jsonc）也算开栏；闭合栏必须是同一种字符且不更短。
+      fence = open[1]
+      continue
+    }
     const m = /^(#{1,6})\s+(.*)$/.exec(line)
     if (!m) continue
     const title = m[2].replace(/\s+#+\s*$/, '')
-    if (/^```/.test(title)) continue
     let base = slug(title)
     if (!base) continue
     const n = seen.get(base) ?? 0
@@ -129,26 +158,266 @@ export function toolCountDrift({ docs = MAIN_DOCS, rootDir = ROOT } = {}) {
   return out
 }
 
-export function check() {
+/**
+ * 真源侧的可复算量：每一个都是一行能跑的读取，不是注释里的"应该等于"。
+ */
+
+/** `.github/workflows/ci.yml` 里 `jobs:` 下的顶层 job 数（不含 `on:` 的 `push:`）。 */
+function ciLaneCount(rootDir = ROOT) {
+  const file = path.join(rootDir, '.github', 'workflows', 'ci.yml')
+  if (!fs.existsSync(file)) return null
+  let count = 0
+  let inJobs = false
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    if (/^jobs:\s*$/.test(line)) { inJobs = true; continue }
+    if (inJobs && /^[^\s#]/.test(line)) inJobs = false
+    if (inJobs && /^ {2}\S[^:]*:\s*$/.test(line)) count += 1
+  }
+  return count
+}
+
+/** `gp_act` 能执行的无障碍动作数——真源是契约层 `ActionSchema`（`kernel/src/evidence-pack.ts`），
+ * 不是文档里那句枚举，也不是 mcp-shell 里那份由它派生的输入 schema。 */
+function actionCount(rootDir = ROOT) {
+  const src = path.join(rootDir, 'kernel', 'src', 'evidence-pack.ts')
+  if (!fs.existsSync(src)) return null
+  const m = /export const ActionSchema = z\.enum\(\[([^\]]*)\]/.exec(fs.readFileSync(src, 'utf8'))
+  if (!m) return null
+  return (m[1].match(/"[^"]+"/g) ?? []).length
+}
+
+/** `install.sh` 钉住的发布 tag（去掉前导 `v`）。 */
+function installPinnedTag(rootDir = ROOT) {
+  const file = path.join(rootDir, 'install.sh')
+  if (!fs.existsSync(file)) return null
+  const hits = [...fs.readFileSync(file, 'utf8').matchAll(/GLASSPANE_RELEASE="v([^"]+)"/g)]
+  return hits.length === 1 ? hits[0][1] : null
+}
+
+/** 当前版本线（`major.minor`），真源 = 根 `package.json` 的 `version`。 */
+function currentLine(rootDir = ROOT) {
+  const file = path.join(rootDir, 'package.json')
+  if (!fs.existsSync(file)) return null
+  const version = JSON.parse(fs.readFileSync(file, 'utf8')).version
+  const m = /^(\d+)\.(\d+)\./.exec(version ?? '')
+  return m ? `${m[1]}.${m[2]}` : null
+}
+
+/** 归因默认值：`contaminated ? .weak : .soft` 里的**否分支**才是没污染时的默认。 */
+function attributionDefault(rootDir = ROOT) {
+  const file = path.join(rootDir, 'engine', 'Sources', 'GlassPaneEngine', 'EngineCore.swift')
+  if (!fs.existsSync(file)) return null
+  const m = /contaminated\s*\?\s*\.(\w+)\s*:\s*\.(\w+)/.exec(fs.readFileSync(file, 'utf8'))
+  return m ? m[2] : null
+}
+
+/** 数字写作式：`7`、`seven`、`七`、`二十七` 都归一成整数；读不懂返回 null。 */
+const EN_WORDS = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17,
+  eighteen: 18, nineteen: 19, twenty: 20,
+}
+const ZH_WORDS = {
+  一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10,
+  十一: 11, 十二: 12, 十三: 13, 十四: 14, 十五: 15, 十六: 16, 十七: 17, 十八: 18, 十九: 19, 二十: 20,
+}
+
+function parseCount(token) {
+  if (/^\d+$/.test(token)) return Number(token)
+  const lower = token.toLowerCase()
+  if (lower in EN_WORDS) return EN_WORDS[lower]
+  if (token in ZH_WORDS) return ZH_WORDS[token]
+  return null
+}
+
+/**
+ * 抽取式里共用的"一个数量"记法：阿拉伯数字、英文单词、中文数字都算。
+ *
+ * **`one` 与 `一` 不在里面**，这是刻意的：中文的"一个无障碍动作"和英文的 "one accessibility
+ * action" 绝大多数是冠词/量词用法（"执行其中一个动作"），不是计数主张。把它们当数抓，
+ * 判据就会把一句正常的话报成"写了 1 个，真源是 7"——假红多了，真红就没人信了。
+ * 真要写"只有 1 个"，写阿拉伯数字，那条一直抓得到。
+ */
+const NUMBER = '\\d+|[二三四五六七八九十][一二三四五六七八九十]{0,2}|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty'
+/** 反引号（Markdown 的行内代码）在正则字面量里不用转义，但在 new RegExp 的模板里要用变量带入。 */
+const TICK = String.raw`\x60`
+
+/**
+ * 可复算主张登记表。每条给：两侧的抽取式（`en` 用于 `*.md`，`zh` 用于 `*.zh-CN.md`）、
+ * 真源读取 `truth(rootDir)`（返回 null = 读不到）、以及人话单位。抽取式一律带 `g`，
+ * 命中即把原句一起报出来——改文档的人要能在报错里看见自己动的那一句。
+ *
+ * 抽取式刻意窄：宁可不抓，也不许把不相干的句子当成主张（限定词 `accessibility`/`无障碍`
+ * 是必须的，"个工具"只在带 `MCP`/`gp_*` 时才认，中文的"条"只在带 lane/通道/泳道/job 时才认）。
+ * 捕获组 #1 恒为"那个值"。
+ */
+export const CLAIMS = [
+  {
+    id: '对外工具数',
+    en: new RegExp(`(${NUMBER})\\s+(?:${TICK}gp_\\*${TICK}\\s+)?MCP tools`, 'gi'),
+    zh: new RegExp(`(${NUMBER})\\s*个\\s*(?:MCP 工具|${TICK}gp_\\*${TICK})`, 'g'),
+    unit: '个工具',
+    truth: realToolCount,
+  },
+  {
+    id: 'CI 通道数',
+    en: new RegExp(`(${NUMBER})\\s+(?:CI\\s+)?(?:lanes?|jobs?)\\b`, 'gi'),
+    zh: new RegExp(`(${NUMBER})\\s*条\\s*(?:CI\\s*)?(?:lane|通道|泳道|job)`, 'g'),
+    unit: '条 CI 通道',
+    truth: ciLaneCount,
+  },
+  {
+    id: '无障碍动作数',
+    en: new RegExp(`(${NUMBER})\\s+accessibility\\s+(?:verbs?|actions?)\\b`, 'gi'),
+    zh: new RegExp(`(${NUMBER})\\s*个\\s*无障碍\\s*(?:动词|动作)`, 'g'),
+    unit: '个无障碍动作',
+    truth: actionCount,
+  },
+  {
+    id: '归因默认值',
+    // 认三种真实出现过的写法：英文的 `${TICK}soft${TICK} by default`、中文的 `默认 ${TICK}soft${TICK}`、
+    // 真机断言里的 `attribution.level="soft"`（`engine/smoke.md` 第 6 行就是第三种）。
+    // **只认"等级词在 by default 之前"那一种语序**：这句后面常跟着"`strong` only when…"，
+    // 若允许等级词跟在 by default 之后，那条正确的补充说明会被读成默认值，判据就假红了。
+    en: new RegExp(`${TICK}?(weak|soft|strong)${TICK}?\\s+by default\\b|attribution\\.level="(weak|soft|strong)"`, 'gi'),
+    zh: new RegExp(`默认\\s*${TICK}?(weak|soft|strong)${TICK}?`, 'g'),
+    unit: '归因默认等级',
+    truth: attributionDefault,
+    norm: (token) => token,
+  },
+  {
+    id: 'README 钉住的发布 tag',
+    // 两种语言里这一行都是同一条英文命令，抽取式共用。
+    en: /git clone --branch v?(\d+\.\d+\.\d+)/g,
+    zh: /git clone --branch v?(\d+\.\d+\.\d+)/g,
+    unit: '钉住的 tag',
+    truth: installPinnedTag,
+    norm: (token) => token,
+  },
+  {
+    id: '当前版本线',
+    en: /\|\s*(\d+\.\d+)\.x\s*\|[^|\n]*(?:current|security fixes)/gi,
+    zh: /\|\s*(\d+\.\d+)\.x\s*\|[^|\n]*(?:当前|安全修复)/g,
+    unit: '当前版本线',
+    truth: currentLine,
+    norm: (token) => token,
+  },
+]
+
+/** 主张判据扫描的文档集合。**`CHANGELOG.md` 不在里面**：那是按版本落的账本，
+ * 每一行记的都是"当时那一版量到的数"，拿今天的真源去要求它，等于要求历史改写自己。 */
+const CLAIM_DOCS = [
+  'README.md',
+  'README.zh-CN.md',
+  'SECURITY.md',
+  'SECURITY.zh-CN.md',
+  'CONTRIBUTING.md',
+  'CONTRIBUTING.zh-CN.md',
+  'ITERATE.md',
+  'engine/smoke.md',
+]
+
+const isZhDoc = (doc) => doc.endsWith('.zh-CN.md')
+
+/** 从一条命中里取出"那个值"：捕获组 #1，没有就取 #2（`归因默认值` 那条有两个分支）。 */
+function claimValue(claim, match) {
+  const token = match[1] ?? match[2] ?? null
+  if (token === null) return null
+  if (claim.norm) return claim.norm(token)
+  const n = parseCount(token)
+  return n === null ? null : String(n)
+}
+
+/**
+ * 可复算主张的双语一致性 + 对真源一致性。
+ *
+ * 两条判据各有各的失效面，都要：
+ *   - **对真源**：README 写 `weak` 而引擎写 `.soft`，两份 README 一起错也照样是错；
+ *   - **对另一语言**：只改一种语言的那一句（本轮 2/3/8 号的形状）——真源读得到时两条都红，
+ *     真源读不到时（跨仓库、缺文件）这一条还站着。
+ */
+export function claimDrift({ docs = CLAIM_DOCS, rootDir = ROOT } = {}) {
+  const out = []
+  const found = new Map() // claim id → doc → [{value, raw}]
+  for (const claim of CLAIMS) {
+    const per = new Map()
+    let truth = null
+    try {
+      truth = claim.truth ? String(claim.truth(rootDir)) : null
+    } catch {
+      truth = null
+    }
+    if (truth === 'null' || truth === 'undefined') truth = null
+    for (const doc of docs.filter((d) => fs.existsSync(path.join(rootDir, d)))) {
+      const text = read(doc, rootDir)
+      const pattern = isZhDoc(doc) ? claim.zh : claim.en
+      const re = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`)
+      const hits = []
+      for (const m of text.matchAll(re)) {
+        const value = claimValue(claim, m)
+        if (value === null) continue
+        hits.push({ value, raw: m[0].trim().replace(/\s+/g, ' ') })
+      }
+      if (hits.length) per.set(doc, hits)
+      if (truth !== null) {
+        for (const h of hits) {
+          if (h.value !== truth) {
+            out.push(`${doc}: 「${claim.id}」写了 ${h.value}（${claim.unit}），真源是 ${truth} —— 原句 "${h.raw}"`)
+          }
+        }
+      }
+    }
+    found.set(claim.id, per)
+    // 有主张却没有真源＝这道闸今天什么都没能核对。写出来，别让它变成"绿着但没人看"。
+    if (truth === null && per.size > 0) {
+      out.push(`「${claim.id}」有 ${per.size} 份文档在写它，但真源读不到（文件缺失或形状已漂移）——无法核对`)
+    }
+  }
+
+  // 双语一致性：同一条主张在对偶文件里必须报同一个值。只在**两侧都写了**这条主张时比对，
+  // 否则"另一种语言本来没这句"会变成噪音。
+  for (const [a, b] of MIRROR_PAIRS) {
+    if (!MAIN_DOCS.includes(a)) continue
+    for (const claim of CLAIMS) {
+      const per = found.get(claim.id)
+      const left = per.get(a)
+      const right = per.get(b)
+      if (!left || !right) continue
+      const values = (hits) => [...new Set(hits.map((h) => h.value))].sort()
+      const lv = values(left)
+      const rv = values(right)
+      if (lv.join('/') !== rv.join('/')) {
+        out.push(`双语漂移「${claim.id}」：${a} 写 ${lv.join('/')}，${b} 写 ${rv.join('/')}（原句 "${left[0].raw}" / "${right[0].raw}"）`)
+      }
+    }
+  }
+  return out
+}
+
+export function check({ rootDir = ROOT, docs = DOCS } = {}) {
   const problems = []
-  const present = DOCS.filter((d) => fs.existsSync(path.join(ROOT, d)))
-  const anchors = new Map(present.map((d) => [d, headingsOf(read(d))]))
+  const present = docs.filter((d) => fs.existsSync(path.join(rootDir, d)))
+  const anchors = new Map(present.map((d) => [d, headingsOf(read(d, rootDir))]))
+  // 锚点缓存：登记过的文档用 `anchors`，没登记的按需再算一次（见下面跨文档那一支）。
+  const anchorCache = new Map()
 
   // 文档里抄写的工具数量必须等于代码里的真实数量：README 用"15 个工具"这种说法
   // 是好意（读者不必自己数），但手抄数字必然漂移，所以让它可验证。
-  const countProblems = toolCountDrift()
-  problems.push(...countProblems)
+  problems.push(...toolCountDrift({ rootDir }))
+  // 可复算主张：对真源核一遍，再对另一语言核一遍。缺了这一步，"双语成对完整"只意味着
+  // 文件都在，不意味着两份话说的是同一件事。
+  problems.push(...claimDrift({ rootDir }))
 
   for (const [a, b] of MIRROR_PAIRS) {
-    const ea = fs.existsSync(path.join(ROOT, a))
-    const eb = fs.existsSync(path.join(ROOT, b))
+    const ea = fs.existsSync(path.join(rootDir, a))
+    const eb = fs.existsSync(path.join(rootDir, b))
     if (ea !== eb) problems.push(`${a} 与 ${b} 只有一侧存在（双语约定缺腿）`)
   }
 
   let links = 0
   let external = 0
   for (const doc of present) {
-    const text = read(doc)
+    const text = read(doc, rootDir)
     // 代码块里的相对路径**照旧检查**。从前这里算过一个 `codeFences` 集合，算完没人
     // 读——一个"声称豁免、其实没豁免"的计算比没有更坏，因为它让下一个人以为围栏内
     // 是安全的。安装片段里抄错的路径也是抄错的路径。
@@ -167,15 +436,31 @@ export function check() {
         }
         continue
       }
-      const abs = path.join(ROOT, path.dirname(doc), target)
+      const abs = path.join(rootDir, path.dirname(doc), target)
       if (!fs.existsSync(abs)) {
         problems.push(`${doc}: 相对路径不存在 → ${url}`)
         continue
       }
       if (rawAnchor && fs.statSync(abs).isFile() && abs.endsWith('.md')) {
-        const rel = path.relative(ROOT, abs).split(path.sep).join('/')
-        const set = anchors.get(rel)
-        if (set && !set.has(decodeURIComponent(rawAnchor))) {
+        const rel = path.relative(rootDir, abs).split(path.sep).join('/')
+        // **锚点存在与否一定要查到底，不能因为目标文档没登记就跳过。** 从前这里是
+        // `const set = anchors.get(rel); if (set && ...)`：指向未登记文件（fork 的文档、
+        // 临时新增的 md）的锚点被静默放过，等于"看不见的文件永远不会写错标题"。
+        // 现在按需计算，读不到才算问题——跳过不是宽容，是把判据关掉。
+        let set = anchors.get(rel)
+        if (set === undefined) {
+          if (!anchorCache.has(rel)) {
+            try {
+              anchorCache.set(rel, headingsOf(read(rel, rootDir)))
+            } catch {
+              anchorCache.set(rel, null)
+            }
+          }
+          set = anchorCache.get(rel)
+        }
+        if (set === null) {
+          problems.push(`${doc}: 锚点目标读不到 → ${url}`)
+        } else if (!set.has(decodeURIComponent(rawAnchor))) {
           problems.push(`${doc}: 跨文档锚点失效 → ${url}`)
         }
       }
@@ -192,7 +477,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.join(import.meta.d
   const { docs, links, external, problems } = check()
   process.stdout.write(`文档 ${docs} 份 | 仓库内链接 ${links} 条 | 外链 ${external} 条（不请求）\n`)
   if (problems.length === 0) {
-    process.stdout.write('OK：无死链、无失效锚点、双语成对完整。\n')
+    process.stdout.write('OK：无死链、无失效锚点、双语成对完整、可复算主张与真源一致。\n')
     process.exit(0)
   }
   process.stderr.write(`发现 ${problems.length} 处问题：\n`)

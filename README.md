@@ -117,8 +117,8 @@ all. GlassPane measures; it does not have taste. Use both for what they are good
   early by design; it then reports what it measured plus `complete: false` rather than nothing.
 - **Numerical pixel verification** — how much of the target region changed and where, computed
   locally; that measurement stores no screenshot and ships none to a model.
-- **Attribution with a strength ladder** — `weak` by default; `strong` when the app under test
-  embeds the probe SDK and confirms its own handler ran.
+- **Attribution with a strength ladder** — `soft` by default; `strong` when the app under test
+  embeds the probe SDK and confirms its own handler ran; `weak` only when contamination dominates.
 - **Contamination detection** — if a human touches the app mid-operation, the measurement says so
   instead of quietly blaming the agent's click.
 - **Checkpoints and rollback** — snapshot a baseline; restore by replaying recorded steps.
@@ -196,8 +196,10 @@ npx glasspane-install
 
 # 3) From a checkout you manage. `install.sh` pins one release tag (its `GLASSPANE_RELEASE` default,
 #    rewritten by `scripts/set-version.mjs` on every release) — clone that tag, not `main`, unless you
-#    mean to install an unreleased tree. The number below is this release's; verify it against install.sh.
-git clone --branch v1.11.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
+#    mean to install an unreleased tree. The tag below is not verified by eye: it is a derived site
+#    owned by `scripts/version-sites.mjs`, and `scripts/check-doc-links.mjs` reddens when it stops
+#    matching install.sh.
+git clone --branch v1.14.1 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
 
 `GLASSPANE_REF=<tag>` selects another release; `GLASSPANE_REF=main` tracks the trunk, which is not a
@@ -272,11 +274,15 @@ to, swaps in the new version. The page that drives it is the **更新** (Updates
 - **A major version is never applied on a schedule.** It waits as an offer, with the reason on the page
   (跨大版本升级，可能改变对外行为), and pressing 「安装更新」 is what confirms it. Nothing is skipped
   silently: `--consent major` is that button's effect, and the scheduled run does not have it.
-- **A release nobody signed is not installed by the schedule either.** Each release carries a detached GPG
-  signature over its checksum file, verified against the key shipped with this program; that is what turns
-  "who published this" from an assumption into a checked claim (and it means exactly *matches the key we
-  ship*). If there is nothing to check — no signature published (`v1.3.1` predates the signing job), or no
-  `gpg` on the machine — the daily run stops and says so on the page; you may proceed once by hand with
+- **A release nobody signed is not installed by the schedule either.** Every release from `v1.5.0` onward
+  publishes a detached GPG signature over its checksum file, and signing is a step the release workflow
+  cannot skip: if the signature is not produced and is not non-empty on disk, the Release is never created.
+  Verified against the key shipped with this program, that is what turns "who published this" from an
+  assumption into a checked claim (and it means exactly *matches the key we ship*). The older tags are the
+  ones with nothing to check — `v1.4.0` shipped without its `.asc` (the signing step was silently skipped
+  and the two files were back-signed by hand afterwards), and `v1.3.1` predates the signing job. So: if
+  there is nothing to check — no signature published, or no `gpg` on the machine — the daily run stops and
+  says so on the page; you may proceed once by hand with
   `updater check --consent unsigned-release`, and the state file and `gp_diagnose` keep reporting that
   release as installed **without authorship proof**. A signature that is published and does not check is
   refused outright: no consent overrides it. The 「安装更新」 button does not grant this one — it only ever
@@ -331,7 +337,7 @@ Stated plainly, because these determine whether it fits your workflow:
 
 ## Connecting an MCP client
 
-Two equivalent forms:
+Two equivalent forms *for an MCP client* (the package installs a third command, described below):
 
 ```jsonc
 // from a checkout — exactly what the installer prints
@@ -344,6 +350,12 @@ Two equivalent forms:
 `npm i -g glasspane-mcp` installs **the transport layer only**; the daemon still comes from the
 installer above. With the daemon unreachable or a permission missing, tool calls return a structured
 error containing the exact remedy command — you should not need a document to get unstuck.
+
+The same package installs a second command, `glasspane-http` (and publishes it as the `./http-gateway`
+export — measured from `mcp-shell/package.json`'s `bin` and `exports`). It is not a third MCP form: it
+bridges HTTP/REST callers onto the *same* daemon socket, it is started by nobody except you, and its
+trust boundary — loopback-only bind, a bearer token you must supply, and the fact that it exposes
+`act`, `attach`, `restore` and `snapshot` — is spelled out in [SECURITY.md](SECURITY.md) §2.3.
 
 ## Tools
 
@@ -380,8 +392,9 @@ Each operation produces a versioned `glasspane.evidence` pack (JSON; schema in
 - **before/after accessibility trees** and the structural diff;
 - a **pixel-difference measurement** for the affected window region (`changedPixelRatio` and bounds;
   raw screenshots are not persisted);
-- an **attribution verdict** — `weak` by default, `strong` only when a live
-  [GlassPaneProbe](engine/probe) in the target app confirms the handler executed;
+- an **attribution verdict** — `soft` by default, `strong` only when a live
+  [GlassPaneProbe](engine/probe) in the target app confirms the handler executed, and `weak` only
+  when contamination is measured for that window;
 - a **contamination flag** when other input arrived mid-operation;
 - the **checkpoint steps** `gp_restore` replays.
 
@@ -451,7 +464,7 @@ GlassPane/
 ├── scripts/            set-version / check-version — the single version line
 ├── specs/              implementation specs + acceptance records (PRD, P0–P6, audits)
 ├── ITERATE.md          this repo's own iterate onboarding knowledge base
-└── .github/workflows/  ci.yml (7 lanes + publish-shape guard), release.yml
+└── .github/workflows/  ci.yml (9 lanes; the publish-shape guard is a step in one of them), release.yml
 ```
 
 ## Development
@@ -477,7 +490,8 @@ hardware smoke runs in [engine/smoke.md](engine/smoke.md) instead of being silen
 
 Releases: `node scripts/set-version.mjs <semver>` writes the whole version line; pushing a tag
 produces a GitHub Release whose archive is the tagged tree — less `harness/`, the vendored fork no install
-step reads and which is 90% of the repository's bytes — plus the built JavaScript the updater cannot
+step reads and which is 87.8% of the repository's tracked bytes (recompute it with `git ls-tree -r -l HEAD`,
+summing blob sizes per path) — plus the built JavaScript the updater cannot
 produce on the target (`mcp-shell/dist`, `mcp-shell/schemas` — `scripts/make-release-archive.mjs`), together
 with `SHA256SUMS.txt`; npm publishing goes through `release.yml` with provenance.
 
