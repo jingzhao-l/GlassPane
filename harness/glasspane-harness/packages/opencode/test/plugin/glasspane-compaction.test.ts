@@ -424,6 +424,41 @@ describe("dimension coverage, computed by the kernel (M4)", () => {
     expect(block).toContain("dimension coverage:")
     expect(block).toContain("2/2 dimensions verified")
   })
+
+  // One `try` around pull + collect + render used to call every internal defect "could not
+  // read this session's messages", which sent the reader to the client/server pair for a bug
+  // in this file. The two stages now say which one broke — and the wording is the contract,
+  // so both directions are pinned here.
+  test("a defect in the renderer is not reported as a message-pull failure", async () => {
+    const output: { context: string[]; prompt?: string } = { context: [] }
+    const note = await injectEvidenceAnchors(
+      "ses_1",
+      output,
+      async () => [message("gp_observe", { metadata: okMetadata({ decisionLog: receipt() }) })],
+      () => {
+        throw new TypeError("readPlan is not a function")
+      },
+    )
+    expect(note.status).toBe("failed")
+    if (note.status !== "failed") return
+    expect(note.message).toContain("could not build the block")
+    expect(note.message).toContain("readPlan is not a function")
+    expect(note.message).not.toContain("could not read this session")
+    expect(note.remedy).toContain("this plugin's renderer")
+    expect(note.remedy).not.toContain("client/server pair")
+    expect(output.context[0]).toContain("evidence anchors NOT preserved")
+  })
+
+  test("and a genuine pull failure still says it was the pull", async () => {
+    const output: { context: string[]; prompt?: string } = { context: [] }
+    const note = await injectEvidenceAnchors("ses_1", output, async () => {
+      throw new Error("Session not found")
+    })
+    expect(note.status).toBe("failed")
+    if (note.status !== "failed") return
+    expect(note.message).toContain("could not read this session's messages")
+    expect(note.message).not.toContain("could not build the block")
+  })
 })
 
 

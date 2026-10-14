@@ -144,6 +144,22 @@ const installed = ["--record", "--check"].includes(mode) ? collectInstalled() : 
 const lock = ["--record", "--check"].includes(mode) ? lockEntry() : null
 
 if (mode === "--record") {
+  // `--record` writes what the *installed* tree says, so it is only trustworthy when the
+  // install and the lock describe the same artifact. Measured on 2026-10-14: pin and
+  // `bun.lock` both said 0.1.7 while `node_modules` still held 0.1.5 (the re-pin landed
+  // without a `bun install` in that tree). Recording there would have replaced the 26
+  // hashes of the 0.1.7 artifact with 0.1.5's, and `--check` — which compares the tree
+  // against the golden, not against the registry — would have gone green on the wrong
+  // bytes. A gate whose failure path recommends destroying its own baseline is not a gate.
+  const installedKey = `${PACKAGE}@${installed.version}`
+  if (lock.key !== installedKey) {
+    die(
+      1,
+      `--record refused: the install is ${installed.version} but bun.lock resolves ${JSON.stringify(lock.key)} — ` +
+        `run \`bun install\` in ${productRoot} so the tree matches the lock, then record. Recording now would write ` +
+        `${installedKey}'s bytes into a manifest the lock does not describe.`,
+    )
+  }
   const manifest = {
     _comment:
       "Provenance of the iterate-kernel dependency this fork ships. Written by script/kernel-pin.mjs --record when the version is deliberately bumped; checked by --check in CI. The kernel's canonical home is iterate-skill/kernel, published as `iterate-kernel`; the vendored mirror under packages/opencode/vendor/kernel was retired with this file.",
@@ -186,6 +202,14 @@ if (mode === "--check") {
     problems.push(
       `bun.lock integrity ${lock.integrity.slice(0, 18)}… != manifest ${String(manifest.resolution?.integrity).slice(0, 18)}…`,
     )
+  // The manifest has to agree with itself. `lockKey` is `${PACKAGE}@${version}`, so a
+  // golden whose two fields were not moved together was edited by hand — and a hand-edited
+  // provenance record is the thing this file exists to make impossible.
+  const goldenKey = `${PACKAGE}@${manifest.version}`
+  if (manifest.resolution?.lockKey !== goldenKey)
+    problems.push(
+      `the manifest is internally inconsistent: it pins version ${manifest.version} but records resolution.lockKey ${JSON.stringify(manifest.resolution?.lockKey)} — a golden comes from --record, never from an editor`,
+    )
 
   const pinned = new Map((manifest.corpus ?? []).map((e) => [e.file, e.sha256]))
   const seen = new Set()
@@ -199,8 +223,27 @@ if (mode === "--check") {
 
   if (problems.length > 0) {
     for (const problem of problems) console.error(`kernel-pin: ${problem}`)
-    console.error(`\n  Remedy: if the kernel version was moved on purpose, re-record with \`bun install\` then`)
-    console.error(`  \`node script/kernel-pin.mjs --record\` and commit the manifest with the code that needs it.`)
+    // The remedy is chosen from what actually disagreed. One sentence for every diagnosis
+    // used to name `--record` even when the lock and the manifest agreed with each other and
+    // only the install was stale — the advice that destroys a correct golden.
+    const staleInstall = lock.key === manifest.resolution?.lockKey && installed.version !== manifest.version
+    const corpusMoved = installed.version === manifest.version && lock.integrity === manifest.resolution?.integrity
+    if (staleInstall) {
+      console.error(`\n  Remedy: the lock and the manifest both resolve ${manifest.version}; the installed copy is ${installed.version}.`)
+      console.error(`  Run \`bun install\` in ${productRoot}, then re-run --check.`)
+      console.error("  Do NOT run --record from a stale install — it writes the old artifact's hashes over this golden.")
+    } else if (corpusMoved) {
+      console.error("\n  Remedy: version and lock integrity match, but the corpus inside the installed artifact does not.")
+      console.error(`  ${PACKAGE}@${manifest.version} was recorded as one set of bytes and the registry served another at the same`)
+      console.error("  version. A published npm version must not move. Do NOT re-record: re-recording would bless the swap.")
+      console.error("  Ask the kernel's owner what was republished, then decide: pin the new version explicitly, or fetch the")
+      console.error("  original again. Until then this lane has to stay red — it is the only thing that can see this.")
+    } else {
+      console.error("\n  Remedy: the lock and the manifest disagree, so one of them is the stale side.")
+      console.error("  If the kernel version moved on purpose: bump the dependency line, `bun install`, then")
+      console.error("  `node script/kernel-pin.mjs --record` and commit the manifest with the code that needs it.")
+      console.error("  If it did not, the lock changed under you — treat that as a supply-chain question, not bookkeeping.")
+    }
     process.exit(1)
   }
   console.log(

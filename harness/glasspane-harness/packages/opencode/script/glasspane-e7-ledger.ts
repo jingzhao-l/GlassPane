@@ -8,14 +8,15 @@
  * socket calls (`hello`, `probe_status`) go to the *running* daemon. The script
  * never calls `act`, so it cannot change anything in an app under test.
  *
- * It also prints, rather than papers over, a measurement nobody predicted: the
- * running daemon answers `GP_E_NO_EVIDENCE` to `gp_last_evidence` both with and
- * without an `operationId`, even though 582 archive entries sit on disk. From the
- * harness side that means the engine's replay path is currently pointing at an
- * archive this process considers empty — a deployment/engine question, not
- * something a ledger should hide by falling back silently. So the ledger is fed
- * the archived bytes directly here, and the socket behaviour is reported as a
- * finding.
+ * A past measurement, kept because it explains the shape of this script: on
+ * 2026-10-11 the running daemon answered `GP_E_NO_EVIDENCE` to `gp_last_evidence`
+ * both with and without an `operationId`, even with 582 archive entries on disk —
+ * the engine's replay path pointing at an archive that process considered empty.
+ * Re-measured 2026-10-14 on this host (daemon binary from 2026-10-03, same archive):
+ * both calls now hand back a frame, so the finding is closed as an observation and
+ * NOT as a claim about which release fixed it. The ledger is still fed the archived
+ * bytes directly here, which is what lets the chain be checked against engine-written
+ * packs instead of a fixture.
  *
  * The ledger goes to a private 0700 directory. Anything inside `~/.glasspane`
  * would put a second writer in the engine's state root — the `projects.json`

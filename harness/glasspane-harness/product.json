@@ -106,7 +106,7 @@
         "glasspane-harness-darwin-arm64",
         "glasspane-harness-darwin-x64"
       ],
-      "status": "owner-action: not yet configured (npm CLI token cannot read trust settings: 403)",
+      "status": "measured working: v0.7.8 carries both npm publish and SLSA provenance attestations (checked 2026-10-14 at registry.npmjs.org/-/npm/v1/attestations/glasspane-harness@0.7.8, predicateType slsa.dev/provenance/v1). The earlier \"not yet configured\" note came from a 403 when reading trust settings with the npm CLI token — that is a read-permission limit on the settings page, not a limit on the publish path, and saying \"not configured\" while provenance ships is a claim the registry can falsify.",
       "note": "npm does not validate this at save time \u2014 a mismatch only fails at publish. The publish jobs carry `environment: release` and `id-token: write`, so the field values above are exactly what the workflow presents."
     },
     "versionBurnedNote": "0.5.0 \u7684 wrapper \u56e0\u4e00\u6b21\u5e76\u53d1\u53d1\u5e03\u88ab npm stage\uff08stage list \u770b\u4e0d\u5230\u5b83\uff0c\u4f46\u8be5\u7248\u672c\u53f7\u4f1a\u88ab registry \u62d2\u7edd\u518d\u6b21\u53d1\u5e03\uff09\uff0c\u56e0\u6b64\u5b9e\u9645\u53d1\u5e03\u7684\u662f 0.5.1\uff0c\u5185\u5bb9\u76f8\u540c\u3002\u53d1\u5e03\u811a\u672c\u73b0\u5728\u6709\u6392\u4ed6\u9501\u9632\u6b62\u518d\u72af\u3002"

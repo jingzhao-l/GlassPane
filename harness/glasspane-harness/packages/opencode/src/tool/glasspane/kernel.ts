@@ -8,7 +8,7 @@
  * `script/kernel-vendor.mjs`, because the recorded release policy was "not published
  * separately; consumers inline it" (P6 §13, P4 §33.2). That policy was reversed on the
  * iterate side: the kernel is `iterate-kernel` on npm, and this file now resolves it as
- * a semver dependency (`0.1.2`, pinned by `contracts/kernel-pin.json`). The switch was
+ * a semver dependency (the pinned version is whatever `contracts/kernel-pin.json` says — 0.1.7 as this line was written 2026-10-14, and the number lives in that file, not here). The switch was
  * one import line here — which is the claim this comment used to make as a hope and can
  * now make as a fact.
  *
@@ -156,7 +156,7 @@ export function readEvidenceFrame(
         error: {
           code: error.code,
           message: `${error.message} — the kernel's read-side contract refused the engine's frame`,
-          remedy: "Swift and TypeScript have drifted out of agreement (C35): capture gp_probe_status plus this reply and treat the run as unverified rather than retrying",
+          remedy: "Swift and TypeScript have drifted out of agreement (C35): run gp_probe_status and keep its reply beside this entry, then leave this call's dimension unverified in whatever you report — re-issuing the call cannot make the two agree",
         },
       }
     }

@@ -304,19 +304,29 @@ export async function injectEvidenceAnchors(
   pull: PullSessionMessages,
   readPlan: () => ReturnType<typeof readRunPlan> = () => readRunPlan(),
 ): Promise<CompactionNote> {
+  // Two stages, two truths. One `try` around pull + collect + render used to report every
+  // internal defect as "could not read this session's messages" — a kernel `throw` or a bad
+  // `readPlan()` came out as a host rejection, which sent the reader to the client/server
+  // pair for a bug in this file. Compaction is still never failed by this plugin (a note is
+  // written and the run continues); what changed is that the note now says which stage broke.
+  let messages: Awaited<ReturnType<PullSessionMessages>>
   try {
-    const messages = await pull(sessionID)
+    messages = await pull(sessionID)
+  } catch (error) {
+    const message = `could not read this session's messages (${errorText(error)})`
+    const remedy = "re-run the same compaction once after gp_probe_status answers; if the note persists, the pull is broken and the ledger path in this session's decision entries is still readable"
+    appendBlock(output, `GlassPane compaction note: evidence anchors NOT preserved — ${message}. remedy: ${remedy}`)
+    return { status: "failed", code: "GP_E_COMPACTION_MESSAGES", message, remedy }
+  }
+  try {
     const collected = collectEvidenceAnchors(messages)
     const block = renderAnchorBlock(collected, readPlan())
     if (!block) return { status: "skipped", reason: "no gp_* tool calls in this session" }
     const target = appendBlock(output, block)
     return { status: "injected", calls: collected.calls, anchors: collected.anchors.length, target, block }
   } catch (error) {
-    // An absent audit trail must be visible in the same place a present one
-    // would have been. Compaction itself is never failed by this plugin.
-    const message = `could not read this session's messages (${errorText(error)})`
-    const remedy =
-      "compact anyway (the chain is on disk), then check the harness client/server pair; anchors were NOT preserved in this summary"
+    const message = `the anchors were read but this plugin could not build the block (${errorText(error)})`
+    const remedy = `compact anyway — the chain is on disk and untouched by this; the failure is in this plugin's renderer, not in the host, so re-reading the session will not change it`
     appendBlock(output, `GlassPane compaction note: evidence anchors NOT preserved — ${message}. remedy: ${remedy}`)
     return { status: "failed", code: "GP_E_COMPACTION_MESSAGES", message, remedy }
   }

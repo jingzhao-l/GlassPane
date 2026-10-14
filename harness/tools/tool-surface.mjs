@@ -534,6 +534,25 @@ if (mode === "record") {
     console.error("  Record where the reference clone exists (`harness/upstream.json.checkout`), then --check can re-measure everywhere.")
     process.exit(1)
   }
+  // A dirty worktree is the third way a measurement does not exist. This ruler reads the
+  // disk, so recording while another lane has uncommitted lines in `mcp-shell/src` (the
+  // 07:30 line works in that tree, and 2026-10-14 found it dirty again) writes THAT lane's
+  // lines into OUR baseline — the golden then blesses bytes no commit contains, and the
+  // next clean `--check` goes red for a change nobody made. fork-diff already refuses on
+  // this; surface A had no equivalent guard.
+  const dirtyScope = ["mcp-shell/src/", "harness/glasspane-harness/"]
+  const dirty = execFileSync("git", ["diff", "--name-only", "HEAD"], { encoding: "utf8" })
+    .split("\n")
+    .filter((rel) => rel && dirtyScope.some((prefix) => rel.startsWith(prefix)))
+    .sort()
+  if (dirty.length) {
+    for (const rel of dirty.slice(0, 20)) console.error(`  ✗ tracked but modified in the working tree, not yet in any commit: ${rel}`)
+    if (dirty.length > 20) console.error(`      … ${dirty.length - 20} more`)
+    console.error("tool-surface: refusing to record — the golden would carry uncommitted lines from another lane.")
+    console.error("  Commit the source change first (or record from a clean worktree of that commit), then")
+    console.error("  re-record and fold the golden into that same commit.")
+    process.exit(1)
+  }
   mkdirSync(path.dirname(goldenFile), { recursive: true })
   // Saying it before writing it: the golden about to be written blesses a surface
   // that is over the documented limit, and from that commit the crossing check for

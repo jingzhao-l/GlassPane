@@ -186,7 +186,10 @@ export const ProbeStatusTool = Tool.define(
 
 export const AttachParams = Schema.Struct({
   bundleId: Schema.optional(Schema.String.annotate({ description: "CFBundleIdentifier, e.g. com.apple.Notes" })),
-  pid: Schema.optional(Schema.NumberFromString.annotate({ description: "process id, when several instances run and the bundle id is ambiguous" })),
+  // Same shape rule as `maxDepth` above: a process id arrives as a number from a shell
+  // or a script, and as a string from a model that read it off a table. Rejecting the
+  // first made this parameter unusable for the one case it exists for.
+  pid: Schema.optional(Schema.Union([Schema.NumberFromString, Schema.Int]).annotate({ description: "process id, when several instances run and the bundle id is ambiguous" })),
   dimension: DimensionArg,
 })
 
@@ -217,8 +220,13 @@ export const ObserveParams = Schema.Struct({
   // 4MB frame cap turned it into a payload error — one wasted round trip, and a
   // denial-of-context lever aimed at the model's own tool call. The bound is now
   // the schema, so the model is corrected before anything leaves the process.
+  // `Schema.NumberFromString` alone, though, rejected the natural JSON shape:
+  // measured 2026-10-14, `{maxDepth: 6}` died as `Expected string | undefined, got 6`
+  // and the same trap made `gp_attach({pid: 1234})` — the documented way to say which
+  // of several running instances to look at — unusable. Both shapes decode now; the
+  // bound applies to whichever one arrives.
   maxDepth: Schema.optional(
-    Schema.NumberFromString.check(Schema.isInt()).check(Schema.isBetween({ minimum: 1, maximum: 10 })).annotate({
+    Schema.Union([Schema.NumberFromString, Schema.Int]).check(Schema.isInt()).check(Schema.isBetween({ minimum: 1, maximum: 10 })).annotate({
       description: "1-10 (enforced by the schema), engine default is 6. Lower it when the tree is huge.",
     }),
   ),

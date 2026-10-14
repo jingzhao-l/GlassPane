@@ -1,10 +1,10 @@
 {
-  "observedAt": "2026-09-26",
+  "observedAt": "2026-10-14",
   "source": "specs/GlassPane_Harness_Fork_调研与方案_v0.1.md §9-6（可 grep 的那半个铁律）",
   "rules": [
     {
       "id": "threshold-comparison",
-      "why": "a decimal literal on the other side of a comparison is a threshold; thresholds belong to the engine"
+      "why": "a decimal literal on either side of a comparison is a threshold; thresholds belong to the engine"
     },
     {
       "id": "verdict-synthesis",
@@ -18,7 +18,7 @@
   "surfaces": {
     "mcpShell": {
       "caliber": "every *.ts under mcp-shell/src",
-      "filesScanned": 10,
+      "filesScanned": 13,
       "hits": []
     },
     "fork": {
@@ -28,5 +28,5 @@
     }
   },
   "totalHits": 0,
-  "filesScanned": 15
+  "filesScanned": 18
 }

@@ -144,7 +144,7 @@ function rawRequest(method: string, params: object, timeoutMs: number): Promise<
       try {
         parsed = JSON.parse(frame)
       } catch {
-        finish(failure("GP_E_INTERNAL", `the daemon sent a frame that is not valid JSON: ${frame.slice(0, 160)}`, "read the daemon log at ~/.glasspane/installer-daemon.log and report the line to the maintainers — the shell cannot repair this"))
+        finish(failure("GP_E_INTERNAL", `the daemon sent a frame that is not valid JSON: ${frame.slice(0, 160)}`, "run gp_probe_status once to see whether the daemon still answers; if it does, repeat this call once. If the frame is malformed again, read the daemon's own tail with `tail -n 20 ~/.glasspane/installer-daemon.log` — and treat this operation as having NO evidence rather than an unknown one: do not retry it in a loop, and do not report anything it would have verified"))
         return
       }
       if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {

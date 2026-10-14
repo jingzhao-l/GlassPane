@@ -5,9 +5,9 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { Agent } from "@/agent/agent"
 import * as Truncate from "@/tool/truncate"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Schema } from "effect"
 
-import { engineBody, glasspaneDefs, present, refused, requireCapability } from "../../src/tool/glasspane/index"
+import { AttachParams, ObserveParams, engineBody, glasspaneDefs, present, refused, requireCapability } from "../../src/tool/glasspane/index"
 import { DIMENSION_ID_LIMITS, validateDimension, validateSelector } from "../../src/tool/glasspane/kernel"
 import * as Daemon from "../../src/tool/glasspane/daemon"
 
@@ -646,3 +646,80 @@ function structBody(source: string, name: string): string {
   }
   throw new Error(`${name}: unbalanced Schema.Struct`)
 }
+
+describe("what a numeric argument does", () => {
+  // `Schema.NumberFromString` alone rejects a JSON number, so the two parameters typed that
+  // way refused the natural call: measured 2026-10-14, `gp_observe({maxDepth: 6})` and
+  // `gp_attach({pid: 1234})` — the documented way to say which of several running instances
+  // to look at — both died as InvalidArgumentsError before anything reached the engine.
+  // Strings must keep working too: every existing caller, and the fixed points below, send
+  // them. The bound is what the first fix added, so out-of-range stays refused in both shapes.
+  const decode = (schema: any, value: unknown) => () => Schema.decodeUnknownSync(schema)(value)
+
+  test("a numeric maxDepth decodes to a number", () => {
+    expect(Schema.decodeUnknownSync(ObserveParams)({ maxDepth: 6 })).toEqual({ maxDepth: 6 })
+  })
+
+  test("and a string maxDepth still decodes", () => {
+    expect(Schema.decodeUnknownSync(ObserveParams)({ maxDepth: "6" })).toEqual({ maxDepth: 6 })
+  })
+
+  test("while the bound still refuses, whichever shape it arrives in", () => {
+    expect(decode(ObserveParams, { maxDepth: 100000 })).toThrow()
+    expect(decode(ObserveParams, { maxDepth: "100000" })).toThrow()
+    expect(decode(ObserveParams, { maxDepth: 0 })).toThrow()
+  })
+
+  test("a numeric pid is accepted — the disambiguation path has to be callable", () => {
+    expect(Schema.decodeUnknownSync(AttachParams)({ pid: 1234 })).toEqual({ pid: 1234 })
+    expect(Schema.decodeUnknownSync(AttachParams)({ pid: "1234" })).toEqual({ pid: 1234 })
+  })
+})
+
+describe("what a remedy is allowed to say", () => {
+  /**
+   * Every remedy string the surface emits, pulled out of the source as a literal — not
+   * scraped from comments, because a scan that flags prose gets "fixed" by deleting the
+   * prose. An agent that is told to "report the line to the maintainers" has been handed a
+   * dead end: nobody is reading, and the turn ends with a claim it cannot act on.
+   */
+  const remedyLiterals = (file: string) => {
+    const source = readFileSync(path.join(import.meta.dir, "../..", file), "utf8")
+    return [...source.matchAll(/remedy:\s*(?:"([^"]*)"|`([^`]*)`)/g)].map((m) => m[1] ?? m[2] ?? "")
+  }
+  const files = ["src/tool/glasspane/daemon.ts", "src/tool/glasspane/kernel.ts", "src/plugin/glasspane-compaction.ts"]
+
+  test("the scan finds the remedies it claims to scan", () => {
+    // A pattern that matches nothing is the假绿 shape this repo keeps hitting: assert the
+    // battery has something to bite on before trusting the absence of a hit.
+    const found = files.flatMap(remedyLiterals)
+    expect(found.length).toBeGreaterThan(3)
+  })
+
+  test("no remedy sends the agent to a human", () => {
+    for (const file of files) {
+      for (const remedy of remedyLiterals(file)) {
+        expect(`${file}: ${remedy}`).not.toInclude("maintainers")
+        expect(`${file}: ${remedy}`).not.toInclude("report the line")
+        expect(`${file}: ${remedy}`).not.toInclude("client/server pair")
+        expect(remedy.length).toBeGreaterThan(0)
+      }
+    }
+  })
+
+  test("and the malformed-frame remedy names a call to make, not a person to find", async () => {
+    // Driven over a real unix socket rather than scraped: the assertion is about the frame
+    // the agent actually receives. A source scan for "maintainers" would be satisfied by
+    // deleting the phrase from a comment and keeping it in the string.
+    await withDaemonPeer("malformed-json", (conn) => conn.write("this is not json\n"), async () => {
+      const reply = await Effect.runPromise(Daemon.call("observe", {}, 5_000))
+      expect(reply.ok).toBe(false)
+      if (reply.ok) return
+      expect(reply.error.code).toBe("GP_E_INTERNAL")
+      expect(reply.error.remedy).toContain("gp_probe_status")
+      expect(reply.error.remedy).toContain("tail -n 20 ~/.glasspane/installer-daemon.log")
+      expect(reply.error.remedy).not.toInclude("maintainers")
+      expect(reply.error.remedy).not.toInclude("report the line")
+    })
+  })
+})

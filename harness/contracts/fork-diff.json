@@ -2,7 +2,7 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-10-13",
+  "observedAt": "2026-10-14",
   "counts": {
     "identical": 4663,
     "edited": 264,
@@ -3391,7 +3391,7 @@
   "addedDetail": [
     {
       "file": ".github/workflows/ci.yml",
-      "forkHash": "c3599c28568e31b91d6b9b47b9032f58bcc7f9ed"
+      "forkHash": "8c3db16a6bd0963a8be46ac696d6c32ef58f0a2e"
     },
     {
       "file": ".github/workflows/release.yml",
@@ -3627,7 +3627,7 @@
     },
     {
       "file": "packages/opencode/script/glasspane-e7-ledger.ts",
-      "forkHash": "679dcaea8893d35ddcb54d6fb7ab148c85c0760d"
+      "forkHash": "679b787af72fcce8723fa8ff420d8c617da59f22"
     },
     {
       "file": "packages/opencode/script/glasspane-e8-compaction.ts",
@@ -3647,7 +3647,7 @@
     },
     {
       "file": "packages/opencode/src/plugin/glasspane-compaction.ts",
-      "forkHash": "29f9026bfc0373aa443801940b8d398ce2d6c437"
+      "forkHash": "47881f3eb83c38864f9fda7443e3128d6f19cacd"
     },
     {
       "file": "packages/opencode/src/plugin/glasspane-decision-log.ts",
@@ -3655,15 +3655,15 @@
     },
     {
       "file": "packages/opencode/src/tool/glasspane/daemon.ts",
-      "forkHash": "7d19c5cbe94131c2d8fc1891c6f83e6b7cc54e6d"
+      "forkHash": "5c82c7bfdf3fd6f1f74b7df5a6abd74e35959edf"
     },
     {
       "file": "packages/opencode/src/tool/glasspane/index.ts",
-      "forkHash": "70e8d79b267ba94231710eb2bedb04cf72ed7635"
+      "forkHash": "a3fa4fbefc892a8d53a90c97a2c1a45b6b201882"
     },
     {
       "file": "packages/opencode/src/tool/glasspane/kernel.ts",
-      "forkHash": "fb6af906b29500ad22c66cf5509be4104ba44dfb"
+      "forkHash": "78bfebeafe4a95e42c2d832c984920660405c87a"
     },
     {
       "file": "packages/opencode/test/config/project-config-dirs.test.ts",
@@ -3675,7 +3675,7 @@
     },
     {
       "file": "packages/opencode/test/plugin/glasspane-compaction.test.ts",
-      "forkHash": "574e21a83f088a2a746bf162982f40242ba5b88b"
+      "forkHash": "2dc53cb33fb02e4ed4c79e72c6c4169518aab573"
     },
     {
       "file": "packages/opencode/test/plugin/glasspane-decision-log.test.ts",
@@ -3687,11 +3687,11 @@
     },
     {
       "file": "packages/opencode/test/tool/glasspane-surface.test.ts",
-      "forkHash": "cca47b81dd0eab2b5d1ad4463088a953be77654e"
+      "forkHash": "ec6c68e77d2952c2c248200eb07a62e98a8edccd"
     },
     {
       "file": "product.json",
-      "forkHash": "9b62c09253b0a914544c094b7ac1cda30a9a0945"
+      "forkHash": "79b0634f69771a143cbc07475a28af8b4e987af9"
     },
     {
       "file": "README.zh-CN.md",
@@ -3707,7 +3707,7 @@
     },
     {
       "file": "script/kernel-pin.mjs",
-      "forkHash": "9b6a749b7a71551e8c7d25ac56a1b0737c6ed99e"
+      "forkHash": "818cd4fbe1a77c78ab483c2b50333a458de1c5b5"
     },
     {
       "file": "scripts/install.sh",

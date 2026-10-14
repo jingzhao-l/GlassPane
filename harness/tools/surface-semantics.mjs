@@ -209,6 +209,30 @@ for (const [name, surface] of Object.entries(golden.surfaces ?? {})) {
 }
 
 let red = 0
+// Coverage is half the contract, and it used to be unchecked: the golden still says
+// `filesScanned 15` while this tree scans 18, which proves nothing reads the number. A
+// surface that stops being opened — a renamed directory, a glob rewritten to match
+// nothing, a rule deleted from RULES — reports zero hits, and zero hits is what a clean
+// surface looks like. So the scan set and the rule set are asserted, not just the hits.
+const coverage = []
+for (const [name, surface] of Object.entries(observed.surfaces)) {
+  const was = golden.surfaces?.[name]
+  if (!was) {
+    coverage.push(`${name}: the golden has no such surface — either it was renamed in code or the record is stale`)
+    continue
+  }
+  if (was.caliber !== surface.caliber)
+    coverage.push(`${name}: caliber went ${JSON.stringify(was.caliber)} → ${JSON.stringify(surface.caliber)} — rewriting what a surface means is not shrinking a surface`)
+  if (typeof was.filesScanned !== "number") coverage.push(`${name}: the golden records no filesScanned, so this rule cannot prove it scanned anything`)
+  else if (surface.filesScanned < was.filesScanned)
+    coverage.push(`${name}: ${was.filesScanned} file(s) were open when the baseline was taken, ${surface.filesScanned} are open now — "no hits" can only clear files this rule actually read`)
+}
+const ruleIds = RULES.map((rule) => rule.id).join(", ")
+const goldenIds = (golden.rules ?? []).map((rule) => rule.id).join(", ")
+if (!goldenIds) coverage.push("the golden records no rules at all — an empty record clears every surface without checking one")
+else if (goldenIds !== ruleIds) coverage.push(`the rule set no longer matches the record: golden [${goldenIds}] vs code [${ruleIds}]`)
+
+for (const problem of coverage) console.error(`  ✗ coverage: ${problem}`)
 for (const [name, surface] of Object.entries(observed.surfaces)) {
   for (const hit of surface.hits) {
     const was = baseline.get(`${name}|${hit.file}|${hit.rule}`) ?? 0
@@ -221,12 +245,19 @@ for (const [name, surface] of Object.entries(observed.surfaces)) {
   }
 }
 
-if (red > 0) {
-  console.error("surface-semantics: a tool surface started judging evidence (or judging more of it).")
-  console.error("  The iron law is 工具面不得自行判定证据语义: thresholds, pixel verdicts and pass/fail")
-  console.error("  literals belong to the engine (or to the kernel), never to a shell.")
-  console.error("  If the new hit is legitimate, record it in the same commit and say why there:")
-  console.error("    node harness/tools/surface-semantics.mjs --record")
+if (red > 0 || coverage.length > 0) {
+  if (red > 0) {
+    console.error("surface-semantics: a tool surface started judging evidence (or judging more of it).")
+    console.error("  The iron law is 工具面不得自行判定证据语义: thresholds, pixel verdicts and pass/fail")
+    console.error("  literals belong to the engine (or to the kernel), never to a shell.")
+    console.error("  If the new hit is legitimate, record it in the same commit and say why there:")
+    console.error("    node harness/tools/surface-semantics.mjs --record")
+  }
+  if (coverage.length > 0) {
+    console.error(`surface-semantics: ${coverage.length} coverage problem(s) — this rule cannot claim to have cleared what it never opened.`)
+    console.error("  If a surface genuinely got smaller, say why and re-record; if the glob or the rule set")
+    console.error("  broke, fix the ruler rather than the record.")
+  }
   process.exit(1)
 }
 const fewer = Object.entries(observed.surfaces).filter(([name, surface]) =>

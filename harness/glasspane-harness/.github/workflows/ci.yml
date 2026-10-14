@@ -52,10 +52,14 @@ jobs:
         working-directory: packages/tui
         run: bun test --timeout 30000 test/cli/tui/inline-tool-wrap-snapshot.test.tsx
 
-      # Pack every npm artifact and validate its shape (bins present and executable,
-      # wrapper's optionalDependencies == product.json's target matrix, os/cpu gate)
-      # without touching the registry. A package that installs but cannot run is the
-      # failure mode this catches on a PR instead of after a release.
+      # Pack the WRAPPER and validate its shape (bins present and executable, the
+      # optionalDependencies == product.json target matrix, the os/cpu gate) without
+      # touching the registry. Scope honest note: this lane builds nothing, so dist/ is
+      # absent and the two platform tarballs are NOT packed or checked here — publish.ts
+      # says so out loud ("no ./dist here — validating the wrapper only"). The platform
+      # shape is checked in release.yml's binaries lane, where each runner builds its own
+      # target and then runs the same validator over it. Calling this "every artifact" was
+      # a claim a green PR could not support.
       - name: npm pack validation (no registry access)
         working-directory: packages/opencode
         run: bun run script/publish.ts --dry-run
