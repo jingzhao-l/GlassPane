@@ -148,16 +148,56 @@ check("wrapper-name-in-publish", !publish.includes('pkg.name + "-ai"'), "publish
 // sentence *describing* the removed body cannot satisfy it — only the absence of the body can.
 const rootPublish = stripComments(read("script/publish.ts"))
 check("no-foreign-publish", /process\.exit\(2\)/.test(rootPublish), "script/publish.ts (fork root) no longer refuses — it must exit 2 before it can publish")
-check("no-foreign-publish", !/packages\/(sdk\/js|plugin|ui)\/script\/publish\.ts/.test(rootPublish), "script/publish.ts invokes a per-package publish script again — that lane npm-publishes under upstream's scope")
 check("no-foreign-publish", !/npm publish/.test(rootPublish), "script/publish.ts runs `npm publish` from the fork root")
-// The rule above read ONE file: the root orchestrator. The two per-package publishers it
-// used to call kept their live `npm publish *.tgz --access public` bodies — for packages
-// named @opencode-ai/plugin and @opencode-ai/sdk — and no needle that only looks at
-// script/publish.ts could ever see that. A dead root entry point with live per-package
-// entry points one `cd` away is the same door left open. These read the files themselves
-// and assert the refusal shape, the absence of the publish call, and the absence of the
-// upstream-scope identifier in executable text — the name shape the old needles missed.
-for (const rel of ["packages/plugin/script/publish.ts", "packages/sdk/js/script/publish.ts"]) {
+// The two rules above read ONE file: the root orchestrator. The per-package publishers it
+// used to call kept their live `npm publish … --access public` bodies, and no needle that
+// only looks at script/publish.ts can ever see a file it does not open. A dead root entry
+// point with live per-package entry points one `cd` away is the same door left open — and
+// the door was wider than the report: four such publishers existed (`@opencode-ai/plugin`,
+// `-sdk`, `-ui`, `-cli`), each with its own live publish line, none of them named in
+// product.json, none of them protected by `private` or a `publishConfig` gate.
+//
+// The set is DISCOVERED, not remembered: walking `packages/**/script/publish.ts` means an
+// upstream sync that lands a fifth publisher trips this rule without anyone editing it,
+// which is exactly the failure a hardcoded file list repeats. The product's own publisher is
+// the one file allowed to still contain a publish call, so it is excluded by path.
+const publisherFiles = (() => {
+  const found = []
+  const walk = (rel, depth) => {
+    if (depth > 4) return
+    for (const entry of readdirSync(path.join(forkRoot, rel), { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name === "node_modules" || entry.name.startsWith(".")) continue
+      const child = path.join(rel, entry.name)
+      if (entry.name === "script" && existsSync(path.join(forkRoot, child, "publish.ts"))) {
+        found.push(`${child}/publish.ts`)
+      }
+      walk(child, depth + 1)
+    }
+  }
+  walk("packages", 0)
+  return found
+})()
+
+const productPublisher = "packages/opencode/script/publish.ts"
+const foreignPublishers = publisherFiles.filter((f) => f !== productPublisher).sort()
+// A broken walk disables this whole section while still printing green, so the discovery is
+// asserted on its own: the four known dead ends must all still be found. If one goes missing
+// because it moved, this names it; if all four go missing, the walk is broken.
+check("no-foreign-publish", publisherFiles.includes(productPublisher), "the product's own publisher (packages/opencode/script/publish.ts) is not discovered — the walk is broken")
+for (const want of [
+  "packages/cli/script/publish.ts",
+  "packages/plugin/script/publish.ts",
+  "packages/sdk/js/script/publish.ts",
+  "packages/ui/script/publish.ts",
+]) {
+  check("no-foreign-publish", foreignPublishers.includes(want), `${want} is not discovered as a per-package publisher — it moved (update the dead-end list) or the walk broke`)
+}
+check(
+  "no-foreign-publish",
+  !foreignPublishers.some((rel) => rootPublish.includes(rel)),
+  "script/publish.ts invokes a per-package publish script again — that lane npm-publishes under upstream's scope",
+)
+for (const rel of foreignPublishers) {
   const code = readCode(rel)
   check("no-foreign-publish", /process\.exit\(2\)/.test(code), `${rel} no longer refuses — it must exit 2 before it can publish`)
   check("no-foreign-publish", !/npm publish|--access public/.test(code), `${rel} runs a live public-registry publish again`)
