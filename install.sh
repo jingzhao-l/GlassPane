@@ -15,6 +15,27 @@ set -eu
 # "最新"的东西：钉的是哪个 tag 就写在这行里。
 GLASSPANE_RELEASE="v1.14.1"
 
+# 输出函数先定义：下面第 (0) 条 HOME 闸要用 fail 说话，而它必须排在任何 $HOME 展开之前。
+say() { printf '%s\n' "$*"; }
+fail() { printf '错误: %s\n' "$*" >&2; exit 1; }
+
+# --- 0a) HOME 闸（必须在 CLONE_DIR 展开之前）---------------------------------
+# `set -u` 下 `${VAR:-$HOME/x}` 的**默认值也是展开的一部分**：HOME 没设置时 shell 在拼
+# clone 目录那一刻就报 "HOME: unbound variable" 退出（实测 /bin/sh：`install.sh: line 19:
+# HOME: unbound variable`，退出 1），一行解释都读不到。installer/cli.js 的 installGuard()
+# 专门写了这一段补救话（finding 4），但 install.sh 从来走不到它——它死在委托之前。
+# dry-run 不豁免：这一条拒的不是"副作用"，而是"接下来每一条路径都拼不出来"这件事本身，
+# 所以它必须仍然是拒（CI 读到的是同一句话）。
+# 文案与 installGuard 的 HOME 分支同口径（install-sh.test.mjs 按两条入口同句断言）。
+if [ -z "${HOME:-}" ]; then
+  printf '%s\n' '错误: HOME 未设置：安装产物、socket 与 ~/Library/LaunchAgents 的路径全部由它拼出来，' >&2
+  printf '%s\n' '缺了它这些会落到**当前目录**的相对位置（./.glasspane、./Library/LaunchAgents/…），' >&2
+  printf '%s\n' '而 launchd 直接拒收相对的 StandardOutPath——本轮没有写入任何东西。' >&2
+  printf '%s\n' '补救：在自己的登录 shell 里重跑（必要时 export HOME=/Users/<你>）；' >&2
+  printf '%s\n' '不要用 `sudo -u 某用户` / `env -u HOME` 这类形态起安装器。' >&2
+  exit 1
+fi
+
 REPO_URL="${GLASSPANE_REPO_URL:-https://github.com/jingzhao-l/GlassPane.git}"
 CLONE_DIR="${GLASSPANE_INSTALL_DIR:-$HOME/glasspane}"
 DRY_RUN="${GLASSPANE_INSTALL_DRY_RUN:-0}"
@@ -35,10 +56,7 @@ REF="${REF#"${REF%%[![:space:]]*}"}"
 REF="${REF%"${REF##*[![:space:]]}"}"
 [ -n "$REF" ] || REF="$GLASSPANE_RELEASE"
 
-say() { printf '%s\n' "$*"; }
-fail() { printf '错误: %s\n' "$*" >&2; exit 1; }
-
-# --- 0) 覆盖位的形状闸（finding 3）--------------------------------------------
+# --- 0b) 覆盖位的形状闸（finding 3）-------------------------------------------
 # GLASSPANE_REPO_URL / GLASSPANE_REF 是文档里写明的覆盖口子，值直接进 `git clone` 的
 # argv。两类值是命令执行入口：
 #   - 不带 scheme 的 `ext::sh -c …`（git 的 ext 传输在 clone 那一刻起一个 shell）；

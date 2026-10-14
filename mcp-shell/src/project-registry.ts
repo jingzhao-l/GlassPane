@@ -704,7 +704,8 @@ function assertSingleIdentity(entry: ProjectEntry): void {
  * with no state root. `glasspaned --state-dir <root>` makes it load
  * `<root>/projects.json` (`ProjectRegistry(stateRoot:)`, and every subcommand
  * resolves through the same root), and the socket cannot be asked which root the
- * running job chose — the method table is frozen and reports no state root. So a
+ * running job chose — since 1.15.0 the daemon says so in `hello`'s `stateRoot`, while a
+ * service still running an older binary does not. So a
  * notice that simply ordered a restart was telling an agent that restarting would
  * help in the one case where it cannot, and a notice that said "this is the file
  * the service loads" was naming a file the service may not load. Both branches
@@ -735,7 +736,7 @@ export function daemonRestartNotice(filePath: string): string {
  */
 function rootDiscriminator(): string {
   return "Tell the two cases apart with the service's own answer: gp_project_list reads the file this call wrote, so an entry it lists is on disk, and gp_attach {projectId} is answered by the running service — an entry the list shows plus an attach that answers GP_E_NOT_FOUND means the service is loading a different projects.json than the one this write reached, not that the write failed. "
-    + "Which file the running service loads is one thing this shell cannot see and will not guess from $HOME: `glasspaned --state-dir <root>` moves it to <root>/projects.json, and the socket reports no state root. Read it instead of deriving it — `launchctl print gui/"
+    + "Which file the running service loads is not something this shell guesses from $HOME: `glasspaned --state-dir <root>` moves it to <root>/projects.json, and the daemon reports the root it resolved — `hello` names the state root under its `stateRoot` key. A daemon predating 1.15.0 omits the key, and an omitted key means \"that daemon does not report it\", never \"so it must be the home default\": for those binaries the discriminator below is the only read. Cross-check either way — `launchctl print gui/"
     + currentUid()
     + "/com.glasspane.daemon` prints the arguments the job was started with. "
     + "If those arguments name a --state-dir, the entry has to go into that root's projects.json (repeat gp_project_set with "

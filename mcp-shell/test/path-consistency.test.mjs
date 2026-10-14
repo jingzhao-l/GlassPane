@@ -919,9 +919,20 @@ test("no socket reply carries the daemon's state root, and the registry notice m
   const emitters = named
     .filter((row) => row.spellings.includes("quoted"))
     .map((row) => row.file);
-  assert.deepEqual(emitters, ["engine/Sources/glasspaned/main.swift"],
-    `"stateRoot" 这个键的出处变了：${emitters.join(", ")}。如果它进了某个线上回复，`
-    + "notice 里那句\u201c本壳看不见\u201d就该换成\u201c去读它\u201d —— 改文案，别改这条闸来迁就");
+  // 1.15.0 起 hello 真的报这个键了（面板那行读数、以及 http-gateway 那句"对着同一个
+  // --state-dir 跑维护命令"从此可查）。所以这条闸不再问"它有没有进回复"——那半边已经
+  // 由文案跟着改了；它把"进回复"钉成契约：谁把 stateRoot 从 EngineCore.hello 摘掉，
+  // 这里就少一个文件而变红，谁新加一处出处也得回来核文案。
+  assert.deepEqual(
+    [...emitters].sort(),
+    [
+      "engine/Sources/GlassPaneEngine/DaemonProbe.swift",
+      "engine/Sources/GlassPaneEngine/EngineCore.swift",
+      "engine/Sources/glasspaned/main.swift",
+    ].sort(),
+    `"stateRoot" 的出处变了：${emitters.join(", ")}。少了回复侧那一半 = hello 不再报根，`
+    + "notice 里\u201c去读它\u201d那句就成假的；多了新出处 = 得回头核文案与面板是否同源。");
+  const reportedOverSocket = emitters.some((f) => f.startsWith("engine/Sources/GlassPaneEngine"));
 
   // The half the literal scan could not see (finding 中-5): the module that builds
   // the socket's replies may not name the key in *any* spelling, quoted or not.
@@ -929,10 +940,9 @@ test("no socket reply carries the daemon's state root, and the registry notice m
   // the row above measures; `glasspane-settings` is a SwiftUI panel that never
   // answers the socket. Anything new inside `GlassPaneEngine` is a reply field.
   const insideReplies = named.filter((row) => row.file.startsWith("engine/Sources/GlassPaneEngine"));
-  assert.deepEqual(insideReplies, [],
-    "daemon 的回复模块开始用任何一种拼法说 state root 了："
-    + insideReplies.map((row) => `${row.file}(${row.spellings.join(",")})`).join("; ")
-    + " —— notice 里\u201csocket 不报 state root\u201d那句从此是假的，改文案，别放宽这条闸");
+  assert.ok(insideReplies.length > 0,
+    "回复模块里再没有 stateRoot 的任何拼法了：hello 不报根了，"
+    + "notice 里\u201c去读它\u201d与面板那行读数都得跟着改回去");
 
   // And the scan must not be green because it went blind: each spelling has a
   // fixture that only it catches. MUTATION THIS PINS: dropping any matcher above
@@ -998,11 +1008,21 @@ test("no socket reply carries the daemon's state root, and the registry notice m
 
   for (const filePath of ["/Users/example/work", "/Users/other/.glasspane/projects.json"]) {
     const notice = daemonRestartNotice(filePath);
-    assert.deepEqual(claimsStateRootReadable(notice), [],
-      `notice 把本壳看不见的东西说成了能从 socket 读到：${notice}`);
-    // 正向的一半还得在：不能靠删掉整段自辩来通过上一条断言。
-    assert.match(notice, /cannot see|will not guess|not certain from here/,
-      `notice 要说清自己的边界，而不是沉默地少说一句：${notice}`);
+    if (reportedOverSocket) {
+      // 代码报了根 → 文案必须把这条读法交给 agent，并且不许再留着那套"本壳看不见"的自辩。
+      assert.ok(claimsStateRootReadable(notice).length > 0,
+        `hello 报 stateRoot，notice 却不告诉 agent 去读它：${notice}`);
+      assert.match(notice, /stateRoot/, `要给出可读的那个键名，而不是含糊一句：${notice}`);
+      assert.doesNotMatch(notice, /socket reports no state root|cannot see and will not guess/,
+        `这段自辩已经过期；过期的自辩会把下一个读者带回旧契约：${notice}`);
+      // 诚实的另一半：旧 daemon 不报，缺席不许被读成 home 默认。
+      assert.match(notice, /omits the key/, `要写明缺席意味着什么：${notice}`);
+    } else {
+      assert.deepEqual(claimsStateRootReadable(notice), [],
+        `notice 把本壳看不见的东西说成了能从 socket 读到：${notice}`);
+      assert.match(notice, /cannot see|will not guess|not certain from here/,
+        `notice 要说清自己的边界，而不是沉默地少说一句：${notice}`);
+    }
     assert.match(notice, /launchctl print/, `边界要给出一条做得到的读法：${notice}`);
   }
 });

@@ -37,13 +37,20 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { SITES } from '../../scripts/version-sites.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.resolve(HERE, '..', '..')
 const FROM = '1.0.0'
 const TO = '1.2.3'
 
-/** The 10 declared sites, spelled for a scratch tree: file → the text that carries the version. */
+/**
+ * The declared sites, spelled for a scratch tree: file → the text that carries the version.
+ *
+ * `every declared site has a scratch template` below is what keeps this list honest: a site
+ * added to scripts/version-sites.mjs without a template here makes the guard name the file, instead
+ * of the three lock tests failing with "位点异常" like they did when the README sites landed.
+ */
 const SITE_TEMPLATES = {
   'package.json': (v) => `${JSON.stringify({ name: 'glasspane', version: v, private: true }, null, 2)}\n`,
   'mcp-shell/package.json': (v) => `${JSON.stringify({ name: 'glasspane-mcp', version: v }, null, 2)}\n`,
@@ -58,6 +65,10 @@ const SITE_TEMPLATES = {
   'engine/scripts/make-app.sh': (v) => `#!/bin/sh\ncat <<XML\n<key>CFBundleShortVersionString</key>\n        <string>${v}</string>\nXML\n`,
   'install.sh': (v) => `#!/bin/sh\nGLASSPANE_RELEASE="v${v}"\n`,
   'installer/cli.js': (v) => `export const RELEASE_VERSION = '${v}'\n`,
+  // 文档里那条 clone 命令也是位点（1.15.0 起）：README 与 install.sh 各写一份 tag 时，
+  // 漂移的是用户照抄的那一行，而 check-version 当时看不见它。夹具按生产那一行的形状给。
+  'README.md': (v) => `git clone --branch v${v} https://github.com/jingzhao-l/GlassPane.git && cd GlassPane\n`,
+  'README.zh-CN.md': (v) => `git clone --branch v${v} https://github.com/jingzhao-l/GlassPane.git && cd GlassPane\n`,
 }
 
 /** The lock shape set-version's own regeneration produces: one versioned entry per workspace key. */
@@ -241,4 +252,14 @@ test('the happy path still unifies sites and locks in one run', () => {
   } finally {
     tree.cleanup()
   }
+})
+
+test('every declared site has a scratch template, so adding one cannot break the lock tests silently', () => {
+  const templated = new Set(Object.keys(SITE_TEMPLATES))
+  const missing = [...new Set(SITES.map((s) => s.file))].filter((f) => !templated.has(f))
+  assert.deepEqual(missing, [], `scripts/version-sites.mjs 里有位点没有夹具：${missing.join(', ')}`)
+  // 反过来说，模板表里留着已经不在位点表的文件也是漂移（上一版写死的"10 个位点"就是这么过期的）。
+  const declared = new Set(SITES.map((s) => s.file))
+  const stale = [...templated].filter((f) => !declared.has(f))
+  assert.deepEqual(stale, [], `夹具里有已经不在位点表的文件：${stale.join(', ')}`)
 })

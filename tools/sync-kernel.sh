@@ -292,10 +292,16 @@ else
   # before the gates — after the checks that do not need it have run.
   BUN="${BUN:-$(command -v bun || true)}"
   if [ -z "$BUN" ] && [ -x "$HOME/.bun/bin/bun" ]; then BUN="$HOME/.bun/bin/bun"; fi
+  # `--target=fork` refuses above, so this leg is unreachable and kept only as the
+  # record of what the fork used to run. It still has to be *correct* if revived:
+  # these strings go through `eval`, so an unquoted $root word-splits on any checkout
+  # path with a space (macOS volume names do) — the gate would then run a different
+  # command than the one printed, or fail for a reason that has nothing to do with
+  # the sync.
   gates=(
-    "node $root/harness/glasspane-harness/script/kernel-vendor.mjs --check"
-    "node $root/harness/tools/fork-diff.mjs --check"
-    "node $root/harness/tools/tool-surface.mjs --check"
+    "node \"$root/harness/glasspane-harness/script/kernel-vendor.mjs\" --check"
+    "node \"$root/harness/tools/fork-diff.mjs\" --check"
+    "node \"$root/harness/tools/tool-surface.mjs\" --check"
   )
   gate_cwd=("$root" "$root" "$root")
   if [ -n "$BUN" ]; then

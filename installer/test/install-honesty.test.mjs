@@ -20,7 +20,11 @@ import path from 'node:path'
 
 import {
   builtDaemonVersion,
+  install,
   installVerification,
+  npmDepsCommand,
+  tagVerifyGate,
+  parseArgs,
   tagTreeAgreement,
   tagVerifyAgainstTree,
   tagVerifyDecision,
@@ -179,4 +183,107 @@ test('应答 hello 的实例版本与本轮构建产物不一致时，"安装完
   assert.match(preexisting.note, /不能证明它是本轮构建/, '同版本号只说明同一版本，实例早于本次安装时这句必须说')
 
   assert.equal(installVerification({ arrived: false }).verified, false, 'socket 没等到仍旧不算')
+})
+
+/* ---------------------------------------------------------------------------
+ * 拿去 `npm` 的那条命令行（2026-10-14 review）。`install()` 从前无条件跑
+ * `npm install`，而同一仓库的 CI 根门（ci.yml install-gate 的 `npm ci`）、发布作业
+ * （release.yml 的 `npm ci --no-audit --no-fund`）与 updater 的树守卫量的都是**提交过的
+ * 那份 lockfile**——"CI 全绿的发布 tag"这句 attest 说的就是那棵依赖树。`npm install`
+ * 会重新解析浮动传递依赖，于是装出来的 app 依赖树可以与被 attest 的那棵不是同一份，
+ * 屏幕上却仍写着绿。夹具形状：一棵真目录 + 一个只记录 argv 然后**按失败退场**的 npm
+ * （真 npm 装失败就是这个形状）；它不答任何"成功"的样子，所以这条测试能证的只有
+ * "选的是哪条命令行"，证不了依赖真装上了。
+ * ------------------------------------------------------------------------- */
+
+/** 只记录 argv 就退 1 的 npm：没有安装能力、没有版本可答，与真实的失败面同形。 */
+function makeRefusingNpmStub() {
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-npmstub-'))
+  const log = path.join(dir, 'argv.log')
+  fs.writeFileSync(path.join(dir, 'npm'),
+    `#!/bin/sh\nprintf 'npm %s\\n' "$*" >> '${log}'\nexit 1\n`, { mode: 0o755 })
+  return { dir, log, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) }
+}
+
+/** 一棵"要被装"的树：真的 package.json，lockfile 按参数给不给。 */
+function makeInstallTarget({ lockfile }) {
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-npmci-tree-'))
+  fs.writeFileSync(path.join(dir, 'package.json'), '{"name":"gp-fixture-tree","version":"1.14.1"}\n')
+  if (lockfile) fs.writeFileSync(path.join(dir, 'package-lock.json'), '{"lockfileVersion":3}\n')
+  return dir
+}
+
+test('npmDepsCommand：有 lockfile = npm ci --no-audit --no-fund，没有才 npm install', () => {
+  assert.deepEqual(npmDepsCommand({ hasLockfile: true }), ['ci', '--no-audit', '--no-fund'])
+  assert.deepEqual(npmDepsCommand({ hasLockfile: false }), ['install'])
+  assert.deepEqual(npmDepsCommand({}), ['install'], '判据缺省是"没有 lockfile"，不许凭空假定有一份')
+})
+
+test('真 install() 走到依赖那一步时，按树的 lockfile 形状选命令行（argv 由 stub 记录）', async () => {
+  const stub = makeRefusingNpmStub()
+  const home = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-npmci-home-'))
+  const savedPath = process.env.PATH
+  const savedHome = process.env.HOME
+  // `run()` 是按进程 PATH 起 npm 的，所以这里必须临时换 PATH（并在 finally 里换回来）。
+  process.env.PATH = `${stub.dir}:${path.dirname(process.execPath)}:/usr/bin:/bin`
+  process.env.HOME = home
+  const seen = []
+  try {
+    for (const lockfile of [true, false]) {
+      const tree = makeInstallTarget({ lockfile })
+      const { options, error } = parseArgs(['--repo', tree, '--no-prompt', '--no-gui', '--no-app'])
+      assert.equal(error, null, error)
+      // 依赖装不动 → 安装必须**停下**（不是继续报绿）。
+      await assert.rejects(
+        () => install({ options, env: { HOME: home, GLASSPANE_REPO: tree }, uid: 501 }),
+        /npm 失败，退出码 1/,
+        `npm 那一步非零退出必须让 install() 抛（lockfile=${lockfile}）`,
+      )
+      const lines = fs.readFileSync(stub.log, 'utf8').trim().split('\n')
+      assert.equal(lines.length, seen.length + 1, `每轮应只调用一次 npm，实得：${JSON.stringify(lines)}`)
+      seen.push(lines[lines.length - 1])
+      fs.rmSync(tree, { recursive: true, force: true })
+    }
+    assert.equal(seen[0], 'npm ci --no-audit --no-fund', `有 lockfile 的那棵树走的必须是 npm ci（与 CI/release 门同一份 lock），实得「${seen[0]}」`)
+    assert.equal(seen[1], 'npm install', `没有 lockfile 的树才允许退回 npm install，实得「${seen[1]}」`)
+    // 口令式反证：两棵树的命令行不是同一条——否则上面两条断言可以同时被一条硬编码满足。
+    assert.notEqual(seen[0], seen[1])
+  } finally {
+    process.env.PATH = savedPath
+    process.env.HOME = savedHome
+    stub.cleanup()
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('tagVerifyGate：一个不存在的 ref 不能冒充"验过签"', () => {
+  // 从前这里是 `pinRef !== 'main' && repoHasRef(...)`：两个条件都不满足时整块静默跳过，
+  // 安装照常完成，输出里没有一句"没验过"。
+  const missing = tagVerifyGate({ pinRef: 'v9.9.9', hasRef: false })
+  assert.equal(missing.action, 'skip', '--repo 指的本地树没有 tag 可验，不能因此打断受支持的安装路径')
+  assert.match(missing.text, /未做 GPG 验签/, missing.text)
+  assert.match(missing.text, /没有任何签名担保/, missing.text)
+
+  const present = tagVerifyGate({ pinRef: 'v1.14.1', hasRef: true })
+  assert.equal(present.action, 'verify', '存在就该去验，不该有任何解释文案')
+  assert.equal(present.text, null)
+
+  const branch = tagVerifyGate({ pinRef: 'main', hasRef: false })
+  assert.equal(branch.action, 'skip', 'main 是显式声明的"分支头没有发布签名可验"')
+  assert.match(branch.text, /GLASSPANE_REF=main/, branch.text)
+  // 两条 skip 的话术必须不同：一个是"你指名要分支头"，一个是"你要的 tag 不在这棵树里"。
+  assert.notEqual(branch.text, missing.text)
+})
+
+test('tagVerifyGate：形状不安全的 ref 是拒，不是跳过验签继续装', () => {
+  // 这个值会被原样拼进 `git verify-tag` / `git rev-parse`。以 `-` 开头就是选项注入的入口，
+  // 含空白则是 `ext::sh -c …` 那一类；`validateGitRef` 过去只守 clone 那一条路。
+  for (const bad of ['--upload-pack=touch /tmp/pwned', 'v1.14.1 -c', '+v1.14.1', '']) {
+    const gate = tagVerifyGate({ pinRef: bad, hasRef: true })
+    assert.equal(gate.action, 'refuse', `${JSON.stringify(bad)} 必须被拒：${gate.text}`)
+    assert.match(gate.text, /形状不安全|为空|含空白|以 "-" 开头|以 "\+" 开头/, gate.text)
+  }
+  // 对照：正常 tag 不能被这条判据误伤。
+  assert.equal(tagVerifyGate({ pinRef: 'v1.14.1', hasRef: true }).action, 'verify')
+  assert.equal(tagVerifyGate({ pinRef: 'refs/tags/v1.14.1', hasRef: true }).action, 'verify')
 })

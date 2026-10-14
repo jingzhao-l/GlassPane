@@ -46,6 +46,11 @@ set -euo pipefail
 KEYCHAIN_SERVICE="${GP_SIGNING_SERVICE:-gpg-signing}"
 KEY_GRIP_HINT="89D88B1D043A1298"   # jingzhao-l (sign-github) <ET_lin@outlook.com>
 
+# File-scope on purpose: `cmd_seed` arms an EXIT trap that removes it, and a
+# function-local is already out of scope by the time that trap runs — the cleanup
+# would then silently do nothing and every run would leave another file in TMPDIR.
+gpg_err_file=""
+
 # repo|local checkout|environment holding the secrets ("" = repo level).
 # The third column is not cosmetic: a job declaring `environment: release`
 # cannot read a repo-level secret, so a workflow that reads the wrong scope
@@ -107,10 +112,27 @@ cmd_seed() {
   #   缺少 pinentry               -> gpg never got one (a GUI prompt may have
   #                                  appeared and been dismissed) — NOT "wrong"
   local armored gpg_err
-  armored="$(gpg --batch --yes --pinentry-mode loopback --passphrase "$pass" \
-                   --armor --export-secret-keys "$KEY_GRIP_HINT" 2>/tmp/.gpg-seed-err || true)"
-  gpg_err="$(cat /tmp/.gpg-seed-err 2>/dev/null || true)"
-  rm -f /tmp/.gpg-seed-err
+  # 口令走 `--passphrase-fd 0`（stdin），绝不走把口令写进 argv 的那种形式：argv 在同一台机器上
+  # 是**任何本地账号**都能读的东西（`ps -eww -o args`）。这不是推测——release.yml 的签名步骤
+  # 就是为这件事改的（那里实测"签名进行中 12 次采样全部读到"），loopback pinentry 本来就是
+  # 为"从文件描述符喂进来"设计的。本地工具与 CI 必须同一口径，否则 CI 侧修好、本机侧继续漏。
+  #
+  # 错误文件用 mktemp **模板**（不带 -t）：`mktemp -t NAME` 在 BSD(macOS) 上是把 NAME 当前缀，
+  # 而 GNU coreutils 把 -t 当已废弃、把参数当模板并要求尾部至少两个 X——同一行在两个平台上
+  # 一边过一边报错。从前的写法是写死的 /tmp/.gpg-seed-err：路径人人可预测、先到先得，而里面
+  # 装的正是 gpg 的原话。
+  gpg_err_file="$(mktemp "${TMPDIR:-/var/tmp}/gpg-seed-err.XXXXXX")"
+  # The guard is load-bearing, not stylistic: `gpg_err_file` is `local` to this
+  # function, so when the EXIT trap fires it is out of scope again, and under
+  # `set -u` a bare `rm -f "$gpg_err_file"` died with "gpg_err_file: unbound
+  # variable" *after* a perfectly successful seed — the tool reported failure on
+  # the path that worked. `rm -f ""` is no good either (BSD rm errors on an empty
+  # operand), so the name is tested before it is used.
+  trap 'if [ -n "${gpg_err_file:-}" ]; then rm -f "$gpg_err_file"; fi' EXIT
+  armored="$(printf '%s\n' "$pass" | gpg --batch --yes --pinentry-mode loopback \
+                   --passphrase-fd 0 --armor --export-secret-keys "$KEY_GRIP_HINT" \
+                   2>"$gpg_err_file" || true)"
+  gpg_err="$(cat "$gpg_err_file" 2>/dev/null || true)"
   if [ -n "$armored" ] && printf '%s' "$armored" | grep -q 'BEGIN PGP PRIVATE KEY BLOCK'; then
     ok "key unlocked and exported"
   elif printf '%s' "$gpg_err" | grep -qE '损坏的密码|bad passphrase'; then
@@ -171,9 +193,11 @@ cmd_verify_pass() {
   printf '\n'
   # --export-secret-keys is the operation that actually requires an unlock, so
   # it is the honest probe; listing keys would "succeed" without ever asking.
+  # 口令同 cmd_seed：`--passphrase-fd 0` 从 stdin 喂，不进 argv（这条命令的 argv 在
+  # 任何本地账号的 `ps -eww -o args` 里都读得到，而这里恰恰是用户反复试口令的地方）。
   local err
-  err="$(gpg --batch --yes --pinentry-mode loopback --passphrase "$pass" \
-              --armor --export-secret-keys "$KEY_GRIP_HINT" 2>&1 >/dev/null || true)"
+  err="$(printf '%s\n' "$pass" | gpg --batch --yes --pinentry-mode loopback \
+              --passphrase-fd 0 --armor --export-secret-keys "$KEY_GRIP_HINT" 2>&1 >/dev/null || true)"
   unset pass
   if [ -z "$err" ]; then
     ok "口令正确（gpg 没有报错，导出成功）"

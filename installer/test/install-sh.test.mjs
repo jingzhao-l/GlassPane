@@ -11,6 +11,7 @@ import {
   repoMissingText,
   resolvePinRef,
   bootstrapPlan,
+  installGuard,
   REPO_URL,
   INSTALL_SH_URL,
   RELEASE_VERSION,
@@ -32,12 +33,17 @@ function makeFakeRoot() {
   return root
 }
 
-/** 以受控环境运行 install.sh（dry-run 保证零副作用：不 clone、不委托执行）。 */
-function runInstallSh({ cwd, env = {} } = {}) {
+/** 以受控环境运行 install.sh（dry-run 保证零副作用：不 clone、不委托执行）。
+ *  `drop` 是**删掉**某个变量的口子：`{...process.env, HOME: undefined}` 在 spawnSync 里
+ *  等于没删（undefined 会被 JSON 序列化丢掉，但为了让"未设置"这件事写在测试里而不是一行
+ *  赋值里，这里显式 delete）。 */
+function runInstallSh({ cwd, env = {}, drop = [] } = {}) {
+  const childEnv = { ...process.env, GLASSPANE_REPO: '', GLASSPANE_INSTALL_DRY_RUN: '1', ...env }
+  for (const name of drop) delete childEnv[name]
   return spawnSync('/bin/sh', [INSTALL_SH], {
     cwd,
     encoding: 'utf8',
-    env: { ...process.env, GLASSPANE_REPO: '', GLASSPANE_INSTALL_DRY_RUN: '1', ...env },
+    env: childEnv,
   })
 }
 
@@ -48,6 +54,45 @@ function runInstallSh({ cwd, env = {} } = {}) {
 test('install.sh: POSIX sh 语法检查通过', () => {
   const result = spawnSync('/bin/sh', ['-n', INSTALL_SH], { encoding: 'utf8' })
   assert.equal(result.status, 0, `sh -n 失败：${result.stderr}`)
+})
+
+/* HOME 闸：`set -eu` 下 CLONE_DIR 的默认值 `${GLASSPANE_INSTALL_DIR:-$HOME/glasspane}`
+ * 里，$HOME 也是**展开的一部分**，所以 HOME 未设置时 shell 在第 19 行就死了
+ * （实测：`install.sh: line 19: HOME: unbound variable`，退出 1）。installer/cli.js 的
+ * installGuard() 就是为这一种情况写的补救话，而 install.sh 从来走不到它——它死在委托之前。
+ * 夹具是**真脚本**（INSTALL_SH），不是重写一份逻辑。 */
+test('install.sh: HOME 未设置 → 人话拒绝而不是 unbound variable，dry-run 仍是拒', () => {
+  const guard = installGuard({ home: '' })
+  assert.equal(guard.ok, false, '前提：installer 侧这条本来就是拒绝分支')
+
+  // 三个入口分支都验：仓库靠 cwd 定位、靠 GLASSPANE_REPO 指定、什么都没定位到（将要 clone）。
+  // 闸若排在任何一处消息逻辑之后，第一条就会漏。
+  const cases = [
+    ['cwd 即仓库', { cwd: makeFakeRoot(), env: {} }],
+    ['GLASSPANE_REPO 指定', { cwd: os.tmpdir(), env: { GLASSPANE_REPO: makeFakeRoot() } }],
+    ['未定位到仓库（clone 分支）', { cwd: fs.mkdtempSync(path.join(os.tmpdir(), 'glasspane-bare-home-')), env: {} }],
+  ]
+  for (const [label, spec] of cases) {
+    const result = runInstallSh({ ...spec, drop: ['HOME'] })
+    const text = `${result.stderr}\n${result.stdout}`
+    assert.equal(result.status, 1, `${label}：HOME 未设置必须退出 1，实得 ${result.status}｜${text}`)
+    assert.match(text, /HOME 未设置/, `${label}：要说的是 HOME 未设置这件事`)
+    assert.doesNotMatch(text, /unbound variable/, `${label}：不许以 shell 的 nounset 报错收场`)
+    assert.doesNotMatch(text, /\[dry-run\]/, `${label}：dry-run 不豁免这条拒绝（它拒的是路径拼不出来）`)
+    assert.doesNotMatch(text, /node .*installer\/cli\.js/, `${label}：拒绝之后不得再打印委托行`)
+    // 与 installer 侧同口径：两条一键入口对同一个缺失给同一句补救。
+    for (const fragment of ['export HOME=/Users/', 'env -u HOME']) {
+      assert.ok(guard.error.includes(fragment), `前提：installGuard 的补救里有 ${fragment}`)
+      assert.ok(text.includes(fragment), `${label}：拒绝文案要带 installGuard 的补救片段「${fragment}」，实得：${text}`)
+    }
+  }
+})
+
+test('install.sh: HOME 设了但为空 = 与未设置同义（一样拒，且零输出零副作用）', () => {
+  const result = runInstallSh({ cwd: makeFakeRoot(), env: { HOME: '' } })
+  assert.equal(result.status, 1, result.stderr)
+  assert.match(result.stderr, /HOME 未设置/)
+  assert.doesNotMatch(`${result.stderr}${result.stdout}`, /unbound variable/)
 })
 
 test('install.sh: GLASSPANE_REPO 指向合法仓库 → dry-run 报告委托命令', () => {

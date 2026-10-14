@@ -444,10 +444,18 @@ test("both notices name the --state-dir root and the check that decides between 
     assertRootDiscriminator(own, "the default-root notice");
     const stray = daemonRestartNotice(reg.filePath);
     assertRootDiscriminator(stray, "the shell-override notice");
-    // Neither branch may claim to *know* which root the running service chose.
+    // Neither branch may claim to *know* which root an old service chose, and now that
+    // hello carries the root it must say where to read it — plus what an absent key
+    // means. MUTATION THIS PINS: dropping the `stateRoot` read path (the notice would
+    // be back to "cannot see", which the daemon has stopped making true), or dropping
+    // the old-daemon caveat (which would let "absent" be read as "home default").
     for (const [label, notice] of [["own", own], ["stray", stray]]) {
-      assert.match(notice, /cannot see|invisible to this shell|not certain from here/,
-        `${label}: the notice states its own limit, or it is asserting a fact it cannot observe`);
+      assert.match(notice, /hello.*stateRoot|stateRoot.*hello/,
+        `${label}: 1.15.0 起根是可读的，notice 必须把这条读法交给 agent：${notice}`);
+      assert.match(notice, /omits the key/,
+        `${label}: 缺席不等于默认——旧 daemon 不报时必须这么说：${notice}`);
+      assert.doesNotMatch(notice, /socket reports no state root/,
+        `${label}: 这句已经被代码推翻了，留着就是把过期结论交给下一个读者：${notice}`);
     }
   } finally {
     reg.dispose();

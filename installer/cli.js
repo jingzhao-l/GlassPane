@@ -3,7 +3,8 @@
  * glasspane-install — 一键安装 CLI（零第三方依赖，Node >= 18）。
  *
  * 流程：terminal onboarding 横幅 → 环境预检（node/swift/git/open）→ 定位项目
- * 根目录 → npm install（workspaces）→ 编译 TS（kernel → mcp-shell）→ swift
+ * 根目录 → npm 依赖（有 package-lock.json 走 npm ci，见 npmDepsCommand）→ 编译 TS
+ * （kernel → mcp-shell）→ swift
  * build -c release（engine）→ make-app.sh 打包**并签名**两个 .app → 安置到
  * ~/Applications → 以 bundle 内可执行注册 launchd 自启并启动 daemon → 打开
  * GlassPane.app 设置面板进入权限引导（授权对象是 daemon，见 P1 v1.2 §11）→
@@ -1369,10 +1370,62 @@ export function updateGuidanceText(update) {
 // 执行层
 // ---------------------------------------------------------------------------
 
+/** 装之前"这一次到底验没验签"的门（纯函数，可单测）。
+ *
+ *  从前这里是 `pinRef !== 'main' && repoHasRef(...)` 一条静默的 `&&`：条件不满足时整块被
+ *  跳过、安装照旧跑完，而输出里没有一句"没验过"。`--repo <本地目录>` 与 `GLASSPANE_REF=main`
+ *  都是文档里在用的路径，那些树本来就没有发布 tag 可验——所以这里**不拒**（拒会把受支持的
+ *  离线/开发安装打断），但必须把"没验签"这件事说出来：担保没生效时，屏幕不能装作担保生效。
+ *
+ *  唯一真拒的是形状不安全的值：它会被原样拼进 `git verify-tag` / `git rev-parse`，以 `-`
+ *  开头是选项注入的入口，含空白是 `ext::sh -c …` 那一类。`validateGitRef` 过去只守 clone
+ *  那一条路，这里是第二条入口。 */
+export function tagVerifyGate({ pinRef, hasRef }) {
+  const check = validateGitRef(pinRef)
+  if (!check.ok) {
+    return {
+      action: 'refuse',
+      text: `GLASSPANE_REF 形状不安全，安装中止（不是"跳过验签继续装"）：${check.error}`,
+    }
+  }
+  if (pinRef === 'main') {
+    return {
+      action: 'skip',
+      text: '未做 GPG 验签：GLASSPANE_REF=main，分支头没有发布 tag 的签名可验。要装被签的发布物就别设这个环境变量。',
+    }
+  }
+  if (!hasRef) {
+    return {
+      action: 'skip',
+      text: `未做 GPG 验签：这棵树里找不到 ${pinRef}（本地 --repo 或浅取种的树本来就没有那个 tag）。`
+        + '本轮安装没有任何签名担保——装的是你交给它的那棵树。',
+    }
+  }
+  return { action: 'verify', text: null }
+}
+
+/** 钉住的 tag 那棵树**依赖安装**用哪条命令：仓库里有 `package-lock.json` 就走 `npm ci`。
+ *
+ * WHY（不是口味问题）。CI 的根 workspace 门（`.github/workflows/ci.yml` 的 install-gate：
+ * `npm ci`）、发布作业（`release.yml` 的 `npm ci --no-audit --no-fund`）与 updater 的树守卫
+ * 量的都是**提交过的那份 lockfile**——"CI 绿"这句 attest 说的就是那棵树。安装器却跑
+ * `npm install`，它会重新解析浮动传递依赖：装出来的 app 依赖树可以与被 attest 的那棵不同，
+ * 而屏幕上仍然写着"CI 全绿的发布 tag"。判据放成纯函数是为了可测——这一段从前埋在
+ * `install()` 里，没有任何一条测试能指到它（与 `tagVerifyDecision` 同一条理由）。
+ * 没有 lockfile 的树（浅 clone 之外的手工目录、老 tag）仍要能装，故保留 `npm install` 退路。 */
+export function npmDepsCommand({ hasLockfile = false } = {}) {
+  return hasLockfile ? ['ci', '--no-audit', '--no-fund'] : ['install']
+}
+
 /** 前台运行命令并透传输出；非零退出码 → reject 携带清晰描述。 */
 export function run(cmd, args, { cwd } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32' })
+    // `shell: true` 在任何平台上都是"把 cmd 与 args 拼成一条 shell 命令行"，而这个产品的
+    // 一切输入都来自外部（仓库 URL、ref、目录）。它是树里唯一一处 shell:true，而 macOS 上
+    // 一个用 `win32` 当条件的开关永远为真地不起作用——留着只会让人以为 Windows 是被支持的
+    // 交付面（README 与 install.sh 都写明 macOS）。要真支持 Windows，正确做法是把
+    // `npm.cmd` 解析成绝对路径后仍走 argv，而不是打开 shell 解析。
+    const child = spawn(cmd, args, { cwd, stdio: 'inherit' })
     child.on('error', (error) => reject(new Error(`${cmd} 启动失败：${error.message}`)))
     child.on('close', (code) => {
       if (code === 0) {
@@ -2152,8 +2205,12 @@ export async function install({
     rootDir = plan.targetDir
   }
 
-  // 发布 tag GPG 验签：动作怎么落由 `tagVerifyDecision` 判（纯函数，有单测）。
-  if (pinRef !== 'main' && repoHasRef(rootDir, pinRef)) {
+  // 发布 tag GPG 验签：先过"这次到底验不验"的门（形状/存在性），再判动作，两条判据都是纯函数。
+  const gate = tagVerifyGate({ pinRef, hasRef: repoHasRef(rootDir, pinRef) })
+  if (gate.action === 'refuse') throw new Error(gate.text)
+  if (gate.action === 'skip') {
+    printStep(paint(gate.text, 'yellow'))
+  } else {
     const sig = verifyCloneTagGpg({ repoDir: rootDir, ref: pinRef })
     // 先判"签名对不对"，再判"要装的是不是被签的那棵树"——两问分开，绿字才只在对得上时出现。
     const verdict = tagVerifyAgainstTree({
@@ -2198,8 +2255,14 @@ export async function install({
   printStep(`日志与 socket 目录就位：${logDir.dir}`)
 
   if (!options.skipBuild) {
-    printStep('安装 npm 依赖（workspaces: kernel / mcp-shell / installer）……')
-    await run('npm', ['install'], { cwd: rootDir })
+    // 装的是钉住的 tag 那棵树：有提交过的 lockfile 就必须 `npm ci`，与被 CI/release 门
+    // attest 的依赖树同一份（判据与理由见 npmDepsCommand）。
+    const hasLockfile = fs.existsSync(path.join(rootDir, 'package-lock.json'))
+    const depsCmd = npmDepsCommand({ hasLockfile })
+    printStep(hasLockfile
+      ? '安装 npm 依赖（workspaces: kernel / mcp-shell / installer）——按提交过的 package-lock.json 走 npm ci……'
+      : '安装 npm 依赖（workspaces: kernel / mcp-shell / installer）——该树没有 package-lock.json，退回 npm install（依赖树未经 CI 那一份 lock 的 attest）……')
+    await run('npm', depsCmd, { cwd: rootDir })
 
     printStep('编译 kernel……')
     await run('npm', ['run', 'build', '--workspace', '@iterate/kernel'], { cwd: rootDir })

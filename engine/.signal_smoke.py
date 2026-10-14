@@ -37,6 +37,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 DEFAULT_BIN = os.path.join(
@@ -381,8 +382,16 @@ def main(argv):
         print("  产物路径若变更，须同步改该 workflow 的 Signal teardown gate 一行")
         print("  本机确实要机会式跳过：设 %s=1（CI 里勿设）" % ALLOW_SKIP_ENV)
         return EXIT_NOT_RUN
-    work = "/tmp/glasspane-signal-smoke-%d" % os.getpid()
-    os.makedirs(work, exist_ok=True)
+    # A pid-numbered name under /tmp is predictable: another account (or an earlier
+    # run that survived) can pre-create it, and this directory holds the daemon's
+    # state roots and its stderr logs. `mkdtemp` is O_EXCL and unique by construction.
+    # The parent is named rather than left to `$TMPDIR`: on macOS `TMPDIR` is
+    # `/var/folders/<...>/T/`, and a state root under it pushes
+    # `<work>/state-sigterm/daemon.sock` past the 104-byte `sun_path` limit, so the
+    # daemon refuses to bind and the gate goes red for the wrong reason. `/var/tmp`
+    # is short, survives the periodic cleaner that has eaten `/tmp` before, and is
+    # still 0700 per directory as created by mkdtemp.
+    work = tempfile.mkdtemp(prefix="glasspane-signal-smoke-", dir="/var/tmp")
     try:
         problems = self_test_diagnosis(work)
         problems += run_case(binary, "SIGTERM", os.path.join(work, "state-sigterm"), 15)
