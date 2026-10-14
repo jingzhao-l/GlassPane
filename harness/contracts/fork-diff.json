@@ -3663,7 +3663,7 @@
     },
     {
       "file": "packages/opencode/src/tool/glasspane/kernel.ts",
-      "forkHash": "78bfebeafe4a95e42c2d832c984920660405c87a"
+      "forkHash": "2cf1f807725433eb8018bb3620657f582eb40345"
     },
     {
       "file": "packages/opencode/test/config/project-config-dirs.test.ts",
@@ -3683,7 +3683,7 @@
     },
     {
       "file": "packages/opencode/test/tool/glasspane-kernel.test.ts",
-      "forkHash": "6d7b7e2b3ad80c3d4b841ad915a4d891d14e97f9"
+      "forkHash": "4a2391c5462919f9c8b4fa28cf5c73460f675f9f"
     },
     {
       "file": "packages/opencode/test/tool/glasspane-surface.test.ts",

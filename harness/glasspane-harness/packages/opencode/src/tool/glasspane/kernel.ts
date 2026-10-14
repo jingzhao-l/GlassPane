@@ -406,6 +406,20 @@ export function readRunPlan(
 }
 
 /**
+ * The ledger's `createdAt`, as one named function so its shape is testable.
+ *
+ * The kernel's schema demands `…T{HH}:{mm}:{ss}.{ms}Z` — three digits, any value — and
+ * `Date#toISOString` always emits exactly that. This used to overwrite those three digits
+ * with `000`, which the schema accepts but which is a *fabricated* field: it claimed a
+ * precision the code had just thrown away, and two decisions taken in the same second
+ * carried identical stamps, so the chain could not order them. The rule for this module is
+ * transcribe, never invent.
+ */
+export function decisionStamp(at: Date): string {
+  return at.toISOString()
+}
+
+/**
  * Append one decision for an evidence pack. The chain fields and the entry id
  * come from the kernel + ledger; the outcome and summary come from the pack. The
  * caller cannot supply either, which is what keeps two shells from writing the
@@ -441,7 +455,7 @@ export function logDecision(
       operationId: pack.operationId,
       summary: summary.slice(0, 2048),
       outcome: decisionOutcomeFromEvidence(pack),
-      createdAt: new Date().toISOString().replace(/\.\d{3}Z$/, ".000Z"),
+      createdAt: decisionStamp(new Date()),
     })
     return {
       ok: true,

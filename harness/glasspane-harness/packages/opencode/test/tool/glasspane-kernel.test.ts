@@ -8,6 +8,7 @@ import type { DecisionOutcome, EvidencePack } from "../../src/tool/glasspane/ker
 import { kernelContractFile, kernelFixture, kernelFixturesDir, kernelPackageDir } from "../lib/kernel-contract"
 
 import {
+  decisionStamp,
   entryHashOf,
   logDecision,
   outcomeOf,
@@ -395,5 +396,34 @@ describe("the run-plan channel (scenario 2, planned half)", () => {
     if (empty.ok) return
     expect(empty.error.code).toBe("GP_E_RUN_PLAN_SCHEMA")
     expect(empty.error.message).toContain("dimensions")
+  })
+})
+
+describe("the stamp the ledger records", () => {
+  // The kernel's schema asks for exactly three millisecond digits; `toISOString` always
+  // supplies them. The binding used to force those digits to `000`, which the schema
+  // accepts while nothing else does: the entry then claimed a precision the code had
+  // discarded, and two decisions taken inside one second got the same stamp — a chain
+  // that cannot order its own lines. Pinned against a fixed Date so this is arithmetic,
+  // not a race against the clock.
+  const CREATED_AT = JSON.parse(readFileSync(path.join(kernelPackageDir(import.meta.dir), "schemas", "decision-log-entry.schema.json"), "utf8")).properties
+    .createdAt.pattern as string
+
+  test("keeps the milliseconds it was given", () => {
+    expect(decisionStamp(new Date("2026-10-11T02:28:11.042Z"))).toBe("2026-10-11T02:28:11.042Z")
+  })
+
+  test("and still satisfies the kernel's own createdAt pattern", () => {
+    for (const iso of ["2026-10-11T02:28:11.042Z", "2026-01-01T00:00:00.000Z", "2026-12-31T23:59:59.999Z"]) {
+      expect(new RegExp(CREATED_AT).test(iso)).toBe(true)
+    }
+    expect(decisionStamp(new Date("2026-10-11T02:28:11.042Z"))).toMatch(new RegExp(CREATED_AT))
+  })
+
+  test("two calls in the same second are not forced to the same instant", () => {
+    const a = decisionStamp(new Date(1_700_000_000_123))
+    const b = decisionStamp(new Date(1_700_000_000_456))
+    expect(a).not.toBe(b)
+    expect(new Date(b).getTime() - new Date(a).getTime()).toBe(333)
   })
 })
