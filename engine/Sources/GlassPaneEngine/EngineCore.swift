@@ -28,7 +28,7 @@ public final class EngineCore {
     /// keys its daemon site on exactly this line's shape, `hello` reads it, and
     /// `glasspaned --version` reads it — so the version a client sees on the socket
     /// and the version a one-shot process prints cannot drift apart.
-    public static let buildVersion = "1.15.0"
+    public static let buildVersion = "1.15.1"
 
     public let version = EngineCore.buildVersion
     public let protocolVersion = "0"
@@ -211,6 +211,15 @@ public final class EngineCore {
         ]
         if let stateRootPath {
             payload["stateRoot"] = stateRootPath
+        }
+        // P8's other half. `glasspaned --approval-verify` can only ever report the
+        // ledger as this one-shot process sees it — it reads the file and never
+        // appends, so `persistFailed` there is structurally nil. The instance that
+        // CAN fail to persist is the running daemon, and until now that fact died
+        // inside it: the panel could print 「签名链完整」 about a chain whose newest
+        // record never reached disk. `hello` is where a caller can ask.
+        if let persistFailure = approvalGate?.persistFailed {
+            payload["approvalPersistFailed"] = persistFailure
         }
         // P1 v1.2 §11.2：带上 daemon 自身的授权主体与四类席位（未注入钩子时
         // 整段省略——面板据此如实显示"未验证"，不以面板进程的权限冒充）。

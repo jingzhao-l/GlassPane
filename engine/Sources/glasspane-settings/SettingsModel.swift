@@ -57,6 +57,10 @@ final class SettingsModel: ObservableObject {
         /// daemon 自报的状态根（`hello.stateRoot`）。nil 是"这一帧没上报"，
         /// 不是"没有根"——面板不许拿自己这一侧的根去替它填。
         var stateRoot: String?
+        /// daemon 自报的"台账最近一次追加没落盘"（`hello.approvalPersistFailed`）。
+        /// 只有正在服务的实例能知道这件事：`--approval-verify` 是一次性读文件，
+        /// 它自己永远不会有这个字段。
+        var approvalPersistFailed: String?
     }
 
     @Published var entries: [PermissionEntry] = []
@@ -734,6 +738,7 @@ final class SettingsModel: ObservableObject {
             daemon.pid = summary.pid
             daemon.subject = summary.subject
             daemon.stateRoot = summary.stateRoot
+            daemon.approvalPersistFailed = summary.approvalPersistFailed
             daemonReportedStatuses = summary.permissions
             if let probePid = developerToolsProbePid, probePid != summary.pid {
                 // daemon 换过进程：上一次"验证调试能力"的结论不再代表现状。
@@ -756,6 +761,7 @@ final class SettingsModel: ObservableObject {
         daemon.pid = nil
         daemon.subject = nil
         daemon.stateRoot = nil
+        daemon.approvalPersistFailed = nil
         daemonReportedStatuses = [:]
     }
 
