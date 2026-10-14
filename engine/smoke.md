@@ -608,3 +608,89 @@ stdin 打一条 `initialize`：
 
 `~/.glasspane/evidence` 收口计数 **582**（开工时同为 582），`projects.json` 仍是 3 条。
 所有归档类检查一律带 `--state-dir`；本轮没有任何一条命令以 `--prune-evidence` 跑在默认根上。
+
+---
+
+## 2026-10-14 · v1.15.0 收口轮的真机读数（新增小节，不改上面任何历史结论）
+
+全部读数来自本机（有登录 GUI 会话、四张权限席位已勾），命令逐字写在每一条后面。
+
+### 1. daemon 权限席位与 hello 的自报面
+
+```
+engine/.build/debug/glasspaned --state-dir <隔离根> --permissions
+{"permissions":{"accessibility":"granted","developerTools":"unverifiable",
+ "inputMonitoring":"granted","screenRecording":"granted"},
+ "subject":{"binaryPath":"/Volumes/Eng-Dev/GlassPane/engine/.build/debug/glasspaned",
+ "entryName":"glasspaned","hasBundleIdentity":false}}
+```
+
+四席读数与 10-13 那轮一致（三张 granted、开发者工具恒 unverifiable 是设计）。
+`entryName=glasspaned` + `hasBundleIdentity:false` 如实标出这是裸二进制主体。
+
+### 2. `hello` 第一次报出自己服务的状态根（本版新增，实测而非推断）
+
+```
+printf '{"id":1,"method":"hello"}\n' | nc -U -w 3 <隔离根>/daemon.sock
+… "protocolVersion":"0","stateRoot":"/var/tmp/gp-e2e-SXzC6J","version":"1.14.1" …
+```
+
+同一份回包里 `capabilities` 实数 11 个方法名，含 `capture_view` ——这正是本轮 mcp-shell
+那条"假的能力漂移告警"的判据来源（`gp_capture_view` 有执行器却仍转发 `capture_view`，
+从前它不在 `DAEMON_FORWARDED_METHODS` 里，于是每条连接都印一句"agent 从 MCP 够不着它"）。
+`version` 那格是 1.14.1 因为跑的是本轮构建前的 debug 产物，取号之后未重编 debug——
+这一条如实记下，不当成"版本对不上"的缺陷。
+
+### 3. 面板真机走查（本轮构建的 bundle）
+
+`engine/scripts/make-app.sh --settings-bin engine/.build/debug/glasspane-settings
+--skip-daemon --out /var/tmp/gp-app-e2e` 出包并 `open`，窗口 1132 截屏核对：
+侧栏页脚三行是「后台服务运行中 / glasspaned 1.6.2 / **状态根未上报**」。
+最后那行就是本轮新加的判据面：正在跑的 daemon 是机器上已安装的 1.6.2，它不报根，
+面板写"未上报"而不是拿自己这一侧的根替它填——**这条是负例，正是它该有的形状**。
+
+同一时刻 daemon 的 AX attach 成功（`{"appName":"GlassPane","bundleId":"com.glasspane.settings"}`），
+但 `observe` 回 `GP_E_AX_UNAVAILABLE (kAXError -25200)`：已安装的 1.6.2 daemon 读不动这个
+从 `/var/tmp` 起的 bundle。因此**菜单项「打开设置面板」的 `kAXPressAction` 本轮未观测**，
+补上它需要的人工动作与理由记在 `specs/GlassPane_每日审查_2026-10-14_记录.md` §4
+（要点：要把本轮产物装成 `~/Applications/*.app` 并 `launchctl kickstart -k`，
+那是 owner 机器上的共享状态变更，无人值守下没做）。
+
+### 4. 信号闸与状态根隔离
+
+`cd engine && python3 .signal_smoke.py .build/debug/glasspaned` →
+`SIGNAL SMOKE OK：SIGTERM / SIGINT 均自行退出（码 0）且 socket 文件被 unlink`。
+本轮把这条闸的工作目录从 `/tmp/glasspane-signal-smoke-<pid>`（人人可预测、先到先得）
+换成 `mkdtemp`；第一版落在 `$TMPDIR` 下被这条闸自己抓红——macOS 的 `TMPDIR` 深到让
+`<work>/state-x/daemon.sock` 超过 `sun_path` 的 104 字节，daemon 直接拒绝 bind 并以 1 退场。
+现在点名 `/var/tmp`：短、且不会被 `/tmp` 的周期清理吃掉。
+
+### 5. 发布物自证（不靠本地重算）
+
+`gh release view v1.15.0`：`isDraft=false`、`target=a3c6716…`（= 本轮 main 收口提交）。
+归档下载后本地 sha256 与 GitHub API 的 `assets[].digest` 逐字相同
+（`b7872052…74ee179`，2 845 542 字节），所以这台机器上"重下会被静默截断"的老问题这次没发生。
+`node scripts/make-release-archive.mjs --verify <archive> 1.15.0` → 607 entries、
+20 个声明的 command/schema 齐；`tar -tzf … | grep -cE "(^|/)harness/"` = **0**。
+
+### 6. 从签名归档到 MCP 握手（端到端）
+
+解归档 → 树内 `npm pack` → `npm install --prefix <干净前缀>` → 用 stdin 打一条 `initialize`，
+**走的是交付形状那个符号链接 bin**（`prefix/node_modules/.bin/glasspane-mcp`，1.12.3 那轮
+的 P0 形状）：
+
+```
+{"id":1,"jsonrpc":"2.0","result":{…"protocolVersion":"2024-11-05",
+ "serverInfo":{"name":"glasspane-mcp","version":"1.15.0"}}}
+```
+
+registry 侧 `npm view glasspane-mcp@1.15.0 version --prefer-online` 与
+`npm view glasspane-install@1.15.0 version --prefer-online` 都回 `1.15.0`，
+两包 `dist-tags.latest` 也都是 `1.15.0`；publish 走 trusted publisher 直发，
+没有留下待批的 staged publish（因此本轮不需要 owner 的 2FA 动作）。
+
+### 7. 真实状态面未被动过
+
+本轮所有 daemon 调用一律带 `--state-dir` 指向临时根；没有任何一条命令以 `--prune-evidence`
+跑在默认根上。测试跑完后核对工作树 `git status --porcelain` 为空，
+`~/.glasspane` 未被本轮任何一步写入（面板那次 `open` 读的是它自己的默认根，只读）。
