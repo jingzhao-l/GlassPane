@@ -67,3 +67,15 @@
   `~/Applications/GlassPane.app` + `GlassPane Daemon.app` 并 `launchctl kickstart -k
   gui/$(id -u)/com.glasspane.daemon`，再按 `gp-*` 标识走一次 `kAXPressAction`；
   本轮没有替换 owner 机器上正在使用的安装与 launchd 作业（那是可被别人看见的共享状态变更）。
+
+## 5. 补记（同日 v1.15.1）
+
+上表"46 条"之外，收口前复核又清掉三条未落地项，并把一处**面板对未落盘追加亮绿灯**的诚实性缺陷
+一并修掉，随 **v1.15.1** 发布（判据、反向破坏与版本判断见 `CHANGELOG.md` 的 `[1.15.1]`）：
+台账"签名链完整"此前只读文件校验，而 `persistFailed` 出不了正在服务的 daemon 进程；
+现在 `hello` 自报、探针读回、审批页标题与灯色同时读两半。
+
+发布实测：Release `v1.15.1` draft=false、target=`94ad3ae`；归档本地 sha256
+`f6065a70…180eb` 与 GitHub API 的 `assets[].digest` 逐字相同，608 entries，
+`grep -cE "(^|/)harness/"` = 0；registry 两包 `--prefer-online` 与 `dist-tags.latest` 均为
+`1.15.1`（`glasspane-install` 第一次查询报了一次瞬时错误，重查即中——是读副本延迟，不是没发出去）。
