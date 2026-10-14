@@ -12,14 +12,14 @@
   "engineFiles": 62,
   "surfaces": {
     "mcpShell": {
-      "loc": 9231,
+      "loc": 9232,
       "files": 13,
       "ratio": 0.2181,
       "byFile": {
         "mcp-shell/src/tools.ts": 2647,
         "mcp-shell/src/engine-client.ts": 1505,
         "mcp-shell/src/http-gateway.ts": 1285,
-        "mcp-shell/src/project-registry.ts": 1099,
+        "mcp-shell/src/project-registry.ts": 1100,
         "mcp-shell/src/update-state.ts": 526,
         "mcp-shell/src/audit-session.ts": 381,
         "mcp-shell/src/dispatch.ts": 378,
@@ -1096,7 +1096,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 16485,
+  "totalToolSurfaceLoc": 16486,
   "note": null,
   "carried": null
 }

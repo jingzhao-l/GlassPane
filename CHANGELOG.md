@@ -2,7 +2,120 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
-## [Unreleased]
+## [1.15.0] — 2026-10-14
+
+**版本判断：minor。** 四条判据逐条对今天的树实测，不是引用旧条目：
+
+- **新增用户可见控制件 ⇒ minor**（这条单独就足以定级）：设置面板侧栏页脚多一行"服务端的根
+  \<path\>"或"状态根未上报"（`ConsoleRootView` 读 `hello.stateRoot`）；项目页的「清理」入口从
+  "本地算出残留数 > 0 才画出来"改成**恒显示**（禁用时给理由与下一步）；菜单里「打开设置面板」
+  从"只前置已存在的窗口"改成 `Window(id:) + openWindow`（Cmd-W 之后它此前按下去什么都不发生）。
+- **状态/协议字段动了**：`hello` 增 `stateRoot` 键（增量可选，旧客户端忽略即可，与
+  `evidencePersistenceError`/`contamination` 同一先例）；`gp_snapshot` 响应增 `captureDepth`、
+  `gp_restore` 响应增 `comparedDepth`；`gp_diagnose` 在丢帧计数 >0 时插入一段。
+  `kernel/schemas/**` 与 evidence 载荷**未**改（`check-kernel-corpus` 26 份语料逐字节仍与 pin 齐）。
+- **退出码集合没动**：仍是 {0,1,2,3,64,65}（`DaemonExitCodeTests` 双向对照绿）。变的是**归属**：
+  `--prune-evidence` 在档案读不出来时从 0 改为 1，与 `--list-projects`/`--project-prune` 对同一
+  条件的既有判据一致，也与 `--help` 对 1 的定义一致。
+- **CLI 参数没动**（没加、没删开关）；两个 npm 包的 `bin` 声明没动；对外 `gp_*` 工具数目没动
+  （16 个，`check-doc-links` 的"可复算主张↔真源"对照绿）。
+
+取号判断（实测，不信任何文档）：`git tag --sort=-v:refname` 顶格 `v1.14.1`，
+`npm view glasspane-mcp version` 与 `npm view glasspane-install version` 都是 `1.14.1`，
+根 `package.json` 也是 `1.14.1` —— 三条线一致，`v1.15.0` 未被占用，顺序取号、无需让号。
+本版**合并**了开工时 `[Unreleased]` 里那条 `sync-kernel.sh` 的 GNU `mktemp` 修复（它不在
+`v1.14.1` 的签名发布物里，原文照留在下方）。`harness/` 内容一行未改（唯一例外是棘轮金样
+`harness/contracts/tool-surface.json` 的补记，另笔提交，理由与增长明细写在那条提交正文里）。
+
+### Fixed — 证据判定与归属（引擎侧 17 处，逐条有能红的对照）
+
+失效模式与证据（完整清单见提交 `0b4efde`、`81b3c9e` 的正文；这里记的是"错在哪、怎么被看见"）：
+
+1. **`gp_restore` 比较两棵不同的树**（P0）。`gp_snapshot` 尊重调用方的 `maxDepth`，而 restore
+   两侧都按引擎默认深度 6 重测——摘要是**截断树**的摘要，于是 `{maxDepth:3}` 之后应用一动不动
+   也回 `consistent:false`，且没有任何地方记录用过哪个深度。现在快照带 `maxDepth`、restore 按
+   同一深度重测，响应各自写明深度。这条缺陷在单测里**不可见**，因为 `ScriptedChannel` 吃掉
+   `maxDepth` 参数、对任何深度回同一棵树——桩替不存在的能力背书，正是这类错误活了很久的原因。
+2. **一次探针状态差被记到没做过基线的操作上**（P0/P1）。`op_begin` 没送达时探针仍答 `op_end`，
+   它的镜像基线还是上一个 act 的末态，报出的移动属于别的操作；而 daemon 有条"实测到的
+   `changed:true` 是它自己的测量"的保留规则，恰好把这种差留住并升成 `.strong` 归因。
+   修在两侧：探针无基线就一条不发，daemon 对无基线的窗口只撤 `z2-mirror` 条目、KVO/宏帧照留
+   （它们不需要任何窗口命令——一刀切会把真证据一起丢掉）。
+3. **序列化失败的帧被静默吞掉**，且实测发现 Foundation 对 NaN 抛的是 Objective-C 异常、
+   `try?` 抓不住：被测应用里一个 NaN 进度值会把异常扔回宿主，而这段代码自己的注释写着
+   "O(1)、非阻塞、不抛"。改为显式非有限数检查（含嵌套）+ 计入 `hello.droppedWrites`（有读者）。
+4. **审计 B-17**：`RestorePipeline.verifyStateDigest` 只被测试调用、活路径从不调用——P5 §6.3 的
+   "防探针篡改"在真机上是死代码。现在它是 `validate` 的第 6 条，被改写过负载的探针产不出
+   看起来已批准的计划；顺带把 P5 那批用占位摘要 `dddd…` 的夹具改成算真摘要（它们被这条新接上
+   的判据正确地拒绝了），并另加一条具名的篡改检出用例。
+5. **同一个事实两个面各答各话**：`--check-developer-tools` 的退出码读或值，权限卡按"拒绝优先"
+   （10-11 那轮只修了卡，是半修）。`launch:"ok", attach:"denied"` 此前对 agent 报 0、对人是
+   "被系统拒绝"。现在一处算、两面同判；该探针类此前**零单测**，补分类与一致性用例。
+6. **遮挡计数把"读不到"当成"不在前面"**（R6-11 那句谎的新变体）：缺 `kCGWindowLayer` 的邻居被
+   `continue` 掉却不标 `countable=false`，于是整屏裁剪照常提供，一次真实变化可以算出 0 变化率。
+   计数改成可注入窗口列表的纯函数，负层/缺层/缺界各有具名行为用例（原形状闸改为指向新函数，
+   并保留"fetch 那半必须真读 CGWindowList"的对照）。
+7. **多窗口应用被凭空判成阻断**：审计只拿最前面那个窗口判越界，检查器/面板里的控件被写成
+   "用户看不见也点不到"（blocking）。现在按 pid 列出全部屏上窗口、对"任一窗口内"判定，
+   裁剪比例也用真正容纳它的那个窗口算。
+8. **R1-06 的第三面**：`gp_assert_element` 只用内存 64 环取信号上下文，而 `last_evidence`/
+   `diagnose` 有磁盘回落——重启后 agent 能读回那个操作、却被告知"没有上一个操作"。
+9. **checkpoint 缺 digest 被写成"空负载"**，处方指向错的那一端。
+10. **`--prune-evidence` 读不到档案时 `pruned:null` 却退 0**（见上"版本判断"）。
+11. **状态根第一次可问**：`hello` 报 `stateRoot`，`DaemonProbe`/面板/`ConsoleModel` 三处接上；
+    `http-gateway` 那句"对着这个 socket 服务的同一个 --state-dir 跑维护命令"此前在协议里
+    无处可查。旧 daemon 不报时面板写"状态根未上报"，不拿自己那一侧的根替它填。
+    真机实测：隔离 `--state-dir` 起 daemon，hello 回包带 `"stateRoot":"/var/tmp/gp-e2e-SXzC6J"`；
+    面板（本轮构建的 bundle）对旧 daemon 的读数截屏核对为"状态根未上报"。
+12. **B-12 读侧最左一格**：一条 `connect()` 后一字不发的连接可以永久占死这个只有单一客户端位置
+    的 daemon，且 `shutdownRequested` 再也无从被看见（同 uid 即可，socket 无 peer 鉴权）。
+    首字节绝对预算 + 空闲期切片轮询，"完整帧之间永不超时"的既有语义逐字保留。
+13. **每一条 ERROR 都被 `quiet` 丢掉**，而发布形态恒为 quiet（launchd 只传 `--socket-path`）——
+    `internalError` 给 agent 的处方"去看 daemon log（stderr）"指向一条产品从不写入的流。
+    ERROR 改为恒发；顺带把 `CGEventInputMonitor` 里"tap 重新武装成功"从 error 降回 info，
+    否则恒发的错误日志会把健康恢复写成故障。
+14-16. **面板四处指错/冒充 + 两处"按下去无事发生" + 两处禁用不给下一步**：台账按钮打开 home
+    默认目录而启用判据读的是本页那个根；项目页无路径时开共用档案；项目"证据条数"用共用档案的
+    文件数顶替（daemon 对同一事实答 null）——`LocalArchive.evidenceCount` 的 `fallback:` 参数连同
+    它的默认目录一起删除，替身这条路不再是可选项；同一个 nil 在行内写"证据目录已清理"（宣称
+    发生过一次没人测到的清理）；清理入口被本地残留数藏着；菜单项只前置已存在的窗口。
+17. **socket 祖先目录没进隔离判据**（安全）：`--state-dir` 落在别的账号拥有、或任何人可写且无
+    sticky 的祖先里时，那个账号可以把 0700 的状态根挪走、自己顶上同名 socket——daemon 对着一个
+    没人连得上的 fd 服务，而按名字连接的客户端全落到攻击者那里。祖先逐级同判，
+    `/tmp`（root + 1777 + sticky）与本机默认根实测通过，不是假设。
+
+### Fixed — 文档说的和代码做的不一致（11 条，全部回真源）
+
+README 双语四处把归因默认值写成 `weak`（代码是 `contaminated ? .weak : .soft`，而 SECURITY 早就
+写对——两份文档互相矛盾）；clone 命令钉 `v1.11.0` 而 `install.sh` 已到 `v1.14.1`，且那句话自己
+写着"请对着 install.sh 核"、没人核（现在它是 `set-version` 的第 11/12 号位点）；SECURITY 的受支持
+版本表停在 1.1.x；"每个发布都带 detached GPG 签名"与本仓实测（v1.3.1 无 .asc）冲突；CI 通道数
+7 vs 9；ITERATE 三处基线被仓库自己的测量推翻（用例数、位点数、"1.1.0 是否已上 npm"）；
+`engine/smoke.md` 第 6 行要求 `schemaVersion="glasspane.evidence/0.1-draft"`，而写入端发的是
+`glasspane.evidence/0.1` —— **照旧流程跑必得一次假 FAIL**。
+`scripts/check-doc-links.mjs` 从"只查死链"升级为能查可复算主张漂移 + 双语同量对照（登记表 24→25
+份，含 `engine/smoke.md`、`ITERATE.md`）；反向破坏实测两条：把 README 的 "9 lanes" 改成 "7 lanes"
+⇒ 具名两红，把 "`soft` by default" 改成 "`weak` by default" ⇒ 同样具名两红。位点个数从 ITERATE 里
+删掉了——那个数字上一版写 9、实测 10、本轮 12，写死它本身就是每轮红一次的缺陷。
+
+### Changed — 安装链与发布形态
+
+`HOME` 未设置时 `install.sh` 现在给出可读的拒绝而不是 `unbound variable`；签名口令不再出现在
+`gpg` 的 argv 上（同机任何账号 `ps` 可读），错误文件不再用可预测路径；钉住的 tag 那棵树按
+`npm ci` 装依赖（与 CI/release/更新器同一份 lockfile）；`GLASSPANE_REF` 指到一个树里不存在的
+ref 时不再**静默跳过** GPG 验签，而是明说"本轮安装没有任何签名担保"，形状不安全的值直接拒；
+`check-kernel-corpus` 的三条退出路径按文件头文档化（缺 pin = 2 而不是 1）、`--record` 会清除
+非钉住的多余文件、并如实打印本机安装的 `iterate-kernel` 版本（实测：装的是 0.1.5、pin 是 0.1.7）。
+
+### 门禁实测计数（本版收口时）
+
+`npm test --workspaces --if-present` 90 / 447 / 158 / 457 例全过（0 失败）；`swift test
+--package-path engine` 1015 例 0 失败 3 跳过（真机 opt-in）+ Swift Testing 15 例 2 套件全过；
+`swift test --package-path engine/probe` 29 例 0 失败；`pytest -q bridge` 79 passed；
+`node scripts/check-version.mjs` 12 位点 + 8 条 lock 齐；`check-doc-links` 25 份 / 227 内链 /
+26 外链 0 问题；`check-workflows` 自测 + 5 份工作流 clean；`check-kernel-corpus` 26 份语料与
+pin 齐；`sh -n install.sh` 过；信号闸 `python3 .signal_smoke.py .build/debug/glasspaned` 过；
+`tool-surface --check` 见上方金样补记；发布形态 `npm run bundle && npm pack --dry-run` 见下。
 
 ### Fixed — `tools/sync-kernel.sh` 的枚举临时文件在 GNU mktemp 上恒退 1（v1.14.1 的归档里带着这个形状）
 
