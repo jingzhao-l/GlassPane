@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { Writable } from "node:stream";
-import test from "node:test";
+import test, { after } from "node:test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -165,6 +165,19 @@ test("D4: no advertised string field is looser than its validator's emptiness ve
     `这条闸没有再看见 observe.role 这一对（扫描或字段名变了）：checked=${checked.join(", ")}`);
   assert.deepEqual(offenders, [], `这些对外 advertise 的字段比 validator 松：${offenders.join(", ")}`);
 });
+
+
+/**
+ * The drain budget in `io.ts` runs on an **unref'd** timer, so a write waiting for a
+ * drain that will never arrive does not keep the event loop alive. On a fast runner
+ * (CI, Node 20) the process then exits with that test's promise still pending, and the
+ * runner reports every remaining case in the file as `cancelledByParent` — the cases
+ * were not wrong, they were unobservable. One ref'd timer for the life of the file makes
+ * the wait deterministic; `after` releases it so the process still exits normally.
+ * No assertion is changed or weakened by this.
+ */
+const loopHold = setInterval(() => {}, 25)
+after(() => clearInterval(loopHold))
 
 /* ------------------------------------------------------------------ *
  * D5 — signals and shutdown. A signal handler that calls `shutdown()` (which
