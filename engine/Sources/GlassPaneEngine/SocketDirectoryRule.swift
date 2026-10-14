@@ -54,6 +54,49 @@ enum SocketDirectoryRule {
         guard mode == 0o700 else {
             return "\(directory) is still \(String(format: "%04o", mode)) after chmod(0700) — this volume does not keep the permission bits, so isolating the socket here is impossible"
         }
+        return ancestorDefect(for: directory)
+    }
+
+    /// The leaf's own checks say nothing about the path above it, and that is the
+    /// half an attacker needs: a state root at `/tmp/obs/st` binds a `0700` `st`
+    /// that `/tmp/obs` — owned by a **different account** — still lets its owner
+    /// rename aside and plant its own `engine.sock` under the same name. The daemon
+    /// then serves its fd to nobody while every client that connects by name reaches
+    /// the other account's listener. `createDirectory(withIntermediateDirectories:)`
+    /// applies its attributes only to the directory it creates, so the intermediates
+    /// were never brought into the rule at all.
+    ///
+    /// Measured on this machine: `/`, `/var/folders`, `/var/folders/5h` are root 0755,
+    /// the DARWIN_USER_DIR levels belong to this account, and `~/.glasspane` is 0700 —
+    /// so the ordinary paths pass and only a genuinely foreign or group-writable
+    /// ancestor refuses.
+    static func ancestorDefect(for directory: String) -> String? {
+        var parent = (directory as NSString).deletingLastPathComponent
+        while !parent.isEmpty, parent != "/" {
+            var info = stat()
+            guard stat(parent, &info) == 0 else {
+                let code = errno
+                return "cannot examine the ancestor \(parent) of \(directory) (\(String(cString: strerror(code)))) — isolation unproven"
+            }
+            let fullMode = Int(info.st_mode & 0o7777)
+            guard ancestorIsIsolated(
+                ownerUID: Int64(info.st_uid), fullMode: fullMode, ourUID: Int64(getuid())
+            ) else {
+                return "\(parent) — an ancestor of \(directory) — is not isolated (owner uid \(info.st_uid), mode \(String(format: "%04o", fullMode))): whoever owns or can write it can move this socket aside and answer clients that connect by name. Put the state root under a directory this account owns, e.g. --state-dir ~/.glasspane"
+            }
+            parent = (parent as NSString).deletingLastPathComponent
+        }
         return nil
+    }
+
+    /// An ancestor is trusted when nobody but this account (or root, for the
+    /// system levels of the path) can create names in it. World/group-writable is
+    /// still acceptable with the sticky bit set — that is `/tmp`, where the sticky
+    /// flag is exactly what stops another account from renaming my directory away.
+    static func ancestorIsIsolated(ownerUID: Int64, fullMode: Int, ourUID: Int64) -> Bool {
+        let writableByOthers = (fullMode & 0o022) != 0
+        let sticky = (fullMode & 0o1000) != 0
+        if writableByOthers && !sticky { return false }
+        return ownerUID == ourUID || ownerUID == 0
     }
 }

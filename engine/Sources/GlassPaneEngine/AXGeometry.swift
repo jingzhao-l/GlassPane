@@ -108,6 +108,10 @@ public struct AxGeometryNode: Codable, Equatable {
 public struct AxGeometrySnapshot: Codable, Equatable {
     public let nodes: [AxGeometryNode]
     public let window: AxFrame?
+    /// Every on-screen app window of the attached process, front-to-back. Optional
+    /// so an archive written before this field still decodes; `containmentFrames`
+    /// is the one judgement the audit reads.
+    public let windows: [AxFrame]?
     public let latencyMs: Double
     /// false = 预算耗尽等原因导致走查提前停止，`nodes` 只是界面的一部分。
     public let complete: Bool
@@ -116,14 +120,26 @@ public struct AxGeometrySnapshot: Codable, Equatable {
     public init(
         nodes: [AxGeometryNode],
         window: AxFrame?,
+        windows: [AxFrame]? = nil,
         latencyMs: Double,
         complete: Bool = true,
         stopReason: String? = nil
     ) {
         self.nodes = nodes
         self.window = window
+        self.windows = windows
         self.latencyMs = latencyMs
         self.complete = complete
         self.stopReason = stopReason
+    }
+
+    /// The frames an element must be inside *one of* to count as on screen.
+    /// Falling back to the frontmost window keeps a snapshot that never
+    /// enumerated windows behaving as it did before, rather than reporting every
+    /// element as outside nothing-at-all.
+    public var containmentFrames: [AxFrame] {
+        if let windows, !windows.isEmpty { return windows }
+        if let window { return [window] }
+        return []
     }
 }

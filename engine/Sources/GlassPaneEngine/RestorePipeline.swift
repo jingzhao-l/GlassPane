@@ -244,6 +244,13 @@ public enum RestorePipeline {
             issues.append("plan expectedStateDigest does not match probe stateDigest")
         }
 
+        // 6. B-17: P5 §6.3's anti-tamper recomputation belongs on the live path.
+        // It was only ever called from a test, so a payload whose envelope had
+        // been rewritten after export could still yield an approved-looking plan.
+        if !verifyStateDigest(snapshot: snapshot) {
+            issues.append("probe payload envelope does not recompute for \(probe.checkpointFormat)")
+        }
+
         return (issues.isEmpty, issues)
     }
 
@@ -264,18 +271,21 @@ public enum RestorePipeline {
         // reject honest probes, so the live contract for gpz1 is "verified at
         // export"; other formats keep the P5 placeholder check below.
         if probe.checkpointFormat == "gpz1-json-v1" { return true }
+        return envelopeDigest(of: probe) == probe.stateDigest
+    }
+
+    /// The envelope digest input (P5 §6.3): every probe field except
+    /// `stateDigest`, canonicalized. Public so a probe SDK and the tests build
+    /// payloads against the same input instead of a copy of this expression.
+    public static func envelopeDigest(of probe: SnapshotProbeInfo) -> String {
         let payload: [String: Any] = [
             "probeVersion": probe.probeVersion,
             "exportedDomains": probe.exportedDomains,
             "checkpointFormat": probe.checkpointFormat,
             "capturedAt": probe.capturedAt
         ]
-        guard let data = CanonicalJSON.stringify(payload).data(using: .utf8) else {
-            return false
-        }
-        let digest = SHA256.hash(data: data)
-        let hex = digest.map { String(format: "%02x", $0) }.joined()
-        return hex == probe.stateDigest
+        guard let data = CanonicalJSON.stringify(payload).data(using: .utf8) else { return "" }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
 

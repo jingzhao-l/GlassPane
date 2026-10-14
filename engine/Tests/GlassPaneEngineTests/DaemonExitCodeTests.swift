@@ -117,4 +117,40 @@ final class DaemonExitCodeTests: XCTestCase {
             XCTAssertTrue(documentedCodes(text).contains(pillar), "`--help` 不再解释 \(pillar)")
         }
     }
+
+    /// 码对上了还不够：调用方按 64 分叉时，它得知道**哪些开关**会走到 64。
+    /// 缺陷形状是 `--active-project`/`--project`/`--recipe-validate` 缺值都回 64，
+    /// 而 64 那一行只写了"未知参数"和 `--request-permission`——表里少三条腿。
+    /// 反向破坏：把 64 那一行的 `--active-project` 删掉 ⇒ 这条红。
+    func testEveryFlagThatReachesUsageErrorIsNamedUnderCode64() throws {
+        let text = try source()
+        let flags = usageErrorFlags(text)
+        XCTAssertFalse(flags.isEmpty, "一个 .error(\"--flag …\") 都没抠到：这条闸正在看空表")
+        let paragraph = codeParagraph(text, code: "64")
+        XCTAssertFalse(paragraph.isEmpty, "EXIT CODES 里没有 64 那一行了")
+        let missing = flags.filter { !paragraph.contains($0) }.sorted()
+        XCTAssertTrue(missing.isEmpty, "这些开关缺值/被拒时回 64，`--help` 的 64 段却没点名：\(missing)")
+    }
+
+    /// `.error("--flag …")` 的报文自己点名是哪个开关，所以按报文取，不按 `case` 行取：
+    /// `--socket-path` 的分支里也会替 `--state-dir` 说话，按分支归属就数错了。
+    private func usageErrorFlags(_ text: String) -> Set<String> {
+        Set(captures(#"return \.error\(\"(--[a-z-]+)"#, in: text))
+    }
+
+    private func codeParagraph(_ text: String, code: String) -> String {
+        guard let start = text.range(of: "EXIT CODES"),
+              let end = text.range(of: "PROTOCOL:", range: start.upperBound..<text.endIndex) else { return "" }
+        var paragraph = ""
+        var collecting = false
+        for line in text[start.upperBound..<end.lowerBound].split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let head = trimmed.prefix { $0.isNumber }
+            if let after = trimmed.split(separator: " ", maxSplits: 1).first, head == after, !head.isEmpty {
+                collecting = (head == code)
+            }
+            if collecting { paragraph += trimmed + "\n" }
+        }
+        return paragraph
+    }
 }

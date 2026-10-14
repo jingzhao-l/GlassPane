@@ -136,9 +136,12 @@ public final class AXChannel: RuntimeChannel {
                 AxFrame(x: Double(rect.minX), y: Double(rect.minY), width: Double(rect.width), height: Double(rect.height))
             }
         }
+        let windowFrames: [AxFrame] = (attached.map { app in onScreenWindowRects(of: app.pid) } ?? []).map {
+            AxFrame(x: Double($0.minX), y: Double($0.minY), width: Double($0.width), height: Double($0.height))
+        }
         let latencyMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
         return AxGeometrySnapshot(
-            nodes: nodes, window: windowFrame, latencyMs: latencyMs,
+            nodes: nodes, window: windowFrame, windows: windowFrames, latencyMs: latencyMs,
             complete: stopReason == nil, stopReason: stopReason
         )
     }
@@ -770,6 +773,15 @@ public final class AXChannel: RuntimeChannel {
         return Self.frontmostWindow(in: windowList, for: pid)
     }
 
+    private func onScreenWindowRects(of pid: pid_t) -> [CGRect] {
+        guard let windowList = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly], kCGNullWindowID
+        ) as? [[String: Any]] else {
+            return []
+        }
+        return Self.appWindowFrames(in: windowList, for: pid)
+    }
+
     /// 纯函数半段：从一份 CGWindowList 里挑该 pid **最前面**的那个应用窗口。
     /// CGWindowList 已按前后顺序排好，所以第一个命中的就是最前面的。
     ///
@@ -792,6 +804,24 @@ public final class AXChannel: RuntimeChannel {
             return (windowId, bounds)
         }
         return nil
+    }
+
+    /// Every on-screen app window owned by `pid`, front-to-back. The layout audit
+    /// needs the whole set: an element that lives in a second window (inspector,
+    /// palette, dialog) is off the *frontmost* frame without being outside the app,
+    /// and reporting that as "用户看不见也点不到" invents a blocking defect.
+    static func appWindowFrames(in windowList: [[String: Any]], for pid: pid_t) -> [CGRect] {
+        var frames: [CGRect] = []
+        for window in windowList {
+            guard let ownerPid = window[windowOwnerPIDKey] as? Int, ownerPid == Int(pid) else { continue }
+            guard isAppWindowLayer(window[windowLayerKey] as? Int) else { continue }
+            guard let bounds = rect(fromWindowBounds: window[windowBoundsKey]),
+                  bounds.width > 0, bounds.height > 0 else {
+                continue
+            }
+            frames.append(bounds)
+        }
+        return frames
     }
 
     /// 哪些层算"应用的窗口"。0 是普通窗口，1...19 是浮动面板/HUD 一类的应用自有层；

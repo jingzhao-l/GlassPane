@@ -289,6 +289,10 @@ final class ProbeRuntime: @unchecked Sendable {
     private var checkpoints: [(domain: String, get: () -> [String: String], set: (([String: String]) -> Void)?)] = []
     private var retainedCheckpoints: [(ref: String, domains: [String: [String: String]])] = []
     private var lastMirrorExport: [String: String] = [:]
+    /// Whether `lastMirrorExport` is a baseline some `op_begin` actually asked
+    /// for. Diffing an `op_end` against a baseline that belongs to an earlier
+    /// window credits this act with somebody else's movement.
+    private var mirrorBaselined = false
 
     /// Test/smoke seam: shrinks both backoff waits so a re-arm can be observed
     /// without sleeping the real 1s×3 + 30s schedule.
@@ -601,13 +605,22 @@ final class ProbeRuntime: @unchecked Sendable {
             let exported = exportMirrorState()
             lock.lock()
             lastMirrorExport = exported
+            mirrorBaselined = true
             lock.unlock()
         case "op_end":
             let current = exportMirrorState()
             lock.lock()
             let baseline = lastMirrorExport
+            let hadBaseline = mirrorBaselined
             lastMirrorExport = current
+            mirrorBaselined = true
             lock.unlock()
+            // No honest diff exists for a window this probe never baselined — the
+            // comparison would run from the END of the previous act to now, and the
+            // daemon would file those entries under this operation. Emitting nothing
+            // is the truthful answer; the daemon drops the signal for the case it
+            // can see (an undelivered `op_begin`).
+            guard hadBaseline else { return }
             for (key, value) in current.sorted(by: { $0.key < $1.key }) {
                 let before = baseline[key]
                 if before != value {
@@ -822,13 +835,55 @@ final class ProbeRuntime: @unchecked Sendable {
         ])
     }
 
+    /// The frame's wire bytes, or nil when it holds something JSON cannot write.
+    ///
+    /// The non-finite check is not a nicety: `JSONSerialization` does not report a
+    /// NaN as a Swift error, it raises an Objective-C exception, and `try?` cannot
+    /// catch an NSException — so instrumenting a host value that happens to be NaN
+    /// (an unresolved ratio, a divide-by-zero metric) would throw straight into the
+    /// app under test, which is exactly the "non-blocking, throw-free" promise this
+    /// queue makes.
+    static func hasNonFiniteNumber(_ value: Any) -> Bool {
+        if let number = value as? NSNumber {
+            // NSNumber boxes anything numeric; only real numbers can be non-finite,
+            // and a BOOL NSNumber answers 0/1 here, so this cannot mis-flag one.
+            return !number.doubleValue.isFinite
+        }
+        if let dict = value as? [String: Any] {
+            return dict.values.contains(where: hasNonFiniteNumber)
+        }
+        if let array = value as? [Any] {
+            return array.contains(where: hasNonFiniteNumber)
+        }
+        return false
+    }
+
+    static func frameLine(_ frame: [String: Any]) -> Data? {
+        guard !hasNonFiniteNumber(frame) else { return nil }
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: frame, options: [.sortedKeys]
+        ) else { return nil }
+        var line = data
+        line.append(UInt8(ascii: "\n"))
+        return line
+    }
+
     /// Hand the frame to the probe's write queue. The emitting thread never
     /// touches the socket: it either appends to the offline buffer, enqueues a
     /// bounded write, or counts a drop — O(1), non-blocking, throw-free.
-    private func writeFrame(_ frame: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: frame, options: [.sortedKeys]) else { return }
-        var line = data
-        line.append(UInt8(ascii: "\n"))
+    /// Internal (not private) so the drop accounting is reachable from the tests,
+    /// the same reason `SocketServer.writeBounded` is a static.
+    func writeFrame(_ frame: [String: Any]) {
+        // A frame that cannot be serialized was never delivered, and the loss has
+        // to land in the counter the daemon already reads (`hello.droppedWrites`,
+        // surfaced by gp_probe_status). Returning silently made the sentence above
+        // false: the host kept instrumenting while frames disappeared uncounted.
+        guard let line = Self.frameLine(frame) else {
+            lock.lock()
+            droppedWrites += 1
+            lock.unlock()
+            return
+        }
         lock.lock()
         let currentFD = fd
         if currentFD < 0 {
@@ -1021,6 +1076,7 @@ final class ProbeRuntime: @unchecked Sendable {
         checkpoints = []
         retainedCheckpoints = []
         lastMirrorExport = [:]
+        mirrorBaselined = false
         metalCaptureURL = nil
         captureResultHookStorage = nil
         lock.unlock()

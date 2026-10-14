@@ -372,17 +372,46 @@ public enum SCKCapturer {
         guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return nil
         }
+        return occludingWindows(in: list, inFrontOf: targetNumber, frame: frame)
+    }
+
+    /// The count over a list the caller hands in, so the cases this machine's
+    /// window server cannot be asked to produce on demand — a neighbour with no
+    /// layer entry, a neighbour below the desktop level, a neighbour whose bounds
+    /// will not parse — are exercised as behaviour instead of as source text.
+    static func occludingWindows(
+        in list: [[String: Any]], inFrontOf targetNumber: Int, frame: CGRect
+    ) -> [Int]? {
         var inFront: [Int] = []
         var foundTarget = false
         var countable = true
         for entry in list {
-            guard let number = entry[kCGWindowNumber as String] as? Int else { continue }
+            // An entry this file cannot even identify is not evidence that
+            // nothing covers the target: it is the same "could not tell" that an
+            // unreadable bound already answers with.
+            guard let number = entry[kCGWindowNumber as String] as? Int else {
+                countable = false
+                continue
+            }
             if number == targetNumber {
                 foundTarget = true
                 break
             }
-            guard number > 0,
-                  let layer = entry[kCGWindowLayer as String] as? Int, layer >= 0 else { continue }
+            guard number > 0 else {
+                countable = false
+                continue
+            }
+            // A layer present but negative (wallpaper, dock backing, menu-bar
+            // shadow) genuinely sits behind the target, so it is skipped and the
+            // count stays trustworthy. A layer that is *absent* says nothing, and
+            // answering "not in front" from silence is the R6-11 lie in a new
+            // costume.
+            if let layer = entry[kCGWindowLayer as String] as? Int {
+                if layer < 0 { continue }
+            } else {
+                countable = false
+                continue
+            }
             guard let raw = entry[kCGWindowBounds as String] as? [String: Any],
                   let x = raw["X"] as? CGFloat, let y = raw["Y"] as? CGFloat,
                   let width = raw["Width"] as? CGFloat, let height = raw["Height"] as? CGFloat else {

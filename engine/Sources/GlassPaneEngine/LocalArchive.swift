@@ -339,15 +339,15 @@ public enum LocalArchive {
         ].filter { !$0.isEmpty }
     }
 
-    /// 某项目档案目录里的 evidence 条数；目录不存在返回 nil（"没有档案"与
-    /// "档案目录已被清理"在面板上是两种措辞）。
-    public static func evidenceCount(
-        at path: String?,
-        fallback: String = EvidenceStore.defaultDirectory
-    ) -> Int? {
-        let dir = (path?.isEmpty == false) ? path! : fallback
-        guard FileManager.default.fileExists(atPath: dir) else { return nil }
-        let url = URL(fileURLWithPath: dir)
+    /// 某项目档案目录里的 evidence 条数。目录缺席返回 nil ——「没有档案」与
+    /// 「档案目录已被清理」在面板上是两种措辞，而"没配目录"绝不能回落到
+    /// 共用档案去数：那等于替一个项目宣称它没有的测量。`fallback:` 参数与它的
+    /// `EvidenceStore.defaultDirectory` 缺省值已删（面板侧不再传），因为默认值
+    /// 就是那条替身路径本身。
+    public static func evidenceCount(at path: String?) -> Int? {
+        guard let path, !path.isEmpty else { return nil }
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        let url = URL(fileURLWithPath: path)
         guard let listed = try? FileManager.default.contentsOfDirectory(
             at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
         ) else { return nil }

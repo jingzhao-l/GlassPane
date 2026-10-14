@@ -226,6 +226,10 @@ struct ConsoleRootView: View {
                     Text("glasspaned \(version)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                    Text(settings.daemonStateRootCaption)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("gp-daemon-state-root")
                 } else if case .presentButSilent = settings.daemon.liveness {
                     Text(SettingsModel.silentDaemonReportNote)
                         .font(.caption2)

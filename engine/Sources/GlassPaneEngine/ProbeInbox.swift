@@ -404,7 +404,9 @@ public final class ProbeInbox {
     /// Close the window and build the §3.1 signals from events received in
     /// `[t0, t1]`. Returns nil pair only when no window was open (no probe
     /// connection at begin time — the null-signal honest absence).
-    public func endWindow(pid: Int32, opId: String) -> (handlerProbe: HandlerProbeSignal?, stateDiff: StateDiffSignal?)? {
+    public func endWindow(
+        pid: Int32, opId: String, includeMirrorDiff: Bool = true
+    ) -> (handlerProbe: HandlerProbeSignal?, stateDiff: StateDiffSignal?)? {
         lock.lock(); defer { lock.unlock() }
         let closedAt = now()
         guard let index = windows.lastIndex(where: { $0.opId == opId && $0.pid == pid && $0.t1 == nil }) else {
@@ -430,6 +432,16 @@ public final class ProbeInbox {
                     window.handlers.append(HandlerRef(file: file, line: line))
                 }
             case .state:
+                // A `z2-mirror` frame is a comparison against the baseline that
+                // `op_begin` captured. With no baseline in this window the probe
+                // was diffing against the END of the previous act, so whatever it
+                // measured belongs to a different operation — filing it here is a
+                // misattribution, not a measurement. KVO and macro frames need no
+                // window command and are kept verbatim.
+                if case .state(_, _, _, let rawSource, _) = event.frame,
+                   !includeMirrorDiff, rawSource == StateDiffSource.z2Mirror.rawValue {
+                    continue
+                }
                 stateEvents.append(event)
             default:
                 break
@@ -585,7 +597,17 @@ public final class ProbeInbox {
                     setLastCheckpointError("digest mismatch: probe reported \(reported), daemon recomputed \(computed)")
                     return nil
                 }
-                setLastCheckpointError("empty checkpoint payload")
+                // "empty checkpoint payload" used to cover both halves, so a probe
+                // that exported its domains and forgot the digest was told it had
+                // exported nothing — and the remedy that follows points at the
+                // wrong side of the wire.
+                if entry.domains == nil {
+                    setLastCheckpointError("empty checkpoint payload: no domains table")
+                    return nil
+                }
+                setLastCheckpointError(
+                    "checkpoint carried \(entry.domains!.count) domain(s) but no digest, so the daemon had nothing to recompute against"
+                )
                 return nil
             }
             attempts -= 1

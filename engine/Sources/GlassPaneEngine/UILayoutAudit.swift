@@ -219,26 +219,33 @@ public enum UILayoutAudit {
                     measured: ["width": frame.width, "height": frame.height, "minPt": minHitTargetPt]
                 ))
             }
-            if let window = snapshot.window, !frame.centerInside(window) {
+            // Containment is decided against **every** on-screen window of the app,
+            // not only the frontmost one: an inspector, palette or dialog is a
+            // second frame, and its controls are inside the app while being outside
+            // the front window. Judging them against one frame fabricated
+            // `outsideWindow` blocking findings for perfectly reachable UI.
+            let containers = snapshot.containmentFrames
+            if !containers.isEmpty, !containers.contains(where: { frame.centerInside($0) }) {
                 findings.append(LayoutFinding(
                     rule: "outsideWindow",
                     severity: .blocking,
                     elementPath: node.path,
                     role: node.role,
                     title: node.title,
-                    detail: "元素中心落在窗口之外，用户看不见也点不到。",
+                    detail: "元素中心落在这 \(containers.count) 个屏上窗口之外，用户看不见也点不到。",
                     measured: ["x": frame.x, "y": frame.y, "width": frame.width, "height": frame.height]
                 ))
-            } else if let window = snapshot.window, !frame.contained(in: window), frame.area > 0 {
+            } else if let host = containers.first(where: { frame.centerInside($0) }),
+                      !frame.contained(in: host), frame.area > 0 {
                 findings.append(LayoutFinding(
                     rule: "clippedByWindow",
                     severity: .advisory,
                     elementPath: node.path,
                     role: node.role,
                     title: node.title,
-                    detail: "元素被窗口边界裁掉一部分。",
+                    detail: "元素被它所在窗口的边界裁掉一部分。",
                     measured: [
-                        "visibleRatio": visibleRatio(of: frame, in: window),
+                        "visibleRatio": visibleRatio(of: frame, in: host),
                         "width": frame.width,
                         "height": frame.height,
                     ]

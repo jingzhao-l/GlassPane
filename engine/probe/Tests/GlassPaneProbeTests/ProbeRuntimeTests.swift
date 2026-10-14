@@ -41,6 +41,31 @@ final class ProbeRuntimeTests: XCTestCase {
         XCTAssertEqual(frames.first?["file"] as? String, "ProbeRuntimeTests.swift")
     }
 
+    func testUnserializableFrameIsCountedAsADropAndNotSwallowed() {
+        // `GP.instrument` can hand a host value that JSON has no token for. The
+        // frame is then undeliverable, which is a loss the daemon must be able to
+        // see — `hello.droppedWrites` is the counter gp_probe_status already reads.
+        XCTAssertNil(ProbeRuntime.frameLine(["t": "state", "after": Double.nan]))
+        XCTAssertNil(ProbeRuntime.frameLine(["t": "state", "after": Double.infinity]))
+        XCTAssertNil(
+            ProbeRuntime.frameLine(["t": "state", "payload": ["ratio": Double.nan]]),
+            "the check has to reach inside nested containers — that is where a host value lands"
+        )
+        XCTAssertFalse(
+            ProbeRuntime.hasNonFiniteNumber(["t": "state", "n": 3, "s": "ok", "d": 0.5]),
+            "finite numbers and strings are deliverable; refusing them would silence the channel"
+        )
+        let line = ProbeRuntime.frameLine(["t": "state", "after": "3"])
+        XCTAssertEqual(line?.suffix(1), Data([UInt8(ascii: "\n")]), "one frame is exactly one newline-delimited line")
+
+        let before = GP.runtime.droppedWriteCount
+        GP.runtime.writeFrame(["t": "state", "after": Double.nan])
+        XCTAssertEqual(
+            GP.runtime.droppedWriteCount, before + 1,
+            "a frame that never reached the socket must move the counter that says so"
+        )
+    }
+
     func testOfflineBufferingDropsBeyondCapAndCounts() {
         for index in 0..<(ProbeRuntime.offlineBufferLimit + 10) {
             GP.recordHandler(file: "f\(index)", line: index)
@@ -111,6 +136,40 @@ final class ProbeRuntimeTests: XCTestCase {
         XCTAssertEqual(event["before"] as? String, "0")
         XCTAssertEqual(event["after"] as? String, "5")
         XCTAssertEqual(event["source"] as? String, "z3-kvc")
+    }
+
+    func testOpEndWithoutOpBeginEmitsNoMirrorDiff() throws {
+        // The window's "before" is whatever `op_begin` captured. With no baseline in
+        // this process (fresh start, or a reset that dropped it), diffing here would
+        // compare against the end of some earlier act and hand the daemon a change
+        // that belongs to a different operation.
+        GP.runtime.resetForTests()
+        final class Root: NSObject {
+            @objc dynamic var label = "a"
+        }
+        let root = Root()
+        GP.registerMirrorRoot(label: "orphan", object: root)
+        root.label = "b"
+        let before = GP.runtime.debugOfflineSnapshot().count
+        GP.runtime.handleCommand(["t": "op_end"])
+        let emitted = GP.runtime.debugOfflineSnapshot().dropFirst(min(before, GP.runtime.debugOfflineSnapshot().count))
+        let mirror = emitted.filter {
+            ($0["t"] as? String) == "state" && ($0["source"] as? String) == "z2-mirror"
+        }
+        XCTAssertEqual(mirror.count, 0, "an unbaselined window has no honest diff: \(mirror)")
+
+        // And once a baseline exists the same window does report it — the guard must
+        // not have quietly disabled the channel.
+        GP.runtime.handleCommand(["t": "op_begin"])
+        root.label = "c"
+        let mark = GP.runtime.debugOfflineSnapshot().count
+        GP.runtime.handleCommand(["t": "op_end"])
+        let after = GP.runtime.debugOfflineSnapshot().dropFirst(mark).first {
+            ($0["t"] as? String) == "state" && ($0["source"] as? String) == "z2-mirror"
+        }
+        let event = try XCTUnwrap(after, "a baselined window must still emit the mirror diff")
+        XCTAssertEqual(event["before"] as? String, "b")
+        XCTAssertEqual(event["after"] as? String, "c")
     }
 
     func testOpEndMirrorDiffEmitsChangedKeys() throws {

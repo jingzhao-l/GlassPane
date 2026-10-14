@@ -50,6 +50,10 @@ public struct AppStateSnapshot: Equatable {
     public let snapshotId: String
     public let treeDigest: String
     public let nodeCount: Int
+    /// The depth the baseline tree was walked to. `treeDigest` is a digest of a
+    /// *truncated* tree, so a comparison is only meaningful at the same depth;
+    /// nothing else records it (§1.2).
+    public let maxDepth: Int
     public let capturedAt: String
     /// Z5 probe payload captured alongside the tree baseline (P5 v5.0 §6.2).
     /// Nil for snapshots taken without a probe; engine-internal shape — never
@@ -60,12 +64,14 @@ public struct AppStateSnapshot: Equatable {
         snapshotId: String,
         treeDigest: String,
         nodeCount: Int,
+        maxDepth: Int,
         capturedAt: String,
         probeInfo: SnapshotProbeInfo? = nil
     ) {
         self.snapshotId = snapshotId
         self.treeDigest = treeDigest
         self.nodeCount = nodeCount
+        self.maxDepth = maxDepth
         self.capturedAt = capturedAt
         self.probeInfo = probeInfo
     }

@@ -586,6 +586,40 @@ final class EngineCoreRound1Tests: XCTestCase {
         }
     }
 
+    /// R1-06's third face. `assert_element` reuses the most recent operation's
+    /// signal context, and it resolved that context from the 64-entry memory ring
+    /// only — while `last_evidence` and `diagnose` both fall back to the archive.
+    /// After a restart the agent could read the operation back and still be told
+    /// "no prior operation", i.e. two answers to one existence question.
+    func testAssertElementResolvesTheArchivedOperationAfterARestart() throws {
+        let dir = tempDirectory("gp-r1-assert-restart")
+        let writer = EngineCore(
+            channel: makeChannel(), settle: {}, evidenceStore: TestSandbox.evidenceStore(at: dir)
+        )
+        _ = try writer.attach(bundleId: "com.example.app", pid: nil)
+        XCTAssertNoThrow(try writer.act(selector: submitSelector, action: .press))
+
+        let reader = EngineCore(
+            channel: makeChannel(), settle: {}, evidenceStore: TestSandbox.evidenceStore(at: dir)
+        )
+        _ = try reader.attach(bundleId: "com.example.app", pid: nil)
+        XCTAssertNoThrow(
+            try reader.assertElement(selector: submitSelector, property: .enabled, expected: .bool(true)),
+            "the archive holds the operation whose signal context this assert reuses"
+        )
+
+        // The refusal still exists for the case that deserves it: nothing in
+        // memory and nothing on disk.
+        let emptyDirectory = tempDirectory("gp-r1-assert-empty")
+        let fresh = EngineCore(
+            channel: makeChannel(), settle: {}, evidenceStore: TestSandbox.evidenceStore(at: emptyDirectory)
+        )
+        _ = try fresh.attach(bundleId: "com.example.app", pid: nil)
+        XCTAssertThrowsGPError(.noOperation) {
+            _ = try fresh.assertElement(selector: submitSelector, property: .enabled, expected: .bool(true))
+        }
+    }
+
     // MARK: - R1-07: a missing archive may not impersonate an audit trail
 
     func testUnwritableArchiveIsSurfacedOnBothFaces() throws {
@@ -1055,9 +1089,13 @@ final class EngineCoreWaveThreeMappingTests: XCTestCase {
         XCTAssertFalse(reason.contains("refused"), "the probe never heard the request: \(reason)")
     }
 
-    func testWhatTheProbeReallyReportedSurvivesAnUndeliveredCommand() throws {
-        // The opt-in lane (P6 §8 H7): state frames that arrived are their own
-        // measurement, and dropping them would erase a positive observation.
+    func testMirrorFrameFromAnUnopenedWindowIsNotThisActsMeasurement() throws {
+        // A `z2-mirror` frame is a *difference*: before = what `op_begin` captured.
+        // When that command never left, the probe was comparing against the end of
+        // the PREVIOUS act, so the movement it reports is real but not this
+        // operation's. It used to be filed here as `changed: true` with `.strong`
+        // attribution on the "arrived frames are their own measurement" rule —
+        // which is true of the frame and false of the interval it covers.
         let time = Box(Date(timeIntervalSince1970: 1_758_200_000))
         let (core, inbox) = probeCore(time: time) { _, _ in false }
         _ = try core.attach(bundleId: "com.example.app", pid: nil)
@@ -1066,7 +1104,25 @@ final class EngineCoreWaveThreeMappingTests: XCTestCase {
         ))
         _ = try core.act(selector: submitSelector, action: .press)
         let pack = try core.lastEvidence(operationId: nil)
-        XCTAssertEqual(pack.signals.stateDiff?.changed, true)
+        XCTAssertNil(
+            pack.signals.stateDiff,
+            "the only state evidence spans a window this daemon never opened: \(pack.signals.stateDiff as Any)"
+        )
+        XCTAssertEqual(pack.attribution.level, .soft, "a diff credited to the wrong act may not upgrade attribution")
+    }
+
+    func testWindowIndependentFramesSurviveAnUndeliveredCommand() throws {
+        // The other half of the same rule: KVO frames need no window command, so
+        // dropping them too would turn a misattribution fix into lost evidence.
+        let time = Box(Date(timeIntervalSince1970: 1_758_200_000))
+        let (core, inbox) = probeCore(time: time) { _, _ in false }
+        _ = try core.attach(bundleId: "com.example.app", pid: nil)
+        inbox.ingest(pid: 4242, frame: .state(
+            key: "model.count", before: "3", after: "4", source: "z3-kvc", ts: 0
+        ))
+        _ = try core.act(selector: submitSelector, action: .press)
+        let pack = try core.lastEvidence(operationId: nil)
+        XCTAssertEqual(pack.signals.stateDiff?.changed, true, "a KVO change is observed inside the window regardless")
         XCTAssertEqual(pack.attribution.level, .strong)
     }
 

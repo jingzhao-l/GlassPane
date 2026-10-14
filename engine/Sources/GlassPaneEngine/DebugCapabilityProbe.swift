@@ -20,7 +20,15 @@ public final class DebugCapabilityProbe {
     public struct Snapshot: Codable, Equatable {
         public let launch: Outcome
         public let attach: Outcome
-        public var granted: Bool { launch == .ok || attach == .ok }
+        /// One verdict for this seat, computed once: an explicitly measured
+        /// refusal is not cancelled by the other half succeeding. The panel card
+        /// (`DeveloperToolsCapability.status`) and `--check-developer-tools`'s
+        /// exit code both read this, so the same payload cannot answer "granted"
+        /// to the agent and "被系统拒绝" to the person looking at the card.
+        public var granted: Bool {
+            if launch == .denied || attach == .denied { return false }
+            return launch == .ok || attach == .ok
+        }
     }
 
     /// Injectable process layer so unit tests never touch lldb.

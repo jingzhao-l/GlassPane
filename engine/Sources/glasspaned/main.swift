@@ -448,8 +448,11 @@ private func printUsage() {
                 read. NOT a usage error in the 64 sense: the flag was understood,
                 its argument was not
         3   --project-remove named an id that is not registered
-        64  usage error: an unknown argument, or a missing/malformed
-                --request-permission kind
+        64  usage error, printed with the whole usage block: an unknown argument;
+                a missing or rejected value for --state-dir, --socket-path (either
+                spelling), --probe-socket-path; a value-taking flag given nothing —
+                --active-project, --project, --recipe-validate; or a missing or
+                malformed --request-permission kind
         65   a live instance already owns the socket (refuse to displace it)
 
     PROTOCOL:
@@ -1207,7 +1210,11 @@ if options.pruneEvidence || options.evidenceStats {
             dir: dir,
             listFailure: listFailure
         ))
-        exit(0)
+        // `pruned: null` is exactly the "partly succeeded / refused" case that §the
+        // usage block assigns to 1, and `--list-projects` already answers 1 for the
+        // same unreadable archive. Exiting 0 here handed a caller a green answer
+        // that reports it obtained nothing.
+        exit(listFailure == nil ? 0 : 1)
     }
     if options.evidenceStats {
         let stats = store.stats()
@@ -1444,6 +1451,9 @@ let core = EngineCore(
     inputMonitorAbsenceReason: inputMonitorAbsenceReason,
     declaresUnattendedWindow: options.unattendedWindowDeclared
 )
+// X-22's read side: the root resolved above is the fact the console and the HTTP
+// gateway both need, and until now it lived only in this process's argv.
+core.stateRootPath = stateRoot.path
 let dispatcher = Dispatcher(core: core, log: log)
 let server = SocketServer(
     socketPath: socketPath,

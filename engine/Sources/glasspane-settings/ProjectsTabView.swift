@@ -26,9 +26,10 @@ struct ProjectsTabView: View {
     private var listPane: some View {
         VStack(spacing: 0) {
             PageTitleView(title: "项目", systemImage: "square.stack.3d.up")
-            if model.testResidueCount > 0 {
-                residueBanner
-            }
+            // 这一枚**永远画出来**：有没有得清只有后台服务的 --project-prune --dry-run
+            // 答得出，面板本地的计数不是把它收起来的理由（读失败时那个数是 0，
+            // 于是 daemon 一次都没被问过）。按不动时理由与下一步写在它自己身上。
+            pruneControlRow
             if model.pruneNeedsRestart {
                 restartBanner
             }
@@ -41,24 +42,25 @@ struct ProjectsTabView: View {
         }
     }
 
-    /// 测试残留提示：说清是什么、有多少、能一键清掉。
-    private var residueBanner: some View {
+    /// 测试残留那一行：说清面板本地读到多少，并把「清理」递出去。
+    /// 计数为 0 时它说的是"面板读到 0 条"，不是"后台服务说没有"——两个数各归各。
+    private var pruneControlRow: some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "trash.circle").foregroundStyle(.orange)
+            Image(systemName: "trash.circle")
+                .foregroundStyle(model.canPreviewTestResiduePrune ? Color.orange : Color.secondary)
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(model.testResidueCount) 条注册项指向系统临时目录")
+                Text(model.pruneControlBanner)
                     .font(.callout.weight(.medium))
-                Text("这些是引擎自检过程留下的示例项目，不是你注册的应用。")
+                Text(model.pruneControlHelp)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
             Button("清理") { model.previewTestResiduePrune() }
                 .controlSize(.small)
-                .disabled(model.isPreparingPrunePreview)
-                .help(model.isPreparingPrunePreview
-                    ? "在向后台服务要预览清单（--project-prune --dry-run）"
-                    : "先向后台服务要一份将删除的清单，再确认")
+                .disabled(!model.canPreviewTestResiduePrune)
+                .help(model.pruneControlHelp)
                 .accessibilityIdentifier("gp-prune-projects")
         }
         .padding(10)
@@ -200,9 +202,14 @@ struct ProjectsTabView: View {
                         accessory: AnyView(
                             HStack(spacing: 6) {
                                 Button("在访达中打开证据目录") {
-                                    openInFinder(entry.evidenceStoragePath ?? EvidenceStore.defaultDirectory)
+                                    // 注册项没写目录时，这一枚开的是**本页在读的那一份**，
+                                    // 不再是家目录默认根：那个根在这台机器上可能根本没人用
+                                    // （`GLASSPANE_STATE_DIR` / `--state-dir` 挪过根），
+                                    // 于是它展示的是另一份档案，而屏幕上写的是这一份。
+                                    openInFinder(entry.evidenceStoragePath ?? model.evidenceDirectoryPath)
                                 }
                                 .controlSize(.small)
+                                .help(evidenceDirectoryHelp(entry))
                                 Button("复制项目 ID") {
                                     NSPasteboard.general.clearContents()
                                     NSPasteboard.general.setString(entry.projectId, forType: .string)
@@ -211,7 +218,7 @@ struct ProjectsTabView: View {
                             }
                         )
                     ) {
-                        PathRowView(label: "证据目录", path: entry.evidenceStoragePath ?? "未配置（用默认目录）")
+                        PathRowView(label: "证据目录", path: entry.evidenceStoragePath ?? "未配置（这个项目自己没有档案目录）")
                         PathRowView(label: "配方配置", path: entry.recipeConfigPath ?? "未配置")
                         PathRowView(label: "校准资源", path: entry.calibrationAssetsPath ?? "未配置")
                     }
@@ -246,10 +253,19 @@ struct ProjectsTabView: View {
     }
 
     private func evidenceCountText(_ projectId: String) -> String {
-        switch model.projectEvidenceCounts[projectId] ?? nil {
-        case .none: return "证据目录不存在"
-        case .some(let count): return "\(count) 条"
+        ConsoleModel.evidenceCountReadout(model.projectEvidenceCounts[projectId] ?? nil)
+    }
+
+    /// 「在访达中打开证据目录」这一枚说的是哪一份档案：注册项自己写过就点它，
+    /// 没写过就明说开的是本页在读的那一份共用档案——那句必须写在控件上，
+    /// 因为这一页同时报得出"这个项目没测量"。
+    private func evidenceDirectoryHelp(_ entry: ProjectEntry) -> String {
+        if let stored = entry.evidenceStoragePath, !stored.isEmpty {
+            return "在访达中打开这条注册项自己写的档案目录：\(stored)"
         }
+        return "这条注册项没写档案目录，所以它自己没有可打开的档案。这一枚开的是本页在读的那一份："
+            + "\(model.evidenceDirectoryPath)（本页读数取自状态根 \(model.displayedStateRoot)）——"
+            + "那是本页共用的档案目录，不是这个项目的替身。"
     }
 
     private func openInFinder(_ path: String) {
@@ -355,7 +371,9 @@ struct ProjectRowView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text("·").font(.caption).foregroundStyle(.tertiary)
-                    Text(evidenceCount.map { "\($0) 条证据" } ?? "证据目录已清理")
+                    // 与详情那一行同一句、同一判据：从前这里的 nil 写「证据目录已清理」
+                    // ——一件没有任何东西观测过的事——而详情对同一个 nil 写「不存在」。
+                    Text(ConsoleModel.evidenceCountReadout(evidenceCount))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

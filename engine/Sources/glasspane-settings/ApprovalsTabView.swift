@@ -62,16 +62,20 @@ struct ApprovalsTabView: View {
             ToolbarItem(placement: .automatic) {
                 // 没有台账文件时这一枚按下去什么都不发生（访达里没有一个去处可显示）。
                 // 所以它按不动，并把"去哪儿做到有这一步"写在理由里。
+                // 去处由**这一页读过的那份台账**给出（`ConsoleModel.approvalsPath`）：
+                // 引擎那个家目录默认根的常量指向 `~/.glasspane`，状态根挪过时它开的是
+                // 一个从没被这一页测过的目录——那里没有屏幕上这份台账。
                 Button {
                     NSWorkspace.shared.selectFile(
-                        nil, inFileViewerRootedAtPath: (ApprovalGate.defaultPath as NSString).deletingLastPathComponent
+                        nil, inFileViewerRootedAtPath: model.approvalsDirectory
                     )
                 } label: {
                     Label("台账文件", systemImage: "folder")
                 }
                 .help(model.canRevealApprovalLedger
-                      ? "在访达中显示 approvals.json"
-                      : "「台账文件」现在按不动：\(model.approvalLedgerUnavailableReason)")
+                      ? "在访达中显示这一页读过的那份台账：\(model.approvalsLedgerPath)"
+                      : "「台账文件」现在按不动：\(model.approvalLedgerUnavailableReason)"
+                        + "（这一页去看的位置是 \(model.approvalsLedgerPath)，核对它是不是后台服务实际在用的那个状态根。）")
                 .disabled(!model.canRevealApprovalLedger)
                 .accessibilityIdentifier("gp-reveal-approval-ledger")
             }

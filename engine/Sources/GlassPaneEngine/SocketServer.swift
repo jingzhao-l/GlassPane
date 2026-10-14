@@ -31,6 +31,23 @@ public final class SocketServer {
     /// long-lived session legitimately idles between calls.
     static let partialLineTimeoutSeconds: TimeInterval = 60
 
+    /// 一条连接**一个字节都没发过**的绝对预算。它不是上面那条规则里的"空闲"：
+    /// 空闲说的是**完整帧之间**的安静，而这里连第一帧都不曾开始过，会话还不存在。
+    /// 产品里没有任何"连上却不说话"的正经用途——生产的传输是"有请求才连、连上就写"
+    /// （`mcp-shell/src/engine-client.ts` 的 `ReconnectingSocketIo.writeLine` 先
+    /// `connect()` 再 `writeLine`），daemon 自己的单实例探针也先写 hello 再等回应
+    /// （`DaemonProbe.liveness`）。所以能被这条时限命中的只有一种对端：同机任意进程
+    /// `connect()` 之后一字不发。从前那样的对端能把这个只有单一客户端位置的 daemon
+    /// 钉死在第一次 `read()` 上（B-12 读侧最左的一格）：真正的 agent 永远排不进来，
+    /// 而 `serve()` 回不到循环顶部，`shutdownRequested` 也永远无从被看见。
+    static let firstByteTimeoutSeconds: TimeInterval = 10
+
+    /// 会话空闲期回头看 `shutdownRequested` 的轮询切片。**不是**超时策略：切片到点
+    /// 什么都不丢（判据见 `silenceTimeoutAction`），它只是把一次可能永不返回的
+    /// `read()` 换成有界的 `poll()`，让"对端一直安静"时循环顶部那条判据仍然被执行。
+    /// 空闲语义本身照旧：长期会话在两次调用之间可以一直等着。
+    static let idlePollSliceSeconds: TimeInterval = 0.5
+
     /// Bounds `write()` against a client that stops reading (the other half of
     /// B-12: without it a non-draining client wedges the daemon in writeAll).
     private static let clientSendTimeoutSeconds: Int32 = 30
@@ -224,10 +241,24 @@ public final class SocketServer {
 
     // MARK: - Connection service
 
-    /// Serve one connection. Two bounds keep a misbehaving client from pinning
-    /// the single-client daemon (B-12): an absolute deadline on an *incomplete*
-    /// line, and `SO_SNDTIMEO` on the writes going back.
-    private func serve(clientFD: Int32) {
+    /// Serve one connection. Three bounds keep a misbehaving client from pinning
+    /// the single-client daemon (B-12): an absolute budget on the connection's
+    /// **first byte**, an absolute deadline on an *incomplete* line, and
+    /// `SO_SNDTIMEO` on the writes going back. A connection that has already
+    /// spoken and is resting between complete frames is timed out by none of
+    /// them — it is only polled in slices, so `shutdownRequested` stays
+    /// observable through a silent period (see `clientReadPlan`).
+    ///
+    /// 不是 `private`：首字节时限与空闲切片这两条判据必须能在**真 socketpair** 上被
+    /// 确定性验红（"沉默的对端到点被拒"与"空闲的会话不许被踢"都藏在控制流里，藏在
+    /// private 里就没人测得到）。理由与 `writeBounded`/`writeAll` 那条一样：`@testable`
+    /// 只到 internal。两个预算参数默认取生产常量，测试把首字节预算调小才等得起
+    /// （`writeAll` 的 `budgetSeconds:` 是同一条先例）。
+    func serve(
+        clientFD: Int32,
+        firstByteBudget: TimeInterval = SocketServer.firstByteTimeoutSeconds,
+        idleSlice: TimeInterval = SocketServer.idlePollSliceSeconds
+    ) {
         var sendTimeout = timeval(tv_sec: Int(Self.clientSendTimeoutSeconds), tv_usec: 0)
         _ = setsockopt(
             clientFD, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout,
@@ -237,24 +268,38 @@ public final class SocketServer {
         var codec = FrameCodec()
         var buffer = [UInt8](repeating: 0, count: 65536)
         var lineDeadline: SocketDeadline?
+        var firstByteDeadline: SocketDeadline?
+        var spokeOnce = false
         while !dispatcher.core.shutdownRequested {
-            if let lineDeadline {
-                // Only armed while a frame is half-received.
-                switch BoundedSocket.wait(clientFD, events: Int16(POLLIN), deadline: lineDeadline) {
-                case .ready:
-                    break
-                case .timedOut:
-                    // 丢弃超长帧时 pendingBytes 恒为 0，照原样打印就成了"客户端
-                    // 一个字节都没发却卡住了我们"——原因恰恰在它发了太多字节。
-                    let buffered = codec.isDiscardingOversizeFrame
-                        ? "an oversize frame being discarded"
-                        : "\(codec.pendingBytes) buffered byte(s)"
-                    log.error("client left an incomplete line (\(buffered)) with no newline within \(Int(Self.partialLineTimeoutSeconds))s — closing the connection instead of waiting forever")
+            // 武装与判据都在轮询之前取：一轮只问一次，避免"武装规则"和"等待规则"
+            // 各说各话（半帧挂起却没被计时，或空闲会话被当成沉默的新连接踢掉）。
+            let plan = Self.clientReadPlan(
+                codec: codec,
+                spokeOnce: spokeOnce,
+                existingLineDeadline: lineDeadline,
+                existingFirstByteDeadline: firstByteDeadline,
+                firstByteBudget: firstByteBudget,
+                idleSliceSeconds: idleSlice
+            )
+            lineDeadline = plan.lineDeadline
+            firstByteDeadline = plan.firstByteDeadline
+
+            switch BoundedSocket.wait(clientFD, events: Int16(POLLIN), deadline: plan.wait.deadline) {
+            case .ready:
+                break
+            case .timedOut:
+                switch Self.silenceTimeoutAction(for: plan.wait, codec: codec) {
+                case .close(let reason):
+                    log.error(reason)
                     return
-                case .failed(let code):
-                    log.error("client poll failed: \(BoundedSocket.errnoText(code)) (errno \(code)) — closing connection")
-                    return
+                case .keepWaiting:
+                    // 空闲切片到头。这条连接什么都不知道，我们只是回头看了它一眼
+                    // `shutdownRequested`——绝不允许在这里关闭：长期会话就靠这一句活着。
+                    continue
                 }
+            case .failed(let code):
+                log.error("client poll failed: \(BoundedSocket.errnoText(code)) (errno \(code)) — closing connection")
+                return
             }
             let readCount = read(clientFD, &buffer, buffer.count)
             if readCount < 0 {
@@ -271,12 +316,14 @@ public final class SocketServer {
                 log.info("client disconnected")
                 return
             }
+            // 走到这里，这条连接已经开过口了：它从此是"会话"，受空闲语义保护，
+            // 不再受首字节预算的约束（判据在 `firstByteDeadline`）。
+            spokeOnce = true
             let events = codec.append(Data(buffer[0..<readCount]))
             for event in events {
                 let response = dispatcher.handle(event)
                 guard writeAll(clientFD, response) else { return }
             }
-            lineDeadline = Self.partialLineDeadline(for: codec, existing: lineDeadline)
         }
     }
 
@@ -291,6 +338,94 @@ public final class SocketServer {
     ) -> SocketDeadline? {
         guard codec.awaitsNewline else { return nil }
         return existing ?? SocketDeadline(seconds: partialLineTimeoutSeconds, now: now)
+    }
+
+    /// 首字节时限的武装判据，形状与 `partialLineDeadline` 一致（纯函数，假时钟可驱动）。
+    /// 与它不同的一点：这里问的是"这条连接开过口没有"，而不是"buffer 里有没有货"——
+    /// 半帧的预算按帧计，首字节的预算按**连接**计，一次都不许多给。
+    /// `existing ?? …`：装好之后不被顶掉，否则滴一个字节的对端每轮把时钟拨回原点，
+    /// 绝对时限就退化成了一次 syscall 的超时（R5-07 那一课，见 `writeBounded` 的注释）。
+    static func firstByteDeadline(
+        spokeOnce: Bool,
+        existing: SocketDeadline?,
+        budgetSeconds: TimeInterval = SocketServer.firstByteTimeoutSeconds,
+        now: @escaping () -> TimeInterval = { Date().timeIntervalSince1970 }
+    ) -> SocketDeadline? {
+        guard !spokeOnce else { return nil }
+        return existing ?? SocketDeadline(seconds: budgetSeconds, now: now)
+    }
+
+    /// 这一轮 POLLIN 的等待属于哪一段安静。三段必须**带着身份**返回，因为它们的到点
+    /// 处置不一样：两段关闭（各自有绝对预算），一段什么都不丢（空闲切片）。
+    enum ClientReadWait {
+        /// 连接还没发过一个字节：`firstByteTimeoutSeconds` 的绝对预算。
+        case firstByte(SocketDeadline)
+        /// 一帧写了一半挂着：`partialLineTimeoutSeconds` 的绝对预算。
+        case partialLine(SocketDeadline)
+        /// 已开过口的会话停在帧与帧之间：只有切片，安静本身不是罪。
+        case idleSlice(SocketDeadline)
+
+        var deadline: SocketDeadline {
+            switch self {
+            case .firstByte(let deadline), .partialLine(let deadline), .idleSlice(let deadline):
+                return deadline
+            }
+        }
+    }
+
+    /// 到点之后这段安静意味着什么。抽成纯函数的理由是那条老规矩：`serve` 里的控制流
+    /// 测不到，而"空闲不许踢、沉默的新连接要拒"这件事恰恰只能由判据本身钉住。
+    enum SilenceTimeoutAction: Equatable {
+        case close(reason: String)
+        case keepWaiting
+    }
+
+    /// 读侧一轮的完整计划：武装两条绝对预算，再决定这一轮该怎么等。
+    /// 武装与判据同出一处，所以两者不可能分叉——半帧一定会被计时，开过口的空闲会话
+    /// 永远不会被当成沉默的新连接。`serve()` 每轮从这里取，测试用假时钟驱动它。
+    static func clientReadPlan(
+        codec: FrameCodec,
+        spokeOnce: Bool,
+        existingLineDeadline: SocketDeadline?,
+        existingFirstByteDeadline: SocketDeadline?,
+        firstByteBudget: TimeInterval = SocketServer.firstByteTimeoutSeconds,
+        idleSliceSeconds: TimeInterval = SocketServer.idlePollSliceSeconds,
+        now: @escaping () -> TimeInterval = { Date().timeIntervalSince1970 }
+    ) -> (wait: ClientReadWait, lineDeadline: SocketDeadline?, firstByteDeadline: SocketDeadline?) {
+        let line = partialLineDeadline(for: codec, existing: existingLineDeadline, now: now)
+        let firstByte = firstByteDeadline(
+            spokeOnce: spokeOnce, existing: existingFirstByteDeadline, budgetSeconds: firstByteBudget, now: now
+        )
+        let wait: ClientReadWait
+        if codec.awaitsNewline, let line {
+            wait = .partialLine(line)
+        } else if !spokeOnce, let firstByte {
+            wait = .firstByte(firstByte)
+        } else {
+            wait = .idleSlice(SocketDeadline(seconds: idleSliceSeconds, now: now))
+        }
+        return (wait: wait, lineDeadline: line, firstByteDeadline: firstByte)
+    }
+
+    /// 一次超时到点的处置。`.idleSlice` 一律 `keepWaiting`：它是"多久回头看一次
+    /// `shutdownRequested`"的切片，不是会话的死刑。
+    static func silenceTimeoutAction(
+        for wait: ClientReadWait,
+        codec: FrameCodec
+    ) -> SilenceTimeoutAction {
+        switch wait {
+        case .partialLine(let deadline):
+            // 丢弃超长帧时 pendingBytes 恒为 0，照原样打印就成了"客户端
+            // 一个字节都没发却卡住了我们"——原因恰恰在它发了太多字节。
+            let buffered = codec.isDiscardingOversizeFrame
+                ? "an oversize frame being discarded"
+                : "\(codec.pendingBytes) buffered byte(s)"
+            return .close(reason: "client left an incomplete line (\(buffered)) with no newline within \(Int(deadline.seconds))s — closing the connection instead of waiting forever")
+        case .firstByte(let deadline):
+            return .close(reason: "client connected and never sent a single byte within \(Int(deadline.seconds))s — closing the connection: a peer that has not spoken is not an idle session, and letting it hold the only client slot would lock every real agent out (B-12)")
+        case .idleSlice:
+            return .keepWaiting
+        }
     }
 
     /// 一次回包的**总**预算。`SO_SNDTIMEO` 是单次 syscall 的超时并且每轮重置，所以从前

@@ -54,6 +54,9 @@ final class SettingsModel: ObservableObject {
         var pid: Int?
         /// daemon 自报的授权主体（nil = 未连上或旧 daemon 不上报）。
         var subject: PermissionSubject?
+        /// daemon 自报的状态根（`hello.stateRoot`）。nil 是"这一帧没上报"，
+        /// 不是"没有根"——面板不许拿自己这一侧的根去替它填。
+        var stateRoot: String?
     }
 
     @Published var entries: [PermissionEntry] = []
@@ -730,6 +733,7 @@ final class SettingsModel: ObservableObject {
             daemon.protocolVersion = summary.protocolVersion
             daemon.pid = summary.pid
             daemon.subject = summary.subject
+            daemon.stateRoot = summary.stateRoot
             daemonReportedStatuses = summary.permissions
             if let probePid = developerToolsProbePid, probePid != summary.pid {
                 // daemon 换过进程：上一次"验证调试能力"的结论不再代表现状。
@@ -751,7 +755,16 @@ final class SettingsModel: ObservableObject {
         daemon.protocolVersion = nil
         daemon.pid = nil
         daemon.subject = nil
+        daemon.stateRoot = nil
         daemonReportedStatuses = [:]
+    }
+
+    /// 侧栏那行"服务端的根"。旧版 daemon 的 hello 不带这个键，这里就写没上报——
+    /// 面板自己那一份 `ConsoleModel.displayedStateRoot` 是**这一页读数用的根**，
+    /// 两者可以不同（smoke.md 记过这条歧义），所以谁也不能替谁填。
+    var daemonStateRootCaption: String {
+        guard let root = daemon.stateRoot, !root.isEmpty else { return "状态根未上报" }
+        return "服务端的根 \(root)"
     }
 
     /// 由 daemon 自报席位 + 重探结果重算卡片状态与注记。

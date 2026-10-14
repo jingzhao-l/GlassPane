@@ -205,11 +205,15 @@ final class LocalArchiveTests: XCTestCase {
     func testEvidenceCountDistinguishesMissingDirectory() {
         let dir = tempDir()
         write(pack(), to: dir)
-        XCTAssertEqual(LocalArchive.evidenceCount(at: dir, fallback: dir), 1)
-        XCTAssertNil(LocalArchive.evidenceCount(at: dir + "/gone", fallback: dir),
+        XCTAssertEqual(LocalArchive.evidenceCount(at: dir), 1)
+        XCTAssertNil(LocalArchive.evidenceCount(at: dir + "/gone"),
                      "目录不存在要返回 nil，而不是 0 条")
-        XCTAssertEqual(LocalArchive.evidenceCount(at: nil, fallback: dir), 1,
-                       "未配置路径时按默认目录计数")
+        XCTAssertNil(
+            LocalArchive.evidenceCount(at: nil),
+            "未配置路径就是没有档案可数。它从前按默认（共用）目录返回一个数字，"
+                + "于是没配目录的项目被报成共用档案的那 N 条——一次替身测量"
+        )
+        XCTAssertNil(LocalArchive.evidenceCount(at: "   "), "空白串不是路径")
     }
 
     // MARK: - 审批台账

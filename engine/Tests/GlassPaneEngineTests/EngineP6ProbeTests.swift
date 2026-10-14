@@ -1076,6 +1076,11 @@ final class P6EngineCoreProbeTests: XCTestCase {
         let time = P6TimeBox()
         let inbox = ProbeInbox(now: { time.now })
         inbox.register(p6Hello(capabilities: ["z2"]))
+        // The mirror diff is a comparison against the baseline `op_begin` asked the
+        // probe to capture, so this fixture has to deliver that command — a probe
+        // whose command channel is dead cannot have baselined this window, and the
+        // daemon files its diff under the previous act instead (§2.3's precondition).
+        inbox.sender = { _, _ in true }
         let core = makeCore(time: time, inbox: inbox)
         _ = try core.attach(bundleId: "com.example.app", pid: nil)
         inbox.ingest(pid: 4242, frame: .state(key: "settings.unit", before: "db", after: "percent", source: "z2-mirror", ts: 0))
@@ -1090,6 +1095,7 @@ final class P6EngineCoreProbeTests: XCTestCase {
         let time = P6TimeBox()
         let inbox = ProbeInbox(now: { time.now })
         inbox.register(p6Hello(capabilities: ["z1", "z2"]))
+        inbox.sender = { _, _ in true }
         let core = makeCore(time: time, inbox: inbox)
         _ = try core.attach(bundleId: "com.example.app", pid: nil)
         inbox.ingest(pid: 4242, frame: .handler(file: "View.swift", line: 12, ts: 0, durationNs: nil))

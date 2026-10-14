@@ -501,10 +501,13 @@ public enum DeveloperToolsCapability {
 
         /// 卡片上那盏灯怎么点：**先认实测到的拒绝**，再认 `granted`。
         ///
-        /// `granted` 是两个探测的**或**（`DebugCapabilityProbe` 里那行），所以
-        /// `launch:"ok", attach:"denied"` 也算 granted——而这张卡存在的意义就是"能不能让调试器
-        /// 附加到进程"：附加被系统明确拒绝却点绿，等于把一次实测的拒绝折算成一次授权。
-        /// 顺序就是这条判据本身；把它挪回 `if granted` 在前，`PermissionCardDenialWins` 那条会红。
+        /// 这张卡存在的意义就是"能不能让调试器附加到进程"：附加被系统明确拒绝却点绿，
+        /// 等于把一次实测的拒绝折算成一次授权。`DebugCapabilityProbe.Snapshot.granted`
+        /// 现在自己就是这么算的（两侧同一个判据），这里仍把拒绝排在前面，是因为
+        /// `Report` 也可以由一份**旧版 daemon 发来的** JSON 解析出来——那种负载里的
+        /// `granted` 还是或值，卡不能替它把拒绝洗成授权。
+        /// 顺序就是这条判据本身；把它挪回 `if granted` 在前，
+        /// `testDenialOnEitherHalfWinsOverTheOredGrantedFlag` 会红。
         public var status: PermissionStatus {
             if launch == "denied" || attach == "denied" { return .denied }
             if granted { return .granted }

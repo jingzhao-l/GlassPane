@@ -46,6 +46,7 @@ final class RestorePipelineTests: XCTestCase {
             snapshotId: "snap_0000000000000000000000ABCDEF",
             treeDigest: String(repeating: "a", count: 64),
             nodeCount: 10,
+            maxDepth: 6,
             capturedAt: "2026-09-18T00:00:00.000Z",
             probeInfo: probe
         )
@@ -275,12 +276,23 @@ final class EngineP5Batch2Tests: XCTestCase {
     }
 
     private func makeProbe(domains: [String] = ["objc", "heap"]) -> SnapshotProbeInfo {
-        SnapshotProbeInfo(
+        let draft = SnapshotProbeInfo(
             probeVersion: "z5-0.1.0",
             exportedDomains: domains,
-            stateDigest: String(repeating: "d", count: 64),
+            stateDigest: "",
             checkpointFormat: "z5-json-v1",
             capturedAt: "2026-09-18T00:00:00.000Z"
+        )
+        // B-17 put the envelope recomputation on the live path, so a fixture with a
+        // placeholder digest is now (correctly) refused. This class's subject is the
+        // plan and the ledger, not tampering, so the payload carries its real digest;
+        // `testRollbackFullRefusesAFabricatedEnvelopeDigest` keeps the tamper case.
+        return SnapshotProbeInfo(
+            probeVersion: draft.probeVersion,
+            exportedDomains: draft.exportedDomains,
+            stateDigest: RestorePipeline.envelopeDigest(of: draft),
+            checkpointFormat: draft.checkpointFormat,
+            capturedAt: draft.capturedAt
         )
     }
 
@@ -290,6 +302,34 @@ final class EngineP5Batch2Tests: XCTestCase {
             throw NSError(domain: "test", code: 1)
         }
         return snapshotId
+    }
+
+    /// B-17: P5 §6.3's anti-tamper recomputation is now on the live path. A probe
+    /// payload whose `stateDigest` does not follow from its own fields must not
+    /// produce an approved-looking plan — this used to be checked only from a test.
+    func testRollbackFullRefusesAFabricatedEnvelopeDigest() throws {
+        let honest = makeProbe()
+        let tampered = SnapshotProbeInfo(
+            probeVersion: honest.probeVersion,
+            exportedDomains: honest.exportedDomains,
+            stateDigest: String(repeating: "d", count: 64),
+            checkpointFormat: honest.checkpointFormat,
+            capturedAt: honest.capturedAt
+        )
+        XCTAssertNotEqual(
+            tampered.stateDigest, RestorePipeline.envelopeDigest(of: tampered),
+            "the fixture must actually be a rewritten envelope"
+        )
+        let core = try makeCore(probe: tampered)
+        let snapshotId = try takeSnapshot(core)
+        XCTAssertThrowsError(try core.restore(snapshotId: snapshotId, steps: nil, mode: "rollback_full")) { error in
+            guard let gpError = error as? GPError else { return XCTFail("expected GPError, got \(error)") }
+            XCTAssertEqual(gpError.code, .restoreUnsupported)
+            XCTAssertTrue(
+                gpError.message.contains("envelope does not recompute"),
+                "the refusal has to name the check that fired: \(gpError.message)"
+            )
+        }
     }
 
     /// P5-B1: the injection slot exists (nil default) and captures attach the

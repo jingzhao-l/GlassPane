@@ -183,7 +183,12 @@ public final class CGEventInputMonitor: InputEventSource, InputSourceMonitoring 
         if let fault {
             log.error("C33 input monitor: \(fault) (disables so far: \(disables))")
         } else {
-            log.error("C33 input monitor: \(name) → tap re-armed "
+            // A re-arm that worked is not a fault. It used to be written through
+            // `error` while every ERROR line was still suppressed by `quiet`
+            // (`EngineLog`); now that errors always reach the log, a healthy
+            // recovery would read as a recurring defect to whoever follows
+            // `internalError`'s "check the daemon log" remedy.
+            log.info("C33 input monitor: \(name) → tap re-armed "
                 + "(\(reArms)/\(Self.maxReArmAttempts), disables so far: \(disables))")
         }
     }

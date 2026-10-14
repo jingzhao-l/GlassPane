@@ -267,12 +267,26 @@ final class ReviewCoreATests: XCTestCase {
     /// uncountable set returns nil before the crop is offered. The two cases that
     /// are executable (target absent) are pinned above instead.
     /// REVERSE: put `?? 0` back, or drop the `foundTarget` guard → red here.
+    /// SHAPE GATE, not behavioural. It pins that the *fetch* half still reads the
+    /// real window list and delegates to the counted half, and that the counted half
+    /// keeps its strict parsing. The unreadable-bounds and missing-layer neighbours
+    /// are now exercised as behaviour in `OcclusionCountParsingTests` (the count
+    /// takes the list as an argument), so this gate is a regression net on the
+    /// wiring, not the only evidence that the loop is honest.
+    /// REVERSE: drop the `foundTarget` guard, or make the fetch half return `[]`
+    /// instead of delegating → red here.
     func testOccluderLoopParsesBoundsStrictlyAndTracksTheTarget() throws {
         let source = codeOnly(try read("engine/Sources/GlassPaneEngine/SCKCapturer.swift"))
         let loop = try XCTUnwrap(
-            body(of: source, from: "static func occludingWindows("),
-            "no occludingWindows in SCKCapturer.swift — this gate is looking at nothing"
+            body(of: source, from: "static func occludingWindows(\n        in list:"),
+            "no list-taking occludingWindows in SCKCapturer.swift — this gate is looking at nothing"
         )
+        let fetch = try XCTUnwrap(
+            body(of: source, from: "static func occludingWindows(inFrontOf targetNumber:"),
+            "the fetch half is gone; nothing reads CGWindowList any more"
+        )
+        XCTAssertTrue(fetch.contains("CGWindowListCopyWindowInfo"), "the list is no longer read from the window server")
+        XCTAssertTrue(fetch.contains("in: list"), "the fetch half does not hand its list to the counted half")
 
         XCTAssertTrue(loop.contains("foundTarget = true"), "target found is never recorded")
         XCTAssertTrue(loop.contains("guard foundTarget"), "nothing confirms the target was in the list")

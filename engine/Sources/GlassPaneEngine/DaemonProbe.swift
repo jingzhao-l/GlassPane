@@ -65,19 +65,24 @@ public final class DaemonProbe: @unchecked Sendable {
         public let subject: PermissionSubject?
         /// daemon 自身的四类席位（`hello.permissions`）；缺失即空字典。
         public let permissions: [PermissionKind: PermissionStatus]
+        /// daemon 读写的状态根（`hello.stateRoot`）。旧 daemon 不带这个字段时为 nil，
+        /// 面板据此写"未观测"——绝不拿面板自己显示的根去冒充服务端的根。
+        public let stateRoot: String?
 
         public init(
             version: String,
             protocolVersion: String,
             pid: Int,
             subject: PermissionSubject? = nil,
-            permissions: [PermissionKind: PermissionStatus] = [:]
+            permissions: [PermissionKind: PermissionStatus] = [:],
+            stateRoot: String? = nil
         ) {
             self.version = version
             self.protocolVersion = protocolVersion
             self.pid = pid
             self.subject = subject
             self.permissions = permissions
+            self.stateRoot = stateRoot
         }
     }
 
@@ -237,7 +242,8 @@ public final class DaemonProbe: @unchecked Sendable {
             protocolVersion: protocolVersion,
             pid: pid,
             subject: PermissionSubject.from(wireValue: result["identity"] as? [String: Any]),
-            permissions: DaemonPermissionSnapshot.statuses(from: result["permissions"] as? [String: Any])
+            permissions: DaemonPermissionSnapshot.statuses(from: result["permissions"] as? [String: Any]),
+            stateRoot: result["stateRoot"] as? String
         )
     }
 

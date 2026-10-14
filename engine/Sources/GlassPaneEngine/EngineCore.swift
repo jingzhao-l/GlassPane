@@ -55,6 +55,13 @@ public final class EngineCore {
     /// when `nil` is injected — used to disable persistence in tests that
     /// assert pure in-memory behavior.
     private let evidenceStore: EvidenceStore?
+    /// The state root this instance reads and writes, published in `hello` as the
+    /// additive `stateRoot` key. Without it the console cannot say which root a
+    /// socket serves — and `http-gateway` instructs agents to run maintenance
+    /// "against the same --state-dir this socket serves", an instruction nobody can
+    /// follow from a hello frame that omits it. Set by the daemon once the root is
+    /// resolved; nil means "not resolved yet", which the panel shows as such.
+    public var stateRootPath: String?
     /// Concurrency attribution guard (P2 spec v2.0 §15.4). Nil disables C33 —
     /// act() then behaves exactly like v1.6.
     private let attributionGuard: AttributionGuard?
@@ -202,6 +209,9 @@ public final class EngineCore {
             "pid": Int(ProcessInfo.processInfo.processIdentifier),
             "capabilities": EngineMethod.capabilityWireNames
         ]
+        if let stateRootPath {
+            payload["stateRoot"] = stateRootPath
+        }
         // P1 v1.2 §11.2：带上 daemon 自身的授权主体与四类席位（未注入钩子时
         // 整段省略——面板据此如实显示"未验证"，不以面板进程的权限冒充）。
         if let snapshot = permissionsReport?() {
@@ -816,10 +826,12 @@ public final class EngineCore {
         // probe never told the window opened cannot have diffed it, so the
         // silence that explains is never reported as an observation.
         var probeCommandFailure: String?
+        var probeBaselined = true
         if let inbox = probeInbox, let pid = probePid {
             inbox.beginWindow(pid: pid, opId: operationId)
             if !inbox.sendCommand("op_begin", to: pid) {
                 probeCommandFailure = inbox.lastDeliveryError ?? "op_begin was never delivered to pid \(pid)"
+                probeBaselined = false
             }
         }
 
@@ -892,7 +904,7 @@ public final class EngineCore {
             if opEndDelivered {
                 Thread.sleep(forTimeInterval: EngineCore.probeEndDrainSeconds)
             }
-            probeSignals = inbox.endWindow(pid: pid, opId: operationId)
+            probeSignals = inbox.endWindow(pid: pid, opId: operationId, includeMirrorDiff: probeBaselined)
             // X-11: `changed == false` after an undelivered op_begin/op_end is
             // not "the state did not move", it is "the probe was never asked".
             // A diff that *did* report movement stays (those frames are their
@@ -905,6 +917,13 @@ public final class EngineCore {
                     probeSignals = signals
                 }
             }
+            // X-11's other half, and the one that mis-attributed rather than
+            // under-reported: with `op_begin` undelivered the probe still answered
+            // `op_end`, diffing against the END of the previous window. That diff
+            // legitimately reports movement — from an act that is not this one — so
+            // the "a measured `changed: true` is its own measurement" rule cannot
+            // cover it. `includeMirrorDiff: false` drops exactly those entries and
+            // keeps the window-independent KVO/macro frames, which need no command.
         }
 
         let latencyMs = clock().timeIntervalSince(started) * 1000
@@ -1434,7 +1453,11 @@ public final class EngineCore {
         guard attachedApp != nil else {
             throw GPError(code: .notAttached, message: "no app attached")
         }
-        guard let context = latestPack() else {
+        // R1-06: ONE resolution rule. `last_evidence` and `diagnose` both fall back
+        // to the archive, so an assert taken right after a daemon restart used to
+        // answer GP_E_NO_OPERATION while the operation it wants to reuse was
+        // sitting in the archive on disk.
+        guard let context = resolvedPack(operationId: nil) else {
             // P0 §3.3：assert 证据的 signals 复用最近一次 act 的上下文，因此它不能
             // 成为会话的第一个操作。错误码保持 GP_E_NO_OPERATION（错误码表冻结），
             // 但 remedy 必须可执行——原文案"run act or assert_element first"对这条
@@ -1850,6 +1873,7 @@ public final class EngineCore {
             snapshotId: snapshotId,
             treeDigest: tree.digest,
             nodeCount: tree.nodeCount,
+            maxDepth: maxDepth,
             capturedAt: nowISO(),
             probeInfo: probeInfo
         )
@@ -1859,6 +1883,9 @@ public final class EngineCore {
             "snapshotId": snapshot.snapshotId,
             "treeDigest": snapshot.treeDigest,
             "nodeCount": snapshot.nodeCount,
+            // The digest is of a tree walked to `maxDepth`; `restore` re-measures
+            // at this same depth, so the agent is told which tree was digested.
+            "captureDepth": snapshot.maxDepth,
             "capturedAt": snapshot.capturedAt,
             "latencyMs": latencyMs
         ]
@@ -2012,7 +2039,7 @@ public final class EngineCore {
         guard let steps else {
             // Baseline-consistency form: compare current tree against the
             // snapshot digest. confirmed/total stay 0 — no step ran.
-            let tree = try currentTreeDigest()
+            let tree = try currentTreeDigest(depth: snapshot.maxDepth)
             let consistent = tree.digest == snapshot.treeDigest
             registerRestoreApproval(
                 snapshotId: snapshotId, mode: mode, hasSteps: false,
@@ -2028,6 +2055,7 @@ public final class EngineCore {
                 "confirmed": 0,
                 "total": 0,
                 "targetDigest": tree.digest,
+                "comparedDepth": snapshot.maxDepth,
                 "consistent": consistent
             ]
         }
@@ -2065,7 +2093,7 @@ public final class EngineCore {
         // 直接抛错，整包退化成一个不相干的 GP_E_INTERNAL（remedy 还在说
         // "缩小 observe maxDepth"），而 `consistent:false` 又宣称了一个根本没
         // 测到的结论。失败必须按它本来的面目上报。
-        let target = try currentTreeDigest()
+        let target = try currentTreeDigest(depth: snapshot.maxDepth)
         registerRestoreApproval(
             snapshotId: snapshotId, mode: mode, hasSteps: true,
             outcome: "executed \(stepResults.count)/\(steps.count) steps"
@@ -2077,6 +2105,7 @@ public final class EngineCore {
             "confirmed": stepResults.count,
             "total": steps.count,
             "targetDigest": target.digest,
+            "comparedDepth": snapshot.maxDepth,
             "consistent": target.digest == snapshot.treeDigest
         ]
     }
@@ -2143,11 +2172,11 @@ public final class EngineCore {
         checkpointExportFailures = checkpointExportFailures.filter { live.contains($0.key) }
     }
 
-    private func currentTreeDigest() throws -> AxTreeSnapshot {
+    private func currentTreeDigest(depth: Int) throws -> AxTreeSnapshot {
         // Tree capture failures surface as GP_E_AX_UNAVAILABLE, matching
         // observe's error vocabulary (§1.2 restore error codes).
         do {
-            return try channel.treeSnapshot(maxDepth: Self.defaultObserveDepth)
+            return try channel.treeSnapshot(maxDepth: depth)
         } catch let error as ChannelError {
             throw EngineCore.map(error)
         }

@@ -259,15 +259,12 @@ final class ConsoleModel: ObservableObject {
     func reloadProjects() {
         projectsState = .loading
         let path = projectsPath
-        let fallback = evidenceDirectory
         Task.detached(priority: .userInitiated) {
             let registry = ProjectRegistry(filePath: path)
             let entries = registry.all
             var counts: [String: Int?] = [:]
             for entry in entries {
-                counts[entry.projectId] = LocalArchive.evidenceCount(
-                    at: entry.evidenceStoragePath, fallback: fallback
-                )
+                counts[entry.projectId] = Self.ownedEvidenceCount(for: entry)
             }
             let damaged = registry.loadFailed
             await MainActor.run {
@@ -797,8 +794,203 @@ final class ConsoleModel: ObservableObject {
     /// 档案目录的完整路径（空状态里告诉用户去哪儿看，不让人猜）。
     var evidenceDirectoryPath: String { evidenceDirectory }
 
-    /// 测试残留条数（项目页的"清理"按钮标题用它，让人先知道有多少）。
+    /// 台账文件的完整路径：这一页**读过的那一份**（`reloadApprovals` 用的就是它）。
+    var approvalsLedgerPath: String { approvalsPath }
+
+    /// 台账所在的目录：由上面那份实测到的路径反推，**不是**引擎那个"家目录默认根"
+    /// 常量的父目录。后者永远指向 `~/.glasspane`，而这一页读的台账可能在别的根
+    /// （`GLASSPANE_STATE_DIR` / daemon 的 `--state-dir`）——于是那一枚「台账文件」
+    /// 开的是一个它从没测过的目录：里面根本没有被读到的那份 `approvals.json`；
+    /// 反过来，挪过根的那台机器上它会说"还没有 approvals.json"而文件其实就在屏幕上
+    /// 那一份的位置。与证据页早就在用的 `evidenceDirectoryPath` 同一条口径。
+    var approvalsDirectory: String { (approvalsPath as NSString).deletingLastPathComponent }
+
+    /// 测试残留条数（项目页的横幅用它，让人先知道有多少）。
+    /// **它不是「清理」这一枚显示与否的判据**——见 `pruneControl`。
     var testResidueCount: Int { projects.filter { LocalArchive.isTestResidue($0) }.count }
+
+    // MARK: - 项目「证据条数」：只量它自己那份档案
+
+    /// 某项目**自己拥有**的档案条数；没写 `evidenceStoragePath` 就是**没测量**（nil）。
+    ///
+    /// 这里绝不接受任何"顶替"：从前这一页把本页在读的共用档案目录当 `fallback` 交给
+    /// `LocalArchive.evidenceCount(at:fallback:)`，于是没配目录的项目显示的是
+    /// **共用档案**的文件条数，而被顶替掉的那个数字才是这个项目的答案。同一个事实在
+    /// `glasspaned --evidence-stats --project <id>` 那里答的是 `null` 并明说共享档案
+    /// 不是它的替身（`EngineCore.noArchiveRefusal`），两个面不能各答各的，
+    /// 而面板那一侧给的正是编出来的那一个。
+    ///
+    /// `counter` 是注入点：单测用它证明"没配目录 → 一次都没数"，不靠磁盘形状。
+    nonisolated static func ownedEvidenceCount(
+        for entry: ProjectEntry,
+        counter: (String) -> Int? = { LocalArchive.evidenceCount(at: $0) }
+    ) -> Int? {
+        guard let directory = entry.evidenceStoragePath?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !directory.isEmpty else {
+            return nil
+        }
+        // Only a directory this entry owns is ever handed to the counter:
+        // `LocalArchive.evidenceCount` no longer has a fallback parameter at all,
+        // so "count something else instead" is not a branch anyone can re-add here.
+        return counter(directory)
+    }
+
+    /// 「证据条数」唯一的那一句：列表行与详情行共用同一判据、同一串字。
+    ///
+    /// 同一个 nil 从前在列表行写「证据目录已清理」、在详情行写「证据目录不存在」——
+    /// 前者宣称发生过一次清理，而这一页什么都没观测到（它只测到过"那里没有目录"）；
+    /// 后者是它真正测到的事。两个说法里较响的那个不是事实，所以这里只留一个。
+    nonisolated static func evidenceCountReadout(_ count: Int?) -> String {
+        guard let count else {
+            return "未测量（注册项没写证据目录，或那个目录不在）"
+        }
+        return "\(count) 条"
+    }
+
+    // MARK: - 一枚按不动的控件：理由 + 下一步
+
+    /// 一枚控件的呈现：按得动与否 + 那一句话（禁用时它就是理由与下一步）。
+    struct PanelControl: Equatable {
+        let enabled: Bool
+        let help: String
+    }
+
+    /// 「档案目录」这一枚的呈现（纯函数，供单测）。
+    /// 从前禁用态那句 help 只描述启用态（"在访达中打开 …"），于是按不动的时候
+    /// 屏幕上那句话说的是一件它没做的事。
+    nonisolated static func evidenceDirectoryControl(
+        exists: Bool, directory: String
+    ) -> PanelControl {
+        if exists {
+            return PanelControl(enabled: true, help: "在访达中打开这一页在读的档案目录：\(directory)")
+        }
+        return PanelControl(enabled: false, help:
+            "「档案目录」现在按不动：这个根里还没有档案目录，访达没有一个去处可显示（应在：\(directory)）。"
+            + "下一步：执行一次会留档案的操作后点「刷新」重扫；状态根挪过就再核对一次 "
+            + "GLASSPANE_STATE_DIR 是不是后台服务实际在用的那一个。")
+    }
+
+    /// 「打开报告」这一枚的呈现：**判据是这条档案的读取结局**，不是那个共用的 nil。
+    /// 每一支都带上这一屏做得动的那一步。
+    nonisolated static func reportButtonControl(packLoad: PackLoad) -> PanelControl {
+        switch packLoad {
+        case .loaded:
+            return PanelControl(enabled: true, help:
+                "用浏览器打开这条证据的报告：会在系统临时目录写一份 0600 的副本，看完可自行删除")
+        case .loading:
+            return PanelControl(enabled: false, help:
+                "「打开报告」现在按不动：这条档案还在读盘，报告要拿到完整信号链才写得出来。"
+                + "下一步：等这一条读完，或点「刷新」重读。")
+        case .failed(let reason):
+            return PanelControl(enabled: false, help:
+                "「打开报告」现在按不动：\(reason) 下一步：点这一屏的「重试」再读一次；"
+                + "还是读不出就用 MCP 侧的 gp_export_evidence 取这份档案的文本。")
+        case .none:
+            return PanelControl(enabled: false, help:
+                "「打开报告」现在按不动：这一帧没读到这条记录的内容（还没点中左侧的记录，或列表刚重扫）。"
+                + "下一步：左侧点一条记录，或点「刷新」重读一次。")
+        }
+    }
+
+    // MARK: - 项目页「清理」这一枚
+
+    /// 「清理」的呈现。
+    enum PanelPruneControl: Equatable {
+        /// 按得动：横幅那句实测计数 + help 里那句"清单以后台服务为准"。
+        case ready(banner: String, help: String)
+        /// 按不动：**照样画出来**，`banner` 是这一页报得出的条数，`reason` 是原因 + 下一步。
+        case blocked(banner: String, reason: String)
+    }
+
+    /// 「清理」这一枚的呈现判据（纯函数，供单测）。
+    ///
+    /// **永不隐藏**：这一页有没有得清，只有后台服务的 `--project-prune --dry-run`
+    /// 答得出；面板自己按 `LocalArchive.isTestResidue` 数出来的那个数不是它的判据。
+    /// 从前按钮只在 `testResidueCount > 0` 时才画，而注册表**读失败**时那个数就是 0
+    /// （`projects` 是空的），于是 daemon 一次都没被问过——一个入口因为解释不了
+    /// 自己就被收掉了，正是 README 认下的那类毛病（"never hides a control to avoid
+    /// explaining it"）。现在它永远在屏上：按不动时把原因和下一步写在同一枚控件上。
+    nonisolated static func pruneControl(
+        projectsState: LoadState,
+        residueCount: Int,
+        canRunDaemonCLI: Bool,
+        isPreparingPreview: Bool
+    ) -> PanelPruneControl {
+        let banner: String
+        /// 读表那一侧给出的"按不动"原因（表读成了就是 nil）。
+        let readBlock: String?
+        switch projectsState {
+        case .idle, .loading:
+            banner = "注册表还在读，这一页报不出条数"
+            readBlock = "「清理」现在按不动：注册表还在读，这一页既不知道表里有什么，也就说不出要清什么。"
+                + "下一步：等它读完，或点「刷新」重读注册表。"
+        case .failed(let message):
+            banner = "注册表这次没读成，这一页报不出条数"
+            readBlock = "「清理」现在按不动：注册表这次没读成（\(message)），这一页的零条是读不到的零条，"
+                + "不是后台服务的答复。下一步：先点「刷新」把注册表读成，这一枚才有清单可要。"
+        case .loaded:
+            banner = residueCount > 0
+                ? "\(residueCount) 条注册项指向系统临时目录"
+                : "面板在这台机器上读到 0 条指向系统临时目录的注册项"
+            readBlock = nil
+        }
+        if isPreparingPreview {
+            return .blocked(banner: banner, reason:
+                "预览已经在路上：这一趟 --project-prune --dry-run 还没回话，同时问两次没有意义。"
+                + "下一步：等它回话，或稍后再点一次「清理」。")
+        }
+        if let readBlock {
+            return .blocked(banner: banner, reason: readBlock)
+        }
+        if !canRunDaemonCLI {
+            return .blocked(banner: banner, reason:
+                "「清理」现在按不动：还没读到后台服务的程序路径，这一枚没有可执行入口。"
+                + "下一步：点「刷新」等后台服务重新应门，它会把自己那份路径报回来。")
+        }
+        let help = residueCount > 0
+            ? "这些是引擎自检过程留下的示例项目，不是你注册的应用。按下「清理」先向后台服务要一份"
+                + "将删除的清单（--project-prune --dry-run），确认之后才动手。"
+            : "这个 0 只是面板本地的计数：有没有得清，以后台服务的 --project-prune --dry-run 为准。"
+                + "按下「清理」先拿那份清单，确认之后才动手。"
+        return .ready(banner: banner, help: help)
+    }
+
+    /// 现在这一屏上「清理」该有的形态。
+    var pruneControl: PanelPruneControl {
+        Self.pruneControl(
+            projectsState: projectsState,
+            residueCount: testResidueCount,
+            canRunDaemonCLI: canRunDaemonCLI,
+            isPreparingPreview: isPreparingPrunePreview
+        )
+    }
+
+    /// 「清理」按得动吗——**永远画得出来**，这里只答"能不能按"。
+    var canPreviewTestResiduePrune: Bool {
+        if case .ready = pruneControl { return true }
+        return false
+    }
+
+    /// 那一枚控件上的一句话：按得动时是它做什么，按不动时是原因 + 下一步。
+    var pruneControlHelp: String {
+        switch pruneControl {
+        case .ready(_, let help): return help
+        case .blocked(_, let reason): return reason
+        }
+    }
+
+    /// 横幅那一行：面板这一趟报得出的条数（读不到时那句就写着读不到）。
+    var pruneControlBanner: String {
+        switch pruneControl {
+        case .ready(let banner, _): return banner
+        case .blocked(let banner, _): return banner
+        }
+    }
+
+    /// 「档案目录」那一枚的现在形态（按得动与否 + 那一句话）。
+    var evidenceDirectoryControl: PanelControl {
+        Self.evidenceDirectoryControl(exists: archiveExists, directory: evidenceDirectory)
+    }
 
     // MARK: - 审批台账文件那一枚按钮
 

@@ -63,8 +63,15 @@ final class ScriptedChannel: RuntimeChannel {
         return try pingResult.get()
     }
 
+    /// The depths each tree read asked for, in call order. A digest is a digest
+    /// of a *truncated* tree, so a baseline taken at one depth can only be
+    /// compared against a re-read at the same depth — and a fake that ignored
+    /// the parameter could never show the difference.
+    private(set) var treeDepths: [Int] = []
+
     func treeSnapshot(maxDepth: Int) throws -> AxTreeSnapshot {
         treeCallCount += 1
+        treeDepths.append(maxDepth)
         if !treeResults.isEmpty {
             return try treeResults.removeFirst().get()
         }

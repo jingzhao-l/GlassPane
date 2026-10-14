@@ -179,8 +179,10 @@ struct EvidenceTabView: View {
             } label: {
                 Label("档案目录", systemImage: "folder")
             }
-            .help("在访达中打开 \(model.evidenceDirectoryPath)")
-            .disabled(!model.archiveExists)
+            // 禁用态那一句也要说禁用态：从前 help 无论按得动按不动都写着"在访达中打开 …"，
+            // 于是按不动的时候屏幕上那句话讲的是一件它没做的事，下一步也没有。
+            .help(model.evidenceDirectoryControl.help)
+            .disabled(!model.evidenceDirectoryControl.enabled)
         }
     }
 
@@ -445,12 +447,20 @@ struct EvidenceDetailView: View {
             } label: {
                 Image(systemName: "doc.richtext")
             }
-            .help("用浏览器打开这条证据的报告：会在系统临时目录写一份 0600 的副本，看完可自行删除")
-            .disabled(pack == nil)
+            // 判据是这条档案的**读取结局**，不是那个把"还在读"与"读不出"混在一起的 nil：
+            // 三种形态各有各的下一步，从前它们共用一句只描述启用态的 help。
+            .help(reportControl.help)
+            .disabled(!reportControl.enabled)
             .accessibilityIdentifier("gp-open-evidence-report")
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
+    }
+
+    /// 「打开报告」这一枚的现在形态：按得动与否只由这条档案的读取结局决定，
+    /// 按不动时同一句里给出原因与下一步。
+    private var reportControl: ConsoleModel.PanelControl {
+        ConsoleModel.reportButtonControl(packLoad: packLoad)
     }
 
     private var verdictTitle: String {
