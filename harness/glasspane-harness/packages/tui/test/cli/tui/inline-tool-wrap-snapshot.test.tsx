@@ -2,6 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { createSignal, For, Show } from "solid-js"
 import type { BoxRenderable, ScrollBoxRenderable } from "@opentui/core"
 import { testRender, type JSX } from "@opentui/solid"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { PermissionV2 } from "@opencode-ai/core/permission"
+import { QuestionV2 } from "@opencode-ai/core/question"
 import {
   formatCompletedSubagentDetail,
   formatSubagentRetry,
@@ -18,6 +21,41 @@ import {
   glasspaneRow,
   glasspaneRowLook,
 } from "../../../src/routes/session"
+import { errorMessage } from "../../../src/util/error"
+import { isToolDenial, toolDenialMarkers } from "../../../src/util/tool-denial"
+
+/**
+ * The refusal texts below are not typed into this file. `failToolCall` writes a denied
+ * tool call as `errorMessage(error)` into a bare string field, so the only thing the TUI
+ * can see is the sentence the error class emits — and building it here from the classes
+ * themselves is what makes the assertion mean anything. The previous version of this
+ * file fed `error: "user rejected permission"`, a literal hand-typed from the very
+ * substrings the implementation grepped for: it could not fail when the prose changed,
+ * while a reword upstream would have repainted a refusal as an ordinary call error.
+ */
+const refusal = {
+  rejected: errorMessage(new PermissionV1.RejectedError()),
+  corrected: errorMessage(new PermissionV1.CorrectedError({ feedback: "not that app" })),
+  deniedByRule: errorMessage(new PermissionV1.DeniedError({ ruleset: [{ permission: "bash", action: "deny" }] })),
+  dismissed: errorMessage(new QuestionV2.RejectedError()),
+}
+// The same four classes read as identity rather than as prose: `errorMessage` returns
+// `error.name` when a refusal carries no sentence of its own, and for these classes
+// `_tag` is the same string. Not what the server writes today — this is the second key
+// the detection claims to have, so it is asserted through `glasspaneRow` rather than
+// left as a comment.
+const refusalIdentity = [
+  new PermissionV1.RejectedError(),
+  new PermissionV1.CorrectedError({ feedback: "not that app" }),
+  new PermissionV1.DeniedError({ ruleset: [] }),
+  new QuestionV2.RejectedError(),
+].flatMap((error) => [error.name, error._tag])
+const notARefusal = "socket closed"
+// Not one of the four sentences, and not an identity either: a guess at what a reword
+// could say. The branch is real, so an unknown text reads as a call error — and if that
+// prose ever actually ships, it ships from the classes, the markers move with them and
+// this case moves to `denied` in the same commit.
+const rewordedRefusal = "The user declined this tool call."
 
 let testSetup: Awaited<ReturnType<typeof testRender>> | undefined
 
@@ -215,7 +253,7 @@ function DeniedGlassPaneToolFixture() {
   // The props the session row passes for `state: "denied"`: finished, not failed, not
   // success — with the denial's own reason available on click.
   return (
-    <InlineToolRow icon="⊘" complete={true} denied={true} pending="Performing action…" error="user rejected permission">
+    <InlineToolRow icon="⊘" complete={true} denied={true} pending="Performing action…" error={refusal.rejected}>
       gp_act
     </InlineToolRow>
   )
@@ -331,12 +369,92 @@ describe("TUI inline tool wrapping", () => {
     expect(glasspaneRow({ tool: "gp_act", status: "error", error: "socket closed", metadata: {} }).state).toBe("call-error")
   })
 
-  test("glasspaneRow distinguishes a thrown call error and a permission denial", () => {
-    const denied = glasspaneRow({ tool: "gp_act", status: "error", error: "user rejected permission", metadata: {} })
-    expect(denied.state).toBe("denied")
-    const thrown = glasspaneRow({ tool: "gp_act", status: "error", error: "socket closed", metadata: {} })
-    expect(thrown.state).toBe("call-error")
-    expect(thrown.detail).toBe("socket closed")
+  test("glasspaneRow denies every refusal shape the server can raise, and only those", () => {
+    // Each of these is what `failToolCall` actually stores for a human "no": the
+    // rejection, the rejection with feedback, the rule that blocked the call, and the
+    // dismissed question.
+    for (const error of [refusal.rejected, refusal.corrected, refusal.deniedByRule, refusal.dismissed]) {
+      const row = glasspaneRow({ tool: "gp_act", status: "error", error, metadata: {} })
+      expect(row.state).toBe("denied")
+      // The reason stays readable on click; the row invents nothing.
+      expect(row.detail).toBe(error)
+    }
+    // The branch is real: text no refusal class emits stays an ordinary call error, and
+    // so does a refusal whose prose has moved out from under us — until the classes
+    // themselves change, at which point the markers and this case move together.
+    for (const error of [notARefusal, rewordedRefusal]) {
+      const row = glasspaneRow({ tool: "gp_act", status: "error", error, metadata: {} })
+      expect(row.state).toBe("call-error")
+      expect(row.detail).toBe(error)
+    }
+    // The half a prose-only check cannot see: a refusal that reaches the row as the class
+    // identity instead of as the class sentence. The pre-fix detection grepped four
+    // sentences, so every assertion above stays green when it is restored and only this
+    // loop turns red — it is the reverse-control case for `glasspaneRow`.
+    for (const error of refusalIdentity) {
+      expect(glasspaneRow({ tool: "gp_act", status: "error", error, metadata: {} }).state).toBe("denied")
+    }
+    for (const error of [new PermissionV2.DeclinedError().name, new PermissionV2.BlockedError({ rules: [] }).name]) {
+      expect(glasspaneRow({ tool: "gp_act", status: "error", error, metadata: {} }).state).toBe("call-error")
+    }
+    expect(glasspaneRow({ tool: "gp_act", status: "error", metadata: {} }).state).toBe("call-error")
+  })
+
+  test("denial detection is read out of the error classes instead of copied into the TUI", () => {
+    // The one-way link that makes the assertions above evidence: every marker is text a
+    // refusal class produces, and every text a refusal class produces carries a marker.
+    // Restoring hand-typed substrings breaks this — that was the drift the old test and
+    // the old implementation could not see, because they typed the same words to each other.
+    expect(toolDenialMarkers.length).toBeGreaterThan(0)
+    for (const marker of toolDenialMarkers) {
+      expect(marker.length).toBeGreaterThan(10)
+      // A marker short enough to appear in an unrelated failure would deny live calls.
+      expect(notARefusal.includes(marker)).toBe(false)
+    }
+    expect(toolDenialMarkers).toContain(refusal.rejected)
+    expect(toolDenialMarkers).toContain(refusal.dismissed)
+    // The two classes that interpolate carry the sentence up to the data, which is what
+    // every real rendering of them starts with.
+    for (const error of [refusal.corrected, refusal.deniedByRule]) {
+      expect(toolDenialMarkers.some((marker) => error.startsWith(marker))).toBe(true)
+    }
+    // Both keys, read from the classes: the sentence and the identity. `errorMessage`
+    // prefers prose, so the identity half only matters for a refusal that arrives without
+    // one — which is what `PermissionV2.DeclinedError` would do, and why its name is
+    // deliberately absent below.
+    for (const error of [...Object.values(refusal), ...refusalIdentity]) {
+      expect(isToolDenial(error)).toBe(true)
+    }
+    for (const error of [new PermissionV2.DeclinedError().name, new PermissionV2.BlockedError({ rules: [] }).name]) {
+      expect(isToolDenial(error)).toBe(false)
+    }
+    expect(isToolDenial(undefined)).toBe(false)
+    expect(isToolDenial("")).toBe(false)
+  })
+
+  test("the gp_* family row model is not gated by the methods it happens to name", () => {
+    // The engine's method table is derived from `enum EngineMethod` and grows without
+    // telling the TUI, and the TUI carries no capability channel to read it from, so
+    // presentation has to be a function of the `gp_` prefix. Anything that makes the
+    // wording override load-bearing fails here: that is how `audit_ui`, `capture_view`
+    // and the next one get caught instead of drifting into the generic text wall.
+    for (const method of ["audit_ui", "capture_view", "assert_element", "snapshot", "restore", "not_in_any_list"]) {
+      const tool = `gp_${method}`
+      expect(toolDisplay(tool)).toBe("glasspane")
+      const running = glasspaneRow({ tool, status: "running", metadata: {} })
+      expect(running.state).toBe("pending")
+      expect(running.pending).toBe(`Running ${tool}…`)
+      expect(glasspaneRowLook(running, tool).spinner).toBe(true)
+      expect(glasspaneRow({ tool, status: "completed", metadata: { ok: true, method } }).state).toBe("success")
+      expect(glasspaneRow({ tool, status: "completed", metadata: {} }).state).toBe("no-verdict")
+      expect(glasspaneRow({ tool, status: "completed", metadata: { ok: false, code: "GP_E_NO_TARGET" } }).state).toBe(
+        "engine-failure",
+      )
+      expect(glasspaneRow({ tool, status: "error", error: refusal.rejected, metadata: {} }).state).toBe("denied")
+      expect(glasspaneRow({ tool, status: "error", error: notARefusal, metadata: {} }).state).toBe("call-error")
+    }
+    // Methods that do have bespoke wording keep it, so the override table stays honest.
+    expect(glasspaneRow({ tool: "gp_act", status: "running", metadata: {} }).pending).toBe("Performing action…")
   })
 
   test("glasspaneRow surfaces evidence-pack fields for last_evidence, verbatim", () => {
@@ -426,7 +544,7 @@ describe("TUI inline tool wrapping", () => {
     // This drives the exported mapping, so reversing `complete` or the icon goes red here —
     // the fixture test above only pins what `InlineToolRow` does with props it is handed.
     const look = (input: Parameters<typeof glasspaneRow>[0]) => glasspaneRowLook(glasspaneRow(input), input.tool)
-    const denied = look({ tool: "gp_act", status: "error", error: "user rejected permission", metadata: {} })
+    const denied = look({ tool: "gp_act", status: "error", error: refusal.rejected, metadata: {} })
     expect(denied.denied).toBe(true)
     expect(denied.failed).toBe(false)
     expect(denied.complete).toBe(true)
@@ -438,7 +556,7 @@ describe("TUI inline tool wrapping", () => {
     const four = [
       look({ tool: "gp_act", status: "running", metadata: {} }),
       look({ tool: "gp_act", status: "completed", metadata: { ok: true, method: "act", operationId: "op_1" } }),
-      look({ tool: "gp_act", status: "error", error: "socket closed", metadata: {} }),
+      look({ tool: "gp_act", status: "error", error: notARefusal, metadata: {} }),
       denied,
     ]
     expect(four[0].spinner).toBe(true)
@@ -446,6 +564,16 @@ describe("TUI inline tool wrapping", () => {
     expect(four[1].complete).toBe(true)
     expect(four[2].failed).toBe(true)
     expect(new Set(four.map((l) => `${l.icon}|${l.failed}|${l.denied}|${l.noVerdict}|${l.complete}|${l.spinner}|${l.color}`)).size).toBe(4)
+
+    // Every refusal shape the server raises gets the same finishedness, not just the one
+    // this file used to type by hand.
+    for (const error of [refusal.corrected, refusal.deniedByRule, refusal.dismissed]) {
+      const other = look({ tool: "gp_act", status: "error", error, metadata: {} })
+      expect(other.denied).toBe(true)
+      expect(other.failed).toBe(false)
+      expect(other.complete).toBe(true)
+      expect(other.icon).toBe("⊘")
+    }
   })
 
   test("filters malformed nested tool wire data", () => {

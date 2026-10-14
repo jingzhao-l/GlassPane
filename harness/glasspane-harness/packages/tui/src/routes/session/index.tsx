@@ -57,6 +57,7 @@ import { SubagentFooter } from "./subagent-footer.tsx"
 import { filetype } from "../../util/filetype"
 import parsers from "../../parsers-config"
 import { errorMessage } from "../../util/error"
+import { isToolDenial } from "../../util/tool-denial"
 import { Toast, useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv.tsx"
 import stripAnsi from "strip-ansi"
@@ -1888,13 +1889,11 @@ function InlineTool(props: {
 
   const error = createMemo(() => (props.part.state.status === "error" ? props.part.state.error : undefined))
 
-  const denied = createMemo(
-    () =>
-      error()?.includes("QuestionRejectedError") ||
-      error()?.includes("rejected permission") ||
-      error()?.includes("specified a rule") ||
-      error()?.includes("user dismissed"),
-  )
+  // A refusal and a broken call are different events, and only one of them is history:
+  // the markers come from the error classes that produce the refusal (see
+  // `util/tool-denial`) rather than from prose typed here, so an upstream reword moves
+  // this branch and its test together instead of quietly painting a refusal as a failure.
+  const denied = createMemo(() => isToolDenial(error()))
 
   const failed = createMemo(() => Boolean(error() && !denied()))
   const clickable = createMemo(() => Boolean(props.onClick || failed()))
@@ -2684,7 +2683,29 @@ export type GlassPaneRow = {
   pending: string
 }
 
-const GLASSPANE_PENDING: Record<string, string> = {
+/**
+ * Wording overrides for the `gp_*` family, keyed by engine method — an override table,
+ * not an enumeration of the methods that exist.
+ *
+ * Nothing about a row is decided by membership here. `toolDisplay` matches the `gp_`
+ * prefix and `glasspaneRow` reads `metadata.method`, so a method the engine advertises
+ * that has no entry below still gets the whole evidence row — pending copy, engine
+ * verdict, denial, everything — and only loses its bespoke sentence. Letting this map
+ * become a gate would recreate the bug that made copied method lists forbidden: the
+ * engine's table is derived from `enum EngineMethod`
+ * (`engine/Sources/GlassPaneEngine/FrameCodec.swift:73`) and grows without telling the
+ * TUI — `audit_ui` and `capture_view` both landed after the 1.1.1 base point, which is
+ * exactly the drift FORK.md forbids by rule (方法名不许抄成字面量清单) and SYNCLOG.md
+ * (2026-09-25 M1) records as already happened. No count is written here on purpose: FORK.md
+ * 说该表数字别的会话会改，别信任何写死的数字. The TUI also
+ * has no capability channel to read the table from — `sync.data.capabilities` carries
+ * opencode's experimental flags, not the engine's `hello.capabilities`, and this package
+ * starts no IPC of its own — so prefix-derived presentation with a non-load-bearing
+ * override is the strongest form available on this side. The entries below cover the methods
+ * this fork binds today; the drift guard is the test that walks methods the fork has never
+ * bound through the row model.
+ */
+const GLASSPANE_PENDING_WORDING: Record<string, string> = {
   probe_status: "Probing GlassPane engine…",
   attach: "Attaching to app…",
   observe: "Reading accessibility tree…",
@@ -2798,20 +2819,21 @@ export function glasspaneRow(input: {
 }): GlassPaneRow {
   const meta = recordValue(input.metadata) ?? {}
   const method = stringValue(meta.method) ?? input.tool.replace(/^gp_/, "")
-  const pending = GLASSPANE_PENDING[method] ?? `Running ${input.tool}…`
+  // Family copy: an unbound method is still a GlassPane call, so it gets a GlassPane
+  // spinner line from its own tool name instead of falling out of this renderer.
+  const pending = GLASSPANE_PENDING_WORDING[method] ?? `Running ${input.tool}…`
 
   if (input.status === "running" || input.status === "pending") {
     return { state: "pending", method, line: method, pending }
   }
 
-  const denied =
-    input.error?.includes("QuestionRejectedError") ||
-    input.error?.includes("rejected permission") ||
-    input.error?.includes("specified a rule") ||
-    input.error?.includes("user dismissed")
   if (input.status === "error") {
-    if (denied) return { state: "denied", method, line: input.tool, detail: input.error, pending }
-    return { state: "call-error", method, line: input.tool, detail: input.error, pending }
+    // `isToolDenial` reads the refusal from the error classes that raise it (see
+    // `../../util/tool-denial`), not from prose copied here. Sniffing copied prose made
+    // a human "no" indistinguishable from a crash the moment upstream reworded the
+    // sentence — and a test that typed the same sentence could not notice.
+    const state = isToolDenial(input.error) ? "denied" : "call-error"
+    return { state, method, line: input.tool, detail: input.error, pending }
   }
 
   // Engine-level failure: the tool executed fine but the daemon reported a code.
