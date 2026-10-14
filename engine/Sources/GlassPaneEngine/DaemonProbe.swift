@@ -68,6 +68,9 @@ public final class DaemonProbe: @unchecked Sendable {
         /// daemon 读写的状态根（`hello.stateRoot`）。旧 daemon 不带这个字段时为 nil，
         /// 面板据此写"未观测"——绝不拿面板自己显示的根去冒充服务端的根。
         public let stateRoot: String?
+        /// 后台服务自己的台账追加有没有落盘失败（`hello.approvalPersistFailed`）。
+        /// nil = 没有失败或旧 daemon 不上报；非 nil 时面板不许只对着文件说"签名链完整"。
+        public let approvalPersistFailed: String?
 
         public init(
             version: String,
@@ -75,7 +78,8 @@ public final class DaemonProbe: @unchecked Sendable {
             pid: Int,
             subject: PermissionSubject? = nil,
             permissions: [PermissionKind: PermissionStatus] = [:],
-            stateRoot: String? = nil
+            stateRoot: String? = nil,
+            approvalPersistFailed: String? = nil
         ) {
             self.version = version
             self.protocolVersion = protocolVersion
@@ -83,6 +87,7 @@ public final class DaemonProbe: @unchecked Sendable {
             self.subject = subject
             self.permissions = permissions
             self.stateRoot = stateRoot
+            self.approvalPersistFailed = approvalPersistFailed
         }
     }
 
@@ -243,7 +248,8 @@ public final class DaemonProbe: @unchecked Sendable {
             pid: pid,
             subject: PermissionSubject.from(wireValue: result["identity"] as? [String: Any]),
             permissions: DaemonPermissionSnapshot.statuses(from: result["permissions"] as? [String: Any]),
-            stateRoot: result["stateRoot"] as? String
+            stateRoot: result["stateRoot"] as? String,
+            approvalPersistFailed: result["approvalPersistFailed"] as? String
         )
     }
 

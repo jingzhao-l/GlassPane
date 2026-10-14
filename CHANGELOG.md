@@ -2,6 +2,48 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.15.1] — 2026-10-14
+
+**版本判断：patch。** 四条判据逐条实测：状态文件的字段没动（`hello` 新增的是一个**可选**键
+`approvalPersistFailed`，与 `stateRoot`/`evidencePersistenceError` 同一先例；schema、
+`projects.json`、`update-state.json`、evidence 载荷一行未改）；退出码集合没动（仍是
+{0,1,2,3,64,65}，`DaemonExitCodeTests` 双向对照绿）；CLI 参数没动（没加、没删、没改任何开关
+语义）；两个 npm 包的 `bin` 声明没动，也没新增对外 `gp_*` 工具。面板那处改动是**同一枚卡片
+的措辞与灯色判据**，不是新控件。取号：`v1.15.1` 未被占用（`git tag --sort=-v:refname` 顶格
+`v1.15.0`），registry 两包 `latest` 都是 `1.15.0`。
+
+### Fixed — 台账"签名链完整"曾经盖住一条从未落盘的追加（P8 的另一半）
+
+**失效模式。** `glasspaned --approval-verify` 是一次性进程：它读台账文件、从不追加，所以它
+自己那份 `gate.persistFailed` **结构上永远是 nil**。会失败的是正在服务的那个 daemon 实例，
+而它把这件事只写在自己的日志里。于是面板可以对着一条"最新记录根本没写进磁盘"的链打印
+「签名链完整」并亮绿灯——哈希链自洽证明不了链尾还在（一条更短的链同样从创世校验通过）。
+`main.swift` 里那段 P8 注释把这条局限写得清清楚楚，但**写清楚不是修好**：字段当时确实出不了
+那个进程。
+
+**修法。** `hello` 增可选键 `approvalPersistFailed`（daemon 自报），`DaemonProbe.Summary` 读它，
+`SettingsModel.DaemonEntry` 带着它走"每次实测覆盖 / 没回话就清空"那条既有纪律，审批页的标题与
+灯色改为**同时**读文件校验结论与 daemon 自报：有落盘失败时标题写"文件里的链完整，但后台服务
+有记录没落盘"、灯色降为橙，不再给绿。旧 daemon 不上报时按"没有这个信息"处理，不替它假定无事。
+
+**闸。** `ApprovalLedgerPersistenceHonestyTests`：措辞判据四态各一条（无失败→"签名链完整"、
+有失败→含"没落盘"且**不等于**"签名链完整"、断裂仍是断裂、读不开仍是读不开）；探针侧
+`parseHelloResponse` 有键/无键各一条（无键必须是 nil，不能读成"没有失败"）；加一条形状闸
+钉住"审批页真的读了这个字段两处"（标题 + 灯色）——只读一处的那半就会继续对未落盘的链亮绿。
+**反向破坏已实测**：把标题那处的 `settings.daemon.approvalPersistFailed` 换成 `nil` ⇒
+`testTheApprovalsPageActuallyReadsTheReportedFailure` 具名变红；改回后 4 例全绿。
+
+**同轮补上的三条收口项**（同一批审查里前几条泳道报出、当时未落地，本轮清零）：
+- 文档第三枚 bin：README 双语与 ITERATE 现在写明这个包除 `glasspane-mcp` 外还发布
+  `glasspane-http`（SECURITY 早就在写它，README 那句"两种等价写法"却把它藏了）；
+- `check-doc-links` 的"可复算主张"表扩到**无障碍动作数**（`Seven accessibility verbs` 这种
+  拼写数字与 `the 7 accessibility actions` 这种非 tool 措辞此前不在任何判据里）。实测反向破坏：
+  把 `16 MCP tools` 改成 17、把 `the 7 accessibility actions` 改成 9 ⇒ 一次跑出 5 条具名红
+  （两条真源不符 + 两条双语漂移 + 一条工具数）；
+- 跨文档锚点：往 SECURITY 里加一条指向 `README.md#1-one-liner`（那是代码块里的编号被当成
+  标题产生的**假锚点**）与一条指向 `engine/smoke.md#no-such-heading-here` ⇒ 两条都具名变红，
+  证明"围栏内不算标题"与"登记表内的文件也要核锚点"两条都活着。
+
 ## [1.15.0] — 2026-10-14
 
 **版本判断：minor。** 四条判据逐条对今天的树实测，不是引用旧条目：

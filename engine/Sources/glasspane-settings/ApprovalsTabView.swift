@@ -11,6 +11,10 @@ import GlassPaneEngine
 /// 自登记（`daemon:auto`）。面板不会把这种记录显示成"人已批准"。
 struct ApprovalsTabView: View {
     @EnvironmentObject private var model: ConsoleModel
+    /// 台账的落盘失败只有正在服务的实例知道（`hello.approvalPersistFailed`），
+    /// 而那一帧落在 `SettingsModel.daemon` 上——这一页必须一起读，否则它会对一条
+    /// 没写进磁盘的链说"签名链完整"。
+    @EnvironmentObject private var settings: SettingsModel
 
     var body: some View {
         VStack(spacing: 0) {
@@ -128,13 +132,16 @@ struct ApprovalsTabView: View {
     private var chainColor: Color {
         guard let report = model.approvalReport else { return .secondary }
         if report.loadFailed { return .red }
+        // 绿色只留给"链完整且没有记录悬在未落盘的追加里"这一种情况。
+        if settings.daemon.approvalPersistFailed != nil { return .orange }
         return report.chainValid ? .green : .red
     }
 
     private var chainTitle: String {
-        guard let report = model.approvalReport else { return "台账状态未知" }
-        if report.loadFailed { return "台账文件读不开" }
-        return report.chainValid ? "签名链完整" : "签名链已断裂"
+        ConsoleModel.chainTitle(
+            report: model.approvalReport,
+            daemonPersistFailure: settings.daemon.approvalPersistFailed
+        )
     }
 
     private func chainSubtitle(_ report: ApprovalLedgerReport) -> String {

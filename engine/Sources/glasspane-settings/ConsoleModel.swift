@@ -1002,6 +1002,23 @@ final class ConsoleModel: ObservableObject {
     /// 按不动时那句理由（同时是空台账那一屏的下一步）。
     var approvalLedgerUnavailableReason: String { Self.ledgerUnavailableReason(report: approvalReport) }
 
+    /// 台账那一行标题唯一的措辞源。
+    ///
+    /// `report.chainValid` 说的是**文件里那条链**自洽；它证明不了最新一条记录落过盘
+    /// （P8：一条更短的链同样能从创世校验通过）。知道这件事的只有正在服务的那个 daemon
+    /// 进程——`--approval-verify` 是一次性读文件，它自己永远不会有 `persistFailed`。
+    /// 所以 daemon 报了落盘失败时，这里不许单独说"签名链完整"。
+    nonisolated static func chainTitle(
+        report: ApprovalLedgerReport?, daemonPersistFailure: String?
+    ) -> String {
+        guard let report else { return "台账状态未知" }
+        if report.loadFailed { return "台账文件读不开" }
+        if daemonPersistFailure != nil {
+            return report.chainValid ? "文件里的链完整，但后台服务有记录没落盘" : "签名链已断裂"
+        }
+        return report.chainValid ? "签名链完整" : "签名链已断裂"
+    }
+
     nonisolated static func ledgerRevealable(report: ApprovalLedgerReport?) -> Bool {
         report?.fileExists ?? false
     }
