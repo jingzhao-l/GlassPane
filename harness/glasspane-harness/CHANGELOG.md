@@ -87,6 +87,16 @@ registry 三个包 latest 都还是 `0.7.8`，`npm view glasspane-harness@0.7.9`
   `--record` 两个模式都比。
 - docs: `SECURITY.md` 新增"仓库自带的代码默认不执行"一节并改写发布物验证段落；`docs/install.md` 的安装期
   验证段落改成与新行为一致（含 override 的确切写法与摘要里会出现的状态串）。
+- fix(harness): 上面这些改动第一次推上去以后，split 仓的两条泳道各自抓出一条我自己的缺陷，都按实测修掉：
+  1. `checksums` 用 `gh release download` 不带 tag——它解析的是 "latest"，而 release 现在按新规矩是 draft
+     （draft 不进 latest），于是它下的是**上一条已发布 release 的资产**，构建期锚如实地报"served 的字节不是
+     这次构建的字节"。这条红是新闸自己第一次运行就生效的证据；改成显式点名 `${GITHUB_REF_NAME}`。
+  2. 新的"每个方法引擎都接受"固定点测试直读父仓的 `engine/Sources/.../FrameCodec.swift`，而那个文件不随
+     subtree split 进产品仓——本地绿、split CI 里两条断言全死。改为把引擎方法表**作为契约随包**
+     （`contracts/engine-methods.json`，13 个方法），漂移检查留在有 Swift 的那一侧：
+     `product-surface` 新增 `engine-methods` 规则，每次重解析 `EngineMethod` 枚举并拒绝任何双向漂移
+     （契约缺方法 / 契约多方法都红）。对照：从契约里删掉 `restore` → `product-surface` 具名红
+     （192 条一致 / 1 问题），复原后 193 / 0。缺契约时测试直接拒绝而不是跳过。
 
 ## [0.7.9] - 2026-10-14
 

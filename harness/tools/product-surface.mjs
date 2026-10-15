@@ -264,6 +264,54 @@ check(
   /npm view [^\n]*--registry \$\{registry\}/.test(publishTs) && /npm publish [^\n]*--registry \$\{registry\}/.test(publishTs),
   "packages/opencode/script/publish.ts consults or writes the registry without naming this product's registry",
 )
+
+// ---- the engine's method table, as the published fork carries it
+// `contracts/engine-methods.json` exists because the fork's fixed-point tests need the engine's
+// method list and the engine is NOT in the subtree split: a test that read `FrameCodec.swift`
+// directly passed on this machine and failed in the split repo's CI on the missing file. A pinned
+// copy that nobody re-derives is just a second answer waiting to be wrong, so this rule re-parses
+// the Swift enum on every run and refuses any drift between it and the contract. The parser knows
+// both ways Swift writes a case (`case hello, attach, act, observe` and
+// `case auditUI = "audit_ui" // …`); reading one identifier per line reported an engine with no
+// `attach`, `observe`, `act`, `last_evidence` or `restore`.
+{
+  const contractRel = "contracts/engine-methods.json"
+  const swiftRel = path.join(repoRoot, "engine", "Sources", "GlassPaneEngine", "FrameCodec.swift")
+  const contract = existsSync(path.join(forkRoot, contractRel)) ? JSON.parse(read(contractRel)) : null
+  check("engine-methods", contract !== null, `${contractRel} is missing — the fork's tests have no engine method table to read`)
+  if (contract && existsSync(swiftRel)) {
+    const codec = readFileSync(swiftRel, "utf8")
+    const from = codec.indexOf("public enum EngineMethod")
+    const to = codec.indexOf("extension EngineMethod", from)
+    check("engine-methods", from >= 0 && to > from, "FrameCodec.swift has no `public enum EngineMethod` … `extension EngineMethod` span — the table cannot be re-derived")
+    const names = []
+    if (from >= 0 && to > from) {
+      for (const line of codec.slice(from, to).split("\n")) {
+        const declared = line.match(/^\s*case\s+(.*)$/)
+        if (!declared) continue
+        for (const entry of declared[1].replace(/\/\/.*$/, "").split(",")) {
+          const one = entry.trim()
+          const wired = one.match(/^\w+\s*=\s*"([a-z_]+)"$/)
+          const bare = one.match(/^([a-zA-Z]\w*)$/)
+          const name = wired ? wired[1] : bare ? bare[1] : null
+          if (name) names.push(name)
+        }
+      }
+    }
+    const shipped = Array.isArray(contract.methods) ? contract.methods : []
+    const missing = names.filter((n) => !shipped.includes(n))
+    const extra = shipped.filter((n) => !names.includes(n))
+    check(
+      "engine-methods",
+      names.length > 0 && missing.length === 0 && extra.length === 0,
+      `${contractRel} disagrees with the engine: ${missing.length} method(s) the Swift declares are absent (${missing.join(", ")}), ${extra.length} the contract names that the engine does not (${extra.join(", ")}). Re-derive it from FrameCodec.swift; do not edit the contract to match a test.`,
+    )
+  } else if (contract) {
+    // No engine tree here means no ability to re-derive — which is exactly the state a stale
+    // contract survives in. Say it out loud instead of silently passing.
+    console.log("  note: engine/Sources is absent in this checkout — engine-methods compares the contract against nothing (this is NOT a re-derivation)")
+  }
+}
 check(
   "publish-registry",
   readCode("packages/opencode/script/verify-published.ts").includes("const registry = product.registry"),

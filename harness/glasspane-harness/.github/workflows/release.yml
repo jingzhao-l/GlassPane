@@ -237,7 +237,12 @@ jobs:
           rm -rf "$work"
           mkdir -p "$work"
           cd "$work"
-          gh release download --repo "$GH_REPO" --pattern '*.zip' --pattern '*.tar.gz'
+          # The tag is named, not defaulted. `gh release download` with no argument resolves
+          # "latest", and `create-release` now makes a **draft** — which the releases API does not
+          # count as latest — so an untagged download quietly fetches the *previous* release's
+          # assets. Measured on the first v0.7.10 run: the build-time anchor did its job and said
+          # the served bytes are not the bytes this run compiled, because they were v0.7.8's.
+          gh release download "${GITHUB_REF_NAME}" --repo "$GH_REPO" --pattern '*.zip' --pattern '*.tar.gz'
           # A dropped or partial download used to be tolerated (`|| true`) as long as
           # *something* arrived, and SHA256SUMS.txt then vouched authoritatively for only
           # the assets that happened to be present — a release could ship one platform and

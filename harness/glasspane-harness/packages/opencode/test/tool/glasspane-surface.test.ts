@@ -822,45 +822,27 @@ describe("what a remedy is allowed to say", () => {
 })
 
 /**
- * The engine's own method table, read off the Swift source rather than copied into this
- * file. `FrameCodec.swift`'s `EngineMethod` is what decides "is this method callable", and
- * a hard-coded list here is the stale copy the design of this surface forbids — the same
- * reason `requireCapability` asks `hello` instead of carrying one.
+ * The engine's method table, read from the contract the published repository carries.
+ *
+ * It is NOT read out of `engine/Sources/.../FrameCodec.swift` here, even though that file is what
+ * decides "is this method callable": the engine lives in the parent repository and never enters the
+ * subtree split, so a test that walked up looking for it passed on a maintainer machine and died in
+ * the split repo's CI on the missing file (measured 2026-10-15, both method-table assertions). The
+ * list travels as `contracts/engine-methods.json`; the rule that keeps it honest — re-parsing the
+ * Swift enum and refusing any drift — is `product-surface.mjs` rule `engine-methods`, which only
+ * runs where the Swift source actually is. Copying the list into this file would be the stale-copy
+ * failure the surface itself refuses (`requireCapability` asks `hello`, it does not carry a table).
  */
 function engineMethodNames(): string[] {
-  let dir = import.meta.dir
-  for (let i = 0; i < 10; i++) {
-    const candidate = path.join(dir, "engine", "Sources", "GlassPaneEngine", "FrameCodec.swift")
-    if (existsSync(candidate)) {
-      const codec = readFileSync(candidate, "utf8")
-      const from = codec.indexOf("public enum EngineMethod")
-      const block = codec.slice(from, codec.indexOf("extension EngineMethod", from))
-      expect(block.length, "found FrameCodec.swift but no EngineMethod enum in it").toBeGreaterThan(0)
-      const names: string[] = []
-      for (const line of block.split("\n")) {
-        // Swift declares several cases on one line (`case hello, attach, act, observe`) and
-        // gives others a wire name (`case auditUI = "audit_ui" // …`). Reading only the first
-        // identifier of a line made the table look like it had no `attach`, `observe`, `act`,
-        // `last_evidence` or `restore`, so the assertion that this surface's calls are all
-        // callable was failing on methods the engine does accept — a fixture that does not
-        // match the shape of the thing it reads is a false red, not a finding.
-        const declared = line.match(/^\s*case\s+(.*)$/)
-        if (!declared) continue
-        for (const entry of declared[1].replace(/\/\/.*$/, "").split(",")) {
-          const one = entry.trim()
-          const wired = one.match(/^\w+\s*=\s*"([a-z_]+)"$/)
-          const bare = one.match(/^([a-zA-Z]\w*)$/)
-          const name = wired?.[1] ?? bare?.[1]
-          if (name) names.push(name)
-        }
-      }
-      return names
-    }
-    const parent = path.dirname(dir)
-    if (parent === dir) break
-    dir = parent
+  const contract = path.join(import.meta.dir, "..", "..", "..", "..", "contracts", "engine-methods.json")
+  if (!existsSync(contract)) {
+    throw new Error(`${contract} is missing — the engine's method table cannot be checked without it, and a test that skips that check is a green light for a wrong timeout table`)
   }
-  throw new Error("no engine/Sources/GlassPaneEngine/FrameCodec.swift above this test — the timeout table's method claims cannot be checked")
+  const parsed = JSON.parse(readFileSync(contract, "utf8")) as { methods?: unknown }
+  if (!Array.isArray(parsed.methods) || parsed.methods.length === 0) {
+    throw new Error(`${contract} carries no method list — refusing to treat "empty contract" as "everything is allowed"`)
+  }
+  return parsed.methods.filter((m): m is string => typeof m === "string")
 }
 
 describe("the timeout table and the call sites that read it", () => {
