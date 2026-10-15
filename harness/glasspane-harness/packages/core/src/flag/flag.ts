@@ -77,6 +77,17 @@ export const Flag = {
   get OPENCODE_DISABLE_PROJECT_CONFIG() {
     return truthy("OPENCODE_DISABLE_PROJECT_CONFIG")
   },
+  /**
+   * Auto-discovered plugins found inside the project being opened. Off by default in this
+   * product: loading `./.glasspane-harness/plugin/*.ts` means executing whatever a repository
+   * contains, and the process that ends up running it holds the `gp_*` accessibility surface —
+   * a drive-by clone would get code execution plus the ability to move real apps. Declared
+   * plugins (the `plugin` list in a config file) are untouched; this gates only the ones nobody
+   * named. A user who does trust the checkout says so explicitly.
+   */
+  get GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS() {
+    return truthy("GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS")
+  },
   get OPENCODE_EXPERIMENTAL_REFERENCES() {
     return enabledByExperimental("OPENCODE_EXPERIMENTAL_REFERENCES")
   },

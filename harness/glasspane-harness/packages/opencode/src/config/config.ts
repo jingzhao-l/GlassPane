@@ -501,7 +501,20 @@ const layer = Layer.effect(
           // Auto-discovered plugins under `.opencode/plugin(s)` are already local files, so ConfigPlugin.load
           // returns normalized Specs and we only need to attach origin metadata here.
           const list = yield* Effect.promise(() => ConfigPlugin.load(dir))
-          yield* mergePluginOrigins(dir, list)
+          // [gp] Not loaded unless the operator said to trust this checkout. Importing a file from
+          // the directory under review is arbitrary code execution, and in this product that code
+          // inherits the `gp_*` accessibility surface — it could drive a real app while the agent
+          // that opened the repository believes nothing ran. Plugins a config file *declares* are
+          // still loaded; this gate covers only the ones nobody named.
+          const plan = ConfigPlugin.projectPluginPlan(list, Flag.GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS)
+          if (plan.refused.length > 0) {
+            yield* Effect.logWarning("project plugins were discovered and not loaded", {
+              dir,
+              files: plan.refused.length,
+              remedy: `set GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS=true for this run, or declare the plugin in your config's "plugin" list`,
+            })
+          }
+          if (plan.load.length > 0) yield* mergePluginOrigins(dir, plan.load)
         }
 
         const configContent = EnvRead("OPENCODE_CONFIG_CONTENT")
