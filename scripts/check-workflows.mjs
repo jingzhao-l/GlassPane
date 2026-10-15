@@ -20,7 +20,9 @@
  * Exit codes: 0 clean, 1 a workflow is broken, 2 no workflows found (caliber
  * error — refusing to report success over an empty set).
  */
-import { existsSync, readFileSync, readdirSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -82,6 +84,12 @@ function inspect(target) {
   let inRun = false
   let runIndent = 0
   const runRefs = []
+  // Whole `run:` bodies, assembled as the scanner goes. `runRefs` is per line on purpose —
+  // the script-existence rule reports line numbers — but a shell body has to be judged as one
+  // script, and comment/blank lines inside it are skipped by this loop, so re-joining those
+  // fragments by line number later cannot work.
+  const shells = []
+  let shellBlock = null
   let stepDir = "" // step-level working-directory, applied to that step's scripts
   let hasTopPermissions = false // a top-level `permissions:` block; see the check at the end
 
@@ -101,9 +109,11 @@ function inspect(target) {
       const bodyIndent = raw.search(/\S/)
       if (bodyIndent > runIndent) {
         runRefs.push({ text: raw.trim(), line: i + 1, dir: stepDir })
+        if (shellBlock) shellBlock.lines.push(raw.trim())
         continue
       }
       inRun = false
+      shellBlock = null
     }
 
     if (top) {
@@ -127,6 +137,10 @@ function inspect(target) {
       if (/[|>]/.test(inline)) {
         inRun = true
         runIndent = indent.length
+        shellBlock = { line: i + 1, lines: [] }
+        shells.push(shellBlock)
+      } else if (inline) {
+        shells.push({ line: i + 1, lines: [inline] })
       }
     }
   }
@@ -205,6 +219,32 @@ function inspect(target) {
       }
     }
   }
+
+  // 2a. every `run:` body has to parse as shell. A workflow file can be valid YAML and
+  //     still carry a step whose script is unbalanced — Actions then fails that step at run
+  //     time, mid-release, after the expensive jobs in front of it already ran. Found the
+  //     hard way on 2026-10-16: an edit to a publish step left one `fi` short, and the only
+  //     thing between that and a shipped release was a human reading the YAML. The bodies come
+  //     from the scanner above (`shells`), not from re-joining `runRefs` by line number: this
+  //     loop skips blank and `#` lines, so a body containing comments has gaps by construction,
+  //     and re-assembling on contiguity reported 232 "problems" across five fine workflows.
+  //     A control that cries wolf is worse than none — the next real one drowns with the rest.
+  shells.forEach((block, index) => {
+    const script = block.lines.join("\n")
+    if (!script.trim()) return
+    if (/^\s*(python3|node|bun)\s/.test(block.lines[0] ?? "")) return // a one-liner in another language
+    const tmp = path.join(tmpdir(), `wf-step-${process.pid}-${index}.sh`)
+    writeFileSync(tmp, `${script}\n`)
+    const parsed = spawnSync("bash", ["-n", tmp], { encoding: "utf8" })
+    unlinkSync(tmp)
+    if (parsed.status !== 0) {
+      const detail = (parsed.stderr || parsed.stdout || "bash -n failed").trim().split("\n")[0].replaceAll(tmp, "<step>")
+      problems.push(
+        `line ${block.line}: this step's shell does not parse — ${detail}. ` +
+          `YAML validity is not shell validity: this step would fail at run time, after the jobs before it already spent their minutes.`,
+      )
+    }
+  })
 
   // 2b. `bun run <name>` / `npm run <name>` names a *package.json script*, not a
   //     file, so the rule above cannot see it: a step that ran `bun run build` from
@@ -669,6 +709,13 @@ jobs:
       id: "unquoted value containing ': ' (the harness-contract defect)",
       apply: (t) => t.replace("name: build the thing", "name: canonical kernel: moved? anchor still reachable?"),
       expect: /unquoted value/,
+    },
+    {
+      id: "a `run:` body whose shell does not parse (the missing `fi`)",
+      // YAML stays valid here — that is the point. The defect only surfaces when the step
+      // executes, which in a release lane is minutes and one half-published version later.
+      apply: (t) => t.replace("        run: node scripts/check-version.mjs\n", "        run: |\n          if [ -n \"x\" ]; then\n            echo yes\n"),
+      expect: /this step's shell does not parse/,
     },
     {
       id: "referenced script that does not exist",

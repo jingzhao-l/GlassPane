@@ -606,9 +606,31 @@ jobs:
               rm -f "$log"
               exit 1
             else
-              echo "::error::$pkg@$ver failed to publish (exit $rc) and nothing in the output says the registry refused a direct publish — not staging blindly"
+            # Re-dispatching a tag is a supported operation everywhere else in this lane
+            # (`create-release` reuses the release, `gh release upload --clobber` replaces assets),
+            # but the npm jobs could not do it: a second run of the same version dies with
+            # "You cannot publish over the previously published versions", measured on the second
+            # dispatch of v0.7.10 — the platform packages were live from the first run and both
+            # jobs went red. Tolerating that message blindly would be its own false green (it is
+            # the same bytes or it is somebody else's), so the version is checked rather than
+            # forgiven: this build's tarball and the registry's copy must have the same sha512.
+            if grep -qiE "cannot publish over the previously published versions" "$log"; then
+              local_tgz="$(ls ./*.tgz | head -1)"
+              want="sha512-$(openssl dgst -sha512 -binary "$local_tgz" | openssl base64 -A)"
+              got="$(npm view "${pkg}@${ver}" dist.integrity --registry https://registry.npmjs.org --prefer-online 2>/dev/null || true)"
+              if [ -n "$got" ] && [ "$got" = "$want" ]; then
+                echo "already published by an earlier run of this version, and the bytes are the same ($want)"
+                rm -f "$log"
+                exit 0
+              fi
+              echo "::error::$pkg@$ver is already on the registry with DIFFERENT bytes: registry=$got this build=$want"
+              echo "::error::two different artifacts claiming one version — this is why the duplicate is not simply forgiven. Publish the next version."
               rm -f "$log"
-              exit "$rc"
+              exit 1
+            fi
+            echo "::error::$pkg@$ver failed to publish (exit $rc) and nothing in the output says the registry refused a direct publish — not staging blindly"
+            rm -f "$log"
+            exit "$rc"
             fi
           fi
           rm -f "$log"
