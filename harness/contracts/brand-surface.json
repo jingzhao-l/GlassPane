@@ -31,7 +31,7 @@
   "hits": [],
   "lineage": {
     "occurrences": 9627,
-    "filesScanned": 3307
+    "filesScanned": 3308
   },
-  "lineageNote": "2026-10-15 (0.7.10): occurrences 9624 -> 9627, files 3304 -> 3307. The three added literals are attribution prose inside .github/workflows run: bodies and two fixed-point test names, describing which upstream publisher this product refuses to be — they are in executable text because a CI step body is executable text, and deleting the sentence to keep the number flat is the '删注释换绿' failure this ratchet exists to catch. Precedent: 9616/9617/9618 and the 2026-10-14 note this replaces."
+  "lineageNote": "2026-10-16 (0.7.10, second installment): occurrences move only because the CI run-block prose and the fork's own contract note describe which upstream lane is refused. Attribution inside a run: body is executable text — it stays, the number moves. Precedent: 9616/9617/9618 and the 2026-10-15 note. Reverse check still holds: delete the sentence and the count falls; the sentence is not the control."
 }

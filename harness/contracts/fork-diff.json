@@ -6,7 +6,7 @@
   "counts": {
     "identical": 4658,
     "edited": 269,
-    "added": 86,
+    "added": 87,
     "deleted": 1705
   },
   "edited": [
@@ -329,6 +329,7 @@
     "SYNCLOG.md",
     "assets/banner.svg",
     "assets/logo.svg",
+    "contracts/engine-methods.json",
     "contracts/kernel-conformance.json",
     "contracts/kernel-pin.json",
     "docs/evidence.md",
@@ -3429,7 +3430,7 @@
     },
     {
       "file": ".github/workflows/release.yml",
-      "forkHash": "69064f465095a8c4e54837909256a78c2ab2d84a"
+      "forkHash": "e01443f16a5fe9ca525ecf6de513b749ebd1f642"
     },
     {
       "file": ".glasspane-harness/.gitignore",
@@ -3597,7 +3598,11 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "3ca69798b9d6fd538690c91763680b88f8465f1d"
+      "forkHash": "6255511c38b58f741dc4baffb1e8ee05c44f4057"
+    },
+    {
+      "file": "contracts/engine-methods.json",
+      "forkHash": "1f2ef19351ccd02aaed545bedaf4f2a733bf9a71"
     },
     {
       "file": "contracts/kernel-conformance.json",
@@ -3733,7 +3738,7 @@
     },
     {
       "file": "packages/opencode/test/tool/glasspane-surface.test.ts",
-      "forkHash": "89f339483cc0383bf8f5c295fc42d78975fad0a2"
+      "forkHash": "37f79ee1112ff455433f7d3a8ffc3a886e17f4a0"
     },
     {
       "file": "packages/tui/src/util/tool-denial.ts",
