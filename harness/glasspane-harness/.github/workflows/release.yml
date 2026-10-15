@@ -96,7 +96,22 @@ jobs:
           # ships unsigned releases", warned, and installed the bytes. A release that cannot
           # be verified is not a released one, so it now stays draft until it can be.
           if gh release view "${GITHUB_REF_NAME}" --repo "$GH_REPO" >/dev/null 2>&1; then
-            echo "release ${GITHUB_REF_NAME} already exists — leaving it as it is"
+            # Idempotent is not the same as correct. A re-run against a re-pointed tag (a tag that
+            # was moved after the release was first created) used to print "leaving it as it is" and
+            # keep the OLD `targetCommitish` — measured on v0.7.10, where the release pointed at
+            # `62366bf` while the tag had moved to `88e75e4`, so the release's own metadata named
+            # bytes nobody shipped. Repair the anchor instead of inheriting it.
+            existing="$(gh release view "${GITHUB_REF_NAME}" --repo "$GH_REPO" --json targetCommitish --jq .targetCommitish)"
+            if [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "release ${GITHUB_REF_NAME} exists but targets ${existing}; re-anchoring to this tag's commit ${GITHUB_SHA}"
+              gh release edit "${GITHUB_REF_NAME}" --repo "$GH_REPO" --target "$GITHUB_SHA"
+              after="$(gh release view "${GITHUB_REF_NAME}" --repo "$GH_REPO" --json targetCommitish --jq .targetCommitish)"
+              if [ "$after" != "$GITHUB_SHA" ]; then
+                echo "::error::release ${GITHUB_REF_NAME} still targets $after after the edit — refusing to publish under an anchor that names other bytes"
+                exit 1
+              fi
+            fi
+            echo "release ${GITHUB_REF_NAME} already exists — anchor verified against ${GITHUB_SHA}"
             exit 0
           fi
           # `--target` names the commit the release is *of*. Without it GitHub records
@@ -643,9 +658,23 @@ jobs:
           reg="$(node -p "JSON.parse(require('fs').readFileSync('../../product.json','utf8')).registry")"
           missing=""
           while read -r pkg; do
-            got="$(npm view "${pkg}@${ver}" version --registry "$reg" 2>/dev/null || true)"
+            # The registry's own answer is what counts, but it is asked with a bounded wait.
+            # Measured on the first 0.7.10 run: `publish-platform` reported success for
+            # glasspane-harness-darwin-x64 seconds earlier, and this gate read "nothing" and refused
+            # the wrapper — npm's read replicas lag a fresh publish by minutes (this repository has
+            # hit 12–20 minutes before). A single instantaneous answer is not "the package is absent";
+            # the absence has to survive the propagation window to mean anything. `--prefer-online`
+            # skips npm's local cache so at least one layer of staleness is not our own.
+            got=""
+            for attempt in $(seq 1 24); do
+              got="$(npm view "${pkg}@${ver}" version --registry "$reg" --prefer-online 2>/dev/null || true)"
+              [ "$got" = "$ver" ] && break
+              sleep 30
+            done
             if [ "$got" != "$ver" ]; then
-              missing="$missing ${pkg}@${ver}(registry answered ${got:-nothing})"
+              missing="$missing ${pkg}@${ver}(registry answered ${got:-nothing} after 12 minutes of polling)"
+            else
+              echo "live: ${pkg}@${ver} (after $attempt poll(s))"
             fi
           done < <(node -e 'const p=require("../../product.json");const n=(t)=>[p.name,t.os==="win32"?"windows":t.os,t.arch,t.avx2===false?"baseline":undefined,t.abi].filter(Boolean).join("-");for(const t of p.platformTargets)console.log(n(t))')
           if [ -n "$missing" ]; then
