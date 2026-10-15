@@ -278,8 +278,13 @@ function drive(impl, fixture, kind) {
 /**
  * Which fixtures this lane drives, in prefix order. A shipped fixture that matches no kind
  * here is a contract nobody checks — which is exactly how `dimension-context` sat unused for
- * a release, so the corpus count in `kernel-pin.json` and the driven count printed below are
- * compared on every run rather than trusted to line up.
+ * a release. The comparison that comment promised used to not exist: the pin's corpus covers
+ * fixtures AND `schemas/**` (plus fixtures this lane has no kind for), while this lane drives
+ * only the `.json` fixtures whose prefix appears below, and the real coverage assertion
+ * (`undriven` in the check tail) was gated on `golden && mode === "check"`, so `--record`
+ * could bless a golden that silently omitted a shipped fixture. It is now compared
+ * against the pin's drivable fixture set on every run, in both modes, below where `files` is
+ * computed — this table is the input to that comparison, not the comparison itself.
  */
 const KINDS = [
   "dimension-context",
@@ -296,6 +301,26 @@ const KINDS = [
 ]
 
 const kindOf = (name) => KINDS.find((kind) => name.startsWith(kind)) ?? null
+
+/**
+ * The fixture set the pin says ships AND this lane can drive: `contracts/kernel-pin.json`
+ * is the only record of what the published artifact contains, so drivability is computed
+ * from its corpus entries under `fixtures/` through the same `kindOf` the driver uses.
+ */
+function pinnedCorpus() {
+  const pinManifestFile = path.join(repoRoot, "contracts", "kernel-pin.json")
+  if (!existsSync(pinManifestFile)) {
+    console.error("kernel-conformance: no contracts/kernel-pin.json — the driven fixture set cannot be compared against the pinned corpus. Run script/kernel-pin.mjs --record first.")
+    process.exit(2)
+  }
+  const corpus = JSON.parse(readFileSync(pinManifestFile, "utf8")).corpus ?? []
+  const drivable = corpus
+    .map((entry) => entry.file)
+    .filter((f) => f.startsWith("fixtures/") && f.endsWith(".json") && kindOf(f.slice("fixtures/".length)))
+    .map((f) => f.slice("fixtures/".length))
+    .sort()
+  return { drivable, total: corpus.length }
+}
 
 const args = process.argv.slice(2)
 const mode = args.includes("--record") ? "record" : "check"
@@ -649,6 +674,22 @@ if (files.length === 0) {
   console.error(`kernel-conformance: no contract fixtures found in ${fixturesDir} — this lane would run green while measuring nothing`)
   process.exit(1)
 }
+
+// Coverage, both directions, every mode: what the pin records as shipped-and-drivable must
+// be exactly what the disk holds and the lane drives. The `undriven` check at the tail is
+// gated on a golden and --check, so without this a `--record` run could bless a golden that
+// silently omitted a shipped fixture (or drove one the provenance record never pinned).
+const pinned = pinnedCorpus()
+const notDriven = pinned.drivable.filter((f) => !files.includes(f))
+const notPinned = files.filter((f) => !pinned.drivable.includes(f))
+if (notDriven.length > 0 || notPinned.length > 0) {
+  console.error(`kernel-conformance: driven set and pinned corpus do not line up (${files.length} driven vs ${pinned.drivable.length} pinned drivable):`)
+  for (const f of notDriven) console.error(`  ✗ ${f}: pinned in kernel-pin.json and a kind this lane drives, but not found in the installed package — the shipped corpus moved`)
+  for (const f of notPinned) console.error(`  ✗ ${f}: driven by this lane but not pinned in kernel-pin.json — the package ships a fixture the provenance record does not carry`)
+  console.error("  Fix the install (or re-run script/kernel-pin.mjs after reviewing the artifact); this lane will not record or check a corpus it cannot fully account for.")
+  process.exit(1)
+}
+console.log(`kernel-conformance: coverage: ${files.length} driven fixture(s) == ${pinned.drivable.length} pinned drivable fixture(s) in kernel-pin.json (its full corpus of ${pinned.total} entries also carries schemas/** and files with no driven kind, asserted by kernel-pin --check and the undriven gate below).`)
 
 const golden = existsSync(goldenFile) ? JSON.parse(readFileSync(goldenFile, "utf8")) : null
 if (mode === "check" && !golden) {

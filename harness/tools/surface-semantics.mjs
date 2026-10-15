@@ -17,7 +17,10 @@
  *   surface B  the fork's evidence-handling files: packages/opencode/src/tool/
  *              glasspane/** plus packages/opencode/src/plugin/glasspane-*.ts
  *              (the plugin layer transcribes engine/kernel facts — a verdict
- *              synthesized there is the same defect one layer later)
+ *              synthesized there is the same defect one layer later) plus the
+ *              session row renderer, packages/tui/src/routes/session/index.tsx —
+ *              the file that turns evidence into the words a person reads, so it is
+ *              the surface most able to move a verdict out of the engine unnoticed
  *   comments   stripped before matching (prose may discuss pass/fail; code may not
  *              *compute* it)
  *   strings    kept for the verdict-literal rule, stripped for the comparison
@@ -41,6 +44,8 @@
  *   --check   fail if any (file, rule) count grew past the baseline, or if a
  *             file that is not in the baseline carries hits, or if the scan
  *             found nothing to scan
+ *   both      run the positive controls first and refuse to report a clean
+ *             surface on a rule that cannot fire
  *
  * This is a ratchet, not a ban: a legitimate hit can be recorded in the same
  * commit and is then visible in review. Removing hits is always allowed.
@@ -142,18 +147,64 @@ const surfaces = {
     files: walk(path.join(repoRoot, "mcp-shell", "src")).filter((f) => f.endsWith(".ts")),
   },
   fork: {
-    caliber: "fork evidence-handling files: src/tool/glasspane/** + src/plugin/glasspane-*.ts",
+    caliber:
+      "fork evidence-handling files: src/tool/glasspane/** + src/plugin/glasspane-*.ts + packages/tui/src/routes/session/index.tsx",
     files: [
       ...walk(path.join(repoRoot, "harness", "glasspane-harness", "packages", "opencode", "src", "tool", "glasspane")),
       ...walk(path.join(repoRoot, "harness", "glasspane-harness", "packages", "opencode", "src", "plugin")).filter(
         (f) => path.basename(f).startsWith("glasspane-") && f.endsWith(".ts"),
       ),
-    ].filter((f) => f.endsWith(".ts")),
+      // The row renderer is where evidence becomes the words a person reads, so the verdict
+      // rule has to reach it: a synthesizer living only here was invisible to the meter built
+      // to catch synthesizers.
+      path.join(
+        repoRoot,
+        "harness",
+        "glasspane-harness",
+        "packages",
+        "tui",
+        "src",
+        "routes",
+        "session",
+        "index.tsx",
+      ),
+    ].filter((f) => /\.(ts|tsx)$/.test(f) && existsSync(f)),
   },
+}
+
+/**
+ * A positive control, per rule, inside the ruler: a known judgement handed to the rule's own
+ * predicate that must produce a hit. Without it a `count()` neutered to return 0 keeps every
+ * surface green forever, and the golden's empty `hits` proves nothing about what was measured.
+ * Samples live here, never in the surfaces they police.
+ */
+const CONTROLS = [
+  { id: "threshold-comparison", judgement: "const ready = coverageRatio > 0.9" },
+  { id: "verdict-synthesis", judgement: 'const label = ok ? "passed" : "failed"' },
+  { id: "evidence-field-compare", judgement: "if (pack.changedPixelRatio >= 0.5) return" },
+]
+
+function assertRulesCanFire() {
+  for (const rule of RULES) {
+    const control = CONTROLS.find((candidate) => candidate.id === rule.id)
+    if (!control)
+      die(2, `positive control: rule "${rule.id}" carries no known-judgement sample — nothing has shown it can fire`)
+    const fired = rule.count(rule.scope === "code" ? control.judgement : stripStrings(control.judgement))
+    if (fired === 0)
+      die(
+        2,
+        `positive control: rule "${rule.id}" does not fire on ${JSON.stringify(control.judgement)} — a rule that cannot go red cannot clear anything`,
+      )
+  }
+  console.log(
+    `surface-semantics — positive controls: ${RULES.length}/${RULES.length} rule(s) fired on a known judgement`,
+  )
 }
 
 if (!surfaces.mcpShell.files.length) die(2, "no *.ts under mcp-shell/src — the scan found nothing to check")
 if (!surfaces.fork.files.length) die(2, "no fork evidence files found — the scan found nothing to check")
+
+assertRulesCanFire()
 
 function scan() {
   const out = {}
