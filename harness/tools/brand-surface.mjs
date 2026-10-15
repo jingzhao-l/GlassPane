@@ -432,6 +432,23 @@ if (mode === "record") {
   // the coverage move it is blessing instead of leaving it implicit.
   const prior = existsSync(goldenFile) ? JSON.parse(readFileSync(goldenFile, "utf8")) : null
   reportCoverage(prior)
+  // The reason a growth is allowed to become the new baseline has to survive the recording.
+  // `observed` is rebuilt from scratch, so the previous `lineageNote` — the sentence naming
+  // which CHANGELOG/CI text carries the literal and why it is not new product surface — was
+  // being deleted by the very act that raised the number. A ratchet whose justification is
+  // erased on every turn is indistinguishable from one that was never justified.
+  const priorOcc = prior?.lineage?.occurrences ?? 0
+  const noteArgIndex = process.argv.indexOf("--lineage-note")
+  const noteArg = noteArgIndex > -1 ? process.argv[noteArgIndex + 1] : undefined
+  if (observed.lineage.occurrences > priorOcc && !noteArg) {
+    console.error(`brand-surface: refusing to record — lineage occurrences grew ${priorOcc} → ${observed.lineage.occurrences}`)
+    console.error("  A growth needs a reason that outlives this run. Say where the extra literal is and why it is")
+    console.error("  attribution rather than new product surface:")
+    console.error('    node harness/tools/brand-surface.mjs --record --lineage-note "<date>: <where and why>"')
+    process.exit(1)
+  }
+  if (noteArg) observed.lineageNote = noteArg
+  else if (prior?.lineageNote) observed.lineageNote = prior.lineageNote
   writeFileSync(goldenFile, JSON.stringify(observed, null, 2) + "\n")
   console.log(`recorded -> ${path.relative(repoRoot, goldenFile)}`)
   process.exit(0)
