@@ -388,7 +388,7 @@ function jobPolicyProblems(lines, { enforcePins = true } = {}) {
     if (!inJobs) continue
     const jobMatch = /^ {2}([A-Za-z0-9_.-]+):/.exec(line)
     if (jobMatch) {
-      current = { name: jobMatch[1], line: i + 1, scopes: null, readsRepo: false, environment: null, unpinned: [] }
+      current = { name: jobMatch[1], line: i + 1, scopes: null, readsRepo: false, environment: null, unpinned: [], unresolvable: [] }
       jobs.set(current.name, current)
       continue
     }
@@ -415,9 +415,25 @@ function jobPolicyProblems(lines, { enforcePins = true } = {}) {
     if (used && current.environment && !/@[0-9a-f]{40}/.test(used[1])) {
       current.unpinned.push({ ref: used[1], line: i + 1 })
     }
+    // Shape, not provenance. A `uses:` value GitHub cannot resolve makes the whole workflow
+    // file fail at registration: the run is created, gets zero jobs, and dies in under a second
+    // with no log at all — measured on 2026-10-15 when a release lane pinned an action as a bare
+    // 40-hex SHA with no `owner/repo` in front of it. The pin rule above cannot see that, because
+    // a bare SHA *is* 40 hex. Only two shapes are addressable: a path inside the repository, or
+    // `owner/repo@ref` (optionally with a host for container actions).
+    if (used && !/^\.{1,2}\//.test(used[1]) && !/^(?:[\w.-]+\/)?[\w.-]+\/[\w.-]+@[\w.-]+$/.test(used[1])) {
+      current.unresolvable.push({ ref: used[1], line: i + 1 })
+    }
   }
 
   for (const job of jobs.values()) {
+    if (job.unresolvable?.length) {
+      out.push(
+        `job "${job.name}" (line ${job.line}) runs ${job.unresolvable.map((u) => `"${u.ref}" at line ${u.line}`).join(", ")} — ` +
+          `a "uses:" value must be "./some/local/action" or "owner/repo@ref" (a 40-hex SHA is a ref, not an address). ` +
+          `GitHub rejects the whole file otherwise: the run appears, gets no jobs, and fails in ~0s with no log.`,
+      )
+    }
     if (job.scopes && job.readsRepo && !job.scopes.has("contents")) {
       out.push(
         `job "${job.name}" (line ${job.line}) declares its own "permissions:" block without "contents", while it checks out the repository — ` +
@@ -640,6 +656,14 @@ jobs:
       id: "secrets context in a step's if:",
       apply: (t) => t, // the BASE already carries it
       expect: /secrets context/,
+    },
+    {
+      id: "uses: pinned to a bare SHA with no owner/repo (the 0-second red release run)",
+      // The shape GitHub itself rejects. Written the way the defect actually shipped: a
+      // 40-hex SHA standing alone where `actions/upload-artifact@<sha>` belongs — a pin the
+      // pin rule is happy with, and a workflow file GitHub cannot register at all.
+      apply: (t) => t.replace("- uses: actions/checkout@v4", "- uses: cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2"),
+      expect: /must be "\.\/some\/local\/action" or "owner\/repo@ref"/,
     },
     {
       id: "unquoted value containing ': ' (the harness-contract defect)",
