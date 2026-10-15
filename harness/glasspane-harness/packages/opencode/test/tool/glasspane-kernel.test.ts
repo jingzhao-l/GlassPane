@@ -7,6 +7,9 @@ import path from "node:path"
 import type { DecisionOutcome, EvidencePack } from "../../src/tool/glasspane/kernel"
 import { kernelContractFile, kernelFixture, kernelFixturesDir, kernelPackageDir } from "../lib/kernel-contract"
 
+import { Global } from "@opencode-ai/core/global"
+import { resolveSocket, stateRootOf } from "../../src/tool/glasspane/daemon"
+
 import {
   decisionStamp,
   entryHashOf,
@@ -124,6 +127,39 @@ describe("the frame reader refuses shapes it cannot verify, without throwing", (
       expect(read.error.remedy.length).toBeGreaterThan(10)
     })
   }
+
+  test("the two refusals are different codes, because they are different facts", () => {
+    // A reply that is not an object at all is a frame this contract cannot read —
+    // including the `result: null` the transport probe in
+    // test/tool/glasspane-surface.test.ts pins (a shape the engine does not emit:
+    // `EngineCore.swift:1631-1644` throws instead of answering null). A reply that IS an
+    // object and simply carries no `evidencePack` is the ordinary no-evidence case for
+    // every method but `last_evidence` (`Dispatcher.swift:156`). Collapsing them would make
+    // "the engine said nothing" and "the frame is unreadable" one bucket.
+    for (const notAFrame of [null, [], "evidence", 7]) {
+      const read = readEvidenceFrame(notAFrame)
+      expect(read.ok).toBe(false)
+      if (read.ok) return
+      expect(read.error.code).toBe("GP_E_EVIDENCE_FRAME")
+    }
+    const noPack = readEvidenceFrame({ somethingElse: 1 })
+    expect(noPack.ok).toBe(false)
+    if (noPack.ok) return
+    expect(noPack.error.code).toBe("GP_E_NO_EVIDENCE")
+  })
+
+  test("and the unreadable-frame remedy does not send the agent back to the failed call", () => {
+    // The frame that lands in this branch is very often `gp_last_evidence`'s own reply, so
+    // "call gp_last_evidence and pass its reply" was a loop: the instruction to recover
+    // from the failure was the failure. What remains executable is reading the engine's
+    // self-report and recording the absence.
+    const read = readEvidenceFrame(null)
+    expect(read.ok).toBe(false)
+    if (read.ok) return
+    expect(read.error.remedy).not.toContain("call gp_last_evidence")
+    expect(read.error.remedy).toContain("gp_probe_status")
+    expect(read.error.remedy.length).toBeGreaterThan(40)
+  })
 })
 
 describe("the ledger location rule", () => {
@@ -159,7 +195,12 @@ describe("the ledger location rule", () => {
     expect(resolved.ok).toBe(false)
     if (resolved.ok) return
     expect(resolved.error.code).toBe("GP_E_DECISION_LOG_PATH")
-    expect(resolved.error.remedy).toContain("outside ~/.glasspane")
+    expect(resolved.error.remedy).toContain("outside")
+    // The refusal names the tree it actually resolved — which here is a temp root, not the
+    // default — and still says what the default is, so a reader with a custom socket recognizes
+    // the directory being protected.
+    expect(resolved.error.remedy).toContain(state)
+    expect(resolved.error.remedy).toContain("~/.glasspane")
   })
 
   test("the state root follows GLASSPANE_SOCKET, not just HOME", () => {
@@ -173,6 +214,87 @@ describe("the ledger location rule", () => {
     expect(resolved.ok).toBe(false)
     if (resolved.ok) return
     expect(resolved.error.message).toContain(socketDir)
+  })
+
+  test("a relative GLASSPANE_SOCKET is refused by one rule, in both files", () => {
+    // `path.resolve` would put the socket in the harness's own working directory, while
+    // glasspaned binds the same string wherever IT was started (`StateRoot.engineSocketPath`
+    // passes `--socket-path` through). Measured with the CWD in the way: the harness used to
+    // treat its working directory as the engine's state root, refusing every ledger path
+    // inside a tree the engine never wrote to while talking to a daemon living elsewhere.
+    const env = { HOME: privateDir(), GLASSPANE_SOCKET: "engine.sock", GLASSPANE_DECISION_LOG: "/var/tmp/elsewhere/decisions.jsonl" }
+    const resolved = resolveLedger(env)
+    expect(resolved.ok).toBe(false)
+    if (resolved.ok) return
+    expect(resolved.error.code).toBe("GP_E_SOCKET_PATH")
+
+    // The transport answers the same setting the same way — one resolution rule, not two
+    // that can each pick their own answer.
+    const located = resolveSocket(env)
+    expect(located.ok).toBe(false)
+    if (located.ok) return
+    expect(located.error.code).toBe("GP_E_SOCKET_PATH")
+    expect(located.error.remedy.length).toBeGreaterThan(10)
+
+    // And the run plan, which shares the rule, refuses it too.
+    const plan = readRunPlan({ ...env, GLASSPANE_RUN_PLAN: "/var/tmp/elsewhere/run-plan.json" })
+    expect(plan.ok).toBe(false)
+    if (plan.ok) return
+    expect(plan.error.code).toBe("GP_E_SOCKET_PATH")
+
+    // A CWD-relative path is what the old code computed; it must not be the root.
+    expect(path.resolve("engine.sock")).not.toBe("/nonexistent-root/engine.sock")
+  })
+
+  test("the default ledger location is guarded by the same rule, not only the override", () => {
+    // The refusal used to sit on the `GLASSPANE_DECISION_LOG` branch alone, so the branch
+    // that runs in production never consulted the state root at all. Point the engine's
+    // socket at the harness's own data directory and the default ledger lands inside the
+    // engine's tree — the projects.json double writer, with no check firing.
+    const state = Global.Path.data
+    const resolved = resolveLedger({ HOME: privateDir(), GLASSPANE_SOCKET: path.join(state, "engine.sock") })
+    expect(resolved.ok).toBe(false)
+    if (resolved.ok) return
+    expect(resolved.error.code).toBe("GP_E_DECISION_LOG_PATH")
+    expect(resolved.error.message).toContain(state)
+    expect(resolved.error.message).toContain("glasspane-harness")
+
+    // The ordinary production shape is untouched by the new guard.
+    const normal = resolveLedger({ HOME: privateDir() })
+    expect(normal.ok).toBe(true)
+    if (!normal.ok) return
+    expect(normal.ledger.source).toBe("default")
+  })
+
+  test("a run plan inside a socket-derived root is refused even when HOME says otherwise", () => {
+    const home = privateDir()
+    const socketDir = path.join(home, "elsewhere", "engine-state")
+    mkdirSync(socketDir, { recursive: true })
+    const file = path.join(socketDir, "run-plan.json")
+    writeFileSync(file, JSON.stringify({ schemaVersion: "iterate.run-plan/0.1", dimensions: [{ id: "security" }] }))
+    const read = readRunPlan({ HOME: home, GLASSPANE_SOCKET: path.join(socketDir, "engine.sock"), GLASSPANE_RUN_PLAN: file })
+    expect(read.ok).toBe(false)
+    if (read.ok) return
+    expect(read.error.code).toBe("GP_E_RUN_PLAN_PATH")
+    expect(read.error.message).toContain(socketDir)
+  })
+
+  test("the state root the ledger refuses is the root the transport reports", () => {
+    // One rule, checked as a fixed point rather than as two implementations that happen
+    // to agree today: whatever `resolveSocket` calls the engine's root is exactly the tree
+    // `resolveLedger` refuses to write into, for the same environment.
+    const home = privateDir()
+    const socket = path.join(home, "custom", "engine.sock")
+    const env = { HOME: home, GLASSPANE_SOCKET: socket }
+    const located = resolveSocket(env)
+    if (!located.ok) throw new Error(`an absolute socket must resolve: ${located.error.code}`)
+    expect(located.stateRoot).toBe(path.join(home, "custom"))
+    expect(stateRootOf(env)).toEqual({ ok: true, path: path.join(home, "custom") })
+
+    const inside = resolveLedger({ ...env, GLASSPANE_DECISION_LOG: path.join(located.stateRoot, "decisions.jsonl") })
+    expect(inside.ok).toBe(false)
+    const outside = resolveLedger({ ...env, GLASSPANE_DECISION_LOG: path.join(home, "decisions.jsonl") })
+    expect(outside.ok).toBe(true)
   })
 })
 

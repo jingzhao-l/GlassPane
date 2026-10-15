@@ -30,16 +30,25 @@ import { DIMENSION_ID_LIMITS, validateDimension, validateSelector } from "./kern
  *
  * It is a harness-side annotation, never engine input: the Swift daemon has no idea what
  * "spec-compliance" means, so `engineBody()` strips it before anything leaves the
- * process. What it buys is the recorded half of dimension coverage — the compaction block
- * can only count a planned dimension as verified when some call says which one it served.
- * Absent is legitimate and means "this call served no declared dimension", which coverage
- * then reports as unverified rather than inventing one; a malformed id is refused before
- * the call, because a typo would be counted as an unplanned dimension and silently rename
- * what the session claims it covered.
+ * process. What it buys is the *label* on a recorded decision — and only one engine
+ * method produces one to label. `last_evidence` is the single reply that carries an
+ * `evidencePack` (measured against the engine: one emitter, `Dispatcher.swift:156`);
+ * `act` answers with the flat operation dict (`EngineCore.swift:1275-1300`) and
+ * `attach`/`observe`/`diagnose`/`probe_status` carry no pack either. So a dimension
+ * declared on `gp_act`, `gp_observe`, `gp_attach` or `gp_diagnose` cannot move the
+ * coverage counter — those calls record no decision for the kernel to attribute it to.
+ * Cite the operation with `gp_last_evidence` and declare the dimension there.
+ *
+ * Absent is legitimate and means "this call served no declared dimension"; compaction
+ * then reports that dimension as unverified rather than inventing one, and a call whose
+ * engine reply held no pack is counted as a call without a decision record — an absent
+ * record reads as absent, never as fine. A malformed id is refused before the call,
+ * because a typo would be counted as an unplanned dimension and silently rename what the
+ * session claims it covered.
  */
 const DimensionArg = Schema.optional(
   Schema.String.annotate({
-    description: `the review dimension this call serves, kebab-case (e.g. "security", "spec-compliance"); omit it when the call was not made for a dimension`,
+    description: `the review dimension this call serves, kebab-case (e.g. "security", "spec-compliance"); omit it when the call was not made for a dimension. Only gp_last_evidence's reply carries the evidence pack a decision is recorded from, so a dimension declared on any other gp_* call labels nothing and stays reported as unverified`,
     pattern: DIMENSION_ID_LIMITS.pattern.source,
     maxLength: DIMENSION_ID_LIMITS.maxLength,
   }),
@@ -173,7 +182,7 @@ export const ProbeStatusTool = Tool.define(
           // No `dimension` here on purpose: a self-report produces no evidence frame, so it
           // can never yield a decision for a dimension to be counted against. A parameter with
           // no reader is how a tool surface starts lying about what it records.
-          const probe = yield* Daemon.call("probe_status", {}, 8000)
+          const probe = yield* Daemon.call("probe_status", {})
           const caps = yield* Daemon.probeCapabilities()
           const head = caps.ok
             ? `engine ${caps.report.version} / protocol ${caps.report.protocolVersion}\ncapabilities: ${caps.report.capabilities.join(", ")}\npermissions: ${json(caps.report.permissions)}`
@@ -251,7 +260,7 @@ export const ObserveTool = Tool.define(
           const body: Record<string, unknown> = {}
           if (params.maxDepth !== undefined) body.maxDepth = params.maxDepth
           if (params.role !== undefined) body.role = params.role
-          const reply = yield* Daemon.call("observe", body, Daemon.TIMEOUT_MS.observe)
+          const reply = yield* Daemon.call("observe", body)
           return present("gp_observe", "observe", reply, (result) => {
             const tree = fields(result)
             return `nodes=${text(tree.nodeCount, "unknown")} digest=${text(tree.digest, "unknown")}\n${json(tree.axTree ?? result)}`
@@ -300,7 +309,7 @@ export const ActTool = Tool.define(
             always: [],
             metadata: fields(params),
           })
-          const reply = yield* Daemon.call("act", engineBody(params), Daemon.TIMEOUT_MS.act)
+          const reply = yield* Daemon.call("act", engineBody(params))
           return present("gp_act", "act", reply, (result) => {
             const out = fields(result)
             const opId = text(out.operationId, "none")

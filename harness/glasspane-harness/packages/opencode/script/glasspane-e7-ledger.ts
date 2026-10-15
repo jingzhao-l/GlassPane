@@ -4,7 +4,9 @@
  *   cd packages/opencode && bun run script/glasspane-e7-ledger.ts
  *
  * What this adds over the unit tests: the pack that lands in the chain was read
- * out of **the engine's own archive** (`~/.glasspane/evidence/op_*.json`), and the
+ * out of **the engine's own archive** (`<state root>/evidence/op_*.json`, and the
+ * state root is the one `daemon.ts`'s socket rule resolves — the same authority
+ * `kernel.ts` refuses to write inside), and the
  * socket calls (`hello`, `probe_status`) go to the *running* daemon. The script
  * never calls `act`, so it cannot change anything in an app under test.
  *
@@ -23,6 +25,7 @@
  * mistake, already paid for twice (audit B-1 / A-15) — and the binding refuses
  * that on its own, so this script could not pollute it even by accident.
  */
+import { createHash } from "node:crypto"
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -43,12 +46,32 @@ const check = (label: string, ok: boolean, detail = "") => {
   if (!ok) failures += 1
 }
 const note = (label: string, detail: string) => console.log(`NOTE  ${label} — ${detail}`)
+/**
+ * The script's own refusal shape, for the cases where there is nothing to measure: the
+ * daemon-unreachable path below already prints code, message and remedy and exits 2. An
+ * unreadable archive used to fall through to a raw ENOENT stack — with `HOME` unset the
+ * path was CWD-relative besides, which is a wrong answer rather than no answer.
+ */
+function refuse(label: string, error: { code: string; message: string; remedy: string }): never {
+  console.error(`cannot measure ${label}: ${error.code} ${error.message}`)
+  console.error(`remedy: ${error.remedy}`)
+  process.exit(2)
+}
+function unreadable(label: string, cause: unknown): never {
+  const error = cause as NodeJS.ErrnoException
+  return refuse(label, {
+    code: `GP_E_ARCHIVE_${error.code ?? "UNREADABLE"}`,
+    message: `${label} could not be read (${error.message ?? String(cause)})`,
+    remedy: "run the daemon once so it writes its evidence archive, or pass GLASSPANE_SOCKET pointing at the engine whose state root holds it; this script reads the archive that socket's directory implies and nothing else",
+  })
+}
+const sha256 = (bytes: string) => createHash("sha256").update(bytes).digest("hex")
 
 /** `Daemon.call` returns an Effect — a description, not a promise. */
 const run = <A>(effect: Effect.Effect<A>) => Effect.runPromise(effect)
 
 // 1. the running daemon: capabilities come from it, never from a list in here
-const hello = await run(Daemon.call("hello", {}, 5_000))
+const hello = await run(Daemon.hello())
 if (!hello.ok) {
   console.error(`cannot reach glasspaned: ${hello.error.code} ${hello.error.message}`)
   console.error(`remedy: ${hello.error.remedy}`)
@@ -57,18 +80,39 @@ if (!hello.ok) {
 const caps = (hello.result as { capabilities?: string[] }).capabilities ?? []
 note("engine capabilities", caps.join(", "))
 
-// 2. bytes the engine wrote, straight off its archive
-const archiveDir = path.join(process.env.HOME ?? "", ".glasspane", "evidence")
-const archived = readdirSync(archiveDir)
-  .filter((n) => /^op_[0-9A-HJKMNP-TV-Z]{26}\.json$/.test(n))
-  .map((n) => ({ n, mtime: statSync(path.join(archiveDir, n)).mtimeMs }))
-  .sort((a, b) => b.mtime - a.mtime)
+// 2. bytes the engine wrote, straight off its archive.
+//
+// The archive lives in the engine's state root, and the root is decided by ONE rule for the
+// whole fork — the socket location (`daemon.ts`'s `resolveSocket`, which `kernel.ts` uses
+// when it refuses to write into that tree). Composing `$HOME/.glasspane` here instead read
+// a directory this run had nothing to do with whenever `GLASSPANE_SOCKET` named another
+// tree, and with `HOME` unset it composed a CWD-relative path and died on a raw ENOENT.
+const engine = Daemon.stateRootOf(env)
+if (!engine.ok) refuse("the engine's state root", engine.error)
+const archiveDir = path.join(engine.path, "evidence")
+
+let archived: { n: string; mtime: number }[]
+try {
+  archived = readdirSync(archiveDir)
+    .filter((n) => /^op_[0-9A-HJKMNP-TV-Z]{26}\.json$/.test(n))
+    .map((n) => ({ n, mtime: statSync(path.join(archiveDir, n)).mtimeMs }))
+    .sort((a, b) => b.mtime - a.mtime)
+} catch (error) {
+  unreadable(archiveDir, error)
+}
 if (archived.length === 0) {
   console.error(`${archiveDir} holds no archived operation; there is nothing real to log`)
   process.exit(2)
 }
-const operationId = archived[0].n.slice(0, -".json".length)
-const packBytes = JSON.parse(readFileSync(path.join(archiveDir, archived[0].n), "utf8"))
+const operationId = archived[0]!.n.slice(0, -".json".length)
+let packRaw: string
+try {
+  packRaw = readFileSync(path.join(archiveDir, archived[0]!.n), "utf8")
+} catch (error) {
+  unreadable(path.join(archiveDir, archived[0]!.n), error)
+}
+const packBytes = JSON.parse(packRaw) as { schemaVersion?: string }
+const packDigest = sha256(packRaw)
 note("engine-written archive entry used", `${operationId} (label ${packBytes.schemaVersion}; ${archived.length} entries on disk)`)
 
 // 3. measured, not assumed: does the daemon still replay what it wrote?
@@ -134,7 +178,22 @@ check("the second frame joined the same chain", second?.status === "logged" && s
 const lines = readFileSync(ledger, "utf8").trimEnd().split("\n")
 check("entry 2 links to entry 1 by hash", JSON.parse(lines[1]).prevEntryHash.length === 64)
 check("the ledger file is 0600", (statSync(ledger).mode & 0o777) === 0o600)
-check("the engine's archive was not written to", readdirSync(archiveDir).length === archived.length)
+// What this line used to say was "the engine's archive was not written to", measured as a
+// directory count. That number answers neither question the label implies: a pack rewritten
+// in place leaves the count untouched, and a live daemon archiving a new operation during
+// this run trips the check for a reason that has nothing to do with this script. The bytes of
+// the entry under test are what this run must not have changed, so those are what is read.
+let packAfter: string
+try {
+  packAfter = readFileSync(path.join(archiveDir, archived[0]!.n), "utf8")
+} catch (error) {
+  unreadable(path.join(archiveDir, archived[0]!.n), error)
+}
+check(
+  "the archive entry this run read is byte-for-byte unchanged",
+  sha256(packAfter) === packDigest,
+  `${archived[0]!.n} ${packDigest.slice(0, 12)}… vs ${sha256(packAfter).slice(0, 12)}…`,
+)
 
 // 7. damage the tail: refuse the next write, name the line, keep the bytes
 writeFileSync(ledger, `${lines.join("\n")}\n{"entryId":"truncat`)

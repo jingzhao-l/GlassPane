@@ -25,7 +25,10 @@ import { errorMessage } from "./error"
  *   `packages/opencode/src/question/index.ts:27`, which this package must not import
  *   (`packages/opencode` depends on the TUI — see its `util/error.ts` re-exporting
  *   this module). Its message is defined identically to core's `QuestionV2.RejectedError`
- *   used below; if those two definitions ever diverge, this is the file to fix.
+ *   used below; if those two definitions ever diverge, this is the file to fix. Its
+ *   *identity* is not: the host's tag is `"QuestionRejectedError"` and core's is
+ *   `"QuestionV2.RejectedError"`, so naming only core's class leaves the identity lane
+ *   mute for the one refusal the server actually raises.
  * - The type-name markers match nothing live today: all four classes supply prose, and
  *   prose is what `errorMessage` returns for them. They are insurance for the change
  *   that is easy to imagine — a refusal arriving as its serialized identity (`name`, and
@@ -52,6 +55,10 @@ function denialMarker(primary: unknown, alternate: unknown) {
 
 const questionRejected = new QuestionV2.RejectedError()
 
+/** The host's own identity for the same refusal (`src/question/index.ts:27`): that package
+ *  depends on this one, so its wire tag can be named here but not imported. */
+const hostQuestionRejectedTag = "QuestionRejectedError"
+
 export const toolDenialMarkers: readonly string[] = [
   denialMarker(new PermissionV1.RejectedError(), new PermissionV1.RejectedError()),
   denialMarker(new PermissionV1.CorrectedError({ feedback: "a" }), new PermissionV1.CorrectedError({ feedback: "b" })),
@@ -63,6 +70,7 @@ export const toolDenialMarkers: readonly string[] = [
   new PermissionV1.CorrectedError({ feedback: "a" }).name,
   new PermissionV1.DeniedError({ ruleset: "a" }).name,
   questionRejected.name,
+  hostQuestionRejectedTag,
 ].filter(
   // A zero-length marker means the class put its entire message behind dynamic text.
   // Dropping it keeps the safe reading — an ordinary call error — instead of matching

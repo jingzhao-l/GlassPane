@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { readFileSync, unlinkSync } from "node:fs"
+import { existsSync, readFileSync, unlinkSync } from "node:fs"
 import net from "node:net"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -237,9 +237,22 @@ describe("what the transport accepts as an answer", () => {
     })
   })
 
-  test("an explicit null result is still an answer", async () => {
-    // Presence is the question, not truthiness: "no evidence pack for this id" is a
-    // real result the engine sends, and refusing it would invent a failure.
+  test("a transport-level probe of a frame shape the engine does not emit", async () => {
+    // LABELLED AS WHAT IT IS. This is not "a real result the engine sends": measured
+    // against the engine, `lastEvidence(operationId:)` THROWS `GP_E_NO_EVIDENCE` for both
+    // the with-id and no-id lookup when there is nothing to hand back
+    // (`EngineCore.swift:1631-1644`), and `Dispatcher.swift:156` wraps the pack in an
+    // object — no method answers with a bare `result: null`. What the case does measure is
+    // the client's own rule: presence, not truthiness, decides "the daemon answered", so a
+    // frame this shape must not be laundered into a refusal at the transport while a
+    // different one is invented into success.
+    //
+    // Downstream is where the honesty lives, and it is pinned there rather than asserted
+    // from here: `readEvidenceFrame` answers `GP_E_EVIDENCE_FRAME` for this value
+    // (test/tool/glasspane-kernel.test.ts) and the M2 hook records `status: "failed"` with
+    // a remedy the agent can actually run (test/plugin/glasspane-decision-log.test.ts).
+    // The tool row itself still reads ok — the transport did get an answer — which is
+    // exactly why the failure has to be said by the layer that reads the frame.
     await withPeer("null-result", (conn) => conn.write(`${JSON.stringify({ id: 1, result: null })}\n`), (reply) => {
       expect(reply.ok).toBe(true)
       if (!reply.ok) return
@@ -682,18 +695,102 @@ describe("what a remedy is allowed to say", () => {
    * scraped from comments, because a scan that flags prose gets "fixed" by deleting the
    * prose. An agent that is told to "report the line to the maintainers" has been handed a
    * dead end: nobody is reading, and the turn ends with a claim it cannot act on.
+   *
+   * Three shapes, because the surface writes remedies in three shapes:
+   *  - `remedy: <literal>` in an error object (kernel.ts, the inline daemon frame guard),
+   *  - the third positional argument of `failure(code, message, remedy)` (daemon.ts builds
+   *    every transport remedy that way),
+   *  - `const remedy = <literal>` where a stage assembles its own refusal
+   *    (glasspane-compaction.ts has no `remedy:` key at all).
+   * A scanner that read only the first shape measured 1 remedy in daemon.ts where 10 are
+   * built, and 0 in the compaction plugin — and the aggregate guard below could not see
+   * either file going dark, which is why each file's own count is asserted by name.
    */
-  const remedyLiterals = (file: string) => {
-    const source = readFileSync(path.join(import.meta.dir, "../..", file), "utf8")
-    return [...source.matchAll(/remedy:\s*(?:"([^"]*)"|`([^`]*)`)/g)].map((m) => m[1] ?? m[2] ?? "")
+  const literalText = (argument: string | undefined) => {
+    const text = (argument ?? "").trim()
+    const quote = text[0]
+    if (quote !== '"' && quote !== "`" && quote !== "'") return undefined
+    if (text.length < 2 || text[text.length - 1] !== quote) return undefined
+    return text.slice(1, -1)
   }
+
+  /** The top-level argument list of every `callee(...)` in the source, split on depth-1 commas. */
+  const callArguments = (source: string, callee: string): string[][] => {
+    const found: string[][] = []
+    for (const match of source.matchAll(new RegExp(`\\b${callee}\\(`, "g"))) {
+      const args: string[] = []
+      let current = ""
+      let depth = 1
+      let quote: string | null = null
+      for (let i = (match.index ?? 0) + match[0].length; i < source.length; i++) {
+        const ch = source[i]
+        if (quote !== null) {
+          current += ch
+          if (ch === "\\") current += source[++i] ?? ""
+          else if (ch === quote) quote = null
+          continue
+        }
+        if (ch === '"' || ch === "`" || ch === "'") {
+          quote = ch
+          current += ch
+          continue
+        }
+        if (ch === "{" || ch === "(" || ch === "[") depth++
+        else if (ch === "}" || ch === ")" || ch === "]") {
+          depth--
+          if (depth === 0) {
+            args.push(current)
+            break
+          }
+        }
+        if (ch === "," && depth === 1) {
+          args.push(current)
+          current = ""
+          continue
+        }
+        current += ch
+      }
+      found.push(args)
+    }
+    return found
+  }
+
+  const remediesIn = (file: string) => {
+    const source = readFileSync(path.join(import.meta.dir, "../..", file), "utf8")
+    const keyed = [...source.matchAll(/remedy:\s*(?:"([^"]*)"|`([^`]*)`)/g)].map((m) => m[1] ?? m[2] ?? "")
+    const staged = [...source.matchAll(/\bconst remedy\s*=\s*(?:"([^"]*)"|`([^`]*)`)/g)].map((m) => m[1] ?? m[2] ?? "")
+    const positional = callArguments(source, "failure")
+      .map((args) => literalText(args[2]))
+      .filter((text): text is string => text !== undefined)
+    return { keyed, staged, positional }
+  }
+  const remedyLiterals = (file: string) => Object.values(remediesIn(file)).flat()
   const files = ["src/tool/glasspane/daemon.ts", "src/tool/glasspane/kernel.ts", "src/plugin/glasspane-compaction.ts"]
 
-  test("the scan finds the remedies it claims to scan", () => {
-    // A pattern that matches nothing is the假绿 shape this repo keeps hitting: assert the
-    // battery has something to bite on before trusting the absence of a hit.
-    const found = files.flatMap(remedyLiterals)
-    expect(found.length).toBeGreaterThan(3)
+  test("the scan finds the remedies it claims to scan, file by file", () => {
+    // The aggregate guard this replaced (`found.length > 3` over all three files) was
+    // satisfied by one file while the other two contributed nothing, so a file could stop
+    // being scanned without anything going red — and the shapes each file builds its
+    // remedies in are stated here as facts about those files, not measured off the scan,
+    // so the scan cannot grade its own work.
+    const shapes: Record<string, keyof ReturnType<typeof remediesIn>> = {
+      // The transport hands every remedy to `failure(code, message, remedy)`.
+      "src/tool/glasspane/daemon.ts": "positional",
+      // The plugin writes its refusals as `remedy:` error-object fields.
+      "src/tool/glasspane/kernel.ts": "keyed",
+      // The compaction stage assembles its note before returning it, as `const remedy`.
+      "src/plugin/glasspane-compaction.ts": "staged",
+    }
+    for (const file of files) {
+      const found = remediesIn(file)
+      const shape = shapes[file]!
+      expect(
+        found[shape].length,
+        `${file} builds its remedies as ${shape === "positional" ? "the third argument of failure(...)" : shape === "staged" ? "`const remedy = ...`" : "`remedy:` object fields"}, and the scan finds ${found[shape].length} of them`,
+      ).toBeGreaterThan(0)
+      expect(remedyLiterals(file).length, `${file} contributes no remedies to the scan`).toBeGreaterThan(0)
+      for (const remedy of remedyLiterals(file)) expect(remedy.length, `${file} yielded an empty remedy`).toBeGreaterThan(0)
+    }
   })
 
   test("no remedy sends the agent to a human", () => {
@@ -721,5 +818,93 @@ describe("what a remedy is allowed to say", () => {
       expect(reply.error.remedy).not.toInclude("maintainers")
       expect(reply.error.remedy).not.toInclude("report the line")
     })
+  })
+})
+
+/**
+ * The engine's own method table, read off the Swift source rather than copied into this
+ * file. `FrameCodec.swift`'s `EngineMethod` is what decides "is this method callable", and
+ * a hard-coded list here is the stale copy the design of this surface forbids — the same
+ * reason `requireCapability` asks `hello` instead of carrying one.
+ */
+function engineMethodNames(): string[] {
+  let dir = import.meta.dir
+  for (let i = 0; i < 10; i++) {
+    const candidate = path.join(dir, "engine", "Sources", "GlassPaneEngine", "FrameCodec.swift")
+    if (existsSync(candidate)) {
+      const codec = readFileSync(candidate, "utf8")
+      const from = codec.indexOf("public enum EngineMethod")
+      const block = codec.slice(from, codec.indexOf("extension EngineMethod", from))
+      expect(block.length, "found FrameCodec.swift but no EngineMethod enum in it").toBeGreaterThan(0)
+      const names: string[] = []
+      for (const line of block.split("\n")) {
+        // Swift declares several cases on one line (`case hello, attach, act, observe`) and
+        // gives others a wire name (`case auditUI = "audit_ui" // …`). Reading only the first
+        // identifier of a line made the table look like it had no `attach`, `observe`, `act`,
+        // `last_evidence` or `restore`, so the assertion that this surface's calls are all
+        // callable was failing on methods the engine does accept — a fixture that does not
+        // match the shape of the thing it reads is a false red, not a finding.
+        const declared = line.match(/^\s*case\s+(.*)$/)
+        if (!declared) continue
+        for (const entry of declared[1].replace(/\/\/.*$/, "").split(",")) {
+          const one = entry.trim()
+          const wired = one.match(/^\w+\s*=\s*"([a-z_]+)"$/)
+          const bare = one.match(/^([a-zA-Z]\w*)$/)
+          const name = wired?.[1] ?? bare?.[1]
+          if (name) names.push(name)
+        }
+      }
+      return names
+    }
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  throw new Error("no engine/Sources/GlassPaneEngine/FrameCodec.swift above this test — the timeout table's method claims cannot be checked")
+}
+
+describe("the timeout table and the call sites that read it", () => {
+  /**
+   * Both directions are pinned from the shipped source (the offline scripts and these
+   * tests may pass their own budgets; `src/tool/glasspane/` may not), and the expected
+   * values are read off the call sites and off the engine — never off the table, which
+   * would be the table grading its own work.
+   */
+  const files = ["src/tool/glasspane/daemon.ts", "src/tool/glasspane/index.ts"]
+  const surfaceSource = files.map((file) => readFileSync(path.join(import.meta.dir, "../..", file), "utf8"))
+  const methodsSent = () => [...new Set(surfaceSource.flatMap((s) => [...s.matchAll(/\bcall\("([a-z_]+)"/g)].map((m) => m[1]!)))]
+
+  test("every method this surface sends is one the engine accepts", () => {
+    const callable = engineMethodNames()
+    for (const method of methodsSent()) {
+      expect(callable, `this surface sends "${method}", which is not in the engine's method table`).toContain(method)
+    }
+  })
+
+  test("no table entry is spent by a call nobody makes", () => {
+    // The `shutdown: 5_000` case: an entry with no reader anywhere in the tree.
+    for (const key of Object.keys(Daemon.TIMEOUT_MS)) {
+      if (key === "default") continue
+      expect(methodsSent(), `TIMEOUT_MS.${key} has no call site — an entry with no reader is a budget nobody re-measures`).toContain(key)
+    }
+  })
+
+  test("no call site in the surface brings its own number", () => {
+    // `hello()` hard-coding 5_000 and `gp_probe_status` hard-coding 8000 were the other
+    // half of the defect: the table was not where the product's timings lived.
+    for (const [file, source] of files.map((file, i) => [file, surfaceSource[i]!] as const)) {
+      const literals = [...source.matchAll(/\bcall\("[a-z_]+",\s*[^)]*?,\s*[\d_]+\s*\)/g)]
+      expect(literals.length, `${file} passes a hard-coded timeout instead of the table: ${JSON.stringify(literals.map((m) => m[0]))}`).toBe(0)
+    }
+  })
+
+  test("a method this surface does not send falls through to the default, by measurement", () => {
+    // `restore` really is an engine method and really does replay UI steps, and the MCP
+    // shell does drive it — under its own deadline table (`mcp-shell/src/engine-client.ts`).
+    // Nothing here calls it, so nothing here may carry a number or a promise for it;
+    // saying otherwise was the claim this fix removed.
+    expect(engineMethodNames()).toContain("restore")
+    expect(methodsSent()).not.toContain("restore")
+    expect(Daemon.timeoutFor("restore")).toBe(Daemon.TIMEOUT_MS.default)
   })
 })

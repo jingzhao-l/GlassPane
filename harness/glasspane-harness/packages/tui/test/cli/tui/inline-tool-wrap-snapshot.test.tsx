@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
 import { createSignal, For, Show } from "solid-js"
 import type { BoxRenderable, ScrollBoxRenderable } from "@opentui/core"
 import { testRender, type JSX } from "@opentui/solid"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { PermissionV2 } from "@opencode-ai/core/permission"
-import { QuestionV2 } from "@opencode-ai/core/question"
 import {
   formatCompletedSubagentDetail,
   formatSubagentRetry,
@@ -20,9 +20,26 @@ import {
   toolDisplay,
   glasspaneRow,
   glasspaneRowLook,
+  toolPartShouldHide,
 } from "../../../src/routes/session"
 import { errorMessage } from "../../../src/util/error"
 import { isToolDenial, toolDenialMarkers } from "../../../src/util/tool-denial"
+
+/**
+ * The dismissal the server fails into a tool part is `Question.RejectedError` in the fork's
+ * own tool package (`src/question/index.ts:27`), not core's `QuestionV2.RejectedError` — and
+ * that package depends on the TUI, so this test may not import it either. Its wire values are
+ * read out of that file instead: rename the tag or reword the sentence there and the fixtures
+ * below move with it, which is what makes these assertions evidence about the host rather than
+ * a restatement of whatever `tool-denial.ts` happened to type.
+ */
+const hostQuestion = (() => {
+  const source = readFileSync(new URL("../../../../opencode/src/question/index.ts", import.meta.url), "utf8")
+  const rejected = /class RejectedError[\s\S]{0,200}?\("([^"]+)"[\s\S]{0,200}?return "([^"]+)"/.exec(source)
+  if (!rejected) throw new Error("Question.RejectedError's tag and message are no longer readable in its source")
+  // `Schema.TaggedErrorClass` gives the class a `name` and a `_tag` holding the same string.
+  return { tag: rejected[1], dismissed: rejected[2] }
+})()
 
 /**
  * The refusal texts below are not typed into this file. `failToolCall` writes a denied
@@ -37,19 +54,20 @@ const refusal = {
   rejected: errorMessage(new PermissionV1.RejectedError()),
   corrected: errorMessage(new PermissionV1.CorrectedError({ feedback: "not that app" })),
   deniedByRule: errorMessage(new PermissionV1.DeniedError({ ruleset: [{ permission: "bash", action: "deny" }] })),
-  dismissed: errorMessage(new QuestionV2.RejectedError()),
+  dismissed: hostQuestion.dismissed,
 }
-// The same four classes read as identity rather than as prose: `errorMessage` returns
-// `error.name` when a refusal carries no sentence of its own, and for these classes
-// `_tag` is the same string. Not what the server writes today — this is the second key
-// the detection claims to have, so it is asserted through `glasspaneRow` rather than
-// left as a comment.
+// The same refusals read as identity rather than as prose: `errorMessage` returns
+// `error.name` when a refusal carries no sentence of its own. Not what the server writes
+// today — this is the second key the detection claims to have, so it is asserted through
+// `glasspaneRow` rather than left as a comment. The question's identity comes from the host,
+// whose tag is not core's class name.
 const refusalIdentity = [
   new PermissionV1.RejectedError(),
   new PermissionV1.CorrectedError({ feedback: "not that app" }),
   new PermissionV1.DeniedError({ ruleset: [] }),
-  new QuestionV2.RejectedError(),
-].flatMap((error) => [error.name, error._tag])
+]
+  .flatMap((error) => [error.name, error._tag])
+  .concat(hostQuestion.tag)
 const notARefusal = "socket closed"
 // Not one of the four sentences, and not an identity either: a guess at what a reword
 // could say. The branch is real, so an unknown text reads as a call error — and if that
@@ -412,7 +430,10 @@ describe("TUI inline tool wrapping", () => {
       expect(notARefusal.includes(marker)).toBe(false)
     }
     expect(toolDenialMarkers).toContain(refusal.rejected)
+    // Cross-package now: the marker is read off core's class, this text off the class the host
+    // actually fails into the tool part. They agree only as long as the two definitions do.
     expect(toolDenialMarkers).toContain(refusal.dismissed)
+    expect(toolDenialMarkers).toContain(hostQuestion.tag)
     // The two classes that interpolate carry the sentence up to the data, which is what
     // every real rendering of them starts with.
     for (const error of [refusal.corrected, refusal.deniedByRule]) {
@@ -475,7 +496,27 @@ describe("TUI inline tool wrapping", () => {
       },
     })
     expect(row.state).toBe("success")
-    expect(row.line).toBe("attribution strong, contaminated · cb 2 · assertion failed")
+    expect(row.line).toBe("attribution strong contaminated=true · cb 2 · assertion.passed=false")
+  })
+
+  test("glasspaneRow transcribes the assertion field instead of naming its verdict", () => {
+    const line = (assertion: unknown, attribution: unknown) =>
+      glasspaneRow({
+        tool: "gp_last_evidence",
+        status: "completed",
+        metadata: { ok: true, method: "last_evidence", result: { evidencePack: { assertion, attribution } } },
+      }).line
+    // The engine's field name and the engine's value, the way every other field on this row is
+    // written. Choosing the word for a boolean — "passed", "failed", "contaminated" — is the
+    // verdict, and the verdict belongs to the engine.
+    expect(line({ passed: true }, { level: "weak", contaminated: false })).toBe(
+      "attribution weak contaminated=false · assertion.passed=true",
+    )
+    expect(line({ passed: false }, { level: "strong", contaminated: true })).toBe(
+      "attribution strong contaminated=true · assertion.passed=false",
+    )
+    // No boolean from the engine is absence, and absence must stay sayable as `?`.
+    expect(line({}, {})).toBe("attribution ? contaminated=? · assertion.passed=?")
   })
 
   test("glasspaneRow renders observe's node count as the number the engine sends", () => {
@@ -574,6 +615,34 @@ describe("TUI inline tool wrapping", () => {
       expect(other.complete).toBe(true)
       expect(other.icon).toBe("⊘")
     }
+  })
+
+  test("the detail-visibility toggle hides results but never an engine refusal", () => {
+    const hidden = (row: Parameters<typeof glasspaneRow>[0]) => toolPartShouldHide({ showDetails: false, row })
+    const refused = { tool: "gp_act", status: "completed", metadata: { ok: false, code: "GP_E_NO_EVIDENCE" } }
+    const silent = { tool: "gp_act", status: "completed", metadata: {} }
+    const answered = { tool: "gp_act", status: "completed", metadata: { ok: true, method: "act", result: {} } }
+    // An engine refusal is a COMPLETED part (a human denial is the error status this row model
+    // still calls finished), so `status === "completed"` alone hid the refusal and left the
+    // crash next to it — the quiet transcript erased the one distinction the row model keeps.
+    expect(hidden(refused)).toBe(false)
+    expect(hidden(silent)).toBe(false)
+    expect(hidden({ tool: "gp_act", status: "error", error: refusal.rejected, metadata: {} })).toBe(false)
+    expect(hidden({ tool: "gp_act", status: "error", error: hostQuestion.tag, metadata: {} })).toBe(false)
+
+    // What the toggle is for stays hidden: an answer the engine gave, on any tool, and a
+    // non-evidence completed part must not be dragged in by the refusal exemption.
+    expect(hidden(answered)).toBe(true)
+    expect(hidden({ tool: "read", status: "completed", metadata: {} })).toBe(true)
+    expect(hidden({ tool: "read", status: "error", error: notARefusal, metadata: {} })).toBe(false)
+
+    // Parts that never finished are not the toggle's business, and details on hides nothing.
+    expect(hidden({ tool: "gp_act", status: "running", metadata: {} })).toBe(false)
+    expect(hidden({ tool: "read", status: "pending", metadata: {} })).toBe(false)
+    expect(toolPartShouldHide({ showDetails: true, row: { tool: "read", status: "completed", metadata: {} } })).toBe(
+      false,
+    )
+    expect(toolPartShouldHide({ showDetails: true, row: silent })).toBe(false)
   })
 
   test("filters malformed nested tool wire data", () => {

@@ -43,7 +43,15 @@ function run(target) {
   })
 }
 
-const envPath = process.env.OPENCODE_BIN_PATH
+// This shim ships as the package's `bin` and runs before anything is bundled, so it cannot
+// import the one resolver product.json names (packages/core/src/flag/flag.ts's read()). It
+// applies that resolver's rule by hand for the single variable a launcher needs — product
+// name first, legacy name second — and the duplication is bounded to exactly these two
+// names: harness/tools/product-surface.mjs's `env-resolution-point` rule fails if any file
+// outside flag.ts reads a legacy-named variable without the product name in front of it.
+const PRODUCT_BIN_PATH = "GLASSPANE_HARNESS_BIN_PATH"
+const LEGACY_BIN_PATH = "OPENCODE_BIN_PATH"
+const envPath = process.env[PRODUCT_BIN_PATH] ?? process.env[LEGACY_BIN_PATH]
 
 const scriptPath = fs.realpathSync(__filename)
 const scriptDir = path.dirname(scriptPath)
