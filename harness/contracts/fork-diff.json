@@ -3430,7 +3430,7 @@
     },
     {
       "file": ".github/workflows/release.yml",
-      "forkHash": "e01443f16a5fe9ca525ecf6de513b749ebd1f642"
+      "forkHash": "6f8591fd2140ecd8493cf810ae371fc7bc5e4b05"
     },
     {
       "file": ".glasspane-harness/.gitignore",
@@ -3770,7 +3770,7 @@
     },
     {
       "file": "SYNCLOG.md",
-      "forkHash": "2cd5c06f59c9bbed39ad87b37db5c832c31bc7a0"
+      "forkHash": "7f6383fbee6f3e9f7ddfa9730feac00f15444b24"
     }
   ]
 }
