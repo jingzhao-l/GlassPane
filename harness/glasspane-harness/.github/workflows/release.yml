@@ -82,12 +82,19 @@ jobs:
       # first real run died: the binary built, the smoke test passed, and then
       # the upload had nowhere to put the bytes. Creating it here — and only when
       # absent, so re-running a tag is not an error — makes the lane idempotent.
-      - name: Create the release if it does not exist yet
+      - name: Create the release as a draft if it does not exist yet
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # Draft, and only `publish-release` clears that flag after the manifest and every
+          # `.asc` have landed. Before this ordering existed the release was public from the
+          # moment `create-release` ran, so a `binaries` leg that failed after uploading the
+          # other one left a live release carrying one asset, no SHA256SUMS.txt and no
+          # signature — and `scripts/install.sh` treated exactly that state as "the product
+          # ships unsigned releases", warned, and installed the bytes. A release that cannot
+          # be verified is not a released one, so it now stays draft until it can be.
           if gh release view "${GITHUB_REF_NAME}" --repo "$GH_REPO" >/dev/null 2>&1; then
             echo "release ${GITHUB_REF_NAME} already exists — leaving it as it is"
             exit 0
@@ -99,9 +106,9 @@ jobs:
           # An idempotent re-run (the branch above) will not repair an old release that
           # was created without this — it needs `gh release edit --target`.
           gh release create "${GITHUB_REF_NAME}" --repo "$GH_REPO" \
-            --target "$GITHUB_SHA" \
+            --target "$GITHUB_SHA" --draft \
             --title "glasspane-harness ${GITHUB_REF_NAME}" --generate-notes
-          echo "created release ${GITHUB_REF_NAME}"
+          echo "created draft release ${GITHUB_REF_NAME}"
 
   binaries:
     name: binary ${{ matrix.target }}
@@ -161,6 +168,35 @@ jobs:
           export OPENCODE_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('../../product.json','utf8')).version")"
           bun run build --single
 
+      - name: Record the hash of the bytes this run built
+        run: |
+          set -euo pipefail
+          # Anchored to the build, not to what GitHub later serves. The `checksums` job must
+          # download the assets from the release in order to sign them, and before this step that
+          # download was the only source of the bytes it vouched for: anything able to replace an
+          # asset between this upload and that download got its replacement checksummed, signed
+          # and endorsed. This hash leaves the runner through the artifact control plane, which a
+          # release-asset write cannot reach.
+          cd packages/opencode/dist
+          : > "$RUNNER_TEMP/asset-sha256-${{ matrix.target }}.txt"
+          found=0
+          for f in *.zip *.tar.gz; do
+            [ -f "$f" ] || continue
+            shasum -a 256 "$f" >> "$RUNNER_TEMP/asset-sha256-${{ matrix.target }}.txt"
+            found=$((found + 1))
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "::error::this build produced no archive in packages/opencode/dist, so nothing can be anchored"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/asset-sha256-${{ matrix.target }}.txt"
+
+      - uses: cf430e030ddbb5b0abf93d22962f4752f3646cd9 # actions/upload-artifact@v7.0.2
+        with:
+          name: asset-sha256-${{ matrix.target }}
+          path: ${{ runner.temp }}/asset-sha256-${{ matrix.target }}.txt
+          if-no-files-found: error
+
   checksums:
     name: SHA256SUMS for the release assets
     if: success() && github.event_name == 'push'
@@ -175,6 +211,11 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - uses: 9000827ccba6bdab643e8b6fd33ac0654aef8333 # actions/download-artifact@v8.0.2
+        with:
+          pattern: asset-sha256-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/asset-hashes
       - name: Download every release asset and checksum it
         env:
           GH_TOKEN: ${{ github.token }}
@@ -227,6 +268,46 @@ jobs:
             diff <(printf '%s\n' "$want") <(printf '%s\n' "$stems") || true
             exit 1
           fi
+          # Anchor the served bytes to the build that made them. `gh release download` above
+          # reads what the release holds *now*; the hashes here were recorded inside the build
+          # job, before anything could touch the release. Every asset must have exactly one
+          # record, must match it, and every record must be claimed by an asset — otherwise the
+          # manifest would be endorsing bytes this pipeline cannot trace to a compiler.
+          anchors="${RUNNER_TEMP:-/tmp}/asset-hashes"
+          unrecorded=""
+          mismatched=""
+          for f in ./*; do
+            b="${f#./}"
+            rec="$(awk -v n="$b" '$2 == n { print $1 }' "$anchors"/*.txt 2>/dev/null | head -1)"
+            if [ -z "$rec" ]; then
+              unrecorded="$unrecorded $b"
+              continue
+            fi
+            got="$(sha256sum "$b" | awk '{print $1}')"
+            if [ "$got" != "$rec" ]; then
+              mismatched="$mismatched $b(recorded=$rec served=$got)"
+            fi
+          done
+          orphan=""
+          for line in "$anchors"/*.txt; do
+            n="$(awk '{print $2}' "$line" | head -1)"
+            [ -f "./$n" ] || orphan="$orphan $n"
+          done
+          if [ -n "$unrecorded" ]; then
+            echo "::error::asset(s) served by the release carry no build-time hash:$unrecorded"
+            echo "::error::refusing to checksum and sign bytes this run cannot trace to a build"
+            exit 1
+          fi
+          if [ -n "$mismatched" ]; then
+            echo "::error::asset bytes do not match the hash the build recorded:$mismatched"
+            echo "::error::the release asset was replaced between the build and this download"
+            exit 1
+          fi
+          if [ -n "$orphan" ]; then
+            echo "::error::a build recorded a hash for an asset the release does not carry:$orphan"
+            exit 1
+          fi
+          echo "every served asset matches the hash its build job recorded"
           sha256sum ./* > SHA256SUMS.txt
           cat SHA256SUMS.txt
           # Re-read every file against the manifest that was just written: this catches a file
@@ -322,6 +403,36 @@ jobs:
           # Say which expectation broke instead of letting gh report "no matches found".
           [ -f SHA256SUMS.txt ] || { echo "::error::SHA256SUMS.txt is not in ${RUNNER_TEMP:-/tmp}/release-assets — the checksum step wrote it somewhere else"; exit 1; }
           gh release upload "$TAG" SHA256SUMS.txt $ASC_FILES --clobber --repo "$GH_REPO"
+
+  publish-release:
+    name: Make the release visible once it can be verified
+    # The last step of the asset lane, and the only thing that clears `--draft`. A release is
+    # public from the moment it exists, and `scripts/install.sh` resolves "latest" through the
+    # releases API — so while the manifest and signature jobs were still running, a user could
+    # already be pointed at assets with nothing to check them against. Draft until the checksums
+    # and every `.asc` have landed closes that window; a run that fails before this job leaves
+    # the release invisible instead of leaving it public and unverifiable.
+    if: success() && github.event_name == 'push'
+    needs: checksums
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release edit "${GITHUB_REF_NAME}" --repo "$GH_REPO" --draft=false
+          # Read it back: `gh release edit` exiting 0 is not evidence the flag took effect on a
+          # release that another actor may have already changed.
+          state="$(gh release view "${GITHUB_REF_NAME}" --repo "$GH_REPO" --json isDraft --jq .isDraft)"
+          if [ "$state" != "false" ]; then
+            echo "::error::release ${GITHUB_REF_NAME} is still a draft (isDraft=$state) after the publish step"
+            exit 1
+          fi
+          echo "release ${GITHUB_REF_NAME} is live with its manifest and signatures attached"
 
   publish-gate:
     name: Refuse to publish a tree no tag vouches for
@@ -466,6 +577,14 @@ jobs:
               npm stage publish . --provenance
               echo "::notice::owner approves with: npm stage approve <stage-id> (ids: npm stage list)"
               echo "STAGED, NOT PUBLISHED: $pkg@$ver is waiting for owner approval."
+              # Fail the job. This run has not put the package on the registry, and a green
+              # `publish-platform` is what `publish-wrapper` trusts — v0.7.6 shipped exactly that
+              # shape: job green, provenance in the transparency log, package absent, and an
+              # install that places no binary. The owner's approval is a physical 2FA step, so the
+              # honest outcome here is a red run that names the one command to finish.
+              echo "::error::$pkg@$ver is staged, not published — approve it and re-dispatch this tag"
+              rm -f "$log"
+              exit 1
             else
               echo "::error::$pkg@$ver failed to publish (exit $rc) and nothing in the output says the registry refused a direct publish — not staging blindly"
               rm -f "$log"
@@ -503,6 +622,34 @@ jobs:
           npm install -g npm@12.2.0
           echo "npm in this publish lane: $(npm --version)"
 
+      - name: Every platform package the wrapper names must already be live
+        working-directory: packages/opencode
+        run: |
+          set -euo pipefail
+          # The wrapper's optionalDependencies are computed from product.json's target matrix, so
+          # the wrapper can be published naming a platform version that this run never put on the
+          # registry. Measured on v0.7.6: the publish job printed `+ glasspane-harness-darwin-x64@0.7.6`,
+          # its provenance reached the transparency log, the job exited 0 — and the registry had no
+          # 0.7.6 for that package at all. On an Intel Mac that is `npm install` succeeds, no
+          # command appears. A *staged* platform package looks identical from inside its job (exit
+          # 0, "STAGED, NOT PUBLISHED"), so the only honest check is the registry's own answer,
+          # asked before the wrapper goes out.
+          ver="$(node -p "JSON.parse(require('fs').readFileSync('../../product.json','utf8')).version")"
+          reg="$(node -p "JSON.parse(require('fs').readFileSync('../../product.json','utf8')).registry")"
+          missing=""
+          while read -r pkg; do
+            got="$(npm view "${pkg}@${ver}" version --registry "$reg" 2>/dev/null || true)"
+            if [ "$got" != "$ver" ]; then
+              missing="$missing ${pkg}@${ver}(registry answered ${got:-nothing})"
+            fi
+          done < <(node -e 'const p=require("../../product.json");const n=(t)=>[p.name,t.os==="win32"?"windows":t.os,t.arch,t.avx2===false?"baseline":undefined,t.abi].filter(Boolean).join("-");for(const t of p.platformTargets)console.log(n(t))')
+          if [ -n "$missing" ]; then
+            echo "::error::refusing to publish a wrapper naming packages that are not live:$missing"
+            echo "::error::if a platform job printed STAGED, NOT PUBLISHED, the owner must approve it: npm stage list --registry $reg, then npm stage approve <stage-id>"
+            exit 1
+          fi
+          echo "every declared platform package is live at $ver"
+
       - name: Assemble and publish the wrapper (optionalDependencies come from product.json)
         working-directory: packages/opencode
         shell: bash
@@ -522,8 +669,10 @@ jobs:
               echo "::notice::the registry refused a direct publish of the wrapper — staging instead"
               cd dist/glasspane-harness
               npm stage publish . --provenance
-              echo "::notice::owner approves with: npm stage approve <stage-id> (ids: npm stage list)"
+              echo "::error::the wrapper is STAGED, NOT PUBLISHED — it is waiting for the owner's 2FA approval"
               echo "STAGED, NOT PUBLISHED: the wrapper is waiting for owner approval."
+              echo "::error::run 'npm stage list' and approve it; this job must not end green while nothing is installable"
+              exit 1
             else
               echo "::error::the wrapper lane failed (exit $rc) without a registry refusal — nothing was published or staged"
               rm -f "$log"
@@ -531,6 +680,33 @@ jobs:
             fi
           fi
           rm -f "$log"
+
+  # The lane that asks the registry's own question: can a user install what this run published,
+  # and does the command they get actually run? `product.json` → `npm.publishPolicy` promised
+  # "发布后跑 verify-published" and nothing wired it, so the only check that walks the user's path
+  # — download the published tarball, install into a throwaway prefix, run `--version`, confirm
+  # the binary serves the embedded web app — was a manual step nobody took on a bad release.
+  # It has to run on macOS: the wrapper's `os` field refuses a Linux install by design, and an
+  # install that is refused is not the release being tested.
+  verify-published:
+    name: install the published bytes and run them
+    if: success() && github.event_name == 'workflow_dispatch' && inputs.publish_npm == true && inputs.confirm == true
+    needs: publish-wrapper
+    runs-on: macos-14
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-bun
+      - name: Install workspace
+        run: bun install --frozen-lockfile
+      - name: Verify the published version end to end
+        working-directory: packages/opencode
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          bun run script/verify-published.ts "$version"
 
   # Does the npm trusted publisher actually work? Proved, not assumed.
   #

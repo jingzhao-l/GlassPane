@@ -12,6 +12,82 @@ contract does not).
 
 <!-- 内容归入下一版；此处留空以备下一批。 -->
 
+## [0.7.10] - 2026-10-15
+
+判据：本轮全部是缺陷修复与两处默认收紧（安装期验证、项目内插件信任），没有新增工具、参数、
+平台目标或命令形状 ⇒ patch。**取号决定**：`0.7.9` 是上一轮（2026-10-14）在 main 上写的版本号，
+但它从未离开那个提交——split 仓 `main` 仍是 `46d131e` = `v0.7.8`，远端 tag 列表里没有 `v0.7.9`，
+registry 三个包 latest 都还是 `0.7.8`，`npm view glasspane-harness@0.7.9` 回 404。因此 `0.7.9`
+这个号在野外并不存在，本轮不把它补发成一个"已知带缺陷"的中间版本，而是把两轮内容一起发成
+`0.7.10`，让 `0.7.9` 的号作废并在 `SYNCLOG.md` 留下证据；`[0.7.9]` 条目原样保留，它描述的是
+已经在这一版里的代码。
+
+- fix(harness): 发布物的 `SHA256SUMS.txt` 或 `.asc` 缺席时，`curl` 通道不再"警告后继续安装"，
+  而是拒绝；只有显式 `GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1` 才放行，且安装摘要把"是这道 override
+  而非这条发布"作为未验证的原因写进状态串。判据：发布泳道对每个目标都产 manifest 与签名并在缺失时
+  失败，所以缺席描述的是坏发布，不是安装器可以自行豁免的政策。固定点＝`installer-selftest.sh`
+  场景 5/8/15 全部反转（改前它们断言"仍然安装、退出码 0"），改后 404→退出码 1、override→退出码 0
+  且状态串点名 override。
+- fix(harness): GitHub Release 现在以 **draft** 创建，`publish-release` 在 manifest 与全部签名落地后
+  才取消 draft，并读回 `isDraft` 确认；此前 release 一存在就公开，`binaries` 矩阵半失败会留下一个
+  "没有 manifest 也没有签名但可下载"的 live release，而安装器对它的态度是警告后安装。
+- fix(harness): `checksums` 不再只信"GitHub 此刻serve 的字节"。每个 `binaries` job 把自己构建出的
+  归档 sha256 作为 workflow artifact 交出，`checksums` 逐个比对：没有构建期记录的资产、与记录不一致
+  的资产、记录了却不在 release 里的资产，三种都红。这把"contents: write 的人在上游与下载之间换掉资产，
+  然后被本管道签名背书"这条路堵上。
+- fix(harness): wrapper 发布前逐个问 registry："我即将点名的每个平台包，这个版本真的在吗"。不在就红，
+  并把 `npm stage list` / `npm stage approve <id>` 写给 owner——v0.7.6 那次是 job 绿、provenance 进了
+  透明日志、registry 里却没有那个版本，Intel Mac 装完没有命令。同时 `publish-platform` / `publish-wrapper`
+  的 staged 分支不再以退出码 0 收场：staged 就是没发布，这条 run 必须红。
+- fix(harness): `script/verify-published.ts`——把**已发布**的 tarball 装进临时前缀、跑 `--version`、
+  确认那份二进制真在供内嵌 web——第一次被接进 `release.yml`（`verify-published` job，跑在 macOS 上，
+  因为 macOS-only 的 `os` 字段在 Linux 上会拒绝安装，那测的不是这次发布）。`product.json` 早就写着
+  "发布后跑 verify-published"，此前没有任何东西跑它。
+- fix(harness): 打开一个目录不再执行那个目录里的插件。`<project>/.glasspane-harness/plugin(s)/*.ts`
+  （含上游 `.opencode` 拼法）现在被"发现但拒载"，因为 import 它＝任意代码执行，而跑它的进程手里有
+  `gp_*` 辅助功能面；要信任这份 checkout 请显式设 `GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS=true`，
+  或像以前一样把插件写进配置的 `plugin` 列表（被点名的一直会加载）。固定点＝
+  `test/config/glasspane-project-plugin-trust.test.ts`，它先证明 glob 真找得到 2 个文件，再断言默认
+  全拒、信任时全放——一个找不到文件的夹具等于什么都没验。
+- fix(harness): 发布脚本的三处"拿声明跟自己比"——`validateTarball` 的 name 断言比的是同一个
+  package.json 里读出来的字符串；`optionalDependencies`/`os`/`cpu` 比的是本进程几行前刚写下去的内存对象；
+  可执行位断言跑在 `chmod -R 755` 之后。现在身份判定抽成纯函数 `script/publish-shape.ts`（能被夹具驱动），
+  全部检查读**打好的 tarball**：manifest 从 tarball 解出，模式取 `tar -tvzf` 记录的位（解包会重套本机 umask），
+  期望值从磁盘上的 `product.json` 重读。补上反向那道：`dist/` 里出现不是本产品声明目标的包名＝拒发
+  （此前只有"声明了没构建"这一侧有人看）。新闸第一次跑就抓到真东西：上一次的 tarball 被下一次 pack
+  打了进去（mode 0、文件数 7→8），于是 pack 前先删同名旧归档，`npm publish` 也不再 glob 而是点名。
+- fix(harness): `script/publish.ts` 的两处 npm 调用不点名 registry（其余每条消费路径都钉了），以及
+  `npm publish ...${provenance}` 这种拼接把 bun 的引号规则变成 `"public --provenance"` 一个 argv——
+  实测子进程 argv 后拆成两条字面命令，`--provenance` 这才真的成了一个 flag。registry 从此只有一个来源：
+  `product.registry`（`verify-published` 原来读 `product.npm.registry`，两个字段只有一个被闸看），
+  `product-surface` 新增 `registry` / `publish-registry` 三条一致断言。
+- fix(harness): 上游那五个 per-package 发布脚本的拒载，在**真正会发布东西的那个仓**里第一次被行为验证：
+  split 仓 `ci.yml` 逐个 `bun run` 它们并要求退出码 2（`no-foreign-publish` 那条规则住在主仓的尺子层，
+  不在 split 树里；一个只扫字节的闸可以被一句注释满足，跑它不能）。
+- fix(tui): 渲染层不再从引擎布尔字段铸出"passed/failed/contaminated"这些判决词，改为转写
+  `assertion.passed=false` 这类"字段＋字面值"；管这件事的尺子 `surface-semantics` 此前**根本没把这个文件
+  纳入口径**（金样 `hits: []` 是空表），现在纳入了，并且每条规则都带正向对照——把任一规则的 `count()`
+  改成恒 0，`--check` 具名变红。
+- fix(tui): `tool_details_visibility` 关掉时不再把引擎拒绝一起藏掉（拒绝是一个 `completed` 的 part，
+  藏起来就等于把这个产品存在的理由做成一个开关）；`Question` 拒绝的身份标记改读宿主真正抛出的那个
+  类（此前测试与实现读同一个错类，是个自我认证）。
+- fix(harness): `gp_*` 的 timeout 表删掉没人读的行、补上没人给的数（`hello` 的 5 秒、`gp_probe_status`
+  的 8 秒此前是调用点自带数字），并新增"这张表说的每个方法引擎真的接受"的对照——它读
+  `FrameCodec.swift` 的 `EngineMethod`，且解析器认识 Swift 的 `case a, b, c` 多名一行写法（改前它只认
+  单名行，于是把 `attach/observe/act/restore` 都当成不存在，是夹具形状不对导致的假红）。
+- fix(harness): 决策台账/运行计划的"引擎状态根"解析与 daemon 用同一套规则（`GLASSPANE_SOCKET` 是相对
+  路径时不再把当前工作目录当成引擎的根），拒绝消息同时点名"实际解析到的根"与默认根；E7 台账脚本的归档
+  路径改用同一权威并守住 `readdirSync` 的失败面；E8 压缩脚本的子进程与临时目录现在在所有退出路径上都回收
+  （此前崩溃路径留下一个活着的 `serve` 和一堆临时文件），requestLog 缺失变成一条具名检查而不是一个 ENOENT。
+- fix(harness): 尺子层自身四处"只能绿"的位置——`tool-surface` 的脏树守卫用调用方的 CWD 跑 `git diff`
+  （换目录就读错仓）、`diff` 失败/超缓冲被当成 0 行（面 B 只会少算，而那正是棘轮看不见的一侧）、
+  `hook-liveness --offline` 的断言是它自己 `--record` 的重言式（金样为空也能报 OK，且从不检查本 fork
+  绑定的那两个扩展点还在）、`kernel-pin` 解析 `node_modules` 的顺序与产品运行时相反（两份不一致时它不拒）。
+  `kernel-conformance` 那句"corpus 数与驱动数每次比对"此前只是注释，现在真的比，并且 `--check` 与
+  `--record` 两个模式都比。
+- docs: `SECURITY.md` 新增"仓库自带的代码默认不执行"一节并改写发布物验证段落；`docs/install.md` 的安装期
+  验证段落改成与新行为一致（含 override 的确切写法与摘要里会出现的状态串）。
+
 ## [0.7.9] - 2026-10-14
 
 判据：纯修复，无产品面形状变化 ⇒ patch。本轮把"能红"这件事补在了三个层次上：

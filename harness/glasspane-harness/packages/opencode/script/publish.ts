@@ -3,7 +3,9 @@ import { $ } from "bun"
 import pkg from "../package.json"
 import product from "../../../product.json"
 import { Script } from "@opencode-ai/script"
-import { existsSync, mkdirSync, rmSync } from "node:fs"
+import { validatePackageIdentity } from "./publish-shape"
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "url"
 
@@ -40,8 +42,18 @@ process.on("exit", () => {
   } catch {}
 })
 
+/**
+ * The registry is named here for the same reason it is named in `postinstall.mjs` and
+ * `scripts/install.sh`: npm resolves an ambient `npm_config_registry` / `~/.npmrc` mirror
+ * first, and a publish host pointed at a mirror would consult — and write to — a registry
+ * that every consumer path then refuses to trust. This was the one npm-facing script in
+ * the product that left it unpinned, so "already published?" and the publish itself could
+ * answer about a mirror while `verify-published` checked the real thing.
+ */
+const registry = product.registry
+
 async function published(name: string, version: string) {
-  return (await $`npm view ${name}@${version} version`.nothrow()).exitCode === 0
+  return (await $`npm view ${name}@${version} version --registry ${registry}`.nothrow()).exitCode === 0
 }
 
 // Stable releases go to `latest`; anything on a non-latest channel goes to `next`,
@@ -52,11 +64,25 @@ async function publish(dir: string, name: string, version: string) {
   // GitHub artifact downloads can drop the executable bit, and Docker uses the
   // unpacked dist binaries directly rather than the published tarball.
   if (process.platform !== "win32") await $`chmod -R 755 .`.cwd(dir)
-  if (dryRun) await $`bun pm pack --dry-run`.cwd(dir)
-  // These assertions gate the live path too. They used to sit inside the `dryRun`
-  // branch, so the run that actually published checked nothing, while the comment on
-  // `validateTarball` promised they were "checked before it can be published".
-  const problems = await validateTarball(dir, name, version)
+  // Drop the tarball a previous pack left in this directory before making a new one. Without
+  // this the archive packs itself: measured on the first run of the check below, the second
+  // `bun pm pack` listed 8 files including `glasspane-harness-0.7.9.tgz` at mode 0, and the
+  // exec-bit assertion went red for the right reason — an artifact that is not the package.
+  // Named explicitly rather than globbed: a shell glob of the tarball pattern, written the way
+  // a shell writes it, opens a block comment as far as `product-surface.mjs`'s stripper is
+  // concerned — it then cannot see the publish lines below at all. And this script publishes
+  // one named file either way.
+  await $`rm -f ${name}-${version}.tgz`.cwd(dir)
+  // Pack first, in both modes. `--dry-run` used to run `bun pm pack --dry-run`, which prints a
+  // file list without writing one, so the assertions below could only ever read the dist
+  // directory — whose modes the chmod on the line above had just forced to 0755. `bun pm pack`
+  // writes a tarball locally and touches no registry, so a dry run can afford to judge the same
+  // bytes a user's npm will judge.
+  await $`bun pm pack`.cwd(dir)
+  const tarball = path.join(dir, `${name}-${version}.tgz`)
+  const problems = (await Bun.file(tarball).exists())
+    ? await validateTarball(dir, name, version, tarball)
+    : [`no ${name}-${version}.tgz was produced in ${dir} — the pack step wrote something else, and nothing was validated`]
   if (problems.length) {
     console.error(`  ✗ ${name}@${version} ${dryRun ? "would publish" : "will not publish"} with problems:`)
     for (const p of problems) console.error(`      - ${p}`)
@@ -71,9 +97,16 @@ async function publish(dir: string, name: string, version: string) {
     console.log(`  already published ${name}@${version} — this call published nothing`)
     return
   }
-  await $`bun pm pack`.cwd(dir)
-  const provenance = process.env.CI ? " --provenance" : ""
-  await $`npm publish *.tgz --access public${provenance} --tag ${distTag}`.cwd(dir)
+  // Two literal command lines, not one built by interpolation. Bun quotes every `${}` as a
+  // single argv entry, so a `" --provenance"` suffix riding next to another value arrives as
+  // part of that value — measured against this file's own shape with a dump of the child's
+  // argv: `--access public${provenance}` reached npm as `["--access", "public --provenance"]`,
+  // an invalid `--access` value and no `--provenance` flag anywhere. The flag has to be a
+  // token of its own, which a concatenation cannot guarantee.
+  // The tarball is named, not globbed: `npm publish *.tgz` uploads every archive sitting in the
+  // directory, so the bytes validated above would not be the bytes published.
+  if (process.env.CI) await $`npm publish ${name}-${version}.tgz --access public --registry ${registry} --provenance --tag ${distTag}`.cwd(dir)
+  else await $`npm publish ${name}-${version}.tgz --access public --registry ${registry} --tag ${distTag}`.cwd(dir)
 }
 
 /** The npm page of a platform package: what it is, and where the product is. */
@@ -107,16 +140,55 @@ async function writePlatformReadme(dir: string, name: string) {
  * A package that installs but cannot run is the worst outcome of a release lane:
  * npm reports success, the user gets a broken command. The checks are the shape of
  * "what the installer needs", not taste.
+ *
+ * Everything is read out of the PACKED `.tgz` — the bytes the registry will hand to a user —
+ * not out of `dist/`. Two separate reasons: the exec-bit assertions were running after this
+ * function's own caller had already done `chmod -R 755 .` on that directory, so they tested a
+ * mode the pipeline had just forced and could never go red; and the manifest/`optionalDependencies`
+ * /`os`/`cpu` assertions were comparing the file against the in-memory objects that had written
+ * it seconds earlier in the same process, which is a declaration compared with itself. The
+ * product's own expectations are re-read from `product.json` on disk for the same reason.
  */
-async function validateTarball(dir: string, name: string, version: string): Promise<string[]> {
+async function validateTarball(dir: string, name: string, version: string, tarball: string): Promise<string[]> {
   const problems: string[] = []
-  const manifest = (await Bun.file(path.join(dir, "package.json")).json()) as Record<string, any>
-  if (manifest.version !== version) problems.push(`package.json version ${manifest.version} != product version ${version}`)
-  if (manifest.name !== name) problems.push(`package.json name ${manifest.name} != ${name}`)
+  // `import.meta.url`, not a path joined onto the dist directory: this script chdir'd to the
+  // package root on line 11, and `dir` here is the relative `./dist/<name>` the caller passes.
+  const truth = (await Bun.file(fileURLToPath(new URL("../../../product.json", import.meta.url))).json()) as typeof product
+  const root = await mkdtempSync(path.join(tmpdir(), "gp-pack-"))
+  await $`tar -xzf ${tarball} -C ${root}`
+  const pkgRoot = path.join(root, "package")
+  // Modes as the ARCHIVE records them. Extracting re-applies the local umask, so a file the
+  // tarball says is 0755 can land 0745 here — and the other way round. `tar -tvzf` prints the
+  // recorded mode, in symbolic form on both GNU and BSD tar, so the nine permission bits are
+  // read off the string rather than parsed as an octal number.
+  const listing = (await $`tar -tvzf ${tarball}`.text()).split("\n").filter((line) => line.length > 0)
+  const symbolic = (bits: string) => {
+    let mode = 0
+    for (const [index, flag] of ["r", "w", "x", "r", "w", "x", "r", "w", "x"].entries()) {
+      if (bits[index] === flag) mode |= 1 << (8 - index)
+    }
+    return mode
+  }
+  const modeOf = (member: string) => {
+    const line = listing.find((entry) => entry.endsWith(` ${member}`))
+    if (!line) return undefined
+    const field = line.trim().split(/\s+/)[0]
+    return field.length >= 10 ? symbolic(field.slice(1, 10)) : undefined
+  }
+  const statMode = async (file: string) => modeOf(path.relative(root, file))
+  const manifest = (await Bun.file(path.join(pkgRoot, "package.json")).json()) as Record<string, any>
+  const declaredTargets = (truth.platformTargets ?? []).map((target) => platformPackageName(target))
+  const problemsIdentity = validatePackageIdentity({
+    manifest,
+    dirName: path.basename(dir),
+    expectedVersion: version,
+    allowedNames: [truth.name, ...declaredTargets],
+  })
+  problems.push(...problemsIdentity)
   if (name === pkg.name) {
     // the wrapper
     for (const [bin, target] of Object.entries(manifest.bin ?? {})) {
-      if (!existsSync(path.join(dir, target as string))) problems.push(`bin "${bin}" points at ${target}, which is not in the tarball`)
+      if (!existsSync(path.join(pkgRoot, target as string))) problems.push(`bin "${bin}" points at ${target}, which is not in the tarball`)
     }
     // What the wrapper ships in its bin entries is the apology script, not a binary:
     // postinstall replaces it at install time. Nothing checked those bytes, so a tarball could
@@ -124,12 +196,12 @@ async function validateTarball(dir: string, name: string, version: string): Prom
     // that does not exist — and the release lane called that clean. Each check below is the
     // shape of one of those two failures, and each was seen red by deleting the thing it
     // guards (the shebang, the resolved path, the exec bit).
-    const scripts = new Set<string>(Object.values(manifest.bin ?? {}).map((target) => path.join(dir, target as string)))
+    const scripts = new Set<string>(Object.values(manifest.bin ?? {}).map((target) => path.join(pkgRoot, target as string)))
     for (const file of scripts) {
       if (!existsSync(file)) continue
-      const label = path.relative(dir, file)
-      const stat = await Bun.file(file).stat?.()
-      if (stat && (stat.mode & 0o111) === 0) problems.push(`${label} is not executable in the tarball (mode ${(stat.mode & 0o777).toString(8)}) — the command would answer "permission denied" instead of its remedy`)
+      const label = path.relative(pkgRoot, file)
+      const mode = await statMode(file)
+      if (mode !== undefined && (mode & 0o111) === 0) problems.push(`${label} is not executable in the tarball (mode ${(mode & 0o777).toString(8)}) — the command would answer "permission denied" instead of its remedy`)
       const first = (await Bun.file(file).text()).split("\n", 1)[0]
       if (!first.startsWith("#!")) problems.push(`${label} has no shebang (first line is ${JSON.stringify(first)}) — a launcher that execs it without a shell gets ENOEXEC and no message`)
       // The remedy has to be actionable from wherever the reader is standing, which is the
@@ -149,14 +221,14 @@ async function validateTarball(dir: string, name: string, version: string): Prom
         }
       }
     }
-    if (!existsSync(path.join(dir, "postinstall.mjs"))) problems.push("postinstall.mjs is missing — the platform binary would never be placed")
-    if (!existsSync(path.join(dir, "LICENSE"))) problems.push("LICENSE is missing")
-    if (!existsSync(path.join(dir, "README.md"))) problems.push("README.md is missing — the npm page would render as a bare version string")
+    if (!existsSync(path.join(pkgRoot, "postinstall.mjs"))) problems.push("postinstall.mjs is missing — the platform binary would never be placed")
+    if (!existsSync(path.join(pkgRoot, "LICENSE"))) problems.push("LICENSE is missing")
+    if (!existsSync(path.join(pkgRoot, "README.md"))) problems.push("README.md is missing — the npm page would render as a bare version string")
     const declared = Object.keys(manifest.optionalDependencies ?? {}).sort()
-    if (declared.join(",") !== Object.keys(declaredPlatforms).sort().join(",")) {
-      problems.push(`optionalDependencies [${declared.join(", ")}] do not match product.json's target matrix [${Object.keys(declaredPlatforms).join(", ")}]`)
+    if (declared.join(",") !== declaredTargets.sort().join(",")) {
+      problems.push(`optionalDependencies [${declared.join(", ")}] do not match product.json's target matrix [${declaredTargets.join(", ")}]`)
     }
-    for (const [field, expected] of [["os", product.platform?.os], ["cpu", product.platform?.arch]] as const) {
+    for (const [field, expected] of [["os", truth.platform?.os], ["cpu", truth.platform?.arch]] as const) {
       if (JSON.stringify(manifest[field] ?? null) !== JSON.stringify(expected ?? null)) {
         problems.push(`${field} is ${JSON.stringify(manifest[field])} but product.platform says ${JSON.stringify(expected)} — npm would install the wrong platform or refuse the right one`)
       }
@@ -167,11 +239,12 @@ async function validateTarball(dir: string, name: string, version: string): Prom
     // a branch whose two arms are the same string, which reads as if the x64 tarball held
     // a differently named binary and would quietly mis-validate the next target added here.
     const binary = product.bins[0]
-    if (!existsSync(path.join(dir, "bin", binary))) problems.push(`bin/${binary} is missing from the tarball`)
-    if (!existsSync(path.join(dir, "README.md"))) problems.push("README.md is missing — the npm page would render as a bare version string")
-    const stat = existsSync(path.join(dir, "bin", binary)) ? (await Bun.file(path.join(dir, "bin", binary)).stat?.()) : undefined
-    if (stat && (stat.mode & 0o111) === 0) problems.push(`bin/${binary} is not executable in the tarball (mode ${(stat.mode & 0o777).toString(8)})`)
+    if (!existsSync(path.join(pkgRoot, "bin", binary))) problems.push(`bin/${binary} is missing from the tarball`)
+    if (!existsSync(path.join(pkgRoot, "README.md"))) problems.push("README.md is missing — the npm page would render as a bare version string")
+    const mode = await statMode(path.join(pkgRoot, "bin", binary))
+    if (mode !== undefined && (mode & 0o111) === 0) problems.push(`bin/${binary} is not executable in the tarball (mode ${(mode & 0o777).toString(8)})`)
   }
+  rmSync(root, { recursive: true, force: true })
   return problems
 }
 

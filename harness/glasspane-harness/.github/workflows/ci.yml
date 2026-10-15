@@ -46,7 +46,50 @@ jobs:
 
       - name: Fixed-point tests (glasspane tool surface, ledger, compaction, rendering)
         working-directory: packages/opencode
-        run: bun test --timeout 30000 test/tool/glasspane-surface.test.ts test/tool/glasspane-kernel.test.ts test/plugin/glasspane-decision-log.test.ts test/plugin/glasspane-compaction.test.ts
+        run: bun test --timeout 30000 test/tool/glasspane-surface.test.ts test/tool/glasspane-kernel.test.ts test/plugin/glasspane-decision-log.test.ts test/plugin/glasspane-compaction.test.ts test/script/publish-shape.test.ts test/config/glasspane-project-plugin-trust.test.ts
+
+      # The rule that keeps this fork from publishing into someone else's npm scope lives in
+      # `harness/tools/product-surface.mjs`, which is in the parent repository and therefore NOT
+      # in this tree — the repository that actually publishes had no copy of the guarantee. This
+      # step is the behavioral form of it: every dead-end publisher is run, and each must refuse
+      # with exit 2. A byte-scan can be satisfied by a comment; running the file cannot.
+      - name: Dead-end publishers still refuse (exit 2 before they can reach a registry)
+        run: |
+          set -euo pipefail
+          refused=0
+          for rel in script/publish.ts packages/cli/script/publish.ts packages/plugin/script/publish.ts packages/sdk/js/script/publish.ts packages/ui/script/publish.ts; do
+            if [ ! -f "$rel" ]; then
+              echo "::error::$rel is gone — the publisher list moved, and the refusal cannot be assumed about a file nobody looked at"
+              exit 1
+            fi
+            # errexit off for the run, on again after: the refusal IS a non-zero exit, and a
+            # `|| true` on the assignment would erase the number this step exists to read.
+            set +e
+            out="$(bun run "$rel" 2>&1)"
+            code=$?
+            set -e
+            if [ "$code" = "0" ]; then
+              echo "::error::$rel exited 0 — a publisher that does not refuse is a publisher that publishes"
+              echo "$out"
+              exit 1
+            fi
+            if [ "$code" != "2" ] && ! printf '%s' "$out" | grep -qiE "refus|does not ship|not this product|does not publish"; then
+              echo "::error::$rel exited $code without naming a refusal — that is a crash, not a gate"
+              echo "$out"
+              exit 1
+            fi
+            if printf '%s' "$out" | grep -qE "npm notice|Publishing to|\+ @opencode"; then
+              echo "::error::$rel looked like it published something"
+              exit 1
+            fi
+            refused=$((refused + 1))
+            echo "ok: $rel refuses (exit $code)"
+          done
+          if [ "$refused" -eq 0 ]; then
+            echo "::error::no publisher was checked — the loop matched nothing"
+            exit 1
+          fi
+          echo "checked $refused dead-end publisher(s)"
 
       - name: TUI rendering fixed points
         working-directory: packages/tui

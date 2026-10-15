@@ -27,6 +27,15 @@ NPM_PACKAGE="${GLASSPANE_HARNESS_NPM:-$PRODUCT}"
 # harness/tools/product-surface.mjs (rule installer-registry).
 NPM_REGISTRY="${GLASSPANE_HARNESS_REGISTRY:-https://registry.npmjs.org}"
 RELEASE_BASE="${GLASSPANE_HARNESS_RELEASES:-https://github.com/$REPO/releases/download}"
+# "No SHA256SUMS.txt / no .asc was published for this release" used to be a warning the
+# installer talked itself past and then installed anyway. That tolerance is not ours to
+# grant: the release lane publishes both files for every target and fails the run if either
+# is missing, so a 404 on a release asset means the release in front of us is incomplete —
+# a half-built `binaries` matrix, a tag cut from a different tree, or somebody's asset
+# deleted after the fact. Installing unverified bytes because the manifest was absent is the
+# failure this channel was written to prevent, so the default is now refusal, and the
+# override says who chose it.
+ALLOW_UNVERIFIED="${GLASSPANE_HARNESS_ALLOW_UNVERIFIED:-}"
 
 # ------------------------------------------------------------------ colors
 if [ -t 1 ]; then
@@ -69,6 +78,9 @@ Environment:
   GLASSPANE_HARNESS_NPM       npm package to install (default glasspane-harness)
   GLASSPANE_HARNESS_REGISTRY  npm registry for the install lane (default https://registry.npmjs.org)
   GLASSPANE_HARNESS_RELEASES  base URL for release assets (default this repo's releases)
+  GLASSPANE_HARNESS_ALLOW_UNVERIFIED
+                             set to 1 to install even when the release publishes no
+                             SHA256SUMS.txt or no .asc (default: refuse)
 USAGE
       exit 0
       ;;
@@ -280,9 +292,16 @@ verify_asset_gpg() {
   http="$(curl -sSL -o "$asc" -w '%{http_code}' "$url.asc" 2>/dev/null || true)"
   [ -n "$http" ] || http="000"
   if [ "$http" = "404" ]; then
-    GPG_STATE="skipped (no .asc published for this asset)"
-    warn "no GPG signature sidecar ($name.asc) published for this release — skipping (unsigned is a policy gap, not tampering)"
-    return 0
+    if [ "$ALLOW_UNVERIFIED" = "1" ]; then
+      GPG_STATE="skipped by GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 (no .asc published for this asset)"
+      warn "no GPG signature sidecar ($name.asc) published for this release — installing anyway because GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1"
+      return 0
+    fi
+    GPG_STATE="FAILED (no .asc published for this asset)"
+    error "no GPG signature sidecar ($name.asc) is published for this release"
+    error "this product's release lane signs every asset and fails the run if a signature is missing, so an unsigned release is an incomplete or replaced one."
+    error "refusing to install. If you accept that risk for this run: GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl -fsSL <install.sh> | bash"
+    exit 1
   fi
   if [ "$http" != "200" ] || [ ! -s "$asc" ]; then
     GPG_STATE="FAILED (could not fetch the signature: HTTP $http)"
@@ -354,9 +373,16 @@ verify_asset() {
   http="$(curl -sSL -o "$sums" -w '%{http_code}' "$RELEASE_BASE/v$VERSION/SHA256SUMS.txt" 2>/dev/null || true)"
   [ -n "$http" ] || http="000"
   if [ "$http" = "404" ]; then
-    SHA_STATE="skipped (no SHA256SUMS.txt published for v$VERSION)"
-    warn "no SHA256SUMS.txt published for v$VERSION — skipping integrity check (provenance gap, not tampering)"
-    return 0
+    if [ "$ALLOW_UNVERIFIED" = "1" ]; then
+      SHA_STATE="skipped by GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 (no SHA256SUMS.txt published for v$VERSION)"
+      warn "no SHA256SUMS.txt published for v$VERSION — installing anyway because GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1"
+      return 0
+    fi
+    SHA_STATE="FAILED (no SHA256SUMS.txt published for v$VERSION)"
+    error "no SHA256SUMS.txt is published for v$VERSION"
+    error "the release lane writes one manifest covering every target and refuses to sign an incomplete set, so a release without a manifest is not a release this installer can vouch for."
+    error "refusing to install. If you accept that risk for this run: GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl -fsSL <install.sh> | bash"
+    exit 1
   fi
   if [ "$http" != "200" ] || [ ! -s "$sums" ]; then
     SHA_STATE="FAILED (could not fetch SHA256SUMS.txt: HTTP $http)"

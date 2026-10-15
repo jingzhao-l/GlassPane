@@ -74,12 +74,27 @@ shasum -a 256 -c SHA256SUMS.txt
 gpg --verify glasspane-harness-darwin-arm64.zip.asc glasspane-harness-darwin-arm64.zip
 ```
 
-The `curl` channel runs both of those itself. What it does with each outcome is the part
-worth knowing: a release that publishes no `.asc`, or a machine with no `gpg`, is a policy
-gap — it warns, names the gap, and installs, because an unsigned release is not evidence
-of tampering. A signature that **does not verify**, one made by a key other than the
-fingerprint the installer itself carries, or a signature fetch
-that fails for a reason that is not 404, is a tampering signal — it refuses and exits.
+The `curl` channel runs both of those itself, and it stops when either one cannot be done.
+A release that publishes no `SHA256SUMS.txt` or no `.asc` is refused rather than warned about:
+this product's release lane writes a manifest covering every target and signs each asset, and it
+fails the run if either is missing — so their absence describes a broken or replaced release, not
+a policy the installer gets to waive. A signature that does not verify, or one made by a key other
+than the fingerprint the installer carries, is refused for the same reason. The installer also keeps
+"this release has no manifest" apart from "I could not read the manifest": a blocked fetch (a proxy
+that re-signs TLS, a 403, an HTTP 200 carrying HTML) is reported as a fetch failure, never as an
+unpublished release.
+
+Only you can decide to install anyway, and saying so is an explicit act:
+
+```bash
+GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.sh | bash
+```
+
+The install summary then names the override in the state it prints
+(`sha256: skipped by GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1`), so the log of that run cannot be read
+later as a verified install. A machine with no `gpg` still installs after the checksum passes and
+says its provenance was skipped — that is a missing tool, not a missing signature.
+
 That distinction matters because `SHA256SUMS.txt` is downloaded from the same origin as the
 asset it lists, so on its own it cannot survive a swapped release; the signature is the one
 check whose answer the other side cannot produce.
