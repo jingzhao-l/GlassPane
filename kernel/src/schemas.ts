@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 /**
  * The JSON Schema files under schemas/ are the single source of truth for the
  * C35 dual-language contract. They are loaded at module init from the
- * package-local schemas/ directory so that consumers of @iterate/kernel
+ * package-local schemas/ directory so that consumers of iterate-kernel
  * always see the same schema objects that the engine-side tests validate
  * against (never an embedded copy).
  */
@@ -15,6 +15,16 @@ export const DECISION_LOG_ENTRY_SCHEMA_ID =
   "https://schemas.iterate.dev/decision-log-entry-0.1-draft.json" as const;
 export const RECIPE_CONFIG_SCHEMA_ID =
   "https://schemas.iterate.dev/recipe-config-0.1-draft.json" as const;
+export const RUN_PLAN_SCHEMA_ID =
+  "https://schemas.iterate.dev/run-plan-0.1.json" as const;
+export const INVARIANT_REPORT_SCHEMA_ID =
+  "https://schemas.iterate.dev/invariant-report-0.1.json" as const;
+export const REVERIFICATION_REQUEST_SCHEMA_ID =
+  "https://schemas.iterate.dev/reverification-request-0.1.json" as const;
+export const CONVERGENCE_ROUND_STATE_SCHEMA_ID =
+  "https://schemas.iterate.dev/convergence-round-state-0.1.json" as const;
+export const PROVIDER_REGISTRATION_SCHEMA_ID =
+  "https://schemas.iterate.dev/provider-registration-0.1.json" as const;
 
 export interface JsonSchemaObject {
   readonly $id: string;
@@ -35,4 +45,24 @@ export const DECISION_LOG_ENTRY_JSON_SCHEMA: JsonSchemaObject = loadSchema(
 
 export const RECIPE_CONFIG_JSON_SCHEMA: JsonSchemaObject = loadSchema(
   "../schemas/recipe-config.schema.json"
+);
+
+export const RUN_PLAN_JSON_SCHEMA: JsonSchemaObject = loadSchema(
+  "../schemas/run-plan.schema.json"
+);
+
+export const INVARIANT_REPORT_JSON_SCHEMA: JsonSchemaObject = loadSchema(
+  "../schemas/invariant-report.schema.json"
+);
+
+export const REVERIFICATION_REQUEST_JSON_SCHEMA: JsonSchemaObject = loadSchema(
+  "../schemas/reverification-request.schema.json"
+);
+
+export const CONVERGENCE_ROUND_STATE_JSON_SCHEMA: JsonSchemaObject = loadSchema(
+  "../schemas/convergence-round-state.schema.json"
+);
+
+export const PROVIDER_REGISTRATION_JSON_SCHEMA: JsonSchemaObject = loadSchema(
+  "../schemas/provider-registration.schema.json"
 );

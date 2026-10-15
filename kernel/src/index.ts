@@ -1,5 +1,5 @@
 /**
- * @iterate/kernel — Phase A
+ * iterate-kernel — Phase A
  *
  * Shared kernel of the iterate ecosystem, temporarily hosted in the
  * GlassPane repository (5.8 R43). The JSON Schema files under schemas/ are
@@ -10,9 +10,19 @@ export {
   EVIDENCE_PACK_SCHEMA_ID,
   DECISION_LOG_ENTRY_SCHEMA_ID,
   RECIPE_CONFIG_SCHEMA_ID,
+  RUN_PLAN_SCHEMA_ID,
+  INVARIANT_REPORT_SCHEMA_ID,
+  REVERIFICATION_REQUEST_SCHEMA_ID,
+  CONVERGENCE_ROUND_STATE_SCHEMA_ID,
+  PROVIDER_REGISTRATION_SCHEMA_ID,
   EVIDENCE_PACK_JSON_SCHEMA,
   DECISION_LOG_ENTRY_JSON_SCHEMA,
   RECIPE_CONFIG_JSON_SCHEMA,
+  RUN_PLAN_JSON_SCHEMA,
+  INVARIANT_REPORT_JSON_SCHEMA,
+  REVERIFICATION_REQUEST_JSON_SCHEMA,
+  CONVERGENCE_ROUND_STATE_JSON_SCHEMA,
+  PROVIDER_REGISTRATION_JSON_SCHEMA,
   type JsonSchemaObject
 } from "./schemas.js";
 
@@ -75,6 +85,8 @@ export {
 
 export {
   DECISION_ENTRY_ID_PATTERN,
+  DECISION_KIND_PATTERN,
+  PAYLOAD_MAX_CANONICAL_LENGTH,
   PREV_ENTRY_HASH_PATTERN,
   SUMMARY_MAX_LENGTH,
   DecisionOutcomeSchema,
@@ -82,6 +94,13 @@ export {
   type DecisionOutcome,
   type DecisionLogEntry
 } from "./decision-log-entry.js";
+
+export {
+  DECISION_TRANSCRIBE_CODES,
+  KernelDecisionTranscribeError,
+  decisionLogDraftFromRecord,
+  isLegacyDecisionRecord
+} from "./decision-log-transcribe.js";
 
 export {
   RECIPE_SCHEMA_VERSION,
@@ -97,13 +116,62 @@ export {
 } from "./recipe-config.js";
 
 export {
+  DIMENSION_ID_PATTERN,
+  DIMENSION_ID_MAX_LENGTH,
+  DIMENSION_LABEL_MAX_LENGTH,
+  DIMENSION_FOCUS_MAX_LENGTH,
+  DIMENSION_MIN_PLANNED,
+  DIMENSION_MAX_PLANNED,
+  DIMENSION_MAX_OPERATION_IDS,
+  DIMENSION_CONTEXT_CODES,
+  PlannedDimensionSchema,
+  DimensionEvidenceSchema,
+  DimensionStatusSchema,
+  DimensionContextEntrySchema,
+  DimensionContextTotalsSchema,
+  DimensionContextSchema,
+  DimensionContextInputSchema,
+  KernelDimensionError,
+  dimensionContext,
+  formatDimensionContext,
+  type DimensionEvidence,
+  type DimensionStatus,
+  type DimensionContextEntry,
+  type DimensionContextTotals,
+  type DimensionContext,
+  type DimensionContextInput,
+  type KernelDimensionCode
+} from "./dimension-context.js";
+
+export {
   parseEvidencePack,
   parseEvidencePackRead,
   parseDecisionLogEntry,
-  parseRecipeConfig
+  parseRecipeConfig,
+  parseRunPlan,
+  parseDimensionContext,
+  parseDimensionContextInput,
+  parseInvariantReport,
+  parseReverificationRequest,
+  parseRoundState,
+  parseProviderRegistration
 } from "./parse.js";
 
 export { canonicalJson } from "./canonical-json.js";
+
+export {
+  RUN_PLAN_SCHEMA_VERSION,
+  RUN_PLAN_SOURCES,
+  RunPlanSchema,
+  RunPlanSourceSchema,
+  RunPlanSourceKindSchema,
+  plannedIds,
+  plannedDimensionsOf,
+  runPlanDigest,
+  type RunPlan,
+  type RunPlanSource,
+  type RunPlanSourceKind
+} from "./run-plan.js";
 
 export { decisionOutcomeFromEvidence, decisionSummaryFromEvidence } from "./evidence-decision.js";
 
@@ -126,3 +194,66 @@ export {
 } from "./decision-log.js";
 
 export { KernelSchemaError, type KernelSchemaIssue } from "./errors.js";
+
+export {
+  INVARIANT_REPORT_SCHEMA_VERSION,
+  REVERIFICATION_SCHEMA_VERSION,
+  INVARIANT_CHECK_MAX,
+  INVARIANT_DETAIL_MAX_LENGTH,
+  REVERIFICATION_CODES,
+  InvariantCheckKindSchema,
+  InvariantCheckSchema,
+  InvariantReportOutcomeSchema,
+  InvariantReportSchema,
+  ReverificationTargetsSchema,
+  ReverificationRequestSchema,
+  KernelReverificationError,
+  invariantReportDigest,
+  failingChecks,
+  reVerificationRequestFrom,
+  type InvariantCheckKind,
+  type InvariantCheck,
+  type InvariantReportOutcome,
+  type InvariantReport,
+  type ReverificationTargets,
+  type ReverificationRequest,
+  type ReverificationRecipeStep,
+  type KernelReverificationCode
+} from "./invariant-report.js";
+
+export {
+  CONVERGENCE_SCHEMA_VERSION,
+  CONVERGENCE_REASONS,
+  InvariantStateSchema,
+  RoundStateSchema,
+  ConvergenceActionSchema,
+  ConvergenceDecisionSchema,
+  convergenceDecision,
+  type InvariantState,
+  type RoundState,
+  type ConvergenceAction,
+  type ConvergenceDecision,
+  type ConvergenceReason
+} from "./convergence.js";
+
+export {
+  PROVIDER_SCHEMA_VERSION,
+  PROVIDER_ID_PATTERN,
+  PROVIDER_ID_MAX_LENGTH,
+  PROVIDER_METHOD_MAX,
+  PROVIDER_CODES,
+  ProviderKindSchema,
+  ProviderMethodSchema,
+  ProviderRegistrationSchema,
+  KernelProviderError,
+  emptyProviderRegistry,
+  registerProvider,
+  resolveProvider,
+  requireMethod,
+  providerIdsInCommon,
+  type ProviderKind,
+  type ProviderMethod,
+  type ProviderRegistration,
+  type ProviderRegistry,
+  type KernelProviderCode
+} from "./provider-registration.js";

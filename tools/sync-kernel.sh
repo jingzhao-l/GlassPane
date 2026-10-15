@@ -86,6 +86,30 @@ done
 
 RSYNC_EXCLUDES=(--exclude node_modules --exclude dist --exclude .npm-cache)
 
+# The mirror owns its manifest; canonical owns the code, the schemas, the fixtures
+# and the tests.
+#
+# WHY THIS IS AN EXCLUSION AND NOT A MERGE: `kernel/package.json` is not a copy of
+# canonical's. It is the workspace entry mcp-shell resolves through
+# `"@iterate/kernel": "file:../kernel"` — name `@iterate/kernel`, `private: true`, the
+# version stamped by `scripts/set-version.mjs` onto the GlassPane line, zod pinned to
+# one exact version for a reproducible install, and an exports map that publishes only
+# the root entry. Canonical's carries `iterate-kernel`, `private: false`, its own
+# `0.1.x`, a `>=3.25.76 <5` range and fifteen subpath exports. Measured 2026-10-15: the
+# copy that shipped here overwrote all of it, and the very next step — root
+# `npm run build` — died on `No workspaces found: --workspace=@iterate/kernel`. Guard 3
+# rolled the sync back, so the visible symptom was not a corrupted mirror but a
+# documented procedure that could never complete. A manifest copy is therefore not a
+# no-op, and a merge that "keeps the interesting fields" is worse: it would silently
+# decide, every run, which half of the identity survives.
+#
+# `package-lock.json` goes the same way for the same reason: it is the record of the
+# mirror's own pinned resolution, and it is one of `check-version.mjs`'s lock sites.
+MANIFEST_OWNED=()
+if [ "$target" = "repo" ]; then
+  MANIFEST_OWNED=(--exclude package.json --exclude package-lock.json)
+fi
+
 # The fork target vendors a subset: the TypeScript source, the schema truth
 # files and the fixtures. It deliberately does NOT copy `test/` (those tests
 # import the built `dist/`, which the fork does not produce) or `package.json`
@@ -124,7 +148,7 @@ enumerate() { # $1 = dry | real
       rsync $flags --delete --itemize-changes "${RSYNC_EXCLUDES[@]}" "$SRC/kernel/$sub/" "$DST/$sub/"
     done
   else
-    rsync $flags --delete --itemize-changes "${RSYNC_EXCLUDES[@]}" "$SRC/kernel/" "$DST/"
+    rsync $flags --delete --itemize-changes "${RSYNC_EXCLUDES[@]}" ${MANIFEST_OWNED[@]+"${MANIFEST_OWNED[@]}"} "$SRC/kernel/" "$DST/"
   fi
 }
 
@@ -194,6 +218,40 @@ for symbol in appendDecisionLogEntry verifyDecisionLogText decisionLogEntryHash 
     exit 1
   }
 done
+if [ "$target" = "repo" ] && [ -f "$DST/package.json" ]; then
+  # Guard 2b — the dependency face, which is exactly what excluding the manifest makes
+  # invisible. The mirror keeps its own `package.json`, so a package canonical newly
+  # depends on would land in `src/` as an import nothing installs: the build would fail
+  # later, in a consumer's face, with a message about a module instead of about this
+  # sync. Refusing here names the package and the file to edit.
+  # Names are compared, not ranges: the mirror pins `zod` to one exact version on purpose
+  # (reproducible install is this line's recorded decision) while canonical carries a
+  # range, and reading that difference as a missing dependency would block every sync.
+  missing_deps="$(node -e '
+    const fs = require("fs");
+    const read = (i) => JSON.parse(fs.readFileSync(process.argv[i], "utf8"));
+    const src = read(1);
+    const dst = read(2);
+    const have = new Set([...Object.keys(dst.dependencies || {}), ...Object.keys(dst.devDependencies || {})]);
+    const need = [...new Set([...Object.keys(src.dependencies || {}), ...Object.keys(src.devDependencies || {})])];
+    const missing = need.filter((n) => !have.has(n));
+    if (missing.length) console.log(missing.join(" "));
+  ' "$SRC/kernel/package.json" "$DST/package.json")" || {
+    echo "error: the dependency comparison could not run; a manifest that does not parse is not a sync" >&2
+    exit 1
+  }
+  if [ -n "$missing_deps" ]; then
+    echo "error: canonical kernel declares package(s) this mirror's manifest does not: $missing_deps" >&2
+    echo "  This sync deliberately does not copy $DST/package.json — the mirror owns its" >&2
+    echo "  workspace identity (@iterate/kernel, private, the GlassPane version line, the" >&2
+    echo "  pinned zod range) — so a new dependency would never install and a consumer" >&2
+    echo "  would fail on an unresolved import far from here." >&2
+    echo "  Remedy: add $missing_deps to $DST/package.json (dependencies or devDependencies," >&2
+    echo "  matching how mcp-shell consumes it), run \`npm ci\` in $root, then re-run this sync." >&2
+    exit 1
+  fi
+fi
+
 if [ "$target" = "repo" ]; then
   [ "$src_version" = "$root_version" ] || echo "note: version re-stamp pending — canonical says $src_version, GlassPane line is $root_version (mirror wins locally; set-version owns it)"
 else
@@ -258,7 +316,37 @@ if [ "$target" = "fork" ]; then
 fi
 
 if [ "$target" = "repo" ]; then
-  # Re-stamp the mirror's own version sites, since the copy carried canonical's number.
+  # Two manifest fields are NOT identity — they describe the contract corpus, and the
+  # kernel's own packaging gate (`test/packaging.test.mjs`, which the mirror runs because
+  # the mirror runs canonical's tests) asserts them:
+  #   · `exports` — every src module must be reachable as a subpath, so a new module in
+  #     canonical must be importable here too, and
+  #   · `files` — the fixture corpus "is the cross-language contract" and must ship.
+  # They are copied from canonical rather than kept by the mirror, because hand-copying
+  # them is what the mirror silently failed to do on 2026-10-15: canonical gained six
+  # modules and the mirror's manifest kept a `.`-only exports map, so the sync could
+  # never pass its own gates. Everything else in the manifest stays the mirror's —
+  # `name` (the workspace handle mcp-shell resolves), `private`, the version line, the
+  # exact-pinned zod range, the scripts, and the absence of `publishConfig`.
+  node -e '
+    const fs = require("fs");
+    const [srcFile, dstFile] = process.argv.slice(1);
+    const src = JSON.parse(fs.readFileSync(srcFile, "utf8"));
+    const dst = JSON.parse(fs.readFileSync(dstFile, "utf8"));
+    const before = JSON.stringify({ exports: dst.exports, files: dst.files });
+    dst.exports = src.exports;
+    dst.files = src.files;
+    fs.writeFileSync(dstFile, `${JSON.stringify(dst, null, 2)}\n`);
+    const after = JSON.stringify({ exports: dst.exports, files: dst.files });
+    const subs = Object.keys(src.exports ?? {}).filter((k) => k !== ".").length;
+    console.log(`manifest: exports (${subs} subpaths) and files copied from canonical; name/private/version/pinned deps kept by the mirror`);
+    if (before !== after) console.log("manifest: exports/files changed in this run — review the diff, the kernel packaging gate asserts both");
+  ' "$SRC/kernel/package.json" "$DST/package.json" || {
+    echo "error: the manifest contract fields could not be copied; rolling the mirror back." >&2
+    rolled_back=1; rollback
+    exit 1
+  }
+  # Re-stamp the mirror's version site, since the mirror's manifest is on the GlassPane line.
   node "$root/scripts/set-version.mjs" "$root_version" >/dev/null || {
     echo "error: set-version re-stamp failed; rolling the mirror back to its pre-sync bytes." >&2
     rolled_back=1; rollback
