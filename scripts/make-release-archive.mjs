@@ -233,26 +233,82 @@ export function buildOutputEntries({ root, dir }) {
 }
 
 /**
- * The three files `mcp-shell`'s own `bundle` script writes. A `dist` holding any other `.js` was produced by
- * `tsc`, not by the bundler — and that is not a cosmetic difference: `glasspane-mcp` declares only `zod` as a
- * dependency (the kernel sits in `devDependencies` as `file:../kernel`), so a tsc-shaped `dist` still carries
- * `import "@iterate/kernel"` in its entry points. Such a package installs cleanly, reports its version
- * correctly, and dies on the first `ERR_MODULE_NOT_FOUND` when the agent runs it — found by packing an archive
- * whose `dist` had been rebuilt by `npm test` after the bundle step, then installing that archive's own tarball
- * in a clean prefix. `npm pack --dry-run` cannot see it because a dry run never installs and never executes.
+ * The files `mcp-shell`'s own `bundle` script writes — **read off that script**, never
+ * re-listed here. A `dist` holding any other `.js` was produced by `tsc`, not by the
+ * bundler — and that is not a cosmetic difference: `glasspane-mcp` declares only `zod` as a
+ * dependency (the kernel sits in `devDependencies` as `file:../kernel`), so a tsc-shaped
+ * `dist` still carries `import "@iterate/kernel"` in its entry points. Such a package
+ * installs cleanly, reports its version correctly, and dies on the first
+ * `ERR_MODULE_NOT_FOUND` when the agent runs it — found by packing an archive whose `dist`
+ * had been rebuilt by `npm test` after the bundle step, then installing that archive's own
+ * tarball in a clean prefix. `npm pack --dry-run` cannot see it because a dry run never
+ * installs and never executes.
+ *
+ * The list this replaces named three entries while the script bundled four, and the only
+ * thing that noticed was this guard refusing to publish a tree that was fine — i.e. no
+ * release archive could be built from it. That is the third time a hand-copied list of
+ * this repository's own outputs went stale, so the copy is gone: the expected set is every
+ * `--outfile` the bundler declares, and a script that cannot be read is a **refusal**, not
+ * an empty list that lets every file in `dist` pass vacuously.
  */
-const BUNDLE_ENTRIES = ['index.js', 'http-gateway.js', 'http-gateway-cli.js']
+export function bundleEntriesFromScript(script, { where = 'the bundle script' } = {}) {
+  if (typeof script !== 'string' || script.trim() === '') {
+    fail(`${where} is missing or empty: the expected bundle output cannot be derived from a script that is not there, and an empty list would pass every file dist holds`)
+  }
+  const outfiles = [...script.matchAll(/--outfile=(?:"([^"]+)"|'([^']+)'|([^\s&"']+))/g)]
+    .map((match) => match[1] ?? match[2] ?? match[3])
+  if (outfiles.length === 0) {
+    fail(`${where} declares no --outfile= at all: either esbuild stopped writing the bundle or this script stopped being the bundler — refusing rather than assuming nothing is expected`)
+  }
+  const names = []
+  for (const outfile of outfiles) {
+    const rel = posix(outfile)
+    if (!/^dist\/[A-Za-z0-9._-]+\.js$/.test(rel)) {
+      fail(`${where} writes ${outfile}, which is not a plain \`dist/<name>.js\`: this guard compares dist's files by name and cannot do that against a nested or non-.js output`)
+    }
+    const name = rel.slice('dist/'.length)
+    if (!names.includes(name)) names.push(name)
+  }
+  // The clean-up step is part of the same promise: it keeps exactly the files the bundler
+  // wrote. A `! -name` list that disagrees with the `--outfile` list means one of the two
+  // is lying — an entry the script deletes again after writing it, or a leftover it
+  // protects that the bundler no longer produces.
+  const kept = [...script.matchAll(/! -name '([^']+)'/g)].map((match) => match[1])
+  if (kept.length > 0) {
+    const keptButNotBundled = kept.filter((name) => !names.includes(name))
+    const bundledButDeleted = names.filter((name) => !kept.includes(name))
+    if (keptButNotBundled.length > 0 || bundledButDeleted.length > 0) {
+      fail(`${where} is internally inconsistent: its clean-up step keeps ${JSON.stringify([...kept].sort())} while it bundles ${JSON.stringify([...names].sort())}`
+        + `${keptButNotBundled.length > 0 ? ` (${JSON.stringify(keptButNotBundled)} kept but never bundled)` : ''}`
+        + `${bundledButDeleted.length > 0 ? ` (${JSON.stringify(bundledButDeleted)} bundled but deleted by its own clean-up step)` : ''}`)
+    }
+  }
+  return names.sort()
+}
+
+/** The expected set, read from this repository's own `mcp-shell` manifest. */
+function repoBundleEntries() {
+  const manifest = path.join(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'), 'mcp-shell', 'package.json')
+  let parsed
+  try {
+    parsed = JSON.parse(fs.readFileSync(manifest, 'utf8'))
+  } catch (error) {
+    fail(`mcp-shell/package.json could not be read to derive the bundle entries (${String(error)}): this script cannot say what the bundler writes without it`)
+  }
+  return bundleEntriesFromScript(parsed?.scripts?.bundle, { where: 'mcp-shell/package.json scripts.bundle' })
+}
 
 /** Prove the packed `mcp-shell/dist` is the bundle, and that nothing it imports is undeclared. */
 export function assertBundleShape({ entries, manifest }) {
   const declared = new Set(Object.keys(manifest.dependencies ?? {}))
+  const bundleEntries = repoBundleEntries()
   const js = entries.filter((entry) => entry.name.startsWith('mcp-shell/dist/') && entry.name.endsWith('.js'))
   if (js.length === 0) fail('mcp-shell/dist carries no .js at all — there is nothing for the declared bin targets to run')
   const unbundled = js
-    .filter((entry) => !BUNDLE_ENTRIES.includes(entry.name.split('/').pop()))
+    .filter((entry) => !bundleEntries.includes(entry.name.split('/').pop()))
     .map((entry) => entry.name)
   if (unbundled.length > 0) {
-    fail(`mcp-shell/dist holds ${unbundled.length} file(s) the bundler does not write (${unbundled.slice(0, 6).join(', ')}): this is tsc output, its entry points still import "@iterate/kernel" which glasspane-mcp does not declare, and the installed package dies on ERR_MODULE_NOT_FOUND. Run "npm --workspace glasspane-mcp run bundle" as the LAST step touching dist before packing (npm test rebuilds it with tsc).`)
+    fail(`mcp-shell/dist holds ${unbundled.length} file(s) the bundler does not write (${unbundled.slice(0, 6).join(', ')}): this is tsc output, its entry points still import "@iterate/kernel" which glasspane-mcp does not declare, and the installed package dies on ERR_MODULE_NOT_FOUND. Run "npm --workspace glasspane-mcp run bundle" as the LAST step touching dist before packing (npm test rebuilds it with tsc). The expected set (${bundleEntries.join(', ')}) is read from mcp-shell/package.json's own bundle script.`)
   }
   const missing = new Set()
   for (const entry of js) {

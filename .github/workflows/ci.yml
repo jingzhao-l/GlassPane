@@ -22,15 +22,30 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
       - name: Build engine
         working-directory: engine
         run: swift build
       - name: Test engine (pure-logic suite, no GUI permission needed)
         working-directory: engine
-        run: swift test
+        # pipefail 是这条闸的一半：没有它，`swift test | tee` 的退出码是 tee 的，
+        # 一趟真失败的测试会被包装脚本判成绿（本仓栽过：包装脚本的退出码不可信）。
+        run: |
+          set -o pipefail
+          swift test 2>&1 | tee /tmp/gp-engine-tests.log
       - name: Test probe SDK package (GlassPaneProbe SPM target)
         working-directory: engine/probe
-        run: swift test
+        run: |
+          set -o pipefail
+          swift test 2>&1 | tee /tmp/gp-probe-tests.log
+      - name: "测试计数闸：一条用例都没跑不许算绿"
+        # `swift test` 的退出码只说"没失败"，不说"有没有东西在跑"：用例全删掉、glob 匹配空、
+        # target 一条都没链上，这一格照样绿。两种 runner（XCTest 与 Swift Testing）各自的行
+        # 都必须出现，且合起来的数量过下限——下限由调用方给，钉一个会衰减的大数会把正常改动
+        # 变成红，那是另一种假绿。判据与反例见 scripts/assert-test-count.mjs 与其测试。
+        run: node scripts/assert-test-count.mjs swift 1 /tmp/gp-engine-tests.log /tmp/gp-probe-tests.log
       - name: Signal teardown gate (SIGTERM/SIGINT clean exit + socket unlink)
         working-directory: engine
         run: python3 .signal_smoke.py .build/debug/glasspaned
