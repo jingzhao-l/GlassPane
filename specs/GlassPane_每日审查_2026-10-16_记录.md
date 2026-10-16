@@ -1,4 +1,4 @@
-# 每日审查记录 · 2026-10-16 · 主仓产品面（v1.16.0 → v1.16.3）
+# 每日审查记录 · 2026-10-16 · 主仓产品面（v1.16.0 → v1.16.4）
 
 本轮是真源文件 `tools/prompts/daily-glasspane-main.md` 的无人值守每日任务。台账只新增不改历史
 结论：这一节记录当日实测到的缺陷、发布链的实际状态、替 owner 做的决定与回滚方式，以及未观测项。
@@ -17,11 +17,11 @@
 | kernel 镜像同步（`sync-kernel.sh --target=repo` 把镜像的 manifest 洗成 canonical 那份：包名/private/版本/依赖全被覆盖，且门禁当时看不出来） | 1 | `tools/sync-kernel.sh` + `updater/test/tools-sync-kernel.test.mjs`（真跑一次同步的沙箱 + 缺依赖必须拒绝且零写入） |
 | 发布链（**没有任何一环问"被 tag 的那棵树跑过测试吗"** ⇒ `v1.16.1` 三格齐而 CI 红；CI-green 那两步在 Actions 里拿不到 `gh` 的身份 ⇒ `v1.16.2` 整版挡死） | 2 | 新增 `scripts/assert-ci-green.mjs`（14 条测试 + 真 API 夹具 + 两条真调用实测）、`.github/workflows/release.yml` 两步各带 `env: GH_TOKEN`，接线核对那条测试同时判 `actions: read` 与 `GH_TOKEN` |
 | "写了但没人跑"的测试（`scripts/test/tools-gpg-signing.test.mjs` 4 条管 GPG 口令不进 argv 的安全守卫，自写下从未被任何门禁执行：根 `test` 只跑 workspaces，`scripts/` 不是 workspace，全仓 grep `scripts/test` 命中 0） | 1 | 套件移入 `updater/test/`（第一次跑就 4/4 绿），并新增 `updater/test/scripts-test-suite-is-run.test.mjs`：每条被跟踪的 `*.test.mjs` 必须落进某 workspace 的 test glob（5 条，三组反向撤销各自具名红） |
-| 测试自己的坏对照（argv 记录器把"半条记录"当一次完整调用 ⇒ 既能假红也能假绿；滴流夹具的第一块等 2ms 定时器 ⇒ 只在负载下红；并发测试文件共用沙箱基目录而 `dispose()` 把它 rmdir ⇒ CI 报 `ENOENT mkdtemp`；信号自检的现场等待 5s 不够 ⇒ 把夹具没到位说成判据问题） | 4 | `ConsoleDaemonStateRootTests.swift`（新增按帧边界算账 + 一条不起进程的现场用例）、`updater/test/source.test.mjs`、`mcp-shell/test/support/sandbox.mjs` + 新 `mcp-shell/test/sandbox-helper.test.mjs`（5 条）、`engine/.signal_smoke.py` |
+| 测试自己的坏对照（argv 记录器把"半条记录"当一次完整调用 ⇒ 既能假红也能假绿；滴流夹具的第一块等 2ms 定时器 ⇒ 只在负载下红；并发测试文件共用沙箱基目录而 `dispose()` 把它 rmdir ⇒ CI 报 `ENOENT mkdtemp`；新加的"自愈"用例为了量重建而 `rmSync` 那个共用基目录 ⇒ 同一趟里同时红两条，一条是它自己 ENOTEMPTY、一条是被它拆夹具的 `project-registry` 那条；信号自检的现场等待 5s 不够 ⇒ 把夹具没到位说成判据问题） | 5 | `ConsoleDaemonStateRootTests.swift`（新增按帧边界算账 + 一条不起进程的现场用例）、`updater/test/source.test.mjs`、`mcp-shell/test/support/sandbox.mjs` + `mcp-shell/test/sandbox-helper.test.mjs`（三条保留、一条删除，删除理由写进文件头）、`engine/.signal_smoke.py` |
 | 文档卫生（用 heredoc 追加真机记录时，包装脚本自己的 `EOF` / `echo "appended: $(wc -l <…)"` 被当成正文提交，同一形状中招两次，而 `check-doc-links` 全绿——它没有一判看正文里是否混进 shell） | 1（含 2 次实例） | 新增 `shellResidue()` 判据（只认 heredoc 结束标记与命令形状行，``` 围栏内一律豁免），5 条用例 + 四组反向撤销；两条残渣已从 `engine/smoke.md` 清除 |
 | 棘轮/闸的自述与实测不符（本轮写在文件头的"反向变异清单"里有两条声称能红、实测零红：一条是重复的目录前缀判断，一条是"argv[1] 相对路径会让自执行判据永假"——实测 Node 交给 argv[1] 的已是绝对且折叠过的路径） | 2 | 两条连同对应冗余代码一起删除，注释改为写明实测结果；这一类教训进 `feedback-controls-must-be-able-to-fail` |
 
-合计 **40 条**（含文档与测试自身的缺陷）。每一组的判据都在表里点名；没有一条留在"已知未修/
+合计 **41 条**（含文档与测试自身的缺陷）。每一组的判据都在表里点名；没有一条留在"已知未修/
 待补实现/下一轮再看"那种中间态。
 
 ## 2. 发布链当日实际走到哪一格（实测，不信任何文档里的数字）
@@ -82,9 +82,15 @@
 
 ## 6. 这份台账自己在哪一棵树里
 
-`v1.16.3` 的 tag 切在本文件写入**之前**（tag → `cb1463bb`，签名归档由那次 tag push 的
-Release run 38867271592 产出）。所以 `GlassPane-1.16.3.tar.gz` 里**没有这份文件**——它随下一版
-发出。这一条写在这里而不是省掉，是因为"发布物等于被 tag 的树"这条判据本轮已经用它打过两次脸
-（1.16.1 与 1.16.2），不能到自己这里就默认例外。代码、测试与工作流改动全在被 tag 的那棵树里；
-离树的只有这份记录与本节。
+写第一版时 `v1.16.3` 的 tag 已经切下（tag → `cb1463bb`，归档由那次 tag push 的 Release run
+38867271592 产出），所以那份归档里**没有**本文件。修法不是接受例外，而是再出一版把它收进树里：
+`v1.16.4` 的 tag 落在本文档所在的提交之后 ⇒ 本文件与 §1 的总账、§2 的四格状态，都在
+`GlassPane-1.16.4.tar.gz` 里。这一条之所以要写而不是省掉，是因为"发布物 = 被 tag 的树"这条判据
+当日已经用它打过两次脸（1.16.1 的 tag 切早了、1.16.2 挡住自己），不能轮到自己就默认例外。
+
+同一判据也管住了测试夹具那一笔：`mcp-shell/test/sandbox-helper.test.mjs` 里"删共用基目录以量自愈"
+那条用例在 `v1.16.3` 的归档里（CI run 38869673471 因此同时红两条：它自己 `ENOTEMPTY`，和被它拆掉
+夹具的 `project-registry.test.mjs:337` 那条 `ENOENT`）。核对过 `grep -rnE "npm (run )?test|node --test"
+updater/lib installer/cli.js install.sh` 只命中一条注释——升级/安装路径不跑测试，所以它对用户机器
+没有行为影响；但它在被发布的树里，所以删掉它、并把删它的理由写进文件头，随 1.16.4 发出。
 | 真机无障碍/屏幕录制类交互（`gp_act` 在真实 app 上的点击） | 需要登录 GUI 会话与已勾权限；本轮权限读数确认为 accessibility/screenRecording/inputMonitoring 均 granted，但真机 act 走的是另一条验收（`engine/.p4i4_smoke.py` 已跑，退 0） | 无需人工：已跑。仅"面板跨根采纳"一项留作上表第三行 |

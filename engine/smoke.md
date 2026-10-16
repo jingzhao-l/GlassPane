@@ -878,5 +878,26 @@ installer 那一段在同一条命令上本轮量到过四种结果：`v1.16.1` 
 话冤枉了一把本来正确的判据。改法是先等夹具走到**它自己声明的那种**现场再问诊断，两类失败各说各话；
 两条出路都实测能红（stub 不 unlink ⇒ "夹具没到位"；诊断改坏 ⇒ "诊断与现场不符"），没有放宽超时。
 
-本轮缺陷总账（40 条，按组点名判据所在）、发布链四格的实测状态、替 owner 做的八条决定与回滚、
+本轮缺陷总账（41 条，按组点名判据所在）、发布链四格的实测状态、替 owner 做的八条决定与回滚、
 以及"这份台账自己在哪一棵树里"那条自证，记在 `specs/GlassPane_每日审查_2026-10-16_记录.md`。
+
+### 9. v1.16.4：删掉那条拆别人夹具的用例之后的 15 条复跑
+
+本版没有一行运行时代码变化，但它让"发布物 = 被 tag 的树"这条判据重新成立：`v1.16.3` 的归档里带着
+一条会 `rmSync` 共用沙箱基目录的测试（CI run 38869673471 因此一趟红两条），而当日台账文件是在
+那个 tag 之后才写进仓库的。
+
+`npm ci` 0；`npm run build` 0；`npm test --workspaces --if-present` 0
+（kernel **229/229**、mcp-shell **495/495**、installer **172/172**、updater **539/539**，
+四段各自 0 fail、0 skipped）；`check-version` 0（版本线一致 **1.16.4**）；`check-doc-links` 0
+（25 份 / 227 条仓库内 / 26 条外链不请求）；`check-workflows --self-test` 0（12 档 = 11 个必须抓住
+的变异 + 1 个必须不响的合法形状）；`check-workflows` 0（5 份 workflow clean）；`swift build` 0；
+`swift test --package-path engine` 0（XCTest **Executed 1074 tests, 3 skipped, 0 failures**；
+Swift Testing **15 tests in 2 suites**）；`swift test --package-path engine/probe` 0
+（**29 tests, 0 failures**）；`pytest -q bridge` 0（**79 passed**）；`sh -n install.sh` 0；信号闸 0；
+发布形态 0（**29 个文件** / 打包 273.4 kB / 展开 931.3 kB）；`tool-surface --check` 0。
+
+mcp-shell 从 496 回到 **495**：少的正是被删掉的那一条"自愈"用例——它测的东西（缺目录会重建）由
+`mkdirSync(…, { recursive: true })` 每次调用都保证，而它的手段是删掉并发文件共用的目录。
+少一条用例不是损失，留着它才是：那一趟里两条红有一条发生在**别人的**用例上。
+
