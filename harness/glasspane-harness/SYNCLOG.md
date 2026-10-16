@@ -82,6 +82,84 @@
 ④ fork-diff 金样重记与代码同批（分两笔提交落，内容一致）。回滚：`git revert` 本批三笔
 （工具与接线、金样、台账）即回到 0.8.0 的等式状态；已发的 tag 与 npm 版本不撤。
 
+### 发布链实测（2026-10-16，tag 之后补记——这一段本身就是下一版要带走的字）
+
+**搬运与 tag**：`git subtree split --prefix=harness/glasspane-harness` 出的切提树
+`b015f03e…` 与 `git rev-parse HEAD:harness/glasspane-harness` **逐字相等**（推之前断言过）。
+远端 `main` 当时是 `23b63020`，实测**不是**主干的祖先（`git merge-base --is-ancestor` 否），
+所以按 0.8.0 那轮定下的做法补了一笔 `-s ours` 血缘合并（`commit-tree` 直接落：树仍是
+`b015f03e`，父 = [切提 `19105090`, 远端旧 tip `23b63020`]）⇒ 普通 push 就过
+（`23b63020..ac3f7f14`，**没有 `--force`、没有覆盖任何东西**）。tag `v0.8.1` 是 annotated
+对象 `143dc918`，peel 到 `ac3f7f14`，切在血缘合并之后 ⇒ 被 tag 的 commit 从一开始就在
+`refs/heads/main` 可达范围内（0.8.0 那条 403 坑没有复发）。主干侧推送前先 `git fetch`
+复基线：origin 又动了 2 笔（`docs(specs)`，只碰 `specs/` 台账，与本轮 8 个文件**零重叠**），
+`git rebase origin/main` 干净重放 4 笔，重放后子树树仍是 `b015f03e`（闸重新比过一次）。
+
+**Release 跑 `38891176919`（tag push 触发）全 success**：`tag matches the product version` 7s
+→ `create the GitHub release for this tag` 3s → `binary darwin-arm64` 2m33s →
+`binary darwin-x64` 5m51s → `SHA256SUMS for the release assets` + 签名 → `Make the release
+visible once it can be verified`。锚那一步打出的是真哈希，不是"绿"：
+
+```
+released tree (this tag's HEAD^{tree}):  b015f03e0b2d28e4e01eb054e5fd562923795dae
+trunk's subtree (harness/glasspane-harness):         b015f03e0b2d28e4e01eb054e5fd562923795dae
+anchor OK: the artifact being released IS trunk's fork subtree — b015f03e0b2d28e4e01eb054e5fd562923795dae
+```
+
+`gh release view v0.8.1` 回读：`isDraft=false`、`targetCommitish=ac3f7f14…`（就是被 tag 的
+commit）、`publishedAt=2026-10-16T11:09:18Z`、6 件资产齐（两份 zip、两份 `.zip .asc`、
+`SHA256SUMS.txt` 与其 `.asc`），全部带 `digest`。
+
+**npm 那条是独立 dispatch**（`gh workflow run release.yml --ref v0.8.1 -f publish_npm=true
+-f confirm=true`，跑 `38892404754`，success）：`Refuse to publish a tree no tag vouches for`
+先过（`--ref` 显式写成 tag 这件事由那条 job 自己判），三个 npm 作业（两个平台包 + wrapper）
+success，CI 侧那条 macOS `install the published bytes and run them` success。registry 按版本号
+点名 + `--prefer-online` 实测：三包 `@0.8.1` 都读得到，`dist-tags.latest` 也已经是 `0.8.1`
+（本轮没有复现上一轮那种十几分钟的读副本滞后）。
+
+**签名与完整性（不走本机重下资产那条路）**：`SHA256SUMS.txt` 与其 `.asc` 单取下来，用
+`scripts/install.sh` 内嵌的那把公钥 `gpg --verify` ⇒ **完好的签名**，密钥
+`0929EA31DF4F7429F63FC53189D88B1D043A1298`、身份 `jingzhao-l (sign-github)`、签名时间
+2026-10-16 19:09 CST。清单里两条 sha256 与 GitHub 资产 API 的 `digest` 逐字相等
+（arm64 `4bd76c9b5556f76f…`、x64 `0f6c1f6eff7d03f5…`）。判据仍不拿本机重算当数——
+本机重下 46 MB 资产会被代理静默截断，这是已记过的机器事实。
+
+**发布专有闸本机真跑**：`bun run script/verify-published.ts 0.8.1` 全绿——装的是**已发布**
+tarball、`glasspane-harness --version` 与 `gp-harness --version` 都回 `0.8.1`、`os`/`cpu`/
+`version` 三项对的是**已安装包**的清单（`os=["darwin"] cpu=["arm64","x64"] version="0.8.1"`）、
+wrapper 点名的每个平台包都在 registry 且带 `sha512-fVybn5vlsaght5MnoTm+…` 的 integrity、
+装好的二进制真在供内嵌 web（等 0.5s，`content-type=text/html`、doctype、assets 被引用）。
+
+**两条安装通道端到端**
+- npm：`verify-published` 走的就是这条路（临时前缀 + 真 `npm install`），上面已记；npm 11 的
+  `allow-scripts` 警告按文案原样出现，安装仍成功。
+- bun：`bun add -g glasspane-harness` ⇒ 2 个包 14.69s 装上、`~/.bun/bin/glasspane-harness`
+  与 `gp-harness` 都是符号链接指向 `../../node_modules/glasspane-harness/bin/glasspane-harness.exe`；
+  `bun pm -g trust glasspane-harness` 跑完 postinstall 后两个 bin 各回 `0.8.1`、退出码 0。
+- `curl` 兜底通道：本轮**没跑完带 gpg 的成功那一腿**，原因是本机代理对 ~40 MB 的 GitHub 资产
+  限速（上一轮同一处 40 分钟没下完，属机器边界不是产品缺陷）。补它的确切命令
+  （README.md:111 的原文形态，PATH 里要有 gpg）：
+  `curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.sh | bash`。
+  不依赖大资产的那半条本轮又核过了（上一句的 API digest 比对 + 这一段前面的 `gpg --verify`）。
+
+**父仓 CI 那条红，和它其实是闸在说话**：主干推上去的 `38891129814` 第一次是红的，红的就是
+新加的 `release-artifact --check`——它在 11:02:31 采样，那一刻 `✓ split-main` 已经成立，而
+`✗ artifact: has no tag v0.8.1`，因为我 10 秒之后才推 tag。红的内容与真实状态一致，所以处置不是
+放宽它：tag 落地后 `gh run rerun --failed` 复绿，并从绿跑日志里点名确认两条新步**真的执行了**
+（`release-artifact — 2 agreement(s) held, 0 tolerated lag(s), 0 problem(s)`；自测在 Linux runner
+上打出 `each rule goes red for its own reason…`，11 条电池全过）。
+
+**我自己两次把测量姿势弄错，记下来而不是删掉**——两次都差点被写成产品缺陷：
+① 固定点第一次跑用的是 `bun test <4 个文件>`（默认每条 5s），那条"超尺寸引擎帧应被 in-band 拒"
+的用例报 `timed out after 5000ms`；生产的跑法是 `bun test --timeout 30000 <6 个具名文件>`
+（fork 的 ci.yml:53 就是这么写的，那条用例的调用预算本来就是按 30s 契约定的）。照 CI 口径复跑
+⇒ **138 pass / 0 fail**（6 个文件、814 次断言、24.88s），tui 那条 `inline-tool-wrap-snapshot`
+⇒ **32 pass / 0 fail**（8 张快照、226 次断言）。红在我的调用签名与被测量物不一致，不在代码。
+② bun 通道我用 `bun x --bun glasspane-harness --version` 探，回 `0.7.10`，看起来像"全局装的
+是旧版"；直接跑 `~/.bun/bin/glasspane-harness --version` ⇒ `0.8.1` rc=0。`bun x` 取的是它自己的
+缓存副本，不是这次的全局安装。两次同一个形状：**先问"我读的这一个是谁"**。
+
+
 
 ## 2026-10-16（第十次会话）· 0.8.0：发布物与主干那条没人量的等式，四条尺子的"只能绿"，与四条把红线当成交付的修复
 
