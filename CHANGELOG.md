@@ -2,6 +2,93 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.16.2] — 2026-10-16
+
+**版本判断：patch。** 四条判据逐条实测：状态文件的字段没动（新增的是发布链的 step，不是落盘的
+JSON）；退出码集合没动；CLI 参数没动；两个 npm 包的 `bin` 声明没动。取号：`v1.16.1` 已发
+（tag/Release/registry 三处齐），本版是它的后续。
+
+### 为什么这一版必须存在
+
+`v1.16.1` 的发布物本身是合格的——tag 对得上树、Release 非草稿、四件资产齐、`.asc` 验得过，
+registry 两个包现在都读得到 `1.16.1`。但**那一棵树的 CI 是红的**：run 38842800885 的
+`root workspace gate` 里 `updater/lib/mcp.js` 抛 `write EPIPE`。发的时候我没有先取该 sha 的
+CI 结论再打 tag（提示词的顺序写的是 push → 等 CI 绿 → tag → dry → publish），而链子上也没有
+任何一环会拦这件事。于是这一版做三件事：把那条红修掉、把"没验证的树发不出去"变成机器判据、
+把一条从写下那天起就没被执行过的安全守卫接回门禁。
+
+### Fixed
+
+- **更新器不再被一次 EPIPE 带下去**（`updater/lib/mcp.js`）。失效模式：三处
+  `child.stdin?.write(...)` 都没有 error 监听，Node 对未路由的 stream error 的处理是抛
+  uncaughtException；跑这条路径的是 launchd 起的常驻更新器，"自更新前问一句 MCP 有哪些工具"
+  就是它。真机上 MCP 服务器起得来、读了一半不读了，更新器不是给出说得出的判决而是整个进程死掉，
+  留下一半 staged 的树。CI 里那次是 child 恰好死在"写已提交、libuv 完成回调未回"的缝里，
+  负载越高越容易中（本机复跑 6/6 绿，同一个洞）。现在写之前看 `settled`/`destroyed`，
+  错误只记账不重抛，判决仍由 `close` 或超时那一侧给出，但把管道已死这件事并进原因里——
+  "did not answer tools/list within 800ms"只说了半场，不写出 EPIPE 读者会去查一个根本没坏的
+  服务器。测试夹具不靠负载施舍：`#!/bin/sh` 包一层先 `exec 0<&-` 关掉读端再答 `initialize`，
+  父进程的写因此必然打在已关的读端上；判决放在**另一个进程**里量，退出码才是度量（`node --test`
+  会把 uncaughtException 记到当前用例头上，测不出"生产里会不会崩"）。让 node 自己
+  `fs.closeSync(0)` 是错的形状——实测那样会卡住 node 自己的事件循环，一句回答都发不出来。
+  反向撤销实测：删监听 → 两条新用例红；抹掉 EPIPE 那半句 → 只有指名它的那条红。
+
+### Fixed（测试自己的缺陷：一条会假红、也会假绿的对照）
+
+- **`ConsoleDaemonStateRootTests` 的 argv 记录器按帧边界算账**（`engine/Tests/…/ConsoleDaemonStateRootTests.swift`）。
+  形状：负载 42 那一趟 `swift test` 报"`--project-prune --dry-run` 这条没跟着换根，实得
+  `["--state-dir", …]`"，而同一棵树上一趟绿。桩分两次落盘（先 argv 逐行、再 `\036` 分隔符），
+  读侧却把"已经写出来的那几行"当成一次完整调用——夹在两次写中间就拿到一条两元的"记录"。
+  假红还只是轻的：一次真的漏掉开关的调用，同样可能被读成"看着对"。现在分隔符就是边界，
+  没写完的那一段不算记录，等待条件也只数完整帧。新增第 5 条用例不起进程地量这件事（喂"一条
+  完整 + 一条截断"的文件形状，断言数出 1 条、且是完整那条；补上分隔符后断言开始数 2 条）。
+  反向撤销实测：把 `frames.dropLast()` 改回 `frames` → 只有这一条具名变红。
+- **滴流夹具的第一块不再等时钟**（`updater/test/source.test.mjs`）。同一类失效的第二种形状：
+  夹具每块数据都 `await setTimeout(2)`，而总上限只有 60ms——负载 35–42 的那一趟里第一个定时器
+  被拖过上限，`produced` 还是 0，于是"这一段确实收到过字节"那条前提红了。它红得正确（那一刻测的
+  确实不是滴流撞上限），但**只在机器忙时才有的红就是坏对照**：改形式（第一块直接交，之后每块
+  继续 2ms），不加超时——`timeoutMs` 正是被测对象，放宽它等于把判据改掉。复跑 3 趟全绿。
+
+### Guards（新加的机器判据，不是文档承诺）
+
+- **发布前问一次 GitHub：这个 commit 的 CI 到底绿没绿**（`scripts/assert-ci-green.mjs`，
+  `release.yml` 的 `github-release` 与 `npm-publish` 各接一处）。三种出路分开说，因为补救动作
+  不同：跑坏了 → 点名 run 号、结论与 URL；还没跑完 → 等（预算 20 分钟），等满按"未验证"拒绝，
+  绝不记成通过；这个 sha 一条记录都没有 → 拒绝并说"没有证据"（空 `workflow_runs` 最容易长成绿，
+  而它正是 tag 指到 main 之外的提交上时的样子）。取按 `created_at` 最新的那一条——重跑同一个
+  commit 是常规操作，旧的红不该永远钉住这一版。`github-release` 那一步放在最前面：那时还没构建、
+  没签名、没上传，拒绝在这里什么都不必回滚。14 条测试，夹具是真 API 响应体（红的那份就是
+  run 38842800885 本身），另有两条真机端到端：对 `4c58e9c` 退 1 并给出 URL，对 `6bb4f54` 退 0。
+  这道闸自己的入参也被判掉：`--budget`/`--poll` 收不进正整数毫秒就拒绝并退出 1——这不是洁癖，
+  实测 `Atomics.wait(…, NaN)` **永不返回**（那条只读探针挂了两分钟只能杀掉），而预算比较遇 NaN
+  恒为假，写坏一个时间参数会把发布作业变成一台不报错、不超时也停不下来的机器。
+- **"写了的测试必须有人跑"变成一条闸**（`updater/test/scripts-test-suite-is-run.test.mjs`）。
+  起因是一条实测发现的死守卫：`scripts/test/tools-gpg-signing.test.mjs`（4 条用例，管
+  `tools/gpg-signing.sh` 不许把 GPG 口令拼进 argv、错误文件不许落在可预测的 /tmp 路径）
+  **从来没有被执行过**——根 `test` 脚本是 `npm run test --workspaces --if-present`，
+  workspaces 只有四个目录，`scripts/` 不在其中，全仓 grep `scripts/test` 命中 0 条。套件已移进
+  `updater/test/`（本仓 Node 测试的实际归处），移动后第一次跑，4/4 绿；新的闸把类别挡住：
+  每条被跟踪的 `*.test.mjs` 必须落进某个 workspace 的 `scripts.test` 里那条 glob，glob 从各包
+  package.json 现读、`*` 不跨目录边界。三条反向撤销各自具名变红；另有原本声称、实测零红而删掉
+  的一条（重复的目录前缀判断），连同它那句自述一起删了。
+
+### 门禁
+
+15 条逐字命令在**本版最终树**上全绿（本轮逐条实测，实际计数如下）：
+`npm ci` / `npm run build` / `npm test --workspaces --if-present`
+（kernel **229/229**、mcp-shell **491/491**、installer **172/172**、updater **534/534**，
+四段各自 0 fail、0 skipped）/ `check-version`（版本线一致 1.16.2）/ `check-doc-links` /
+`check-workflows --self-test`（**11 档各自被证红**）/ `check-workflows`（5 份 workflow clean）/
+`swift build` / `swift test`（XCTest **Executed 1074 tests, 3 skipped, 0 failures**；
+Swift Testing **15 tests in 2 suites**）/ `swift test --package-path engine/probe`（**29 tests, 0 failures**）/
+`pytest -q bridge`（**79 passed**）/ `sh -n install.sh` / 信号闸 / 发布形态
+（`npm run bundle && npm pack --dry-run`：**29 个文件 / 273.4 kB**）/ `tool-surface --check`
+（no growth past the recorded baseline）。
+
+updater 那一段从 1.16.0 的 509 涨到 534，全是本轮新写的用例（EPIPE 两条、孤儿套件闸五条、
+CI-green 十四条、签名口令那条搬过来四条……见各提交正文），没有一条是靠放宽判据省出来的。
+
+
 ## [1.16.1] — 2026-10-16
 
 **版本判断：patch。** 四条判据逐条实测：状态文件的字段没动；退出码集合没动；CLI 参数没动；

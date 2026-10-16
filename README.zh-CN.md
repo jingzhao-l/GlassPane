@@ -171,7 +171,7 @@ npx glasspane-install
 #    每次发版由 `scripts/set-version.mjs` 改写）——要装未发布的树才去 `main`。下面那个 tag 不靠人眼
 #    核对：它是 `scripts/version-sites.mjs` 登记的派生位点，一旦与 install.sh 不一致，
 #    `scripts/check-doc-links.mjs` 就把这一页判红。
-git clone --branch v1.16.1 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
+git clone --branch v1.16.2 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
 
 `GLASSPANE_REF=<tag>` 指定其他发布版；`GLASSPANE_REF=main` 追主干（它不是固定产物）。
