@@ -506,6 +506,28 @@ function assertNoConcurrentWrite(filePath: string, openedAs: string | null): voi
   }
 }
 
+/**
+ * Sync the directory entry so the rename itself is on disk, not only the file's bytes.
+ *
+ * Tolerant on purpose: a volume that has no directory sync (smbfs, NFS, exFAT, a read-only
+ * mount) is a legal `--state-dir` target, and refusing the write there would report
+ * "nothing was saved" about a registration that did land. Only an error that says the
+ * storage actually misbehaved (`EIO`, `ENOMEM`) is rethrown, and the caller's existing
+ * refusal text is what the operator then reads.
+ */
+function syncDirectory(dir: string): void {
+  let dirFd: number | null = null;
+  try {
+    dirFd = fs.openSync(dir, "r");
+    fs.fsyncSync(dirFd);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "EIO" || code === "ENOMEM") throw error;
+  } finally {
+    if (dirFd !== null) fs.closeSync(dirFd);
+  }
+}
+
 function saveProjects(filePath: string, entries: ProjectEntry[]): void {
   const dir = path.dirname(filePath);
   // Atomic write: tmp + rename. The temp name is unique per write — three
@@ -519,7 +541,19 @@ function saveProjects(filePath: string, entries: ProjectEntry[]): void {
     // makes the promise true, and it runs on a directory that already existed.
     fs.mkdirSync(dir, { recursive: true, mode: STATE_DIR_MODE });
     tightenMode(dir, STATE_DIR_MODE, "directory");
-    fs.writeFileSync(tmpPath, JSON.stringify(entries, null, 2), "utf8");
+    // Bytes before name: `writeFileSync` + `renameSync` alone publishes the path while the
+    // payload may still be in the buffer cache, so `gp_project_set` could answer "saved"
+    // about a registration that a power loss never wrote down. The daemon's own stores
+    // (engine/Sources/GlassPaneEngine/DurableFileWrite.swift) fsync the fd before the
+    // rename; this file is the *other* production writer of the same table, and a fix on
+    // one face only is what makes the other face's promise false.
+    const fd = fs.openSync(tmpPath, "w", STATE_FILE_MODE);
+    try {
+      fs.writeFileSync(fd, JSON.stringify(entries, null, 2), "utf8");
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
     // Tightened while it still carries the temp name, so the path that is
     // *created* is never world-readable, and judged again after the rename: a
     // replacement can hand the destination's older, looser mode to the item that
@@ -527,6 +561,7 @@ function saveProjects(filePath: string, entries: ProjectEntry[]): void {
     // pre-existing world-readable file this shell is about to rewrite.
     tightenMode(tmpPath, STATE_FILE_MODE, "file");
     fs.renameSync(tmpPath, filePath);
+    syncDirectory(dir);
     tightenMode(filePath, STATE_FILE_MODE, "file");
   } catch (error) {
     // The half-written temp file goes either way: a mode that would not stick is
@@ -546,7 +581,18 @@ function saveProjects(filePath: string, entries: ProjectEntry[]): void {
         + "permissions; until then the registry on disk and this shell disagree about who can read it",
       );
     }
-    throw error;
+    // A durability fault is not a permissions story, and it is not "the file is damaged":
+    // the write itself could not be committed. Say which syscall failed, answer "not saved"
+    // instead of "saved", and hand over the two commands that tell the causes apart.
+    const errno = (error as NodeJS.ErrnoException)?.code ?? "unknown";
+    throw new ProjectRegistryError(
+      GP_E_INTERNAL,
+      `projects.json at ${filePath} was not published: committing the bytes to the device failed (${errno}). `
+      + `gp_project_set answers "not saved" here rather than "saved", because a registration a power loss can `
+      + `drop is not a registration. This is the write's own failure, not a verdict about the file's contents: `
+      + `check what the volume will do (\`ls -lO ${dir}\` for an immutable flag, \`diskutil info -live ${dir}\` `
+      + `for a read-only or remote mount), fix that, then retry the same call.`,
+    );
   }
 }
 

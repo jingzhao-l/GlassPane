@@ -125,6 +125,14 @@ public final class ApprovalGate {
     /// one through the same door.
     var isolationCheck: (String) -> String? = StateRoot.isolateFile(at:)
 
+    /// 落盘系统调用面（fsync 那一步），默认是真系统调用。
+    ///
+    /// 与上面 `isolationCheck` 同一个理由：非 root 的单测造不出"fsync 返 EIO 的
+    /// 卷"，而"持久化失败要报成失败的写"这条分支若从未被执行过，它就只是一句写在
+    /// 注释里的承诺。`DurableFileWriteTests` 用它把 fsync 换成失败，检验
+    /// `persistFailed` 记下的是这一条而不是成功。
+    var durableWriteOperations = DurableFileWrite.Operations.live
+
     public init(
         path: String? = nil,
         clock: @escaping () -> Date = { Date() },
@@ -335,7 +343,11 @@ public final class ApprovalGate {
         // per write, same convention as ProjectRegistry / EvidenceStore.
         let tmpPath = "\(path).tmp-\(getpid())-\(UUID().uuidString)"
         do {
-            try data.write(to: URL(fileURLWithPath: tmpPath))
+            // 共享的落盘原语（`DurableFileWrite`）：独占创建 → 写全 → **fsync** →
+            // close。`data.write(to:)` 只把字节交给内核缓冲，而这条链的对外承诺是
+            // "记录已进审计"——`--approval-verify` 之后从**另一个进程**读这份文件，
+            // 断电后它可能读到旧链，而追加的那一侧已经报过"记下了"。
+            try DurableFileWrite.stage(data, to: tmpPath, operations: durableWriteOperations)
             // The mode is set while the bytes are still under the temporary
             // name, so the published name is never *created* group- or
             // world-readable; the check after the rename below is what covers the
@@ -351,6 +363,9 @@ public final class ApprovalGate {
                 withItemAt: URL(fileURLWithPath: tmpPath)
             )
             try? FileManager.default.removeItem(atPath: tmpPath)
+            // 改名的持久化点在目录项上：链的字节 fsync 过之后，还要"这个名字指向
+            // 这条链"也 fsync 过，才轮到把 `persistFailed` 清空。
+            try DurableFileWrite.syncPublished(atPath: path, operations: durableWriteOperations)
             // …and the window the temporary name closes is only half the story:
             // measured on APFS, `replaceItemAt` hands the *destination's*
             // attributes to the item that lands, so a ledger that was ever
@@ -367,6 +382,17 @@ public final class ApprovalGate {
             } else {
                 persistFailed = nil
             }
+        } catch let fault as DurableFileWrite.Failure where fault.isDurabilityFault {
+            // 名字能用、盘却说"这些字节没有落"。**不许**走下面那条 fallback：它
+            // 一次 fsync 都不做，用它把这次写成成功正是本条缺陷的形状。按本仓
+            // 既有口径（chmod 不粘就报失败的写，不报存好了）把 `persistFailed`
+            // 写成这次持久化失败，并清掉被拒的临时件。
+            if FileManager.default.fileExists(atPath: tmpPath) {
+                try? FileManager.default.removeItem(atPath: tmpPath)
+            }
+            reportPersistenceFailure(
+                "approval ledger \(path) was not persisted: \(fault.message) — the write is reported as failed, not as saved: the \(records.count) record(s) are in this process only and `--approval-verify` from another process cannot be promised to see them. The state root has to sit on a volume that answers fsync (`ls -ld \(path)`, `df -k \(path)`); nothing was deleted."
+            )
         } catch {
             let primary = error
             log.error("approval ledger write via \(tmpPath) failed: \(primary) — falling back to an atomic rewrite of \(path)")
@@ -384,6 +410,9 @@ public final class ApprovalGate {
             }
             do {
                 try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+                // 兜底这条路同样不许把"没落盘"写成"记下了"：`.atomic` 只管改名
+                // 的可见性，补一次文件 + 目录的 fsync 才配得上 `persistFailed = nil`。
+                try DurableFileWrite.syncPublished(atPath: path, operations: durableWriteOperations)
                 if let defect = isolationCheck(path) {
                     reportPersistenceFailure(
                         "approval ledger \(path) is not owner-only after the fallback write: \(defect) — permission judgment, not a full disk: the \(records.count) record(s) reached disk but the hash chain is readable by every local account, so \(path) has to be tightened (chmod 600) or the state root moved with --state-dir to a volume that honors permissions"
@@ -391,6 +420,10 @@ public final class ApprovalGate {
                 } else {
                     persistFailed = nil
                 }
+            } catch let fault as DurableFileWrite.Failure where fault.isDurabilityFault {
+                reportPersistenceFailure(
+                    "approval ledger \(path) reached its final name by the fallback write but was not persisted: \(fault.message) — reported as a failed persist, not as a recorded one: the \(records.count) record(s) are here in memory and a later process is not promised this chain (fsync has to be answered by the volume holding \(path))"
+                )
             } catch {
                 reportPersistenceFailure(
                     "approval ledger write to \(path) failed twice (via \(tmpPath): \(primary); direct: \(error)) — the \(records.count) record(s) exist in this process only and are NOT in the audit trail on disk"

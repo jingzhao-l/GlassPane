@@ -351,7 +351,11 @@ public final class EvidenceStore {
         // past whatever it left behind.
         let tmpPath = temporaryPath(filePath)
         do {
-            try data.write(to: URL(fileURLWithPath: tmpPath), options: .atomic)
+            // 落盘走 `DurableFileWrite`：独占创建 → 写全 → **fsync** → close，然
+            // 后才轮到隔离判定与改名。`Data.write(.atomic)` 只保证"读者看不见半份
+            // 文件"，不保证"断电后这份文件还在"，而 `true` 会被 `EngineCore` 说成
+            // `evidencePersisted: true`。
+            try DurableFileWrite.stage(data, to: tmpPath, operations: durableWriteOperations)
             // Owner-only *before* the rename, so an evidence pack is never — not
             // even briefly — readable by another local account. The archive is
             // the audit trail the panel and `gp_export_evidence` publish, and
@@ -380,8 +384,27 @@ public final class EvidenceStore {
                 removeAfterRefusal(filePath)
                 return false
             }
+            // 改名的持久化点在**目录项**上：pack 的字节已经 fsync 过，而"这个名字
+            // 指向这些字节"这件事要到目录也 sync 才算落。放在隔离判定之后，是因为
+            // 判定不过的那一次根本不该被发布出去。
+            try DurableFileWrite.syncPublished(atPath: filePath, operations: durableWriteOperations)
             reportRetention(capRemoved: pruneIfNeeded(), ttlRemoved: pruneExpiredIfNeeded())
             return true
+        } catch let fault as DurableFileWrite.Failure where fault.isDurabilityFault {
+            // 名字能用、盘却说"这些字节没有落"。**不许**走下面那条 fallback：
+            // 它一次 fsync 都不做，用它把这次写成 true 正是本条缺陷的形状——
+            // 与"chmod 没粘住就报成失败的写"同一条口径。
+            log.error(durabilityRefusalReport(filePath, fault: fault))
+            // 失败在改名之前（staged 那一步）时，那份临时件是本进程写的、没人认领的
+            // 字节——按既有规矩撤掉它。失败在改名之后时 tmpPath 早就不在了，这里
+            // 不去假装删了什么。
+            if FileManager.default.fileExists(atPath: tmpPath) {
+                removeAfterRefusal(tmpPath)
+            }
+            // 不删已发布的 pack：内容层面它是完好的档案，删掉一次未被证实的持久化
+            // 是拿审计数据换一个不存在的保证。调用方拿到的是 `false`，也就是
+            // `evidencePersisted: false` + `lastEvidencePersistenceFailure`。
+            return false
         } catch {
             // Fallback: direct write (see ProjectRegistry.save). Reached when the
             // temporary name cannot be used at all — which is what a full,
@@ -397,9 +420,36 @@ public final class EvidenceStore {
                 removeAfterRefusal(filePath)
                 return false
             }
+            // 兜底这条路同样不能把"没落盘"写成"存好了"：`Data.write(.atomic)` 之后
+            // 补一次文件 + 目录的 fsync，判不过就报 false。
+            do {
+                try DurableFileWrite.syncPublished(atPath: filePath, operations: durableWriteOperations)
+            } catch let fault as DurableFileWrite.Failure {
+                log.error(durabilityRefusalReport(filePath, fault: fault))
+                return false
+            } catch {
+                log.error("evidence pack \(filePath) reached its final name by the fallback route but could not be re-synced (\(error)) — the write is reported as failed, not as saved")
+                return false
+            }
             reportRetention(capRemoved: pruneIfNeeded(), ttlRemoved: pruneExpiredIfNeeded())
             return true
         }
+    }
+
+    /// 持久化判定的系统调用面，默认是 `DurableFileWrite.Operations.live`。
+    ///
+    /// 与 `isolationCheck`/`temporaryPath` 完全同一个理由：单测（非 root）造不出
+    /// "fsync 返 EIO 的卷"，而那条拒绝分支若从未被执行过，它就只是一个写在这里的
+    /// 承诺。`DurableFileWriteTests` 用它把 `fsync` 换成失败，检验
+    /// `write` 回 false、且这份档案没有被写成 `true`。
+    var durableWriteOperations = DurableFileWrite.Operations.live
+
+    /// 一次持久化失败对外说的那句话。它与 `isolationRefusalReport` 的区别要留在
+    /// 文本里：那条是权限判定（字节在、谁能读不对），这条是**字节没有落**。
+    private func durabilityRefusalReport(
+        _ path: String, fault: DurableFileWrite.Failure
+    ) -> String {
+        "evidence pack \(path) was not persisted: \(fault.message) — the write is reported as failed, not as saved, so `evidencePersisted` says what was measured (nothing) rather than what was hoped; the archive directory \(directory) has to be on a volume that answers fsync"
     }
 
     /// The refusal an isolation failure on the published name raises. It names

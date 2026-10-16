@@ -35,9 +35,16 @@ public final class ProjectRegistry {
     /// Why the load failed, phrased for the agent-facing message.
     public private(set) var loadFailure: String?
 
-    /// The cheap identity of the bytes this process last read: modification time
-    /// (to the nanosecond) plus size. nil when there was no file at load.
+    /// 落盘系统调用面（fsync 那一步），默认是真系统调用。
     ///
+    /// 与 `EvidenceStore.isolationCheck`、`ApprovalGate.isolationCheck` 同一个理由：
+    /// 非 root 的单测造不出"fsync 返 EIO 的卷"，而"字节没落就报失败的写"这条分支
+    /// 若从未被执行过，它就只是注释里的一句话。`DurableFileWriteTests` 用它把
+    /// fsync 换成失败，检验 `create()` 抛的是拒绝而不是成功。
+    var durableWriteOperations = DurableFileWrite.Operations.live
+
+    /// The cheap identity of the bytes this process last read: modification time
+    /// (to the nanosecond) plus size. nil when there was no file at load.    ///
     /// `save()` serialises the *whole* table and `verifySaved` can only compare
     /// the count this process just wrote, so without a baseline here a file
     /// changed by another writer in between — `glasspaned --project-prune` is a
@@ -392,7 +399,12 @@ public final class ProjectRegistry {
         let tmpPath = "\(filePath).tmp-\(getpid())-\(UUID().uuidString)"
         let tmpURL = URL(fileURLWithPath: tmpPath)
         do {
-            try data.write(to: tmpURL)
+            // 共享的落盘原语：独占创建 → 写全 → **fsync** → close。`Data.write` 把
+            // 字节交给内核缓冲就算成功，而这份表是 daemon 之外所有进程（一次性 CLI、
+            // MCP 壳）都要照着动的东西：`verifySaved` 读回的是本机内核还没丢的那份，
+            // 断电之后文件可以在、内容却可能是旧的或零长——"保存成功"那句话就跑在
+            // 字节前面了。
+            try DurableFileWrite.stage(data, to: tmpPath, operations: durableWriteOperations)
             // The registry lists every project this machine may act on, with
             // paths and bundle ids; the umask default (`0644`) made it readable
             // by every local account (R5-04). Tightened while it is still the
@@ -426,10 +438,27 @@ public final class ProjectRegistry {
                backup.standardizedFileURL.path != destination.standardizedFileURL.path {
                 try? FileManager.default.removeItem(at: backup)
             }
+            // 改名的持久化点在**目录项**上：表的内容已经 fsync 过，"这个文件名指向
+            // 这份表"要到目录也 sync 过才算数。放在回读校验之前，因为
+            // `verifySaved` 读回的是本机缓存里的样子——它证明不了断电后还在。
+            try DurableFileWrite.syncPublished(atPath: filePath, operations: durableWriteOperations)
             // Belt: the table has to be readable back off disk before the caller
             // hears "saved" — an in-memory-only registry is invisible to the next
             // process and evaporates on restart.
             try verifySaved(destination, expecting: projects.count)
+        } catch let fault as DurableFileWrite.Failure where fault.isDurabilityFault {
+            // 系统调用回答了"这些字节没有落"。这既不是并发写者的拒绝，也不是一条
+            // "the file on disk is unchanged"——那种说法在这里会说谎：改名可能已经
+            // 发生，只是没人能保证它还看得见。报成一次失败的写（调用方按既有路径
+            // 回滚内存表），并把落在临时名上的那份撤掉。
+            if FileManager.default.fileExists(atPath: tmpPath) {
+                _ = discardStagedCopy(tmpPath)
+            }
+            throw GPError(
+                code: .internalError,
+                message: "project registry write to \(filePath) did not reach the disk: \(fault.message) — the write is reported as failed rather than as saved, so no caller may treat these \(projects.count) registration(s) as persisted; the volume holding \(filePath) has to answer fsync",
+                remedy: "check the volume and the directory (`df -k \(destination.deletingLastPathComponent().path)`, `ls -ld \(destination.deletingLastPathComponent().path)`); until the registry is on durable bytes, restart the background service so no process trusts an in-memory table (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`)"
+            )
         } catch let clash as ConcurrentWriteRefusal {
             // The refusal is the outcome, so it is reported as itself: the staged
             // copy goes, the file stays exactly as the other writer left it, and
