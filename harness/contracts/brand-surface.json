@@ -33,5 +33,5 @@
     "occurrences": 9646,
     "filesScanned": 3312
   },
-  "lineageNote": "2026-10-16 合并批次的随批重记：本轮新增的归属说明与新增测试文件进扫描集（覆盖率与计数同进退），上一记见 ab78c8ac 的 --lineage-note"
+  "lineageNote": "2026-10-16 收口补记随批重记：本轮 SYNCLOG/CHANGELOG 里那些点名字节归属的说明句（哪个依赖升到哪、哪把尺子改的是谁的规则）；反证仍成立"
 }

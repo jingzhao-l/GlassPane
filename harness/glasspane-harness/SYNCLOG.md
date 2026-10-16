@@ -113,6 +113,79 @@ CI job 使 `CONTRIBUTING.{md,zh-CN.md}` 的"九条 job"过期 → `check-doc-lin
 
 **闸的最终数字**：见本节末【收口补记】（发布链跑完后写）。
 
+## 收口补记（2026-10-16，发布链跑完之后）
+
+**发布物实测**：`v0.8.0` = split 仓 tag → commit `ca32b73`；Release **非草稿**，`targetCommitish` 就是
+被 tag 的那个 commit（不再是分支名——v0.6.4 那次的锚点缺陷此后每版都核，本轮仍核）。6 个资产齐：
+`glasspane-harness-darwin-arm64.zip` / `-darwin-x64.zip` / 各自 `.asc` / `SHA256SUMS.txt` / 其 `.asc`。
+两条运行都绿：push 那条 6m7s（`version-check` 含本轮新加的**主干锚** → `create-release` → binaries×2 →
+`checksums` + 签名 → 公开），dispatch 那条（`publish-gate` → npm 平台包×2 → wrapper →
+**`verify-published`**）。registry 三包 `--prefer-online` 实测均 `0.8.0`，`dist-tags.latest = 0.8.0`。
+
+**一条本轮新踩的顺序坑，记下来而不是当作偶发**：第一次 push 触发时 `create-release` 拿
+**HTTP 403 "Resource not accessible by integration"**——不是权限设置（`actions/permissions` 是
+`allowed_actions: all`，job 里 `contents: write` 明写在文件里），而是**tag 先推了、被 tag 的那个 commit
+当时还不是 split 仓任何分支的祖先**。等 lineage merge 把 commit 带进 `refs/heads/main` 之后，
+`gh run rerun --failed` 同一条 job 4 秒过。发布顺序因此固定为：**split → `-s ours` 并 split main → 推 main
+→ 核 commit 可达 → 再打 tag**。不改 `actions/permissions`、不给 job 加更宽的 token。
+
+**端到端实测（三条通道）**
+- `npm install -g --prefix ~/.local glasspane-harness` → `glasspane-harness --version` 与
+  `gp-harness --version` 都回 `0.8.0`；npm 11 的 `allow-scripts` 警告按文案原样出现（安装仍成功）。
+- `bun add -g` → 2 个包装上、两个 bin 到位，但 bun 默认拦 postinstall；`bun pm -g trust glasspane-harness`
+  跑完那条脚本后 `--version` 回 `0.8.0`。
+- `curl` 兜底通道把 npm/bun 都藏起来真跑：**`sha256 verified against SHA256SUMS.txt`** 之后，因那次运行的
+  PATH 里没有 gpg，走到本轮新加的**拒装**分支——错误逐句是
+  `gpg is not on PATH — this release asset's provenance cannot be established at all` /
+  `install the tool and re-run: brew install gnupg` / 并说明"a VAR=1 before curl does NOT reach a piped bash"。
+  **什么都没装**（前缀里 `bin/` 是空的），这就是本轮收紧的默认在真实发布物上的样子。带 gpg 的**安装成功**
+  那一腿本机未跑完：代理对 GitHub 的 ~40 MB 资产限速（本机已知问题，40 分钟没下完），补它的确切命令写在
+  汇报第 ⑩ 项。不依赖大文件的那半条今天跑成了：把 `SHA256SUMS.txt` 与它的 `.asc` 单独取下来，用
+  `scripts/install.sh` 内嵌的那把公钥 `gpg --verify` → **完好的签名**，密钥
+  `0929EA31DF4F7429F63FC53189D88B1D043A1298`、身份 `jingzhao-l (sign-github)`、签名时间 2026-10-16 13:41 CST，
+  manifest 里两个资产的 sha256 各自点名（`55a63168…` arm64 / `e5c6ffdd…` x64）。
+- 发布专有闸 `bun run script/verify-published.ts 0.8.0` 本机全绿（exit 0）：装的是**已发布**的 tarball、
+  `glasspane-harness --version` 与 `gp-harness --version` 都 `0.8.0`、`os`/`cpu`/`version` 三项对的是
+  **已安装包**的清单（`os=["darwin"] cpu=["arm64","x64"] version="0.8.0"`——不再是那句拿 `product.json`
+  跟自己比的旧自回显）、wrapper 点名的每个平台包都在 registry 上且带 `sha512-IgDYnUSJ…` 的 integrity、
+  装好的二进制真的在供内嵌 web（`content-type=text/html`、doctype、assets 被引用）。
+
+**闸的最终数字**（合并后从干净树复测）：`fork-diff vs v1.18.32: 4645/6724 byte-identical, 282 edited,
+92 added, 1705 deleted`（开工 `4658/6719, 269/87/1705`；+13 edited / +5 added 里含合并带进来的 4 个新测试
+与领回发布物的那 11 个文件）。面 A `mcp-shell/src 9609 LOC / 21.41%`（**仍超文档 10% 上限**，越线检查对
+这个面已经耗尽，只剩 LOC 棘轮挡增量——本轮没动它一行）；面 B `fork 8793 LOC / 19.59%`（开工 8275/18.65%，
+本轮 +518 行，全部是 32 条修复自己的行，与代码同批 `--record`）；血缘 `9646 处 / 3312 文件`（开工
+9627/3308；`+19` 全是"这块字节是谁的"的归属说明，`--record` 现要求带 `--lineage-note`，本轮按 9616/9617/9618
+先例写明出处，反证成立）；product-surface **225 条一致 / 0 问题**（开工 193；+32 是本轮新规则
+`release-anchor`/`selftest-wired`/`scan-set`/`agreement-count`/`engine-methods` 的字节钉）；
+surface-semantics `0 命中 / 20 文件（14+6）`、三条正向对照仍 3/3 能红；hook-liveness `21 钩子无漂移`；
+固定点 opencode **151 / 0 fail**（8 个文件，开工 4 个文件 129）、tui **32 / 0 fail**；四包 typecheck 干净；
+`publish.ts --dry-run` 绿；`installer-selftest.sh` **all checks held**；`kernel-conformance` 16 fixture 全中；
+`kernel-pin` 26 个契约文件；`check-workflows` 5 份工作流干净 + `--self-test` 绿；`check-doc-links` 绿
+（它本轮第一次咬到我们自己写的数字：新加一条 CI job 之后 `CONTRIBUTING`/`README` 的"九条 lane"过期）。
+split 仓 CI（main push）全绿；父仓 CI 见下条。
+
+**父仓 CI 那条红，以及它抓到的合并残留**：merge 推上去后 `root workspace gate` 红，红的是
+`updater/test/scripts-test-suite-is-run.test.mjs` 那两条守卫——"这些测试写了但没有任何一条门禁会跑它们：
+`scripts/test/tools-gpg-signing.test.mjs`"。成因不是那条线的规则错，而是我的合并：main 被重写成单根历史时
+那条线把签名口令套件从 `scripts/test/` **移进** `updater/test/`，而旧历史里还留着原位置那份，合并把两个位置
+都留下了。判据用 sha256 不用猜：两份逐字节相同（`73ea49b3045e…`），删掉旧位置那份不丢任何断言；删后该守卫
+5 条全过。**这是"测试不许住在没人跑的目录"这条机制第一次替另一条线抓住我的合并**。
+
+**四条泳道全部在 150 轮上限处中断**（各自最后一句都是"现在去做 red/green 证据"）。代码在，证据不在，
+所以本轮的红/绿表由主代理自己重做：尺子层 12 条破坏、安装链 2 条、升级面 4 条、pin/probe/audit 三态各一条，
+全部"先证它能红、再还原并 sha256 核回"，明细见 `harness/README.md` 末节【2026-10-16 复验】。
+其中两条"红不了"最后查出是**我的变异打错了位置**（一次打在非 `environment:` 的 job 上——规则本来就不管它；
+一次把 PATH 清空连 node 一起杀掉，拿到 127 而不是 2），照本仓的规矩记进来：判"规则失效"之前先证明变异落地了。
+
+**本轮我替你做的决定**见上面那张表与 `CHANGELOG.md` 顶部条目的判据段；两条与并行线有关的事实也记在这里：
+① 主树里那 11 项未提交批次我**没有**继续当"别人在飞的工作"留着——它内容与 split 已发布的 blob 逐哈希相等，
+落回主干才是收口，`git status` 因此为空；② 07:30 那条线在 13:09 把 `main` 重写成单根历史，我没有覆盖它，
+而是以自己的线为第二父并入（推上去对他们是 fast-forward），76 处 add/add 按"三方字节比对"分流，
+两侧都动过的 3 个文件手工逐块合（他们的 CI-green 与我方的 npm 判决共存）。
+
+**清理盘点**见本轮最终汇报第 ⑪ 项。
+
 ## 2026-10-15（第九次会话）· 0.7.10：29 条发现全部收口，两处默认收紧，`0.7.9` 这个号作废
 
 **开工态**：主树 `/Volumes/Eng-Dev/GlassPane` 干净，HEAD `58da7be`，与 `origin/main` 同点
@@ -384,7 +457,7 @@ split 仓 `.github/workflows/release.yml`（`ref_name` 走 env + 形状校验、
 `06241ad` 是本 tip 的祖先，所以普通 push 就过（fast-forward，**没有覆盖任何东西**，
 `--force-with-lease` 本轮不需要）。tag `v0.7.8` 由 split tip 推出。Release 跑
 `38345796379`：version-check 6s、create-release 4s、darwin-x64 5m55s、darwin-arm64 3m12s、
-checksums+签名 12s，整跑 success；`gh release view` 回读 `draft=false`、
+checksums+签名 12s，整跑 success；`gh release view` 回读 `draft=`、
 **`targetCommitish` = `46d131e…`（是被 tag 的那个 commit，不再是分支名——0.6.4 那条锚点缺陷
 已在真发布物上复验）**，6 份资产齐（两份 zip、三份 `.asc`、`SHA256SUMS.txt`）。
 npm 那条是独立的 dispatch：`gh workflow run release.yml --ref v0.7.8 -f publish_npm=true
