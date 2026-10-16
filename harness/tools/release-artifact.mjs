@@ -14,13 +14,23 @@
  *   the dangerous one: trunk had LOST a line the split still held (`draft=false` → `draft=`),
  *   so a re-split performed blindly would have deleted correct bytes from the published repo.
  *
+ *   It also taught a second lesson, about this tool's own shape: fetching the published
+ *   repository into the object store of the repository being measured appends the fetched tip to
+ *   `.git/shallow`, and a shallow marker truncates history traversal — which silently falsifies
+ *   every `git merge-base --is-ancestor` a subtree push leans on. Measured the same day: nine
+ *   spurious markers, each with all of its parents present locally, one of them making a
+ *   already-published 搬运 branch look un-landed. So the remote side is fetched into a scratch
+ *   object store and the two trees are compared by what they hold; nothing in the measured
+ *   repository is written, and battery K in the selftest holds that line.
+ *
  * CALIBER
- *   Two tree hashes fetched from the split repository named by
+ *   Two tree hashes read out of the split repository named by
  *   `harness/glasspane-harness/product.json` -> `repoUrl` — `refs/heads/main` and
- *   `refs/tags/v<product.json version>` — each peeled to `^{tree}` (the tags are annotated, so
- *   the ref object is not the commit), compared against `HEAD:harness/glasspane-harness`. The
- *   operand is trunk's COMMITTED subtree: a dirty subtree is not a state anyone released, so it
- *   is refused rather than measured.
+ *   `refs/tags/v<product.json version>` — each peeled to `^{tree}` (those tags are annotated, so
+ *   the ref names a tag object), compared against `HEAD:harness/glasspane-harness`. Per-path
+ *   blob hashes say who holds which file; a path both sides hold gets its line counts from a
+ *   `git diff --no-index` over the two materialized blobs. The operand is trunk's COMMITTED
+ *   subtree: a dirty subtree is not a state anyone released, so it is refused, not measured.
  *
  * RULES
  *   split-main   split `refs/heads/main` tree == trunk's subtree tree, strictly, in either
@@ -39,12 +49,13 @@
  *   --repo <path>      measure a repository other than this one (the selftest points it at
  *   file:// fixtures; production runs never pass it).
  *
- * Exit codes: 0 agree, 1 disagreement (named rule + which side holds the bytes), 2 cannot
- * measure (no product.json, no subtree in HEAD, dirty subtree, or the split remote did not
- * answer). A refusal never buys exit 0.
+ * Exit codes: 0 agree (a tolerated `△` is still 0, and it is printed), 1 disagreement (named rule
+ * + which side holds the bytes), 2 cannot measure (no product.json, no subtree in HEAD, dirty
+ * subtree, or the split remote did not answer). A refusal never buys exit 0.
  */
 import { execFileSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -53,7 +64,7 @@ const SUBTREE = "harness/glasspane-harness"
 const MAX_LISTED = 12
 
 // Paths that RECORD a release rather than being one. A round cannot write "the registry answered
-// 0.8.1, the assets verified, the run was green" into a tree the tag has not yet cut, so the
+// 0.8.2, the assets verified, the run was green" into a tree the tag has not yet cut, so the
 // tagged artifact is permitted to lag trunk by these files' additions — said out loud, never
 // silently, and carried by the next tag. It is never permitted to LEAD (bytes trunk lost), and no
 // other path is tolerated in either direction. `split-main` takes no such allowance: pushing the
@@ -72,7 +83,9 @@ for (let i = 0; i < argv.length; i += 1) {
   const flag = argv[i]
   if (flag === "--check") continue
   if (flag === "--repo") {
-    repoRoot = path.resolve(argv[i + 1] ?? cannot("--repo needs a path"))
+    const value = argv[i + 1]
+    if (!value) cannot("--repo needs a path")
+    repoRoot = path.resolve(value)
     i += 1
     continue
   }
@@ -80,11 +93,19 @@ for (let i = 0; i < argv.length; i += 1) {
   cannot(`unknown flag ${flag} (this tool answers --check, optionally --repo <path>)`)
 }
 
-// `git` returns the trimmed stdout, or null when the command itself fails. Callers decide
-// whether a failure is a disagreement (never for git errors) or an inability to measure.
+// `git` reads/writes the measured repository; `gitIn` is for the scratch object store. Both return
+// trimmed stdout, or null when the command itself failed — callers decide whether that is a
+// disagreement (never for a git error) or an inability to measure.
 const git = (...args) => {
   try {
     return execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).trim()
+  } catch {
+    return null
+  }
+}
+const gitIn = (dir, ...args) => {
+  try {
+    return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).trim()
   } catch {
     return null
   }
@@ -109,7 +130,7 @@ if (dirty !== "") cannot(`${SUBTREE} has uncommitted changes — the anchor comp
 const trunkTree = git("rev-parse", `HEAD:${SUBTREE}`)
 if (trunkTree === null) cannot(`HEAD has no ${SUBTREE} tree in ${repoRoot}`)
 
-// One ls-remote answers both questions — does the remote exist at all, and which of the two
+// One ls-remote answers both questions — can the remote be reached at all, and which of the two
 // refs it publishes. A remote that will not answer is "cannot measure"; a remote that answers
 // "no such tag" is a disagreement this tool has to say out loud.
 const listed = git("ls-remote", splitUrl, "refs/heads/main", `refs/tags/${tagName}`)
@@ -119,47 +140,101 @@ const shaOf = (ref) => {
   return line ? line.split("\t")[0] : null
 }
 const mainSha = shaOf("refs/heads/main")
-const tagSha = shaOf(`refs/tags/${tagName}`) || shaOf(`refs/tags/${tagName}^{}`)
+const tagSha = shaOf(`refs/tags/${tagName}`)
 
-// FETCH_HEAD is a moving pointer, so the tree is read immediately after each fetch: a stale
-// FETCH_HEAD from the previous fetch would let the second rule compare the first ref's bytes.
-const treeAt = (ref) => {
-  if (git("fetch", "--no-tags", "--depth", "1", splitUrl, ref) === null) return null
-  return git("rev-parse", "FETCH_HEAD^{tree}")
+// A bare scratch store: the remote's objects land here, never in the measured repository, and the
+// directory is removed on every exit path below.
+const scratch = mkdtempSync(path.join(tmpdir(), `release-artifact-${process.pid}-`))
+const scratchRepo = path.join(scratch, "remote.git")
+const cleanup = () => rmSync(scratch, { recursive: true, force: true })
+
+const finish = (code) => {
+  cleanup()
+  process.exit(code)
 }
 
-// Paths inside the subtree, split by which side holds them. `--no-renames` is deliberate: a
-// rename would otherwise be reported as neither added nor deleted, and "who lost which bytes"
-// is the only question this breakdown exists to answer. `--numstat` then says, for a path both
-// sides carry, how many lines each side holds that the other does not — a file listed as
-// "edited" is exactly where a blind re-split destroys published bytes without any path changing
-// sides, which is the shape the `draft=false` line was lost in.
-const breakdown = (remoteTree) => {
-  const raw = git("diff", "--name-status", "--no-renames", trunkTree, remoteTree)
+if (git("--version") === null) cannot("git is not runnable")
+mkdirSync(scratchRepo, { recursive: true })
+if (gitIn(scratchRepo, "init", "-q", "--bare") === null) cannot(`could not initialize the scratch object store in ${scratch}`)
+
+// `--depth 1` because the published repository's history is irrelevant here: only each tip's tree
+// is read. BOTH refs are negotiated in one fetch — a second depth-limited fetch into a store that
+// already holds a shallow boundary cannot extend it and fails, which is exactly how a tag pointing
+// at an older commit than `main` (the normal end-of-round state) used to answer "cannot measure".
+// The refs are named inside the scratch store, so nothing in the measured repository moves.
+const refspecs = []
+if (mainSha !== null) refspecs.push("refs/heads/main:refs/artifact/main")
+if (tagSha !== null) refspecs.push(`refs/tags/${tagName}:refs/artifact/tag`)
+if (refspecs.length > 0) {
+  if (gitIn(scratchRepo, "fetch", "-q", "--no-tags", "--depth", "1", splitUrl, ...refspecs) === null) {
+    cleanup()
+    cannot(`fetching ${refspecs.map((r) => r.split(":")[0]).join(" and ")} from ${splitUrl} did not materialize — neither the 搬运 branch nor the released artifact was observed`)
+  }
+}
+const treeAt = (name) => gitIn(scratchRepo, "rev-parse", `refs/artifact/${name}^{tree}`)
+
+// A path listing per side: an object store that holds one tree also holds every blob under it, so
+// `ls-tree -r` answers "which paths, with which content" without a checkout.
+const listing = (dir, tree) => {
+  const raw = gitIn(dir, "ls-tree", "-r", tree)
   if (raw === null) return null
+  const map = new Map()
+  for (const line of raw.split("\n")) {
+    if (line === "") continue
+    const [meta, file] = line.split("\t")
+    const fields = meta.split(" ")
+    map.set(file, fields[2])
+  }
+  return map
+}
+
+const trunkFiles = listing(repoRoot, trunkTree)
+if (trunkFiles === null) cannot(`could not list trunk's ${SUBTREE} tree ${trunkTree}`)
+
+// Line counts for a path both sides hold. `+N` is what a re-split destroys: lines the published
+// bytes hold and trunk does not. `--no-index` compares two loose files, so this needs neither
+// repository and materializes nothing into either. The blobs are read as BYTES, not through the
+// trimming helper: dropping a file's final newline makes the last line compare as modified, so a
+// one-line append is reported as +2/-1 instead of +1/-0 — enough to turn a tolerated ledger lag into
+// a red, and enough to invent a RE-SPLIT RISK that is not there.
+const blobAt = (dir, hash) => {
+  try {
+    return execFileSync("git", ["-C", dir, "cat-file", "blob", hash], { encoding: "buffer", maxBuffer: 512 * 1024 * 1024 })
+  } catch {
+    return null
+  }
+}
+const lineDelta = (trunkBlob, remoteBlob) => {
+  const a = path.join(scratch, "trunk-side")
+  const b = path.join(scratch, "remote-side")
+  const left = blobAt(repoRoot, trunkBlob)
+  const right = blobAt(scratchRepo, remoteBlob)
+  if (left === null || right === null) return { added: "?", deleted: "?" }
+  writeFileSync(a, left)
+  writeFileSync(b, right)
+  let out = null
+  try {
+    out = execFileSync("git", ["diff", "--no-index", "--numstat", "--", a, b], { encoding: "utf8", cwd: scratch })
+  } catch (e) {
+    out = `${e.stdout ?? ""}`
+  }
+  const fields = (out ?? "").split("\n").find((l) => l !== "")?.split("\t")
+  if (!fields || fields.length < 2) return { added: "?", deleted: "?" }
+  return { added: fields[0], deleted: fields[1] }
+}
+
+const breakdown = (remoteTree) => {
+  const remoteFiles = listing(scratchRepo, remoteTree)
+  if (remoteFiles === null) return null
   const onlyTrunk = []
   const onlyRemote = []
   const edited = []
-  for (const line of raw.split("\n")) {
-    if (line === "") continue
-    const [status, ...paths] = line.split("\t")
-    if (status === "D") onlyTrunk.push(paths[0])
-    else if (status === "A") onlyRemote.push(paths[paths.length - 1])
-    else edited.push(paths[0])
+  for (const [file, blob] of trunkFiles) {
+    if (!remoteFiles.has(file)) onlyTrunk.push(file)
+    else if (remoteFiles.get(file) !== blob) edited.push({ path: file, ...lineDelta(blob, remoteFiles.get(file)) })
   }
-  const counts = new Map()
-  const num = git("diff", "--numstat", "--no-renames", trunkTree, remoteTree)
-  if (num !== null) {
-    for (const line of num.split("\n")) {
-      if (line === "") continue
-      const [added, deleted, file] = line.split("\t")
-      counts.set(file, { added, deleted })
-    }
-  }
-  // `+N` is the count a re-split destroys: lines the published bytes hold and trunk does not.
-  // Binary files report "-" for both sides, which stays unknown rather than becoming a zero.
-  const editedFiles = edited.map((p) => ({ path: p, added: counts.get(p)?.added ?? "?", deleted: counts.get(p)?.deleted ?? "?" }))
-  return { onlyTrunk, onlyRemote, edited: editedFiles }
+  for (const file of remoteFiles.keys()) if (!trunkFiles.has(file)) onlyRemote.push(file)
+  return { onlyTrunk, onlyRemote, edited }
 }
 
 const report = (rule, remoteLabel, remoteTree, diff, remedy) => {
@@ -170,17 +245,16 @@ const report = (rule, remoteLabel, remoteTree, diff, remedy) => {
         : "the next `git subtree split` would either drop trunk's work or overwrite the split's."
     }`,
   ]
-  const edited = diff.edited.map((e) => `${e.path} (+${e.added} remote-only line(s) / -${e.deleted} trunk-only line(s))`)
   const section = (label, paths) =>
     paths.length === 0 ? `      ${label}: none` : `      ${label}: ${paths.length}\n${paths.slice(0, MAX_LISTED).map((p) => `        ${p}`).join("\n")}${paths.length > MAX_LISTED ? `\n        … ${paths.length - MAX_LISTED} more` : ""}`
+  const edited = diff.edited.map((e) => `${e.path} (+${e.added} remote-only line(s) / -${e.deleted} trunk-only line(s))`)
   lines.push(section("trunk-only, i.e. absent from the published bytes", diff.onlyTrunk))
   lines.push(section("published-only, i.e. a whole file trunk does not have", diff.onlyRemote))
   lines.push(section("edited on both sides (+remote-only lines / -trunk-only lines)", edited))
   // The direction that loses work silently: a file both sides carry, where the published copy
-  // holds lines trunk no longer does. Whole-file additions are visible as a path on one side;
-  // this one is invisible until the split push has already overwritten it — the exact shape
-  // `draft=false` was lost in.
-  const remoteLines = diff.edited.reduce((n, e) => n + (/^\d+$/.test(e.added) ? Number(e.added) : 0), 0)
+  // holds lines trunk no longer does. Whole-file additions show as a path on one side; this one is
+  // invisible until the split push has already overwritten it — the shape `draft=false` was lost in.
+  const remoteLines = linesOf(diff.edited.map((e) => e.added))
   const riskFiles = diff.edited.filter((e) => /^\d+$/.test(e.added) && Number(e.added) > 0).length
   if (remoteLines > 0 || diff.onlyRemote.length > 0)
     lines.push(`      ⚠ RE-SPLIT RISK: the published bytes hold ${remoteLines} line(s) in ${riskFiles} file(s) plus ${diff.onlyRemote.length} whole file(s) that trunk does not — \`git subtree split\` from trunk today overwrites them. Land every one of those in trunk first, then split.`)
@@ -196,10 +270,12 @@ let measured = 0
 if (mainSha === null) {
   problems.push(`split-main: ${splitUrl} publishes no refs/heads/main — the 搬运 branch that a subtree push is supposed to fast-forward is gone, so nothing downstream of it can be trusted to equal trunk`)
 } else {
-  const mainTree = treeAt("refs/heads/main")
-  if (mainTree === null) cannot(`fetching refs/heads/main from ${splitUrl} did not materialize a tree — the split repository was not observed`)
+  const mainTree = treeAt("main")
+  if (mainTree === null) {
+    cleanup()
+    cannot(`refs/heads/main was advertised by ${splitUrl} but no tree could be read for it`)
+  }
   measured += 1
-  const diff = breakdown(mainTree)
   if (mainTree === trunkTree) agreements.push(`split-main: split refs/heads/main ${mainTree} == trunk's ${SUBTREE} tree`)
   else
     problems.push(
@@ -207,7 +283,7 @@ if (mainSha === null) {
         "split-main",
         "the published repository's main",
         mainTree,
-        diff,
+        breakdown(mainTree),
         `reconcile trunk so it holds every published-only line above, then \`git subtree split --prefix=${SUBTREE} -b split/glasspane-harness\` and fast-forward push (docs/release.md step 3).`,
       ),
     )
@@ -216,8 +292,11 @@ if (mainSha === null) {
 if (tagSha === null) {
   problems.push(`artifact: ${splitUrl} has no tag ${tagName}, but ${SUBTREE}/product.json declares version ${version} — this version has never been released, so no user can have the bytes trunk holds`)
 } else {
-  const tagTree = treeAt(`refs/tags/${tagName}`)
-  if (tagTree === null) cannot(`fetching ${tagName} from ${splitUrl} did not materialize a tree — the released artifact was not observed`)
+  const tagTree = treeAt("tag")
+  if (tagTree === null) {
+    cleanup()
+    cannot(`${tagName} was advertised by ${splitUrl} but no tree could be read for it (annotated tags are peeled; a tag object that points at nothing is not a measurement)`)
+  }
   measured += 1
   const diff = breakdown(tagTree)
   if (tagTree === trunkTree) agreements.push(`artifact: ${tagName} ${tagTree} == trunk's ${SUBTREE} tree`)
@@ -226,9 +305,10 @@ if (tagSha === null) {
     // ledger, and only in the direction of the artifact not yet having it.
     const paths = [...diff.onlyTrunk, ...diff.onlyRemote, ...diff.edited.map((e) => e.path)]
     const outside = paths.filter((p) => !LEDGER.has(p))
-    const leadLines = linesOf(diff.edited.filter((e) => LEDGER.has(e.path)).map((e) => e.added)) + diff.onlyRemote.filter((p) => LEDGER.has(p)).length
-    const lagLines = linesOf(diff.edited.filter((e) => LEDGER.has(e.path)).map((e) => e.deleted))
-    const lagFiles = diff.edited.filter((e) => LEDGER.has(e.path)).map((e) => e.path)
+    const ledgerEdited = diff.edited.filter((e) => LEDGER.has(e.path))
+    const leadLines = linesOf(ledgerEdited.map((e) => e.added)) + diff.onlyRemote.filter((p) => LEDGER.has(p)).length
+    const lagLines = linesOf(ledgerEdited.map((e) => e.deleted))
+    const lagFiles = ledgerEdited.map((e) => e.path)
     if (outside.length > 0 || leadLines > 0)
       problems.push(
         report(
@@ -243,7 +323,10 @@ if (tagSha === null) {
   }
 }
 
-if (measured === 0) cannot(`neither refs/heads/main nor ${tagName} could be read from ${splitUrl} — nothing was measured, and exit 0 would be a claim about a comparison that never ran`)
+if (measured === 0) {
+  cleanup()
+  cannot(`neither refs/heads/main nor ${tagName} could be read from ${splitUrl} — nothing was measured, and exit 0 would be a claim about a comparison that never ran`)
+}
 
 console.log(`release-artifact — ${agreements.length} agreement(s) held, ${notes.length} tolerated lag(s), ${problems.length} problem(s) [trunk ${trunkTree}]`)
 for (const a of agreements) console.log(`  ✓ ${a}`)
@@ -251,10 +334,11 @@ for (const n of notes) console.log(`  △ ${n}`)
 for (const p of problems) console.error(`  ✗ ${p}`)
 if (problems.length > 0) {
   console.error(`release-artifact: trunk and the published repository are not the same bytes (${splitUrl} @ ${tagName}).`)
-  process.exit(1)
+  finish(1)
 }
 console.log(
   notes.length === 0
     ? `release-artifact: ${product.name}@${version} — split main and the released ${tagName} are both trunk's ${SUBTREE} tree`
     : `release-artifact: ${product.name}@${version} — split main is trunk's ${SUBTREE} tree, and the released ${tagName} differs from it only by the ledger named above`,
 )
+finish(0)

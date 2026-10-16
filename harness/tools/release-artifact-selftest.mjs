@@ -31,7 +31,7 @@
  * could not be built at all (no `git`), which is a machine without a measurement, not a pass.
  */
 import { execFileSync } from "node:child_process"
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
@@ -67,6 +67,23 @@ const g = (dir, ...args) => {
 const write = (file, text) => {
   mkdirSync(path.dirname(file), { recursive: true })
   writeFileSync(file, text)
+}
+
+// Read-only git for the purity battery: it must never write, so it takes no identity and no
+// mutation arguments.
+const g2 = (dir, ...args) => {
+  try {
+    return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" })
+  } catch {
+    return ""
+  }
+}
+const scratchCount = () => {
+  try {
+    return readdirSync(tmpdir()).filter((d) => d.startsWith("release-artifact-")).length
+  } catch {
+    return 0
+  }
 }
 
 const runTool = (args) => {
@@ -184,6 +201,31 @@ expect(
   }).trunkDir,
   { rc: 0, mustInclude: ["1 tolerated lag(s)", "△ artifact", "✓ split-main", "0 problem(s)"], mustNotInclude: ["✗ artifact"] },
 )
+
+// K. the measurement must not leave anything behind in the repository it measures. This is not
+// decoration: fetching the published repository into the measured object store with `--depth 1`
+// appends the fetched tip to `.git/shallow`, and a shallow marker truncates history traversal —
+// which silently falsifies `git merge-base --is-ancestor`, the exact check a subtree push uses to
+// prove it is not overwriting anything. Measured 2026-10-16: nine such markers in the parent repo,
+// each with all of its parents present locally, one of them making an already-published 搬运 tip
+// look un-landed so its branch was kept "for safety".
+{
+  const f = fixture("purity", { trunkFiles: base, splitFiles: base })
+  const before = scratchCount()
+  const got = runTool(["--check", "--repo", f.trunkDir])
+  if (got.rc !== 0) bad(`K: the equal fixture should agree, got exit ${got.rc} — the purity claims below would be vacuous, since a tool that crashed also leaves nothing behind\n${got.text}`)
+  else {
+    const shallow = path.join(f.trunkDir, ".git", "shallow")
+    const strayRefs = g2(f.trunkDir, "for-each-ref", "--format=%(refname)", "refs/artifact")
+    if (existsSync(shallow)) bad("K: the run wrote .git/shallow into the measured repository — a depth-limited fetch grafted history there, and every ancestry answer taken from this repository afterwards is suspect")
+    else ok("K live: no .git/shallow left in the measured repository")
+    if (strayRefs.trim() !== "") bad(`K: the run left refs in the measured repository:\n${strayRefs}`)
+    else ok("K live: no refs written into the measured repository")
+    const after = scratchCount()
+    if (after > before) bad(`K: the scratch store was not cleaned up (${before} → ${after} release-artifact-* directories under tmpdir)`)
+    else ok("K live: the scratch object store it needed was removed")
+  }
+}
 
 // F. an unreachable remote is "cannot measure", never a pass.
 expect("F unreachable remote refuses", fixture("dead-url", { trunkFiles: base, splitFiles: base, urlOverride: pathToFileURL(path.join(scratch, "no-such-repo")).href }).trunkDir, {
