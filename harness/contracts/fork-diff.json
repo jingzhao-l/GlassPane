@@ -2728,7 +2728,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "89f2f96b23c5ee060fb090a1a83cfeee3dccf813"
+      "forkHash": "18b947c7112151cad44147f0689464a626848ea5"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -3681,7 +3681,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "9a798e647518b4d00e0a6e34667a923359251c2b"
+      "forkHash": "e37221f8b25762b62a67eca36280daa2951f938f"
     },
     {
       "file": "contracts/engine-methods.json",
@@ -3849,7 +3849,7 @@
     },
     {
       "file": "product.json",
-      "forkHash": "39e1f24e0f00044f4efe41cca229cca65298f6a2"
+      "forkHash": "b6e28b8f50310159bba3970273c43426a9c48545"
     },
     {
       "file": "README.zh-CN.md",
@@ -3873,7 +3873,7 @@
     },
     {
       "file": "SYNCLOG.md",
-      "forkHash": "885ddca83af0e9695a3e8bbc38eca8992ec8c788"
+      "forkHash": "3351c99f50a85fd50aab2dcf409eb65a5189658a"
     }
   ]
 }
