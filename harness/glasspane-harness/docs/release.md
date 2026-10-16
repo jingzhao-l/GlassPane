@@ -111,6 +111,18 @@ Things worth knowing, because they are the usual way this is set up wrong:
    # fallback: --force-with-lease=split/glasspane-harness:<expected-remote-sha>
    ```
 
+   **3b. When the close-out notes land, repeat this step — it consumes no version.**
+   The record of a release (`SYNCLOG.md`, `CHANGELOG.md`) can only be written after the tag
+   exists, so at the end of every round trunk legitimately holds lines the artifact does not.
+   That is a reason to re-push the 搬运 branch, never a reason to let it drift: the parent-side
+   lane `harness/tools/release-artifact.mjs` requires split `refs/heads/main` to equal trunk's
+   subtree **at all times**, and grants the *tag* exactly one named, printed allowance
+   (`△ artifact`) for those two files in the lagging direction. A round that ends without this
+   re-push leaves the parent CI red — measured 2026-10-16, when the 0.8.0 close-out notes were
+   committed to trunk and never re-split, so the shipped `v0.8.0` archive did not contain the
+   record of its own release, and the same comparison showed trunk had silently lost a line the
+   split still held.
+
 4. **Tag** the same tree that is on `main` — the tag *is* the release identity:
 
    ```bash
