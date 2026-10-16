@@ -759,3 +759,69 @@ PASS guide-developerTools:  kind 路由 + 面板跳转（badge=未验证）
 发布形态 `cd mcp-shell && npm run bundle && npm pack --dry-run` 0（**29 个文件 / 931.1 kB**）；
 `node harness/tools/tool-surface.mjs --check` 0（"no growth past the recorded baseline"，
 面 A 9605 LOC/21.65%、面 B 8275 LOC/18.66%；面 A 的基线补记单独成笔 e0e12d1，比例仍高于文档 10% 上限这一条如实保留）。
+
+## 追加 2026-10-16 · v1.16.2 这一轮（同一天第二段：发布链的缺陷与被改的判据）
+
+上面那一节记的是 `v1.16.0/1.16.1`。这一段的起因是一条**发布出去但没被 CI 验证过**的树，
+以及两处只在负载下才现形的对照。所有读数出自 `release: 1.16.2` 那一笔（`216d3a2`）的树，
+命令与输出原样抄录。
+
+### 4. 为什么 1.16.1 之后必须再来一版（不是"下一个小修补"）
+
+`v1.16.1` 三格齐（tag、Release 非草稿 + 四件资产 + 签名、registry 两个包都读得到 `1.16.1`——
+当时 npm 那一侧先看不到，是读副本滞后，日志里 `+ glasspane-mcp@1.16.1` 确实在）。
+但**同一 sha 的 CI 是红的**：run 38842800885，`root workspace gate` 报
+`not ok 164 … failureType: uncaughtException, error: write EPIPE`，栈顶在
+`updater/lib/mcp.js:183` 那句 `child.stdin?.write(...)`。链子上没有任何一环会拦这件事，
+所以本轮除了修那条 EPIPE，还把"没验证的树发不出去"做成机器判据：
+`scripts/assert-ci-green.mjs` 接在 `release.yml` 的 `github-release` 第一步与 `npm-publish`
+的两条 `npm publish` 之前，三种出路分开拒（坏 / 没跑完等满预算 / 该 sha 无记录）。
+两条真调用实测：
+
+    $ node scripts/assert-ci-green.mjs --sha 4c58e9c… --repository jingzhao-l/GlassPane
+    ci.yml 在 commit 4c58e9c… 上是 failure：#241 failure https://github.com/…/runs/38842800885…   exit=1
+    $ node scripts/assert-ci-green.mjs --sha 6bb4f54… --repository jingzhao-l/GlassPane
+    ci.yml #240 在 6bb4f54… 上是 success（38841947197）                                            exit=0
+
+### 5. 两处"只在机器忙时才红"的对照，改的是形式不是超时
+
+- `ConsoleDaemonStateRootTests` 的 argv 记录器把"已经写出来的几行"当成一次完整调用；桩是分两次
+  `printf` 落盘（argv 逐行、再 `\036`），负载 42 那一趟读到半条，`prefix(3)` 就抱怨"命令没跟上"。
+  现在按帧边界算账，并新增一条不起进程的用例直接量这件事（喂"一条完整 + 一条截断"，数出 1 条；
+  补上分隔符后数出 2 条）。反向撤销实测：`frames.dropLast()` → `frames` 时该条具名变红。
+- `source.test.mjs` 的滴流夹具每块都 `await setTimeout(2)`，而总上限只有 60ms；负载高时第一个
+  定时器就被拖过上限，"确实收到过字节"这条前提红了。红得正确，但只在忙时红的对照是坏对照：
+  第一块改为直接交出，之后每块继续 2ms，上限照样撞响（`did not finish within` 那条没动）。
+  **没有**放宽 `timeoutMs`——那正是被测对象。复跑 3 趟（负载 35–42）全绿。
+
+### 6. 端到端实测（发布前后各一次；本轮这一趟在打 tag 之前跑在 `216d3a2` 的树上）
+
+    $ node scripts/make-release-archive.mjs 1.16.2 …/GlassPane-1.16.2.tar.gz
+      entries=665 bytes=3186547 sha256=af38f60e4c0efa12cb00d5723c6b30129992b3cfd5d6ad2c12d4d710f755b251
+      commands carried: mcp-shell:glasspane-mcp, mcp-shell:glasspane-http, installer:glasspane-install
+    $ node scripts/make-release-archive.mjs --verify … 1.16.2
+      release archive verified: 665 entries, 3186547 bytes, all 20 declared commands and schemas present
+    tar -tzf 复点：665 条，(^|/)harness/ 命中 **0** 条，`updater/lib/mcp.js` 在场 **1** 条（本轮修的那个文件确实在发布物里）
+    解包后在树内 `npm pack` → glasspane-mcp-1.16.2.tgz（273411 bytes）→ `npm install -g --prefix <干净前缀>`：added 2 packages
+    $ printf '"…initialize…"' | <前缀>/bin/glasspane-mcp
+      {"id":1,"jsonrpc":"2.0","result":{…,"serverInfo":{"name":"glasspane-mcp","version":"1.16.2"}}}   exit=0
+
+daemon 侧走隔离状态根（不动 `~/.glasspane`）：`glasspaned --state-dir <临时根> --version` 回
+`glasspaned 1.16.2`、退 0，且**没有**把状态根创建出来；`--permissions` 退 0，读数是
+accessibility granted / screenRecording granted / inputMonitoring granted / developerTools unverifiable，
+同样不创建状态根。
+
+### 7. 本版这趟门禁逐字复跑的实际计数
+
+`npm ci` 0；`npm run build` 0；`npm test --workspaces --if-present` 0
+（kernel **229/229**、mcp-shell **491/491**、installer **172/172**、updater **534/534**，四段各自 0 fail、0 skipped）；
+`check-version` 0（版本线一致 1.16.2）；`check-doc-links` 0（25 份文档 / 227 条仓库内链接 / 26 条外链不请求）；
+`check-workflows --self-test` 0（**11 档各自被证红**）；`check-workflows` 0（5 份 workflow clean）；
+`swift build` 0；`swift test --package-path engine` 0（XCTest **Executed 1074 tests, 3 skipped, 0 failures**；
+Swift Testing **15 tests in 2 suites passed**）；`swift test --package-path engine/probe` 0（**29 tests, 0 failures**）；
+`pytest -q bridge` 0（**79 passed**）；`sh -n install.sh` 0；信号闸 0；
+发布形态 `cd mcp-shell && npm run bundle && npm pack --dry-run` 0（**29 个文件**，打包 **273.4 kB** / 展开 **931.3 kB**
+——上面 1.16.0 那节写的 931.1 kB 是同一条命令的**展开**数，两处不矛盾，本轮起把两个数都标出来）；
+`node harness/tools/tool-surface.mjs --check` 0（no growth past the recorded baseline）。
+EOF
+echo "appended: $(wc -l < /Volumes/Eng-Dev/.worktrees/gp-daily-main-20261015/engine/smoke.md) lines total"
