@@ -794,11 +794,28 @@ if options.listProjects {
     }
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-    if let data = try? encoder.encode(registry.all) {
+    do {
+        let data = try encoder.encode(registry.all)
         FileHandle.standardOutput.write(data)
         FileHandle.standardOutput.write(Data("\n".utf8))
-    } else {
-        FileHandle.standardOutput.write(Data("[]\n".utf8))
+    } catch {
+        // 编码失败与读不开是同一种"没测出来"。旧写法回 `[]` + 退出码 0，而它上面
+        // 15 行刚写下"读不回的文件一律拒答，不许回 `[]` + 退出码 0"——这条命令是
+        // agent 被指来回答"注册了什么"的那一条（mcp-shell 的 remedy 原文点名它），
+        // 一份编码不出去表同样是"看不见"，不是"没有"。走与 `.unreadable` 同一条
+        // stderr 拒绝 + exit 1：不给 `count`，不给 `projects`。
+        // `error` 说的是本进程真的测到的一件事（表读进来了，但这份表没能编码出去），
+        // 不冒充"文件读不开"——那句会是另一句假话：键名必须与事实同源。消费侧
+        // （面板的「注册表读不开」文案、agent 会去跑的 `python3 -m json.tool`）都按
+        // `loadFailed` 的意思行动，而这里文件是读得开的，坏的这一次是输出。
+        writeJSON([
+            "command": "--list-projects", "encodeFailed": true,
+            "registryPath": registry.filePath,
+            "entriesRead": registry.count,
+            "error": "the registry this process read (\(registry.count) entries) could not be encoded for output (\(error)) — nothing was listed",
+            "next": "the file itself parses (`python3 -m json.tool \(registry.filePath)` proves it); this is a daemon-side output defect, and nothing this command holds was published"
+        ], to: .standardError)
+        exit(1)
     }
     exit(0)
 }
@@ -812,6 +829,25 @@ if let activeId = options.activeProjectId {
     // 专门审过的幻影控制形状），所以这里如实输出**核验报告**并显式
     // stateChanged=false；displayName 是 agent 自撰内容，只能经 JSON 转义出口离开
     // 进程（R5-03）。
+    //
+    // 读不开的 projects.json 回答不了"`<id>` 注册了吗"。`registry.get` 对
+    // 「没有这条 id」和「文件读不出所以什么都看不见」回的都是 nil，而旧代码把两者
+    // 一起写成 `found:false` + "no project … is registered" + exit 1：后一种情况下
+    // 那句缺席是本进程编出来的（判据与 --list-projects 同源，见
+    // `ProjectRegistry.listing()`）。所以先问一次"这张表读得开吗"，读不开就走
+    // loadFailed 拒绝形状——不给 `found` 这个键，因为"没找到"在这里同样没被测量。
+    if case .unreadable(let reason) = registry.listing() {
+        writeJSON([
+            "command": "--active-project",
+            "loadFailed": true,
+            "stateChanged": false,
+            "projectId": activeId,
+            "registryPath": registry.filePath,
+            "error": reason,
+            "next": "make the file readable again (python3 -m json.tool \(registry.filePath), or restore it from a copy), then re-run this verification; until then nothing here can say whether \(activeId) is registered"
+        ], to: .standardError)
+        exit(1)
+    }
     guard let entry = registry.get(activeId) else {
         writeJSON([
             "command": "--active-project",
@@ -1039,9 +1075,22 @@ if let recipePath = options.recipeValidate {
     let result = RecipeLoader.validate(data)
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]
-    if let resultData = try? encoder.encode(result) {
+    // 与 `--list-projects` 同一条规矩：结论算出来了却发不出去，是一次**没交出的答案**，
+    // 不是"recipe 有效"。旧写法在 encode 失败时什么都不写、还按 `result.valid` 退 0——
+    // 调用方读到的是"零输出 + 退出码 0"，那正是这条命令自己的帮助文本禁止的形状。
+    // 拒绝报文里不给 `valid`：这道命令没把结论交出去，谈不上有效与否。
+    do {
+        let resultData = try encoder.encode(result)
         FileHandle.standardOutput.write(resultData)
         FileHandle.standardOutput.write(Data("\n".utf8))
+    } catch {
+        writeJSON([
+            "command": "--recipe-validate", "encodeFailed": true,
+            "path": recipePath,
+            "error": "the validation result could not be encoded for output (\(error)) — no verdict was published",
+            "next": "re-run the same call; if it repeats, this is a daemon-side output defect, not a verdict about the recipe"
+        ], to: .standardError)
+        exit(1)
     }
     exit(result.valid ? 0 : 1)
 }
@@ -1148,6 +1197,31 @@ if options.pruneEvidence || options.evidenceStats {
     let dir: String
     if let projectId = options.maintenanceProjectId {
         let registry = ProjectRegistry(stateRoot: stateRoot)
+        // `registry.get` answers nil for two very different facts — "this id is not
+        // in the table" and "there is no table this process can read". The old code
+        // folded the second into the first and printed `"unknown project <id>"`, a
+        // definite absence built from blindness (the same confusion `attach` refuses
+        // through `EngineCore.requireRegistry`, and the one `--list-projects` answers
+        // with `loadFailed`). The judgement is taken from
+        // `ProjectRegistry.listing()`, the same source the read side uses; the
+        // honest "not registered" below stays exactly as documented for a registry
+        // this process *can* read.
+        if case .unreadable(let reason) = registry.listing() {
+            writeJSON(
+                [
+                    "command": options.pruneEvidence ? "--prune-evidence" : "--evidence-stats",
+                    "loadFailed": true,
+                    "project": projectId,
+                    "registryPath": registry.filePath,
+                    "stateRoot": stateRoot.path,
+                    "stateChanged": false,
+                    "error": reason,
+                    "next": "make \(registry.filePath) readable again (`python3 -m json.tool \(registry.filePath)`, or restore it from a copy), then re-run this command; while it is unreadable nothing here can say whether project \(projectId) exists, and no archive was opened or deleted"
+                ],
+                to: .standardError
+            )
+            exit(1)
+        }
         guard let entry = registry.get(projectId) else {
             writeJSON(
                 [
@@ -1230,7 +1304,12 @@ if options.pruneEvidence || options.evidenceStats {
             "dir": dir
         ]
         writeJSON(payload)
-        exit(0)
+        // `--prune-evidence` 20 行之前对同一个事实（`listFailure != nil`）回的是 1，
+        // 而 `--help` 的 EXIT CODES 把 1 定义成"被拒绝或只部分成功"。读不懂归档时
+        // 这条命令报的是 `count: null` ——一次什么都没测出来的调用，退出码 0 会把
+        // "拿到了统计"这句话送给只分支于 rc 的调用方。两条维护命令共用一个状态根，
+        // 就必须共用一个退出码口径。
+        exit(unreadable ? 1 : 0)
     }
 }
 
