@@ -849,7 +849,7 @@ test('the daily job\'s npm spawn works with the rendered PATH and dies without i
         env: { PATH: LAUNCHD_PATH, GP_PROBE_PREFIX: '/Users/dev/npm-prefix' },
       })
       assert.equal(starved.status, 127, `不带补过的 PATH，这份脚本必须像真 npm 一样挂：${JSON.stringify(starved)}`)
-      assert.match(String(starved.stderr), /env: node: No such file or directory/, starved.stderr)
+      assert.match(String(starved.stderr), /env: '?node'?: No such file or directory/, starved.stderr)
     }
 
     const asJob = spawnSync(script, ['config', 'get', 'prefix'], {

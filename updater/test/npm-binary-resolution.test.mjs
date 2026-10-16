@@ -135,7 +135,7 @@ test('checkNpmPrefix finds a real npm that is off PATH, and runs that copy', { s
       console.log('# control-not-applicable: 这台机器的最小 PATH 里能解析到 node，夹具不会像真 npm 那样挂；只判正面')
     } else {
       assert.equal(raw.status, 127, `一个不带 env 的真 spawn 必须像真 npm 那样死：${JSON.stringify({ status: raw.status, stderr: raw.stderr })}`)
-      assert.match(String(raw.stderr), /env: node: No such file or directory/, '夹具的 shebang 问的是 node，而最小 PATH 里没有 node')
+      assert.match(String(raw.stderr), /env: '?node'?: No such file or directory/, '夹具的 shebang 问的是 node，而最小 PATH 里没有 node')
     }
     // The control first: with the same PATH and no extra directory, nothing is found. So every success
     // below is attributable to the search, not to a PATH that happens to work on this machine.

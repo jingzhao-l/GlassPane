@@ -132,6 +132,10 @@ test('childSpawnEnv puts the node this program runs on the child PATH and keeps 
   // The measurement the fix is made of, with no seam at all: the node really is on the PATH this returns.
   const real = childSpawnEnv(process.execPath, { env: { PATH: LAUNCHD_PATH } })
   assert.equal(isInterpreterMissing({ status: 127, stderr: 'env: node: No such file or directory\n' }), true)
+  // GNU coreutils 给的名字带引号（`/usr/bin/env: 'node': …`，CI 的 ubuntu runner 实测），
+  // BSD 的不带。两种都得认出来，否则同一个"起不来"在一个平台上被当成"跑得坏"。
+  assert.equal(isInterpreterMissing({ status: 127, stderr: "/usr/bin/env: 'node': No such file or directory\n" }), true,
+    'GNU 的引号形状也必须被认成运行时够不着')
   assert.equal(isInterpreterMissing({ status: 1 }), false, '一次普通的非零退出不是这一条')
   assert.ok(real.PATH.split(':').includes(path.dirname(process.execPath)))
 })
@@ -150,7 +154,7 @@ test('the resolved npm is *started*, not merely found, under the job\'s measured
       console.log('# control-not-applicable: 这台机器的最小 PATH 能解析到 node，夹具不会挂；只判正面')
     } else {
       assert.equal(unaided.status, 127, `夹具必须像真 npm 一样挂：${JSON.stringify(unaided)}`)
-      assert.match(String(unaided.stderr), /env: node: No such file or directory/, unaided.stderr)
+      assert.match(String(unaided.stderr), /env: '?node'?: No such file or directory/, unaided.stderr)
     }
 
     const got = defaultRun('npm', ['config', 'get', 'prefix'], {
