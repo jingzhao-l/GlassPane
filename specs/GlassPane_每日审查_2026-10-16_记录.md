@@ -32,6 +32,7 @@
 | 1.16.1 | `v1.16.1` → `4c58e9cb` | 非草稿、target 对、四件资产 + `.asc` 验得过 | 两包都读得到 `1.16.1`（发布后读副本滞后十几分钟才看得见，日志里 `+ glasspane-mcp@1.16.1` 确实在） | **同一 sha 的 CI 是红的**（run 38842800885，updater 那条 EPIPE）。发布物 = 被 tag 的树，但那棵树没被验证过 |
 | **1.16.2** | `v1.16.2` → `6d53d2aa` | **没有** | **没有** | 新装的 CI-green 那一步自己把整版挡住：`gh` 在 Actions 里读 `GH_TOKEN`，runner 注入的是 `GITHUB_TOKEN`（run 38855034310）。方向是 fail-closed，所以没发出过未验证的字节。政策不删不移 tag ⇒ 留成空号 |
 | 1.16.3 | `v1.16.3` → `cb1463bb` | 非草稿、publishedAt 07:27:19Z、target == tag commit、四件资产 | 两包 `@1.16.3` 与 `dist-tags.latest` 都等于 1.16.3（`--prefer-online` 实测）；两条 provenance 进了 sigstore（logIndex 3275715621 / 3275730672）；`npm stage list` 为空 | 发布凭据 = 该 sha 的 CI（run 38866240249 success）。归档自证：`--verify` 过，签名的 `SHA256SUMS-1.16.3.txt` 里那条 sha256 与 GitHub 资产 API digest 一致，`.asc` 用发布私钥验为"完好的签名（绝对）" |
+| **1.16.4** | `v1.16.4` → `fad5a7c4` | 非草稿、publishedAt 09:10Z、target == tag commit、四件资产；签名的 `SHA256SUMS-1.16.4.txt` 里那条 sha256 与资产 API digest 一致（61bbcbb8…），`.asc` 验为"完好的签名（绝对）" | 两包 `@1.16.4` 与 `dist-tags.latest` 都等于 1.16.4（`--prefer-online`）；日志两行 `+ glasspane-mcp@1.16.4` / `+ glasspane-install@1.16.4`；provenance 进 sigstore（logIndex 3276973072 / 3276991625）；`npm stage list` 空 | CI 凭据 = run 38877042375 success；Release run 38878602110；dry 38879728163；publish 38880252997。CI-green 那道闸这次自己走完了全流程：它先在 1.16.2 上把发布挡住（缺 GH_TOKEN），修好后在 1.16.3/1.16.4 上放行 |
 
 **本地重算与 CI 资产字节不同**（本机 Node 26 + 最后一次 build 未重跑 bundle，归档里 `mcp-shell/dist`
 的输入就不是一回事）。所以归档完整性一律走 **API digest + 签名链**，不拿本地重算当判据。
