@@ -63,14 +63,21 @@ contains no path at all; the paths arrive as positional parameters (`$0`…`$3`)
       <string>{{STATE_ROOT}}</string>
     </array>
     <!--
-      ENV_BLOCK is filled by `agentEnvironmentBlock()` in ../lib/launchd.js: either
-      an EnvironmentVariables dict carrying NODE_EXTRA_CA_CERTS -> the exported
-      system root bundle, or a comment saying this machine has no such bundle.
-      WHY IT BELONGS TO THE JOB AND NOT TO THE CODE: node reads that variable when
-      the process starts, so an updater that sets it later in its own body would be
-      changing nothing. On a machine whose TLS is intercepted by a locally trusted
-      root (corporate gateway, accelerator), a job without this line fails the very
-      first network gate every single day — and looks like a working agent.
+      ENV_BLOCK is filled by `agentEnvironmentBlock()` in ../lib/launchd.js: an
+      EnvironmentVariables dict carrying PATH (the directory of the node that rendered this plist, the
+      global npm prefix bins, the shared binary directories, and the minimal system PATH) and, when this
+      machine has one, NODE_EXTRA_CA_CERTS -> the exported system root bundle; with no bundle the block is
+      preceded by a comment saying so.
+      WHY THE PATH BELONGS TO THE JOB AND NOT TO THE CODE: a launchd job is handed
+      usr/bin:bin:usr/sbin:sbin (this repo measured it). This machine's npm and glasspane-mcp live in
+      usr/local/bin and both start with an env-node shebang, so even a spawn of the **absolute** path the
+      updater resolved dies at exit 127 with "env: node: No such file or directory" unless the job's own PATH
+      can answer that shebang. Rendering it here is also the only honest remedy: a hand-edit of this dict is
+      overwritten by the next run of updater enable, which re-renders the whole block.
+      WHY THE CA BUNDLE BELONGS TO THE JOB: node reads that variable when the process starts, so an updater
+      that sets it later in its own body would be changing nothing. On a machine whose TLS is intercepted by
+      a locally trusted root (corporate gateway, accelerator), a job without this line fails the very first
+      network gate every single day — and looks like a working agent.
     -->
     {{ENV_BLOCK}}
     <key>RunAtLoad</key>

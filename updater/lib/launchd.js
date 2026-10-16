@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url'
 
 import { CODES } from './codes.js'
 import { CA_ENV_VAR } from './ca-bundle.js'
+import { COMMON_BIN_DIRS, LAUNCHD_PATH, npmGlobalBinDirs } from './binaries.js'
 import { UpdaterError, STATE_FILE_MODE, sameRuntimePath, writePrivateFile } from './fsutil.js'
 import { stateDirReadings } from './policy.js'
 
@@ -198,34 +199,83 @@ export function readRunningJob({
 /* --------------------------------------------------------------- the agent */
 
 /**
+ * The PATH to hand the job, built from what this process can actually name.
+ *
+ * Why this belongs in the plist and not in a sentence: a launchd job is handed `/usr/bin:/bin:/usr/sbin:/sbin`
+ * (the repo's measured value, `lib/binaries.js`'s `LAUNCHD_PATH`), this machine keeps node and npm in
+ * `/usr/local/bin`, and the two binaries are `#!/usr/bin/env node` scripts. So even a job that spawns the
+ * **absolute** path `defaultRun` resolved dies with `env: node: No such file or directory` and exit 127. With
+ * no PATH in the definition there was nothing an operator could do about it either: the only advice this tool
+ * used to give — "add that directory to the job's EnvironmentVariables PATH" — was silently wiped by the next
+ * `updater enable`, which re-renders this whole block. Rendering it here removes that whole class instead of
+ * describing it.
+ *
+ * The order is deliberate: the directory of the node that is running *this* program first (its own shebang
+ * was just answered, so it is not a guess), then the global npm prefix bins, then the shared binary
+ * directories, then the minimal system PATH the job would otherwise have had — nothing is dropped, only
+ * added to. A directory that does not exist yet is inert in a PATH, so listing a documented prefix bin
+ * costs nothing and lands the command when it is created.
+ */
+export function agentPathValue({
+  env = process.env,
+  execPath = process.execPath,
+  extraDirs = null,
+  systemDirs = LAUNCHD_PATH.split(':'),
+} = {}) {
+  const nodeDir = path.dirname(String(execPath ?? ''))
+  const dirs = [
+    nodeDir !== '' && nodeDir !== '.' ? nodeDir : null,
+    ...(extraDirs ?? npmGlobalBinDirs({ env })),
+    ...COMMON_BIN_DIRS,
+    ...systemDirs,
+  ].filter((dir) => typeof dir === 'string' && dir !== '' && !dir.includes(':'))
+  return [...new Set(dirs)].join(':')
+}
+
+/**
  * The `EnvironmentVariables` block, or a comment saying why there is none.
  *
- * This is the whole reason the agent can reach GitHub at all on a machine whose
- * TLS is intercepted: node reads `NODE_EXTRA_CA_CERTS` **at process start**, so a
- * bundle that exists but is not in the job's environment changes nothing, and the
- * daily run keeps failing its first network gate while looking alive.
+ * Two entries can appear, and each one is here because node/launchd read them **at process start**:
+ *   · `PATH` — the reach the daily job needs to start the `#!/usr/bin/env node` scripts it spawns (see
+ *     `agentPathValue`; without it, `updater apply` resolves npm, execs it, and gets exit 127);
+ *   · `NODE_EXTRA_CA_CERTS` — the exported system root bundle. This is the whole reason the agent can reach
+ *     GitHub at all on a machine whose TLS is intercepted: a bundle that exists but is not in the job's
+ *     environment changes nothing, and the daily run keeps failing its first network gate while looking alive.
  *
- * "No bundle" renders as a comment rather than an empty dict on purpose: the
- * installed plist is the artifact an operator reads when this goes wrong, and
- * "this machine has no exported root bundle" is information where an empty dict
- * reads like a mistake somebody made.
+ * "No bundle" renders as a comment rather than an empty dict on purpose: the installed plist is the artifact
+ * an operator reads when this goes wrong, and "this machine has no exported root bundle" is information
+ * where an empty dict reads like a mistake somebody made. The comment is about the **bundle**; a PATH entry
+ * in the same dict does not make it a lie, because the variable named in it is still absent.
  */
-export function agentEnvironmentBlock(caBundle) {
-  if (caBundle === null || caBundle === undefined) {
-    return `    <!-- ${CA_ENV_VAR} not set: this machine has no exported system root bundle -->`
+export function agentEnvironmentBlock(caBundle, { pathValue = null } = {}) {
+  const entries = []
+  if (pathValue !== null && pathValue !== undefined) {
+    const value = String(pathValue)
+    // eslint-disable-next-line no-control-regex
+    if (value === '' || /[\u0000\u000a\u000d]/.test(value)) {
+      throw new UpdaterError(CODES.agentPathUnsafe, `the update agent cannot be rendered: the job's PATH was ${JSON.stringify(pathValue)}; a PATH with a control character in it is a launchd definition that does not say what the job searches`)
+    }
+    entries.push(['PATH', value])
   }
-  if (typeof caBundle !== 'string' || caBundle === '') {
-    throw new UpdaterError(CODES.agentPathUnsafe, `the update agent cannot be rendered: the CA bundle path was ${JSON.stringify(caBundle)}; an unnamed bundle would be a job that trusts nothing while claiming to trust something`)
+  if (caBundle !== null && caBundle !== undefined) {
+    if (typeof caBundle !== 'string' || caBundle === '') {
+      throw new UpdaterError(CODES.agentPathUnsafe, `the update agent cannot be rendered: the CA bundle path was ${JSON.stringify(caBundle)}; an unnamed bundle would be a job that trusts nothing while claiming to trust something`)
+    }
+    // eslint-disable-next-line no-control-regex
+    if (/[\u0000\u000a\u000d]/.test(caBundle)) {
+      throw new UpdaterError(CODES.agentPathUnsafe, `the update agent cannot be rendered: the CA bundle path carries a control character (${JSON.stringify(caBundle)})`)
+    }
+    entries.push([CA_ENV_VAR, caBundle])
   }
-  // eslint-disable-next-line no-control-regex
-  if (/[\u0000\u000a\u000d]/.test(caBundle)) {
-    throw new UpdaterError(CODES.agentPathUnsafe, `the update agent cannot be rendered: the CA bundle path carries a control character (${JSON.stringify(caBundle)})`)
-  }
-  return '    <key>EnvironmentVariables</key>\n'
+  const comment = (caBundle === null || caBundle === undefined)
+    ? `    <!-- ${CA_ENV_VAR} not set: this machine has no exported system root bundle -->`
+    : null
+  if (entries.length === 0) return comment
+  const dict = '    <key>EnvironmentVariables</key>\n'
     + '    <dict>\n'
-    + `      <key>${CA_ENV_VAR}</key>\n`
-    + `      <string>${escapePlistString(caBundle)}</string>\n`
+    + entries.map(([key, value]) => `      <key>${key}</key>\n      <string>${escapePlistString(value)}</string>\n`).join('')
     + '    </dict>'
+  return comment === null ? dict : `${comment}\n${dict}`
 }
 
 /**
@@ -346,6 +396,10 @@ export function renderAgentPlist({
   label = AGENT_LABEL,
   caBundle = null,
   template,
+  // The PATH the job is handed. Default is the one computed *here, at render time*, from the node that is
+  // running this program and the npm prefix bins this machine's environment names; a caller passes `null`
+  // only when it is deliberately rendering a definition with no environment at all.
+  jobPath = agentPathValue({ execPath: nodePath }),
 } = {}) {
   if (!cliPath) throw new UpdaterError(CODES.stateWriteUnverified, 'the update agent needs an updaterCli path')
   // The log path is derived from the state root, so it is derived *after* the
@@ -378,12 +432,12 @@ export function renderAgentPlist({
   }
   const body = template ?? agentTemplateText()
   assertNoInterpolatedShellCommand(body)
-  if (caBundle && !body.includes('{{ENV_BLOCK}}')) {
-    // A template that lost the token would render a perfectly valid plist that
-    // simply never hands the job its bundle — the silent shape this whole module
-    // exists to prevent, because the failure it produces looks like a network
-    // problem on a machine where the network is fine.
-    throw new UpdaterError(CODES.agentPathUnsafe, 'the agent template has no {{ENV_BLOCK}} slot, so the exported root bundle could not reach the job; add the slot back rather than registering an agent that will fail its first network gate daily')
+  if ((caBundle || jobPath) && !body.includes('{{ENV_BLOCK}}')) {
+    // A template that lost the token would render a perfectly valid plist that simply never hands the job
+    // its environment: no bundle (the daily failure that looks like a network problem on a machine where the
+    // network is fine) and no PATH (the daily failure that looks like a permissions problem on a machine
+    // where npm is installed). Both are silent, so both are refused.
+    throw new UpdaterError(CODES.agentPathUnsafe, 'the agent template has no {{ENV_BLOCK}} slot, so the exported root bundle and the PATH this machine needs could not reach the job; add the slot back rather than registering an agent that will fail its first network gate daily and its first npm spawn every day after it')
   }
   let out = body
   for (const [token, value] of Object.entries(values)) {
@@ -392,10 +446,10 @@ export function renderAgentPlist({
     // 替换语义而不是 XML 语义。而这些值全部来自另一个进程写的文件（指针 / 状态根）。
     out = out.replaceAll(token, () => escapePlistString(value))
   }
-  // The environment block is markup this function builds (with the path escaped
+  // The environment block is markup this function builds (with each value escaped
   // inside it), so it is substituted last and never through the escaping loop —
   // escaping it would put a literal `&lt;key&gt;` into the plist.
-  out = out.replaceAll('{{ENV_BLOCK}}', () => agentEnvironmentBlock(caBundle))
+  out = out.replaceAll('{{ENV_BLOCK}}', () => agentEnvironmentBlock(caBundle, { pathValue: jobPath }))
   const leftover = /\{\{[A-Z_]+\}\}/.exec(out)
   if (leftover) {
     throw new UpdaterError(CODES.agentPathUnsafe, `the rendered agent still carries ${leftover[0]}: the template asks for a value this function does not fill, and launchd would run the placeholder`)

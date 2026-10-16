@@ -11,6 +11,9 @@
  * handshake and rolls back.
  */
 import { spawn } from 'node:child_process'
+import process from 'node:process'
+
+import { binaryNotFoundDetail, candidateDirsFor, childSpawnEnv, interpreterMissingDetail, isInterpreterMissing, resolveBinary } from './binaries.js'
 
 export const MCP_BIN_DEFAULT = 'glasspane-mcp'
 export const PROTOCOL_VERSION = '2024-11-05'
@@ -20,10 +23,38 @@ function frame(message) {
 }
 
 /**
+ * Where a `glasspane-mcp` may still live when it is not on PATH.
+ *
+ * Same class as `signature.js`'s gpg search, measured for this machine in `lib/binaries.js`: the command is
+ * installed by `npm install -g`, so it sits in the npm prefix bin (`/usr/local/bin` here), while a launchd
+ * job is handed `/usr/bin:/bin:/usr/sbin:/sbin`. Before this, `apply`'s §3.3 MCP half died on
+ * `glasspane-mcp could not run (ENOENT)` on exactly the machines that have it installed — and that answer
+ * gates a rollback, so a PATH fact was costing the machine a swap.
+ *
+ * The search is filesystem-only (no probe spawn), so asking is cheap and a test can drive it by naming the
+ * directories to look in. It runs when the *real* process selector is in use, or when a caller asks for a
+ * search by name (`dirs`/`env`); a caller that handed in its own `spawnFn` has chosen the process already,
+ * and this module must not go reading the developer's machine on top of that.
+ */
+export function resolveMcpBinary({ name = MCP_BIN_DEFAULT, env = process.env, dirs = null, exists, canExec, isFile } = {}) {
+  return resolveBinary(name, { env, dirs: dirs ?? candidateDirsFor(name, { env }), exists, canExec, isFile })
+}
+
+/**
  * Ask a `glasspane-mcp`-shaped server for its tool list.
  * `spawnFn` is injectable for *process selection*; the framing, the reply
  * matching and the timeout are the real ones (see `test/apply.test.mjs`, which
  * drives this against a child process running a minimal server fixture).
+ *
+ * Every reason this function returns names the command it tried, and a command that could not be found at
+ * all is answered here rather than by a doomed spawn: "not found on these searched paths" is a different
+ * repair from "it ran and refused".
+ *
+ * The child is spawned with `childSpawnEnv(bin)`, not with the inherited environment. This command is a
+ * `npm install -g` script whose first line is `#!/usr/bin/env node` (measured:
+ * `/usr/local/bin/glasspane-mcp`), so a spawn that inherits the daily job's
+ * `/usr/bin:/bin:/usr/sbin:/sbin` execs it, `env` cannot find node, and the handshake dies at 127 — which
+ * §3.3 reads as a failed handshake and pays for with a rollback of a swap that worked.
  */
 export function mcpToolsList({
   command = MCP_BIN_DEFAULT,
@@ -31,18 +62,54 @@ export function mcpToolsList({
   timeoutMs = 10_000,
   spawnFn = spawn,
   clientInfo = { name: 'glasspane-updater', version: 'handshake' },
+  env = process.env,
+  dirs = null,
+  exists,
+  canExec,
+  isFile,
+  resolveBin,
 } = {}) {
+  const search = resolveBin !== undefined
+    ? resolveBin
+    : (spawnFn === spawn || dirs !== null || exists !== undefined || canExec !== undefined || isFile !== undefined)
+      ? resolveMcpBinary
+      : null
+  let bin = command
+  let tried = null
+  if (search && !String(command ?? '').includes('/')) {
+    const found = search({ name: command, env, dirs, exists, canExec, isFile })
+    tried = found.tried
+    if (!found.bin) {
+      return Promise.resolve({
+        ok: false,
+        notFound: true,
+        tried,
+        blocked: found.blocked ?? null,
+        reason: binaryNotFoundDetail({
+          name: String(command),
+          tried,
+          pathValue: env?.PATH,
+          blocked: found.blocked,
+          blockedWhy: found.blockedWhy ?? null,
+        }),
+      })
+    }
+    bin = found.bin
+  }
   return new Promise((resolve) => {
     let child
     try {
-      child = spawnFn(command, args, { stdio: ['pipe', 'pipe', 'pipe'] })
+      child = spawnFn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], env: childSpawnEnv(bin, { env }) })
     } catch (error) {
-      resolve({ ok: false, reason: `starting ${command} failed (${error.message})` })
+      resolve({ ok: false, reason: `starting ${bin} failed (${error.message})`, tried })
       return
     }
     let buffer = ''
     let settled = false
     let tools = null
+    // The first lines of the child's stderr, kept for one purpose: `env: node: No such file or directory` is
+    // the only evidence that distinguishes "the runtime is unreachable" from "the server answered rubbish".
+    let errorTail = ''
     const finish = (verdict) => {
       if (settled) return
       settled = true
@@ -54,10 +121,18 @@ export function mcpToolsList({
       }
       resolve(verdict)
     }
-    const timer = setTimeout(() => finish({ ok: false, reason: `${command} did not answer tools/list within ${timeoutMs}ms` }), timeoutMs)
+    const timer = setTimeout(() => finish({ ok: false, reason: `${bin} did not answer tools/list within ${timeoutMs}ms`, tried }), timeoutMs)
 
-    child.on('error', (error) => finish({ ok: false, reason: `${command} could not run (${error.code ?? error.message})` }))
-    child.stderr?.on('data', () => { /* server logs are not the handshake */ })
+    child.on('error', (error) => finish({
+      ok: false,
+      tried,
+      // A spawn that never started. `notFound` is set only when this call actually searched and found
+      // nothing to run — "it is not here" and "it ran badly" are different repairs.
+      reason: `${bin} could not be run (${error.code ?? error.message})${tried ? ` — searched: ${tried.join(', ')}` : ''}`,
+    }))
+    child.stderr?.on('data', (chunk) => {
+      if (errorTail.length < 400) errorTail += chunk.toString('utf8').slice(0, 400 - errorTail.length)
+    })
     child.stdout?.on('data', (chunk) => {
       buffer += chunk.toString('utf8')
       let newline
@@ -69,12 +144,12 @@ export function mcpToolsList({
         try {
           message = JSON.parse(line)
         } catch {
-          finish({ ok: false, reason: `${command} emitted a non-JSON line: ${line.slice(0, 80)}` })
+          finish({ ok: false, reason: `${bin} emitted a non-JSON line: ${line.slice(0, 80)}`, tried })
           return
         }
         if (message.id === 1) {
           if (message.error) {
-            finish({ ok: false, reason: `${command} refused initialize: ${message.error?.message ?? 'no message'}` })
+            finish({ ok: false, reason: `${bin} refused initialize: ${message.error?.message ?? 'no message'}`, tried })
             return
           }
           child.stdin?.write(frame({ jsonrpc: '2.0', method: 'notifications/initialized' }))
@@ -83,15 +158,27 @@ export function mcpToolsList({
         }
         if (message.id === 2) {
           if (message.error || !Array.isArray(message.result?.tools)) {
-            finish({ ok: false, reason: `${command} answered tools/list without a tool list` })
+            finish({ ok: false, reason: `${bin} answered tools/list without a tool list`, tried })
             return
           }
-          finish({ ok: true, tools: message.result.tools.map((t) => t?.name).filter(Boolean), count: message.result.tools.length })
+          finish({ ok: true, bin, tools: message.result.tools.map((t) => t?.name).filter(Boolean), count: message.result.tools.length })
         }
       }
     })
     child.on('close', (code) => {
-      if (tools === null && !settled) finish({ ok: false, reason: `${command} exited with code ${code} before answering tools/list` })
+      if (tools === null && !settled) {
+        // 127 plus an `env: …: No such file or directory` line is not "the server behaved badly": it is the
+        // runtime the script's shebang asks for being unreachable from the environment this run handed the
+        // child. Said as that, because the repair is different (see `lib/binaries.js`'s `childSpawnEnv`).
+        finish({
+          ok: false,
+          tried,
+          interpreterMissing: isInterpreterMissing({ status: code, stderr: errorTail }),
+          reason: isInterpreterMissing({ status: code, stderr: errorTail })
+            ? interpreterMissingDetail({ name: String(command), bin, stderr: errorTail, searched: childSpawnEnv(bin, { env }).PATH })
+            : `${bin} exited with code ${code} before answering tools/list${errorTail.trim() ? `; its stderr said: ${errorTail.trim().slice(0, 200)}` : ''}`,
+        })
+      }
     })
     child.stdin?.write(frame({
       jsonrpc: '2.0',

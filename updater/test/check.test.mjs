@@ -40,12 +40,13 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { assertDeclaredBytes, runCheck } from '../lib/check.js'
+import { assertDeclaredBytes, runCheck, stagingRaceCause } from '../lib/check.js'
 import { CODES } from '../lib/codes.js'
 import { updateSummary } from '../lib/state.js'
 import { makeBytesFetcher, makeFetcher } from '../lib/source.js'
-import { stagedTreePresent } from '../lib/staging.js'
-import { loadState } from '../lib/state.js'
+import { ARCHIVE_FILE_NAME, stagedTreePresent, sweepUnreferencedGenerations } from '../lib/staging.js'
+import { loadState, nextState, saveState } from '../lib/state.js'
+import { UpdaterError } from '../lib/fsutil.js'
 import { localVersion } from '../lib/version.js'
 import { packTarGz } from '../lib/tar.js'
 import {
@@ -264,8 +265,14 @@ test('all eight gates pass: the release is staged and the state records the dige
     assert.equal(path.basename(gpg.verified[0].signatureFile), 'SHA256SUMS-1.4.1.txt.asc')
     assert.notEqual(path.basename(gpg.verified[0].signedFile), 'GlassPane-1.4.1.tar.gz')
     // The throwaway keyring is not state: it is gone when the check is done, so a
-    // machine that verified once does not keep a keyring around for next time.
-    assert.equal(fs.existsSync(path.join(machine.stagingOf('1.4.1'), 'gnupg-verify')), false)
+    // machine that verified once does not keep a keyring around for next time. The name carries a unique
+    // token now (two runs staging the same version must not share one keyring), so the sweep is over the
+    // prefix rather than over one literal.
+    assert.deepEqual(
+      fs.readdirSync(machine.stagingOf('1.4.1')).filter((name) => name.startsWith('gnupg-verify')),
+      [],
+      'gate 8 用完的临时钥匙环不留在暂存目录里',
+    )
   } finally {
     await src.server.close()
     machine.cleanup()
@@ -844,6 +851,241 @@ test('定时跑带着人的同意来也不放行：--auto 就不该有资格替�
     assert.equal(person.staged.version, '1.4.1')
     assert.equal(loadState(machine.dir).state.authorship.consented, true)
   } finally {
+    await src.server.close()
+    machine.cleanup()
+  }
+})
+
+/* =============================== finding 4 (P2, 2026-10-16): the sweep a check owes the disk */
+
+/**
+ * `retireStaleGenerations` only ever ran at the end of a swap that succeeded, so on this machine — a full
+ * 25 MB `update-staging/1.5.1/` and an empty `1.12.0/` under a state file that names neither — the stale
+ * trees are removable only by an apply that can succeed, and the reason it cannot succeed is the very defect
+ * under test. A check is the half that runs every day regardless, so the sweep moved there too, with the
+ * state document as its only reference and a generation that is being written left alone.
+ *
+ * REVERSE MUTATION: delete the `sweepStale` call in `lib/check.js`'s `finish` and the first test below goes
+ * red (the two stale directories are still there after a successful check); delete the `keep`/`protectedDirs`
+ * rule in `lib/staging.js` and the second goes red (the referenced offer is swept away).
+ */
+test('a completed check sweeps the staging generations this machine no longer references', async () => {
+  const machine = makeMachine('sweep-stale')
+  const src = await startSource({ version: '1.4.1' })
+  const stale = machine.stagingOf('1.3.9')
+  const emptyGen = machine.stagingOf('1.2.0')
+  try {
+    fs.mkdirSync(path.join(stale, 'tree'), { recursive: true, mode: 0o700 })
+    fs.writeFileSync(path.join(stale, ARCHIVE_FILE_NAME), 'x'.repeat(2048))
+    fs.mkdirSync(emptyGen, { recursive: true, mode: 0o700 })
+    const result = await check({ machine, server: src.server })
+    assert.equal(result.status, 'staged', result.message)
+    assert.equal(fs.existsSync(stale), false, `那一整棵旧树还在盘上：${stale}`)
+    assert.equal(fs.existsSync(emptyGen), false, '那个空的版本目录也是本轮该清掉的')
+    assert.ok(fs.existsSync(machine.stagingOf('1.4.1')), '本轮的报价不能被自己扫掉')
+    assert.equal(loadState(machine.dir).state.staged.version, '1.4.1')
+    assert.deepEqual([...result.stagingSweep.removed].sort(), [stale, emptyGen].sort(), JSON.stringify(result.stagingSweep))
+    assert.equal(result.stagingSweep.failed.length, 0, JSON.stringify(result.stagingSweep))
+  } finally {
+    await src.server.close()
+    machine.cleanup()
+  }
+})
+
+test('an up-to-date check sweeps too, and says nothing extra when the disk was already clean', async () => {
+  const machine = makeMachine('sweep-uptodate')
+  const src = await startSource({ version: '1.4.0' })
+  try {
+    const stale = machine.stagingOf('1.3.2')
+    fs.mkdirSync(stale, { recursive: true, mode: 0o700 })
+    const result = await check({ machine, server: src.server })
+    assert.equal(result.status, 'up-to-date', result.message)
+    assert.equal(fs.existsSync(stale), false, '"没有新版本"的那一趟也必须把没人引用的字节清走')
+    assert.doesNotMatch(String(result.message), /could not remove/, `一次干净的清扫不该往句子里加话：${result.message}`)
+  } finally {
+    await src.server.close()
+    machine.cleanup()
+  }
+})
+
+test('the sweep never touches a generation the state points at, nor one that is being written now', async () => {
+  const machine = makeMachine('sweep-keep')
+  const src = await startSource({ version: '1.4.1' })
+  const referenced = machine.stagingOf('1.3.4')
+  const runtimeGen = machine.stagingOf('1.3.3')
+  const inflight = machine.stagingOf('1.3.2')
+  const removable = machine.stagingOf('1.3.1')
+  try {
+    for (const dir of [referenced, runtimeGen, inflight, removable]) {
+      fs.mkdirSync(path.join(dir, 'tree'), { recursive: true, mode: 0o700 })
+      fs.writeFileSync(path.join(dir, ARCHIVE_FILE_NAME), 'y'.repeat(64))
+    }
+    // `writeArchive` names its temp with a unique token inside the version directory, so a `*.part-*` entry
+    // is the observable sign that a second run is writing this generation right now.
+    fs.writeFileSync(path.join(inflight, `${ARCHIVE_FILE_NAME}.part-9f3a`), 'z'.repeat(64))
+    const state = loadState(machine.dir).state
+    saveState(machine.dir, nextState(state, {
+      staged: { version: '1.3.4', dir: referenced, digest: 'd'.repeat(64), at: NOW.toISOString() },
+    }, { now: NOW }), { now: NOW })
+
+    const outcome = sweepUnreferencedGenerations({
+      stateRoot: machine.dir,
+      state: { staged: { dir: referenced }, runtime: { cliPath: path.join(runtimeGen, 'updater', 'cli.js') } },
+      referenceVersion: '1.4.1',
+    })
+    assert.equal(outcome.ok, true, JSON.stringify(outcome))
+    assert.ok(fs.existsSync(referenced), `state.staged 指着的那一棵绝不能被扫掉：${JSON.stringify(outcome)}`)
+    assert.ok(fs.existsSync(runtimeGen), 'state.runtime 指着的世代同样不能扫掉（扫的是它的目录，不是叶子路径）')
+    assert.ok(fs.existsSync(inflight), '另一趟运行正在写的字节不能被扫掉')
+    assert.equal(fs.existsSync(removable), false, `没人引用的旧世代必须被扫掉：${JSON.stringify(outcome.removed)}`)
+    const skipped = outcome.skipped.join('\n')
+    assert.match(skipped, /referenced by this machine's state/, skipped)
+    assert.match(skipped, /being written right now/, skipped)
+    assert.deepEqual([...outcome.removed], [removable], JSON.stringify(outcome))
+  } finally {
+    await src.server.close()
+    machine.cleanup()
+  }
+})
+
+test('a completed check leaves an in-flight generation standing and names it', async () => {
+  const machine = makeMachine('sweep-inflight')
+  const src = await startSource({ version: '1.4.1' })
+  const inflight = machine.stagingOf('1.3.2')
+  const removable = machine.stagingOf('1.3.1')
+  try {
+    for (const dir of [inflight, removable]) fs.mkdirSync(path.join(dir, 'tree'), { recursive: true, mode: 0o700 })
+    fs.writeFileSync(path.join(inflight, `${ARCHIVE_FILE_NAME}.part-tokenA`), 'z'.repeat(64))
+    fs.writeFileSync(path.join(removable, ARCHIVE_FILE_NAME), 'y'.repeat(64))
+    const result = await check({ machine, server: src.server })
+    assert.equal(result.status, 'staged', result.message)
+    assert.ok(fs.existsSync(inflight), '清扫不能去动另一趟运行的字节')
+    assert.equal(fs.existsSync(removable), false, '没有人在写的那一棵还是要清掉')
+    assert.match(result.stagingSweep.skipped.join('\n'), /being written right now/, JSON.stringify(result.stagingSweep))
+  } finally {
+    await src.server.close()
+    machine.cleanup()
+  }
+})
+
+test('a sweep that could not delete is stated in the sentence, not swallowed', async () => {
+  const machine = makeMachine('sweep-failed')
+  const src = await startSource({ version: '1.4.1' })
+  try {
+    const result = await runCheck({
+      stateRoot: machine.dir,
+      env: { GLASSPANE_UPDATE_BASE: src.server.origin },
+      now: NOW,
+      local: LOCAL,
+      consents: [],
+      trigger: 'manual',
+      fetchJson: makeFetcher(),
+      fetchBytes: makeBytesFetcher(),
+      signatureOpts: { runner: fakeGpg().runGpg },
+      log: () => {},
+      sweepStale: () => ({
+        ok: false,
+        removed: [],
+        failed: [{ dir: machine.stagingOf('1.3.9'), reason: 'EBUSY: the tree is still open' }],
+        skipped: [],
+      }),
+    })
+    assert.equal(result.status, 'staged', result.message)
+    assert.match(result.message, /could not remove .*1\.3\.9/, `留下来的字节必须出现在面板原样印的那句里：${result.message}`)
+    assert.match(result.message, /EBUSY/, result.message)
+  } finally {
+    await src.server.close()
+    machine.cleanup()
+  }
+})
+
+test('a refused check does not sweep: the tree it throws away is its own', async () => {
+  const machine = makeMachine('sweep-refused')
+  const src = await startSource({ version: '1.4.1', runs: { workflow_runs: [] } })
+  try {
+    const other = machine.stagingOf('1.3.9')
+    fs.mkdirSync(path.join(other, 'tree'), { recursive: true, mode: 0o700 })
+    fs.writeFileSync(path.join(other, ARCHIVE_FILE_NAME), 'x'.repeat(64))
+    const result = await check({ machine, server: src.server })
+    assert.equal(result.ok, false, result.message)
+    assert.equal(result.stagingSweep, null, '拒绝那一支已经丢掉了自己的字节，不再叠加第二次删除')
+    assert.ok(fs.existsSync(other), '清扫只在一次走完的检查末尾发生')
+  } finally {
+    await src.server.close()
+    machine.cleanup()
+  }
+})
+
+/* =============================== finding 7 (P2, 2026-10-16): a denied syscall is not "the usual second run" */
+
+test('EPERM and EACCES inside the staging directory name the errno, the path, and the command that tells them apart', () => {
+  const staging = '/Users/dev/.glasspane/update-staging'
+  const dir = path.join(staging, '1.4.1')
+  for (const code of ['EPERM', 'EACCES']) {
+    const error = Object.assign(new Error(`${code}: operation not permitted, unlink '${path.join(dir, 'tree', 'x')}'`), { code })
+    const told = stagingRaceCause(error, { dir, staging, version: '1.4.1' })
+    assert.ok(told, `${code} 必须被说清楚`)
+    const text = told.message
+    assert.ok(text.includes(code), `errno 要在句子里：${text}`)
+    assert.ok(text.includes(dir) || text.includes(staging), '被拦住的那一条路径要在句子里')
+    assert.match(text, /ls -lO/, `要给出能分辨的命令（uchg 这类标志）：${text}`)
+    assert.match(text, /stat -f/, `还要给出看归属的那一条：${text}`)
+    assert.match(text, /immutable flag/, text)
+    assert.match(text, /another account/, text)
+    // The two candidates are *possibilities*, never the measured author.
+    assert.doesNotMatch(text, /the usual author/, `未经测量不得点名病因：${text}`)
+    assert.doesNotMatch(text, /second update run/, `${code} 不是"文件不见了"那一类：${text}`)
+    assert.match(text, /Nothing was/, '拒绝要说清这一跑留下了什么')
+  }
+
+  // The vanish class keeps its own, measured sentence — the fix must not have flattened both into one.
+  const gone = Object.assign(new Error(`ENOENT: no such file or directory, open '${path.join(dir, ARCHIVE_FILE_NAME)}'`), { code: 'ENOENT' })
+  const toldGone = stagingRaceCause(gone, { dir, staging, version: '1.4.1' })
+  assert.match(toldGone.message, /moved while it worked/, toldGone.message)
+  assert.match(toldGone.message, /second update run/, toldGone.message)
+  assert.doesNotMatch(toldGone.message, /ls -lO/, '不见了的东西没有标志可查：' + toldGone.message)
+
+  // And the two refusals this function must not touch.
+  assert.equal(stagingRaceCause(Object.assign(new Error('EPERM: inside somebody else'), { code: 'EPERM' }), { dir, staging, version: '1.4.1' }), null,
+    '一条与本运行的暂存目录无关的错误不能被改写成这里的故事')
+  const alreadyNamed = new UpdaterError(CODES.versionLineBroken, 'the guard script already named this gate', null)
+  alreadyNamed.tlsVerification = false
+  assert.equal(stagingRaceCause(alreadyNamed, { dir, staging, version: '1.4.1' }), null, '一个已经点名了自己那道门的 UpdaterError 保持原样')
+  assert.equal(stagingRaceCause(Object.assign(new Error('EPERM: outside'), { code: 'EPERM' }), { dir, staging: '/somewhere/else', version: '1.4.1' }), null)
+})
+
+/**
+ * The same sentence reached through the real gate: a tree directory this account may not unlink is exactly
+ * the shape whose errno used to be re-told as "the usual author is a second update run". Nothing is faked
+ * here but the moment — the mode is set on a real directory and `extractInto` really is refused.
+ */
+test('a check whose own unpack is denied says "denied", names the path, and does not blame a second run', async () => {
+  const machine = makeMachine('denied-unpack')
+  const src = await startSource({ version: '1.4.1' })
+  const treePath = path.join(machine.stagingOf('1.4.1'), 'tree')
+  const keepDir = path.join(treePath, 'keep')
+  try {
+    fs.mkdirSync(keepDir, { recursive: true, mode: 0o700 })
+    fs.writeFileSync(path.join(keepDir, 'file.txt'), 'left from an earlier run\n')
+    // `unlink` needs write permission on the **directory the file sits in**, so this is what a real
+    // second-run-owned or flag-protected tree looks like from here: the walk gets to `keep/file.txt` and is
+    // denied, and the errno it comes back with is the fact the sentence has to carry.
+    fs.chmodSync(keepDir, 0o500)
+    const result = await check({ machine, server: src.server })
+    assert.equal(result.ok, false, result.message)
+    const text = String(result.message)
+    assert.match(text, /EACCES|EPERM/, `errno 必须原样出现在句子里：${text}`)
+    assert.match(text, /denied by the filesystem/, text)
+    assert.ok(text.includes(treePath) || text.includes(machine.stagingOf('1.4.1')) || text.includes(keepDir), `要点名被拦住的那条路径：${text}`)
+    assert.match(text, /ls -lO/, text)
+    assert.doesNotMatch(text, /the usual author of that is a second update run/, `一次被拒绝的 unlink 不是"多半另一趟运行"：${text}`)
+    assert.equal(loadState(machine.dir).state.staged, null, '拒了就是没有报价')
+  } finally {
+    try {
+      fs.chmodSync(keepDir, 0o700)
+    } catch {
+      /* never created, or already discarded by the refusal */
+    }
     await src.server.close()
     machine.cleanup()
   }

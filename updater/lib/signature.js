@@ -61,7 +61,7 @@ import { spawnSync } from 'node:child_process'
 
 import { CODES } from './codes.js'
 import { SIGNATURE_NAME } from './assets.js'
-import { UpdaterError, removeTreeWithin, resolveWithin, writableRoots } from './fsutil.js'
+import { UpdaterError, removeTreeWithin, resolveWithin, uniqueToken, writableRoots } from './fsutil.js'
 
 /**
  * The closed vocabulary. The installer's `classifyTagVerify` supplies the words
@@ -496,8 +496,12 @@ export async function verifyReleaseSignature({
   }
 
   const roots = stagingDir ? writableRoots(stateRoot) : null
+  // The throwaway keyring is per *call*, not per version: two runs staging the same release share
+  // `<staging>/<version>`, and with a fixed name whichever one finished gate 8 first deleted the keyring the
+  // other was still importing into (`ENOENT … gnupg-verify/SHA256SUMS-1.4.1.txt.asc`). The non-staging
+  // branch has always been unique for the same reason; this one had not caught up.
   const home = stagingDir
-    ? resolveWithin(roots.staging, path.join(stagingDir, 'gnupg-verify'), 'verification keyring')
+    ? resolveWithin(roots.staging, path.join(stagingDir, `gnupg-verify-${uniqueToken()}`), 'verification keyring')
     : mkdtemp(path.join(os.tmpdir(), 'glasspane-gnupg-'))
   try {
     fs.mkdirSync(home, { recursive: true, mode: 0o700 })

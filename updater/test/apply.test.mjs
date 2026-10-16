@@ -1411,39 +1411,107 @@ test('a backup that changes one byte at the same length is refused before the sw
   }
 })
 
-// REVERSE MUTATION (fix 4, handshakeVerify): move the `toolsList` call back inside
-// the `hello` match (the shape that ignored the MCP half whenever the version was
-// wrong) — `versionWrong.seen.mcp` becomes null and this goes red.
+// REVERSE MUTATION (fix 4, handshakeVerify): move the `toolsList` call back inside the `hello` match (the
+// shape that ignored the MCP half whenever the version was wrong) — the deterministic test below goes red on
+// its poll counts (the MCP half stops being asked on the polls where `hello` disagrees), and the real-socket
+// test goes red on `seen.mcp`, which becomes null.
+//
+// Why this file no longer measures a wrong version over a real socket with a sub-second budget:
+// `verifyAfterRestart` shrinks each poll's own timeout to the remaining budget (`apply.js`:
+// `timeoutMs: Math.min(2_000, deadline - Date.now())`), so under load the socket answer became
+// `unanswered: no reply within 247ms` (measured red at load average 100-160 on 8 cores, green in
+// isolation on the same commit). A control that only holds while the machine is idle is not a control: the
+// polling contract is decided by the seams `verifyAfterRestart` already takes (`call`, `toolsList`,
+// `sleep`, `budgetMs`), and one case keeps the real socket with a budget minutes wide.
 test('handshakeVerify asks both halves on every poll, so the record names the one that broke', async () => {
-  const fx = fixture('halves')
+  // Poll 1 and 2 answer the *old* version, poll 3 answers the wanted one, and the loop ends there: the
+  // counts below are arithmetic, not a measurement of how fast this machine happens to be.
+  const helloAsked = []
+  const mcpAsked = []
+  const scripted = ['1.4.0', '1.4.0', '1.4.1']
+  const agreed = await handshakeVerify({
+    socketPath: '/unused-by-the-injected-call.sock',
+    wantVersion: '1.4.1',
+    budgetMs: 60_000,
+    pollMs: 1,
+    sleep: async () => {},
+    call: async (options) => {
+      helloAsked.push(options.timeoutMs)
+      const version = scripted[Math.min(helloAsked.length - 1, scripted.length - 1)]
+      return { answered: true, frame: { id: 1, result: { version } } }
+    },
+    toolsList: async () => {
+      mcpAsked.push(1)
+      return { ok: true, count: 16, tools: ['gp_probe_status'] }
+    },
+  })
+  assert.equal(agreed.ok, true, agreed.message)
+  assert.equal(helloAsked.length, 3, `轮询数由脚本决定，不由这台机器决定：${helloAsked.length}`)
+  assert.equal(mcpAsked.length, helloAsked.length, '每一轮都问了 MCP 那一半——版本不对的那几轮也算')
+
+  // The other half of the contract: a socket that is fine and an MCP layer that is not must still produce a
+  // refusal that names both readings, and the two halves must be asked the same number of times.
+  const hello2 = []
+  const mcp2 = []
+  const broken = await handshakeVerify({
+    socketPath: '/unused-by-the-injected-call.sock',
+    wantVersion: '1.4.1',
+    budgetMs: 40,
+    pollMs: 5,
+    call: async (options) => {
+      hello2.push(options.timeoutMs)
+      return { answered: true, frame: { id: 1, result: { version: '1.4.0' } } }
+    },
+    toolsList: async () => {
+      mcp2.push(1)
+      return { ok: false, reason: 'glasspane-mcp could not be run (ENOENT)' }
+    },
+  })
+  assert.equal(broken.ok, false, 'a socket that reports the wanted version is not, by itself, a verified swap')
+  assert.equal(broken.seen.hello, '1.4.0')
+  assert.match(broken.seen.mcp, /^unavailable: /, `要说清是 MCP 那一半没答上：${broken.seen.mcp}`)
+  assert.ok(hello2.length >= 1 && mcp2.length === hello2.length, `两半同轮，一次不多一次不少：${hello2.length} / ${mcp2.length}`)
+
+  // And the MCP half is asked even when `hello` itself never answers, because "an old daemon" and "a broken
+  // tool surface" are two different repairs and the record has to name which one to go and do.
+  const silentHello = []
+  const silentMcp = []
+  const silent = await handshakeVerify({
+    socketPath: '/unused-by-the-injected-call.sock',
+    wantVersion: '1.4.1',
+    budgetMs: 40,
+    pollMs: 5,
+    call: async () => {
+      silentHello.push(1)
+      return { answered: false, reason: 'no reply within 5ms' }
+    },
+    toolsList: async () => {
+      silentMcp.push(1)
+      return { ok: true, count: 16, tools: ['gp_probe_status'] }
+    },
+  })
+  assert.equal(silent.ok, false)
+  assert.match(silent.seen.hello, /^unanswered: /, silent.seen.hello)
+  assert.equal(silent.seen.mcp, '16 tools', 'hello 哑了也要读到 MCP 那一份，否则记录只剩一个"没答"')
+  assert.equal(silentMcp.length, silentHello.length, JSON.stringify({ silentHello: silentHello.length, silentMcp: silentMcp.length }))
+})
+
+test('the pair still reads a real unix socket, with a budget that is not a race', async () => {
+  // The one case here that uses the real `socketCall` against the real daemon-shaped server, so the framing
+  // and the frame parsing stay part of the contract. It asserts the outcome that must happen *first* and
+  // gives it minutes: the loop returns the moment both halves agree, so a busy machine only ever costs a
+  // retry, never a false red.
+  const fx = fixture('halves-real')
   const socketPath = shortSocketPath(fx.dir, 'halves.sock')
   const daemon = await startSocketDaemon(socketPath, { behaviour: 'answer', version: '1.4.0' })
-  // The allowances below are sized for *what this test decides*, not for how fast a
-  // `node` child happens to boot: 400 ms was measured failing when another process
-  // was compiling in the same box, which is a load artefact and not a verdict. The
-  // refusals being asserted are logical (a wrong version, a half that never
-  // answers), so a generous budget cannot make them pass by accident — the named
-  // reverse mutation above still reddens with these numbers.
-  const liveTools = () => mcpToolsList({ spawnFn: fakeMcpPeer('answer'), timeoutMs: 250 })
   try {
-    const versionWrong = await handshakeVerify({ socketPath, wantVersion: '1.4.1', budgetMs: 6_000, pollMs: 100, toolsList: liveTools })
-    assert.equal(versionWrong.ok, false)
-    assert.equal(versionWrong.seen.hello, '1.4.0')
-    assert.match(versionWrong.seen.mcp, /16 tools/, 'the MCP half is asked even when the socket already failed: an old daemon and a broken tool surface are different repairs')
-    assert.match(versionWrong.message, /hello said "1\.4\.0"/)
-
-    const toolsBroken = await handshakeVerify({
-      socketPath,
-      wantVersion: '1.4.0',
-      budgetMs: 6_000,
-      pollMs: 100,
-      // `slow` never answers at all, so the refusal below is produced by the
-      // client's own timeout rather than by how fast a child happens to boot.
-      toolsList: () => mcpToolsList({ spawnFn: fakeMcpPeer('slow'), timeoutMs: 300 }),
-    })
-    assert.equal(toolsBroken.ok, false, 'a socket that reports the wanted version is not, by itself, a verified swap')
-    assert.equal(toolsBroken.seen.hello, '1.4.0')
-    assert.match(toolsBroken.seen.mcp, /^unavailable: /)
+    const tools = () => mcpToolsList({ spawnFn: fakeMcpPeer('answer'), timeoutMs: 10_000 })
+    const verdict = await handshakeVerify({ socketPath, wantVersion: '1.4.0', budgetMs: 60_000, pollMs: 250, toolsList: tools })
+    assert.equal(verdict.ok, true, verdict.message)
+    assert.equal(verdict.seen.hello, '1.4.0', 'socket 答的就是这台机器真在跑的那个版本')
+    assert.match(verdict.seen.mcp, /16 tools/, '两道读回在同一次轮询里都答了才算成立')
+    assert.equal(verdict.version, '1.4.0')
+    assert.ok(daemon.requests.length >= 1, '真的走了一次 unix socket，不是注入的桩')
   } finally {
     await daemon.close()
     fx.cleanup()

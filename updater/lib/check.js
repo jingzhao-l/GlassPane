@@ -33,7 +33,7 @@ import { findSignatureAsset, requireAssetPair } from './assets.js'
 import { authorshipNote, UNSIGNED_CONSENT_KIND, verifyReleaseSignature } from './signature.js'
 import { digestFor } from './sums.js'
 import { verifyArchiveDigest } from './digest.js'
-import { discardStaging, extractInto, prepareStaging, releaseTreeRoot, writeArchive } from './staging.js'
+import { discardStaging, extractInto, prepareStaging, releaseTreeRoot, sweepUnreferencedGenerations, writeArchive } from './staging.js'
 import { selfCheckStagedTree } from './selfcheck.js'
 import { verifyCiGreen } from './ci.js'
 import { loadState, nextState, saveState } from './state.js'
@@ -91,6 +91,21 @@ export async function runCheck({
   selfCheckOpts = {},
   signatureOpts = {},
   log = () => {},
+  /**
+   * The sweep of generations this machine has no offer for any more, run at the end of a check that
+   * *completed*.
+   *
+   * It used to live only after a successful swap, which made it unreachable on exactly the machines that
+   * need it: this one carried a 25 MB `update-staging/1.5.1/` and an empty `1.12.0/` under a state file that
+   * named neither, and the only code that deletes them ran at the end of an apply that could not succeed.
+   * A check is the half that runs every day regardless, so it gets the same sweep — under the same
+   * protections, and with the state document as the only reference it may read (`lib/staging.js`'s
+   * `sweepUnreferencedGenerations`).
+   *
+   * Injectable because it is a filesystem side effect, and the tests that want to watch it must not have to
+   * build a stale tree to prove a sentence.
+   */
+  sweepStale = sweepUnreferencedGenerations,
 } = {}) {
   const roots = writableRoots(stateRoot)
   const previous = loadState(stateRoot).state
@@ -107,11 +122,30 @@ export async function runCheck({
   const finish = (patch, historyEntry) => {
     const merged = nextState(previous, { ...patch, historyEntry }, { now })
     if (save) saveState(stateRoot, merged, { now })
+    // The stale-generation sweep belongs to the *completed* answers only. A refusal has already thrown its
+    // own tree away (and said so if it could not), and a second delete behind a refusal is how this file
+    // produced a `check-failed` whose sentence was about something else. A `needs-consent` answer that
+    // **staged** an offer is completed in the sense that matters here: the machine has a live offer, so
+    // every other generation is by definition unreferenced.
+    const completed = patch.status === 'staged' || patch.status === 'available' || patch.status === 'up-to-date' || patch.status === 'applied'
+      || (patch.status === 'needs-consent' && Boolean(patch.staged))
+    let sweep = null
+    if (completed) {
+      const referenceVersion = patch.staged?.version ?? patch.current ?? previous.current
+      sweep = safeSweep({ stateRoot, state: merged, referenceVersion })
+    }
+    const sweepNote = sweep && sweep.failed.length > 0
+      ? ` This run swept the generations it no longer has an offer for, but could not remove ${sweep.failed.map((one) => one.dir).join(', ')} (${sweep.failed.map((one) => one.reason).join('; ')}).`
+      : null
+    const message = sweepNote === null
+      ? patch.message ?? null
+      : (typeof patch.message === 'string' && patch.message !== '' ? `${patch.message}${sweepNote}` : sweepNote.trim())
+    if (sweep && sweepNote) log(sweepNote.trim())
     return {
       ok: patch.status === 'staged' || patch.status === 'available' || patch.status === 'up-to-date' || patch.status === 'applied',
       status: patch.status,
       code: patch.code ?? null,
-      message: patch.message ?? null,
+      message,
       tlsVerification: patch.tlsVerification === true,
       latest: patch.latest ?? previous.latest,
       current: patch.current ?? previous.current,
@@ -120,7 +154,24 @@ export async function runCheck({
       // deliberate null as "absent, keep the old one" — which is how a refused
       // check used to hand a stale tree straight to `apply`.
       staged: merged.staged,
+      // What the sweep decided, as data: `removed` / `skipped` / `failed`. A generation left alone because
+      // another run is writing it is a *stated* skip, never a silent one.
+      stagingSweep: sweep,
       state: merged,
+    }
+  }
+
+  /** A sweep may not add a second failure on top of the answer the check just gave. */
+  function safeSweep(options) {
+    try {
+      return sweepStale(options)
+    } catch (error) {
+      return {
+        ok: false,
+        removed: [],
+        failed: [],
+        skipped: [`the sweep of unreferenced staging generations threw (${error?.message ?? String(error)})`],
+      }
     }
   }
 
@@ -331,21 +382,117 @@ export async function runCheck({
   } catch (error) {
     // Any gate from here on has already deleted its own staging (digest
     // mismatch does it in `verifyArchiveDigest`); belt and braces for the rest.
-    try {
-      discardStaging({ stateRoot, dir: staging.dir })
-    } catch {
-      /* nothing there to discard */
-    }
+    //
+    // The `catch {}` that used to sit here — commented "nothing there to discard" — is why this machine
+    // still has an empty `update-staging/1.12.0/` under the refusal of 2026-10-11: a discard that failed was
+    // swallowed, and the record went on claiming the tree had been thrown away. `discardStaging` now
+    // answers in data, and anything it could not remove is added to the sentence the panel prints.
+    const discarded = safeDiscard({ stateRoot, dir: staging.dir })
+    const discardNote = discarded.ok === true
+      ? null
+      : `. This run could not throw its own staged bytes away: ${discarded.reason}. Nothing was installed, `
+        + 'but the disk it left behind is real — re-run "updater check" (which re-stages into the same place), '
+        + `and if ${discarded.dir} is still there after that, that directory is the thing to fix`
+    // A filesystem error *inside this run's own staging directory* is a second run's doing, and the raw
+    // errno is not the cause a person can act on. See `stagingRaceCause`.
+    const raced = stagingRaceCause(error, { dir: staging.dir, staging: roots.staging, version: candidate.version })
+    const reported = errorWithNote(raced ?? error, discardNote)
     // Gate 8's two "proof is missing" states are refusals a person can overrule,
     // so they are `needs-consent`, not `check-failed`: the panel keeps the reason
     // on screen with a live check button, and `apply` still sees no staged tree.
     // `signature-invalid` is not in the set and stays a plain check failure.
     const status = AUTHORSHIP_CONSENT_CODES.has(error?.code) ? 'needs-consent' : 'check-failed'
-    return refuse(error, {
+    return refuse(reported, {
       status,
       patch: { current: currentVersion, latest: candidate.version, lastCheckAt: now.toISOString(), staged: null, authorship },
     })
   }
+}
+
+/**
+ * The discard may not add a second failure on top of the one being reported.
+ *
+ * `discardStaging` answers in data for anything that did not delete; the one throw left in it is the path
+ * guard, and a guard firing here must still come out as *this* refusal plus a stated leftover, not as an
+ * exception that reaches `cli.js`'s generic handler with no gate sentence at all.
+ */
+function safeDiscard(options) {
+  try {
+    return discardStaging(options)
+  } catch (error) {
+    return { ok: false, dir: options.dir ?? null, reason: `throwing the staged tree away was refused (${error?.message ?? String(error)})` }
+  }
+}
+
+/**
+ * One refusal, one sentence, and the leftovers in it.
+ *
+ * Appending to the *returned* message only would be the dishonest half of the pair: `lastError.message` is
+ * what the panel and `gp_diagnose` print, so the note has to be part of the error the state is stamped
+ * from. The code, the details and the TLS flag of the original refusal are carried over untouched — this
+ * adds a fact, it does not re-decide one.
+ */
+function errorWithNote(error, note) {
+  if (note === null || error === null || error === undefined) return error
+  const wrapped = new UpdaterError(
+    error instanceof UpdaterError ? error.code : CODES.checkFailed,
+    `${error.message ?? ''}${note}`,
+    error.details ?? null,
+  )
+  wrapped.tlsVerification = error.tlsVerification === true
+  return wrapped
+}
+
+/**
+ * The one failure shape this file could not name before: `ENOENT … update-staging/1.4.1/archive.tar.gz`.
+ *
+ * Two runs staging the *same* version share one directory — the panel's Install button and the daily job
+ * both fetch what is the latest release — so whichever refuses first throws away the tree the other is still
+ * writing. Measured on this machine on 2026-10-11: a `check-failed / version-line-broken` row over an empty
+ * `update-staging/1.12.0/`, which is the same event read from the losing side. An errno is honest about the
+ * syscall and silent about the cause, and a silent cause is the defect this repo already named for gpg (a
+ * PATH problem reported as a permissions problem): the reader is sent to the wrong door.
+ *
+ * **`EPERM`/`EACCES` are not that event, and used to be told as if they were.** The shared-directory story
+ * explains a file that vanished; it does not explain a syscall that was *denied*, and a denied one has at
+ * least two authors this run cannot tell apart from the errno alone: an immutable flag set on the tree
+ * (`uchg`, which an installer or a hand `chflags` leaves behind and which root cannot delete either), or a
+ * directory owned by somebody else. Naming "the usual author" for those is the same unmeasured cause this
+ * batch set out to remove, so they get the two facts that *were* measured — the errno and the path — the
+ * possibilities as possibilities, and the one command that distinguishes them.
+ *
+ * Only a raw filesystem error about a path under *this run's* staging directory is re-told here. An
+ * `UpdaterError` already names its own gate, keeps its own code, and is left exactly as it is.
+ */
+export function stagingRaceCause(error, { dir, staging, version }) {
+  const code = error?.code
+  const isDenied = code === 'EPERM' || code === 'EACCES'
+  if (!isDenied && code !== 'ENOENT' && code !== 'ENOTDIR' && code !== 'EEXIST') return null
+  if (error instanceof UpdaterError) return null
+  const text = String(error?.message ?? '')
+  if (!text.includes(staging) && !text.includes(dir)) return null
+  const where = text.includes(dir) ? dir : staging
+  const refused = isDenied
+    ? new UpdaterError(
+      CODES.checkFailed,
+      `the update run was denied by the filesystem while it worked on ${where}: ${code}: ${text}. `
+        + 'Nothing about that answer identifies who denied it, and the two candidates have different repairs: the tree may carry an '
+        + 'immutable flag (a `uchg` makes even the owner\'s `unlink` an `EPERM`), or it may belong to another account or mode. Tell them apart '
+        + `before retrying — "ls -lO ${where}" shows the flags (look for \`uchg\`/\`schg\`; "chflags -R nouchg" is what clears one), and `
+        + `"stat -f 'owner %Su group %Sg mode %Sp flags %Sf' ${where}" shows who owns it and what mode it has. `
+        + `If neither points at the directory, whatever else on this machine holds ${where} open is the thing to fix. `
+        + `Nothing was kept and no version was offered: nothing was installed, and re-run "updater check" once the flags or the owner `
+        + 'are the ones this account can write.',
+    )
+    : new UpdaterError(
+      CODES.checkFailed,
+      `the bytes this run was staging under ${dir} moved while it worked (${code}: ${text}) — `
+        + `the usual author of that is a second update run for ${version} in the same directory: the GlassPane panel's "Install update" and the daily job fetch the same release, `
+        + 'and whichever one refuses first throws the shared tree away (the other cause is a hand-cleaned update-staging/). '
+        + 'Nothing was kept and no version was offered: run "updater check" again on its own, and leave the other run\'s directory alone while it works.',
+    )
+  refused.tlsVerification = error?.tlsVerification === true
+  return refused
 }
 
 /** Wrap a synchronous gate that may refuse, keeping the refusal as data. */

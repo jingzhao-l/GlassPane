@@ -39,7 +39,15 @@ export class UpdaterError extends Error {
 }
 
 let tokenCounter = 0
-function uniqueToken() {
+/**
+ * A name no other writer can already be holding: pid + a clock + this process's own counter.
+ *
+ * Exported because every "write then rename" in this package needs it. `${target}.part`-style *fixed* temp
+ * names do not: the panel's Install button and the daily job are two processes that stage the same version
+ * into the same directory, and a shared temp is one `renameSync` away from answering ENOENT about a file
+ * the other run had already moved (`lib/staging.js`'s `writeArchive` did exactly that until 2026-10-15).
+ */
+export function uniqueToken() {
   tokenCounter += 1
   return `${process.pid}-${Date.now().toString(36)}-${tokenCounter}`
 }

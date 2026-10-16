@@ -32,6 +32,7 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 import { CODES } from './codes.js'
+import { binaryNotExecutableDetail, binaryNotFoundDetail, candidateDirsFor, childSpawnEnv, interpreterMissingDetail, isInterpreterMissing, isSearchedCommand, resolveBinary } from './binaries.js'
 import { sha256Bytes, sha256File, sha256FileSync } from './digest.js'
 import { UpdaterError, canonicalPath, ensurePrivateDir, removeTreeWithin, resolveWithin, tightenMode, writableRoots, writePrivateFile } from './fsutil.js'
 import { probeIdle } from './idle.js'
@@ -42,7 +43,7 @@ import { bumpKind, parsePlainVersion } from './version.js'
 import { decideSwapPermission, foreignStateDir } from './policy.js'
 import { authorshipNote } from './signature.js'
 import { loadState, nextState, readPointer, saveState } from './state.js'
-import { ARCHIVE_FILE_NAME, extractInto, releaseTreeRoot, stagedTreePresent } from './staging.js'
+import { ARCHIVE_FILE_NAME, extractInto, releaseTreeRoot, retireStaleGenerations, stagedTreePresent } from './staging.js'
 
 /** §3.3: the daemon gets this long to answer before the swap is undone. */
 export const HANDSHAKE_BUDGET_MS = 15_000
@@ -390,13 +391,23 @@ export async function verifyStagedBytes({
     return { ok: false, reason: `${archivePath} is no longer on disk, so ${rootPath} cannot be proven to be the bytes whose digest ${expected.slice(0, 12)}… the release's checksum file named` }
   }
   // The only read of the archive anywhere in this proof: one buffer, hashed and unpacked.
-  const archiveBytes = readArchive(archivePath)
-  const actual = sha256Bytes(archiveBytes)
-  if (actual !== expected) {
-    return { ok: false, reason: `the staged archive now digests ${actual}, while the release's checksum file — and the state — say ${expected}: the bytes under ${staged.dir} are not the bytes that were published` }
-  }
+  //
+  // It sits **inside** the try, and that placement is the fix: this step's whole contract is that every
+  // answer is `{ok:false, reason}` data (§7 exit 3, nothing swapped), and an `EACCES` on the staged archive
+  // used to escape the function from the line above the `try`. `applyUpdate` calls this *before* the
+  // post-swap region, so the escape reached `cli.js`'s generic handler and the machine got a stack trace
+  // and `check-failed` instead of the named reason, and the `return` after the `finally` was unreachable
+  // dead code. Reverse mutation: move `readArchive` back above the `try` —
+  // `a staged archive this account cannot read is a reason, not an exception` goes red on the throw.
   const scratch = path.join(staged.dir, `apply-verify-${process.pid}`)
+  let archiveBytes
+  let actual
   try {
+    archiveBytes = readArchive(archivePath)
+    actual = sha256Bytes(archiveBytes)
+    if (actual !== expected) {
+      return { ok: false, reason: `the staged archive now digests ${actual}, while the release's checksum file — and the state — say ${expected}: the bytes under ${staged.dir} are not the bytes that were published` }
+    }
     extractInto({ treePath: scratch, stagingRoot: staging, bytes: archiveBytes })
     const unpacked = releaseTreeRoot({ treePath: scratch, version: staged.version })
     if (!unpacked.ok) {
@@ -427,7 +438,6 @@ export async function verifyStagedBytes({
       /* the scratch copy is inside the staging root; a failed cleanup cannot un-prove the tree */
     }
   }
-  return { ok: true, reason: null, digest: actual }
 }
 
 /* ------------------------------------------------------------------- build */
@@ -443,6 +453,13 @@ export function buildStagedTree(stagedTree, { run = defaultRun, timeoutMs = 15 *
     return { ok: false, builtDir: null, message: `the staged tree has no engine/ directory: ${stagedTree}` }
   }
   const build = run('swift', ['build', '-c', 'release', '--package-path', engineDir], { cwd: stagedTree, timeoutMs })
+  if (build.notFound === true || build.notExecutable === true || build.runtimeUnavailable === true) {
+    // "no swift on this machine" and "swift is installed but this job was started with a PATH that does
+    // not reach it" are different repairs from a build error, and the searched paths are the actionable
+    // half of the sentence. Measured on 2026-10-15: this is the same minimal-PATH class that made the npm
+    // layer refuse for permissions it never had.
+    return { ok: false, builtDir: null, message: `the build could not be started: ${(build.stderr ?? '').trim() || 'swift was not found'}` }
+  }
   if (build.status !== 0) {
     return { ok: false, builtDir: null, message: `swift build -c release exited ${build.status}: ${(build.stderr || build.stdout || '').trim().slice(-400)}` }
   }
@@ -463,12 +480,135 @@ export function buildStagedTree(stagedTree, { run = defaultRun, timeoutMs = 15 *
   return { ok: true, builtDir, message: null }
 }
 
-function defaultRun(bin, args, { cwd, timeoutMs } = {}) {
-  const res = spawnSync(bin, args, { cwd, encoding: 'utf8', timeout: timeoutMs ?? 120_000 })
+/**
+ * The module's own process runner.
+ *
+ * A bare command name is *searched* before it is spawned (see `lib/binaries.js`), and a search that comes
+ * back empty is answered as data — `{status:null, notFound:true, tried, stderr:<the search>}` — instead of
+ * the old `{status:127}`. That mapping was the misattribution: ENOENT on `npm` became "npm config get
+ * prefix answered 127", which §3.5's refusal then told the person to read as a permissions problem on a
+ * machine where npm is installed and its prefix is writable. `EACCES` on a file the search *did* find is
+ * kept separate, because that one really is a permissions fact.
+ *
+ * The search's answer is then **spawned with `childSpawnEnv`**, because finding the file was only half of
+ * what broke here. Measured 2026-10-16 on this machine: `/usr/local/bin/npm` and
+ * `/usr/local/bin/glasspane-mcp` both start with `#!/usr/bin/env node`, and an `env` shebang resolves `node`
+ * from the *child's* PATH — the job's inherited `/usr/bin:/bin:/usr/sbin:/sbin`. Spawning the resolved
+ * absolute path with that environment ran the script, `env` printed `env: node: No such file or directory`,
+ * and the exit was **127**: not `notFound`, so `checkNpmPrefix` answered "npm config get prefix answered
+ * 127" and §3.5 printed the retired permissions sentence again. Resolution without an environment the child
+ * can actually start in fixes nothing; a 127 that carries that stderr is now named as
+ * `runtime-unavailable`, which is a third fact and gets its own cause.
+ *
+ * A caller that hands back its own `run` (every unit test of these sequences) is never affected: no search,
+ * no filesystem, no machine.
+ *
+ * Exported for the same reason `defaultCopy` is: `test/npm-binary-resolution.test.mjs` has to drive *this*
+ * runner — the search and the spawn are the thing under test — and a test that substitutes its own would be
+ * grading its own stub.
+ */
+export function defaultRun(bin, args, {
+  cwd,
+  timeoutMs,
+  env = process.env,
+  dirs = null,
+  exists,
+  canExec,
+  isFile,
+  resolve = null,
+  // The runtime `childSpawnEnv` puts on the child's PATH. Production takes the node running this process;
+  // the negative control ("node genuinely unavailable") has to be able to say that this machine's node is
+  // *not* reachable, which no other injection can express without lying about the spawn.
+  execPath = process.execPath,
+} = {}) {
+  const wanted = String(bin ?? '')
+  let command = wanted
+  let tried = null
+  let blockedWhy = null
+  if (wanted !== '' && isSearchedCommand(wanted)) {
+    const found = (resolve ?? ((name, options) => resolveBinary(name, {
+      env: options?.env,
+      dirs: options?.dirs ?? candidateDirsFor(name, { env: options?.env ?? env }),
+      exists: options?.exists,
+      canExec: options?.canExec,
+      isFile: options?.isFile,
+    })))(wanted, { env, dirs: dirs ?? undefined, exists, canExec, isFile })
+    tried = found.tried
+    blockedWhy = found.blockedWhy ?? null
+    if (!found.bin) {
+      return {
+        status: null,
+        stdout: '',
+        stderr: found.blocked
+          ? binaryNotExecutableDetail({ name: wanted, bin: found.blocked, why: blockedWhy })
+          : binaryNotFoundDetail({ name: wanted, tried, pathValue: env?.PATH, blocked: found.blocked, blockedWhy }),
+        notFound: true,
+        tried,
+        blocked: found.blocked ?? null,
+      }
+    }
+    command = found.bin
+  }
+  const spawnEnv = childSpawnEnv(command, { env, execPath })
+  const res = spawnSync(command, args, { cwd, encoding: 'utf8', timeout: timeoutMs ?? 120_000, env: spawnEnv })
   if (res.error && res.status === null) {
+    // Found a moment ago and unspawnable now: say which of the two facts this is, and name the path.
+    if (res.error.code === 'EACCES') {
+      // A directory cannot be exec'd either, and answers the same EACCES — measured. Without this
+      // re-measurement the sentence would call a directory "a file this account cannot execute".
+      const looksLikeDir = (() => {
+        try {
+          return fs.statSync(command).isDirectory()
+        } catch {
+          return false
+        }
+      })()
+      return {
+        status: 126,
+        stdout: '',
+        stderr: binaryNotExecutableDetail({ bin: command, why: looksLikeDir ? 'directory' : blockedWhy }),
+        tried: tried ?? [command],
+        notExecutable: true,
+      }
+    }
+    if (res.error.code === 'ENOENT') {
+      return {
+        status: 127,
+        stdout: '',
+        stderr: binaryNotFoundDetail({ name: command, tried: tried ?? [command], pathValue: env?.PATH, blockedWhy }),
+        notFound: true,
+        tried: tried ?? [command],
+      }
+    }
     return { status: 127, stdout: '', stderr: String(res.error.message) }
   }
-  return { status: res.status ?? 1, stdout: res.stdout ?? '', stderr: res.stderr ?? '' }
+  const stderrText = res.stderr ?? ''
+  if (isInterpreterMissing({ status: res.status, stderr: stderrText })) {
+    // The child ran and could not start: its shebang asked for a runtime this environment cannot find.
+    return {
+      status: res.status ?? 127,
+      stdout: res.stdout ?? '',
+      stderr: interpreterMissingDetail({ name: wanted, bin: command, stderr: stderrText, searched: spawnEnv.PATH }),
+      tried: tried ?? [command],
+      runtimeUnavailable: true,
+    }
+  }
+  return { status: res.status ?? 1, stdout: res.stdout ?? '', stderr: stderrText }
+}
+
+/**
+ * What one npm call answered, in the sentence the person reads.
+ *
+ * `npm` not being found and npm answering non-zero are different facts with different repairs, and the
+ * messages used to be built the same way (`exit null` + a truncated stderr), which hid the search behind a
+ * number. This keeps the whole detail for the not-found case — the list of paths searched is the point of
+ * the sentence and must not be cut off by a length cap.
+ */
+function npmRunFailure(res, what) {
+  if (res?.notFound === true || res?.notExecutable === true || res?.runtimeUnavailable === true) {
+    return `${what} could not be run: ${(res.stderr ?? '').trim() || 'the command was not there'}`
+  }
+  return `${what} exited ${String(res?.status)}: ${(res?.stderr || res?.stdout || 'no output').toString().trim().slice(0, 300)}`
 }
 
 /** Move built bundles into `appsDir`, verifying each one after the copy. */
@@ -639,6 +779,11 @@ export function installNpmPackages({
     }
     const res = run('npm', ['pack', '--ignore-scripts'], { cwd: dir, timeoutMs: 180_000 })
     const file = (res.stdout ?? '').trim().split('\n').filter(Boolean).pop()
+    if (res.notFound === true || res.notExecutable === true || res.runtimeUnavailable === true) {
+      // Nothing has been installed yet, so this is still a refusal that costs the machine nothing — and
+      // it must say that npm was not runnable rather than that `npm pack` failed for some build reason.
+      return { ok: false, code: CODES.npmVersionMismatch, message: npmRunFailure(res, `npm pack in ${dir}`) }
+    }
     if (res.status !== 0 || !file || !file.endsWith('.tgz')) {
       return { ok: false, code: CODES.npmVersionMismatch, message: `npm pack in ${dir} failed (exit ${res.status}): ${(res.stderr ?? '').trim().slice(0, 200)}` }
     }
@@ -862,15 +1007,28 @@ function notWired(what) {
   return () => ({ ok: false, message: `${what} is not wired into this call, so the global npm layer was left alone` })
 }
 
+/**
+ * The one line an npm command's answer contributes to a sentence that already names the command.
+ *
+ * The not-found case keeps its full text: the searched paths are the whole content of the answer, and the
+ * old 300-character cap cut them off, which is how a PATH problem lost its own evidence.
+ */
+function npmFailureLine(res) {
+  if (res?.notFound === true || res?.notExecutable === true || res?.runtimeUnavailable === true) {
+    return String(res.stderr ?? '').trim() || 'npm was not runnable by this process'
+  }
+  return (res?.stderr || res?.stdout || 'no output').toString().trim().slice(0, 300)
+}
+
 /** Take a global package off again — the undo for "this machine did not have it before the install". */
 function defaultNpmUninstall(name) {
   const res = defaultRun('npm', ['uninstall', '-g', name], { timeoutMs: 300_000 })
-  return res.status === 0 ? { ok: true, message: null } : { ok: false, message: (res.stderr || res.stdout || 'no output').trim().slice(0, 300) }
+  return res.status === 0 ? { ok: true, message: null } : { ok: false, message: npmFailureLine(res) }
 }
 
 function defaultNpmInstall(tgz) {
   const res = defaultRun('npm', ['install', '-g', tgz], { timeoutMs: 300_000 })
-  return res.status === 0 ? { ok: true, message: null } : { ok: false, message: (res.stderr || res.stdout || 'no output').trim().slice(0, 300) }
+  return res.status === 0 ? { ok: true, message: null } : { ok: false, message: npmFailureLine(res) }
 }
 
 /**
@@ -883,7 +1041,7 @@ function defaultNpmInstall(tgz) {
  */
 function defaultNpmRestore(name, version) {
   const res = defaultRun('npm', ['install', '-g', `${name}@${version}`], { timeoutMs: 300_000 })
-  return res.status === 0 ? { ok: true, message: null } : { ok: false, message: (res.stderr || res.stdout || 'no output').trim().slice(0, 300) }
+  return res.status === 0 ? { ok: true, message: null } : { ok: false, message: npmFailureLine(res) }
 }
 
 /**
@@ -917,6 +1075,12 @@ export function defaultReadGlobalVersions({ run = defaultRun } = {}) {
   const res = run('npm', ['ls', '-g', '--depth=0', '--json'], { timeoutMs: 60_000 })
   const stdout = (res.stdout ?? '').trim()
   const stderr = (res.stderr ?? '').trim()
+  if (res.notFound === true || res.notExecutable === true || res.runtimeUnavailable === true) {
+    // "I could not look" — and here the reason is that there was no npm to ask. The caller distinguishes
+    // this from a listing that names no package, which is why an unreadable prefix must never be read as
+    // an absence (see `installNpmPackages`).
+    return { ok: false, versions: {}, message: npmRunFailure(res, 'npm ls -g --json') }
+  }
   if (!stdout) {
     return { ok: false, versions: {}, message: `npm ls -g --json exited ${res.status}${stderr ? `: ${stderr.split('\n')[0]}` : ' with no output'}` }
   }
@@ -955,13 +1119,54 @@ export function defaultReadGlobalVersions({ run = defaultRun } = {}) {
  *
  * `fs.W_OK` on the directory is the whole question — npm creates package directories inside it, and a
  * missing `lib/node_modules` under a writable prefix is npm's to make.
+ *
+ * A third answer exists, and it was the one this machine actually got on 2026-10-03/2026-10-15: **there was
+ * no npm to ask**. The daily job is handed `/usr/bin:/bin:/usr/sbin:/sbin`, this machine's npm is in
+ * `/usr/local/bin`, the spawn ENOENTed, and `npm config get prefix answered 127` was reported as if the
+ * *prefix* were the problem. So `run` is given the search (`env`, `dirs`) and a not-found answer is
+ * reported as `cause: 'npm-not-found'` with the paths it looked at, which is what lets §3.5's refusal name
+ * the real thing instead of sending the person to `npm config get prefix` permissions.
  */
-export function checkNpmPrefix({ run = defaultRun, fsImpl = fs } = {}) {
+export function checkNpmPrefix({
+  run = defaultRun,
+  fsImpl = fs,
+  env = process.env,
+  dirs = null,
+  canExec,
+  isFile,
+  execPath,
+} = {}) {
   let got = null
   try {
-    got = run('npm', ['config', 'get', 'prefix'], { timeoutMs: 30_000 })
+    got = run('npm', ['config', 'get', 'prefix'], {
+      timeoutMs: 30_000,
+      env,
+      dirs,
+      exists: (target) => fsImpl.existsSync(target),
+      ...(canExec === undefined ? {} : { canExec }),
+      ...(isFile === undefined ? {} : { isFile }),
+      ...(execPath === undefined ? {} : { execPath }),
+    })
   } catch (error) {
     return { ok: false, prefix: null, dir: null, reason: `asking npm for its global prefix threw (${error?.message ?? String(error)})` }
+  }
+  if (got?.notFound === true || got?.notExecutable === true || got?.runtimeUnavailable === true) {
+    return {
+      ok: false,
+      prefix: null,
+      dir: null,
+      // Three facts, three repairs: the file is nowhere (`npm-not-found`), the file is there but cannot be
+      // exec'd (`npm-not-executable`), and the file was exec'd but the interpreter its own shebang names is
+      // unreachable from the environment this run handed the child (`npm-runtime-unavailable` — measured
+      // here as exit 127 with `env: node: No such file or directory`). All three mean "this run never
+      // reached an answer from npm", so all three must keep `dir: null`: a refusal that named a prefix
+      // directory it had not read would be the old misattribution in a new costume.
+      cause: got.runtimeUnavailable === true
+        ? 'npm-runtime-unavailable'
+        : got.notExecutable === true ? 'npm-not-executable' : 'npm-not-found',
+      tried: got.tried ?? [],
+      reason: String(got.stderr ?? '').trim() || 'npm could not be run',
+    }
   }
   const prefix = String(got?.stdout ?? '').trim()
   if (got?.status !== 0 || prefix === '' || prefix.startsWith('-')) {
@@ -1056,6 +1261,13 @@ export async function applyUpdate({
       })),
   socketPath = null,
   writeState = true,
+  /**
+   * The one read of the staged archive inside the re-proof (§3 / `verifyStagedBytes`), passed through so a
+   * caller can say what that read is allowed to do. Injectable because the failure this exists for — the
+   * archive is there and this account cannot read it — is not reproducible by pointing the real proof at a
+   * real file, and because the answer it must produce is data (`deferred`, nothing swapped), not a throw.
+   */
+  readArchive = (file) => fs.readFileSync(file),
   refreshCa = null,
   // §11: the updater's own copy. `env`/`autoDisabled` decide whether a job may be registered at all,
   // and the whole step is injectable because it spawns a process and reads launchd's answer.
@@ -1064,10 +1276,26 @@ export async function applyUpdate({
   readRunningJobImpl = readRunningJob,
   refreshRuntimeImpl = refreshRuntime,
   undoHandoverImpl = undoHandover,
+  /**
+   * The retirement of the staged generations after a swap that succeeded.
+   *
+   * Injectable for the same reason the copy is: this is the one step whose failure is *only* about the disk,
+   * and `test/staging-concurrency.test.mjs` has to be able to make the delete fail to prove the record says
+   * so instead of rolling a finished swap back.
+   */
+  retireStaged = retireStaleGenerations,
   // The same registration step §11's forward path uses, given to the undo as well. Without it the
   // rollback path could only be driven by spawning a real `node`, which is not what a test of the
   // sequence is for.
   runEnableImpl = undefined,
+  /**
+   * The clock used for the *moment of a write*, as distinct from `now` — the run clock, which says what
+   * moment the record describes and may have been handed over with `--at`.
+   *
+   * History rows take this one (see `stampOnto`), so a long run followed by a handover child appends in
+   * the order the bytes actually landed. Injectable so the ordering can be proven without waiting.
+   */
+  writeClock = () => new Date(),
 } = {}) {
   const roots = writableRoots(stateRoot)
   const { state } = loadState(stateRoot)
@@ -1086,7 +1314,19 @@ export async function applyUpdate({
   const handoverMode = trigger === 'auto' ? 'defer' : 'now'
   /** Merge `patch` onto `base` and publish it. `stamp` is the ordinary case: this run's own read. */
   function stampOnto(base, patch) {
-    const next = nextState(base, patch, { now })
+    // `updatedAt` stays on the run clock (`now`, which `cli.js` may have been told with `--at`), but the
+    // history row is stamped with the wall clock *of this write*. The two are different questions — "what
+    // moment does this record describe" and "when did these bytes land" — and using the run clock for both
+    // made the audit trail non-monotonic. Measured in `~/.glasspane/update-state.json` on this machine:
+    //   { at: 08:47:51, action: enable }  ← the handover child's own start
+    //   { at: 08:44:15, action: apply }   ← the parent's start, written three and a half minutes later
+    // so a reader taking the last N events saw the agent being enabled *before* the apply that enabled it.
+    // Reverse mutation: drop the `at` below and `the history of a parent run and its handover child appends
+    // in the order the writes happened` goes red on the decreasing pair.
+    const withStamp = patch.historyEntry
+      ? { ...patch, historyEntry: { ...patch.historyEntry, at: writeClock().toISOString() } }
+      : patch
+    const next = nextState(base, withStamp, { now })
     if (writeState) saveState(stateRoot, next, { now })
     return next
   }
@@ -1116,6 +1356,12 @@ export async function applyUpdate({
   // What §11's handover may have written that this run cannot see from its own read. Kept as a list so
   // the catch below can say it too, and never folded into a status by itself.
   const handoverNotes = []
+  /**
+   * What this run left on the disk it could not delete. Same shape as `handoverNotes` and kept separate
+   * because it is a different fact: the install verdict does not change, but "the staged bytes are still
+   * there" has to be in the record rather than in a swallowed `catch`.
+   */
+  const stagingNotes = []
   // Only true once the new copy has been asked to register itself: before that, nothing but this
   // function has touched the state file, and a re-read would only add a claim that is not earned.
   let handoverRan = false
@@ -1200,7 +1446,7 @@ export async function applyUpdate({
   // Gate §3 / #3（本轮加的）：staged 的字节在动任何真东西之前重新证明一次。`check` 的证明
   // 发生在几分钟之前，而 `stagedTreePresent` 只回答"树还在、形状还对"——形状对的树里完全可以
   // 是别人写进来的源码，`swift build` 与 `npm pack` 都照编译照装（见 verifyStagedBytes 的注释）。
-  const proven = await verifyStagedBytes({ stateRoot, staged: state.staged, rootPath: staged.rootPath })
+  const proven = await verifyStagedBytes({ stateRoot, staged: state.staged, rootPath: staged.rootPath, readArchive })
   if (!proven.ok) {
     return fail('deferred', CODES.digestMismatch,
       `the staged release is no longer the bytes "check" verified: ${proven.reason}. Nothing was built, packed, swapped or restarted, and the daemon was left running the version it had. `
@@ -1223,29 +1469,68 @@ export async function applyUpdate({
   // bundles were swapped buys a rollback, two daemon restarts and a version that never lands.
   const npmReady = preflightNpm()
   if (!npmReady.ok) {
-    const remedy = npmReady.dir
-      // The two ways out are not equal, and the sentence used to lead with the dangerous one:
-      // `sudo chown -R "$(whoami)" /usr/local/lib/node_modules /usr/local/bin` — a recursive ownership
-      // sweep across every *other* global package and every binary in /usr/local/bin, printed verbatim by
-      // the panel and by `gp_diagnose` because `lastError.message` is what they show. This product's rule
-      // (test/remedy-surface.test.mjs, and the shape lib/ca-bundle.js was corrected to) is that a remedy may
-      // *name* the tool a person would use but must not hand out an executable escalation. Relocating npm's
-      // prefix needs no escalation at all and an agent can run it, so it comes first.
-      ? 'Two ways out, and the first one an agent can run by itself: move npm\'s prefix under the home '
-        + 'directory (`npm config set prefix ~/.npm-global`, put `~/.npm-global/bin` on PATH, then re-run the '
-        + 'GlassPane installer so the launcher points at the new one). The other is a person\'s call, and this '
-        + 'tool will not run it for them: hand '
-        + (npmReady.dirs ?? [npmReady.dir]).map((dir) => `"${dir}"`).join(' and ')
-        + ' to this account, which means a `chown` of those directories entered by hand with a password. '
-        + 'After either one, press "Install update" again.'
-      : 'Check `npm config get prefix` from this account — the updater will not ask for a password.'
+    // Three different facts arrive here, and they used to share one sentence.
+    //  · the command was not there at all (`npm-not-found`) — the shape this machine actually hit, because
+    //    launchd hands the job `/usr/bin:/bin:/usr/sbin:/sbin` and npm lives in `/usr/local/bin` here;
+    //  · the prefix is there and this account cannot write it (`dir` named);
+    //  · npm answered but not with a prefix.
+    // Telling the second one's story about the first is a defect in its own right: the person goes and
+    // checks `npm config get prefix` permissions on a machine where npm was never reachable by this run.
+    const notFound = npmReady.cause === 'npm-not-found' || npmReady.cause === 'npm-not-executable'
+    const runtimeGone = npmReady.cause === 'npm-runtime-unavailable'
+    const remedy = runtimeGone
+      // The fourth fact in this class, and the one the resolved path used to hide: the script was found and
+      // exec'd, and the `#!/usr/bin/env node` at the top of it could not find node in the environment this
+      // run handed the child. `childSpawnEnv` closes that gap for the children this program starts, so a
+      // run that still lands here has a genuinely unreachable runtime — said as that, never as a permission.
+      ? 'The fix is to put node back where this run can reach it, not to change any permission: npm is a '
+        + 'script whose first line asks for `node`, and that request could not be answered from this '
+        + 'environment. Install or restore node (brew install node, or the official installer), then run '
+        + '"updater apply" again from that shell and follow it with "updater enable" from the same shell — '
+        + 'enable renders the daily job\'s PATH from the node that is running it, which is what the job needs '
+        + 'to start the same script tomorrow. Nothing about the install itself has to change, and no password '
+        + 'is asked for.'
+      : notFound
+        // An agent can do this one by itself, which is what makes it the first half of the sentence: run the
+        // same command from a shell whose PATH reaches the directory, and the search stops being empty.
+        // The second half names what this tool *does* support: `updater enable` re-renders the job's
+        // EnvironmentVariables (including the PATH it puts there), so a hand-edit of the plist is not the
+        // remedy — it is overwritten by the next enable.
+        ? 'The fix is to give this run a PATH that reaches npm, not to change any permission: run '
+          + '"updater apply" again from a shell whose PATH includes the directory npm is installed in (the '
+          + 'search above is the list of directories this process was allowed to look in), and re-register '
+          + 'the daily job with "updater enable" from that same shell — enable writes the job\'s PATH from '
+          + 'the node and npm prefix bins it finds at that moment, so editing the plist by hand would only '
+          + 'be overwritten. Nothing about the install itself has to change, and no password is asked for.'
+        : npmReady.dir
+        // The two ways out are not equal, and the sentence used to lead with the dangerous one:
+        // `sudo chown -R "$(whoami)" /usr/local/lib/node_modules /usr/local/bin` — a recursive ownership
+        // sweep across every *other* global package and every binary in /usr/local/bin, printed verbatim by
+        // the panel and by `gp_diagnose` because `lastError.message` is what they show. This product's rule
+        // (test/remedy-surface.test.mjs, and the shape lib/ca-bundle.js was corrected to) is that a remedy may
+        // *name* the tool a person would use but must not hand out an executable escalation. Relocating npm's
+        // prefix needs no escalation at all and an agent can run it, so it comes first.
+        ? 'Two ways out, and the first one an agent can run by itself: move npm\'s prefix under the home '
+          + 'directory (`npm config set prefix ~/.npm-global`, put `~/.npm-global/bin` on PATH, then re-run the '
+          + 'GlassPane installer so the launcher points at the new one). The other is a person\'s call, and this '
+          + 'tool will not run it for them: hand '
+          + (npmReady.dirs ?? [npmReady.dir]).map((dir) => `"${dir}"`).join(' and ')
+          + ' to this account, which means a `chown` of those directories entered by hand with a password. '
+          + 'After either one, press "Install update" again.'
+        : 'Check `npm config get prefix` from this account — the updater will not ask for a password.'
+    const claim = (notFound || runtimeGone)
+      ? '. Nothing was replaced and the daemon was not restarted: the updater never reached npm, so it has no '
+        + 'answer about the global prefix yet, and the two packages `glasspane-mcp` and `glasspane-install` '
+        + 'are installed with `npm install -g` after the bundles swap. This is a PATH fact about the process '
+        + 'that ran this command, not a permission of the directory npm would write into.'
+      : '. Nothing was replaced and the daemon was not restarted: the two packages `glasspane-mcp` and '
+        + '`glasspane-install` are installed with `npm install -g` *after* the bundles swap, and this account '
+        + 'cannot write where npm would put them. '
     return fail('deferred', CODES.npmPrefixUnwritable,
       'automatic update cannot finish on this machine: '
       + (npmReady.reason ?? 'the npm global prefix could not be checked')
-      + '. Nothing was replaced and the daemon was not restarted: the two packages `glasspane-mcp` and '
-      + '`glasspane-install` are installed with `npm install -g` *after* the bundles swap, and this account '
-      + 'cannot write where npm would put them. ' + remedy,
-      { details: { prefix: npmReady.prefix, dir: npmReady.dir } })
+      + claim + remedy,
+      { details: { prefix: npmReady.prefix, dir: npmReady.dir, cause: npmReady.cause ?? null, tried: npmReady.tried ?? null } })
   }
 
   // The other half of the same question: the release may be *installable* by an account that can write its
@@ -1580,7 +1865,20 @@ export async function applyUpdate({
       }
     }
     const runtimeStalled = runtime?.status === 'failed'
-    removeTreeWithin(roots.staging, staged.dir)
+    // Retire this generation *and* the ones the state no longer references. The call that used to be here
+    // (`removeTreeWithin(roots.staging, staged.dir)`) had two holes: it retired only its own directory, so
+    // every earlier generation stayed on the disk forever (measured here: a whole 25 MB archive under
+    // `update-staging/1.5.1/` beneath a state file three versions newer), and a throw from the delete would
+    // have been caught by the post-swap handler below and answered as a *rollback* of a swap that had
+    // succeeded. Both are paid for: stale siblings are swept under the equal-or-older rule in
+    // `lib/staging.js`, and a removal that did not take is stated in the record rather than thrown.
+    const retired = retireStaged({ stateRoot, appliedVersion: wantVersion, also: [staged.dir] })
+    for (const one of retired.failed) {
+      stagingNotes.push(`the staged bytes under ${one.dir} were NOT thrown away (${one.reason})`)
+    }
+    if (retired.ok === false && retired.failed.length === 0) {
+      for (const note of retired.skipped) stagingNotes.push(`the staging sweep left something alone: ${note}`)
+    }
     // Gate 8's answer is *not* retired with it. `check` wrote `authorship` for the
     // release it staged, `nextState` carries untouched fields through, so this is
     // the one record left on the machine saying whether what is now installed came
@@ -1607,7 +1905,7 @@ export async function applyUpdate({
     // The document the applied patch merges onto is re-read here and nowhere else in this function:
     // this is the one write that runs after another process (`enable`) may have written the file.
     const base = freshestBase(handoverNotes)
-    const message = [swapped + (standing ? `. ${standing.message}` : ''), runtimeNote, ...handoverNotes].filter(Boolean).join('. ')
+    const message = [swapped + (standing ? `. ${standing.message}` : ''), runtimeNote, ...stagingNotes, ...handoverNotes].filter(Boolean).join('. ')
     // §9: a swap replaces the very bundles the agent runs from, so the root bundle
     // node is handed has to be re-exported with it. Without this, a rotated
     // interception root turns the daily job dead under an install that just
@@ -1617,7 +1915,7 @@ export async function applyUpdate({
     const saved = stampOnto(base, {
       status: 'applied',
       code,
-      message: code !== null || handoverNotes.length > 0 ? message : null,
+      message: code !== null || handoverNotes.length > 0 || stagingNotes.length > 0 ? message : null,
       current: wantVersion,
       latest: base.latest,
       staged: null,
@@ -1756,6 +2054,17 @@ export async function rollbackToBackup({
   backupDir = null,
   socketPath = null,
   now = new Date(),
+  /**
+   * The clock of the *write*, exactly as `applyUpdate`'s `stampOnto` uses it (see the note there): `now` is
+   * the run clock and may have been handed over with `--at`, while a history row has to say when its bytes
+   * landed. A manual rollback is the slower run of the two — it restores, re-probes, restarts the daemon and
+   * waits for a handshake — so with the run clock its row could be stamped *before* a `check` or `apply` that
+   * happened while it was working, and the audit trail the panel reads went backwards.
+   *
+   * REVERSE MUTATION: put `now.toISOString()` back into the two rows below and
+   * `a rollback's history rows are stamped at the moment they were written, not at the run's start` goes red.
+   */
+  writeClock = () => new Date(),
   copyFn = defaultCopy,
   kickstart = kickstartJob,
   helloCall = socketCall,
@@ -1785,7 +2094,7 @@ export async function rollbackToBackup({
       status: 'rollback-failed',
       code: CODES.rollbackFailed,
       message: `${restored.message}: re-run the GlassPane installer to put a working version back into ${appsDir}`,
-      historyEntry: { at: now.toISOString(), action: 'rollback', result: 'rollback-failed', digest: null, code: CODES.rollbackFailed },
+      historyEntry: { at: writeClock().toISOString(), action: 'rollback', result: 'rollback-failed', digest: null, code: CODES.rollbackFailed },
     }, { now })
     saveState(stateRoot, saved, { now })
     return { ok: false, status: 'rollback-failed', code: CODES.rollbackFailed, message: saved.lastError.message, state: saved }
@@ -1829,7 +2138,7 @@ export async function rollbackToBackup({
       code: handshake.ok ? null : CODES.handshakeFailed,
       current: wantVersion,
       staged: null,
-      historyEntry: { at: now.toISOString(), action: 'rollback', result: handshake.ok ? 'rolled-back' : 'rolled-back-unverified', digest: null, code: handshake.ok ? null : CODES.handshakeFailed },
+      historyEntry: { at: writeClock().toISOString(), action: 'rollback', result: handshake.ok ? 'rolled-back' : 'rolled-back-unverified', digest: null, code: handshake.ok ? null : CODES.handshakeFailed },
     },
     { now },
   )
