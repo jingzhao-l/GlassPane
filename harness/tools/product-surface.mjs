@@ -807,6 +807,7 @@ const SELFTESTS = [
   "harness/tools/kernel-pin-selftest.mjs",
   "harness/tools/verify-published-selftest.sh",
   "harness/tools/probe-lane-selftest.sh",
+  "harness/tools/release-artifact-selftest.mjs",
 ]
 {
   const wiringRoots = [path.join(repoRoot, ".github", "workflows"), path.join(forkRoot, ".github", "workflows")]

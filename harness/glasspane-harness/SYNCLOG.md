@@ -457,7 +457,7 @@ split 仓 `.github/workflows/release.yml`（`ref_name` 走 env + 形状校验、
 `06241ad` 是本 tip 的祖先，所以普通 push 就过（fast-forward，**没有覆盖任何东西**，
 `--force-with-lease` 本轮不需要）。tag `v0.7.8` 由 split tip 推出。Release 跑
 `38345796379`：version-check 6s、create-release 4s、darwin-x64 5m55s、darwin-arm64 3m12s、
-checksums+签名 12s，整跑 success；`gh release view` 回读 `draft=`、
+checksums+签名 12s，整跑 success；`gh release view` 回读 `draft=false`、
 **`targetCommitish` = `46d131e…`（是被 tag 的那个 commit，不再是分支名——0.6.4 那条锚点缺陷
 已在真发布物上复验）**，6 份资产齐（两份 zip、三份 `.asc`、`SHA256SUMS.txt`）。
 npm 那条是独立的 dispatch：`gh workflow run release.yml --ref v0.7.8 -f publish_npm=true
@@ -749,7 +749,7 @@ exit 2＝`NOT OBSERVED`（机器的成因，沿用本文件已有的"这台机�
 `--prefix <dir>` 是为了让 FAIL 分支**可执行**才加的（npm 安装实测 21 分钟，错误页没法靠真发布物
 造出来），它会打印自己跳过了安装。`harness/tools/verify-published-selftest.sh` 用三个假前缀
 驱动三条分支 + 一条"位置参数真被吃了"的控制，实测 8 条断言全中 rc=0；
-把页面判据阉成 `/<html/i` 的副本（`VP_GATE=` 指过去，真文件不动）喂同一条测试 ⇒
+把页面判据阉成 `/<html/i` 的副本（用 `VP_GATE` 指过去，真文件不动）喂同一条测试 ⇒
 **2 条具名红 + rc=1**（`/var/tmp/gp-sess4-mut.log`）。
 这条测试自己红过两次，两处都留在测试里并写明：`run_case` 漏赋值 `$1..$3` ⇒
 `grep -qF ""` 对任何输出都成立、三个用例跑的其实是同一个假发布物还报绿（现在期望串为空即判
