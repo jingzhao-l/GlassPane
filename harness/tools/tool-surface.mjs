@@ -28,13 +28,17 @@
  *   --record  write harness/contracts/tool-surface.json (the baseline)
  *   --check   fail if a surface grew past its recorded baseline, or if a surface
  *             that is not yet over the documented limit crosses it, or if part
- *             of a surface cannot be attributed at all
+ *             of a surface cannot be attributed at all, or if the set of files
+ *             actually MEASURED is smaller than the set the golden records (a
+ *             measurement that quietly got smaller is not a smaller surface), or
+ *             if a measured set came back empty (then no percentage is compared)
  *
  * This is a ratchet, not a ban: growing a surface is allowed, doing it
  * *unnoticed* is not. `--record` in the same commit is the remedy, and the
  * commit is where the growth gets justified.
  *
- * Exit codes: 0 ok, 1 grew past baseline / crossed the limit, 2 cannot measure.
+ * Exit codes: 0 ok, 1 grew past baseline / crossed the limit / measured less than
+ * the record says it measures, 2 cannot measure.
  */
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
@@ -259,13 +263,24 @@ function measureFork(golden) {
     files.push({ file: rel, kind: "edited", lines: n })
   }
 
-  // A rule that excludes everything is indistinguishable from a measurement of
-  // zero, so refuse instead: `(^|\/test\/)` once matched the empty string at
-  // position 0 and classified every single file as a test, which reported
-  // surface B as 14 LOC and looked like a plausible number.
-  const codeish = (fd.added ?? []).filter((rel) => REF_EXTS.includes(path.extname(rel)))
-  if (codeish.length > 0 && files.length === 0) {
-    return fail(`${codeish.length} fork file(s) are ours to measure but every one was excluded — the exclusion rules are wrong, not the surface empty`)
+  // The measured set must be non-empty, and (asserted below, against the golden) as large
+  // as the set the record says this rule measures. The old form of this guard asked the
+  // *same golden it was guarding* how many files there were to measure:
+  // `(fd.added ?? []).filter(...)` — so emptying `fork-diff.json`'s `added` made the guard
+  // vacuous instead of making the shrink visible. Measured 2026-10-16 with that golden's
+  // `added`/`edited`/`addedDetail`/`editedDetail` emptied (counts left untouched):
+  // surface B went 8,275 LOC / 216 files → 0 LOC, `--check` printed
+  // "no growth past the recorded baseline" and exited 0, and the same run moved surface A
+  // from 21.66% → 26.63% while A's own LOC did not change — one surface shrinking
+  // relabelled the other. An emptied list, a narrowed `REF_EXTS`, a widened `isTest` or a
+  // renamed bucket all shrink B that way and could then be `--record`ed as the new baseline.
+  // So: an empty measured set refuses here (no percentage is computed over it, and
+  // `--record` cannot stamp it because `note` is set), and any shrink against the recorded
+  // file list is red in the coverage section below.
+  if (files.length === 0) {
+    return fail(
+      `surface B measured 0 file(s): the fork-diff golden's \`added\`/\`edited\` lists carry ${(fd.added ?? []).length} + ${(fd.edited ?? []).length} file(s) while its own \`counts\` still declares ${fd.counts?.edited ?? "?"} edited / ${fd.counts?.added ?? "?"} added. An emptied list, a narrowed REF_EXTS, a widened isTest or a renamed bucket all look exactly like this — refusing to report a percentage over an empty measured set`,
+    )
   }
 
   // Only the lane that lacks the clone carries. Writing this unconditionally makes the
@@ -404,7 +419,14 @@ function build(golden) {
   const fork = measureFork(golden)
   const forkLoc = fork.files.reduce((s, f) => s + f.lines, 0)
   const denom = engineLoc + surfaceALoc + forkLoc
-  const ratio = (n) => Math.round((n / denom) * 10000) / 10000
+  // A percentage is only comparable when every term of its denominator was measured.
+  // With one surface at 0 files the other's share moves without its own code moving
+  // (measured 2026-10-16: B 8,275 → 0 LOC pushed A from 21.66% to 26.63% at an unchanged
+  // 9,609 LOC), so when a measured set comes back empty the ratio is reported as *not
+  // measured* instead of as a number two runs can compare.
+  const unmeasured =
+    fork.files.length === 0 ? "surface B measured 0 file(s)" : surfaceAFiles.length === 0 ? "surface A measured 0 file(s)" : null
+  const ratio = (n) => (unmeasured ? null : Math.round((n / denom) * 10000) / 10000)
   return {
     limit: LIMIT,
     limitSource: LIMIT_SOURCE,
@@ -468,13 +490,73 @@ if (golden && mode === "check") {
 
 const observed = build(golden)
 
+const percentageRefusal =
+  observed.surfaces.fork.files.length === 0
+    ? "surface B measured 0 file(s), so it contributes nothing to the denominator and surface A's share would move on its own code doing nothing"
+    : "surface A measured 0 file(s)"
+
+/**
+ * How many files the surface actually measured, versus how many the record says it
+ * measures. The golden's own recorded set is the only honest yardstick here — the
+ * fork-diff lists cannot be, because they are the input this rule reads and emptying
+ * them is the very mutation that made surface B disappear (see the note in measureFork).
+ * Same discipline as `surface-semantics.mjs` (filesScanned vs the recorded scan set) and
+ * `brand-surface.mjs` (lineage coverage): a measurement set that got smaller is a change
+ * of caliber, not a smaller surface, and "we measured nothing" must never read as
+ * "nothing grew".
+ */
+const recordedCount = (surf) =>
+  Array.isArray(surf?.files) ? surf.files.length : typeof surf?.files === "number" ? surf.files : Object.keys(surf?.byFile ?? {}).length
+
+function coverageProblems(golden) {
+  const problems = []
+  for (const [name, now, was] of [
+    ["surface A (mcp-shell/src)", observed.surfaces.mcpShell.files, golden?.surfaces?.mcpShell],
+    ["surface B (fork, ours)", observed.surfaces.fork.files.length, golden?.surfaces?.fork],
+  ]) {
+    if (!was) {
+      problems.push(`${name}: the golden has no such surface — this rule cannot prove it measured anything`)
+      continue
+    }
+    const recorded = recordedCount(was)
+    if (!Number.isFinite(recorded) || recorded === 0) {
+      const shape = was?.files === undefined ? (was?.byFile === undefined ? "absent from the golden" : `only byFile (${Object.keys(was.byFile).length} keys)`) : JSON.stringify(was.files)
+      problems.push(`${name}: the golden stopped carrying the file list this rule compares (its \`files\` field is ${shape}) — a ratchet with no recorded measurement set cannot notice the set disappearing. Re-record against the tree so the number of files measured is on the record.`)
+      continue
+    }
+    if (now < recorded) {
+      problems.push(
+        `${name}: the baseline measured ${recorded} file(s), this run measures ${now} — ${recorded - now} file(s) left the MEASURED set. That is a caliber change (an emptied fork-diff list, a narrowed REF_EXTS, a widened isTest, a renamed bucket), not a smaller surface: LOC that is not measured cannot grow. Restore what the rule reads, or --record in the same commit and say why those files are no longer part of the surface.`,
+      )
+    }
+  }
+  return problems
+}
+
+function reportCoverage(golden) {
+  for (const [name, now, was] of [
+    ["surface A (mcp-shell/src)", observed.surfaces.mcpShell.files, golden?.surfaces?.mcpShell],
+    ["surface B (fork, ours)", observed.surfaces.fork.files.length, golden?.surfaces?.fork],
+  ]) {
+    const recorded = was ? recordedCount(was) : null
+    if (!Number.isFinite(recorded)) {
+      console.log(`  ${name} coverage: this run measured ${now} file(s); the baseline carries no measurement set, so it cannot be compared`)
+      continue
+    }
+    const delta = now - recorded
+    console.log(
+      `  ${name} coverage: recorded ${recorded} file(s) → now ${now} file(s)${delta === 0 ? "" : ` (${delta > 0 ? "grew" : "SHRANK"} ${Math.abs(delta)}) — the LOC figure is a sum over ${now} file(s)`}`,
+    )
+  }
+}
+
 // The limit is a documented number, so a surface sitting over it is a fact the
 // report must state whatever it is doing — not a fact only surface A gets to say.
-const pct = (n) => `${(n * 100).toFixed(2)}%`
-const overLimit = (s) => s.ratio > observed.limit
+const pct = (n) => (Number.isFinite(n) ? `${(n * 100).toFixed(2)}%` : "not measured")
+const overLimit = (s) => Number.isFinite(s.ratio) && s.ratio > observed.limit
 const show = (name, s) =>
   console.log(
-    `  ${name}: ${s.loc} LOC, ${pct(s.ratio)} (documented limit ${(observed.limit * 100).toFixed(0)}%)${overLimit(s) ? "  ← OVER LIMIT" : ""}`,
+    `  ${name}: ${s.loc} LOC, ${Number.isFinite(s.ratio) ? pct(s.ratio) : `ratio REFUSED (${percentageRefusal})`} (documented limit ${(observed.limit * 100).toFixed(0)}%)${overLimit(s) ? "  ← OVER LIMIT" : ""}`,
   )
 
 /**
@@ -575,7 +657,10 @@ if (mode === "record") {
   // Saying it before writing it: the golden about to be written blesses a surface
   // that is over the documented limit, and from that commit the crossing check for
   // it is spent. The record is still allowed (this is a ratchet, not a ban) — but
-  // not silently.
+  // not silently. The coverage line above it does the same job for the measurement
+  // SET: a record that quietly measures fewer files than its predecessor turns the
+  // ratchet into a no-op, so the move is printed in the same breath as the number.
+  reportCoverage(golden)
   announceOverLimit([
     ["surface A (mcp-shell/src)", observed.surfaces.mcpShell, golden?.surfaces?.mcpShell ?? null],
     ["surface B (fork, ours)", observed.surfaces.fork, golden?.surfaces?.fork ?? null],
@@ -589,6 +674,20 @@ if (!golden) die(2, `no golden at ${path.relative(repoRoot, goldenFile)} — run
 if (!golden.surfaces?.mcpShell || !golden.surfaces?.fork) die(2, "golden is missing a surface — re-record")
 
 let red = 0
+
+// Coverage first, before any number is compared: a surface that stopped being measured
+// cannot be cleared by the comparison that depends on measuring it.
+for (const problem of coverageProblems(golden)) {
+  console.error(`  ✗ coverage: ${problem}`)
+  red++
+}
+reportCoverage(golden)
+// No percentage is emitted over an empty measured set (build() returns null for it), and
+// the refusal is itself a verdict: a run that could not measure is not a run that passed.
+if (!Number.isFinite(observed.surfaces.fork.ratio) || !Number.isFinite(observed.surfaces.mcpShell.ratio)) {
+  console.error(`  ✗ percentages are not comparable this run: ${percentageRefusal} — the ratio's denominator lost a term, so every share printed against it would be a different measurement wearing the same name.`)
+  red++
+}
 
 const pairs = [
   ["surface A (mcp-shell/src)", observed.surfaces.mcpShell, golden.surfaces.mcpShell],

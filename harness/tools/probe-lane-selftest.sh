@@ -68,6 +68,21 @@ chmod 755 "$TMP/bin/node"
 fail=0
 run_case() {
   want_rc="$1" want_out="$2" probe_rc="$3"
+  # An empty expectation is not a passing expectation: `grep -q ""` matches every line, so a
+  # case that forgot to say what it expects is indistinguishable from a case that passed. This
+  # is the identical hole `verify-published-selftest.sh:110-114` refuses ("夹具必须能拒绝") —
+  # the same file once reported three green checks while every case ran the same fake.
+  # Refusing the shape is the only way this fixture can fail to prove nothing.
+  if [ -z "$want_out" ]; then
+    echo "  ✗ case exit $probe_rc arrived with NO expected line — refusing to call an empty expectation a pass"
+    fail=1
+    return
+  fi
+  if [ -z "$want_rc" ]; then
+    echo "  ✗ case \"$want_out\" arrived with NO expected exit code — refusing to guess what the step should do"
+    fail=1
+    return
+  fi
   : > "$TMP/summary.md"
   got="$(
     PATH="$TMP/bin:$PATH" PROBE_RC="$probe_rc" GITHUB_STEP_SUMMARY="$TMP/summary.md" \
@@ -81,7 +96,10 @@ run_case() {
   else
     echo "  ✓ exit $probe_rc → step exit $got_rc"
   fi
-  if ! printf '%s' "$got" | grep -q "$want_out"; then
+  # -F: the expectations are literal sentences (they carry （） and ——), and a BRE that
+  # mis-interprets one of them reads as "the step did not say it" — a false red is as expensive
+  # here as a false green.
+  if ! printf '%s' "$got" | grep -qF -- "$want_out"; then
     echo "    ✗ the step did not say it: $want_out"
     fail=1
   fi

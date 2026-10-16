@@ -18,9 +18,11 @@ name: Release
 #     透明日志，没有产生任何 stage 件。这里此前写的「"publish directly" 未勾
 #     （staged only）」已不成立 —— 别按那句话去终端找 `npm stage approve`。
 #   · 万一哪天直发被拒（TP 配置改回 staged-only，或 npm 对 bypass-2FA token 的策略
-#     收紧），下面的 `|| npm stage publish` 分支接住，owner 用
-#     `npm stage approve <stage-id>`（2FA）兑现存在。
-# npm CLI ≥ 11.15 才有 stage 子命令，故先全局升 npm@11；不配 NPM_TOKEN
+#     收紧），下面那条分支接住：把包 stage 起来，**然后判红**——这一跑没把任何东西放上
+#     registry，让它绿就是 v0.7.6 那种"job 绿、registry 查无此版"的事故。owner 用
+#     `npm stage approve <stage-id>`（2FA）兑现存在，再重跑这一版。
+# npm CLI ≥ 11.15 才有 stage 子命令，故先全局升一条钉死版本的 npm（不是 `npm@11` 那种飘的
+# dist-tag，理由见下面那条步骤的注释）；不配 NPM_TOKEN
 # （空 token 会被 setup-node 写进 .npmrc，反而挡住 OIDC）。
 # npm 11 行为变化：`npm publish --dry-run` 不再纯本地、会查 registry 撞已发
 # 版本，所以 dry 分支一律用 `npm pack --dry-run`。
@@ -220,7 +222,15 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
       - name: Upgrade npm (staged publishing needs >= 11.15)
-        run: npm install -g npm@11
+        # 钉死 npm@12.2.0，不再飘 `npm@11`：这一台机器握着 OIDC token，几分钟后就要做不可逆的
+        # publish，而 `npm@11` 是一条能被人重贴的 dist-tag —— 把第三方代码不带锚点地装进发布机上，
+        # 等于自己造出本文件上面那段话警告的那个洞。选 12.2.0 的依据是同一条链上的实测：fork 那条
+        # 发布 lane 用同一个数字，并且记下 registry 元数据里带 provenance 的那次发布的
+        # `_npmVersion` 就是 12.2.0（见 harness/glasspane-harness 的 release.yml 同名步骤）。
+        # 照旧把版本打出来：钉的与实际装上的不一致时，不许被读成"发布成功"。
+        run: |
+          npm install -g npm@12.2.0
+          echo "npm in this publish lane: $(npm --version)"
       - name: Install workspaces from root lockfile
         run: npm ci
       - name: Build all TS workspaces (kernel first; mcp-shell imports it)
@@ -286,23 +296,122 @@ jobs:
           npm run bundle
           if [ "$MODE" = "dry" ]; then
             npm pack --dry-run
-          else
-            npm publish --provenance || {
-              echo "::notice::direct publish refused (staged-only trusted publisher)"
-              npm stage publish . --provenance
-              echo "::notice::staged publish created — owner approves with: npm stage approve <stage-id> (see npm stage list)"
-            }
+            exit 0
           fi
+          # 这一段是从 fork 那条 lane 搬过来的判决，替换掉的是一条 `||`。原来那条 `||` 把
+          # **任何**失败都走成"直发被拒→stage"：E401、registry 5xx、tarball 本身坏了都进这个分支，
+          # 而 stage 退 0 时这一格就绿了——绿着什么都没发。这正是 v0.7.6 那次事故的形状（job 绿、
+          # registry 查无此版、装上去没有命令），本仓的 harness SYNCLOG 记着它。stage 只服务一种
+          # 情形：TP 配置是 staged-only、注册表拒绝**直发**。其余失败保持失败。
+          # 名字与版本都从这一份 manifest 读（working-directory 就是这个包），不在这个文件里再写
+          # 一个字面量：写了就有了"文件里的名字与包里的名字不一致"这种账。
+          pkg="$(node -p "require('./package.json').name")"
+          ver="$(node -p "require('./package.json').version")"
+          log="$(mktemp)"
+          rc=0
+          npm publish --provenance >"$log" 2>&1 || rc=$?
+          cat "$log"
+          if [ "$rc" -ne 0 ]; then
+            if grep -qiE "staged publishing|only allowed through (the )?oidc|trusted publisher|publishing directly is not allowed" "$log"; then
+              echo "::notice::registry 拒了 ${pkg}@${ver} 的直发（staged-only trusted publisher）——改为 stage"
+              npm stage publish . --provenance
+              echo "::error::${pkg}@${ver} 是 staged 而不是 published：这一跑没把任何东西放上 registry，绿就是把「发布成功」交给一个还没存在的包。owner 收尾：npm stage list → npm stage approve <stage-id>（2FA），再重跑这一版。"
+              rm -f "$log"
+              exit 1
+            fi
+            # 同一个版本重发（并发组排队的那第二条，或人工重跑 dispatch）会撞上这条拒绝。它不是失败，
+            # 但也不能白拿：判据是注册表自己说这一版在不在，而不是"看见这句报错就当没事"。
+            if grep -qiE "cannot publish over the previously published versions" "$log"; then
+              echo "已发过：${pkg}@${ver} 撞到重复版本拒绝——现在向 registry 核实它确实在"
+              got=""
+              for attempt in $(seq 1 24); do
+                got="$(npm view "${pkg}@${ver}" version --registry https://registry.npmjs.org --prefer-online 2>/dev/null || true)"
+                [ "$got" = "$ver" ] && break
+                sleep 30
+              done
+              if [ "$got" != "$ver" ]; then
+                echo "::error::${pkg}@${ver} 被当成重复版本拒了，但轮询 12 分钟后 registry 答的仍是 ${got:-nothing}——这就是 v0.7.6 的形状（绿着，registry 查无此版），保持红"
+                rm -f "$log"
+                exit 1
+              fi
+              echo "registry 确认在架：${pkg}@${ver}（第 $attempt 次轮询答对）"
+              rm -f "$log"
+              exit 0
+            fi
+            echo "::error::${pkg}@${ver} 发布失败（exit $rc），而输出里没有任何一句说注册表拒了直发——不盲签 stage"
+            rm -f "$log"
+            exit "$rc"
+          fi
+          # 退 0 也不算数：这一格存在的理由是"registry 上有了这一版"，那句话只能由 registry 回答。
+          got=""
+          for attempt in $(seq 1 24); do
+            got="$(npm view "${pkg}@${ver}" version --registry https://registry.npmjs.org --prefer-online 2>/dev/null || true)"
+            [ "$got" = "$ver" ] && break
+            sleep 30
+          done
+          if [ "$got" != "$ver" ]; then
+            echo "::error::npm publish 退 0，但 12 分钟轮询后 registry 上 ${pkg} 的这一版答的是 ${got:-nothing}——发出去了才算发出去了，保持红"
+            rm -f "$log"
+            exit 1
+          fi
+          rm -f "$log"
+          echo "published and confirmed on the registry: ${pkg}@${ver}"
       - name: Publish (or pack-check) glasspane-install
         working-directory: installer
         run: |
           set -euo pipefail
           if [ "$MODE" = "dry" ]; then
             npm pack --dry-run
-          else
-            npm publish --provenance || {
-              echo "::notice::direct publish refused (staged-only trusted publisher)"
-              npm stage publish . --provenance
-              echo "::notice::staged publish created — owner approves with: npm stage approve <stage-id> (see npm stage list)"
-            }
+            exit 0
           fi
+          # 与上一条同样的判决（见那里的注释）：只有"注册表拒了直发"这一种失败才允许 stage，且 stage
+          # 之后判红；其余失败原样退出；退 0 之后再向 registry 核实这一版确实在架。两个包各自读自己的
+          # manifest，不共用这个文件里的名字。
+          pkg="$(node -p "require('./package.json').name")"
+          ver="$(node -p "require('./package.json').version")"
+          log="$(mktemp)"
+          rc=0
+          npm publish --provenance >"$log" 2>&1 || rc=$?
+          cat "$log"
+          if [ "$rc" -ne 0 ]; then
+            if grep -qiE "staged publishing|only allowed through (the )?oidc|trusted publisher|publishing directly is not allowed" "$log"; then
+              echo "::notice::registry 拒了 ${pkg}@${ver} 的直发（staged-only trusted publisher）——改为 stage"
+              npm stage publish . --provenance
+              echo "::error::${pkg}@${ver} 是 staged 而不是 published：这一跑没把任何东西放上 registry，绿就是把一次不存在的发布报成成功。owner 收尾：npm stage list → npm stage approve <stage-id>（2FA），再重跑这一版。"
+              rm -f "$log"
+              exit 1
+            fi
+            if grep -qiE "cannot publish over the previously published versions" "$log"; then
+              echo "已发过：${pkg}@${ver} 撞到重复版本拒绝——现在向 registry 核实它确实在"
+              got=""
+              for attempt in $(seq 1 24); do
+                got="$(npm view "${pkg}@${ver}" version --registry https://registry.npmjs.org --prefer-online 2>/dev/null || true)"
+                [ "$got" = "$ver" ] && break
+                sleep 30
+              done
+              if [ "$got" != "$ver" ]; then
+                echo "::error::${pkg}@${ver} 被当成重复版本拒了，但轮询 12 分钟后 registry 答的仍是 ${got:-nothing}——这就是 v0.7.6 的形状（绿着，registry 查无此版），保持红"
+                rm -f "$log"
+                exit 1
+              fi
+              echo "registry 确认在架：${pkg}@${ver}（第 $attempt 次轮询答对）"
+              rm -f "$log"
+              exit 0
+            fi
+            echo "::error::${pkg}@${ver} 发布失败（exit $rc），而输出里没有任何一句说注册表拒了直发——不盲签 stage"
+            rm -f "$log"
+            exit "$rc"
+          fi
+          got=""
+          for attempt in $(seq 1 24); do
+            got="$(npm view "${pkg}@${ver}" version --registry https://registry.npmjs.org --prefer-online 2>/dev/null || true)"
+            [ "$got" = "$ver" ] && break
+            sleep 30
+          done
+          if [ "$got" != "$ver" ]; then
+            echo "::error::npm publish 退 0，但 12 分钟轮询后 registry 上 ${pkg} 的这一版答的是 ${got:-nothing}——发出去了才算发出去了，保持红"
+            rm -f "$log"
+            exit 1
+          fi
+          rm -f "$log"
+          echo "published and confirmed on the registry: ${pkg}@${ver}"
