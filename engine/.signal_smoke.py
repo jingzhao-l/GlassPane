@@ -44,6 +44,13 @@ DEFAULT_BIN = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), ".build", "release", "glasspaned"
 )
 EXIT_TIMEOUT_SECONDS = 6.0
+# 等多久让自检 stub 走到它自己声明的那种现场。这条上限**不是判据**——判据是"诊断对那种现场说的那句
+# 话"，上限只是"不愿意无限等一个不做事的夹具"。5s 是本函数第一版的值，实测在负载 10 上下、CI 与本地
+# 门禁同时在跑的那一趟里不够（`partial` 报"没有走到它声明的现场"，而同一脚本负载 5–7 时连跑三趟全绿）：
+# 那 5s 要装下 python 冷启动 + 一次异步信号派发。放宽到 30s 之后仍然会红——红的时候说的是"30 秒里
+# 这个 stub 什么都没做"，那是关于夹具的真话，而不是关于调度运气的话。
+# 与之相对，`EXIT_TIMEOUT_SECONDS` 与下面 socket 创建的 5s 都**没有**动：那些是判据本身。
+SETTLE_TIMEOUT_SECONDS = 30.0
 
 # 0 = 断言全跑过且通过；1 = 断言不过；2 = NOT RUN（前置二进制不可用，一条断言都没跑）。
 # 2 与 1 分开：CI 与人一眼能分清"闸门判出红"和"闸门根本没开门"。
@@ -255,7 +262,7 @@ def self_test_diagnosis(work):
             "partial": lambda: not os.path.exists(engine_sock) and os.path.exists(probe_sock),
             "ignored": lambda: os.path.exists(engine_sock) and os.path.exists(probe_sock),
         }[tag]
-        settle_deadline = time.time() + 5
+        settle_deadline = time.time() + SETTLE_TIMEOUT_SECONDS
         while time.time() < settle_deadline and not settles():
             time.sleep(0.02)
         settled = settles()
