@@ -1,6 +1,6 @@
 {
   "name": "glasspane-mcp",
-  "version": "1.15.1",
+  "version": "1.16.0",
   "description": "GlassPane MCP stdio shell: JSON-RPC 2.0 over stdio bridging an AI agent to the glasspane engine daemon",
   "type": "module",
   "main": "./dist/index.js",
@@ -20,6 +20,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./stdio-session": {
+      "types": "./dist/stdio-session.d.ts",
+      "default": "./dist/stdio-session.js"
+    },
     "./http-gateway": {
       "types": "./dist/http-gateway.d.ts",
       "default": "./dist/http-gateway.js"
@@ -30,7 +34,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "bundle": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node18 --external:zod --outfile=dist/index.js && esbuild src/http-gateway.ts --bundle --platform=node --format=esm --target=node18 --external:zod --outfile=dist/http-gateway.js && esbuild src/http-gateway-cli.ts --bundle --platform=node --format=esm --target=node18 --external:zod --outfile=dist/http-gateway-cli.js && rm -f dist/*.js.map dist/*.d.ts.map && find dist -maxdepth 1 -name '*.js' ! -name 'index.js' ! -name 'http-gateway.js' ! -name 'http-gateway-cli.js' -delete && rm -rf schemas && mkdir -p schemas && cp -R ../kernel/schemas/. schemas/",
+    "bundle": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node18 --external:zod --outfile=dist/index.js && esbuild src/stdio-session.ts --bundle --platform=node --format=esm --target=node18 --external:zod --outfile=dist/stdio-session.js && esbuild src/http-gateway.ts --bundle --platform=node --format=esm --target=node18 --external:zod --outfile=dist/http-gateway.js && esbuild src/http-gateway-cli.ts --bundle --platform=node --format=esm --target=node18 --external:zod --outfile=dist/http-gateway-cli.js && rm -f dist/*.js.map dist/*.d.ts.map && find dist -maxdepth 1 -name '*.js' ! -name 'index.js' ! -name 'stdio-session.js' ! -name 'http-gateway.js' ! -name 'http-gateway-cli.js' -delete && rm -rf schemas && mkdir -p schemas && cp -R ../kernel/schemas/. schemas/",
     "test": "npm run build && node --test test/*.test.mjs",
     "prepublishOnly": "npm run build && npm run bundle"
   },

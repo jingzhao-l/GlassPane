@@ -18,6 +18,7 @@ import { RESTORE_MODES, TOOL_BY_NAME, executeTool } from "../dist/tools.js";
 import { ProjectSetArgs } from "../dist/project-registry.js";
 import { LineReader, MAX_FRAME_BYTES } from "../dist/io.js";
 import { executableSource } from "./support/source.mjs";
+import { deriveSelectorEmptiness } from "./support/param-validation-rules.mjs";
 import { makeEngine } from "./helpers.mjs";
 import { EngineJsonRpcClient } from "../dist/engine-client.js";
 import { FakeLineIo } from "./helpers.mjs";
@@ -1445,10 +1446,11 @@ test("gp_capture_view advertises no second copy of the PNG budget", () => {
  * refuses `role: ""`, and how a second, stricter copy of the same selector grew
  * in this shell.
  *
- * Nothing here is a restated `true`: each verdict is *derived* from what the
- * daemon's own sources currently say, so a daemon that drops its guard, starts
- * refusing the empty title itself, or starts printing an empty title reddens this
- * gate instead of letting the kernel quietly disagree with it.
+ * Nothing here is a restated `true`: each verdict is *derived* from what the daemon's own
+ * sources currently say, per field, so a daemon that drops either emptiness guard (or
+ * starts printing an empty title it refused) reddens this gate instead of letting the
+ * kernel quietly disagree with it. Both `role` and `title` are refused by
+ * `optSelector` today; `identifier` is refused by nothing, and that is checked too.
  * ------------------------------------------------------------------ */
 
 const AX_CHANNEL_FILE = "../../engine/Sources/GlassPaneEngine/AXChannel.swift";
@@ -1457,41 +1459,24 @@ const EVIDENCE_REPORT_FILE = "../../engine/Sources/GlassPaneEngine/EvidenceRepor
 /**
  * The daemon's selector rules, read out of the Swift that decides them.
  *
- * `tools.test.mjs` already reads these for the shell's own request path; this
- * reads them for the *published* contract, which is the half that had no gate:
- * the kernel's schema and zod are what a Swift `Codable`, an HTTP gateway and any
- * third-party consumer of `@iterate/kernel` all take their rule from.
+ * `tools.test.mjs` already reads these for the shell's own request path; this reads them
+ * for the *published* contract, which is the half that had no gate: the kernel's schema
+ * and zod are what a Swift `Codable`, an HTTP gateway and any third-party consumer of
+ * `@iterate/kernel` all take their rule from.
+ *
+ * The per-field verdict comes from `test/support/param-validation-rules.mjs` — the whole
+ * `optSelector` body, read field by field — because the version that looked only inside
+ * `optString` reported "the daemon accepts `title: ""`" *after* `optSelector` grew the
+ * guard, which made this gate blind to the rule it exists to compare: deleting the Swift
+ * guard left every TS side green.
  */
 function daemonSelectorEmptiness() {
   const swift = readFileSync(new URL(PARAM_VALIDATION_FILE, import.meta.url), "utf8");
-  const opened = swift.indexOf("static func optSelector");
-  assert.notEqual(opened, -1,
-    "ParamValidation.swift 里找不到 optSelector：这条闸读的东西搬家了，要改的是闸本身而不是结论");
-  const closed = swift.indexOf("static func requireSelector", opened);
-  assert.notEqual(closed, -1, "optSelector 的函数体读不到结尾，判据不可信");
-  const body = swift.slice(opened, closed);
+  const derived = deriveSelectorEmptiness(swift);
 
-  const roleGuard = /guard\s+let\s+role\s*=\s*dict\["role"\][\s\S]{0,80}?else/.exec(body);
-  assert.ok(roleGuard !== null, "optSelector 不再用 guard 读 role——重读这条闸");
-  const maxLength = /static let selectorMaxLength\s*=\s*(\d+)/.exec(swift);
-  assert.ok(maxLength !== null, "selectorMaxLength 不在了——长度上限这条判据也读不到了");
-
-  // `title` and `identifier` are both read through `optString`, whose only rule is
-  // a length cap. Whether that helper grew an emptiness guard is the difference
-  // between "the daemon refuses it" and "only its consumers can", so it is read,
-  // not assumed.
-  const lengthOnlyReader = /let (title|identifier) = try optString\(dict, "\1"[^\n]*/g;
-  assert.equal(
-    [...body.matchAll(lengthOnlyReader)].length,
-    2,
-    "optSelector 不再把 title/identifier 交给 optString——两条字段的读法变了，重读这条闸",
-  );
-  const optStringBody = swift.slice(swift.indexOf("static func optString"), swift.indexOf("static func optInt"));
-  const readerRefusesEmpty = /\.isEmpty/.test(optStringBody);
-
-  // The reason an empty `title` may not be published as a legal value even though
-  // the daemon swallows it: the daemon matches it for exact equality and then
-  // renders it as absent, so an act and the pack describing it disagree.
+  // The reason an empty `title` may not be published as a legal value even where a daemon
+  // tolerates it: the daemon matches it for exact equality and then renders it as absent,
+  // so an act and the pack describing it disagree.
   const channel = executableSource(readFileSync(new URL(AX_CHANNEL_FILE, import.meta.url), "utf8"));
   const matchesTitleExactly =
     /if let wantedTitle = selector\.title \{[\s\S]{0,200}?if title != wantedTitle \{ return false \}/.test(channel);
@@ -1499,11 +1484,12 @@ function daemonSelectorEmptiness() {
   const printsTitleOnlyWhenNonEmpty = /if let title = selector\.title\?\.nonEmpty/.test(report);
 
   return {
-    selectorMaxLength: Number(maxLength[1]),
-    roleRefusedByDaemonAlone: /!role\.isEmpty/.test(roleGuard[0]),
-    titleRefusedByDaemonAlone: readerRefusesEmpty,
-    identifierRefusedByDaemonAlone: readerRefusesEmpty,
+    selectorMaxLength: derived.selectorMaxLength,
+    roleRefusedByDaemonAlone: derived.fields.role.refusedAlone,
+    titleRefusedByDaemonAlone: derived.fields.title.refusedAlone,
+    identifierRefusedByDaemonAlone: derived.fields.identifier.refusedAlone,
     titleEvidenceDisagrees: matchesTitleExactly && printsTitleOnlyWhenNonEmpty,
+    derived,
   };
 }
 
@@ -1540,27 +1526,25 @@ test("selector emptiness: the daemon's guard, the published schema and the kerne
   //  - kernel zod: dropping `.min(1)` → the loaded `SelectorSchema` accepts `""`
   //    while the schema the same package ships refuses it (this is what let
   //    `this shell` grow its own stricter copy in the first place).
-  //  - daemon: dropping `!role.isEmpty` from `optSelector`, or making
-  //    `EvidenceReportGenerator` print an empty title, flips a *derived* verdict
-  //    and the two TS sides then disagree with it.
+  //  - daemon: dropping `!role.isEmpty` or the `title` emptiness throw from
+  //    `optSelector` flips a *derived* verdict, and the three TS sides — which still
+  //    refuse — then disagree with it. That last one is why the verdict is read per
+  //    field off the whole function body: the `|| titleEvidenceDisagrees` this used to
+  //    OR together stayed true from Swift prose alone, so the guard could be deleted
+  //    with every gate here green.
   const daemon = daemonSelectorEmptiness();
   const published = publishedSelectorRule();
 
   assert.equal(daemon.roleRefusedByDaemonAlone, true,
     "daemon 不再要求 selector.role 非空了：空 role 的结论要按新读法重推，不能沿用");
-  assert.equal(
-    daemon.titleRefusedByDaemonAlone || daemon.titleEvidenceDisagrees,
-    true,
-    "daemon 侧对空 title 的读法变了（既不拒、也不再匹配后渲染成缺失）：这条闸的结论要按新读法重推",
-  );
+  assert.equal(daemon.titleRefusedByDaemonAlone, true,
+    "daemon 不再在 optSelector 里拒空 title 了（`evidence-pack.schema.json` 的 minLength: 1 从此没有执行层）：空 title 的结论要按新读法重推，不能沿用");
 
   const verdicts = [];
   for (const field of ["role", "title", "identifier"]) {
-    const mustRefuse =
-      field === "role" ? daemon.roleRefusedByDaemonAlone
-        : field === "title"
-          ? daemon.titleRefusedByDaemonAlone || daemon.titleEvidenceDisagrees
-          : daemon.identifierRefusedByDaemonAlone;
+    const mustRefuse = field === "identifier"
+      ? daemon.identifierRefusedByDaemonAlone
+      : daemon[`${field}RefusedByDaemonAlone`];
     // An empty `identifier` is the field no side rules on: the daemon has no guard
     // on it and the "nothing in the tree carries an empty AXIdentifier" premise is
     // not readable from Swift, so the derivation stops at the daemon. `tools.test
@@ -1588,6 +1572,59 @@ test("selector emptiness: the daemon's guard, the published schema and the kerne
     );
   }
   assert.equal(verdicts.length, 9, "每个字段的三面比对都要留下记录，少一面就是这条闸少读了一面");
+});
+
+test("the daemon verdict is read per field, so either guard can turn this gate red on its own", () => {
+  // The control for the section above: an extracted verdict that cannot move is a restated
+  // `true`, and this whole gate is one step from that. Both guards are deleted here in
+  // memory, one at a time, and each field's verdict has to follow its own Swift — which is
+  // what `role` and `title` now disagree about with `identifier` staying `false`.
+  const swift = readFileSync(new URL(PARAM_VALIDATION_FILE, import.meta.url), "utf8");
+  const base = deriveSelectorEmptiness(swift);
+  assert.equal(base.fields.role.directGuard, true, "fixture: optSelector guards role");
+  assert.equal(base.fields.title.directGuard, true, "fixture: optSelector guards title");
+  assert.equal(base.fields.identifier.directGuard, false, "fixture: identifier has no guard to keep");
+  assert.equal(base.fields.identifier.reader, "optString", "fixture: identifier is delegated to optString");
+
+  // Both guards are neutered here in memory — the emptiness clause replaced by a bound no
+  // caller can hit, which is what "the daemon stopped refusing it" looks like in Swift while
+  // still reading the field. Each field's verdict has to follow its own clause, which is
+  // what `role` and `title` now disagree about with `identifier` staying `false`.
+  const withoutTitleGuard = swift.replace(
+    ", presentTitle.isEmpty {",
+    ", presentTitle.count > 9_999_999 {",
+  );
+  assert.notEqual(withoutTitleGuard, swift, "the fixture no longer matches the title guard: re-read it");
+  const titleGone = deriveSelectorEmptiness(withoutTitleGuard);
+  assert.equal(titleGone.fields.title.refusedAlone, false,
+    "删掉 daemon 的 title 拒绝，这条闸的判据没变——它读的还是别处，不是这条规则本身");
+  assert.equal(titleGone.fields.role.refusedAlone, true, "role 的判据不得被 title 的改动带走");
+  assert.equal(titleGone.fields.identifier.refusedAlone, false);
+
+  const withoutRoleGuard = swift.replace(
+    ", !role.isEmpty else {",
+    ", role.count > 9_999_999 else {",
+  );
+  assert.notEqual(withoutRoleGuard, swift, "the fixture no longer matches the role guard: re-read it");
+  const roleGone = deriveSelectorEmptiness(withoutRoleGuard);
+  assert.equal(roleGone.fields.role.refusedAlone, false,
+    "删掉 daemon 的 role 拒绝，这条闸的判据没变——它读的还是别处，不是这条规则本身");
+  assert.equal(roleGone.fields.title.refusedAlone, true, "title 的判据不得被 role 的改动带走");
+
+  // And the shared reader is the third answer: emptiness banned inside `optString` reaches
+  // every field it reads, which is why the derivation reads it separately rather than
+  // assuming the guard in `optSelector` is the only one that exists.
+  const optStringBan = swift.replace(
+    /static func optString\(([^\n]*)\n/,
+    'static func optString($1\n        if let value = dict[key] as? String, value.isEmpty { throw GPError(code: .badParams, message: "empty") }\n',
+  );
+  assert.notEqual(optStringBan, swift, "the fixture could not patch optString: re-read the reader");
+  const delegated = deriveSelectorEmptiness(optStringBan);
+  for (const field of ["title", "identifier"]) {
+    assert.equal(delegated.fields[field].readerRefusesEmpty, true,
+      `optString 长了空串禁令，${field} 的判据却看不见——共享读取层的规则也是该字段的规则`);
+    assert.equal(delegated.fields[field].refusedAlone, true);
+  }
 });
 
 /* ------------------------------------------------------------------ *

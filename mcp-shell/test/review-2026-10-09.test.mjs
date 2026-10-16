@@ -334,25 +334,44 @@ test("a bad argument writes the whole message before exiting, through a pipe", a
   assert.ok(seen.includes("<state-dir>/daemon.sock."), `管道里的用法文本被截断了（收到 ${seen.length} 字节）`);
   assert.ok(seen.length > 100_000, `长消息必须整条送达，收到 ${seen.length} 字节`);
 
-  /* 上面那半条在 macOS 上**不是**能红的对照——本轮实测证明：把这一支改回
-   * `process.stderr.write(...)` + `process.exit(2)`（也就是缺陷本体），100 KB 照样整条到达。
-   * 原因在平台之间不一样：管道写满时 POSIX 的 `write()` 会阻塞在 libuv 线程池里，而
-   * Linux 的 `process.exit()` 会丢掉还在排的写请求、macOS 的则往往已经落完。所以"能不能
-   * 观测到截断"是机器事实，不是代码事实——把它当判据，得到的就是一条永远绿的假闸。
+  /* 上面那半条**能不能红**，本轮重测过，结论和这条测试当初写下的不一样，所以改在这里：
+   * 同一个 100 KB 的裸 `process.stderr.write(...)` + `process.exit(2)` 子进程，在
+   * 父进程一直读管道的情形下 12/12 次停在 65 536 字节、尾巴丢了；同一份未修复的
+   * `dist/http-gateway-cli.js` 6/6 次同样只回来 65 536 字节。也就是说 macOS 上这个丢失
+   * **是**可观测的——本文件以前那一句"macOS 整条到达，所以这是机器事实不是代码事实"
+   * 只在它自己那一次抽样里成立（同一支 CLI 我也抽到过一次整条到达）。
    *
-   * 因此这条修复由**形状**把关：读退出通路的那一段源码，要求它走同步 fd 写、并且不许在
-   * `process.exit` 前面留一句排队式的 `process.stderr.write`。这与同文件里 stdin error
-   * 那条的口径一致（能跑的跑，跑不稳的钉写法，两种都写清楚自己是哪一种）。 */
+   * 结论没变的那一半：抽样可观测 ≠ 保证可观测，所以这条修复继续由**形状**把关（读源码
+   * 的退出通路，要求同步 fd 写、不许留排队式 `process.stderr.write`），并且形状断言现在
+   * 指向 `src/io.ts` 的共享写手 + `http-gateway-cli.ts` 对它的引用；字节的那一半交给
+   * `test/exit-adjacent-writes.test.mjs`，那里用真实子进程真实管道把"截断 vs 存活"两头都
+   * 量出来，并说明它测的是哪一侧。
+   *
+   * Linux 侧照旧：`process.exit()` 会丢掉还在排的写请求，所以这一支在 CI 上更硬。 */
   const source = fs.readFileSync(path.resolve(HERE, "..", "src", "index.ts"), "utf8");
   const parseCatch = /options = parseArgs\(process\.argv\.slice\(2\)\);[\s\S]{0,120}?catch \(error\) \{([\s\S]{0,600}?)\n  \}/.exec(source);
   assert.ok(parseCatch, "读不到 parseArgs 的 catch 分支，这条对照已经看不见东西");
   assert.match(parseCatch[1], /writeDescriptor\(2,/, "参数错误必须由同步 fd 写出去：process.exit 不等队列里的写");
   assert.doesNotMatch(parseCatch[1], /process\.stderr\.write\(/, "这一支里不许留排队式的 stderr 写（那正是被修掉的那一句）");
   // 同步写不是"写完就走"：管道满时它拿 EAGAIN，所以必须有界地重试，而不是转成一次静默丢弃。
-  const writer = /function writeDescriptor\([\s\S]{0,2600}?\n\}/.exec(source);
+  //
+  // The writer itself is read from `src/io.ts`, and that move is deliberate: it is
+  // the shared copy now (`index.ts` and `http-gateway-cli.ts` both exit right after
+  // one of these writes), and a shape gate on the writer has to look at the file
+  // that *is* the writer, not at one of its callers.
+  const writerSource = fs.readFileSync(path.resolve(HERE, "..", "src", "io.ts"), "utf8");
+  const writer = /export function writeDescriptor\([\s\S]{0,2600}?\n\}/.exec(writerSource);
   assert.ok(writer, "读不到 writeDescriptor 本体");
   assert.match(writer[0], /fs\.writeSync\(/, "写必须是同步的");
   assert.match(writer[0], /"EAGAIN"/, "管道满（EAGAIN）必须被认出来，而不是当成写成功");
+  // And the other entrypoint has to be using it, not a re-typed copy: measured on
+  // the unfixed artifact, `glasspane-http`'s exit-2 line through a pipe arrived as
+  // exactly 65 536 bytes with the sentence naming the bad flag gone.
+  const httpSource = fs.readFileSync(path.resolve(HERE, "..", "src", "http-gateway-cli.ts"), "utf8");
+  assert.match(httpSource, /import \{ writeDescriptor \} from "\.\/io\.js"/,
+    "glasspane-http 的退出通路必须用同一个写手，否则两处会各自漂");
+  assert.doesNotMatch(httpSource, /process\.stderr\.write\(String\(error\)[\s\S]{0,80}?\n\s*process\.exit\(/,
+    "参数错误那一句又回到排队式 stderr 写：紧跟的 process.exit 不等它");
 });
 
 /* ------------------------------------------------------------------ *
@@ -360,7 +379,10 @@ test("a bad argument writes the whole message before exiting, through a pipe", a
  * ------------------------------------------------------------------ */
 
 test("stdin's error path queues shutdown the way the close path does", () => {
-  const source = fs.readFileSync(path.resolve(HERE, "..", "src", "index.ts"), "utf8");
+  // The wiring moved to `src/stdio-session.ts` when the entrypoint was split (that
+  // file imports without taking over the host's stdio); the gate is on the wiring,
+  // so it follows it. `src/index.ts` no longer contains any of it.
+  const source = fs.readFileSync(path.resolve(HERE, "..", "src", "stdio-session.ts"), "utf8");
   const errored = /process\.stdin\.on\("error",\s*\(error\) => \{([\s\S]{0,900}?)\n  \}\);/.exec(source);
   assert.ok(errored, "读不到 stdin 的 error 处理器，这条闸要看的是它自己");
   const body = errored[1];

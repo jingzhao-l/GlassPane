@@ -187,8 +187,11 @@ after(() => clearInterval(loopHold))
  * ------------------------------------------------------------------ */
 
 test("D5: SIGINT and SIGTERM route shutdown through the reply queue, not directly", () => {
-  // Reverts red if index.ts goes back to `process.on("SIGINT", shutdown)`.
-  const source = fs.readFileSync(path.resolve(SRC, "index.ts"), "utf8");
+  // Reverts red if the signal handlers go back to `process.on("SIGINT", shutdown)`.
+  // Read from `src/stdio-session.ts`: the entrypoint was split so that importing the
+  // wiring no longer hijacks the host's stdio, and the handlers are part of the
+  // wiring, not of the `main()` that stayed in `index.ts`.
+  const source = fs.readFileSync(path.resolve(SRC, "stdio-session.ts"), "utf8");
   for (const signal of ["SIGINT", "SIGTERM"]) {
     const handler = new RegExp(`process\\.on\\("${signal}",\\s*\\(\\) => (queue\\.push\\(async \\(\\) => shutdown\\(\\)\\)|shutdown)`).exec(source);
     assert.ok(handler, `读不到 ${signal} 处理器——这条闸要看它自己`);

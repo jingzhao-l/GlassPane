@@ -1,6 +1,12 @@
 import { EngineJsonRpcClient } from "./engine-client.js";
 import { attachIdentityOf, executeTool, TOOL_SPECS, ToolSpec } from "./tools.js";
-import { EvidenceAuditSession, operationIds, UNKNOWN_GENERATION } from "./audit-session.js";
+import {
+  ARRIVAL_ORDER_MECHANISM,
+  type LateArrivalAttribution,
+  EvidenceAuditSession,
+  operationIds,
+  UNKNOWN_GENERATION,
+} from "./audit-session.js";
 
 /* ------------------------------------------------------------------ *
  * JSON-RPC 2.0 message shapes (spec §6.1).
@@ -33,7 +39,7 @@ export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = [
   "2025-03-26",
   MCP_PROTOCOL_VERSION,
 ] as const;
-export const SERVER_INFO = { name: "glasspane-mcp", version: "1.15.1" } as const;
+export const SERVER_INFO = { name: "glasspane-mcp", version: "1.16.0" } as const;
 
 export const PARSE_ERROR = -32700;
 export const INVALID_REQUEST = -32600;
@@ -297,6 +303,24 @@ export function createTrackedMcpServer(
   stdoutDroppedFrames?: () => number,
 ): { server: McpServer; session: EvidenceAuditSession } {
   const session = new EvidenceAuditSession();
+  /**
+   * The clause an id list carries when the frame it came from was never matched by id.
+   *
+   * `gp_recent_reports` already renders {@link TRAIL_PROVENANCE_NOTES} beside a recorded
+   * id, but both refusal paths below name ids for a frame that is *not* in the trail, and
+   * an agent holding `op_…` from a log line has no trail entry to read the caveat out of.
+   * Saying "the operations it named are X" for an arrival-order guess states a match the
+   * transport could not make, so the mechanism goes in the sentence — the same
+   * {@link ARRIVAL_ORDER_MECHANISM} text the trail note is built from, so the two surfaces
+   * describe one rule and not two. Nothing here adjudicates the ids: it does not say the
+   * operation did not run, and it does not say the guess is wrong.
+   */
+  const arrivalOrderClause = (attribution: LateArrivalAttribution | undefined): string => (
+    attribution === "arrival-order"
+      ? ` (the frame echoed no request id, so ${ARRIVAL_ORDER_MECHANISM}: these are the ids that frame carried, `
+        + "which is the most this shell can say about which operation they are)"
+      : ""
+  );
   engine.onLateReply(({ method, result, correlation, attribution }) => {
     if (correlation !== undefined && correlation !== session.generation) {
       // The request was admitted under an earlier attach: writing its
@@ -312,8 +336,8 @@ export function createTrackedMcpServer(
         `late reply to '${method}' belongs to a superseded attach (trail generation ${correlation}, current `
         + `${session.generation}): not recorded, and gp_recent_reports will not list it`
         + (ids.length > 0
-          ? `; the operations it named are ${ids.join(", ")} — fetch one with gp_last_evidence while the `
-            + "daemon still holds it"
+          ? `; the operations it named are ${ids.join(", ")}${arrivalOrderClause(attribution)} — fetch one with `
+            + "gp_last_evidence while the daemon still holds it"
           : "; the frame named no operationId, so there is nothing to fetch back"),
       );
       return;
@@ -348,8 +372,8 @@ export function createTrackedMcpServer(
           + `chain restarted away from (now ${outcome.generationAtWrite}): not recorded, and gp_recent_reports `
           + "will not list it"
           + (ids.length > 0
-            ? `; the operations it named are ${ids.join(", ")} — fetch one with gp_last_evidence while the `
-              + "daemon still holds it"
+            ? `; the operations it named are ${ids.join(", ")}${arrivalOrderClause(attribution)} — fetch one with `
+              + "gp_last_evidence while the daemon still holds it"
             : "; no operationId appeared within the depth this shell reads (3), so there is nothing it "
               + "can name for you to fetch back"),
         );

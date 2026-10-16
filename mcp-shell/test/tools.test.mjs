@@ -11,6 +11,7 @@ import {
 } from "../dist/tools.js";
 import { EvidenceAuditSession } from "../dist/audit-session.js";
 import { canReceiveDaemonReply, methodsSentByShell } from "./support/wire-surface.mjs";
+import { deriveSelectorEmptiness } from "./support/param-validation-rules.mjs";
 import { privateSandbox } from "./support/sandbox.mjs";
 import { canonicalJson } from "../dist/canonical.js";
 import { FORCE_OVERWRITE_ENV, MAX_PROJECTS } from "../dist/project-registry.js";
@@ -2410,32 +2411,17 @@ const EVIDENCE_REPORT_SWIFT = path.resolve(HERE, "..", "..", "engine", "Sources"
  * The daemon's selector rules, read out of its source instead of restated.
  *
  * Hardcoding `false` for "may `role` be empty" would be decoration: the day
- * `optSelector` grows an emptiness guard for `title` too — or drops the one it has
- * for `role` — the shell and the daemon would disagree again, and only a gate that
- * re-reads the rule would notice which side is now wrong.
+ * `optSelector` drops either emptiness guard — the one it has for `role`, or the one it
+ * has for `title` — the shell and the daemon disagree, and only a gate that re-reads the
+ * rule notices which side is now wrong.
  */
 function daemonSelectorRules() {
   const source = fs.readFileSync(PARAM_VALIDATION_SWIFT, "utf8");
-  const opened = source.indexOf("static func optSelector");
-  assert.notEqual(opened, -1,
-    "ParamValidation.swift 里找不到 optSelector：这条闸读的东西搬家了，要改的是闸本身而不是结论");
-  const closed = source.indexOf("static func requireSelector", opened);
-  assert.notEqual(closed, -1, "optSelector 的函数体读不到结尾，判据不可信");
-  const body = source.slice(opened, closed);
-
-  const roleGuard = body.match(/guard\s+let\s+role\s*=\s*dict\["role"\][\s\S]{0,80}?else/);
-  assert.ok(roleGuard !== null, "optSelector 不再用 guard 读 role——重读这条闸");
-  const maxLength = source.match(/static let selectorMaxLength\s*=\s*(\d+)/);
-  assert.ok(maxLength !== null, "selectorMaxLength 不在了——长度上限这条判据也读不到了");
-
-  // `title` is read through `optString`, which has no emptiness guard at all:
-  // that is the whole difference between the two fields, and it is what makes the
-  // daemon's *evidence* disagree with the daemon's *action*.
-  const titleLine = body.match(/let title = try optString\(dict, "title"[^\n]*\n/);
-  assert.ok(titleLine !== null, "optSelector 不再经 optString 读 title——重读这条闸");
-  const optStringBody = source.slice(source.indexOf("static func optString"), source.indexOf("static func optInt"));
-  assert.notEqual(optStringBody.indexOf("optString"), -1);
-  const optStringRejectsEmpty = /\.isEmpty/.test(optStringBody);
+  // Per field, over the whole `optSelector` body: `title` is decided there, in front of
+  // the `optString` call, and a derivation that looked only inside `optString` kept
+  // reporting "the daemon accepts `title: ""`" after the guard went in — which made the
+  // Swift rule invisible to every TS gate that compares surfaces.
+  const derived = deriveSelectorEmptiness(source);
 
   const channel = fs.readFileSync(AX_CHANNEL_SWIFT, "utf8");
   const matchesTitleExactly = /if let wantedTitle = selector\.title \{[\s\S]{0,200}?if title != wantedTitle \{ return false \}/.test(channel);
@@ -2443,10 +2429,12 @@ function daemonSelectorRules() {
   const rendersTitleOnlyWhenNonEmpty = /if let title = selector\.title\?\.nonEmpty/.test(report);
 
   return {
-    selectorMaxLength: Number(maxLength[1]),
-    roleMustBeNonEmpty: /!role\.isEmpty/.test(roleGuard[0]),
-    titleMustBeNonEmptyByDaemonAlone: optStringRejectsEmpty,
+    selectorMaxLength: derived.selectorMaxLength,
+    roleMustBeNonEmpty: derived.fields.role.refusedAlone,
+    titleMustBeNonEmptyByDaemonAlone: derived.fields.title.refusedAlone,
+    identifierRefusedByDaemonAlone: derived.fields.identifier.refusedAlone,
     titleDisagrees: matchesTitleExactly && rendersTitleOnlyWhenNonEmpty,
+    derived,
   };
 }
 
@@ -2467,18 +2455,26 @@ test("the shell refuses an empty selector.role instead of paying a round trip fo
   }
 });
 
-test("an empty selector.title is refused because the evidence would print it as absent", async () => {
-  // MUTATION THIS PINS: accepting `title: ""`. `AXChannel.elementMatches` compares
-  // the wanted title for exact equality, so `""` is a *value* that selects the
-  // elements with an empty AX title; `EvidenceReportGenerator.selectorText` prints
-  // `selector.title?.nonEmpty`, so the pack it writes describes the action as
-  // having had no title at all. An action whose own evidence disagrees with it is
-  // the one thing this surface exists to prevent.
+test("an empty selector.title is refused here and by the daemon, for the reason the schema states", async () => {
+  // MUTATION THIS PINS: accepting `title: ""` — here, or `ParamValidation`'s emptiness
+  // throw for it. The refusal is the published rule (`evidence-pack.schema.json`
+  // `$defs.selector.title.minLength: 1`), and the reason it was ever a defect is still
+  // readable in the daemon's Swift: `AXChannel.elementMatches` compares the wanted title
+  // for exact equality, so `""` is a *value* that selects the elements with an empty AX
+  // title, while `EvidenceReportGenerator.selectorText` prints `selector.title?.nonEmpty`
+  // and describes the action as having had no title at all. An action whose own evidence
+  // contradicts it is the one thing this surface exists to prevent.
   const rules = daemonSelectorRules();
   assert.equal(rules.titleDisagrees, true,
     "daemon 侧的读法变了（匹配或渲染改了）：这条闸的结论要按新读法重推，不能沿用");
-  assert.equal(rules.titleMustBeNonEmptyByDaemonAlone, false,
-    "daemon 已经自己拒空 title 了：壳层这条规则的依据要重记");
+  assert.equal(rules.titleMustBeNonEmptyByDaemonAlone, true,
+    "daemon 不再在 optSelector 里拒空 title 了：壳层这条规则的依据要按新读法重记");
+  // Per field, not one verdict shared by two fields: `identifier` is the selector field no
+  // side rules on, and a derivation that answered for both could not tell those apart.
+  assert.equal(rules.identifierRefusedByDaemonAlone, false,
+    "daemon 开始拒空 identifier 了：这与 kernel schema 那句刻意不写 minLength 的话相互矛盾，要一起重读");
+  assert.equal(rules.derived.fields.title.directGuard, true,
+    "空 title 的判据不在 optSelector 里了——它搬去哪了，这条闸要跟着搬");
 
   const act = TOOL_BY_NAME.get("gp_act");
   const { engine } = makeEngine();

@@ -1597,6 +1597,17 @@ const OP_IN_ORDER = "op_000000000000000000000000inorder";
 const OP_LATE_CONFIRMED = "op_0000000000000000000000lateok";
 const OP_LATE_GUESSED = "op_0000000000000000000000lateguess";
 
+/**
+ * The ids this trail holds that arrived as a guess, asked through the API that has a
+ * reader: `recentIds()` plus `provenanceOf()`, i.e. exactly what the `gp_recent_reports`
+ * renderer walks. (`inferredIds()` used to answer this question and had no consumer in
+ * `src/`; an unread function is not a surface, and a test-only one can only ever be
+ * asserted by the test that calls it.)
+ */
+function inferredIn(trail) {
+  return trail.recentIds(AUDIT_HISTORY_LIMIT * 2).filter((id) => trail.provenanceOf(id) === "late-inferred");
+}
+
 test("the trail records how each id arrived, and an inferred one is not verified", async () => {
   const session = new EvidenceAuditSession();
   // Nothing recorded yet: the answer is "this trail does not hold that id", not a
@@ -1607,7 +1618,7 @@ test("the trail records how each id arrived, and an inferred one is not verified
   // that echoed its id. This is the only entry the trail may call verified.
   session.record({ operationId: OP_IN_ORDER });
   assert.equal(session.provenanceOf(OP_IN_ORDER), "in-order");
-  assert.deepEqual(session.inferredIds(), []);
+  assert.deepEqual(inferredIn(session), [], "链里还没有任何 id，更没有一个是猜进来的");
 
   // A late reply whose frame echoed the id: late (its position in request order is
   // arranged on arrival), but the operation is the daemon's own.
@@ -1617,7 +1628,7 @@ test("the trail records how each id arrived, and an inferred one is not verified
     "echoed-id",
   );
   assert.equal(session.provenanceOf(OP_LATE_CONFIRMED), "late");
-  assert.deepEqual(session.inferredIds(), [], "只有回显 id 的迟到回复不得被标成猜的");
+  assert.deepEqual(inferredIn(session), [], "只有回显 id 的迟到回复不得被标成猜的");
 
   // The frame this defect is about: a *result* with no id at all.
   await session.recordLateArrival(
@@ -1626,7 +1637,7 @@ test("the trail records how each id arrived, and an inferred one is not verified
     "arrival-order",
   );
   assert.equal(session.provenanceOf(OP_LATE_GUESSED), "late-inferred");
-  assert.deepEqual(session.inferredIds(), [OP_LATE_GUESSED]);
+  assert.deepEqual(inferredIn(session), [OP_LATE_GUESSED], "猜来的 id 必须带着它的归属留在链里");
   assert.deepEqual(session.recentIds(20), [OP_IN_ORDER, OP_LATE_CONFIRMED, OP_LATE_GUESSED],
     "标注归属方式不得改变链的内容或顺序——迟到操作仍要在链里，否则 agent 会以为它没跑");
 
@@ -1687,7 +1698,7 @@ test("provenance is trimmed and cleared with the trail it describes", () => {
   }
   assert.equal(session.recentIds(AUDIT_HISTORY_LIMIT * 2).length, AUDIT_HISTORY_LIMIT);
   assert.equal(session.provenanceOf(first), null, "被保留窗挤出的 id 必须连同归属一起消失");
-  assert.equal(session.inferredIds().length, 0);
+  assert.deepEqual(inferredIn(session), [], "保留窗里不得留下一个猜来的 id");
   // An id the trim *kept*, so the next assertion cannot pass by accident: it is the
   // restart that has to forget it. MUTATION THIS PINS: `restart()` without
   // `provenance.clear()` — the ids are gone, and a stale label on a gone id reads as

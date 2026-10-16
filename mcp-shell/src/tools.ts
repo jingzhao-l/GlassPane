@@ -42,7 +42,12 @@ import {
   GP_E_PROJECT_LIMIT,
   GP_E_REGISTRY_DRIFT,
 } from "./errors.js";
-import { EvidenceAuditSession, type TrailTurn } from "./audit-session.js";
+import {
+  EvidenceAuditSession,
+  TRAIL_PROVENANCE_NOTES,
+  type TrailProvenance,
+  type TrailTurn,
+} from "./audit-session.js";
 import { renderHTML, renderMarkdown, escapeHTML } from "./evidence-report.js";
 import type { EvidencePackReportView } from "./evidence-report.js";
 import {
@@ -127,14 +132,22 @@ const ExpectSchema = z.union([z.string().max(512), z.boolean()]);
  *    (`guard let role = dict["role"] as? String, !role.isEmpty`), so paying a
  *    socket round trip (and, on the HTTP gateway, relaying the daemon's wording
  *    instead of this tool's) to learn it was always the shell's bug;
- *  - `title: ""`, which the daemon *accepts* and matches by exact equality
- *    (`AXChannel.elementMatches`, `title != wantedTitle`) while the evidence
- *    report prints it as **absent** (`EvidenceReportGenerator.selectorText`,
- *    `selector.title?.nonEmpty`) — an action whose own evidence contradicts it.
+ *  - `title: ""`, which `ParamValidation.optSelector` now refuses as well
+ *    (`if let presentTitle = dict["title"] as? String, presentTitle.isEmpty`), because
+ *    the published contract already said it may not be empty
+ *    (`kernel/schemas/evidence-pack.schema.json`, `$defs.selector.title.minLength: 1`)
+ *    and the daemon is the layer that decides a schema's promise. Before that guard the
+ *    value was *accepted* and matched by exact equality
+ *    (`AXChannel.elementMatches`, `title != wantedTitle`) while the evidence report
+ *    printed it as absent (`EvidenceReportGenerator.selectorText`,
+ *    `selector.title?.nonEmpty`) — an action whose own evidence contradicted it, which is
+ *    the reason the rule exists at all and why this shell refuses it on the way in too.
  *
- * `identifier` stays emptiness-free on every side: an empty identifier can only
- * ever *fail to resolve* (nothing in the tree carries one), so the disagreement
- * `title` had never arises for it.
+ * `identifier` stays emptiness-free on every side — the daemon's guard deliberately does
+ * not reach it, and the schema says so (`$defs.selector.identifier` has no `minLength`):
+ * an empty identifier can only ever *fail to resolve* (nothing in the tree carries one),
+ * so the disagreement `title` had never arises for it, and inventing a rule here would be
+ * a fourth surface disagreeing with the three that agree.
  *
  * `test/tools.test.mjs` keeps reading those daemon rules out of the Swift sources
  * rather than restating them, and `test/consumer-consistency.test.mjs` holds the
@@ -1223,14 +1236,27 @@ export function toolAuthorsTimeoutAdvice(
 
 
 /** Read the trail once this call's turn comes up, i.e. in request order. */
+/**
+ * One trail entry as a report holds it: the id, and *how the trail says it got
+ * there*. The two are read in the same turn because they are one record —
+ * `audit-session.ts` writes an id and its provenance together and deletes them
+ * together — and reading the id in one turn and the provenance in a later one
+ * would let a re-attach between the two answer "no provenance" for an id the
+ * report has already committed to listing.
+ */
+interface TrailEntryView {
+  id: string;
+  provenance: TrailProvenance | null;
+}
+
 async function readTrail(
   session: EvidenceAuditSession,
   turn: TrailTurn,
   limit: number,
-): Promise<string[]> {
+): Promise<TrailEntryView[]> {
   await turn.acquire();
   try {
-    return session.recentIds(limit);
+    return session.recentIds(limit).map((id) => ({ id, provenance: session.provenanceOf(id) }));
   } finally {
     turn.release();
   }
@@ -2243,14 +2269,98 @@ function renderForeign(text: string, format: "html" | "markdown"): string {
     : stripped.replace(MARKDOWN_STRUCTURE_CHARS, "·");
 }
 
-/** One trail id as it appears in a report. */
-function renderTrailId(id: string, format: "html" | "markdown"): string {
-  return renderForeign(id, format);
+/**
+ * The sentence `audit-session.ts` cannot supply for a trail entry whose
+ * provenance record is missing.
+ *
+ * Unreachable by construction: `record()` pushes an id and sets its provenance in
+ * the same pass, the eviction past `AUDIT_HISTORY_LIMIT` and `restart()` delete
+ * both, and {@link readTrail} reads the pair inside one trail turn. It exists
+ * because the only alternative default is to print the id with no caveat at all,
+ * and "no caveat" is what this shell means by *verified*.
+ */
+const PROVENANCE_UNREADABLE_NOTE = "this session's trail lists the id but holds no provenance record for it, so "
+  + "nothing here confirms how it arrived — treat it as unverified, not as verified";
+
+/** True when a trail entry may not be presented as a confirmed one. */
+function isUnverifiedProvenance(provenance: TrailProvenance | null | undefined): boolean {
+  return provenance !== undefined && provenance !== "in-order";
 }
 
-/** A list of trail ids as it appears in a report. */
-function renderTrailIds(ids: readonly string[], format: "html" | "markdown"): string {
-  return ids.map((id) => renderTrailId(id, format)).join(", ");
+/**
+ * The trail's own account of how an id arrived, in a form the report may carry.
+ * `null`/`"in-order"` print nothing: the note is a caveat, and putting one beside
+ * the entry the trail *can* call verified would tell an agent to distrust the one
+ * id that is not a guess.
+ *
+ * The text is the existing `TRAIL_PROVENANCE_NOTES` literal, verbatim, so the
+ * report cannot drift from the mechanism it describes. Neither literal carries a
+ * Markdown structure character or an HTML metacharacter today, and the HTML arm
+ * escapes it anyway: a future edit to those strings then cannot restructure a
+ * report.
+ */
+function provenanceNoteText(
+  provenance: TrailProvenance | null | undefined,
+  format: "html" | "markdown",
+): string | null {
+  // Written as the narrowing the compiler needs rather than as a call to
+  // {@link isUnverifiedProvenance}, which is the same predicate but returns a
+  // plain `boolean` and so leaves `provenance` typed as possibly `undefined` on the
+  // line that indexes `TRAIL_PROVENANCE_NOTES` with it. Keep the two in agreement:
+  // the predicate decides which ids get a caveat, this decides what the caveat says.
+  if (provenance === undefined || provenance === "in-order") {
+    return null;
+  }
+  const raw = provenance === null ? PROVENANCE_UNREADABLE_NOTE : TRAIL_PROVENANCE_NOTES[provenance];
+  return format === "html" ? escapeHTML(raw) : raw;
+}
+
+/** One trail id as it appears in a report, caveat attached when it has one. */
+function renderTrailId(
+  id: string,
+  format: "html" | "markdown",
+  provenance: TrailProvenance | null | undefined = undefined,
+): string {
+  const shown = renderForeign(id, format);
+  const note = provenanceNoteText(provenance, format);
+  return note === null ? shown : `${shown} (${note})`;
+}
+
+/**
+ * A list of trail ids as it appears in a report.
+ *
+ * Annotated entries are separated with `; ` rather than `, ` because the caveat
+ * itself is a sentence with commas in it, and a comma-joined list of two annotated
+ * ids reads as one id with two notes. The unannotated case keeps its exact bytes.
+ */
+function renderTrailIds(
+  ids: readonly string[],
+  format: "html" | "markdown",
+  provenanceOf?: (id: string) => TrailProvenance | null,
+): string {
+  const parts = ids.map((id) => renderTrailId(id, format, provenanceOf?.(id)));
+  const annotated = ids.some((id) => isUnverifiedProvenance(provenanceOf?.(id)));
+  return parts.join(annotated ? "; " : ", ");
+}
+
+/**
+ * The caveat printed above a rendered pack, in the report's own body rather than
+ * only in its lists: the pack title *is* the operationId, so a reader who scrolls
+ * straight to the evidence has to meet the caveat there too.
+ */
+function provenanceBanner(
+  id: string,
+  provenance: TrailProvenance | null | undefined,
+  format: "html" | "markdown",
+): string {
+  const note = provenanceNoteText(provenance, format);
+  if (note === null) {
+    return "";
+  }
+  const sentence = `${renderTrailId(id, format)} is listed as unverified, not as confirmed: ${note}`;
+  return format === "html"
+    ? `<p class="gp-trail-unverified">${sentence}</p>`
+    : `> ${sentence}`;
 }
 
 /**
@@ -2312,7 +2422,15 @@ async function recentReports(
   // released right after the read — the evidence fetches below do not touch the
   // trail, and queueing them behind this turn would make every later evidence
   // tool wait on daemon round trips that are none of its business.
-  const ids = await readTrail(context.session, context.turn, argv.limit);
+  const entries = await readTrail(context.session, context.turn, argv.limit);
+  const ids = entries.map((entry) => entry.id);
+  // Read once, in the trail turn, and then only ever looked up by id: the report
+  // lists these ids, so each listing owes the reader the trail's own account of how
+  // the id got in. An id attributed only by arrival order is otherwise fetched,
+  // rendered and listed exactly like one the daemon confirmed by echoing its
+  // request id, and an agent stops re-checking it (R10-中2, reporting half).
+  const trailProvenance = new Map(entries.map((entry) => [entry.id, entry.provenance] as const));
+  const provenanceOf = (id: string): TrailProvenance | null => trailProvenance.get(id) ?? null;
   if (ids.length === 0) {
     return {
       content: [{ type: "text", text: formatToolError(
@@ -2349,7 +2467,7 @@ async function recentReports(
         GP_E_INTERNAL,
         `gp_recent_reports sent no request: all ${ids.length} ${ids.length === 1 ? "id" : "ids"} in this session's trail `
         + "are shaped like operationIds the daemon would reject, so this shell refused them before the wire: "
-        + renderTrailIds(rejected, format),
+        + renderTrailIds(rejected, format, provenanceOf),
         "these ids were harvested from engine reply frames, so the disagreement is between the daemon and the id "
         + "grammar this shell publishes, not in your arguments, and nothing here can repair one: gp_last_evidence "
         + "and gp_export_evidence apply the same rule, so an id rejected here cannot be fetched from there either. "
@@ -2455,10 +2573,10 @@ async function recentReports(
     const extras: string[] = [];
     if (notFetched.length > 0) {
       extras.push(`${notFetched.length} further ${notFetched.length === 1 ? "entry" : "entries"} never fetched: `
-        + renderTrailIds(notFetched, format));
+        + renderTrailIds(notFetched, format, provenanceOf));
     }
     if (rejected.length > 0) {
-      extras.push(`${rejectedClause(rejected.length)}${renderTrailIds(rejected, format)}`);
+      extras.push(`${rejectedClause(rejected.length)}${renderTrailIds(rejected, format, provenanceOf)}`);
     }
     return {
       content: [{
@@ -2477,7 +2595,7 @@ async function recentReports(
     return {
       content: [{ type: "text", text: formatToolError(
         GP_E_ENGINE_TIMEOUT,
-        `gp_recent_reports fetched no pack inside its ${RECENT_REPORTS_BUDGET_MS}ms budget: ${notFetched.length} of ${ids.length} trail ${ids.length === 1 ? "entry" : "entries"} went unanswered (${renderTrailIds(notFetched, format)})`,
+        `gp_recent_reports fetched no pack inside its ${RECENT_REPORTS_BUDGET_MS}ms budget: ${notFetched.length} of ${ids.length} trail ${ids.length === 1 ? "entry" : "entries"} went unanswered (${renderTrailIds(notFetched, format, provenanceOf)})`,
         "the operations are recorded and the daemon may still be answering; ask for fewer at once with a smaller limit (gp_recent_reports advertises 1…20), or read one operation with gp_last_evidence {operationId} / gp_export_evidence {operationId}, each of which answers inside its own deadline. Do not re-run gp_act to regenerate what the trail already holds",
       ) }],
       isError: true,
@@ -2497,7 +2615,7 @@ async function recentReports(
     return {
       content: [{ type: "text", text: formatToolError(
         GP_E_NO_EVIDENCE,
-        `no pack is reachable in the daemon history for any of the ${ids.length} ${ids.length === 1 ? "operation" : "operations"} this shell asked about: each was answered GP_E_NO_EVIDENCE (${renderTrailIds(skipped, format)})`,
+        `no pack is reachable in the daemon history for any of the ${ids.length} ${ids.length === 1 ? "operation" : "operations"} this shell asked about: each was answered GP_E_NO_EVIDENCE (${renderTrailIds(skipped, format, provenanceOf)})`,
         "these operations are recorded in this session's trail, and the daemon holding no pack for them is a fact about its bounded history, not evidence that they did not run — this call measured nothing about a restart, so no cause is claimed here. Read one of them by id with gp_last_evidence {operationId} / gp_export_evidence {operationId}, or ask again with a smaller limit (gp_recent_reports advertises 1…20). Do not re-run gp_act to regenerate what the trail already holds",
       ) }],
       isError: true,
@@ -2515,28 +2633,37 @@ async function recentReports(
     : `> ${sentence}`;
   const skipNote = skipped.length === 0
     ? ""
-    : note("gp-skipped", `skipped ${skipped.length} unreachable ${skipped.length === 1 ? "entry" : "entries"}: ${renderTrailIds(skipped, format)}`);
+    : note("gp-skipped", `skipped ${skipped.length} unreachable ${skipped.length === 1 ? "entry" : "entries"}: ${renderTrailIds(skipped, format, provenanceOf)}`);
   // A budget stop is a different fact from an unreachable entry: the daemon may
   // be answering these right now, so they are named as not fetched, with the
   // wait that ran out, and never folded into the "unreachable" count.
   const unfetchedNote = notFetched.length === 0 ? "" : format === "html"
-    ? `<p class="gp-not-fetched">not fetched within this report's ${RECENT_REPORTS_BUDGET_MS}ms wait: ${notFetched.length} ${notFetched.length === 1 ? "entry" : "entries"} left unanswered: ${renderTrailIds(notFetched, format)}. Fetch one by id with gp_last_evidence, or ask again with a smaller limit</p>`
-    : `> not fetched within this report's ${RECENT_REPORTS_BUDGET_MS}ms wait: ${notFetched.length} ${notFetched.length === 1 ? "entry" : "entries"} left unanswered: ${renderTrailIds(notFetched, format)}. Fetch one by id with gp_last_evidence, or ask again with a smaller limit`;
+    ? `<p class="gp-not-fetched">not fetched within this report's ${RECENT_REPORTS_BUDGET_MS}ms wait: ${notFetched.length} ${notFetched.length === 1 ? "entry" : "entries"} left unanswered: ${renderTrailIds(notFetched, format, provenanceOf)}. Fetch one by id with gp_last_evidence, or ask again with a smaller limit</p>`
+    : `> not fetched within this report's ${RECENT_REPORTS_BUDGET_MS}ms wait: ${notFetched.length} ${notFetched.length === 1 ? "entry" : "entries"} left unanswered: ${renderTrailIds(notFetched, format, provenanceOf)}. Fetch one by id with gp_last_evidence, or ask again with a smaller limit`;
   // Ids this shell refused to send are reported as *rejected*, in their
   // neutralised form, and never as "unreachable": the daemon was never asked, so
   // it has no opinion about them, and an agent reading "unreachable" goes looking
   // for evidence that was never addressable.
   const rejectNote = rejected.length === 0
     ? ""
-    : note("gp-rejected", `${rejectedClause(rejected.length)}${renderTrailIds(rejected, format)}. They were not sent, so nothing was lost by their absence here: gp_last_evidence validates an id the same way before it asks`);
+    : note("gp-rejected", `${rejectedClause(rejected.length)}${renderTrailIds(rejected, format, provenanceOf)}. They were not sent, so nothing was lost by their absence here: gp_last_evidence validates an id the same way before it asks`);
   const failureNote = hardFailure === null
     ? ""
-    : note("gp-fetch-failed", `the report stops here: ${renderTrailId(hardFailure.id, format)} failed with `
+    : note("gp-fetch-failed", `the report stops here: ${renderTrailId(hardFailure.id, format, provenanceOf(hardFailure.id))} failed with `
       + `${renderErrorLine(hardFailure.line, format)}. The ${packs.length} ${packs.length === 1 ? "pack" : "packs"} above were fetched and are `
       + "rendered; read the failed one on its own with gp_last_evidence {operationId}. Do not re-run gp_act to "
       + "regenerate what the trail already holds");
   const separator = format === "html" ? "\n<hr>\n" : "\n\n---\n";
-  const body = packs.map(({ pack }) => render(pack, undefined)).join(separator);
+  // The caveat travels with the pack it qualifies, not only with the lists above:
+  // a pack's own title is the operationId, so an agent that jumps straight to the
+  // evidence would otherwise read an inferred operation as a confirmed one.
+  const body = packs
+    .map(({ id, pack }) => {
+      const banner = provenanceBanner(id, provenanceOf(id), format);
+      const rendered = render(pack, undefined);
+      return banner === "" ? rendered : `${banner}\n${rendered}`;
+    })
+    .join(separator);
 
   const sections: string[] = [header];
   for (const section of [rejectNote, skipNote, unfetchedNote, failureNote]) {

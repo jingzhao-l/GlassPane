@@ -1,4 +1,78 @@
 import { Readable, Writable } from "node:stream";
+import fs from "node:fs";
+
+/**
+ * How long one synchronous wait for a full pipe lasts, and how often it repeats.
+ */
+const WRITE_STALL_MS = 10;
+const WRITE_STALL_LIMIT = 1_000;
+
+/**
+ * Write a whole string to a descriptor and do not return until the kernel has
+ * taken all of it.
+ *
+ * This is the writer for a message printed and then followed by
+ * `process.exit()`. `process.stderr`/`process.stdout` are *asynchronous* whenever
+ * the destination is a pipe — which is how every MCP host captures this server,
+ * and how every `glasspane-mcp … | tee` or every launchd-redirected run reads it —
+ * so a `write()` on a piped stream only queues a libuv request, `process.exit()`
+ * never runs the loop that would flush it, and the reader is handed a bare exit
+ * code with the explanation cut off mid-buffer (measured in `index.ts` and carried
+ * here: a 256 KiB piped stderr write stops at the 64 KiB pipe capacity, its tail
+ * gone). `fs.writeSync` issues a real blocking write instead, and the retry loop is
+ * what carries a message past the pipe capacity rather than assuming one syscall
+ * takes it all.
+ *
+ * Both entrypoints need it, so it lives in the module they both already import:
+ * the stdio shell prints its usage and startup failures this way, and
+ * `glasspane-http` prints its configuration refusals, its token refusals and — the
+ * one that matters most to an operator — its FATAL "the gateway is not serving"
+ * block immediately before `process.exit(3)`.
+ *
+ * The bound is deliberate: a descriptor that will not take the message (EPIPE,
+ * EBADF, or a pipe nobody drains for {@link WRITE_STALL_LIMIT} rounds) leaves
+ * nowhere to report the failure, so the write gives up rather than wedging the
+ * exit. A caller on a *live* path — a server that keeps running — pays that stall
+ * budget up front instead, which is why these sites are the exit-adjacent ones.
+ */
+export function writeDescriptor(fd: 1 | 2, text: string): void {
+  const buffer = Buffer.from(text, "utf8");
+  let offset = 0;
+  let stalls = 0;
+  while (offset < buffer.length) {
+    let written: number;
+    try {
+      written = fs.writeSync(fd, buffer, offset, buffer.length - offset);
+    } catch (error) {
+      // A piped stdio descriptor is *non-blocking* in this process — Node hands
+      // the fd to libuv that way as soon as stdout/stderr are pipes, which is how
+      // every MCP host and every `glasspane-mcp … | tee` runs it — so once the
+      // 64 KiB pipe buffer is full `writeSync` does not wait, it throws `EAGAIN`.
+      // Letting that escape killed the process on an uncaught exception (exit 1,
+      // message cut at the pipe capacity), and returning quietly would have cut it
+      // the same way while claiming the message had gone out. Retry after a short
+      // synchronous block so the reader gets its turn, and bound the retries so a
+      // pipe nobody drains cannot wedge the exit.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EAGAIN" && stalls < WRITE_STALL_LIMIT) {
+        stalls++;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, WRITE_STALL_MS);
+        continue;
+      }
+      // EPIPE, EBADF, or the retry ceiling: a descriptor that will not take the
+      // message leaves nowhere to report it (the same last resort as the shell's
+      // `logNote`).
+      return;
+    }
+    // A zero-length return means the descriptor took nothing without saying so;
+    // continuing would spin.
+    if (written <= 0) {
+      return;
+    }
+    offset += written;
+    stalls = 0;
+  }
+}
 
 /** Single-frame cap shared with the engine protocol (P0 spec §3.1). */
 export const MAX_FRAME_BYTES = 4 * 1024 * 1024;

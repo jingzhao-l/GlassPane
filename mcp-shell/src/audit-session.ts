@@ -73,6 +73,17 @@ export type TrailProvenance = "in-order" | "late" | "late-inferred";
 export type LateArrivalAttribution = "echoed-id" | "arrival-order" | "unknown";
 
 /**
+ * The mechanism an `arrival-order` attribution names, in one sentence with no verdict in
+ * it. Written here because this is the layer that knows it, and put beside every surface
+ * that shows one of those frames: the trail's own
+ * {@link TRAIL_PROVENANCE_NOTES `late-inferred`} note is built from this text, and
+ * `dispatch.ts`'s late-reply log line says the same words for the ids it names, so the
+ * two surfaces cannot one day describe two different mechanisms.
+ */
+export const ARRIVAL_ORDER_MECHANISM = "which request it answers is inferred from arrival order "
+  + "(the daemon answers in the order it received them) and could not be confirmed by an echoed id";
+
+/**
  * The sentence the surface that shows the trail puts beside one id. Written here
  * because this is the layer that knows the mechanism; the tool layer renders it.
  */
@@ -80,9 +91,8 @@ export const TRAIL_PROVENANCE_NOTES: Readonly<Record<TrailProvenance, string>> =
   "in-order": "recorded from the reply to this session's own request, matched by the id that request carried",
   "late": "recorded from a reply that landed after its caller had already been answered, so it was filed at the next "
     + "free trail position rather than at its request's own",
-  "late-inferred": "recorded from a reply that landed late AND echoed no request id: which request it answers is "
-    + "inferred from arrival order (the daemon answers in the order it received them) and could not be confirmed by an "
-    + "echoed id, so this operation is listed as inferred — not as verified — and its identity, not merely its order, "
+  "late-inferred": "recorded from a reply that landed late AND echoed no request id: " + ARRIVAL_ORDER_MECHANISM
+    + ", so this operation is listed as inferred — not as verified — and its identity, not merely its order, "
     + "is what the inference covers",
 };
 
@@ -175,11 +185,6 @@ export class EvidenceAuditSession {
    */
   provenanceOf(id: string): TrailProvenance | null {
     return this.provenance.get(id) ?? null;
-  }
-
-  /** The ids currently filed as inferred; see {@link TrailProvenance}. */
-  inferredIds(): string[] {
-    return this.ids.filter((id) => this.provenance.get(id) === "late-inferred");
   }
 
   /**

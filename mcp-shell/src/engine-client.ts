@@ -90,9 +90,73 @@ export const ENGINE_SOCKET_ENV = "GLASSPANE_ENGINE_SOCK";
  * Single source all the same: the CLI argument parser in index.ts and the
  * reconnecting transport both resolve the path through this function, so an env
  * override cannot be honoured on one side only.
+ *
+ * A **blank** override is not an override. `GLASSPANE_ENGINE_SOCK=""` — which is
+ * what `export FOO=` and a launcher that means "unset" actually put in the
+ * environment — is not nullish, so honouring it literally sends `""` to
+ * `net.connect`. Measured on the delivered artifact: `gp_probe_status` answered
+ * `GP_E_ENGINE_UNREACHABLE` carrying Node's internals ("Port should be >= 0 and <
+ * 65536. Received type string ('')"), and the remedy fell back to the generic
+ * "restart the daemon" wording, i.e. the answer *invented a daemon fault* out of a
+ * variable the shell was never given. Empty-and-whitespace-only reads as "no name
+ * here", which is what the fallback guess is for; the CLI flag spelling of the same
+ * empty value is refused instead, because there an operator is naming a socket in
+ * this command line and dropping it silently would connect them to one they did not
+ * choose (`index.ts`, `http-gateway-cli.ts`).
  */
 export function defaultSocketPath(): string {
-  return process.env[ENGINE_SOCKET_ENV] ?? path.join(os.homedir(), ".glasspane", "engine.sock");
+  const named = socketOverride(process.env[ENGINE_SOCKET_ENV]);
+  if (named === null) {
+    return path.join(os.homedir(), ".glasspane", "engine.sock");
+  }
+  return named;
+}
+
+/**
+ * The env override that actually names a socket, or `null` when it names nothing.
+ *
+ * `true`-for-blank is written as "returns the value or `null`" rather than as a
+ * `boolean` predicate because the caller has to carry the value onward, and a
+ * `boolean` helper leaves TypeScript unable to see that the surviving case is a
+ * string — the shape of this decision is not something a caller should be cast
+ * around.
+ *
+ * The value is *not* trimmed on the way out: a real path may contain spaces, and
+ * `/tmp/ a.sock` is somebody's socket. This only decides whether the value says
+ * anything at all. It is the single spelling of that rule so the env override and
+ * the CLI flag check (`refuseEmptySocketPath`) cannot drift into disagreeing about
+ * what "no socket named" means.
+ */
+export function socketOverride(value: string | undefined): string | null {
+  if (value === undefined || value.trim() === "") {
+    return null;
+  }
+  return value;
+}
+
+/**
+ * Refuse a `--socket-path` that names nothing, as the usage error it is.
+ *
+ * The opposite of the env rule above, deliberately: a variable somebody exported
+ * can only say "no name here", and the fallback guess is what answers that; a flag
+ * on this command line is an operator *naming a socket*, and dropping the name they
+ * typed would leave this process bridging a daemon they did not choose. And `""` is
+ * not merely a path that does not exist — `net.connect("")` fails its own argument
+ * validation ("Port should be >= 0 and < 65536. Received type string ('')"), which
+ * arrives dressed as `GP_E_ENGINE_UNREACHABLE` with generic restart wording.
+ *
+ * Only the truly empty value is refused. A path of spaces is a path (`/tmp/ .sock`
+ * exists on a POSIX filesystem), and the honest answer for one that does not exist
+ * is the ENOENT this shell already reports, not a usage error invented here.
+ */
+export function refuseEmptySocketPath(value: string, flag: string): void {
+  if (value === "") {
+    throw new Error(
+      `${flag} requires a value: an empty path is not a socket, and this shell will not connect to it. `
+      + `Pass ${flag} <path> with the socket the daemon is really on (the usage below gives the command that reads `
+      + `it), or drop the flag and let this shell use ${ENGINE_SOCKET_ENV} or its own fallback guess`,
+    );
+  }
 }
 
 /** Fallback deadline for a method missing from the table below. */

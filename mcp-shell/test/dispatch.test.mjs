@@ -467,18 +467,56 @@ test("blank line yields no response", async () => {
  * ------------------------------------------------------------------ */
 
 /**
- * Await the queue until nothing is queued *or* about to be queued: a delivery
- * step joins the chain one microtask after its request resolves, and each write
- * below yields a macrotask, so a single `drained()` can return too early.
+ * Await the queue until `done()` holds: a delivery step joins the chain one
+ * microtask after its request resolves, and each write below yields a macrotask, so
+ * a single `drained()` can return too early.
+ *
+ * The loop is bounded by *rounds of the queue settling*, not by a wall-clock slice:
+ * the fixed-6-round version of this helper used to be followed by an exact-list
+ * assertion whose answer the 500 ms engine deadline could change (see the test's own
+ * note), and a helper that cannot tell "the shell never got here" from "the machine
+ * was slow" is what made that control unfixable. `rounds` is a guard against
+ * spinning forever on a shell that genuinely does not answer: when it runs out, the
+ * caller's assertion reads the state and goes red — it does not time out, and it
+ * does not pass.
  */
-async function drainAll(queue) {
-  for (let round = 0; round < 6; round++) {
+async function drainUntil(queue, done, rounds = 24) {
+  for (let round = 0; round < rounds; round++) {
     await queue.drained();
+    if (done()) {
+      return;
+    }
     await new Promise((resolve) => setImmediate(resolve));
   }
 }
 
-test("an outstanding gp_act does not hold back ping or tools/list", async () => {
+/** Both outrunner frames written, whatever the act is doing. */
+const answeredBothOutrunners = (written) => written.filter((r) => r.id === 101 || r.id === 102).length === 2;
+
+test("an outstanding gp_act does not hold back ping or tools/list", async (t) => {
+  /*
+   * MUTATION THIS PINS, and the reason the clock is mocked: the act's engine
+   * deadline is a real `setTimeout` armed inside `EngineJsonRpcClient.call()`
+   * (`engine-client.ts:842`) at the fixture's 500 ms, and the whole question "is the
+   * act still outstanding?" used to be decided by the scheduler. Measured on this
+   * machine at load 160–200, this test went red at 562 ms with
+   * `AssertionError: ping and tools/list are answered while the act is still
+   * outstanding` and `actual: [101, 102, 100]` — the act's own *timeout* reply had
+   * landed during the drain. The same output proved the property under test (the act
+   * answered last, after both outran it), so the red was the control measuring the
+   * scheduler, not a head-of-line-blocking defect in the shell. Verified separately:
+   * with `pushDelivery` replaced by the old `queue.push(server.handleLine(...))`,
+   * ping is genuinely held back, and the assertions below go red — this is a real
+   * gate, not a timing artefact.
+   *
+   * Fixed through the seams that already exist: `timeoutMs` is the caller's own bound
+   * (`engine-client.ts:823-827`) and `t.mock.timers` is how this suite already drives
+   * deadline-backed behaviour (`engine-client.test.mjs`, "the real MCP wiring files an
+   * id-less late reply…"). Here nothing is *supposed* to be answered by the deadline,
+   * so the tick that would fire it is simply never taken, and the act can only settle
+   * when the test hands it a frame. The real-clock half is the next test.
+   */
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const { server, io } = makeServer();
   const written = [];
   const reported = [];
@@ -507,14 +545,14 @@ test("an outstanding gp_act does not hold back ping or tools/list", async () => 
 
   ask({ jsonrpc: "2.0", id: 101, method: "ping" });
   ask({ jsonrpc: "2.0", id: 102, method: "tools/list" });
-  await drainAll(queue);
+  await drainUntil(queue, () => answeredBothOutrunners(written));
   assert.deepEqual(written.map((r) => r.id), [101, 102],
     "ping and tools/list are answered while the act is still outstanding");
   assert.equal(written[1].result.tools.length, 16);
   assert.equal(writesMostInFlight, 1, "frames still go out one at a time");
 
   io.respond({ operationId: "op_0123456789ABCDEFGHJKMNPQRS", actConfirmed: true });
-  await drainAll(queue);
+  await drainUntil(queue, () => written.length === 3);
   assert.deepEqual(written.map((r) => r.id), [101, 102, 100], "the outrun reply is not lost");
   assert.equal(written[2].result.isError, false);
   assert.deepEqual(reported, [], "no reply failed on the way out");
@@ -531,9 +569,78 @@ test("an outstanding gp_act does not hold back ping or tools/list", async () => 
   queue.push(async () => {
     reached = true;
   });
-  await drainAll(queue);
+  // Both halves are waited for, and that matters: a delivery that joins the chain
+  // from a microtask (`pushDelivery` of an already-resolved value) can land *after*
+  // a `push` made synchronously ahead of it, so a predicate on `reached` alone
+  // returns while `stdout rejected` is still queued behind it.
+  await drainUntil(queue, () => reached && reported.length === 2);
   assert.deepEqual(reported.map((e) => e.message), ["handleLine blew up", "stdout rejected"]);
   assert.equal(reached, true, "a poisoned chain would stop every later reply");
+});
+
+test("the same outrun holds on the real clock, with no mocked timer in sight", async () => {
+  /*
+   * The real-timing case, kept on purpose: a mocked clock proves the ordering
+   * logic but cannot show that a live shell answers `ping` before its own daemon
+   * reply arrives. Two things make this one honest rather than load-sensitive:
+   *
+   * - the act is answered by a **frame**, never by its deadline, and the deadline is
+   *   pushed far past anything the drain can take (`timeoutMs` is the caller's own
+   *   bound, injected through the existing `makeEngine` seam). Nothing here *waits*
+   *   for it, so raising it buys no wall-clock slice and removes the only way the
+   *   machine's speed could change this answer. The act is settled by `io.respond`
+   *   below and its timer is cleared, so the pending deadline cannot hold the test
+   *   process open either.
+   * - the property is read from a snapshot taken **inside the write**, so it says
+   *   "answered while the act was outstanding" as a measurement, not as an inference
+   *   from a list length.
+   */
+  const { server, io } = makeServer(60_000);
+  const written = [];
+  let actSettled = false;
+  const queue = new OrderedReplyQueue(() => undefined);
+  const write = async (response) => {
+    await new Promise((resolve) => setImmediate(resolve));
+    if (response !== null) {
+      written.push({ id: response.id, actSettled });
+    }
+  };
+
+  const actInFlight = server.handleLine(enq({
+    jsonrpc: "2.0",
+    id: 100,
+    method: "tools/call",
+    params: { name: "gp_act", arguments: { selector: { role: "button" }, action: "press" } },
+  }));
+  // Registered before the delivery is queued, so the flag is true by the time the
+  // act's own frame is written and false for everything that outran it.
+  void actInFlight.then(() => {
+    actSettled = true;
+  });
+  queue.pushDelivery(actInFlight, write);
+
+  for (const frame of [
+    { jsonrpc: "2.0", id: 101, method: "ping" },
+    { jsonrpc: "2.0", id: 102, method: "tools/list" },
+  ]) {
+    queue.pushDelivery(server.handleLine(enq(frame)), write);
+  }
+
+  await drainUntil(queue, () => answeredBothOutrunners(written));
+  // Named first, and not as a formality: under head-of-line blocking these two
+  // replies are never written at all, and the snapshot loop below would read an
+  // empty list and pass.
+  assert.deepEqual(written.map((r) => r.id), [101, 102],
+    "ping and tools/list got answered at all while the act's own reply had not arrived");
+  for (const record of written) {
+    assert.equal(record.actSettled, false,
+      `reply ${record.id} was written only after the act had settled — that is head-of-line blocking, not a slow machine`);
+  }
+
+  io.respond({ operationId: "op_0123456789ABCDEFGHJKMNPQRS", actConfirmed: true });
+  await drainUntil(queue, () => written.length === 3);
+  assert.deepEqual(written.map((r) => r.id), [101, 102, 100]);
+  assert.equal(written[2].actSettled, true, "and the act's own reply is the one that settled it");
 });
 /* ------------------------------------------------------------------ *
  * R8-中5: a notification gets no answer per JSON-RPC, which is exactly why it

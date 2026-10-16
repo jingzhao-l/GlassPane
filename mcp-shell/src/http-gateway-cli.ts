@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 import process from "node:process";
 
-import { defaultSocketPath, CALLER_VISIBLE_CEILING_MS } from "./engine-client.js";
+import { defaultSocketPath, CALLER_VISIBLE_CEILING_MS, refuseEmptySocketPath } from "./engine-client.js";
+// The exit-adjacent writer, shared with the stdio shell (`index.ts`) so the two
+// entrypoints cannot drift apart: every site below it prints a message and then
+// `process.exit()`s, and a piped stderr write that has not been handed to the
+// kernel is gone with the process. Measured on this artifact (`dist`, unfixed):
+// `glasspane-http --socket-pth<100 KB>` with a draining reader on the other end of
+// the pipe returned exactly 65 536 bytes and lost the sentence that names the flag.
+import { writeDescriptor } from "./io.js";
 import {
   createHttpGateway,
   DEFAULT_GATEWAY_HOST,
@@ -78,10 +85,13 @@ function parseArgs(argv: readonly string[]): CliOptions {
       if (value === undefined) {
         throw new Error("--socket-path requires a value");
       }
+      refuseEmptySocketPath(value, arg);
       options.socketPath = value;
       i += 1;
     } else if (arg.startsWith("--socket-path=")) {
-      options.socketPath = arg.slice("--socket-path=".length);
+      const value = arg.slice("--socket-path=".length);
+      refuseEmptySocketPath(value, "--socket-path");
+      options.socketPath = value;
     } else if (arg === "--port" || arg === "-p") {
       options.port = parsePort(argv[i + 1], arg);
       i += 1;
@@ -140,18 +150,21 @@ function main(): void {
   try {
     options = parseArgs(process.argv.slice(2));
   } catch (error) {
-    process.stderr.write(String(error) + "\n\n" + USAGE);
+    // Exit-adjacent: `process.exit` follows on the next line and does not wait for
+    // a queued piped write, so this is the whole reason the writer is shared.
+    writeDescriptor(2, String(error) + "\n\n" + USAGE);
     process.exit(EXIT_CONFIG);
   }
 
   if (options.help) {
-    process.stdout.write(USAGE);
+    writeDescriptor(1, USAGE);
     process.exit(0);
   }
 
   const token = process.env[GLASSPANE_HTTP_TOKEN_ENV];
   if (typeof token !== "string" || token === "") {
-    process.stderr.write(
+    writeDescriptor(
+      2,
       `${GLASSPANE_HTTP_TOKEN_ENV} is not set or is empty; refusing to start an unauthenticated gateway.\n\n${USAGE}`,
     );
     process.exit(EXIT_CONFIG);
@@ -163,7 +176,8 @@ function main(): void {
   const chars = [...token];
   const distinct = new Set(chars).size;
   if (chars.length < MIN_TOKEN_CHARS || distinct < MIN_TOKEN_DISTINCT_CHARS) {
-    process.stderr.write(
+    writeDescriptor(
+      2,
       `${GLASSPANE_HTTP_TOKEN_ENV} is ${chars.length} character(s) drawn from ${distinct} distinct one(s); `
       + `refusing to start with a credential under the ${MIN_TOKEN_CHARS}-character / `
       + `${MIN_TOKEN_DISTINCT_CHARS}-distinct-character minimum (make one with "openssl rand -hex 16").\n\n${USAGE}`,
@@ -180,7 +194,7 @@ function main(): void {
       host: HOST,
     });
   } catch (error) {
-    process.stderr.write(`failed to start the HTTP gateway: ${String(error)}\n`);
+    writeDescriptor(2, `failed to start the HTTP gateway: ${String(error)}\n`);
     process.exit(EXIT_CONFIG);
   }
 
@@ -189,6 +203,12 @@ function main(): void {
     const bound = typeof address === "object" && address !== null
       ? `${address.address}:${address.port}`
       : String(address);
+    // Left as an asynchronous write, and that is a decision rather than an
+    // oversight: nothing exits after these two lines, so the loop flushes them and
+    // they cannot be lost. Routing them through `writeDescriptor` instead would put
+    // that writer's bounded stall (up to `WRITE_STALL_LIMIT` rounds of waiting on a
+    // pipe nobody drains) on the event loop of a *live* gateway, to protect a
+    // message that was never at risk.
     process.stderr.write(`[glasspane-http] listening on http://${bound}\n`);
     process.stderr.write(`[glasspane-http] bridging daemon socket ${options.socketPath}\n`);
   });
@@ -204,7 +224,12 @@ function main(): void {
   gateway.server.on("error", (error: NodeJS.ErrnoException) => {
     const code = typeof error.code === "string" ? error.code : "unknown error code";
     const detail = typeof error.message === "string" ? error.message : "no message";
-    process.stderr.write(
+    // The most important line this entrypoint can print, and the one an operator
+    // running this under `| tee` or launchd used to lose: `process.exit(3)` follows
+    // immediately, so an asynchronous piped write could hand them the exit code with
+    // the "not listening" explanation cut at the pipe capacity.
+    writeDescriptor(
+      2,
       `[glasspane-http] FATAL: the gateway is not serving and this process is exiting — `
       + `could not bind ${HOST}:${options.port} (${code}: ${detail}).\n`
       + (code === "EADDRINUSE"
@@ -224,11 +249,14 @@ function main(): void {
       return;
     }
     shuttingDown = true;
-    process.stderr.write(`[glasspane-http] received ${signal}; shutting down\n`);
+    // Exit-adjacent in effect even though the `process.exit` is one promise away:
+    // `gateway.close()` can settle in a microtask, which runs before the event loop
+    // gets a turn to flush a queued piped write.
+    writeDescriptor(2, `[glasspane-http] received ${signal}; shutting down\n`);
     gateway.close().then(
       () => process.exit(0),
       (error) => {
-        process.stderr.write(`[glasspane-http] error during shutdown: ${String(error)}\n`);
+        writeDescriptor(2, `[glasspane-http] error during shutdown: ${String(error)}\n`);
         process.exit(1);
       },
     );
