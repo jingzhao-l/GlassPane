@@ -212,12 +212,59 @@ export function removeTreeWithin(allowedRoot, target) {
     // Deleting the guard root itself would remove the very path the next
     // refusal check compares against; drop the contents, keep the directory.
     for (const entry of fs.readdirSync(resolved)) {
-      fs.rmSync(path.join(resolved, entry), { recursive: true, force: true })
+      removeEntry(path.join(resolved, entry))
     }
     return resolved
   }
-  fs.rmSync(resolved, { recursive: true, force: true })
+  removeEntry(resolved)
   return resolved
+}
+
+/**
+ * One entry, leaves first, and the **first** errno that comes back is the one thrown.
+ *
+ * `fs.rmSync(dir, { recursive: true })` reports `ENOTEMPTY` for the parent when a child
+ * inside it could not be unlinked: on this machine the same tree, written by the same run,
+ * answered "Directory not empty: …/update-staging/1.4.1/tree" for a directory whose child
+ * was mode 0500 — a permission denial dressed up as a bookkeeping complaint, and the
+ * sentence a person or an agent reads is the refusal's whole diagnosis. Walking here keeps
+ * the cause's own code and path attached.
+ */
+function removeEntry(entry) {
+  let stats
+  try {
+    stats = fs.lstatSync(entry)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return
+    throw error
+  }
+  if (stats.isDirectory() && !stats.isSymbolicLink()) {
+    let names
+    try {
+      names = fs.readdirSync(entry)
+    } catch (error) {
+      throw namedRemovalFailure(entry, error)
+    }
+    for (const name of names) removeEntry(path.join(entry, name))
+    try {
+      fs.rmdirSync(entry)
+    } catch (error) {
+      throw namedRemovalFailure(entry, error)
+    }
+    return
+  }
+  try {
+    fs.unlinkSync(entry)
+  } catch (error) {
+    throw namedRemovalFailure(entry, error)
+  }
+}
+
+function namedRemovalFailure(entry, error) {
+  const wrapped = new Error(`${error?.code ?? 'removal failed'}: ${entry} (${error?.message ?? String(error)})`)
+  wrapped.code = error?.code ?? 'EUNKNOWN'
+  wrapped.path = entry
+  return wrapped
 }
 
 /** Mode of a path (`null` when it does not exist). */
