@@ -694,3 +694,68 @@ registry 侧 `npm view glasspane-mcp@1.15.0 version --prefer-online` 与
 本轮所有 daemon 调用一律带 `--state-dir` 指向临时根；没有任何一条命令以 `--prune-evidence`
 跑在默认根上。测试跑完后核对工作树 `git status --porcelain` 为空，
 `~/.glasspane` 未被本轮任何一步写入（面板那次 `open` 读的是它自己的默认根，只读）。
+
+---
+
+## 每日真机核对 2026-10-16（v1.16.0 这一轮）
+
+本机登录会话在、四张权限席位已勾，本轮所有真机项都在本机做完；未做完的写在最后一条。
+
+### 1. 一次性 CLI：状态根点名与"读不开 ≠ 没注册"（全部 `--state-dir` 隔离根，输出原样抄录）
+
+二进制：`engine/.build/debug/glasspaned`（本轮构建，版本自报 1.16.0 那一线的产物）。
+
+| 调用 | 实测输出与退出码 | 这一条在判什么 |
+| --- | --- | --- |
+| `--state-dir R --permissions` | `{"permissions":{"accessibility":"granted","developerTools":"unverifiable","inputMonitoring":"granted","screenRecording":"granted"},"subject":{...}}`，退 0 | daemon 自报席位；开发者工具卡恒 unverifiable（设计） |
+| `--state-dir R --evidence-stats`（空档案目录） | `{"count":0,"totalBytes":0,"listFailure":null,...}`，退 0 | "里面确实没有" 与 "读不出" 分得开 |
+| `--state-dir R --list-projects`（全新根） | `[]`，退 0 | 文件**不在** = 真的没人注册过，不是"读不回" |
+| 损坏 `projects.json` + `--list-projects` | `{"command":"--list-projects","loadFailed":true,...}` 走 stderr，退 1 | 拒绝形状的真源 |
+| 同一份损坏文件 + `--active-project prj_…AA` | `{"loadFailed":true,"stateChanged":false,...}`，**没有** `found:false`，退 1 | 本轮修的 P1：从前这里答 `no project … is registered` |
+| 同一份损坏文件 + `--prune-evidence --project prj_…AA` | `{"loadFailed":true,"stateChanged":false,"error":"projects.json at … is not a decodable project list (…)"}`，退 1 | 从前答 `unknown project …`——"看不见这张表"被说成"一定不在表里" |
+| 悬空符号链接当档案目录 + `--evidence-stats` | `{"count":null,"totalBytes":null,"listFailure":"cannot read the evidence archive at …"}`，退 **1** | 本轮改判：从前同一事实退 0，而 20 行外的 `--prune-evidence` 退 1 |
+
+`R` = `/var/tmp/gp-daily-main-20261015/probe-final/root{,2,3}`。**没有任何一步碰过 `~/.glasspane`**；
+`--prune-evidence` 只在损坏注册表的隔离根上以带 `--project` 的拒绝分支形式跑过（它在读表这一步
+就被拒了，没有打开任何档案）。
+
+### 2. 面板真机（AX `kAXPressAction`，`engine/.p4i4_smoke.py --skip-drag`，退 0）
+
+```
+PASS guide-accessibility:    卡徽标实测「已授权」，按钮已是稳态跳转「在系统设置中查看」——如实，不是一次按下动作
+PASS guide-inputMonitoring:  同上
+PASS guide-screenRecording:    同上
+PASS guide-developerTools:  kind 路由 + 面板跳转（badge=未验证）
+```
+
+这一轮顺手修了**这条冒烟自己**：它认的已授权形状是"按钮 disabled 写着「已授权」"，
+而面板改版后（`SettingsPanelView.buttonTitle` 的 `.granted` 分支）那枚按钮换成了仍然有效的
+跳转「在系统设置中查看」。于是在一台三个必需权限**都真的授过权**的机器上，它判三张卡
+"找不到卡内引导按钮"并 FAIL——判据读的是一个已经不存在的界面。现在标题集合与面板那张
+一一对应的表同构，报告里写的是**量到的徽标**而不是"我以为已授权长什么样"。
+
+**未观测（并给出补它的确切动作）**：面板"跟着 daemon 报的根换"这一条的端到端 GUI 观察。
+本机做不到诚实的观测方式——面板连的是默认根下的 socket，要让它在 GUI 里见到**另一个**根，
+就得把正在服务的真 daemon 停掉或挪根（那是用户状态，本轮不许动）。这一判据目前由
+`ConsoleDaemonStateRootTests` 用真起子进程 + argv 记录器覆盖（桩对不点名 `--state-dir`
+的参数一律 `unknown argument` + 64，不替不存在的能力背书）。补上它需要的动作：
+在一次性测试机上以 `glasspaned --state-dir <另一个根>` 起服务、面板指向那个 socket 打开
+项目页，把侧栏「状态根」一行与控制台 caption 的原文抄进本节，再按下「清理」确认它拒绝。
+
+### 3. 本轮门禁逐字复跑的实际计数（不是"全绿"两个字）
+
+`npm ci` 0；`npm run build` 0；`npm test --workspaces --if-present` 0
+（kernel **229/229**、mcp-shell **491/491**、installer **172/172**、updater **509/509**，各自 0 fail、0 skipped）；
+`node scripts/check-version.mjs` 0（**13 个位点 + 8 条 lock 条目**统一到 1.16.0）；
+`node scripts/check-doc-links.mjs` 0（25 文档 / 227 仓库内链接 / 26 外链不请求）；
+`node scripts/check-workflows.mjs --self-test` 0（**11 档各自被证红**）；`… .mjs` 0（5 份 workflow clean）；
+`swift build --package-path engine` 0；`swift test --package-path engine` 0
+（XCTest **Executed 1073 tests, with 3 tests skipped and 0 failures**；Swift Testing **Test run with 15 tests in 2 suites passed**）；
+`swift test --package-path engine/probe` 0（XCTest **29 tests, 0 failures**；该包不含 Swift Testing 用例，
+那一行的 `Test run with 0 tests in 0 suites` 是新加的 `scripts/assert-test-count.mjs` 允许的形态——
+它要挡的是**两种 runner 一起不出声**，probe 的 XCTest 半侧有 29 条）；
+`python3 -m pytest -q bridge` 0（**79 passed**）；`sh -n install.sh` 0；
+信号闸 `python3 .signal_smoke.py .build/debug/glasspaned` 0（SIGTERM/SIGINT 各自自行退出并 unlink socket，三次起停各自跑在点名且由 daemon 自己收紧的状态根里）；
+发布形态 `cd mcp-shell && npm run bundle && npm pack --dry-run` 0（**29 个文件 / 931.1 kB**）；
+`node harness/tools/tool-surface.mjs --check` 0（"no growth past the recorded baseline"，
+面 A 9605 LOC/21.65%、面 B 8275 LOC/18.66%；面 A 的基线补记单独成笔 e0e12d1，比例仍高于文档 10% 上限这一条如实保留）。

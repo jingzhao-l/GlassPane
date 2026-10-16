@@ -210,6 +210,11 @@ KINDS = [
     ("developerTools", "开发者工具", r"已打开「开发者工具」面板"),
 ]
 GUIDE_BUTTON_TITLES = {"授权", "打开系统设置"}
+# 已授权卡上那一枚仍然有效的跳转按钮（改版后的稳态形状，见 card_guide_button 的注释）。
+# 集合与 `SettingsPanelView.buttonTitle` 那张一一对应的表同构：面板改了标题而这里没跟上，
+# 这一支两条判据都不命中 → mode 仍是 None → 这张卡被记成 FAIL。它不会悄悄放过，只会
+# 用一次红把自己提醒到（本轮就是靠这次红发现脚本比面板晚了一步）。
+GRANTED_BUTTON_TITLES = {"在系统设置中查看"}
 # 开发者工具卡合法徽标：无实测时=未验证；实测后允许带时刻结论（P6 §11 补录）。
 DEV_BADGES = {"未验证", "可用（实测）", "被拒绝（实测）"}
 BANNER_NEEDLE = "拖拽引导"
@@ -300,7 +305,14 @@ def card_guide_button(elements, display_name):
         titles = button["strings"]
         if any(t.strip() in GUIDE_BUTTON_TITLES for t in titles):
             return (button["x"] + button["w"] / 2.0, button["y"] + button["h"] / 2.0), "press"
-        if any(t.strip() == "已授权" for t in titles):
+        # 已授权态改版（`SettingsPanelView.buttonTitle`）：卡上不再放一枚灰掉的「已授权」
+        # ——那既重复徽标信息又让人以为界面坏了——改成仍然有效的动作「在系统设置中查看」。
+        # 本冒烟原来只认那句已废掉的按钮标题，于是在一台**三个必需权限都真的授过权**的
+        # 机器上判三张卡"找不到引导按钮"：一条判据读的是不存在的界面，就是它自己失效了。
+        # 判据跟着走，含义不变——这一支仍是"如实的稳态"，不是按下动作。
+        if any(t.strip() == "已授权" for t in titles) or any(
+            t.strip() in GRANTED_BUTTON_TITLES for t in titles
+        ):
             return None, "granted"
     return None, None
 
@@ -383,7 +395,10 @@ def main():
         point, mode = card_guide_button(snapshot, display_name)
         badge = badge_near(snapshot, display_name)
         if mode == "granted":
-            report.append(f"PASS guide-{key}: 卡已授权（按钮 disabled「已授权」）——steady-state 如实")
+            # 报告里写的是**量到的那个徽标**，不是"我以为已授权长什么样"：这一支的证据
+            # 就是卡片徽标文本本身（改版后按钮已不写「已授权」）。
+            report.append(f"PASS guide-{key}: 卡徽标实测「{badge}」，"
+                          f"按钮已是稳态跳转「在系统设置中查看」——如实，不是一次按下动作")
             continue
         if mode != "press":
             failures.append(f"{key}: 找不到卡内引导按钮")
