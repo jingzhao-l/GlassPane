@@ -24,6 +24,7 @@ import {
   DEFAULT_MINUTE,
   AGENT_TEMPLATE,
   agentEnvironmentBlock,
+  agentPathValue,
   agentPlistPath,
   kickstartJob,
   parseArgumentsBlock,
@@ -36,6 +37,8 @@ import {
   unregisterAgent,
 } from '../lib/launchd.js'
 import { CODES } from '../lib/codes.js'
+import { CA_ENV_VAR } from '../lib/ca-bundle.js'
+import { LAUNCHD_PATH } from '../lib/binaries.js'
 import { UpdaterError, modeOf } from '../lib/fsutil.js'
 import { decideSwapPermission, stateDirReadings } from '../lib/policy.js'
 import { removeDir, tempDir, TMP_PREFIX } from './helpers.mjs'
@@ -742,16 +745,112 @@ test('the agent is handed the exported root bundle, because node reads it when t
   }
 })
 
-test('no bundle means no EnvironmentVariables key at all — not an empty one, not an empty string', (t) => {
+test('no bundle means no NODE_EXTRA_CA_CERTS at all — not an empty one, not an empty string', (t) => {
   if (process.platform !== 'darwin') return t.skip('plutil is the reader being satisfied here')
   const dir = tempDir(`${TMP_PREFIX}ca-none-`)
   try {
     const text = renderAgentPlist({ cliPath: '/x/cli.js', stateRoot: '/Users/dev/.glasspane' })
     const doc = plistToJson(text, dir)
-    assert.equal('EnvironmentVariables' in doc, false, 'NODE_EXTRA_CA_CERTS="" is a bundle path that points at nothing; node fails at start-up on an unreadable file')
+    // The variable, not the dict: the dict now legitimately carries the job's PATH (see
+    // `agentPathValue`), and an empty `NODE_EXTRA_CA_CERTS=""` is still a bundle path that points at nothing
+    // — node fails at start-up on an unreadable file.
+    assert.equal(CA_ENV_VAR in (doc.EnvironmentVariables ?? {}), false, JSON.stringify(doc.EnvironmentVariables))
     // The absence has to be readable by a person too: the installed plist is the
     // artifact someone opens when the daily job misbehaves.
     assert.match(text, /NODE_EXTRA_CA_CERTS not set: this machine has no exported system root bundle/)
+  } finally {
+    removeDir(dir)
+  }
+})
+
+/* ------------------------------------------------- finding 5: the job is handed a PATH */
+
+test('the rendered job carries a PATH that can answer a #!/usr/bin/env node script', (t) => {
+  if (process.platform !== 'darwin') return t.skip('plutil is the reader being satisfied here')
+  const dir = tempDir(`${TMP_PREFIX}job-path-`)
+  try {
+    const text = renderAgentPlist({ cliPath: '/x/cli.js', stateRoot: '/Users/dev/.glasspane', nodePath: '/usr/local/bin/node' })
+    const doc = plistToJson(text, dir)
+    const pathValue = doc.EnvironmentVariables.PATH
+    assert.equal(typeof pathValue, 'string', JSON.stringify(doc.EnvironmentVariables))
+    const dirs = pathValue.split(':')
+    assert.equal(dirs[0], '/usr/local/bin', 'dirname(nodePath) 必须排第一：shebang 问的 node 就在那里')
+    assert.ok(dirs.includes('/opt/homebrew/bin'), 'Homebrew 机器的 node 与 npm 都在那里')
+    for (const minimal of LAUNCHD_PATH.split(':')) {
+      assert.ok(dirs.includes(minimal), `最小 PATH 的 ${minimal} 不能被替换掉，只能被补上：${pathValue}`)
+    }
+    // The npm prefix bins come from the environment of the process that renders, so an operator's own
+    // prefix is what lands in the job — which is the point: `enable` is run from a working shell.
+    const withPrefix = agentPathValue({ env: { npm_config_prefix: '/srv/mynode' }, execPath: '/opt/homebrew/bin/node' })
+    assert.equal(withPrefix.split(':')[0], '/opt/homebrew/bin')
+    assert.ok(withPrefix.split(':').includes('/srv/mynode/bin'), withPrefix)
+    // Nothing in the value ever enters a shell string: the `-c` literal is untouched by this block.
+    assert.equal(doc.ProgramArguments[2].includes('PATH'), false, 'PATH 是作业环境，不是命令行的一部分')
+  } finally {
+    removeDir(dir)
+  }
+})
+
+test('a PATH is a value, not markup: metacharacters and $& come back byte-identical', (t) => {
+  if (process.platform !== 'darwin') return t.skip('plutil is the reader being satisfied here')
+  const dir = tempDir(`${TMP_PREFIX}job-path-xml-`)
+  try {
+    const hostile = '/Users/dev/a&b<c>d$&/bin:/usr/local/bin'
+    const doc = plistToJson(renderAgentPlist({
+      cliPath: '/x/cli.js',
+      stateRoot: '/Users/dev/.glasspane',
+      jobPath: hostile,
+    }), dir)
+    assert.equal(doc.EnvironmentVariables.PATH, hostile, '未转义的 PATH 会改写这份 plist，launchd 读到的是另一份作业')
+    assert.equal(CA_ENV_VAR in (doc.EnvironmentVariables ?? {}), false, JSON.stringify(doc.EnvironmentVariables))
+  } finally {
+    removeDir(dir)
+  }
+})
+
+test('a PATH carrying a control character is refused, and so is an empty one', () => {
+  for (const bad of ['', '/usr/bin:/bin\n/bin', '/usr/bin:/bin\rb']) {
+    const error = capture(() => agentEnvironmentBlock(null, { pathValue: bad }))
+    assert.equal(error.code, CODES.agentPathUnsafe, JSON.stringify(bad))
+  }
+  const rendered = capture(() => renderAgentPlist({
+    cliPath: '/x/cli.js',
+    stateRoot: '/Users/dev/.glasspane',
+    jobPath: '/usr/bin:/bin\n  <key>X</key>',
+  }))
+  assert.equal(rendered.code, CODES.agentPathUnsafe)
+})
+
+/**
+ * REVERSE MUTATION for the finding this block exists for: delete the `jobPath` default in `renderAgentPlist`
+ * and the tests above go red — the plist renders a job whose npm spawn dies at 127, which is the exact
+ * failure whose only documented remedy (a hand-edit of this dict) cannot survive the next `enable`.
+ */
+test('the daily job\'s npm spawn works with the rendered PATH and dies without it', (t) => {
+  const dir = tempDir(`${TMP_PREFIX}job-path-spawn-`)
+  try {
+    // A production-shaped script: the same first line as `/usr/local/bin/npm`.
+    const binDir = path.join(dir, 'prefix', 'bin')
+    fs.mkdirSync(binDir, { recursive: true, mode: 0o755 })
+    const script = path.join(binDir, 'npm')
+    fs.writeFileSync(script, '#!/usr/bin/env node\nprocess.stdout.write(process.env.GP_PROBE_PREFIX + "\\n")\n')
+    fs.chmodSync(script, 0o755)
+    const jobPath = agentPathValue({ env: { npm_config_prefix: binDir }, execPath: process.execPath })
+    assert.ok(jobPath.split(':').includes(path.dirname(process.execPath)), `渲染出来的 PATH 里必须有能答上 node 的那一条：${jobPath}`)
+
+    const starved = spawnSync(script, ['config', 'get', 'prefix'], {
+      encoding: 'utf8',
+      env: { PATH: LAUNCHD_PATH, GP_PROBE_PREFIX: '/Users/dev/npm-prefix' },
+    })
+    assert.equal(starved.status, 127, `不带补过的 PATH，这份脚本必须像真 npm 一样挂：${JSON.stringify(starved)}`)
+    assert.match(String(starved.stderr), /env: node: No such file or directory/, starved.stderr)
+
+    const asJob = spawnSync(script, ['config', 'get', 'prefix'], {
+      encoding: 'utf8',
+      env: { PATH: jobPath, GP_PROBE_PREFIX: '/Users/dev/npm-prefix' },
+    })
+    assert.equal(asJob.status, 0, JSON.stringify(asJob))
+    assert.equal(asJob.stdout.trim(), '/Users/dev/npm-prefix')
   } finally {
     removeDir(dir)
   }
@@ -780,7 +879,7 @@ test('an unnamed bundle is refused instead of rendered as a job that trusts noth
   })).code, CODES.agentPathUnsafe, 'a newline in a path cannot survive launchd reading the plist, so it is refused here rather than silently dropped')
 })
 
-test('a template that lost the ENV_BLOCK slot cannot be handed a bundle silently', () => {
+test('a template that lost the ENV_BLOCK slot cannot be handed a bundle or a PATH silently', () => {
   assert.match(fs.readFileSync(AGENT_TEMPLATE, 'utf8'), /\{\{ENV_BLOCK\}\}/, 'the shipped template no longer asks for the environment block, so the bundle would never reach the job')
   const body = fs.readFileSync(AGENT_TEMPLATE, 'utf8').replace('{{ENV_BLOCK}}', '<!-- slot gone -->')
   // The plist still renders, still parses, still runs — it just never gets the
@@ -794,8 +893,24 @@ test('a template that lost the ENV_BLOCK slot cannot be handed a bundle silently
   }))
   assert.equal(error.code, CODES.agentPathUnsafe)
   assert.match(error.message, /\{\{ENV_BLOCK\}\}/)
-  // …and the same template is fine when there is no bundle to place.
-  assert.doesNotThrow(() => renderAgentPlist({ cliPath: '/x/cli.js', stateRoot: '/Users/dev/.glasspane', template: body }))
+  // The same refusal now covers the PATH, which is the second thing that silently
+  // stops the daily job (exit 127 on every npm spawn). REVERSE MUTATION: gate this
+  // on `caBundle` alone and this assertion goes red while the plist still renders.
+  const pathOnly = capture(() => renderAgentPlist({
+    cliPath: '/x/cli.js',
+    stateRoot: '/Users/dev/.glasspane',
+    jobPath: '/usr/local/bin:' + LAUNCHD_PATH,
+    template: body,
+  }))
+  assert.equal(pathOnly.code, CODES.agentPathUnsafe, '没有 bundle 也要有 PATH：丢了槽位就是丢了一个每天必挂的作业')
+  assert.match(pathOnly.message, /\{\{ENV_BLOCK\}\}/)
+  // …and the same template is fine when there is no environment to place at all.
+  assert.doesNotThrow(() => renderAgentPlist({
+    cliPath: '/x/cli.js',
+    stateRoot: '/Users/dev/.glasspane',
+    jobPath: null,
+    template: body,
+  }))
 })
 
 /** The refusal, as data. */
