@@ -245,6 +245,20 @@ def self_test_diagnosis(work):
         while time.time() < deadline and not os.path.exists(engine_sock):
             time.sleep(0.02)
         os.kill(child.pid, signal.SIGINT)
+        # 先等夹具走到**它自己声明的那种现场**，再问诊断。从前这里是"发完信号就看一眼文件
+        # 系统"，而 stub 的信号处理器是异步的：负载 25 的那一趟里 `consumed` 还没来得及
+        # unlink 就被判成"两个 socket 文件都还在"——红的不是诊断（面对那种现场它本来就该说
+        # 那句），是夹具没到位。两种失败必须分开说，否则一条只在机器忙时才红的闸会把人引去
+        # 改一把本来正确的判据。
+        settles = {
+            "consumed": lambda: not os.path.exists(engine_sock) and not os.path.exists(probe_sock),
+            "partial": lambda: not os.path.exists(engine_sock) and os.path.exists(probe_sock),
+            "ignored": lambda: os.path.exists(engine_sock) and os.path.exists(probe_sock),
+        }[tag]
+        settle_deadline = time.time() + 5
+        while time.time() < settle_deadline and not settles():
+            time.sleep(0.02)
+        settled = settles()
         stalled = True
         try:
             child.wait(timeout=1.0)
@@ -259,7 +273,10 @@ def self_test_diagnosis(work):
                 os.unlink(path)
             except OSError:
                 pass
-        if not stalled:
+        if not settled:
+            problems.append("自检 stub（%s）没有走到它声明的现场（socket 文件的实际增减与 mode 不符）"
+                            "⇒ 诊断分支今天没有被检验过；这是**夹具没到位**，不是诊断说错" % tag)
+        elif not stalled:
             problems.append("自检 stub（%s）没能在信号后卡住 ⇒ 诊断分支今天没有被检验过" % tag)
         elif not diagnosis.startswith(expect_prefix):
             problems.append("自检 %s 诊断与现场不符（期望以 %r 开头）⇒ %s"
