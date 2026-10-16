@@ -70,7 +70,7 @@ export const INSTALL_SH_URL =
 /** 发布线锚点（版本真源 = 根 package.json，由 scripts/set-version.mjs 统一改写，
  *  勿手改）：npx 形态下本地没有仓库时，引导 clone 的就是这个 tag，与 install.sh
  *  的 `GLASSPANE_RELEASE` 同值——两条一键入口必须拿到同一份源码。 */
-export const RELEASE_VERSION = '1.15.1'
+export const RELEASE_VERSION = '1.16.0'
 /** 发布 ref（tag 名）。GLASSPANE_REF 环境变量可覆盖（追主干用 `main`）。 */
 export const REPO_REF = `v${RELEASE_VERSION}`
 
@@ -712,11 +712,38 @@ function readPlistProgram(readFile, plistPath) {
   }
 }
 
+/** 当前 uid 的**唯一**读法（四处调用点共用：launchdReregisterProbe、launchctlBootstrap、
+ *  launchctlKickstart、install() 里收拢旧实例后的 launchd 接管）。
+ *
+ *  为什么要单独抽出来：`spawnSync('id', ['-u'])` 在**起不来**时给的是
+ *  `{ error, status: null, stdout: undefined }`，而那三处从前写的都是
+ *  `.stdout.trim()`——TypeError 不是拒绝：它把紧跟其后那句"无法解析当前 uid（id -u 失败）…"
+ *  的补救话连同整条命令的退出码一起吞掉，屏幕上只剩一个未捕获异常的栈。判据（"读不到
+ *  就不猜 uid"）一直是对的，可达性没了；只有 launchdReregisterProbe 一处早写了 `?? ""`。
+ *  这里统一成带保护的读法，并把失败原因带出来，供调用点拼那句可执行的补救。 */
+export function readCurrentUid({ spawn = spawnSync } = {}) {
+  const probe = spawn('id', ['-u'], { encoding: 'utf8' })
+  const uid = String(probe?.stdout ?? '').trim()
+  const reason = probe?.error?.message
+    ?? (probe?.signal ? `被信号 ${probe.signal} 终止` : null)
+    ?? (uid ? null : '没有给出可解析的 uid')
+  return { uid: uid || null, reason }
+}
+
+/** uid 读不出来时那句拒绝的**共同骨架**：说清哪一步没做、为什么本轮什么都没改、下一步跑什么。 */
+function uidUnresolvedText({ action, label, reason }) {
+  return `无法解析当前 uid（id -u 失败：${reason ?? '没有输出'}）：launchd 的席位是 gui/<uid>/${label} 这个域，`
+    + `uid 拼不出来就${action}不了 ${label}——本轮**没有**动 launchd，什么都没改。`
+    + '补救：先让 `/usr/bin/id -u` 在本机能跑出一个数字（`ls -l /usr/bin/id` 看它在不在，'
+    + '缺了就 `xcode-select --install` 修 Command Line Tools），再在自己的登录 shell 里重跑本命令；'
+    + '不要用 `sudo -u 某用户` / `env -u …` 这类形态起安装器。'
+}
+
 /** 只读探一次"重注册会不会动到在跑的东西"（纯函数，供确认门用）。
  *  确认必须发生在**写盘之前**：先写 plist 再问，人回答"跳过"之后磁盘上是新定义、
  *  launchd 里还是旧定义，而 `bootoutDeclined` 那句"什么都没改"会当场变成假话。 */
 export function launchdReregisterProbe(desiredProgram, { label = LAUNCHD_LABEL, spawn = spawnSync } = {}) {
-  const uid = String(spawn('id', ['-u'], { encoding: 'utf8' })?.stdout ?? '').trim()
+  const uid = readCurrentUid({ spawn }).uid ?? ''
   if (!uid) return { loaded: false, program: null, uid: null, needsReregister: false }
   const probe = spawn('launchctl', ['print', `gui/${uid}/${label}`], { encoding: 'utf8' })
   const loaded = probe.status === 0
@@ -745,10 +772,16 @@ export function launchctlBootstrap(label, plistPath, {
   readFile = (file) => fs.readFileSync(file, 'utf8'),
   allowBootout = true,
 } = {}) {
-  const uid = spawn('id', ['-u'], { encoding: 'utf8' }).stdout.trim()
-  if (!uid) {
-    return { ok: false, already: false, message: '无法解析当前 uid（id -u 失败），跳过 launchd 注册' }
+  const uidProbe = readCurrentUid({ spawn })
+  if (!uidProbe.uid) {
+    return {
+      ok: false,
+      already: false,
+      uidUnresolved: true,
+      message: uidUnresolvedText({ action: '注册', label, reason: uidProbe.reason }),
+    }
   }
+  const uid = uidProbe.uid
   const domain = `gui/${uid}`
   const probe = spawn('launchctl', ['print', domain + '/' + label], { encoding: 'utf8' })
   const wantProgram = desiredProgram ?? readPlistProgram(readFile, plistPath)
@@ -806,17 +839,53 @@ export function launchctlBootstrap(label, plistPath, {
 /** 以 daemon 自身席位重启已加载的 launchd 作业（`kickstart -k`）。恢复流程里
  *  只在"作业已加载但自报非 granted"时调用——此时 daemon 本就不可用，中断
  *  面为零；TCC 判定按进程缓存，勾选授权后必须新进程才看得到（P1 v1.2 §11）。 */
-export function launchctlKickstart(label) {
-  const uid = spawnSync('id', ['-u'], { encoding: 'utf8' }).stdout.trim()
-  if (!uid) {
-    return { ok: false, message: '无法解析当前 uid（id -u 失败），跳过 kickstart' }
+export function launchctlKickstart(label, { spawn = spawnSync } = {}) {
+  const uidProbe = readCurrentUid({ spawn })
+  if (!uidProbe.uid) {
+    return {
+      ok: false,
+      uidUnresolved: true,
+      message: uidUnresolvedText({ action: '重启', label, reason: uidProbe.reason }),
+    }
   }
-  const kick = spawnSync('launchctl', ['kickstart', '-k', `gui/${uid}/${label}`], { encoding: 'utf8' })
+  const uid = uidProbe.uid
+  const kick = spawn('launchctl', ['kickstart', '-k', `gui/${uid}/${label}`], { encoding: 'utf8' })
   const stderr = (kick.stderr ?? '').trim()
   if (kick.status === 0) {
     return { ok: true, message: `launchd 已重启作业（gui/${uid}/${label}）` }
   }
   return { ok: false, message: stderr || `launchctl kickstart 失败，退出码 ${kick.status}` }
+}
+
+/** 收拢旧实例后让 launchd 按新配置接管（kickstart -k）+ 有界等 socket。
+ *
+ *  为什么 TERM 之后还要主动 kickstart：daemon 的 SIGTERM 收尾是 clean exit 0，而 plist 里
+ *  KeepAlive 用的是 SuccessfulExit=false——按那个语义 launchd 本就不该复活它。不接管就退化
+ *  成"手动实例持有 socket"，开机自启那份配置形同虚设。
+ *
+ *  uid 读不出来这一支必须**说出来**：它从前是 `if (runUid) {...}` 的静默跳过（而它上面那句
+ *  `.stdout.trim()` 在 `id` 起不来时直接抛 TypeError——同一个缺陷的两种表现），跳过之后
+ *  安装器会自己启动一份手动实例，屏幕上却没有一句"launchd 这次没接管"，读者会以为开机自启
+ *  已经按新配置在跑。返回 `{relaunched, uid, message}`，`uid === null` 就是那一次没做成。 */
+export async function launchdTakeoverAfterTerminate({
+  label = LAUNCHD_LABEL,
+  socketPath,
+  spawn = spawnSync,
+  waitFn = waitForSocket,
+} = {}) {
+  const uidProbe = readCurrentUid({ spawn })
+  if (!uidProbe.uid) {
+    return { relaunched: false, uid: null, message: uidUnresolvedText({ action: '重启', label, reason: uidProbe.reason }) }
+  }
+  spawn('launchctl', launchdKickstartArgs({ label, uid: uidProbe.uid }))
+  const relaunched = await waitFn(socketPath)
+  return {
+    relaunched,
+    uid: uidProbe.uid,
+    message: relaunched
+      ? 'launchd 已按新配置接管 daemon（kickstart）'
+      : 'launchd 未在时限内接管，改由安装器直接启动',
+  }
 }
 
 /** 向 daemon socket 发一行 hello（NDJSON 单行协议，与 FrameCodec 对齐），返回
@@ -1571,7 +1640,13 @@ export function openPrivateLog(logPath, {
  *  error 事件都看不见；daemon 到底活没活，只有收尾那次 socket hello 校验说了算。
  *
  *  日志目录（`~/.glasspane`）由 install() 在建 plist、bootstrap 之前一次性创建
- *  （见 ensureLogDir）；这里的 mkdirSync 只是给直接调用方与单测留的兜底。 */
+ *  （见 ensureLogDir）；这里的 mkdirSync 只是给直接调用方与单测留的兜底。
+ *
+ *  `sleep(settleMs, child)` 的第二个参数：窗口的**长度**由注入的实现决定，所以它需要知道
+ *  自己等的是哪个子进程。默认实现按真实时间等 settleMs（产品语义一字未改：有界窗口、
+ *  窗口结束后采样一次退出状态）；测试可以注入"子进程一报退出就收窗、最长不超过某个上界"
+ *  的那一档——在高负载的机器上，"400ms 内排得上一次 fork + exit"并不是事实，拿它当判据的
+ *  控制只在机器空时成立（这类控制会在CI上随机红，也会在真出问题时随机绿）。 */
 export async function startDetached(binPath, args, logPath, { settleMs = LAUNCH_SETTLE_MS, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), openLog = openPrivateLog } = {}) {
   try {
     fs.mkdirSync(path.dirname(logPath), { recursive: true, mode: STATE_DIR_MODE })
@@ -1592,7 +1667,7 @@ export async function startDetached(binPath, args, logPath, { settleMs = LAUNCH_
   child.on('error', (error) => { failure = `${error.message}` })
   child.unref()
   // 给 spawn 的 error 事件一个落地窗口（ENOENT 在下一 tick 才到）。
-  await sleep(settleMs)
+  await sleep(settleMs, child)
   if (child.pid == null) {
     return { ok: false, pid: null, error: failure ?? '子进程未起来（拿不到 PID）', exit: null }
   }
@@ -2035,12 +2110,20 @@ export function installOutcome({ verified = false, daemonExpected = true } = {})
  * （上面那条"daemon 已在监听…跳过启动"分支）应答的是上一版构建，新构建从未被启动也从未被验证，
  * 安装器却打印"实测校验通过…安装完成"并退 0，而 `install.sh` 是 exec 委托：按退出码办事的
  * agent 只看到 0。
+ *
+ * `declinedBundles`（2026-10-15 补的那一格）：`installBundles` 有一条"目标已存在而覆盖被
+ * 回答跳过"的路（finding 11），跳过时**磁盘上留的是上一轮的 bundle**，daemon 的启动路径也
+ * 照旧选中它。于是"同版本号"这件事再也分不出字节是谁家的：本轮重建了产物却没装上，
+ * hello 应答的版本号与 `glasspaned --version` 一模一样，收尾却要说"实测校验通过…
+ * 本轮构建产物=<v>"——那句在这一层无从验证，写出来就是把未验证写成已验证。
+ * 所以 declined 非空时 verified 只能是 false。
  */
 export function installVerification({
   arrived = false,
   helloVersion = null,
   builtVersion = null,
   servedByEarlierInstance = false,
+  declinedBundles = [],
 } = {}) {
   if (!arrived || !helloVersion) return { verified: false, note: null }
   if (!builtVersion) {
@@ -2055,6 +2138,18 @@ export function installVerification({
       verified: false,
       note: `应答 hello 的 daemon 自报 ${helloVersion}，本轮构建产物是 ${builtVersion}：socket 被旧实例占着，`
         + '这一轮的构建从未被验证。用 --replace-daemon 重跑（它会先收拢在跑的实例）。',
+    }
+  }
+  const declined = (Array.isArray(declinedBundles) ? declinedBundles : []).filter(Boolean)
+  if (declined.length > 0) {
+    return {
+      verified: false,
+      note: `应答 hello 的 daemon 自报 ${helloVersion}，与本轮构建产物同号——但这一轮的 .app 覆盖被回答跳过：`
+        + `${declined.join('、')} 里装的还是**上一轮**的产物，daemon 启动路径也照旧选中它。`
+        + '同号只可能是同一版本的两份字节，这一层分不出来，所以"应答的就是本轮构建"这句话没有依据——'
+        + '按"不得把未验证写成已验证"，本轮不算校验通过（磁盘上的 bundle 不是本轮构建的那一份）。'
+        + '补救：在交互终端重跑本命令，并对"将用本轮产物覆盖已存在的 .app"回答继续；'
+        + '脚本/自动化里显式加 --no-prompt。',
     }
   }
   if (servedByEarlierInstance) {
@@ -2133,7 +2228,21 @@ export function verificationFailureText({
   daemonLog,
   cliPath,
   exitCode = 1,
+  declinedBundles = [],
 } = {}) {
+  const declined = (Array.isArray(declinedBundles) ? declinedBundles : []).filter(Boolean)
+  if (declined.length > 0) {
+    // 这一档的病因不是"hello 没答上来"，也不是 launchd 作业没注册——是**本轮产物压根没装上盘**。
+    // 把 --restore-launchd 那条补救派给它是误归因（它修注册，不覆盖 bundle），所以单独一支。
+    return [
+      `安装未完成：daemon 在 ${socketPath} 应答了 hello，但这一轮的 .app 覆盖被回答跳过——`
+        + `${declined.join('、')} 里还是上一轮的产物，本轮构建的字节没被装上，也就没被验证。`,
+      `本命令退出码 ${exitCode}：install.sh 与调用它的脚本/agent 按安装失败处理，先别接 MCP。`,
+      '补救：在交互终端重跑本命令，并对"将用本轮产物覆盖已存在的 .app"回答继续；'
+        + '脚本/自动化里显式加 --no-prompt。（--restore-launchd 修的是作业注册，不覆盖 bundle，这条用不上。）',
+      `对照口径：本轮构建产物自己报的版本取自 ${daemonLog} 同一次安装的 glasspaned --version；装上盘才算数。`,
+    ].join('\n')
+  }
   return [
     arrived
       ? `安装未完成：socket 在（${socketPath}），但 daemon 没有正确应答 hello——见 ${daemonLog}`
@@ -2231,6 +2340,9 @@ export async function install({
   const daemonLog = path.join(homeDir, SOCKET_DIR_NAME, DAEMON_LOG_NAME)
   // 收尾那句"实测校验通过"要说实话，就得知道应答的实例是不是本次安装启动/重启的那一份。
   let servedByEarlierInstance = false
+  // 本轮**没有**覆盖掉的 bundle（覆盖被回答跳过时磁盘上留的是上一轮的产物）：收尾的版本核对
+  // 需要它，否则"同版本号"会被当成"就是本轮构建"（见 installVerification 的 declinedBundles）。
+  let declinedBundles = []
   // bundle 安置计划（P1 v1.2 §11.1）：--no-app 时 appPackaged=false，后续一律
   // 回退裸二进制并如实告警。
   const plan = bundlePlan({
@@ -2309,6 +2421,7 @@ export async function install({
       }
     }
     const bundles = installBundles({ plan, allowReplace })
+    declinedBundles = bundles.declined
     for (const app of bundles.installed) {
       printStep(`已安置：${app}`)
     }
@@ -2443,14 +2556,15 @@ export async function install({
           // 收拢旧实例后主动让 launchd 接管：TERM 现在是 clean exit 0，KeepAlive
           // (SuccessfulExit=false) 语义下 launchd 不会自动复活，必须 kickstart。
           // 不这么做就会退化成"手动实例持有 socket"，开机自启那份配置形同虚设。
+          // uid 读不出来时**红字说出来**（判据与句子见 launchdTakeoverAfterTerminate），
+          // 静默跳过会让读者以为开机自启已经按新配置在跑。
           if (staleDaemons.length > 0 && options.launchd) {
-            const runUid = String(spawnSync('id', ['-u'], { encoding: 'utf8' }).stdout.trim())
-            if (runUid) {
-              spawnSync('launchctl', launchdKickstartArgs({ label: LAUNCHD_LABEL, uid: runUid }))
-              relaunchedByLaunchd = await waitForSocket(socketPath)
-              printStep(relaunchedByLaunchd
-                ? 'launchd 已按新配置接管 daemon（kickstart）'
-                : 'launchd 未在时限内接管，改由安装器直接启动')
+            const takeover = await launchdTakeoverAfterTerminate({ socketPath })
+            if (takeover.uid === null) {
+              printStep(paint(takeover.message, 'red'))
+            } else {
+              relaunchedByLaunchd = takeover.relaunched
+              printStep(takeover.message)
             }
           }
         }
@@ -2535,6 +2649,7 @@ export async function install({
     helloVersion: hello?.version ?? null,
     builtVersion,
     servedByEarlierInstance,
+    declinedBundles,
   })
   const outcome = installOutcome({ verified, daemonExpected })
   if (verified) {
@@ -2549,6 +2664,7 @@ export async function install({
       daemonLog,
       cliPath: path.join(rootDir, 'installer', 'cli.js'),
       exitCode: outcome.exitCode,
+      declinedBundles,
     }).split('\n')) {
       printStep(paint(line, 'red'))
     }

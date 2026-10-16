@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -12,6 +12,9 @@ import {
   resolvePinRef,
   bootstrapPlan,
   installGuard,
+  validateGitRef,
+  validateGitRepoUrl,
+  cloneFailureText,
   REPO_URL,
   INSTALL_SH_URL,
   RELEASE_VERSION,
@@ -237,7 +240,7 @@ test('install.sh: GLASSPANE_REF 只有空白 = 与置空同义；含内部空白
     env: { GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: path.join(bare, 'ct2'), GLASSPANE_REF: 'v1 x' },
   })
   assert.notEqual(smuggle.status, 0, '含内部空白的 ref 必须仍被拒')
-  assert.match(`${smuggle.stderr}${smuggle.stdout}`, /含空白字符/)
+  assert.match(`${smuggle.stderr}${smuggle.stdout}`, /含空白\/控制字符/)
   assert.ok(!/--branch v1 x/.test(smuggle.stdout), '被拒的值不许进到 clone 行')
 })
 
@@ -246,4 +249,220 @@ test('repoMissingText: 三条路径齐全且与 install.sh 地址真源一致', 
   assert.ok(text.includes(INSTALL_SH_URL))
   assert.ok(text.includes(REPO_URL))
   assert.ok(text.includes('--repo'))
+})
+
+/* ===========================================================================
+ * 2026-10-15 修复轮（installer P2 #1 / #2）
+ *
+ * install.sh:42-57 的注释写着 GLASSPANE_REF 的口径"与 installer/cli.js 的 resolvePinRef
+ * 同源"，而形状闸那一段（旧 68-88 行）只守"以 - 开头"和"含空白"两条：cli.js 的
+ * unsafeArgvValue 还拒以 "+" 开头、validateGitRef 还要求值落在
+ * `^[A-Za-z0-9][A-Za-z0-9._/@+-]*$` 里。实测（HEAD 上）`GLASSPANE_REF=+bad`、`v1:2`、
+ * `~x`、`%n` 在 install.sh 一路放行、原样进 `git clone --branch`，失败后再由
+ * "ref 不存在或网络不可达"那句替形状问题背锅——误归因本身就是缺陷。
+ *
+ * 下面三条用例把"同源"这句变成可跑的判据：**逐字比对两条入口对同一个值说的话**，
+ * 而不是"两边都非零退出"。夹具是真脚本 + 真 installer 函数 + 真 git 仓库。
+ * ========================================================================= */
+
+/** install.sh 的 `fail` 打的是 `错误: <那句话>`；剥掉前缀才能与 cli.js 的 error 逐字比。 */
+function refusalOf(result) {
+  return String(result.stderr).replace(/^错误: /, '').replace(/\n+$/, '')
+}
+
+/** 只有 clone 计划行才能证明"走到了 clone 分支"——用它做反证，避免"没出现"是因为没走到。 */
+const PLANNED_CLONE = /\[dry-run\].*git clone/
+
+test('install.sh: GLASSPANE_REF 四条形状规则与 installer 的 validateGitRef 逐字同一句（dry-run 矩阵）', () => {
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'glasspane-refmatrix-'))
+  const rejected = [
+    ['"-" 开头（选项注入）', '--upload-pack=touch /tmp/gp-pwned-ref'],
+    ['"-" 开头（短形式）', '-x'],
+    ['含空白（ext:: 起 shell 的手段）', 'v1 x'],
+    ['"+" 开头（强推语义）', '+bad'],
+    ['"+" 开头（看着像合法 tag）', '+v1.15.1'],
+    ['字符集外：工作树语法 ":"', 'v1:2'],
+    ['字符集外：revision 范围 "~"', '~x'],
+    ['字符集外：printf 占位 "%"（旧实现还会把它当格式串）', '%n'],
+    ['字符集外：glob "*"', 'v1*branch'],
+    ['字符集外：首字符不是字母/数字', '.hidden'],
+  ]
+  for (const [index, [rule, value]] of rejected.entries()) {
+    const installer = validateGitRef(value)
+    assert.equal(installer.ok, false, `前提：installer 侧必须拒 ${JSON.stringify(value)}（规则：${rule}）`)
+    const result = runInstallSh({
+      cwd: bare,
+      env: { GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: path.join(bare, `ct-${index}`), GLASSPANE_REF: value },
+    })
+    assert.equal(result.status, 1, `${rule}：install.sh 必须退出 1，实得 ${result.status}｜${result.stdout}${result.stderr}`)
+    assert.equal(
+      refusalOf(result),
+      installer.error,
+      `${rule}：同一个值，两条一键入口必须说同一句话（install.sh 声称与 installer 同源）`,
+    )
+    assert.doesNotMatch(result.stdout, PLANNED_CLONE, `${rule}：被拒的值不许进到 clone 计划里`)
+  }
+  // 四条规则里 "+" 与字符集这两条是本轮新加的：没有它们，上面那批值会一路走进 clone。
+  assert.match(validateGitRef('+bad').error, /以 "\+" 开头/, '前提：installer 侧的 "+" 规则在')
+  assert.match(validateGitRef('v1:2').error, /含不被接受的字符/, '前提：installer 侧的字符集规则在')
+  // 对照：合法 ref 两侧都收，且 clone 计划里就是那个值（判据不能被"全拒"满足）。
+  for (const value of ['main', `v${RELEASE_VERSION}`, 'refs/tags/v1.15.1', 'feature/x_y-1.0+2']) {
+    assert.equal(validateGitRef(value).ok, true, `前提：installer 侧要收 ${value}`)
+    const result = runInstallSh({
+      cwd: bare,
+      env: { GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: path.join(bare, `ok-${value}`), GLASSPANE_REF: value },
+    })
+    assert.equal(result.status, 0, `${value} 是合法 ref，不该被拒：${result.stderr}`)
+    assert.ok(result.stdout.includes(`--branch ${value}`), `clone 计划里必须是那个值：${result.stdout}`)
+  }
+})
+
+test('install.sh: GLASSPANE_REPO_URL 的判序与句子同 validateGitRepoUrl（ext:: 不再被报成"含空白"）', () => {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'glasspane-urlmatrix-'))
+  const sentinel = path.join(work, 'pwned-by-ext')
+  const rejected = [
+    'ext::sh -c touch ' + sentinel,
+    'ext::evil',
+    'git@github.com:jingzhao-l/GlassPane.git',
+    '-u',
+    'https://example.invalid/r git',
+  ]
+  for (const [index, value] of rejected.entries()) {
+    const installer = validateGitRepoUrl(value)
+    assert.equal(installer.ok, false, `前提：installer 侧必须拒 ${JSON.stringify(value)}`)
+    const result = runInstallSh({
+      cwd: work,
+      env: { GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: path.join(work, `ct-${index}`), GLASSPANE_REPO_URL: value },
+    })
+    assert.equal(result.status, 1, `${JSON.stringify(value)} 必须被拒：${result.stdout}${result.stderr}`)
+    // 判序要紧：`ext::sh -c …` 被挡的理由是"不带 scheme 的 ext 传输会起 shell"，
+    // 先撞上空白那条就把它报成"含空白/控制字符"，读者看不出真正被拒的是什么。
+    assert.equal(refusalOf(result), installer.error, `两侧对同一个 URL 必须说同一句话：${JSON.stringify(value)}`)
+    assert.doesNotMatch(result.stdout, PLANNED_CLONE, '被拒的 URL 不许进到 clone 计划里')
+  }
+  assert.equal(fs.existsSync(sentinel), false, 'sentinel 被创建了：ext:: 传输真的被执行了')
+  // 对照：合法 scheme 两侧都收（file:// 是 specs 里记着的离线/镜像用法）。
+  for (const value of ['ssh://git@example.invalid/x.git', 'file:///Users/dev/mirror/GlassPane.git']) {
+    assert.equal(validateGitRepoUrl(value).ok, true, `前提：installer 侧要收 ${value}`)
+    const result = runInstallSh({
+      cwd: work,
+      env: { GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: path.join(work, 'ok-url'), GLASSPANE_REPO_URL: value },
+    })
+    assert.equal(result.status, 0, `${value} 是合法 scheme，不该被拒：${result.stderr}`)
+    assert.ok(result.stdout.includes(value), `clone 计划里必须是那个地址：${result.stdout}`)
+  }
+})
+
+/** 一棵真的本地仓库（真 init/commit/tag），给"clone 失败"那条路当地址：`--branch` 指一个
+ *  不存在的分支时 git 给的是它自己的原话，不是任何安装器编出来的归因。 */
+function makeLocalGitRepo(label) {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), `glasspane-${label}-`))
+  const src = path.join(work, 'src')
+  fs.mkdirSync(src, { recursive: true })
+  const git = (...args) => execFileSync('git', args, { cwd: src, encoding: 'utf8' })
+  git('init', '-q')
+  git('config', 'user.email', 'test@example.test')
+  git('config', 'user.name', 'test')
+  fs.writeFileSync(path.join(src, 'a.txt'), 'one\n')
+  git('add', '-A')
+  git('commit', '-q', '-m', 'one')
+  git('tag', 'v9.9.9')
+  return { work, src, cleanup: () => fs.rmSync(work, { recursive: true, force: true }) }
+}
+
+test('install.sh: clone 失败交出 git 的原话，那句归因与 cli.js 的 cloneFailureText 逐字同', () => {
+  const repo = makeLocalGitRepo('clonefail')
+  const missingRef = 'nope-nope'
+  const cloneDir = path.join(repo.work, 'clone-target')
+  try {
+    // 参照跑：同一条 git 命令行、同一个目标目录，先拿到 git 自己的退出码与原话。
+    // （git 在失败时会把它建的目录收掉，所以 install.sh 随后仍能看到"目标不存在"。）
+    const reference = spawnSync('git', ['clone', '--branch', missingRef, '--depth', '1', '--', `file://${repo.src}`, cloneDir], {
+      encoding: 'utf8',
+    })
+    assert.equal(reference.status, 128, `前提：真 git 对不存在的分支应退 128，实得 ${reference.status}｜${reference.stderr}`)
+    assert.match(reference.stderr, /Remote branch nope-nope not found in upstream origin/, reference.stderr)
+    fs.rmSync(cloneDir, { recursive: true, force: true })
+    const expected = cloneFailureText({
+      ref: missingRef,
+      status: reference.status,
+      stderr: reference.stderr,
+      targetDir: cloneDir,
+    })
+
+    const result = runInstallSh({
+      cwd: repo.work,
+      env: {
+        GLASSPANE_REPO: '',
+        GLASSPANE_INSTALL_DIR: cloneDir,
+        GLASSPANE_REPO_URL: `file://${repo.src}`,
+        GLASSPANE_REF: missingRef,
+        GLASSPANE_INSTALL_DRY_RUN: '0',
+      },
+    })
+    assert.equal(result.status, 1, `clone 失败必须退 1：${result.stdout}\n${result.stderr}`)
+    // 逐字：install.sh 那句归因 == installer 的 cloneFailureText 对同一批输入给的那几句。
+    assert.equal(refusalOf(result), expected, '两侧对同一次 clone 失败必须说同一句话')
+    assert.ok(result.stderr.includes(reference.stderr.trim()), 'git 的原话必须一字不改地交给读者')
+    assert.match(result.stderr, /git 的原话：/, '要说"git 的原话"，不是替它总结成因')
+    // 反证旧文案：把任何非零都算成"ref 不存在或网络不可达"（句号收尾的那句断言）不许再出现。
+    assert.doesNotMatch(result.stderr, /不存在或网络不可达。/, '旧写法把非零退出直接算成网络/tag 问题')
+    assert.match(result.stderr, /只是这份原话\*\*可能\*\*的成因之一/, '网络只作为"可能的成因之一"出现，以原话为准')
+    assert.equal(fs.existsSync(cloneDir), false, '失败后不该留下半个 clone 目录')
+  } finally {
+    repo.cleanup()
+  }
+})
+
+test('install.sh: Node 预检排在 clone 之前——低于 18 时连 clone 计划行都不出现', () => {
+  const repo = makeLocalGitRepo('oldnode')
+  const stubDir = path.join(repo.work, 'bin')
+  fs.mkdirSync(stubDir, { recursive: true })
+  // 只答真 node 的那一条版本探测（install.sh 用的正是这句 argv），其余 argv 一律按"不认识"
+  // 退 64：不给不存在的能力作背书，也不替 clone/委托那一行兜底。
+  fs.writeFileSync(
+    path.join(stubDir, 'node'),
+    [
+      '#!/bin/sh',
+      'if [ "$1" = "-p" ] && [ "$2" = \x27Number(process.versions.node.split(".")[0])\x27 ]; then',
+      '  echo 16',
+      '  exit 0',
+      'fi',
+      'echo "node: 这个 stub 不认的 argv: $*" >&2',
+      'exit 64',
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  )
+  const cloneDir = path.join(repo.work, 'clone-target')
+  const env = {
+    GLASSPANE_REPO: '',
+    GLASSPANE_INSTALL_DIR: cloneDir,
+    GLASSPANE_REPO_URL: `file://${repo.src}`,
+  }
+  try {
+    const old = runInstallSh({
+      cwd: repo.work,
+      env: { ...env, PATH: `${stubDir}:/usr/bin:/bin:/usr/sbin:/sbin` },
+    })
+    assert.equal(old.status, 1, `Node 16 必须让入口就拒，实得 ${old.status}｜${old.stdout}\n${old.stderr}`)
+    assert.match(old.stderr, /Node\.js 需要 >= 18，当前主版本为 16/, old.stderr)
+    // 断言的是**计划输出**，不是某个 flag：clone 那一条计划行压根不许出现。
+    assert.doesNotMatch(old.stdout, PLANNED_CLONE, `Node 不够格时不该先付一次 clone：${old.stdout}`)
+    assert.doesNotMatch(old.stdout, /未定位到本地仓库，clone 源码到/, '也不该先说"将要 clone"')
+    assert.doesNotMatch(old.stdout, /将执行: node /, '拒绝之后不许再打印委托行')
+    assert.equal(fs.existsSync(cloneDir), false, '零副作用：目标目录不该被建出来')
+
+    // 对照：同一套 env 只把 PATH 换回真 node，clone 计划行必须出现——否则上面那条
+    // "没有出现"可以由"根本没走到 clone 分支"白过，尺子就是空的。
+    const control = runInstallSh({ cwd: repo.work, env })
+    assert.equal(control.status, 0, `对照跑必须走到 clone 计划：${control.stderr}`)
+    assert.match(control.stdout, PLANNED_CLONE, control.stdout)
+    assert.match(control.stdout, /Node\.js \d+ 预检通过/, '对照跑里 Node 预检仍要说一句（它排在 clone 之前）')
+    const cloneAt = control.stdout.search(PLANNED_CLONE)
+    const nodeAt = control.stdout.search(/Node\.js \d+ 预检通过/)
+    assert.ok(nodeAt >= 0 && nodeAt < cloneAt, `Node 预检行必须排在 clone 计划行之前（nodeAt=${nodeAt}, cloneAt=${cloneAt}）`)
+  } finally {
+    repo.cleanup()
+  }
 })

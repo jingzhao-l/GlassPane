@@ -547,26 +547,54 @@ test('ensureLogDir: 建不出来时返回原因，让 install() 在写 plist 之
   assert.ok(failed.error.includes('/Users/dev/.glasspane'), '原因必须点出是哪个目录')
 })
 
+/** startDetached 的观察窗口（注入版）：**子进程一报退出就收窗，最长不超过 capMs**。
+ *  用它是为了拆掉一条"只在机器空时才成立"的控制——旧写法是「固定 settleMs 的挂钟窗口
+ *  + 窗口到点采样一次」，而这台机器 load average 常在 100~190，`/bin/sh -c exit 7` 从 fork
+ *  到退出事件落地就是可能超过 400ms：于是"秒退的子进程不得报成功"这条断言在满载时随机红
+ *  （实测两次：`秒退的子进程不得报成功：true !== false` 与 `clean.exit null !== {code:0,signal:null}`），
+ *  而随机红的控制等于没有控制。
+ *
+ *  产品语义一个字没改：窗口仍是**有界**的（capMs 是上界，且这一档由测试自己声明），
+ *  窗口到点没观测到退出就回 `exit: null`——既不说它在跑，也不说它退了。收窗原因是
+ *  'exit' 还是 'cap' 会被记进 `seen`，用例据此确认"这条断言是靠真观测成立的"。
+ *  默认实现（真实时钟等 settleMs）走的是同一条代码路径，见下面 alive 那一档。 */
+function windowOnExitOrCap(capMs) {
+  const seen = []
+  const sleep = (settleMs, child) => new Promise((resolve) => {
+    let settled = false
+    const finish = (how) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      seen.push({ settleMs, how, exitCode: child.exitCode ?? null, signalCode: child.signalCode ?? null })
+      resolve()
+    }
+    const timer = setTimeout(() => finish('cap'), capMs)
+    child.once('exit', () => finish('exit'))
+    child.once('error', () => finish('error'))
+  })
+  return { sleep, seen }
+}
+
 test('startDetached: 窗口内非零退出/被信号终止 → ok:false，不再带着作废 PID 报成功', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-lateexit-'))
   const logPath = path.join(dir, 'daemon.log')
 
-  const exited = await startDetached('/bin/sh', ['-c', 'exit 7'], logPath, { settleMs: 400 })
+  const late = windowOnExitOrCap(30_000)
+  const exited = await startDetached('/bin/sh', ['-c', 'exit 7'], logPath, { settleMs: 400, sleep: late.sleep })
   assert.equal(exited.ok, false, `秒退的子进程不得报成功：${exited.error ?? ''}`)
+  assert.deepEqual(late.seen.map((s) => s.how), ['exit'], '窗口必须是**观测到退出**才收的：靠上界到点收窗的话这条断言什么都没测')
   assert.equal(exited.pid, null, 'ok:false 一律不回 PID（那是个已经作废的数字）')
   assert.deepEqual(exited.exit, { code: 7, signal: null }, '观察到的退出状态要如实回传')
   assert.ok(exited.error.includes('7'), '原因必须带上真实退出码')
   assert.ok(exited.error.includes('有界观察'), '必须说明这是有界观察而非存活证明')
 
-  const signalled = await startDetached('/bin/sh', ['-c', 'kill -TERM $$'], logPath, { settleMs: 400 })
-  assert.equal(signalled.ok, false, '被 SIGTERM 打掉的子进程同样不是成功')
-  assert.equal(signalled.pid, null)
-  assert.ok(signalled.exit, '必须观察到"命令已经退出"这个事实')
-  assert.ok(
-    signalled.exit.signal === 'SIGTERM'
-      || (signalled.exit.code !== null && signalled.exit.code !== 0),
-    `退出原因必须是信号或非零码，实测到的是 ${JSON.stringify(signalled.exit)}`,
-  )
+  const signalled = windowOnExitOrCap(30_000)
+  const killed = await startDetached('/bin/sh', ['-c', 'kill -TERM $$'], logPath, { settleMs: 400, sleep: signalled.sleep })
+  assert.equal(killed.ok, false, '被 SIGTERM 打掉的子进程同样不是成功')
+  assert.deepEqual(signalled.seen.map((s) => s.how), ['exit'], '这一档同样是观测到退出才收窗')
+  assert.equal(killed.pid, null)
+  assert.deepEqual(killed.exit, { code: null, signal: 'SIGTERM' }, '信号终止要把信号本身回传，不是"code !== 0"这种含糊话')
 
   fs.rmSync(dir, { recursive: true, force: true })
 })
@@ -577,13 +605,20 @@ test('startDetached: 窗口内 0 退出算命令被受理（`open` 的正常形�
 
   // /usr/bin/open 提交给 LaunchServices 后就是 0 退出；把它判成失败属于过度修复，
   // 但调用方必须能从 `exit` 读到"命令已退出"这个事实（install() 据此改口）。
-  const clean = await startDetached('/bin/sh', ['-c', 'exit 0'], logPath, { settleMs: 400 })
+  const zero = windowOnExitOrCap(30_000)
+  const clean = await startDetached('/bin/sh', ['-c', 'exit 0'], logPath, { settleMs: 400, sleep: zero.sleep })
   assert.equal(clean.ok, true, clean.error ?? '')
+  assert.deepEqual(zero.seen.map((s) => s.how), ['exit'], '0 退出那一档也得是真观测到的，不是猜的')
   assert.deepEqual(clean.exit, { code: 0, signal: null })
 
-  const alive = await startDetached('/bin/sleep', ['1'], logPath, { settleMs: 150 })
+  // 永不报退出那一档：窗口按上界收（`/bin/sleep 1` 在 200ms 上界内**只可能**还没退出，
+  // 负载只会让它更晚，所以这一条在满载时也是稳的），产品回 exit:null——
+  // "没观测到"不许被写成"在跑"，也不许被写成"退出了"。
+  const capped = windowOnExitOrCap(200)
+  const alive = await startDetached('/bin/sleep', ['1'], logPath, { settleMs: 150, sleep: capped.sleep })
   assert.equal(alive.ok, true, alive.error ?? '')
   assert.equal(alive.exit, null, '窗口结束时仍在跑：exit 只能是"未观察到退出"')
+  assert.deepEqual(capped.seen.map((s) => s.how), ['cap'], '这一档必须是上界到点收窗——它测的就是"子进程从不报退出时窗口仍然有界"')
   assert.ok(Number.isInteger(alive.pid) && alive.pid > 0)
 
   assert.ok(LAUNCH_SETTLE_MS >= 400,

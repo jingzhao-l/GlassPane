@@ -15,6 +15,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -22,8 +23,11 @@ import path from 'node:path'
 import {
   LAUNCHD_LABEL,
   launchctlBootstrap,
+  launchctlKickstart,
   launchdProgramFromPlistText,
   launchdPlistString,
+  launchdTakeoverAfterTerminate,
+  readCurrentUid,
   restoreLaunchd,
 } from '../cli.js'
 
@@ -182,3 +186,136 @@ test('restoreLaunchd: bootout 失败与 bootstrap 失败分开报，agent 拿到
   assert.equal(bf.action, 'bootstrap-failed', '旧的 bootstrap 那一档形状不变')
   assert.match(bf.message, /bootstrap 失败/, bf.message)
 })
+
+/* ===========================================================================
+ * 2026-10-15 修复轮（installer P2 #3）：三处 `spawn('id', ['-u']).stdout.trim()`
+ *
+ * spawnSync 在**起不来**时给的是 `{error, status: null, stdout: undefined}`（下面那个
+ * 夹具是真跑一次不存在的可执行文件照下来的，不是编的），于是 `.stdout.trim()` 抛
+ * TypeError——紧跟其后那句"无法解析当前 uid（id -u 失败）…"的补救话**永远跑不到**，
+ * 屏幕上只剩一个未捕获异常。同一条判据在 launchdReregisterProbe 里早就写了 `?? ""`，
+ * 三处不对称。四个调用点（bootstrap / kickstart / install() 的 launchd 接管 / 只读探测）
+ * 各自测一遍：注入失败探测 → 拿到那句拒绝，且一个 launchctl 都不发。
+ *
+ * REVERSE MUTATION：把任一处还原成 `.stdout.trim()`（不带保护）→ 对应那条测试红
+ * （红的方式正是那个 TypeError，也就是缺陷本身）。
+ * ========================================================================= */
+
+/** 真 spawnSync 起不来时的那副形状：跑一次**不存在**的 `/usr/bin/id`，照它的字段做替身。
+ *  断言的是前提本身——stdout 是 undefined 而不是空串，否则 `.trim()` 根本不会抛，
+ *  这条缺陷就不成立（那样的话测试该在这里响，而不是在别处假装通过）。 */
+function realSpawnFailureShape() {
+  const ghost = spawnSync('/nonexistent/glasspane-id-probe', ['-u'], { encoding: 'utf8' })
+  assert.equal(ghost.error?.code, 'ENOENT', `前提：真失败要给 error，实得 ${JSON.stringify(ghost)}`)
+  assert.equal(ghost.stdout, undefined, '前提：失败时 stdout 是 undefined（旧写法正是死在 .trim() 上）')
+  assert.equal(ghost.status, null, '前提：连退出码都没有，不能拿它当"跑过了"')
+  return ghost
+}
+
+/** 只对**准备过的 argv** 回话的 id/launchctl 替身；认不出的命令直接抛——
+ *  "对任何输入都答成功"的 stub 会把拒绝分支测成假绿，所以这里不留兜底。 */
+function launchctlDouble({ id, print, bootout, bootstrap, kickstart } = {}) {
+  const calls = []
+  const spawn = (cmd, args) => {
+    calls.push([cmd, ...args])
+    if (cmd === 'id' && args.length === 1 && args[0] === '-u') {
+      return id ?? { status: 0, stdout: '501\n', stderr: '' }
+    }
+    if (cmd === 'launchctl' && args[0] === 'print') {
+      return print ?? { status: 0, stdout: `    program = ${NEW_BIN}`, stderr: '' }
+    }
+    if (cmd === 'launchctl' && args[0] === 'bootout') return bootout ?? { status: 0, stdout: '', stderr: '' }
+    if (cmd === 'launchctl' && args[0] === 'bootstrap') return bootstrap ?? { status: 0, stdout: '', stderr: '' }
+    if (cmd === 'launchctl' && args[0] === 'kickstart' && args[1] === '-k') {
+      return kickstart ?? { status: 0, stdout: '', stderr: '' }
+    }
+    throw new Error(`替身没有准备过这条命令：${cmd} ${args.join(' ')}`)
+  }
+  return {
+    spawn,
+    calls,
+    verbs: () => calls.map((call) => (call[0] === 'id' ? 'id' : `${call[1]}`)),
+  }
+}
+
+test('readCurrentUid: id 起不来时回 uid:null + 原因，不抛（三处调用点共用的那一条判据）', () => {
+  const failure = realSpawnFailureShape()
+  const double = launchctlDouble({ id: failure })
+  let got
+  assert.doesNotThrow(() => { got = readCurrentUid({ spawn: double.spawn }) })
+  assert.equal(got.uid, null, '读不出来就是 null，不许编一个 0 或 501 出来')
+  assert.match(String(got.reason), /ENOENT/, '原因要带着真错误，供调用点拼那句补救')
+  // 对照：同一副替身把 id 换成能跑出的那一副，就必须读到 501（判据不是"永远拒"）。
+  const ok = readCurrentUid({ spawn: launchctlDouble({}).spawn })
+  assert.equal(ok.uid, '501', JSON.stringify(ok))
+  assert.equal(ok.reason, null)
+})
+
+test('launchctlBootstrap: id -u 起不来 → 拿到那句拒绝，且一个 launchctl 都不发', () => {
+  const dir = tempRoot('uid-boot')
+  const double = launchctlDouble({ id: realSpawnFailureShape() })
+  try {
+    let got
+    assert.doesNotThrow(
+      () => { got = launchctlBootstrap(LAUNCHD_LABEL, plistFile(dir), { spawn: double.spawn }) },
+      'id 起不来必须是**一次拒绝**，不是把整条命令炸成一个未捕获 TypeError',
+    )
+    assert.equal(got.ok, false)
+    assert.equal(got.uidUnresolved, true, '这一档要能被调用方和 bootout 失败分开')
+    assert.match(got.message, /无法解析当前 uid（id -u 失败：/, got.message)
+    assert.match(got.message, /gui\/<uid>\/com\.glasspane\.daemon/, '要说清拼不出的是哪个席位')
+    assert.match(got.message, /没有.*launchd.*什么都没改|没有动 launchd/, got.message)
+    assert.match(got.message, /xcode-select --install|ls -l \/usr\/bin\/id/, '补救必须是坐在键盘前能跑的命令')
+    assert.deepEqual(double.verbs(), ['id'], 'uid 都没读出来就不许碰 launchctl（bootstrap 会拿一个空域去注册）')
+    // 对照：同一个函数、同一副替身，只把 id 换回可读的那一份 → 走到 print 那一步。
+    const healthy = launchctlDouble({})
+    const passed = launchctlBootstrap(LAUNCHD_LABEL, plistFile(dir), { spawn: healthy.spawn })
+    assert.equal(passed.ok, true, passed.message)
+    assert.deepEqual(healthy.verbs(), ['id', 'print'], '对照：uid 读得到时判据照常往下走')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('launchctlKickstart: id -u 起不来 → 拒绝里有补救，不带空域去 kickstart', () => {
+  const double = launchctlDouble({ id: realSpawnFailureShape() })
+  let got
+  assert.doesNotThrow(
+    () => { got = launchctlKickstart(LAUNCHD_LABEL, { spawn: double.spawn }) },
+    '这一处的 .stdout.trim() 从前会把 --restore-launchd 那条补救命令整个炸掉',
+  )
+  assert.equal(got.ok, false)
+  assert.equal(got.uidUnresolved, true)
+  assert.match(got.message, /无法解析当前 uid（id -u 失败：/, got.message)
+  assert.match(got.message, /重跑本命令/, got.message)
+  assert.deepEqual(double.verbs(), ['id'], 'kickstart 的域是 gui/<uid>/<label>，uid 没有就没法发')
+  // 对照：uid 读得到时照常发 kickstart，且发的就是这个域。
+  const healthy = launchctlDouble({})
+  const passed = launchctlKickstart(LAUNCHD_LABEL, { spawn: healthy.spawn })
+  assert.equal(passed.ok, true, passed.message)
+  assert.deepEqual(healthy.calls, [['id', '-u'], ['launchctl', 'kickstart', '-k', `gui/501/${LAUNCHD_LABEL}`]])
+})
+
+test('launchdTakeoverAfterTerminate: id -u 起不来 → 红字那句而不是静默跳过，且不等 socket', async () => {
+  const waited = []
+  const waitFn = async () => { waited.push('wait'); return true }
+  const double = launchctlDouble({ id: realSpawnFailureShape() })
+  let got
+  await assert.doesNotReject(async () => {
+    got = await launchdTakeoverAfterTerminate({ socketPath: '/fake/engine.sock', spawn: double.spawn, waitFn })
+  }, '接管那一步也一样：id 起不来是拒绝，不是异常')
+  assert.equal(got.uid, null, 'uid:null 就是"这一轮 launchd 没接管"这个事实')
+  assert.equal(got.relaunched, false)
+  assert.match(got.message, /无法解析当前 uid/, got.message)
+  assert.deepEqual(double.verbs(), ['id'], '没有 uid 就没有 kickstart 命令可发')
+  assert.deepEqual(waited, [], '没发 kickstart 就不该去等一个不会来的接管（那是在假装有希望）')
+  // 对照：uid 读得到 → 发 kickstart 并如实回报有没有接管上。
+  const healthy = launchctlDouble({})
+  const passed = await launchdTakeoverAfterTerminate({ socketPath: '/fake/engine.sock', spawn: healthy.spawn, waitFn })
+  assert.equal(passed.uid, '501')
+  assert.equal(passed.relaunched, true)
+  assert.equal(passed.message, 'launchd 已按新配置接管 daemon（kickstart）')
+  assert.deepEqual(healthy.calls[1], ['launchctl', 'kickstart', '-k', `gui/501/${LAUNCHD_LABEL}`])
+  assert.deepEqual(waited, ['wait'], '对照：真发过 kickstart 才去等 socket')
+})
+

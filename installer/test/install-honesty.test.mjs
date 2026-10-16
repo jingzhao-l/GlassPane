@@ -13,22 +13,36 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
+  APPS_DIR_NAME,
+  DAEMON_APP_NAME,
+  DAEMON_EXE_NAME,
+  PANEL_EXE_NAME,
+  SETTINGS_APP_NAME,
+  SOCKET_DIR_NAME,
+  SOCKET_FILE_NAME,
   builtDaemonVersion,
+  checkEnvironment,
   install,
   installVerification,
   npmDepsCommand,
+  preflightIssues,
   tagVerifyGate,
   parseArgs,
   tagTreeAgreement,
   tagVerifyAgainstTree,
   tagVerifyDecision,
+  verificationFailureText,
 } from '../cli.js'
+
+const CLI = fileURLToPath(new URL('../cli.js', import.meta.url))
 
 function makeTree() {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-installer-tree-'))
@@ -286,4 +300,253 @@ test('tagVerifyGate：形状不安全的 ref 是拒，不是跳过验签继续�
   // 对照：正常 tag 不能被这条判据误伤。
   assert.equal(tagVerifyGate({ pinRef: 'v1.14.1', hasRef: true }).action, 'verify')
   assert.equal(tagVerifyGate({ pinRef: 'refs/tags/v1.14.1', hasRef: true }).action, 'verify')
+})
+
+/* ===========================================================================
+ * 2026-10-15 修复轮（installer P2 #5）：.app 覆盖被回答跳过时，收尾不许说"本轮构建产物"
+ *
+ * `installBundles` 有一条 declined 的路（目标已存在 + 没拿到覆盖许可）：跳过时磁盘上留的
+ * **是上一轮的 bundle**，daemon 的启动路径照旧选中它。而 `installVerification` 从前只比
+ * 版本字符串——同号重建那一轮里，hello 报的版本与 `glasspaned --version` 一模一样，屏幕上
+ * 于是写着"实测校验通过…本轮构建产物=<v>"并退 0，可本轮那些字节从没上过盘。
+ * 判据：不得把未验证写成已验证。
+ *
+ * 三条用例：判据本身（纯函数）、那一档的补救不许被支去 --restore-launchd（病因不是注册）、
+ * 以及**真 CLI 进程走真流程**（真 bundle、真 unix socket 的 hello 应答）——declined 那一跑
+ * 不许出现"本轮构建产物"那句，对照那一跑（真的换掉了 bundle）必须照旧出现。
+ * ========================================================================= */
+
+/** daemon hello 自报的版本与本轮构建产物的版本**故意同号**：这正是旧判据分不出来的那一格。 */
+const SAME_VERSION = '1.2.3'
+
+test('installVerification：覆盖被跳过时同版本号不算校验通过（对照：真换掉了就算）', () => {
+  const declined = [
+    path.join('/Users/dev', APPS_DIR_NAME, SETTINGS_APP_NAME),
+    path.join('/Users/dev', APPS_DIR_NAME, DAEMON_APP_NAME),
+  ]
+  const stale = installVerification({
+    arrived: true, helloVersion: SAME_VERSION, builtVersion: SAME_VERSION, declinedBundles: declined,
+  })
+  assert.equal(stale.verified, false, '磁盘上那份是上一轮的 bundle，"应答 hello 的就是本轮构建"在这一层无从验证')
+  assert.ok(stale.note.includes(DAEMON_APP_NAME), `要点名留下旧产物的是哪个 bundle：${stale.note}`)
+  assert.match(stale.note, /上一轮/, stale.note)
+  assert.match(stale.note, /不得把未验证写成已验证|没有依据/, stale.note)
+  assert.match(stale.note, /--no-prompt|回答继续/, '补救必须是真存在的放行口径')
+
+  const installed = installVerification({ arrived: true, helloVersion: SAME_VERSION, builtVersion: SAME_VERSION })
+  assert.equal(installed.verified, true, '对照：bundle 真被本轮换上盘时，同号仍是实打实的通过——这条闸不许只会拒绝')
+  assert.equal(installed.note, null)
+
+  // 版本对不上时，那条更硬的归因排在前面（同号只是这一档的前提，不是病因）。
+  const mismatch = installVerification({
+    arrived: true, helloVersion: '1.2.2', builtVersion: SAME_VERSION, declinedBundles: [DAEMON_APP_NAME],
+  })
+  assert.equal(mismatch.verified, false)
+  assert.match(mismatch.note, /--replace-daemon/, mismatch.note)
+})
+
+test('verificationFailureText：覆盖被跳过那一档不把读者支去 --restore-launchd', () => {
+  const text = verificationFailureText({
+    arrived: true,
+    socketPath: '/s.sock',
+    daemonLog: '/l.log',
+    cliPath: '/c.js',
+    exitCode: 1,
+    declinedBundles: [path.join('/Users/dev', APPS_DIR_NAME, DAEMON_APP_NAME)],
+  })
+  assert.match(text, /应答了 hello/, text)
+  assert.match(text, /覆盖被回答跳过/, text)
+  assert.match(text, /--no-prompt/, text)
+  assert.doesNotMatch(
+    text,
+    /^补救（不需要手敲 launchctl）：node "\/c\.js" --restore-launchd$/m,
+    '这一档的病因不是作业注册；把那条派给它＝误归因',
+  )
+  // 对照：hello 真没答上来时，--restore-launchd 仍然是对的那一步，不许一并删掉。
+  const plain = verificationFailureText({
+    arrived: true, socketPath: '/s.sock', daemonLog: '/l.log', cliPath: '/c.js', exitCode: 1,
+  })
+  assert.match(plain, /socket 在/, plain)
+  assert.match(plain, /--restore-launchd/, plain)
+})
+
+/** 短临时根：unix socket 路径受 sun_path（macOS 104 字节）限制，`os.tmpdir()` 在 macOS 上
+ *  是 `/var/folders/…/T/`，加上 `.glasspane/engine.sock` 会顶到边界；两条都还是临时目录，
+ *  绝不落进真实的 `~/.glasspane`。 */
+function shortTmpRoot() {
+  const real = fs.realpathSync(os.tmpdir())
+  return real.length <= 40 ? real : '/tmp'
+}
+
+/** 与真 `glasspaned --version` 同面的产物：`glasspaned <版本>` 一行，其余 argv 按 64 拒绝。
+ *  `marker` 用来把"上一轮那一份"和"本轮那一份"在字节层面区分开（磁盘上读得回来的证据）。 */
+function writeDaemonBuildStub(bin, { marker = '' } = {}) {
+  fs.writeFileSync(bin, [
+    '#!/bin/sh',
+    `# ${marker || 'this-round'} bundle`,
+    'if [ "$1" = "--version" ]; then',
+    `  echo "glasspaned ${SAME_VERSION}"`,
+    '  exit 0',
+    'fi',
+    'echo "unknown argument: $1" >&2',
+    'exit 64',
+    '',
+  ].join('\n'), { mode: 0o755 })
+}
+
+/** engine/scripts/make-app.sh 的夹具：与真脚本同一份 argv 面（--settings-bin/--daemon-bin/
+ *  --out），产出同一形状的 bundle 目录；认不出的参数拒 64——不给不存在的能力作背书。 */
+function writeMakeAppFixture(scriptPath) {
+  fs.writeFileSync(scriptPath, [
+    '#!/bin/bash',
+    'set -eu',
+    'settings="" ; daemon="" ; out=""',
+    'while [ $# -gt 0 ]; do',
+    '  case "$1" in',
+    '    --settings-bin) settings="$2"; shift 2 ;;',
+    '    --daemon-bin)   daemon="$2";   shift 2 ;;',
+    '    --out)          out="$2";      shift 2 ;;',
+    '    *) printf "make-app.sh 夹具：不认的参数 %s\\n" "$1" >&2; exit 64 ;;',
+    '  esac',
+    'done',
+    '[ -n "$settings" ] && [ -n "$daemon" ] && [ -n "$out" ] || { echo "make-app.sh 夹具：--settings-bin/--daemon-bin/--out 三个都得给" >&2; exit 64; }',
+    `mkdir -p "$out/${SETTINGS_APP_NAME}/Contents/MacOS" "$out/${DAEMON_APP_NAME}/Contents/MacOS"`,
+    `cp "$settings" "$out/${SETTINGS_APP_NAME}/Contents/MacOS/${PANEL_EXE_NAME}"`,
+    `cp "$daemon" "$out/${DAEMON_APP_NAME}/Contents/MacOS/${DAEMON_EXE_NAME}"`,
+    `chmod 755 "$out/${SETTINGS_APP_NAME}/Contents/MacOS/${PANEL_EXE_NAME}" "$out/${DAEMON_APP_NAME}/Contents/MacOS/${DAEMON_EXE_NAME}"`,
+    '',
+  ].join('\n'), { mode: 0o755 })
+}
+
+/** 起一个真 daemon 面的 hello 服务：NDJSON 单行，与 socketHello 的解析同一协议。 */
+function serveHello(socketPath) {
+  const server = net.createServer((conn) => {
+    conn.on('data', (chunk) => {
+      const text = chunk.toString('utf8')
+      const newline = text.indexOf('\n')
+      if (newline < 0) return
+      let frame = null
+      try {
+        frame = JSON.parse(text.slice(0, newline))
+      } catch {
+        conn.end()
+        return
+      }
+      conn.write(`${JSON.stringify({
+        id: frame.id ?? 1,
+        result: {
+          version: SAME_VERSION,
+          pid: 4242,
+          permissions: { accessibility: 'notDetermined', inputMonitoring: 'notDetermined', screenRecording: 'notDetermined' },
+        },
+      })}\n`)
+    })
+  })
+  return new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(socketPath, () => resolve(server))
+  })
+}
+
+/** 真跑一次 CLI（子进程，父进程的事件循环要留着给 hello 服务应答），返回退出码与两份输出。
+ *  `preexistingBundles` 决定 ~/Applications 里**有没有**上一轮的 bundle：有→本轮覆盖被跳过
+ *  （非交互、没给 --no-prompt 时 confirm 回 false，正是 finding 11 那一档）；没有→真的装上。 */
+async function runRealInstallOnce({ preexistingBundles }) {
+  const root = fs.mkdtempSync(path.join(shortTmpRoot(), 'gp-ho-'))
+  const home = path.join(root, 'home')
+  const stateDir = path.join(home, SOCKET_DIR_NAME)
+  const socketPath = path.join(stateDir, SOCKET_FILE_NAME)
+  const tree = path.join(root, 'repo')
+  const buildDir = path.join(tree, 'engine', '.build', 'release')
+  const appsDir = path.join(home, APPS_DIR_NAME)
+  try {
+    fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 })
+    fs.mkdirSync(buildDir, { recursive: true })
+    fs.mkdirSync(path.join(tree, 'mcp-shell'), { recursive: true })
+    fs.writeFileSync(path.join(tree, 'engine', 'Package.swift'), '// swift-tools-version:5.9\n')
+    fs.writeFileSync(path.join(tree, 'mcp-shell', 'package.json'), '{"name":"glasspane-mcp"}\n')
+    fs.writeFileSync(path.join(tree, 'package.json'), '{"name":"gp-fixture-tree","version":"1.2.3"}\n')
+    writeDaemonBuildStub(path.join(buildDir, DAEMON_EXE_NAME))
+    writeDaemonBuildStub(path.join(buildDir, PANEL_EXE_NAME))
+    fs.mkdirSync(path.join(tree, 'engine', 'scripts'), { recursive: true })
+    writeMakeAppFixture(path.join(tree, 'engine', 'scripts', 'make-app.sh'))
+    if (preexistingBundles) {
+      // 上一轮留在盘上的那两份：同一个版本号，但字节里写着 PREVIOUS-ROUND。
+      for (const [app, exe] of [[SETTINGS_APP_NAME, PANEL_EXE_NAME], [DAEMON_APP_NAME, DAEMON_EXE_NAME]]) {
+        const dir = path.join(appsDir, app, 'Contents', 'MacOS')
+        fs.mkdirSync(dir, { recursive: true })
+        writeDaemonBuildStub(path.join(dir, exe), { marker: 'PREVIOUS-ROUND' })
+      }
+    }
+    const server = await serveHello(socketPath)
+    try {
+      const child = spawn(
+        process.execPath,
+        [CLI, '--repo', tree, '--skip-build', '--no-gui', '--no-launchd', '--no-auto-update'],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          env: { ...process.env, HOME: home, GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: path.join(root, 'never-cloned') },
+        },
+      )
+      let stdout = ''
+      let stderr = ''
+      child.stdout.on('data', (chunk) => { stdout += chunk })
+      child.stderr.on('data', (chunk) => { stderr += chunk })
+      const code = await new Promise((resolve) => {
+        const killer = setTimeout(() => { child.kill('SIGKILL'); resolve('TIMEOUT') }, 180_000)
+        child.on('close', (exitCode) => { clearTimeout(killer); resolve(exitCode) })
+      })
+      const onDiskDaemon = path.join(appsDir, DAEMON_APP_NAME, 'Contents', 'MacOS', DAEMON_EXE_NAME)
+      return {
+        code,
+        stdout,
+        stderr,
+        diskBundle: fs.existsSync(onDiskDaemon) ? fs.readFileSync(onDiskDaemon, 'utf8') : null,
+      }
+    } finally {
+      await new Promise((resolve) => server.close(() => resolve()))
+      fs.rmSync(socketPath, { force: true })
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+}
+
+test('真 install() 走完覆盖被跳过那一轮：不许打印"本轮构建产物"那句（对照：真换掉时照旧打印）', async (t) => {
+  // CLI 的入口在 install() 之前有一道环境预检（要 node/npm/swift/git/open）：过不去的机器
+  // 走不到 bundle 安置那一步，这条用例就该**如实 skip**，而不是把预检那句拒绝当成结论。
+  const blockers = preflightIssues(checkEnvironment())
+  if (blockers.length > 0) {
+    t.skip(`这台机器过不了 installer 自己的环境预检：${blockers.join('；')}`)
+    return
+  }
+  const declined = await runRealInstallOnce({ preexistingBundles: true })
+  assert.notEqual(declined.code, 'TIMEOUT', declined.stdout + declined.stderr)
+  const declinedText = `${declined.stdout}\n${declined.stderr}`
+  // 前提：这一跑**确实**走到了 bundle 安置那一步并真的被跳过（否则"没打印"是白过的）。
+  assert.ok(declinedText.includes('未覆盖（回答跳过）'), `夹具没走到 declined 那一档：${declinedText}`)
+  assert.equal(declined.code, 1, `本轮产物没装上盘就是安装未完成，退出码不许是 0：${declinedText}`)
+  assert.doesNotMatch(declinedText, /本轮构建产物=/, '那句"实测校验通过…本轮构建产物=<v>"在这一档没有依据')
+  assert.doesNotMatch(declinedText, /实测校验通过/, declinedText)
+  assert.match(declinedText, /应答了 hello.*覆盖被回答跳过|覆盖被回答跳过/, '要说清病因是"没换上盘"，不是 hello 没答')
+  // 收尾那一大段（verificationFailureText）也必须走"覆盖被跳过"那一支：把读者派去
+  // `--restore-launchd` 就是误归因——那一支修的是作业注册，不覆盖 bundle。
+  assert.match(declinedText, /应答了 hello/, declinedText)
+  assert.match(declinedText, /--no-prompt|回答继续/, declinedText)
+  // 磁盘上的证据：盘上那份还是上一轮的字节，而 hello 报的版本与本轮产物同号。
+  assert.ok(declined.diskBundle && declined.diskBundle.includes('PREVIOUS-ROUND'),
+    '前提没成立：磁盘上那份应该还是上一轮的 bundle')
+
+  const replaced = await runRealInstallOnce({ preexistingBundles: false })
+  assert.notEqual(replaced.code, 'TIMEOUT', replaced.stdout + replaced.stderr)
+  const replacedText = `${replaced.stdout}\n${replaced.stderr}`
+  assert.ok(replacedText.includes('已安置：'), `对照跑必须真的把 bundle 装上盘：${replacedText}`)
+  assert.doesNotMatch(replacedText, /未覆盖（回答跳过）/, replacedText)
+  assert.match(replacedText, /实测校验通过/, replacedText)
+  assert.ok(replacedText.includes(`本轮构建产物=${SAME_VERSION}`),
+    `对照跑里那句必须照旧出现（这条闸不许只会拒绝）：${replacedText}`)
+  assert.equal(replaced.code, 0, `对照跑（产物真上盘 + hello 同号）必须退 0：${replacedText}`)
+  assert.ok(replaced.diskBundle && !replaced.diskBundle.includes('PREVIOUS-ROUND'),
+    '对照跑的盘上那份应该是本轮字节')
 })
