@@ -110,6 +110,25 @@ export function mcpToolsList({
     // The first lines of the child's stderr, kept for one purpose: `env: node: No such file or directory` is
     // the only evidence that distinguishes "the runtime is unreachable" from "the server answered rubbish".
     let errorTail = ''
+    // Writes to a child that has stopped listening are EPIPEs on `child.stdin`, and node throws an unrouted
+    // stream error. Under CI load the child dies between a write being dispatched and its completion, so the
+    // updater lost the whole process mid-update (2026-10-16, CI run 38842800885) to a pipe error that is only
+    // the echo of a state this function can already name: the server is either gone or deaf. Recorded, never
+    // rethrown, and folded into whichever verdict arrives first.
+    let stdinFailure = null
+    const noteStdinFailure = (error) => {
+      if (stdinFailure === null) stdinFailure = String(error?.code ?? error?.message ?? 'write failed')
+    }
+    child.stdin?.on('error', noteStdinFailure)
+    const stdinClause = () => (stdinFailure === null ? '' : `; writing to its stdin had already failed (${stdinFailure})`)
+    const writeFrame = (message) => {
+      if (settled || !child.stdin || child.stdin.destroyed) return
+      try {
+        child.stdin.write(frame(message))
+      } catch (error) {
+        noteStdinFailure(error)
+      }
+    }
     const finish = (verdict) => {
       if (settled) return
       settled = true
@@ -121,7 +140,10 @@ export function mcpToolsList({
       }
       resolve(verdict)
     }
-    const timer = setTimeout(() => finish({ ok: false, reason: `${bin} did not answer tools/list within ${timeoutMs}ms`, tried }), timeoutMs)
+    const timer = setTimeout(
+      () => finish({ ok: false, reason: `${bin} did not answer tools/list within ${timeoutMs}ms${stdinClause()}`, tried }),
+      timeoutMs,
+    )
 
     child.on('error', (error) => finish({
       ok: false,
@@ -152,8 +174,8 @@ export function mcpToolsList({
             finish({ ok: false, reason: `${bin} refused initialize: ${message.error?.message ?? 'no message'}`, tried })
             return
           }
-          child.stdin?.write(frame({ jsonrpc: '2.0', method: 'notifications/initialized' }))
-          child.stdin?.write(frame({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }))
+          writeFrame({ jsonrpc: '2.0', method: 'notifications/initialized' })
+          writeFrame({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
           continue
         }
         if (message.id === 2) {
@@ -176,15 +198,15 @@ export function mcpToolsList({
           interpreterMissing: isInterpreterMissing({ status: code, stderr: errorTail }),
           reason: isInterpreterMissing({ status: code, stderr: errorTail })
             ? interpreterMissingDetail({ name: String(command), bin, stderr: errorTail, searched: childSpawnEnv(bin, { env }).PATH })
-            : `${bin} exited with code ${code} before answering tools/list${errorTail.trim() ? `; its stderr said: ${errorTail.trim().slice(0, 200)}` : ''}`,
+            : `${bin} exited with code ${code} before answering tools/list${errorTail.trim() ? `; its stderr said: ${errorTail.trim().slice(0, 200)}` : ''}${stdinClause()}`,
         })
       }
     })
-    child.stdin?.write(frame({
+    writeFrame({
       jsonrpc: '2.0',
       id: 1,
       method: 'initialize',
       params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo },
-    }))
+    })
   })
 }

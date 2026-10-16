@@ -30,6 +30,10 @@
  *     which starts printing the retired permissions line again.
  *   · take the regular-file test out of `resolveBinary` — `a directory named npm is not a binary, and the
  *     sentence says what was measured` goes red.
+ *   · delete `child.stdin?.on('error', noteStdinFailure)` from `lib/mcp.js` — `a server still running but
+ *     no longer reading …` goes red: the EPIPE is no longer routed, node throws it as an uncaughtException,
+ *     and the driver process this test measures exits 7. That is the bug CI caught and this file exists to
+ *     keep caught; the sibling `…dies the moment it answers…` gates the exit-path verdict.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -203,6 +207,110 @@ test('mcpToolsList starts a #!/usr/bin/env node glasspane-mcp with the real spaw
     assert.equal(starved.interpreterMissing, true, 'node 真的够不着时，这一条必须被认出来')
     assert.match(starved.reason, /could not run: '?node'? is not on the PATH this process handed to the child/, starved.reason)
     assert.doesNotMatch(starved.reason, /exited with code 127 before answering/, `127 不是"跑得坏"，是"起不来"：${starved.reason}`)
+  } finally {
+    fx.cleanup()
+  }
+})
+
+/* ------------------------------------------------------------------ the dead-pipe path */
+
+/**
+ * A reply that makes the parent write, with the read end of stdin gone. Both shapes below are the same
+ * event CI hit on 2026-10-16 (run 38842800885, `write EPIPE` attributed as `uncaughtException` to
+ * `mcpToolsList starts a #!/usr/bin/env node glasspane-mcp with the real spawn`) — there it happened by
+ * luck, between a write being dispatched and the child dying. Locally the same code never errored, so the
+ * fixture has to force the state rather than wait for it.
+ *
+ * The pipe is closed by `exec 0<&-` in a `sh` wrapper, *before* node is exec'd — not by the server itself.
+ * A node process that closes its own fd 0 wedges its event loop and answers nothing at all (measured here
+ * 2026-10-16), which is a different bug and would make these two tests time out instead of EPIPE.
+ *
+ * `close` = the read end is gone, the server answers, then stays alive. The parent only writes after it
+ * sees the answer, so the write is provably against a dead pipe; closing after answering is a race against
+ * the parent's event loop, and a race that passes locally is not a control.
+ * `exit`  = the read end is gone because the server dies the instant it answers — CI's shape. Its EPIPE is
+ * not guaranteeable (teardown has to beat the parent's write), so this one gates the *verdict* on the exit
+ * path; `close` is the one that gates the listener.
+ *
+ * The wrapper execs the absolute interpreter rather than `env node` on purpose: what is under test here is
+ * the pipe, and leaving the interpreter resolvable by PATH would make these tests fail for a reason this
+ * file already covers elsewhere.
+ */
+function writeDeadPipeServer(binDir, name, shape) {
+  fs.mkdirSync(binDir, { recursive: true, mode: 0o755 })
+  const file = path.join(binDir, name)
+  const reply = 'process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { protocolVersion: '
+    + '"2024-11-05", capabilities: {}, serverInfo: { name: "glasspane-mcp", version: "1.4.1" } } }) + "\\n")\n'
+  const body = shape === 'close' ? `${reply}setInterval(() => {}, 1000)\n` : `${reply}process.exit(0)\n`
+  const payload = path.join(binDir, `${name}.payload.cjs`)
+  fs.writeFileSync(payload, body)
+  fs.writeFileSync(file, `#!/bin/sh\nexec 0<&-\nexec '${process.execPath}' '${payload}'\n`)
+  fs.chmodSync(file, 0o755)
+  return file
+}
+
+/**
+ * Driven in a process of its own: inside `node --test`, an unrouted stream error is swallowed by the runner
+ * and booked against whichever test happens to be live, so "would this kill a real process" is not
+ * measurable from in here. In production it is an uncaughtException that takes the updater down mid-update,
+ * so the measurement is that process's exit code plus the line it prints.
+ */
+function runHandshakeInItsOwnProcess(serverPath, { timeoutMs }) {
+  const driver = path.join(path.dirname(serverPath), `driver-${path.basename(serverPath)}.mjs`)
+  fs.writeFileSync(driver, 'import { mcpToolsList } from ' + JSON.stringify(new URL('../lib/mcp.js', import.meta.url).href) + '\n'
+    + 'process.on("uncaughtException", (error) => {\n'
+    + '  process.stdout.write("UNCAUGHT|" + String(error.code ?? error.message) + "\\n")\n'
+    + '  process.exit(7)\n'
+    + '})\n'
+    + 'const answer = await mcpToolsList({ command: ' + JSON.stringify(serverPath)
+    + ', env: process.env, timeoutMs: ' + timeoutMs + ' })\n'
+    + 'process.stdout.write("VERDICT|" + JSON.stringify(answer) + "\\n")\n'
+    + 'process.exit(0)\n')
+  const ran = spawnSync(process.execPath, [driver], { encoding: 'utf8' })
+  const out = `${ran.stdout ?? ''}${ran.stderr ?? ''}`
+  const line = out.split('\n').find((l) => l.startsWith('VERDICT|'))
+  return {
+    status: ran.status,
+    uncaught: /UNCAUGHT\|/.test(out),
+    verdict: line ? JSON.parse(line.slice('VERDICT|'.length)) : null,
+    out,
+  }
+}
+
+test('a server that dies the moment it answers is given a verdict, not an uncaughtException', () => {
+  const fx = scratch('childenv-pipe-exit')
+  try {
+    const server = writeDeadPipeServer(fx.bin, 'glasspane-mcp-exit', 'exit')
+    // 20s is not how long this takes — the `close` event answers it in about a second. It is how much room
+    // the exit path gets before the timer is allowed to preempt it: on a cold node start the first spawn of
+    // a suite has been measured at 3.4s here, and a verdict that flips from "exited with code 0" to "did not
+    // answer within 3000ms" depending on how busy the machine is grades the runner, not this code.
+    const got = runHandshakeInItsOwnProcess(server, { timeoutMs: 20_000 })
+    assert.equal(got.uncaught, false, `管道死了不是把宿主进程带下去的理由：${got.out}`)
+    assert.equal(got.status, 0, `升级过程不能因为一次 EPIPE 就退出非零：${JSON.stringify(got)}`)
+    assert.ok(got.verdict, `必须有一个判决可打印：${got.out}`)
+    assert.equal(got.verdict.ok, false, JSON.stringify(got.verdict))
+    assert.match(got.verdict.reason, /exited with code \d+ before answering tools\/list/, got.verdict.reason)
+    assert.doesNotMatch(got.verdict.reason, /could not be run/, '它确实被启动了，是起来之后没读第二帧')
+  } finally {
+    fx.cleanup()
+  }
+})
+
+test('a server still running but no longer reading says the pipe was dead, not just that it was slow', () => {
+  const fx = scratch('childenv-pipe-close')
+  try {
+    const server = writeDeadPipeServer(fx.bin, 'glasspane-mcp-close', 'close')
+    // The verdict on this path comes from the timer, so the timer has to outlast a cold node start on a
+    // loaded machine; a timeout shorter than the fixture's boot would red for the runner's speed, not for
+    // anything about this code.
+    const got = runHandshakeInItsOwnProcess(server, { timeoutMs: 8000 })
+    assert.equal(got.uncaught, false, `管道死了不是把宿主进程带下去的理由：${got.out}`)
+    assert.equal(got.status, 0, JSON.stringify(got))
+    assert.equal(got.verdict?.ok, false, JSON.stringify(got.verdict))
+    assert.match(got.verdict.reason, /did not answer tools\/list within 8000ms/, got.verdict.reason)
+    // "没答话"只说了半场。真相是它已经不读了——不写出来的话，读者会去查一个根本没坏的服务器。
+    assert.match(got.verdict.reason, /writing to its stdin had already failed \(EPIPE\)/, got.verdict.reason)
   } finally {
     fx.cleanup()
   }
