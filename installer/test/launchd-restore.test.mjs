@@ -207,7 +207,12 @@ test('restoreLaunchd: bootout 失败与 bootstrap 失败分开报，agent 拿到
 function realSpawnFailureShape() {
   const ghost = spawnSync('/nonexistent/glasspane-id-probe', ['-u'], { encoding: 'utf8' })
   assert.equal(ghost.error?.code, 'ENOENT', `前提：真失败要给 error，实得 ${JSON.stringify(ghost)}`)
-  assert.equal(ghost.stdout, undefined, '前提：失败时 stdout 是 undefined（旧写法正是死在 .trim() 上）')
+  // 两种平台给法都不一样，而对 `.trim()` 来说它们是同一件事：Linux 上 spawnSync 失败回
+  // `stdout: null`，macOS 回 `undefined`——两者都不是字符串，`.trim()` 一样抛。
+  // 钉死其中一种会让另一个平台上的这条闸整体红（CI 的 ubuntu runner 实测如此），
+  // 而那与"旧写法死在 .trim() 上"这条缺陷没有任何关系。
+  assert.ok(ghost.stdout === undefined || ghost.stdout === null,
+    `前提：真失败时 stdout 不该是个字符串，否则 .trim() 不会抛：${JSON.stringify(ghost.stdout)}`)
   assert.equal(ghost.status, null, '前提：连退出码都没有，不能拿它当"跑过了"')
   return ghost
 }

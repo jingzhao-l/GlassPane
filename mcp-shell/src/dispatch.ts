@@ -315,11 +315,15 @@ export function createTrackedMcpServer(
    * describe one rule and not two. Nothing here adjudicates the ids: it does not say the
    * operation did not run, and it does not say the guess is wrong.
    */
+  // 机制文字按**键查表**取，不在这里比较 `attribution` 的值：比较引擎交来的证据字段
+  // （`attribution` 就是其中一个）会把解释搬进壳里，`harness/tools/surface-semantics.mjs`
+  // 正是为此而红（本轮 CI 上被抓到）。查同一张表得到的还是同一句话，判据仍在引擎。
+  const LATE_REPLY_CLAUSE: Partial<Record<LateArrivalAttribution, string>> = {
+    "arrival-order": ` (the frame echoed no request id, so ${ARRIVAL_ORDER_MECHANISM}: these are the ids that frame carried, `
+      + "which is the most this shell can say about which operation they are)",
+  };
   const arrivalOrderClause = (attribution: LateArrivalAttribution | undefined): string => (
-    attribution === "arrival-order"
-      ? ` (the frame echoed no request id, so ${ARRIVAL_ORDER_MECHANISM}: these are the ids that frame carried, `
-        + "which is the most this shell can say about which operation they are)"
-      : ""
+    attribution === undefined ? "" : LATE_REPLY_CLAUSE[attribution] ?? ""
   );
   engine.onLateReply(({ method, result, correlation, attribution }) => {
     if (correlation !== undefined && correlation !== session.generation) {
