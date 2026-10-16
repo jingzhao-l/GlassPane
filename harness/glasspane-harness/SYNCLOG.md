@@ -161,6 +161,18 @@ wrapper 点名的每个平台包都在 registry 且带 `sha512-fVybn5vlsaght5Mno
 
 
 
+### 0.8.2：这把闸第一次打的红，打在我自己那一笔上
+
+`v0.8.1` 全链跑完之后，主干又收了 `docs/release.md` 的第 3b 步（"收口记录落下之后必须再推一次
+搬运分支"）。`release-artifact --check` 据此红：`✗ artifact`，并点名
+"1 of the differing path(s) are not the release ledger, so no allowance applies"——
+差集里 `SYNCLOG.md (+0/-78)` 与 `docs/release.md (+0/-12)` 都是"发布物缺主干的字"，
+但只有前两个路径是记录，程序文档是产品内容。两条处置我都试想过：放宽容忍（把
+`docs/release.md` 也塞进 LEDGER）与再出一版。**放宽被否**：那等于把本轮开场那个缺陷
+（发布物里没有它自己的记录）换成尺子写成制度。所以出 `0.8.2`，判 patch（四条用户可见判据未动，
+变的只有版本号与两类文本）。同一天两版 docs-only patch 的价格照实记在这里，
+出路是下一轮把程序与台账都写在 tag 之前——那正是 3b 教的事。
+
 ## 2026-10-16（第十次会话）· 0.8.0：发布物与主干那条没人量的等式，四条尺子的"只能绿"，与四条把红线当成交付的修复
 
 **开工态**：主树 HEAD `40f6dca`（落后 `origin/main` 一笔），`git status --porcelain` 有 11 项，全部
