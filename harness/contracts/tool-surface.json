@@ -7,27 +7,28 @@
     "fork": "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted, and one deleted line excuses at most one re-added line (pairing is one-to-one, so 40 copies of a rebranded line bill 39)",
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
-  "observedAt": "2026-10-15",
-  "engineLoc": 25889,
-  "engineFiles": 62,
+  "observedAt": "2026-10-16",
+  "engineLoc": 26476,
+  "engineFiles": 63,
   "surfaces": {
     "mcpShell": {
-      "loc": 9232,
-      "files": 13,
-      "ratio": 0.2127,
+      "loc": 9605,
+      "files": 14,
+      "ratio": 0.2165,
       "byFile": {
-        "mcp-shell/src/tools.ts": 2647,
-        "mcp-shell/src/engine-client.ts": 1505,
+        "mcp-shell/src/tools.ts": 2774,
+        "mcp-shell/src/engine-client.ts": 1569,
         "mcp-shell/src/http-gateway.ts": 1285,
-        "mcp-shell/src/project-registry.ts": 1100,
+        "mcp-shell/src/project-registry.ts": 1146,
         "mcp-shell/src/update-state.ts": 526,
-        "mcp-shell/src/audit-session.ts": 381,
-        "mcp-shell/src/dispatch.ts": 378,
-        "mcp-shell/src/io.ts": 371,
+        "mcp-shell/src/io.ts": 445,
+        "mcp-shell/src/dispatch.ts": 402,
+        "mcp-shell/src/audit-session.ts": 386,
         "mcp-shell/src/evidence-report.ts": 364,
-        "mcp-shell/src/index.ts": 308,
-        "mcp-shell/src/http-gateway-cli.ts": 240,
+        "mcp-shell/src/stdio-session.ts": 269,
+        "mcp-shell/src/http-gateway-cli.ts": 268,
         "mcp-shell/src/errors.ts": 93,
+        "mcp-shell/src/index.ts": 44,
         "mcp-shell/src/canonical.ts": 34
       }
     },
@@ -1115,7 +1116,7 @@
           "lines": 0
         }
       ],
-      "ratio": 0.1907,
+      "ratio": 0.1866,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
@@ -1131,7 +1132,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 17507,
+  "totalToolSurfaceLoc": 17880,
   "note": null,
   "carried": null
 }
