@@ -173,6 +173,43 @@ wrapper 点名的每个平台包都在 registry 且带 `sha512-fVybn5vlsaght5Mno
 变的只有版本号与两类文本）。同一天两版 docs-only patch 的价格照实记在这里，
 出路是下一轮把程序与台账都写在 tag 之前——那正是 3b 教的事。
 
+### 0.8.2 发布实测（tag 之后补记；这一段的缺席就是 `△ artifact` 说的那种）
+
+**切与推**：split `main` = `115a8379`，树 `6306b5e7…` 与 `HEAD:harness/glasspane-harness` 逐字相等
+（血缘合并的第二父是上一 tip `5d877c66`，普通 push 就过）。tag `v0.8.2` annotated → `115a8379`，
+切在主干已推之后（split 侧的锚 fetch 的是 `origin/main`，顺序错了它就比到旧树）。
+Release 跑 `38896806470` success：`tag matches the product version` 里那一步打出来的仍是两行同一个
+`6306b5e7…` + `anchor OK`；`gh release view v0.8.2` → `isDraft=false`、
+`targetCommitish=115a8379…`、6 件资产、`publishedAt=2026-10-16T11:58:33Z`。
+清单两条 sha256（arm64 `85bd5fc4…`、x64 `7c592abf…`）与 GitHub 资产 API 的 `digest` 逐字相等，
+`.asc` 用 `scripts/install.sh` 内嵌公钥验为完好的签名（同一把 `0929EA31…`）。
+
+**npm 那条（dispatch `38897772678`）先红后绿，红的是传播不是字节**：`publish-gate` 与三个 npm 作业
+都 success，但最后那条 `install the published bytes and run them` 第一趟红：
+`npm error notarget No matching version found for glasspane-harness@0.8.2`——它 `needs: publish-wrapper`，
+发布成功后约 1 秒就开跑，registry 读副本还没 serve 新版本。**同一时刻本机跑同一条脚本，拿到同一个
+`ETARGET`**（两个独立观察、同一形状，所以不是 runner 的偶发）。约三分钟后
+`npm view glasspane-harness@0.8.2 version --prefer-online` 读到 `0.8.2`，
+`gh run rerun --failed` 那条 job 过了、整跑 success；本机复跑 `verify-published 0.8.2` 也全绿
+（临时前缀装的是已发布 tarball、`glasspane-harness` 与 `gp-harness` 各回 `0.8.2`、平台包齐、
+带 registry integrity、装好的二进制供出内嵌 web：`text/html` + doctype + assets referenced、等待 0.5s）。
+registry 最终读数：三包 `dist-tags.latest` 均 `0.8.2`，`npm stage list` 空。
+
+**这条结构性缺口本轮没有修，理由写在明面上**：`verify-published` 那条 job 对"发布之后要等多久才
+读得到"没有任何界限，所以每次发 npm 它都可能红，而它的红与**真坏发布**的红在 CI 里长得一模一样
+（同一条 `FAIL npm install of the published package`）。两条出路都合法且都不是放宽断言——版本号
+最终必须装得到，装不到仍旧该红：① 脚本对 `ETARGET` 做有界轮询（等到能装为止，到期仍红并报出它等了多久）；
+② 那条 job 加 `delay`。选哪条改的是发布泳道的形状，留给 owner 定，不在本轮里顺手改。
+
+**本轮结束时这把闸自己的状态**：`release-artifact --check` ⇒ `✓ split-main` + `△ artifact`
+（tag 只缺这段台账）⇒ exit 0。也就是说：推搬运分支是收口动作，补记不需要第三版。
+
+**没跑的部分照实写**：fork 的固定点套件（`138 pass / 0 fail`、tui `32 pass / 0 fail`）是在
+`0.8.2` 那两笔提交**之前**测的；`0.8.2` 只改 `product.json`、`packages/opencode/package.json` 的版本号
+与两份文本 + `docs/release.md`，不含任何 `src/` 路径，故未复跑；四包 `bun typecheck` 本轮未跑（同理，
+无 TS 源改动）。`curl` 兜底通道"带 gpg 装成功"那一腿仍未观测（本机代理对 ~40 MB 资产限速），
+命令与上一节同一条。
+
 ## 2026-10-16（第十次会话）· 0.8.0：发布物与主干那条没人量的等式，四条尺子的"只能绿"，与四条把红线当成交付的修复
 
 **开工态**：主树 HEAD `40f6dca`（落后 `origin/main` 一笔），`git status --porcelain` 有 11 项，全部
