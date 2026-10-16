@@ -51,11 +51,21 @@ final class ConsoleDaemonStateRootTests: XCTestCase {
     }
 
     /// 读完一次调用记下的 argv（分隔符切段），并等它真的落地。
+    ///
+    /// 分隔符就是帧边界：**没有 `\036` 结尾的那一段是一次还没写完的调用**，不能算一条记录。
+    /// 从前这里把"已经写出来的那几个 argv"当成完整记录返回，于是同一条断言既能假红也能假绿：
+    /// 桩是两次 `printf` 落盘（先 argv 逐行、再分隔符），读侧正好夹在中间就拿到
+    /// `["--state-dir", <根>]` 这种两元的"记录"，`prefix(3)` 于是抱怨"命令没跟上"——
+    /// 2026-10-16 在负载 42 的那一趟 `swift test` 里真红了这一次（同一棵树上一趟绿）。
+    /// 反过来更坏：一次真的少了开关的调用，也可能被读成"看着对"。按帧边界算账才是判据。
     private func readInvocations(_ argvFile: String) -> [[String]] {
         guard let text = try? String(contentsOfFile: argvFile, encoding: .utf8) else { return [] }
-        return text.components(separatedBy: "\u{1e}\n")
-            .map { $0.split(separator: "\n", omittingEmptySubsequences: true).map(String.init) }
-            .filter { !$0.isEmpty }
+        let frames = text.components(separatedBy: "\u{1e}\n")
+        // components 在 N 条完整帧之后必然还剩一段尾巴（最后那条的下半截，或空串）；丢掉它，
+        // 剩下的每一段都以分隔符结尾，都是写完的。
+        return frames.dropLast().map { chunk in
+            chunk.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        }.filter { !$0.isEmpty }
     }
 
     private func waitUntilInvocations(_ argvFile: String, atLeast count: Int) -> [[String]] {
@@ -115,7 +125,25 @@ final class ConsoleDaemonStateRootTests: XCTestCase {
         }
     }
 
+    /// 第 5 条：帧边界本身就是判据。为 2026-10-16 那次负载假红而写（见 `readInvocations` 的注释），
+    /// 但它管的不是"别假红"，是"半条记录不能算记录"——那条形状同时能把真的漏开关读成通过。
+    /// 反向变异：把 `frames.dropLast()` 改回 `frames`（什么都能算一条）→ 这一条红（实得 2 条）。
+    func testAHalfWrittenInvocationIsNotCountedAsARecord() throws {
+        let dir = TestSandbox.directory("argv-frame")
+        let file = dir + "/argv.txt"
+        let first = "--state-dir\n/var/root-a\n"
+        let torn = "--state-dir\n/var/root-b\n"
+        try (first + "\u{1e}\n" + torn).write(toFile: file, atomically: true, encoding: .utf8)
+        let got = readInvocations(file)
+        XCTAssertEqual(got.count, 1, "第二段没有分隔符收尾，是一次还没写完的调用：\(got)")
+        XCTAssertEqual(got.first ?? [], ["--state-dir", "/var/root-a"], "数出来的必须是写完那一条")
+        // 写完之后再数一次：同一条记录不能因为"后来才落地"被丢掉（否则等待逻辑会永远等不到）。
+        try (first + "\u{1e}\n" + torn + "\u{1e}\n").write(toFile: file, atomically: true, encoding: .utf8)
+        XCTAssertEqual(readInvocations(file).count, 2, "补上分隔符后那条必须开始算数")
+    }
+
     /// 第 2 条：这一页读的三个位置（档案目录 / 注册表 / 台账）一起跟着报来的根。
+
     func testDerivedPathsFollowTheAdoptedRoot() {
         let dir = TestSandbox.directory("console-root-paths")
         let panelRoot = dir + "/panel-side"
