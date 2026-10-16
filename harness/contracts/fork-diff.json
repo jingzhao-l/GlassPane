@@ -2,14 +2,15 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-10-15",
+  "observedAt": "2026-10-16",
   "counts": {
-    "identical": 4658,
-    "edited": 269,
-    "added": 87,
+    "identical": 4653,
+    "edited": 274,
+    "added": 88,
     "deleted": 1705
   },
   "edited": [
+    ".github/CODEOWNERS",
     ".github/ISSUE_TEMPLATE/bug-report.yml",
     ".github/ISSUE_TEMPLATE/feature-request.yml",
     ".github/pull_request_template.md",
@@ -129,6 +130,7 @@
     "packages/core/src/tool/websearch.ts",
     "packages/core/src/v1/config/server.ts",
     "packages/core/test/plugin/skill.test.ts",
+    "packages/desktop/package.json",
     "packages/desktop/src/main/wsl/servers.ts",
     "packages/desktop/src/main/wsl/sidecar.ts",
     "packages/opencode/package.json",
@@ -217,9 +219,11 @@
     "packages/opencode/test/server/httpapi-experimental.test.ts",
     "packages/plugin/script/publish.ts",
     "packages/script/src/index.ts",
+    "packages/sdk/js/package.json",
     "packages/sdk/js/script/publish.ts",
     "packages/server/src/auth.ts",
     "packages/server/src/routes.ts",
+    "packages/session-ui/package.json",
     "packages/tui/src/app.tsx",
     "packages/tui/src/attention.ts",
     "packages/tui/src/component/dialog-model.tsx",
@@ -275,6 +279,7 @@
     "packages/tui/test/fixture/fixture.ts",
     "packages/tui/test/fixture/tui-sdk.ts",
     "packages/tui/test/util/presentation.test.ts",
+    "packages/ui/package.json",
     "packages/ui/script/publish.ts",
     "script/publish.ts",
     "script/translate-app.test.ts",
@@ -363,6 +368,7 @@
     "packages/opencode/test/tool/glasspane-kernel.test.ts",
     "packages/opencode/test/tool/glasspane-surface.test.ts",
     "packages/tui/src/util/tool-denial.ts",
+    "patches/@modelcontextprotocol%2Fsdk@1.31.0.patch",
     "product.json",
     "script/gpg-signing.sh",
     "script/kernel-conformance.mjs",
@@ -370,7 +376,6 @@
     "scripts/install.sh"
   ],
   "deleted": [
-    ".github/CODEOWNERS",
     ".github/ISSUE_TEMPLATE/config.yml",
     ".github/TEAM_MEMBERS",
     ".github/publish-python-sdk.yml",
@@ -2055,6 +2060,7 @@
     "packages/web/src/types/starlight-virtual.d.ts",
     "packages/web/sst-env.d.ts",
     "packages/web/tsconfig.json",
+    "patches/@modelcontextprotocol%2Fsdk@1.29.0.patch",
     "perf/test-suite.md",
     "screenshot-uk.png",
     "sdks/vscode/.gitignore",
@@ -2078,6 +2084,11 @@
   ],
   "editedDetail": [
     {
+      "file": ".github/CODEOWNERS",
+      "upstreamHash": "c6dfb0ebda4e70ef5cfb1dcb2589d4a5890de3ce",
+      "forkHash": "bd5249a6a5439e42d25d906ae9df72f593692909"
+    },
+    {
       "file": ".github/ISSUE_TEMPLATE/bug-report.yml",
       "upstreamHash": "da82bde2e12db6ace24637da504e47c5808381e7",
       "forkHash": "a482b0e94fc4129fe4c2345997eb7855a4055689"
@@ -2100,7 +2111,7 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "967bd54acdfe1227a8dbb20520b2777aa97bb416"
+      "forkHash": "f922a288fadc7fa642f93b3aa1ffd55e69b92e11"
     },
     {
       "file": "bunfig.toml",
@@ -2120,7 +2131,7 @@
     {
       "file": "package.json",
       "upstreamHash": "a3f9544410da3e258778f7968641ed0bbbd6d442",
-      "forkHash": "6c1119c151c0c152688565832c3c920f6e646fab"
+      "forkHash": "18a47dab1b5775f84bd9157b2abdbff40655f650"
     },
     {
       "file": "packages/app/src/components/dialog-connect-provider.stories.tsx",
@@ -2663,6 +2674,11 @@
       "forkHash": "1ab76d1f78306d75ba68525360566bdc29824427"
     },
     {
+      "file": "packages/desktop/package.json",
+      "upstreamHash": "dac7921cf48a18ae62c2a4d6f3affdb61324e990",
+      "forkHash": "e81524884b086809ce07f200432b66b78cd2f6d2"
+    },
+    {
       "file": "packages/desktop/src/main/wsl/servers.ts",
       "upstreamHash": "749f51431f491031b5ccc6372038aca8f28cd569",
       "forkHash": "99fe85a8b48eea00e82b73c98f35ef6e1ca79386"
@@ -2675,7 +2691,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "3311ce0521e67a850619a1dcaeab79893e3620de"
+      "forkHash": "092be4537dad136aae93ffbb4986b2675215b96e"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -3103,6 +3119,11 @@
       "forkHash": "c7292e8d3d9e30dd5a34930bd82669e2c1afd822"
     },
     {
+      "file": "packages/sdk/js/package.json",
+      "upstreamHash": "4662037d9b3c697a61e4137099200c12ae5b1c2b",
+      "forkHash": "3879b67ab436358fbe1946cd2e1c4b3e1becc6bd"
+    },
+    {
       "file": "packages/sdk/js/script/publish.ts",
       "upstreamHash": "29426a41b7ddb3c196f8d5d6041944749a293805",
       "forkHash": "28128f4807a7605fe54e0424598ea0b7eef804b2"
@@ -3116,6 +3137,11 @@
       "file": "packages/server/src/routes.ts",
       "upstreamHash": "cc1b1ae6a55d77a8898cbb4f7135527110172fae",
       "forkHash": "d4a38c53b3c062f3829fbe7a110c682ab402fce8"
+    },
+    {
+      "file": "packages/session-ui/package.json",
+      "upstreamHash": "2164064facf201bdfdff6f7d96eeb18b76876f4c",
+      "forkHash": "f551c06c9404c540018e3607b94112bd942d5665"
     },
     {
       "file": "packages/tui/src/app.tsx",
@@ -3393,6 +3419,11 @@
       "forkHash": "85ed2a3670cb1b82d2d2f67df4c55cfe5a847d5e"
     },
     {
+      "file": "packages/ui/package.json",
+      "upstreamHash": "49d6d7d130f2d585beca209d24e665293c3785cc",
+      "forkHash": "899507a967a1781da257686bd0cb8c365c64ccd9"
+    },
+    {
       "file": "packages/ui/script/publish.ts",
       "upstreamHash": "ba81ab7dfee881a9a5984983c3fd68d231818b8b",
       "forkHash": "bd96e4731fb4ae943d0fe5fdb3b90538dcc4fbcf"
@@ -3400,7 +3431,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "28c281ea1cef39cbfbe65f53b568ccc1074ffe22"
+      "forkHash": "30046261a6bdec626f13610398dd870927f0d379"
     },
     {
       "file": "script/publish.ts",
@@ -3745,12 +3776,16 @@
       "forkHash": "39687aa589321a69fcbabccce503e71c7e45ad56"
     },
     {
+      "file": "patches/@modelcontextprotocol%2Fsdk@1.31.0.patch",
+      "forkHash": "1d7e7c41487d3095cbff3da5ab0d25059e4d78ac"
+    },
+    {
       "file": "product.json",
       "forkHash": "1fdb694cd9d66c952f4a60d339a7fdbffab8d406"
     },
     {
       "file": "README.zh-CN.md",
-      "forkHash": "4c8836116d85cfce5a9de5e61dda9533490da7f6"
+      "forkHash": "a3b830cbcfa287fd28cbf901808a5c3da9885fab"
     },
     {
       "file": "script/gpg-signing.sh",
