@@ -2,6 +2,158 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-15（第九次会话）· 0.7.10：29 条发现全部收口，两处默认收紧，`0.7.9` 这个号作废
+
+**开工态**：主树 `/Volumes/Eng-Dev/GlassPane` 干净，HEAD `58da7be`，与 `origin/main` 同点
+（`git rev-list --left-right --count origin/main...HEAD` = `0 0`）。`bun` = 1.3.14（= `packageManager`
+钉的那一个），`.external/opencode` 的 `describe --tags` = `v1.18.32` = `harness/upstream.json` 的 pin，
+`preflight` 验通 `objects.githubusercontent.com`（钥匙串束 163 张）。盘：开工 33.1 GiB 可用（`df -k`
+25,353,180 KB used / 34,735,568 KB avail），收口前 26.3 GiB。
+
+**一处环境事故，记在这里而不是当作噪声**：开工约 25 分钟后 `vm.loadavg` 到 207，`fork-diff --check`
+从 ~2 分钟拖到 11 分钟，`ps` 本身都要跑两分钟。查出是 **96 个 `node -e 'while(true){Math.random()*Math.random()}'`
+孤儿进程**（PPID 全为 1，同一 7 秒窗口内起，无父壳），第一次清理后 12:10 又原地复活一批 96 个。复活的时间
+与 `git -C .worktrees/gp-daily-main-20261015 status` 里那 61 个未提交文件的树最后修改时间一致，也就是说它是
+另一条线跑挂之后留下的，不是本轮的进程。两次都只按**完整命令行精确匹配**回收（TERM→KILL），不碰任何别的
+进程；22:00 之后负载降到 5–20，`gates` 才取得到可信数字。教训：负载 200 时任何"计时敏感"断言都不可信，
+本会话里第一批 `publish-shape` 跑出的 1 fail 就是这种假红（钩子超时），隔离复跑即绿。
+
+**往轮遗留判定（"上一轮的遗留"是待办，不是输入）**
+
+1. `gp-harness-orphan-20261010`（`a054fdc`，本地+origin 各一条）——**已被 main 重写并取代**，判据用字节不是
+   分支名也不是提交信息：`git diff main gp-harness-orphan-20261010 -- <五个文件>` 的差集方向是"main 更多"
+   （`verify-published.ts` main 多 142 行、`product-surface.mjs` 多 109 行、`install.sh` 多 60 行、
+   `installer-selftest.sh` 多 91 行，`script/publish.ts` **blob 全等**）。再把"orphan 相对 main 独有的行"
+   逐行回 main 核对，只剩两条：`grep 'curl -fL'`（main 在同一位置改用长选项 `--location` 并新增
+   `--retry-all-errors`/`--continue-at`，同一意图的更强形态）与
+   `check("no-foreign-publish", !/packages\/(sdk\/js|plugin|ui)\/script\/publish\.ts/...)`（main 上这条已被
+   `a7bbe11` 从"点名两个文件"改成"遍历发现全部 publisher"）。它要修的那两条真缺陷——`verify-published` 的
+   自回显 os/cpu 断言、安装器兜底通道的验签面——今天都在 main 上以更强形态存在（本轮又把它们推进到"读 tarball
+   真身"与"404 即拒装"）。因此不是"没落地"，是被取代。按纪律先记这条判定、再删本地与 origin 的同名分支。
+2. **`0.7.9` 从未发布**——这是本轮真正的"上一轮没收口"。判据：split 远端 `refs/heads/main` = `46d131e`
+   （= tag `v0.7.8`），`git ls-remote --tags` 列表里有 `v0.7.8` 没有 `v0.7.9`；`npm view` 三个包 latest 全是
+   `0.7.8`，`npm view glasspane-harness@0.7.9 version` 回 404；`gh run list` 最后一条 Release 是 `v0.7.8`。
+   main 上 `product.json` 却已经写着 `0.7.9`，于是 `product-surface` 报"三方一致"而发布物根本不存在——号写了、
+   闸绿了、用户装不到。
+   **决定：不把 `0.7.9` 补发出去**，因为那要先发一个已知带着本轮 29 条缺陷的中间版本，再发一版覆盖它；
+   改为把两轮内容一起发成 `0.7.10`，让 `0.7.9` 的号作废并在 `CHANGELOG.md` 顶部写明。回滚：
+   `git revert` 取号提交即回到 `0.7.9`，但 registry 上永远不会出现 `0.7.9`（版本号不可回收，这正是诚实的代价）。
+
+**本轮决定 → 依据 → 回滚命令**
+
+| 决定 | 依据 | 回滚 |
+|---|---|---|
+| 取号 `0.7.10`，`0.7.9` 作废 | 见上；不发已知带缺陷的中间版本 | `git revert` 版本提交；或将来 `v0.7.11` 正常前进 |
+| split 用 fast-forward 而非覆盖 | `split/glasspane-harness` 相对 main 的差集为空，普通 push 即过 | 无需回滚（未覆盖任何提交） |
+| `tool-surface` 面 B 棘轮重记 `18.06% → 19.07%`（`7743 → 8275` LOC） | 29 条修复里 22 条往我们的定制面加了行；与代码同批 `--record`，且只在**干净隔离树**里记（并行 lane 的未提交行不能洗进金样） | `git checkout b25b92f -- harness/contracts/tool-surface.json` 后 `--check` 会红，按行 revert 即可 |
+| `fork-diff` 金样重记 `268→269 edited / 83→86 added / 6715→6718` | 新增 3 个我们的文件 + 1 个 edited 计数变化，同一提交内重记 | 同上，revert 该金样文件 |
+| `brand-surface` 血缘 `9624 → 9627`（`+3` 次 / `+3` 文件）重记 | `+3` 全部来自 CI `run:` 正文与测试名里"这块是 fork/upstream 的哪一种"的**归属说明**——按 9616/9617/9618 先例记进金样 `source`，而不是删句子换绿 | revert `harness/contracts/brand-surface.json` |
+| 安装期默认从"警告后安装"翻成"拒装"，留 `GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1` 出口 | 发布泳道每个目标必产 manifest+`.asc` 且缺则失败，404 描述的是坏发布 | `git revert` 安装链提交 |
+| 项目自带插件默认拒载，留 `GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS` 出口 | 该产品进程持有 `gp_*` 辅助功能面，glob 到即执行＝把真实 App 交给陌生仓库 | `git revert` 该提交 |
+| `release.yml` 改 draft→签完再公开 + 构建期 sha256 锚定 + wrapper 前置存活查 | v0.7.6 的"job 绿而 registry 没有那个号"是实测事故 | `git revert` 发布链提交 |
+| `product.npm.registry` 与 `product.registry` 并存但强制一致，消费方一律读后者 | 删字段是契约变更，加一致断言是同等效果且不破文档 | revert `product-surface.mjs` 的 `registry` 三条 |
+
+**改动面数字（`--record` 后从干净树复测）**：`fork-diff vs v1.18.32: 4658/6718 byte-identical,
+269 edited, 86 added, 1705 deleted`（开工 `4659/6715, 268 edited, 83 added, 1705 deleted`）。
+占比：面 A `mcp-shell/src 9232 LOC 21.27%`（开工 21.54%，分母随 main 上引擎增长而下移，**上限仍被超**，
+越线检查对此面已耗尽，只剩 LOC 棘轮挡增量）；面 B `fork 8275 LOC 19.07%`（开工 7743/18.06%，本批
++532 行，三条泳道有意增长）。血缘 `9627 次 / 3307 文件`（开工 9624/3304）。product-surface
+**190 条一致 / 0 问题**（开工 144）。固定点：opencode **135 pass / 0 fail**（开工 114，含新
+`publish-shape` 6 条与新 `project-plugin-trust` 3 条）、tui **32 pass / 0 fail**（开工 30）、
+`installer-selftest` 全绿（含被反转的 3 个场景与 2 条 override 正例）、四包 typecheck 干净、
+kernel-conformance 16 fixture 全中且新增"16 == 16 可驱"覆盖行、kernel-pin 26 个随包契约文件、
+`check-workflows` 9 条自测各自能红 + 5 份工作流干净（release.yml 8 → 10 job）、`check-doc-links`
+25 份文档 / 227 条内链无死链。
+
+**红过又修好的项**（不写"最终绿了"就当作没红过）：
+- `publish-shape.test.ts` 首次跑出 1 fail——`beforeEach/afterEach 钩子超时`，负载 207 下的假红，隔离复跑绿。
+- `validateTarball` 改读 tarball 后第一次 `--dry-run` 就红：`bin/glasspane-harness.exe is not executable in the tarball (mode 0)`。
+  两个原因叠着：上一次的 `.tgz` 被下一次 pack 打了进去（文件数 7→8），以及我把 BSD/GNU tar 的**符号**模式
+  串当八进制解析成 NaN。前者是真缺陷（`npm publish *.tgz` 会连旧包一起发），后者是尺子自己的错。都改了。
+- 新写的"每个方法引擎都接受"起初报 `attach/observe/act/restore` 不存在——解析器只认 `case 单名`，
+  Swift 实际写 `case hello, attach, act, observe`。夹具形状不对造成的红不是发现。
+- 安装器 `--dry-run` 的 `ALLOWED=1 run_install` 不起作用：函数前缀赋值不会传给子进程。改走
+  `SCENARIO_ALLOW_UNVERIFIED` → `run_install` 里显式 export，与既有场景开关同构。
+- `product-surface` 的 `publish-registry` 起初恒红：`publish.ts` 里 shell 的 `/*.tgz` glob 被
+  `stripComments` 当成块注释起点，一口吞掉后面两条 publish 行。改成点名 tarball 之后既是真修复也让
+  扫描看得见；注释里也不留 `/*` 序列。
+
+**第三段（同一版本，发布链三轮自证 + 一次我自己写错的裁定）**：`v0.7.10` 的 npm 派发连红三次，
+每次都修在我这一侧，不是环境、不是别人。
+
+1. **重跑不可能**：第二次派发时两条 `publish-platform` 报 `You cannot publish over the previously
+   published versions: 0.7.10`——平台包第一轮已上去，而这条 lane 除 npm 外处处可重跑
+   （`create-release` 复用、`gh release upload --clobber` 覆盖）。npm 侧此前没有"已发布"分支。
+2. **我的裁定把闸门焊死**：补的分支要求 registry 的 integrity 等于本次重打包的 integrity。第三次派发
+   证明这个等式**永远不成立**——同一版本两次运行 npm 自己给出的 integrity 都不同
+   （sha512-t01wKyYfMFO1U… → sha512-Dm90l7AmByGjE…），因为打包会把每次构建的元数据写进 tar。
+   "两次构建字节相同"不是本产品的性质；拿不成立的等式当闸 = 把恢复通道锁死。一个只能失败的控件
+   不是控件。
+3. **改成判可判的**：命中重复时按"存在"的方向重问 registry（沿用 wrapper 那道存活闸的传播等待：
+   24 × 30s + `--prefer-online`）。12 分钟后仍查无此号 ⇒ 红（这才是 v0.7.6 的真形状：job 绿、
+   registry 没号、装完没命令）；查到 ⇒ 绿并把两个 integrity 打进日志当审计行，同时明写"字节对不对
+   归 `verify-published` 那条安装 lane 回答，这道裁定不外推"。
+4. **构建期锚第一次真跑就抓到我自己的取数错误**：`checksums` 里 `gh release download` 不点名 tag ⇒
+   解析 "latest" ⇒ draft 不进 latest ⇒ 下回来的是 v0.7.8 的资产。锚报" served ≠ 本次构建"是对的，
+   错的是我。点名 `${GITHUB_REF_NAME}` 修掉。
+5. **少一个 `fi` 的 `run:` 正文**：YAML 合法、GitHub 不预检，只有跑到那一步才炸。永久接管它的规则是
+   `scripts/check-workflows.mjs` 新增 2a：每个 `run:` 正文过 `bash -n`，并加自测用例（故意少关一层
+   `if`）。`--self-test` 10 → **11 条，各自验证能红**；5 份工作流 0 问题。
+   这条规则自己先错过一次：按 `runRefs` 的逐行记录重接正文，而扫描器跳过空行与 `#` 注释 ⇒
+   带注释的正文必断，第一版对 5 份正常工作流报了 **232 条假警**。假警比没闸更糟，因为下一次真红
+   会跟它们一起被忽略；改为在扫描器里就地累积整段正文。
+
+**发布锚点**：`create-release` 的"已存在就原样留着"改成"已存在就把 `targetCommitish` 对到本次 tag
+的 commit 并读回确认"——v0.6.4 记过的那类失效（release 元数据指向分支名/别的 commit）在本轮被
+我自己的 tag 移动第三次复现了一次，现已当场修复并有读回断言。tag `v0.7.10` 共移动四次
+（`9351f87`→`88e75e4`→`4245a44`→`a8adb40`），前三次都在"没有任何发布物"的窗口内收回
+（第一次 `gh release view` 直接回 "release not found"），不是删发布锚点。
+
+## 收口补记（同一天，发布链跑完之后）
+
+**发布物实测**：`v0.7.10` = split 仓 tag `a8adb40`（本次是第四次也是最后一次移动，前三次都在
+"没有任何发布物"的窗口内收回）。Release 非草稿、`targetCommitish` = 被 tag 的 commit、6 个资产
+（两平台 zip + 各自 `.asc` + `SHA256SUMS.txt` + 其 `.asc`）；两条 workflow 运行都绿：
+push 那条（version-check → create-release → binaries×2 → checksums → publish-release）与
+dispatch 那条（publish-gate → npm 平台包×2 → wrapper → **verify-published**，后者本轮第一次接进 CI）。
+registry 三包 `--prefer-online` 实测均为 `0.7.10`。
+`verify-published.ts 0.7.10` 本机重跑：装进一次性前缀、两个命令都 `--version` 出 `0.7.10`、
+os/cpu/version 三项对的是**已安装包**的 manifest、两个平台包在 registry 上都查得到、
+装好的二进制真的在供内嵌 web（`content-type=text/html`、doctype、assets 被引用）。
+`npm install -g --prefix ~/.local` 与 `bun add -g` 两条通道都出 `0.7.10`；npm 11 的
+`allow-scripts` 警告按文案原样出现（安装仍成功）。
+兜底通道用**真实发布物**跑通并把 npm 藏起来强制走它：`sha256: verified (SHA256SUMS.txt)`、
+`GPG: verified (signing key 0929EA31DF4F7429F63FC53189D88B1D043A1298)`，独立 `gpg --verify` 用脚本内
+嵌的那把公钥复核到 `jingzhao-l (sign-github)`，独立 `shasum -a 256 -c SHA256SUMS.txt` 对
+arm64 资产回 `OK`。
+
+**闸的最终数字**（干净隔离树复测）：fork-diff 见本段末尾的重记；面 A `9232 LOC / 21.27%`、
+面 B `8275 LOC / 19.07%`（三段之间无新增长度——后三段只动 `release.yml` 与父仓的闸，不在面 B 口径内）；
+血缘 `9627 / 3308`；product-surface **193 条一致 / 0 问题**；固定点 opencode **138 / 0 fail**（6 个文件）、
+tui **32 / 0 fail**；`installer-selftest` 全绿；四包 typecheck 干净；kernel-conformance 16 fixture 全中
+且覆盖行 16==16；kernel-pin 26 个契约文件；`check-workflows` 自测 **11 条**各自能红 + 5 份工作流干净；
+`check-doc-links` 25 份 / 227 内链无死链。
+
+**清理盘点（两个远端都盘过，判据是内容不是分支名）**
+
+| 对象 | 去向 | 判据 |
+|---|---|---|
+| 本地 `gp-harness-daily-20261008` / `-20261010-batch` / `gp-harness-orphan-20261010` / `gp-harness-port-075` | 先 `-s ours` 记成 main 祖先（树哈希逐字节不变，当场核对），再 `git branch -d` | 相对 merge-base 的新增行里 main 缺的只有注释措辞与被重写前的夹具形状，实质以更强形态在 main（见【往轮遗留判定】与上面第二/三段的实测） |
+| 本地 `backup/harness/recovered`、`gp-harness-daily-20261010`、`gp-harness-daily-20261014-security-preserved`、`harness/daily-20261006` | `git branch -d` | `main..<b>` 为 0 笔，已是祖先 |
+| 本地 `gp-014-goldens`、`gp-harness-daily-20261014`、`-20261014-security`、`-20261014-tui`、`gp-kernel-015` 五棵 worktree | `worktree remove` + `prune` + `branch -d` | 每棵 `git status --porcelain` 为空、分支为 0 笔 ahead |
+| `.worktrees/gp-014-goldens`（remove 时 dirty=2） | 两个金样文件先按字节 `cp` 到 `/var/tmp` 存档，再 `worktree remove --force` | 里面是 2026-10-08/10-11 的旧金样草稿，main 上的金样是本轮从活树重记的更新版 |
+| 本地 `split/glasspane-harness`、`-076`、`_backup`、`-h15`、`split/h15-v2` | 删除 | subtree 搬运件，内容已由 split 仓 main 与 tag 承载；派生历史不是 main 的祖先，`-d` 按构造不可能接受，故在此说明后删 |
+| origin 远端 `gp-harness-daily-20261010-batch`、`-20261011-batch`、`gp-harness-orphan-20261010`、`gp-harness-release-076` | `git push origin --delete` | 同上四条的内容判据（10-11 与 release-076 两条含逐行比对：main 缺的只有旧版本号字面量与重写前的夹具形状） |
+| split 远端 `split-next-20261011` | 删除 | 往轮搬运件，内容在 split main |
+| `/var/tmp/glasspane-harness/` 289 项往轮临时件（184 MB 的 `w078`、139 MB 的 `e2e-curl` 等） | 删除 | 早于本日的往轮 scratch；`ca-bundle.pem` 是环境依赖，保留 |
+| **留下**：`.worktrees/gp-daily-main-20261015` + 本地分支 `gp-daily-main-20261015`（1 笔、29 文件，其 worktree 另有 61 项未提交） | 不碰、不替它提交 | 主仓 07:30 那条线的在飞批次；与本轮回改动是否重叠：仅 `harness/glasspane-harness/packages/**` 无交集，它动的是 `engine/`、`mcp-shell/` 与 `tools/` |
+| **留下**：主树里另一会话的未提交依赖批次（README×2、5 个 `package.json`、patch 改名、CODEOWNERS） | 不提交、不 reset | 它已在 split 仓落地为 4 笔提交并被本轮向前合并；父仓侧由那条线自己收口，正解见上面的跨线事实 |
+| **留下**：split 仓 `dependabot/npm_and_yarn/...` 分支 | 不删 | 机器人所有，非本会话产物；`gh pr list --state open` 无开启的 PR，等它自己回收 |
+
+**未观测的边界（照实写，附补它的确切命令）**：见最终汇报第 ⑩ 项——真模型轮次、真 TUI 观感、
+`GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS` 在**真实宿主会话**里的端到端加载（本轮只有夹具级证据），
+以及 `npm stage approve` 的 2FA。
+
 ## 2026-10-14（第八次会话）· 0.7.9：三把尺子的"看得见"与两处发布活门
 
 **开工态**：主树 `/Volumes/Eng-Dev/GlassPane` 干净（`e33356b`，与 origin 同）⇒ 开工；跑到中途

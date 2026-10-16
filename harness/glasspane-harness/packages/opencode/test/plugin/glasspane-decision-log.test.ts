@@ -119,6 +119,47 @@ describe("what the plugin refuses to invent", () => {
     expect(verifyLedger(path.join(dir, "decisions.jsonl")).entries).toBe(0)
   })
 
+  test("the engine's real act reply records no decision, dimension declared or not", () => {
+    // Measured against the engine, this is the ordinary case and not a degraded one:
+    // `act` answers with the flat operation dict (`EngineCore.swift:1275-1300`), and the
+    // one reply that carries an `evidencePack` is `last_evidence` (`Dispatcher.swift:156`).
+    // A dimension declared on `gp_act` therefore has nothing to be recorded against —
+    // which is the fact the tool surface's own parameter text now states.
+    const { env, dir } = ledgerEnv()
+    const actReply = { operationId: "op_0123456789ABCDEFGHJKMNPQRS", actConfirmed: true, latencyMs: 12, evidenceId: "op_0123456789ABCDEFGHJKMNPQRS" }
+    for (const metadata of [actReply, { ...actReply, dimension: "security" }]) {
+      const note = recordToolExecution(input("gp_act"), toolResult(metadata), env)
+      expect(note?.status).toBe("skipped")
+    }
+    expect(verifyLedger(path.join(dir, "decisions.jsonl")).entries).toBe(0)
+  })
+
+  test("a frame the engine does not emit fails loudly, with a remedy that is not a loop", () => {
+    // `result: null` is a transport-level shape, not an engine answer — `lastEvidence`
+    // throws GP_E_NO_EVIDENCE when there is nothing to hand back (`EngineCore.swift:1631-1644`)
+    // and `Dispatcher.swift:156` always wraps the pack in an object. The transport still
+    // hands it up unchanged (pinned in test/tool/glasspane-surface.test.ts), so this is the
+    // layer that has to say what it means: no decision, and a next step the agent can run
+    // even when the call that just failed WAS `gp_last_evidence`.
+    const { env, dir } = ledgerEnv()
+    const output = toolResult(null)
+    const note = recordToolExecution(input("gp_last_evidence"), output, env)
+    expect(note?.status).toBe("failed")
+    if (note?.status !== "failed") return
+    expect(note.code).toBe("GP_E_EVIDENCE_FRAME")
+    expect(note.remedy).not.toContain("call gp_last_evidence")
+    expect(note.remedy).not.toContain("gp_last_evidence and pass its reply")
+    // Executable, and not about the call that just failed.
+    expect(note.remedy).toContain("gp_probe_status")
+    expect(note.remedy).toContain("no evidence")
+    expect(verifyLedger(path.join(dir, "decisions.jsonl")).entries).toBe(0)
+    // The row still reads as a transport success (the daemon did answer), so the failure
+    // only reaches the model through the appended warning — that is the divergence, and it
+    // is pinned rather than smoothed over.
+    expect(output.metadata).toMatchObject({ ok: true })
+    expect(decisionLogWarning(note)).toContain("decision log NOT written")
+  })
+
   test("a frame that fails the kernel's contract is a loud failure, not a silent gap", () => {
     const { env, dir } = ledgerEnv()
     const broken = { evidencePack: { ...(pack("ok-01") as object), attribution: { level: "telepathic", contaminated: false } } }
@@ -129,6 +170,23 @@ describe("what the plugin refuses to invent", () => {
     expect(note.remedy.length).toBeGreaterThan(10)
     expect(verifyLedger(path.join(dir, "decisions.jsonl")).entries).toBe(0)
     expect(decisionLogWarning(note)).toContain("decision log NOT written")
+  })
+
+  test("its prose names only tools this surface defines", () => {
+    // A method the fork does not have, written into an explanatory comment, is the same
+    // defect as a method the engine does not have: the next person reads the comment as a
+    // list of what exists. `gp_shutdown` lived in this file's skip-list comment for that
+    // long — there is no such tool here, and the engine's `shutdown` is excluded from the
+    // capabilities `hello` advertises (`FrameCodec.swift`'s `capabilityMethods`).
+    const surface = readFileSync(path.join(import.meta.dir, "..", "..", "src", "tool", "glasspane", "index.ts"), "utf8")
+    const defined = new Set([...surface.matchAll(/Tool\.define\(\s*"([a-z_]+)"/g)].map((m) => m[1]))
+    expect(defined.size, "the tool surface defines no tools — this scan is measuring an empty set").toBeGreaterThan(5)
+    for (const file of ["glasspane-decision-log.ts", "glasspane-compaction.ts"]) {
+      const text = readFileSync(path.join(import.meta.dir, "..", "..", "src", "plugin", file), "utf8")
+      for (const name of new Set([...text.matchAll(/\bgp_[a-z_]+/g)].map((m) => m[0]))) {
+        expect([...defined].sort(), `${file} names ${name}, which no Tool.define registers`).toContain(name)
+      }
+    }
   })
 })
 

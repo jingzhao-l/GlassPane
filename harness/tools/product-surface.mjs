@@ -248,6 +248,76 @@ check(
   `postinstall.mjs resolves the platform package without naming ${product.registry} — an ambient npmrc would decide which bytes get executed`,
 )
 
+// ---- one registry, and every npm-facing lane names it
+// `product.json` carried the registry twice (`registry` and `npm.registry`) and only one of them
+// was gated, so a lane reading the other could silently point at a mirror. Both fields still
+// exist (docs quote the nested one), so they must agree, and the publisher — the only lane that
+// *writes* — has to name it on both its reads and its publishes.
+check(
+  "registry",
+  (product.npm?.registry ?? product.registry) === product.registry,
+  `product.json's npm.registry (${product.npm?.registry}) disagrees with the gated product.registry (${product.registry}) — two answers for one fact`,
+)
+const publishTs = readCode("packages/opencode/script/publish.ts")
+check(
+  "publish-registry",
+  /npm view [^\n]*--registry \$\{registry\}/.test(publishTs) && /npm publish [^\n]*--registry \$\{registry\}/.test(publishTs),
+  "packages/opencode/script/publish.ts consults or writes the registry without naming this product's registry",
+)
+
+// ---- the engine's method table, as the published fork carries it
+// `contracts/engine-methods.json` exists because the fork's fixed-point tests need the engine's
+// method list and the engine is NOT in the subtree split: a test that read `FrameCodec.swift`
+// directly passed on this machine and failed in the split repo's CI on the missing file. A pinned
+// copy that nobody re-derives is just a second answer waiting to be wrong, so this rule re-parses
+// the Swift enum on every run and refuses any drift between it and the contract. The parser knows
+// both ways Swift writes a case (`case hello, attach, act, observe` and
+// `case auditUI = "audit_ui" // …`); reading one identifier per line reported an engine with no
+// `attach`, `observe`, `act`, `last_evidence` or `restore`.
+{
+  const contractRel = "contracts/engine-methods.json"
+  const swiftRel = path.join(repoRoot, "engine", "Sources", "GlassPaneEngine", "FrameCodec.swift")
+  const contract = existsSync(path.join(forkRoot, contractRel)) ? JSON.parse(read(contractRel)) : null
+  check("engine-methods", contract !== null, `${contractRel} is missing — the fork's tests have no engine method table to read`)
+  if (contract && existsSync(swiftRel)) {
+    const codec = readFileSync(swiftRel, "utf8")
+    const from = codec.indexOf("public enum EngineMethod")
+    const to = codec.indexOf("extension EngineMethod", from)
+    check("engine-methods", from >= 0 && to > from, "FrameCodec.swift has no `public enum EngineMethod` … `extension EngineMethod` span — the table cannot be re-derived")
+    const names = []
+    if (from >= 0 && to > from) {
+      for (const line of codec.slice(from, to).split("\n")) {
+        const declared = line.match(/^\s*case\s+(.*)$/)
+        if (!declared) continue
+        for (const entry of declared[1].replace(/\/\/.*$/, "").split(",")) {
+          const one = entry.trim()
+          const wired = one.match(/^\w+\s*=\s*"([a-z_]+)"$/)
+          const bare = one.match(/^([a-zA-Z]\w*)$/)
+          const name = wired ? wired[1] : bare ? bare[1] : null
+          if (name) names.push(name)
+        }
+      }
+    }
+    const shipped = Array.isArray(contract.methods) ? contract.methods : []
+    const missing = names.filter((n) => !shipped.includes(n))
+    const extra = shipped.filter((n) => !names.includes(n))
+    check(
+      "engine-methods",
+      names.length > 0 && missing.length === 0 && extra.length === 0,
+      `${contractRel} disagrees with the engine: ${missing.length} method(s) the Swift declares are absent (${missing.join(", ")}), ${extra.length} the contract names that the engine does not (${extra.join(", ")}). Re-derive it from FrameCodec.swift; do not edit the contract to match a test.`,
+    )
+  } else if (contract) {
+    // No engine tree here means no ability to re-derive — which is exactly the state a stale
+    // contract survives in. Say it out loud instead of silently passing.
+    console.log("  note: engine/Sources is absent in this checkout — engine-methods compares the contract against nothing (this is NOT a re-derivation)")
+  }
+}
+check(
+  "publish-registry",
+  readCode("packages/opencode/script/verify-published.ts").includes("const registry = product.registry"),
+  "verify-published.ts no longer reads the gated product.registry — it would verify against a registry nothing pins",
+)
+
 // ---- a removed first-party capability must not keep a user-visible entry
 // `product.json` lists session sharing among what this product does not have (no account, no
 // cloud). `run` still advertised `--share` for it, and the call it made resolves to no route at
@@ -390,27 +460,94 @@ check("postinstall-identity", shimText.includes(`"${product.binary}"`), "bin shi
 check("runtime-package-names", readCode("packages/opencode/src/installation/index.ts").includes(`${product.name}@`), "installation/index.ts does not upgrade the product package")
 check("runtime-package-names", readCode("packages/opencode/src/cli/cmd/uninstall.ts").includes(`"uninstall", "-g", "${product.name}"`), "uninstall.ts does not uninstall the product package")
 
-// ---- the CLI's own words name the product's environment variables
-// Every variable gained a GLASSPANE_HARNESS_* name that is read first, with the upstream
-// OPENCODE_* name kept as a legacy fallback (product.json -> privateSurface.envVars). Reading
+// ---- the CLI's own words name the product's environment variables, and one file resolves them
+// Every variable gained a name under the product's own prefix, read first, with the upstream
+// name kept as a legacy fallback; and the resolution point is exactly ONE —
+// packages/core/src/flag/flag.ts's read() (product.json -> privateSurface.envVars). Reading
 // the fallback is code; PRINTING it is a product claim. Four strings did: `serve` and `web`
-// warned about OPENCODE_SERVER_PASSWORD, and `attach` / `run` --help named both credentials as
-// the default source. No ruler had ever looked at a string literal under src/cli/cmd/, so the
-// fix could have come back silently — this is the reader. It scans literals only, which is why
-// the legitimate compat reads (Flag.OPENCODE_SERVER_PASSWORD, Config.string("OPENCODE_..."))
-// stay code and do not trip it.
+// warned about the legacy server password, and `attach` / `run` --help named both credentials
+// as the default source. No ruler had ever looked at a string literal under src/cli/cmd/, so
+// the fix could have come back silently — this is the reader. It scans literals only, which is
+// why the legitimate compat reads (Flag.<legacy key>, Config.string("<legacy key>")) stay code
+// and do not trip it.
+//
+// THREE BLIND SPOTS THIS READER HAD, all of them on the same lane:
+//   - it listed `src/cli/cmd/*.ts` NON-recursively, so `run/` and `debug/` — 39 more files,
+//     including the one that prints the `--help` body — were never opened;
+//   - its literal matcher could not cross a newline, so a multi-line template literal (exactly
+//     how help text is written) could not be matched even in a file it did open;
+//   - the shipped launcher was not in the discovery set at all, so when it started reading one
+//     product variable by its legacy name directly — `process.env.<LEGACY>_BIN_PATH`, bypassing
+//     read() — the product's own name was silently ignored by the thing users actually run, and
+//     nothing said so. Both directions are checked now: a raw legacy read outside the one
+//     resolver must be the resolver's own rule (product name first), and the launcher must
+//     really name the product's variable.
+// The two prefixes are read out of product.json rather than spelled in here, so this file
+// cannot become a second place the names live.
+const upstreamName = (product.upstream?.repo ?? "").split("/").pop() ?? ""
+const legacyPrefix = `${upstreamName.toUpperCase()}_`
+const productPrefix = `${String(product.name).toUpperCase().replace(/[^A-Z0-9]/g, "_")}_`
 const cliDir = "packages/opencode/src/cli/cmd"
-for (const entry of readdirSync(path.join(forkRoot, cliDir)).filter((x) => x.endsWith(".ts")).sort()) {
-  const code = readCode(`${cliDir}/${entry}`)
-  const literal = (code.match(/(["'`])(?:\\\1.|(?!\1)[^\\\n])*\1/g) ?? []).find(
-    (s) => /(defaults to|Warning|is not set)[^\n]*(OPENCODE_[A-Z0-9_]+|opencode\.ai|@opencode-ai\/)/.test(s),
+const launcher = "packages/opencode/bin/glasspane-harness"
+const flagFile = "packages/core/src/flag/flag.ts"
+
+function tsFilesUnder(rel) {
+  const found = []
+  for (const entry of readdirSync(path.join(forkRoot, rel), { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    const child = `${rel}/${entry.name}`
+    if (entry.isDirectory()) found.push(...tsFilesUnder(child))
+    else if (entry.name.endsWith(".ts")) found.push(child)
+  }
+  return found
+}
+
+// A single- or double-quoted literal cannot hold a raw newline; a template literal can, and
+// `help` bodies are written that way — the matcher this replaces stopped at the first line.
+const literalPattern = /(["'])(?:\\\1.|(?!\1)[^\\\n])*\1|`(?:\\[\s\S]|[^`\\])*`/g
+const upstreamHost = upstreamName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+const printedLegacy = new RegExp(`(defaults to|Warning|is not set)[\\s\\S]*${legacyPrefix}[A-Z0-9_]+`)
+const printedUpstream = new RegExp(`(defaults to|Warning|is not set)[\\s\\S]*(${upstreamHost}\\.ai|@${upstreamHost}-ai/)`)
+// `process.env.<LEGACY>…` and `process.env["<LEGACY>…"]` are resolutions. A property read off
+// `Flag`, or a key handed to `Flag.read`, is not — those go through the one resolver.
+const rawLegacyRead = new RegExp(
+  `process\\.env\\.${legacyPrefix}[A-Z0-9_]+|process\\.env\\[\\s*["'\`]${legacyPrefix}[A-Z0-9_]+["'\`]`,
+  "g",
+)
+
+const envDiscovery = [...tsFilesUnder(cliDir), launcher]
+for (const rel of envDiscovery) {
+  const code = readCode(rel)
+  const literal = (code.match(literalPattern) ?? []).find(
+    (s) => printedLegacy.test(s) || printedUpstream.test(s),
   )
   check(
     "cli-text-names-product-env",
     !literal,
-    `${cliDir}/${entry} shows the user ${JSON.stringify((literal ?? "").slice(0, 78))} — name the product's own variable; the upstream one is a fallback that gets read, not printed`,
+    `${rel} shows the user ${JSON.stringify((literal ?? "").slice(0, 78))} — name the product's own variable; the upstream one is a fallback that gets read, not printed`,
   )
 }
+
+// Any raw legacy-name resolution outside flag.ts has to be the same rule flag.ts implements:
+// product name read first, legacy name as the fallback. One file may do that — the launcher,
+// which ships standalone and cannot import the resolver — and it is named below.
+for (const rel of envDiscovery) {
+  if (rel === flagFile) continue
+  const code = readCode(rel)
+  for (const read of code.matchAll(rawLegacyRead)) {
+    const name = (read[0].match(new RegExp(`${legacyPrefix}[A-Z0-9_]+`)) ?? [""])[0]
+    const twin = productPrefix + name.slice(legacyPrefix.length)
+    check(
+      "env-resolution-point",
+      rel === launcher && code.indexOf(twin) !== -1 && code.indexOf(twin) < read.index,
+      `${rel} resolves ${name} where only ${flagFile} may: the product's own name (${twin}) is ${code.includes(twin) ? "read after the legacy one, so an exported product setting is ignored" : "never read at all"}. product.json -> privateSurface.envVars says the resolution point is exactly one`,
+    )
+  }
+}
+check(
+  "env-resolution-point",
+  readCode(launcher).includes(`${productPrefix}BIN_PATH`),
+  `${launcher} does not name the product's own BIN_PATH variable, so an exported ${productPrefix}BIN_PATH is ignored by the shipped launcher`,
+)
 
 // The report and the exit are the LAST thing this script does, and there is exactly one
 // of each. Four assertions used to sit below both of them: they still ran, still pushed

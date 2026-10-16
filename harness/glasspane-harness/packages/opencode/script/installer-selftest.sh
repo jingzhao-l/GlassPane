@@ -250,6 +250,7 @@ run_install() {
     export STUB_SUMS_HTTP="${SCENARIO_SUMS_HTTP:-}"
     export STUB_CURL_ASSET_FAIL="${SCENARIO_CURL_ASSET_FAIL:-}"
     export STUB_GPG_IMPORT_FAILS="${SCENARIO_GPG_IMPORT_FAILS:-}"
+    export GLASSPANE_HARNESS_ALLOW_UNVERIFIED="${SCENARIO_ALLOW_UNVERIFIED:-}"
     export TMPDIR="${SCENARIO_TMPDIR:-/tmp}"
     mkdir -p "$TMPDIR"
     export GLASSPANE_HARNESS_HOME="$SCRATCH/root-$(basename "$log")"
@@ -309,13 +310,23 @@ assert_has "the refusal names the mismatch" "$SCRATCH/verify-bad.log" "checksum 
 mv "$SCRATCH/keep.zip" "$FIX/glasspane-harness-darwin-arm64.zip"
 
 # ---------------------------------------------------------------- 5: no manifest at all
-# The claim must degrade with the evidence, not with the intent.
+# The claim must degrade with the evidence, not with the intent — and a release the lane
+# cannot vouch for is not a release it installs. Missing SHA256SUMS.txt used to warn and
+# continue; the release lane publishes a manifest for every target and fails the run if one
+# is absent, so 404 means the release in front of us is incomplete. Default is now refusal,
+# with an explicit opt-out that says in the state string who chose it.
 mv "$FIX/SHA256SUMS.txt" "$SCRATCH/SHA256SUMS.txt.hold"
 run_install "$SCRATCH/no-sums.log" --version 9.9.9
-assert_code "the installer still completes when the release carries no manifest" "$?" "0"
+assert_code "a release with no checksum manifest is refused" "$?" "1"
 assert_not_has "with no SHA256SUMS.txt it does not claim sha256 verified" "$SCRATCH/no-sums.log" "sha256: verified"
-assert_has "it says the checksum was skipped and why" "$SCRATCH/no-sums.log" "sha256: skipped (no SHA256SUMS.txt published for v9.9.9)"
-assert_has "and it warns that the bytes were not fully verified" "$SCRATCH/no-sums.log" "not fully verified"
+assert_has "it says the manifest is not published" "$SCRATCH/no-sums.log" "no SHA256SUMS.txt is published for v9.9.9"
+assert_has "and it names the opt-out instead of inventing one" "$SCRATCH/no-sums.log" "GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1"
+assert_not_has "nothing is installed on that path" "$SCRATCH/no-sums.log" "[OK]    installed via"
+SCENARIO_ALLOW_UNVERIFIED=1 run_install "$SCRATCH/no-sums-optout.log" --version 9.9.9
+assert_code "GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 does install" "$?" "0"
+assert_has "and the state names the override as the reason" "$SCRATCH/no-sums-optout.log" "sha256: skipped by GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1"
+assert_has "and it still says the bytes were not fully verified" "$SCRATCH/no-sums-optout.log" "not fully verified"
+assert_not_has "the opt-out does not claim a checksum verification it did not do" "$SCRATCH/no-sums-optout.log" "sha256: verified"
 mv "$SCRATCH/SHA256SUMS.txt.hold" "$FIX/SHA256SUMS.txt"
 
 # ---------------------------------------------------------------- 6: a failed signature
@@ -345,12 +356,21 @@ assert_not_has "no-gpg does not claim GPG verified" "$SCRATCH/no-gpg.log" "GPG: 
 mv "$SCRATCH/gpg.hold" "$STUB/gpg"
 
 # ---------------------------------------------------------------- 8: nothing was published
+# The shape a half-built release actually has: no manifest, no signature sidecar. This is the
+# case that used to install anyway behind two warnings — the release lane publishes both for
+# every target, so their absence describes a broken release, not a policy the installer gets
+# to waive on its own.
 mv "$FIX/SHA256SUMS.txt" "$SCRATCH/s.hold"
 mv "$FIX/glasspane-harness-darwin-arm64.zip.asc" "$SCRATCH/a.hold"
 run_install "$SCRATCH/unverified.log" --version 9.9.9
-assert_code "the installer still installs an unsigned, unmanifested release" "$?" "0"
+assert_code "an unsigned, unmanifested release is refused" "$?" "1"
 assert_not_has "it never prints the unconditional verified claim" "$SCRATCH/unverified.log" "sha256 + GPG verified"
-assert_has "it prints both skipped states" "$SCRATCH/unverified.log" "sha256: skipped"
+assert_has "it says which of the two is missing" "$SCRATCH/unverified.log" "no SHA256SUMS.txt is published"
+assert_not_has "nothing is installed on that path" "$SCRATCH/unverified.log" "[OK]    installed via"
+SCENARIO_ALLOW_UNVERIFIED=1 run_install "$SCRATCH/unverified-optout.log" --version 9.9.9
+assert_code "the override installs, and says so" "$?" "0"
+assert_has "it prints both skipped states, each naming the override" "$SCRATCH/unverified-optout.log" "skipped by GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1"
+assert_not_has "and the override never prints the unconditional verified claim" "$SCRATCH/unverified-optout.log" "sha256 + GPG verified"
 mv "$SCRATCH/s.hold" "$FIX/SHA256SUMS.txt"
 mv "$SCRATCH/a.hold" "$FIX/glasspane-harness-darwin-arm64.zip.asc"
 
@@ -439,16 +459,19 @@ assert_not_has "and it never dresses a transport failure up as an unpublished ma
 assert_not_has "nothing is installed on that path" "$SCRATCH/sums-blocked.log" "[OK]    installed via"
 SCENARIO_SUMS_HTTP=""
 
-# ---------------------------------------------------------------- 15: a true 404 still skips
+# ---------------------------------------------------------------- 15: a true 404 refuses too
 # Not a repeat of 5: there the file was absent from the fixture dir, here the endpoint answers
-# 404 for a manifest that exists. Both must reach the same honest skip, which is what keeps
-# the refusal in 14 from being a "everything is fatal now" over-correction.
+# 404 for a manifest that exists on disk. Both mean "this release carries no manifest", and both
+# must reach the same refusal — while test 14 keeps the *other* fact (a blocked fetch) separately
+# worded, so the installer is not simply "everything is fatal now".
 printf 'gone\n' > "$SCRATCH/sums.hold"
 mv "$FIX/SHA256SUMS.txt" "$SCRATCH/sums.real"
 SCENARIO_SUMS_HTTP=404 run_install "$SCRATCH/sums-404.log" --version 9.9.9
-assert_code "a manifest that genuinely is not published still installs" "$?" "0"
-assert_has "and names it as unpublished" "$SCRATCH/sums-404.log" "sha256: skipped (no SHA256SUMS.txt published for v9.9.9)"
+assert_code "a manifest the endpoint reports as unpublished is refused" "$?" "1"
+assert_has "and names it as unpublished" "$SCRATCH/sums-404.log" "no SHA256SUMS.txt is published for v9.9.9"
 assert_not_has "it does not claim a checksum verification it did not do" "$SCRATCH/sums-404.log" "sha256: verified"
+SCENARIO_SUMS_HTTP=404 SCENARIO_ALLOW_UNVERIFIED=1 run_install "$SCRATCH/sums-404-optout.log" --version 9.9.9
+assert_code "and the same 404 installs under the documented override" "$?" "0"
 mv "$SCRATCH/sums.real" "$FIX/SHA256SUMS.txt"
 
 # ---------------------------------------------------------------- 16: redirect discipline

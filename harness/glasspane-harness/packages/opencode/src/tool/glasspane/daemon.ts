@@ -16,13 +16,39 @@ import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 
-/** Request timeouts per method. `restore` replays UI steps, so it gets more. */
+/**
+ * Request timeouts per method, keyed by the method's wire name.
+ *
+ * Two rules hold this table honest, and both are pinned in
+ * `test/tool/glasspane-surface.test.ts`:
+ *  - every entry names a method a call site in this package sends. The engine's table
+ *    (`FrameCodec.swift`'s `EngineMethod`) accepts more than this surface uses:
+ *    `restore`, `snapshot`, `audit_ui`, `capture_view` and `assert_element` are on the
+ *    wire and are driven by the *other* shell, which keeps its own budgets
+ *    (`mcp-shell/src/engine-client.ts`: `ENGINE_DEADLINES_MS`, plus
+ *    `RESTORE_BASE_DEADLINE_MS` for `restore`, which really does replay UI steps). None
+ *    of them is reachable from a `gp_*` tool here, so none of them has a number here:
+ *    the sentence that used to sit on this table ("`restore` replays UI steps, so it
+ *    gets more") described a call this file never makes, and `shutdown: 5_000` had no
+ *    reader anywhere — a budget nobody spends is a budget nobody re-measures;
+ *  - no call site in `src/tool/glasspane/` brings its own number. `call` looks the
+ *    method up here, so the table is the only place a budget is written down; a method
+ *    that is not in it gets `default` and says so in this sentence rather than in a
+ *    magic number at the call site.
+ */
 export const TIMEOUT_MS = {
   default: 30_000,
-  act: 60_000,
+  hello: 5_000,
+  probe_status: 8_000,
   observe: 30_000,
-  shutdown: 5_000,
+  act: 60_000,
 } as const
+
+/** The budget for one method: its own entry if it has one, `default` if it has not. */
+export function timeoutFor(method: string): number {
+  const listed = (TIMEOUT_MS as Readonly<Record<string, number>>)[method]
+  return listed ?? TIMEOUT_MS.default
+}
 
 export const MAX_FRAME_BYTES = 4 * 1024 * 1024
 
@@ -37,16 +63,57 @@ export interface DaemonError {
 
 export type DaemonReply = { ok: true; result: unknown } | { ok: false; error: DaemonError }
 
+/** What one engine-facing location rule answers: `{code, message, remedy}`. */
+export interface LocationRejection {
+  readonly code: string
+  readonly message: string
+  readonly remedy: string
+}
+
+export type SocketLocation =
+  | { readonly ok: true; readonly socket: string; readonly stateRoot: string }
+  | { readonly ok: false; readonly error: LocationRejection }
+
 /**
- * Where the daemon's socket lives. Deliberately NOT a copy of the engine's
- * constant: the MCP shell reads the same env var, and the default path follows
- * the documented convention, so neither surface carries a hard-coded path that
- * can drift from the other.
+ * Where the daemon's socket lives, and the state root it sits in — the fork's ONE
+ * resolution rule for both, consulted by this module before it connects and by
+ * `kernel.ts` before it refuses to write next to the engine.
+ *
+ * Deliberately NOT a copy of the engine's constant: the MCP shell reads the same env
+ * var, and the default path follows the documented convention, so neither surface
+ * carries a hard-coded path that can drift from the other.
+ *
+ * A relative `GLASSPANE_SOCKET` is refused rather than resolved. `glasspaned` passes
+ * `--socket-path` straight through (`StateRoot.engineSocketPath`), so a relative name
+ * is bound wherever *the daemon* was standing; `path.resolve` would put it wherever
+ * *this* process is standing instead. Two answers to "which engine is this" is how the
+ * harness ends up treating its own working directory as the engine's state root —
+ * refusing every ledger path inside it while talking to a daemon that lives elsewhere.
  */
-export function socketPath(): string {
-  const fromEnv = process.env.GLASSPANE_SOCKET
-  if (fromEnv && fromEnv.length > 0) return fromEnv
-  return path.join(os.homedir(), ".glasspane", "engine.sock")
+export function resolveSocket(env: NodeJS.ProcessEnv = process.env): SocketLocation {
+  const fromEnv = env.GLASSPANE_SOCKET
+  if (fromEnv !== undefined && fromEnv.length > 0) {
+    if (!path.isAbsolute(fromEnv)) {
+      return {
+        ok: false,
+        error: {
+          code: "GP_E_SOCKET_PATH",
+          message: `GLASSPANE_SOCKET='${fromEnv}' is not absolute, so this process cannot say which engine it would talk to`,
+          remedy: `point GLASSPANE_SOCKET at the absolute path glasspaned bound (e.g. ${path.join(os.homedir(), ".glasspane", "engine.sock")}) — the daemon binds a relative name wherever it was started, and this harness would resolve the same string against its own working directory and read a different file`,
+        },
+      }
+    }
+    return { ok: true, socket: fromEnv, stateRoot: path.dirname(fromEnv) }
+  }
+  const root = path.join(env.HOME ?? os.homedir(), ".glasspane")
+  return { ok: true, socket: path.join(root, "engine.sock"), stateRoot: root }
+}
+
+/** The engine's state root under the one rule above; refused when the socket cannot be located. */
+export function stateRootOf(env: NodeJS.ProcessEnv = process.env): { ok: true; path: string } | { ok: false; error: LocationRejection } {
+  const located = resolveSocket(env)
+  if (!located.ok) return { ok: false, error: located.error }
+  return { ok: true, path: located.stateRoot }
 }
 
 function failure(code: string, message: string, remedy: string): DaemonReply {
@@ -55,7 +122,14 @@ function failure(code: string, message: string, remedy: string): DaemonReply {
 
 function rawRequest(method: string, params: object, timeoutMs: number): Promise<DaemonReply> {
   return new Promise((resolve) => {
-    const target = socketPath()
+    const located = resolveSocket()
+    if (!located.ok) {
+      // Total by construction, like every other path here: an unusable setting is a
+      // reply the agent can read, not an exception the tool runtime swallows.
+      resolve(failure(located.error.code, located.error.message, located.error.remedy))
+      return
+    }
+    const target = located.socket
     // The socket is created unconnected on purpose: `connect` runs *after* the
     // listeners below exist (see the comment at the bottom of this function).
     const socket = new net.Socket()
@@ -192,9 +266,13 @@ function rawRequest(method: string, params: object, timeoutMs: number): Promise<
         })
         return
       }
-      // `{id, result}` or `{id, error}` — and `result` may legitimately be `null`
-      // ("no evidence pack for this id"), so presence is the question, not truthiness.
-      // A frame carrying neither was, until now, resolved as `{ok: true, result:
+      // `{id, result}` or `{id, error}`, and the question here is presence, not
+      // truthiness: `result: null` is a frame the client must still hand up rather than
+      // turn into a failure it did not see. It is NOT a frame the engine emits —
+      // `lastEvidence(operationId:)` throws `GP_E_NO_EVIDENCE` when there is nothing to
+      // give back (`EngineCore.swift:1631-1644`) and every other method answers with an
+      // object — so nothing downstream may read `null` as "the engine said something".
+      // A frame carrying neither field was, until now, resolved as `{ok: true, result:
       // undefined}`, which the tool layer renders as "gp_act: act ok": the model reads
       // that the click happened when the engine answered nothing at all. A transport
       // that manufactures success out of an empty response is a false green inside the
@@ -229,14 +307,19 @@ function rawRequest(method: string, params: object, timeoutMs: number): Promise<
  * raised defect that disappears into the tool runtime. `rawRequest` never
  * rejects — every failure path resolves a `DaemonReply` — which is what lets
  * this stay `Effect.promise` instead of a try/catch wrapper.
+ *
+ * The budget comes from `TIMEOUT_MS` by method name. A caller may still pass one
+ * (the offline E7/E8 measurements wait longer than the tool surface does), but no
+ * call site in `src/tool/glasspane/` does — that is what keeps the table and the
+ * surface from drifting apart, and the surface test pins it.
  */
-export function call(method: string, params: object = {}, timeoutMs: number = TIMEOUT_MS.default) {
+export function call(method: string, params: object = {}, timeoutMs: number = timeoutFor(method)) {
   return Effect.promise(() => rawRequest(method, params, timeoutMs))
 }
 
 /** `hello` is the only place capabilities and versions come from. */
 export function hello() {
-  return call("hello", {}, 5_000)
+  return call("hello")
 }
 
 export interface Capabilities {

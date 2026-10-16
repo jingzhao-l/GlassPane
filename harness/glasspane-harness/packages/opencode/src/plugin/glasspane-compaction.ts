@@ -32,10 +32,15 @@ export type PlanRead = { ok: true; plan: RunPlanRef | null } | { ok: false; erro
  *    dimension ids the caller was configured with and does the accounting; the
  *    vocabulary itself belongs to the iterate config (nine ids, locked across
  *    six sources by `test_dimension_lock.py`), so this module never declares an
- *    ontology of its own. As shipped, the production path reaches this with no plan and no
- *    recorded dimensions — `collectEvidenceAnchors` transcribes daemon frames and M2
- *    receipts, and neither carries a dimension — so `renderDimensionCoverage` returns
- *    `undefined` and the block simply omits the line. A session with a plan and zero
+ *    ontology of its own. As shipped, the production path reaches this with no plan
+ *    (`GLASSPANE_RUN_PLAN` is unset by default), and the anchors it can carry a
+ *    declared dimension on come only from calls that recorded a decision: the engine
+ *    emits an `evidencePack` on one method, `last_evidence` (`Dispatcher.swift:156`),
+ *    so a dimension declared on `gp_act`, `gp_observe`, `gp_attach` or `gp_diagnose`
+ *    never reaches an anchor at all — those calls record no decision, and an anchor is
+ *    where a declared dimension would have been transcribed. With nothing planned and
+ *    nothing recorded `renderDimensionCoverage` returns `undefined` and the block
+ *    simply omits the line. A session with a plan and zero
  *    decisions would get "0/N dimensions verified", which is the useful sentence; a session
  *    with no plan gets silence, because there is no coverage to state. Wiring the plan
  *    (the kernel's `run-plan` contract carries `dimensions`) is open work, and
@@ -328,7 +333,10 @@ export async function injectEvidenceAnchors(
     const message = `the anchors were read but this plugin could not build the block (${errorText(error)})`
     const remedy = `compact anyway — the chain is on disk and untouched by this; the failure is in this plugin's renderer, not in the host, so re-reading the session will not change it`
     appendBlock(output, `GlassPane compaction note: evidence anchors NOT preserved — ${message}. remedy: ${remedy}`)
-    return { status: "failed", code: "GP_E_COMPACTION_MESSAGES", message, remedy }
+    // Its own code, for its own stage: sharing `GP_E_COMPACTION_MESSAGES` with the pull
+    // failure made the two stages one bucket no matter what the sentence said, and the
+    // sentence right here blames this plugin's renderer.
+    return { status: "failed", code: "GP_E_COMPACTION_RENDER", message, remedy }
   }
 }
 

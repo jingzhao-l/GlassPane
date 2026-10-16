@@ -20,7 +20,9 @@
  * Exit codes: 0 clean, 1 a workflow is broken, 2 no workflows found (caliber
  * error — refusing to report success over an empty set).
  */
-import { existsSync, readFileSync, readdirSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -82,6 +84,12 @@ function inspect(target) {
   let inRun = false
   let runIndent = 0
   const runRefs = []
+  // Whole `run:` bodies, assembled as the scanner goes. `runRefs` is per line on purpose —
+  // the script-existence rule reports line numbers — but a shell body has to be judged as one
+  // script, and comment/blank lines inside it are skipped by this loop, so re-joining those
+  // fragments by line number later cannot work.
+  const shells = []
+  let shellBlock = null
   let stepDir = "" // step-level working-directory, applied to that step's scripts
   let hasTopPermissions = false // a top-level `permissions:` block; see the check at the end
 
@@ -101,9 +109,11 @@ function inspect(target) {
       const bodyIndent = raw.search(/\S/)
       if (bodyIndent > runIndent) {
         runRefs.push({ text: raw.trim(), line: i + 1, dir: stepDir })
+        if (shellBlock) shellBlock.lines.push(raw.trim())
         continue
       }
       inRun = false
+      shellBlock = null
     }
 
     if (top) {
@@ -127,6 +137,10 @@ function inspect(target) {
       if (/[|>]/.test(inline)) {
         inRun = true
         runIndent = indent.length
+        shellBlock = { line: i + 1, lines: [] }
+        shells.push(shellBlock)
+      } else if (inline) {
+        shells.push({ line: i + 1, lines: [inline] })
       }
     }
   }
@@ -205,6 +219,32 @@ function inspect(target) {
       }
     }
   }
+
+  // 2a. every `run:` body has to parse as shell. A workflow file can be valid YAML and
+  //     still carry a step whose script is unbalanced — Actions then fails that step at run
+  //     time, mid-release, after the expensive jobs in front of it already ran. Found the
+  //     hard way on 2026-10-16: an edit to a publish step left one `fi` short, and the only
+  //     thing between that and a shipped release was a human reading the YAML. The bodies come
+  //     from the scanner above (`shells`), not from re-joining `runRefs` by line number: this
+  //     loop skips blank and `#` lines, so a body containing comments has gaps by construction,
+  //     and re-assembling on contiguity reported 232 "problems" across five fine workflows.
+  //     A control that cries wolf is worse than none — the next real one drowns with the rest.
+  shells.forEach((block, index) => {
+    const script = block.lines.join("\n")
+    if (!script.trim()) return
+    if (/^\s*(python3|node|bun)\s/.test(block.lines[0] ?? "")) return // a one-liner in another language
+    const tmp = path.join(tmpdir(), `wf-step-${process.pid}-${index}.sh`)
+    writeFileSync(tmp, `${script}\n`)
+    const parsed = spawnSync("bash", ["-n", tmp], { encoding: "utf8" })
+    unlinkSync(tmp)
+    if (parsed.status !== 0) {
+      const detail = (parsed.stderr || parsed.stdout || "bash -n failed").trim().split("\n")[0].replaceAll(tmp, "<step>")
+      problems.push(
+        `line ${block.line}: this step's shell does not parse — ${detail}. ` +
+          `YAML validity is not shell validity: this step would fail at run time, after the jobs before it already spent their minutes.`,
+      )
+    }
+  })
 
   // 2b. `bun run <name>` / `npm run <name>` names a *package.json script*, not a
   //     file, so the rule above cannot see it: a step that ran `bun run build` from
@@ -388,7 +428,7 @@ function jobPolicyProblems(lines, { enforcePins = true } = {}) {
     if (!inJobs) continue
     const jobMatch = /^ {2}([A-Za-z0-9_.-]+):/.exec(line)
     if (jobMatch) {
-      current = { name: jobMatch[1], line: i + 1, scopes: null, readsRepo: false, environment: null, unpinned: [] }
+      current = { name: jobMatch[1], line: i + 1, scopes: null, readsRepo: false, environment: null, unpinned: [], unresolvable: [] }
       jobs.set(current.name, current)
       continue
     }
@@ -415,9 +455,25 @@ function jobPolicyProblems(lines, { enforcePins = true } = {}) {
     if (used && current.environment && !/@[0-9a-f]{40}/.test(used[1])) {
       current.unpinned.push({ ref: used[1], line: i + 1 })
     }
+    // Shape, not provenance. A `uses:` value GitHub cannot resolve makes the whole workflow
+    // file fail at registration: the run is created, gets zero jobs, and dies in under a second
+    // with no log at all — measured on 2026-10-15 when a release lane pinned an action as a bare
+    // 40-hex SHA with no `owner/repo` in front of it. The pin rule above cannot see that, because
+    // a bare SHA *is* 40 hex. Only two shapes are addressable: a path inside the repository, or
+    // `owner/repo@ref` (optionally with a host for container actions).
+    if (used && !/^\.{1,2}\//.test(used[1]) && !/^(?:[\w.-]+\/)?[\w.-]+\/[\w.-]+@[\w.-]+$/.test(used[1])) {
+      current.unresolvable.push({ ref: used[1], line: i + 1 })
+    }
   }
 
   for (const job of jobs.values()) {
+    if (job.unresolvable?.length) {
+      out.push(
+        `job "${job.name}" (line ${job.line}) runs ${job.unresolvable.map((u) => `"${u.ref}" at line ${u.line}`).join(", ")} — ` +
+          `a "uses:" value must be "./some/local/action" or "owner/repo@ref" (a 40-hex SHA is a ref, not an address). ` +
+          `GitHub rejects the whole file otherwise: the run appears, gets no jobs, and fails in ~0s with no log.`,
+      )
+    }
     if (job.scopes && job.readsRepo && !job.scopes.has("contents")) {
       out.push(
         `job "${job.name}" (line ${job.line}) declares its own "permissions:" block without "contents", while it checks out the repository — ` +
@@ -642,9 +698,24 @@ jobs:
       expect: /secrets context/,
     },
     {
+      id: "uses: pinned to a bare SHA with no owner/repo (the 0-second red release run)",
+      // The shape GitHub itself rejects. Written the way the defect actually shipped: a
+      // 40-hex SHA standing alone where `actions/upload-artifact@<sha>` belongs — a pin the
+      // pin rule is happy with, and a workflow file GitHub cannot register at all.
+      apply: (t) => t.replace("- uses: actions/checkout@v4", "- uses: cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2"),
+      expect: /must be "\.\/some\/local\/action" or "owner\/repo@ref"/,
+    },
+    {
       id: "unquoted value containing ': ' (the harness-contract defect)",
       apply: (t) => t.replace("name: build the thing", "name: canonical kernel: moved? anchor still reachable?"),
       expect: /unquoted value/,
+    },
+    {
+      id: "a `run:` body whose shell does not parse (the missing `fi`)",
+      // YAML stays valid here — that is the point. The defect only surfaces when the step
+      // executes, which in a release lane is minutes and one half-published version later.
+      apply: (t) => t.replace("        run: node scripts/check-version.mjs\n", "        run: |\n          if [ -n \"x\" ]; then\n            echo yes\n"),
+      expect: /this step's shell does not parse/,
     },
     {
       id: "referenced script that does not exist",

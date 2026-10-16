@@ -356,9 +356,23 @@ function addedLinesAgainstRef(blobs, rel, forkAbs) {
   try {
     let diff = ""
     try {
-      execFileSync("diff", ["-u", tmp, forkAbs], { encoding: "utf8", maxBuffer: 512 * 1024 * 1024 })
+      diff = execFileSync("diff", ["-u", tmp, forkAbs], { encoding: "utf8", maxBuffer: 512 * 1024 * 1024 })
     } catch (err) {
-      diff = typeof err?.stdout === "string" ? err.stdout : "" // diff exits 1 when files differ: normal
+      // diff's exit code IS the measurement: 0 = identical (empty stdout, counted above),
+      // 1 = there is a difference and stdout carries it, anything else = the comparison
+      // never happened. Swallowing every non-zero exit made exit 2 (an operand diff could
+      // not read) and ENOBUFS (stdout truncated past maxBuffer, which keeps a *partial*
+      // diff) indistinguishable from "no differences" — countAuthoredLines then billed 0,
+      // the one under-count direction the LOC ratchet is blind to: a growing surface
+      // reported as unchanged. Die loudly, naming both operands, instead.
+      const firstLine = String(err.stderr ?? err.message ?? "").trim().split("\n")[0]
+      if (err.code === "ENOBUFS") {
+        die(2, `diff output for '${rel}' exceeded its 512MB buffer and was truncated — the partial diff would bill fewer authored lines than the real one. operands: upstream snapshot ${tmp} vs fork file ${forkAbs}`)
+      }
+      if (err.status !== 1 || typeof err.stdout !== "string") {
+        die(2, `diff of '${rel}' failed with exit ${err.status ?? `signal ${err.signal}`} (only exit 1 means 'files differ') — refusing to bill an unmeasured file as zero authored lines. operands: upstream snapshot ${tmp} vs fork file ${forkAbs}. diff said: ${firstLine}`)
+      }
+      diff = err.stdout
     }
     return countAuthoredLines(diff)
   } finally {
@@ -541,7 +555,11 @@ if (mode === "record") {
   // next clean `--check` goes red for a change nobody made. fork-diff already refuses on
   // this; surface A had no equivalent guard.
   const dirtyScope = ["mcp-shell/src/", "harness/glasspane-harness/"]
-  const dirty = execFileSync("git", ["diff", "--name-only", "HEAD"], { encoding: "utf8" })
+  // `cwd: repoRoot` because repoRoot comes from THIS FILE's location, not the process's:
+  // run from any other directory, git would read whatever repository (if any) surrounds the
+  // invocation and the refusal below would describe the wrong tree — or throw outside one.
+  // Same rule fork-diff.mjs applies to its git reads.
+  const dirty = execFileSync("git", ["diff", "--name-only", "HEAD"], { cwd: repoRoot, encoding: "utf8" })
     .split("\n")
     .filter((rel) => rel && dirtyScope.some((prefix) => rel.startsWith(prefix)))
     .sort()

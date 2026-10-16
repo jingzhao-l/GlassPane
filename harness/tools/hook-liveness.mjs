@@ -53,6 +53,21 @@ const STRUCTURAL = {
   "provider.transformHeader": "init-time: header transform",
 }
 
+/**
+ * Extension points THIS fork binds, with the binding site. `--record` writes whatever
+ * kind the generator computed (`sites.length > 0 ? "live" : …`), so every assertion that
+ * only re-reads the generator's own rule is a tautology that can never fire. These two
+ * cannot be: if upstream stops dispatching one, or drops it from the declaration, the
+ * golden records it dead/absent while our plugin files keep awaiting calls that never
+ * come — the exact "looks healthy, does nothing" failure this tool exists to catch.
+ * The offline lane, which never opens upstream, is where this check has to live, because
+ * it is the lane CI runs when no clone is present.
+ */
+const BOUND_HOOKS = {
+  "tool.execute.after": "packages/opencode/src/plugin/glasspane-decision-log.ts",
+  "experimental.session.compacting": "packages/opencode/src/plugin/glasspane-compaction.ts",
+}
+
 const args = new Set(process.argv.slice(2))
 
 function fail(code, msg) {
@@ -212,6 +227,13 @@ if (!existsSync(GOLDEN_FILE) && mode !== "record") {
 }
 const golden = existsSync(GOLDEN_FILE) ? JSON.parse(readFileSync(GOLDEN_FILE, "utf8")) : null
 
+// Read before anything dereferences `golden.hooks`: an array-shaped-but-empty golden is
+// the offline lane's contract question below; a golden without the key at all is a broken
+// tool input, and the reader deserves that sentence instead of a TypeError.
+if (golden && !Array.isArray(golden.hooks)) {
+  fail(2, `golden at ${path.relative(repoRoot, GOLDEN_FILE)} has no \`hooks\` array — it is not a hook-liveness golden; re-record`)
+}
+
 if (mode === "record") {
   if (!observed) fail(2, "--record needs the upstream checkout; set upstream.json.checkout")
   const next = {
@@ -245,16 +267,37 @@ if (mode === "offline") {
   // what --offline means: the operator chose a lane that does not read upstream, and the
   // checkout may well be sitting right there (in a worktree it usually is, as a symlink). A
   // degraded output stated as a measurement is the failure mode this file exists to catch.
+  if (!Array.isArray(golden.hooks) || golden.hooks.length === 0) {
+    fail(1, "golden carries no hooks at all — an empty golden is not a contract, and printing OK over it is the loudest possible nothing. Re-record against the pinned checkout.")
+  }
   console.log(`hook-liveness: --offline — this lane does not read upstream, so upstream was NOT observed.`)
   console.log(`  (${pin.checkout} was not opened; nothing here says whether it exists.)`)
   console.log(
     `  golden self-consistency: ${golden.hooks.length} hooks, ${golden.hooks.filter((h) => h.kind === "live").length} live, dead set = [${expectedDead.join(", ")}]`,
   )
+  const KINDS = new Set(["live", "structural", "dead"])
   for (const h of golden.hooks) {
-    if (h.kind === "live" && (!Array.isArray(h.fireSites) || h.fireSites.length === 0)) {
+    // Beyond the generator's own live/fireSites rule (which no golden it wrote can
+    // violate), assert the shapes a hand-edit or a stale-generator golden can have: an
+    // unrecorded kind, a missing declaration line, a fire site without file:line. These
+    // go red for reasons the --record lane does not itself produce.
+    if (typeof h.name !== "string" || !h.name) fail(1, `golden has an entry with no usable name: ${JSON.stringify(h)}`)
+    if (!KINDS.has(h.kind)) fail(1, `golden entry ${h.name} has kind ${JSON.stringify(h.kind)}, not one of live/structural/dead — hand-edited or written by an older generator`)
+    if (typeof h.declaredAt !== "string" || !h.declaredAt) fail(1, `golden entry ${h.name} has no declaredAt — every recorded hook must name its declaration line`)
+    if (!Array.isArray(h.fireSites)) fail(1, `golden entry ${h.name} has no fireSites array`)
+    if (h.kind === "live" && h.fireSites.length === 0) {
       fail(1, `golden is internally inconsistent: ${h.name} marked live with no fire site`)
     }
+    for (const s of h.fireSites) {
+      if (typeof s?.file !== "string" || !Number.isInteger(s?.line)) fail(1, `${h.name} records a fire site without file:line: ${JSON.stringify(s)}`)
+    }
   }
+  for (const [name, binding] of Object.entries(BOUND_HOOKS)) {
+    const recorded = golden.hooks.find((h) => h.name === name)
+    if (!recorded) fail(1, `golden does not record ${name}, which this fork binds at ${binding} — a bound extension point silently dropped from the contract`)
+    if (recorded.kind !== "live") fail(1, `${name} is recorded ${recorded.kind}, but ${binding} still awaits its dispatch — declared-and-dead means our plugin runs never, not late. Investigate before this lane goes green.`)
+  }
+  console.log(`  bound hooks still recorded live: ${Object.keys(BOUND_HOOKS).join(", ")}`)
   console.log("  OK (offline). The upstream-facing lane is the scheduled `harness contract` job, not this one.")
   process.exit(0)
 }

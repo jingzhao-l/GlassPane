@@ -69,11 +69,18 @@ function sha256(file) {
   return createHash("sha256").update(readFileSync(file)).digest("hex")
 }
 
-/** Locate the installed package: bun hoists, so it may sit at either level. */
+/**
+ * Locate the installed package the way the product resolves it. The consumer lives in
+ * `packages/opencode` (see test/lib/kernel-contract.ts, which walks UP from the package and
+ * takes the closest `node_modules/iterate-kernel`), so the package-level copy wins when both
+ * levels hold one. Measuring root-first pinned a copy the product might never load: today
+ * only the package-level copy exists and the two orders agree by luck; a hoist that leaves an
+ * older root copy used to green-light the pin while the product ran a different kernel.
+ */
 function installedDirs() {
   return [
-    path.join(productRoot, "node_modules", PACKAGE),
     path.join(productRoot, "packages", "opencode", "node_modules", PACKAGE),
+    path.join(productRoot, "node_modules", PACKAGE),
   ].filter((dir) => existsSync(path.join(dir, "package.json")))
 }
 
@@ -92,6 +99,15 @@ function collectInstalled() {
   const dirs = installedDirs()
   if (dirs.length === 0) {
     die(2, `${PACKAGE} is not installed — run \`bun install\` in ${productRoot} before measuring`)
+  }
+  // Same refusal its sibling kernel-conformance.mjs makes: when two copies exist and disagree,
+  // no ordering of `installedDirs` is proof of what the product loads (bun's hoist can put an
+  // import at either level), and a pin recorded over the wrong one is provenance fiction.
+  if (dirs.length > 1) {
+    const metas = dirs.map((dir) => readFileSync(path.join(dir, "package.json"), "utf8"))
+    if (metas[0] !== metas[1]) {
+      die(2, `two different ${PACKAGE} installs: ${dirs[0]} and ${dirs[1]} — the product resolves the package-level copy first but which import actually loads it is not knowable from here. \`bun install\` until they agree (or remove the stale one), then re-measure.`)
+    }
   }
   const packageJson = JSON.parse(readFileSync(path.join(dirs[0], "package.json"), "utf8"))
   const version = packageJson.version

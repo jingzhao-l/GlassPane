@@ -51,7 +51,11 @@ if (positional.length > 1) {
 }
 
 const version = positional[0] ?? product.version
-const registry = product.npm?.registry ?? "https://registry.npmjs.org"
+// `product.registry`, not `product.npm.registry`: the two fields existed side by side and only
+// one of them was gated, so this lane could be pointed at a different registry than the one
+// `publish.ts`, `postinstall.mjs` and `install.sh` pin — and a release verified against a mirror
+// is a release nobody checked. `product-surface.mjs` now refuses if the two ever disagree.
+const registry = product.registry
 const failures: string[] = []
 const unobserved: string[] = []
 const check = (label: string, ok: boolean, detail = "") => {

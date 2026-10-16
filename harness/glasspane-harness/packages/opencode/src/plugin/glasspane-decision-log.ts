@@ -65,8 +65,13 @@ export function recordToolExecution(
 
   const read = readEvidenceFrame(metadata.result)
   if (!read.ok) {
-    // `GP_E_NO_EVIDENCE` is the ordinary case for tools that return a status
-    // rather than a pack (gp_attach, gp_probe_status, gp_shutdown).
+    // Measured against the engine, not a list kept here: `last_evidence` is the one
+    // method whose reply carries an `evidencePack` (`Dispatcher.swift:156`), so this is
+    // the ordinary path for every other gp_* call — `gp_act` included, whose reply is
+    // the flat operation dict (`EngineCore.swift:1275-1300`). `skipped` is the honest
+    // word for it: nothing was decided, so nothing is recorded, and a dimension declared
+    // on such a call has no entry to be counted against. `GP_E_EVIDENCE_FRAME` below is a
+    // different fact — a reply this contract could not read at all.
     if (read.error.code === "GP_E_NO_EVIDENCE") {
       return { status: "skipped", reason: "this gp_* method returns no evidence frame" }
     }

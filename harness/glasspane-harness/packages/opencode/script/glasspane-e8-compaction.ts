@@ -186,6 +186,37 @@ const serve = Bun.spawn([process.execPath, "src/index.ts", "serve", "--port", St
   stderr: "pipe",
 })
 const serveLog = path.join(scratch, "serve.log")
+// Teardown on every exit path. The two early exits below called `serve.kill()`/`mock.close()`
+// by hand and a thrown read did not, so the crash path left a live `serve` child and the
+// scratch directory behind — the shape this script is supposed to detect in others.
+let tornDown = false
+function teardown() {
+  if (tornDown) return
+  tornDown = true
+  serve.kill()
+  mock.close()
+}
+process.on("exit", teardown)
+
+/**
+ * The provider's request log, or `""` when it does not exist yet. A missing file is this
+ * script's own finding — "the mock was never called" — and it used to arrive as a raw ENOENT
+ * thrown out of the middle of a check, which reported nothing and skipped the teardown.
+ */
+function requestText(): string {
+  try {
+    return readFileSync(requestLog, "utf8")
+  } catch {
+    return ""
+  }
+}
+function requestEntries() {
+  return requestText()
+    .trimEnd()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as { n: number; body: unknown })
+}
 let logText = ""
 async function pump(stream: ReadableStream<Uint8Array>): Promise<void> {
   // `for await` over a stream is Bun runtime behavior, not in this tsconfig's
@@ -222,8 +253,7 @@ const healthy = await waitFor(
 )
 if (!healthy) {
   console.error("dependencies: the forked opencode did not boot; nothing was measured.")
-  serve.kill()
-  mock.close()
+  teardown()
   process.exit(2)
 }
 note("serve booted", `${base} (source tree, internal plugins on)`)
@@ -235,8 +265,7 @@ const created = (await (await fetch(`${base}/session`, { method: "POST", headers
 const sessionID = created.id
 check("session created", typeof sessionID === "string" && sessionID.length > 0, sessionID ?? "no id returned")
 if (!sessionID) {
-  serve.kill()
-  mock.close()
+  teardown()
   process.exit(1)
 }
 
@@ -301,21 +330,13 @@ const sawBlock = await waitFor(
   "a post-summarize request carrying the M4 block",
   async () => {
     if (requestCount <= beforeSummary) return false
-    const lines = readFileSync(requestLog, "utf8").trimEnd().split("\n").filter(Boolean)
-    return lines.some((line) => {
-      const entry = JSON.parse(line) as { n: number; body: unknown }
-      return entry.n > beforeSummary && JSON.stringify(entry.body).includes("## GlassPane evidence anchors (M4)")
-    })
+    return requestEntries().some((entry) => JSON.stringify(entry.body).includes("## GlassPane evidence anchors (M4)") && entry.n > beforeSummary)
   },
   60,
   1000,
 )
 
-const entries = readFileSync(requestLog, "utf8")
-  .trimEnd()
-  .split("\n")
-  .filter(Boolean)
-  .map((line) => JSON.parse(line) as { n: number; body: { messages?: Array<{ content?: unknown }> } })
+const entries = requestEntries() as Array<{ n: number; body: { messages?: Array<{ content?: unknown }> } }>
 const summarization = entries.find((entry) => entry.n > beforeSummary && JSON.stringify(entry.body).includes("## GlassPane evidence anchors (M4)"))
 check("the compaction model request carries the M4 block", sawBlock)
 if (summarization) {
@@ -327,8 +348,7 @@ if (summarization) {
 const leaked = entries.some((entry) => entry.n <= beforeSummary && JSON.stringify(entry.body).includes("## GlassPane evidence anchors (M4)"))
 check("the block did not leak into the pre-compaction turns", !leaked)
 
-serve.kill()
-mock.close()
+teardown()
 note("scratch", scratch)
 if (failures > 0) {
   console.error(`${failures} E8 check(s) failed`)

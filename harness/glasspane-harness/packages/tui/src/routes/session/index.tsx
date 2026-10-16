@@ -1669,16 +1669,42 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
 
 // Pending messages moved to individual tool pending functions
 
+/**
+ * Whether the `tool_details_visibility` toggle may drop this part.
+ *
+ * A GlassPane engine refusal is a *completed* part (`metadata.ok:false`, `state.status`
+ * "completed"), so `status === "completed"` alone hides the refusal while a crashed call —
+ * status "error" — stays on screen. That inverts the only distinction {@link glasspaneRow}
+ * exists to keep, and it hides it precisely when the user asked for a quieter transcript.
+ */
+export function toolPartShouldHide(input: { showDetails: boolean; row: Parameters<typeof glasspaneRow>[0] }) {
+  if (input.showDetails) return false
+  // Only the evidence family answers with a refusal inside a completed part; any other
+  // tool's completed row is a result, and results are what the toggle is for.
+  if (toolDisplay(input.row.tool) === "glasspane" && isGlassPaneRefusalState(glasspaneRow(input.row).state))
+    return false
+  return input.row.status === "completed"
+}
+
+function isGlassPaneRefusalState(state: GlassPaneRowState) {
+  return state === "engine-failure" || state === "no-verdict" || state === "denied"
+}
+
 function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMessage }) {
   const ctx = use()
   const display = createMemo(() => toolDisplay(props.part.tool))
 
-  // Hide tool if showDetails is false and tool completed successfully
-  const shouldHide = createMemo(() => {
-    if (ctx.showDetails()) return false
-    if (props.part.state.status !== "completed") return false
-    return true
-  })
+  const shouldHide = createMemo(() =>
+    toolPartShouldHide({
+      showDetails: ctx.showDetails(),
+      row: {
+        tool: props.part.tool,
+        status: props.part.state.status,
+        error: props.part.state.status === "error" ? props.part.state.error : undefined,
+        metadata: props.part.state.status === "pending" ? {} : (props.part.state.metadata ?? {}),
+      },
+    }),
+  )
 
   const toolprops = {
     get metadata() {
@@ -2752,11 +2778,11 @@ function glasspaneSummary(method: string, result: Record<string, unknown> | unde
     const cb = recordValue(pack.circuitBreaker)
     const assertion = recordValue(pack.assertion)
     const bits = [
-      att ? `attribution ${stringValue(att.level) ?? "?"}${att.contaminated === true ? ", contaminated" : ""}` : undefined,
+      // Field name plus the engine's own value, the way `act` above writes it. Choosing
+      // "passed"/"failed" for a boolean is the verdict, and the verdict is the engine's.
+      att ? `attribution ${stringValue(att.level) ?? "?"} contaminated=${glasspaneBool(att.contaminated)}` : undefined,
       cb ? `cb ${numberValue(cb.level) ?? "?"}` : undefined,
-      assertion
-        ? `assertion ${assertion.passed === true ? "passed" : assertion.passed === false ? "failed" : "?"}`
-        : undefined,
+      assertion ? `assertion.passed=${glasspaneBool(assertion.passed)}` : undefined,
     ].filter(Boolean)
     return bits.join(" · ") || "evidence pack"
   }

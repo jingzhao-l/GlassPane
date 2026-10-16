@@ -129,29 +129,99 @@ describe("what the hook preserves", () => {
 
   test("what the production path actually reaches, so the dimension lane is not claimed twice", () => {
     // The coverage-line tests above hand-build an `AnchorCollection` with
-    // `plannedDimensions` and per-anchor `dimension`. Nothing on the real path fills either
-    // field in: `collectEvidenceAnchors` transcribes the daemon's frames and the M2 receipt,
-    // and neither carries a review dimension (`decision-log-entry.schema.json` has
-    // entryId/sequence/prevEntryHash/operationId/summary/outcome/createdAt, and
-    // `evidence-pack.schema.json` has none either). So today the injected block has no
-    // coverage line, and saying otherwise in the module header would be this file's own
-    // version of "a fixture endorsing a capability the product does not have".
+    // `plannedDimensions` and per-anchor `dimension`. On the real path an anchor exists only
+    // where M2 recorded a decision, and a declared dimension is transcribed only onto one:
+    // the engine emits an `evidencePack` on one method, `last_evidence`
+    // (`Dispatcher.swift:156`), so a dimension declared on `gp_act` / `gp_observe` /
+    // `gp_attach` / `gp_diagnose` sits on a call that produces no anchor at all — see the
+    // pair pinned in "only a call that recorded a decision can move the coverage counter".
+    // What is still not wired is the plan: `collectEvidenceAnchors` never fills
+    // `plannedDimensions`, and `renderAnchorBlock` with no plan and no recorded dimension
+    // has no coverage to state.
     //
     // This test is the ratchet for that claim: wire a real plan source — the kernel's
     // `run-plan` contract is the candidate, it has the `dimensions` field — and the
     // assertions below go red, which is when the header comment and `FORK.md` get to say the
     // lane is live.
     const collected = collectEvidenceAnchors([
-      message("gp_act", { metadata: okMetadata({ decisionLog: receipt() }) }),
+      message("gp_act", { metadata: okMetadata({ method: "act", decisionLog: receipt() }) }),
       message("gp_observe", { metadata: okMetadata({ decisionLog: receipt() }) }),
     ])
     expect(collected.plannedDimensions).toBeUndefined()
-    expect(collected.anchors.every((anchor) => anchor.dimension === undefined)).toBe(true)
     const block = renderAnchorBlock(collected)
     expect(block).toBeDefined()
     expect(block).toContain("decisions recorded: 2")
     expect(block).not.toContain("dimension coverage:")
   })
+
+  test("only a call that recorded a decision can move the coverage counter", () => {
+    // DEFECT 5's fixed point, measured as behavior rather than as prose. The engine's act
+    // reply is the flat operation dict (`EngineCore.swift:1275-1300`) — it carries no
+    // `evidencePack`, so M2 has nothing to chain and records `skipped`, and compaction sees
+    // a call without a decision. Declaring a dimension on such a call cannot make it
+    // verified, and the line has to say the dimension is unverified rather than go quiet.
+    const actReply = {
+      operationId: OP_OK,
+      actConfirmed: true,
+      latencyMs: 12,
+      evidenceId: OP_OK,
+      contaminationMonitored: true,
+      contaminationBasis: "watched",
+    }
+    const declaredOnAct = collectEvidenceAnchors([
+      message("gp_act", {
+        metadata: okMetadata({
+          method: "act",
+          dimension: "security",
+          result: actReply,
+          decisionLog: { status: "skipped", reason: "this gp_* method returns no evidence frame" },
+        }),
+      }),
+    ])
+    expect(declaredOnAct.calls).toBe(1)
+    expect(declaredOnAct.anchors).toEqual([])
+    expect(declaredOnAct.withoutDecision).toBe(1)
+    expect(
+      renderDimensionCoverage({
+        calls: declaredOnAct.calls,
+        anchors: declaredOnAct.anchors,
+        withoutDecision: declaredOnAct.withoutDecision,
+        plannedDimensions: ["security"],
+      }),
+    ).toBe("0/1 dimensions verified, 1 unverified (security), 0 decisions")
+
+    // The same session, and the same dimension declared on the one method whose reply the
+    // engine does archive: now there is a decision to attribute, and the counter moves.
+    const declaredOnLastEvidence = collectEvidenceAnchors([
+      message("gp_act", {
+        metadata: okMetadata({
+          method: "act",
+          dimension: "security",
+          result: actReply,
+          decisionLog: { status: "skipped", reason: "this gp_* method returns no evidence frame" },
+        }),
+      }),
+      message("gp_last_evidence", {
+        metadata: okMetadata({ method: "last_evidence", dimension: "security", decisionLog: receipt() }),
+      }),
+    ])
+    expect(declaredOnLastEvidence.calls).toBe(2)
+    expect(declaredOnLastEvidence.withoutDecision).toBe(1)
+    expect(declaredOnLastEvidence.anchors.map((anchor) => anchor.dimension)).toEqual(["security"])
+    expect(
+      renderDimensionCoverage({
+        calls: declaredOnLastEvidence.calls,
+        anchors: declaredOnLastEvidence.anchors,
+        withoutDecision: declaredOnLastEvidence.withoutDecision,
+        plannedDimensions: ["security"],
+      }),
+    ).toContain("1/1 dimensions verified")
+
+    // And the block says the first call had no decision record, so a reader cannot infer
+    // coverage from the number of gp_* calls it can see.
+    expect(renderAnchorBlock(declaredOnAct)).toContain("decisions recorded: 0 · without a decision record: 1")
+  })
+
 
   test("the block is appended to the context array, and the note names the target", async () => {
     const output: { context: string[]; prompt?: string } = { context: [] }
@@ -427,8 +497,9 @@ describe("dimension coverage, computed by the kernel (M4)", () => {
 
   // One `try` around pull + collect + render used to call every internal defect "could not
   // read this session's messages", which sent the reader to the client/server pair for a bug
-  // in this file. The two stages now say which one broke — and the wording is the contract,
-  // so both directions are pinned here.
+  // in this file. The two stages now say which one broke — and the CODE is what a summary is
+  // grouped and matched by (the module's own rationale for putting a code in the sentence),
+  // so both directions are pinned below: prose alone would let two stages share one bucket.
   test("a defect in the renderer is not reported as a message-pull failure", async () => {
     const output: { context: string[]; prompt?: string } = { context: [] }
     const note = await injectEvidenceAnchors(
@@ -441,6 +512,8 @@ describe("dimension coverage, computed by the kernel (M4)", () => {
     )
     expect(note.status).toBe("failed")
     if (note.status !== "failed") return
+    expect(note.code).toBe("GP_E_COMPACTION_RENDER")
+    expect(note.code).not.toBe("GP_E_COMPACTION_MESSAGES")
     expect(note.message).toContain("could not build the block")
     expect(note.message).toContain("readPlan is not a function")
     expect(note.message).not.toContain("could not read this session")
@@ -456,9 +529,33 @@ describe("dimension coverage, computed by the kernel (M4)", () => {
     })
     expect(note.status).toBe("failed")
     if (note.status !== "failed") return
+    expect(note.code).toBe("GP_E_COMPACTION_MESSAGES")
+    expect(note.code).not.toBe("GP_E_COMPACTION_RENDER")
     expect(note.message).toContain("could not read this session's messages")
     expect(note.message).not.toContain("could not build the block")
   })
+
+  test("the two stages answer to two codes, in both directions", async () => {
+    // The shape the file's own rationale demands: a code travels with the sentence so the
+    // sentences can be grouped. With one code for both stages, "the host could not read the
+    // session" and "this plugin could not build the block" counted as the same failure no
+    // matter which one a run hit.
+    const pull = await injectEvidenceAnchors("ses_1", { context: [] }, async () => {
+      throw new Error("Session not found")
+    })
+    const render = await injectEvidenceAnchors(
+      "ses_1",
+      { context: [] },
+      async () => [message("gp_observe", { metadata: okMetadata({ decisionLog: receipt() }) })],
+      () => {
+        throw new TypeError("renderer exploded")
+      },
+    )
+    if (pull.status !== "failed" || render.status !== "failed") throw new Error("both stages must report a failure note")
+    expect(pull.code).not.toBe(render.code)
+    expect(new Set([pull.code, render.code])).toEqual(new Set(["GP_E_COMPACTION_MESSAGES", "GP_E_COMPACTION_RENDER"]))
+  })
+
 })
 
 

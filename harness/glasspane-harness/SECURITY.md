@@ -29,6 +29,18 @@ harness's own local state lives under `~/.glasspane-harness` (0700) and the deci
 is written 0600. Nothing in the tool surface writes inside the engine's state root; the
 binding refuses that path by design.
 
+### Code that comes with the repository is not executed
+
+Opening a directory makes this product read that directory's config. It does **not** run
+plugins it finds there: a file matching `<project>/.glasspane-harness/plugin/*.ts` (or
+`plugins/`, or the upstream `.opencode` spelling) is discovered and then refused, because
+importing it is arbitrary code execution and the process doing it holds the `gp_*`
+accessibility surface — a drive-by checkout would otherwise get both code execution and the
+ability to move real apps. Set `GLASSPANE_HARNESS_TRUST_PROJECT_PLUGINS=true` for a run where
+you do trust the checkout, or put the plugin in your config's `plugin` list, which is a name
+somebody wrote down and is loaded as before. The refusal is logged with the count of files it
+held back; nothing about it is silent.
+
 ## Dependency posture
 
 - Upstream opencode is **pinned** (`v1.18.32`) and the divergence from that pin is
@@ -58,6 +70,13 @@ binding refuses that path by design.
   the fingerprint it requires a `VALIDSIG` to match. What is **not** yet asserted is that the
   release lane's `GPG_PRIVATE_KEY` secret *is* that key — CI signs with whatever the secret
   holds, so the installer's check is the enforcement point, not a CI step.
+- Two ordering decisions close the window that made the above exploitable. The GitHub release
+  is created **draft** and only `publish-release` makes it visible, after the manifest and every
+  `.asc` have landed: a public release with no manifest was installable through the `curl` lane
+  while the signing job was still running. And each `binaries` job records the sha256 of the
+  archive it built as a workflow artifact; `checksums` refuses any served asset whose bytes do not
+  match that build-time hash (and any hash with no asset), so the manifest is no longer computed
+  from whatever the release happened to be serving at the moment the checksum ran.
 
 ## Verifying what you installed
 
@@ -77,6 +96,10 @@ gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt     # the manifest itself is sign
 
 A checksum answers "did the transfer arrive intact"; only the signature answers "who made
 this", and `SHA256SUMS.txt` is served from the same origin as the asset it lists — so on its
-own it cannot survive a replaced release. An **absent** `.asc` is a policy gap and the
-installer says so and continues; a signature that **does not verify**, or one made by a key
-other than the fingerprint above, is a tampering signal and the installer refuses it.
+own it cannot survive a replaced release. An **absent** manifest or `.asc` is refused: the
+release lane writes both for every target and fails the run when either is missing, so their
+absence describes a broken or replaced release rather than a policy the installer may waive.
+A signature that **does not verify**, or one made by a key other than the fingerprint above, is
+refused for the same reason. Installing over a missing manifest is possible only by name —
+`GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1` — and the summary line then records that the override,
+not the release, is why nothing was verified.

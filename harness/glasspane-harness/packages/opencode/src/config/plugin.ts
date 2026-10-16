@@ -29,6 +29,20 @@ export async function load(dir: string) {
   return plugins
 }
 
+/**
+ * What to do with the plugins a project directory happens to contain.
+ *
+ * Kept as a named decision so it can be driven with a fixture: importing a `.ts` file out of
+ * the repository under review is arbitrary code execution, and in this product the process that
+ * runs it holds the `gp_*` accessibility surface. Plugins a config file declares are a different
+ * lane and are not here — this only ever sees the auto-discovered ones.
+ */
+export function projectPluginPlan(discovered: readonly ConfigPluginV1.Spec[], trusted: boolean) {
+  return trusted
+    ? { load: [...discovered], refused: [] as ConfigPluginV1.Spec[] }
+    : ({ load: [] as ConfigPluginV1.Spec[], refused: [...discovered] })
+}
+
 export function pluginSpecifier(plugin: ConfigPluginV1.Spec): string {
   return Array.isArray(plugin) ? plugin[0] : plugin
 }

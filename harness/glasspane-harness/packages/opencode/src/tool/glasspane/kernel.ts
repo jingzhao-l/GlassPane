@@ -26,10 +26,11 @@
  * copies, fixed twice).
  */
 import { existsSync, mkdirSync, readFileSync } from "node:fs"
-import os from "node:os"
 import path from "node:path"
 
 import { Global } from "@opencode-ai/core/global"
+
+import { stateRootOf } from "./daemon"
 
 // Per-module imports, NOT the kernel's `index` barrel — and that is a product
 // requirement, not a style choice. The barrel re-exports `schemas`, which loads the
@@ -120,7 +121,11 @@ export function readEvidenceFrame(
       error: {
         code: "GP_E_EVIDENCE_FRAME",
         message: "the engine reply is not an object, so no evidence pack can be read from it",
-        remedy: "call gp_last_evidence and pass its reply; if this repeats, run gp_probe_status and report the engine version",
+        // Non-circular on purpose. The frame that lands here can be the reply of
+        // `gp_last_evidence` itself, and telling the agent to call that and pass its
+        // reply would send it back to the call that just failed. What is still
+        // executable is reading the engine's own self-report and recording the absence.
+        remedy: "run gp_probe_status once and cite its reply beside this operation, then report this call as having produced no evidence — re-issuing the call is not the next step, because it is the frame it answered with that cannot be read",
       },
     }
   }
@@ -173,10 +178,23 @@ export function summaryOf(pack: EvidencePack): string {
 }
 
 /** The engine's own state root, which the harness must not write into. */
-function engineStateRoot(env: NodeJS.ProcessEnv): string {
-  const socket = env.GLASSPANE_SOCKET
-  if (typeof socket === "string" && socket.length > 0) return path.dirname(path.resolve(socket))
-  return path.join(env.HOME ?? os.homedir(), ".glasspane")
+type StateRoot = { ok: true; path: string } | { ok: false; error: KernelRejection }
+
+/**
+ * One rule, one place: the answer comes from the same resolution the transport uses
+ * to decide which daemon it is calling (`daemon.ts`'s `resolveSocket`), because a
+ * second copy here is how the harness ended up treating its own working directory as
+ * the engine's state root when `GLASSPANE_SOCKET` named a relative file — refusing
+ * every ledger path inside a directory the engine never wrote to, while talking to a
+ * daemon that lives somewhere else. An unusable setting is a refusal, not a guess.
+ */
+function engineStateRoot(env: NodeJS.ProcessEnv): StateRoot {
+  return stateRootOf(env)
+}
+
+/** Whether one resolved path is the engine's root or something under it. */
+function insideStateRoot(candidate: string, state: string): boolean {
+  return candidate === state || candidate.startsWith(state + path.sep)
 }
 
 /**
@@ -185,8 +203,18 @@ function engineStateRoot(env: NodeJS.ProcessEnv): string {
  * directory is used (the same `Global.Path.data` every other persisted
  * opencode artifact uses — never the CWD, which is how a "harness state file"
  * ends up committed inside someone's repository).
+ *
+ * The engine-root guard runs on BOTH branches, and the refusal names the root it
+ * measured rather than a spelled-in-home `~/.glasspane` — a `GLASSPANE_SOCKET`
+ * elsewhere moves the engine's tree, and a remedy pointing at a directory that is not
+ * the one being refused sends the reader to the wrong tree. The default path is not
+ * outside the engine's root by definition: it is outside it by today's
+ * `XDG_DATA_HOME`, so an operator who points the state root at the harness's own data
+ * directory would otherwise get a second writer in it without a check firing.
  */
 export function resolveLedger(env: NodeJS.ProcessEnv = process.env): { ok: true; ledger: LedgerRef } | { ok: false; error: KernelRejection } {
+  const state = engineStateRoot(env)
+  if (!state.ok) return state
   const override = env.GLASSPANE_DECISION_LOG
   if (typeof override === "string" && override.length > 0) {
     if (!path.isAbsolute(override)) {
@@ -199,21 +227,31 @@ export function resolveLedger(env: NodeJS.ProcessEnv = process.env): { ok: true;
         },
       }
     }
-    const state = engineStateRoot(env)
     const resolved = path.resolve(override)
-    if (resolved === state || resolved.startsWith(state + path.sep)) {
+    if (insideStateRoot(resolved, state.path)) {
       return {
         ok: false,
         error: {
           code: "GP_E_DECISION_LOG_PATH",
-          message: `GLASSPANE_DECISION_LOG='${resolved}' is inside the engine's state root ${state}`,
-          remedy: "choose a path outside ~/.glasspane — the engine owns that tree, and a second writer in it is the projects.json failure all over again",
+          message: `GLASSPANE_DECISION_LOG='${resolved}' is inside the engine's state root ${state.path}`,
+          remedy: `choose a path outside ${state.path} (the engine's state root — ~/.glasspane unless GLASSPANE_SOCKET names another) — the engine owns that tree, and a second writer in it is the projects.json failure all over again`,
         },
       }
     }
     return { ok: true, ledger: { path: resolved, source: "env" } }
   }
-  return { ok: true, ledger: { path: path.join(Global.Path.data, "glasspane-harness", "decisions.jsonl"), source: "default" } }
+  const fallback = path.join(Global.Path.data, "glasspane-harness", "decisions.jsonl")
+  if (insideStateRoot(fallback, state.path)) {
+    return {
+      ok: false,
+      error: {
+        code: "GP_E_DECISION_LOG_PATH",
+        message: `the harness's default ledger location '${fallback}' is inside the engine's state root ${state.path}`,
+        remedy: `the engine's state root and the harness's data directory are the same tree — move GLASSPANE_SOCKET, or point GLASSPANE_DECISION_LOG at a path outside ${state.path}`,
+      },
+    }
+  }
+  return { ok: true, ledger: { path: fallback, source: "default" } }
 }
 
 export interface LoggedDecision {
@@ -234,12 +272,17 @@ export const DIMENSION_ID_LIMITS = {
  *
  * WHY THIS EXISTS AT ALL. `dimensionContext` counts a planned dimension as verified only
  * when a recorded decision carries that id, and the recorder here is the tool call: an
- * agent says which dimension a `gp_act` was serving, the shell echoes it into the tool
- * result's metadata, and compaction turns the pair into "2/3 verified". Without the
- * declared id the arithmetic is honest but blind — which is exactly why the absence is
- * accepted. A declared-but-malformed id is not: it would be counted as an *unplanned*
- * dimension, and a typo that silently renames a dimension is a false statement about what
- * this session covered.
+ * agent says which dimension a call was serving, the shell echoes it into the tool
+ * result's metadata, and compaction turns the pair into "2/3 verified". Only a call whose
+ * engine reply carries an evidence pack produces the decision half of that pair — today
+ * that is `last_evidence` and nothing else (`Dispatcher.swift:156`) — so a dimension
+ * declared on `gp_act`, `gp_observe`, `gp_attach` or `gp_diagnose` is recorded nowhere and
+ * its dimension stays reported unverified. The shape is validated for every method that
+ * accepts it, because a declaration that reaches the ledger malformed is the lying case;
+ * an honest but unread one is merely blind — which is exactly why the absence is accepted.
+ * A declared-but-malformed id is not: it would be counted as an *unplanned* dimension, and
+ * a typo that silently renames a dimension is a false statement about what this session
+ * covered.
  *
  * The shape is the kernel's, not a local guess: `DIMENSION_ID_PATTERN` is what
  * `PlannedDimensionSchema` validates plan ids against, so a plan and a declaration cannot
@@ -350,14 +393,15 @@ export function readRunPlan(
     }
   }
   const state = engineStateRoot(env)
+  if (!state.ok) return state
   const resolved = path.resolve(override)
-  if (resolved === state || resolved.startsWith(state + path.sep)) {
+  if (insideStateRoot(resolved, state.path)) {
     return {
       ok: false,
       error: {
         code: "GP_E_RUN_PLAN_PATH",
-        message: `GLASSPANE_RUN_PLAN='${resolved}' is inside the engine's state root ${state}`,
-        remedy: "choose a path outside ~/.glasspane — the engine owns that tree, and the plan belongs to whoever configured the run",
+        message: `GLASSPANE_RUN_PLAN='${resolved}' is inside the engine's state root ${state.path}`,
+        remedy: `choose a path outside ${state.path} (the engine's state root — ~/.glasspane unless GLASSPANE_SOCKET names another) — the engine owns that tree, and the plan belongs to whoever configured the run`,
       },
     }
   }
