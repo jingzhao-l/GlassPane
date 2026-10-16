@@ -211,13 +211,22 @@ test('a bare name is a package.json script and a name followed by a path is not'
   assert.equal(checked.status, 0, checked.output)
 })
 
-test('check-workflows --self-test verifies nine cases, including the lastIndex one', () => {
+test('check-workflows --self-test 的每一档都被证红过，报出的数就是它真的跑过的数', () => {
   // The self-test exists to prove each rule can go red; the count in its output line
-  // is what CI reads. A case silently dropped from the list would still exit 0.
+  // 是 CI 读的那一行。原来这里钉死 "9 case(s)"——harness 那条线 2026-10-16 加了两档
+  // （bare-SHA 的 `uses:`、缺 script 的那条）之后，这一条红在**计数**上而不是红在
+  // "有案子被悄悄丢掉"上，那是另一种假绿：判据盯的是一个会随正常改动漂移的整数。
+  // 现在盯关系：报出的数 == 真打出来的 `ok self-test:` 行数，且不少于已知的下限。
   const checked = spawnSync(process.execPath, [SCRIPT, '--self-test'], { cwd: REPO, encoding: 'utf8' })
   const output = `${checked.stdout}${checked.stderr}`
   assert.equal(checked.status, 0, output)
-  assert.match(output, /--self-test: 9 case\(s\) each verified to fail/, output)
+  const reported = /--self-test: (\d+) case\(s\) each verified to fail/.exec(output)
+  assert.ok(reported, `self-test 没有报出它验证了几档：${output}`)
+  const lines = (output.match(/^\s*ok self-test:/gm) ?? []).length
+  assert.equal(Number(reported[1]), lines,
+    `报出 ${reported[1]} 档却只打了 ${lines} 行 ok self-test：有一档没被验证就被算进数里`)
+  assert.ok(Number(reported[1]) >= 9,
+    `self-test 掉到 ${reported[1]} 档（已知至少 9 档）：某一档被从表里删掉了`)
   // 新增的那一档：顶层 permissions 缺失必须能被证红（这条规则的来路见 f12b241）。
   assert.match(output, /no top-level permissions block is caught/, output)
   assert.match(output, /shared-lastIndex defect\) is caught/, output)

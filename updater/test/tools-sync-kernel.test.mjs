@@ -111,6 +111,13 @@ test('sync-kernel: the retired fork leg refuses, and the usage text no longer ad
 const CANONICAL_MANIFEST = path.join(REPO, 'updater', 'test', 'fixtures', 'canonical-kernel-package.json')
 
 /**
+ * 沙箱里的 root 与 mcp-shell 都写**当前真源**的号，而不是测试里抄一个数字：
+ * 镜像的期望版本就是产品线的版本，抄死的数每次升版都会红一次（1.16.0 就红过，
+ * 而那条红读的像是同步坏了）。
+ */
+const ROOT_VERSION = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8')).version
+
+/**
  * 一个能**真跑完**的仓沙箱：root workspace + 镜像 + 打桩的 set-version/check-version，
  * 以及一个 build/test 都是空操作的 mcp-shell。被测的是文件的去向，不是 tsc，
  * 所以 manifest 里的 scripts 换成空操作，其余身份字段保持镜像真实值。
@@ -139,7 +146,7 @@ function sandbox() {
     `${JSON.stringify({
       name: 'sandbox',
       private: true,
-      version: '1.15.1',
+      version: ROOT_VERSION,
       workspaces: ['kernel', 'mcp-shell'],
       // 与真 root 同一形状：这两条都按**工作区名**寻址，所以镜像那份 manifest 的名字
       // 一旦被覆盖，这里就会像真机一样红在 `No workspaces found`。
@@ -151,7 +158,7 @@ function sandbox() {
   )
   fs.writeFileSync(
     path.join(repo, 'mcp-shell', 'package.json'),
-    `${JSON.stringify({ name: 'glasspane-mcp', version: '1.15.1', scripts: { build: 'node -e 0', test: 'node -e 0' } }, null, 2)}\n`,
+    `${JSON.stringify({ name: 'glasspane-mcp', version: ROOT_VERSION, scripts: { build: 'node -e 0', test: 'node -e 0' } }, null, 2)}\n`,
   )
   for (const stub of ['set-version.mjs', 'check-version.mjs']) {
     fs.writeFileSync(path.join(repo, 'scripts', stub), 'process.exit(0)\n')
@@ -183,7 +190,7 @@ test('sync-kernel: 真同步保留镜像自有的 manifest，只搬 canonical �
   // 四条被覆盖掉的字段，每一条都对应一个真实消费者。
   assert.equal(after.name, '@iterate/kernel', '工作区名是 mcp-shell 的 file:../kernel 解析入口')
   assert.equal(after.private, true, '镜像不在 GlassPane 这条线上发布')
-  assert.equal(after.version, '1.15.1', '镜像跟着产品版本线走，不是 kernel 自己的号')
+  assert.equal(after.version, ROOT_VERSION, '镜像跟着产品版本线走，不是 kernel 自己的号')
   assert.equal(after.dependencies.zod, '3.25.76', '镜像钉精确范围，可复现安装是这条线的决定')
   // exports/files 是契约形状，不是身份：这两项**必须**跟 canonical 一致（kernel 自己的
   // packaging 闸断言它们）。私有的一侧写 "." 才是缺陷——上一轮就是这两项没跟上。

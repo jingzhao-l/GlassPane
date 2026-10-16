@@ -22,7 +22,14 @@ final class DurableFileWriteDirectorySyncToleranceTests: XCTestCase {
         var lastErrno: Int32 = 0
         let ops = DurableFileWrite.Operations(
             open: { path, flags, mode in path.withCString { Darwin.open($0, flags, mode) } },
-            write: { _, _, _ in 0 },
+            // write 必须真的写：`stage` 把 0 当"一个字节都没落"，返回 0 会让夹具自己在
+            // 落盘那一步就抛，测试看到的就不是它要判的那一步了。
+            write: { fd, data, offset in
+                data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Int in
+                    guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return -1 }
+                    return Darwin.write(fd, base + offset, data.count - offset)
+                }
+            },
             fsync: { fd in
                 calls += 1
                 let want = (calls == 1) ? (fsyncErrnoForFile ?? 0) : fsyncErrnoForDirectory

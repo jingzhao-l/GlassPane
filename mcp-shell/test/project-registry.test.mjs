@@ -1007,9 +1007,15 @@ test("a chmod that does not stick is reported as a failed write, not as a saved 
   const filePath = path.join(root, "projects.json");
   const restore = registryFileAt(null, filePath);
   const realChmod = fs.chmodSync;
+  const realOpen = fs.openSync;
   const previousUmask = process.umask(0o000);
   try {
     fs.chmodSync = () => undefined;
+    // 2026-10-16 落盘改成 `openSync(tmp,"w",0600)` + fsync 之后再 rename：一份卷如果
+    // **连创建时的 mode 都不认**（只按 umask 给）， chmod 的空转才重新有意义。
+    // 不把这一半也打掉，这条对照就只是在断言"新建的文件本来就是 0600"——那句是好事，
+    // 不是这条闸要盯的失效模式。
+    fs.openSync = (target, flags, mode) => realOpen(target, flags, undefined);
     const message = expectRegistryError(
       () => projectSet(baseArgs),
       "GP_E_INTERNAL",
@@ -1022,6 +1028,7 @@ test("a chmod that does not stick is reported as a failed write, not as a saved 
   } finally {
     process.umask(previousUmask);
     fs.chmodSync = realChmod;
+    fs.openSync = realOpen;
     restore();
     sandbox.dispose();
   }

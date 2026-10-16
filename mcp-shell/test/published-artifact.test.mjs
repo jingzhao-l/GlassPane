@@ -51,7 +51,33 @@ const SCRATCH = fs.mkdtempSync(path.join(os.tmpdir(), "gp-published-"));
 after(() => fs.rmSync(SCRATCH, { recursive: true, force: true }));
 
 /** PATH with the worktree's hoisted `.bin` first: esbuild lives at the repo root. */
-const ENV = { ...process.env, PATH: `${path.join(WORKTREE, "node_modules", ".bin")}:${process.env.PATH}` };
+/**
+ * 干净、且**与自己一份缓存绑定**的外部 npm 环境。
+ *
+ * 两个坑都是这台机器实测到的：
+ * ① 从父 `npm test` 继承下来的 `npm_config_*` / `npm_lifecycle_*` / `npm_execpath`
+ * 会让嵌套的 `npm pack` 走生命周期语义；
+ * ② 更关键——`npm pack` 会把 tarball 写进 `~/.npm/_cacache`，而那台机器上的共享缓存里
+ * 已经有一个同键的文件（实测：`File exists: ~/.npm/_cacache/content-v2/sha512/f0/a4`，
+ * 退 243）。一条测试不该依赖"用户的全局缓存此刻恰好干净"，所以给它一份自己的缓存目录。
+ * 同时**不许**用 `--silent`：那正是这条红读起来像"包坏了"的原因——npm 在 --silent 下
+ * 失败时一句话都不打（stdout/stderr 全空，只剩一个 243）。
+ * 这里把 worktree 的 .bin 放在 PATH 前面，让 esbuild/tsc 还能被 bundle 脚本找到。
+ */
+const ENV = (() => {
+  const env = { ...process.env, PATH: `${path.join(WORKTREE, "node_modules", ".bin")}:${process.env.PATH}` };
+  for (const key of Object.keys(env)) {
+    if (
+      /^npm_(config|lifecycle|package|init|user|loglevel)/.test(key)
+      || key === "npm_execpath"
+      || key === "npm_config"
+    ) {
+      delete env[key];
+    }
+  }
+  env.npm_config_cache = path.join(SCRATCH, "npm-cache");
+  return env;
+})();
 
 function run(program, args, cwd, { timeoutMs = 900_000 } = {}) {
   const res = spawnSync(program, args, {
@@ -77,6 +103,14 @@ function run(program, args, cwd, { timeoutMs = 900_000 } = {}) {
  * loaded machine, and they all describe the same artifact.
  */
 let artifact = null;
+function linkInto(target, dest) {
+  // 幂等：一次 setup 半途而废之后，后面每条用例都会在这里再撞一次 EEXIST，
+  // 于是一个 npm pack 的失败变成七条互不相干的红。软链已经在了就跳过，
+  // 让第一条失败保持它本来的样子（并且只失败一次）。
+  if (fs.existsSync(dest)) return;
+  fs.symlinkSync(target, dest);
+}
+
 function published() {
   if (artifact !== null) {
     return artifact;
@@ -87,9 +121,9 @@ function published() {
   // The scratch tree stands where the worktree's own layout puts a package relative to
   // its dependencies: the bundle script reads `../kernel/schemas`, and esbuild and zod
   // resolve from the hoisted root `node_modules`.
-  fs.symlinkSync(path.join(WORKTREE, "node_modules"), path.join(tree, "node_modules"));
-  fs.symlinkSync(path.join(WORKTREE, "kernel"), path.join(tree, "kernel"));
-  fs.symlinkSync(path.join(SHELL, "node_modules"), path.join(pkg, "node_modules"));
+  linkInto(path.join(WORKTREE, "node_modules"), path.join(tree, "node_modules"));
+  linkInto(path.join(WORKTREE, "kernel"), path.join(tree, "kernel"));
+  linkInto(path.join(SHELL, "node_modules"), path.join(pkg, "node_modules"));
   for (const name of ["package.json", "tsconfig.json", "LICENSE", "README.md"]) {
     fs.copyFileSync(path.join(SHELL, name), path.join(pkg, name));
   }
@@ -97,8 +131,16 @@ function published() {
 
   const bundle = run("npm", ["run", "bundle"], pkg);
   assert.equal(bundle.status, 0, `npm run bundle failed in the scratch tree: ${bundle.stderr.slice(0, 900)}`);
-  const packed = run("npm", ["pack", "--silent"], pkg);
-  assert.equal(packed.status, 0, `npm pack failed: ${packed.stderr.slice(0, 900)}`);
+  const packed = run("npm", ["pack"], pkg);
+  // npm 在负载下有时会不带一句话就退出（实测 243、stderr 全空）。那时 stdout 与
+  // spawn 自己的 error 字段是仅有的线索，必须一起报出来，不然这条红读起来像是
+  // 发布物坏了，而其实是一次子进程没跑完。
+  assert.equal(
+    packed.status,
+    0,
+    `npm pack failed (${packed.status}; ${packed.error ?? "no spawn error"}): `
+    + `stderr=${packed.stderr.slice(0, 900)} stdout=${packed.stdout.slice(-900)}`,
+  );
   const tarball = path.join(pkg, packed.stdout.trim().split("\n").pop());
   assert.ok(fs.existsSync(tarball), `no tarball at ${packed.stdout.trim()}`);
 

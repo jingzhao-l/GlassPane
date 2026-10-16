@@ -426,11 +426,10 @@ test('真把拷贝进程 SIGKILL 掉，目标要么完整旧要么完整新，�
  */
 test('npm-prefix 那条 remedy 点名路径、交给一个人，且不交出任何命令行', () => {
   const raw = fs.readFileSync(path.join(UPDATER_ROOT, 'lib', 'apply.js'), 'utf8')
-  // 合并后这条 remedy 的载体是 `const remedy = notFound`（2026-10-15 起，命令根本没找到是第三种出路，
-  // 见 test/npm-binary-resolution.test.mjs），点名目录的那一支仍在 `npmReady.dir` 后面。
-  // 锚点跟着走，断言盯的还是这条 finding 的实质：路径要点名、动作要交给人、程序自己不跑，
-  // 而**不许**出现一句可以直接抄去执行的升权命令。
-  const from = raw.indexOf('const remedy = notFound')
+  // 锚点是这条 remedy 的第一句话，而不是某个变量名：载体写法会变（2026-10-15 是
+  // `const remedy = notFound`，2026-10-16 命令没找到与目录不可写分成两支之后又变了），
+  // 而这条 finding 的实质不变：路径要点名、动作要交给人、程序自己不跑。
+  const from = raw.indexOf('Two ways out, and the first one an agent can run by itself')
   assert.ok(from > 0, 'apply.js 里找不到那条点名目录的 remedy 了')
   const block = raw.slice(from, from + 2600)
     .split('\n')
