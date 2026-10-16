@@ -53,6 +53,10 @@ jobs:
     environment: release
     permissions:
       contents: write
+      # `scripts/assert-ci-green.mjs` asks GitHub which CI runs exist for this commit. The
+      # `/actions/workflows/<file>/runs` endpoint needs `actions: read`, and a job-level block
+      # replaces the workflow-level one — leaving it unnamed makes the question fail closed.
+      actions: read
     # Pinned, and `check-workflows.mjs` now enforces that this file stays pinned: this job
     # declares `environment: release`, so it is the one place a mutable action ref has
     # something worth stealing — it reads `secrets.GPG_PRIVATE_KEY` and holds `contents: write`.
@@ -65,6 +69,17 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
+      - name: The CI of this exact commit must be green before anything ships
+        # 放在最前面：这一版还没构建、没签名、没上传，拒绝在这里什么都不必回滚。判据写在
+        # `scripts/assert-ci-green.mjs` 里（"没跑完就等满预算"与"没记录＝没有证据"两种出路都在那儿），
+        # 这一步只负责在它说不发的时候让 job 死掉，而不是把结论打印完继续发。
+        run: |
+          set -euo pipefail
+          node scripts/assert-ci-green.mjs \
+            --sha "$(git rev-parse HEAD)" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow ci.yml \
+            --budget 1200000 --poll 30000
       - name: Validate tag and version line
         env:
           REF_NAME: ${{ github.ref_name }}
@@ -211,6 +226,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      # Same question as the release-archive job asks, same reason: `actions: read` for the runs API.
+      actions: read
     env:
       MODE: ${{ github.event.inputs.mode }}
     steps:
@@ -279,6 +296,23 @@ jobs:
               "但 provenance 会记成前者。带上 --ref ${WANT} 重跑。"
             exit 1; }
           echo "publish 的对象已核实：${WANT} = ${HEAD_SHA}，mode=${MODE}"
+      - name: The CI of this exact commit must be green before the registry gets it
+        # 上一条证明"发的是被 tag 的那棵树"，这一条证明"那棵树跑过测试"。两件事彼此独立：
+        # v1.16.1 那次两条通道都走完了，而同一 sha 的 CI 是红的（run 38842800885）——当时链子上
+        # 没有一环问这个问题。dry 不查：它不发东西，而"tag 之前先把打包形状验一遍"是正常用法。
+        env:
+          MODE: ${{ github.event.inputs.mode }}
+        run: |
+          set -euo pipefail
+          if [ "${MODE:-dry}" != "publish" ]; then
+            echo "mode=${MODE:-dry}：这一步不写 registry，CI 结论留到 publish 那次再问"
+            exit 0
+          fi
+          node scripts/assert-ci-green.mjs \
+            --sha "$(git rev-parse HEAD)" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow ci.yml \
+            --budget 1200000 --poll 30000
       - name: Publish (or pack-check) glasspane-mcp
         working-directory: mcp-shell
         run: |
