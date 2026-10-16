@@ -11,6 +11,14 @@
  *
  * REVERSE MUTATION：把 `dispose()` 里那段 rmdir 加回来（见本文件最后一条用例，它直接测这件事）
  * → 具名红 `最后一个沙箱收尾之后基目录还在`。这条不需要负载配合，所以它才是判据。
+ *
+ * 写过又删掉的一条：`mkdtemp 在基目录被外部删掉之后仍能重建`。它为了量"自愈"而
+ * `fs.rmSync(BASE, { recursive: true, force: true })`——**正是本文件要防的那件事**：基目录由并发的
+ * 测试文件共用，删它等于拆别人的夹具。CI run 38869673471 因此同时红两条：它自己
+ * `ENOTEMPTY … .gp-test-sandbox/gp-registry-H8ZLEo`（sibling 正在用），以及
+ * `project-registry.test.mjs:337` 那条 `ENOENT … gp-registry-H8ZLEo/projects.json.tmp`。
+ * 自愈那一半不另设用例：`mkdirSync(SANDBOX_BASE, { recursive: true })` 每次调用都跑，缺目录必然重建；
+ * 为它删一次共用目录，代价大于覆盖。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -59,21 +67,6 @@ test('最后一个沙箱收尾之后基目录还在——它是并发进程共�
   assert.equal(fs.existsSync(BASE), true,
     '基目录被 dispose() 收掉了：`node --test` 逐文件起并发进程共用它，先跑完的那个把父目录抽走，'
     + '慢的那个下一次 mkdtemp 就 ENOENT（CI run 38862162240 的 mcp-shell 那条红正是这个形状）')
-})
-
-test('mkdtemp 在基目录被外部删掉之后仍能重建（自愈，不是只在干净树上跑得通）', () => {
-  const box = privateSandbox('gp-helper-selfheal-')
-  box.dispose()
-  // 模拟一次外部清理（例如另一条命令 rm -rf 了基目录）：下一次使用必须自己把基目录建回来。
-  fs.rmSync(BASE, { recursive: true, force: true })
-  const again = privateSandbox('gp-helper-selfheal2-')
-  try {
-    assert.equal(fs.existsSync(again.dir), true, '基目录没了就得重建，否则整段套件在一个干净检出上必红')
-    fs.writeFileSync(path.join(again.dir, 'ok'), 'written')
-    assert.equal(fs.readFileSync(path.join(again.dir, 'ok'), 'utf8'), 'written')
-  } finally {
-    again.dispose()
-  }
 })
 
 test('另一个进程里用同一份助手：两个沙箱互不重叠，收尾后基目录仍在', () => {
