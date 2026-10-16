@@ -40,4 +40,15 @@ MCP 客户端配置：
 已捆绑内联，包内不存在指向源码仓库的 `file:` 依赖；`schemas/` 是 kernel schema
 的发布副本，每次 `npm run bundle` 重新同步。
 
+两个入口，各自是什么就按什么用 / two entries, each with one job：
+
+| specifier | file | 行为 / behaviour |
+| --- | --- | --- |
+| `glasspane-mcp`（`exports["."]`） | `dist/index.js` | 就是 `glasspane-mcp` 命令本体：import 它即开始跑 stdio 会话，接管该进程的 stdin/stdout。它是程序，不是库——宿主不要 import 它。 |
+| `glasspane-mcp/stdio-session`（`exports["./stdio-session"]`） | `dist/stdio-session.js` | 同一个会话的库形态（`parseArgs`、`startStdioServer`、`USAGE`、`tooLargeResponse`）：import 时既不读 stdin 也不写 stdout，只有你调用 `startStdioServer()` 才接管。要嵌进自己的进程就用这一条。 |
+
+`exports["."]` 与 `bin["glasspane-mcp"]` 指向同一个文件是刻意的：命令必须无条件运行，
+`argv[1]`/`require.main` 那类"自我判断要不要跑"的守卫曾在 19 个版本里把发布包变成 0
+字节。所以运行与否由你选哪个 specifier 决定，而不是由文件猜。
+
 License: MIT.

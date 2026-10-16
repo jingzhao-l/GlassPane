@@ -2,6 +2,221 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.16.0] — 2026-10-16
+
+**版本判断：minor。** 四条判据逐条实测过，但本版有三处**调用方会观察到**的行为改变，
+按 1.6.2 那条判据的精神记 minor，不记 patch：
+① `gp_act`/`gp_restore` 的 `selector.title` 传**显式空串**从此被 daemon 拒
+（`GP_E_BAD_PARAMS`）——这不是新增参数，是把已经冻结的 schema（`minLength: 1`，且原文写着
+"daemon refuses it"）在实现一侧补上；此前是"同一份契约两套判决"。
+② `glasspaned --evidence-stats` 在档案读不开时从退出码 0 改判 1（退出码**集合**没动，仍是
+{0,1,2,3,64,65}；改的是这一条事实归到哪一格，且 `--project-prune` 20 行之外早就答 1）。
+③ 设置面板「清理/删除」这两条写入动作，在"服务在应门却从没报过自己的状态根"这种情形下**拒绝执行**
+（此前它会照常在面板自己算的根上动手）。
+状态文件的字段没动；CLI 参数没动（没加、没删开关）；两个 npm 包的 `bin` 声明没动；没有新增对外
+`gp_*` 工具。取号：`git tag --sort=-v:refname` 顶格 `v1.15.1`，registry 两包 `latest` 都是
+`1.15.1`，`v1.16.0` 未被占用。
+
+### 为什么这一版条目这么多
+
+一轮全线审查（引擎/MCP 壳/安装器/更新器/发布链/内核镜像）+ 两处**复审自己审出来的缺陷**也一并修了
+（见"复审补上的那几条"）。中间态没留：每一条都是"已改 + 有测试 + 进 main + 随本版发出"。
+
+### Fixed — 引擎与判定（Swift）
+
+- **面板显示一个根、动手删的是另一个根的注册表（P1）。** daemon 只认启动时的 `--state-dir`，
+  **从不读** `GLASSPANE_STATE_DIR`（那是更新器那侧的口径）；而控制台这一页的根是面板按 env/家目录
+  自己算的，四条一次性命令（`--evidence-stats`/`--project-prune --dry-run`/`--project-prune`/
+  `--project-remove`）就带着那个自算的根去 exec。`hello` 早在 1.6.2 就报出自己的 `stateRoot`，
+  侧栏也显示了，面板从没把它接回自己这一侧——`smoke.md` 2026-10-13 §4 记为已确认 P1，一直没修。
+  现在 `adoptDaemonReport` 跟着 daemon 的读数换根、档案目录/注册表/台账三个位置一起重算、
+  换根后重扫；根的来源用 `StateRootSource` 三态如实标着（这一帧报的 / 早前报的 / 面板自己算的），
+  那句话进 projects 页的文案；四条命令的 argv 收进唯一一条漏斗 `daemonCLIArguments(_:)`，
+  全文件只点一次根。真机对照走的是真起进程 + argv 桩
+  （`ConsoleDaemonStateRootTests`，桩对不点名根的参数一律 `unknown argument` + 64），
+  闸侧 `PanelDaemonCommandContractTests.testEveryConsoleCommandCarriesThePanelsOwnStateRoot`
+  从"每处各点一次根"改成"调用次数 == 漏斗次数，且根恰好只被点名一次"。
+- **`--active-project` 与 `--project-*` 的 `--project` 参数把"读不开"答成"没注册"（P1）。**
+  `ProjectRegistry.get` 对"表读不回"和"这条没注册"回同一个 nil，于是损坏的 `projects.json`
+  换来一句 `no project X is registered` / `unknown project X` + 退出码 1——"看不见这张表"被
+  说成"一定不在表里"，而同一个文件在 `--list-projects` 那里是 `loadFailed:true` 拒绝。
+  两条分支现在先问 `listing()`，读不开就走与 `--list-projects` 同一条拒绝（不给 `found:false`、
+  不给 `unknown project`）。测试：`RegistryCliRefusalShapeTests`、`MainRegistryRefusalBranchTests`
+  （夹具是真的把 `projects.json` 写成读不开的样子）。
+- **`--list-projects` 编码失败回 `[]` + 退出码 0**，而它上面 15 行刚写下"读不回的文件一律拒答，
+  不许回 `[]` + 退出码 0"。改走 stderr 拒绝 + 1。拒绝报文给的键是 `encodeFailed`，**不是**
+  `loadFailed`——这一趟文件是读得开的，冒充"文件读不开"会把人指去 `python3 -m json.tool`
+  查一份正常的文件（复审补上的那条，见下）。
+- **`--evidence-stats` 在档案读不开时退出码 0**，而 `--prune-evidence` 对同一个事实退 1，
+  usage 块自己写着"1 = 这次操作被拒"。改为同判；消费侧逐条核过
+  （`engine/.p6_smoke.py`、`.t9_smoke.py` 只读 `dir`，面板忽略退出码）。
+- **restore 的 ffwd 步骤行把 `operationId` 写成 `?? ""`**——一个"存在但没意义"的号，
+  agent 会拿它去 `gp_last_evidence` 问。改成读不到就**不给这个键**（本仓"缺席=没测到"的既有约定）。
+- **`--check-developer-tools` 把一次健康的调试席位判成 timeout**：探测只挂了一根管道，
+  且在轮询循环**之后**才 `readDataToEndOfFile()`，`lldb --batch` 超过 64 KiB 管道缓冲就写阻塞、
+  预算耗尽被本进程自己掐掉。改成边跑边读；`classify` 的判序补两处——拒绝句优先于 `attached`
+  （一句话里两个信号时，说"系统不让"的那半句才是结论），以及**被掐掉/非零退出的会话不再算 ok**
+  （此前只有半句 `Process 42 attached` 也能点亮 granted）。测试：`DebugCapabilityProbeDrainTests`
+  用真 512 KiB 输出、真卡住的子进程与混合输出三种形状。
+- **`selector.title` 传空串：冻结的 schema 说 daemon 会拒，daemon 其实收**。
+  `ParamValidation.optSelector` 只对 `role` 查非空，`title` 走只查长度的 `optString`，
+  于是 `gp_act {role:"AXButton",title:""}` 能落一份档案，而随包发布的 schema（`minLength: 1`）
+  在 TS 那侧判它非法。修法落在 Swift（声明的最后一道判）：显式空串 → `GP_E_BAD_PARAMS`。
+  `identifier` 按同一形状对齐。测试：`SelectorTitleEmptinessTests` + TS 侧四面对照改成能从
+  `optSelector` 全体读判据（复审补）。
+- **`EngineCore` 里四个 responder 没有线上路由，注释却声称它是"同一份文件的第二个写者"**
+  （`projectList`/`projectSet`/`projectGet`/`pruneEvidence` 既无 `EngineMethod` case 也无 Dispatcher
+  路由，生产里跑不到）。注释改成实测到的可达性，并加 `ResponderReachabilityTests`：凡声明
+  "socket 可达"的 responder 必须有同名 `EngineMethod` 与路由，凡声明"无线上路由"的不许出现调用点。
+- **一句 durability 承诺跑在字节之前**：`grep -rn "fsync|F_FULLFSYNC"` 在 engine/Sources、
+  mcp-shell/src、updater/lib、installer、bridge 全线**零个调用点**，而证据/台账/注册表都是
+  `Data.write(.atomic)`/`replaceItemAt` 之后直接发布路径名——断电后可能留下一个长度为 0 的
+  `projects.json` 而 daemon 已经答过 `evidencePersisted:true`。新增 `DurableFileWrite`
+  （独占创建 → 写全 → `fsync(fd)` → close → rename → 文件与目录项各 sync 一次），三份 Swift 存储
+  全部走它；**复审补上漏掉的那一半**：`mcp-shell/src/project-registry.ts` 才是 `gp_project_set`
+  回答"已保存"的那一个生产写者，同样补 `open→write→fsync→close→rename→sync 目录`，
+  同步失败按"这次写没成"拒绝并点名是哪一步（不再拿权限话术顶包）。目录项 sync 对
+  smbfs/NFS/exFAT/只读挂载这类**不支持**的卷不再把一次已落盘的写拒掉（`ENOTSUP/EINVAL/EPERM/
+  EACCES/ENOSYS` 容错，`EIO/ENOMEM` 仍硬拒）——判据必须是量到的东西。
+  测试：`DurableFileWriteTests`、`DurableFileWriteDirectorySyncToleranceTests`、
+  `project-registry-durability.test.mjs`（用真文件真 rename，注入 errno 记调用序）。
+
+### Fixed — 更新器与自动更新链
+
+- **装了 1.10.0 之前那份 updater 的机器，自动更新从此死锁（P1，本机实测）**：1.6.2 的
+  `selfcheck.js` 只拿 `/public let version = "x.y.z"/` 找版本，而 1.10.0 把那一行改成了
+  `= EngineCore.buildVersion`（转读、不带字面量）。本机
+  `~/.glasspane/update-state.json` 自 2026-10-11 起恒 `check-failed / version-line-broken`，
+  指针仍钉在 1.6.2 那份 CLI——每日作业与面板"立即检查"跑的都是读不懂新树的代码。
+  新树补回一个**兼容位点**（`EngineCore.swift` 的实例字面量），`scripts/version-sites.mjs` 多一条
+  真位点、`set-version` 两处一起写、`check-version` 两处都核，`DaemonVersionFlagTests` 与
+  `updater/test/legacy-selfcheck-compat.test.mjs` 断言两处同号且旧读者真能读出——后者带着一条
+  负例（把那一行改回转读，旧读者必须抛），不是永远绿的对照。
+- **定时与面板发起的 apply 解析不到 `npm` / `glasspane-mcp`（P1）**：两处都是按裸名 spawn，
+  而 launchd 给作业的是 `/usr/bin:/bin:/usr/sbin:/sbin`（本机 node/npm 在 `/opt/homebrew/bin`）。
+  `spawnSync` 报 ENOENT → 状态 127 → 拒绝报文说"npm config get prefix 答了 127"并把人指去查
+  **权限**——PATH 问题被讲成权限问题。同一个坑本仓在 2026-10-03 已为 `gpg` 实测并修过
+  （`GPG_CANDIDATE_PATHS`），这次照同一先例给 npm 与 glasspane-mcp 加候选路径，
+  **并且连子进程的环境一起给**：只解析绝对路径而不给 PATH，`#!/usr/bin/env node` 那两个真二进制
+  仍然 127、仍然打那句旧话（复审实测抓出的半修）。`updater enable` 现在把
+  `dirname(process.execPath)` 与前缀 bin 写进作业的 `EnvironmentVariables PATH`——此前两条 remedy
+  让操作者去改那个字典，而 plist 是渲染出来的、手改会被下一次 enable 抹掉。
+  测试：`npm-binary-resolution.test.mjs` 的夹具改成 `#!/usr/bin/env node` 真形状 +
+  `PATH=LAUNCHD_PATH`，另有一条"node 真的不在"仍须具名拒绝的负例。
+- **暂存生命周期会漏**：`writeArchive` 用固定名 `${target}.part`（面板按钮与每日作业同时 check
+  就在同一个临时文件上竞争），`discardStaging` 失败被 `catch {}` 吞掉，成功的 apply 只退役自己那一代。
+  本机实测：`~/.glasspane/update-staging/1.5.1/` 里躺着一份 25 MB 已校验归档（10-01），
+  另有一个空的 `1.12.0/`（10-11）。现在临时名带独占 token、丢弃失败会说话、
+  未被状态引用的旧世代在 **check 收尾也清**（此前只有 swap 成功才清，而本机正因上面那条 apply
+  不成功）。测试：`staging-concurrency.test.mjs`（两个 in-flight check 走同一份环回夹具）。
+- **`verifyStagedBytes` 的 `readArchive` 在 try 之外**：归档读不动（EACCES）时抛出逃出数据契约，
+  而同一函数每一条别的判据都回 `{ok:false, reason}`；后面还有一个不可达的 `return {ok:true,…}`。
+  收进 try、删死返回，测试注入抛错的 `readArchive` 断言这是**数据拒绝**（退出 3，什么都没换）。
+- **历史条目用运行起始时钟盖章**，交接子进程的行先写、父进程的行后盖 ⇒ 审计轨迹非单调。
+  本机 `update-state.json` 实测 `08:47:51 enable` 排在 `08:44:15 apply` 之前。改成
+  `historyEntry.at` 用写入时刻（`updatedAt` 仍走运行钟）；复审补上漏掉的一半：
+  `rollbackToBackup` 两处仍用运行钟，一并改。测试用注入时钟断言追加序单调。
+- **两个"讲错原因"的小判据**：解析器只看 `X_OK`，于是**名字叫 npm 的目录**会被当成候选二进制、
+  再被报成"存在但当前账号不能执行"；`check.js` 把 `EPERM/EACCES` 重讲成"通常是谁的活儿、
+  另一次更新正在跑"。现在都只说自己量到的那个 errno 与路径，并给出能分辨两种可能的命令。
+
+### Fixed — MCP 壳（TypeScript）
+
+- **靠到达顺序猜出来的 operationId，此前与靠回显 id 确认过的同样呈现（P1）**：
+  `audit-session.ts` 写着 `provenanceOf`/`TRAIL_PROVENANCE_NOTES`，注释还写着
+  "它不许读起来像已验证，`gp_recent_reports` 得在这一层说出来"，而全仓没有一个读者。
+  现在报告与渲染两条面都把出处文字带上（壳不判定，只把机制说出来）；`dispatch.ts` 里两处
+  迟到应答的日志同样加限定；没人读的 `inferredIds()` 删掉。测试：
+  `trail-provenance-surface.test.mjs` 经真客户端+真会话产出，不是手摆报文。
+- **`glasspane-http` 退出前的报错可能被管道截掉**：`index.ts` 早就量过"256 KiB 的 stderr 管道写
+  只能落 64 KiB，尾巴没了"，并把写入收进 `writeDescriptor`；网关那份没跟着改，八处退出相邻的写
+  还是裸 `process.stderr.write`（包括那句 FATAL "not listening"）。抽出共享写者并全部改用；
+  `exit-adjacent-writes.test.mjs` 用真管道量 65 536 字节截断 vs 100 005 送达。
+- **`GLASSPANE_ENGINE_SOCK=""` 被当成一个字面路径**：`?? ` 只挡 nullish，空串照传，
+  发布物实测报的是 Node 内部话术 `Port should be >= 0 and < 65536`，remedy 退回泛泛的"重启服务"。
+  空/纯空白现在按"没设"处理，`--socket-path=` 给空值按用法错误拒；两个入口都测
+  （`socket-override-blank.test.mjs`，另有一条"真路径仍然优先"的对照）。
+- **发布物形状此前没有任何闸**：测试 import 的是 `tsc` 产物，而 `prepublishOnly` 发的是
+  esbuild **bundle**——两种字节。新增 `published-artifact.test.mjs`：建 bundle、`npm pack`、
+  装进干净前缀、经 npm 风格的**符号链接 bin** 不加解释器直接起它（shebang 真跑一遍）、
+  再用真 stdio 会话打 `initialize`/`tools/list`。`main()` 在 import 就 hijack stdio 这一条
+  拆出一个库入口（`stdio-session`，并加进 `exports`）——**没有**加 `argv[1]`/`require.main`
+  自检守卫，那一类守卫曾让 19 个已发布版本经符号链接调用时全部空转。
+- **对照桩的形状错**：`fake-daemon.mjs` 与 `socket-override-blank.test.mjs` 各写了一份
+  `probe_status` 报文，字段与真 responder（`EngineCore.probeStatus()` 的
+  `probes/attachedHasProbe/disconnections/…`）都不一致，靠壳原样转发才"过"。改成共享一个按真形状
+  的桩，并加一条"daemon 从不发的键不许被这些夹具默认接受"的对照。
+
+### Fixed — 安装器与引导
+
+- **`install.sh` 的 ref 判据比 installer 松**，而它自己的注释声明两处同源：`GLASSPANE_REF='+bad'`、
+  `v1:2`、`~x`、`%n` 都能过 `install.sh` 并原样进 `git clone --branch`，而
+  `installer/cli.js` 的 `validateGitRef` 同样取值直接拒。补齐（含前导 `+` 与字符集），
+  两条入口的拒绝句子逐字对齐；clone 失败文本改成像 `cloneFailureText` 那样**转述 git 自己的 stderr**，
+  不再一律怪到"ref 不存在或网络不可达"。测试是双入口拒绝矩阵（`install-sh.test.mjs`）。
+- **`install.sh` 先 clone 再验 Node**：一个没装 Node 的机器要先付、并留下一次 5 600 文件的 clone。
+  两块都是纯检查，顺序换过来状态中立。
+- **三处 `id -u` 探针会崩而不是拒**：`spawn('id',['-u']).stdout.trim()` 在 spawn 失败时
+  `stdout` 是 undefined，`.trim()` 抛未捕获 TypeError，而它下面那句"无法解析当前 uid"的拒绝
+  **根本跑不到**（兄弟函数 `launchdReregisterProbe` 早就 `?? ''` 了）。四处调用点统一到
+  共享安全读法，各配一条注入失败的测试。
+- **bundle 安置被拒时仍打印"实测校验通过…本轮构建产物=<v>"**：同版本重装、人对覆盖答"不"，
+  重启起来的是盘上那一份旧的，版本号一样而字节不同——这一层没法证明那是本轮的产物。
+  现在 `declined` 非空就把这句话撤回，改成明说"应答的是磁盘上的旧一份"。
+- **两条只在工作量低时才成立的计时断言**（`updater/test/apply.test.mjs` 的 handshakeVerify
+  轮询、`installer/test/bundle-apps.test.mjs` 的 `startDetached` 窗口）改走已有注入缝/有界事件竞态，
+  各保留一条真 socket、真子进程的宽松预算对照——不是把超时调大。
+
+### Fixed — 内核镜像与发布链
+
+- **`kernel/` 镜像内部自相矛盾（P1）**：schemas/fixtures 已是 `iterate-kernel` 0.1.7，而 `src/`
+  停在 0.1.5（缺 convergence / decision-log-transcribe / dimension-context / invariant-report /
+  provider-registration / run-plan 六个模块，`decision-log-entry` 的 zod 仍是 7 字段 strictObject）。
+  后果可见：一份 0.1.7 JSON Schema 判合法的台账行（Swift 的 `DecisionLogEntry` 确实写
+  kind/round/dimension/payload）被镜像这侧的校验器拒；而 `mcp-shell/schemas/` 打进发布物的是
+  0.1.7，bundle 里的校验器是 0.1.5 —— 同一契约两套判决。经唯一入口从 canonical
+  （iterate-skill `origin/main` 02699de）整体重刷，带回 canonical 自己的
+  `test/decision-log-entry.test.mjs:105-108`（把 `ok-02` 真送进两侧），这就是原先缺的那条对照。
+  51682a4 那次"镜像语料追平"只追平 schemas+fixtures、没动代码，缺陷被提交信息盖住了。
+- **`tools/sync-kernel.sh --target=repo` 覆盖镜像自有 manifest（P1）**：把
+  `@iterate/kernel`/`private:true`/产品线版本号/钉死的 zod 范围换成 `iterate-kernel`/
+  `private:false`/0.1.7/范围式，root `npm run build` 当场 `No workspaces found`；
+  guard 3 回滚 ⇒ 症状是"文档规定的同步永远做不成"，缺陷被它自己的补救遮住。
+  现在 `package.json`/`package-lock.json` 不进复制集，新增依赖名对照的 guard 2b（缺就**先拒再写**），
+  `exports`/`files` 两个契约形状字段改为从 canonical 复制（kernel 自己的 packaging 闸断言它们，
+  上一轮正是这两项没跟上）。新夹具是 capture 下来的 canonical manifest 原样字节——旧夹具拿
+  镜像自己的字节当 canonical，"两份身份不同的 manifest"在那套夹具里物理上不可能发生。
+- **`scripts/make-release-archive.mjs` 硬编码 bundle 文件表**（"the three files"），
+  壳多出一个 bundle 入口就报"归档必须有构建产物"、还让人去跑那个**产生被拒文件**的步骤，
+  即本版一度造不出发布归档。改为从 `mcp-shell` 自己的 bundle 脚本读，解不出来就拒
+  （绝不退回一个空表）。
+- **CI 的 swift job `swift test` 零条用例也算绿**：新增 `scripts/assert-test-count.mjs`
+  （两种 runner 的行都必须出声、合起来过下限、读不到日志是 2 不是 0）与 ci.yml 的调用点，
+  `set -o pipefail` 一起补上（管道里包装脚本的退出码不可信）。
+
+### 复审补上的那几条（本轮新代码自己的缺陷）
+
+两条流水线改完之后各过了一遍全新视角的复审，审出来的都算本轮的缺陷、本轮修的：
+① npm/glasspane-mcp 只解析了路径没给子进程 PATH（仍 127、仍打那句旧话）；
+② `projects.json` 的 TS 生产写者没同步；③ `--list-projects` 编码失败被标成 `loadFailed`；
+④ `--recipe-validate` 留着的同一形状吞异常；⑤ `classify` 里被掐掉的会话仍算 ok；
+⑥ 回滚路径的历史时钟；⑦ remedy 指向一个会被 enable 抹掉的机制；
+⑧ `published-artifact.test.mjs` 自己三处运算符/属性名错误（其中一处**永远不可能通过**）；
+⑨ `scripts-set-version.test.mjs` 的位点完备性对照只按文件名核（改了位点也测不到）；
+⑩ 目录项 sync 在不支持的卷上把正常的写拒掉。
+
+### 门禁（本版逐条复跑，实际计数见发布记录）
+
+`npm ci` / `npm run build` / `npm test --workspaces --if-present` / `check-version` /
+`check-doc-links` / `check-workflows --self-test` + `check-workflows` /
+`swift build --package-path engine` / `swift test --package-path engine` /
+`swift test --package-path engine/probe` / `python3 -m pytest -q bridge` / `sh -n install.sh` /
+信号闸 `python3 .signal_smoke.py .build/debug/glasspaned` / 发布形态 `npm run bundle && npm pack --dry-run` /
+`node harness/tools/tool-surface.mjs --check`（面 A 因本版有意增长重记基线，单独一条
+`chore(harness)` 提交；面 B 未动）。
+
+
+
 ## [1.15.1] — 2026-10-14
 
 **版本判断：patch。** 四条判据逐条实测：状态文件的字段没动（`hello` 新增的是一个**可选**键
