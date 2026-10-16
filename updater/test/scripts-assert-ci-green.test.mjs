@@ -21,6 +21,9 @@
  *     pending 会带着 `conclusion: null` 落进"结论不是 success"以外的路径。
  *   · 把文件末尾的自执行判据放宽成 `if (process.argv[1])`（被 import 时也照跑）→ 整个测试文件
  *     死于退出码 1：import 就把 CLI 跑起来了，那条隔离断言红（实测）。
+ *   · 把 `positiveInt(budgetRaw)` 换回 `Number(budgetRaw)` → `写坏的时间参数是拒绝，不是无限等待`
+ *     红（NaN 会一路走到发请求、退 0）。这条是本轮写完这道闸之后自己复查出来的：判据本身对，
+ *     参数没判，而 `Atomics.wait(…, NaN)` 不返回。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -199,6 +202,23 @@ test('没有 sha 的时候不猜一个就发', () => {
     assert.equal(ran.status, 1, ran.out)
     assert.match(ran.out, /没有 sha/, ran.out)
     assert.deepEqual(ran.calls(), [], '没有对象可问时连 API 都不该发出去')
+  } finally {
+    gh.cleanup()
+  }
+})
+
+test('写坏的时间参数是拒绝，不是无限等待', () => {
+  // 实测过的形状：`Number('20m')` 是 NaN，`elapsed >= NaN` 恒假（预算到不了），
+  // 而 `Atomics.wait(view, 0, 0, NaN)` **永不返回**——那条探针在本机挂了两分钟不退出，只能杀掉。
+  // 也就是说 `--budget 20m` 会把发布作业变成一台不出日志、不超时、也停不下来的机器。
+  const gh = stubGh('cli-badbudget', FIX('ci-runs-success.json'))
+  try {
+    for (const bad of ['abc', '20m', '0', '-5']) {
+      const ran = runCli({ args: ['--sha', ASK.sha, '--repository', 'jingzhao-l/GlassPane', '--budget', bad, '--poll', bad], gh })
+      assert.equal(ran.status, 1, `--budget ${bad} 必须拒绝：${ran.out}`)
+      assert.match(ran.out, /正整数毫秒/, ran.out)
+    }
+    assert.deepEqual(gh.calls(), [], '参数判掉之后不该再发 API 请求')
   } finally {
     gh.cleanup()
   }

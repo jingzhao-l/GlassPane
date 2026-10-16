@@ -76,6 +76,17 @@ function arg(name, fallback) {
   return i > -1 && process.argv[i + 1] !== undefined ? process.argv[i + 1] : fallback
 }
 
+/**
+ * `--budget` / `--poll` 必须是真正的正整数毫秒，理由不是洁癖：`Number('20m')` 是 NaN，
+ * `elapsed >= NaN` 恒为假（预算永远到不了），而 `Atomics.wait(…, NaN)` 实测**永不返回**
+ * （2026-10-16 量到：那条探针挂了两分钟不退，只能被杀掉）。一个写坏的时间参数会把发布作业
+ * 变成一台无限等待的机器——不报错、不超时、不出日志。放宽判据之前，先把入参判掉。
+ */
+function positiveInt(raw) {
+  const n = Number(raw)
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : null
+}
+
 function fetchRuns({ repository, workflow, sha, ghBin }) {
   const apiPath = `repos/${repository}/actions/workflows/${encodeURIComponent(workflow)}/runs`
   const got = spawnSync(ghBin, ['api', `${apiPath}?head_sha=${sha}&event=push&per_page=100`],
@@ -96,8 +107,17 @@ export function main({ env = process.env, ghBin = 'gh', sleep = (ms) => Atomics.
   const sha = arg('sha', env.GITHUB_SHA ?? '') || ''
   const workflow = arg('workflow', 'ci.yml')
   const repository = arg('repository', env.GITHUB_REPOSITORY ?? '')
-  const budgetMs = Number(arg('budget', '1200000'))
-  const pollMs = Number(arg('poll', '30000'))
+  const budgetRaw = arg('budget', '1200000')
+  const pollRaw = arg('poll', '30000')
+  const budgetMs = positiveInt(budgetRaw)
+  const pollMs = positiveInt(pollRaw)
+  if (budgetMs === null || pollMs === null) {
+    return {
+      code: 1,
+      text: `--budget/--poll 要的是正整数毫秒，实得 --budget=${budgetRaw} --poll=${pollRaw}。`
+        + '写成别的数字不是"没有限制"，是"等不到头"：预算比较恒为假，而按那个值睡下去不会再醒来。',
+    }
+  }
   if (!sha) return { code: 1, text: '没有 sha：既没给 --sha，环境里也没有 GITHUB_SHA。没有对象可问，不能算通过。' }
   if (!repository) return { code: 1, text: '没有 GITHUB_REPOSITORY，问不了 Actions API。' }
 
