@@ -115,6 +115,30 @@ enum ParamValidation {
         if role.count > selectorMaxLength {
             throw GPError(code: .badParams, message: "field 'selector.role' exceeds \(selectorMaxLength) characters")
         }
+        // 显式给出的 `title` 不许为空。判据的出处是发布出去的契约本身：
+        // `kernel/schemas/evidence-pack.schema.json` 的 `$defs.selector.title` 写了
+        // `minLength: 1`，而 daemon 是那份 schema 声明的最后判决层——"schema 说拒、
+        // 执行它的层收"就是"一份契约、两个判决"（gp_act 收下的空 title 会进证据包，
+        // 那份包再被同一份 schema 判为非法）。
+        //
+        // 判据放在 `optSelector` 而不是 `optString` 里，是有意的：`optString` 是全
+        // 模块共用的长度读取（`attach.bundleId`、`observe.role`、`restore.mode`……），
+        // 给所有字段加空串禁令会一次性改掉十条命令的已接受输入，而这条缺陷只关于
+        // selector 的 title。
+        //
+        // `identifier` 保持原样（长度判据而已）——这不是遗漏，是照着 schema 那句话做的：
+        // `$defs.selector.identifier` 刻意没有 `minLength`，原文是 "Deliberately has no
+        // minLength: no side rules on an empty identifier (the daemon has no guard for
+        // it), so the kernel does not invent one."。要在这里加拒绝，就得同时改 kernel
+        // 的 schema 与 zod（不是本次修复的层，也不是我的文件所有权），那才是把一处
+        // 未测量的规则塞进代码。`mcp-shell/test/tools.test.mjs` 也按"空 identifier
+        // 仍然转发" Behavioral 地钉着这一条。
+        if let presentTitle = dict["title"] as? String, presentTitle.isEmpty {
+            throw GPError(
+                code: .badParams,
+                message: "field 'selector.title' must be a non-empty string when present"
+            )
+        }
         let title = try optString(dict, "title", maxLength: selectorMaxLength)
         let identifier = try optString(dict, "identifier", maxLength: selectorMaxLength)
         return Selector(role: role, title: title, identifier: identifier)

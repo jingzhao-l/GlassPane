@@ -43,6 +43,10 @@ public final class DebugCapabilityProbe {
     }
 
     public struct ProcessRunner: Running {
+        /// 读者收尾窗口：子进程退出/被杀之后，管道要到写端全部关闭才落到 EOF。
+        /// 正常情况下这在一瞬间；给 2s 上限是"探测不许把调用线程挂住"的下半句。
+        static let drainGraceSeconds: TimeInterval = 2
+
         public init() {}
         public func run(_ binary: String, _ arguments: [String], timeout: TimeInterval)
             -> (exit: Int32?, timedOut: Bool, output: String) {
@@ -57,6 +61,21 @@ public final class DebugCapabilityProbe {
             } catch {
                 return (nil, false, "spawn failed: \(error.localizedDescription)")
             }
+            // 读管道与等退出必须**同时**进行。旧写法在轮询循环**之后**才
+            // `readDataToEndOfFile()`：`lldb --batch` 的输出一旦超过管道的内核缓冲
+            // （macOS 上 64 KiB），子进程就阻塞在自己的 write() 上，循环看到的
+            // "还在跑"正是这个阻塞，于是到点 terminate，`classify` 把一次健康的调试
+            // 席位判成 `.timeout`——而面板"验证调试能力"显示的就是那个结论。
+            // 这里沿用本仓已经验证过的读者形状（`ConsoleModel.runDaemonCLI`：后台队列
+            // 读到 EOF + 带时限的 `DispatchGroup.wait`）。两条流共用同一个 Pipe，
+            // 所以一个读者就够，不存在"先写满第一路才写第二路"的交叉阻塞。
+            let collected = PipeCollector()
+            let reader = DispatchGroup()
+            reader.enter()
+            DispatchQueue.global(qos: .utility).async {
+                collected.append(pipe.fileHandleForReading.readDataToEndOfFile())
+                reader.leave()
+            }
             let deadline = Date().addingTimeInterval(timeout)
             var timedOut = false
             while process.isRunning {
@@ -69,11 +88,13 @@ public final class DebugCapabilityProbe {
                 }
                 usleep(100_000)
             }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let status = process.terminationStatus
-            let text = String(data: data, encoding: .utf8) ?? ""
+            // 被杀掉的那一侧也会让读者落到 EOF；收尾窗口用尽就取已经拿到的部分——
+            // 输出一段截过的文本，好过把探测挂在这里。这里**不**去 invalidate 那个
+            // FileHandle：读者的 `readDataToEndOfFile()` 还在它上面阻塞着，关掉会是
+            // 一次 use-after-close。后台块自己收尾、只往收集器里追加，没有别的作用。
+            _ = reader.wait(timeout: .now() + Self.drainGraceSeconds)
+            let text = String(data: collected.value, encoding: .utf8) ?? ""
             if text.hasPrefix("spawn failed:") { return (nil, false, text) }
-            _ = status
             return (timedOut ? nil : process.terminationStatus, timedOut, text)
         }
 
@@ -138,14 +159,24 @@ public final class DebugCapabilityProbe {
 
     /// Output-shape classification. Unknown failures surface as spawnFailed
     /// verbatim — never silently folded into a permission claim either way.
+    ///
+    /// 判据顺序：**拒绝先于成功**。旧顺序先测 `.ok`（含 "attached" 即算），于是
+    /// `lldb` 一次"先挂上、随后失败"的输出（`Process 42 attached` 之后跟
+    /// `error: attach failed: …`）被判成 `.ok`，把一次没成功的席位报成 granted——
+    /// 而 `.denied` 那三条字符串就在下面几行等着，永远读不到。一句话里两个信号时，
+    /// 说"系统不让"的那半句才是结论。
     static func classify(_ run: (exit: Int32?, timedOut: Bool, output: String)) -> Outcome {
         let text = run.output
-        if text.contains("exited with status") { return .ok }
-        if text.contains("attached") && !text.contains("Not allowed") { return .ok }
         if text.contains("Not allowed to attach") || text.contains("attach failed")
             || text.contains("not permitted") { return .denied }
+        // 一次没跑完的会话不能因为"它中途说了句 attached"就被判成席位是通的：
+        // 卡住被 terminate/SIGKILL 的那一趟，输出里最正常的就是那半句 attach。
+        // 判据的顺序就是证据的优先级——先问"这台子是怎么结束的"，再问"它说了什么"。
         if run.timedOut { return .timeout }
         if run.exit == nil { return .spawnFailed }
+        if let code = run.exit, code != 0 { return .spawnFailed }
+        if text.contains("exited with status") { return .ok }
+        if text.contains("attached") && !text.contains("Not allowed") { return .ok }
         return .spawnFailed
     }
 
@@ -170,5 +201,29 @@ public final class DebugCapabilityProbe {
             "granted": snap.granted,
             "note": "TCC 无公开查询 API；本结果是受限真实 lldb 探测的三态陈述（P6 §7）。granted=false 的唯一人工步骤是系统设置勾选，验证/复验全由本命令承担。",
         ]
+    }
+}
+
+/// 后台读者累加管道输出的地方：一把锁 + 一个 `Data`。
+///
+/// 面板侧的同形状是 `ConsoleModel.MutexBox`（在 `glasspane-settings` target 里，
+/// 本 target 不依赖它，也不该为一个 20 行的盒子加依赖）。它存在的全部理由是
+/// `ProcessRunner.run` 现在**边等退出边读**：读者在别的队列上，取值的一方在调用
+/// 线程上，没有锁就是一次并发读写 `Data`。
+private final class PipeCollector {
+    private let lock = NSLock()
+    private var storage = Data()
+
+    func append(_ data: Data) {
+        guard !data.isEmpty else { return }
+        lock.lock()
+        storage.append(data)
+        lock.unlock()
+    }
+
+    var value: Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
     }
 }
