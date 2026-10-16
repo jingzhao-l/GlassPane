@@ -90,12 +90,13 @@
 | `npm stage approve`（若哪天 trusted publisher 改回 staged-only） | 需要 owner 的 2FA | 本轮**没走到**这一分支（两包均直发成功，`npm stage list` 为空）。将来出现时：`npm stage list` 取 stage-id → `npm stage approve <stage-id> --provenance` |
 | Apple 公证（`.app` 的 notaryTool 票据） | 需要付费开发者账号 | `xcrun notarytool submit GlassPane-<ver>.tar.gz …` 需要账号；本轮发布物不含公证，面板与 daemon 走本机自签构建 |
 | 面板跨根采纳（daemon 报来的根 ≠ 面板算的根）那条端到端 | 需要一个**非默认根**的常驻 daemon；本机只有默认 `~/.glasspane` 的在跑实例，起第二个会去动真档案 | 人工：`glasspaned --state-dir <临时根>` 起一个非默认根实例，再在面板项目页看页脚是否写"服务端的根 \<path\>"。判据与假绿形状都写在 `ConsoleDaemonStateRootTests` 与 `engine/smoke.md` §4 的"未观测"那一行 |
+| 真机无障碍/屏幕录制类交互（`gp_act` 在真实 app 上的点击） | 需要登录 GUI 会话与已勾权限；本轮权限读数确认为 accessibility/screenRecording/inputMonitoring 均 granted，但真机 act 走的是另一条验收（`engine/.p4i4_smoke.py` 已跑，退 0） | 无需人工：已跑。仅"面板跨根采纳"一项留作上表第三行 |
 
 ## 6. 这份台账自己在哪一棵树里
 
 写第一版时 `v1.16.3` 的 tag 已经切下（tag → `cb1463bb`，归档由那次 tag push 的 Release run
 38867271592 产出），所以那份归档里**没有**本文件。修法不是接受例外，而是再出一版把它收进树里：
-`v1.16.4` 的 tag 落在本文档所在的提交之后 ⇒ 本文件与 §1 的总账、§2 的四格状态，都在
+`v1.16.4` 的 tag 落在本文档所在的提交之后 ⇒ 本文件与 §1 的总账、§2 的逐格状态（1.16.4 那一行按本节末尾那条规则在 tag 之后补），都在
 `GlassPane-1.16.4.tar.gz` 里。这一条之所以要写而不是省掉，是因为"发布物 = 被 tag 的树"这条判据
 当日已经用它打过两次脸（1.16.1 的 tag 切早了、1.16.2 挡住自己），不能轮到自己就默认例外。
 
@@ -104,4 +105,10 @@
 夹具的 `project-registry.test.mjs:337` 那条 `ENOENT`）。核对过 `grep -rnE "npm (run )?test|node --test"
 updater/lib installer/cli.js install.sh` 只命中一条注释——升级/安装路径不跑测试，所以它对用户机器
 没有行为影响；但它在被发布的树里，所以删掉它、并把删它的理由写进文件头，随 1.16.4 发出。
-| 真机无障碍/屏幕录制类交互（`gp_act` 在真实 app 上的点击） | 需要登录 GUI 会话与已勾权限；本轮权限读数确认为 accessibility/screenRecording/inputMonitoring 均 granted，但真机 act 走的是另一条验收（`engine/.p4i4_smoke.py` 已跑，退 0） | 无需人工：已跑。仅"面板跨根采纳"一项留作上表第三行 |
+
+
+**这条判据的准确说法（当日绕了三圈之后定下来，写在这里免得下一轮重新发明）**：被 tag 的树必须
+**包含**它发布出去的每一个字节——归档由那次 tag push 构建，这一点机器保证；任何代码、测试、判据
+改动必须**先落 main 再打 tag**；而那次发布自己的运行编号（Release run、npm run、sigstore logIndex）
+只能**事后**记录：它记录的是那次发布的结果，把它塞进被 tag 的树是循环定义，不是纪律。§2 表里
+1.16.4 那一行的编号就是按这条规则在 tag 之后补的，那一行之外的内容全在被 tag 的树里。
