@@ -264,7 +264,7 @@ struct ProjectsTabView: View {
             return "在访达中打开这条注册项自己写的档案目录：\(stored)"
         }
         return "这条注册项没写档案目录，所以它自己没有可打开的档案。这一枚开的是本页在读的那一份："
-            + "\(model.evidenceDirectoryPath)（本页读数取自状态根 \(model.displayedStateRoot)）——"
+            + "\(model.evidenceDirectoryPath)（\(model.displayedStateRootCaption)）——"
             + "那是本页共用的档案目录，不是这个项目的替身。"
     }
 

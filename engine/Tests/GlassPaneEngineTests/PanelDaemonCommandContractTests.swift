@@ -150,19 +150,22 @@ final class PanelDaemonCommandContractTests: XCTestCase {
     func testEveryConsoleCommandCarriesThePanelsOwnStateRoot() throws {
         let source = try read("engine/Sources/glasspane-settings/ConsoleModel.swift")
         let calls = captures(#"(ConsoleModel\.runDaemonCLI\(binary:)"#, in: source)
-        // 数调用点而不是函数名：`daemonCLIArguments` 的定义行也含那个名字，
-        // 把它算进"组装次数"会让计数比调用点多一，于是这条闸永远只能靠写死数字过。
-        let built = captures(#"(ConsoleModel\.daemonCLIArguments\()"#, in: source)
-        let withRoot = captures(#"(stateRoot: stateRoot\.path\))"#, in: source)
+        // 2026-10-16：四条命令不再各自拼根，而是一律走实例漏斗 `daemonCLIArguments(_:)`。
+        // 于是"每一次调用都有一次组装"这条关系不变，但**根的点名次数**从"每处一次"变成
+        // "全文件恰好一次"——那一次必须在漏斗里。少路由一处（第五处命令自己拼数组）会让
+        // calls > built，红；在漏斗之外再点一次根（多一处 `stateRoot:` 实参）意味着有人开始
+        // 绕过漏斗，红。
+        let built = captures(#"(daemonCLIArguments\(\[)"#, in: source)
+        let rootNamed = captures(#"(stateRoot: stateRoot\.path)"#, in: source)
         XCTAssertGreaterThanOrEqual(calls.count, 3,
             "只找到 \(calls.count) 处 daemon 一次性调用，这条闸已经在看不到东西的地方")
-        XCTAssertGreaterThanOrEqual(built.count, 3,
-            "只有 \(built.count) 处经 daemonCLIArguments 组装，低于已知的三条")
         XCTAssertEqual(built.count, calls.count,
-            "有 \(calls.count) 处一次性调用却只有 \(built.count) 处组装：多出来的那一支不点名状态根，"
+            "有 \(calls.count) 处一次性调用却只有 \(built.count) 处经漏斗组装：多出来的那一支不点名状态根，"
             + "就会在家目录默认根上执行")
-        XCTAssertEqual(withRoot.count, built.count,
-            "\(built.count) 处组装里只有 \(withRoot.count) 处显式带上面板认的状态根")
+        XCTAssertEqual(rootNamed.count, 1,
+            "状态根应当在漏斗里被点名恰好一次，实得 \(rootNamed.count) 次：多出来的那一次是有人在绕过漏斗")
+        XCTAssertTrue(source.contains("[\"--state-dir\", stateRoot.path] + command"),
+            "漏斗本身不再把根显式递给 daemon——每一条命令都会落到它自己的默认根上")
         XCTAssertFalse(source.contains("arguments: [\"--"),
             "还有一处把开关数组直接递给 daemon——它会在家目录默认根上执行")
     }

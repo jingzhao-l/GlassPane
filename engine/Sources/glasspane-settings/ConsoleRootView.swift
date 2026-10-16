@@ -79,6 +79,12 @@ struct ConsoleRootView: View {
         .onChange(of: settings.daemon.liveness) { liveness in
             syncFromSettings(liveness: liveness)
         }
+        // 状态根换一个 daemon 就能在**同一档 liveness** 下变（重装后仍"运行中"，只是
+        // --state-dir 指到别处）。只挂 liveness 会漏掉这一帧，于是这一页继续按旧根读、
+        // 旧根写——正是这条缺陷的形状。
+        .onChange(of: settings.daemon.stateRoot) { _ in
+            syncFromSettings(liveness: settings.daemon.liveness)
+        }
         .onChange(of: selection) { section in
             // 进某一页时按需重读该页数据：档案是外部进程随时会写的，
             // 但也不该在用户没看的时候反复扫盘。
@@ -98,6 +104,7 @@ struct ConsoleRootView: View {
     private func syncFromSettings(liveness: SettingsModel.DaemonLiveness) {
         console.adoptDaemonReport(
             binaryPath: settings.daemon.subject?.binaryPath,
+            daemonStateRoot: settings.daemon.stateRoot,
             answered: liveness == .answering
         )
     }

@@ -143,17 +143,27 @@ final class ConsoleModel: ObservableObject {
     /// daemon 可执行文件路径：由面板在 hello 拿到 daemon 身份后回填。
     /// 没有它，清理/删除这类写入动作就没有可执行入口。
     @Published var daemonBinaryPath: String?
-    /// 面板认的状态根。三条腿以前各走各的：更新器那侧读 `GLASSPANE_STATE_DIR`，
-    /// 这一侧的 `evidenceDirectory` / `projectsPath` / `approvalsPath` 一律是
-    /// **家目录默认根**的常量，而三个 daemon 写入命令（`--evidence-stats`、
-    /// `--project-prune`、`--project-remove`）连根都不传，于是 daemon 也按它自己的
-    /// 默认根解析。用户把状态根挪过（`glasspaned --state-dir …`）之后，这一页显示的是
-    /// 新根、点"清理/删除"改的是 `~/.glasspane` 里那份**另一个实例的真注册表**——
-    /// 而屏幕上的字还写着"档案目录：<新根>"。现在四个数来自同一个根，CLI 也带着它。
-    private let stateRoot: StateRoot
-    private let evidenceDirectory: String
-    private let projectsPath: String
-    private let approvalsPath: String
+    /// 面板这一页读与写的状态根。
+    ///
+    /// 由来：`GLASSPANE_STATE_DIR` 是更新器那侧的口径，daemon 从不读它（它只认启动时的
+    /// `--state-dir`），于是"面板按 env 算根、daemon 守另一个根"时同一屏并排显示两个根的
+    /// 数据，而「清理/删除」这四条一次性 CLI 改的是**另一个实例的真注册表**
+    /// （`smoke.md` 2026-10-13 §4 记为已确认 P1）。现在 hello 报来根就跟着换，
+    /// 出处由 `stateRootSource` 如实标着。
+    @Published private(set) var stateRoot: StateRoot
+    /// 这一页的根是从哪来的——三种来源三句话，"daemon 报的"不许由"面板算的"来冒充。
+    enum StateRootSource: Equatable {
+        /// 最近一帧 hello 里 daemon 自己报的。
+        case daemonReported
+        /// daemon 报过，之后的帧没再报（老 daemon 没带这个键）：路径留着，出处如实降级。
+        case daemonReportedEarlier
+        /// daemon 从没报过，这是面板按 `GLASSPANE_STATE_DIR`/家目录算的。
+        case panelComputed
+    }
+    @Published private(set) var stateRootSource: StateRootSource = .panelComputed
+    @Published private(set) var evidenceDirectory: String
+    @Published private(set) var projectsPath: String
+    @Published private(set) var approvalsPath: String
     /// 档案目录扫描的注入点：默认走本机 `LocalArchive.scanEvidence`。测试用它
     /// 造出"目录读不了"与"目录在但确实空的"两种不同结局——这两种在真机上
     /// 长得一模一样（都是一份空列表），不注入就永远只测得到其中一种。
@@ -194,11 +204,39 @@ final class ConsoleModel: ObservableObject {
         ["--state-dir", stateRoot] + command
     }
 
+    /// 四条 daemon 一次性命令实际用的 argv：**只能**从这一页当前认的根组装。
+    /// 从前四个调用点各自拼 `stateRoot.path`，于是"跟着 daemon 换根"这件事要改四处，
+    /// 少改一处就是半修（读的是新根、删的是旧根）。收在这里，测试也只需要对这一条说话。
+    func daemonCLIArguments(_ command: [String]) -> [String] {
+        ConsoleModel.daemonCLIArguments(command, stateRoot: stateRoot.path)
+    }
+
     /// 面板这一页认的状态根（供文案点名"这数字是从哪儿读的"）。
     var displayedStateRoot: String { stateRoot.path }
 
+    /// 这一页的根是**谁**认定的。从前这句话只报路径，于是 daemon 报一个根、面板按
+    /// `GLASSPANE_STATE_DIR` 另算一个根时，屏幕两侧都写着一个"状态根"而看不出它们不是
+    /// 同一个数——现在把出处一起说出来，没报过就不冒充报过。
+    var displayedStateRootCaption: String {
+        let origin: String
+        switch stateRootSource {
+        case .daemonReported: origin = "后台服务这一帧上报的"
+        case .daemonReportedEarlier: origin = "后台服务早前上报的（这一帧没再报）"
+        case .panelComputed: origin = "面板自己算的（后台服务从没报过它实际在用的根）"
+        }
+        return "\(origin)状态根 \(displayedStateRoot)——本页读数与「清理/删除」都按它走"
+    }
+
     /// daemon 二进制路径是否已知——决定"清理/删除"这类写入动作可用与否。
     var canRunDaemonCLI: Bool { daemonBinaryPath != nil }
+
+    /// daemon 至少应过一次门。没有它，"这一页的根是自己算的"与"根本没有服务可问"
+    /// 是两件事，而只有前者才该拦下写入动作。
+    @Published private(set) var daemonHasAnswered = false
+    /// 服务在应门，却从没报过它自己的根，而这一页手里那个根是面板按 env/家目录算的——
+    /// 这种情形下 `--project-prune` / `--project-remove` 动的是**哪个实例的注册表**没人知道。
+    /// 读侧靠 `displayedStateRootCaption` 把出处说出来；写侧不能只靠一句话就照常动手。
+    var writesLackAReportedRoot: Bool { daemonHasAnswered && stateRootSource == .panelComputed }
 
     /// 把一次 hello 的实测结局接到控制台数据上。
     ///
@@ -208,15 +246,39 @@ final class ConsoleModel: ObservableObject {
     /// 没自报，保持现状，因为"没读到路径"不等于"路径没了"）。
     /// - Parameter answered: 这一帧是不是真的拿到了 hello 回话。"注册表改动要重启
     ///   后台服务才生效"那句话只能在服务重新应门之后撤，点一下按钮不算重启成功。
-    func adoptDaemonReport(binaryPath: String?, answered: Bool) {
+    func adoptDaemonReport(binaryPath: String?, daemonStateRoot: String? = nil, answered: Bool) {
         // 只有真空白算"这一帧没自报"；空白串也不能当路径——后面四条动作都要拿它去 exec。
         let reported = binaryPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let reportedRoot = daemonStateRoot?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var rootChanged = false
+        if let reportedRoot, !reportedRoot.isEmpty {
+            let next = StateRoot(path: reportedRoot)
+            if next != stateRoot {
+                stateRoot = next
+                evidenceDirectory = next.evidenceDirectory
+                projectsPath = next.projectsFile
+                approvalsPath = next.approvalsFile
+                rootChanged = true
+            }
+            stateRootSource = .daemonReported
+        } else if stateRootSource == .daemonReported {
+            // 报过又断了（老 daemon 不带这个键）：路径留着，但出处必须降级——
+            // "上一次报的"与"这一帧报的"是两句话，写成一句就是替另一句背书。
+            stateRootSource = .daemonReportedEarlier
+        }
         if let reported, !reported.isEmpty, reported != daemonBinaryPath {
             daemonBinaryPath = reported
             // 换的是"该问哪一个进程"，那一栏的旧结论（或从没结论）要跟着重测。
             refreshDaemonStats()
         }
+        if rootChanged {
+            // 换根之后这一页三个数都读错了对象：档案、注册表、台账全部重扫。
+            reloadEvidence()
+            reloadProjects()
+            reloadApprovals()
+        }
         if answered {
+            daemonHasAnswered = true
             pruneNeedsRestart = false
         }
     }
@@ -341,7 +403,7 @@ final class ConsoleModel: ObservableObject {
         guard !daemonStatsInFlight else { return }
         daemonStatsInFlight = true
         daemonStats = .asking
-        let statsArgs = ConsoleModel.daemonCLIArguments(["--evidence-stats"], stateRoot: stateRoot.path)
+        let statsArgs = daemonCLIArguments(["--evidence-stats"])
         Task.detached(priority: .userInitiated) {
             let run = ConsoleModel.runDaemonCLI(binary: binary, arguments: statsArgs)
             let result = ConsoleModel.foldDaemonStats(fromCLIReply: run)
@@ -479,8 +541,7 @@ final class ConsoleModel: ObservableObject {
         let binary = daemonBinaryPath
         // 状态根必须显式点名（与另三条控制台命令同一个组装函数）：预览读的是哪张表，
         // 就得是面板这一页正在显示的那张根，否则摊给人看的清单来自另一个实例。
-        let args = ConsoleModel.daemonCLIArguments(
-            ["--project-prune", "--dry-run"], stateRoot: stateRoot.path)
+        let args = daemonCLIArguments(["--project-prune", "--dry-run"])
         Task.detached(priority: .userInitiated) {
             let run = ConsoleModel.runDaemonCLI(binary: binary, arguments: args)
             await MainActor.run {
@@ -565,10 +626,20 @@ final class ConsoleModel: ObservableObject {
             lastActionMessage = "还没连上后台服务：读不到它的程序路径，清理动作无法执行。点「刷新」恢复后重试。"
             return
         }
+        // 写入动作需要一次**实测到的根**：服务在应门却没报过根，这一页手里那个根是面板
+        // 自己算的，动的手可能落在另一个实例的注册表上。
+        guard !writesLackAReportedRoot else {
+            isPruneSheetPresented = false
+            lastActionMessage = "清理没有执行：后台服务在应门，但它没有报过自己用的状态根，而这一页现在按的是"
+                + "面板自己算的那一个（\(displayedStateRoot)）。在这种情形下点「清理」动的是谁的注册表没人说得清，"
+                + "所以这一枚拒绝。下一步：重启后台服务并在启动时点名 `--state-dir <你要清的根>`，"
+                + "或把它升级到会自报状态根的版本（1.6.2 及以后会报），然后点「刷新」重来。"
+            return
+        }
         isRunningPrune = true
         isPruneSheetPresented = false
         let binary = daemonBinaryPath
-        let pruneArgs = ConsoleModel.daemonCLIArguments(["--project-prune"], stateRoot: stateRoot.path)
+        let pruneArgs = daemonCLIArguments(["--project-prune"])
         Task.detached(priority: .userInitiated) {
             let run = ConsoleModel.runDaemonCLI(binary: binary, arguments: pruneArgs)
             await MainActor.run {
@@ -593,8 +664,14 @@ final class ConsoleModel: ObservableObject {
             lastActionMessage = "还没连上后台服务：读不到它的程序路径，删除动作无法执行。"
             return
         }
+        guard !writesLackAReportedRoot else {
+            lastActionMessage = "删除 \(projectId) 没有执行：后台服务在应门，却没有报过自己用的状态根，"
+                + "而这一页按的是面板自己算的那一个（\(displayedStateRoot)）——这一枚删的是谁的注册表说不准。"
+                + "下一步：让服务带着 `--state-dir <根>` 重启，或升级到会自报状态根的版本后点「刷新」。"
+            return
+        }
         let binary = daemonBinaryPath
-        let removeArgs = ConsoleModel.daemonCLIArguments(["--project-remove", projectId], stateRoot: stateRoot.path)
+        let removeArgs = daemonCLIArguments(["--project-remove", projectId])
         Task.detached(priority: .userInitiated) {
             let run = ConsoleModel.runDaemonCLI(binary: binary, arguments: removeArgs)
             await MainActor.run {
@@ -866,8 +943,9 @@ final class ConsoleModel: ObservableObject {
         }
         return PanelControl(enabled: false, help:
             "「档案目录」现在按不动：这个根里还没有档案目录，访达没有一个去处可显示（应在：\(directory)）。"
-            + "下一步：执行一次会留档案的操作后点「刷新」重扫；状态根挪过就再核对一次 "
-            + "GLASSPANE_STATE_DIR 是不是后台服务实际在用的那一个。")
+            + "下一步：执行一次会留档案的操作后点「刷新」重扫；后台服务的状态根只在启动时用 "
+            + "--state-dir 点名（它不读 GLASSPANE_STATE_DIR），这一页跟着它上报的那一个读，"
+            + "侧栏「状态根」那一行就是它报的数。")
     }
 
     /// 「打开报告」这一枚的呈现：**判据是这条档案的读取结局**，不是那个共用的 nil。
@@ -914,6 +992,7 @@ final class ConsoleModel: ObservableObject {
         projectsState: LoadState,
         residueCount: Int,
         canRunDaemonCLI: Bool,
+        writesLackReportedRoot: Bool = false,
         isPreparingPreview: Bool
     ) -> PanelPruneControl {
         let banner: String
@@ -947,6 +1026,13 @@ final class ConsoleModel: ObservableObject {
                 "「清理」现在按不动：还没读到后台服务的程序路径，这一枚没有可执行入口。"
                 + "下一步：点「刷新」等后台服务重新应门，它会把自己那份路径报回来。")
         }
+        if writesLackReportedRoot {
+            return .blocked(banner: banner, reason:
+                "「清理」现在按不动：后台服务在应门，却没有报过它自己用的状态根，而这一页按的是面板自己算的"
+                + "那一个（出处就写在侧栏「状态根」那一行）。按下它可能动到另一个实例的真注册表，所以这一枚"
+                + "拒绝。下一步：让服务带着 `--state-dir <你要清的根>` 重启，或升级到会自报状态根的版本，"
+                + "然后点「刷新」。")
+        }
         let help = residueCount > 0
             ? "这些是引擎自检过程留下的示例项目，不是你注册的应用。按下「清理」先向后台服务要一份"
                 + "将删除的清单（--project-prune --dry-run），确认之后才动手。"
@@ -961,6 +1047,7 @@ final class ConsoleModel: ObservableObject {
             projectsState: projectsState,
             residueCount: testResidueCount,
             canRunDaemonCLI: canRunDaemonCLI,
+            writesLackReportedRoot: writesLackAReportedRoot,
             isPreparingPreview: isPreparingPrunePreview
         )
     }
