@@ -2,6 +2,47 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [1.16.1] — 2026-10-16
+
+**版本判断：patch。** 四条判据逐条实测：状态文件的字段没动；退出码集合没动；CLI 参数没动；
+两个 npm 包的 `bin` 声明没动。本版三处改动里没有一处改变调用方观察到的行为——第一处把壳里
+一次字段比较换成查同一张表（说出来的句子逐字不变），后两处是测试自己的平台前提。
+取号：`v1.16.0` 已发（tag/Release/registry 三处齐），本版是它的后续。
+
+### 为什么 1.16.0 之后立刻还要一版
+
+`v1.16.0` 的 tag 切在 `6f9c562`，而那之后 main 上又落了四笔：`mcp-shell/src/dispatch.ts`
+把 `attribution === "arrival-order"` 换成按键查表（因为 `harness/tools/surface-semantics.mjs`
+判它"工具面开始比较引擎交来的证据字段"——本轮政策是这类红**不许 --record 掩盖**，
+判定要挪回引擎那一侧），以及三条测试的平台前提修正。**发布物必须等于被 tag 的那棵树**，
+所以这些改动要么进 1.16.1、要么把 tag 移走；移动已发布的 tag 会让 npm 那一侧与
+Release 资产指向不同字节（npm 又拒绝重发同一个版本号），所以取前者。
+
+### Fixed
+
+- **壳里那次对 `attribution` 的比较改成查表**（`mcp-shell/src/dispatch.ts`）：迟到应答的
+  机制文字来自同一份 `ARRIVAL_ORDER_MECHANISM`，说出来的话一字不改；差别在于壳不再
+  "解释"引擎交来的字段，只是按引擎已经给出的标签取一句预先写好的说明。
+  `node harness/tools/surface-semantics.mjs --check` 现在 0 hit，未记录任何新基线。
+- **三条"只在 macOS 上成立"的测试前提改成量出来的**：
+  ① 控制组原来假定"作业的最小 PATH 里答不出 node"——macOS 如此（那条 127 缺陷就是在
+  那儿抓到的），ubuntu runner 上 node 在那几条目录里就有；现在先量再判，量不到前提时
+  把事实打印出来，正面断言（带着渲染出的 PATH 必须跑得起来）两种平台都执行。
+  ② `/usr/bin/env` 报运行时缺失时 GNU 加引号（`'node'`）、BSD 不加——产品侧的
+  `isInterpreterMissing` 两种都认（所以那三红从来不是产品错），测试正则只认了后者；
+  现在两种都判，并把这条平台差本身钉成一条断言，防止有人把产品侧的宽正则"收紧"成
+  单平台形状（那会把 Linux 上的"起不来"重新讲成"跑得不好"）。
+  ③ `every bare command … provably inside the launchd PATH` 那条完备性闸把
+  `launchctl`/`security` 的存在性当成普适事实；它们是 macOS 的系统二进制，现在按平台
+  标注，"目录必须在最小 PATH 里"这一半两种平台都核。
+
+### 门禁
+
+CI 在 `6bb4f54` 上九个 job 全绿（engine Swift 1073 + Swift Testing 15、kernel 229、
+mcp-shell 491、installer 172、updater 509、bridge 79、docs/workflows/version-line/rulers），
+本机 `npm ci` 后的复跑与之同口径；本版只改版本号位点与台账。
+
+
 ## [1.16.0] — 2026-10-16
 
 **版本判断：minor。** 四条判据逐条实测过，但本版有三处**调用方会观察到**的行为改变，
