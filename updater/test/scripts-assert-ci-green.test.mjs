@@ -256,6 +256,13 @@ test('release.yml 两条发布通道都真的问了这个问题', () => {
     assert.ok(body.some((l) => l.includes('--sha')), `${job} 的调用没有点名 --sha：那会去问事件的 sha 而不是被检出的这棵树`)
     assert.ok(body.some((l) => l.includes('--workflow ci.yml')), `${job} 没点名问哪条工作流`)
     assert.ok(body.some((l) => /^\s+actions: read\s*$/.test(l)), `${job} 的 permissions 没给 actions: read——API 会 403/404，而这一步必须失败而不是空过`)
+    // runner 交给 step 的是 `GITHUB_TOKEN`，而 `gh` 认的是 `GH_TOKEN`。v1.16.2 的那次发布就是
+    // 死在这里（run 38855034310：`gh api 回了 4：To use GitHub CLI in a GitHub Actions workflow,
+    // set the GH_TOKEN environment variable`）——判据本身没问题，是这一步拿不到身份。写这条断言
+    // 的时候它已经红过一次真实的发布了，所以这条不是预防性的装饰。
+    assert.ok(body.some((l) => l.includes('GH_TOKEN: ${{ github.token }}')),
+      `${job} 的 CI-green 步没声明 GH_TOKEN：gh 在 Actions 里读不到 runner 给的身份，`
+      + '这一步会 4 号退出并把整版挡住（那是 fail-closed，不是放行，但每一版都会挡住）')
   }
   // 两个权限块都得是"整块替换"的形状：job 级 permissions 会顶掉工作流级那一整块，
   // 所以 contents/id-token 一条都不能少（这条文件里 f12b241 之后就一直有闸，见 check-workflows）。

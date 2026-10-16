@@ -75,6 +75,11 @@ jobs:
         # 放在最前面：这一版还没构建、没签名、没上传，拒绝在这里什么都不必回滚。判据写在
         # `scripts/assert-ci-green.mjs` 里（"没跑完就等满预算"与"没记录＝没有证据"两种出路都在那儿），
         # 这一步只负责在它说不发的时候让 job 死掉，而不是把结论打印完继续发。
+        # `GH_TOKEN` 不是可选项：runner 给 step 的是 `GITHUB_TOKEN`，而 `gh` 认的是 `GH_TOKEN`——
+        # v1.16.2 那次这一步就是这么死的（run 38855034310：`gh api 回了 4：… set the GH_TOKEN
+        # environment variable`），下面建 Release 那一步早就带着它，正是同一件事的先例。
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           node scripts/assert-ci-green.mjs \
@@ -312,6 +317,7 @@ jobs:
         # 没有一环问这个问题。dry 不查：它不发东西，而"tag 之前先把打包形状验一遍"是正常用法。
         env:
           MODE: ${{ github.event.inputs.mode }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ "${MODE:-dry}" != "publish" ]; then
