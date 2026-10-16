@@ -1,7 +1,7 @@
 /**
  * `scripts/check-doc-links.mjs` 的判据：每一条都要能证红，红要有名字。
  *
- * 这个文件守着三类判据，每一类都对应一轮真实发生过的缺陷：
+ * 这个文件守着四类判据，每一类都对应一轮真实发生过的缺陷：
  *   1) **工具数量**（`toolCountDrift`）——主仓文档手抄的 `gp_*` 数与 `mcp-shell/src/tools.ts`
  *      的真实数量对不上必须红；而同一把尺子量到 fork 自己的文档上会恒红（2026-10-13 那次），
  *      所以扫描集合必须能注入、两个方向都要测。
@@ -11,6 +11,10 @@
  *   3) **可复算主张的双语一致性**（`claimDrift`）——从前"双语成对"只查对偶文件在不在，
  *      于是 README 写 `weak` 而 SECURITY 与引擎写 `soft`、两份 README 说 7 条 lane 而
  *      ci.yml 有 9 个 job，全绿过闸。这里补的是**只改一种语言那一侧**的形状。
+ *   4) **正文里不许有 shell 残渣**（`shellResidue`，2026-10-16 本轮）——用 heredoc 往
+ *      `engine/smoke.md` 追加时外层引号提前收尾，包装脚本自己的 `EOF` / `echo "appended: $(…)"`
+ *      被当成正文提交，同一形状中招两次，而当时的这道闸全绿：它只看链接与主张。围栏要豁免、
+ *      中文人话要豁免（第一版就误红过 harness 的一句话），两种豁免各有对照。
  *
  * 夹具写在临时根里，不动仓库任何一份真文档；最后一条用真仓库自证当下是绿的。
  */
@@ -21,7 +25,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { toolCountDrift, claimDrift, headingsOf, check, CLAIMS } from '../../scripts/check-doc-links.mjs'
+import { toolCountDrift, claimDrift, headingsOf, check, CLAIMS, shellResidue } from '../../scripts/check-doc-links.mjs'
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -273,4 +277,76 @@ test('check-doc-links: 真仓库现在每一条主张判据都是绿的（且判
   assert.deepEqual(claimDrift(), [], 'main 上的可复算主张不该红')
   assert.deepEqual(check().problems, [], 'main 上的文档闸（死链/锚点/双语/主张）不该红')
   assert.ok(CLAIMS.length >= 6, '主张登记表被删空了——判据退化回只查文件存在性')
+})
+
+/* ------------------------------------------------------------------ shell 残渣闸（2026-10-16 本轮中招两次） */
+
+/** 只放一份 `x.md` 的临时根：残渣判据的两条形状都靠它喂，不动仓库里的真文档。 */
+function residueRoot(text) {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-residue-'))
+  fs.writeFileSync(path.join(root, 'x.md'), text)
+  return root
+}
+
+test('shell 残渣闸：本轮真漏进正文的那两行必须被点名', () => {
+  const root = residueRoot([
+    '正文一句话。',
+    "EOF",
+    'echo "appended: $(wc -l < /Volumes/Eng-Dev/.worktrees/gp-daily-main-20261015/engine/smoke.md) lines total"',
+    '',
+  ].join('\n'))
+  const problems = shellResidue({ rootDir: root, docs: ['x.md'] })
+  assert.equal(problems.length, 2, JSON.stringify(problems))
+  assert.match(problems[0], /x\.md:2.*heredoc 结束标记/)
+  assert.match(problems[1], /x\.md:3.*裸露的 shell 命令行/)
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('shell 残渣闸：围栏里的 shell 记录不算残渣（那是文档的正常内容）', () => {
+  const root = residueRoot([
+    '跑这一串：',
+    '```bash',
+    'cat >> engine/smoke.md <<EOF',
+    'wc -l engine/smoke.md',
+    'EOF',
+    '```',
+    '正文继续。',
+    '',
+  ].join('\n'))
+  assert.deepEqual(shellResidue({ rootDir: root, docs: ['x.md'] }), [],
+    '把围栏也扫进去是一道永远误红的闸，最后一定会被放宽')
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('shell 残渣闸：以命令词开头的中文人话不算残渣（两处真句子，其中一处是本轮自己写的）', () => {
+  // 两行都是本仓文档里**真实存在**的句子，都以小写命令词开头：
+  //   · `grep 会把这种管道输入当"二进制"而停止匹配。`——这道闸的第一版把它判成了残渣
+  //     （harness/glasspane-harness/SYNCLOG.md:684，一条新闸首次运行就误红别人的文档）。第一版的
+  //     错处是"行里任意位置有引号就算命令"；现在引号必须紧跟命令词，这一行因此靠**锚定**豁免。
+  //   · `tar -tzf 复点：665 条，…`——本轮我自己写进 `engine/smoke.md` 的读数行，`tar` 后面真的是
+  //     `-`，锚定帮不上忙，它靠的是"整行不含汉字"这一半。
+  // 实测：去掉 HAN 那一半，这一条用例红（tar 那行被点名）；去掉引号锚定，另有用例红。
+  // 也就是说两句各管一种豁免，缺哪个判据都有名字会响。
+  const root = residueRoot([
+    'grep 会把这种管道输入当"二进制"而停止匹配。',
+    'tar -tzf 复点：665 条，(^|/)harness/ 命中 **0** 条。',
+    '',
+  ].join('\n'))
+  assert.deepEqual(shellResidue({ rootDir: root, docs: ['x.md'] }), [],
+    '"整行不含汉字"这一半判据的存在理由：命令词后面接中文不是命令')
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('shell 残渣闸：wc -l <路径> 这种没有引号也没有 $() 的行照样抓到', () => {
+  const root = residueRoot('wc -l /Volumes/Eng-Dev/GlassPane/engine/smoke.md\n')
+  const problems = shellResidue({ rootDir: root, docs: ['x.md'] })
+  assert.equal(problems.length, 1, JSON.stringify(problems))
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('shell 残渣闸：接在主检查里，不是只住在一个可选函数里', () => {
+  const root = residueRoot('EOF\n')
+  const { problems } = check({ rootDir: root, docs: ['x.md'] })
+  assert.ok(problems.some((p) => /heredoc 结束标记/.test(p)), JSON.stringify(problems))
+  assert.deepEqual(shellResidue(), [], 'main 上的文档此刻不该有残渣')
 })

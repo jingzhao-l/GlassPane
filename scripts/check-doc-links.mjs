@@ -404,6 +404,8 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
   // 文档里抄写的工具数量必须等于代码里的真实数量：README 用"15 个工具"这种说法
   // 是好意（读者不必自己数），但手抄数字必然漂移，所以让它可验证。
   problems.push(...toolCountDrift({ rootDir }))
+  // shell 残渣：本轮被同一形状中招两次（见 `shellResidue` 的注释），所以它进主检查而不只是测试。
+  problems.push(...shellResidue({ rootDir, docs }))
   // 可复算主张：对真源核一遍，再对另一语言核一遍。缺了这一步，"双语成对完整"只意味着
   // 文件都在，不意味着两份话说的是同一件事。
   problems.push(...claimDrift({ rootDir }))
@@ -467,6 +469,55 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
     }
   }
   return { docs: present.length, links, external, problems }
+}
+
+/**
+ * shell 残渣闸：文档正文里不许出现 heredoc 结束标记或裸露的 shell 命令行。
+ *
+ * WHY（本轮真事中招两次，2026-10-16）。用 `cat >> 文件 <<'EOF' … EOF` 往 `engine/smoke.md`
+ * 追加时，外层 `/bin/bash -c '…'` 的单引号提前收尾，于是**包装脚本自己的那一行**被当成正文写进
+ * 了被跟踪的文件——第一次留下了 `EOF` 与 `echo "appended: $(wc -l < …)"` 两行，第二次留下了
+ * `EOF` 与 `wc -l …` 两行。两处都在 `git commit` 之后才发现，其中第一处已经进了 `v1.16.2` 那笔
+ * 提交（那一版没有发布物，所以没有流进签名归档）。`check-doc-links` 当时全绿：死链、锚点、双语
+ * 都对，因为它只看链接和主张，**没有任何一道闸看"正文里是不是混进了 shell"**。
+ *
+ * 判据只认两种形状，故意不做广义"像不像代码"的判断（广义规则会把人话误判成残渣，然后被要求放宽）：
+ * ① 一行恰好是 heredoc 结束标记；② 一行是**命令形状**的 shell 行——小写命令词开头、整行不含汉字、
+ * 且带着只有命令行才有的东西（`$(`、第二个词以 `-` 或 `/` 开头、或紧跟引号）。两者都只在
+ * **围栏之外**生效——``` 里面的 shell 记录是文档的正常内容（这一页就有好几段），把围栏也扫进去
+ * 是一道永远会误红的闸。
+ *
+ * "整行不含汉字"这一半不是凑数：判据第一版只看命令词，于是
+ * `harness/glasspane-harness/SYNCLOG.md:684` 那句人话（"grep 会把这种管道输入当"二进制"而停止
+ * 匹配。"）被判成了残渣——**一道新闸第一次运行就误红了一条别人的文档**。命令词后面接中文不是命令。
+ */
+const HEREDOC_TERMINATORS = new Set(['EOF', 'MSG', 'PY', 'SQL', 'OUT', 'YAML', 'JSON'])
+const HAN = /[\p{Script=Han}]/u
+
+export function shellResidue({ rootDir = ROOT, docs = DOCS } = {}) {
+  const problems = []
+  for (const doc of docs.filter((d) => fs.existsSync(path.join(rootDir, d)))) {
+    const text = read(doc, rootDir)
+    let fenced = false
+    text.split('\n').forEach((line, i) => {
+      if (line.trim().startsWith('```')) { fenced = !fenced; return }
+      if (fenced) return
+      const trimmed = line.trim()
+      if (HEREDOC_TERMINATORS.has(trimmed)) {
+        problems.push(`${doc}:${i + 1} 正文里有一行恰好是 heredoc 结束标记（${trimmed}）——`
+          + '这是 shell 追加脚本自己漏进正文的残渣，不是文档内容')
+        return
+      }
+      const commandShaped = /^(echo|wc|printf|cat|sed|grep|ls|nohup|tar)\b/.test(trimmed)
+        && !HAN.test(trimmed)
+        && (/\$\(/.test(trimmed) || /^\w+\s+[-/]/.test(trimmed) || /^\w+\s+["']/.test(trimmed))
+      if (commandShaped) {
+        problems.push(`${doc}:${i + 1} 正文里出现裸露的 shell 命令行（${trimmed.slice(0, 60)}）——`
+          + '要么放进 ``` 围栏，要么写成 `反引号`；作为正文它既不能执行也不能被读者当话')
+      }
+    })
+  }
+  return problems
 }
 
 // 只有被当成命令直接执行时才跑 CLI。这段此前是无条件执行的：`import` 它的那条测试子进程
