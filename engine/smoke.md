@@ -830,11 +830,12 @@ Swift Testing **15 tests in 2 suites passed**）；`swift test --package-path en
 `GH_TOKEN` 而不是 runner 注入的 `GITHUB_TOKEN`，run 38855034310 fail-closed），所以那一格是
 **没有发布物的空号**，修复随 1.16.3 发出。
 
-下面这组数是**并入 harness 线那一轮之后的那一趟**（也就是准备被 tag 的那棵树）；本轮另外三趟
-见后面的对账。`npm ci` 0；`npm run build` 0；`npm test --workspaces --if-present` 0
-（kernel **229/229**、mcp-shell **491/491**、installer **172/172**、updater **534/534**；
+下面这组数是**本版最终树**（含沙箱并发修正与信号闸那次等待上限之后）那一趟；本轮另外几趟的对账
+写在后面。`npm ci` 0；`npm run build` 0；`npm test --workspaces --if-present` 0
+（kernel **229/229**、mcp-shell **496/496**、installer **172/172**、updater **539/539**；
 四段各自 0 fail、0 skipped）；`check-version` 0（版本线一致 1.16.3）；
-`check-doc-links` 0（25 份 / 227 条仓库内 / 26 条外链不请求）；`check-workflows --self-test` 0
+`check-doc-links` 0（25 份 / 227 条仓库内 / 26 条外链不请求，含新加的 shell 残渣判据）；
+`check-workflows --self-test` 0
 （**12 档**：`11 mutation(s) that had to be caught, 1 legal shape(s) that had to stay silent`——
 比 1.16.2 那趟多一档，是 harness 线那笔 `scripts/check-workflows.mjs` 的改动带来的，不是本轮加的）；
 `check-workflows` 0（5 份 workflow clean）；`swift build` 0；
@@ -844,6 +845,22 @@ Swift Testing **15 tests in 2 suites**）；`swift test --package-path engine/pr
 信号闸 0（`SIGNAL SMOKE OK`，三次起停各自跑在本脚本点名、由 daemon 自己创建并收紧的状态根里）；
 发布形态 0（**29 个文件**，打包 273.4 kB / 展开 931.3 kB）；`tool-surface --check` 0
 （no growth past the recorded baseline）。
+
+mcp-shell 491 → **496**、updater 534 → **539**：分别是沙箱助手的五条与文档卫生闸的五条，
+每一条都在加之前先被证红过一次（沙箱：把 `rmdir 基目录` 加回来 → 具名红两条；卫生闸：四组变异
+各自具名红）。数字只涨不塌是这里的判据，不是装饰。
+
+**CI 侧的两条红，一条是真缺陷、一条是 flake，分开记**：
+- run 38862162240（sha `27cba9de`）红在 mcp-shell 的"目录 sync"控制上，报 `ENOENT … mkdtemp
+  '.gp-test-sandbox/…'`。那是**真缺陷**：并发测试文件共用基目录，而 `dispose()` 会把它 rmdir 掉。
+  已按上面的五条新用例修掉，反向撤销能具名变红，且不依赖负载。
+- run 38863836563（sha `ac32b2dd`）红在 installer 的 `install-honesty.test.mjs` 整个文件上，
+  `failureType: uncaughtException`、`error: 'Unable to deserialize cloned data due to invalid or
+  unsupported version.'`，栈全在 `node:internal/test_runner/runner` 的 `#proccessRawBuffer` 里——
+  是 Node 20 测试运行器解包子进程消息时出的错，栈里没有一行本仓代码。按"红必须先隔离复跑再判"
+  的规矩对**同一个 sha** 重跑那一个 run（`gh run rerun --failed`），该 job 转绿、整条 run
+  `completed success`。本轮把它记成 runner flake 而不是缺陷，依据是：同树同码重跑即过，且报错位置
+  在 runner 内部；**没有**为了让它绿而改任何判据。发布凭据仍取被 tag 那个 sha 的最新一条 CI。
 
 installer 那一段在同一条命令上本轮量到过四种结果：`v1.16.1` 那棵树 **170 pass + 2 skipped**、
 `v1.16.2` 那棵树 **172 + 0**、1.16.3 在并入 harness 线**之前** **171 + 1**、并入之后 **172 + 0**。
