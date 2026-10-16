@@ -126,8 +126,17 @@ test('checkNpmPrefix finds a real npm that is off PATH, and runs that copy', { s
     // `env: node: No such file or directory`. REVERSE MUTATION: drop `env: spawnEnv` from `defaultRun`'s
     // spawnSync and this whole test goes red on exactly that 127.
     const raw = spawnSync(npmPath, ['config', 'get', 'prefix'], { encoding: 'utf8', env: { PATH: LAUNCHD_PATH } })
-    assert.equal(raw.status, 127, `一个不带 env 的真 spawn 必须像真 npm 那样死：${JSON.stringify({ status: raw.status, stderr: raw.stderr })}`)
-    assert.match(String(raw.stderr), /env: node: No such file or directory/, '夹具的 shebang 问的是 node，而最小 PATH 里没有 node')
+    // 控制组的前提是"这个平台的最小 PATH 里没有 node"。这在 macOS 上是实测（本轮就是在那儿
+    // 抓到 127 的），在 ubuntu runner 上不一定成立（那儿 /usr/bin 里可能就有 node）。
+    // 前提不成立时不能拿它当失败，也不能悄悄当通过——打出来，让读的人知道这台机器
+    // 只证了正面那一半。
+    const nodeReachableHere = spawnSync('/usr/bin/env', ['node', '-v'], { encoding: 'utf8', env: { PATH: LAUNCHD_PATH } }).status === 0
+    if (nodeReachableHere) {
+      console.log('# control-not-applicable: 这台机器的最小 PATH 里能解析到 node，夹具不会像真 npm 那样挂；只判正面')
+    } else {
+      assert.equal(raw.status, 127, `一个不带 env 的真 spawn 必须像真 npm 那样死：${JSON.stringify({ status: raw.status, stderr: raw.stderr })}`)
+      assert.match(String(raw.stderr), /env: node: No such file or directory/, '夹具的 shebang 问的是 node，而最小 PATH 里没有 node')
+    }
     // The control first: with the same PATH and no extra directory, nothing is found. So every success
     // below is attributable to the search, not to a PATH that happens to work on this machine.
     const bare = defaultRun('npm', ['config', 'get', 'prefix'], { timeoutMs: 30_000, env: { PATH: LAUNCHD_PATH }, dirs: [fx.empty] })
@@ -430,8 +439,8 @@ test('every bare command updater/lib spawns is either searched or provably insid
     swift: 'searched by lib/binaries.js',
     gpg: 'searched by lib/signature.js — GPG_CANDIDATE_PATHS, with a --version probe this tool needs and npm does not',
     id: '/usr/bin/id',
-    launchctl: '/bin/launchctl',
-    security: '/usr/bin/security',
+    launchctl: { path: '/bin/launchctl', platform: 'darwin' },
+    security: { path: '/usr/bin/security', platform: 'darwin' },
   }
   const found = []
   for (const name of files) {
@@ -444,13 +453,22 @@ test('every bare command updater/lib spawns is either searched or provably insid
   assert.ok(found.length >= 8, `只认出 ${found.length} 处裸命令调用，这条闸已经看不见东西：${JSON.stringify(found)}`)
   const unknown = [...new Set(found.map((one) => one.bin))].filter((bin) => !(bin in KNOWN))
   assert.deepEqual(unknown, [], `这些命令名是新出现的裸调用，需要被搜索或被解释（出现在 ${JSON.stringify(found)}）`)
-  for (const [bin, where] of Object.entries(KNOWN)) {
+  for (const [bin, claim] of Object.entries(KNOWN)) {
+    const where = typeof claim === 'string' ? claim : claim.path
     if (where.startsWith('searched by')) {
       if (bin === 'gpg') continue
       assert.ok(SEARCHED_COMMANDS.includes(bin), `${bin} 声称被 lib/binaries.js 搜索，却不在 SEARCHED_COMMANDS 里`)
       continue
     }
-    assert.ok(fs.existsSync(where), `${bin} 声称在 ${where}，那儿没有这个文件——它就不该被算作"最小 PATH 够用"`)
+    // 「最小 PATH 里就有」是一个**关于某个平台**的说法：launchctl 与 security 是 macOS 的
+    // 系统二进制，ubuntu runner 上根本没有这两个文件——本条闸在两种 runner 上都该判得动，
+    // 所以按平台要求存在性，而目录必须在最小 PATH 里这一半永远成立。
+    // 反向变异：把 `id` 改成 `/usr/local/bin/id`（不在最小 PATH）→ 两种平台都红。
+    if (claim.platform === 'darwin' && process.platform !== 'darwin') {
+      console.log(`# platform-scoped: ${bin} 声称在 ${where}，那是 macOS 的系统二进制；本平台只核目录归属`)
+    } else {
+      assert.ok(fs.existsSync(where), `${bin} 声称在 ${where}，那儿没有这个文件——它就不该被算作"最小 PATH 够用"`)
+    }
     assert.ok(launchdDirs.includes(path.dirname(where)), `${bin} 的 ${where} 不在 launchd 的最小 PATH 里，必须改成被搜索的名字`)
   }
 })

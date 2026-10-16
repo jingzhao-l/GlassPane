@@ -141,10 +141,17 @@ test('the resolved npm is *started*, not merely found, under the job\'s measured
   try {
     const npmPath = writeEnvNodeScript(fx.bin, { prefix: path.join(fx.dir, 'prefix') })
     // Control, measured rather than asserted about: the same file, spawned the way the code used to spawn
-    // it (no `env`), dies exactly like `/usr/local/bin/npm` dies under launchd.
+    // it (no `env`), dies exactly like `/usr/local/bin/npm` dies under launchd — **on a machine where the
+    // minimal PATH cannot answer `node`**. macOS is such a machine (that is where this was caught);
+    // ubuntu runners ship a node under /usr/bin, so there the control is not applicable and saying so is
+    // the honest move — a red that only measures the runner's image is not a signal about this code.
     const unaided = spawnSync(npmPath, ['config', 'get', 'prefix'], { encoding: 'utf8', env: { PATH: LAUNCHD_PATH } })
-    assert.equal(unaided.status, 127, `夹具必须像真 npm 一样挂：${JSON.stringify(unaided)}`)
-    assert.match(String(unaided.stderr), /env: node: No such file or directory/, unaided.stderr)
+    if (spawnSync('/usr/bin/env', ['node', '-v'], { encoding: 'utf8', env: { PATH: LAUNCHD_PATH } }).status === 0) {
+      console.log('# control-not-applicable: 这台机器的最小 PATH 能解析到 node，夹具不会挂；只判正面')
+    } else {
+      assert.equal(unaided.status, 127, `夹具必须像真 npm 一样挂：${JSON.stringify(unaided)}`)
+      assert.match(String(unaided.stderr), /env: node: No such file or directory/, unaided.stderr)
+    }
 
     const got = defaultRun('npm', ['config', 'get', 'prefix'], {
       timeoutMs: 30_000,
@@ -190,7 +197,7 @@ test('mcpToolsList starts a #!/usr/bin/env node glasspane-mcp with the real spaw
     })
     assert.equal(starved.ok, false, JSON.stringify(starved))
     assert.equal(starved.interpreterMissing, true, 'node 真的够不着时，这一条必须被认出来')
-    assert.match(starved.reason, /could not run: node is not on the PATH this process handed to the child/, starved.reason)
+    assert.match(starved.reason, /could not run: '?node'? is not on the PATH this process handed to the child/, starved.reason)
     assert.doesNotMatch(starved.reason, /exited with code 127 before answering/, `127 不是"跑得坏"，是"起不来"：${starved.reason}`)
   } finally {
     fx.cleanup()
@@ -210,7 +217,10 @@ test('a child whose interpreter is genuinely unavailable refuses with a named ca
     assert.equal(got.status, 127, JSON.stringify(got))
     assert.equal(got.runtimeUnavailable, true, '这是一个被点名的因由，不是一个数')
     assert.notEqual(got.notFound, true, '文件找到了：这不是"没有装"')
-    assert.match(got.stderr, new RegExp(`was found and started, but it could not run: ${missing}`), got.stderr)
+    // 报话把那个运行时的名字用引号括起来（`'gp-absent-runtime-…'`），因为那是一段人可以
+    // 复制的文字；判据盯的是"哪个名字、哪一件事"，不是引号的个数。
+    assert.match(got.stderr, new RegExp(`could not run: .?${missing}.? is not on the PATH this process handed to the child`), got.stderr)
+    assert.match(got.stderr, /was found and started, but it could not run/, got.stderr)
     assert.match(got.stderr, /not a permission of any directory/, got.stderr)
 
     const gate = checkNpmPrefix({ env: { PATH: LAUNCHD_PATH }, dirs: [fx.bin] })
@@ -258,7 +268,7 @@ test('node genuinely unavailable still refuses through §3.5 without the retired
     assert.equal(exitCodeFor(result), EXIT.REFUSED)
     assert.deepEqual(kick, [], '这道门仍然排在换版之前')
     assert.ok(String(result.state.lastError.details).includes('npm-runtime-unavailable'), `因由要作为数据留在记录里：${result.state.lastError.details}`)
-    assert.match(result.message, /could not run: node is not on the PATH this process handed to the child/, result.message)
+    assert.match(result.message, /could not run: '?node'? is not on the PATH this process handed to the child/, result.message)
     assert.doesNotMatch(result.message, /Check `npm config get prefix` from this account/, '那一句在本轮被退休，运行时够不着也不许把它请回来：' + result.message)
     assert.doesNotMatch(result.message, /cannot write where npm would put them/, result.message)
     assert.doesNotMatch(result.message, /\bsudo\b/, 'remedy 不许交出可照抄执行的升权命令')

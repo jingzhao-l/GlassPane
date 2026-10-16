@@ -838,12 +838,19 @@ test('the daily job\'s npm spawn works with the rendered PATH and dies without i
     const jobPath = agentPathValue({ env: { npm_config_prefix: binDir }, execPath: process.execPath })
     assert.ok(jobPath.split(':').includes(path.dirname(process.execPath)), `渲染出来的 PATH 里必须有能答上 node 的那一条：${jobPath}`)
 
-    const starved = spawnSync(script, ['config', 'get', 'prefix'], {
-      encoding: 'utf8',
-      env: { PATH: LAUNCHD_PATH, GP_PROBE_PREFIX: '/Users/dev/npm-prefix' },
-    })
-    assert.equal(starved.status, 127, `不带补过的 PATH，这份脚本必须像真 npm 一样挂：${JSON.stringify(starved)}`)
-    assert.match(String(starved.stderr), /env: node: No such file or directory/, starved.stderr)
+    // 控制组只在"最小 PATH 答不出 node"的机器上成立（macOS 就是，这条缺陷在那儿抓到；
+    // ubuntu runner 的 /usr/bin 里有 node，那份脚本不会挂）。不适用时说出来，
+    // 下面的正向断言（带着渲染出的 PATH 必须跑得起来）两种平台都判得动。
+    if (spawnSync('/usr/bin/env', ['node', '-v'], { encoding: 'utf8', env: { PATH: LAUNCHD_PATH } }).status === 0) {
+      console.log('# control-not-applicable: 本平台最小 PATH 能解析到 node，不带补过的 PATH 不会挂')
+    } else {
+      const starved = spawnSync(script, ['config', 'get', 'prefix'], {
+        encoding: 'utf8',
+        env: { PATH: LAUNCHD_PATH, GP_PROBE_PREFIX: '/Users/dev/npm-prefix' },
+      })
+      assert.equal(starved.status, 127, `不带补过的 PATH，这份脚本必须像真 npm 一样挂：${JSON.stringify(starved)}`)
+      assert.match(String(starved.stderr), /env: node: No such file or directory/, starved.stderr)
+    }
 
     const asJob = spawnSync(script, ['config', 'get', 'prefix'], {
       encoding: 'utf8',
