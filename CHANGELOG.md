@@ -35,9 +35,24 @@
   必然重建，为它删一次共用目录，代价大于覆盖。文件头写明"写过又删掉"与两条 CI 红的对应关系，
   防止后来人为了覆盖率把它加回来。mcp-shell 复跑 **495/495 绿**（496 减去删掉的那一条）。
 
+### CI 侧（一条有依据的缓解，不是确诊修复）
+
+- **installer 那条套件改为串行**（`installer/package.json` 的 `test` 加 `--test-concurrency=1`）。
+  同一形状连续三趟红，且都报在**整个文件**上：
+  `not ok - installer/test/install-honesty.test.mjs`、`failureType: uncaughtException`、
+  `error: 'Unable to deserialize cloned data due to invalid or unsupported version.'`，栈全在
+  `node:internal/test_runner/runner` 的 `#proccessRawBuffer`／`FileTest.parseMessage`——没有一行
+  本仓代码（run 38863836563、38869673471、38873031343）。本机 node v26.4.0 复跑 3/3 绿、整条
+  门禁 15 条全绿，所以这是并发子进程把 Node 20 测试运行器的 IPC 压坏的形状，不是某条断言判出来的红。
+  机制无法在本机复现，故这一笔写明是**缓解**：那条 job 里同一套 installer 测试被跑两遍，而
+  install-honesty 会 spawn 一次真安装器运行（真 `npm ci`、真 git 仓库、真 stub 进程），是这一步里
+  最重的并发源；串行实测 57s（172/172 绿）。没动判据、没放宽超时、没删用例、没改 Node 版本。
+  若同一形状再红一次，该改的就是这一步的跑法（把真进程级用例单独成一步），并如实记成未解项，
+  而不是继续 `rerun`。
+
 ### 门禁与实测
 
-15 条逐字命令在本版最终树上的计数见 `engine/smoke.md` §9；当日缺陷总账、发布链四格（1.16.0 /
+15 条逐字命令在本版最终树上的计数见 `engine/smoke.md` §9；当日缺陷总账、发布链五格（1.16.0 /
 1.16.1 / 1.16.2 空号 / 1.16.3）与本轮决定见 `specs/GlassPane_每日审查_2026-10-16_记录.md`。
 
 

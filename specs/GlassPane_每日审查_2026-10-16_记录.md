@@ -36,14 +36,25 @@
 **本地重算与 CI 资产字节不同**（本机 Node 26 + 最后一次 build 未重跑 bundle，归档里 `mcp-shell/dist`
 的输入就不是一回事）。所以归档完整性一律走 **API digest + 签名链**，不拿本地重算当判据。
 
-## 3. CI 的两条红，处置不同
+## 3. CI 的红：两条真缺陷修掉了，第三条从"flake"改口为"未确诊、已缓解"
 
 - run 38862162240（sha `27cba9de`）：mcp-shell 段 `ENOENT … mkdtemp '.gp-test-sandbox/…'`。**真缺陷**
   ——并发测试文件共用基目录，`dispose()` 把它 rmdir 掉。已修，反向撤销具名变红两条，不依赖负载。
-- run 38863836563（sha `ac32b2dd`）：installer 的 `install-honesty.test.mjs` 整文件报
-  `Unable to deserialize cloned data due to invalid or unsupported version`，栈全在
-  `node:internal/test_runner/runner`。按"红先隔离复跑再判"对同一 sha 重跑那一个 run ⇒ 该 job 转绿、
-  整条 run success。记为 Node 20 runner 的 flake，**没有**为了让它绿而改任何判据。
+- run 38869673471（sha `789cc0aa`）：同一趟两条红，另一条是本轮**新加**的"自愈"用例——它
+  `rmSync` 的就是那个共用基目录：先拆了 sibling 的夹具（`project-registry.test.mjs:337` 那条
+  `ENOENT … gp-registry-H8ZLEo/projects.json.tmp`），自己再撞 `ENOTEMPTY`。已删，理由写进文件头。
+- **`install-honesty.test.mjs` 以整个文件为单位报
+  `Unable to deserialize cloned data due to invalid or unsupported version`，连续三趟**：run
+  38863836563（`ac32b2dd`）、38869673471（`789cc0aa`）、38873031343（`38c9b908`）。栈全在
+  `node:internal/test_runner/runner` 的 `#proccessRawBuffer`／`FileTest.parseMessage`，没有一行
+  本仓代码；本机 node v26.4.0 上该文件 3/3 绿、整条 15 项门禁全绿。中间那次按"红先隔离复跑再判"
+  重跑过并转绿——**第三次红证明那个结论下早了**，此处改口：它是 Node 20 测试运行器在并发子进程
+  压力下的 IPC 解包失败，机制本机无法复现，所以本轮做的是**有依据的缓解**而非确诊修复：
+  installer 套件加 `--test-concurrency=1`（串行实测 57s、172/172 绿；那条 job 里同一套 installer
+  测试还跑第二遍，而 install-honesty 会 spawn 一次真安装器运行——真 `npm ci`、真 git 仓库、真 stub
+  进程，是这一步最重的并发源）。判据没动、超时没放宽、用例没删、Node 版本没改。
+  **下一轮的处置标准写死在这里**：同一形状再红一次，就把真进程级用例从 `Test all workspaces`
+  那一步拆成独立一步——不是继续 `rerun`，也不是加超时。
 
 ## 4. 本轮替 owner 做的决定（依据 + 回滚）
 
