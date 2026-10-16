@@ -154,97 +154,105 @@ async function validateTarball(dir: string, name: string, version: string, tarba
   // `import.meta.url`, not a path joined onto the dist directory: this script chdir'd to the
   // package root on line 11, and `dir` here is the relative `./dist/<name>` the caller passes.
   const truth = (await Bun.file(fileURLToPath(new URL("../../../product.json", import.meta.url))).json()) as typeof product
-  const root = await mkdtempSync(path.join(tmpdir(), "gp-pack-"))
-  await $`tar -xzf ${tarball} -C ${root}`
-  const pkgRoot = path.join(root, "package")
-  // Modes as the ARCHIVE records them. Extracting re-applies the local umask, so a file the
-  // tarball says is 0755 can land 0745 here — and the other way round. `tar -tvzf` prints the
-  // recorded mode, in symbolic form on both GNU and BSD tar, so the nine permission bits are
-  // read off the string rather than parsed as an octal number.
-  const listing = (await $`tar -tvzf ${tarball}`.text()).split("\n").filter((line) => line.length > 0)
-  const symbolic = (bits: string) => {
-    let mode = 0
-    for (const [index, flag] of ["r", "w", "x", "r", "w", "x", "r", "w", "x"].entries()) {
-      if (bits[index] === flag) mode |= 1 << (8 - index)
+  const root = mkdtempSync(path.join(tmpdir(), "gp-pack-"))
+  // Every path out of the extract→validate region removes the directory. The cleanup used to
+  // sit on the last line of the function, so any throw in between — `tar -xzf` failing, the
+  // manifest read below (`pack` dropping `package/package.json`), a `tar -tvzf` that cannot
+  // list the archive — left a `gp-pack-*` tree behind for each failing retry, and this script
+  // is run in a loop by the release lane.
+  try {
+    await $`tar -xzf ${tarball} -C ${root}`
+    const pkgRoot = path.join(root, "package")
+    // Modes as the ARCHIVE records them. Extracting re-applies the local umask, so a file the
+    // tarball says is 0755 can land 0745 here — and the other way round. `tar -tvzf` prints the
+    // recorded mode, in symbolic form on both GNU and BSD tar, so the nine permission bits are
+    // read off the string rather than parsed as an octal number.
+    const listing = (await $`tar -tvzf ${tarball}`.text()).split("\n").filter((line) => line.length > 0)
+    const symbolic = (bits: string) => {
+      let mode = 0
+      for (const [index, flag] of ["r", "w", "x", "r", "w", "x", "r", "w", "x"].entries()) {
+        if (bits[index] === flag) mode |= 1 << (8 - index)
+      }
+      return mode
     }
-    return mode
-  }
-  const modeOf = (member: string) => {
-    const line = listing.find((entry) => entry.endsWith(` ${member}`))
-    if (!line) return undefined
-    const field = line.trim().split(/\s+/)[0]
-    return field.length >= 10 ? symbolic(field.slice(1, 10)) : undefined
-  }
-  const statMode = async (file: string) => modeOf(path.relative(root, file))
-  const manifest = (await Bun.file(path.join(pkgRoot, "package.json")).json()) as Record<string, any>
-  const declaredTargets = (truth.platformTargets ?? []).map((target) => platformPackageName(target))
-  const problemsIdentity = validatePackageIdentity({
-    manifest,
-    dirName: path.basename(dir),
-    expectedVersion: version,
-    allowedNames: [truth.name, ...declaredTargets],
-  })
-  problems.push(...problemsIdentity)
-  if (name === pkg.name) {
-    // the wrapper
-    for (const [bin, target] of Object.entries(manifest.bin ?? {})) {
-      if (!existsSync(path.join(pkgRoot, target as string))) problems.push(`bin "${bin}" points at ${target}, which is not in the tarball`)
+    const modeOf = (member: string) => {
+      const line = listing.find((entry) => entry.endsWith(` ${member}`))
+      if (!line) return undefined
+      const field = line.trim().split(/\s+/)[0]
+      return field.length >= 10 ? symbolic(field.slice(1, 10)) : undefined
     }
-    // What the wrapper ships in its bin entries is the apology script, not a binary:
-    // postinstall replaces it at install time. Nothing checked those bytes, so a tarball could
-    // go out with a placeholder that cannot be exec'd, or that points its reader at a directory
-    // that does not exist — and the release lane called that clean. Each check below is the
-    // shape of one of those two failures, and each was seen red by deleting the thing it
-    // guards (the shebang, the resolved path, the exec bit).
-    const scripts = new Set<string>(Object.values(manifest.bin ?? {}).map((target) => path.join(pkgRoot, target as string)))
-    for (const file of scripts) {
-      if (!existsSync(file)) continue
-      const label = path.relative(pkgRoot, file)
-      const mode = await statMode(file)
-      if (mode !== undefined && (mode & 0o111) === 0) problems.push(`${label} is not executable in the tarball (mode ${(mode & 0o777).toString(8)}) — the command would answer "permission denied" instead of its remedy`)
-      const first = (await Bun.file(file).text()).split("\n", 1)[0]
-      if (!first.startsWith("#!")) problems.push(`${label} has no shebang (first line is ${JSON.stringify(first)}) — a launcher that execs it without a shell gets ENOEXEC and no message`)
-      // The remedy has to be actionable from wherever the reader is standing, which is the
-      // whole point of the file and the thing it used to get wrong. Run it the way a tool
-      // runs it — spawned directly, from an unrelated directory — and ask the output for the
-      // directory it tells the reader to cd into.
-      if (process.platform !== "win32") {
-        try {
-          const run = Bun.spawnSync([path.resolve(file)], { cwd: "/", stdout: "pipe", stderr: "pipe" })
-          const seen = run.stderr.toString()
-          if (run.exitCode === 0) problems.push(`${label} exits 0 when run — the placeholder reports success while installing nothing`)
-          const named = seen.match(/cd "(\/[^"]*)" && node postinstall\.mjs/)
-          if (!named) problems.push(`${label} prints no absolute "cd <dir> && node postinstall.mjs" remedy — a relative one does not resolve from a global install`)
-          else if (!existsSync(path.join(named[1], "postinstall.mjs"))) problems.push(`${label} sends the reader to ${named[1]}, which does not hold postinstall.mjs`)
-        } catch (error) {
-          problems.push(`${label} could not be spawned from another directory: ${error instanceof Error ? error.message : String(error)}`)
+    const statMode = async (file: string) => modeOf(path.relative(root, file))
+    const manifest = (await Bun.file(path.join(pkgRoot, "package.json")).json()) as Record<string, any>
+    const declaredTargets = (truth.platformTargets ?? []).map((target) => platformPackageName(target))
+    const problemsIdentity = validatePackageIdentity({
+      manifest,
+      dirName: path.basename(dir),
+      expectedVersion: version,
+      allowedNames: [truth.name, ...declaredTargets],
+    })
+    problems.push(...problemsIdentity)
+    if (name === pkg.name) {
+      // the wrapper
+      for (const [bin, target] of Object.entries(manifest.bin ?? {})) {
+        if (!existsSync(path.join(pkgRoot, target as string))) problems.push(`bin "${bin}" points at ${target}, which is not in the tarball`)
+      }
+      // What the wrapper ships in its bin entries is the apology script, not a binary:
+      // postinstall replaces it at install time. Nothing checked those bytes, so a tarball could
+      // go out with a placeholder that cannot be exec'd, or that points its reader at a directory
+      // that does not exist — and the release lane called that clean. Each check below is the
+      // shape of one of those two failures, and each was seen red by deleting the thing it
+      // guards (the shebang, the resolved path, the exec bit).
+      const scripts = new Set<string>(Object.values(manifest.bin ?? {}).map((target) => path.join(pkgRoot, target as string)))
+      for (const file of scripts) {
+        if (!existsSync(file)) continue
+        const label = path.relative(pkgRoot, file)
+        const mode = await statMode(file)
+        if (mode !== undefined && (mode & 0o111) === 0) problems.push(`${label} is not executable in the tarball (mode ${(mode & 0o777).toString(8)}) — the command would answer "permission denied" instead of its remedy`)
+        const first = (await Bun.file(file).text()).split("\n", 1)[0]
+        if (!first.startsWith("#!")) problems.push(`${label} has no shebang (first line is ${JSON.stringify(first)}) — a launcher that execs it without a shell gets ENOEXEC and no message`)
+        // The remedy has to be actionable from wherever the reader is standing, which is the
+        // whole point of the file and the thing it used to get wrong. Run it the way a tool
+        // runs it — spawned directly, from an unrelated directory — and ask the output for the
+        // directory it tells the reader to cd into.
+        if (process.platform !== "win32") {
+          try {
+            const run = Bun.spawnSync([path.resolve(file)], { cwd: "/", stdout: "pipe", stderr: "pipe" })
+            const seen = run.stderr.toString()
+            if (run.exitCode === 0) problems.push(`${label} exits 0 when run — the placeholder reports success while installing nothing`)
+            const named = seen.match(/cd "(\/[^"]*)" && node postinstall\.mjs/)
+            if (!named) problems.push(`${label} prints no absolute "cd <dir> && node postinstall.mjs" remedy — a relative one does not resolve from a global install`)
+            else if (!existsSync(path.join(named[1], "postinstall.mjs"))) problems.push(`${label} sends the reader to ${named[1]}, which does not hold postinstall.mjs`)
+          } catch (error) {
+            problems.push(`${label} could not be spawned from another directory: ${error instanceof Error ? error.message : String(error)}`)
+          }
         }
       }
-    }
-    if (!existsSync(path.join(pkgRoot, "postinstall.mjs"))) problems.push("postinstall.mjs is missing — the platform binary would never be placed")
-    if (!existsSync(path.join(pkgRoot, "LICENSE"))) problems.push("LICENSE is missing")
-    if (!existsSync(path.join(pkgRoot, "README.md"))) problems.push("README.md is missing — the npm page would render as a bare version string")
-    const declared = Object.keys(manifest.optionalDependencies ?? {}).sort()
-    if (declared.join(",") !== declaredTargets.sort().join(",")) {
-      problems.push(`optionalDependencies [${declared.join(", ")}] do not match product.json's target matrix [${declaredTargets.join(", ")}]`)
-    }
-    for (const [field, expected] of [["os", truth.platform?.os], ["cpu", truth.platform?.arch]] as const) {
-      if (JSON.stringify(manifest[field] ?? null) !== JSON.stringify(expected ?? null)) {
-        problems.push(`${field} is ${JSON.stringify(manifest[field])} but product.platform says ${JSON.stringify(expected)} — npm would install the wrong platform or refuse the right one`)
+      if (!existsSync(path.join(pkgRoot, "postinstall.mjs"))) problems.push("postinstall.mjs is missing — the platform binary would never be placed")
+      if (!existsSync(path.join(pkgRoot, "LICENSE"))) problems.push("LICENSE is missing")
+      if (!existsSync(path.join(pkgRoot, "README.md"))) problems.push("README.md is missing — the npm page would render as a bare version string")
+      const declared = Object.keys(manifest.optionalDependencies ?? {}).sort()
+      if (declared.join(",") !== declaredTargets.sort().join(",")) {
+        problems.push(`optionalDependencies [${declared.join(", ")}] do not match product.json's target matrix [${declaredTargets.join(", ")}]`)
       }
+      for (const [field, expected] of [["os", truth.platform?.os], ["cpu", truth.platform?.arch]] as const) {
+        if (JSON.stringify(manifest[field] ?? null) !== JSON.stringify(expected ?? null)) {
+          problems.push(`${field} is ${JSON.stringify(manifest[field])} but product.platform says ${JSON.stringify(expected)} — npm would install the wrong platform or refuse the right one`)
+        }
+      }
+    } else {
+      // a platform package: the binary itself. Every target names it after the product —
+      // this used to be `name.endsWith("-darwin-x64") ? "glasspane-harness" : "glasspane-harness"`,
+      // a branch whose two arms are the same string, which reads as if the x64 tarball held
+      // a differently named binary and would quietly mis-validate the next target added here.
+      const binary = product.bins[0]
+      if (!existsSync(path.join(pkgRoot, "bin", binary))) problems.push(`bin/${binary} is missing from the tarball`)
+      if (!existsSync(path.join(pkgRoot, "README.md"))) problems.push("README.md is missing — the npm page would render as a bare version string")
+      const mode = await statMode(path.join(pkgRoot, "bin", binary))
+      if (mode !== undefined && (mode & 0o111) === 0) problems.push(`bin/${binary} is not executable in the tarball (mode ${(mode & 0o777).toString(8)})`)
     }
-  } else {
-    // a platform package: the binary itself. Every target names it after the product —
-    // this used to be `name.endsWith("-darwin-x64") ? "glasspane-harness" : "glasspane-harness"`,
-    // a branch whose two arms are the same string, which reads as if the x64 tarball held
-    // a differently named binary and would quietly mis-validate the next target added here.
-    const binary = product.bins[0]
-    if (!existsSync(path.join(pkgRoot, "bin", binary))) problems.push(`bin/${binary} is missing from the tarball`)
-    if (!existsSync(path.join(pkgRoot, "README.md"))) problems.push("README.md is missing — the npm page would render as a bare version string")
-    const mode = await statMode(path.join(pkgRoot, "bin", binary))
-    if (mode !== undefined && (mode & 0o111) === 0) problems.push(`bin/${binary} is not executable in the tarball (mode ${(mode & 0o777).toString(8)})`)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
   }
-  rmSync(root, { recursive: true, force: true })
   return problems
 }
 

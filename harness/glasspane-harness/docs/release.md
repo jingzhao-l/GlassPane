@@ -125,7 +125,21 @@ Things worth knowing, because they are the usual way this is set up wrong:
 5. **Publish to npm** — either let the workflow do it:
 
    ```
-   gh workflow run release.yml -f publish_npm=true -f confirm=true
+   gh workflow run release.yml --repo jingzhao-l/glasspane-harness --ref v0.4.0 -f publish_npm=true -f confirm=true
+   ```
+
+   `--ref` names the tag you cut in step 4, and it is not optional. `gh workflow run` defaults
+   to the repository's default branch, so without it `github.ref` is `refs/heads/main` while
+   the release wants `refs/tags/v0.4.0`; the split repo's `publish-gate` step asserts
+   `[ "$DISPATCH_REF" = "refs/tags/${WANT}" ]` and refuses the run — same bytes, different
+   provenance, because the attestation would name the branch, and a checkout of the default
+   branch is not guaranteed to be the tree the tag points at. When the gate refuses, it prints
+   this exact command with `--ref` filled in; copy that line rather than the one above.
+
+   ```bash
+   gh workflow run release.yml --repo jingzhao-l/glasspane-harness \
+     --ref "v$(node -p "require('./product.json').version")" \
+     -f publish_npm=true -f confirm=true
    ```
 
    or from a machine with a token, which is the path that works before trusted publishing
@@ -234,7 +248,10 @@ assets are built by the `binaries` job with `OPENCODE_RELEASE=1`; they are named
 already scopes it) and `.zip` rather than `.tar.gz`, because `script/build.ts` only
 tars up Linux targets. Every asset ships with a `SHA256SUMS.txt` manifest and a
 detached `<asset>.asc` signature, and the installer checks both: the checksum decides
-integrity and refuses to install on mismatch, the signature decides provenance and warns
-if it cannot be established. If the asset lane is still queued on macOS runners, that is
+integrity and refuses to install on mismatch, the signature decides provenance and the
+installer refuses when it cannot be established — which includes a machine with no `gpg`,
+the stock macOS state (`brew install gnupg`). Waiving either refusal is an explicit act,
+`GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1`, and the summary line then records the override as
+the reason. If the asset lane is still queued on macOS runners, that is
 fine: npm is the channel that has to work, and the installer's npm path does not depend
 on it.

@@ -17,7 +17,11 @@ export const UpgradeCommand = {
         alias: "m",
         describe: "installation method to use",
         type: "string",
-        choices: ["curl", "npm", "pnpm", "bun", "brew", "choco", "scoop"],
+        // [gp] Product: only the channels this product publishes a version feed to. brew/choco/scoop
+        // stayed in this list after the fork stopped publishing to them, so the CLI advertised an
+        // upgrade path whose every ending is "there is no such channel". The list is Installation's
+        // own, so the offer and `latest()`'s refusal cannot drift apart again.
+        choices: [...Installation.UpdateChannels],
       })
   },
   handler: async (args: { target?: string; method?: string }) => {
@@ -41,6 +45,16 @@ export const UpgradeCommand = {
         prompts.outro("Done")
         return
       }
+    }
+    // [gp] Product: the gate is the method, not a side effect of looking a version up. An
+    // explicit [target] skipped `latest()` altogether, and `latest()` is where the refusal for a
+    // channel this product does not publish to lives — so `glasspane-harness upgrade 1.2.3` on a
+    // brew or scoop install handed that manager an upgrade instruction for a package this product
+    // never shipped. Same sentence as the `latest()` path, from the same helper.
+    if (!Installation.isUpdateChannel(method)) {
+      prompts.log.warn(Installation.noUpdateChannel(method).message)
+      prompts.outro("Done")
+      return
     }
     prompts.log.info("Using method: " + method)
     // `latest()` now refuses for a channel this product does not publish to, instead of

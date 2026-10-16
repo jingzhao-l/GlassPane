@@ -12,7 +12,6 @@ import path from "path"
 import { makeRuntime } from "@opencode-ai/core/effect/runtime"
 import semver from "semver"
 import { InstallationChannel, InstallationVersion } from "@opencode-ai/core/installation/version"
-import { NpmConfig } from "@opencode-ai/core/npm-config"
 import { InstallationEvent } from "@opencode-ai/schema/installation-event"
 
 export type Method = "curl" | "npm" | "yarn" | "pnpm" | "bun" | "brew" | "scoop" | "choco" | "unknown"
@@ -76,14 +75,47 @@ export class NoUpdateChannelError extends Schema.TaggedErrorClass<NoUpdateChanne
   }
 }
 
+// [gp] Product: the refusal is one sentence, built in one place, because the CLI has to be able
+// to give it without pretending to look a version up: an explicit `[target]` skips the version
+// check, and the check is where the refusal used to live.
+export function noUpdateChannel(method: Method) {
+  return new NoUpdateChannelError({
+    method,
+    remedy:
+      method === "unknown"
+        ? "glasspane-harness cannot tell how this copy was installed, so it has no version to check against — update with `npm install -g glasspane-harness`, or re-run the installer from https://github.com/jingzhao-l/glasspane-harness"
+        : `glasspane-harness publishes no ${method} package, so there is no ${method} version to check against — update with \`npm install -g glasspane-harness\`, or re-run the installer from https://github.com/jingzhao-l/glasspane-harness`,
+  })
+}
+
 // [gp] Product: this product's releases are its own repository's, and that feed is
 // the only place its update path may read a version from. (Lineage: the fork's
 // upstream is `anomalyco/opencode`, whose releases answer for a different program.)
 const ReleaseRepo = "jingzhao-l/glasspane-harness"
 
+// [gp] Product: and its npm lane reads this product's registry, not the ambient one.
+// `NpmConfig.load` honours a *project* `.npmrc` and `npm_config_registry`, so resolving the
+// registry per repository let the repository a user cd's into decide both where the version
+// check asks and where the `install -g` it then runs downloads the bytes it executes from.
+// Every other npm-facing path pins it for exactly this reason — `script/postinstall.mjs`
+// (`REGISTRY`, passed as `--registry`), `script/verify-published.ts`, `scripts/install.sh`.
+// The literal is the same product fact those files read: product.json → `registry`.
+const Registry = "https://registry.npmjs.org"
+
+// [gp] Product: the channels this product publishes a version feed to. It is one list on
+// purpose: `latest()` refuses every method outside it, and `glasspane-harness upgrade
+// --method` must not offer a channel the update path would only refuse.
+export const UpdateChannels: readonly Method[] = ["curl", "npm", "pnpm", "bun"]
+
+export const isUpdateChannel = (method: Method) => UpdateChannels.includes(method)
+
 // Response schemas for external version APIs
 const GitHubRelease = Schema.Struct({ tag_name: Schema.String })
 const NpmPackage = Schema.Struct({ version: Schema.String })
+// One entry of `brew info --json --formula <name>`. Only the identity is read here, and
+// `full_name` is the field that carries it: a formula from a tap is named `someone/tap/<name>`,
+// a formula from homebrew-core is named bare.
+const BrewFormula = Schema.Struct({ full_name: Schema.String })
 
 export interface Interface {
   readonly info: () => Effect.Effect<Info, NoUpdateChannelError>
@@ -139,10 +171,20 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
     // to anomalyco/homebrew-tap). We keep the *detection* so `upgrade` can say
     // "this install method is not supported by glasspane-harness" instead of
     // half-upgrading a brew install that we do not own.
+    //
+    // The identity has to be read from the machine, not from this file: upstream returned the
+    // same bare name from both branches here, so the tap test at the upgrade leg could never be
+    // true and `brew upgrade glasspane-harness` ran against a formula that may live in somebody
+    // else's tap. Homebrew 7 answers `brew info --json --formula <name>` with a flat array of
+    // formula objects (older releases answer `{"formulae": …}`), and `full_name` is the field
+    // that carries the tap: tap-qualified names contain "/". An identity that does not decode is
+    // no identity, and the upgrade leg refuses on that rather than guessing a formula is ours.
     const getBrewFormula = Effect.fnUntraced(function* () {
-      const localFormula = yield* text(["brew", "list", "--formula", "glasspane-harness"])
-      if (localFormula.includes("glasspane-harness")) return "glasspane-harness"
-      return "glasspane-harness"
+      const info = yield* text(["brew", "info", "--json", "--formula", "glasspane-harness"])
+      const formulae = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Array(BrewFormula)))(info).pipe(
+        Effect.orElseSucceed(() => []),
+      )
+      return formulae[0]?.full_name ?? ""
     })
 
     const upgradeFailure = (method: Method, result?: { code: number; stdout: string; stderr: string }) => {
@@ -173,14 +215,13 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
 
     // [gp] Product: the two channels this product actually publishes to. A curl
     // install reads this product's own releases; an npm-family install reads this
-    // product's own package on the configured registry. Nothing here asks another
-    // project's infrastructure what version it is.
+    // product's own package on this product's pinned registry. Nothing here asks another
+    // project's infrastructure what version it is, and nothing here lets the checkout
+    // decide where to ask.
     const latestFromChannel = Effect.fnUntraced(function* (detectedMethod: Method) {
       if (detectedMethod === "npm" || detectedMethod === "bun" || detectedMethod === "pnpm") {
         const response = yield* httpOk.execute(
-          HttpClientRequest.get(
-            `${yield* NpmConfig.registry(process.cwd())}/glasspane-harness/${InstallationChannel}`,
-          ).pipe(HttpClientRequest.acceptJson),
+          HttpClientRequest.get(`${Registry}/glasspane-harness/${InstallationChannel}`).pipe(HttpClientRequest.acceptJson),
         )
         const data = yield* HttpClientResponse.schemaBodyJson(NpmPackage)(response)
         return data.version
@@ -226,9 +267,7 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
 
         for (const check of checks) {
           const output = yield* check.command()
-          const installedName =
-            check.name === "brew" || check.name === "choco" || check.name === "scoop" ? "glasspane-harness" : "glasspane-harness"
-          if (output.includes(installedName)) {
+          if (output.includes("glasspane-harness")) {
             return check.name
           }
         }
@@ -243,14 +282,8 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
         // either. Upstream's code asked those registries (and upstream's own release
         // feed) anyway, so a user on any of them was shown another program's version
         // number as an available update. No request leaves this process for them.
-        if (detectedMethod !== "curl" && detectedMethod !== "npm" && detectedMethod !== "bun" && detectedMethod !== "pnpm") {
-          return yield* new NoUpdateChannelError({
-            method: detectedMethod,
-            remedy:
-              detectedMethod === "unknown"
-                ? "glasspane-harness cannot tell how this copy was installed, so it has no version to check against — update with `npm install -g glasspane-harness`, or re-run the installer from https://github.com/jingzhao-l/glasspane-harness"
-                : `glasspane-harness publishes no ${detectedMethod} package, so there is no ${detectedMethod} version to check against — update with \`npm install -g glasspane-harness\`, or re-run the installer from https://github.com/jingzhao-l/glasspane-harness`,
-          })
+        if (!isUpdateChannel(detectedMethod)) {
+          return yield* noUpdateChannel(detectedMethod)
         }
 
         return yield* latestFromChannel(detectedMethod)
@@ -262,24 +295,30 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
             upgradeResult = yield* upgradeCurl(target)
             break
           case "npm":
-            upgradeResult = yield* run(["npm", "install", "-g", `glasspane-harness@${target}`])
+            upgradeResult = yield* run(["npm", "install", "-g", "--registry", Registry, `glasspane-harness@${target}`])
             break
           case "pnpm":
-            upgradeResult = yield* run(["pnpm", "install", "-g", `glasspane-harness@${target}`])
+            upgradeResult = yield* run(["pnpm", "install", "-g", "--registry", Registry, `glasspane-harness@${target}`])
             break
           case "bun":
-            upgradeResult = yield* run(["bun", "install", "-g", `glasspane-harness@${target}`])
+            upgradeResult = yield* run(["bun", "install", "-g", "--registry", Registry, `glasspane-harness@${target}`])
             break
           case "brew": {
             const formula = yield* getBrewFormula()
             const env = { HOMEBREW_NO_AUTO_UPDATE: "1" }
-            if (formula.includes("/")) {
-              // [gp] Product: upstream pulled `anomalyco/tap` here. This product is
-              // published to npm and has no tap of its own, so upgrading a formula
-              // that came from someone else's tap is refused with the way out, rather
-              // than silently fetching another project's repository.
-              upgradeResult = yield* run(["echo", "This formula comes from a third-party tap; upgrade with: npm install -g glasspane-harness@latest"], { env })
-              break
+            // [gp] Product: a tap-qualified identity — or no readable identity at all — is not
+            // this product's formula, because this product publishes no tap. Upgrading it would
+            // fetch somebody else's repository and run its install, so the leg answers with the
+            // way out instead. It used to be unreachable: `getBrewFormula` returned the same bare
+            // name from both branches, so `includes("/")` could never be true, and the refusal
+            // below it ran through `echo` with exit code 0 — a refusal the caller reported as
+            // "Upgrade complete".
+            if (formula === "" || formula.includes("/")) {
+              return yield* new UpgradeFailedError({
+                stderr: formula
+                  ? `glasspane-harness publishes no Homebrew tap, and the installed formula is ${formula} — upgrade with \`npm install -g glasspane-harness\``
+                  : "glasspane-harness publishes no Homebrew tap, and this install's formula cannot be named — upgrade with `npm install -g glasspane-harness`",
+              })
             }
             upgradeResult = yield* run(["brew", "upgrade", formula], { env })
             break

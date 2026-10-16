@@ -87,13 +87,21 @@ unpublished release.
 Only you can decide to install anyway, and saying so is an explicit act:
 
 ```bash
-GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.sh | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash
 ```
+
+The override has to be set for the shell that reads the script, not for `curl`: a leading
+`GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl … | bash` binds the variable to `curl` alone, the
+piped `bash` never sees it, and the run is refused again by the very line that offered the
+escape. If you ran the installer from a file instead, the same override is a normal prefix
+(`GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash scripts/install.sh`).
 
 The install summary then names the override in the state it prints
 (`sha256: skipped by GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1`), so the log of that run cannot be read
-later as a verified install. A machine with no `gpg` still installs after the checksum passes and
-says its provenance was skipped — that is a missing tool, not a missing signature.
+later as a verified install. A machine with no `gpg` — which stock macOS is, since it ships no
+GnuPG — is refused the same way and is told how to fix it (`brew install gnupg`): a missing tool
+is installable, and the provenance check it makes impossible is the one check the other side
+cannot fake.
 
 That distinction matters because `SHA256SUMS.txt` is downloaded from the same origin as the
 asset it lists, so on its own it cannot survive a swapped release; the signature is the one
@@ -101,7 +109,6 @@ check whose answer the other side cannot produce.
 
 The web app is embedded: `glasspane-harness serve --port 4096` serves it from the same
 process (a build made with `--skip-embed-web-ui` starts and says the UI is absent).
-
 ## Uninstall
 
 ```bash

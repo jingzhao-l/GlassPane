@@ -123,7 +123,7 @@ for (const item of targets) {
   const treeSitterWorkerPath = "opentui-tree-sitter-worker.js"
   const bunfsRoot = item.os === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/"
 
-  await Bun.build({
+  const compiled = await Bun.build({
     conditions: ["bun", "node"],
     tsconfig: "./tsconfig.json",
     plugins: [plugin],
@@ -162,7 +162,40 @@ for (const item of targets) {
       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
       ...(item.os === "linux" ? { "process.env.OPENTUI_LIBC": JSON.stringify(item.abi ?? "glibc") } : {}),
     },
+    // The rejection half of Bun.build's failure contract, caught so it can name the target.
+    // Measured on this repo's bun (1.3.14): `throw` defaults to true, so an unresolvable import,
+    // a syntax error, an outfile that is an existing directory and an unknown compile target all
+    // reject with `AggregateError: Bundle failed`. Left unhandled, that ends the run with a dump
+    // whose target is only guessable from the `building <name>` line printed before it — and it
+    // ends *before* `binaries[name]`, so the two failure shapes need the same named verdict here.
+  }).catch((error) => {
+    console.error(`build failed: Bun.build threw for target ${name}: ${String(error).split("\n")[0]}`)
+    process.exit(1)
   })
+
+  // The build result is judged per target, by name.
+  //
+  // Two separate holes were here. (1) The awaited value was thrown away, so nothing in this loop
+  // ever asked whether the compile succeeded — and `binaries[name]` at the bottom of the loop is
+  // recorded unconditionally, which is what the publish lane and the release upload read as "this
+  // target exists". (2) Only the *native* target is smoke-tested below, so a second target had no
+  // observer on `bun run build` (both darwin targets on one machine, docs/release.md).
+  //
+  // Three shapes are named failures now: the rejection (the `.catch` above), a build that settles
+  // with `success: false` — the half of the API the discarded value made unreachable, and the only
+  // verdict a caller gets once `throw` is off or a future bun changes that default — and a build
+  // that settles as successful without writing the artifact, which is the case that leaves
+  // `dist/<name>/bin` empty while `binaries` says otherwise.
+  if (!compiled.success) {
+    console.error(`build failed: Bun.build reported success=false for target ${name}`)
+    for (const log of compiled.logs) console.error(`  ${name}: ${log.message}`)
+    process.exit(1)
+  }
+  const outfile = `dist/${name}/bin/glasspane-harness`
+  if (!(await Bun.file(outfile).exists())) {
+    console.error(`build failed: Bun.build reported success for ${name} but wrote no ${outfile}`)
+    process.exit(1)
+  }
 
   // Smoke test: only run if binary is for current platform
   if (item.os === process.platform && item.arch === process.arch && !item.abi) {

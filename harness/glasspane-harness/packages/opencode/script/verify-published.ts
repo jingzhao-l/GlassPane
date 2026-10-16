@@ -75,6 +75,29 @@ const cannotObserve = (label: string, detail: string) => {
   unobserved.push(label)
 }
 
+/**
+ * What one `npm view` read actually established. npm exits non-zero for "the registry says this
+ * version is not there" AND for ECONNRESET / ENOTFOUND / EAI_AGAIN / 429 / a proxy that answered
+ * something else, so `if (seen.exitCode !== 0) missing.push(...)` was adjudicating a transport
+ * failure as a bad release — the inverse of the three-state rule this file states at the top of
+ * the block and already honours for the web-app check. Only `absent` may fail a release;
+ * `unaskable` goes through exit 2 with its reason.
+ *
+ * The classification reads the registry's own answer from the error text rather than npm's exit
+ * code, because the exit code is the same for all of them. E404 is the only one that is a fact
+ * about the artifact.
+ */
+const npmAnswer = (
+  exitCode: number,
+  stdout: string,
+  stderr: string,
+): { state: "answered" | "absent" | "unaskable"; value: string } => {
+  if (exitCode === 0) return { state: "answered", value: stdout.trim() }
+  if (/code E404|404 Not Found/.test(stderr)) return { state: "absent", value: "the registry answers 404 for this version" }
+  const lines = stderr.split("\n").filter((line) => line.trim() !== "")
+  return { state: "unaskable", value: lines.length > 0 ? lines.slice(-2).join(" / ") : `npm exited ${exitCode} without a message` }
+}
+
 if (process.platform !== "darwin") {
   // This used to assert `install.exitCode !== 0` and call that "npm refuses because of
   // the os field". Any failure satisfies that — offline, a TLS proxy, a 404, npm missing
@@ -193,29 +216,58 @@ try {
     // `latest: 0.7.5` with no 0.7.6 at all. On an Intel Mac that is an install with no
     // command, and `verify-published` passing on arm64 could not have seen it.
     const missing: string[] = []
+    const couldNotAsk: string[] = []
     for (const [dep, depVersion] of optional) {
       const seen = await $`npm view ${dep}@${depVersion} version --registry ${registry}`.nothrow().quiet(true)
-      if (seen.exitCode !== 0) missing.push(`${dep}@${depVersion} (npm view exit ${seen.exitCode})`)
-      else if (seen.stdout.toString().trim() !== depVersion) missing.push(`${dep}@${depVersion} (registry answers ${JSON.stringify(seen.stdout.toString().trim())})`)
+      const answer = npmAnswer(seen.exitCode, seen.stdout.toString(), seen.stderr.toString())
+      if (answer.state === "unaskable") {
+        couldNotAsk.push(`${dep}@${depVersion}: ${answer.value}`)
+      } else if (answer.state === "absent") {
+        missing.push(`${dep}@${depVersion} (${answer.value})`)
+      } else if (answer.value !== depVersion) {
+        missing.push(`${dep}@${depVersion} (registry answers ${JSON.stringify(answer.value)})`)
+      }
     }
-    check(
-      "every platform package the wrapper declares is published at the version it names",
-      optional.length > 0 && missing.length === 0,
-      optional.length === 0
-        ? "the installed wrapper declares no optionalDependencies at all — nothing resolves a binary for any platform"
-        : missing.join("; "),
-    )
+    // A read the registry never answered cannot exonerate the release either, and it must not
+    // convict it: this is the lane whose red means "stop and fix the artifact", so a flaky
+    // 429 or a dead DNS lookup has to leave the verdict unobserved (exit 2), not failed (exit 1).
+    if (couldNotAsk.length > 0) {
+      cannotObserve(
+        "every platform package the wrapper declares is published at the version it names",
+        `the registry could not be asked for ${couldNotAsk.length} of ${optional.length} declaration(s): ${couldNotAsk.join("; ")}. Re-run when the registry answers; nothing is concluded about those versions.`,
+      )
+    }
+    if (couldNotAsk.length === 0) {
+      check(
+        "every platform package the wrapper declares is published at the version it names",
+        optional.length > 0 && missing.length === 0,
+        optional.length === 0
+          ? "the installed wrapper declares no optionalDependencies at all — nothing resolves a binary for any platform"
+          : missing.join("; "),
+      )
+    } else if (missing.length > 0) {
+      // An answer that is bad for the release stays bad, whatever else could not be read.
+      check("every platform package the wrapper declares is published at the version it names", false, missing.join("; "))
+    }
     // What the registry vouches for these exact bytes. Integrity, not provenance: it says
     // the downloaded tarball is the one the registry records for this version, and nothing
     // about who built it — hence the separate note below.
     const dist = await $`npm view ${product.name}@${version} dist.integrity --registry ${registry}`
       .nothrow()
       .quiet(true)
-    check(
-      "the published version carries a registry integrity hash",
-      dist.exitCode === 0 && dist.stdout.toString().trim().startsWith("sha512-"),
-      dist.stdout.toString().trim() || `exit ${dist.exitCode}`,
-    )
+    const distAnswer = npmAnswer(dist.exitCode, dist.stdout.toString(), dist.stderr.toString())
+    if (distAnswer.state === "unaskable") {
+      cannotObserve(
+        "the published version carries a registry integrity hash",
+        `npm view did not reach the registry (${distAnswer.value}). Nothing is concluded about the integrity field.`,
+      )
+    } else {
+      check(
+        "the published version carries a registry integrity hash",
+        distAnswer.state === "answered" && distAnswer.value.startsWith("sha512-"),
+        distAnswer.value || `npm view exit ${dist.exitCode}`,
+      )
+    }
     await reportProvenance()
 
     // The embedded web app: the companion surface that only exists if the bundle

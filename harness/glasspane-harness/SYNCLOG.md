@@ -2,6 +2,117 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-16（第十次会话）· 0.8.0：发布物与主干那条没人量的等式，四条尺子的"只能绿"，与四条把红线当成交付的修复
+
+**开工态**：主树 HEAD `40f6dca`（落后 `origin/main` 一笔），`git status --porcelain` 有 11 项，全部
+落在 `harness/glasspane-harness/` 内。盘 `df -k /Volumes/Eng-Dev` = 32,524,048 KB 可用（≈31 GiB），
+`bun` = 1.3.14（= `packageManager`），`.external/opencode` 的 `describe --tags` = `v1.18.32` =
+`harness/upstream.json` 的 pin，`fsck` 无错、工作树干净，`preflight` 报出本机 TLS 由
+`SteamTools Certificate` 签发并给出钥匙串束的接法（`/var/tmp/glasspane-harness/ca-bundle.pem`，
+163 张）。registry 三包 latest 实测均 `0.7.10`，split 仓 `main` = `ea70dc8`。
+
+**往轮遗留判定（"上一轮的遗留"是待办，不是输入）**
+
+1. **`gp-harness-orphan-20261010`：本轮不存在这条分支**。`git ls-remote --heads origin` 只有 `main`，
+   本地分支只剩 `main` 与 07:30 那条线的 `gp-daily-main-20261015`。它的五个文件在 10-15 那轮已被
+   逐字节判过"被更强的形态取代"（判据在那轮的 SYNCLOG 里），本轮复查确认 `verify-published.ts`
+   读的是**已安装包**的 `os`/`cpu`/`version`，不再是拿 `product.json` 跟自己比的那句自回显断言。
+2. **主树里那 11 项未提交批次不是"别人的在飞工作"，是本轮的头号缺陷**。查法：逐文件
+   `git hash-object` 与 split 仓 `main` 的 blob 比 → 10 个文件**逐哈希相等**；再把
+   `HEAD:harness/glasspane-harness`（`4ad214d`）与 split `main` 的树（`896398d`）整树
+   `git diff --name-status` → 差 11 项，即那 10 个文件 + **主树从来没有的 `bun.lock`**。
+   出处是两笔**只在 split 仓存在**的提交：`d56660e fix(deps): raise 7 pinned deps above the first
+   patched version`（dompurify 3.3.1→3.4.16、electron 42.3.3→42.10.0、minimatch 10.0.3→10.2.3、
+   katex 0.16.27→0.18.2、`@modelcontextprotocol/sdk` 1.29.0→1.31.0＝CVE-2026-104850 /
+   GHSA-6qxp-vccf-f47h OAuth 客户端凭据泄露、`@babel/core` 7.28.4→7.29.6、`@hey-api/openapi-ts`
+   0.90.10→0.97.3）与 `3207508 chore: add CODEOWNERS`。**这两笔进了 v0.7.10 的发布物，主干却从未
+   收到**——下一笔 `git subtree split` 会把一次安全升版静默撤销。处置：把内容（含 `bun.lock`）
+   落回 main（`359088e`），`fork-diff` 金样同批重记；`bun install --frozen-lockfile` 实测过，装的
+   版本实测 1.31.0 / 10.2.3 / 7.29.6。落地后 `HEAD:harness/glasspane-harness` == split `main` 的树
+   （`896398d`），已 tag 的 v0.7.10 与之只差 `SYNCLOG.md` 一个文件（发布物不含代码差异）。
+3. **本轮把这条等式变成机制**（见下【P0】）。这条等式原先只写在 `docs/release.md` 的一句手打
+   `test "$(git rev-parse …^{tree})"`，SYNCLOG 每轮记录它被**人**跑过——10-15 那轮甚至把"清理盘点"
+   写明了这个差集，却没有任何东西能红。
+
+**P0：没有任何尺子量过"主干 == 发布物"**（两条独立审查同时命中）。盘过七个地方，一个都不比：
+六把尺子（`fork-diff` 比的是 fork↔**上游**，不是 fork↔split）、`harness/glasspane-harness/contracts/*`
+（无 fork 树哈希）、父仓三条工作流、split 的 `release.yml`（`publish-gate` 只证明 tag 的 commit ==
+HEAD，它看不见父仓）、`scripts/check-workflows.mjs`、`docs/release.md`（散文）。根因是结构性的：
+**尺子不在 split 树里**，发布仓跑不出主干的任何性质。处置＝把断言放到唯一能说真话的时刻——
+`release.yml` 的 `version-check`，取号之后、`create-release` 公开之前，匿名 HTTPS 抓主干，比
+`FETCH_HEAD:harness/glasspane-harness` 与本树 `HEAD^{tree}`，不等就打出文件级差集并非零退出；
+`create-release` 与 `binaries` 都 `needs:` 它。红路可复现：本机对 **v0.7.10 那棵树**跑同一段逻辑，
+它就在 `A .github/CODEOWNERS / M README.md / M bun.lock …` 上退 1（＝当年漏进主干的那批东西）。
+尺子侧另加 `[release-anchor]`：step 名字不在、或它不在 `version-check`、或 `version-check` 不再是
+`create-release`/`binaries` 的前置，都红——删 step 实测 exit 1 并点名。
+
+**本轮修掉的（按"发现 N 条就修 N 条"清点，32 条）**
+
+*供应链与安装/升级面* ①`Installation.latest()` 的 registry 来自 `NpmConfig.registry(process.cwd())`
+＝吃项目 `.npmrc`/`npm_config_registry`，三条 `install -g` 更是不传 `--registry`：陌生仓库可以既
+决定"最新版是谁"又决定"全局装谁的包"（那包的 postinstall 跑的是它的 JS）。②`Npm.reify` 把项目
+`.npmrc` 原样交给 Arborist，而本产品会往用户刚打开的项目里写依赖。③写进项目的
+`@opencode-ai/plugin` 版本用的是**本产品**版本号——实测 404（`1.18.32` 才有），安装 forked 在后台、
+失败只留 warning，于是每个被发行版打开的项目静默拿不到插件文件 import 的那个 API。④⑤⑥三处
+**跑不到的拒绝分支**：`getBrewFormula()` 两个 return 同一字符串 ⇒ 第三方 tap 那条拒绝恒不执行、
+照旧 `brew upgrade` 别人的 formula；`method()` 的 `installedName` 三元两侧相同；`--method` 的
+`choices` 仍列 brew/choco/scoop，且显式 `[target]` 绕过"没有这个渠道"的拒绝。⑦`--pure` 与
+`GLASSPANE_HARNESS_*` 整批名字在工具宿主侧从未生效（`Config.boolean("OPENCODE_PURE")` 按字面名问
+provider，从不经过 `flag.ts::read()` 那个唯一解析点），而被注入每个会话的 skill 正在教用户导出
+它们；`plugin/index.ts` 里那个空 `if` 一声不吭丢掉 N 个 plugin origin。⑧安装器两条拒绝打印的
+`GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl … | bash` 执行不了（行首赋值只管 `curl`），照抄再被拒。
+⑨`gpg` 不在 PATH 时兜底通道"警告后安装"——裸 macOS 本来就没有 GnuPG，等于在最需要它的机器上关掉
+溯源控制，剩下那把尺子是同一个 origin 发下来的 SHA256SUMS.txt。⑩`gpg-signing.sh audit` 每个正文
+`2>/dev/null || true` 取，全部取不到时打印 `ok no silent-skip signing found`（它存在的目的恰恰是
+发现那种静默跳过）。⑪⑫⑬`build.ts` 丢掉 `Bun.build` 返回值（编译失败不打字、退 0、
+`dist/<pkg>/bin` 是空的，只有本机 target 有冒烟测）；`publish.ts` 的 `gp-pack-*` 只在成功路径清理；
+`verify-published.ts` 把 `npm view` 的传输错误判成"发布是坏的"，与它自己文件头的三态规则相反。
+⑭`create-release` 的"release 已存在"分支只修锚点就继续，配 `binaries` 的 `--clobber` ⇒ 一个版本号
+同时挂着 GitHub 的新字节与 npm 的旧字节、签名在重签前对不上旧资产。⑮`docs/release.md` 教的派发
+命令缺 `--ref v<X.Y.Z>`，而 `publish-gate` 对缺它的派发恒拒绝。⑯父仓 `release.yml` 的
+`npm publish --provenance || { npm stage publish; }` 假绿形状（E401/5xx/tarball 问题都走这支；
+v0.7.6 就是 job 绿而 registry 没那个号），以及铸 OIDC token 那台机器上浮动的 `npm@11`。
+⑰`packages/{sdk/js,plugin,ui,app,cli}` 补 `private: true`——此前只有 `script/publish.ts` 的 `exit 2`
+桩在挡，而 `npm publish -w @opencode-ai/ui` 根本不经过桩。⑱FORK.md 那句"CODEOWNERS/
+ISSUE_TEMPLATE 全部移除"按树的真相改正（是**改写**，且 CODEOWNERS 是 10-15 为分支保护恢复的；
+上游工作流实测 27 个，不是 26）。
+
+*尺子层* ⑲`tool-surface` 的测量集下限问的就是它守的那份金样（清空 `fork-diff.json` 的
+`added`/`edited` ⇒ 面 B 8,275/216→0，`--check` 绿退 0，还把面 A 21.66%→26.63% 而 A 一行没动）；
+现在下限取自**自己金样记录的测量集**，空集不再算数。⑳`hook-liveness` 把"读不到版本"当"没有漂移"，
+`--record` 会把没读过的 tag 写进金样 → 退 2。㉑㉒㉓`brand-surface` 金样缺 `lineage` 时
+`undefined` 比较恒不成立→红；命中数改为**数匹配**（此前 `test()`+`count:1`，一个已记录文件从 1 处
+涨到 100 处不可见）；豁免名单改为**按规则**（此前点名一个文件＝豁免全部四条）。㉔`product-surface`
+只打印一致性条数从不比较→把四个发现集的规模钉住；且它**照收 `--record`**（它没有基线）→ 未知参数
+退 2。㉕`contracts/engine-methods.json` 那颗 `swiftBlob` **没有任何读者**（引擎缺席时只打 note 退 0）
+→ 现在对 `FrameCodec.swift` 的真哈希核，伪写一位即红，引擎不在则退 2 明说"CANNOT OBSERVE, not
+agreement"。㉖`kernel-pin --probe` 问不到 registry 退 0，而唯一吃它的 `kernel-drift` job 的判词就是
+退出码、注释还写着"不可达就失败"→ "问不到/答空"退 2，**真漂移保持退 0**（漂移是要人看的发现，
+不是 CI 红），判决写进 step summary 让它有读者。㉗三把写了却没人跑的自测
+（`ref-batch-selftest.mjs`/`kernel-pin-selftest.mjs`/`verify-published-selftest.sh` 引用数为零）接进
+`ci.yml`，另两把"测不到就退 0"改为退 2，`probe-lane-selftest.sh` 补上空期望值守卫；并加
+`[selftest-wired]` 规则把这件事变成机制。㉘`check-workflows` 的 `enforcePins: target.primary === true`
+豁免撤销（fork 子树里那条发布通道 `environment: release` + `id-token: write` 却在跑 `@v4`，而父仓
+`release.yml` 把这条攻击写成了文档），split 两条工作流的 `uses:` 全部钉 40 位 SHA，五个 pin 逐个
+对 GitHub tag ref 反查核实。㉙`docs/release.md`/`docs/install.md` 与本轮新事实对齐。㉚本轮新加的
+CI job 使 `CONTRIBUTING.{md,zh-CN.md}` 的"九条 job"过期 → `check-doc-links` 真的把它抓出来了
+（这是那条守卫第一次咬到我们自己），改成十条。
+
+**本轮决定 → 依据 → 回滚**
+
+| 决定 | 依据 | 回滚 |
+|---|---|---|
+| 取号 **0.8.0**（minor），不是 patch | 三处用户可见形状/默认变了：`upgrade --method` 少三个渠道、`gpg` 缺席由"警告后装"翻成"拒装"、发布多一道能拦停的活门。号先实测空闲：`npm view glasspane-harness@0.8.0` 与 `-darwin-arm64@0.8.0` 均 404，split 远端无 `v0.8*` tag | `git revert` 版本提交（号一旦被占不可回收） |
+| 把主树那 11 项**提交进 main**，而不是继续"留着" | 内容与已发布的 split blob 逐哈希相等；它是已发布物的唯一真源缺项，留着＝主干与发布物继续分叉，且 `git status` 是收口硬条件 | `git revert 359088e` |
+| `enforcePins` 两面都管 | 豁免换不来任何东西，只让唯一能发现 `@v4` 被改名的闸闭眼 | `git revert` 该提交；恢复豁免即把 `check-workflows.mjs:394` 改回带 `primary` 的调用 |
+| `gpg` 缺席改拒装，留 `GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1` | 缺一个可安装的工具 ≠ 缺一条签名；同文件对 manifest 缺席早就是拒装 | `git revert` 安装链提交 |
+| 插件 API 版本改取自 `packages/plugin/package.json` | 上游按自己的发布编号出那个包；本产品版本号在那个 registry 里 404（实测） | `git revert` 该提交 |
+| 面 B `8275 → 8730`（+455，216 文件不变）、血缘 `9627 → 9643`（+16 / 3308→3312 文件）同批 `--record` | 32 条修复里 11 个文件往我们的面上加行，逐文件归因由 `tool-surface` 自己打出来；+16 全部是"这是谁的字节"的归属说明（按 9616/9617/9618 先例写进金样 `source`） | `git checkout HEAD~ -- harness/contracts/{tool-surface,brand-surface,fork-diff}.json` 后 `--check` 必红 |
+| 五个非发布包 `private: true`；**不删** CODEOWNERS，改正 FORK.md | 删 CODEOWNERS 会把刚恢复的分支保护对齐拆回去；文档与树不一致才是要修的 | `git revert` 该提交 |
+| 主仓 `release.yml` 的 npm 假绿在本轮跨线修 | 缺陷在主仓那层，"交给那条线"不是出口；工作流文件落 main 即生效，不动主仓版本线 | `git revert` 该提交 |
+
+**闸的最终数字**：见本节末【收口补记】（发布链跑完后写）。
+
 ## 2026-10-15（第九次会话）· 0.7.10：29 条发现全部收口，两处默认收紧，`0.7.9` 这个号作废
 
 **开工态**：主树 `/Volumes/Eng-Dev/GlassPane` 干净，HEAD `58da7be`，与 `origin/main` 同点
