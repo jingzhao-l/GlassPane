@@ -2,6 +2,87 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-16（第十一次会话）· 0.8.1：那条等式第二次开口，这次两个方向同时缺字节
+
+**开工态**：主树 `main` = `9cefe7e7`（落后 `origin/main` 13 笔、领先 0 笔）⇒ 先 `git merge
+--ff-only origin/main` 复基线到 `96e1b27f`，整树 `git status --porcelain` 空。
+`df -k /Volumes/Eng-Dev` = 29,213,056 KB 可用（≈28 GiB）。`bun` = 1.3.14 = `packageManager`
+钉的同一支。`.external/opencode` 的 `describe --tags` 实测 = `v1.18.32` = `harness/upstream.json`
+的 pin（不是照抄上一轮的记述）。split 仓 `main` = `23b63020`。
+
+**缺陷 1（P0 机制留下的那一格）：发布物 ⊅ 主干，且没有任何尺子在量**。0.8.0 那条
+`version-check` 锚只在切 tag 那一刻比一次 tree 哈希，切完之后主干又收了 74 行——
+实测：`git rev-parse HEAD:harness/glasspane-harness` = `c21d9e4b`，split `main` 与 tag
+`v0.8.0` 的树都是 `8620e992`，差一个文件 `SYNCLOG.md`（主干独有 74 行）。后果不是"文档没带上"
+这么轻：**装到用户机器上的那份归档里，没有这次发布的实测记录**——同一判据 07:30 那条线当天
+用它打过自己的脸（`v1.16.3` 的归档里没有台账，于是补了一版 `1.16.4`），本轮不能对本线默认例外。
+
+**缺陷 2（反向，且是重切会吃掉别人字节的那一侧）**：同一份差集里 `SYNCLOG.md` 还有
+**+1 行只在发布物**——主干 0.7.8 那一段的 `` 回读 `draft=false` `` 被 `943b2841`（就是写
+0.8.0 收口补记的那一笔）吃成了 `` 回读 `draft=` ``。真相独立核过，不信任何一边树里的字：
+`gh release view v0.7.8 --repo jingzhao-l/glasspane-harness --json isDraft` → `false`。
+也就是说：**照原样 `git subtree split` 一次，就会把 split 仓里正确的那行删掉**，而当时父仓
+10 条 lane 全绿。同形第二处：同一笔还把 `VP_GATE=<那份副本>` 吃成了 `VP_GATE=`
+（`verify-published-selftest.sh` 里 `GATE="${VP_GATE:-…}"` 实测存在那个变量）。两处都按
+"补回可核的真相"处理，不按"重录基线"处理。
+
+**机制补上：`harness/tools/release-artifact.mjs`（父仓侧持续量，不再只在切 tag 那一刻量一次）**
+- `split-main`：split 的 `refs/heads/main` 树 == 主干子树树，**严格**、两个方向都红。依据：
+  推一次搬运分支不消耗版本号，所以不存在"回头再推"的正当性。
+- `artifact`：被 tag 的那棵树 == 主干子树树。容忍只此一种——tag 还没带上**本版自己的收口记录**
+  （`SYNCLOG.md` / `CHANGELOG.md`），因为那段记录无法描述一个当时还不存在的树；且必须打成
+  `△ tolerated lag(s)` 报出来，绝不静默。非 ledger 路径不等、或发布物**领先**主干，一律红。
+- 差集报到**行级**（`+远端独有行 / -主干独有行`）并单列 `⚠ RE-SPLIT RISK`。这一条是本轮缺陷 2
+  的直接教训：整文件缺席看得见，两边都在的文件里丢了哪几行看不见——`draft=false` 就是这么消失的。
+- 没有 `--record`（自测里那条电池钉着：`--record` 回 exit 2）。一把能把"发布物过期"记成基线的尺子
+  不是尺子；这一格与面 A 那种"越线检查已耗尽、只剩 LOC 棘轮"不同，这里没有任何数字需要基线。
+- 取不到远端 / 子树有未提交改动 ⇒ **exit 2**，CI 把 exit 2 判红（与 `verify-published.ts`、
+  `hook-liveness --offline`、`ref-batch-selftest` 同一分码口径）。
+
+**固定点测试：`harness/tools/release-artifact-selftest.mjs`，10 条电池 + 1 条反向破坏，实测全过**
+夹具是 `file://` 上的真仓库（真 `git init`/commit/**annotated** tag——split 仓的 tag 是带对象的，
+`refs/tags/v…` 指向 tag 对象，工具必须 peel 才能拿到树；用轻量 tag 做夹具就会漏掉这条路径）。
+- A 全等 ⇒ 0；B 主干多一个文件 ⇒ 1，两条规则同时点名并列出 `NEW.md`；
+  C 发布物多一行（`draft=false` 形状）⇒ 1，报 `⚠ RE-SPLIT RISK` 与 `SYNCLOG.md (+1 / -0)`；
+  C2 发布物多一个整文件 ⇒ 1，`published-only: 1` + `⚠`；D 声明的版本从没打过 tag ⇒ 1，
+  **`✓ split-main` 且 `✗ artifact`**；E tag 落后 main 且差的是非 ledger 路径 ⇒ 1，同样
+  一条绿一条红，且不容忍；J tag 只落后本版收口记录 ⇒ 0 但必须打印 `△`（断言里有
+  `1 tolerated lag(s)`，防止"容忍"变成"闭嘴"）；F 远端不可达 ⇒ 2；G 子树未提交 ⇒ 2。
+  D/E/J 三条是本文件存在的理由：把"树不等"合成一句判决就分不清"补一版"与"先把字找回主干再重切"
+  这两种相反的处置。
+- 反向破坏：把两处 tree 比较阉成 `if (true)` 的副本，在已知不等的夹具上必须回 **exit 0**
+  （回 0 才证明上面那些红是比出来的，不是恰好崩）；实测 `control live`。
+- 接线（`product-surface` 的 `selftest-wired` 从四把变五把）：`.github/workflows/ci.yml`
+  的 `harness-rulers` 加了三处——尺子在树里那条 `for f in …` 名单、`--check` 一步、自测一步
+  （照 `ref-batch` 那两步的双网写法：退出码非 0 红 + `case "$out"` 抓"回答没测量"）。
+
+**闸的读数（本批，从干净树复测）**：`fork-diff vs v1.18.32: 4645/6724 byte-identical, 282 edited,
+92 added, 1705 deleted`（与开工同值；金样只重记了四个 `forkHash`——`CHANGELOG.md`、
+`product.json`、`SYNCLOG.md`、`packages/opencode/package.json`，`git diff` 差集逐行核过是
+4 行、计数一格没动）；`tool-surface` 面 A 9609 LOC / 21.41%、面 B 8793 LOC / 19.59%，**no growth**
+（两个面仍超文档 10% 上限，越线检查对这个面已耗尽，本轮没动它一行）；`surface-semantics` 0 命中；
+`brand-surface` 血缘 9646 / 3312 文件，与基线相等；`hook-liveness` 21 钩子无漂移；
+`product-surface` **227 条一致 / 0 问题**（开工 225；+2 是新自测的"在树里"与"被接线"两问）；
+`kernel-pin` iterate-kernel@0.1.7 / 26 个契约文件；`kernel-conformance` 16 fixture 全中；
+`check-workflows` 5 份工作流干净 + `--self-test` 12 条各验其红；`check-doc-links` 25 份文档 /
+227 条仓内链接 OK；`release-artifact --check` 本批**故意是红的**（`✗ split-main`、
+`✗ artifact: has no tag v0.8.1`），红的内容就是本版要消掉的差集——推搬运分支、tag `v0.8.1`
+之后按上面三条规则复绿。
+
+**取号 0.8.0 → 0.8.1（patch）的依据**：四条用户可见判据逐条实测未动——状态文件字段（无改）、
+退出码集合（无改）、CLI 参数（无改）、npm `bin`（无改）；子树里的字节变化只有版本号、
+`CHANGELOG.md` 与 `SYNCLOG.md`。本版存在的理由不是"改了功能"，是"发布物里没有上一版自己的
+收口记录"，而消掉它的代价应当是一版而不是一个例外。
+
+**本轮我替你做的决定**：① 主树的 13 笔落后用 `--ff-only` 复基线，不 rebase 不覆盖；
+② 缺陷 2 按"补回可核真相"处理（`gh release view v0.7.8 isDraft` 与脚本里的真实变量名为据），
+不把 split 侧的差集当"上游噪声"重录掉；③ `artifact` 那条容忍只给 `SYNCLOG.md`/`CHANGELOG.md`
+两个路径、只给"tag 缺主干的字"一个方向，且必须打印 `△`——这是我替你定的口径，因为不收口记录
+就写不进 tag（tag 之前那段实测还不存在），而把它做成静默放行就等于本轮开场那个缺陷；
+④ fork-diff 金样重记与代码同批（分两笔提交落，内容一致）。回滚：`git revert` 本批三笔
+（工具与接线、金样、台账）即回到 0.8.0 的等式状态；已发的 tag 与 npm 版本不撤。
+
+
 ## 2026-10-16（第十次会话）· 0.8.0：发布物与主干那条没人量的等式，四条尺子的"只能绿"，与四条把红线当成交付的修复
 
 **开工态**：主树 HEAD `40f6dca`（落后 `origin/main` 一笔），`git status --porcelain` 有 11 项，全部
