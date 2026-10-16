@@ -164,8 +164,9 @@ final class PanelDaemonCommandContractTests: XCTestCase {
             + "就会在家目录默认根上执行")
         XCTAssertEqual(rootNamed.count, 1,
             "状态根应当在漏斗里被点名恰好一次，实得 \(rootNamed.count) 次：多出来的那一次是有人在绕过漏斗")
-        XCTAssertTrue(source.contains("[\"--state-dir\", stateRoot.path] + command"),
-            "漏斗本身不再把根显式递给 daemon——每一条命令都会落到它自己的默认根上")
+        XCTAssertTrue(source.contains("[\"--state-dir\", stateRoot] + command")
+                       && source.contains("ConsoleModel.daemonCLIArguments(command, stateRoot: stateRoot.path)"),
+                      "漏斗本身不再把根显式递给 daemon——每一条命令都会落到它自己的默认根上")
         XCTAssertFalse(source.contains("arguments: [\"--"),
             "还有一处把开关数组直接递给 daemon——它会在家目录默认根上执行")
     }

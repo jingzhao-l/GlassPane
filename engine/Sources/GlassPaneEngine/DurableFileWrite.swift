@@ -123,8 +123,10 @@ enum DurableFileWrite {
         // 去处，而那些卷压根不支持目录项 sync。把"证明不了"当成"没落盘"去拒绝一次已经
         // 成功写下的注册，就是用一条测不出来的保证去否决一次实测到的写——本仓对模式判定
         // 的同一条纪律（判据必须是量到的东西）反过来也成立。文件本体的 fsync 仍然是硬要求。
-        try? syncExisting(path: directory, step: .syncDirectory, operations: operations,
-                          tolerateUnsupported: true)
+        // 容错的那一半写在 `syncExisting` 里，判据是 errno：`try?` 会连 EIO 一起吞掉，
+        // 那才是真正"用一条测不出来的保证换一次安静"。
+        try syncExisting(path: directory, step: .syncDirectory, operations: operations,
+                         tolerateUnsupported: true)
     }
 
     /// 这台机器上"这个卷不支持目录 sync"的那几种回话。EIO / ENOMEM 不在其内：那是
