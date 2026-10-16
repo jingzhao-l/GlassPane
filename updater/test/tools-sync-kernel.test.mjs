@@ -185,7 +185,11 @@ test('sync-kernel: 真同步保留镜像自有的 manifest，只搬 canonical �
   assert.equal(after.private, true, '镜像不在 GlassPane 这条线上发布')
   assert.equal(after.version, '1.15.1', '镜像跟着产品版本线走，不是 kernel 自己的号')
   assert.equal(after.dependencies.zod, '3.25.76', '镜像钉精确范围，可复现安装是这条线的决定')
-  assert.deepEqual(Object.keys(after.exports ?? {}), ['.'], '镜像只导根入口')
+  // exports/files 是契约形状，不是身份：这两项**必须**跟 canonical 一致（kernel 自己的
+  // packaging 闸断言它们）。私有的一侧写 "." 才是缺陷——上一轮就是这两项没跟上。
+  const canonicalManifest = JSON.parse(fs.readFileSync(CANONICAL_MANIFEST, 'utf8'))
+  assert.deepEqual(Object.keys(after.exports).sort(), Object.keys(canonicalManifest.exports).sort(), '子路径导出要跟 canonical 一致')
+  assert.deepEqual(after.files, canonicalManifest.files, 'fixture 语料要随包走（跨语言契约）')
   // 排除 manifest 不等于排除代码：canonical 那一侧的内容必须真的落地。
   const canonicalSrc = fs.readFileSync(path.join(s.srcRoot, 'kernel', 'src', 'index.ts'), 'utf8')
   assert.equal(fs.readFileSync(path.join(s.repo, 'kernel', 'src', 'index.ts'), 'utf8'), canonicalSrc, 'src/ 仍要从 canonical 过来')

@@ -70,24 +70,50 @@ final class DaemonVersionFlagTests: XCTestCase {
             "只报一个版本号的调用不该把状态根创建出来（更不该顺手 chmod 别人的目录）")
     }
 
-    /// 版本字面量只有一处：实例属性转读 static，别处再抄一份字符串就是漂移。
+    /// 版本字面量：一处权威（static），加一处**旧 updater 读者的兼容位**（实例字面量），
+    /// 两者必须同为同一个号，且两个形状都还在位点表里。
+    ///
+    /// 2026-10-15 之前这一条断言的是"实例属性转读 static"。那个形状对 1.10.0 之后的读者
+    /// 是对的，对**装了 1.10.0 之前那份 updater 的机器**是死的：1.6.2 的
+    /// `siteVersion` 只拿 `/public let version = "([^"]+)"/` 找版本，找不到就判
+    /// `version-line-broken`——本机 `~/.glasspane/update-state.json` 从 2026-10-11 起
+    /// 每一份新树都被它拒掉，自动更新从此不再工作。字面量回来了，但"漂移"这个原始顾虑
+    /// 由这一条 + `check-version` 两个位点 + `set-version` 唯一入口一起兜住。
     func testVersionLiteralIsSingleSourced() throws {
         let path = repoRoot + "/engine/Sources/GlassPaneEngine/EngineCore.swift"
         guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
             throw XCTSkip("读不到 EngineCore.swift；这一条在没有该文件的环境里不作数")
         }
-        let literal = try? NSRegularExpression(pattern: "static let buildVersion = \"[0-9.]+\"")
-        let hits = literal?.numberOfMatches(in: text, range: NSRange(text.startIndex..., in: text)) ?? 0
-        XCTAssertEqual(hits, 1, "版本字面量应当恰好一处（供位点表改写），实际 \(hits) 处")
-        XCTAssertTrue(text.contains("public let version = EngineCore.buildVersion"),
-                      "实例属性又开始自带一份字符串了：hello 与 --version 会各说各话")
-        // 位点表必须还认这一行：认不上的话 `set-version` 会静默漏改这一处。
+        func firstValue(_ pattern: String) -> String? {
+            guard let re = try? NSRegularExpression(pattern: pattern),
+                  let match = re.firstMatch(in: text, range: NSRange(text.startIndex..., in: text))
+            else { return nil }
+            let range = match.range(at: 1)
+            guard let swift = Range(range, in: text) else { return nil }
+            return String(text[swift])
+        }
+        let authoritative = firstValue("static let buildVersion = \"([0-9.]+)\"")
+        let legacyReadable = firstValue("public let version = \"([0-9.]+)\"")
+        XCTAssertNotNil(authoritative, "daemon 的权威版本字面量不在了")
+        XCTAssertNotNil(legacyReadable,
+                        "旧 updater（1.10.0 之前装的）只认 `public let version = \"x.y.z\"`；"
+                        + "这一行变成转读，那批机器的自动更新就永久停在 version-line-broken")
+        XCTAssertEqual(legacyReadable, authoritative,
+                       "两处字面量漂了：hello/--version 说一个数，暂存树自检读另一个数")
+        let literalHits = (try? NSRegularExpression(pattern: "static let buildVersion = \"[0-9.]+\""))?
+            .numberOfMatches(in: text, range: NSRange(text.startIndex..., in: text)) ?? 0
+        XCTAssertEqual(literalHits, 1, "权威位点应当恰好一处（供位点表改写），实际 \(literalHits) 处")
+        // 位点表必须还认这两行：认不上的话 `set-version` 会静默漏改其中一处。
         let sites = repoRoot + "/scripts/version-sites.mjs"
         guard let table = try? String(contentsOfFile: sites, encoding: .utf8) else {
             throw XCTSkip("读不到 scripts/version-sites.mjs")
         }
-        XCTAssertTrue(table.contains("public static let buildVersion = \""),
-                      "daemon 位点的正则不再指向那一行——下一次 set-version 会悄悄漏改这个位点")
+        // 核的是**捕获组那一形**（`= ")`），不是裸子串：位点表的注释里也提到这两种形状，
+        // 按裸子串断言就等于在断言一句注释。
+        XCTAssertTrue(table.contains("public static let buildVersion = \")"),
+                      "daemon 权威位点的正则不再指向那一行——下一次 set-version 会悄悄漏改这个位点")
+        XCTAssertTrue(table.contains("public let version = \")"),
+                      "兼容位点没进位点表——下一次 set-version 会把它留在旧号上，两处开始漂")
     }
 
     /// 解析表、usage 与文件头注释块必须互逆：只在一侧出现的开关，一边是"能用但没人知道"，

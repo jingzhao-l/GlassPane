@@ -77,6 +77,19 @@ export const SITES = [
     hint: 'glasspaned 自报版本（hello、--version、设置面板与证据包同源）',
   },
   {
+    id: 'daemon 版本字面量的兼容位',
+    file: 'engine/Sources/GlassPaneEngine/EngineCore.swift',
+    // 装了 1.10.0 之前那份 updater 的机器，读暂存树只认「public let version 等于一个带引号
+    // 的字面量」这一种形状（1.6.2 的 updater/lib/selfcheck.js 里那条正则原样如此）。那一行
+    // 若改成转读 static，这批机器就把每一份新树判成 version-line-broken，自动更新永久停摆
+    // （本机 2026-10-11 起实测如此）。所以这里是一个**真位点**，不是注释：set-version 必须
+    // 把它和上面那行一起写，check-version 两个都核，DaemonVersionFlagTests 再断言两者同号。
+    // 这段注释里不许出现被扫描的那两种形状——闸是在原文上跑正则的，注释举一次例子就会去
+    // 断言一句注释。
+    regex: /(public let version = ")([^"]+)(")/,
+    hint: '旧 updater 读者能解析的字面量；与上一位点同号，漂了由两者共同闸住',
+  },
+  {
     id: 'CFBundleShortVersionString',
     file: 'engine/scripts/make-app.sh',
     regex: /(<key>CFBundleShortVersionString<\/key>\s*\n\s*<string>)([^<]+)(<\/string>)/,

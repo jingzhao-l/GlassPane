@@ -28,9 +28,23 @@ public final class EngineCore {
     /// keys its daemon site on exactly this line's shape, `hello` reads it, and
     /// `glasspaned --version` reads it — so the version a client sees on the socket
     /// and the version a one-shot process prints cannot drift apart.
-    public static let buildVersion = "1.15.1"
+    public static let buildVersion = "1.16.0"
 
-    public let version = EngineCore.buildVersion
+    /// 兼容位：**装了 1.10.0 之前那份 updater 的机器**读暂存树时，只认「public let version
+    /// 等于一个带引号的字面量」这一种形状（1.6.2 的 `updater/lib/selfcheck.js` 里那条正则
+    /// 原样如此）。把这一行改成转读 static，那批机器就把每一份新树都判成
+    /// `version-line-broken`：本机实测——`~/.glasspane/update-state.json` 自 2026-10-11 起
+    /// 恒 `check-failed / version-line-broken`，指针还钉在 1.6.2 那份 CLI 上，自动更新这条路
+    /// 对任何已装机器都是死的。
+    ///
+    /// 注意：这一段的注释里**不许**出现被扫描的那两种形状——`check-version`、
+    /// `DaemonVersionFlagTests` 与旧读者都在原文上跑正则，注释里举一次例子就会让闸去断言
+    /// 一句注释（本仓真栽过：源码扫描把注释当代码）。
+    ///
+    /// 两处字面量会漂——所以三件事同时成立：`scripts/set-version.mjs` 是唯一入口（两个位点
+    /// 一起写）、`scripts/check-version.mjs` 两个位点都核、`DaemonVersionFlagTests` 与
+    /// `updater/test/legacy-selfcheck-compat.test.mjs` 断言这两个常量同号。
+    public let version = "1.16.0"
     public let protocolVersion = "0"
     public private(set) var attachedApp: AttachedApp?
     /// Currently active project (P1 spec v1.4 §1.3). Set via attach with projectId.
@@ -616,7 +630,8 @@ public final class EngineCore {
 
     /// The single resolution of "which archive directory does this project
     /// own", or the refusal that says why none may be touched. Shared by
-    /// `pruneEvidence` (engine method) and `glasspaned --prune-evidence` /
+    /// `pruneEvidence` (the embedded Swift API — it has no wire method, see the
+    /// REACHABILITY marker on it) and `glasspaned --prune-evidence` /
     /// `--evidence-stats --project` (A-07/C-06): the half that deletes used to
     /// hand the stored value straight to `EvidenceStore` while `attach` refused
     /// to adopt the same value.
@@ -1650,6 +1665,15 @@ public final class EngineCore {
     }
 
     // MARK: - P1 project registry (spec v1.4 §1)
+    //
+    // 可达性（实测，不是自述）：下面三个 `project*` 响应函数与后面的
+    // `pruneEvidence(_:olderThanDays:)` **没有 socket 路线**——`EngineMethod`
+    // （FrameCodec.swift）的线名表里没有它们，`Dispatcher.dispatch` 里也没有调用
+    // 它们的 case。生产 daemon 上没有任何一帧能走到这里；写 `projects.json` 的是
+    // 另外两方（一次性 `glasspaned` CLI 子命令，以及 mcp-shell 的
+    // `src/project-registry.ts`，它直接用 fs 改那份文件）。这条注释由
+    // `ResponderReachabilityTests` 与 `EngineMethod.allCases` + Dispatcher 源码
+    // 对照，所以"把它说成线可达的"从此必须同时改线表才能过闸。
 
     /// 没有注册表时的统一口径：**报错**，不是回一份空表。
     /// 空列表在 agent 与面板眼里等于"用户没有注册任何项目"，那是一个引擎并没有
@@ -1667,6 +1691,9 @@ public final class EngineCore {
     }
 
     /// List all registered projects.
+    ///
+    /// REACHABILITY: none — no `EngineMethod` case, no `Dispatcher` route (see the
+    /// section comment above; `ResponderReachabilityTests` re-measures it).
     public func projectList() throws -> [String: Any] {
         guard let projectRegistry else {
             // C-03, main-facing contract: with no registry there is nothing to
@@ -1705,6 +1732,9 @@ public final class EngineCore {
     }
 
     /// Register or update a project.
+    ///
+    /// REACHABILITY: none — no `EngineMethod` case, no `Dispatcher` route (see the
+    /// section comment above; `ResponderReachabilityTests` re-measures it).
     public func projectSet(
         projectId: String?,
         displayName: String,
@@ -1714,9 +1744,21 @@ public final class EngineCore {
         calibrationAssetsPath: String?,
         evidenceStoragePath: String?
     ) throws -> [String: Any] {
-        // A-14 on the daemon's own write side: the shell validates paths, but
-        // this method is a second writer of the same file, and a path stored
-        // here is what `attach` and `pruneEvidence` later act on.
+        // A-14's path rules, kept here because this function writes the same three
+        // fields the registry stores — but the reachability sentence that used to
+        // justify it was false, and it is corrected rather than repeated:
+        // **this method is not a writer of `projects.json` on any production
+        // route.** Measured at HEAD: no `EngineMethod` case names it and
+        // `Dispatcher.dispatch` has no call site for it, so no socket frame can
+        // reach it, and the mcp-shell registration path (`gp_project_set`) never
+        // asked it to — `src/project-registry.ts` rewrites the file itself with
+        // `fs.writeFileSync` + `renameSync`. The writers that exist are the
+        // one-shot `glasspaned` CLI and that Node module; this method runs only
+        // for an embedder that calls `EngineCore` directly (and for tests).
+        // What stays true, and what keeps the guard here rather than deleting it:
+        // whoever does reach it must not be able to store a path the archive
+        // resolver later refuses, because `attach` and the maintenance CLI read
+        // the stored value back out and act on it.
         //
         // All three path fields, not just the archive. The MCP shell already
         // checked the other two; the daemon checked one, so a value that the
@@ -1777,6 +1819,9 @@ public final class EngineCore {
     }
 
     /// Get a project by ID.
+    ///
+    /// REACHABILITY: none — no `EngineMethod` case, no `Dispatcher` route (see the
+    /// section comment above; `ResponderReachabilityTests` re-measures it).
     public func projectGet(projectId: String) throws -> [String: Any] {
         guard let entry = try requireRegistry().get(projectId) else {
             throw GPError(code: .notFound, message: "unknown projectId \(projectId)")
@@ -1801,6 +1846,9 @@ public final class EngineCore {
     /// injected into this instance. Returns the number of entries removed; a
     /// missing directory counts 0. Storage-layer primitive — no socket frame,
     /// no method-table change.
+    ///
+    /// REACHABILITY: none — no `EngineMethod` case, no `Dispatcher` route (see the
+    /// section comment above; `ResponderReachabilityTests` re-measures it).
     ///
     /// An instance built with `evidenceStore: nil` has no archive to prune and
     /// refuses (`noStoreArchiveRefusal`) rather than falling back to the shared
@@ -2076,18 +2124,9 @@ public final class EngineCore {
                 let outcome = try act(selector: step.0, action: step.1)
                 // act() throws GP_E_ACT_FAILED on rejection; reaching here
                 // means the step was confirmed.
-                // 选择器里**没给的**字段要缺席，不能写成空串：空串读起来像
-                // "断言它等于空"，而那是一次从未做出的约束（仓里别处也按
-                // absent ≠ empty 区分）。
-                var selectorFields: [String: Any] = ["role": step.0.role]
-                if let title = step.0.title { selectorFields["title"] = title }
-                if let identifier = step.0.identifier { selectorFields["identifier"] = identifier }
-                stepResults.append([
-                    "selector": selectorFields,
-                    "action": step.1.rawValue,
-                    "actConfirmed": true,
-                    "operationId": outcome["operationId"] as? String ?? ""
-                ])
+                stepResults.append(Self.rollForwardStepRow(
+                    selector: step.0, action: step.1, outcome: outcome
+                ))
             } catch {
                 registerRestoreApproval(
                     snapshotId: snapshotId, mode: mode, hasSteps: true,
@@ -2120,6 +2159,34 @@ public final class EngineCore {
     }
 
     // MARK: - P1 snapshot/restore internals
+
+    /// ffwd 重演里**一行步骤**的形状（纯函数，所以它有闸：`DurableStepRowTests`）。
+    ///
+    /// 口径与 `act` 的 `axChanged`/`pixelChanged`（R1-03）和上面选择器字段完全一致：
+    /// 没有测到的值是**缺席**，不是一个像样的替身。这一行从前写的是
+    /// `outcome["operationId"] as? String ?? ""`，所以任何一次形状漂移都会落成一个
+    /// "存在但没有意义"的空 id——而读这行的人（agent）正被指引拿它去问
+    /// `gp_last_evidence`，一次空字符串的查询就这样变成了"有证据"的假象。
+    /// 判据是 `if let`：cast 不成功就不写这个键。
+    static func rollForwardStepRow(
+        selector: Selector, action: Action, outcome: [String: Any]
+    ) -> [String: Any] {
+        // 选择器里**没给的**字段要缺席，不能写成空串：空串读起来像
+        // "断言它等于空"，而那是一次从未做出的约束（仓里别处也按
+        // absent ≠ empty 区分）。
+        var selectorFields: [String: Any] = ["role": selector.role]
+        if let title = selector.title { selectorFields["title"] = title }
+        if let identifier = selector.identifier { selectorFields["identifier"] = identifier }
+        var row: [String: Any] = [
+            "selector": selectorFields,
+            "action": action.rawValue,
+            "actConfirmed": true,
+        ]
+        if let stepOperationId = outcome["operationId"] as? String {
+            row["operationId"] = stepOperationId
+        }
+        return row
+    }
 
     /// P5 §3.5: registers one high-risk approval record for an executed
     /// restore. Best-effort and non-blocking by design.

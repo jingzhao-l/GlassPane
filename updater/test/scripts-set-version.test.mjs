@@ -58,10 +58,12 @@ const SITE_TEMPLATES = {
   'updater/package.json': (v) => `${JSON.stringify({ name: 'glasspane-update', version: v, private: true }, null, 2)}\n`,
   'kernel/package.json': (v) => `${JSON.stringify({ name: '@iterate/kernel', version: v, private: true }, null, 2)}\n`,
   'mcp-shell/src/dispatch.ts': (v) => `export const SERVER_INFO = { name: "glasspane-mcp", version: "${v}" }\n`,
-  // 1.10.0 起这份位点写的是 static，实例属性转读它——夹具要按生产形状来，
-  // 否则这里绿的是一套字面量、发出去的树是另一套。
+  // 1.10.0 起权威位点是 static；1.16.0 起还有一份**旧 updater 读者能解析的实例字面量**
+  // （兼容位，见 CHANGELOG 1.16.0 与 version-sites.mjs 的那条注释）。夹具必须同时带这两行——
+  // 只给一份的测试结果会像 1.16.0 那次一样：三个锁测试红在"位点异常"，而完备性对照因为
+  // 按**文件名**去核，看见这个文件有夹具就放行了。
   'engine/Sources/GlassPaneEngine/EngineCore.swift': (v) =>
-    `public static let buildVersion = "${v}"\n    public let version = EngineCore.buildVersion\n`,
+    `public static let buildVersion = "${v}"\n    public let version = "${v}"\n`,
   'engine/scripts/make-app.sh': (v) => `#!/bin/sh\ncat <<XML\n<key>CFBundleShortVersionString</key>\n        <string>${v}</string>\nXML\n`,
   'install.sh': (v) => `#!/bin/sh\nGLASSPANE_RELEASE="v${v}"\n`,
   'installer/cli.js': (v) => `export const RELEASE_VERSION = '${v}'\n`,
@@ -262,4 +264,14 @@ test('every declared site has a scratch template, so adding one cannot break the
   const declared = new Set(SITES.map((s) => s.file))
   const stale = [...templated].filter((f) => !declared.has(f))
   assert.deepEqual(stale, [], `夹具里有已经不在位点表的文件：${stale.join(', ')}`)
+  // 文件名对上不等于位点对上。1.16.0 那次新增的兼容位点**和被删的位点在同一个文件里**，
+  // 上面两条对照全绿，而三个锁测试红在"位点异常"——因为夹具还写着 1.10.0 的转读写法，
+  // 那条正则在新位点上永远不命中。判据必须是"每一条位点正则能在它自己的夹具里打到东西"。
+  for (const site of SITES) {
+    const template = SITE_TEMPLATES[site.file]
+    const produced = template('9.9.9')
+    const re = new RegExp(site.regex.source, site.regex.flags.replace('g', ''))
+    assert.ok(re.test(produced),
+              `位点 ${site.id} 的正则打不到自己的夹具（${site.file}）：加位点要连夹具一起加`)
+  }
 })
