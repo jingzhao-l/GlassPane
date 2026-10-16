@@ -20,13 +20,18 @@
  *
  * MODES
  *   --record   Recompute from a local upstream checkout and rewrite the golden.
- *              Refuses unless the checkout's version equals the pinned tag.
+ *              Refuses unless the checkout's version equals the pinned tag — and
+ *              refuses outright when the checkout carries no version at all
+ *              (writing `upstreamTag` from a directory whose tag was never read
+ *              launders a wrong-basis measurement into a golden).
  *   --check    (default) Verify the golden against a checkout when one is
  *              present; when it is not, assert the golden's internal
  *              consistency and say loudly that upstream was NOT observed here.
+ *              Same rule as --record: no readable version means exit 2, not "no drift".
  *
  * Exit codes: 0 ok (including the honest offline skip), 1 contract drift,
- * 2 the tool could not do its job (missing config, unreadable checkout).
+ * 2 the tool could not do its job (missing config, unreadable checkout, unreadable
+ *   checkout version).
  */
 import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from "node:fs"
 import path from "node:path"
@@ -200,6 +205,13 @@ function observe(pin, { expectTag = true } = {}) {
   }
   return {
     version,
+    // Named for the caller: `--check`/`--record` must be able to say *which* file it could
+    // not read when the version is absent, instead of quietly carrying on and printing
+    // "checked … against anomalyco/opencode@v1.18.32" for a checkout whose version was
+    // never looked at (the tag it claims to have verified would then be a claim about a
+    // directory nobody read — and `--record` would write that tag into the golden).
+    versionFile,
+    checkout,
     hooks: declared.map((d) => {
       const sites = findFireSites(files, d.name)
       return {
@@ -221,6 +233,26 @@ const pin = readPin()
 const mode = args.has("--record") ? "record" : args.has("--probe") ? "probe" : args.has("--offline") ? "offline" : "check"
 const result = mode === "offline" ? null : observe(pin, { expectTag: mode !== "probe" })
 const observed = result && result.hooks
+
+/**
+ * `--check` prints "checked N hooks against <repo>@<pin.tag>" and `--record` writes
+ * `upstreamTag: pin.tag` into the golden. Both of those sentences are about the tag, and the
+ * tag is only *known* if the checkout's own version was read: the version check used to sit
+ * inside `if (existsSync(versionFile))`, so a checkout that has `packages/plugin/src/index.ts`
+ * but no `packages/opencode/package.json` passed through it unread and the run still asserted
+ * the pin (measured 2026-10-16: `--check` printed "no drift" and `--record` would have stamped
+ * `upstreamTag` from that directory). That laundering turns a wrong-basis measurement into a
+ * golden, so an unread version is exit 2 — "cannot ask", not "no drift". `--probe` already
+ * answers honestly (`v… `unknown``, exit unchanged) and `--offline` never reads upstream.
+ * The tag-MISMATCH refusal above is untouched: this only adds the case where there was no
+ * tag to compare at all.
+ */
+if ((mode === "check" || mode === "record") && result && !result.version) {
+  fail(
+    2,
+    `--${mode} cannot assert a tag it did not read: the checkout at ${result.checkout} has no ${path.relative(result.checkout, result.versionFile)}, so its version is unknown while ${pin.repo}@${pin.tag} is what this run would claim to have checked. Point HARNESS_UPSTREAM_CHECKOUT (or upstream.json.checkout) at the pinned checkout, or run --offline (does not read upstream) / --probe (reports the version as "unknown" instead of asserting it).`,
+  )
+}
 
 if (!existsSync(GOLDEN_FILE) && mode !== "record") {
   fail(2, `no golden at ${path.relative(repoRoot, GOLDEN_FILE)} — run --record`)

@@ -464,7 +464,7 @@ GlassPane/
 ├── scripts/            set-version / check-version — the single version line
 ├── specs/              implementation specs + acceptance records (PRD, P0–P6, audits)
 ├── ITERATE.md          this repo's own iterate onboarding knowledge base
-└── .github/workflows/  ci.yml (9 lanes; the publish-shape guard is a step in one of them), release.yml
+└── .github/workflows/  ci.yml (10 lanes; the publish-shape guard is a step in one of them), release.yml
 ```
 
 ## Development

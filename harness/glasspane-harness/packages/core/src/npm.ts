@@ -14,6 +14,7 @@ import { filesystem } from "./effect/app-node-platform"
 import { LayerNode } from "./effect/layer-node"
 import { makeRuntime } from "./effect/runtime"
 import { NpmConfig } from "./npm-config"
+import { NpmRegistry } from "./installation/version"
 
 export class InstallFailedError extends Schema.TaggedErrorClass<InstallFailedError>()("NpmInstallFailedError", {
   add: Schema.Array(Schema.String).pipe(Schema.optional),
@@ -91,8 +92,12 @@ const layer = Layer.effect(
         const { Arborist } = yield* Effect.promise(() => import("@npmcli/arborist"))
         const add = input.add ?? []
         const npmOptions = yield* NpmConfig.load(input.dir)
+        // [gp] Product: the registry is pinned, last, over whatever this project's own
+        // `.npmrc` / `npm_config_registry` resolved — the bytes written into the user's
+        // project (and later imported by their plugins) must not be chosen by the project.
+        const pinned = { ...npmOptions, registry: NpmRegistry }
         const arborist = new Arborist({
-          ...npmOptions,
+          ...pinned,
           path: input.dir,
           binLinks: true,
           progress: false,
@@ -102,7 +107,7 @@ const layer = Layer.effect(
         return yield* Effect.tryPromise({
           try: () =>
             arborist.reify({
-              ...npmOptions,
+              ...pinned,
               add,
               save: true,
               saveType: "prod",

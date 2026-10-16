@@ -70,6 +70,11 @@ chmod 755 "$ASSET_DIR/glasspane-harness"
 FIXTURE_HASH="$(cd "$FIX" && shasum -a 256 glasspane-harness-darwin-arm64.zip | awk '{print $1}')"
 printf '%s  ./%s\n' "$FIXTURE_HASH" "glasspane-harness-darwin-arm64.zip" > "$FIX/SHA256SUMS.txt"
 printf 'not a real signature\n' > "$FIX/glasspane-harness-darwin-arm64.zip.asc"
+# The refusals in install.sh print the URL of the script itself as the command to re-run. For
+# the "the printed remedy actually works" cases the stub curl has to be able to answer that
+# basename, so the fixture release carries a copy of the script under test — the same bytes the
+# assertions below grep, served the same way every other asset is served here.
+cp "$INSTALL_SH" "$FIX/install.sh"
 
 # ---------------------------------------------------------------- stubs
 # curl answers from $FIX by basename, and it answers *the way the real endpoint does for
@@ -237,8 +242,8 @@ STUBGPG
 chmod +x "$STUB/gpg"
 
 export FIX_DIR="$FIX"
-run_install() {
-  # $1 = log file, rest = argv for install.sh.
+installer_env() {
+  # $1 = log file, rest = the command to run inside the stubbed installer environment.
   # RUN_PATH overrides the search path: "gpg is not installed" can only be tested by
   # hiding every gpg on the machine, and this box has one outside the stub directory.
   local log="$1"; shift
@@ -255,8 +260,19 @@ run_install() {
     mkdir -p "$TMPDIR"
     export GLASSPANE_HARNESS_HOME="$SCRATCH/root-$(basename "$log")"
     export GLASSPANE_HARNESS_RELEASES="https://stub.invalid/releases/download"
-    bash "$INSTALL_SH" "$@"
+    "$@"
   ) >"$log" 2>&1
+}
+run_install() {
+  # $1 = log file, rest = argv for install.sh.
+  local log="$1"; shift
+  installer_env "$log" bash "$INSTALL_SH" "$@"
+}
+run_printed() {
+  # $1 = log file, $2 = a command line captured from the installer's OWN output.
+  # The remedy assertions run what was printed rather than a hand-written look-alike, so a
+  # refusal whose advice cannot execute fails here instead of on a user's machine.
+  installer_env "$1" bash -c "$2"
 }
 
 # ---------------------------------------------------------------- 1: argv forms
@@ -347,12 +363,50 @@ SCENARIO_GPG=good
 # ---------------------------------------------------------------- 7: no gpg binary
 # The stub gpg is removed *and* the search path is narrowed to /bin:/usr/bin so a real
 # gpg installed elsewhere on this machine cannot answer for it.
+#
+# This scenario asserted the opposite until 2026-10-16: it celebrated `exit 0` and the state
+# string "skipped (gpg not on PATH)". Stock macOS ships no GnuPG, so that skip was the default
+# on every fresh machine, and the only check left standing was SHA256SUMS.txt — fetched from
+# the same origin as the asset it lists. A fixture that endorses the skip is a false control,
+# so the expectation is now the refusal, plus the override path it tells users to run.
 mv "$STUB/gpg" "$SCRATCH/gpg.hold"
+# The status is captured on the line that produced it. `RUN_PATH=""` in between used to clobber
+# `$?`, so the old `assert_code "the install completes with gpg absent" "$?" "0"` was judging the
+# assignment, not the installer — an exit-code assertion that could not go red at all.
 RUN_PATH="$STUB:/usr/bin:/bin:/usr/sbin:/sbin" run_install "$SCRATCH/no-gpg.log" --version 9.9.9
+NO_GPG_RC=$?
 RUN_PATH=""
-assert_code "the install completes with gpg absent" "$?" "0"
-assert_has "and says provenance was skipped for that reason" "$SCRATCH/no-gpg.log" "GPG: skipped (gpg not on PATH)"
-assert_not_has "no-gpg does not claim GPG verified" "$SCRATCH/no-gpg.log" "GPG: verified"
+assert_code "gpg absent refuses the install instead of skipping provenance" "$NO_GPG_RC" "1"
+assert_has "it says provenance cannot be established" "$SCRATCH/no-gpg.log" "provenance cannot be established"
+assert_has "it names the concrete install that fixes it" "$SCRATCH/no-gpg.log" "brew install gnupg"
+assert_has "and it names the override that waives it" "$SCRATCH/no-gpg.log" "GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1"
+assert_not_has "no-gpg no longer prints the old skip-and-continue state" "$SCRATCH/no-gpg.log" "skipped (gpg not on PATH)"
+assert_not_has "no-gpg installs nothing" "$SCRATCH/no-gpg.log" "[OK]    installed via"
+# The override still has to be reachable, and reachable the way the printed advice says: set
+# for the shell that reads the script. `GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl … | bash`
+# binds to curl only, which is why this line is the *observed* command, not a hand-written one.
+REMEDY_NOGPG="$(sed -n 's/^[[:space:]]*\(curl -fsSL [^|]* | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash.*\)$/\1/p' "$SCRATCH/no-gpg.log" | head -1)"
+if [ -n "$REMEDY_NOGPG" ]; then
+  pass "the no-gpg refusal prints one copy-pasteable remedy command"
+else
+  fail "the no-gpg refusal printed no 'curl … | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash' command"
+fi
+assert_not_has "the printed remedy is not the shape that binds the override to curl" "$SCRATCH/no-gpg.log" "GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl"
+assert_has "the printed remedy puts the override on the shell that reads the script" "$SCRATCH/no-gpg.log" "| GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash"
+if [ -n "$REMEDY_NOGPG" ]; then
+  RUN_PATH="$STUB:/usr/bin:/bin:/usr/sbin:/sbin" run_printed "$SCRATCH/no-gpg-remedy.log" "$REMEDY_NOGPG"
+  REMEDY_RC=$?
+  RUN_PATH=""
+  assert_code "running the printed remedy does install (the override reaches bash, not curl)" "$REMEDY_RC" "0"
+  assert_has "and it records the override as the reason provenance was skipped" "$SCRATCH/no-gpg-remedy.log" "GPG: skipped by GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 (gpg is not installed)"
+  assert_has "and it still says the bytes were not fully verified" "$SCRATCH/no-gpg-remedy.log" "not fully verified"
+  assert_not_has "the override path never claims GPG was verified" "$SCRATCH/no-gpg-remedy.log" "GPG: verified"
+fi
+SCENARIO_ALLOW_UNVERIFIED=1 RUN_PATH="$STUB:/usr/bin:/bin:/usr/sbin:/sbin" run_install "$SCRATCH/no-gpg-optout.log" --version 9.9.9
+OPTOUT_RC=$?
+RUN_PATH=""
+assert_code "the same machine with the override installs" "$OPTOUT_RC" "0"
+assert_has "with the same state string the printed remedy produced" "$SCRATCH/no-gpg-optout.log" "GPG: skipped by GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 (gpg is not installed)"
 mv "$SCRATCH/gpg.hold" "$STUB/gpg"
 
 # ---------------------------------------------------------------- 8: nothing was published
@@ -531,6 +585,29 @@ assert_not_has "and nothing is installed" "$SCRATCH/sums-unlisted.log" "[OK]    
 cp "$SCRATCH/sums.real" "$FIX/SHA256SUMS.txt"
 run_install "$SCRATCH/after-unlisted.log" --version 9.9.9
 assert_code "the same run is green again once the real manifest is back" "$?" "0"
+
+# ---------------------------------------------------------------- 20: every printed remedy runs
+# The three refusal sites (no gpg, no manifest, no signature sidecar) all pointed the user at
+#   GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl -fsSL <install.sh> | bash
+# which cannot work: a leading assignment binds to `curl` alone, the piped `bash` never sees the
+# variable, and the person following the advice verbatim is refused again by the same line. The
+# no-gpg site is covered in section 7; this covers the manifest site's own printed output, and
+# executes it, so the advice is judged as an observed command rather than as prose.
+assert_not_has "the no-manifest refusal does not bind the override to curl" "$SCRATCH/no-sums.log" "GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl"
+assert_has "the no-manifest refusal carries the override on bash" "$SCRATCH/no-sums.log" "| GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash"
+REMEDY_NOSUMS="$(sed -n 's/^[[:space:]]*\(curl -fsSL [^|]* | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash.*\)$/\1/p' "$SCRATCH/no-sums.log" | head -1)"
+if [ -n "$REMEDY_NOSUMS" ]; then
+  pass "the no-manifest refusal prints one copy-pasteable remedy command"
+  mv "$FIX/SHA256SUMS.txt" "$SCRATCH/sums.remedy-hold"
+  run_printed "$SCRATCH/no-sums-remedy.log" "$REMEDY_NOSUMS"
+  assert_code "the printed no-manifest remedy installs when it is run as printed" "$?" "0"
+  assert_has "and the override is named as the reason the checksum was skipped" "$SCRATCH/no-sums-remedy.log" "sha256: skipped by GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1"
+  assert_has "and the run still says the bytes were not fully verified" "$SCRATCH/no-sums-remedy.log" "not fully verified"
+  assert_not_has "the printed remedy never produced a skip that reads as a verification" "$SCRATCH/no-sums-remedy.log" "sha256: verified"
+  mv "$SCRATCH/sums.remedy-hold" "$FIX/SHA256SUMS.txt"
+else
+  fail "the no-manifest refusal printed no 'curl … | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash' command"
+fi
 
 echo ""
 if [ "$FAILURES" -gt 0 ]; then

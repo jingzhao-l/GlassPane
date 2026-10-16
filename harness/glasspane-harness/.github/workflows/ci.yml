@@ -29,7 +29,11 @@ jobs:
     name: install, typecheck, fixed points
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Every `actions/*` ref in this subtree's workflows is pinned to a 40-hex SHA, and
+      # `scripts/check-workflows.mjs` now enforces pins for this root too (it used to exempt the
+      # fork subtree). The split repository is the thing that actually publishes, so a retagged
+      # `@v4` here is attacker code in the release chain, not just in a read-only lane.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: ./.github/actions/setup-bun
 
@@ -146,7 +150,7 @@ jobs:
     name: install.sh fallback channel (offline, stubbed)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Installer selftest (80 named checks against stubbed curl/npm/gpg)
         run: bash packages/opencode/script/installer-selftest.sh

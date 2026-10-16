@@ -405,7 +405,7 @@ GlassPane/
 ├── scripts/            set-version / check-version —— 单一版本线
 ├── specs/              实施规格与验收记录（PRD、P0–P6、审查记录）
 ├── ITERATE.md          本仓自己的 iterate onboarding 知识库
-└── .github/workflows/  ci.yml（9 条 lane；发布形态守卫是其中一条里的一个步骤）、release.yml
+└── .github/workflows/  ci.yml（10 条 lane；发布形态守卫是其中一条里的一个步骤）、release.yml
 ```
 
 ## 开发

@@ -13,6 +13,8 @@
 # 会蒙混过关，本测试当场变红。
 #
 # 用法：sh harness/tools/verify-published-selftest.sh    （在仓库根或任何地方跑都行）
+# 退出码：0 三条分支各给出自己的答案；1 某条分支答错了；2 跑不了（bun/node 不在 PATH 或闸脚本
+# 不在树里）——"测不了"以前也是 0，那与"通过"共用一个退出码，正是本仓反复要抓的形状。
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -23,12 +25,17 @@ PRODUCT="$ROOT/harness/glasspane-harness/product.json"
 fails=0
 say() { printf '%-8s %s\n' "$1" "$2"; }
 
-command -v bun >/dev/null 2>&1 || { say SKIP "bun is not on PATH — the release gate was NOT exercised"; exit 0; }
+# 缺工具不等于闸红，也不等于闸过了：这两行以前 `say SKIP` 之后 `exit 0`，于是"这台机器上什么都没
+# 测"和"发布闸的三条分支都验过了"共用一个退出码。本仓的分码语义是 0 通过 / 1 判决不成立 / 2 测不了
+# （verify-published.ts 的 NOT OBSERVED、hook-liveness 缺参照检出都是 2），这里照办：不能跑就是 2，
+# 并且把没跑的东西点名说出来。CI 的 harness-rulers job 在上面刚装过钉死的 bun、也给过 setup-node，
+# 所以在那里退 2 就是缺陷，不是豁免。
+command -v bun >/dev/null 2>&1 || { say FAIL "bun is not on PATH — the release gate was NOT exercised (exit 2: cannot measure is not a pass)"; exit 2; }
 # The gate reads product.json through node, and the fake command the gate is pointed at is a
 # node script. A missing node used to surface three lines later as `NAME: unbound variable`,
 # which reads like a broken test rather than the environment it is.
-command -v node >/dev/null 2>&1 || { say SKIP "node is not on PATH — the release gate was NOT exercised"; exit 0; }
-[ -f "$GATE" ] || { say FAIL "gate script not found at $GATE"; exit 1; }
+command -v node >/dev/null 2>&1 || { say FAIL "node is not on PATH — the release gate was NOT exercised (exit 2: cannot measure is not a pass)"; exit 2; }
+[ -f "$GATE" ] || { say FAIL "gate script not found at $GATE"; exit 2; }
 
 eval "$(node -e '
 const p = require(process.argv[1])

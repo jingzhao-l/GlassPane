@@ -150,10 +150,20 @@ jobs:
           sh harness/tools/probe-lane-selftest.sh
 
   # The shared kernel lives in another repository, pinned by ref. Asking "has it moved,
-  # and is our anchor still reachable?" on the same weekly schedule as the upstream probe
-  # is what keeps "one kernel, N consumers" a fact rather than a hope. It fails when the
-  # anchor is unreachable, because that breaks the provenance chain — not when the
-  # vendored bytes change (the normal lane already proves they did not).
+  # and can we still ask the question?" on the same weekly schedule as the upstream probe
+  # is what keeps "one kernel, N consumers" a fact rather than a hope.
+  #
+  # The contract this job enforces is `kernel-pin.mjs --probe`'s exit code, and the two halves
+  # mean different things. exit 0 = it MEASURED, and a measurement may say DRIFT: drift stays
+  # green by design, because the vendored bytes are still exactly what the manifest declares
+  # (`--check` proves that in the normal lane) and taking the kernel's move is a human decision,
+  # not a red build. exit != 0 = it COULD NOT ASK (registry unreachable, the package answered
+  # nothing, the script threw), and that is red: an unanswered question may not be filed as
+  # "no drift", which is the same shape as the upstream probe lane's defect further up this file.
+  # It used to be that `--probe` exited 0 for "could not ask" while this comment claimed the job
+  # "fails when the anchor is unreachable" — the claim was the intent, and the code below is what
+  # makes it the behaviour too. The answer itself now has a reader: it goes into the run summary,
+  # because a weekly probe whose output nobody opens is indistinguishable from one that never ran.
   kernel-drift:
     name: kernel drift probe
     runs-on: ubuntu-latest
@@ -163,4 +173,34 @@ jobs:
         with:
           node-version: "22"
       - name: "canonical kernel: moved? anchor still reachable?"
-        run: node harness/glasspane-harness/script/kernel-pin.mjs --probe
+        run: |
+          set -euo pipefail
+          rc=0
+          out="$(node harness/glasspane-harness/script/kernel-pin.mjs --probe 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          {
+            echo "### 内核探查（exit $rc）"
+            echo '```'
+            printf '%s\n' "$out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=内核漂移没有被测量（这不等于没有漂移）::--probe 以 exit $rc 拒绝回答：注册表问不到，或它答不出。这条 lane 唯一的职责就是回答共享内核有没有换版本，测不了必须红。检查 npm 是否能访问 registry（npm view iterate-kernel version），修好后重跑这一条 lane。"
+            {
+              echo ""
+              echo "**未观测**：探查没有测量到任何东西（exit $rc）。这不构成「内核没漂移」。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          # Drift is a finding for a human, not a CI red: `--check` in the normal lane already
+          # proves the bytes we ship are the bytes the manifest declares, so a moved upstream
+          # version is a decision to take, and deciding it is the kernel's owner's call. The order
+          # to take it is in the probe's own answer (bump the dependency line, install, re-record
+          # the manifest in the fork root, re-run the conformance fixtures). Matching with `case`
+          # rather than a piped `grep -q` because pipefail + an early-exiting grep turns a hit into
+          # a SIGPIPE status — the same trap this repository already documented for `npm pack`.
+          case "$out" in
+            *"DRIFTED"*)
+              echo "::notice title=共享内核换了版本（红不是这一条的判决）::--probe 测到了漂移，答案已写进 run summary。"
+              ;;
+          esac

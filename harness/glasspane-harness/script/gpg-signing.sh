@@ -38,7 +38,8 @@
 #   gpg-signing.sh install [repo...]    # push both secrets to the targets
 #   gpg-signing.sh verify [repo...]     # report what is in place and what is not
 #   gpg-signing.sh local [dir...]       # set commit/tag gpgsign in checkouts
-#   gpg-signing.sh audit                 # find silent-skip signing in workflows
+#   gpg-signing.sh audit                 # find silent-skip signing; refuses to certify a
+#                                        # target it could not read (exit 1 on partial read)
 #   gpg-signing.sh selftest              # prove the guards trip when they should
 set -euo pipefail
 
@@ -316,20 +317,74 @@ cmd_local() {
 # ── audit ────────────────────────────────────────────────────────────────────
 # The failure that started this: `if: secrets.GPG_PRIVATE_KEY != ''` turns an
 # unsigned release into a release that looks successful.
+#
+# An audit that read nothing must not report clean health. With `gh api … 2>/dev/null |
+# base64 -d 2>/dev/null || true` and `[ -n "$body" ] || continue`, an unauthenticated or expired
+# `gh`, a renamed repository, or a workflow that moved out of .github/workflows made EVERY body
+# empty, every target `continue`-d past, and the command printed
+#
+#   ok no silent-skip signing found
+#
+# — the exact shape it exists to detect, certified as absent. `secret_names` (see `verify`)
+# already keeps "the list is empty" apart from "the list could not be read"; the audit now keeps
+# the same three answers apart per (repo, workflow): READ, ABSENT (the endpoint answered 404 for
+# a repository it did resolve), UNVERIFIABLE (we could not ask, or cannot tell whether the file
+# moved with the repo). The ok line requires every target to have been answered, and the command
+# exits non-zero when it has not — or when a live silent-skip was found, because a reported
+# finding that exits 0 is the same silent-green shape one level up.
+workflow_answer() {  # $1 = repo, $2 = workflow file; prints the decoded body for the READ answer
+  local repo="$1" wf="$2" raw err rc body
+  err="$(mktemp)"
+  # The status comes from `gh`, not from the pipeline: piping straight into `base64 -d` makes
+  # the exit code base64's, which is 0 for an empty stream — that is what erased the difference
+  # between "no answer" and "an empty answer".
+  if raw="$(gh api "repos/jingzhao-l/$repo/contents/.github/workflows/$wf" --jq '.content' 2>"$err")"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    # 404 alone is ambiguous: GitHub answers 404 for a missing file AND for a repository that
+    # is renamed, private-to-this-token, or gone. Resolve the repository before calling an
+    # absent file "absent"; anything else is UNVERIFIABLE.
+    if grep -q 'HTTP 404' "$err" && gh api "repos/jingzhao-l/$repo" --jq '.full_name' >/dev/null 2>&1; then
+      rm -f "$err"
+      return 1
+    fi
+    rm -f "$err"
+    return 2
+  fi
+  body="$(printf '%s' "$raw" | base64 -d 2>/dev/null || true)"
+  rm -f "$err"
+  # An answered call that carried no content is not a workflow we audited.
+  [ -n "$body" ] || return 2
+  printf '%s\n' "$body"
+  return 0
+}
+
 cmd_audit() {
   need gh
   printf '\n== silent-skip signing in release workflows ==\n'
-  local repo dir env any=0 wf
+  local repo dir env any=0 unreadable=0 wf body rc live
   while IFS='|' read -r repo dir env; do
     for wf in release.yml publish.yml; do
-      local body
-      body="$(gh api "repos/jingzhao-l/$repo/contents/.github/workflows/$wf" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true)"
-      [ -n "$body" ] || continue
+      if body="$(workflow_answer "$repo" "$wf")"; then rc=0; else rc=$?; fi
+      case "$rc" in
+        0) : ;;
+        1)
+          printf '  absent %s/%s — the endpoint answered 404 for a repository it did resolve\n' "$repo" "$wf"
+          continue
+          ;;
+        *)
+          printf '  UNVERIFIABLE %s/%s — gh could not read it (auth, transport, or the path moved)\n' "$repo" "$wf"
+          unreadable=$((unreadable + 1))
+          continue
+          ;;
+      esac
       # Strip comment lines first. A workflow that documents *why* it removed
       # the silent-skip still contains the string, and reporting that as a live
       # skip trains people to ignore this command — the same mistake a linter
       # makes when it greps its own explanation.
-      local live
       live="$(printf '%s\n' "$body" | grep -vE '^[[:space:]]*#' || true)"
       if printf '%s' "$live" | grep -qE 'if: *\$\{\{ *secrets\.GPG_PRIVATE_KEY'; then
         printf '  %s/%s\n' "$repo" "$wf"
@@ -338,7 +393,16 @@ cmd_audit() {
       fi
     done
   done < <(targets_filtered)
-  [ "$any" -eq 1 ] || ok "no silent-skip signing found"
+  if [ "$unreadable" -gt 0 ]; then
+    say "audit: $unreadable target(s) could not be read — silent-skip signing is NOT excluded for them"
+    say "fix the credential (gh auth status) or the target list, then re-run. This is not a pass."
+    exit 1
+  fi
+  if [ "$any" -eq 1 ]; then
+    say "audit: a live silent-skip signing step was found above — the release ships unsigned when the secret is missing"
+    exit 1
+  fi
+  ok "no silent-skip signing found (every target was read or answered as absent)"
   cat <<'NOTE'
 
   Each line above means: when the secret is missing, the whole signing step
@@ -424,6 +488,98 @@ cmd_selftest() {
     ok "an environment with an empty-but-readable list stays distinguishable from an unreadable one"
   else bad "empty list was read as failure"; fails=1; fi
   rm -rf "$stubdir"
+
+  # cmd_audit must keep three answers apart: READ, ABSENT, UNVERIFIABLE. The defect this pins is
+  # `gh api … 2>/dev/null | base64 -d 2>/dev/null || true` followed by `[ -n "$body" ] ||
+  # continue`: with expired credentials, a renamed repo, or a moved workflow every body came back
+  # empty, every target was skipped, and the audit printed `ok no silent-skip signing found` —
+  # certifying the absence of the exact shape it exists to detect. Stub `gh` answers by endpoint,
+  # so each scenario drives the real read accounting.
+  local adir alog arc audit_status
+  adir="$(mktemp -d)"; alog="$(mktemp)"; arc="$(mktemp)"
+  run_audit() {  # $1 = directory holding the stub gh; output lands in $alog, status in $arc
+    # The inner `( … )` is what absorbs cmd_audit's own `exit 1` — run bare in the subshell
+    # below, that `exit` also skips the line that records the status, and the scenario then
+    # reads as "the selftest died" instead of "the audit refused".
+    ( set +e
+      ( PATH="$1:$PATH" cmd_audit >"$alog" 2>&1 )
+      printf '%s\n' "$?" > "$arc" )
+    audit_status="$(cat "$arc")"
+    return 0
+  }
+  printf 'name: release\njobs:\n  sign:\n    run: |\n      if [ -z "${GPG_INPUT_KEY:-}" ]; then echo no key; exit 1; fi\n' > "$adir/clean.yml"
+  printf "name: release\njobs:\n  sign:\n    if: \${{ secrets.GPG_PRIVATE_KEY != '' }}\n    run: echo signing\n" > "$adir/skip.yml"
+
+  cat > "$adir/gh" <<'STUBAUDITAUTH'
+#!/bin/sh
+# Expired or absent credential: every endpoint answers with a status that is not 404.
+printf 'gh: Bad credentials (HTTP 401)\n' >&2
+exit 1
+STUBAUDITAUTH
+  chmod +x "$adir/gh"
+  run_audit "$adir"
+  if [ "$audit_status" != "0" ]; then
+    ok "audit exits non-zero when no workflow body could be read (exit $audit_status)"
+  else bad "audit exited 0 on an unreadable GitHub API — a clean bill of health it did not earn"; fails=1; fi
+  if grep -q 'UNVERIFIABLE' "$alog"; then ok "audit names the targets it could not read (UNVERIFIABLE)";
+  else bad "audit printed no UNVERIFIABLE line for unreadable targets"; fails=1; fi
+  if grep -q 'no silent-skip signing found' "$alog"; then
+    bad "audit printed the ok line after reading nothing"; fails=1
+  else ok "audit withholds the ok line unless every target was answered"; fi
+
+  cat > "$adir/gh" <<'STUBAUDITREPO'
+#!/bin/sh
+# A renamed or inaccessible repository: 404 for the workflow AND for the repo itself, so 404
+# cannot be read as "this file is just not here".
+printf 'gh: Not Found (HTTP 404)\n' >&2
+exit 1
+STUBAUDITREPO
+  run_audit "$adir"
+  if [ "$audit_status" != "0" ] && grep -q 'UNVERIFIABLE' "$alog"; then
+    ok "a 404 on an unresolvable repository is UNVERIFIABLE, not absent"
+  else bad "an unresolvable repository was certified as a clean read (exit $audit_status)"; fails=1; fi
+
+  cat > "$adir/gh" <<'STUBAUDITBODY'
+#!/bin/sh
+# The contents endpoint serves whatever $GP_AUDIT_BODY names; the repository probe resolves.
+case "$*" in
+  *contents/*) base64 < "$GP_AUDIT_BODY" ;;
+  repos/jingzhao-l/*) printf 'jingzhao-l/stub-repo\n' ;;
+esac
+exit 0
+STUBAUDITBODY
+  export GP_AUDIT_BODY="$adir/clean.yml"
+  run_audit "$adir"
+  if [ "$audit_status" = "0" ] && grep -q 'no silent-skip signing found' "$alog"; then
+    ok "a fully read target set with nothing to report does print the ok line"
+  else bad "a clean read was not certified as clean (exit $audit_status)"; fails=1; fi
+  export GP_AUDIT_BODY="$adir/skip.yml"
+  run_audit "$adir"
+  if [ "$audit_status" != "0" ] && grep -q 'no silent-skip signing found' "$alog"; then
+    bad "audit found a silent skip and still exited 0 — a red finding with a green exit code"; fails=1
+  elif [ "$audit_status" != "0" ]; then ok "a live silent-skip is reported AND exits non-zero"
+  else bad "a live silent-skip did not fail the audit (exit $audit_status)"; fails=1; fi
+  unset GP_AUDIT_BODY
+
+  cat > "$adir/gh" <<'STUBAUDITABSENT'
+#!/bin/sh
+# The real shape of `publish.yml`: 404 for the file, 200 for the repository. That is an answer,
+# not a missing read — treating it as UNVERIFIABLE would make the audit permanently red and teach
+# everyone to ignore it.
+case "$*" in
+  *contents/*) printf 'gh: Not Found (HTTP 404)\n' >&2; exit 1 ;;
+  repos/jingzhao-l/*) printf 'jingzhao-l/stub-repo\n' ;;
+esac
+exit 0
+STUBAUDITABSENT
+  run_audit "$adir"
+  if grep -q 'absent' "$alog" && ! grep -q 'UNVERIFIABLE' "$alog"; then
+    ok "a workflow the reachable repository does not carry is reported as absent"
+  else bad "an answered-404 workflow was not reported as absent"; fails=1; fi
+  if [ "$audit_status" != "0" ]; then
+    bad "a repository that answered every question still failed the audit (exit $audit_status)"; fails=1
+  else ok "every target answered (read or absent) is what the ok line is allowed to mean"; fi
+  rm -rf "$adir" && rm -f "$alog" "$arc"
 
   # No secret may reach argv — audited against this file's own live lines, comments
   # excluded (the same rule cmd_audit applies to other people's workflows, turned on the

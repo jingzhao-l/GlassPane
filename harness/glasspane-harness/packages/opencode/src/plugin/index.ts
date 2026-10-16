@@ -189,7 +189,13 @@ const layer = Layer.effect(
         }
 
         const plugins = flags.pure ? [] : (cfg.plugin_origins ?? [])
+        // [gp] Product: pure mode throws away every plugin the config declared, and this branch
+        // existed to say so while containing nothing — a user who exported the product's own
+        // PURE name got a plugin-less session and no line saying why.
         if (flags.pure && cfg.plugin_origins?.length) {
+          yield* Effect.logInfo("skipped configured external plugins in pure mode", {
+            origins: cfg.plugin_origins.length,
+          })
         }
         if (plugins.length) yield* config.waitForDependencies()
 

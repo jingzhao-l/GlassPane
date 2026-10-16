@@ -8,9 +8,10 @@ on:
 
 # 最小权限（与 release.yml、harness-contract.yml 同一口径）：这里不声明，每个 PR 触发的
 # job 就继承仓库默认权限（组织级常为 write）。逐 job 核过：swift / bridge / kernel /
-# mcp-shell / install-gate / docs / version-line / harness-rulers / workflow-lint 这 9 个
-# job 用到的 action 只有 checkout 与 setup-python/setup-node，全文没有 upload-artifact、
-# 没有 GITHUB_TOKEN、没有 `gh pr|api|release`、没有 git push/tag、没有评论或 release 写入。
+# mcp-shell / install-gate / docs / version-line / harness-rulers / publish-gate-selftest /
+# workflow-lint 这 10 个 job 用到的 action 只有 checkout、setup-python/setup-node 与那条钉死
+# SHA 的 setup-bun，全文没有 upload-artifact、没有 GITHUB_TOKEN、没有 `gh pr|api|release`、
+# 没有 git push/tag、没有评论或 release 写入。
 # harness-rulers 里的 `git clone` 拉的是公开的上游参照仓，匿名即可完成，不需要 token；
 # 其余步骤只读工作树、跑本地脚本。所以顶层一条 `contents: read` 覆盖全部 job。
 permissions:
@@ -326,6 +327,105 @@ jobs:
       - name: Kernel behaviour answers as recorded (fixtures through the installed kernel)
         working-directory: harness/glasspane-harness
         run: bun script/kernel-conformance.mjs
+
+      # 下面两把尺子的**自测**：写好了却没有任何 lane 跑过它们（grep 全仓：既不在 workflow 里，
+      # 也不在 package.json 的脚本里，第三把住在下面那条 macOS job）。这正是本条 lane 开篇记的那次
+      # 事故的同一种形状——尺子在树里、判据没人执行，于是"有测试"这件事本身成了假绿。两步都跑在
+      # 参照检出与 bun 安装**之后**：这条 job 到这一步已经测量得了，所以它们若回答"测不了"，那条
+      # 回答在这就是缺陷，不是豁免。两条自测现在都对"测不了"回 exit 2（2026-10-16 落地的分码：
+      # 0 通过 / 1 判决不成立 / 2 测不了），退出码那一道闸就把它判红；正文那道 `case` 是第二张网，
+      # 防的是有人把它改回"静默 exit 0"。
+      - name: "The batch reader answers with git show's bytes (ref-batch selftest)"
+        run: |
+          set -euo pipefail
+          rc=0
+          out="$(node harness/tools/ref-batch-selftest.mjs 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::ref-batch 的固定点测试以 exit $rc 失败（上面点名的是哪条断言）。remedy：面 B 的读数就是从它验的批量读来的——先修 harness/tools/ref-batch.mjs，别放宽测试的期望；contracts/tool-surface.json 要在修好之后重录。"
+            exit 1
+          fi
+          # 匹配用 case 不用 `printf | grep -q`：这个 shell 开了 pipefail，而 grep -q 命中就走，
+          # printf 随后死在 SIGPIPE 上，管道的退出码就成了 141 —— 一道会把自己判成"没跳过"的跳过闸，
+          # 与 release.yml 里 `npm pack --silent | tail -1` 那次记的是同一个坑。
+          case "$out" in
+            *"NOT self-tested"*|*"not exercised"*)
+              echo "::error::ref-batch selftest 以 exit 0 回答了「没测量」。这条 job 在上面已经取到参照检出（.external/opencode），所以此刻没有任何东西阻止它测量——闸没合上就是红的。remedy：查上面那步 clone 是否成功、harness/upstream.json 的 fork.referenceClone 是否还指对。"
+              exit 1 ;;
+          esac
+          echo "ref-batch selftest 已测量：批量读与 git show 逐字节一致"
+
+      - name: "The kernel provenance gate can still go red (kernel-pin selftest)"
+        run: |
+          set -euo pipefail
+          rc=0
+          out="$(node harness/tools/kernel-pin-selftest.mjs 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::kernel-pin 的自测以 exit $rc 失败。这个文件证明的是**每条红都点名真正的分歧侧**——上面那条 FAIL 说哪条判决退化成了通用文本或干脆不红。remedy：按它点名的那条修 harness/glasspane-harness/script/kernel-pin.mjs 的判决分支；这条闸的红必须能对上号，否则一次误诊就会把金样重录到错的产物上。"
+            exit 1
+          fi
+          # 这个自测没有「测不了」分支：它只造临时产物根、跑真脚本，要么给出判决要么非 0 退出，
+          # 所以上面那条退出码就是全部的闸。别的 lane 若给它加上 exit 2，这里同样是红——退出码
+          # 非 0 已经把它接住了，不需要猜它会打印什么。
+          echo "kernel-pin selftest 已测量：每条红都因为它点名的那个原因红"
+
+  # 第三把没人跑的自测不能住在上面那条 job 里：`verify-published-selftest.sh` 跑的是真正的发布闸
+  # (`packages/opencode/script/verify-published.ts`)，而那把闸在非 macOS 主机上当场 exit 2
+  # "host is linux; this product is macOS-only and NOTHING was verified"。把它塞进 ubuntu 的
+  # harness-rulers，得到的只能是"因主机选错而红"——和它要防的"因产物坏而红"完全是两回事，红久了
+  # 就没人看。而 `if: runner.os == 'macOS'` 那种写法等于没跑（本仓明令禁止，见 fork 的 ci.yml 里
+  # installer-selftest 的同一处理）。所以它自成一条 macOS job：在这张机器上它是**测量**，不是跳过。
+  # 依赖只到 bun + node：发布闸 import 的只有 `bun`、`node:*` 与../../../product.json，不需要
+  # workspace 安装，所以这条 job 不跑 `bun install`。
+  publish-gate-selftest:
+    name: publish gate selftest (verify-published, macOS-only product)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: "Resolve the pinned bun version (single source: the fork's packageManager)"
+        id: bunver
+        run: |
+          set -euo pipefail
+          pm="$(node -p "require('./harness/glasspane-harness/package.json').packageManager")"
+          case "$pm" in
+            bun@*) ;;
+            *) echo "::error::packageManager is not a bun pin: $pm"; exit 1 ;;
+          esac
+          echo "version=${pm#bun@}" >> "$GITHUB_OUTPUT"
+
+      - name: Install the pinned bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ steps.bunver.outputs.version }}
+
+      - name: "The publish gate gives three different answers (verify-published selftest)"
+        # bash 而非 sh：这个文件用 `set -uo pipefail`，而 /bin/sh 在 GitHub 的 ubuntu runner 上是
+        # dash（没有 -o pipefail）；macOS 的 /bin/sh 是 bash 的 posix 模式，但这条 job 不该靠那张
+        # 机器的巧合来决定测不测得成。
+        run: |
+          set -euo pipefail
+          rc=0
+          out="$(bash harness/tools/verify-published-selftest.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::verify-published 的固定点测试以 exit $rc 失败。它拿三个假前缀把发布闸的三条分支各跑一遍（good / 错误页 / 永不 listening）。remedy：红的那条分支名在上面的 FAIL 里——判据若退化成套一句 /\<html/i 就再也看不见错误页，那是这检查历史上真实存在过的形状；修 harness/glasspane-harness/packages/opencode/script/verify-published.ts 的判决，别改期望。退 2 的另一读法：bun 或 node 没在这条 job 里装上，那同样是红（测不了不是过）。"
+            exit 1
+          fi
+          # 退出码之外再看正文：这个文件对"跑不了"的回答以前是 `SKIP … was NOT exercised` + exit 0
+          # （另一条 lane 正在把它改成 exit 2）。两种形态在这里都是红——一道只能回答"没测"的闸
+          # 不构成发布链的绿灯。匹配用 case 不用 `printf | grep -q`：pipefail 配上提前退出的 grep
+          # 会把"我跳过了"读成"我没跳过"（与本文件 114 行那条 npm pack 的坑同源）。
+          case "$out" in
+            *"NOT exercised"*)
+              echo "::error::verify-published selftest 以 exit 0 回答了「没跑成」。这条 job 有钉死的 bun 与 setup-node 的 node，此刻拒绝测量就是缺陷而不是环境限制。remedy：查上面 setup-bun 那步的输出。"
+              exit 1 ;;
+          esac
+          echo "verify-published selftest 已测量：三种情形给出三个不同的答案"
 
   # 工作流可编译性守卫。GitHub 拒绝解析的工作流不产生任何 job 日志：它在解析期整体
   # 作废，之后每次触发只留下一个 0 步、名为文件路径的红色 run。c3797d4 用

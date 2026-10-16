@@ -58,7 +58,12 @@ jobs:
     if: success() && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Pinned to a 40-hex SHA like every other `actions/*` ref in this file. The exemption that
+      # used to keep the linter away from the fork subtree (`check-workflows.mjs` passing
+      # `enforcePins` only for the primary root) is gone: the subtree split is what publishes this
+      # product, so an unpinned ref here is unpinned in the repository that really runs it — and
+      # several jobs below this one read `secrets.GPG_PRIVATE_KEY` or hold `id-token: write`.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: The tag must equal product.json's version
         run: |
           node -e '
@@ -68,6 +73,59 @@ jobs:
             if (tag !== product.version) { console.error(`tag ${tag} != product.json version ${product.version} — the release lane refuses to ship mismatched bytes`); process.exit(1) }
             console.log("tag and product version agree:", product.version)
           '
+      - name: The released tree must equal trunk's fork subtree
+        # This release is published from the split repository, whose `main` is a
+        # `git subtree split` of trunk's `harness/glasspane-harness`. Until this step existed the
+        # only thing proving that relationship was a hand-typed line in `docs/release.md` that a
+        # human runs (or skips) at the keyboard — and skipping it is not hypothetical: measured on
+        # v0.7.10, two commits (a seven-dependency security bump and the CODEOWNERS file) lived
+        # ONLY in the split repo, shipped in that release, while trunk's `main` never received
+        # them. The next split would have silently reverted a security fix, and the artifact under
+        # a live version number would not be reproducible from trunk at all.
+        #
+        # `version-check` is the only moment the claim can be machine-checked: after the tag has
+        # been agreed to be this version, before `create-release` makes anything public. It stays a
+        # `needs:` prerequisite of both `create-release` and `binaries`, so nothing ships without it.
+        # The fetch is anonymous HTTPS against a public repository, so this job keeps the
+        # workflow-level `contents: read` and asks for no wider token.
+        env:
+          TRUNK_URL: https://github.com/jingzhao-l/GlassPane.git
+          TRUNK_REF: main
+          TRUNK_PREFIX: harness/glasspane-harness
+        run: |
+          set -euo pipefail
+          own="$(git rev-parse 'HEAD^{tree}')"
+          echo "released tree (this tag's HEAD^{tree}):  $own"
+          if ! git fetch --no-tags --depth 1 "$TRUNK_URL" "$TRUNK_REF"; then
+            echo "::error::could not fetch trunk's $TRUNK_REF from $TRUNK_URL, so this tree cannot be" \
+              "anchored to trunk. Refusing on purpose: an unmeasured anchor is not a passing anchor." \
+              "Check network access from this runner and that trunk still exists at that URL."
+            exit 1
+          fi
+          trunk="$(git rev-parse "FETCH_HEAD:$TRUNK_PREFIX" 2>/dev/null || true)"
+          if [ -z "$trunk" ]; then
+            echo "::error::trunk's $TRUNK_REF ($(git rev-parse FETCH_HEAD)) has no $TRUNK_PREFIX subtree." \
+              "The fork no longer lives inside trunk's tree, so this lane's whole premise is gone;" \
+              "nothing is published until that is decided on purpose."
+            exit 1
+          fi
+          echo "trunk's subtree ($TRUNK_PREFIX):         $trunk"
+          if [ "$trunk" = "$own" ]; then
+            echo "anchor OK: the artifact being released IS trunk's fork subtree — $own"
+            exit 0
+          fi
+          echo "::error::the tree being released ($own) is NOT trunk's $TRUNK_PREFIX tree ($trunk)." \
+            "The tag carries bytes trunk lacks, or drops bytes trunk has: the artifact shipped under" \
+            "this version number cannot be reproduced from trunk, and the next subtree split would" \
+            "silently revert whatever differs — which is how v0.7.10 nearly shipped a reverted" \
+            "security dependency."
+          echo "::error::file-level delta, trunk -> released tree (first 50 lines):"
+          git diff --name-status "$trunk" "$own" | head -50 || true
+          echo "::error::remedy: make the two trees one tree, then re-cut this tag. Either merge the" \
+            "split-only commits into trunk under $TRUNK_PREFIX, or re-run" \
+            "\`git subtree split --prefix=$TRUNK_PREFIX\` from trunk's $TRUNK_REF and push that." \
+            "Do not move the tag to whatever is handy: that is the other half of the same defect."
+          exit 1
 
   create-release:
     name: create the GitHub release for this tag
@@ -102,14 +160,35 @@ jobs:
             # `62366bf` while the tag had moved to `88e75e4`, so the release's own metadata named
             # bytes nobody shipped. Repair the anchor instead of inheriting it.
             existing="$(gh release view "${GITHUB_REF_NAME}" --repo "$GH_REPO" --json targetCommitish --jq .targetCommitish)"
-            if [ "$existing" != "$GITHUB_SHA" ]; then
-              echo "release ${GITHUB_REF_NAME} exists but targets ${existing}; re-anchoring to this tag's commit ${GITHUB_SHA}"
-              gh release edit "${GITHUB_REF_NAME}" --repo "$GH_REPO" --target "$GITHUB_SHA"
-              after="$(gh release view "${GITHUB_REF_NAME}" --repo "$GH_REPO" --json targetCommitish --jq .targetCommitish)"
-              if [ "$after" != "$GITHUB_SHA" ]; then
-                echo "::error::release ${GITHUB_REF_NAME} still targets $after after the edit — refusing to publish under an anchor that names other bytes"
-                exit 1
-              fi
+            is_draft="$(gh release view "${GITHUB_REF_NAME}" --repo "$GH_REPO" --json isDraft --jq .isDraft)"
+            if [ "$existing" = "$GITHUB_SHA" ]; then
+              echo "release ${GITHUB_REF_NAME} already exists and already anchors ${GITHUB_SHA} — nothing to repair"
+              exit 0
+            fi
+            # Re-anchoring is only safe while the release is still a draft. A PUBLIC release whose
+            # anchor differs from this commit is a re-dispatch of a version that already shipped, and
+            # continuing was the defect: `binaries` below runs `gh release upload … --clobber`
+            # (packages/opencode/script/build.ts), which replaces the zips the world already
+            # downloaded with this run's bytes, while the npm side refuses the duplicate version and
+            # deliberately only asserts presence (SYNCLOG 2026-10-16). One version number then names
+            # two byte sets — GitHub's archives from this commit, the tarballs on the registry from
+            # the old one — and until `checksums` re-signs, the live release serves new bytes against
+            # the OLD SHA256SUMS.txt and .asc. A version that shipped is not re-publishable; the next
+            # step is a new version, not a new run of this one.
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::release ${GITHUB_REF_NAME} is already public and anchors ${existing}, not this tag's commit ${GITHUB_SHA} — refusing to re-publish a version number that already shipped."
+              echo "::error::continuing would overwrite the live release assets with this run's bytes while npm keeps the previous tarball for the same version, and the published SHA256SUMS.txt / .asc would describe the archives that were there before this run."
+              echo "::error::remedy: cut a new version — bump product.json and packages/opencode/package.json, re-run the subtree split from trunk, push the split, and tag the NEW number. Do not move a tag that already shipped."
+              exit 1
+            fi
+            # Still a draft: nothing has been served to a user from this release yet, so the anchor
+            # is free to move — that is what this path was written for.
+            echo "draft release ${GITHUB_REF_NAME} exists but targets ${existing}; re-anchoring to this tag's commit ${GITHUB_SHA}"
+            gh release edit "${GITHUB_REF_NAME}" --repo "$GH_REPO" --target "$GITHUB_SHA"
+            after="$(gh release view "${GITHUB_REF_NAME}" --repo "$GH_REPO" --json targetCommitish --jq .targetCommitish)"
+            if [ "$after" != "$GITHUB_SHA" ]; then
+              echo "::error::release ${GITHUB_REF_NAME} still targets $after after the edit — refusing to publish under an anchor that names other bytes"
+              exit 1
             fi
             echo "release ${GITHUB_REF_NAME} already exists — anchor verified against ${GITHUB_SHA}"
             exit 0
@@ -145,7 +224,7 @@ jobs:
           - { target: darwin-x64, runner: macos-15-intel }
           - { target: darwin-arm64, runner: macos-14 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: ./.github/actions/setup-bun
 
@@ -225,7 +304,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: asset-sha256-*
@@ -467,7 +546,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: The dispatched ref must be the tag this version was cut from
         env:
@@ -522,7 +601,7 @@ jobs:
           - { target: darwin-x64, runner: macos-15-intel }
           - { target: darwin-arm64, runner: macos-14 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: ./.github/actions/setup-bun
 
@@ -663,7 +742,7 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: ./.github/actions/setup-bun
 
@@ -771,7 +850,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup-bun
       - name: Install workspace
         run: bun install --frozen-lockfile
@@ -799,7 +878,7 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: ./.github/actions/setup-bun
 

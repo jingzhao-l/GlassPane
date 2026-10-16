@@ -27,6 +27,11 @@ NPM_PACKAGE="${GLASSPANE_HARNESS_NPM:-$PRODUCT}"
 # harness/tools/product-surface.mjs (rule installer-registry).
 NPM_REGISTRY="${GLASSPANE_HARNESS_REGISTRY:-https://registry.npmjs.org}"
 RELEASE_BASE="${GLASSPANE_HARNESS_RELEASES:-https://github.com/$REPO/releases/download}"
+# Where this script is published, kept in step with product.json's `install.curl` by
+# harness/tools/product-surface.mjs. It is a variable rather than prose because the refusals
+# below print it as the command the user is told to run: a remedy that does not install is not
+# a remedy, and the version this run was asked for is data the refusal already holds.
+INSTALLER_URL="https://raw.githubusercontent.com/$REPO/main/scripts/install.sh"
 # "No SHA256SUMS.txt / no .asc was published for this release" used to be a warning the
 # installer talked itself past and then installed anyway. That tolerance is not ours to
 # grant: the release lane publishes both files for every target and fails the run if either
@@ -80,7 +85,11 @@ Environment:
   GLASSPANE_HARNESS_RELEASES  base URL for release assets (default this repo's releases)
   GLASSPANE_HARNESS_ALLOW_UNVERIFIED
                              set to 1 to install even when the release publishes no
-                             SHA256SUMS.txt or no .asc (default: refuse)
+                             SHA256SUMS.txt or no .asc, or when gpg is not on PATH
+                             (default: refuse)
+                             On the curl one-liner the override has to be set for the shell
+                             that reads the script, not for curl:
+                               curl -fsSL $INSTALLER_URL | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash
 USAGE
       exit 0
       ;;
@@ -181,10 +190,17 @@ fi
 # it proves the tarball came from this key, not just that its SHA-256 is intact
 # (content integrity is still the checksum's job).
 #
-# The policy splits three ways, and the split is the point:
-#   - no `.asc` published at all, or no gpg on the machine  -> a POLICY GAP. Warn and
-#     continue. This is the 0.6.4 decision and it still stands: an unsigned release is
-#     not evidence of tampering.
+# The policy splits by what each state actually says, and the split is the point:
+#   - no `.asc` published at all  -> a POLICY GAP, and the 0.6.4 decision was "warn and
+#     continue". That tolerance now needs the override to be named: an unsigned release is not
+#     evidence of tampering, but the release lane signs every asset and fails the run if a
+#     signature is missing, so its absence describes an incomplete or replaced release.
+#   - no `gpg` on the machine -> a REFUSAL, not a skip. Stock macOS ships no GnuPG, so the
+#     skip was the default state on every fresh machine, and the only check left standing was
+#     SHA256SUMS.txt — fetched from the same origin as the asset it lists. A missing tool is
+#     installable (`brew install gnupg`); a missing signature is not, so this is the same
+#     class as the missing-manifest refusal below, and `GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1`
+#     is the only way through it.
 #   - `.asc` there but it does not verify, or it verifies under a DIFFERENT key
 #     fingerprint  -> a TAMPERING SIGNAL. Refuse. The only other check in this path is
 #     SHA256SUMS.txt, fetched from the same origin as the asset it lists, so both
@@ -258,6 +274,26 @@ PGPKEY
 GPG_STATE="not-run"
 SHA_STATE="not-run"
 
+remedy_unverified() {
+  # Print the ONE command that carries the override to the shell that actually reads this
+  # script.
+  #
+  # Until 2026-10-16 every refusal here printed
+  #   GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl -fsSL <install.sh> | bash
+  # A leading assignment applies to `curl` alone, so the piped `bash` never had the variable in
+  # its environment: a user who followed the printed advice verbatim was refused again, by the
+  # same line, with the same advice. The assignment has to sit on the far side of the pipe, and
+  # the version this run was asked for has to travel with it — `bash -s --` is how a piped
+  # script takes arguments. `installer-selftest.sh` runs the printed line back through the
+  # stubbed release, so this shape cannot silently rot again.
+  error "refusing to install. If you accept that risk for this run, re-run with the override on"
+  error "the shell that reads the script (a VAR=1 before curl does NOT reach a piped bash):"
+  # The command itself carries no `[ERROR]` prefix: a remedy an agent is meant to run has to be
+  # copy-pasteable as it is printed. It goes to the same stream as the refusal above it, so the
+  # two cannot be separated by a redirect.
+  echo "  curl -fsSL $INSTALLER_URL | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash -s -- --version $VERSION" >&2
+}
+
 verify_asset_gpg() {
   # Verify the release-asset fallback's archive against its `$ASSET.asc` sidecar.
   # Uses a throwaway GNUPGHOME holding only the signing key, then discards it —
@@ -271,9 +307,23 @@ verify_asset_gpg() {
   local asc="$TMP/$name.asc" gnupg out rc=0 http fpr
   info "verifying release asset GPG signature"
   if ! command -v gpg >/dev/null 2>&1; then
-    GPG_STATE="skipped (gpg not on PATH)"
-    warn "gpg not found on PATH — skipping release asset GPG provenance (integrity is still checksum-only)"
-    return 0
+    # This used to warn, set GPG_STATE="skipped (gpg not on PATH)" and `return 0` — which
+    # switched the provenance control off on precisely the machines that need it, because stock
+    # macOS ships no GnuPG. What survives that skip is SHA256SUMS.txt, fetched from the same
+    # origin as the asset it lists, i.e. one source vouching for itself (see the policy note
+    # above the key). A missing tool is installable, so the refusal names the install and the
+    # override, same shape as the missing-manifest refusal below.
+    if [ "$ALLOW_UNVERIFIED" = "1" ]; then
+      GPG_STATE="skipped by GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 (gpg is not installed)"
+      warn "gpg is not on PATH — skipping release asset GPG provenance because GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1"
+      return 0
+    fi
+    GPG_STATE="FAILED (gpg is not installed)"
+    error "gpg is not on PATH — this release asset's provenance cannot be established at all"
+    error "integrity alone does not say who produced these bytes: the only other check here is SHA256SUMS.txt, fetched from the same origin as the asset it lists."
+    error "install the tool and re-run: brew install gnupg"
+    remedy_unverified
+    exit 1
   fi
   # The status code is read from curl, not inferred from a non-zero exit: `-f` folds
   # "not published", "blocked by the network", and "answered with something else" into
@@ -300,7 +350,7 @@ verify_asset_gpg() {
     GPG_STATE="FAILED (no .asc published for this asset)"
     error "no GPG signature sidecar ($name.asc) is published for this release"
     error "this product's release lane signs every asset and fails the run if a signature is missing, so an unsigned release is an incomplete or replaced one."
-    error "refusing to install. If you accept that risk for this run: GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl -fsSL <install.sh> | bash"
+    remedy_unverified
     exit 1
   fi
   if [ "$http" != "200" ] || [ ! -s "$asc" ]; then
@@ -381,7 +431,7 @@ verify_asset() {
     SHA_STATE="FAILED (no SHA256SUMS.txt published for v$VERSION)"
     error "no SHA256SUMS.txt is published for v$VERSION"
     error "the release lane writes one manifest covering every target and refuses to sign an incomplete set, so a release without a manifest is not a release this installer can vouch for."
-    error "refusing to install. If you accept that risk for this run: GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl -fsSL <install.sh> | bash"
+    remedy_unverified
     exit 1
   fi
   if [ "$http" != "200" ] || [ ! -s "$sums" ]; then
@@ -552,7 +602,9 @@ if [ "$VERSION_RC" -ne 0 ]; then
   printf '%s\n' "$VERSION_OUT" | sed 's/^/    /' >&2
   error "  If that is the placeholder ('postinstall script was not run'), npm gated the lifecycle script. Remedy:"
   error "    npm install -g --allow-scripts=$PRODUCT ${NPM_SPEC:-$PRODUCT}"
-  error "  Or install the release asset instead: bash $0"
+  # Not `bash $0`: through `curl … | bash` $0 is the word `bash`, so the printed remedy was
+  # `bash bash` — the same class of broken advice the refusals above used to print.
+  error "  Or install the release asset instead: curl -fsSL $INSTALLER_URL | bash"
   exit 1
 fi
 case "$VERSION_FIRST" in

@@ -17,9 +17,11 @@
  *   2. a neutered copy of the parser (its object-framing advance moved by one byte) must go
  *      red. If the tampered copy still agrees, the sample is too small to be a control.
  *
- * With no reference clone the reader cannot be exercised at all. It then says so on the
- * record and exits 0 — a lane without upstream bytes has not passed anything, and the line
- * below is the only honest output it can produce.
+ * With no reference clone the reader cannot be exercised at all, and this file says so and
+ * exits 2. It used to exit 0 while printing `NOT self-tested`: a lane that ran nothing looked
+ * like a lane that passed, which is the failure this whole layer exists to catch. Exit codes:
+ * 0 the batch reader matched `git show` byte for byte, 1 an assertion failed, 2 it could not
+ * measure (no reference clone).
  *
  * Run: `node harness/tools/ref-batch-selftest.mjs` (from anywhere; it locates the repo root).
  */
@@ -44,8 +46,13 @@ const pin = JSON.parse(readFileSync(path.join(repoRoot, "harness", "upstream.jso
 const refRel = pin?.fork?.referenceClone ?? ".external/opencode"
 const refDir = path.join(repoRoot, refRel)
 if (!existsSync(path.join(refDir, ".git"))) {
-  console.log(`NOT self-tested: no reference clone at ${refRel} — the batch reader was not exercised against real upstream bytes on this machine`)
-  process.exit(0)
+  console.error(`ref-batch-selftest: NOT self-tested — no reference clone at ${refRel}, so the batch reader could not be exercised against real upstream bytes on this machine. Exiting 2: a fixed-point test that never ran has proved nothing, and exit 0 here is exactly the "green while measuring nothing" this repository keeps having to re-learn. Run it where the clone exists (harness/upstream.json's fork.referenceClone), or in CI after the \`Fetch the pinned upstream reference clone\` step.`)
+  // Exit 2, not 0. `cannot measure` and `passed` are different claims and must not be
+  // purchasable with the same exit code (this file's own sibling rules: `verify-published.ts`
+  // answers NOT OBSERVED with 2, `hook-liveness --check` answers an absent checkout with 2).
+  // A CI lane that runs this without the clone is now red — and that lane is supposed to have
+  // the clone, so the red is the defect telling the truth.
+  process.exit(2)
 }
 
 const fd = JSON.parse(readFileSync(path.join(repoRoot, "harness", "contracts", "fork-diff.json"), "utf8"))

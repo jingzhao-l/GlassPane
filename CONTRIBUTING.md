@@ -36,9 +36,9 @@ Start from the repo root: `npm ci` → `npm run build` → `cd engine && swift b
 | [spike/](./spike/) | feasibility experiments and measured records | not gated |
 | [specs/](./specs/) | the Chinese implementation and acceptance specs (PRD, P0–P6, 5.6/5.7/5.8 reviews) = **design of record** | a doc change is itself the PR |
 
-## 3. Gates: nine CI lanes, run them locally first
+## 3. Gates: ten CI lanes, run them locally first
 
-[.github/workflows/ci.yml](./.github/workflows/ci.yml) has nine jobs; CI only repeats what you should already have measured.
+[.github/workflows/ci.yml](./.github/workflows/ci.yml) has ten jobs; CI only repeats what you should already have measured.
 
 | CI job | Runner | What it measures |
 |---|---|---|

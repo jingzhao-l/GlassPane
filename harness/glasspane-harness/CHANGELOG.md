@@ -12,6 +12,110 @@ contract does not).
 
 <!-- 内容归入下一版；此处留空以备下一批。 -->
 
+## [0.8.0] - 2026-10-16
+
+判据：本轮有**三处用户可见的形状/默认变化**，不是纯修复 ⇒ minor（pre-1.0 口径）。①
+`glasspane-harness upgrade --method` 不再接受 `brew` / `choco` / `scoop`——本产品在这三个渠道
+没有包，过去显式给 `[target]` 还会绕过"没有可核对渠道"的拒绝，直接对陌生包管理器动手；② `curl`
+兜底安装通道在 `gpg` 不在 PATH 时从"警告后继续安装"翻成**拒绝**，只留
+`GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1` 一条出口（裸 macOS 本来就不带 GnuPG，那条跳过等于在
+最需要它的机器上关掉溯源控制）；③ 发布泳道多了一道**能拦住发布**的活门：被 tag 的那棵树必须
+逐字等于主干的 fork 子树。其余按缺陷计。
+
+- fix(harness): **主干把发布物领回来**（P0，本轮开工第一件事）。v0.7.10 的发布树里有两笔提交
+  只存在于 split 仓——`d56660e`（7 个钉死依赖升到"第一个已修补版本"之上：dompurify、electron、
+  minimatch、katex、`@modelcontextprotocol/sdk` 1.29.0→1.31.0（CVE-2026-104850 / GHSA-6qxp-vccf-f47h
+  OAuth 客户端凭据泄露）、`@babel/core`、`@hey-api/openapi-ts`）与 `3207508`（CODEOWNERS）——主干
+  `main` 从未收到它们，于是下一笔 subtree split 会**静默撤销一次安全升版**。判据用字节：主树里那
+  10 个未提交文件与 split 的 blob 逐哈希相等，唯一缺的是重生成的 `bun.lock`；补上后
+  `git rev-parse HEAD:harness/glasspane-harness` == split 仓 main 的树（`896398d`），
+  `bun install --frozen-lockfile` 实测过，装的版本实测是 1.31.0 / 10.2.3 / 7.29.6。
+- fix(harness): **没有任何尺子量过"发布物 == 主干"**（同一 P0 的机制面）。这条等式原先只活在
+  `docs/release.md` 里一句手打的 `test "$(git rev-parse …)"`，SYNCLOG 每轮记它被**人**跑过一遍。
+  现在它落在 split 仓 `release.yml` 的 `version-check`（取号之后、`create-release` 公开之前），
+  `create-release` 与 `binaries` 都 `needs:` 它；抓不到主干就红，红的时候打出文件级差集与出路。
+  反向控制：把那个 step 删掉 → `product-surface` `[release-anchor]` 具名变红（实测 exit 1）。
+- fix(harness): **升级与"打开一个项目"两条路不再让别人的配置决定字节从哪来**。
+  `Installation.latest()` 的 registry 取自 `NpmConfig.registry(process.cwd())`——它吃**项目目录**
+  里的 `.npmrc` 与 `npm_config_registry`；三条 `install -g` 更是连 `--registry` 都不传。于是陌生
+  仓库可以既决定"最新版本是谁"又决定"全局装的是谁的包"，而那包的 `postinstall` 跑的是它的 JS。
+  同样形状的第二处：`Npm.reify` 把项目 `.npmrc` 原样交给 Arborist，而本产品会往用户刚打开的项目
+  里写依赖。两处都改为钉住产品自己的 registry（与 `postinstall.mjs` / `install.sh` /
+  `verify-published.ts` 同一条政策）。固定点＝`test/installation/glasspane-registry-pin.test.ts`
+  （观察真实 argv 与真实请求 URL，不是回显常量）+ `packages/core/test/npm.test.ts` 新增一条：
+  假 registry 收零请求、且错误串里点名的是真 registry（先断言 `.npmrc` 确实被解析到，否则
+  "没被咨询"可以是空转）。
+- fix(harness): **写进用户项目的插件 API 版本从来不存在**（P1）。`config.ts` 用**本产品**版本号
+  请求 `@opencode-ai/plugin`，而那个包按上游自己的发布编号出版——实测 npm 对 `0.7.10` 回 404、
+  对 `1.18.32` 回 200；安装跑在 forked 后台、失败只留一条 warning，所以每个被发行版打开的项目
+  都静悄悄地拿不到它插件文件 import 的那个 API。改为取自 `packages/plugin/package.json` 的版本，
+  值由尺子对着那份文件钉住。
+- fix(harness): 检测/升级面里三处**跑不到的拒绝分支**。`getBrewFormula()` 两个 return 给同一个
+  字符串 ⇒ `formula.includes("/")` 恒假 ⇒ "这个 formula 来自别人的 tap"那条拒绝从未生效，代码
+  照样对陌生 tap 执行 `brew upgrade`；现在真去读 `brew info --json --formula` 的 `full_name`。
+  `method()` 里 `installedName` 的三元两侧相同；`--method` 的 `choices` 仍列着本产品没有包的三个
+  渠道。三条都改成能真正分岔的形状。
+- fix(harness): `--pure` 与 `GLASSPANE_HARNESS_*` 这批名字在工具宿主这一侧**从未生效**（P1）。
+  CLI 中间件写 `GLASSPANE_HARNESS_PURE=1`，而 `runtime-flags.ts` 用 `Config.boolean("OPENCODE_PURE")`
+  按字面名问 ConfigProvider，从不经过产品自己的解析点 `flag.ts::read()`；每轮会话都被注入的
+  `customize-harness` skill 却在教用户导出这些名字。现在解析回到那一个点（产品名先、旧名后，
+  兼容不变），`plugin/index.ts` 里那个空 `if` 也补上它本来要说的"丢掉了几个 plugin origin"。
+- fix(harness): 兜底安装器不再打印**执行不了的补救命令**。两条拒绝写的是
+  `GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 curl -fsSL <install.sh> | bash`——行首赋值只作用于 `curl`，
+  管道里的 `bash` 永远看不到它，照抄的用户会被再拒一次。`install.sh` 与 `docs/install.md` 都改成
+  真正把 override 交给读脚本那个 shell 的形式；自测也跟着反转：它过去**庆祝** `gpg` 缺席时
+  `exit 0`＋"skipped (gpg not on PATH)"，现在要求拒绝、要求点名 `brew install gnupg`、要求它
+  **执行自己打印的那条命令**而不是手写一个长得像的。
+- fix(harness): `gpg-signing.sh audit` 在什么都没读到的时候出具健康证明。每个工作流正文都用
+  `gh api … 2>/dev/null | base64 -d 2>/dev/null || true` 取，取不到就 `continue`，最后
+  "一条都没读成"反而打印 `ok no silent-skip signing found`——正是它存在的目的（发现
+  `if: secrets.GPG_PRIVATE_KEY != ''` 这种静默跳过）。现在逐目标记 `UNVERIFIABLE` 并非零退出，
+  没读全就不许说"没问题"（同文件对 `secret_names` 早就是这么办的）。
+- fix(harness): 尺子自己"只能绿"的六处（本轮逐条实测能红）：`tool-surface` 的测量集下限原本
+  问的就是它自己守的那份金样（清空 `fork-diff.json` 的 `added`/`edited` ⇒ 面 B 8,275 LOC/216 文件
+  → 0，`--check` 照旧绿退 0，还把面 A 从 21.66% 推到 26.63% 而 A 自己一行没动）；
+  `hook-liveness` 把"读不到版本"的检出当成"没有漂移"，`--record` 会把没读过的 tag 写进金样；
+  `brand-surface` 金样丢掉 `lineage` 字段后 `undefined` 比较恒不成立 ⇒ 绿，且它的命中数是
+  `re.test()`+`count:1`（一个已记录文件从 1 处涨到 100 处都看不见），豁免名单还是"点名一个文件
+  就豁免全部四条规则"；`product-surface` 只打印一致性条数从不比较它（发现集空了就静默变绿）、
+  并且**照收 `--record`**（它没有基线）——现在拒绝未知参数退 2、把四个发现集的规模钉住；
+  `contracts/engine-methods.json` 里那颗 `swiftBlob` **没有任何读者**（引擎缺席时只打一条 note
+  退 0），现在它对着 `FrameCodec.swift` 的真哈希核，引擎不在就退 2 说"CANNOT OBSERVE, not agreement"。
+- fix(harness): 三把写了却**没人跑**的自测（`ref-batch-selftest.mjs`、`kernel-pin-selftest.mjs`、
+  `verify-published-selftest.sh` 被任何工作流与任何 package.json 脚本引用的都是零），以及两把
+  "测不到就退 0"的自测（藏掉参照检出 / 缺 bun 时打印 `NOT self-tested` `SKIP` 然后退 0）。全部
+  接进 `ci.yml` 的 `harness-rulers`，退出口按"能不能测量"分流；`product-surface` 新增
+  `[selftest-wired]` 一条规则：自测文件若没有任何读者就红——把这件事从"记得跑"变成机制。
+- fix(harness): `kernel-pin.mjs --probe` 问不到 registry 时退 0，而唯一吃它的 `harness-contract.yml`
+  `kernel-drift` job 的判词就是退出码，注释还写着"anchor 不可达就失败"。现在"问不到/答空"退 2、
+  "同一版本"与**真漂移**保持退 0（漂移是要人看的发现，不是 CI 红），那条 lane 把判决写进
+  step summary 让漂移有读者；`probe-lane-selftest.sh` 三种结局各自可红。
+- fix(harness): 发布链三处"绿得不诚实"。`build.ts` 丢掉 `Bun.build` 的返回值（编译失败不打字、
+  退 0、`dist/<pkg>/bin` 是空的，只有本机那个 target 会被冒烟测抓到）；`publish.ts` 的
+  `gp-pack-*` 临时目录只在成功路径清理，任何一次校验抛错就留一份；`verify-published.ts` 把
+  `npm view` 的传输错误（ECONNRESET/ENOTFOUND/429 都退非零）判成"这个发布是坏的"，与它自己
+  写在文件头的三态规则相反——只会喊狼的闸门，最后的下场是它的红没人理。
+- fix(harness): 被 tag 过一次的发布不再能覆盖已经公开的东西。`create-release` 的"release 已存在"
+  分支此前只修 `targetCommitish` 就继续，而 `binaries` 带着 `--clobber`：一条版本号于是同时挂着
+  GitHub 的新字节与 npm 的旧字节，签名在重签完成前对不上。现在非 draft 且锚点不同的已发布
+  release 一律拒绝，出路是往前取新号。
+- fix(harness): 发布链的 `uses:` 全部钉到 40 位 SHA，并取消 `check-workflows.mjs` 对 fork 子树的
+  豁免（`enforcePins: target.primary === true` ⇒ 两边都管）。这不是洁癖：被改名的 `@v4` 会跑在
+  能读 `secrets.GPG_PRIVATE_KEY`、带 `id-token: write` 的 job 里——父仓自己的 `release.yml`
+  把这条攻击写成了文档，却用豁免把自己家发布通道的同一形状放过去了。五个 pin 逐个对 GitHub 的
+  tag ref 反查核实。反向控制：把一个 `environment: release` job 的 checkout 改回 `@v4` ⇒
+  `check-workflows` 具名变红（实测 exit 1）。
+- fix(harness): 主仓 npm 发布那两处 `npm publish --provenance || { … npm stage publish … }` 的
+  假绿形状（E401、registry 5xx、tarball 问题都走这一支，staged 一退 0 就绿——正是 v0.7.6
+  "job 绿而 registry 没有那个号"的形状），改为按失败原因分流并要求版本号真的在场；顺带把
+  铸造 OIDC token 那台机器上的浮动 `npm@11` 钉成确切版本。
+- security(harness): `packages/{sdk/js,plugin,ui,app,cli}` 补 `private: true`。此前挡它们的只有
+  `script/publish.ts` 里那些 `exit 2` 的拒绝桩，而 `npm publish -w @opencode-ai/ui` 根本不经过桩
+  ——它会直接拿上游的命名空间往公共 registry 发东西。FORK.md 里"CODEOWNERS/ISSUE_TEMPLATE 全部
+  移除"那句也按树的真相反正（这两个是**改写**，且 `CODEOWNERS` 是 10-15 为对齐分支保护恢复的）。
+- docs(harness): `docs/release.md` 教的 npm 派发命令少了 `--ref v<X.Y.Z>`，而发布泳道的
+  `publish-gate` 对缺它的派发**恒拒绝**——照着文档敲就会撞上一条自己文档里没写的红。
+
 ## [0.7.10] - 2026-10-15
 
 判据：本轮全部是缺陷修复与两处默认收紧（安装期验证、项目内插件信任），没有新增工具、参数、

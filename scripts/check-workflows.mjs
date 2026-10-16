@@ -386,12 +386,18 @@ function inspect(target) {
   //     stops the irreversible channel dies at step one with nothing local able to see it.
   //     Indentation-based, like the rest of this walker: a job is a 2-space key under `jobs:`,
   //     its own `permissions:` block is a 4-space key, and its scopes are 6-space keys.
-  //     Rule 3c rides the same walk, but only for this repository's own workflows: the fork
-  //     subtree under `harness/` is scanned by the same loop (a workflow that references a
-  //     script must still resolve), while its publish channel belongs to the harness release
-  //     line — the rule that stops the pin check from reaching it is the `primary` flag set at
-  //     the target list, and the finding is reported to that line, not fixed from here.
-  problems.push(...jobPolicyProblems(lines, { enforcePins: target.primary === true }))
+  //     Rule 3c (the pin rule) rides the same walk and is enforced for EVERY root this tool scans,
+  //     the fork subtree under `harness/` included. That is a policy change, not a bug fix: the
+  //     call used to pass `enforcePins: target.primary === true`, on the theory that the subtree's
+  //     publish channel belongs to the harness release line and the finding could only be
+  //     "reported to that line, not fixed from here". The exemption bought nothing and cost the
+  //     only thing the rule has — the split repo IS this product's release lane (a `git subtree
+  //     split` publishes it verbatim, and its tag is what triggers the release), and its
+  //     `release.yml` declared `environment: release` / `id-token: write` while still running
+  //     `actions/checkout@v4`: the exact attack the parent's own release.yml documents ("a retagged
+  //     `@v4` would run attacker code there, sign an attacker archive with the real key"). Both
+  //     roots are pinned now, so the rule has nothing left to look away from.
+  problems.push(...jobPolicyProblems(lines))
 
   return { jobs: [...seen.keys()], problems }
 }
@@ -409,8 +415,14 @@ function inspect(target) {
  * checks the fingerprint on the signature, which a stolen key satisfies. Jobs with no
  * environment are out of scope for that rule on purpose: the pin is cheap exactly where the
  * payload is irreversible, and widening it to the read-only CI lanes is a separate change.
+ * Local `uses: ./path` actions are exempt by construction: their bytes are the commit already
+ * checked out, so there is no mutable upstream ref to retag.
+ *
+ * It used to take an `enforcePins` switch so the fork subtree could be skipped; the switch and the
+ * exemption are both gone, and every root `inspect()` reaches is enforced. Keeping a knob with no
+ * caller that turns a control off is how a control quietly stops existing.
  */
-function jobPolicyProblems(lines, { enforcePins = true } = {}) {
+function jobPolicyProblems(lines) {
   const out = []
   let inJobs = false
   let current = null
@@ -452,7 +464,12 @@ function jobPolicyProblems(lines, { enforcePins = true } = {}) {
       current.readsRepo = true
     }
     const used = /^\s*(?:-\s*)?uses:\s*(\S+)/.exec(line)
-    if (used && current.environment && !/@[0-9a-f]{40}/.test(used[1])) {
+    // A `uses: ./some/local/action` ref is not addressable by a SHA and does not need to be: the
+    // action's bytes come from the commit this run already checked out, so a retagged upstream
+    // release — the attack this rule exists for — has nothing to reach. Enforcing the 40-hex shape
+    // here would demand a syntax GitHub does not accept for local actions and make the fork's
+    // release lane unfixable rather than safe.
+    if (used && current.environment && !/^\.{1,2}\//.test(used[1]) && !/@[0-9a-f]{40}/.test(used[1])) {
       current.unpinned.push({ ref: used[1], line: i + 1 })
     }
     // Shape, not provenance. A `uses:` value GitHub cannot resolve makes the whole workflow
@@ -481,7 +498,7 @@ function jobPolicyProblems(lines, { enforcePins = true } = {}) {
           `Add "contents: read" (or write) to the block at line ${job.line}.`,
       )
     }
-    if (enforcePins && job.environment && job.unpinned.length) {
+    if (job.environment && job.unpinned.length) {
       out.push(
         `job "${job.name}" declares "environment: ${job.environment}" (so it can read that environment's secrets) but runs ${job.unpinned
           .map((u) => `${u.ref} at line ${u.line}`)
@@ -624,8 +641,10 @@ function resolveWorkspace({ root, spec }) {
 //
 // A rule nobody has seen go red is not a rule. So each case below feeds a mutated
 // copy of a real workflow through `inspect()` and asserts the specific problem
-// comes back. The mutations run against a synthetic target in a temp dir, so they
-// never touch the tree.
+// comes back. One case asserts the opposite half — that a shape the rule must not
+// touch stays silent — because a rule that fires on legal syntax gets switched off,
+// and that is how a control dies. The mutations run against a synthetic target in a
+// temp dir, so they never touch the tree.
 if (process.argv.includes("--self-test")) {
   const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs")
   const { tmpdir } = await import("node:os")
@@ -691,6 +710,26 @@ jobs:
           "  build:\n    name: build the thing\n    runs-on: ubuntu-latest\n    environment: release\n",
         ),
       expect: /pin every "uses:"/,
+    },
+    {
+      id: "a repo-local action in an environment job is not an unpinned ref",
+      // The other half of the same rule, and the half that decides whether the fork's release
+      // lane can be pinned at all: its jobs run `./.github/actions/setup-bun`, a composite action
+      // whose bytes are the commit this run already checked out. There is no upstream tag to
+      // retag there, and GitHub rejects `./path@<sha>` — so a pin rule that fired on it would
+      // demand a syntax that cannot exist. Same environment, SHA-pinned checkout, local action:
+      // the rule must stay silent.
+      apply: (t) =>
+        t
+          .replace(
+            "  build:\n    name: build the thing\n    runs-on: ubuntu-latest\n",
+            "  build:\n    name: build the thing\n    runs-on: ubuntu-latest\n    environment: release\n",
+          )
+          .replace(
+            "- uses: actions/checkout@v4",
+            "- uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n      - uses: ./.github/actions/setup-bun",
+          ),
+      absent: /pin every "uses:"/,
     },
     {
       id: "secrets context in a step's if:",
@@ -774,21 +813,37 @@ jobs:
       label: "self-test",
       primary: true,
     })
-    const hit = problems.some((p) => c.expect.test(p))
+    const hit = c.absent ? !problems.some((p) => c.absent.test(p)) : problems.some((p) => c.expect.test(p))
     if (hit) {
-      console.log(`  ok self-test: ${c.id} is caught`)
+      // `updater/test/scripts-check-workflows.test.mjs` counts the `ok self-test:` lines against
+      // the number in the summary, so a counter-case still has to print as one line here — it just
+      // says what it proved instead of claiming a catch.
+      console.log(`  ok self-test: ${c.id} ${c.absent ? "stays silent, as it must" : "is caught"}`)
     } else {
-      console.error(`  ✗ self-test: ${c.id} was NOT caught (${problems.length} problem(s) reported)`)
+      console.error(
+        c.absent
+          ? `  ✗ self-test: ${c.id} was NOT silent — the rule fires where it has no object`
+          : `  ✗ self-test: ${c.id} was NOT caught (${problems.length} problem(s) reported)`,
+      )
       failed++
     }
   }
   rmSync(dir, { recursive: true, force: true })
 
   if (failed > 0) {
-    console.error(`check-workflows --self-test: ${failed} case(s) did not go red.`)
+    console.error(`check-workflows --self-test: ${failed} case(s) did not behave as declared.`)
     process.exit(1)
   }
-  console.log(`check-workflows --self-test: ${cases.length} case(s) each verified to fail`)
+  // The wording of this line is a contract: `updater/test/scripts-check-workflows.test.mjs` parses
+  // `N case(s) each verified to fail` out of it and asserts N equals the number of
+  // `ok self-test:` lines actually printed, so a case quietly dropped from the table cannot be
+  // counted. The counter-case (the one that proves a legal shape stays silent) is a case verified
+  // to answer as declared too, and the clause after the dash says which halves it has.
+  const caught = cases.filter((c) => !c.absent).length
+  const silent = cases.length - caught
+  console.log(
+    `check-workflows --self-test: ${cases.length} case(s) each verified to fail — ${caught} mutation(s) that had to be caught, ${silent} legal shape(s) that had to stay silent`,
+  )
   process.exit(0)
 }
 

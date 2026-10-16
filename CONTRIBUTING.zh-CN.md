@@ -33,9 +33,9 @@ GlassPane 是 **macOS 上给 AI 编程代理用的 GUI 测试与验证层**：�
 | [spike/](./spike/) | 可行性实验与实测留档 | 不入门禁 |
 | [specs/](./specs/) | 中文实施规格与验收文档（PRD、P0–P6、5.6/5.7/5.8 项目综述）＝**设计真值** | 文档改动本身就是 PR |
 
-## 3. 门禁：九条 CI 通道，先在本地跑绿
+## 3. 门禁：十条 CI 通道，先在本地跑绿
 
-[.github/workflows/ci.yml](./.github/workflows/ci.yml) 共九条 job。CI 只是同一套东西的重复——先在本地把它们跑绿。
+[.github/workflows/ci.yml](./.github/workflows/ci.yml) 共十条 job。CI 只是同一套东西的重复——先在本地把它们跑绿。
 
 | CI job | Runner | 测什么 |
 |---|---|---|

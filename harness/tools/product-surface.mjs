@@ -23,15 +23,30 @@
  *   state-root / config-names                            XDG root + config file names (product first, legacy kept)
  *   installer-urls / installer-syntax / installer-dry-run the one-click scripts point at the product and actually parse/plan
  *   workflows / notice-license                            our own pipelines only; attribution on disk
+ *   release-anchor                                        the release lane proves the released tree IS trunk's
+ *                                                         `harness/glasspane-harness` subtree (fetched from trunk,
+ *                                                         compared as a tree hash, and depended on by the jobs
+ *                                                         that create and build the release)
+ *   scan-set                                              every DISCOVERY set this gate walks is pinned at a floor,
+ *                                                         because an empty or shortened scan prints fewer
+ *                                                         agreements and used to stay green
+ *   selftest-wired                                        every fixed-point test under harness/tools is referenced
+ *                                                         by a workflow step or a package.json script — a test
+ *                                                         nobody runs cannot go red
+ *   engine-methods                                        the fork's method table re-derived from FrameCodec.swift,
+ *                                                         AND its recorded `swiftBlob` re-hashed from those bytes
+ *   agreement-count                                       the run asked at least as many questions as before
  *
  * MODES
  *   --check (default)  all rules must hold
- *   (no --record: this is an agreement, not a number to baseline. If a rule is
- *   wrong, fix the rule in review — there is nothing to "record over")
+ *   (no --record, and no other flag: this is an agreement, not a number to baseline. If a rule
+ *   is wrong, fix the rule in review — there is nothing to "record over", and accepting a
+ *   `--record` that writes nothing was a flag that promised a baseline and did nothing)
  *
- * Exit codes: 0 agree, 1 disagree (named rule + file), 2 cannot measure.
+ * Exit codes: 0 agree, 1 disagree (named rule + file), 2 cannot measure (or an unknown flag).
  */
 import { execFileSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import { existsSync, readFileSync, readdirSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -44,6 +59,26 @@ const pkgDir = path.join(forkRoot, "packages", "opencode")
 function die(code, msg) {
   console.error(`product-surface: ${msg}`)
   process.exit(code)
+}
+
+/**
+ * No arguments but `--check` (and none at all — `ci.yml` runs it bare).
+ *
+ * WHY THIS IS A CHECK AND NOT A POLICY NOTE. `--record` used to be accepted silently: it
+ * printed the agreements and exited 0 while writing nothing. A flag that parses but does
+ * nothing is how a lane learns to type a flag it believes records a baseline — and this is
+ * the one ruler in `harness/tools` that must have no baseline, because what it asserts is
+ * "these files agree with product.json", not "this number has not moved". If a rule is
+ * wrong, the rule changes in review; there is nothing to stamp over a disagreement.
+ */
+{
+  const unknown = process.argv.slice(2).filter((a) => a !== "--check")
+  if (unknown.length) {
+    die(
+      2,
+      `unknown argument(s): ${unknown.join(", ")} — this ruler has NO golden, so there is nothing to record. ${unknown.includes("--record") ? "`--record` is not a mode here: it would be a flag that looks like a baseline and does nothing, which is worse than no flag. " : ""}Run \`node harness/tools/product-surface.mjs --check\` (or with no argument). A red rule is fixed in the named file, or by changing product.json deliberately — never by re-recording.`,
+    )
+  }
 }
 function read(rel) {
   const abs = path.join(forkRoot, rel)
@@ -73,9 +108,42 @@ const check = (rule, condition, detail) => {
   else problems.push(`[${rule}] ${detail}`)
 }
 
+/**
+ * Floors for the DISCOVERY sets this gate walks.
+ *
+ * WHY. The lane prints `${ok.length} agreement(s)` and compares that number against nothing,
+ * and most agreements come from loops: every CLI file under `src/cli/**` × 2 rules (66 files
+ * today) plus the launcher, every forbidden-registry file × 6 needles (7 files), every
+ * discovered foreign publisher × 3 (4 of them), every `product.bins` entry × 2 (2 of them).
+ * Empty one of those sets — delete `product.bins`, rewrite a glob so it matches nothing,
+ * shorten a list — and the lane prints a SMALLER number of agreements and still exits 0. The
+ * count of what was asked is not evidence that it was asked; `no-foreign-publish` already
+ * pins publisher discovery by name (see the `for (const want of …)` below), and this is the
+ * same shape applied to every scan set a verdict depends on.
+ *
+ * Floors, not ceilings: a scan set growing is ordinary work (a new CLI command file adds two
+ * agreements), a scan set shrinking is a caliber change and has to be argued in review.
+ * Changing one of these numbers in this file IS that argument; lowering one to make a red
+ * lane green is the loosening this repository forbids.
+ */
+const SCAN_SET_FLOORS = {
+  bins: 2, // product.json -> bins
+  forbiddenFiles: 7, // files searched for upstream registries / package names
+  forbiddenNeedles: 6, // what they are searched for
+  cliCmdFiles: 66, // packages/opencode/src/cli/cmd/**.ts, walked recursively
+  envDiscovery: 67, // those CLI files + the shipped launcher
+  foreignPublishers: 4, // per-package publishers that must stay dead ends
+  workflows: 5, // 3 root + 2 fork workflow files the wiring corpus reads
+  selftests: 4, // selftests that must be wired to a runner
+}
+
 // ---- manifest agreement
 check("manifest-name", manifest.name === product.name, `package.json name "${manifest.name}" != product.json name "${product.name}"`)
 check("manifest-version", manifest.version === product.version, `package.json version ${manifest.version} != product.json version ${product.version}`)
+// The bins loop below produces 2 agreements per bin. If `product.bins` goes empty or loses
+// one entry, it asserts nothing and the lane simply prints fewer agreements — which reads as
+// a smaller product surface rather than as a scan that stopped happening.
+check("scan-set", (product.bins ?? []).length >= SCAN_SET_FLOORS.bins, `product.json declares ${(product.bins ?? []).length} bin(s), the floor for this gate is ${SCAN_SET_FLOORS.bins} — the manifest-bins loop would check ${product.bins ? product.bins.length * 2 : 0} fact(s) instead of ${SCAN_SET_FLOORS.bins * 2}. An empty or shortened "bins" list is a scan set shrinking, not a surface getting smaller.`)
 for (const bin of product.bins ?? []) {
   const target = manifest.bin?.[bin]
   check("manifest-bins", typeof target === "string", `product.json declares bin "${bin}" but package.json bin map has no such entry`)
@@ -184,6 +252,11 @@ const foreignPublishers = publisherFiles.filter((f) => f !== productPublisher).s
 // asserted on its own: the four known dead ends must all still be found. If one goes missing
 // because it moved, this names it; if all four go missing, the walk is broken.
 check("no-foreign-publish", publisherFiles.includes(productPublisher), "the product's own publisher (packages/opencode/script/publish.ts) is not discovered — the walk is broken")
+check(
+  "scan-set",
+  foreignPublishers.length >= SCAN_SET_FLOORS.foreignPublishers,
+  `the packages/**/script/publish.ts walk found ${foreignPublishers.length} foreign publisher(s) (${foreignPublishers.join(", ") || "none"}); this gate's floor is ${SCAN_SET_FLOORS.foreignPublishers} — each one is worth 3 agreements, so a walk that finds fewer silently checks ${3 * (SCAN_SET_FLOORS.foreignPublishers - foreignPublishers.length)} fewer things. A publisher that moved is renamed here in the same commit; a glob that stopped matching is fixed, not recorded.`,
+)
 for (const want of [
   "packages/cli/script/publish.ts",
   "packages/plugin/script/publish.ts",
@@ -226,6 +299,14 @@ const forbiddenFiles = [
 function stripComments(text) {
   return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1").replace(/^\s*#.*$/gm, "")
 }
+// Both halves of this cross product are pinned, because dropping one entry from either list
+// removes agreements without removing a fact: the loop prints 6 per file and 7 per needle, so
+// deleting `scripts/install.sh` (or the ghcr needle) from a literal list looks like a lane
+// that simply has less to say. These are the files and the endpoints that were拆 out of
+// upstream's release lanes in 私有化批次 A — the set is a claim about the product, not a
+// scratch list, and it only stays a claim if shrinking it is red.
+check("scan-set", forbiddenFiles.length >= SCAN_SET_FLOORS.forbiddenFiles, `the upstream-registry scan set holds ${forbiddenFiles.length} file(s); floor is ${SCAN_SET_FLOORS.forbiddenFiles} (${forbiddenFiles.join(", ")}) — a file dropped from the "forbiddenFiles" list stops being read for every needle at once`)
+check("scan-set", forbidden.length >= SCAN_SET_FLOORS.forbiddenNeedles, `the upstream-registry needle list holds ${forbidden.length} endpoint(s); floor is ${SCAN_SET_FLOORS.forbiddenNeedles} — a needle dropped from this list is an upstream release lane this gate no longer looks for`)
 for (const file of forbiddenFiles) {
   const text = stripComments(read(file))
   for (const [needle, what] of forbidden) {
@@ -274,13 +355,53 @@ check(
 // both ways Swift writes a case (`case hello, attach, act, observe` and
 // `case auditUI = "audit_ui" // …`); reading one identifier per line reported an engine with no
 // `attach`, `observe`, `act`, `last_evidence` or `restore`.
+//
+// THE BYTE-LEVEL HALF OF THAT CONTRACT. The same file carries `swiftBlob` — the git object hash
+// of the Swift the table was read from — and until 2026-10-16 nothing anywhere (`*.mjs`, `*.ts`,
+// `*.yml`, `*.sh`) read it: grep finds the field and zero readers. A name-only comparison re-derives
+// the *list*; the blob pins the *file it came from*, which is the difference between "these 13
+// strings appear in the enum" and "the enum I just parsed is the one that was recorded". Two
+// engines can carry the same method names with different surrounding bytes, and the split repo's
+// tests would read a table whose provenance nobody could check. So the hash is asserted here, and
+// the branch where the engine is not in the checkout is a refusal, not a note: this rule printing
+// "compares the contract against nothing" and exiting 0 was a control that reported its own
+// absence as a pass.
 {
   const contractRel = "contracts/engine-methods.json"
-  const swiftRel = path.join(repoRoot, "engine", "Sources", "GlassPaneEngine", "FrameCodec.swift")
+  const swiftRelInRepo = path.join("engine", "Sources", "GlassPaneEngine", "FrameCodec.swift")
+  const swiftRel = path.join(repoRoot, swiftRelInRepo)
   const contract = existsSync(path.join(forkRoot, contractRel)) ? JSON.parse(read(contractRel)) : null
   check("engine-methods", contract !== null, `${contractRel} is missing — the fork's tests have no engine method table to read`)
-  if (contract && existsSync(swiftRel)) {
-    const codec = readFileSync(swiftRel, "utf8")
+  if (!existsSync(swiftRel)) {
+    die(
+      2,
+      `${swiftRelInRepo} is absent from this checkout, so the engine method table cannot be re-derived and its recorded \`swiftBlob\` cannot be re-hashed — that is CANNOT OBSERVE, not agreement. This rule used to print a note and exit 0 over exactly this state, which is how a stale contract survives. Run it where the engine lives (the trunk repository; \`harness/glasspane-harness/contracts/engine-methods.json\` exists precisely because the split repository has no engine tree).`,
+    )
+  }
+  if (contract) {
+    // The blob the contract claims to have been read from, recomputed from the bytes on disk.
+    // Same object format git uses (`blob <len>\0` + content, sha1), so it equals
+    // `git hash-object <file>` for a file with no filter applied — computed here rather than
+    // shelled out because the ruler must answer from the bytes it can see.
+    const swiftBytes = readFileSync(swiftRel)
+    const observedBlob = createHash("sha1").update(Buffer.from(`blob ${swiftBytes.length}\0`)).update(swiftBytes).digest("hex")
+    const recordedBlob = String(contract.swiftBlob ?? "")
+    check(
+      "engine-methods",
+      /^[0-9a-f]{40}$/.test(recordedBlob),
+      `${contractRel} carries no 40-hex \`swiftBlob\` (${JSON.stringify(contract.swiftBlob)}) — the one byte-level tie between the shipped method table and the Swift engine is missing, so nothing here can prove the table came from the file on disk. Re-derive the contract from ${swiftRelInRepo} and record its blob.`,
+    )
+    check(
+      "engine-methods",
+      contract.source === swiftRelInRepo,
+      `${contractRel} says it was read from ${JSON.stringify(contract.source)}, but this rule hashes ${swiftRelInRepo} — a blob pinned against one file and compared against another proves nothing.`,
+    )
+    check(
+      "engine-methods",
+      observedBlob === recordedBlob,
+      `${contractRel} pins swiftBlob ${recordedBlob} but ${swiftRelInRepo} hashes to ${observedBlob} — the shipped method table and the Swift engine are no longer the same artifact. Re-derive the contract (methods AND blob) from the enum in the same commit as the engine change; do not edit either side to make this line match.`,
+    )
+    const codec = swiftBytes.toString("utf8")
     const from = codec.indexOf("public enum EngineMethod")
     const to = codec.indexOf("extension EngineMethod", from)
     check("engine-methods", from >= 0 && to > from, "FrameCodec.swift has no `public enum EngineMethod` … `extension EngineMethod` span — the table cannot be re-derived")
@@ -306,10 +427,11 @@ check(
       names.length > 0 && missing.length === 0 && extra.length === 0,
       `${contractRel} disagrees with the engine: ${missing.length} method(s) the Swift declares are absent (${missing.join(", ")}), ${extra.length} the contract names that the engine does not (${extra.join(", ")}). Re-derive it from FrameCodec.swift; do not edit the contract to match a test.`,
     )
-  } else if (contract) {
-    // No engine tree here means no ability to re-derive — which is exactly the state a stale
-    // contract survives in. Say it out loud instead of silently passing.
-    console.log("  note: engine/Sources is absent in this checkout — engine-methods compares the contract against nothing (this is NOT a re-derivation)")
+    check(
+      "scan-set",
+      names.length >= 13,
+      `the Swift enum yielded ${names.length} method(s) (${names.join(", ")}); this gate's floor is 13 — a parser that matches fewer case forms reports an engine with missing methods while still printing agreements. Fix the parser, do not re-derive a smaller table.`,
+    )
   }
 }
 check(
@@ -453,6 +575,116 @@ const notice = existsSync(path.join(forkRoot, "NOTICE")) ? readFileSync(path.joi
 check("notice-license", notice.includes(product.upstream?.tag ?? "v1.18.32"), "NOTICE does not record the pinned upstream tag")
 check("notice-license", notice.includes("MIT"), "NOTICE does not record the upstream license")
 
+// ---- the released tree is anchored to trunk's fork subtree
+// WHY THIS IS A RULE AND NOT A LINE IN A DOC. The published repository is a
+// `git subtree split` of trunk's `harness/glasspane-harness`, and until today NOTHING in this
+// repository or in its CI asserted that the tree being released IS that subtree. The only place
+// the equality appeared was a hand-typed line in `docs/release.md` (the
+// `test "$(git rev-parse split/…)" = "$(git rev-parse HEAD:harness/glasspane-harness)"` step)
+// that a human runs — or skips — at a keyboard, and SYNCLOG records it being run manually every
+// release. Skipping it is not hypothetical: measured at v0.7.10, two commits (a seven-dependency
+// security bump and the CODEOWNERS file) lived ONLY in the split repo, shipped in that release,
+// and trunk's `main` never received them — so the next split would have silently reverted a
+// security fix, and the artifact under a live version number was not reproducible from trunk at
+// all. A control a person can skip is not a control (the founding rule of this whole layer).
+//
+// What is asserted is the anchor's SHAPE, not its wording: the step must exist in `version-check`
+// (the one moment the claim can be machine-checked — after the tag is agreed, before
+// `create-release` makes anything public), must fetch TRUNK rather than the split repo (fetching
+// the split repo compares a tree against itself and is vacuously true), must compare a
+// `harness/glasspane-harness` tree hash, and must stay a `needs:` prerequisite of the jobs that
+// build and publish so the anchor cannot be orphaned into an unreachable job.
+{
+  const trunkRepo = String(product.glasspane?.engineRepo ?? "")
+  const upstreamFile = path.join(repoRoot, "harness", "upstream.json")
+  if (!trunkRepo) die(2, "product.json carries no glasspane.engineRepo — the trunk repository this release lane must be anchored to is unnamed, so the anchor cannot be checked")
+  if (!existsSync(upstreamFile)) die(2, `harness/upstream.json is absent — the subtree path the released tree must equal (${forkRoot}) is not recorded anywhere readable`)
+  const subtreePath = String(JSON.parse(readFileSync(upstreamFile, "utf8"))?.fork?.path ?? "")
+  if (!subtreePath) die(2, "harness/upstream.json carries no fork.path — which subtree of trunk is the product?")
+
+  const jobBlock = (text, id) => {
+    const lines = text.split("\n")
+    const start = lines.findIndex((l) => new RegExp(`^  ${id}:\\s*(#.*)?$`).test(l))
+    if (start < 0) return null
+    let end = lines.length
+    for (let i = start + 1; i < lines.length; i++) if (/^  [A-Za-z][\w-]*:\s*(#.*)?$/.test(lines[i])) { end = i; break }
+    return lines.slice(start, end).join("\n")
+  }
+  /** The `run:`/`env:` lines belonging to ONE step, from its `- name:` to the next step. */
+  const stepBlock = (job, name) => {
+    const lines = job.split("\n")
+    const start = lines.findIndex((l) => {
+      const m = l.match(/^\s*-\s+name:\s*(.*)$/)
+      return m !== null && m[1].trim().replace(/^["']|["']$/g, "") === name
+    })
+    if (start < 0) return null
+    const indent = (lines[start].match(/^\s*/) ?? [""])[0].length
+    let end = lines.length
+    for (let i = start + 1; i < lines.length; i++) {
+      const lead = (lines[i].match(/^\s*/) ?? [""])[0].length
+      if (/^\s*-\s+/.test(lines[i]) && lead <= indent) { end = i; break }
+      if (lead <= indent && /^\S/.test(lines[i])) { end = i; break }
+    }
+    return lines.slice(start, end).join("\n")
+  }
+  const needsOf = (job) => {
+    const m = job?.match(/^ {4}needs:\s*(\[[^\]]*\]|[^\n#]+)/m)
+    return m ? m[1].trim() : ""
+  }
+  // Comments carry the reason; only the env values and the run body can enforce anything.
+  const executable = (text) => text.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n")
+
+  const ANCHOR_STEP = "The released tree must equal trunk's fork subtree"
+  const versionCheck = jobBlock(release, "version-check")
+  check("release-anchor", versionCheck !== null, "release.yml has no `version-check` job — the release lane lost the job the tree anchor is supposed to live in")
+  const anchor = versionCheck ? stepBlock(versionCheck, ANCHOR_STEP) : null
+  check(
+    "release-anchor",
+    anchor !== null,
+    `release.yml's \`version-check\` job has no step named exactly "${ANCHOR_STEP}" — nothing in CI now asserts that the tree being released equals trunk's \`${subtreePath}\` subtree, which is the state v0.7.10 shipped in (split-only commits, trunk never told). Restore the step; do not re-add the equality as a line in docs/release.md.`,
+  )
+  if (anchor) {
+    const body = executable(anchor)
+    check("release-anchor", /git\s+fetch\b/.test(body), `"${ANCHOR_STEP}" does not run \`git fetch\` — it cannot observe trunk's tree, so it cannot compare against it`)
+    check(
+      "release-anchor",
+      body.includes(trunkRepo),
+      `"${ANCHOR_STEP}" never names the trunk repository (${trunkRepo}, from product.json -> glasspane.engineRepo) — an anchor that fetches nothing, or fetches somewhere else, proves the agreement of two unrelated things`,
+    )
+    check(
+      "release-anchor",
+      !body.includes(`github.com/${product.repo}`) && !body.includes(product.repoUrl),
+      `"${ANCHOR_STEP}" names the SPLIT repository (${product.repo}) as an operand — fetching the split repo and comparing it to the split checkout is a tautology: it is true even when trunk never received the commits being shipped`,
+    )
+    check(
+      "release-anchor",
+      /FETCH_HEAD\s*:\s*["'`]?\$?\{?TRUNK_PREFIX|FETCH_HEAD:[^"'`\s]*harness\/glasspane-harness/.test(body),
+      `"${ANCHOR_STEP}" does not read a \`harness/glasspane-harness\` tree hash out of FETCH_HEAD — the thing it must compare is the subtree at ${subtreePath}, not the trunk commit itself`,
+    )
+    check(
+      "release-anchor",
+      /rev-parse[^\n]*(\^\{tree\}|:\S+)/.test(body) && /\[\s*"?\$\w+"?\s*=\s*"?\$\w+"?\s*\]/.test(body),
+      `"${ANCHOR_STEP}" does not compare two tree hashes (it must \`git rev-parse\` both the released tree and trunk's subtree, then test them for equality) — echoing a hash is not asserting agreement`,
+    )
+    check(
+      "release-anchor",
+      /exit\s+1/.test(body),
+      `"${ANCHOR_STEP}" cannot fail: with no \`exit 1\` on the mismatch branch a divergent artifact still passes the step, which is the whole defect this step exists to close`,
+    )
+  }
+  // An anchor nobody depends on is decoration: `version-check` has to gate both the job that
+  // creates/publishes the release and the job that builds the binaries.
+  for (const gatee of ["create-release", "binaries"]) {
+    const job = jobBlock(release, gatee)
+    check("release-anchor", job !== null, `release.yml has no \`${gatee}\` job — the anchor's dependency graph changed under it`)
+    check(
+      "release-anchor",
+      job !== null && needsOf(job).includes("version-check"),
+      `\`${gatee}\` does not list \`version-check\` in its \`needs:\` (it says ${JSON.stringify(needsOf(job))}) — the tree anchor is orphaned: the release can be created and the binaries built without ever proving the artifact equals trunk's ${subtreePath} subtree`,
+    )
+  }
+}
+
 // ---- postinstall identity, read before the verdict is written
 const shimText = readCode("packages/opencode/bin/glasspane-harness")
 check("postinstall-identity", shimText.includes(`"${product.name}-" + platform`), "bin shim does not resolve the product's platform packages")
@@ -515,6 +747,14 @@ const rawLegacyRead = new RegExp(
 )
 
 const envDiscovery = [...tsFilesUnder(cliDir), launcher]
+// Both halves of this set are pinned, and this is the section the pin matters most: the loop
+// below contributes two agreements per file, so a `cliDir` that stops resolving (a moved
+// command tree, a recursive walk that returns nothing) used to shrink the lane's printed
+// agreement count from 132+ to 2 and still exit 0 — the shape this file has been caught in
+// twice. The launcher is named separately because it was once missing from the set entirely,
+// which is how the shipped binary ended up reading a product variable by its legacy name.
+check("scan-set", envDiscovery.length - 1 >= SCAN_SET_FLOORS.cliCmdFiles, `the recursive walk of ${cliDir} found ${envDiscovery.length - 1} .ts file(s); floor is ${SCAN_SET_FLOORS.cliCmdFiles} — the cli-text rule below asks each one, so a shorter walk means fewer questions, not a cleaner CLI (a set that empties is this lane reporting agreement about nothing)`)
+check("scan-set", envDiscovery.length >= SCAN_SET_FLOORS.envDiscovery && envDiscovery.includes(launcher), `the env-resolution scan set holds ${envDiscovery.length} entr(ies) including the launcher=${envDiscovery.includes(launcher)}; floor is ${SCAN_SET_FLOORS.envDiscovery} (CLI files + ${launcher}) — without the launcher the shipped binary's own env reads are unmeasured`)
 for (const rel of envDiscovery) {
   const code = readCode(rel)
   const literal = (code.match(literalPattern) ?? []).find(
@@ -549,6 +789,56 @@ check(
   `${launcher} does not name the product's own BIN_PATH variable, so an exported ${productPrefix}BIN_PATH is ignored by the shipped launcher`,
 )
 
+// ---- every selftest that guards a ruler is actually run by something
+// WHY. A test nobody runs is worse than no test: it is evidence that cannot be re-made, and it
+// reads as "someone checked this". The fork's own `ci.yml` says its installer-selftest job exists
+// to prevent exactly that failure ("测试写而无人跑"), and the same shape was live in this
+// directory: measured 2026-10-16, `ref-batch-selftest.mjs`, `kernel-pin-selftest.mjs` and
+// `verify-published-selftest.sh` were referenced by no workflow and no package.json script — the
+// only greppable hits were README/SYNCLOG prose, which is how they came to be described as
+// passing in batch notes nobody re-ran. `probe-lane-selftest.sh` and `installer-selftest.sh` are
+// the two that ARE wired, and they are listed here too so the set does not quietly shrink.
+//
+// The corpus is the runnable places ONLY (workflow steps and package.json scripts): prose in
+// harness/README.md mentioning a test must never satisfy this rule, because mentioning is not
+// running. Fixing a red here means adding a step to a lane, not adding a sentence to a doc.
+const SELFTESTS = [
+  "harness/tools/ref-batch-selftest.mjs",
+  "harness/tools/kernel-pin-selftest.mjs",
+  "harness/tools/verify-published-selftest.sh",
+  "harness/tools/probe-lane-selftest.sh",
+]
+{
+  const wiringRoots = [path.join(repoRoot, ".github", "workflows"), path.join(forkRoot, ".github", "workflows")]
+  const runnable = []
+  for (const dir of wiringRoots) {
+    if (!existsSync(dir)) continue
+    for (const f of readdirSync(dir).sort()) {
+      if (/\.ya?ml$/.test(f)) runnable.push(`${path.relative(repoRoot, path.join(dir, f))}=${readFileSync(path.join(dir, f), "utf8")}`)
+    }
+  }
+  for (const rel of ["package.json", "harness/glasspane-harness/package.json"]) {
+    const abs = path.join(repoRoot, rel)
+    if (!existsSync(abs)) continue
+    const scripts = JSON.parse(readFileSync(abs, "utf8")).scripts
+    // Only the SCRIPT VALUES count as a runner. Serializing the whole manifest would let a
+    // `"description"` or a dependency name satisfy the rule — which is the "mentioned ≠ run"
+    // mistake wearing a JSON coat.
+    runnable.push(`${rel}=${JSON.stringify(scripts ?? {})}`)
+  }
+  const corpus = runnable.join("\n")
+  check("scan-set", runnable.length >= SCAN_SET_FLOORS.workflows, `the selftest-wiring scan read ${runnable.length} runner file(s); floor is ${SCAN_SET_FLOORS.workflows} (root + fork workflows, root + fork package.json scripts) — a workflow directory that stops resolving turns every wiring assertion below into "not referenced" noise, so name the scan set first`)
+  for (const rel of SELFTESTS) {
+    const abs = path.join(repoRoot, rel)
+    check("selftest-wired", existsSync(abs), `${rel} is not in the tree — a ruler's fixed-point test that was deleted still has a lane that is believed to run it`)
+    check(
+      "selftest-wired",
+      corpus.includes(path.basename(rel)),
+      `${rel} is referenced by NO workflow step and NO package.json script in this repository — a selftest nobody runs cannot go red, so it is not a control (see 闸自己被验过吗 in harness/README.md). Wire it: add a step to .github/workflows/ci.yml's \`harness-rulers\` job (or the fork's ci.yml for anything that must run inside the subtree), then this rule is satisfied by the running, not by a sentence in a doc.`,
+    )
+  }
+}
+
 // The report and the exit are the LAST thing this script does, and there is exactly one
 // of each. Four assertions used to sit below both of them: they still ran, still pushed
 // into `problems`, and could no longer change anything — the lane printed
@@ -556,6 +846,13 @@ check(
 // second time this file has been caught that way (the first was found because the
 // agreement count went 83 → 86), so the shape of the fix is "one decision point, at the
 // bottom", not "remember to put new checks above line N".
+//
+// The count itself is now asserted, at a floor: every discovery set above is pinned
+// individually, and this is the net that catches a future rule being deleted outright
+// (including by this file's own editors). Growth is expected and free; a shrink is the
+// lane saying less than it used to, which is the one thing a green printout must not mean.
+const AGREEMENT_FLOOR = 200
+check("agreement-count", ok.length + problems.length >= AGREEMENT_FLOOR, `this run asked ${ok.length + problems.length} question(s) of the product surface; the floor is ${AGREEMENT_FLOOR} — a smaller number means a rule or a scan set left this file, and "fewer agreements" is how every silent narrowing in this lane has historically looked (83 → 86 was caught by exactly this comparison). Fix the scan; do not lower the floor.`)
 console.log(`product-surface — ${ok.length} agreement(s) held, ${problems.length} problem(s)`)
 for (const p of problems) console.error(`  ✗ ${p}`)
 if (problems.length > 0) {

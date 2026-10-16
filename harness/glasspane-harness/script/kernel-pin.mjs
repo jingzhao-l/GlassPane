@@ -30,11 +30,16 @@
  * The thing that goes stale is the *ecology*: iterate ships a kernel that answers a
  * scenario better than ours does, and if nobody looks, the two harnesses quietly stop
  * sharing a contract. The probe asks the registry for the latest version, reports drift,
- * and changes nothing. It is a finding for a human, not a CI failure — our bytes are
- * exactly what the manifest declares, which is what --check enforces.
+ * and changes nothing. A DRIFT is a finding for a human, not a CI failure — our bytes are
+ * exactly what the manifest declares, which is what --check enforces — so drift exits 0.
+ * NOT being able to ask is a different fact and takes exit 2: the probe's only consumer is
+ * a scheduled job whose step verdict is this exit code, and an alarm that goes green when
+ * it measured nothing is an alarm nobody has.
  *
  * Exit codes: 0 ok, 1 the installed kernel no longer matches its provenance, 2 cannot
- * measure (no lockfile, no installed package, no registry reach).
+ * measure (no lockfile, no installed package, no registry reach). For --probe that means
+ * 0 = the registry was asked and answered (same version or DRIFTED), 2 = the question could
+ * not be asked, or the answer was empty.
  */
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
@@ -269,20 +274,32 @@ if (mode === "--check") {
 }
 
 // --probe: has the registry published a newer kernel than the one we pinned?
+//
+// The exit code is the whole contract, because the probe's only consumer is the weekly
+// `kernel-drift` job in .github/workflows/harness-contract.yml, whose `run:` verdict IS this
+// number: 0 = the registry was asked and answered (same version or DRIFTED — a drift is a
+// finding for a human, never a CI red), 2 = the question could not be asked. Until 2026-10-16
+// the two failure paths below printed "probe skipped, not a failure" and exited 0, so blocked
+// egress or a missing npm kept the only drift alarm permanently green — the same
+// reports-green-when-it-measured-nothing shape this file's own header (exit 2 = cannot measure)
+// says it does not have.
 let latest
 try {
   latest = execFileSync("npm", ["view", PACKAGE, "version"], { encoding: "utf8" }).trim()
-} catch {
-  console.log(`kernel-pin: could not reach the registry for ${PACKAGE} — probe skipped, not a failure`)
-  process.exit(0)
+} catch (error) {
+  const reason = error instanceof Error && error.message ? error.message.split("\n")[0] : "unknown error"
+  die(2, `could not ask the registry for ${PACKAGE} — the drift question was NOT answered (${reason}). ` +
+    `A probe that cannot measure must not read as green: check npm on PATH and egress to the registry, then re-run.`)
 }
 if (!latest) {
-  console.log(`kernel-pin: registry answered nothing for ${PACKAGE} — probe skipped, not a failure`)
-  process.exit(0)
+  die(2, `the registry answered nothing for ${PACKAGE} — no version was read, so drift cannot be judged. ` +
+    `Re-run the probe; if it repeats, ask the kernel's owner whether the package is still published.`)
 }
 if (latest === manifest.version) {
   console.log(`kernel-pin: ${PACKAGE}@${manifest.version} is the published latest.`)
 } else {
+  // DRIFTED is exit 0 on purpose: our bytes are still exactly what the manifest declares
+  // (--check proves that), and a moved upstream kernel is a decision for a human, not a red CI.
   console.log(`kernel-pin: DRIFTED — ${PACKAGE} publishes ${latest}, we pin ${manifest.version}`)
   console.log(
     "  Our installed bytes are still exactly what the manifest declares (--check proves that), but the\n" +

@@ -1,4 +1,5 @@
 import { Config, ConfigProvider, Context, Effect, Layer, Option } from "effect"
+import { read } from "@opencode-ai/core/flag/flag"
 import { ConfigService } from "@/effect/config-service"
 
 const bool = (name: string) => Config.boolean(name).pipe(Config.withDefault(false))
@@ -72,7 +73,32 @@ export const layer = (overrides: Partial<Info> = {}) =>
     }),
   ).pipe(Layer.provide(emptyConfigLayer))
 
-export const node = LayerNode.make({ service: Service, layer: Service.layer.pipe(Layer.orDie), deps: [] })
+// [gp] Product: an env name resolves in exactly one place — packages/core/src/flag/flag.ts
+// `read()`, which answers for the product's own name first and the legacy upstream name second.
+// Every `Config.boolean("OPENCODE_X")` above asks the active ConfigProvider for that single
+// literal name, so the product's spelling of these knobs never reached this lane: `--pure` is
+// written as GLASSPANE_HARNESS_PURE by the CLI middleware (src/index.ts), and the
+// customize-harness skill tells users to export GLASSPANE_HARNESS_DISABLE_DEFAULT_PLUGINS and
+// GLASSPANE_HARNESS_DISABLE_EXTERNAL_SKILLS. Both did nothing here while the skill promised them.
+//
+// The resolver answers the lookup and the provider that was already active stays the fallback, so
+// Effect keeps owning names, defaults and parsing — and a test-supplied ConfigProvider still
+// resolves, which is what `layer(overrides)` and the existing tests rely on. The lookup happens
+// per path rather than at module load, because the middleware sets GLASSPANE_HARNESS_PURE after
+// this module has been imported; a module-load read would be as dead as the old one.
+const resolverLayer = ConfigProvider.layerAdd(
+  ConfigProvider.make((path) => {
+    const value = read(path.map(String).join("_"))
+    return Effect.succeed(value === undefined ? undefined : ConfigProvider.makeValue(value))
+  }),
+  { asPrimary: true },
+)
+
+export const node = LayerNode.make({
+  service: Service,
+  layer: Service.layer.pipe(Layer.provide(resolverLayer), Layer.orDie),
+  deps: [],
+})
 
 export * as RuntimeFlags from "./runtime-flags"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"

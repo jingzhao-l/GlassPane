@@ -11,7 +11,7 @@ import { Flag } from "@opencode-ai/core/flag/flag"
 import { Auth } from "../auth"
 import { Env } from "../env"
 import { applyEdits, modify } from "jsonc-parser"
-import { InstallationLocal, InstallationVersion } from "@opencode-ai/core/installation/version"
+import { InstallationLocal, PluginPackageVersion } from "@opencode-ai/core/installation/version"
 import { existsSync } from "fs"
 import { isRecord } from "@/util/record"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -171,6 +171,14 @@ function writableGlobal(info: Info) {
   // When a user changes config from a value back to default in the Desktop app, we don't want to leave a blank `"shell": "",` key
   if ("shell" in next && next.shell === "") return { ...next, shell: undefined }
   return next
+}
+
+// [gp] Product: the plugin API a project receives is published under upstream's release
+// numbers, so a shipped build asks for the version this fork pins — asking for our own
+// product version asks npm for a version that does not exist, which failed silently in the
+// background and left the user's plugin import unresolved.
+export function pluginDependency(local: boolean) {
+  return { name: "@opencode-ai/plugin", version: local ? undefined : PluginPackageVersion }
 }
 
 const layer = Layer.effect(
@@ -476,12 +484,7 @@ const layer = Layer.effect(
 
           const dep = yield* npmSvc
             .install(dir, {
-              add: [
-                {
-                  name: "@opencode-ai/plugin",
-                  version: InstallationLocal ? undefined : InstallationVersion,
-                },
-              ],
+              add: [pluginDependency(InstallationLocal)],
             })
             .pipe(
               Effect.exit,

@@ -63,7 +63,10 @@
  *             --ack-missing-product-file is passed, which records the hole and prints
  *             it every later run.
  *   --check   fail on any unrecorded hit, lineage growth, or a shrink of the scanned
- *             coverage; exit 2 if nothing was scanned
+ *             coverage; exit 2 if nothing was scanned. A baseline field the golden is
+ *             supposed to carry (`lineage.occurrences`, `lineage.filesScanned`, `hits`)
+ *             that is missing or not a number is RED too: the comparison stops happening,
+ *             which is the ruler losing its marks, not the subject getting cleaner.
  *
  * This is a ratchet: a legitimate new hit must be recorded in the same commit and
  * is then visible in review. Removing hits is always allowed.
@@ -241,15 +244,31 @@ function scan() {
     "packages/app/src",
     "packages/server/src",
   ]
-  // Files where the upstream identifier is the *subject* rather than the product's
-  // own name: the code that migrates away from it, or that still accepts it. Each
-  // entry is a decision, not a hole — a new one has to be argued for in review.
-  const LEGACY_NAME_ALLOWANCE = [
-    "packages/core/src/database/database.ts", // renames opencode.db on first run
-    "packages/opencode/src/config/config.ts", // reads the legacy project config name
-    "packages/opencode/src/config/tui-migrate.ts", // migrates the legacy tui config
-    "packages/tui/src/context/theme.tsx", // migrates a stored upstream theme id
-  ]
+  // Files where the upstream identifier is the *subject* rather than the product's own
+  // name: the code that migrates away from it, or that still accepts it. Each entry is a
+  // decision, not a hole — a new one has to be argued for in review.
+  //
+  // The allowance is PER RULE. It used to be a flat list consulted before the rule loop,
+  // so naming a file exempted it from ALL FOUR rules: one justified legacy database name
+  // bought a free first-party-gateway string, a free upstream `X-Title: opencode` header, a
+  // free third-party `$schema` write in the same file. The exemption is supposed to buy
+  // exactly the one legacy name the file argues for and nothing else, so each file is now
+  // listed under the rule it actually justifies — measured, not assumed: on 2026-10-16
+  // database.ts fires only `product-file-name`, and config.ts / tui-migrate.ts / theme.tsx
+  // fire only `first-party-gateway` (that is what "the theme id", "the legacy project
+  // config name" and the migration's subject string are in the literal sense).
+  const LEGACY_NAME_ALLOWANCE = {
+    "product-file-name": [
+      "packages/core/src/database/database.ts", // renames opencode.db on first run
+    ],
+    "first-party-gateway": [
+      "packages/opencode/src/config/config.ts", // reads the legacy project config name
+      "packages/opencode/src/config/tui-migrate.ts", // migrates the legacy tui config
+      "packages/tui/src/context/theme.tsx", // migrates a stored upstream theme id
+    ],
+    "wire-identity": [],
+    "foreign-schema-write": [],
+  }
   const shippedFiles = []
   const walkSrc = (dir) => {
     if (!existsSync(path.join(forkRoot, dir))) return
@@ -291,10 +310,17 @@ function scan() {
         "the user's own files or the LAN service are named for the upstream project",
       ],
     ]) {
-      // A legacy name is legitimate where the code migrates *from* it or still
-      // accepts it as an input; those files are listed explicitly above.
-      if (LEGACY_NAME_ALLOWANCE.includes(rel)) continue
-      if (re.test(text)) hits.push({ file: rel, rule, count: 1 })
+      // A legacy name is legitimate where the code migrates *from* it or still accepts
+      // it as an input — and only for the rule that name belongs to (see the map above).
+      if ((LEGACY_NAME_ALLOWANCE[rule] ?? []).includes(rel)) continue
+      // Count the matches, do not note that there is one. `re.test(text)` + `count: 1`
+      // meant the baseline recorded a file as a single hit and every further match in it
+      // was then invisible: `hit.count > prior.count` (below) compares 1 against 1, so an
+      // already-recorded file could grow from one gateway string to a hundred and stay
+      // green — the ratchet only ever bit the *first* leak in a new file. Matching globally
+      // makes the recorded number the thing the rule is named for.
+      const matches = text.match(new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`)) ?? []
+      if (matches.length > 0) hits.push({ file: rel, rule, count: matches.length })
     }
   }
   // the built-in skill is injected into every session: its name and body are surface
@@ -359,13 +385,13 @@ function scan() {
 /** Coverage, stated every run. The lineage number is a SUM, so it only means
  *  something against a baseline that summed over the same amount of tree; naming the
  *  file count next to the occurrence count is what makes a shrink visible instead of
- *  readable as progress. A baseline without a coverage figure is said so out loud
- *  rather than treated as a pass. */
+ *  readable as progress. A baseline without a coverage figure is stated here AND reported
+ *  red by `coverageProblem` — "cannot be compared" is a broken ruler, not a clean run. */
 function reportCoverage(golden) {
   const now = observed.lineage.filesScanned
   const was = golden?.lineage?.filesScanned
   if (!Number.isFinite(was)) {
-    console.log(`  lineage coverage: this run scanned ${now} file(s); the baseline records no coverage figure, so coverage cannot be compared — re-record to make it checkable`)
+    console.log(`  lineage coverage: this run scanned ${now} file(s); the baseline records no coverage figure, so coverage cannot be compared${mode === "check" ? " — reported red below, because an uncounted tree is not a cleaner tree" : " (first record of this baseline)"} — re-record to make it checkable`)
     return
   }
   const delta = now - was
@@ -379,14 +405,24 @@ function reportCoverage(golden) {
  *  off. */
 function coverageProblem(golden) {
   const was = golden?.lineage?.filesScanned
-  if (!Number.isFinite(was)) return null
+  // A baseline field that is not there is not a pass: the comparison the rule exists to make
+  // silently stops happening, and `undefined >= anything` is false in every direction, so the
+  // run reports clean over a rule that measured nothing. `surface-semantics.mjs` (filesScanned)
+  // and `fork-diff.mjs` (the hash-detail lists beside a name list) are RED on exactly this
+  // shape, and so is this file for a `missing-product-file`. A golden that lost the number is
+  // the golden-equivalent of a ruler with no marks on it.
+  if (!Number.isFinite(was)) {
+    return `lineage coverage: the golden carries no \`filesScanned\` baseline (recorded ${JSON.stringify(was)}), so this rule cannot prove what it scanned — a lineage count without its coverage figure is a sum over an uncounted tree. Re-record so the coverage travels with the number; "cannot compare" is not "no drift"`
+  }
   const now = observed.lineage.filesScanned
   if (now >= was) return null
   const dropped = was - now
   const occ = observed.lineage.occurrences
-  const howToReadIt = occ < golden.lineage.occurrences
-    ? `lineage reads ${golden.lineage.occurrences} → ${occ}; that is NOT brand progress, it is ${dropped} fewer file(s) being looked at`
-    : `lineage ${golden.lineage.occurrences} → ${occ}`
+  const recordedOcc = Number.isFinite(golden.lineage?.occurrences) ? golden.lineage.occurrences : "(no baseline)"
+  const howToReadIt =
+    Number.isFinite(golden.lineage?.occurrences) && occ < golden.lineage.occurrences
+      ? `lineage reads ${recordedOcc} → ${occ}; that is NOT brand progress, it is ${dropped} fewer file(s) being looked at`
+      : `lineage ${recordedOcc} → ${occ}`
   return `lineage coverage shrank ${was} → ${now} file(s) (−${dropped}): ${howToReadIt}. What this rule scans is part of the caliber — restore the subtree, or re-record and say what left the tree`
 }
 
@@ -437,10 +473,17 @@ if (mode === "record") {
   // which CHANGELOG/CI text carries the literal and why it is not new product surface — was
   // being deleted by the very act that raised the number. A ratchet whose justification is
   // erased on every turn is indistinguishable from one that was never justified.
-  const priorOcc = prior?.lineage?.occurrences ?? 0
+  const priorOcc = prior?.lineage?.occurrences
   const noteArgIndex = process.argv.indexOf("--lineage-note")
   const noteArg = noteArgIndex > -1 ? process.argv[noteArgIndex + 1] : undefined
-  if (observed.lineage.occurrences > priorOcc && !noteArg) {
+  // The growth rule needs a floor to grow past. A golden that carries no number is the case
+  // `--check` reports red and tells the operator to re-record, so `--record` must not demand a
+  // justification for a baseline it cannot compare against (that would be a deadlock: "re-record"
+  // refused by "say why it grew relative to nothing"). Recording anyway is what closes the hole;
+  // the fact that this record establishes the number is stated out loud.
+  if (!Number.isFinite(priorOcc)) {
+    console.error(`brand-surface: this record ESTABLISHES the lineage baseline (${JSON.stringify(priorOcc)} → ${observed.lineage.occurrences}); the growth ratchet compares against it from the next run`)
+  } else if (observed.lineage.occurrences > priorOcc && !noteArg) {
     console.error(`brand-surface: refusing to record — lineage occurrences grew ${priorOcc} → ${observed.lineage.occurrences}`)
     console.error("  A growth needs a reason that outlives this run. Say where the extra literal is and why it is")
     console.error("  attribution rather than new product surface:")
@@ -460,14 +503,31 @@ if (!existsSync(goldenFile)) {
 }
 const golden = JSON.parse(readFileSync(goldenFile, "utf8"))
 const problems = []
+// `hits` is the record of what the per-file rules are allowed to find. Without the array the
+// loop below compares every observed hit against "no baseline" — which happens to be red, and
+// so is honest — while an EMPTY observed list compares against nothing at all and the rule that
+// is supposed to notice a new leak silently stops existing. Say which field is missing rather
+// than letting the absence read as a clean run.
+if (!Array.isArray(golden.hits)) {
+  problems.push(`the golden carries no \`hits\` array (${JSON.stringify(golden.hits)}), so this run cannot tell "no brand drift" from "the baseline stopped recording drift" — re-record`)
+}
 for (const hit of observed.hits) {
   const prior = golden.hits?.find((h) => h.file === hit.file && h.rule === hit.rule)
   if (!prior) problems.push(`${hit.file}: ${hit.rule} ×${hit.count} is new (no baseline)`)
   else if (hit.count > prior.count) problems.push(`${hit.file}: ${hit.rule} grew ${prior.count} → ${hit.count}`)
 }
-if (observed.lineage.occurrences > golden.lineage.occurrences) {
+// A rule the golden is supposed to carry cannot be satisfied by a baseline that stopped
+// carrying its number: `9626 > undefined` is false, so emptying `lineage` used to turn the
+// bloodline ratchet off and still exit 0 (measured 2026-10-16 in an overlay: "lineage 9626
+// (baseline undefined) … coverage cannot be compared", exit 0). `fork-diff.mjs:197-204` and
+// `surface-semantics.mjs:277` are RED on exactly this shape — a missing baseline field is the
+// ruler losing its marks, not the subject getting cleaner.
+const recordedOcc = golden.lineage?.occurrences
+if (!Number.isFinite(recordedOcc)) {
+  problems.push(`lineage occurrences: the golden stopped carrying the number this rule compares (recorded ${JSON.stringify(recordedOcc)}), so "bloodline may shrink, never multiply" has no floor to shrink from — re-record against the tree; a missing baseline is reported red, not waived`)
+} else if (observed.lineage.occurrences > recordedOcc) {
   problems.push(
-    `lineage occurrences grew ${golden.lineage.occurrences} → ${observed.lineage.occurrences} (bloodline names may shrink, never multiply)`,
+    `lineage occurrences grew ${recordedOcc} → ${observed.lineage.occurrences} (bloodline names may shrink, never multiply)`,
   )
 }
 if (observed.lineage.filesScanned === 0) {
@@ -494,5 +554,5 @@ if (problems.length > 0) {
   for (const p of problems) console.error(`  ✗ ${p}`)
   process.exit(1)
 }
-console.log(`brand-surface: no unrecorded brand drift; lineage ${observed.lineage.occurrences} (baseline ${golden.lineage.occurrences}) over ${observed.lineage.filesScanned} scanned file(s) (baseline ${golden.lineage?.filesScanned ?? "unknown"})`)
+console.log(`brand-surface: no unrecorded brand drift; lineage ${observed.lineage.occurrences} (baseline ${recordedOcc}) over ${observed.lineage.filesScanned} scanned file(s) (baseline ${golden.lineage?.filesScanned ?? "unknown"})`)
 

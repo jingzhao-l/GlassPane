@@ -6,6 +6,7 @@ import { Effect, Option } from "effect"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { Global } from "@opencode-ai/core/global"
 import { Npm } from "@opencode-ai/core/npm"
+import { NpmConfig } from "@opencode-ai/core/npm-config"
 import { which } from "@opencode-ai/core/util/which"
 import { tmpdir } from "./fixture/tmpdir"
 
@@ -150,5 +151,50 @@ describe("Npm.install", () => {
 
     await expect(fs.stat(path.join(tmp.path, "node_modules", "prod-pkg"))).resolves.toBeDefined()
     await expect(fs.stat(path.join(tmp.path, "node_modules", "dev-pkg"))).rejects.toThrow()
+  })
+})
+
+describe("Npm.install registry", () => {
+  // The project directory is untrusted input: a repository can carry a `.npmrc`, and the
+  // product writes plugin API dependencies into that directory when it opens it. `omit` above
+  // proves npm-config really is read from the project, so this is the other half — the
+  // registry that decides which bytes land there is not the project's to choose.
+  test("a project .npmrc does not pick the registry the install comes from", async () => {
+    await using tmp = await tmpdir()
+    await writePackage(tmp.path, { name: "fixture" })
+
+    let hits = 0
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        hits++
+        return Response.json({ name: "@gp-pinning-probe/none", "dist-tags": { latest: "1.0.0" } })
+      },
+    })
+    try {
+      await Bun.write(path.join(tmp.path, ".npmrc"), `registry=http://127.0.0.1:${server.port}/\n`)
+      // Without this the assertions below could pass on a `.npmrc` nobody honoured.
+      const resolved = await Effect.runPromise(NpmConfig.registry(tmp.path))
+      expect(resolved).toBe(`http://127.0.0.1:${server.port}`)
+
+      const outcome = await Effect.gen(function* () {
+        const npm = yield* Npm.Service
+        return yield* npm.install(tmp.path, { add: [{ name: "@gp-pinning-probe/none", version: "1.0.0" }] })
+      })
+        .pipe(
+          Effect.scoped,
+          Effect.provide(npmLayer(path.join(tmp.path, "cache"))),
+          Effect.matchCause({ onFailure: (cause) => String(cause), onSuccess: () => "installed" }),
+          Effect.runPromise,
+        )
+
+      expect(hits).toBe(0)
+      expect(outcome.toLowerCase()).not.toContain(`127.0.0.1:${server.port}`)
+      // The install has to have actually reached a registry: an outcome that names none means
+      // this control measured nothing, which is the failure shape this lane refuses elsewhere.
+      expect(outcome).toMatch(/registry/i)
+    } finally {
+      server.stop()
+    }
   })
 })
