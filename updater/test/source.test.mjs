@@ -377,7 +377,12 @@ test('an endless trickle still hits the ceiling, so the daily job cannot hang fo
       getReader: () => ({
         read: async () => {
           if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' })
-          await new Promise((resolve) => setTimeout(resolve, 2))
+          // 第一块**不等时钟**就交出去。原来每一块都 `await setTimeout(2)`，于是"这一段确实收到过
+          // 字节"这条前提自己也要赢一次调度：负载 42 的那趟里第一个 2ms 定时器被拖过了 60ms 的总
+          // 上限，`produced` 还是 0，那条前提断言就红了——它红得正确（那时测的确实不是滴流撞上限，
+          // 而是一开始就没数据），但一条只在机器忙时才红的对照是坏对照。判据是"永远在滴、永不结束"，
+          // 那就让第一块必然落地，之后的每一块继续走 2ms，上限照样在"还有下一块"的时候把它撞响。
+          if (index > 0) await new Promise((resolve) => setTimeout(resolve, 2))
           if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' })
           index += 1
           produced = index
