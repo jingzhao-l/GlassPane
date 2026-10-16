@@ -1,6 +1,6 @@
 {
   "name": "@glasspane/monorepo",
-  "version": "1.16.2",
+  "version": "1.16.3",
   "private": true,
   "description": "GlassPane monorepo: TS mcp-shell + iterate kernel + macOS Swift engine (daemon + settings GUI) + one-command installer",
   "workspaces": [

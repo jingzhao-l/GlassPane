@@ -825,3 +825,32 @@ Swift Testing **15 tests in 2 suites passed**）；`swift test --package-path en
 `node harness/tools/tool-surface.mjs --check` 0（no growth past the recorded baseline）。
 EOF
 echo "appended: $(wc -l < /Volumes/Eng-Dev/.worktrees/gp-daily-main-20261015/engine/smoke.md) lines total"
+### 8. v1.16.3 这趟门禁逐字复跑的实际计数（15 条全绿）
+
+起因写在 `CHANGELOG.md` 的 1.16.3 条目里：`v1.16.2` 的 tag 挡住了自己（`gh` 在 Actions 里读
+`GH_TOKEN` 而不是 runner 注入的 `GITHUB_TOKEN`，run 38855034310 fail-closed），所以那一格是
+**没有发布物的空号**，修复随 1.16.3 发出。
+
+`npm ci` 0；`npm run build` 0；`npm test --workspaces --if-present` 0
+（kernel **229/229**、mcp-shell **491/491**、installer **172 条 = 171 pass + 1 skipped**、
+updater **534/534**；四段各自 0 fail）；`check-version` 0（版本线一致 1.16.3）；
+`check-doc-links` 0（25 份 / 227 条仓库内 / 26 条外链不请求）；`check-workflows --self-test` 0
+（**11 档各自被证红**）；`check-workflows` 0（5 份 workflow clean）；`swift build` 0；
+`swift test --package-path engine` 0（XCTest **Executed 1074 tests, 3 skipped, 0 failures**；
+Swift Testing **15 tests in 2 suites**）；`swift test --package-path engine/probe` 0
+（**29 tests, 0 failures**）；`pytest -q bridge` 0（**79 passed**）；`sh -n install.sh` 0；
+信号闸 0（`SIGNAL SMOKE OK`，三次起停各自跑在本脚本点名、由 daemon 自己创建并收紧的状态根里）；
+发布形态 0（**29 个文件**，打包 273.4 kB / 展开 931.3 kB）；`tool-surface --check` 0
+（no growth past the recorded baseline）。
+
+installer 那一段这一趟是 **1 条 skipped**，而同一条命令在本轮另外两趟里是 0 条与 2 条——实测三趟
+分别是：`v1.16.1` 那棵树 170 pass + 2 skipped、`v1.16.2` 那棵树 172 + 0、本树 171 + 1。那是按
+平台/环境条件**主动跳过**的用例，不是丢失；把三趟的数都写出来，是因为"pass 数刚好等于 tests 数"
+这种写法会把跳过洗掉，而读者无从知道少了什么。
+
+信号闸在这趟之前刚改过一次形式（§5 那一节的第三条同源）：`consumed`/`partial` 从前是发完信号
+立刻看现场，而 stub 的处理器是异步的，负载 25 时读到的是还没 unlink 的状态，于是"诊断说错"这句
+话冤枉了一把本来正确的判据。改法是先等夹具走到**它自己声明的那种**现场再问诊断，两类失败各说各话；
+两条出路都实测能红（stub 不 unlink ⇒ "夹具没到位"；诊断改坏 ⇒ "诊断与现场不符"），没有放宽超时。
+EOF
+wc -l /Volumes/Eng-Dev/.worktrees/gp-daily-main-20261015/engine/smoke.md

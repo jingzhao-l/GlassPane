@@ -199,7 +199,7 @@ npx glasspane-install
 #    mean to install an unreleased tree. The tag below is not verified by eye: it is a derived site
 #    owned by `scripts/version-sites.mjs`, and `scripts/check-doc-links.mjs` reddens when it stops
 #    matching install.sh.
-git clone --branch v1.16.2 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
+git clone --branch v1.16.3 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
 
 `GLASSPANE_REF=<tag>` selects another release; `GLASSPANE_REF=main` tracks the trunk, which is not a
