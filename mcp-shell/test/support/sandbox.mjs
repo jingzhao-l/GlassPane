@@ -85,11 +85,12 @@ export function privateSandbox(prefix = 'gp-sandbox-') {
     dir,
     dispose() {
       fs.rmSync(dir, { recursive: true, force: true })
-      try {
-        if (fs.existsSync(SANDBOX_BASE) && fs.readdirSync(SANDBOX_BASE).length === 0) {
-          fs.rmdirSync(SANDBOX_BASE)
-        }
-      } catch { /* 并发收尾时目录非空属正常 */ }
+      // 基目录**不收**：`node --test test/*.test.mjs` 会把每个测试文件放进自己的进程里并发跑，
+      // 而这些进程共用同一个 `.gp-test-sandbox`。最后一个收尾的人把空基目录 rmdir 掉， sibling
+      // 的下一次 `mkdtemp` 就直接 ENOENT——CI run 38862162240 的 mcp-shell 那条红就是这个形状
+      // （`ENOENT: no such file or directory, mkdtemp '…/mcp-shell/.gp-test-sandbox/gp-registry-dirsync…'`），
+      // 本地同一棵树却是绿的：一个靠调度赢的夹具不是夹具。基目录被 .gitignore 挡住，留着一个空
+      // 目录没有任何代价；抽走别人正在用的目录有。
     },
   }
 }
