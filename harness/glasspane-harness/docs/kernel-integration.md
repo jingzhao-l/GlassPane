@@ -31,8 +31,10 @@ kernel instead of in each shell.
 
 The kernel is **not vendored**. `packages/opencode/vendor/kernel/` (25 files — 11 sources,
 3 schemas, 11 fixtures) was deleted, and `packages/opencode` now resolves `iterate-kernel`
-as a normal dependency at an exact pin (`0.1.3`), recorded with registry resolution and
-integrity in `bun.lock`.
+as a normal dependency at an exact pin — the number itself lives in
+`contracts/kernel-pin.json` and `bun.lock`, not in this sentence, which was stale within a
+week of being written. Resolution comes from the registry, with integrity recorded in
+`bun.lock`.
 
 Two gates carry what `kernel-vendor.mjs` used to carry — one replaced outright, one rewritten
 to aim at the installed package:

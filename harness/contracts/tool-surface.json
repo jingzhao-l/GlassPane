@@ -7,7 +7,7 @@
     "fork": "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted, and one deleted line excuses at most one re-added line (pairing is one-to-one, so 40 copies of a rebranded line bill 39)",
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
-  "observedAt": "2026-10-16",
+  "observedAt": "2026-10-18",
   "engineLoc": 26476,
   "engineFiles": 63,
   "surfaces": {
@@ -1143,7 +1143,7 @@
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
         "package": "iterate-kernel",
-        "version": "0.1.7"
+        "version": "0.1.8"
       }
     }
   },

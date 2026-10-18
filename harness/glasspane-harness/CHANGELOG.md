@@ -10,7 +10,30 @@ contract does not).
 
 ## [Unreleased]
 
-<!-- 内容归入下一版；此处留空以备下一批。 -->
+### Changed — 内核依赖追到 0.1.8：`breakerLevel` 缺席从此是一个合法答案
+
+- **依赖再升 `iterate-kernel@0.1.8`**（`RoundState.breakerLevel` 改成可选：缺席读作"这个跑没有
+  断路器通道"，不再等同于 `0`——`0` 断言的是"有断路器且未跳闸"）。fork 自己不读 `convergence`
+  规则，所以 `packages/opencode/src` 一字未动；动的是契约语料与两份记录文件。
+- **红先绿后**：`kernel-conformance` 在 `--record` 之前当场红在唯一一条移动了的判决上——
+  `convergence.ok-01.json` 摘要 `28f8a3d93028` → `d001e5209e55`，并点名 "behaviour moved"；其余
+  15 份逐字未动。`kernel-pin --record` 重记 26 份契约档案（版本 + lock integrity + 逐文件 sha256）。
+- **父仓镜像 `kernel/` 按 canonical 追平**（`tools/sync-kernel.sh --target=repo`，源
+  `iterate-skill@9d6d9036`）。变的仍只有那三份收敛文件：`fixtures/convergence.ok-01.json`、
+  `schemas/convergence-round-state.schema.json`、`src/convergence.ts`。镜像的 `fixtures|schemas`
+  与 pin 逐文件核过（`scripts/check-kernel-corpus.mjs`：26 份同源）——Swift 的 C35 腿
+  `TestSupport.swift:467` 直读 `kernel/fixtures`，镜像落后就等于引擎侧对新发布的契约全盲。
+  本轮对引擎无影响，这一点是查出来的不是推断的：Swift 按名字取语料、不遍历目录，且
+  `engine/Tests` 里没有一处引用 `convergence`。
+- 实测：镜像 kernel 231 pass、mcp-shell 495 pass、installer 172 pass、fork 侧
+  `glasspane-kernel.test.ts` 40 pass；`kernel-pin --check`、`kernel-conformance`（16 份）、
+  `check-kernel-corpus` 与六把尺子全绿，面 A 9609 LOC / 面 B 8793 LOC 一字未动。
+  updater 的 `scripts-assert-ci-green.test.mjs::等满预算按未验证拒绝，不是放行` 在四套并跑时红过
+  一次（`pending 就该反复问，实得 1 次`——轮询次数被负载吃掉），单独复跑 14/14 绿；与内核无关，
+  记在这里而不是抹掉。
+- 本批没做完的（点名）：`mcp-shell` 仍挂在 `file:../kernel` 上，所以镜像的 `src/`+`test/`+
+  `package.json` 还得靠 `sync-kernel.sh` 一份份抄；Step 0b 的正题——把这条腿换成已发布的
+  `iterate-kernel`、让镜像只剩那份被 pin 钉住的语料——没在本批做。
 
 ## [0.8.2] - 2026-10-16
 
