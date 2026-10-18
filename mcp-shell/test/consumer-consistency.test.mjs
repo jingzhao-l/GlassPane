@@ -2,15 +2,18 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 
+// The published artifact, not the repository's mirror of it: this gate's whole claim is that
+// the bytes a third-party consumer installs answer the same questions as the daemon and the
+// shell. `scripts/check-kernel-corpus.mjs` is what proves `kernel/{fixtures,schemas}` still
+// equals this package's corpus, so the fixtures below and these imports cannot be two sources.
+import { EVIDENCE_PACK_JSON_SCHEMA } from "iterate-kernel/schemas";
+import { SELECTOR_MAX_LENGTH, SelectorSchema } from "iterate-kernel/evidence-pack";
 import {
-  EVIDENCE_PACK_JSON_SCHEMA,
-  SELECTOR_MAX_LENGTH,
-  SelectorSchema,
   parseEvidencePack,
   parseEvidencePackRead,
   parseDecisionLogEntry,
   parseRecipeConfig,
-} from "@iterate/kernel";
+} from "iterate-kernel/parse";
 
 import { canonicalJson } from "../dist/canonical.js";
 import { EvidenceAuditSession } from "../dist/audit-session.js";
@@ -1462,7 +1465,7 @@ const EVIDENCE_REPORT_FILE = "../../engine/Sources/GlassPaneEngine/EvidenceRepor
  * `tools.test.mjs` already reads these for the shell's own request path; this reads them
  * for the *published* contract, which is the half that had no gate: the kernel's schema
  * and zod are what a Swift `Codable`, an HTTP gateway and any third-party consumer of
- * `@iterate/kernel` all take their rule from.
+ * `iterate-kernel` all take their rule from.
  *
  * The per-field verdict comes from `test/support/param-validation-rules.mjs` — the whole
  * `optSelector` body, read field by field — because the version that looked only inside

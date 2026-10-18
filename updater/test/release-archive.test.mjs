@@ -451,12 +451,15 @@ test('归档的字节取自 HEAD 的树，不是取自磁盘——脏工作树�
   }
 })
 
-test('发布档拒绝 tsc 形状的 dist：它入口裸 import 未声明的 @iterate/kernel，装上去就跑不起来', () => {
+test('发布档拒绝 tsc 形状的 dist：它入口裸 import 只在构建期声明的 iterate-kernel，读的是没人对照过的契约', () => {
   // 我自己踩出来的：归档取的是磁盘上的 mcp-shell/dist。bundle 之后只要再跑一次 `npm test`
   // （mcp-shell 的 test 脚本 = `npm run build && node --test`，tsc 会把 dist 重铺），dist 就退回
-  // 逐模块形状；那形状里入口仍 import "@iterate/kernel"，而 glasspane-mcp 的 dependencies 只有 zod
-  // （kernel 是 devDependency 的 file:../kernel）。pack 出来照样装、照样报版本号，第一条 MCP 请求
-  // 就 ERR_MODULE_NOT_FOUND。`npm pack --dry-run` 与 publish-shape lane 全看不见——dry-run 不装不跑。
+  // 逐模块形状；那形状里入口仍 import "iterate-kernel/…"，而 glasspane-mcp 的 dependencies 只有 zod
+  // （内核是 devDependency，捆进 bundle 里）。2026-10-18 之前这条的后果是 ERR_MODULE_NOT_FOUND
+  // （内核当时是仓内 file:../kernel，装好的包里当然没有它）；内核上了 registry 之后后果变**安静**了：
+  // npm 会解析到机器上任意一份 iterate-kernel，版本号照报，答的却是没人拿这份产物对过的契约。
+  // 安静不等于安全，所以这条闸现在是必须拒。`npm pack --dry-run` 与 publish-shape lane
+  // 全看不见——dry-run 不装不跑。
   const tree = makeReleaseTree()
   const manifestOf = () => JSON.parse(fs.readFileSync(path.join(tree.root, 'mcp-shell', 'package.json'), 'utf8'))
   const distWrite = (rel, body) => {
@@ -473,25 +476,25 @@ test('发布档拒绝 tsc 形状的 dist：它入口裸 import 未声明的 @ite
     distWrite('tools.js', 'import { z } from "zod"\nexport const x = 1\n')
     assert.throws(
       () => archiveBytes({ root: tree.root, version: '1.6.0' }),
-      /tsc output.*@iterate\/kernel.*run bundle/s,
+      /tsc output.*iterate-kernel.*run bundle/s,
       '非入口 .js 必须被点名拒绝，并说清下一步跑 bundle',
     )
     fs.rmSync(path.join(tree.root, 'mcp-shell', 'dist', 'tools.js'))
 
     // 依赖面：入口 import 一个没声明的裸包，即使形状是三个入口也要拒。
-    distWrite('index.js', '#!/usr/bin/env node\nimport { RunPlan } from "@iterate/kernel/plan"\nconsole.log("glasspane-mcp")\n')
+    distWrite('index.js', '#!/usr/bin/env node\nimport { RunPlan } from "iterate-kernel/run-plan"\nconsole.log("glasspane-mcp")\n')
     assert.throws(
       () => assertBundleShape({
         entries: [{ name: 'mcp-shell/dist/index.js', content: fs.readFileSync(path.join(tree.root, 'mcp-shell', 'dist', 'index.js')) }],
         manifest: manifestOf(),
       }),
-      /imports package\(s\) the manifest does not declare: @iterate\/kernel/,
+      /imports package\(s\) the manifest does not declare: iterate-kernel/,
       '未声明依赖的裸 import 必须点名到包名与文件',
     )
 
     // 声明了就不许再拒（这条防的是把闸写成永远红）。
     const withDep = manifestOf()
-    withDep.dependencies = { ...withDep.dependencies, '@iterate/kernel': 'file:../kernel' }
+    withDep.dependencies = { ...withDep.dependencies, 'iterate-kernel': '0.1.8' }
     const ok = assertBundleShape({
       entries: [{ name: 'mcp-shell/dist/index.js', content: fs.readFileSync(path.join(tree.root, 'mcp-shell', 'dist', 'index.js')) }],
       manifest: withDep,

@@ -236,13 +236,16 @@ export function buildOutputEntries({ root, dir }) {
  * The files `mcp-shell`'s own `bundle` script writes — **read off that script**, never
  * re-listed here. A `dist` holding any other `.js` was produced by `tsc`, not by the
  * bundler — and that is not a cosmetic difference: `glasspane-mcp` declares only `zod` as a
- * dependency (the kernel sits in `devDependencies` as `file:../kernel`), so a tsc-shaped
- * `dist` still carries `import "@iterate/kernel"` in its entry points. Such a package
- * installs cleanly, reports its version correctly, and dies on the first
- * `ERR_MODULE_NOT_FOUND` when the agent runs it — found by packing an archive whose `dist`
- * had been rebuilt by `npm test` after the bundle step, then installing that archive's own
- * tarball in a clean prefix. `npm pack --dry-run` cannot see it because a dry run never
- * installs and never executes.
+ * dependency (`iterate-kernel` sits in `devDependencies`, because the bundle inlines it),
+ * so a tsc-shaped `dist` still carries `import "iterate-kernel/…"` in its entry points.
+ * Such a package installs cleanly, reports its version correctly, and then answers with
+ * whatever kernel version the machine happened to have — which since 2026-10-18 is
+ * *quieter* than the old failure, not safer: with the kernel vendored as `file:../kernel`
+ * the same mistake died on `ERR_MODULE_NOT_FOUND` on first run, and with the kernel on the
+ * registry it resolves a contract nobody tested against this artifact. Found originally by
+ * packing an archive whose `dist` had been rebuilt by `npm test` after the bundle step, then
+ * installing that archive's own tarball in a clean prefix. `npm pack --dry-run` cannot see it
+ * because a dry run never installs and never executes.
  *
  * The list this replaces named three entries while the script bundled four, and the only
  * thing that noticed was this guard refusing to publish a tree that was fine — i.e. no
@@ -308,7 +311,7 @@ export function assertBundleShape({ entries, manifest }) {
     .filter((entry) => !bundleEntries.includes(entry.name.split('/').pop()))
     .map((entry) => entry.name)
   if (unbundled.length > 0) {
-    fail(`mcp-shell/dist holds ${unbundled.length} file(s) the bundler does not write (${unbundled.slice(0, 6).join(', ')}): this is tsc output, its entry points still import "@iterate/kernel" which glasspane-mcp does not declare, and the installed package dies on ERR_MODULE_NOT_FOUND. Run "npm --workspace glasspane-mcp run bundle" as the LAST step touching dist before packing (npm test rebuilds it with tsc). The expected set (${bundleEntries.join(', ')}) is read from mcp-shell/package.json's own bundle script.`)
+    fail(`mcp-shell/dist holds ${unbundled.length} file(s) the bundler does not write (${unbundled.slice(0, 6).join(', ')}): this is tsc output, its entry points still import "iterate-kernel/…" which glasspane-mcp declares only as a build-time dependency, so the installed package resolves a kernel nobody tested against this artifact. Run "npm --workspace glasspane-mcp run bundle" as the LAST step touching dist before packing (npm test rebuilds it with tsc). The expected set (${bundleEntries.join(', ')}) is read from mcp-shell/package.json's own bundle script.`)
   }
   const missing = new Set()
   for (const entry of js) {
@@ -408,7 +411,11 @@ export function archiveBytes({ root, version, prefixes = EXCLUDED_PREFIXES }) {
  *
  * Two kinds, deliberately derived from different places. The commands come from the packages' own `bin`
  * fields and the schemas from `kernel/schemas`, so neither list goes stale when a command or a schema is
- * added. The install inputs come from `REQUIRED_IN_ARCHIVE`, which is a transcription of what
+ * added. The bundle step no longer copies from that directory (it copies from the installed
+ * `iterate-kernel`, via `scripts/bundle-kernel-schemas.mjs`), which is what makes this a check rather than
+ * a tautology: the mirror is kept equal to the published corpus by `scripts/check-kernel-corpus.mjs`, so
+ * requiring the archive to hold the mirror's schema set asks whether the artifact shipped the contract the
+ * fork's pin describes. The install inputs come from `REQUIRED_IN_ARCHIVE`, which is a transcription of what
  * `updater/lib/apply.js` reads out of the unpacked tree — that one is checked against the archive on purpose,
  * because an exclusion rule (`EXCLUDED_PREFIXES`) is exactly the shape that can remove `engine/` and still
  * leave every `bin` field satisfied.
@@ -417,7 +424,7 @@ export function requiredEntries({ root, version }) {
   const prefix = `GlassPane-${version}/`
   const wanted = declaredCommands({ root }).map((cmd) => `${prefix}${path.relative(root, cmd.file).split(path.sep).join('/')}`)
   const schemaDir = path.join(root, 'kernel', 'schemas')
-  if (!fs.existsSync(schemaDir)) fail('kernel/schemas is missing: the bundle step copies it next to the command, so there is nothing to require without it')
+  if (!fs.existsSync(schemaDir)) fail('kernel/schemas is missing: this list is the pinned corpus the archive is required against (scripts/check-kernel-corpus.mjs keeps it equal to what iterate-kernel publishes), so there is nothing to require without it')
   const schemas = fs.readdirSync(schemaDir)
     .filter((name) => name.endsWith('.json'))
     .map((name) => `${prefix}mcp-shell/schemas/${name}`)

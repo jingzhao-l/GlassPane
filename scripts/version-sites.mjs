@@ -148,11 +148,17 @@ export const SITES = [
  * 反过来，根 lock 的 `node_modules/glasspane-*` 那几个条目**不是**位点：它们是
  * `{"resolved": <dir>, "link": true}`，没有 `version` 字段可读，`lockVersions()` 对
  * link/无 version 的条目本来就跳过。
+ *
+ * `../kernel` 这一位在 2026-10-18 退场了：mcp-shell 不再吃 `file:../kernel`，改吃已发布的
+ * `iterate-kernel`。上面那段实测仍然成立，只是这条本地依赖条目不再存在于这棵树里。
+ * `iterate-kernel` 自己的版本**不归** GlassPane 版本线（它按 iterate 的节奏发布），所以它
+ * 不是位点；它的一致性由 `scripts/bundle-kernel-schemas.mjs` 那一处三同号代守——
+ * manifest 声明 = 装到的 = fork 的 pin。
  */
 export const LOCKFILES = [
   { file: 'package-lock.json', keys: ['', 'kernel', 'mcp-shell', 'installer', 'updater'] },
   { file: 'kernel/package-lock.json', keys: [''] },
-  { file: 'mcp-shell/package-lock.json', keys: ['', '../kernel'] },
+  { file: 'mcp-shell/package-lock.json', keys: [''] },
 ]
 
 function withGlobal(re) {

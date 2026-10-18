@@ -24,6 +24,10 @@
  * therefore prints what the installed package actually is whenever it can find one, so a stale
  * install is visible instead of silently unmeasured.
  *
+ * The third leg (check mode, always) asks the question a mirror cannot answer by itself: does the
+ * version `mcp-shell` bundles equal the version the fork pins? That is where the two consumers of
+ * this contract are proved to consume the *same* one — see "the shell's leg" below the check.
+ *
  *   node scripts/check-kernel-corpus.mjs            # check (exit 1 = drift, 2 = cannot measure)
  *   node scripts/check-kernel-corpus.mjs --record   # rewrite the mirror from the pinned package
  */
@@ -171,3 +175,32 @@ if (have === null) {
 } else {
   console.log(`  installed-package leg: 本机装的也是 ${have}，与 pin 同源。`)
 }
+
+// ---- the shell's leg ------------------------------------------------------
+// `mcp-shell` bundles the kernel into its own artifact, so the version it declares is the
+// version living inside the published `glasspane-mcp` tarball. Two consumers of one contract
+// is the entire premise of a shared kernel: a bump that reaches the fork's pin and not the
+// shell's manifest — or the other way round — is two ecosystems wearing one name, and nothing
+// else in this repository would notice. `scripts/bundle-kernel-schemas.mjs` asks the same
+// question at bundle time; this asks it on every CI run, including the ones that never bundle.
+const shellPath = join(root, 'mcp-shell', 'package.json')
+if (!existsSync(shellPath)) {
+  die(2, 'mcp-shell/package.json does not exist', 'this leg reads the shell manifest to answer for the published artifact; run it from a GlassPane checkout')
+}
+let shell
+try {
+  shell = JSON.parse(readFileSync(shellPath, 'utf8'))
+} catch (error) {
+  die(2, `mcp-shell/package.json is not readable JSON: ${error.message}`, 'repair the manifest; a shell that cannot be read cannot be held to a version')
+}
+const shellSpec = shell?.dependencies?.['iterate-kernel'] ?? shell?.devDependencies?.['iterate-kernel']
+if (typeof shellSpec !== 'string' || shellSpec === '') {
+  die(1, 'mcp-shell/package.json declares no iterate-kernel', 'the shell bundles the kernel and imports it as `iterate-kernel/<module>`; declaring it in nothing means the artifact records no provenance for the contract inside it')
+}
+if (!/^\d+\.\d+\.\d+$/.test(shellSpec)) {
+  die(1, `mcp-shell declares iterate-kernel as "${shellSpec}" — not one exact version`, 'the bundle inlines the package, so the version is a fact about the published bytes; a range makes those bytes depend on what the registry served that day')
+}
+if (shellSpec !== pin.version) {
+  die(1, `the shell bundles iterate-kernel@${shellSpec} while the fork pins ${pin.version}`, 'one kernel per ecosystem: bump mcp-shell/package.json and re-record the pin in the same batch, then re-sync this mirror (--record)')
+}
+console.log(`  mcp-shell leg: glasspane-mcp 捆的是 iterate-kernel@${shellSpec}，与 pin 同号。`)

@@ -2,18 +2,21 @@ import { z } from "zod";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+// Subpath imports, never the `iterate-kernel` barrel: it re-exports `schemas`, which reads
+// `../schemas/*.json` at module init — a path that only exists next to the package, not next to
+// the esbuild bundle this file ships as. Same rule as the fork's binding, for the same reason.
 import {
   SELECTOR_MAX_LENGTH,
   ActionSchema,
   AssertionPropertySchema,
   SelectorSchema,
-  parseEvidencePackRead,
-  KernelSchemaError,
   type Selector,
   type Action,
   type AssertionProperty,
   type EvidencePack,
-} from "@iterate/kernel";
+} from "iterate-kernel/evidence-pack";
+import { parseEvidencePackRead } from "iterate-kernel/parse";
+import { KernelSchemaError } from "iterate-kernel/errors";
 
 import { canonicalJson } from "./canonical.js";
 import { readUpdateState, runtimeIsUsable, stateRootOf, type CaRootsReading, type RuntimeReading } from "./update-state.js";

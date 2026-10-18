@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { parseEvidencePack } from "@iterate/kernel";
+import { parseEvidencePack } from "iterate-kernel/parse";
 
 import {
   PLACEHOLDER,

@@ -36,9 +36,13 @@ MCP 客户端配置：
 
 ## What ships in this package / 包里有什么
 
-`dist/index.js` 是 esbuild 单文件产物：`@iterate/kernel`（schema 真源）在发布时
-已捆绑内联，包内不存在指向源码仓库的 `file:` 依赖；`schemas/` 是 kernel schema
-的发布副本，每次 `npm run bundle` 重新同步。
+`dist/index.js` 是 esbuild 单文件产物：已发布的 `iterate-kernel`（schema 真源，devDependency，
+只按 `iterate-kernel/<module>` 子路径引入）在发布时已捆绑内联，包内不存在指向源码仓库的
+`file:` 依赖，也不残留一个裸的 `import "iterate-kernel"`——后者会让装到本机的产物去解析一份
+没人拿这份产物对照过的内核，比 `ERR_MODULE_NOT_FOUND` 安静，但不更安全；发布档的
+bundle-shape 闸专拒这一条。`schemas/` 是内核契约的发布副本，每次 `npm run bundle` 由
+`scripts/bundle-kernel-schemas.mjs` 从**装好的那一份包**重新同步，并核
+manifest 声明 = 装到的 = fork 的 pin 三者同号。
 
 两个入口，各自是什么就按什么用 / two entries, each with one job：
 

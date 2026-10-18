@@ -32,8 +32,11 @@ socket 的另一个入口，其信任边界写在 `SECURITY.md` §2.3。对外�
 | 安装器 | 零第三方依赖 Node ESM | `installer/cli.js` |
 | 发布/CI | GitHub Actions；npm Trusted Publishing（staged-only） | `.github/workflows/` |
 
-依赖关系：`mcp-shell` 通过 `file:../kernel` 引 kernel，**发布时由 bundle 内联**，
-npm 包里不得残留 `file:` 引用（CI 的 publish-shape 守卫专抓这个）。
+依赖关系：`mcp-shell` 引**已发布**的 `iterate-kernel`（devDependency，只按子路径 import），
+**发布时由 bundle 内联**；npm 包里不得残留 `file:` 引用，也不得留一个要到运行时才解析的裸
+`iterate-kernel` import（CI 的 publish-shape 守卫与发布档的 bundle-shape 闸各抓一半）。
+`kernel/{fixtures,schemas}` 是留给读不到 TypeScript 的消费者（Swift 的 C35 腿、归档要求清单）
+的语料镜像，由 `scripts/check-kernel-corpus.mjs` 核它与 pin 同源。
 
 ## 模块地图 / Module Map
 

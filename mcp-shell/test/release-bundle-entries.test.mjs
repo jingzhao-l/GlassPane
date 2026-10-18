@@ -3,7 +3,7 @@
  *
  * `scripts/make-release-archive.mjs` refuses a `mcp-shell/dist` that holds a `.js` the
  * bundler does not write, because that is tsc output and its entry points still import
- * `@iterate/kernel` — a dependency `glasspane-mcp` does not declare, so the installed
+ * `iterate-kernel` — a dependency `glasspane-mcp` declares only at build time, so the installed
  * package dies on `ERR_MODULE_NOT_FOUND` after an install that reported success. What it
  * refused *against* was a `const` in that script listing three entries while
  * `mcp-shell/package.json`'s `bundle` script wrote four, and the guard's own refusal made
@@ -123,15 +123,15 @@ test("the guard accepts the bundle this repository really writes, and still refu
   // release: a non-entry file, and an entry that imports an undeclared package.
   assert.throws(
     () => assertBundleShape({ entries: [...everyEntry, bundleFile("tools.js")], manifest }),
-    /holds 1 file\(s\) the bundler does not write \(mcp-shell\/dist\/tools\.js\).*tsc output.*@iterate\/kernel.*run bundle/s,
+    /holds 1 file\(s\) the bundler does not write \(mcp-shell\/dist\/tools\.js\).*tsc output.*iterate-kernel.*run bundle/s,
     "a tsc leftover must still be refused, and named",
   );
   assert.throws(
     () => assertBundleShape({
-      entries: [{ name: "mcp-shell/dist/index.js", content: Buffer.from('import { RunPlan } from "@iterate/kernel/plan"\n') }],
+      entries: [{ name: "mcp-shell/dist/index.js", content: Buffer.from('import { RunPlan } from "iterate-kernel/run-plan"\n') }],
       manifest,
     }),
-    /imports package\(s\) the manifest does not declare: @iterate\/kernel/,
+    /imports package\(s\) the manifest does not declare: iterate-kernel/,
     "the dependency half of the guard must not have been lost with the list",
   );
 });

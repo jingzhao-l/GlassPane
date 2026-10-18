@@ -1,4 +1,4 @@
-import type { EvidencePack, HandlerProbeSignal, StateDiffSignal } from "@iterate/kernel";
+import type { EvidencePack, HandlerProbeSignal, StateDiffSignal } from "iterate-kernel/evidence-pack";
 
 /**
  * What a report may be handed: a validated pack, or the same structure with

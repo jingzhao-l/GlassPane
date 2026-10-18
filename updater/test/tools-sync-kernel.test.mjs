@@ -188,7 +188,7 @@ test('sync-kernel: 真同步保留镜像自有的 manifest，只搬 canonical �
   assert.match(result.stdout, /target=repo/)
   const after = JSON.parse(fs.readFileSync(s.mirrorPkg, 'utf8'))
   // 四条被覆盖掉的字段，每一条都对应一个真实消费者。
-  assert.equal(after.name, '@iterate/kernel', '工作区名是 mcp-shell 的 file:../kernel 解析入口')
+  assert.equal(after.name, '@iterate/kernel', '镜像的名字是它在根 workspace 表里的键（mcp-shell 已于 2026-10-18 改吃已发布的 iterate-kernel）')
   assert.equal(after.private, true, '镜像不在 GlassPane 这条线上发布')
   assert.equal(after.version, ROOT_VERSION, '镜像跟着产品版本线走，不是 kernel 自己的号')
   assert.equal(after.dependencies.zod, '3.25.76', '镜像钉精确范围，可复现安装是这条线的决定')

@@ -2,6 +2,28 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [Unreleased]
+
+### Changed — `mcp-shell` 的内核出处从"仓内镜像"换成 npm 上那一份（Step 0b 第一半）
+
+- `mcp-shell` 不再吃 `file:../kernel`：devDependency 换成 `iterate-kernel@0.1.8`，import 改走子路径
+  （`iterate-kernel/evidence-pack|parse|errors`），发布时仍由 esbuild 捆进 `dist/`。包里那份
+  `schemas/` 现在由 `scripts/bundle-kernel-schemas.mjs` 从**装好的那一份包**逐文件复制，并核
+  manifest 声明 = 装到的 = fork 的 pin 三者同号；`scripts/check-kernel-corpus.mjs` 因此多了
+  mcp-shell 那一条判据（反向变异过：把声明改成 0.1.7，它点名
+  "the shell bundles iterate-kernel@0.1.7 while the fork pins 0.1.8" 并退 1）。
+- **为什么"入口裸 import 未声明的内核"现在比过去更坏，不是更好**：内核住在仓内时，tsc 形状的 dist
+  装上去第一条请求就 `ERR_MODULE_NOT_FOUND`；内核上了 registry 之后，npm 会解析到机器上任意一份
+  `iterate-kernel`，版本号照报，答的却是没人拿这份产物对照过的契约。安静不等于安全，所以发布档的
+  bundle-shape 闸从"拒"升级为"必须拒"，`updater/test/release-archive.test.mjs` 那一组用例连名带判据
+  一起换。
+- 一条测出来的契约事实，写在这里免得下一位重新踩：`iterate-kernel` 发布物里的 `.d.ts` 是 **zod 3 形状**
+  （`ZodObject<Shape, "strict", ZodTypeAny, Out, In>`），可它声明的依赖范围是 `>=3.25.76 <5`。消费者
+  一旦把内核解析到 zod 4，内核的类型就退化成 `any`——不报"类型错了"，报"参数隐含 any"，也就是
+  看起来过了、实际没类型。本仓现在用 npm `overrides` 把 zod 钉在 3.25.76（根 `package.json` 与
+  `mcp-shell/package.json` 各一处：workspace 装与独立装是两个入口，CI 的 mcp-shell job 走后者）。
+  内核侧该把这一位收成精确版本、或按 zod 4 重出声明——那是 iterate-skill 的决定，不在本批里顺手改。
+
 ## [1.16.4] — 2026-10-16
 
 **版本判断：patch。** 四条判据逐条实测：状态文件的字段没动、退出码集合没动、CLI 参数没动、

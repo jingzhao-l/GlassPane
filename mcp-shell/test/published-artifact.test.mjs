@@ -118,11 +118,14 @@ function published() {
   const tree = path.join(SCRATCH, "tree");
   const pkg = path.join(tree, "mcp-shell");
   fs.mkdirSync(path.join(pkg, "dist"), { recursive: true });
-  // The scratch tree stands where the worktree's own layout puts a package relative to
-  // its dependencies: the bundle script reads `../kernel/schemas`, and esbuild and zod
-  // resolve from the hoisted root `node_modules`.
+  // The scratch tree stands where the worktree's own layout puts a package relative to its
+  // dependencies: esbuild and zod resolve from the hoisted root `node_modules`, the shipped
+  // schemas are copied by `../scripts/bundle-kernel-schemas.mjs` out of the installed
+  // `iterate-kernel`, and `../kernel` is the pinned corpus the archive's schema list is
+  // required against (the bundle itself no longer reads it).
   linkInto(path.join(WORKTREE, "node_modules"), path.join(tree, "node_modules"));
   linkInto(path.join(WORKTREE, "kernel"), path.join(tree, "kernel"));
+  linkInto(path.join(WORKTREE, "scripts"), path.join(tree, "scripts"));
   linkInto(path.join(SHELL, "node_modules"), path.join(pkg, "node_modules"));
   for (const name of ["package.json", "tsconfig.json", "LICENSE", "README.md"]) {
     fs.copyFileSync(path.join(SHELL, name), path.join(pkg, name));
