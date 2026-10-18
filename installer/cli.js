@@ -4,7 +4,7 @@
  *
  * 流程：terminal onboarding 横幅 → 环境预检（node/swift/git/open）→ 定位项目
  * 根目录 → npm 依赖（有 package-lock.json 走 npm ci，见 npmDepsCommand）→ 编译 TS
- * （kernel → mcp-shell）→ swift
+ * （mcp-shell；内核是已发布的 `iterate-kernel` 依赖，捆进它的 bundle，不再是仓内 workspace）→ swift
  * build -c release（engine）→ make-app.sh 打包**并签名**两个 .app → 安置到
  * ~/Applications → 以 bundle 内可执行注册 launchd 自启并启动 daemon → 打开
  * GlassPane.app 设置面板进入权限引导（授权对象是 daemon，见 P1 v1.2 §11）→
@@ -2372,12 +2372,9 @@ export async function install({
     const hasLockfile = fs.existsSync(path.join(rootDir, 'package-lock.json'))
     const depsCmd = npmDepsCommand({ hasLockfile })
     printStep(hasLockfile
-      ? '安装 npm 依赖（workspaces: kernel / mcp-shell / installer）——按提交过的 package-lock.json 走 npm ci……'
-      : '安装 npm 依赖（workspaces: kernel / mcp-shell / installer）——该树没有 package-lock.json，退回 npm install（依赖树未经 CI 那一份 lock 的 attest）……')
+      ? '安装 npm 依赖（workspaces: mcp-shell / installer / updater）——按提交过的 package-lock.json 走 npm ci……'
+      : '安装 npm 依赖（workspaces: mcp-shell / installer / updater）——该树没有 package-lock.json，退回 npm install（依赖树未经 CI 那一份 lock 的 attest）……')
     await run('npm', depsCmd, { cwd: rootDir })
-
-    printStep('编译 kernel……')
-    await run('npm', ['run', 'build', '--workspace', '@iterate/kernel'], { cwd: rootDir })
 
     printStep('编译 mcp-shell……')
     await run('npm', ['run', 'build', '--workspace', 'glasspane-mcp'], { cwd: rootDir })

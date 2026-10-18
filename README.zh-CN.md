@@ -399,13 +399,13 @@ GlassPane/
 │   ├── probe/          GlassPaneProbe（内嵌后可做强归因）
 │   └── scripts/        make-app.sh —— 两个 .app 的打包与 ad-hoc 签名
 ├── mcp-shell/          TypeScript MCP stdio 服务 → npm `glasspane-mcp`
-├── kernel/             JSON Schema 真源，与 iterate 生态共享
+├── kernel/             已发布 iterate-kernel 的被钉语料（schemas + fixtures）
 ├── bridge/             Python LLDB 调试桥（崩溃/运行时采集）
 ├── spike/              可行性实验与留档结果
 ├── scripts/            set-version / check-version —— 单一版本线
 ├── specs/              实施规格与验收记录（PRD、P0–P6、审查记录）
 ├── ITERATE.md          本仓自己的 iterate onboarding 知识库
-└── .github/workflows/  ci.yml（10 条 lane；发布形态守卫是其中一条里的一个步骤）、release.yml
+└── .github/workflows/  ci.yml（9 条 lane；发布形态守卫是其中一条里的一个步骤）、release.yml
 ```
 
 ## 开发
@@ -453,11 +453,15 @@ npm 发布走 `release.yml` 的 provenance 通道。
 
 ## 与 iterate 生态的关系
 
-`kernel/` 是作者 [iterate](https://github.com/jingzhao-l/iterate-skill) 生态的共享 schema 契约层
-（`@iterate/kernel`）：同一批 JSON Schema 同时被 iterate 的多轮评审、GlassPane 服务与 MCP 层消费，
-双语绑定用共享 fixture 校验。两半互补——iterate 审"这段代码对不对"，GlassPane 验"跑起来的应用
-是不是真像代理所说的那样变了"。发布时 kernel 被捆绑进 `glasspane-mcp`，npm 包不会带着指回本仓库的
-`file:` 依赖。
+共享 schema 契约层是作者 [iterate](https://github.com/jingzhao-l/iterate-skill) 生态的内核，
+发布为 [`iterate-kernel`](https://www.npmjs.com/package/iterate-kernel)：同一批 JSON Schema 同时被
+iterate 的多轮评审、GlassPane 服务与 MCP 层消费，双语绑定用共享 fixture 校验。两半互补——iterate 审
+"这段代码对不对"，GlassPane 验"跑起来的应用是不是真像代理所说的那样变了"。两个 TypeScript 消费者各自
+装那一份发布包：`mcp-shell` 把它捆进 `glasspane-mcp`（所以发布物里没有指回本仓库的 `file:` 依赖），
+fork 经自己的 lockfile 解析它，出处记在
+`harness/glasspane-harness/contracts/kernel-pin.json`。[kernel/](kernel/) 因此只剩那份包的**被钉语料**
+——`fixtures/` 与 `schemas/`——因为 Swift 的 C35 腿和归档的要求清单读的是这些字节，而它们读不到
+TypeScript。
 
 本仓库同时吃自己的狗粮：[ITERATE.md](ITERATE.md) 与 [iterate.config.yaml](iterate.config.yaml)
 就是本项目的 onboarding 产物，`/iterate` 在这里审查时用的门禁命令与 CI 强制的完全一致。

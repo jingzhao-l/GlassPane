@@ -458,13 +458,13 @@ GlassPane/
 │   ├── probe/          GlassPaneProbe SPM package (embed it for strong attribution)
 │   └── scripts/        make-app.sh — bundle + ad-hoc sign the two .app products
 ├── mcp-shell/          TypeScript MCP stdio server → npm `glasspane-mcp`
-├── kernel/             JSON Schema truth source, shared with the iterate ecosystem
+├── kernel/             pinned corpus (schemas + fixtures) of the published iterate-kernel
 ├── bridge/             Python LLDB bridge (crash / runtime capture)
 ├── spike/              feasibility experiments and recorded results
 ├── scripts/            set-version / check-version — the single version line
 ├── specs/              implementation specs + acceptance records (PRD, P0–P6, audits)
 ├── ITERATE.md          this repo's own iterate onboarding knowledge base
-└── .github/workflows/  ci.yml (10 lanes; the publish-shape guard is a step in one of them), release.yml
+└── .github/workflows/  ci.yml (9 lanes; the publish-shape guard is a step in one of them), release.yml
 ```
 
 ## Development
@@ -515,13 +515,18 @@ specified and marked verified or not, so it is the closest thing to a reference 
 
 ## Relationship to the iterate ecosystem
 
-`kernel/` is the shared schema contract layer of the author's
-[iterate](https://github.com/jingzhao-l/iterate-skill) ecosystem (`@iterate/kernel`): the same JSON
-Schema definitions are consumed by iterate's multi-round review loop and by the GlassPane daemon and
-MCP shell, with dual-language bindings checked against shared fixtures. The two halves are
-complementary — iterate reviews whether the code is right; GlassPane verifies whether the running
-app actually does what the agent claims it made it do. At publish time the kernel is bundled into
-`glasspane-mcp`, so the npm package carries no `file:` dependency back to this repository.
+The shared schema contract layer is the author's
+[iterate](https://github.com/jingzhao-l/iterate-skill) ecosystem kernel, published as
+[`iterate-kernel`](https://www.npmjs.com/package/iterate-kernel): the same JSON Schema definitions
+are consumed by iterate's multi-round review loop and by the GlassPane daemon and MCP shell, with
+dual-language bindings checked against shared fixtures. The two halves are complementary — iterate
+reviews whether the code is right; GlassPane verifies whether the running app actually does what the
+agent claims it made it do. Each TypeScript consumer installs that package: `mcp-shell` bundles it
+into `glasspane-mcp` (so the published artifact carries no `file:` dependency back to this
+repository), and the fork resolves it through its own lockfile with provenance in
+`harness/glasspane-harness/contracts/kernel-pin.json`. [kernel/](kernel/) therefore holds only the
+pinned copy of that package's corpus — `fixtures/` and `schemas/` — because the Swift C35 leg and
+the release archive's requirement list read those bytes and cannot import TypeScript.
 
 This repository also dogfoods that ecosystem: [ITERATE.md](ITERATE.md) and
 [iterate.config.yaml](iterate.config.yaml) are its own onboarding artifacts, so an `/iterate` run

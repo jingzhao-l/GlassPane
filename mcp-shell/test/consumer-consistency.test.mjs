@@ -1441,7 +1441,7 @@ test("gp_capture_view advertises no second copy of the PNG budget", () => {
  * (`ParamValidation.optSelector`, plus the two daemon readings that make an
  * empty `title` a contradiction rather than a mere oddity). It is then published
  * as JSON Schema (`kernel/schemas/evidence-pack.schema.json`, the C35 source of
- * truth), mirrored as zod (`kernel/src/evidence-pack.ts` → `SelectorSchema`,
+ * truth), mirrored as zod (`iterate-kernel/evidence-pack` → `SelectorSchema`,
  * which `src/tools.ts` now imports instead of restating), and advertised to the
  * agent in `tools/list`. Four places, one judgement — and until this section
  * nothing read the daemon's judgement and compared it to the other three, which

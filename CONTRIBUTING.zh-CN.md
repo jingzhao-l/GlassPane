@@ -28,14 +28,14 @@ GlassPane 是 **macOS 上给 AI 编程代理用的 GUI 测试与验证层**：�
 | [engine/probe/](./engine/probe/) | 独立 SPM 包 `GlassPaneProbe`：被测进程内的 Z1–Z4.5 探针 SDK | `cd engine/probe && swift test` |
 | [mcp-shell/](./mcp-shell/) | TypeScript MCP stdio 服务，npm 包 `glasspane-mcp` | `cd mcp-shell && npm test`；发布形态另跑 `npm run bundle` |
 | [installer/](./installer/) | 零第三方依赖的 Node ESM 一键安装器，npm 包 `glasspane-install` | `npm test --workspace glasspane-install` |
-| [kernel/](./kernel/) | `@iterate/kernel`，私有且**不单独发布**：JSON Schema 真值源 [kernel/schemas/](./kernel/schemas/)，与作者的 iterate 生态共享，发布时由 bundle 内联 | `cd kernel && npm test` |
+| [kernel/](./kernel/) | 已发布 `iterate-kernel` 的**被钉语料**：[kernel/schemas/](./kernel/schemas/) 与 `fixtures/`。留在这里是因为 Swift 的 C35 腿与归档要求清单读的是这些字节；代码不在这儿——`mcp-shell` 装的是那份包并把它捆进产物 | `node scripts/check-kernel-corpus.mjs`（镜像 ↔ pin ↔ 壳声明的版本，三处同号） |
 | [bridge/](./bridge/) | Python LLDB 调试桥与 pytest 套件（纯逻辑核可脱离 lldb 测） | `cd bridge && python3 -m pytest -q` |
 | [spike/](./spike/) | 可行性实验与实测留档 | 不入门禁 |
 | [specs/](./specs/) | 中文实施规格与验收文档（PRD、P0–P6、5.6/5.7/5.8 项目综述）＝**设计真值** | 文档改动本身就是 PR |
 
-## 3. 门禁：十条 CI 通道，先在本地跑绿
+## 3. 门禁：九条 CI 通道，先在本地跑绿
 
-[.github/workflows/ci.yml](./.github/workflows/ci.yml) 共十条 job。CI 只是同一套东西的重复——先在本地把它们跑绿。
+[.github/workflows/ci.yml](./.github/workflows/ci.yml) 共九条 job。CI 只是同一套东西的重复——先在本地把它们跑绿。
 
 | CI job | Runner | 测什么 |
 |---|---|---|

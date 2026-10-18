@@ -8,7 +8,7 @@
  * sync with the very `npm install --package-lock-only` calls `set-version.mjs` runs:
  *
  *   - `mcp-shell/package-lock.json` → `"../kernel"` — the `file:../kernel` devDependency's resolved
- *     local entry, which holds `"version"` copied from `kernel/package.json`.
+ *     local entry — retired 2026-10-18, when `mcp-shell` switched to the published `iterate-kernel`.
  *   - `package-lock.json` → `"updater"` — the `updater` workspace entry, whose version belongs to
  *     the line because `updater/package.json` is a declared SITE.
  *
@@ -34,7 +34,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { LOCKFILES, drift, lockVersions, truthVersion } from '../../scripts/version-sites.mjs'
+import { LOCKFILES, SITES, drift, lockVersions, truthVersion } from '../../scripts/version-sites.mjs'
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -84,7 +84,7 @@ test('every lock site the table names exists in its lockfile and matches its own
   // The cross-check that makes the table worth having: each declared key resolves to a real entry whose
   // version equals the package.json of the same-named workspace. A key that names nothing at all would
   // make `lockVersions()` report `missing`, and this assertion catches the table drifting from the tree.
-  const manifestVersion = { '': 'package.json', kernel: 'kernel/package.json', 'mcp-shell': 'mcp-shell/package.json', installer: 'installer/package.json', updater: 'updater/package.json' }
+  const manifestVersion = { '': 'package.json', 'mcp-shell': 'mcp-shell/package.json', installer: 'installer/package.json', updater: 'updater/package.json' }
   for (const lock of LOCKFILES) {
     for (const entry of lockVersions(lock)) {
       assert.equal(entry.missing, false, `${lock.file} → ${entry.key} 在 lock 里找不到`)
@@ -97,11 +97,15 @@ test('every lock site the table names exists in its lockfile and matches its own
 
 test('the line is currently consistent, so a site added in error would be a permanently red gate', () => {
   // This is the check that makes adding lock sites safe: with the real tree at its current version the
-  // drift set must be empty. If npm did NOT keep `../kernel` or `updater` in sync, the row would appear
-  // here and the gate would be red forever — which is the outcome that has to be proven absent.
+  // drift set must be empty. If npm did NOT keep `updater` (or a workspace entry) in sync, the row would
+  // appear here and the gate would be red forever — which is the outcome that has to be proven absent.
   const rows = drift(null)
   assert.deepEqual(rows, [], `版本线漂移：${JSON.stringify(rows)}`)
-  assert.equal(truthVersion(), versionOf('kernel/package.json'), '真源与 kernel 同源，否则上面的空集没有意义')
+  assert.equal(truthVersion(), versionOf('mcp-shell/package.json'), '真源与壳同源，否则上面的空集没有意义')
+  // 内核不在这条线上（2026-10-18）：`kernel/package.json` 跟着代码镜像一起退场了。它若再出现在位点表里，
+  // 意思就是那份没有出处的镜像回来了——所以这条断言核的是"这里没有位点"，不是某个数字。
+  assert.equal(SITES.some((site) => site.file === 'kernel/package.json'), false,
+    'kernel/package.json 又成版本线位点了：那意味着仓里重新有了一份需要跟版本号的内核 manifest')
 })
 
 test('link entries carry no version, so they are not lock sites (the finding that is not real)', () => {

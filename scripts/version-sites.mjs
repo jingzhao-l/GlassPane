@@ -2,9 +2,14 @@
  * 版本线真源定义（scripts/set-version.mjs 与 scripts/check-version.mjs 共用）。
  *
  * 口径（2026-09-22 拍板）：**全仓库统一版本线**——同一个数字同时是根 workspace、
- * 两个 npm 包（glasspane-mcp / glasspane-install）、kernel、MCP initialize 自报、
+ * 两个 npm 包（glasspane-mcp / glasspane-install）、MCP initialize 自报、
  * Swift daemon hello 自报、.app bundle 版本，以及 install.sh / installer 钉住的
  * 发布 tag。真源 = 根 `package.json` 的 `version`；其余都是派生位点，由脚本改写。
+ *
+ * `kernel/` 曾在这条线上占一个位点（镜像自带 `@iterate/kernel` 的 package.json，随本仓
+ * 版本线打号）。2026-10-18 它退场了：mcp-shell 改吃已发布的 `iterate-kernel`，镜像代码
+ * 不再被任何消费者 import。留着那位的结果就是它自己发生过的那种——一个没人 import 的
+ * manifest 跟着版本线改写，读起来像还有一份内核在这条线上。
  *
  * 每个位点的正则统一为三组：`$1` 前缀包装、`$2` 版本值、`$3` 收尾包装，且必须
  * **恰好命中一次**：命中 0 次说明位点被改名或删除（静默漏改比报错危险），命中
@@ -51,15 +56,6 @@ export const SITES = [
     file: 'updater/package.json',
     regex: /("version":\s*")([^"]+)(")/,
     hint: '不单独发布（private），但同一条版本线：面板与 launchd 调的是同一棵树里的它',
-  },
-  {
-    id: '@iterate/kernel',
-    file: 'kernel/package.json',
-    regex: /("version":\s*")([^"]+)(")/,
-    hint: '不单独发布，随 mcp-shell 捆绑内联',
-    // 已知将来变化：kernel 正被迁成 iterate-skill 主仓的 canonical + 本仓镜像
-    // （分支 kernel-migration，未合 main）。若那条落地，kernel 的版本归 iterate
-    // 节奏，应从本表删掉这一位点——届时守卫会因镜像回写而报漂移，属预期信号。
   },
   {
     id: 'MCP serverInfo.version',
@@ -156,8 +152,7 @@ export const SITES = [
  * manifest 声明 = 装到的 = fork 的 pin。
  */
 export const LOCKFILES = [
-  { file: 'package-lock.json', keys: ['', 'kernel', 'mcp-shell', 'installer', 'updater'] },
-  { file: 'kernel/package-lock.json', keys: [''] },
+  { file: 'package-lock.json', keys: ['', 'mcp-shell', 'installer', 'updater'] },
   { file: 'mcp-shell/package-lock.json', keys: [''] },
 ]
 

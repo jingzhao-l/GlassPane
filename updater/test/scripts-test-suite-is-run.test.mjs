@@ -5,7 +5,7 @@
  * 一条 4 个用例的套件（`tools-gpg-signing.test.mjs`，管的是"gpg 口令不许进 argv"那条
  * 安全修复），而**没有任何一条门禁跑过它**：根 `package.json` 的 `test` 是
  * `npm run build && npm run test --workspaces --if-present`，workspaces 只有
- * kernel / mcp-shell / installer / updater 四个目录，`scripts/` 不是 workspace；全仓
+ * mcp-shell / installer / updater 三个目录（`kernel/` 的代码镜像与它一起于 2026-10-18 退场），`scripts/` 不是 workspace；全仓
  * grep `scripts/test` 命中 0 条（含 CI 的两个 yml）。于是那条签名口令的守卫自写下那天起
  * 就是死字——它不会红，哪怕 `tools/gpg-signing.sh` 重新把口令拼回 argv。
  * "写出来的测试"与"会被执行的测试"之间没有闸，就是这么个下场。
@@ -90,7 +90,7 @@ const TRACKED = execFileSync('git', ['ls-files', '-z', '*.test.mjs'], { cwd: REP
 test('每条被跟踪的 .test.mjs 都落在某个 workspace 的 test glob 里', () => {
   assert.ok(TRACKED.length > 80, `git ls-files 只回条 ${TRACKED.length} 条测试文件——这道闸自己就先瞎了（glob 参数写错、`
     + '索引为空都会是这个形状，那时"没有孤儿"是空过出来的绿）')
-  assert.ok(RUNNERS.length >= 4, `四个 workspace 至少该贡献 4 条 glob，实得 ${RUNNERS.length}：`
+  assert.ok(RUNNERS.length >= 3, `三个 workspace 至少该贡献 3 条 glob，实得 ${RUNNERS.length}：`
     + '读不到 runner 的时候这道闸一律"通过"，那就是把门禁改成了装饰')
   const orphans = uncovered({ tracked: TRACKED, runners: RUNNERS })
   assert.deepEqual(orphans, [], `这些测试写了但没有任何一条门禁会跑它们：${orphans.join(', ')}。`
@@ -134,8 +134,7 @@ test('那条签名口令的套件现在真的会被跑（本文件的来路）',
   assert.deepEqual(uncovered({ tracked: [rel], runners: RUNNERS }), [], '移进来之后仍没有 runner 够它＝白移')
   assert.equal(fs.existsSync(path.join(REPO, 'scripts', 'test')), false,
     '`scripts/test/` 还在：那儿是一条没有任何门禁读取的死目录，正是这条 finding 本体')
-  // 移过来不等于会跑：跑它的那条 glob 必须真在这四个 workspace 的 test 脚本里。
-  // 移过来不等于会跑：跑它的那条 glob 必须真在这四个 workspace 的 test 脚本里。
+  // 移过来不等于会跑：跑它的那条 glob 必须真在这三个 workspace 的 test 脚本里。
   const updater = RUNNERS.find((r) => r.prefix === 'updater/')
   assert.ok(updater && globToRegExp(updater.glob).test(path.join(updater.dir, 'test', 'tools-gpg-signing.test.mjs')),
     'updater 的 test glob 不再覆盖这个文件名——下一次 `npm test` 就又没人跑它了')

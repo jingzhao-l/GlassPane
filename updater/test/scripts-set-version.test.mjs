@@ -19,8 +19,8 @@
  * These run `set-version.mjs` in a scratch repository with a **stubbed npm** on PATH, so nothing
  * touches the working tree and no real `npm install` is paid for. The stub reproduces the one
  * behaviour the defect turns on: it rewrites the directory's `package-lock.json` to the new
- * version, then fails on the call the test designates. `LOCK_DIRS` is `['.', 'kernel',
- * 'mcp-shell']`, so "a later entry fails" is call 2 or 3.
+ * version, then fails on the call the test designates. `LOCK_DIRS` is `['.', 'mcp-shell']`
+ * (`kernel` left it on 2026-10-18 with the mirrored manifest), so "the later entry fails" is call 2.
  *
  * REVERSE MUTATION: move the lockfile snapshot back inside the regeneration loop (after the
  * `spawnSync`) — `a failed lock regeneration rolls the already-regenerated lock back too` goes
@@ -56,7 +56,6 @@ const SITE_TEMPLATES = {
   'mcp-shell/package.json': (v) => `${JSON.stringify({ name: 'glasspane-mcp', version: v }, null, 2)}\n`,
   'installer/package.json': (v) => `${JSON.stringify({ name: 'glasspane-install', version: v }, null, 2)}\n`,
   'updater/package.json': (v) => `${JSON.stringify({ name: 'glasspane-update', version: v, private: true }, null, 2)}\n`,
-  'kernel/package.json': (v) => `${JSON.stringify({ name: '@iterate/kernel', version: v, private: true }, null, 2)}\n`,
   'mcp-shell/src/dispatch.ts': (v) => `export const SERVER_INFO = { name: "glasspane-mcp", version: "${v}" }\n`,
   // 1.10.0 起权威位点是 static；1.16.0 起还有一份**旧 updater 读者能解析的实例字面量**
   // （兼容位，见 CHANGELOG 1.16.0 与 version-sites.mjs 的那条注释）。夹具必须同时带这两行——
@@ -74,14 +73,14 @@ const SITE_TEMPLATES = {
 }
 
 /** The lock shape set-version's own regeneration produces: one versioned entry per workspace key. */
-const rootLock = (v) => `${JSON.stringify({ name: 'glasspane', version: v, lockfileVersion: 3, packages: { '': { version: v }, kernel: { version: v }, 'mcp-shell': { version: v }, installer: { version: v }, updater: { version: v } } }, null, 2)}\n`
+const rootLock = (v) => `${JSON.stringify({ name: 'glasspane', version: v, lockfileVersion: 3, packages: { '': { version: v }, 'mcp-shell': { version: v }, installer: { version: v }, updater: { version: v } } }, null, 2)}\n`
 const subLock = (name, v, extra = {}) => `${JSON.stringify({ name, version: v, lockfileVersion: 3, packages: { '': { version: v }, ...extra } }, null, 2)}\n`
 
 /**
  * A scratch repository holding its own copy of both scripts (so `version-sites.mjs` resolves ROOT
- * to the scratch tree), all 10 sites and all 3 locks at `FROM`, and a `bin/npm` stub on PATH.
+ * to the scratch tree), every declared site and both locks at `FROM`, and a `bin/npm` stub on PATH.
  */
-function makeVersionTree({ locks = ['.', 'kernel', 'mcp-shell'] } = {}) {
+function makeVersionTree({ locks = ['.', 'mcp-shell'] } = {}) {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-set-version-'))
   const write = (rel, body, mode) => {
     const abs = path.join(root, rel)
@@ -94,8 +93,10 @@ function makeVersionTree({ locks = ['.', 'kernel', 'mcp-shell'] } = {}) {
   write('scripts/check-version.mjs', fs.readFileSync(path.join(REPO, 'scripts', 'check-version.mjs'), 'utf8'))
   for (const [rel, template] of Object.entries(SITE_TEMPLATES)) write(rel, template(FROM))
   if (locks.includes('.')) write('package-lock.json', rootLock(FROM))
-  if (locks.includes('kernel')) write('kernel/package-lock.json', subLock('@iterate/kernel', FROM))
-  if (locks.includes('mcp-shell')) write('mcp-shell/package-lock.json', subLock('glasspane-mcp', FROM, { '../kernel': { name: '@iterate/kernel', version: FROM, dev: true } }))
+  // `iterate-kernel` sits in the shell's lock at its OWN version (0.1.8, not the GlassPane line):
+  // the kernel publishes on iterate's rhythm, and the stub npm rewrites only `FROM` — so this entry
+  // also proves a version bump here cannot drag the kernel's number along.
+  if (locks.includes('mcp-shell')) write('mcp-shell/package-lock.json', subLock('glasspane-mcp', FROM, { 'node_modules/iterate-kernel': { name: 'iterate-kernel', version: '0.1.8', dev: true, resolved: 'https://registry.npmjs.org/iterate-kernel/-/iterate-kernel-0.1.8.tgz' } }))
 
   // The npm stub: what it must reproduce is "this directory's lock is now at the new version".
   write('bin/npm', `#!/usr/bin/env node
@@ -143,13 +144,15 @@ function siteTexts({ root }) {
 const lockText = (tree, dir) => fs.readFileSync(path.join(tree.root, dir, 'package-lock.json'), 'utf8')
 
 test('a failed lock regeneration rolls the already-regenerated lock back too', () => {
-  // `.` regenerates fine, `kernel` then fails. The defect: the root lock had already been snapshotted
-  // *after* npm rewrote it, so rollback restored the 10 sites to 1.0.0 and left the root lock at 1.2.3.
+  // `.` regenerates fine, `mcp-shell` then fails. The defect: the root lock had already been snapshotted
+  // *after* npm rewrote it, so rollback restored the sites to 1.0.0 and left the root lock at 1.2.3.
+  // (`kernel` left `LOCK_DIRS` on 2026-10-18 — the mirrored manifest is no longer on the GlassPane
+  // version line — so this is the second and last regeneration call.)
   const tree = makeVersionTree()
   try {
     const run = runSetVersion(tree, [TO], { failOn: 2 })
     assert.equal(run.status, 1, run.output)
-    assert.deepEqual(run.calls, [tree.root, path.join(tree.root, 'kernel')], 'failOn=2 应当死在 kernel 这一步：' + JSON.stringify(run.calls))
+    assert.deepEqual(run.calls, [tree.root, path.join(tree.root, 'mcp-shell')], 'failOn=2 应当死在 mcp-shell 这一步：' + JSON.stringify(run.calls))
 
     // The declared sites are back at the old version — the half that always worked.
     const moved = Object.entries(siteTexts(tree)).filter(([, text]) => text.includes(TO))
@@ -165,28 +168,13 @@ test('a failed lock regeneration rolls the already-regenerated lock back too', (
   }
 })
 
-test('a failed third lock regeneration rolls back the first two', () => {
-  // Same defect one step further along: with `mcp-shell` failing, both the root and kernel locks had
-  // already been regenerated and snapshotted too late.
-  const tree = makeVersionTree()
-  try {
-    const run = runSetVersion(tree, [TO], { failOn: 3 })
-    assert.equal(run.status, 1, run.output)
-    for (const dir of ['.', 'kernel']) {
-      assert.equal(lockText(tree, dir).includes(TO), false, `${dir}/package-lock.json 没跟着回滚`)
-    }
-  } finally {
-    tree.cleanup()
-  }
-})
-
 test('a lock npm created during a run that then failed is removed, not orphaned', () => {
   // The snapshot cannot describe a file that did not exist before the run. `mcp-shell` has no lock at
   // all; the stub generates one; the run then fails there. "Rolled back to the original state" is only
   // true if the generated lock goes away rather than being left at the new version.
-  const tree = makeVersionTree({ locks: ['.', 'kernel'] })
+  const tree = makeVersionTree({ locks: ['.'] })
   try {
-    const run = runSetVersion(tree, [TO], { failOn: 3 })
+    const run = runSetVersion(tree, [TO], { failOn: 2 })
     assert.equal(run.status, 1, run.output)
     assert.equal(fs.existsSync(path.join(tree.root, 'mcp-shell', 'package-lock.json')), false, '回滚后留下了一个本不该存在的 lock')
     assert.equal(lockText(tree, '.').includes(TO), false, '根 lock 也要回到旧版本')
@@ -196,7 +184,7 @@ test('a lock npm created during a run that then failed is removed, not orphaned'
 })
 
 test('--no-lock succeeds over stale locks, which is what the flag advertises', () => {
-  // The unsatisfiable-flag half: regeneration is skipped, so the three locks stay at 1.0.0 while the
+  // The unsatisfiable-flag half: regeneration is skipped, so both locks stay at 1.0.0 while the
   // sites move to 1.2.3. Step ③ used to count the lock rows as drift and roll the whole thing back,
   // meaning `--no-lock` could never exit 0. It must, and it must say the locks are still stale.
   const tree = makeVersionTree()
@@ -205,7 +193,7 @@ test('--no-lock succeeds over stale locks, which is what the flag advertises', (
     assert.equal(run.status, 0, run.output)
     assert.deepEqual(run.calls, [], '--no-lock 不该调用 npm：' + JSON.stringify(run.calls))
     for (const [rel, text] of Object.entries(siteTexts(tree))) assert.ok(text.includes(TO), `${rel} 没改到新版本`)
-    for (const dir of ['.', 'kernel', 'mcp-shell']) {
+    for (const dir of ['.', 'mcp-shell']) {
       assert.equal(lockText(tree, dir).includes(TO), false, `${dir} 的 lock 不该被动`)
     }
     assert.match(run.output, /--no-lock 跳过了 lockfile/, '旗标的后果要说出来，否则"自证通过"会被读成 CI 也通过')
@@ -242,9 +230,9 @@ test('the happy path still unifies sites and locks in one run', () => {
   try {
     const run = runSetVersion(tree, [TO])
     assert.equal(run.status, 0, run.output)
-    assert.equal(run.calls.length, 3, `三个 lock 目录都要重生成一次：${JSON.stringify(run.calls)}`)
+    assert.equal(run.calls.length, 2, `两个 lock 目录都要重生成一次：${JSON.stringify(run.calls)}`)
     for (const [rel, text] of Object.entries(siteTexts(tree))) assert.ok(text.includes(TO), `${rel} 没改到新版本`)
-    for (const dir of ['.', 'kernel', 'mcp-shell']) {
+    for (const dir of ['.', 'mcp-shell']) {
       assert.equal(lockText(tree, dir).includes(FROM), false, `${dir}/package-lock.json 仍停在旧版本`)
     }
     assert.match(run.output, /版本线已统一到/, run.output)

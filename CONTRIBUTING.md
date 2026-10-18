@@ -31,14 +31,14 @@ Start from the repo root: `npm ci` → `npm run build` → `cd engine && swift b
 | [engine/probe/](./engine/probe/) | Separate SPM package `GlassPaneProbe`: the in-process Z1–Z4.5 probe SDK for the app under test | `swift test` in `engine/probe/` |
 | [mcp-shell/](./mcp-shell/) | TypeScript MCP stdio server, npm package `glasspane-mcp` | `npm test` in `mcp-shell/`; publish shape also via `npm run bundle` |
 | [installer/](./installer/) | Zero-third-party-dependency Node ESM installer, npm package `glasspane-install` | `npm test --workspace glasspane-install` |
-| [kernel/](./kernel/) | `@iterate/kernel`, private and **not published separately**: JSON Schema truth source [kernel/schemas/](./kernel/schemas/), shared with the author's iterate ecosystem, inlined into the bundle at publish time | `npm test` in `kernel/` |
+| [kernel/](./kernel/) | the **pinned corpus** of the published `iterate-kernel`: [kernel/schemas/](./kernel/schemas/) + `fixtures/`, kept because the Swift C35 leg and the archive's requirement list read those bytes. The code is not here — `mcp-shell` installs the package and bundles it | `node scripts/check-kernel-corpus.mjs` (mirror ↔ pin ↔ shell's declared version) |
 | [bridge/](./bridge/) | Python LLDB bridge and pytest suite (the pure-logic core tests without lldb) | `python3 -m pytest -q` in `bridge/` |
 | [spike/](./spike/) | feasibility experiments and measured records | not gated |
 | [specs/](./specs/) | the Chinese implementation and acceptance specs (PRD, P0–P6, 5.6/5.7/5.8 reviews) = **design of record** | a doc change is itself the PR |
 
-## 3. Gates: ten CI lanes, run them locally first
+## 3. Gates: nine CI lanes, run them locally first
 
-[.github/workflows/ci.yml](./.github/workflows/ci.yml) has ten jobs; CI only repeats what you should already have measured.
+[.github/workflows/ci.yml](./.github/workflows/ci.yml) has nine jobs; CI only repeats what you should already have measured.
 
 | CI job | Runner | What it measures |
 |---|---|---|

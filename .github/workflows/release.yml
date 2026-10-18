@@ -115,8 +115,9 @@ jobs:
           # MCP half died on `glasspane-mcp could not run (ENOENT)` — the whole swap rolled back. Building
           # here is what makes the archive installable at all; the next step refuses to publish if it is missing.
           npm ci --no-audit --no-fund
-          # The root script is the ordered one (`@iterate/kernel` types first, then the MCP shell that reads
-          # them); calling the two workspaces directly would build them in whatever order this file guesses.
+          # The root script is the ordered one: mcp-shell is the only TypeScript workspace left in
+          # this tree (the kernel is the published `iterate-kernel`, bundled by the next step), so the
+          # order is stated by `package.json` rather than guessed here.
           npm run build
           npm run bundle --workspace glasspane-mcp
       - name: Build the deterministic release archive
@@ -255,7 +256,7 @@ jobs:
           echo "npm in this publish lane: $(npm --version)"
       - name: Install workspaces from root lockfile
         run: npm ci
-      - name: Build all TS workspaces (kernel first; mcp-shell imports it)
+      - name: Build all TS workspaces (mcp-shell; the kernel is a published dependency)
         run: npm run build
       - name: Version line must be self-consistent before publishing
         run: node scripts/check-version.mjs

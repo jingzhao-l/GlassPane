@@ -30,8 +30,9 @@ import path from 'node:path'
 import process from 'node:process'
 import { ROOT, SEMVER_RE, SITES, applySite, drift, siteValue } from './version-sites.mjs'
 
-/** lock 重生成要跑的目录：根（workspaces）+ 两个自带独立 lock 的子包。 */
-const LOCK_DIRS = ['.', 'kernel', 'mcp-shell']
+/** lock 重生成要跑的目录：根（workspaces）+ 那个自带独立 lock 的子包。
+ * `kernel` 那一位跟着镜像代码一起退场（2026-10-18，mcp-shell 改吃已发布的 iterate-kernel）。 */
+const LOCK_DIRS = ['.', 'mcp-shell']
 
 function fail(message) {
   process.stderr.write(`${message}\n`)

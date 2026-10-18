@@ -11,7 +11,7 @@ public struct RecipeValidationResult: Codable, Equatable {
 
 /// Structural recipe validator for the engine, mirroring the **frozen kernel
 /// contract** for recipe files: `kernel/schemas/recipe-config.schema.json` and
-/// its zod twin `kernel/src/recipe-config.ts`.
+/// its zod twin (the published `iterate-kernel/recipe-config`).
 ///
 /// Why it mirrors instead of defining its own rules (R4-02 / R6-01): this type
 /// used to require an *integer* `schemaVersion ≥ 1` and steps shaped
@@ -49,7 +49,7 @@ public struct RecipeLoader {
     /// ASCII it agreed with neither contract side.
     ///
     /// Aligning with the schema does **not** align with the zod twin, and that is
-    /// the honest limit of this fix: `kernel/src/recipe-config.ts` reaches 256
+    /// the honest limit of this fix: `iterate-kernel/recipe-config` reaches 256
     /// through `z.string().max(256)`, and JavaScript's `.length` counts **UTF-16
     /// code units**. For every BMP character — precomposed or decomposed accents,
     /// CJK, Cyrillic — one code point is one unit, so the two contract sides agree

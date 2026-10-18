@@ -760,8 +760,8 @@ final class RecipeLoaderTests: XCTestCase {
     /// with each other, so matching the schema means *not* matching zod.
     /// 256 × U+1F600 is 256 graphemes, 256 code points and 512 UTF-16 code units;
     /// the schema (ajv's code-point `maxLength`) and this validator accept it,
-    /// while `z.string().max(256)` in `kernel/src/recipe-config.ts` counts the 512
-    /// units and rejects. The disagreement therefore sits inside `kernel/` itself —
+    /// while `z.string().max(256)` in `iterate-kernel/recipe-config` counts the 512
+    /// units and rejects. The disagreement therefore sits inside the kernel
     /// its own `assertBothSidesAccept` helper would fail on this input — and
     /// closing it means editing a protected path, not this file. What this test
     /// records is which side the engine mirrors, so a later reader cannot mistake

@@ -2,9 +2,8 @@
   "name": "@glasspane/monorepo",
   "version": "1.16.4",
   "private": true,
-  "description": "GlassPane monorepo: TS mcp-shell + iterate kernel + macOS Swift engine (daemon + settings GUI) + one-command installer",
+  "description": "GlassPane monorepo: TS mcp-shell + macOS Swift engine (daemon + settings GUI) + one-command installer; the iterate kernel is consumed as the published iterate-kernel",
   "workspaces": [
-    "kernel",
     "mcp-shell",
     "installer",
     "updater"
@@ -18,7 +17,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "npm run build --workspace @iterate/kernel && npm run build --workspace glasspane-mcp",
+    "build": "npm run build --workspace glasspane-mcp",
     "test": "npm run build && npm run test --workspaces --if-present",
     "contracts:harness": "node harness/tools/hook-liveness.mjs --check",
     "contracts:harness:offline": "node harness/tools/hook-liveness.mjs --offline",

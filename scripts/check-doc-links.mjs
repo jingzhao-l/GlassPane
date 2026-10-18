@@ -176,14 +176,23 @@ function ciLaneCount(rootDir = ROOT) {
   return count
 }
 
-/** `gp_act` 能执行的无障碍动作数——真源是契约层 `ActionSchema`（`kernel/src/evidence-pack.ts`），
- * 不是文档里那句枚举，也不是 mcp-shell 里那份由它派生的输入 schema。 */
+/** `gp_act` 能执行的无障碍动作数——真源是契约层那份**已发布并被 pin 的** JSON Schema
+ * (`kernel/schemas/evidence-pack.schema.json` 的 `properties.signals.properties.act.properties.action.enum`，
+ * 与 `contracts/kernel-pin.json` 逐文件核过字节)，不是文档里那句枚举，也不是 mcp-shell 里那份由它
+ * 派生的输入 schema。读 TS 源码那一版跟着 `kernel/src` 一起退场了：仓里的镜像代码没有任何出处
+ * 记录，而这份 schema 有。路径读不到、或读到的不是非空数组，一律返回 null——那条主张会报"读不出"，
+ * 不许拿一个猜的数字当答案。 */
 function actionCount(rootDir = ROOT) {
-  const src = path.join(rootDir, 'kernel', 'src', 'evidence-pack.ts')
-  if (!fs.existsSync(src)) return null
-  const m = /export const ActionSchema = z\.enum\(\[([^\]]*)\]/.exec(fs.readFileSync(src, 'utf8'))
-  if (!m) return null
-  return (m[1].match(/"[^"]+"/g) ?? []).length
+  const file = path.join(rootDir, 'kernel', 'schemas', 'evidence-pack.schema.json')
+  if (!fs.existsSync(file)) return null
+  try {
+    const schema = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const values = schema?.properties?.signals?.properties?.act?.properties?.action?.enum
+    if (!Array.isArray(values) || values.length === 0) return null
+    return values.length
+  } catch {
+    return null
+  }
 }
 
 /** `install.sh` 钉住的发布 tag（去掉前导 `v`）。 */

@@ -23,7 +23,7 @@ node harness/glasspane-harness/script/kernel-pin.mjs --check   # 装进来的内
 bun harness/glasspane-harness/script/kernel-conformance.mjs    # 随包语料跑过装进来的那份 dist（行为，不只是字节）
 ```
 
-换内核的合法路径只有"改依赖 + 重钉"这一条，`tools/sync-kernel.sh --target=fork` 现在**明确拒绝**并指向它：在 `packages/opencode/package.json` bump 版本 → `bun install` → `node harness/glasspane-harness/script/kernel-pin.mjs --record` → `bun harness/glasspane-harness/script/kernel-conformance.mjs --impl <canonical kernel checkout>`。`--target=repo`（`kernel/` 那份 mcp-shell 镜像）照旧可用，尚未退役。
+换内核的合法路径只有"改依赖 + 重钉"这一条，`tools/sync-kernel.sh --target=fork` 现在**明确拒绝**并指向它：在 `packages/opencode/package.json` bump 版本 → `bun install` → `node harness/glasspane-harness/script/kernel-pin.mjs --record` → `bun harness/glasspane-harness/script/kernel-conformance.mjs --impl <canonical kernel checkout>`。`--target=repo` 也于 2026-10-18 退役：那份 `kernel/` 代码镜像的最后一个消费者是 `mcp-shell` 的 `file:../kernel`，而它已改吃发布包，所以整个脚本现在只返回拒绝与三条出路（语料 `check-kernel-corpus.mjs --record`、fork 重钉 `kernel-pin.mjs --record`、行为对账 `kernel-conformance.mjs`）。
 
 为什么把这条写死：另一条 harness 线（`iterate-harness`）的设计文档写着"8 处定点修改"，而它自己的树里 194 个共享文件有 **144 个**被改过、20 个被删、8 个新增，并且没有任何机器检查能发现这件事。**定制多少从来不是问题，不知道定制了多少才是。**
 
