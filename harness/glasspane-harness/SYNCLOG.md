@@ -41,6 +41,13 @@ signatures"，GitHub 点名 8 笔——复切链上那 8 笔提交没有签名�
 下一次正经发布要么在签名树上重切，要么把这条列进 release 前置核对；不要在"CI 反正绿"的理由下
 默认它无害。
 
+**同一支线上父仓侧还落了两笔（Step 0b）**：`mcp-shell` 从 `file:../kernel` 换成发布包
+`iterate-kernel`，随后 `kernel/{src,test,package.json,package-lock.json,tsconfig.json}` 整份代码镜像退役，
+`kernel/` 只剩被 pin 钉住的语料。子树里动的只有 `FORK.md` 那一行——它原来写着
+"`--target=repo` 照旧可用，尚未退役"，而那句话现在会教下一位去跑一个只剩拒绝的脚本。
+金样同批改（fork-diff 那条 forkHash），`tool-surface` 不必重记：Swift 侧那四处内核指针是行内换字，
+engine LOC 一字未动（这条是量出来的，不是假设的）。
+
 **仍未合上的那一格（`artifact` 判据，红的，故意留在这里）**：主干子树 = `35adbb6f`，而已发布的
 `v0.8.2` 树 = `6306b5e7`，差 6 份文件、`5 of the differing path(s) are not the release ledger`
 ⇒ 按 0.8.1 那轮的口径，出路是照发一个 patch（`v0.8.3`）把主干字节带进发布物。**本批没有自行切这一版**，
