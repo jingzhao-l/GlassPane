@@ -31,9 +31,15 @@ import Metal
 //     object first, and what it refuses comes back as a counted note
 //     (`GP.rejectedKeyCount`) instead of an Objective-C exception on the host's
 //     thread;
-// Losses stay observable (GP.droppedEventCount / GP.droppedWriteCount) and are
-// announced in `hello`, so "the handler did not run" can be told apart from
-// "the probe could not deliver".
+//   * every outbound line is measured in bytes against the daemon's frame cap
+//     before it is written, because that reader DISCARDS an oversized frame: a
+//     frame the probe cannot fit is refused on purpose and counted, never handed
+//     over to be thrown away in silence (values carry their own byte cap,
+//     `ProbeRuntime.stateValueByteCap`, so a normal state frame fits by design);
+// Losses stay observable (GP.droppedEventCount / GP.droppedWriteCount, and
+// GP.truncatedValueCount for the values the byte cap shortened) and are announced
+// in `hello`, so "the handler did not run" can be told apart from "the probe could
+// not deliver", and both from "the value was longer than what arrived".
 
 public enum GP {
     static let runtime = ProbeRuntime()
@@ -156,6 +162,14 @@ public enum GP {
     /// was full. Delivery losses, never an error thrown into the host.
     public static var droppedWriteCount: Int { runtime.droppedWriteCount }
 
+    /// Values the probe reported shorter than the host held — the `state`
+    /// frame's before/after and each Mirror export value, cut at
+    /// `ProbeRuntime.stateValueByteCap` encoded bytes. A *reading* loss, counted
+    /// apart from `droppedWriteCount` (a delivery loss), and carried to the
+    /// daemon in the same `hello` frame: "the state moved and the panel showed a
+    /// prefix" has to stay tellable from "the frame never arrived".
+    public static var truncatedValueCount: Int { runtime.truncatedValueCount }
+
     /// keyPaths `registerKVCObject` was asked for and refused to observe
     /// (unresolvable, empty, or a shape the probe cannot validate). Registration
     /// is the only place this can be detected, so the count is how a missing
@@ -204,6 +218,11 @@ final class ProbeRuntime: @unchecked Sendable {
     /// 这个读者跑在**被测 app** 里：对端写一条不带换行的流，无界攒字节的 OOM 落在
     /// 被测量对象身上，测量就此变成对被测应用的攻击面。超限就断开并记账。
     static let maxInboundLineBytes = 4 * 1024 * 1024
+    /// 出站方向同一个上限，量在**序列化之后的字节**上：daemon 的读者
+    /// (`FrameCodec.swift:7` `maxFrameBytes`) 对超过它的行是**丢弃**，不是截断——
+    /// 一条超形的帧＝那个 pid 的整条 state 通道安静地消失。所以这里不指望
+    /// 「值够小」，落笔前逐帧量一次：装不下的帧由探针自己丢，并且记账。
+    static let maxOutboundFrameBytes = 4 * 1024 * 1024
     static let checkpointRetention = 8
     /// How many refusal notes stay readable through `GP.kvcRejections`. Bounded:
     /// a host that registers bad keys in a loop must not be able to grow the
@@ -211,16 +230,32 @@ final class ProbeRuntime: @unchecked Sendable {
     static let rejectionNoteLimit = 16
     /// Z2's documented bounds (P6 §Z2: 深度 ≤8、节点 ≤4000). Named, not inline
     /// literals at the call site: a bound nobody can reference is a bound nobody
-    /// can prove is still there, and these two numbers are what keep the worst
-    /// case of a host object graph inside one frame.
+    /// can prove is still there. They bound the *walk*, not the *bytes*: 4000
+    /// nodes × `stateValueByteCap` is 4,096,000 bytes of value payload on its
+    /// own (plus 4000 keys and JSON framing), i.e. one batched export does NOT
+    /// fit one 4 MiB frame — which is what `maxOutboundFrameBytes` is measured
+    /// against before every write, per frame.
     static let mirrorMaxDepth = 8
     static let mirrorMaxNodes = 4000
-    /// Character cap on every value the probe reports as state: the `state`
-    /// frame's before/after (§2.2: "≤1 KiB 截断") and each Mirror export value,
-    /// leaf *or* container. One cap because one budget — a single oversized
-    /// value is what pushes a frame past the daemon's `FrameCodec.maxFrameBytes`,
-    /// and the daemon drops the whole state channel for the pid, not just the key.
-    static let stateValueCharCap = 1024
+    /// Byte cap (encoded UTF-8) on every value the probe reports as state: the
+    /// `state` frame's before/after (§2.2: "≤1 KiB 截断") and each Mirror export
+    /// value, leaf *or* container. One cap because one budget.
+    ///
+    /// Bytes, deliberately: the cap used to be counted in *characters*, and a
+    /// character is what the host types, not what the wire pays — 1024 CJK
+    /// characters leave the process as 3072 UTF-8 bytes (a flag sequence reaches
+    /// 8 bytes each), so a document-sized "1 KiB" value was silently 3-8 KiB of
+    /// frame. The cut also lands on a grapheme-cluster boundary, so a truncated
+    /// value never arrives as half a composed character.
+    ///
+    /// Worst case this guarantees for one `state` frame: 2 values × 1024 bytes,
+    /// escaped at most 6 bytes per byte (`\u00XX`) = 12,288 bytes, plus key,
+    /// `ts`, `t`/`source` and the newline — 12,390 bytes measured, under 13 KiB,
+    /// ~330× inside the frame budget (`testWorstCaseStateFrameIsWhatTheCapComments
+    /// Claim` measures it, so this sentence cannot drift out of date). A key the
+    /// host controls is *not* capped, so the unconditional guarantee is the frame
+    /// measurement in `writeFrame`, not this number.
+    static let stateValueByteCap = 1024
 
     /// Backoff after a failed attempt inside one cycle (P6 §2.1: 1s, 2s, 3s).
     static func attemptBackoffMs(afterFailedAttempt attempt: Int) -> Int {
@@ -269,6 +304,9 @@ final class ProbeRuntime: @unchecked Sendable {
     private var offlineBuffer: [[String: Any]] = []
     private var dropped = 0
     private var droppedWrites = 0
+    /// Values the probe cut at `stateValueByteCap` on their way to the wire —
+    /// a reading loss, kept apart from the delivery losses above.
+    private var truncatedValues = 0
     /// keyPaths refused at registration, lifetime total for this runtime.
     private var rejectedKeys = 0
     /// 入站超长行被丢弃的次数（对端写了没有换行的一行，超过 maxInboundLineBytes）。
@@ -312,6 +350,11 @@ final class ProbeRuntime: @unchecked Sendable {
     var droppedWriteCount: Int {
         lock.lock(); defer { lock.unlock() }
         return droppedWrites
+    }
+
+    var truncatedValueCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return truncatedValues
     }
 
     var rejectedKeyCount: Int {
@@ -474,6 +517,7 @@ final class ProbeRuntime: @unchecked Sendable {
         let capabilities = currentCapabilitiesLocked()
         let offlineDropped = dropped
         let writeDropped = droppedWrites
+        let valueTruncated = truncatedValues
         let inboundDropped = droppedInboundLines
         let framesDropped = droppedInboundFrames
         let appName = appNameValue
@@ -493,6 +537,10 @@ final class ProbeRuntime: @unchecked Sendable {
             // delivered".
             "droppedEvents": offlineDropped,
             "droppedWrites": writeDropped,
+            // 帧没送达（droppedWrites）和值被截短（truncatedValues）是两件事：前者是
+            // "daemon 什么都没读到"，后者是"读到的只是一个前缀"。合成一个数就再也分不开，
+            // 而预算收紧后一次截短可以完全不动任何帧。
+            "truncatedValues": valueTruncated,
             // 入站方向同样有丢：daemon 写过一条没有换行的超长行、SDK 断开重连后，
             // "命令都收到了"必须能被证伪，而不是靠那半行没被执行来侥幸。
             "droppedInboundLines": inboundDropped,
@@ -791,11 +839,16 @@ final class ProbeRuntime: @unchecked Sendable {
         let checkpointGets = checkpoints
         lock.unlock()
         var exported: [String: String] = [:]
+        var valueCuts = 0
         for root in roots {
-            MirrorWalk.flatten(root.object, label: root.label,
+            valueCuts += MirrorWalk.flatten(root.object, label: root.label,
                               maxDepth: ProbeRuntime.mirrorMaxDepth,
                               maxNodes: ProbeRuntime.mirrorMaxNodes, into: &exported)
         }
+        // The walk's byte cap is a reading loss, and it has to be counted where
+        // the daemon can read it: without this, a prefix and the host's whole
+        // value reach the panel looking identical.
+        if valueCuts > 0 { countValueTruncations(valueCuts) }
         for checkpoint in checkpointGets {
             for (key, value) in checkpoint.get() {
                 exported["\(checkpoint.domain).\(key)"] = value
@@ -827,12 +880,47 @@ final class ProbeRuntime: @unchecked Sendable {
     }
 
     func emitState(key: String, before: String, after: String, source: String) {
-        let cap = ProbeRuntime.stateValueCharCap
+        let keptBefore = Self.capValueBytes(before)
+        let keptAfter = Self.capValueBytes(after)
+        let cuts = (keptBefore.truncated ? 1 : 0) + (keptAfter.truncated ? 1 : 0)
+        if cuts > 0 { countValueTruncations(cuts) }
         writeFrame([
             "t": "state", "key": key,
-            "before": String(before.prefix(cap)), "after": String(after.prefix(cap)),
+            "before": keptBefore.kept, "after": keptAfter.kept,
             "source": source, "ts": Date().timeIntervalSince1970
         ])
+    }
+
+    /// The value cap, applied in the unit the wire charges for: at most
+    /// `stateValueByteCap` **encoded UTF-8 bytes**, never splitting a composed
+    /// character. A byte cut that lands inside a cluster would hand the daemon an
+    /// orphan combining mark or half a flag sequence — a truncated value that
+    /// reads as mojibake is a worse measurement than a shorter one.
+    ///
+    /// The budget is *spent*, not measured: no `value.utf8.count` up front, and
+    /// the walk stops at the cluster that no longer fits. Emission stays O(cap)
+    /// on the host's thread (the `state` lane runs from a KVO callback), so a
+    /// 4.5 MB host `description` is never walked to its end just to find a cut —
+    /// counting the whole string first would have made this cap a hot-path cost.
+    static func capValueBytes(_ value: String) -> (kept: String, truncated: Bool) {
+        let cap = stateValueByteCap
+        var kept = ""
+        kept.reserveCapacity(cap)
+        var bytes = 0
+        for character in value {
+            let characterBytes = character.utf8.count
+            if bytes + characterBytes > cap { return (kept, true) }
+            kept.append(character)
+            bytes += characterBytes
+        }
+        // Ran out of value before the budget: every byte of it is kept.
+        return (value, false)
+    }
+
+    private func countValueTruncations(_ count: Int) {
+        lock.lock()
+        truncatedValues += count
+        lock.unlock()
     }
 
     /// The frame's wire bytes, or nil when it holds something JSON cannot write.
@@ -879,9 +967,18 @@ final class ProbeRuntime: @unchecked Sendable {
         // surfaced by gp_probe_status). Returning silently made the sentence above
         // false: the host kept instrumenting while frames disappeared uncounted.
         guard let line = Self.frameLine(frame) else {
-            lock.lock()
-            droppedWrites += 1
-            lock.unlock()
+            countDroppedWrite()
+            return
+        }
+        // Measured in bytes on the bytes that are about to go out, because that is
+        // the unit the daemon charges: its reader caps a frame at 4 MiB and
+        // DISCARDS an oversized line, so handing one over is not a degraded reading
+        // but the whole state channel for this pid, reported as nothing at all.
+        // Refusing it here costs the same frame and says so through the same
+        // counter the daemon already reads — and it is the bound that holds whatever
+        // the host's own strings do, since a key length is not the probe's to cap.
+        guard line.count <= ProbeRuntime.maxOutboundFrameBytes else {
+            countDroppedWrite()
             return
         }
         lock.lock()
@@ -1064,6 +1161,7 @@ final class ProbeRuntime: @unchecked Sendable {
         offlineBuffer = []
         dropped = 0
         droppedWrites = 0
+        truncatedValues = 0
         droppedInboundLines = 0
         droppedInboundFrames = 0
         rejectedKeys = 0
@@ -1455,14 +1553,15 @@ final class KVCObserver: NSObject {
 // MARK: - Mirror walk (Z2)
 
 enum MirrorWalk {
-    /// Character cap on *every* exported value, leaf or container — the same
-    /// `ProbeRuntime.stateValueCharCap` the `state` frame applies, so neither
-    /// channel can be the one that overflows a frame. An uncapped container
-    /// value is not a cosmetic problem: one host object whose `description`
-    /// runs to megabytes makes a single op_end frame bigger than the daemon's
-    /// `FrameCodec.maxFrameBytes`, and the daemon drops the whole state channel
-    /// for that pid, not the one oversized key.
-    private static var valueCharCap: Int { ProbeRuntime.stateValueCharCap }
+    // Every exported value — leaf *or* container — is capped in *encoded UTF-8
+    // bytes* by `ProbeRuntime.capValueBytes`, i.e. the same `stateValueByteCap`
+    // the `state` frame applies, so neither channel can be the one that
+    // overflows a frame, and so a "1 KiB" value costs 1 KiB on the wire instead
+    // of 3-8 KiB for a CJK or emoji host. An uncapped container value is not a
+    // cosmetic problem: one host object whose `description` runs to megabytes
+    // makes a single frame bigger than the daemon's `FrameCodec.maxFrameBytes`,
+    // and the daemon drops the whole state channel for that pid, not the one
+    // oversized key.
 
     /// Sentinel keys a walk writes when a bound actually cut it short (one per
     /// root and reason, appended to the root label). Without them a truncated
@@ -1472,13 +1571,17 @@ enum MirrorWalk {
     static let depthMarkerKey = "∅truncated-depth"
     static let budgetMarkerKey = "∅truncated-budget"
 
+    /// One root's export, plus how many of its values the byte cap shortened —
+    /// the caller counts that, because the count is what tells the daemon that
+    /// what it read was a prefix rather than the host's value.
+    @discardableResult
     static func flatten(
         _ root: AnyObject,
         label: String,
         maxDepth: Int,
         maxNodes: Int,
         into out: inout [String: String]
-    ) {
+    ) -> Int {
         var walk = Walk(budget: maxNodes)
         flatten(Mirror(reflecting: root), path: label, depth: 0, maxDepth: maxDepth, walk: &walk, into: &out)
         if walk.depthCuts > 0 {
@@ -1489,6 +1592,7 @@ enum MirrorWalk {
             out["\(label).\(Self.budgetMarkerKey)"] =
                 "not measured: node budget \(maxNodes) exhausted at \(exhaustedAt); the values below it were never visited"
         }
+        return walk.valueCuts
     }
 
     /// What one walk gave up on, so the truncation can be reported once per root
@@ -1496,6 +1600,7 @@ enum MirrorWalk {
     private struct Walk {
         var budget: Int
         var depthCuts = 0
+        var valueCuts = 0
         var budgetCutPath: String?
     }
 
@@ -1524,7 +1629,11 @@ enum MirrorWalk {
             walk.budget -= 1
             let key = "\(path).\(label)"
             let display = String(describing: value)
-            let truncated = String(display.prefix(valueCharCap))
+            // Capped in encoded bytes, on a cluster boundary — see the cap note at
+            // the top of this enum and `ProbeRuntime.stateValueByteCap`.
+            let capped = ProbeRuntime.capValueBytes(display)
+            if capped.truncated { walk.valueCuts += 1 }
+            let truncated = capped.kept
             // Leaf scalars are recorded verbatim (capped); containers/objects recurse.
             switch value {
             case let nested as AnyObject where isReflectionWorthwhile(nested):

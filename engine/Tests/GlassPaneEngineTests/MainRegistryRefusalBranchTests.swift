@@ -106,11 +106,17 @@ final class MainRegistryRefusalBranchTests: XCTestCase {
     }
 
     /// `--list-projects` 编码失败不许再回 `[]` + 0（P2 #2）。
+    ///
+    /// 窗口左界取**顶格（第 0 列）**的处理块 `\nif options.listProjects {`：2026-10-19
+    /// 起 `requestedCommands` 的命令名单里也有一条缩进的 `if options.listProjects {
+    /// names.append("--list-projects") }`，按裸文本匹配会把窗口从那里张开，吞进
+    /// --version / --grant-accessibility / 权限探针等六条别的命令的分发块——那七次
+    /// `exit(0)` 就是这么来的，一条都不属于这条命令。
     func testListProjectsEncodeFailureRefusesInsteadOfAnEmptyArray() throws {
         let source = try mainSource()
         let start = try XCTUnwrap(
-            source.range(of: "if options.listProjects {"),
-            "--list-projects 的分支不见了"
+            source.range(of: "\nif options.listProjects {"),
+            "--list-projects 的处理块不见了"
         )
         let end = try XCTUnwrap(
             source.range(of: "if let activeId = options.activeProjectId {", range: start.upperBound..<source.endIndex),
@@ -125,6 +131,25 @@ final class MainRegistryRefusalBranchTests: XCTestCase {
         XCTAssertTrue(
             block.contains("to: .standardError)"),
             "编码失败的分支必须与 `.unreadable` 走同一条 stderr 拒绝"
+        )
+        // 编码失败路径的可达性判据（比裸计数更精确的那一半）：catch 之后的第一个
+        // 出口必须是 exit(1)，且在那之前一次 stdout 都不许写——把失败分支改成
+        // "落到 exit(0)"或"编不出去也先发 stdout"，都过不了这两行。
+        let catchPath = block[try XCTUnwrap(
+            block.range(of: "} catch {"),
+            "编码失败的分支不见了：这条闸钉的就是这个 catch"
+        ).upperBound..<block.endIndex]
+        let firstExit = try XCTUnwrap(
+            catchPath.range(of: "exit("),
+            "编码失败的路径没有出口：控制流会从失败分支流出去"
+        )
+        XCTAssertTrue(
+            catchPath[firstExit.upperBound...].hasPrefix("1)"),
+            "编码失败路径的第一个出口不是 exit(1)：exit(0) 又可达了"
+        )
+        XCTAssertFalse(
+            catchPath[..<firstExit.lowerBound].contains("standardOutput"),
+            "编码失败的分支在写 stdout：编不出去的东西被当成答案发出去了"
         )
         let refusals = block.components(separatedBy: "exit(1)").count - 1
         let successes = block.components(separatedBy: "exit(0)").count - 1

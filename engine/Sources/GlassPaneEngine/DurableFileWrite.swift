@@ -131,8 +131,24 @@ enum DurableFileWrite {
 
     /// 这台机器上"这个卷不支持目录 sync"的那几种回话。EIO / ENOMEM 不在其内：那是
     /// 存储自己在报错，必须继续当失败抛出去。
+    ///
+    /// **2026-10-19 实测后收紧**（原先这里还容错 EACCES 与 EPERM）。本机 APFS 卷
+    /// （`/var/folders/…`，`statfs.f_fstypename == "apfs"`）量到的结果是：
+    ///   • 目录 fsync 本身在 0700 目录、`O_DIRECTORY`、`uchg` 标记目录、以及密封只读
+    ///     系统卷根目录上都**返回 0**——APFS 上没有任何"这个卷不会 sync 目录"要用
+    ///     EACCES/EPERM 来回答的形态；
+    ///   • EACCES(13) 却是能碰到的，而且碰在最坏的地方：档案目录 mode 0300（可写可
+    ///     执行、**不可读**）时，rename 进去照样成功，紧跟着的 `open(O_RDONLY)` 回
+    ///     EACCES。按旧集合容错，就等于"目录项从没 sync 过"而调用方仍然回答
+    ///     `evidencePersisted: true`——正是本文件立起来要防的那句话，被一条权限状态
+    ///     伪装成卷能力吞掉了。
+    /// 因此这两个号回到"字节没有落"那一族；`smbfs/NFS/exFAT/只读挂载` 那几种真不
+    /// 支持的形态仍然按 EINVAL/ENOTSUP/ENOSYS/EOPNOTSUPP 容错，
+    /// `DurableFileWriteDirectorySyncToleranceTests` 的两条钉子（ENOTSUP 放行、EIO
+    /// 拒绝）一字未动。判据还是量到的东西：`Qoder20261019CanonicalBytesTests` 在真
+    /// 目录上跑这条 EACCES，跑不出来就 XCTSkip。
     static let unsupportedDirectorySyncErrnos: Set<Int32> = [
-        EINVAL, ENOTSUP, EPERM, EACCES, ENOSYS, EOPNOTSUPP,
+        EINVAL, ENOTSUP, ENOSYS, EOPNOTSUPP,
     ]
 
     private static func syncExisting(

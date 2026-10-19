@@ -241,12 +241,16 @@ final class RegistryCliRefusalShapeTests: XCTestCase {
 
     func testListProjectsEncodeFailureRoutesToTheRefusalNotToAnEmptyArray() throws {
         let source = try mainSwiftSource()
+        // 窗口左界取**顶格（第 0 列）**的处理块 `\nif options.listProjects {`：
+        // 2026-10-19 起 `requestedCommands` 的命令名单里也有一条缩进的
+        // `if options.listProjects {`，按裸文本匹配会把窗口张到那条上，吞进
+        // --version / 权限探针等六条别的命令的分发块——七个 `exit(0)` 是这么来的。
         let start = try XCTUnwrap(
-            source.range(of: "if options.listProjects {"),
+            source.range(of: "\nif options.listProjects {"),
             "--list-projects 的处理块不见了，这条对照已不作数"
         )
         let end = try XCTUnwrap(
-            source.range(of: "if let activeId = options.activeProjectId {"),
+            source.range(of: "if let activeId = options.activeProjectId {", range: start.upperBound..<source.endIndex),
             "下一条命令的起点找不到：窗口没有边界"
         )
         let block = source[start.lowerBound..<end.lowerBound]
@@ -258,6 +262,26 @@ final class RegistryCliRefusalShapeTests: XCTestCase {
         XCTAssertFalse(
             block.contains(#""[]\n""#) || block.contains("[]\\n"),
             "--list-projects 里还留着 `[]` 兜底：那正是它上面注释禁止的形状"
+        )
+        // 编码失败路径的可达性判据：catch 之后的第一个出口必须是 exit(1)，且在那
+        // 之前一次 stdout 都不许写。裸计数说"分支里有几次 exit"，这两句说的是
+        // "失败路径走得出去吗"——把 catch 的 exit(1) 改成 exit(0)、或删掉出口让它
+        // 落到成功分支的 exit(0)，红的是这里。
+        let catchPath = block[try XCTUnwrap(
+            block.range(of: "} catch {"),
+            "编码失败的分支不见了：这条闸钉的就是这个 catch"
+        ).upperBound..<block.endIndex]
+        let firstExit = try XCTUnwrap(
+            catchPath.range(of: "exit("),
+            "编码失败的路径没有出口：控制流会从失败分支流出去"
+        )
+        XCTAssertTrue(
+            catchPath[firstExit.upperBound...].hasPrefix("1)"),
+            "编码失败路径的第一个出口不是 exit(1)：exit(0) 又可达了"
+        )
+        XCTAssertFalse(
+            catchPath[..<firstExit.lowerBound].contains("standardOutput"),
+            "编码失败的分支在写 stdout：编不出去的东西被当成答案发出去了"
         )
         // 窗口内 `exit(0)` 只许出现在成功之后一次；失败分支必须是 exit(1)。
         XCTAssertEqual(

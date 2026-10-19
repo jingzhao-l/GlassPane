@@ -28,6 +28,12 @@ public struct ProbeHello: Equatable {
     /// The read side gave up on a connection whose unterminated remainder passed
     /// the inbound line cap, so the rest of that stream was never framed.
     public let droppedInboundLines: Int?
+    /// Values the probe shortened at its own byte cap on the way to the wire. This is a
+    /// different fact from `droppedWrites`: a dropped frame means the daemon read nothing,
+    /// a truncated value means it read a prefix of something. Folded into one number they
+    /// can no longer be told apart, and a "state never changed" verdict is only readable
+    /// against whichever of the two actually happened.
+    public let truncatedValues: Int?
 
     public init(
         pid: Int32,
@@ -39,7 +45,8 @@ public struct ProbeHello: Equatable {
         droppedWrites: Int? = nil,
         rejectedKeys: Int? = nil,
         droppedInboundFrames: Int? = nil,
-        droppedInboundLines: Int? = nil
+        droppedInboundLines: Int? = nil,
+        truncatedValues: Int? = nil
     ) {
         self.pid = pid
         self.bundleId = bundleId
@@ -51,6 +58,7 @@ public struct ProbeHello: Equatable {
         self.rejectedKeys = rejectedKeys
         self.droppedInboundFrames = droppedInboundFrames
         self.droppedInboundLines = droppedInboundLines
+        self.truncatedValues = truncatedValues
     }
 }
 
@@ -70,10 +78,11 @@ public enum ProbeInboundFrame: Equatable {
 
 public enum ProbeWire {
 
-    /// A drop counter as the wire carries it: absent, or a non-negative integer.
-    /// Anything else comes back `nil` — "unreported" — rather than a number the
-    /// probe never claimed. A frame carrying `"droppedWrites": "many"` must not
-    /// become `0`, because `0` is the assertion that nothing was lost.
+    /// A drop counter as the wire carries it: absent, or a non-negative integer
+    /// that fits the counter's own type. Anything else comes back `nil` —
+    /// "unreported" — rather than a number the probe never claimed. A frame
+    /// carrying `"droppedWrites": "many"` must not become `0`, because `0` is the
+    /// assertion that nothing was lost.
     ///
     /// Booleans need an explicit veto for the same reason: `JSONSerialization`
     /// answers `NSNumber` for `true`/`false` too, and `as? NSNumber` therefore
@@ -85,10 +94,19 @@ public enum ProbeWire {
     /// scalar the cast asks for. Only the CoreFoundation type ID reports what
     /// the object actually is (`RecipeLoader.describe` walks into this same
     /// trap and answers it the same way).
+    ///
+    /// Range is the third shape of the same mistake, and `intValue` was the whole
+    /// of it: `{"droppedWrites": 4294967296}` came back as `0` — a clean bill of
+    /// health for a channel that reported losing 4 billion frames — while
+    /// 9007199254740993 came back as `1`. `boundedInt32` below already refuses
+    /// that coercion for `pid` and `line` (the 2^32+1 → 1 case is documented
+    /// there), so the counters go through the same exact-range read: a count the
+    /// probe could not have meant is no count at all.
     static func counter(_ value: Any?) -> Int? {
-        guard let number = scalar(value) else { return nil }
-        let whole = number.intValue
-        return whole >= 0 ? whole : nil
+        // The probe's counters are `NSUInteger` on the SDK side and `Int32` is
+        // what this daemon can reprint without coercion, so the bound is the
+        // wire's own (`0 … Int32.max`), not a convenience.
+        boundedInt32(value, in: 0...(Int32.max)).map { Int($0) }
     }
 
     /// An `NSNumber` only when the JSON really carried a number.
@@ -154,7 +172,8 @@ public enum ProbeWire {
                 droppedWrites: Self.counter(dict["droppedWrites"]),
                 rejectedKeys: Self.counter(dict["rejectedKeys"]),
                 droppedInboundFrames: Self.counter(dict["droppedInboundFrames"]),
-                droppedInboundLines: Self.counter(dict["droppedInboundLines"])
+                droppedInboundLines: Self.counter(dict["droppedInboundLines"]),
+                truncatedValues: Self.counter(dict["truncatedValues"])
             ))
         case "handler":
             // `line` is a source position the probe reports; past Int32 there is

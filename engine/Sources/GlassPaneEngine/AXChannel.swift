@@ -201,7 +201,20 @@ public final class AXChannel: RuntimeChannel {
         }
         guard let children else { return }
         for (index, child) in children.enumerated() {
-            guard !aborted else { return }
+            guard !aborted else {
+                // 预算中止之后剩下的兄弟从前**一个节点都不产生**——这正是本函数头部
+                // (:159-166) 记过的那笔账的另一半：那次修好了"子树读失败还要继续走兄弟"，
+                // 而"中止后剩下的兄弟"仍然凭空消失，于是 `coverage.total` 只包含走过的部分，
+                // 看到一角也能报 ratio=1.00。每个没走到的子树在这里留一条自述占位：它不是
+                // 应用给的元素，是"这一截我们知道存在、这一轮没看到"，进分母、不进 measured。
+                nodes.append(contentsOf: Self.unvisitedSubtreeNodes(
+                    parentLabel: label,
+                    startingAt: index,
+                    childCount: children.count,
+                    reason: stopReason ?? "the walk stopped before this point"
+                ))
+                return
+            }
             try walkGeometry(
                 for: child,
                 path: label.isEmpty ? "\(index)" : "\(label)/\(index)",
@@ -211,6 +224,30 @@ public final class AXChannel: RuntimeChannel {
                 into: &nodes,
                 stopReason: &stopReason,
                 aborted: &aborted
+            )
+        }
+    }
+
+    /// 纯记账（CI 可测）：中止点上**没走到的每一个兄弟**换一条占位节点。
+    ///
+    /// 为什么必须换成节点而不是只留一句 stopReason：覆盖率是
+    /// `measured / total`（`LayoutCoverage`），分母只有 `nodes.count` 这一个来源；
+    /// 没走到的子树不进节点，比例就悄悄变成"走过的部分里量到了多少"，而那正好是
+    /// ratio=1.00 骗过一个只有根被看到的界面的方式。
+    /// 占位只到"知道存在"这一层：中止子树里面还有多少元素，走查本身无从得知——这件事
+    /// 由 `complete=false` 与 `LayoutCoverage.walkComplete` 说，不由这里的计数假装说全。
+    static func unvisitedSubtreeNodes(
+        parentLabel: String,
+        startingAt index: Int,
+        childCount: Int,
+        reason: String
+    ) -> [AxGeometryNode] {
+        guard index < childCount else { return [] }
+        return (index..<childCount).map { child in
+            AxGeometryNode(
+                path: "\(parentLabel)/\(child)",
+                role: unreadSubtreeRole,
+                geometry: .unread(reason: "subtree never visited — the walk stopped before it: \(reason)")
             )
         }
     }

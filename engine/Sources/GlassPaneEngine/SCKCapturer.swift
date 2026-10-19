@@ -351,6 +351,10 @@ public enum SCKCapturer {
         /// 邻居到底**没数出来**（`occludingWindows` 回了 nil）：不知道有没有东西
         /// 盖着，也就不能把"没有东西盖着"当成默认值去重新允许那张会撒谎的裁剪。
         var occlusionUncountable = false
+        /// 裁剪矩形换算不出来的时候（窗口 frame 落不进所选显示器的本地坐标系）：
+        /// 整屏那条候选直接不收，理由原样带进拒绝文案，不许悄悄少一条候选再让人
+        /// 以为"两条都试过了"。
+        var cropRefusal: String?
     }
 
     /// On-screen windows in front of `targetNumber` whose bounds intersect its frame,
@@ -450,9 +454,24 @@ public enum SCKCapturer {
         }
         plan.occludedBy = covered
         if covered.isEmpty {
+            // sourceRect 必须是**显示器本地**逻辑坐标（specs/GlassPane_P1_实施规格
+            // _v1.0_SCK迁移.md:37），窗口 frame 是全局的：原判据 `context.window.frame`
+            // 只在主屏原点恰为 (0,0) 时才碰巧相等。换算不了就一次都不许裁。
+            guard let crop = cropRect(window: context.window.frame, display: context.display.frame) else {
+                plan.cropRefusal = "window \(context.window.windowID) frame "
+                    + "\(context.window.frame.width)x\(context.window.frame.height)"
+                    + "@(\(context.window.frame.minX),\(context.window.frame.minY)) cannot be expressed inside display "
+                    + "\(context.display.frame.width)x\(context.display.frame.height)"
+                    + "@(\(context.display.frame.minX),\(context.display.frame.minY))'s local coordinates"
+                let note = "glasspaned: pixel capture of window " + String(context.window.windowID)
+                    + " lost its display-region fallback: " + plan.cropRefusal!
+                    + "; that crop would be a different screen area than the window, so it is refused (R6-12)\n"
+                FileHandle.standardError.write(Data(note.utf8))
+                return plan
+            }
             plan.candidates.append(SurfaceCapture(
                 filter: SCContentFilter(display: context.display, excludingWindows: []),
-                sourceRect: context.window.frame, label: "display-region"
+                sourceRect: crop, label: "display-region"
             ))
         } else {
             let names = covered.map { String($0) }.joined(separator: ", ")
@@ -477,6 +496,11 @@ public enum SCKCapturer {
                 + "; whether another window covers it could not be counted (the CG window list did not contain the target, or a neighbour's bounds were unreadable), so no display crop was offered (R6-11)"
         }
         guard !plan.occludedBy.isEmpty else {
+            if let cropRefusal = plan.cropRefusal {
+                return "no capture surface available for window " + window
+                    + "; the display-region fallback was refused because " + cropRefusal
+                    + " (a crop in the wrong coordinate space is a different screen area, not this window)"
+            }
             return "no capture surface available for window " + window
                 + " (neither its own surface nor a display crop produced an image)"
         }
@@ -484,6 +508,102 @@ public enum SCKCapturer {
             + String(plan.occludedBy.count) + " window(s) ("
             + plan.occludedBy.map { String($0) }.joined(separator: ", ")
             + "), and its own surface could not be captured either"
+    }
+
+    /// 采集配置的共同决定点：**两条 OS 分支（SCScreenshotManager / SCStream）都只经
+    /// 过这里**，所以"像素尺寸从哪来""sourceRect 从哪来"只有一个答案，不会一条路修好、
+    /// 另一条路继续按旧算式产出图片。
+    ///
+    /// 两种结局互不折叠：拿到配置 = 真的会产出一张有定义域的图；`refused` = 一次显式
+    /// 未测量，调用方必须把它抛成 `pixelCaptureDenied`，不许拿任何图当替代。
+    enum ConfigurationOutcome {
+        case configured(SCStreamConfiguration)
+        case refused(ChannelError)
+    }
+
+    /// - Parameters:
+    ///   - region: 要采的那块区域（窗口自己的面 = 窗口 frame；整屏裁剪 = 裁剪矩形）。
+    ///   - displayLocalCrop: 已经换算成**显示器本地**逻辑坐标的裁剪矩形；nil 表示
+    ///     filter 本身就是窗口面，绝不能再挂一个 sourceRect 上去。
+    ///   - scale: `filter.pointPixelScale`（13 那条路用 `NSScreen.backingScaleFactor`）。
+    ///
+    /// 这里**不**管 `pixelFormat`：SCStream 那条要自己点名（见 `snapViaStream`），
+    /// 那条声明不能由公共构造点替它说——它钉的是"这条路按 BGRA 抄缓冲"这个假设。
+    static func configuration(
+        region: CGRect,
+        displayLocalCrop: CGRect?,
+        scale: CGFloat
+    ) -> ConfigurationOutcome {
+        // 尺寸算不出一张有定义域的图 ⇒ 一次显式拒绝，绝不返回一个把边长凑到 1 px 的
+        // 配置。旧写法 `config.width = max(1, ceil(region.width * scale))` 就干过这件事：
+        // 一个亚像素区域拿到 1×1，注释却说这条路径拒绝"合法但空白的 1×1 采集"，随后
+        // 那一个像素的"比率"被当成测量发进证据链（R6-12）。
+        guard let pixels = outputPixels(region: region, scale: scale) else {
+            return .refused(.pixelCaptureDenied(reason:
+                "a \(region.width)x\(region.height) pt region at \(scale)x would produce "
+                + "\(Swift.max(1, Int(ceil(region.width * scale))))x\(Swift.max(1, Int(ceil(region.height * scale)))) pixel output;"
+                + " a capture with a one-pixel (or degenerate) side is not a measurement of any interface,"
+                + " so no image is produced here and no pixel difference is reported (refused rather than manufactured)"
+            ))
+        }
+        let config = SCStreamConfiguration()
+        // A window-scoped filter is already the window: setting a display-space
+        // sourceRect on it would crop the wrong thing entirely.
+        if let rect = displayLocalCrop { config.sourceRect = rect }
+        config.width = pixels.width
+        config.height = pixels.height
+        config.showsCursor = false
+        config.capturesAudio = false
+        return .configured(config)
+    }
+
+    /// 输出像素尺寸（`config.width` / `config.height` 的**唯一**来源）。
+    ///
+    /// 返回 nil 表示"这个区域不可能被诚实采成一个二维图像"：亚像素、非有限、倍率不可用，
+    /// 以及任何一条边只有 1 像素的输出。调用方必须据此拒绝，不得 `max(1, …)` 凑数——
+    /// 凑出来的图会带着一个看起来像测量结论的像素差进档案。
+    static func outputPixels(region: CGRect, scale: CGFloat) -> (width: Int, height: Int)? {
+        guard scale.isFinite, scale > 0 else { return nil }
+        guard region.width.isFinite, region.height.isFinite,
+              region.width > 0, region.height > 0 else { return nil }
+        guard let width = pixelSpan(points: region.width, scale: scale),
+              let height = pixelSpan(points: region.height, scale: scale) else { return nil }
+        guard width > 1, height > 1 else { return nil }
+        return (width, height)
+    }
+
+    /// `ceil(points × scale)` without letting an overflow become a negative dimension.
+    private static func pixelSpan(points: CGFloat, scale: CGFloat) -> Int? {
+        let scaled = points * scale
+        guard scaled.isFinite, scaled <= CGFloat(Int.max) else { return nil }
+        return Int(ceil(scaled))
+    }
+
+    /// `SCStreamConfiguration.sourceRect` 的单位是**显示器本地逻辑坐标**
+    /// （`specs/GlassPane_P1_实施规格_v1.0_SCK迁移.md:37`：「显示器逻辑坐标系，单位
+    /// point」），而 `SCWindow.frame` 是全局桌面坐标。本文件自己就把这两个量放在一起比
+    /// （`selectDisplayIndex` 拿 `window.frame` 与 `display.frame` 求相交），这只有在两者
+    /// 同属全局坐标时才有意义——所以旧写法把 `context.window.frame` 原样交给 sourceRect
+    /// 是自相矛盾的：原点恰为 (0,0) 的那块屏上两个数字碰巧相等，别的屏上它们指的是世界里
+    /// 的两块不同区域，而采回来的图仍然被贴上"这个窗口的像素"的标签（R6-12）。
+    ///
+    /// 返回 nil = **拒绝裁剪**：窗口与这块显示器不相交（或矩形退化/非有限）时，减去显示器
+    /// 原点得到的矩形既不在窗口上也不在这块屏上，那不是裁剪而是另采一处。
+    ///
+    /// 边界如实记下：跨两块屏的窗口（与所选显示器只**部分**相交）这里按相交部分给出本地
+    /// 矩形，落在显示器外的部分由 SDK 决定它怎么裁——那一格的真机行为本机量不到
+    /// （只有一块原点 (0,0) 的屏），属 未观测，不是已验证。
+    static func cropRect(window: CGRect, display: CGRect) -> CGRect? {
+        let coordinates = [
+            window.minX, window.minY, window.width, window.height,
+            display.minX, display.minY, display.width, display.height,
+        ]
+        guard coordinates.allSatisfy({ $0.isFinite }) else { return nil }
+        guard window.width > 0, window.height > 0, display.width > 0, display.height > 0 else {
+            return nil
+        }
+        guard display.intersects(window) else { return nil }
+        return window.offsetBy(dx: -display.minX, dy: -display.minY)
     }
 
     // MARK: - Path A (macOS 14+, SCScreenshotManager)
@@ -515,16 +635,18 @@ public enum SCKCapturer {
     private static func snapViaScreenshotManager(contentFilter filter: SCContentFilter,
                                                  sourceRect: CGRect?,
                                                  windowFrame: CGRect) throws -> CGImage {
-        let config = SCStreamConfiguration()
         let scale = CGFloat(filter.pointPixelScale)
-        let region = sourceRect ?? windowFrame
-        // A window-scoped filter is already the window: setting a display-space
-        // sourceRect on it would crop the wrong thing entirely.
-        if let rect = sourceRect { config.sourceRect = rect }
-        config.width = max(1, Int(ceil(region.width * scale)))
-        config.height = max(1, Int(ceil(region.height * scale)))
-        config.showsCursor = false
-        config.capturesAudio = false
+        let config: SCStreamConfiguration
+        switch configuration(
+            region: sourceRect ?? windowFrame,
+            displayLocalCrop: sourceRect,
+            scale: scale
+        ) {
+        case .configured(let built):
+            config = built
+        case .refused(let error):
+            throw error
+        }
         return try awaitGuardedNextImage(contentFilter: filter, config: config)
     }
 
@@ -571,19 +693,23 @@ public enum SCKCapturer {
     private static func snapViaStream(contentFilter filter: SCContentFilter,
                                       sourceRect: CGRect?,
                                       windowFrame: CGRect) throws -> CGImage {
-        let config = SCStreamConfiguration()
         // 像素格式在这里点名，不交给默认值：下面的转换是按单平面 BGRA 写的，
         // 而 `SCStreamConfiguration.pixelFormat` 的默认值不是这条契约的一部分。
         // 13 那条流路径在本仓历史上从来没产出过帧（帧输出从前没登记），所以这个假设
         // 从未在那条路上被运行验证过；让它显式，是"证据不能建在一个没核过的默认值上"。
-        config.pixelFormat = kCVPixelFormatType_32BGRA
         let region = sourceRect ?? windowFrame
-        let scale = streamPixelScale(for: region)
-        if let rect = sourceRect { config.sourceRect = rect }
-        config.width = max(1, Int(ceil(region.width * scale)))
-        config.height = max(1, Int(ceil(region.height * scale)))
-        config.showsCursor = false
-        config.capturesAudio = false
+        let config: SCStreamConfiguration
+        switch configuration(
+            region: region,
+            displayLocalCrop: sourceRect,
+            scale: streamPixelScale(for: windowFrame)
+        ) {
+        case .configured(let built):
+            config = built
+        case .refused(let error):
+            throw error
+        }
+        config.pixelFormat = kCVPixelFormatType_32BGRA
 
         let bridge = StreamFrameBridge(timeout: .now() + captureTimeoutSeconds)
         let stream = SCStream(filter: filter, configuration: config, delegate: bridge)

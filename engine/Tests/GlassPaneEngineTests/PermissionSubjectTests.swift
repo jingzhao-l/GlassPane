@@ -228,15 +228,24 @@ final class PermissionSubjectTests: XCTestCase {
 
     func testRequestFiresPromptOnlyAndNeverPanelNavigation() {
         // 申请动作只唤起系统申请面；跳转面板由设置 GUI 负责（职责分离，且
-        // daemon 侧不产生 `open` 副作用）。
+        // daemon 侧不产生 `open` 副作用）。返回值是申请发起后的即时观测：两席都
+        // 只被问过、都没被回答，所以它既不是 granted，也不是 denied / notDetermined
+        // 这两个已经做过决定的说法（`--permissions` 把它们分别念成「已拒绝」「未请求」）。
         let (set, recorder) = fakeProbes()
-        XCTAssertEqual(set.request(.accessibility), .notDetermined)
+        let accessibility = set.request(.accessibility)
         XCTAssertEqual(recorder.accessibilityPromptCalls, 1)
         XCTAssertEqual(recorder.accessibilityPaneCalls, 0)
+        XCTAssertNotEqual(accessibility, .granted, "trustCheck 仍是 false，不许点亮")
+        XCTAssertNotEqual(accessibility, .notDetermined, "刚问过系统，不能说成未请求")
+        XCTAssertEqual(accessibility, .unverifiable, "AX 的布尔答不了\"未授权\"是哪一种，只能读作未验证")
 
-        XCTAssertEqual(set.request(.inputMonitoring), .denied, "请求后仍未授权 → 三态近似落到 denied")
+        let inputMonitoring = set.request(.inputMonitoring)
         XCTAssertEqual(recorder.inputRequestCalls, 1)
         XCTAssertEqual(recorder.inputPaneCalls, 0)
+        XCTAssertNotEqual(inputMonitoring, .granted, "预检仍 false，不许点亮")
+        XCTAssertNotEqual(inputMonitoring, .denied, "请求后仍未授权 → 系统没拒绝过，三态近似只能落到 unverifiable")
+        XCTAssertNotEqual(inputMonitoring, .notDetermined, "问过之后不得回退为未请求")
+        XCTAssertEqual(inputMonitoring, .unverifiable)
 
         _ = set.request(.screenRecording)
         XCTAssertEqual(recorder.screenRequestCalls, 1)
@@ -408,7 +417,11 @@ final class PermissionSubjectTests: XCTestCase {
             inputTapProbe: { tapCalls += 1; return false },
             subjectProvider: { PermissionSubject(binaryPath: "/x/glasspaned") }
         )
-        XCTAssertEqual(set.request(.inputMonitoring), .denied)
+        // 只问一次：再问一次会多建一次 tap，tapCalls 那条断言就自证不了了。
+        let observed = set.request(.inputMonitoring)
+        XCTAssertNotEqual(observed, .denied, "预检 false 只是\"还没答应\"，不是一个决定")
+        XCTAssertNotEqual(observed, .notDetermined, "问过之后不得回退为未请求")
+        XCTAssertEqual(observed, .unverifiable)
         XCTAssertEqual(tapCalls, 1, "必须尝试创建一次 tap，否则列表里不会出现该主体")
     }
 

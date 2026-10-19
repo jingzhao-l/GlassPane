@@ -196,6 +196,42 @@ public struct CrashSignal: Codable, Equatable {
     }
 }
 
+// MARK: - Producer-side field bounds
+
+/// Every length rule the frozen evidence contract states, in the unit it states
+/// it in. `kernel/schemas/evidence-pack.schema.json` counts `maxLength` in UTF-16
+/// code units and `mcp-shell/src/tools.ts` counts `z.string().max()` in the same
+/// units; `kernel/dist/evidence-pack.js:216-228` names the resulting mismatch as
+/// a producer bug ("the Swift writer counts `Character`s and never bounds these
+/// fields"), and a pack that trips it is refused *after* the daemon answered
+/// `evidencePersisted: true`. So the bytes are bounded where the bytes are made.
+///
+/// Clipping is always said out loud: a truncated value that looks complete is
+/// the same dishonesty in a smaller font, and the reader has to be able to tell
+/// "the probe reported 4 KiB and the archive kept the head" from "the probe
+/// reported exactly this". Same rule `RecipeLoader.capped` applies to error text.
+enum ArchiveFieldBounds {
+    static let stateKeyMaxUTF16Units = 512
+    static let stateValueMaxUTF16Units = 1024
+    static let handlerFileMaxUTF16Units = 512
+    static let probeVersionMaxUTF16Units = 64
+
+    /// `value`, in UTF-16 units, cut to `limit` with the elision named.
+    static func bounded(_ value: String, maxUTF16Units limit: Int) -> String {
+        let units = Array(value.utf16)
+        guard units.count > limit else { return value }
+        let marker = Array("… (\(units.count) UTF-16 units total)".utf16)
+        // Keep at least one unit of the value itself: `key` and `file` carry
+        // `minLength: 1`, and an empty clipped value would read as "there was
+        // nothing here" rather than "this was clipped from N".
+        var kept = Array(units.prefix(max(1, limit - marker.count)))
+        // Never cut a surrogate pair in half — an orphaned half is not a
+        // character, and no JSON reader can be asked what it means.
+        if let last = kept.last, (0xD800...0xDBFF).contains(last) { kept.removeLast() }
+        return String(decoding: kept, as: UTF16.self) + String(decoding: marker, as: UTF16.self)
+    }
+}
+
 // MARK: - Probe signals (P6 spec v6.0 §3.1, Z1–Z4.5 channel)
 
 /// One handler hit localized by source location (Z1 macro instrumentation).
@@ -204,7 +240,8 @@ public struct HandlerRef: Codable, Equatable {
     public let line: Int
 
     public init(file: String, line: Int) {
-        self.file = file
+        // §2.2 wire text of arbitrary length, `maxLength: 512` in the schema.
+        self.file = ArchiveFieldBounds.bounded(file, maxUTF16Units: ArchiveFieldBounds.handlerFileMaxUTF16Units)
         self.line = line
     }
 }
@@ -221,7 +258,10 @@ public struct HandlerProbeSignal: Codable, Equatable {
     public let lateCount: Int
 
     public init(probeVersion: String, hitCount: Int, handlers: [HandlerRef], lateCount: Int = 0) {
-        self.probeVersion = probeVersion
+        // `maxLength: 64`, same $defs block as `handlers[].file`.
+        self.probeVersion = ArchiveFieldBounds.bounded(
+            probeVersion, maxUTF16Units: ArchiveFieldBounds.probeVersionMaxUTF16Units
+        )
         self.hitCount = hitCount
         self.handlers = Array(handlers.prefix(Self.maxHandlers))
         self.lateCount = lateCount
@@ -234,17 +274,20 @@ public enum StateDiffSource: String, Codable {
     case z3KVC = "z3-kvc"
 }
 
-/// One before/after pair; values are canonical strings (≤1 KiB truncated by
-/// the probe side).
+/// One before/after pair; values are canonical strings, bounded on the way in
+/// by the unit the frozen schema counts (`maxLength: 1024`, UTF-16 units) with
+/// any elision said out loud — the probe side's "≤1 KiB" rule was never
+/// enforceable from here, so an oversized frame used to be archived verbatim and
+/// then refused by the published reader.
 public struct StateEntry: Codable, Equatable {
     public let key: String
     public let before: String
     public let after: String
 
     public init(key: String, before: String, after: String) {
-        self.key = key
-        self.before = before
-        self.after = after
+        self.key = ArchiveFieldBounds.bounded(key, maxUTF16Units: ArchiveFieldBounds.stateKeyMaxUTF16Units)
+        self.before = ArchiveFieldBounds.bounded(before, maxUTF16Units: ArchiveFieldBounds.stateValueMaxUTF16Units)
+        self.after = ArchiveFieldBounds.bounded(after, maxUTF16Units: ArchiveFieldBounds.stateValueMaxUTF16Units)
     }
 }
 

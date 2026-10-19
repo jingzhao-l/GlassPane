@@ -22,6 +22,15 @@ enum SocketDirectoryRule {
     /// 0700. Otherwise the defect, phrased to be read by a person or an agent.
     static func enforce(directory: String) -> String? {
         guard !directory.isEmpty else { return nil }
+        // The leaf may not be a symlink. `chmod`, `stat` and `bind` all follow it, so
+        // every check below would measure — and pass on — the directory the link
+        // *points at*, while `ancestorDefect(for:)` walks the string path it was given.
+        // That pair is the hole: a state root named `/Users/me/.glasspane` whose leaf
+        // links to `/tmp/somebody/mine` measures the target's owner and mode (both fine)
+        // and never asks whether the parents of the real location let another account
+        // create names there. The archive side refuses exactly this shape for the same
+        // reason (`EvidenceStore.nameIsUsableArchiveDirectory`: "chmod 会跟着符号链接走").
+        if let defect = leafSymlinkDefect(directory) { return defect }
         try? FileManager.default.createDirectory(
             atPath: directory,
             withIntermediateDirectories: true,
@@ -55,6 +64,18 @@ enum SocketDirectoryRule {
             return "\(directory) is still \(String(format: "%04o", mode)) after chmod(0700) — this volume does not keep the permission bits, so isolating the socket here is impossible"
         }
         return ancestorDefect(for: directory)
+    }
+
+    /// The leaf's own type, taken without following it. A symlink at the end of the
+    /// path is refused rather than resolved: `chmod`/`stat`/`bind` would all act on the
+    /// directory the link points at while the ancestor walk below is handed the link's
+    /// own path, so the real location's parents never get asked. `lstat` failing with
+    /// ENOENT is not a defect — that is the ordinary "the daemon creates it" case.
+    static func leafSymlinkDefect(_ directory: String) -> String? {
+        var info = stat()
+        guard lstat(directory, &info) == 0 else { return nil }
+        guard (info.st_mode & S_IFMT) == S_IFLNK else { return nil }
+        return "\(directory) is a symlink — the socket would be bound through it into whatever it points at, while the parent checks below can only see this path. Refusing without following it (the same rule the evidence archive applies to its directory, `EvidenceStore.nameIsUsableArchiveDirectory`): point --state-dir at a real directory this account owns"
     }
 
     /// The leaf's own checks say nothing about the path above it, and that is the

@@ -30,6 +30,13 @@ public final class ProbeInbox {
         var stateBefore: [String: StateEntry] = [:]
         var stateSource: StateDiffSource?
         var probeVersion: String
+        /// Defect 1 (2026-10-19 review): set when the probe owning this window
+        /// disconnected while the window was still open. `disconnect` takes the
+        /// pid's event ring with it, so the window can no longer be measured —
+        /// and "the ring is gone" is a different fact from "the ring was empty".
+        /// `endWindow` answers the file's own honest-absence shape for a flagged
+        /// window instead of counting the empty replacement ring as zero hits.
+        var probeGone = false
     }
 
     /// One recorded probe drop-off (P6 §2.1/§5.4, R2-18): what *was* connected,
@@ -147,7 +154,8 @@ public final class ProbeInbox {
                     droppedWrites: hello.droppedWrites ?? existing.hello.droppedWrites,
                     rejectedKeys: hello.rejectedKeys ?? existing.hello.rejectedKeys,
                     droppedInboundFrames: hello.droppedInboundFrames ?? existing.hello.droppedInboundFrames,
-                    droppedInboundLines: hello.droppedInboundLines ?? existing.hello.droppedInboundLines
+                    droppedInboundLines: hello.droppedInboundLines ?? existing.hello.droppedInboundLines,
+                    truncatedValues: hello.truncatedValues ?? existing.hello.truncatedValues
                 ),
                 connectedAt: existing.connectedAt,
                 eventsSeen: existing.eventsSeen
@@ -185,6 +193,14 @@ public final class ProbeInbox {
         // history); `register` starts a fresh pid clean.
         events.removeValue(forKey: pid)
         unmappedStateSources.removeValue(forKey: pid)
+        // Defect 1: a window that was open when the probe went away can never be
+        // measured again — its event ring is what `endWindow` counts, and that
+        // ring is gone with the process. Flag it so the close answers the honest
+        // absence instead of `hitCount: 0`, which Classifier reads as a real
+        // zero-hit act (its T8/zero branches key on exactly that number).
+        for index in windows.indices where windows[index].pid == pid && windows[index].t1 == nil {
+            windows[index].probeGone = true
+        }
         let previousDrops = disconnections.first(where: { $0.pid == pid })?.drops ?? 0
         disconnections.removeAll(where: { $0.pid == pid })
         disconnections.append(Disconnection(
@@ -403,7 +419,9 @@ public final class ProbeInbox {
 
     /// Close the window and build the §3.1 signals from events received in
     /// `[t0, t1]`. Returns nil pair only when no window was open (no probe
-    /// connection at begin time — the null-signal honest absence).
+    /// connection at begin time — the null-signal honest absence), or when the
+    /// probe disconnected while the window was open (defect 1: its event ring
+    /// went with the process, so this close has nothing to measure).
     public func endWindow(
         pid: Int32, opId: String, includeMirrorDiff: Bool = true
     ) -> (handlerProbe: HandlerProbeSignal?, stateDiff: StateDiffSignal?)? {
@@ -415,6 +433,14 @@ public final class ProbeInbox {
         var window = windows[index]
         window.t1 = closedAt
         windows[index] = window
+        if window.probeGone {
+            // The probe for this window is gone and the close is recorded above
+            // (so a second close still answers nil). Nothing below this line can
+            // be measured: `events[pid]` is now an empty ring belonging to nobody,
+            // and reading it would turn "we lost the channel mid-act" into
+            // "the act produced zero handler hits". §3.1's absence is the answer.
+            return (nil, nil)
+        }
 
         let stream = events[pid] ?? []
         var stateEvents: [Event] = []
@@ -468,6 +494,11 @@ public final class ProbeInbox {
             probeVersion: window.probeVersion,
             hitCount: window.hitCount,
             handlers: window.handlers,
+            // The grace period after `closedAt` has not elapsed yet, so this is
+            // the count *at close*, not the final answer: `EngineCore.diagnose`
+            // refreshes it through `refreshLateCount`, which says out loud when
+            // the refresh cannot happen (defect 3) instead of leaving a 0 to be
+            // read as "no late arrivals".
             lateCount: 0
         )
         // §3.1 presence rule as implemented: `stateDiff` needs a *nameable*
@@ -520,9 +551,16 @@ public final class ProbeInbox {
     /// grace period after t1 (P6 §2.3 — "delayed reaction" is exactly a
     /// handler firing shortly after the act, so no file:line preconditions;
     /// acts are serialized by the dispatcher, keeping attribution unambiguous).
+    ///
+    /// nil is "this window's late count cannot be measured", which covers three
+    /// states: no record in the ring (evicted by `windowHistoryLimit`, or a
+    /// restarted daemon), a window never closed, and — defect 1's other half — a
+    /// window whose probe disconnected, because the ring it would be counted
+    /// from is gone and a recycled pid's fresh ring is not this window's data.
     public func lateCount(opId: String) -> Int? {
         lock.lock(); defer { lock.unlock() }
-        guard let window = windows.first(where: { $0.opId == opId }), let t1 = window.t1 else {
+        guard let window = windows.first(where: { $0.opId == opId }), let t1 = window.t1,
+              !window.probeGone else {
             return nil
         }
         var late = 0
@@ -544,18 +582,54 @@ public final class ProbeInbox {
         return late
     }
 
+    /// What a diagnose-time late-count refresh actually established (defect 3).
+    ///
+    /// The old shape was `HandlerProbeSignal?`, and `nil` stood for two opposite
+    /// facts: "the stored count is already final" and "nothing can ever read
+    /// this count again". `EngineCore` substituted only on non-nil, so the second
+    /// one kept the act-time `lateCount: 0` — a fabricated "no late arrivals" in
+    /// the archived pack, and a pack for which T8 can never go red. Four outcomes
+    /// now, so the refusal is sayable.
+    public enum LateCountRefresh: Equatable {
+        /// The final count is known and differs from the stored one.
+        case measured(HandlerProbeSignal)
+        /// The final count is known and equals the stored one: nothing to rewrite.
+        case confirmed
+        /// This pack carries no handlerProbe signal, so there is no late count to
+        /// claim either way (§3.1 absence).
+        case notCarried
+        /// The window left the ring, so its stored `lateCount` is the act-time
+        /// default and nobody can verify it. `reason` is for the pack.
+        case unmeasurable(reason: String)
+    }
+
     /// Refresh a stored handlerProbe with the final late count (diagnose time).
-    public func refreshedHandlerProbe(for pack: EvidencePack) -> HandlerProbeSignal? {
-        guard let stored = pack.signals.handlerProbe,
-          let late = lateCount(opId: pack.operationId), late != stored.lateCount else {
-            return nil
+    public func refreshLateCount(for pack: EvidencePack) -> LateCountRefresh {
+        guard let stored = pack.signals.handlerProbe else { return .notCarried }
+        guard let late = lateCount(opId: pack.operationId) else {
+            return .unmeasurable(reason: """
+            the act window for \(pack.operationId) is no longer in the probe inbox's \
+            \(ProbeInbox.windowHistoryLimit)-window ring, so the grace period after its close \
+            can never be counted; handlerProbe.lateCount=\(stored.lateCount) is the value written \
+            when the window closed, not a measurement of late arrivals (T8 is undecidable for this \
+            pack — re-run the act, then diagnose within \(Int(ProbeInbox.lateGraceSeconds))s of it)
+            """)
         }
-        return HandlerProbeSignal(
+        guard late != stored.lateCount else { return .confirmed }
+        return .measured(HandlerProbeSignal(
             probeVersion: stored.probeVersion,
             hitCount: stored.hitCount,
             handlers: stored.handlers,
             lateCount: late
-        )
+        ))
+    }
+
+    /// The signal-only view of `refreshLateCount`, kept for callers that have no
+    /// use for the third answer. Prefer `refreshLateCount`: folding "unmeasurable"
+    /// into nil is exactly the confusion defect 3 removes.
+    public func refreshedHandlerProbe(for pack: EvidencePack) -> HandlerProbeSignal? {
+        guard case let .measured(signal) = refreshLateCount(for: pack) else { return nil }
+        return signal
     }
 
     // MARK: - Checkpoint request/response (tier-1, §5.5)
@@ -682,7 +756,8 @@ public final class ProbeInbox {
     /// through a channel this daemon cannot read".
     ///
     /// The probe's own drop counters (`droppedEvents`, `droppedWrites`,
-    /// `rejectedKeys`, `droppedInboundFrames`, `droppedInboundLines`) follow the
+    /// `rejectedKeys`, `droppedInboundFrames`, `droppedInboundLines`,
+    /// `truncatedValues`) follow the
     /// **opposite** rule: they
     /// are added only when the
     /// probe reported them, because a probe that predates them, or one whose
@@ -719,6 +794,9 @@ public final class ProbeInbox {
             }
             if let droppedInboundLine = connection.hello.droppedInboundLines {
                 entry["droppedInboundLines"] = droppedInboundLine
+            }
+            if let truncatedValues = connection.hello.truncatedValues {
+                entry["truncatedValues"] = truncatedValues
             }
             return entry
         }

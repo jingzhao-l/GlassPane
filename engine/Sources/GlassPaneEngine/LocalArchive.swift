@@ -258,10 +258,15 @@ public enum LocalArchive {
 
     /// 扫描一个 evidence 目录。按 createdAt 倒序（新→旧）；同值时按文件名，
     /// 保证两次扫描结果稳定可断言。
+    ///
+    /// **与 daemon 同一个读者**（defect 8，2026-10-19）。此前这里是 `decode` +
+    /// 任意 `*.json`，而 daemon 是 `EvidenceStore.isEntryName` + `decodeAndValidate`：
+    /// 一份档案、两个判决，面板会渲染 daemon 用 GP_E_NO_EVIDENCE 回答的档案行。
+    /// 现在两条判据都在，且"看了却给不出行"的那种文件不静默丢——它进
+    /// `unreadableFiles`，条数与名字都呈现。
     public static func scanEvidence(
         directory: String = EvidenceStore.defaultDirectory,
-        fileReader: (String) -> Data? = { path in try? Data(contentsOf: URL(fileURLWithPath: path)) },
-        decoder: JSONDecoder = JSONDecoder()
+        fileReader: (String) -> Data? = { path in try? Data(contentsOf: URL(fileURLWithPath: path)) }
     ) -> EvidenceArchiveScan {
         let url = URL(fileURLWithPath: directory)
         guard FileManager.default.fileExists(atPath: directory) else {
@@ -289,12 +294,27 @@ public enum LocalArchive {
         var total = 0
         for name in names {
             let path = directory + "/" + name
-            guard let data = fileReader(path) else {
+            guard EvidenceStore.isEntryName(name) else {
+                // Not a name this archive's owner ever writes (`op_<26>.json`), so
+                // the daemon will not read it, will not count it in `stats()`, and
+                // will not delete it. A panel row for it would be the lying half of
+                // that; naming it is the honest half.
                 unreadable.append(name)
                 continue
             }
-            total += data.count
-            guard let pack = try? decoder.decode(EvidencePack.self, from: data) else {
+            // Defect 9: the archive's size is what the daemon counts — the size of
+            // every entry it owns, including one whose *contents* cannot be read.
+            // Summing only the files that decoded made the panel state a smaller
+            // archive in exactly the same breath as reporting it partly unreadable.
+            let listedSize = try? url.appendingPathComponent(name)
+                .resourceValues(forKeys: [.fileSizeKey]).fileSize
+            guard let data = fileReader(path) else {
+                total += listedSize ?? 0
+                unreadable.append(name)
+                continue
+            }
+            total += listedSize ?? data.count
+            guard let pack = try? EvidencePack.decodeAndValidate(data) else {
                 unreadable.append(name)
                 continue
             }
