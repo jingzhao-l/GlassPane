@@ -10,7 +10,90 @@ contract does not).
 
 ## [Unreleased]
 
-### Changed — 内核依赖追到 0.1.8：`breakerLevel` 缺席从此是一个合法答案
+（空。2026-10-19 这一轮的账全部归入 `0.9.0`；原先挂在这里的"Step 0b 没在本批做"那一条是过期账，
+`mcp-shell` 早已从 `file:../kernel` 换成发布包、`kernel/` 的代码镜像也已退役，见 SYNCLOG 2026-10-18。）
+
+## [0.9.0] - 2026-10-19
+
+判据：**minor**。pre-1.0 语义下"产品面/CLI 形状变动 = minor"，这一版改的每一条都是用户读得到或
+做得到东西，不是纯内部修复：TUI 首页文案、CLI 收尾语与 `--help` 分支、安装/兜底通道印出的包名与
+安装 URL、运行时不再抓模型目录、决策台账默认路径（**需要用户动手搬一次**，见下）。另外本版的
+发布 lane 与六把尺子的判据面都变了形，装的人与读文档的人看到的承诺随之改变。取号说明：上一轮
+（2026-10-18）把 `v0.8.3` 这个号留给主人、故意让 `artifact` 那格红；本轮按同一口径取号，但改动
+形状 ⇒ 走 minor，`0.8.3` 作废不取。
+
+### Changed — 产品面
+
+- **模型目录改为树上的 pin**：`contracts/models-catalog.json`（232 个 provider）进版本控制，
+  `packages/opencode/script/generate.ts` 默认读它，文件缺失**构建失败**并按名指出刷新命令，绝不
+  悄悄回落去抓网络。此前每次发布把 `models.dev` 当时的响应体贴进签名产物——tag 决定不了发布物字节。
+- **运行时不再抓目录**：`packages/core/src/models-dev.ts` 的默认主机不再是 `models.opencode.ai`；
+  不设 `OPENCODE_MODELS_URL` 就一次都不请求。那半份"禁用抓取"本来是假的：`populate` 吃
+  `OPENCODE_DISABLE_MODELS_FETCH`，`refresh()` 与后台 60 分钟轮询不吃——现在三处都吃。抓回的正文
+  先验形状再落缓存（缓存比内嵌快照先读，一次坏写入会长期遮蔽快照）。
+  这条改的是安全形状：目录里一个字符串字段会被交给 `npm install` + `await import()` 执行，
+  执行环境持有整个 `gp_*` 无障碍面。
+- **TUI 首页删掉两条 tips**：`docker run -it --rm ghcr.io/anomalyco/opencode` 与 OpenCode Zen 引导。
+  它们教每个安装去拉上游的容器镜像与上游的付费模型服务；本产品的规矩是分发面不许出现别人的基础设施，
+  而管这条的闸当时只读 7 个手抄文件，从没打开过那个文件。
+- **`uninstall` 收尾语**改为产品名（此前对用户说"感谢你使用 OpenCode"）。
+- **`--help`/usage 那条分支**原本拿 `"opencode "` 去比，而 `.scriptName()` 早已是产品名——
+  分支永远走不到，等于"是否重复打 logo"这个决定从来没发生。现在两处共用一个常量。
+- **安装/兜底文案只点发得出的包**：`postinstall.mjs` 与 `bin/glasspane-harness` 不再建议
+  "手动安装 `glasspane-harness-darwin-x64-baseline` / `-musl` / `linux-*` / `windows-*`"——
+  这些包本产品决定不发。机器不在矩阵里时直接说不支持并列出支持集。
+- **安装 URL 钉本版 tag**：`product.json → install.curl` 与两份 README、`docs/install.md`、
+  `install.sh` 头部那行，全部从 `/main/` 改为 `/v0.9.0/`。安装脚本是验二进制的那个东西，钉在分支上
+  等于任何能 push split 仓 main 的人都能换掉校验器。新闸 `installer-curl-pinned` 四处逐字核，
+  下一版漏改一处就红。
+- **决策台账默认路径去掉重复目录段**：`~/.local/share/glasspane-harness/decisions.jsonl`
+  （此前实际落在 `…/glasspane-harness/glasspane-harness/decisions.jsonl`，而 `docs/troubleshooting.md`
+  与 `docs/models-and-keys.md` 一直发布的是单段形式——照文档去找的人看到"No such file"）。
+  **需要动手**：已有深层台账的用户请搬一次
+  `mv ~/.local/share/glasspane-harness/glasspane-harness/decisions.jsonl ~/.local/share/glasspane-harness/`，
+  不搬则新条目从一条空链开始（哈希链本身不跨文件续接，这是有意的：没有东西能证明续得上）。
+
+### Fixed — 工具面与宿主之间
+
+- 台账写失败或内核抛出**不再带走 `gp_*` 的答案**。`plugin.trigger` 不接拒绝，而
+  `session/tools.ts` 是在完成 tool call **之前**触发 `tool.execute.after`：一次写不进去的台账
+  （只卷、被 chmod 过的审计文件）此前会把整个 `gp_act` 判失败，而此时应用已经被点过。
+- `HOME=""` 不再造出相对的 socket/状态根（`??` 不吃空串），非绝对的默认根直接拒绝——那同时
+  也是引擎状态根守卫失效的方式。
+- `gp_probe_status` 的模型可见描述不再复述"四个权限席位"及其名单；集合的真源是引擎的 `hello`，
+  复制过来就是等着说谎。`docs/install.md` 同一处措辞一并改。
+- `gp_*` 进行中的专属文案（Reading accessibility tree… 等）现在真的会显示：渲染路径先匹
+  `spinner` 再把 `children` 塞进去，而 `~ {pending}` 在只有别的状态能到的分支里，那几个字符串
+  此前是写了、传了、从不显示。选择在纯函数 `glasspaneRowLook().text` 里决定，那句主张第一次可测。
+
+### 发布链与尺子（本版同时收紧，属产品承诺的一部分）
+
+- 发布 lane 的 `version-check` 现在双向核 tag / `product.json` / `packages/opencode/package.json`，
+  并新增 CI-green 前置（按 peel 后的 commit 查 `ci.yml`；缺 token、报错、无记录、非 success、
+  预算耗尽一律拒绝）。`docs/release.md` 原先声称的 `check-version` 只存在于父仓，split 仓里从来没有它。
+- `setup-bun` 里那条 `pip install setuptools || … || true` **删除**：按本仓真实构建路径量过，
+  node-gyp@12.3.0 自带的 gyp 对 setuptools/distutils 零依赖，那一步只是往签名构建机上放一份
+  不钉版本的第三方包并把失败咽掉。
+- `tools/gpg-signing.sh` 的私钥与 passphrase 不再走 argv（任何本地账号 `ps -eww` 可读）；
+  那条审计改为按路径同时覆盖父子两份拷贝，父份不在时大声 SKIP 而非静默通过。
+- 六把尺子审出 14 处"记录写着、代码不读"或"失败分支跑不到"的缺陷并全部修掉：`brand-surface`
+  的 productFiles/docFiles 无人回读、locale 命中数折成 1、`--record` 无脏树拒绝、内置 skill 规则
+  的输入路径早在私有化时改名（于是它贡献 0 命中而金样记成"干净"）；`tool-surface` 的分母
+  （engine）无人回读、内核出处解析失败只打一行 stderr 然后判绿；`fork-diff` 两条自回显长度比较、
+  降级泳道不看"提交里有而工作树里没有"、参照侧无空集地板且不校检出干净；`hook-liveness` 读参照
+  工作树而不看 git 状态（本地编辑会被判成"上游换了地板"）；`surface-semantics` 的 `--record`
+  无脏树拒绝（它记的是允许面，洗进去就永远红不了）；`release-artifact` 把读不出的字节折成 0 行、
+  把工具崩溃报成分歧；`product-surface` 的 selftest 语料含 YAML 注释、两处地板比实测松 27、
+  `registry` 那条是 `x ?? y === y` 的自回显。
+- 新闸与修复由 `harness/tools/rulers-selftest.mjs` 逐条驱动到具名红（含一条"把守卫拆掉后
+  同一变异应当变绿"的因果对照），已接进父仓 `ci.yml` 的 `harness-rulers` job。
+- `scripts/check-doc-links.mjs` 首次开始核尺子自己的出处指针（`limitSource` 曾指向一份
+  从未存在的 specs 决策记录），并把 `docs/models-and-keys.md`、`docs/release.md`、
+  `docs/kernel-integration.md` 与 `harness/README.md` 登记进死链/主张校验集合。
+- `product.json` 不再描述空气：`lineageOnly` 里六条不存在的路径拆成 `deletedFromTree`，
+  新闸 `declared-shape` 双向核声明与磁盘。
+
+### 本批内核依赖（原 `[Unreleased]` 账，随本版一并落地）
 
 - **依赖再升 `iterate-kernel@0.1.8`**（`RoundState.breakerLevel` 改成可选：缺席读作"这个跑没有
   断路器通道"，不再等同于 `0`——`0` 断言的是"有断路器且未跳闸"）。fork 自己不读 `convergence`
@@ -31,9 +114,10 @@ contract does not).
   updater 的 `scripts-assert-ci-green.test.mjs::等满预算按未验证拒绝，不是放行` 在四套并跑时红过
   一次（`pending 就该反复问，实得 1 次`——轮询次数被负载吃掉），单独复跑 14/14 绿；与内核无关，
   记在这里而不是抹掉。
-- 本批没做完的（点名）：`mcp-shell` 仍挂在 `file:../kernel` 上，所以镜像的 `src/`+`test/`+
-  `package.json` 还得靠 `sync-kernel.sh` 一份份抄；Step 0b 的正题——把这条腿换成已发布的
-  `iterate-kernel`、让镜像只剩那份被 pin 钉住的语料——没在本批做。
+- ~~本批没做完的（点名）：`mcp-shell` 仍挂在 `file:../kernel` 上~~ —— 这条是过期账，本轮删：
+  `mcp-shell` 已改为发布包 `iterate-kernel` 依赖，`kernel/{src,test,package.json,…}` 那份代码镜像
+  也已于 2026-10-18 退役，`tools/sync-kernel.sh` 两个 `--target` 现在都返回拒绝（判据见 SYNCLOG
+  2026-10-18 与 `FORK.md` 纪律 4）。留着它，下一轮就会有人去"修"一件已经修完的事。
 
 ## [0.8.2] - 2026-10-16
 

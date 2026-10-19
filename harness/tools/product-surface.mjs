@@ -595,6 +595,22 @@ const sh = stripComments(read("scripts/install.sh"))
 // The raw "curl | bash" URL lives where the user copies it from (product.json's
 // install block and the README); the script body is what executes after that.
 check("installer-urls", (product.install?.curl ?? "").includes(`raw.githubusercontent.com/${product.repo}/`), "product.json install.curl does not point at the product's own raw script URL")
+// The installer is the thing that verifies the binary, so the URL it is handed out by cannot
+// live on a moving branch: whoever can push `main` of the split repository would otherwise pick
+// the verifier for every reader of the docs. Pinned to this version's tag, and the three places a
+// human copies it from have to say the same string — a per-release rewrite nobody remembers is
+// exactly how the previous `/main/` line survived while `release.yml` claimed the installers pin
+// the tag.
+{
+  const curl = product.install?.curl ?? ""
+  check("installer-curl-pinned", curl.includes(`/v${product.version}/`), `product.json install.curl is not pinned to this release (expected /v${product.version}/, got "${curl}") — the entry point that hands out the verifier must name a tag`)
+  check("installer-curl-pinned", !curl.includes("/main/"), `product.json install.curl still points at the branch: ${curl}`)
+  for (const doc of ["README.md", "README.zh-CN.md", "docs/install.md"]) {
+    const text = read(doc)
+    check("installer-curl-pinned", text.includes(curl), `${doc} does not carry product.json's pinned install line verbatim — a reader following the docs gets a different ref than the manifest declares`)
+    check("installer-curl-pinned", !text.includes("glasspane-harness/main/scripts/install.sh"), `${doc} still shows a branch-pinned curl | bash one-liner`)
+  }
+}
 check("installer-urls", (product.install?.npm ?? "").includes(product.name), "product.json install.npm does not install the product package")
 check("installer-urls", sh.includes("releases/download") && sh.includes(product.repo), "install.sh does not point at the product's release assets (repo + /releases/download)")
 check("installer-urls", sh.includes('npm install -g --registry "$NPM_REGISTRY" "$NPM_SPEC"'), "install.sh does not install the npm package through the pinned registry (npm must be the primary lane, named registry included)")

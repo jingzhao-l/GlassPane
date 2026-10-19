@@ -140,7 +140,7 @@ jobs:
           '
 
   # installer-selftest.sh 是 scripts/install.sh 回退通道（GitHub release asset + sha256/GPG）
-  # 的离线行为测试：stub curl/uname/npm/gpg，80 条具名断言（2026-10-14 实测）。在此之前
+  # 的离线行为测试：stub curl/uname/npm/gpg，165 条具名断言（2026-10-19 实测；2026-10-14 记的是 80）。在此之前
   # 没有任何 lane 运行它——grep 全仓只能找到 README/CHANGELOG/contracts，这正是本文件
   # 存在要防的失败形态（测试写而无人跑）。
   # 为什么单独成 job 而不是 verify 的一步：selftest 有意把 `uname -s` 留给真机（macOS-only
@@ -152,5 +152,5 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Installer selftest (80 named checks against stubbed curl/npm/gpg)
+      - name: Installer selftest (165 named checks against stubbed curl/npm/gpg)
         run: bash packages/opencode/script/installer-selftest.sh
