@@ -156,8 +156,19 @@ cmd_seed() {
   # rejects as "no valid OpenPGP data found" with no hint about the cause. That
   # is not hypothetical — it is how v0.6.1's first run failed. A single-line
   # value round-trips correctly (verified), so base64 is the transport.
+  #
+  # The base64 value then goes to `security`'s prompt on STDIN, never into argv.
+  # `-w` with no argument makes the tool read two lines (value, then retype) from
+  # its input, and it reads stdin when there is no tty. `-w "$value"` is the
+  # insecure shape its own usage text warns about: argv is readable by any local
+  # account (`ps -eww -o args`) for the whole lifetime of the command, which would
+  # put the armored private key and the passphrase there. Same rule as the
+  # `--passphrase-fd 0` note above, and the same rule `selftest` audits both
+  # copies of this file against. The prompt can exit 0 on a mismatched pair, so
+  # the honest verdict stays the read-back below.
   kc_put() { local b; b="$(printf '%s' "$2" | base64 | tr -d '\n')"
-             security add-generic-password -U -s "$KEYCHAIN_SERVICE" -a "$1" -w "$b" >/dev/null; }
+             printf '%s\n%s\n' "$b" "$b" \
+               | security add-generic-password -U -s "$KEYCHAIN_SERVICE" -a "$1" -w >/dev/null; }
   kc_get() { security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$1" -w 2>/dev/null \
                | base64 -d 2>/dev/null || true; }
 

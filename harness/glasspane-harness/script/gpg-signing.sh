@@ -581,58 +581,83 @@ STUBAUDITABSENT
   else ok "every target answered (read or absent) is what the ok line is allowed to mean"; fi
   rm -rf "$adir" && rm -f "$alog" "$arc"
 
-  # No secret may reach argv — audited against this file's own live lines, comments
-  # excluded (the same rule cmd_audit applies to other people's workflows, turned on the
-  # tool itself). Two shapes broadcast it: a keychain value handed to `security`, and a
-  # passphrase handed to gpg. Both were here until 2026-10-14.
-  local src live
+  # No secret may reach argv. Two shapes broadcast it: a keychain value handed to
+  # `security`, and a passphrase handed to gpg. Both were here until 2026-10-14.
+  #
+  # This runs by PATH over BOTH copies of the tool, not only over the file that happens
+  # to be executing. The two copies share one keychain service and one pair of account
+  # names, so a transport fix that lands in one of them is not a fix — and a selftest
+  # that can only see `${BASH_SOURCE[0]:-$0}` can never keep the other copy honest, which
+  # is exactly how the parent's `tools/gpg-signing.sh` kept its `-w "$value"` shape after
+  # this file was corrected. Comments are excluded the way cmd_audit excludes them from
+  # other people's workflows, so a file that documents the anti-pattern is not flagged
+  # for documenting it.
+  local src parent_src
   src="${BASH_SOURCE[0]:-$0}"
-  live="$(grep -vE '^[[:space:]]*#' "$src" 2>/dev/null || true)"
-  if [ -z "$live" ]; then
-    bad "selftest could not read its own source ($src) — the argv audit did not run"; fails=1
-  else
+  # Resolved relative to this script's own location, never hard-coded to one machine:
+  # <root>/harness/glasspane-harness/script -> ../../.. -> <root>, and the parent copy is
+  # <root>/tools/gpg-signing.sh. In the split repo that path does not exist, and the
+  # audit says so out loud instead of going green.
+  parent_src="$(cd "$(dirname "$src")/../../.." >/dev/null 2>&1 && printf '%s/tools/gpg-signing.sh' "$(pwd)")" || parent_src=""
+  audit_argv_channel() {  # $1 = label, $2 = path of a gpg-signing.sh copy to audit
+    local label="$1" f="$2" live
+    if [ -z "$f" ] || [ ! -f "$f" ]; then
+      warn "SKIP  $label: nothing at '${f:-<unresolved>}' — that copy is NOT audited, this is not a pass"
+      return 0
+    fi
+    live="$(grep -vE '^[[:space:]]*#' "$f" 2>/dev/null || true)"
+    if [ -z "$live" ]; then
+      bad "$label: could not read $f — the argv audit did not run"; fails=1; return 0
+    fi
     if printf '%s\n' "$live" | grep -qE 'add-generic-password[^|]*[[:space:]]-w[[:space:]]+"'; then
-      bad "a keychain value is back in argv (security takes it through the prompt)"; fails=1
-    else ok "no keychain value in argv"; fi
+      bad "$label: a keychain value is back in argv ($f — security takes it through the prompt)"; fails=1
+    else ok "$label: no keychain value in argv"; fi
     if printf '%s\n' "$live" | grep -qE -- '--passphrase[[:space:]]+"'; then
-      bad "the signing passphrase is back in gpg argv"; fails=1
-    else ok "no passphrase in gpg argv"; fi
+      bad "$label: the signing passphrase is back in gpg argv ($f)"; fails=1
+    else ok "$label: no passphrase in gpg argv"; fi
     # The two negatives above go green when the code disappears, so the positive halves
     # are asserted too: each secret must have a named non-argv channel still in place.
     if printf '%s\n' "$live" | grep -qE -- '--passphrase-fd 0'; then
-      ok "gpg still reads the passphrase from fd 0"
-    else bad "--passphrase-fd 0 is gone — the passphrase has no channel"; fails=1; fi
+      ok "$label: gpg still reads the passphrase from fd 0"
+    else bad "$label: --passphrase-fd 0 is gone — the passphrase has no channel"; fails=1; fi
     if printf '%s\n' "$live" | grep -qE 'add-generic-password[^|]*[[:space:]]-w[[:space:]]*(>|$)'; then
-      ok "security still writes through the value-less -w prompt"
-    else bad "the value-less -w prompt form is gone"; fails=1; fi
-    # Behavioural, not textual: kc_put must move the value on STDIN and kc_get must hand
-    # back exactly what went in. A shell function named `security` shadows the real tool
-    # for these four lines, so the argv it receives is recorded rather than guessed at —
-    # a regression to `-w "$value"` shows up as the sentinel sitting in the recorded argv,
-    # and a put without base64 shows up as a value that no longer reads back.
-    local sec_log sec_store sent got_back
-    sec_log="$(mktemp)"; sec_store="$(mktemp)"
-    sent="Sec-Roundtrip-Probe-7c"
-    security() {
-      local first
-      case "$1" in
-        # The real prompt consumes two lines (value, retype) and stores one — mirrored.
-        add-generic-password) printf 'ARGV %s\n' "$*" >> "$sec_log"; IFS= read -r first; printf '%s' "$first" > "$sec_store" ;;
-        find-generic-password) cat "$sec_store" 2>/dev/null ;;
-      esac
-      return 0
-    }
-    kc_put private-key "$(printf '%s\n%s\n%s' '-----BEGIN PGP PRIVATE KEY BLOCK-----' "$sent" '-----END PGP PRIVATE KEY BLOCK-----')"
-    got_back="$(kc_get private-key)"
-    unset -f security
-    if [ -s "$sec_log" ] && grep -q "$sent" "$sec_log"; then
-      bad "the key material reached \`security\` argv"; fails=1
-    else ok "kc_put moves the value on stdin, not in argv"; fi
-    if printf '%s' "$got_back" | grep -q "$sent"; then
-      ok "base64 transport round-trips (write side encodes, read side decodes)"
-    else bad "the stored value did not read back as what went in: '$got_back'"; fails=1; fi
-    rm -f "$sec_log" "$sec_store"
-  fi
+      ok "$label: security still writes through the value-less -w prompt"
+    else bad "$label: the value-less -w prompt form is gone"; fails=1; fi
+    return 0
+  }
+  audit_argv_channel "harness copy" "$src"
+  audit_argv_channel "parent tools/ copy" "$parent_src"
+
+  # The textual halves above only prove the shape is right; they would also go green if
+  # kc_put were deleted. This half is behavioural: kc_put must move the value on STDIN and
+  # kc_get must hand back exactly what went in. A shell function named `security` shadows
+  # the real tool for these lines, so the argv it receives is recorded rather than guessed
+  # at — a regression to the argv form shows up as the sentinel sitting in the recorded
+  # argv, and a put without base64 shows up as a value that no longer reads back.
+  # It exercises THIS file's kc_put/kc_get; the parent copy is covered by the by-path
+  # textual audit above, which is why that audit runs over both paths.
+  local sec_log sec_store sent got_back
+  sec_log="$(mktemp)"; sec_store="$(mktemp)"
+  sent="Sec-Roundtrip-Probe-7c"
+  security() {
+    local first
+    case "$1" in
+      # The real prompt consumes two lines (value, retype) and stores one — mirrored.
+      add-generic-password) printf 'ARGV %s\n' "$*" >> "$sec_log"; IFS= read -r first; printf '%s' "$first" > "$sec_store" ;;
+      find-generic-password) cat "$sec_store" 2>/dev/null ;;
+    esac
+    return 0
+  }
+  kc_put private-key "$(printf '%s\n%s\n%s' '-----BEGIN PGP PRIVATE KEY BLOCK-----' "$sent" '-----END PGP PRIVATE KEY BLOCK-----')"
+  got_back="$(kc_get private-key)"
+  unset -f security
+  if [ -s "$sec_log" ] && grep -q "$sent" "$sec_log"; then
+    bad "the key material reached \`security\` argv"; fails=1
+  else ok "kc_put moves the value on stdin, not in argv"; fi
+  if printf '%s' "$got_back" | grep -q "$sent"; then
+    ok "base64 transport round-trips (write side encodes, read side decodes)"
+  else bad "the stored value did not read back as what went in: '$got_back'"; fails=1; fi
+  rm -f "$sec_log" "$sec_store"
 
   [ "$fails" -eq 0 ] && printf '\nselftest passed\n' || { printf '\nselftest FAILED\n'; exit 1; }
 }
