@@ -1882,7 +1882,7 @@ function GlassPaneTool(props: ToolProps) {
         if (look().failed || look().denied) setErrorExpanded((value) => !value)
       }}
     >
-      {look().label}
+      {look().text}
     </InlineToolRow>
   )
 }
@@ -2801,6 +2801,16 @@ export type GlassPaneRowLook = {
   /** Named by role, not by `theme.*`: the theme only exists inside a mounted component. */
   color: "error" | "warning" | "muted" | "text"
   label: string
+  /**
+   * The string the row actually renders. It is a decision the component used to make by
+   * construction: `InlineToolRow` matches `spinner` FIRST and renders `children` inside it, so
+   * the `~ {pending}` copy below was unreachable for every `gp_*` state — pending took the
+   * spinner, and success/failure/denial/no-verdict all satisfy `complete || failed`. The
+   * in-flight wording (`Reading accessibility tree…`) was therefore written, threaded through
+   * `glasspaneRow`, and never shown: a running call read as `gp_observe observe`. Choosing the
+   * text here, in the exported pure function, is what makes the claim testable at all.
+   */
+  text: string
 }
 
 /**
@@ -2834,6 +2844,7 @@ export function glasspaneRowLook(row: GlassPaneRow, toolName: string, permission
             ? "muted"
             : "text",
     label: failed || denied ? row.line : `${toolName} ${row.line}`,
+    text: row.state === "pending" ? row.pending : failed || denied ? row.line : `${toolName} ${row.line}`,
   }
 }
 

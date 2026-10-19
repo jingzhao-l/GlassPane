@@ -476,6 +476,24 @@ describe("TUI inline tool wrapping", () => {
     }
     // Methods that do have bespoke wording keep it, so the override table stays honest.
     expect(glasspaneRow({ tool: "gp_act", status: "running", metadata: {} }).pending).toBe("Performing action…")
+
+    // …and the in-flight wording is the string the row actually RENDERS. Passing `pending` down
+    // was not enough: `InlineToolRow` matches `spinner` first and puts `children` inside it, so
+    // the `~ {pending}` branch was unreachable for every `gp_*` state (pending → spinner,
+    // success/no-verdict/denied/engine-failure → complete or failed). A running `gp_observe`
+    // therefore read as `gp_observe observe` while the product said it showed
+    // "Reading accessibility tree…". `look().text` is what the component is told to draw.
+    const wording = (tool: string, method: string) =>
+      glasspaneRowLook(glasspaneRow({ tool, status: "running", metadata: {} }), tool).text
+    expect(wording("gp_observe", "observe")).toBe("Reading accessibility tree…")
+    expect(wording("gp_act", "act")).toBe("Performing action…")
+    expect(wording("gp_probe_status", "probe_status")).toBe("Probing GlassPane engine…")
+    expect(wording("gp_last_evidence", "last_evidence")).toBe("Fetching evidence pack…")
+    expect(wording("gp_unmapped", "unmapped")).toBe("Running gp_unmapped…")
+    // Settled rows still carry the tool+method label; only the in-flight copy changes.
+    const done = glasspaneRowLook(glasspaneRow({ tool: "gp_observe", status: "completed", metadata: { ok: true, method: "observe" } }), "gp_observe")
+    expect(done.text).toBe(done.label)
+    expect(done.spinner).toBe(false)
   })
 
   test("glasspaneRow surfaces evidence-pack fields for last_evidence, verbatim", () => {
