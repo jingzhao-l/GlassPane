@@ -2,10 +2,16 @@
 //
 // 为什么要把它写进仓库：入库的 `bridge/crashcanary` 是 spike 当时在临时目录里
 // 编译的（其调试信息指向 `crashme/crashme.swift`），源不在仓库 = 夹具不可复现，
-// 任何一次 capture 回归失败都无从判断是桥坏了还是夹具坏了。本文件是等价再生成源。
+// 任何一次 capture 回归失败都无从判断是桥坏了还是夹具坏了。本文件就是让这份二进制
+// 可复现的再生成源：按下面的命令重编，崩溃现场落在本文件的 `raiseCanaryCrash()` 上。
 //
-// 重建（不要覆盖已入库那一份，除非刻意更新夹具——`bridge/capture-sample.json`
-// 是按它采样的留档数据）：
+// 但入库的 `bridge/capture-sample.json` **不是按本文件采的样**——那是遗留夹具数据：它的
+// frame 4 是 `main` / `crashme.swift:4` / module `crashme`，来自一个已删除的旧夹具
+// （`crashme.swift`），模块名与帧名都早于本文件的 `raiseCanaryCrash()`。留这份存档只为
+// "真机确曾采到过现场"的形状，请勿据此认定当前夹具产出过它：如今重采会带 `crashcanary`
+// 与 `raiseCanaryCrash` 的名字，而不是 `crashme`。
+//
+// 重建（不要覆盖已入库那一份，除非刻意更新夹具）：
 //   swiftc -g -o /tmp/crashcanary bridge/crashcanary.swift
 // 自检（真崩溃 + 桥能采到栈）：
 //   python3 bridge/glasspane_bridge.py capture --exe /tmp/crashcanary --out /tmp/capture.json

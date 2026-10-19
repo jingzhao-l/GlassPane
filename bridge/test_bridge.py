@@ -434,6 +434,64 @@ class SocketDelivery(unittest.TestCase):
             with open(out, encoding="utf-8") as handle:
                 self.assertEqual(json.loads(handle.read()), {"mode": "trace"})
 
+    def test_emit_refuses_a_pre_existing_out_file(self):
+        """A regular file already at --out must never be clobbered (O_EXCL), and
+        the refusal must leave as JSON (§6.2), not as a traceback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "payload.json")
+            with open(out, "w", encoding="utf-8") as handle:
+                handle.write("PRE-EXISTING-NOT-THE-CAPTURE")
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                with self.assertRaises(OSError):
+                    gb.emit({"mode": "capture", "status": "eStateStopped"}, out_path=out)
+            with open(out, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "PRE-EXISTING-NOT-THE-CAPTURE",
+                                 "a pre-existing --out target must be left byte-for-byte intact")
+            found, _raw = gb.extract_sentinel(buffer.getvalue())
+            self.assertIsNotNone(found, buffer.getvalue())
+            self.assertEqual(found["status"], "failed")
+            self.assertTrue(any("refusing to write --out" in error for error in found["errors"]))
+
+    def test_emit_refuses_a_symlink_at_out_and_leaves_its_target(self):
+        """The documented usage is `--out /tmp/capture.json`; a symlink planted at
+        that name must turn into a refusal, never an arbitrary-file overwrite.
+        O_NOFOLLOW means the linked-to file is not touched and the link survives."""
+        with tempfile.TemporaryDirectory() as tmp:
+            victim = os.path.join(tmp, "victim.txt")
+            with open(victim, "w", encoding="utf-8") as handle:
+                handle.write("SECRET-NEVER-OVERWRITE")
+            link = os.path.join(tmp, "capture.json")
+            os.symlink(victim, link)
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                with self.assertRaises(OSError):
+                    gb.emit({"mode": "capture", "status": "eStateStopped"}, out_path=link)
+            self.assertTrue(os.path.islink(link), "the symlink must not be replaced or followed")
+            self.assertFalse(os.path.exists(os.path.join(tmp, "payload.json")))
+            with open(victim, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "SECRET-NEVER-OVERWRITE",
+                                 "writing through a planted symlink would be an arbitrary-file overwrite")
+            found, _raw = gb.extract_sentinel(buffer.getvalue())
+            self.assertIsNotNone(found, buffer.getvalue())
+            self.assertEqual(found["status"], "failed")
+
+    def test_emit_out_mode_is_0600_regardless_of_umask(self):
+        """The capture holds registers and a debugged process's LOCALS; the mode is
+        pinned to 0600 so no umask can widen it (world-readable leak) nor narrow it
+        (an unreadable file the panel claims it can open)."""
+        for hostile_umask in (0o000, 0o022, 0o077):
+            with tempfile.TemporaryDirectory() as tmp:
+                out = os.path.join(tmp, "payload.json")
+                previous = os.umask(hostile_umask)
+                try:
+                    gb.emit({"mode": "capture"}, out_path=out)
+                finally:
+                    os.umask(previous)
+                mode = os.stat(out).st_mode & 0o777
+                self.assertEqual(mode, 0o600,
+                                 "umask %03o must still yield 0600, got %04o" % (hostile_umask, mode))
+
     def test_emit_honours_an_explicit_budget(self):
         # B-24: the bound is a parameter, so a slow-but-alive engine can be given
         # more room without ever going back to "wait forever". The回传 frame on the

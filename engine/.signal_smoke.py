@@ -200,7 +200,7 @@ def shutdown_stall_diagnosis(engine_sock, probe_sock, probe_existed=True):
 
 _STUB_SOURCE = """
 import os, signal, sys, time
-engine, probe, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+engine, probe, mode, ready = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 open(engine, "w").close()
 open(probe, "w").close()
 
@@ -221,8 +221,19 @@ def arrived(signum, frame):
 
 signal.signal(signal.SIGINT, arrived)
 signal.signal(signal.SIGTERM, arrived)
+# 就绪标记必须**在两个处理器都装上之后**才写下。这是握手，不是巧合：harness 只在看到
+# ready 之后才发信号，所以 SIGINT 不可能再落在处理器存在之前。从前 harness 只等 engine
+# socket 出现就发信号，而那个 socket 在第 4 行就建好、处理器要到上面几行才装——负载下
+# SIGINT 于是合法地抢在处理器之前，把 stub 打死在 `open(engine, "w")` 里（KeyboardInterrupt），
+# 于是这道闸在机器忙的时候红成"夹具没到位"。标记＝"处理器就位、允许发信号"的唯一凭证。
+open(ready, "w").close()
 time.sleep(30)
 """
+
+#: 有界地等 stub 写下就绪标记（处理器装好）。这不是判据，只是"不愿无限等一个从未就绪的夹具"。
+#: 30s 与 SETTLE_TIMEOUT_SECONDS 同量级：就绪标记在 stub 冷启动 + 装完两个处理器的那一刻出现，
+#: 负载再高也通常在几秒内；真拿不到标记（stub 在 import 阶段就崩了）时，才走"从未就绪"那条分支。
+READY_TIMEOUT_SECONDS = 30.0
 
 
 def self_test_diagnosis(work):
@@ -242,15 +253,36 @@ def self_test_diagnosis(work):
                                ("partial", "现场不齐")):
         engine_sock = os.path.join(work, "self-%s-engine.sock" % tag)
         probe_sock = os.path.join(work, "self-%s-probe.sock" % tag)
-        for path in (engine_sock, probe_sock):
+        ready_marker = os.path.join(work, "self-%s.ready" % tag)
+        for path in (engine_sock, probe_sock, ready_marker):
             if os.path.exists(path):
                 os.unlink(path)
         child = subprocess.Popen(
-            [sys.executable, stub, engine_sock, probe_sock, tag]
+            [sys.executable, stub, engine_sock, probe_sock, tag, ready_marker]
         )
-        deadline = time.time() + 5
-        while time.time() < deadline and not os.path.exists(engine_sock):
+        # 等**就绪标记**而不是 engine socket：engine socket 是 stub 的第 4 行就建的，早于
+        # 处理器安装，只等它会在处理器就位前抢发 SIGINT（那正是负载下这道闸误红的根因）。
+        # 就绪标记在处理器装完之后才写下，看到它才发信号，抢跑窗口就此封死。有界等待：
+        # 拿不到标记就单列成"stub 从未就绪"，不与下面的"现场不齐/夹具没到位"混为一谈。
+        ready_deadline = time.time() + READY_TIMEOUT_SECONDS
+        while time.time() < ready_deadline and not os.path.exists(ready_marker):
+            if child.poll() is not None:
+                break  # stub 已离场，就绪标记永远不会来——立刻收手，不必等满预算
             time.sleep(0.02)
+        if not os.path.exists(ready_marker):
+            code = reap(child)
+            problems.append(
+                "自检 stub（%s）从未就绪：它没能在装好 SIGINT/SIGTERM 处理器之前写下就绪标记 %s"
+                "（stub 退出码 %r）⇒ 这是**夹具从未进入可判定状态**，与'现场不齐'和'夹具没到位'"
+                "都不是一回事——诊断分支今天同样没被检验过，但根因是 stub 自身没起来，"
+                "不是信号抢在了处理器之前（那个抢跑已由就绪握手封死）"
+                % (tag, os.path.basename(ready_marker), code))
+            for path in (engine_sock, probe_sock, ready_marker):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            continue
         os.kill(child.pid, signal.SIGINT)
         # 先等夹具走到**它自己声明的那种现场**，再问诊断。从前这里是"发完信号就看一眼文件
         # 系统"，而 stub 的信号处理器是异步的：负载 25 的那一趟里 `consumed` 还没来得及
@@ -275,7 +307,7 @@ def self_test_diagnosis(work):
         diagnosis = shutdown_stall_diagnosis(engine_sock, probe_sock)
         child.kill()
         child.wait()
-        for path in (engine_sock, probe_sock):
+        for path in (engine_sock, probe_sock, ready_marker):
             try:
                 os.unlink(path)
             except OSError:

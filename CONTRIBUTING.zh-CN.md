@@ -41,12 +41,12 @@ GlassPane 是 **macOS 上给 AI 编程代理用的 GUI 测试与验证层**：�
 |---|---|---|
 | `swift` | macos-latest | engine 构建、纯逻辑测试套件（无需 GUI 权限）、探针包，以及信号收尾闸 `python3 .signal_smoke.py .build/debug/glasspaned`：SIGTERM/SIGINT 必须自行退出且退出码 0，且两个 socket 文件都被 unlink |
 | `bridge` | ubuntu-latest，Python 3.11 | 队列 / 截断 / 哨兵 / argv / socket 回环，全程不依赖 lldb |
-| `kernel` | ubuntu-latest | C35 与 fixtures 的往返 |
 | `mcp-shell` | ubuntu-latest | 分发 + 工具表 + engine 客户端，再加 publish-shape 守卫（`npm run bundle`、`npm pack`、在干净目录装上产物并完成 MCP `initialize` 握手）：`file:` 依赖泄漏、schemas 缺文件都在这一步现形 |
-| `install-gate` | ubuntu-latest | 发布形态所依据的根布局：安装器单测、kernel → mcp-shell 构建、全部 workspace 测试 |
+| `install-gate` | ubuntu-latest | 发布形态所依据的根布局：`node scripts/check-kernel-corpus.mjs`（镜像的内核语料必须等于 Swift C35 腿所读的 pin——内核校验是这里的一个**步骤**，不是单独一条 job）、安装器单测、mcp-shell 构建（内核是已发布依赖）、全部 workspace 测试 |
 | `version-line` | ubuntu-latest | 每个版本位点与根 manifest 是否一致 |
 | `docs` | ubuntu-latest | 对外文档体检：相对链接可达、页内/跨页锚点存在、双语两侧都在位（`node scripts/check-doc-links.mjs`） |
 | `harness-rulers` | ubuntu-latest | `harness/` 那套已记录基线：fork 分歧度、工具面与产品面、品牌漂移、pinned 上游 tag 上的扩展点存活、内核出处（`node harness/tools/*.mjs --check`）。这一条读的是 `harness/**`，而发布归档里从不带它 |
+| `publish-gate-selftest` | macos-14 | 发布闸自身的固定点测试：`verify-published.ts` 必须给出三个不同的答案（good / 错误页 / 永不 listening）。产品是 macOS-only——这道闸在 Linux 上会 exit 2「什么都没验」——所以它跑在 macOS runner 上，此刻是真的在测量 |
 | `workflow-lint` | ubuntu-latest | workflow 文件本身：`node scripts/check-workflows.mjs` 拒掉 GitHub 根本不会加载的写法（重名 job、`if:` 里引用 `secrets`、未加引号的 `value: `、指向不存在脚本的步骤、未声明就使用的 `workflow_dispatch` 输入） |
 
 运行时接受的命令是 [iterate.config.yaml](./iterate.config.yaml) → `validation.commands` 里的封闭清单，**逐字**匹配：加参数或换目录都会被拒绝。

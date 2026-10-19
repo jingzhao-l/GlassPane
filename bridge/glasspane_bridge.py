@@ -724,6 +724,46 @@ def build_lldb_argv(bridge_path, mode, pid=None, exe=None, exe_args=None,
     return argv
 
 
+def _secure_out_write(out_path, text):
+    """Write the payload to ``--out`` without ever clobbering a file or following a link.
+
+    The payload is a debugged process's registers and top-frame locals, so the
+    plain ``open(path, "w")`` this replaces was unsafe three ways at once: the
+    mode came from the caller's umask (a world-readable ``/tmp/capture.json`` is
+    the documented usage, see ``bridge/crashcanary.swift``), a pre-existing file
+    was overwritten silently, and a symlink planted at the target turned the write
+    into an arbitrary-file overwrite running as the user. This mirrors the engine's
+    evidence-report writer (``EvidenceReportGenerator.swift``): ``O_EXCL`` refuses a
+    target that exists, ``O_NOFOLLOW`` refuses a symlink (on macOS both surface as
+    ``EEXIST`` and nothing is written), and ``fchmod`` pins ``0600`` because a umask
+    can only *clear* bits from ``0o600`` — under ``umask 0777`` an un-pinned file is
+    ``0000``, not the ``0600`` the panel promises. Raises ``OSError`` when refused;
+    a file this call created but could not finish writing is removed, never left half.
+    """
+    try:
+        fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except OSError as error:
+        kind = "is a symlink" if os.path.islink(out_path) else "already exists"
+        raise OSError(
+            "refusing to write --out %r: the target %s. O_EXCL and O_NOFOLLOW never "
+            "clobber a file or follow a link, so nothing was written and the target "
+            "was left untouched (errno %s)" % (out_path, kind, error.errno)
+        ) from error
+    try:
+        os.fchmod(fd, 0o600)  # guarantee 0600 regardless of the caller's umask
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1  # ownership moved to the file object; the with-block closes it
+            handle.write(text + "\n")
+    except OSError as error:
+        if fd != -1:
+            os.close(fd)
+        try:
+            os.unlink(out_path)  # O_EXCL proved this call created it
+        except OSError:
+            pass
+        raise OSError("could not finish writing --out %r: %s" % (out_path, error)) from error
+
+
 def emit(payload, out_path=None, send_sock=None, timeout_s=None):
     """R30 local回传: stdout sentinel always; optional one-line NDJSON frame
     into an existing unix socket (connection failure → stderr + nonzero).
@@ -732,13 +772,29 @@ def emit(payload, out_path=None, send_sock=None, timeout_s=None):
     side that stopped draining would otherwise hang the bridge forever with a
     leaked fd (§6.2 only promises "failure surfaces", silence is not success).
     The default bound is EMIT_TIMEOUT_S; an explicit timeout_s overrides it.
+
+    ``--out`` goes through `_secure_out_write` (private, exclusive create): a
+    refused target does not leak the capture and does not overwrite anything —
+    it leaves a JSON-shaped failure on stdout (§6.2) and re-raises, so the run
+    reports nonzero rather than writing a world-readable or symlinked file.
     """
     text = render_json(payload)
+    if out_path:
+        try:
+            _secure_out_write(out_path, text)
+        except OSError as error:
+            refusal = assemble_result(
+                mode=payload.get("mode") if isinstance(payload, dict) else None,
+                target=payload.get("target") if isinstance(payload, dict) else None,
+                status="failed",
+                threads=[],
+                errors=["--out delivery refused, the capture was not written: %s" % error],
+            )
+            sys.stdout.write("%s%s%s\n" % (SENTINEL_BEGIN, render_json(refusal), SENTINEL_END))
+            sys.stdout.flush()
+            raise
     sys.stdout.write("%s%s%s\n" % (SENTINEL_BEGIN, text, SENTINEL_END))
     sys.stdout.flush()
-    if out_path:
-        with open(out_path, "w", encoding="utf-8") as handle:
-            handle.write(text + "\n")
     if send_sock:
         budget = EMIT_TIMEOUT_S if timeout_s is None else float(timeout_s)
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -834,7 +890,10 @@ def run_outer(args):
         try:
             emit(payload, out_path=args.out, send_sock=args.send_sock)
         except OSError as error:
-            sys.stderr.write("send-sock delivery failed: %s\n" % error)
+            # emit already left the JSON-shaped failure on stdout (§6.2); this is
+            # the operator-facing note only. Covers both a refused --out target and
+            # a --send-sock that stopped draining, so it must not name just one.
+            sys.stderr.write("payload delivery failed (--out / --send-sock): %s\n" % error)
             return 2
         return 1
     payload, _raw = extract_sentinel(completed.stdout, nonce=nonce)
@@ -857,7 +916,9 @@ def run_outer(args):
     try:
         emit(payload, out_path=args.out, send_sock=args.send_sock)
     except OSError as error:
-        sys.stderr.write("send-sock delivery failed: %s\n" % error)
+        # emit already left the JSON-shaped failure on stdout (§6.2); the refusal
+        # can come from a protected --out target or a drained --send-sock alike.
+        sys.stderr.write("payload delivery failed (--out / --send-sock): %s\n" % error)
         return 2
     return 0 if capture_succeeded(payload) else 1
 

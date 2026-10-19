@@ -75,8 +75,10 @@ GlassPane gives the agent eyes and hands with an accountability trail:
   late, or a concurrent human hand contaminated the measurement;
 - **undo** — `gp_snapshot` / `gp_restore` take the app back to a prior state, so the agent can
   re-run a test instead of leaving your machine in a half-configured mess;
-- **proof** — `gp_export_evidence` / `gp_recent_reports` render the whole thing as a report you can
-  read in a browser or archive next to the commit.
+- **proof** — `gp_export_evidence` / `gp_recent_reports` render the whole thing as an HTML or Markdown
+  report that comes back as text in the session — they take no path and write no file, so saving it for
+  a browser or beside a commit is your step; the settings panel's report button is the only writer of a
+  report file.
 
 ## Why not screenshots
 
@@ -164,8 +166,8 @@ panel walks you card by card and re-measures after each tick.
 > now checked with `gp_assert_element`, and if anything didn't take, `gp_diagnose` it. Roll it back
 > afterwards and show me the evidence.
 
-You get a verdict with a before/after delta attached, and a report you can open with
-`gp_export_evidence`.
+You get a verdict with a before/after delta attached, and a report `gp_export_evidence` returns as
+HTML/Markdown text in the session (it writes no file — only the panel's report button does).
 
 ## Installation
 
@@ -389,7 +391,8 @@ Each operation produces a versioned `glasspane.evidence` pack (JSON; schema in
 [kernel/schemas](kernel/schemas)) holding:
 
 - the **target selector** — how the element was identified, not merely its label;
-- **before/after accessibility trees** and the structural diff;
+- **before/after accessibility-tree digests** (fixed-width hashes, plus the node count and a changed
+  flag — the pack stores digests, not the trees) and their structural diff;
 - a **pixel-difference measurement** for the affected window region (`changedPixelRatio` and bounds;
   raw screenshots are not persisted);
 - an **attribution verdict** — `soft` by default, `strong` only when a live
@@ -474,7 +477,7 @@ that must not touch a developer's real `~/.glasspane` are in [CONTRIBUTING.md](C
 ([简体中文](CONTRIBUTING.zh-CN.md)). The short version:
 
 ```bash
-npm ci && npm run build && npm test --workspaces --if-present   # TS: kernel, mcp-shell, installer
+npm ci && npm run build && npm test --workspaces --if-present   # TS workspaces: mcp-shell, installer, updater (kernel/ has no package.json)
 swift build --package-path engine && swift test --package-path engine   # Swift engine
 swift test --package-path engine/probe                           # probe SDK
 python3 -m pytest -q bridge                                      # LLDB bridge

@@ -173,8 +173,10 @@ shared bearer token, and that token is the whole boundary.
 - **Late replies are raw engine content.** When an answer lands after its caller was already given a
   deadline, the gateway writes that body to its own stderr, unredacted, capped at 64 KiB per reply with
   the un-logged remainder counted in a marker (`LOG_BODY_CHARS`). If you redirect that stderr into a
-  file, it takes the mode that whatever started the gateway gave it — section 2.4 documents a
-  world-readable file in the state root that exists today.
+  file, it takes the mode that whatever started the gateway gave it, not one GlassPane chose. The
+  state-root log in section 2.4 is closed to `0600` now, but the warning it still carries applies here
+  too: a file's mode does not travel with a copy, so a redirect or copy of this stderr reads to whoever
+  can read the file it lands in.
 
 Practical consequences: do not leave this running when nothing is using it; treat the token as a
 password (environment, not a command line or a shell history line); and prefer the MCP path or the
@@ -192,9 +194,12 @@ permission rather than by a secret.
 - Content: the operation's selector (role / title / identifier — **titles are text from the app under
   test's own UI**), the action and its confirmation bit, an AX tree summary and node count, the
   changed-pixel ratio plus window geometry and window id, responsiveness and liveness signals, the
-  `file:line` of any handler that fired, before/after normalized state strings (each truncated at
-  ≤1 KiB), the classification verdict and the attribution. **The evidence path persists no raw
-  screenshot** — only derived quantities. But `gp_observe` returns full accessibility trees into the
+  `file:line` of any handler that fired, before/after normalized state strings (each truncated at 1024
+  **encoded bytes**, cut on a grapheme-cluster boundary and counted in the probe's `truncatedValues`, so a
+  shortened value is distinguishable from a short one), the classification verdict and the attribution.
+  A state frame that still cannot fit the daemon's 4 MiB frame cap is refused and counted in
+  `droppedWrites` — the reader sees a named drop count instead of silence. **The evidence
+  path persists no raw screenshot** — only derived quantities. But `gp_observe` returns full accessibility trees into the
   MCP session, so that part lands in the agent host's context and in the remote model.
 - **`gp_capture_view` is the only path that ships screen pixels anywhere, and it is a pass-through.**
   It encodes a PNG of the attached window and returns it as MCP image content; the daemon writes no
@@ -293,10 +298,14 @@ permission rather than by a secret.
   Attaching to a running process requires "Privacy & Security → Developer Tools" to be ticked by hand,
   and that seat has no query API.
 - This is the strongest capability in the project: **any input that can drive the bridge is equivalent
-  to being able to read memory inside the target process.** The bridge therefore ships only as a
-  standalone CLI/script asset — the daemon never spawns lldb, and there is no socket command that
-  forwards to the bridge. When extending this project, do not wire the bridge into a `gp_*` tool or into
-  any input a remote party can influence: that widens the "same-user code on this machine" boundary into
+  to being able to read memory inside the target process — and `--setup` is stronger still.** That flag
+  is interpolated verbatim into an lldb `-o` command (`bridge/glasspane_bridge.py:703-704`), so its text
+  runs as an lldb command (`script <python>` included): anything that can set `--setup` executes
+  arbitrary code **as the user running the bridge** — not merely reading the target's memory, which is
+  what the phrasing above understates. The bridge therefore ships only as a standalone CLI/script asset
+  — the daemon never spawns lldb, and there is no socket command that forwards to the bridge. When
+  extending this project, do not wire the bridge into a `gp_*` tool or into any input a remote party
+  can influence — `--setup` included: that widens the "same-user code on this machine" boundary into
   remote code debugging.
 
 ### 2.7 Ad-hoc signing without notarization: what it prevents and what it does not

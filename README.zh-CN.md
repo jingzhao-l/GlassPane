@@ -67,7 +67,7 @@ GlassPane 给代理装上带账本的眼睛和手：
 - **判断** —— `gp_diagnose` 给"没生效"分类：界面没变、变得晚了、还是有人同时操作污染了测量；
 - **撤销** —— `gp_snapshot` / `gp_restore` 把应用带回之前的状态，代理能重跑测试，
   而不是把你的机器留在半配置状态；
-- **证明** —— `gp_export_evidence` / `gp_recent_reports` 渲染成报告，浏览器里读，或者跟着 commit 归档。
+- **证明** —— `gp_export_evidence` / `gp_recent_reports` 把这一切渲染成 HTML 或 Markdown 报告，作为文本随会话结果返回——它们不接收路径、也不写文件，要存进浏览器或跟着 commit 归档是你自己的一步；只有设置面板的「打开报告」按钮会把报告落盘。
 
 ## 为什么不是截图
 
@@ -139,7 +139,7 @@ macOS 禁止程序化授权，所以这是唯一的人工步骤；面板逐卡�
 > 构建并启动应用，打开设置，用 `gp_act` 切换"深色外观"，用 `gp_assert_element` 断言复选框已勾选；
 > 如果哪一步没生效就用 `gp_diagnose` 分类，最后恢复原状态并把证据给我看。
 
-你会拿到带前后差异的判定，以及一份可以用 `gp_export_evidence` 打开的报告。
+你会拿到带前后差异的判定，以及一份由 `gp_export_evidence` 作为 HTML/Markdown 文本随会话返回的报告（它不写文件——只有面板的「打开报告」按钮才落盘）。
 
 ## 安装
 
@@ -341,7 +341,7 @@ node installer/cli.js --restore-launchd
 [kernel/schemas](kernel/schemas)）：
 
 - **目标选择器** —— 元素是怎么被识别出来的，不只是显示名；
-- **前后无障碍树**与两者结构差异；
+- **前后无障碍树的摘要**（定长哈希，外加节点数与是否变化的标志——包里存的是摘要而非整棵树）与两者的结构差异；
 - **像素差异实测**（比例与区域；原始截图不落盘）；
 - **归因结论**：默认 `soft`，只有目标应用内在线的 [GlassPaneProbe](engine/probe) 确认处理器跑过才 `strong`，
   操作窗口内量到人手介入时才降为 `weak`；
@@ -414,7 +414,7 @@ GlassPane/
 都在 [CONTRIBUTING.md](CONTRIBUTING.md)（[简体中文](CONTRIBUTING.zh-CN.md)）。简版：
 
 ```bash
-npm ci && npm run build && npm test --workspaces --if-present   # TS：kernel / mcp-shell / installer
+npm ci && npm run build && npm test --workspaces --if-present   # TS 工作区：mcp-shell / installer / updater（kernel/ 没有 package.json）
 swift build --package-path engine && swift test --package-path engine   # Swift 引擎
 swift test --package-path engine/probe                           # 探针 SDK
 python3 -m pytest -q bridge                                      # LLDB 桥

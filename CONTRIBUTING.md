@@ -44,12 +44,12 @@ Start from the repo root: `npm ci` → `npm run build` → `cd engine && swift b
 |---|---|---|
 | `swift` | macos-latest | engine build, pure-logic tests (no GUI permission needed), the probe package, and the signal-teardown gate `python3 .signal_smoke.py .build/debug/glasspaned`: SIGTERM/SIGINT must self-exit with code 0 and unlink both socket files |
 | `bridge` | ubuntu-latest, Python 3.11 | queue / truncation / sentinel / argv / socket loopback, lldb-free |
-| `kernel` | ubuntu-latest | C35 roundtrip against fixtures |
 | `mcp-shell` | ubuntu-latest | dispatch + tools + engine client, then the publish-shape guard (`npm run bundle`, `npm pack`, install the tarball in a clean directory, complete an MCP `initialize` handshake); a leaked `file:` dep or a missing schema file surfaces here |
-| `install-gate` | ubuntu-latest | the root layout that ships: installer units, the kernel → mcp-shell build, all workspace tests |
+| `install-gate` | ubuntu-latest | the root layout that ships: `node scripts/check-kernel-corpus.mjs` (the mirrored kernel corpus must equal the pin the Swift C35 leg reads — the kernel check is a **step** here, not its own job), installer units, the mcp-shell build (the kernel is a published dependency), all workspace tests |
 | `version-line` | ubuntu-latest | every version site against the root manifest |
 | `docs` | ubuntu-latest | public docs health: relative links resolve, in-page and cross-page anchors exist, and each bilingual document has both legs (`node scripts/check-doc-links.mjs`) |
 | `harness-rulers` | ubuntu-latest | the recorded `harness/` baselines: fork divergence, tool and product surfaces, branding, hook liveness at the pinned upstream tag, kernel provenance (`node harness/tools/*.mjs --check`). This lane reads `harness/**`, which the product release channel never ships |
+| `publish-gate-selftest` | macos-14 | the publish gate's own fixed-point test: `verify-published.ts` must give three different answers (good / error page / never listening). The product is macOS-only — the gate exits 2 as "nothing verified" on Linux — so this runs on a macOS runner where it actually measures |
 | `workflow-lint` | ubuntu-latest | the workflow files themselves: `node scripts/check-workflows.mjs` rejects YAML GitHub would refuse to load (duplicate job keys, `secrets` in a step `if:`, unquoted `value: `, a referenced script that does not exist, an undeclared `workflow_dispatch` input) |
 
 The commands the iterate runtime accepts are the closed list in [iterate.config.yaml](./iterate.config.yaml) → `validation.commands`, matched **verbatim**: extra flags or a different working directory are refused.
