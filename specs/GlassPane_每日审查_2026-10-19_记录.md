@@ -156,3 +156,33 @@
 | R-7 | 符号链接让闸静默退 0（R2） | 本机实测两轮：修前 `node <symlink>/assert-ci-green.mjs` → rc 0 且零输出（`make-release-archive` 同形状 rc 0 而非 rc 2）；修后三个脚本经符号链接调用都回非零并打印句子（rc=1/2/0-with-output），这条不依赖任何人的转述 |
 
 诚实性说明：本轮有两条"我本来可以只改期望值让它绿"的闸（R-5、以及 T2 那条断言假话的用例），处置都是先把规矩重述成能表达的形态、再证明它能红，而不是把红消掉。
+
+## 4. 收尾补记（主代理自己发现的、以及各泳道交接处露出来的口子）
+
+台账前面按泳道登记；这一节记的是**交接处**的东西——它们不在任何一条泳道的清单里，却是本轮
+真正该收的活。每条都带判据与用例，不写"下次注意"。
+
+| # | 缺陷 | 处置 |
+|---|---|---|
+| X1 | 探针 SDK 这轮新增的 `truncatedValues` 在 daemon 侧**没有读者**（`grep -rn truncatedValues engine/Sources/` 当时为空），而 `SECURITY.md`（本回合双语那两处）已经承诺读者能区分"值被截短"与"帧没送达"。一个无读者的计数就是替一句落空的主张背书——这正是本仓反复出现的"计数无读者"形状 | 已修：`ProbeWire` 解码 + 重连合并 + `ProbeInbox.statusJSON` 发布三段都接上，并与其余计数器共用同一条精确-range 读法（越界即"未上报"）。测试 `Qoder20261019ProbeCounterReaderTests` 5 条；反向验证见 §5 R-3 |
+| X2 | `SocketDirectoryRule.enforce` 的叶子若是符号链接，`chmod`/`stat`/`bind` 都跟着走，量到并通过的是**被指向的目录**，而 `ancestorDefect(for:)` 拿到的是传进去的那串路径——目标真实父链有没有别人可写，从来没被问过。档案侧早就因为同一个理由（"chmod 会跟着符号链接走"）拒这种形状。泳道 1 把这条目录规则记为"本轮查过、干净"，泳道 6 记为 Low——冲突不靠措辞裁决，走代码判定 | 已修：在任何动作之前拒叶子符号链接并给 `--state-dir` 的下一步；**中间分量**的符号链接照旧放过（`/var` → `/private/var` 是 macOS 自己的布局，拒它等于拒掉每一次真安装）。测试 `Qoder20261019SocketLeafSymlinkTests` 5 条（含"拒绝发生在任何东西落盘之前"与三条对照）。变异证明见 §5 R-8 |
+| X3 | 权限探针改成"问过而未答不是被拒"之后，**daemon 自己的话术与取值表落后了**：`--guide-screen-permission` 在系统还没作决定时打印 "Permission still denied after the request."，而 `--check-input-permission` / `--check-accessibility` 的 `--help` 取值表还写着 `denied`（这两条命令现在打印不出来）并漏写 `unverifiable`（现在真会打印）。按那份表分叉的脚本永远走不到它该走的那条 | 已修：两句文案改到与实测量一致；新增 `DaemonPermissionVocabularyTests` 把"可达集合"从探针自己算（注入 preflight/request），把"文案"从被交付的 `main.swift` 按帮助段落切出来读，两边不等即红；另断言旧那句不再出现。§5 R-9 是它的变异 |
+| X4 | 一次性 launchd 任务的两个文件模式都不由面板决定：脚本 chmod **0755**（owner 的 x 就够，它是同 uid 起的），而 `--permissions` 的读数由那一趟 shell 重定向创建，模式取决于**那个上下文的 umask**。目录闸 `StateRoot.directoryIsolation` 拒的是"可写"，一个 0755 的目录照样通过（`$TMPDIR` 被改指到别处时就是这样），于是"0755 目录 + 0644 文件"是一份别人读得到的权限读数；引擎侧对同一类派生物早就要求 0600 | 已修：脚本显式 0700；输出在 submit 之前由面板按 0600 建好（重定向只截断、不改已存在文件的模式）。测试 `Qoder20261019OneShotFileModesTests` 两条：一条在真 `/bin/sh` + 真 umask 022 下**量出这个机制**（预置的那份保持 0600，不预置的那份是 0644，两者必须不同——否则这条修法什么都没改），一条盯交付代码的两个属性与"先删后建"的顺序 |
+| X5 | 判定与权限那批改动撞上 7 条**既有**测试（`EngineP1Batch3Tests`、`PermissionSubjectTests`、`ScreenCapturePermissionTests`、`DeveloperToolsVerdictTests`）。逐条对账的结论：6 条是旧测试替 TCC 从没作过的决定背书（"刚问过 ⇒ denied"、"AX 不可信 ⇒ notDetermined"），1 条（`DeveloperToolsVerdictTests`）的规矩仍然成立、只是锚在一个 lldb 不认识的 `--attach` 上 | 全部按原意图重述，不删不跳：`问过之后不得回退成 notDetermined` 那句单调性约定**逐字保留**（它记的是真出过的事故）；`DeveloperToolsVerdictTests` 改为按真 argv 分流两个半边、卡片只读负载自己发出的那两个词，并加"每个半边恰好各跑一次"的绑定断言。每条都做过变异：把探针改回旧行为 ⇒ 该用例具名变红（详见泳道留档与 `git log` 里那条引擎提交的正文） |
+| X6 | 交接口径本身：`--check-screen-permission` 打印三态枚举 `state`，`--permissions`/`hello`/卡片读 `panelStatus`，两处不是同一个属性 | 写明并在 X3 的用例里分别取可达集合（不是拿一个属性的可达集去核对另一条命令的文案） |
+
+### 台账总量与"未修"的口径
+
+- 各泳道**提出**的条目：W14 + J14 + C10 + T9 + R9 + B12 = **68 条主张**。
+- 主代理回代码/实测复核后**判定不成立、未改代码**的：J9（`PixelDiff.bounds.y` 底原点——ImageIO→Pillow 独立复测证明翻转与内存布局相互抵消，本来就是顶原点，翻了才会把已发布的数字改错）、B4（一次性任务落点在本机实测是 `drwx------`，其"别人可读"的前提在默认布局下不成立；但同一形状在 `$TMPDIR` 被改指时成立 ⇒ 该修法仍然落进代码，见 X4）、以及泳道 2 报为 P0 的"深度截断仍报 complete:true"（`complete` 语义是"承诺的那次走查走完了"，`maxDepth` 是调用方自己声明的范围；残留的真实缺口另记为 J14 并已修）。
+- 因此本轮**修完并有测试**的条目：68 − 2（J9、B4 这两条作为"缺陷主张"不成立；它们各自的**处置**——补前提用例、把 X4 的两个模式钉死——仍然进了代码）= 66 条按缺陷计已修，另有 4 条交接处新发现（X1、X2、X3、X4）与 1 条既有测试重述批次（X5）。汇报里的"未修项"为 0。
+- 交给 harness 线的只有 §2.7 那一条（`tool-surface` 自己的出处链接指向一个不存在的 specs 文件）——判据与两条出路都写在那里，本轮未动 `harness/` 任何字节，除 §5 记录的那次 `--record`。
+
+## 5. 反向验证（新增/改写：每条都必须能红）
+
+| # | 破坏的那一处 | 具名变红的用例 |
+|---|---|---|
+| R-3 | 把 `ProbeInbox.statusJSON` 里 `truncatedValues` 的发布三行换成一句注释（备份 + `shasum -a 256` 核回，不用 git checkout） | `testTruncatedValuesSurviveTheWireIntoTheStatusRow`、`testAbsentTruncatedValuesIsNeverRenderedAsZero`、`testRehelloWithoutTheKeyKeepsTheEarlierTruncationCount`、`testFrameLossAndValueTruncationStayTwoNumbers` 4 条红；第 5 条（越界即无计数）本就该绿，它是"缺席"的对照 |
+| R-8 | 把 `SocketDirectoryRule.enforce` 里新加的叶子符号链接守卫注释掉 | `testLeafSymlinkIsRefusedWithoutFollowingIt` 红（`XCTUnwrap failed: expected non-nil value of type "String"`）；恢复后与备份逐字节相同（sha `063ddf1c…`） |
+| R-9 | 把 `--check-accessibility` 的取值表改回 `(granted | notDetermined)`，或把 `AccessibilityPermissionProbe.displayStatus()` 改回 `isTrusted() ? .granted : .notDetermined` | `testCheckAccessibilityHelpEqualsItsReachableSet` 与 `EngineP1Batch3Tests testAccessibilityProbeInjectsTrustCheck` 各自具名变红（后者是泳道留档里那一次 2 failures） |
+| R-10 | 把 `runOneShot` 的输出预建 0600 那一步删掉 | `testOneShotWriterSetsBothModesItself` 红；而机制用例 `testShellRedirectKeepsAPreCreatedPrivateMode` 自带对照臂（不预置时必须是 0644），保证这条闸不是只在看两个字符串 |
