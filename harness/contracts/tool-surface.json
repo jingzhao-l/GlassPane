@@ -7,25 +7,25 @@
     "fork": "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted, and one deleted line excuses at most one re-added line (pairing is one-to-one, so 40 copies of a rebranded line bill 39)",
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
-  "observedAt": "2026-10-18",
-  "engineLoc": 26476,
+  "observedAt": "2026-10-19",
+  "engineLoc": 27867,
   "engineFiles": 63,
   "surfaces": {
     "mcpShell": {
-      "loc": 9612,
+      "loc": 9886,
       "files": 14,
-      "ratio": 0.2142,
+      "ratio": 0.2124,
       "byFile": {
-        "mcp-shell/src/tools.ts": 2777,
-        "mcp-shell/src/engine-client.ts": 1569,
-        "mcp-shell/src/http-gateway.ts": 1285,
-        "mcp-shell/src/project-registry.ts": 1146,
-        "mcp-shell/src/update-state.ts": 526,
+        "mcp-shell/src/tools.ts": 2812,
+        "mcp-shell/src/engine-client.ts": 1616,
+        "mcp-shell/src/http-gateway.ts": 1295,
+        "mcp-shell/src/project-registry.ts": 1185,
+        "mcp-shell/src/update-state.ts": 612,
         "mcp-shell/src/io.ts": 445,
-        "mcp-shell/src/dispatch.ts": 406,
+        "mcp-shell/src/dispatch.ts": 441,
         "mcp-shell/src/audit-session.ts": 386,
         "mcp-shell/src/evidence-report.ts": 364,
-        "mcp-shell/src/stdio-session.ts": 269,
+        "mcp-shell/src/stdio-session.ts": 291,
         "mcp-shell/src/http-gateway-cli.ts": 268,
         "mcp-shell/src/errors.ts": 93,
         "mcp-shell/src/index.ts": 44,
@@ -1131,7 +1131,7 @@
           "lines": 0
         }
       ],
-      "ratio": 0.1959,
+      "ratio": 0.1889,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
@@ -1147,7 +1147,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 18405,
+  "totalToolSurfaceLoc": 18679,
   "note": null,
   "carried": null
 }
