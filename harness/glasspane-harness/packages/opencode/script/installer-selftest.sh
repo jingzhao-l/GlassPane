@@ -743,6 +743,79 @@ else
   advice_names_in_matrix "bin shim advice from the product.json branch only names declared packages" "$SCRATCH/npm-shim-matrix.log"
 fi
 
+# ---------------------------------------------------------------- 22: no printed installer URL points at a moving branch
+# The release lane's own header (`docs/release.yml` prose, and `.github/workflows/release.yml` lines
+# 9-10) promises "the installers pin the tag, so a user can reproduce the exact bytes", while every
+# remedy `install.sh` printed pointed at `.../main/scripts/install.sh`. That is not a cosmetic
+# difference: the script is the thing that verifies the binary, so a refusal whose advice lives on a
+# mutable branch hands the verifier to whoever can push that branch — and the parent repository's
+# release lane states the opposite rule for its own install commands (pin to the ref being released,
+# never to `main`, "下一条命令却把人支到一个会移动的分支上" is the defect it names). These cases read
+# the printed strings in both shapes where the installer knows a version: `--version` given, and the
+# tag resolved from the releases API on a run that asked for no version at all.
+PINNED_INSTALLER_URL="https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v9.9.9/scripts/install.sh"
+REPO_MAIN_URL="https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/main/scripts/install.sh"
+installer_urls() { grep -oE 'https://raw\.githubusercontent\.com/[^[:space:]"|]+' "$1" 2>/dev/null | sort -u; }
+assert_no_main_url() {
+  # Scoped to the installer's own URL rather than a bare grep for `/main/`, so the assertion cannot
+  # fire on unrelated prose and cannot be satisfied by a log that printed no remedy at all — the
+  # companion `assert_has` cases are what prove a URL *was* printed.
+  local label="$1" file="$2" bad="" u
+  while IFS= read -r u; do
+    case "$u" in *"/main/"*) bad="$bad $u" ;; esac
+  done < <(installer_urls "$file")
+  if [ -n "$bad" ]; then fail "$label — it printed a branch-pinned installer URL:$bad"; else pass "$label"; fi
+}
+
+# 22a — the two refusal sites that already ran above with `--version 9.9.9` in hand.
+assert_has "the no-manifest refusal prints the installer tagged at the version it was asked for" "$SCRATCH/no-sums.log" "$PINNED_INSTALLER_URL"
+assert_no_main_url "the no-manifest refusal prints no /main/ installer URL" "$SCRATCH/no-sums.log"
+assert_has "the no-gpg refusal prints the tagged installer URL as well" "$SCRATCH/no-gpg.log" "$PINNED_INSTALLER_URL"
+assert_no_main_url "the no-gpg refusal prints no /main/ installer URL" "$SCRATCH/no-gpg.log"
+
+# 22b — the site that sends the user to the release asset after the installed command fails to run.
+assert_has "the placeholder-binary remedy says which tag it pinned to" "$SCRATCH/stub-binary.log" "installer tagged at v9.9.9"
+assert_has "and prints the tagged installer URL there too" "$SCRATCH/stub-binary.log" "$PINNED_INSTALLER_URL"
+assert_no_main_url "the placeholder-binary remedy prints no /main/ installer URL" "$SCRATCH/stub-binary.log"
+
+# 22c — the install plan and `--help`, both with a version in hand. `--help` used to be answered
+# inside the argv loop, so `--help --version X` could not know the version that followed it.
+run_install "$SCRATCH/plan-tagged.log" --dry-run --version 9.9.9
+assert_has "the install plan names the tagged installer it would tell a user to re-run" "$SCRATCH/plan-tagged.log" "installer to re-run if this refuses: $PINNED_INSTALLER_URL"
+assert_not_has "and the plan offers no branch-pinned URL" "$SCRATCH/plan-tagged.log" "$REPO_MAIN_URL"
+bash -c "cat '$INSTALL_SH' | bash -s -- --help --version 9.9.9" >"$SCRATCH/help-after-version.log" 2>&1
+assert_code "install.sh --help --version <value> still exits 0" "$?" "0"
+assert_has "and its documented opt-out line carries the tagged URL" "$SCRATCH/help-after-version.log" "$PINNED_INSTALLER_URL"
+assert_no_main_url "--help with a version in hand prints no /main/ installer URL" "$SCRATCH/help-after-version.log"
+
+# 22d — the asset lane with NO `--version`: `releases/latest` must be resolved to one named tag, that
+# tag must be printed before anything is downloaded, and every later fetch must address it. This is
+# the shape where "latest" used to be an unbounded moving target for the checksum manifest.
+printf '{"tag_name":"v9.9.9","name":"glasspane-harness v9.9.9","draft":false,"prerelease":false}\n' > "$FIX/latest"
+run_install "$SCRATCH/latest-resolved.log"
+assert_code "a run with no --version resolves one concrete tag and installs against it" "$?" "0"
+assert_has "it prints the tag it resolved" "$SCRATCH/latest-resolved.log" "resolved release tag: v9.9.9"
+assert_has "and binds every later fetch to that tag" "$SCRATCH/latest-resolved.log" "this run is bound to it: the asset, SHA256SUMS.txt and .asc are all read from"
+assert_has "the download it names is the tag's asset, not a moving pointer" "$SCRATCH/latest-resolved.log" "downloading https://stub.invalid/releases/download/v9.9.9/glasspane-harness-darwin-arm64.zip"
+assert_no_main_url "a run that resolved a tag prints no /main/ installer URL" "$SCRATCH/latest-resolved.log"
+# The same lane's refusal: the remedy the user is told to run has to be the verifier from that tag.
+SCENARIO_SUMS_HTTP=404 run_install "$SCRATCH/latest-refused.log"
+assert_code "the tag-resolved run still refuses a manifest the release does not carry" "$?" "1"
+assert_has "and its printed remedy names the resolved tag" "$SCRATCH/latest-refused.log" "$PINNED_INSTALLER_URL"
+assert_no_main_url "the tag-resolved refusal prints no /main/ installer URL" "$SCRATCH/latest-refused.log"
+SCENARIO_SUMS_HTTP=""
+# What the shape check is for: an endpoint answer that is not a version tag is a moving ref, and the
+# one step that removes the moving target is the one that has to refuse it.
+printf '{"tag_name":"main"}\n' > "$FIX/latest"
+run_install "$SCRATCH/latest-branch.log"
+assert_code "a releases API that names a branch is refused rather than installed against" "$?" "1"
+assert_has "and says plainly that it is not a release tag" "$SCRATCH/latest-branch.log" "is not a vX.Y.Z release tag"
+assert_no_main_url "the refusal names no branch-pinned installer to re-run" "$SCRATCH/latest-branch.log"
+printf '{"tag_name":"v9.9.9","name":"glasspane-harness v9.9.9","draft":false,"prerelease":false}\n' > "$FIX/latest"
+run_install "$SCRATCH/latest-restored.log"
+assert_code "the same lane is green again once the endpoint names a tag" "$?" "0"
+rm -f "$FIX/latest"
+
 echo ""
 if [ "$FAILURES" -gt 0 ]; then
   echo "installer-selftest: $FAILURES check(s) failed"

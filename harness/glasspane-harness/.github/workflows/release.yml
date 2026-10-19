@@ -6,8 +6,13 @@ name: Release
 #
 #   1) GitHub Release assets — on a `v*` tag, automatically: per-platform binary
 #      archives (zip/tar.gz) built on native runners, plus SHA256SUMS.txt.
-#      script/build.ts does the upload when OPENCODE_RELEASE=1; the installers pin
-#      the tag, so a user can reproduce the exact bytes.
+#      script/build.ts does the upload when OPENCODE_RELEASE=1. "the installers pin the tag" is now a
+#      checked statement rather than an aspiration: every installer URL `scripts/install.sh` prints
+#      back to a user names the tag of the version it resolved — given as `--version` or resolved from
+#      the releases API before any download — and `installer-selftest.sh` section 22 fails the lane if
+#      a `/main/` installer URL is ever printed with a version in hand. What is NOT pinned here is the
+#      documented one-click entry point (`product.json` → `install.curl`, the READMEs and
+#      `docs/install.md`), which still names the moving branch; that string belongs to its owner.
 #   2) npm publish — manual workflow_dispatch, dry by default: the platform
 #      packages (one per runner) and then the `glasspane-harness` wrapper
 #      (postinstall picks the right platform package). Provenance on; the
@@ -54,9 +59,18 @@ permissions:
 
 jobs:
   version-check:
-    name: tag matches the product version
+    name: tag, manifests and CI all agree on this commit
     if: success() && github.event_name == 'push'
     runs-on: ubuntu-latest
+    # A job-level `permissions:` block REPLACES the workflow-level one, so `contents: read` has to be
+    # named again here even though the workflow already names it — without it this job has no readable
+    # repository, which is the rule `scripts/check-workflows.mjs` enforces. `actions: read` is the new
+    # scope, and it is the one the CI-green question needs: `gh api
+    # repos/<repo>/actions/workflows/ci.yml/runs` answers 403 without it, and the parent lane learned
+    # that a scope left unnamed makes the question fail closed rather than pass quietly.
+    permissions:
+      contents: read
+      actions: read
     steps:
       # Pinned to a 40-hex SHA like every other `actions/*` ref in this file. The exemption that
       # used to keep the linter away from the fork subtree (`check-workflows.mjs` passing
@@ -64,15 +78,56 @@ jobs:
       # product, so an unpinned ref here is unpinned in the repository that really runs it — and
       # several jobs below this one read `secrets.GPG_PRIVATE_KEY` or hold `id-token: write`.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: The tag must equal product.json's version
+      - name: The tag and BOTH version manifests must name the same version
+        # `docs/release.md` step 1 tells the releaser to bump `product.json` only and promises that
+        # "`check-version` fails the build if they disagree". That script lives in the parent
+        # monorepo (`scripts/check-version.mjs`, wired into the parent `ci.yml`); it is NOT part of the
+        # subtree split, so in the repository that actually publishes this product the claim had no
+        # machine behind it. The split repo's own `ci.yml` does cross-check the two manifests — but CI
+        # is a green badge somebody else may not have waited for, so the lane that builds, checksums
+        # and GPG-signs the bytes now asks the question itself, at the only moment before anything is
+        # public where a refusal costs nothing.
         run: |
           node -e '
             const fs = require("fs")
             const product = JSON.parse(fs.readFileSync("product.json", "utf8"))
+            const pkg = JSON.parse(fs.readFileSync("packages/opencode/package.json", "utf8"))
             const tag = process.env.GITHUB_REF_NAME.replace(/^v/, "")
-            if (tag !== product.version) { console.error(`tag ${tag} != product.json version ${product.version} — the release lane refuses to ship mismatched bytes`); process.exit(1) }
-            console.log("tag and product version agree:", product.version)
+            const problems = []
+            if (tag !== product.version) problems.push(`tag v${tag} != product.json version ${product.version}`)
+            if (pkg.version !== product.version) problems.push(`packages/opencode/package.json version ${pkg.version} != product.json version ${product.version}`)
+            if (problems.length) {
+              console.error("the release lane refuses to build, checksum and sign a tree whose own manifests disagree:")
+              for (const p of problems) console.error(" -", p)
+              console.error("remedy: bump product.json and packages/opencode/package.json in the SAME commit, re-run the subtree split from trunk, and cut the tag from that commit. A tag that already shipped never moves.")
+              process.exit(1)
+            }
+            console.log("tag, product.json and packages/opencode/package.json all name:", product.version)
           '
+      - name: CI for the commit this tag points at must already be green
+        # "A tag was pushed" is not "this commit was tested". The parent repository measured the
+        # difference on its own release line (v1.16.1: release non-draft, assets and signatures live,
+        # npm serving the version — and CI for that exact commit RED), and nothing in this lane asked
+        # the question either. The judgement lives in `script/assert-ci-green.mjs` so the three
+        # different answers (red / still running / no record at all) get three different remedies, and
+        # so that "could not ask" is a refusal rather than a pass.
+        #
+        # Ask about the commit the TAG points at, not about a branch tip: `HEAD^{commit}` peels an
+        # annotated tag, which is what `git tag -a` produces and what `gh` releases anchor to.
+        # Querying the default branch instead would grade whatever is handy today rather than the bytes
+        # this run ships — the mistake this repository already made once with `create-release`'s
+        # `targetCommitish: main`.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          COMMIT="$(git rev-parse 'HEAD^{commit}')"
+          echo "tag ${GITHUB_REF_NAME} peels to commit ${COMMIT} (event sha ${GITHUB_SHA}) — asking ${GITHUB_REPOSITORY} whether CI is green for THAT commit"
+          node script/assert-ci-green.mjs \
+            --sha "$COMMIT" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow ci.yml \
+            --budget 1800000 --poll 30000
       - name: The released tree must equal trunk's fork subtree
         # This release is published from the split repository, whose `main` is a
         # `git subtree split` of trunk's `harness/glasspane-harness`. Until this step existed the

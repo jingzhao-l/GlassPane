@@ -49,9 +49,47 @@ runs:
         restore-keys: |
           ${{ runner.os }}-bun-
 
-    - name: Install setuptools for distutils compatibility
-      run: python3 -m pip install setuptools || pip install setuptools || true
+    - name: Check the interpreter the native install scripts need
+      # This step used to be `python3 -m pip install setuptools || pip install setuptools || true`,
+      # i.e. an unpinned third-party package pulled onto the machine that builds and signs the release,
+      # with no lockfile and no hash, behind three `||` arms that made failure indistinguishable from
+      # success. It is gone, on evidence rather than preference:
+      #
+      #   · What invokes node-gyp here is the `install` script of `tree-sitter-bash` /
+      #     `tree-sitter-powershell` (both `node-gyp-build`, both in the root package.json's
+      #     trustedDependencies). `tree-sitter-bash` ships `prebuilds/darwin-arm64` and
+      #     `darwin-x64`, so nothing compiles for it on either release runner;
+      #     `tree-sitter-powershell@0.25.10` ships NO `prebuilds/` at all, so node-gyp-build falls
+      #     through to a real `node-gyp rebuild` — measured in this checkout, whose
+      #     `packages/opencode/node_modules/tree-sitter-powershell/build/` carries the generated
+      #     `Makefile` / `config.gypi` with `"python": "/usr/local/bin/python3"` recorded in it.
+      #     `@parcel/watcher` and `@lydell/node-pty` resolve to their per-platform prebuilt packages
+      #     in bun.lock, so they never reach a compiler.
+      #   · What that build needs is a supported python3, NOT setuptools. bun.lock pins
+      #     `node-gyp@12.3.0`; node-gyp spawns its vendored `gyp/gyp_main.py` directly
+      #     (`lib/configure.js`), and all 58 .py files under that `gyp/` tree contain zero references
+      #     to `distutils` or `setuptools`. The only `setuptools` strings in the package are in
+      #     `gyp/pyproject.toml`'s `[build-system]` / `[project].dependencies` — which matter when
+      #     gyp-next is *installed as a wheel*, a path node-gyp never takes. node-gyp's own README
+      #     says it plainly: "Python >= v3.12 requires `node-gyp` >= v10" — the `pip install
+      #     setuptools` shim was the pre-v10 fix for the distutils removal, and this lockfile is v12.
+      #
+      # So the step installed nothing this build reads, and its `|| true` meant a genuinely broken
+      # interpreter would surface later as a compiler error somewhere unhelpful. What is left is the
+      # requirement the deleted step was nominally about, stated where it can fail: no python3 means
+      # node-gyp cannot run at all, so say so here — before `bun install` spends its minutes — rather
+      # than letting the native build die on a stack of `|| true`.
       shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v python3 >/dev/null 2>&1; then
+          echo "::error::python3 is not on PATH. \`bun install\` in this workspace compiles" \
+            "tree-sitter-powershell through node-gyp (that package ships no prebuilds), and node-gyp" \
+            "cannot configure without a Python interpreter. Nothing was installed by this action yet," \
+            "so nothing needs cleaning up: fix the runner image or the PATH and re-run."
+          exit 1
+        fi
+        python3 -c 'import sys; print("native-build interpreter:", sys.version.split()[0], "->", sys.executable)'
 
     - name: Install dependencies
       run: |

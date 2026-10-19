@@ -6,6 +6,12 @@
 #   bash scripts/install.sh --dry-run       # print the plan, touch nothing
 #   bash scripts/install.sh --version 0.1.0 # pin a version
 #
+# The one-liner above is the documented *moving* entry point (it is product.json's `install.curl`, and
+# only its owner may change it). Everything this script prints back to the user is different in kind:
+# once a version is in hand — given or resolved — the installer URL names that tag, because this script
+# is the thing that verifies the binary and a remedy on a mutable branch hands the verifier to whoever
+# can push that branch.
+#
 # Mirrors the iterate-ecosystem installer shape (banner, OS detection, dependency
 # check, install, verify, next steps) and reads its identity from product.json at
 # the repo root; harness/tools/product-surface.mjs keeps the URLs here in step with
@@ -16,6 +22,7 @@ PRODUCT="glasspane-harness"
 VERSION=""
 REPO="jingzhao-l/glasspane-harness"
 DRY_RUN=0
+HELP=0
 INSTALL_ROOT="${GLASSPANE_HARNESS_HOME:-$HOME/.glasspane-harness}"
 # Allow a fork/mirror to be installed from by pinning the source explicitly.
 NPM_PACKAGE="${GLASSPANE_HARNESS_NPM:-$PRODUCT}"
@@ -31,7 +38,27 @@ RELEASE_BASE="${GLASSPANE_HARNESS_RELEASES:-https://github.com/$REPO/releases/do
 # harness/tools/product-surface.mjs. It is a variable rather than prose because the refusals
 # below print it as the command the user is told to run: a remedy that does not install is not
 # a remedy, and the version this run was asked for is data the refusal already holds.
-INSTALLER_URL="https://raw.githubusercontent.com/$REPO/main/scripts/install.sh"
+#
+# The ref is DERIVED, never hardcoded to a moving branch. `main` is only the pre-version default:
+# as soon as a concrete version is in hand — given by `--version`, or resolved from the releases
+# API — the printed URL points at `vX.Y.Z`. The reason is that this script is the thing that
+# verifies the binary, so whoever can push to `main` of this repository controls the verifier the
+# user is told to re-run; the parent repository's release lane states the same rule for its own
+# installers ("pin to the ref being released, never to `main`"). One honest exception stays: with
+# no version resolved at all (the npm lane, no `--version`), there is no tag to name yet, and the
+# URL then printed is labelled as the moving default rather than silently presented as reproducible.
+INSTALLER_BASE="https://raw.githubusercontent.com/$REPO"
+INSTALLER_REF="main"
+INSTALLER_URL="$INSTALLER_BASE/$INSTALLER_REF/scripts/install.sh"
+pin_installer_url() {
+  # $1 = the concrete version this run resolved (without the leading `v`), empty when nothing is known.
+  if [ -n "${1:-}" ]; then
+    INSTALLER_REF="v$1"
+  else
+    INSTALLER_REF="main"
+  fi
+  INSTALLER_URL="$INSTALLER_BASE/$INSTALLER_REF/scripts/install.sh"
+}
 # "No SHA256SUMS.txt / no .asc was published for this release" used to be a warning the
 # installer talked itself past and then installed anyway. That tolerance is not ours to
 # grant: the release lane publishes both files for every target and fails the run if either
@@ -70,8 +97,20 @@ while [ $# -gt 0 ]; do
       VERSION="$1"
       ;;
     --version=*) VERSION="${1#--version=}" ;;
-    --help|-h)
-      cat <<USAGE
+    # Answered after the loop, not inside it: `--help --version X.Y.Z` has to print the URL of the
+    # version the same command line asked for, and a loop that reads argv left to right cannot know a
+    # `--version` that comes after `--help`.
+    --help|-h) HELP=1 ;;
+    *) error "Unknown argument: $1 (try --help)"; exit 1 ;;
+  esac
+  shift
+done
+
+# From here on every URL this script prints for itself is named after the version in hand.
+pin_installer_url "$VERSION"
+
+if [ "$HELP" = "1" ]; then
+  cat <<USAGE
 glasspane-harness installer
 
   bash scripts/install.sh                  install (npm first, GitHub release asset as fallback)
@@ -91,12 +130,8 @@ Environment:
                              that reads the script, not for curl:
                                curl -fsSL $INSTALLER_URL | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash
 USAGE
-      exit 0
-      ;;
-    *) error "Unknown argument: $1 (try --help)"; exit 1 ;;
-  esac
-  shift
-done
+  exit 0
+fi
 
 # ------------------------------------------------------------------ banner
 echo ""
@@ -147,10 +182,15 @@ step "Install plan"
 NPM_SPEC="$NPM_PACKAGE${VERSION:+@$VERSION}"
 if [ "$VERSION" = "" ]; then
   info "1) npm:  $NPM_SPEC        (registry: $NPM_REGISTRY; preferred: platform selection and updates are npm's job)"
-  info "2) release asset fallback: $RELEASE_BASE (latest release resolved at install time)"
+  # "latest" is an API pointer, not an install target: it is resolved to one concrete tag before
+  # anything is downloaded, and every fetch after that — asset, SHA256SUMS.txt, .asc — addresses that
+  # tag. Without this the checksum manifest would be read from whatever the moving pointer named at
+  # the moment each file happened to be fetched.
+  info "2) release asset fallback: the releases API is asked for one concrete tag, which is printed before any download; the asset, its SHA256SUMS.txt and its .asc are then read from that tag only"
 else
   info "1) npm:  $NPM_SPEC        (registry: $NPM_REGISTRY; preferred: platform selection and updates are npm's job)"
   info "2) release asset fallback: $RELEASE_BASE/v$VERSION/$PRODUCT-$PLATFORM.zip (checks sha256 against SHA256SUMS.txt, GPG against the asset's .asc)"
+  info "   installer to re-run if this refuses: $INSTALLER_URL (tagged at v$VERSION, not a moving branch)"
 fi
 info "   install root (fallback path only): $INSTALL_ROOT/bin"
 if [ "$DRY_RUN" = "1" ]; then
@@ -490,12 +530,30 @@ verify_asset() {
 if [ -z "$INSTALLED_VIA" ]; then
   step "Installing from the GitHub release asset"
   command -v curl >/dev/null 2>&1 || { error "neither npm nor curl is available; install Node.js/npm or curl and retry"; exit 1; }
-  # Resolve "latest" through the releases API so the asset URL is one download, not a dance.
+  # Resolve "latest" through the releases API so the asset URL is one download, not a dance — and make
+  # the answer name exactly one tag. `releases/latest` is a moving pointer; asking it is only useful if
+  # every fetch after the answer is bound to the tag it gave back (asset, SHA256SUMS.txt and `.asc`),
+  # so a release published mid-run cannot move the manifest under a checksum read for a different tag.
   if [ -z "$VERSION" ]; then
     API_JSON="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")" || { error "could not query the latest release of $REPO"; exit 1; }
-    VERSION="$(printf '%s' "$API_JSON" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -1)"
-    [ -n "$VERSION" ] || { error "could not read a version from the releases API"; exit 1; }
-    info "latest release: v$VERSION"
+    TAG_NAME="$(printf '%s' "$API_JSON" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+    VERSION="${TAG_NAME#v}"
+    [ -n "$VERSION" ] || { error "could not read a tag_name from the releases API — refusing to install bytes against an unnamed release"; exit 1; }
+    # A tag that does not look like a version means the endpoint handed back a branch or somebody else's
+    # mutable ref. Resolving it is the one step that removes the moving target, so it is checked here
+    # rather than trusted downstream: the same shape test the verify step applies to the installed
+    # binary's own output.
+    case "$VERSION" in
+      [0-9]*.[0-9]*) ;;
+      *)
+        error "the releases API named \"$TAG_NAME\", which is not a vX.Y.Z release tag"
+        error "refusing to bind the checksum manifest to a moving ref. Ask for a version explicitly: --version X.Y.Z"
+        exit 1
+        ;;
+    esac
+    pin_installer_url "$VERSION"
+    info "resolved release tag: v$VERSION"
+    info "this run is bound to it: the asset, SHA256SUMS.txt and .asc are all read from $RELEASE_BASE/v$VERSION/, never from a moving latest"
   fi
   # The asset name is what `script/build.ts` uploads: `<product>-<os>-<arch>` with
   # no version in it (the tag already scopes the URL) and `.zip` for every non-Linux
@@ -604,7 +662,16 @@ if [ "$VERSION_RC" -ne 0 ]; then
   error "    npm install -g --allow-scripts=$PRODUCT ${NPM_SPEC:-$PRODUCT}"
   # Not `bash $0`: through `curl … | bash` $0 is the word `bash`, so the printed remedy was
   # `bash bash` — the same class of broken advice the refusals above used to print.
-  error "  Or install the release asset instead: curl -fsSL $INSTALLER_URL | bash"
+  # The URL is the one pinned to the version this run resolved, so the verifier the user is sent to is
+  # the bytes under that tag rather than whatever `main` points at today. With no version resolved at
+  # all (the npm lane, no `--version`), there is no tag to name — so a template is printed instead of
+  # quietly offering the moving branch as if it were reproducible.
+  if [ -n "$VERSION" ]; then
+    error "  Or install the release asset instead (installer tagged at v$VERSION): curl -fsSL $INSTALLER_URL | bash"
+  else
+    error "  Or install a tagged release yourself: curl -fsSL $INSTALLER_BASE/vX.Y.Z/scripts/install.sh | bash -s -- --version X.Y.Z"
+    error "    (this run resolved no tag, so the branch default \"$INSTALLER_REF\" is not offered as a reproducible command)"
+  fi
   exit 1
 fi
 case "$VERSION_FIRST" in
