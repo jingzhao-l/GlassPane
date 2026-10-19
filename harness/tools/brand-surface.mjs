@@ -339,9 +339,25 @@ function scan() {
       if (matches.length > 0) hits.push({ file: rel, rule, count: matches.length })
     }
   }
-  // the built-in skill is injected into every session: its name and body are surface
-  if (existsSync(path.join(forkRoot, "packages/core/src/plugin/skill/customize-opencode.md")))
-    hits.push({ file: "packages/core/src/plugin/skill/customize-opencode.md", rule: "first-party-gateway", count: 1 })
+  // The built-in skill is injected into every session: its name and body are surface.
+  //
+  // DISCOVERED, not remembered. This used to be one hard-coded path naming the upstream skill
+  // document, and the private-isation renamed that file, so the `existsSync` guard made the rule
+  // silently stop contributing a hit, and the golden's `hits: []` recorded an empty answer as
+  // "clean". A skill body is model-facing text; the rule that was supposed to own it had no input.
+  // An empty skill directory is now "cannot measure" (exit 2), the same shape as the locale rule
+  // below it.
+  const skillDir = path.join(forkRoot, "packages/core/src/plugin/skill")
+  if (!existsSync(skillDir)) {
+    console.error(`brand-surface: no ${path.relative(repoRoot, skillDir)} — the built-in skill rule cannot run, which is not the same as passing`)
+    process.exit(2)
+  }
+  const skillDocs = readdirSync(skillDir).filter((f) => /^customize-.*\.md$/.test(f)).sort()
+  if (skillDocs.length === 0) {
+    console.error(`brand-surface: ${path.relative(repoRoot, skillDir)} holds no customize-*.md — the built-in skill this rule exists to watch is not there, and "not there" is not "clean"`)
+    process.exit(2)
+  }
+  for (const doc of skillDocs) hits.push({ file: `packages/core/src/plugin/skill/${doc}`, rule: "first-party-gateway", count: 1 })
   // The locale directory is a scan input, not a guarantee: when a batch moves it, the
   // honest answer is "this rule could not run" (exit 2, the code this file already uses
   // for an empty scan at :370). Reading the tree as "no brand drift" on an ENOENT would

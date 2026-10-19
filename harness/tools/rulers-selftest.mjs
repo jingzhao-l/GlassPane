@@ -124,27 +124,31 @@ mustGoRed(
 // A permissive baseline (surface-semantics records ALLOWED judgements) is the worst of them: a
 // laundered hit raises that file's ceiling, so the committed tree can never be red for it again.
 {
-  const probe = path.join(fork, "packages", "opencode", "src", "plugin", "rulers-selftest-probe.ts")
-  const probeRel = path.relative(repoRoot, probe)
-  if (existsSync(probe)) bad(`3: ${probeRel} already exists — this battery expects to own that path`)
-  else {
-    try {
-      writeFileSync(probe, "export const rulersSelftestProbe = 1\n")
-      for (const [tool, name] of [
-        ["harness/tools/surface-semantics.mjs", "surface-semantics"],
-        ["harness/tools/brand-surface.mjs", "brand-surface"],
-        ["harness/tools/tool-surface.mjs", "tool-surface"],
-      ]) {
-        const got = run(tool, ["--record"])
-        if (got.rc !== 1) bad(`${name} --record over a dirty tree exited ${got.rc}; refusing is the only correct answer`)
-        else if (!got.text.includes(probeRel) || !got.text.includes("refusing to record"))
-          bad(`${name} --record refused without naming the file or the refusal:\n${got.text.slice(0, 600)}`)
-        else ok(`${name}: --record refuses a tracked-but-modified tree and names ${probeRel}`)
-      }
-    } finally {
-      rmSync(probe, { force: true })
-      if (existsSync(probe)) bad(`3: the probe file survived the finally block — ${probeRel} is still on disk`)
+  // The probe must be a TRACKED file modified in place: `git diff --name-only HEAD` — the command
+  // all three guards run — does not list untracked paths, so a brand-new file is invisible to them
+  // and this control would pass vacuously. (It did exactly that on its first run: three `--record`
+  // calls exited 0 and rewrote the goldens, which is also how the closure check below earned its
+  // keep.) The appended line carries no brand token, and the original bytes are restored by sha.
+  const probeRel = "harness/glasspane-harness/CONTEXT.md"
+  const probe = path.join(repoRoot, probeRel)
+  const original = readFileSync(probe)
+  const before = sha(original)
+  try {
+    writeFileSync(probe, `${original.toString("utf8")}\n<!-- rulers-selftest dirty probe -->\n`)
+    for (const [tool, name] of [
+      ["harness/tools/surface-semantics.mjs", "surface-semantics"],
+      ["harness/tools/brand-surface.mjs", "brand-surface"],
+      ["harness/tools/tool-surface.mjs", "tool-surface"],
+    ]) {
+      const got = run(tool, ["--record"])
+      if (got.rc !== 1) bad(`${name} --record over a dirty tree exited ${got.rc}; refusing is the only correct answer\n${got.text.slice(0, 400)}`)
+      else if (!got.text.includes(probeRel) || !got.text.includes("refusing to record"))
+        bad(`${name} --record refused without naming the file or the refusal:\n${got.text.slice(0, 400)}`)
+      else ok(`${name}: --record refuses a tracked-but-modified tree and names ${probeRel}`)
     }
+  } finally {
+    writeFileSync(probe, original)
+    if (sha(readFileSync(probe)) !== before) bad(`3: RESTORE FAILED — ${probeRel} is not the bytes this control found`)
   }
 }
 

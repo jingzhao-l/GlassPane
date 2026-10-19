@@ -27,7 +27,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
-import { toolCountDrift, claimDrift, headingsOf, check, CLAIMS, shellResidue, DOCS } from '../../scripts/check-doc-links.mjs'
+import { toolCountDrift, claimDrift, headingsOf, check, CLAIMS, shellResidue, DOCS, rulerProvenance } from '../../scripts/check-doc-links.mjs'
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -441,4 +441,36 @@ test("check-doc-links: 登记集合必须仍然包含尺子文档与三份产品
     assert.ok(fs.existsSync(path.join(REPO, doc)), `${doc} 登记了却不在树里`)
   }
   assert.ok(DOCS.length >= 29, `登记集合缩到 ${DOCS.length} 份：少一份文档＝少一片有人看的死链面`)
+})
+
+test('check-doc-links: 尺子的出处字段指向不存在的文件 → 具名红；金样里删除桶的路径不算出处', () => {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-prov-'))
+  fs.mkdirSync(path.join(root, 'harness', 'contracts'), { recursive: true })
+  fs.mkdirSync(path.join(root, 'specs'), { recursive: true })
+  fs.writeFileSync(path.join(root, 'specs', 'Real.md'), '# real\n')
+  fs.writeFileSync(
+    path.join(root, 'harness', 'contracts', 'tool-surface.json'),
+    JSON.stringify({ limitSource: '三条架构铁律（specs/Ghost_Decisions.md）', caliber: 'specs/Real.md 的口径' }, null, 2),
+  )
+  // `deleted` 桶整份都是"上游有、我们删了"的路径——报它们等于把尺子对上上游的正确答案判红。
+  fs.writeFileSync(
+    path.join(root, 'harness', 'contracts', 'fork-diff.json'),
+    JSON.stringify({ deleted: ['harness/glossary/da.md', 'docs/gone.md'], counts: { deleted: 2 } }, null, 2),
+  )
+  const problems = rulerProvenance({ rootDir: root })
+  assert.equal(problems.length, 1, JSON.stringify(problems))
+  assert.match(problems[0], /tool-surface\.json: 出处指向 specs\/Ghost_Decisions\.md/, problems[0])
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('check-doc-links: 尺子层目录读不到时报"未观测"而不是零问题（缺席不等于通过）', () => {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-prov-empty-'))
+  const problems = rulerProvenance({ rootDir: root })
+  assert.equal(problems.length, 1, JSON.stringify(problems))
+  assert.match(problems[0], /未观测，不是通过/)
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('check-doc-links: 今天的尺子层出处全部指得到真文件（这条判据在 main 上必须是绿的）', () => {
+  assert.deepEqual(rulerProvenance(), [], 'main 上的尺子出处仍然指向空气')
 })

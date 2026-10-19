@@ -56,7 +56,13 @@ const pinFile = path.join(repoRoot, "harness", "upstream.json")
 const mode = process.argv.includes("--record") ? "record" : "check"
 
 const LIMIT = 0.1 // "<10% 代码量", one of the three architecture iron laws
-const LIMIT_SOURCE = "三条架构铁律（specs/GlassPane_Design_Decisions.md）"
+// The specs file this pointed at never existed (a decision record named in a string, never opened
+// by anything); the 2026-10-19 review of the other line found it and handed the fix over, because
+// nothing in the docs lane reads `harness/`, so a ruler's own provenance pointer was the one link
+// nobody checked. The iron laws live in §4.2 of the current 综述 (5.8), and `check-doc-links`
+// now resolves every provenance field in `harness/contracts/*.json` against the tree.
+const LIMIT_SOURCE = "三条架构铁律（specs/GlassPane_5.8_项目综述文档.md §4.2）"
+
 /**
  * What each counted number means. Named so `--check` can compare it against the golden
  * before anything is measured: the golden records the caliber it was measured under, and

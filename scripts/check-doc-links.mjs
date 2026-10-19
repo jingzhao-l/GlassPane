@@ -502,6 +502,85 @@ export function claimDrift({ docs = CLAIM_DOCS, rootDir = ROOT } = {}) {
   return out
 }
 
+/**
+ * 尺子层自己的出处指针必须指向树里真有的文件。
+ *
+ * WHY。这道闸走的是"对外文档"，`harness/contracts/*.json` 与 `harness/tools/*.mjs` 从来不在它
+ * 的视野里——于是占比闸的 `limitSource` 指着 `specs/GlassPane_Design_Decisions.md`（该文件不存在，
+ * 26 份 specs 里没有一个这么命名）一路绿到 2026-10-19。一条闸的"我按哪条律量的"是它的出处；
+ * 出处指向空气，读的人就无从复核它量的是不是那条律。金样是机器可读的，这一条判据也必须是。
+ *
+ * 解析按三个根试：仓根、fork 根、指针所在文件自己的目录——`docs/release.md` 这种相对写法
+ * 在 fork 树里是对的，拿仓根去判就是假红。
+ */
+export function rulerProvenance({ rootDir = ROOT } = {}) {
+  const out = []
+  const contractDir = path.join(rootDir, 'harness', 'contracts')
+  const toolsDir = path.join(rootDir, 'harness', 'tools')
+  if (!fs.existsSync(contractDir) && !fs.existsSync(toolsDir)) {
+    return ['harness/contracts 与 harness/tools 都读不到——尺子出处的这道判据今天什么都没核（未观测，不是通过）']
+  }
+  const files = []
+  for (const [dir, suffix] of [[contractDir, '.json'], [toolsDir, '.mjs']]) {
+    if (!fs.existsSync(dir)) continue
+    for (const f of fs.readdirSync(dir).sort()) if (f.endsWith(suffix)) files.push(path.relative(rootDir, path.join(dir, f)))
+  }
+  // Provenance is a *field*, not a substring hunt. The goldens also carry DATA: `fork-diff.json`
+  // holds the `deleted` bucket, whose whole purpose is naming upstream `.md` files that are gone
+  // from this tree. Matching those reported 222 "broken pointers" on the first run — the golden
+  // answering correctly about upstream's deletions. So: walk the parsed JSON, and check only the
+  // values under keys that state where a rule comes from. Code files are scanned in full, because
+  // there the same path shapes only appear in comments and string constants.
+  const PROVENANCE_KEYS = /^(limitsource|source|sourceoftruth|whyrule|why|provenance|docs|canonical|caliber|note|reason|rule|law)$/i
+  const PATHISH = /(?:specs|harness|docs|engine|scripts|kernel|updater|bridge|installer|mcp-shell|packages)\/[\w./()-]*?\.(?:md|json)(?![\w-])/g
+  const forkRoot = path.join(rootDir, 'harness', 'glasspane-harness')
+  const missing = (target, fromRel) => {
+    const candidates = [path.join(rootDir, target), path.join(forkRoot, target), path.join(path.dirname(path.join(rootDir, fromRel)), target)]
+    return !candidates.some((c) => fs.existsSync(c))
+  }
+  const report = (rel, text) => {
+    for (const m of text.matchAll(PATHISH)) {
+      if (missing(m[0], rel)) out.push(`${rel}: 出处指向 ${m[0]}，三个根下都没有这个文件——被指着的那一侧无人校验它，而这条闸的"我按什么量的"从此无法复核`)
+    }
+  }
+  const walkJson = (rel, node, keyName) => {
+    if (typeof node === 'string') {
+      if (keyName && PROVENANCE_KEYS.test(keyName)) report(rel, node)
+      return
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) walkJson(rel, item, keyName)
+      return
+    }
+    if (node && typeof node === 'object') {
+      for (const [k, v] of Object.entries(node)) walkJson(rel, v, k)
+    }
+  }
+  for (const rel of files) {
+    const abs = path.join(rootDir, rel)
+    let text
+    try {
+      text = fs.readFileSync(abs, 'utf8')
+    } catch {
+      out.push(`${rel}: 登记在尺子层里却读不出来`)
+      continue
+    }
+    if (rel.endsWith('.json')) {
+      let parsed
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        out.push(`${rel}: 金样不是合法 JSON，出处判据无法在它上运行（这不是通过）`)
+        continue
+      }
+      walkJson(rel, parsed, null)
+    } else {
+      report(rel, text)
+    }
+  }
+  return out
+}
+
 export function check({ rootDir = ROOT, docs = DOCS } = {}) {
   const problems = []
   const present = docs.filter((d) => fs.existsSync(path.join(rootDir, d)))
@@ -517,6 +596,8 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
   // 可复算主张：对真源核一遍，再对另一语言核一遍。缺了这一步，"双语成对完整"只意味着
   // 文件都在，不意味着两份话说的是同一件事。
   problems.push(...claimDrift({ rootDir }))
+  // 尺子层自己的出处指针。它不在"对外文档"集合里，所以从前坏了也没人看。
+  problems.push(...rulerProvenance({ rootDir }))
 
   for (const [a, b] of MIRROR_PAIRS) {
     const ea = fs.existsSync(path.join(rootDir, a))
