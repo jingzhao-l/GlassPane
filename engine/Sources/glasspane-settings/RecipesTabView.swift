@@ -61,7 +61,7 @@ struct RecipesTabView: View {
         return VStack(alignment: .leading, spacing: 8) {
             SectionHeader(
                 title: "字段结构",
-                subtitle: "真源：kernel/schemas/recipe-config.schema.json（只读）",
+                subtitle: RecipeSchemaLoader.subtitle(for: overview),
                 systemImage: "doc.badge.gearshape"
             )
             HStack(spacing: 6) {
@@ -413,6 +413,11 @@ struct SchemaFieldRow: Identifiable {
 struct SchemaOverview {
     /// 来源标注：`schema 文件（只读真源）` 或 `内置快照（文件未找到）`。
     let source: String
+    /// 这一屏**真的读到的**那一份文件在哪（绝对路径）。nil = 盘上那一份没读到，
+    /// 页面上摊开的是内置快照。那句副标题只认这一个判据——它不能由 `source` 那句
+    /// 人话里含哪些字猜出来（猜错过一次：「内置快照（schema 文件未找到）」里也含
+    /// "schema 文件"，于是快照那一屏被自称成了真源）。
+    let loadedPath: String?
     let schemaVersion: String?
     let description: String?
     let required: [String]?
@@ -455,6 +460,25 @@ enum RecipeSchemaLoader {
     }
     """
 
+    /// 卡片顶部那句"这一屏显示的是哪一份"。
+    ///
+    /// 它必须跟着 `load()` 的实际结局走。从前这一行硬写着
+    /// "真源：kernel/schemas/recipe-config.schema.json（只读）"，而 `load()` 只试
+    /// **当前工作目录**相对的那两个候选：面板由 launchd/Finder 起时 cwd 是 `/`，
+    /// 那一次永远落到内置快照，屏幕上那份内置快照却由那句话自称是真源。
+    /// 这一行不是给读的人增加装饰的，它说的必须就是这一屏的东西（面板只报它测到的）。
+    static func subtitle(for overview: SchemaOverview) -> String {
+        // 判据是"这一趟到底读到了一份文件没有"，不是那句 `source` 人话里含哪些字：
+        // 快照那一句写作「内置快照（schema 文件未找到）」，用 `contains("schema 文件")`
+        // 去分枝会把这一支读成真源那一支——一句给错的副标题正是这条缺陷本身。
+        // 读到的一律点名**那一份文件**（绝对路径），这一屏才说得出它显示的是哪一份。
+        if let path = overview.loadedPath {
+            return "这一屏读的是盘上那一份 \(path)（只读真源）"
+        }
+        return "这一屏显示的是面板内置的快照（\(overview.source)）："
+            + "kernel/schemas/recipe-config.schema.json 这一趟没读到，页面上这份不声称就是那一份"
+    }
+
     /// 候选位置：优先当前工作目录下的 kernel 路径；其余兜底。
     private static let candidatePaths = [
         "kernel/schemas/recipe-config.schema.json",
@@ -470,6 +494,7 @@ enum RecipeSchemaLoader {
                let overview = makeOverview(text: String(data: data, encoding: .utf8)) {
                 return SchemaOverview(
                     source: "schema 文件（只读真源）",
+                    loadedPath: absolute,
                     schemaVersion: overview.schemaVersion,
                     description: overview.description,
                     required: overview.required,
@@ -482,6 +507,7 @@ enum RecipeSchemaLoader {
         if let overview = makeOverview(text: embeddedRaw) {
             return SchemaOverview(
                 source: "内置快照（schema 文件未找到）",
+                loadedPath: nil,
                 schemaVersion: overview.schemaVersion,
                 description: overview.description,
                 required: overview.required,
@@ -489,7 +515,7 @@ enum RecipeSchemaLoader {
                 raw: overview.raw
             )
         }
-        return SchemaOverview(source: "内置快照（解析失败）", schemaVersion: nil,
+        return SchemaOverview(source: "内置快照（解析失败）", loadedPath: nil, schemaVersion: nil,
                               description: nil, required: nil, fields: [], raw: embeddedRaw)
     }
 
@@ -529,7 +555,7 @@ enum RecipeSchemaLoader {
                                              detail: detailParts.isEmpty ? "object" : detailParts.joined(separator: "， ")))
             }
         }
-        return SchemaOverview(source: "", schemaVersion: schemaVersion, description: description,
+        return SchemaOverview(source: "", loadedPath: nil, schemaVersion: schemaVersion, description: description,
                               required: required, fields: fields, raw: pretty)
     }
 

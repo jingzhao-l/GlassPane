@@ -4,7 +4,16 @@ import SwiftUI
 ///
 /// 主窗口 = 左侧导航（权限 / 证据档案 / 项目 / 审批台账）+ 右侧内容；
 /// 菜单栏项 = 轻量入口（打开主窗口 / 刷新 / 退出）。
-/// 面板不持久化任何配置：权限状态实时检测，档案每次进页重读。
+///
+/// 持久化的边界（从前这里写的是"面板不存任何配置"，被下面两处 `@AppStorage`
+/// 直接证伪，所以改成实话）：
+///  - **会落盘的两样**，都是给人看的偏好而不是给 daemon 的指令，键都在 UserDefaults：
+///    配方编辑器草稿（`RecipesTabView.swift` 的 `glasspane.recipeEditor`）与
+///    卡片/说明的折叠状态（`ConsoleTheme.swift` 的 `glasspane.card.*.collapsed`、
+///    `SettingsPanelView.swift` 的 `glasspane.card.perm-*.explainer`）；
+///  - **不落盘的东西**：权限状态、证据档案、项目注册表、审批台账、更新结论——全部
+///    每次进页或点「刷新」时重新实测（权限只读 daemon 自报的那一份，面板不代测）。
+/// 也就是说：面板只把自己的"读到什么"存在内存里，存的只有视图偏好与一份草稿。
 @main
 struct GlassPaneSettingsApp: App {
     @StateObject private var model: SettingsModel

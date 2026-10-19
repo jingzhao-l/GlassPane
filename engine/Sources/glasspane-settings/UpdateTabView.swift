@@ -419,18 +419,27 @@ struct UpdateTabView: View {
                 } else {
                     PathRowView(label: "记录", path: model.pointerFile, identifierKey: "updater-pointer")
                 }
-                HStack(spacing: 6) {
+                HStack(alignment: .top, spacing: 6) {
                     Text("状态根")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .frame(width: 52, alignment: .leading)
-                    Text(model.stateRoot)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-                        .help(model.stateRoot)
+                    // 路径之外还要有一句出处：daemon 报一个根、这一页按 env 另算一个根时，
+                    // 屏幕上两行"状态根"看不出它们不是同一个数（控制台那一页早就这么标了）。
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(model.stateRoot)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                            .help(model.stateRoot)
+                        Text(model.stateRootCaption)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("gp-update-state-root-source")
+                    }
                     Spacer()
                 }
             }

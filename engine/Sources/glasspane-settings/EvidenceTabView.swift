@@ -440,7 +440,12 @@ struct EvidenceDetailView: View {
             } label: {
                 Image(systemName: "folder")
             }
-            .help("在访达中显示这个档案")
+            // 这枚从前是一句 `revealFile()`：路径为空或整包没读到时按下去什么都不发生，
+            // 而它的同胞「打开报告」是带着禁用理由画出来的。判据两边现在同一套：
+            // 这条档案的读取结局 + 扫描给出的落盘路径，都是这一页测到的东西。
+            .help(revealControl.help)
+            .disabled(!revealControl.enabled)
+            .accessibilityIdentifier("gp-reveal-evidence-file")
 
             Button {
                 openHTMLReport()
@@ -461,6 +466,11 @@ struct EvidenceDetailView: View {
     /// 按不动时同一句里给出原因与下一步。
     private var reportControl: ConsoleModel.PanelControl {
         ConsoleModel.reportButtonControl(packLoad: packLoad)
+    }
+
+    /// 「在访达中显示」这一枚的现在形态：读取结局 + 这条档案在盘上的路径，两个判据。
+    private var revealControl: ConsoleModel.PanelControl {
+        ConsoleModel.revealFileControl(packLoad: packLoad, filePath: summary.filePath)
     }
 
     private var verdictTitle: String {
@@ -724,8 +734,18 @@ struct EvidenceDetailView: View {
 
     // MARK: 动作
 
+    /// 在访达里选中这一条档案自己的那份文件。
+    ///
+    /// 按不动的形态已经由 `revealControl` 灰掉并写在了它自己身上；这里那一层闸是第二道：
+    /// 键鼠与无障碍都能绕过灰掉的按钮按到这里，而从前它 `return` 得无声无息——
+    /// "点了没反应"正是这一面修过的那类缺陷，所以这一次也说一句（走 `lastActionMessage`
+    /// 那条已被渲染的横幅，不新开一个只有模型知道的口子）。
     private func revealFile() {
-        guard !summary.filePath.isEmpty else { return }
+        let control = revealControl
+        guard control.enabled, !summary.filePath.isEmpty else {
+            model.lastActionMessage = control.help
+            return
+        }
         NSWorkspace.shared.selectFile(summary.filePath, inFileViewerRootedAtPath: "")
     }
 

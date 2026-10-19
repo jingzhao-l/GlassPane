@@ -102,11 +102,18 @@ struct ConsoleRootView: View {
     }
 
     private func syncFromSettings(liveness: SettingsModel.DaemonLiveness) {
+        let answered = liveness == .answering
         console.adoptDaemonReport(
             binaryPath: settings.daemon.subject?.binaryPath,
             daemonStateRoot: settings.daemon.stateRoot,
-            answered: liveness == .answering
+            answered: answered
         )
+        // 更新页也要跟着同一帧实测走：它的指针与根证书束都落在状态根下，从前这一页
+        // 只按 `GLASSPANE_STATE_DIR`/家目录自己算一个根，于是 daemon 带着 `--state-dir`
+        // 起时，「自动更新」的开关写的是**默认家目录那一份真状态**，而屏幕上写的是沙箱
+        // （`ConsoleModel.swift:148-152` 把这个形状记成它修掉的 P1——只修了自己一页
+        // 就是半修）。
+        updates.adoptDaemonReport(daemonStateRoot: settings.daemon.stateRoot, answered: answered)
     }
 
     // MARK: - 动作结论
