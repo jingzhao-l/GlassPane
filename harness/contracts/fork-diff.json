@@ -2745,7 +2745,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "98ded9abc0657da65a8b4e548faf1e66dab28a71"
+      "forkHash": "47f3413d55d281206e2000202debf55428164582"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -3505,7 +3505,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "ccbc1fa89145395f18e24a296c2ff81b47e97ffe"
+      "forkHash": "ac63cc76d68beb91fd52881daff1d4450247293e"
     },
     {
       "file": "script/publish.ts",
@@ -3703,7 +3703,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "540a94051906985b4d7c365d4d298dd935033f76"
+      "forkHash": "0e2815a1337bbf005a461307fd031019bbe446df"
     },
     {
       "file": "contracts/engine-methods.json",
@@ -3731,7 +3731,7 @@
     },
     {
       "file": "docs/install.md",
-      "forkHash": "8131420fd3e77990ea1caa70a06a87c43af9a2c4"
+      "forkHash": "61d308f689e5e506b7122b9f6f5ca5951089e194"
     },
     {
       "file": "docs/kernel-integration.md",
@@ -3875,11 +3875,11 @@
     },
     {
       "file": "product.json",
-      "forkHash": "20d1f8ba8a2d7dff6c869b25223118fe98b1b66d"
+      "forkHash": "a9cddfd20b9d1906445e1b9753464cb436a74e13"
     },
     {
       "file": "README.zh-CN.md",
-      "forkHash": "25d8225de1a19e8db2a5bc3dd528b9c8f98cfb87"
+      "forkHash": "b7f7ce761475eace4a6708d77c53c4797b2b4ee8"
     },
     {
       "file": "script/assert-ci-green.mjs",
@@ -3899,7 +3899,7 @@
     },
     {
       "file": "scripts/install.sh",
-      "forkHash": "d7f88dcae0e1ae66fede9a60a29c333228b5956e"
+      "forkHash": "778156ed23b89b16efa1d05aafa55275809004fb"
     },
     {
       "file": "SYNCLOG.md",

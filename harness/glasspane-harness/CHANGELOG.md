@@ -10,6 +10,16 @@ contract does not).
 
 ## [Unreleased]
 
+（空。本批的账归入 `0.9.1`。）
+
+## [0.9.1] - 2026-10-20
+
+判据：patch。四项用户可见判据逐条实测未动——状态文件字段、退出码集合、CLI 参数、npm `bin`
+声明。本版带走的是内核的**声明**：`iterate-kernel@0.1.9` 把 `zod` 从范围收成精确版本，
+于是 `mcp-shell` 上游那两处 npm `overrides`（在下游钉住整棵树的 zod，绕开的正是内核自己的
+声明与它发出去的 `.d.ts` 不同号）删掉了。判决一字未动：0.1.9 的语料字节与 0.1.8 相同，
+`kernel-conformance` 的 16 份摘要逐字复算一致。
+
 ### Changed — 内核追到 `iterate-kernel@0.1.9`（那一份声明把它发出去的 `.d.ts` 说清楚了）
 
 - **依赖再升 `iterate-kernel@0.1.9`**。0.1.9 不改任何判决：它把 `zod` 从 `">=3.25.76 <5"` 收成
@@ -23,7 +33,6 @@ contract does not).
   16 份。判决一条都没动——0.1.9 的语料字节与 0.1.8 相同，摘要逐字复算一致；`harness/README.md`
   里那句"今天以 registry 依赖 `iterate-kernel@0.1.x`"是可复算主张，由 `check-doc-links` 拿 pin
   反算，本批把它追平（这条红是闸抓的，不是人查的）。
-
 
 ## [0.9.0] - 2026-10-19
 
