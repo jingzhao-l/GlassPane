@@ -771,12 +771,23 @@ final class SettingsModel: ObservableObject {
             try? FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try script.write(to: url, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath)
+            // Owner 的 x 就够了：一次性任务由同一个 uid 的 launchd 起，0755 只是把这个
+            // uid 之外的读者加进来——而它所在的目录只要 0755 就通过
+            // `StateRoot.directoryIsolation`（那条规矩拒的是"可写"，不是"可读"）。脚本里
+            // 写着 daemon 二进制路径与状态根，同组/其他人可读不是一个需要存在的性质。
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptPath)
         } catch {
             FileHandle.standardError.write(Data("runOneShot script-write failed: \(error) path=\(scriptPath)\n".utf8))
             return .writeFailed
         }
         try? FileManager.default.removeItem(atPath: outputPath)
+        // 输出文件由那一趟 shell 重定向创建，所以它的模式是**那个执行上下文的 umask**
+        // 说了算，不是面板说了算。先按 0600 建好：重定向只截断已存在的文件，不改它的模式。
+        // 同一类由屏幕/权限派生的东西在引擎侧要 0600（`EvidenceReportGenerator.swift:196-201`），
+        // 一份 `--permissions` 的读数（主体路径、pid、每个席位的判决）不该是例外。
+        FileManager.default.createFile(
+            atPath: outputPath, contents: Data(), attributes: [.posixPermissions: 0o600]
+        )
         let process = Process()
         process.executableURL = URL(fileURLWithPath: command.launchPath)
         process.arguments = command.arguments
