@@ -215,8 +215,11 @@ release-artifact — 1 agreement(s) held, 0 tolerated lag(s), 1 problem(s) [trun
 那条线落下 0.8.3（它自己的 `docs/release.md` 步骤 3-4）之后，这两条通道接着跑：
 
 ```bash
-# 1) 让发布重跑被拦下的那一格（tag 不动、不重打）
-gh run rerun 39195845505 --failed --repo jingzhao-l/GlassPane
+# 1) 让发布重跑被拦下的那一格（tag 不动、不重打）。取号写死会过期：v1.17.0 到现在已经跑过
+#    两条 Release（39195845505 打在旧 tag 对象上、39198788721 打在重指之后的 HEAD 上），
+#    都在同一格 CI-green 上拒绝。取最新一条即可。
+gh run rerun "$(gh run list --repo jingzhao-l/GlassPane --workflow Release \
+  --limit 1 --json databaseId --jq ".[0].databaseId")" --failed --repo jingzhao-l/GlassPane
 # 2) 两条 npm 通道，顺序固定：先 dry 再 publish，--ref 必须显式是这个 tag
 gh workflow run release.yml --repo jingzhao-l/GlassPane --ref v1.17.0 -f mode=dry
 gh workflow run release.yml --repo jingzhao-l/GlassPane --ref v1.17.0 -f mode=publish
