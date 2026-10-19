@@ -474,3 +474,22 @@ test('check-doc-links: 尺子层目录读不到时报"未观测"而不是零问�
 test('check-doc-links: 今天的尺子层出处全部指得到真文件（这条判据在 main 上必须是绿的）', () => {
   assert.deepEqual(rulerProvenance(), [], 'main 上的尺子出处仍然指向空气')
 })
+
+test("check-doc-links: 带日期的历史复记不被拿今天的真源判红（同一句里两个数形状相同）", () => {
+  // `harness/README.md` 那一行同时有"2026-10-16 复记 9,646 处 / 3,312 文件"和"本轮复记 …"。
+  // 前者是当时量到的数，改写它等于要求历史否认自己；判据只认带 present 标记的那一句。
+  const root = rulerRoot({
+    readme: "brand-surface 血缘：2026-10-16 复记 9,646 处 / 3,312 文件；本轮复记 9,603 处 / 3,311 文件。\n",
+    lineage: { occurrences: 9603, filesScanned: 3311 },
+  })
+  assert.deepEqual(claimDrift({ docs: RULER, rootDir: root }), [])
+  // 对照：present 那一句写错时必须红——证明"不红"是因为它认得出哪句是今天的话。
+  const wrong = rulerRoot({
+    readme: "brand-surface 血缘：2026-10-16 复记 9,646 处 / 3,312 文件；本轮复记 9,000 处 / 3,000 文件。\n",
+    lineage: { occurrences: 9603, filesScanned: 3311 },
+  })
+  const problems = claimDrift({ docs: RULER, rootDir: wrong })
+  assert.equal(problems.length, 2, JSON.stringify(problems))
+  fs.rmSync(root, { recursive: true, force: true })
+  fs.rmSync(wrong, { recursive: true, force: true })
+})
