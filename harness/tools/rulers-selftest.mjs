@@ -228,11 +228,16 @@ mustGoRed(
 mustGoRed(
   "harness/glasspane-harness/product.json",
   "product-surface: a declared path that is not on disk is red",
-  (text) => text.replace(`"deletedFromTree": [`, `"deletedFromTree": [\n      "packages/does-not-exist-selftest",`),
+  // The first version of this control inserted a made-up package name into `deletedFromTree` —
+  // and passed with exit 0, because that list asserts the path is ABSENT, so a nonexistent name is
+  // the correct answer. The accident the rule exists for is the opposite one (a deleted-list naming
+  // a directory that is still there, which is what `packages/web` was), so the probe has to declare
+  // a real, present package as deleted.
+  (text) => text.replace(`"packages/stats"`, `"packages/desktop"`),
   "harness/tools/product-surface.mjs",
   ["--check"],
   1,
-  ["packages/does-not-exist-selftest is declared under deletedFromTree"],
+  ["packages/desktop is declared under deletedFromTree"],
 )
 
 // 13. causality, not coincidence: with the brand guard removed, control 1 goes green. That is the
