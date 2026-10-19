@@ -32,9 +32,15 @@ import { read as EnvRead } from "@opencode-ai/core/flag/flag"
 
 const args = hideBin(process.argv)
 
+// One name, used by both the parser and the branch below. `show` compared the help text with
+// the literal `"opencode "` while `.scriptName()` was already the product's own — so the
+// branch could never fire and every help invocation printed the logo plus the usage line,
+// which is the opposite of what the check was written to decide.
+const SCRIPT_NAME = "glasspane-harness"
+
 function show(out: string) {
   const text = out.trimStart()
-  if (!text.startsWith("opencode ")) {
+  if (!text.startsWith(`${SCRIPT_NAME} `)) {
     process.stderr.write(UI.logo() + EOL + EOL)
     process.stderr.write(text + EOL)
     return
@@ -44,7 +50,7 @@ function show(out: string) {
 
 const cli = yargs(args)
   .parserConfiguration({ "populate--": true })
-  .scriptName("glasspane-harness")
+  .scriptName(SCRIPT_NAME)
   .wrap(100)
   .help("help", "show help")
   .alias("help", "h")

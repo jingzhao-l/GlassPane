@@ -157,11 +157,15 @@ const layer = Layer.effect(
       ),
     )
 
-    const source = Flag.OPENCODE_MODELS_URL || "https://models.opencode.ai"
-    const filepath = path.join(
-      Global.Path.cache,
-      source === "https://models.opencode.ai" ? "models.json" : `models-${Hash.fast(source)}.json`,
-    )
+    // No catalog host is baked into the product. Upstream resolved this to its own
+    // infrastructure, and one string field of that JSON (`npm`) is fed to `npm install <pkg>`
+    // followed by `await import()` inside the process that holds the whole `gp_*` accessibility
+    // surface (`plugin/provider/dynamic.ts`). A retag of an endpoint this project does not own
+    // was therefore arbitrary code execution on every machine that ran `models` or `/connect`,
+    // with no signature, no digest and no schema on the response. A remote catalog is now read
+    // only when the operator names one.
+    const source = Flag.OPENCODE_MODELS_URL
+    const filepath = path.join(Global.Path.cache, source ? `models-${Hash.fast(source)}.json` : "models.json")
     const ttl = Duration.minutes(5)
     const lockKey = `models-dev:${filepath}`
 
@@ -199,8 +203,32 @@ const layer = Layer.effect(
       typeof OPENCODE_MODELS_DEV === "undefined" ? undefined : OPENCODE_MODELS_DEV,
     )
 
+    // `JSON.parse(text) as Record<string, Provider>` accepted any JSON and called it a catalog.
+    // The shape is declared (an object whose values are objects), so it is checked: a body that
+    // does not have it is not cached, because the cache file is read BEFORE the embedded snapshot
+    // on every later run and one bad write would keep shadowing the snapshot after the endpoint
+    // was gone.
+    const decodeCatalog = (text: string): Record<string, Provider> | undefined => {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        return undefined
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined
+      const entries = Object.entries(parsed as Record<string, unknown>)
+      if (entries.length === 0) return undefined
+      if (!entries.every(([, value]) => !!value && typeof value === "object" && !Array.isArray(value))) return undefined
+      return parsed as Record<string, Provider>
+    }
+
     const fetchAndWrite = Effect.fn("ModelsDev.fetchAndWrite")(function* () {
       const text = yield* fetchApi()
+      const catalog = decodeCatalog(text)
+      if (!catalog) {
+        yield* Effect.logWarning("the configured model catalog did not have the declared shape; nothing was cached and the embedded snapshot stays in use")
+        return undefined
+      }
       const tempfile = `${filepath}.${process.pid}.${Date.now()}.tmp`
       yield* fs.writeWithDirs(tempfile, text).pipe(
         Effect.andThen(fs.rename(tempfile, filepath)),
@@ -211,7 +239,7 @@ const layer = Layer.effect(
           }),
         ),
       )
-      return text
+      return catalog
     })
 
     const populate = Effect.gen(function* () {
@@ -219,15 +247,15 @@ const layer = Layer.effect(
       if (fromDisk) return fromDisk
       const snapshot = yield* loadSnapshot
       if (snapshot) return snapshot
-      if (Flag.OPENCODE_DISABLE_MODELS_FETCH) return {}
-      // Flock is cross-process: concurrent opencode CLIs can race on this cache file.
-      const text = yield* Effect.scoped(
+      if (Flag.OPENCODE_DISABLE_MODELS_FETCH || !source) return {}
+      // Flock is cross-process: concurrent harness processes can race on this cache file.
+      const catalog = yield* Effect.scoped(
         Effect.gen(function* () {
           yield* Flock.effect(lockKey)
           return yield* fetchAndWrite()
         }),
       )
-      return JSON.parse(text) as Record<string, Provider>
+      return catalog ?? {}
     }).pipe(Effect.withSpan("ModelsDev.populate"), Effect.orDie)
 
     const [cachedGet, invalidate] = yield* Effect.cachedInvalidateWithTTL(populate, Duration.infinity)
@@ -235,6 +263,10 @@ const layer = Layer.effect(
     const get = (): Effect.Effect<Record<string, Provider>> => cachedGet
 
     const refresh = Effect.fn("ModelsDev.refresh")(function* (force = false) {
+      // `populate` honoured the switch and this one did not, so "fetching is disabled" was half
+      // true: the background schedule and the two commands that call `refresh(true)` still
+      // reached the network. With no configured source there is nothing to refresh either way.
+      if (Flag.OPENCODE_DISABLE_MODELS_FETCH || !source) return
       if (!force && (yield* fresh())) return
       yield* Effect.scoped(
         Effect.gen(function* () {

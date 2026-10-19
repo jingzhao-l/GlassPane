@@ -83,6 +83,52 @@ if (!arch) {
 const base = "glasspane-harness-" + platform + "-" + arch
 const binary = platform === "windows" ? "glasspane-harness.exe" : "glasspane-harness"
 
+// The installable platform packages are the target matrix, never an enumeration of possible
+// suffixes — same rule as script/postinstall.mjs. product.json holds the matrix and script/
+// publish.ts seals it into the wrapper's optionalDependencies (its --dry-run refuses a
+// wrapper whose list disagrees), so both copies name the same declared set by construction.
+// The product.json path follows script/build.ts's convention (fork root, three directories
+// above), which holds in this repo checkout and in installer-selftest fixtures; inside an
+// installed wrapper the shim sits in bin/, so the adjacent package.json one directory up is
+// the matrix's only surviving copy there. A foreign product.json reached the same way is
+// rejected by the name check, never obeyed.
+const wrapperManifestPath = path.join(scriptDir, "..", "package.json")
+const declaredNames = (() => {
+  const namesFromMatrix = (product) =>
+    product.platformTargets.map((target) =>
+      [
+        product.name,
+        target.os === "win32" ? "windows" : target.os,
+        target.arch,
+        target.avx2 === false ? "baseline" : undefined,
+        target.abi ?? undefined,
+      ]
+        .filter(Boolean)
+        .join("-"),
+    )
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(scriptDir, "..", "..", "..", "product.json"), "utf8"))
+    if (Array.isArray(parsed.platformTargets) && parsed.platformTargets.length > 0) {
+      let wrapperName = null
+      try {
+        wrapperName = JSON.parse(fs.readFileSync(wrapperManifestPath, "utf8")).name
+      } catch {
+        // no readable wrapper manifest — the product.json here is the repo root's own
+      }
+      if (!wrapperName || parsed.name === wrapperName) return namesFromMatrix(parsed)
+    }
+  } catch {
+    // not in a repo checkout — fall through to the sealed manifest
+  }
+  try {
+    return Object.keys(JSON.parse(fs.readFileSync(wrapperManifestPath, "utf8")).optionalDependencies ?? {})
+  } catch {
+    // An unreadable manifest cannot prove any name installable; the refusal text then says
+    // plainly that no build is declared instead of pointing at packages that may not exist.
+    return []
+  }
+})()
+
 function supportsAvx2() {
   if (arch !== "x64") return false
 
@@ -133,50 +179,73 @@ function supportsAvx2() {
   return false
 }
 
-const names = (() => {
+const machine = (() => {
   const avx2 = supportsAvx2()
   const baseline = arch === "x64" && !avx2
 
-  if (platform === "linux") {
-    const musl = (() => {
-      try {
-        if (fs.existsSync("/etc/alpine-release")) return true
-      } catch {
-        // ignore
+  const musl = (() => {
+    if (platform !== "linux") return false
+
+    try {
+      if (fs.existsSync("/etc/alpine-release")) return true
+    } catch {
+      // ignore
+    }
+
+    try {
+      const result = childProcess.spawnSync("ldd", ["--version"], { encoding: "utf8" })
+      const text = ((result.stdout || "") + (result.stderr || "")).toLowerCase()
+      if (text.includes("musl")) return true
+    } catch {
+      // ignore
+    }
+
+    return false
+  })()
+
+  const candidates = (() => {
+    if (platform === "linux") {
+      if (musl) {
+        if (arch === "x64") {
+          if (baseline) return [`${base}-baseline-musl`, `${base}-musl`, `${base}-baseline`, base]
+          return [`${base}-musl`, `${base}-baseline-musl`, base, `${base}-baseline`]
+        }
+        return [`${base}-musl`, base]
       }
 
-      try {
-        const result = childProcess.spawnSync("ldd", ["--version"], { encoding: "utf8" })
-        const text = ((result.stdout || "") + (result.stderr || "")).toLowerCase()
-        if (text.includes("musl")) return true
-      } catch {
-        // ignore
-      }
-
-      return false
-    })()
-
-    if (musl) {
       if (arch === "x64") {
-        if (baseline) return [`${base}-baseline-musl`, `${base}-musl`, `${base}-baseline`, base]
-        return [`${base}-musl`, `${base}-baseline-musl`, base, `${base}-baseline`]
+        if (baseline) return [`${base}-baseline`, base, `${base}-baseline-musl`, `${base}-musl`]
+        return [base, `${base}-baseline`, `${base}-musl`, `${base}-baseline-musl`]
       }
-      return [`${base}-musl`, base]
+      return [base, `${base}-musl`]
     }
 
     if (arch === "x64") {
-      if (baseline) return [`${base}-baseline`, base, `${base}-baseline-musl`, `${base}-musl`]
-      return [base, `${base}-baseline`, `${base}-musl`, `${base}-baseline-musl`]
+      if (baseline) return [`${base}-baseline`, base]
+      return [base, `${base}-baseline`]
     }
-    return [base, `${base}-musl`]
-  }
+    return [base]
+  })()
 
-  if (arch === "x64") {
-    if (baseline) return [`${base}-baseline`, base]
-    return [base, `${base}-baseline`]
-  }
-  return [base]
+  // Only a declared package is installable on this product, and a no-AVX2 x64 machine can only
+  // run a baseline build (product.json platform.dropped records that darwin-x64-baseline was
+  // dropped by decision — the old text named it to users anyway, a remedy that can never work).
+  // An empty list means "this machine has no build to install"; the refusal below says so.
+  const installable = candidates.filter((name) => {
+    if (!declaredNames.includes(name)) return false
+    return !baseline || name.endsWith("-baseline") || name.endsWith("-baseline-musl")
+  })
+
+  const here = `${platform}-${arch}${musl ? "-musl" : ""}${baseline ? " without AVX2" : ""}`
+  const supported = declaredNames.length
+    ? "The builds it does publish are " + declaredNames.map((name) => `"${name}"`).join(", ") + "."
+    : "This wrapper declares no platform packages at all."
+  const refusal = `glasspane-harness does not ship a build for your platform (${here}). ${supported}`
+
+  return { installable, refusal }
 })()
+
+const names = machine.installable
 
 function findBinary(startDir) {
   let current = startDir
@@ -198,6 +267,13 @@ function findBinary(startDir) {
 
 const resolved = envPath || (fs.existsSync(cached) ? cached : findBinary(scriptDir))
 if (!resolved) {
+  if (names.length === 0) {
+    // Nothing on this machine is installable: state that plainly and name the supported set,
+    // instead of the old text that told the reader to manually install packages this product
+    // has decided (product.json platform.dropped) never to publish.
+    console.error(machine.refusal)
+    process.exit(1)
+  }
   console.error(
     "It seems that your package manager failed to install the right version of the glasspane-harness CLI for your platform. You can try manually installing " +
       names.map((n) => `\"${n}\"`).join(" or ") +

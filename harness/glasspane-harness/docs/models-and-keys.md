@@ -9,7 +9,9 @@ There is nothing to log into, and nothing to sign up for here.
 ## What is in the catalog
 
 The full models.dev catalog ships with the binary — hundreds of models across dozens of
-providers — and the catalog is refreshed automatically. Two things were removed from it:
+providers. It is embedded from `contracts/models-catalog.json` at build time and is **not**
+fetched at runtime: with no `OPENCODE_MODELS_URL` configured the product never contacts a
+catalog endpoint, and the copy in your binary is the copy that was in the tagged tree. Two things were removed from it:
 
 | Removed | Why |
 | --- | --- |
@@ -37,7 +39,6 @@ Three ways, in the order opencode resolves them:
 
    ```json
    {
-     "$schema": "https://opencode.ai/config.json",
      "provider": {
        "anthropic": { "options": { "apiKey": "{env:ANTHROPIC_API_KEY}" } }
      }
@@ -45,9 +46,10 @@ Three ways, in the order opencode resolves them:
    ```
 
    The `{env:NAME}` form is a template: the value is read from the environment at load
-   time, so the file never contains a secret. (`$schema` still points at opencode's
-   published config schema — the config shape is upstream's, which is exactly what the
-   compatibility promise means.)
+   time, so the file never contains a secret. The example deliberately carries no
+   `$schema` line: the config shape is upstream's, but pointing a user-owned file at a
+   third-party schema URL is a claim that file makes about *that* project, and this
+   product writes nothing like it.
 
 3. **Interactive** — inside the TUI, `/connect` asks for the key and stores it in the
    credentials file (`~/.local/share/glasspane-harness/auth.json`). That file is created

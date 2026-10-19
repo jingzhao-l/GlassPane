@@ -232,7 +232,12 @@ async function executeUninstall(method: Installation.Method, targets: RemovalTar
   }
 
   UI.empty()
-  prompts.log.success("Thank you for using OpenCode!")
+  // The product's own name — the same fact `product.json` → `name` and the gated literal in
+  // `installation/index.ts` carry. This line used to thank the reader for using the upstream
+  // project, and the brand gate could not see it: its user-text rule matched only backtick
+  // literals and tested the upstream word case-sensitively, so a double-quoted capitalised
+  // name was invisible to the one rule whose job is to notice.
+  prompts.log.success("Thank you for using glasspane-harness!")
 }
 
 async function getShellConfigFile(): Promise<string | null> {

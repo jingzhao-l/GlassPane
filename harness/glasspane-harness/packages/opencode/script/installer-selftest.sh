@@ -172,6 +172,20 @@ chmod +x "$STUB/uname"
 printf '#!/bin/sh\necho "stub npm: refusing (simulated EACCES)" >&2\nexit 1\n' > "$STUB/npm"
 chmod +x "$STUB/npm"
 
+# sysctl: only section 21 reads it. The npm-lane launchers probe hw.optional.avx2_0 to decide
+# whether this x64 Mac needs a baseline build; SCENARIO_AVX2=0 answers "no AVX2" so a no-AVX2
+# Intel Mac is reproducible on Apple Silicon, and anything else falls through to the real
+# sysctl so every other scenario keeps the machine's own answer.
+cat > "$STUB/sysctl" <<'STUBSYSCTL'
+#!/usr/bin/env bash
+if printf '%s' "$*" | grep -q "hw.optional.avx2_0"; then
+  if [ "${STUB_AVX2:-}" = "0" ]; then echo 0; exit 0; fi
+  if [ "${STUB_AVX2:-}" = "1" ]; then echo 1; exit 0; fi
+fi
+exec /usr/sbin/sysctl "$@"
+STUBSYSCTL
+chmod +x "$STUB/sysctl"
+
 # gpg: two scripted outcomes, good signature and bad, so both branches of the verify
 # function are reachable without a keyring.
 cat > "$STUB/gpg" <<'STUBGPG'
@@ -255,6 +269,7 @@ installer_env() {
     export STUB_SUMS_HTTP="${SCENARIO_SUMS_HTTP:-}"
     export STUB_CURL_ASSET_FAIL="${SCENARIO_CURL_ASSET_FAIL:-}"
     export STUB_GPG_IMPORT_FAILS="${SCENARIO_GPG_IMPORT_FAILS:-}"
+    export STUB_AVX2="${SCENARIO_AVX2:-}"
     export GLASSPANE_HARNESS_ALLOW_UNVERIFIED="${SCENARIO_ALLOW_UNVERIFIED:-}"
     export TMPDIR="${SCENARIO_TMPDIR:-/tmp}"
     mkdir -p "$TMPDIR"
@@ -607,6 +622,125 @@ if [ -n "$REMEDY_NOSUMS" ]; then
   mv "$SCRATCH/sums.remedy-hold" "$FIX/SHA256SUMS.txt"
 else
   fail "the no-manifest refusal printed no 'curl … | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash' command"
+fi
+
+# ---------------------------------------------------------------- 21: the npm lane's advice must be satisfiable
+# The wrapper's postinstall.mjs and the shipped bin/glasspane-harness used to enumerate the
+# POSSIBLE platform package names (-musl, -baseline, linux-*, windows-*) and hand that list to
+# the user as a "manually install" remedy — including names this product has decided never to
+# publish (product.json platform.dropped: no Linux/Windows builds, no darwin-x64-baseline).
+# A remedy pointing at a package that does not exist is worse than no remedy. Both launchers
+# now derive the installable set from the declared matrix (product.json when reachable, the
+# wrapper's sealed optionalDependencies otherwise) and answer an off-matrix machine with a
+# plain refusal naming the supported set. These cases drive the REAL files as an installed
+# copy would run them: a scratch node_modules/glasspane-harness layout, the stub npm refusing
+# every install, and the no-AVX2 Intel Mac reproduced on Apple Silicon by pinning os.arch() to
+# "x64" in the SCRATCH copy and answering the sysctl probe with 0 — the same way section 2
+# reproduces an Intel machine for install.sh through a stubbed uname.
+PRODUCT_JSON="$FORK_ROOT/product.json"
+HOST_PKG="glasspane-harness-$(node -e 'console.log(process.platform + "-" + process.arch)')"
+MATRIX_NAMES="$(node -e '
+  const product = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))
+  for (const t of product.platformTargets ?? [])
+    console.log([product.name, t.os === "win32" ? "windows" : t.os, t.arch, t.avx2 === false ? "baseline" : undefined, t.abi].filter(Boolean).join("-"))
+' "$PRODUCT_JSON")"
+
+# Every glasspane-harness-<os>-… package name a launcher prints must be one the product
+# declares. This is the assertion that goes red if an undeclared name (a -baseline, a -musl, a
+# linux-*) ever reaches the advice again.
+advice_names_in_matrix() {
+  local label="$1" file="$2" bad="" token
+  while IFS= read -r token; do
+    [ -n "$token" ] || continue
+    printf '%s\n' "$MATRIX_NAMES" | grep -qxF -- "$token" || bad="$bad $token"
+  done < <(grep -oE 'glasspane-harness-(darwin|linux|windows|win32)[a-zA-Z0-9_-]*' "$file" | sort -u)
+  if [ -n "$bad" ]; then fail "$label — names outside product.json's matrix:$bad"; else pass "$label"; fi
+}
+assert_supported_set() {
+  local label="$1" file="$2" n
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    assert_has "$label names the declared package \"$n\"" "$file" "\"$n\""
+  done <<< "$MATRIX_NAMES"
+}
+run_launcher() {
+  # $1 = log file, rest = the launcher command, with the bin-path overrides stripped so a
+  # maintainer's exported GLASSPANE_HARNESS_BIN_PATH cannot resolve the shim out of its failure.
+  installer_env "$1" env -u GLASSPANE_HARNESS_BIN_PATH -u OPENCODE_BIN_PATH "${@:2}"
+}
+
+if [ -z "$MATRIX_NAMES" ]; then
+  fail "section 21 setup: product.json declares no platformTargets — there is no declared matrix to test against"
+else
+  NI="$SCRATCH/npm-install"
+  GP="$NI/node_modules/glasspane-harness"
+  mkdir -p "$GP/bin" "$GP/x64bin"
+  node -e '
+    const fs = require("fs")
+    const od = {}
+    for (const n of process.argv[2].split("\n")) if (n) od[n] = "9.9.9"
+    fs.writeFileSync(process.argv[1], JSON.stringify({ name: "glasspane-harness", version: "9.9.9", optionalDependencies: od }, null, 2))
+  ' "$GP/package.json" "$MATRIX_NAMES" || fail "section 21 setup: could not write the fixture wrapper manifest"
+  cp "$FORK_ROOT/packages/opencode/script/postinstall.mjs" "$GP/postinstall.mjs"
+  sed 's/os\.arch()/"x64"/g' "$FORK_ROOT/packages/opencode/script/postinstall.mjs" > "$GP/postinstall-x64.mjs"
+  cp "$FORK_ROOT/packages/opencode/bin/glasspane-harness" "$GP/bin/glasspane-harness"
+  sed 's/os\.arch()/"x64"/g' "$FORK_ROOT/packages/opencode/bin/glasspane-harness" > "$GP/x64bin/glasspane-harness"
+
+  # 21a — the machine this product DOES ship for, with a package manager that failed to place
+  # the optional dependency: the original remedy sentence survives, naming only declared names.
+  run_launcher "$SCRATCH/npm-postinstall-host.log" node "$GP/postinstall.mjs"
+  assert_code "postinstall with no resolvable platform package exits 1" "$?" "1"
+  assert_has "the supported-machine advice keeps its original sentence" "$SCRATCH/npm-postinstall-host.log" "Try manually installing"
+  assert_has "and names this machine's declared package" "$SCRATCH/npm-postinstall-host.log" "\"$HOST_PKG\""
+  advice_names_in_matrix "postinstall advice on the host machine only names declared packages" "$SCRATCH/npm-postinstall-host.log"
+
+  # 21b — a no-AVX2 x64 Mac: plain refusal, supported set named, no baseline package offered.
+  SCENARIO_AVX2=0 run_launcher "$SCRATCH/npm-postinstall-x64.log" node "$GP/postinstall-x64.mjs"
+  POST_X64_RC=$?
+  SCENARIO_AVX2=""
+  assert_code "postinstall on a no-AVX2 x64 Mac exits 1" "$POST_X64_RC" "1"
+  assert_has "and refuses plainly instead of naming an uninstallable package" "$SCRATCH/npm-postinstall-x64.log" "does not ship a build for your platform"
+  assert_has "naming the machine it cannot serve" "$SCRATCH/npm-postinstall-x64.log" "without AVX2"
+  assert_supported_set "the postinstall refusal" "$SCRATCH/npm-postinstall-x64.log"
+  assert_not_has "the no-AVX2 refusal never offers a baseline package" "$SCRATCH/npm-postinstall-x64.log" "-baseline"
+  advice_names_in_matrix "postinstall advice on the simulated Intel Mac only names declared packages" "$SCRATCH/npm-postinstall-x64.log"
+
+  # 21c/21d — the shipped bin shim, same two machines.
+  run_launcher "$SCRATCH/npm-shim-host.log" node "$GP/bin/glasspane-harness" --version
+  assert_code "the bin shim with no installed platform package exits 1" "$?" "1"
+  assert_has "the supported-machine shim advice keeps its original sentence" "$SCRATCH/npm-shim-host.log" "You can try manually installing"
+  assert_has "and names this machine's declared package" "$SCRATCH/npm-shim-host.log" "\"$HOST_PKG\""
+  advice_names_in_matrix "bin shim advice on the host machine only names declared packages" "$SCRATCH/npm-shim-host.log"
+
+  SCENARIO_AVX2=0 run_launcher "$SCRATCH/npm-shim-x64.log" node "$GP/x64bin/glasspane-harness" --version
+  SHIM_X64_RC=$?
+  SCENARIO_AVX2=""
+  assert_code "the bin shim on a no-AVX2 x64 Mac exits 1" "$SHIM_X64_RC" "1"
+  assert_has "and refuses plainly instead of naming an uninstallable package" "$SCRATCH/npm-shim-x64.log" "does not ship a build for your platform"
+  assert_has "naming the machine it cannot serve" "$SCRATCH/npm-shim-x64.log" "without AVX2"
+  assert_supported_set "the bin shim refusal" "$SCRATCH/npm-shim-x64.log"
+  assert_not_has "the no-AVX2 shim refusal never offers a baseline package" "$SCRATCH/npm-shim-x64.log" "-baseline"
+  advice_names_in_matrix "bin shim advice on the simulated Intel Mac only names declared packages" "$SCRATCH/npm-shim-x64.log"
+
+  # 21e — the product.json branch: both launchers resolve the matrix three directories above
+  # their own file (the script/build.ts convention). Placing a product.json there re-runs the
+  # no-AVX2 cases through that branch; the answer must be the same declared set either way.
+  cp "$PRODUCT_JSON" "$SCRATCH/product.json"
+  SCENARIO_AVX2=0 run_launcher "$SCRATCH/npm-postinstall-matrix.log" node "$GP/postinstall-x64.mjs"
+  MATRIX_POST_RC=$?
+  SCENARIO_AVX2=""
+  assert_code "postinstall reading product.json still refuses the no-AVX2 Mac with exit 1" "$MATRIX_POST_RC" "1"
+  assert_has "with the same refusal" "$SCRATCH/npm-postinstall-matrix.log" "does not ship a build for your platform"
+  assert_supported_set "the product.json-backed postinstall refusal" "$SCRATCH/npm-postinstall-matrix.log"
+  advice_names_in_matrix "postinstall advice from the product.json branch only names declared packages" "$SCRATCH/npm-postinstall-matrix.log"
+
+  SCENARIO_AVX2=0 run_launcher "$SCRATCH/npm-shim-matrix.log" node "$GP/x64bin/glasspane-harness" --version
+  MATRIX_SHIM_RC=$?
+  SCENARIO_AVX2=""
+  assert_code "the bin shim reading product.json still refuses the no-AVX2 Mac with exit 1" "$MATRIX_SHIM_RC" "1"
+  assert_has "with the same refusal" "$SCRATCH/npm-shim-matrix.log" "does not ship a build for your platform"
+  assert_supported_set "the product.json-backed shim refusal" "$SCRATCH/npm-shim-matrix.log"
+  advice_names_in_matrix "bin shim advice from the product.json branch only names declared packages" "$SCRATCH/npm-shim-matrix.log"
 fi
 
 echo ""

@@ -200,6 +200,28 @@ Things worth knowing, because they are the usual way this is set up wrong:
    one and `npm deprecate` the bad version with the reason in the message. Unpublishing
    burns the version number for everyone who already has it.
 
+## Refreshing the model catalog
+
+`contracts/models-catalog.json` is the provider/model catalog the binary embeds. It is a file in
+the tree, not a response: `packages/opencode/script/generate.ts` reads it and the build **fails by
+name** if it is missing rather than reaching for the network, because `Bun.build({define})` pastes
+those bytes into the signed artifact and a live endpoint would decide them on build day.
+
+A refresh is a deliberate commit:
+
+```bash
+# from the fork root
+curl -fsSL https://models.dev/api.json -o /tmp/models.json
+node -e 'const s=JSON.parse(require("fs").readFileSync("/tmp/models.json","utf8"));const k=Object.keys(s);if(!k.length)throw new Error("empty catalog");require("fs").writeFileSync("contracts/models-catalog.json",JSON.stringify(s));console.log("providers",k.length)'
+git add contracts/models-catalog.json && git commit -F /var/tmp/gp-catalog-refresh
+```
+
+`MODELS_DEV_API_JSON=<file>` points the build at a different file, and
+`GLASSPANE_MODELS_FETCH_LIVE=1` makes it fetch the endpoint for a one-off diagnostic build — neither
+is ever used to produce a release, and a release whose catalog came from either is not reproducible
+from its tag. At runtime the product does not fetch a catalog at all unless the operator sets
+`OPENCODE_MODELS_URL`; see `docs/models-and-keys.md`.
+
 ## Four failures this lane has actually hit
 
 Each of these cost a full CI cycle to find, and all four are things the workflow

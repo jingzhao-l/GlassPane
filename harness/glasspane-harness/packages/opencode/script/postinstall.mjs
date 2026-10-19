@@ -33,6 +33,39 @@ const sourceBinary = platform === "windows" ? "glasspane-harness.exe" : "glasspa
 const REGISTRY = "https://registry.npmjs.org"
 const targetBinary = path.join(__dirname, "bin", "glasspane-harness.exe")
 
+// The installable platform packages are the target matrix, never an enumeration of possible
+// suffixes. product.json holds that matrix and script/publish.ts seals it into this wrapper's
+// own optionalDependencies (its --dry-run refuses a wrapper whose list disagrees), so both
+// copies are the same declared set by construction. Read product.json the same way
+// script/build.ts does — at the fork root, three directories above this file — which holds in
+// the repo and in installer-selftest fixtures; inside an installed wrapper that path does not
+// exist and the sealed optionalDependencies are the matrix's only surviving copy there. A
+// foreign product.json three directories above node_modules (a project that happens to ship
+// one) is rejected by the name check below, never obeyed.
+const declaredNames = (() => {
+  const namesFromMatrix = (matrix) =>
+    matrix.map((target) =>
+      [
+        packageJson.name,
+        target.os === "win32" ? "windows" : target.os,
+        target.arch,
+        target.avx2 === false ? "baseline" : undefined,
+        target.abi ?? undefined,
+      ]
+        .filter(Boolean)
+        .join("-"),
+    )
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "..", "product.json"), "utf8"))
+    if (parsed?.name === packageJson.name && Array.isArray(parsed.platformTargets) && parsed.platformTargets.length > 0) {
+      return namesFromMatrix(parsed.platformTargets)
+    }
+  } catch {
+    // not in a repo checkout — fall through to the sealed manifest
+  }
+  return Object.keys(packageJson.optionalDependencies ?? {})
+})()
+
 function supportsAvx2() {
   if (arch !== "x64") return false
 
@@ -101,24 +134,45 @@ function isMusl() {
 function packageNames() {
   const baseline = arch === "x64" && !supportsAvx2()
 
-  if (platform === "linux") {
-    if (isMusl()) {
+  const candidates = (() => {
+    if (platform === "linux") {
+      if (isMusl()) {
+        if (arch === "x64")
+          return baseline
+            ? [`${base}-baseline-musl`, `${base}-musl`, `${base}-baseline`, base]
+            : [`${base}-musl`, `${base}-baseline-musl`, base, `${base}-baseline`]
+        return [`${base}-musl`, base]
+      }
+
       if (arch === "x64")
         return baseline
-          ? [`${base}-baseline-musl`, `${base}-musl`, `${base}-baseline`, base]
-          : [`${base}-musl`, `${base}-baseline-musl`, base, `${base}-baseline`]
-      return [`${base}-musl`, base]
+          ? [`${base}-baseline`, base, `${base}-baseline-musl`, `${base}-musl`]
+          : [base, `${base}-baseline`, `${base}-musl`, `${base}-baseline-musl`]
+      return [base, `${base}-musl`]
     }
 
-    if (arch === "x64")
-      return baseline
-        ? [`${base}-baseline`, base, `${base}-baseline-musl`, `${base}-musl`]
-        : [base, `${base}-baseline`, `${base}-musl`, `${base}-baseline-musl`]
-    return [base, `${base}-musl`]
-  }
+    if (arch === "x64") return baseline ? [`${base}-baseline`, base] : [base, `${base}-baseline`]
+    return [base]
+  })()
 
-  if (arch === "x64") return baseline ? [`${base}-baseline`, base] : [base, `${base}-baseline`]
-  return [base]
+  // Only a declared package can be installed (installPackage already refuses to run npm for a
+  // name with no sealed version, so everything filtered here was ever just an unsatisfiable
+  // fallback — naming one in the failure advice sent the reader to a package this product does
+  // not publish), and a no-AVX2 x64 machine can only run a baseline build (the plain x64 build
+  // needs AVX2; product.json's platform.dropped records that darwin-x64-baseline was dropped
+  // by decision, so on such a machine the honest answer is the refusal below, not the plain
+  // package that would not start). An empty list means "this machine has no build to install".
+  return candidates.filter((name) => {
+    if (!declaredNames.includes(name)) return false
+    return !baseline || name.endsWith("-baseline") || name.endsWith("-baseline-musl")
+  })
+}
+
+function machineLabel() {
+  const parts = [`${platform}-${arch}`]
+  if (platform === "linux" && isMusl()) parts.push("musl")
+  if (arch === "x64" && !supportsAvx2()) parts.push("without AVX2")
+  return parts.join(" ")
 }
 
 function resolveBinary(name) {
@@ -186,7 +240,19 @@ function verifyBinary() {
 }
 
 function main() {
-  for (const name of packageNames()) {
+  const names = packageNames()
+  // The machine has no installable build at all: say so plainly and name the supported set.
+  // The old text here told Linux, Windows and no-AVX2 x64 Mac users to "manually install"
+  // names like glasspane-harness-darwin-x64-baseline — packages this product has decided
+  // (product.json platform.dropped) not to publish, so the printed remedy could never work.
+  if (names.length === 0) {
+    const supported = declaredNames.length
+      ? `The builds it does publish are ${declaredNames.map((name) => JSON.stringify(name)).join(", ")}.`
+      : "This wrapper declares no platform packages at all."
+    throw new Error(`glasspane-harness does not ship a build for your platform (${machineLabel()}). ${supported}`)
+  }
+
+  for (const name of names) {
     try {
       copyBinary(resolveBinary(name), targetBinary)
       if (verifyBinary()) return
@@ -196,7 +262,7 @@ function main() {
   }
 
   throw new Error(
-    `It seems your package manager failed to install the right glasspane-harness CLI package. Try manually installing ${packageNames()
+    `It seems your package manager failed to install the right glasspane-harness CLI package. Try manually installing ${names
       .map((name) => JSON.stringify(name))
       .join(" or ")}.`,
   )
