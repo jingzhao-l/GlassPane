@@ -27,7 +27,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
-import { toolCountDrift, claimDrift, headingsOf, check, CLAIMS, shellResidue } from '../../scripts/check-doc-links.mjs'
+import { toolCountDrift, claimDrift, headingsOf, check, CLAIMS, shellResidue, DOCS } from '../../scripts/check-doc-links.mjs'
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -378,4 +378,67 @@ test('通过符号链接调用这道文档闸时，它照样把结论打出来',
   } finally {
     fs.rmSync(base, { recursive: true, force: true })
   }
+})
+
+/** 尺子文档的假仓库：`harness/README.md` 加两份真源（内核出处清单、brand 金样）。 */
+function rulerRoot({ readme, pin = { version: "0.1.8", corpus: { a: 1, b: 2 } }, lineage = { occurrences: 9646, filesScanned: 3312 } } = {}) {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "gp-ruler-docs-"))
+  fs.mkdirSync(path.join(root, "harness", "glasspane-harness", "contracts"), { recursive: true })
+  fs.mkdirSync(path.join(root, "harness", "contracts"), { recursive: true })
+  fs.writeFileSync(path.join(root, "harness", "glasspane-harness", "contracts", "kernel-pin.json"), JSON.stringify(pin))
+  fs.writeFileSync(path.join(root, "harness", "contracts", "brand-surface.json"), JSON.stringify({ lineage }))
+  if (readme) fs.writeFileSync(path.join(root, "harness", "README.md"), readme)
+  return root
+}
+const RULER = ["harness/README.md"]
+
+test("check-doc-links: 尺子文档抄错内核 pin 与语料条数 → 各自主张具名红（这批数字本来无人回读）", () => {
+  const root = rulerRoot({
+    readme: "今天以 **registry 依赖** `iterate-kernel@0.1.6` 的形态活在 fork 里；它钉住随包 24 个契约文件的 sha256。\n",
+  })
+  const problems = claimDrift({ docs: RULER, rootDir: root })
+  assert.equal(problems.length, 2, JSON.stringify(problems))
+  assert.match(problems.join("\n"), /内核 pin 版本.*写了 0\.1\.6.*真源是 0\.1\.8/, problems.join("\n"))
+  assert.match(problems.join("\n"), /随包契约语料条数.*写了 24.*真源是 2/, problems.join("\n"))
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test("check-doc-links: 尺子文档的数字对得上真源时不报（对照，防止判据只会红）", () => {
+  const root = rulerRoot({
+    readme: "今天以 **registry 依赖** `iterate-kernel@0.1.8` 的形态活在 fork 里；随包 2 个契约文件；本轮复记 9,646 处 / 3,312 文件。\n",
+    pin: { version: "0.1.8", corpus: { a: 1, b: 2 } },
+  })
+  assert.deepEqual(claimDrift({ docs: RULER, rootDir: root }), [])
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test("check-doc-links: 真源往前走一格而文档一字未动 ⇒ 四条主张全咬（不是自回显）", () => {
+  const readme = "今天以 **registry 依赖** `iterate-kernel@0.1.8`；随包 26 个契约文件；本轮复记 9,646 处 / 3,312 文件。\n"
+  const moved = rulerRoot({ readme, pin: { version: "0.1.9", corpus: { a: 1 } }, lineage: { occurrences: 9000, filesScanned: 3000 } })
+  const problems = claimDrift({ docs: RULER, rootDir: moved })
+  assert.equal(problems.length, 4, JSON.stringify(problems))
+  fs.rmSync(moved, { recursive: true, force: true })
+})
+
+test("check-doc-links: 上游参照检出的 clone 命令不被当成产品发布 tag（同一数字形状两件事实）", () => {
+  // `harness/README.md` 里那句 `git clone --branch v1.18.32` 钉的是上游 opencode 的参照检出，
+  // 而"README 钉住的发布 tag"的真源是主仓 install.sh 里的产品发布号。少了 `only`，这条主张
+  // 就会拿主仓的号去判尺子文档的一句真话——0.7.8 那轮恒红正是这个形状。
+  const root = rulerRoot({ readme: "git clone --branch v1.18.32 --depth 1 https://github.com/anomalyco/opencode.git .external/opencode\n" })
+  fs.writeFileSync(path.join(root, "install.sh"), 'GLASSPANE_RELEASE="v1.16.4"\n')
+  assert.deepEqual(claimDrift({ docs: RULER, rootDir: root }), [])
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test("check-doc-links: 登记集合必须仍然包含尺子文档与三份产品文档（手抄清单缩水＝没人看的死链）", () => {
+  for (const doc of [
+    "harness/README.md",
+    "harness/glasspane-harness/docs/models-and-keys.md",
+    "harness/glasspane-harness/docs/release.md",
+    "harness/glasspane-harness/docs/kernel-integration.md",
+  ]) {
+    assert.ok(DOCS.includes(doc), `${doc} 不在登记集合里——它内部的链接与锚点今天无人校验`)
+    assert.ok(fs.existsSync(path.join(REPO, doc)), `${doc} 登记了却不在树里`)
+  }
+  assert.ok(DOCS.length >= 29, `登记集合缩到 ${DOCS.length} 份：少一份文档＝少一片有人看的死链面`)
 })

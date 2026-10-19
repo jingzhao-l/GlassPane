@@ -60,7 +60,7 @@
    - `node harness/tools/brand-surface.mjs --check`（品牌棘轮 + 全树血缘只减不增）
    - `node harness/tools/product-surface.mjs --check`（产品面一致性，**无基线、无 `--record`**：规则错了就改规则）
    - `node harness/tools/hook-liveness.mjs --check`（对齐 pin 的扩展点存活）；没有参照的环境用 `--offline`，它必须大声声明"上游未在此观测"
-   - `node harness/glasspane-harness/script/kernel-pin.mjs --check`（装的版本 == pin、lock 是 registry 解析且 integrity 对得上、随包 14 个契约文件逐条 sha256）；`--probe` 问 registry 有没有更新的一版（漂移是要人看的发现，不是 CI 失败）
+   - `node harness/glasspane-harness/script/kernel-pin.mjs --check`（装的版本 == pin、lock 是 registry 解析且 integrity 对得上、随包 26 个契约文件（18 fixtures + 8 schemas）逐条 sha256）；`--probe` 问 registry 有没有更新的一版（漂移是要人看的发现，不是 CI 失败）
    fork 包内测试（**仓根有一个故意的 `do-not-run-tests-from-root` 挡路，不要绕开它**）：
    - `cd harness/glasspane-harness/packages/opencode && bun test --timeout 30000 test/tool/glasspane-surface.test.ts test/tool/glasspane-kernel.test.ts test/plugin/glasspane-decision-log.test.ts test/plugin/glasspane-compaction.test.ts`（`test/preload.ts` 的 afterAll 要 dispose runtime + 删临时目录，5 秒默认超时会被打断成"无名失败"，所以必须带 `--timeout 30000`）
    - `cd harness/glasspane-harness/packages/tui && bun test --timeout 30000 test/cli/tui/inline-tool-wrap-snapshot.test.tsx`

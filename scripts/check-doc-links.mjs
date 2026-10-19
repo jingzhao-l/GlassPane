@@ -43,6 +43,14 @@ const FORK_DOCS = [
   'harness/glasspane-harness/docs/evidence.md',
   'harness/glasspane-harness/docs/migrate-from-opencode.md',
   'harness/glasspane-harness/docs/troubleshooting.md',
+  // 2026-10-19 登记：这三份是产品文档，却从没进过任何登记集合——它们内部的链接、锚点
+  // 和双语对偶此前完全不在这道闸的视野里，而 `docs/index.md` 与两份 README 都链向它们。
+  'harness/glasspane-harness/docs/models-and-keys.md',
+  'harness/glasspane-harness/docs/release.md',
+  'harness/glasspane-harness/docs/kernel-integration.md',
+  // 尺子层自己的文档。它写的每一个数都声称可复算（金样条数、血缘计数、断言条数），
+  // 却既不在死链集合也不在主张集合里——2026-10-19 那批数字漂移就是这么绿着过的。
+  'harness/README.md',
   'harness/glasspane-harness/.github/pull_request_template.md',
   'harness/glasspane-harness/.github/ISSUE_TEMPLATE/bug-report.yml',
   'harness/glasspane-harness/.github/ISSUE_TEMPLATE/feature-request.yml',
@@ -63,7 +71,7 @@ const MAIN_DOCS = [
   '.github/pull_request_template.md',
 ]
 
-const DOCS = [...MAIN_DOCS, ...FORK_DOCS]
+export const DOCS = [...MAIN_DOCS, ...FORK_DOCS]
 
 /** 成对文档：任一侧缺失即漂移（双语约定不能只留一条腿）。 */
 const MIRROR_PAIRS = [
@@ -254,6 +262,50 @@ const NUMBER = '\\d+|[二三四五六七八九十][一二三四五六七八九�
 const TICK = String.raw`\x60`
 
 /**
+ * 尺子层文档里的可复算量。真源全部是**另一份文件**，不是这句话本身：
+ * 内核版本与随包语料条数读 fork 的出处清单，血缘两条读 brand-surface 的金样。
+ * 这一族主张原先没有读者——`harness/README.md` 当时连扫描集合都不在，于是它写
+ * `iterate-kernel@0.1.6`（真源 0.1.8）、"随包 24 个契约文件"（真源 26）、"225 条断言"
+ * （尺子今天报 6351）、"当前 9,618 处 / 3,309 文件"（同一句上半段刚写完 9,646/3,312），
+ * 四条全是绿的。`FORK.md` 那两句"依赖 `iterate-kernel@0.1.5`"也一样。
+ */
+function kernelPinManifest(rootDir = ROOT) {
+  const file = path.join(rootDir, 'harness', 'glasspane-harness', 'contracts', 'kernel-pin.json')
+  if (!fs.existsSync(file)) return null
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'))
+  } catch {
+    return null
+  }
+}
+function kernelPinVersion(rootDir = ROOT) {
+  return kernelPinManifest(rootDir)?.version ?? null
+}
+function kernelCorpusCount(rootDir = ROOT) {
+  const corpus = kernelPinManifest(rootDir)?.corpus
+  if (!corpus) return null
+  return Array.isArray(corpus) ? corpus.length : Object.keys(corpus).length
+}
+function brandSurfaceGolden(rootDir = ROOT) {
+  const file = path.join(rootDir, 'harness', 'contracts', 'brand-surface.json')
+  if (!fs.existsSync(file)) return null
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'))
+  } catch {
+    return null
+  }
+}
+function lineageOccurrences(rootDir = ROOT) {
+  return brandSurfaceGolden(rootDir)?.lineage?.occurrences ?? null
+}
+function lineageFilesScanned(rootDir = ROOT) {
+  return brandSurfaceGolden(rootDir)?.lineage?.filesScanned ?? null
+}
+
+/** `1,234` 这种带千分位的写法：`parseCount` 只认裸数字，这里先去分隔符。 */
+const countToken = (token) => String(Number(String(token).replace(/[,\s]/g, '')))
+
+/**
  * 可复算主张登记表。每条给：两侧的抽取式（`en` 用于 `*.md`，`zh` 用于 `*.zh-CN.md`）、
  * 真源读取 `truth(rootDir)`（返回 null = 读不到）、以及人话单位。抽取式一律带 `g`，
  * 命中即把原句一起报出来——改文档的人要能在报错里看见自己动的那一句。
@@ -261,6 +313,11 @@ const TICK = String.raw`\x60`
  * 抽取式刻意窄：宁可不抓，也不许把不相干的句子当成主张（限定词 `accessibility`/`无障碍`
  * 是必须的，"个工具"只在带 `MCP`/`gp_*` 时才认，中文的"条"只在带 lane/通道/泳道/job 时才认）。
  * 捕获组 #1 恒为"那个值"。
+ *
+ * `only`：这条主张认哪几份文件。同一个数字形状在两份文档里说的是两件事实——
+ * `harness/README.md` 里那句 `git clone --branch v1.18.32` 钉的是**上游参照检出**，
+ * 而"README 钉住的发布 tag"的真源是主仓 `install.sh` 里的产品发布号；把它套到尺子文档上
+ * 就是一句真话被判红（0.7.8 那轮的恒红正是这个形状）。集合外的文件一律不扫。
  */
 export const CLAIMS = [
   {
@@ -304,6 +361,10 @@ export const CLAIMS = [
     unit: '钉住的 tag',
     truth: installPinnedTag,
     norm: (token) => token,
+    // 主仓 `install.sh` 钉的是**本产品**的发布号。尺子文档里那句
+    // `git clone --branch v1.18.32` 钉的是**上游参照检出**——两个不同的事实同一个数字形状，
+    // 套上去就是一句真话被判红（0.7.8 那轮的恒红正是这个形状）。
+    only: ['README.md', 'README.zh-CN.md'],
   },
   {
     id: '当前版本线',
@@ -312,6 +373,41 @@ export const CLAIMS = [
     unit: '当前版本线',
     truth: currentLine,
     norm: (token) => token,
+  },
+  {
+    id: '内核 pin 版本',
+    en: /今天以 \*\*registry 依赖\*\* \x60iterate-kernel@(\d+\.\d+\.\d+)\x60/g,
+    zh: /今天以 \*\*registry 依赖\*\* \x60iterate-kernel@(\d+\.\d+\.\d+)\x60/g,
+    unit: 'iterate-kernel 版本',
+    truth: kernelPinVersion,
+    norm: (token) => token,
+    only: ['harness/README.md'],
+  },
+  {
+    id: '随包契约语料条数',
+    en: /随包 (\d+) 个契约文件/g,
+    zh: /随包 (\d+) 个契约文件/g,
+    unit: '个契约文件',
+    truth: kernelCorpusCount,
+    only: ['harness/README.md'],
+  },
+  {
+    id: '血缘处数',
+    en: /本轮复记 ([\d,]+) 处/g,
+    zh: /本轮复记 ([\d,]+) 处/g,
+    unit: '处血缘',
+    truth: lineageOccurrences,
+    norm: countToken,
+    only: ['harness/README.md'],
+  },
+  {
+    id: '血缘扫描文件数',
+    en: /[\d,]+ 处 \/ ([\d,]+) 文件/g,
+    zh: /[\d,]+ 处 \/ ([\d,]+) 文件/g,
+    unit: '个被扫文件',
+    truth: lineageFilesScanned,
+    norm: countToken,
+    only: ['harness/README.md'],
   },
 ]
 
@@ -326,6 +422,7 @@ const CLAIM_DOCS = [
   'CONTRIBUTING.zh-CN.md',
   'ITERATE.md',
   'engine/smoke.md',
+  'harness/README.md',
 ]
 
 const isZhDoc = (doc) => doc.endsWith('.zh-CN.md')
@@ -359,7 +456,7 @@ export function claimDrift({ docs = CLAIM_DOCS, rootDir = ROOT } = {}) {
       truth = null
     }
     if (truth === 'null' || truth === 'undefined') truth = null
-    for (const doc of docs.filter((d) => fs.existsSync(path.join(rootDir, d)))) {
+    for (const doc of docs.filter((d) => fs.existsSync(path.join(rootDir, d)) && (!claim.only || claim.only.includes(d)))) {
       const text = read(doc, rootDir)
       const pattern = isZhDoc(doc) ? claim.zh : claim.en
       const re = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`)
