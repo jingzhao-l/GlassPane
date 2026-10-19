@@ -511,3 +511,30 @@ test('发布档拒绝 tsc 形状的 dist：它入口裸 import 只在构建期�
     tree.cleanup()
   }
 })
+
+/**
+ * The self-execution guard must survive being handed a **symlink** (2026-10-19).
+ *
+ * `const SELF = path.resolve(fileURLToPath(import.meta.url))` compared against
+ * `path.resolve(process.argv[1])` with no realpath on either side: Node loads an ESM entry by its real
+ * path, so through a link the two differ, `main()` never runs, and the process exits **0 with no
+ * output**. Measured on this machine: `node scripts/make-release-archive.mjs` → rc 2 with the usage
+ * lines; the same file through `/var/tmp/.../mra-link.mjs` → rc 0, zero bytes. A release job that
+ * invokes the packer through a link would then "succeed" having written no archive.
+ */
+test('通过符号链接调用打包脚本时，usage 与退出码照样出来', () => {
+  const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-mra-link-'))
+  const link = path.join(base, 'mra-link.mjs')
+  try {
+    fs.symlinkSync(SCRIPT, link)
+    const direct = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8', cwd: REPO })
+    const through = spawnSync(process.execPath, [link], { encoding: 'utf8', cwd: REPO })
+    const out = `${through.stdout ?? ''}${through.stderr ?? ''}`
+    assert.equal(through.status, 2, `符号链接调用应当按用法退 2，实到 ${through.status}（stdout=${JSON.stringify(through.stdout)} stderr=${JSON.stringify(through.stderr)}）`)
+    assert.ok(out.trim() !== '', '通过链接调用必须照样打出 usage，否则发布者读到的是一段沉默')
+    assert.match(out, /usage: node scripts\/make-release-archive\.mjs/, out)
+    assert.equal(through.status, direct.status, '两条调用路径的判定必须一致')
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true })
+  }
+})

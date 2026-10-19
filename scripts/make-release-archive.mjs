@@ -508,7 +508,23 @@ function main(argv) {
   return 0
 }
 
-const SELF = path.resolve(fileURLToPath(import.meta.url))
-if (process.argv[1] && path.resolve(process.argv[1]) === SELF) {
+// **两侧都 realpath**，与 `updater/cli.js`、`installer/cli.js`、`updater/agent-entry.js` 那三个
+// npm/launchd 交付的入口同一个规矩：node 按**真实路径**载入 ESM 入口，所以这个脚本被符号链接
+// 调用时 `path.resolve(process.argv[1])` 是链接本身、`fileURLToPath(import.meta.url)` 是被指的那份，
+// 两者永不相等——`main()` 一步不走，进程**退 0 且零输出**。本机 2026-10-19 实测：直接跑无参
+// → rc 2 加两行 usage；经 `/var/tmp/gp-item4-20261019/mra-link.mjs` → rc 0、一行不出。发布作业里
+// 那一格于是"成功"了，而归档一个字节都没写。realpathSync 对不存在的路径会抛，抛＝"不是被
+// 直接运行"，不是崩掉模块。
+function invokedAsEntrypoint() {
+  const entry = process.argv[1]
+  if (!entry) return false
+  try {
+    return fs.realpathSync(entry) === fs.realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
+
+if (invokedAsEntrypoint()) {
   process.exitCode = main(process.argv.slice(2))
 }

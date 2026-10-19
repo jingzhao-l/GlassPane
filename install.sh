@@ -104,10 +104,14 @@ assert_repo_url() {
   case "$1" in
     -*) fail "GLASSPANE_REPO_URL 以 \"-\" 开头，会被 git 当成命令行选项而不是值：$1" ;;
   esac
-  # scheme 比较与 cli.js 同口径（它对整值做 lowercase 后比前缀），所以先裁出 scheme 段
-  # 再折成小写；`ext::sh -c …` 这种没有 `://` 的值整段当 scheme 看，落在白名单外。
-  case "$(printf '%s' "${1%%://*}" | tr 'A-Z' 'a-z')" in
-    https|ssh|file) : ;;
+  # scheme 判据与 cli.js 的 validateGitRepoUrl 逐字同形：整值折成小写后比**前缀**
+  # （`https://` / `ssh://` / `file://`）。从前这里先 `${1%%://*}` 裁出 scheme 段再比白名单，
+  # 而那个裁法在值里没有 `://` 时返回整串——裸词 `https` / `ssh` / `file` 于是恰好命中白名单
+  # 被放过，installer 那一侧却拒它们（比的是带分隔符的前缀）。同一个值两个答案，而放过的
+  # 这一半是 `curl | sh` 把值原样送进 `git clone` argv 的那一半，失败还要被下面的归因
+  # 说成"ref 不存在或网络不可达"。
+  case "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" in
+    https://*|ssh://*|file://*) : ;;
     *) fail "GLASSPANE_REPO_URL 必须以 https://、ssh://、file:// 之一开头（实为「$1」）。不带 scheme 的值会被 git 当成传输扩展名（\`ext::…\` 会直接执行后面的命令），因此一律拒绝；本地/镜像 clone 请写 file:///<绝对路径>，scp 式 git@host:path 请写 ssh://git@host/path。" ;;
   esac
   case "$1" in

@@ -23,7 +23,7 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import { CODES, EXIT, exitCodeFor } from './lib/codes.js'
-import { UpdaterError, canonicalPath } from './lib/fsutil.js'
+import { UpdaterError, canonicalPath, sameRuntimePath } from './lib/fsutil.js'
 import { effectiveStatus, isOverdue, loadState, nextState, readPointer, saveState, updateSummary } from './lib/state.js'
 import { runCheck } from './lib/check.js'
 import { applyUpdate, buildStagedTree, checkNpmPrefix, DEFAULT_BUNDLES, rollbackToBackup } from './lib/apply.js'
@@ -122,6 +122,17 @@ export function parseArgs(argv) {
     } else if (['--state-dir', '--state-root', '--apps-dir', '--daemon-bin', '--socket', '--at', '--hour', '--minute'].includes(token)) {
       const value = argv[(i += 1)]
       if (value === undefined) return { ok: false, reason: `${token} needs a value` }
+      // An empty (or whitespace-only) value is not "the option was left out": the caller named a
+      // place, and `resolveStateRoot`'s `trim() !== ''` used to read that name as absent and land on
+      // the live `~/.glasspane` — so `updater check --state-dir ""` wrote state and staging into the
+      // machine the caller believed they were working around. `--hour ""`/`--minute ""` were the same
+      // accident on the schedule (`Number('')` is a whole number inside the range). Usage error, out loud.
+      if (typeof value === 'string' && value.trim() === '') {
+        return {
+          ok: false,
+          reason: `${token} was given an empty value: an empty name is not a location or a number this tool may act on, and falling back to the built-in default would update the live install while you believe you pointed at a sandbox. Pass ${token} <value>, or leave the option out entirely.`,
+        }
+      }
       // Onto `flags` itself, keyed by the bare option name — which is exactly how every
       // consumer reads it (`flags['state-dir']`, `flags.at`, `flags.hour`, `flags.socket`).
       // These used to land in a separate `flags.overrides` bag that nothing ever read, so
@@ -218,8 +229,32 @@ export function recordHomeDir() {
 
 export function resolveStateRoot({ flags = {}, env = process.env, homeDir = recordHomeDir() } = {}) {
   const named = flags['state-dir'] ?? flags['state-root'] ?? env.GLASSPANE_STATE_DIR
-  if (typeof named === 'string' && named.trim() !== '') return canonicalPath(named)
-  return path.join(homeDir, '.glasspane')
+  const defaultRoot = canonicalPath(path.join(homeDir, '.glasspane'))
+  if (typeof named === 'string' && named.trim() !== '') {
+    const lexical = canonicalPath(named)
+    // The deception case the containment helpers cannot see: the caller named a *different* place, and
+    // that name is a link whose real path is this machine's live `~/.glasspane`. `isWithin` now follows
+    // links, so writes stay "inside the root" — inside the root the link points at, which is the install
+    // the caller believed they were working around. A person who means that install says so with
+    // `--consent state-dir`; naming the default root itself (no link) stays the ordinary path.
+    if (lexical !== defaultRoot && sameRuntimePath(lexical, defaultRoot)) {
+      const consents = Array.isArray(flags.consents) ? flags.consents : []
+      if (!consents.includes('state-dir')) {
+        throw new UpdaterError(
+          CODES.nonDefaultStateDir,
+          `--state-dir ${lexical} is not a separate state root: it resolves to ${defaultRoot}, the default root this machine writes into. `
+            + 'Nothing was read or written under that name. Run the command without --state-dir, or — if pointing at this install through that link is what you meant — '
+            + 'add --consent state-dir.',
+        )
+      }
+      // Consent granted: work on the *real* directory under its real name. Keeping the link's own
+      // spelling here would put every containment promise in `lib/fsutil.js` back on a name that is
+      // not the root, which is the defect this function just refused.
+      return defaultRoot
+    }
+    return lexical
+  }
+  return defaultRoot
 }
 
 export function resolveAppsDir({ flags = {}, env = process.env, homeDir = recordHomeDir() } = {}) {
@@ -271,8 +306,25 @@ export function defaultDeps({ stateRoot, appsDir, env, flags, exportCa = exportC
 
 /** One command, one outcome object. Never throws: refusals are data. */
 export async function runCommand({ command, flags, env = process.env, deps = {}, stdout = null, stderr = null }) {
-  const stateRoot = resolveStateRoot({ flags, env, homeDir: deps.homeDir ?? recordHomeDir() })
-  const appsDir = resolveAppsDir({ flags, env, homeDir: deps.homeDir ?? recordHomeDir() })
+  let stateRoot
+  let appsDir
+  try {
+    stateRoot = resolveStateRoot({ flags, env, homeDir: deps.homeDir ?? recordHomeDir() })
+    appsDir = resolveAppsDir({ flags, env, homeDir: deps.homeDir ?? recordHomeDir() })
+  } catch (error) {
+    // The state root is the one argument every outcome is written relative to, so a root this tool
+    // refuses to use has to come back as a refusal *with* a code and a remedy — not as a thrown
+    // error, and not as a run against the install the caller thought they were pointing away from.
+    return {
+      ok: false,
+      status: 'check-failed',
+      code: error instanceof UpdaterError ? error.code : 'internal',
+      message: error.message,
+      command,
+      exitCode: EXIT.REFUSED,
+      state: null,
+    }
+  }
   const now = flags.at ? new Date(flags.at) : (deps.now ? deps.now() : new Date())
   if (Number.isNaN(now.getTime())) {
     return { status: null, code: null, usageError: true, message: `--at ${flags.at} is not a date` }

@@ -326,6 +326,15 @@ test('install.sh: GLASSPANE_REPO_URL 的判序与句子同 validateGitRepoUrl（
     'git@github.com:jingzhao-l/GlassPane.git',
     '-u',
     'https://example.invalid/r git',
+    // 没有 `://` 分隔符的裸 scheme 词。`${1%%://*}` 对它们返回整串，所以从前那一半
+    // 恰好命中 scheme 白名单被放过，而 `validateGitRepoUrl` 拒（它比的是带分隔符的前缀）。
+    // 放过的那一半是 `curl | sh`，它把值原样送进 `git clone` argv。
+    'https',
+    'ssh',
+    'file',
+    'HTTPS',
+    'File',
+    'http',
   ]
   for (const [index, value] of rejected.entries()) {
     const installer = validateGitRepoUrl(value)

@@ -27,7 +27,7 @@
  * 需要放行时，人得改这个文件——那是留痕的位置，而不是一个 `--force` 旗标。
  */
 import { spawnSync } from 'node:child_process'
-import path from 'node:path'
+import fs from 'node:fs'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
@@ -142,9 +142,23 @@ export function main({ env = process.env, ghBin = 'gh', sleep = (ms) => Atomics.
 
 // 被 import 时什么都不跑（`updater/test/scripts-assert-ci-green.test.mjs` 有一条断言专门量这件事：
 // 顶层自跑 + exit 的脚本被 `node --test` import 时，会以"零条用例通过"的形状假绿）。
-// 判据写成绝对路径比较：实测这一版 Node 交给 argv[1] 的已经是绝对且折叠过的路径，两边归一只是
-// 不把这件事押在实现细节上。
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// **两侧都要 realpath**，与 `updater/cli.js`、`installer/cli.js`、`updater/agent-entry.js` 那三个
+// npm/launchd 交付的入口同一个规矩：node 是按**真实路径**载入 ESM 入口的，所以被符号链接调用时
+// `process.argv[1]` 是链接、`import.meta.url` 是被指的那份，只比 `path.resolve` 的字符串恒不相等——
+// 于是 `main()` 一步不走、进程退 0 且**一行输出都没有**。本机 2026-10-19 实测：直接跑 rc=1 加一句
+// 中文拒绝，经 `/var/tmp/gp-main-20261019/acg-link.mjs` 跑 rc=0、零输出。对这道闸来说那就是
+// "发布链没问 CI 就通过了"。realpathSync 对不存在的路径会抛，抛＝"不是被直接运行"，不是崩掉模块。
+function invokedAsEntrypoint() {
+  const entry = process.argv[1]
+  if (!entry) return false
+  try {
+    return fs.realpathSync(entry) === fs.realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
+
+if (invokedAsEntrypoint()) {
   const result = main()
   process.stdout.write(`${result.text}\n`)
   process.exit(result.code)

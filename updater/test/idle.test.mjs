@@ -146,6 +146,25 @@ test('which socket to probe is resolved the way the daemon resolves it', () => {
     path.join('/named/root', 'daemon.sock'),
     'a named state root serves daemon.sock, per StateRoot.engineSocketPath',
   )
+  // 同一条判据的**另一种拼法**。`lib/policy.js` 把两种拼法冻在 `STATE_ROOT_FLAGS` 里，而
+  // `renderAgentPlist` 写进作业的默认就是 `--state-root`（`launchd.js` 的 `daemonFlag`）：这个函数
+  // 从前自己重写了一遍"读状态根"、只认 `--state-dir`，于是对一个用另一种拼法注册的作业，
+  // 它探的是**本次调用**的 socket 而不是那个作业的 socket —— §2 的空闲判定问错了进程。
+  assert.equal(
+    resolveEngineSocket({ env: {}, jobArgs: ['glasspaned', '--state-root', '/var/tmp/other'], stateRoot: '/root' }),
+    path.join('/var/tmp/other', 'daemon.sock'),
+    '作业写的是另一种拼法时也必须读得出来，并且优先于本次调用的 stateRoot',
+  )
+  assert.equal(
+    resolveEngineSocket({ env: {}, jobArgs: ['--state-root=/var/tmp/eq-root'] }),
+    path.join('/var/tmp/eq-root', 'daemon.sock'),
+    '= 写法同样两种拼法都认',
+  )
+  assert.equal(
+    resolveEngineSocket({ env: {}, jobArgs: ['glasspaned', '--state-root'], stateRoot: '/root' }),
+    path.join('/root', 'daemon.sock'),
+    '旗标读不出值时回到本次调用的根，不能凭空拼一个',
+  )
   assert.equal(
     resolveEngineSocket({ env: {}, jobArgs: [], stateRoot: '/named/root' }),
     path.join('/named/root', 'daemon.sock'),

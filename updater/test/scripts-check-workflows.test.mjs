@@ -211,6 +211,53 @@ test('a bare name is a package.json script and a name followed by a path is not'
   assert.equal(checked.status, 0, checked.output)
 })
 
+/**
+ * The create-release step must *judge* the publish, not print it.
+ *
+ * `gh release edit … --draft=false --latest` exiting 0 is not evidence the release is
+ * outward-facing: a release left in draft keeps /releases/latest serving the PREVIOUS tag,
+ * and `updater/lib/check.js` maps "the newest published release is older" to
+ * `up-to-date` + exit 0 — so one silent draft stops every machine in the fleet from updating
+ * while this very workflow runs green. The sibling fork already asserts this
+ * (harness/glasspane-harness/.github/workflows/release.yml, `publish-release`:
+ * `if [ "$state" != "false" ]; then ::error …; exit 1`).
+ *
+ * REVERSE MUTATION: delete the three read-back guards from release.yml's create-release step
+ * body (leave the printing `gh release view` alone) — this test goes red on
+ * `读回 isDraft 之后没有一句 exit 1`。放宽成"只检查 draft 一项"红在 latest 与 assets 两条。
+ */
+test('release.yml 的建 Release 步把 draft/latest/资产读回来并逐项判红，不是只打印', () => {
+  const yml = fs.readFileSync(path.join(REPO, '.github', 'workflows', 'release.yml'), 'utf8')
+  const lines = yml.split('\n')
+  const from = lines.findIndex((l) => l.trim() === '- name: Create or update the release')
+  assert.ok(from > -1, 'release.yml 里没有 "Create or update the release" 这一步——落点变了，测试得跟着改')
+  const next = lines.findIndex((l, i) => i > from && (/^      - name: /.test(l) || /^ {0,4}\S/.test(l)))
+  const body = lines.slice(from, next < 0 ? lines.length : next)
+  const text = body.join('\n')
+
+  const editAt = body.findIndex((l) => l.includes('--draft=false') && l.includes('--latest'))
+  assert.ok(editAt > -1, '这一步没有把发布取消草稿并钉成 latest 的那条命令：' + text.slice(0, 200))
+  const afterEdit = body.slice(editAt + 1).join('\n')
+  for (const field of ['isDraft', 'latest', 'assets']) {
+    assert.match(afterEdit, new RegExp(`--json[^\\n]*${field}|${field}`), `编辑之后没有读回 ${field}`)
+  }
+  assert.ok(/exit 1/.test(afterEdit),
+    '建 Release 那一步在 --draft=false 之后没有任何 exit 1：它把 draft/latest/资产打印完就继续绿')
+
+  // 三条判决各自要有一句 ::error:: 点名失败对象（光 `exit 1` 不说哪一项，读者只能去猜）。
+  const guards = [
+    { name: 'draft', want: /::error::[^\n]*(draft|草稿)[^\n]*\n[^\n]*exit 1|draft[^\n]*\n[^\n]*::error::/i },
+    { name: 'latest', want: /::error::[^\n]*latest[^\n]*\n[^\n]*exit 1/i },
+    { name: 'assets', want: /::error::[^\n]*(asset|资产)[^\n]*\n[^\n]*exit 1/i },
+  ]
+  for (const { name, want } of guards) {
+    const normalized = text.replace(/\\\n/g, ' ').replace(/\s*\n\s*/g, '\n')
+    assert.ok(want.test(normalized), `${name} 的读回失败时没有一句点名它的 ::error:: + exit 1`)
+  }
+  assert.ok((afterEdit.match(/exit 1/g) ?? []).length >= 3,
+    `读回之后的 exit 1 只有 ${(afterEdit.match(/exit 1/g) ?? []).length} 处，三件事（draft / latest / 非空资产）判不齐`)
+})
+
 test('check-workflows --self-test 的每一档都被证红过，报出的数就是它真的跑过的数', () => {
   // The self-test exists to prove each rule can go red; the count in its output line
   // 是 CI 读的那一行。原来这里钉死 "9 case(s)"——harness 那条线 2026-10-16 加了两档

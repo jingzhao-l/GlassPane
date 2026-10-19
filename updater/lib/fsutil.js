@@ -7,8 +7,13 @@
  * 1. Nothing outside `<stateRoot>/update-staging/`, `<stateRoot>/update-backup/`
  *    and the updater's own state/pointer files is ever deleted or overwritten.
  *    A path that resolves outside the state root is a refusal, not a warning —
- *    which means it is resolved (`path.resolve`) *before* it is compared, so
- *    `..` segments and symlinks-in-the-string cannot walk out.
+ *    and "resolves" has to mean the **filesystem's** answer, not the string's:
+ *    `path.resolve` folds `..` and makes the path absolute, but a component that
+ *    *is* a symbolic link keeps walking out no matter how clean its spelling is.
+ *    `isWithin`/`resolveWithin` therefore compare `realContainerPath` (the real
+ *    path of the components that exist, with an not-yet-created tail kept
+ *    verbatim), and `assertPrivateRoot` refuses a root that is itself a link —
+ *    because every write through that name lands in whatever it points at.
  * 2. `chmod` is not proof. A volume that ignores permission bits (read-only
  *    mount, ACL, immutable flag, a USB stick without the metadata) answers
  *    `chmod` with success and leaves the old mode in place, so every write
@@ -58,11 +63,67 @@ export function canonicalPath(target) {
   return abs.length > 1 ? abs.replace(/\/+$/, '') || path.sep : abs
 }
 
-/** True when `candidate` is `root` or lives under it (already resolved). */
+/**
+ * The path `p` *actually* names, following the components the filesystem already has.
+ *
+ * `path.resolve` only folds `..` and makes the string absolute; it cannot see that a component is a
+ * symbolic link, and this file already knows that (`realWithin`, `sameRuntimePath`) — which is exactly
+ * the inconsistency this closes. Every containment promise here ("nothing outside
+ * `<stateRoot>/update-staging/` is ever deleted") was a string comparison, so a state root — or
+ * `<root>/update-staging` — that *is* a link made the promise hold about a name while the writes and
+ * the removals landed wherever the link pointed, including the live `~/.glasspane`.
+ *
+ * Only the components that exist are resolved; a tail that has not been created yet (a staging
+ * directory about to be made) is kept verbatim, so "not created yet" never reads as "outside".
+ */
+export function realContainerPath(target) {
+  const abs = canonicalPath(target)
+  let current = abs
+  const tail = []
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(current), ...tail)
+    } catch (error) {
+      if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') return abs
+    }
+    const parent = path.dirname(current)
+    if (parent === current) return abs
+    tail.unshift(path.basename(current))
+    current = parent
+  }
+}
+
+/** True when `candidate` is `root` or lives under it, following the links that exist. */
 export function isWithin(root, candidate) {
-  const r = canonicalPath(root)
-  const c = canonicalPath(candidate)
+  const r = realContainerPath(root)
+  const c = realContainerPath(candidate)
   return c === r || c.startsWith(r + path.sep)
+}
+
+/**
+ * Refuse a root that is itself a symbolic link.
+ *
+ * A link named `<sandbox>` is not a sandbox: `mkdir` answers "it exists", `chmod` tightens the target,
+ * and every file written under the name lands in the directory the caller thought they were avoiding.
+ * `--consent state-dir` is the human answer to "I do mean that other install", so the refusal names it.
+ * Paths that do not exist yet are fine — this call is what creates them, as a real directory.
+ */
+export function assertPrivateRoot(target, label = 'state root') {
+  let stats = null
+  try {
+    stats = fs.lstatSync(target)
+  } catch {
+    return canonicalPath(target)
+  }
+  if (stats.isSymbolicLink()) {
+    throw new UpdaterError(
+      'path-outside-state-root',
+      `the ${label} ${canonicalPath(target)} is a symbolic link to ${(() => { try { return fs.realpathSync(target) } catch { return 'somewhere unreadable' } })()}: `
+        + "writing through that name would put the updater's state, staging and deletions in whatever the link points at rather than in the root it was asked to use, "
+        + 'so nothing was written and nothing was removed. Point --state-dir at the real directory, or — if this machine really means that other install — pass --consent state-dir',
+    )
+  }
+  return canonicalPath(target)
 }
 
 /**
@@ -125,7 +186,9 @@ export function resolveWithin(root, candidate, label = 'path') {
 
 /** The writable locations this subsystem may ever touch. */
 export function writableRoots(stateRoot) {
-  const root = canonicalPath(stateRoot)
+  // The one choke point every write and every removal in this subsystem passes through — if the root
+  // itself is a link, the four names below are four promises about a directory nobody chose.
+  const root = assertPrivateRoot(stateRoot)
   return {
     stateRoot: root,
     staging: path.join(root, STAGING_DIR_NAME),
@@ -138,6 +201,9 @@ export function writableRoots(stateRoot) {
 
 /** `0700` directory, created if missing, mode verified afterwards. */
 export function ensurePrivateDir(dir) {
+  // `mkdir -p` on a name that is already a link answers "it exists" and the `chmod` below then tightens
+  // the *target*, so this has to be refused before either syscall — not after the mode was read back.
+  assertPrivateRoot(dir, 'directory')
   fs.mkdirSync(dir, { recursive: true, mode: STATE_DIR_MODE })
   tightenMode(dir, STATE_DIR_MODE, 'directory')
   return dir

@@ -117,6 +117,69 @@ export function parseLaunchctlState(printOutput) {
   return match ? match[1] : null
 }
 
+/**
+ * The `StartCalendarInterval` block launchd is holding, or `null` when the book does not answer.
+ *
+ * This exists because `registerAgent`'s read-back used to compare **only argv**, and the job's argv
+ * is stable by design (`agent-entry.js` is the whole point of it, and
+ * `CODES.runtimeRegistrationPending` documents that the definition stops changing per version). A
+ * re-registration whose `bootout` failed therefore "matched" perfectly while launchd kept running
+ * yesterday's definition — the one fact `enable --hour 3` is about is invisible in the argument
+ * list. Absent or unreadable here means *not said*, never *mismatched*: a launchd build that stops
+ * echoing the interval must not turn a correct registration into a refusal.
+ */
+export function parseLaunchctlSchedule(printOutput) {
+  const block = /start\s*calendar\s*interval\s*=\s*\{([\s\S]*?)\}/i.exec(String(printOutput ?? ''))
+  if (!block) return null
+  const number = (key) => {
+    const match = new RegExp(`\\b${key}\\s*=\\s*"?(-?\\d+)"?`, 'i').exec(block[1])
+    return match ? Number(match[1]) : null
+  }
+  const hour = number('Hour')
+  const minute = number('Minute')
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null
+  return { hour, minute }
+}
+
+/**
+ * The `environment = { … }` block launchd is holding, or `null` when it does not answer.
+ * Keys are compared only when both sides name them — see `parseLaunchctlSchedule` for why an
+ * unreadable book is never a mismatch.
+ */
+export function parseLaunchctlEnvironment(printOutput) {
+  const block = /(?:^|\n)\s*environment\s*=\s*\{([\s\S]*?)\n\s*\}/.exec(String(printOutput ?? ''))
+  if (!block) return null
+  const entries = {}
+  for (const line of block[1].split('\n')) {
+    const match = /^\s*([A-Za-z_][\w.-]*)\s*=\s*(.*?);?\s*$/.exec(line)
+    if (!match) continue
+    entries[match[1]] = match[2].replace(/^"([\s\S]*)"]$/, '$1')
+  }
+  return entries
+}
+
+/** The `EnvironmentVariables` a rendered plist hands the job, values un-escaped for comparison. */
+export function parseAgentEnvironment(plistText) {
+  const block = /<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/.exec(String(plistText ?? ''))
+  if (!block) return null
+  const entries = {}
+  const pairs = /<key>([\s\S]*?)<\/key>\s*<string>([\s\S]*?)<\/string>/g
+  for (const match of block[1].matchAll(pairs)) {
+    entries[unescapePlistString(match[1])] = unescapePlistString(match[2])
+  }
+  return entries
+}
+
+function unescapePlistString(value) {
+  return String(value)
+    .replaceAll('&apos;', "'")
+    .replaceAll('&quot;', '"')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&lt;', '<')
+    .replaceAll('&amp;', '&')
+}
+
 function defaultRun(bin, args) {
   const res = spawnSync(bin, args, { encoding: 'utf8', timeout: 15_000 })
   return {
@@ -184,6 +247,19 @@ export function readRunningJob({
       reason: `the running job names the state-root flag more than once (${named.join(', ')}), so which state root it writes is not decidable and no version was swapped`,
     }
   }
+  // A flag that is *there* with a value that cannot be decoded is not a flag that is absent:
+  // `ok: true, stateDir: null` used to be read downstream as "this daemon writes where we were
+  // pointed", which is the same guess `lib/policy.js` now refuses to make.
+  if (named.length === 1 && (named[0] === null || named[0] === '')) {
+    return {
+      ok: false,
+      unknown: true,
+      loaded: true,
+      program: parseLaunchctlProgram(res.stdout),
+      code: CODES.busyOrUnreachable,
+      reason: `the running job names the state-root flag with a value that cannot be read (${JSON.stringify(named[0])}: the flag is last in the argument list, its value begins with "-", or nothing follows the "="), so which state root it writes is not decidable and no version was swapped`,
+    }
+  }
   return {
     ok: true,
     unknown: false,
@@ -193,6 +269,11 @@ export function readRunningJob({
     args,
     stateDir: named[0] ?? null,
     uid: resolved,
+    // The whole body, kept for the readers that ask more of the book than the argument list:
+    // `registerAgent` has to be able to see the schedule and the environment launchd is holding,
+    // and the argv it prints is stable by design (`agent-entry.js`), so arguments alone can never
+    // tell a new definition from the one that failed to boot out.
+    printText: res.stdout,
   }
 }
 
@@ -645,11 +726,65 @@ export function registerAgent({
         message: `launchctl bootstrap for gui/${resolvedUid}/${label} exited ${boot.status}, but the loaded job names (${args.slice(0, 6).join(' ') || 'no arguments read back'}) and not ${cliPath ?? 'the CLI path this run rendered'}${booted ? '' : `; bootout of the previous definition also failed (exit ${out.status})`}: the update agent was not replaced`,
       }
     }
+    // The argv matched, and that is *not* the proof it used to be read as. The stable entry means
+    // every definition this tool renders names the same argument list, so a job launchd could not
+    // boot out keeps running the previous schedule and the previous environment while this read-back
+    // says "matches" — and `enable` then exits 0 and records `enabled`. `installer/cli.js` reads the
+    // same bootout failure as a hard refusal (its `bootoutFailed` branch); two readers, one fact.
+    if (!booted) {
+      return {
+        ok: false,
+        verified: false,
+        plistPath,
+        code: CODES.busyOrUnreachable,
+        message: `the update agent was not replaced: launchctl bootout of gui/${resolvedUid}/${label} exited ${out.status} `
+          + `(${(out.stderr || 'no stderr').trim().slice(0, 160)}), so launchd is still holding the definition from before this run, `
+          + `and its answer to bootstrap was only "${String(boot.stderr ?? '').trim().slice(0, 80) || `exit ${boot.status}`}" — the loaded job names the same `
+          + `stable entry it always named (${cliPath ?? 'the CLI path this run rendered'}), which proves nothing about the schedule or environment it carries. `
+          + 'Nothing was recorded as enabled: run "launchctl bootout '
+          + `gui/${resolvedUid}/${label}" (or "launchctl remove ${label}") until it answers Could not find service, then run "updater enable" again`,
+      }
+    }
+    // What the book *does* answer about the loaded definition is compared next: the daily interval
+    // and the environment block are the two things a stable argv cannot see. An unreadable book
+    // keeps the argv verdict (this refuses on evidence, never on a missing echo).
+    const printed = typeof loaded.printText === 'string' ? loaded.printText : ''
+    const wantSchedule = readAgentSchedule({ plistPath, readFile: () => String(plistText ?? '') })
+    const heldSchedule = parseLaunchctlSchedule(printed)
+    if (wantSchedule && heldSchedule && (wantSchedule.hour !== heldSchedule.hour || wantSchedule.minute !== heldSchedule.minute)) {
+      return {
+        ok: false,
+        verified: false,
+        plistPath,
+        code: CODES.busyOrUnreachable,
+        message: `the update agent was not replaced: the job launchd is holding runs at ${heldSchedule.hour}:${String(heldSchedule.minute).padStart(2, '0')}, `
+          + `not the ${wantSchedule.hour}:${String(wantSchedule.minute).padStart(2, '0')} this run rendered, and its arguments name the stable entry `
+          + `${cliPath ?? '<none>'} so the argv alone could not notice. Run "launchctl bootout gui/${resolvedUid}/${label}" until it answers `
+          + 'Could not find service, then run "updater enable" again',
+      }
+    }
+    const wantEnv = parseAgentEnvironment(plistText)
+    const heldEnv = parseLaunchctlEnvironment(printed)
+    const differed = wantEnv && heldEnv
+      ? Object.entries(wantEnv).filter(([key, value]) => heldEnv[key] !== undefined && heldEnv[key] !== value).map(([key]) => key)
+      : []
+    if (differed.length > 0) {
+      return {
+        ok: false,
+        verified: false,
+        plistPath,
+        code: CODES.busyOrUnreachable,
+        message: `the update agent was not replaced: the loaded job's environment still differs from the definition this run rendered in `
+          + `${differed.join(', ')}, which the stable argv cannot show. Run "launchctl bootout gui/${resolvedUid}/${label}" until it answers `
+          + 'Could not find service, then run "updater enable" again',
+      }
+    }
     return {
       ok: true,
       verified: true,
       plistPath,
-      message: `update agent registered (gui/${resolvedUid}/${label}) and the loaded job names ${cliPath ?? 'the CLI path this run rendered'}`,
+      message: `update agent registered (gui/${resolvedUid}/${label}) and the loaded job names ${cliPath ?? 'the CLI path this run rendered'}`
+        + (heldSchedule ? ` at ${heldSchedule.hour}:${String(heldSchedule.minute).padStart(2, '0')}` : ''),
     }
   }
   // launchd refused the new definition — and this call already booted out whatever was loaded. Deleting the

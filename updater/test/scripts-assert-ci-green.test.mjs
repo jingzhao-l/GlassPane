@@ -271,6 +271,41 @@ test('release.yml 两条发布通道都真的问了这个问题', () => {
   assert.match(npmBlock, /id-token: write/, 'npm-publish 丢了 id-token 就签不出 provenance')
 })
 
+/**
+ * The self-execution guard must survive being handed a **symlink**.
+ *
+ * Node loads an ESM entry by its *real* path, so `import.meta.url` is the target file while
+ * `process.argv[1]` is the link that was named. `path.resolve(argv[1]) === fileURLToPath(import.meta.url)`
+ * (no realpath on either side) is therefore false, `main()` never runs, and the process exits **0 with no
+ * output** — a发布步骤 that asks nothing and passes. Measured on this machine 2026-10-19:
+ * `node scripts/assert-ci-green.mjs` → rc 1 + the refusal line; the same file reached through a symlink
+ * → rc 0, zero bytes. The three npm/launchd-delivered entrypoints in this repo already realpath both
+ * sides (`installer/cli.js`, `updater/cli.js`, `updater/agent-entry.js`); this gate is the same shape of
+ * guard and had the same hole.
+ */
+test('通过符号链接调用时这道闸照样跑，退码与输出都在（realpath 两侧）', () => {
+  const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-cigreen-link-'))
+  const link = path.join(base, 'acg-link.mjs')
+  const gh = stubGh('cli-link', FIX('ci-runs-failure.json'))
+  try {
+    fs.symlinkSync(SCRIPT, link)
+    const got = spawnSync(process.execPath, [link, '--sha', ASK.sha, '--repository', 'jingzhao-l/GlassPane', '--workflow', 'ci.yml'], {
+      encoding: 'utf8',
+      cwd: REPO,
+      env: { ...process.env, PATH: `${gh.dir}${path.delimiter}${process.env.PATH ?? ''}` },
+    })
+    const out = `${got.stdout ?? ''}${got.stderr ?? ''}`
+    assert.notEqual(got.status, 0, `被符号链接调用时这道闸安静地退 0——它什么都没问：stdout=${JSON.stringify(got.stdout)} stderr=${JSON.stringify(got.stderr)}`)
+    assert.ok(out.trim() !== '', '符号链接调用必须照样输出判决，否则发布步骤读到的是一段沉默')
+    assert.equal(got.status, 1, out)
+    assert.match(out, /38842800885/, out)
+    assert.equal(gh.calls().length, 1, '通过链接调用也要真的问过那一次 API')
+  } finally {
+    gh.cleanup()
+    fs.rmSync(base, { recursive: true, force: true })
+  }
+})
+
 test('脚本被 import 时一行都不执行', async () => {
   // 这条文件自己的教训（见 memory 与 scripts/ 里的旧坑）：顶层自跑 + exit 的脚本被测试 import 时，
   // 会以"零条用例通过"的形状假绿。这里量的是反面：import 不产生任何输出、不改退出码。

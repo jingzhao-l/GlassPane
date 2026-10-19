@@ -102,9 +102,10 @@ test('both spellings of the state-root flag are read, and a missing value is not
   assert.equal(stateDirFromArgs(['glasspaned', '--state-dir']), null, 'a flag with no value must not become the empty string')
   assert.equal(foreignStateDir({ jobArgs: ['--state-dir', '/a/b/'], ourStateRoot: '/a/b' }), null)
 
-  // `--state-root` is not a hypothetical spelling: it is the one the daemon's own option uses
-  // (`launchd.js` renders it into the job as `daemonFlag`), and it is what the update agent's
-  // `launchctl print` output carried when it was captured from this machine on 2026-09-30. Reading
+  // `--state-root` is not a hypothetical spelling: it is the one `renderAgentPlist` writes into the
+  // job as `daemonFlag` (`launchd.js`), and it is what the update agent's `launchctl print` output
+  // carried when it was captured from this machine on 2026-09-30. (The daemon's *own* option is
+  // `--state-dir` — `engine/Sources/glasspaned/main.swift` — so this spelling arrives from us.) Reading
   // only `--state-dir` here meant a daemon started with `--state-root /somewhere/else` looked like a
   // job with *no* state flag, so §2's foreign-root gate — the one that exists to stop a swap against
   // somebody else's installation — had nothing to compare and let it through.
@@ -189,6 +190,53 @@ test('a job naming two different state roots is never a swap, with consent or wi
     }).status,
     'allowed',
   )
+})
+
+/**
+ * The "unknown is not fine" rule that `readings.length > 1` applies to two values was never
+ * applied to a value this tool could not decode at all: `stateDirReadings` pushes `null` for a
+ * present flag with a missing or `-`-prefixed value, `readings.length` is then 1, and
+ * `foreignStateDir`'s `if (!named) return null` reads "no flag" — so the §2 gate waved the swap
+ * through on a job whose state root it had just failed to read. An empty inline value
+ * (`--state-root=`) is the same shape with a different byte.
+ *
+ * REVERSE MUTATION: delete the `undecodable.length > 0` half of the §2 branch in
+ * `decideSwapPermission` — this test goes red on the first matrix row with `status === 'allowed'`.
+ */
+test('a state-root flag whose value cannot be decoded is unknown, never allowed', () => {
+  const cases = [
+    ['glasspaned', '--state-dir'],
+    ['--state-dir', '--evil'],
+    ['glasspaned', '--state-root'],
+    ['--state-root='],
+  ]
+  for (const jobArgs of cases) {
+    for (const consented of [[], [CONSENT_KINDS[1]]]) {
+      const decision = decideSwapPermission({ probe: { answered: true }, jobArgs, ourStateRoot: '/Users/dev/.glasspane', consented })
+      assert.notEqual(decision.status, 'allowed', `${JSON.stringify(jobArgs)} 读不出状态根，consent=${consented.join(',') || '无'}：${JSON.stringify(decision)}`)
+      assert.equal(decision.status, 'unknown', '读不出不是"等人点头"，与多值那一条同一档')
+      assert.equal(decision.swapped, false)
+      assert.equal(decision.code, CODES.busyOrUnreachable)
+      assert.match(decision.reason, /launchctl print/, '拒绝里要给得出下一步：把那份作业读出来看')
+    }
+  }
+  // 一个读得出来的值仍然照常判定（这一半守住的是"别把正常作业判死"）。
+  assert.equal(decideSwapPermission({ probe: { answered: true }, jobArgs: ['glasspaned', '--state-dir', '/Users/dev/.glasspane'], ourStateRoot: '/Users/dev/.glasspane' }).status, 'allowed')
+  assert.deepEqual(stateDirReadings(['glasspaned', '--state-dir']), [null], 'null 是"这个旗标在，但值读不出"的记号，不是"没有旗标"')
+  assert.equal(stateDirReadings(['glasspaned']).length, 0, '没有旗标才是 0 个读数')
+})
+
+/**
+ * `--consent <kind>` 是这三道门唯一的下一步（policy.js:112-113 自己写的："拒绝必须带一个可执行
+ * 的下一步"）。`state-dir` 与 `unsigned-release` 都点名了口令，`major` 那一条从前只说
+ * "press Install update in the panel"——面板确实是其中一条出路，但句子里没有 agent 能跑的那一半。
+ */
+test('the major refusal names the runnable consent, not only the panel', () => {
+  const decision = decideUpdate({ currentVersion: '1.4.2', tag: 'v2.0.0' })
+  assert.equal(decision.status, 'needs-consent')
+  assert.match(decision.reason, /--consent major/, '拒绝必须给出人说"要这一版"的那条口令，和另外两道门同一个形状')
+  assert.match(decision.reason, /updater (check|apply)/, '口令前面要带上真正要跑的子命令')
+  assert.match(decision.reason, /press "Install update"/, '面板那条路保留：它是人实际按下去的地方')
 })
 
 /**

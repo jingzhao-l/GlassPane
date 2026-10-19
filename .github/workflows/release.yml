@@ -208,8 +208,44 @@ jobs:
               --title "GlassPane ${VERSION}" --notes "$NOTES" --target "$TARGET_SHA"
           fi
           gh release edit "$REF_NAME" --draft=false --latest
+          # 读回来判，不是读回来打印。`gh release edit` 退 0 不是"这一版已经对外"的证据：GitHub 会
+          # 把 Actions 身份建的发布留在草稿态，而留在草稿态时 /releases/latest 继续服务**上一个 tag**
+          # ——`updater/lib/check.js` 把"最新已发布的版本比本机跑的还旧"判成 `up-to-date` + exit 0，
+          # 于是这一格绿着让每台机器安静地不再更新（同一形状的先例见本文件开头 v1.4.0 那条签名事故，
+          # 也见 harness/glasspane-harness 的 publish-release 步：那里 `[ "$state" != "false" ]` 是判红的）。
+          # 三件事各自判：draft、latest、非空资产列表——少任何一件，这一版对外都不是这一版。
+          READBACK=$(gh release view "$REF_NAME" --json tagName,isDraft,latest,assets,targetCommitish \
+            --jq '[(.isDraft|tostring), (.latest|tostring), (.assets|length|tostring), .targetCommitish] | @tsv') \
+            || { echo "::error::gh release view $REF_NAME 读不回来（isDraft / latest / assets 一个都没拿到）——发出去没有这一句就没有证据，判红"; exit 1; }
+          IFS=$'\t' read -r DRAFT LATEST ASSETS TARGET_READ <<<"$READBACK"
+          if [ "$DRAFT" != "false" ]; then
+            echo "::error::release $REF_NAME 编辑之后读回 isDraft=$DRAFT，它仍然是草稿：/releases/latest 还在服务上一个 tag，" \
+              "install.sh 与 updater 取到的都不是这一版，而每台机器会把"查不到更新"读成 up-to-date。"
+            exit 1
+          fi
+          if [ "$LATEST" != "true" ]; then
+            echo "::error::release $REF_NAME 读回 latest=$LATEST：它不是 /releases/latest 指向的那一个，" \
+              "钉着 latest 的安装命令与 updater 装的是上一版的内容。"
+            exit 1
+          fi
+          case "$ASSETS" in
+            ''|*[!0-9]*)
+              echo "::error::release $REF_NAME 的资产数量读回的是「$ASSETS」，不是一个数字：无法证明归档与签名件挂上了这个发布。"
+              exit 1 ;;
+          esac
+          if [ "$ASSETS" -lt 1 ]; then
+            echo "::error::release $REF_NAME 已非草稿但资产列表是空的（assets=0）——没有归档与 SHA256SUMS 的发布，" \
+              "updater 第 3 道校验只会拒绝，这一版对外等于没发。"
+            exit 1
+          fi
           gh release view "$REF_NAME" --json tagName,isDraft,targetCommitish \
             --jq '"release \(.tagName) 已对外：draft=\(.isDraft)，target=\(.targetCommitish)"'
+          echo "已核实：draft=$DRAFT，latest=$LATEST，$ASSETS 件资产，target=$TARGET_READ（应为 $TARGET_SHA）"
+          if [ -n "$TARGET_READ" ] && [ "$TARGET_READ" != "$TARGET_SHA" ] \
+            && [ "$TARGET_READ" != "$(git rev-parse --short "$TARGET_SHA")" ]; then
+            echo "::error::release $REF_NAME 的 target 读回 $TARGET_READ，不是这次 checkout 的 $TARGET_SHA——发布指向的不是被测试的那棵树。"
+            exit 1
+          fi
 
   npm-publish:
     name: publish bare names with provenance

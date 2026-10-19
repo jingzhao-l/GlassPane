@@ -84,6 +84,39 @@ test('the CLI as a process: --state-dir keeps the whole run off this machine\'s 
   }
 })
 
+test('an empty --state-dir is a usage error, not the live root', () => {
+  // 上面那条守的是"给了非空沙盒就别碰活根"，这一条守的是**给了一个空的**：`parseArgs` 从前照收
+  // 单引号，`resolveStateRoot` 的 `trim() !== ''` 再把"没指成"读成"没指"，于是
+  // `updater check --state-dir ""` 把状态与暂存写进这台机器活的 `~/.glasspane`，而调用方以为自己
+  // 指的是一个沙盒。空值必须是用法错误（exit 2），不是一句"那我挑一个默认"。
+  for (const flag of ['--state-dir', '--state-root', '--apps-dir', '--socket']) {
+    const parsed = parseArgs(['check', flag, ''])
+    assert.equal(parsed.ok, false, `${flag} "" 不该被静默收下`)
+    assert.match(parsed.reason, new RegExp(flag.replace(/-/g, '\\-')), `拒绝里要点名是哪条参数：${parsed.reason}`)
+    assert.match(parsed.reason, /empty|为空/, `拒绝要说清空值为什么不行：${parsed.reason}`)
+    const spaced = parseArgs(['status', flag, '', '--json'])
+    assert.equal(spaced.ok, false, `${flag} 的空值在别的子命令上同样是用法错误`)
+  }
+  // 空格不是"没给"：`--state-dir " "` 这种也必须在入口就被问住，否则它落到 `named` 里就是一个
+  // 名字为一个空格的目录，而调用方以为自己在沙盒里。
+  assert.equal(parseArgs(['check', '--state-dir', '   ']).ok, false, '只有空白的值同样是用法错误')
+
+  const liveDir = path.join(os.homedir(), '.glasspane')
+  const live = [path.join(liveDir, 'update-state.json'), path.join(liveDir, 'update-install.json')]
+  const before = live.map((f) => (fs.existsSync(f) ? sha256(f) : null))
+  try {
+    const got = runCli(['status', '--state-dir', '', '--json'])
+    assert.equal(got.status, 2, `空 --state-dir 必须按用法退出 2，实到 ${got.status}：${got.stdout}${got.stderr}`)
+    assert.equal(got.stdout.trim(), '', `用法错误不许往 stdout 吐一行 JSON：${got.stdout}`)
+    assert.match(got.stderr, /--state-dir/, `stderr 要点名那条参数：${got.stderr}`)
+  } finally {
+    live.forEach((f, i) => {
+      const after = fs.existsSync(f) ? sha256(f) : null
+      assert.equal(after, before[i], `${f} 被一次空 --state-dir 的调用改动了——那正是"沙盒没指成"的形状`)
+    })
+  }
+})
+
 test('--at moves the clock the overdue judgement uses (process level)', () => {
   const sandbox = scratch('at-')
   try {

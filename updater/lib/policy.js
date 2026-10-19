@@ -57,7 +57,12 @@ export function decideUpdate({ currentVersion, tag, autoApply = true, consents =
       kind,
       autoApplyAllowed: false,
       consent: 'major',
-      reason: `version ${candidate.version} is a major upgrade from ${currentVersion}: contract changes need a person, so press "Install update" when you want it`,
+      // 拒绝必须给出一条能跑的口令（本文件 :112-113 立的规矩）：面板那条路保留，但只说面板的
+      // 拒绝对一个在终端前头的 agent 没有下一步，而另外两道门（`state-dir` 见下、
+      // `unsigned-release` 见 lib/signature.js）都已经带着 `--consent <kind>`。
+      reason: `version ${candidate.version} is a major upgrade from ${currentVersion}: contract changes need a person, so press "Install update" when you want it. `
+        + `A person who has decided they want this major may run "updater check --consent major" to stage it and "updater apply --consent major" to swap it in; `
+        + 'an automatic run never carries that flag.',
     }
   }
   if (!autoApply) {
@@ -96,11 +101,20 @@ export function decideSwapPermission({ probe, jobArgs, ourStateRoot, consented =
   // 正是别家 daemon 正在用的 bundle（真机形态见 lib/launchd.js 的 `launchctl print` 解析，
   // 那里早已按 `stateDirReadings` 判 unknown——两道门口径必须一致）。
   const readings = stateDirReadings(jobArgs)
-  if (readings.length > 1) {
+  // `null` / `''` here is not "no flag": it is *this* flag, present, with a value this reader could
+  // not decode (argv ending in `--state-dir`, a value that begins with `-`, `--state-root=` with
+  // nothing after the `=`). Reading it as "no flag" is what let the gate answer `allowed` for a job
+  // whose state root it had just failed to read — the same "unknown is not fine" rule the
+  // multi-value case below already applies, extended to the value that cannot be decoded.
+  const undecodable = readings.filter((value) => value === null || value === '')
+  if (readings.length > 1 || undecodable.length > 0) {
+    const ambiguous = readings.length > 1
     return {
       status: 'unknown',
       code: CODES.busyOrUnreachable,
-      reason: `the running job names the state-root flag more than once (${readings.map((value) => String(value)).join(', ')}), so which state root its daemon writes to is not decidable and this tool will not swap on a guess. Nothing was replaced: read the job back with \`launchctl print gui/$(id -u)/com.glasspane.daemon\`, put its arguments list down to one state root — then re-run "updater apply" against that root.`,
+      reason: ambiguous
+        ? `the running job names the state-root flag more than once (${readings.map((value) => String(value)).join(', ')}), so which state root its daemon writes to is not decidable and this tool will not swap on a guess. Nothing was replaced: read the job back with \`launchctl print gui/$(id -u)/com.glasspane.daemon\`, put its arguments list down to one state root — then re-run "updater apply" against that root.`
+        : `the running job names the state-root flag, but its value cannot be read (${readings.map((value) => String(value)).join(', ')} — a flag at the end of the argument list, a value beginning with "-", or nothing after the "="), so which state root its daemon writes to is not decidable and this tool will not swap on a guess. Nothing was replaced: read the job back with \`launchctl print gui/$(id -u)/com.glasspane.daemon\`, put its arguments list down to one readable state root — then re-run "updater apply" against that root.`,
       swapped: false,
     }
   }
@@ -124,23 +138,29 @@ export function decideSwapPermission({ probe, jobArgs, ourStateRoot, consented =
 /** The `--state-dir` a running job names when it differs from ours. */
 export function foreignStateDir({ jobArgs, ourStateRoot }) {
   const readings = stateDirReadings(jobArgs)
-  // 0 个读数＝作业没写旗标，1 个＝唯一答案；多于 1 个是歧义，由 `decideSwapPermission` 判
-  // `unknown`，这里不替它猜一个值。
+  // 0 个读数＝作业没写旗标，1 个**读得出来**的＝唯一答案；多于 1 个是歧义、1 个读不出也是歧义，
+  // 两种都由 `decideSwapPermission` 判 `unknown`，这里不替它猜一个值。
   if (readings.length !== 1) return null
   const named = readings[0]
-  if (!named) return null
+  if (named === null || named === '') return null
   const a = stripTrailing(String(named))
   const b = stripTrailing(String(ourStateRoot))
   return a === b ? null : a
 }
 
 /**
- * The two spellings one flag has in this project. `updater/cli.js` accepts both, the daemon's own
- * option is `--state-root`, and `renderAgentPlist` puts `--state-root` into the job it registers — so
- * a reader that only knows `--state-dir` is blind to the state root of a job this tool rendered
- * itself. That is not a cosmetic gap: §2's foreign-root gate answers "which state root does the
- * running daemon write to", and reading only one spelling means a daemon started with
- * `--state-root /some/other/place` reports "no flag" and is waved through as ours.
+ * The two spellings one flag has in this project. `updater/cli.js` accepts both, and
+ * `renderAgentPlist`'s `daemonFlag` default puts `--state-root` into the job it registers
+ * (`lib/launchd.js`) — so a reader that only knows `--state-dir` is blind to the state root of a
+ * job this tool rendered itself. That is not a cosmetic gap: §2's foreign-root gate answers "which
+ * state root does the running daemon write to", and reading only one spelling means a daemon started
+ * with `--state-root /some/other/place` reports "no flag" and is waved through as ours.
+ *
+ * The sentence this comment used to carry — "the daemon's own option is `--state-root`" — was
+ * measured false: `engine/Sources/glasspaned/main.swift` parses `--state-dir`. Both spellings are
+ * read here because **the job this tool renders** is the one that carries `--state-root`, not the
+ * daemon's own CLI; the daemon reads `--state-dir` and `--state-root` only ever appears in argv this
+ * repository wrote into a plist.
  */
 export const STATE_ROOT_FLAGS = Object.freeze(['--state-dir', '--state-root'])
 

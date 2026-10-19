@@ -19,6 +19,8 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 
 const ROOT = path.resolve(import.meta.dirname, '..')
 
@@ -533,7 +535,24 @@ export function shellResidue({ rootDir = ROOT, docs = DOCS } = {}) {
 // 会在登记任何用例之前就被 `process.exit(0)` 带走，于是 `node --test` 报
 // "tests 1 / pass 1"——一份写了 4 条用例的文件以零条用例的身份通过。lint 脚本必须可以
 // 被安全 import（判据本身要能被单测注入），这条守卫是那道前提。
-if (process.argv[1] && path.resolve(process.argv[1]) === path.join(import.meta.dirname, 'check-doc-links.mjs')) {
+//
+// **两侧都 realpath**，与 `updater/cli.js`、`installer/cli.js`、`updater/agent-entry.js` 那三个
+// npm/launchd 交付的入口同一个规矩。node 按**真实路径**载入 ESM 入口，所以被符号链接调用时
+// `process.argv[1]`（链接）与 `import.meta.dirname` 拼出来的那份（真实文件）永不相等：这道闸一段
+// 沉默地退 0，检查根本没有发生。本机 2026-10-19 实测：直接跑打出两行结论，经
+// `/var/tmp/gp-item4-20261019/cdl-link.mjs` 跑是 rc=0 加零输出。realpathSync 对不存在的路径会抛，
+// 抛＝"不是被直接运行"，不是崩掉模块。
+function invokedAsEntrypoint() {
+  const entry = process.argv[1]
+  if (!entry) return false
+  try {
+    return fs.realpathSync(entry) === fs.realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
+
+if (invokedAsEntrypoint()) {
   const { docs, links, external, problems } = check()
   process.stdout.write(`文档 ${docs} 份 | 仓库内链接 ${links} 条 | 外链 ${external} 条（不请求）\n`)
   if (problems.length === 0) {

@@ -25,6 +25,7 @@ import path from 'node:path'
 import process from 'node:process'
 
 import { CODES } from './codes.js'
+import { stateDirFromArgs } from './policy.js'
 
 export const PROBE_METHOD = 'probe_status'
 export const DEFAULT_PROBE_TIMEOUT_MS = 5_000
@@ -141,6 +142,13 @@ export function probeIdle({
  * explicit env, the running job's `--socket-path`, a named state root's
  * `daemon.sock`, then the historic home-derived `engine.sock`.
  * (Mirrors `StateRoot.engineSocketPath` in the engine; see README.)
+ *
+ * The state root is read with `lib/policy.js`'s `stateDirFromArgs`, **not** with a local
+ * `args.includes('--state-dir')`: `STATE_ROOT_FLAGS` freezes two spellings and
+ * `renderAgentPlist`'s default `daemonFlag` is `--state-root`, so a reader that knows one spelling
+ * probes *this run's* socket about a job registered with the other one — an idle verdict about a
+ * daemon that was never asked. (`main.swift` parses `--state-dir`; `--state-root` is the spelling this
+ * repository writes into the plist.)
  */
 export function resolveEngineSocket({ env = process.env, jobArgs = [], stateRoot = null, homeDir = null } = {}) {
   const fromEnv = env.GLASSPANE_ENGINE_SOCK
@@ -150,7 +158,7 @@ export function resolveEngineSocket({ env = process.env, jobArgs = [], stateRoot
     if (args[i] === '--socket-path' && typeof args[i + 1] === 'string') return args[i + 1]
     if (String(args[i]).startsWith('--socket-path=')) return String(args[i]).slice('--socket-path='.length)
   }
-  const named = args.includes('--state-dir') ? args[args.indexOf('--state-dir') + 1] : null
+  const named = stateDirFromArgs(args)
   const root = typeof named === 'string' && named !== '' ? named : stateRoot
   if (typeof root === 'string' && root !== '') {
     return path.join(root.replace(/\/+$/, ''), 'daemon.sock')

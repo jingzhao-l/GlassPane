@@ -1418,7 +1418,13 @@ export async function applyUpdate({
   // the USAGE text said majors refuse under `--auto`.
   const humanConsents = trigger === 'auto' ? [] : consents
   if (kind === 'major' && !humanConsents.includes('major')) {
-    return fail('needs-consent', CODES.consentRequired, `version ${wantVersion} is a major upgrade from ${baseline}. Press "Install update" in the GlassPane panel to confirm you want it.`
+    // The other two consent gates each hand the reader a command to run; this one used to
+    // name only the panel button, so an agent driving the updater had an action for a
+    // foreign state root and an unsigned release but none for the most consequential
+    // refusal of the three (`policy.js:112-113`'s rule: a refusal carries a next step).
+    // Both routes are said: the panel for a person, `--consent major` for an agent — and
+    // the scheduled run is told plainly that neither was used on its behalf.
+    return fail('needs-consent', CODES.consentRequired, `version ${wantVersion} is a major upgrade from ${baseline}. Press "Install update" in the GlassPane panel to confirm you want it, or run "updater apply --consent major" from a terminal (the consent is per run; nothing here grants it to the schedule).`
       + (trigger === 'auto' && consents.length > 0
         ? ' This run came in as the scheduled run (--auto), so the consent on its command line was not used: a schedule cannot confirm on a person\'s behalf.'
         : ''))

@@ -20,9 +20,11 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 import { toolCountDrift, claimDrift, headingsOf, check, CLAIMS, shellResidue } from '../../scripts/check-doc-links.mjs'
@@ -349,4 +351,31 @@ test('shell 残渣闸：接在主检查里，不是只住在一个可选函数�
   const { problems } = check({ rootDir: root, docs: ['x.md'] })
   assert.ok(problems.some((p) => /heredoc 结束标记/.test(p)), JSON.stringify(problems))
   assert.deepEqual(shellResidue(), [], 'main 上的文档此刻不该有残渣')
+})
+
+/**
+ * The self-execution guard must survive being handed a **symlink** (2026-10-19).
+ *
+ * Node loads an ESM entry by its real path, so through a link `process.argv[1]` (the link) and
+ * `fileURLToPath(import.meta.url)` (the target) are different strings, the guard is false, and the
+ * script exits **0 having printed nothing** — the silent-same-shape case: the CI step that runs this
+ * gate would pass while never asking the question. Measured on this machine: direct → the two summary
+ * lines; through `/var/tmp/.../cdl-link.mjs` → zero bytes, rc 0. The three npm/launchd-delivered
+ * entrypoints here already realpath both sides (`installer/cli.js`, `updater/cli.js`,
+ * `updater/agent-entry.js`); this guard is the same shape and had the same hole.
+ */
+test('通过符号链接调用这道文档闸时，它照样把结论打出来', () => {
+  const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-cdlinks-link-'))
+  const link = path.join(base, 'cdl-link.mjs')
+  try {
+    fs.symlinkSync(path.join(REPO, 'scripts', 'check-doc-links.mjs'), link)
+    const direct = spawnSync(process.execPath, [path.join(REPO, 'scripts', 'check-doc-links.mjs')], { encoding: 'utf8', cwd: REPO })
+    const through = spawnSync(process.execPath, [link], { encoding: 'utf8', cwd: REPO })
+    const out = `${through.stdout ?? ''}${through.stderr ?? ''}`
+    assert.ok(out.trim() !== '', `符号链接调用这道闸一段沉默（rc=${through.status}），它什么都没检查就退场：stdout=${JSON.stringify(through.stdout)} stderr=${JSON.stringify(through.stderr)}`)
+    assert.equal(through.status, direct.status, `通过链接与直接调用的判定必须一样：链接=${through.status} 直接=${direct.status}`)
+    assert.match(out, /文档 \d+ 份/, out)
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true })
+  }
 })

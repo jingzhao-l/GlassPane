@@ -954,3 +954,121 @@ test('every substituted token keeps a `$&` in the value verbatim (replaceAll sem
     removeDir(dir)
   }
 })
+
+/**
+ * The bootout-failure hole (2026-10-19 lane). `registerAgent` maps a bootstrap stderr that says
+ * "already" onto the loaded branch, and that branch's read-back compared **argv only** — but the
+ * job argv is stable by design (`agent-entry.js`'s header, `CODES.runtimeRegistrationPending`),
+ * so a changed schedule or environment always "matches" while launchd keeps the definition it
+ * could not boot out. `installer/cli.js` refuses outright on the same bootout failure, so the two
+ * readers of one fact ran on two rules while `enable` exited 0.
+ *
+ * REVERSE MUTATION: delete the `if (!booted)` refusal under the read-back — the first case goes
+ * red on `ok === true`. Delete the schedule comparison and the second case goes red; delete the
+ * environment comparison and the third goes red.
+ */
+function printJobBody({ args, schedule = null, env = null } = {}) {
+  const lines = [`gui/501/${AGENT_LABEL} = {`, '\tactive count = 1', '\ttype = LaunchAgent', '\tstate = not running', '']
+  if (args) lines.push('\targuments = {', ...args.map((a) => `\t\t${a}`), '\t}', '')
+  if (env) lines.push('\tenvironment = {', ...Object.entries(env).map(([k, v]) => `\t\t${k} = "${v}";`), '}', '')
+  if (schedule) lines.push('\tstart calendar interval = {', ...Object.entries(schedule).map(([k, v]) => `\t\t${k} = ${v};`), '}', '')
+  lines.push('}')
+  return lines.join('\n')
+}
+
+test('a bootout that failed while bootstrap answered "Already exists" is not a verified registration', () => {
+  const dir = tempDir(`${TMP_PREFIX}launchd-bootout-failed-`)
+  const cliPath = '/Users/dev/.glasspane/runtime/agent-entry.js'
+  const printed = printJobBody({
+    args: ['/bin/sh', '-c', 'entry', cliPath, '--state-root', '/Users/dev/.glasspane'],
+    schedule: { Hour: 12, Minute: 0 },
+    env: { PATH: LAUNCHD_PATH },
+  })
+  try {
+    const outcome = registerAgent({
+      label: AGENT_LABEL,
+      plistPath: path.join(dir, 'LaunchAgents', `${AGENT_LABEL}.plist`),
+      plistText: renderAgentPlist({ cliPath, stateRoot: '/Users/dev/.glasspane' }),
+      cliPath,
+      uid: '501',
+      run: (bin, args) => {
+        if (args[0] === 'bootout') return { status: 1, stdout: '', stderr: 'I/O error' }
+        if (args[0] === 'bootstrap') return { status: 6, stdout: '', stderr: 'Could not complete bootstrap: Already exists' }
+        if (args[0] === 'print') return { status: 0, stdout: printed, stderr: '' }
+        return { status: 0, stdout: '', stderr: '' }
+      },
+      writeFile: () => undefined,
+    })
+    assert.equal(outcome.ok, false, `旧定义没被卸掉，launchd 还在跑它，这一格不能报成注册成功：${JSON.stringify(outcome)}`)
+    assert.equal(outcome.verified, false, 'argv 一字不变正是这份设计的要求，它证明不了新定义生效')
+    assert.match(outcome.message, /bootout/, '句子里要点名失败的是 bootout，否则读者只看得见 Already exists')
+    assert.match(outcome.message, /I\/O error/, 'launchd 的原话要在句子里')
+  } finally {
+    removeDir(dir)
+  }
+})
+
+test('the read-back judges the loaded daily schedule, not only the stable argv', () => {
+  // 同一份 argv、不同的 Hour：换钟点这件事在 argv 上是隐形的，而 `enable --hour 3` 的全部语义
+  // 就是那一个数字。旧定义仍在装载时把这一格判绿，等于告诉用户"每天 03:00"。
+  const dir = tempDir(`${TMP_PREFIX}launchd-schedule-`)
+  const cliPath = '/Users/dev/.glasspane/runtime/agent-entry.js'
+  try {
+    const outcome = registerAgent({
+      label: AGENT_LABEL,
+      plistPath: path.join(dir, 'LaunchAgents', `${AGENT_LABEL}.plist`),
+      plistText: renderAgentPlist({ cliPath, stateRoot: '/Users/dev/.glasspane', hour: 3, minute: 30 }),
+      cliPath,
+      uid: '501',
+      run: (bin, args) => (args[0] === 'print'
+        ? {
+            status: 0,
+            stdout: printJobBody({
+              args: ['/bin/sh', '-c', 'entry', cliPath, '--state-root', '/Users/dev/.glasspane'],
+              schedule: { Hour: 12, Minute: 0 },
+            }),
+            stderr: '',
+          }
+        : { status: 0, stdout: '', stderr: '' }),
+      writeFile: () => undefined,
+    })
+    assert.equal(outcome.ok, false, '装载着的作业写的是 12:00，本次渲染的是 03:30：不能报成已注册')
+    assert.equal(outcome.verified, false)
+    assert.match(outcome.message, /3:30|03:30/, '拒绝里要看得见本次要的钟点')
+    assert.match(outcome.message, /12:00/, '也看得见 launchd 实际在跑的钟点')
+  } finally {
+    removeDir(dir)
+  }
+})
+
+test('a loaded job whose environment is not the one just rendered is not reported as registered', () => {
+  // argv 看不见的另一件事：`agentEnvironmentBlock` 把 PATH 渲染进定义，正是因为没有它的作业每天
+  // 死在 exit 127；旧的 PATH 与旧的钟点一样，会在一次没换成功的重新注册后活下来。
+  const dir = tempDir(`${TMP_PREFIX}launchd-env-`)
+  const cliPath = '/Users/dev/.glasspane/runtime/agent-entry.js'
+  try {
+    const outcome = registerAgent({
+      label: AGENT_LABEL,
+      plistPath: path.join(dir, 'LaunchAgents', `${AGENT_LABEL}.plist`),
+      plistText: renderAgentPlist({ cliPath, stateRoot: '/Users/dev/.glasspane' }),
+      cliPath,
+      uid: '501',
+      run: (bin, args) => (args[0] === 'print'
+        ? {
+            status: 0,
+            stdout: printJobBody({
+              args: ['/bin/sh', '-c', 'entry', cliPath, '--state-root', '/Users/dev/.glasspane'],
+              env: { PATH: '/usr/bin:/bin' },
+            }),
+            stderr: '',
+          }
+        : { status: 0, stdout: '', stderr: '' }),
+      writeFile: () => undefined,
+    })
+    assert.equal(outcome.ok, false, 'launchd 手里的 PATH 不是这次渲染的那一条：作业还是旧那份')
+    assert.equal(outcome.verified, false)
+    assert.match(outcome.message, /PATH/, '句子里要点名读不回一致的是环境里的哪一项')
+  } finally {
+    removeDir(dir)
+  }
+})

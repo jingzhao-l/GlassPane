@@ -23,6 +23,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { describeCa } from '../lib/ca-bundle.js'
+import { CONSENT_KINDS, decideSwapPermission, decideUpdate } from '../lib/policy.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -126,6 +127,51 @@ test('状态分支与这份夹具一一对应，新增一个状态不许悄悄�
   const missing = [...branches].filter((status) => !covered.has(status))
   assert.deepEqual(missing, [], `这些状态分支没有被扫到：${missing.join(', ')}——给它们补一条夹具，而不是删掉断言`)
   assert.ok(branches.size >= 5, `只认出 ${branches.size} 个状态分支，这条对照已不作数`)
+})
+
+test('每一条 needs-consent 的拒绝都点一个真的存在的 --consent <kind>', () => {
+  // `policy.js:112-113` 立的规矩："拒绝必须带一个 agent 能直接执行的下一步"。这道闸量的是那一步
+  // **存不存在**：句子里点的旗标必须落在 CONSENT_KINDS 里，而本轮的缺陷正是 `major` 那一条只说
+  // "press Install update in the panel"、从不点名 `--consent major`（另外两条门都点）。
+  const outcomes = [
+    {
+      name: 'decideUpdate 的 major',
+      decision: decideUpdate({ currentVersion: '1.4.2', tag: 'v2.0.0' }),
+      want: 'major',
+    },
+    {
+      name: 'decideSwapPermission 的 foreign state root',
+      decision: decideSwapPermission({
+        probe: { answered: true },
+        jobArgs: ['glasspaned', '--state-dir', '/Volumes/Other'],
+        ourStateRoot: '/Users/dev/.glasspane',
+      }),
+      want: 'state-dir',
+    },
+  ]
+  for (const { name, decision, want } of outcomes) {
+    assert.equal(decision.status, 'needs-consent', `${name} 的判定变了，这条闸要跟着改判据而不是删断言`)
+    const named = [...String(decision.reason).matchAll(/--consent\s+([A-Za-z0-9-]+)/g)].map((m) => m[1])
+    assert.ok(named.length > 0, `${name} 的拒绝里没有一个 --consent 旗标，人读到的是散文不是一句命令：${decision.reason}`)
+    for (const kind of named) {
+      assert.ok(CONSENT_KINDS.includes(kind), `${name} 点了 --consent ${kind}，而 CONSENT_KINDS 里没有这一种：${decision.reason}`)
+    }
+    assert.ok(named.includes(want), `${name} 必须点它本次缺的那一种（${want}），实点 ${named.join(', ')}`)
+    assert.match(decision.reason, /updater (check|apply)/, `${name} 的旗标前面要带上真正要跑的子命令`)
+  }
+
+  // 静态的一半：lib 里交出去的话术**只要提到** `--consent <kind>`，那个 kind 就得是真的——
+  // 拼错的口令比没有口令更坏，因为它让人以为自己批过了（`cli.js` 里那条同样的判据的散文版）。
+  const libDir = path.join(HERE, '..', 'lib')
+  let mentions = 0
+  for (const name of fs.readdirSync(libDir).filter((n) => n.endsWith('.js'))) {
+    const raw = fs.readFileSync(path.join(libDir, name), 'utf8')
+    for (const m of raw.matchAll(/--consent\s+([A-Za-z0-9-]+)/g)) {
+      mentions += 1
+      assert.ok(CONSENT_KINDS.includes(m[1]), `${name} 写了 --consent ${m[1]}，CONSENT_KINDS 是 ${CONSENT_KINDS.join('/')}`)
+    }
+  }
+  assert.ok(mentions >= 4, `整个 lib 只认出 ${mentions} 处 --consent 提及，这条对照已经看不见东西`)
 })
 
 test('整条 updater 交出去的话术里都不许出现可照抄执行的升权形状', () => {
