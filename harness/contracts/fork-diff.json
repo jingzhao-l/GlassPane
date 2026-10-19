@@ -2,17 +2,18 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-10-18",
+  "observedAt": "2026-10-19",
   "counts": {
-    "identical": 4645,
-    "edited": 282,
-    "added": 92,
-    "deleted": 1705
+    "identical": 4640,
+    "edited": 285,
+    "added": 94,
+    "deleted": 1707
   },
   "edited": [
     ".github/CODEOWNERS",
     ".github/ISSUE_TEMPLATE/bug-report.yml",
     ".github/ISSUE_TEMPLATE/feature-request.yml",
+    ".github/actions/setup-bun/action.yml",
     ".github/pull_request_template.md",
     "AGENTS.md",
     "CONTEXT.md",
@@ -113,6 +114,7 @@
     "packages/core/src/flag/flag.ts",
     "packages/core/src/global.ts",
     "packages/core/src/installation/version.ts",
+    "packages/core/src/models-dev.ts",
     "packages/core/src/npm.ts",
     "packages/core/src/observability/logging.ts",
     "packages/core/src/observability/otlp.ts",
@@ -243,6 +245,7 @@
     "packages/tui/src/context/sync.tsx",
     "packages/tui/src/context/theme.tsx",
     "packages/tui/src/editor-zed.ts",
+    "packages/tui/src/feature-plugins/home/tips-view.tsx",
     "packages/tui/src/feature-plugins/home/tips.tsx",
     "packages/tui/src/feature-plugins/sidebar/footer.tsx",
     "packages/tui/src/prompt/traits.ts",
@@ -345,6 +348,7 @@
     "contracts/engine-methods.json",
     "contracts/kernel-conformance.json",
     "contracts/kernel-pin.json",
+    "contracts/models-catalog.json",
     "docs/evidence.md",
     "docs/index.md",
     "docs/install.md",
@@ -382,6 +386,7 @@
     "packages/tui/src/util/tool-denial.ts",
     "patches/@modelcontextprotocol%2Fsdk@1.31.0.patch",
     "product.json",
+    "script/assert-ci-green.mjs",
     "script/gpg-signing.sh",
     "script/kernel-conformance.mjs",
     "script/kernel-pin.mjs",
@@ -2073,8 +2078,10 @@
     "packages/web/sst-env.d.ts",
     "packages/web/tsconfig.json",
     "patches/@modelcontextprotocol%2Fsdk@1.29.0.patch",
+    "patches/install-korean-ime-fix.sh",
     "perf/test-suite.md",
     "screenshot-uk.png",
+    "script/stats.ts",
     "sdks/vscode/.gitignore",
     "sdks/vscode/.vscode-test.mjs",
     "sdks/vscode/.vscodeignore",
@@ -2095,6 +2102,11 @@
     "sst.config.ts"
   ],
   "editedDetail": [
+    {
+      "file": ".github/actions/setup-bun/action.yml",
+      "upstreamHash": "9d29724d86a429e08a9031f1c7e92ab607688412",
+      "forkHash": "6d529b9bf300d117f279502065e5114c6f0144f5"
+    },
     {
       "file": ".github/CODEOWNERS",
       "upstreamHash": "c6dfb0ebda4e70ef5cfb1dcb2589d4a5890de3ce",
@@ -2601,6 +2613,11 @@
       "forkHash": "eedc1747311136c8f237cab5c8e50200052803b3"
     },
     {
+      "file": "packages/core/src/models-dev.ts",
+      "upstreamHash": "e577935f067ac5462022a912554279310cfdaa4d",
+      "forkHash": "37258f76bb043f3ff8b1734e824231f29a7883a5"
+    },
+    {
       "file": "packages/core/src/npm.ts",
       "upstreamHash": "94e573d12da938336fc5922b69fc342e401105e9",
       "forkHash": "d2507ff2fd6eb709ddaf7a18b359d2ceea51067b"
@@ -2728,7 +2745,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "095e227019eae7e189448eb39918e680e43f0cdc"
+      "forkHash": "7f911a4eebb599fc7b092bec87adec89a536dd1d"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -2738,12 +2755,12 @@
     {
       "file": "packages/opencode/script/generate.ts",
       "upstreamHash": "91a2d30eb7befbb88edc84bc6b6bc8644c4f40be",
-      "forkHash": "2eb642add65a7e774d4ecb6f6acb293a346704e6"
+      "forkHash": "da6401bfc4ac11232684ad1ceb58403012d226f1"
     },
     {
       "file": "packages/opencode/script/postinstall.mjs",
       "upstreamHash": "fa303b746b8c585561986f8399e4a038f1bd507c",
-      "forkHash": "f9e345eeb06e76f9849e6c8bfac2087d96643f4c"
+      "forkHash": "50dc9784565309879e301b68a954ec90eaae25eb"
     },
     {
       "file": "packages/opencode/script/publish.ts",
@@ -2858,7 +2875,7 @@
     {
       "file": "packages/opencode/src/cli/cmd/uninstall.ts",
       "upstreamHash": "0afdc518545d1084b0cca7ba945353fd54d38e07",
-      "forkHash": "df47a7652c09ff116f733c25a8a57a23178f8029"
+      "forkHash": "2dcebdf4ed469027e43fba55cbbf658130c2089a"
     },
     {
       "file": "packages/opencode/src/cli/cmd/upgrade.ts",
@@ -2938,7 +2955,7 @@
     {
       "file": "packages/opencode/src/index.ts",
       "upstreamHash": "13540a73a36fcb27f591011d9147c60073055b45",
-      "forkHash": "8ca9493a7f411658fe39284f14a615b62824fce6"
+      "forkHash": "c96a9695b36060f3557fdc7d855615752fbfc41b"
     },
     {
       "file": "packages/opencode/src/installation/index.ts",
@@ -3251,6 +3268,11 @@
       "forkHash": "bdd156e4a9173079050328051655bd310d232b94"
     },
     {
+      "file": "packages/tui/src/feature-plugins/home/tips-view.tsx",
+      "upstreamHash": "d9ef81e40ccaf6238d065de30525995830901fda",
+      "forkHash": "533a10068c344e2426b4e50b21330c771f3392d8"
+    },
+    {
       "file": "packages/tui/src/feature-plugins/home/tips.tsx",
       "upstreamHash": "9a853c371d00c1b686207ac67c01cab6123f9df9",
       "forkHash": "e0cd2c01e826dac19eaa4139a419d95b560401dd"
@@ -3268,7 +3290,7 @@
     {
       "file": "packages/tui/src/routes/session/index.tsx",
       "upstreamHash": "2b54f21671b3889e6752175b1c2b0f36d189d3b9",
-      "forkHash": "597442600c0522440b4d9ac325c0b2c6d1556d84"
+      "forkHash": "722d35380dbe739bb44e6af9b7c57b8804755cf2"
     },
     {
       "file": "packages/tui/src/theme/assets/aura.json",
@@ -3453,7 +3475,7 @@
     {
       "file": "packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx",
       "upstreamHash": "6da90633ca421fa085fa1c69ffbd5c0c8a3dc0fa",
-      "forkHash": "0067a8d00e722103e4eba3609aabfd8be3b81ccd"
+      "forkHash": "7cc2d98ab78ca69fb8446fecd82353763b79fdd8"
     },
     {
       "file": "packages/tui/test/fixture/fixture.ts",
@@ -3483,7 +3505,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "30046261a6bdec626f13610398dd870927f0d379"
+      "forkHash": "ccbc1fa89145395f18e24a296c2ff81b47e97ffe"
     },
     {
       "file": "script/publish.ts",
@@ -3503,17 +3525,17 @@
     {
       "file": "SECURITY.md",
       "upstreamHash": "e7e59f4a27ac2bd2ed5005f8851dcb946c08f914",
-      "forkHash": "7139b0fb439074ed5f324e1496c618d7e91ee604"
+      "forkHash": "834b63da6bd1e4842522721d1bc770fb33e24080"
     }
   ],
   "addedDetail": [
     {
       "file": ".github/workflows/ci.yml",
-      "forkHash": "c1f8136700d600e95a93530fe427195614b8c779"
+      "forkHash": "fbb76e4afbe5d0cf2a70e6b89382bdc2034a1730"
     },
     {
       "file": ".github/workflows/release.yml",
-      "forkHash": "cd92c475717c7101c700bc21fa3b71dc7fa252f3"
+      "forkHash": "b39bdb0a58603ebbf4716910999426925216b1e5"
     },
     {
       "file": ".glasspane-harness/.gitignore",
@@ -3681,7 +3703,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "29f88b2052c1b36128d273d43088c401b7f0d972"
+      "forkHash": "a4e8fe8e782a15a438ffbc721649b138100ec7d5"
     },
     {
       "file": "contracts/engine-methods.json",
@@ -3696,32 +3718,36 @@
       "forkHash": "ea1acc6017ff12c42134039134777a9425d3835f"
     },
     {
+      "file": "contracts/models-catalog.json",
+      "forkHash": "dc1327482ff9f04f6b3bc99851f2c7fd0945a7ca"
+    },
+    {
       "file": "docs/evidence.md",
       "forkHash": "c06574733cdf73eee3fcad6258b349caf7cb318f"
     },
     {
       "file": "docs/index.md",
-      "forkHash": "d7c619f17cc9f55bc2e8040b12f2336c73c48fcd"
+      "forkHash": "3f7efa0b45d2343f4054080defbcc674b772a03f"
     },
     {
       "file": "docs/install.md",
-      "forkHash": "9ab8482624762ebfb71217e99d3793f8be95d3cc"
+      "forkHash": "8131420fd3e77990ea1caa70a06a87c43af9a2c4"
     },
     {
       "file": "docs/kernel-integration.md",
-      "forkHash": "b0618b67c108e06a718fee57342e33898be0f87b"
+      "forkHash": "f8b1dbdc91afa3195873235a5596a35482c7bc3c"
     },
     {
       "file": "docs/migrate-from-opencode.md",
-      "forkHash": "3021b83bc6e7f3ed743f13b6e5278ced9da67f1b"
+      "forkHash": "b4f21d73f99052214f4141c69715da642c7bf4e6"
     },
     {
       "file": "docs/models-and-keys.md",
-      "forkHash": "d1b7fae168706e2292ed3b467fa05189686b2b19"
+      "forkHash": "1b76a25ebe485c4f587becd2dba38d6b3e99f43b"
     },
     {
       "file": "docs/release.md",
-      "forkHash": "16f3398d151f53c97e13d9fca85d98735afe3805"
+      "forkHash": "dd78873c959a7b031eb8ac34d878675cee890741"
     },
     {
       "file": "docs/tools.md",
@@ -3733,7 +3759,7 @@
     },
     {
       "file": "FORK.md",
-      "forkHash": "e3fdacd6c5527ac9d791d252698251d945e1b87f"
+      "forkHash": "84b50293c604a072d452d1bdcb2a08b166e82a51"
     },
     {
       "file": "NOTICE",
@@ -3745,7 +3771,7 @@
     },
     {
       "file": "packages/opencode/bin/glasspane-harness",
-      "forkHash": "2968561ee17e324b106e0e9a7d7021f102c207c6"
+      "forkHash": "2652e1b50429c57d6fc45168b8e3c77f6e8ff052"
     },
     {
       "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -3761,7 +3787,7 @@
     },
     {
       "file": "packages/opencode/script/installer-selftest.sh",
-      "forkHash": "1ed57c0a41c0fda88d8023401cf2be7477315585"
+      "forkHash": "2c273a2acf61de5cdc8c0ac42e62d0a52e9df467"
     },
     {
       "file": "packages/opencode/script/publish-shape.ts",
@@ -3777,19 +3803,19 @@
     },
     {
       "file": "packages/opencode/src/plugin/glasspane-decision-log.ts",
-      "forkHash": "46dbe2fe292fc911f4940e58def9254067ac8dab"
+      "forkHash": "d40bbdb8a586d1567b17f66a60f15caba7f3a363"
     },
     {
       "file": "packages/opencode/src/tool/glasspane/daemon.ts",
-      "forkHash": "28456bb1e2a232d960da14ed75e9de8289785429"
+      "forkHash": "3695b1a3a1160050630a161a453f6263f7810199"
     },
     {
       "file": "packages/opencode/src/tool/glasspane/index.ts",
-      "forkHash": "9045155730da89f47e016515bf5299f9d6e30296"
+      "forkHash": "c837262fb1cf71781443838fc65207898c21bd9f"
     },
     {
       "file": "packages/opencode/src/tool/glasspane/kernel.ts",
-      "forkHash": "548aa81bc6c76b14944be003537d0ef759478fee"
+      "forkHash": "9d4a13cc1a455d2a92597ae47b136da358ca9ea0"
     },
     {
       "file": "packages/opencode/test/cli/cmd/glasspane-upgrade-channel.test.ts",
@@ -3825,7 +3851,7 @@
     },
     {
       "file": "packages/opencode/test/plugin/glasspane-decision-log.test.ts",
-      "forkHash": "9529ec0bc685fe42fe9c1942ddcb0c3f6f63013a"
+      "forkHash": "f0cd9e53e4d784409b0d74eae3f9bc3b0bdb5b52"
     },
     {
       "file": "packages/opencode/test/script/publish-shape.test.ts",
@@ -3833,11 +3859,11 @@
     },
     {
       "file": "packages/opencode/test/tool/glasspane-kernel.test.ts",
-      "forkHash": "78268795ebef8f0a005fb048d3e9f3fbb912f621"
+      "forkHash": "4bf56d9e3b34b402f921196fdf27cb8260de1fe9"
     },
     {
       "file": "packages/opencode/test/tool/glasspane-surface.test.ts",
-      "forkHash": "37f79ee1112ff455433f7d3a8ffc3a886e17f4a0"
+      "forkHash": "e2c0e236c1788ae0a70b8b112a3095073888846b"
     },
     {
       "file": "packages/tui/src/util/tool-denial.ts",
@@ -3849,15 +3875,19 @@
     },
     {
       "file": "product.json",
-      "forkHash": "b06872d20eb165ab9982b66b122ed041a3964e9f"
+      "forkHash": "20d1f8ba8a2d7dff6c869b25223118fe98b1b66d"
     },
     {
       "file": "README.zh-CN.md",
-      "forkHash": "a3b830cbcfa287fd28cbf901808a5c3da9885fab"
+      "forkHash": "25d8225de1a19e8db2a5bc3dd528b9c8f98cfb87"
+    },
+    {
+      "file": "script/assert-ci-green.mjs",
+      "forkHash": "f58f790e861cb46e1477a9f19d65687fcfe89d3b"
     },
     {
       "file": "script/gpg-signing.sh",
-      "forkHash": "a42382368a9d5ddac5dd9e492f1f19ab5ec4ba2b"
+      "forkHash": "42df45b8c442cfe45b3266c2e5b1844cb891c6b4"
     },
     {
       "file": "script/kernel-conformance.mjs",
@@ -3869,7 +3899,7 @@
     },
     {
       "file": "scripts/install.sh",
-      "forkHash": "57386793c5fd69ebf41207f263101894dc8aa454"
+      "forkHash": "d7f88dcae0e1ae66fede9a60a29c333228b5956e"
     },
     {
       "file": "SYNCLOG.md",

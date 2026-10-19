@@ -1,5 +1,5 @@
 {
-  "observedAt": "2026-10-16",
+  "observedAt": "2026-10-19",
   "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
   "rules": [
     {
@@ -28,10 +28,16 @@
     "README.md",
     "README.zh-CN.md"
   ],
-  "hits": [],
+  "hits": [
+    {
+      "file": "packages/core/src/plugin/skill/customize-harness.md",
+      "rule": "first-party-gateway",
+      "count": 1
+    }
+  ],
   "lineage": {
-    "occurrences": 9646,
-    "filesScanned": 3312
+    "occurrences": 9603,
+    "filesScanned": 3311
   },
   "lineageNote": "2026-10-16 收口补记随批重记：本轮 SYNCLOG/CHANGELOG 里那些点名字节归属的说明句（哪个依赖升到哪、哪把尺子改的是谁的规则）；反证仍成立"
 }
