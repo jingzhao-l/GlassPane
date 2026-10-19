@@ -59,6 +59,59 @@ test("call rejects with EngineCallError when the daemon returns an error frame",
   });
 });
 
+test("an error frame carrying no remedy is answered per method, not with a blanket re-send", async () => {
+  // MUTATION THIS PINS: `EngineJsonRpcClient.engineError`'s no-remedy fallback
+  // (`engine-client.ts`), which composed "check the daemon log (stderr) and retry" for
+  // ANY method. That is the transport ordering by words what it refuses by behaviour:
+  // `REPLAY_UNSAFE_REASONS` is why `slowEngineRemedy` says *do NOT re-issue*, and
+  // `writeBacklogRemedy` why the backlog answer orders no loop. The frame proves the
+  // request reached the daemon; whether it took effect before the error was raised is a
+  // thing no error frame says, so for these methods the answer may not invite a copy.
+  for (const method of REPLAY_UNSAFE_METHOD_NAMES) {
+    const io = new FakeLineIo();
+    const client = new EngineJsonRpcClient(io);
+    const promise = client.call(method, {});
+    io.respondError({ code: "GP_E_UNKNOWN", message: "the daemon refused and named no way out" });
+    const error = await promise.then(() => null, (caught) => caught);
+    assert.ok(error, `${method}: 无 remedy 的错误帧没有回给调用方`);
+    assert.equal(error.code, "GP_E_UNKNOWN");
+    // Where the cause is readable is still worth saying — it is the one place that can see it.
+    assert.match(error.remedy, /daemon'?s? own log/, `${method}: 无出路的答复要指明读哪里：${error.remedy}`);
+    // No re-send instruction survives the negation strip: whatever this answer says about
+    // the log, it may not end by telling the caller to put a second copy on the wire.
+    assert.doesNotMatch(
+      error.remedy.replace(/\bdo not re-issue\b/gi, ""),
+      /\b(re-?issue|re-?send|retry|send (it|this) again)\b/i,
+      `${method}: 无出路的答复不得命令重发：${error.remedy}`,
+    );
+    // The refusal is said, in this file's own vocabulary, and its reason comes from the
+    // transport's table rather than a sentence written beside it.
+    assert.match(error.remedy, new RegExp(`do not re-issue '${method}'`, "i"), error.remedy);
+    assert.match(error.remedy, /this shell never replays it/, error.remedy);
+  }
+
+  // The half that keeps its old shape: a read the transport *would* replay is allowed to
+  // be asked again, and saying so is what makes the refusal above legible.
+  const readIo = new FakeLineIo();
+  const readClient = new EngineJsonRpcClient(readIo);
+  const readPromise = readClient.call("observe", { maxDepth: 3 });
+  readIo.respondError({ code: "GP_E_UNKNOWN", message: "refused" });
+  const readError = await readPromise.then(() => null, (caught) => caught);
+  assert.match(readError.remedy, /\bretry\b/i, `读方法的无出路答复丢掉了它能给的那半：${readError.remedy}`);
+
+  // `snapshot` is the third state, and the one a blanket "retry" got wrong in its own way:
+  // not replay-unsafe, but a re-send writes another entry into the daemon's bounded ring
+  // and can evict the baseline an earlier `gp_snapshot` returned — the rule this file keeps
+  // as `STATE_CHANGING_ON_RETRY_METHOD_NAMES`.
+  const snapIo = new FakeLineIo();
+  const snapClient = new EngineJsonRpcClient(snapIo);
+  const snapPromise = snapClient.call("snapshot", {});
+  snapIo.respondError({ code: "GP_E_UNKNOWN", message: "refused" });
+  const snapError = await snapPromise.then(() => null, (caught) => caught);
+  assert.doesNotMatch(snapError.remedy, /\bretry\b/i, `snapshot 的出路又要被写成重发了：${snapError.remedy}`);
+  assert.match(snapError.remedy, /evict|bounded/i, snapError.remedy);
+});
+
 test("call rejects on transport error as GP_E_ENGINE_UNREACHABLE", async () => {
   const io = new FakeLineIo();
   const client = engineClientOver(io, 500);

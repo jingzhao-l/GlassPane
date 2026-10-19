@@ -683,6 +683,74 @@ test("an unimplemented notification is reported as dropped, initialized excluded
   assert.ok(notes[0].includes("notifications/progress") && notes[0].includes("dropped"), notes[0]);
 });
 
+test("a protocol-level tools/call refusal carries a remedy naming published tools", async () => {
+  // MUTATION THIS PINS: `McpServer.callTool`'s three protocol refusals (`dispatch.ts`),
+  // which answered with a bare message and no remedy at all. The rule this product holds
+  // is that an error is the triple {code, message, remedy} and that the remedy is
+  // executable by the agent reading it: "Unknown tool: gp_acti" says what is wrong and
+  // nothing about what to do, so the caller's next move is to guess a name again. The
+  // names it is offered come from this server's own published list — the same list
+  // `tools/list` just answered with — because a suggestion the caller cannot call is
+  // worse than no suggestion.
+  const { server } = makeServer();
+  const listed = await server.handleLine(enq({ jsonrpc: "2.0", id: 1, method: "tools/list" }));
+  const published = new Set(listed.result.tools.map((tool) => tool.name));
+  assert.ok(published.size >= 10, `这条闸要有可比的对象，tools/list 只回了 ${published.size} 个`);
+
+  const res = await server.handleLine(enq({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: { name: "gp_acti", arguments: {} },
+  }));
+  assert.equal(res.error.code, -32602);
+  assert.match(res.error.message, /Unknown tool: gp_acti/, res.error.message);
+  assert.match(res.error.message, /\| remedy: /, `协议拒绝也要带出路：${res.error.message}`);
+
+  // Names *offered* as the way out must be callable — the echoed offending input is not an
+  // offer, and the assertion above already pins that the message says what arrived.
+  const remedyClause = res.error.message.slice(res.error.message.indexOf("| remedy: "));
+  assert.ok(remedyClause.length > "| remedy: ".length, `出路部分是空的：${res.error.message}`);
+  const offered = [...remedyClause.matchAll(/gp_[a-z_]+/g)].map((match) => match[0]);
+  assert.ok(offered.length >= 1, `出路里一个已发布的工具名都没有：${res.error.message}`);
+  for (const name of offered) {
+    assert.ok(published.has(name), `出路点名了一个这个面上不存在的工具 ${name}：${res.error.message}`);
+  }
+  // The typo's own nearest neighbour is the useful one, and it is in the list.
+  assert.ok(offered.includes("gp_act"), `拼错 gp_act 的人要拿到 gp_act：${res.error.message}`);
+  assert.equal(res.error.message.includes("TOOL_SPECS"), false, "JSON-RPC 读者打不开一个源码符号");
+
+  // The two sibling refusals are the same class of caller: a body shaped wrong, and no
+  // idea what a right one looks like.
+  const wrongParams = await server.handleLine(enq({ jsonrpc: "2.0", id: 3, method: "tools/call", params: "gp_observe" }));
+  assert.match(wrongParams.error.message, /\| remedy: /, wrongParams.error.message);
+  for (const name of [...wrongParams.error.message.matchAll(/gp_[a-z_]+/g)].map((m) => m[0])) {
+    assert.ok(published.has(name), `params 形状的出路点名了不存在的 ${name}：${wrongParams.error.message}`);
+  }
+  const wrongName = await server.handleLine(enq({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: 7 } }));
+  assert.match(wrongName.error.message, /\| remedy: /, wrongName.error.message);
+  for (const name of [...wrongName.error.message.matchAll(/gp_[a-z_]+/g)].map((m) => m[0])) {
+    assert.ok(published.has(name), `name 形状的出路点名了不存在的 ${name}：${wrongName.error.message}`);
+  }
+  // And the refusals that only appear when a caller is talking to a *shrunken* server: the
+  // example baked into the two shape refusals is not allowed to name a tool this server does
+  // not answer. Without this case the sentence could advertise a tool that only exists in the
+  // full TOOL_SPECS list and leave every check above green.
+  const subset = new McpServer({
+    engine: makeEngine().engine,
+    session: new EvidenceAuditSession(),
+    specs: [{ name: "gp_probe_status", description: "d", inputSchema: { type: "object", properties: {} } }],
+  });
+  for (const [id, params] of [[11, "gp_observe"], [12, { name: 7 }]]) {
+    const shape = await subset.handleLine(enq({ jsonrpc: "2.0", id, method: "tools/call", params }));
+    assert.match(shape.error.message, /\| remedy: /, shape.error.message);
+    for (const name of [...shape.error.message.matchAll(/gp_[a-z_]+/g)].map((m) => m[0])) {
+      assert.equal(name, "gp_probe_status",
+        `一个只发布 gp_probe_status 的面上，出路点名了 ${name}：${shape.error.message}`);
+    }
+  }
+});
+
 test("a session-less McpServer is refused at runtime, not just in types", () => {
   const { engine } = makeEngine();
   // The types make `session` required; these tests are JavaScript, and so is

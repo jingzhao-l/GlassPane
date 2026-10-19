@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { AGENT_PATH_PROTECTION } from "../dist/project-registry.js";
 import { EvidenceAuditSession } from "../dist/audit-session.js";
@@ -20,6 +21,25 @@ import {
 import { GP_E_NO_USER_RECORD } from "../dist/errors.js";
 import { TOOL_BY_NAME, executeTool } from "../dist/tools.js";
 import { makeEngine } from "./helpers.mjs";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * The module with its comments taken out, for the one gate that has to ask what the
+ * *shipped code says* rather than what an agent was handed. Prose about a fixed bug may
+ * name the old command (`registryReaders` opens by explaining that `python3 -m json.tool`
+ * was wrong twice over); a string that reaches a caller may not. Deleting the prose would
+ * turn this gate green by erasing the reason it exists, so the strip keeps code and drops
+ * comments — and the caller asserts the code survived the strip.
+ */
+function executableSource(text) {
+  return text
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .map((line) => (line.trimStart().startsWith("//") ? "" : line.replace(/\s+\/\/[^\n]*$/, "")))
+    .join("\n");
+}
+
 
 /* ------------------------------------------------------------------ *
  * Registry boundary tests (P1 spec v1.4 §4 file-level access):
@@ -297,6 +317,61 @@ test("an entry the daemon cannot decode blocks the write, because Swift rejects 
   } finally {
     reg.dispose();
   }
+});
+
+test("an unloadable registry names a reader the agent can actually run", async () => {
+  // MUTATION THIS PINS: `unreadableMessage` / `readFailureMessage` in
+  // `project-registry.ts`, both of which ordered `python3 -m json.tool <path>` while the
+  // remedy carried by the *same* GP_E_INTERNAL error (`tools.ts`' projectFaultRemedy)
+  // insists on absolute `/usr/bin/plutil` and `/bin/cat` "because they need nothing that
+  // may be off PATH". One error, two opposite rules — and the stricter side is the correct
+  // one: a stock macOS ships no `python3` at all, so that instruction described an action
+  // nobody could take.
+  const reg = useRegistry();
+  try {
+    fs.writeFileSync(reg.filePath, "{ not json,,,", "utf8");
+    const readMessage = expectRegistryError(() => projectList(), "GP_E_INTERNAL", "projectList");
+    const writeMessage = expectRegistryError(() => projectSet(baseArgs), "GP_E_INTERNAL", "projectSet");
+    for (const [label, message] of [["read", readMessage], ["write", writeMessage]]) {
+      assert.ok(!message.includes("python3"),
+        `${label}: 一条 stock macOS 上不存在的命令又回到了注册表的说法里：${message}`);
+      // The readers it does name are absolute, so they run from whatever directory the
+      // reader happens to be standing in — the rule the remedy on this same error states.
+      assert.match(message, /\/usr\/bin\/plutil -p/, `${label}: ${message}`);
+      assert.match(message, /\/bin\/cat/, `${label}: ${message}`);
+      // …and the one escape hatch that actually rebuilds the table stays named.
+      assert.match(message, new RegExp(FORCE_OVERWRITE_ENV), `${label}: ${message}`);
+    }
+
+    // The same text as the agent receives it, through the tool seam, so this cannot pass
+    // by a message that dies inside the registry layer.
+    const { engine } = makeEngine();
+    const outcome = await executeTool(
+      TOOL_BY_NAME.get("gp_project_list"),
+      {},
+      engine,
+      new EvidenceAuditSession(),
+    );
+    assert.equal(outcome.isError, true, outcome.content[0].text);
+    assert.ok(!outcome.content[0].text.includes("python3"), outcome.content[0].text);
+    assert.match(outcome.content[0].text, /\/bin\/cat|\/usr\/bin\/plutil/, outcome.content[0].text);
+  } finally {
+    reg.dispose();
+  }
+
+  // The whole module, not only the two branches a corrupt file reaches: a refusal reason
+  // anywhere in this file is the same class of agent-facing text.
+  const source = executableSource(
+    fs.readFileSync(path.resolve(HERE, "..", "src", "project-registry.ts"), "utf8"),
+  );
+  // The strip must not be a way to make this gate say nothing: had it eaten the module,
+  // `doesNotMatch` below would pass on an empty string.
+  for (const kept of ["registryReaders", "plutil", "ProjectRegistryError"]) {
+    assert.ok(source.includes(kept),
+      `剥离注释把代码也剥掉了（缺 ${kept}）——这条闸此刻量的是一句空话，不是注册表的说法`);
+  }
+  assert.doesNotMatch(source, /python3/,
+    "注册表的任何说法都不许再点一条按 PATH 解析、而 stock macOS 上根本没有的解释器");
 });
 
 test("the named escape hatch moves the unloadable file aside instead of deleting it", () => {

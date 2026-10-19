@@ -229,15 +229,16 @@ export class McpServer {
   private async callTool(id: number | string, rawParams: unknown): Promise<RpcResponse> {
     const params = this.asParams(rawParams);
     if (!params) {
-      return this.error(INVALID_PARAMS, "tools/call requires an object params", id);
+      return this.error(INVALID_PARAMS, `tools/call requires an object params | remedy: ${this.callShapeRemedy()}`, id);
     }
     const name = params.name;
     if (typeof name !== "string") {
-      return this.error(INVALID_PARAMS, "tools/call requires a string name", id);
+      return this.error(INVALID_PARAMS, `tools/call requires a string name | remedy: ${this.callShapeRemedy()}`, id);
     }
     const spec = this.specs.find((candidate) => candidate.name === name);
     if (!spec) {
-      return this.error(INVALID_PARAMS, `Unknown tool: ${name}`, id);
+      return this.error(INVALID_PARAMS, `Unknown tool: ${name}`
+        + ` | remedy: ${this.publishedNamesNear(name)}`, id);
     }
 
     // `arguments` is optional in the MCP `tools/call` shape: a tool with no
@@ -274,6 +275,40 @@ export class McpServer {
 
   private result(id: number | string, result: unknown): RpcResponse {
     return { jsonrpc: JSONRPC, id, result };
+  }
+
+  /**
+   * The example for the two `tools/call` **shape** refusals, taken from the list this server
+   * actually answers. A JSON-RPC reader cannot open a source symbol, and an example naming a
+   * tool this surface does not publish would be a second refusal waiting to happen — so the
+   * preference is a published tool that is legal to call with an empty `arguments`.
+   * `test/dispatch.test.mjs` checks every name in this sentence against `tools/list`, and
+   * checks it again on a server deliberately built with a one-tool list.
+   */
+  private callShapeRemedy(): string {
+    const takesNothing = this.specs.filter((spec) => {
+      const required = (spec.inputSchema as { required?: unknown }).required;
+      return !Array.isArray(required) || required.length === 0;
+    });
+    const example = (takesNothing[0] ?? this.specs[0])?.name;
+    if (example === undefined) {
+      return "no tool is published on this connection; call tools/list to read what it answers";
+    }
+    return `send {"name":"${example}","arguments":{}} — a tool with no required inputs answers to an empty `
+      + "arguments object; tools/list lists every tool this server answers";
+  }
+
+  /**
+   * The names this server actually answers with, nearest the caller's guess first. Every
+   * name offered here is one `tools/list` just advertised: a suggestion the caller cannot
+   * call is worse than no suggestion, and the point of the sentence is to end the guessing
+   * loop a bare `Unknown tool: gp_acti` left the caller in.
+   */
+  private publishedNamesNear(guess: string): string {
+    const names = this.specs.map((spec) => spec.name);
+    const near = names.filter((candidate) => candidate.startsWith(guess.slice(0, 6)));
+    const offered = near.length > 0 ? near : names;
+    return `call one of: ${offered.join(", ")} — or call tools/list to read this server's own list`;
   }
 
   private error(code: number, message: string, id: number | string | null): RpcResponse {

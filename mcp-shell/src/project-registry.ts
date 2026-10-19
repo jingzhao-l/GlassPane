@@ -48,6 +48,22 @@ const MAX_DISPLAY_NAME_LENGTH = 256;
 const MAX_FIELD_LENGTH = 1024;
 
 /**
+ * The `bundleId` ceiling — one number for both surfaces that carry the identity.
+ *
+ * It is the daemon's own bound, not this shell's preference: `Dispatcher.handleAttach`
+ * reads `bundleId` with `maxLength: 512`, and `test/consumer-consistency.test.mjs` re-reads
+ * that literal from the Swift source and fails if either side of the pair moves. The
+ * registry stores *the same* identity an attach is matched by and the daemon's registry path
+ * applies no length rule of its own, so a second, stricter cap on the storing half was not a
+ * safety margin — a 300-character bundleId was attachable and permanently unregisterable,
+ * refused by this shell with a `GP_E_BAD_PARAMS` the service would never have issued.
+ * Both `gp_attach`'s and `gp_project_set`'s advertised schemas and this module's patch-shaped
+ * zod take the number from here, so "one rule, two answers" is a compile-time impossibility
+ * rather than a thing to remember.
+ */
+export const BUNDLE_ID_MAX_LENGTH = 512;
+
+/**
  * `pid` is stored as Swift `Int32?` (ProjectModels.ProjectEntry) and narrowed
  * to `pid_t` by the daemon's attach path. The upper bound is therefore not
  * cosmetic: one out-of-range number makes JSONDecoder reject the *whole*
@@ -87,17 +103,21 @@ const PROTECTED_ROOTS: readonly string[] = [
  *   a registry pointing there is readable-by-everyone evidence, whatever the
  *   directory's own mode says on the day it is checked.
  *
- * What that pinning does **not** cover, so the split is recorded rather than
- * implied as closed: the guard reads the daemon's *names*, not its *matcher*.
- * These entries are matched as subtrees here (`/private/tmp/x` is refused),
- * while `EngineCore.resolvedStoragePathDefect` still compares
- * `sharedScratchStoragePaths` for exact equality, so that path is accepted by
- * the daemon — same list, two verdicts. The open half is registered in
- * `specs/GlassPane_规格修订_2026-09-23_iterate-round4.md` ("仍未收口": the Swift
- * half of path validation) and is closed in Swift, not here; this file's
- * subtree behaviour is what the input-level entries of
- * `test/path-consistency.test.mjs` pin, so a future downgrade of either side is
- * visible in at least one gate.
+ * What that pinning covers, and what it now says in the present tense because the code
+ * moved under it: the guard reads the daemon's *names* and its *matcher*, and the two
+ * agree. These entries are matched as subtrees on both sides — `/private/tmp/x` is
+ * refused here (`refuseCandidate` walks `PROTECTED_SUBTREES` through `isInside`, which is
+ * "equal to the tree, or prefixed by `<tree>/`") and refused there
+ * (`EngineCore.resolvedStoragePathDefect` loops `sharedScratchStoragePaths` with
+ * `stripped == scratch || stripped.hasPrefix(scratch + "/")`). The daemon's half used to
+ * be a whole-path equality test, and that was the divergence this header registered as
+ * open; round 4 closed it in Swift and the prose stayed behind, still reading as a split
+ * someone ought to fix — which is how one already-fixed side gets "fixed" a second time.
+ * The guards that keep this paragraph true are `test/path-consistency.test.mjs` (whose
+ * input-level entries pin this file's subtree behaviour and whose own assertions re-read
+ * the Swift matcher from source, reddening if the equality form comes back) and
+ * `test/qoder-20261019-matcher-parity.test.mjs`, which compares the two sides' names and
+ * matchers as the one rule they are meant to be.
  */
 const PROTECTED_SUBTREES: readonly string[] = [
   "/Applications", "/System", "/Library", "/private/etc",
@@ -266,7 +286,7 @@ export const ProjectSetArgs = z.strictObject({
   // rule deliberately is not a check on this object — it holds of the MERGED
   // entry, and an update that clears one field while setting the other only
   // becomes legal after the merge (`assertSingleIdentity`).
-  bundleId: z.string().max(256).nullish(),
+  bundleId: z.string().max(BUNDLE_ID_MAX_LENGTH).nullish(),
   pid: z.number().int().min(PID_RANGE[0]).max(PID_RANGE[1]).nullish(),
   recipeConfigPath: z.string().max(MAX_FIELD_LENGTH).nullish(),
   calibrationAssetsPath: z.string().max(MAX_FIELD_LENGTH).nullish(),
@@ -392,12 +412,31 @@ function requireUsableRegistry(filePath: string, snapshot: RegistrySnapshot): { 
   return { projects: [], discarded };
 }
 
+/**
+ * The two readers a damaged registry can be looked at with, named as absolute commands.
+ *
+ * `python3 -m json.tool` used to stand in both messages below, and it was wrong twice over:
+ * a stock macOS ships no `python3` at all, and a bare command name resolves through a PATH
+ * this reader does not control — the exact rule the `GP_E_INTERNAL` remedy beside those
+ * messages already states ("both absolute, so they … need nothing that may be off PATH").
+ * One error carried two opposite rules; the stricter side is the true one, so both halves
+ * now say it out of here rather than each in its own words.
+ *
+ * `target` is the file when this layer knows it, and the placeholder
+ * `"<that path>"` when the sentence above has already named it — one phrasing, two callers,
+ * so neither can drift back to a command the agent cannot run.
+ */
+export function registryReaders(target: string): string {
+  return `\`/usr/bin/plutil -p ${target}\` or \`/bin/cat ${target}\` — both absolute, so they run from whatever `
+    + "directory the reader is in and need nothing that may be off PATH";
+}
+
 function unreadableMessage(filePath: string, failure: string): string {
-  return `projects.json at ${filePath} ${failure}. gp_project_set refused to write it: replacing an unreadable registry discards every registration in it. See the damage with \`python3 -m json.tool ${filePath}\` and repair that file, or set ${FORCE_OVERWRITE_ENV}=1 and retry to rebuild the registry from scratch — the unloadable file is moved aside as ${filePath}.unreadable-<id> rather than deleted, and every existing project entry is lost.`;
+  return `projects.json at ${filePath} ${failure}. gp_project_set refused to write it: replacing an unreadable registry discards every registration in it. See the damage with ${registryReaders(filePath)} and repair that file, or set ${FORCE_OVERWRITE_ENV}=1 and retry to rebuild the registry from scratch — the unloadable file is moved aside as ${filePath}.unreadable-<id> rather than deleted, and every existing project entry is lost.`;
 }
 
 function readFailureMessage(filePath: string, failure: string): string {
-  return `projects.json at ${filePath} ${failure}. This is a read failure, not an empty registry: the entries that are registered cannot be listed. See the damage with \`python3 -m json.tool ${filePath}\`, then repair or replace that file. To rebuild the registry from scratch instead — which costs every existing entry — set ${FORCE_OVERWRITE_ENV}=1 and call gp_project_set again.`;
+  return `projects.json at ${filePath} ${failure}. This is a read failure, not an empty registry: the entries that are registered cannot be listed. See the damage with ${registryReaders(filePath)}, then repair or replace that file. To rebuild the registry from scratch instead — which costs every existing entry — set ${FORCE_OVERWRITE_ENV}=1 and call gp_project_set again.`;
 }
 
 /**

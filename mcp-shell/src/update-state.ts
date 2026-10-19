@@ -43,6 +43,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** Env the daemon's own `--state-dir` maps to for this process (X-22 family). */
 export const STATE_DIR_ENV = "GLASSPANE_STATE_DIR";
@@ -381,6 +382,91 @@ export function stateRootOf(stateFile: string): string {
 }
 
 /**
+ * Quote a path for a shell only when it needs it, so a pasted command reads as the
+ * single argument it is.
+ */
+export function shellPath(text: string): string {
+  return /[\s"'`\\]/.test(text) ? JSON.stringify(text) : text;
+}
+
+/**
+ * A `node <path> …` command the reader can actually run.
+ *
+ * The remedy lines this feeds used to print `node updater/cli.js enable` and
+ * `node installer/cli.js` — relative to *whatever working directory the reader
+ * happens to be in*, which for an agent inside an MCP host is nowhere near this
+ * repository, so the command named an action nobody could take (review 2026-10-09
+ * finding 12). The published artifact removes the second half of the excuse:
+ * `mcp-shell/package.json` ships `dist` and `schemas`, so an installed copy has no
+ * `updater/cli.js` beside it to resolve to at all. A path is therefore only named when
+ * it is absolute, and `null` means no such command exists for this machine — the
+ * branches that receive it say that instead of printing a path that resolves elsewhere.
+ *
+ * This is the same judgement `tools.ts`'s `kind === "read"` branch renders
+ * (`updaterEnableCommand`, `runtimeSelfDiagnosis`); it lives here so the branches that
+ * render an *absent* or *unreadable* state — which is what a first-run machine and a
+ * damaged record actually read — cannot grow a second, weaker copy of it.
+ */
+export function absoluteNodeCommand(cliPath: string | null, suffix: string): string | null {
+  if (cliPath === null || !path.isAbsolute(cliPath)) {
+    return null;
+  }
+  return `node ${shellPath(cliPath)}${suffix}`;
+}
+
+/**
+ * This build's own location, for finding the scripts shipped beside it — the lookup
+ * `engine-client.ts`'s `daemonUnreachableRemedy` already makes, for the same reason.
+ */
+export function repoScript(name: string): string | null {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidate = path.resolve(here, "..", "..", name);
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
+/** What to say when no absolute command exists to print — the sentence, not a placeholder. */
+const NO_COMMAND_PRINTED = "this build is shipped with no updater or installer entry point beside it, and the state "
+  + "file it is reporting on names none either, so this line prints no command rather than one resolved against a "
+  + "directory you are not standing in";
+
+/**
+ * How to re-write a record this shell could not decode, in words the machine can execute.
+ *
+ * The record's own `runtime.cliPath` is not usable here — this branch exists because the
+ * record could not be read — so the only nameable paths are the ones beside this build,
+ * each accepted only when absolute.
+ */
+function rewriteRecordSentence(stateFile: string): string {
+  const enable = absoluteNodeCommand(
+    repoScript(path.join("updater", "cli.js")),
+    ` enable --state-dir ${shellPath(stateRootOf(stateFile))}`,
+  );
+  const installer = absoluteNodeCommand(repoScript("installer/cli.js"), "");
+  if (enable !== null && installer !== null) {
+    return `re-run the GlassPane installer (\`${installer}\`) or the updater's \`enable\` step (\`${enable}\`), `
+      + "either of which writes the record again";
+  }
+  if (enable !== null) {
+    return `run the updater's \`enable\` step (\`${enable}\`) to write the record again`;
+  }
+  if (installer !== null) {
+    return `re-run the GlassPane installer (\`${installer}\`) to write the record again`;
+  }
+  return `re-run the installer of the checkout this machine was installed from to write the record again: ${NO_COMMAND_PRINTED}`;
+}
+
+/** How to find out whether an install that never checked is current, as a runnable command. */
+function runCheckSentence(stateFile: string): string {
+  const check = absoluteNodeCommand(
+    repoScript(path.join("updater", "cli.js")),
+    ` check --state-dir ${shellPath(stateRootOf(stateFile))}`,
+  );
+  return check === null
+    ? `find out from the settings panel instead: ${NO_COMMAND_PRINTED}`
+    : `run \`${check}\` (or use the settings panel) to find out`;
+}
+
+/**
  * Read and render. Never throws: `gp_diagnose` answers about an operation, and a
  * missing or broken update file is a fact about the machine, not a reason to fail
  * the diagnosis.
@@ -400,7 +486,7 @@ export function readUpdateState(env: NodeJS.ProcessEnv = process.env, stateRootO
       kind: "absent",
       stateFile,
       summary: `update state: no ${stateFile} — auto-update has never run on this machine, so nothing here says `
-        + "the installed GlassPane is current; run \`node updater/cli.js check\` (or use the settings panel) to find out",
+        + "the installed GlassPane is current; " + runCheckSentence(stateFile),
     };
   }
   // 文件头把"a mode that is not owner-only"写进 unreadable 那一档已经很久了，但这里从来没
@@ -474,8 +560,8 @@ export function readUpdateState(env: NodeJS.ProcessEnv = process.env, stateRootO
       kind: "unreadable",
       stateFile,
       summary: `update state: ${stateFile} carries a CA trust bundle record this shell cannot read (${ca.reason}); `
-        + "whether this install can reach the release endpoint at all is unknown, so nothing below it is trusted either — "
-        + "re-run the installer or `node updater/cli.js enable` to write the record again",
+        + "whether this install can reach the release endpoint at all is unknown, so nothing below it is trusted "
+        + `either — ${rewriteRecordSentence(stateFile)}`,
     };
   }
   // Same rule, different fact: a record of the updater's own swap that cannot be decoded
@@ -487,8 +573,8 @@ export function readUpdateState(env: NodeJS.ProcessEnv = process.env, stateRootO
       kind: "unreadable",
       stateFile,
       summary: `update state: ${stateFile} carries an updater self-update record this shell cannot read (${runtime.reason}); `
-        + "which copy of the updater this machine's daily job will run next is unknown, so nothing below it is trusted either — "
-        + "re-run the GlassPane installer, or `node updater/cli.js enable`, to write the record again",
+        + "which copy of the updater this machine's daily job will run next is unknown, so nothing below it is trusted "
+        + `either — ${rewriteRecordSentence(stateFile)}`,
     };
   }
   const bits = [

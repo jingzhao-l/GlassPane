@@ -286,6 +286,51 @@ export function isReplayUnsafeMethod(method: string): boolean {
 export const REPLAY_UNSAFE_METHOD_NAMES: readonly string[] = Object.keys(REPLAY_UNSAFE_REASONS);
 
 /**
+ * The answer this shell gives when the daemon's error frame carries no remedy at all.
+ *
+ * It used to be one sentence for every method — "check the daemon log (stderr) and retry" —
+ * which made the transport order by words the re-send it refuses by behaviour: `act`,
+ * `restore` and `attach` are the methods {@link REPLAY_UNSAFE_REASONS} exists to keep off
+ * the wire a second time, `slowEngineRemedy` says *do NOT re-issue* for them, and
+ * `writeBacklogRemedy` refuses even to name a probe while one is outstanding. An error
+ * frame is the daemon's answer to *this* request, so the request did reach the service —
+ * and whether the change took effect before the error was raised is a thing no error frame
+ * says, which is exactly why the sentence may not spend that unknown on a second copy.
+ * `snapshot` is the third case and the one a blanket "retry" also got wrong: nothing is
+ * pressed twice, but every accepted copy writes another entry into the daemon's bounded
+ * ring and can evict the baseline an earlier snapshot returned — the one a later restore
+ * still needs. Membership comes from the two lists this file already keeps, so a method
+ * moving between them moves this answer with it.
+ *
+ * `null` is the unattributed case: an id-less frame this client could not tie to a request
+ * it still tracks, where naming a method would be a guess and authorising a re-send on top
+ * of the guess would be worse.
+ */
+export function noRemedyFallback(method: string | null): string {
+  const readTheLog = "the engine sent no remedy for this error code, and the daemon's own log (stderr) is the only "
+    + "side that can say what it refused; this shell cannot see past the frame it was handed";
+  if (method === null) {
+    return `${readTheLog}. This frame was not attributed to a request this client still tracks, so nothing here says `
+      + "which method it answers, and this line authorises no re-send";
+  }
+  const unsafe = REPLAY_UNSAFE_REASONS[method];
+  if (unsafe !== undefined) {
+    return `${readTheLog}. Do not re-issue '${method}' on the strength of this answer: the frame is proof the `
+      + "request reached the daemon, and no error frame says whether the change took effect before it was raised — "
+      + `this shell never replays it on its own either, because ${unsafe}`;
+  }
+  if (STATE_CHANGING_ON_RETRY_METHOD_NAMES.includes(method)) {
+    return `${readTheLog}. A second '${method}' is not a cheaper copy of the first: it writes daemon state again, `
+      + "the snapshot ring the daemon keeps is bounded, and one more entry can evict the baseline an earlier "
+      + "snapshot returned — the one a later restore still needs. Read what the first answer said before asking "
+      + "for another";
+  }
+  return `${readTheLog}, and a retry is the plain next step: '${method}' is not a method this shell refuses to `
+    + "replay, so nothing is performed twice. Change what the request carries if a different answer is wanted — "
+    + "nothing here says the daemon will answer this one differently";
+}
+
+/**
  * `hello.capabilities` 的第一个读者（2026-10-11）。
  *
  * 这份清单由 daemon 从 `EngineMethod` 派生（`FrameCodec.capabilityWireNames`），可此前
@@ -1109,7 +1154,7 @@ export class EngineJsonRpcClient {
           // `reject()` settles the caller, so the echoed reply takes the late-reply
           // path above and is still attributed and recorded; marking the entry
           // spends the guess for arrival-order purposes only.
-          this.reject(target, attribute(this.engineError(frame.error), target));
+          this.reject(target, attribute(this.engineError(frame.error, target.method), target));
           target.arrivalOrderConsumed = true;
           this.retainForLateReply();
           return;
@@ -1123,7 +1168,9 @@ export class EngineJsonRpcClient {
         return;
       }
       this.report(frame.error
-        ? `engine reported ${this.engineError(frame.error).code} with no request in flight: ${truncate(line)}`
+        // `null`, and not a guess at a method: this frame is being reported precisely
+        // because no request this client still tracks owns it.
+        ? `engine reported ${this.engineError(frame.error, null).code} with no request in flight: ${truncate(line)}`
         : `engine sent an id-less frame with no request in flight: ${truncate(line)}`);
       return;
     }
@@ -1132,7 +1179,7 @@ export class EngineJsonRpcClient {
 
   private settleFromFrame(entry: Pending, frame: CallFrame): void {
     if (frame.error) {
-      this.reject(entry, this.engineError(frame.error));
+      this.reject(entry, this.engineError(frame.error, entry.method));
       return;
     }
     // "没有 result 这个键"与"result 是 undefined"不是一件事。少了这一句，一帧既无
@@ -1181,13 +1228,13 @@ export class EngineJsonRpcClient {
     ), entry, inferred));
   }
 
-  private engineError(body: Partial<EngineErrorBody>): EngineCallError {
+  private engineError(body: Partial<EngineErrorBody>, method: string | null): EngineCallError {
     return new EngineCallError(
       String(body.code ?? GP_E_UNKNOWN),
       String(body.message ?? "the engine sent an error frame without a message"),
       typeof body.remedy === "string" && body.remedy !== ""
         ? body.remedy
-        : "the engine sent no remedy for this error code; check the daemon log (stderr) and retry",
+        : noRemedyFallback(method),
     );
   }
 
