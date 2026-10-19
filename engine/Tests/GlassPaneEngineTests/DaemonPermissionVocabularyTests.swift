@@ -17,9 +17,11 @@ final class DaemonPermissionVocabularyTests: XCTestCase {
     private static let stateTokens = ["granted", "denied", "notDetermined", "unverifiable"]
 
     private func mainSource() throws -> String {
-        let path = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .appendingPathComponent("Sources/glasspaned/main.swift").path
-        return try String(contentsOfFile: path, encoding: .utf8)
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("engine/Sources/glasspaned/main.swift")
+        return try String(contentsOf: url, encoding: .utf8)
     }
 
     /// `--help` 里某一条旗标自己那一段：从它的标题行起，到下一条同缩进的旗标行为止。

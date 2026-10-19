@@ -63,16 +63,25 @@ final class Qoder20261019OneShotFileModesTests: XCTestCase {
     /// 交付代码那一半：脚本不再 owner 之外可读，输出在提交之前就被面板建好。
     func testOneShotWriterSetsBothModesItself() throws {
         let url = URL(fileURLWithPath: #filePath)
-        let path = url.deletingLastPathComponent()
-            .appendingPathComponent("Sources/glasspane-settings/SettingsModel.swift").path
-        let source = try String(contentsOfFile: path, encoding: .utf8)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("engine/Sources/glasspane-settings/SettingsModel.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
         let start = try XCTUnwrap(
             source.range(of: "nonisolated private static func runOneShot("),
             "一次性任务的执行面搬家了：这条闸要跟着搬，不许把它删掉")
-        let end = try XCTUnwrap(
-            source.range(of: "launchctl submit", range: start.upperBound..<source.endIndex),
-            "找不到提交那一步，说明这一段的结构变了")
-        let body = source[start.lowerBound..<end.lowerBound]
+        // 右边界只能是**下一个函数**：文档注释里就写着 "launchctl submit" 这几个字，
+        // 拿它当终点会得到一个空窗口，然后三条断言都在读一句注释。
+        let following = ["\n    nonisolated private static func ", "\n    private static func ",
+                         "\n    static func ", "\n    func "]
+        var end = source.endIndex
+        for marker in following {
+            if let r = source.range(of: marker, range: start.upperBound..<source.endIndex), r.lowerBound < end {
+                end = r.lowerBound
+            }
+        }
+        XCTAssertLessThan(start.upperBound, end, "runOneShot 这一段切不出长度，三条断言就读不到东西")
+        let body = source[start.lowerBound..<end]
 
         XCTAssertFalse(body.contains("0o755"),
                        "一次性脚本又被 chmod 成 0755：它由同一个 uid 的 launchd 执行，owner 的 x 就够")
