@@ -186,3 +186,44 @@
 | R-8 | 把 `SocketDirectoryRule.enforce` 里新加的叶子符号链接守卫注释掉 | `testLeafSymlinkIsRefusedWithoutFollowingIt` 红（`XCTUnwrap failed: expected non-nil value of type "String"`）；恢复后与备份逐字节相同（sha `063ddf1c…`） |
 | R-9 | 把 `--check-accessibility` 的取值表改回 `(granted | notDetermined)`，或把 `AccessibilityPermissionProbe.displayStatus()` 改回 `isTrusted() ? .granted : .notDetermined` | `testCheckAccessibilityHelpEqualsItsReachableSet` 与 `EngineP1Batch3Tests testAccessibilityProbeInjectsTrustCheck` 各自具名变红（后者是泳道留档里那一次 2 failures） |
 | R-10 | 把 `runOneShot` 的输出预建 0600 那一步删掉 | `testOneShotWriterSetsBothModesItself` 红；而机制用例 `testShellRedirectKeepsAPreCreatedPrivateMode` 自带对照臂（不预置时必须是 0644），保证这条闸不是只在看两个字符串 |
+
+## 6. 交接：发布为什么没走完，以及走完它的确切命令
+
+本轮主仓产品面 17 条逐字门禁全绿（计数在 `engine/smoke.md` §5），main 已推，`v1.17.0` 已打在主线最后一笔上。
+**GitHub Release 与 npm 两条通道未触发**，原因是发布自己的前置：`release.yml` 第一步
+`node scripts/assert-ci-green.mjs --sha <tagged commit> --workflow ci.yml` 要求这个 commit 的 CI 全绿，
+而 CI 唯一红的 job 不是本仓产品面的：
+
+```
+harness rulers › The released artifact and the split branch are trunk's bytes   ✗
+release-artifact — 1 agreement(s) held, 0 tolerated lag(s), 1 problem(s) [trunk 1836c47d…]
+  ✗ artifact: the tree behind the released v0.8.2 is 6306b5e7… but trunk's harness/glasspane-harness is 1836c47d…
+      remedy: land trunk's side of every difference above, re-split, and cut the next patch
+              so the tagged tree is trunk's (docs/release.md steps 3-4).
+              A tag that has already been published is never moved.
+```
+
+**判据：该由那条线修，不该由我这轮修。** 三条理由：
+1. 差异的 8 个路径全在 `harness/glasspane-harness/**`（CHANGELOG/FORK/SYNCLOG/bun.lock/
+   `contracts/kernel-*.json`/`docs/kernel-integration.md`/`packages/opencode/package.json`），
+   开口子是 2026-10-18 那批 Step 0b 的 harness 提交，不是本轮任何一笔；
+2. 本轮任务明文写着不改 `harness/` 内容或版本、`harness/` 不发版（它 10:30 有独立任务与独立发布通道），
+   消掉这道红唯一的办法正是"发一个 harness 的新 patch 版"——那是它的版本号，不是我的；
+3. 我不会用放宽判据、删步骤或跳过 `--check` 的方式让它变绿；那条红线本身是对的（它防的就是
+   "用户装到的与仓库说它发过的不是一份东西"）。
+
+那条线落下 0.8.3（它自己的 `docs/release.md` 步骤 3-4）之后，这两条通道接着跑：
+
+```bash
+# 1) 让发布重跑被拦下的那一格（tag 不动、不重打）
+gh run rerun 39195845505 --failed --repo jingzhao-l/GlassPane
+# 2) 两条 npm 通道，顺序固定：先 dry 再 publish，--ref 必须显式是这个 tag
+gh workflow run release.yml --repo jingzhao-l/GlassPane --ref v1.17.0 -f mode=dry
+gh workflow run release.yml --repo jingzhao-l/GlassPane --ref v1.17.0 -f mode=publish
+# 3) job 绿不等于发完：回查 registry
+npm view glasspane-mcp@1.17.0 version --prefer-online
+npm view glasspane-install@1.17.0 version --prefer-online
+```
+
+物理边界（不是决策遗留）照旧两条：`npm stage approve <stage-id>` 需要 owner 的 2FA；Apple 公证需要
+付费账号，本轮没有生成任何公证步骤，也没有把它写成已完成。
