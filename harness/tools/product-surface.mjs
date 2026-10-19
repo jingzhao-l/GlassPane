@@ -128,7 +128,7 @@ const check = (rule, condition, detail) => {
  */
 const SCAN_SET_FLOORS = {
   bins: 2, // product.json -> bins
-  forbiddenFiles: 879, // shipped text discovered under the release, install, launcher and patch paths
+  forbiddenFiles: 896, // shipped text discovered under the release, install, launcher and patch paths
   forbiddenNeedles: 7, // what they are searched for
   cliCmdFiles: 66, // packages/opencode/src/cli/cmd/**.ts, walked recursively
   envDiscovery: 67, // those CLI files + the shipped launcher
@@ -329,6 +329,7 @@ const forbiddenNeedles = [
 const forbiddenScanDirs = [
   "packages/opencode/src",
   "packages/opencode/script",
+  "script",
   "packages/opencode/bin",
   "packages/tui/src",
   "packages/core/src",
@@ -992,7 +993,7 @@ const SELFTESTS = [
 // individually, and this is the net that catches a future rule being deleted outright
 // (including by this file's own editors). Growth is expected and free; a shrink is the
 // lane saying less than it used to, which is the one thing a green printout must not mean.
-const AGREEMENT_FLOOR = 6351
+const AGREEMENT_FLOOR = 6490
 check("agreement-count", ok.length + problems.length >= AGREEMENT_FLOOR, `this run asked ${ok.length + problems.length} question(s) of the product surface; the floor is ${AGREEMENT_FLOOR} — a smaller number means a rule or a scan set left this file, and "fewer agreements" is how every silent narrowing in this lane has historically looked (83 → 86 was caught by exactly this comparison). Fix the scan; do not lower the floor.`)
 console.log(`product-surface — ${ok.length} agreement(s) held, ${problems.length} problem(s)`)
 for (const p of problems) console.error(`  ✗ ${p}`)
