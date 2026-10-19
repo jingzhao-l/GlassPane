@@ -68,7 +68,7 @@ afterAll 要 dispose runtime + 删临时目录，5 秒默认超时会把它打�
 
 **product-surface** — 私有化是**分布式事实**：产品名住在 `product.json`，但同一事实散在 `packages/opencode/package.json`、`script/build.ts`、`script/publish.ts`、`script/postinstall.mjs`、`bin/glasspane-harness`、两个安装器和工作流里，**没有任何东西会发现其中一处还写着上游的名字**。症状不是红测试——是装出来的东西不对，或者发布推到陌生人 registry（这正是批次 A 从上游脚本里拆掉的 ghcr/AUR/homebrew tap/opencode.ai/install 四条路）。brand 那道闸量字符串，这道量**一致**：2026-10-19 实测 6351 条断言，**无基线**（`--record` 现在被直接拒绝并退 2；本轮把四个发现集的规模钉住，空集不再算数）（它量的不是数字，是"该不该一样"——规则错了就改规则，没有 `--record` 可盖）。安装器不只被读：`sh -n` 过语法，`--dry-run` 真跑一遍并断言计划里出现产品名。反向因果五条已验可红（版本漂移、代码里塞回 ghcr、安装器指向别人仓、多一个工作流、配置发现丢掉遗留回退），另有两条是**校准负例**：第一版 URL 规则被注释里的仓库名喂饱（改为只看可执行文本），以及 state-root/config 两条一度被分段插入落在 `process.exit` 之后成为死代码（计数从 83 变 86 才发现——**"闸是绿的"要连计数一起看**）。
 
-**brand-surface** — 私有化批次 A 改了名、B 钉住了"彼此一致"，但**一致地叫 glasspane-harness 旁边照样能长出一句 `npm install -g opencode-ai`**：安装器照跑，只是装错了名字；文档照读，只是叫错了人——品牌腐烂的失败模式全是"没人发现"。所以产品面 25 个文件零容忍（上游 npm 名/平台包名/上游 registry/用户可见字符串；注释不算，说明"我们删掉了 X"的注释是记录不是引用），两份 README 按**行**判定（每处 opencode 必须在署名行上，路径 `packages/opencode` 也算行——路径不是产品主张），再加一条全树**血缘计数只许减不许增**的棘轮（2026-10-16 复记 9,646 处 / 3,312 文件；上一记 9,627 / 3,308——+19 处全是尺子与测试里"这块字节是谁的"的归属说明，按 9616/9617/9618 先例带 `--lineage-note` 记账，而不是删句子换绿。（此数曾记到 18,649/3,906，是口径收窄前的全树形状）；今天全仓最大的数字就是它，而这正是它的用途：让 `@opencode-ai/*`、`OPENCODE_*` 这些刻意保留的名字成为**有基线的存量**而不是没人管的增量）。反向因果六条全验可红，其中两条**校准负例**最典型：① 无引号的 `npm i -g opencode-ai` 一开始只被 lineage 计数抓住、专属规则没咬（规则从"带引号"收紧为"任何出现"）；② 平台包规则只认成品名 `opencode-darwin`、没认模板形式 `opencode-${platform}`（postinstall 里正是模板形式）——**总计数兜住了一切，但兜底不能替代专属规则**，两条都收紧后各自单咬。又一轮校准同样入账：血缘计数最初把 fork 自己的 SYNCLOG/FORK/上游 AGENTS 也算进去，于是**诚实的文档写作会让代码血缘计数变红**——现在按文件排除这些"讲血缘故事的地方"（两份 README 仍走行级规则管住它们的措辞）；而 `upstream-npm-name` 收紧到"任何出现"时先误咬了 17 处刻意保留的 `@opencode-ai/*` 工作区作用域，改为"前面不是 @ 也不属于标识符"才是诚实的中间态。两条**口径级**的账也在同一批补上：`--record` 遇到 `missing-product-file`（列在名单里却读不到的文件）一律拒绝，除非另给显式 `--ack-missing-product-file`，且此后每次 `--check` 都重播这个洞——"没在看这个文件"不许被盖成绿色基线；血缘计数**每次并报扫描规模**（3,310 文件是口径的一部分），覆盖率**下降即红**（子树离开树＝计数变小＝假的"品牌进步"），上升只报不红（新增文件是正常干活，挡它只会逼人关闸）。
+**brand-surface** — 私有化批次 A 改了名、B 钉住了"彼此一致"，但**一致地叫 glasspane-harness 旁边照样能长出一句 `npm install -g opencode-ai`**：安装器照跑，只是装错了名字；文档照读，只是叫错了人——品牌腐烂的失败模式全是"没人发现"。所以产品面 25 个文件零容忍（上游 npm 名/平台包名/上游 registry/用户可见字符串；注释不算，说明"我们删掉了 X"的注释是记录不是引用），两份 README 按**行**判定（每处 opencode 必须在署名行上，路径 `packages/opencode` 也算行——路径不是产品主张），再加一条全树**血缘计数只许减不许增**的棘轮（2026-10-16 复记 9,646 处 / 3,312 文件；上一记 9,627 / 3,308——+19 处全是尺子与测试里"这块字节是谁的"的归属说明，按 9616/9617/9618 先例带 `--lineage-note` 记账，而不是删句子换绿。本轮复记 9,603 处 / 3,311 文件（此数曾记到 18,649/3,906，是口径收窄前的全树形状）；今天全仓最大的数字就是它，而这正是它的用途：让 `@opencode-ai/*`、`OPENCODE_*` 这些刻意保留的名字成为**有基线的存量**而不是没人管的增量）。反向因果六条全验可红，其中两条**校准负例**最典型：① 无引号的 `npm i -g opencode-ai` 一开始只被 lineage 计数抓住、专属规则没咬（规则从"带引号"收紧为"任何出现"）；② 平台包规则只认成品名 `opencode-darwin`、没认模板形式 `opencode-${platform}`（postinstall 里正是模板形式）——**总计数兜住了一切，但兜底不能替代专属规则**，两条都收紧后各自单咬。又一轮校准同样入账：血缘计数最初把 fork 自己的 SYNCLOG/FORK/上游 AGENTS 也算进去，于是**诚实的文档写作会让代码血缘计数变红**——现在按文件排除这些"讲血缘故事的地方"（两份 README 仍走行级规则管住它们的措辞）；而 `upstream-npm-name` 收紧到"任何出现"时先误咬了 17 处刻意保留的 `@opencode-ai/*` 工作区作用域，改为"前面不是 @ 也不属于标识符"才是诚实的中间态。两条**口径级**的账也在同一批补上：`--record` 遇到 `missing-product-file`（列在名单里却读不到的文件）一律拒绝，除非另给显式 `--ack-missing-product-file`，且此后每次 `--check` 都重播这个洞——"没在看这个文件"不许被盖成绿色基线；血缘计数**每次并报扫描规模**（3,310 文件是口径的一部分），覆盖率**下降即红**（子树离开树＝计数变小＝假的"品牌进步"），上升只报不红（新增文件是正常干活，挡它只会逼人关闸）。
 
 ## 怎么跑
 
@@ -117,6 +117,47 @@ KERNEL_SRC=/path/to/iterate-skill tools/sync-kernel.sh --target=repo            
   本轮三处改动各自要咬的是哪一类假绿：`countAuthoredLines` 里那个**永不前进的 `ri`**（一条删除行可以免掉任意多条新增行，40 份改名复制记 0 行）；**面 B 越过 10% 却没人说**（跨限判定 `was.ratio <= limit` 对已经超限的基线恒假，所以那句"already over"只写给面 A，面 B 15.86% 只在括号里出现一次）；排除清单的**出处打成一条不存在的.path**（`harness/contracts/kernel-vendor.json`，真文件在 fork 树里），以及 brand-surface 的 `--record` 会把"这个文件没被扫到"写成绿色基线、`--check` 又从不比对扫描覆盖（子树消失＝血缘计数下降＝看着像进步）。surface-semantics 的阈值规则只认一种操作数顺序（`ratio > 0.5` 命中，`0.5 < ratio` 记 0），换成两侧匹配后本树仍 0 命中/18 文件——**没有**为了这条改动动过金样。
 - surface-semantics：`mcp-shell/src/tools.ts` 加 `ratio > 0.95` → threshold-comparison 红；`glasspane-decision-log.ts` 加 `ok ? "pass" : "fail"` → verdict-synthesis 红；`mcp-shell/src/evidence-report.ts` 加 `pack.signals.pixelDiff >= 0.5` → 两条规则同红（都点名文件与规则计数）；删金样 → exit 2 并指名 `--record`；还原三处 → 转绿。**校准也是负例**：第一版规则把本仓 `status: "failed"` 与 `pixelDiff !== undefined` 判成命中（基线一度 6 命中），按"按主语判合成 / 在场检查豁免"收窄后回到 0 命中——先校准再记基线，否则金样记的是规则的噪声。
 - `tools/sync-kernel.sh --target=fork`（**该 leg 已于 2026-10-08 改为直接拒绝**，以下是它还在 vendoring 时的控制记录）：一道红闸（用 `BUN=/usr/bin/false` 强制）→ 回滚后镜像 23 个文件、内容签名、溯源清单三项都在，**没有任何东西被删**；这条控制是补出来的——脚本的第一版回滚用 `git clean`，在首次 vendoring（路径还没进版本控制）时把刚 vendor 进来的 23 个文件删掉了，而触发它的根本不是代码问题，是 `bun: command not found`。**"缺工具"与"闸红"分开处理**这条现在仍活在 `--target=repo`（mcp-shell 那份镜像）上：找不到 bun 就明说哪两道闸没跑，并在成功行里保留警告。
+
+### 2026-10-19 每日批次（harness 线）：落仓电池 `rulers-selftest.mjs`，与"记录写着、代码不读"这一族
+
+这一轮改了六把尺子共 14 处，所以按纪律重新验"它能红"，并且**第一次把验证落仓**：
+`harness/tools/rulers-selftest.mjs`（接进父仓 `ci.yml` 的 `harness-rulers` job，`product-surface`
+的 `selftest-wired` 规则现在也盯着它）。它拒绝在脏树上起跑，每条控制改一个输入、跑**真尺子**、
+要求**具名**诊断（只退 1 不说清哪条规则的红不算控制），再按 sha256 核回。本轮 14 条全中：
+
+- `brand-surface`：金样 `productFiles` 减一 → `✗ product-file scan set moved`；`docFiles` 换成一条 →
+  `✗ doc-file scan set moved`。因果对照也跑了：把那条守卫改成 `if (false)` 的副本对**同一个变异**
+  报绿——证明上面两条红确实来自这段代码，而不是这棵树本来就在别处红。
+- `brand-surface` 的 `--record`、`tool-surface` 的 `--record`、`surface-semantics` 的 `--record`：
+  各修改一个**已跟踪**的 fork 文件 → 三把都 exit 1 并点名那个文件。这一条自身纠了一次错：
+  第一版控制用一个新建文件当探针，而三条守卫读的 `git diff --name-only HEAD` 根本不列未跟踪路径
+  ⇒ 三条对照"通过"、守卫从未触发，两次 `--record` 还真把金样写了出去；收尾的 git-status 断言
+  把它抓住。**"对照能过"不等于"对照在测东西"**，这条形状在本仓已经是第三次，所以写在这里。
+- `tool-surface`：金样 `engineLoc` 减一 → `✗ the denominator moved`；`surfaces.fork.kernel.version`
+  改一个不存在的号 → `✗ the kernel attribution moved`。这两条今天不是摆设：合并另一条线之后
+  engine 从 26,476 涨到 27,867，两面一字未改而占比自己变了——加这条之前那是一次静默的换口径。
+- `fork-diff`：金样 `editedDetail` 清空 → `✗ … declares 282 edited file(s) but carries content hashes
+  for only 0`（此前那句声明由两个同源长度的自比来"守"，物理上不可触发）。
+- `hook-liveness` 与 `fork-diff`：往参照检出放一个文件（`git status --porcelain` 立刻非空）→
+  两把都 exit 2 点名 `is not clean`。这条防的不是洁癖：钩子存活是按参照树的字节判的，
+  本地改一个上游文件会被判成"上游换了插件地板"——那把一次本地误操作说成上游事故，
+  正是这把尺子存在的理由的反面。
+- `product-surface`：`generate.ts` 里的目录名改掉 → `✗ … no longer reads the committed catalog by name`；
+  `deletedFromTree` 里把一个**存在**的包声明成已删 → `✗ packages/desktop is declared under
+  deletedFromTree … the disk says present`。第二个控制原先写反了（往"已删"列表里塞一个不存在的
+  路径——那本来就是正确答案），退 0 被抓出来后才改成现在的形状。
+- `release-artifact`：两面共用一个二进制差异文件时 `numstat` 给 `-`，`linesOf` 折成 0，
+  从前读不出的字节会被分类成"发布物比主干少 0 行"= 被容忍；`release-artifact-selftest.mjs`
+  新增 J2 用例，实测 exit 2 点名 `could not be materialized`，而那条"拆掉比较就判绿"的中性对照
+  照旧红——两条互不遮蔽。
+- 三条尺子改完之后，`--record` 重跑与仓内金样逐字节相同（面 B 覆盖率、血缘计数、四桶计数各自
+  打印），`git status` 零残留；参照检出仍是 `describe == v1.18.32`、`fsck` 无错、工作树干净。
+
+本轮还有两处"闸自己是受害者"的发现记在上面的 §尺子各防哪一种事故 之外：`brand-surface` 的
+内置 skill 规则一直按一个**已被改名**的文件路径读输入，于是它贡献 0 命中、金样把"没人看"记成
+"干净"；而 `tool-surface` 的 `limitSource` 指向一份从未存在的 specs 决策记录——后者是另一条线的
+审查交过来的，`scripts/check-doc-links.mjs` 现在多了一条 `rulerProvenance()`：金样与尺子代码里
+凡声明 `.md`/`.json` 出处的字段都按三个根解析，指不到真文件就红。它上线当天就抓到了 skill 那条。
 
 ### 2026-10-12 每日批次（harness 线）：面 B 那 90 分钟的成因，与发布闸把"机器忙"判成"产品坏"
 

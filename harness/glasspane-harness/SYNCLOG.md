@@ -2,6 +2,95 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-19（第十三次会话）· 0.9.0：46 条审查发现清零，六把尺子里"记录写着、代码不读"那一族一次收完
+
+### 开工自检与上一轮遗留
+
+- 开工 HEAD：主仓 `5b20a957`；整树 `git status` 62 条，全部在 `engine/` 与 `specs/`
+  （07:30 那条线正在飞，含一个可疑残渣 `engine/Optional("/`——不是我的文件，原样留给那条线）。
+  本轮按纪律在隔离工作树 `/Volumes/Eng-Dev/.worktrees/gp-harness-daily-20261019`
+  （分支 `gp-harness-daily-20261019`）改动与提交，`.external/opencode` 做符号链接指回主树那份。
+- 盘：`df -k /Volumes/Eng-Dev` 开工 12,871,912 KB ≈ 12.3 GiB 可用，收口时 12.6 GB 量级；
+  node_modules 用 APFS clonefile（`cp -Rc`）从主树复制，实测只吃掉 ~60 MB。
+- `gp-harness-orphan-20261010`（`a054fdc`）**已在 main 里**：`git merge-base --is-ancestor` 判真，
+  远端与本地那条分支经 `--prune` 后已不存在。逐文件按字节复核（不是看提交信息）：
+  `script/publish.ts` 与 main 逐字相等；`verify-published.ts` 的 os/cpu 断言现在读的是
+  **已安装**包清单（`prefix/lib/node_modules/<name>/package.json` 的 `os`/`cpu`/`version`），
+  那句"拿 product.json 跟自己比"的自回显已不在；`scripts/install.sh` 25 条新增行在 main 里
+  逐条命中（0 缺失）；`installer-selftest.sh` 与 `product-surface.mjs` 有 6 条与 1 条按字面找不到，
+  语义复核证明是**被更强的版本取代**：404 分支从"跳过"改成"拒绝 + 显式 opt-out"
+  （`installer-selftest.sh:516-528`），`no-foreign-publish` 从一条正则改成发现集 + 四条地板
+  （`product-surface.mjs:228-266`）。结论：这笔遗留不需要并，也已经被并，判据在此。
+
+### 审查规模与终态
+
+- 四路审查（fork 定制面 5 条、尺子层 14 条、发布与供应链 9 条、体验与文档 18 条）+ 我自己
+  查出 3 条（尺子文档 stale 数字、`tool-surface` 的 `limitSource` 指向不存在的 specs 文件
+  ——这条是别的线交来的、`brand-surface` 内置 skill 规则的输入路径早在私有化时改名），
+  去重后 46 条，全部修完并有固定点；`未修项` 为空。
+- 另有两条由**新闸第一次真跑**才浮出来：`script/stats.ts`（按上游包名抓 npm 下载量并 POST 进
+  PostHog，全仓无人引用）与 `product.json` 声明的六个不存在的目录。
+
+### 数字（本轮实测，全部对着文件读）
+
+- 版本线：`product.json` 0.8.2 → **0.9.0**（真源），`packages/opencode/package.json` 跟随；
+  `scripts/check-version.mjs` 报父仓版本线 1.16.4 一致（另一条线，本轮没动）。
+- 六把尺子（全部从主仓根跑）：
+  - `fork-diff` 4640/6726 逐字节相同 · 285 edited · 94 added · 1707 deleted
+  - `tool-surface` engine 26,476 LOC / 63 文件；面 A 9,886 / **21.65%**；面 B 8,793 → 9,294 /
+    **20.36%**（本批自己 +501 行，逐处归属见金样提交正文；**上一笔提交信息里我写的
+    "8793→9553/+760" 与 "engine→27,547" 三个数字是错的**——engine 在隔离树里没变，
+    面 B 的实测是 9,294。写错的原因是照着文件清单估加和而没有回读金样，正是这个仓反复要防的
+    "提交信息 ≠ 内容"，留在这里而不是抹掉。限 10% 两面皆越，如实记）
+  - `surface-semantics` 0 命中 / 20 文件（mcpShell 14 + fork 6），正对照 3/3 规则各命中一次
+  - `brand-surface` 26 产品文件 + 2 文档 · 1 命中（`customize-harness.md`，见上）·
+    血缘 9,646/3,312 → 9,603/3,311
+  - `product-surface` 227 → **6,491** 条一致 / 0 条问题（发现集从 7 个手抄文件扩到 896 个
+    发布/安装/启动器/patches/script 文本 × 7 个端点，加模型目录 pin 与声明形状双向核）
+  - `hook-liveness` 21 个钩子对齐 v1.18.32，无漂移；金样死钩子集仍是 `permission.ask` 一条
+- 内核：`kernel-pin` `iterate-kernel@0.1.8` · 26 份契约文件逐条 sha256 · lock integrity 对得上；
+  `kernel-conformance` 16 份 fixture，`--impl /Volumes/Eng-Dev/iterate-skill/kernel` 两份实现
+  同答案；参照检出 `describe` == pin（`v1.18.32`）、`fsck` 无错、工作树干净。
+- 固定点用例：opencode 侧 129 → **130**（`test/tool/glasspane-surface|kernel`、
+  `test/plugin/glasspane-decision-log|compaction`）其中 decision-log 13 → 15；tui 侧
+  `inline-tool-wrap-snapshot.test.tsx` 32 条；installer-selftest 80 → **165** 条具名断言；
+  文档闸 `updater/test/scripts-check-doc-links.test.mjs` 22 → **28** 条；
+  四个发布包 typecheck 各自干净；`publish.ts --dry-run` 形态干净。
+- 主仓公共闸：`check-workflows --self-test` 12/12、`check-workflows` 5 份工作流干净、
+  `check-doc-links` 25 → 29 份文档 / 238 条仓内链接 / 0 死链 0 失效锚点。
+
+### 反向验证（每条都要具名红，不是"跑过了"）
+
+| 破坏的东西 | 具名变红 |
+|---|---|
+| 撤掉 decision-log 读数侧 wrapper | `test/plugin/glasspane-decision-log.test.ts` 13 pass / **2 fail**，错误句 `error: reader blew up` |
+| `brand-surface` 的 productFiles 减一 | `✗ product-file scan set moved`；**并把这条守卫拆掉后同一变异变绿**（因果对照，证明红来自这段代码） |
+| `brand-surface` 的 docFiles 换成一条 | `✗ doc-file scan set moved` |
+| `tool-surface` engineLoc 减一 | `✗ the denominator moved` |
+| `tool-surface` kernel.version 改 0.0.0-selftest | `✗ the kernel attribution moved` |
+| `fork-diff` 金样 `editedDetail` 清空 | `✗ the golden declares 282 edited file(s) but carries content hashes for only 0` |
+| 往 `.external/opencode` 放一个探针文件 | `hook-liveness` 与 `fork-diff` 双双 exit 2 点名 `is not clean` |
+| 修改一个**已跟踪**的 fork 文件后跑 `--record` | `brand-surface` / `tool-surface` / `surface-semantics` 三把各自 exit 1 并点名该文件 |
+| `generate.ts` 里的目录名改掉 | `product-surface` `✗ [catalog-pinned] script/generate.ts no longer reads the committed catalog by name` |
+| `deletedFromTree` 塞一个不存在的包 | `✗ [declared-shape] … is declared under deletedFromTree … the disk says present` |
+| `release-artifact` 两面共用一个二进制差异文件 | 自测 J2：exit 2 点名 `could not be materialized`（改前它被折成"0 行差"并 exit 0） |
+| `install.sh` 的 `INSTALLER_REF` 改回 `main`（scratch 副本） | `installer-selftest.sh` 12 条具名红，逐条打印那条 `/main/` URL |
+| 把签名 keychain 写回 argv（scratch 镜像副本） | fork 那份 selftest `MISS parent tools/ copy`；改前的 selftest 对同一个坏副本打 `selftest passed` |
+| `--force-with-lease` 前的 split 覆盖 | 见发布段 |
+
+一处**自己的假绿**记在这里：`rulers-selftest` 第一版用一个新建文件当脏树探针，而三条守卫读的
+`git diff --name-only HEAD` 不列未跟踪路径 ⇒ 三条对照全部"通过"而守卫根本没被触发，两次
+`--record` 还真写了金样。收尾的 git-status 断言把它抓住，改成修改已跟踪文件并按 sha 核回。
+
+### 未观测（只限物理边界）
+
+- `verify-published.ts` 的内嵌 web 那一段：本机 `bun run build --single` 一次没跑（整包 >10 分钟
+  且要吃 12 GB 盘里的大头），所以本轮对已发布物的端到端复核只能走 publish 之后的那条；
+  补它的确切命令写在收口段。
+- 真模型轮次、真 TUI 会话观感：需要真 provider key 与人的肉眼；本轮把 TUI 那处"进行中文案从不显示"
+  修成组件外可判定的纯函数并有断言，但**肉眼观感仍未观测**。
+- musl / baseline 目标：`product.json` 已记 `platform.dropped`，无 CI lane，属已决维持现状。
+
 ## 2026-10-18（第十二次会话）· 内核追到 0.1.8，搬运分支重切一次——它不是快进
 
 **开工态**：主树 `main` = `7abae7d1`（`git status` 空，`gh run list` 该 sha 的 CI 全绿）。
