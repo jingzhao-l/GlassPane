@@ -70,6 +70,28 @@ describe("what the registry receives", () => {
     expect(defs.map((def) => def.id)).toContain("gp_probe_status")
   })
 
+  test("gp_probe_status's description reports the permission seats without copying the engine's set", async () => {
+    // The description used to read "the four macOS permission seats (accessibility, input
+    // monitoring, screen recording, developer tools)". The transport never validates a
+    // count: `daemon.ts`'s `probeCapabilities` hands `permissions` straight out of `hello`
+    // as an open record, so the day the engine adds or renames a seat that sentence lies to
+    // the model about what the tool reports. Same reason `requireCapability` above asks
+    // `hello.capabilities` instead of carrying a method table — the harness does not restate
+    // the engine's sets in its own text.
+    const defs = await loadDefs()
+    const description = defs.find((def) => def.id === "gp_probe_status")?.description ?? ""
+    expect(description.length).toBeGreaterThan(0)
+    expect(description).toContain("permission seats")
+    // no count in front of the seats, written as a digit…
+    expect(description).not.toMatch(/\b\d+\s+(?:[\w-]+\s+)*permission seat/i)
+    // …or spelled as a word, and no closed enumeration after the phrase
+    expect(description).not.toMatch(/\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:[\w-]+\s+)*permission seat/i)
+    expect(description).not.toMatch(/permission seat\w*\s*\(/i)
+    for (const seat of ["input monitoring", "screen recording", "developer tools"]) {
+      expect(description, `the description enumerates the engine's seats: ${seat}`).not.toContain(seat)
+    }
+  })
+
   test("observe's depth is bounded by the schema, not by the description", async () => {
     // The "1-10" used to live only in the description string. An agent that asked
     // for maxDepth=100000 got a request the daemon had to answer with a

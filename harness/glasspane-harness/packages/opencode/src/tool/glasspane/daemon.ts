@@ -89,6 +89,10 @@ export type SocketLocation =
  * *this* process is standing instead. Two answers to "which engine is this" is how the
  * harness ends up treating its own working directory as the engine's state root —
  * refusing every ledger path inside it while talking to a daemon that lives elsewhere.
+ *
+ * The default branch is refused by the SAME rule, because it can produce the same
+ * relative answer: `HOME` counts as unset when it is empty as well as when it is absent,
+ * and a `HOME` that names a relative directory is a refusal rather than a path to join.
  */
 export function resolveSocket(env: NodeJS.ProcessEnv = process.env): SocketLocation {
   const fromEnv = env.GLASSPANE_SOCKET
@@ -105,7 +109,26 @@ export function resolveSocket(env: NodeJS.ProcessEnv = process.env): SocketLocat
     }
     return { ok: true, socket: fromEnv, stateRoot: path.dirname(fromEnv) }
   }
-  const root = path.join(env.HOME ?? os.homedir(), ".glasspane")
+  // `||`, not `??`: with `HOME=''` — a real shape, e.g. `env -i` or a `launchd` plist that
+  // exports an empty HOME — `??` kept the empty string and `path.join("", ".glasspane")`
+  // returned the RELATIVE `".glasspane"`. Measured: `resolveSocket({HOME: ""})` gave
+  // `.glasspane/engine.sock`. Two consequences, both the failure this function exists to
+  // refuse: which engine this process talks to depends on the working directory, and
+  // `kernel.ts`'s `insideStateRoot` compares ABSOLUTE ledger candidates against that
+  // relative root, so the engine-root guard never matches and a second writer gets into
+  // the real `~/.glasspane`.
+  const home = env.HOME || os.homedir()
+  const root = path.join(home, ".glasspane")
+  if (!path.isAbsolute(root)) {
+    return {
+      ok: false,
+      error: {
+        code: "GP_E_STATE_ROOT",
+        message: `the default engine state root is '${root}', which is not absolute (HOME='${env.HOME ?? ""}'), so this process cannot say which engine it would talk to`,
+        remedy: `set HOME to the absolute directory \`echo $HOME\` reports, or point GLASSPANE_SOCKET at the absolute path glasspaned bound (confirm it with \`launchctl print gui/\$(id -u)/com.glasspane.daemon\`, e.g. ${path.join(os.homedir(), ".glasspane", "engine.sock")}) — a relative state root makes this harness answer "which engine" from its own working directory and stops the guard that refuses ledger paths inside the engine's tree`,
+      },
+    }
+  }
   return { ok: true, socket: path.join(root, "engine.sock"), stateRoot: root }
 }
 

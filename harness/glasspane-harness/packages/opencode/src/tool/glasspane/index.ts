@@ -174,7 +174,7 @@ export const ProbeStatusTool = Tool.define(
   Effect.gen(function* () {
     return {
       description:
-        "Ask the GlassPane background service what it can actually see: engine version, protocol, which verification capabilities it advertises, whether an in-app probe SDK is connected, and the four macOS permission seats (accessibility, input monitoring, screen recording, developer tools) as the daemon measures them. Read-only; touches no target app.",
+        "Ask the GlassPane background service what it can actually see: engine version, protocol, which verification capabilities it advertises, whether an in-app probe SDK is connected, and the macOS permission seats the daemon measures. Read-only; touches no target app.",
       parameters: ProbeStatusParams,
       execute: (_params: Schema.Schema.Type<typeof ProbeStatusParams>, ctx: Tool.Context) =>
         Effect.gen(function* () {

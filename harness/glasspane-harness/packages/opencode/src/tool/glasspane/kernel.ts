@@ -51,7 +51,6 @@ import {
   decisionLogEntryHash,
   newDecisionEntryId,
   readDecisionLog,
-  verifyDecisionLogText,
   KernelDecisionLogError,
 } from "iterate-kernel/decision-log"
 import type { DecisionLogEntry, DecisionOutcome } from "iterate-kernel/decision-log-entry"
@@ -169,10 +168,22 @@ export function readEvidenceFrame(
   }
 }
 
+/**
+ * The kernel's outcome and summary for one pack, under this module's names.
+ *
+ * NO `src/` CONSUMER. The decision-log plugin records through `logDecision`, which
+ * calls `decisionOutcomeFromEvidence` / `decisionSummaryFromEvidence` directly, so
+ * these two are not a path any product code takes. They exist for the fixture-parity
+ * block of `test/tool/glasspane-kernel.test.ts` ("the installed kernel agrees with
+ * canonical about the five real fixtures"), which pins the parity claim through THIS
+ * module rather than by importing `iterate-kernel` — the binding is the thing under
+ * test, so the test can only pin what this doorway re-exports.
+ */
 export function outcomeOf(pack: EvidencePack): DecisionOutcome {
   return decisionOutcomeFromEvidence(pack)
 }
 
+/** The one-line decision summary for one pack. Same consumers as `outcomeOf`, none in `src/`. */
 export function summaryOf(pack: EvidencePack): string {
   return decisionSummaryFromEvidence(pack)
 }
@@ -204,6 +215,13 @@ function insideStateRoot(candidate: string, state: string): boolean {
  * opencode artifact uses — never the CWD, which is how a "harness state file"
  * ends up committed inside someone's repository).
  *
+ * `Global.Path.data` ALREADY carries the product segment — `packages/core/src/global.ts`
+ * joins `xdgData` onto `app = "glasspane-harness"` — so the ledger sits directly under it,
+ * which is the single-segment form `docs/troubleshooting.md` and `docs/models-and-keys.md`
+ * publish. Joining `"glasspane-harness"` here again made the real default
+ * `~/.local/share/glasspane-harness/glasspane-harness/decisions.jsonl`, i.e. a directory
+ * no document, and no reader following the remedy below, would ever look in.
+ *
  * The engine-root guard runs on BOTH branches, and the refusal names the root it
  * measured rather than a spelled-in-home `~/.glasspane` — a `GLASSPANE_SOCKET`
  * elsewhere moves the engine's tree, and a remedy pointing at a directory that is not
@@ -223,7 +241,7 @@ export function resolveLedger(env: NodeJS.ProcessEnv = process.env): { ok: true;
         error: {
           code: "GP_E_DECISION_LOG_PATH",
           message: `GLASSPANE_DECISION_LOG='${override}' is not absolute`,
-          remedy: "point it at an absolute path (e.g. /Users/you/.local/state/glasspane-harness/decisions.jsonl); a relative one lands wherever the agent happened to be",
+          remedy: "point it at an absolute path (e.g. /Users/you/.local/share/glasspane-harness/decisions.jsonl, the directory this function defaults to); a relative one lands wherever the agent happened to be",
         },
       }
     }
@@ -240,7 +258,7 @@ export function resolveLedger(env: NodeJS.ProcessEnv = process.env): { ok: true;
     }
     return { ok: true, ledger: { path: resolved, source: "env" } }
   }
-  const fallback = path.join(Global.Path.data, "glasspane-harness", "decisions.jsonl")
+  const fallback = path.join(Global.Path.data, "decisions.jsonl")
   if (insideStateRoot(fallback, state.path)) {
     return {
       ok: false,
@@ -520,7 +538,16 @@ export function logDecision(
   }
 }
 
-/** Re-verify a ledger from disk. Used by the tool surface and by the fixed-point tests. */
+/**
+ * Re-verify a ledger from disk.
+ *
+ * WHO ACTUALLY CALLS THIS, checked by grep over `packages/` and `script/`: the
+ * fixed-point tests `test/tool/glasspane-kernel.test.ts` and
+ * `test/plugin/glasspane-decision-log.test.ts`, and the offline measurement
+ * `script/glasspane-e7-ledger.ts`. NOT the tool surface — no `gp_*` tool re-reads the
+ * chain, and the sentence that used to say so here described a consumer that does not
+ * exist, which is how a reader ends up hunting for a call site to fix.
+ */
 export function verifyLedger(ledgerPath: string): { ok: boolean; entries: number; firstBrokenLine?: number; reason?: string } {
   if (!existsSync(ledgerPath)) return { ok: true, entries: 0 }
   const verified = readDecisionLog(ledgerPath)
@@ -532,6 +559,9 @@ export function verifyLedger(ledgerPath: string): { ok: boolean; entries: number
   }
 }
 
-/** Re-exported so a consumer can prove a chain link without importing the kernel package directly. */
+/**
+ * Re-exported so a consumer can prove a chain link without importing the kernel package
+ * directly. Its only consumer today is `test/tool/glasspane-kernel.test.ts`, which uses
+ * it to show that editing a recorded line breaks the hash the next line carries.
+ */
 export const entryHashOf = decisionLogEntryHash
-export const verifyLedgerText = verifyDecisionLogText

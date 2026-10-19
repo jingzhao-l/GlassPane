@@ -63,7 +63,19 @@ export function recordToolExecution(
     return { status: "skipped", reason: `gp call did not succeed (${metadata?.code ?? "no metadata"})` }
   }
 
-  const read = readEvidenceFrame(metadata.result)
+  // Both kernel calls are wrapped, and the wrapper is the point rather than a detail:
+  // `kernel.ts` rethrows anything that is not its own tagged error (EACCES and ENOSPC while
+  // appending reach here), the host does not catch a rejecting hook (`plugin/index.ts`
+  // `trigger` → `Effect.promise`, and `session/tools.ts` triggers *before* completing the
+  // tool call), so an unwrapped throw failed the whole `gp_act` call after the app had
+  // already been clicked — and the engine's real answer was discarded with it. A ledger
+  // fault is therefore reported in the note shape this file already speaks, never rethrown.
+  let read: ReturnType<typeof readEvidenceFrame>
+  try {
+    read = readEvidenceFrame(metadata.result)
+  } catch (error) {
+    return ledgerFault("reading the evidence frame", error)
+  }
   if (!read.ok) {
     // Measured against the engine, not a list kept here: `last_evidence` is the one
     // method whose reply carries an `evidencePack` (`Dispatcher.swift:156`), so this is
@@ -78,10 +90,15 @@ export function recordToolExecution(
     return { status: "failed", ...read.error }
   }
 
-  const logged = logDecision(read.pack, {
-    env,
-    extraSummary: `${input.tool} in session ${input.sessionID}`,
-  })
+  let logged: ReturnType<typeof logDecision>
+  try {
+    logged = logDecision(read.pack, {
+      env,
+      extraSummary: `${input.tool} in session ${input.sessionID}`,
+    })
+  } catch (error) {
+    return ledgerFault("appending to the decision ledger", error)
+  }
   if (!logged.ok) return { status: "failed", ...logged.error }
   return {
     status: "logged",
@@ -90,6 +107,22 @@ export function recordToolExecution(
     hash: logged.logged.hash,
     outcome: logged.logged.entry.outcome,
     line: logged.logged.line,
+  }
+}
+
+/**
+ * The note for a ledger fault this plugin could not classify because it came out of the
+ * kernel as an untagged throw. Named by stage, because "the ledger failed" without the stage
+ * sends the reader to hunt between two calls that fail for different reasons.
+ */
+function ledgerFault(stage: string, error: unknown): DecisionLogNote {
+  const message = `${stage} threw (${error instanceof Error ? error.message : String(error)})`
+  return {
+    status: "failed",
+    code: "GP_E_DECISION_LOG_RUNTIME",
+    message,
+    remedy:
+      "the gp_* answer above is unchanged and real — only this run's audit entry is missing. Re-run the same call once; if the note persists, the ledger is unwritable, so point GLASSPANE_DECISION_LOG at a directory you can create or fix the permissions on the harness data directory",
   }
 }
 

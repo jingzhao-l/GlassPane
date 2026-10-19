@@ -8,6 +8,7 @@ import type { DecisionOutcome, EvidencePack } from "../../src/tool/glasspane/ker
 import { kernelContractFile, kernelFixture, kernelFixturesDir, kernelPackageDir } from "../lib/kernel-contract"
 
 import { Global } from "@opencode-ai/core/global"
+import { xdgData } from "xdg-basedir"
 import { resolveSocket, stateRootOf } from "../../src/tool/glasspane/daemon"
 
 import {
@@ -169,7 +170,18 @@ describe("the ledger location rule", () => {
     if (!resolved.ok) return
     expect(resolved.ledger.source).toBe("default")
     expect(path.isAbsolute(resolved.ledger.path)).toBe(true)
-    expect(resolved.ledger.path).toContain("glasspane-harness")
+    // The EXACT default, pinned by construction rather than by a substring:
+    // `toContain("glasspane-harness")` was satisfied by the doubled directory
+    // `<data>/glasspane-harness/glasspane-harness/decisions.jsonl` as well, because the
+    // outer segment matched too. `Global.Path.data` already IS
+    // `<xdgData>/glasspane-harness` (packages/core/src/global.ts joins the product name
+    // onto xdgData), so the ledger sits directly under it — the single-segment form
+    // docs/troubleshooting.md and docs/models-and-keys.md publish.
+    expect(xdgData).toBeDefined()
+    expect(resolved.ledger.path).toBe(path.join(xdgData!, "glasspane-harness", "decisions.jsonl"))
+    expect(path.dirname(resolved.ledger.path)).toBe(Global.Path.data)
+    expect(path.basename(resolved.ledger.path)).toBe("decisions.jsonl")
+    expect(resolved.ledger.path.split(path.sep).filter((segment) => segment === "glasspane-harness")).toHaveLength(1)
     expect(resolved.ledger.path.startsWith(process.cwd())).toBe(false)
   })
 

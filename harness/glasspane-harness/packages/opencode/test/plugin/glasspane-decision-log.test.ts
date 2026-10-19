@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
@@ -218,6 +218,59 @@ describe("what the plugin does when the ledger cannot be trusted", () => {
     expect(output.output).toContain("decision log NOT written")
     expect(output.output).toContain("remedy:")
     expect(verifyLedger(ledger).firstBrokenLine).toBe(1)
+  })
+
+  test("台账写不进去时，答案原样交给模型，失败点按阶段点名", () => {
+    // Real shape: the kernel opens the ledger with `openSync(path, "a")`
+    // (`iterate-kernel/dist/decision-log.js:261`), so an audit file that became read-only — a
+    // `chmod` in a cleanup script, a snapshot restored onto a read-only volume — is an ordinary
+    // Thursday. This pins that the plugin reports it instead of pretending the decision was
+    // logged, and that the tool's own conclusion is not rewritten by the failure.
+    const { env, dir } = ledgerEnv()
+    const ledger = path.join(dir, "decisions.jsonl")
+    writeFileSync(ledger, "")
+    chmodSync(ledger, 0o400)
+    try {
+      const output = toolResult({ evidencePack: pack("ok-01") })
+      const before = output.output
+      const note = recordToolExecution(input("gp_last_evidence"), output, env)
+      expect(note?.status).toBe("failed")
+      if (note?.status !== "failed") return
+      expect(note.code).toBe("KERNEL_E_DECISION_LOG_WRITE")
+      expect(note.message).toContain("EACCES")
+      expect(output.output).toBe(before)
+      expect(verifyLedger(ledger).entries).toBe(0)
+    } finally {
+      chmodSync(ledger, 0o600)
+    }
+  })
+
+  test("一个不带标签的抛出只能变成 note，不能把 gp_* 的答案一起带走", () => {
+    // The getter is synthetic — no engine frame throws on property access. What is pinned is the
+    // wrapper's contract: `readEvidenceFrame` and `logDecision` rethrow anything that is not one of
+    // the kernel's two tagged error classes, the host's `plugin.trigger` does not catch a rejecting
+    // hook (`plugin/index.ts` → `Effect.promise`), and `session/tools.ts` triggers
+    // `tool.execute.after` *before* completing the tool call. So an unwrapped throw failed the
+    // whole `gp_act` call after the app had already been clicked, and the engine's real answer was
+    // discarded with it — the exact outcome the header of this plugin forbids.
+    const { env } = ledgerEnv()
+    const frame = {
+      get evidencePack() {
+        throw new Error("reader blew up")
+      },
+    }
+    const output = toolResult(frame)
+    const before = output.output
+    const note = recordToolExecution(input("gp_last_evidence"), output, env)
+    expect(note?.status).toBe("failed")
+    if (note?.status !== "failed") return
+    expect(note.code).toBe("GP_E_DECISION_LOG_RUNTIME")
+    expect(note.message).toContain("reading the evidence frame")
+    expect(note.message).toContain("reader blew up")
+    expect(note.remedy).toContain("GLASSPANE_DECISION_LOG")
+    // Nothing was appended behind the wrapper's back: the answer is the one the engine gave.
+    expect(output.output).toBe(before)
+    expect((output.metadata as { decisionLog?: unknown }).decisionLog).toBeUndefined()
   })
 
   test("the warning rule is quiet for the states that need no alarm", () => {
