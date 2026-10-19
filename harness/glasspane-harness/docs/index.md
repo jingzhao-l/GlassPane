@@ -6,11 +6,19 @@ app; the harness transcribes the engine's conclusions, keeps an audit chain, and
 invents a verdict.
 
 - [Install](install.md) — channels, prerequisites, permissions, verification, uninstall
+- [Models and keys](models-and-keys.md) — the model catalog and how to supply your own API
+  keys
 - [Tools](tools.md) — the `gp_*` surface, argument by argument
 - [Evidence](evidence.md) — attribution, diagnosis, the decision log, compaction anchors
 - [Migrate from opencode](migrate-from-opencode.md) — what the private customisation
   changed and what deliberately stayed
+- [Release](release.md) — cutting a release, and the npm trusted-publisher setup
+- [Kernel integration](kernel-integration.md) — the shared kernel, how it reaches this fork
+  as a pinned `iterate-kernel` dependency, and how much of the two-way integration exists
+  today
 - [Troubleshooting](troubleshooting.md) — engine unreachable, permission denials, `GP_E_*`
+
+That is every page in this directory — `docs/` holds these eight plus this index.
 
 ## The four laws
 

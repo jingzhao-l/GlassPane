@@ -57,7 +57,8 @@ Things worth knowing, because they are the usual way this is set up wrong:
   bypasses 2FA gets `403` on trust endpoints, which is why this is an owner step and not
   an automated one.
 - Connections cannot be edited: delete and recreate. Up to 10 per package.
-- Cloud-hosted runners only (ours are `macos-13`/`macos-14`/`ubuntu-latest` — fine).
+- Cloud-hosted runners only (ours are `macos-14` for darwin-arm64, `macos-15-intel` for darwin-x64
+  and `ubuntu-latest` — fine; `macos-13` is retired on GitHub's side and no lane uses it).
 - Until this is configured, publishing from CI is not possible; publish from a machine
   with `npm login` and a granular access token, or add the environment secrets and skip
   the OIDC path.

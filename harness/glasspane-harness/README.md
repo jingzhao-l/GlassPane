@@ -49,14 +49,15 @@ Nothing was cut to make room for the kernel.
 That is a measured claim, not a promise. The fork tracks upstream
 [anomalyco/opencode](https://github.com/anomalyco/opencode) at a pinned tag, and
 `harness/tools/fork-diff.mjs` compares every file in this tree against that tag on every
-change:
+change. The ruler prints its own line — this is that line, verbatim, against the golden
+recorded 2026-10-18:
 
 ```
-fork-diff vs v1.18.32: 4668/6713 byte-identical, 259 edited, 81 added, 1705 deleted
+fork-diff vs v1.18.32: 4645/6724 byte-identical, 282 edited, 92 added, 1705 deleted
 ```
 
-Most of what upstream ships is still byte-for-byte upstream — 4,668 of its 6,632 files. The
-259 edits are concentrated in config/paths/branding, the `gp_*` tool surface, the kernel
+Most of what upstream ships is still byte-for-byte upstream — 4,645 of its 6,632 files. The
+282 edits are concentrated in config/paths/branding, the `gp_*` tool surface, the kernel
 binding, the compaction hook, and the packaging scripts. The deleted files are upstream's own
 publish plumbing for channels this product does not use (ghcr images, AUR, a Homebrew tap, a
 hosted console account) — plus, in 0.4.0, the first-party account surface described below.
@@ -206,8 +207,13 @@ bun install                # workspace (on TLS-intercepting networks bun needs
                            # NODE_EXTRA_CA_CERTS — see FORK.md)
 bun run typecheck           # per package
 bun test --timeout 30000    # fixed-point tests (from packages/opencode)
-bun run build --single      # product build: CLI + TUI + embedded web app
+cd packages/opencode && bun run build --single   # product build: CLI + TUI + embedded web app
 ```
+
+`build` is a script in `packages/opencode/package.json`; the workspace root has no `build`
+script, so the last command must run from that package — from the root it dies with
+`Script not found "build"`, which is failure #1 of the four recorded in
+[docs/release.md](docs/release.md).
 
 The repo-side gates live in the GlassPane repository under `harness/` (hook-liveness,
 fork-diff, kernel-pin, tool-surface, surface-semantics, product-surface,

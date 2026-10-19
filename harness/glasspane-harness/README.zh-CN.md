@@ -42,13 +42,14 @@ SDK 与 plugin API。为了塞下内核，没有任何功能被砍掉。
 
 这句话是**量出来的**，不是承诺。分叉锚定上游
 [anomalyco/opencode](https://github.com/anomalyco/opencode) 的某个 tag，
-`harness/tools/fork-diff.mjs` 每次改动都会把本树与那个 tag 逐文件对比：
+`harness/tools/fork-diff.mjs` 每次改动都会把本树与那个 tag 逐文件对比。那把尺子自己打出的就是
+下面这一行——原样照抄，对着 2026-10-18 记录的金样：
 
 ```
-fork-diff vs v1.18.32: 4668/6713 byte-identical, 259 edited, 81 added, 1705 deleted
+fork-diff vs v1.18.32: 4645/6724 byte-identical, 282 edited, 92 added, 1705 deleted
 ```
 
-上游发来的 6,632 个文件里 4,668 个仍逐字节保持上游原样。改动（259 个）集中在 config/paths/品牌、
+上游发来的 6,632 个文件里 4,645 个仍逐字节保持上游原样。改动（282 个）集中在 config/paths/品牌、
 `gp_*` 工具面、内核绑定、压缩钩子和打包脚本；删掉的是上游**自己的**发布管道（ghcr 镜像、AUR、
 Homebrew tap、托管 console 账号）——外加 0.4.0 里下面说的第一方账号面。
 
@@ -79,9 +80,11 @@ Azure、OpenRouter 等等全在——几百个模型——每一个都用**你�
 | **SDK** | TypeScript SDK 与 plugin SDK，用来写自己的 `gp_*` 式工具 | 工作区包，随树发布 |
 
 **刻意不发**：上游的托管 console / enterprise 栈（私有 harness 不需要"组织与额度后台"这种形态）、
-上游的**文档站**（`packages/web`）——这两片树已**从本仓删除**；本产品的 canonical 文档是 `docs/`。
-它们从来不属于这个产品，把别人的产品面留在自己仓里只会让私有化变成自欺。Electron 桌面 app 保留在
-树里（产品面，第二批——需要签名与公证账号）。
+上游的**文档站**（`packages/web`）——这些片已**从本仓删除**；本产品的 canonical 文档是 `docs/`。
+它们从来不属于这个产品，把别人的产品面留在自己仓里只会让私有化变成自欺。**Electron 桌面 app
+不随产品发布，这是决定**：`packages/desktop` 仍在树里，但它是**血缘**——`product.json` 的
+`product.lineageOnly` 把它记作 `packages/desktop (Electron — second batch: needs signing/notarisation accounts)`，
+第二批缺的正是签名与公证账号。
 
 ## 安装
 
@@ -151,9 +154,14 @@ glasspane-harness --help
 ## 文档
 
 - [`docs/install.md`](docs/install.md) — 安装通道、权限、自检
+- [`docs/models-and-keys.md`](docs/models-and-keys.md) — 模型目录，以及怎么把你自己的 API key
+  交进去
 - [`docs/tools.md`](docs/tools.md) — 逐个参数的 `gp_*` 参考
 - [`docs/evidence.md`](docs/evidence.md) — 归因、诊断、决策日志
 - [`docs/migrate-from-opencode.md`](docs/migrate-from-opencode.md) — 相对上游改了什么、刻意留了什么
+- [`docs/release.md`](docs/release.md) — 怎么切一版，以及 npm trusted-publisher 的配置
+- [`docs/kernel-integration.md`](docs/kernel-integration.md) — 共享内核、它如何以钉住的
+  `iterate-kernel` 依赖进入本 fork、以及双向集成今天到底有多少
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — 引擎不可达、权限拒绝、`GP_E_*` 码表
 - [`FORK.md`](FORK.md) / [`SYNCLOG.md`](SYNCLOG.md) — 分叉坐标、纪律、每批实测数字；
   [`NOTICE`](NOTICE) — 署名；[`CHANGELOG.md`](CHANGELOG.md) — 每个版本发了什么
@@ -164,8 +172,12 @@ glasspane-harness --help
 bun install                # 工作区（被 TLS 拦截的网络上 bun 需要 NODE_EXTRA_CA_CERTS，见 FORK.md）
 bun run typecheck
 bun test --timeout 30000    # 固定点测试（在 packages/opencode 里跑）
-bun run build --single      # 产品构建：CLI + TUI + 内嵌 web 应用
+cd packages/opencode && bun run build --single   # 产品构建：CLI + TUI + 内嵌 web 应用
 ```
+
+`build` 是 `packages/opencode/package.json` 里的脚本，工作区根**没有** `build` 这个脚本，所以最后
+那条必须在那个包里跑——在根上跑会死在 `Script not found "build"`，那正是
+[docs/release.md](docs/release.md) 记的四次栽跟头里的第一次。
 
 仓侧的闸住在 GlassPane 仓的 `harness/`（hook-liveness、fork-diff、kernel-pin、
 tool-surface、surface-semantics、product-surface、brand-surface），理由、反向控制与已知边界

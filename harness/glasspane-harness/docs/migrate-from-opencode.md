@@ -9,7 +9,7 @@ except what this table lists; the evidence surface is additive.
 | Before | After |
 |---|---|
 | `opencode` binary, `opencode-ai` npm package | `glasspane-harness` / `gp-harness` binaries, `glasspane-harness` npm package (+ `glasspane-harness-<platform>`) |
-| `~/.local/share/opencode`, `~/.config/opencode` | `~/.glasspane-harness` equivalents (the old ones are not read; the uninstaller can remove them) |
+| `~/.local/share/opencode`, `~/.config/opencode` | the product's own XDG roots — `~/.local/share/glasspane-harness`, `~/.cache/glasspane-harness`, `~/.config/glasspane-harness`, `~/.local/state/glasspane-harness` (`packages/core/src/global.ts`; `~/.glasspane-harness` is only the installer's fallback bin root). The old trees are not read, and `uninstall` does **not** remove them — its directory list is exactly those four product roots |
 | `opencode.json(c)` project config | `glasspane-harness.json(c)` — the old names are still read as legacy fallbacks |
 | `.opencode/` project directory | `.glasspane-harness/` — `.opencode/` is still read, and when both exist the product's directory wins the merge. (This repository dogfoods the rule: its own agent/command/skill config lives in `.glasspane-harness/`.) |
 | `x-opencode-directory` header, `OPENCODE_*` env vars | unchanged (kept as lineage identifiers on purpose) |

@@ -21,7 +21,8 @@ exactly what it is: `decisionOutcomeFromEvidence` and `decisionSummaryFromEviden
 (evidence → decision, read side), the decision-log chain primitives (write side, used by
 the decision-log and compaction plugins), `dimensionContext` (the dimension accounting M4
 renders verbatim), and the `parse*` validators that gate what reaches those mappings. The
-three JSON Schema files belong to the package too — this fork pins their bytes as contract,
+package's eight JSON Schema files belong to the package too — this fork pins their bytes as
+contract (they are the eight `schemas/` entries of `contracts/kernel-pin.json`'s `corpus`),
 but it does not import the module that reads them off disk at load time, because that module
 is reachable only through the barrel (see below). The kernel transcribes; it never judges —
 that boundary is the architecture's first iron law, and it is why the mapping lives in the
@@ -43,14 +44,19 @@ to aim at the installed package:
   it checks four separate things: the *installed* version equals the pin; the `bun.lock`
   specifier for that resolution is **empty**, i.e. it came from the registry and not from
   `file:`/`link:` (a local-path resolution would mean the product ships a directory nobody
-  else can install); the lock integrity equals the pinned integrity; and the sha256 of the
-  **24 contract files the package ships** (16 fixtures + 8 schemas) equals what the manifest
-  records. `--probe` asks the registry (`npm view iterate-kernel version`) rather than
+  else can install); the lock integrity equals the pinned integrity; and the sha256 of every
+  contract file the package ships equals what the manifest records. That fourth check walks
+  the manifest's own `corpus` array — the list, and therefore the count, lives there and not
+  in this sentence (26 entries as recorded on 2026-10-18; `--check` prints how many it read).
+  `--probe` asks the registry (`npm view iterate-kernel version`) rather than
   `git ls-remote`, because the thing that goes stale now is the published line, not a branch
   head.
 - **`script/kernel-conformance.mjs`** is the behaviour gate: it runs the corpus that ships
   *inside the installed package* through the installed `dist`, and `--impl <path>` runs a
-  second implementation (a canonical checkout) and requires byte-identical answers. Since
+  second implementation (a canonical checkout) and requires byte-identical answers. The set it
+  drives is derived from the pin, not typed in: 16 fixtures today, which is every `.json`
+  fixture in `contracts/kernel-pin.json`'s `corpus` that this lane has a `kind` for (the two
+  `report.ok-01.*` files ship in the corpus but no fixture kind consumes them). Since
   2026-10-08 it also drives `dimension-context`, which the fork consumes but which nothing
   had ever checked against a fixture.
 
@@ -62,10 +68,12 @@ Three accounting consequences are worth naming:
 
 - `tool-surface.mjs` no longer excludes any kernel lines, because there are none in the tree:
   the vendored exclusion is **0 files / 0 lines** (it was 11 files / 1,464 lines). The golden
-  now records `kernel: iterate-kernel@0.1.5` so the change of caliber is readable on the ruler
-  rather than only in a commit message. And the guard inverted: `measureFork` **refuses** the
-  tree if `packages/opencode/vendor/kernel` reappears, because its 1,464 dependency lines
-  would be billed as our authorship with nothing left to exclude them.
+  now records `kernel: {package: iterate-kernel, version: 0.1.8}` under `surfaces.fork`
+  (`harness/contracts/tool-surface.json`, observed 2026-10-18) so the change of caliber is
+  readable on the ruler rather than only in a commit message. And the guard inverted:
+  `measureFork` **refuses** the tree if `packages/opencode/vendor/kernel` reappears, because
+  its 1,464 dependency lines would be billed as our authorship with nothing left to exclude
+  them.
 - The mirrored contract corpus `harness/contracts/kernel-fixtures/` (9 files) was deleted. A
   mirror is a second source of truth, and it had already drifted — 9 here against 11 published.
   The corpus is pinned by sha256 in `kernel-pin.json` instead.
@@ -73,11 +81,20 @@ Three accounting consequences are worth naming:
   bump the dependency in `packages/opencode/package.json`, `bun install`, then
   `node script/kernel-pin.mjs --record`, then `bun script/kernel-conformance.mjs --impl <canonical
   kernel checkout>`. Copying bytes into a vendor tree would recreate the copy this retirement
-  exists to remove. `--target=repo` (the `kernel/` mirror for mcp-shell) is unchanged for now.
+  exists to remove. `--target=repo` retired on the same shape, on 2026-10-18: the `kernel/`
+  code mirror existed for `mcp-shell`'s `file:../kernel` dependency, and `mcp-shell` now
+  consumes the published package, so the mirror lost its last consumer — and nothing ever
+  provenanced `kernel/src`, which is how it sat on 0.1.7 while the registry served 0.1.8. The
+  script now takes no working mode: **both** targets print one refusal and exit 2, naming
+  three replacement commands (corpus → `node scripts/check-kernel-corpus.mjs --record`; fork
+  pin → `node harness/glasspane-harness/script/kernel-pin.mjs --record`; behaviour →
+  `bun harness/glasspane-harness/script/kernel-conformance.mjs`). `kernel/` at the repository
+  root survives as the pinned corpus only — 18 `fixtures/` and 8 `schemas/`, the same bytes
+  `contracts/kernel-pin.json` hashes.
 
 **One import-shape constraint, and it is a product requirement, not a style choice.**
 `kernel.ts` imports per-module subpaths (`iterate-kernel/parse` and friends) and never the
-barrel. The barrel re-exports `schemas`, which reads the three JSON Schemas next to the
+barrel. The barrel re-exports `schemas`, which reads the eight JSON Schemas next to the
 package at module load through `createRequire(import.meta.url)` — a runtime file read that a
 single-file binary cannot satisfy. This is measured, not argued: after the switch,
 `bun run script/build.ts --single --skip-install --skip-embed-web-ui` compiles and its own
@@ -149,14 +166,20 @@ So publishing is the cheapest way to make "N consumers, one kernel" *mechanicall
 rather than conventional — and it removes the per-consumer sync tax. It is not a prerequisite
 for any R40 scenario; every one of them was blocked on kernel API work first.
 
-## What exists today (2026-10-08, measured)
+## What exists today (re-read against the pin recorded 2026-10-18)
 
 - **Consumption side: done and measured.** One module touches the kernel, and it resolves a
-  registry package whose version, lock integrity and 24 contract files are pinned by
-  `contracts/kernel-pin.json`.
-- **Publishing: done, by the iterate side, and consumed.** `iterate-kernel@0.1.3` (0.1.1 → 0.1.2 added the contract corpus to the tarball; 0.1.2 → 0.1.3 added `evidence-decision.ok-01.json`, the transcription contract the Python half of iterate-harness is written against).
-- **Behaviour parity: measured across two implementations.** Nine fixtures produce identical
-  answers through the installed `dist` and through a canonical kernel checkout
+  registry package whose version, lock integrity and per-file contract hashes are pinned by
+  `contracts/kernel-pin.json` (its `corpus`: 26 entries as recorded on 2026-10-18).
+- **Publishing: done by the iterate side, and consumed here.** The version this fork resolves
+  is whatever `contracts/kernel-pin.json` records — 0.1.8 as of its 2026-10-18 recording, and
+  `packages/opencode/package.json`'s dependency line is checked against that number by
+  `product-surface.mjs`. At the 2026-10-08 switch it was `0.1.3` (0.1.1 → 0.1.2 added the
+  contract corpus to the tarball; 0.1.2 → 0.1.3 added `evidence-decision.ok-01.json`, the
+  transcription contract the Python half of iterate-harness is written against).
+- **Behaviour parity: measured across two implementations.** The sixteen fixtures that
+  `contracts/kernel-conformance.json` records answers for produce identical output through
+  the installed `dist` and through a canonical kernel checkout
   (`kernel-conformance --impl`), with the zod-major error-prose difference reported as a note.
 - **Both former API blockers are gone.** `dimensionContext` is in the dependency and the fork
   consumes it (`kernel.ts` → `dimensionCoverage` → `src/plugin/glasspane-compaction.ts`), so
@@ -201,17 +224,25 @@ package → byte-identical answers, exit 0. A deliberately sabotaged copy failed
 (exit 1), so the lane was not vacuous. The mirror it compared against has since been deleted;
 the corpus now comes from inside the package and is hash-pinned.
 
-What the switch did **not** finish:
+Two of the three things the switch left open have since closed. This page used to claim the
+opposite about both of them; the closed ones stay listed because the claim they retired is the
+point.
 
-1. **`harness/glasspane-harness/product.json → kernel` still describes the old form** —
-   `mode: vendored`, `version: 0.1.0-draft.1`, `enforcedBy: …/kernel-vendor.mjs`. Nothing
-   reads that block any more (the reader was `kernel-vendor.mjs`'s declared-mode check, and
-   `kernel-pin.mjs` uses `product.json` only to find the tree root), so it is stale prose in
-   a machine-readable file rather than a red gate. It needs the owner's decision on the
-   field's shape before it is rewritten.
-2. **The mcp-shell mirror under `kernel/` is still synced by `tools/sync-kernel.sh
-   --target=repo`.** That mirror is scheduled for retirement in a later batch; this page does
-   not claim it is gone.
+1. **`harness/glasspane-harness/product.json → kernel` — closed.** This page said the block
+   still described the old form (`mode: vendored`, `version: 0.1.0-draft.1`,
+   `enforcedBy: …/kernel-vendor.mjs`). Those keys are gone. The block now carries
+   `"provenance": "contracts/kernel-pin.json"` plus `why`, `canonical`, `docs`, `conformance`
+   and `history` — a pointer, not a fourth copy of the version, because a copied fact is the
+   one that goes quiet when it stops being true. The reader is `product-surface.mjs`'s
+   `kernel-provenance` rule: the pointer must resolve to a readable pin, that pin must declare
+   `iterate-kernel`, `packages/opencode/package.json`'s dependency line must equal the pinned
+   version, `packages/opencode/vendor/kernel` must not reappear, and every `corpus` entry must
+   name a file with a 64-hex sha256 (a shape check, deliberately not a count).
+2. **The `kernel/` code mirror — closed 2026-10-18.** `tools/sync-kernel.sh` no longer copies
+   anything: both `--target` values print the same refusal and exit 2, naming the three
+   replacement commands above. `mcp-shell` consumes the published package now, so the mirror
+   lost its last consumer, and `kernel/` at the repository root holds only the pinned corpus
+   (`fixtures/` + `schemas/`), whose 26 files hash-match `contracts/kernel-pin.json` exactly.
 3. **The API questions the R40 list still needs** (invariant evaluation among them) remain
    kernel-side work, to be asked for as a **contract proposal with fixtures** rather than as a
    private fork of the kernel. Distribution is no longer one of them.

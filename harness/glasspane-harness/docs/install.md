@@ -116,7 +116,13 @@ glasspane-harness uninstall        # removes the CLI and its local state
 npm uninstall -g glasspane-harness # or remove the package directly
 ```
 
-Local state lives under `~/.glasspane-harness` (and `~/.config/glasspane-harness`).
+Local state lives under the four XDG roots that `packages/core/src/global.ts` names —
+`~/.local/share/glasspane-harness` (data), `~/.cache/glasspane-harness` (cache),
+`~/.config/glasspane-harness` (config) and `~/.local/state/glasspane-harness` (state), each
+one `<xdg-basedir>/glasspane-harness` and each overridable through the matching `XDG_*_HOME`.
+`~/.glasspane-harness/bin` is a different thing: it is the one-click installer's *fallback bin
+root* (`scripts/install.sh`, `INSTALL_ROOT`, overridable with `GLASSPANE_HARNESS_HOME`), and no
+local state is written there.
 A legacy `~/.config/opencode` / `~/.local/share/opencode` from an earlier upstream
 install is not read by this product and is not touched by the uninstaller unless you
 remove it yourself.

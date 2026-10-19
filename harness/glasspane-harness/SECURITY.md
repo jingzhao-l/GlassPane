@@ -25,9 +25,21 @@ On macOS the `gp_*` tools need the GlassPane engine, which needs system permissi
 
 Every mutating tool call goes through the harness permission plane (a prompt) before the
 engine is asked to act, and the engine — not the harness — decides what happened. The
-harness's own local state lives under `~/.glasspane-harness` (0700) and the decision log
-is written 0600. Nothing in the tool surface writes inside the engine's state root; the
-binding refuses that path by design.
+harness's own local state lives under the four XDG roots named by
+`packages/core/src/global.ts`: `~/.local/share/glasspane-harness` (data),
+`~/.cache/glasspane-harness` (cache), `~/.config/glasspane-harness` (config) and
+`~/.local/state/glasspane-harness` (state). `~/.glasspane-harness/bin` is not a state root —
+it is the one-click installer's fallback bin root (`scripts/install.sh`, `INSTALL_ROOT`).
+Be exact about modes, because this page used to claim more than the code does: those four
+roots are created with `fs.mkdir(path, { recursive: true })` and **no `mode` argument**, so
+they take the process umask and are not a private-owner directory. What the code *does*
+restrict: the decision-log file is opened with mode `0600` and then `fchmod`-ed to `0600`
+(the installed `iterate-kernel`'s `dist/decision-log.js`), the directory the ledger is created
+in is made `0700` when the binding has to create it
+(`packages/opencode/src/tool/glasspane/kernel.ts`), and the lock/breaker directories under the
+state root are `0700` (`packages/core/src/util/flock.ts`). So the audit trail is private; the
+directories above it are as private as the umask makes them. Nothing in the tool surface writes
+inside the engine's state root; the binding refuses that path by design.
 
 ### Code that comes with the repository is not executed
 
