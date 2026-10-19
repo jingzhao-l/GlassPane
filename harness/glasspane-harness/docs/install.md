@@ -58,8 +58,10 @@ gp-harness --version               # the second shipped command, same binary
 ```
 
 Then, inside a session, ask for `gp_probe_status`. It reports the engine version,
-advertised capabilities, and the four permission seats. Every remedy the tool surface
-emits points back at that call, so it is the first thing to read when something is off.
+advertised capabilities, and the macOS permission seats the daemon measures. Every remedy
+the tool surface emits points back at that call, so it is the first thing to read when
+something is off. The set of seats is the engine's to decide — this page deliberately does
+not count them, because a documented number is how a renamed seat turns into a lie.
 
 A version that prints is not evidence the bytes are the bytes that were published, so the
 two delivery channels each have their own check. Neither one runs on your behalf unless

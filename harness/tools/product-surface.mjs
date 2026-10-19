@@ -141,6 +141,30 @@ const SCAN_SET_FLOORS = {
 // ---- manifest agreement
 check("manifest-name", manifest.name === product.name, `package.json name "${manifest.name}" != product.json name "${product.name}"`)
 check("manifest-version", manifest.version === product.version, `package.json version ${manifest.version} != product.json version ${product.version}`)
+// The declared product shape has to match the tree. `product.json` used to list
+// `packages/web (docs site — kept for lineage and still builds)` plus console/enterprise/stats/
+// infra/artifacts under `lineageOnly`, and none of those six paths exists in this repository —
+// while both READMEs correctly said they were deleted. A machine-readable truth source describing
+// absent directories as present is worse than none: the docs quote it, and the plan it states
+// ("trim the 14 upstream locales") is work nobody can start. Asserted in BOTH directions, so the
+// list cannot rot by omission either way.
+{
+  const declaredPath = (entry) => String(entry).trim().split(/\s+/)[0].replace(/\/+$/, "")
+  const declaredSets = [
+    [product.product?.ship ?? [], true, "ship"],
+    [product.product?.lineageOnly ?? [], true, "lineageOnly"],
+    [product.product?.deletedFromTree ?? [], false, "deletedFromTree"],
+  ]
+  for (const [list, want, name] of declaredSets) {
+    for (const entry of list) {
+      const rel = declaredPath(entry)
+      if (!rel.includes("/")) continue
+      const exists = existsSync(path.join(forkRoot, rel))
+      check("declared-shape", exists === want, `${rel} is declared under ${name} (a tree that is ${want ? "in this repository" : "gone from it"}), but the disk says ${exists ? "present" : "absent"} — this manifest is the source the READMEs quote, so a path list that disagrees with the tree is a claim no reader can rely on`)
+    }
+  }
+  check("scan-set", (product.product?.ship ?? []).length >= 4 && (product.product?.deletedFromTree ?? []).length >= 6, `the declared-shape lists hold ${(product.product?.ship ?? []).length} ship + ${(product.product?.deletedFromTree ?? []).length} deleted entries; the floors are 4 + 6 — a shortened list is not a smaller product, it is this rule checking fewer paths`)
+}
 // The bins loop below produces 2 agreements per bin. If `product.bins` goes empty or loses
 // one entry, it asserts nothing and the lane simply prints fewer agreements — which reads as
 // a smaller product surface rather than as a scan that stopped happening.

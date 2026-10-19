@@ -24,21 +24,17 @@
       "packages/plugin"
     ],
     "lineageOnly": [
+      "packages/desktop (Electron \u2014 second batch: needs signing/notarisation accounts)"
+    ],
+    "deletedFromTree": [
       "packages/console",
       "packages/enterprise",
       "packages/stats",
-      "infra/ (upstream's hosted-service SST stack)",
-      "packages/desktop (Electron \u2014 second batch: needs signing/notarisation accounts)",
-      "artifacts/ (upstream demo videos)",
-      "packages/web (docs site \u2014 upstream content, not shipped yet)"
+      "packages/web",
+      "infra/",
+      "artifacts/"
     ],
-    "note": "\u4ea7\u54c1\u9762\uff08owner 2026-09-25 \u5b9a\uff09\uff1a**macOS \u4e13\u5c5e**\u7684 CLI + TUI + \u5185\u5d4c web \u5e94\u7528 + \u4ed3\u5185 docs/ + \u968f\u4ed3 SDK/plugin\u3002\u4e0d\u505a Linux/Windows \u9002\u914d\uff08\u5206\u53d1\u9762\u968f\u4e4b\u6536\u6210 macOS-only\uff0c\u89c1 platform.why\uff09\uff1bconsole/enterprise/stats/infra \u4e0d\u505a\uff1bElectron \u684c\u9762 app \u7b2c\u4e8c\u6279\uff1b\u4e0a\u6e38\u6587\u6863\u7ad9\u5c1a\u672a\u79c1\u6709\u5316\uff08canonical \u6587\u6863\u662f\u4ed3\u5185 docs/\uff09\u3002",
-    "docsSite": {
-      "status": "not-yet-ours",
-      "where": "packages/web (upstream Astro/Starlight tree, kept for lineage and still builds)",
-      "canonical": "docs/ in this repository",
-      "plan": "replace the site's content with docs/, trim the 14 upstream locales, static output \u2192 GitHub Pages"
-    }
+    "note": "\u4ea7\u54c1\u9762\uff08owner 2026-09-25 \u5b9a\uff09\uff1a**macOS \u4e13\u5c5e**\u7684 CLI + TUI + \u5185\u5d4c web \u5e94\u7528 + \u4ed3\u5185 docs/ + \u968f\u4ed3 SDK/plugin\u3002\u4e0d\u505a Linux/Windows \u9002\u914d\uff08\u5206\u53d1\u9762\u968f\u4e4b\u6536\u6210 macOS-only\uff0c\u89c1 platform.why\uff09\uff1bconsole/enterprise/stats/infra \u4e0d\u505a\uff1bElectron \u684c\u9762 app \u7b2c\u4e8c\u6279\uff1b\u4e0a\u6e38\u6587\u6863\u7ad9\uff08`packages/web`\uff09**\u5df2\u4ece\u672c\u4ed3\u5220\u9664**\uff0ccanonical \u6587\u6863\u5c31\u662f\u4ed3\u5185 `docs/` \u90a3\u516b\u4efd\u2014\u2014\u8fd9\u91cc\u539f\u5148\u4ecd\u628a\u5b83\u5199\u6210\u300c\u5c1a\u672a\u79c1\u6709\u5316\u3001\u4ecd\u5728\u6811\u91cc\u3001still builds\u300d\uff0c\u800c\u90a3\u4e2a\u76ee\u5f55\u5df2\u7ecf\u4e0d\u5b58\u5728\uff1a\u673a\u5668\u53ef\u8bfb\u7684\u771f\u6e90\u4e0d\u80fd\u63cf\u8ff0\u4e00\u7247\u7a7a\u6c14\u3002"
   },
   "upstream": {
     "repo": "anomalyco/opencode",

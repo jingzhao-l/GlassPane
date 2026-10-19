@@ -213,7 +213,29 @@ if (existsSync(path.join(refDir, ".git"))) {
   console.log(`note  9-10 NOT OBSERVED: no git reference clone at ${path.relative(repoRoot, refDir)} — the clone-cleanliness guards could not be driven here. This is not a pass.`)
 }
 
-// 11. causality, not coincidence: with the brand guard removed, control 1 goes green. That is the
+// 11-12. product-surface's two new rules must fire on their own accident, not only sit in the
+// file: a catalog that vanished (the build would silently fall back to fetching it), and a declared
+// tree that is not on disk (the accident `packages/web` actually caused).
+mustGoRed(
+  "harness/glasspane-harness/packages/opencode/script/generate.ts",
+  "product-surface: a build that stopped naming the committed catalog is red",
+  (text) => text.replace(`"models-catalog.json"`, `"models-catalog-moved.json"`),
+  "harness/tools/product-surface.mjs",
+  ["--check"],
+  1,
+  ["script/generate.ts no longer reads the committed catalog by name"],
+)
+mustGoRed(
+  "harness/glasspane-harness/product.json",
+  "product-surface: a declared path that is not on disk is red",
+  (text) => text.replace(`"deletedFromTree": [`, `"deletedFromTree": [\n      "packages/does-not-exist-selftest",`),
+  "harness/tools/product-surface.mjs",
+  ["--check"],
+  1,
+  ["packages/does-not-exist-selftest is declared under deletedFromTree"],
+)
+
+// 13. causality, not coincidence: with the brand guard removed, control 1 goes green. That is the
 // difference between "the lane happens to be red" and "this code is what makes it red".
 {
   const toolPath = "harness/tools/brand-surface.mjs"
