@@ -28,6 +28,17 @@
 主代理侧的完整台账与每条的判据见 `specs/GlassPane_每日审查_2026-10-19_记录.md`；
 下面只写失效模式。
 
+### 发布状态（如实记，不等下一轮再补）
+
+`v1.17.0` 已打在本主线的最后一笔上并推上远端，GitHub Release 与 npm **两条通道本轮都没有发出去**：
+`release.yml` 的第一步就是"这个 commit 的 CI 必须绿才许出货"（`scripts/assert-ci-green.mjs`），
+而 CI 上唯一红的 job 是 `harness rulers` 里的 `release-artifact`——它量的是"主干的
+`harness/glasspane-harness` 与已发布的 `v0.8.2` 是不是同一份字节"，缺口是 2026-10-18 那批 Step 0b
+留下的，判据自己在 remedy 里写着"re-split and cut the next patch"。本轮任务明文禁止我改 `harness/`
+的内容或版本（它有 10:30 那条独立任务与独立发布通道），所以我没有去替它发那个版，也没有放宽那道闸。
+解法与命令记在 `specs/GlassPane_每日审查_2026-10-19_记录.md` §6；那边落下 0.8.3 之后，
+`gh run rerun 39195845505 --failed` 就能把这两条通道接着跑完，tag 不必重打。
+
 ### Fixed — 探针通道与证据档案（Swift，daemon 侧）
 
 - **探针掉线被读成"处理器没跑"**：`ProbeInbox` 的 `disconnect` 摘掉事件环却留着在开的

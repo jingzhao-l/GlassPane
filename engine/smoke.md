@@ -901,3 +901,87 @@ mcp-shell 从 496 回到 **495**：少的正是被删掉的那一条"自愈"用�
 `mkdirSync(…, { recursive: true })` 每次调用都保证，而它的手段是删掉并发文件共用的目录。
 少一条用例不是损失，留着它才是：那一趟里两条红有一条发生在**别人的**用例上。
 
+
+## 每日真机核对 2026-10-19（v1.17.0 这一轮）
+
+本轮改的是判定层与 CLI/面板的诚实性，所以下面每一条都是"改完之后重新量一遍"，不是复述门禁。
+
+### 1. daemon CLI 的退出码（本轮改判的三条，全部实测量过）
+
+裸构建 `.build/debug/glasspaned`，状态根一律 `--state-dir` 指到 `/var/tmp/gp-main-20261019/…`。
+
+| 调用 | 从前在 HEAD 上实测 | 本轮实测 |
+|---|---|---|
+| `--version --evidence-stats` | 只打印 `glasspaned 1.16.4` 并**退 0**（第二条命令静默不执行） | 退 **64**，句子点名两条（`more than one subcommand was requested (--version, --evidence-stats) … it ran none of them`），并照常带整块 usage |
+| `--request-permission developer-tools` | 打印 JSON 后**无条件退 0**（席位是 unverifiable） | 打印同一份 JSON（`requestedStatus":"unverifiable"`）并退 **1**；`--help` 里写明"退的是席位读成什么，不是问没问出去" |
+| `--check-developer-tools` | `attach` 那一路跑 `xcrun lldb --batch --attach <pid>`，lldb 不认这个选项 ⇒ 恒 `spawnFailed`（本轮改之前的 `--help` 与旧记录都把这个读数当"探测过了"） | 改用 `-p` 之后 `attach` 与 `launch` 各回一次**真**读数：`{"attach":{"state":"denied"},"launch":{"state":"denied"},"granted":false}`，退 1。也就是说这条通道从此开始给出可证伪的答案，而不是永远 `spawnFailed` |
+
+`--permissions`（隔离根）：`{"accessibility":"granted","developerTools":"unverifiable","inputMonitoring":"granted","screenRecording":"granted"}`，
+`subject.binaryPath` 就是那个裸构建、`hasBundleIdentity:false` —— 面板与 daemon 读的是同一个主体，没有代测。
+`--unknown-flag` 仍是 64；`--list-projects` / `--evidence-stats` 在空隔离根上分别回 `[]` / `{"count":0,…}` 且退 0。
+
+### 2. 发布形态端到端（本机做得动的那一半，做完了）
+
+`node scripts/make-release-archive.mjs 1.17.0 …` → `--verify` 同一份归档 → 解包 → 在树内 `npm pack` →
+`npm i -g --prefix <干净前缀> --omit=dev --prefer-offline <tgz>` → 用 stdin 打一条 MCP `initialize`：
+
+```json
+{"id":1,"jsonrpc":"2.0","result":{"capabilities":{"tools":{"listChanged":false}},
+ "protocolVersion":"2025-06-18","serverInfo":{"name":"glasspane-mcp","version":"1.17.0"}}}
+```
+
+- 归档里 `(^|/)harness/` 条目数 **0**（数用 `grep -cE`，不是 `grep -q`），顶层目录唯一。
+- 交付的 `glasspane-mcp` 那个 bin 仍是符号链接（`npm i -g` 的形状），这条正是 1.12.3 那次事故的形状，
+  本轮它照样跑得动 ⇒ 那道 realpath 闸没有退化。
+- 整趟只往 `/var/tmp` 里写：`~/.glasspane/evidence` 条数 **582 → 582**（前后各数一次）。
+
+### 3. 面板真机（`python3 engine/.p4i4_smoke.py --skip-drag`，退 1）
+
+三条引导断言实测通过（accessibility / inputMonitoring / screenRecording 的卡徽标都是**实测量出来的**
+「已授权」，按钮已是稳态的「在系统设置中查看」，不是伪装的按下动作）。第四条没过：
+
+```
+FAIL developerTools: 引导后未观测到 System Settings 成为前台（front=com.apple.SecurityAgent）
+结论：P4-I4 自动化断言未全过，不能销账。
+```
+
+那条 FAIL 量到的是**这台机器**在弹自己的授权对话框（裸构建的 ad-hoc 签名改动会让 SecurityAgent 抢前台），
+不是面板把没测的东西说成测过；developerTools 那张卡按设计恒「未验证」，本轮没有动它。
+所以这一步记**未观测**而不是"通过"。补它的确切动作：先让人在系统设置里过一次这台机器的授权提示，
+再跑一次同一条命令 —— `cd /Volumes/Eng-Dev/GlassPane/engine && python3 .p4i4_smoke.py --skip-drag`
+（无人值守里我不会去点那个对话框，这就是它留着没销账的唯一原因）。
+
+### 4. 面板"能不能看见隔离起来的 daemon"（本轮 C4/C5 的改动）——真机**未观测**
+
+这一条单独列，因为它是本轮改得最像"用户会遇到"的地方，而我**没能在真机上证实它**。
+单元层有据：`Qoder20261019PanelDefectsTests` / `QoderPanel20261019Tests` 用一个真起在
+`X/daemon.sock` 上的 spy daemon 断言面板答"在跑"并说出它连的是哪个根，以及更新页在 hello 报出
+`stateRoot = X` 之后把 `pointerFile` 指到 `X/update-install.json`。但 `.p4i4_smoke.py` 在第 3 条
+那一步就退出了，没有走到页脚那三行，所以"真窗口里页脚写着哪个根"这一眼本轮没看到。
+补它的确切命令（人先在 X 上起一个隔离 daemon，再让冒烟脚本去读页脚）：
+
+```
+mkdir -p /var/tmp/gp-iso && engine/.build/debug/glasspaned --state-dir /var/tmp/gp-iso --socket-path /var/tmp/gp-iso/daemon.sock &
+GLASSPANE_STATE_DIR=/var/tmp/gp-iso engine/.build/debug/glasspane-settings   # 看页脚「状态根」那一行点名 /var/tmp/gp-iso
+```
+
+### 5. 门禁计数（逐字命令，实际数字）
+
+`npm ci` 0；`npm run build` 0；`npm test --workspaces --if-present` 0
+（mcp-shell **510/510**、installer **172/172**、updater **551/551**，`fail 0` 三处各自成立；
+本轮网络恢复，`published-artifact.test.mjs` 那 8 条在开工基线里因 registry 超时红的用例这次真跑过了）；
+`node scripts/check-version.mjs` 0（版本线 **1.17.0**，17 行 ✓：12 个声明位点 + 5 处 lock 条目）；
+`node scripts/check-doc-links.mjs` 0（文档 25 份 / 仓库内链接 229 条 / 外链 28 条不请求）；
+`node scripts/check-workflows.mjs --self-test` 0（12 档 = 11 个必须抓住的变异 + 1 个必须不响的合法形状）；
+`node scripts/check-workflows.mjs` 0（5 份 workflow clean）；
+`swift build --package-path engine` 0；
+`swift test --package-path engine` 0（XCTest **Executed 1260 tests, 3 skipped, 0 failures**；
+Swift Testing **15 tests in 2 suites**；开工基线是 1074/3/0 ⇒ 本轮 +186 条用例，一条没少）；
+`swift test --package-path engine/probe` 0（**36 tests, 0 failures**；基线 29，Swift Testing 那一行是
+`Test run with 0 tests`，该包只有 XCTest 用例，如实记）；
+`python3 -m pytest -q bridge` 0（**82 passed**；基线 79）；`sh -n install.sh` 0；
+信号闸 `cd engine && python3 .signal_smoke.py .build/debug/glasspaned` 0
+（修夹具之前它在负载下红过：stub 在第 4 行建 socket、第 222 行才装处理器，harness 看见 socket 就发信号）；
+发布形态 `cd mcp-shell && npm run bundle && npm pack --dry-run` 0；
+`node harness/tools/tool-surface.mjs --check` 0（本轮的 +274 行有意增长按授权重记金样，
+单独一笔 `chore(harness)`，重记前它是红的——红过才算它还在工作）。
