@@ -32,11 +32,6 @@
   "engines": {
     "node": ">=18"
   },
-  "overrides": {
-    "iterate-kernel": {
-      "zod": "3.25.76"
-    }
-  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "bundle": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node18 --external:zod --outfile=dist/index.js && esbuild src/stdio-session.ts --bundle --platform=node --format=esm --target=node18 --external:zod --outfile=dist/stdio-session.js && esbuild src/http-gateway.ts --bundle --platform=node --format=esm --target=node18 --external:zod --outfile=dist/http-gateway.js && esbuild src/http-gateway-cli.ts --bundle --platform=node --format=esm --target=node18 --external:zod --outfile=dist/http-gateway-cli.js && rm -f dist/*.js.map dist/*.d.ts.map && find dist -maxdepth 1 -name '*.js' ! -name 'index.js' ! -name 'stdio-session.js' ! -name 'http-gateway.js' ! -name 'http-gateway-cli.js' -delete && node ../scripts/bundle-kernel-schemas.mjs",
@@ -68,7 +63,7 @@
   "devDependencies": {
     "@types/node": "26.5.1",
     "esbuild": "^0.28.2",
-    "iterate-kernel": "0.1.8",
+    "iterate-kernel": "0.1.9",
     "typescript": "5.9.3"
   }
 }

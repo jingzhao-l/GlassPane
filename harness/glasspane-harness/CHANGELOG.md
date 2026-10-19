@@ -10,8 +10,20 @@ contract does not).
 
 ## [Unreleased]
 
-（空。2026-10-19 这一轮的账全部归入 `0.9.0`；原先挂在这里的"Step 0b 没在本批做"那一条是过期账，
-`mcp-shell` 早已从 `file:../kernel` 换成发布包、`kernel/` 的代码镜像也已退役，见 SYNCLOG 2026-10-18。）
+### Changed — 内核追到 `iterate-kernel@0.1.9`（那一份声明把它发出去的 `.d.ts` 说清楚了）
+
+- **依赖再升 `iterate-kernel@0.1.9`**。0.1.9 不改任何判决：它把 `zod` 从 `">=3.25.76 <5"` 收成
+  `"3.25.76"`，因为发布物里的 `.d.ts` 是按 3.25.76 发光的（`ZodObject<Shape,"strict",z.ZodTypeAny,Out,In>`）。
+  声明允许 zod 4 而声明文件说的是 zod 3，消费者的解析器一旦挑了 4，拿到的不是类型错误而是**类型消失**
+  （`z.infer` 静默变 `any`，TS7006 去抱怨消费者自己的回调）。GlassPane 这条线上一批刚在下游用
+  npm `overrides` 钉住整棵树绕过它——上游修好之后那两处 override 都已删除，实测依赖树只剩一份
+  zod@3.25.76（`iterate-kernel` deduped 到它），`mcp-shell` 独立安装与根 workspace 两条路各自
+  `npm ci` + 全测：**510/510**。
+- `kernel-pin --record` 26 份（版本、lock integrity、逐文件 sha256）、`kernel-conformance --record`
+  16 份。判决一条都没动——0.1.9 的语料字节与 0.1.8 相同，摘要逐字复算一致；`harness/README.md`
+  里那句"今天以 registry 依赖 `iterate-kernel@0.1.x`"是可复算主张，由 `check-doc-links` 拿 pin
+  反算，本批把它追平（这条红是闸抓的，不是人查的）。
+
 
 ## [0.9.0] - 2026-10-19
 

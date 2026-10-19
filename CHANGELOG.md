@@ -2,6 +2,19 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+## [Unreleased]
+
+### Changed — `iterate-kernel@0.1.9`：`zod` 收成精确版本，`overrides` 那处绕过删掉
+
+- `mcp-shell` 的 devDependency 升到 `iterate-kernel@0.1.9`。上一批为了让 `tsc` 不被内核的
+  `.d.ts` 静默降级成 `any`，在根与 `mcp-shell/package.json` 各加过一处 npm `overrides` 钉住
+  `zod@3.25.76`；0.1.9 把这件事放回了它该住的地方——内核自己声明精确版本，并加了
+  `kernel/test/zod-contract.test.mjs` 三条判据让"声明与发光版本不一致"变成不可发布。**两处
+  override 现已删除**，实测依赖树里只剩一份 `zod@3.25.76`（内核 dedupe 到它），两条安装路径
+  （根 workspace `npm ci` 与 `cd mcp-shell && npm ci`）各自构建 + 全测绿。
+- fork 侧 pin/conformance 同批重记（26 份契约档案 + 16 份语料判决，判决一字未动）。
+
+
 ## [1.17.0] — 2026-10-19
 
 **版本判断：minor。** 逐条对着本仓自己那四项 patch 判据实测：`bin` 声明没动

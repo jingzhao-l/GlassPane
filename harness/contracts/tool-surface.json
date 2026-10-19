@@ -1158,7 +1158,7 @@
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
         "package": "iterate-kernel",
-        "version": "0.1.8"
+        "version": "0.1.9"
       }
     }
   },

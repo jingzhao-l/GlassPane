@@ -8,11 +8,6 @@
     "installer",
     "updater"
   ],
-  "overrides": {
-    "iterate-kernel": {
-      "zod": "3.25.76"
-    }
-  },
   "engines": {
     "node": ">=18"
   },
