@@ -129,14 +129,36 @@ function logNote(text: string): void {
   }
 }
 
-/** JSON-RPC answer to a request frame that could not be framed at all. */
+/**
+ * JSON-RPC answer to a request frame that could not be framed at all.
+ *
+ * One fact, said once: the inbound bytes exceeded the frame cap, so nothing in them ever
+ * became a request this shell could validate. The numeric code is therefore the JSON-RPC
+ * class that fact genuinely is — `INVALID_REQUEST`, "the JSON sent is not a valid Request
+ * object" — and `GP_E_PAYLOAD_TOO_LARGE` rides in the message as *this shell's name for the
+ * same frame*, the label the tool and HTTP surfaces carry and the one the daemon uses at its
+ * own end of the socket (`Dispatcher.swift` answers its `.oversize` case with it, and
+ * `errors.ts` says the two sides share the code on purpose).
+ *
+ * The message used to lead with that label as though it were the verdict the numeric code
+ * carried, which made one answer state two conditions and disagree with itself. JSON-RPC's
+ * numeric space has no payload-too-large class and this shell is not going to mint one —
+ * `test/published-artifact.test.mjs` pins both halves an installed bundle answers with — so
+ * the fix is the wording: the code names the class, the message names the same class first
+ * and then the label, and `test/qoder-20261019-oversize-frame-code.test.mjs` pins that the
+ * two still describe one frame.
+ */
 export function tooLargeResponse(id: number | string | null): unknown {
   return {
     jsonrpc: JSONRPC,
     id,
     error: {
       code: INVALID_REQUEST,
-      message: `${GP_E_PAYLOAD_TOO_LARGE}: the request frame exceeds the ${MAX_FRAME_BYTES}-byte limit | remedy: shrink this request — cap observe maxDepth and keep argument strings within their schema limits`,
+      message: `Invalid Request: the inbound frame exceeds the ${MAX_FRAME_BYTES}-byte frame cap, so nothing in it `
+        + "was ever a JSON-RPC request this shell could parse or validate — the same frame the numeric code above "
+        + `calls an invalid request, and ${GP_E_PAYLOAD_TOO_LARGE} is the code this shell (and the daemon) use for `
+        + "that same frame rather than a second verdict on it | remedy: shrink this request — cap observe maxDepth "
+        + "and keep argument strings within their schema limits",
     },
   };
 }

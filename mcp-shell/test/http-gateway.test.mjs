@@ -1202,6 +1202,51 @@ test("the all-skipped aggregate points at reading, not at an act that already ra
   }
 });
 
+test("the all-skipped aggregate claims no cause this request did not measure", async () => {
+  // MUTATION THIS PINS: the opening clause of the `blocks.length === 0` remedy on the
+  // aggregate evidence route (`http-gateway.ts`). It asserted "the engine may have
+  // restarted" — a cause nothing on this path measures. Every id named in the request
+  // was sent *and answered* (that is what "skipped" means here: an answered
+  // `GP_E_NO_EVIDENCE`), and a daemon that answers is not one this call can call dead.
+  // The MCP half of the same branch was rewritten for exactly this reason (review
+  // 2026-10-09 finding 4, `tools.ts`), and this route never got re-read.
+  const fake = new FakeGatewayClient();
+  fake.on("last_evidence", () => {
+    throw new EngineCallError(GP_E_NO_EVIDENCE, "no evidence in the daemon history", "IGNORED");
+  });
+  const { gw, base } = await startGateway(fake);
+  try {
+    for (const format of ["markdown", "html"]) {
+      const res = await fetch(`${base}/v1/evidence?ids=${ID},${MISSING_ID}&format=${format}`, { headers: auth() });
+      const text = await res.text();
+      assert.equal(res.status, 404, `${format}: ${text.slice(0, 200)}`);
+      // Not one causal claim about a restart, in either rendering of the same answer.
+      for (const claim of [/may have restart/i, /engine restart/i, /restarted, or/i, /must have restart/i]) {
+        assert.equal(claim.test(text), false,
+          `${format}: 这条答复把一件它没测过的事说成了成因 ${claim}: ${text.slice(0, 320)}`);
+      }
+      const body = JSON.parse(text);
+      assert.equal(body.error.code, GP_E_NO_EVIDENCE);
+      // What the MCP half says instead, in this surface's own nouns: the daemon's
+      // bounded history is the fact, the absence of a cause is stated as unmeasured
+      // rather than left for the reader to invent, and the routes named are the ones a
+      // curl caller can actually send.
+      assert.match(body.error.remedy, /measured nothing about a restart/, body.error.remedy);
+      assert.match(body.error.remedy, /bounded history/, body.error.remedy);
+      assert.match(body.error.remedy, /not evidence that (?:they|those operations) did not run/, body.error.remedy);
+      assert.ok(!/gp_/i.test(body.error.remedy), `curl 读者叫不出 gp_* 工具：${body.error.remedy}`);
+      assert.ok(body.error.remedy.includes("GET /v1/evidence/<operationId>"), body.error.remedy);
+      assert.ok(body.error.remedy.includes("POST /v1/tools/observe"), body.error.remedy);
+      assert.ok(body.error.remedy.includes("no operation trail"), body.error.remedy);
+    }
+    // Two ids per request, two requests: the route is the only thing under test here,
+    // and it did answer both times (so nothing above is an artefact of an empty fan-out).
+    assert.equal(fake.invoked("last_evidence").length, 4);
+  } finally {
+    await gw.close();
+  }
+});
+
 test("the unknown-tool answer lists the routes that exist instead of a source symbol", async () => {
   const fake = new FakeGatewayClient();
   const { gw, base } = await startGateway(fake);

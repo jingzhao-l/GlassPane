@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
+import path from "node:path";
 
 // The published artifact, not the repository's mirror of it: this gate's whole claim is that
 // the bytes a third-party consumer installs answer the same questions as the daemon and the
@@ -18,9 +19,10 @@ import {
 import { canonicalJson } from "../dist/canonical.js";
 import { EvidenceAuditSession } from "../dist/audit-session.js";
 import { RESTORE_MODES, TOOL_BY_NAME, executeTool } from "../dist/tools.js";
-import { ProjectSetArgs } from "../dist/project-registry.js";
+import { ProjectSetArgs, PROJECTS_FILE_ENV } from "../dist/project-registry.js";
 import { LineReader, MAX_FRAME_BYTES } from "../dist/io.js";
 import { executableSource } from "./support/source.mjs";
+import { privateSandbox } from "./support/sandbox.mjs";
 import { deriveSelectorEmptiness } from "./support/param-validation-rules.mjs";
 import { makeEngine } from "./helpers.mjs";
 import { EngineJsonRpcClient } from "../dist/engine-client.js";
@@ -353,7 +355,18 @@ test("the advertised pid schemas state the domain the validators enforce", () =>
   });
   const project = TOOL_BY_NAME.get("gp_project_set").inputSchema.properties;
   assert.deepEqual(project.pid, { type: ["integer", "null"], minimum: lower, maximum: upper });
-  assert.deepEqual(project.bundleId, { type: ["string", "null"], maxLength: 256 });
+  // RE-PINNED (2026-10-19, was `maxLength: 256`). One identity, two surfaces: the registry
+  // stores the *same* bundleId the daemon matches an app by, and `Dispatcher.handleAttach`
+  // reads it with `maxLength: 512`. A 256 cap on the storing half therefore accepted an
+  // attachable id (`gp_attach {bundleId}` of 300 chars) and refused, forever, to register
+  // it — while the daemon's own registry path applies no cap at all, so nothing downstream
+  // could have admitted a third answer. The gate below re-reads the Swift number instead of
+  // trusting either surface's digits.
+  const attachBundleIdBound = daemonBound(
+    dispatcherStringBounds("handleAttach").bounds.get("bundleId"),
+    "Dispatcher.handleAttach bundleId",
+  );
+  assert.deepEqual(project.bundleId, { type: ["string", "null"], maxLength: attachBundleIdBound });
   for (const field of ["recipeConfigPath", "calibrationAssetsPath", "evidenceStoragePath"]) {
     assert.deepEqual(project[field], { type: ["string", "null"], maxLength: 1024 });
   }
@@ -1732,6 +1745,73 @@ test("attach.bundleId is bounded by the Dispatcher's own number, in the zod and 
   assert.equal(spec.inputSchema.properties.bundleId.maxLength, bound,
     `tools/list advertises ${spec.inputSchema.properties.bundleId.maxLength} for attach.bundleId while the `
     + `validator enforces the daemon's ${bound}: the agent is promised one rule and given another`);
+});
+
+test("project_set.bundleId is bounded by attach's own number, so an attachable id registers", async () => {
+  // MUTATION THIS PINS: the second, *stricter* copy of one identity rule. `gp_attach` was
+  // already bounded by `Dispatcher.handleAttach`'s `maxLength: 512` (the gate above), while
+  // the registry surface kept 256 in both its advertisement and its zod — so a 300-character
+  // bundleId was attachable and permanently unregisterable, the daemon's own registry
+  // applying no cap of its own. The pair is therefore one rule with one number, and both
+  // halves of the shell are probed: the zod that decides and the schema that promises.
+  const bound = daemonBound(
+    dispatcherStringBounds("handleAttach").bounds.get("bundleId"),
+    "Dispatcher.handleAttach bundleId",
+  );
+  const attach = TOOL_BY_NAME.get("gp_attach").inputSchema.properties.bundleId;
+  const project = TOOL_BY_NAME.get("gp_project_set").inputSchema.properties.bundleId;
+  assert.equal(attach.maxLength, bound, `attach 的广告不再等于 daemon 的 ${bound}：${attach.maxLength}`);
+  assert.equal(project.maxLength, bound,
+    `tools/list 给 gp_project_set 广告了 ${project.maxLength}，而同一个 bundleId 在 attach 那一侧是 ${bound} —— `
+      + "一条规则两个答案，注册得上的那个身份就此取决于调用方读的是哪一半");
+
+  // The zod that decides, probed at the boundary rather than at a comfortable middle.
+  for (const [length, admitted] of [[bound, true], [bound + 1, false]]) {
+    const bundleId = `com.example.${"x".repeat(length - "com.example.".length)}`;
+    assert.equal(bundleId.length, length, "the probe has to sit exactly on the boundary");
+    const parsed = ProjectSetArgs.safeParse({ displayName: "Consistency", bundleId });
+    assert.equal(parsed.success, admitted,
+      `ProjectSetArgs 对 ${length}-字符 bundleId 判成 ${parsed.success ? "接受" : "拒绝"}（daemon 的界是 ${bound}）`);
+  }
+
+  // And the seam an agent actually calls, against a registry file this test owns.
+  const sandbox = privateSandbox("gp-bundle-cap-");
+  const saved = process.env[PROJECTS_FILE_ENV];
+  process.env[PROJECTS_FILE_ENV] = path.join(sandbox.dir, "projects.json");
+  try {
+    for (const [length, admitted] of [[bound, true], [bound + 1, false]]) {
+      const bundleId = `com.example.${"x".repeat(length - "com.example.".length)}`;
+      const { engine } = makeEngine();
+      const outcome = await executeTool(
+        TOOL_BY_NAME.get("gp_project_set"),
+        { displayName: "Consistency", bundleId },
+        engine,
+        new EvidenceAuditSession(),
+      );
+      assert.equal(outcome.isError, !admitted,
+        `gp_project_set 对 ${length}-字符 bundleId（daemon 的界 ${bound}）判成 ${outcome.isError ? "拒绝" : "接受"}：`
+        + outcome.content.map((item) => item.text ?? "").join(" ").slice(0, 200));
+      if (!admitted) {
+        assert.match(outcome.content[0].text, /GP_E_BAD_PARAMS/, outcome.content[0].text);
+      }
+    }
+    // The decisive case of the defect itself: an id longer than the old 256 but inside the
+    // daemon's own cap must be both attachable and registrable — no third answer.
+    const threeHundred = `com.example.${"y".repeat(300 - "com.example.".length)}`;
+    assert.equal(threeHundred.length, 300);
+    const { engine } = makeEngine();
+    const stored = await executeTool(
+      TOOL_BY_NAME.get("gp_project_set"),
+      { displayName: "Consistency", bundleId: threeHundred },
+      engine,
+      new EvidenceAuditSession(),
+    );
+    assert.equal(stored.isError, false, stored.content.map((item) => item.text ?? "").join(" "));
+  } finally {
+    if (saved === undefined) delete process.env[PROJECTS_FILE_ENV];
+    else process.env[PROJECTS_FILE_ENV] = saved;
+    sandbox.dispose();
+  }
 });
 
 test("observe.role is bounded by the daemon's selectorMaxLength, wherever that number is declared", async () => {

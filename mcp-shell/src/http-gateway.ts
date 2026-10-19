@@ -755,14 +755,24 @@ async function handleEvidenceAggregate(
   }
 
   if (blocks.length === 0) {
+    // Every id this route sent came back answered, with `GP_E_NO_EVIDENCE`. That is the
+    // daemon saying its bounded history holds no pack for the id — it is *not* a statement
+    // that the operation never ran, and it is not evidence about the daemon's lifetime
+    // either: a request that receives an answer is a request to something that is up. The
+    // sentence this branch used to open with asserted exactly that unmeasured cause ("the
+    // engine may have restarted"); the MCP half of the same branch was rewritten for that
+    // reason (review 2026-10-09 finding 4, `tools.ts`) and this route is the same fact, so
+    // it now says the same thing in this surface's own nouns.
     fail(res, 404, GP_E_NO_EVIDENCE,
-      "none of the requested operations have evidence in the daemon history",
-      "the engine may have restarted, or those operationIds never produced evidence; each id named here was fetched "
-      + "and missed, and this gateway keeps no operation trail of its own, so it cannot list what ran. Producing a "
-      + "fresh pack means performing another action, which a read like this one does not do for you: see what the "
-      + "attached app is doing now with POST /v1/tools/observe, POST /v1/tools/assert_element or "
-      + "POST /v1/tools/probe_status, re-fetch one id with GET /v1/evidence/<operationId>, and the routes this "
-      + `surface answers are ${TOOL_ROUTES_TEXT}`);
+      `none of the ${ids.length} requested ${ids.length === 1 ? "operation has" : "operations have"} a pack in the `
+      + "daemon history: each id this request named was fetched and answered with that code",
+      "the daemon holding no pack for these operations is a fact about its bounded history, not evidence that they "
+      + "did not run, and this request measured nothing about a restart, so no cause is claimed here. Each id named "
+      + "above was fetched and missed, and this gateway keeps no operation trail of its own, so it cannot list what "
+      + "ran. Producing a fresh pack means performing another action, which a read like this one does not do for "
+      + "you: see what the attached app is doing now with POST /v1/tools/observe, POST /v1/tools/assert_element or "
+      + "POST /v1/tools/probe_status, re-fetch one id with GET /v1/evidence/<operationId>, ask again with fewer ids "
+      + `(at most ${MAX_EVIDENCE_IDS} per request), and the routes this surface answers are ${TOOL_ROUTES_TEXT}`);
     return;
   }
 

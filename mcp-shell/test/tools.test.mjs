@@ -1485,9 +1485,18 @@ test("an oversized reply to a replay-unsafe tool forbids the retry instead of or
   assert.match(restore, /do not re-issue this request/, restore);
   assert.ok(!/\bretry with\b/.test(restore), restore);
   assert.match(restore, /it replays recorded steps onto the user's screen/);
-  // `restore` advertises no knob that shrinks a reply, so none may be invented.
+  // The knobs `gp_restore` does not advertise stay un-invented.
   assert.ok(!/smaller (maxDepth|scale|limit)|tighter (role|title)/.test(restore), restore);
-  assert.match(restore, /no parameter that shrinks a reply/);
+  // RE-PINNED (2026-10-19, was `assert.match(restore, /no parameter that shrinks a reply/)`).
+  // That assertion pinned the *defect*. `gp_restore` publishes `steps`
+  // (`tools.ts`' own `inputSchema`, `minItems: 1`/`maxItems: 64`), the daemon replays one act
+  // per entry (`Dispatcher.handleRestore` → `ParamValidation.optSteps`, capped 1…64), and this
+  // shell already budgets its own wait per step (`engineDeadlineMs`: RESTORE_BASE + one
+  // `act` deadline per step). So "this tool advertises no parameter that shrinks a reply" is a
+  // false statement about a parameter the caller was shown, and the reverse mutation — dropping
+  // `steps` out of `narrowingKnobsFor` — brings that sentence back and reddens the line below.
+  assert.doesNotMatch(restore, /no parameter that shrinks a reply/, restore);
+  assert.match(restore, /shorter steps array \(this tool advertises 1…64\)/, restore);
 
   const attach = await oversizedAdviceThrough("gp_attach", { bundleId: "com.example.sweep" });
   assert.match(attach, /do not re-issue this request/, attach);
@@ -1499,6 +1508,41 @@ test("an oversized reply to a replay-unsafe tool forbids the retry instead of or
   const observe = await oversizedAdviceThrough("gp_observe", {});
   assert.match(observe, /retry with a smaller maxDepth/, observe);
   assert.ok(!/do not re-issue this request/.test(observe), observe);
+});
+
+test("gp_restore's steps array is the lever the daemon itself caps, floor and ceiling included", async () => {
+  // MUTATION THIS PINS: the `steps` branch of `narrowingKnobsFor`
+  // (mcp-shell/src/tools.ts). `restore` is the one tool whose reply *and* whose
+  // deadline both scale with a count its own schema publishes
+  // (`engineDeadlineMs` = RESTORE_BASE + one `act` deadline per step), and the map
+  // that decides "what can shrink this reply" did not know the name, so the advice
+  // told the caller the tool advertises nothing. Bounds come out of the advertised
+  // schema — `minItems`/`maxItems`, the shell's mirror of `ParamValidation.stepsLower`
+  // / `stepsUpper` — rather than being typed a second time here.
+  const step = { selector: { role: "AXButton" }, action: "press" };
+  const three = await oversizedAdviceThrough("gp_restore", {
+    snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS",
+    steps: [step, step, step],
+  });
+  assert.match(three, /shorter steps array \(this tool advertises 1…64\)/, three);
+  assert.doesNotMatch(three, /no parameter that shrinks a reply/, three);
+  // Still a replay-unsafe tool: the lever is offered for the case where the reading
+  // shows nothing took effect, never as an order to send it again now.
+  assert.match(three, /do not re-issue this request/, three);
+  assert.ok(!/\bretry with\b/.test(three), three);
+
+  // The floor half: one step is what `minItems` (and `ParamValidation.stepsLower`)
+  // allows, so "send fewer steps" is a command zod answers with GP_E_BAD_PARAMS. It
+  // has to be refused by name, the way `maxDepth: 1` and `limit: 1` already are.
+  const one = await oversizedAdviceThrough("gp_restore", {
+    snapshotId: "snap_0123456789ABCDEFGHJKMNPQRS",
+    steps: [step],
+  });
+  assert.match(one, /steps is already at this tool's floor \(1\)/, one);
+  assert.ok(!/shorter steps array/.test(one), one);
+  // …and with nothing else to turn it says what is left, rather than claiming the
+  // tool publishes no parameter at all — the knob exists, it is simply spent.
+  assert.doesNotMatch(one, /no parameter that shrinks a reply/, one);
 });
 
 /**

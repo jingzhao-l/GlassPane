@@ -1,7 +1,6 @@
 import { z } from "zod";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 // Subpath imports, never the `iterate-kernel` barrel: it re-exports `schemas`, which reads
 // `../schemas/*.json` at module init — a path that only exists next to the package, not next to
 // the esbuild bundle this file ships as. Same rule as the fork's binding, for the same reason.
@@ -19,7 +18,16 @@ import { parseEvidencePackRead } from "iterate-kernel/parse";
 import { KernelSchemaError } from "iterate-kernel/errors";
 
 import { canonicalJson } from "./canonical.js";
-import { readUpdateState, runtimeIsUsable, stateRootOf, type CaRootsReading, type RuntimeReading } from "./update-state.js";
+import {
+  absoluteNodeCommand,
+  readUpdateState,
+  repoScript,
+  runtimeIsUsable,
+  shellPath,
+  stateRootOf,
+  type CaRootsReading,
+  type RuntimeReading,
+} from "./update-state.js";
 import { MAX_FRAME_BYTES } from "./io.js";
 import {
   CALLER_VISIBLE_CEILING_MS,
@@ -57,6 +65,8 @@ import {
   ProjectListArgs,
   ProjectSetArgs,
   ProjectGetArgs,
+  BUNDLE_ID_MAX_LENGTH,
+  registryReaders,
   projectList,
   projectSet,
   projectGet,
@@ -87,12 +97,18 @@ const OptionalDepthSchema = z.number().int().min(1).max(10).optional();
  * it refuses, with `GP_E_BAD_PARAMS` from this shell, a frame the daemon would have
  * accepted and answered, so the agent loses the daemon's own verdict. The pair is
  * gated by `test/consumer-consistency.test.mjs`, which reads both numbers out of
- * `Dispatcher.swift` and fails if either side moves. */
+ * `Dispatcher.swift` and fails if either side moves.
+ *
+ * `bundleId` takes its number from `project-registry.ts`'s `BUNDLE_ID_MAX_LENGTH` rather
+ * than from a second literal: the registry stores the very same identity, and when only
+ * the attach side carried the daemon's 512 the storing side's 256 made a long bundleId
+ * attachable and permanently unregisterable — one rule, two answers, and which one a
+ * caller met depended on which tool it had read. */
 // `.min(1)`：daemon 的 observe role 是一条纯等值过滤（`EngineCore.prune(_:matchingRole:)`），
 // 空串永远匹配不到任何节点，却会回 `isError:false` + `nodeCount:0` —— 那是对着一屏元素说出
 // "这个 app 没有无障碍内容"。同一层的 selector.role 早已按这条拒过，这里是它漏掉的那一半。
 const OptionalRoleSchema = z.string().min(1).max(SELECTOR_MAX_LENGTH).optional();
-const OptionalBundleIdSchema = z.string().max(512).optional();
+const OptionalBundleIdSchema = z.string().max(BUNDLE_ID_MAX_LENGTH).optional();
 /**
  * The id grammar, in one place: `op_` + 26 Crockford base32 characters
  * (P0 §4.1, mirrored by `ParamValidation.operationIdPattern` on the daemon side
@@ -380,7 +396,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       type: "object",
       additionalProperties: false,
       properties: {
-        bundleId: { type: "string", maxLength: 512 },
+        bundleId: { type: "string", maxLength: BUNDLE_ID_MAX_LENGTH },
         pid: { type: "integer", minimum: 1, maximum: PID_INT32_MAX },
         projectId: { type: "string", pattern: "^prj_[0-9A-HJKMNP-TV-Z]{26}$" },
       },
@@ -636,7 +652,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         displayName: { type: "string", minLength: 1, maxLength: 256 },
         // `null` clears the field on update, so these mirror
         // ProjectSetArgs' `.nullish()` rather than the old optional-string form.
-        bundleId: { type: ["string", "null"], maxLength: 256 },
+        // The ceiling is `gp_attach`'s, from the daemon's own bound — the identity a
+        // caller can attach with has to be one the registry can store.
+        bundleId: { type: ["string", "null"], maxLength: BUNDLE_ID_MAX_LENGTH },
         // Matches ProjectSetArgs.pid, which is bounded to the same Int32 domain
         // the daemon stores (an out-of-range pid made Swift fail to decode the
         // whole registry file, which then got rewritten as an empty table).
@@ -833,8 +851,13 @@ interface NarrowingKnob {
   /**
    * `target` is not a knob this layer may offer: see
    * {@link TARGET_SELECTING_KNOBS}. The others decide how much a reply carries.
+   *
+   * `steps` is `gp_restore`'s replay list: the daemon performs one act per entry
+   * (`Dispatcher.handleRestore` → `ParamValidation.optSteps`), so the entry count decides
+   * both how much the answer carries and how long this shell waits for it
+   * (`engine-client.ts`'s `engineDeadlineMs`: base + one `act` deadline per step).
    */
-  kind: "scale" | "depth" | "selector" | "limit" | "target";
+  kind: "scale" | "depth" | "selector" | "limit" | "steps" | "target";
   minimum?: number;
   maximum?: number;
   /** The value the request carried, when it carried one. */
@@ -902,7 +925,13 @@ function narrowingKnobsFor(spec: ToolSpec, params: Record<string, unknown>): Nar
   const properties = (spec.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
   const knobs: NarrowingKnob[] = [];
   for (const [name, raw] of Object.entries(properties)) {
-    const schema = raw as { type?: string; minimum?: number; maximum?: number };
+    const schema = raw as {
+      type?: string;
+      minimum?: number;
+      maximum?: number;
+      minItems?: number;
+      maxItems?: number;
+    };
     const sentValue = params[name];
     const sent = typeof sentValue === "number" ? sentValue : undefined;
     // Which knob shrinks *what* is a property of the tool, so the mapping is
@@ -916,6 +945,18 @@ function narrowingKnobsFor(spec: ToolSpec, params: Record<string, unknown>): Nar
       knobs.push({ name, kind: "scale", minimum: schema.minimum, maximum: schema.maximum, sent });
     } else if (name === "limit") {
       knobs.push({ name, kind: "limit", minimum: schema.minimum, maximum: schema.maximum, sent });
+    } else if (name === "steps") {
+      // An array, so the count that decides the reply's size is `minItems`/`maxItems`
+      // rather than `minimum`/`maximum`, and the value the request carried is its length.
+      // Both bounds are the ones `tools/list` publishes, and the daemon enforces the same
+      // pair (`ParamValidation.stepsLower` / `stepsUpper`).
+      knobs.push({
+        name,
+        kind: "steps",
+        minimum: schema.minItems,
+        maximum: schema.maxItems,
+        sent: Array.isArray(sentValue) ? sentValue.length : undefined,
+      });
     } else if (name === "selector" || name === "role" || name === "title") {
       const target = targetSelectingKnob(spec.name, name);
       knobs.push(target === null
@@ -973,6 +1014,8 @@ function knobSubject(kind: NarrowingKnob["kind"]): string {
       return "the number of entries it collects";
     case "scale":
       return "the image";
+    case "steps":
+      return "the replay it performs";
     case "selector":
       return "the reply";
     case "target":
@@ -1011,6 +1054,10 @@ function describeKnob(knob: NarrowingKnob): string {
         : `a tighter ${knob.name} filter`;
     case "scale":
       return `a smaller scale${bounds}${knob.sent !== undefined ? `, currently ${knob.sent}` : ""}`;
+    case "steps":
+      // The honest shape of "smaller" here: one fewer entry is one fewer action replayed,
+      // so the sentence says which it is rather than letting `shorter` read as free.
+      return `a shorter steps array${bounds}${knob.sent !== undefined ? `, currently ${knob.sent} ${knob.sent === 1 ? "step" : "steps"}` : ""}`;
     case "target":
       // Callers take target-shaped knobs out of any list they render with this
       // function; the clause is what they say instead.
@@ -1108,6 +1155,7 @@ export function replayUnsafePayloadAdvice(
 ): string {
   const knobs = narrowingKnobsFor(spec, params);
   const shrinkable = replyShrinkingKnobs(knobs).filter((knob) => !atAdvertisedFloor(knob));
+  const atFloor = knobs.filter(atAdvertisedFloor);
   const target = targetKnobs(knobs);
   const head = `the reply was too large for one frame (${MAX_FRAME_BYTES}-byte limit); `;
   const harm = REPLAY_UNSAFE_PAYLOAD_HARMS[method] ?? "it changes daemon state";
@@ -1121,7 +1169,14 @@ export function replayUnsafePayloadAdvice(
     ? `with ${shrinkable.map(describeKnob).join(" and ")}`
     : target.length > 0
       ? `exactly as it stands, with the same ${target.map((knob) => knob.name).join(" and ")} (${target.map(describeTargetKnob).join("; ")})`
-      : "only after narrowing it (this tool advertises no parameter that shrinks a reply, so ask a smaller question: one element, one region)";
+      // A knob the tool does publish, spent: `gp_restore {steps: [one step]}` advertises a
+      // real lever and already holds it at `minItems`, so the sentence says which it is
+      // instead of claiming the tool offers nothing — the same floor rule
+      // `oversizedReplyAdvice` applies to `maxDepth` and `limit`, and for the same reason:
+      // "narrow it" here is a command this shell would answer with GP_E_BAD_PARAMS.
+      : atFloor.length > 0
+        ? `only after narrowing it (${atFloor.map(describeKnob).join("; ")})`
+        : "only after narrowing it (this tool advertises no parameter that shrinks a reply, so ask a smaller question: one element, one region)";
   return head
     + `do not re-issue this request. '${spec.name}' already reached the daemon and was answered — only the answer was dropped for exceeding one frame — and ${harm}, `
     + `so sending it again performs the change a second time rather than recovering the first. Read what happened instead: gp_recent_reports lists the operations this session `
@@ -1511,39 +1566,15 @@ async function runValidatedTool(
 }
 
 /**
- * Quote a path for a shell only when it needs it, so a pasted command reads as the
- * single argument it is.
+ * The three path helpers this block used to define privately — `shellPath`,
+ * `absoluteNodeCommand`, `repoScript` — now live in `update-state.ts` and are imported at
+ * the top of this file, because the `absent` / `unreadable` / `unresolvable` branches
+ * rendered there have to reach the same verdict about "is there an absolute command this
+ * machine can run at all". A second, weaker copy of that judgement is how a remedy goes
+ * back to being a cwd-relative guess (review 2026-10-09 finding 12), and the two branches
+ * below — `updaterEnableCommand` and `runtimeSelfDiagnosis` — are the ones that have
+ * always had to make it.
  */
-function shellPath(text: string): string {
-  return /[\s"'`\\]/.test(text) ? JSON.stringify(text) : text;
-}
-
-/**
- * A `node <path> …` command the reader can actually run.
- *
- * The two remedy lines this feeds used to print `node updater/cli.js enable` and
- * `node installer/cli.js` — relative to *whatever working directory the reader
- * happens to be in*, which for an agent inside an MCP host is nowhere near this
- * repository, so the command named an action nobody could take (review 2026-10-09
- * finding 12). A path is only named when it is absolute: either the install record
- * itself says where the copy lives, or this build sits in the checkout beside the
- * script, which is exactly the check `engine-client.ts`'s `daemonUnreachableRemedy`
- * already makes. `null` means no such command exists for this machine, and the
- * branches say that instead of printing a path that resolves elsewhere.
- */
-function absoluteNodeCommand(cliPath: string | null, suffix: string): string | null {
-  if (cliPath === null || !path.isAbsolute(cliPath)) {
-    return null;
-  }
-  return `node ${shellPath(cliPath)}${suffix}`;
-}
-
-/** This build's own location, for finding the scripts shipped beside it. */
-function repoScript(name: string): string | null {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const candidate = path.resolve(here, "..", "..", name);
-  return fs.existsSync(candidate) ? candidate : null;
-}
 
 /**
  * The updater's `enable` step, worded as something this machine can run.
@@ -2141,7 +2172,11 @@ function projectErrorRemedy(code: string): string {
     return "this process has no entry in the password database, so neither it nor the daemon can know which user's state directory is meant; run the shell as a user that has one (`id -u` / `dscl . -read /Users/<name> NFSHomeDirectory`). Nothing in ~/.glasspane needs repairing for this";
   }
   if (code === GP_E_INTERNAL) {
-    return `the projects file is the problem, not your arguments: the message above names its path, so read it with \`/usr/bin/plutil -p <that path>\` or \`/bin/cat <that path>\` — both absolute, so they run from whatever directory the reader is in and need nothing that may be off PATH — repair or restore the damaged entry, and retry — or set ${FORCE_OVERWRITE_ENV}=1 and call gp_project_set to rebuild the registry from scratch (the unloadable file is moved aside as <path>.unreadable-<id>, never deleted, and every entry still in it is lost). Do not retry the same read-only call unchanged: it will keep failing.`;
+    // The readers come from `registryReaders` — the same sentence the registry's own message
+    // prints, because one error must not carry two opposite rules about what a reader can
+    // run from (the message used to order a bare `python3`, which a stock macOS has not
+    // got, while this remedy insisted on absolute binaries off-PATH-safe).
+    return `the projects file is the problem, not your arguments: the message above names its path, so read it with ${registryReaders("<that path>")}; repair or restore the damaged entry, and retry — or set ${FORCE_OVERWRITE_ENV}=1 and call gp_project_set to rebuild the registry from scratch (the unloadable file is moved aside as <path>.unreadable-<id>, never deleted, and every entry still in it is lost). Do not retry the same read-only call unchanged: it will keep failing.`;
   }
   return "check the tool's input schema and retry";
 }
