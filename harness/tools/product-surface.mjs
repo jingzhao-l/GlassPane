@@ -128,13 +128,14 @@ const check = (rule, condition, detail) => {
  */
 const SCAN_SET_FLOORS = {
   bins: 2, // product.json -> bins
-  forbiddenFiles: 7, // files searched for upstream registries / package names
-  forbiddenNeedles: 6, // what they are searched for
+  forbiddenFiles: 879, // shipped text discovered under the release, install, launcher and patch paths
+  forbiddenNeedles: 7, // what they are searched for
   cliCmdFiles: 66, // packages/opencode/src/cli/cmd/**.ts, walked recursively
   envDiscovery: 67, // those CLI files + the shipped launcher
   foreignPublishers: 4, // per-package publishers that must stay dead ends
-  workflows: 5, // 3 root + 2 fork workflow files the wiring corpus reads
+  workflows: 7, // 3 root + 2 fork workflow files, plus the 2 package.json manifests the wiring corpus reads
   selftests: 4, // selftests that must be wired to a runner
+  catalogProviders: 200, // providers in the committed model catalog
 }
 
 // ---- manifest agreement
@@ -286,31 +287,98 @@ const forbidden = [
   ['"opencode-ai"', "the upstream npm package name"],
   ["opencode-ai@", "the upstream npm package name"],
 ]
-const forbiddenFiles = [
+const forbiddenNeedles = [
+  ...forbidden,
+  ["models.opencode.ai", "upstream's model catalog, which is fetched at runtime and whose `npm` field becomes a dynamic import"],
+]
+/**
+ * The scanned set is DISCOVERED, not remembered. The hand-listed 7 files are why a shipped
+ * leak passed: `packages/tui/src/feature-plugins/home/tips-view.tsx` prints
+ * `docker run -it --rm ghcr.io/anomalyco/opencode` on the home screen of every installed
+ * copy, and this gate never opened that file — the needle it holds was in the list, the
+ * file was not. Everything that reaches a user or a machine is in scope: the sources
+ * compiled into the binary, the launchers, the installers, and `patches/`, which
+ * `bun install` reads. Test and fixture trees are excluded: they quote upstream strings to
+ * prove migration works, and a gate that demands they forget would be answered by deleting
+ * the test.
+ */
+const forbiddenScanDirs = [
+  "packages/opencode/src",
+  "packages/opencode/script",
+  "packages/opencode/bin",
+  "packages/tui/src",
+  "packages/core/src",
+  "packages/plugin/src",
+  "scripts",
+  "patches",
+]
+const forbiddenScanExt = /\.(ts|tsx|js|mjs|cjs|sh)$/
+function textFilesUnder(rel) {
+  const found = []
+  for (const entry of readdirSync(path.join(forkRoot, rel), { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    const child = `${rel}/${entry.name}`
+    if (entry.isDirectory()) {
+      if (entry.name === "node_modules" || entry.name === "dist" || entry.name === "test" || entry.name === "tests" || entry.name === "fixtures") continue
+      found.push(...textFilesUnder(child))
+    } else if (forbiddenScanExt.test(entry.name)) found.push(child)
+  }
+  return found
+}
+const forbiddenFiles = forbiddenScanDirs.flatMap(textFilesUnder).filter((rel) => existsSync(path.join(forkRoot, rel))).sort()
+// A discovered set can also go quiet by its roots leaving the tree, so the files that carry
+// the release and install path are named as well: the walk must find them or the lane is red.
+for (const want of [
   "packages/opencode/script/publish.ts",
-  "packages/opencode/script/build.ts",
   "packages/opencode/script/postinstall.mjs",
   "packages/opencode/src/installation/index.ts",
   "packages/opencode/src/cli/cmd/uninstall.ts",
   "packages/opencode/bin/glasspane-harness",
   "scripts/install.sh",
-]
+]) {
+  check("scan-set", forbiddenFiles.includes(want) || forbiddenScanDirs.some((d) => want.startsWith(`${d}/`)), `${want} is no longer inside the discovered upstream-registry scan set (${forbiddenScanDirs.join(", ")}) — a distribution file the gate stopped reading`)
+}
 /** Comments carry the record of what was removed; only code can still reach it. */
 function stripComments(text) {
   return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1").replace(/^\s*#.*$/gm, "")
 }
-// Both halves of this cross product are pinned, because dropping one entry from either list
-// removes agreements without removing a fact: the loop prints 6 per file and 7 per needle, so
-// deleting `scripts/install.sh` (or the ghcr needle) from a literal list looks like a lane
-// that simply has less to say. These are the files and the endpoints that were拆 out of
-// upstream's release lanes in 私有化批次 A — the set is a claim about the product, not a
-// scratch list, and it only stays a claim if shrinking it is red.
-check("scan-set", forbiddenFiles.length >= SCAN_SET_FLOORS.forbiddenFiles, `the upstream-registry scan set holds ${forbiddenFiles.length} file(s); floor is ${SCAN_SET_FLOORS.forbiddenFiles} (${forbiddenFiles.join(", ")}) — a file dropped from the "forbiddenFiles" list stops being read for every needle at once`)
-check("scan-set", forbidden.length >= SCAN_SET_FLOORS.forbiddenNeedles, `the upstream-registry needle list holds ${forbidden.length} endpoint(s); floor is ${SCAN_SET_FLOORS.forbiddenNeedles} — a needle dropped from this list is an upstream release lane this gate no longer looks for`)
+// Both halves of this cross product are pinned. The needles are a literal list (dropping one is
+// dropping an upstream release lane this gate looks for), and the files are discovered (a root
+// leaving the tree, an extension dropping out, or the exclusions widening is a scan that quietly
+// stopped happening). The floor below is the count this walk measures today: shrinking it in
+// review is the argument, lowering it to make a red lane green is the loosening this repository
+// forbids.
+check("scan-set", forbiddenFiles.length >= SCAN_SET_FLOORS.forbiddenFiles, `the upstream-registry scan set discovered ${forbiddenFiles.length} file(s); floor is ${SCAN_SET_FLOORS.forbiddenFiles} — a scan set that found fewer files read fewer of them for every needle at once (${forbiddenFiles.slice(0, 5).join(", ")}…)`)
+check("scan-set", forbiddenNeedles.length >= SCAN_SET_FLOORS.forbiddenNeedles, `the upstream-registry needle list holds ${forbiddenNeedles.length} endpoint(s); floor is ${SCAN_SET_FLOORS.forbiddenNeedles} — a needle dropped from this list is an upstream release lane this gate no longer looks for`)
 for (const file of forbiddenFiles) {
   const text = stripComments(read(file))
-  for (const [needle, what] of forbidden) {
+  for (const [needle, what] of forbiddenNeedles) {
     check("no-upstream-registries", !text.includes(needle), `${file} references ${what} (${needle}) in executable text`)
+  }
+}
+
+// ---- the model catalog the binary embeds is a file in this tree
+// WHY. `build.ts` pastes this catalog into `Bun.build({define})`, a source-text substitution, so
+// its bytes are inside the signed artifact; one string field of it (`npm`) is later handed to
+// `npm install` + `await import()` in the process that owns the `gp_*` surface. Reading it from a
+// live endpoint at build time meant the tag did not determine the release, and this gate — which
+// scans for upstream infrastructure — could not see either the endpoint or the missing pin.
+{
+  const catalogRel = "contracts/models-catalog.json"
+  const catalogAbs = path.join(forkRoot, catalogRel)
+  check("catalog-pinned", existsSync(catalogAbs), `${catalogRel} is not in the tree — the build has no catalog to embed and must fail rather than fetch`)
+  const generateTs = readCode("packages/opencode/script/generate.ts")
+  check("catalog-pinned", generateTs.includes(`"models-catalog.json"`), "script/generate.ts no longer reads the committed catalog by name")
+  check("catalog-pinned", generateTs.includes("GLASSPANE_MODELS_FETCH_LIVE"), "script/generate.ts lost the explicit opt-in marker — a live fetch must be a deliberate flag, not the default")
+  if (existsSync(catalogAbs)) {
+    let providers = null
+    try {
+      const parsed = JSON.parse(readFileSync(catalogAbs, "utf8"))
+      providers = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? Object.keys(parsed) : null
+    } catch {
+      providers = null
+    }
+    check("catalog-pinned", providers !== null && providers.length > 0, `${catalogRel} is not a non-empty JSON object of providers — an empty or malformed catalog is a build failure, not a smaller product surface`)
+    check("scan-set", providers !== null && providers.length >= 200, `${catalogRel} carries ${providers === null ? "unreadable" : providers.length} provider(s); the floor is ${SCAN_SET_FLOORS.catalogProviders} — a catalog that silently lost most of its providers would still build, and the shipped product would answer for models it no longer knows`)
   }
 }
 
@@ -334,9 +402,18 @@ check(
 // was gated, so a lane reading the other could silently point at a mirror. Both fields still
 // exist (docs quote the nested one), so they must agree, and the publisher — the only lane that
 // *writes* — has to name it on both its reads and its publishes.
+// The comparison must not be able to satisfy itself: `product.npm?.registry ?? product.registry`
+// equals `product.registry` unconditionally once the nested field is deleted, so the old form
+// went green by removing one of the two answers it existed to cross-check. Presence is asserted
+// separately, and then equality.
 check(
   "registry",
-  (product.npm?.registry ?? product.registry) === product.registry,
+  typeof product.npm?.registry === "string" && product.npm.registry.length > 0,
+  `product.json has no non-empty "npm.registry" (read ${JSON.stringify(product.npm?.registry)}) — this rule compares two declared registries, and deleting one is not making them agree`,
+)
+check(
+  "registry",
+  product.npm?.registry === product.registry,
   `product.json's npm.registry (${product.npm?.registry}) disagrees with the gated product.registry (${product.registry}) — two answers for one fact`,
 )
 const publishTs = readCode("packages/opencode/script/publish.ts")
@@ -572,7 +649,22 @@ check("workflows", /publish_npm/.test(release) && /confirm/.test(release), "rele
 check("workflows", !release.includes("anomalyco"), "release.yml references upstream infrastructure")
 check("notice-license", existsSync(path.join(forkRoot, "LICENSE")), "the upstream LICENSE is missing — attribution is not optional")
 const notice = existsSync(path.join(forkRoot, "NOTICE")) ? readFileSync(path.join(forkRoot, "NOTICE"), "utf8") : ""
-check("notice-license", notice.includes(product.upstream?.tag ?? "v1.18.32"), "NOTICE does not record the pinned upstream tag")
+// The pinned upstream tag has ONE source: `harness/upstream.json`. Comparing NOTICE against
+// `product.upstream?.tag ?? "v1.18.32"` let the rule stay green by deleting the field — the
+// fallback is a number this ruler invented, and it also decoupled the check from the pin CI
+// actually clones. Presence, cross-source agreement, then the NOTICE text.
+const upstreamPin = (() => {
+  const f = path.join(repoRoot, "harness", "upstream.json")
+  if (!existsSync(f)) return null
+  try {
+    return JSON.parse(readFileSync(f, "utf8")).tag ?? null
+  } catch {
+    return null
+  }
+})()
+check("notice-license", typeof upstreamPin === "string" && upstreamPin.length > 0, `harness/upstream.json carries no readable \`tag\` (read ${JSON.stringify(upstreamPin)}) — the upstream pin is not on disk, so nothing below can be checked against it`)
+check("notice-license", product.upstream?.tag === upstreamPin, `product.json declares upstream.tag ${JSON.stringify(product.upstream?.tag)} while the pin in harness/upstream.json is ${JSON.stringify(upstreamPin)} — two answers for one fact`)
+check("notice-license", typeof upstreamPin === "string" && notice.includes(upstreamPin), `NOTICE does not record the pinned upstream tag (${upstreamPin})`)
 check("notice-license", notice.includes("MIT"), "NOTICE does not record the upstream license")
 
 // ---- the released tree is anchored to trunk's fork subtree
@@ -808,6 +900,7 @@ const SELFTESTS = [
   "harness/tools/verify-published-selftest.sh",
   "harness/tools/probe-lane-selftest.sh",
   "harness/tools/release-artifact-selftest.mjs",
+  "harness/tools/rulers-selftest.mjs",
 ]
 {
   const wiringRoots = [path.join(repoRoot, ".github", "workflows"), path.join(forkRoot, ".github", "workflows")]
@@ -815,7 +908,14 @@ const SELFTESTS = [
   for (const dir of wiringRoots) {
     if (!existsSync(dir)) continue
     for (const f of readdirSync(dir).sort()) {
-      if (/\.ya?ml$/.test(f)) runnable.push(`${path.relative(repoRoot, path.join(dir, f))}=${readFileSync(path.join(dir, f), "utf8")}`)
+      // A YAML comment is prose. The corpus must be the executable part of the lane or the rule
+      // "a selftest nobody runs is not a control" is satisfied by leaving the sentence behind and
+      // deleting the step — measured here: `ci.yml` holds a comment naming
+      // `verify-published-selftest.sh` 40 lines above the step that actually runs it.
+      if (/\.ya?ml$/.test(f)) {
+        const body = readFileSync(path.join(dir, f), "utf8")
+        runnable.push(`${path.relative(repoRoot, path.join(dir, f))}=${body.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n")}`)
+      }
     }
   }
   for (const rel of ["package.json", "harness/glasspane-harness/package.json"]) {
@@ -852,7 +952,7 @@ const SELFTESTS = [
 // individually, and this is the net that catches a future rule being deleted outright
 // (including by this file's own editors). Growth is expected and free; a shrink is the
 // lane saying less than it used to, which is the one thing a green printout must not mean.
-const AGREEMENT_FLOOR = 200
+const AGREEMENT_FLOOR = 6351
 check("agreement-count", ok.length + problems.length >= AGREEMENT_FLOOR, `this run asked ${ok.length + problems.length} question(s) of the product surface; the floor is ${AGREEMENT_FLOOR} — a smaller number means a rule or a scan set left this file, and "fewer agreements" is how every silent narrowing in this lane has historically looked (83 → 86 was caught by exactly this comparison). Fix the scan; do not lower the floor.`)
 console.log(`product-surface — ${ok.length} agreement(s) held, ${problems.length} problem(s)`)
 for (const p of problems) console.error(`  ✗ ${p}`)

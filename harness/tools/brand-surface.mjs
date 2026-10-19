@@ -147,10 +147,17 @@ const RULES = [
   },
   {
     id: "upstream-in-user-text",
+    // Three shapes this rule used to miss, all of them real: it paired `prompts.log.*(` with a
+    // backtick only (the shipped farewell is double-quoted), it kept `"|`console.log(` as
+    // alternatives that each bound one quote character, and it matched `\bopencode\b`
+    // case-sensitively — so `Thank you for using OpenCode!` sat in a file this gate claims to
+    // read, with the golden recording zero hits. Every quote shape now, case-insensitive, and
+    // `(?<![@\w])…(?![\w-])` so the deliberately-kept `@opencode-ai/*` workspace scopes are
+    // still bloodline rather than a product claim.
     count: (text) =>
       occ(
         text,
-        /(?:describe\s*:\s*"|console\.(?:log|error|warn)\(\s*`|console\.(?:log|error|warn)\(\s*"|prompts\.log\.\w+\(\s*`|clientInfo\s*:\s*\{\s*name\s*:\s*"|active\s*:\s*"|withDefault\(\s*"|const name = `opencode)[^\n]*\bopencode\b/g,
+        /(?:describe\s*:\s*["'`]|console\.(?:log|error|warn)\(\s*["'`]|prompts\.log\.\w+\(\s*["'`]|clientInfo\s*:\s*\{\s*name\s*:\s*["'`]|active\s*:\s*["'`]|withDefault\(\s*["'`]|const name = ["'`])[^\n]*(?<![@\w])opencode(?![\w-])/gi,
       ),
     why: "a user-facing string that says opencode is a product claim; internal identifiers are bloodline, strings are identity",
   },
@@ -192,10 +199,19 @@ const LINEAGE_DOCS = new Set([
  *  was retired on 2026-10-08 in favour of the iterate-kernel dependency, pinned by
  *  script/kernel-pin.mjs; the skip stays so a re-appearing vendor tree is not silently
  *  counted as our lineage) and the lineage documents above. */
+// Vendored third-party DATA is not bloodline. `contracts/models-catalog.json` is the provider
+// catalog the binary embeds (it names upstream products 174 times because that is what a provider
+// catalog of someone else's models looks like), and it is pinned, hashed-by-shape and refreshed by
+// a deliberate commit — the same treatment `kernel-pin.json` gives the kernel corpus. Counting it
+// as lineage would make the one number this ratchet owns a function of how many third-party
+// providers exist, so a catalog refresh would read as brand regression in either direction.
+const LINEAGE_DATA = [path.join("contracts", "models-catalog.json")]
+
 function forkTextFiles(dir = forkRoot, out = []) {
   for (const entry of readdirSync(dir)) {
     if (entry === "node_modules" || entry === "artifacts" || entry === ".git" || entry === "dist") continue
     if (dir === forkRoot && LINEAGE_DOCS.has(entry)) continue
+    if (LINEAGE_DATA.includes(path.relative(forkRoot, path.join(dir, entry)))) continue
     const abs = path.join(dir, entry)
     const st = statSync(abs)
     if (st.isDirectory()) {
@@ -338,11 +354,17 @@ function scan() {
   }
   for (const locale of readdirSync(i18nDir)) {
     const text = readFileSync(path.join(i18nDir, locale), "utf8")
-    // values only: `"key": "... opencode ..."`. Key names are internal identifiers.
-    for (const m of text.matchAll(/"[^"]*"\s*:\s*"[^"]*\bopencode\b[^"]*"/gi))
-      hits.push({ file: `packages/app/src/i18n/${locale}`, rule: "first-party-gateway", count: 1 })
-    if (/\bopencode\b/i.test(text.replace(/"[^"]*"\s*:/g, "")) === false && /opencode/i.test(text))
-      hits.push({ file: `packages/app/src/i18n/${locale}`, rule: "first-party-gateway", count: 1 })
+    // Values only (`"key": "… opencode …"`) — a key name is an internal identifier, which is what
+    // the declared caliber exempts, so the branch that fired when the word appeared *exclusively*
+    // in key positions was reporting the exempt case as a leak.
+    //
+    // ONE hit per (file, rule) carrying the number of matching values. Pushing `count: 1` once per
+    // match made the comparison below read `1 > 1` for every leak after the first, so a locale
+    // already on the baseline could grow from one upstream string to a thousand and stay green —
+    // the same bug this file fixed for the shipped-source rules above ("Count the matches, do not
+    // note that there is one").
+    const leaked = text.match(/"[^"]*"\s*:\s*"[^"]*\bopencode\b[^"]*"/gi) ?? []
+    if (leaked.length > 0) hits.push({ file: `packages/app/src/i18n/${locale}`, rule: "first-party-gateway", count: leaked.length })
   }
   for (const rel of [
     "artifacts",
@@ -439,6 +461,23 @@ console.log(`brand-surface — ${observed.productFiles} product file(s) + ${DOC_
 for (const hit of observed.hits) console.log(`    ${hit.rule} ×${hit.count}  ${hit.file}`)
 
 if (mode === "record") {
+  // Every input this tool reads comes off the working tree, so recording over a dirty tree used
+  // to stamp another lane's uncommitted lines into the brand baseline — the same hole `fork-diff`
+  // and `tool-surface` refuse (2026-10-14 recorded the fix for the latter; it was never applied
+  // here, and the `execFileSync` import at the top of this file was the fossil of it). A golden
+  // that blesses bytes no commit contains goes green on the commit and red on someone else's
+  // machine, which reads as an unrelated regression.
+  const dirty = execFileSync("git", ["diff", "--name-only", "HEAD"], { cwd: repoRoot, encoding: "utf8" })
+    .split("\n")
+    .filter((rel) => rel && rel.startsWith("harness/glasspane-harness/"))
+    .sort()
+  if (dirty.length) {
+    for (const rel of dirty.slice(0, 20)) console.error(`  ✗ tracked but modified in the working tree, not yet in any commit: ${rel}`)
+    if (dirty.length > 20) console.error(`      … ${dirty.length - 20} more`)
+    console.error("brand-surface: refusing to record — the golden would carry uncommitted lines from another lane.")
+    console.error("  Commit the source change first (or record from a clean worktree of that commit), then re-record.")
+    process.exit(1)
+  }
   // A `missing-product-file` is not a brand finding: it is this tool reporting that a
   // scan input is gone. Recording it as an ordinary baseline hit would turn "we
   // stopped looking at this file" into a permanently green number — the installer,
@@ -510,6 +549,18 @@ const problems = []
 // than letting the absence read as a clean run.
 if (!Array.isArray(golden.hits)) {
   problems.push(`the golden carries no \`hits\` array (${JSON.stringify(golden.hits)}), so this run cannot tell "no brand drift" from "the baseline stopped recording drift" — re-record`)
+}
+// The two scan sets are remembered, not discovered: `PRODUCT_FILES` is a hand-list of the files
+// that ship a brand claim, and a file that leaves it is simply never opened again. The golden has
+// always carried both sizes (`productFiles`, `docFiles`) and nothing read them back — so deleting
+// 24 of the 26 entries was a green `--check` and a clean `--record`, which is the accident this
+// gate exists for (the file's own header records two brand leaks that shipped from outside the
+// list). Movement in either direction is a caliber change and must be argued in the same commit.
+if (golden.productFiles !== observed.productFiles) {
+  problems.push(`product-file scan set moved: the golden records ${JSON.stringify(golden.productFiles)} and this run reads ${observed.productFiles} — ${observed.productFiles < (golden.productFiles ?? 0) ? `a product file left the list and stopped being brand-checked (${PRODUCT_FILES.join(", ")})` : "the list grew, which is deliberate work: re-record so the caliber travels with it"}`)
+}
+if (!Array.isArray(golden.docFiles) || golden.docFiles.join("\u0000") !== DOC_FILES.join("\u0000")) {
+  problems.push(`doc-file scan set moved: the golden records ${JSON.stringify(golden.docFiles)} and this run reads ${JSON.stringify(DOC_FILES)} — a README that leaves this list stops being judged line by line, and only the tree-wide bloodline count would notice, which is the backstop this file's own history says cannot replace the named rule`)
 }
 for (const hit of observed.hits) {
   const prior = golden.hits?.find((h) => h.file === hit.file && h.rule === hit.rule)

@@ -147,6 +147,12 @@ function observeReference() {
   if (!existsSync(path.join(refDir, ".git"))) return null
   const version = execFileSync("git", ["-C", refDir, "describe", "--tags"], { encoding: "utf8" }).trim()
   if (version !== pin.tag) die(2, `reference clone is ${version}, upstream.json pins ${pin.tag} — refuse to compare across bases`)
+  // `describe` pins the commit, `ls-files` below reads the INDEX. A staged or edited file in the
+  // clone therefore gets compared as if it were upstream at the pin — and `--record` would stamp
+  // those hashes into the golden as "upstream's bytes", which is the one claim this whole lane is
+  // built on. Cleanliness is asserted, not assumed.
+  const refDirt = execFileSync("git", ["-C", refDir, "status", "--porcelain"], { encoding: "utf8" }).trim()
+  if (refDirt) die(2, `reference clone at ${pin.tag} is not clean — refusing to measure divergence against bytes that are not upstream's (first entries: ${refDirt.split("\n").slice(0, 3).join(" | ")})`)
   const raw = execFileSync("git", ["-C", refDir, "ls-files", "-s"], { encoding: "utf8" })
   const map = new Map()
   for (const line of raw.split("\n")) {
@@ -158,6 +164,10 @@ function observeReference() {
     // which is exactly what blobHash() reproduces above.
     map.set(rel.replace(/^"|"$/g, ""), { hash, mode: md })
   }
+  // The fork side refuses an empty set (`observeForkCommitted` dies at `!map.size`); the
+  // reference side used to return an empty map happily, and `--record` over it would stamp every
+  // fork file as `added` with `identical: 0` and exit 0. An empty upstream is not a measurement.
+  if (!map.size) die(2, `reference clone at ${refDir} has no files in its index — cannot measure divergence`)
   return map
 }
 
@@ -235,6 +245,14 @@ if (!ref) {
   }
   for (const rel of uncommitted) {
     console.error(`  ✗ '${rel}' exists on disk but is not committed — a release would not ship it`)
+    offlineDrift++
+  }
+  // The mirror case, and the reason the full lane refuses it: a file committed but deleted from
+  // this worktree still hash-matches the golden (the comparison is HEAD vs record), so this lane
+  // used to print "OK (offline)" and exit 0 while the tree on disk no longer contains a file the
+  // golden names as ours. Same claim, both directions.
+  for (const rel of missingFromWorktree) {
+    console.error(`  ✗ '${rel}' is committed but missing from this worktree — the record names a file the tree does not carry`)
     offlineDrift++
   }
   if (offlineDrift > 0) {
@@ -378,16 +396,17 @@ for (const file of wasDetail.keys()) {
   }
 }
 
-// The golden must describe the whole declared surface, not a subset of it. Compared against the
-// *name lists* (also in the golden, but stripped only together with them), so a golden edited
-// down to `editedDetail: []` with `counts.edited` left intact cannot walk this lane away claiming
-// it hash-checked nothing.
-if (observed.editedDetail.length !== observed.edited.length) {
-  console.error(`  ✗ ${observed.edited.length} file(s) are declared edited but only ${observed.editedDetail.length} carry content hashes — re-run --record`)
+// The golden must describe the whole declared surface, not a subset of it. This compares the
+// GOLDEN's own two lists: the previous form compared `observed.editedDetail` with
+// `observed.edited`, which are built by mapping the same arrays in the same object literal, so the
+// two lengths can never differ and the failing branch was unreachable by construction — a claim
+// that "a golden edited down to `editedDetail: []` cannot walk this lane away" that could not fire.
+if ((golden.editedDetail ?? []).length !== (golden.edited ?? []).length) {
+  console.error(`  ✗ the golden declares ${(golden.edited ?? []).length} edited file(s) but carries content hashes for only ${(golden.editedDetail ?? []).length} — the hash pins for the rest are gone, so content drift on them is invisible; re-run --record`)
   drift++
 }
-if (observed.addedDetail.length !== observed.added.length) {
-  console.error(`  ✗ ${observed.added.length} file(s) are declared added but only ${observed.addedDetail.length} carry content hashes — re-run --record`)
+if ((golden.addedDetail ?? []).length !== (golden.added ?? []).length) {
+  console.error(`  ✗ the golden declares ${(golden.added ?? []).length} added file(s) but carries content hashes for only ${(golden.addedDetail ?? []).length} — a name list without per-file hashes lets an added file change underneath it silently; re-run --record`)
   drift++
 }
 const wasAddedDetail = new Map((golden.addedDetail ?? []).map((d) => [d.file, d]))

@@ -202,6 +202,21 @@ expect(
   { rc: 0, mustInclude: ["1 tolerated lag(s)", "△ artifact", "✓ split-main", "0 problem(s)"], mustNotInclude: ["✗ artifact"] },
 )
 
+// J2. a difference whose bytes cannot be read is NOT a difference of zero lines. `git diff
+// --no-index --numstat` answers `-` for a binary pair, and `linesOf` folds any non-numeric to 0,
+// so the ledger allowance used to classify an unreadable shared file as "the artifact lags trunk by
+// 0 line(s)" and exit 0. This fixture differs on both sides by a binary file that is neither of the
+// two ledger paths, which is also the ordinary shape of a released asset landing in the tree.
+{
+  const binary = { ...base, "assets/icon.png": "PNG\x00\x01\x02\xff\xfe trunk bytes\n" }
+  const other = { ...base, "assets/icon.png": "PNG\x00\x03\x04\xff other bytes here\n" }
+  expect("J2 an unreadable line delta refuses instead of scoring zero", fixture("binary-delta", { trunkFiles: binary, splitFiles: other }).trunkDir, {
+    rc: 2,
+    mustInclude: ["could not be materialized"],
+    mustNotInclude: ["0 problem(s)", "△ artifact"],
+  })
+}
+
 // K. the measurement must not leave anything behind in the repository it measures. This is not
 // decoration: fetching the published repository into the measured object store with `--depth 1`
 // appends the fetched tip to `.git/shallow`, and a shallow marker truncates history traversal —

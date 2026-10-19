@@ -258,6 +258,14 @@ jobs:
       - name: The released artifact and the split branch are trunk's bytes
         run: node harness/tools/release-artifact.mjs --check
 
+      # 六把尺子今天各有一处"记录里写着、代码不读"的缺口（2026-10-19 审出）：补上的每条守卫
+      # 都必须能红一次才算闸。这个电池对每条守卫改一个输入、跑真尺子、要求**具名**的诊断，
+      # 再按 sha256 核回；它自己在改动前后都要求工作树干净，所以并行批次不会被它洗掉。
+      # 写在 `harness/tools/` 里而 `product-surface` 的 selftest-wired 规则盯着它出现在某条
+      # step 里——"测试写了但没人跑"正是这条 lane 存在理由的那次事故。
+      - name: Each ruler guard can actually go red
+        run: node harness/tools/rulers-selftest.mjs
+
       # 内核改依赖之后，出处检查要看得到装出来的那份包。第一次 CI 跑这段时它红了：
       # `kernel-pin: iterate-kernel is not installed — run 'bun install' …`，退出码 2。
       # 那不是回归而是这道闸的正确行为——测不到被测量物时它拒绝说绿。这里的修法是给它

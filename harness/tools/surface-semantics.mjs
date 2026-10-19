@@ -53,6 +53,7 @@
  * Exit codes: 0 ok, 1 drift, 2 cannot measure.
  */
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import { execFileSync } from "node:child_process"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -245,6 +246,21 @@ console.log(
 )
 
 if (mode === "record") {
+  // This golden is a PERMISSIVE baseline: a recorded hit raises the ceiling for that file+rule, so
+  // laundering another lane's uncommitted `ok ? "pass" : "fail"` through `--record` makes the
+  // committed tree permanently green for a judgement that is not in any commit. `fork-diff` and
+  // `tool-surface` refuse on tracked-but-modified input; this rule reads the same working tree.
+  const dirty = execFileSync("git", ["diff", "--name-only", "HEAD"], { cwd: repoRoot, encoding: "utf8" })
+    .split("\n")
+    .filter((rel) => rel && (rel.startsWith("mcp-shell/src/") || rel.startsWith("harness/glasspane-harness/")))
+    .sort()
+  if (dirty.length) {
+    for (const rel of dirty.slice(0, 20)) console.error(`  ✗ tracked but modified in the working tree, not yet in any commit: ${rel}`)
+    if (dirty.length > 20) console.error(`      … ${dirty.length - 20} more`)
+    console.error("surface-semantics: refusing to record — the baseline would bless a judgement no commit contains.")
+    console.error("  Commit the source change first (or record from a clean worktree of that commit), then re-record.")
+    process.exit(1)
+  }
   mkdirSync(path.dirname(goldenFile), { recursive: true })
   writeFileSync(goldenFile, JSON.stringify(observed, null, 2) + "\n")
   console.log(`recorded -> ${path.relative(repoRoot, goldenFile)}`)

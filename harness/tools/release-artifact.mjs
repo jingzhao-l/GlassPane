@@ -237,6 +237,25 @@ const breakdown = (remoteTree) => {
   return { onlyTrunk, onlyRemote, edited }
 }
 
+const needDiff = (tree, label) => {
+  // `breakdown` returns null when the tree cannot be listed, and an edited entry carries `?` when
+  // one side's blob cannot be materialized. Both used to reach the allowance arithmetic as
+  // *zero* — `linesOf` folds any non-numeric to 0 — so a ledger file whose bytes could not be read
+  // produced `lead 0 / lag 0`, was classified as the tolerated case, and exited 0. An unknown
+  // difference is not agreement: this lane must refuse rather than score it.
+  const d = breakdown(tree)
+  if (d === null) {
+    cleanup()
+    cannot(`${label}: its tree ${tree} could not be listed, so the comparison did not happen — "could not read" is not "agrees"`)
+  }
+  const unread = d.edited.filter((e) => !/^\d+$/.test(e.added) || !/^\d+$/.test(e.deleted)).map((e) => e.path)
+  if (unread.length) {
+    cleanup()
+    cannot(`${label}: the bytes of ${unread.join(", ")} could not be materialized on one side, so their line difference is unknown — an unknown counts as 0 in the ledger allowance below, and "no divergence" cannot be bought with an unread blob`)
+  }
+  return d
+}
+
 const report = (rule, remoteLabel, remoteTree, diff, remedy) => {
   const lines = [
     `${rule}: ${remoteLabel} is ${remoteTree} but trunk's ${SUBTREE} is ${trunkTree} — ${
@@ -283,7 +302,7 @@ if (mainSha === null) {
         "split-main",
         "the published repository's main",
         mainTree,
-        breakdown(mainTree),
+        needDiff(mainTree, "the split repository's main"),
         `reconcile trunk so it holds every published-only line above, then \`git subtree split --prefix=${SUBTREE} -b split/glasspane-harness\` and fast-forward push (docs/release.md step 3).`,
       ),
     )
@@ -298,7 +317,7 @@ if (tagSha === null) {
     cannot(`${tagName} was advertised by ${splitUrl} but no tree could be read for it (annotated tags are peeled; a tag object that points at nothing is not a measurement)`)
   }
   measured += 1
-  const diff = breakdown(tagTree)
+  const diff = needDiff(tagTree, `the released ${tagName}`)
   if (tagTree === trunkTree) agreements.push(`artifact: ${tagName} ${tagTree} == trunk's ${SUBTREE} tree`)
   else {
     // Classify before deciding: a difference is only tolerable when it is the release's own

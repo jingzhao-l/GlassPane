@@ -34,6 +34,7 @@
  *   checkout version).
  */
 import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from "node:fs"
+import { execFileSync } from "node:child_process"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -191,6 +192,19 @@ function observe(pin, { expectTag = true } = {}) {
     if (expectTag && version !== pin.tag.replace(/^v/, "")) {
       fail(2, `checkout at ${checkout} is version ${version}, pinned tag is ${pin.tag} — refusing to mix bases`)
     }
+  }
+  // The version file is one editable string, and every hook below is read from this directory's
+  // WORKING TREE. When the checkout is a git clone (the local case; the CI lane that unpacks a
+  // tarball has no `.git` and is exempt), pin it to the object the tag names and require the tree
+  // to be clean — otherwise a locally edited upstream file is reported as "上游换了插件地板",
+  // which is the exact false attribution this tool exists to make impossible.
+  if (existsSync(path.join(checkout, ".git"))) {
+    if (expectTag) {
+      const described = execFileSync("git", ["-C", checkout, "describe", "--tags"], { encoding: "utf8" }).trim()
+      if (described !== pin.tag) fail(2, `reference clone at ${checkout} is ${described}, pinned tag is ${pin.tag} — refusing to mix bases`)
+    }
+    const dirt = execFileSync("git", ["-C", checkout, "status", "--porcelain"], { encoding: "utf8" }).trim()
+    if (dirt) fail(2, `reference clone at ${checkout} is not clean (first entries: ${dirt.split("\n").slice(0, 3).join(" | ")}) — a drift read off edited bytes would be blamed on upstream, so this lane refuses to measure`)
   }
   const hooksFile = path.join(checkout, pin.hooksFile)
   if (!existsSync(hooksFile)) fail(2, `missing ${hooksFile}`)

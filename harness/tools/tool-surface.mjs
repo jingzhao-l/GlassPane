@@ -169,6 +169,13 @@ function measureFork(golden) {
   const refDir = path.join(repoRoot, refRel)
   const hasRef = existsSync(path.join(refDir, ".git"))
   const kernel = readKernelDependency()
+  // Kernel provenance is part of the caliber, not a label: the golden pins
+  // `kernel: iterate-kernel@<version>` precisely because the vendored-source exclusion was
+  // retired with it. Both failure paths used to print an error and return, leaving the run to
+  // report a green verdict over a surface whose dependency it had just announced it could not
+  // attribute. Refusing to measure is the only honest answer here, and it blocks `--record` too.
+  if (!kernel) return fail("no contracts/kernel-pin.json — the kernel dependency cannot be attributed, so the bytes this rule excludes from surface B are unverifiable; run `node harness/glasspane-harness/script/kernel-pin.mjs --record`")
+  if (!kernel.version) return fail(`the manifest at ${kernel.manifestFile} does not describe an iterate-kernel version — attribute the dependency before measuring`)
   // Every upstream blob this measurement can ask about, in one pass. The set is a superset
   // on purpose: all `edited` files plus all `deleted` files that carry a counted extension,
   // whether or not the loops below end up probing them. Narrowing it to the exact probes
@@ -636,7 +643,7 @@ if (mode === "record") {
   // lines into OUR baseline — the golden then blesses bytes no commit contains, and the
   // next clean `--check` goes red for a change nobody made. fork-diff already refuses on
   // this; surface A had no equivalent guard.
-  const dirtyScope = ["mcp-shell/src/", "harness/glasspane-harness/"]
+  const dirtyScope = ["mcp-shell/src/", "harness/glasspane-harness/", "engine/"]
   // `cwd: repoRoot` because repoRoot comes from THIS FILE's location, not the process's:
   // run from any other directory, git would read whatever repository (if any) surrounds the
   // invocation and the refusal below would describe the wrong tree — or throw outside one.
@@ -755,6 +762,27 @@ if (observed.carried) {
   console.error("    An unattributable surface will not be declared within limits, in either direction.")
   console.error("    Remedy (documented in harness/README.md):")
   console.error("      git clone --branch <upstream.json.tag> --depth 1 https://github.com/anomalyco/opencode.git .external/opencode")
+  red++
+}
+
+// The denominator of the share this ratchet owns. `engineFiles`/`engineLoc` have been written to
+// the golden since 2026-09 and read back by nothing: renaming or emptying `engine/Sources` moves
+// both percentages with neither tool surface changing a single line, and the LOC ratchet compares
+// only A and B, so it cannot see it. The iron law is "工具面 <10% 代码量" — a ratio over a
+// different denominator is a different claim, so the denominator travels with the record.
+if (golden && Number.isFinite(golden.engineLoc) && Number.isFinite(golden.engineFiles)) {
+  if (observed.engineFiles !== golden.engineFiles || observed.engineLoc !== golden.engineLoc) {
+    console.error(`  ✗ the denominator moved: engine ${golden.engineFiles} file(s) / ${golden.engineLoc} LOC → ${observed.engineFiles} / ${observed.engineLoc}. The limit is a SHARE of engine code, so a percentage measured over a different engine is not the same rule: re-record with the change and say which files moved.`)
+    red++
+  }
+} else {
+  console.error(`  ✗ the golden carries no readable engine baseline (engineLoc ${JSON.stringify(golden?.engineLoc)}, engineFiles ${JSON.stringify(golden?.engineFiles)}) — both percentages compare against nothing, so this lane cannot declare anything within limits; re-record`)
+  red++
+}
+const wasKernel = golden?.surfaces?.fork?.kernel
+const nowKernel = observed.surfaces?.fork?.kernel
+if (JSON.stringify(wasKernel) !== JSON.stringify(nowKernel) || golden?.surfaces?.fork?.kernelPin !== observed.surfaces?.fork?.kernelPin) {
+  console.error(`  ✗ the kernel attribution moved: golden ${JSON.stringify(wasKernel)} (pinned by ${JSON.stringify(golden?.surfaces?.fork?.kernelPin)}) → this run ${JSON.stringify(nowKernel)} (pinned by ${JSON.stringify(observed.surfaces?.fork?.kernelPin)}). Surface B excludes that dependency's bytes on the strength of this manifest, so taking a new kernel version is a caliber change and is recorded with the bump, not past it.`)
   red++
 }
 
