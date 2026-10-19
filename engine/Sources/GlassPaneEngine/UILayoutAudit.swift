@@ -60,13 +60,23 @@ public struct LayoutCoverage: Codable, Equatable {
     /// measured / total。分母含 absent（应用明确不给几何的元素），因为那部分
     /// 永远量不到，把它说成"已覆盖"就是虚报。
     public let ratio: Double
+    /// 这条比率是在**哪一部分**界面上算出来的。`false` = 几何遍历中途停了，于是
+    /// `total` 只是走过的节点数：预算中止点上没走到的兄弟各留一条自述占位（所以分母
+    /// 含"知道存在、这一截没看到"的子树），但中止子树里面还有多少元素没人知道。
+    /// 因此 `ratio == 1.00` 配 `walkComplete == false` 说的是"看到的部分都量到了"，
+    /// 不是"整个界面量全了"——从前这句话只能去 finding 的散文里找，而 ratio 是一个
+    /// 机器可读的数字，读数字的人不会先读散文。
+    /// `complete` 的语义不变：答应走的遍历走完了没有。深度是调用方自己声明的范围，
+    /// 由 `captureDepth` 说，不算不完整。
+    public let walkComplete: Bool
 
-    public init(total: Int, measured: Int, absent: Int, unread: Int) {
+    public init(total: Int, measured: Int, absent: Int, unread: Int, walkComplete: Bool = true) {
         self.total = total
         self.measured = measured
         self.absent = absent
         self.unread = unread
         self.ratio = total == 0 ? 0 : Double(measured) / Double(total)
+        self.walkComplete = walkComplete
     }
 }
 
@@ -178,7 +188,8 @@ public enum UILayoutAudit {
             total: snapshot.nodes.count,
             measured: measuredCount,
             absent: absentCount,
-            unread: unreadCount
+            unread: unreadCount,
+            walkComplete: snapshot.complete
         )
 
         let interactive = snapshot.nodes.filter { isInteractive($0) }

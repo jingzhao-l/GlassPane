@@ -8,17 +8,44 @@ import XCTest
 /// produced two verdicts. Both now come from the same computation.
 final class DeveloperToolsVerdictTests: XCTestCase {
 
+    /// The flags lldb parses for "attach to this pid" (`lldb --help`, ATTACHING).
+    /// `--attach` is not one of them — it never was — and this stub used to key on
+    /// it, so both halves were answered with the launch outcome and the pairing
+    /// below compared a card that had seen "denied" against a payload that had
+    /// never been asked the attach question at all.
+    private static let attachFlags = ["-p", "--attach-pid"]
+
     /// Drives the real classification from the argv it is handed, so a launch
-    /// probe can never be answered with an attach outcome.
-    private struct StubRunner: DebugCapabilityProbe.Running {
+    /// probe can never be answered with an attach outcome. It also counts which
+    /// arm was driven, because a stub that answers one arm twice used to make this
+    /// file's central pairing pass while measuring nothing.
+    private final class StubRunner: DebugCapabilityProbe.Running {
         let launch: (exit: Int32?, timedOut: Bool, output: String)
         let attach: (exit: Int32?, timedOut: Bool, output: String)
+        private let attachFlags: [String]
+        var launchRuns = 0
+        var attachRuns = 0
+
+        init(
+            launch: (exit: Int32?, timedOut: Bool, output: String),
+            attach: (exit: Int32?, timedOut: Bool, output: String),
+            attachFlags: [String]
+        ) {
+            self.launch = launch
+            self.attach = attach
+            self.attachFlags = attachFlags
+        }
 
         func run(
             _ binary: String, _ arguments: [String], timeout: TimeInterval
         ) -> (exit: Int32?, timedOut: Bool, output: String) {
             XCTAssertEqual(binary, "/usr/bin/xcrun", "the probe must not be answered for another binary")
-            return arguments.contains("--attach") ? attach : launch
+            if arguments.contains(where: { attachFlags.contains($0) }) {
+                attachRuns += 1
+                return attach
+            }
+            launchRuns += 1
+            return launch
         }
         func spawnVictim(seconds: Int) -> String? { "4242" }
         func killVictim(_ pid: Int32) {}
@@ -36,11 +63,11 @@ final class DeveloperToolsVerdictTests: XCTestCase {
         }
     }
 
-    private func payload(launch: String, attach: String) -> [String: Any] {
-        let probe = DebugCapabilityProbe(runner: StubRunner(
-            launch: outcome(launch), attach: outcome(attach)
-        ))
-        return probe.jsonPayload()
+    private func payload(launch: String, attach: String) -> (json: [String: Any], runner: StubRunner) {
+        let runner = StubRunner(
+            launch: outcome(launch), attach: outcome(attach), attachFlags: Self.attachFlags
+        )
+        return (DebugCapabilityProbe(runner: runner).jsonPayload(), runner)
     }
 
     func testMeasuredRefusalOnEitherHalfIsNotReportedAsGranted() {
@@ -61,10 +88,23 @@ final class DeveloperToolsVerdictTests: XCTestCase {
 
     func testPayloadGrantedAgreesWithTheCardForEveryHalfCombination() {
         for (launch, attach) in [("ok", "denied"), ("denied", "ok"), ("ok", "ok"), ("timeout", "spawnFailed")] {
-            let json = payload(launch: launch, attach: attach)
+            let (json, runner) = payload(launch: launch, attach: attach)
+            // 两侧都真的各跑了一次：这条闸的全部内容就是"一半的答案不许当另一半用"，
+            // 而它以前靠一个 lldb 不认识的 `--attach` 来分流——那个 flag 不存在，于是
+            // attach 那一侧从未被问过，负载里的 `granted` 说的只是 launch 半边的故事。
+            XCTAssertEqual(runner.launchRuns, 1, "launch arm must run exactly once for \(launch)/\(attach)")
+            XCTAssertEqual(runner.attachRuns, 1,
+                           "attach arm must run exactly once for \(launch)/\(attach) - an argv without -p/--attach-pid means it measured nothing")
             let granted = (json["granted"] as? Bool) ?? true
+            // 卡片读的是负载自己发出的那两个词，不是测试的参数。
+            let emittedLaunch = (json["launch"] as? [String: Any])?["state"] as? String ?? "<missing>"
+            let emittedAttach = (json["attach"] as? [String: Any])?["state"] as? String ?? "<missing>"
+            XCTAssertEqual(
+                [emittedLaunch, emittedAttach], [launch, attach],
+                "the probe must put the driven half into the payload it publishes for \(launch)/\(attach)"
+            )
             let report = DeveloperToolsCapability.Report(
-                launch: launch, attach: attach, granted: granted, observedAt: Date()
+                launch: emittedLaunch, attach: emittedAttach, granted: granted, observedAt: Date()
             )
             XCTAssertEqual(
                 report.status == .granted, granted,

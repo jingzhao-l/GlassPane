@@ -9,6 +9,19 @@ enum ParamValidation {
     /// by exports, so it carries the same cap as the selector fields and the
     /// shell's `ExpectSchema` — length-only checks were the gap (P0 §3.3).
     static let expectedMaxLength = 512
+    /// The unit every cap above counts in: UTF-16 code units.
+    ///
+    /// `String.count` counts *grapheme clusters*, and the contract on both other
+    /// sides counts units: `mcp-shell/src/tools.ts:95,124` (`z.string().max(512)`)
+    /// and `kernel/schemas/evidence-pack.schema.json` `$defs.selector.maxLength`
+    /// (JSON Schema defines `maxLength` as the number of UTF-16 code units, and
+    /// the kernel's validator is ajv with `unicode: false`, i.e. the default).
+    /// Counting clusters let the daemon admit a 512-grapheme combining sequence
+    /// (1024 units) that the shell refuses and the frozen schema refuses —
+    /// one contract, three answers, with the daemon's the loosest.
+    /// `RecipeLoader.capped` truncates by *scalar* for the same reason: the unit
+    /// a length check uses has to be the unit the reader counts.
+    static func length(_ value: String) -> Int { value.utf16.count }
     static let observeMaxDepthLower = 1
     static let observeMaxDepthUpper = 10
     static let stepsLower = 1
@@ -49,7 +62,7 @@ enum ParamValidation {
         guard let string = raw as? String else {
             throw GPError(code: .badParams, message: "field '\(key)' must be a string")
         }
-        if let maxLength, string.count > maxLength {
+        if let maxLength, Self.length(string) > maxLength {
             throw GPError(code: .badParams, message: "field '\(key)' exceeds \(maxLength) characters")
         }
         return string
@@ -112,7 +125,7 @@ enum ParamValidation {
         guard let role = dict["role"] as? String, !role.isEmpty else {
             throw GPError(code: .badParams, message: "field 'selector.role' must be a non-empty string")
         }
-        if role.count > selectorMaxLength {
+        if Self.length(role) > selectorMaxLength {
             throw GPError(code: .badParams, message: "field 'selector.role' exceeds \(selectorMaxLength) characters")
         }
         // 显式给出的 `title` 不许为空。判据的出处是发布出去的契约本身：
@@ -179,7 +192,7 @@ enum ParamValidation {
             return .bool(bool)
         }
         if let string = raw as? String {
-            guard string.count <= expectedMaxLength else {
+            guard Self.length(string) <= expectedMaxLength else {
                 throw GPError(
                     code: .badParams,
                     message: "field 'expected' exceeds \(expectedMaxLength) characters"

@@ -72,7 +72,13 @@ public enum Classifier {
         // the requires-probe-signals INCONCLUSIVE boundary is preserved.
         if let handlerProbe = pack.signals.handlerProbe {
             let axChanged = axEvent.axChanged
-            let pixelChanged = (pack.signals.pixelDiff?.changedPixelRatio ?? 0) > 0
+            // 像素通道是**三态**的。从前这里是 `(... ?? 0) > 0`，把一个没答应的通道
+            // 折成"像素没变"，再拿它当 T4/T5/T7 的证据——而本文件在 :114 的 T6 路径上
+            // 明确拒绝这种折法（`guard let pixelDiff … else inconclusive`），`stateChanged`
+            // 自己也是三态并且要求 measured-false，`pixelClause` 甚至已经备好
+            // "pixels not measured" 这句话。说出来的话和判进去的值必须是同一件事：
+            // 需要"像素没变"这条前提的分支，只在通道真的量过并回答"没变"时才成立。
+            let pixelChanged = pack.signals.pixelDiff.map { $0.changedPixelRatio > 0 }
             let stateChanged = pack.signals.stateDiff.map { $0.changed }
 
             // T8: the window stayed silent but events landed late (async timing).
@@ -82,20 +88,24 @@ public enum Classifier {
                     next: "inspect the handler for async dispatch (\(handlerProbeSummary(handlerProbe))); shorten the settle interval or await the async continuation before asserting")
             }
             // T4 needs a decidable state channel; without stateDiff it is not
-            // claimed (silence ≠ no-change for state-incapable probes).
-            if handlerProbe.hitCount > 0 && stateChanged == false && !axChanged && !pixelChanged {
+            // claimed (silence ≠ no-change for state-incapable probes). It needs a
+            // decidable pixel channel for the same reason.
+            if handlerProbe.hitCount > 0 && stateChanged == false && !axChanged && pixelChanged == false {
                 return outcome(.t4, path: path, evidence: evidenceSummary,
                     anomaly: "logic bug: \(handlerProbe.hitCount) handler hit(s) (\(handlerProbeSummary(handlerProbe))) but state and AX tree silent, \(pixelClause(pack))",
                     next: "inspect the handler body between hit locations \(handlerProbeSummary(handlerProbe)) — the bound effect is missing or writes a stale key")
             }
             // T5: state moved but neither view channel followed (dependency loss).
-            if handlerProbe.hitCount > 0 && stateChanged == true && !axChanged && !pixelChanged {
+            // "The AX tree stayed silent **and the pixels did not move**" is a claim
+            // about both view channels, so the pixel channel has to have answered.
+            if handlerProbe.hitCount > 0 && stateChanged == true && !axChanged && pixelChanged == false {
                 return outcome(.t5, path: path, evidence: evidenceSummary,
                     anomaly: "SwiftUI dependency loss: handler hit and state changed (\(stateDiffSummary(pack))) but AX tree stayed silent, \(pixelClause(pack))",
                     next: "check the view's observation of the changed key (Z1b-style direct @State writes and missing @Observable registration are the usual roots); re-bind or route through the observed model")
             }
-            // T7: view channels moved while the observed state stayed put.
-            if handlerProbe.hitCount > 0 && stateChanged == false && (axChanged || pixelChanged) {
+            // T7: view channels moved while the observed state stayed put. A measured
+            // positive on either channel is enough; an unmeasured one is not.
+            if handlerProbe.hitCount > 0 && stateChanged == false && (axChanged || pixelChanged == true) {
                 return outcome(.t7, path: path, evidence: evidenceSummary,
                     anomaly: "view-model decoupling: AX/pixels changed while observed state did not (handler hit \(handlerProbe.hitCount), stateDiff.changed=false)",
                     next: "locate the direct UI mutation bypassing the state layer; assert against the state channel (stateDiff entries) rather than pixels")
@@ -103,10 +113,20 @@ public enum Classifier {
             // Honest gap: the handler ran but the probe carries no state
             // channel — T4/T5/T7 are undecidable and the black-box T3 verdict
             // ("dead click") would contradict the probe. Do not guess.
-            if handlerProbe.hitCount > 0 && stateChanged == nil && !axChanged && !pixelChanged {
+            if handlerProbe.hitCount > 0 && stateChanged == nil && !axChanged && pixelChanged != true {
                 return outcome(.inconclusive, path: path, evidence: evidenceSummary,
                     anomaly: "handler ran (\(handlerProbeSummary(handlerProbe))) but the probe has no state channel and AX/pixels are silent — T4 vs no-anomaly needs a state source (z2/z3)",
                     next: "register state observation in the probe (GP.registerMirrorRoot or GP.registerKVCObject), then re-run the act; do not conclude binding loss while the probe says the handler executed")
+            }
+            // The same gap, one channel wider: the state channel answered and the tree
+            // stayed silent, but the **pixel** channel never did. T4 ("state and AX
+            // silent") and T5 ("neither view channel followed") both assert something
+            // about the pixels; with no measurement there is nothing to assert, and the
+            // black-box T3 below would contradict the probe's own hit count.
+            if handlerProbe.hitCount > 0 && stateChanged != nil && pixelChanged == nil && !axChanged {
+                return outcome(.inconclusive, path: path, evidence: evidenceSummary,
+                    anomaly: "handler ran (\(handlerProbeSummary(handlerProbe))) and AX tree stayed silent, but \(pixelClause(pack)) — T4/T5 both need a measured \"pixels did not change\", and no-anomaly needs the other half",
+                    next: "restore the pixel channel for this window (read circuitBreaker.reason for the cause; the Screen Recording seat is only one of them) and re-run the act; do not file a binding-loss or render-layer conclusion while the pixel channel has not answered")
             }
         }
 
@@ -192,8 +212,10 @@ public enum Classifier {
     }
 
     /// 像素通道的如实措辞：没有捕获值时不能写成"像素没变"。
-    /// 归类判定保持保守不变（nil 走 false 分支），改的只是**说出来的那句话**
-    /// ——P0 §8 授权 T3/T4/T5 的是归类结论，不是宣称一个未测量的负例。
+    /// 自 Qoder 2026-10-19 这一句与**归类判定**同步了：探针分支里的 `pixelChanged`
+    /// 也是三态的，需要"像素没变"作前提的 T4/T5 在该通道没回答时一律不成立
+    /// （见上面的 honest gap），不再由 `?? 0` 把缺席折成负例。T3 一直只用树通道，
+    /// 措辞与判定在它那里本来就是同一件事。
     static func pixelClause(_ pack: EvidencePack) -> String {
         pack.signals.pixelDiff == nil ? "pixels not measured" : "pixels unchanged"
     }

@@ -117,7 +117,20 @@ public final class DebugCapabilityProbe {
 
     /// Cold-start penalty on real machines (P6 §0 F5): keep the budget wide.
     public static let defaultTimeoutSeconds: TimeInterval = 120
+    /// The floor for a victim's lifetime. It is a **floor, not the answer**: the victim
+    /// is the fixture the probe measures through, and a fixture that expires before the
+    /// measurement does is not a permission result (see `victimLifetimeSeconds`).
     static let attachVictimSeconds = 30
+    /// victim 必须活得比这一侧的预算久，否则探测测到的是夹具的死亡而不是系统的答复。
+    ///
+    /// 从前 attach 用的 victim 是固定 30 秒的 `/bin/sleep`，而预算是 120 秒：一次合法
+    /// 但慢的 attach（冷启动、弹窗后人再确认）会在 sleep 到点之后才跑起来，lldb 于是打
+    /// `error: attach failed: no such process`——真机复现（`lldb --batch -p <已退出的 pid>`），
+    /// 而 `classify` 从前见到 "attach failed" 就回 `.denied`，面板显示"被系统拒绝"。
+    /// 一句夹具寿命的事实被写成了权限结论。
+    static func victimLifetimeSeconds(forProbeBudget budget: TimeInterval) -> Int {
+        Swift.max(attachVictimSeconds, Int(ceil(budget)))
+    }
 
     private let runner: Running
     private let timeout: TimeInterval
@@ -139,15 +152,24 @@ public final class DebugCapabilityProbe {
     }
 
     /// attach: spawn a short-lived sleep child and attach to it by pid.
+    ///
+    /// `-p <pid>` is the flag lldb parses. The arm used to run `--attach <pid>`, which is
+    /// not an option at all: lldb answers `error: unknown option: --attach`, the probe
+    /// classified that as `.spawnFailed`, and the question this arm exists to answer
+    /// ("can this machine attach a debugger?") was never asked. The same defect was found
+    /// and fixed on the Python side of this repo (`bridge/glasspane_bridge.py:696-699`,
+    /// "--attach 不存在…真机复验抓到这个参数缺陷"), and `engine/smoke.md:218-224` records
+    /// the attach arm reading `{"state":"spawnFailed"}` while `granted:true`.
     public func probeAttach() -> Outcome {
-        guard let pidText = runner.spawnVictim(seconds: Self.attachVictimSeconds),
+        let victimLifetime = Self.victimLifetimeSeconds(forProbeBudget: timeout)
+        guard let pidText = runner.spawnVictim(seconds: victimLifetime),
               let pid = Int32(pidText) else {
             return .spawnFailed
         }
         defer { runner.killVictim(pid) }
         let result = runner.run(
             "/usr/bin/xcrun",
-            ["lldb", "--batch", "--attach", pidText, "-o", "detach", "-o", "quit"],
+            ["lldb", "--batch", "-p", pidText, "-o", "detach", "-o", "quit"],
             timeout: timeout
         )
         return Self.classify(result)
@@ -155,6 +177,17 @@ public final class DebugCapabilityProbe {
 
     public func snapshot() -> Snapshot {
         Snapshot(launch: probeLaunch(), attach: probeAttach())
+    }
+
+    /// 夹具寿命的说法，不是权限的说法：victim 已经不在了，调试器自然"附加失败"，而这条
+    /// 通道从头到尾没有对"这台机器允不允许调试"给出任何回答。
+    /// 只列**明确指认进程不存在**的措辞；拒绝串（`Not allowed to attach` /
+    /// `not permitted` / `(os/kern) failure`）仍然算拒绝。
+    static let victimLifetimePhrases = ["no such process", "does not exist"]
+
+    static func reportsVictimLifetime(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        return victimLifetimePhrases.contains { lowered.contains($0) }
     }
 
     /// Output-shape classification. Unknown failures surface as spawnFailed
@@ -165,9 +198,13 @@ public final class DebugCapabilityProbe {
     /// `error: attach failed: …`）被判成 `.ok`，把一次没成功的席位报成 granted——
     /// 而 `.denied` 那三条字符串就在下面几行等着，永远读不到。一句话里两个信号时，
     /// 说"系统不让"的那半句才是结论。
+    ///
+    /// 例外只有一条，就是上面那段：拒绝串里**先认出夹具寿命**的那一种。它不是"软化拒绝"
+    /// ——一次没发生的拒绝被写成 `denied`，和一次没发生的成功被写成 `ok` 是同一种错。
     static func classify(_ run: (exit: Int32?, timedOut: Bool, output: String)) -> Outcome {
         let text = run.output
-        if text.contains("Not allowed to attach") || text.contains("attach failed")
+        if !reportsVictimLifetime(text),
+           text.contains("Not allowed to attach") || text.contains("attach failed")
             || text.contains("not permitted") { return .denied }
         // 一次没跑完的会话不能因为"它中途说了句 attached"就被判成席位是通的：
         // 卡住被 terminate/SIGKILL 的那一趟，输出里最正常的就是那半句 attach。

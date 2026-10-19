@@ -170,14 +170,7 @@ public enum RestorePipeline {
         let cyclic = dependencyCount > 0 || computed.count < allDomains.count
         guard !cyclic else { return nil }
 
-        let orderedSteps = steps.sorted { stepA, stepB in
-            guard let indexA = computed.firstIndex(of: stepA.domain),
-                  let indexB = computed.firstIndex(of: stepB.domain),
-                  indexA != indexB else {
-                return false
-            }
-            return indexA < indexB
-        }
+        let orderedSteps = steps.sorted(by: Self.stepOrder(computed: computed))
         return RestorePlan(
             snapshotId: snapshotId,
             baselineDigest: baselineDigest,
@@ -186,6 +179,35 @@ public enum RestorePipeline {
             expectedStateDigest: expectedStateDigest,
             domainCount: computed.count
         )
+    }
+
+    /// 步骤排序的比较器（单独成文，是为了让它能被"是不是一条全序"这种问题问倒）。
+    ///
+    /// 从前这一段是 `guard let indexA = computed.firstIndex(of:), let indexB = …,
+    /// indexA != indexB else { return false }`：`steps` 与 `domains` 都是调用方给的
+    /// （`restore` 的 wire 参数），所以一个 domain 不在 `computed` 里的步骤会同时与
+    /// a 和 c "相等"，而 a < c 成立 —— 那不是 strict weak ordering。Swift 的 `sorted`
+    /// 对不一致的比较器**允许 trap**，不 trap 的时候未知步骤落在哪儿只取决于输入顺序，
+    /// 而这份步骤序列正是探针侧要执行的恢复顺序。
+    ///
+    /// 现在的规则写死在这里：算出来的域按依赖序排前，**未知域的步骤成类沉底**（文档化的
+    /// sink，不是 filter —— 调用方给的步骤一条都不许悄悄消失），类内按
+    /// `(domain, checkpointRef)` 定全序，于是比较器对任意输入都是 strict weak ordering。
+    static func stepOrder(computed: [String]) -> (RestoreStep, RestoreStep) -> Bool {
+        { stepA, stepB in
+            let indexA = computed.firstIndex(of: stepA.domain)
+            let indexB = computed.firstIndex(of: stepB.domain)
+            switch (indexA, indexB) {
+            case let (.some(a), .some(b)):
+                return a < b
+            case (.some, .none):
+                return true
+            case (.none, .some):
+                return false
+            case (.none, .none):
+                return (stepA.domain, stepA.checkpointRef) < (stepB.domain, stepB.checkpointRef)
+            }
+        }
     }
 
     /// Validate a plan against its snapshot probe payload. Every violation is

@@ -55,6 +55,22 @@ struct ProjectsTabView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                // 在途的那一趟必须自己上屏。从前 `isRunningPrune`/`isPreparingPrunePreview`
+                // 只被模型自己读过（`guard !isRunningPrune`），而那一枚 `guard` 是闸门不是
+                // 读者：真删最长 20 秒里这一枚已经回到 .ready，第二次点击就是一次对着
+                // 正在被改写的注册表起的 dry-run。沙漏 + 一句"哪一趟在跑"让这一步在屏幕
+                // 上看得见，判据与禁用理由仍是模型那一个 `pruneControl`。
+                if model.isRunningPrune || model.isPreparingPrunePreview {
+                    HStack(spacing: 5) {
+                        ProgressView().controlSize(.small)
+                        Text(model.isRunningPrune
+                             ? "后台服务正在删注册项（--project-prune），这一趟还没回话"
+                             : "后台服务正在给清单（--project-prune --dry-run），这一趟还没回话")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("gp-prune-in-flight")
+                    }
+                }
             }
             Spacer()
             Button("清理") { model.previewTestResiduePrune() }

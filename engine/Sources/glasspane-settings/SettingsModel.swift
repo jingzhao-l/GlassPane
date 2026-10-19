@@ -66,7 +66,21 @@ final class SettingsModel: ObservableObject {
     @Published var entries: [PermissionEntry] = []
     @Published var daemon: DaemonEntry
     @Published var isRefreshing = false
-    @Published var lastRefreshError: String?
+    /// 面板探的那一个名字是哪一级定下来的（显式 → `GLASSPANE_ENGINE_SOCK` → 点名根的
+    /// `daemon.sock` → 家目录默认根的 `engine.sock`）。页面上那一行必须说得出它连的是
+    /// 哪一个根：daemon 用自己的隔离 flag 起时，屏幕上"后台服务"与"状态根"要指同一件事。
+    @Published private(set) var socketSource: SocketPathSource = .homeDefault
+    /// 回落表里探过的每一个名字（顺序即优先级）。"未运行"那句话只在整张表都没人应门
+    /// 时才说得出，所以这张表本身也要能被读者看见。
+    @Published private(set) var socketCandidates: [String] = []
+    /// `socketCandidates` 那一张表的完整形态（名字 + 出处），顺序即优先级。
+    private var socketCandidateEntries: [(path: String, source: SocketPathSource)] = []
+    // 「刷新失败」那一行从前挂在一个只被赋过 nil 的 `lastRefreshError` 上——一条永远
+    // 点不亮的红行（这一产品里"看着会亮却永远不亮"就是 P0）。它要说的三件事都已经有
+    // 能亮的出口：`daemonCaption`/`daemonTone`（四种实测存活结局各有一句）、
+    // 「应门不回话」那一支的专属文案与 `gp-daemon-silent-reason` 标识，以及四张权限卡
+    // 各自的 `statusNote`。这里选**删**而不是把它接到某个失败态上：接过去只会让同一
+    // 件事实有两个说法，其中一个是红的。
     /// 拖拽引导状态：最近一次落点的权限类别（nil = 无进行中的引导）。
     @Published var pendingGuideKind: PermissionKind?
     /// 拖拽引导文案（`PermissionGuide.instruction` 或手动按钮引导文案）。
@@ -183,23 +197,125 @@ final class SettingsModel: ObservableObject {
         }
     }
 
-    /// 与 daemon 默认一致的 socket 路径。
+    /// 与 daemon 默认一致的 socket 路径（家目录那一个：默认根的叶子名是 `engine.sock`）。
+    /// 面板实际探的往往不是这一个——回落顺序见 `resolveSocketPath(explicitSocketPath:env:home:)`。
     public static func defaultSocketPath() -> String {
         DaemonProbe.defaultSocketPath
+    }
+
+    /// socket 的解析顺序（纯函数，供单测）：显式 socket → `GLASSPANE_ENGINE_SOCK` →
+    /// 面板已知状态根的 `daemon.sock` → 家目录默认根的 `engine.sock`；只有这一个名字
+    /// 后面确实没人时，才轮得到"未运行"那句话。
+    ///
+    /// 缺陷形状：这里从前只有最后一级。`glasspaned --state-dir X`——它自己的帮助文本
+    /// 教的那条隔离 flag——绑的是 `X/daemon.sock`（`main.swift` 走
+    /// `StateRoot.engineSocketPath(explicitSocketPath:stateRoot:)`，名字跟着根换是既有
+    /// 文档化规则），面板于是把一个正在应门的 daemon 报成"后台服务未运行"，四张权限卡
+    /// 一起挂"未验证"。`mcp-shell` 认 `GLASSPANE_ENGINE_SOCK`，`updater/lib/idle.js` 也认，
+    /// 而 `grep GLASSPANE_ENGINE_SOCK engine/Sources` 回空：这一组读者里面板是最后一个
+    /// 还在自己猜的。空白串按"没点名"处理（`export GLASSPANE_ENGINE_SOCK=` 之后不能拿
+    /// 空串去 connect；与 `mcp-shell` 的 socket-override-blank 同一条规则）。
+    ///
+    /// 以及这一帧 hello 报回来的状态根（`daemonStateRootCaption`——它只在服务端真报过
+    /// 时说服务端的事，面板不许拿自己探的那一个去替它填）。
+    static func resolveSocketPath(
+        explicitSocketPath: String? = nil,
+        env: [String: String] = ProcessInfo.processInfo.environment,
+        home: String = NSHomeDirectory()
+    ) -> String {
+        if let explicit = explicitSocketPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !explicit.isEmpty {
+            return explicit
+        }
+        if let named = env["GLASSPANE_ENGINE_SOCK"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !named.isEmpty {
+            return named
+        }
+        let namedRoot = env["GLASSPANE_STATE_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !namedRoot.isEmpty {
+            // 根的路径由 `UpdatePanel.stateRoot` 那一份规则算（tilde 展开与空白判据都
+            // 在那儿）：同一份规矩不许在这一面再抄第二遍。叶子名跟着换——点名过的根
+            // 是 `daemon.sock`，只有没点名才留 `engine.sock`。
+            let root = StateRoot(path: UpdatePanel.stateRoot(env: env, home: home))
+            return StateRoot.engineSocketPath(explicitSocketPath: nil, stateRoot: root)
+        }
+        return DaemonProbe.defaultSocketPath
+    }
+
+    /// 上面那一条只答"第一级是哪个名字"。这一条把**整张回落表**交出去：一次运行只探
+    /// 一个名字是不够的——`GLASSPANE_ENGINE_SOCK` 指着一个已经退役的 socket、而真正的
+    /// daemon 正绑在点名根的 `daemon.sock` 上时，只探第一个名字的面板依旧报"未运行"，
+    /// 而这一次它其实连的是别人。所以按这张表逐个探，**第一个真回了 hello 的赢**，
+    /// 整张表都没人应门才轮得到"未运行"那句话（`socketSource` 记下赢的是哪一级，
+    /// 页面上那一行就说得出它在跟哪一个根说话）。
+    static func socketPathCandidates(
+        explicitSocketPath: String? = nil,
+        env: [String: String] = ProcessInfo.processInfo.environment,
+        home: String = NSHomeDirectory()
+    ) -> [(path: String, source: SocketPathSource)] {
+        var out: [(path: String, source: SocketPathSource)] = []
+        func add(_ path: String, _ source: SocketPathSource) {
+            let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !out.contains(where: { $0.path == trimmed }) else { return }
+            out.append((trimmed, source))
+        }
+        if let explicit = explicitSocketPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !explicit.isEmpty {
+            add(explicit, .explicitArgument)
+        }
+        if let named = env["GLASSPANE_ENGINE_SOCK"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !named.isEmpty {
+            add(named, .engineSocketEnvironment)
+        }
+        let namedRoot = env["GLASSPANE_STATE_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !namedRoot.isEmpty {
+            let root = StateRoot(path: UpdatePanel.stateRoot(env: env, home: home))
+            add(StateRoot.engineSocketPath(explicitSocketPath: nil, stateRoot: root), .namedStateRoot)
+        }
+        add(DaemonProbe.defaultSocketPath, .homeDefault)
+        return out
+    }
+
+    /// 面板探的那一个名字是**哪一级**定下来的。与 `ConsoleModel.StateRootSource` 同一套
+    /// 说法：出处不是给读的人增加装饰的，屏幕上并排两个"状态根"时它要说得出谁是谁。
+    enum SocketPathSource: Equatable {
+        /// 面板自己的 `--socket-path`（与 daemon 同语义）。
+        case explicitArgument
+        /// `GLASSPANE_ENGINE_SOCK`：`mcp-shell` 与 `updater/lib/idle.js` 认的那一个变量。
+        case engineSocketEnvironment
+        /// 面板已知状态根（`GLASSPANE_STATE_DIR`）下的 `daemon.sock`。
+        case namedStateRoot
+        /// 家目录默认根下的 `engine.sock`——最后一级，也是唯一一级"猜"。
+        case homeDefault
+
+        /// 那一行的出处说法（三态三句话，没有一级冒充另一级）。
+        var caption: String {
+            switch self {
+            case .explicitArgument: return "面板启动时显式点名的 socket"
+            case .engineSocketEnvironment: return "GLASSPANE_ENGINE_SOCK 点名的 socket"
+            case .namedStateRoot: return "GLASSPANE_STATE_DIR 那个状态根下的 daemon.sock"
+            case .homeDefault: return "谁都没点名时家目录默认根的 engine.sock（这一级是猜的）"
+            }
+        }
     }
 
     init(
         socketPath: String? = nil,
         refreshOnAppear: Bool = true,
         probes: PermissionProbeSet = PermissionProbeSet(),
-        daemonProbe: DaemonProbe = DaemonProbe()
+        daemonProbe: DaemonProbe = DaemonProbe(),
+        env: [String: String] = ProcessInfo.processInfo.environment,
+        home: String = NSHomeDirectory()
     ) {
-        let resolvedSocketPath = socketPath ?? Self.defaultSocketPath()
         self.panelProbes = probes
         self.daemonProbe = daemonProbe
         self.panelSubject = probes.snapshot().subject
+        let candidates = Self.socketPathCandidates(explicitSocketPath: socketPath, env: env, home: home)
+        socketCandidateEntries = candidates
+        socketCandidates = candidates.map { $0.path }
+        socketSource = candidates.first?.source ?? .homeDefault
         daemon = DaemonEntry(
-            socketPath: resolvedSocketPath,
+            socketPath: candidates.first?.path ?? DaemonProbe.defaultSocketPath,
             liveness: .unmeasured,
             version: nil,
             protocolVersion: nil,
@@ -655,12 +771,23 @@ final class SettingsModel: ObservableObject {
             try? FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try script.write(to: url, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath)
+            // Owner 的 x 就够了：一次性任务由同一个 uid 的 launchd 起，0755 只是把这个
+            // uid 之外的读者加进来——而它所在的目录只要 0755 就通过
+            // `StateRoot.directoryIsolation`（那条规矩拒的是"可写"，不是"可读"）。脚本里
+            // 写着 daemon 二进制路径与状态根，同组/其他人可读不是一个需要存在的性质。
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptPath)
         } catch {
             FileHandle.standardError.write(Data("runOneShot script-write failed: \(error) path=\(scriptPath)\n".utf8))
             return .writeFailed
         }
         try? FileManager.default.removeItem(atPath: outputPath)
+        // 输出文件由那一趟 shell 重定向创建，所以它的模式是**那个执行上下文的 umask**
+        // 说了算，不是面板说了算。先按 0600 建好：重定向只截断已存在的文件，不改它的模式。
+        // 同一类由屏幕/权限派生的东西在引擎侧要 0600（`EvidenceReportGenerator.swift:196-201`），
+        // 一份 `--permissions` 的读数（主体路径、pid、每个席位的判决）不该是例外。
+        FileManager.default.createFile(
+            atPath: outputPath, contents: Data(), attributes: [.posixPermissions: 0o600]
+        )
         let process = Process()
         process.executableURL = URL(fileURLWithPath: command.launchPath)
         process.arguments = command.arguments
@@ -690,22 +817,80 @@ final class SettingsModel: ObservableObject {
         return result
     }
 
+    /// 按回落表逐个探：第一个真回 hello 的名字赢。都没回话时也要把两件事分开说——
+    /// "有人占着门却不开口"比"整张表一个名字都没人听"更值得让人知道，而两种都不是
+    /// "未运行"。全部落空才回 `.noListener`，并把探过的名字一起交出去，否则那句
+    /// "未运行"说的是一个这一页从没找过的地址。
+    ///
+    /// 为什么不能只探第一个名字：`GLASSPANE_ENGINE_SOCK` 指着一个已经退役的 socket、
+    /// 真正的 daemon 正绑在点名根的 `daemon.sock` 上时，只探头一级的气象仍报"未运行"，
+    /// 而这一句要人去做的事一件也做不出来。
+    nonisolated static func probeSocketPaths(
+        _ transport: DaemonProbe, paths: [String]
+    ) -> (index: Int, liveness: DaemonProbe.Liveness) {
+        var silent: (index: Int, reason: String)?
+        var absent: (index: Int, reason: String)?
+        for (index, path) in paths.enumerated() {
+            switch transport.liveness(socketPath: path) {
+            case .answered(let summary):
+                return (index, .answered(summary))
+            case .presentButNotAnswering(let reason):
+                if silent == nil { silent = (index, reason) }
+            case .noListener(let reason):
+                if absent == nil { absent = (index, reason) }
+            }
+        }
+        if let silent {
+            return (silent.index, .presentButNotAnswering(reason: silent.reason))
+        }
+        let fallback = absent ?? (0, "no name was resolved to probe")
+        let index = min(max(fallback.index, 0), max(paths.count - 1, 0))
+        let tried = paths.joined(separator: "、")
+        return (index, .noListener(reason: "\(fallback.reason)——这一页探过 \(paths.count) 个名字：\(tried)"))
+    }
+
+    /// 这一页连的是哪一个名字，以及那个名字是**谁**点名的。与
+    /// `ConsoleModel.displayedStateRootCaption` 同一套说法：屏幕上并排两行"状态根"时，
+    /// 读者要能看出它们说的是不是同一个实例。
+    var daemonSocketOriginCaption: String {
+        var text = "面板探的是 \(socketSource.caption)：\(daemon.socketPath)"
+        if let root = daemon.stateRoot, !root.isEmpty {
+            text += "；服务端自己报的根 \(root)"
+        } else if socketCandidates.count > 1 {
+            text += "（回落表里 \(socketCandidates.count) 个名字都没报回状态根）"
+        }
+        return text
+    }
+
     /// 重查全部权限与 daemon 状态：一次真实的 hello 握手（3s 会话，放后台不阻塞主线程）。
     ///
     /// 这里刻意不再取 `reachable(socketPath:)` 的数——那个函数只回答"文件在不在"，
     /// 拿它当存活判据就是"灯亮着而服务早没了"这一类缺陷的由来。
     func refresh() {
         isRefreshing = true
-        lastRefreshError = nil
-        let socketPath = daemon.socketPath
         let transport = daemonProbe
+        let paths = socketCandidates
         Task.detached(priority: .userInitiated) {
-            let liveness = transport.liveness(socketPath: socketPath)
+            let outcome = Self.probeSocketPaths(transport, paths: paths)
             Task { @MainActor in
-                self.applyLiveness(liveness)
+                self.applySocketProbe(outcome, paths: paths)
                 self.isRefreshing = false
             }
         }
+    }
+
+    /// 一次逐个探测的结局落到发布状态上：赢家的名字与出处一起换，灯跟着实测走。
+    private func applySocketProbe(
+        _ outcome: (index: Int, liveness: DaemonProbe.Liveness), paths: [String]
+    ) {
+        let path = paths.indices.contains(outcome.index) ? paths[outcome.index] : daemon.socketPath
+        if path != daemon.socketPath {
+            daemon.socketPath = path
+            if socketCandidateEntries.indices.contains(outcome.index) {
+                socketSource = socketCandidateEntries[outcome.index].source
+            }
+        }
+        applyLiveness(outcome.liveness)
     }
 
     /// 一次性存活实测（后台队列，带在途保护）。
@@ -714,13 +899,16 @@ final class SettingsModel: ObservableObject {
         guard !probeInFlight else { return nil }
         probeInFlight = true
         defer { probeInFlight = false }
-        let socketPath = daemon.socketPath
+        let paths = socketCandidates
         let transport = daemonProbe
-        return await withCheckedContinuation { (continuation: CheckedContinuation<DaemonProbe.Liveness?, Never>) in
+        let outcome = await withCheckedContinuation {
+            (continuation: CheckedContinuation<(index: Int, liveness: DaemonProbe.Liveness), Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: transport.liveness(socketPath: socketPath))
+                continuation.resume(returning: Self.probeSocketPaths(transport, paths: paths))
             }
         }
+        await MainActor.run { self.applySocketProbe(outcome, paths: paths) }
+        return outcome.liveness
     }
 
     /// 把一次实测的存活结局落到发布状态上：daemon 自报什么就显示什么；没有回话

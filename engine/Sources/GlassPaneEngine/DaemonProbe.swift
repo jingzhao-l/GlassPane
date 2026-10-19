@@ -369,6 +369,15 @@ public final class DaemonProbe: @unchecked Sendable {
         var budget = ResponseBudget(maxBytes: maxResponseBytes)
         var response = Data()
         var buffer = [UInt8](repeating: 0, count: 8192)
+        /// 滴字节的对端在时限到之后说的话。**每一轮 read 都要问一次**这条，包括
+        /// `count > 0` 那条路：只把时限放在 EAGAIN 分支里（旧写法），一个每 50 ms 递
+        /// 1 字节的对端就永远让 read 立刻返回，EAGAIN 一次也不触发，于是整场会话只剩
+        /// 字节上限这一道界——64 KiB 按那个节奏是 ~55 分钟，而护栏跑在信号遮罩之后、
+        /// 无法打断。（实测面：`Qoder20261019DribblingPeerTests`，真 socket，1s 时限
+        /// 跑了 11.3s 才靠 cap 收口。）
+        func dribbledPastDeadline() -> RawOutcome {
+            .occupied(reason: "peer dribbled \(budget.receivedBytes) byte(s) past the absolute \(timeoutSeconds)s deadline")
+        }
         while true {
             let count = read(fd, &buffer, Swift.min(buffer.count, budget.remainingBytes))
             if count > 0 {
@@ -376,6 +385,9 @@ public final class DaemonProbe: @unchecked Sendable {
                 response.append(contentsOf: buffer[0..<count])
                 if budget.isFull {
                     return .occupied(reason: "peer sent \(budget.receivedBytes) bytes with no compliant answer (cap \(maxResponseBytes))")
+                }
+                if deadline.expired() {
+                    return dribbledPastDeadline()
                 }
                 continue
             }
@@ -386,7 +398,7 @@ public final class DaemonProbe: @unchecked Sendable {
                 // 单次读超时：只在绝对时限内继续等。滴字节的对端每轮都让 SO_RCVTIMEO
                 // 重新计时，但推不动 deadline，所以最多拖到 timeout + 一次 syscall。
                 if deadline.expired() {
-                    return .occupied(reason: "peer dribbled \(budget.receivedBytes) byte(s) past the absolute \(timeoutSeconds)s deadline")
+                    return dribbledPastDeadline()
                 }
                 continue
             }

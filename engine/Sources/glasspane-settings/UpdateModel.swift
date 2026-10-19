@@ -35,7 +35,19 @@ final class UpdateModel: ObservableObject {
     @Published private(set) var runningCommand: Command?
     /// 时钟可注入：过期判定的"现在"由它给，测试据此造 37 小时前的状态。
     private let clock: () -> Date
-    private let stateRootPath: String
+    /// 这一页读写的状态根。**不可以在 init 里定死**：见 `adoptDaemonReport`。
+    private var stateRootPath: String
+    /// 这一页认的根是**谁**认定的，与 `ConsoleModel.StateRootSource` 同一套三态三句话：
+    /// 「daemon 报的」不许由「面板算的」冒充，反过来说也一样。
+    enum StateRootSource: Equatable {
+        /// 最近一帧 hello 里 daemon 自己报的。
+        case daemonReported
+        /// daemon 报过，之后的帧没再报（老 daemon 没带这个键）：路径留着，出处如实降级。
+        case daemonReportedEarlier
+        /// daemon 从没报过，这是面板按 `GLASSPANE_STATE_DIR`/家目录算的。
+        case panelComputed
+    }
+    @Published private(set) var stateRootSource: StateRootSource = .panelComputed
     /// node 程序位置；nil 表示每次按 `UpdatePanel.nodeCandidates` 现找。
     private let injectedNodePath: String?
     /// 起子进程时那份环境的底子。可注入是为了让测试能把"这台机器本来就带着
@@ -54,6 +66,57 @@ final class UpdateModel: ObservableObject {
         self.injectedNodePath = nodePath
         self.clock = clock
         self.baseEnvironment = baseEnvironment
+    }
+
+    // MARK: - 跟着 daemon 报的根走
+
+    /// 把 hello 实测到的状态根接到这一页上（`ConsoleModel.adoptDaemonReport` 的同一步，
+    /// 从前只给了它自己那一页）。
+    ///
+    /// 缺陷形状：`stateRootPath` 从前是 init 时由 `GLASSPANE_STATE_DIR`→家目录定死的
+    /// `let`，而 `ConsoleRootView.syncFromSettings` 只把 `console` 接到 `hello.stateRoot`
+    /// 上。于是 daemon 带着 `--state-dir X` 起时，同一个窗口并排显示两个"状态根"而没人
+    /// 说得出谁是谁，而「自动更新」的开关与检查会把 `update-install.json`、`ca-roots.pem`
+    /// 写到**默认家目录那一份真状态**里——操作者以为自己在看沙箱。
+    /// `ConsoleModel` 那份注释（:148-152）把这个形状记成它修掉的 P1，却只修了自己一页，
+    /// 那正是半修的definition。
+    ///
+    /// 口径与那一页一致：只有真空白算"这一帧没报"；报过又不报了，路径留着、出处降级，
+    /// 不许继续冒充"这一帧报的"。换根之后不自动重跑一次动作：`resolveRunner()` 每次
+    /// 动作现读指针，进这一页时也会 `refresh()` 一次，所以旧根的结论不会跟着搬过来。
+    func adoptDaemonReport(daemonStateRoot: String?, answered: Bool) {
+        // 只有"这一帧真的拿到了 hello 回话"才算一次上报：`presentButSilent` 那一支
+        // 手里那个路径是上一次测量的残留，拿它换根就是让旧结论替新现状背书。
+        guard answered else {
+            if stateRootSource == .daemonReported { stateRootSource = .daemonReportedEarlier }
+            return
+        }
+        let reported = daemonStateRoot?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let reported, !reported.isEmpty {
+            let next = StateRoot(path: reported).path
+            if next != stateRootPath {
+                stateRootPath = next
+                // 根换了，这一页手里那份"更新器位置"与结论都来自**另一个安装**：
+                // 留着它们就等于让旧根的数字在新根的名字下说话。
+                snapshot = nil
+                pointer = .failed(.missingPointer)
+                readFailure = nil
+            }
+            stateRootSource = .daemonReported
+        } else if stateRootSource == .daemonReported {
+            stateRootSource = .daemonReportedEarlier
+        }
+    }
+
+    /// 状态根那一行唯一的一句话：路径 + 它是谁认定的。
+    var stateRootCaption: String {
+        let origin: String
+        switch stateRootSource {
+        case .daemonReported: origin = "后台服务这一帧上报的"
+        case .daemonReportedEarlier: origin = "后台服务早前上报的（这一帧没再报）"
+        case .panelComputed: origin = "面板自己算的（后台服务从没报过它实际在用的根）"
+        }
+        return "\(origin)状态根 \(stateRoot)——本页的更新器指针与根证书束都按它读"
     }
 
     // MARK: - 派生呈现

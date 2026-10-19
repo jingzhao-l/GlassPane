@@ -1,6 +1,19 @@
 import Foundation
 import CoreGraphics
 
+/// 可选能力：输入源把"我订阅了哪些事件种类"说出来。
+///
+/// 协议声明放在本文件：`InputSourceMonitoring` 属 `AttributionGuard.swift`（另一条泳道的
+/// 文件，本批不动它），而"监测到的种类"必须有地方说出口——`EngineCore` 的
+/// `contaminationBasis` 那句"整段都被看着"要靠它才能被核对而不是被信任。
+///
+/// 不实现它的源没有第二条路：调用方要么自己申报种类（`EngineCore` 的
+/// `inputEventKindsProvider`），要么得到一句"这个源没申报种类"。把缺席读成"全都看着"
+/// 就是本批要关掉的那句话。
+public protocol InputEventKindReporting: AnyObject {
+    var monitoredEventKinds: [String] { get }
+}
+
 /// Real CGEvent-backed input source (P2 spec v2.0 §16.2). Requires the
 /// Input Monitoring TCC permission at runtime; genuine always-on polling is
 /// not testable in unit tests, so the daemon consumes this adapter and tests
@@ -19,7 +32,61 @@ import CoreGraphics
 /// on those notifications (bounded, with the read-back checked rather than
 /// assumed), and every outcome is *published* through `isMonitoringInput` /
 /// `inputMonitoringFault` instead of being inferred from an empty stream.
-public final class CGEventInputMonitor: InputEventSource, InputSourceMonitoring {
+public final class CGEventInputMonitor: InputEventSource, InputSourceMonitoring, InputEventKindReporting {
+
+    // MARK: - What this tap actually subscribes to (single source of truth)
+
+    /// 这张 tap 订阅的事件种类。**唯一真源**：`eventsOfInterest` 的蒙版由这张表生成，
+    /// `EngineCore` 的 `contaminationBasis` 那句"watched for the whole operation window"
+    /// 说的也是这张表（`inputEventKindsProvider`）。
+    ///
+    /// 从前蒙版里写死的是 keyDown + 三种 mouse **down**，而句子说的是"整个操作窗口都在
+    /// 看着"：一个人如果在 act 期间只滚了滚轮、或只把一次拖拽抬起，被订阅的种类一个都不会
+    /// 投递，于是那次"零事件"被当成"没人碰机器"发布出去（`EngineCore.swift:1246`，
+    /// 归因仍是 `.soft`/`contaminated=false`）。这正是本项目最贵的一类错：把一个没测到的
+    /// 负例说成一个测到的负例。
+    ///
+    /// `mouseMoved` 不在名单里，而句子也不声称看着它：把一个会话级、每帧都来的位移事件
+    /// 投给 `.defaultTap`（不是 listen-only）是已知的输入延迟代价，而"指针动了、没按也
+    /// 没滚"不是这条主张要覆盖的交互。写在这里而不是藏在代码里，是因为漏掉的种类必须
+    /// 能被读出来——句子列出的就是蒙版有的，名单没列的读者看得见它没被列。
+    /// 名单本身是产品面：本批补的是"说的与订的是同一件事"，不是替产品决定监测范围。
+    static let monitoredEventTypes: [(name: String, type: CGEventType)] = [
+        ("keyDown", .keyDown),
+        ("keyUp", .keyUp),
+        ("flagsChanged", .flagsChanged),
+        ("leftMouseDown", .leftMouseDown),
+        ("leftMouseUp", .leftMouseUp),
+        ("rightMouseDown", .rightMouseDown),
+        ("rightMouseUp", .rightMouseUp),
+        ("otherMouseDown", .otherMouseDown),
+        ("otherMouseUp", .otherMouseUp),
+        ("leftMouseDragged", .leftMouseDragged),
+        ("rightMouseDragged", .rightMouseDragged),
+        ("otherMouseDragged", .otherMouseDragged),
+        ("scrollWheel", .scrollWheel),
+    ]
+
+    /// 订阅种类的线上形态（`act` 响应里的 `monitoredEventKinds`）。
+    public static var monitoredEventKinds: [String] { monitoredEventTypes.map { $0.name } }
+
+    /// 单个种类对应的蒙版位。认不出的名字回 nil——让调用方拿到 0 再或进蒙版，等于把
+    /// 一个拼错的名字变成"订阅了第 0 号事件"。
+    public static func eventMask(forKind name: String) -> CGEventMask? {
+        guard let entry = monitoredEventTypes.first(where: { $0.name == name }) else { return nil }
+        return CGEventMask(1) << CGEventMask(entry.type.rawValue)
+    }
+
+    /// `tapCreate` 用的蒙版：逐位或出来，永远与 `monitoredEventKinds` 同源。
+    public static var monitoredEventMask: CGEventMask {
+        monitoredEventTypes.reduce(CGEventMask(0)) { mask, entry in
+            mask | (eventMask(forKind: entry.name) ?? 0)
+        }
+    }
+
+    /// 本实例订阅的种类（与 `monitoredEventMask` 同一张表；投递与否由 `isMonitoringInput`
+    /// 说，种类不是那条声明）。
+    public var monitoredEventKinds: [String] { Self.monitoredEventKinds }
 
     /// 重装预算：反复被停用说明系统/用户持续拒绝投递，继续重装只会把"零投递"
     /// 一路伪装成"在测"。预算用尽后存活位改 false，裁决改走未监测分支。
@@ -85,25 +152,31 @@ public final class CGEventInputMonitor: InputEventSource, InputSourceMonitoring 
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
-            eventsOfInterest: 1 << CGEventType.keyDown.rawValue
-                | 1 << CGEventType.leftMouseDown.rawValue
-                | 1 << CGEventType.rightMouseDown.rawValue
-                | 1 << CGEventType.otherMouseDown.rawValue,
+            eventsOfInterest: Self.monitoredEventMask,
             callback: callback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
             recordFault("CGEventTapCreate returned nil (Input Monitoring TCC not granted?)")
             return false
         }
-        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         stateLock.lock()
         if shuttingDown {
             // stop() raced the install: nothing may keep a tap after teardown.
+            //
+            // The run-loop source is created **below** this branch on purpose. It used to
+            // be created above it, so the abandoned path built a `CFRunLoopSource`,
+            // invalidated the mach port underneath it and returned: ARC lets go of the
+            // source at scope exit, so today that is not a leak — it is a teardown path
+            // that has to clean up an object it never needed, and the next edit that
+            // *stores* that source (the two lines below store everything else) would put
+            // an owned object on a path nobody unwinds. Creating nothing here is the
+            // smaller claim.
             stateLock.unlock()
             CGEvent.tapEnable(tap: tap, enable: false)
             CFMachPortInvalidate(tap)
             return false
         }
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         if let source {
             CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         }
@@ -357,12 +430,19 @@ public final class CGEventInputMonitor: InputEventSource, InputSourceMonitoring 
         }
     }
 
-    /// 有序拆卸：① 关掉 tap 的投递；② 让泵循环那一侧自己摘 source + invalidate
-    /// tap（跨线程摘 source 是未定义行为）；③ 有界地等它退出，超时才在本线程
-    /// 补一次 invalidate 并记日志。返回后不可能再有回调往缓冲区里塞事件。
+    /// 有序拆卸：① 先把"没在测"发布出去；② 关掉 tap 的投递；③ 让泵循环那一侧自己摘
+    /// source + invalidate tap（跨线程摘 source 是未定义行为）；④ 有界地等它退出，超时
+    /// 才在本线程补一次 invalidate 并记日志。返回后不可能再有回调往缓冲区里塞事件。
+    ///
+    /// ① 必须在 ② 之前，而且必须在**两条**分支之前：从前只有非 joinable 分支清存活位，
+    /// joinable 那条把它留给后台线程自己的拆卸——最迟要等一个泵周期
+    /// （`runLoopWakeInterval`）。那一段时间里投递已经关了，`isMonitoringInput` 仍然回
+    /// true，面板写着"在监测"，而 `AttributionGuard` 判"这个窗口有人看着"用的正是这个值。
     public func stop() {
         stateLock.lock()
         shuttingDown = true
+        // 存活位在读到 `joinable` 之前就已落定：任何一条分支都不再声称"在测"。
+        tapAlive = false
         let tap = eventTap
         let loop = runLoop
         let joinable = ownsRunLoop && runLoopSource != nil
@@ -373,7 +453,6 @@ public final class CGEventInputMonitor: InputEventSource, InputSourceMonitoring 
             runLoopSource = nil
             runLoop = nil
             ownsRunLoop = false
-            tapAlive = false
             monitorThread = nil
         }
         stateLock.unlock()

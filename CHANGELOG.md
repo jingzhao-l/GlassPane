@@ -2,7 +2,255 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
-## [Unreleased]
+## [1.17.0] — 2026-10-19
+
+**版本判断：minor。** 逐条对着本仓自己那四项 patch 判据实测：`bin` 声明没动
+（`glasspane-mcp`→`dist/index.js`+`dist/http-gateway-cli.js`、`glasspane-install`→`./cli.js`，
+与 1.16.4 逐字相同）；CLI 参数集合没动（一个新旗标都没加，`main.swift` 里新出现的
+`--xxx` 字样全是被登记进"多命令拒绝"清单的既有旗标）；`update-state.schema.json` 与
+`mcp-shell/schemas` 没动。动的是另外三样，任何一样都超出 patch 的定义：
+
+1. **退出码的触发条件**（调用方就是按它分叉的）：`--request-permission` 从前在席位
+   落在 denied/unverifiable 时也退 0；`writeJSON` 编不出去的报告从前是"零输出 + 退 0"；
+   同时点名两条子命令从前跑掉第一条并退 0。数字集合仍是 0/1/2/64，但"什么条件给什么码"
+   这份合同变了——按 rc 行动的 agent 与脚本会读到不同的世界。
+2. **响应形状新增字段**：`audit_ui` 交出它实际走过的深度（与 `snapshot` 的 `captureDepth`
+   同一命名法）、`probe_status` 的行里出现 `truncatedValues`、act 的污染依据句旁边出现
+   `monitoredEventKinds`。
+3. **面板新增用户可见的控制状态**：清理在飞时的禁用态与理由、reveal 按钮的禁用理由、
+   状态根来源标注，以及面板现在能看见用 `--state-dir` 隔离起来的 daemon。
+
+本版**合并了一段没有随任何发布物出去的 main 代码**：`v1.16.4` 之后落进 main 的 Step 0b
+（`mcp-shell` 改吃 npm 上的 `iterate-kernel@0.1.8`、`kernel/` 的代码镜像退役、
+`scripts/bundle-kernel-schemas.mjs` 从装好的那份包里抄 schemas）只在这棵树里，
+不在 `GlassPane-1.16.4.tar.gz`、也不在 registry 那两个包里。本版把它一起带走。
+
+主代理侧的完整台账与每条的判据见 `specs/GlassPane_每日审查_2026-10-19_记录.md`；
+下面只写失效模式。
+
+### 发布状态（如实记，不等下一轮再补）
+
+`v1.17.0` 已打在本主线的最后一笔上并推上远端，GitHub Release 与 npm **两条通道本轮都没有发出去**：
+`release.yml` 的第一步就是"这个 commit 的 CI 必须绿才许出货"（`scripts/assert-ci-green.mjs`），
+而 CI 上唯一红的 job 是 `harness rulers` 里的 `release-artifact`——它量的是"主干的
+`harness/glasspane-harness` 与已发布的 `v0.8.2` 是不是同一份字节"，缺口是 2026-10-18 那批 Step 0b
+留下的，判据自己在 remedy 里写着"re-split and cut the next patch"。本轮任务明文禁止我改 `harness/`
+的内容或版本（它有 10:30 那条独立任务与独立发布通道），所以我没有去替它发那个版，也没有放宽那道闸。
+解法与命令记在 `specs/GlassPane_每日审查_2026-10-19_记录.md` §6；那边落下 0.8.3 之后，
+`gh run rerun 39195845505 --failed` 就能把这两条通道接着跑完，tag 不必重打。
+
+### Fixed — 探针通道与证据档案（Swift，daemon 侧）
+
+- **探针掉线被读成"处理器没跑"**：`ProbeInbox` 的 `disconnect` 摘掉事件环却留着在开的
+  窗口，读侧 `events[pid] ?? []` 于是把"环没了"折成"它报了 0 个事件"，`handlerProbe(hitCount:0,
+  handlers:[])` 作为一次**测量**发布，分类器顺着走 T4/T5/T7/T8 之外的黑盒分支。现在
+  `disconnect` 给该 pid 的窗口打标记，被标记的窗口按文件自己的"诚实缺席"形状回 (nil, nil)。
+- **计数器越界被静默折回**：`ProbeWire` 的计数器走 `intValue`，`{"droppedWrites":4294967296}`
+  折成 0——一份"什么都没丢"的健康证明，替一个正在丢 40 亿帧的通道签的。同文件的
+  `boundedInt32` 注释早就写着这个坑（2^32+1 变成 pid 1）却没有用在计数器上。现在走
+  同一条精确-range 读，越界 ⇒ nil。
+- **`lateCount` 替没量过的事作保**：act 时硬写 0，唯一写真值的路径在窗口离开 16 条内存环
+  时返回 nil（被逐出，或 daemon 重启后从磁盘解析包），而那句 `guard … late != stored.lateCount
+  else { return nil }` 把"刷新不了"折成"保留 0"并重新落盘 ⇒ 归档包永远说"没有迟到事件"，
+  T8 对这些包红不了。现在"刷新不了"是可区分的状态。
+- **生产侧无上界，消费侧按 schema 拒**：`StateEntry.key/before/after`、`HandlerRef.file`
+  在 Swift 侧完全没有长度规则（已发布内核的读者 `kernel/dist/evidence-pack.js:216-228`
+  点名的就是这一条），而 `:237` 的注释写着"探针侧截到 ≤1 KiB"——没有任何东西执行它。
+  于是一个大帧换到的是"`evidencePersisted: true` 已经答出去，档案却和自己的 schema 打架"。
+  现在构造函数里按 schema 的单位收界并标明被截短。
+- **一份契约两个长度单位**：`ParamValidation` 按字素簇计数，契约（壳的 `z.string().max(512)`
+  与 JSON Schema 的 `maxLength`、daemon `Dispatcher` 的 attach 上限）按 UTF-16 ⇒ 壳与 schema
+  拒得下的串，daemon 收。改 `utf16.count`。
+- **断言可以记在别人的应用头上**：`assert_element` 无 operationId 时按 mtime 取档案里最新的
+  一份作信号上下文，而 `attach` 只清内存 history、档案从不按应用划界 ⇒ 挂接到 B 之后，
+  这次断言带着 A 的 `attribution: strong`、A 的 `signals.act`、A 的崩溃/AX 读数落盘。
+  现在兜底限定在本次挂接会话产生的包，否则 GP_E_NO_OPERATION 并给原因。
+- **重写一个包可能把档案本身弄没**：`EvidenceStore` 在"发布后隔离判定"之前就用
+  `replaceItemAt` 覆盖旧条目，判定失败又删掉发布路径——而 diagnose→replace→persist 是正常
+  路径。现在证明不了隔离就不替换。
+- **面板与 daemon 对同一个文件两套判决**：面板侧读者裸 `decode`（不跑不变式）并收任何
+  `*.json`，daemon 侧 `decodeAndValidate` + `isEntryName` ⇒ 面板渲染出来的行，daemon 回
+  GP_E_NO_EVIDENCE。统一到同一套名字与校验，违反不变式的计入 `unreadableFiles`。
+- **档案体积少算**：`totalBytes` 只累加读得动的文件，于是同一份档案一边被报"部分不可读"、
+  一边被报小。改成像 `stats()` 那样对每个条目取尺寸。
+- **两处"同数不同字节"**：账本的整值快路径把界写成 9.007e14 而它自己的注释说的是 2^53；
+  `CanonicalJSON` 的非整值分支绕过跨语言格式化（Swift 的 `9.0e+15` vs `JSON.stringify` 的
+  定点形式），而载荷长度上界量的正是这个字节数。两处都按契约改齐，比对基准是真跑
+  `node` 取来的输出。
+- **探针新增的截短计数在 daemon 侧没有读者**（本轮两条并行改动之间自己造出来的空档）：
+  SDK 已在 `hello` 里发布 `truncatedValues`、`SECURITY.md` 也跟着承诺读者能区分"帧没到"
+  与"值被截短"，而 daemon 一个字节都没读它。现在解码、重连合并、`statusJSON` 发布三段都接上，
+  且与其余计数器同一条精确-range 规则。
+
+### Fixed — 判定、权限与捕获（Swift）
+
+- **没量的像素被当成"像素没变"**：`Classifier` 的 `pixelDiff?.changedPixelRatio ?? 0 > 0`
+  把未测量的通道折成 false 再喂给 T4/T5/T7，而同一文件对 `stateDiff` 用的是三态、对 T6 用
+  `guard let … else inconclusive`。改成三态并收回需要"未变"的分支——对照用例（量到 0 的同一包
+  仍须落 T5）保证这不是把规则改成永不判定。
+- **滴字节的读者拖住启动护栏**：`DaemonProbe` 的绝对时限只在 EAGAIN 分支查，`count > 0`
+  那半永远不看它；真机 `AF_UNIX` 每 50 ms 滴一字节、1 s 时限实测跑满 11.28 秒并把时限
+  误报成字节上限。现在每轮读迭代先问时限。
+- **调试能力探测从来没量过 attach**：它跑 `xcrun lldb --batch --attach <pid>`，而 lldb 没有
+  `--attach` 这个选项（本机 `lldb --help` 只列 `--attach-pid`/`-p`；直接调用回
+  `error: unknown option: --attach`）。本仓的桥早就在另一门语言里修过同一件事
+  （`bridge/glasspane_bridge.py:696-699`），`engine/smoke.md:218-224` 也留着 attach
+  `spawnFailed` 的读数。改用 `-p`，argv 由注入的 `Running` 钉住。
+- **慢而被允许的 attach 被判成"系统拒绝"**：victim 只活 30 秒、预算 120 秒，而 `classify`
+  把所有含 "attach failed" 的输出判 `.denied`——本机实测死 pid 的 `lldb -p` 正输出
+  `error: attach failed: no such process`。现在这类"夹具到点"不再是席位判决。
+- **刚问过的权限被报成"已拒绝"**：`InputMonitoring`/`ScreenCapture` 的
+  `hasRequestedThisRun ? .denied : .notDetermined`，而 TCC 此刻还没作任何决定；面板原样打印
+  "已拒绝"。辅助功能那侧反过来：真被拒的席位被报成"未请求"（`isTrusted() ? .granted :
+  .notDetermined`）。三处都改成"不替系统作判决"，并把四条既有测试里的单调性约定（问过之后
+  不得回退成 notDetermined）原样保留——它记的是真出过的事故。
+- **遮挡兜底裁错屏幕区域**：`SCKCapturer` 把窗口的**全局** frame 当 `sourceRect` 交给 SCK，
+  而本仓 P1 规格写明它按显示器逻辑坐标解释；同文件又拿同一个 rect 与 `display.frame` 比较，
+  恰好自证它是全局坐标。现在抽 `cropRect(window:display:)` 减去所选显示器原点，不相交/退化
+  给具名拒绝。真机错位后果本机**测不了**（实测只有一块屏），只证算术，文件头与 specs 都写明。
+- **制造出来的 1×1 截图**：零面积闸放行亚像素窗口后，`max(1, ceil(…))` 造出的正是注释说要
+  拒绝的"合法但空白"的一张图，把一个像素的"比例"送进证据。现在任一边 ≤1 像素即拒绝。
+- **"整个操作窗口都在监听输入流"这句不成立**：tap 掩码只覆盖 keyDown + 三种 mouse-down，
+  一个人只滚动或只抬手，监听到的事件数为 0，窗口照样归档成全程 watched 且未污染。现在
+  掩码由导出的 kinds 表生成， kinds 也随句交出，测试钉的是"句子==掩码==发布表"这个对应关系。
+- **收尾竞争里的两件事**：`installTap` 的 shuttingDown 分支 invalidate 了 port 却不释放
+  自己创建的 `CFRunLoopSource`；可 join 的 `stop()` 路径上 `tapAlive` 要等一次泵转才置 false，
+  其间仍声称在监听。
+- **恢复步骤的排序不是严格弱序**：domain 不在 `computed` 里的步骤与 A、C 都判等而 A<C，
+  调用方给的步骤顺序不确定。现在未知 domain 先沉底，并断言传递性。
+- **走过 5% 也报 coverage 1.00**：预算中止后未走的兄弟不产生任何节点，`ratio` 的分母只含
+  看过的部分——文件注释自己把这个形状列为已知缺陷。现在中止点按兄弟补位，未完成时不再给出
+  一个读起来像满覆盖的比值。
+- **审计不交出它量了多深**：`audit_ui` 的载荷把 `complete`/`stopReason` 交成一等字段却没有
+  `captureDepth` 的同族字段，省略 `maxDepth` 的调用方读 "pass, complete" 时无从知道范围。
+
+### Fixed — daemon CLI 与设置面板
+
+- **`writeJSON` 的"零输出 + 退 0"**：编码失败时它 `guard … else { return }`，命令照样走到
+  `exit(0)`。本文件的注释（:1078-1081）早就把"零输出 + 退出码 0"列为这条命令自己的帮助文本
+  禁止的形状，`--list-projects` 与 `--recipe-validate` 也各自修过——~27 个调用点被留下不管，
+  正是"改了 A 面、B 面仍按旧行为走"。现在保证收在咽喉点：编不出去就自行输出 encodeFailed
+  拒绝并非零离场，任何现有或将来的调用点都拿不到"沉默的成功"。
+- **两条子命令只跑第一条并退 0**（HEAD 真机实测：`--version --evidence-stats` 只打印版本）。
+  现在在任何一条执行之前以 64 拒绝并点名两条。
+- **`--request-permission` 替没批的事作保**：席位落在 denied/unverifiable 也退 0，而隔壁
+  `--check-developer-tools` 已经按 granted 退。现在未授予即非零，`--help` 写明。
+- **面板看不见隔离起来的 daemon**：只探测 `~/.glasspane/engine.sock`，而它自己的帮助告诉
+  用户隔离要用 `--state-dir`（那时 socket 叫 `<root>/daemon.sock`）；`mcp-shell` 与
+  `updater/lib/idle.js` 都认 `GLASSPANE_ENGINE_SOCK`，面板不认。现在按 显式 → 环境变量 →
+  状态根 → home 默认 的顺序解析，并说出它连的是哪一个根。
+- **更新页把状态写进真实 home 而 daemon 在沙箱里**：`hello.stateRoot` 只喂给 console，
+  `UpdateModel` 的根在 init 定死，`update-install.json`/`ca-roots.pem` 与 enable/disable 都
+  落在默认 `~/.glasspane`，同一窗口里两行"状态根"没有任何一行标明来源。
+  `ConsoleModel.swift:148-152` 把这个形状记成它只替自己修好的 P1——半修比不修更糟。
+- **清理在飞时控件回到可点状态**：`isRunningPrune` 写了但没有任何视图读者，最长 20 秒的真
+  删除期间可以再点一次；`PanelActionReadoutTests` 把模型里那句自守当成"有读者"，等于闸变软。
+  现在要求在飞的禁用态被渲染，并把闸收紧成"写动作状态必须有视图读者"。
+- **按下去什么都不会发生的 reveal 按钮**：`filePath` 为空或包读不动时 `revealFile()` 静默
+  return，而它的兄弟是按"禁用理由 + 下一步"建的。现在同一个形状。
+- **永远点不亮的错误行**：`lastRefreshError` 只被赋过 `nil`。
+- **配方页说真源是 schema，实际显示的是快照**：`load()` 只试 CWD 相对路径，launchd/Finder
+  起的面板 cwd 是 `/`。现在如实说出显示的是哪一份。
+- **面板头注释"不持久化任何配置"**与 `@AppStorage`（配方草稿、折叠态）矛盾；已改为如实描述
+  持久化的是 UI 本地状态、不持久化任何测量或判决。
+- **socket 目录的叶子符号链接**：`chmod`/`stat`/`bind` 都跟着链接走，而父链检查拿到的是
+  字符串路径——于是"目标目录的父链是否被别人可写"从来没被问过，档案侧早就因为这个理由
+  拒这种形状（`EvidenceStore.nameIsUsableArchiveDirectory`："chmod 会跟着符号链接走"）。
+  现在叶子是符号链接就在动手之前拒绝并给出 `--state-dir` 的下一步；中间分量的符号链接
+  照旧放过（macOS 自己的 `/var` → `/private/var` 就是这个形状）。
+
+### Fixed — MCP 壳（TypeScript）
+
+- **出路指着不存在的命令**：`gp_diagnose` 在 update state 缺席/读不开时教人跑
+  `node updater/cli.js check`/`… enable`，而发布物的 `files` 只有 `dist` 与 `schemas`——
+  那条相对路径在装好的包里不存在，读者的 cwd 也不是这个仓库。同一文件早为 `kind === "read"`
+  建了解析绝对路径的通路，另外几态没有。现在要么给绝对命令，要么明说点不出。
+- **壳否认自己发布的参数**：`gp_restore` 被告知"这个工具没有能缩小回应的参数"，而它的 schema
+  里就写着 `steps`（`maxItems: 64`，daemon 每步重放一次 act，壳自己的预算也是按步算的）；
+  `test/tools.test.mjs` 还把那句假话断言成绿。加了 `steps` 这一档旋钮并把那条断言翻过来。
+- **网关替没量过的原因作证**：HTTP 聚合证据路由在 `GP_E_NO_EVIDENCE` 上写"引擎可能重启过"，
+  而 MCP 那一半早为同一句话重写过，网关里也没有任何重启探测。
+- **无 remedy 兜底命令重发**：`engineError()` 对任何方法都拼"看 daemon 日志并重试"，包括
+  act/restore/attach，与同文件的 `REPLAY_UNSAFE_REASONS` 相反。现在按方法分岔。
+- **一条错误两条相反的规矩**：注册表 message 教人跑 `python3 -m json.tool`，同一错误的 remedy
+  坚持"读取器都要绝对路径，因为它们不依赖可能被改掉的 PATH"。stock macOS 上没有 python3。
+- **bundleId 三处两个答案**：attach 512（与 daemon 同口径）、`gp_project_set` 256、daemon
+  自己的注册表不设限 ⇒ 300 字符的 bundleId 能挂接、永远注册不上。壳侧统一到 512 并成对钉住。
+- **数值码与内嵌码互相反对**：超大入站帧答 `-32600 (Invalid Request)` 而 message 以
+  `GP_E_PAYLOAD_TOO_LARGE:` 开头。不新造协议：message 先说它自己那一类，再把 GP_E_ 标成
+  "这一面与 daemon 对同一帧的标签"。
+- **协议层拒绝没有 remedy**：`Unknown tool: …` 这类只回一句散文。现在都带出路，且点名的工具
+  来自这一面**实际发布**的列表（测试另打一个只发布一个工具的 server 来钉住这点）。
+- **交付源码里替已修好的分叉作伪证**：注释仍说"跨语言那条还没收口"，而 Swift 那边早已改成
+  子树匹配。注释随实状改写，并把"匹配规则等价"（不再只是清单等价）做成用例。
+
+### Fixed — 安装器、更新器、脚本与发布链
+
+- `release.yml` 的建 Release 步只打印 draft 不判它——留在草稿态时 `/releases/latest` 继续
+  服务上一个 tag，而 `check.js` 把"已发布的比本机旧"判成 up-to-date + 0，绿着让每台机器停止更新。
+- 三道闸（`assert-ci-green`/`check-doc-links`/`make-release-archive`）的自执行守卫不 realpath，
+  经符号链接调用时安静退 0、零输出（本机实测：直接跑退 1/退 2，经链接跑退 0 无输出）。
+- `launchd.js registerAgent` 在 bootout 失败 + bootstrap 回"already loaded"时仍报 verified
+  ——读回来只比 argv，而 argv 按设计稳定，改时刻/环境的那一次永远"匹配"。
+- `policy.js` 把"旗标在但值解不出来"当成"没有旗标"，于是允许换版；major 的 needs-consent
+  只给面板按钮、不给 `--consent major`；`--state-dir ""` 静默落到活的 `~/.glasspane`；
+  `fsutil` 的包含判定全是词法的，符号链接的状态根会让 staging/删除落到链接指向处；
+  `idle.js` 只认一种 state-root 拼法（而 `renderAgentPlist` 的默认是另一种），且
+  `policy.js` 的注释把 daemon 的选项写成了 `--state-root`（实测 `main.swift:174` 是 `--state-dir`）。
+- `install.sh` 的 `assert_repo_url` 接受没有 `://` 的裸词 `https`/`ssh`/`file`，而
+  `installer/cli.js` 拒它们——放过的那半是 `curl | sh`，失败还被归因成网络问题。
+
+### Fixed — 桥、探针 SDK 与对外文档
+
+- `--out` 从前用 `open(path,"w")` 写寄存器与栈帧局部变量：模式随 umask、已存在文件静默覆盖、
+  符号链接变成任意文件写。改 `O_CREAT|O_EXCL|O_NOFOLLOW` + `fchmod 0600`，拒绝时不写出去。
+- 探针 SDK 的 Z2/Z3 上界按字符/节点数计，4000 节点 × 1024 个中日韩字符 ≈ 16 MB，超 daemon
+  的 4 MiB 帧上限 ⇒ 整个通道的帧被丢，而注释承诺的恰是"罩在一帧里"。改成按编码字节截、
+  落在字素簇边界、`truncatedValues` 具名计数，并在写帧前量序列化字节、超预算就计入
+  已有的 `droppedWrites`（读者看见具名的丢弃计数而不是沉默）。
+- 文档：证据包不是"前后 accessibility 树"而是树摘要 + 结构差异；`--setup` 等价于以用户身份
+  执行代码；§2.4 那条"今天仍然存在"的世界可读文件早已关上；状态值上限随代码改为编码字节；
+  CI job 表里不存在的 `kernel` lane 与漏掉的 `publish-gate-selftest`；工作空间清单一行；
+  `gp_export_evidence` 不落盘；`crashcanary.swift` 头注释替一份来自已删夹具的样例作伪证。
+
+### Fixed — 各层交接处露出来的四口
+
+- **一个没有读者的计数**：探针 SDK 这轮新增的 `truncatedValues` 已在 `hello` 里发布、
+  `SECURITY.md` 也已承诺读者能区分"值被截短"与"帧没送达"，daemon 侧却一个字节都没读它
+  （`grep -rn truncatedValues engine/Sources/` 当时为空）。补上解码、重连合并、
+  `statusJSON` 三段，并与其余计数器共用同一条精确-range 读法：越界是"未上报"，不是 0。
+- **socket 目录的叶子符号链接**：`chmod`/`stat`/`bind` 都跟着叶子链接走，于是量到并通过的是
+  被指向的那个目录（owner、0700 都对），而父链检查拿到的是传进去的那串字符串路径——目标
+  真实父链能不能被别人写，从来没被问过。档案侧早就为同一个理由拒这种形状
+  （`EvidenceStore.nameIsUsableArchiveDirectory`："chmod 会跟着符号链接走"）。现在动手之前
+  就拒绝并给出 `--state-dir` 的下一步；**中间分量**的符号链接照旧放过（`/var` →
+  `/private/var` 是 macOS 自己的布局，拒它等于拒掉每一次真安装）。
+- **CLI 自己的话术落后于探针**：权限探针改成"问过而未答不是被拒"之后，
+  `--guide-screen-permission` 还在打印 "Permission still denied after the request."，
+  `--check-input-permission` 与 `--check-accessibility` 的 `--help` 取值表还列着这两条命令
+  现在打印不出来的 `denied`、漏着现在真会打印的 `unverifiable`。新增
+  `DaemonPermissionVocabularyTests`：可达集合由探针自己算（注入 preflight/request），
+  文案从被交付的 `main.swift` 按帮助段落切出来读，两边不等即红。
+- **一次性 launchd 任务留在磁盘上的两件东西，模式都不由面板决定**：脚本 chmod 0755（它由
+  同一个 uid 起，owner 的 x 就够），而 `--permissions` 的读数由那一趟 shell 重定向创建，
+  模式取决于那个上下文的 umask；目录闸拒的是"可写"，一个 0755 的目录照样通过（`$TMPDIR`
+  被改指时就是这样），合起来就是一份别人读得到的权限读数。现在脚本显式 0700、输出在提交
+  之前按 0600 预建（重定向只截断不改已存在文件的模式），并用真 `/bin/sh` + 真 umask 把
+  这个机制量出来（含"不预置时必须是 0644"那条对照）。
+
+### 复核后不成立的发现（记下来免得下一轮重新踩）
+
+- 泳道报称深度截断的几何走查仍报 `complete: true`，能替没访问过的子树发 pass + ratio 1.00，
+  判为 P0。回代码：`auditUI` 已把 `complete`/`stopReason` 做成一等字段，`maxDepth` 是调用方
+  在 schema 里自己声明的范围（1…10），`complete` 的语义是"承诺的那次走查走完了"，`.pass`
+  也已同时受 `complete` 与 `overlapScanTruncated` 约束——把深度截断改判成"未完成"会推翻
+  调用方选定的**范围**。残留的真实缺口是"没交出用了哪一层深度"，已单独修（见上）。
+- 泳道报称 `PixelDiff.bounds.y` 是底原点行下标而契约写"row 0 = 顶"。用 ImageIO→Pillow 独立
+  复测同一份夹具（PNG 扫描行 `y=0` = `(255,0,0,255)`、`y=h-1` = `(0,0,255,255)`），
+  `CGContext.draw(image, in: CGRect(0,0,w,h))` 把 provider 第 0 行留在缓冲区第 0 行，
+  翻转与底左下布局相互抵消：`bounds.y` 本来就是顶原点。照那条结论去翻转会把已发布的数字改错。
+  改为补一条用例，从 CoreGraphics 之外钉住这个前提。
+
 
 ### Changed — `mcp-shell` 的内核出处从"仓内镜像"换成 npm 上那一份（Step 0b 第一半）
 

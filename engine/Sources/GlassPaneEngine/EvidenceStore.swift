@@ -342,6 +342,32 @@ public final class EvidenceStore {
             log.error("evidence entry \(filePath) exists but is not an archive entry this store wrote — refusing to write, and leaving it exactly as found")
             return false
         }
+        // Defect 7: `replaceItemAt` publishes *onto* the existing entry, and the
+        // post-publish isolation verdict only runs afterwards — so a refusal there
+        // used to `removeAfterRefusal(filePath)` and leave **no entry where one
+        // existed**. Rewriting one's own pack is the normal route
+        // (`EngineCore.diagnose` → `replace` → `persist`), so the normal route
+        // could destroy the audit trail it was refusing to modify.
+        //
+        // The rule R5-04 already states is "do not publish what you cannot prove
+        // isolated"; applied to a replacement, that proof has to be had *before*
+        // the overwrite, on the name that is about to be overwritten (measured:
+        // `replaceItemAt` hands the destination's attributes to the item that lands
+        // there, so this judgment is the one that decides the published mode). The
+        // bytes of the existing entry are kept as the second line of defence for
+        // the branch where the verdict contradicts itself mid-write.
+        let priorBytes: Data? = Self.isDeletableEntry(destination)
+            ? try? Data(contentsOf: destination)
+            : nil
+        if priorBytes != nil, let defect = isolationCheck(filePath) {
+            log.error("""
+            evidence entry \(filePath) cannot be isolated, so nothing may be published onto it: \
+            \(defect) — the existing entry was left exactly as it was, and this write is refused \
+            rather than replaced-then-undone (a refusal that removed the published name destroyed \
+            the audit trail instead of protecting it)
+            """)
+            return false
+        }
         // The temp name is unique per write, for the same reason `ProjectRegistry.save`
         // moved off `<file>.tmp`: this archive is written by more than one process
         // (the daemon, and a one-shot CLI run against the same `--state-dir`), and a
@@ -381,7 +407,16 @@ public final class EvidenceStore {
             // failure spoken-and-not-acted shape as the fallback's.
             if let defect = isolationCheck(filePath) {
                 log.error(isolationRefusalReport(filePath, defect: defect, route: "rename"))
-                removeAfterRefusal(filePath)
+                // Defect 7's second line: this branch can only be reached when the
+                // pre-flight above passed and the published name then contradicted
+                // it (somebody changed the attributes mid-write). Removing the name
+                // would still delete a pack that was in the archive a moment ago, so
+                // the bytes that were there come back first.
+                if let priorBytes {
+                    restorePriorBytes(priorBytes, to: filePath, operationId: pack.operationId)
+                } else {
+                    removeAfterRefusal(filePath)
+                }
                 return false
             }
             // 改名的持久化点在**目录项**上：pack 的字节已经 fsync 过，而"这个名字
@@ -417,7 +452,11 @@ public final class EvidenceStore {
             }
             if let defect = isolationCheck(filePath) {
                 log.error(isolationRefusalReport(filePath, defect: defect, route: "fallback"))
-                removeAfterRefusal(filePath)
+                if let priorBytes {
+                    restorePriorBytes(priorBytes, to: filePath, operationId: pack.operationId)
+                } else {
+                    removeAfterRefusal(filePath)
+                }
                 return false
             }
             // 兜底这条路同样不能把"没落盘"写成"存好了"：`Data.write(.atomic)` 之后
@@ -499,6 +538,34 @@ public final class EvidenceStore {
             try FileManager.default.removeItem(atPath: path)
         } catch {
             log.error("refused evidence file \(path) could not be removed after the isolation failure (\(error)) — it is still on disk and it is NOT owner-only; delete that one file by name")
+        }
+    }
+
+    /// Put back the bytes a refused replacement had overwritten (defect 7).
+    ///
+    /// Which of the two failure shapes this is matters to the operator: the write
+    /// is still reported as failed — nothing here claims persistence — but an
+    /// archive entry that existed before the call must exist after it. The undo
+    /// re-runs the isolation check on the restored name and reports the exposure
+    /// itself when that fails; silently leaving a world-readable *new* pack, or
+    /// silently deleting the old one, are both answers this type has already
+    /// refused once in review.
+    private func restorePriorBytes(_ prior: Data, to path: String, operationId: String) {
+        do {
+            try prior.write(to: URL(fileURLWithPath: path), options: .atomic)
+        } catch {
+            log.error("evidence pack \(operationId) could not be restored to \(path) after the isolation refusal (\(error)) — the refused bytes are what is on disk now; the archive entry was NOT recoverable by this write and the operator must check that name by hand")
+            return
+        }
+        if let defect = isolationCheck(path) {
+            log.error("restored evidence pack \(path) is still not owner-only: \(defect) — the pre-existing entry is back on disk and readable by whoever could read it before; this write is reported as failed")
+            return
+        }
+        do {
+            try DurableFileWrite.syncPublished(atPath: path, operations: durableWriteOperations)
+            log.info("evidence pack \(operationId): refused replacement rolled back to the bytes that were archived before it")
+        } catch {
+            log.error("restored evidence pack \(path) could not be re-synced (\(error)) — the old bytes are on disk; the durability of that restore is not proven, so it is said rather than claimed")
         }
     }
 

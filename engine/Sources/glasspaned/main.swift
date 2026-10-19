@@ -338,14 +338,21 @@ private func printUsage() {
         --verbose, -v         Log frames and state transitions to stderr
         --grant-accessibility  Onboarding: prompt for accessibility permission
         --check-screen-permission   Print screen recording permission state
-                                 (granted | denied | notDetermined) and exit
+                                 (granted | notDetermined) and exit — the API behind
+                                 this seat answers only "is it on", so a seat that is
+                                 switched off and one that was never asked print the
+                                 same word; nothing here may claim the system decided
         --guide-screen-permission   Prompt for screen recording permission
                                  (no-op when already granted) and exit
         --check-input-permission    Print input monitoring permission state
-                                 (granted | denied | notDetermined) and exit
+                                 (granted | notDetermined | unverifiable) and exit —
+                                 unverifiable means "a request went out this run and
+                                 the system has not answered", which is not a denial
         --check-accessibility      Print this process's accessibility seat
-                                 (granted | notDetermined — AX exposes no
-                                 denied visibility) and exit
+                                 (granted | unverifiable — AX answers one boolean, so a
+                                 seat never asked about and a seat switched off cannot be
+                                 told apart, and the honest word for that pair is the
+                                 second one here) and exit
         --version                  Print `glasspaned <version>` and exit 0 — the same literal the
                                  `hello` frame reports, which is the reading
                                  `updater/lib/version.js` pairs with the bundle plist. Reads no state,
@@ -364,6 +371,13 @@ private func printUsage() {
                                  The Settings panel invokes this through
                                  `launchctl submit` so the grant lands on the
                                  daemon's own identity instead of its launcher's.
+                                 The exit code states what the seat **reads**, not
+                                 that the ask ran: 0 only for `granted`, nonzero
+                                 (1) for every other reading — `denied`,
+                                 `notDetermined` and `unverifiable` included, so an
+                                 asked-but-unanswered seat is 1 too, never a grant.
+                                 The JSON is printed either way: the report is the
+                                 answer, the exit code is the verdict on it.
         --check-developer-tools     Probe debugger capability (launch/attach
                                  three-state JSON, P6 §7); exit 0 = granted.
                                  The only human step is the System Settings
@@ -439,16 +453,24 @@ private func printUsage() {
     reads them out of this file's own `exit(...)`/`.errorCode(..., N)` sites and
     refuses to let one go undocumented — a caller that has to branch on the
     answer cannot read a usage block that names four of the six):
-        0   success, including a read-only answer that reports nothing found
+        0   success, including a read-only answer that reports nothing found —
+                and never for a run that printed nothing: a report that cannot be
+                encoded answers 1 with an `encodeFailed` refusal on stderr, because
+                "zero output plus exit code 0" is the one shape this CLI must never
+                return (see `--list-projects`, `--recipe-validate`, `--approval-audit`)
         1   the operation was refused or only partly succeeded (a registry that
                 cannot be read back, a project path the store would refuse to
-                archive into, partial removal in --project-prune)
+                archive into, partial removal in --project-prune, a
+                --request-permission seat that does not read granted, a report
+                that could not be encoded for output)
         2   a value-taking flag was given no usable value (--project-remove,
                 --older-than) or --recipe-validate named a file that cannot be
                 read. NOT a usage error in the 64 sense: the flag was understood,
                 its argument was not
         3   --project-remove named an id that is not registered
         64  usage error, printed with the whole usage block: an unknown argument;
+                more than one subcommand in one invocation (this binary answers
+                exactly one per invocation, and such a run executes none of them);
                 a missing or rejected value for --state-dir, --socket-path (either
                 spelling), --probe-socket-path; a value-taking flag given nothing —
                 --active-project, --project, --recipe-validate; or a missing or
@@ -511,10 +533,36 @@ private func permissionSnapshotJSON(_ snapshot: DaemonPermissionSnapshot) -> [St
 /// 插值拼 JSON / 直接原文打印，把 agent 自撰的 `displayName` 与路径原样送上终端
 /// （OSC-52 复制序列、ANSI 光标移动都可执行）。转义口径与 `--list-projects` 的
 /// JSONEncoder 一致：<0x20 控制字符、引号、反斜杠一律转义，斜杠不转义。
+///
+/// 这里同时是**全部**机器可读出口唯一的收口点，所以"编不出去"这一支也归它管。
+/// 从前它写的是 `guard let line = AgentText.jsonLine(object) else { return }`：
+/// 编不出去的那一次一个字都不写，控制权交回调用方，调用方随后 `exit(0)`——读到的
+/// 就是"零输出 + 退出码 0"，那正是本文件 `--recipe-validate` 一处注释与 `--help` 的
+/// EXIT CODES 一起禁止的形状。那份诚实此前只补在两个调用点上（`--list-projects`、
+/// `--recipe-validate`），其余 ~27 个调用点各自都要记得拒绝，而"记得"就是它的反面：
+/// 漏一个就是一条能报成功的空答案。现在拒绝写在收口点自己身上，任何现在或将来的
+/// 调用点都不可能用零输出换到退出码 0。
+/// 两处手写站点（上面点名的那两条）形状与用词都不动：它们的编码器是 `JSONEncoder`，
+/// 与这里那台 `JSONSerialization` 不是同一台，外层已经先一步拒绝，走不到这一支。
 private func writeJSON(_ object: [String: Any], to handle: FileHandle = .standardOutput) {
-    guard let line = AgentText.jsonLine(object) else { return }
+    guard let line = AgentText.jsonLine(object) else {
+        let refusal = AgentText.jsonLine([
+            "command": cliCommandLabel,
+            "encodeFailed": true,
+            "error": "the report this process built could not be encoded for output — nothing was published",
+            "next": "re-run the same call; if it repeats, this is a daemon-side output defect, not a verdict about the thing asked for"
+        ]) ?? "glasspaned: the report could not be encoded and nothing was published (command: \(cliCommandLabel))\n"
+        FileHandle.standardError.write(Data(refusal.utf8))
+        exit(1)
+    }
     handle.write(Data(line.utf8))
 }
+
+/// 现在这一次调用报出去时该说自己叫什么：收口点的拒绝用它命名"哪条命令没了输出"。
+/// 它取的是分发前数出来的那一条命令名（多于一条时那一次已经先被 64 拒掉了），
+/// 所以 27 个调用点一个都不必自己设置它。
+private var cliCommandLabel = "glasspaned"
+
 
 // MARK: - Onboarding (R36: permission guidance)
 
@@ -593,7 +641,7 @@ private func runGuideScreenPermission(_ probe: ScreenCapturePermissionProbe) {
         if outcome == .granted {
             print("Screen recording permission granted.")
         } else {
-            print("Permission still denied after the request. Enable the entry for this app under System Settings > Privacy & Security > Screen Recording, then re-run: glasspaned --check-screen-permission")
+            print("Screen recording is still not granted after the request — this run measured no decision, so it is not reported as a denial. Enable the entry for this app under System Settings > Privacy & Security > Screen Recording, then re-run: glasspaned --check-screen-permission")
         }
     case .denied:
         print("Screen recording permission is denied. Open System Settings > Privacy & Security > Screen Recording and enable the entry for this app, then re-run: glasspaned --check-screen-permission")
@@ -706,6 +754,51 @@ case .parsed(let parsed):
     options = parsed
 }
 
+// MARK: - One invocation, one command
+
+/// 这一次调用请求了哪些**命令**。分发一直是一条 first-match 的 `if` 链，所以从前
+/// 要两条时它跑第一条、对其余一个字不说地跳过、还退 0——本机在 HEAD 上实测过
+/// `glasspaned --state-dir <tmp> --version --evidence-stats`：只有版本号，退出码 0。
+/// 读 rc 的人（脚本、CI、agent）拿到的是"这一条成了"，而它连第二条都没答。
+/// 这里把名单数出来，多于一条时在**任何一条跑出去之前**按用法错误（64）拒绝，
+/// 并把两条都点名；`--help` 的 64 段同步说这条。
+private func requestedCommands(_ options: Options) -> [String] {
+    var names: [String] = []
+    if options.printVersion { names.append("--version") }
+    if options.grantAccessibility { names.append("--grant-accessibility") }
+    if options.checkScreenPermission { names.append("--check-screen-permission") }
+    if options.guideScreenPermission { names.append("--guide-screen-permission") }
+    if options.checkInputPermission { names.append("--check-input-permission") }
+    if options.checkAccessibility { names.append("--check-accessibility") }
+    if options.permissionsJSON { names.append("--permissions") }
+    if options.requestPermission != nil { names.append("--request-permission") }
+    if options.checkDeveloperTools { names.append("--check-developer-tools") }
+    if options.listProjects { names.append("--list-projects") }
+    if options.activeProjectId != nil { names.append("--active-project") }
+    if options.projectPrune { names.append("--project-prune") }
+    if options.projectRemoveId != nil { names.append("--project-remove") }
+    if options.recipeValidate != nil { names.append("--recipe-validate") }
+    if options.approvalAudit { names.append("--approval-audit") }
+    if options.approvalVerify { names.append("--approval-verify") }
+    if options.pruneEvidence { names.append("--prune-evidence") }
+    if options.evidenceStats { names.append("--evidence-stats") }
+    return names
+}
+
+let requestedCommandNames = requestedCommands(options)
+if requestedCommandNames.count > 1 {
+    FileHandle.standardError.write(Data((
+        "glasspaned: more than one subcommand was requested (\(requestedCommandNames.joined(separator: ", "))) "
+        + "— this binary answers exactly one per invocation, so it ran none of them. Name one, "
+        + "or run them one at a time."
+    ).utf8 + Data("\n".utf8)))
+    printUsage()
+    exit(64)
+}
+// 收口点的那份拒绝报文用它命名是哪条命令没了输出（一条命令时就是那一条；
+// 起服务时没有命令名，保持 `glasspaned`）。
+cliCommandLabel = requestedCommandNames.first ?? "glasspaned"
+
 if options.printVersion {
     // 一行、一个出处、退出码 0：读的就是 `hello` 里那个 `version`。这一句不碰状态根，
     // 所以它既不会创建目录，也不会触发那次收紧扫描——与 `--permissions` 同一个道理。
@@ -740,7 +833,9 @@ if options.checkDeveloperTools {
 }
 if options.checkInputPermission {
     // P2 §17.2 真机冒烟前置：C33 输入监控 TCC 状态对外如实输出
-    // （granted | denied | notDetermined），供冒烟脚本判断可否观察输入流。
+    // （granted | notDetermined | unverifiable——问过而系统未答不是"被拒"）。取值表由
+    // `DaemonPermissionVocabularyTests` 与 `--help` 钉在一起：那张表是 agent 与冒烟脚本
+    // 据以分叉的契约，写一个探针打印不出来的词，比不写更坏。
     let probe = InputMonitoringPermissionProbe()
     print(probe.state.rawValue)
     exit(0)
@@ -766,7 +861,12 @@ if let kind = options.requestPermission {
     payload["requested"] = kind.cliValue
     payload["requestedStatus"] = status.rawValue
     writeJSON(payload)
-    exit(0)
+    // 退出码说的是**这个席位读成了什么**，不是"这条命令跑完了"：脚本按 rc 分叉，
+    // 一份 denied/notDetermined/unverifiable 的报告配一个 0，读起来就是"批下来了"。
+    // 同文件上面的 `--check-developer-tools` 早就按 `granted` 分叉，两条权限命令不能
+    // 一个按实测退出、一个按"跑完了"退出。「问了但没答」也不是批下来——
+    // notDetermined/unverifiable 同样走非 0 这一支，这里没有可以给它的 0。
+    exit(status == .granted ? 0 : 1)
 }
 
 // MARK: - P1 project management commands (spec v1.4 §3)
@@ -1158,8 +1258,24 @@ if options.approvalAudit || options.approvalVerify {
         if let data = gate.auditJSON() {
             FileHandle.standardOutput.write(data)
             FileHandle.standardOutput.write(Data("\n".utf8))
+            exit(0)
         }
-        exit(0)
+        // 台账读得开，`auditJSON()` 却交不回字节——这是"没把答案交出去"，不是"没有记录"。
+        // 从前这个 `if let` 没有 else：编不出去就一个字不写，随后 `exit(0)`，与 `writeJSON`
+        // 收口点刚被修掉的是同一个形状。它归不到收口点那里：`auditJSON()` 用的是
+        // `JSONEncoder`，交回来的是**已经编码好的 Data**，压根没经过这条出口，
+        // 所以这份拒绝必须在这一处自己说出口（用词与 `--list-projects` 的
+        // `encodeFailed` 报文一致：不给 `records`，不给一条也没 audit 到的假象）。
+        let ledger = gate.ledgerPath ?? "（this run resolved no ledger path）"
+        writeJSON([
+            "command": "--approval-audit", "encodeFailed": true,
+            "recordsRead": gate.count,
+            "ledgerPath": ledger,
+            "stateRoot": stateRoot.path,
+            "error": "the ledger this process read (\(gate.count) records) could not be encoded for output — nothing was audited",
+            "next": "the file itself parses (`python3 -m json.tool \(ledger)`); this is a daemon-side output defect, and no audit record was published"
+        ], to: .standardError)
+        exit(1)
     }
 }
 

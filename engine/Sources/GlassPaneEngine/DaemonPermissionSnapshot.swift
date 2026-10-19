@@ -181,13 +181,17 @@ public final class PermissionProbeSet {
     }
 
     /// 当前快照（本进程身份下的四类席位）。
+    ///
+    /// 屏幕录制走 `panelStatus` 而不是 `state.panelStatus`：`state` 的三态里"从未请求"
+    /// 与"已请求、系统尚未回答"同为 `notDetermined`，而这一面是面板唯一读的席位值，
+    /// 它必须能把后者说成「未验证」而不是「已拒绝」或「未请求」。
     public func snapshot() -> DaemonPermissionSnapshot {
         DaemonPermissionSnapshot(
             subject: subjectProvider(),
             statuses: [
                 .accessibility: accessibility.displayStatus(),
                 .inputMonitoring: inputMonitoring.state,
-                .screenRecording: screenRecording.state.panelStatus,
+                .screenRecording: screenRecording.panelStatus,
                 .developerTools: developerTools.status,
             ]
         )
@@ -195,8 +199,11 @@ public final class PermissionProbeSet {
 
     /// 以**本进程身份**发起一型权限申请：只唤起系统申请面（弹窗 / TCC 登记），
     /// 不跳系统面板、不轮询等待——面板由调用方（设置 GUI）打开，申请结果由
-    /// 调用方重新 `snapshot()` 观测。返回值是申请发起后的即时观测状态，
-    /// `denied` / `notDetermined` 不代表失败：用户可能稍后才在系统面板里勾选。
+    /// 调用方重新 `snapshot()` 观测。返回值是申请发起后的即时观测状态。
+    ///
+    /// `unverifiable` / `notDetermined` 都不代表失败：TCC 还没有回答，用户可能稍后才在
+    /// 系统面板里勾选。从前这里回答 `denied`（预检 false 就算拒绝），而 `--permissions`
+    /// 与面板把 `denied` 渲染成「已拒绝」——一个决定，在系统还没做决定的时候说出口。
     @discardableResult
     public func request(_ kind: PermissionKind) -> PermissionStatus {
         switch kind {
@@ -213,7 +220,7 @@ public final class PermissionProbeSet {
             return inputMonitoring.state
         case .screenRecording:
             screenRecording.requestOnly()
-            return screenRecording.state.panelStatus
+            return screenRecording.panelStatus
         case .developerTools:
             // 无系统总开关、无公开查询 API：不伪造申请动作，恒为 unverifiable。
             return developerTools.status

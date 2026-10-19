@@ -214,6 +214,16 @@ struct SettingsPanelView: View {
                     }
                 }
                 PathRowView(label: "Socket", path: model.daemon.socketPath, identifierKey: "socket")
+                // 那一行印的是一个路径，而"这一个路径是谁点名的"才是操作者判断
+                // 「我连的是不是我要看的那一个实例」需要的信息：daemon 用自己的
+                // `--state-dir` 起时，屏幕上"后台服务"与"状态根"必须说得出出处，
+                // 否则两行并排而看不出它们不是同一个实例（与项目页那行同一条口径）。
+                Text(model.daemonSocketOriginCaption)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("gp-daemon-socket-origin")
                 if let subject = model.daemon.subject {
                     PathRowView(
                         label: "程序",
@@ -223,17 +233,10 @@ struct SettingsPanelView: View {
                         identifierKey: "binary"
                     )
                 }
-                if let error = model.lastRefreshError {
-                    HStack(spacing: 5) {
-                        Image(systemName: "exclamationmark.triangle")
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                        Text(error)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .textSelection(.enabled)
-                    }
-                }
+                // 这里原来还有一行红的"刷新失败"：它读的是 `lastRefreshError`，而那个
+                // 状态只被赋过 nil，所以这一行永远画不出来。上面那一枚点与它下面那句
+                // 「应门不回话」已经把"这一次没测到"说完了，两处说法留一个（见
+                // `QoderPanel20261019ControlHonestyTests.testTheErrorRowThatCouldNeverLightIsGone`）。
             }
         }
     }

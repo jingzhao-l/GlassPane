@@ -24,11 +24,19 @@ public final class EngineCore {
     /// In-memory snapshot retention cap (P1 spec v1.1 §1.5).
     public static let snapshotHistoryLimit = 8
 
+    /// Label `diagnose` writes into `circuitBreaker.reason` when an archived
+    /// pack's `handlerProbe.lateCount` can no longer be measured (defect 3,
+    /// 2026-10-19 review). Matched by `Qoder20261019ProbeHonestyTests` and by
+    /// readers of the archive; same "label: detail" shape as the
+    /// `input-contamination-*` and `pixel-capture-*` labels, which Classifier
+    /// also pattern-matches rather than guesses.
+    public static let lateArrivalsUnmeasuredLabel = "late-arrivals-unmeasured"
+
     /// The one release-version literal in this target. `scripts/version-sites.mjs`
     /// keys its daemon site on exactly this line's shape, `hello` reads it, and
     /// `glasspaned --version` reads it — so the version a client sees on the socket
     /// and the version a one-shot process prints cannot drift apart.
-    public static let buildVersion = "1.16.4"
+    public static let buildVersion = "1.17.0"
 
     /// 兼容位：**装了 1.10.0 之前那份 updater 的机器**读暂存树时，只认「public let version
     /// 等于一个带引号的字面量」这一种形状（1.6.2 的 `updater/lib/selfcheck.js` 里那条正则
@@ -44,7 +52,7 @@ public final class EngineCore {
     /// 两处字面量会漂——所以三件事同时成立：`scripts/set-version.mjs` 是唯一入口（两个位点
     /// 一起写）、`scripts/check-version.mjs` 两个位点都核、`DaemonVersionFlagTests` 与
     /// `updater/test/legacy-selfcheck-compat.test.mjs` 断言这两个常量同号。
-    public let version = "1.16.4"
+    public let version = "1.17.0"
     public let protocolVersion = "0"
     public private(set) var attachedApp: AttachedApp?
     /// Currently active project (P1 spec v1.4 §1.3). Set via attach with projectId.
@@ -55,6 +63,24 @@ public final class EngineCore {
     private let clock: () -> Date
     private let settle: () -> Void
     private var history: [EvidencePack] = []
+    /// Which attachment each pack this process archived belonged to (defect 6,
+    /// 2026-10-19 review). Bounded FIFO for the same reason the memory ring is
+    /// capped: a long-running daemon may not grow state without limit.
+    ///
+    /// The frozen evidence schema (`additionalProperties: false`) has no field
+    /// naming the app a pack was written against, and `attach` clears only the
+    /// in-memory history, so the on-disk archive is the one surface with no app
+    /// scope at all. Without this ledger `resolvedPack(operationId: nil)` handed
+    /// `assert_element` the newest-mtime pack of *whatever app wrote it* — another
+    /// app's "strong" attribution, another app's `signals.act`, another app's
+    /// crash and AX measurements — and filed it as this attachment's.
+    private var archivedUnderApp: [(operationId: String, app: AttachedApp)] = []
+
+    /// Why the most recent `operationId`-less resolution refused the archive, or
+    /// nil when it did not. A refusal here is not "nothing was found": an
+    /// operation *was* found and is not this attachment's to reuse, and the
+    /// caller has to be able to tell those two sentences apart.
+    private var archiveFallbackRefusal: String?
     /// Recent app-state snapshots (P1 spec v1.1 §1.5); FIFO-evicted.
     private var snapshots: [AppStateSnapshot] = []
     /// Project registry (P1 spec v1.4 §1). `nil` means **this engine instance
@@ -135,6 +161,13 @@ public final class EngineCore {
     /// reader can always tell "nobody was there" from "somebody watched and saw
     /// nothing".
     private let declaresUnattendedWindow: Bool
+    /// C33 这张通道**订阅了哪些事件种类**（见 `act` 里 `contaminationBasis` 那段）。
+    ///
+    /// 默认取自 `CGEventInputMonitor` 的名单——daemon 的操作权监测源就是它，而那份名单
+    /// 同时生成 tap 的蒙版，所以"句子里说的种类"与"系统会投递的种类"是同一份数据。
+    /// 用别的输入源嵌入本引擎的调用方要自己申报：一个不申报种类的源得到的是一句
+    /// "没有量到种类"，而不是替别人的蒙版作保。
+    private let inputEventKindsProvider: () -> [String]
     /// A-01: per-snapshot record of a checkpoint export that **ran and failed**,
     /// keyed by snapshotId, so `restore(mode: rollback_full)` can distinguish
     /// "this snapshot has no probe payload because nothing was exported" from
@@ -181,7 +214,8 @@ public final class EngineCore {
         probeInbox: ProbeInbox? = nil,
         permissionsReport: (() -> DaemonPermissionSnapshot?)? = nil,
         inputMonitorAbsenceReason: String? = nil,
-        declaresUnattendedWindow: Bool = false
+        declaresUnattendedWindow: Bool = false,
+        inputEventKindsProvider: (() -> [String])? = nil
     ) {
         self.channel = channel
         self.clock = clock
@@ -197,6 +231,10 @@ public final class EngineCore {
         self.permissionsReport = permissionsReport
         self.inputMonitorAbsenceReason = inputMonitorAbsenceReason
         self.declaresUnattendedWindow = declaresUnattendedWindow
+        // 默认就是这张 tap 的名单：daemon 的操作权监测源是 `CGEventInputMonitor`，而它的
+        // 蒙版由同一份表生成。没有守卫的引擎不会走到那句話（见 `contaminationBasis` 的
+        // 未监测分支），所以这里不需要为它另造一份说法。
+        self.inputEventKindsProvider = inputEventKindsProvider ?? { CGEventInputMonitor.monitoredEventKinds }
     }
 
     // MARK: - ISO-8601 timestamp
@@ -1205,6 +1243,14 @@ public final class EngineCore {
             ? false
             : (contaminationVerdict?.contaminated ?? (monitorFault != nil))
         let contaminationBasis: String
+        // C33 订阅了**哪些**事件种类。`contaminationBasis` 从前只说"整段操作窗口都被
+        // 看着"，那是关于整条输入流的主张，而 tap 的蒙版只覆盖它订阅的那几种事件——
+        // 只在 act 期间滚动滚轮、抬起拖拽或按下修饰键的人因此一个种类都不会投递，
+        // "零事件"就被发布成"这段有人看着，且没人在场"。
+        // 蒙版由同一份名单生成（`CGEventInputMonitor.monitoredEventMask`），所以句子与
+        // 投递之间没有可以各自漂移的两份文本；用别的源嵌入本引擎的调用方必须自己申报
+        // （`inputEventKindsProvider`），否则句子就会替一个没人订阅的种类作保。
+        let watchedEventKinds = inputEventKindsProvider()
         if declaredUnattended {
             // No new response key: `contaminationMonitored: false` together with
             // `contaminated: false` is already an unambiguous pair — it can only
@@ -1217,7 +1263,9 @@ public final class EngineCore {
             contaminationBasis = "no input monitor watched this window and the operator declared it unattended (--unattended-window): the contaminated=false verdict here is a declaration, not a measurement"
                 + (monitorFault.map { " — the monitor's own state stays on record: \($0)" } ?? "")
         } else if contaminationMonitored {
-            contaminationBasis = "the input stream was watched for the whole operation window"
+            contaminationBasis = watchedEventKinds.isEmpty
+                ? "the input stream was watched for the whole operation window, but this monitor declared no event kinds — which kinds the watch covers is not measured here, so an empty window is not evidence that nobody touched the machine"
+                : "the input stream was watched for the whole operation window, for these event kinds only: \(watchedEventKinds.joined(separator: ", ")) — a human input outside that list is not attributed by this channel"
         } else if monitorWasLost, let monitorFault {
             contaminationBasis = "the input monitor stopped reporting inside this window: \(monitorFault) — the contaminated=true verdict is the absence of a watching channel, not an observed input"
         } else if let monitorFault {
@@ -1312,6 +1360,11 @@ public final class EngineCore {
         // it was watched" from "unknown, because nothing watched it".
         result["contaminationMonitored"] = contaminationMonitored
         result["contaminationBasis"] = contaminationBasis
+        // 种类只在真的有人看着的时候发布：一份"watched kinds"配 `contaminationMonitored:
+        // false` 会被读成"这些种类被看着且没发现输入"，而那正是本批要拆掉的那句话。
+        if contaminationMonitored {
+            result["monitoredEventKinds"] = watchedEventKinds
+        }
         return result
     }
 
@@ -1410,6 +1463,12 @@ public final class EngineCore {
         // 就是看全了"。
         payload["complete"] = snapshot.complete
         payload["stopReason"] = snapshot.stopReason ?? NSNull()
+        // 走过的**范围**同样是一等字段，名字与 `snapshot` 那一面共用（`captureDepth`）：
+        // 一份 "verdict: pass, complete: true" 只说明答应走的遍历走完了，走多深是调用方
+        // 自己声明的范围。从前这里不报深度，省略 `maxDepth` 的调用方读到 pass 时没有任何
+        // 办法知道量到的是哪一层——而审计判定只对走过的部分成立。
+        // 诚实边界：这是"允许走到"的深度，不是"树有那么深"。
+        payload["captureDepth"] = maxDepth
         return payload
     }
 
@@ -1486,10 +1545,19 @@ public final class EngineCore {
             // 成为会话的第一个操作。错误码保持 GP_E_NO_OPERATION（错误码表冻结），
             // 但 remedy 必须可执行——原文案"run act or assert_element first"对这条
             // 路径是自指的（真机踩过：用它核验设置面板时循环无解）。
+            // Defect 6: the archive fallback can also refuse because the newest
+            // entry belongs to another attachment. That is a different fact — the
+            // operation exists and was *not* reusable — and it has to be said, or
+            // the agent goes looking for an act that already happened.
+            let refusal = archiveFallbackRefusal
             throw GPError(
                 code: .noOperation,
-                message: "no prior operation to reuse signal context from",
-                remedy: "run act first — assert_element reuses the most recent act's signal context (P0 spec §3.3)"
+                message: refusal.map {
+                    "no prior operation of this attachment to reuse signal context from: \($0)"
+                } ?? "no prior operation to reuse signal context from",
+                remedy: refusal == nil
+                    ? "run act first — assert_element reuses the most recent act's signal context (P0 spec §3.3)"
+                    : "run act against the attached app first — assert_element reuses the most recent act's signal context, and after re-attaching a different app that context has to come from this app (P0 spec §3.3)"
             )
         }
         let actual: StringOrBool
@@ -1540,16 +1608,41 @@ public final class EngineCore {
         guard let resolved = resolvedPack(operationId: operationId) else {
             throw GPError(
                 code: .noOperation,
-                message: operationId.map { "unknown operationId \($0)" } ?? "no operation to diagnose"
+                message: operationId.map { "unknown operationId \($0)" }
+                    ?? (archiveFallbackRefusal.map { "no operation of this attachment to diagnose: \($0)" }
+                        ?? "no operation to diagnose")
             )
         }
         var target = resolved
         // P6 §3.1: late probe arrivals (async handlers finishing after the
         // act window) only become visible by diagnose time — refresh the
         // stored signal before classifying so T8 is decidable, then persist.
-        if let inbox = probeInbox, let refreshed = inbox.refreshedHandlerProbe(for: target) {
-            target.signals.handlerProbe = refreshed
-            replace(target)
+        if let inbox = probeInbox {
+            switch inbox.refreshLateCount(for: target) {
+            case let .measured(refreshed):
+                target.signals.handlerProbe = refreshed
+                replace(target)
+            case .confirmed, .notCarried:
+                break
+            case let .unmeasurable(reason):
+                // Defect 3: the stored `lateCount` is the act-time default and no
+                // reader can verify it any more. `circuitBreaker.reason` is this
+                // pack's existing home for "a measurement channel that did not
+                // run" (the frozen evidence schema is `additionalProperties: false`,
+                // so the fact cannot travel as a new key or as a null lateCount —
+                // `lateCount` is required and `minimum: 0`), and the label keeps it
+                // matchable. Silently keeping the 0 is what made an archived pack
+                // claim "no late arrivals" for a channel nobody measured.
+                // Idempotent: `diagnose` may run on the same pack repeatedly, and a
+                // reason stacked twice reads as a defect in the stacker.
+                if target.circuitBreaker.reason?.contains(Self.lateArrivalsUnmeasuredLabel) != true {
+                    let basis = "\(Self.lateArrivalsUnmeasuredLabel): \(reason)"
+                    target.circuitBreaker.reason = target.circuitBreaker.reason.map {
+                        $0 + "; " + basis
+                    } ?? basis
+                    replace(target)
+                }
+            }
         }
         let (diagnosisClass, report) = Classifier.classify(target)
         var updated = target
@@ -1655,6 +1748,13 @@ public final class EngineCore {
         case .some(let id):
             throw GPError(code: .noEvidence, message: "unknown operationId \(id)")
         case .none:
+            // Defect 6: "no evidence recorded yet" is only true when the archive
+            // said nothing. When it said *something* and the resolver refused it
+            // for belonging to another attachment, the caller has to hear that
+            // instead — the evidence exists, it is just not this app's.
+            if let refusal = archiveFallbackRefusal {
+                throw GPError(code: .noEvidence, message: "no evidence of this attachment: \(refusal)")
+            }
             throw GPError(code: .noEvidence, message: "no evidence recorded yet")
         }
     }
@@ -2285,7 +2385,18 @@ public final class EngineCore {
     /// 磁盘档案。`diagnose` 过去只用内存环，而 `last_evidence` 有磁盘回落，于是
     /// 超 64 次或重启后对磁盘上确实存在的档案报 GP_E_NO_OPERATION —— 同一存在
     /// 性问题给出两个相反答案，还连带封死 T8 的迟到事件刷新。两处现在共用它。
+    ///
+    /// Defect 6 adds the one rule this resolver was missing: the *unnamed*
+    /// resolution ("whatever the most recent operation is") is an attribution
+    /// claim, so it may only reach an archive entry this attachment can vouch
+    /// for. An entry this process wrote under a **different** app is refused, with
+    /// `archiveFallbackRefusal` naming the refusal. An entry this process never
+    /// wrote (a restarted daemon, an evicted ledger) is unknown rather than
+    /// contradicted, and R1-06's restart semantics stay as published: the archive
+    /// is the audit trail, and inventing a refusal there would be the same
+    /// "cannot prove ⇒ refuse" move this project keeps rejecting.
     private func resolvedPack(operationId: String?) -> EvidencePack? {
+        archiveFallbackRefusal = nil
         if let operationId {
             if let found = pack(withId: operationId) {
                 return found
@@ -2298,9 +2409,39 @@ public final class EngineCore {
         // Memory is empty (fresh daemon / history evicted): fall back to the
         // most recently written archive entry so the audit trail survives.
         if let evidenceStore, let newestId = evidenceStore.lastOnDisk() {
+            if let owner = archiveOwner(of: newestId), let attached = attachedApp, owner != attached {
+                archiveFallbackRefusal = """
+                the newest archive entry of this store was written while this daemon was attached \
+                to '\(owner.appName)' (pid \(owner.pid), bundle \(owner.bundleId ?? "unspecified")), \
+                not to the attached '\(attached.appName)' (pid \(attached.pid)); reusing its signal \
+                context would file this assertion under another app's attribution, so nothing was \
+                reused and no pack was written
+                """
+                return nil
+            }
             return evidenceStore.read(operationId: newestId)
         }
         return nil
+    }
+
+    /// The attachment a stored operation was archived under, or nil when this
+    /// process never wrote it (unknown, which is not the same as "belongs to
+    /// another app").
+    private func archiveOwner(of operationId: String) -> AttachedApp? {
+        archivedUnderApp.last { $0.operationId == operationId }?.app
+    }
+
+    /// Record which app an archived pack belonged to, capped FIFO. Called on
+    /// every persistence path (`store` and `replace` both reach `persist`), so a
+    /// pack rewritten by `diagnose` keeps its original owner.
+    private func recordArchiveOwner(of pack: EvidencePack) {
+        guard let app = attachedApp else { return }
+        archivedUnderApp.removeAll { $0.operationId == pack.operationId }
+        archivedUnderApp.append((pack.operationId, app))
+        let cap = EngineCore.historyLimit * 4
+        if archivedUnderApp.count > cap {
+            archivedUnderApp.removeFirst(archivedUnderApp.count - cap)
+        }
     }
 
     @discardableResult
@@ -2333,6 +2474,7 @@ public final class EngineCore {
     /// failure) and otherwise the actual outcome, which is also recorded in
     /// `lastEvidencePersistenceFailure` (R1-07).
     private func persist(_ pack: EvidencePack) -> Bool? {
+        recordArchiveOwner(of: pack)
         guard let evidenceStore else { return nil }
         if evidenceStore.write(pack) {
             lastEvidencePersistenceFailure = nil

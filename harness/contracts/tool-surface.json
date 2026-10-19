@@ -1,6 +1,6 @@
 {
   "limit": 0.1,
-  "limitSource": "三条架构铁律（specs/GlassPane_5.8_项目综述文档.md §4.2）",
+  "limitSource": "三条架构铁律（specs/GlassPane_Design_Decisions.md）",
   "caliber": {
     "engine": "lines of every *.swift under engine/Sources",
     "mcpShell": "lines of every *.ts under mcp-shell/src",
@@ -8,13 +8,13 @@
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
   "observedAt": "2026-10-19",
-  "engineLoc": 26476,
+  "engineLoc": 27867,
   "engineFiles": 63,
   "surfaces": {
     "mcpShell": {
       "loc": 9886,
       "files": 14,
-      "ratio": 0.2165,
+      "ratio": 0.2124,
       "byFile": {
         "mcp-shell/src/tools.ts": 2812,
         "mcp-shell/src/engine-client.ts": 1616,
@@ -33,7 +33,7 @@
       }
     },
     "fork": {
-      "loc": 9294,
+      "loc": 8793,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -53,7 +53,7 @@
         {
           "file": "packages/opencode/script/installer-selftest.sh",
           "kind": "added",
-          "lines": 825
+          "lines": 618
         },
         {
           "file": "packages/opencode/script/publish-shape.ts",
@@ -73,12 +73,12 @@
         {
           "file": "packages/opencode/src/plugin/glasspane-decision-log.ts",
           "kind": "added",
-          "lines": 156
+          "lines": 123
         },
         {
           "file": "packages/opencode/src/tool/glasspane/daemon.ts",
           "kind": "added",
-          "lines": 397
+          "lines": 374
         },
         {
           "file": "packages/opencode/src/tool/glasspane/index.ts",
@@ -88,7 +88,7 @@
         {
           "file": "packages/opencode/src/tool/glasspane/kernel.ts",
           "kind": "added",
-          "lines": 567
+          "lines": 537
         },
         {
           "file": "packages/tui/src/util/tool-denial.ts",
@@ -98,7 +98,7 @@
         {
           "file": "script/gpg-signing.sh",
           "kind": "added",
-          "lines": 673
+          "lines": 648
         },
         {
           "file": "script/kernel-conformance.mjs",
@@ -113,7 +113,7 @@
         {
           "file": "scripts/install.sh",
           "kind": "added",
-          "lines": 707
+          "lines": 640
         },
         {
           "file": "packages/app/src/components/dialog-connect-provider.stories.tsx",
@@ -658,12 +658,12 @@
         {
           "file": "packages/opencode/script/generate.ts",
           "kind": "edited",
-          "lines": 66
+          "lines": 42
         },
         {
           "file": "packages/opencode/script/postinstall.mjs",
           "kind": "edited",
-          "lines": 90
+          "lines": 22
         },
         {
           "file": "packages/opencode/script/publish.ts",
@@ -778,7 +778,7 @@
         {
           "file": "packages/opencode/src/cli/cmd/uninstall.ts",
           "kind": "edited",
-          "lines": 20
+          "lines": 15
         },
         {
           "file": "packages/opencode/src/cli/cmd/upgrade.ts",
@@ -858,7 +858,7 @@
         {
           "file": "packages/opencode/src/index.ts",
           "kind": "edited",
-          "lines": 13
+          "lines": 5
         },
         {
           "file": "packages/opencode/src/installation/index.ts",
@@ -1108,7 +1108,7 @@
         {
           "file": "packages/tui/src/routes/session/index.tsx",
           "kind": "edited",
-          "lines": 330
+          "lines": 319
         },
         {
           "file": "packages/tui/src/util/presentation.ts",
@@ -1131,14 +1131,14 @@
           "lines": 0
         }
       ],
-      "ratio": 0.2036,
+      "ratio": 0.1889,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
       },
       "testsExcluded": {
         "files": 36,
-        "lines": 3761
+        "lines": 3656
       },
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
@@ -1147,7 +1147,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 19180,
+  "totalToolSurfaceLoc": 18679,
   "note": null,
   "carried": null
 }

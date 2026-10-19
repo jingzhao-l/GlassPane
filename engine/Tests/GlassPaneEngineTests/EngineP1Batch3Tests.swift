@@ -42,9 +42,17 @@ final class EngineP1Batch3Tests: XCTestCase {
         XCTAssertEqual(trusted.isTrusted(), true)
         XCTAssertEqual(trusted.displayStatus(), .granted)
 
+        // AX 只暴露一个布尔：在名单里被关掉、从来不在名单里、条目被删掉，三种情况都
+        // 回 false。从前这里断言 `.notDetermined`，而面板把它渲染成「未请求」
+        // （`SettingsPanelView.swift:790`）——等于替读者说"这次运行还没问过系统"，
+        // 那是没有任何一次测量支撑的一句话。保护意图原样保留：没量到就不许点亮，
+        // 也不许冒充三态里的任何一个确定态。
         let untrusted = AccessibilityPermissionProbe(trustCheck: { false })
         XCTAssertEqual(untrusted.isTrusted(), false)
-        XCTAssertEqual(untrusted.displayStatus(), .notDetermined)
+        XCTAssertNotEqual(untrusted.displayStatus(), .granted, "预检说没有，就不许显示已授权")
+        XCTAssertNotEqual(untrusted.displayStatus(), .notDetermined, "\"未请求\"说的是历史，探针量不到")
+        XCTAssertNotEqual(untrusted.displayStatus(), .denied, "\"已拒绝\"是一个决定，同样没人量到")
+        XCTAssertEqual(untrusted.displayStatus(), .unverifiable, "未测量的诚实值是未验证")
     }
 
     func testAccessibilityProbePromptAndOpenPaneInvocations() {
@@ -65,7 +73,9 @@ final class EngineP1Batch3Tests: XCTestCase {
         let granted = InputMonitoringPermissionProbe(preflight: { true })
         XCTAssertEqual(granted.state, .granted)
 
-        // 未请求 → notDetermined；请求后被拒 → denied
+        // 未请求 → notDetermined；请求后预检仍 false → 系统还没做决定，探针也不许替它做
+        // （从前这一格断言 denied，而 `--permissions`/面板把 denied 念成「已拒绝」，
+        // 用户当时大概率正看着那个弹窗）。
         var approved = false
         let probe = InputMonitoringPermissionProbe(
             preflight: { approved },
@@ -74,8 +84,14 @@ final class EngineP1Batch3Tests: XCTestCase {
         )
         XCTAssertEqual(probe.state, .notDetermined)
         let outcome = probe.requestAccess()
-        XCTAssertEqual(outcome, .denied)
-        XCTAssertEqual(probe.state, .denied)
+        XCTAssertNotEqual(outcome, .granted, "预检仍是 false，不能点亮")
+        XCTAssertNotEqual(outcome, .denied, "没人回答的询问不是一次拒绝")
+        XCTAssertEqual(outcome, .unverifiable)
+        // 单调性（真实缺陷的记忆）：问过之后不得回退成"还没问过"，也不许继续冒充拒绝。
+        XCTAssertNotEqual(probe.state, .notDetermined, "状态必须单调，不得回退为 notDetermined")
+        XCTAssertNotEqual(probe.state, .granted)
+        XCTAssertEqual(probe.state, .unverifiable)
+        XCTAssertEqual(probe.state, .unverifiable, "状态必须单调，不得回退为 notDetermined")
 
         // 请求后授权成功 → granted
         var approvedLater = false

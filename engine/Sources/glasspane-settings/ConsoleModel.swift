@@ -126,6 +126,10 @@ final class ConsoleModel: ObservableObject {
     @Published var prunePreview: [PrunePreviewRow] = []
     @Published var isPreparingPrunePreview = false
     @Published var isPruneSheetPresented = false
+    /// 确认后的真删在途。**这一枚必须有屏幕上的形状**：`pruneControl` 把它折算成
+    /// 一个 `.blocked` 的「清理」（带原因与下一步），`ProjectsTabView` 那一行再画一枚
+    /// 沙漏与一句"哪一趟在跑"（`gp-prune-in-flight`）。从前它只被模型自己的 `guard`
+    /// 读过，而那是闸门不是读者——真删那 20 秒里按钮已经回到可点状态。
     @Published var isRunningPrune = false
     /// 修剪后是否需要重启后台服务（daemon 内存里还是旧表）。
     @Published var pruneNeedsRestart = false
@@ -537,6 +541,16 @@ final class ConsoleModel: ObservableObject {
             return
         }
         guard !isPreparingPrunePreview else { return }
+        // 一次真删可以跑上约 20 s。这一趟里再起一次 `--project-prune --dry-run`，摊出来
+        // 的清单读的是**正在被改的那张表**——预览与删除用的是同一份 projects.json，
+        // 而运行中的 daemon 手里还持着另一份。控件那一份判据在 `pruneControl`
+        // （`isPruneRunning` 那一支），这里再来一道：键盘与自动化会绕过灰掉的按钮。
+        guard !isRunningPrune else {
+            lastActionMessage = "清理没有再问一次预览：上一次「确认清理」还在后台服务里跑，"
+                + "这一趟的清单会读着一张正在被改的表。下一步：等它跑完（页面那一行会自己说什么时候完），"
+                + "再点一次「清理」。"
+            return
+        }
         isPreparingPrunePreview = true
         let binary = daemonBinaryPath
         // 状态根必须显式点名（与另三条控制台命令同一个组装函数）：预览读的是哪张表，
@@ -970,6 +984,42 @@ final class ConsoleModel: ObservableObject {
         }
     }
 
+    /// 「在访达中显示」这一枚的呈现（纯函数，供单测）。
+    ///
+    /// 缺陷形状：它是「打开报告」旁边那一枚没有闸的按钮——`revealFile()` 在路径为空
+    /// 时直接 `return`，整包没读到时同样什么都不发生，而它的同胞早就经
+    /// `reportButtonControl(...)` 给出禁用理由。按了没反应、屏幕上又没有一个字说为什么，
+    /// 在这一产品里就是 P0：控件看着能按，本身就是一种主张。
+    ///
+    /// 判据只有两个，而且都是这一页**测到**的东西：这条档案的读取结局，与扫描给出的那个
+    /// 落盘路径。没有第三条"差不多可以"的回落——路径为空就是这条记录没带着它在盘上的位置，
+    /// 整包没读到就是访达那头的东西还没被确认存在。
+    nonisolated static func revealFileControl(packLoad: PackLoad, filePath: String) -> PanelControl {
+        let path = filePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch packLoad {
+        case .loaded:
+            guard !path.isEmpty else {
+                return PanelControl(enabled: false, help:
+                    "「在访达中显示」现在按不动：这条档案的扫描结果没带着它在盘上的路径，"
+                    + "访达没有一个去处可显示。下一步：点「刷新」重扫一次档案目录；"
+                    + "还是空的就是这条记录本身没有路径可报，这一页不会替它编一个。")
+            }
+            return PanelControl(enabled: true, help: "在访达中选中这一条档案自己那份文件：\(path)")
+        case .loading:
+            return PanelControl(enabled: false, help:
+                "「在访达中显示」现在按不动：这条档案还在读盘，它到底在不在都要等这一次读完才知道。"
+                + "下一步：等这一条读完，或点「刷新」重读。")
+        case .failed(let reason):
+            return PanelControl(enabled: false, help:
+                "「在访达中显示」现在按不动：\(reason) 下一步：点这一屏的「重试」再读一次；"
+                + "整包读不出时访达里那个位置也可能已经不在了，先用「档案目录」那一枚看这一页在读的目录。")
+        case .none:
+            return PanelControl(enabled: false, help:
+                "「在访达中显示」现在按不动：这一帧没读到这条记录的内容（还没点中左侧的记录，"
+                + "或列表刚重扫）。下一步：左侧点一条记录，或点「刷新」重读一次。")
+        }
+    }
+
     // MARK: - 项目页「清理」这一枚
 
     /// 「清理」的呈现。
@@ -993,7 +1043,8 @@ final class ConsoleModel: ObservableObject {
         residueCount: Int,
         canRunDaemonCLI: Bool,
         writesLackReportedRoot: Bool = false,
-        isPreparingPreview: Bool
+        isPreparingPreview: Bool,
+        isPruneRunning: Bool = false
     ) -> PanelPruneControl {
         let banner: String
         /// 读表那一侧给出的"按不动"原因（表读成了就是 nil）。
@@ -1012,6 +1063,15 @@ final class ConsoleModel: ObservableObject {
                 ? "\(residueCount) 条注册项指向系统临时目录"
                 : "面板在这台机器上读到 0 条指向系统临时目录的注册项"
             readBlock = nil
+        }
+        // 在途的**删除**排在在途的预览之前说：删除正在进行时注册表正被改写，
+        // 这时候再点「清理」起一次 dry-run，摊开的清单读的是改到一半的表。
+        if isPruneRunning {
+            return .blocked(banner: banner, reason:
+                "「清理」现在按不动：上一趟 --project-prune 还在跑（真删一条最长要等 20 秒的"
+                + "daemon 回话），注册表此刻正被它改写。这一步再按下去，对着的就是一张改到一半的表。"
+                + "下一步：等这一趟回话——它删了几条、失败在哪、要不要重启都会写在页面上方那条横幅里，"
+                + "那时再点「清理」要清单才有意义。")
         }
         if isPreparingPreview {
             return .blocked(banner: banner, reason:
@@ -1048,7 +1108,8 @@ final class ConsoleModel: ObservableObject {
             residueCount: testResidueCount,
             canRunDaemonCLI: canRunDaemonCLI,
             writesLackReportedRoot: writesLackAReportedRoot,
-            isPreparingPreview: isPreparingPrunePreview
+            isPreparingPreview: isPreparingPrunePreview,
+            isPruneRunning: isRunningPrune
         )
     }
 

@@ -248,7 +248,8 @@ final class ProbeRuntimeTests: XCTestCase {
         // table; a key escaping it would attribute one object's state to another).
         XCTAssertTrue(measured.allSatisfy { $0.hasPrefix("chain.") || $0.hasPrefix("wide.") },
                       "stray keys: \(measured.filter { !$0.hasPrefix("chain.") && !$0.hasPrefix("wide.") })")
-        XCTAssertTrue(out.values.allSatisfy { $0.count <= ProbeRuntime.stateValueCharCap })
+        XCTAssertTrue(out.values.allSatisfy { $0.utf8.count <= ProbeRuntime.stateValueByteCap },
+                      "the cap is charged in encoded bytes: \(out.values.first { $0.utf8.count > ProbeRuntime.stateValueByteCap } ?? "∅")")
     }
 
     func testMirrorExportCapsContainerValuesTheWayItCapsLeaves() throws {
@@ -260,18 +261,21 @@ final class ProbeRuntimeTests: XCTestCase {
         GP.registerMirrorRoot(label: "loud", object: loud)
         let out = withExtendedLifetime(loud) { GP.runtime.exportMirrorState() }
 
-        XCTAssertEqual(out["loud.big"]?.count, ProbeRuntime.stateValueCharCap,
+        // The fixture is ASCII, so characters and bytes agree here; the cap's own
+        // unit is encoded bytes (see Qoder20261019FrameBudgetTests for the CJK
+        // case, where a *character* cap was 3× the documented frame budget).
+        XCTAssertEqual(out["loud.big"]?.utf8.count, ProbeRuntime.stateValueByteCap,
                        "the container arm is the one that used to be stored verbatim")
-        XCTAssertEqual(out["loud.speech"]?.count, ProbeRuntime.stateValueCharCap,
+        XCTAssertEqual(out["loud.speech"]?.utf8.count, ProbeRuntime.stateValueByteCap,
                        "and the leaf arm stays capped with it")
         for (key, value) in out {
-            XCTAssertFalse(value.count > ProbeRuntime.stateValueCharCap, "\(key) escaped the cap")
+            XCTAssertFalse(value.utf8.count > ProbeRuntime.stateValueByteCap, "\(key) escaped the cap")
         }
 
         // Same 4.5 MB description on both arms: capped, the export fits in one
         // frame; uncapped (the bug), it is past the wire's limit.
         let payload = try JSONSerialization.data(withJSONObject: out, options: [.sortedKeys])
-        XCTAssertLessThan(payload.count, ProbeRuntime.maxInboundLineBytes,
+        XCTAssertLessThan(payload.count, ProbeRuntime.maxOutboundFrameBytes,
                           "an export that cannot fit a frame is an export the daemon throws away")
     }
 

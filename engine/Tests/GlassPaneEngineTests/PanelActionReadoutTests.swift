@@ -107,16 +107,35 @@ final class PanelActionReadoutTests: XCTestCase {
         return false
     }
 
-    /// 主闸：面板模型里每一个 `@Published` 状态，都必须至少有一个读者。
+    /// 写入动作的状态：这里的"有读者"必须是**视图**读者。模型里那一句
+    /// `guard !isRunningPrune else { return }` 是闸门，不是读者——真正把它说给人看的
+    /// 才叫读者。从前这条闸把自读也算成一个读者，于是 `isRunningPrune` 在一次可以跑
+    /// 约 20 s 的真删期间没有任何屏幕形状，「清理」早已回到 `.ready`，第二次点击会
+    /// 对着正在被改的注册表起一次 dry-run（2026-10-19 复审记为 P1）。
+    /// 判据是一张名单而不是"名字看起来像不像在途"：一条靠猜词形的闸会在下一次改名时
+    /// 悄悄变成空表。
+    static let writeActionStates: Set<String> = [
+        "isRunningPrune", "isPreparingPrunePreview", "isPruneSheetPresented",
+        "pruneNeedsRestart", "lastActionMessage",
+    ]
+
+    /// 主闸：面板模型里每一个 `@Published` 状态，都必须至少有一个读者；
+    /// 写入动作那一组（`writeActionStates`）必须有一个**视图**读者。
     func testEveryPublishedPanelStateIsReadSomewhere() throws {
         let (models, views) = splitFiles(try sources())
         var scanned = 0
         var unread: [String] = []
+        var writeActionsWithoutViewReader: [String] = []
+        var writeActionsScanned = 0
         for (name, text) in models.sorted(by: { $0.key < $1.key }) {
             for property in Self.publishedNames(in: text) {
                 scanned += 1
                 let readInOwnFile = Self.hasRead(name: property, in: text)
                 let readInView = views.values.contains { Self.hasRead(name: property, in: $0) }
+                if Self.writeActionStates.contains(property) {
+                    writeActionsScanned += 1
+                    if !readInView { writeActionsWithoutViewReader.append("\(name).\(property)") }
+                }
                 if !readInOwnFile && !readInView {
                     unread.append("\(name).\(property)")
                 }
@@ -126,6 +145,13 @@ final class PanelActionReadoutTests: XCTestCase {
         // 这条闸已经在看不到东西的地方——那必须炸，不许静默"全通过"。
         XCTAssertGreaterThanOrEqual(scanned, 30,
             "只扫到 \(scanned) 个 @Published 状态，这条闸已经不作数了")
+        // 收紧的那一半也要有自己的证伪：名单里的状态还在被扫，且确实有一个视图读者
+        // （否则"要求视图读者"会退化成"扫不到东西的那一条"）。
+        XCTAssertGreaterThanOrEqual(writeActionsScanned, Self.writeActionStates.count,
+            "写入动作的状态只扫到 \(writeActionsScanned) 个：这条收紧正在看不到东西的地方")
+        XCTAssertTrue(writeActionsWithoutViewReader.isEmpty,
+            "这些写入动作的状态只在模型里被读到，屏幕上没有它们的形状："
+                + writeActionsWithoutViewReader.joined(separator: ", "))
         XCTAssertTrue(unread.isEmpty,
             "这些面板状态被写入却没有任何读者，用户看不见它们承载的结论：" + unread.joined(separator: ", "))
     }
