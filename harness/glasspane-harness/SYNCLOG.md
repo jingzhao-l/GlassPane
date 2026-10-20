@@ -2,6 +2,92 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-20（第十四次会话）· 0.9.1：内核只剩一份、壳吃 npm、写侧翻转；发布三格齐，外加一条我自己撞出来的尺子缺陷
+
+### 开工与隔离
+
+- 起点 main `c2538f1b`（上一轮 0.9.0 已发：split main `8a6d74a` = tag `v0.9.0`）。本轮在隔离工作树
+  `/Volumes/Eng-Dev/.worktrees/gp-019`（分支 `gp-019-pin`）改动与提交。事故照实记：一次 `cd` 到已被
+  删除的工作树**静默失败**，我把两笔改动写进了共享主树；核对脏项恰好是我那两份文件后，备份到
+  `/var/tmp/gp-backup-019`、建 `gp-019`、在主树 `git restore --source=HEAD` 那两份并验回干净。
+- 并行状态（判据取文件字节，不取提交信息）：`iterate-skill` 的 `origin/main` 就是我那三笔
+  （`9a6b0621`/`2bb86745`/`e155c6ee`）；本地 main 另有 8 笔未推（另一条线的 3.6.0 取号与修复），
+  本轮不并、不推、不替那条线决定。
+
+### 四批落地的内容
+
+1. **Step 0b 后半**：`mcp-shell` 改吃 npm 裸名 `iterate-kernel`，只走子路径导入（`/evidence-pack`、
+   `/parse`、`/errors`），不吃 `schemas` barrel——barrel 在模块初始化时读 `../schemas/*.json`，那个
+   路径只存在于包旁边、不存在于 esbuild 产物旁边。根 `kernel/` 降级为**被 pin 钉住的语料镜像**
+   （不是内核代码），`tools/sync-kernel.sh` 改成拒绝（exit 2，印三条替代命令，并把四条教训留在脚本里：
+   删除守卫、"抄清单不是空操作"、"验证是操作的一部分"、"回滚只覆盖了 `$DST`、没覆盖 npm 重写的两份
+   lockfile"）。CI 的 `kernel (TypeScript)` lane 随之删除，**lane 数 10 → 9**。
+2. **场景③ Python 半边**（`iterate-skill` main `9a6b0621`）：决策日志落盘的即是内核那条哈希链；
+   迁移取记录自身时刻与自身 id；读不进的历史拒绝且零改动；链开始后混进 legacy ⇒ 拒绝 +
+   `archive_contested_log` 由人选重启；8-vs-10 的 kind 分叉结束；八个读者靠投影一字未改；测试 13 → 21。
+3. **内核 0.1.9**（`2bb86745` + `e155c6ee`）：`zod` 从 `">=3.25.76 <5"` 收成 `"3.25.76"`，配三条 canary
+   （精确 spec、装的=声明的、`dist/evidence-pack.d.ts` 里 `"strict", z.ZodTypeAny,` 在）。判决字节未动：
+   0.1.9 的语料与 0.1.8 相同，`kernel-conformance` 的 16 份摘要逐字复算一致；下游那两处 npm
+   `overrides` 因此删除，实测依赖树只剩一份 zod@3.25.76。
+4. **v0.9.1 发布链**（本批，`1e2921a6`）：判据 patch（四项用户可见判据逐条实测未动）。
+   `[installer-curl-pinned]` 抓的是三处文档与 `product.json` 逐字不同——它红得对；`scripts/install.sh`
+   表头那条形**不在闸的读取范围里**，按 0.9.0 那笔的形状人工补齐（这一处靠人不靠闸，已写进发布文档
+   所依赖的事实里）。金样与代码同批：`fork-diff` 7 个 `forkHash` 随本批字节走；
+   `surface-semantics` 的面 A 扫描数 13 → 14 —— 多出来的那份是 2026-10-16（`182d3919`）落地的
+   `mcp-shell/src/stdio-session.ts`，**这条尺子的 `--check` 只比 `hits`、不比扫描数**，所以它一直红不了、
+   金样一直停在 13；本批如实追平计数，`hits` 仍是 0。
+
+### 发布三格实测（不是"看起来成功"）
+
+- 搬运分支：`git subtree split` 后 `split^{tree}` = `6aa1f7a4` = `HEAD:harness/glasspane-harness` ✓，
+  且旧 tip `8a6d74a` 是新 tip `ccccc6ce` 的祖先 ⇒ **快进推送**，无 `--force`。
+- tag：`v0.9.1` → `ccccc6ce`（先推 main、核可达、再打 tag——0.8.0 那次顺序颠倒拿过 403）。
+- Release：非草稿，6 份资产齐（两平台 zip + .asc + SHA256SUMS.txt + .asc），tag 触发的 `Release` 跑绿。
+- npm：`workflow_dispatch --ref v0.9.1` 派发，`publish-gate` 验"tag==HEAD==refs/tags/v0.9.1"绿；
+  三包 0.9.1 live，且 **CI 打印的 wrapper tarball shasum `26e8c8c8f4855774f807a0a33df8f83a57885a60`
+  与 registry `dist.shasum` 逐字相同**、provenance logIndex 3328365454、`optionalDependencies`
+  两平台都钉 0.9.1。
+
+### 本轮抓到的一条尺子缺陷（照实写，含它为什么红）
+
+`install the published bytes and run them`（verify-published）**红了一次**，具名 FAIL：
+`ETARGET notarget No matching version found for glasspane-harness@0.9.1`，时刻在 publish 被接受后
+96 秒——即 npm 的处理/读副本窗（实测过 12–20 分钟）。这不是发布物坏，是**这条 lane 没有"等版本出现"
+的轮询**：它假设"job 内前一步成功"等于"registry 读得到"。已按 `gh run rerun --failed` 复通，**复通后该
+job 绿**（这条 lane 的判据是 exit 0 = 把已发布的 tarball 装进一次性前缀后，那一份二进制服务出内嵌页），
+整条 dispatch run 也随之 completed/success；待办是把轮询装进 lane（本轮没装，如实记为遗留）。
+
+### 闸与实跑
+
+- 从主仓根跑，全部退出码取脚本自身：`check-version` 0、`check-doc-links` 0、`check-kernel-corpus` 0
+  （mcp-shell 捆的与 pin 同号 0.1.9）、`check-workflows` 0（5 份 workflow）、`fork-diff` 0
+  （vs `v1.18.32`：4640/6726 逐字节相同 · 285 edited · 94 added · 1707 deleted）、`tool-surface` 0
+  （面 B 记录 20.15% = 现状 20.15%，超文档 10% 上限的 `!` 是历史已花的越线判定，LOC 棘轮仍在）、
+  `brand-surface` 0（lineage 9603/3311 未变）、`surface-semantics` 0（20 文件 0 命中）、
+  `hook-liveness` 0（21 钩子对 `anomalyco/opencode@v1.18.32` 无漂移）、`product-surface` 0
+  （6491 条同意、0 问题，glasspane-harness@0.9.1）、`release-artifact` 提交前 exit 2（脏子树拒测）→
+  提交后按序推完 split/tag 后转绿。
+- 父仓 CI 在 `1e2921a6` 上**九道 lane 全绿**（`release-artifact` 那条曾红，红在 tag 还不存在的那一刻，
+  推完 split+tag 后 `--failed` 复通为绿）。fork 侧 CI 在 `ccccc6ce` 绿。
+- 没跑的照实写：本机未重跑 fork 的 `bun test` 全套与 `installer-selftest`（165 条）——两条都在
+  `ccccc6ce` 的 CI 里跑过并绿；`engine/` 的 Swift 本轮零改动，未重跑。
+
+### 交下一轮（本轮实测的新事实，不是抄旧账）
+
+- 场景②：`GLASSPANE_RUN_PLAN` 这条共享通道**在 fork 侧已被消费**（`plugin/glasspane-compaction.ts`
+  经内核 `readRunPlan` 读它，早先记的"open work"已闭）；缺的是 Python 生产侧——`iterate/run_plan.py`
+  有 `build_run_plan`/`write_run_plan`/`run_plan_digest`，但 `src/` 里**零消费者**（只有
+  `scripts/check_run_plan_channel.py` 与测试用它）；`iterate/dimension_context.py` 同样除自身与
+  测试外无人 import（2.7.x 的 CHANGELOG 已把这条更正过一次，仍然成立）。面 A 无 dimension 槽：
+  `mcp-shell/src/*.ts` 里 `dimension` 0 命中，而面 B 有 5 个工具带 `DimensionArg`。
+- 场景⑤：provider 契约两侧**实现齐全**（内核 TS + Python 镜像 583 行）、两侧**尺子齐全**
+  （`script/kernel-conformance.mjs`、`scripts/diff_kernel_implementations.py`、
+  `tests/test_provider_registry.py`），但产品侧注册为零：fork 的 tool/plugin、`mcp-shell/src`、
+  `engine/Sources` 与 iterate-harness 的循环代码里都没有 `registerProvider`/`register_provider`。
+- 场景③ 还剩 plugin TS 半边（`harness/iterate-plugin/src/tools/decision-log.ts` + `types.ts` 的
+  10-kind 表 + `prune.ts` 必须从"重编号"改成"归档重启"）；plugin 现在对内核零依赖，取号由用户定。
+- 内核语料与 npm 的关系已经只剩一条：`kernel/` 是被 pin 钉的语料，不再是待同步的副本。
+
 ## 2026-10-19（第十三次会话）· 0.9.0：46 条审查发现清零，六把尺子里"记录写着、代码不读"那一族一次收完
 
 ### 开工自检与上一轮遗留
