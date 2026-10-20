@@ -595,7 +595,10 @@ test("the projects-path doc states that it is the default root, not the only one
   assert.match(doc, /default/i, "and labelled as the default, not as the only file the daemon reads");
   assert.equal(/no override of its own/.test(doc), false,
     "the claim that made the restart notice wrong must not come back");
-  assert.match(doc, /method table is frozen|reports no state root/);
+  assert.match(doc, /hello|stateRoot/,
+    "文档要说得出根是从哪儿读来的：daemon 自 1.15.0 起在 hello 里报 stateRoot，从前那句『方法表已冻结、socket 问不到根』是假的，而 shell 就因为这句假前提把注册写进 home 默认根");
+  assert.equal(/method table is frozen|reports no state root/.test(doc), false,
+    "那句『问不到根』的前提已被 hello.stateRoot 推翻，留着它就会再一次授权 home 默认根");
 });
 
 test("the notice for the daemon's own file states the restart, with the un-bootstrapped fallback", () => {

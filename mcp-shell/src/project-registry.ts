@@ -208,12 +208,11 @@ function systemHome(): string {
  * `glasspaned --state-dir <path>` (parsed at `glasspaned/main.swift`, resolved
  * through `StateRoot(path:)`) makes the service load `<path>/projects.json`
  * instead — `ProjectRegistry(stateRoot:)` is the route every subcommand takes, so
- * no command honours the flag and misses it. This shell cannot see that root: the
- * daemon's method table is frozen and reports no state root over the socket, and
- * guessing one from `$HOME` or from the environment is what this module refuses to
- * do ({@link systemHome}). So this value answers "where the service writes by
- * default", never "where the running service reads", and
- * {@link daemonRestartNotice} says what to check when the two differ.
+ * no command honours the flag and misses it. The shell can read that root: since
+ * 1.15.0 the daemon names it in `hello`'s `stateRoot`, and
+ * {@link daemonProjectsPath} takes that value — falling back to the home default
+ * only when no handshake answered, which is said as "default", never as "the
+ * running service's root" ({@link daemonRestartNotice} carries the difference).
  *
  * Derived from {@link systemHome}, not from `$HOME`, because a root *this* process
  * can move is not the daemon's default root: with an overridden `HOME` the old
@@ -221,7 +220,13 @@ function systemHome(): string {
  * written for false — a write into the sandbox was reported as the file the
  * service loads, and a write to the file it really loads was called a stray.
  */
-export function daemonProjectsPath(): string {
+export function daemonProjectsPath(daemonStateRoot?: string | null): string {
+  // Since 1.15.0 the daemon names the root it resolved in `hello`'s `stateRoot`, so the
+  // shell does not have to guess it from `$HOME`. Without that key (an older binary, or no
+  // handshake yet) the home default is the only defensible answer, and it is said as
+  // "where the service writes by default", never as "where the running service reads".
+  const named = typeof daemonStateRoot === "string" ? daemonStateRoot.trim() : "";
+  if (named !== "") return path.join(named, "projects.json");
   return path.join(systemHome(), ".glasspane", "projects.json");
 }
 
@@ -296,10 +301,10 @@ export type ProjectSetArgs = z.infer<typeof ProjectSetArgs>;
 
 // ----- File access -----
 
-function projectsPath(): string {
+function projectsPath(daemonStateRoot?: string | null): string {
   const envPath = process.env[PROJECTS_FILE_ENV];
   if (envPath) return envPath;
-  return daemonProjectsPath();
+  return daemonProjectsPath(daemonStateRoot);
 }
 
 /**
@@ -643,8 +648,8 @@ function uniqueToken(): string {
 
 // ----- Public operations -----
 
-export function projectList(): ProjectEntry[] {
-  const filePath = projectsPath();
+export function projectList(daemonStateRoot?: string | null): ProjectEntry[] {
+  const filePath = projectsPath(daemonStateRoot);
   const snapshot = loadRegistry(filePath);
   if (snapshot.failure !== null) {
     throw new ProjectRegistryError(GP_E_INTERNAL, readFailureMessage(filePath, snapshot.failure));
@@ -652,8 +657,8 @@ export function projectList(): ProjectEntry[] {
   return snapshot.projects;
 }
 
-export function projectGet(projectId: string): ProjectEntry | undefined {
-  const projects = projectList();
+export function projectGet(projectId: string, daemonStateRoot?: string | null): ProjectEntry | undefined {
+  const projects = projectList(daemonStateRoot);
   return projects.find((p) => p.projectId === projectId);
 }
 
@@ -665,8 +670,8 @@ export function projectGet(projectId: string): ProjectEntry | undefined {
  * anything is written, and the result states explicitly what the running daemon
  * can and cannot see yet.
  */
-export function projectSet(args: ProjectSetArgs): ProjectSetResult {
-  const filePath = projectsPath();
+export function projectSet(args: ProjectSetArgs, daemonStateRoot?: string | null): ProjectSetResult {
+  const filePath = projectsPath(daemonStateRoot);
   assertStorablePid(args.pid);
   const snapshot = loadRegistry(filePath);
   const { projects, discarded } = requireUsableRegistry(filePath, snapshot);
@@ -710,7 +715,7 @@ export function projectSet(args: ProjectSetArgs): ProjectSetResult {
   return {
     ...entry,
     requiresDaemonRestart: true,
-    daemonRestartNotice: daemonRestartNotice(filePath),
+    daemonRestartNotice: daemonRestartNotice(filePath, daemonStateRoot),
     ...(discarded !== undefined ? { discardedUnreadableFile: discarded } : {}),
   };
 }
@@ -798,12 +803,23 @@ function assertSingleIdentity(entry: ProjectEntry): void {
  * surface actually has, and say what each outcome means:
  * {@link rootDiscriminator}.
  */
-export function daemonRestartNotice(filePath: string): string {
-  const daemonPath = daemonProjectsPath();
+export function daemonRestartNotice(filePath: string, daemonStateRoot?: string | null): string {
+  const named = typeof daemonStateRoot === "string" && daemonStateRoot.trim() !== "" ? daemonStateRoot.trim() : null;
+  const daemonPath = daemonProjectsPath(named);
+  // Two different authorities, and the sentence has to say which one spoke: a daemon that
+  // answered `hello.stateRoot` names the root it loads, while an older binary (or no
+  // handshake) leaves only the home default, which is a guess about the default and not
+  // about the running service.
+  const authority = named === null
+    ? "its default root is the folder under this user's home record (where a service started with no --state-dir looks)"
+    : `its root is the one the running daemon named in its hello (${named})`;
   if (path.resolve(filePath) !== path.resolve(daemonPath)) {
-    return `Saved in ${filePath}. The background service does not read this path because of anything in its own configuration: its default root is the folder under this user's home record, where it loads ${daemonPath} once when it starts, and ${PROJECTS_FILE_ENV} — the variable that pointed this write here — is honoured by this MCP shell only, so as far as the service's own configuration goes it never reads that file, and no restart of the service will make it load this one. ${rootDiscriminator()} To land the entry where that default root looks: unset ${PROJECTS_FILE_ENV} for this shell (or point it at ${daemonPath}) and repeat gp_project_set, then restart the background service so it reloads — ${restartCommand()}`;
+    return `Saved in ${filePath}. The background service does not read this path because of anything in its own configuration: ${authority}. It loads ${daemonPath} once when it starts, and ${PROJECTS_FILE_ENV} — the variable that pointed this write here — is honoured by this MCP shell only, so as far as the service's own configuration goes it never reads that file, and no restart of the service will make it load this one. ${rootDiscriminator()} To land the entry where that root looks: unset ${PROJECTS_FILE_ENV} for this shell (or point it at ${daemonPath}) and repeat gp_project_set, then restart the background service so it reloads — ${restartCommand()}`;
   }
-  return `Saved in ${filePath}, the projects file under the home record this user's state root defaults to. If this is the root the service was started on — which is not knowable from here — then the running background service loaded that file once when it started, so gp_attach will keep returning GP_E_NOT_FOUND for this projectId until the service restarts: ${restartCommand()}. ${rootDiscriminator()}`;
+  if (named !== null) {
+    return `Saved in ${filePath} — the projects file of the state root the running daemon reported in its own hello (${named}), so this is the file that service loads. It read that file once when it started, so gp_attach will keep returning GP_E_NOT_FOUND for this projectId until the service restarts: ${restartCommand()}`;
+  }
+  return `Saved in ${filePath}, the projects file under the home record this user's state root defaults to. If this is the root the service was started on — which is not knowable from here, because this daemon's hello reported no stateRoot — then the running background service loaded that file once when it started, so gp_attach will keep returning GP_E_NOT_FOUND for this projectId until the service restarts: ${restartCommand()}. ${rootDiscriminator()}`;
 }
 
 /**

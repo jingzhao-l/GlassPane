@@ -2061,9 +2061,9 @@ function mapEvidenceReadError(error: unknown): ToolResult | undefined {
  * the MCP layer — no socket methods are added ("不改变 socket 协议方法表").
  * ------------------------------------------------------------------ */
 
-async function projectListTool(): Promise<ToolResult> {
+async function projectListTool(_args: Record<string, unknown>, context: ToolExecuteContext): Promise<ToolResult> {
   try {
-    const projects = projectList();
+    const projects = projectList(context.engine.reportedStateRoot);
     return {
       content: [{ type: "text", text: canonicalJson({ projects }) }],
       isError: false,
@@ -2073,19 +2073,19 @@ async function projectListTool(): Promise<ToolResult> {
   }
 }
 
-async function projectSetTool(args: Record<string, unknown>): Promise<ToolResult> {
+async function projectSetTool(args: Record<string, unknown>, context: ToolExecuteContext): Promise<ToolResult> {
   try {
-    const entry = projectSet(args as ProjectSetArgs);
+    const entry = projectSet(args as ProjectSetArgs, context.engine.reportedStateRoot);
     return { content: [{ type: "text", text: canonicalJson({ project: entry }) }], isError: false };
   } catch (error) {
     return mapProjectError(error);
   }
 }
 
-async function projectGetTool(args: Record<string, unknown>): Promise<ToolResult> {
+async function projectGetTool(args: Record<string, unknown>, context: ToolExecuteContext): Promise<ToolResult> {
   const argv = args as ProjectGetArgs;
   try {
-    const entry = projectGet(argv.projectId);
+    const entry = projectGet(argv.projectId, context.engine.reportedStateRoot);
     if (entry === undefined) {
       return {
         content: [{ type: "text", text: formatToolError(
@@ -2437,7 +2437,18 @@ export function describeFetchFailure(error: unknown): string {
   const mapped = mapEvidenceReadError(error);
   if (mapped !== undefined) {
     const [first] = mapped.content;
-    return first !== undefined && first.type === "text" ? first.text : "the evidence read failed";
+    if (first !== undefined && first.type === "text") {
+      return first.text;
+    }
+    // A mapped refusal whose content carries no text part would otherwise put a bare
+    // sentence into a partial report: `{code, message, remedy}` is the one shape every
+    // error in this file keeps, and a two-field string leaves the reader with a verdict
+    // and no next move.
+    return formatToolError(
+      GP_E_INTERNAL,
+      "a mapped evidence-read refusal reached gp_recent_reports without any text part, so its own message could not be carried",
+      "read that operation on its own with gp_last_evidence {operationId}, which reports its own fault in the three-field shape; do not re-run gp_act",
+    );
   }
   return formatToolError(
     GP_E_INTERNAL,

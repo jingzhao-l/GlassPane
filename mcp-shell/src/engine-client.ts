@@ -871,6 +871,17 @@ export class EngineJsonRpcClient {
   }
 
   /**
+   * The state root the daemon named in its own `hello` (additive since 1.15.0), or null
+   * when no handshake answered that key. `null` means "this daemon does not report it" —
+   * never "therefore it is the home default"; callers say which of the two they used.
+   */
+  private helloStateRoot: string | null = null;
+
+  get reportedStateRoot(): string | null {
+    return this.helloStateRoot;
+  }
+
+  /**
    * Sink for facts that cannot be attached to any request of the caller: a
    * late reply, a frame with an id this client never issued, a daemon that
    * fails its handshake. Without a sink these stay invisible, which is how
@@ -1187,10 +1198,12 @@ export class EngineJsonRpcClient {
     // text 的内容项，`isError` 仍是 false——引擎什么都没答，代理读到的却是绿。
     // 与 `capture_view` 的 `persisted !== false` 同一条规矩：主张必须由引擎说出来，
     // 壳层不许替它填一个默认值。
-    if (!("result" in frame)) {
+    if (!("result" in frame) || frame.result === null) {
       this.reject(entry, new EngineCallError(
         GP_E_INTERNAL,
-        `engine answered '${entry.method}' with a frame carrying neither result nor error`,
+        frame.result === null
+          ? `engine answered '${entry.method}' with a frame whose result is null: the key is present but carries no answer`
+          : `engine answered '${entry.method}' with a frame carrying neither result nor error`,
         "do not read this call as successful: the engine answered nothing. Retry once, then check the daemon log (stderr) for what it died before answering",
       ));
       return;
@@ -1424,7 +1437,7 @@ export class EngineJsonRpcClient {
       this.report("engine answered hello without an object result — protocol compatibility could not be measured");
       return;
     }
-    const report = result as { engine?: unknown; version?: unknown; protocolVersion?: unknown; capabilities?: unknown };
+    const report = result as { engine?: unknown; version?: unknown; protocolVersion?: unknown; capabilities?: unknown; stateRoot?: unknown };
     const protocol = typeof report.protocolVersion === "string" ? report.protocolVersion : null;
     if (protocol === null) {
       this.report(`engine self-report has no protocolVersion (engine=${jsonOrString(report.engine)}); expected '${expected}' — compatibility unverified`);
@@ -1435,6 +1448,16 @@ export class EngineJsonRpcClient {
       return;
     }
     const version = typeof report.version === "string" ? report.version : null;
+    // `hello.stateRoot` (additive since 1.15.0) is the daemon's own answer to "which root
+    // did you resolve". The project tools read it through `reportedStateRoot` instead of
+    // deriving a root from `$HOME`: a service started with `--state-dir /tmp/sandbox` loads
+    // `/tmp/sandbox/projects.json`, and writing the home default while reporting success is
+    // the incident class this module was created to refuse. An absent key is kept absent —
+    // "that daemon does not report it", never "so it must be the home default".
+    const reportedRoot = typeof report.stateRoot === "string" ? report.stateRoot.trim() : "";
+    if (reportedRoot !== "") {
+      this.helloStateRoot = reportedRoot;
+    }
     const wantVersion = this.identity?.version;
     if (version !== null && wantVersion !== undefined && version !== wantVersion) {
       this.report(`version mismatch: engine self-reports '${version}', this MCP shell ships '${wantVersion}' (single version line) — one side is stale`);

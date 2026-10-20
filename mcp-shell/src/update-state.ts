@@ -536,7 +536,22 @@ export function readUpdateState(env: NodeJS.ProcessEnv = process.env, stateRootO
   }
   let parsed: Record<string, unknown>;
   try {
-    parsed = JSON.parse(text) as Record<string, unknown>;
+    const decoded: unknown = JSON.parse(text);
+    // `JSON.parse("null")` succeeds, and the cast above is a lie about it: the next
+    // property read throws a TypeError out of the whole tool call, so `gp_diagnose`
+    // answers with a shell-internal error and the daemon's actual diagnosis is thrown
+    // away. A JSON top level that is not an object carries no update state at all, so
+    // it is refused here in the same words the unreadable file above uses.
+    if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) {
+      return {
+        kind: "unreadable",
+        stateFile,
+        summary: `update state: ${stateFile} is not a JSON object (its top level is `
+          + `${decoded === null ? "null" : Array.isArray(decoded) ? "an array" : typeof decoded}), which carries no `
+          + "status field; freshness is unknown, which is not the same as up to date",
+      };
+    }
+    parsed = decoded as Record<string, unknown>;
   } catch (error) {
     return {
       kind: "unreadable",
