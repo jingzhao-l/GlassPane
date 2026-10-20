@@ -234,9 +234,12 @@ struct ProjectsTabView: View {
                             }
                         )
                     ) {
-                        PathRowView(label: "证据目录", path: entry.evidenceStoragePath ?? "未配置（这个项目自己没有档案目录）")
-                        PathRowView(label: "配方配置", path: entry.recipeConfigPath ?? "未配置")
-                        PathRowView(label: "校准资源", path: entry.calibrationAssetsPath ?? "未配置")
+                        PathRowView(label: "证据目录", path: entry.evidenceStoragePath ?? "未配置（这个项目自己没有档案目录）",
+                                    identifierKey: "project-evidence", isPlaceholder: entry.evidenceStoragePath == nil)
+                        PathRowView(label: "配方配置", path: entry.recipeConfigPath ?? "未配置",
+                                    identifierKey: "project-recipe", isPlaceholder: entry.recipeConfigPath == nil)
+                        PathRowView(label: "校准资源", path: entry.calibrationAssetsPath ?? "未配置",
+                                    identifierKey: "project-calibration", isPlaceholder: entry.calibrationAssetsPath == nil)
                     }
                 }
                 .padding(14)

@@ -61,22 +61,45 @@ final class PanelDaemonCommandContractTests: XCTestCase {
     }
 
     /// 面板实际发给 daemon 的开关。
-    private func panelInvocations() throws -> [(flag: String, line: Int)] {
-        let source = try read("engine/Sources/glasspane-settings/ConsoleModel.swift")
-        var found: [(String, Int)] = []
-        for (offset, lineText) in source.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
-            let line = String(lineText)
-            // argv 现在由 `daemonCLIArguments(_:stateRoot:)` 组装，开关字面量因此落在
-            // 那一行而不是 `arguments:` 那一行——提取器跟着走，否则这条闸会看不见东西
-            // （它自己会报"一个都没抠出来"，这一轮就是这么被抓出来的）。
-            guard line.contains("runDaemonCLI") || line.contains("arguments:")
-                || line.contains("daemonCLIArguments(") else { continue }
-            for flag in captures(#""(--[a-z][a-z0-9-]*)""#, in: line) {
-                found.append((flag, offset + 1))
+    ///
+    /// 从前这里只读 `ConsoleModel.swift`，而面板还有三条一次性命令的出处不在那份文件里
+    /// （`SettingsModel.swift` 的席位读取与调试能力探测、`PermissionStatus.swift` 里那两个
+    ///  argv 字面量、`RecipesTabView.swift` 的配方校验）。写在那里的开关漂了也不会有人报错，
+    /// 于是这条闸对它看不见的调用面一律"通过"——看不见东西的闸什么都挡不住。
+    private static let panelCommandSources = [
+        "engine/Sources/glasspane-settings/ConsoleModel.swift",
+        "engine/Sources/glasspane-settings/SettingsModel.swift",
+        "engine/Sources/glasspane-settings/RecipesTabView.swift",
+        "engine/Sources/GlassPaneEngine/PermissionStatus.swift",
+    ]
+
+    private func panelInvocations() throws -> [(flag: String, at: String)] {
+        var found: [(flag: String, at: String)] = []
+        for file in Self.panelCommandSources {
+            let source = try read(file)
+            for (offset, lineText) in source.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+                let line = String(lineText)
+                // argv 现在由 `daemonCLIArguments(_:stateRoot:)` 组装，开关字面量因此落在
+                // 那一行而不是 `arguments:` 那一行——提取器跟着走，否则这条闸会看不见东西
+                // （它自己会报"一个都没抠出来"，这一轮就是这么被抓出来的）。
+                guard line.contains("runDaemonCLI") || line.contains("arguments:")
+                    || line.contains("daemonCLIArguments(") || line.contains("submission(")
+                    || line.contains("runOneShot") || line.contains("arguments = [")
+                    || line.contains("Arguments = [") else { continue }
+                for flag in captures(#""(--[a-z][a-z0-9-]*)""#, in: line) {
+                    found.append((flag, "\(file):\(offset + 1)"))
+                }
             }
         }
-        XCTAssertGreaterThanOrEqual(found.count, 2,
-            "面板里一个 daemon 开关都没抠出来（找到 \(found.count) 个），这条契约闸已经不作数了")
+        XCTAssertGreaterThanOrEqual(found.count, 8,
+            "面板里只抠出 \(found.count) 个 daemon 开关，这条契约闸已经不作数了")
+        // 三条各自有出处的命令必须在提取结果里看得见名字，否则"读了几份文件"这件事本身
+        // 也可以被写成零命中：这里点名的正是从前看不见的那三个调用面。
+        let seen = Set(found.map { $0.flag })
+        for flag in ["--permissions", "--check-developer-tools", "--recipe-validate"] {
+            XCTAssertTrue(seen.contains(flag),
+                "面板的 \(flag) 调用没有进入这条契约闸的视野（提取到 \(found.count) 条），闸在空转")
+        }
         return found
     }
 
@@ -87,7 +110,7 @@ final class PanelDaemonCommandContractTests: XCTestCase {
         let unknown = invoked.filter { !parsed.contains($0.flag) }
         XCTAssertEqual(unknown.map { $0.flag }.sorted().uniqueed(), [],
             "面板会拿到 `unknown argument` + 退出码 64，并把它折算成一句报平安的话："
-            + unknown.map { "\($0.flag) (ConsoleModel.swift:\($0.line))" }.joined(separator: ", "))
+            + unknown.map { "\($0.flag) (\($0.at))" }.joined(separator: ", "))
     }
 
     /// 正向的一半：写入面确实还在用这两条命令。若哪天面板不再调它们，

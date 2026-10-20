@@ -373,8 +373,48 @@ public enum EvidenceReportGenerator {
     /// 1234.5678 → "1234.57", 1234567 → "1.23457e+06". The TS mirror
     /// re-implements this rule rather than `String(n)`, which keeps up to 17
     /// digits and would print "1234.5678" where the panel prints "1234.57".
-    private static func doubleText(_ value: Double) -> String {
-        String(format: "%g", value)
+    ///
+    /// Spelled out rather than delegated to a formatter, because both delegations were wrong
+    /// here: `String(format: "%g", value)` resolves against the **user's** locale, so a
+    /// comma-decimal Mac rendered `changedRatio=0,25` while the TS mirror kept writing `0.25`,
+    /// and the byte-exact golden against `kernel/fixtures/report.ok-01.*` only held because the
+    /// test host happened to be dot-locale. Handing Foundation an explicit `en_US_POSIX`
+    /// locale fixed the separator but broke the rule at a decade boundary — it printed
+    /// `1000000` where `%g` prints `1e+06` (measured: 999999.5). So the rule is now the
+    /// function itself, and `DailyRound20261020Tests` pins the boundaries.
+    static func doubleText(_ value: Double) -> String {
+        if value.isNaN { return "nan" }
+        if value.isInfinite { return value < 0 ? "-inf" : "inf" }
+        if value == 0 { return "0" }
+        let sign = value < 0 ? "-" : ""
+        let magnitude = Swift.abs(value)
+        var exponent = Int(floor(log10(magnitude)))
+        var digits = (magnitude / pow(10.0, Double(exponent)) * 100_000).rounded(.toNearestOrEven)
+        if digits >= 1_000_000 {
+            digits /= 10
+            exponent += 1
+        }
+        var text = String(Int(digits))
+        while text.hasSuffix("0") { text.removeLast() }
+        if exponent < -4 || exponent >= 6 {
+            let head = String(text.first!)
+            let tail = text.dropFirst()
+            let mantissa = tail.isEmpty ? head : "\(head).\(tail)"
+            let marker = exponent >= 0
+                ? "e+\(String(format: "%02d", exponent))"
+                : "e-\(String(format: "%02d", -exponent))"
+            return sign + mantissa + marker
+        }
+        let chars = Array(text)
+        if exponent >= 0 {
+            let whole = exponent + 1
+            if whole >= chars.count {
+                return sign + String(chars) + String(repeating: "0", count: whole - chars.count)
+            }
+            let cut = chars.index(chars.startIndex, offsetBy: whole)
+            return sign + String(chars[..<cut]) + "." + String(chars[cut...])
+        }
+        return sign + "0." + String(repeating: "0", count: -exponent - 1) + String(chars)
     }
 
     /// HTML-escapes every value that crosses into a report (spec v1.3 §13.4).

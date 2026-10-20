@@ -36,7 +36,7 @@ public final class EngineCore {
     /// keys its daemon site on exactly this line's shape, `hello` reads it, and
     /// `glasspaned --version` reads it — so the version a client sees on the socket
     /// and the version a one-shot process prints cannot drift apart.
-    public static let buildVersion = "1.17.0"
+    public static let buildVersion = "1.18.0"
 
     /// 兼容位：**装了 1.10.0 之前那份 updater 的机器**读暂存树时，只认「public let version
     /// 等于一个带引号的字面量」这一种形状（1.6.2 的 `updater/lib/selfcheck.js` 里那条正则
@@ -52,7 +52,7 @@ public final class EngineCore {
     /// 两处字面量会漂——所以三件事同时成立：`scripts/set-version.mjs` 是唯一入口（两个位点
     /// 一起写）、`scripts/check-version.mjs` 两个位点都核、`DaemonVersionFlagTests` 与
     /// `updater/test/legacy-selfcheck-compat.test.mjs` 断言这两个常量同号。
-    public let version = "1.17.0"
+    public let version = "1.18.0"
     public let protocolVersion = "0"
     public private(set) var attachedApp: AttachedApp?
     /// Currently active project (P1 spec v1.4 §1.3). Set via attach with projectId.
@@ -1556,8 +1556,8 @@ public final class EngineCore {
                     "no prior operation of this attachment to reuse signal context from: \($0)"
                 } ?? "no prior operation to reuse signal context from",
                 remedy: refusal == nil
-                    ? "run act first — assert_element reuses the most recent act's signal context (P0 spec §3.3)"
-                    : "run act against the attached app first — assert_element reuses the most recent act's signal context, and after re-attaching a different app that context has to come from this app (P0 spec §3.3)"
+                    ? "run act first — assert_element reuses the most recent act's signal context"
+                    : "run act against the attached app first — assert_element reuses the most recent act's signal context, and after re-attaching a different app that context has to come from this app"
             )
         }
         let actual: StringOrBool

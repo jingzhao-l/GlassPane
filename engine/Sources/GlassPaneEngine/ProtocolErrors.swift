@@ -54,7 +54,10 @@ public struct GPError: Error {
         case .payloadTooLarge:
             return "reduce observe maxDepth or narrow the selector scope"
         case .methodNotFound:
-            return "use a method from the protocol method table (hello/attach/act/observe/assert_element/audit_ui/capture_view/diagnose/last_evidence/snapshot/restore/probe_status/shutdown)"
+            // Derived from the method table itself. This was a hand copy, and
+            // `capabilityWireNames` exists precisely because a hand-copied copy of this
+            // list drifted before (it named a `probe` that never shipped).
+            return "use a method from the protocol method table (\(EngineMethod.allCases.map({ $0.rawValue }).joined(separator: "/")))"
         case .badParams:
             return "fix the parameters according to the method table"
         case .notAttached:

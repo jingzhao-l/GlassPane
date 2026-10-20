@@ -379,8 +379,9 @@ final class ProjectRegistryTests: XCTestCase {
             "the remedy has to name, in the emitted command, the surface that actually owns the shared archive"
         )
         XCTAssertTrue(
-            payload.contains("--state-dir \\(stateRoot.path)"),
-            "…and pin the installation it prunes, so a second run cannot be pointed at another state root"
+            payload.contains("--state-dir \\\"" + "\\(stateRoot.path)" + "\\\""),
+            "…and pin the installation it prunes, so a second run cannot be pointed at another state root "
+            + "（带引号：状态根里可能有空格或非 ASCII 名字，不加引号的那条命令作用于被裁断的路径）"
         )
         XCTAssertTrue(
             payload.contains("\"stateChanged\": false"),

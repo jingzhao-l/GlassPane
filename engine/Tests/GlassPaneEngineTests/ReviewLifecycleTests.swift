@@ -353,13 +353,20 @@ final class ReviewLifecycleTests: XCTestCase {
                           "\(flag) 必须在解析期就按绝对路径判据过一遍：监听者会把 socket 的父目录收成 0700，相对值 chmod 的是当前工作目录")
         }
         // 等号形态与空格形态共用一份判据，两种拼写不能对同一个值给两个答案。
-        guard let equalsStart = source.range(of: "hasPrefix(\"--socket-path=\")")?.lowerBound,
-              let equalsEnd = source.range(of: "hasPrefix(\"--state-dir=\")",
-                                           range: equalsStart..<source.endIndex)?.lowerBound else {
-            return XCTFail("找不到 --socket-path= 的等号分支，这条对照看不见它")
-        }
-        XCTAssertTrue(source[equalsStart..<equalsEnd].contains("StateRootArgument.rejection"),
-                      "等号形态绕开判据，就等于同一 flag 有两种拼写两套答案")
+        // 2026-10-20：从前这里找的是两支手写的 `hasPrefix("--socket-path=")` /
+        // `hasPrefix("--state-dir=")` 分支——那正是缺陷本身：只有这两个开关认等号，
+        // `--older-than=7`、`--request-permission=x` 一律"unknown argument" + 64。
+        // 现在等号在解析入口被统一裁开，判据仍是同一个 `StateRootArgument`，所以这条对照
+        // 改盯"只有一份展开"，而**行为**由 `DailyRound20261011Batch2Tests` 与
+        // `DailyRound20261020Tests` 在真二进制上钉（两种拼写都得走到各自的校验）。
+        let expansion = try XCTUnwrap(
+            source.range(of: "rawArguments"),
+            "解析入口不再统一展开 --key=value，等号形态会退回到只有两个开关认的老样子"
+        )
+        XCTAssertTrue(source[expansion.lowerBound...].contains("firstIndex(of: \"=\")"),
+                      "等号必须被裁一次；两支手写分支已经删掉，找不到展开就是回归")
+        XCTAssertNil(source.range(of: "hasPrefix(\"--socket-path=\")"),
+                     "又出现单开关的等号特例：那意味着别的取值开关仍旧不认这个写法")
         // 三个 flag 只有一份判据：`--state-dir` 那一段也必须落在同一个类型上。
         let stateDirBlock = try XCTUnwrap(caseBlock(for: "--state-dir", in: source),
                                           "解析表里找不到 --state-dir 的 case 块")

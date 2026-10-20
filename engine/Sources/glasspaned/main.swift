@@ -107,7 +107,23 @@ private enum ParseResult {
     case errorCode(String, Int32)
 }
 
-private func parseArguments(_ arguments: [String]) -> ParseResult {
+private func parseArguments(_ rawArguments: [String]) -> ParseResult {
+    // `--key=value` is one spelling of one thing, so it gets one handling: expand it
+    // here and every value-taking flag accepts both forms through its own case label.
+    // Two flags used to carry hand-written `=` branches (`--state-dir=`, `--socket-path=`)
+    // while `--older-than=7`, `--request-permission=accessibility` and the rest fell
+    // through to "unknown argument" with exit 64 — an agent reading one grammar for the
+    // CLI had to memorise which two flags were special.
+    var arguments: [String] = []
+    arguments.reserveCapacity(rawArguments.count)
+    for argument in rawArguments {
+        guard argument.hasPrefix("--"), let cut = argument.firstIndex(of: "=") else {
+            arguments.append(argument)
+            continue
+        }
+        arguments.append(String(argument[..<cut]))
+        arguments.append(String(argument[argument.index(after: cut)...]))
+    }
     var options = Options()
     var index = 1
     while index < arguments.count {
@@ -251,29 +267,9 @@ private func parseArguments(_ arguments: [String]) -> ParseResult {
             index += 1
             options.socketPath = arguments[index]
         default:
-            if argument.hasPrefix("--socket-path=") {
-                let value = String(argument.dropFirst("--socket-path=".count))
-                // Same `--key=value` shape as `--state-dir`, same validation:
-                // one rule set decides both spellings, so the two cannot
-                // disagree about what counts as a socket path.
-                if let reason = StateRootArgument.rejection(for: value) {
-                    return .error("--socket-path \(reason)")
-                }
-                options.socketPath = value
-            } else if argument.hasPrefix("--state-dir=") {
-                // Same `--key=value` shape as --socket-path, same validation:
-                // one `StateRootArgument` rule set decides both forms, so the
-                // two spellings cannot disagree about what is a root.
-                let value = String(argument.dropFirst("--state-dir=".count))
-                switch StateRootArgument(raw: value) {
-                case .named(let root):
-                    options.stateDir = root
-                case .rejected(let reason):
-                    return .error("--state-dir \(reason)")
-                }
-            } else {
-                return .error("unknown argument: \(argument)")
-            }
+            // Every `--key=value` spelling was already split at the top of this
+            // function, so an argument reaching here is one this parser does not know.
+            return .error("unknown argument: \(argument)")
         }
         index += 1
     }
@@ -336,14 +332,23 @@ private func printUsage() {
                                  file, a directory or a symlink here is a fatal
                                  refusal and is never removed.
         --verbose, -v         Log frames and state transitions to stderr
-        --grant-accessibility  Onboarding: prompt for accessibility permission
+        --grant-accessibility  Onboarding: ask for accessibility permission **for the
+                                 process running this command** — not for the daemon,
+                                 whose seat GP_E_AX_UNAVAILABLE is about. It blocks up
+                                 to 300s waiting for a person, so it is not an
+                                 agent-runnable fix; for the daemon's own seat use
+                                 --request-permission accessibility.
         --check-screen-permission   Print screen recording permission state
                                  (granted | notDetermined) and exit — the API behind
                                  this seat answers only "is it on", so a seat that is
                                  switched off and one that was never asked print the
                                  same word; nothing here may claim the system decided
         --guide-screen-permission   Prompt for screen recording permission
-                                 (no-op when already granted) and exit
+                                 (no-op when already granted) and exit; exit 0 only
+                                 when the seat reads granted afterwards, 1 for every
+                                 other reading — the same rule --request-permission
+                                 follows, because a script that branches on the code
+                                 must not read a failed onboarding as a grant.
         --check-input-permission    Print input monitoring permission state
                                  (granted | notDetermined | unverifiable) and exit —
                                  unverifiable means "a request went out this run and
@@ -379,7 +384,12 @@ private func printUsage() {
                                  The JSON is printed either way: the report is the
                                  answer, the exit code is the verdict on it.
         --check-developer-tools     Probe debugger capability (launch/attach
-                                 three-state JSON, P6 §7); exit 0 = granted.
+                                 three-state JSON); exit 0 only when the **attach**
+                                 arm measured ok — the seat this flag answers for is
+                                 "can a debugger attach to a process", so a launch-only
+                                 success is reported as a measurement of the launch arm
+                                 and no grant. Exit 1 for a refusal and for an arm that
+                                 never reached a verdict.
                                  The only human step is the System Settings
                                  checkbox; verification is machine-owned.
         --no-c33             Disable C33 input monitoring (degrade to pure
@@ -430,10 +440,11 @@ private func printUsage() {
                                  (exit 1) rather than overwritten.
         --active-project <id>  Report whether <id> is a registered project (JSON)
                                  and exit. **This command changes nothing**: the
-                                 registry has no active-project field and no
-                                 protocol method accepts one, so the payload says
-                                 stateChanged=false. To make a project active,
-                                 call gp_attach with its projectId.
+                                 registry stores no active-project field, so the
+                                 payload says stateChanged=false. Routing is done by
+                                 the attach method — `attach`/`gp_attach` accept a
+                                 projectId and that call is what makes a project
+                                 active for the rest of the attachment.
         --recipe-validate <path>  Validate a recipe **JSON** file against the frozen
                                  kernel recipe contract (schemaVersion
                                  "glasspane.recipe/0.1-draft", steps {kind, params})
@@ -630,10 +641,11 @@ private func runCheckScreenPermission(_ probe: ScreenCapturePermissionProbe) {
     print(probe.state.rawValue)
 }
 
-private func runGuideScreenPermission(_ probe: ScreenCapturePermissionProbe) {
+private func runGuideScreenPermission(_ probe: ScreenCapturePermissionProbe) -> ScreenCapturePermissionState {
     switch probe.state {
     case .granted:
         print("screen recording permission already granted — no action needed.")
+        return .granted
     case .notDetermined:
         print("Screen recording permission has not been granted yet. A system authorization dialog is being requested now.")
         let outcome = probe.guideAccess()
@@ -643,9 +655,11 @@ private func runGuideScreenPermission(_ probe: ScreenCapturePermissionProbe) {
         } else {
             print("Screen recording is still not granted after the request — this run measured no decision, so it is not reported as a denial. Enable the entry for this app under System Settings > Privacy & Security > Screen Recording, then re-run: glasspaned --check-screen-permission")
         }
+        return probe.state
     case .denied:
         print("Screen recording permission is denied. Open System Settings > Privacy & Security > Screen Recording and enable the entry for this app, then re-run: glasspaned --check-screen-permission")
         openScreenRecordingPane()
+        return .denied
     }
 }
 
@@ -816,11 +830,13 @@ if options.checkScreenPermission || options.guideScreenPermission {
     let probe = ScreenCapturePermissionProbe()
     if options.checkScreenPermission {
         runCheckScreenPermission(probe)
+        exit(0)
     }
-    if options.guideScreenPermission {
-        runGuideScreenPermission(probe)
-    }
-    exit(0)
+    // `--guide-screen-permission` 的退出码与 `--request-permission` 同一口径：它说的
+    // 是这个席位**读成了什么**，不是"这条命令跑完了"。从前它打印"still not granted"之后
+    // 退 0，按 rc 分叉的脚本就把一次没批下来的引导读成了成功。
+    let guided = runGuideScreenPermission(probe)
+    exit(guided == .granted ? 0 : 1)
 }
 
 if options.checkDeveloperTools {
@@ -1370,7 +1386,7 @@ if options.pruneEvidence || options.evidenceStats {
                     "registryPath": registry.filePath,
                     "stateRoot": stateRoot.path,
                     "sharedArchiveOfThisRun": stateRoot.evidenceDirectory,
-                    "next": "glasspaned --prune-evidence --older-than \(options.pruneOlderThanDays) --state-dir \(stateRoot.path) — with no --project, because that command is the surface that owns \(stateRoot.evidenceDirectory); look first with --evidence-stats and count without deleting via --dry-run",
+                    "next": "glasspaned --prune-evidence --older-than \(options.pruneOlderThanDays) --state-dir \"\(stateRoot.path)\" — with no --project, because that command is the surface that owns \(stateRoot.evidenceDirectory); look first with --evidence-stats and count without deleting via --dry-run",
                     "stateChanged": false
                 ],
                 to: .standardError

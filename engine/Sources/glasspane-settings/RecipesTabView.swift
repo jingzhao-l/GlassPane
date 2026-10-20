@@ -162,9 +162,23 @@ struct RecipesTabView: View {
                 } label: {
                     Label("清空", systemImage: "trash")
                 }
+                .help("把编辑器里的文本清成空白（不落盘、不动项目）")
                 .disabled(isValidating)
 
                 Spacer()
+            }
+
+            // 禁用态自己上屏：这一排三枚按钮在校验中都会变灰，而 `.help` 说的是启用时
+            // 做什么。与项目页 `gp-prune-in-flight` 同一条规矩——按钮禁用理由与下一步都要
+            // 看得见，不是等人把鼠标停上去猜。
+            if isValidating {
+                HStack(spacing: 5) {
+                    ProgressView().controlSize(.small)
+                    Text("校验中：这一趟还没回话，模板、清空与重新校验都要等它回话后再点")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("gp-recipe-in-flight")
+                }
             }
 
             outcomeView

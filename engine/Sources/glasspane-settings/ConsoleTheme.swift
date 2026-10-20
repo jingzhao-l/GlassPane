@@ -236,6 +236,10 @@ struct PathRowView: View {
     var monospaced: Bool = true
     /// 复制按钮的稳定标识键（ASCII）：标识里放中文，自动化按标识选不中。
     var identifierKey: String = "path"
+    /// 值不是路径时为真（"未配置"这类占位句）。占位行不给复制按钮：按下去把
+    /// "未配置"三个字送进剪贴板，而按钮的说明写着"复制路径"——控件在对不是数据
+    /// 的东西动手，读的人以为拿到了路径。
+    var isPlaceholder: Bool = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -250,21 +254,23 @@ struct PathRowView: View {
                 .truncationMode(.middle)
                 .textSelection(.enabled)
                 .help(path)
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(path, forType: .string)
-            } label: {
-                // 命中区要明显大于字形：这里原先只有一枚 `.font(.caption2)` 的图标，
-                // 实测无障碍尺寸 10×12pt，人手基本点不中（面板自己的 UILayoutAudit
-                // 会把这种目标报成 smallHitTarget）。字形保持小，可点区域撑到 20×20。
-                Image(systemName: "doc.on.doc")
-                    .font(.caption2)
-                    .frame(width: 20, height: 20)
-                    .contentShape(Rectangle())
+            if !isPlaceholder {
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(path, forType: .string)
+                } label: {
+                    // 命中区要明显大于字形：这里原先只有一枚 `.font(.caption2)` 的图标，
+                    // 实测无障碍尺寸 10×12pt，人手基本点不中（面板自己的 UILayoutAudit
+                    // 会把这种目标报成 smallHitTarget）。字形保持小，可点区域撑到 20×20。
+                    Image(systemName: "doc.on.doc")
+                        .font(.caption2)
+                        .frame(width: 20, height: 20)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .help("复制路径")
+                .accessibilityIdentifier("gp-copy-\(identifierKey)")
             }
-            .buttonStyle(.borderless)
-            .help("复制路径")
-            .accessibilityIdentifier("gp-copy-\(identifierKey)")
         }
     }
 }

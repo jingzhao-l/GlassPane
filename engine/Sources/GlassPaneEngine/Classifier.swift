@@ -84,7 +84,7 @@ public enum Classifier {
             // T8: the window stayed silent but events landed late (async timing).
             if handlerProbe.hitCount == 0 && (stateChanged ?? false) == false && handlerProbe.lateCount > 0 {
                 return outcome(.t8, path: path, evidence: evidenceSummary,
-                    anomaly: "async timing: no probe signal inside the act window but \(handlerProbe.lateCount) late handler arrival(s) followed (windowed attribution §2.3)",
+                    anomaly: "async timing: no probe signal inside the act window but \(handlerProbe.lateCount) late handler arrival(s) followed",
                     next: "inspect the handler for async dispatch (\(handlerProbeSummary(handlerProbe))); shorten the settle interval or await the async continuation before asserting")
             }
             // T4 needs a decidable state channel; without stateDiff it is not
