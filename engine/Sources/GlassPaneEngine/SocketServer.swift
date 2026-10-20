@@ -163,6 +163,14 @@ public final class SocketServer {
     }
 
     private func bindAndListen() throws -> Int32 {
+        // `bind()` follows a symlink in the leaf: `~/.glasspane/engine.sock -> /elsewhere/x`
+        // creates the listener at the target, the 0600 chmod acts through the link, and the
+        // unlink on shutdown removes the link. Neither of the two existing name guards can
+        // see it — they both run on an EADDRINUSE path, and this shape binds successfully.
+        // The name the daemon publishes has to be one it owns, measured before the bind.
+        guard DaemonProbe.nameIsClearableSocketName(socketPath) else {
+            throw SocketErrorResponse.nameOccupied(DaemonProbe.nonSocketNameDescription(socketPath))
+        }
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
             throw SocketErrorResponse.system(errno, "socket()")

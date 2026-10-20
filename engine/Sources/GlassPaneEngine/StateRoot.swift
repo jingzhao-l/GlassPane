@@ -134,6 +134,18 @@ public struct StateRoot: Equatable {
     /// Nothing is created here and nothing is deleted: a missing path returns
     /// nil (there is no exposure in a file that is not there), and a file the
     /// caller cannot chmod is reported, not "recreated".
+    /// `lstat` only: a leaf that is a symlink has no mode this sweep may claim to have
+    /// tightened, because chmod would act on whatever it points at. Absent is not a
+    /// defect (the writers create it); a link is, and it is said rather than followed.
+    static func leafSymlinkDefect(_ directory: String) -> String? {
+        var info = stat()
+        guard lstat(directory, &info) == 0 else { return nil }
+        guard (info.st_mode & S_IFMT) == S_IFLNK else { return nil }
+        return "\(directory) is a symlink — its owner-only mode cannot be set without acting on "
+            + "the file or directory it points at, which this root does not own. Nothing was chmod-ed here; "
+            + "point --state-dir at a real directory this account owns"
+    }
+
     public static func isolateFile(at path: String) -> String? {
         // One probe, two very different failures, and the difference is read out
         // of the error rather than from a second `fileExists` call: a file that
@@ -218,6 +230,16 @@ public struct StateRoot: Equatable {
     @discardableResult
     public func tightenPermissions(log: EngineLog) -> [String] {
         var notes: [String] = []
+        // `stat`/`chmod` both follow the leaf symlink, so a `--state-dir` naming
+        // `~/.glasspane -> /somewhere/else` would tighten the *target* tree and then
+        // exit 1 on the bind refusal — a run that changes nothing, changing something.
+        // The two writers already refuse this shape (`SocketDirectoryRule` for the
+        // socket parent, `EvidenceStore.nameIsUsableArchiveDirectory` for the archive);
+        // the sweep holds the same line, measured with `lstat` before any chmod.
+        if let defect = Self.leafSymlinkDefect(path) {
+            log.error("state permission not isolatable — \(defect)")
+            return [defect]
+        }
         var info = stat()
         if stat(path, &info) == 0 {
             if chmod(path, mode_t(0o700)) != 0 {
@@ -236,15 +258,20 @@ public struct StateRoot: Equatable {
             log.info("state root \(path) does not exist yet — nothing to tighten")
             return []
         }
+        // The archive directory is judged before it is walked: a symlink there would
+        // send the file sweep into a tree this root does not own.
+        let archiveDefect = Self.leafSymlinkDefect(evidenceDirectory)
         let files = [projectsFile, approvalsFile, installerDaemonLogFile, updateLogFile]
-            + (Self.jsonFiles(in: evidenceDirectory))
+            + (archiveDefect == nil ? Self.jsonFiles(in: evidenceDirectory) : [])
         for file in files {
             if let defect = Self.isolateFile(at: file) {
                 notes.append(defect)
             }
         }
         // The archive directory itself (0700), separate from the root.
-        if stat(evidenceDirectory, &info) == 0, chmod(evidenceDirectory, mode_t(0o700)) != 0 {
+        if let defect = archiveDefect {
+            notes.append(defect)
+        } else if stat(evidenceDirectory, &info) == 0, chmod(evidenceDirectory, mode_t(0o700)) != 0 {
             notes.append("evidence directory \(evidenceDirectory): chmod(0700) failed: \(String(cString: strerror(errno)))")
         }
         for note in notes {

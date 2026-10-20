@@ -39,7 +39,16 @@ public final class Dispatcher {
                 return response(id: request.id, error: error)
             } catch {
                 log.error("unhandled engine error: \(error)")
-                let gpError = GPError(code: .internalError, message: "\(error)")
+                // The escaped error's own text is not put on the wire: a Foundation
+                // `NSError` description carries absolute paths — the state root, the
+                // evidence archive, the home directory — and this frame reaches any
+                // same-user process holding the socket, including the loopback gateway.
+                // The type name is kept because it is the part that helps a reader, and
+                // the full text stays where the remedy points: the daemon's stderr log.
+                let gpError = GPError(
+                    code: .internalError,
+                    message: "unhandled engine error of type \(type(of: error)); its own description names files this frame does not publish"
+                )
                 return response(id: request.id, error: gpError)
             }
         }
