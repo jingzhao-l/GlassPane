@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import { judgeTagReady, tagShapeOk } from '../../scripts/assert-tag-ready.mjs';
 import { inertExclusions, trackedEntries, EXCLUDED_PREFIXES } from '../../scripts/make-release-archive.mjs';
-import { check as checkDocs, DOCS } from '../../scripts/check-doc-links.mjs';
+import { check as checkDocs, markdownTableProblems, DOCS } from '../../scripts/check-doc-links.mjs';
 import { judgeAnchor, judgeStagedAnchor, readAnchor, recordAnchor, releaseSigningFingerprint, trustFilePath } from '../lib/trust.js';
 import { PINNED_PRIMARY_FINGERPRINT } from '../lib/signature.js';
 import { CODES } from '../lib/codes.js';
@@ -136,6 +136,117 @@ test('a registered document that is gone is a problem, and zero documents cannot
     const real = checkDocs();
     assert.deepEqual(real.problems, [], `main 上的文档闸不该红：${JSON.stringify(real.problems)}`);
     assert.ok(DOCS.length > 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// MARK: - 表格形状：渲染时才错的那类缺陷
+//
+// 下面六条都打在 `check-doc-links.mjs` 的 `markdownTableProblems` 上。这条规则的存在理由是本轮
+// 在自己的台账里中招两处、回扫全仓又抓到 13 行，而死链/锚点/双语/主张四道判据对此全都无感。
+
+test('an unescaped pipe inside a table cell is a problem, and the escaped one is not', () => {
+  const dir = tempRoot('mdtable');
+  const write = (rel, body) => {
+    const abs = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, body);
+  };
+  try {
+    const bad = '| # | 判据 | 处置 |\n|---|---|---|\n| A | 或值 `x || y` 被放过 | 已修 |\n';
+    write('bad.md', bad);
+    const p = markdownTableProblems({ rootDir: dir }).problems.filter((s) => s.includes('bad.md'));
+    assert.equal(p.length, 1, JSON.stringify(p));
+    assert.match(p[0], /bad\.md:3/, '要报得出行号，否则读者只能自己数');
+    assert.match(p[0], /5 格而表头是 3 格/, p[0]);
+    // 对照：同一张表把格内竖线转义之后必须完全沉默，否则这条规则只是永远红。
+    write('bad.md', bad.replace('`x || y`', '`x \\|\\| y`'));
+    assert.deepEqual(markdownTableProblems({ rootDir: dir }).problems, [], '转义过的形状必须放行');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a table with no separator row is not a table to the renderer, and that is reported', () => {
+  const dir = tempRoot('mdsep');
+  try {
+    fs.writeFileSync(path.join(dir, 'nosep.md'), '| a | b |\n| 1 | 2 |\n');
+    const out = markdownTableProblems({ rootDir: dir }).problems;
+    assert.equal(out.length, 1, JSON.stringify(out));
+    assert.match(out[0], /没有竖线分隔行/, out[0]);
+    // 对照：孤零零一行 `|a|b|` 不是表格，不该红。
+    fs.rmSync(path.join(dir, 'nosep.md'));
+    fs.writeFileSync(path.join(dir, 'lone.md'), '| a | b |\n正文继续说话\n');
+    assert.deepEqual(markdownTableProblems({ rootDir: dir }).problems, [], '单行不判，否则任何竖线开头的正文都是假红');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a separator row whose cell count disagrees with the header is its own problem', () => {
+  const dir = tempRoot('mdsepcount');
+  try {
+    fs.writeFileSync(path.join(dir, 'x.md'), '| a | b | c |\n|---|---|\n| 1 | 2 | 3 |\n');
+    const out = markdownTableProblems({ rootDir: dir }).problems;
+    assert.equal(out.length, 1, JSON.stringify(out));
+    assert.match(out[0], /分隔行是 2 格，表头是 3 格/, out[0]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an ASCII table inside a code fence is content, not a table', () => {
+  // 这一条是"误红的闸会被放宽"的防线：围栏里的对齐图常按内容补空格，行与行格数本来就不同。
+  const dir = tempRoot('mdfence');
+  try {
+    fs.writeFileSync(path.join(dir, 'f.md'), '```\n| 左 | 右 |\n| 很长的一段 | x |\n| a | b | c |\n```\n');
+    const r = markdownTableProblems({ rootDir: dir });
+    assert.deepEqual(r.problems, [], JSON.stringify(r.problems));
+    assert.equal(r.tables, 0, '围栏里的段数不该被数进表格总数');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a row that opens with a pipe but never closes it is reported', () => {
+  const dir = tempRoot('mdtrunc');
+  try {
+    fs.writeFileSync(path.join(dir, 't.md'), '| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4\n');
+    const out = markdownTableProblems({ rootDir: dir }).problems;
+    assert.ok(out.some((s) => /不以竖线结尾/.test(s)), JSON.stringify(out));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the repository as shipped has every table row agree, and the gate counts them', () => {
+  const { problems, tables, files } = markdownTableProblems({ rootDir: ROOT });
+  assert.deepEqual(problems, [], `main 上不该有坏表格：${JSON.stringify(problems.slice(0, 5))}`);
+  // 两个分母都要有读者：零张表 / 极少文件意味着扫描没走到任何地方（路径规则变了，或 SKIP 名单
+  // 吞掉了全仓），那是一种"永远绿"的假绿。
+  assert.ok(files > 100, `只走到 ${files} 份 markdown：本仓自己的文档就有 110+ 份`);
+  assert.ok(tables > 200, `只数到 ${tables} 张表格：这条闸的红与绿全靠它有覆盖面`);
+});
+
+test('the vendored fork package tree is out of scope, and the rest of the tree is not', () => {
+  // 跳过 `harness/glasspane-harness/packages/**` 是一次**范围决定**，不是一句注释：上游 bump
+  // 不该能红在本仓的闸上（那种红的唯一修法是放宽本闸）。所以两侧都要能测出来——
+  // 只测"外面的被抓"会放过一个把整仓都跳过去了的实现，只测"里面的沉默"会放过一个永不判的实现。
+  const dir = tempRoot('mdscope');
+  const broken = '| a | b |\n|---|---|\n| 1 | 2 | 3 |\n';
+  try {
+    const vendored = 'harness/glasspane-harness/packages/opencode/docs/x.md';
+    const ours = 'harness/glasspane-harness/docs/y.md';
+    for (const rel of [vendored, ours]) {
+      const abs = path.join(dir, rel);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, broken);
+    }
+    const r = markdownTableProblems({ rootDir: dir });
+    assert.equal(r.problems.length, 1, JSON.stringify(r.problems));
+    assert.match(r.problems[0], /^harness\/glasspane-harness\/docs\/y\.md:3/, r.problems[0]);
+    assert.ok(!r.problems.some((s) => s.includes('packages/')), 'vendored 树里的坏表格被判红了：范围决定失效');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

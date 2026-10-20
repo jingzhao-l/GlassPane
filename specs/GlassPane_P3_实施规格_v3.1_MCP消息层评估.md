@@ -589,7 +589,7 @@ public struct DegradationVerdict: Equatable {
 | P2-B3 | 窗口与生命周期 | 64 上限 FIFO 修剪；reset 清空；longSession 标记 | ✓ 已实现并单测通过（2026-09-17，70→64 修剪、reset→0、320s 跨度标记） |
 | P2-B4 | 探针真实读取 | getpid 自探测内存/句柄均 > 0；死亡 pid → nil | ✓ 已实现并单测通过（2026-09-17，getpid 自验；不存在的 pid 双信号均 nil——LISTFDS 尺寸探针不校验 pid，改为以 TASKINFO 存在性联动，防"死进程冒充零句柄"） |
 | P2-B5 | act 集成零回归 | 无 tracker 时与 v2.0 一致；平坦序列不升级 | ✓ 已实现并单测通过（2026-09-17，无 tracker→normal 无前缀；平坦双轮 act→不升级） |
-| P2-B6 | act 联合升级 | 双信号漂移 → evidence `.degraded` + `degradation|` reason | ✓ 已实现并单测通过（2026-09-17，ping 2→5 + 内存 1K→5K→第二轮 evidence 升级 .degraded，reason 含 memory+ping） |
+| P2-B6 | act 联合升级 | 双信号漂移 → evidence `.degraded` + `degradation\|` reason | ✓ 已实现并单测通过（2026-09-17，ping 2→5 + 内存 1K→5K→第二轮 evidence 升级 .degraded，reason 含 memory+ping） |
 | P2-B7 | Classifier T9 | degradation 前缀包 → 诊断类 T9 | ✓ 已实现并单测通过（2026-09-17，前缀包→T9；无前缀不判 T9；unconfirmed 保持 INCONCLUSIVE） |
 | P2-B8 | 全量回归 | engine + mcp-shell 全用例不回归 | ✓ 回归通过（2026-09-17：engine 223 用例 0 失败 1 跳过；mcp-shell 56 用例全绿） |
 

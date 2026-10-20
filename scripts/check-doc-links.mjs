@@ -612,6 +612,9 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
   problems.push(...claimDrift({ rootDir }))
   // 尺子层自己的出处指针。它不在"对外文档"集合里，所以从前坏了也没人看。
   problems.push(...rulerProvenance({ rootDir }))
+  // markdown 表格形状（全仓 markdown，不只是 DOCS 登记表；判据见 `markdownTableProblems`）。
+  const shape = markdownTableProblems({ rootDir })
+  problems.push(...shape.problems)
 
   for (const [a, b] of MIRROR_PAIRS) {
     const ea = fs.existsSync(path.join(rootDir, a))
@@ -671,7 +674,7 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
       }
     }
   }
-  return { docs: present.length, links, external, problems }
+  return { docs: present.length, links, external, tables: shape.tables, mdFiles: shape.files, problems }
 }
 
 /**
@@ -723,6 +726,113 @@ export function shellResidue({ rootDir = ROOT, docs = DOCS } = {}) {
   return problems
 }
 
+/**
+ * markdown 表格形状：一张表里每一行的格数必须一样，且第二行必须是 `|---|` 那道分隔行。
+ *
+ * WHY（本轮在自己的台账里中招两处，回扫全仓又抓到 13 行）。某一格里写了个没转义的 `|`，
+ * 源码看着是整齐的一行，**渲染出来**却被切成多一格——那一行的"处置"跑到别的列里去，而表格里的
+ * 每个中文分句都还在，谁也不会觉得少了什么。死链、锚点、双语对偶、可复算主张四道判据对此全部
+ * 无感：文档还是那份文档。中招的两条正是本轮台账自己（`launch == .ok || attach == .ok` 与
+ * `… | sh -s -- --no-prompt`），说明写的人（包括本轮的我）需要的是机器提醒而不是记住它。
+ *
+ * 三条判据的取舍：
+ * ① 围栏内不扫。``` 里的 ASCII 表是文档的正常内容（这一页就有），把它当表格判是一道会误红的闸，
+ *    而误红的闸的下场是被放宽——那才是真的失去保护。
+ * ② `\|` 先折成占位符再数格数，所以"转义过的竖线"既不算分隔符也不算缺陷。
+ * ③ 分隔行与表头不齐也是问题：GFM 没有分隔行就不把这一段当表格渲染，读者看到的是一行裸竖线。
+ *    扫描集合是**全部** markdown，除了派生目录与 vendored 的 fork 包树（见 `MD_SKIP_ROOTS`），
+ *    不是 DOCS 登记表——登记表管的是"对外文档的链接与主张"，而表格形状在所有本仓自己的文档里
+ *    都会坏给同一批读者看。`harness/glasspane-harness/packages/**` 是上游 fork 的产品源码树：
+ *    那里的文档归那条线（它有 10:30 的独立任务与独立尺子），把它们扫进来，就等于让一次上游
+ *    bump 能红在本仓的闸上——而那种红的唯一修法是放宽本闸。
+ */
+const MD_SKIP_DIRS = new Set(['node_modules', '.build', '.git', '.external', '.swiftpm', 'DerivedData', 'dist'])
+const MD_SKIP_ROOTS = ['harness/glasspane-harness/packages/']
+const MD_MAX_DEPTH = 14
+const CELL_PLACEHOLDER = '\u0001'
+
+function markdownFilesUnder(rootDir) {
+  const out = []
+  const walk = (dir, depth) => {
+    if (depth > MD_MAX_DEPTH) return
+    let entries
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      if (MD_SKIP_DIRS.has(e.name)) continue
+      const abs = path.join(dir, e.name)
+      const rel = path.relative(rootDir, abs).split(path.sep).join('/')
+      if (MD_SKIP_ROOTS.some((r) => rel.startsWith(r))) continue
+      if (e.isDirectory()) walk(abs, depth + 1)
+      else if (e.name.endsWith('.md')) out.push(abs)
+    }
+  }
+  walk(rootDir, 0)
+  return out.sort()
+}
+
+const mdRow = (line) => /^\s*\|.*\|\s*$/.test(line)
+const mdSeparatorRow = (line) => /^\s*\|(?:\s*:?-{2,}:?\s*\|)+\s*$/.test(line)
+const mdCells = (line) => line.replace(/\\\|/g, CELL_PLACEHOLDER).split('|').length - 2
+
+export function markdownTableProblems({ rootDir = ROOT } = {}) {
+  const problems = []
+  const under = markdownFilesUnder(rootDir)
+  let tables = 0
+  for (const abs of under) {
+    const rel = path.relative(rootDir, abs).split(path.sep).join('/')
+    let text
+    try {
+      text = fs.readFileSync(abs, 'utf8')
+    } catch {
+      continue
+    }
+    const lines = text.split('\n')
+    let fenced = false
+    let i = 0
+    while (i < lines.length) {
+      const line = lines[i]
+      if (/^\s*(?:```|~~~)/.test(line)) { fenced = !fenced; i += 1; continue }
+      if (fenced || !mdRow(line)) { i += 1; continue }
+      const header = mdCells(line)
+      const next = lines[i + 1] ?? ''
+      if (!mdRow(next)) {
+        // 孤行一段：只有它自己是 `|…|` 形状，没有第二行跟进——不是表格，不判。
+        i += 1
+        continue
+      }
+      if (!mdSeparatorRow(next)) {
+        problems.push(`${rel}:${i + 2} 这一段看着像表格（连续两行竖线开头竖线结尾）却没有竖线分隔行：`
+          + 'GFM 因此不把它渲染成表格，读者拿到的是一整行裸竖线')
+        i += 1
+        continue
+      }
+      tables += 1
+      if (mdCells(next) !== header) {
+        problems.push(`${rel}:${i + 2} 分隔行是 ${mdCells(next)} 格，表头是 ${header} 格：两者不齐时渲染按短的裁`)
+      }
+      let j = i + 2
+      for (; j < lines.length && mdRow(lines[j]); j += 1) {
+        if (mdCells(lines[j]) !== header) {
+          problems.push(`${rel}:${j + 1} 这一行是 ${mdCells(lines[j])} 格而表头是 ${header} 格——`
+            + '格内的竖线要写成 `\\|`，否则渲染时这一行被切到别的列里去')
+        }
+      }
+      i = j
+    }
+    // 上一行是表格行、这一行以 `|` 开头却不以 `|` 结尾 = 被裁断的一行
+    for (let k = 1; k < lines.length; k += 1) {
+      if (/^\s*\|/.test(lines[k]) && !/\|\s*$/.test(lines[k]) && mdRow(lines[k - 1])) {
+        problems.push(`${rel}:${k + 1} 这行以竖线开头却不以竖线结尾，而它上面就是表格行：这一格在渲染时不会闭合`)
+      }
+    }
+  }
+  return { problems, tables, files: under.length }
+}
+
 // 只有被当成命令直接执行时才跑 CLI。这段此前是无条件执行的：`import` 它的那条测试子进程
 // 会在登记任何用例之前就被 `process.exit(0)` 带走，于是 `node --test` 报
 // "tests 1 / pass 1"——一份写了 4 条用例的文件以零条用例的身份通过。lint 脚本必须可以
@@ -745,10 +855,10 @@ function invokedAsEntrypoint() {
 }
 
 if (invokedAsEntrypoint()) {
-  const { docs, links, external, problems } = check()
-  process.stdout.write(`文档 ${docs} 份 | 仓库内链接 ${links} 条 | 外链 ${external} 条（不请求）\n`)
+  const { docs, links, external, tables, mdFiles, problems } = check()
+  process.stdout.write(`文档 ${docs} 份 | 仓库内链接 ${links} 条 | 外链 ${external} 条（不请求）| markdown 表格 ${tables} 张（扫 ${mdFiles} 份 markdown）\n`)
   if (problems.length === 0) {
-    process.stdout.write('OK：无死链、无失效锚点、双语成对完整、可复算主张与真源一致。\n')
+    process.stdout.write('OK：无死链、无失效锚点、双语成对完整、可复算主张与真源一致、每张表格每行格数一致。\n')
     process.exit(0)
   }
   process.stderr.write(`发现 ${problems.length} 处问题：\n`)

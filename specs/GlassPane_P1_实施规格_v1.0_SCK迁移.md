@@ -92,7 +92,7 @@ daemon 新增 `--check-screen-permission`（只读检测输出三态）与 `--gu
 | P1-A3 | 权限三态命令 | `--check-screen-permission` 输出合法枚举；`--guide-screen-permission` 在已授权态 no-op |
 | P1-A4 | 降级保持 | 无权限时 `captureWindow` 抛 `pixelCaptureDenied`，evidence 的 `pixelDiff==null` + `circuitBreaker.level==1` |
 | P1-A5 | 纯逻辑单测回归 | 既有 96 用例全绿；新增权限状态解析单测（注入 fake） |
-| P1-A6 | CI 兼容 | engine 在 macos-latest（macOS 13 runner）能 `swift build`（路径 B 编译分支存在） | ✓ 路径 B 分支已实现并编译通过（2026-09-16） |
+| P1-A6 | CI 兼容 | engine 在 macos-latest（macOS 13 runner）能 `swift build`（路径 B 编译分支存在）——✓ 路径 B 分支已实现并编译通过（2026-09-16） |
 
 > 注：macos-latest runner 现为 macOS 14+，路径 A 编译；macOS 13 的路径 B 分支已编译保证（`SCKCapturer.captureViaStream`/`snapViaStream`/`StreamFrameBridge` 全链路落地），真机首帧验证延后至有 13 环境的 P1 批次（如实记录此边界）。
 
