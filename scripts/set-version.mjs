@@ -5,10 +5,10 @@
  *   node scripts/set-version.mjs 1.2.0
  *
  * 三步：① 只读试算（任一位置异常就一行都不写）→ ② 改写全部派生位点 + 重生成
- * 三个 lockfile，失败则整批回滚快照 → ③ 用与 CI 同一套规则自证。
+ * `LOCK_DIRS` 列出的那些 lockfile，失败则整批回滚快照 → ③ 用与 CI 同一套规则自证。
  *
- * 快照的范围 = ② 会碰到的全部文件：`SITES` 里每一个声明位点，加上三个
- * package-lock.json 在重生成**之前**的文本。顺序是关键——快照若晚于重生成，回滚就只会
+ * 快照的范围 = ② 会碰到的全部文件：`SITES` 里每一个声明位点，加上 `LOCK_DIRS` 里每一份
+ * lockfile 在重生成**之前**的文本。顺序是关键——快照若晚于重生成，回滚就只会
  * 把位点退回旧版本、把已经重生成的 lock 留在新版本上（见 ② 处注释）。
  *
  * 这里不写位点个数：那条数字每加一个位点就会漂移一次，而它已经在 ITERATE.md 上漂移过
@@ -119,7 +119,7 @@ if (!skipLock) {
 // 调用 `drift(arg)`，lock 条目照样算漂移——于是带 `--no-lock` 且 lock 是旧版本时脚本
 // 必然回滚、永远不可能成功：usage 里 advertised 的旗标其实做不到它说的事。选择保留并
 // 修正旗标（而不是删掉它），因为"只改位点、先不动 lock"是发布前排查时真要用的一档。
-// 跳过的只有 lock 条目；10 个声明位点仍然全查，仍然是一个都不许漂。
+// 跳过的只有 lock 条目；`SITES` 的位点仍然全查，仍然是一个都不许漂。
 const remaining = drift(arg, { locks: !skipLock })
 if (remaining.length > 0) {
   rollback(`改写后仍与 ${arg} 漂移：\n${remaining.map((r) => `  - ${r.kind} ${r.where}: ${r.actual} ≠ ${r.target}`).join('\n')}`)
@@ -128,7 +128,7 @@ process.stdout.write(`\n版本线已统一到 ${arg}，且按 check-version 规�
 if (skipLock) {
   // 自证没看 lock，不代表 lock 没问题——这行必须说出来，否则"通过"两个字会被读成
   // "CI 也会通过"，而 CI 跑的 check-version 是看 lock 的。
-  process.stdout.write(`注意：--no-lock 跳过了 lockfile 重生成，三个 package-lock.json 仍是旧版本。\n`)
+  process.stdout.write(`注意：--no-lock 跳过了 lockfile 重生成，${LOCK_DIRS.length} 份 package-lock.json 仍是旧版本。\n`)
   process.stdout.write('      node scripts/check-version.mjs 会因 lock 条目报漂移；发布前必须去掉 --no-lock 重跑一次。\n')
 }
 process.stdout.write('下一步（发布属 owner 显式动作，本脚本不代做）：\n')

@@ -221,7 +221,7 @@ export function truthVersion() {
 /**
  * 全量核对：返回漂移列表（空数组 = 版本线一致）。
  *
- * `locks: false` 只核对 10 个声明位点、跳过 lock 条目。这不是给检查器开的后门，
+ * `locks: false` 只核对 `SITES` 里的声明位点、跳过 lock 条目。这不是给检查器开的后门，
  * 而是为了让 `set-version.mjs --no-lock` 不自相矛盾：那个旗标的作用就是**不**重生成
  * lock，而 ③ 自证一步原先无条件调用 `drift()`，于是带 `--no-lock` 且 lock 是旧的时
  * 候脚本必然回滚、永远不可能成功——一个 advertised-but-unsatisfiable 的旗标。

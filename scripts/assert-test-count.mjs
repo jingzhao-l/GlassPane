@@ -10,7 +10,8 @@
  *
  * 判据用**两种runner各自的行**：XCTest 打 `Executed N tests, with M failures (…)`，
  * Swift Testing 打 `Test run with N tests in M suites`。只数一种，另一种清零就看不见。
- * 两种都必须至少出现一次，且各自求和 ≥ 给定下限。
+ * 两种都必须至少出现一次，且各自求和 ≥ 给定下限。**每份日志还要各自至少执行一条**——
+ * 合起来数会让第二份空日志躲在第一份的计数后面（2026-10-20 实测：probe 那条线清零仍绿）。
  *
  * 下限为什么由调用方给：Swift 那条线一直有按设计跳过的真机项，数量会随环境动；这里要挡的是
  * "根本没有用例在跑"，不是"少了几条"，所以传一个保守的 1，而不是把一个会随正常改动衰减的
@@ -25,8 +26,11 @@ import fs from 'node:fs'
 // 以及带跳过子句的总计行 `Executed 1065 tests, with 3 tests skipped and 0 failures`。
 // 只匹配前一种会把总计行整个漏掉——那样一来"有失败"也只会在套件行上看得见，
 // 而 XCTest 恰恰把最终失败数报在总计行上。
-const XCUITEST = /Executed (\d+) tests, with(?: (\d+) tests? skipped and)? (\d+) failures?/g
-const SWIFT_TESTING = /Test run with (\d+) tests in (\d+) suites/
+// `tests?` / `failures?` / `suites?` 这几个单数不是凑数：一条只有 1 个用例或 1 个 suite 的
+// 线（2026-10-20 实测：`Test run with 2 tests in 1 suite`）在复数写法下一行都匹配不上，
+// 于是"这一半 runner 没出声"——把一个真跑了的套件读成零。
+const XCUITEST = /Executed (\d+) tests?, with(?: (\d+) tests? skipped and)? (\d+) failures?/g
+const SWIFT_TESTING = /Test run with (\d+) tests? in (\d+) suites?/
 
 function usage(message) {
   if (message) process.stderr.write(`error: ${message}\n`)
@@ -50,7 +54,7 @@ let swiftTestingSum = 0
 let xcuitestSeen = 0
 let swiftTestingSeen = 0
 let failures = 0
-const texts = []
+const silent = []
 
 for (const file of files) {
   let text
@@ -60,11 +64,18 @@ for (const file of files) {
     process.stderr.write(`error: cannot read ${file}: ${error.message}\n`)
     process.exit(2)
   }
-  texts.push(text)
-  // 总计行会重复打（同一份数字出现两次），所以取**最大值**而不是求和，免得把一条跑成两条。
+  // Per-file measurement, then pooled for the floor. Pooling the *shapes* is what let the
+  // probe lane run zero cases and stay green: `engine`'s log alone satisfies "both runners
+  // spoke", so a second log contributing nothing was invisible. Each log must therefore
+  // show at least one executed test of at least one shape — `engine/probe` is a Swift
+  // Testing-only package (measured: no `Executed N tests` line in its log), so requiring
+  // both shapes *per file* would be a false requirement, and requiring none would be this
+  // same gate's own bug.
+  let fileTests = 0
   for (const match of text.matchAll(XCUITEST)) {
     xcuitestSeen += 1
     xcuitestSum = Math.max(xcuitestSum, Number(match[1]))
+    fileTests = Math.max(fileTests, Number(match[1]))
     // 套件行与总计行都会计入，可能重复；这里只需要"> 0 就是红"，不需要精确失败条数。
     failures += Number(match[3])
   }
@@ -72,18 +83,23 @@ for (const file of files) {
   if (testing) {
     swiftTestingSeen += 1
     swiftTestingSum = Math.max(swiftTestingSum, Number(testing[1]))
+    fileTests = Math.max(fileTests, Number(testing[1]))
   }
+  if (fileTests === 0) silent.push(file)
 }
 
 const reasons = []
 if (xcuitestSeen === 0) reasons.push('日志里没有一行 XCTest 的 `Executed N tests`（那条线一条用例都没跑，或跑错了 target）')
 if (swiftTestingSeen === 0) reasons.push('日志里没有一行 Swift Testing 的 `Test run with N tests`（那一半 runner 没出声）')
+if (silent.length > 0) {
+  reasons.push(`这些日志一条用例都没执行：${silent.join(', ')}（合在一起的计数会把空的那份洗掉）`)
+}
 if (xcuitestSum + swiftTestingSum < floor) {
   reasons.push(`实到 XCTest ${xcuitestSum} + Swift Testing ${swiftTestingSum} < 下限 ${floor}`)
 }
 if (failures > 0) reasons.push(`日志里报了 ${failures} 条失败`)
 
-const line = `test-count[${label}]: XCTest ${xcuitestSum} 条(${xcuitestSeen} 行) · Swift Testing ${swiftTestingSum} 条 · floor ${floor}`
+const line = `test-count[${label}]: XCTest ${xcuitestSum} 条(${xcuitestSeen} 行) · Swift Testing ${swiftTestingSum} 条 · floor ${floor} · ${files.length} 份日志(${silent.length} 份空)`
 if (reasons.length > 0) {
   process.stderr.write(`${line}\n`)
   for (const reason of reasons) process.stderr.write(`  ✗ ${reason}\n`)

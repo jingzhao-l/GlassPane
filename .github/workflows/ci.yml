@@ -7,11 +7,13 @@ on:
     branches: [main]
 
 # 最小权限（与 release.yml、harness-contract.yml 同一口径）：这里不声明，每个 PR 触发的
-# job 就继承仓库默认权限（组织级常为 write）。逐 job 核过：swift / bridge / kernel /
-# mcp-shell / install-gate / docs / version-line / harness-rulers / publish-gate-selftest /
-# workflow-lint 这 10 个 job 用到的 action 只有 checkout、setup-python/setup-node 与那条钉死
-# SHA 的 setup-bun，全文没有 upload-artifact、没有 GITHUB_TOKEN、没有 `gh pr|api|release`、
-# 没有 git push/tag、没有评论或 release 写入。
+# job 就继承仓库默认权限（组织级常为 write）。逐 job 核过：下面每一条 job（swift、bridge、
+# mcp-shell、install-gate、docs、version-line、harness-rulers、publish-gate-selftest、
+# workflow-lint）用到的 action 只有 checkout、setup-python/setup-node 与那条钉死 SHA 的
+# setup-bun，全文没有 upload-artifact、没有 GITHUB_TOKEN、没有 `gh pr|api|release`、
+# 没有 git push/tag、没有评论或 release 写入。曾经写在这里的 `kernel` job 已随内核镜像
+# 退场（2026-10-18），计数也一并去掉——条数由 `node scripts/check-workflows.mjs` 数出来，
+# 一个抄在注释里的数字每删一条 job 就会漂一次。
 # harness-rulers 里的 `git clone` 拉的是公开的上游参照仓，匿名即可完成，不需要 token；
 # 其余步骤只读工作树、跑本地脚本。所以顶层一条 `contents: read` 覆盖全部 job。
 permissions:

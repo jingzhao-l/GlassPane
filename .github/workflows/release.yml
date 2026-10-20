@@ -240,12 +240,21 @@ jobs:
           fi
           gh release view "$REF_NAME" --json tagName,isDraft,targetCommitish \
             --jq '"release \(.tagName) 已对外：draft=\(.isDraft)，target=\(.targetCommitish)"'
-          echo "已核实：draft=$DRAFT，latest=$LATEST，$ASSETS 件资产，target=$TARGET_READ（应为 $TARGET_SHA）"
-          if [ -n "$TARGET_READ" ] && [ "$TARGET_READ" != "$TARGET_SHA" ] \
+          # target 读不到 ≠ target 对上。从前这一支写作 `[ -n "$TARGET_READ" ] && …`：GitHub 回了
+          # 空串时整条判断短路，下面那句"已核实"照样打印，一格绿着说它验过一件它没读到的事。
+          # 读回的东西必须先是一枚 commit id，才有资格参与比较。
+          case "$TARGET_READ" in
+            ''|*[!0-9a-f]*)
+              echo "::error::release $REF_NAME 的 targetCommitish 读回的是「$TARGET_READ」，不是一枚 commit id：" \
+                "target 无法核实就是**没有核实**，这一版不能被说成钉在这次 checkout 的树上。"
+              exit 1 ;;
+          esac
+          if [ "$TARGET_READ" != "$TARGET_SHA" ] \
             && [ "$TARGET_READ" != "$(git rev-parse --short "$TARGET_SHA")" ]; then
             echo "::error::release $REF_NAME 的 target 读回 $TARGET_READ，不是这次 checkout 的 $TARGET_SHA——发布指向的不是被测试的那棵树。"
             exit 1
           fi
+          echo "已核实：draft=$DRAFT，latest=$LATEST，$ASSETS 件资产，target=$TARGET_READ（应为 $TARGET_SHA）"
 
   npm-publish:
     name: publish bare names with provenance

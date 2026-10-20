@@ -587,6 +587,17 @@ export function rulerProvenance({ rootDir = ROOT } = {}) {
 export function check({ rootDir = ROOT, docs = DOCS } = {}) {
   const problems = []
   const present = docs.filter((d) => fs.existsSync(path.join(rootDir, d)))
+  // 登记过却不在磁盘上的文档是**问题**，不是"本轮不归它管"。从前各支各自 `existsSync` 过滤，
+  // 于是把一份文档（或整个 MAIN_DOCS）改名/删掉，这条闸会打出 `文档 0 份 … OK` 并退 0——
+  // 零条用例通过正是本仓已经栽过两次的那个形状。
+  for (const doc of docs) {
+    if (!fs.existsSync(path.join(rootDir, doc))) {
+      problems.push(`${doc} 登记在 DOCS 里但磁盘上没有：恢复它，或把它从登记表里删掉；让它躲在 existsSync 过滤器后面，这条闸就退化成一份它不再检查任何东西的清单`)
+    }
+  }
+  if (present.length === 0) {
+    problems.push(`DOCS 的 ${docs.length} 份登记一份都不在磁盘上：这条闸什么都量不到，不许算通过`)
+  }
   const anchors = new Map(present.map((d) => [d, headingsOf(read(d, rootDir))]))
   // 锚点缓存：登记过的文档用 `anchors`，没登记的按需再算一次（见下面跨文档那一支）。
   const anchorCache = new Map()

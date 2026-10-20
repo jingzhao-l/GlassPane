@@ -178,6 +178,32 @@ export function trackedEntries({ root, git = execFileSync }) {
 }
 
 /**
+ * Which entries of the shipped exclusion list landed on nothing. Kept as a pure function so
+ * both answers are testable without packing the repository: an armed-and-empty exclusion is
+ * the shape that lets a renamed `harness/` ship ~64 MB in a signed archive while every step
+ * still exits 0, and `main()` refuses on it.
+ */
+export function inertExclusions(matched, prefixes = EXCLUDED_PREFIXES) {
+  return prefixes.filter((prefix) => !matched.includes(prefix))
+}
+
+/**
+ * The refusal as a pure function, so the wiring in `main()` is testable: returning a sentence
+ * here is what proves the caller is the one that turns it into exit 1.
+ */
+export function judgeExclusionsActive({ matched, prefixes = EXCLUDED_PREFIXES }) {
+  const inert = inertExclusions(matched, prefixes)
+  if (inert.length === 0) return { ok: true, inert }
+  return {
+    ok: false,
+    inert,
+    reason: `EXCLUDED_PREFIXES names ${inert.join(', ')}, but no tracked entry starts with any of them. `
+      + 'Either that path moved (the archive would now ship it) or the list is stale — fix the one that is '
+      + 'actually wrong; do not delete the exclusion to make this line go away.',
+  }
+}
+
+/**
  * Drop the excluded prefixes from a tracked-entry list, and say how much that took out.
  *
  * The second half is the point: an archive that quietly gets 90% smaller looks identical to an archive that
@@ -192,6 +218,11 @@ export function applyExclusions({ entries, prefixes = EXCLUDED_PREFIXES }) {
     if (prefix) excluded.push({ ...entry, prefix })
     else kept.push(entry)
   }
+  // A prefix that matched nothing stays a *reported empty exclusion* here, on purpose
+  // (`release-archive.test.mjs` pins that: the number the job prints is the thing a
+  // reviewer checks, and injected fixtures legitimately pass lists that match nothing).
+  // The refusal belongs one level up, where the shipped list is the real one — see the
+  // `EXCLUDED_PREFIXES` self-check in `main()`.
   return {
     kept,
     excluded: {
@@ -443,16 +474,27 @@ export function requiredEntries({ root, version }) {
  * while naming an entry the archive did contain. One author for the question and one for the answer, and
  * both read the same `bin` fields.
  */
-export function verifyArchive({ file, version, root }) {
+export function verifyArchive({ file, version, root, excludedPrefixes = EXCLUDED_PREFIXES }) {
   const bytes = fs.readFileSync(file)
   const entries = readTarGz(bytes).map((entry) => String(entry.name).replace(/\/+$/, ''))
   const have = new Set(entries)
   const { required } = requiredEntries({ root, version })
   const missing = required.filter((name) => !have.has(name))
-  return { entries: entries.length, bytes: bytes.length, required, missing }
+  // The other half of the question. `required` can only prove what must be present; nothing
+  // in it notices an archive that also carries the excluded tree, and every entry here sits
+  // under the single `GlassPane-<ver>/` top directory — so a `^harness/`-anchored check would
+  // match nothing and pass vacuously (this repo has been fooled by exactly that shape).
+  const prefix = `GlassPane-${version}/`
+  const leaked = entries.filter((name) => excludedPrefixes.some((p) => name.startsWith(`${prefix}${p}`)))
+  return { entries: entries.length, bytes: bytes.length, required, missing, leaked }
 }
 
-function main(argv) {
+/**
+ * The CLI. `root` is injectable for the same reason `archiveBytes` takes `prefixes`: the two
+ * refusals this function owns (an exclusion that went inert, an archive that leaks the excluded
+ * tree) live here, and a test that can only reach the pure judges would leave the wiring uncovered.
+ */
+export function main(argv, { root: rootOverride } = {}) {
   const [firstArg, second, third] = argv
   const verifying = firstArg === '--verify'
   const version = verifying ? third : firstArg
@@ -466,7 +508,7 @@ function main(argv) {
     process.stderr.write(`refusing: ${JSON.stringify(version)} is not a version this script will name a release archive with\n`)
     return 2
   }
-  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+  const root = rootOverride ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
   if (verifying) {
     let checked
     try {
@@ -480,7 +522,12 @@ function main(argv) {
       process.stderr.write(`release archive is missing ${checked.missing.length} of ${checked.required.length} required entries\n`)
       return 1
     }
-    process.stdout.write(`release archive verified: ${checked.entries} entries, ${checked.bytes} bytes, all ${checked.required.length} declared commands and schemas present\n`)
+    if (checked.leaked.length > 0) {
+      for (const name of checked.leaked.slice(0, 12)) process.stderr.write(`::error::the release archive carries ${name}, which EXCLUDED_PREFIXES says must not ship\n`)
+      process.stderr.write(`release archive leaks ${checked.leaked.length} excluded entr(ies) — the updater downloads this file on every self-update\n`)
+      return 1
+    }
+    process.stdout.write(`release archive verified: ${checked.entries} entries, ${checked.bytes} bytes, all ${checked.required.length} declared commands and schemas present, no entry under ${EXCLUDED_PREFIXES.join(' / ')}\n`)
     return 0
   }
   let first
@@ -494,6 +541,18 @@ function main(argv) {
   }
   if (!first.bytes.equals(secondPass.bytes)) {
     process.stderr.write('release archive is not reproducible: two passes over the same tree produced different bytes\n')
+    return 1
+  }
+  // The half `applyExclusions` deliberately leaves to the caller: this is the run whose
+  // prefixes are the *shipped* list, so a configured prefix that landed on nothing means
+  // `harness/` (or a file named in `EXCLUDED_PREFIXES`) moved out from under it — the
+  // signed artifact every updater downloads would grow by ~64 MB while both this step and
+  // `--verify` still exit 0. Measured cost of that shape: v1.6.1's 25 MB archive refused at
+  // 7.3 KiB/s, machine pinned to the previous version. Printed counts are for review;
+  // an armed-and-empty exclusion is a refusal.
+  const active = judgeExclusionsActive({ matched: first.excluded.prefixes })
+  if (!active.ok) {
+    process.stderr.write(`release archive refused: ${active.reason}\n`)
     return 1
   }
   fs.writeFileSync(target, first.bytes)
