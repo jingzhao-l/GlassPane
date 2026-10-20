@@ -7,14 +7,14 @@
     "fork": "fork-diff `added` files + authored (`+`) lines of `edited` vendored files, docs excluded; a hunk that differs only by a brand token is a rebranding and is not counted, and one deleted line excuses at most one re-added line (pairing is one-to-one, so 40 copies of a rebranded line bill 39)",
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
-  "observedAt": "2026-10-19",
+  "observedAt": "2026-10-20",
   "engineLoc": 27867,
   "engineFiles": 63,
   "surfaces": {
     "mcpShell": {
       "loc": 9886,
       "files": 14,
-      "ratio": 0.2091,
+      "ratio": 0.2079,
       "byFile": {
         "mcp-shell/src/tools.ts": 2812,
         "mcp-shell/src/engine-client.ts": 1616,
@@ -33,7 +33,7 @@
       }
     },
     "fork": {
-      "loc": 9524,
+      "loc": 9793,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -83,12 +83,17 @@
         {
           "file": "packages/opencode/src/tool/glasspane/index.ts",
           "kind": "added",
-          "lines": 397
+          "lines": 429
         },
         {
           "file": "packages/opencode/src/tool/glasspane/kernel.ts",
           "kind": "added",
           "lines": 567
+        },
+        {
+          "file": "packages/opencode/src/tool/glasspane/providers.ts",
+          "kind": "added",
+          "lines": 237
         },
         {
           "file": "packages/tui/src/util/tool-denial.ts",
@@ -1146,14 +1151,14 @@
           "lines": 0
         }
       ],
-      "ratio": 0.2015,
+      "ratio": 0.206,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
       },
       "testsExcluded": {
-        "files": 36,
-        "lines": 3761
+        "files": 37,
+        "lines": 4104
       },
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
@@ -1162,7 +1167,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 19410,
+  "totalToolSurfaceLoc": 19679,
   "note": null,
   "carried": null
 }

@@ -24,6 +24,8 @@ import { Effect, Schema } from "effect"
 import * as Tool from "../tool"
 import * as Daemon from "./daemon"
 import { DIMENSION_ID_LIMITS, validateDimension, validateSelector } from "./kernel"
+import { diagnoseAttribution } from "./providers"
+import type { ProviderAttribution } from "./providers"
 
 /**
  * The review dimension this call was made for, as the model declares it.
@@ -66,19 +68,27 @@ export function engineBody(params: Record<string, unknown>): Record<string, unkn
  *  `execute` returns, so a union of shapes there becomes a union the registry
  *  cannot carry. Exported for the M1 fixed-point tests (same reason as
  *  `glasspaneRow` in M5): the remedy-in-output rule is the invariant worth pinning,
- *  and a test can only pin what it can name. */
+ *  and a test can only pin what it can name.
+ *
+ *  `provider` is the registration this answer is attributed to — `{id, version, method,
+ *  requires}` for a verdict, `null` for a tool whose answer comes from no registered
+ *  judgement producer. It is carried on BOTH branches so one shape stays one shape
+ *  (`test/tool/glasspane-surface.test.ts` pins that ok and refusal key sets are equal),
+ *  and it is transcribed, not derived: the registry says it, this line repeats it.
+ */
 export function present(
   tool: string,
   method: string,
   reply: Daemon.DaemonReply,
   summary: (result: unknown) => string,
   dimension: string | null = null,
+  provider: ProviderAttribution | null = null,
 ): Tool.ExecuteResult {
-  if (!reply.ok) return refused(tool, method, reply.error, dimension)
+  if (!reply.ok) return refused(tool, method, reply.error, dimension, provider)
   return {
     title: `${tool}: ${method} ok`,
     output: summary(reply.result),
-    metadata: { ok: true, method, code: null, message: null, remedy: null, dimension, result: reply.result as object },
+    metadata: { ok: true, method, code: null, message: null, remedy: null, dimension, provider, result: reply.result as object },
   }
 }
 
@@ -89,11 +99,17 @@ export function present(
  * remedy the engine attached — the one it knows is executable — would be lost.
  * Exported for the M1 fixed-point tests, for the same reason as `present`.
  */
-export function refused(tool: string, method: string, error: Daemon.DaemonError, dimension: string | null = null): Tool.ExecuteResult {
+export function refused(
+  tool: string,
+  method: string,
+  error: Daemon.DaemonError,
+  dimension: string | null = null,
+  provider: ProviderAttribution | null = null,
+): Tool.ExecuteResult {
   return {
     title: `${tool}: ${error.code}`,
     output: `${error.message}\nremedy: ${error.remedy}`,
-    metadata: { ok: false, method, code: error.code, message: error.message, remedy: error.remedy, dimension, result: null },
+    metadata: { ok: false, method, code: error.code, message: error.message, remedy: error.remedy, dimension, provider, result: null },
   }
 }
 
@@ -348,13 +364,29 @@ export const DiagnoseTool = Tool.define(
         Effect.gen(function* () {
           const declared = validateDimension(params.dimension)
           if (!declared.ok) return refused("gp_diagnose", "diagnose", declared.error)
+          // R40 scenario ⑤, the consumer half. This is the one call whose reply IS a
+          // verdict (`class=` below is the engine's diagnosis), so it is the one place the
+          // registration contract has to be consulted rather than quoted: the method being
+          // asked for must be one the AE provider actually declares, and the answer must
+          // carry the id/version it is attributed to. Nothing here compares a signal or
+          // weighs a threshold — the kernel's `requireMethod` answers a registry question,
+          // and the verdict still comes only from the daemon's reply.
+          const attribution = diagnoseAttribution("diagnose")
+          if (!attribution.ok) return refused("gp_diagnose", "diagnose", attribution.error, params.dimension ?? null)
           yield* ctx.ask({ permission: "glasspane", patterns: ["diagnose"], always: ["diagnose"], metadata: params })
           const reply = yield* Daemon.call("diagnose", engineBody(params))
-          return present("gp_diagnose", "diagnose", reply, (result) => {
-            const out = fields(result)
-            const report = fields(out.report)
-            return `class=${text(out.class, "unknown")}\npath: ${text(report.path, "-")}\nanomaly: ${text(report.anomaly, "-")}\nevidence: ${text(report.evidence, "-")}\nnext: ${text(report.next, "-")}`
-          }, params.dimension ?? null)
+          return present(
+            "gp_diagnose",
+            "diagnose",
+            reply,
+            (result) => {
+              const out = fields(result)
+              const report = fields(out.report)
+              return `class=${text(out.class, "unknown")}\npath: ${text(report.path, "-")}\nanomaly: ${text(report.anomaly, "-")}\nevidence: ${text(report.evidence, "-")}\nnext: ${text(report.next, "-")}`
+            },
+            params.dimension ?? null,
+            attribution.provider,
+          )
         }),
     }
   }),
