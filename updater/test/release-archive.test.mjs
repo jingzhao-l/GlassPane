@@ -570,7 +570,7 @@ test('the CLI itself refuses both shapes: an inert exclusion, and an archive tha
 
     tree.git('rm', '-q', '--cached', '.iterate_decisions.md')
     fs.rmSync(path.join(tree.root, '.iterate_decisions.md'), { force: true })
-    tree.git('commit', '-q', '--amend', '-m', 'tree')
+    tree.git('-c', 'user.email=test@example.test', '-c', 'user.name=test', 'commit', '-q', '--amend', '-m', 'tree')
     const inert = run(['1.6.0', path.join(tree.root, 'second.tar.gz')])
     assert.equal(inert.rc, 1, `一条命中零的前缀不该被放行：${inert.out}`)
     assert.match(inert.out, /EXCLUDED_PREFIXES names \.iterate_decisions\.md/, inert.out)
@@ -620,7 +620,7 @@ test('the shipped exclusion list has to be doing something in the run that produ
     }).inert, [])
     withoutLog.git('rm', '-q', '--cached', '.iterate_decisions.md')
     fs.rmSync(path.join(withoutLog.root, '.iterate_decisions.md'), { force: true })
-    withoutLog.git('commit', '-q', '--amend', '-m', 'tree')
+    withoutLog.git('-c', 'user.email=test@example.test', '-c', 'user.name=test', 'commit', '-q', '--amend', '-m', 'tree')
     const stillArmed = archiveBytes({ root: withoutLog.root, version: '1.6.0' })
     assert.equal(judgeExclusionsActive({ matched: stillArmed.excluded.prefixes }).ok, false,
       '路径搬走之后排除表就空转了：这一格必须拒，而不是安静地少排除一个文件')
