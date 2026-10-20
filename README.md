@@ -201,7 +201,7 @@ npx glasspane-install
 #    mean to install an unreleased tree. The tag below is not verified by eye: it is a derived site
 #    owned by `scripts/version-sites.mjs`, and `scripts/check-doc-links.mjs` reddens when it stops
 #    matching install.sh.
-git clone --branch v1.17.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
+git clone --branch v1.18.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
 
 `GLASSPANE_REF=<tag>` selects another release; `GLASSPANE_REF=main` tracks the trunk, which is not a
@@ -424,10 +424,13 @@ the entry must be `GlassPane Daemon`, not your terminal and not `GlassPane.app`.
 subject it measured; run `node installer/cli.js --restore-launchd` to move the service under launchd
 and re-verify.
 
-**Panel is open but tools error.** The panel is not the service. Check that `~/.glasspane/engine.sock`
-exists and that the daemon answers `--permissions`. If an older build holds the socket, re-run the
-installer with `--replace-daemon` — otherwise the app you granted permission to is not the app doing
-the work.
+**Panel is open but tools error.** The panel is not the service. Ask the socket itself:
+`printf '{"id":0,"method":"hello"}\n' | nc -U ~/.glasspane/engine.sock` returns the running daemon's
+`hello` — its version, capabilities and state root — and that is the liveness read. Do not substitute
+`glasspaned --permissions`: that flag measures the **TCC seats of whichever process runs it** and opens
+no socket at all (its own `--help` says so), so a green JSON there says nothing about the service. If an
+older build holds the socket, re-run the installer with `--replace-daemon` — otherwise the app you
+granted permission to is not the app doing the work.
 
 **The agent says the change happened but the UI did not move.** That is the case `gp_diagnose`
 exists for; it separates "no structural change", "change arrived late", and "input contamination".
@@ -493,10 +496,10 @@ hardware smoke runs in [engine/smoke.md](engine/smoke.md) instead of being silen
 
 Releases: `node scripts/set-version.mjs <semver>` writes the whole version line; pushing a tag
 produces a GitHub Release whose archive is the tagged tree — less `harness/`, the vendored fork no install
-step reads and which is 87.8% of the repository's tracked bytes (recompute it with `git ls-tree -r -l HEAD`,
-summing blob sizes per path) — plus the built JavaScript the updater cannot
+step reads and which is 86.9% of the repository's tracked bytes (64,535,347 of 74,253,356, measured
+2026-10-20 — recompute it with `git ls-tree -r -l HEAD`, summing blob sizes per path) — plus the built JavaScript the updater cannot
 produce on the target (`mcp-shell/dist`, `mcp-shell/schemas` — `scripts/make-release-archive.mjs`), together
-with `SHA256SUMS.txt`; npm publishing goes through `release.yml` with provenance.
+with `SHA256SUMS-<version>.txt` (the version is part of the file name — the updater asks for that name); npm publishing goes through `release.yml` with provenance.
 
 ## Documentation
 

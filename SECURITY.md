@@ -446,12 +446,12 @@ permission rather than by a secret.
 
 | Version | Supported |
 |---|---|
-| 1.17.x | ✅ current release line; security fixes ship here. **Measurement (2026-10-19, at the 1.17.0 bump):** root `package.json` is `1.17.0`, and `node scripts/check-version.mjs` unifies the declared sites plus the lock entries on it — 12 declared sites, 17 checked lines (the five extra are the lockfile entries). `npm view glasspane-mcp dist-tags` / `npm view glasspane-install dist-tags` answer `latest = 1.16.4` until this version ships — the registry lagging the repo is by design, and stating the measurement date is what makes that lag readable |
+| 1.18.x | ✅ current release line; security fixes ship here. **Measurement (2026-10-20, at the 1.18.0 bump):** root `package.json` is `1.18.0`, and `node scripts/check-version.mjs` unifies the declared sites plus the lock entries on it — 12 declared sites, 17 checked lines (the five extra are the lockfile entries). `npm view glasspane-mcp dist-tags` / `npm view glasspane-install dist-tags` answered `latest = 1.16.4` when this line was cut: `v1.17.0` was tagged on 2026-10-19 and never shipped, because the release job's CI-green precondition can no longer be satisfied for that commit (see the 1.18.0 entry in `CHANGELOG.md`). The registry lagging the repo is by design; stating the measurement date is what makes the lag readable |
 | 1.15.x and older (including the `1.0.x` / `1.1.x` lines the release lines were unified onto) | ❌ no longer patched — one version line moves forward; each release replaces the previous |
 | 0.x (releases before `glasspane-mcp@0.1.0` / `glasspane-install@1.0.0`) | ❌ no patches — upgrade |
 
 **No fix-time commitment (SLA) yet**: one maintainer, no security team, so there is no "responds within
 X days / fixed within Y days" promise to make. What can be promised: private advisories are read and
-answered, confirmed issues are fixed on the current line (`1.17.x` as measured above), and the impact range plus workarounds are
+answered, confirmed issues are fixed on the current line (`1.18.x` as measured above), and the impact range plus workarounds are
 stated in the Release notes and CHANGELOG. If you need a temporary workaround, the two most effective are
 stopping the launchd jobs (`launchctl bootout`, sections 2.5 and 2.8) and removing the granted TCC seats.

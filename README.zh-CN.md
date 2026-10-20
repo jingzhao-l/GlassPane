@@ -171,7 +171,7 @@ npx glasspane-install
 #    每次发版由 `scripts/set-version.mjs` 改写）——要装未发布的树才去 `main`。下面那个 tag 不靠人眼
 #    核对：它是 `scripts/version-sites.mjs` 登记的派生位点，一旦与 install.sh 不一致，
 #    `scripts/check-doc-links.mjs` 就把这一页判红。
-git clone --branch v1.17.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
+git clone --branch v1.18.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
 
 `GLASSPANE_REF=<tag>` 指定其他发布版；`GLASSPANE_REF=main` 追主干（它不是固定产物）。
@@ -366,9 +366,12 @@ node installer/cli.js --restore-launchd
 `GlassPane.app`。卡片会显示它测到的主体；跑 `node installer/cli.js --restore-launchd`
 把服务挪到 launchd 下并复验。
 
-**面板开着，工具还是报错。** 面板不是服务。检查 `~/.glasspane/engine.sock` 是否存在、
-服务是否应答 `--permissions`。若 socket 被旧构建占着，用 `--replace-daemon` 重跑安装——
-否则你授权的那个应用和干活的那个应用不是同一个。
+**面板开着，工具还是报错。** 面板不是服务。直接问 socket：
+`printf '{"id":0,"method":"hello"}\n' | nc -U ~/.glasspane/engine.sock` 会回正在运行的 daemon 的
+`hello`——它的版本、能力表与状态根，这才是"服务活着"的读数。不要拿 `glasspaned --permissions`
+代替它：那条命令量的是**跑它的那个进程**自己的 TCC 席位，一个 socket 都不碰（它自己的 `--help`
+就这么写），回一份绿色 JSON 也不说明服务的事。若 socket 被旧构建占着，用 `--replace-daemon`
+重跑安装——否则你授权的那个应用和干活的那个应用不是同一个。
 
 **代理说改了但界面没动。** 这正是 `gp_diagnose` 存在的理由：它把"结构没变""变化晚到""输入污染"
 分开。如果你的功能只有拖拽入口，先看[它做不到什么](#它做不到什么)。
@@ -428,9 +431,11 @@ CI 还跑**发布形态守卫**：打包 `glasspane-mcp` → 装进干净目录 
 [engine/smoke.md](engine/smoke.md)，而不是被静默跳过。
 
 发布：`node scripts/set-version.mjs <semver>` 写整条版本线；推 tag 即产出带发布归档（被 tag 的树，
-**减去 `harness/`**——那是换版路径一行都不读的 vendored fork，却占本仓已跟踪字节的 87.8%（这条数可以
+**减去 `harness/`**——那是换版路径一行都不读的 vendored fork，却占本仓已跟踪字节的 86.9%（74,253,356
+字节里的 64,535,347，2026-10-20 实测；这条数可以
 复算：`git ls-tree -r -l HEAD` 按路径累加 blob 大小）；再加
-`mcp-shell/dist`、`mcp-shell/schemas` 两份构建产物）与 `SHA256SUMS.txt` 的 GitHub Release——纯源码归档
+`mcp-shell/dist`、`mcp-shell/schemas` 两份构建产物）与 `SHA256SUMS-<版本>.txt`（版本号在文件名里，
+updater 就是按那个名字去要的）的 GitHub Release——纯源码归档
 会让 updater 在目标机上 `npm pack` 出一个没有可执行文件的包，2026-10-01 真机因此每次换版都回滚；
 npm 发布走 `release.yml` 的 provenance 通道。
 

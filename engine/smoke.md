@@ -985,3 +985,63 @@ Swift Testing **15 tests in 2 suites**；开工基线是 1074/3/0 ⇒ 本轮 +18
 发布形态 `cd mcp-shell && npm run bundle && npm pack --dry-run` 0；
 `node harness/tools/tool-surface.mjs --check` 0（本轮的 +274 行有意增长按授权重记金样，
 单独一笔 `chore(harness)`，重记前它是红的——红过才算它还在工作）。
+
+## 每日真机核对 2026-10-20（v1.18.0 这一轮）
+
+本机 = 有登录 GUI 会话的 macOS（arm64）。命令逐字跑过，读数按实测写，不做推断。
+
+### 1. daemon 自报读数（`engine/.build/debug/glasspaned`，本轮构建）
+
+| 命令 | 读数 | 退出码 |
+|---|---|---|
+| `--version` | `glasspaned 1.18.0`（set-version 之前那次构建打的是 1.17.0，如实记下这个先后） | 0 |
+| `--check-accessibility` | `granted` | 0 |
+| `--check-input-permission` | `granted` | 0 |
+| `--check-screen-permission` | `granted` | 0 |
+| `--guide-screen-permission` | `screen recording permission already granted — no action needed.` | 0（席位确实是 granted，走的是正支） |
+| `--check-developer-tools` | `{"launch":{"state":"denied"},"attach":{"state":"denied"},"granted":false,…}` | 1 |
+
+- `--guide-screen-permission` 的 0 只证成**正支**：拒绝支（读数不是 granted 就退 1）本机跑不了——那要先撤销一个
+  真权限，撤销/重勾会改这台机器的 TCC 状态。补它的确切人工动作：系统设置里取消 GlassPane 的"屏幕录制"勾选，
+  跑 `glasspaned --guide-screen-permission; echo $?` 期望 1 且打印 "still not granted"，再勾回来。**不写成已验证。**
+- `--check-developer-tools` 这份读数（两臂都 denied）在新旧两种算法下都给 false ⇒ **它不区分本次改判**。
+  能区分的是 `smoke.md:218-224` 记着的历史负载 `launch:ok / attach:spawnFailed / granted:true`，
+  由 `DailyRound20261020Tests` 的 `testGrantedFollowsTheAttachArmNotTheOredPair` 与
+  `testCardIgnoresAnOlderPayloadsOredGrantedFlag` 钉住。note 里的 `（P6 §7）` 已不在真机输出中（对外文案去章节号那条）。
+
+### 2. 状态根隔离与符号链接（`--state-dir`，一律带这个旗标，不碰 `~/.glasspane`）
+
+`--evidence-stats` 与 `--prune-evidence --dry-run` 都在临时根上跑（归档类检查一律带 `--state-dir` 是本轮纪律）。
+新增用例 `testTightenPermissionsRefusesASymlinkedRootAndLeavesTheTargetAlone` 在真文件系统上断言：
+`--state-dir` 指到符号链接时这一趟**一条 chmod 都不发**（目标目录仍是 0755）。从前它先把目标改成 0700、
+把里面的档案改成 0600，随后才在 bind 处拒——"要改任何东西的资格"那句话当时不成立。
+
+### 3. 等号形态与错误形状（真二进制，三条都在 `testEqualsSpellingReachesEachFlagsOwnValidation` 里起进程跑）
+
+`--older-than=abc` → rc 2 且说的是取值（从前是 `unknown argument` + 64）；
+`--request-permission=not-a-seat` → rc 64 且报 `--request-permission unknown kind`；
+`--definitely-not-a-flag=1` → rc 64 且报 `unknown argument: --definitely-not-a-flag`。
+
+### 4. 面板真机（AX `kAXPressAction`）——本轮这四处未观测
+
+本轮改到面板的是：证据列表那枚污染芯片与结论标题、recipe 页在途那一行（新标识 `gp-recipe-in-flight`）、
+「刷新」的禁用态说明、`PathRowView` 对占位值不再画复制按钮（三枚标识改为
+`gp-copy-project-evidence` / `-recipe` / `-calibration`）。
+**AX 走查本轮未观测**：`.p4i4_smoke.py --skip-drag` 会逐卡按下引导按钮，那会真改这台机器的 launchd 作业与
+TCC 引导状态；本轮这几处是文案与控件可见性，判据在 `DailyRound20261020Tests` 的构造层与 `PanelDaemonCommandContractTests` 的源码头断言里。
+补它的确切一条命令（面板起来之后）：`cd engine && python3 .p4i4_smoke.py --skip-drag`（期望退 0），
+再展开项目卡核 `gp-copy-project-evidence` 是否只在真有路径的那一行出现。
+
+### 5. 门禁计数
+
+逐条命令与实际计数见本轮汇报第 ③ 项。负载造成的两条计时假红（`updater/test/idle.test.mjs` 的一条、
+`updater/test/source.test.mjs` 的一条）按"隔离复跑"处理，判据与超时一个字没改，复跑各自全绿。
+
+### 6. 更正一处过期主张（B-01 小节，2026-09-23 写的两句话）
+
+上文 `冒烟状态根隔离与熔断标签分段匹配（2026-09-23，B-01/A-02）` 里那两句——
+"`glasspaned` 的 `parseArguments` 里**没有**任何能重定向这个根的 flag"与"两条冒烟闸因此是死闸"——
+**已被后来的实现推翻**：`--state-dir` 现在就在解析表里（`Sources/glasspaned/main.swift` 的 `case "--state-dir"`，
+另有 `--state-dir=` 展开），两条冒烟脚本也各自带它跑（`.p6_smoke.py` 的状态根段落）。历史结论按纪律不改写，
+只在这里新增更正，免得有人照那段话去重新实现一个已经存在的旗标、或把一条绿色的闸当成"死闸"再绕过去。
+本轮真机第 2 节就是带着 `--state-dir` 跑的。

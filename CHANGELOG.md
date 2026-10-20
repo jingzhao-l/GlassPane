@@ -2,9 +2,25 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
-## [Unreleased]
+## [1.18.0] — 2026-10-20
 
-### Changed — `iterate-kernel@0.1.9`：`zod` 收成精确版本，`overrides` 那处绕过删掉
+**版本判断：minor。** 对着本仓自己那四项 patch 判据逐条实测（判据原文在 1.6.2 条目里）：
+`bin` 声明没动（`glasspane-mcp`→`dist/index.js`+`dist/http-gateway-cli.js`、`glasspane-install`→`./cli.js`）；
+状态文件字段没动（`update-state.schema.json` 一字未改，`trust.json` 是**新增**的独立文件）；
+`mcp-shell/schemas` 与 `kernel/schemas` 没动。动的是另外三样，任一样都超出 patch 的定义：
+
+1. **CLI 参数语法**：`--key=value` 从前只有 `--state-dir=` 与 `--socket-path=` 两支手写分支认，
+   其余取值开关（`--older-than=7`、`--request-permission=x`、`--probe-socket-path=`…）一律
+   `unknown argument` + 64。现在入口统一裁一次 `=`，所有取值开关同形。
+2. **退出码的触发条件**（调用方按它分叉）：`--guide-screen-permission` 从前打印"still not granted"
+   之后退 0；`--check-developer-tools` 从前在附加那一臂从未得到答案时也退 0；
+   `updater check/apply/status/rollback --hour …` 从前退 0 而什么都没动。数字集合仍是 0/1/2/3/64/65。
+3. **同意语义**：`install.sh` 不再在非终端时替调用方补 `--no-prompt`（那一补让文档里那条一键命令
+   成为唯一一档"不问就覆盖 .app、不问就 bootout、不问就杀在跑的 daemon"的路径，而同一份文档的
+   `npx glasspane-install` 是会问的）。
+
+本版**合并了开工时 `[Unreleased]` 里那条 `iterate-kernel@0.1.9`**（`zod` 收成精确版本、两处 npm
+`overrides` 删除）：它已在 main 的树上，但没随任何发布物出去过，本版一并带走。原文照录：
 
 - `mcp-shell` 的 devDependency 升到 `iterate-kernel@0.1.9`。上一批为了让 `tsc` 不被内核的
   `.d.ts` 静默降级成 `any`，在根与 `mcp-shell/package.json` 各加过一处 npm `overrides` 钉住
@@ -14,6 +30,131 @@
   （根 workspace `npm ci` 与 `cd mcp-shell && npm ci`）各自构建 + 全测绿。
 - fork 侧 pin/conformance 同批重记（26 份契约档案 + 16 份语料判决，判决一字未动）。
 
+**发布线上有一枚永不发布的锚点，如实记在这里**：`v1.17.0` 的签名 tag 于 2026-10-19 打在
+`94150865`，GitHub Release 与 npm 两条通道都没跑成。10-19 那轮写下的交接命令
+（"harness 落下 0.8.3 之后 `gh run rerun --failed` 就能接着跑完，tag 不必重打"）**是不可执行的**，
+本轮实测原因：`release.yml` 第一步 `assert-ci-green` 问的是 tag 落点那笔 commit 的 `ci.yml`，
+而那笔 commit 上唯一红的正是 `harness/tools/release-artifact.mjs`——它比较**被检出的那棵树**里的
+`harness/glasspane-harness` 子树与 `product.json` 所写版本（当时 0.8.2）的**已发布 tag** 是否同一份字节，
+已发布 tag 绝不移动，故该 sha 的 CI 事后永远转不了绿。harness 线 10-20 自己落下 0.9.1 并把父仓九道
+lane 转绿之后，这件事依旧成立。处置：不删 tag（发布锚点，`install.sh` 与 updater 钉的就是它）、
+不放宽那道闸，改为取新号 1.18.0，并新增 `scripts/assert-tag-ready.mjs` 把"tag 打在红树上"这件事
+**在打之前**就拒掉。逐条判据与失效模式见 `specs/GlassPane_每日审查_2026-10-20_记录.md`。
+
+### Fixed — 证据与判定诚实性（Swift，引擎与面板）
+
+- **改名的档案被当成另一个操作的证据**：`EvidenceStore.read(operationId:)` 只按请求的 id 拼路径、
+  解码即回，从不比较包内 `operationId`。把 `op_A.json` 复制/改名成 `op_B.json`，
+  `gp_last_evidence{op_B}`、档案扫描与 HTML 报告都会把 A 的测量呈现为 B 的"已验证"。现在读侧比 id，
+  不符即拒（`GP_E_NO_EVIDENCE`）并记一条 error。
+- **面板替引擎声称了一次它拒绝做出的测量（半修）**：详情页早已改用
+  `EvidenceCopy.contamination(contaminated:breakerReason:)`，列表那侧（芯片、结论标题、过滤器标题）
+  仍只看 `contaminated`。`--no-c33` 起或 CGEvent tap 建不起来的 daemon，每一行都写"有人同时操作"，
+  而那恰恰是引擎标注为 `input-contamination-not-monitored` 的那一档。`EvidenceSummary` 现在带
+  `breakerReason`，列表与标题共用那一个判据，过滤器标题改为"污染判定"。
+- **开发者工具卡被另一臂代答**：`granted = launch == .ok || attach == .ok`，而这张卡的名字就是
+  "让调试器附加到进程"。`engine/smoke.md` 记着的真机负载 `launch:ok / attach:spawnFailed / granted:true`
+  曾被点成"可用（实测）"。现在 `Snapshot.granted` 只认附加那一臂的实测（拒绝仍优先），
+  `Report.status` 也以两臂实测词为权威——旧版 daemon 发来的或值不再能点亮绿。
+- **符号链接的 socket 叶子在 bind 之后才被看**：`bind()` 顺链把监听点建到别处，`chmod 0600` 与
+  退出时的 `unlink` 都打在链接另一头，而两条既有守卫只跑在 `EADDRINUSE` 那一支——这个形状 bind 是成功的。
+  现在 bind 之前先 `lstat`。
+- **一次本该什么都不改的运行改了别人的目录**：`StateRoot.tightenPermissions` 用 `stat`/`chmod`（都跟符号链接），
+  `--state-dir` 指到链接时先把目标目录改成 0700、档案改成 0600，随后才在 bind 处拒。现在根与档案目录
+  都先判叶子。
+- **报告数字随用户 locale 变**：`String(format: "%g", value)` 在逗号小数机器上写 `changedRatio=0,25`，
+  而 TS 那份永远 `0.25`；与 `kernel/fixtures/report.ok-01.*` 的字节比对只是恰好测试机是小数点 locale
+  才一直绿。现在显式 `en_US_POSIX`。
+- **错误帧把路径带出去**：`Dispatcher` 对逃逸的非 `GPError` 直接 `\(error)` 进 message，Foundation 的
+  `NSError` 文本含绝对路径，而这根 socket 无 peer 鉴权、loopback 网关也在 SECURITY §2.3 声明的可达面内。
+  原文只进 daemon 日志，帧里给有界的类型名。
+- **方法表手抄**：`GP_E_METHOD_NOT_FOUND` 的 remedy 手抄 13 个方法名（`capabilityWireNames` 存在的理由就是
+  这份表以前抄漂过）。现在由 `EngineMethod.allCases` 派生。
+- **三条面板一次性命令不在契约闸视野里**：`PanelDaemonCommandContractTests` 只刮 `ConsoleModel.swift`，
+  看不见 `SettingsModel.swift` / `PermissionStatus.swift` / `RecipesTabView.swift`；闸在看不见的地方"通过"。
+  刮取范围扩到那三份，并加一条"必须看得见那三个开关"的空转闸。
+- **GUI 文案与控件**：`--grant-accessibility` 的 help 补上"授的是跑这条命令的进程、阻塞至多 300s"
+  （它曾是 agent 一键挂死的路径）；`--active-project` 的 help 不再声称"没有任何协议方法接受它"
+  （`attach` 就接受）；发出去的字符串里的规格章节号（`P0 spec §3.3`、`windowed attribution §2.3`、`（P6 §7）`）删掉；
+  recipe 页三枚禁用控件与证据页「刷新」现在给得出禁用理由与下一步；`PathRowView` 对占位句不给复制按钮
+  （从前按下去把"未配置"送进剪贴板），三枚路径行的标识键也分开（原先共用 `gp-copy-path`，自动化选不中）。
+
+### Fixed — 壳侧（`mcp-shell`）
+
+- **`null` 状态文件吃掉 daemon 的诊断**：`update-state.ts` 把 `JSON.parse` 的结果直接当对象用，
+  整份内容是 `null` 时下一行抛 TypeError，`gp_diagnose` 于是回一条壳内错误、daemon 真正的结论被丢掉。
+  顶层不是对象即按"读不出的状态"拒。
+- **`{"result":null}` 被当成成功**：`settleFromFrame` 只挡"没有 result 键"，键在而值是 null 时
+  工具回文本 `"null"` 且 `isError:false`。今天 Swift 发不出这帧，但这根 socket 无 peer 鉴权，
+  任何同用户进程都能写；且壳层替引擎填默认值正是 `capture_view` 那条规矩禁止的。现在同判拒。
+- **部分报告里混进二字段错误**：`describeFetchFailure` 的一支返回裸句子。改成三字段。
+- **`gp_project_set` 写进开发者的真注册表**：本模块一直认为"socket 问不到 daemon 的根"（注释原话：
+  方法表是冻结的），而 daemon 自 1.15.0 起就在 `hello` 里报 `stateRoot`。对着 `--state-dir /tmp/sandbox`
+  起的 daemon 注册，改的却是 `<home>/.glasspane/projects.json`——与当年 71→2 那次同一类。
+  现在解析顺序是 `GLASSPANE_PROJECTS_FILE` → daemon 自报的根 → home 默认（且文案明说是默认）；
+  daemon 报了根时回执直接说"这就是那个服务加载的文件"。
+
+### Fixed — 门禁与发布链
+
+- `scripts/make-release-archive.mjs`：`--verify` 只证明"该有的在"，从不证明"不该到的没到"（tar 里条目全在
+  单一顶层目录下，锚在 `^harness/` 的写法会空过成绿）；且一条**命中零条**的排除前缀只被打印不被拒——
+  `harness/` 改名后签名归档会静默涨 ~64 MB 而打包与校验双双退 0。现在 `verifyArchive` 增加 `leaked` 判定，
+  生产入口用 `inertExclusions` 拒惰性前缀（`applyExclusions` 的纯函数语义与它那两条既有夹具不动）。
+- `scripts/assert-test-count.mjs`：两种 runner 的计数跨文件合池，`engine/probe` 跑 0 条也能靠 engine 的日志绿；
+  另外两条正则只吃复数（`1 suite` / `1 test` 的真行形匹配不上，会把真跑过的套件读成零）。现在逐份日志要求
+  各自 ≥1 条，正则收单复数。
+- `scripts/check-doc-links.mjs`：每支各自 `existsSync` 过滤登记文档，于是把一份文档（或整个 `MAIN_DOCS`）
+  改名会让这一格打 `文档 0 份 … OK` 并退 0。现在"登记而不在盘上"是问题，一份都不在时判红。
+- `.github/workflows/release.yml`：target 复核写成 `[ -n "$TARGET_READ" ] && …`，GitHub 回空串时整条判据短路，
+  下面那句"已核实"照打。现在先验形状（非十六进制即拒），判定之后才打印。
+- `ci.yml` 自述"这 10 个 job"含早已退役的 `kernel`（实测 9）；`set-version.mjs` 自述"三个 lockfile"
+  （`LOCK_DIRS` 两份）；`set-version.mjs` / `version-sites.mjs` 两处自述"10 个声明位点"（`SITES.length` = 12）。
+  数字改为派生或删去。
+- **新增 `scripts/assert-tag-ready.mjs`**：链子上原本没有任何一环执行"push → 等 CI 绿 → 再打 tag"，
+  所以 10-19 敢把 tag 打在红树上。判据复用 `assert-ci-green.mjs` 的 `judgeCiGreen`（两处一套口径）：
+  tag 形状与是否已存在、HEAD == `origin/main`、该 sha 最新一条 `ci.yml` 必须 completed+success；
+  问不到仓库名一律判 2，不白拿绿。
+- `tools/prompts/daily-glasspane-main.md` 第 74 行把 clone 位点写成"README/**CONTRIBUTING** 里那条"——
+  `CONTRIBUTING.md`/`.zh-CN.md` 里没有 clone tag 位点（实测只有 `README.md:204`、`README.zh-CN.md:174`），
+  位点表是对的，那句说明是错的。只改这一处事实描述，不改任何指令。
+
+### Fixed — 安装器与更新器
+
+- `install.sh` 非 TTY 时不再替调用方补 `--no-prompt`（见上"同意语义"），并打印这一趟会跳过、
+  以及放行的写法。测试真跑 dry-run 断言将执行的命令里没有那个 flag。
+- `install.sh` 增加 macOS 前置：README 两份都写"macOS 14+"而脚本不检查，Linux 上要先付完整那次
+  5600 文件 clone 才被 installer 间接拒绝——与 Node 预检挪到 clone 之前要避免的是同一个白付。
+- `installer/cli.js` 的 usage 从前明说"`curl | sh` 的 `$?` 就是这里的结论"。本机实测
+  `curl -fsSL http://127.0.0.1:1/nope.sh | sh` → curl 退 7、**管道退 0**：什么都没装的运行被报成成功。
+  现在那句话说是它成立的范围，并给出分步写法；用例把这个形状钉住。
+- 预检四行（`未找到 npm`/`未找到 git`/`无法解析 Node.js 版本（执行失败）`/`未找到 open`）只说缺什么，
+  全靠汇总那句通用的"修复后重新运行即可"；每行现在自带可执行动作，那个永远为真的三元删掉。
+  引导第 4 条不再把内部变量名 `entryName` 印到用户界面。
+- `updater check/apply/status/rollback --hour|--minute` 从前退 0 而这两个值只有 `enable` 读——本文件对
+  未知 `--consent` 判"grants nothing"，同一条规矩对自己失效。现在非 `enable` 一律拒并给出该跑的那条。
+- `--state-root`（installer 渲染的 plist 用的就是这个拼写）存在却不在 `USAGE` 里。补为同义拼写；不删它。
+- 两处 remedy 把路径插进命令而不加引号（`--state-dir /Users/a name/…`、`export NODE_EXTRA_CA_CERTS=/Users/a name/…`），
+  面板与 `gp_diagnose` 原样印出来，含空格的家目录会让那条命令作用于被裁断的路径。现在加引号，
+  用例钉住"含空格路径整条被引住"。
+- `updater` 的降级支仍回 `up-to-date`（这个词是"没有更新的发布物"，也常被读成"这台机器在发布线上"，
+  今天这棵树正好两者不一致）。reason 现在把两种读法分开说。
+- **签名锚点搬出发布物**：`PINNED_PRIMARY_FINGERPRINT` 与 `GLASSPANE_SIGNING_PUBLIC_KEY` 都住在发布归档里，
+  而 `runtime.js` 把 `updater/`+`installer/` 整份换掉——于是一次 `--consent unsigned-release` 放行会同时
+  替换"验签用的 pin"，之后每个攻击者发布都对自己的 pin 报 `verified`，那条常驻警告还会自己消失。
+  新增 `updater/lib/trust.js`：`<stateRoot>/trust.json`（0600，由**正在运行**的代码写，绝不从暂存树取值），
+  `apply` 在构建/打包/换版之前比暂存树声明的指纹，不同即 `signature-anchor-changed`，**没有旗标可绕**——
+  换钥匙只能由人改那一个字段。TOFU 边界如实写在模块头：它保护的是"锚点建立之后的每一次发布"。
+- `updater/test/release-archive.test.mjs` 的夹具模式与交付形状相反：`mcp-shell/dist/index.js` 写 0755
+  （真 esbuild 产物是 0644，可执行位是 `npm install -g` 建的），`installer/cli.js` 写 0644（git 记 100755）。
+  夹具改回真形状，断言改为"归档原样带着两者的模式"，端到端仍真跑 `npm pack` → 干净前缀 `npm install -g`
+  → 执行那条命令。
+
+### Changed — 文档
+
+- `README.md` / `README.zh-CN.md`：发布物里的校验文件名带上版本号（`SHA256SUMS-<ver>.txt`，updater 就按
+  这个名字要）；harness 占比 87.8% 复算为 **86.9%**（74,253,356 中的 64,535,347 字节，2026-10-20 实测），
+  并把复算方法写在旁边；排查段不再教读者用 `glasspaned --permissions` 验证"服务活着"——那条命令量的是
+  **调用进程自己**的席位、一个 socket 都不碰（它自己的 `--help` 就写着），改为向 socket 问 `hello`。
 
 ## [1.17.0] — 2026-10-19
 
