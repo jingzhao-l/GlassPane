@@ -25,9 +25,17 @@ public final class DebugCapabilityProbe {
         /// (`DeveloperToolsCapability.status`) and `--check-developer-tools`'s
         /// exit code both read this, so the same payload cannot answer "granted"
         /// to the agent and "被系统拒绝" to the person looking at the card.
+        ///
+        /// The seat this snapshot names is the **attach** arm
+        /// (`PermissionDescriptor.developerTools` purposeText: 让调试器附加到进程). The
+        /// launch arm is published beside it as its own measurement, and it may not
+        /// answer for attach: `launch == .ok` with an attach arm that never got an
+        /// answer lit 可用（实测） on a machine that had never been asked the question
+        /// the card exists to answer — the same substitution `DeveloperToolsVerdictTests`
+        /// calls "一半的答案不许当另一半用".
         public var granted: Bool {
             if launch == .denied || attach == .denied { return false }
-            return launch == .ok || attach == .ok
+            return attach == .ok
         }
     }
 
@@ -236,7 +244,7 @@ public final class DebugCapabilityProbe {
             "launch": encode(snap.launch),
             "attach": encode(snap.attach),
             "granted": snap.granted,
-            "note": "TCC 无公开查询 API；本结果是受限真实 lldb 探测的三态陈述（P6 §7）。granted=false 的唯一人工步骤是系统设置勾选，验证/复验全由本命令承担。",
+            "note": "TCC 无公开查询 API；本结果是受限真实 lldb 探测的三态陈述。granted=false 的唯一人工步骤是系统设置勾选，验证/复验全由本命令承担。",
         ]
     }
 }

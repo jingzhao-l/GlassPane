@@ -184,8 +184,10 @@ final class Qoder20261019AttachArgvTests: XCTestCase {
         XCTAssertEqual(DebugCapabilityProbe.Outcome.timeout.rawValue, "timeout")
         XCTAssertEqual(DebugCapabilityProbe.Outcome.spawnFailed.rawValue, "spawnFailed")
         XCTAssertEqual(
-            DebugCapabilityProbe.Snapshot(launch: .ok, attach: .spawnFailed).granted, true,
-            "the launch half still decides granted when the attach half is unknown"
+            DebugCapabilityProbe.Snapshot(launch: .ok, attach: .spawnFailed).granted, false,
+            "an attach arm that never reached a verdict is not a grant: the seat this card names is attach, "
+            + "and the launch half may not answer for it (2026-10-20 review; the previous expectation here read "
+            + "\"the launch half still decides\", which lit 可用（实测） on the machine-smoke payload launch:ok/attach:spawnFailed)"
         )
         XCTAssertEqual(DebugCapabilityProbe.Snapshot(launch: .ok, attach: .denied).granted, false)
     }

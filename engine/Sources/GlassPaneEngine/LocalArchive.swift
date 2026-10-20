@@ -41,6 +41,10 @@ public struct EvidenceSummary: Equatable, Identifiable {
     public let pixelRatio: Double?
     public let attributionLevel: String
     public let contaminated: Bool
+    /// `circuitBreaker.reason` verbatim: `contaminated` is a verdict, and the engine sets it
+    /// conservatively when nothing watched the window (it names that in this string). Without
+    /// it a row cannot tell "a person was measured operating" from "nobody looked, so assumed".
+    public let breakerReason: String?
     public let circuitBreakerLevel: Int
     public let diagnosisClass: String?
     public let assertionPassed: Bool?
@@ -67,6 +71,7 @@ public struct EvidenceSummary: Equatable, Identifiable {
         pixelRatio: Double?,
         attributionLevel: String,
         contaminated: Bool,
+        breakerReason: String?,
         circuitBreakerLevel: Int,
         diagnosisClass: String?,
         assertionPassed: Bool?,
@@ -90,6 +95,7 @@ public struct EvidenceSummary: Equatable, Identifiable {
         self.pixelRatio = pixelRatio
         self.attributionLevel = attributionLevel
         self.contaminated = contaminated
+        self.breakerReason = breakerReason
         self.circuitBreakerLevel = circuitBreakerLevel
         self.diagnosisClass = diagnosisClass
         self.assertionPassed = assertionPassed
@@ -122,6 +128,7 @@ public struct EvidenceSummary: Equatable, Identifiable {
             pixelRatio: signals.pixelDiff?.changedPixelRatio,
             attributionLevel: pack.attribution.level.rawValue,
             contaminated: pack.attribution.contaminated,
+            breakerReason: pack.circuitBreaker.reason,
             circuitBreakerLevel: pack.circuitBreaker.level.rawValue,
             diagnosisClass: pack.diagnosis.map { $0.class.rawValue },
             assertionPassed: pack.assertion?.passed,
@@ -149,7 +156,10 @@ public enum EvidenceFilter: String, CaseIterable, Identifiable {
         switch self {
         case .all: return "全部"
         case .unconfirmed: return "未确认"
-        case .contaminated: return "有人同时操作"
+        // 过滤器按**结论**筛（contaminated 为 true 的都进来），标题不许替它声称是测量：
+        // 无人看守时引擎也判 true，那一半在行里读得到（EvidenceCopy.contamination 给的
+        // 是"未监测（无人看守该窗口…）"）。写"有人同时操作"会把没看守的行说成看守过。
+        case .contaminated: return "污染判定"
         case .breaker: return "已降级"
         case .diagnosed: return "有诊断"
         case .assertionFailed: return "断言未过"

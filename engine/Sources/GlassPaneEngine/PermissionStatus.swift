@@ -499,7 +499,7 @@ public enum DeveloperToolsCapability {
             self.observedAt = observedAt
         }
 
-        /// 卡片上那盏灯怎么点：**先认实测到的拒绝**，再认 `granted`。
+        /// 卡片上那盏灯怎么点：**先认实测到的拒绝**，再认附加那一臂的实测成功。
         ///
         /// 这张卡存在的意义就是"能不能让调试器附加到进程"：附加被系统明确拒绝却点绿，
         /// 等于把一次实测的拒绝折算成一次授权。`DebugCapabilityProbe.Snapshot.granted`
@@ -508,9 +508,12 @@ public enum DeveloperToolsCapability {
         /// `granted` 还是或值，卡不能替它把拒绝洗成授权。
         /// 顺序就是这条判据本身；把它挪回 `if granted` 在前，
         /// `testDenialOnEitherHalfWinsOverTheOredGrantedFlag` 会红。
+        ///
+        /// `granted` 不再是绿灯的依据，理由与上面同源：旧版负载的或值会把"附加从没被问过"
+        /// 说成已授权。判据只认 `attach == "ok"` 这一臂的实测；启动臂仍单独呈现。
         public var status: PermissionStatus {
             if launch == "denied" || attach == "denied" { return .denied }
-            if granted { return .granted }
+            if attach == "ok" { return .granted }
             return .unverifiable
         }
 

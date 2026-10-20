@@ -577,7 +577,18 @@ public final class EvidenceStore {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: filePath)) else {
             return nil
         }
-        return try? EvidencePack.decodeAndValidate(data)
+        guard let pack = try? EvidencePack.decodeAndValidate(data) else { return nil }
+        // The file answers for the operation its **name** states, so the pack has to
+        // agree: without this, copying or renaming `op_A.json` over `op_B.json` makes
+        // gp_last_evidence{op_B}, the archive scan and the HTML report all present A's
+        // measurement as B's — a "verified" claim about an operation it never ran.
+        // A same-user writer can recompute the bytes, which is why this is stated as
+        // detectability of a misfiled record, not as tamper-proofing.
+        guard pack.operationId == operationId else {
+            log.error("evidence pack \(filePath) carries operationId \(pack.operationId): refusing to answer it as \(operationId)")
+            return nil
+        }
+        return pack
     }
 
     /// OperationId of the most recently written file, by file modification

@@ -546,7 +546,11 @@ final class PermissionSubjectTests: XCTestCase {
     func testCapabilityReportMapsThreeStates() {
         let at = Date(timeIntervalSince1970: 1_700_000_000)
         let report = DeveloperToolsCapability.parse(capabilityJSON, observedAt: at)
-        XCTAssertEqual(report?.status, .granted, "任一侧 ok 即 granted（与 P6 Snapshot.granted 同口径）")
+        // 2026-10-20 改判：这张卡命名的是"调试器能不能附加到进程"，附加那一臂从没答上
+        // （spawnFailed = 未启动）时不许点绿——从前这里按"任一侧 ok 即 granted"，把启动臂的
+        // 答案代答了附加臂，而 `engine/smoke.md` 记着的真机负载正是 launch:ok/attach:spawnFailed。
+        XCTAssertEqual(report?.status, .unverifiable,
+                       "附加那一臂没有得到答案，就不是这台机器被批下来了；两臂仍各自呈现")
         XCTAssertEqual(report?.launch, "ok")
         XCTAssertEqual(report?.attach, "spawnFailed")
 

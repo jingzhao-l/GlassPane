@@ -527,6 +527,7 @@ final class ReviewPanelTests: XCTestCase {
             selectorRole: "AXButton", selectorTitle: "提交", actConfirmed: true,
             axChanged: nil, treeChanged: nil, nodeCount: nil, latencyMs: nil,
             pixelRatio: nil, attributionLevel: "strong", contaminated: false,
+            breakerReason: nil,
             circuitBreakerLevel: 0, diagnosisClass: nil, assertionPassed: nil,
             stateChanged: nil, processAliveAfter: nil, fileBytes: 512, filePath: filePath
         )

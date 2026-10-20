@@ -170,7 +170,11 @@ struct EvidenceTabView: View {
             } label: {
                 Label("刷新", systemImage: "arrow.clockwise")
             }
-            .help("重新扫描档案目录，并再向后台服务要一次统计")
+            // 与下面「档案目录」同一条规矩：禁用时的说明要写禁用理由与下一步，
+            // 不能无论按得动按不动都念那句启用时的动作。
+            .help(model.evidenceState == .loading
+                  ? "扫描进行中：这一趟还没回话。等它回话后再点——这一枚会把档案目录重扫一次，并再向后台服务要一次统计"
+                  : "重新扫描档案目录，并再向后台服务要一次统计")
             .accessibilityIdentifier("gp-refresh-evidence")
             .disabled(model.evidenceState == .loading)
 
@@ -258,7 +262,8 @@ struct EvidenceRowView: View {
             }
             ChipRowLayout(spacing: 5, lineSpacing: 4) {
                 if summary.contaminated {
-                    ChipView(text: "有人同时操作", color: .orange, systemImage: "hand.raised")
+                    ChipView(text: EvidenceCopy.contaminationChip(contaminated: true, breakerReason: summary.breakerReason),
+                             color: .orange, systemImage: "hand.raised")
                 }
                 if summary.circuitBreakerLevel > 0 {
                     ChipView(
@@ -475,7 +480,11 @@ struct EvidenceDetailView: View {
 
     private var verdictTitle: String {
         if !summary.actConfirmed { return "操作未确认" }
-        if summary.contaminated { return "已确认，但期间有人操作" }
+        if summary.contaminated {
+            return EvidenceCopy.wasWatched(breakerReason: summary.breakerReason)
+                ? "已确认，但期间有人操作"
+                : "已确认，但污染未经监测（无人看守该窗口，按保守判污）"
+        }
         return "操作已确认"
     }
 
@@ -860,6 +869,13 @@ enum EvidenceCopy {
         return wasWatched(breakerReason: breakerReason)
             ? "期间检测到本人操作"
             : "未监测（无人看守该窗口，按保守判污）"
+    }
+
+    /// 列表那一枚短标签。与 contamination() 同一个判据，只是裁到一栏放得下的长度：
+    /// 无人看守时引擎按保守判 true，那一半不许在列表里被说成"测到了本人操作"。
+    static func contaminationChip(contaminated: Bool, breakerReason: String?) -> String {
+        guard contaminated else { return "" }
+        return wasWatched(breakerReason: breakerReason) ? "有人同时操作" : "污染未经监测"
     }
 
     static func breakerLevel(_ raw: Int) -> String {
