@@ -53,6 +53,7 @@ import {
   verificationFailureText,
   writePrivatePlist,
 } from '../cli.js'
+import './support/darwin-host.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const CLI = path.join(HERE, '..', 'cli.js')

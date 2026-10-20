@@ -19,6 +19,7 @@ import {
   INSTALL_SH_URL,
   RELEASE_VERSION,
 } from '../cli.js'
+import './support/darwin-host.mjs'
 
 /** 发布版本从 cli.js 常量取（真源唯一），测试里不复制字面量。 */
 function require_release_version() {

@@ -45,25 +45,55 @@ test('curl | sh reports success when curl itself failed, which is why the usage 
 
 // MARK: - 平台闸排在 clone 之前
 
-test('install.sh refuses a non-macOS host before paying for the clone', () => {
+test('install.sh refuses a non-macOS host before the clone, and says so in a dry-run too', () => {
   const stub = stubBin('uname', 'echo Linux');
+  const wouldClone = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-nondarwin-'));
+  // 平台闸住在"定位不到源码 ⇒ 必须 clone"那一支：已经有源码的那一趟不付 clone，也就没得挡。
+  const env = {
+    ...process.env,
+    PATH: `${stub}:${process.env.PATH}`,
+    GLASSPANE_REPO: '',
+    GLASSPANE_INSTALL_DIR: path.join(wouldClone, 'glasspane'),
+  };
   try {
-    const got = spawnSync('/bin/sh', [INSTALL_SH], {
-      env: { ...process.env, PATH: `${stub}:${process.env.PATH}`, GLASSPANE_INSTALL_DRY_RUN: '1' },
-      encoding: 'utf8', timeout: 60_000,
+    const real = spawnSync('/bin/sh', [INSTALL_SH], {
+      env: { ...env, GLASSPANE_INSTALL_DRY_RUN: '0' }, encoding: 'utf8', timeout: 60_000, input: '',
     });
-    assert.equal(got.status, 1, `${got.stdout}\n${got.stderr}`);
-    assert.match(got.stderr, /只支持 macOS（uname -s = Linux）/, got.stderr);
-    assert.match(got.stderr, /没有 clone、没有写入任何东西/, got.stderr);
+    assert.equal(real.status, 1, `${real.stdout}\n${real.stderr}`);
+    assert.match(real.stderr, /只支持 macOS（uname -s = Linux）/, real.stderr);
+    assert.match(real.stderr, /没有 clone、没有写入任何东西/, real.stderr);
+    assert.deepEqual(fs.readdirSync(wouldClone), [], '被拒的那一趟不许在 clone 目录里留下任何东西');
+
+    const dry = spawnSync('/bin/sh', [INSTALL_SH], {
+      env: { ...env, GLASSPANE_INSTALL_DRY_RUN: '1' }, encoding: 'utf8', timeout: 60_000, input: '',
+    });
+    assert.equal(dry.status, 0, `${dry.stdout}\n${dry.stderr}`);
+    assert.match(dry.stdout, /平台闸会在 clone 之前停/, dry.stdout);
+    assert.match(dry.stdout, /\[dry-run\] 未定位到仓库，将执行: git clone/, `clone 计划行不许因为平台闸而消失：${dry.stdout}`);
   } finally {
     fs.rmSync(stub, { recursive: true, force: true });
+    fs.rmSync(wouldClone, { recursive: true, force: true });
   }
-  // 对照：本机（Darwin）这一条必须放行，否则那扇闸只是永远拒绝。
-  const ok = spawnSync('/bin/sh', [INSTALL_SH], {
-    env: { ...process.env, GLASSPANE_INSTALL_DRY_RUN: '1', GLASSPANE_REPO: path.join(HERE, '..', '..') },
-    encoding: 'utf8', timeout: 60_000,
-  });
-  assert.equal(ok.status, 0, `${ok.stdout}\n${ok.stderr}`);
+  // 对照：一台 Darwin 主机上这一条必须放行到"clone 目标已存在"那一支，而不是被平台闸挡下——
+  // 否则那扇闸只是永远拒绝。这里自己造一枚 Darwin 的 `uname`，不靠环境：同一份测试要能在
+  // ubuntu 的 CI 上跑到同一支（那一格整格外层还套着 test/support/darwin-host.mjs 的桩）。
+  const darwin = stubBin('uname', 'echo Darwin');
+  const existing = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-darwin-ctl-'));
+  try {
+    const ok = spawnSync('/bin/sh', [INSTALL_SH], {
+      env: {
+        ...process.env, PATH: `${darwin}:${process.env.PATH}`,
+        GLASSPANE_INSTALL_DRY_RUN: '0', GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: existing,
+      },
+      encoding: 'utf8', timeout: 60_000, cwd: os.tmpdir(), input: '',
+    });
+    assert.doesNotMatch(`${ok.stdout}${ok.stderr}`, /只支持 macOS/, `${ok.stdout}\n${ok.stderr}`);
+    assert.match(`${ok.stdout}${ok.stderr}`, /目标目录已存在且不是 GlassPane 仓库/, `${ok.stdout}\n${ok.stderr}`);
+    assert.equal(ok.status, 1, '走到"目标已存在"那一支必须是拒（这台机器上它确实存在且非空）');
+  } finally {
+    fs.rmSync(darwin, { recursive: true, force: true });
+    fs.rmSync(existing, { recursive: true, force: true });
+  }
 });
 
 // MARK: - 预检每一行都说得出下一步；对外文案不漏内部标识

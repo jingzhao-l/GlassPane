@@ -130,6 +130,14 @@ lane 转绿之后，这件事依旧成立。处置：不删 tag（发布锚点�
 - 预检四行（`未找到 npm`/`未找到 git`/`无法解析 Node.js 版本（执行失败）`/`未找到 open`）只说缺什么，
   全靠汇总那句通用的"修复后重新运行即可"；每行现在自带可执行动作，那个永远为真的三元删掉。
   引导第 4 条不再把内部变量名 `entryName` 印到用户界面。
+- **本轮自己引入、又在本轮内修掉的一处**：上面那条平台闸最初放在脚本入口，CI 的 root-workspace 那一格
+  （跑在 ubuntu 上，测的是 install.sh 的分支/形状闸/归因/透传）因此红了 20 多条。缺陷要修的只是那笔
+  白花的 clone，所以闸搬到"定位不到源码 ⇒ 一定要 clone"那一支的开头，dry-run 不再被它短路、而是把
+  "真跑会停在这里"说明白。测试侧 `test/support/darwin-host.mjs` 的第一版按 node 的 `process.platform`
+  判要不要给桩，本机模拟 Linux 时它与子进程实际看到的 `uname -s` 不一致，三条用例在模拟里仍红——
+  这也是这处回归没能更早暴露的原因；现在按子进程会看到的东西判，并在 `daily-20261020.test.mjs` 里
+  反向用一枚 Linux 的 `uname` 桩钉住平台闸本身（真跑退 1 且 clone 目录仍空 / dry-run 既有计划行又有
+  停靠说明 / 再补一枚 Darwin 桩证明它不是永远拒绝）。
 - `updater check/apply/status/rollback --hour|--minute` 从前退 0 而这两个值只有 `enable` 读——本文件对
   未知 `--consent` 判"grants nothing"，同一条规矩对自己失效。现在非 `enable` 一律拒并给出该跑的那条。
 - `--state-root`（installer 渲染的 plist 用的就是这个拼写）存在却不在 `USAGE` 里。补为同义拼写；不删它。

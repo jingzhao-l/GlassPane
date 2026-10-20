@@ -167,10 +167,7 @@ describe_ref() {
 # 任何落盘行为，只省下那次注定白费的 clone。
 # dry-run 同样跑：CI 用 dry-run 读的就是"这条命令会怎么走"，Node 不够格时它该读到的是
 # 这一步就拒，而不是读到一条永远执行不了的 clone 计划。
-# macOS 这一条同一条规矩：README 两份都写着"macOS 14+"，而本脚本从前不检查——Linux
-# 上跑这条一键命令要付完整那次 clone，然后在 installer 里被一句"未找到 open（本安装器
-# 面向 macOS）"间接地发现装不了。那是同一个白花，只是换了个理由。
-[ "$(uname -s)" = "Darwin" ] || fail "本安装器只支持 macOS（uname -s = $(uname -s)）：Swift/XCTest、launchd 与 TCC 席位都在 macOS 这一侧，本轮没有 clone、没有写入任何东西。要在别的系统上用 GlassPane，等它把引擎搬到那一侧再说，现在这一步没有可绕的旗标。"
+# （macOS 这一条不在这里：它要挡的是那笔 clone，所以住在 clone 分支的开头，见下面的 --- 2。）
 command -v node >/dev/null 2>&1 || fail "未找到 Node.js（需 >= 18，https://nodejs.org 或 brew install node）：本轮没有 clone、没有写入任何东西。"
 NODE_MAJOR=$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)
 [ "$NODE_MAJOR" -ge 18 ] 2>/dev/null || fail "Node.js 需要 >= 18，当前主版本为 $NODE_MAJOR：先换够格的 Node（brew install node 或用 nvm 切一个）再重跑，本轮没有 clone、没有写入任何东西。"
@@ -191,6 +188,19 @@ elif looks_like_repo "$CLONE_DIR"; then
 fi
 
 if [ -z "$REPO" ]; then
+# 定位不到源码 ⇒ 这一步一定要 clone，而 clone 就是那笔白花的花费所在，所以平台闸正好卡在这里
+  # （不是卡在入口）：README 两份都写着"macOS 14+"，而 Linux/BSD 上从前要付完整那次 5600 文件的
+  # clone，然后在 installer 里被一句"未找到 open"间接地发现装不了。已经有源码的那一趟不在此列——
+  # 它不付 clone，交给 installer 自己去说平台。
+  # dry-run 仍然把计划打出来（CI 的 install-gate 那一格就跑在非 macOS 上，它读的是"这条命令会走到
+  # 哪一步"），只是先把"真跑会停在平台闸"说明白，不留一句没说出口的假设。
+  if [ "$(uname -s)" != "Darwin" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      say '[dry-run] 平台闸会在 clone 之前停（uname -s 不是 Darwin）：真跑这一条不会 clone、不会写入任何东西。下面两行是 macOS 上会发生的部分。'
+    else
+      fail "本安装器只支持 macOS（uname -s = $(uname -s)）：Swift/XCTest、launchd 与 TCC 席位都在 macOS 这一侧，本轮没有 clone、没有写入任何东西。要在别的系统上用 GlassPane，等它把引擎搬到那一侧再说，现在这一步没有可绕的旗标。"
+    fi
+  fi
   # 走到这里就一定要 clone（连 dry-run 也是要说清"将要 clone 什么"），所以两个覆盖位
   # 先过形状闸，再谈执行；dry-run 同样校验，CI 才能在零副作用下读到这条拒绝。
   assert_repo_url "$REPO_URL"

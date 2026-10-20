@@ -116,3 +116,15 @@ fetch 后基线 `24c27904`，收口基线 `origin/main = b9fd7bc0`（harness 线
 `harness/glasspane-harness/{CHANGELOG.md,README.md,README.zh-CN.md,docs/install.md,packages/opencode/package.json,product.json}`，
 最后写入 07:31。全部在 `harness/**` 之内 ⇒ **与本轮改动零重叠**（本轮 `harness/` 一行未改），
 不影响本轮收口的成立。那条线随后自己把 0.9.1 推上了 main（`1e2921a6`）并补了台账（`b9fd7bc0`）。
+
+## 8. 本轮自己引入又修掉的回归（记下来，不让它只活在提交信息里）
+
+`fix(installer)` 的第一版把 macOS 前置放在 install.sh 入口 ⇒ CI 的 `root workspace gate`（ubuntu runner）
+红 20+ 条：那一格测的是 install.sh 的决策分支，不是主机能不能装。第二版把闸搬到"定位不到源码 ⇒
+一定要 clone"那一支的开头，并让 dry-run 继续打计划行。
+
+测试侧的桩也错过一次：`test/support/darwin-host.mjs` 初版按 `process.platform` 决定要不要前置 Darwin 的
+`uname`，而本机"模拟 Linux"的方式恰恰是往 PATH 里放一枚报 Linux 的 `uname` 桩——两者不一致，导致
+三条既有用例在模拟里仍红、而这处不一致本来会在 CI 上以同样的方式暴露。判据改成**子进程会看到的**
+`uname -s`。教训一句：凡是"按环境决定要不要伪装环境"的测试脚手架，判据必须取自被伪装的那个观察者，
+不能取自进程自己。
