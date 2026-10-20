@@ -122,7 +122,7 @@ printf '%s\n' \
 | 环节 | 脚本 | 结果 |
 |---|---|---|
 | C33（P2 v2.0 §16.2）输入监控真机冒烟 | `engine/.c33_smoke.py` | C33 SMOKE OK：`glasspaned --check-input-permission`=granted（新增 CLI flag，granted/denied/notDetermined 三态如实输出）→ 自动发现 settings GUI → attach → observe（220 节点）→ act（role-only AXButton，operationId 落盘）→ `last_evidence` 归因面如实呈现（attribution.level=soft、contaminated=false、circuitBreaker.level=1）。按 spec v2.0 §17.2 降级口径：输入流污染判定待 daemon 注入 AttributionGuard 后验证（当前为纯操作权互斥形态），本冒烟覆盖授权环境下完整操作回路与归因面观测 |
-| T9（P2 v2.1 §19.2）渐进退化泄漏注入冒烟 | `engine/.t9_smoke.py` | T9 SMOKE OK：脚本自编译泄漏金丝雀（AppKit，每次点击保留 8MB 内存 + 1 个 fd），daemon 驱动 act 至第 16/24 轮 → evidence 熔断升级 degraded、reason 携带 `degradation|memory+handles; longSession=false; screen-recording-denied`（当日实测原样；X-6 起末段为 `screen-recording-denied: <捕获原文>`） → `diagnose.class=T9` |
+| T9（P2 v2.1 §19.2）渐进退化泄漏注入冒烟 | `engine/.t9_smoke.py` | T9 SMOKE OK：脚本自编译泄漏金丝雀（AppKit，每次点击保留 8MB 内存 + 1 个 fd），daemon 驱动 act 至第 16/24 轮 → evidence 熔断升级 degraded、reason 携带 `degradation\|memory+handles; longSession=false; screen-recording-denied`（当日实测原样；X-6 起末段为 `screen-recording-denied: <捕获原文>`） → `diagnose.class=T9` |
 
 真机观察补充：
 
@@ -1045,3 +1045,37 @@ TCC 引导状态；本轮这几处是文案与控件可见性，判据在 `Daily
 另有 `--state-dir=` 展开），两条冒烟脚本也各自带它跑（`.p6_smoke.py` 的状态根段落）。历史结论按纪律不改写，
 只在这里新增更正，免得有人照那段话去重新实现一个已经存在的旗标、或把一条绿色的闸当成"死闸"再绕过去。
 本轮真机第 2 节就是带着 `--state-dir` 跑的。
+
+### 7. 发布物端到端（从 GitHub 上下来的那一份，不是本地构树）
+
+下载 `v1.18.0` 的四件资产到 `/tmp/gp-artifact-1.18.0/` 之后逐件量过。完整性比对基准是 **GitHub API
+自己记的 `assets[].digest`**，不是本地重算的 sha256——这台机器重下发布物会被代理静默截断（已记着的坑）：
+
+| 资产 | 远端记的 sha256 前缀 | 本地 sha256 前缀 | 结论 |
+|---|---|---|---|
+| `GlassPane-1.18.0.tar.gz`（3,446,067 B） | `9edc601ed335…` | `9edc601ed335…` | 相等 |
+| `SHA256SUMS-1.18.0.txt`（90 B） | `3a53debd39e9…` | `3a53debd39e9…` | 相等 |
+
+- `shasum -a 256 -c SHA256SUMS-1.18.0.txt` → `GlassPane-1.18.0.tar.gz: OK`。
+- `tar -tzf` 共 **669** 条，`grep -cE "(^|/)harness/"` 数出 **0** 条（这条判据本身是本轮修的：锚在
+  `^harness/` 会因单一顶层目录而空过成绿）。
+- `node scripts/make-release-archive.mjs --verify <归档> 1.18.0` → `release archive verified: 669 entries,
+  3446067 bytes, all 20 declared commands and schemas present, no entry under harness/ / .iterate_decisions.md`，退 0。
+  这一步同时是本轮新加的 `leaked` 判定第一次跑在**真发布物**上，不只是夹具。
+- 签名：用用户机器上那份代码判——`updater/lib/signature.js` 的 `verifyReleaseSignature`，
+  资产由 `assets.js` 的 `findSignatureAsset`/`requireAssetPair` 定位、字节由 `source.js` 的
+  `makeBytesFetcher` 取（本机 TLS 被自签根拦截，所以按 `source.js` 自己那条 remedy 把钥匙串 CA 束
+  喂给 `NODE_EXTRA_CA_CERTS`，163 张证书；不是关掉校验）。回
+  `outcome=verified`、`keyFingerprint=0929EA31DF4F7429F63FC53189D88B1D043A1298` == 仓内 `PINNED_PRIMARY_FINGERPRINT`，
+  gpg 退 0。checksum 文件"release 声明 90 B / 实取 90 B"也一致。
+- 解包 → 在**归档内的** `mcp-shell` 里 `npm pack` → 装进干净前缀（`npm install -g --prefix`，
+  `--omit=dev`）→ `bin/glasspane-mcp` 存在且是指向 `dist/index.js` 的相对符号链接 →
+  从 stdin 打一条 `initialize`，回：
+  `{"id":1,"result":{"capabilities":{"tools":{"listChanged":false}},"protocolVersion":"2024-11-05","serverInfo":{"name":"glasspane-mcp","version":"1.18.0"}}}`。
+  即"从 GitHub 下来的那份字节"确实起得来、报的也是 1.18.0。
+- 第一版这条脚本自己错过一次，记下来：`fetchBytes` 我直接把 `gh api` 的原始资产对象传进去，
+  而它的 `.url` 是 **API 元数据地址**不是 `browser_download_url`，gpg 拿到一份 JSON 回 exit 2；
+  再加上脚本用 `| tail` 掩盖了 node 的退出码，那一格当时看着是 0。生产代码走的是
+  `assetIndex()` 里 `browser_download_url ?? url` 那一条，改成经 `findSignatureAsset` 取资产之后才真通过。
+  两处都是本轮纪律点名的形状：**桩跑过的不等于交付形状**、**包装脚本的退出码不可信**。
+

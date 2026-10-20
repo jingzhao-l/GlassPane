@@ -41,6 +41,74 @@ lane 转绿之后，这件事依旧成立。处置：不删 tag（发布锚点�
 不放宽那道闸，改为取新号 1.18.0，并新增 `scripts/assert-tag-ready.mjs` 把"tag 打在红树上"这件事
 **在打之前**就拒掉。逐条判据与失效模式见 `specs/GlassPane_每日审查_2026-10-20_记录.md`。
 
+### 发布状态（本版实测，不写"应该发出去了"）
+
+三条通道各自回读过：
+
+- **tag**：`v1.18.0` 指向 `80b81f18`（`git rev-parse v1.18.0^{commit}`），已推远端。
+- **GitHub Release**：`draft=false`、`target=80b81f18eb953…`、四件资产
+  （`GlassPane-1.18.0.tar.gz` 3,446,067 B 与其 `.asc`、`SHA256SUMS-1.18.0.txt` 90 B 与其 `.asc`），
+  `/releases/latest` 现在服务的就是 `v1.18.0`。归档自证：`make-release-archive.mjs --verify` 报
+  `669 entries … no entry under harness/`，`grep -cE "(^|/)harness/"` 数出来是 **0**；
+  两个资产的本地 sha256 与 GitHub API 自己记的 `digest` 逐字节相等（本机下载会被静默截断，
+  所以比对基准用远端记的那份，不是本地重算的）。签名由**用户机器上跑的那份代码**判的：
+  `updater/lib/signature.js` 的 `verifyReleaseSignature` 走 `findSignatureAsset` +
+  `makeBytesFetcher`（钥匙串 CA 束喂 `NODE_EXTRA_CA_CERTS`，即 `source.js` 自己那条 remedy），
+  回 `outcome=verified`、`keyFingerprint` == 仓内钉死的 `0929EA31…043A1298`。
+- **npm**：`release.yml` 以 `--ref v1.18.0 -f mode=publish` 触发（run `39371230541`，job 全绿），
+  registry 回读 `glasspane-mcp@1.18.0` 与 `glasspane-install@1.18.0` 都在、两包的 `latest` 都等于
+  `1.18.0`，各自带 2 条 attestation（SLSA provenance predicate v1 + v0.1）。trusted publisher 直发成功，
+  **没有产生任何 stage 件**，所以本轮不存在"等 owner 2FA 批准"这一格。
+- **本版第一版的红**：`github-release` job 首跑（run `39369074180`）死在"把发布读回来判"那一步——
+  它向 `gh release view --json` 问了一个 gh 答不出的字段 `latest`。发布对象与四件资产在那之前已经
+  建好挂上，所以对外状态是对的，红的是那格本该做的验证。修复与本版的 npm 通道无关（`npm-publish`
+  是另一条 job），已在 `v1.18.0` 之后落 main，见下面那一节「`v1.18.0` 之后落地的两批」。
+
+### Fixed — `v1.18.0` 之后落地的两批（发布链的 CI 基础设施 + 文档表格形状）
+
+这一批落在 `v1.18.0` 这个 tag **之后**：`.github/workflows/release.yml`、
+`scripts/check-workflows.mjs`、`scripts/check-doc-links.mjs`、
+`updater/test/scripts-check-workflows.test.mjs`、`updater/test/scripts-daily-20261020.test.mjs`，
+以及 9 份 markdown 里 13 行被撑破的表格（`specs/` 8 份 + `engine/smoke.md` + 本轮台账）。
+因此它们不在 1.18.0 的签名归档、npm 包或 tag 树里。决定：不为此另取一号，也不动已发布的 tag。
+依据两条——其一，`v1.18.0` 的发布物已经签出去且被 `install.sh`/updater 钉住，重打或补号都会让
+"这台机器装的是哪一棵树"重新变成问题；其二，这些文件里没有一行会被装到用户机器上执行
+（改的是发布作业、门禁自己的尺子、以及文档里表格的形状），随下一个真正带产品变更的版本出去
+不损失任何保护。下一次 `release.yml` 被触发时跑的就是修好的那一份。台账按提示词第 6 条归进
+本版条目，不留 `[Unreleased]` 段。
+
+- **`v1.18.0` 那一格红在自己的"验证"那一步**：读回命令写的是
+  `gh release view … --json tagName,isDraft,latest,assets,targetCommitish`，而 `latest` 不是
+  `gh release view` 的字段——gh 直接报 `Unknown JSON field: "latest"` 并列出它答得出的那 18 个，
+  整步 exit 1。死的位置很难看：发布对象已经建好、四件资产已经挂上，只有"对外了吗"这一句没被
+  回答。现在 draft 与 assets 仍从 `gh release view` 读，"这一版是不是 `/releases/latest` 服务的那一个"
+  改由 `gh api repos/<repo>/releases/latest` 读回来跟本次 tag 比——那个端点才是 `install.sh` 与
+  updater 实际走的路。三条判据各自点名自己的失败对象。
+- **这道闸当初为什么没拦住它自己的事故**：`updater/test/scripts-check-workflows.test.mjs` 里那条
+  "把 draft/latest/资产读回来并逐项判红"的判据写的是 `--json…latest|latest`——第二个分支只要
+  `latest` 这个词在步骤里出现过任何一次就算通过。词一直在（`--latest` 本身、注释、那句打印），
+  所以它绿着放过了一个 gh 答不出的字段。现在三个量各自有形状判据，并加一条"读回的 `--json`
+  字段表里不许出现 `latest`"。
+- **新增一条会判红的规则**：`scripts/check-workflows.mjs` 现在拿 gh 亲口列过的那份字段表核对每行
+  可执行的 `gh release view --json …`；`#` 开头的行不判（`release.yml` 就用注释记着这个错误，
+  把散文当缺陷报出来，得到的修法是删注释而不是改命令）。三档 `--self-test` 对照：坏字段被抓到、
+  真字段保持沉默、只在注释里的坏字段保持沉默。实测 15 档全按声明回答（12 档必须红、3 档必须沉默）。
+- **13 行 markdown 表格被未转义的竖线撑破**（`specs/` 里 11 行 + `engine/smoke.md` 1 行 + 本轮台账 2 行，
+  其中台账那两处是本轮自己写进去的）。这类缺陷的形状是：源码那一行看着整齐，**渲染出来**却被切成
+  多一格，于是那一行的"处置"跑到别的列里去，而字一个没少——死链、锚点、双语对偶、可复算主张四道
+  既有判据全都无感，因为文档确实还是那份文档。逐行改正：格内竖线一律写成 `\|`；`P1:95` 那一行不是
+  转义问题而是真多出一列，把第 4 格并进第 3 格；`P6:216` 那一行少一格，**只补一个空格子**，不替
+  当初的作者发明"验证"栏该写什么。回扫全仓 417 张表 → 0 张不齐。
+- **`scripts/check-doc-links.mjs` 新增表格形状判据**（`markdownTableProblems`）：围栏内不扫
+  （``` 里的对齐图行与行格数本来就可以不同，一道误红的闸的下场是被放宽）；`\|` 先折成占位符再数格；
+  缺 `|---|` 分隔行单独判（GFM 没分隔行根本不把它渲染成表格）；以竖线开头却不以竖线结尾判裁断。
+  扫描集合是全仓 markdown（跳过派生目录）而不只是 DOCS 登记表，汇总行因此多一个有读者的分母：
+  `markdown 表格 393 张（扫 113 份 markdown）`。`harness/glasspane-harness/packages/**` 那棵
+  vendored 的 fork 产品源码树**在范围外**——那是一条范围决定而不是注释：上游 bump 不该能红在本仓的
+  闸上（那种红的唯一修法是放宽本闸），两侧各有一条用例钉住（里面的沉默、外面的被抓）。六条用例双向
+  （未转义被抓／转义形状沉默／孤行不判／围栏不判且不计进总数／分隔行格数不齐被抓／真仓库零问题且
+  文件数 >100、表格数 >200），反向变异三处各自让闸退 1 并点名 `文件:行`，还原按 sha256 逐文件核回。
+
 ### Fixed — 证据与判定诚实性（Swift，引擎与面板）
 
 - **改名的档案被当成另一个操作的证据**：`EvidenceStore.read(operationId:)` 只按请求的 id 拼路径、
