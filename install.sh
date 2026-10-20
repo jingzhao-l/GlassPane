@@ -15,7 +15,7 @@ set -eu
 # 勿手改）：一键安装 clone 的是这个 **tag**，不是移动的 main——同一天两个人跑
 # 同一条命令必须拿到同一份源码。入口脚本本身仍从 main 取，因为它是唯一需要
 # "最新"的东西：钉的是哪个 tag 就写在这行里。
-GLASSPANE_RELEASE="v1.17.0"
+GLASSPANE_RELEASE="v1.18.0"
 
 # 输出函数先定义：下面第 (0) 条 HOME 闸要用 fail 说话，而它必须排在任何 $HOME 展开之前。
 say() { printf '%s\n' "$*"; }
@@ -159,7 +159,7 @@ describe_ref() {
   git -C "$1" describe --tags --always 2>/dev/null || say "（无法判定该目录的版本）"
 }
 
-# --- 1) Node 硬预检（installer 是 Node ESM，缺它无从委托；其余依赖交给 installer） ---
+# --- 1) 平台与 Node 硬预检（installer 是 Node ESM，缺它无从委托；其余依赖交给 installer） ---
 # **排在任何 clone 之前**。从前这一段写在 clone 后面，于是"这台机器压根跑不动 installer"
 # 这种情形要先付一次 5600 个文件的深 1 clone（慢、占盘、还可能被网络打断），然后才在
 # 委托前一句"Node.js 需要 >= 18"退场——留下一个用不上的 ~/glasspane。两条判据都是
@@ -167,6 +167,10 @@ describe_ref() {
 # 任何落盘行为，只省下那次注定白费的 clone。
 # dry-run 同样跑：CI 用 dry-run 读的就是"这条命令会怎么走"，Node 不够格时它该读到的是
 # 这一步就拒，而不是读到一条永远执行不了的 clone 计划。
+# macOS 这一条同一条规矩：README 两份都写着"macOS 14+"，而本脚本从前不检查——Linux
+# 上跑这条一键命令要付完整那次 clone，然后在 installer 里被一句"未找到 open（本安装器
+# 面向 macOS）"间接地发现装不了。那是同一个白花，只是换了个理由。
+[ "$(uname -s)" = "Darwin" ] || fail "本安装器只支持 macOS（uname -s = $(uname -s)）：Swift/XCTest、launchd 与 TCC 席位都在 macOS 这一侧，本轮没有 clone、没有写入任何东西。要在别的系统上用 GlassPane，等它把引擎搬到那一侧再说，现在这一步没有可绕的旗标。"
 command -v node >/dev/null 2>&1 || fail "未找到 Node.js（需 >= 18，https://nodejs.org 或 brew install node）：本轮没有 clone、没有写入任何东西。"
 NODE_MAJOR=$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)
 [ "$NODE_MAJOR" -ge 18 ] 2>/dev/null || fail "Node.js 需要 >= 18，当前主版本为 $NODE_MAJOR：先换够格的 Node（brew install node 或用 nvm 切一个）再重跑，本轮没有 clone、没有写入任何东西。"
@@ -231,15 +235,30 @@ if [ -z "$REPO" ]; then
 fi
 
 # --- 3) 委托 installer（参数原样透传，如 --no-gui / --no-app） -----------------
-# 非 TTY 时补 --no-prompt：installer 里的确认门（finding 12：bootout 已加载的 launchd
-# 作业、覆盖已存在的 .app、结束在跑的实例）现在是**活代码**——交互终端会问一句，
-# --no-prompt 显式放行，非交互又没给这个 flag 则跳过这些破坏性动作。`curl | sh` 与
-# CI 走的就是这里补上的那一支，行为与改造前一致。
-SILENT=""
-[ -t 0 ] || SILENT="--no-prompt"
+# 三道破坏性确认（覆盖已存在的 .app、bootout 已加载的 launchd 作业、结束在跑的 glasspaned）
+# 在 installer 里是三档：交互终端问一句、给了 `--no-prompt` 才照做、非交互又没给这个 flag
+# 就**跳过**并打印各自的补救命令（finding 11/12）。
+#
+# 从前这一节在非 TTY 时替调用方补上 `--no-prompt`，于是文档里那条 `curl … | sh` 一键命令
+# ——它永远不是终端——成了唯一一档"不问就照做"的入口：覆盖、bootout、杀进程都在没有一句
+# 说明的情况下发生，而同一份文档的 `npx glasspane-install`（TTY）是会问的。两条一键入口对
+# 同一件事给出相反的同意，且差别看不见。现在本脚本不再代答：非交互就是 installer 的跳过档，
+# 要放行必须自己写 `curl … | sh -s -- --no-prompt`。
+HAS_NO_PROMPT=0
+for passed in "$@"; do
+  [ "$passed" = "--no-prompt" ] && HAS_NO_PROMPT=1
+done
+if [ -t 0 ]; then
+  say 'stdin 是终端：installer 的三道破坏性确认（覆盖已有 .app、bootout launchd 作业、结束在跑的实例）会当面问一句。'
+elif [ "$HAS_NO_PROMPT" = "1" ]; then
+  say '你显式给了 --no-prompt：上面那三道门不问、直接执行。'
+else
+  say 'stdin 不是终端：那三道破坏性确认会被跳过，installer 会逐条打印可以照着跑的命令。'
+  say '  要放行就在一键命令后面补上这个旗标：sh -s -- --no-prompt；本脚本不替你决定这件事。'
+fi
 if [ "$DRY_RUN" = "1" ]; then
-  say "[dry-run] 将执行: node $REPO/installer/cli.js $SILENT $*"
+  say "[dry-run] 将执行: node $REPO/installer/cli.js $*"
   exit 0
 fi
 export GLASSPANE_REPO="$REPO"
-exec node "$REPO/installer/cli.js" $SILENT "$@"
+exec node "$REPO/installer/cli.js" "$@"

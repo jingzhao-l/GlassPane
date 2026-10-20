@@ -830,5 +830,39 @@ test('finding11: --no-prompt 被三个破坏性步骤读，usage 与 install.sh 
   assert.match(usageText(), /--no-prompt[\s\S]{0,600}bootout[\s\S]{0,400}\.app/, 'usage 要说清跳过的是哪几步')
   assert.match(usageText(), /必须显式带 --no-prompt/, '非交互调用方要被告知必须显式带 flag')
   const sh = fs.readFileSync(INSTALL_SH, 'utf8')
-  assert.match(sh, /\[ -t 0 \] \|\| SILENT="--no-prompt"/, '非 TTY 由入口脚本补上 flag，CI/e2e 行为不变')
+  // 2026-10-20 改判：入口脚本不再替调用方补 `--no-prompt`。从前那句 `[ -t 0 ] || SILENT="--no-prompt"`
+  // 让文档里那条一键命令（`curl … | sh`，永远不是终端）成了唯一一档"不问就照做"的破坏性路径，
+  // 而同一份文档的 npx 入口是会问的——同一个同意，两条入口两种结果，且差别不告诉任何人。
+  // installer 自己的三档（TTY 问 / 给了 flag 照做 / 非交互没给就跳过并打印命令）才是口径。
+  assert.doesNotMatch(sh, /SILENT="--no-prompt"/, 'install.sh 不许代答那三道门')
+  // 上面那条按字面量太脆（换成单引号或换个变量名就绕过了）。两条更狠的：没有任何赋值
+  // 产出这个 flag，也没有任何一处把它拼进交给 installer 的命令行。
+  assert.doesNotMatch(sh, /=["']?--no-prompt/, 'install.sh 里不许出现把 --no-prompt 赋给任何东西的写法')
+  assert.doesNotMatch(sh, /cli\.js[^\n]*--no-prompt/, '交给 installer 的那条命令不许自带这个 flag')
+  assert.match(sh, /要放行就/, '非 TTY 时要把"这一趟会跳过"说出来，并给出放行的那条命令')
+  assert.match(sh, /sh -s -- --no-prompt/, '放行的写法要能照抄')
+  // 本轮真踩到的另一条形：`say "… \`那条命令\` …"` 里的反引号是**命令替换**——脚本会去执行它，
+  // 再把返回值印出来（这台机器上返回空串，于是"该怎么放行"这半句整个消失）。给用户看的句子
+  // 一律单引号；反引号只留在注释里。
+  assert.doesNotMatch(sh, /^[ \t]*say[^\n]*`/m, 'say 的文案里不许出现反引号：那是命令替换，不是排版')
+  assert.doesNotMatch(sh, /^[ \t]*fail[^\n]*`/m, 'fail 同理')
+})
+
+test('install.sh on a non-terminal neither auto-approves nor stays silent about it', () => {
+  // 真跑一次 dry-run：stdin 不是终端（pipe），断言它将要执行的命令里没有 --no-prompt，
+  // 而它打印的那句里说清了跳过与放行办法。这是"文案与行为一致"那一半的实测。
+  const repoRoot = path.join(HERE, '..', '..')
+  const got = spawnSync('/bin/sh', [INSTALL_SH], {
+    env: { ...process.env, GLASSPANE_INSTALL_DRY_RUN: '1', GLASSPANE_REPO: repoRoot },
+    input: '',
+    encoding: 'utf8',
+    timeout: 60_000,
+  })
+  assert.equal(got.status, 0, `${got.stdout}\n${got.stderr}`)
+  const out = `${got.stdout}`
+  const delegated = out.split('\n').find((line) => line.includes('[dry-run] 将执行'))
+  assert.ok(delegated, `dry-run 必须打出行将执行的那一句：${out}`)
+  assert.doesNotMatch(delegated, /--no-prompt/, `非交互的 dry-run 不许把 flag 加进将执行的命令：${delegated}`)
+  assert.match(out, /那三道破坏性确认会被跳过/, out)
+  assert.match(out, /sh -s -- --no-prompt/, out)
 })

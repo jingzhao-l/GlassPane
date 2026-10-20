@@ -70,7 +70,7 @@ export const INSTALL_SH_URL =
 /** 发布线锚点（版本真源 = 根 package.json，由 scripts/set-version.mjs 统一改写，
  *  勿手改）：npx 形态下本地没有仓库时，引导 clone 的就是这个 tag，与 install.sh
  *  的 `GLASSPANE_RELEASE` 同值——两条一键入口必须拿到同一份源码。 */
-export const RELEASE_VERSION = '1.17.0'
+export const RELEASE_VERSION = '1.18.0'
 /** 发布 ref（tag 名）。GLASSPANE_REF 环境变量可覆盖（追主干用 `main`）。 */
 export const REPO_REF = `v${RELEASE_VERSION}`
 
@@ -324,22 +324,24 @@ export function checkEnvironment({ nodePath = process.execPath } = {}) {
 /** 汇总预检结果：缺项按严重程度排序返回可读描述（空数组 = 全部通过）。 */
 export function preflightIssues(env) {
   const issues = []
+  // 每一行都要带上"下一步能跑的动作"：`未找到 npm` 单独一句是把诊断交给读者，而预检失败
+  // 时汇总只补一句通用的"修复后重新运行即可"——四行里只有 swift 那条说得出该装什么。
   if (env.nodeMajor === 0) {
-    issues.push(`无法解析 Node.js 版本（${env.nodeMajor === 0 ? '执行失败' : ''}）`)
+    issues.push('无法解析 Node.js 版本（`node --version` 跑不起来）：装一个 >= 18 的 Node（brew install node，或 nvm install --lts 后 nvm use）再重跑')
   } else if (!env.nodeOk) {
-    issues.push(`Node.js 需要 >= ${MIN_NODE_MAJOR}，当前为 ${env.nodeMajor}`)
+    issues.push(`Node.js 需要 >= ${MIN_NODE_MAJOR}，当前为 ${env.nodeMajor}：换够格的 Node 版本再重跑（brew upgrade node 或 nvm use 22）`)
   }
   if (!env.npm) {
-    issues.push('未找到 npm')
+    issues.push('未找到 npm（它随 Node 一起装：brew install node）')
   }
   if (!env.swift) {
     issues.push('未找到 swift（需安装 Xcode Command Line Tools：xcode-select --install）')
   }
   if (!env.git) {
-    issues.push('未找到 git')
+    issues.push('未找到 git（xcode-select --install 会带上它，或 brew install git）')
   }
   if (!env.open) {
-    issues.push('未找到 open（本安装器面向 macOS）')
+    issues.push('未找到 open（本安装器面向 macOS：Linux/Windows 上没有可装的东西，请在 macOS 14+ 上重跑）')
   }
   return issues
 }
@@ -1776,8 +1778,11 @@ export function usageText() {
     '     （--no-daemon 且 --no-launchd）',
     '  1  收尾未通过 hello 校验（daemon 没起来/不应答），或构建/产物/launchd 出错',
     '  2  命令行参数错误',
-    '  注：install.sh 用 exec 委托本文件，退出码原样透传，所以 `curl | sh` 的',
-    '      $? 就是这里的结论。',
+    '  注：install.sh 用 exec 委托本文件，所以**脚本自己跑完了**之后，退出码原样透传。',
+    '      但 `curl … | sh` 的 $? 只在 curl 成功时才是这里的结论：curl 取不到脚本时 sh 读到的',
+    '      是空输入，直接 EOF 退 0（本机实测 curl 退 7、管道退 0）；中途断流时 sh 只执行了',
+    '      收到的前半截，回的是最后一条命令的状态。要拿退出码当结论就分两步跑：',
+    '      curl -fsSL <install.sh> -o /tmp/gp-install.sh && sh /tmp/gp-install.sh',
     '',
   ].join('\n')
 }
@@ -1862,7 +1867,7 @@ export function nextStepsText({
     `   作业被 bootout（等授权期间常发生）后的恢复**不需要手敲 launchctl**：`,
     `   node "${path.join(rootDir, 'installer', 'cli.js')}" --restore-launchd`,
     `   （检测→bootstrap→hello 校验自报席位；勾完 TCC 框重跑即自动换进程复验）`,
-`4. entryName 核对：设置面板「Daemon 状态 → 主体」应与上面「${entryName}」一致；不一致说明连到了别的构建实例。`,
+`4. 主体名核对：设置面板「Daemon 状态 → 主体」应与上面「${entryName}」一致；不一致说明连到了别的构建实例。`,
     '5. registry 发布形态：MCP 服务器已可独立安装（`npm i -g glasspane-mcp`，命令名',
     '   glasspane-mcp）；但它只是转发层，daemon 与权限仍由本次安装产出，缺 daemon 时',
     '   工具调用会返回带补救步骤的结构化错误。',
