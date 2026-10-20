@@ -81,8 +81,8 @@ async function diagnoseWithCaRoots(caRoots, extra = {}) {
     io.lastFrame();
     io.respond({ class: "T1", summary: "ok" });
     const outcome = await promise;
-    assert.equal(outcome.content.length, 2,
-      `the daemon reply plus one update block, got ${JSON.stringify(outcome.content.map((c) => c.text.slice(0, 60)))}`);
+    assert.equal(outcome.content.length, 3,
+      `the daemon reply plus one update block plus the provider attribution, got ${JSON.stringify(outcome.content.map((c) => c.text.slice(0, 60)))}`);
     assert.deepEqual(JSON.parse(outcome.content[0].text), { class: "T1", summary: "ok" },
       "the daemon's reply is passed through byte-for-byte, CA bundle line or not");
     const text = outcome.content[1].text;
@@ -665,7 +665,7 @@ test("gp_diagnose carries the update state as a separate block, leaving the JSON
     io.lastFrame();
     io.respond({ class: "T1", summary: "ok" });
     const outcome = await promise;
-    assert.equal(outcome.content.length, 2, `diagnose must answer plus one update block: ${JSON.stringify(outcome.content)}`);
+    assert.equal(outcome.content.length, 3, `diagnose must answer plus one update block plus the provider attribution: ${JSON.stringify(outcome.content)}`);
     assert.deepEqual(JSON.parse(outcome.content[0].text), { class: "T1", summary: "ok" },
       "the daemon's reply is passed through byte-for-byte, update block or not");
     assert.match(outcome.content[1].text, /^update state: status=up-to-date/);
