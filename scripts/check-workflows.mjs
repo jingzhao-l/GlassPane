@@ -366,6 +366,14 @@ function inspect(target) {
     if (!declared.has(name)) problems.push(`uses inputs.${name} but never declares it under workflow_dispatch.inputs`)
   }
 
+  // 3a2. `gh … --json <fields>` asks gh for a field it does not have. Measured on the
+  //      v1.18.0 release: the readback asked for `latest`, gh answered
+  //      `Unknown JSON field: "latest"` + the list it does have, and the step died **after**
+  //      the release was created and its assets uploaded — a half-shipped version whose only
+  //      symptom is a red lane. A field gh cannot answer is not a slow check, it is a check
+  //      that never ran, so the question is settled here instead of in the release lane.
+  for (const problem of ghJsonFieldProblems(text, base)) problems.push(problem)
+
   // A workflow without a top-level `permissions:` runs with whatever the repository hands
   // the default token — historically `contents: write`. Every job in it can then push a ref
   // or write a release, including the jobs that `npm ci` a lockfile nobody reviewed. The rule
@@ -422,6 +430,47 @@ function inspect(target) {
  * exemption are both gone, and every root `inspect()` reaches is enforced. Keeping a knob with no
  * caller that turns a control off is how a control quietly stops existing.
  */
+/**
+ * The fields `gh release view --json` can actually answer, as printed by gh itself on
+ * 2026-10-20 (`Unknown JSON field: "latest"` followed by the list). Not invented, and the
+ * three `--self-test` cases below are what keep this list honest: a field outside it
+ * reddens the gate, a field set inside it must stay silent.
+ */
+const GH_RELEASE_VIEW_FIELDS = new Set([
+  'apiUrl', 'assets', 'author', 'body', 'createdAt', 'databaseId', 'id', 'isDraft',
+  'isImmutable', 'isPrerelease', 'name', 'publishedAt', 'tagName', 'tarballUrl',
+  'targetCommitish', 'uploadUrl', 'url', 'zipballUrl',
+])
+
+/**
+ * Every `gh release view … --json a,b,c` in a workflow: are all the named fields real?
+ * Only `release view` is checked today because that is the one this repository asks;
+ * an unknown command's fields are left alone rather than guessed at.
+ *
+ * Comment lines are skipped — a `#` line inside a `run:` block never executes, and a
+ * scanner that reports prose as a defect gets silenced by deleting the prose instead of
+ * fixing the command. This repository's release.yml *documents* the `latest` mistake on
+ * such a line; the gate must stay blind to that and red for the command.
+ */
+function ghJsonFieldProblems(text, base, known = GH_RELEASE_VIEW_FIELDS) {
+  const problems = []
+  const pattern = /gh\s+release\s+view[^\n]*?--json\s+([A-Za-z0-9,_]+)/g
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\s*#/.test(line)) continue
+    pattern.lastIndex = 0
+    let match
+    while ((match = pattern.exec(line)) !== null) {
+      for (const field of match[1].split(',').filter(Boolean)) {
+        if (!known.has(field)) {
+          problems.push(`${base}: "gh release view --json" asks for "${field}", which gh does not answer — the step dies on `
+            + `Unknown JSON field instead of verifying anything. Fields gh listed on 2026-10-20 are the ones this gate knows.`)
+        }
+      }
+    }
+  }
+  return problems
+}
+
 function jobPolicyProblems(lines) {
   const out = []
   let inJobs = false
@@ -788,6 +837,49 @@ jobs:
             "      - name: gated on a secret",
         ),
       expect: /no "bundle-that-does-not-exist" script/,
+    },
+    {
+      id: "`gh release view --json` asking for a field gh does not have",
+      // What actually cost the v1.18.0 release lane its readback: `latest` is not a
+      // `gh release view` field, gh exits with `Unknown JSON field`, and the step dies
+      // *after* the release and its assets already exist. Verify-it-yourself is worth
+      // nothing if the verifier was never able to run.
+      apply: (t) =>
+        t.replace(
+          "      - name: gated on a secret",
+          "      - name: read the release back\n" +
+            '        run: gh release view "$TAG" --json tagName,isDraft,latest,assets --jq .isDraft\n' +
+            "      - name: gated on a secret",
+        ),
+      expect: /which gh does not answer/,
+    },
+    {
+      id: "`gh release view --json` with only fields gh really answers",
+      // The same step with the corrected field list must be silent, or this rule is just
+      // a permanent red that someone switches off.
+      apply: (t) =>
+        t.replace(
+          "      - name: gated on a secret",
+          "      - name: read the release back\n" +
+            '        run: gh release view "$TAG" --json tagName,isDraft,assets,targetCommitish --jq .isDraft\n' +
+            "      - name: gated on a secret",
+        ),
+      absent: /which gh does not answer/,
+    },
+    {
+      id: "a bad field that only appears in a comment",
+      // release.yml documents this exact mistake on a `#` line. Prose that cannot execute
+      // must not redden the gate — a scanner that reports comments gets its comments
+      // deleted rather than its commands fixed, and the command then goes unverified.
+      apply: (t) =>
+        t.replace(
+          "      - name: run the real script",
+          "      - name: the mistake, in prose\n" +
+            "        # gh release view \"$TAG\" --json tagName,latest used to live here\n" +
+            "        run: node scripts/check-version.mjs\n" +
+            "      - name: run the real script",
+        ),
+      absent: /which gh does not answer/,
     },
   ]
 

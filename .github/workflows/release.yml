@@ -214,17 +214,24 @@ jobs:
           # 于是这一格绿着让每台机器安静地不再更新（同一形状的先例见本文件开头 v1.4.0 那条签名事故，
           # 也见 harness/glasspane-harness 的 publish-release 步：那里 `[ "$state" != "false" ]` 是判红的）。
           # 三件事各自判：draft、latest、非空资产列表——少任何一件，这一版对外都不是这一版。
-          READBACK=$(gh release view "$REF_NAME" --json tagName,isDraft,latest,assets,targetCommitish \
-            --jq '[(.isDraft|tostring), (.latest|tostring), (.assets|length|tostring), .targetCommitish] | @tsv') \
-            || { echo "::error::gh release view $REF_NAME 读不回来（isDraft / latest / assets 一个都没拿到）——发出去没有这一句就没有证据，判红"; exit 1; }
-          IFS=$'\t' read -r DRAFT LATEST ASSETS TARGET_READ <<<"$READBACK"
+          # `latest` 不是 `gh release view --json` 的字段（v1.18.0 首跑就是死在这：gh 直接报
+          # `Unknown JSON field: "latest"` 并列出可用字段，整步 exit 1，发布对象其实已经建好、
+          # 资产也挂上了——一格"验证 latest"的判据问了一个 gh 答不出的问题）。"这一版是不是
+          # /releases/latest 服务的那一个"由 REST 端点回答，因为它就是 updater 与 install.sh
+          # 实际走的那条路。
+          READBACK=$(gh release view "$REF_NAME" --json tagName,isDraft,assets,targetCommitish \
+            --jq '[(.isDraft|tostring), (.assets|length|tostring), .targetCommitish] | @tsv') \
+            || { echo "::error::gh release view $REF_NAME 读不回来（isDraft / assets 一个都没拿到）——发出去没有这一句就没有证据，判红"; exit 1; }
+          IFS=$'\t' read -r DRAFT ASSETS TARGET_READ <<<"$READBACK"
+          LATEST=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name) \
+            || { echo "::error::repos/${GITHUB_REPOSITORY}/releases/latest 读不回来：无法证明这一版就是别人装的时候拿到的那一版，判红"; exit 1; }
           if [ "$DRAFT" != "false" ]; then
             echo "::error::release $REF_NAME 编辑之后读回 isDraft=$DRAFT，它仍然是草稿：/releases/latest 还在服务上一个 tag，" \
-              "install.sh 与 updater 取到的都不是这一版，而每台机器会把"查不到更新"读成 up-to-date。"
+              "install.sh 与 updater 取到的都不是这一版，而每台机器会把「查不到更新」读成 up-to-date。"
             exit 1
           fi
-          if [ "$LATEST" != "true" ]; then
-            echo "::error::release $REF_NAME 读回 latest=$LATEST：它不是 /releases/latest 指向的那一个，" \
+          if [ "$LATEST" != "$REF_NAME" ]; then
+            echo "::error::/releases/latest 现在服务的是「$LATEST」，不是 $REF_NAME：" \
               "钉着 latest 的安装命令与 updater 装的是上一版的内容。"
             exit 1
           fi

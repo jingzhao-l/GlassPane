@@ -238,9 +238,18 @@ test('release.yml 的建 Release 步把 draft/latest/资产读回来并逐项判
   const editAt = body.findIndex((l) => l.includes('--draft=false') && l.includes('--latest'))
   assert.ok(editAt > -1, '这一步没有把发布取消草稿并钉成 latest 的那条命令：' + text.slice(0, 200))
   const afterEdit = body.slice(editAt + 1).join('\n')
-  for (const field of ['isDraft', 'latest', 'assets']) {
-    assert.match(afterEdit, new RegExp(`--json[^\\n]*${field}|${field}`), `编辑之后没有读回 ${field}`)
-  }
+  // 三件事各自要真的被读回来。原来这里写成 `--json…latest|latest`，第二个分支让"latest
+  // 这个词在任何地方出现过一次"就算数——v1.18.0 那次事故恰好是 `--json` 里问了 gh 答不出的
+  // `latest`，这个词一直在，闸却一直是绿的。
+  assert.match(afterEdit, /--json[^\n]*isDraft[^\n]*assets/, '编辑之后没有把 isDraft 与资产列表读回来')
+  assert.match(afterEdit, /gh\s+api\s+[^\n]*releases\/latest/,
+    'latest 没有单独读：这一版是不是 /releases/latest 服务的那一个，只能从这个端点问出来')
+  assert.match(afterEdit, /\[\s*"\$LATEST"\s*!=\s*"\$REF_NAME"\s*\]/,
+    '读回的 latest 没有跟本次的 tag 比过——比过之后才谈得上判红')
+  const jsonFields = afterEdit.match(/--json\s+([A-Za-z0-9,_]+)/)?.[1].split(',') ?? []
+  assert.ok(jsonFields.length > 0 && !jsonFields.includes('latest'),
+    `读回那一步又向 gh 问了它答不出的字段（${jsonFields.join(', ')}）：这一步会死在 Unknown JSON field，` +
+      '而那时发布对象与资产已经挂上去了')
   assert.ok(/exit 1/.test(afterEdit),
     '建 Release 那一步在 --draft=false 之后没有任何 exit 1：它把 draft/latest/资产打印完就继续绿')
 
