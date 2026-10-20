@@ -31,8 +31,10 @@ import { fileURLToPath } from 'node:url'
 
 import {
   applyExclusions,
+  main,
   archiveBytes,
   declaredCommands,
+  judgeExclusionsActive,
   EXCLUDED_PREFIXES,
   REQUIRED_IN_ARCHIVE,
   requiredEntries,
@@ -100,9 +102,12 @@ function makeReleaseTree({ withDist = true, commitBuildOutputs = false } = {}) {
     version: '1.6.0',
     bin: 'cli.js',
   }) + '\n')
-  write('installer/cli.js', 'export const install = () => {}\n')
+  write('installer/cli.js', 'export const install = () => {}\n', 0o755)
   if (withDist) {
-    write('mcp-shell/dist/index.js', '#!/usr/bin/env node\nconsole.log("glasspane-mcp")\n', 0o755)
+    // esbuild 产出的 `dist/index.js` 在真树里是 **-rw-r--r--**（本机实测：`ls -l mcp-shell/dist/index.js`），
+    // 可执行位是 `npm install -g` 建 bin 软链时补上的。从前这份夹具写 0755、断言又要求"归档不许剥掉
+    // 可执行位"，于是它测的是一份生产里不存在的形状——正是交付形状与原 P0 同类的那次教训。
+    write('mcp-shell/dist/index.js', '#!/usr/bin/env node\nconsole.log("glasspane-mcp")\n', 0o644)
     write('mcp-shell/schemas/decision-log-entry.schema.json', '{}\n')
   }
   git('add', '-A')
@@ -131,7 +136,13 @@ test('the archive carries the build output the npm package promises to run', () 
       extractTarGz(bytes, dest, { allowedRoot: dest })
       const binFile = path.join(dest, 'GlassPane-1.6.0', 'mcp-shell', 'dist', 'index.js')
       assert.ok(fs.existsSync(binFile), 'the unpacked release must contain what its manifest declares as the command')
-      assert.notEqual(fs.statSync(binFile).mode & 0o111, 0, 'the build wrote an executable command; the archive may not strip that bit')
+      // 夹具交付的是真形状：构建产物 0644。可执行位由下面 `npm install -g` 建 bin 时补上——
+      // 那条命令能不能跑，判据在最后一步的 `spawnSync(command)`，不在 tar 里的 mode 位。
+      const installedCommandMode = fs.statSync(binFile).mode & 0o111
+      assert.equal(installedCommandMode, fs.statSync(path.join(tree.root, 'mcp-shell', 'dist', 'index.js')).mode & 0o111,
+        '归档必须原样带着构建产物的模式，既不许加也不许剥')
+      const cliEntry = readTarGz(bytes).find((entry) => entry.name === 'GlassPane-1.6.0/installer/cli.js')
+      assert.equal(cliEntry?.mode & 0o111, 0o111, 'git 把 cli.js 记成 100755，发布物里也得是（安装器与 updater 都 exec 它）')
 
       // And `npm pack` of that directory has to produce a tarball that really holds it — the exact
       // step that shipped a three-entry package from the source-only archive on 2026-10-01.
@@ -536,5 +547,85 @@ test('通过符号链接调用打包脚本时，usage 与退出码照样出来',
     assert.equal(through.status, direct.status, '两条调用路径的判定必须一致')
   } finally {
     fs.rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('the CLI itself refuses both shapes: an inert exclusion, and an archive that leaks', () => {
+  // 判据函数在上面测过了；这一条测**接线**——两条拒绝都住在 `main()` 里，只测函数等于没测它们。
+  // `root` 可注入正是为此（与 `archiveBytes` 收 `prefixes` 同一个理由）。
+  const tree = makeReleaseTree()
+  const out = path.join(tree.root, 'GlassPane-1.6.0.tar.gz')
+  const writes = []
+  const realWrite = process.stderr.write.bind(process.stderr)
+  process.stderr.write = (chunk) => { writes.push(String(chunk)); return true }
+  const run = (argv) => { writes.length = 0; return { rc: main(argv, { root: tree.root }), out: writes.join('') } }
+  try {
+    const good = run(['1.6.0', out])
+    assert.equal(good.rc, 0, `一份正常的归档不该被拒：${good.out}`)
+
+    fs.writeFileSync(out, archiveBytes({ root: tree.root, version: '1.6.0', prefixes: [] }).bytes)
+    const leaky = run(['--verify', out, '1.6.0'])
+    assert.equal(leaky.rc, 1, `带着被排除树的归档必须被读侧拒：${leaky.out}`)
+    assert.match(leaky.out, /leaks \d+ excluded entr/, leaky.out)
+
+    tree.git('rm', '-q', '--cached', '.iterate_decisions.md')
+    fs.rmSync(path.join(tree.root, '.iterate_decisions.md'), { force: true })
+    tree.git('commit', '-q', '--amend', '-m', 'tree')
+    const inert = run(['1.6.0', path.join(tree.root, 'second.tar.gz')])
+    assert.equal(inert.rc, 1, `一条命中零的前缀不该被放行：${inert.out}`)
+    assert.match(inert.out, /EXCLUDED_PREFIXES names \.iterate_decisions\.md/, inert.out)
+  } finally {
+    process.stderr.write = realWrite
+    tree.cleanup()
+  }
+})
+
+test('an archive that carries the excluded tree is refused by the reader, not only by the writer', () => {
+  // `required` 只能证明"该有的在"。"不该到的没到"这一问从前没人问，而 tar 里所有条目都在
+  // 单一顶层目录 `GlassPane-<ver>/` 之下——锚在 `^harness/` 的写法一条不中、会空过成绿
+  // （本仓被同一个形状骗过）。所以这里按真形状造一份"排除没生效"的归档，让读侧必须点名。
+  const tree = makeReleaseTree()
+  const leaky = path.join(tree.root, 'leaky.tar.gz')
+  const good = path.join(tree.root, 'GlassPane-1.6.0.tar.gz')
+  try {
+    fs.writeFileSync(good, archiveBytes({ root: tree.root, version: '1.6.0' }).bytes)
+    fs.writeFileSync(leaky, archiveBytes({ root: tree.root, version: '1.6.0', prefixes: [] }).bytes)
+    const clean = verifyArchive({ file: good, version: '1.6.0', root: tree.root })
+    assert.deepEqual(clean.leaked, [], JSON.stringify(clean.entries))
+    const bad = verifyArchive({ file: leaky, version: '1.6.0', root: tree.root })
+    assert.ok(bad.leaked.some((name) => name.includes('harness/glasspane-harness/')),
+      `vendored fork 进了发布物却没人指出来：${JSON.stringify(bad.leaked)}`)
+    assert.ok(bad.leaked.some((name) => name.endsWith('.iterate_decisions.md')),
+      `开发者自己的迭代日志（含家目录与 token scope）也在漏：${JSON.stringify(bad.leaked)}`)
+  } finally {
+    tree.cleanup()
+  }
+})
+
+test('the shipped exclusion list has to be doing something in the run that produces the archive', () => {
+  assert.deepEqual(judgeExclusionsActive({ matched: [...EXCLUDED_PREFIXES] }).inert, [])
+  assert.equal(judgeExclusionsActive({ matched: [...EXCLUDED_PREFIXES] }).ok, true,
+    '对照：两条都命中时必须放行，否则这道闸只是永远红')
+  const half = judgeExclusionsActive({ matched: ['harness/'] })
+  assert.equal(half.ok, false)
+  assert.deepEqual(half.inert, ['.iterate_decisions.md'])
+  assert.match(half.reason, /do not delete the exclusion/, half.reason)
+  // 夹具树按真排除打包 → 两条都该命中；把那份日志从**提交**里拿走（归档读的是 HEAD 的树，
+  // 不是工作树），生产入口就要在"排除空转"这一点上红。
+  const withBoth = makeReleaseTree()
+  const withoutLog = makeReleaseTree()
+  try {
+    assert.deepEqual(judgeExclusionsActive({
+      matched: archiveBytes({ root: withBoth.root, version: '1.6.0' }).excluded.prefixes,
+    }).inert, [])
+    withoutLog.git('rm', '-q', '--cached', '.iterate_decisions.md')
+    fs.rmSync(path.join(withoutLog.root, '.iterate_decisions.md'), { force: true })
+    withoutLog.git('commit', '-q', '--amend', '-m', 'tree')
+    const stillArmed = archiveBytes({ root: withoutLog.root, version: '1.6.0' })
+    assert.equal(judgeExclusionsActive({ matched: stillArmed.excluded.prefixes }).ok, false,
+      '路径搬走之后排除表就空转了：这一格必须拒，而不是安静地少排除一个文件')
+  } finally {
+    withBoth.cleanup()
+    withoutLog.cleanup()
   }
 })

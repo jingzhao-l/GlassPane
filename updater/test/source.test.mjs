@@ -196,7 +196,7 @@ test('a certificate-verification failure reports the cause code, not "fetch fail
   assert.match(error.message, /UNABLE_TO_VERIFY_LEAF_SIGNATURE/, 'the code lives in error.cause; dropping it is what made this machine look offline while curl worked')
   assert.match(error.message, /fetch failed/, 'the original sentence stays, this is an addition not a rewrite')
   assert.equal(error.tlsVerification, true, 'the recovery branch reads this flag, not my sentence')
-  assert.match(error.details, new RegExp(`NODE_EXTRA_CA_CERTS=${BUNDLE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'the remedy names the file this machine should be handed')
+  assert.match(error.details, new RegExp(`NODE_EXTRA_CA_CERTS="${BUNDLE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`), 'the remedy names the file this machine should be handed — quoted, because a home directory may contain a space and an unquoted copy would act on a truncated path')
   assert.match(error.details, /updater enable|installer/, 'and the two ways to produce it')
 })
 

@@ -38,6 +38,8 @@ import { UpdaterError, canonicalPath, ensurePrivateDir, removeTreeWithin, resolv
 import { probeIdle } from './idle.js'
 import { kickstartJob, readRunningJob } from './launchd.js'
 import { mcpToolsList } from './mcp.js'
+import { judgeStagedAnchor, recordAnchor, trustFilePath } from './trust.js'
+import { PINNED_PRIMARY_FINGERPRINT } from './signature.js'
 import { refreshRuntime, undoHandover } from './runtime.js'
 import { bumpKind, parsePlainVersion } from './version.js'
 import { decideSwapPermission, foreignStateDir } from './policy.js'
@@ -1470,6 +1472,19 @@ export async function applyUpdate({
    */
   const provenTree = proven.rootPath
 
+  // The signing anchor lives in the state root and is read by the code that is *already
+  // running*, because a release that could edit its own pin could also edit the rule that
+  // says it may not: `runtime.js` copies `updater/` into the installed tree, so one
+  // waved-through release would otherwise replace `PINNED_PRIMARY_FINGERPRINT` and every
+  // later release would read `verified` against the new key. A difference is refused here,
+  // before anything is built, packed, swapped or restarted.
+  const anchorGate = judgeStagedAnchor({ stateRoot, treeRoot: provenTree })
+  if (!anchorGate.ok) {
+    return fail('deferred', CODES.signatureAnchorChanged,
+      `the staged release was not put in place, because its signing key is not the one this machine recorded: ${anchorGate.reason}`,
+      { details: { anchorFile: anchorGate.anchor.file, recorded: anchorGate.anchor.fingerprint ?? null, staged: anchorGate.staged } })
+  }
+
   // §3.5's pre-flight, placed here because everything below this line can change the live machine.
   // The npm step is the last one and the only one that can need root; finding that out after the
   // bundles were swapped buys a rollback, two daemon restarts and a version that never lands.
@@ -1918,6 +1933,16 @@ export async function applyUpdate({
     // succeeded, and "applied" is the last honest thing the state file says.
     const caRoots = refreshCa ? refreshCa() : base.caRoots ?? null
     const code = standing?.code ?? (runtimeStalled ? CODES.runtimeStale : null)
+    // Trust-on-first-use, said out loud: the machine that had no anchor now has one,
+    // recorded from the code running here (not from the tree that just arrived), so the
+    // *next* release is judged against it. The window this closes is the one the finding
+    // describes — a waved-through release silently redefining what "verified" means.
+    if (anchorGate.anchor.state === 'absent') {
+      const recorded = recordAnchor(stateRoot, PINNED_PRIMARY_FINGERPRINT)
+      handoverNotes.push(recorded.ok
+        ? `this machine had no recorded signing anchor, so ${recorded.file} now holds the one this updater ships (${PINNED_PRIMARY_FINGERPRINT}); from the next release on, a different key is refused rather than trusted`
+        : `the signing anchor could not be recorded in ${trustFilePath(stateRoot)} (${recorded.reason}), so the next release still has nothing to be compared against here`)
+    }
     const saved = stampOnto(base, {
       status: 'applied',
       code,

@@ -57,6 +57,11 @@ export const CODES = Object.freeze({
   signatureInvalid: 'signature-invalid',
   releaseUnsigned: 'release-unsigned',
   signatureToolMissing: 'signature-tool-missing',
+  // The staged release pins a **different key** than the one recorded in this machine's
+  // `<stateRoot>/trust.json`. Like `signature-invalid`, no consent waves it through —
+  // `--consent unsigned-release` answers "nobody signed this release", never "the author
+  // changed". The only way past it is a person editing that one field (lib/trust.js).
+  signatureAnchorChanged: 'signature-anchor-changed',
   assetHostUnpinned: 'asset-host-unpinned',
   // A download that left the pinned host after a redirect (§1's host pinning is
   // about the bytes that land on disk, not only about the URL in the payload).

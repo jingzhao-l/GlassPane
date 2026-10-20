@@ -45,7 +45,13 @@ export function decideUpdate({ currentVersion, tag, autoApply = true, consents =
       candidate: candidate.version,
       kind,
       autoApplyAllowed: false,
-      reason: `the newest published release (${candidate.version}) is older than what this machine runs (${currentVersion}); nothing to do`,
+      // `up-to-date` here means only "no published release is newer to take". Say which of
+      // the two readings applies, because the word alone also reads as "this machine is on
+      // the published line" — and a host built from a tag whose Release never shipped is
+      // exactly the case where the two differ (measured 2026-10-19/20 with 1.17.0 tagged,
+      // published line at 1.16.4).
+      reason: `the newest published release (${candidate.version}) is older than what this machine runs (${currentVersion}); nothing to do. `
+        + `"up-to-date" here means no published release is newer — it does not say this machine is on the published line, and the two differ whenever a tag was cut without shipping its Release.`,
     }
   }
   const hasConsent = consents.includes(kind)
@@ -128,7 +134,7 @@ export function decideSwapPermission({ probe, jobArgs, ourStateRoot, consented =
       // 这句从前还补了一句"面板上「安装更新」按钮干的是同一件事"——那是假的：`non-default-state-dir`
       // 不在 UpdatePanelLogic 的 consentGate 表里，落到 `.none` 那一档，而那一档写死
       // `applyEnabled: false`（UpdatePanelTests 钉着）。把人说往一个按不动的按钮，比不说更糟。
-      reason: `the running daemon writes to ${foreign}, which is not the state root this tool was asked to update (${ourStateRoot}). A swap here would replace bundles that somebody else's daemon is using. A person who has checked which install they mean may run "updater apply --state-dir ${ourStateRoot} --consent state-dir"; an automatic run never carries that flag.`,
+      reason: `the running daemon writes to ${foreign}, which is not the state root this tool was asked to update (${ourStateRoot}). A swap here would replace bundles that somebody else's daemon is using. A person who has checked which install they mean may run "updater apply --state-dir \"${ourStateRoot}\" --consent state-dir" — quoted, because a home or state root may contain a space or a non-ASCII name, and an unquoted copy of it would act on a truncated path; an automatic run never carries that flag.`,
       swapped: false,
     }
   }

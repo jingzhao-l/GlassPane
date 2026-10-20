@@ -64,6 +64,9 @@ commands
 options
   --state-dir <path>   state root (same meaning as the daemon's flag);
                        defaults to $GLASSPANE_STATE_DIR, then ~/.glasspane
+  --state-root <path>  accepted synonym of --state-dir: the installer-rendered launchd
+                       plist passes this spelling (launchd.js' daemonFlag), so both names
+                       resolve through one rule and one of them is not a secret
   --apps-dir <path>    where the .app bundles live (default ~/Applications)
   --daemon-bin <path>  glasspaned executable used for the version read-back
   --socket <path>      daemon socket to probe (default: read off the job)
@@ -199,6 +202,22 @@ export function parseArgs(argv) {
           + `(launchd's StartCalendarInterval ${name === 'hour' ? 'Hour' : 'Minute'}). `
           + 'Nothing was registered: a value outside that range renders a plist whose daily job never fires, while the state file would still say automatic updates are on.',
       }
+    }
+  }
+  // `--hour` / `--minute` are read by exactly one branch (`enable`, where they become the
+  // plist's StartCalendarInterval). On the other five commands the parser used to accept and
+  // range-check them and then drop them, so `updater check --hour 3` exited 0 having moved
+  // nothing — a flag that exists but does nothing is the same defect this file refuses in
+  // `--consent` ("an unknown consent kind grants nothing").
+  if (command !== 'enable' && (flags.hour !== undefined || flags.minute !== undefined)) {
+    const named = [flags.hour !== undefined ? '--hour' : null, flags.minute !== undefined ? '--minute' : null]
+      .filter(Boolean).join(' and ')
+    return {
+      ok: false,
+      reason: `${named} only mean something to "updater enable" (they are written into the daily `
+        + `launchd schedule); the command here is ${JSON.stringify(command ?? 'none')}, which reads neither. `
+        + 'Nothing was changed: run `updater enable --hour <0-23> --minute <0-59>` to set the schedule, '
+        + 'and drop these options from this invocation.',
     }
   }
   return { ok: true, command, flags }

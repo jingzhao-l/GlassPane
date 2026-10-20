@@ -47,18 +47,36 @@ const sha256 = (file) => crypto.createHash('sha256').update(fs.readFileSync(file
 test('every documented option lands on the key its consumer reads', () => {
   const parsed = parseArgs([
     'check', '--state-dir', '/var/tmp/a', '--state-root', '/var/tmp/a', '--apps-dir', '/var/tmp/b',
-    '--daemon-bin', '/var/tmp/c', '--socket', '/var/tmp/d', '--at', '2026-01-01T00:00:00Z',
-    '--hour', '3', '--minute', '15', '--json',
+    '--daemon-bin', '/var/tmp/c', '--socket', '/var/tmp/d', '--at', '2026-01-01T00:00:00Z', '--json',
   ])
   assert.equal(parsed.ok, true, parsed.reason)
   for (const [key, value] of Object.entries({
     'state-dir': '/var/tmp/a', 'state-root': '/var/tmp/a', 'apps-dir': '/var/tmp/b',
-    'daemon-bin': '/var/tmp/c', socket: '/var/tmp/d', at: '2026-01-01T00:00:00Z', hour: '3', minute: '15',
+    'daemon-bin': '/var/tmp/c', socket: '/var/tmp/d', at: '2026-01-01T00:00:00Z',
   })) {
     assert.equal(parsed.flags[key], value, `--${key} 必须落在 flags.${key} 上（消费者读的就是这个键）`)
   }
   assert.equal('overrides' in parsed.flags, false,
     'flags.overrides 是一个没人读过的袋子：留着它，下一次又会把参数塞进没人读的地方')
+  // `--hour`/`--minute` are read by `enable` and by nothing else, so they are proven on the
+  // command that owns them: on `check` they used to parse, range-check and then be dropped,
+  // which is precisely the "documented option with no consumer" this test exists to refuse.
+  const scheduled = parseArgs(['enable', '--hour', '3', '--minute', '15'])
+  assert.equal(scheduled.ok, true, scheduled.reason)
+  assert.equal(scheduled.flags.hour, '3')
+  assert.equal(scheduled.flags.minute, '15')
+})
+
+test('--hour/--minute are refused on the commands that read neither', () => {
+  // 反例必须能红：把这条判据删掉，`updater check --hour 3` 就又回 0 而什么都没动。
+  for (const command of ['check', 'apply', 'status', 'rollback']) {
+    const got = parseArgs([command, '--hour', '3'])
+    assert.equal(got.ok, false, `${command} 不该收下 --hour：它没有读这个键的分支`)
+    assert.match(got.reason, /only mean something to "updater enable"/, got.reason)
+    assert.match(got.reason, /updater enable --hour/, got.reason)
+  }
+  assert.equal(parseArgs(['enable', '--hour', '3', '--minute', '15']).ok, true,
+    '对照：enable 仍然收这两个值，否则这条修复只是永远拒绝')
 })
 
 test('the CLI as a process: --state-dir keeps the whole run off this machine\'s live state root', () => {
