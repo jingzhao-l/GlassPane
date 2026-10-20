@@ -19,6 +19,11 @@ import { KernelSchemaError } from "iterate-kernel/errors";
 
 import { canonicalJson } from "./canonical.js";
 import {
+  attributeCapability,
+  providerAttributionLine,
+} from "./providers.js";
+import type { ProviderAttribution } from "./providers.js";
+import {
   absoluteNodeCommand,
   readUpdateState,
   repoScript,
@@ -1462,6 +1467,29 @@ async function runValidatedTool(
   turn: TrailTurn,
   stdoutDroppedFrames?: () => number,
 ): Promise<ToolResult> {
+  /**
+   * R40 scenario ⑤, the consumer half on 面 A. A call whose reply *is* a judgement
+   * is attributed to the producer that declares it, through the kernel's registry —
+   * and a capability the registration does not declare is refused here, before the
+   * frame reaches the daemon, rather than answered with a verdict nobody can say the
+   * origin of. Nothing about this line of code reads evidence: `attributeCapability`
+   * answers a declaration question (`requireMethod` on a registered id), the verdict
+   * still comes only from the daemon's reply, and `harness/tools/surface-semantics.mjs`
+   * is the ruler that would notice if that stopped being true.
+   *
+   * Every other tool gets `not-claimed` and is untouched: the registry says nothing
+   * about a call it does not provide, and pretending otherwise would be a claim this
+   * surface has not registered.
+   */
+  const claim = attributeCapability(spec.engineMethod);
+  if (claim.status === "refused") {
+    return {
+      content: [{ type: "text", text: formatToolErrorShape(claim.error) }],
+      isError: true,
+    };
+  }
+  const attributed: ProviderAttribution | null = claim.status === "ok" ? claim.provider : null;
+
   if (spec.execute !== undefined) {
     return spec.execute(value, { engine, session, turn });
   }
@@ -1538,6 +1566,12 @@ async function runValidatedTool(
           });
         }
       }
+    }
+    if (attributed !== null) {
+      // Appended last, as its own item: `content[0]` stays the daemon's frame byte for
+      // byte, and the attribution is a sentence about who is answerable for it rather
+      // than another field in a frame this shell does not own.
+      content.push({ type: "text", text: providerAttributionLine(attributed) });
     }
     return {
       content,

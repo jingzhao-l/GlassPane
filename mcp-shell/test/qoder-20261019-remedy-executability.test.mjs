@@ -166,7 +166,7 @@ test("gp_diagnose hands the agent an update block with no relative command in it
     io.lastFrame();
     io.respond({ class: "T1", summary: "ok" });
     const outcome = await promise;
-    assert.equal(outcome.content.length, 2, JSON.stringify(outcome.content.map((c) => c.text.slice(0, 60))));
+    assert.equal(outcome.content.length, 3, JSON.stringify(outcome.content.map((c) => c.text.slice(0, 60))));
     const block = outcome.content[1].text;
     assert.match(block, /^update state:/, block);
     assertNoRelativeNodeCommand(block, "gp_diagnose 的 update block");

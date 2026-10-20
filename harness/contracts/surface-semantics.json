@@ -18,7 +18,7 @@
   "surfaces": {
     "mcpShell": {
       "caliber": "every *.ts under mcp-shell/src",
-      "filesScanned": 14,
+      "filesScanned": 15,
       "hits": []
     },
     "fork": {
@@ -28,5 +28,5 @@
     }
   },
   "totalHits": 0,
-  "filesScanned": 21
+  "filesScanned": 22
 }
