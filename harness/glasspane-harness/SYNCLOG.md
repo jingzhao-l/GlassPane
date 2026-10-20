@@ -177,6 +177,55 @@ job 绿**（这条 lane 的判据是 exit 0 = 把已发布的 tarball 装进一�
   修成组件外可判定的纯函数并有断言，但**肉眼观感仍未观测**。
 - musl / baseline 目标：`product.json` 已记 `platform.dropped`，无 CI lane，属已决维持现状。
 
+### 收口补记（2026-10-19 取号、跨到 10-20 跑完，发布链实测）
+
+台账只能在 tag 之后写，所以这一段是发布跑完之后补的实测，不是复述计划。
+
+- **发布三格**：split 仓 `main` `96bb5ac9 → 8a6d74a6`（普通 push 快进，未用 lease；推之前逐字核过
+  `git rev-parse split/glasspane-harness^{tree}` == `git rev-parse HEAD:harness/glasspane-harness` ==
+  `0edf9faa91b416193328ea803c40af918a08f7fd`）。tag `v0.9.0` 指向 `8a6d74a6`。Release
+  `draft=false`、`targetCommitish` 是**被 tag 的 commit** 而非分支名（v0.6.4 那格欠的锚，本版实测成立），
+  六个资产齐：两平台 `.zip` + 各 `.asc` + `SHA256SUMS.txt` + 其 `.asc`。npm 三个包
+  （wrapper + `darwin-arm64` + `darwin-x64`）`--prefer-online` 各答 `0.9.0`；`npm stage list`
+  = "No staged packages found"，直发成功、本轮没有需要主人 2FA 的那一步。
+- **发布专有的一条**（`verify-published.ts 0.9.0`，退 0）：装的是 registry 上那一份 tarball；
+  `glasspane-harness --version` 与 `gp-harness --version` 都 `exit 0, output 0.9.0`；os/cpu/version 三个门
+  读的是**已安装清单**（`os=["darwin"] cpu=["arm64","x64"] version="0.9.0"`）——这正是 10-10 那笔孤儿修复
+  的靶心，今天第一次在真发布物上跑到；两个平台包都在 wrapper 点名的版本上；registry integrity
+  `sha512-aQ5hWiluSZyIu9QJ9EX1LR3vA4siF4wus55uCxMqHvAeSBIKh45/dv2l5mu1G3jX5dudob/T56dsp+i1EwzAOQ==`；
+  装出来的二进制真的在供内嵌 web（`content-type=text/html doctype=true assets=referenced`，等 0.5 s）。
+- **三条安装通道都端到端跑过**：npm `-g --prefix` 两枚命令都 `0.9.0`（npm ≥ 11 的 `allow-scripts`
+  警告如期出现且安装成功，与 README/`install.sh` 的文案一致）；`bun add -g` 两包安装、`~/.bun/bin`
+  里两枚都在；**curl/资产兜底通道真跑了两趟**——第一趟 `env -i PATH=/usr/bin:/bin`（把 gpg 也藏掉）：
+  `sha256 verified against SHA256SUMS.txt` 之后 `[ERROR] gpg is not on PATH … refusing to install`，
+  并打印带指纹位的出路，那条出路里的安装 URL 已经是 `.../v0.9.0/scripts/install.sh`（tag，不是分支）；
+  第二趟把 `/opt/homebrew/bin` 放进 PATH：`sha256 verified` + `GPG provenance verified:
+  release asset signature is from the signing key` + `GPG: verified (signing key
+  0929EA31DF4F7429F63FC53189D88B1D043A1298)`，落地二进制 `--version → 0.9.0`，退 0。
+  两趟合起来才把"缺席/坏签/连不上"三态里的两态在真网络上走过（第三态由 `installer-selftest.sh`
+  第 22 节的桩驱动，165 条里含它）。
+- **CI**：父仓 `main` 九 lane success（`harness rulers` 那条现在多了一步
+  `Each ruler guard can actually go red`，14 条控制）；split 仓 CI 与 Release 全 job success，
+  其中发布分发专有的一格 `install the published bytes and run them` = success。
+- **一次父 CI 的"红不是回归"**：push `main` 与打 tag 之间那几分钟，`release-artifact` 那道
+  持续量"发布物 == 主干"的闸按定义判红（`v0.9.0` 还不存在）。这是它该说的话，处置是
+  `gh run rerun <id> --failed` 而不是放宽判据——复跑后九 lane 全绿。取号顺序仍是
+  push main → 核 split 可达 → 再打 tag（10-16 那条锚照旧有效）。
+- **本轮自己两处不体面，留在账上**：① 金样复记那笔的提交正文里三个数字（面 B 8,793→9,553、
+  +760 行、engine→27,547）与文件实际不符，实测是面 B 9,294（合并后 9,524）、+501、engine 26,476
+  （合并后 27,867）；错因是照文件清单估加和而没有回读金样，正是本仓反复防的"提交信息 ≠ 内容"。
+  ② `git add` 一条 pathspec 里含了已被 `git rm` 暂存的路径 ⇒ 整条 add 失败，那一笔只带走了删除，
+  地板数字晚一笔才落（`83b1acb3` / `1795c594`）。
+- **仍然未观测的两条**（物理边界）：真模型轮次与真 TUI 会话的肉眼观感——组件级已测，
+  观感要人看；musl / `darwin-x64-baseline` 无构建通道（`product.json → platform.dropped` 已记为决定）。
+- **收口清理实测计数**：父仓 worktree 2 行（主树 + 另一条线在飞的 `gp-019`）、本地分支 2
+  （`main` + `gp-019-pin`）、`origin` 分支 2；四条 `split/*` 搬运分支逐条
+  `merge-base --is-ancestor <tip> baf948d8` 证真后删除；`/var/tmp/glasspane-harness/` 388 MB → 13 MB
+  （只留 `ca-bundle.pem` 与本会话 scratch）；留一个 10-08 的快照目录不删——它 32 个文件里 30 个与
+  `b5236d89` 逐 blob 相同，但 `engine/Tests/…/RegistryVerdictTests.swift` 与
+  `CaptureChannelShapeTests.swift` 两份在 `--all` 历史里找不到任何匹配字节，那是别人尚未落地的工作的
+  唯一副本，属另一条线，点名移交而不销毁。
+
 ## 2026-10-18（第十二次会话）· 内核追到 0.1.8，搬运分支重切一次——它不是快进
 
 **开工态**：主树 `main` = `7abae7d1`（`git status` 空，`gh run list` 该 sha 的 CI 全绿）。
