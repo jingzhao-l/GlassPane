@@ -6,7 +6,7 @@
   "counts": {
     "identical": 4640,
     "edited": 285,
-    "added": 96,
+    "added": 98,
     "deleted": 1707
   },
   "edited": [
@@ -365,6 +365,7 @@
     "packages/opencode/script/glasspane-preflight.sh",
     "packages/opencode/script/installer-selftest.sh",
     "packages/opencode/script/publish-shape.ts",
+    "packages/opencode/script/registry-readiness.ts",
     "packages/opencode/script/verify-published.ts",
     "packages/opencode/src/plugin/glasspane-compaction.ts",
     "packages/opencode/src/plugin/glasspane-decision-log.ts",
@@ -382,6 +383,7 @@
     "packages/opencode/test/plugin/glasspane-compaction.test.ts",
     "packages/opencode/test/plugin/glasspane-decision-log.test.ts",
     "packages/opencode/test/script/publish-shape.test.ts",
+    "packages/opencode/test/script/registry-readiness.test.ts",
     "packages/opencode/test/tool/glasspane-kernel.test.ts",
     "packages/opencode/test/tool/glasspane-provider-registration.test.ts",
     "packages/opencode/test/tool/glasspane-surface.test.ts",
@@ -3796,8 +3798,12 @@
       "forkHash": "d54039b521b90dc3df1be4e92d512641f2da59b0"
     },
     {
+      "file": "packages/opencode/script/registry-readiness.ts",
+      "forkHash": "843477cdb0f39d5afca831d91c29f78a85c221fa"
+    },
+    {
       "file": "packages/opencode/script/verify-published.ts",
-      "forkHash": "6c3d8742a9454c819fd67901ac4ea20773973c72"
+      "forkHash": "befc5e75d8837958cc41bf6cc5f901dc199ca18a"
     },
     {
       "file": "packages/opencode/src/plugin/glasspane-compaction.ts",
@@ -3862,6 +3868,10 @@
     {
       "file": "packages/opencode/test/script/publish-shape.test.ts",
       "forkHash": "73112ead414cea4a7c9f153654d73473e932375c"
+    },
+    {
+      "file": "packages/opencode/test/script/registry-readiness.test.ts",
+      "forkHash": "0e953a68a8a1535c9a37889f55cd198d673f87b3"
     },
     {
       "file": "packages/opencode/test/tool/glasspane-kernel.test.ts",

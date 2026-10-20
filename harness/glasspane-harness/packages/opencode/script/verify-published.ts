@@ -27,6 +27,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import product from "../../../product.json"
+import { waitForRegistryVersion } from "./registry-readiness"
 
 // `--prefix` is a flag with a value, so it must not be read as the version. Everything
 // positional that is not the flag's argument is the version, and a second one is refused:
@@ -136,7 +137,46 @@ try {
     // The registry is named explicitly: "the registry I happen to be pointed at serves
     // something runnable" is a weaker claim than "the published artifact installs", and an
     // ambient mirror or a lagging read replica must not be what a release verdict rests on.
-    console.log(`installing the published ${product.name}@${version} from ${registry} into a throwaway prefix`)
+    // Ask the registry whether it can READ the version before asking it to INSTALL that version.
+    // Measured 2026-10-20: this lane started 96 seconds after the publish job was accepted and npm
+    // answered `ETARGET notarget No matching version found for glasspane-harness@0.9.1` — a red
+    // named "install the published bytes and run them" for a read replica that had not caught up
+    // with an artifact that had already been uploaded (npm's own notice: "Your package is being
+    // processed and may take a few minutes to become available"; measured 12–20 min here). The
+    // artifact was fine: that version installs today and its registry `dist.shasum` matches what CI
+    // printed. "The previous job succeeded" is not the same claim as "this registry can serve it".
+    const readiness = await waitForRegistryVersion({
+      pkg: product.name,
+      version,
+      registry,
+      probe: async () => {
+        const look = await $`npm view ${product.name}@${version} version --registry ${registry}`
+          .nothrow()
+          .quiet(true)
+        const answer = npmAnswer(look.exitCode, look.stdout.toString(), look.stderr.toString())
+        if (answer.state === "answered") return answer.value
+        // `absent` is the registry saying "not yet" about a fresh publish; `unaskable` is this
+        // machine failing to ask, and the two must not be conflated — same split the file makes
+        // for a 404 versus a proxy.
+        if (answer.state === "absent") return undefined
+        throw new Error(answer.value)
+      },
+      now: () => Date.now(),
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      note: (line) => console.log(`  waiting on the registry: ${line}`),
+    })
+    if (!readiness.ok) {
+      cannotObserve(
+        "the registry can read this published version",
+        `${product.name}@${version} never became readable from ${registry} within ${Math.round(readiness.waitedMs / 60000)} min across ${readiness.attempts} look(s)${readiness.lastTransportError ? `; the last one failed to ask: ${readiness.lastTransportError}` : "; the registry kept answering that the version is not there yet"}`,
+      )
+      console.error(
+        `verify-published: ${unobserved.length} check(s) could not be observed — NOTHING is concluded about the artifact, and this is not a pass`,
+      )
+      console.error("  the install was NOT attempted, so no claim is made about the bytes; re-run once the registry catches up")
+      if (ownPrefix) rmSync(prefix, { recursive: true, force: true })
+      process.exit(2)
+    }
     // `-g --prefix`, not a bare `--prefix`: a local install creates **no** bin links,
     // so "is the command there?" would fail for a reason that has nothing to do with the
     // package. (The first run of this script failed exactly that way, which is the reason
