@@ -1,5 +1,5 @@
 {
-  "observedAt": "2026-10-19",
+  "observedAt": "2026-10-21",
   "source": "specs/GlassPane_Harness_Fork_调研与方案_v0.1.md §9-6（可 grep 的那半个铁律）",
   "rules": [
     {
@@ -18,15 +18,15 @@
   "surfaces": {
     "mcpShell": {
       "caliber": "every *.ts under mcp-shell/src",
-      "filesScanned": 14,
+      "filesScanned": 15,
       "hits": []
     },
     "fork": {
       "caliber": "fork evidence-handling files: src/tool/glasspane/** + src/plugin/glasspane-*.ts + packages/tui/src/routes/session/index.tsx",
-      "filesScanned": 6,
+      "filesScanned": 7,
       "hits": []
     }
   },
   "totalHits": 0,
-  "filesScanned": 20
+  "filesScanned": 22
 }

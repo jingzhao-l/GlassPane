@@ -1,5 +1,5 @@
 {
-  "observedAt": "2026-10-19",
+  "observedAt": "2026-10-21",
   "source": "私有化批次 A/B 之后的产品面（产品身份 = glasspane-harness）",
   "rules": [
     {
@@ -36,8 +36,8 @@
     }
   ],
   "lineage": {
-    "occurrences": 9603,
-    "filesScanned": 3311
+    "occurrences": 9607,
+    "filesScanned": 3313
   },
-  "lineageNote": "2026-10-16 收口补记随批重记：本轮 SYNCLOG/CHANGELOG 里那些点名字节归属的说明句（哪个依赖升到哪、哪把尺子改的是谁的规则）；反证仍成立"
+  "lineageNote": "2026-10-21: fork 侧 provider 注册绑定层与其测试把产品名写进注册 id 与注释（glasspane-engine-ae / glasspane-evidence），是归属说明不是新产品面"
 }

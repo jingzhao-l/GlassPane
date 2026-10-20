@@ -2,11 +2,11 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-10-20",
+  "observedAt": "2026-10-21",
   "counts": {
     "identical": 4640,
     "edited": 285,
-    "added": 94,
+    "added": 96,
     "deleted": 1707
   },
   "edited": [
@@ -371,6 +371,7 @@
     "packages/opencode/src/tool/glasspane/daemon.ts",
     "packages/opencode/src/tool/glasspane/index.ts",
     "packages/opencode/src/tool/glasspane/kernel.ts",
+    "packages/opencode/src/tool/glasspane/providers.ts",
     "packages/opencode/test/cli/cmd/glasspane-upgrade-channel.test.ts",
     "packages/opencode/test/config/glasspane-plugin-dependency.test.ts",
     "packages/opencode/test/config/glasspane-project-plugin-trust.test.ts",
@@ -382,6 +383,7 @@
     "packages/opencode/test/plugin/glasspane-decision-log.test.ts",
     "packages/opencode/test/script/publish-shape.test.ts",
     "packages/opencode/test/tool/glasspane-kernel.test.ts",
+    "packages/opencode/test/tool/glasspane-provider-registration.test.ts",
     "packages/opencode/test/tool/glasspane-surface.test.ts",
     "packages/tui/src/util/tool-denial.ts",
     "patches/@modelcontextprotocol%2Fsdk@1.31.0.patch",
@@ -3811,11 +3813,15 @@
     },
     {
       "file": "packages/opencode/src/tool/glasspane/index.ts",
-      "forkHash": "c837262fb1cf71781443838fc65207898c21bd9f"
+      "forkHash": "ce82a38d8882de3c2e8d44ee982c3a322dc1d096"
     },
     {
       "file": "packages/opencode/src/tool/glasspane/kernel.ts",
       "forkHash": "9d4a13cc1a455d2a92597ae47b136da358ca9ea0"
+    },
+    {
+      "file": "packages/opencode/src/tool/glasspane/providers.ts",
+      "forkHash": "df79123d02826db7185d7d2a530f4d58f56fdc12"
     },
     {
       "file": "packages/opencode/test/cli/cmd/glasspane-upgrade-channel.test.ts",
@@ -3860,6 +3866,10 @@
     {
       "file": "packages/opencode/test/tool/glasspane-kernel.test.ts",
       "forkHash": "4bf56d9e3b34b402f921196fdf27cb8260de1fe9"
+    },
+    {
+      "file": "packages/opencode/test/tool/glasspane-provider-registration.test.ts",
+      "forkHash": "9085cfc376282089b35b4f9e812017935882938d"
     },
     {
       "file": "packages/opencode/test/tool/glasspane-surface.test.ts",
