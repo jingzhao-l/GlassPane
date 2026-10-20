@@ -1022,20 +1022,62 @@ Swift Testing **15 tests in 2 suites**；开工基线是 1074/3/0 ⇒ 本轮 +18
 `--request-permission=not-a-seat` → rc 64 且报 `--request-permission unknown kind`；
 `--definitely-not-a-flag=1` → rc 64 且报 `unknown argument: --definitely-not-a-flag`。
 
-### 4. 面板真机（AX `kAXPressAction`）——本轮这四处未观测
+### 4. 面板真机（AX 走查）——本轮做了，但只做只读那一半
 
-本轮改到面板的是：证据列表那枚污染芯片与结论标题、recipe 页在途那一行（新标识 `gp-recipe-in-flight`）、
-「刷新」的禁用态说明、`PathRowView` 对占位值不再画复制按钮（三枚标识改为
-`gp-copy-project-evidence` / `-recipe` / `-calibration`）。
-**AX 走查本轮未观测**：`.p4i4_smoke.py --skip-drag` 会逐卡按下引导按钮，那会真改这台机器的 launchd 作业与
-TCC 引导状态；本轮这几处是文案与控件可见性，判据在 `DailyRound20261020Tests` 的构造层与 `PanelDaemonCommandContractTests` 的源码头断言里。
-补它的确切一条命令（面板起来之后）：`cd engine && python3 .p4i4_smoke.py --skip-drag`（期望退 0），
-再展开项目卡核 `gp-copy-project-evidence` 是否只在真有路径的那一行出现。
+**为什么先前写"未观测"**：仓里唯一那条面板冒烟 `engine/.p4i4_smoke.py --skip-drag` 会逐卡按下引导按钮，
+那会真改这台机器的 launchd 作业与 TCC 引导状态；而且它在这一轮**根本跑不起来**——实测
+`/usr/bin/python3`、`/opt/homebrew/bin/python3`、`/opt/miniconda3/bin/python3` 三份 python 都
+`ModuleNotFoundError: ApplicationServices`（没装 pyobjc），那条冒烟在 `import AppKit` 就死。
+本轮改成：**只借它那份 Swift AX 辅助器**（把 `HELPER_SRC` 抽出来 `swiftc -O` 编好，不需要 python），
+自己只走只读路径——起面板、`front`、`texts` 取树、最多 `press` 侧栏那几个 tab 按钮（切页不落盘、不动 TCC）。
+
+面板连上的是**这台机器真装着的那份 daemon**（`glasspaned 1.6.2`，home 默认根 `~/.glasspane/engine.sock`，
+PID 65057）；本轮的构建是 `.build/debug/glasspane-settings`。读数：
+
+| 本轮改动 | 真机读到的 | 结论 |
+|---|---|---|
+| #22 `PathRowView` 对占位值不给复制按钮 | 项目页两处 `未配置`（y=436、457），整页只有两枚复制按钮，坐标在 y=380 / y=408 那两行**有真路径**的行上 | **观测到**：占位行一枚都没有，真路径行才有 |
+| #20 recipe 页「清空」原先连 help 都没有 | `AXButton "把编辑器里的文本清成空白（不落盘、不动项目） \| 清空"` | **观测到**（禁用前态的说明文字进了 AXHelp） |
+| #21 「刷新」的 help 状态感知 | `AXButton "重新检测权限、档案与更新状态 \| 刷新"`（可用态那一支） | **观测到可用态**；禁用那一支没能造出来，见下 |
+| #6 污染芯片 | 证据档案页（582 份真档案）里读到芯片文本 `有人同时操作` | **观测到"被看守且判污"那一臂**；`污染未经监测` 那一臂本机造不出来——这台机器的档案全部出自开过 C33 的 daemon，未看守的档案只能由测试夹具构造 |
+| #6 过滤器标题改"污染判定" | 只读到 `AXMenuButton::全部`（收起时 AX 报的是**选中值**），标签文本不在辅助器读的那四个属性里 | **未观测**，且不是权限问题：是工具面不够。补法：给辅助器加 `kAXIdentifierAttribute`/`AXTitleUIElement` 再读，或直接眼睛看那一页 |
+| #18 发出的字符串不带 `§` | 权限页、后台服务页、配方页三棵树里 `§` 出现 0 次 | **观测到**（4192 个元素的树里一个都没有） |
+| 1.6.2 那份 daemon 没在 `hello` 里报 `stateRoot` | 面板侧栏直接写 `状态根未上报`，且「清理」一枚拒绝并给出长理由："后台服务在应门，却没有报过它自己用的状态根，而这一页按的是面板自己算的那一个…下一步：让服务带着 `--state-dir <你要清的根>` 重启，或升级…" | **观测到**：这就是本轮把 `stateRoot` 当成唯一可信来源而不是"从这儿猜"的那条判据在真机上的形状 |
+
+仍未观测的两处，以及各自确切的一条命令（都不是权限缺口，是**状态造不出来**）：
+
+1. #20/#21 的**禁用那一支**：要让按钮在途变灰，得让一次 `recipe validate` 真的挂着不回。本机
+   daemon 是 1.6.2，跑法：`engine/.build/debug/glasspane-settings` 起面板 → 编辑器粘一段合法配方 →
+   立刻 `p4i4_helper press <pid> 校验` 并在同一秒内 `texts <pid>`（在途窗口不足 2s，人手做不到，
+   需要一个能按住响应的 daemon；用本轮构建的 daemon 起在 `--state-dir` 里再试）。
+2. #6 的 `污染未经监测` 臂与上面那枚过滤器标题，同上。
+   `cd engine && python3 .p4i4_smoke.py --skip-drag` 这条**在这台机器上跑不通**（缺 pyobjc），
+   要它得先 `python3 -m pip install --index-url <镜像> pyobjc-framework-ApplicationServices pyobjc-framework-Cocoa`；
+   装好之后这条仍会真按引导按钮，跑之前先确认可以改这台机器的 launchd 与 TCC 状态。
+
+辅助器与走查脚本在 `/tmp/gp-build-ax-helper.sh`、`/tmp/gp-panel-ax-walk{2,3,4}.sh`，
+本轮之后不保留（临时件按【收口清理】第 5 条删）。
 
 ### 5. 门禁计数
 
-逐条命令与实际计数见本轮汇报第 ③ 项。负载造成的两条计时假红（`updater/test/idle.test.mjs` 的一条、
-`updater/test/source.test.mjs` 的一条）按"隔离复跑"处理，判据与超时一个字没改，复跑各自全绿。
+逐字命令共跑四轮（开工基线 + 改后复跑 + 收口前两轮，最后一轮跑在与提交字节相同的树上）。
+**最后一轮的实数**：`npm ci` 与 `npm run build` 退 0；`npm test --workspaces --if-present`
+= mcp-shell 517 / installer 177 / updater 581，共 **1275 条全过、0 失败**；
+`node scripts/check-version.mjs` 17 行 `✓`（版本线 1.18.0 一致）；
+`node scripts/check-doc-links.mjs` = 文档 29 份 / 仓库内链接 238 条 / 外链 29 条不请求 /
+markdown 表格 394 张（扫 113 份）→ OK；
+`check-workflows --self-test` = 15 档（12 必须红、3 必须沉默）全部按声明回答，`check-workflows` =
+5 份 workflow 干净（ci.yml 9 job、release.yml 2、harness-contract 2、harness 那两份 2 + 10）；
+`swift build --package-path engine` 退 0；`swift test --package-path engine` = XCTest
+**1272 条、3 跳过、0 失败** + Swift Testing **15 条 / 2 suites**；
+`swift test --package-path engine/probe` = 36 条 0 失败；`pytest -q bridge` = **82 passed**；
+`sh -n install.sh` 退 0；信号闸 `SIGNAL SMOKE OK`（SIGTERM/SIGINT 各自退 0 且 socket 被 unlink）；
+发布形态 `npm run bundle && npm pack --dry-run` = **29 个文件**的 tarball；
+`tool-surface --check` = "no growth past the recorded baseline"（面 A 20.94%、面 B 20.04%，
+两者都在自己金样的位置上没长）。
+负载造成的两条计时假红出现在**中间那两轮**（`updater/test/idle.test.mjs` 的一条、
+`updater/test/source.test.mjs` 的一条），按"隔离复跑"处理，判据与超时一个字没改，复跑各自全绿；
+最后一轮整树复跑里 `✖` 计数是 0。
 
 ### 6. 更正一处过期主张（B-01 小节，2026-09-23 写的两句话）
 
