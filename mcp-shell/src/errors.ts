@@ -92,3 +92,33 @@ export function formatToolError(code: string, message: string, remedy: string): 
 export function formatToolErrorShape(error: ToolErrorText): string {
   return formatToolError(error.code, error.message, error.remedy);
 }
+
+/**
+ * Quote one value for the backticked command an error frame tells the agent to run.
+ *
+ * This is not a cosmetic concern: the product's own rule is that a remedy is *a command
+ * an agent can run on the machine it is told this on*, so every path a caller of this
+ * helper interpolates into such a command is text a shell will parse. Those paths are not
+ * trusted bytes — a state root arrives from `--state-dir` / `GLASSPANE_STATE_DIR`, an
+ * updater record's `runtime.cliPath` from a JSON file on disk, a socket path from a daemon
+ * reply — and an unquoted one carrying `;`, `$()` or a backtick turns "check the file"
+ * into "run what the file name says".
+ *
+ * Single quotes, because that is the only POSIX quoting form in which no other character
+ * is active: inside a single-quoted word a dollar sign, a backtick, a double quote and a
+ * backslash are all literal, and the single quote itself is spliced out and re-added as
+ * the four-character sequence quote-backslash-quote-quote. Double quotes would *not* do —
+ * the shape this replaced (`shellPath`, which reached for `JSON.stringify` when a path
+ * looked odd) produced double-quoted words, where a command substitution still runs.
+ *
+ * A value made only of characters a shell cannot act on is left bare so the command still
+ * reads as one word; anything else — a space, a quote, a dollar sign, a glob, an empty
+ * string, or a leading hyphen that would be read as an option — gets quoted.
+ */
+const SHELL_INERT_WORD = /^[A-Za-z0-9@%+=:,./_-]+$/;
+
+export function quoteShellArg(value: string): string {
+  return SHELL_INERT_WORD.test(value) && !value.startsWith("-")
+    ? value
+    : `'${value.split("'").join("'\\''")}'`;
+}

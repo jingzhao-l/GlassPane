@@ -45,6 +45,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { quoteShellArg } from "./errors.js";
+
 /** Env the daemon's own `--state-dir` maps to for this process (X-22 family). */
 export const STATE_DIR_ENV = "GLASSPANE_STATE_DIR";
 
@@ -382,14 +384,6 @@ export function stateRootOf(stateFile: string): string {
 }
 
 /**
- * Quote a path for a shell only when it needs it, so a pasted command reads as the
- * single argument it is.
- */
-export function shellPath(text: string): string {
-  return /[\s"'`\\]/.test(text) ? JSON.stringify(text) : text;
-}
-
-/**
  * A `node <path> …` command the reader can actually run.
  *
  * The remedy lines this feeds used to print `node updater/cli.js enable` and
@@ -406,12 +400,16 @@ export function shellPath(text: string): string {
  * (`updaterEnableCommand`, `runtimeSelfDiagnosis`); it lives here so the branches that
  * render an *absent* or *unreadable* state — which is what a first-run machine and a
  * damaged record actually read — cannot grow a second, weaker copy of it.
+ *
+ * The path is handed to `quoteShellArg` on the way in: `cliPath` is read out of
+ * `update-install.json`, and a record whose path carries a shell metacharacter would
+ * otherwise put that metacharacter into the command this product tells an agent to run.
  */
 export function absoluteNodeCommand(cliPath: string | null, suffix: string): string | null {
   if (cliPath === null || !path.isAbsolute(cliPath)) {
     return null;
   }
-  return `node ${shellPath(cliPath)}${suffix}`;
+  return `node ${quoteShellArg(cliPath)}${suffix}`;
 }
 
 /**
@@ -439,7 +437,7 @@ const NO_COMMAND_PRINTED = "this build is shipped with no updater or installer e
 function rewriteRecordSentence(stateFile: string): string {
   const enable = absoluteNodeCommand(
     repoScript(path.join("updater", "cli.js")),
-    ` enable --state-dir ${shellPath(stateRootOf(stateFile))}`,
+    ` enable --state-dir ${quoteShellArg(stateRootOf(stateFile))}`,
   );
   const installer = absoluteNodeCommand(repoScript("installer/cli.js"), "");
   if (enable !== null && installer !== null) {
@@ -459,7 +457,7 @@ function rewriteRecordSentence(stateFile: string): string {
 function runCheckSentence(stateFile: string): string {
   const check = absoluteNodeCommand(
     repoScript(path.join("updater", "cli.js")),
-    ` check --state-dir ${shellPath(stateRootOf(stateFile))}`,
+    ` check --state-dir ${quoteShellArg(stateRootOf(stateFile))}`,
   );
   return check === null
     ? `find out from the settings panel instead: ${NO_COMMAND_PRINTED}`
@@ -519,7 +517,7 @@ export function readUpdateState(env: NodeJS.ProcessEnv = process.env, stateRootO
       stateFile,
       summary: `update state: ${stateFile} is mode ${(stat.mode & 0o777).toString(8)} — group/world readable, so this `
         + "reader will not present it as the owner-only document it claims to be. Run "
-        + `\`chmod 600 ${stateFile}\` (the updater writes it 0600) and read again; freshness stays unknown, `
+        + `\`chmod 600 ${quoteShellArg(stateFile)}\` (the updater writes it 0600) and read again; freshness stays unknown, `
         + "which is not the same as up to date",
     };
   }

@@ -1027,6 +1027,87 @@ test("each fresh connection handshakes and reports what it measured", async () =
   silent.client.close();
 });
 
+/**
+ * The handshake's `version` is a stored measurement, not only a stderr comparison.
+ *
+ * `providers.ts` attributes a forwarded verdict to the build that produced it, and the
+ * only version this process can measure for that build is the one it reports in `hello`.
+ * The key was read here, compared against the shell's own identity, logged to stderr and
+ * then thrown away — so the attribution fell back to `mcp-shell/package.json`, i.e. the
+ * shell's version, and on a machine whose app bundle is older than the shell the agent was
+ * told the verdict came from a build that did not produce it.
+ *
+ * MUTATION THIS PINS: delete the store and keep the log line, and `reportedEngineVersion`
+ * stays null, which reddens the second assertion; default it to the shell's own version
+ * when the daemon says nothing, and the last two go red.
+ */
+test("the daemon's hello version is stored as this connection's measurement", async () => {
+  const { client, sockets } = socketBackedClient({ version: "9.9.9" });
+  assert.equal(client.reportedEngineVersion, null, "handshake 之前没有测过任何版本，不许先有一个值");
+
+  const promise = client.call("observe");
+  sockets[0].emit("connect");
+  const hello = sockets[0].frames().find((frame) => frame.method === "hello");
+  sockets[0].deliver({ id: hello.id, result: { engine: "glasspaned", version: "1.1.0", protocolVersion: "0" } });
+  await nextTick();
+  assert.equal(client.reportedEngineVersion, "1.1.0",
+    "hello 报的版本要被存下来：归因行唯一的源头就是它");
+
+  sockets[0].deliver({ id: sockets[0].frames()[0].id, result: { tree: [] } });
+  await promise;
+  client.close();
+
+  // A self-report that is blank stays unmeasured — never defaulted.
+  const blank = socketBackedClient();
+  const blankCall = blank.client.call("observe");
+  blank.sockets[0].emit("connect");
+  const blankHello = blank.sockets[0].frames().find((frame) => frame.method === "hello");
+  blank.sockets[0].deliver({ id: blankHello.id, result: { engine: "glasspaned", version: "   ", protocolVersion: "0" } });
+  await nextTick();
+  assert.equal(blank.client.reportedEngineVersion, null, "空白自报等于没测过，不是版本 \"   \"");
+  blank.sockets[0].deliver({ id: blank.sockets[0].frames()[0].id, result: { tree: [] } });
+  await blankCall;
+  blank.client.close();
+
+  // And a missing key is the same answer.
+  const absent = socketBackedClient();
+  const absentCall = absent.client.call("observe");
+  absent.sockets[0].emit("connect");
+  const absentHello = absent.sockets[0].frames().find((frame) => frame.method === "hello");
+  absent.sockets[0].deliver({ id: absentHello.id, result: { engine: "glasspaned", protocolVersion: "0" } });
+  await nextTick();
+  assert.equal(absent.client.reportedEngineVersion, null,
+    "旧 daemon 不报版本时，这条测量只能是没测到");
+  absent.sockets[0].deliver({ id: absent.sockets[0].frames()[0].id, result: { tree: [] } });
+  await absentCall;
+  absent.client.close();
+});
+
+/**
+ * A protocol mismatch does not un-measure the reply: the daemon that answered this
+ * handshake is still the build that produced whatever comes back on it, so the version is
+ * stored before the protocol arms decide what else to say.
+ *
+ * MUTATION THIS PINS: move the store below the `protocol !== expected` return and the
+ * attribution on a mismatched connection loses its measurement.
+ */
+test("a protocol-mismatched handshake still records the daemon's version", async () => {
+  const { client, sockets } = socketBackedClient({ version: "9.9.9" });
+  const notes = [];
+  client.onEngineNote((note) => notes.push(note));
+  const promise = client.call("observe");
+  sockets[0].emit("connect");
+  const hello = sockets[0].frames().find((frame) => frame.method === "hello");
+  sockets[0].deliver({ id: hello.id, result: { engine: "glasspaned", version: "1.1.0", protocolVersion: "9" } });
+  await nextTick();
+  assert.match(notes.join(" | "), /protocol mismatch/);
+  assert.equal(client.reportedEngineVersion, "1.1.0",
+    "协议不合仍然回答了这台机器上的 daemon，它的版本就是它的版本");
+  sockets[0].deliver({ id: sockets[0].frames()[0].id, result: { tree: [] } });
+  await promise;
+  client.close();
+});
+
 /* ------------------------------------------------------------------ *
  * Where the daemon socket is (A-1 family: the default is a guess, and
  * saying so is the fix — the shell cannot ask a daemon it has not met).

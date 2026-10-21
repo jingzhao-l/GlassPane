@@ -30,6 +30,7 @@ import {
   KernelProviderError,
   KernelSchemaError,
   CLAIMED_ENGINE_METHODS,
+  UNSTATED_REGISTRATION_VERSION,
   attributeCapability,
   claimForEngineMethod,
   coveredMethods,
@@ -50,6 +51,7 @@ import { TOOL_BY_NAME, TOOL_SPECS, executeTool } from "../dist/tools.js";
 import { SERVER_INFO } from "../dist/dispatch.js";
 import { canonicalJson } from "../dist/canonical.js";
 import { EvidenceAuditSession } from "../dist/audit-session.js";
+import { ENGINE_PROTOCOL_VERSION, engineClientOver } from "../dist/engine-client.js";
 import { makeEngine, FakeLineIo } from "./helpers.mjs";
 import { executableSource } from "./support/source.mjs";
 
@@ -78,6 +80,30 @@ function registryFrom(list) {
 
 const SHELL_VERSION = shellProductVersion();
 const SHIPPED = shellProviderRegistry(SHELL_VERSION ?? "");
+
+/**
+ * A client whose `hello` handshake has been answered by a daemon reporting `version`.
+ *
+ * `FakeLineIo` has no `onOpen`, so this gives it one before the client is constructed —
+ * the transport opening is what makes `engine-client.ts` send the handshake — and then
+ * answers it. This is the only way to test the attributed version as a *measurement*: a
+ * registry built in-process would be stating the version the test wrote down.
+ */
+async function handshakenEngine(version, protocolVersion = ENGINE_PROTOCOL_VERSION) {
+  const io = new FakeLineIo();
+  let opened = null;
+  io.onOpen = (handler) => {
+    opened = handler;
+  };
+  const engine = engineClientOver(io, 500);
+  opened?.();
+  io.respond({ engine: "glasspaned", version, protocolVersion, pid: 1 });
+  await new Promise((resolve) => setImmediate(resolve));
+  return { io, engine };
+}
+
+/** The version a daemon would report that this shell could not have produced. */
+const DAEMON_REPORTED_VERSION = "1.9.9-daemon-only";
 
 describe("面 A registers the producers the contract names", () => {
   test("the version this shell registers with is read from its own manifest, not typed in", () => {
@@ -119,18 +145,78 @@ describe("面 A registers the producers the contract names", () => {
     assert.deepEqual(requireMethod(SHIPPED, GLASSPANE_EVIDENCE_PROVIDER_ID, "last-evidence").requires, []);
   });
 
-  test("the registered version is the version this shell reports, read from its own manifest at runtime", () => {
-    // Three surfaces for one string: the manifest a release carries, the `serverInfo`
-    // this shell answers `initialize` with (and sends as its `hello` identity), and the
-    // version the registration claims. If any two disagree, this surface is stating a
-    // version it does not have.
+  test("the version this shell registers its own drafts with is read from its manifest, not typed in", () => {
+    // Three surfaces for the *shell's* string: the manifest a release carries, the
+    // `serverInfo` this shell answers `initialize` with (and sends as its `hello`
+    // identity), and the version `shellProviderRegistry` is built with. This is about the
+    // shell, and it is NOT what a verdict is attributed to — see the next test.
     assert.equal(SHELL_VERSION, SHELL_MANIFEST.version);
     assert.equal(SERVER_INFO.version, SHELL_MANIFEST.version);
     assert.equal(SHIPPED[GLASSPANE_AE_PROVIDER_ID].version, SHELL_VERSION);
     assert.equal(SHIPPED[GLASSPANE_EVIDENCE_PROVIDER_ID].version, SHELL_VERSION);
-    const claimed = attributeCapability("diagnose");
-    assert.equal(claimed.status, "ok");
-    assert.equal(claimed.provider.version, SHELL_VERSION);
+  });
+
+  test("the version a verdict is attributed to is the DAEMON's measured hello version, not this package's", () => {
+    // MUTATION THIS PINS: hand `attributeCapability` `shellProductVersion()` again (the
+    // defect it replaced) and the first assertion goes red on a machine whose bundle is
+    // older than the shell — the agent would be told the verdict came from a build that
+    // did not produce it.
+    const measured = attributeCapability("diagnose", { producerVersion: DAEMON_REPORTED_VERSION });
+    assert.equal(measured.status, "ok");
+    assert.equal(measured.provider.version, DAEMON_REPORTED_VERSION);
+    assert.notEqual(measured.provider.version, SHELL_VERSION,
+      "把壳的 manifest 版本当成生产者的版本：这正是被测的那个缺陷");
+    assert.match(measured.provider.versionNote, /daemon's own hello self-report/);
+    assert.doesNotMatch(measured.provider.versionNote, /cannot read its own/);
+
+    const line = providerAttributionLine(measured.provider);
+    assert.match(line, new RegExp(`provider: ${GLASSPANE_AE_PROVIDER_ID} version ${DAEMON_REPORTED_VERSION} method diagnose`));
+    assert.equal(line.includes(SHELL_VERSION), false,
+      `归因行里不得再出现壳自己的版本 ${SHELL_VERSION}：${line}`);
+  });
+
+  test("with no handshake measured, the attribution states no version instead of borrowing one", () => {
+    // MUTATION THIS PINS: defaulting `producerVersion` to `shellProductVersion()` (or to
+    // any literal) when nothing was read — "version unmeasured" leaves the sentence and
+    // this goes red.
+    const unmeasured = attributeCapability("diagnose");
+    assert.equal(unmeasured.status, "ok", "no handshake is not a reason to refuse a call the daemon can answer");
+    assert.equal(unmeasured.provider.version, null);
+    assert.match(unmeasured.provider.versionNote, /unmeasured/);
+    const line = providerAttributionLine(unmeasured.provider);
+    assert.match(line, /version unmeasured method diagnose/);
+    assert.equal(line.includes(SHELL_VERSION), false, `没测过的版本不许出现在归因行里：${line}`);
+    assert.equal(line.includes(UNSTATED_REGISTRATION_VERSION), false,
+      "注册表内部的那个占位名不得泄漏给 agent");
+  });
+
+  test("the attributed version travels from the handshake to the line the agent reads, end to end", async () => {
+    // The whole chain on one real client: the daemon's bytes off the transport, the
+    // measurement `engine-client.ts` stores, the version `tools.ts` hands the seam, the
+    // line appended to the reply. Nothing here passes a version in by hand.
+    const { io, engine } = await handshakenEngine(DAEMON_REPORTED_VERSION);
+    assert.equal(engine.reportedEngineVersion, DAEMON_REPORTED_VERSION,
+      "hello 的 version 没有被存下来：修 1 的源头又断了");
+    const reply = { class: "T1", summary: "ok" };
+    const promise = executeTool(TOOL_BY_NAME.get("gp_diagnose"), {}, engine, new EvidenceAuditSession());
+    io.respond(reply);
+    const outcome = await promise;
+    assert.equal(outcome.isError, false);
+    const line = outcome.content[outcome.content.length - 1].text;
+    assert.match(line, new RegExp(`version ${DAEMON_REPORTED_VERSION}`), line);
+    assert.equal(line.includes(SHELL_VERSION), false, line);
+    engine.close();
+  });
+
+  test("a daemon that reports no version leaves the attribution unmeasured rather than defaulting it", async () => {
+    const { io, engine } = await handshakenEngine("   ");
+    assert.equal(engine.reportedEngineVersion, null,
+      "空白自报要当成没测过：把空格存成版本号，归因行就念出一个不存在的版本");
+    const promise = executeTool(TOOL_BY_NAME.get("gp_diagnose"), {}, engine, new EvidenceAuditSession());
+    io.respond({ class: "T1", summary: "ok" });
+    const outcome = await promise;
+    assert.match(outcome.content[outcome.content.length - 1].text, /version unmeasured/);
+    engine.close();
   });
 
   test("the manifest is read beside the build, not out of a path compiled in", () => {
@@ -153,7 +239,7 @@ describe("resolution refuses instead of guessing", () => {
     const aeDeclaresPixelOnly = registryFrom([
       { ...GLASSPANE_FIXTURE[0], methods: [{ name: "diagnose-pixel", requires: ["pixel-diff"] }] },
     ]);
-    const refused = attributeCapability("diagnose", aeDeclaresPixelOnly);
+    const refused = attributeCapability("diagnose", { registry: aeDeclaresPixelOnly });
     assert.equal(refused.status, "refused");
     assert.equal(refused.error.code, PROVIDER_CODES.missingMethod);
     assert.match(refused.error.message, /diagnose/);
@@ -198,7 +284,7 @@ describe("resolution refuses instead of guessing", () => {
     assert.match(thrown.remedy, new RegExp(GLASSPANE_AE_PROVIDER_ID));
     assert.match(thrown.remedy, new RegExp(GLASSPANE_EVIDENCE_PROVIDER_ID));
 
-    const evidenceOnly = attributeCapability("diagnose", registryFrom([GLASSPANE_FIXTURE[1]]));
+    const evidenceOnly = attributeCapability("diagnose", { registry: registryFrom([GLASSPANE_FIXTURE[1]]) });
     assert.equal(evidenceOnly.status, "refused");
     assert.equal(evidenceOnly.error.code, PROVIDER_CODES.unknown);
   });
@@ -284,12 +370,20 @@ describe("an empty requires is a claim, a missing requires is not one", () => {
   test("a registration the kernel will not accept reaches the surface as a refusal, not a stack", () => {
     // This is the arm a shipped build can actually hit: the drafts are this product's own
     // bytes, so a registration the kernel refuses must surface as the three-field answer
-    // an agent reads, never as an uncaught throw out of `tools/call`.
-    const refused = attributeCapability("diagnose", undefined, "");
+    // an agent reads, never as an uncaught throw out of `tools/call`. The version that
+    // breaks it here is one the daemon reported and the kernel's bound refuses.
+    // MUTATION THIS PINS: let `shellProviderRegistry`'s throw escape `attributeCapability`
+    // (drop the catch) and this becomes an uncaught KernelSchemaError, not a refusal.
+    const refused = attributeCapability("diagnose", { producerVersion: "x".repeat(PROVIDER_ID_MAX_LENGTH + 1) });
     assert.equal(refused.status, "refused");
     assert.equal(refused.error.code, "KERNEL_E_SCHEMA");
     assert.match(refused.error.message, /this product writes itself/);
+    assert.match(refused.error.message, /the daemon's own hello self-report/,
+      "拒绝要说出这张注册表是用哪个测量填的版本：${JSON.stringify(refused.error)}");
     assert.match(refused.error.remedy, /shellProviderDrafts/);
+    for (const field of ["code", "message", "remedy"]) {
+      assert.equal(typeof refused.error[field], "string", `error frame 少了 ${field} 这一字段`);
+    }
   });
 
   test("a method declared twice is refused rather than collapsed", () => {
@@ -366,13 +460,32 @@ describe("methodForSignals: a declaration query, not a reading of evidence", () 
     assert.equal(methodForSignals(["ax-event"], parallel), null);
     // …and the consumer refuses on it: naming a verdict's producer by picking between two
     // indistinguishable declarations is a default resolution, which this contract forbids.
-    const refused = attributeCapability("diagnose", parallel);
+    const refused = attributeCapability("diagnose", { registry: parallel });
     assert.equal(refused.status, "refused");
     assert.match(refused.error.message, /diagnose, diagnose-blind/);
   });
 
-  test("the default registry is the shipped one, built from the version this build reads", () => {
-    assert.equal(methodForSignals(["ax-event", "attribution", "circuit-breaker"]), "diagnose");
+  test("methodForSignals takes an explicit registry — the throwing default arm is gone", () => {
+    // MUTATION THIS PINS: restore the default argument
+    // `registry = shellProviderRegistry(shellProductVersion() ?? "")`. On a build whose
+    // manifest cannot be read that throws `KernelSchemaError` out of a default argument,
+    // which is the trap this choice removes; the guard below is what a JS caller that
+    // omits the argument gets instead, and it names the fix rather than the kernel bound.
+    assert.equal(methodForSignals(["ax-event", "attribution", "circuit-breaker"], SHIPPED), "diagnose");
+    let thrown;
+    try {
+      methodForSignals(["ax-event"], undefined);
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown instanceof TypeError, `省略 registry 要得到点名这条契约的 TypeError，got ${String(thrown)}`);
+    assert.match(thrown.message, /explicit ProviderRegistry/);
+    assert.match(thrown.message, /shellProviderRegistry/);
+    assert.equal(thrown instanceof KernelSchemaError, false,
+      "默认臂又回到用壳的 manifest 版本建 registry：读不到清单的构建会从参数默认值里抛出内核模式错误");
+    const source = executableSource(PROVIDERS_SOURCE);
+    assert.equal(/methodForSignals\([\s\S]{0,200}?registry: ProviderRegistry = /.test(source), false,
+      "src 里的 methodForSignals 重新给 registry 写了默认值");
   });
 });
 
@@ -386,9 +499,20 @@ describe("the consumer on 面 A: attribution, and a refusal that never reaches t
     assert.equal(outcome.isError, false);
     assert.equal(outcome.content[0].text, canonicalJson(reply), "the reply an agent parses stays byte-identical");
     const line = outcome.content[outcome.content.length - 1].text;
-    assert.match(line, new RegExp(`provider: ${GLASSPANE_AE_PROVIDER_ID} version ${SHELL_VERSION} method diagnose`));
+    // This client never had its `hello` answered, so the producer's version is unmeasured
+    // and the line says exactly that. Pinning `version ${SHELL_VERSION}` here used to
+    // endorse the defect: it certified the shell's own build as the producer of a verdict
+    // the daemon made.
+    assert.match(line, new RegExp(`provider: ${GLASSPANE_AE_PROVIDER_ID} version unmeasured method diagnose`));
+    assert.match(line, /no daemon hello handshake has been answered on this connection/);
     assert.match(line, /the verdict above is the engine's/);
-    assert.match(providerAttributionLine({ id: "x", version: "1", method: "m", requires: [] }), /prerequisites: none/);
+    assert.equal(line.includes(SHELL_VERSION), false, line);
+    assert.match(
+      providerAttributionLine({
+        id: "x", version: "1", method: "m", requires: [], versionNote: "the producer's version is the daemon's own hello self-report",
+      }),
+      /prerequisites: none/,
+    );
   });
 
   test("a tool the registry claims nothing about keeps its exact reply shape", async () => {
@@ -407,11 +531,16 @@ describe("the consumer on 面 A: attribution, and a refusal that never reaches t
 
   test("tools.ts asks the registry before it forwards, and renders the attribution it gets", () => {
     const code = executableSource(TOOLS_SOURCE);
-    assert.match(code, /attributeCapability\(spec\.engineMethod\)/);
+    assert.match(code, /attributeCapability\(spec\.engineMethod, \{/);
     assert.match(code, /providerAttributionLine\(/);
+    // The version it hands the seam is the client's measurement, not this package's
+    // manifest: `providers.ts` has no way to reach the handshake, so a call site that
+    // dropped this argument would silently re-measure nothing.
+    assert.match(code, /producerVersion: engine\.reportedEngineVersion/,
+      "tools.ts 不再把这次连接上量到的 daemon 版本交给归因入口：修 1 在调用侧断了");
     const forwarded = code.indexOf("await engine.call(spec.engineMethod");
     assert.ok(forwarded > 0, "the forwarded call site this gate measures moved out of tools.ts");
-    assert.ok(code.indexOf("attributeCapability(spec.engineMethod)") < forwarded,
+    assert.ok(code.indexOf("attributeCapability(spec.engineMethod") < forwarded,
       "the claim is that an unattributable capability never reaches the daemon; a guard sitting after the call would not make it true");
   });
 
@@ -427,9 +556,13 @@ describe("the consumer on 面 A: attribution, and a refusal that never reaches t
     }
   });
 
-  test("a build that cannot read its own version refuses, and the daemon is never asked", async () => {
+  test("a build with no readable manifest still forwards, still attributes what it measures, and says its own version is unreadable", async () => {
     // Not a mock: the shipped `dist` copied into a tree with no manifest above it, so the
     // version source is proved to be the runtime read rather than a string compiled in.
+    // MUTATION THIS PINS: making the unreadable manifest a refusal again (`GP_E_INTERNAL`
+    // + the "run glasspane-mcp from a package directory…" remedy) — the daemon was healthy
+    // and the diagnosis was answerable, and the remedy named a thing an agent cannot do
+    // from where it is standing.
     const base = fs.mkdtempSync(path.join(TEST_DIR, ".gp-nomanifest-"));
     try {
       fs.cpSync(path.join(TEST_DIR, "..", "dist"), path.join(base, "dist"), { recursive: true });
@@ -439,25 +572,50 @@ describe("the consumer on 面 A: attribution, and a refusal that never reaches t
 
       const local = await load("providers.js");
       assert.equal(local.shellProductVersion(), null, "a build with no manifest beside it must not report a version");
-      const refused = local.attributeCapability("diagnose");
-      assert.equal(refused.status, "refused");
-      assert.equal(refused.error.code, "GP_E_INTERNAL");
-      assert.match(refused.error.message, /cannot name the version/);
-      assert.match(refused.error.remedy, /refuses to state a version/);
 
+      // (a) Nothing measured: the seam answers, states no producer version, and says the
+      //     manifest is unreadable instead of refusing.
+      const bare = local.attributeCapability("diagnose");
+      assert.equal(bare.status, "ok", "读不到 manifest 不是拒绝诊断的理由");
+      assert.equal(bare.provider.version, null);
+      assert.match(bare.provider.versionNote, /cannot read its own glasspane-mcp manifest/);
+      assert.match(bare.provider.versionNote, new RegExp(local.shellManifestPath().replace(/[/.]/g, (c) => `\\${c}`)));
+      const bareLine = local.providerAttributionLine(bare.provider);
+      assert.match(bareLine, /version unmeasured/);
+      assert.equal(bareLine.includes(local.UNSTATED_REGISTRATION_VERSION), false,
+        `内部占位版本不得念给 agent：${bareLine}`);
+
+      // (b) The daemon measured: its own hello version is what gets attributed, through the
+      //     real tool path, and the daemon is actually asked.
       const localTools = await load("tools.js");
-      const { engineClientOver } = await load("engine-client.js");
+      const { engineClientOver: over } = await load("engine-client.js");
       const { EvidenceAuditSession: LocalSession } = await load("audit-session.js");
       const io = new FakeLineIo();
-      const outcome = await localTools.executeTool(
+      let opened = null;
+      io.onOpen = (handler) => {
+        opened = handler;
+      };
+      const engine = over(io, 500);
+      opened?.();
+      io.respond({ engine: "glasspaned", version: DAEMON_REPORTED_VERSION, protocolVersion: ENGINE_PROTOCOL_VERSION });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(engine.reportedEngineVersion, DAEMON_REPORTED_VERSION,
+        "no-manifest 的构建读不到自己的 hello 测量：这条端到端就没有源头");
+      const promise = localTools.executeTool(
         localTools.TOOL_BY_NAME.get("gp_diagnose"),
         {},
-        engineClientOver(io, 500),
+        engine,
         new LocalSession(),
       );
-      assert.equal(outcome.isError, true);
-      assert.match(outcome.content[0].text, /^GP_E_INTERNAL: /);
-      assert.equal(io.sent.length, 0, "a capability this shell cannot attribute must not reach the daemon");
+      io.respond({ class: "T1", summary: "ok" });
+      const answered = await promise;
+      assert.equal(answered.isError, false, JSON.stringify(answered.content.map((c) => c.text.slice(0, 80))));
+      assert.equal(io.sent.filter((line) => JSON.parse(line).method === "diagnose").length, 1,
+        "读不到 manifest 的壳照样要把这条转给 daemon");
+      const line = answered.content[answered.content.length - 1].text;
+      assert.match(line, new RegExp(`version ${DAEMON_REPORTED_VERSION}`), line);
+      assert.match(line, /cannot read its own glasspane-mcp manifest/);
+      engine.close();
     } finally {
       fs.rmSync(base, { recursive: true, force: true });
     }

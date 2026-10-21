@@ -105,24 +105,32 @@ let cachedProductVersion: string | null | undefined;
  * Both layouts agree on that. The `tsc` output sits at `mcp-shell/dist/x.js` and the
  * esbuild bundle at `dist/index.js`, so `../package.json` is the package root either
  * way; a scratch tree without one is exactly the case {@link shellProductVersion}
- * refuses instead of guessing about.
+ * reports as unreadable.
  */
 export function shellManifestPath(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json");
 }
 
 /**
- * The version `glasspane-mcp` really reports, or `null` when this build cannot read it.
+ * The version *this shell* carries, or `null` when this build cannot read it.
  *
- * This is the registration's only version source: the `version` field of this
- * package's own manifest, resolved at runtime from this module's location — the same
- * string the shell hands to the daemon's `hello` identity and answers in
- * `initialize`'s `serverInfo` (`dispatch.ts`'s `SERVER_INFO`), and the equality of
- * those three is pinned by `test/providers.test.mjs`. A version literal written into a
- * registration would be a claim this surface never measured; `kernel/fixtures/
- * provider-registration.ok-01.json` carries `1.11.0` in every entry because that was
- * the corpus's engine version the day it was authored, and copying it here would
- * certify a release this product never shipped.
+ * This is the shell's own measurement, from the manifest beside the `dist/` it ships in,
+ * and it is the string this shell sends as its `hello` identity and answers in
+ * `initialize`'s `serverInfo` (`dispatch.ts`'s `SERVER_INFO`). It is **not** the version a
+ * verdict is attributed to: the verdict an agent is given came out of the *daemon's*
+ * build, and that build advertises its own version in `hello`, which
+ * `engine-client.ts` stores and `attributeCapability` states. Equating the two was the
+ * defect — on a machine whose app bundle is older than the shell, the agent was told the
+ * verdict came from a build that did not produce it.
+ *
+ * It is also no longer a hard dependency for answering a call: a relocated `dist/` with
+ * no manifest above it leaves this `null`, the shell still forwards, and the attribution
+ * says the shell's own version is unreadable instead of refusing the diagnosis.
+ *
+ * A version literal written into a registration would be a claim this surface never
+ * measured; `kernel/fixtures/provider-registration.ok-01.json` carries `1.11.0` in every
+ * entry because that was the corpus's engine version the day it was authored, and copying
+ * it here would certify a release this product never shipped.
  */
 export function shellProductVersion(): string | null {
   if (cachedProductVersion === undefined) {
@@ -259,14 +267,25 @@ export function coveredMethods(
  * resolver that would "helpfully" take the only registered provider when the id it was
  * handed does not match.
  *
- * The default registry is the shipped one, built from {@link shellProductVersion}; a
- * build that cannot read its manifest gets the kernel's own refusal of an empty
- * version rather than an invented one.
+ * THE REGISTRY IS NOT DEFAULTED. This used to default it to
+ * `shellProviderRegistry(shellProductVersion() ?? "")`, and that default arm was a trap:
+ * a build that could not read its manifest got a `KernelSchemaError` thrown out of a
+ * default argument, bypassing the three-field `{code, message, remedy}` shape every other
+ * arm of this file keeps. Every caller now names the registry it means, and an omitted
+ * one is refused by the guard below with the sentence that says so rather than by the
+ * kernel's schema error.
  */
 export function methodForSignals(
   signals: Iterable<string>,
-  registry: ProviderRegistry = shellProviderRegistry(shellProductVersion() ?? ""),
+  registry: ProviderRegistry | undefined,
 ): string | null {
+  if (registry === undefined) {
+    throw new TypeError(
+      "methodForSignals takes an explicit ProviderRegistry — build one with shellProviderRegistry(<measured version>). "
+      + "The old default arm threw the kernel's schema error for any build that could not read its manifest, which is "
+      + "the throw this file's three-field refusal shape exists to avoid.",
+    );
+  }
   const covered = coveredMethods(signals, registry);
   const only = covered.length === 1 ? covered[0] : undefined;
   return only === undefined ? null : only.name;
@@ -275,9 +294,19 @@ export function methodForSignals(
 /** What a verdict is attributed to: the registered id, its version, the declared method. */
 export interface ProviderAttribution {
   readonly id: string;
-  readonly version: string;
+  /**
+   * The producer's version as measured from its own `hello` reply, or `null` when this
+   * connection has not read one. Nothing that was not measured is stated here.
+   */
+  readonly version: string | null;
   readonly method: string;
   readonly requires: readonly string[];
+  /**
+   * What was and was not measured about versions on this call, in one sentence the
+   * surface is allowed to print: whose `hello` was read, and whether this build can read
+   * its own manifest.
+   */
+  readonly versionNote: string;
 }
 
 /** A refusal, in this repository's existing three-field shape (`code`/`message`/`remedy`). */
@@ -331,46 +360,56 @@ export function claimForEngineMethod(engineMethod: string): CapabilityClaim | nu
 }
 
 /**
+ * What the caller hands the consumer seam, all of it measurements it made itself.
+ *
+ * `producerVersion` is the version the daemon named in its own `hello`, read through
+ * `EngineJsonRpcClient.reportedEngineVersion` (the HTTP surface reads the same value off
+ * its client); `null`/absent means no handshake has answered one yet. `shellVersion` and
+ * `registry` exist so a test can pin the refusals from the other side without touching
+ * this build's manifest; production calls pass the measurement and nothing else.
+ */
+export interface CapabilityQuery {
+  readonly registry?: ProviderRegistry;
+  readonly producerVersion?: string | null;
+  readonly shellVersion?: string | null;
+}
+
+/**
  * The consumer half: which registered producer does this forwarded call belong to?
  *
  * Refuses rather than defaults, in every arm:
- *   - no version readable from this build's own manifest → refuse (naming the path it
- *     looked at); stating a version the product never measured is worse than not
- *     answering, because the whole point of the registration is to be relied on;
  *   - a method the named provider does not declare → the kernel's
  *     `KERNEL_E_PROVIDER_METHOD`, whose remedy names what *is* declared;
  *   - a prerequisite list covering more than one declaration → refuse and name them;
- *   - a registration the kernel itself will not accept → refuse with its schema code
- *     and the path back to the corpus, because these bytes are this product's own and
- *     a call site must never be where the contract gets relaxed;
+ *   - a registration the kernel itself will not accept → refuse with its schema code,
+ *     naming which measurement the registration was built from, because these bytes are
+ *     this product's own and a call site must never be where the contract gets relaxed;
  *   - anything else → rethrow. An unexpected fault is not dressed up as a refusal.
  *
- * `registry` and `version` are optional so a test can pin the same refusals from the
- * other side — a registry with one declaration removed, or a version the kernel will
- * not accept — without touching this build's manifest. Production calls pass only the
- * engine method, which is the arm that reads the version for real.
+ * An unreadable manifest is **not** one of those arms. The version a verdict is
+ * attributed to is the producer's, measured from its `hello`; this build's own version is
+ * a second, separate fact, and when it cannot be read the answer says so plainly instead
+ * of refusing a call the healthy daemon is perfectly able to answer. When *neither* is
+ * measurable, the registration is still built — from {@link UNSTATED_REGISTRATION_VERSION}
+ * — so the kernel's declaration check keeps running, and the visible version stays `null`:
+ * the placeholder names nothing an agent is told.
  */
-export function attributeCapability(
-  engineMethod: string,
-  registry?: ProviderRegistry,
-  version?: string,
-): CapabilityAnswer {
+export function attributeCapability(engineMethod: string, query: CapabilityQuery = {}): CapabilityAnswer {
   const claim = claimForEngineMethod(engineMethod);
   if (claim === null) {
     return { status: "not-claimed" };
   }
-  let target = registry;
-  let stated = version;
-  if (target === undefined && stated === undefined) {
-    const read = shellProductVersion();
-    if (read === null) {
-      return { status: "refused", error: versionUnavailable(claim) };
-    }
-    stated = read;
-  }
+  const measured = typeof query.producerVersion === "string" && query.producerVersion.trim() !== ""
+    ? query.producerVersion.trim()
+    : null;
+  const own = query.shellVersion === undefined ? shellProductVersion() : query.shellVersion;
+  const usable = (value: string | null): string | null =>
+    (value !== null && value.trim() !== "" ? value.trim() : null);
+  const registrationVersion = measured ?? usable(own) ?? UNSTATED_REGISTRATION_VERSION;
+  let target = query.registry;
   try {
     if (target === undefined) {
-      target = shellProviderRegistry(stated ?? "");
+      target = shellProviderRegistry(registrationVersion);
     }
     const declared = requireMethod(target, claim.providerId, claim.method);
     const provider = resolveProvider(target, claim.providerId);
@@ -382,10 +421,14 @@ export function attributeCapability(
     return {
       status: "ok",
       provider: {
+        // Never `provider.version`: that field is whatever the registration was built
+        // with, which can be the placeholder. The version an agent is told is the one the
+        // producer itself reported.
         id: provider.id,
-        version: provider.version,
+        version: measured,
         method: declared.name,
         requires: declared.requires,
+        versionNote: versionNote(measured, usable(own)),
       },
     };
   } catch (error) {
@@ -397,7 +440,7 @@ export function attributeCapability(
         status: "refused",
         error: {
           code: error.code,
-          message: `${error.message} — the kernel refused a registration this product writes itself`,
+          message: `${error.message} — the kernel refused a registration this product writes itself, built with the version from ${registrationVersionSource(measured, usable(own))}`,
           remedy: "fix shellProviderDrafts in mcp-shell/src/providers.ts; it is the contract both harnesses read, "
             + "so it cannot be relaxed at a call site — run node scripts/check-kernel-corpus.mjs and compare "
             + "against kernel/fixtures/provider-registration.ok-01.json",
@@ -409,31 +452,65 @@ export function attributeCapability(
 }
 
 /**
+ * The version slot of a registration when neither the producer nor this build reports one.
+ *
+ * The kernel's shape needs a non-empty `version` string to accept the registration at all,
+ * and the declaration check that refuses an undeclared capability before the frame reaches
+ * the daemon runs against that registration — so it is filled with this named constant,
+ * never with an invented release number, and never surfaced: `attributeCapability` reports
+ * the measured producer version (here `null`) and `providerAttributionLine` prints
+ * "version unmeasured" for that. Redden the arm by changing the value it reports, not by
+ * making this string printable.
+ */
+export const UNSTATED_REGISTRATION_VERSION = "unmeasured-registration-placeholder";
+
+/** Which measurement the refused registration was built from, named in the refusal. */
+function registrationVersionSource(measured: string | null, own: string | null): string {
+  if (measured !== null) {
+    return "the daemon's own hello self-report";
+  }
+  return own === null
+    ? `the ${MANIFEST_NAME} manifest this build cannot read at ${shellManifestPath()}`
+    : "this build's own manifest";
+}
+
+/**
  * The one line 面 A adds to a forwarded judgement: who is being trusted for it.
  *
  * Appended as its own content item, never folded into the daemon's JSON, because the
  * reply an agent parses has to stay byte-identical (the same rule `tools.ts` already
- * follows for the update-state block and the stdout-backlog note).
+ * follows for the update-state block and the stdout-backlog note). The HTTP surface
+ * renders the *same* string, as the envelope's `attribution` key — two doorways, one
+ * provenance answer.
+ *
+ * The version clause states only a measurement: the daemon's own `hello` self-report, or
+ * "version unmeasured" when this connection has not read one.
  */
 export function providerAttributionLine(attributed: ProviderAttribution): string {
   const needs = attributed.requires.length > 0 ? attributed.requires.join(", ") : "none";
-  return `provider: ${attributed.id} version ${attributed.version} method ${attributed.method}`
+  const version = attributed.version === null ? "version unmeasured" : `version ${attributed.version}`;
+  return `provider: ${attributed.id} ${version} method ${attributed.method}`
     + ` | declared prerequisites: ${needs}`
+    + ` | ${attributed.versionNote}`
     + " | the verdict above is the engine's, transcribed unchanged; this line names the registered producer"
     + " this surface attributes it to, from the kernel's provider-registration contract";
 }
 
-/** The kernel's own words, kept, for a manifest this build cannot read. */
-function versionUnavailable(claim: CapabilityClaim): ProviderRefusal {
-  return {
-    code: GP_E_INTERNAL,
-    message: `this build cannot name the version of the provider that declares '${claim.method}': no readable`
-      + ` ${MANIFEST_NAME} manifest at ${shellManifestPath()}`,
-    remedy: "run glasspane-mcp from a package directory that carries its own manifest — the registration's"
-      + ` version is the string this shell reports in 'initialize' serverInfo and in the daemon's hello, and`
-      + " this surface refuses to state a version it has not read rather than attribute a verdict to a"
-      + " producer it invented",
-  };
+/**
+ * What this surface can and cannot say about versions on this call.
+ *
+ * Two separate facts, because they are two separate measurements: whose version was read,
+ * and whether this build can read its own manifest. The second is why a relocated `dist/`
+ * no longer refuses a diagnosis — it is said out loud here, beside the answer, and the
+ * call still goes through.
+ */
+function versionNote(measured: string | null, own: string | null): string {
+  const producer = measured === null
+    ? "the producer's version is unmeasured: no daemon hello handshake has been answered on this connection, so this line states no version"
+    : "the producer's version is the daemon's own hello self-report, read on this connection";
+  return own === null
+    ? `${producer}; this build cannot read its own ${MANIFEST_NAME} manifest at ${shellManifestPath()}, so it states no version of itself either`
+    : producer;
 }
 
 /** The refusal for a prerequisite list that names more than one declaration (or none). */

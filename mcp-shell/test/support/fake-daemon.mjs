@@ -27,7 +27,6 @@ import fs from "node:fs";
 
 import { SERVER_INFO } from "../../dist/dispatch.js";
 import { ENGINE_PROTOCOL_VERSION } from "../../dist/engine-client.js";
-import { DAEMON_FORWARDED_METHODS } from "../../dist/tools.js";
 
 /**
  * The fixture's probe registration: a `com.example.*` bundle id is what a daemon row
@@ -42,20 +41,47 @@ const DAEMON_TIMESTAMP = "2026-10-15T07:33:12.480Z";
 const DAEMON_DROP_TIMESTAMP = "2026-10-15T07:33:44.020Z";
 
 /**
+ * The capability names this fixture advertises: a **literal**, on purpose.
+ *
+ * It used to be `[...DAEMON_FORWARDED_METHODS]` — the very set this fixture exists to
+ * reconcile against — so an end-to-end test could never observe the two drifting: the
+ * stand-in advertised exactly what the shell forwarded, by construction, and
+ * `describeCapabilityDrift`'s reconciliation had nothing to disagree with. The same
+ * failure the `hello` key set above was locked against, in a different file.
+ *
+ * `test/fixture-daemon-shape.test.mjs` now reddens this list whenever it stops matching
+ * either the daemon's own table (read out of `engine/Sources/GlassPaneEngine/FrameCodec.swift`
+ * — `EngineMethod`'s cases minus its `transportMethods`) or the shell's forwarded set, so a
+ * divergence between the two products is a failing test rather than a fixture that follows
+ * whichever side moved.
+ */
+export const FAKE_DAEMON_CAPABILITIES = Object.freeze([
+  "attach",
+  "act",
+  "observe",
+  "assert_element",
+  "diagnose",
+  "last_evidence",
+  "snapshot",
+  "restore",
+  "audit_ui",
+  "capture_view",
+  "probe_status",
+]);
+
+/**
  * The `hello` result, in the key set `EngineCore.hello()` publishes
  * (`engine`, `version`, `protocolVersion`, `pid`, `capabilities`; `stateRoot`,
  * `approvalPersistFailed`, `identity` and `permissions` are conditional and are
  * *absent* here, which is the daemon's own way of saying it did not measure them).
  *
- * `capabilities` defaults to the wire names this shell already knows
- * (`DAEMON_FORWARDED_METHODS`, derived from `TOOL_SPECS`) so a session that did not ask
- * about capability drift is not handed a drift note it cannot act on; a test that wants
- * the drift passes its own list.
+ * `capabilities` defaults to {@link FAKE_DAEMON_CAPABILITIES}, the pinned literal; a test
+ * that wants capability drift passes its own list.
  */
 export function fakeHelloResult({
   version = SERVER_INFO.version,
   protocolVersion = ENGINE_PROTOCOL_VERSION,
-  capabilities = [...DAEMON_FORWARDED_METHODS],
+  capabilities = [...FAKE_DAEMON_CAPABILITIES],
   pid = process.pid,
 } = {}) {
   return {

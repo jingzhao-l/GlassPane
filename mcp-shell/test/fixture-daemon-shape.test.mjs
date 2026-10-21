@@ -31,16 +31,20 @@ import { fileURLToPath } from "node:url";
 import {
   FAKE_PROBE_BUNDLE_ID,
   FAKE_PROBE_PID,
+  FAKE_DAEMON_CAPABILITIES,
   fakeHelloResult,
   fakeProbeStatusResult,
   startFakeDaemon,
 } from "./support/fake-daemon.mjs";
 import { SERVER_INFO } from "../dist/dispatch.js";
+import { DAEMON_FORWARDED_METHODS } from "../dist/tools.js";
+import { describeCapabilityDrift } from "../dist/engine-client.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ENGINE = path.resolve(HERE, "..", "..", "engine", "Sources", "GlassPaneEngine");
 const ENGINE_CORE = path.join(ENGINE, "EngineCore.swift");
 const PROBE_INBOX = path.join(ENGINE, "ProbeInbox.swift");
+const FRAME_CODEC = path.join(ENGINE, "FrameCodec.swift");
 
 /** One Swift function's body: from its signature to the next member at the same indent. */
 function swiftBody(source, signature, where) {
@@ -198,6 +202,136 @@ test("hello's version really defaults to the shell's own, as this file documents
     assert.equal(hello.result.version, SERVER_INFO.version, JSON.stringify(hello.result));
     assert.equal(hello.result.protocolVersion, fakeHelloResult().protocolVersion);
   } finally {
+    await daemon.stop();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * The fixture's advertised capability list.
+ *
+ * It used to be `[...DAEMON_FORWARDED_METHODS]` — the set the fixture exists to be
+ * reconciled *against* — so drift was structurally invisible: whatever the shell forwarded
+ * was by definition what the daemon offered, and `describeCapabilityDrift` could only ever
+ * say "一致". Three names are in play and all three have to be pinned to each other here:
+ * the daemon's own table (read out of `FrameCodec.swift`), the shell's forwarded set
+ * (`DAEMON_FORWARDED_METHODS`, derived from `TOOL_SPECS`), and this fixture's literal.
+ *
+ * MUTATION THIS PINS: add a method to the Swift `EngineMethod` enum, or drop one from
+ * `FAKE_DAEMON_CAPABILITIES`, or forward a tool whose `engineMethod` the daemon does not
+ * list — one of these three goes red, with the difference named. Turning the literal back
+ * into a derivation from `DAEMON_FORWARDED_METHODS` reddens the second test.
+ * ------------------------------------------------------------------ */
+
+/**
+ * The names `hello` advertises, as the daemon computes them: `EngineMethod`'s raw values
+ * minus the ones its own `transportMethods` list names.
+ */
+function swiftAdvertisedCapabilities() {
+  const source = fs.readFileSync(FRAME_CODEC, "utf8");
+  const block = /public enum EngineMethod: String, CaseIterable \{([\s\S]*?)\n\}/.exec(source);
+  assert.ok(block, "FrameCodec.swift 不再以这段声明写 EngineMethod——这条闸要红而不是跳过");
+  const names = new Set();
+  for (const rawLine of block[1].split("\n")) {
+    const line = rawLine.replace(/\/\/.*$/, "").trim();
+    if (!line.startsWith("case ")) continue;
+    for (const part of line.slice("case ".length).split(",")) {
+      const trimmed = part.trim();
+      if (trimmed === "") continue;
+      const withValue = /^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]+)"$/.exec(trimmed);
+      names.add(withValue ? withValue[2] : trimmed);
+    }
+  }
+  const transport = /static let transportMethods: \[EngineMethod\] = \[([^\]]*)\]/.exec(source);
+  assert.ok(transport, "FrameCodec.swift 不再用 transportMethods 命名纯传输方法——清单的减法没有了源头");
+  const dropped = [...transport[1].matchAll(/\.([A-Za-z][A-Za-z0-9_]*)/g)].map((m) => m[1]);
+  assert.ok(dropped.length >= 1, `transportMethods 解析出 ${dropped.length} 个名字，这条减法已经看不见写法`);
+  // A Swift case name is not its raw value (`case lastEvidence = "last_evidence"`), so the
+  // drop is matched on both spellings.
+  const rawOf = new Map();
+  for (const rawLine of block[1].split("\n")) {
+    const line = rawLine.replace(/\/\/.*$/, "").trim();
+    for (const part of line.startsWith("case ") ? line.slice(5).split(",") : []) {
+      const m = /^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]+)"$/.exec(part.trim());
+      if (m !== null) rawOf.set(m[1], m[2]);
+    }
+  }
+  const advertised = [...names].filter((name) => !dropped.some((swiftCase) => (rawOf.get(swiftCase) ?? swiftCase) === name));
+  assert.ok(advertised.length >= 10, `只解析出 ${advertised.length} 个对外能力名：${advertised.join(", ")}`);
+  return advertised;
+}
+
+test("the fixture advertises a literal capability list, not a derivation of the shell's own set", () => {
+  const fixtureSource = fs.readFileSync(
+    path.join(HERE, "support", "fake-daemon.mjs"),
+    "utf8",
+  ).replace(/\/\*[\s\S]*?\*\//g, "").split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
+  assert.doesNotMatch(fixtureSource, /capabilities\s*=\s*\[\.\.\.DAEMON_FORWARDED_METHODS\]/,
+    "fixture 又拿壳的转发集合当自己的清单：这条对账就没有对照物了");
+  assert.match(fixtureSource, /capabilities\s*=\s*\[\.\.\.FAKE_DAEMON_CAPABILITIES\]/,
+    "hello 的默认清单不再是那条字面量");
+  assert.deepEqual(fakeHelloResult().capabilities, [...FAKE_DAEMON_CAPABILITIES],
+    "fakeHelloResult 的默认值必须就是那条字面量");
+});
+
+test("the fixture's literal equals the daemon's advertised table read out of Swift", () => {
+  const advertised = swiftAdvertisedCapabilities();
+  assert.deepEqual(
+    [...FAKE_DAEMON_CAPABILITIES].filter((name) => !advertised.includes(name)).sort(),
+    [],
+    "fixture 广告了 daemon 方法表里没有的能力名：它会替 daemon 撒谎");
+  assert.deepEqual(
+    advertised.filter((name) => !FAKE_DAEMON_CAPABILITIES.includes(name)).sort(),
+    [],
+    `daemon 广告了 fixture 不列的能力，端到端测试就看不见这条漂移：${advertised.join(", ")}`);
+  // The vacuity control for the extractor above: a table read as empty would pass both
+  // directions against an empty fixture list.
+  assert.ok(advertised.length >= 10 && FAKE_DAEMON_CAPABILITIES.length >= 10,
+    `解析出的能力太少，这两条比较已经在空转：swift=${advertised.length}, fixture=${FAKE_DAEMON_CAPABILITIES.length}`);
+});
+
+test("the fixture's literal equals the set the shell reconciles against", () => {
+  const forwarded = [...DAEMON_FORWARDED_METHODS];
+  assert.deepEqual(
+    [...FAKE_DAEMON_CAPABILITIES].filter((name) => !forwarded.includes(name)).sort(),
+    [],
+    `fixture 列了壳不转发的方法：端到端会话会收到一条假漂移：${FAKE_DAEMON_CAPABILITIES.filter((n) => !forwarded.includes(n))}`);
+  assert.deepEqual(
+    forwarded.filter((name) => !FAKE_DAEMON_CAPABILITIES.includes(name)).sort(),
+    [],
+    `壳转发而 fixture 不列：${forwarded.filter((n) => !FAKE_DAEMON_CAPABILITIES.includes(n))}`);
+  assert.deepEqual(new Set(forwarded).size, forwarded.length, "壳的转发集合有重名，逐条比较会漏");
+
+  // And the check bites: a fixture list missing one capability is exactly the drift this
+  // file used to be unable to see.
+  const shorted = FAKE_DAEMON_CAPABILITIES.filter((name) => name !== "capture_view");
+  assert.deepEqual(forwarded.filter((name) => !shorted.includes(name)), ["capture_view"]);
+});
+
+test("a session against the fixture sees no capability drift, and does see an invented one", async () => {
+  const socketPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "gp-fixture-caps-")), "engine.sock");
+  const daemon = await startFakeDaemon(socketPath);
+  const conn = net.connect(socketPath);
+  try {
+    conn.setEncoding("utf8");
+    conn.write(`${JSON.stringify({ id: 1, method: "hello" })}\n`);
+    const reply = await new Promise((resolve, reject) => {
+      let buffer = "";
+      conn.on("data", (chunk) => {
+        buffer += chunk;
+        const nl = buffer.indexOf("\n");
+        if (nl !== -1) resolve(JSON.parse(buffer.slice(0, nl)));
+      });
+      conn.on("error", reject);
+    });
+    assert.deepEqual(reply.result.capabilities, [...FAKE_DAEMON_CAPABILITIES],
+      "线上跑出去的不是那条字面量清单");
+    assert.equal(describeCapabilityDrift(reply.result.capabilities, [...DAEMON_FORWARDED_METHODS]), null,
+      "fixture 与壳一致时这条对账必须无话可说");
+    const invented = describeCapabilityDrift([...FAKE_DAEMON_CAPABILITIES, "checkpoint"], [...DAEMON_FORWARDED_METHODS]);
+    assert.ok(invented && invented.includes("checkpoint"),
+      "daemon 多列一个能力时对账要说话——fixture 的清单必须能被这条闸读出漂移");
+  } finally {
+    conn.destroy();
     await daemon.stop();
   }
 });

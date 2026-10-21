@@ -19,6 +19,7 @@ import {
   GP_E_INTERNAL,
   GP_E_PAYLOAD_TOO_LARGE,
   GP_E_UNKNOWN,
+  quoteShellArg,
 } from "./errors.js";
 
 /**
@@ -33,7 +34,7 @@ export function daemonUnreachableRemedy(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const installerCli = path.resolve(here, "..", "..", "installer", "cli.js");
   if (fs.existsSync(installerCli)) {
-    return `run "node ${installerCli} --restore-launchd" (auto-restores and verifies the launchd-managed daemon), then retry`;
+    return `run \`node ${quoteShellArg(installerCli)} --restore-launchd\` (auto-restores and verifies the launchd-managed daemon), then retry`;
   }
   return "ensure the glasspane daemon is running (launchd job com.glasspane.daemon; in a repo checkout run `node installer/cli.js --restore-launchd`), then retry";
 }
@@ -882,6 +883,23 @@ export class EngineJsonRpcClient {
   }
 
   /**
+   * The version the daemon named in its own `hello`, or null when no handshake on this
+   * connection has reported one.
+   *
+   * This is the *producer's* measurement, and it is what the provider attribution line
+   * states (`providers.ts`'s `attributeCapability`): the verdict an agent is being told
+   * about came out of the daemon's build, not this package's. Read rather than assumed —
+   * `null` means "not measured on this connection", never "therefore it is the shell's
+   * own version", which is the mistake that made an app bundle older than the shell
+   * report a verdict from a build that did not produce it.
+   */
+  private helloVersion: string | null = null;
+
+  get reportedEngineVersion(): string | null {
+    return this.helloVersion;
+  }
+
+  /**
    * Sink for facts that cannot be attached to any request of the caller: a
    * late reply, a frame with an id this client never issued, a daemon that
    * fails its handshake. Without a sink these stay invisible, which is how
@@ -1438,6 +1456,14 @@ export class EngineJsonRpcClient {
       return;
     }
     const report = result as { engine?: unknown; version?: unknown; protocolVersion?: unknown; capabilities?: unknown; stateRoot?: unknown };
+    // Stored before the protocol arms, and whatever they decide: the daemon that answered
+    // this handshake is the build that produced the verdicts on this connection, so its
+    // self-reported version is a measurement whether or not the protocol numbers agree.
+    // A blank or absent one stays unmeasured — never defaulted to this shell's own.
+    const version = typeof report.version === "string" ? report.version.trim() : "";
+    if (version !== "") {
+      this.helloVersion = version;
+    }
     const protocol = typeof report.protocolVersion === "string" ? report.protocolVersion : null;
     if (protocol === null) {
       this.report(`engine self-report has no protocolVersion (engine=${jsonOrString(report.engine)}); expected '${expected}' — compatibility unverified`);
@@ -1447,7 +1473,7 @@ export class EngineJsonRpcClient {
       this.report(`protocol mismatch: engine speaks '${protocol}', this shell speaks '${expected}' — upgrade or restart one side before trusting tool results`);
       return;
     }
-    const version = typeof report.version === "string" ? report.version : null;
+    const reportedVersion = version === "" ? null : version;
     // `hello.stateRoot` (additive since 1.15.0) is the daemon's own answer to "which root
     // did you resolve". The project tools read it through `reportedStateRoot` instead of
     // deriving a root from `$HOME`: a service started with `--state-dir /tmp/sandbox` loads
@@ -1459,8 +1485,8 @@ export class EngineJsonRpcClient {
       this.helloStateRoot = reportedRoot;
     }
     const wantVersion = this.identity?.version;
-    if (version !== null && wantVersion !== undefined && version !== wantVersion) {
-      this.report(`version mismatch: engine self-reports '${version}', this MCP shell ships '${wantVersion}' (single version line) — one side is stale`);
+    if (reportedVersion !== null && wantVersion !== undefined && reportedVersion !== wantVersion) {
+      this.report(`version mismatch: engine self-reports '${reportedVersion}', this MCP shell ships '${wantVersion}' (single version line) — one side is stale`);
     }
     if (this.expectedDaemonMethods.length > 0) {
       const advertised = Array.isArray(report.capabilities)

@@ -28,7 +28,6 @@ import {
   readUpdateState,
   repoScript,
   runtimeIsUsable,
-  shellPath,
   stateRootOf,
   type CaRootsReading,
   type RuntimeReading,
@@ -57,6 +56,7 @@ import {
   GP_E_PAYLOAD_TOO_LARGE,
   GP_E_PROJECT_LIMIT,
   GP_E_REGISTRY_DRIFT,
+  quoteShellArg,
 } from "./errors.js";
 import {
   EvidenceAuditSession,
@@ -1477,11 +1477,19 @@ async function runValidatedTool(
    * still comes only from the daemon's reply, and `harness/tools/surface-semantics.mjs`
    * is the ruler that would notice if that stopped being true.
    *
+   * The version handed to it is the daemon's own `hello` self-report, read off this
+   * client — the build that produced the reply. This package's manifest version is a
+   * different fact and is not what an agent is told the verdict came from; on a machine
+   * whose app bundle is older than the shell, stating it would attribute the verdict to a
+   * build that did not produce it. `reportedEngineVersion` reads through the
+   * `Object.create` shadow the same way `isClosed()` does, and `null` from it means "no
+   * handshake has answered on this connection", which the line then says.
+   *
    * Every other tool gets `not-claimed` and is untouched: the registry says nothing
    * about a call it does not provide, and pretending otherwise would be a claim this
    * surface has not registered.
    */
-  const claim = attributeCapability(spec.engineMethod);
+  const claim = attributeCapability(spec.engineMethod, { producerVersion: engine.reportedEngineVersion });
   if (claim.status === "refused") {
     return {
       content: [{ type: "text", text: formatToolErrorShape(claim.error) }],
@@ -1600,14 +1608,14 @@ async function runValidatedTool(
 }
 
 /**
- * The three path helpers this block used to define privately — `shellPath`,
- * `absoluteNodeCommand`, `repoScript` — now live in `update-state.ts` and are imported at
- * the top of this file, because the `absent` / `unreadable` / `unresolvable` branches
- * rendered there have to reach the same verdict about "is there an absolute command this
- * machine can run at all". A second, weaker copy of that judgement is how a remedy goes
- * back to being a cwd-relative guess (review 2026-10-09 finding 12), and the two branches
- * below — `updaterEnableCommand` and `runtimeSelfDiagnosis` — are the ones that have
- * always had to make it.
+ * The path helpers this block used to define privately — `absoluteNodeCommand`,
+ * `repoScript` (and the quoting helper, now `quoteShellArg` in `errors.ts`) — live outside
+ * this file and are imported at the top, because the `absent` / `unreadable` /
+ * `unresolvable` branches rendered there have to reach the same verdict about "is there an
+ * absolute command this machine can run at all". A second, weaker copy of that judgement is
+ * how a remedy goes back to being a cwd-relative guess (review 2026-10-09 finding 12), and
+ * the two branches below — `updaterEnableCommand` and `runtimeSelfDiagnosis` — are the ones
+ * that have always had to make it.
  */
 
 /**
@@ -1661,7 +1669,7 @@ function caBundleDiagnosis(ca: CaRootsReading, enableCmd: string): string {
       + "so on a machine whose HTTPS is re-signed locally every auto-update run fails certificate verification and "
       + `nothing on the surface says so. Remedy: re-run the GlassPane installer, or ${enableCmd}, either of which `
       + `writes the roots to ${ca.bundlePath} and points the launchd agent and the panel at it. For a check run by `
-      + `hand in a terminal: export NODE_EXTRA_CA_CERTS=${ca.bundlePath} — but only once that file exists, and set `
+      + `hand in a terminal: export NODE_EXTRA_CA_CERTS=${quoteShellArg(ca.bundlePath)} — but only once that file exists, and set `
       + "before node starts, because a running process never picks the variable up.";
   }
   // The exporter's own recorded path wins: it is the file the export actually wrote and
@@ -1769,7 +1777,7 @@ function runtimeSelfDiagnosis(runtime: RuntimeReading, stateFile: string): strin
       + "from inside it"
     : installScript === null
       ? `\`${installerCommand}\``
-      : `\`${installerCommand}\` (or \`${shellPath(installScript)}\`)`;
+      : `\`${installerCommand}\` (or \`${quoteShellArg(installScript)}\`)`;
   // Re-registering the copy the record names is the one command that ends three of the four
   // states, and it is built from the record's own path plus the state root this shell already
   // resolved. No path in the record means no such command exists — only the installer can
@@ -1777,7 +1785,7 @@ function runtimeSelfDiagnosis(runtime: RuntimeReading, stateFile: string): strin
   // A relative recorded path is refused the same way: it is a command for some other process's
   // working directory, not for this one.
   const enableCmd = (cliPath: string | null): string | null =>
-    absoluteNodeCommand(cliPath, ` enable --state-dir ${shellPath(stateRootOf(stateFile))} --json`);
+    absoluteNodeCommand(cliPath, ` enable --state-dir ${quoteShellArg(stateRootOf(stateFile))} --json`);
   // How the record names the copy it is about. Both halves are quoted as written and an
   // absence is said as an absence: a reader that was handed `<path>` would have to go find
   // the file themselves, which is the one thing this line is supposed to save them.

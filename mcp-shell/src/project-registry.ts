@@ -11,6 +11,7 @@ import {
   GP_E_NO_USER_RECORD,
   GP_E_PROJECT_LIMIT,
   GP_E_REGISTRY_DRIFT,
+  quoteShellArg,
 } from "./errors.js";
 import { daemonUnreachableRemedy } from "./engine-client.js";
 
@@ -432,7 +433,7 @@ function requireUsableRegistry(filePath: string, snapshot: RegistrySnapshot): { 
  * so neither can drift back to a command the agent cannot run.
  */
 export function registryReaders(target: string): string {
-  return `\`/usr/bin/plutil -p ${target}\` or \`/bin/cat ${target}\` — both absolute, so they run from whatever `
+  return `\`/usr/bin/plutil -p ${quoteShellArg(target)}\` or \`/bin/cat ${quoteShellArg(target)}\` — both absolute, so they run from whatever `
     + "directory the reader is in and need nothing that may be off PATH";
 }
 
@@ -620,7 +621,7 @@ function saveProjects(filePath: string, entries: ProjectEntry[]): void {
         error.code,
         `${error.message}; projects.json at ${filePath} was therefore not published as owner-only, and `
         + `gp_project_set refuses to report a write the daemon's own modes did not hold. Bring the state root `
-        + `to them yourself (chmod 700 ${dir}, chmod 600 ${filePath}) and retry — a volume that ignores chmod `
+        + `to them yourself (chmod 700 ${quoteShellArg(dir)}, chmod 600 ${quoteShellArg(filePath)}) and retry — a volume that ignores chmod `
         + "(read-only mount, ACL, immutable flag) needs the daemon's --state-dir moved to one that honours "
         + "permissions; until then the registry on disk and this shell disagree about who can read it",
       );
@@ -634,7 +635,7 @@ function saveProjects(filePath: string, entries: ProjectEntry[]): void {
       `projects.json at ${filePath} was not published: committing the bytes to the device failed (${errno}). `
       + `gp_project_set answers "not saved" here rather than "saved", because a registration a power loss can `
       + `drop is not a registration. This is the write's own failure, not a verdict about the file's contents: `
-      + `check what the volume will do (\`ls -lO ${dir}\` for an immutable flag, \`diskutil info -live ${dir}\` `
+      + `check what the volume will do (\`ls -lO ${quoteShellArg(dir)}\` for an immutable flag, \`diskutil info -live ${quoteShellArg(dir)}\` `
       + `for a read-only or remote mount), fix that, then retry the same call.`,
     );
   }

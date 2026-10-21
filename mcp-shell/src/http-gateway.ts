@@ -36,6 +36,7 @@ import {
   TOOL_SPECS,
   type ToolSpec,
 } from "./tools.js";
+import { attributeCapability, providerAttributionLine } from "./providers.js";
 
 /**
  * HTTP/REST transport for non-MCP clients (curl / scripts) to reach the GlassPane
@@ -183,6 +184,13 @@ export interface EngineClientLike {
    */
   onEngineNote?(handler: (note: string) => void): void;
   onLateReply?(handler: (reply: { method: string; result: unknown }) => void): void;
+  /**
+   * The version the daemon named in its own `hello` on this connection, or null when no
+   * handshake has reported one. Optional so a fake may omit it — the seam then attributes
+   * what it can measure and says the version is unmeasured, which is exactly what the
+   * stdio doorway does for the same client.
+   */
+  readonly reportedEngineVersion?: string | null;
 }
 
 export interface HttpGatewayOptions {
@@ -233,6 +241,13 @@ export interface HttpGateway {
  * excluded — they are not daemon socket methods, and the gateway only claims to
  * bridge to the daemon. Reusing `TOOL_SPECS` keeps validation identical to the
  * MCP path instead of duplicating a second schema.
+ *
+ * "Identical" covers the provenance too, not just the arguments: {@link
+ * handleToolForward} runs every route through the same `attributeCapability` seam
+ * `tools.ts` runs the stdio doorway through, so a claimed capability is answered with
+ * the same attribution line on both doors and refused before the frame leaves on both
+ * doors when that seam cannot name a producer. `test/http-gateway.test.mjs` drives one
+ * call through each doorway and compares them.
  */
 const FORWARDABLE_TOOLS: ReadonlyMap<string, ToolSpec> = new Map(
   TOOL_SPECS.filter((spec) => spec.execute === undefined).map((spec) => [spec.engineMethod, spec]),
@@ -837,6 +852,21 @@ async function handleToolForward(
     return;
   }
 
+  // The same provider-registration seam `tools.ts` runs the stdio doorway through, in the
+  // same place in the sequence: before the frame reaches the daemon, so a capability the
+  // registration does not claim an answer for is refused here too rather than answered
+  // with a verdict this door cannot attribute. One rule, two doors — a half-armed gate
+  // was the defect: the same diagnose reply used to arrive with provenance on stdio and
+  // bare over HTTP.
+  const claim = attributeCapability(spec.engineMethod, {
+    producerVersion: client.reportedEngineVersion ?? null,
+  });
+  if (claim.status === "refused") {
+    fail(res, httpStatusForEngineCode(claim.error.code), claim.error.code, claim.error.message, claim.error.remedy);
+    return;
+  }
+  const attribution = claim.status === "ok" ? providerAttributionLine(claim.provider) : undefined;
+
   try {
     const result = await client.call(spec.engineMethod, checked.value);
     // Honesty-bypass guard (mirrors tools.ts §6.3): a last_evidence frame is
@@ -851,7 +881,7 @@ async function handleToolForward(
         return;
       }
     }
-    ok(res, result);
+    ok(res, result, attribution);
   } catch (error) {
     await failEngine(res, error, spec, checked.value);
   }
@@ -1014,8 +1044,20 @@ function makeNotFetchedNote(notFetched: readonly string[], format: ReportFormat)
  * Response envelopes and the body reader (all JSON, capped).
  * ------------------------------------------------------------------ */
 
-function ok(res: ServerResponse, result: unknown): void {
-  writeJson(res, 200, { ok: true, result });
+/**
+ * The success envelope. `result` is the daemon's reply, byte for byte as this client
+ * decoded it, and never folded into: the same rule the MCP doorway keeps when it appends
+ * the attribution as its own content item.
+ *
+ * `attribution` is that same item's text, present exactly when the provider-registration
+ * contract claims the method that produced the reply. A caller reading `result` alone
+ * therefore gets the same answer on either doorway, and a caller asking who produced a
+ * judgement gets one answer rather than one per door.
+ */
+function ok(res: ServerResponse, result: unknown, attribution?: string): void {
+  writeJson(res, 200, attribution === undefined
+    ? { ok: true, result }
+    : { ok: true, result, attribution });
 }
 
 function fail(res: ServerResponse, status: number, code: string, message: string, remedy: string): void {
