@@ -83,13 +83,21 @@ public enum EngineMethod: String, CaseIterable {
 
 extension EngineMethod {
 
+    /// The two pure-transport methods, named once. `hello` is the handshake that
+    /// carries the capability list, `shutdown` is an operator action rather than a
+    /// capability an agent is offered.
+    public static let transportMethods: [EngineMethod] = [.hello, .shutdown]
+
+    /// True for the methods `hello` advertises — the single predicate the lists
+    /// below are both computed from, so the advertised set and the "these two are
+    /// transport" sentence in `GP_E_METHOD_NOT_FOUND`'s remedy cannot disagree.
+    public var isCapability: Bool { !EngineMethod.transportMethods.contains(self) }
+
     /// `hello` 的 `capabilities` 清单＝本表去掉两个纯传输方法（`hello` 是承载清单的
     /// 握手本身，`shutdown` 是运维动作而非代理可使的能力）。这里从前是 EngineCore
     /// 手抄的字面量，已与真源漂移（报了线上不存在的 `probe`，漏掉 attach/
     /// last_evidence/probe_status）且没有读者会报错——所以清单只能派生，不许再手抄。
-    public static let capabilityMethods: [EngineMethod] = allCases.filter {
-        $0 != .hello && $0 != .shutdown
-    }
+    public static let capabilityMethods: [EngineMethod] = allCases.filter { $0.isCapability }
 
     /// 对外协商的线名（与 `RequestParser` 接受的 `method` 字段同一拼写）。
     public static var capabilityWireNames: [String] {

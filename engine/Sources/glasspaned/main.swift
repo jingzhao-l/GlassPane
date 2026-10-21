@@ -904,7 +904,7 @@ if options.listProjects {
             "command": "--list-projects", "loadFailed": true,
             "registryPath": registry.filePath,
             "error": reason,
-            "next": "make the file readable again (python3 -m json.tool \(registry.filePath), or restore it from a copy), then restart the background service so it re-reads"
+            "next": "make the file readable again (python3 -m json.tool \(RemedyCommand.quote(registry.filePath)), or restore it from a copy), then restart the background service so it re-reads"
         ], to: .standardError)
         exit(1)
     }
@@ -929,7 +929,7 @@ if options.listProjects {
             "registryPath": registry.filePath,
             "entriesRead": registry.count,
             "error": "the registry this process read (\(registry.count) entries) could not be encoded for output (\(error)) — nothing was listed",
-            "next": "the file itself parses (`python3 -m json.tool \(registry.filePath)` proves it); this is a daemon-side output defect, and nothing this command holds was published"
+            "next": "the file itself parses (`python3 -m json.tool \(RemedyCommand.quote(registry.filePath))` proves it); this is a daemon-side output defect, and nothing this command holds was published"
         ], to: .standardError)
         exit(1)
     }
@@ -960,7 +960,7 @@ if let activeId = options.activeProjectId {
             "projectId": activeId,
             "registryPath": registry.filePath,
             "error": reason,
-            "next": "make the file readable again (python3 -m json.tool \(registry.filePath), or restore it from a copy), then re-run this verification; until then nothing here can say whether \(activeId) is registered"
+            "next": "make the file readable again (python3 -m json.tool \(RemedyCommand.quote(registry.filePath)), or restore it from a copy), then re-run this verification; until then nothing here can say whether \(activeId) is registered"
         ], to: .standardError)
         exit(1)
     }
@@ -1012,16 +1012,13 @@ private func runProjectPrune(options: Options) -> Never {
     if registry.loadFailed {
         // 读不回的文件一律拒绝覆写（§12.3.2 / A-1 同源）：自动重读会丢掉本次写入，
         // 照旧覆写会丢掉文件里的真条目，两个方向都是无声丢数据。
-        writeJSON([
-            "command": "--project-prune", "dryRun": dryRun, "loadFailed": true,
-            "total": before.count, "matched": 0, "pruned": 0,
-            "prunedProjectIds": [String](), "failed": 0, "failures": [[String: String]](),
-            "remaining": before.count, "requiresDaemonRestart": false,
-            "projects": [[String: Any]](),
-            "registryPath": registry.filePath,
-            "error": "projects.json cannot be read back, so nothing was written: refusing to overwrite a table we cannot verify",
-            "next": "repair the file (python3 -m json.tool <path>), then restart the daemon"
-        ], to: .standardError)
+        // 载荷在库里（`pruneUnreadableAtLoadPayload`），因为它从前在这份文件里手拼，
+        // 顺手写了 `total/matched/pruned/remaining/projects` 五个 0——`all` 之所以是空的
+        // 正是因为什么都读不到，那一句等于同时说"看不见这张表"和"表里一条也没有"，而
+        // `matched: 0` 会被面板念成"没有需要清理的测试残留项目"。
+        writeJSON(ProjectRegistry.pruneUnreadableAtLoadPayload(
+            dryRun: dryRun, registryPath: registry.filePath
+        ), to: .standardError)
         exit(1)
     }
 
@@ -1079,13 +1076,12 @@ private func runProjectRemove(projectId: String, options: Options) -> Never {
     let before = registry.all
 
     if registry.loadFailed {
-        writeJSON([
-            "command": "--project-remove", "dryRun": dryRun, "loadFailed": true,
-            "found": false, "removed": false, "wouldRemove": false, "remaining": before.count,
-            "projectId": projectId, "registryPath": registry.filePath,
-            "error": "projects.json cannot be read back, so nothing was written",
-            "next": "repair the file (python3 -m json.tool <path>), then restart the daemon"
-        ], to: .standardError)
+        // 同一把尺子：读不到的表回答不了"这条 id 在不在"。从前这里写
+        // `found:false, wouldRemove:false, remaining:0`，是在替一张打不开的文件宣布缺席，
+        // 而 `--active-project` 对同一个事实早已拒绝给 `found` 这个键。
+        writeJSON(ProjectRegistry.removalUnreadableAtLoadPayload(
+            projectId: projectId, dryRun: dryRun, registryPath: registry.filePath
+        ), to: .standardError)
         exit(1)
     }
 
@@ -1146,7 +1142,7 @@ private func runProjectRemove(projectId: String, options: Options) -> Never {
             // 盘与 daemon 内存此刻已经不一致，重启确实需要——这里不夸大。
             "requiresDaemonRestart": true,
             "error": verified.unreadableReport ?? "the registry cannot be read back after the write",
-            "next": "make the file readable again (python3 -m json.tool \(registry.filePath), or restore it from a copy) and restart the daemon"
+            "next": "make the file readable again (python3 -m json.tool \(RemedyCommand.quote(registry.filePath)), or restore it from a copy) and restart the daemon"
         ], to: .standardError)
         exit(1)
     }
@@ -1289,7 +1285,7 @@ if options.approvalAudit || options.approvalVerify {
             "ledgerPath": ledger,
             "stateRoot": stateRoot.path,
             "error": "the ledger this process read (\(gate.count) records) could not be encoded for output — nothing was audited",
-            "next": "the file itself parses (`python3 -m json.tool \(ledger)`); this is a daemon-side output defect, and no audit record was published"
+            "next": "the file itself parses (`python3 -m json.tool \(RemedyCommand.quote(ledger))`); this is a daemon-side output defect, and no audit record was published"
         ], to: .standardError)
         exit(1)
     }
@@ -1348,7 +1344,7 @@ if options.pruneEvidence || options.evidenceStats {
                     "stateRoot": stateRoot.path,
                     "stateChanged": false,
                     "error": reason,
-                    "next": "make \(registry.filePath) readable again (`python3 -m json.tool \(registry.filePath)`, or restore it from a copy), then re-run this command; while it is unreadable nothing here can say whether project \(projectId) exists, and no archive was opened or deleted"
+                    "next": "make \(registry.filePath) readable again (`python3 -m json.tool \(RemedyCommand.quote(registry.filePath))`, or restore it from a copy), then re-run this command; while it is unreadable nothing here can say whether project \(projectId) exists, and no archive was opened or deleted"
                 ],
                 to: .standardError
             )
@@ -1386,7 +1382,7 @@ if options.pruneEvidence || options.evidenceStats {
                     "registryPath": registry.filePath,
                     "stateRoot": stateRoot.path,
                     "sharedArchiveOfThisRun": stateRoot.evidenceDirectory,
-                    "next": "glasspaned --prune-evidence --older-than \(options.pruneOlderThanDays) --state-dir \"\(stateRoot.path)\" — with no --project, because that command is the surface that owns \(stateRoot.evidenceDirectory); look first with --evidence-stats and count without deleting via --dry-run",
+                    "next": "glasspaned --prune-evidence --older-than \(options.pruneOlderThanDays) --state-dir \(RemedyCommand.quote(stateRoot.path)) — with no --project, because that command is the surface that owns \(stateRoot.evidenceDirectory); look first with --evidence-stats and count without deleting via --dry-run",
                     "stateChanged": false
                 ],
                 to: .standardError

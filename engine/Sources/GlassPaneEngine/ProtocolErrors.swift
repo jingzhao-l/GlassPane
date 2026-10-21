@@ -52,12 +52,23 @@ public struct GPError: Error {
         case .badRequest:
             return "fix the JSON payload and resend the frame"
         case .payloadTooLarge:
+            // The **outbound** arm: `Dispatcher.encode` reaches this when a reply it
+            // built would not fit the frame, and both knobs named here genuinely shrink
+            // that reply. The inbound arm — a caller whose request line is too long —
+            // states its own remedy at `Dispatcher.handle`, because neither of these
+            // shortens a request.
             return "reduce observe maxDepth or narrow the selector scope"
         case .methodNotFound:
             // Derived from the method table itself. This was a hand copy, and
             // `capabilityWireNames` exists precisely because a hand-copied copy of this
             // list drifted before (it named a `probe` that never shipped).
-            return "use a method from the protocol method table (\(EngineMethod.allCases.map({ $0.rawValue }).joined(separator: "/")))"
+            //
+            // It is now the SAME list the `message` names. The remedy used to print
+            // `EngineMethod.allCases` — 13 names, including `hello` and `shutdown` —
+            // under a message that advertised the 11 in `hello.capabilities`, so one
+            // frame told the caller two different things about what it answers, and the
+            // wider set is exactly the copy this derivation was introduced to stop.
+            return "use a method from the protocol method table (\(EngineMethod.capabilityWireNames.joined(separator: "/"))). \(EngineMethod.allCases.count) names are dispatched in total: the \(EngineMethod.capabilityMethods.count) above are the capabilities `hello` advertises, plus the two transport methods \(EngineMethod.allCases.filter { !$0.isCapability }.map { "\($0.rawValue)" }.joined(separator: " and ")), which the daemon answers but does not advertise"
         case .badParams:
             return "fix the parameters according to the method table"
         case .notAttached:

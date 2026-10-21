@@ -17,9 +17,17 @@ public final class Dispatcher {
     public func handle(_ event: FrameCodec.Event) -> Data {
         switch event {
         case .oversize:
+            // The shared table's remedy for this code is written for the **outbound**
+            // direction (`Dispatcher.encode` hits it when a reply would not fit): "reduce
+            // observe maxDepth or narrow the selector scope" shrinks what the engine
+            // sends back. This frame is the opposite — the client sent a line this
+            // daemon will not read — and neither of those knobs shortens a request, so
+            // the advice pointed at a control the caller does not have. The general
+            // entry stays where it is; this arm gets the sentence for its own direction.
             let error = GPError(
                 code: .payloadTooLarge,
-                message: "frame exceeds \(FrameCodec.maxFrameBytes) bytes"
+                message: "frame exceeds \(FrameCodec.maxFrameBytes) bytes",
+                remedy: "this is the request you sent, not a reply the engine tried to make: shorten the frame — pass fewer `steps` in one `act`/`restore` call, send a smaller `params` blob (a `restore` checkpoint body and a long selector are what reach this limit in practice), and split the work over calls. Nothing was executed: the line was discarded before it was parsed, so the operation it names did not happen and re-sending a smaller frame is safe"
             )
             return response(id: nil, error: error)
         case .frame(let data):

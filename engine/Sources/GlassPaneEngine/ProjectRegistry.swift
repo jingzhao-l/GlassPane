@@ -140,7 +140,7 @@ public final class ProjectRegistry {
     /// daemon-side equivalent — move the damaged file aside yourself — needs no
     /// second hidden mode to keep the registrations recoverable.
     public var unreadableRemedy: String {
-        "repair that file before anything writes to it again: print it with `python3 -m json.tool \(filePath)`, fix or restore the damaged entry, then restart the background service so it reloads the registry (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`). To rebuild the registry from scratch instead — which costs every entry still in the unreadable file — move it aside first (`mv \(filePath) \(filePath).corrupt`) and retry."
+        "repair that file before anything writes to it again: print it with `python3 -m json.tool \(RemedyCommand.quote(filePath))`, fix or restore the damaged entry, then restart the background service so it reloads the registry (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`). To rebuild the registry from scratch instead — which costs every entry still in the unreadable file — move it aside first (`mv \(RemedyCommand.quote(filePath)) \(RemedyCommand.quote(filePath + ".corrupt"))`) and retry."
     }
 
     /// Lookup by project ID.
@@ -388,10 +388,38 @@ public final class ProjectRegistry {
             )
         }
         let destination = URL(fileURLWithPath: filePath)
+        let registryDirectory = destination.deletingLastPathComponent().path
         try FileManager.default.createDirectory(
             at: destination.deletingLastPathComponent(),
-            withIntermediateDirectories: true
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
         )
+        // Creating with the right mode is only half of it: `withIntermediateDirectories`
+        // sets attributes on what *this call* creates, so a state root that already
+        // exists at 0755 — one first made by a maintenance subcommand, which exits
+        // before the daemon's `tightenPermissions` sweep — keeps publishing
+        // projects.json's name, size and mtime to every local account while the file
+        // itself is 0600. The invariant is owner-only for the directory too, so it is
+        // enforced here, on the writer's own path, and a failure to tighten is a
+        // refused write rather than a silent 0755.
+        var dirInfo = stat()
+        if stat(registryDirectory, &dirInfo) == 0, dirInfo.st_mode & S_IFMT == S_IFDIR {
+            if dirInfo.st_uid == getuid(), chmod(registryDirectory, mode_t(0o700)) != 0 {
+                throw GPError(
+                    code: .internalError,
+                    message: "the directory holding \(filePath) could not be tightened to 0700: \(String(cString: strerror(errno)))",
+                    remedy: "the registry was NOT written; make the directory owner-only yourself and retry (`chmod 700 \(RemedyCommand.quote(registryDirectory))`), or move the state root with --state-dir onto a volume that honours permissions"
+                )
+            }
+            var after = stat()
+            if stat(registryDirectory, &after) == 0, after.st_mode & 0o077 != 0 {
+                throw GPError(
+                    code: .internalError,
+                    message: "the directory holding \(filePath) is mode \(String(format: "%04o", Int(after.st_mode & 0o777))) after tightening — every local account can still list the registry this daemon acts on",
+                    remedy: "the registry was NOT written; find out what holds that directory (`ls -ld \(RemedyCommand.quote(registryDirectory))`, an ACL or an immutable flag shows there), fix it, then retry"
+                )
+            }
+        }
         // The temp name is unique per write: three processes rewrite this file
         // (the daemon, the one-shot CLI and the Node shell), and a shared
         // `<file>.tmp` lets one writer rename another's half-written buffer
@@ -457,7 +485,7 @@ public final class ProjectRegistry {
             throw GPError(
                 code: .internalError,
                 message: "project registry write to \(filePath) did not reach the disk: \(fault.message) — the write is reported as failed rather than as saved, so no caller may treat these \(projects.count) registration(s) as persisted; the volume holding \(filePath) has to answer fsync",
-                remedy: "check the volume and the directory (`df -k \(destination.deletingLastPathComponent().path)`, `ls -ld \(destination.deletingLastPathComponent().path)`); until the registry is on durable bytes, restart the background service so no process trusts an in-memory table (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`)"
+                remedy: "check the volume and the directory (`df -k \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`, `ls -ld \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`); until the registry is on durable bytes, restart the background service so no process trusts an in-memory table (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`)"
             )
         } catch let clash as ConcurrentWriteRefusal {
             // The refusal is the outcome, so it is reported as itself: the staged
@@ -476,7 +504,7 @@ public final class ProjectRegistry {
             throw GPError(
                 code: .internalError,
                 message: "project registry write to \(filePath) failed (\(error)); the file on disk is unchanged and the change was rolled back in memory\(discardStagedCopy(tmpPath))",
-                remedy: "check that the directory is writable and has free space (`ls -ld \(destination.deletingLastPathComponent().path)`, `df -k \(destination.deletingLastPathComponent().path)`), fix it, then repeat the call — until then the registry in the running daemon and the file disagree"
+                remedy: "check that the directory is writable and has free space (`ls -ld \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`, `df -k \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`), fix it, then repeat the call — until then the registry in the running daemon and the file disagree"
             )
         }
         // The table is on disk and reads back; the last thing that can still be
@@ -493,7 +521,7 @@ public final class ProjectRegistry {
             throw GPError(
                 code: .internalError,
                 message: "the project registry at \(filePath) landed but is not owner-only: \(defect) — every local account can read the project list this daemon acts on, and the write is reported as failed rather than as saved",
-                remedy: "chmod 600 \(filePath) and make its directory owner-only (`ls -ld \(destination.deletingLastPathComponent().path)`); if the volume still ignores chmod (read-only mount, ACL or immutable flag) move the state root with --state-dir to one that honors permissions and restart the background service (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`). Nothing was deleted: the table on disk is the new one, it is simply not private."
+                remedy: "chmod 600 \(RemedyCommand.quote(filePath)) and make its directory owner-only (`ls -ld \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`); if the volume still ignores chmod (read-only mount, ACL or immutable flag) move the state root with --state-dir to one that honors permissions and restart the background service (`launchctl kickstart -k gui/$(id -u)/com.glasspane.daemon`). Nothing was deleted: the table on disk is the new one, it is simply not private."
             )
         }
     }
@@ -510,14 +538,14 @@ public final class ProjectRegistry {
             throw GPError(
                 code: .internalError,
                 message: "the project registry write to \(filePath) did not land: the file cannot be read back (\(error)); the \(count) entry/entries exist only in this process",
-                remedy: "check the directory (`ls -ld \(destination.deletingLastPathComponent().path)`, `df -k \(destination.deletingLastPathComponent().path)`); the write must be retried before any caller relies on this registration"
+                remedy: "check the directory (`ls -ld \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`, `df -k \(RemedyCommand.quote(destination.deletingLastPathComponent().path))`); the write must be retried before any caller relies on this registration"
             )
         }
         guard let decoded = try? JSONDecoder().decode([ProjectEntry].self, from: data) else {
             throw GPError(
                 code: .internalError,
                 message: "the project registry at \(filePath) was written but does not decode (\(data.count) bytes); this process's table and the file are now different representations",
-                remedy: "inspect the file (`python3 -m json.tool \(filePath)`); until it decodes, restart the background service so no process trusts an in-memory-only registry"
+                remedy: "inspect the file (`python3 -m json.tool \(RemedyCommand.quote(filePath))`); until it decodes, restart the background service so no process trusts an in-memory-only registry"
             )
         }
         guard decoded.count == count else {
@@ -561,6 +589,46 @@ extension ProjectRegistry {
             "registryPath": registryPath,
             "error": "the write left projects.json unreadable; the daemon must not keep running on its in-memory copy",
             "next": "restore the file from \(registryPath) backups and restart the daemon",
+        ]
+    }
+
+    /// The refusal `glasspaned --project-prune` owes when the table was **never
+    /// readable by this run** — the arm before any write is attempted.
+    ///
+    /// This used to be assembled inline in `main.swift` and it published
+    /// `total: 0, matched: 0, pruned: 0, remaining: 0, projects: []` next to
+    /// `loadFailed: true`. Those numbers are not measurements: `all` is empty
+    /// precisely because nothing could be read, so the payload said both "I cannot
+    /// see this table" and "this table holds nothing" — and `matched: 0` is the one
+    /// field the panel renders as 「没有需要清理的测试残留项目」. Same family as
+    /// `removalVerdict`'s complaint about a bare `!all.contains(…)`: an unreadable
+    /// disk always answers "no". The rule the read side already follows
+    /// (`--list-projects`, `--active-project`) is that an unreadable registry gets
+    /// **no** answer key, so neither does the write side.
+    public static func pruneUnreadableAtLoadPayload(dryRun: Bool, registryPath: String) -> [String: Any] {
+        [
+            "command": "--project-prune", "dryRun": dryRun, "loadFailed": true,
+            "registryPath": registryPath,
+            "requiresDaemonRestart": false,
+            "error": "projects.json cannot be read, so nothing here can say how many entries it holds or which of them are test residue: no entry was matched, no entry was written, and no count is reported because none was measured",
+            "next": "make it readable again (`python3 -m json.tool \(RemedyCommand.quote(registryPath))`), then re-run the preview with --dry-run; the daemon refuses to overwrite a table it cannot verify",
+        ]
+    }
+
+    /// The refusal `glasspaned --project-remove` owes for the same situation, with
+    /// the same reason: `found`, `wouldRemove`, `removed` and `remaining` all read a
+    /// comparison against a table this process could not see, so `found: false` would
+    /// be this process inventing an absence — which is why `--active-project` already
+    /// refuses to write `found` here (`main.swift`, the `listing()` arm).
+    public static func removalUnreadableAtLoadPayload(
+        projectId: String, dryRun: Bool, registryPath: String
+    ) -> [String: Any] {
+        [
+            "command": "--project-remove", "dryRun": dryRun, "loadFailed": true,
+            "projectId": projectId,
+            "registryPath": registryPath,
+            "error": "projects.json cannot be read, so this command cannot say whether \(projectId) is registered and refuses to write: reporting found:false here would be a claim about a table nobody could open",
+            "next": "make it readable again (`python3 -m json.tool \(RemedyCommand.quote(registryPath))`), then re-run with --dry-run; do not delete the file to get past this refusal — the registrations are only in it",
         ]
     }
 }
