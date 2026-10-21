@@ -1121,3 +1121,64 @@ markdown 表格 394 张（扫 113 份）→ OK；
   `assetIndex()` 里 `browser_download_url ?? url` 那一条，改成经 `findSignatureAsset` 取资产之后才真通过。
   两处都是本轮纪律点名的形状：**桩跑过的不等于交付形状**、**包装脚本的退出码不可信**。
 
+
+## 每日真机核对 2026-10-21（v1.19.0 这一轮）
+
+辅助器：本轮现写的 `gp-ax-walk`（Swift + `ApplicationServices`，按 `AXIdentifier` 读、按
+`kAXPressAction` 点，`--press` 之后对比前后标识集合）。从前那两条走查脚本
+`engine/.p4i4_smoke.py` 在这台机器上仍跑不通（缺 pyobjc，与 10-20 记的同一条），
+所以这一轮的读数全部来自这份不依赖第三方包的辅助器。被测对象是本轮源码构建的
+`glasspane-settings` 与 `glasspaned`（隔离 scratch-path 的那份构建，字节与 main 相同）。
+
+1. **面板权限页（有真 daemon 在服务的状态）**：读到 39 个 `gp-*` 标识，其中
+   `gp-daemon-liveness-answering`＝"后台服务运行中"、`gp-daemon-state-root`＝"状态根未上报"、
+   `gp-permission-overview-all-granted`＝"必备权限已全部授权"，四张席位徽标
+   `gp-perm-{accessibility,input-monitoring,screen-recording}-granted` +
+   `gp-perm-developer-tools-unverifiable`。**没有代测、没有借用**：开发者工具那一枚仍是
+   `unverifiable`（设计如此）。
+2. **本轮修的徽标隔离（真机实测）**：按 `gp-verify-developer-tools` → `err=0`，
+   在途新增的是 `gp-devtools-pending`（不是 `gp-perm-*` 那一族），跑完之后新增
+   `gp-perm-developer-tools-measured-unverifiable` 与 `gp-devtools-unverifiable`，
+   而 daemon 自报那一枚 `gp-perm-developer-tools-unverifiable` **同时在屏上没被覆盖**。
+   按钮在途期间 `AXEnabled=0`（禁用有实测理由）。这条正是 C6 冒烟按
+   `gp-perm-<kind>-<state>` 数席位时会被骗的那个形状，现在两种来源两个标识。
+3. **引导横幅（真机按了一枚已授权那一档）**：按 `gp-guide-accessibility` → `err=0`，
+   新增 `gp-guide-banner`，文字是"系统设置已打开，辅助功能这一项当前是开启的。"
+   ——即"只说量到的那件事"那一支；本轮改的"提交结局决定句式"那一支需要一次**真的**
+   未授权 + `launchctl submit`，见下面未观测项。按完之后 System Settings 被打开，
+   已用 `osascript … quit` 关闭，机器状态未改。
+4. **daemon 一次性命令（注入状态根）**：`glasspaned --state-dir <临时根> --permissions` 退 0
+   并自报四张席位；`--version` 报 1.19.0。本轮新加的拒绝臂实测：
+   `--state-dir /` → **退 64**、stderr 指名 "would be the filesystem root"，且 `/` 的模式位
+   前后一致（对照 `testDaemonRefusesTheFilesystemRootBeforeTouchingAnything`）。
+   同一份二进制对一份真损坏的 `projects.json` 跑 `--project-prune --dry-run` → 退 1，
+   回话里 `matched/remaining/found/wouldRemove/projects` 一个都不再出现。
+5. **发布链端到端（从 GitHub 下来的字节）**：`gh release view v1.19.0` →
+   `isDraft=false`、`targetCommitish=cf888bc2…`（== 本轮收口 HEAD）、4 枚资产
+   （归档 / 归档 `.asc` / `SHA256SUMS` / 其 `.asc`）。`shasum -a 256 -c` 过；
+   `node scripts/make-release-archive.mjs --verify` 退 0；
+   `tar -tzf | grep -cE "(^|/)harness/"` = **0**（数数用 `grep -c`，不用 `grep -q`）。
+   解包 → 在归档内 `npm pack` → 装进干净前缀 → `bin/glasspane-mcp` 是指向
+   `dist/index.js` 的相对符号链接 → stdin 打 `initialize` 回
+   `serverInfo":{"name":"glasspane-mcp","version":"1.19.0"}`。
+   registry 两包 `--prefer-online` 均 `1.19.0`。
+6. **本轮新增的签名身份闸**：`bash tools/release-signing-gate.sh selftest` 本机四臂——
+   ARM1 自家 key 退 0、ARM2 别的 key 签名退 1 且点名两个指纹、ARM3 生产形态（不带
+   `--pinned`，从 `updater/lib/signature.js` 读 pin）退 1、ARM4 载荷被改退 1。
+   另用真 pin 的 key 本地签一份夹具跑**生产形态**那一条 → 退 0，
+   `pinned-fingerprint=0929EA31DF4F7429F63FC53189D88B1D043A1298` 与签名者逐字相同。
+
+### 未观测（真机这一半做不完的那两臂，附补它的确切动作）
+
+- **重启横幅那条修复**：要观测它必须制造"系统里已勾选、运行实例没读到"那一档——即真去
+  改这台机器的 TCC 席位并 `launchctl kickstart -k` 重启被 launchd 托管的 daemon。本轮的
+  面板走查与 CI 依赖那个在跑的 daemon，且改 TCC 是对机器状态的不可逆动作（不是本轮被
+  授权的范围）。补它的确切一条：勾上「输入监控」后不重启 daemon，在权限页按
+  `gp-restart-daemon`，然后用 `gp-ax-walk --press gp-restart-daemon` 读
+  `gp-permission-restart-outcome` 是否**还在屏上**（从前它一点就没了）。
+  折算层已有 `showsRestartBanner(...)` 的三条用例（含"点击抹掉自己读数"那条反例）钉住判据。
+- **引导横幅的"提交成功/起不来"两臂**：需要 daemon 未被授权那一档才会走到
+  `launchctl submit`。上面第 3 条只实测到"已授权 → 只导航"那一支。
+  补它：没有"撤销一次 TCC 授权"的无副作用命令（系统侧不提供，本产品的 remedy 也不许编造
+  一条），所以只能在一台尚未勾选权限的机器上按 `gp-guide-accessibility`，再读
+  `gp-guide-banner` 那句是否随 `launchctl submit` 的退出码在"已提交 / 起不来"之间变化。
