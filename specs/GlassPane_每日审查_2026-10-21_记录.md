@@ -80,3 +80,19 @@ minor 的判据对着 1.6.2 那四项实测：CLI 参数的接受条件变了（
 真正在方法表上作镜像的是参数词汇三处对齐（action 的 7 个动词、assert 的 5 个 property、
 selector 的 `role/title` + minLength 1 + 512 上限），Swift `EvidenceModels` ↔
 `kernel/schemas/evidence-pack.schema.json` ↔ `tools.ts` 逐字一致，本轮复核成立。
+
+## 6. 反向破坏的实测清单（哪一处被破坏、哪条具名用例变红）
+
+本轮在隔离处（先 `git status` 确认树上没有别人的活）做了六次"撤销该修复"的破坏，全部恢复：
+
+| 破坏的那一处 | 变红的具名用例 | 结果 |
+|---|---|---|
+| `StateRootArgument.classify` 里的 dedicated-root guard 删除 | `testStateDirRefusesRootsThisProductDoesNotOwn` + `testDaemonRefusesTheFilesystemRootBeforeTouchingAnything` | 2 条红、3 个断言红 |
+| `pruneUnreadableAtLoadPayload` 里加回 `matched: 0, remaining: 0, projects: []` | `testPruneRefusalCarriesNoCountsItCouldNotMeasure`、`testRealDaemonRefusesToWriteAnUnreadableRegistryWithoutCounts`、`testPanelNamesTheUnreadableRegistryRatherThanAMissingField` | 3 条红 |
+| `ProjectRegistry` 的 remedy 换回裸插值路径 | `testEveryRemedyCommandPresentsTheHostilePathAsData` + 源码扫描那条 | 红 |
+| `ProbeSocketServer.bindListener` 的 bind 前 guard 删除 | `testProbeListenerRefusesASymlinkedNameBeforeBindingIt` | 红（且目标被 bind 成 socket 的那条断言也红） |
+| `SettingsModel.showsRestartBanner` 退回"只看待重启权限那一档" | `DailyRound20261021PanelTests` 整族 6 个断言红 | 红——正是被"点击抹掉自己读数"那个缺陷复原的样子 |
+| `http-gateway.ts` 的成功臂不带归属 | **第一次 570/570 全绿**——没有一条用例看得见它 | 于是补了 `both doorways answer the provenance question with the same sentence`，再破坏一次 → 该条红（54/1），恢复后 571/571 |
+
+最后一行是本轮自己发现的一处"修复没有闸"，按 §2 的口径它也算一条缺陷（半交付的形状：
+A 面改了而 B 面 regress 无人看见），已在本轮补上并随 `7e3ef7c8` 进主干。
