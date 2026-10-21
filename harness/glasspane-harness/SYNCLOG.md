@@ -2,6 +2,86 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-22（第十五次会话）· 0.10.0：provider 契约有了产品侧消费者，发布 lane 学会等 registry；场景① 的通道第二次"看着有、其实跑不到"
+
+### 开工与隔离
+
+- 起点 trunk `1c2a495b`（1.19.0 那条线，面 A 已并 `8e321d4c`）。本轮在隔离工作树
+  `/Volumes/Eng-Dev/.worktrees/gp-sc5-rebased`（分支 `gp-sc5-rebased`）改动与提交。
+- 事故照实记：上一轮的 `/Volumes/Eng-Dev/.worktrees/gp-019` 被并行会话删除，那四笔里有两笔
+  （fork 半边 `b5bf9dc2`、registry 就绪 `f0f0ce6b`）靠 cherry-pick 带过 rebase，另两笔的去向**不是**我
+  能凭提交信息断的——面 A 的 ⑤ 半边（`mcp-shell/src/providers.ts` + `tools.ts` 消费者 + 用例）
+  由那条线自己并入 trunk（`8e321d4c`，其后 `dce12b81` 又修了归属行的版本与 remedy），本轮是**读
+  trunk 文件字节**（`tools.ts:23-24/1499/1582`、`mcp-shell/test/providers.test.mjs` 存在）才敢写这句。
+- rebase 的代价与纪律：另一条会话的插件文件当时未提交、压在树上，`git rebase` 直接拒。按既有做法
+  走：`git diff > /var/tmp/plugin-wip.patch` 并记 sha `da531d66…` → `git restore --worktree` →
+  rebase + 推 → `git apply` 回 → **sha 两次相等**。禁 `git checkout`/`git stash` 这条在这里不是洁癖，
+  是那一树的活是别人的。
+- 并行线上还有一次我自己差点犯的事故：`git push --force-with-lease=gp-sc5-rebased:<我发明的长 SHA>`
+  报 "stale info"。正确做法是先 `git ls-remote` 读真值再写显式 SHA，不猜。
+
+### 本批落地的内容
+
+1. **场景⑤ fork 半边**（`b5bf9dc2`）：`packages/opencode/src/tool/glasspane/providers.ts` 把引擎的
+   判定生产者按内核 provider 契约注册，`gp_diagnose` 的回包带归属（注册表说它是什么方法、版本、
+   声明的前置条件），20 条用例。面 A 的对应半边由并行线并入（见上），Python 半边早在 `e33d1a35`。
+2. **fork CI 的定点名单**（`7b87b70a`）：两个新测试文件加进 `.github/workflows/ci.yml` 的
+   `bun test` 名单——住在没人跑的目录里的测试不是覆盖。golden 同批折叠，按 CI 原命令在本机复跑
+   **169 pass / 0 fail / 937 expect()**。
+3. **发布 lane 学会等 registry**（`f0f0ce6b`）：`packages/opencode/script/registry-readiness.ts` 是可注入
+   时钟的纯等待（`poll 20s / budget 20min`，deadline 在"看一眼"与"睡"之间重判，最后一次 sleep 被
+   剩余预算裁剪），`verify-published.ts` 在 `ownPrefix` 分支里先等 registry 读得到这个版本再装；
+   `--prefix` 那条路径**不动**，以保住 `tools/verify-published-selftest.sh` 的三判决形状。探针分类沿用
+   本文件既有的 `npmAnswer`（`answered`/`absent`/`unaskable`），预算耗尽退 2 并写 NOT OBSERVED——
+   "装不上"与"没观察到"是两句不同的话，0.9.1 那次把它们混成一句就是本轮要修的缺陷。8 条用例，
+   其中一条**第一版是假绿**（断 `slept` 时还没 await 那个 promise），改先 await 后成立；四发变异
+   各点名一条用例变红，文件按 sha256 `b8e63b4a…` 核回。
+4. **取号 0.10.0**（`8e4dd6a1`，minor：provider 契约第一次有了产品侧消费者＝新能力，不是修补）。
+   这步我先踩了一个大坑再纠正：`scripts/set-version.mjs` 是**父仓**的版本统一器，拿它取 harness 号
+   会改 13 个位点（含 `EngineCore.swift`、`install.sh`、installer、mcp-shell），几乎抹掉父仓
+   1.17.0/1.19.0 那条线。按显式文件清单 `git restore --worktree --` 回滚并读版本源核过之后，
+   harness 取号只改 `product.json` + `packages/opencode/package.json`，另加六处 `v0.9.1` curl 钉
+   （含 `scripts/install.sh` 表头那句——`product-surface` 的 `[installer-curl-pinned]` 并不读它，
+   改它是为了不留一句错话给用户，不是为了让闸变绿）。CHANGELOG 开 `## [0.10.0] - 2026-10-21` 一格；
+   `check-doc-links` 抓到 `harness/README.md` 的血缘计数停在旧值（3,313 → 复记 3,315 文件）并带日期入账。
+
+### 闸
+
+本批收口时在这棵树上重跑一遍，读数照实写：`check-kernel-corpus`（mcp-shell 捆 `iterate-kernel@0.1.9`，与
+pin 同号）、`check-doc-links`、`check-version`（父仓线 1.19.0，与 harness 号无关但必须一致）、
+`fork-diff --check`（"divergence matches the recorded surface"——SYNCLOG 这格移动它**不**报红，金样未动）、
+`tool-surface --check`、`surface-semantics --check`、`brand-surface --check`（lineage 9,607 / 3,315 文件，
+与基线同号）、`product-surface`（glasspane-harness@0.10.0：manifest、build、publish、installers、pipelines
+一致）、`hook-liveness --check`（21 个 hook 对 `anomalyco/opencode@v1.18.32` 无漂移）——**九把全 exit 0**。
+`rulers-selftest` 在脏树上 exit 2（"Commit or move the batch first"），它拒绝把别人正改的字节恢复成金样，
+这条拒测本身记在这里；`release-artifact --check` 与 `check-workflows`/`assert-test-count` 在提交后单跑，
+结果写在本格末尾而不是取号那批的话里。（`assert-test-count swift` 依赖 Swift 构建，本机这轮没跑，CI 跑。）
+
+### 发布三格
+
+- 搬运：`git subtree split --prefix=harness/glasspane-harness` → tip `758f39658afa49522cd376c38988c5dd8ea9543d`，
+  `split^{tree}` == `HEAD:harness/glasspane-harness` == `82bf69a1…`（**TREE_EQUALITY=OK**，脚本在不等时中止），
+  快进 `e71d5615..758f3965` 推 glasspane-harness main，核可达后才打 `v0.10.0`（0.8.0 那次顺序颠倒拿过 403）。
+- Release：run `39692611677` success，6 个资产（两平台 zip + 两 .asc + SHA256SUMS + 其 .asc），非 draft。
+- npm：`workflow_dispatch --ref v0.10.0` run `39693559616` success——arm64 2m33s、x64 8m8s、wrapper 8m12s、
+  install 1m48s。三包 registry 读到 0.10.0，且 **CI 打印的 publish notice shasum 与 registry `dist.shasum`
+  逐字相等**：wrapper `42e3e7eb6257aa09cfea8d78f9fa47df28ef07c6`、arm64 `b07c902ae759c9148c4d5cf845bc53625a144a24`、
+  x64 `f4e8e7de4cb17858bb79567aaf46d2adcb36a6ef`。
+
+### 没验到的与记入下一版的账
+
+- 就绪等待的**第一次真机穿过**没等到可观察的滞后：那次安装前 registry 已经答得出来（日志里
+  `waiting on the registry:` 一行没出现），所以"需要等的时候真的等"这句话的证据仍是 8 条单测 +
+  四发变异，而不是真机滞后样本。照实写，不拿"这版装上了"当它证明了等待。
+- 就绪成功那一路**没打印自己的具名 check 行**：`the registry can read this published version` 只在
+  不可观察时出现，绿光里只留 `ok npm install of the published package`。这不是发布物缺陷（判决
+  仍由 install 给出），但它是"观察了却没说自己观察"，属下一版。本轮不动代码——动了就得再取号：
+  `release-artifact` 的 `split-main` 两个方向都严格，`artifact` 只容忍 SYNCLOG/CHANGELOG 那一格滞后，
+  主干上留一份没发布的代码正是它要红的东西。
+- 面 A 的 `dimension` 槽仍空（场景② 在产品侧的最后一处不对称）；① 的宿主半边已在另一仓落地
+  （iterate-skill main `b9395e61`：发布点改 await，上一批那份"绑了但生产跑不到"的通道现在真的发得出去）。
+  两句话放在这里是因为它们属于综述 §8.5 的同一张图，与本次发布物无关。
+
 ## 2026-10-20（第十四次会话）· 0.9.1：内核只剩一份、壳吃 npm、写侧翻转；发布三格齐，外加一条我自己撞出来的尺子缺陷
 
 ### 开工与隔离
