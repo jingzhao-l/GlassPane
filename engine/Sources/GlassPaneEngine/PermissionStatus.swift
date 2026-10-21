@@ -393,6 +393,37 @@ public enum PermissionReprobe {
         return !path.unicodeScalars.contains { $0 == "\n" || $0 == "\r" || $0 == "\0" }
     }
 
+    /// 要被 `launchctl submit` 起来的那个可执行文件，除上面那条形状规则之外还必须是
+    /// **本机用户自己拿得动的普通文件**。
+    ///
+    /// 为什么这一道必须存在：`daemonBinaryPath` 不是面板测出来的，它是 daemon 在
+    /// `hello` 帧里自报的（`DaemonPermissionSnapshot` 原样解析），而 engine.sock 的
+    /// 口径是"同用户即全权、无 peer 鉴权"。少这一句，任何能在候选 socket 名字上回一帧
+    /// 的进程，就能把面板——用户那个已登录的 Aqua 会话——变成"以该会话身份启动任意路径"
+    /// 的执行器。形状规则拦不住 `/tmp/x/payload`，它绝对、无控制字符、看着完全合法。
+    ///
+    /// 三条判据各自堵一种放法：普通文件（不是符号链接、不是目录、不是 fifo），本进程
+    /// 同 uid 拥有（别人放下的东西不算），且所在目录不对全体写开放（共享暂存目录是这种
+    /// 投放的默认落点）。合法的 `~/Applications/GlassPane Daemon.app/…` 与
+    /// `.build/debug/glasspaned` 三条全过，因为它们的属主就是当前用户。
+    public static func isSubmittableExecutable(_ path: String) -> Bool {
+        guard isSubmittablePath(path) else { return false }
+        var info = stat()
+        guard lstat(path, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { return false }
+        guard info.st_uid == getuid() else { return false }
+        let parent = (path as NSString).deletingLastPathComponent
+        var parentInfo = stat()
+        // `stat`, not `lstat`, and this asymmetry is deliberate: `/tmp` is a symlink to a
+        // 1777 directory, so measuring the *link* (mode 0755, `& 0o022 == 0`) waves through
+        // exactly the shared drop location this rule exists to refuse. The leaf keeps
+        // `lstat` — there, "is this a symlink" is the question. Caught by the round-2
+        // review of this very guard: the first version used `lstat` for both and the test
+        // for `/tmp` went red.
+        guard stat(parent, &parentInfo) == 0 else { return false }
+        if parentInfo.st_mode & 0o022 != 0, parentInfo.st_uid != getuid() { return false }
+        return true
+    }
+
     /// 调试能力探测的重探参数（P6 §7 的 `--check-developer-tools`）。
     public static let developerToolsArguments = ["--check-developer-tools"]
 

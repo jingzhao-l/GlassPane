@@ -223,7 +223,7 @@ public final class ApprovalGate {
         // 读不出来就拒绝写，而不是从"没有"重新记起。
         if loadFailed, let path {
             reportPersistenceFailure(
-                "approval ledger \(path) exists but could not be decoded, so this process holds an empty chain — the append was REFUSED and nothing was written to \(path), because publishing an empty chain over the file would delete every approval record still on disk and leave `--approval-verify` certifying the single record that replaced them. Inspect the file (`python3 -m json.tool \(path)`); the chain is recoverable by hand from the bytes that are there, so do not delete or truncate it. Repair the file, then restart the process that appends: writes stay refused until it re-reads."
+                "approval ledger \(path) exists but could not be decoded, so this process holds an empty chain — the append was REFUSED and nothing was written to \(path), because publishing an empty chain over the file would delete every approval record still on disk and leave `--approval-verify` certifying the single record that replaced them. Inspect the file (`python3 -m json.tool \(RemedyCommand.quote(path))`); the chain is recoverable by hand from the bytes that are there, so do not delete or truncate it. Repair the file, then restart the process that appends: writes stay refused until it re-reads."
             )
             return nil
         }
@@ -377,7 +377,7 @@ public final class ApprovalGate {
             // honest outcome is a failed persist the reader can see.
             if let defect = isolationCheck(path) {
                 reportPersistenceFailure(
-                    "approval ledger \(path) is not owner-only after the rename: \(defect) — permission judgment, not a full disk: the chain is on disk and readable by every local account, because the published file kept the mode of the one it replaced (chmod 600 \(path), or move the state root with --state-dir to a volume that honors permissions)"
+                    "approval ledger \(path) is not owner-only after the rename: \(defect) — permission judgment, not a full disk: the chain is on disk and readable by every local account, because the published file kept the mode of the one it replaced (chmod 600 \(RemedyCommand.quote(path)), or move the state root with --state-dir to a volume that honors permissions)"
                 )
             } else {
                 persistFailed = nil
@@ -391,7 +391,7 @@ public final class ApprovalGate {
                 try? FileManager.default.removeItem(atPath: tmpPath)
             }
             reportPersistenceFailure(
-                "approval ledger \(path) was not persisted: \(fault.message) — the write is reported as failed, not as saved: the \(records.count) record(s) are in this process only and `--approval-verify` from another process cannot be promised to see them. The state root has to sit on a volume that answers fsync (`ls -ld \(path)`, `df -k \(path)`); nothing was deleted."
+                "approval ledger \(path) was not persisted: \(fault.message) — the write is reported as failed, not as saved: the \(records.count) record(s) are in this process only and `--approval-verify` from another process cannot be promised to see them. The state root has to sit on a volume that answers fsync (`ls -ld \(RemedyCommand.quote(path))`, `df -k \(RemedyCommand.quote(path))`); nothing was deleted."
             )
         } catch {
             let primary = error

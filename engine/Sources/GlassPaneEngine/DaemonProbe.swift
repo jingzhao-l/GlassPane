@@ -221,7 +221,7 @@ public final class DaemonProbe: @unchecked Sendable {
             kind = "unreadable"
         }
         return "\(path) is \(kind), not a socket — the daemon refused to delete it. "
-            + "Inspect it with `ls -l \(path)`; move it aside yourself only if it is yours, "
+            + "Inspect it with `ls -l \(RemedyCommand.quote(path))`; move it aside yourself only if it is yours, "
             + "or point the daemon at another name with `--socket-path <path>` (or `--state-dir <root>`)."
     }
 

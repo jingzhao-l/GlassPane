@@ -370,6 +370,76 @@ public enum StateRootArgument: Equatable {
         guard raw.hasPrefix("/") else {
             return .refused("must be an absolute path, got \(raw)")
         }
+        // The shape rules above are all this argument had, and the sweep the daemon
+        // runs 20 lines after resolving it (`tightenPermissions`) chmods **whatever
+        // root it names** to 0700 before any later usability refusal. So
+        // `--state-dir ~` used to lock the user's home directory — files, Desktop,
+        // everything a group or other bit reached — and still bind, and `--state-dir /`
+        // reached `chmod("/", 0700)`. A root this product does not own is not a state
+        // root, so it is refused here, at the argument, where nothing has been touched
+        // yet. The precedent for the rule is this repo's own `isSubmittablePath`
+        // (`PermissionStatus.swift`), which refuses `/` for the same reason.
+        if let defect = Self.notADedicatedRoot(raw) {
+            return .refused(defect)
+        }
         return .usable(raw)
+    }
+
+    /// Why `raw` cannot serve as *this* product's state root even though it is a
+    /// well-formed absolute path: the filesystem root, or the account's home
+    /// directory itself. `nil` means the path is dedicated enough to tighten.
+    ///
+    /// Trailing slashes and `~`-normalised spellings are folded onto the same
+    /// comparison because that is what `StateRoot(path:)` does with them: a refusal
+    /// that only catches one spelling is a refusal the next typo walks past.
+    public static func notADedicatedRoot(_ raw: String) -> String? {
+        var normalized = raw
+        while normalized.count > 1, normalized.hasSuffix("/") {
+            normalized.removeLast()
+        }
+        if normalized == "/" {
+            return "would be the filesystem root — the daemon tightens the root it is given to 0700, and it has no business changing the permissions of `/`. Name a directory this install owns, e.g. `--state-dir \(RemedyCommand.quote(NSHomeDirectory() + "/.glasspane"))`"
+        }
+        // Deliberately NOT `ProcessInfo.environment["HOME"]`: `mcp-shell/test/path-consistency.test.mjs`
+        // pins that the daemon's home comes from the passwd entry and that a `HOME`
+        // override moves nothing, and the shell mirrors that rule. Consulting `$HOME` here
+        // would make the refusal depend on the environment while the root the daemon
+        // actually defaults to does not — one typo, two answers about where state lives.
+        for home in Array(Set([
+            NSHomeDirectory(),
+            FileManager.default.homeDirectoryForCurrentUser.path,
+        ])) {
+            var root = home
+            while root.count > 1, root.hasSuffix("/") { root.removeLast() }
+            if normalized == root {
+                return "would be the home directory itself — the daemon tightens the root it is given to 0700 and writes its socket, registry and archive under it, so this would re-permission everything in \(home) and scatter engine files beside the user's own. Name a directory for the engine's state, e.g. `--state-dir \(RemedyCommand.quote(home + "/.glasspane"))`"
+            }
+        }
+        return nil
+    }
+}
+
+// MARK: - Remedy command text
+
+/// POSIX quoting for a value this product puts inside a backticked command in an
+/// error's `remedy:` / `next:` line.
+///
+/// WHY THIS EXISTS. A remedy is not prose here: `specs` and the MCP contract both
+/// define it as the command an agent runs. The daemon's own paths travel into those
+/// lines — `chmod 600 <projects.json>`, `python3 -m json.tool <approvals.json>`,
+/// `mv <file> <file>.corrupt` — and the path is only partly this process's choice:
+/// `--state-dir` is a command-line value, and the state root is published in `hello`
+/// for anything that can reach the socket. Before this helper existed, a value
+/// containing `;`, `$(` or a quote turned the *repair instruction* into whatever the
+/// shell reading it would execute. Escaping it here is what makes the same string
+/// both a usable command and inert data.
+public enum RemedyCommand {
+
+    /// `value` as one single-quoted shell word: `'` becomes `'\''`, and a value with
+    /// no metacharacters still gets quotes so a space cannot split one argument into
+    /// two. Empty input becomes `''` — a quoted nothing is still a nothing the shell
+    /// can see, which is not the same as an argument that vanished.
+    public static func quote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

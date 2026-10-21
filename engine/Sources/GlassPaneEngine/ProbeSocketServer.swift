@@ -192,6 +192,18 @@ public final class ProbeSocketServer {
     /// through `abandonListen` (A-17). EADDRINUSE is reported as
     /// `.nameOccupied`, the fact `rebindAfterOwnershipCheck` decides on.
     private func bindListener() throws -> Int32 {
+        // `bind()` on an AF_UNIX path that is a symlink creates the listener at the
+        // TARGET (measured on this host: the target came back S_IFSOCK). engine.sock
+        // has held this guard before every bind since `bindAndListen` got it; this
+        // listener did not, and its two existing name checks both run only on an
+        // EADDRINUSE path — so a planted `probe.sock -> /tmp/somebody/mine` BINDS
+        // SUCCESSFULLY, the 0600 chmod below acts through the link onto someone
+        // else's inode, and `stop()` unlinks the link and not the socket. The
+        // injection surface that becomes attribution evidence would then live outside
+        // the state root every ancestor check measured.
+        guard DaemonProbe.nameIsClearableSocketName(socketPath) else {
+            throw ProbeServerError.nameOccupied(DaemonProbe.nonSocketNameDescription(socketPath))
+        }
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw ProbeServerError.system(errno, "socket()") }
         stateLock.lock()
