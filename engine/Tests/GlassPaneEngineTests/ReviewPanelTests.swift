@@ -135,7 +135,7 @@ final class ReviewPanelTests: XCTestCase {
         )
         model.developerToolsProbePid = 4242
         let before = badge(for: model)
-        XCTAssertEqual(before.text, "可用（实测）")
+        XCTAssertEqual(before.text, "可用（后台服务实测）")
         XCTAssertEqual(before.status, .granted)
 
         model.recordProbeFailure(.timedOut)
@@ -350,23 +350,35 @@ final class ReviewPanelTests: XCTestCase {
 
     /// 反向变异：**图标与标识跟着 `entry.status`、文字跟着实测状态**（发现的那处
     /// 417 与 519-522 分家），人读到「可用（实测）」而自动化读到 `unverifiable`。
+    ///
+    /// 2026-10-21 读了这一侧：实测那一枚的**标识**不能再落进
+    /// `gp-perm-<kind>-<state>` 那一族——C6 冒烟按那个形状数的是 daemon 自报的席位，
+    /// 而这里说的是 `glasspaned --check-developer-tools` 那一个一次性进程量到的东西。
+    /// 文字、形状、标识三者同源这一条一个字没松，只是同的是**这一次实测**那个源，
+    /// 而 daemon 自报那一枚由视图并排另外画一枚（见 `gp-perm-developer-tools-unverifiable`）。
     func testBadgeTextIconAndIdentifierComeFromOneMeasurement() {
         let measured = PermissionBadge.make(kind: .developerTools, reported: .unverifiable, measured: .granted)
-        XCTAssertEqual(measured.text, "可用（实测）")
+        XCTAssertEqual(measured.text, "可用（后台服务实测）")
         XCTAssertEqual(measured.icon, PermissionGuide.statusIcon(for: .granted), "图标得和文字说的是同一次测量")
         XCTAssertEqual(measured.identifier,
-                       PermissionGuide.statusIdentifier(kind: .developerTools, status: .granted),
-                       "自动化读到的状态必须是肉眼看到的那一个")
+                       PermissionBadge.measuredIdentifier(kind: .developerTools, status: .granted),
+                       "自动化读到的状态必须是肉眼看到的那一次测量，且要说得出它是哪一种测量")
+        XCTAssertNotEqual(measured.identifier,
+                          PermissionGuide.statusIdentifier(kind: .developerTools, status: .granted),
+                          "一过性实测的结论不许借 daemon 自报席位那一族标识")
 
         let reportedOnly = PermissionBadge.make(kind: .accessibility, reported: .granted, measured: nil)
         XCTAssertEqual(reportedOnly.text, "已授权")
         XCTAssertFalse(reportedOnly.text.contains("实测"), "没有实测结论就不许声称实测：\(reportedOnly.text)")
         XCTAssertEqual(reportedOnly.icon, PermissionGuide.statusIcon(for: .granted))
+        XCTAssertEqual(reportedOnly.identifier,
+                       PermissionGuide.statusIdentifier(kind: .accessibility, status: .granted),
+                       "自报席位那一族一个标识都不许动")
 
         let denied = PermissionBadge.make(kind: .developerTools, reported: .unverifiable, measured: .denied)
-        XCTAssertEqual(denied.text, "被拒绝（实测）")
+        XCTAssertEqual(denied.text, "被拒绝（后台服务实测）")
         XCTAssertEqual(denied.identifier,
-                       PermissionGuide.statusIdentifier(kind: .developerTools, status: .denied))
+                       PermissionBadge.measuredIdentifier(kind: .developerTools, status: .denied))
 
         let unknown = PermissionBadge.make(kind: .screenRecording, reported: .unverifiable, measured: nil)
         XCTAssertEqual(unknown.text, "未验证")
