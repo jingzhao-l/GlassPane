@@ -2,6 +2,103 @@
 
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
+
+## [1.19.0] — 2026-10-21
+
+**版本判断：minor。** 对着本仓自己那四项 patch 判据（判据原文在 1.6.2 条目里）逐条实测，本版动了其中三项：
+
+1. **CLI 参数的接受条件**：`--state-dir` 从前只校验形状（绝对、不是另一个旗标），现在多一条归属规则——
+   `/` 与账号主目录本身一律拒（退 64），因为 daemon 紧接着就在 `tightenPermissions` 里把**它拿到的那个根**
+   chmod 成 0700，而那时还没到 bind 阶段的可用性拒绝。
+2. **输出字段集合**：`glasspaned --project-prune` / `--project-remove` 在"注册表读不开"那一档不再写
+   `total/matched/pruned/remaining/projects` 与 `found/wouldRemove/removed/remaining`——那些 0 是在替一张
+   打不开的文件宣布内容；`specs/GlassPane_Audit_2026-09-22` 的 A-1 对同一个事实早已写下"不给 `found` 这个键"。
+3. **退出码集合**：LLDB 桥新增一档 3（崩溃现场已交付），并把"信号停止"从被误报成一次成功采集改为如实记 crash。
+
+其余是同一批修复里的文案与 remedy 形状变更，不新增任何对外 `gp_*` 工具、不改发布平台矩阵、不改产品定位。
+
+### 上一轮没收口的活
+
+`gp-sc5-fork`（tip `f32ef8dd`，三笔）在 main 之外停了两天。按"上一轮的遗留是本轮的待办"处置，判据只用文件字节：
+
+| 那三笔 | 处置 | 判据 |
+|---|---|---|
+| `9c1ede8f` 面 A：shell 侧 provider 注册 + `gp_diagnose` 归属 | **已并 main**（`8e321d4c`） | `git show 45478350:mcp-shell/src/providers.ts` 与分支那份 `diff -q` 无差异，`providers.test.mjs` 同样逐字节相同；金样不由手改带进来，改用 `node harness/tools/tool-surface.mjs --record` 重记（单独一笔 `45478350`） |
+| `6bcbb18a` 面 B：fork 侧判定生产者注册 | **移交 harness 线**，分支改名 `gp-harness-sc5-fork-20261020` 后推送 | 并它必然让主干 CI 的 `harness/tools/release-artifact.mjs --check` 变红：该尺比较**已发布 tag** 与主干里的 `harness/glasspane-harness` 子树是否同一份字节，只容忍收口台账。要同时满足"内容进主干"与"尺子绿"只有打一个新 harness tag 一条路，而本轮被明令不改 harness 内容与版本。已把这一笔写进那条线自己的发现清单（`tools/prompts/daily-glasspane-harness.md` §2，与它从前点名 `gp-harness-orphan-20261010` 同一条机制） |
+| `f32ef8dd` `registry-readiness.ts` + `verify-published.ts` | 同上移交 | 同上，全在 `harness/glasspane-harness/**` |
+
+旧远端分支 `origin/gp-sc5-fork` 已删（删前证明：新分支 tip == `f32ef8dd`，SHA 逐字相同，内容一份不丢），
+worktree `/Volumes/Eng-Dev/.worktrees/gp-019` 已 `worktree remove` + `prune`。
+
+### 本轮审出并修完的缺陷（发现 27 条，修复 27 条）
+
+审查面六条泳道：Swift 引擎核心、面板与 probe、mcp-shell、installer/updater/scripts/workflows、信任边界安全、
+bridge。每条回代码复核后才动手；复核后不成立的一条写在下面「复核判为不是缺陷」那一节。
+
+**引擎与协议层**
+
+| # | 位置 | 失效模式 | 修复与证据 |
+|---|---|---|---|
+| 1 | `glasspaned/main.swift` 的 `--project-prune` 读不开分支 | 同时说"看不见这张表"和"表里 0 条"，而 `matched: 0` 正是面板念成「没有需要清理的测试残留项目」的那个键 | 载荷进库（`ProjectRegistry.pruneUnreadableAtLoadPayload`），一条测量结果都不写；`ConsoleModel.prunePreviewOutcome` 改为先判 `loadFailed` 再要求 `matched`，否则一个如实的拒绝会被念成"对方失职" |
+| 2 | 同文件 `--project-remove` 读不开分支 | `found: false` 是本进程替一张打不开的文件宣布的缺席 | `removalUnreadableAtLoadPayload`：不给 `found/wouldRemove/removed/remaining` |
+| 3 | `Dispatcher.handle` 的 `.oversize` | 入站帧超长却回"减少 observe maxDepth 或收窄 selector"——那两个旋钮缩不了调用方发来的那一行 | 入站那一臂自带 remedy，并明说"什么都没执行，重发更小的一帧是安全的" |
+| 4 | `GP_E_METHOD_NOT_FOUND` | 同一帧里 `message` 报 11 个能力名、`remedy` 报 13 个（含 `hello`/`shutdown`），两张表自相矛盾 | remedy 改用它自己的派生源，并说出两张表的关系；`EngineMethod.isCapability` 成为唯一谓词 |
+| 5 | `--state-dir` 只有形状校验 | daemon 的清扫 chmod 它拿到的那个根：`--state-dir ~` 会把用户主目录锁成 0700 并照常 bind；`--state-dir /` 走到 `chmod("/",0700)` | `StateRootArgument.notADedicatedRoot` 在参数层拒这两种，且**故意不看 `$HOME`**（`mcp-shell/test/path-consistency.test.mjs` 钉住 daemon 的家来自 passwd 表） |
+| 6 | `ProjectRegistry.save` 建目录不带属性 | `withIntermediateDirectories` 只给这次新建的层设 0700，一个早先被维护子命令建成 0755 的状态根会一直把 projects.json 的名字/大小/mtime 摊给全体本地账号 | 建目录带 0700 属性，写完复核父目录模式；收紧不掉的是**一次被拒绝的写**，不是绿 |
+| 7 | `ProbeSocketServer.bindListener` 无 bind 前护栏 | `probe.sock` 被放成符号链接时 `bind()` 落到目标：注入口建在状态根之外，`chmod(0600)` 打在别人的 inode 上，`stop()` 删的是链接。engine.sock 每次 bind 前都问这一句，这个监听者只在 EADDRINUSE 之后问 | 同一个 `DaemonProbe.nameIsClearableSocketName` 提到 bind 之前；用例真放一个链接并断言目标没变成 socket |
+
+**信任边界（安全泳道）**
+
+| # | 位置 | 攻击/失效模型 | 修复 |
+|---|---|---|---|
+| 8 | `ProjectRegistry`/`ApprovalGate`/`DaemonProbe`/`main.swift` 共 11 处 remedy | remedy 按本仓定义是"agent 会执行的命令"，而路径是 `--state-dir` 的值或 socket 回话里的读数——`;`、`$()`、反引号能把它变成另一条命令 | 新增 `RemedyCommand.quote`（POSIX 单引号），11 处全部走它；另加一条扫源码的闸，把"命令位上的插值路径"判成缺陷。`main.swift` 里那处双引号形式也一并改掉：双引号里 `$()` 照样展开 |
+| 9 | 面板把 socket 自报的 `binaryPath` 交给 `launchctl submit` | 能在候选 socket 名上回一帧的进程，可让面板在用户那个 Aqua 会话里起任意路径 | `PermissionReprobe.isSubmittableExecutable`：普通文件 + 本 uid 拥有 + 父目录不对全体写开放 |
+| 10 | `installer/cli.js` 的 survivor 文案 | 产品面里唯一教人提权的一条命令（`sudo kill -9`） | 先 `/bin/kill -9`，够不到就 plainly 交回人手（本仓只把物理性人工步骤留给用户） |
+
+**面板（UX 诚实性）**
+
+| # | 位置 | 失效模式 | 修复 |
+|---|---|---|---|
+| 11 | `SettingsPanelView` 重启横幅 + `restartDaemon()` | 点击即 `reprobed = nil` → `kindsNeedingRestart` 变空 → 整个横幅（按钮与 `gp-permission-restart-outcome` 一起）消失，实测的重启结论**永远显示不出来** | 横幅可见性从 `kindsNeedingRestart` 解耦成 `showsRestartBanner(...)`，同时保留"重启后不许信旧重探"的原意 |
+| 12 | 权限引导横幅 | `launchctl submit` 走 `try? process.run()`，不读退出码也不读输出，横幅却宣称"已请求授权" | 走已单测的 `ConsoleModel.runDaemonCLI` 通道，横幅句子由 `guideText(...)` 依实测档位生成（提交成功 / 起不来 / 因拿不到身份而未尝试） |
+| 13 | `ProjectsTabView` 在访达打开证据目录 | 该路径已被本页量成不存在时按钮照样可点，`selectFile` 空转、不给理由 | 与证据页同一档位：禁用并给理由 |
+| 14 | 顶部总览与侧栏角标 | 收到第一帧 hello 之前每项都是 `.unverifiable`，却念「还有 N 项必备权限没授权」 | 改成「未上报」，并且不数数 |
+| 15 | 开发者工具卡的徽标 | 该卡按设计恒"未验证"，一次性实测却复用 daemon 席位那族标识（`gp-perm-developer-tools-granted`），AX 门禁读不出这两个来源不同 | 一次性读数用自己的标识，文案点名是谁测的 |
+| 16 | 配方页第一张卡 | 把内核契约注脚原文（含 `R35`、`P0 landing`）当用户文案显示 | 视图层不再管道化那句契约说明；契约文件本身一个字没动 |
+| 17 | `--recipe-validate` 的结论 | `parseVerdict(stdout)` 只看 stdout，而 daemon 的拒绝写在 stderr，于是对方的原话被换成"后台服务不可达" | 走 `ConsoleModel.replyText` 选路，并区分"daemon 答了且拒绝"与"够不到 daemon" |
+
+**MCP 壳（面 A）**
+
+| # | 位置 | 失效模式 | 修复 |
+|---|---|---|---|
+| 18 | `providers.ts` 归属行的版本 | 报的是 `mcp-shell/package.json` 的版本，而被归属的那个判定是 **daemon** 产的；app 比壳旧时，agent 被告知判定来自一个没造它的 build | 版本改读 hello 实测值（`engine-client.ts` 存下 `helloVersion`），没测到就不报版本 |
+| 19 | 壳的 manifest 读不到时 | `gp_diagnose` 永久回 `GP_E_INTERNAL`，remedy 还教人"从带 manifest 的包目录里跑"——正是触发它的那种内置构建做不到的一句 | 版本源换掉后壳不再硬依赖自身 manifest；读不到时如实说读不到，照常转发 |
+| 20 | `methodForSignals` 默认参数 | 空版本直接 `throw`，绕过全仓"错误恒三字段"的形状 | 显式注册表入参；不可构建那一臂回三字段拒绝 |
+| 21 | `http-gateway.ts` 的 `/v1/tools/diagnose` | 新加的"未声明能力在发帧前就拒"只装在 stdio 那一扇门，同一个判定从 HTTP 门进去既不拒也不归属——两张门给两个答案 | 网关接回同一条接缝，用例同一趟调用走两扇门比对 |
+| 22 | `test/support/fake-daemon.mjs` | 假 hello 的 `capabilities` 默认取 `DAEMON_FORWARDED_METHODS`，即它本该比对的那张表——漂移永远不会被任何端到端用例看见 | 夹具钉成字面清单，另加一条把它与 Swift `EngineMethod` 源码读出来比对的用例 |
+| 23 | 壳侧 remedy 里的路径 | 同 #8，TS 侧同类站点 | `quoteShellArg` + 参数位扫描闸（该闸第一版按词表命中散文，21 条假阳；改成按参数位判定） |
+
+**发布链 / 桥 / 文档**
+
+| # | 位置 | 失效模式 | 修复 |
+|---|---|---|---|
+| 24 | `release.yml` 签名那一步 | 只断言 `.asc` 非空，从不问**哪把 key 签的**；轮换或错放 secret 会发出一版"签名有效但身份不对"的 Release，而 `updater/lib/signature.js` 在每台机器上把它判 `invalid`，且 `signature-invalid` 不在可同意集合里——那版自动更新全灭，发布链却绿着 | 新增 `tools/release-signing-gate.sh`：pin 从 `signature.js` import 读出（不抄字面量），签名者由 `gpg --verify --status-fd` 的 `VALIDSIG` 读（与运行时同一串），逐件比对；四臂自测（正/错 key/生产形态/篡改）；本机用真 key 跑过生产形态那一条为正 |
+| 25 | `bridge/glasspane_bridge.py` 停止原因表 | 表写 5→frameIndexChanged、7→signal，而实测 lldb 是 Signal=5、Watchpoint=4、Breakpoint=3、Exec=7：SIGSEGV 被念成一次普通成功的采集，`crash: null`，退 0 | 按实测重建表并驱动 crash 记录；新增一档退出码 3 表示"崩溃现场已交付"；用例直接从同一 `xcrun lldb` 读枚举再比表 |
+| 26 | `bridge` 交付 `-o "command script import %s"` | 未加引号，仓库路径含空格时（macOS 家目录常见）桥根本导不进来，而回话把原因写成"开发者工具权限" | 按 lldb 自己的分词加引号；无载荷时的归因分档，不再默认赖权限 |
+| 27 | `SECURITY.md` / `.zh-CN.md` 两处 | 把版本线与门禁计数写死在散文里（`1.18.x` 的一句叙述、"12 declared sites, 17 checked lines"）——`set-version` 只推进被门禁的那一格，散文会被留在原地继续宣称旧线 | 改为不含数字的叙述；被 `check-doc-links.mjs` 当"当前版本线"claim 的那一格表格行是真门禁行，随本版推进为 `1.19.x`（它不在 `version-sites.mjs` 的位点表里，由这条闸逼着改）；两处失效的行号引用指回真位置 |
+
+### 复核判为不是缺陷的一条（不计入上面 26 条）
+
+`EngineCore` 计划态 restore 仍回 `consistent: true`。审查提出"读侧可能当成实测一致"。回代码与规格复核：该字段是
+P5 §6.4 原文要求的，方法表冻结不能删；同一载荷里带着 `consistentBasis: "plan-only, state not re-measured"`；
+`specs/GlassPane_Audit_2026-09-22` 的 A-5 已把这一处置记在案（"保留字段…补 basis…规格待随批修订"）；
+且全仓除内部两处**实测**分支外没有读者按它分叉。改它等于改冻结的响应形状并撤销一条已落档的判定，不是本轮的修复项。
+
+### 已知边界（不是缺陷，也不是遗留）
+
+`iterate-harness`（`/Volumes/Eng-Dev/iterate-skill/harness/iterate-harness`）的 `mcp/client.py:179-192` 用
+`"\n".join(parts)` 把 MCP 回包的 item 边界抹掉，`relay_answer` 对"帧 + 任意第二项"一律判 `unparseable`。这条**早于本版成立**
+（1.18.0 的 `gp_diagnose` 就已经回第二项），修在消费端；本轮未动那条线，判据与确切修法写在收口汇报里。
 ## [1.18.0] — 2026-10-20
 
 **版本判断：minor。** 对着本仓自己那四项 patch 判据逐条实测（判据原文在 1.6.2 条目里）：
