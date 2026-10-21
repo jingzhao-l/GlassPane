@@ -26,8 +26,9 @@ struct SettingsPanelView: View {
                 DragGuideBannerView()
                 if let guideText = model.pendingGuideText {
                     GuideBannerView(kind: model.pendingGuideKind, text: guideText) {
-                        model.pendingGuideKind = nil
-                        model.pendingGuideText = nil
+                        // 走模型那一个出口：它同时把"这一次引导"作废，迟到的提交
+                        // 结局才不会把一条刚被关掉的横幅再画回来。
+                        model.dismissPendingGuide()
                     }
                 }
                 permissionSection
@@ -53,26 +54,48 @@ struct SettingsPanelView: View {
     }
 
     /// 一眼能看懂的总览：还差几项、差哪几项。省掉"逐张卡看一遍"的负担。
+    ///
+    /// 判据来自 `SettingsModel.PermissionOverview`（与侧栏标记同一份），这里只负责画：
+    /// 一条自报席位都没读到的时候，这一行说"还没上报"，不报数也不报"没授权"——
+    /// 那样的一句是对本机 TCC 的一次没测过的断言，而它下面四张卡自己写着"读不到"。
     private var overviewStrip: some View {
-        let pending = model.entries.filter { $0.kind != .developerTools && $0.status != .granted }
+        let overview = model.permissionOverview
+        let color: Color?
+        switch overview.tone {
+        case .unmeasured: color = nil
+        case .granted: color = .green
+        case .pending: color = .orange
+        }
         return HStack(spacing: 10) {
-            Image(systemName: pending.isEmpty ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+            Image(systemName: overview.icon)
                 .font(.title3)
-                .foregroundStyle(pending.isEmpty ? Color.green : Color.orange)
+                .foregroundStyle(color ?? Color.secondary)
             VStack(alignment: .leading, spacing: 3) {
-                Text(pending.isEmpty ? "必备权限已全部授权" : "还有 \(pending.count) 项必备权限没授权")
+                Text(overview.headline)
                     .font(.callout.weight(.semibold))
-                Text(pending.isEmpty
-                     ? "开发者工具是可选的深度调试通道，不影响日常使用。"
-                     : pending.map { $0.descriptor.displayName }.joined(separator: "、")
-                     + " 缺得越多，能验证的通道越少。")
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(overview.detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
         }
         .padding(12)
-        .consoleCard(tint: pending.isEmpty ? .green : .orange)
+        .consoleCard(tint: color)
+        .accessibilityIdentifier(Self.overviewStripIdentifier(for: overview))
+    }
+
+    /// 总览那一行的机器可读出口：三种结局各一个标识，自动化才读得出
+    /// "此刻屏幕上说的到底是哪一种"，而不是靠中文文案猜。
+    nonisolated static func overviewStripIdentifier(
+        for overview: SettingsModel.PermissionOverview
+    ) -> String {
+        switch overview {
+        case .awaitingDaemonReport: return "gp-permission-overview-awaiting-report"
+        case .allGranted: return "gp-permission-overview-all-granted"
+        case .measured: return "gp-permission-overview-pending"
+        }
     }
 
     private var permissionSection: some View {
@@ -84,7 +107,13 @@ struct SettingsPanelView: View {
             )
             // 授权已落但运行实例读不到（TCC 判定按进程缓存）→ 给出重启入口。
             // 不自动重启：那会中断正在进行的 act，必须由用户点。
-            if !model.kindsNeedingRestart.isEmpty {
+            //
+            // 显示条件不是 `kindsNeedingRestart`：按下那一枚按钮的那一刻 `reprobed`
+            // 就被清空（重启之后不许再信旧的重探），那张表于是变空，而按钮与
+            // `gp-permission-restart-outcome` 这一行都长在它里面——用同一个条件就等于
+            // 这一次点击把自己的读数从屏幕上抹掉。横幅改由"在途 or 已有结论 or
+            // 确实有待重启的权限"三者任一撑着（判据在 `SettingsModel.showsRestartBanner`）。
+            if model.showsRestartBanner {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: "arrow.triangle.2.circlepath.circle")
@@ -444,16 +473,27 @@ struct PermissionCardView: View {
     @State private var isDropTargeted = false
 
     /// 徽标一次算全：文字、形状图标、无障碍标识必须来自**同一个** status。
-    /// 开发者工具卡上，一旦有"验证调试能力"的实测结论，整套改按实测状态显示
-    /// （系统没有查询接口 ≠ 不能实测；实测结论必须让用户看得见，而不是永远
-    /// 灰在"未验证"）；其余卡恒按 daemon 自报席位。从前文字跟着实测状态走、
-    /// 图标与标识跟着自报席位走，于是一张卡说了两件事。
+    /// 这一枚说的是 daemon 在 `hello` 里自报的席位——每张卡恒画它，其余卡也只有它。
+    /// 从前文字跟着实测状态走、图标与标识跟着自报席位走，于是一张卡说了两件事。
     private var badge: PermissionBadge {
-        PermissionBadge.make(kind: entry.kind, reported: entry.status, measured: verifiedStatus)
+        PermissionBadge.make(kind: entry.kind, reported: entry.status)
     }
 
-    private var badgeColor: Color {
-        switch badge.status {
+    /// 只有开发者工具卡会有第二枚：那一次「验证调试能力」是**另一个进程**量到的
+    /// （`glasspaned --check-developer-tools` 的一过性任务）。它必须留在屏幕上——
+    /// 系统没有查询接口 ≠ 不能实测，实测结论不该永远灰在"未验证"里——但它讲的
+    /// 不是 daemon 的席位，所以走自己那一族标识（`PermissionBadge.measuredIdentifier`），
+    /// 与上面那一枚并排各说各话，谁也不替谁背书。
+    private var measuredBadge: PermissionBadge? {
+        guard let verifiedStatus else { return nil }
+        return PermissionBadge.make(
+            kind: entry.kind, reported: entry.status, measured: verifiedStatus
+        )
+    }
+
+    /// 一枚徽标的颜色只由它自己那个 status 折算（形状与颜色一致，色盲可用）。
+    private func badgeColor(for status: PermissionStatus) -> Color {
+        switch status {
         case .granted:
             return .green
         case .denied:
@@ -464,6 +504,8 @@ struct PermissionCardView: View {
             return .secondary
         }
     }
+
+    private var badgeColor: Color { badgeColor(for: badge.status) }
 
     private var iconName: String {
         switch entry.kind {
@@ -542,6 +584,16 @@ struct PermissionCardView: View {
                         statusIcon: badge.icon,
                         statusIdentifier: badge.identifier
                     )
+                    // 实测那一枚与自报席位并排，不覆盖它：两张卡说的是两个来源，
+                    // 合并成一枚就必然有一件事实没有出口。
+                    if let measuredBadge {
+                        BadgeView(
+                            text: measuredBadge.text,
+                            color: badgeColor(for: measuredBadge.status),
+                            statusIcon: measuredBadge.icon,
+                            statusIdentifier: measuredBadge.identifier
+                        )
+                    }
                     if entry.statusNote != nil {
                         Image(systemName: "arrow.clockwise.circle")
                             .font(.caption)
@@ -770,11 +822,39 @@ struct PermissionCardDropDelegate: DropDelegate {
 /// 状态折算出来：从前文字读实测结论、图标与标识读 daemon 自报席位，人看到的
 /// "可用（实测）"与冒烟脚本读到的 `gp-perm-developer-tools-unverifiable`
 /// 是同一张卡上的两个答案——按标识判读的那一方会以为这张卡什么都没说。
+///
+/// 但"同一个状态"不等于"同一个标识"。开发者工具这一张按设计恒为未验证
+/// （`engine/smoke.md` 记的就是这一条：系统不提供查询接口），而「验证调试能力」
+/// 那一次是**另一个进程**量的——`glasspaned --check-developer-tools` 起的一过性
+/// 任务（`main.swift` 里那条命令自己）。把它的读数挂进
+/// `gp-perm-developer-tools-<state>` 那一族标识，C6 冒烟就会把"某个一次性任务能
+/// 附加调试器"读成"daemon 自己有这个席位"，而那张卡真正的自报席位还在下面那一枚
+/// `unverifiable` 上。所以实测结论保留它自己的文字与形状，标识走
+/// `measuredIdentifier`——一眼看得出它是量过的，也绝不会与 daemon 自报那一族混读。
 struct PermissionBadge: Equatable {
     let status: PermissionStatus
     let text: String
     let icon: String
     let identifier: String
+
+    /// 这一枚徽标说的是 daemon 自报的席位，还是另一个进程的一次性实测。
+    let source: BadgeSource
+
+    enum BadgeSource: Equatable {
+        /// daemon 在 `hello` 里自报的席位（`gp-perm-<kind>-<state>` 那一族）。
+        case daemonReported
+        /// 面板起的一过性实测（`glasspaned --check-developer-tools`）。
+        case oneShotMeasurement
+    }
+
+    /// 实测结论专用的标识：与自报席位那一族**形状不同**，自动化才不会拿它去判
+    /// daemon 的席位（C6 的 `gp-perm-<kind>-(granted|denied|notDetermined|unverifiable)`
+    /// 恰好一枚的闸就是靠这个形状数的）。
+    static func measuredIdentifier(
+        kind: PermissionKind, status: PermissionStatus
+    ) -> String {
+        "gp-perm-\(kind.cliValue)-measured-\(status.rawValue)"
+    }
 
     static func make(
         kind: PermissionKind,
@@ -785,8 +865,8 @@ struct PermissionBadge: Equatable {
         let measuredText: Bool = measured != nil
         let text: String
         switch status {
-        case .granted: text = measuredText ? "可用（实测）" : "已授权"
-        case .denied: text = measuredText ? "被拒绝（实测）" : "已拒绝"
+        case .granted: text = measuredText ? "可用（后台服务实测）" : "已授权"
+        case .denied: text = measuredText ? "被拒绝（后台服务实测）" : "已拒绝"
         case .notDetermined: text = "未请求"
         case .unverifiable: text = "未验证"
         }
@@ -794,7 +874,10 @@ struct PermissionBadge: Equatable {
             status: status,
             text: text,
             icon: PermissionGuide.statusIcon(for: status),
-            identifier: PermissionGuide.statusIdentifier(kind: kind, status: status)
+            identifier: measuredText
+                ? measuredIdentifier(kind: kind, status: status)
+                : PermissionGuide.statusIdentifier(kind: kind, status: status),
+            source: measuredText ? .oneShotMeasurement : .daemonReported
         )
     }
 }

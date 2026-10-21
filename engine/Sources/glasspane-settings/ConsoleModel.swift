@@ -117,6 +117,11 @@ final class ConsoleModel: ObservableObject {
     @Published private(set) var projects: [ProjectEntry] = []
     /// projectId → 该项目证据目录里的档案条数（nil = 目录不存在）。
     @Published private(set) var projectEvidenceCounts: [String: Int?] = [:]
+    /// 扫注册表这一趟**顺带量到**的"本页在读的那一份档案目录在不在"。
+    /// 三态：`nil` = 这一趟还没跑过（不是"不在"）；`true`/`false` = 量到的结局。
+    /// 项目页那枚「在访达中打开证据目录」在它没有自己的目录时就开这一份，所以这一
+    /// 枚的可用性只能由这一次实测决定，不能由"看起来应该有"决定。
+    @Published private(set) var sharedEvidenceDirectoryExists: Bool?
     @Published var selectedProjectId: String?
     /// 待确认的清理清单。**必须由 daemon 的 `--project-prune --dry-run` 产生**：
     /// 从前这里是面板自己按 `LocalArchive.isTestResidue` 过滤本地读到的注册表，
@@ -325,6 +330,7 @@ final class ConsoleModel: ObservableObject {
     func reloadProjects() {
         projectsState = .loading
         let path = projectsPath
+        let sharedDirectory = evidenceDirectory
         Task.detached(priority: .userInitiated) {
             let registry = ProjectRegistry(filePath: path)
             let entries = registry.all
@@ -333,9 +339,13 @@ final class ConsoleModel: ObservableObject {
                 counts[entry.projectId] = Self.ownedEvidenceCount(for: entry)
             }
             let damaged = registry.loadFailed
+            // 同一趟里量一下"本页在读的那一份档案目录在不在"：项目页那枚打开目录的
+            // 控件在注册项没写目录时开的就是它，判据必须来自这里，不能来自猜。
+            let sharedExists = Self.directoryIsPresent(sharedDirectory)
             await MainActor.run {
                 self.projects = entries
                 self.projectEvidenceCounts = counts
+                self.sharedEvidenceDirectoryExists = sharedExists
                 self.projectsState = damaged ? .failed("注册表文件读不开，面板只呈现能读到的部分") : .loaded
                 if self.selectedProjectId == nil {
                     self.selectedProjectId = entries.first?.projectId
@@ -590,13 +600,17 @@ final class ConsoleModel: ObservableObject {
             return .refused("清理预览没有执行：读不到后台服务的程序路径，或它没在时限内回话。点「刷新」恢复后重试。")
         }
         let reply = replyText(stdout: stdout, stderr: stderr)
+        // 先问"这张表读得开吗"，再问"命中几条"。反过来的时候，daemon 那份
+        // `loadFailed:true` 的拒绝载荷——它故意不再带 `matched`，因为读不到的表给不出
+        // 任何条数——会被这里当成"后台服务没按约定回答"，把一个已经如实说明原因的回话
+        // 折成一句猜测。顺序就是这两件事的先后：先确认有没有答案，再看答案说什么。
+        if boolField("loadFailed", in: reply) == true {
+            return .refused("注册表读不开（loadFailed:true），预览与删除都不可信；先修 \(registryPath(in: reply)) 再试。")
+        }
         guard let matched = intField("matched", in: reply) else {
             return .refused(
                 "后台服务没有按约定回答清理预览（退出码 \(exitCode)，回文里没有 matched 字段）。"
                 + "清单不显示，任何删除都不会执行——它原话：\(quoteDaemonWords(stderr.isEmpty ? stdout : stderr))")
-        }
-        if boolField("loadFailed", in: reply) == true {
-            return .refused("注册表读不开（loadFailed:true），预览与删除都不可信；先修 \(registryPath(in: reply)) 再试。")
         }
         if boolField("dryRun", in: reply) == false {
             return .refused(
@@ -835,6 +849,30 @@ final class ConsoleModel: ObservableObject {
         return isJsonObject(stdout) ? stdout : (isJsonObject(stderr) ? stderr : stdout)
     }
 
+    /// 回话里"它自己说出来的原因"（纯函数，供单测）。
+    ///
+    /// 这些一次性命令把拒绝写在 stderr：`--recipe-validate` 读不到那个文件时回
+    /// `{"valid":false,"errors":["file not found: …"],"path":…}`（退出码 2），
+    /// 结论编码不出去时回 `{"encodeFailed":true,"error":"…"}`（退出码 1）。
+    /// 上游要的从来不是"退出码非 0"这一个比特，而是**它到底说了什么**——
+    /// 把这句丢掉换成"后台服务不可达"，就是拿一件没发生过的事替掉了量到的那件。
+    /// 取序：`errors` 数组 → `error` 字符串 → 回话原文；一个字都没有就如实说没有。
+    nonisolated static func daemonRefusalReason(reply: String) -> String {
+        let trimmed = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let data = trimmed.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let errors = object["errors"] as? [String],
+               !errors.filter({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }).isEmpty {
+                return errors.joined(separator: "；")
+            }
+            if let error = object["error"] as? String,
+               !error.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return error
+            }
+        }
+        return trimmed.isEmpty ? "它一个字都没回（这一趟没有任何可指认的原因）" : trimmed
+    }
+
     /// 把后台服务真正说过的话附在结论后面。控制字符一律折成可见形式——这句会
     /// 被复制进终端和报告（R5-03），而它不是本进程写的。
     nonisolated static func quoteDaemonWords(_ text: String) -> String {
@@ -960,6 +998,57 @@ final class ConsoleModel: ObservableObject {
             + "下一步：执行一次会留档案的操作后点「刷新」重扫；后台服务的状态根只在启动时用 "
             + "--state-dir 点名（它不读 GLASSPANE_STATE_DIR），这一页跟着它上报的那一个读，"
             + "侧栏「状态根」那一行就是它报的数。")
+    }
+
+    /// 项目页「在访达中打开证据目录」这一枚的呈现（纯函数，供单测）。
+    ///
+    /// 缺陷形状：注册项没写档案目录时它开的是**本页在读的那一份共用目录**，而那一份
+    /// 这一页已经量过"不在盘上"（同一屏上面那一行就是按占位画的）——`NSWorkspace.selectFile`
+    /// 对一个不存在的位置什么都不做，屏幕上没有一个字说为什么。证据页的同胞早就由
+    /// `evidenceDirectoryControl(exists:directory:)` 管住了自己，这一枚是漏网的那一个。
+    ///
+    /// `sharedDirectoryExists` 用的是三态而不是 Bool：`nil` = 这一趟还没量过。
+    /// 把"没量过"写成"那里没有"、或把"没量过"放过去开一个没验证过的位置，是同一个
+    /// 毛病的两个方向。
+    nonisolated static func projectEvidenceDirectoryControl(
+        registeredPath: String?,
+        sharedDirectory: String,
+        sharedDirectoryExists: Bool?,
+        stateRootCaption: String
+    ) -> PanelControl {
+        let registered = registeredPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !registered.isEmpty {
+            return PanelControl(enabled: true, help:
+                "在访达中打开这条注册项自己写的档案目录：\(registered)")
+        }
+        switch sharedDirectoryExists {
+        case .some(true):
+            return PanelControl(enabled: true, help:
+                "这条注册项没写档案目录，所以它自己没有可打开的档案。这一枚开的是本页在读的那一份："
+                    + "\(sharedDirectory)（\(stateRootCaption)）——那是本页共用的档案目录，不是这个项目的替身。")
+        case .some(false):
+            return PanelControl(enabled: false, help:
+                "「在访达中打开证据目录」现在按不动：这条注册项没写档案目录，而这一页量过它本来要开的"
+                    + "那一份 \(sharedDirectory)——它不在盘上（\(stateRootCaption)）。访达没有一个去处可显示。"
+                    + "下一步：执行一次会留档案的操作后点「刷新」重扫；要让这个项目有自己的档案目录，"
+                    + "就在注册时给它写上 evidenceStoragePath。")
+        case nil:
+            return PanelControl(enabled: false, help:
+                "「在访达中打开证据目录」现在按不动：这条注册项没写档案目录，而这一页还没量过它本来要"
+                    + "开的那一份 \(sharedDirectory) 在不在——没量过就不开一个没验证过的位置。"
+                    + "下一步：点这一页的「刷新」量一次，再决定去哪儿。")
+        }
+    }
+
+    /// 这一页量到的「那个位置在不在」：目录存在且确实是目录才算 `true`。
+    nonisolated static func directoryIsPresent(_ path: String) -> Bool {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        var isDirectory = ObjCBool(false)
+        guard FileManager.default.fileExists(atPath: trimmed, isDirectory: &isDirectory) else {
+            return false
+        }
+        return isDirectory.boolValue
     }
 
     /// 「打开报告」这一枚的呈现：**判据是这条档案的读取结局**，不是那个共用的 nil。
@@ -1138,6 +1227,17 @@ final class ConsoleModel: ObservableObject {
     /// 「档案目录」那一枚的现在形态（按得动与否 + 那一句话）。
     var evidenceDirectoryControl: PanelControl {
         Self.evidenceDirectoryControl(exists: archiveExists, directory: evidenceDirectory)
+    }
+
+    /// 项目页「在访达中打开证据目录」那一枚的现在形态。判据与证据页那枚同一条：
+    /// 这一页量到过那个去处，才谈得上按得动。
+    func projectEvidenceDirectoryControl(for entry: ProjectEntry) -> PanelControl {
+        Self.projectEvidenceDirectoryControl(
+            registeredPath: entry.evidenceStoragePath,
+            sharedDirectory: evidenceDirectoryPath,
+            sharedDirectoryExists: sharedEvidenceDirectoryExists,
+            stateRootCaption: displayedStateRootCaption
+        )
     }
 
     // MARK: - 审批台账文件那一枚按钮

@@ -180,6 +180,113 @@ final class SettingsModel: ObservableObject {
         }
     }
 
+    /// 顶部总览那一行与侧栏标记共用的**唯一**判据（纯函数，供单测）。
+    ///
+    /// 判据是"这一页读到过几条自报席位"，不是"有几张卡不是绿的"。第一帧 hello
+    /// 回来之前（以及 daemon 没在运行、应门不回话时）四张卡全是 `unverifiable`，
+    /// 那种状态下写"还有 3 项必备权限没授权"是替本机 TCC 做一次它从没量过的断言——
+    /// 而它就印在那几张自己写着"读不到它的授权状态"的卡上面，两句话互相打脸。
+    /// `unverifiable` 与 `denied`/`notDetermined` 是两种事实，只有后者才数得出"没授权"。
+    enum PermissionOverview: Equatable {
+        /// 一条自报席位都没读到：既不能说还差几项，也不能说已经齐了。
+        case awaitingDaemonReport
+        /// 必备三类都由 daemon 自报为 granted（这一次读到了，而且都在）。
+        case allGranted
+        /// 读到的席位里有 `ungranted` 项没授权；另有 `unreported` 项这一帧没上报。
+        /// 两个数各记各的账，不合并成一句"没授权"。
+        case measured(ungranted: [String], unreported: Int)
+
+        nonisolated static func make(entries: [PermissionEntry]) -> PermissionOverview {
+            let essential = entries.filter { $0.kind != .developerTools }
+            guard !essential.isEmpty else { return .awaitingDaemonReport }
+            let reported = essential.filter { $0.status != .unverifiable }
+            guard !reported.isEmpty else { return .awaitingDaemonReport }
+            let ungranted = reported.filter { $0.status != .granted }
+            let unreported = essential.count - reported.count
+            if ungranted.isEmpty && unreported == 0 { return .allGranted }
+            return .measured(
+                ungranted: ungranted.map { $0.descriptor.displayName },
+                unreported: unreported
+            )
+        }
+
+        /// 大字那一行。没说过的话一个字都不写：没读到席位时不报数、不报"没授权"。
+        nonisolated var headline: String {
+            switch self {
+            case .awaitingDaemonReport: return "后台服务还没上报它的授权状态"
+            case .allGranted: return "必备权限已全部授权"
+            case .measured(let ungranted, let unreported):
+                if ungranted.isEmpty { return "有 \(unreported) 项必备权限这一帧没上报" }
+                return "实测到 \(ungranted.count) 项必备权限没授权"
+                    + (unreported > 0 ? "，另有 \(unreported) 项这一帧没上报" : "")
+            }
+        }
+
+        /// 小字那一行：点名是哪几项，并说清下一眼该看哪儿。
+        nonisolated var detail: String {
+            switch self {
+            case .awaitingDaemonReport:
+                return "这一页一次都没读到它自报的席位，所以既说不出还差哪几项，也不能说已经齐了。"
+                    + "点「刷新」让它报一次；各张卡自己的注记写的就是现在的实测结局。"
+            case .allGranted:
+                return "开发者工具是可选的深度调试通道，不影响日常使用。"
+            case .measured(let ungranted, let unreported):
+                if ungranted.isEmpty {
+                    return "\(unreported) 项这一帧没上报——那是没读到，不是没授权。点「刷新」重读一次。"
+                }
+                let named = ungranted.joined(separator: "、")
+                var text = "没授权的是：\(named)（后台服务自报的席位）。缺得越多，能验证的通道越少。"
+                if unreported > 0 {
+                    text += "另有 \(unreported) 项这一帧没上报（没读到不等于没授权）。"
+                }
+                return text
+            }
+        }
+
+        /// 承载状态的形状（颜色只是附带：色盲可用，形状必须自己说得清）。
+        nonisolated var icon: String {
+            switch self {
+            case .awaitingDaemonReport: return "questionmark.circle"
+            case .allGranted: return "checkmark.circle.fill"
+            case .measured: return "exclamationmark.circle.fill"
+            }
+        }
+
+        /// 该不该点亮那枚"齐了/还差几项"的颜色。没读到过席位 = 哪边都不站。
+        nonisolated var tone: OverviewTone {
+            switch self {
+            case .awaitingDaemonReport: return .unmeasured
+            case .allGranted: return .granted
+            case .measured: return .pending
+            }
+        }
+
+        enum OverviewTone: Equatable {
+            case unmeasured
+            case granted
+            case pending
+        }
+    }
+
+    /// 顶部总览那一行此刻的读数（视图只读这一个，不再自己数一遍）。
+    var permissionOverview: PermissionOverview {
+        PermissionOverview.make(entries: entries)
+    }
+
+    /// 侧栏「权限」那一行的标记：与顶部总览同一判据、同一份读数，两处不许各数一遍。
+    /// 没读到席位时它说的是"没上报"这件事（这一页确实没收到过），而不是差几项。
+    nonisolated static func sidebarPermissionBadge(entries: [PermissionEntry]) -> String? {
+        switch PermissionOverview.make(entries: entries) {
+        case .awaitingDaemonReport:
+            return "未上报"
+        case .allGranted:
+            return nil
+        case .measured(let ungranted, let unreported):
+            if !ungranted.isEmpty { return "\(ungranted.count) 项待处理" }
+            return unreported > 0 ? "\(unreported) 项没上报" : nil
+        }
+    }
+
     /// 顶部图标的拖拽源：daemon 有 bundle 身份时提供 **daemon 真身 .app**
     /// 的 fileURL（可直接拖进系统设置列表并显示图标）；daemon 未上报身份时
     /// 只提供纯文本导航——把设置面板自己的 .app 拖进去会授权错主体。
@@ -330,17 +437,38 @@ final class SettingsModel: ObservableObject {
 
     // MARK: - 引导动作（P1 v1.2 §11.2：由 daemon 自己申请，面板只导航）
 
+    /// 把申请交给 daemon 那一步**实测到的**结局。横幅里那句话只能由它折算：
+    /// 从前这里只有 `try? process.run()`——起没起来、退出码多少都不落进状态，
+    /// 而横幅照旧写着"已请求「辅助功能」授权"，等于面板替系统声明了一次它
+    /// 从没量过的申请。还有更直的一支：daemon 身份没上报时一个任务都没提交，
+    /// 同一句话照样发出去。
+    enum DaemonRequestStage: Equatable {
+        /// `launchctl submit` 已经交出去，这一趟还没回话。
+        case submitting
+        /// 提交子进程返回 0——"已请求授权"这句话现在背后有那个退出码了。
+        case submitted
+        /// 子进程返回非 0：申请没提交成，理由就是它自己回的那句话。
+        case refused(status: Int32, detail: String)
+        /// 连退出码都没拿到：起不来，或没在时限内回话。
+        case notStarted
+        /// 一次都没提交：daemon 没上报身份，面板代申请会把席位记到面板自己头上。
+        case notAttempted
+    }
+
     /// 权限卡的统一引导入口：
     ///  1. 已授权 → 只把系统设置里对应那一页打开（按钮语义是"查看"）；
     ///  2. 取到 daemon 身份 → `launchctl submit` 让 daemon 以**自身身份**发起
     ///     系统申请，随后打开对应系统面板深链；
     ///  3. 取不到 daemon 身份 → 只打开深链并如实说明"面板代申请会记错主体"，
     ///     绝不把申请动作落在面板进程上。
-    func guide(_ kind: PermissionKind) {
-        setPendingGuide(kind)
+    ///
+    /// 第 2 支的那句话由提交结局折算（`DaemonRequestStage`），不再在提交之前先
+    /// 宣称"已请求"：跑一次子进程不等于系统批了申请，退出码没读到就更不能说"已请求"。
+    func guide(_ kind: PermissionKind, droppedName: String? = nil) {
         switch kind {
         case .developerTools:
             // 无系统总开关、无公开查询 API：仅打开面板 + 文案（恒 unverifiable）。
+            setPendingGuide(kind, droppedName: droppedName)
             PermissionGuide.openSystemPane(for: kind)
             return
         case .accessibility, .inputMonitoring, .screenRecording:
@@ -352,12 +480,21 @@ final class SettingsModel: ObservableObject {
                 PermissionGuide.openSystemPane(for: kind)
                 return
             }
-            if let binaryPath = daemon.subject?.binaryPath {
-                requestPermissionViaDaemon(kind, daemonBinaryPath: binaryPath)
+            let reportedBinaryPath = daemon.subject?.binaryPath
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard let subject = daemon.subject, !reportedBinaryPath.isEmpty else {
+                // 身份没上报 = 一个申请都不会提交，这一支有它自己那句话。
+                // （`binaryPath` 是空串时 launchd 那头什么也不会起，说"已请求"就是假的。）
+                setPendingGuide(kind, droppedName: droppedName, stage: .notAttempted)
+                PermissionGuide.openSystemPane(for: kind)
+                refresh()
+                return
             }
+            setPendingGuide(kind, droppedName: droppedName, stage: .submitting)
             PermissionGuide.openSystemPane(for: kind)
+            requestPermissionViaDaemon(kind, subject: subject, daemonBinaryPath: reportedBinaryPath)
+            refresh()
         }
-        refresh()
     }
 
     func guideAccessibility() { guide(.accessibility) }
@@ -370,35 +507,117 @@ final class SettingsModel: ObservableObject {
     /// 因此仅用于回落文案，不进入卡片状态判定。
     @discardableResult
     func handleDrop(kind: PermissionKind, droppedName: String?) -> String {
-        guide(kind)
-        return pendingGuideText ?? PermissionGuide.instruction(for: kind, droppedName: droppedName ?? "GlassPane")
+        guide(kind, droppedName: droppedName)
+        return pendingGuideText
+            ?? PermissionGuide.instruction(for: kind, droppedName: droppedName ?? "GlassPane")
     }
 
     /// 以 launchd 一过性任务的方式让 daemon 发起申请。命令构造是 engine 侧纯
     /// 函数（`PermissionGuide.daemonRequestCommand`），本处只负责执行与清理。
-    private func requestPermissionViaDaemon(_ kind: PermissionKind, daemonBinaryPath: String) {
+    ///
+    /// 提交那一趟走 `ConsoleModel.runDaemonCLI`——这一面**已经有**一条捕获退出码 +
+    /// 两路输出并带超时的通道（且被单测钉过），不再复制第二份执行器，也不再
+    /// `try? process.run()` 把结局丢掉。
+    private func requestPermissionViaDaemon(
+        _ kind: PermissionKind, subject: PermissionSubject, daemonBinaryPath: String
+    ) {
+        // `binaryPath` 是 daemon 在 hello 帧里自报的，而 engine.sock 的口径是"同用户即全权、
+        // 无 peer 鉴权"。面板这一侧是那条声明唯一的读者，所以校验也必须落在这里：任何能在
+        // 候选 socket 名上回一帧的进程，都能借这个按钮把任意路径送进用户那个已登录的 Aqua
+        // 会话。形状规则（绝对、无控制字符）拦不住 `/tmp/x/payload`。
+        guard PermissionReprobe.isSubmittableExecutable(daemonBinaryPath) else {
+            guideEpoch += 1
+            pendingGuideText = PermissionGuide.daemonRequiredText
+                + " 后台服务自报的程序路径不能被提交：它不是这个账号拥有的普通文件——"
+                + daemonBinaryPath + "。本次没有向 launchd 提交任何任务。"
+            return
+        }
         let nonce = "\(Int(Date().timeIntervalSince1970))-\(UInt32.random(in: 1...UInt32.max))"
         let command = PermissionGuide.daemonRequestCommand(
             for: kind,
             daemonBinaryPath: daemonBinaryPath,
             nonce: nonce
         )
-        runSystemBinary(command.launchPath, arguments: command.arguments)
-        // 任务为一次性（申请动作即起即停）；延迟清理标签，失败静默。
+        let epoch = guideEpoch
+        let dropped = pendingDroppedName
+        Task.detached(priority: .userInitiated) {
+            let run = ConsoleModel.runDaemonCLI(
+                binary: command.launchPath, arguments: command.arguments, timeoutSeconds: 10
+            )
+            let stage = Self.daemonRequestStage(from: run)
+            await MainActor.run {
+                // 迟到的结局不许改写已经换过主题（或被用户关掉）的横幅。
+                guard epoch == self.guideEpoch, self.pendingGuideKind == kind else { return }
+                self.pendingGuideText = Self.guideText(
+                    for: kind, subject: subject, stage: stage, droppedName: dropped
+                )
+            }
+        }
+        // 任务为一次性（申请动作即起即停）；清理标签失败静默是故意的——
+        // 它不产出任何面向用户的结论，所以不需要一条 measured 的文案。
         let cleanup = PermissionGuide.daemonRequestCleanupCommand(jobLabel: command.jobLabel)
-        Task { @MainActor in
+        Task.detached(priority: .utility) {
             try? await Task.sleep(nanoseconds: 5_000_000_000)
-            self.runSystemBinary(cleanup.launchPath, arguments: cleanup.arguments)
+            _ = ConsoleModel.runDaemonCLI(
+                binary: cleanup.launchPath, arguments: cleanup.arguments, timeoutSeconds: 5
+            )
         }
     }
 
-    /// 尽力而为地执行系统侧命令（launchctl / open）：不取输出、失败静默——
-    /// 命令不可用时卡片文案仍然给出下一步（与 `PermissionGuide.openSystemPane` 同口径）。
-    nonisolated private func runSystemBinary(_ launchPath: String, arguments: [String]) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: launchPath)
-        process.arguments = arguments
-        try? process.run()
+    /// 提交子进程的结局折算。nil = 连退出码都没拿到（起不来 / 超时 / 输出读不出），
+    /// 那**不是**"已经提交"，也不能与"它回了非 0"共用一句话。
+    nonisolated static func daemonRequestStage(
+        from run: (output: String, errorOutput: String, status: Int32)?
+    ) -> DaemonRequestStage {
+        guard let run else { return .notStarted }
+        guard run.status == 0 else {
+            let detail = run.errorOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? run.output
+                : run.errorOutput
+            return .refused(status: run.status, detail: detail)
+        }
+        return .submitted
+    }
+
+    /// 横幅那句话：只由**测到的那一步**折算，每种结局各说各话。
+    /// 抽成纯函数（入参就是这一次引导的实测材料），这样"没有实测就不许说已请求"
+    /// 能单测——单测不该为了读一句话去构造一个会查 TCC 席位的模型。
+    nonisolated static func guideText(
+        for kind: PermissionKind,
+        subject: PermissionSubject?,
+        stage: DaemonRequestStage?,
+        droppedName: String? = nil
+    ) -> String {
+        let subjectName = subject?.tccEntryName ?? "glasspaned"
+        let hasBundleIdentity = subject?.hasBundleIdentity ?? false
+        let name = PermissionGuide.descriptorName(for: kind)
+        let base: String
+        switch stage {
+        case .submitted, nil:
+            // devTools 那一支（stage 恒为 nil）说的是"打开了面板"，不含申请主张。
+            base = PermissionGuide.instruction(
+                for: kind, subjectName: subjectName, hasBundleIdentity: hasBundleIdentity
+            )
+        case .submitting:
+            base = "这一页正在为后台服务申请「\(name)」授权：申请已经交给 launchctl，它还没回话。"
+                + "回话之前这句话只说明这一趟在跑，不说明系统已经批了；卡片状态只由「刷新」"
+                + "读到的自报席位决定。"
+        case .notStarted:
+            base = "「\(name)」的申请没有提交成功：这一页连 \(Launchctl.path) 的退出码都没读到"
+                + "（起不来，或没在时限内回话）。这一页没有向系统发起任何申请，卡片状态不会因此改变。"
+                + "下一步：点「刷新」确认后台服务在运行，再点一次这一卡的「授权」。"
+        case .refused(let status, let detail):
+            base = "「\(name)」的申请没有提交成功：\(Launchctl.path) 退出码 \(status)。"
+                + "\(ConsoleModel.quoteDaemonWords(detail)) 这一页没有向系统发起任何申请，"
+                + "卡片状态不会因此改变。下一步：点「刷新」确认后台服务在运行后重试一次；"
+                + "也可以直接到系统设置的「隐私与安全性」里为 \(subjectName) 打开开关。"
+        case .notAttempted:
+            base = PermissionGuide.daemonRequiredText + " " + PermissionGuide.instruction(
+                for: kind, subjectName: subjectName, hasBundleIdentity: hasBundleIdentity
+            )
+        }
+        guard let droppedName, !droppedName.isEmpty else { return base }
+        return base + "（拖入的『\(droppedName)』只是帮你跳转；真正要勾选的是后台服务本身）"
     }
 
     // MARK: - 状态测量（真源 = daemon 自报）
@@ -435,13 +654,47 @@ final class SettingsModel: ObservableObject {
         PermissionReprobe.kindsNeedingRestart(running: daemonReportedStatuses, reprobed: reprobed)
     }
 
+    /// 横幅在屏上、手里却没有"待重启的权限"可指时那一句（重启在途或已出结论时就是它）。
+    /// 它只说这一枚按钮做什么，不声称任何席位状态——那种主张要有重探撑着。
+    static let restartBannerWithoutReprobeHint =
+        "重启后台服务：让它重新读一次系统里的授权。这会打断正在执行的操作，所以只由你点。"
+
     var restartHint: String {
         let kinds = kindsNeedingRestart
-        return kinds.isEmpty ? "" : PermissionGuide.restartNeededText(kinds)
+        return kinds.isEmpty
+            ? Self.restartBannerWithoutReprobeHint
+            : PermissionGuide.restartNeededText(kinds)
     }
 
     /// daemon 自报的席位（重探/重启后需要重算注记，单独留一份）。
     private var daemonReportedStatuses: [PermissionKind: PermissionStatus] = [:]
+
+    /// 「重启后台服务」那一块横幅在不在屏上（纯函数，供单测）。
+    ///
+    /// 判据**不能**是 `kindsNeedingRestart`。`restartDaemon()` 一被按下就把 `reprobed`
+    /// 清空——重启之后不许再信上一次的重探，这个意图是对的——而
+    /// `PermissionReprobe.kindsNeedingRestart` 读不到重探就回空表。把同一张表当横幅的
+    /// 显示条件，等于那一次点击把自己那段唯一的出口从屏幕上抹掉：按钮和
+    /// `gp-permission-restart-outcome` 那一行都长在横幅里，实测到的重启结论于是永远
+    /// 没有读者（点了之后屏幕上什么都不会出现）。
+    nonisolated static func showsRestartBanner(
+        kindsNeedingRestart: [PermissionKind],
+        isRestartInFlight: Bool,
+        outcome: DaemonRestartOutcome
+    ) -> Bool {
+        if !kindsNeedingRestart.isEmpty { return true }
+        if isRestartInFlight { return true }
+        return outcome != .idle
+    }
+
+    /// 现在这一帧该不该有那块横幅：在途、已有结论、或确实有待重启的权限，三者任一。
+    var showsRestartBanner: Bool {
+        Self.showsRestartBanner(
+            kindsNeedingRestart: kindsNeedingRestart,
+            isRestartInFlight: isRestartInFlight,
+            outcome: restartOutcome
+        )
+    }
 
     /// 最近一次"调试能力"机器探测结果（P6 §7 的 `--check-developer-tools`，
     /// 由 daemon 自己的二进制在 launchd 上下文中跑）。显式触发、带时刻，
@@ -462,6 +715,8 @@ final class SettingsModel: ObservableObject {
     /// 责任上下文是 daemon 本身）：拿到"同一身份的新进程"看到的席位。
     func reprobeSeats(force: Bool = false) async -> PermissionReprobe.Result? {
         guard let binaryPath = daemon.subject?.binaryPath else { return nil }
+        // 同一条口径：自报路径必须是本账号拥有的普通文件，才许被 launchd 起起来。
+        guard PermissionReprobe.isSubmittableExecutable(binaryPath) else { return reprobed }
         guard !reprobeInFlight else { return reprobed }
         if !force && Date().timeIntervalSince(lastReprobeAt) < reprobeIntervalNow { return reprobed }
         reprobeInFlight = true
@@ -503,6 +758,10 @@ final class SettingsModel: ObservableObject {
     func verifyDeveloperTools() async {
         guard let binaryPath = daemon.subject?.binaryPath else {
             recordProbeFailure(.unreadable, "还没连上后台服务：调试能力要由它自己实测。点「刷新」恢复连接后重试。")
+            return
+        }
+        guard PermissionReprobe.isSubmittableExecutable(binaryPath) else {
+            recordProbeFailure(.unreadable, "后台服务自报的程序路径不能被提交：它不是这个账号拥有的普通文件。本次没有起一次性任务。")
             return
         }
         guard !capabilityInFlight else { return }
@@ -991,18 +1250,31 @@ final class SettingsModel: ObservableObject {
         return Self.noDaemonReportNote
     }
 
-    private func setPendingGuide(_ kind: PermissionKind, droppedName: String? = nil) {
+    /// 那一行现在写的是**哪一次**引导：每一次新引导与用户手动关闭都让它前进，
+    /// 迟到的提交结局据此决定自己还能不能说上话（`requestPermissionViaDaemon`）。
+    private var guideEpoch = 0
+    /// 当前横幅属于哪一次拖入（提交结局回来时要把那半句一起续上，不能只留结论）。
+    private var pendingDroppedName: String?
+
+    private func setPendingGuide(
+        _ kind: PermissionKind,
+        droppedName: String? = nil,
+        stage: DaemonRequestStage? = nil
+    ) {
+        guideEpoch += 1
         pendingGuideKind = kind
-        let subject = daemon.subject
-        let subjectName = subject?.tccEntryName ?? "glasspaned"
-        let hasBundleIdentity = subject?.hasBundleIdentity ?? false
-        var text = PermissionGuide.instruction(for: kind, subjectName: subjectName, hasBundleIdentity: hasBundleIdentity)
-        if kind != .developerTools, subject == nil {
-            text = PermissionGuide.daemonRequiredText + " " + text
-        }
-        if let droppedName, !droppedName.isEmpty {
-            text += "（拖入的『\(droppedName)』只是帮你跳转；真正要勾选的是后台服务本身）"
-        }
-        pendingGuideText = text
+        pendingDroppedName = droppedName
+        pendingGuideText = Self.guideText(
+            for: kind, subject: daemon.subject, stage: stage, droppedName: droppedName
+        )
+    }
+
+    /// 用户关掉这条横幅： epoch 必须一起前进，否则上一次提交的结局会把
+    /// 一条刚被关掉的横幅再画回来（"我关掉了它，它又自己出现"不是诚实呈现）。
+    func dismissPendingGuide() {
+        guideEpoch += 1
+        pendingDroppedName = nil
+        pendingGuideKind = nil
+        pendingGuideText = nil
     }
 }

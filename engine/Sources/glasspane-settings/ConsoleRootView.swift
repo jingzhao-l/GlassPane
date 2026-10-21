@@ -205,13 +205,15 @@ struct ConsoleRootView: View {
 
     /// 侧栏上的待处理标记：权限没齐就在"权限"那一行给出数字，
     /// 让人不用点进去也知道该去哪儿。
+    ///
+    /// 数字只能来自读到过的自报席位。第一帧 hello 之前四张卡全是 `unverifiable`，
+    /// 那一支从前在这里数成「3 项待处理」——对一台从没问过的机器报一次 TCC 结论，
+    /// 与同一屏页脚那句"还没实测过"当面打脸。判据收在 `SettingsModel`，与权限页
+    /// 顶部总览共用同一份（两处各数一遍正是这类分歧的由来）。
     private func badgeText(for section: ConsoleSection) -> String? {
         switch section {
         case .permissions:
-            let pending = settings.entries.filter {
-                $0.kind != .developerTools && $0.status != .granted
-            }.count
-            return pending > 0 ? "\(pending) 项待处理" : nil
+            return SettingsModel.sidebarPermissionBadge(entries: settings.entries)
         case .evidence:
             return console.summaries.isEmpty ? nil : "\(console.summaries.count)"
         case .projects:

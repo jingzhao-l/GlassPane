@@ -36,10 +36,14 @@ struct RecipesTabView: View {
         case noDaemon
         /// 临时文件写入失败。
         case writeFailed
-        /// daemon 起不来 / 超时 / 输出不是约定的 `{valid, errors, recipeName}`。
-        case daemonUnavailable
         /// daemon 给出了明确结论。
         case verdict(valid: Bool, recipeName: String?, errors: [String])
+        /// daemon **回了话**，却没把结论交出来：它读不到那个文件（stderr + 退出码 2），
+        /// 或结论编码不出去（stderr + 退出码 1），或回了一段读不出形状的文本。
+        /// 这一支必须与下面那一支分开——它的原话是事实，"它没在说话"是另一件事实。
+        case daemonRefused(reason: String, exitCode: Int32)
+        /// 一次回话都没拿到：起不来 / 超时 / 两路管道都读不出。
+        case daemonUnavailable
     }
 
     var body: some View {
@@ -68,12 +72,10 @@ struct RecipesTabView: View {
                 ChipView(text: "schema \(overview.schemaVersion ?? "-")", color: .secondary)
                 ChipView(text: overview.source, color: .orange, systemImage: "person.crop.circle.badge.questionmark")
             }
-            if let description = overview.description, !description.isEmpty {
-                Text(description)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Text(RecipeSchemaLoader.userFacingSummary(for: overview))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             if let required = overview.required {
                 Text("必填：\(required.joined(separator: "、"))")
                     .font(.caption)
@@ -206,7 +208,18 @@ struct RecipesTabView: View {
         case .daemonUnavailable:
             verdictBanner(icon: "questionmark.circle", tint: .orange,
                           title: "未测得",
-                          body: "后台服务不可达、超时，或其输出不是约定的 JSON，未校验。不把超时包装成结论。")
+                          body: "这一趟没拿到后台服务的任何回话：它没在跑、起不来，或没在时限内回话。"
+                              + "不把超时包装成结论。点侧栏底部的「刷新」恢复连接后再点一次「校验」。")
+        case .daemonRefused(let reason, let exitCode):
+            // 后台服务答了话、却把结论拒了回来：这一屏说的是**它的原话**，
+            // 不是"它不可达"——那是另一件没发生过的事。
+            verdictBanner(icon: "exclamationmark.triangle.fill", tint: .orange,
+                          title: "后台服务答了话，但没给出结论",
+                          body: "退出码 \(exitCode)。" + ConsoleModel.quoteDaemonWords(reason)
+                            + " 这不是配方非法：按它自己报的退出码，这一趟没走到校验那一步。"
+                            + "下一步：点侧栏底部的「刷新」确认它在跑，再点一次「校验」；"
+                            + "一直如此就把编辑器里的内容另存成文件，"
+                            + "用后台服务的命令行 --recipe-validate <路径> 跑一次看它说什么。")
         case .verdict(let valid, let recipeName, let errors):
             if valid {
                 verdictBanner(icon: "checkmark.seal.fill", tint: .green,
@@ -295,10 +308,14 @@ struct RecipesTabView: View {
         Task.detached(priority: .userInitiated) {
             // 清理放进 defer，读与不读都会删。
             defer { try? FileManager.default.removeItem(atPath: tempPath) }
-            let run = ConsoleModel.runDaemonCLI(binary: binary, arguments: ["--recipe-validate", tempPath])
+            let run = ConsoleModel.runDaemonCLI(
+                binary: binary, arguments: ["--recipe-validate", tempPath]
+            )
             let result: RecipeValidationOutcome
             if let run {
-                result = Self.parseVerdict(run.output)
+                result = Self.foldValidation(
+                    stdout: run.output, stderr: run.errorOutput, exitCode: run.status
+                )
             } else {
                 result = .daemonUnavailable
             }
@@ -332,17 +349,38 @@ struct RecipesTabView: View {
                       userInfo: [NSLocalizedDescriptionKey: "无法以独占权限创建临时文件（重试次数已用完）"])
     }
 
-    /// 解析 `--recipe-validate` 的输出 `{valid, errors[], recipeName}`（字段以
-    /// RecipeLoader.validate 的返回为准）。
-    nonisolated private static func parseVerdict(_ text: String) -> RecipeValidationOutcome {
-        guard let data = text.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let valid = object["valid"] as? Bool else {
-            return .daemonUnavailable
+    /// `--recipe-validate` 那一趟的结局折算（纯函数，供单测）。
+    ///
+    /// 从前只看 stdout：这条命令的**拒绝写在 stderr**——文件读不开是
+    /// `{"valid":false,"errors":["file not found: …"],"path":…}` 配退出码 2，
+    /// 结论编码不出去是 `{"encodeFailed":true,…}` 配退出码 1。只看 stdout 的那一条
+    /// 把它们全折成"输出不是约定的 JSON"，屏幕上于是写「后台服务不可达」——
+    /// 后台服务明明答了话、还答了自己的原因，被换成了一件没发生过的事实。
+    ///
+    /// 判据两样，都是量到的东西：`ConsoleModel.replyText` 选出的那一路回话（stdout
+    /// 优先、形状不成才看 stderr），与退出码。退出码 2 按这条命令自己的 `--help`
+    /// 说的是"它给的这个值用不了"（不是 64 那种用法错），连文件都没读，
+    /// 那份载荷里的 `valid:false` 就不是配方的结论。
+    nonisolated static func foldValidation(
+        stdout: String, stderr: String, exitCode: Int32
+    ) -> RecipeValidationOutcome {
+        let reply = ConsoleModel.replyText(stdout: stdout, stderr: stderr)
+        guard let data = reply.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return .daemonRefused(
+                reason: ConsoleModel.daemonRefusalReason(reply: reply), exitCode: exitCode
+            )
         }
-        let recipeName = object["recipeName"] as? String
-        let errors = (object["errors"] as? [String]) ?? []
-        return .verdict(valid: valid, recipeName: recipeName, errors: errors)
+        if let valid = object["valid"] as? Bool, exitCode == 0 || exitCode == 1 {
+            return .verdict(
+                valid: valid,
+                recipeName: object["recipeName"] as? String,
+                errors: (object["errors"] as? [String]) ?? []
+            )
+        }
+        return .daemonRefused(
+            reason: ConsoleModel.daemonRefusalReason(reply: reply), exitCode: exitCode
+        )
     }
 
     // MARK: - 工具栏
@@ -433,7 +471,6 @@ struct SchemaOverview {
     /// "schema 文件"，于是快照那一屏被自称成了真源）。
     let loadedPath: String?
     let schemaVersion: String?
-    let description: String?
     let required: [String]?
     let fields: [SchemaFieldRow]
     /// 原始 schema 的缩进文本（真源原貌）。
@@ -510,7 +547,6 @@ enum RecipeSchemaLoader {
                     source: "schema 文件（只读真源）",
                     loadedPath: absolute,
                     schemaVersion: overview.schemaVersion,
-                    description: overview.description,
                     required: overview.required,
                     fields: overview.fields,
                     raw: overview.raw
@@ -523,14 +559,31 @@ enum RecipeSchemaLoader {
                 source: "内置快照（schema 文件未找到）",
                 loadedPath: nil,
                 schemaVersion: overview.schemaVersion,
-                description: overview.description,
                 required: overview.required,
                 fields: overview.fields,
                 raw: overview.raw
             )
         }
         return SchemaOverview(source: "内置快照（解析失败）", loadedPath: nil, schemaVersion: nil,
-                              description: nil, required: nil, fields: [], raw: embeddedRaw)
+                              required: nil, fields: [], raw: embeddedRaw)
+    }
+
+    /// 结构卡顶部那一句**给人读**的话（纯函数，供单测）。
+    ///
+    /// 它从前是 schema 自己那句 `description` 原文。那一句是写给内核读者的契约注脚
+    /// （"…contract (P0 landing of the shared recipe validator, R35)…"），把它原样印在
+    /// 这一页上，用户读到的就是内部批次编号与一句自我说明——这一面的用户文案不许
+    /// 承载那种东西。这里只说这一屏是什么、以及它**不**替你做什么；契约原文仍然完整
+    /// 保留在下面那份原始 JSON 里，一个字没改。
+    static func userFacingSummary(for overview: SchemaOverview) -> String {
+        var sentence = "一份配方就是「一个名字 + 一串按顺序执行的步骤」。"
+        if let required = overview.required, !required.isEmpty {
+            sentence += "下面这张表列的是 \(required.joined(separator: "、")) 这些字段要写成什么样；"
+        } else {
+            sentence += "下面这张表列的是这份结构要求的字段与取值范围；"
+        }
+        sentence += "内容合不合格由「校验」交给后台服务判，这一页不替它判定。"
+        return sentence
     }
 
     private static func makeOverview(text: String?) -> SchemaOverview? {
@@ -543,7 +596,6 @@ enum RecipeSchemaLoader {
         let pretty = prettyPrinted(root)
         let props = root["properties"] as? [String: Any]
         let schemaVersion = (props?["schemaVersion"] as? [String: Any])?["const"] as? String
-        let description = root["description"] as? String
         let required = root["required"] as? [String]
         var fields: [SchemaFieldRow] = []
         if let properties = root["properties"] as? [String: Any] {
@@ -569,7 +621,7 @@ enum RecipeSchemaLoader {
                                              detail: detailParts.isEmpty ? "object" : detailParts.joined(separator: "， ")))
             }
         }
-        return SchemaOverview(source: "", loadedPath: nil, schemaVersion: schemaVersion, description: description,
+        return SchemaOverview(source: "", loadedPath: nil, schemaVersion: schemaVersion,
                               required: required, fields: fields, raw: pretty)
     }
 

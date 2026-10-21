@@ -225,7 +225,12 @@ struct ProjectsTabView: View {
                                     openInFinder(entry.evidenceStoragePath ?? model.evidenceDirectoryPath)
                                 }
                                 .controlSize(.small)
+                                // 按不动时它得自己说清为什么、以及下一步做什么：这一页
+                                // 已经量过那个去处不在盘上，`selectFile` 对不存在的位置
+                                // 什么都不做——一句"打开了"都没有，正是这一产品里的静默失效。
+                                .disabled(!evidenceDirectoryEnabled(entry))
                                 .help(evidenceDirectoryHelp(entry))
+                                .accessibilityIdentifier("gp-open-evidence-directory")
                                 Button("复制项目 ID") {
                                     NSPasteboard.general.clearContents()
                                     NSPasteboard.general.setString(entry.projectId, forType: .string)
@@ -275,16 +280,22 @@ struct ProjectsTabView: View {
         ConsoleModel.evidenceCountReadout(model.projectEvidenceCounts[projectId] ?? nil)
     }
 
-    /// 「在访达中打开证据目录」这一枚说的是哪一份档案：注册项自己写过就点它，
-    /// 没写过就明说开的是本页在读的那一份共用档案——那句必须写在控件上，
-    /// 因为这一页同时报得出"这个项目没测量"。
+    /// 「在访达中打开证据目录」这一枚的**唯一**判据（与证据页那枚同一条口径）：
+    /// 这一页量到过它要打开的那个去处，它才按得动；按不动时那句话就是理由 + 下一步。
+    /// 从前它永远可用，注册项没写目录、而本页在读的那一份又被量到不在盘上时，
+    /// 按下只是让 `NSWorkspace` 对着一个不存在的位置什么都不做。
+    private func evidenceDirectoryControl(_ entry: ProjectEntry) -> ConsoleModel.PanelControl {
+        model.projectEvidenceDirectoryControl(for: entry)
+    }
+
+    private func evidenceDirectoryEnabled(_ entry: ProjectEntry) -> Bool {
+        evidenceDirectoryControl(entry).enabled
+    }
+
+    /// 那一枚说的是哪一份档案：注册项自己写过就点它，没写过就明说开的是本页在读的
+    /// 那一份共用档案——那句必须写在控件上，因为这一页同时报得出"这个项目没测量"。
     private func evidenceDirectoryHelp(_ entry: ProjectEntry) -> String {
-        if let stored = entry.evidenceStoragePath, !stored.isEmpty {
-            return "在访达中打开这条注册项自己写的档案目录：\(stored)"
-        }
-        return "这条注册项没写档案目录，所以它自己没有可打开的档案。这一枚开的是本页在读的那一份："
-            + "\(model.evidenceDirectoryPath)（\(model.displayedStateRootCaption)）——"
-            + "那是本页共用的档案目录，不是这个项目的替身。"
+        evidenceDirectoryControl(entry).help
     }
 
     private func openInFinder(_ path: String) {

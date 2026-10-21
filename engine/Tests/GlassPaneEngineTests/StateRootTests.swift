@@ -318,7 +318,15 @@ final class StateRootTests: XCTestCase {
         let root = injectedRoot("stateroot-accepted")
         XCTAssertEqual(StateRootArgument(raw: root.path), .named(root))
         XCTAssertEqual(StateRootArgument.rejection(for: root.path), nil)
-        XCTAssertEqual(StateRootArgument(raw: "/"), .named(StateRoot(path: "/")))
+        // 这一条从前把 `--state-dir /` 判成**可用**，而 daemon 紧接着就在
+        // `tightenPermissions` 里 chmod 它拿到的那个根——非 root 时会失败，但这条断言
+        // 本身在给"文件系统根是一个状态根"作背书。2026-10-21 起改为拒绝：形状之外的
+        // 规则是"这个根归不归本装实例所有"，见 `StateRootArgument.notADedicatedRoot`。
+        XCTAssertNotNil(StateRootArgument.rejection(for: "/"))
+        XCTAssertEqual(
+            StateRootArgument(raw: "/"),
+            .rejected(StateRootArgument.rejection(for: "/") ?? "")
+        )
     }
 
     /// The refusal carries a reason and the acceptance carries a root, so the two
