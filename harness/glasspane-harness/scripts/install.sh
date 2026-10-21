@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # glasspane-harness one-click installer
 #
-#   curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.9.1/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.10.0/scripts/install.sh | bash
 #   bash scripts/install.sh                 # install (npm first, GitHub release asset as fallback)
 #   bash scripts/install.sh --dry-run       # print the plan, touch nothing
 #   bash scripts/install.sh --version 0.1.0 # pin a version

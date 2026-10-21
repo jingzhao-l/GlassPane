@@ -10,7 +10,36 @@ contract does not).
 
 ## [Unreleased]
 
-（空。本批的账归入 `0.9.1`。）
+（空。本批的账归入 `0.10.0`。）
+
+## [0.10.0] - 2026-10-21
+
+判据：minor。两条用户读得到的形状变了：`gp_diagnose` 的回包多了归属键
+`provider{id, version, method, requires}`（面 A 与 fork 两扇门都从内核的 provider 注册契约取它），
+而 provider 契约第一次有了**产品侧**消费者——此前两侧只有尺子（`kernel-conformance` 与
+`diff_kernel_implementations`）读它。四项 patch 判据（状态文件字段、退出码集合、CLI 参数、
+npm `bin` 声明）逐条未动。
+
+### Added — 场景⑤：判定生产者按内核契约注册
+
+- fork 的 `tool/glasspane/providers.ts` 注册 `glasspane-engine-ae`（diagnose / diagnose-pixel /
+  diagnose-probed，requires 用证据包自己的信号词）与 `glasspane-evidence`（capture / last-evidence）；
+  面 A 的 `mcp-shell/src/providers.ts` 经 `requireMethod` 把未声明的方法挡在帧发出之前。每条注册都过
+  内核的 parse/register，本仓不重述任何 pattern 或长度；version 取产品自己的运行版本，夹具里的
+  `1.11.0` 在产品里一个字节都不出现——抄它等于替产品认证一条产品没测过的主张。
+- 两扇门的归属句由一条既有对账钉住逐字相同。新增的两个测试文件（provider 注册 20 条、registry
+  就绪 8 条）**点进了 fork 的 fixed-point 名单**——不点进去就是住在没人跑的目录里：断言写了而 CI
+  从不执行，这种绿是假的。
+
+### Fixed — 发布 lane 不再把读副本延迟当坏发布
+
+`install the published bytes and run them` 在 0.9.1 那次 publish 被接受后 96 秒就跑去
+`npm install`，npm 回 `ETARGET … No matching version found`：具名 FAIL 的是这条 lane，发布物本身
+是好的（那版今天装得上，registry 的 `dist.shasum` 与 CI 当时打印的 tarball shasum 逐字相同）。
+现在先等 registry 读得到这个版本再装：`script/registry-readiness.ts` 把等待做成可注入时钟的纯函数，
+三种结局分开——就绪 / 预算用完走 exit 2 的 NOT OBSERVED / 问不成（transport 失败）绝不当成就绪；
+`absent` 与 `unaskable` 的分法沿用本文件既有的 `npmAnswer`（读 registry 自己的错误文本，因为 npm
+退出码对两者相同）。`--prefix` 那条路不碰 registry，所以既有的三结局负向对照形状不变。
 
 ## [0.9.1] - 2026-10-20
 
