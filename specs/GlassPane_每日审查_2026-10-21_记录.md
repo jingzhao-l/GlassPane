@@ -61,3 +61,22 @@ minor 的判据对着 1.6.2 那四项实测：CLI 参数的接受条件变了（
 判据：`content[0]` 逐字节仍是 daemon 回包，所以任何按 item 读的客户端无恙；坏的是那个自己 join 的客户端。
 **该由 iterate-skill 那条线修**（修在消费端：逐 item 取回 + 逐项分类，`_refusal_from_text` 只作用单项），
 不在本轮范围：本轮的审查面是主仓产品面，跨线授权点名的是 canonical 内核。
+
+## 5. 审查面自身的一处读数修正（不是缺陷，是提示词里的一处口径）
+
+提示词第 2 步要求"工具数目不写死，以 `kernel/schemas`、daemon `hello.capabilities` 与
+`mcp-shell/src/tools.ts` 三处实测为准，三者不一致本身就是缺陷"。本轮实测：
+
+- `mcp-shell/src/tools.ts`：16 个对外 `gp_*` 工具；其中 `DAEMON_FORWARDED_METHODS` 11 个
+  （attach/observe/act/assert_element/audit_ui/capture_view/diagnose/last_evidence/snapshot/restore/probe_status）。
+- daemon：`EngineMethod` 13 个 dispatch case，`capabilityMethods` 由它减去 `hello`/`shutdown`
+  两个纯传输方法 = 同一份 11 个，逐字相同。
+- `kernel/schemas/*.json`（8 份契约）**一个工具名、一个 socket 方法名都没有**
+  （`grep` 命中 0）——它是数据契约（evidence-pack / run-plan / recipe-config / decision-log-entry /
+  invariant-report / convergence-round-state / provider-registration / reverification-request），
+  不是方法表。所以"三处镜像"在这个仓里实际是**两处**，两处实测一致；把 schema 目录当成第三份
+  方法表去比，会比出一条永不存在的漂移。
+
+真正在方法表上作镜像的是参数词汇三处对齐（action 的 7 个动词、assert 的 5 个 property、
+selector 的 `role/title` + minLength 1 + 512 上限），Swift `EvidenceModels` ↔
+`kernel/schemas/evidence-pack.schema.json` ↔ `tools.ts` 逐字一致，本轮复核成立。
