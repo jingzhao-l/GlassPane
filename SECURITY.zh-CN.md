@@ -223,7 +223,7 @@ GlassPane 不是普通工具库：它**持有** macOS 的高危权限（辅助�
 - `bridge/glasspane_bridge.py` 以 `xcrun lldb` 的 SB API **启动新进程或 attach 到既有 pid**，读取回溯、寄存器、
   局部变量并可挂硬件观察点；attach 现成进程需手工勾选「隐私与安全性 → 开发者工具」，且该席位无查询接口。
 - 这是本项目里最强的能力：**任何能驱动桥的输入，等价于能在目标进程里读内存——而 `--setup` 比这更强**。
-  那个 flag 会被逐字插进一条 lldb `-o` 命令（`bridge/glasspane_bridge.py:703-704`），其文本作为 lldb 命令
+  那个 flag 会被逐字插进一条 lldb `-o` 命令（`bridge/glasspane_bridge.py:725-726`），其文本作为 lldb 命令
   执行（含 `script <python>`）：能设 `--setup` 者即能以**运行桥的这个用户**的身份执行任意代码——上面那句
   "在目标进程里读内存"恰恰说轻了。因此桥只作为独立 CLI/脚本资产交付，daemon 不自动 spawn lldb，socket
   命令面也没有转发到桥的路径。二次开发时请勿把桥接到 `gp_*` 工具或任何远程可影响的输入上——`--setup` 也算
@@ -334,10 +334,11 @@ GlassPane 不是普通工具库：它**持有** macOS 的高危权限（辅助�
 
 | 版本 | 是否支持 |
 |---|---|
-| 1.18.x | ✅ 当前版本线，安全修复在此发布。**测量口径（2026-10-20，随 1.18.0 取号）**：根 `package.json` 是 `1.18.0`，`node scripts/check-version.mjs` 把声明位点与 lock 条目统一到它——12 个声明位点、17 行核对（多出的 5 行是 lockfile 条目）。这条线取号时 `npm view glasspane-mcp dist-tags` 与 `npm view glasspane-install dist-tags` 仍答 `latest = 1.16.4`：`v1.17.0` 于 2026-10-19 打了 tag 却从未发布，因为发布作业的 CI-green 前置对那笔 commit 已不可能满足（见 `CHANGELOG.md` 的 1.18.0 条目）。registry 落后于仓库是设计如此，这一行写明测量日期就是为了这点落后 |
+| 1.18.x | ✅ 当前版本线，安全修复在此发布。**测量口径（2026-10-20，随 1.18.0 取号）**：真源是根 `package.json` 的 version，`node scripts/check-version.mjs` 把每一个声明位点与 lockfile 条目统一到它。这一行**刻意不写位点个数、也不写核对行数**：那些个数不是 `scripts/version-sites.mjs` 里的位点，`set-version` 只会推着被闸住的版本表格行走，留下这段散文声称一根早已漂走的线——而这句话在 `ITERATE.md` 上已经漂过一次，正因如此 `scripts/set-version.mjs` 禁止把个数抄进散文。这一行里唯一被闸读取的数字是版本格本身（`scripts/check-doc-links.mjs` 拿它与根 `package.json` 的版本线核）；下面那些是带日期的读数，不是活主张。这条线取号时 `npm view glasspane-mcp dist-tags` 与 `npm view glasspane-install dist-tags` 仍答 `latest = 1.16.4`：`v1.17.0` 于 2026-10-19 打了 tag 却从未发布，因为发布作业的 CI-green 前置对那笔 commit 已不可能满足（见 `CHANGELOG.md` 的 1.18.0 条目）。registry 落后于仓库是设计如此，这一行写明测量日期就是为了这点落后 |
 | 1.15.x 及更早（含当年把版本线统一过去的 `1.0.x` / `1.1.x`） | ❌ 不再修补——只有一条版本线向前移动，后一版取代前一版 |
 | 0.x（`glasspane-mcp@0.1.0` / `glasspane-install@1.0.0` 之前的发布） | ❌ 无修补，请升级 |
 
 **尚不承诺修复时限（SLA）**：单人维护、无安全团队，无法给出「X 天内响应/修复」的承诺。能承诺的是：
-私密通告会被阅读并回复，确认的问题会修在上面量出的当前线（`1.18.x`）上，并在 Release/CHANGELOG 里说明影响范围与规避
+私密通告会被阅读并回复，确认的问题会修在当前发布线上（就是上面那一行，版本线由
+`scripts/check-version.mjs` 从根 `package.json` 读出——这句话刻意不重复任何版本号），并在 Release/CHANGELOG 里说明影响范围与规避
 手段。需要临时规避时，最有效的两条是停掉 launchd 作业（`launchctl bootout`，见 2.5 与 2.8）或删掉 TCC 授权席位。

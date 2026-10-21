@@ -299,7 +299,7 @@ permission rather than by a secret.
   and that seat has no query API.
 - This is the strongest capability in the project: **any input that can drive the bridge is equivalent
   to being able to read memory inside the target process — and `--setup` is stronger still.** That flag
-  is interpolated verbatim into an lldb `-o` command (`bridge/glasspane_bridge.py:703-704`), so its text
+  is interpolated verbatim into an lldb `-o` command (`bridge/glasspane_bridge.py:725-726`), so its text
   runs as an lldb command (`script <python>` included): anything that can set `--setup` executes
   arbitrary code **as the user running the bridge** — not merely reading the target's memory, which is
   what the phrasing above understates. The bridge therefore ships only as a standalone CLI/script asset
@@ -446,12 +446,14 @@ permission rather than by a secret.
 
 | Version | Supported |
 |---|---|
-| 1.18.x | ✅ current release line; security fixes ship here. **Measurement (2026-10-20, at the 1.18.0 bump):** root `package.json` is `1.18.0`, and `node scripts/check-version.mjs` unifies the declared sites plus the lock entries on it — 12 declared sites, 17 checked lines (the five extra are the lockfile entries). `npm view glasspane-mcp dist-tags` / `npm view glasspane-install dist-tags` answered `latest = 1.16.4` when this line was cut: `v1.17.0` was tagged on 2026-10-19 and never shipped, because the release job's CI-green precondition can no longer be satisfied for that commit (see the 1.18.0 entry in `CHANGELOG.md`). The registry lagging the repo is by design; stating the measurement date is what makes the lag readable |
+| 1.18.x | ✅ current release line; security fixes ship here. **Measurement (2026-10-20, at the 1.18.0 bump):** the root `package.json` version is the source of truth and `node scripts/check-version.mjs` unifies every declared site plus the lockfile entries onto it. This row deliberately states **no site count and no checked-line count**: those counts are not version sites in `scripts/version-sites.mjs`, so `set-version` would bump the gated table row and leave the prose asserting a stale line — and that sentence already drifted once in `ITERATE.md`, which is why `scripts/set-version.mjs` forbids copying the count into prose. The version cell is the only figure in this row a gate reads (`scripts/check-doc-links.mjs` compares it against the root `package.json` line); the numbers below are dated readings, not live claims. `npm view glasspane-mcp dist-tags` / `npm view glasspane-install dist-tags` answered `latest = 1.16.4` when this line was cut: `v1.17.0` was tagged on 2026-10-19 and never shipped, because the release job's CI-green precondition can no longer be satisfied for that commit (see the 1.18.0 entry in `CHANGELOG.md`). The registry lagging the repo is by design; stating the measurement date is what makes the lag readable |
 | 1.15.x and older (including the `1.0.x` / `1.1.x` lines the release lines were unified onto) | ❌ no longer patched — one version line moves forward; each release replaces the previous |
 | 0.x (releases before `glasspane-mcp@0.1.0` / `glasspane-install@1.0.0`) | ❌ no patches — upgrade |
 
 **No fix-time commitment (SLA) yet**: one maintainer, no security team, so there is no "responds within
 X days / fixed within Y days" promise to make. What can be promised: private advisories are read and
-answered, confirmed issues are fixed on the current line (`1.18.x` as measured above), and the impact range plus workarounds are
+answered, confirmed issues are fixed on the current release line (the row above, as read from the root
+`package.json` by `scripts/check-version.mjs` — this sentence states no version number on purpose), and the
+impact range plus workarounds are
 stated in the Release notes and CHANGELOG. If you need a temporary workaround, the two most effective are
 stopping the launchd jobs (`launchctl bootout`, sections 2.5 and 2.8) and removing the granted TCC seats.

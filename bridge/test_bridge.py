@@ -18,7 +18,9 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -346,7 +348,10 @@ class ArgvComposition(unittest.TestCase):
         self.assertEqual(argv[:2], ["xcrun", "lldb"])
         self.assertIn("--file", argv)
         commands = [argv[i + 1] for i, token in enumerate(argv) if token == "-o"]
-        self.assertIn("command script import /abs/bridge.py", commands[0])
+        # 引号是必需的，不是装饰：这段 token 由 lldb **自己的命令分词器**再切一次，
+        # 裸路径带一个空格就裂成 `invalid pathname '/tmp/gp'`（真机实测）。见
+        # `BridgePathSurvivesLLDBsOwnTokenizer`。
+        self.assertIn("command script import '/abs/bridge.py'", commands[0])
         # Batch would end at the crash stop → one script command drives it all.
         self.assertTrue(any("run_capture_cli" in c for c in commands))
         self.assertNotIn("run", commands)
@@ -1059,6 +1064,402 @@ class WatchRequestParsing(unittest.TestCase):
         mode, refusal = gb.parse_watch_mode("sometimes")
         self.assertIsNone(mode)
         self.assertTrue(refusal)
+
+
+# ---------------------------------------------------------------------------
+# 真面（real-machine arms）
+#
+# 三条用例要跑**本机 lldb 自己**：停因枚举核对、带空格/引号的仓库路径能否真的
+# 导进来、以及一次真崩溃的判决。口径取 `engine/smoke.md` §闸门退出码契约那一条：
+# `0 = PASS / 1 = FAIL / 2 = NOT RUN`，而"打一行 SKIP 然后 exit 0"已作废——依赖不
+# 在时**必须留下可见的 skipped 一档**，且成因要指名缺什么、复算命令是什么。
+# pytest 的 skipped 与 passed 分列计数，所以这里用 skipTest(成因) 表达 NOT RUN；
+# 绝不用 return（那才是把 NOT RUN 混成 pass）。
+#
+# 第三条真崩溃采证另外要**显式开关** `GLASSPANE_REAL_LLDB=1`：它跑一次 debugserver
+# 冷启动（P6 §0 F5：本机首次 >5min），默认进 CI 会把纯逻辑泳道钉成一分钟级的红/慢，
+# 所以它与 `.p6_smoke.py`/`.t9_smoke.py` 同档——真机跑，CI 里显式不开。
+# ---------------------------------------------------------------------------
+
+BRIDGE_DIR = os.path.dirname(os.path.abspath(__file__))
+REAL_LLDB_OPT_IN = "GLASSPANE_REAL_LLDB"
+ENUM_MARKER = "@@GPSTOPENUM@@"
+TABLE_MARKER = "@@GPBRIDGETBL@@"
+
+#: 2026-10-20 在本机 `xcrun lldb` 里逐条量到的 SBStopReason 取值（留档，供无 lldb
+#: 的纯逻辑机器仍然钉得住这张表）。旧实现手抄的那张把 5 写成 frameIndexChanged、
+#: 7 写成 signal，那是 LLDB 私有 `StopReasonEnum` 的次序，SB 绑定里没有这些成员。
+MEASURED_STOP_REASON_INTS = {
+    "eStopReasonInvalid": 0, "eStopReasonNone": 1, "eStopReasonTrace": 2,
+    "eStopReasonBreakpoint": 3, "eStopReasonWatchpoint": 4, "eStopReasonSignal": 5,
+    "eStopReasonException": 6, "eStopReasonExec": 7, "eStopReasonPlanComplete": 8,
+    "eStopReasonThreadExiting": 9, "eStopReasonInstrumentation": 10,
+    "eStopReasonProcessorTrace": 11, "eStopReasonFork": 12, "eStopReasonVFork": 13,
+    "eStopReasonVForkDone": 14, "eStopReasonInterrupt": 15,
+    "eStopReasonHistoryBoundary": 16,
+}
+
+
+def run_lldb(commands, timeout=180):
+    """Drive the SAME lldb the bridge drives: `xcrun lldb --batch -o …`."""
+    argv = ["xcrun", "lldb", "--batch"]
+    for command in commands:
+        argv += ["-o", command]
+    argv += ["-o", "quit"]
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except OSError as error:
+        raise unittest.SkipTest(
+            "NOT RUN（不是 pass）: 本机跑不起 `xcrun lldb`：%r。复算命令："
+            "xcrun lldb --batch -o \"script print(1)\" -o quit。缺 Xcode 命令行工具"
+            "或开发者工具调试席位（P6 §7.1）时就是这一档；装好后重跑本条即转真。"
+            " engine/smoke.md §闸门退出码契约：NOT RUN 只许记成 skipped。" % (error,))
+
+
+def marker_payload(output, marker):
+    """Take the JSON a `-o script print('<marker>'+json)` line emitted."""
+    for line in (output or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(marker):
+            try:
+                return json.loads(stripped[len(marker):])
+            except ValueError:
+                continue
+    return None
+
+
+class RealLLDBStopReasonTable(unittest.TestCase):
+    """停因表必须与**桥所驱动的这台 lldb**逐条相等——否则下一次 lldb 挪动枚举值，
+    崩溃又会从判据里溜出去（2026-10-20 真机复算抓到的正是这一类）。"""
+
+    def _lldb_constants(self):
+        probe = run_lldb(["script print('@@GPALIVE@@')"], timeout=120)
+        if "@@GPALIVE@@" not in (probe.stdout + probe.stderr):
+            self.skipTest("NOT RUN（不是 pass）: lldb 跑起来了但没回显脚本输出，"
+                          "读不到 SBStopReason 常量。实测输出尾部：%r"
+                          % ((probe.stdout + probe.stderr)[-400:],))
+        expression = ("script import json;print('%s'+json.dumps("
+                      "{n: int(getattr(lldb, n)) for n in dir(lldb) "
+                      "if n.startswith('eStopReason')}))" % ENUM_MARKER)
+        completed = run_lldb([expression], timeout=120)
+        measured = marker_payload(completed.stdout + completed.stderr, ENUM_MARKER)
+        if not measured:
+            self.skipTest("NOT RUN（不是 pass）: 这台 lldb 没有回读 eStopReason 常量"
+                          "（绑定形态与本仓实测不同）。输出尾部：%r"
+                          % ((completed.stdout + completed.stderr)[-400:],))
+        return measured
+
+    def test_shipped_mirror_table_equals_what_lldb_reports(self):
+        """桥里那张手写的镜像表（真机上不直接参与判定，纯逻辑机器全靠它）逐条核对。"""
+        measured = self._lldb_constants()
+        mismatched = {}
+        for name, value in gb._FALLBACK_STOP_REASON_INT.items():
+            if name in measured and measured[name] != value:
+                mismatched[name] = (value, measured[name])
+        self.assertEqual(mismatched, {},
+                         "停因镜像表与本机 lldb 的实测取值不一致（表值, lldb 值）：%s"
+                         % mismatched)
+
+    def test_bridge_resolves_the_same_table_from_inside_lldb(self):
+        """production-shaped：让**桥自己**在真 lldb 里把权威表解析出来再比一次。
+        这条盯的是权威分支（`stop_reason_int_by_name()` 读 lldb 常量那条路），
+        不是把 Python 的表抄给 Python 比——所以它同时钉住前缀拼法与缺席纪律。"""
+        measured = self._lldb_constants()
+        bridge_copy = os.path.join(self._tempdir(), "glasspane_bridge.py")
+        shutil.copyfile(os.path.join(BRIDGE_DIR, "glasspane_bridge.py"), bridge_copy)
+        expression = ("script import json;print('%s'+json.dumps("
+                      "__import__('glasspane_bridge').stop_reason_int_by_name()))"
+                      % TABLE_MARKER)
+        completed = run_lldb(["command script import %s"
+                              % gb.lldb_command_quote(bridge_copy), expression],
+                             timeout=180)
+        resolved = marker_payload(completed.stdout + completed.stderr, TABLE_MARKER)
+        if resolved is None:
+            self.skipTest("NOT RUN（不是 pass）: 桥没能在真 lldb 里把停因表解析出来。"
+                          "输出尾部：%r"
+                          % ((completed.stdout + completed.stderr)[-400:],))
+        for name, value in resolved.items():
+            self.assertIn(name, measured, "桥报了一个 lldb 没有声明的停因名：%s" % name)
+            self.assertEqual(value, measured[name],
+                             "桥在真 lldb 里把 %s 解析成 %s，lldb 自己说是 %s"
+                             % (name, value, measured[name]))
+        # 缺席必须如实缺席：lldb 没声明的名字不许被镜像补进权威分支。
+        for name in gb.STOP_REASON_NAMES:
+            if name not in measured:
+                self.assertNotIn(name, resolved,
+                                 "权威分支拿镜像盖掉了 lldb 的缺席：%s" % name)
+        self.assertEqual(resolved[gb.CRASH_STOP_REASON], measured[gb.CRASH_STOP_REASON],
+                         "崩溃判据那一档（%s）与 lldb 的取值不是同一件事"
+                         % gb.CRASH_STOP_REASON)
+
+    def _tempdir(self):
+        path = tempfile.mkdtemp(prefix="gp enum ")
+        self.addCleanup(shutil.rmtree, path, True)
+        return path
+
+
+class StopReasonTableIsPinned(unittest.TestCase):
+    """纯逻辑机器上（没有 lldb 可导入）这张表照样钉得住——真面用例 skip 时不留洞。"""
+
+    def test_every_declared_stop_reason_has_a_number_and_a_word(self):
+        self.assertEqual(len(set(gb.STOP_REASON_NAMES)), len(gb.STOP_REASON_NAMES))
+        for name in gb.STOP_REASON_NAMES:
+            self.assertTrue(name.startswith("eStopReason"), name)
+            label = gb._STOP_REASON_LABEL_BY_NAME[name]
+            self.assertTrue(label and label[0].islower(), (name, label))
+        # 载荷词汇必须能在整张表上往返：写出去的词读回来还是那一档。
+        for name in gb.STOP_REASON_NAMES:
+            self.assertTrue(gb.stop_reason_matches(gb._STOP_REASON_LABEL_BY_NAME[name], name),
+                            name)
+
+    def test_table_matches_the_recorded_measurement(self):
+        self.assertEqual(gb._FALLBACK_STOP_REASON_INT, MEASURED_STOP_REASON_INTS)
+        self.assertEqual(gb.stop_reason_int_by_name(), MEASURED_STOP_REASON_INTS)
+
+    def test_the_wrong_table_that_shipped_is_gone_from_the_vocabulary(self):
+        """旧表把 5/6/7/8 写成 frameIndexChanged / noDebug / signal / threadSpec，
+        还发明了 stepOut / threadSpec 两个 SB 绑定里不存在的成员。这些词一旦回到
+        载荷里，崩溃就又会被下游读成一次干净的停住——所以直接钉住词汇表。"""
+        labels = set(gb._STOP_REASON_LABEL_BY_NAME.values())
+        for retired in ("frameIndexChanged", "noDebug", "stepOut", "threadSpec"):
+            self.assertNotIn(retired, labels, "%s 不是 SB 绑定里的停因" % retired)
+        self.assertEqual(gb.stop_reason_label("eStopReasonSignal"), "signal")
+
+    def test_crash_gate_is_the_signal_name_not_the_number_seven(self):
+        self.assertEqual(gb.CRASH_STOP_REASON, "eStopReasonSignal")
+        self.assertEqual(gb._FALLBACK_STOP_REASON_INT[gb.CRASH_STOP_REASON], 5)
+        self.assertFalse(gb.is_crash_stop(7), "7 是 exec，不是信号停：旧判据就错在这里")
+        self.assertTrue(gb.is_crash_stop(5))
+        self.assertTrue(gb.is_crash_stop("5"))
+        self.assertTrue(gb.is_crash_stop("signal"))
+        self.assertTrue(gb.is_crash_stop("lldb.eStopReasonSignal"))
+
+
+class SignalStopIsNeverACleanPass(unittest.TestCase):
+    """一次 SIGSEGV/SIGTRAP 停：`crash` 必须有内容，退出码必须非零。旧实现两处都
+    沉默（`stop == 7` 永不命中 + `0 if capture_succeeded else 1`）。"""
+
+    class Thread(object):
+        def __init__(self, reason, data=0):
+            self._reason, self._data = reason, data
+
+        def IsValid(self):
+            return True
+
+        def GetStopReason(self):
+            return self._reason
+
+        def GetStopReasonDataAtIndex(self, index):
+            return self._data
+
+    def test_signal_stop_describes_as_signal_and_carries_the_number(self):
+        self.assertEqual(gb._describe_stop(self.Thread(5)), "signal")
+        record = gb.crash_record(5, 11)
+        self.assertEqual(record, {"signal": "signal 11", "description": "signal"})
+        self.assertTrue(gb.crash_reported({"crash": record, "threads": []}), record)
+
+    def test_other_stops_leave_crash_absent_and_the_run_a_clean_zero(self):
+        for reason, label in ((3, "breakpoint"), (4, "watchpoint"), (7, "exec"),
+                              (1, "none"), (0, "invalid")):
+            self.assertEqual(gb._describe_stop(self.Thread(reason)), label, reason)
+            self.assertIsNone(gb.crash_record(reason, 0), label)
+            payload = {"status": "eStateStopped", "threads": [{"id": 1}],
+                       "stopReason": label, "crash": gb.crash_record(reason, 0)}
+            self.assertEqual(gb.outer_exit_code(payload), 0, payload)
+            self.assertTrue(gb.capture_succeeded(payload), label)
+
+    def test_signal_stop_is_delivered_but_not_reported_as_a_pass(self):
+        payload = {"status": "eStateStopped",
+                   "threads": [{"id": 1, "stopReason": "signal"}],
+                   "stopReason": "signal", "crash": gb.crash_record(5, 11)}
+        # 现场确实采到了（这是崩溃采证的本业），所以 capture_succeeded 仍为真……
+        self.assertTrue(gb.capture_succeeded(payload))
+        # ……但退出码不许把它读成"一次干净的通过"：非零，且是崩溃那一档。
+        self.assertNotEqual(gb.outer_exit_code(payload), 0)
+        self.assertEqual(gb.outer_exit_code(payload), 3)
+        self.assertTrue(gb.crash_reported(payload))
+
+    def test_a_leaked_numeric_stop_reason_still_counts_as_a_crash(self):
+        """即使某台 lldb 的停因解析不出来、载荷里飘出一个裸数字 5，判决也不能装成
+        干净通过——判据在名字上，也在任何一条线程的停因上。"""
+        for payload in ({"status": "eStateStopped", "threads": [{"id": 1}],
+                         "stopReason": "5", "crash": None},
+                        {"status": "eStateStopped", "threads": [{"id": 1, "stopReason": 5}],
+                         "stopReason": "signal", "crash": None},
+                        {"status": "eStateStopped", "threads": [],
+                         "stopReason": "signal", "crash": None}):
+            self.assertEqual(gb.outer_exit_code(payload),
+                             3 if payload["threads"] else 1, payload)
+
+    def test_crash_verdict_survives_a_table_with_unrelated_numbers(self):
+        """与 `CaptureExitCodeGuard.EXOTIC` 同一手法：换一张数值毫不相干的表，崩溃
+        判据照样成立——证明判据真的不押在 5 或 7 上。"""
+        exotic = {name: 700 + index for index, name in enumerate(gb.STOP_REASON_NAMES)}
+        signal_value = exotic[gb.CRASH_STOP_REASON]
+        self.assertTrue(gb.is_crash_stop(signal_value, exotic))
+        self.assertFalse(gb.is_crash_stop(5, exotic))
+        self.assertFalse(gb.is_crash_stop(7, exotic))
+        self.assertEqual(gb.crash_record(signal_value, 4, exotic)["signal"], "signal 4")
+        for name, value in exotic.items():
+            if name == gb.CRASH_STOP_REASON:
+                continue
+            self.assertIsNone(gb.crash_record(value, 4, exotic), name)
+
+    def test_unresolvable_stop_reason_is_reported_as_itself_not_invented(self):
+        self.assertEqual(gb._describe_stop(self.Thread(999)), "999")
+        self.assertEqual(gb.normalize_stop_reason(999), (999, None))
+        self.assertFalse(gb.is_crash_stop(999))
+        self.assertIsNone(gb.crash_record(999, 11))
+
+
+class BridgePathSurvivesLLDBsOwnTokenizer(unittest.TestCase):
+    """`-o "command script import <path>"` 的 <path> 由 **lldb 自己的分词器**再切
+    一次：仓库装在带空格的路径（macOS 家目录常见）时，旧实现交的是裸路径，实测
+    `error: module importing failed: invalid pathname '/tmp/gp'`，桥从未导入，而
+    外层把这件事报成"开发者工具权限"——一个与病因无关的补救。"""
+
+    def test_the_token_is_quoted_in_the_composed_argv(self):
+        argv = gb.build_lldb_argv("/Users/me/My Repos/GlassPane/bridge/glasspane_bridge.py",
+                                  mode="capture", exe="/tmp/crashme")
+        token = next(item for item in argv if item.startswith("command script import "))
+        self.assertEqual(token,
+                         "command script import '/Users/me/My Repos/GlassPane/bridge/glasspane_bridge.py'",
+                         token)
+        # 路径里带单引号也不能裂：shell 接片段在 lldb 分词器里实测成立。
+        self.assertEqual(gb.lldb_command_quote("/a'b/x.py"), "'/a'\\''b/x.py'")
+
+    def _import_output(self, bridge_copy):
+        """跑桥**自己组的那条 argv**（interactive 模式：import + gp-queue）。"""
+        argv = gb.build_lldb_argv(bridge_copy, mode="interactive")
+        return subprocess.run(argv, capture_output=True, text=True, timeout=180), argv
+
+    def _place_bridge(self, directory_name):
+        root = tempfile.mkdtemp(prefix="gp path ")
+        self.addCleanup(shutil.rmtree, root, True)
+        directory = os.path.join(root, directory_name)
+        os.makedirs(directory)
+        target = os.path.join(directory, "glasspane_bridge.py")
+        shutil.copyfile(os.path.join(BRIDGE_DIR, "glasspane_bridge.py"), target)
+        return target
+
+    def test_real_lldb_imports_a_bridge_sitting_on_a_spaced_path(self):
+        run_lldb(["script print('@@GPALIVE@@')"], timeout=120)
+        for name in ("with space", "with'quote and space", 'with"dquote and space',
+                     "both'\"q and space"):
+            with self.subTest(path=name):
+                bridge_copy = self._place_bridge(name)
+                try:
+                    completed, argv = self._import_output(bridge_copy)
+                except (OSError, subprocess.SubprocessError) as error:
+                    self.skipTest("NOT RUN（不是 pass）: 跑不起真 lldb：%r" % (error,))
+                output = completed.stdout + completed.stderr
+                if "importing failed" in output:
+                    self.fail("桥在路径 %r 上导不进 lldb，真实 argv：%s；输出尾部：%s"
+                              % (name, argv, output[-800:]))
+                # 导进来 ≠ 采得到：命令注册与 stop-hook 安装才是 `__lldb_init_module`
+                # 真跑过的证据。
+                self.assertIn("Stop hook #1 added.", output, output[-800:])
+                self.assertIn('"rearmLive"', output, output[-800:])
+                self.assertEqual(completed.returncode, 0, output[-400:])
+
+    def test_the_control_proves_this_assertion_has_teeth(self):
+        """同一条真 lldb、同一个带空格的副本，只把 import token 退回旧的裸路径形态：
+        必须**真的失败**并给出 "invalid pathname"。这条控制项就是"测试能红"的证明，
+        不需要改源码来演示。"""
+        bridge_copy = self._place_bridge("control space")
+        completed = subprocess.run(
+            ["xcrun", "lldb", "--batch",
+             "-o", "command script import %s" % bridge_copy,
+             "-o", "gp-queue", "-o", "quit"],
+            capture_output=True, text=True, timeout=180)
+        output = completed.stdout + completed.stderr
+        if "invalid pathname" not in output:
+            self.skipTest("NOT RUN（不是 pass）: 这台 lldb 的分词器不拆裸空格路径，"
+                          "控制项跑不出来。输出尾部：%r" % (output[-400:],))
+        self.assertNotIn("Stop hook #1 added.", output)
+        self.assertEqual(completed.returncode, 1, output[-400:])
+
+
+class NoPayloadCauseIsTriagedNotAssumed(unittest.TestCase):
+    """载荷缺席的两种成因各有各的补救：桥没导入（路径形态）与调试席位被拒（权限）。
+    从前一律写"去勾 Developer Tools"，路径里一个空格就让人勾一张永不生效的席位。"""
+
+    #: 2026-10-20 本机真 lldb 实测的失败原文（`command script import /tmp/gp sp/b.py`）
+    SPACED_PATH_STDERR = ("error: module importing failed: invalid pathname '/tmp/gp'\n"
+                          "error: module importing failed: invalid pathname "
+                          "'sp/glasspane_bridge.py'\n")
+    GATED_STDERR = ("error: process attach failed: Not allowed to attach to process\n")
+
+    def test_path_shape_failure_names_the_path_and_not_permissions(self):
+        cause, remedy = gb.no_payload_cause(self.SPACED_PATH_STDERR, "", "/tmp/gp sp/b.py")
+        self.assertEqual(cause, "bridge-not-imported")
+        self.assertIn("/tmp/gp sp/b.py", remedy)
+        for word in ("space", "quote"):
+            self.assertIn(word, remedy.lower(), remedy)
+        for permission_phrase in ("Developer Tools", "Privacy & Security"):
+            self.assertNotIn(permission_phrase, remedy,
+                             "路径形态的故障不许给出权限补救：%s" % remedy)
+
+    def test_debug_gated_failure_still_gives_the_permission_remedy(self):
+        cause, remedy = gb.no_payload_cause(self.GATED_STDERR, "", "/tmp/b.py")
+        self.assertEqual(cause, "debug-gated")
+        self.assertIn("Developer Tools", remedy)
+
+    def test_triage_does_not_swallow_the_sentinel_clue(self):
+        """分诊只回答"哪一种病因"，不许顶掉哨兵线索：哨兵从没出现（内层脚本没跑）
+        与出现了但读不出，仍然是两件事，各有各的补救。"""
+        nonce = gb.new_sentinel_nonce()
+        cause, _remedy = gb.no_payload_cause(self.SPACED_PATH_STDERR,
+                                             gb.wrap_sentinel("{broken", nonce=nonce),
+                                             "/tmp/gp sp/b.py")
+        self.assertEqual(cause, "bridge-not-imported",
+                         "lldb 明说导入失败了，就不许因为载荷形状而改口报权限")
+        self.assertEqual(gb.no_payload_cause("nothing useful at all\n", "", "/tmp/b.py")[0],
+                         "debug-gated")
+
+
+class RealMachineCrashScene(unittest.TestCase):
+    """真崩溃采证（P6 §7.5 的执行面）：`bridge/crashcanary` 是入库夹具，跑一次
+    debugserver。默认**不进 CI**（首启 >5min，P6 §0 F5），只认显式开关
+    `GLASSPANE_REAL_LLDB=1` —— 与 engine/smoke.md 那条"只认显式开关"同口径。"""
+
+    def test_crashcanary_stop_populates_crash_and_exits_non_zero(self):
+        if os.environ.get(REAL_LLDB_OPT_IN) != "1":
+            self.skipTest("NOT RUN（不是 pass）: 真崩溃采证要显式开关 "
+                          "%s=1（debugserver 首启在本机 >5min，P6 §0 F5），"
+                          "且需开发者工具调试席位（P6 §7.1）。复算命令："
+                          "GLASSPANE_REAL_LLDB=1 python3 -m pytest -q bridge -k "
+                          "RealMachineCrashScene" % REAL_LLDB_OPT_IN)
+        canary = os.path.join(BRIDGE_DIR, "crashcanary")
+        if not os.path.exists(canary):
+            self.skipTest("NOT RUN（不是 pass）: 夹具 %s 不在；按 "
+                          "bridge/crashcanary.swift 头里的 swiftc 命令重生成" % canary)
+        out = os.path.join(tempfile.mkdtemp(prefix="gp crash "), "capture.json")
+        self.addCleanup(_remove_quietly, out)
+        completed = subprocess.run(
+            [sys.executable, os.path.join(BRIDGE_DIR, "glasspane_bridge.py"),
+             "capture", "--exe", canary, "--out", out, "--timeout", "150"],
+            capture_output=True, text=True, timeout=200)
+        payload, _raw = gb.extract_sentinel(completed.stdout)
+        if payload is None or payload.get("status") == "failed" or not payload.get("threads"):
+            self.skipTest("NOT RUN（不是 pass）: 这台机器上跑不出崩溃现场（调试权限门控"
+                          "或 debugserver 未热）。退出码 %s，载荷：%s"
+                          % (completed.returncode, json.dumps(payload, ensure_ascii=False)[-500:]
+                             if payload else completed.stderr[-500:]))
+        self.assertTrue(gb.crash_reported(payload), json.dumps(payload)[:800])
+        self.assertEqual(payload["stopReason"], "signal", json.dumps(payload)[:800])
+        self.assertIsNotNone(payload["crash"])
+        self.assertIn("signal ", payload["crash"]["signal"])
+        self.assertNotEqual(completed.returncode, 0,
+                            "一次崩溃不许以 0 离场：%s" % payload["crash"])
+        self.assertEqual(completed.returncode, 3)
+
+
+def _remove_quietly(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":

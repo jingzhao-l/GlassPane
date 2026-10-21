@@ -483,7 +483,7 @@ export function classifyKillResult({ status, stderr = '', error = null } = {}) {
 }
 
 /** 这个 pid 是不是**僵尸**（已死、等父进程回收）：`kill -0` 对僵尸回 0，光靠信号探测会把
- *  一个已经不服务 socket 的进程报成"还活着、请你 sudo kill"。状态读不出来时保守回 false
+ *  一个已经不服务 socket 的进程报成"还活着、请你去收尾"。状态读不出来时保守回 false
  *  （宁可多报一个幸存者，也不放走真的还在跑的进程）。 */
 export function isZombiePid(pid, { spawn = spawnSync } = {}) {
   try {
@@ -536,13 +536,13 @@ export function terminatePids(pids, { spawn = spawnSync, sleepMs = 1000, reprobe
     let after = state(pid)
     if (after !== 'gone') {
       // 刚被 SIGKILL 的进程要等它的父进程回收（父进程正 `wait` 着的话是毫秒级）；
-      // 立刻探一次会把它读成"还活着"，于是红字让人去 sudo kill 一个已经没了的 pid。
+      // 立刻探一次会把它读成"还活着"，于是红字让人去收尾一个已经没了的 pid。
       // 给一次**有界**的再探窗口，只有窗口过后还在的才算幸存者。
       if (sleep) sleep(reprobeMs)
       else spawn('sleep', [String(reprobeMs / 1000)], { encoding: 'utf8' })
       after = state(pid)
       // 还"活着"但状态是 Z = 它已经死了，只差父进程 wait() 收尸：这种东西不持有 socket、
-      // 不需要人去 sudo kill，报成幸存者就是把人支到一条没用的命令上。
+      // 不需要人去做任何收尾动作，报成幸存者就是把人支到一条没用的命令上。
       if (after === 'alive' && isZombiePid(pid, { spawn })) after = 'gone'
     }
     if (after === 'gone') {
@@ -556,11 +556,15 @@ export function terminatePids(pids, { spawn = spawnSync, sleepMs = 1000, reprobe
   return { terminated, forced, survivors }
 }
 
-/** 幸存者（安装器发不动信号的进程）的红字（finding 5，纯函数）。
- *  这里给的必须是**人能直接执行**的动作，而不是"请检查权限"：安装器没有 root 权限，
- *  所以只有坐在键盘前的这个人能 `sudo kill -9`；他知道 pid、知道为什么必须他做、
- *  也知道做完要重跑什么。socket 还挂在这些 pid 上，所以本轮的产物从未接管——
- *  收尾那次版本核对会把这件事再钉一次。 */
+/** 幸存者（安装器收不掉的进程）的红字（finding 5，纯函数）。
+ *  这里给的必须是**能直接执行**的动作，而不是"请检查权限"；而本产品的红线是：
+ *  补救文案一律不发提权命令。发信号这条本来就分两档，两档都如实写出来——
+ *  ① 当前账号自己就能做的 `/bin/kill -9 <pid>`（安装器已经试过 TERM 与 KILL，
+ *     再报一次只是给人一个能手敲的等价动作，它不越权）；
+ *  ② 它被 EPERM 拒掉 = 这些 pid 不属于当前账号，那一步**只有坐在键盘前的这个人
+ *     能做**。这一步归人，不归脚本：本产品保留给真人的就是这种物理动作。
+ *  socket 还挂在这些 pid 上，所以本轮的产物从未接管——收尾那次版本核对会把这件
+ *  事再钉一次。退出码契约不变（调用方仍按失败说）。 */
 export function survivorText(survivors, { socketPath } = {}) {
   const pids = survivors.map((entry) => entry.pid).join(' ')
   return [
@@ -568,8 +572,10 @@ export function survivorText(survivors, { socketPath } = {}) {
     + survivors.map((entry) => `pid ${entry.pid} — ${entry.reason}`).join('；'),
     `安装器无权向这些进程发信号（它们不属于当前账号，典型是 root 拉起的旧 daemon）。`
     + `上面"已结束"那句只对确实已经不在的 pid 成立，不含这些。`,
-    `由人来收尾：先看清是谁起的 \`ps -o pid=,user=,lstart=,command= -p ${pids}\`，`
-    + `再 \`sudo kill -9 ${pids}\`，然后重跑本安装器并加 --replace-daemon。`,
+    `先试当前账号自己就能做的那条（不提权）：\`/bin/kill -9 ${pids}\`。`
+    + `它若仍被拒，就只能由坐在键盘前的人来结束这些进程——本安装器不发放提权命令，`
+    + `这一步归人。先看清是谁起的 \`ps -o pid=,user=,lstart=,command= -p ${pids}\`，`
+    + `由本人结束它们，然后重跑本安装器并加 --replace-daemon。`,
   ].join('\n')
 }
 

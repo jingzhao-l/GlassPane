@@ -575,9 +575,26 @@ test('finding5: EPERM 的 pid 进 survivors，不进 terminated（注入接缝=�
   assert.match(result.survivors[0].reason, /EPERM|不属于当前用户/)
   const text = survivorText(result.survivors, { socketPath: '/Users/dev/.glasspane/engine.sock' })
   assert.match(text, /pid 4242/)
-  assert.match(text, /sudo kill -9 4242/, '补救必须是坐在键盘前的人能执行的命令')
+  assert.match(text, /\/bin\/kill -9 4242/, '补救必须先给当前账号自己就能执行的那条（不提权）')
+  assert.doesNotMatch(text, /sudo/, '本产品不发放提权命令：收尾归人，不归 sudo')
+  assert.match(text, /只能由坐在键盘前的人|由本人/, '提权做不到的那档要如实说是人的物理动作')
   assert.match(text, /--replace-daemon/)
   assert.match(text, /engine\.sock/)
+})
+
+test('finding5: survivorText 的红字形状与"三行、含 pid、含 ps 自查"仍然成立（不发提权命令）', () => {
+  const text = survivorText([{ pid: 4242, reason: 'EPERM' }, { pid: 4300, reason: '仍在' }],
+    { socketPath: '/Users/dev/.glasspane/engine.sock' })
+  assert.equal(text.split('\n').length, 3, '消息形状不变：事实 / 诚实边界 / 收尾动作')
+  for (const pid of [4242, 4300]) {
+    assert.match(text, new RegExp(String(pid)), `每个幸存者都要被点名：缺 ${pid}`)
+  }
+  // 将 pid 填进发出去的每条命令，逐条断言它不含 sudo/提权形态。
+  for (const command of text.match(/`[^`]+`/g) ?? []) {
+    assert.doesNotMatch(command, /sudo|doas|su -|pkexec/, `补救里出现了提权形态：${command}`)
+  }
+  assert.match(text, /ps -o pid=,user=,lstart=,command= -p 4242 4300/,
+    '看清是谁起的这条自查命令仍然给得出（非提权、可直接执行）')
 })
 
 test('finding5: 真的收不掉 pid 1（root 所有），也真的收得掉一个赖着不走的孩子', (t) => {

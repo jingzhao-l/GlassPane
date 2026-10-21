@@ -27,6 +27,13 @@ Division of testing (v3.2 acceptance口径): the decidable core — queue policy
 JSON assembly, truncation, sentinel extraction, argv building — is pure and
 covered by test_bridge.py with plain python3; the SB-API execution surface is
 real-machine smoke only (§7.5), never faked into unit tests.
+
+Outer CLI exit codes (`run_outer`): 0 = a non-crash scene was captured, 1 =
+nothing was captured, 2 = lldb could not be spawned or the payload could not be
+delivered, 3 = a crash scene was captured and delivered. 3 exists because a
+signal stop used to be indistinguishable from a clean capture at both layers
+(`stopReason` came from a hand-copied enum table, so SIGSEGV rendered as
+"frameIndexChanged" with `crash: null`, and the exit code was 0).
 """
 
 import argparse
@@ -688,6 +695,21 @@ def encode_capture_spec(spec):
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
+#: `command script import` 的参数由 **lldb 自己的命令分词器**切，不是 shell：
+#: argv 里的一个 token 交给 lldb 后还会再被拆一次。本机实测（`test_bridge.py`
+#: 的 `RealLLDBImportSurvivesPathShape` 就是拿这段跑真 lldb 复算的）：
+#:   - 裸路径带空格 → `error: module importing failed: invalid pathname '/tmp/gp'`
+#:     （仓库装在带空格的路径上就永远导不进来，而外层把这件事报成"开发者工具权限"）
+#:   - 单引号成组、双引号成组都可行，**组内另一种引号是字面量**
+#:   - 单独用 `'…'` 时路径里的 `'` 会被吞掉；单独用 `"…"` 时路径里的 `"` 会被吞掉
+#:   - `'\''` 那枚 shell 接片段在 lldb 的分词器里同样成立（含两种引号的路径实测通过）
+#:   - 反斜杠转义只在空白上可靠，`\t` 这类会被原样留下 → 不采用
+#: 于是唯一一条通用形态 = 单引号成组 + 路径里的 `'` 换成 `'\''`。
+def lldb_command_quote(text):
+    """Quote `text` so lldb's command tokenizer hands it over as ONE token."""
+    return "'" + str(text).replace("'", "'\\''") + "'"
+
+
 def build_lldb_argv(bridge_path, mode, pid=None, exe=None, exe_args=None,
                     samples=TRACE_SAMPLES, extra_script=None):
     """Compose the `xcrun lldb --batch` invocation (pure; unit-tested)."""
@@ -699,7 +721,7 @@ def build_lldb_argv(bridge_path, mode, pid=None, exe=None, exe_args=None,
         argv += ["-p", str(pid)]
     if exe:
         argv += ["--file", exe]
-    argv += ["-o", "command script import %s" % bridge_path]
+    argv += ["-o", "command script import %s" % lldb_command_quote(bridge_path)]
     if extra_script:
         argv += ["-o", extra_script]
     if mode == "capture":
@@ -899,18 +921,21 @@ def run_outer(args):
     payload, _raw = extract_sentinel(completed.stdout, nonce=nonce)
     if payload is None:
         stderr_tail = completed.stderr[-2000:] if completed.stderr else ""
+        # 成因先分诊再落文案：桥没被导入（路径形态）与调试席位被拒（权限）补救
+        # 完全不同，而从前这里无论哪种都写"去勾 Developer Tools"——路径里一个空格
+        # 就让人去勾一张永远不会起效的席位。
+        _cause, remedy = no_payload_cause(stderr_tail, completed.stdout, bridge_path)
         payload = assemble_result(
             mode=args.mode,
             target={"pid": args.pid, "exe": args.exe},
             status="failed",
             threads=[],
             errors=[
-                "lldb produced no capture payload (exit %d). %s. Common cause: "
-                "developer-tools permission gates attach/launch on this machine — "
-                "grant System Settings > Privacy & Security > Developer Tools to the "
-                "calling process (P6 §7.1). lldb stderr tail: %s"
+                "lldb produced no capture payload (exit %d). %s. Cause read from "
+                "lldb's own output (%s): %s lldb stderr tail: %s"
                 % (completed.returncode,
-                   sentinel_absence_clue(completed.stdout, nonce), stderr_tail),
+                   sentinel_absence_clue(completed.stdout, nonce), _cause, remedy,
+                   stderr_tail),
             ],
         )
     try:
@@ -920,7 +945,9 @@ def run_outer(args):
         # can come from a protected --out target or a drained --send-sock alike.
         sys.stderr.write("payload delivery failed (--out / --send-sock): %s\n" % error)
         return 2
-    return 0 if capture_succeeded(payload) else 1
+    # 0/1/3：崩溃现场交付出去仍然给非零（3），调用方只看退出码也不会把一次 SIGSEGV
+    # 读成一次干净的通过。判据在 `outer_exit_code()`，纯函数、单测直接钉住。
+    return outer_exit_code(payload)
 
 
 class _Completed:
@@ -947,6 +974,11 @@ class _Completed:
 #: 我们**没有实测**（requires run）。押错的后果不是报错，而是**每次真机采集都
 #: 以 1 退出**——看着像守卫生效，其实判据已经失效（false red）。
 #: 因此：契约是**状态名**，判定不再经过枚举的字符串渲染。
+#:
+#: 退出码是 `0/1/3`（`outer_exit_code()`）：`0` = 采到了**非崩溃**现场，`1` =
+#: 什么都没采到，`3` = 崩溃现场已交付。停因同样只认枚举名（`STOP_REASON_NAMES`），
+#: 见上面那张表的实测说明——崩溃判据从前押在抄错的 `stop == 7` 上，SIGSEGV 于是
+#: 既没有 `crash` 也没有非零退出，两层一起沉默。
 _OK_STATE_NAMES = ("eStateStopped", "eStateAttached")
 
 #: LLDB `ProcessState` 的状态名全集（判定与归一只认这些名字——闭集）。
@@ -1057,6 +1089,201 @@ def capture_succeeded(payload):
     return bool(payload.get("threads"))
 
 
+#: LLDB `SBStopReason` 枚举成员全集，按**声明次序**（= 数值次序）列出。
+#: 2026-10-20 本机实测（`xcrun lldb --batch -o "script print([n for n in dir(lldb)
+#: if n.startswith('eStopReason')])"`，取值逐条由 lldb 自己给出）：
+#:   Invalid 0 · None 1 · Trace 2 · Breakpoint 3 · Watchpoint 4 · **Signal 5** ·
+#:   Exception 6 · Exec 7 · PlanComplete 8 · ThreadExiting 9 · Instrumentation 10 ·
+#:   ProcessorTrace 11 · Fork 12 · VFork 13 · VForkDone 14 · Interrupt 15 ·
+#:   HistoryBoundary 16
+#: 旧实现手抄的那张表是 LLDB 早期**私有** `StopReasonEnum` 的次序（`stepOut` /
+#: `frameIndexChanged` / `noDebug` / `threadSpec` 这些成员在 SB 绑定里根本不存在），
+#: 于是真机上 SIGSEGV 那一次停（5）被报成 `stopReason: "frameIndexChanged"` +
+#: `crash: null`，崩溃被呈现成一次干净的采集并以 0 离场——本文件里最坏的那一类
+#: 失效。判据与进程状态面同一条纪律：**契约是枚举名，不是数字**（数字由 lldb 给，
+#: 见 `stop_reason_int_by_name()`），所以换一台 lldb 取值不同也不会认错停因。
+STOP_REASON_NAMES = (
+    "eStopReasonInvalid", "eStopReasonNone", "eStopReasonTrace",
+    "eStopReasonBreakpoint", "eStopReasonWatchpoint", "eStopReasonSignal",
+    "eStopReasonException", "eStopReasonExec", "eStopReasonPlanComplete",
+    "eStopReasonThreadExiting", "eStopReasonInstrumentation",
+    "eStopReasonProcessorTrace", "eStopReasonFork", "eStopReasonVFork",
+    "eStopReasonVForkDone", "eStopReasonInterrupt", "eStopReasonHistoryBoundary",
+)
+
+#: 目标被信号打死的那一档：崩溃判据押在名字上，不押在 5 或 7 上。
+CRASH_STOP_REASON = "eStopReasonSignal"
+
+#: 上面那张表在纯逻辑 CI（没有 lldb 可导入）里的镜像：数值 = 声明次序的序号。
+#: 与 `_FALLBACK_STATE_INT` 同理——真机一律走 lldb 自己的常量，镜像不参与判定，
+#: 只为让 name↔int 的等价关系在无 lldb 的机器上同样可测。
+_FALLBACK_STOP_REASON_INT = {name: index for index, name in enumerate(STOP_REASON_NAMES)}
+
+_STOP_REASON_INT_BY_NAME = None
+
+
+def stop_reason_label(name):
+    """枚举成员名 → 载荷里的词：剥 `eStopReason` 前缀、首字母小写。
+    `eStopReasonSignal` → `signal`，`eStopReasonVForkDone` → `vforkDone`。"""
+    stripped = name[len("eStopReason"):] if name.startswith("eStopReason") else name
+    return stripped[:1].lower() + stripped[1:] if stripped else stripped
+
+
+#: 载荷词汇表（`stopReason` 字段写的就是这些）。历史样本里的 `breakpoint` /
+#: `watchpoint` / `signal` / `none` / `trace` 拼写保持不变，被纠正的是那四个
+#: 从未存在于 SB 绑定的名字。
+_STOP_REASON_LABEL_BY_NAME = {name: stop_reason_label(name) for name in STOP_REASON_NAMES}
+
+
+def stop_reason_int_by_name():
+    """停因名 -> 整数。lldb 可导入时**只**信 lldb 常量（与 `state_int_by_name()`
+    同一条权威分支纪律，不与镜像混用：混表会让镜像序号盖过真值，int→名字 反查
+    就此认错停因——那正是本次要消除的那类假象）。"""
+    global _STOP_REASON_INT_BY_NAME
+    if _STOP_REASON_INT_BY_NAME is not None:
+        return _STOP_REASON_INT_BY_NAME
+    resolved = {}
+    try:
+        import lldb
+    except ImportError:
+        lldb = None
+    if lldb is not None:
+        for name in STOP_REASON_NAMES:
+            value = getattr(lldb, name, None)
+            if value is None:
+                continue  # 这个 LLDB 版本没有该停因：如实缺席，不猜
+            try:
+                resolved[name] = int(value)
+            except (TypeError, ValueError):
+                continue  # 常量取不到 int：同样缺席，绝不让 producer 因此炸掉
+    if not resolved:
+        resolved = dict(_FALLBACK_STOP_REASON_INT)
+    _STOP_REASON_INT_BY_NAME = resolved
+    return resolved
+
+
+def normalize_stop_reason(reason, table=None):
+    """把停因归一成 (int | None, 枚举成员名 | None)。
+
+    接受四种形态（与 `normalize_state` 同口径）：int 5 / 数字串 "5" /
+    裸名 "eStopReasonSignal" / 带前缀名 "lldb.eStopReasonSignal"，另外也认
+    载荷里那个短词 "signal"（判据要能读自己写出去的东西）。归不出的回 None 名
+    ——**未知即拒绝**，不替 lldb 编一个停因；`_describe_stop` 那种"照原样把数字
+    报出去"的形态只出现在载荷里，绝不进入判定。
+    """
+    if table is None:
+        table = stop_reason_int_by_name()
+    if reason is None or isinstance(reason, bool):
+        return None, None
+    if isinstance(reason, int):
+        for name, mapped in table.items():
+            if mapped == reason:
+                return reason, name
+        return reason, None
+    text = str(reason).strip()
+    digits = text[1:] if text[:1] in ("+", "-") else text
+    if digits.isdigit():
+        value = int(text)
+        for name, mapped in table.items():
+            if mapped == value:
+                return value, name
+        return value, None
+    bare = text.rsplit(".", 1)[-1]
+    prefixed = bare if bare.startswith("eStopReason") else "eStopReason" + bare[:1].upper() + bare[1:]
+    if prefixed in STOP_REASON_NAMES and prefixed in table:
+        return table[prefixed], prefixed
+    return None, None
+
+
+def stop_reason_matches(reason, expected_name, table=None):
+    """这次停因与那个枚举成员是不是同一件事？int、数字串、名字、短词在此互解。"""
+    _actual_int, actual = normalize_stop_reason(reason, table)
+    _expected_int, expected = normalize_stop_reason(expected_name, table)
+    if actual is None or expected is None:
+        return False
+    return actual == expected
+
+
+def is_crash_stop(reason, table=None):
+    """这次停住是不是"目标被信号打死"？判据是枚举名（`CRASH_STOP_REASON`）。"""
+    return stop_reason_matches(reason, CRASH_STOP_REASON, table)
+
+
+def crash_record(reason, signal_number=None, table=None):
+    """崩溃记录只在停因确实是信号时给出；其余一律 None（= 现场里没有崩溃）。"""
+    if not is_crash_stop(reason, table):
+        return None
+    try:
+        rendered = "signal %d" % int(signal_number)
+    except (TypeError, ValueError):
+        rendered = "signal %s" % (signal_number,)
+    return {"signal": rendered,
+            "description": _STOP_REASON_LABEL_BY_NAME.get(
+                normalize_stop_reason(reason, table)[1], str(reason))}
+
+
+def crash_reported(payload):
+    """交付的这份现场里有没有崩溃。顶线程、载荷词汇、任意一条线程的停因，
+    三处任一处读到信号停就算——崩溃不许从任何一条读法上溜走。"""
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("crash"):
+        return True
+    if is_crash_stop(payload.get("stopReason")):
+        return True
+    for thread in payload.get("threads") or []:
+        if isinstance(thread, dict) and is_crash_stop(thread.get("stopReason")):
+            return True
+    return False
+
+
+def outer_exit_code(payload):
+    """外层 CLI 的退出码判据（0/1/3；2 由 `run_outer` 自己用在起不来与交付失败）。
+
+      0 = 确实停住、采到了线程，而且那次停住**不是**崩溃
+      1 = 什么都没采到（`no-process` / 零线程 / `failed`）
+      3 = 采到了崩溃现场：载荷照常交付（`emit` 在返回之前已经跑完），但退出码
+          不许把一次崩溃读成一次干净的通过
+
+    3 是本轮新增的一档。此前崩溃与"采到一帧干净的停住"共用 0，而崩溃判据又押在
+    抄错的数字上，于是 SIGSEGV 的现场既没有 `crash` 也没有非零退出——两层都沉默。
+    """
+    if not capture_succeeded(payload):
+        return 1
+    return 3 if crash_reported(payload) else 0
+
+
+def no_payload_cause(stderr_text, stdout_text=None, bridge_path=None):
+    """把"lldb 没吐载荷"分成两种成因，各自给各自的补救。
+
+    从前这条路径不分成因，一律写"开发者工具权限挡住了 attach/launch"，于是
+    一次**路径形态**故障（`command script import` 被 lldb 自己的命令分词切开，
+    桥从未被导入）收到的是"去系统设置里勾 Developer Tools"——一个与病因无关的
+    补救，而且怎么勾都不会好。lldb 的 stderr 里两种失败本来就长得不一样，
+    所以放行者是测量，不是猜测。
+
+    返回 `(cause, remedy)`：cause ∈ {"bridge-not-imported", "debug-gated"}。
+    """
+    combined = ("%s\n%s" % (stderr_text or "", stdout_text or "")).lower()
+    named_us = bridge_path if bridge_path else "glasspane_bridge.py"
+    if ("importing failed" in combined or "invalid pathname" in combined
+            or "no such file or directory" in combined
+            or "module not found" in combined):
+        return ("bridge-not-imported",
+                "the bridge itself never got imported into lldb: lldb's own command "
+                "tokenizer split `command script import %s` on whitespace, so the "
+                "checkout path is the suspect, NOT a permission seat. Reproduce with "
+                "the exact argv above and look for \"invalid pathname\" in stderr; "
+                "remedy = move the repo to a path this bug cannot reach (a directory "
+                "name carrying a space or a quote), or quote the path in the -o text. "
+                "No seat in System Settings fixes this one." % named_us)
+    return ("debug-gated",
+            "the bridge imported but produced no payload: debug attach/launch is "
+            "permission-gated on this machine (P6 §0 F1/F2, §7.1) — grant System "
+            "Settings > Privacy & Security > Developer Tools to the calling process, "
+            "or re-run inside an already-authorized Terminal session.")
+
+
 # ---------------------------------------------------------------------------
 # lldb-embedded layer (SB API). Imported only inside `xcrun lldb`.
 # ---------------------------------------------------------------------------
@@ -1094,10 +1321,16 @@ def _process_of(debugger):
 
 
 def _describe_stop(thread):
+    """停因 → 载荷词汇。数值由 lldb 自己的常量解（`stop_reason_int_by_name()`），
+    所以这张表不可能再与本机 lldb 的取值漂移——旧实现手抄的 `{5: frameIndexChanged,
+    6: noDebug, 7: signal, 8: threadSpec}` 是 LLDB 私有枚举的次序，SB 绑定里没有
+    这些成员，SIGSEGV 停（真值 5）就此被报成一次干净的停住。认不出来的取值照旧
+    原样报出去（`str(reason)`），不替 lldb 编一个名字。"""
     reason = thread.GetStopReason()
-    names = {0: "none", 1: "trace", 2: "stepOut", 3: "breakpoint", 4: "watchpoint",
-             5: "frameIndexChanged", 6: "noDebug", 7: "signal", 8: "threadSpec"}
-    return names.get(int(reason), str(reason))
+    _value, name = normalize_stop_reason(reason)
+    if name is None:
+        return str(reason)
+    return _STOP_REASON_LABEL_BY_NAME[name]
 
 
 def _collect_locals(frame):
@@ -1421,18 +1654,19 @@ def _payload_from_process(process, mode, errors=None, samples=None):
         ))
     top = process.GetSelectedThread() or process.GetThreadAtIndex(0)
     stop_reason = _describe_stop(top) if top and top.IsValid() else None
-    signal_description = None
-    try:
-        stop = top.GetStopReason()
-        if stop == 7:  # eStopReasonSignal
-            signal_description = "signal %d" % top.GetStopReasonDataAtIndex(0)
-    except Exception:
-        pass
+    # 崩溃判据走名字（`CRASH_STOP_REASON`），不再走 `stop == 7` 那个抄错的数字：
+    # 真机上信号停是 5，旧判据对一次 SIGSEGV 一条都不给，`crash` 就此是 null。
+    crash = None
+    if top and top.IsValid():
+        try:
+            crash = crash_record(top.GetStopReason(), top.GetStopReasonDataAtIndex(0))
+        except Exception:
+            crash = None  # 取不到停因/信号号：如实报"没有崩溃记录"，不猜
     # 进程状态**在此处归一一次**：int 直接取自 SB 枚举，名字由 lldb 模块常量
     # 反查（`state_int_by_name()` 在 lldb 内部走权威分支）。这条路径与 str()
-    # 无关，所以退出码判据不再押在"枚举怎么渲染"上——本文件里 `_describe_stop`
-    # 的 `stop == 7` 与 `run_capture_cli` 的 `state == lldb.eStateStopped` 本来
-    # 就是数值比较，这里补齐第三处（原先唯一用 str() 的就是这一行）。
+    # 无关，所以退出码判据不再押在"枚举怎么渲染"上——`run_capture_cli` 的
+    # `state == lldb.eStateStopped` 本来就是数值比较，这里补齐原先唯一用 str()
+    # 的那一行。停因面同一条纪律，只是权威表换成 `stop_reason_int_by_name()`。
     raw_state = process.GetState()
     try:
         state_input = int(raw_state)
@@ -1447,7 +1681,7 @@ def _payload_from_process(process, mode, errors=None, samples=None):
         threads=threads,
         registers=_collect_registers(top) if top and top.IsValid() else {},
         stop_reason=stop_reason,
-        crash={"signal": signal_description, "description": stop_reason} if stop_reason == "signal" else None,
+        crash=crash,
         watchpoints=_WATCH_QUEUE.records(),
         errors=(errors or []) + notes,
     )
