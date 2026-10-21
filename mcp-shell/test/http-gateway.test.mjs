@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildSync } from "esbuild";
 
+import { attributeCapability, providerAttributionLine } from "../dist/providers.js";
 import { assertLoopbackHost, createHttpGateway, EVIDENCE_FANOUT_BUDGET_MS, GLASSPANE_HTTP_TOKEN_ENV, MIN_TOKEN_CHARS, MIN_TOKEN_DISTINCT_CHARS } from "../dist/http-gateway.js";
 import { CALLER_VISIBLE_CEILING_MS, EngineCallError, LOG_BODY_CHARS, slowEngineRemedy, truncate } from "../dist/engine-client.js";
 import { replayUnsafePayloadAdvice, TOOL_BY_NAME, TOOL_SPECS } from "../dist/tools.js";
@@ -1835,4 +1836,45 @@ test("the gateway holds no second copy of the advice it delegates: no stale lane
   assert.match(code, /isReplayUnsafeMethod\(spec\.engineMethod\)/);
   const copies = code.match(/"act",\s*"restore",\s*"attach"/g) ?? [];
   assert.deepEqual(copies, [], `网关又抄了一份不可重放的方法集合：${JSON.stringify(copies)}`);
+});
+
+/**
+ * 本轮补的接缝对账。面 A 的"未声明就发帧之前拒 + 已声明就归属"这条规则，第一版只装在
+ * stdio 那一扇门上——HTTP 门把同一个 `diagnose` 回包原样递出去，不带归属也不查声明，
+ * 于是同一个判定从两扇门进去有两个答案（半修的形状：A 面改了，B 面还按旧的走）。
+ *
+ * 这条用例的存在方式本身就是重点：它比较的是**两扇门对同一趟调用的那一句归属文字**，
+ * 所以把 HTTP 门那一侧的 `attribution` 摘掉（本轮反向破坏做的正是这一处），或者把 stdio
+ * 那一侧的归属条目摘掉，都会在这里变红；而只测"能不能拒"的那几条测不到归属。
+ *
+ * REVERSE：把 `http-gateway.ts` 里 `ok(res, result, attribution)` 改成
+ * `ok(res, result, undefined)` → 第一条红；把 stdio 侧 `tools.ts` 里追加归属条目那一句删掉
+ * → 第二条红（两扇门就再一次不一致）。
+ */
+test("both doorways answer the provenance question with the same sentence", async () => {
+  const fake = new FakeGatewayClient();
+  fake.on("diagnose", () => ({ class: "T1", summary: "ok", operationId: ID }));
+  const { gw, base } = await startGateway(fake);
+  try {
+    const res = await fetch(`${base}/v1/tools/diagnose`, {
+      method: "POST",
+      headers: auth(),
+      body: JSON.stringify({ operationId: ID }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(typeof body.attribution, "string",
+      `HTTP 门没把归属交出来，等于让这扇门对"谁作的判定"沉默：${JSON.stringify(body)}`);
+    assert.ok(body.attribution.includes("glasspane-engine-ae"),
+      `归属行的生产者 id 不是注册的那一个：${body.attribution}`);
+
+    const claim = attributeCapability("diagnose", {});
+    assert.equal(claim.status, "ok", "diagnose 在面 A 的注册表里就该有声明");
+    if (claim.status === "ok") {
+      assert.equal(body.attribution, providerAttributionLine(claim.provider),
+        "两扇门对同一趟调用说了两句不同的归属话");
+    }
+  } finally {
+    await gw.close();
+  }
 });
