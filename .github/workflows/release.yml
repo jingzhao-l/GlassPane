@@ -140,6 +140,41 @@ jobs:
           # `set -o pipefail` turns a passing check into a failing step — which is exactly how this step
           # reddened on 2026-10-01 while naming an entry the archive did contain.
           node scripts/make-release-archive.mjs --verify "GlassPane-${VERSION}.tar.gz" "$VERSION"
+      - name: "Prove the identity gate can go red (self-test)"
+        # 这道闸自己能不能红？它比的是「哪把 key 签的」与「产品钉死的是哪把 key」，而这两件事
+        # 一旦相等就再也不分得开——所以它的绿必须是**测过红**的绿。形状与本仓其余自测同一档
+        # （kernel-pin、release-artifact、verify-published）：跑真脚本、拿真一次性 key、
+        # 退出码与正文各判一遍，「测不了」一律判红而不是放行。
+        # 四条臂：① pin 就是签名的 key → 必须 exit 0；② 一次性 key 签、拿 shipped 锚去 pin →
+        # 必须非 0 且把两枚指纹都点名（这就是缺陷本体：签名有效、key 不对）；③ 生产调用形态
+        # （不传 pin，闸自己去 import updater/lib/signature.js）→ 必须非 0；④ 签完之后改一个字节 →
+        # 必须非 0（闸量的是这份字节的签名，不是「目录里有一张能解析的签名」）。
+        # 放在签名之前：它不需要 release 环境的 secret，也不需要已构建的产物，坏在这里时
+        # 上面只花了构建的钱，而下面一步签名都还没开始。
+        run: |
+          set -euo pipefail
+          rc=0
+          out="$(bash tools/release-signing-gate.sh selftest 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::签名身份闸的自测以 exit $rc 失败（上面 FAIL 点名的是四条臂里的哪一条）。remedy：先修 tools/release-signing-gate.sh 那条被点名的判决，别放宽期望值——这条闸唯一的用途就是在 gh release create 之前挡住「签名有效但 key 不对」；它退化成套文件名字，绿的就是 v1.4.0 那个「发布绿、每台机器的自动更新死」。"
+            exit 1
+          fi
+          case "$out" in
+            *"NOT self-tested"*)
+              echo "::error::签名身份闸的自测回答了「没测量」。这条 job 有 node（上面 setup-node 已装）与 ubuntu-latest 自带的 gpg，此刻拒绝建一次性 key 就是缺陷而不是环境限制。remedy：查 gpg 是否仍在这张 runner 的 PATH 上，别把判据改成 exit 0。"
+              exit 1 ;;
+          esac
+          # 退 0 还不够：绿必须是**四条臂都跑过**的绿。只缺一条的绿说明某条判决被悄悄删掉了。
+          for arm in ARM1 ARM2 ARM3 ARM4; do
+            case "$out" in
+              *"$arm"*) ;;
+              *)
+                echo "::error::签名身份闸的自测退 0 却没有报出 $arm —— 一条没人跑过的臂等于一条没有的臂。remedy：查 tools/release-signing-gate.sh 的 cmd_selftest 是不是漏了计数或提前 return。"
+                exit 1 ;;
+            esac
+          done
+          echo "签名身份闸自测已测量：四条臂各按它点名的理由回答（1 绿 / 3 红），每条红都点名真正的分歧侧"
       - name: Sign release artifacts with GPG
         # 签名是**必须成功的一步**，不是 best-effort。这一份 `.asc` 是 updater 第 8 道校验
         # （作者性）唯一的判据：没有它，每一次定时更新都会停在 needs-consent，"自动更新"这个
@@ -177,6 +212,30 @@ jobs:
             [ -s "${f}.asc" ] || { echo "::error::${f}.asc 缺失或为空 —— 签名没有真的产出"; exit 1; }
           done
           ls -la *.asc
+      - name: "The key that signed must be the key this product pins"
+        # 上面那一步证明的是「有两份非空的 .asc」。它证明不了这两份是**谁**签的 —— 而
+        # `updater/lib/signature.js` 的第 8 道校验判的恰恰是这一件事：`classifySignature` 在
+        # 「import 进来的 ring 里有被钉的那把主指纹」**且**「`VALIDSIG` 报的就是它」时才算 verified，
+        # 其余一律 invalid；`lib/check.js` 又把 `signature-invalid` 放在 `AUTHORSHIP_CONSENT_CODES`
+        # 之外，`--consent unsigned-release` 也救不回来。所以 secret 被改名、被重新导入、或悄悄换成
+        # 另一把 key 的时候，旧链子的结果是：Release 绿着发出去、签名有效、key 不对，而每台装好的机器
+        # 对这个版本的自动更新都是死的，发布链路上没有任何一句话说出来过。
+        # 判据的两个输入都不在这个文件里落地：
+        #   · 锚：闸 `import()` `updater/lib/signature.js`，取它自己的 `PINNED_PRIMARY_FINGERPRINT`，
+        #     再经它自己的 `normalizePinnedFingerprint` 归一（抄第二份指纹进 workflow 就是本仓被咬过
+        #     两次的「两份必须一致而没人检查」，也正是 release-anchor 那套机制反对的事）；
+        #   · 签名者：`gpg --verify --status-fd 1` 的 `[GNUPG:] VALIDSIG` 第一个字段，交给
+        #     signature.js 自己的 `validSigFingerprint` 解析（不用 `--list-packets`：它只给 16 位
+        #     key id 的截断值，也不判这些字节是否真被签名验过——而 runtime 比的从来就是完整指纹）。
+        # 这一步失败时 `gh release create` 与 `gh release upload` 都还没执行，对外什么都没留下：
+        # 宁可这一版发不出去。判红把两枚指纹与可执行 remedy 一起打出来（见脚本里的 remedy_block）。
+        run: |
+          set -euo pipefail
+          # --gnupg-home 显式指回签名那一步用的 ring（同一条 job 的文件系统，密钥就在里面）。
+          # 传空不如传实：路径写出来，日志里才看得见闸问的是哪一把 key。
+          bash tools/release-signing-gate.sh check \
+            --gnupg-home "${GNUPGHOME:-$HOME/.gnupg}" \
+            -- "GlassPane-${VERSION}.tar.gz" "SHA256SUMS-${VERSION}.txt"
       - name: Create or update the release
         env:
           GH_TOKEN: ${{ github.token }}
