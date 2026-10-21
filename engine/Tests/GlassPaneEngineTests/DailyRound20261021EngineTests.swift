@@ -282,16 +282,20 @@ final class DailyRound20261021EngineTests: XCTestCase {
         )
     }
 
-    /// 能力清单与传输方法必须共用一个谓词，否则两处派生各写一遍又漂回手抄。
-    /// REVERSE：把 `isCapability` 写成恒真 → 红。
-    func testCapabilityListHasOnePredicate() {
+    /// 能力清单只有一份派生源，且 `hello`/`shutdown` 不在其中——remedy 里那句"两张表的关系"
+    /// 就是从这一份数出来的，所以它不许变成第二处手抄。（`FrameCodec.swift` 的字节被
+    /// `harness/glasspane-harness/contracts/engine-methods.json` 的 `swiftBlob` 钉住，
+    /// 顺手在那儿加一个谓词就是改一件跨仓的产物，本轮为此把重构退了回来。）
+    /// REVERSE：把 `capabilityMethods` 的过滤条件删成恒含两个传输方法 → 前两条红。
+    func testCapabilityListIsDerivedAndExcludesTransport() {
         XCTAssertEqual(EngineMethod.capabilityMethods.count, EngineMethod.allCases.count - 2)
-        for method in EngineMethod.allCases {
-            XCTAssertEqual(method.isCapability, !EngineMethod.transportMethods.contains(method))
-        }
-        XCTAssertFalse(EngineMethod.hello.isCapability)
-        XCTAssertFalse(EngineMethod.shutdown.isCapability)
-        XCTAssertTrue(EngineMethod.diagnose.isCapability)
+        XCTAssertEqual(
+            Set(EngineMethod.capabilityMethods),
+            Set(EngineMethod.allCases).subtracting([.hello, .shutdown])
+        )
+        XCTAssertFalse(EngineMethod.capabilityWireNames.contains("hello"))
+        XCTAssertFalse(EngineMethod.capabilityWireNames.contains("shutdown"))
+        XCTAssertTrue(EngineMethod.capabilityWireNames.contains("diagnose"))
     }
 
     // MARK: - 5. probe.sock 的符号链接必须在 bind 之前就被拒

@@ -1367,11 +1367,17 @@ class BridgePathSurvivesLLDBsOwnTokenizer(unittest.TestCase):
         必须**真的失败**并给出 "invalid pathname"。这条控制项就是"测试能红"的证明，
         不需要改源码来演示。"""
         bridge_copy = self._place_bridge("control space")
-        completed = subprocess.run(
-            ["xcrun", "lldb", "--batch",
-             "-o", "command script import %s" % bridge_copy,
-             "-o", "gp-queue", "-o", "quit"],
-            capture_output=True, text=True, timeout=180)
+        try:
+            completed = subprocess.run(
+                ["xcrun", "lldb", "--batch",
+                 "-o", "command script import %s" % bridge_copy,
+                 "-o", "gp-queue", "-o", "quit"],
+                capture_output=True, text=True, timeout=180)
+        except (OSError, subprocess.SubprocessError) as error:
+            # 与同组其余用例同一口径：没有 lldb 的机器（CI 的 ubuntu 那一格）要说 NOT RUN
+            # 并给出复算命令，而不是让 FileNotFoundError 把这条闸报成一次产品失败。
+            self.skipTest("NOT RUN（不是 pass）: 本机跑不起 `xcrun lldb`：%r。复算命令："
+                          "xcrun lldb --batch -o \"script print(1)\" -o quit。" % (error,))
         output = completed.stdout + completed.stderr
         if "invalid pathname" not in output:
             self.skipTest("NOT RUN（不是 pass）: 这台 lldb 的分词器不拆裸空格路径，"

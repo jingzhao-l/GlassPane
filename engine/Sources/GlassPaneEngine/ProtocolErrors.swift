@@ -68,7 +68,7 @@ public struct GPError: Error {
             // under a message that advertised the 11 in `hello.capabilities`, so one
             // frame told the caller two different things about what it answers, and the
             // wider set is exactly the copy this derivation was introduced to stop.
-            return "use a method from the protocol method table (\(EngineMethod.capabilityWireNames.joined(separator: "/"))). \(EngineMethod.allCases.count) names are dispatched in total: the \(EngineMethod.capabilityMethods.count) above are the capabilities `hello` advertises, plus the two transport methods \(EngineMethod.allCases.filter { !$0.isCapability }.map { "\($0.rawValue)" }.joined(separator: " and ")), which the daemon answers but does not advertise"
+            return "use a method from the protocol method table (\(EngineMethod.capabilityWireNames.joined(separator: "/"))). \(EngineMethod.allCases.count) names are dispatched in total: the \(EngineMethod.capabilityMethods.count) above are the capabilities `hello` advertises, plus \(EngineMethod.allCases.filter { !EngineMethod.capabilityMethods.contains($0) }.map { "`\($0.rawValue)`" }.joined(separator: " and ")), which the daemon answers but does not advertise"
         case .badParams:
             return "fix the parameters according to the method table"
         case .notAttached:
