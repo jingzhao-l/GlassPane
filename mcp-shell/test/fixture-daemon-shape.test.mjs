@@ -241,10 +241,16 @@ function swiftAdvertisedCapabilities() {
       names.add(withValue ? withValue[2] : trimmed);
     }
   }
-  const transport = /static let transportMethods: \[EngineMethod\] = \[([^\]]*)\]/.exec(source);
-  assert.ok(transport, "FrameCodec.swift 不再用 transportMethods 命名纯传输方法——清单的减法没有了源头");
-  const dropped = [...transport[1].matchAll(/\.([A-Za-z][A-Za-z0-9_]*)/g)].map((m) => m[1]);
-  assert.ok(dropped.length >= 1, `transportMethods 解析出 ${dropped.length} 个名字，这条减法已经看不见写法`);
+  // The subtraction is read where it is written: `capabilityMethods` is the one derived
+  // list, so the names it filters out ARE the transport set. An earlier version of this
+  // extractor looked for a `transportMethods` constant that the engine does not have —
+  // it had been added in a refactor that a cross-repo contract hash (`harness/glasspane-
+  // harness/contracts/engine-methods.json` pins FrameCodec.swift's bytes) then forced back
+  // out. Reading the filter instead is both the truth and independent of how it is spelled.
+  const capabilityList = /static let capabilityMethods: \[EngineMethod\] = allCases\.filter \{([^}]*)\}/.exec(source);
+  assert.ok(capabilityList, "FrameCodec.swift 不再用 `allCases.filter { … }` 派生 capabilityMethods——这条减法没有了源头");
+  const dropped = [...capabilityList[1].matchAll(/\$0\s*!=\s*\.([A-Za-z][A-Za-z0-9_]*)/g)].map((m) => m[1]);
+  assert.ok(dropped.length >= 1, `从过滤式里解析出 ${dropped.length} 个被减掉的方法，这条减法已经看不见写法`);
   // A Swift case name is not its raw value (`case lastEvidence = "last_evidence"`), so the
   // drop is matched on both spellings.
   const rawOf = new Map();
