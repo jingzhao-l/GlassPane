@@ -26,6 +26,7 @@ import {
   GP_E_REGISTRY_DRIFT,
   GP_E_UNKNOWN,
 } from "./errors.js";
+import { engineBody, validateDimension } from "./dimension.js";
 import { escapeHTML, renderHTML, renderMarkdown } from "./evidence-report.js";
 import type { EvidencePackReportView } from "./evidence-report.js";
 import {
@@ -928,8 +929,20 @@ async function handleToolForward(
   }
   const attribution = claim.status === "ok" ? providerAttributionLine(claim.provider) : undefined;
 
+  // 面 A's second doorway runs the same argument guard as the first, at the same point in the
+  // sequence: a malformed declared dimension is answered as the caller's bad request (it *is* the
+  // caller's argument), and a well-formed one never reaches the daemon. Without this leg the curl
+  // surface would forward `dimension` inside the frame — the invariant "the engine never sees our
+  // annotation" holds only where it is enforced, and two doors that disagree is the defect this
+  // file was already amended for once (see the provider-registration note above).
+  const declared = validateDimension(checked.value.dimension);
+  if (!declared.ok) {
+    fail(res, 400, declared.error.code, declared.error.message, declared.error.remedy);
+    return;
+  }
+
   try {
-    const result = await client.call(spec.engineMethod, checked.value);
+    const result = await client.call(spec.engineMethod, engineBody(checked.value));
     // Honesty-bypass guard (mirrors tools.ts §6.3): a last_evidence frame is
     // passed through the strong read-side validation before it is surfaced, so
     // a pack the engine wrote but the kernel cannot parse is reported as an
@@ -944,7 +957,7 @@ async function handleToolForward(
     }
     ok(res, result, attribution);
   } catch (error) {
-    await failEngine(res, error, spec, checked.value);
+    await failEngine(res, error, spec, engineBody(checked.value));
   }
 }
 

@@ -76,6 +76,7 @@ export const GP_E_UNKNOWN = "GP_E_UNKNOWN";
 export const GP_E_NO_USER_RECORD = "GP_E_NO_USER_RECORD";
 
 /**
+<<<<<<< HEAD
  * Shell-only: a state root **the daemon reported about itself** (`hello`'s
  * `stateRoot`) names a path this process will neither create nor re-permission —
  * the filesystem root, the account's home directory itself, or a value that is not
@@ -91,8 +92,63 @@ export const GP_E_NO_USER_RECORD = "GP_E_NO_USER_RECORD";
  * this shell's own `mkdirSync(…, 0700)` + `chmod` would obey it. `test/remedy-surface.test.mjs`
  * checks this stays absent from the daemon's enum, so the split has to be re-read if
  * the daemon ever does declare it.
+ *
+ * 它**不**列进下面那份 `SHELL_REQUEST_REFUSAL_CODES`：这一码说的不是"你给的参数不对"，
+ * 而是"服务报了一个我们不能照做的根"，改参数重试不会有用；HTTP 那一侧因此按
+ * shell-only 的规矩答 503（与 `GP_E_REGISTRY_DRIFT` 同一族："什么都没写，去看服务"），
+ * 而不是 4xx。
  */
 export const GP_E_STATE_ROOT_REFUSED = "GP_E_STATE_ROOT_REFUSED";
+
+/**
+ * Shell-only: a declared review dimension is malformed. The daemon has no dimension
+ * vocabulary at all — a dimension is the harness's annotation on a call, never an engine
+ * parameter — so this code can only ever come from the two surfaces that accept the argument,
+ * and `test/remedy-surface.test.mjs` checks it is genuinely absent from the daemon's enum.
+ * 面 B (`tool/glasspane/kernel.ts:validateDimension`) spells the same code for the same refusal:
+ * an agent that drives the app through either doorway must see one vocabulary, and
+ * `mcp-shell/test/dimension.test.mjs` is the leg that compares the two surfaces' tool lists so a
+ * slot added on one side reddens on the other.
+ */
+export const GP_E_DIMENSION = "GP_E_DIMENSION";
+
+/**
+ * Codes this shell authors **about the caller's request**, as opposed to about its own failure.
+ *
+ * They are absent from the daemon's enum for a reason that has nothing to do with blame: the
+ * daemon has no `dimension` concept to declare, because the argument is stripped before the frame
+ * is built. So "the daemon does not declare it" cannot be read as "this gateway did not finish the
+ * request", and `test/http-gateway.test.mjs` therefore partitions shell-only codes with this list
+ * instead of with enum membership — the infrastructure codes (`GP_E_ENGINE_TIMEOUT`,
+ * `GP_E_ENGINE_BACKLOG`, …) still may never be answered as a 4xx, while a code listed here must be
+ * *proven* to come from argument validation, by the HTTP test that drives the real route.
+ */
+export const SHELL_REQUEST_REFUSAL_CODES: readonly string[] = [GP_E_DIMENSION];
+=======
+ * Shell-only: a declared review dimension is malformed. The daemon has no dimension
+ * vocabulary at all — a dimension is the harness's annotation on a call, never an engine
+ * parameter — so this code can only ever come from the two surfaces that accept the argument,
+ * and `test/remedy-surface.test.mjs` checks it is genuinely absent from the daemon's enum.
+ * 面 B (`tool/glasspane/kernel.ts:validateDimension`) spells the same code for the same refusal:
+ * an agent that drives the app through either doorway must see one vocabulary, and
+ * `mcp-shell/test/dimension.test.mjs` is the leg that compares the two surfaces' tool lists so a
+ * slot added on one side reddens on the other.
+ */
+export const GP_E_DIMENSION = "GP_E_DIMENSION";
+
+/**
+ * Codes this shell authors **about the caller's request**, as opposed to about its own failure.
+ *
+ * They are absent from the daemon's enum for a reason that has nothing to do with blame: the
+ * daemon has no `dimension` concept to declare, because the argument is stripped before the frame
+ * is built. So "the daemon does not declare it" cannot be read as "this gateway did not finish the
+ * request", and `test/http-gateway.test.mjs` therefore partitions shell-only codes with this list
+ * instead of with enum membership — the infrastructure codes (`GP_E_ENGINE_TIMEOUT`,
+ * `GP_E_ENGINE_BACKLOG`, …) still may never be answered as a 4xx, while a code listed here must be
+ * *proven* to come from argument validation, by the HTTP test that drives the real route.
+ */
+export const SHELL_REQUEST_REFUSAL_CODES: readonly string[] = [GP_E_DIMENSION];
+>>>>>>> origin/main
 
 export interface ToolErrorText {
   code: string;
