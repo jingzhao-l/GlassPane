@@ -356,15 +356,34 @@ public final class EvidenceStore {
         // there, so this judgment is the one that decides the published mode). The
         // bytes of the existing entry are kept as the second line of defence for
         // the branch where the verdict contradicts itself mid-write.
-        let priorBytes: Data? = Self.isDeletableEntry(destination)
-            ? try? Data(contentsOf: destination)
-            : nil
-        if priorBytes != nil, let defect = isolationCheck(filePath) {
+        //
+        // What the gate is: the **name**, not the read. Gating the pre-flight on
+        // `priorBytes != nil` (the shape until 2026-10-22) asked the backup whether
+        // the overwrite was allowed, and an entry this store cannot read — mode 000,
+        // a foreign `deny read` ACL, anything that makes `Data(contentsOf:)` throw —
+        // answered "no backup", so the pre-flight was skipped entirely. Then
+        // `replaceItemAt` published over the pre-existing entry (its bytes gone with
+        // the destination it replaced), the post-publish verdict failed, and with no
+        // prior bytes to restore the refusal ran `removeAfterRefusal(filePath)` and
+        // unlinked the name too. The audit pack that existed before the call did not
+        // exist after it — the exact outcome the comment above forbids. `priorBytes`
+        // therefore decides only whether a refused overwrite can be rolled back; it
+        // decides nothing about whether the overwrite may be attempted.
+        let nameHoldsEntry = Self.isDeletableEntry(destination)
+        let priorBytes: Data? = nameHoldsEntry ? try? Data(contentsOf: destination) : nil
+        if nameHoldsEntry, let defect = isolationCheck(filePath) {
+            // When the previous entry could not be read, this refusal is the only
+            // thing that stood between the archive and a lost entry, and the reader
+            // has to be told both halves: nothing was published, and nothing here
+            // could have rolled a publication back.
+            let unbacked = priorBytes == nil
+                ? " — the entry already under that name could NOT be read by this process, so this refusal is not backed by a copy of it: nothing was published and that entry stands exactly as it was"
+                : ""
             log.error("""
             evidence entry \(filePath) cannot be isolated, so nothing may be published onto it: \
             \(defect) — the existing entry was left exactly as it was, and this write is refused \
             rather than replaced-then-undone (a refusal that removed the published name destroyed \
-            the audit trail instead of protecting it)
+            the audit trail instead of protecting it)\(unbacked)
             """)
             return false
         }
@@ -411,12 +430,12 @@ public final class EvidenceStore {
                 // pre-flight above passed and the published name then contradicted
                 // it (somebody changed the attributes mid-write). Removing the name
                 // would still delete a pack that was in the archive a moment ago, so
-                // the bytes that were there come back first.
-                if let priorBytes {
-                    restorePriorBytes(priorBytes, to: filePath, operationId: pack.operationId)
-                } else {
-                    removeAfterRefusal(filePath)
-                }
+                // the bytes that were there come back first — and when this process
+                // never got those bytes, nothing is removed at all.
+                undoPublishedRefusal(
+                    filePath: filePath, priorBytes: priorBytes,
+                    nameHoldsEntry: nameHoldsEntry, operationId: pack.operationId
+                )
                 return false
             }
             // 改名的持久化点在**目录项**上：pack 的字节已经 fsync 过，而"这个名字
@@ -452,11 +471,13 @@ public final class EvidenceStore {
             }
             if let defect = isolationCheck(filePath) {
                 log.error(isolationRefusalReport(filePath, defect: defect, route: "fallback"))
-                if let priorBytes {
-                    restorePriorBytes(priorBytes, to: filePath, operationId: pack.operationId)
-                } else {
-                    removeAfterRefusal(filePath)
-                }
+                // The same rule as the rename route, and the same three facts: the
+                // fallback overwrites a pre-existing entry just as `replaceItemAt`
+                // does, so an entry it cannot put back is an entry it must not remove.
+                undoPublishedRefusal(
+                    filePath: filePath, priorBytes: priorBytes,
+                    nameHoldsEntry: nameHoldsEntry, operationId: pack.operationId
+                )
                 return false
             }
             // 兜底这条路同样不能把"没落盘"写成"存好了"：`Data.write(.atomic)` 之后
@@ -539,6 +560,40 @@ public final class EvidenceStore {
         } catch {
             log.error("refused evidence file \(path) could not be removed after the isolation failure (\(error)) — it is still on disk and it is NOT owner-only; delete that one file by name")
         }
+    }
+
+    /// Undo a publication the isolation verdict refused *after* it landed, without
+    /// ever removing an entry that was in the archive before the call.
+    ///
+    /// Three facts, in this order, because the honest answer differs for each:
+    /// - this process holds the bytes that were there → put them back;
+    /// - the name held an entry but this process never got its bytes → there is
+    ///   nothing to restore and no licence to delete: leave the name and report the
+    ///   exposure. After the pre-flight in `write` this arm is unreachable (a name
+    ///   holding one of this archive's entries is refused before anything is
+    ///   published onto it), so it is written to say **which fact it could not
+    ///   restore** and never to unlink — unlinking here is defect 7 itself, an
+    ///   entry deleted by a refusal that was refusing to modify it;
+    /// - the name did not pre-exist → this call published it, so withdrawing the
+    ///   publication removes only what this call created.
+    private func undoPublishedRefusal(
+        filePath: String, priorBytes: Data?, nameHoldsEntry: Bool, operationId: String
+    ) {
+        if let priorBytes {
+            restorePriorBytes(priorBytes, to: filePath, operationId: operationId)
+            return
+        }
+        guard nameHoldsEntry else {
+            removeAfterRefusal(filePath)
+            return
+        }
+        log.error("""
+        evidence pack \(filePath) failed the isolation verdict after it had been published, and the \
+        archive entry that stood under that name before this call could not be read, so there were no \
+        prior bytes to restore — the name was LEFT ON DISK rather than unlinked (unlinking it would \
+        have removed an entry this write never held the contents of). What is under that name now are \
+        the refused bytes: check that one file by hand, and delete it by name only if you accept that
+        """)
     }
 
     /// Put back the bytes a refused replacement had overwritten (defect 7).

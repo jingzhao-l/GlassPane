@@ -58,11 +58,19 @@ final class EvidenceCountNoFallbackTests: XCTestCase {
     // MARK: - 端到端：真的读一份注册表
 
     /// 在沙箱里造一份档案目录，放 `files` 个档案名的文件。
+    ///
+    /// 名字必须**合 daemon 的规格**：`op_` + 26 个 Crockford 字符 + `.json`。从前这里写的是
+    /// `op_` + 23 个 0 + 序号（24 个字符），面板那套"凡是 `.json` 都算一条"的松判据量不出差别，
+    /// 于是这份夹具一直绿着。面板的计数现在改走 `EvidenceStore.isDeletableEntry`（与
+    /// `stats()` 同一个谓词），不合规格的名字一条都不数——夹具不修的话，这两条断言量的就
+    /// 是"造出来的文件名不合法"，而不是面板本来要回答的那个问题。
     private func makeArchive(_ directory: String, files: Int) throws {
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        let alphabet = Array("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
         for index in 0..<files {
+            let body = String(repeating: "0", count: 25) + String(alphabet[index % alphabet.count])
             try Data("{}".utf8).write(
-                to: URL(fileURLWithPath: directory + "/op_00000000000000000000000\(index).json")
+                to: URL(fileURLWithPath: directory + "/op_\(body).json")
             )
         }
     }

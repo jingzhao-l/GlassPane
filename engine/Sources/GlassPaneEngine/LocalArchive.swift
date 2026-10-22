@@ -374,14 +374,23 @@ public enum LocalArchive {
     /// 共用档案去数：那等于替一个项目宣称它没有的测量。`fallback:` 参数与它的
     /// `EvidenceStore.defaultDirectory` 缺省值已删（面板侧不再传），因为默认值
     /// 就是那条替身路径本身。
+    ///
+    /// 计数的判据与 daemon **同一个谓词**（defect 8 的同一句话）：`EvidenceStore.isDeletableEntry`，
+    /// 不是 `pathExtension == "json"`，也不止于"名字合规格"。前者把 `settings.json`、一个叫
+    /// `x.json` 的目录、一个不合规范的 `op_*.json` 都算成已归档证据；后者仍会把一个**取了
+    /// 合规格名字的目录或符号链接**算进条数，而 `stats()` 走的是 `archiveListing` 那一层
+    /// （`isDeletableEntry`：合规格名字 + 普通文件 + 不是符号链接），于是同一个目录、两个数字，
+    /// 用户看到的是面板这一个。缺席的目录仍回 nil，不折算成 0 条。
     public static func evidenceCount(at path: String?) -> Int? {
         guard let path, !path.isEmpty else { return nil }
         guard FileManager.default.fileExists(atPath: path) else { return nil }
         let url = URL(fileURLWithPath: path)
         guard let listed = try? FileManager.default.contentsOfDirectory(
-            at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+            at: url,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
         ) else { return nil }
-        return listed.filter { $0.pathExtension == EvidenceStore.fileExtension }.count
+        return listed.filter { EvidenceStore.isDeletableEntry($0) }.count
     }
 
     // MARK: 审批

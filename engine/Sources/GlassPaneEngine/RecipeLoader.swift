@@ -155,9 +155,15 @@ public struct RecipeLoader {
             // rejects, which is the one-recipe-two-verdicts defect. The message
             // names the unit it enforced, since "258" is not the number of
             // anything a reader would eyeball in that string.
-            // Other `String.count` caps still exist in this target
-            // (`ParamValidation`, `EvidenceModels.summary`); those are different
-            // fields with their own contract sides and are not touched here.
+            // Other length caps in this target measure a **different** unit, and
+            // that is a decision rather than an accident: `ParamValidation.length`
+            // counts UTF-16 units and `EvidenceModels` measures `summary` in
+            // UTF-16 units, because the contract those two read is the published
+            // validator's (`z.string().max(...)` answers in code units). This file
+            // counts code points because the contract it mirrors is the frozen
+            // schema's `maxLength` (see `nameMaxLength` above, and
+            // `testAstralNameFollowsTheSchemaAndStillDivergesFromZod`, which pins
+            // the divergence on both sides so nobody discovers it as a surprise).
             let codePoints = value.unicodeScalars.count
             if codePoints > nameMaxLength {
                 errors.append("'name' is \(codePoints) characters (Unicode code points); maximum is \(nameMaxLength)")

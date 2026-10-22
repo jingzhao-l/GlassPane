@@ -17,6 +17,16 @@ public final class DebugCapabilityProbe {
         case spawnFailed
     }
 
+    /// The one and only representation of "the child never started".
+    ///
+    /// `ProcessRunner.run` is its sole producer (it prefixes the thrown error's
+    /// `localizedDescription` with it), `classify` is its sole reader, and the
+    /// marker's meaning is deliberately *not* a permission statement: a process
+    /// that never existed was never asked whether it may be debugged. Keeping it
+    /// as one constant is what stops a second, parallel spelling of the same fact
+    /// from appearing next to it.
+    static let spawnFailurePrefix = "spawn failed:"
+
     public struct Snapshot: Codable, Equatable {
         public let launch: Outcome
         public let attach: Outcome
@@ -67,7 +77,11 @@ public final class DebugCapabilityProbe {
             do {
                 try process.run()
             } catch {
-                return (nil, false, "spawn failed: \(error.localizedDescription)")
+                // The marker is what `classify` reads (see `spawnFailurePrefix`): an
+                // EPERM here means the debugger never started, so the words that
+                // follow it are the OS's complaint about `fork`/`exec`, not an answer
+                // to "may this seat debug".
+                return (nil, false, "\(DebugCapabilityProbe.spawnFailurePrefix) \(error.localizedDescription)")
             }
             // 读管道与等退出必须**同时**进行。旧写法在轮询循环**之后**才
             // `readDataToEndOfFile()`：`lldb --batch` 的输出一旦超过管道的内核缓冲
@@ -102,7 +116,9 @@ public final class DebugCapabilityProbe {
             // 一次 use-after-close。后台块自己收尾、只往收集器里追加，没有别的作用。
             _ = reader.wait(timeout: .now() + Self.drainGraceSeconds)
             let text = String(data: collected.value, encoding: .utf8) ?? ""
-            if text.hasPrefix("spawn failed:") { return (nil, false, text) }
+            // A child that printed the marker itself is still not a permission answer:
+            // the one representation of "never spawned" keeps the one verdict.
+            if text.hasPrefix(DebugCapabilityProbe.spawnFailurePrefix) { return (nil, false, text) }
             return (timedOut ? nil : process.terminationStatus, timedOut, text)
         }
 
@@ -209,8 +225,21 @@ public final class DebugCapabilityProbe {
     ///
     /// 例外只有一条，就是上面那段：拒绝串里**先认出夹具寿命**的那一种。它不是"软化拒绝"
     /// ——一次没发生的拒绝被写成 `denied`，和一次没发生的成功被写成 `ok` 是同一种错。
+    ///
+    /// 判据顺序的第 0 条（2026-10-22 轮，P2）：**先认出"根本没起来"**。
+    /// `ProcessRunner.run` 在 `process.run()` 抛错时回 `spawn failed: <error>`，而拒绝串
+    /// 扫描排在它前面：EPERM 的 `localizedDescription`（"Operation not permitted"）本身就
+    /// 带着 `not permitted`，于是一次**从未问过系统**的失败被写成 `.denied`——
+    /// `glasspaned --check-developer-tools` 打印 `attach: denied`，面板显示「调试被系统拒绝」
+    /// 并把人送去勾 TCC 那个复选框，而那台机器缺的是可执行文件，不是授权。这正是本函数
+    /// 自己承诺不许发生的事（"未知失败按 spawnFailed 原样上报，绝不折进权限结论"）。
+    ///
+    /// 只认**前缀**，因为 `spawnFailurePrefix` 的唯一生产者把标记放在串首；已经起来的
+    /// lldb 在输出中间说 "spawn failed: … not permitted"（例如断点命令自己又 spawn 了一次）
+    /// 仍是一次实测拒绝。
     static func classify(_ run: (exit: Int32?, timedOut: Bool, output: String)) -> Outcome {
         let text = run.output
+        if text.hasPrefix(spawnFailurePrefix) { return .spawnFailed }
         if !reportsVictimLifetime(text),
            text.contains("Not allowed to attach") || text.contains("attach failed")
             || text.contains("not permitted") { return .denied }

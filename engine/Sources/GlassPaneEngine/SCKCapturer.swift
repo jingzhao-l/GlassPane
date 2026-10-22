@@ -25,9 +25,10 @@ import AppKit
 /// and refuses to measure at all when the fallback would be needed under an overlap.
 ///
 /// Pixel scale source differs per branch: macOS 14+ reads
-/// `SCContentFilter.pointPixelScale`; macOS 13 lacks that property, so path B
-/// falls back to the containing `NSScreen.backingScaleFactor` (AppKit logical
-/// frame coordinates match SCK's display-logical space).
+/// `SCContentFilter.pointPixelScale`; macOS 13 lacks that property, so path B falls back to
+/// the backing scale of the **one** screen whose frame overlaps the window — and refuses
+/// when that reading is ambiguous or absent, because `NSScreen.frame` is Cocoa's bottom-left
+/// global space while `SCWindow.frame` is SCK/CG's top-left one (see `streamPixelScale`).
 public enum SCKCapturer {
 
     /// Wall-clock budget for ONE stage of one capture, not for the capture as a
@@ -698,11 +699,22 @@ public enum SCKCapturer {
         // 13 那条流路径在本仓历史上从来没产出过帧（帧输出从前没登记），所以这个假设
         // 从未在那条路上被运行验证过；让它显式，是"证据不能建在一个没核过的默认值上"。
         let region = sourceRect ?? windowFrame
+        // 倍率量不到就拒绝这次采集，而不是拿一个假设的倍率产图：见 `streamPixelScale`。
+        guard let scale = streamPixelScale(for: windowFrame) else {
+            throw ChannelError.pixelCaptureDenied(reason:
+                "the macOS 13 capture path cannot measure the pixel scale for a window at "
+                + "\(windowFrame): this release has no `SCContentFilter.pointPixelScale`, and the "
+                + "screen-overlap reading is either absent or ambiguous (the screen frames and the "
+                + "window frame are named in two different global coordinate spaces). A scale is "
+                + "not something this channel may assume — an assumed 2x would put interpolated "
+                + "pixels into the archived diff as if they had been measured."
+            )
+        }
         let config: SCStreamConfiguration
         switch configuration(
             region: region,
             displayLocalCrop: sourceRect,
-            scale: streamPixelScale(for: windowFrame)
+            scale: scale
         ) {
         case .configured(let built):
             config = built
@@ -789,11 +801,31 @@ public enum SCKCapturer {
         }
     }
 
-    /// macOS 13 无 `pointPixelScale`，取包含窗口的屏幕倍率（AppKit 与 SCK
-    /// 的逻辑坐标系一致）；找不到时保守用 2x。
+    /// macOS 13 无 `pointPixelScale`，能用的读数只有「这块窗口落在**恰好一块**屏幕上」
+    /// 那一种无歧义情形。为什么只信那一种：`NSScreen.frame` 站在 Cocoa 的**左下**原点
+    /// 全局空间，`SCWindow.frame` 站在 SCK/CG 的**左上**原点全局空间（本文件 `cropRect`
+    /// 一节 :582-595 就是按后者写的），所以多屏时按 `intersects` 挑屏挑到的可能是另一块
+    /// ——倍率拿错，产出的是插值图，而那张图会被当**测量值**归档。单屏时 y 翻转不改变
+    /// "相交/不相交"的答案，这个读数才站得住。
+    ///
+    /// 从前这里在挑不到屏幕时 `?? 2.0`：一次没量到就替用户的显示器宣布它是 Retina。
+    /// 与本文件 :15/:163/:518 同一条规矩——量不到就走 `pixelCaptureDenied`，不许拿一个
+    /// 假设的值当证据。
+    static func pixelScale(from screens: [(frame: CGRect, scale: CGFloat)],
+                           windowFrame: CGRect) -> CGFloat? {
+        let hits = screens.filter {
+            $0.frame.intersects(windowFrame) && $0.scale.isFinite && $0.scale > 0
+        }
+        guard hits.count == 1 else { return nil }
+        return hits[0].scale
+    }
+
     @available(macOS 13.0, *)
-    private static func streamPixelScale(for windowFrame: CGRect) -> CGFloat {
-        NSScreen.screens.first(where: { $0.frame.intersects(windowFrame) })?.backingScaleFactor ?? 2.0
+    private static func streamPixelScale(for windowFrame: CGRect) -> CGFloat? {
+        pixelScale(
+            from: NSScreen.screens.map { ($0.frame, $0.backingScaleFactor) },
+            windowFrame: windowFrame
+        )
     }
 
     /// 单帧捕获桥：首帧 `CVPixelBuffer` 到达即唤醒等待方；`didStopWithError`

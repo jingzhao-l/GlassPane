@@ -31,6 +31,16 @@ enum SocketDirectoryRule {
         // create names there. The archive side refuses exactly this shape for the same
         // reason (`EvidenceStore.nameIsUsableArchiveDirectory`: "chmod 会跟着符号链接走").
         if let defect = leafSymlinkDefect(directory) { return defect }
+        // Measure the leaf, then act — the same order the archive side keeps in
+        // `EvidenceStore.nameIsUsableArchiveDirectory`. Until 2026-10-22 the
+        // not-a-directory verdict sat *below* the `createDirectory` and the
+        // `chmod(0700)` that follow, so `--socket-path /Users/me/notes/engine.sock`
+        // with `notes` a regular file re-permissioned that file (a mode this run has
+        // no business setting: the name is not a socket directory, and 0700 is not
+        // what the owner wrote there) and only then refused. `createDirectory` under
+        // `try?` keeps whatever it reports about a name that is already there, so
+        // `chmod` was the step that changed the disk while nothing was said about it.
+        if let defect = leafNotDirectoryDefect(directory) { return defect }
         try? FileManager.default.createDirectory(
             atPath: directory,
             withIntermediateDirectories: true,
@@ -51,7 +61,7 @@ enum SocketDirectoryRule {
             return "\(directory) cannot be examined after chmod (\(String(cString: strerror(code)))) — isolation unproven"
         }
         guard (info.st_mode & S_IFMT) == S_IFDIR else {
-            return "\(directory) is not a directory (mode \(String(format: "%04o", Int(info.st_mode & 0o777))))"
+            return notDirectoryDefect(directory, measuredMode: Int(info.st_mode & 0o777))
         }
         let owner = Int64(info.st_uid)
         if owner != getuid() {
@@ -76,6 +86,32 @@ enum SocketDirectoryRule {
         guard lstat(directory, &info) == 0 else { return nil }
         guard (info.st_mode & S_IFMT) == S_IFLNK else { return nil }
         return "\(directory) is a symlink — the socket would be bound through it into whatever it points at, while the parent checks below can only see this path. Refusing without following it (the same rule the evidence archive applies to its directory, `EvidenceStore.nameIsUsableArchiveDirectory`): point --state-dir at a real directory this account owns"
+    }
+
+    /// The leaf's own type again, taken without following it: a name that **is**
+    /// there and is not a directory is refused before `createDirectory` or `chmod`
+    /// gets to act on it. A missing leaf is not a defect — `lstat` failing with
+    /// ENOENT is the ordinary "the daemon creates it" case, and the `createDirectory`
+    /// this check guards is exactly the call that creates it.
+    ///
+    /// A symlink at the leaf is answered by `leafSymlinkDefect`, which `enforce`
+    /// asks **first**: calling it "not a directory" would be a different lie about
+    /// the same name, and the refusal that follows the link is what makes that shape
+    /// dangerous. Nothing here resolves or modifies the name — it only reads it.
+    static func leafNotDirectoryDefect(_ directory: String) -> String? {
+        var info = stat()
+        guard lstat(directory, &info) == 0 else { return nil }
+        guard (info.st_mode & S_IFMT) == S_IFDIR else {
+            return notDirectoryDefect(directory, measuredMode: Int(info.st_mode & 0o777))
+        }
+        return nil
+    }
+
+    /// The one spelling of "this leaf is not a directory". The pre-flight and the
+    /// re-read after `chmod` both use it, so the message cannot fork into two
+    /// variants a reader — or a test matching on it — has to learn separately.
+    static func notDirectoryDefect(_ directory: String, measuredMode: Int) -> String {
+        "\(directory) is not a directory (mode \(String(format: "%04o", measuredMode)))"
     }
 
     /// The leaf's own checks say nothing about the path above it, and that is the

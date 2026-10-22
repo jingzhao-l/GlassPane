@@ -401,8 +401,9 @@ public final class ProbeSocketServer {
                 // as the whole story.
                 log.error(
                     "probe fd \(clientFD) sent \(unmappedStateFrames) state frame(s) the daemon could not"
-                        + " map to a state channel (first source=\"\(firstUnmappedSource ?? "?");\""
-                        + " schema lanes are z1-macro/z2-mirror/z3-kvc)"
+                        + " map to a state channel (first source=\""
+                        + ProbeSocketServer.logSafePeerText(firstUnmappedSource ?? "?")
+                        + ";\" schema lanes are z1-macro/z2-mirror/z3-kvc)"
                 )
             }
             closeOwned(clientFD)
@@ -468,7 +469,12 @@ public final class ProbeSocketServer {
                     continue
                 }
                 if case .malformed(let reason) = frame {
-                    log.error("probe frame malformed from pid \(pid): \(reason)")
+                    // `reason` quotes the peer's own frame type back, so it is
+                    // peer bytes reaching the log just like the two state sites.
+                    log.error(
+                        "probe frame malformed from pid \(pid):"
+                            + " \(ProbeSocketServer.logSafePeerText(reason))"
+                    )
                     rejectedFrames += 1
                     continue
                 }
@@ -478,7 +484,8 @@ public final class ProbeSocketServer {
                     if firstUnmappedSource == nil {
                         firstUnmappedSource = rawSource
                         log.error(
-                            "probe pid \(pid) reports state source \"\(rawSource)\", which is none of the"
+                            "probe pid \(pid) reports state source \""
+                                + ProbeSocketServer.logSafePeerText(rawSource) + "\", which is none of the"
                                 + " schema's state channels; the daemon will not name a channel it cannot"
                                 + " read (R6-15), so a probe that declares no channel in its hello gets no"
                                 + " stateDiff (A-09)"
@@ -510,7 +517,10 @@ public final class ProbeSocketServer {
            let rejection = ProbeSocketServer.helloRejectionReason(
                 claimedPID: hello.pid, peer: peer, daemonUID: ProbeSocketServer.daemonUID
            ) {
-            log.error("probe hello rejected (app \(hello.appName) v\(hello.probeVersion)): \(rejection)")
+            log.error(
+                "probe hello rejected (app \(ProbeSocketServer.logSafePeerText(hello.appName))"
+                    + " v\(ProbeSocketServer.logSafePeerText(hello.probeVersion))): \(rejection)"
+            )
             return "peer credential check failed: \(rejection)"
         }
         guard inbox.register(hello) else {
@@ -534,8 +544,10 @@ public final class ProbeSocketServer {
         stateLock.unlock()
         let uidText = peer.uid.map { "\($0)" } ?? "unreadable"
         log.info(
-            "probe connected: \(hello.appName) pid \(hello.pid) v\(hello.probeVersion)"
-                + " caps [\(hello.capabilities.joined(separator: ","))] — peer uid \(uidText) authenticated"
+            "probe connected: \(ProbeSocketServer.logSafePeerText(hello.appName)) pid \(hello.pid)"
+                + " v\(ProbeSocketServer.logSafePeerText(hello.probeVersion))"
+                + " caps [\(ProbeSocketServer.logSafePeerText(hello.capabilities.joined(separator: ",")))]"
+                + " — peer uid \(uidText) authenticated"
         )
         // No `hello_ack`: the §2.1 command whitelist has no ack frame and
         // nothing enforced the rate it advertised, so the frame only implied a
@@ -849,6 +861,38 @@ public final class ProbeSocketServer {
             return "hello declares pid \(claimedPID) but the socket peer is pid \(peerPID)"
         }
         return nil
+    }
+
+    /// A peer-supplied token may not reach the daemon log raw.
+    ///
+    /// The failure mode is the one `AgentText` exists for (R5-03): this process's
+    /// stderr is redirected by launchd into `~/.glasspane/installer-daemon.log`
+    /// and printed with `--verbose`, so a `state.source`, a malformed frame's
+    /// type, or a hello's `appName`/`probeVersion`/`capabilities` carrying an
+    /// ANSI/OSC sequence acts on whatever renders that line next — and a raw
+    /// `\n` inside it forges a second log line the daemon never wrote. The
+    /// reader is the only place these tokens still exist as text, so this is the
+    /// place the escaping belongs.
+    ///
+    /// Route: `AgentText.containsTerminalControlText` is the shared *predicate*
+    /// (it answers a yes/no question and cannot escape anything), and
+    /// `AgentText.jsonLine` encodes a whole JSON object, not a token inside a
+    /// sentence — so the escaping itself happens here, over exactly the scalar
+    /// set the predicate names (`< 0x20` and `0x7F`) and in the same visible
+    /// `\uXXXX` shape `ConsoleModel.quoteDaemonWords` already prints for
+    /// daemon-supplied words. The observation stays readable; only its power to
+    /// move the terminal goes.
+    static func logSafePeerText(_ text: String) -> String {
+        guard AgentText.containsTerminalControlText(text) else { return text }
+        var visible = ""
+        for scalar in text.unicodeScalars {
+            if scalar.value < 0x20 || scalar.value == 0x7f {
+                visible += "\\u\(String(format: "%04X", scalar.value))"
+            } else {
+                visible.unicodeScalars.append(scalar)
+            }
+        }
+        return visible
     }
 
     private static func systemMessage(_ code: Int32) -> String {

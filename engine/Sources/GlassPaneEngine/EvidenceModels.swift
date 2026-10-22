@@ -659,6 +659,10 @@ public indirect enum JSONValue: Codable, Equatable {
 }
 
 public struct DecisionLogEntry: Codable, Equatable {
+    /// `maxLength` of `summary` in `kernel/schemas/decision-log-entry.schema.json`, in
+    /// the unit that validator counts: **UTF-16 code units** (`SUMMARY_MAX_LENGTH` in
+    /// `kernel/dist/decision-log-entry.js`, applied through `z.string().max`, which
+    /// measures `value.length`). Not grapheme clusters — see `validateInvariants`.
     public static let summaryMaxLength = 2048
 
     /// Mirror of `PAYLOAD_MAX_CANONICAL_LENGTH` in the kernel: a line whose payload can grow
@@ -670,7 +674,7 @@ public struct DecisionLogEntry: Codable, Equatable {
     public let sequence: Int          // ≥ 0
     public let prevEntryHash: String  // ^([0-9a-f]{64})?$（创世条目为空串）
     public let operationId: String?   // 可选，^op_[0-9A-HJKMNP-TV-Z]{26}$；编码时省略而非写 null
-    public let summary: String        // ≤ summaryMaxLength
+    public let summary: String        // ≤ summaryMaxLength，单位是 UTF-16 码元（与内核同一条判据）
     public let outcome: DecisionOutcome
     public let createdAt: String      // ISO-8601 毫秒 UTC
     // The four fields 0.1.6 added. All optional, and *absent* (not null) when unset — Codable's
@@ -764,8 +768,21 @@ public extension DecisionLogEntry {
                 throw DecisionLogEntryError.badOperationId(operationId)
             }
         }
-        guard summary.count <= Self.summaryMaxLength else {
-            throw DecisionLogEntryError.summaryTooLong(summary.count)
+        // Measured in UTF-16 code units, the unit the published validator of this
+        // field uses: `SUMMARY_MAX_LENGTH = 2048` is applied by
+        // `z.string().max(SUMMARY_MAX_LENGTH)` in `kernel/dist/decision-log-entry.js`,
+        // and zod's length check reads `value.length` — UTF-16 units, not grapheme
+        // clusters. `String.count` under-read exactly where a summary goes astral:
+        // 1025 emoji are 1025 clusters but 2050 units, so the daemon-side validator of
+        // untrusted JSON admitted ledger lines the kernel refuses — one contract, two
+        // verdicts, and the chain hash covers the bytes that were let in. The sibling
+        // that already counts this way is `ArchiveFieldBounds` above, whose comment is
+        // the same argument for the same fields.
+        // The reported number is the measurement the rule was decided on, so the
+        // message cannot name a count of something else.
+        let summaryUnits = summary.utf16.count
+        guard summaryUnits <= Self.summaryMaxLength else {
+            throw DecisionLogEntryError.summaryTooLong(summaryUnits)
         }
         guard Self.matches(Self.createdAtRegex, createdAt) else {
             throw DecisionLogEntryError.badCreatedAt(createdAt)
