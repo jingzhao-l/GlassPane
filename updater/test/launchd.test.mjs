@@ -106,7 +106,7 @@ test('the update agent this tool registers is itself readable back, quotes and a
     '\t\t-c',
     '\t\t"$0" "$1" check "$2" "$3" --json && "$0" "$1" apply "$2" "$3" --auto --json',
     '\t\t/usr/local/bin/node',
-    '\t\t/Volumes/Eng-Dev/.worktrees/gp-iterate/updater/cli.js',
+    '\t\t/Volumes/Example/.worktrees/gp-iterate/updater/cli.js',
     '\t\t--state-root',
     '\t\t/var/tmp/gp-agent-probe',
     '\t}',

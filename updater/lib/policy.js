@@ -12,6 +12,7 @@
  */
 import { bumpKind, compareVersions, parseTag } from './version.js'
 import { CODES } from './codes.js'
+import { quoteShellArg } from './shell-quote.js'
 
 /**
  * Consent gates a human can name with `--consent <kind>`.
@@ -134,7 +135,10 @@ export function decideSwapPermission({ probe, jobArgs, ourStateRoot, consented =
       // 这句从前还补了一句"面板上「安装更新」按钮干的是同一件事"——那是假的：`non-default-state-dir`
       // 不在 UpdatePanelLogic 的 consentGate 表里，落到 `.none` 那一档，而那一档写死
       // `applyEnabled: false`（UpdatePanelTests 钉着）。把人说往一个按不动的按钮，比不说更糟。
-      reason: `the running daemon writes to ${foreign}, which is not the state root this tool was asked to update (${ourStateRoot}). A swap here would replace bundles that somebody else's daemon is using. A person who has checked which install they mean may run "updater apply --state-dir \"${ourStateRoot}\" --consent state-dir" — quoted, because a home or state root may contain a space or a non-ASCII name, and an unquoted copy of it would act on a truncated path; an automatic run never carries that flag.`,
+      // `ourStateRoot` 走 `quoteShellArg`：这句是被面板/agent 原样转发的 remedy，而状态根是从
+      // `--state-dir` / `GLASSPANE_STATE_DIR` / 面板透传（UpdateModel.swift 直接传 daemon 报的根）
+      // 来的**不受信字节**；从前写的是双引号形态，而 `$()` 与反引号在双引号里照样展开。
+      reason: `the running daemon writes to ${foreign}, which is not the state root this tool was asked to update (${ourStateRoot}). A swap here would replace bundles that somebody else's daemon is using. A person who has checked which install they mean may run "updater apply --state-dir ${quoteShellArg(ourStateRoot)} --consent state-dir" — single-quoted by this tool's own rule (see lib/shell-quote.js: double quotes would not do, a command substitution still runs inside them), because a home or state root may contain a space, a non-ASCII name, or a shell metacharacter, and an unquoted copy of it would act on a truncated path; an automatic run never carries that flag.`,
       swapped: false,
     }
   }

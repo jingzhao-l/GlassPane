@@ -206,7 +206,10 @@ test('a child killed by a signal never comes back as a zero', () => {
 })
 
 test('the state root is resolved in the same precedence the CLI uses', () => {
-  const home = os.homedir()
+  // The fallback `~` is the password record (`os.userInfo().homedir`), not `os.homedir()`:
+  // `daily-20261022-updater.test.mjs` pins the $HOME-sandbox behaviour by name; this row keeps
+  // the precedence table itself.
+  const home = os.userInfo().homedir
   assert.equal(resolveEntryStateRoot(['check', '--state-root', '/a'], {}), '/a')
   assert.equal(resolveEntryStateRoot(['check', '--state-dir', '/b'], {}), '/b')
   assert.equal(resolveEntryStateRoot(['check', '--state-dir=/c'], {}), '/c')

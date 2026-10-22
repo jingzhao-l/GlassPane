@@ -629,3 +629,27 @@ test('the shipped exclusion list has to be doing something in the run that produ
     withoutLog.cleanup()
   }
 })
+
+/**
+ * 2026-10-22（缺陷 6）：这个脚本自己就在发布归档里，所以它那条"归档不是发布者的投递通道"的
+ * 规矩也管着它自己的注释。从前第 58 行附近写着 v1.7.0 那次漏出去的真家目录（一个具体用户名），
+ * 于是每台下载归档的机器都读到了发布者是谁 —— 正是这条规则反对的事。
+ *
+ * 判据量的是**形状**而不是内容：`/Users/<任何用户名>/` 这种"用户名那一格被填上了"的路径就是
+ * 真目录；`/Users/<name>/` 这种带尖括号的占位符描述的是同一个形状，不算泄露，所以本文件可以
+ * 继续把规矩说清楚。
+ * REVERSE MUTATION：把那份真路径抄回 scripts/make-release-archive.mjs → 这条红。
+ */
+test('make-release-archive.mjs 的源码里没有发布者自己的目录（归档的规矩也管着归档里的注释）', () => {
+  const source = fs.readFileSync(SCRIPT, 'utf8')
+  const hits = source
+    .split('\n')
+    .map((line, index) => ({ n: index + 1, line: line.trim() }))
+    .filter(({ line }) => /\/(Users|Volumes|home)\/[A-Za-z0-9._-]{3,}/.test(line))
+  assert.deepEqual(hits, [],
+    '这些行把某台机器的真目录写进了会随归档发出的文件里（本文件 57-63 行那条规矩自己也该遵守）：'
+      + JSON.stringify(hits))
+  // 反证：这条尺子不是永远红——占位形态必须放行，否则上一段的修改本身就会被这道闸拒掉。
+  assert.match(source, /\/Users\/<name>\//,
+    '注释里仍要**说得清那个形状**（用占位符），否则下一位读者不知道自己被禁止的是什么')
+})

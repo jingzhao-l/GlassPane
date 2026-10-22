@@ -14,6 +14,7 @@ import assert from 'node:assert/strict'
 import { DEFAULT_BASE, REPO_SLUG, UPDATE_BASE_ENV, DOWNLOAD_BUDGET_MS, DOWNLOAD_MAX_BYTES, DOWNLOAD_MIN_RATE_BPS, DOWNLOAD_MIN_RATE_FLOOR_BPS, assetPathNamesPinnedRelease, assertAssetUrl, assertRedirectTarget, describeTransportFailure, isTlsVerificationFailure, makeBytesFetcher, makeFetcher, rateFloorFor, resolveBase } from '../lib/source.js'
 import { CODES } from '../lib/codes.js'
 import { UpdaterError } from '../lib/fsutil.js'
+import { quoteShellArg } from '../lib/shell-quote.js'
 import { PINNED_PATH, bytesResponse, jsonResponse, startServer } from './helpers.mjs'
 
 test('with no override the source is the pinned GitHub API', () => {
@@ -196,7 +197,12 @@ test('a certificate-verification failure reports the cause code, not "fetch fail
   assert.match(error.message, /UNABLE_TO_VERIFY_LEAF_SIGNATURE/, 'the code lives in error.cause; dropping it is what made this machine look offline while curl worked')
   assert.match(error.message, /fetch failed/, 'the original sentence stays, this is an addition not a rewrite')
   assert.equal(error.tlsVerification, true, 'the recovery branch reads this flag, not my sentence')
-  assert.match(error.details, new RegExp(`NODE_EXTRA_CA_CERTS="${BUNDLE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`), 'the remedy names the file this machine should be handed — quoted, because a home directory may contain a space and an unquoted copy would act on a truncated path')
+  // 2026-10-22 (P2): this line used to be `NODE_EXTRA_CA_CERTS="<path>"` — **double** quotes, where a
+  // command substitution still runs. It now hands the value to `lib/shell-quote.js`; for this inert
+  // fixture path the helper leaves it bare, and the hostile-path cases (where it single-quotes) are
+  // pinned by name in `test/daily-20261022-updater.test.mjs`.
+  assert.match(error.details, new RegExp(`NODE_EXTRA_CA_CERTS=${quoteShellArg(BUNDLE).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'the remedy names the file this machine should be handed, through the quoting rule — a path a shell can act on must arrive as one inert single-quoted word')
+  assert.doesNotMatch(error.details, /NODE_EXTRA_CA_CERTS="/, '双引号形态必须消失：`"$(touch /tmp/pwned)"` 里的命令替换照样执行')
   assert.match(error.details, /updater enable|installer/, 'and the two ways to produce it')
 })
 

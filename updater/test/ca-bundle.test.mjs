@@ -427,9 +427,14 @@ test('the TLS remedy names a real path when we have one, and a real place to loo
   const err = Object.assign(new Error('fetch failed'), { cause: { code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', message: 'self-signed' } })
   const withPath = describeTransportFailure('https://api.github.com/x', err, { caBundlePath: '/Users/someone/.glasspane/ca-roots.pem' })
   assert.equal(withPath.tlsVerification, true)
-  assert.match(withPath.details, /NODE_EXTRA_CA_CERTS="\/Users\/someone\/\.glasspane\/ca-roots\.pem"/, '有路径就写路径，并且带引号——没有引号时含空格的家目录会被裁成一条改到别处去的命令')
+  // 这一处断言跟着 quoting 那条修复改了形状，判据没变松：值现在过 `quoteShellArg`。
+  // 一条 shell 动不了的字符（字母、数字、`/`、`.`、`-`…）留原样，所以这条安全路径不带引号
+  // 也能一字不差地执行；带空格的那条必须整条被单引号包住。从前它写的是**双**引号，而双引号里
+  // `$( )` 与反引号照样展开——那一版才是"看着像引住了、其实没有"。
+  assert.match(withPath.details, /NODE_EXTRA_CA_CERTS=\/Users\/someone\/\.glasspane\/ca-roots\.pem/, '有路径就写路径：这条不含任何 shell 能动用的字符，quoteShellArg 原样交给读者')
   const spaced = describeTransportFailure('https://api.github.com/x', err, { caBundlePath: '/Users/a name/.glasspane/ca-roots.pem' })
-  assert.match(spaced.details, /NODE_EXTRA_CA_CERTS="\/Users\/a name\/\.glasspane\/ca-roots\.pem"/, '含空格的路径必须整条被引住，否则这条 remedy 是不可执行的')
+  assert.match(spaced.details, /NODE_EXTRA_CA_CERTS='\/Users\/a name\/\.glasspane\/ca-roots\.pem'/, '含空格的路径必须整条被单引号包住，否则这条 remedy 是不可执行的')
+  assert.doesNotMatch(spaced.details, /NODE_EXTRA_CA_CERTS="/, '双引号那一版不许回来：里面 `$()` 照样展开')
   assert.doesNotMatch(withPath.details, /<[a-z][^>]*>/i, `命令里有尖括号模板就没法原样执行：${withPath.details}`)
   const without = describeTransportFailure('https://api.github.com/x', err, {})
   assert.doesNotMatch(`${without.message} ${without.details}`, /<[a-z][^>]*>/i, `没路径时也不能留模板：${without.details}`)

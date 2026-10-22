@@ -1,7 +1,7 @@
 /**
  * `scripts/check-doc-links.mjs` 的判据：每一条都要能证红，红要有名字。
  *
- * 这个文件守着四类判据，每一类都对应一轮真实发生过的缺陷：
+ * 这个文件守着五类判据，每一类都对应一轮真实发生过的缺陷：
  *   1) **工具数量**（`toolCountDrift`）——主仓文档手抄的 `gp_*` 数与 `mcp-shell/src/tools.ts`
  *      的真实数量对不上必须红；而同一把尺子量到 fork 自己的文档上会恒红（2026-10-13 那次），
  *      所以扫描集合必须能注入、两个方向都要测。
@@ -11,10 +11,14 @@
  *   3) **可复算主张的双语一致性**（`claimDrift`）——从前"双语成对"只查对偶文件在不在，
  *      于是 README 写 `weak` 而 SECURITY 与引擎写 `soft`、两份 README 说 7 条 lane 而
  *      ci.yml 有 9 个 job，全绿过闸。这里补的是**只改一种语言那一侧**的形状。
- *   4) **正文里不许有 shell 残渣**（`shellResidue`，2026-10-16 本轮）——用 heredoc 往
+ *   4) **正文里不许有 shell 残渣**（`shellResidue`，2026-10-16 本轮中招两次）——用 heredoc 往
  *      `engine/smoke.md` 追加时外层引号提前收尾，包装脚本自己的 `EOF` / `echo "appended: $(…)"`
  *      被当成正文提交，同一形状中招两次，而当时的这道闸全绿：它只看链接与主张。围栏要豁免、
  *      中文人话要豁免（第一版就误红过 harness 的一句话），两种豁免各有对照。
+ *   5) **尺子层的出处指针**（`rulerProvenance`）与**安装渠道的形状禁令**（`pipedInstallCommands`，
+ *      2026-10-22 补：对外文档给出的安装命令不许是 `curl … | sh` 那条被实测证明会谎报成功的管道）。
+ *      第五类的两个方向（命令形状红 / 散文不红 / 两步写法不红）在
+ *      `updater/test/daily-20261022-gates.test.mjs` 里证，本文件守的是前四类与登记集合本身。
  *
  * 夹具写在临时根里，不动仓库任何一份真文档；最后一条用真仓库自证当下是绿的。
  */
@@ -436,12 +440,19 @@ test("check-doc-links: 登记集合必须仍然包含尺子文档与三份产品
     "harness/glasspane-harness/docs/models-and-keys.md",
     "harness/glasspane-harness/docs/release.md",
     "harness/glasspane-harness/docs/kernel-integration.md",
+    // 2026-10-22：npm 包自己的三份门面 README。`installer/` 与 `mcp-shell/` 的 `files` 清单里就
+    // 写着 README.md，它是 tarball 里唯一的说明——门面里的死链与残渣此前一道判据都不看。
+    // 判据本身（含"英文独有文件不许被变出双语要求"那一半）见 `daily-20261022-gates.test.mjs`。
+    "installer/README.md",
+    "mcp-shell/README.md",
+    "updater/README.md",
   ]) {
     assert.ok(DOCS.includes(doc), `${doc} 不在登记集合里——它内部的链接与锚点今天无人校验`)
     assert.ok(fs.existsSync(path.join(REPO, doc)), `${doc} 登记了却不在树里`)
   }
-  assert.ok(DOCS.length >= 29, `登记集合缩到 ${DOCS.length} 份：少一份文档＝少一片有人看的死链面`)
+  assert.ok(DOCS.length >= 32, `登记集合缩到 ${DOCS.length} 份：少一份文档＝少一片有人看的死链面`)
 })
+
 
 test('check-doc-links: 尺子的出处字段指向不存在的文件 → 具名红；金样里删除桶的路径不算出处', () => {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-prov-'))

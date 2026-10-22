@@ -26,6 +26,7 @@
  */
 import { CODES } from './codes.js'
 import { UpdaterError, writableRoots } from './fsutil.js'
+import { quoteShellArg } from './shell-quote.js'
 import { DEFAULT_BASE, REPO_SLUG, UPDATE_BASE_ENV, resolveBase } from './source.js'
 import { localVersion, parseTag } from './version.js'
 import { decideUpdate } from './policy.js'
@@ -471,16 +472,20 @@ export function stagingRaceCause(error, { dir, staging, version }) {
   if (error instanceof UpdaterError) return null
   const text = String(error?.message ?? '')
   if (!text.includes(staging) && !text.includes(dir)) return null
-  const where = text.includes(dir) ? dir : staging
+  // Named `deniedPath`, not `where`: the name is load-bearing. `mcp-shell/test/remedy-shell-quoting.test.mjs`
+  // scans command-shaped literals by *argument position* and decides whether an interpolated hole carries a
+  // filesystem location by its name (`…path|dir|file|root|cli…`); a bare `where` was invisible to that gate,
+  // so the quoting below had no source-scan pinning it. Behaviour is identical.
+  const deniedPath = text.includes(dir) ? dir : staging
   const refused = isDenied
     ? new UpdaterError(
       CODES.checkFailed,
-      `the update run was denied by the filesystem while it worked on ${where}: ${code}: ${text}. `
+      `the update run was denied by the filesystem while it worked on ${deniedPath}: ${code}: ${text}. `
         + 'Nothing about that answer identifies who denied it, and the two candidates have different repairs: the tree may carry an '
         + 'immutable flag (a `uchg` makes even the owner\'s `unlink` an `EPERM`), or it may belong to another account or mode. Tell them apart '
-        + `before retrying — "ls -lO ${where}" shows the flags (look for \`uchg\`/\`schg\`; "chflags -R nouchg" is what clears one), and `
-        + `"stat -f 'owner %Su group %Sg mode %Sp flags %Sf' ${where}" shows who owns it and what mode it has. `
-        + `If neither points at the directory, whatever else on this machine holds ${where} open is the thing to fix. `
+        + `before retrying — "ls -lO ${quoteShellArg(deniedPath)}" shows the flags (look for \`uchg\`/\`schg\`; "chflags -R nouchg" is what clears one), and `
+        + `"stat -f 'owner %Su group %Sg mode %Sp flags %Sf' ${quoteShellArg(deniedPath)}" shows who owns it and what mode it has. `
+        + `If neither points at the directory, whatever else on this machine holds ${deniedPath} open is the thing to fix. `
         + `Nothing was kept and no version was offered: nothing was installed, and re-run "updater check" once the flags or the owner `
         + 'are the ones this account can write.',
     )

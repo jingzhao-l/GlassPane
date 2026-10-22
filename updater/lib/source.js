@@ -12,6 +12,7 @@ import process from 'node:process'
 
 import { CODES } from './codes.js'
 import { UpdaterError } from './fsutil.js'
+import { quoteShellArg } from './shell-quote.js'
 
 /** Pinned repository. Not overridable by argument, env, or release payload. */
 export const REPO_SLUG = 'jingzhao-l/GlassPane'
@@ -266,7 +267,7 @@ export function describeTransportFailure(url, error, { caBundlePath = null } = {
   const head = `GET ${url} failed: ${own}${code ? ` (${code}${causeText ? `: ${causeText}` : ''})` : ''}`
   if (!isTlsVerificationFailure(code)) return { message: head, details: null, tlsVerification: false }
   const remedy = caBundlePath
-    ? `node trusts only the CA bundle compiled into it and does not read the macOS keychain, so a machine whose HTTPS is intercepted by a locally trusted root needs that root handed to it: export NODE_EXTRA_CA_CERTS="${caBundlePath}" (quoted — the path may contain spaces; if that file does not exist yet, re-run the installer or "updater enable" — either exports the machine's own root bundle; nothing verifies less by doing this, it adds the roots this machine's administrator already trusts).`
+    ? `node trusts only the CA bundle compiled into it and does not read the macOS keychain, so a machine whose HTTPS is intercepted by a locally trusted root needs that root handed to it: export NODE_EXTRA_CA_CERTS=${quoteShellArg(caBundlePath)} (one shell word — the value is single-quoted whenever it carries anything a shell could act on, and a double-quoted copy would **not** be safe, because a command substitution expands inside double quotes too; if that file does not exist yet, re-run the installer or "updater enable" — either exports the machine's own root bundle; nothing verifies less by doing this, it adds the roots this machine's administrator already trusts).`
     : `node trusts only the CA bundle compiled into it and does not read the macOS keychain, so a machine whose HTTPS is intercepted needs its own root bundle exported: run the installer or "updater enable", then point NODE_EXTRA_CA_CERTS at the ca-roots.pem inside your update state root ("updater status --json" names that directory in its stateRoot field).`
   // 结构化地说"这是证书类失败"：下游的自愈分支必须读这个布尔，而不是去匹配我写的句子
   // （文案会改，判据不能跟着改）。
@@ -278,11 +279,23 @@ export function describeTransportFailure(url, error, { caBundlePath = null } = {
  * plenty of real servers (and undefined on anything that is not a Response), so
  * printing it unconditionally produced "answered undefined undefined" — a message
  * that names neither the status nor the fact that the server did answer.
+ *
+ * A bare status is **not yet a refusal a reader can act on**: this sentence is what
+ * the panel prints verbatim (`lib/check.js` keeps it in `lastError.message`), and it
+ * used to stop at "GET … answered 404". Every sibling transport refusal in this file
+ * finishes the thought — the timeout arm says "The release is refused and nothing
+ * partial is staged, so the next run starts from a clean slate", and `stoppedForLength`
+ * adds the re-run instruction; this one owed the same clause and the next step for
+ * *this* cause. Both commands named here are real: `check` and `status` are in
+ * `SUBCOMMANDS` of `updater/cli.js`, and `test/daily-20261022-updater.test.mjs` asserts
+ * every `updater <word>` this sentence names exists there.
  */
 function answered(url, response) {
   const status = Number.isInteger(response && response.status) ? String(response.status) : 'with no status'
   const text = response && typeof response.statusText === 'string' && response.statusText.trim() !== '' ? ` ${response.statusText.trim()}` : ''
-  return `GET ${url} answered ${status}${text}`
+  return `GET ${url} answered ${status}${text}. The release is refused and nothing partial is staged, so the next run starts from a clean slate. `
+    + 'Re-run "updater check" a little later — a 403 from GitHub is rate-limiting, which lifts on its own, while a 404 means the pinned source has '
+    + 'no release to offer yet; "updater status" prints what this install last recorded.'
 }
 
 export function makeFetcher(fetchImpl = globalThis.fetch, { timeoutMs = 20_000, caBundlePath = null } = {}) {

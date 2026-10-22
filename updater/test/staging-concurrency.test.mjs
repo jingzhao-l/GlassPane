@@ -448,7 +448,7 @@ test('the sweep itself: equal and older go, newer stays, and nothing outside the
 /* --------------------------------------------------------------------- fixtures */
 
 const BUNDLES = [
-  { name: 'GlassPane.app', executable: path.join('Contents', 'MacOS', 'GlassPane Settings') },
+  { name: 'GlassPane.app', executable: path.join('Contents', 'MacOS', 'glasspane-settings') },
   { name: 'GlassPane Daemon.app', executable: path.join('Contents', 'MacOS', 'glasspaned') },
 ]
 

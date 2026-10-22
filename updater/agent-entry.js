@@ -40,8 +40,43 @@ import { fileURLToPath } from 'node:url'
 export const POINTER_FILE_NAME = 'update-install.json'
 export const STATE_FLAGS = ['--state-root', '--state-dir']
 
-/** The precedence `updater/cli.js` uses, reimplemented here on purpose: no shared module to import. */
-export function resolveEntryStateRoot(argv, env) {
+/**
+ * Which home the fallback root hangs off — the same split-brain `updater/cli.js:226-247`
+ * closes for the CLI, now pinned for this file too. `os.homedir()` reads `$HOME`, a
+ * **caller-controlled variable**; `os.userInfo().homedir` reads the **password record**, which
+ * is what the panel (`NSHomeDirectory()`) and the daemon (`StateRoot.homeDefault()`) use. A
+ * scheduled launchd job whose `$HOME` differs from the record — a sandboxed job, an
+ * `env -u HOME` invocation, both shapes this repo has measured — would otherwise read the
+ * installer pointer from a root the installer never wrote: `installer-pointer-unreadable`,
+ * exit 3, every day, while the panel and the CLI disagree about which install exists. Same
+ * class as the daemon's `NSHomeDirectory()`-vs-`$HOME` rule pinned by
+ * `mcp-shell/test/path-consistency.test.mjs`, and the reverse mutation (`os.homedir()`) is
+ * reddened by `test/daily-20261022-updater.test.mjs`.
+ * `os.userInfo()` throws when there is no record to ask; the CLI's named refusal is
+ * `CODES.homeRecordUnavailable` (`home-record-unavailable`), mirrored here as
+ * `NO_USER_RECORD_CODE` — the daily job must print a one-line refusal and exit 3, never a
+ * stack trace into a log nobody reads.
+ */
+export const NO_USER_RECORD_CODE = 'home-record-unavailable'
+
+export function entryHomeDir() {
+  try {
+    return os.userInfo().homedir
+  } catch {
+    throw Object.assign(
+      new Error('this process has no password-database record, so the state root cannot be named; pass --state-dir'),
+      { code: NO_USER_RECORD_CODE },
+    )
+  }
+}
+
+/**
+ * The precedence `updater/cli.js` uses, reimplemented here on purpose: no shared module to import
+ * (this file is copied into the state root and runs alone). The fallback `~` is the **password-record
+ * home** (`entryHomeDir`, matching `cli.js`'s `recordHomeDir`), never `$HOME`/`os.homedir()`.
+ * `homeDir` is injectable so a test can arrange the no-record shape this machine cannot.
+ */
+export function resolveEntryStateRoot(argv, env, { homeDir = entryHomeDir } = {}) {
   for (let i = 0; i < argv.length; i += 1) {
     const token = String(argv[i])
     for (const flag of STATE_FLAGS) {
@@ -54,7 +89,7 @@ export function resolveEntryStateRoot(argv, env) {
     }
   }
   if (typeof env.GLASSPANE_STATE_DIR === 'string' && env.GLASSPANE_STATE_DIR !== '') return env.GLASSPANE_STATE_DIR
-  return path.join(os.homedir(), '.glasspane')
+  return path.join(homeDir(), '.glasspane')
 }
 
 /**
@@ -95,9 +130,40 @@ export function refusalLine({ code, stateRoot, cli, json }) {
   })}\n`
 }
 
-export function main(argv = process.argv.slice(2), { env = process.env, spawn = spawnSync, execPath = process.execPath, write = (s) => process.stdout.write(s) } = {}) {
+/**
+ * What the job's log sees when this process has no password record, so even the fallback
+ * state root cannot be named. Mirrors the CLI's named refusal (`CODES.homeRecordUnavailable`,
+ * message wording kept in step with `recordHomeDir` in `updater/cli.js`): a code, one line,
+ * a next step, exit 3 — never the `os.userInfo()` stack trace this replaces.
+ */
+export function homeRefusalLine({ json }) {
+  const message = 'the GlassPane update agent could not start: this process has no password-database record, so the default state root cannot be named. '
+    + 'Nothing was checked or installed. Remedy: give the job an explicit --state-dir naming the state root the installer wrote, '
+    + 'or run this under the account that has the record.'
+  if (!json) return `updater/agent-entry: ${message}\n`
+  return `${JSON.stringify({
+    command: null,
+    ok: false,
+    status: 'check-failed',
+    code: NO_USER_RECORD_CODE,
+    message,
+    // Same shape `refusalLine` prints, so one reader parses both.
+    exitCode: 3,
+  })}\n`
+}
+
+export function main(argv = process.argv.slice(2), { env = process.env, spawn = spawnSync, execPath = process.execPath, write = (s) => process.stdout.write(s), homeDir = entryHomeDir } = {}) {
   const json = argv.includes('--json')
-  const stateRoot = resolveEntryStateRoot(argv, env)
+  let stateRoot
+  try {
+    stateRoot = resolveEntryStateRoot(argv, env, { homeDir })
+  } catch (error) {
+    if (error && error.code === NO_USER_RECORD_CODE) {
+      write(homeRefusalLine({ json }))
+      return 3
+    }
+    throw error
+  }
   const pointer = resolveUpdaterCli(stateRoot)
   if (!pointer.ok) {
     write(refusalLine({ code: pointer.code, stateRoot, cli: pointer.cli, json }))

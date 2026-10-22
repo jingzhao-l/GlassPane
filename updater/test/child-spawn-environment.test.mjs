@@ -55,7 +55,7 @@ import { TMP_PREFIX, makeFakeApp, removeDir, shortSocketPath, startSocketDaemon,
 
 const NOW = new Date('2026-09-27T12:00:00.000Z')
 const BUNDLES = [
-  { name: 'GlassPane.app', executable: path.join('Contents', 'MacOS', 'GlassPane Settings') },
+  { name: 'GlassPane.app', executable: path.join('Contents', 'MacOS', 'glasspane-settings') },
   { name: 'GlassPane Daemon.app', executable: path.join('Contents', 'MacOS', 'glasspaned') },
 ]
 

@@ -182,3 +182,134 @@ test('gpg-signing.sh: 源码里不再有 --passphrase <argv> 形态与写死的 
   assert.match(source, /mktemp "\$\{TMPDIR:-\/var\/tmp\}\/gpg-seed-err\.XXXXXX"/,
     'mktemp 必须是**模板**形态（带尾部 X、不带 -t）：BSD 与 GNU 对 -t 的处理不同，同一行会一边过一边报错')
 })
+
+/* ===========================================================================
+ * 2026-10-22 两轮修复的守卫（缺陷 2 / 3 / 6）。
+ *
+ * 缺陷 2：本文件顶部是 `set -euo pipefail`，而从前有 11 处
+ * `printf '%s' "$x" | grep -q …`。`grep -q` 首个命中就退场，还在写的 printf 随后死于
+ * SIGPIPE，管道的状态于是成了 141 —— 同一个输入可以判绿也可以判红，取决于谁先跑到。
+ * 这个坑本仓写过三次（ci.yml 两处注释、scripts/make-release-archive.mjs 的 verifyArchive
+ * 注释），本文件是第四处，也是最后一处：判据全部换成 `case` / `[[ =~ $re ]]` /
+ * `has_text` 这类**没有管道**的形状。
+ * REVERSE MUTATION：把任意一条改回 `printf '%s' "$key" | grep -q 'BEGIN PGP …'` →
+ * 「没有任何一条判据走管道」这条红。
+ *
+ * 缺陷 3：`gh api … 2>/dev/null || true` 把"gh 自己失败了"与"读回来是空的"压成同一个空串，
+ * 于是没登录 / 404 / scope 不够 / environment 没建，全被报成「secret 不存在」，运维照着这句
+ * 重建一份**本来就配对了的** secret，永远修不好。现在 `secret-verdict` 把分诊函数暴露出来，
+ * 下面三条用例喂**假**的（退出码 / stdout / stderr）三样，零网络。
+ * REVERSE MUTATION：把 `emit_secret_verdict` 的 failed 分支删掉（让它落回那句 missing）、
+ * 或把 `2>/dev/null || true` 抄回 `read_scope_secrets` → 「failed 不许说 missing」与
+ * 「必须引用 gh 的原话」两条一起红。
+ *
+ * 缺陷 6：TARGETS 里躺着一台构建机的 `/Volumes/…`，而这个文件随发布归档发出去。
+ * REVERSE MUTATION：把那一行抄回字面量 → 「活代码里不许有构建机的绝对路径」这条红。
+ * ========================================================================= */
+
+/** 跑真脚本，返回 stdout+stderr 与退出码。 */
+function runScript(args, { stdin, env = {} } = {}) {
+  return spawnSync('/bin/bash', [SCRIPT, ...args], {
+    encoding: 'utf8',
+    env: {
+      PATH: `/usr/bin:/bin`,
+      TMPDIR: os.tmpdir(),
+      HOME: os.tmpdir(),
+      GP_SIGNING_SERVICE: 'gpg-signing-test-fixture',
+      ...env,
+    },
+    input: stdin,
+  })
+}
+
+/** 只留代码行：注释行本来就在解释被换掉的那种形状（与 /tmp/.gpg-seed-err 那条同一口径）。 */
+function liveCodeLines(source) {
+  return source.split('\n').filter((line) => !line.trim().startsWith('#'))
+}
+
+test('gpg-signing.sh: 没有任何一条判据走 `| grep -q` 的管道（pipefail 会把判绿判成 141）', () => {
+  const source = fs.readFileSync(SCRIPT, 'utf8')
+  assert.match(source, /^set -euo pipefail$/m,
+    '本文件的 pipefail 必须还在——它被摘掉的话，下面这条闸就只是在量一具空壳')
+  const offenders = liveCodeLines(source).filter((line) => /\|\s*grep\b[^\n|]*\s-q[xE]?\b/.test(line))
+  assert.deepEqual(offenders, [],
+    `这些行还在把判据交给 `
+    + '`grep -q` 的管道（首个命中就退、写侧死于 SIGPIPE，pipefail 于是把判决变成时序问题）：'
+    + JSON.stringify(offenders)
+    + '；换成 case / [[ =~ $re ]] / has_text 的同义写法')
+  // 反证：替换不是靠"把判据删掉"完成的——三条替身都必须在场。
+  assert.match(source, /^has_text\(\)/m, '字面匹配的谓词 has_text 必须还在')
+  assert.match(source, /^has_line\(\)/m, '整行匹配的谓词 has_line 必须还在（grep -qx 的同义）')
+  assert.match(source, /\[\[ \$live =~ \$SILENT_SKIP_RE \]\]/, 'audit 的判据必须走变量化的 ERE（bash 3.2 与 4+ 同一答案）')
+  assert.match(source, /^SILENT_SKIP_RE=/m, '那条 ERE 必须只有一处定义')
+})
+
+test('gpg-signing.sh: 活代码里不许有构建机的绝对路径（发布归档不是发布者的投递目录）', () => {
+  const source = fs.readFileSync(SCRIPT, 'utf8')
+  const offenders = liveCodeLines(source).filter((line) => /\/(Users|Volumes|home)\/[A-Za-z0-9._-]{3,}/.test(line))
+  assert.deepEqual(offenders, [],
+    `TARGETS 之类的默认值不许写死某台机器的目录（这个文件随 GlassPane 的发布归档发给每台机器）：`
+    + JSON.stringify(offenders)
+    + '；本 checkout 用 REPO_ROOT 算，兄弟目录用 GP_SIGNING_DEV_BASE 指')
+  assert.match(source, /^REPO_ROOT="\$\(cd -- "\$\(dirname -- "\$\{BASH_SOURCE\[0\]\}"\)\/\.\." && pwd -P\)"/m,
+    'REPO_ROOT 必须由脚本自己的位置算出来（与 tools/release-signing-gate.sh:67 同一个算法）')
+  assert.match(source, /GP_DEV_BASE="\$\{GP_SIGNING_DEV_BASE:-\$\(dirname -- "\$REPO_ROOT"\)\}"/,
+    '兄弟 checkout 的父目录必须可被显式覆盖')
+  // 诚实边界：脚本自己的 `selftest` 也有一条臂比 TARGETS 第一行与 REPO_ROOT，但在**那台被抄进
+  // 字面量的机器**上两者恰好相等，那条臂量不到这件事（本机实测：把 /Volumes/… 抄回去，
+  // selftest 仍 rc=0）。所以这条源码形状的断言才是承重的那一道，不是锦上添花。
+})
+
+/** 把三样罐头输出写成临时文件，喂给真脚本的 secret-verdict 分诊入口。 */
+function verdictOf({ rc, names, gherr, want = 'GPG_PRIVATE_KEY', env = 'release', repo = 'GlassPane' }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-gpg-verdict-'))
+  try {
+    fs.writeFileSync(path.join(dir, 'stdout'), names)
+    fs.writeFileSync(path.join(dir, 'stderr'), gherr)
+    const r = runScript(['secret-verdict', String(rc), want, path.join(dir, 'stdout'), path.join(dir, 'stderr'), repo, env])
+    return { ...r, text: `${r.stdout}\n${r.stderr}` }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+test('分诊①：gh 非零退出 + 有原话 → 不许说 missing，必须引用 gh 的 stderr，退出码与"判红"分开', () => {
+  const r = verdictOf({ rc: 1, names: 'GPG_PRIVATE_KEY\nGPG_PASSPHRASE\n', gherr: 'gh: Bad credentials (HTTP 401)\n' })
+  assert.equal(r.status, 3, `gh 失败必须有**自己的**退出码（3＝读不到），实得 ${r.status}｜${r.text}`)
+  assert.doesNotMatch(r.text, /missing/, `读取失败不许被报成「secret 不存在」——那正是运维照着重建正确 secret 的那句谎。实得：${r.text}`)
+  assert.match(r.text, /无法判定/, r.text)
+  assert.match(r.text, /Bad credentials \(HTTP 401\)/, 'gh 的原话必须一字不改地交给读者')
+  // 两种可能必须**分开**点名，且给的是能当场跑的命令（不是"再试试"）。
+  assert.match(r.text, /① gh 不能用/, r.text)
+  assert.match(r.text, /② 要读的目标不存在/, r.text)
+  assert.match(r.text, /gh auth status/, 'remedy 必须是一条真能跑的命令')
+  assert.match(r.text, /gh auth refresh -s repo/, 'scope 不够那一种也要有对应的命令')
+})
+
+test('分诊②：gh 成功而列表为空 → 这才是「缺失」那句，且退出码不是 3', () => {
+  const r = verdictOf({ rc: 0, names: '', gherr: '' })
+  assert.equal(r.status, 0, `读到空列表是一条**判得出**的结论，不该用读不到的退出码：${r.status}｜${r.text}`)
+  assert.match(r.text, /GPG_PRIVATE_KEY missing/, r.text)
+  assert.match(r.text, /environment 'release'/, '缺失要说清缺的是哪一层（环境级与仓库级是两份 secret）')
+  assert.match(r.text, /成功读到\*\*空\*\*列表|读到了一份列表，里面没有它/,
+    '这句必须说明它是**从一次成功的读取**里得出的，而不是从"没读到"里猜的')
+})
+
+test('分诊③：gh 成功且名字在列 → ok；只含前缀的那一行不算命中（grep -qx 的同义）', () => {
+  const hit = verdictOf({ rc: 0, names: 'OTHER\nGPG_PRIVATE_KEY\n', gherr: '' })
+  assert.equal(hit.status, 0, hit.text)
+  assert.match(hit.text, /^ {2}ok {4}GPG_PRIVATE_KEY/m, hit.text)
+  assert.doesNotMatch(hit.text, /missing/, hit.text)
+
+  const prefixOnly = verdictOf({ rc: 0, names: 'GPG_PRIVATE_KEY_BACKUP\n', gherr: '' })
+  assert.equal(prefixOnly.status, 0, prefixOnly.text)
+  assert.match(prefixOnly.text, /GPG_PRIVATE_KEY missing/,
+    `整行才算命中：GPG_PRIVATE_KEY_BACKUP 不能替 GPG_PRIVATE_KEY 作背书。实得：${prefixOnly.text}`)
+
+  const repoLevel = verdictOf({ rc: 1, names: '', gherr: 'gh: Not Found (HTTP 404)\n', env: '' })
+  assert.equal(repoLevel.status, 3, repoLevel.text)
+  assert.doesNotMatch(repoLevel.text, /missing/, `404 也**不等于**没有这个 secret（仓库改名也是 404）：${repoLevel.text}`)
+  assert.match(repoLevel.text, /Not Found \(HTTP 404\)/, repoLevel.text)
+  assert.doesNotMatch(repoLevel.text, /environment 'release'/, '仓库级那条判决不许挂上环境名')
+})
+

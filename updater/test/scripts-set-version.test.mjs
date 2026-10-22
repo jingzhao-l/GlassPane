@@ -70,6 +70,17 @@ const SITE_TEMPLATES = {
   // 漂移的是用户照抄的那一行，而 check-version 当时看不见它。夹具按生产那一行的形状给。
   'README.md': (v) => `git clone --branch v${v} https://github.com/jingzhao-l/GlassPane.git && cd GlassPane\n`,
   'README.zh-CN.md': (v) => `git clone --branch v${v} https://github.com/jingzhao-l/GlassPane.git && cd GlassPane\n`,
+  // 2026-10-22：`SECURITY.md` / `SECURITY.zh-CN.md` 的受影响版本表那一格进了位点表，而它是这一族
+  // 里的第一种 `line: true`——写进那格的是版本线的**段**（`1.2`），不是完整号。原因在那条位点自己
+  // 的注释里：那一格对外说的是"这一线的一切补丁号都收安全修复"，把 `1.2.3` 落进去会把它变成
+  // "只有 1.2.3 这一个补丁版受支持"，那是另一句话，而且是假的那一句。夹具因此按生产的形状给：
+  // 段在格子里，完整号只出现在那句带日期的散文读数里（`siteTexts()` 读的就是它）。
+  'SECURITY.md': (v) =>
+    `| ${v.split('.').slice(0, 2).join('.')}.x | ✅ current release line; security fixes ship here. ` +
+    `**Measurement (2026-10-20, at the ${v} bump):** the root \`package.json\` version is the source of truth. |\n`,
+  'SECURITY.zh-CN.md': (v) =>
+    `| ${v.split('.').slice(0, 2).join('.')}.x | ✅ 当前版本线，安全修复在此发布。` +
+    `**测量口径（2026-10-20，随 ${v} 取号）**：真源是根 \`package.json\` 的 version。|\n`,
 }
 
 /** The lock shape set-version's own regeneration produces: one versioned entry per workspace key. */
@@ -143,6 +154,19 @@ function siteTexts({ root }) {
 
 const lockText = (tree, dir) => fs.readFileSync(path.join(tree.root, dir, 'package-lock.json'), 'utf8')
 
+/**
+ * 一个位点文件在"统一到 `version`"之后**应当**含有哪一段字符串。
+ *
+ * 普通位点就是完整 semver。带 `line: true` 的那几位写的是版本线的**段**（`SECURITY.md` /
+ * `SECURITY.zh-CN.md` 受影响版本表里那一格 `| 1.2.x |` 说的是"这一线的一切补丁号都收安全修复"；
+ * 把 `1.2.3` 落进那一格等于宣称只有那一个补丁版受支持——那是另一句话，而且是不真的那一句。判据与
+ * 它的对照见 `updater/test/scripts-version-sites.test.mjs` 的 `line 位点按版本线的段…`）。
+ * 拿完整号去核那一格，会把"按段写"这个正确行为判成"没改到新版本"；反过来去掉段折算，
+ * `the happy path…` 会红在缺 `1.2`，两边都有名字。
+ */
+const siteTextNeedle = (rel, version) =>
+  (SITES.find((site) => site.file === rel)?.line ? version.split('.').slice(0, 2).join('.') : version)
+
 test('a failed lock regeneration rolls the already-regenerated lock back too', () => {
   // `.` regenerates fine, `mcp-shell` then fails. The defect: the root lock had already been snapshotted
   // *after* npm rewrote it, so rollback restored the sites to 1.0.0 and left the root lock at 1.2.3.
@@ -192,7 +216,7 @@ test('--no-lock succeeds over stale locks, which is what the flag advertises', (
     const run = runSetVersion(tree, [TO, '--no-lock'])
     assert.equal(run.status, 0, run.output)
     assert.deepEqual(run.calls, [], '--no-lock 不该调用 npm：' + JSON.stringify(run.calls))
-    for (const [rel, text] of Object.entries(siteTexts(tree))) assert.ok(text.includes(TO), `${rel} 没改到新版本`)
+    for (const [rel, text] of Object.entries(siteTexts(tree))) assert.ok(text.includes(siteTextNeedle(rel, TO)), `${rel} 没改到新版本（这一位该出现 ${siteTextNeedle(rel, TO)}）`)
     for (const dir of ['.', 'mcp-shell']) {
       assert.equal(lockText(tree, dir).includes(TO), false, `${dir} 的 lock 不该被动`)
     }
@@ -231,7 +255,7 @@ test('the happy path still unifies sites and locks in one run', () => {
     const run = runSetVersion(tree, [TO])
     assert.equal(run.status, 0, run.output)
     assert.equal(run.calls.length, 2, `两个 lock 目录都要重生成一次：${JSON.stringify(run.calls)}`)
-    for (const [rel, text] of Object.entries(siteTexts(tree))) assert.ok(text.includes(TO), `${rel} 没改到新版本`)
+    for (const [rel, text] of Object.entries(siteTexts(tree))) assert.ok(text.includes(siteTextNeedle(rel, TO)), `${rel} 没改到新版本（这一位该出现 ${siteTextNeedle(rel, TO)}）`)
     for (const dir of ['.', 'mcp-shell']) {
       assert.equal(lockText(tree, dir).includes(FROM), false, `${dir}/package-lock.json 仍停在旧版本`)
     }
