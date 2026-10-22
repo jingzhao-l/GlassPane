@@ -1,5 +1,16 @@
-#!/bin/bash
+#!/bin/sh
 # GlassPane .app 打包脚本（零第三方依赖，仅用 macOS 自带工具）。
+#
+# 解释器（先于下面每条结论）：这份脚本有**两个**调用方，各用不同的 shell 起跑——
+#   installer/cli.js  → run('/bin/bash', [makeAppScript, …])
+#   updater/lib/apply.js（每日更新的暂存构建）→ run('/bin/sh', [makeAppScript])
+# 所以 shebang 与 preamble 必须按 POSIX sh 写：macOS 的 /bin/sh 就是 bash，
+# `set -euo pipefail` 在这台机器上侥幸可用；/bin/sh 是 dash 的 runner 上它在
+# preamble 那一行就 "set: Illegal option -o pipefail" 死掉，暂存构建永久报
+# staged-build-failed，每日更新从此再也过不去。本脚本没有任何管道（全文的 `|`
+# 只出现在两处逻辑或），pipefail 从来买不到东西——去掉它是零代价的。
+# 闸：engine/probe/Tests/GlassPaneProbeTests 里的打包脚本形状闸扫的是剥掉整行注释
+# 后的 shell 行，所以这段注释里写下的那些字面量不会把闸红在自己的说明上。
 #
 # 产出两个 bundle（P1 v1.2 §11.1 权限主体修正）：
 #   GlassPane.app         ← glasspane-settings（设置面板，com.glasspane.settings）
@@ -24,11 +35,25 @@
 #   engine/scripts/make-app.sh --skip-daemon         # 只打设置面板
 #
 # 图标为 sips + iconutil 生成的"基础图"而非品牌图——设计上如实标注（P4 v4.0 §34.5）。
-set -euo pipefail
+set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENGINE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$ENGINE_DIR/.build/release"
+
+# 产品的最低系统版本——**唯一声明处**，两个 bundle 的最低版本键都从这一个变量渲染。
+# 取 14.0 的理由（不是审美，是宣称对账）：README.md「Requirements」表、README.zh-CN.md
+# 前置条件表、CONTRIBUTING.md §1、installer/README.md 都写着 macOS 14+，而像素通道在
+# 14 上走 `SCScreenshotManager`、在 13 上退到 `SCStream` 路径 B——CHANGELOG 里那条
+# 2026-10 的记录自己写着「macOS 13 上的真值仍属待真机复跑」。键写低一档的后果是：
+# Ventura 上 LaunchServices 照样起 daemon，那条没测过的路径 B 就跑在生产机上，而每一项
+# "measured on 14+" 的宣称都在**没有拒绝**的情况下落空。地板要说的就是文档说的那一档。
+# 这里也是唯一一处需要改的地方（旧形状是同一处字面量写着比文档低一档的值，于是两个
+# bundle 一起错；现在值进了变量，往后说地板只有这一行可说）。
+# 注：`engine/Package.swift` 的 `.macOS(.v13)` 是**编译**部署目标（链接面），不是产品
+# 地板；把它一起抬到 v14 会改动整个 GlassPaneEngine 的 availability 判定，且必须一次
+# `swift build` 才验得了——本轮不动它，理由记在交付说明里。
+MACOS_MIN_VERSION="14.0"
 
 SETTINGS_BIN="$BUILD_DIR/glasspane-settings"
 DAEMON_BIN="$BUILD_DIR/glasspaned"
@@ -44,7 +69,9 @@ while [ $# -gt 0 ]; do
     --skip-daemon) SKIP_DAEMON=1; shift ;;
     --skip-settings) SKIP_SETTINGS=1; shift ;;
     --help|-h)
-      sed -n '2,30p' "$0"
+      # 帮助 = 文件头那段注释，打到第一个非注释行为止。旧写法钉死一个行号区间，
+      # 注释一加长就把帮助截掉半截、再往下糊几行代码进来。
+      awk 'NR>1 { if (/^#/) print; else exit }' "$0"
       exit 0 ;;
     -*)
       echo "make-app: 未知选项 $1" >&2; exit 64 ;;
@@ -197,7 +224,7 @@ make_bundle() {
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>LSMinimumSystemVersion</key>
-  <string>13.0</string>
+  <string>$MACOS_MIN_VERSION</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSPrincipalClass</key>

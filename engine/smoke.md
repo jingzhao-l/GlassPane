@@ -1067,7 +1067,7 @@ PID 65057）；本轮的构建是 `.build/debug/glasspane-settings`。读数：
 `node scripts/check-doc-links.mjs` = 文档 29 份 / 仓库内链接 238 条 / 外链 29 条不请求 /
 markdown 表格 394 张（扫 113 份）→ OK；
 `check-workflows --self-test` = 15 档（12 必须红、3 必须沉默）全部按声明回答，`check-workflows` =
-5 份 workflow 干净（ci.yml 9 job、release.yml 2、harness-contract 2、harness 那两份 2 + 10）；
+5 份 workflow 干净（ci.yml 的 job 数以下面 2026-10-22 那一节的复测为准——那一轮它记的是 9，本轮为 10；release.yml 2、harness-contract 2、harness 那两份 2 + 10）；
 `swift build --package-path engine` 退 0；`swift test --package-path engine` = XCTest
 **1272 条、3 跳过、0 失败** + Swift Testing **15 条 / 2 suites**；
 `swift test --package-path engine/probe` = 36 条 0 失败；`pytest -q bridge` = **82 passed**；
@@ -1182,3 +1182,65 @@ markdown 表格 394 张（扫 113 份）→ OK；
   补它：没有"撤销一次 TCC 授权"的无副作用命令（系统侧不提供，本产品的 remedy 也不许编造
   一条），所以只能在一台尚未勾选权限的机器上按 `gp-guide-accessibility`，再读
   `gp-guide-banner` 那句是否随 `launchctl submit` 的退出码在"已提交 / 起不来"之间变化。
+
+## 打包地板与探针默认名核对 2026-10-22（make-app.sh 的 macOS 地板 / POSIX preamble）
+
+本轮只动 `engine/scripts/make-app.sh` 与探针 SDK（`engine/probe/**`）。以下每条都是这台机器上跑出来
+的读数，不是从代码推的。本轮**没有**跑 `swift build` / `swift test`（串行闸在后面），所以下面没有
+一条 Swift 用例的绿——新用例是本轮写下去、待闸跑的。本机 macOS `sw_vers -productVersion` = 26.7。
+
+1. **两个 bundle 的最低系统版本键现在读 14.0（真产物读数）**：拿 `/bin/echo` 的副本当夹具产物，把
+   脚本完整跑两遍（一次 `/bin/sh`、一次 `/bin/dash`），再用 `PlistBuddy Print` 读回 Info.plist：
+   两份产物的 `LSMinimumSystemVersion` 都是 **14.0**，`CFBundleShortVersionString=1.19.0`、
+   `CFBundleVersion=1`、`CFBundleName` = `GlassPane` / `GlassPane Daemon`、
+   `CFBundleExecutable` = `glasspane-settings` / `glasspaned`、`CFBundleIdentifier` =
+   `com.glasspane.settings` / `com.glasspane.daemon`，`LSUIElement` 只在 Daemon 那一枚为 `true`；
+   两次产物 `codesign --verify --strict` 均过。
+   对照（缺陷 1 在本机是有文件的）：`engine/.build/release/` 里**本轮之前**构建的那两个 bundle
+   （2026-09-22 的产物）读出来 `LSMinimumSystemVersion` 仍是 **13.0**（其
+   `CFBundleShortVersionString=0.1.0`，是更早版本的脚本），而 README/CONTRIBUTING/installer 文档写
+   macOS 14+。
+2. **脚本现在同时活得过 `/bin/sh` 与 `/bin/dash`（缺陷 3 的正反两面都量了）**：本机 `/bin/sh` 就是
+   bash，`/bin/sh -c 'set -euo pipefail'` 侥幸退 0——这台机器单看 `/bin/sh` 测不出该缺陷；但 macOS
+   也装了 `/bin/dash`。把旧脚本 `git show HEAD:engine/scripts/make-app.sh` 还原后用 `/bin/dash` 跑：
+   `make-app.orig.sh: 27: set: Illegal option -o pipefail`，**退 2**（正是每日更新永久
+   `staged-build-failed` 的那个形状）。同一份夹具下，本轮新脚本 `/bin/dash` 与 `/bin/sh` 都跑完整
+   （9.3 s / 6.2 s），两个 bundle 都产出。`bash -n`、`sh -n`、`dash -n` 三条本轮都过。全文没有一条
+   管道——两处 `|` 都是逻辑或——所以 `pipefail` 本来买不到东西，去掉是零代价。
+3. **daemon 侧的探针口名是实测的（缺陷 5 的前提）**：`engine/.build/debug/glasspaned --state-dir
+   /var/tmp/gp-sock-measure-$$ --socket-path <同目录>/engine.sock --no-c33 --unattended-window
+   --verbose` → 日志一行 `probe socket listening on /var/tmp/gp-sock-measure-23627/probe.sock`，
+   且那个根里确实出现 `probe.sock`（`srw-------`）。同一台机器的现网默认根也有一枚
+   `~/.glasspane/probe.sock`（`ls -l` 读到 `srw-------`，mtime 2026-10-22 07:33）。两条合起来就是
+   "app 不显式给 `socketPath:` 就连不上一个带 `--state-dir` 的 daemon，而在开发机上它连的是现网那一
+   枚"。探针现在按 `GLASSPANE_STATE_DIR` 派生 `<root>/probe.sock`，优先级
+   显式参数 → `GLASSPANE_PROBE_SOCK` → `GLASSPANE_STATE_DIR` → 家目录默认，由纯函数
+   `ProbeRuntime.resolveSocketPath` 写在一处，新用例钉住取值、两种根拼法与接线。
+4. **`--help` 那一段**：旧写法 `sed -n '2,30p'` 把帮助钉死在行号上，文件头一加长就截错。改成
+   `awk 'NR>1 { if (/^#/) print; else exit }'` 后，`sh … --help` 与 `bash … --help` 输出行数一致
+   （36 行，止于注释块末尾，不再把代码糊进帮助）。
+5. **`updater/test/bundle-names.test.mjs` 的那台解析器仍读到同样的两个 bundle**：按它自己的折叠规则
+   （`\\\n` → 空格）在本地复刻一遍，`make_bundle` 调用仍是 2 条，
+   `GlassPane.app → glasspane-settings`、`GlassPane Daemon.app → glasspaned`——本轮没有把别人那一条
+   闸改红。
+
+### 本轮测不到（附补它的确切一条）
+
+- **在 macOS 13 上跑这两个 bundle**：本机 26.7，没有 13 的机器或镜像。地板抬到 14.0 之后
+  "Ventura 上该拒绝、而不是安静地走 macOS-13 的 `SCStream` 路径 B"这一半仍是**声明**，本轮没有读数。
+  补它：`sw_vers -productVersion` 为 13.x 的机器上 `open "GlassPane Daemon.app"`，读 LaunchServices
+  是否拒绝。（CHANGELOG.md:2472「macOS 13 上的真值仍属待真机复跑」本轮仍未闭合。）
+- **launchd 起的 daemon 是否也受 `LSMinimumSystemVersion` 约束**：`installer/cli.js` 那份作业的
+  `ProgramArguments` 首项是 bundle 内的可执行路径，而这一档约束历史上由 LaunchServices 在 `open`
+  时判，不是 launchd。本机无法证伪。补它：在 13 的机器上 `launchctl bootstrap` 同一个 plist，看作业
+  是否被拒。
+- **探针默认名解析的端到端那一半**：这台机器 `~/.glasspane/probe.sock` 有人应在，新用例
+  `testTheEnvironmentNamedRootIsTheSocketTheThreadIsAimedAt` 因此在**本机 skip**（它不许拿现网
+  daemon 当被测对象；取值与接线由同批纯函数用例与源码形状闸覆盖）。补它：在没有装 daemon 的 macOS
+  runner 上 `cd engine/probe && swift test --filter Qoder20261022ProbeReportingAndPackagingGates`。
+  另注：`engine/.p6_smoke.py` 自己 export 了 `GLASSPANE_PROBE_SOCK`（1115/1134 行），所以它对
+  "默认名解析退化"这一类回归**看不见**。
+- **本轮新增/改动的 Swift 用例的绿与红**：按串行闸的约定没有跑 `swift build` / `swift test`。
+  补它：`cd engine/probe && swift test`（每条用例的 REVERSE 写在它自己的注释里）。
+- **旧探针的"改前"对照跑**：要真起一次 demo 去连现网那枚 socket，属于本仓禁止的"测试碰现网状态"，
+  没做。

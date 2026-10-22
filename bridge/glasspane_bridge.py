@@ -25,8 +25,17 @@ address — the normal workflow — never inherits the previous generation's cou
 
 Division of testing (v3.2 acceptance口径): the decidable core — queue policy,
 JSON assembly, truncation, sentinel extraction, argv building — is pure and
-covered by test_bridge.py with plain python3; the SB-API execution surface is
-real-machine smoke only (§7.5), never faked into unit tests.
+covered by test_bridge.py with plain python3. The SB-API surface is split at the
+*call*, not at the module: the decisions taken about SB objects (which thread
+rows reach the payload and what a cap announces, whether a stop is a crash and
+what the 0/1/3 verdict is, whether a watchpoint hit released its slot and armed
+the queue head, what an unreadable read publishes) are driven in the default
+suite against objects shaped like lldb's binding, while the calls that need a
+real debugger — `target.WatchAddress`, resume/re-stop, `LaunchSimple`, the live
+stop hook — are stubbed at that one seam and stay real-machine smoke only
+(§7.5, opt-in via `GLASSPANE_REAL_LLDB=1`). Nothing is faked into a verdict: a
+stub may hand back an SB-shaped value, it may not make the bridge report a
+measurement it did not take (unreadable stays null + an errors[] note).
 
 Outer CLI exit codes (`run_outer`): 0 = a non-crash scene was captured, 1 =
 nothing was captured, 2 = lldb could not be spawned or the payload could not be
@@ -78,6 +87,10 @@ TRACE_INTERVAL_S = 1.0
 SEND_SOCK_TIMEOUT_S = 10.0
 MAX_TRACE_SAMPLES = 32
 EMIT_TIMEOUT_S = 5.0
+#: 杀掉整组之后**再抽干一次管道**的上限。到期就带着已经读到的字节离场：管道写端
+#: 可能被一个逃出了进程组的继承者握着，无限等下去会兑现不了「永不静默挂起」。
+#: 命名它而不是写死 5：它同时是收尾 `wait()` 的上限，测试要用一个小值跑这条分支。
+CHILD_DRAIN_TIMEOUT_S = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +415,14 @@ def render_json(payload):
 
 
 def frame_record(index, module, address, file=None, line=None, function=None, locals_=None):
+    """One §6.4 ``frames[]`` record.
+
+    ``locals_=None`` is **"these locals were never read"**, not "this frame holds
+    no locals": only the top frame is read (§6.1), and a frame that was never
+    asked about its locals used to publish ``locals: []`` + ``localsTotal: 0`` —
+    a count of zero asserted where the truth is unmeasured, the same class the
+    ``queue`` rule below refuses to ship. An empty *list* stays "measured, none".
+    """
     frame = {"idx": index, "module": module, "addr": address}
     if file is not None:
         frame["file"] = file
@@ -409,7 +430,12 @@ def frame_record(index, module, address, file=None, line=None, function=None, lo
         frame["line"] = line
     if function is not None:
         frame["function"] = function
-    seen = list(locals_ or [])
+    if locals_ is None:
+        frame["locals"] = []
+        frame["localsTotal"] = None
+        frame["localsTruncated"] = None
+        return frame
+    seen = list(locals_)
     kept, dropped = keep_capped(seen, MAX_LOCALS)
     frame["locals"] = [
         dict(name=name, value=truncate(value)[0], truncated=truncate(value)[1])
@@ -832,6 +858,58 @@ def emit(payload, out_path=None, send_sock=None, timeout_s=None):
             client.close()
 
 
+def _decoded_partial(value):
+    """Fold a timed-out read's buffer into text the sentinel parser can eat.
+
+    `TimeoutExpired.output`/`.stderr` carry the raw **bytes** read so far — even
+    when Popen ran in text mode, CPython fills them straight from the fd-level
+    chunks — and this pipe is lossy by contract (B-28): a non-UTF-8 byte must
+    become U+FFFD here rather than raise inside the error path.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _keep_widest(kept, candidate):
+    """Keep the larger buffer, never a concatenation.
+
+    CPython accumulates what it read across `communicate()` calls, so the newest
+    buffer is normally a superset of the older one; joining both would duplicate
+    the noise. Length is the only comparison that cannot both lose the sentinel
+    pair and invent a second copy of it.
+    """
+    text = _decoded_partial(candidate)
+    return text if len(text) >= len(kept) else kept
+
+
+def _release_pipes_and_reap(proc):
+    """Close both read ends and reap the child — the two things a timed-out
+    `communicate()` leaves for nobody else to do.
+
+    After a timeout CPython deliberately leaves the fds open in case the caller
+    retries, so a path that does not close them leaks one fd pair per hung
+    capture, and an unreaped child is a zombie that keeps the pid (and, on this
+    bridge, the stopped target) claimed. Both closes are idempotent, so this is
+    safe to run on the success path too.
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(proc, name, None)
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except OSError:
+            pass
+    if proc.returncode is None:
+        try:
+            proc.wait(timeout=CHILD_DRAIN_TIMEOUT_S)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+
 def run_child_captured(argv, timeout, env=None):
     """Spawn the lldb child and drain it: **lossy** decode, whole-group kill.
 
@@ -847,6 +925,11 @@ def run_child_captured(argv, timeout, env=None):
     握着，于是"永不静默挂起"的注释不成立，且被 attach 的目标进程会常驻
     SIGSTOP（用户的被测应用被冻死在这里）。自成进程组才能整组收掉。
 
+    双重超时（杀了整组、管道还是不通 EOF）那一支从前是 `proc.kill()` +
+    `out, err = "", ""`：它同时丢了**已经读进缓冲的字节**（哨兵对可能就在里面，
+    lldb 明明已经吐出了载荷）、漏掉那一对 fd、并且从不 `wait()` 收尸。现在两次
+    抽干之间的字节都留下，收尾一律走 `_release_pipes_and_reap`，超时判决不变。
+
     Returns (completed, timed_out). `OSError` 原样上抛，由调用方决定报什么形状。
     """
     proc = subprocess.Popen(
@@ -856,17 +939,24 @@ def run_child_captured(argv, timeout, env=None):
     try:
         out, err = proc.communicate(timeout=timeout)
         return _Completed(proc.returncode, out, err), False
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as first:
+        out = _keep_widest("", first.output)
+        err = _keep_widest("", first.stderr)
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
         try:
-            out, err = proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            out, err = "", ""
+            drained_out, drained_err = proc.communicate(timeout=CHILD_DRAIN_TIMEOUT_S)
+        except subprocess.TimeoutExpired as second:
+            out = _keep_widest(out, second.output)
+            err = _keep_widest(err, second.stderr)
+        else:
+            out = _keep_widest(out, drained_out)
+            err = _keep_widest(err, drained_err)
         return _Completed(proc.returncode, out, err), True
+    finally:
+        _release_pipes_and_reap(proc)
 
 
 def run_outer(args):
@@ -1270,13 +1360,22 @@ def no_payload_cause(stderr_text, stdout_text=None, bridge_path=None):
             or "no such file or directory" in combined
             or "module not found" in combined):
         return ("bridge-not-imported",
-                "the bridge itself never got imported into lldb: lldb's own command "
-                "tokenizer split `command script import %s` on whitespace, so the "
-                "checkout path is the suspect, NOT a permission seat. Reproduce with "
-                "the exact argv above and look for \"invalid pathname\" in stderr; "
-                "remedy = move the repo to a path this bug cannot reach (a directory "
-                "name carrying a space or a quote), or quote the path in the -o text. "
-                "No seat in System Settings fixes this one." % named_us)
+                "lldb never imported the bridge: its own command tokenizer split "
+                "`command script import %s`, so the checkout path is the suspect, NOT a "
+                "permission seat. The historical shape was an unquoted path carrying a "
+                "space, but `build_lldb_argv` quotes every token through "
+                "`lldb_command_quote` now — re-quoting the -o text is a source edit, not "
+                "a step an operator can take, so work the arms that are runnable as-is: "
+                "(1) `ls -l '%s'` — the file has to exist and be readable at the path in "
+                "the argv; (2) if that argv did not come from `build_lldb_argv` (a "
+                "hand-run lldb, or an --setup line), take the quoted token from the "
+                "bridge itself: `python3 -c \"import glasspane_bridge as gb; "
+                "print(gb.lldb_command_quote('%s'))\"`; (3) if the path itself is what "
+                "lldb refuses, run a copy that sits on a plain path, since the bridge "
+                "imports its own __file__: `cp '%s' /tmp/glasspane_bridge.py` and re-run "
+                "`python3 /tmp/glasspane_bridge.py capture --pid <pid>`. "
+                "No seat in System Settings fixes this one."
+                % (named_us, named_us, named_us, named_us))
     return ("debug-gated",
             "the bridge imported but produced no payload: debug attach/launch is "
             "permission-gated on this machine (P6 §0 F1/F2, §7.1) — grant System "
@@ -1334,18 +1433,33 @@ def _describe_stop(thread):
 
 
 def _collect_locals(frame):
+    """Top-frame locals as (variables, unreadable_reason).
+
+    The reason is the honest half of the pair: `variables == []` **with** a reason
+    means "not measured", and `variables == []` without one means "read, and this
+    frame holds none". Collapsing the two is what let an unreadable frame publish
+    `localsTotal: 0` (the `queue` rule at `thread_entry` is the precedent).
+    """
     variables = []
     try:
         values = frame.GetVariables(True, True, False, True)
-    except Exception:
-        return variables
+    except Exception as error:
+        return variables, ("top-frame locals were not measured: GetVariables() "
+                           "raised %r, so locals: [] in this payload is an unreadable "
+                           "read, not an empty frame" % (error,))
     for value in values or []:
-        if not value or not value.IsValid():
-            continue
-        name = value.GetName() or "?"
-        displayed = value.GetValue() or value.GetSummary() or ""
+        try:
+            if not value or not value.IsValid():
+                continue
+            name = value.GetName() or "?"
+            displayed = value.GetValue() or value.GetSummary() or ""
+        except Exception as error:
+            return [], ("top-frame locals were not measured: a variable read raised "
+                        "%r after %d of them, so this payload carries no locals for the "
+                        "frame rather than a partial list that would read as a complete "
+                        "one" % (error, len(variables)))
         variables.append((name, displayed))
-    return variables
+    return variables, None
 
 
 def _module_name(module):
@@ -1367,9 +1481,24 @@ def _line_file(line_entry):
     return None
 
 
-def _collect_frames(thread, max_frames=MAX_FRAMES):
+def _note(errors, text):
+    """Append an integrity note when the caller kept a place for one.
+
+    `errors=None` means this read is not feeding a payload (the trace sampler's
+    per-stop observations), and the per-row `localsTotal: null` still carries the
+    non-measurement there; a payload path always passes its list.
+    """
+    if errors is not None:
+        errors.append(text)
+
+
+def _collect_frames(thread, max_frames=MAX_FRAMES, errors=None):
     """Frames collected under the cap; the thread's real total travels with the
-    row as ``framesTotal``/``framesTruncated`` so the cut is visible (B-23)."""
+    row as ``framesTotal``/``framesTruncated`` so the cut is visible (B-23).
+
+    A locals read that failed says so twice: the row keeps `localsTotal: null`
+    (= not measured) and `errors[]` names the unreadable channel.
+    """
     frames = []
     for i in range(min(thread.GetNumFrames(), max_frames)):
         frame = thread.GetFrameAtIndex(i)
@@ -1379,6 +1508,15 @@ def _collect_frames(thread, max_frames=MAX_FRAMES):
         symbol = frame.GetSymbol()
         module = frame.GetModule()
         address = "0x%x" % frame.GetPC() if frame.GetPC() is not None else "?"
+        locals_ = None
+        if i == 0:
+            variables, unreadable = _collect_locals(frame)
+            if unreadable:
+                # Keep `locals_: null` (not measured) rather than the failed read's
+                # empty list, which `frame_record` would publish as a measured zero.
+                _note(errors, unreadable)
+            else:
+                locals_ = variables
         frames.append(frame_record(
             index=i,
             module=_module_name(module) if module and module.IsValid() else "?",
@@ -1386,20 +1524,27 @@ def _collect_frames(thread, max_frames=MAX_FRAMES):
             file=_line_file(line_entry),
             line=line_entry.GetLine() if line_entry and line_entry.IsValid() else None,
             function=symbol.GetName() if symbol and symbol.IsValid() else None,
-            locals_=_collect_locals(frame) if i == 0 else None,
+            locals_=locals_,
         ))
     return frames
 
 
 def _collect_registers(thread):
+    """Top-frame registers as (registers, unreadable_reason).
+
+    Same rule as `_collect_locals`: `{}` with a reason is "not measured", `{}`
+    without one is "read, and the thread has no frames".
+    """
     registers = {}
     if thread.GetNumFrames() == 0:
-        return registers
+        return registers, None
     frame = thread.GetFrameAtIndex(0)
     try:
         root = frame.GetRegisters()
-    except Exception:
-        return registers
+    except Exception as error:
+        return registers, ("registers were not measured: GetRegisters() raised %r, so "
+                           "registers: {} in this payload is an unreadable read, not a "
+                           "register-less thread" % (error,))
     for group in root or []:
         for reg in group or []:
             try:
@@ -1409,7 +1554,7 @@ def _collect_registers(thread):
                 continue
             if name:
                 registers[name] = truncate(value or "")[0]
-    return registers
+    return registers, None
 
 
 def _num_frames(thread):
@@ -1526,6 +1671,23 @@ def _promote_and_arm(debugger, freed_index):
     return (spec, None)
 
 
+def _thread_count(process):
+    """Threads the target really reports, as (count, unreadable_reason).
+
+    The count is what makes a cap *visible*: `_payload_from_process` enumerates
+    this many rows so `assemble_result` can drop the excess and announce it, and
+    `reconcile_watchpoint_stops` compares it with MAX_THREADS to say when a stop
+    may have sat past the rows it was allowed to look at. An unreadable count is
+    reported as unreadable, never as "0 threads".
+    """
+    try:
+        return max(0, int(process.GetNumThreads())), None
+    except Exception as error:
+        return 0, ("the thread count was not measured: GetNumThreads() raised %r, so an "
+                   "empty thread list here means unreadable, not a threadless process"
+                   % (error,))
+
+
 def _stop_id(process):
     """SBProcess stop counter — the only thing that distinguishes two samples."""
     getter = getattr(process, "GetStopID", None)
@@ -1546,14 +1708,35 @@ def reconcile_watchpoint_stops(debugger, process=None):
     answers "queued" as a promise nobody keeps. Idempotent per
     (stop id, thread, watchpoint id) so the stop hook and a gp-* command can
     both look at the same stop.
+
+    The thread walk here is capped, so a caveat travels with any cap: the ledger
+    note rides out in every payload's errors[], because "the session observed no
+    watchpoint stop" must never be readable as evidence when the real reason is
+    that the stop sat past the rows this pass was allowed to look at (B-23).
     """
     report = {"hits": [], "rearmed": [], "notes": []}
+
+    def caveat(detail):
+        _WATCH_QUEUE.note(detail)
+        report["notes"].append(detail)
+
     try:
         process = process if process is not None else _process_of(debugger)
         if process is None or not process.IsValid():
             return report
         stop_id = _stop_id(process)
-        for index in range(min(process.GetNumThreads(), MAX_THREADS)):
+        num_threads, unreadable = _thread_count(process)
+        if unreadable:
+            caveat(unreadable)
+        if num_threads > MAX_THREADS:
+            # 载荷那一半现在枚举全部线程（封顶与宣告归 assemble_result），这里为了
+            # 一次停住的开销上限仍然只看前 MAX_THREADS 条 —— 于是第 65 条线程上的
+            # 监视点停会被**静默**漏掉，账本接着报"一次停都没观察到"。漏就要说漏。
+            caveat("watchpoint reconciliation looked at only the first %d of %d threads "
+                   "(MAX_THREADS=%d): a stop on a thread past that cut was NOT observed, "
+                   "so a hit may be missing and a queued watchpoint may still be waiting "
+                   "for a slot it never got" % (MAX_THREADS, num_threads, MAX_THREADS))
+        for index in range(min(num_threads, MAX_THREADS)):
             thread = process.GetThreadAtIndex(index)
             if not thread or not thread.IsValid() or _describe_stop(thread) != "watchpoint":
                 continue
@@ -1634,21 +1817,32 @@ def _install_stop_hook(debugger):
 
 
 def _payload_from_process(process, mode, errors=None, samples=None):
-    import lldb
     notes = _WATCH_QUEUE.integrity_notes()
+    channel_errors = list(errors or [])
     if process is None or not process.IsValid():
         return assemble_result(mode=mode, target={"pid": None}, status="no-process",
-                               threads=[], errors=(errors or ["no live process to capture"]) + notes)
+                               threads=[],
+                               errors=(channel_errors or ["no live process to capture"]) + notes)
     threads = []
-    for i in range(min(process.GetNumThreads(), MAX_THREADS)):
-        thread = process.GetThreadAtIndex(i)
+    # 每一**条**线程都要走到，把封顶与宣告留给 `assemble_result`（它本来就在做这两件
+    # 事）：从前这里先 `min(GetNumThreads(), MAX_THREADS)` 才交给装配，超出上限的
+    # 行根本不存在，于是 `truncated.threads` 是空的、errors[] 一字不提，载荷读起来
+    # 像一份完整的线程表——正是 B-23 要杀掉的那一类"截断了却不宣布截断"。
+    # 上限之后的行仍然建，但只填便宜字段：它们反正被丢掉，为一行没人收的载荷去付
+    # 一次整栈回溯，宽线程目标上能把采集拖过预算。
+    num_threads, count_unreadable = _thread_count(process)
+    if count_unreadable:
+        channel_errors.append(count_unreadable)
+    for index in range(num_threads):
+        thread = process.GetThreadAtIndex(index)
         if not thread or not thread.IsValid():
             continue
+        kept_row = len(threads) < MAX_THREADS
         threads.append(thread_entry(
             thread_id=thread.GetThreadID(),
             name=thread.GetName(),
             stop_reason=_describe_stop(thread),
-            frames=_collect_frames(thread),
+            frames=_collect_frames(thread, errors=channel_errors) if kept_row else [],
             frames_total=_num_frames(thread),
             queue=_thread_queue(thread),
         ))
@@ -1674,16 +1868,21 @@ def _payload_from_process(process, mode, errors=None, samples=None):
         state_input = raw_state  # 取不到 int：交给 normalize_state 尽力解析
     _state_int, state_name = normalize_state(state_input)
     status = state_name or ("state(%s)" % raw_state)
+    registers, register_failure = ({}, None)
+    if top and top.IsValid():
+        registers, register_failure = _collect_registers(top)
+    if register_failure:
+        channel_errors.append(register_failure)
     result = assemble_result(
         mode=mode,
         target={"pid": process.GetProcessID()},
         status=status,
         threads=threads,
-        registers=_collect_registers(top) if top and top.IsValid() else {},
+        registers=registers,
         stop_reason=stop_reason,
         crash=crash,
         watchpoints=_WATCH_QUEUE.records(),
-        errors=(errors or []) + notes,
+        errors=channel_errors + notes,
     )
     if samples is not None:
         result["samples"] = samples

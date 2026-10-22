@@ -51,6 +51,13 @@ public enum GP {
     /// backoff for the life of the process, so an app that started before the
     /// daemon is served as soon as it appears; buffered frames drain onto the
     /// new connection, and what did not fit shows up in `droppedEventCount`.
+    ///
+    /// Which socket, when `socketPath` is nil: `GLASSPANE_PROBE_SOCK`, then the
+    /// listener of the state root named by `GLASSPANE_STATE_DIR`
+    /// (`<root>/probe.sock`, which is what `glasspaned --state-dir <root>` binds),
+    /// then `<home>/.glasspane/probe.sock`. See
+    /// `ProbeRuntime.resolveSocketPath` for the precedence and for why the
+    /// state-root level had to be there.
     public static func start(socketPath: String? = nil, appName: String? = nil) {
         runtime.start(socketPath: socketPath, appName: appName)
     }
@@ -202,9 +209,22 @@ final class ProbeRuntime: @unchecked Sendable {
     static let probeVersion = "gp-probe/0.1.0"
     static let reconnectAttempts = 3
     static let reconnectIntervalMs = 1000
-    /// Wait after a *whole* failed cycle. P6 §2.1 fixes the per-attempt backoff
-    /// (1s×3) but cannot mean "latch the probe off", since "app started before
-    /// daemon" is the ordinary case — so the cycle repeats after this gap.
+    /// Wait after a *whole* failed cycle. The schedule this gap closes is per
+    /// cycle: three connect attempts whose waits escalate 1 s, 2 s, 3 s
+    /// (`attemptBackoffMs`, 6 s of sleeping), then this gap — ~36 s per cycle,
+    /// not a fixed one-second heartbeat. It escalates because the two
+    /// cases that reach it are different: a daemon that is *starting* is there
+    /// after the first second or two, so the early waits have to stay short,
+    /// while a machine that never gets a daemon must not be poked every second
+    /// for the life of the app. P6 §2.1's backoff line counts three waits of one
+    /// fixed second and that sentence — not this schedule — is the stale half: the
+    /// escalating shape is pinned by
+    /// `ProbeRuntimeTests.testExhaustedConnectCycleReArmsInsteadOfQuitting`, and
+    /// the spec text owes a record (not edited from here).
+    ///
+    /// What §2.1 *does* bind is the attempt count, and a cycle that ends must not
+    /// latch the probe off: "app started before daemon" is the ordinary case, so
+    /// the cycle re-arms after this gap.
     static let reconnectCycleIntervalMs = 30_000
     static let offlineBufferLimit = 256
     /// Serial write queue cap — larger than the offline buffer, so a reconnect
@@ -257,7 +277,19 @@ final class ProbeRuntime: @unchecked Sendable {
     /// measurement in `writeFrame`, not this number.
     static let stateValueByteCap = 1024
 
-    /// Backoff after a failed attempt inside one cycle (P6 §2.1: 1s, 2s, 3s).
+    /// Backoff after a failed attempt *inside* one cycle: attempt 0 → 1 s,
+    /// attempt 1 → 2 s, attempt 2 → 3 s, then the cycle gap
+    /// (`reconnectCycleIntervalMs`). The multiplier is the attempt index plus one,
+    /// and `max(1, …)` clamps a caller that hands a negative index instead of
+    /// letting it schedule a zero- or negative-second sleep. This is the schedule
+    /// the suite defends; P6 §2.1's backoff sentence counts three waits of one
+    /// fixed second, and that sentence — not this function — is the half that
+    /// owes a spec-side record.
+    ///
+    /// `Qoder20261022ProbeReportingAndPackagingGates` fails on any comment line in
+    /// this file that re-shortens the schedule to the spec's "N waits of one
+    /// second" shorthand: that shorthand is exactly how this comment drifted away
+    /// from the code it documents.
     static func attemptBackoffMs(afterFailedAttempt attempt: Int) -> Int {
         max(1, attempt + 1) * reconnectIntervalMs
     }
@@ -320,6 +352,12 @@ final class ProbeRuntime: @unchecked Sendable {
     private var kvcRejectionNotes: [(subject: ObjectIdentifier, note: String)] = []
     private var readerRunning = false
     private var advertisedCapabilities: [String] = []
+    /// The socket the connection thread this `start` handed off is aimed at —
+    /// the *answer* `resolveSocketPath` gave for this process's real environment.
+    /// Recorded because the alternative way to prove the wiring is to let a test
+    /// connect somewhere, and "somewhere" is precisely the thing a probe test must
+    /// not guess at (a wrong guess is the live `~/.glasspane/probe.sock`).
+    private var socketPathValue: String?
 
     // Registration surfaces.
     private var mirrorRoots: [MirrorRoot] = []
@@ -333,7 +371,7 @@ final class ProbeRuntime: @unchecked Sendable {
     private var mirrorBaselined = false
 
     /// Test/smoke seam: shrinks both backoff waits so a re-arm can be observed
-    /// without sleeping the real 1s×3 + 30s schedule.
+    /// without sleeping the real 1 s + 2 s + 3 s, then 30 s schedule.
     var backoffOverrideMs: Int? {
         get { lock.lock(); defer { lock.unlock() }; return backoffOverrideStorage }
         set { lock.lock(); backoffOverrideStorage = newValue; lock.unlock() }
@@ -387,9 +425,95 @@ final class ProbeRuntime: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return fd >= 0
     }
+
+    // MARK: Socket resolution
+
+    /// The variable that names a **state root**. Read by the settings panel
+    /// (`glasspane-settings/SettingsModel.swift` → `resolveSocketPath`, with
+    /// `UpdatePanel.stateRoot` as the owner of the root rule), by the updater
+    /// (`updater/lib/home.js` → `resolveStateRoot`, also `agent-entry.js`), and by
+    /// the MCP shell (`mcp-shell/src/update-state.ts` → `STATE_DIR_ENV`). The
+    /// **daemon does not read it** — it serves the root named by `--state-dir`,
+    /// and the listener inside that root is `<root>/probe.sock`
+    /// (`StateRoot.probeSocketFile`, applied at `glasspaned/main.swift:1528`).
+    static let stateDirEnvironmentKey = "GLASSPANE_STATE_DIR"
+    /// The variable that names the probe socket itself: P6 §2.1's SDK-side
+    /// override, and the one `engine/.p6_smoke.py` sets for the demo app.
+    static let probeSocketEnvironmentKey = "GLASSPANE_PROBE_SOCK"
+    /// Leaf name the daemon binds inside whichever root it resolved.
+    static let probeSocketFileName = "probe.sock"
+    /// The per-user state folder — `StateRoot.folderName`, spelled a second time
+    /// because the probe is a separate package and must not enter the daemon's
+    /// dependency-free build graph. The two names are pinned against each other by
+    /// `Qoder20261022ProbeReportingAndPackagingGates`, which reads the daemon's file.
+    static let stateFolderName = ".glasspane"
+
+    /// Where `start(socketPath: nil)` connects, as one pure function so the
+    /// precedence is executable rather than commented. Highest first:
+    ///  1. the caller's explicit `socketPath:` argument;
+    ///  2. `GLASSPANE_PROBE_SOCK` — the only variable naming a socket outright;
+    ///  3. `GLASSPANE_STATE_DIR` + `/probe.sock` — what a daemon started with
+    ///     `--state-dir <root>` actually listens on;
+    ///  4. `<home>/.glasspane/probe.sock` — the home default, i.e. the same root
+    ///     the daemon falls back to when no root was named.
+    ///
+    /// Level 3 is the fix. Without it an app calling `GP.start()` against a daemon
+    /// that named a sandbox root buffered offline **forever** — the smoke run
+    /// believed it was isolated while the app under test talked to nobody — and an
+    /// app calling `GP.start()` on a developer machine attached to the *live*
+    /// `~/.glasspane/probe.sock` while the runner believed otherwise. Both were
+    /// invisible: the probe degrades to buffering by design, and `GP.isConnected`
+    /// only says "not connected", never "you asked the wrong name".
+    ///
+    /// A blank or whitespace-only value means *not named* (the same rule the panel
+    /// applies — `export GLASSPANE_STATE_DIR=` must not become a connect target).
+    /// `~/…` is deliberately **not** expanded: `StateRoot.canonical` does not
+    /// expand it for `--state-dir` either, so expanding it here would make the
+    /// probe disagree with the daemon it is trying to find.
+    static func resolveSocketPath(
+        explicit: String?,
+        env: [String: String] = ProcessInfo.processInfo.environment,
+        home: String = NSHomeDirectory()
+    ) -> String {
+        if let explicit = explicit, let path = namedValue(explicit) { return path }
+        if let path = env[probeSocketEnvironmentKey].flatMap(namedValue) { return path }
+        if let root = env[stateDirEnvironmentKey].flatMap(namedValue) {
+            return probeSocketPath(inRoot: root)
+        }
+        return probeSocketPath(inRoot: home + "/" + stateFolderName)
+    }
+
+    /// `<root>/probe.sock`, canonicalised the way the daemon canonicalises a root:
+    /// `/tmp/x`, `/tmp/x/` and `/tmp/x//` name one directory, so they must name one
+    /// listener — a doubled slash in a `sockaddr_un` is a name nobody bound. A root
+    /// of nothing but slashes keeps the single `/` it is allowed to be.
+    static func probeSocketPath(inRoot root: String) -> String {
+        let canonical = droppingTrailingSlashes(root)
+        return canonical.hasSuffix("/")
+            ? canonical + probeSocketFileName
+            : canonical + "/" + probeSocketFileName
+    }
+
+    /// `StateRoot.canonical`, reimplemented because the probe is a separate package
+    /// and must not enter the daemon's dependency-free build graph.
+    private static func droppingTrailingSlashes(_ root: String) -> String {
+        guard root.count > 1 else { return root }
+        var end = root.endIndex
+        while end > root.startIndex, root[root.index(before: end)] == "/" {
+            end = root.index(before: end)
+        }
+        return end == root.startIndex ? "/" : String(root[..<end])
+    }
+
+    /// Trimmed value, or nil when the caller named nothing.
+    private static func namedValue(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
     // MARK: Connection
 
     func start(socketPath: String?, appName: String?) {
+        let path = ProbeRuntime.resolveSocketPath(explicit: socketPath)
         lock.lock()
         guard !started else { lock.unlock(); return }
         started = true
@@ -398,11 +522,8 @@ final class ProbeRuntime: @unchecked Sendable {
         let generation = connectionGeneration
         appNameValue = appName ?? ProcessInfo.processInfo.processName
         bundleIdValue = Bundle.main.bundleIdentifier
+        socketPathValue = path
         lock.unlock()
-
-        let path = socketPath
-            ?? ProcessInfo.processInfo.environment["GLASSPANE_PROBE_SOCK"]
-            ?? (NSHomeDirectory() + "/.glasspane/probe.sock")
 
         let thread = Thread { [weak self] in self?.serveConnections(path: path, generation: generation) }
         thread.name = "glasspane.probe.connection"
@@ -1123,6 +1244,15 @@ final class ProbeRuntime: @unchecked Sendable {
         return awaitingCloseFD
     }
 
+    /// The socket path the running connection thread was handed (nil = never
+    /// started). This is the resolver's answer for the real process environment,
+    /// so a test can pin "which name did `start(socketPath: nil)` pick" without
+    /// aiming a live connect at anything.
+    internal var debugSocketPathForTests: String? {
+        lock.lock(); defer { lock.unlock() }
+        return socketPathValue
+    }
+
     /// Test hook: adopt an already-connected descriptor (a socketpair end) so
     /// the delivery path can be watched without a daemon. Configured exactly
     /// like a connected socket, so an unprotected descriptor cannot sneak
@@ -1176,6 +1306,7 @@ final class ProbeRuntime: @unchecked Sendable {
         lastMirrorExport = [:]
         mirrorBaselined = false
         metalCaptureURL = nil
+        socketPathValue = nil
         captureResultHookStorage = nil
         lock.unlock()
         // Detach rather than orphan: dropping the reference leaves the KVO
@@ -1258,15 +1389,56 @@ final class ProbeRuntime: @unchecked Sendable {
         let url = metalCaptureURL
         metalCaptureURL = nil
         lock.unlock()
-        guard url != nil else {
-            emitCapture(path: nil, error: "no capture in progress")
-            return
+        if url != nil {
+            // Fire-and-forget: `stopCapture()` returns before the document is
+            // finished, which is exactly why the end frame has to look at the
+            // filesystem instead of assuming it.
+            MTLCaptureManager.shared().stopCapture()
         }
-        MTLCaptureManager.shared().stopCapture()
-        emitCapture(path: url?.path, error: nil)
+        let report = ProbeRuntime.captureEndReport(
+            capturedPath: url?.path,
+            documentExists: url.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        )
+        emitCapture(path: report.path, error: report.error)
         #else
         emitCapture(path: nil, error: "Metal unavailable in this build")
         #endif
+    }
+
+    /// What `endMetalCapture` is allowed to say, as a pure function of "the path
+    /// the begin frame named" and "is that document on disk right now" — so the
+    /// decision is covered by the default suite instead of needing a live Metal
+    /// capture (CI has no window, no screen-recording seat and no GPU trace).
+    ///
+    /// The bug this closes: `stopCapture()` is fire-and-forget and the
+    /// `.gputrace` document is written asynchronously, so the end frame used to
+    /// answer `error: nil` for a file it had never looked at. A `capture` frame
+    /// naming an artifact that does not exist then travelled as a **success** —
+    /// a report citing a trace nobody can open. The negative goes in the frame's
+    /// `error` field, the same field the begin frames use for
+    /// "no Metal device" / "startCapture failed", so the daemon and the host hook
+    /// both see it.
+    ///
+    /// Read the error for what it is: "absent at the moment the capture ended".
+    /// It is not a claim that the capture failed — the document may still land
+    /// after this check — it is the difference between *verified* and *asserted*,
+    /// and an absent artifact must never be reported as the second one.
+    static func captureEndReport(
+        capturedPath: String?,
+        documentExists: Bool
+    ) -> (path: String?, error: String?) {
+        guard let capturedPath, !capturedPath.isEmpty else {
+            return (nil, "no capture in progress")
+        }
+        guard documentExists else {
+            return (
+                capturedPath,
+                "capture document absent at end: \(capturedPath) was not on disk when the "
+                    + "capture stopped (stopCapture is asynchronous, so a later write cannot be "
+                    + "ruled out — but this frame cannot call the artifact verified)"
+            )
+        }
+        return (capturedPath, nil)
     }
 }
 

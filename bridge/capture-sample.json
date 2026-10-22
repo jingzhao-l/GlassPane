@@ -168,8 +168,8 @@
   "x8": "0x08483d08409000bc",
   "x9": "0x08483d08409000bc"
  },
- "status": "5",
- "stopReason": "10",
+ "status": "eStateStopped",
+ "stopReason": "instrumentation",
  "target": {
   "pid": 38946
  },
@@ -181,6 +181,8 @@
      "function": "_swift_runtime_on_report",
      "idx": 0,
      "locals": [],
+     "localsTotal": 0,
+     "localsTruncated": 0,
      "module": "libswiftCore.dylib"
     },
     {
@@ -188,6 +190,8 @@
      "function": "_swift_stdlib_reportFatalErrorInFile",
      "idx": 1,
      "locals": [],
+     "localsTotal": null,
+     "localsTruncated": null,
      "module": "libswiftCore.dylib"
     },
     {
@@ -195,6 +199,8 @@
      "function": "closure #1 (Swift.UnsafeBufferPointer<Swift.UInt8>) -> () in Swift._assertionFailure(_: Swift.StaticString, _: Swift.String, file: Swift.StaticString, line: Swift.UInt, flags: Swift.UInt32) -> Swift.Never",
      "idx": 2,
      "locals": [],
+     "localsTotal": null,
+     "localsTruncated": null,
      "module": "libswiftCore.dylib"
     },
     {
@@ -202,6 +208,8 @@
      "function": "Swift._assertionFailure(_: Swift.StaticString, _: Swift.String, file: Swift.StaticString, line: Swift.UInt, flags: Swift.UInt32) -> Swift.Never",
      "idx": 3,
      "locals": [],
+     "localsTotal": null,
+     "localsTruncated": null,
      "module": "libswiftCore.dylib"
     },
     {
@@ -211,6 +219,8 @@
      "idx": 4,
      "line": 4,
      "locals": [],
+     "localsTotal": null,
+     "localsTruncated": null,
      "module": "crashme"
     },
     {
@@ -218,19 +228,19 @@
      "function": "start",
      "idx": 5,
      "locals": [],
+     "localsTotal": null,
+     "localsTruncated": null,
      "module": "dyld"
     }
    ],
+   "framesTotal": 6,
+   "framesTruncated": 0,
    "id": 1894876,
    "name": "",
-   "queue": "",
-   "stopReason": "10"
+   "queue": null,
+   "stopReason": "instrumentation"
   }
  ],
- "watchpoints": {
-  "hits": [],
-  "queued": [],
-  "rejected": 0,
-  "slots": []
- }
+ "truncated": {},
+ "watchpoints": []
 }

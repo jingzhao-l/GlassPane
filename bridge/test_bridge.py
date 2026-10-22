@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """bridge/test_bridge.py — P6 §6.6: pure-logic unit tests for the LLDB
 bridge (queue policy, JSON assembly, truncation, sentinel extraction, argv
-composition, socket回传, 退出码判据). No debug permission needed.
+composition, socket回传, 退出码判据, 外层交付 `_payload_from_process` /
+`reconcile_watchpoint_stops` / `cmd_*` 用 SB 形状桩驱动, capture-sample 与发射器
+同形). No debug permission needed.
+
+真机那三条（停因表、路径形态导入、崩溃现场）仍是 opt-in；本文件里凡是被验的是
+**判定**而不是硬件调用的地方，都走 SB-API 形状的桩（见 §"SB-API 形状的桩"一节），
+`xcrun lldb` 真跑不进默认泳道。
 
 三种跑法都跑**全部**用例（P6 §6.6 口径是 python3 直跑，P1 §CI 用 pytest）：
 
@@ -19,6 +25,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -129,8 +136,14 @@ class ResultShape(unittest.TestCase):
             self.assertIn(key, payload)
         self.assertEqual(payload["registers"], {})
         self.assertIsNone(payload["crash"])
-        # Deterministic rendering (§6.1): two dumps byte-equal.
-        self.assertEqual(gb.render_json(payload), gb.render_json(payload))
+        # Determinism (§6.1) has to be *observable*: `render_json(payload) ==
+        # render_json(payload)` compares a value with itself and can never go red.
+        # The property the contract actually claims is that the bytes do not depend
+        # on dict insertion order, so the second dump is the same payload written
+        # backwards — which is exactly what `sort_keys=True` buys (and reverting it
+        # makes this assertion fail).
+        backwards = dict(reversed(list(payload.items())))
+        self.assertEqual(gb.render_json(payload), gb.render_json(backwards))
         self.assertTrue(gb.render_json(payload).startswith('{"crash"'))  # sorted keys
 
     def test_frame_record_locals_capped(self):
@@ -524,14 +537,36 @@ class SocketDelivery(unittest.TestCase):
                 self.sent += data
 
         with mock.patch.object(gb.socket, "socket", Recording):
-            gb.emit({"mode": "capture"}, send_sock="/tmp/gp-bridge-unused.sock", timeout_s=5.0)
-        self.assertEqual([5.0], timeouts)
+            gb.emit({"mode": "capture"}, send_sock="/tmp/gp-bridge-unused.sock", timeout_s=7.5)
+        self.assertEqual([7.5], timeouts)
         self.assertEqual(gb.render_json({"mode": "capture"}) + "\n", created[0].sent.decode())
         self.assertTrue(created[0].fileno() == -1, "socket must be closed after delivery")
 
-    def test_emit_default_budget_is_finite(self):
-        self.assertGreater(gb.EMIT_TIMEOUT_S, 0)
-        self.assertLess(gb.EMIT_TIMEOUT_S, 60.0)
+    def test_emit_default_budget_is_finite_AND_APPLIED(self):
+        """Bounding `EMIT_TIMEOUT_S` alone cannot fail: it stayed green while `emit`
+        ignored it and sent on an unbounded socket. The default must be observed on
+        the socket, so the budget is read off `settimeout`, and the explicit-budget
+        case above uses a different number so the two cannot be confused."""
+        from unittest import mock
+
+        timeouts = []
+
+        class Recorder(socket.socket):
+            def settimeout(self, value):
+                timeouts.append(value)
+
+            def connect(self, address):
+                return None
+
+            def sendall(self, data):
+                return None
+
+        with mock.patch.object(gb.socket, "socket", Recorder):
+            gb.emit({"mode": "capture"}, send_sock="/tmp/gp-bridge-unused.sock")
+        self.assertEqual([gb.EMIT_TIMEOUT_S], timeouts,
+                         "emit must apply EMIT_TIMEOUT_S when the caller gave no budget")
+        self.assertGreater(timeouts[0], 0)
+        self.assertLess(timeouts[0], 60.0)
 
     def test_emit_bounds_connect_and_send_and_always_closes_the_socket(self):
         """B-24: an engine that stopped draining must produce an error, not a
@@ -1086,34 +1121,69 @@ REAL_LLDB_OPT_IN = "GLASSPANE_REAL_LLDB"
 ENUM_MARKER = "@@GPSTOPENUM@@"
 TABLE_MARKER = "@@GPBRIDGETBL@@"
 
-#: 2026-10-20 在本机 `xcrun lldb` 里逐条量到的 SBStopReason 取值（留档，供无 lldb
-#: 的纯逻辑机器仍然钉得住这张表）。旧实现手抄的那张把 5 写成 frameIndexChanged、
-#: 7 写成 signal，那是 LLDB 私有 `StopReasonEnum` 的次序，SB 绑定里没有这些成员。
-MEASURED_STOP_REASON_INTS = {
-    "eStopReasonInvalid": 0, "eStopReasonNone": 1, "eStopReasonTrace": 2,
-    "eStopReasonBreakpoint": 3, "eStopReasonWatchpoint": 4, "eStopReasonSignal": 5,
-    "eStopReasonException": 6, "eStopReasonExec": 7, "eStopReasonPlanComplete": 8,
-    "eStopReasonThreadExiting": 9, "eStopReasonInstrumentation": 10,
-    "eStopReasonProcessorTrace": 11, "eStopReasonFork": 12, "eStopReasonVFork": 13,
-    "eStopReasonVForkDone": 14, "eStopReasonInterrupt": 15,
-    "eStopReasonHistoryBoundary": 16,
-}
+#: 2026-10-20 在本机 `xcrun lldb` 里逐条量到的 SBStopReason **成员次序**（量到的数值
+#: 就是声明序号：Invalid 0 · None 1 · Trace 2 · Breakpoint 3 · Watchpoint 4 ·
+#: **Signal 5** · Exception 6 · Exec 7 · PlanComplete 8 · ThreadExiting 9 ·
+#: Instrumentation 10 · ProcessorTrace 11 · Fork 12 · VFork 13 · VForkDone 14 ·
+#: Interrupt 15 · HistoryBoundary 16）。
+#: 这里只留**一份**转写：数值由次序导出，所以
+#: `test_table_matches_the_recorded_measurement` 比的是"桥的声明次序 = 实测次序"这件
+#: 实事，而不是两份各自手抄、可以一起错的同一串字面量。次序之外的权威仍然只有真机
+#: 那一条（`RealLLDBStopReasonTable`），它现在连"改名/删员"也一起抓（见
+#: `mirror_table_drift`）。旧实现手抄的那张把 5 写成 frameIndexChanged、7 写成
+#: signal，那是 LLDB 私有 `StopReasonEnum` 的次序，SB 绑定里没有这些成员。
+MEASURED_STOP_REASON_ORDER = (
+    "eStopReasonInvalid", "eStopReasonNone", "eStopReasonTrace",
+    "eStopReasonBreakpoint", "eStopReasonWatchpoint", "eStopReasonSignal",
+    "eStopReasonException", "eStopReasonExec", "eStopReasonPlanComplete",
+    "eStopReasonThreadExiting", "eStopReasonInstrumentation",
+    "eStopReasonProcessorTrace", "eStopReasonFork", "eStopReasonVFork",
+    "eStopReasonVForkDone", "eStopReasonInterrupt", "eStopReasonHistoryBoundary",
+)
+
+#: 由上面那份转写导出，不再手抄第二遍。
+MEASURED_STOP_REASON_INTS = {name: index
+                             for index, name in enumerate(MEASURED_STOP_REASON_ORDER)}
+
+
+def mirror_table_drift(declared, measured):
+    """(missing, extra, mismatched) — 手抄枚举镜像相对**定义它的那台 lldb**的三种漂移。
+
+    从前真机核对只写 `if name in measured and measured[name] != value`：一台把
+    `eStopReasonSignal` **改名或删掉**的 lldb 会让它比出 0 行，表照样绿，而它服务的
+    崩溃判据已经没人钉了——"没比对到"与"比对通过"在那个写法里是同一个颜色。漂移
+    必须是三种各自可读的结果，缺席尤其要是一等发现。这是纯函数：真机那条 opt-in
+    用例用它，默认泳道用桩驱动它（`MirrorTableDriftIsDetected`）。
+    """
+    missing = sorted(set(declared) - set(measured))
+    extra = sorted(set(measured) - set(declared))
+    mismatched = {name: (declared[name], measured[name]) for name in sorted(declared)
+                  if name in measured and measured[name] != declared[name]}
+    return missing, extra, mismatched
 
 
 def run_lldb(commands, timeout=180):
-    """Drive the SAME lldb the bridge drives: `xcrun lldb --batch -o …`."""
+    """Drive the SAME lldb the bridge drives: `xcrun lldb --batch -o …`.
+
+    起不来一律折算成 NOT RUN（`engine/smoke.md` §闸门退出码契约，本文件 :1073-1077
+    那条口径）：本机没有 xcrun、没装命令行工具、或**冷启动慢到 `subprocess.run` 抛
+    TimeoutExpired**——最后这一种从前接不住（TimeoutExpired 是 SubprocessError 不是
+    OSError），慢 debugserver 的机器上这条 opt-in 闸会以 traceback 收场而不是
+    skipped，正违背它自己声明的 0/1/2。姊妹调用点 `_import_output` 接的就是两者。
+    """
     argv = ["xcrun", "lldb", "--batch"]
     for command in commands:
         argv += ["-o", command]
     argv += ["-o", "quit"]
     try:
         return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-    except OSError as error:
+    except (OSError, subprocess.SubprocessError) as error:
         raise unittest.SkipTest(
             "NOT RUN（不是 pass）: 本机跑不起 `xcrun lldb`：%r。复算命令："
             "xcrun lldb --batch -o \"script print(1)\" -o quit。缺 Xcode 命令行工具"
-            "或开发者工具调试席位（P6 §7.1）时就是这一档；装好后重跑本条即转真。"
-            " engine/smoke.md §闸门退出码契约：NOT RUN 只许记成 skipped。" % (error,))
+            "或开发者工具调试席位（P6 §7.1）、或 lldb 在本机 timeout=%ss 内没起来，"
+            "都是这一档；装好/等热之后重跑本条即转真。 engine/smoke.md §闸门退出码契约："
+            "NOT RUN 只许记成 skipped。" % (error, timeout))
 
 
 def marker_payload(output, marker):
@@ -1149,16 +1219,32 @@ class RealLLDBStopReasonTable(unittest.TestCase):
                           % ((completed.stdout + completed.stderr)[-400:],))
         return measured
 
+    def _lldb_version(self):
+        try:
+            completed = subprocess.run(["xcrun", "lldb", "--version"],
+                                       capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return "unreadable on this machine"
+        lines = [line for line in (completed.stdout or "").splitlines() if line.strip()]
+        return lines[0].strip() if lines else "unreadable on this machine"
+
     def test_shipped_mirror_table_equals_what_lldb_reports(self):
-        """桥里那张手写的镜像表（真机上不直接参与判定，纯逻辑机器全靠它）逐条核对。"""
+        """桥里那张手写的镜像表（真机上不直接参与判定，纯逻辑机器全靠它）逐条核对。
+
+        比对**先看覆盖率再看数值**：一台把 `eStopReasonSignal` 改名或删掉的 lldb
+        从前在这里比出 0 行、于是表照绿而崩溃判据失钉——"没比到"不能是绿色。
+        版本号只在真要报错时去读：绿色一趟不多花一次 `lldb --version` 的启动。
+        """
         measured = self._lldb_constants()
-        mismatched = {}
-        for name, value in gb._FALLBACK_STOP_REASON_INT.items():
-            if name in measured and measured[name] != value:
-                mismatched[name] = (value, measured[name])
-        self.assertEqual(mismatched, {},
-                         "停因镜像表与本机 lldb 的实测取值不一致（表值, lldb 值）：%s"
-                         % mismatched)
+        drift = mirror_table_drift(gb._FALLBACK_STOP_REASON_INT, measured)
+        if drift != ([], [], {}):
+            missing, extra, mismatched = drift
+            self.fail(
+                "停因镜像表与本机 lldb（版本 %s）的实测成员表漂移：lldb 有而表里没有的 %s / "
+                "表里有而 lldb 不再声明的 %s / 数值不符的 (表值, lldb 值) %s。改名或删员"
+                "同样要改这张表，否则崩溃判据（%s）在这台机器上无人核对。"
+                % (self._lldb_version(), extra, missing, mismatched, gb.CRASH_STOP_REASON))
+        self.assertEqual(([], [], {}), drift)
 
     def test_bridge_resolves_the_same_table_from_inside_lldb(self):
         """production-shaped：让**桥自己**在真 lldb 里把权威表解析出来再比一次。
@@ -1213,8 +1299,16 @@ class StopReasonTableIsPinned(unittest.TestCase):
                             name)
 
     def test_table_matches_the_recorded_measurement(self):
+        """桥的**声明次序**必须等于 2026-10-20 实测到的成员次序；数值由次序导出，
+        所以这里比的是一件实事（次序），而不是两份各自手抄、可以一起错的同一串
+        字面量。次序之外，取值的权威只有真机那一条（`RealLLDBStopReasonTable`，
+        它现在连改名/删员也一起抓）。"""
+        self.assertEqual(list(gb.STOP_REASON_NAMES), list(MEASURED_STOP_REASON_ORDER))
         self.assertEqual(gb._FALLBACK_STOP_REASON_INT, MEASURED_STOP_REASON_INTS)
         self.assertEqual(gb.stop_reason_int_by_name(), MEASURED_STOP_REASON_INTS)
+        # 崩溃那一档的实测位次单独钉住：旧表当 7 是 signal，本机实测 signal 是 5。
+        self.assertEqual(5, MEASURED_STOP_REASON_INTS[gb.CRASH_STOP_REASON])
+        self.assertEqual(7, MEASURED_STOP_REASON_INTS["eStopReasonExec"])
 
     def test_the_wrong_table_that_shipped_is_gone_from_the_vocabulary(self):
         """旧表把 5/6/7/8 写成 frameIndexChanged / noDebug / signal / threadSpec，
@@ -1233,6 +1327,74 @@ class StopReasonTableIsPinned(unittest.TestCase):
         self.assertTrue(gb.is_crash_stop("5"))
         self.assertTrue(gb.is_crash_stop("signal"))
         self.assertTrue(gb.is_crash_stop("lldb.eStopReasonSignal"))
+
+
+class MirrorTableDriftIsDetected(unittest.TestCase):
+    """默认泳道对 `mirror_table_drift` 这条**判定**的覆盖：真机那条是 opt-in 的，
+    而它接的正是"换一台 lldb 之后崩溃判据会不会静静失钉"这件事。把判定抽成纯函数
+    之后，CI 里就能拿一台" hypothetical lldb" 把它跑红。"""
+
+    def declared_table(self):
+        return dict(gb._FALLBACK_STOP_REASON_INT)
+
+    def test_a_renamed_member_is_a_drift_not_an_empty_diff(self):
+        measured = self.declared_table()
+        measured["eStopReasonTrap"] = measured.pop(gb.CRASH_STOP_REASON)
+        missing, extra, mismatched = mirror_table_drift(self.declared_table(), measured)
+        self.assertEqual([gb.CRASH_STOP_REASON], missing,
+                         "lldb 不再声明信号停那一档，必须作为缺席报出来")
+        self.assertEqual(["eStopReasonTrap"], extra)
+        self.assertEqual({}, mismatched)
+        # 旧写法（只比 present 的行）在这里比出 0 行 → 表照绿。缺席必须是结果之一。
+        self.assertTrue(missing or extra)
+
+    def test_a_dropped_member_is_a_drift_too(self):
+        measured = self.declared_table()
+        del measured[gb.CRASH_STOP_REASON]
+        missing, extra, mismatched = mirror_table_drift(self.declared_table(), measured)
+        self.assertEqual([gb.CRASH_STOP_REASON], missing)
+        self.assertEqual([], extra)
+
+    def test_a_shifted_number_still_shows_both_values(self):
+        measured = self.declared_table()
+        measured["eStopReasonSignal"] = 42
+        missing, extra, mismatched = mirror_table_drift(self.declared_table(), measured)
+        self.assertEqual([], missing)
+        self.assertEqual([], extra)
+        self.assertEqual({"eStopReasonSignal": (5, 42)}, mismatched)
+
+    def test_an_agreeing_table_reports_no_drift_at_all(self):
+        """控制项：这条闸不许只会报警。"""
+        measured = self.declared_table()
+        self.assertEqual(([], [], {}), mirror_table_drift(self.declared_table(), measured))
+
+
+class RealArmGateReportsNotRun(unittest.TestCase):
+    """opt-in 真面用例的 0/1/2 契约也得在默认泳道里守得住：`run_lldb` 起不来时报
+    skipped，而不是把 traceback 交给闸门当产品失败。这里驱动的就是那条 `except`。"""
+
+    def test_a_slow_lldb_start_is_not_run_not_a_traceback(self):
+        def exploding_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=["xcrun", "lldb", "--batch"], timeout=1)
+
+        with mock.patch.object(subprocess, "run", exploding_run):
+            with self.assertRaises(unittest.SkipTest) as raised:
+                run_lldb(["script print(1)"], timeout=1)
+        self.assertIn("NOT RUN", str(raised.exception))
+
+    def test_a_missing_xcrun_is_not_run_too(self):
+        def missing_run(*args, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory: 'xcrun'")
+
+        with mock.patch.object(subprocess, "run", missing_run):
+            with self.assertRaises(unittest.SkipTest):
+                run_lldb(["script print(1)"], timeout=1)
+
+    def test_a_lldb_that_answers_is_handed_back_not_skipped(self):
+        """控制项：折算成 NOT RUN 的那条路不许变成"永远 skip"。"""
+        completed = subprocess.CompletedProcess(["xcrun", "lldb"], 0, "(lldb) 1\n", "")
+        with mock.patch.object(subprocess, "run", return_value=completed):
+            self.assertIs(completed, run_lldb(["script print(1)"], timeout=1))
 
 
 class SignalStopIsNeverACleanPass(unittest.TestCase):
@@ -1312,7 +1474,630 @@ class SignalStopIsNeverACleanPass(unittest.TestCase):
         self.assertIsNone(gb.crash_record(999, 11))
 
 
+# ---------------------------------------------------------------------------
+# SB-API 形状的桩：给外层交付那一半（`_payload_from_process` /
+# `reconcile_watchpoint_stops` / `cmd_capture` / `cmd_trace` / `cmd_queue`）一个
+# 能跑起来的靶子。
+#
+# 这些对象**只模仿 lldb SB 绑定的读法**（IsValid / GetThreadAtIndex / GetStopReason /
+# GetVariables / GetRegisters / GetID / Disable 的形状与返回形态），不模拟调试器语义：
+# 语义正是桥自己负责、也因此需要被真的跑一遍的那一半。§6.6 的分工照旧——真跑
+# `xcrun lldb` 仍是 opt-in（`RealMachineCrashScene`），这里补的是此前**任何闸门都没
+# 执行过**的外层交付：0/1/3 判决、崩溃记录、命中→释放→重武装的环。`_arm_watchpoint`
+# 里真碰硬件的那一句（`target.WatchAddress`）与 `_resume_for_next_sample` 一样按本
+# 文件既有做法 stub 掉（见 `WatchModeValidation._run`），并且**故意不**把账目标成
+# live：桩不许让载荷声称它没见过的硬件。
+# ---------------------------------------------------------------------------
+
+
+class StubValue(object):
+    def __init__(self, name, value=None, summary=None):
+        self._name, self._value, self._summary = name, value, summary
+
+    def IsValid(self):
+        return True
+
+    def GetName(self):
+        return self._name
+
+    def GetValue(self):
+        return self._value
+
+    def GetSummary(self):
+        return self._summary
+
+
+class StubRegister(object):
+    def __init__(self, name, value):
+        self._name, self._value = name, value
+
+    def GetName(self):
+        return self._name
+
+    def GetValue(self):
+        return self._value
+
+
+class StubFileSpec(object):
+    def __init__(self, filename):
+        self._filename = filename
+
+    def IsValid(self):
+        return True
+
+    def GetFilename(self):
+        return self._filename
+
+
+class StubModule(object):
+    def __init__(self, name):
+        self._name = name
+
+    def IsValid(self):
+        return True
+
+    def GetFileSpec(self):
+        return StubFileSpec(self._name)
+
+
+class StubSymbol(object):
+    def __init__(self, name):
+        self._name = name
+
+    def IsValid(self):
+        return True
+
+    def GetName(self):
+        return self._name
+
+
+class StubLineEntry(object):
+    def __init__(self, filename, line):
+        self._filename, self._line = filename, line
+
+    def IsValid(self):
+        return True
+
+    def GetFileSpec(self):
+        return StubFileSpec(self._filename)
+
+    def GetLine(self):
+        return self._line
+
+
+class StubFrame(object):
+    """SBFrame. `variables_error` / `registers_error` make the read **raise** the way
+    a failed SB call does — the case a payload must publish as "not measured", never
+    as a count of zero."""
+
+    def __init__(self, index=0, pc=0x1000, module="App", function=None, file=None,
+                 line=None, variables=(), registers=(), variables_error=None,
+                 registers_error=None):
+        self._index, self._pc, self._module = index, pc, module
+        self._function, self._file, self._line = function, file, line
+        self._variables, self._registers = variables, registers
+        self._variables_error, self._registers_error = variables_error, registers_error
+
+    def IsValid(self):
+        return True
+
+    def GetPC(self):
+        return self._pc
+
+    def GetModule(self):
+        return StubModule(self._module) if self._module else None
+
+    def GetSymbol(self):
+        return StubSymbol(self._function) if self._function else None
+
+    def GetLineEntry(self):
+        return StubLineEntry(self._file, self._line) if self._file else None
+
+    def GetVariables(self, in_scope=True, args_only=False, show_types=False,
+                     use_dynamic=False):
+        if self._variables_error is not None:
+            raise self._variables_error
+        return list(self._variables)
+
+    def GetRegisters(self):
+        if self._registers_error is not None:
+            raise self._registers_error
+        return [list(self._registers)]
+
+
+class StubThread(object):
+    """SBThread: exactly the reads `_payload_from_process` /
+    `reconcile_watchpoint_stops` make at a stop."""
+
+    def __init__(self, tid=1, name="thread", stop_reason=1, stop_data=(), frames=(),
+                 queue="", num_frames=None, valid=True):
+        self._tid, self._name, self._valid = tid, name, valid
+        self._stop_reason, self._stop_data = stop_reason, tuple(stop_data)
+        self._frames = list(frames)
+        self._queue = queue
+        self._num_frames = len(self._frames) if num_frames is None else num_frames
+
+    def IsValid(self):
+        return self._valid
+
+    def GetThreadID(self):
+        return self._tid
+
+    def GetName(self):
+        return self._name
+
+    def GetStopReason(self):
+        return self._stop_reason
+
+    def GetStopReasonDataAtIndex(self, index):
+        return self._stop_data[index] if index < len(self._stop_data) else 0
+
+    def GetNumFrames(self):
+        return self._num_frames
+
+    def GetFrameAtIndex(self, index):
+        return self._frames[index] if index < len(self._frames) else None
+
+    def GetQueueName(self):
+        return self._queue
+
+
+class StubProcess(object):
+    """SBProcess. `num_threads` may be an Exception (unreadable count) or a number
+    larger than the thread list, which is the shape of a real wide target."""
+
+    def __init__(self, threads=(), state=5, pid=38946, stop_id=1, selected=None,
+                 valid=True, num_threads=None):
+        self._threads = list(threads)
+        self._state, self._pid, self._stop_id = state, pid, stop_id
+        self._selected, self._valid = selected, valid
+        self._num_threads = num_threads
+
+    def IsValid(self):
+        return self._valid
+
+    def GetNumThreads(self):
+        if isinstance(self._num_threads, Exception):
+            raise self._num_threads
+        return len(self._threads) if self._num_threads is None else self._num_threads
+
+    def GetThreadAtIndex(self, index):
+        return self._threads[index] if index < len(self._threads) else None
+
+    def GetSelectedThread(self):
+        if self._selected is not None:
+            return self._selected
+        return self._threads[0] if self._threads else None
+
+    def GetState(self):
+        return self._state
+
+    def GetProcessID(self):
+        return self._pid
+
+    def GetStopID(self):
+        return self._stop_id
+
+
+class StubWatchpoint(object):
+    """SBWatchpoint: the two reads the ledger seam makes. `Disable()` hands back a
+    plain bool — one of the shapes `_outcome_ok` has to normalise."""
+
+    def __init__(self, wp_id):
+        self._id = wp_id
+        self.disable_calls = 0
+
+    def IsValid(self):
+        return True
+
+    def GetID(self):
+        return self._id
+
+    def Disable(self):
+        self.disable_calls += 1
+        return True
+
+
+class StubTarget(object):
+    def __init__(self, process=None, valid=True):
+        self._process, self._valid = process, valid
+
+    def IsValid(self):
+        return self._valid
+
+    def GetProcess(self):
+        return self._process
+
+
+class StubDebugger(object):
+    """SBDebugger: the reads `_process_of` / the trace loop / the stop hook make."""
+
+    def __init__(self, process=None, target_valid=True):
+        self._target = StubTarget(process, target_valid)
+        self.async_calls = []
+        self._async = False
+        self.commands = []
+
+    def GetSelectedTarget(self):
+        return self._target if self._target.IsValid() else None
+
+    def SetAsync(self, value):
+        self.async_calls.append(value)
+        self._async = value
+
+    def GetAsyncMode(self):
+        return self._async
+
+    def HandleCommand(self, text):
+        self.commands.append(text)
+        return True
+
+
+def signal_stop_thread(tid=1894876, frames=None, **kwargs):
+    """A thread stopped by SIGSEGV: stop reason 5, first stop-reason datum 11."""
+    return StubThread(tid=tid, stop_reason=5, stop_data=(11,),
+                      frames=frames if frames is not None else [StubFrame(function="main")],
+                      **kwargs)
+
+
+class OuterDeliveryFromSbStubs(unittest.TestCase):
+    """§6.2/§6.4 delivery half driven by the stubs above (default, no opt-in)."""
+
+    def setUp(self):
+        self.queue = gb.WatchQueue()
+        self.live = {}
+        self.armed_calls = []
+
+        def fake_arm(debugger, entry):
+            self.armed_calls.append(dict(entry))
+            return (True, str(len(self.armed_calls)))
+
+        for attribute, value in (("_WATCH_QUEUE", self.queue),
+                                 ("_LIVE_WATCHPOINTS", self.live),
+                                 ("_RECONCILED_STOPS", set())):
+            mock.patch.object(gb, attribute, value).start()
+        mock.patch.object(gb, "_arm_watchpoint", side_effect=fake_arm).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def arm_four_slots_and_queue_a_fifth(self):
+        """4 armed (debugger-confirmed) watchpoints + 1 queued: the §6.5 over-cap shape."""
+        for index in range(gb.HW_WATCHPOINT_SLOTS):
+            addr = "0x%x" % (0x1000 + index)
+            self.queue.add({"addr": addr, "size": 8, "mode": "w"})
+            self.queue.mark_live(addr)
+            self.live[addr] = StubWatchpoint(100 + index)
+        outcome, _detail = self.queue.add({"addr": "0x2000", "size": 8, "mode": "w"})
+        self.assertEqual("queued", outcome)
+        return self.live["0x1001"]
+
+    def test_hit_watchpoint_is_recorded_released_and_the_queue_head_rearmed(self):
+        hit = self.arm_four_slots_and_queue_a_fifth()
+        threads = [StubThread(tid=11, stop_reason=4, stop_data=(hit.GetID(), 0x1001),
+                              frames=[StubFrame(function="main")]),
+                   StubThread(tid=12, stop_reason=1)]
+        process = StubProcess(threads=threads, stop_id=7)
+        report = gb.reconcile_watchpoint_stops(StubDebugger(process), process)
+        self.assertEqual(["0x1001"], report["hits"], report)
+        self.assertEqual(["0x2000"], report["rearmed"], report)
+        self.assertEqual([], report["notes"], report["notes"])
+        # the debugger side really gave the slot up: hit → Disable() → ledger release
+        self.assertEqual(1, hit.disable_calls, "the hit watchpoint must be disabled")
+        self.assertNotIn("0x1001", self.live)
+        self.assertEqual([], self.queue.queued, "the queued head must have taken the slot")
+        promoted = self.queue.entry_for_addr("0x2000")
+        self.assertEqual(self.queue.PHASE_ARMED, promoted["phase"])
+        self.assertEqual(1, promoted["hwSlot"], "slot 1 was 0x1001's")
+        self.assertEqual(["0x2000"], [call["addr"] for call in self.armed_calls])
+        records = {record["addr"]: record for record in self.queue.records()}
+        self.assertEqual(1, records["0x1001"]["hitCount"])
+        self.assertEqual("spent", self.queue.entry_for_addr("0x1001")["phase"])
+        self.assertEqual(0, records["0x2000"]["hitCount"])
+        # The stub never confirmed hardware for the promoted entry, so the payload
+        # must not claim it: only `WatchAddress` coming back can say "armed".
+        self.assertFalse(records["0x2000"]["armed"], records["0x2000"])
+        self.assertIn("never confirmed", records["0x2000"]["reason"])
+        # idempotent per (stop id, thread, watchpoint id): hook + gp-* command both look
+        again = gb.reconcile_watchpoint_stops(StubDebugger(process), process)
+        self.assertEqual([], again["hits"])
+        self.assertEqual([], again["rearmed"])
+        self.assertEqual(1, sum(row["hitCount"] for row in self.queue.snapshot()["hits"]))
+
+    def test_payload_carries_the_status_crash_and_exit_verdict_of_the_stop(self):
+        frames = ([StubFrame(index=0, pc=0x199cf3ec0, module="libswiftCore.dylib",
+                             function="_swift_runtime_on_report",
+                             variables=[StubValue("payload", "1"),
+                                        StubValue("missing", None, summary="nil")],
+                             registers=[StubRegister("pc", "0x0000000199cf3ec0"),
+                                        StubRegister("sp", "0x000000016fdfe9a0")])] +
+                  [StubFrame(index=i, function="frame-%d" % i)
+                   for i in range(1, gb.MAX_FRAMES)])
+        thread = signal_stop_thread(frames=frames, num_frames=gb.MAX_FRAMES + 6,
+                                   queue="com.apple.main-thread")
+        payload = gb._payload_from_process(StubProcess(threads=[thread], state=5, pid=38946),
+                                          "capture")
+        self.assertEqual("eStateStopped", payload["status"])
+        self.assertEqual({"pid": 38946}, payload["target"])
+        self.assertEqual({"signal": "signal 11", "description": "signal"}, payload["crash"])
+        self.assertEqual("signal", payload["stopReason"])
+        self.assertEqual({"pc": "0x0000000199cf3ec0", "sp": "0x000000016fdfe9a0"},
+                         payload["registers"])
+        self.assertEqual("com.apple.main-thread", payload["threads"][0]["queue"])
+        # 64 collected out of 70 must be a declared cut, not a 64-frame stack
+        self.assertEqual({"dropped": 6, "limit": gb.MAX_FRAMES}, payload["truncated"]["frames"])
+        self.assertEqual(gb.MAX_FRAMES + 6, payload["threads"][0]["framesTotal"])
+        self.assertTrue(any("frames truncated" in error for error in payload["errors"]),
+                        payload["errors"])
+        self.assertEqual(2, payload["threads"][0]["frames"][0]["localsTotal"])
+        self.assertTrue(gb.crash_reported(payload))
+        # 崩溃现场采到了、也交付得出去，但退出码不许读成一次干净的通过（0/1/3）。
+        self.assertTrue(gb.capture_succeeded(payload))
+        self.assertEqual(3, gb.outer_exit_code(payload))
+
+    def test_over_cap_threads_are_announced_not_dropped_silently(self):
+        """B-23 at the process seam: the cap used to be applied *before* assembly, so
+        `truncated.threads` stayed empty and errors[] said nothing about the missing
+        rows — the payload read as a complete thread list."""
+        threads = [signal_stop_thread(tid=index, name="thread-%d" % index,
+                                      frames=[StubFrame(function="main")])
+                   for index in range(gb.MAX_THREADS + 5)]
+        payload = gb._payload_from_process(StubProcess(threads=threads), "capture")
+        self.assertEqual(gb.MAX_THREADS, len(payload["threads"]))
+        self.assertEqual({"kept": gb.MAX_THREADS, "dropped": 5, "limit": gb.MAX_THREADS},
+                         payload["truncated"]["threads"])
+        self.assertTrue(any("threads truncated: kept 64 of 69" in error
+                            for error in payload["errors"]), payload["errors"])
+        # and the announcement may not cost the rows that *were* kept their content
+        self.assertTrue(all(row["frames"] for row in payload["threads"]), payload["threads"])
+
+    def test_reconciliation_names_a_stop_that_could_have_fallen_past_the_cap(self):
+        threads = [StubThread(tid=index, stop_reason=1)
+                   for index in range(gb.MAX_THREADS + 5)]
+        process = StubProcess(threads=threads)
+        report = gb.reconcile_watchpoint_stops(StubDebugger(process), process)
+        text = "\n".join(report["notes"] + self.queue.notes)
+        self.assertIn("watchpoint reconciliation looked at only the first 64 of 69", text)
+        self.assertIn("MAX_THREADS", text)
+        # the caveat must ride out in the payload, not just in the report
+        payload = gb._payload_from_process(process, "capture")
+        self.assertTrue(any("watchpoint reconciliation looked at only the first" in error
+                            for error in payload["errors"]), payload["errors"])
+        # a target inside the cap gets no such note (the announcement is not noise)
+        narrow = StubProcess(threads=threads[:2])
+        self.assertEqual([], gb.reconcile_watchpoint_stops(StubDebugger(narrow), narrow)["notes"])
+
+    def test_unreadable_locals_and_registers_are_named_never_counted_as_zero(self):
+        frame = StubFrame(function="main", variables_error=RuntimeError("unavailable"),
+                          registers_error=RuntimeError("unavailable"))
+        thread = StubThread(tid=7, stop_reason=1, frames=[frame])
+        payload = gb._payload_from_process(StubProcess(threads=[thread]), "capture")
+        text = "\n".join(payload["errors"])
+        self.assertIn("locals were not measured", text)
+        self.assertIn("registers were not measured", text)
+        self.assertIsNone(payload["threads"][0]["frames"][0]["localsTotal"],
+                          "unreadable locals must not publish a count of zero")
+        self.assertEqual({}, payload["registers"], "still empty — errors[] is what says why")
+        # control: a frame that WAS read and holds nothing keeps its measured zero,
+        # so the assertions above cannot be satisfied by "always null" either.
+        read = StubThread(tid=8, stop_reason=1, frames=[StubFrame(function="main")])
+        clean = gb._payload_from_process(StubProcess(threads=[read]), "capture")
+        self.assertEqual([], clean["errors"], clean["errors"])
+        self.assertEqual(0, clean["threads"][0]["frames"][0]["localsTotal"])
+        self.assertEqual({}, clean["registers"])
+
+    def test_frame_rows_that_were_never_asked_say_so_instead_of_zero(self):
+        """Only the top frame's locals are read (§6.1), so every other row used to
+        publish `localsTotal: 0` for a number nobody measured."""
+        thread = StubThread(tid=9, stop_reason=1,
+                            frames=[StubFrame(index=0, function="main"),
+                                    StubFrame(index=1, function="callee")])
+        payload = gb._payload_from_process(StubProcess(threads=[thread]), "capture")
+        frames = payload["threads"][0]["frames"]
+        self.assertEqual(0, frames[0]["localsTotal"], "top frame: read, and empty")
+        self.assertIsNone(frames[1]["localsTotal"], "callee: never read")
+        self.assertIsNone(frames[1]["localsTruncated"])
+        self.assertEqual([], frames[1]["locals"], "the key stays present (§6.1)")
+
+    def test_unreadable_thread_count_is_reported_as_unreadable(self):
+        process = StubProcess(threads=[], num_threads=RuntimeError("unavailable"))
+        payload = gb._payload_from_process(process, "capture")
+        self.assertTrue(any("thread count was not measured" in error
+                            for error in payload["errors"]), payload["errors"])
+        self.assertEqual(1, gb.outer_exit_code(payload))
+
+    def test_no_live_process_is_no_process_and_never_a_zero_thread_pass(self):
+        for process in (None, StubProcess(valid=False)):
+            payload = gb._payload_from_process(process, "capture")
+            self.assertEqual("no-process", payload["status"], payload)
+            self.assertEqual(1, gb.outer_exit_code(payload), payload)
+            self.assertTrue(any("no live process to capture" in error
+                                for error in payload["errors"]), payload["errors"])
+
+    def test_cmd_capture_emits_a_sentinel_payload_that_delivers_to_out(self):
+        """§6.2: `gp-capture` inside lldb always answers with a sentinel pair, and the
+        same payload is what `--out`/`--send-sock` deliver."""
+        process = StubProcess(threads=[signal_stop_thread(
+            frames=[StubFrame(function="main", file="crashme.swift", line=4)])])
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            gb.cmd_capture(StubDebugger(process), "", None, {})
+        found, _raw = gb.extract_sentinel(buffer.getvalue())
+        self.assertIsNotNone(found, buffer.getvalue())
+        self.assertEqual("capture", found["mode"])
+        self.assertEqual("eStateStopped", found["status"])
+        self.assertEqual({"signal": "signal 11", "description": "signal"}, found["crash"])
+        self.assertEqual(3, gb.outer_exit_code(found))
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "capture.json")
+            gb.emit(found, out_path=out)
+            with open(out, encoding="utf-8") as handle:
+                self.assertEqual(found, json.loads(handle.read()))
+
+    def test_cmd_trace_refuses_to_publish_frozen_stop_reads_as_a_time_series(self):
+        """T2 at the command seam: a target that cannot be resumed and re-stopped
+        rests on one measurement, and one measurement must not go out as a series."""
+        process = StubProcess(threads=[StubThread(tid=1, stop_reason=1, stop_data=(0,),
+                                                  frames=[StubFrame(function="hang")])])
+        debugger = StubDebugger(process)
+        buffer = io.StringIO()
+        with mock.patch.object(gb, "_resume_for_next_sample",
+                               return_value=(False, "the target is not interruptible here")):
+            with contextlib.redirect_stdout(buffer):
+                gb.cmd_trace(debugger, "gp-trace --samples 3", None, {})
+        found, _raw = gb.extract_sentinel(buffer.getvalue())
+        self.assertIsNotNone(found, buffer.getvalue())
+        self.assertEqual(3, found["timeline"]["requested"])
+        self.assertEqual(1, found["timeline"]["attempts"],
+                         "sampling must stop at the failed resume, not spin")
+        self.assertEqual(1, found["timeline"]["observations"])
+        self.assertFalse(found["timeline"]["measured"])
+        self.assertEqual(1, found["samples"])
+        self.assertIn("not interruptible", found["timeline"]["reason"])
+        self.assertTrue(any("trace timeline not measured" in error
+                            for error in found["errors"]), found["errors"])
+        self.assertEqual([True, False], debugger.async_calls, "async flag must be restored")
+
+    def test_cmd_queue_list_reconciles_the_stop_it_reports_on(self):
+        hit = self.arm_four_slots_and_queue_a_fifth()
+        process = StubProcess(threads=[StubThread(tid=11, stop_reason=4,
+                                                  stop_data=(hit.GetID(), 0x1001))])
+        messages = []
+        gb.cmd_queue(StubDebugger(process), "list",
+                     types.SimpleNamespace(AppendMessage=messages.append), {})
+        snapshot = json.loads(messages[-1])
+        self.assertEqual(1, snapshot["watchpointStopsObserved"], snapshot)
+        self.assertEqual([("0x1001", 1)], [(row["addr"], row["hitCount"])
+                                           for row in snapshot["hits"]],
+                         "gp-queue list that did not reconcile would report no hit here")
+        self.assertEqual(["0x1001"], [row["addr"] for row in snapshot["spent"]])
+        self.assertEqual("0x2000", snapshot["slots"][-1]["addr"],
+                         "the queued head must now hold the released slot")
+        self.assertEqual([], snapshot["queued"])
+
+
+class OutcomeShapeNormalisation(unittest.TestCase):
+    """`_outcome_ok` is the seam every SB result passes through; an unrecognised
+    shape must read as *unverified*, never as success."""
+
+    class Error(object):
+        def __init__(self, ok, text=None):
+            self._ok, self._text = ok, text
+
+        def Success(self):
+            return self._ok
+
+        def GetCString(self):
+            return self._text
+
+    class CommandResult(object):
+        def __init__(self, ok):
+            self._ok = ok
+
+        def Succeeded(self):
+            return self._ok
+
+    def test_the_four_sb_result_shapes_are_normalised(self):
+        self.assertEqual((False, "the debugger returned no result"), gb._outcome_ok(None))
+        self.assertEqual((True, None), gb._outcome_ok(True))
+        self.assertEqual((False, "the debugger call reported failure"), gb._outcome_ok(False))
+        self.assertEqual((True, None), gb._outcome_ok(self.Error(True)))
+        self.assertEqual((True, None), gb._outcome_ok(self.CommandResult(True)))
+        self.assertEqual((False, "watchpoint not found"),
+                         gb._outcome_ok(self.Error(False, "watchpoint not found")))
+        # Succeeded() with no message: still a failure, with a reason that is not silence
+        described = self.CommandResult(False)
+        ok, detail = gb._outcome_ok(described)
+        self.assertFalse(ok)
+        self.assertTrue(detail)
+        # an object with no success indicator at all is NOT assumed good
+        self.assertEqual((False, "this lldb binding exposed no success indicator for the "
+                                 "call"), gb._outcome_ok(object()))
+
+    def test_an_error_object_without_getcstring_still_reports(self):
+        class Silent(object):
+            def Success(self):
+                return False
+
+        ok, detail = gb._outcome_ok(Silent())
+        self.assertFalse(ok)
+        self.assertEqual("the debugger call failed", detail)
+
+
+# ---------------------------------------------------------------------------
+# 双重超时那一支（F5 收尾）：管道 fd、收尸、与**已经读进缓冲的哨兵对**
+# ---------------------------------------------------------------------------
+
+HOLDER_HOLD_S = 90
+
+
+class ChildDoubleTimeoutCleanup(unittest.TestCase):
+    """`run_child_captured` 的第二次 `communicate()` 也超时那条路径从前是
+    `proc.kill()` + `out, err = "", ""`：丢字节、漏 fd、不收尸。这条用例造一个
+    **逃出进程组的写端持有者**，让 killpg 之后管道依然不通 EOF，于是第二次抽干
+    必然再超时——被验的那一支就是被执行的那一支。"""
+
+    def test_second_timeout_keeps_the_bytes_closes_the_pipes_and_reaps_the_child(self):
+        payload = {"mode": "capture", "status": "eStateStopped", "threads": [{"id": 3}]}
+        emission = gb.wrap_sentinel(json.dumps(payload))
+        with tempfile.TemporaryDirectory() as tmp:
+            holder_pid_file = os.path.join(tmp, "holder.pid")
+            # 子进程先吐哨兵对，再起一个自成会话的持有者（继承同一对管道）：
+            # killpg 打不到它，所以第二次 communicate() 一定还是超时。
+            script = (
+                "import subprocess, sys, time\n"
+                "sys.stdout.write(%r)\nsys.stdout.flush()\n"
+                "holder = subprocess.Popen([sys.executable, '-c', "
+                "'import time; time.sleep(%d)'], start_new_session=True)\n"
+                "open(%r, 'w').write(str(holder.pid))\n"
+                "time.sleep(%d)\n"
+                % (emission, HOLDER_HOLD_S, holder_pid_file, HOLDER_HOLD_S))
+            created = []
+            real_popen = subprocess.Popen
+
+            def recording_popen(*args, **kwargs):
+                proc = real_popen(*args, **kwargs)
+                created.append(proc)
+                return proc
+
+            def kill_holder():
+                try:
+                    with open(holder_pid_file, encoding="utf-8") as handle:
+                        os.kill(int(handle.read().strip()), signal.SIGKILL)
+                except (OSError, ValueError):
+                    pass
+
+            self.addCleanup(kill_holder)
+            fds_before = _open_fd_count()
+            with mock.patch.object(subprocess, "Popen", recording_popen), \
+                    mock.patch.object(gb, "CHILD_DRAIN_TIMEOUT_S", 0.5):
+                completed, timed_out = gb.run_child_captured(
+                    [sys.executable, "-c", script], timeout=3.0)
+            kill_holder()
+        self.assertEqual(1, len(created))
+        proc = created[0]
+        self.assertTrue(timed_out, "the timeout verdict must survive the cleanup")
+        found, _raw = gb.extract_sentinel(completed.stdout)
+        self.assertEqual(payload, found,
+                         "lldb did emit the sentinel pair; a double timeout must not "
+                         "throw the buffered bytes away: %r" % (completed.stdout,))
+        self.assertIsNotNone(proc.returncode, "the child must be reaped, not left a zombie")
+        for name in ("stdout", "stderr"):
+            stream = getattr(proc, name)
+            self.assertTrue(stream is None or stream.closed,
+                            "%s must be closed: a timed-out drain may not leak the fd" % name)
+        if fds_before is not None:
+            self.assertEqual(fds_before, _open_fd_count(),
+                             "the drain leaked an fd pair into this process")
+
+
+def _open_fd_count():
+    try:
+        return len(os.listdir("/dev/fd"))
+    except OSError:
+        return None
+
+
 class BridgePathSurvivesLLDBsOwnTokenizer(unittest.TestCase):
+
     """`-o "command script import <path>"` 的 <path> 由 **lldb 自己的分词器**再切
     一次：仓库装在带空格的路径（macOS 家目录常见）时，旧实现交的是裸路径，实测
     `error: module importing failed: invalid pathname '/tmp/gp'`，桥从未导入，而
@@ -1386,6 +2171,106 @@ class BridgePathSurvivesLLDBsOwnTokenizer(unittest.TestCase):
         self.assertEqual(completed.returncode, 1, output[-400:])
 
 
+SAMPLE_PATH = os.path.join(BRIDGE_DIR, "capture-sample.json")
+
+
+class CaptureSampleMatchesEmitter(unittest.TestCase):
+    """`bridge/capture-sample.json` 是 P6 spec 当作 capture 形态引用的那份文件
+    （`specs/GlassPane_P6_实施规格_v6.0…` §"桥采证本身仍以 §34.5/`capture-sample.json`"），
+    而从前**没有任何代码读它**：`watchpoints` 是账本 dump 而不是 §6.4 数组，
+    `truncated`/`framesTotal`/`localsTotal`/`localsTruncated` 整个缺席，`status` /
+    `stopReason` 是裸的 "5"/"10" 而契约是裸状态名。这里把键集比到**发射器自己**
+    产出的形状上。
+
+    出处照实说：帧、模块、寄存器那些**值**是遗留采集记录原样带过来的
+    （`bridge/crashcanary.swift` 头里已注明那份存档来自已删除的 `crashme` 夹具）；
+    键的形状、裸状态名、以及 `queue: null` 是由发射器（`_payload_from_process` →
+    `thread_entry`/`frame_record`/`assemble_result`）重新生成、不是手写。所以顶帧
+    `localsTotal: 0` 读作"发射器按已读到且为空"，其余帧的 `null` 读作"从未读"——
+    那条分别是发射器的判词，不是第二次实测。真机重采仍归 opt-in 的
+    `RealMachineCrashScene`。规格文件对本人只读，本报告里另记一句。
+    """
+
+    def load_sample(self):
+        with open(SAMPLE_PATH, encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def reference_payload(self):
+        """The shape as the emitter writes it, driven through its own functions."""
+        top = gb.frame_record(0, "App", "0x1000", file="a.swift", line=4, function="main",
+                              locals_=[("x", "1")])
+        callee = gb.frame_record(1, "dyld", "0x2000", function="start", locals_=None)
+        thread = gb.thread_entry(1, "main", "signal", [top, callee], frames_total=2,
+                                 queue="com.apple.main-thread")
+        return gb.assemble_result(mode="capture", target={"pid": 1}, status="eStateStopped",
+                                  threads=[thread], registers={"pc": "0x1"},
+                                  stop_reason="signal", crash=gb.crash_record(5, 11),
+                                  watchpoints=gb.WatchQueue().records())
+
+    def test_sample_key_set_equals_the_emitters_key_set(self):
+        sample, reference = self.load_sample(), self.reference_payload()
+        self.assertEqual(set(reference), set(sample),
+                         "capture-sample.json 与发射器的载荷键集不一致（规格把它当形态）")
+        self.assertEqual(set(reference["target"]), set(sample["target"]))
+        for row, reference_row in zip(sample["threads"], reference["threads"]):
+            self.assertEqual(set(reference_row), set(row),
+                             "threads[] 少/多了键：%s vs %s" % (sorted(row), sorted(reference_row)))
+            always = {"idx", "module", "addr", "locals", "localsTotal", "localsTruncated"}
+            for frame in row["frames"]:
+                self.assertTrue(always <= set(frame),
+                                "frames[] 缺了发射器一定会写的键：%s" % (sorted(always - set(frame)),))
+            fullest = sorted(set(reference["threads"][0]["frames"][0]))
+            richest = max(row["frames"], key=lambda frame: len(frame))
+            self.assertEqual(fullest, sorted(set(richest)),
+                             "没有一帧带齐了 frames[] 的全部键：%s" % sorted(richest))
+
+    def test_sample_states_are_bare_names_not_raw_enum_numbers(self):
+        sample = self.load_sample()
+        self.assertIn(sample["status"], gb.PROCESS_STATE_NAMES, sample["status"])
+        self.assertNotRegex(sample["stopReason"], r"^\d+$",
+                            'stopReason 必须是载荷词汇，不是裸的 "10"')
+        self.assertIsNotNone(gb.normalize_state(sample["status"])[1], sample["status"])
+        self.assertIsNotNone(gb.normalize_stop_reason(sample["stopReason"])[1],
+                             sample["stopReason"])
+        for row in sample["threads"]:
+            self.assertIsNotNone(gb.normalize_stop_reason(row["stopReason"])[1], row)
+
+    def test_sample_watchpoints_are_the_6_4_array_not_a_ledger_dump(self):
+        sample = self.load_sample()
+        self.assertIsInstance(sample["watchpoints"], list,
+                              "§6.4 的 watchpoints 是**每条请求一项的数组**，不是账本快照")
+        self.assertNotIn("slots", sample["watchpoints"])
+        record = gb.WatchQueue()
+        record.add({"addr": "0x1000", "size": 8, "mode": "w"})
+        self.assertEqual({"addr", "hwSlot", "queued", "hitCount", "armed", "reason"},
+                         set(record.records()[0]),
+                         "数组项的键集就是 §6.4 那一套，样本与发射器共用它")
+
+    def test_sample_announces_truncation_and_keeps_unmeasured_unmeasured(self):
+        sample = self.load_sample()
+        self.assertIn("truncated", sample, "载荷必须带着截断宣告这一**键**（§6.1 不省空值）")
+        self.assertIsInstance(sample["truncated"], dict)
+        for row in sample["threads"]:
+            self.assertIn("queue", row)
+            self.assertIsNone(row["queue"],
+                              "读不到的 queue 是 null（未测量），不是伪造的空字符串")
+            frames = row["frames"]
+            self.assertIsInstance(frames[0]["localsTotal"], int, "顶帧的 locals 是读过的")
+            for frame in frames[1:]:
+                self.assertIsNone(frame["localsTotal"],
+                                  "非顶帧从未读局部变量，0 是一个没人测过的数")
+
+    def test_sample_reads_with_the_same_verdicts_a_delivered_payload_gets(self):
+        """The file doubles as the artefact of the documented hand-run
+        (`lldb --batch -o "command script import …" -o gp-capture`), so the outer
+        verdicts must be computable from it exactly as from a live payload."""
+        sample = self.load_sample()
+        self.assertTrue(gb.capture_succeeded(sample), "样本声称的是一次停住且采到线程的现场")
+        self.assertFalse(gb.crash_reported(sample), sample.get("crash"))
+        self.assertEqual(0, gb.outer_exit_code(sample),
+                         "非崩溃现场交付出去就是 0；这份样本必须读得出那一档")
+
+
 class NoPayloadCauseIsTriagedNotAssumed(unittest.TestCase):
     """载荷缺席的两种成因各有各的补救：桥没导入（路径形态）与调试席位被拒（权限）。
     从前一律写"去勾 Developer Tools"，路径里一个空格就让人勾一张永不生效的席位。"""
@@ -1400,8 +2285,14 @@ class NoPayloadCauseIsTriagedNotAssumed(unittest.TestCase):
         cause, remedy = gb.no_payload_cause(self.SPACED_PATH_STDERR, "", "/tmp/gp sp/b.py")
         self.assertEqual(cause, "bridge-not-imported")
         self.assertIn("/tmp/gp sp/b.py", remedy)
-        for word in ("space", "quote"):
-            self.assertIn(word, remedy.lower(), remedy)
+        # 每一支补救都得是**调用者当场能跑的一行**。从前它写"remedy = 把仓库挪到
+        # 这个 bug 够不着的路径，或者在 -o 文本里给路径加引号"——而 `build_lldb_argv`
+        # 现在一律经 `lldb_command_quote` 加引号，后一支只能改源码，不是操作员的一步。
+        for step in ("ls -l", "cp ", "python3 -c", "lldb_command_quote", "space"):
+            self.assertIn(step, remedy, remedy)
+        # 那条不可执行的老支路不许回来（这一行就是"改回旧文案立刻变红"的那一枚闸）。
+        self.assertNotIn("quote the path in the -o text", remedy)
+        self.assertNotIn("move the repo to a path this bug cannot reach", remedy)
         for permission_phrase in ("Developer Tools", "Privacy & Security"):
             self.assertNotIn(permission_phrase, remedy,
                              "路径形态的故障不许给出权限补救：%s" % remedy)
