@@ -919,10 +919,30 @@ test("a code the daemon does not declare is never answered as the caller's bad r
   // for one of those tells a caller its request was wrong when the real answer is
   // "this gateway did not finish it" — the same misdirection the 502-on-everything
   // rule produced, pointing the other way.
+  //
+  // The partition is **blame**, not enum membership, and `errors.ts` now says so: a code the
+  // daemon cannot declare may still be about the caller's argument (`GP_E_DIMENSION` — the daemon
+  // has no dimension concept to declare because the annotation is stripped before the frame).
+  // Those are exempted here by a list the product declares, and the exemption is *earned* by the
+  // two tests below, which drive the real route and assert both halves: a malformed declaration is
+  // answered 400 by the argument guard, and a well-formed one never reaches the daemon. Adding an
+  // infrastructure code to that list would make those tests answer a request the gateway never
+  // refused, and the 5xx rule below keeps every other shell-only code honest.
   const daemon = daemonErrorCodeSet();
+  const exempt = new Set(errorCodes.SHELL_REQUEST_REFUSAL_CODES);
   const shellOnly = [...new Set(Object.values(errorCodes)
-    .filter((value) => typeof value === "string" && value.startsWith("GP_E_") && !daemon.has(value)))];
+    .filter((value) => typeof value === "string" && value.startsWith("GP_E_") && !daemon.has(value) && !exempt.has(value)))];
   assert.ok(shellOnly.length >= 4, `只认出 ${shellOnly.length} 个 shell-only 错误码，扫描方式已经跟不上 errors.ts`);
+  assert.ok(exempt.size >= 1, "request-refusal 名单空了：这条分族又退回按 enum 成员判定，而它判的不是责任归属");
+  // The exemption is a judgement about blame, not a mechanical property, so its membership is
+  // pinned here rather than only trusted from `errors.ts`: widening it has to be a reviewed edit to
+  // a test file, not a quiet addition to a product list. Without this leg, moving an
+  // infrastructure code into the exemption would silently lift it out of the 5xx rule below.
+  assert.deepEqual([...exempt].sort(), ["GP_E_DIMENSION"],
+    `request-refusal 名单现在是 ${[...exempt].sort().join(", ")}；每一项都必须是被正面测过的"调用方参数"拒绝`);
+  for (const code of exempt) {
+    assert.ok(!daemon.has(code), `${code} 被列成"daemon 没声明、但说的是调用方参数"，可它其实就在 daemon 词表里`);
+  }
   let current = shellOnly[0];
   const fake = new FakeGatewayClient();
   fake.on("observe", () => {
@@ -937,6 +957,48 @@ test("a code the daemon does not declare is never answered as the caller's bad r
       assert.equal(body.error.code, code);
       assert.ok(res.status >= 500, `${code} 是 daemon 词表之外的码，被答成了 ${res.status}（调用方的错）`);
     }
+  } finally {
+    await gw.close();
+  }
+});
+
+test("the declared dimension is guarded on the HTTP doorway too, as the caller's bad request", async () => {
+  // The exemption above has to be earned: `GP_E_DIMENSION` reaches a caller only through the
+  // argument guard, on a route that really validated a body. If the gateway ever answers it for a
+  // reason that is not the caller's argument, this is the test that says so.
+  const fake = new FakeGatewayClient();
+  const { gw, base } = await startGateway(fake);
+  try {
+    const res = await fetch(`${base}/v1/tools/observe`, {
+      method: "POST",
+      headers: auth(),
+      body: JSON.stringify({ maxDepth: 4, dimension: "Spec Compliance" }),
+    });
+    assert.equal(res.status, 400, `malformed dimension answered ${res.status}, not the caller's 400`);
+    const body = await res.json();
+    assert.equal(body.error.code, "GP_E_DIMENSION");
+    assert.ok(body.error.remedy.length > 0, "a refusal without a remedy is a dead end");
+    assert.equal(fake.calls.length, 0, "a refused request must be a request the daemon never saw");
+  } finally {
+    await gw.close();
+  }
+});
+
+test("a well-formed dimension is stripped before the daemon on the HTTP doorway", async () => {
+  // The other half of "two doors, one answer": stdio strips the annotation and so must the
+  // gateway. Asserting the captured frame params — not the HTTP body — is the point, because the
+  // invariant is about what the engine is asked to do.
+  const fake = new FakeGatewayClient();
+  const { gw, base } = await startGateway(fake);
+  try {
+    const res = await fetch(`${base}/v1/tools/observe`, {
+      method: "POST",
+      headers: auth(),
+      body: JSON.stringify({ maxDepth: 4, dimension: "security" }),
+    });
+    assert.equal(res.status, 200, JSON.stringify(await res.text()));
+    assert.deepEqual(fake.calls[0].params, { maxDepth: 4 });
+    assert.ok(!("dimension" in fake.calls[0].params));
   } finally {
     await gw.close();
   }

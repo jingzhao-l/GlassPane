@@ -19,6 +19,12 @@ import { KernelSchemaError } from "iterate-kernel/errors";
 
 import { canonicalJson } from "./canonical.js";
 import {
+  DIMENSION_ID_LIMITS,
+  dimensionAttributionLine,
+  engineBody,
+  validateDimension,
+} from "./dimension.js";
+import {
   attributeCapability,
   providerAttributionLine,
 } from "./providers.js";
@@ -182,6 +188,26 @@ const ExpectSchema = z.union([z.string().max(512), z.boolean()]);
 /** Crockford base32 body shared by op_/snap_ ids (P0 §4.1 / P1 v1.1 §1.2). */
 const SnapshotIdSchema = z.string().regex(/^snap_[0-9A-HJKMNP-TV-Z]{26}$/);
 
+/**
+ * The declared review dimension (场景② 的对称半边, 面 A). Deliberately **not** pattern-checked
+ * in zod: the live guard is {@link validateDimension}, and enforcing the shape here instead would
+ * leave that named refusal unreachable in production — a guard whose rejecting branch no caller
+ * can hit is undelivered, not conservative. This mirrors 面 B, where Effect's
+ * `annotate({ pattern, maxLength })` advertises the shape to the client while `validateDimension`
+ * decides it. The advertised JSON Schema below carries the kernel's own limits, and
+ * `test/dimension.test.mjs` pins that the kernel constant, the advertised schema and the live
+ * guard still name one rule rather than three near-misses.
+ */
+const OptionalDimensionSchema = z.string().optional();
+
+const dimensionJsonSchema = {
+  type: "string",
+  pattern: DIMENSION_ID_LIMITS.pattern.source,
+  maxLength: DIMENSION_ID_LIMITS.maxLength,
+  description:
+    'the review dimension this call serves, kebab-case (e.g. "security"); omit it when the call was not made for a dimension',
+} as const;
+
 const ActStepSchema = z.strictObject({
   selector: SelectorSchema,
   action: ActionSchema,
@@ -208,6 +234,7 @@ export const AttachArgs = z.strictObject({
   bundleId: OptionalBundleIdSchema,
   pid: OptionalPidSchema,
   projectId: OptionalProjectIdSchema,
+  dimension: OptionalDimensionSchema,
 }).refine((v) => (v.bundleId === undefined) !== (v.pid === undefined), {
   // Exclusive, not merely "at least one" (R8-中6). The advertised JSON Schema
   // below already says `oneOf` (exactly one), and the daemon resolves both
@@ -224,6 +251,7 @@ export type AttachArgs = z.infer<typeof AttachArgs>;
 export const ObserveArgs = z.strictObject({
   maxDepth: OptionalDepthSchema,
   role: OptionalRoleSchema,
+  dimension: OptionalDimensionSchema,
 });
 export type ObserveArgs = z.infer<typeof ObserveArgs>;
 
@@ -246,6 +274,7 @@ export const ActArgs = z.strictObject({
   selector: SelectorSchema,
   action: ActionSchema,
   degrade: z.boolean().optional(),
+  dimension: OptionalDimensionSchema,
 });
 export type ActArgs = z.infer<typeof ActArgs>;
 
@@ -258,11 +287,13 @@ export type AssertElementArgs = z.infer<typeof AssertElementArgs>;
 
 export const DiagnoseArgs = z.strictObject({
   operationId: OptionalOperationIdSchema,
+  dimension: OptionalDimensionSchema,
 });
 export type DiagnoseArgs = z.infer<typeof DiagnoseArgs>;
 
 export const LastEvidenceArgs = z.strictObject({
   operationId: OptionalOperationIdSchema,
+  dimension: OptionalDimensionSchema,
 });
 export type LastEvidenceArgs = z.infer<typeof LastEvidenceArgs>;
 
@@ -404,6 +435,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         bundleId: { type: "string", maxLength: BUNDLE_ID_MAX_LENGTH },
         pid: { type: "integer", minimum: 1, maximum: PID_INT32_MAX },
         projectId: { type: "string", pattern: "^prj_[0-9A-HJKMNP-TV-Z]{26}$" },
+        dimension: dimensionJsonSchema,
       },
       oneOf: [
         { required: ["bundleId"] },
@@ -422,6 +454,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       properties: {
         maxDepth: { type: "integer", minimum: 1, maximum: 10 },
         role: { type: "string", minLength: 1, maxLength: SELECTOR_MAX_LENGTH },
+        dimension: dimensionJsonSchema,
       },
     },
     validate: zodBridge(ObserveArgs),
@@ -450,6 +483,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           enum: ["press", "increment", "decrement", "showMenu", "confirm", "cancel", "pick"],
         },
         degrade: { type: "boolean" },
+        dimension: dimensionJsonSchema,
       },
       required: ["selector", "action"],
     },
@@ -525,6 +559,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       additionalProperties: false,
       properties: {
         operationId: { type: "string", pattern: "^op_[0-9A-HJKMNP-TV-Z]{26}$" },
+        dimension: dimensionJsonSchema,
       },
     },
     validate: zodBridge(DiagnoseArgs),
@@ -538,6 +573,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       additionalProperties: false,
       properties: {
         operationId: { type: "string", pattern: "^op_[0-9A-HJKMNP-TV-Z]{26}$" },
+        dimension: dimensionJsonSchema,
       },
     },
     validate: zodBridge(LastEvidenceArgs),
@@ -1443,7 +1479,7 @@ export async function executeTool(
   // prototype, no cast, no `any` — with one method shadowed. The validated
   // arguments travel with it because an orchestrated tool's inner frame does not
   // carry the knob the caller actually set (see {@link engineWithPayloadAdvice}).
-  const advised = engineWithPayloadAdvice(engine, spec, checked.value);
+  const advised = engineWithPayloadAdvice(engine, spec, engineBody(checked.value));
   if (!trailScopedTool(spec)) {
     return runValidatedTool(spec, checked.value, advised, session, INERT_TRAIL_TURN, stdoutDroppedFrames);
   }
@@ -1498,6 +1534,22 @@ async function runValidatedTool(
   }
   const attributed: ProviderAttribution | null = claim.status === "ok" ? claim.provider : null;
 
+  /**
+   * R40 scenario ②, the 面 A half: a call may declare which review dimension it served. The
+   * shape is refused here — before the frame is built — because a declaration that reached the
+   * ledger malformed would be counted as an *unplanned* dimension and silently rename what the
+   * session claims it covered. Absence is legitimate and stays unechoed; the guard's rejecting
+   * branch is reachable precisely because zod does not enforce the pattern (see the note on
+   * {@link OptionalDimensionSchema}), and `test/dimension.test.mjs` keeps it that way.
+   */
+  const declared = validateDimension(value.dimension);
+  if (!declared.ok) {
+    return {
+      content: [{ type: "text", text: formatToolErrorShape(declared.error) }],
+      isError: true,
+    };
+  }
+
   if (spec.execute !== undefined) {
     return spec.execute(value, { engine, session, turn });
   }
@@ -1506,7 +1558,7 @@ async function runValidatedTool(
     // `session.generation` travels with the request so a reply that lands after
     // this caller was answered can be judged against the trail it belongs to
     // (R8b-高1, `EngineJsonRpcClient.call`'s correlation).
-    const raw = await engine.call(spec.engineMethod, value, session.generation);
+    const raw = await engine.call(spec.engineMethod, engineBody(value), session.generation);
     // Everything below touches the trail, so it waits for its turn: this is
     // where completion order is turned back into request order.
     await turn.acquire();
@@ -1580,6 +1632,16 @@ async function runValidatedTool(
       // byte, and the attribution is a sentence about who is answerable for it rather
       // than another field in a frame this shell does not own.
       content.push({ type: "text", text: providerAttributionLine(attributed) });
+    }
+    if (declared.dimension !== undefined) {
+      // The declaration is echoed as its own item, after the provider line, for the same reason
+      // the provider line is: this shell does not own the frame, so a sentence about the call
+      // belongs beside it rather than inside it. The consumer that reads it (`relay_answer`'s
+      // per-item classification on the Python side, the fork's decision recorder on the other)
+      // then sees *which* dimension this reply was fetched for without re-deriving it from the
+      // request the agent no longer holds. Undeclared calls get no line at all, so the ordinary
+      // reply bytes do not move.
+      content.push({ type: "text", text: dimensionAttributionLine(declared.dimension) });
     }
     return {
       content,

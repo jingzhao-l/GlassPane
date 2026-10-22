@@ -3,6 +3,39 @@
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
 
+## [Unreleased]
+
+### Added
+
+- **面 A 也有了 `dimension` 槽——场景② 在产品侧的最后一处不对称收掉，两道门跑同一条守卫。**
+  `glasspane-mcp` 的 `gp_attach`/`gp_observe`/`gp_act`/`gp_diagnose`/`gp_last_evidence` 现在接受可选
+  `dimension`，与 fork 侧那五个 `DimensionArg` 工具**逐字同名同集合**（`mcp-shell/test/dimension.test.mjs`
+  读 fork 源码里 `DimensionArg` 的出现位置来比集合，任何一侧单独长槽就红）。新增
+  `mcp-shell/src/dimension.ts`：形状常量从 `iterate-kernel/dimension-context` 取
+  （`DIMENSION_ID_PATTERN`/`DIMENSION_ID_MAX_LENGTH`，与 run plan 校验同一份，不是本地再造一遍）；
+  `engineBody()` 在建帧前剥掉这条注释；`dimensionAttributionLine()` 以**独立 content item** 回显，
+  `content[0]` 保持 daemon 帧逐字节不变——与 provider 归属行同一规矩，也正是 Python 侧逐 item 分类能读它的前提。
+  **zod 有意不校验 pattern**：执法点必须只有一个，否则 `validateDimension` 那条具名拒绝在生产里永远跑不到
+  （"守卫的拒绝分支不可执行＝没交付"是本仓自己定下的规矩），而这条选择本身被一条用例钉住——畸形声明必须答
+  `GP_E_DIMENSION` 而不是 `GP_E_BAD_PARAMS`。
+  两道门同一个答案：HTTP gateway 的 `POST /v1/tools/:name` 走同一条 `validateDimension` + 同一次剥离，
+  畸形声明答 400，合法声明不进帧（`failEngine` 的 remedy 也不再转述一个引擎从没收到过的参数）。
+  两条既有闸各抓到一处，且都是我的错：`GP_E_*` 字面量只能住 `errors.ts`（第一版我在 dimension.ts 里裸写三遍）；
+  以及"daemon 没声明的码不得答成 4xx"这条把**责任归属**当成了**enum 成员**——`GP_E_DIMENSION` 说的是调用方的
+  参数，daemon 不声明它只是因为它压根不是引擎概念。现在分族读 `errors.ts` 里显式命名的
+  `SHELL_REQUEST_REFUSAL_CODES`，名单内容在测试里钉成 `["GP_E_DIMENSION"]`（放宽必须是一次可评审的测试改动，
+  而不是往产品名单里悄悄加一项），豁免由两条正面 HTTP 用例挣得，其余 shell-only 码的 5xx 规则一字未松。
+  `mcp-shell` 全套件 571 → **584**（新增 13 条）；变异 10 发逐一点名变红（回显不再指名声明／stdio 不再剥离／
+  守卫收下任意字符串／字符串绕过守卫／一侧独长槽／zod 代执法／HTTP 不剥离／HTTP 不执法／豁免名单清空／
+  豁免名单吞下基础设施码），按自带备份 + sha256 核回。其中两发第一版**没打红而是编译失败**
+  （`if (false)` 让 TS 丢掉判别联合的窄化，TS2339 不是红灯），重写为保留类型的变异后才成立——这条记在这里，
+  因为"红不了"最常见的成因是变异本身不合法。
+  `tool-surface` 金样与代码同批重记：面 A 10,826 行（基线 10,617，+209：`dimension.ts` 62 新文件 +
+  `tools.ts` +62 + `errors.ts` +25 + `http-gateway.ts` +13），对产品面 21.86%——文档上限 10% 早被历史
+  越过并如实记在金样里，这把棘轮只挡**进一步**增长，本批是有意的增长且与代码同批，正是它允许记账的那一格。
+- 版本判断：**未取号**。按本仓 1.6.2 那四项 patch 判据实测，本版动了"输入参数的接受条件"（五个工具新增可选
+  参数）与"输出内容项"（新增一行归属声明），够 minor；父仓发布链（Swift 构建、归档、签名、npm 三包）本轮不跑，
+  号留给下一版。代码在 main，`[Unreleased]` 段就是它还没进发布物的凭据。
 ## [1.19.0] — 2026-10-21
 
 **版本判断：minor。** 对着本仓自己那四项 patch 判据（判据原文在 1.6.2 条目里）逐条实测，本版动了其中三项：
