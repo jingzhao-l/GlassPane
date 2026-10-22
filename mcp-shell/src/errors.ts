@@ -75,6 +75,25 @@ export const GP_E_UNKNOWN = "GP_E_UNKNOWN";
  */
 export const GP_E_NO_USER_RECORD = "GP_E_NO_USER_RECORD";
 
+/**
+ * Shell-only: a state root **the daemon reported about itself** (`hello`'s
+ * `stateRoot`) names a path this process will neither create nor re-permission —
+ * the filesystem root, the account's home directory itself, or a value that is not
+ * an absolute path at all.
+ *
+ * The daemon refuses the same shapes for its own `--state-dir` (`StateRoot.classify`
+ * → `StateRoot.notADedicatedRoot`) and then `tightenPermissions` that root to 0700,
+ * so the argument parse is the only thing standing between `--state-dir ~` and a
+ * locked home directory. It has no code for the refusal because the refusal is an
+ * exit message, not an error frame — which is why this shell cannot reuse one
+ * either: the root arrives over a socket with **no peer authentication** (SECURITY.md:
+ * same uid = full authority), so a value in a reply frame can name `/Users/<you>` and
+ * this shell's own `mkdirSync(…, 0700)` + `chmod` would obey it. `test/remedy-surface.test.mjs`
+ * checks this stays absent from the daemon's enum, so the split has to be re-read if
+ * the daemon ever does declare it.
+ */
+export const GP_E_STATE_ROOT_REFUSED = "GP_E_STATE_ROOT_REFUSED";
+
 export interface ToolErrorText {
   code: string;
   message: string;

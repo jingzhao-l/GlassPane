@@ -29,6 +29,7 @@ import {
 import { escapeHTML, renderHTML, renderMarkdown } from "./evidence-report.js";
 import type { EvidencePackReportView } from "./evidence-report.js";
 import {
+  DAEMON_FORWARDED_METHODS,
   oversizedReplyAdvice,
   packForReport,
   parseEvidenceFrame,
@@ -266,6 +267,58 @@ const FORWARDABLE_TOOLS: ReadonlyMap<string, ToolSpec> = new Map(
 const TOOL_ROUTES_TEXT = [...FORWARDABLE_TOOLS.keys()]
   .map((method) => `POST /v1/tools/${method}`)
   .join(", ");
+
+/**
+ * The gateway's own answer to "which of the capabilities this `hello` advertises can
+ * I actually POST here?", added to {@link handleHello}'s response as one derived field.
+ *
+ * The daemon's `capabilities` is a measurement of the *daemon*, relayed verbatim — it
+ * includes `capture_view`, which this surface deliberately does not route (SECURITY.md
+ * §2.3: `gp_capture_view` and the orchestrated tools are not on this surface; the
+ * PNG-bearing tool belongs to the stdio server, and `POST /v1/tools/capture_view` is
+ * pinned as a 404). So a client that discovers through `GET /v1/hello` was told one
+ * thing at this door and handed another one request later: no route, and no field
+ * saying which routes exist. Rewriting the daemon's list to hide the difference would
+ * falsify the measurement, so the list stays byte-for-byte and the reconciliation is
+ * added next to it, computed from {@link FORWARDABLE_TOOLS} rather than written out —
+ * a hand-kept copy is the drift this file's whole advice-text doctrine refuses.
+ *
+ * The split into `mcpOnly` and `exposedNowhere` is what keeps the sentence honest: a
+ * capability this surface does not route is only worth calling MCP-only when the MCP
+ * surface really does forward it, and anything else is drift between two builds that
+ * must be named rather than smoothed over.
+ */
+function describeCapabilityRouting(result: unknown): unknown {
+  if (typeof result !== "object" || result === null || Array.isArray(result)) {
+    return result;
+  }
+  const hello = result as Record<string, unknown>;
+  const routed = [...FORWARDABLE_TOOLS.keys()];
+  const advertised = Array.isArray(hello.capabilities)
+    ? hello.capabilities.filter((item): item is string => typeof item === "string")
+    : null;
+  if (advertised === null) {
+    return {
+      ...hello,
+      capabilityRouting: {
+        routed,
+        advertised: null,
+        note: `this daemon's hello named no capability list, so nothing here can reconcile it; the methods this surface routes are the ones in \`routed\`, reachable as POST /v1/tools/<name>`,
+      },
+    };
+  }
+  const notRouted = advertised.filter((name) => !routed.includes(name));
+  return {
+    ...hello,
+    capabilityRouting: {
+      routed,
+      advertised,
+      mcpOnly: notRouted.filter((name) => DAEMON_FORWARDED_METHODS.includes(name)),
+      exposedNowhere: notRouted.filter((name) => !DAEMON_FORWARDED_METHODS.includes(name)),
+      note: "`capabilities` is the daemon's own measurement and is relayed unchanged; `routed` is what THIS HTTP surface answers at POST /v1/tools/<name>. An entry in `mcpOnly` is a daemon capability that exists but is reachable only through the MCP stdio server's tool, never as an HTTP route — `exposedNowhere` would be a capability reachable on neither surface, which is a build disagreement to report rather than a routing choice",
+    },
+  };
+}
 
 export function createHttpGateway(options: HttpGatewayOptions): HttpGateway {
   // Both guards run before anything is opened: no engine client, no listening
@@ -557,10 +610,18 @@ async function dispatch(
   NotFound(res, url.pathname);
 }
 
+/**
+ * Relays the daemon's self-report with one derived field added beside it —
+ * {@link describeCapabilityRouting}, which says which of the advertised
+ * capabilities this surface actually routes. Nothing in the daemon's own keys is
+ * rewritten or dropped: `capabilities` stays the daemon's measurement, and the
+ * reconciliation is a separate key, because the discovery answer and the routing
+ * answer have to be reconcilable at the one door a client stands at.
+ */
 async function handleHello(client: EngineClientLike, res: ServerResponse): Promise<void> {
   try {
     const result = await client.call("hello");
-    ok(res, result);
+    ok(res, describeCapabilityRouting(result));
   } catch (error) {
     failEngine(res, error);
   }
@@ -1049,6 +1110,11 @@ function makeNotFetchedNote(notFetched: readonly string[], format: ReportFormat)
  * decoded it, and never folded into: the same rule the MCP doorway keeps when it appends
  * the attribution as its own content item.
  *
+ * One caller adds a key *beside* the daemon's rather than folding one into them:
+ * {@link handleHello} appends the routing reconciliation {@link
+ * describeCapabilityRouting} derives from `FORWARDABLE_TOOLS`, and does not touch
+ * any key the daemon wrote.
+ *
  * `attribution` is that same item's text, present exactly when the provider-registration
  * contract claims the method that produced the reply. A caller reading `result` alone
  * therefore gets the same answer on either doorway, and a caller asking who produced a
@@ -1170,6 +1236,13 @@ function httpStatusForEngineCode(code: string): number {
       // 503，不是 4xx：这一码说的是"另一个写者在我们读与写之间改过盘，所以这次什么都没写"。
       // 说成调用方的错（走 default 的 422）会让 curl 那一侧去改它本来就没错的参数，
       // 而真正的动作是再读一次盘、把同一次登记重发一遍。
+      return 503;
+    case GP_E_STATE_ROOT_REFUSED:
+      // 同样是 503：这一码说的不是"你的参数不对"，而是"后台服务在 hello 里自报了一个
+      // 本壳不会创建、也不会改权限的根，所以这次什么都没读、什么都没写"。把它答成 4xx
+      // 会让 curl 那一侧去改它本来就没错的 body，而真正的动作在 daemon 那一侧
+      // （`glasspaned --state-dir <这个安装自己能拥有的目录>`）。`GP_E_BAD_PARAMS`
+      // 才是这一面上"调用方的错"那一族，而它有自己那条 400。
       return 503;
     case GP_E_PAYLOAD_TOO_LARGE:
       return 502;

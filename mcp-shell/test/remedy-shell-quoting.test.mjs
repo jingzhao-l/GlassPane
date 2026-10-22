@@ -10,13 +10,16 @@
  * into "run this", and the double-quoted shape one helper used to reach for does not fix
  * it, because a command substitution expands inside double quotes too.
  *
- * So there is one quoting helper (`quoteShellArg` in `src/errors.ts`), and this file
- * checks both halves:
+ * So there is one quoting rule, and this file checks both halves:
  *  - the reachable producers, driven with hostile paths through the real code, with each
  *    command they emitted parsed the way a shell would parse it;
- *  - every command-shaped template literal in `src/`, so a site no test on this machine
- *    can reach (a read-only volume's `chmod`, an `fsync` failure's `ls -lO`) is covered by
- *    the same rule rather than by remembering to check it.
+ *  - every command-shaped template literal in `src/` **and in `updater/`** (`updater/lib/*.js`
+ *    and `updater/*.js`, 2026-10-22: the updater interpolates daemon-reported state roots into
+ *    remedies the same way and its own helper is `updater/lib/shell-quote.js`, the ported twin
+ *    of this package's `quoteShellArg` — the packages ship separately and cannot share an
+ *    import, so the shared thing is the *gate*, which now sees both sides' files), so a site
+ *    no test on this machine can reach (a read-only volume's `chmod`, an `fsync` failure's
+ *    `ls -lO`) is covered by the same rule rather than by remembering to check it.
  *
  * MUTATION THIS PINS: drop a `quoteShellArg(...)` at any of those sites and the source
  * gate names it; make the helper double-quote (or delete it and interpolate raw) and the
@@ -39,6 +42,18 @@ import { makeEngine } from "./helpers.mjs";
 import { executableSource } from "./support/source.mjs";
 
 const SRC = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "src");
+const UPDATER = path.resolve(SRC, "..", "..", "updater");
+
+/**
+ * The scan set: this package's TypeScript sources, and the standalone updater's plain-JS
+ * sources (lib/ plus the two package-root scripts). Same argument-position judgement for
+ * all of them — only the file set widened, never the rule.
+ */
+const SCAN_TARGETS = [
+  { label: "src", dir: SRC, ext: ".ts" },
+  { label: "updater/lib", dir: path.join(UPDATER, "lib"), ext: ".js" },
+  { label: "updater", dir: UPDATER, ext: ".js" },
+];
 
 /** The three payloads: command substitution via backtick, a space, and a single quote. */
 const HOSTILE = {
@@ -426,29 +441,34 @@ const ANY_HOLE = /\$\{([^{}]*)\}/g;
 /** An interpolation whose name says it carries a filesystem location. */
 const PATH_TYPED = /(?:path|Path|dir|Dir|file|File|root|Root|target|Target|cli|Script|directory)/;
 
-test("every interpolated value inside a command-shaped literal in src goes through the quoting helper", () => {
+test("every interpolated value inside a command-shaped literal in src and updater goes through the quoting helper", () => {
   const offenders = [];
   const inspected = [];
-  for (const name of fs.readdirSync(SRC).filter((entry) => entry.endsWith(".ts"))) {
-    const source = executableSource(fs.readFileSync(path.join(SRC, name), "utf8"));
-    for (const match of source.matchAll(/`(?:[^`\\]|\\.)*`/g)) {
-      const literal = match[0];
-      if (!literal.includes("${")) continue;
-      const body = literal.slice(1, literal.length - 1);
-      let sawOperand = false;
-      for (const hole of body.matchAll(ANY_HOLE)) {
-        const expression = (hole[1] ?? "").trim();
-        const before = body.slice(Math.max(0, hole.index - 80), hole.index);
-        if (!COMMAND_PREFIX.test(before)) continue;
-        // 参数位上的插值只有指向**路径**时才需要引号。`(chmod ${(want & 0o777).toString(8)}
-        // failed: …)` 是一句"chmod 以模式 600 失败"的说明文字，那个洞是八进制模式号，不是
-        // 文件名；把它算成缺陷就是让闸去要求一件不可能的事。
-        if (!PATH_TYPED.test(expression)) continue;
-        sawOperand = true;
-        if (expression.startsWith("quoteShellArg(") || ALREADY_QUOTED_PRODUCERS.has(expression)) continue;
-        offenders.push(`${name}: ${JSON.stringify(expression)} 坐在命令 ${JSON.stringify(literal.slice(0, 90))} 的参数位上，却没走引号助手`);
+  for (const target of SCAN_TARGETS) {
+    for (const name of fs.readdirSync(target.dir).filter((entry) => entry.endsWith(target.ext))) {
+      const source = executableSource(fs.readFileSync(path.join(target.dir, name), "utf8"));
+      for (const match of source.matchAll(/`(?:[^`\\]|\\.)*`/g)) {
+        const literal = match[0];
+        if (!literal.includes("${")) continue;
+        const body = literal.slice(1, literal.length - 1);
+        let sawOperand = false;
+        for (const hole of body.matchAll(ANY_HOLE)) {
+          const expression = (hole[1] ?? "").trim();
+          const before = body.slice(Math.max(0, hole.index - 80), hole.index);
+          if (!COMMAND_PREFIX.test(before)) continue;
+          // 参数位上的插值只有指向**路径**时才需要引号。`(chmod ${(want & 0o777).toString(8)}
+          // failed: …)` 是一句"chmod 以模式 600 失败"的说明文字，那个洞是八进制模式号，不是
+          // 文件名；把它算成缺陷就是让闸去要求一件不可能的事。
+          if (!PATH_TYPED.test(expression)) continue;
+          sawOperand = true;
+          // 两侧包各自 import 各自的同名助手（`src/errors.ts` 与 `updater/lib/shell-quote.js`
+          // 是同一规则的两份可执行体，规则本身由本文件的行为半边钉死）；判据只看名字，
+          // 所以 `quoteShellArg(` 前缀对两种语言同样放行。
+          if (expression.startsWith("quoteShellArg(") || ALREADY_QUOTED_PRODUCERS.has(expression)) continue;
+          offenders.push(`${target.label}/${name}: ${JSON.stringify(expression)} 坐在命令 ${JSON.stringify(literal.slice(0, 90))} 的参数位上，却没走引号助手`);
+        }
+        if (sawOperand) inspected.push(`${target.label}/${name}: ${literal.slice(0, 90)}`);
       }
-      if (sawOperand) inspected.push(`${name}: ${literal.slice(0, 90)}`);
     }
   }
   assert.deepEqual(offenders, [], `这些命令位上的路径没有过引号助手，代理照着执行时会被 shell 重排：${offenders.join(" | ")}`);
@@ -458,4 +478,11 @@ test("every interpolated value inside a command-shaped literal in src goes throu
     `命令样式的字面量只扫到 ${inspected.length} 处，这条闸已经看不见东西：${inspected.join(" | ")}`);
   assert.ok(inspected.some((entry) => entry.includes("plutil")), "registryReaders 的那两条读者命令不在扫描结果里");
   assert.ok(inspected.some((entry) => entry.includes("chmod")), "chmod 的出路不在扫描结果里");
+  // The widened half must not be decoration: the updater's own sites have to be *in* the scan
+  // (2026-10-22, `lib/check.js`'s `ls -lO` repair line), or "we now also read updater/" is a
+  // claim no run can check.
+  const updaterInspected = inspected.filter((entry) => entry.startsWith("updater/"));
+  assert.ok(updaterInspected.length >= 1,
+    `扫描集里 updater 那半边一处命令位都没看见（src 侧 ${inspected.length - updaterInspected.length} 处）——扩集只是装饰：${inspected.join(" | ")}`);
+  assert.ok(updaterInspected.some((entry) => entry.includes("ls -lO")), "updater 的 `ls -lO` 分辨命令不在扫描结果里");
 });

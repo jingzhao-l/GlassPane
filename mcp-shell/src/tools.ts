@@ -56,6 +56,7 @@ import {
   GP_E_PAYLOAD_TOO_LARGE,
   GP_E_PROJECT_LIMIT,
   GP_E_REGISTRY_DRIFT,
+  GP_E_STATE_ROOT_REFUSED,
   quoteShellArg,
 } from "./errors.js";
 import {
@@ -589,7 +590,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   },
   {
     name: "gp_probe_status",
-    description: "List GlassPaneProbe connections and whether the attached app has a live probe — probe presence is what makes T4/T5/T7/T8 verdicts and tier-1 checkpoint restores decidable. `attachedHasProbe` is that yes/no for the attached app; `probes` holds **live** registrations only (every row `connected: true`), so a probe that dropped is absent from it rather than flagged inside it: read `recentDisconnections` for that history (`pid`, `disconnectReason`, `disconnectedAt`, per-pid `drops`), and `disconnections` is just the total count since start. Each live row can also carry the frame-accounting that makes a zero verdict readable: `stateFramesUnmappedSource` (daemon-side, per pid), and `droppedEvents` / `droppedWrites` / `rejectedKeys` / `droppedInboundFrames` / `droppedInboundLines` as the probe itself reported them — those are **absent when unreported**, which is not the same as zero, and `unmapableStateFrames` is the daemon-side total that survives a disconnect. The same reply is where the T9 degradation watch is readable without performing an action, under `degradation` (absent when this daemon runs without T9 wired): `tier` is `healthy` / `watch` / `degrading`, and `judged` says whether that tier is a measurement at all — `judged: false` with `tier: healthy` means the window was too thin or too short to read, **not** that the app is clean; `basis` spells out which of those it is with the numbers, alongside `samples`/`minimumSamples` and `spanSeconds`/`minimumSpanSeconds`. `longSession` marks the window spanning at least the long-session threshold; it is context for the trend, and it never changes `tier` by itself. `drivers` appears only when something is trending, and `slopes` carries only the channels that produced one (`pingMsPerSec`, `memoryBytesPerSec`, `handlesPerSec`) — a channel missing from `slopes` was never read, which is not a rate of zero.",
+    description: "List GlassPaneProbe connections and whether the attached app has a live probe — probe presence is what makes T4/T5/T7/T8 verdicts and tier-1 checkpoint restores decidable. `attachedHasProbe` is that yes/no for the attached app; `probes` holds **live** registrations only (every row `connected: true`), so a probe that dropped is absent from it rather than flagged inside it: read `recentDisconnections` for that history (`pid`, `disconnectReason`, `disconnectedAt`, per-pid `drops`), and `disconnections` is just the total count since start. Each live row can also carry the frame-accounting that makes a zero verdict readable: `stateFramesUnmappedSource` (daemon-side, per pid), and `droppedEvents` / `droppedWrites` / `rejectedKeys` / `droppedInboundFrames` / `droppedInboundLines` as the probe itself reported them — those are **absent when unreported**, which is not the same as zero, and `unmapableStateFrames` is the daemon-side total that survives a disconnect. Two more daemon-side losses are readable here: `ringEvictedEvents` on a live row (that pid's events dropped when its 512-event ring overflowed) and `ringEvictedEventsTotal` for the process — a nonzero one means that window's `hitCount` and `handlers` are a **lower bound**, not a complete measurement, and the archived pack carries the same caveat under `circuitBreaker.reason`. The same reply is where the T9 degradation watch is readable without performing an action, under `degradation` (absent when this daemon runs without T9 wired): `tier` is `healthy` / `watch` / `degrading`, and `judged` says whether that tier is a measurement at all — `judged: false` with `tier: healthy` means the window was too thin or too short to read, **not** that the app is clean; `basis` spells out which of those it is with the numbers, alongside `samples`/`minimumSamples` and `spanSeconds`/`minimumSpanSeconds`. `longSession` marks the window spanning at least the long-session threshold; it is context for the trend, and it never changes `tier` by itself. `drivers` appears only when something is trending, and `slopes` carries only the channels that produced one (`pingMsPerSec`, `memoryBytesPerSec`, `handlesPerSec`) — a channel missing from `slopes` was never read, which is not a rate of zero.",
     engineMethod: "probe_status",
     inputSchema: {
       type: "object",
@@ -1361,10 +1362,22 @@ export function shellFaultRemedy(engineMethod: string): string {
     // `snapshot`: repeating it is not a side-effect-free read, it is a new entry in
     // the daemon's bounded ring, which can evict the baseline the caller's *own*
     // earlier snapshot returned and that `gp_restore` needs later.
+    //
+    // This arm used to end "…gp_snapshot lists stored ids, and …", which is not a
+    // thing gp_snapshot does: its own spec says "Capture a digest-only baseline of
+    // the attached app's AX tree for later restore", the daemon's `snapshot`
+    // handler appends to the ring (`EngineCore.swift`'s storeSnapshot, which trims
+    // oldest-first past `snapshotHistoryLimit`), and no method in the daemon's
+    // table nor any tool spec here enumerates stored ids. An agent that followed
+    // that advice created a new snapshot — evicting the very baseline the sentence
+    // was protecting. The ids are only ever where the caller already has them: in
+    // the replies this caller's own earlier `gp_snapshot` calls returned.
     return `this is a defect in this shell, not an answer from the engine. '${engineMethod}' is a method whose `
       + "re-issue writes daemon state — a fresh request appends to the bounded snapshot ring and can evict a "
       + "baseline this caller already received — so treat it as a question to read around rather than one to send "
-      + `again: gp_snapshot lists stored ids, and ${readRoute}. ${reportRoute}`;
+      + "again: the stored snapshot ids come from the gp_snapshot replies already in this caller's own transcript, "
+      + "no route here enumerates the daemon's ring, so re-read your own earlier result rather than asking for a "
+      + `new one. ${readRoute}. ${reportRoute}`;
   }
   return `this is a defect in this shell, not an answer from the engine. '${engineMethod}' is not one of the `
     + "methods this shell classifies as unsafe to repeat (the no-replay set is act/restore/attach, plus snapshot, "
@@ -1962,6 +1975,31 @@ export function packForReport(pack: EvidencePack, measuredSchemaVersion: string)
 }
 
 /**
+ * The `gp_capture_view` description promises that "the summary states both the
+ * requested scale and the appliedScale actually present in the image" — and for
+ * every other measured field, that the numbers in the summary are the daemon's.
+ * `canonicalJson` drops a key whose value is `undefined`, so a frame that never
+ * answered one of them used to answer *for* it by leaving it out: a summary with
+ * `scale` and no `appliedScale` reads to a model as "the applied scale is the
+ * requested one", which is the exact inference the two-numbers sentence exists to
+ * prevent. Refusing the frame is not available either — it would break a working
+ * capture against an older daemon build that genuinely does not report the field.
+ *
+ * So the key is kept and says what it is: not reported, by the side that failed to
+ * report it. Same idiom as `evidence-report.ts`'s `RESPONSIVENESS_NOT_MEASURED` /
+ * `CRASH_NOT_MEASURED` lines. A value the daemon *did* state is passed through
+ * untouched — no reformatting, no rounding, no reinterpretation.
+ */
+const CAPTURE_NOT_REPORTED = "not reported by the engine";
+
+function captureSummaryField(body: Record<string, unknown>, field: string): unknown {
+  const value = body[field];
+  return value === undefined
+    ? `${CAPTURE_NOT_REPORTED}: this capture_view frame carried no \`${field}\`, so the value beside it is not a substitute`
+    : value;
+}
+
+/**
  * `gp_capture_view`：把引擎返回的 PNG 作为 MCP image content 交给调用方，并附一段
  * 文字摘要（尺寸、字节数、缩放、"没有落盘"）。摘要不是装饰：模型只看图时，没人记得
  * 这张图是被 0.6 缩过的，而"我看清了"和"我看清的是缩过 40% 的版本"是两个结论。
@@ -2019,17 +2057,22 @@ async function captureView(
       };
     }
     const mimeType = body.mimeType;
+    // Every measured field the summary claims is written through
+    // {@link captureSummaryField}: the key is always there, and when the frame did
+    // not answer it the value says so rather than being dropped silently, which is
+    // what lets the sentence above promise `appliedScale` without the shell inventing
+    // one. `mimeType` and `persisted` are gated above and so are already the daemon's.
     const summary = canonicalJson({
       mimeType,
-      byteCount: body.byteCount,
-      pixelWidth: body.pixelWidth,
-      pixelHeight: body.pixelHeight,
-      scale: body.scale,
+      byteCount: captureSummaryField(body, "byteCount"),
+      pixelWidth: captureSummaryField(body, "pixelWidth"),
+      pixelHeight: captureSummaryField(body, "pixelHeight"),
+      scale: captureSummaryField(body, "scale"),
       // 实际应用的倍率与请求值都给出：静默降采样失败时，"appliedScale" 才是
       // 模型该信的那个数（它决定自己看到的是不是缩过的版本）。
-      appliedScale: body.appliedScale,
-      windowId: body.windowId,
-      pointSize: body.pointSize,
+      appliedScale: captureSummaryField(body, "appliedScale"),
+      windowId: captureSummaryField(body, "windowId"),
+      pointSize: captureSummaryField(body, "pointSize"),
       persisted: body.persisted,
     });
     return {
@@ -2156,13 +2199,10 @@ async function projectGetTool(args: Record<string, unknown>, context: ToolExecut
  * to avoid producing (R4-03/A-15 family).
  */
 function mapProjectError(error: unknown): ToolResult {
-  if (error instanceof ProjectRegistryError) {
+  const passed = passedThroughRegistryError(error);
+  if (passed !== null) {
     return {
-      content: [{ type: "text", text: formatToolError(
-        error.code,
-        error.message,
-        projectErrorRemedy(error.code),
-      ) }],
+      content: [{ type: "text", text: formatToolError(passed.code, passed.message, projectErrorRemedy(passed.code)) }],
       isError: true,
     };
   }
@@ -2174,6 +2214,23 @@ function mapProjectError(error: unknown): ToolResult {
     ) }],
     isError: true,
   };
+}
+
+/**
+ * 注册表那一层的拒绝要**原样**出去。判据是形状（带一个 `GP_E_*` 码 + 一条 message），
+ * 不是 `instanceof ProjectRegistryError`：这条通道上出错的是"谁的答案"，而类身份取决于
+ * 哪个模块实例先被载入（`dist/project-registry.js` 与 `src/*.ts` 混跑、或包被打包两次时，
+ * instanceof 会假），一假就把一句已经点名的拒绝降级成 `GP_E_INTERNAL: internal shell error`
+ * ——壳自己的缺陷码，替后台服务的自报根作了背书。`test/project-registry.test.mjs` 与
+ * `test/daily-20261022-registry-trust.test.mjs` 各钉一次。
+ */
+function passedThroughRegistryError(error: unknown): { code: string; message: string } | null {
+  const candidate = error as { code?: unknown; message?: unknown } | null;
+  if (candidate === null || typeof candidate.code !== "string" || !candidate.code.startsWith("GP_E_")) {
+    return null;
+  }
+  const message = typeof candidate.message === "string" ? candidate.message : "";
+  return { code: candidate.code, message };
 }
 
 /**
@@ -2212,6 +2269,13 @@ function projectErrorRemedy(code: string): string {
     // password-database entry wastes the one turn it has — the file it would
     // open is not the thing that is wrong.
     return "this process has no entry in the password database, so neither it nor the daemon can know which user's state directory is meant; run the shell as a user that has one (`id -u` / `dscl . -read /Users/<name> NFSHomeDirectory`). Nothing in ~/.glasspane needs repairing for this";
+  }
+  if (code === GP_E_STATE_ROOT_REFUSED) {
+    // 这一码说的不是 projects.json，也不是调用方的参数：是后台服务在 `hello` 里自报了
+    // 一个本壳不会去创建、也不会改权限的根。把 `GP_E_INTERNAL` 那条"去读并修这个文件"
+    // 的兜底套在它身上，等于支使 agent 去改一份根本没被碰过的表。能做的动作在 daemon
+    // 那一侧：换一个它自己拥有的根重启，或先问清它到底报了哪个根。
+    return "the running service named a state root this shell will not create or re-permission, so nothing was read or written by this call: ask the service which root it resolved (`glasspaned --permissions` prints its own reading, and `launchctl print gui/$(id -u)/com.glasspane.daemon` shows the `--state-dir` the job was started with), then start it with a directory this install owns (`glasspaned --state-dir <path>`). Do not repair projects.json for this one — the refusal names a root, not a file, and no path under that root was touched";
   }
   if (code === GP_E_INTERNAL) {
     // The readers come from `registryReaders` — the same sentence the registry's own message

@@ -12,6 +12,11 @@ import { registryDriftReason } from "../dist/project-registry.js";
  * `projectSet` 是同步的，测试没法在它读盘与写盘之间插一次写，所以判据被抽成
  * 这个纯函数单独验。反向变异：把 `registryDriftReason` 改成恒返回 null
  * （等于没有这道闸），下面四条一起变红。
+ *
+ * 这个文件只管判据本身，而且它对参数一无所知——两边都当不透明值比，所以下面传的是
+ * `"1:2:3"` 这种假指纹。判据*比的是哪两个值*（"基线必须是我们读到的那批字节的摘要"）
+ * 由 `test/daily-20261022-registry-trust.test.mjs` 用一次受控的读走真实 `projectSet`
+ * 来验，那才是丢更新这类的原形状。改签名前先两处都看。
  */
 test("the same file identity is not drift", () => {
   assert.equal(registryDriftReason("/p/projects.json", "1:2:3", "1:2:3"), null);

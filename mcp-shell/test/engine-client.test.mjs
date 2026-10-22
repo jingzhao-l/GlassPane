@@ -875,14 +875,26 @@ test("after the daemon closes the socket the next call reconnects and succeeds",
   client.close();
 });
 
-test("a refused connection settles its waiter and is retried on the next call", async () => {
+test("a refused connection settles its waiter with a no-reissue answer, and the next call opens a fresh transport", async () => {
+  // What this test was really always about is the second half: the transport is lazy and
+  // recoverable, so the *next* call opens a new socket and succeeds — the property that makes
+  // `--restore-launchd` executable at all. The first half changed on 2026-10-22: an in-flight
+  // `attach` is in `REPLAY_UNSAFE_REASONS`, and this arm used to settle it with the single
+  // `daemonUnreachableRemedy()` ("…, then retry"), i.e. an order to re-perform a request that
+  // had already left this shell. Reverting `transportDeathRemedy` to that one string reddens
+  // the three assertions below (`then retry` present, no ban, no reason) while the reconnect
+  // half stays green — see `test/daily-20261022-shell-remedies.test.mjs` for the rest of the
+  // per-method arms.
   const { client, sockets } = socketBackedClient();
   const waiting = client.call("attach", { bundleId: "com.example.app" });
   sockets[0].destroy(new Error("ECONNRESET"));
   await assert.rejects(waiting, (err) => {
     assert.equal(err.code, "GP_E_ENGINE_UNREACHABLE");
     assert.match(err.message, /ECONNRESET/);
-    assert.match(err.remedy, /--restore-launchd/);
+    assert.match(err.remedy, /--restore-launchd/, "a dead transport is the one outcome that may name the restore command");
+    assert.doesNotMatch(err.remedy, /then retry/i, `attach 已经发出去了，出路不许命令它再来一遍：${err.remedy}`);
+    assert.match(err.remedy, /Do NOT re-issue 'attach'/, err.remedy.slice(0, 240));
+    assert.match(err.remedy, /the original attach can still re-point the daemon/, "禁令要带上 attach 自己的理由");
     return true;
   });
   const retry = client.call("attach", { bundleId: "com.example.app" });

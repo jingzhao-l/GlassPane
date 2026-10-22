@@ -23,20 +23,49 @@ import {
 } from "./errors.js";
 
 /**
+ * The daemon-lifecycle half of the unreachable answer, *without* the ", then
+ * retry" tail.
+ *
+ * It exists because the tail is a separate claim from the command. The command
+ * is what only a transport outcome may say at all ({@link
+ * livenessProbeDecision}'s `unreachable` arm, pinned by
+ * `test/probe-liveness.test.mjs`); "…, then retry" is an instruction to put a
+ * second copy of the request on the wire, and for a request that already left
+ * this shell that is exactly the re-issue {@link REPLAY_UNSAFE_REASONS},
+ * {@link STATE_CHANGING_ON_RETRY_METHOD_NAMES}, {@link slowEngineRemedy},
+ * {@link noRemedyFallback} and {@link clientClosingRemedy} all exist to refuse.
+ * Keeping the two in one string is how the refusal got written on one face of
+ * this file and left standing on another: {@link transportDeathRemedy} needs the
+ * command alone, and every caller that wants the pair calls
+ * {@link daemonUnreachableRemedy}, whose bytes are that command plus the tail.
+ */
+function daemonRestoreCommand(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const installerCli = path.resolve(here, "..", "..", "installer", "cli.js");
+  if (fs.existsSync(installerCli)) {
+    return `run \`node ${quoteShellArg(installerCli)} --restore-launchd\` (auto-restores and verifies the launchd-managed daemon)`;
+  }
+  return "ensure the glasspane daemon is running (launchd job com.glasspane.daemon; in a repo checkout run `node installer/cli.js --restore-launchd`)";
+}
+
+/**
  * Agent-actionable remedy for an unreachable daemon (P6 §11 audit items ④/⑥:
  * a remedy must be an executable command, not a prose hint). When the repo
  * installer is present next to this build, hand over the machine-verified
  * restore command: it detects a boot-out'd launchd job, bootstraps it, and
  * verifies the daemon's hello self-report — the only remaining human action
  * (TCC checkbox) stays honest. Falls back to generic wording otherwise.
+ *
+ * The ", then retry" tail belongs here and only here: every caller of this
+ * function is an answer for a request that did *not* go out (the write failed,
+ * {@link EngineJsonRpcClient.call}'s catch, or no request was in flight at all),
+ * so nothing can be performed twice by following it. A request that was already
+ * on the wire when the transport died gets {@link transportDeathRemedy}, which
+ * keeps the command and drops the tail for the methods whose re-issue is the
+ * harm.
  */
 export function daemonUnreachableRemedy(): string {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const installerCli = path.resolve(here, "..", "..", "installer", "cli.js");
-  if (fs.existsSync(installerCli)) {
-    return `run \`node ${quoteShellArg(installerCli)} --restore-launchd\` (auto-restores and verifies the launchd-managed daemon), then retry`;
-  }
-  return "ensure the glasspane daemon is running (launchd job com.glasspane.daemon; in a repo checkout run `node installer/cli.js --restore-launchd`), then retry";
+  return `${daemonRestoreCommand()}, then retry`;
 }
 
 /** Env override for the daemon socket path (default below). */
@@ -585,6 +614,25 @@ export function writeBacklogRemedy(backlogBytes: number, limitBytes: number): st
 }
 
 /**
+ * Where a caller of this surface can *read* what happened instead of performing
+ * an action a second time. Split out of {@link clientClosingRemedy} because the
+ * transport-death answer ({@link transportDeathRemedy}) needs the same route for
+ * the same reason, and because the two surfaces do not hold the same state: only
+ * the MCP stdio server has a trail, so only it can name tools that read one.
+ * Naming `gp_recent_reports` to a `curl` caller sends it to `POST
+ * /v1/tools/recent_reports`, which this gateway answers with a 404 — the same
+ * mistake {@link lateReplyRoute} was split for (R8b-高3), and the reason this
+ * text is per-surface rather than one sentence handed to both.
+ */
+function readInsteadRoute(surface: ShellSurface): string {
+  return surface === "mcp"
+    ? "gp_recent_reports lists the operations this session recorded, gp_last_evidence {operationId} returns one in "
+      + "full, and gp_probe_status reads the daemon's own self-report on this same connection"
+    : "this gateway keeps no operation trail of its own, so this process's stderr is the record, and the requests "
+      + "this transport dropped are named there";
+}
+
+/**
  * What the answer to an *outstanding* request may say when this shell's own client
  * ends while the daemon is still working on it (finding 中-3).
  *
@@ -606,9 +654,7 @@ export function writeBacklogRemedy(backlogBytes: number, limitBytes: number): st
  * spells, of which this close is itself one of the named endings.
  */
 function clientClosingRemedy(surface: ShellSurface): string {
-  const readRoute = surface === "mcp"
-    ? "gp_recent_reports lists the operations this session recorded and gp_last_evidence {operationId} returns one in full"
-    : "this gateway keeps no operation trail of its own, so the stderr line this reply is written to is the record";
+  const readRoute = readInsteadRoute(surface);
   return `this shell's own engine client is ending, which measures nothing about the daemon: nothing here authorises `
     + "touching the daemon's lifecycle, and no restart is authorised by this answer. What is unknown stays unknown: "
     + "whether the daemon finished this request cannot be told from a client that stopped asking. The reply may still "
@@ -616,6 +662,88 @@ function clientClosingRemedy(surface: ShellSurface): string {
     + "endings that bound names: the server log line written at this moment lists the requests this client stopped "
     + `tracking. Read what happened rather than performing it a second time: ${readRoute}. Ask through a server `
     + "process that still has a live engine client.";
+}
+
+/**
+ * The answer a *transport death* gives to one outstanding request, per method.
+ *
+ * {@link clientClosingRemedy} documents the defect this is the other face of: the
+ * socket erroring or closing used to reject every request it had in flight with
+ * the single {@link daemonUnreachableRemedy} — "…, then retry" — including the
+ * `act` that had already gone out. The command half of that sentence is earned
+ * here (a transport outcome is the one outcome {@link livenessProbeDecision}
+ * reserves the lifecycle command for, and `test/probe-liveness.test.mjs` pins
+ * that), and the tail is not: the request left this shell, whether the daemon
+ * carried it out before the socket went is not knowable from a dead transport,
+ * and "then retry" spends that unknown on a second copy on the user's screen.
+ *
+ * The same three-way split the error-frame fallback ({@link noRemedyFallback}) and
+ * the timeout answer ({@link slowEngineRemedy}) already make, read from the same
+ * two lists so a method moving between them moves this answer with it:
+ *  - {@link REPLAY_UNSAFE_REASONS} members: no re-issue, naming that method's own
+ *    reason, plus the read route this surface really has;
+ *  - {@link STATE_CHANGING_ON_RETRY_METHOD_NAMES} members (`snapshot`): nothing is
+ *    pressed twice, but a second accepted copy writes daemon state again and can
+ *    evict the baseline an earlier snapshot returned;
+ *  - every other method (the reads: `observe`, `diagnose`, `last_evidence`,
+ *    `probe_status`, `assert_element`, `audit_ui`, `capture_view`, `hello`):
+ *    refusing a retry where nothing is performed twice is its own kind of wrong
+ *    advice, so this arm keeps {@link daemonUnreachableRemedy}'s bytes verbatim.
+ */
+function transportDeathRemedy(method: string, surface: ShellSurface): string {
+  const restore = daemonRestoreCommand();
+  const unsafe = REPLAY_UNSAFE_REASONS[method];
+  if (unsafe !== undefined) {
+    return `${restore}. Do NOT re-issue '${method}' on the strength of this answer: this request had already left `
+      + "this shell when its transport died, and whether the daemon carried it out before that cannot be told from "
+      + `here — a re-issue can perform it a second time, because ${unsafe}. Read what happened instead of `
+      + `performing it a second time: ${readInsteadRoute(surface)}.`;
+  }
+  if (STATE_CHANGING_ON_RETRY_METHOD_NAMES.includes(method)) {
+    return `${restore}. Do NOT send a second '${method}' to replace the one this transport lost: it had already left `
+      + "this shell, so the daemon may have stored the baseline already, and a second copy is not a cheaper re-read "
+      + "of the first — it writes daemon state again, the snapshot ring the daemon keeps is bounded, and one more "
+      + "entry can evict the baseline an earlier snapshot returned, the one a later restore still needs. The ids a "
+      + "restore can name are the ones an earlier reply of this caller's already returned; nothing here enumerates "
+      + "the ring.";
+  }
+  return daemonUnreachableRemedy();
+}
+
+/**
+ * The answer for a frame that names this request and carries no answer at all
+ * (`result: null`, or neither `result` nor `error`).
+ *
+ * This used to be one sentence for every method — "…Retry once, then check the
+ * daemon log (stderr) for what it died before answering" — which put the same
+ * order on `act`/`restore`/`attach`/`snapshot` that {@link noRemedyFallback}
+ * refuses on the same evidence. The frame echoed this request's id, so the
+ * request demonstrably reached the daemon; what it did there before producing an
+ * empty answer is not something this frame says, and a second copy would be the
+ * transport's guess at it. The three arms are {@link transportDeathRemedy}'s, read
+ * from the same two lists: no re-issue for the replay-unsafe set, no second copy
+ * for the ring-writing one, and a plain retry for the reads, where nothing is
+ * performed twice and refusing it is wrong advice of its own.
+ */
+function emptyAnswerRemedy(method: string, surface: ShellSurface): string {
+  const opening = "do not read this call as successful: the engine answered nothing. The frame echoed this "
+    + "request's id, so the request reached the daemon, and an empty answer says nothing about what it did there — "
+    + "this shell cannot see past the frame it was handed";
+  const log = "The daemon's own log (stderr) is the only side that can say what it was doing when it answered "
+    + "nothing.";
+  const unsafe = REPLAY_UNSAFE_REASONS[method];
+  if (unsafe !== undefined) {
+    return `${opening}. Do NOT re-issue '${method}': a re-issue can perform it a second time, because ${unsafe}. `
+      + `Read what happened instead of performing it a second time: ${readInsteadRoute(surface)}. ${log}`;
+  }
+  if (STATE_CHANGING_ON_RETRY_METHOD_NAMES.includes(method)) {
+    return `${opening}. Do NOT send a second '${method}': every accepted copy writes daemon state again, the `
+      + "snapshot ring the daemon keeps is bounded, and one more entry can evict the baseline an earlier snapshot "
+      + "returned — the one a later restore still needs. The id a restore names comes from the reply the first call "
+      + `got, and nothing here enumerates the ring. ${log}`;
+  }
+  return `${opening}, and a retry is the plain next step here: '${method}' is not a method this shell refuses to `
+    + "replay, so nothing is performed twice — send it again. " + log;
 }
 
 /**
@@ -857,17 +985,9 @@ export class EngineJsonRpcClient {
         this.failOversizedReply(error);
         return;
       }
-      this.teardown(new EngineCallError(
-        GP_E_ENGINE_UNREACHABLE,
-        `engine transport error: ${error.message}`,
-        daemonUnreachableRemedy(),
-      ));
+      this.teardown(`engine transport error: ${error.message}`, (method) => transportDeathRemedy(method, this.surface));
     });
-    this.io.onClose(() => this.teardown(new EngineCallError(
-      GP_E_ENGINE_UNREACHABLE,
-      "engine transport closed",
-      daemonUnreachableRemedy(),
-    )));
+    this.io.onClose(() => this.teardown("engine transport closed", (method) => transportDeathRemedy(method, this.surface)));
     this.io.onOpen?.(() => this.handshake());
   }
 
@@ -1029,12 +1149,11 @@ export class EngineJsonRpcClient {
     // shutdown of this shell is not a measurement of the daemon, and the one
     // finding that does justify a lifecycle command is reserved for the transport
     // paths above, where a socket really did go away.
-    this.teardown(new EngineCallError(
-      GP_E_ENGINE_UNREACHABLE,
+    this.teardown(
       "engine client closed: this shell's own client is ending, so whether the daemon finished this request is "
       + "not known here and this client can no longer attribute the reply that may still land",
-      clientClosingRemedy(this.surface),
-    ));
+      () => clientClosingRemedy(this.surface),
+    );
     this.io.close();
   }
 
@@ -1222,7 +1341,7 @@ export class EngineJsonRpcClient {
         frame.result === null
           ? `engine answered '${entry.method}' with a frame whose result is null: the key is present but carries no answer`
           : `engine answered '${entry.method}' with a frame carrying neither result nor error`,
-        "do not read this call as successful: the engine answered nothing. Retry once, then check the daemon log (stderr) for what it died before answering",
+        emptyAnswerRemedy(entry.method, this.surface),
       ));
       return;
     }
@@ -1259,11 +1378,24 @@ export class EngineJsonRpcClient {
     ), entry, inferred));
   }
 
+  /**
+   * The daemon's error frame, mapped into this shell's error.
+   *
+   * An error frame is a three-field shape — code, message, remedy — and each
+   * field has to actually say something for the answer to be usable by an agent.
+   * `??` only catches null/undefined, so a frame carrying `code: ""` used to be
+   * forwarded verbatim as an error with no name and no cause, while the remedy arm
+   * below already treats `""` as absent: one rule for three fields on the same
+   * frame. A blank is now read as "not stated" for every one of them, and a
+   * non-blank value — including one that merely looks odd — passes through
+   * untouched, because this function forwards the daemon's own words and has no
+   * authority to rewrite them.
+   */
   private engineError(body: Partial<EngineErrorBody>, method: string | null): EngineCallError {
     return new EngineCallError(
-      String(body.code ?? GP_E_UNKNOWN),
-      String(body.message ?? "the engine sent an error frame without a message"),
-      typeof body.remedy === "string" && body.remedy !== ""
+      nonBlankOr(body.code, GP_E_UNKNOWN),
+      nonBlankOr(body.message, "the engine sent an error frame without a message"),
+      typeof body.remedy === "string" && body.remedy.trim() !== ""
         ? body.remedy
         : noRemedyFallback(method),
     );
@@ -1404,8 +1536,15 @@ export class EngineJsonRpcClient {
    * "this shell stopped tracking it" from "it never happened" — the difference
    * that decides whether it re-performs an `act` on the user's screen (R9-中1).
    * The reverse mutation is to delete this note and keep the silent clear.
+   *
+   * The message is one sentence for every request — it states what happened to
+   * the transport, which is the same fact for all of them — while the remedy is
+   * written per method (`remedyFor`): what the caller may do next depends on
+   * whether re-issuing that particular request would perform it a second time,
+   * and one remedy for the whole batch is how "…, then retry" reached an
+   * outstanding `act` at all. See {@link transportDeathRemedy}.
    */
-  private teardown(reason: EngineCallError): void {
+  private teardown(message: string, remedyFor: (method: string) => string): void {
     const entries = [...this.pending.values()];
     // Read before the loop below: `reject()` marks an entry settled, and a
     // request that never got an answer is not one whose caller was promised a
@@ -1414,7 +1553,7 @@ export class EngineJsonRpcClient {
     this.pending.clear();
     for (const entry of entries) {
       if (!entry.settled) {
-        this.reject(entry, reason);
+        this.reject(entry, new EngineCallError(GP_E_ENGINE_UNREACHABLE, message, remedyFor(entry.method)));
       } else if (entry.timer !== null) {
         clearTimeout(entry.timer);
         entry.timer = null;
@@ -1422,7 +1561,7 @@ export class EngineJsonRpcClient {
     }
     if (tracked.length > 0) {
       this.report(
-        `${reason.message}: late-reply tracking ended for ${tracked.length} request(s) whose callers had been told their replies would still be attributed (${tracked.map((entry) => `'${entry.method}' id ${entry.id}`).join(", ")}). Nothing tracks them now, so a reply that lands after this line is not attributed, not recorded in the trail, and not evidence either way that the operation ran.`,
+        `${message}: late-reply tracking ended for ${tracked.length} request(s) whose callers had been told their replies would still be attributed (${tracked.map((entry) => `'${entry.method}' id ${entry.id}`).join(", ")}). Nothing tracks them now, so a reply that lands after this line is not attributed, not recorded in the trail, and not evidence either way that the operation ran.`,
       );
     }
   }
@@ -1516,6 +1655,26 @@ export function truncate(text: string): string {
   return text.length <= LOG_BODY_CHARS
     ? text
     : `${text.slice(0, LOG_BODY_CHARS)}… [+${text.length - LOG_BODY_CHARS} chars not logged]`;
+}
+
+/**
+ * A frame field that says something, or the fallback for the one that says
+ * nothing.
+ *
+ * Absent, null, empty and whitespace-only all read as "the daemon did not state
+ * this"; anything else is returned exactly as it came (`String` of it, which is
+ * what this function already did for a non-string value). The distinction
+ * matters in both directions: defaulting a blank is what keeps an agent-facing
+ * error from carrying an empty code, and passing a stated value through
+ * unrewritten is what keeps this from becoming a silent editor of the daemon's
+ * own words.
+ */
+function nonBlankOr(value: unknown, fallback: string): string {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+  const text = String(value);
+  return text.trim() === "" ? fallback : text;
 }
 
 /** Inbound values come from JSON.parse, so serialization cannot throw or cycle. */

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
 
 import {
@@ -11,6 +11,7 @@ import {
   GP_E_NO_USER_RECORD,
   GP_E_PROJECT_LIMIT,
   GP_E_REGISTRY_DRIFT,
+  GP_E_STATE_ROOT_REFUSED,
   quoteShellArg,
 } from "./errors.js";
 import { daemonUnreachableRemedy } from "./engine-client.js";
@@ -156,8 +157,14 @@ export const AGENT_PATH_PROTECTION = {
  * ```
  * HOME=/tmp/fake-sbx-home node -e 'const os=require("os");
  *   console.log(os.homedir(), "|", os.userInfo().homedir)'
- * -> /tmp/fake-sbx-home | /Users/ethanlin
+ * -> /tmp/fake-sbx-home | /Users/<account>
  * ```
+ *
+ * (`/Users/<account>` stands for the home the *password record* holds for whoever
+ * runs it. It is written as a placeholder on purpose: this file ships inside
+ * `dist/*.d.ts` and the release archive, and `scripts/make-release-archive.mjs`
+ * states the rule for what may travel there — "a release archive should not be the
+ * delivery mechanism for whoever built it".)
  *
  * So `os.homedir()` and `NSHomeDirectory()` resolve **different directories** as
  * soon as a caller exports `HOME` — an agent sandbox doing that is the ordinary
@@ -200,6 +207,113 @@ function systemHome(): string {
 }
 
 /**
+ * Why a root the daemon reported about itself cannot be handed to this module, or
+ * `null` when it can.
+ *
+ * The daemon resolves `--state-dir` and then sweeps the root it named
+ * (`StateRoot.tightenPermissions`), so it refuses **at the argument** the two shapes
+ * that would make that sweep a disaster: the filesystem root and the account's home
+ * directory itself (`StateRoot.notADedicatedRoot`, `StateRoot.swift`). This shell does
+ * the same sweep for the same reason — {@link saveProjects} runs
+ * `mkdirSync(dir, {recursive:true, mode:0700})` plus a verified `chmod(dir, 0700)` on
+ * whatever directory its path resolves to — and until now it did it on a root it never
+ * classified: `hello.stateRoot` is stored verbatim (`engine-client.ts`'s
+ * `reportedRoot = report.stateRoot.trim()`) and passed straight into
+ * `projectList`/`projectSet`/`projectGet` (`tools.ts`) as `client.reportedStateRoot`.
+ * `engine.sock` has no peer authentication — SECURITY.md states the rule as same uid =
+ * full authority — so any process running as this user can answer a `hello` frame, and
+ * a reply naming `/Users/<you>` or `/` used to make **this** shell re-permission the
+ * account's home directory 0700 and write the registry into it. Refusing a path this
+ * install does not own, before the first `stat`/`open`/`mkdir` against it, is the whole
+ * fix.
+ *
+ * The three refusals are the daemon's, in the daemon's order, and nothing more:
+ * - not an absolute path (`StateRoot.classify`'s `must be an absolute path`), which
+ *   covers a `~`-prefixed value the shell would otherwise have to expand and a relative
+ *   one whose meaning moves with the working directory;
+ * - the filesystem root;
+ * - the home directory itself, from {@link systemHome} — the **password record**, never
+ *   `$HOME`, because `StateRoot.swift` deliberately does not consult `$HOME` either and
+ *   `test/path-consistency.test.mjs` pins that on both sides. Comparing against
+ *   `$HOME` would let an agent sandbox move which tree is protected, the exact split
+ *   that function exists to close.
+ *
+ * Trailing slashes are folded and the APFS firmlink un-mapped first, because that is
+ * what `StateRoot(path:)` and {@link refuseCandidate} do with the same strings: a
+ * refusal that only catches one spelling is a refusal the next typo walks past, and
+ * `/System/Volumes/Data/Users/<you>` *is* the home directory.
+ *
+ * A root this shell derived for itself ({@link daemonProjectsPath} with no reported
+ * value) is not judged here: it is `<passwd home>/.glasspane`, a dedicated root by the
+ * daemon's own wording, and the daemon's remedy line recommends exactly that shape.
+ */
+function stateRootRefusal(raw: string): string | null {
+  const normalized = stripFirmlink(foldSlashTerminators(path.posix.normalize(raw)));
+  if (!normalized.startsWith("/")) {
+    return `is not an absolute path (${raw})`;
+  }
+  if (normalized === "/") {
+    return "is the filesystem root";
+  }
+  if (normalized === stripFirmlink(path.posix.normalize(systemHome()))) {
+    return `is this account's home directory itself (${systemHome()})`;
+  }
+  return null;
+}
+
+/** Drop redundant trailing separators, keeping `/` itself as `/`. */
+function foldSlashTerminators(target: string): string {
+  let out = target;
+  while (out.length > 1 && out.endsWith("/")) out = out.slice(0, -1);
+  return out;
+}
+
+/**
+ * The one sentence {@link stateRootRefusal} produces, written so that all three of its
+ * promises are in the text an agent reads: where the refused value came from (a daemon
+ * self-report, not this process's choice), what this shell would have done with it
+ * (create and re-permission it), and what actually happened (nothing).
+ *
+ * No silent fallback to the home default, and that is the load-bearing half: writing a
+ * *different* file while reporting success is the incident class this module was created
+ * to refuse (see the header above {@link ProjectEntry}), and `daemonRestartNotice`'s
+ * whole design — "default", never "the running service's root" — presumes the two are
+ * never conflated by an accident like this one.
+ *
+ * The remedy is the daemon's own shape (`--state-dir <a directory this install owns>`,
+ * `StateRoot.notADedicatedRoot`), because the root is the service's configuration; only
+ * the daemon can move it, and this shell restarting the service on a root of its own
+ * guessing would be the same overreach one level up.
+ */
+function refusedStateRootMessage(raw: string, defect: string): string {
+  // The suggested root is the daemon's own recommendation for the same refusal, and it
+  // is derived from {@link systemHome} like every other home here. If there is no record
+  // to ask, the *refusal* is still the fact the caller needs, so the suggestion degrades
+  // to the shape rather than replacing one refusal with another.
+  let suggested: string | null = null;
+  try {
+    suggested = `${stripFirmlink(path.posix.normalize(systemHome()))}/.glasspane`;
+  } catch {
+    /* no user record to derive it from: the refusal above is the fact the caller needs */
+  }
+  return `the background service's self-reported state root ${defect}, so this shell refuses to use it: ${quoteShellArg(raw)}. `
+    + "That value is not a choice this process made — it is the `stateRoot` field of the `hello` frame the daemon answered, and "
+    + "the engine socket has no peer authentication (SECURITY.md: any process running as this user may answer one), so a reply can "
+    + "name a directory this install does not own. `gp_project_*` would have created that directory and re-permissioned it to 0700 "
+    + "before writing projects.json into it, which is the daemon's own `--state-dir` guard arriving one step late: "
+    + "`StateRoot.notADedicatedRoot` rejects the same two shapes at the argument precisely so that nothing is ever touched. "
+    + "This shell will not create or re-permission that path, and it will NOT quietly fall back to the home default instead — "
+    + "writing a different file while reporting success is the failure this registry refuses by design. "
+    + "Nothing was read and nothing was written: no directory was created, no permission was changed, no projects.json was opened, "
+    + "listed or saved. Move the service onto a directory this install owns: start it as "
+    + (suggested === null
+      ? "`glasspaned --state-dir <a directory this install owns>` "
+      : `\`glasspaned --state-dir <a directory this install owns>\` (the daemon's own suggested form is \`glasspaned --state-dir ${quoteShellArg(suggested)}\`) `)
+    + `then reconnect so a fresh hello reports the new root, and repeat the call. If the reported root is not one you configured, treat the `
+    + "answer to that handshake as untrusted: another process on this account replied to it.";
+}
+
+/**
  * The file the daemon reads **when it was started with no state root of its
  * own** — `ProjectRegistry.defaultProjectsPath` =
  * `StateRoot.homeDefault().projectsFile` in Swift, which is what this function
@@ -215,6 +329,10 @@ function systemHome(): string {
  * only when no handshake answered, which is said as "default", never as "the
  * running service's root" ({@link daemonRestartNotice} carries the difference).
  *
+ * A reported root is classified by {@link stateRootRefusal} before it is joined, so a
+ * root the daemon names that this install does not own produces a refusal here — the
+ * first read or write has not happened yet — and never a path.
+ *
  * Derived from {@link systemHome}, not from `$HOME`, because a root *this* process
  * can move is not the daemon's default root: with an overridden `HOME` the old
  * lookup named the sandbox file, which made both halves of the promise it was
@@ -227,7 +345,13 @@ export function daemonProjectsPath(daemonStateRoot?: string | null): string {
   // handshake yet) the home default is the only defensible answer, and it is said as
   // "where the service writes by default", never as "where the running service reads".
   const named = typeof daemonStateRoot === "string" ? daemonStateRoot.trim() : "";
-  if (named !== "") return path.join(named, "projects.json");
+  if (named !== "") {
+    const defect = stateRootRefusal(named);
+    if (defect !== null) {
+      throw new ProjectRegistryError(GP_E_STATE_ROOT_REFUSED, refusedStateRootMessage(named, defect));
+    }
+    return path.join(named, "projects.json");
+  }
   return path.join(systemHome(), ".glasspane", "projects.json");
 }
 
@@ -312,42 +436,58 @@ function projectsPath(daemonStateRoot?: string | null): string {
  * Registry load result. `failure` is a description of why the file cannot be
  * trusted (`null` = it can, including the never-written case); an empty
  * `projects` array with a failure must never be read as "no projects".
+ *
+ * `readAs` is the SHA-256 of the **exact bytes this function read**, and it is the
+ * read-modify-write baseline {@link assertNoConcurrentWrite} compares the file to
+ * before publishing anything. It is `null` only when no bytes were obtained at all
+ * — the file was absent, or it could not be read — and a *damaged* file still has a
+ * digest, because those are the bytes {@link requireUsableRegistry} is about to move
+ * aside and must be able to prove it did not move something else.
  */
 interface RegistrySnapshot {
   projects: ProjectEntry[];
   failure: string | null;
+  readAs: string | null;
 }
 
 function loadRegistry(filePath: string): RegistrySnapshot {
-  let raw: string;
+  // Bytes, not a decoded string: the digest has to be of what is on the device, and a
+  // decode can lose information (invalid UTF-8 becomes U+FFFD, and two damaged files
+  // that decode alike would then look like the same registry). The BOM is dropped for
+  // the *parse* only, which is what `readFileSync(…, "utf8")` did before this, so a
+  // registry that used to load still loads.
+  let bytes: Buffer;
   try {
-    raw = fs.readFileSync(filePath, "utf8");
+    bytes = fs.readFileSync(filePath);
   } catch (error) {
     if (nodeErrorCode(error) === "ENOENT") {
-      return { projects: [], failure: null }; // nothing registered yet
+      return { projects: [], failure: null, readAs: null }; // nothing registered yet
     }
-    return { projects: [], failure: `cannot be read (${describeError(error)})` };
+    return { projects: [], failure: `cannot be read (${describeError(error)})`, readAs: null };
   }
+  const readAs = registryBytesDigest(bytes);
+  const decoded = bytes.toString("utf8");
+  const raw = decoded.charCodeAt(0) === 0xfeff ? decoded.slice(1) : decoded;
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    return { projects: [], failure: `is not valid JSON (${describeError(error)})` };
+    return { projects: [], failure: `is not valid JSON (${describeError(error)})`, readAs };
   }
   if (!Array.isArray(parsed)) {
-    return { projects: [], failure: "is not a JSON array of projects" };
+    return { projects: [], failure: "is not a JSON array of projects", readAs };
   }
 
   const projects: ProjectEntry[] = [];
   for (let i = 0; i < parsed.length; i++) {
     const problem = inspectStoredEntry(parsed[i], i);
     if (problem !== null) {
-      return { projects: [], failure: problem };
+      return { projects: [], failure: problem, readAs };
     }
     projects.push(parsed[i] as ProjectEntry);
   }
-  return { projects, failure: null };
+  return { projects, failure: null, readAs };
 }
 
 /**
@@ -398,13 +538,53 @@ function inspectStoredEntry(raw: unknown, index: number): string | null {
  * Refuse to lose data on a registry we cannot read. Without the escape hatch
  * this is a hard stop; with it, the unloadable file is moved aside (so the
  * evidence in it is still recoverable by hand) and the registry is rebuilt.
+ *
+ * The `baseline` it hands back is what {@link projectSet} later compares the file to
+ * before publishing, so it is established *here*, after any repair this function made:
+ * the point of the check is "is the file still the one we read?", and after a rename the
+ * honest answer is that there is no such file any more (`null`), not "the bytes that
+ * failed to parse". The old `fileIdentity` capture — a `stat` taken after this step, of
+ * whatever was on the disk by then — folded a concurrent writer's update into the
+ * baseline and let this call rename a stale table over it.
+ *
+ * The rename is the other half of the same window, and it is guarded the same way: the
+ * bytes are re-digested first, and a file that is no longer the one that failed to parse
+ * is left exactly where it is. Moving aside a registry that a concurrent *good* write
+ * landed in the meantime would be the identical data loss this escape hatch was narrowed
+ * to avoid — this project once destroyed a real `projects.json` that way — and "we could
+ * not read it" is not evidence that it is still unreadable.
+ *
+ * When no bytes were obtained at all ({@link RegistrySnapshot.readAs} is `null`, i.e. a
+ * *read* error such as `EACCES`, not a parse error) the digest check cannot run: there is
+ * nothing to compare against. That case keeps the documented behaviour and the rename
+ * proceeds, because the only thing we know about that file is that this process could
+ * not look at it, and the file it moves aside is the one it was told to move.
  */
-function requireUsableRegistry(filePath: string, snapshot: RegistrySnapshot): { projects: ProjectEntry[]; discarded?: string } {
+function requireUsableRegistry(
+  filePath: string,
+  snapshot: RegistrySnapshot,
+): { projects: ProjectEntry[]; baseline: string | null; discarded?: string } {
   if (snapshot.failure === null) {
-    return { projects: snapshot.projects };
+    return { projects: snapshot.projects, baseline: snapshot.readAs };
   }
   if (process.env[FORCE_OVERWRITE_ENV] !== "1") {
     throw new ProjectRegistryError(GP_E_INTERNAL, unreadableMessage(filePath, snapshot.failure));
+  }
+  if (snapshot.readAs !== null) {
+    let stillThere: string | null;
+    try {
+      stillThere = registryDigest(filePath);
+    } catch (error) {
+      throw new ProjectRegistryError(
+        GP_E_INTERNAL,
+        `projects.json at ${filePath} ${snapshot.failure}, and it cannot be re-read to confirm it is still the `
+        + `bytes that failed (${describeError(error)}), so ${FORCE_OVERWRITE_ENV}=1 moved nothing and wrote nothing. `
+        + "Reading it is the next step — " + registryReaders(filePath) + " — not replacing it.",
+      );
+    }
+    if (stillThere !== snapshot.readAs) {
+      throw new ProjectRegistryError(GP_E_REGISTRY_DRIFT, refusedToDiscardMessage(filePath, stillThere));
+    }
   }
   const discarded = `${filePath}.unreadable-${uniqueToken()}`;
   try {
@@ -415,7 +595,25 @@ function requireUsableRegistry(filePath: string, snapshot: RegistrySnapshot): { 
       `projects.json at ${filePath} ${snapshot.failure}; ${FORCE_OVERWRITE_ENV}=1 asked to move it aside first, but that failed (${describeError(error)}), so nothing was overwritten`,
     );
   }
-  return { projects: [], discarded };
+  // Re-established *after* the rename: the file this call read is now at `discarded`, so
+  // the table it is about to publish has nothing to overwrite.
+  return { projects: [], baseline: registryDigest(filePath), discarded };
+}
+
+/**
+ * The repair arm met a newer file: say which fact was observed (the bytes are not the
+ * ones that failed to parse), that nothing was moved, and what the caller can do — the
+ * same forced call, which now *reads* those newer bytes and only rebuilds if they turn
+ * out to be unreadable too.
+ */
+function refusedToDiscardMessage(filePath: string, now: string | null): string {
+  return `projects.json at ${filePath} is no longer the file that failed to parse — its contents changed between `
+    + `this call reading it (${FORCE_OVERWRITE_ENV}=1 was set, so it was about to be moved aside) and the rename `
+    + `(the file is now ${now === null ? "absent" : "present with different bytes"}), so nothing was moved and `
+    + "nothing was written. Another process — the background service, its CLI, or the settings panel — landed a newer "
+    + "version of this table, and archiving it as unreadable would delete an entry that was written after we gave up on "
+    + "reading the old one. Repeat the same call: it reads the file again, so the second attempt judges those bytes "
+    + "instead of the ones that are gone. If they parse, the rebuild is not needed at all.";
 }
 
 /**
@@ -503,24 +701,47 @@ function tightenMode(target: string, want: number, kind: "directory" | "file"): 
 }
 
 /**
- * 这份文件此刻的身份：改一次就变的三个数。文件不在时为 null——
- * "还没人注册过"与"刚被别人删了"在这一层是同一个观察，两者都不许被盖过去。
+ * 这份文件此刻的内容指纹：内容一样就是同一份，改过一个字节就不是。
+ * 文件不在时为 null——"还没人注册过"与"刚被别人删了"在这一层是同一个观察，
+ * 两者都不许被盖过去。
+ *
+ * 这是 `fileIdentity`（`mtimeMs:size:ino`）的替代而不是第二套身份方案，理由就在
+ * "基线要取自产生这次编辑的那份字节"这一条上：stat 三元组描述的永远是**问它的那一刻**
+ * 的盘，而不是我们读到的那份内容。旧顺序（先 `readFileSync` 再 `statSync`）把别人在这
+ * 两步之间落地的那次写折进了基线，于是一次读到的表 A、盘上已经是表 B 的调用，最后拿
+ * B 跟 B 比，判定"没变"，然后把过期的 A（外加我们这一条）rename 上去并报告成功。
+ * 内容指纹没有这个缝：`loadRegistry` 返回的是它自己那一次读的哈希，写前回读的是盘，
+ * 两者一比就是"盘上换了哪一份"。
+ *
+ * 顺带把粒度也收紧了：`mtimeMs:size` 在同一毫秒内的等长改写可以完全相同，指纹不会。
  */
-function fileIdentity(filePath: string): string | null {
+function registryDigest(filePath: string): string | null {
+  let bytes: Buffer;
   try {
-    const stat = fs.statSync(filePath);
-    return `${stat.mtimeMs}:${stat.size}:${stat.ino}`;
+    bytes = fs.readFileSync(filePath);
   } catch (error) {
     if (nodeErrorCode(error) === "ENOENT") return null;
     throw error;
   }
+  return registryBytesDigest(bytes);
+}
+
+/** SHA-256 of the exact bytes, hex. One hash function for both halves of the comparison. */
+function registryBytesDigest(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 /**
  * 读—改—写之间盘上换了哪一份：给出这一句拒绝的理由，没换则 null。
  *
- * 单独抽成纯函数是为了能被验红——`projectSet` 是同步的，测试没法在它读到盘与
- * 写回盘之间插进另一次写，所以"守卫真的会拦"这件事只能把判据本身拿出来测。
+ * 判据是**内容指纹**（`registryDigest`），不是 stat 三元组：基线必须是"产生这次编辑的
+ * 那批字节"，而 stat 只能回答"我问的那一刻盘上是什么"。
+ *
+ * 两个参数都当作不透明值比较，调用方给什么就是什么——`registry-drift.test.mjs` 与
+ * `daily-20261011.test.mjs` 传的是 `"1:2:3"` 这类假指纹，签名一旦要求十六进制或 Buffer，
+ * 那两条会一起变红。判据本身继续单独抽出来验红；而"取基线的位置对不对"这件事，如今可以
+ * 真的跑出来：`test/daily-20261022-registry-trust.test.mjs` 用一次受控的读（读到 A、盘上是 B）
+ * 走的是 `projectSet` 的真实路径。
  */
 export function registryDriftReason(
   filePath: string,
@@ -540,12 +761,13 @@ export function registryDriftReason(
 }
 
 /**
- * 落锁要 daemon 那边一起改协议，这里做的是这一层能独立做到的：写之前再看一眼盘，
- * 身份变了就**拒绝**而不是覆盖，并把重试这条路说清楚。丢更新仍然可能发生在本函数
- * 返回与 rename 之间那几微秒里，但那已经不是"读到的表和写回的表不是同一份"了。
+ * 落锁要 daemon 那边一起改协议，这里做的是这一层能独立做到的：写之前把盘上的内容与
+ * 我们读到的那份比一比，不是同一份就**拒绝**而不是覆盖，并把重试这条路说清楚。
+ * 比较的两边都是内容，所以"基线取在哪"不再有缝——`loadRegistry` 的那一次读就是基线。
+ * 丢更新仍然可能发生在本函数返回与 rename 之间那几微秒里，但那已经不是"读到的表和写回的表不是同一份"了。
  */
 function assertNoConcurrentWrite(filePath: string, openedAs: string | null): void {
-  const reason = registryDriftReason(filePath, openedAs, fileIdentity(filePath));
+  const reason = registryDriftReason(filePath, openedAs, registryDigest(filePath));
   if (reason !== null) {
     throw new ProjectRegistryError(GP_E_REGISTRY_DRIFT, reason);
   }
@@ -675,12 +897,14 @@ export function projectSet(args: ProjectSetArgs, daemonStateRoot?: string | null
   const filePath = projectsPath(daemonStateRoot);
   assertStorablePid(args.pid);
   const snapshot = loadRegistry(filePath);
-  const { projects, discarded } = requireUsableRegistry(filePath, snapshot);
-  // 记下这份表被读进来时盘上是哪一份，写回去之前要认得它。
-  // 取在 `requireUsableRegistry` **之后**：那一步自己就会动文件（读不回的表被挪成
-  // `.unreadable-…` 而不是删掉），把它自己的修复当成"别人插进来写了一次"来拒绝，
-  // 等于让那条逃生门永远走不通。要防的是我们读完之后别人的那一次写。
-  const openedAs = fileIdentity(filePath);
+  // 基线就是**产生这次编辑的那批字节**：`requireUsableRegistry` 把它（`baseline`）交出来，
+  // 因为那一步自己就会动文件（读不回的表被挪成 `.unreadable-…` 而不是删掉），挪过之后盘上
+  // 那份已经不是我们读到的那份了。旧写法是在那一步**之后**再取一次 `stat` 当基线，于是
+  // "读完之后别人写了一次"正好被折进基线——守卫拿别人的结果跟别人的结果比，判定没变，
+  // `saveProjects` 把我们这份过期的表 rename 上去并报告成功，别人那条 entry 就没了。
+  // 现在基线在上面那一次读里就定了：`loadRegistry` 交回它自己读的字节摘要，
+  // `requireUsableRegistry` 之后没有任何一步能替它改写它（除了它自己那次修复）。
+  const { projects, discarded, baseline: openedAs } = requireUsableRegistry(filePath, snapshot);
 
   let entry: ProjectEntry;
   const projectId = args.projectId;
@@ -692,7 +916,7 @@ export function projectSet(args: ProjectSetArgs, daemonStateRoot?: string | null
       throw new ProjectRegistryError(GP_E_NOT_FOUND, `unknown projectId ${projectId}`);
     }
     entry = applyPatch(existing, args);
-    assertSingleIdentity(entry);
+    assertSingleIdentity(entry, args, existing, filePath);
     projects[projects.indexOf(existing)] = entry;
   } else {
     // Create.
@@ -707,7 +931,7 @@ export function projectSet(args: ProjectSetArgs, daemonStateRoot?: string | null
       },
       args,
     );
-    assertSingleIdentity(entry);
+    assertSingleIdentity(entry, args, null, filePath);
     projects.push(entry);
   }
 
@@ -760,11 +984,36 @@ function applyPathField(target: ProjectEntry, field: PathField, value: string | 
  * attach, making one projectId mean two apps. Runs on the MERGED entry (B-11):
  * an update may name neither field, and clearing one with an explicit null is
  * only correct once the other is known to remain. The message names both fields.
+ *
+ * "Both are set" has two opposite causes, and only one of them is the caller's:
+ * a registry damaged by another writer can *already* carry both — {@link inspectStoredEntry}
+ * judges the daemon's decodable *types*, not this rule, because refusing to load a
+ * legacy table would blank every registration — and then a call that named neither
+ * field was refused for a shape it did not create. The old single sentence read as a
+ * verdict about the caller's own arguments ("Pass null for the one to drop"), which
+ * sends an agent to change inputs that were never the problem; its sibling branch
+ * below already distinguishes the two ("this call cleared the one that was stored").
+ * So the stored entry comes in as well as the merged one, and the two causes get the
+ * two codes that match what the caller can actually do:
+ * - caller-made (`GP_E_BAD_PARAMS`, unchanged wording): different arguments fix it;
+ * - stored damage (`GP_E_INTERNAL`): the file is the problem, not the input — which is
+ *   exactly what `tools.ts`' remedy arm for that code already says ("the projects file
+ *   is the problem, not your arguments: … repair or restore the damaged entry, and
+ *   retry"), and the next step here is a real one: a call that nulls one half is
+ *   accepted, so this module can repair the entry it just refused to publish over.
  */
-function assertSingleIdentity(entry: ProjectEntry): void {
+function assertSingleIdentity(
+  entry: ProjectEntry,
+  args: ProjectSetArgs,
+  stored: ProjectEntry | null,
+  filePath: string,
+): void {
   const hasBundleId = entry.bundleId !== undefined;
   const hasPid = entry.pid !== undefined;
   if (hasBundleId && hasPid) {
+    if (stored !== null && stored.bundleId !== undefined && stored.pid !== undefined) {
+      throw new ProjectRegistryError(GP_E_INTERNAL, damagedStoredIdentityMessage(entry, args, filePath));
+    }
     throw new ProjectRegistryError(
       GP_E_BAD_PARAMS,
       `bundleId (${entry.bundleId}) and pid (${entry.pid}) are both set on projectId ${entry.projectId} — exactly one of bundleId or pid may identify the app. Pass null for the one to drop (bundleId: null keeps pid, pid: null keeps bundleId); omitting a field keeps whatever is already stored.`,
@@ -776,6 +1025,32 @@ function assertSingleIdentity(entry: ProjectEntry): void {
       `projectId ${entry.projectId} would be left with neither bundleId nor pid — exactly one of bundleId or pid must identify the app (this call cleared the one that was stored). Set bundleId or pid instead of nulling it.`,
     );
   }
+}
+
+/**
+ * The stored entry was already illegal before this call touched it: say whose halves
+ * these are, name the projectId and the file, and keep the next step executable.
+ *
+ * It deliberately does not read as a complaint about the arguments — the caller may
+ * have named neither field — and it does not stop at blaming the file either, because
+ * the one write that fixes this entry is a `gp_project_set` with a single explicit
+ * null. That arm stays open by construction: the check above asks whether the *stored*
+ * entry carried both, so clearing one half merges to a legal entry and lands.
+ */
+function damagedStoredIdentityMessage(entry: ProjectEntry, args: ProjectSetArgs, filePath: string): string {
+  const fromCall = args.bundleId !== undefined && args.pid !== undefined
+    ? "this call named both bundleId and pid"
+    : args.bundleId !== undefined
+      ? `this call named only bundleId (${args.bundleId})`
+      : args.pid !== undefined
+        ? `this call named only pid (${args.pid})`
+        : "this call named neither bundleId nor pid";
+  return `projects.json at ${filePath} already stored two identities on projectId ${entry.projectId} — bundleId (${entry.bundleId}) and pid (${entry.pid}) — and ${fromCall}, so this call did not create that shape, it inherited it. `
+    + "Nothing was written: the entry stays as the other writer left it. The damage is a rule about the *combination*, which the daemon enforces on its own create()/update() and the file's shape check cannot see, so it survives a load and reaches the first call that tries to save the entry again. "
+    + "Two identities on one projectId means `gp_attach` would match that project against two different apps. "
+    + `Put the entry back with the one write that is accepted here: gp_project_set with projectId ${entry.projectId}, its current displayName, and null for the half that is not this app (pid: null keeps bundleId, bundleId: null keeps pid) — naming the half to keep is not required, clearing one is enough. `
+    + "Check which half the app actually runs as first: gp_project_list shows both, `ps -p <pid> -o comm=` names the process a stored pid points at (nothing back means that process is gone, which is the usual sign of a stale pair), and a bundle id is the app's own identifier. "
+    + "Do not hand-edit the file: the running service holds its own copy of the table and rewrites it, so a hand repair disappears at its next save.";
 }
 
 /**
