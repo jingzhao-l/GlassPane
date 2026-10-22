@@ -43,7 +43,7 @@ final class DailyRound20261022CaptureScaleTests: XCTestCase {
     func testAmbiguousOverlapIsNotAMeasurement() {
         XCTAssertNil(SCKCapturer.pixelScale(from: [
             screen(CGRect(x: 0, y: 0, width: 1440, height: 900), 2.0),
-            screen(CGRect(x: 1440, y: 0, width: 2560, height: 1440), 1.0),
+            screen(CGRect(x: 0, y: 0, width: 2560, height: 1440), 1.0),
         ], windowFrame: window))
     }
 
@@ -63,12 +63,26 @@ final class DailyRound20261022CaptureScaleTests: XCTestCase {
 
     /// 拒绝必须真的接到采集上：`snapViaStream` 里量不到倍率的那一臂要抛 `pixelCaptureDenied`，
     /// 而不是继续往下走。这条静态闸防的是"纯函数修好了、调用点又把它折回一个默认值"。
-    /// REVERSE：把 `guard let scale = streamPixelScale` 换回 `streamPixelScale(for:) ?? 2.0` → 红。
+    /// 注释先剥掉再扫，沿用同目录 `CaptureChannelShapeTests.codeOnly` 的理由与原写法：
+    /// 被修掉的那个 `?? 2.0` 现在正写在本条缺陷的教训注释里（`SCKCapturer.swift:811`），
+    /// 带着注释扫会让闸红在自己的说明上，而第一反应是删注释换绿——那条真缺的默认值就此自由。
+    /// REVERSE：把 `guard let scale = streamPixelScale` 那行换回一个带假设值的调用 → 红。
     func testCallerRefusesRatherThanFillingInAScale() throws {
         let path = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/GlassPaneEngine/SCKCapturer.swift")
-        let source = try String(contentsOf: path, encoding: .utf8)
+        let raw = try String(contentsOf: path, encoding: .utf8)
+        var source = raw
+        while let open = source.range(of: "/*") {
+            guard let close = source.range(of: "*/", range: open.upperBound..<source.endIndex) else { break }
+            source.removeSubrange(open.lowerBound..<close.upperBound)
+        }
+        source = source
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { line in
+                !line.drop(while: { $0 == " " || $0 == "\t" }).hasPrefix("//")
+            }
+            .joined(separator: "\n")
         XCTAssertFalse(source.contains("?? 2.0"),
                        "倍率上又出现了一个假设值：这一条就是被修掉的那个默认值")
         XCTAssertTrue(source.contains("guard let scale = streamPixelScale(for: windowFrame) else"),

@@ -497,7 +497,7 @@ final class DailyRound20261022ProtocolTests: XCTestCase {
             "夹具没能让注册表真的读不开——这份文件会被解码，判据就测不到"
         )
 
-        let result = try run([daemonBinary, "--state-dir", root, "--project-prune", "--dry-run"])
+        let result = try run(["--state-dir", root, "--project-prune", "--dry-run"])
         XCTAssertNotEqual(result.status, 0, "预览一份打不开的表不是成功：exit \(result.status)")
         XCTAssertEqual(result.status, 1, "与 --project-prune 的其它拒绝同口径：\(result.stdout)|\(result.stderr)")
         let payload = try XCTUnwrap(

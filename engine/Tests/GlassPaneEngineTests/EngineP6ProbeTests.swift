@@ -1141,13 +1141,30 @@ final class P6EngineCoreProbeTests: XCTestCase {
         time.now = time.now.addingTimeInterval(0.5)
         inbox.ingest(pid: 4242, frame: .handler(file: "View.swift", line: 88, ts: 0, durationNs: nil))
         // 诊断必须在宽限期走完之后跑：在那之前迟到数根本不可测，`diagnose` 现在会诚实地
-        // 把这一路写成"未测量"，T8 也就不会出来（这一条用例要证的正是"能读到的迟到数会被
-        // 刷新并进 T8"，所以它必须在可读的那一刻做）。
+        // 把这一路写成"未测量"（这一条用例要证的正是"能读到的迟到数会被刷新并留下来"，
+        // 所以它必须在可读的那一刻做）。
         time.now = time.now.addingTimeInterval(ProbeInbox.lateGraceSeconds)
         let diagnosis = try core.diagnose(operationId: operationId)
-        XCTAssertEqual(diagnosis["class"] as? String, "T8")
         let pack = try core.lastEvidence(operationId: operationId)
         XCTAssertEqual(pack.signals.handlerProbe?.lateCount, 1, "the refreshed late count must persist into evidence")
+        // 这一支探针只有 z1/z2：没有 state 通道，`stateChanged` 是 nil。T8 的前提
+        // "窗口期间状态没变"在这里**从未被测量**，所以判不出 T8——从前它靠
+        // `stateChanged ?? false` 把 nil 折成"没变"才落到 T8，那正是本文件为像素通道
+        // 谴责过的形状（`testLateArrivalsWithAMeasuredQuietStateStillClaimT8` 是"量到了
+        // 状态安静"那一侧的对照，T8 在那儿照样成立）。刷新本身仍然发生、仍然进档。
+        XCTAssertEqual(diagnosis["class"] as? String, "INCONCLUSIVE",
+                       "没有状态通道时不许把迟到数当 T8 的证据：\(diagnosis["report"] ?? "")")
+        // `report` 是四格结构体（evidence/path/anomaly/next），不是一个字符串——按整串去比
+        // 只会得到 `nil as? String`，那条断言于是恒红且红得看不出原因。
+        let report = try XCTUnwrap(diagnosis["report"] as? [String: Any])
+        let anomaly = try XCTUnwrap(report["anomaly"] as? String)
+        XCTAssertTrue(anomaly.contains("no state channel"),
+                      "拒绝要说出缺的是哪一条通道：\(anomaly)")
+        let next = try XCTUnwrap(report["next"] as? String)
+        XCTAssertTrue(next.contains("state"),
+                      "INCONCLUSIVE 必须带一条能走的路：\(next)")
+        XCTAssertFalse(next.contains("T8"),
+                       "把结论指回 T8 等于又替那条没测到的前提作保：\(next)")
     }
 
     func testSnapshotCarriesRealCheckpointAndRollbackFullExecutes() throws {
