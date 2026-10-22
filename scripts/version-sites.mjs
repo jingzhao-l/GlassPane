@@ -30,7 +30,13 @@ export const ROOT = path.resolve(import.meta.dirname, '..')
 
 /**
  * 派生位点表：`regex` 必须给出三个捕获组（前缀 / 版本值 / 收尾）。
- * @type {{ id: string, file: string, regex: RegExp, hint: string }[]}
+ *
+ * `line: true` 的那几位写的是版本线的**段**（`1.19`），不是完整 semver：SECURITY 的受影响
+ * 版本表按惯例给的是一个区间（`1.19.x` = 这一线上的一切补丁号），把它写成 `1.19.0` 就等于
+ * 宣称只有那一个补丁版受支持——那是另一句话，而且是假的那一句。所以这一类位点由
+ * `expectedFor()` 在比较与改写两处都把真源折算成 `major.minor`（见文件末尾），其余位点
+ * 照旧写完整号。带 `line` 的位点若少了这个折算就会永远报漂移，那正是它必须存在的原因。
+ * @type {{ id: string, file: string, regex: RegExp, hint: string, line?: boolean }[]}
  */
 export const SITES = [
   {
@@ -118,6 +124,25 @@ export const SITES = [
     regex: /(git clone --branch v)([0-9][0-9.]*)( )/,
     hint: '与英文版同一条 clone 命令',
   },
+  {
+    // SECURITY 的受影响版本表里那一格是**活**的：它写着"当前发布线，安全修复在此发布"，
+    // 而 `check-doc-links.mjs` 的「当前版本线」主张拿它与根 package.json 的 major.minor 相对。
+    // 2026-10-21 那轮记录（`specs/GlassPane_每日审查_2026-10-20_记录.md` #27）时它还不是位点，
+    // 于是每一次发版都要人去手改两份文件，改慢一次就红一次——红的原因是"忘了改"而不是"写错了"。
+    // 现在它是位点：`set-version` 推着它走，主张仍在那儿复核这一次推动有没有落到两份文件上。
+    id: 'SECURITY 受影响版本线（英·按段比）',
+    file: 'SECURITY.md',
+    regex: /(\|\s)(\d+\.\d+)(\.x\s*\|\s*✅ current release line;)/,
+    hint: '安全公告表里那一格声称的当前发布线（版本线的段，不是完整号）',
+    line: true,
+  },
+  {
+    id: 'SECURITY 受影响版本线（中·按段比）',
+    file: 'SECURITY.zh-CN.md',
+    regex: /(\|\s)(\d+\.\d+)(\.x\s*\|\s*✅ 当前版本线，)/,
+    hint: '与英文版同一张表的同一格；双语一起走，漂一个就是两份对外安全公告各说一条线',
+    line: true,
+  },
 ]
 
 /**
@@ -160,6 +185,28 @@ function withGlobal(re) {
   return new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`)
 }
 
+/** 版本线的段：`1.19.2` → `1.19`；读不出段就返回 null（调用方按异常处理，不许猜）。 */
+export function lineOf(version) {
+  const m = /^(\d+\.\d+)\./.exec(String(version ?? ''))
+  return m ? m[1] : null
+}
+
+/**
+ * 位点应当等于的字符串。普通位点等于完整 semver；带 `line: true` 的位点等于它的 `major.minor`
+ * （那一格对外声称的是一条**线**，不是一个补丁号）。取不出段就返回 null，让两侧都把它当漂移报，
+ * 而不是拿原串去比一个永远不会相等的值。
+ *
+ * **显示位也必须走这个函数。**`scripts/check-version.mjs` 现在打的是
+ * `value === target ? '✓' : '≠'`，所以那两行会显示 `≠`（文件里写的是 `1.19`，真源是 `1.19.0`）
+ * 而退出码仍然是 0——那是给人看的假红，读的人学会忽略它之后，真的那条也就没人看了。改成
+ * `value === expectedFor(site, target)` 是一行的事，归 `check-version.mjs` 的所有者；本文件先把
+ * 判定与期望值放在**一处**，就是为了那一行改起来不需要再抄一套段号规则。
+ */
+export function expectedFor(site, target) {
+  if (!site.line) return target
+  return lineOf(target)
+}
+
 function read(site) {
   const abs = path.join(ROOT, site.file)
   if (!fs.existsSync(abs)) return { text: null, hits: -1 }
@@ -188,11 +235,15 @@ export function applySite(site, version) {
   if (typeof hits === 'number') return { ok: false, message: `位点未命中：${site.file}（正则与现状不符）` }
   if (hits.length === 0) return { ok: false, message: `位点未命中：${site.file}（正则与现状不符）` }
   if (hits.length > 1) return { ok: false, message: `位点在 ${site.file} 命中 ${hits.length} 次（正则太宽）` }
-  if (hits[0][2] === version) return { ok: true, message: `${site.file} 已是 ${version}`, unchanged: true }
-  const next = text.replace(site.regex, `$1${version}$3`)
+  const want = expectedFor(site, version)
+  if (want === null) {
+    return { ok: false, message: `位点 ${site.id} 记的是版本线的段，而 ${version} 取不出 major.minor——不猜，不改` }
+  }
+  if (hits[0][2] === want) return { ok: true, message: `${site.file} 已是 ${want}`, unchanged: true }
+  const next = text.replace(site.regex, `$1${want}$3`)
   if (next === text) return { ok: false, message: `替换后内容无变化：${site.file}（正则异常）` }
   fs.writeFileSync(abs, next)
-  return { ok: true, message: `${site.file} → ${version}` }
+  return { ok: true, message: `${site.file} → ${want}` }
 }
 
 /** lockfile 中与版本线相关条目的当前 version（link/file: 条目无 version，跳过）。 */
@@ -233,11 +284,12 @@ export function drift(want = null, { locks = true } = {}) {
   const target = want ?? truthVersion()
   const rows = []
   for (const site of SITES) {
+    const expect = expectedFor(site, target)
     const actual = siteValue(site)
     if (actual === null) {
-      rows.push({ kind: '位点', where: `${site.id} (${site.file})`, actual: '未命中/文件缺失', target })
-    } else if (actual !== target) {
-      rows.push({ kind: '位点', where: `${site.id} (${site.file})`, actual, target })
+      rows.push({ kind: '位点', where: `${site.id} (${site.file})`, actual: '未命中/文件缺失', target: expect })
+    } else if (actual !== expect) {
+      rows.push({ kind: '位点', where: `${site.id} (${site.file})`, actual, target: expect })
     }
   }
   if (!locks) return rows

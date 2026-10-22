@@ -49,15 +49,23 @@ test('install.sh refuses a non-macOS host before the clone, and says so in a dry
   const stub = stubBin('uname', 'echo Linux');
   const wouldClone = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-nondarwin-'));
   // 平台闸住在"定位不到源码 ⇒ 必须 clone"那一支：已经有源码的那一趟不付 clone，也就没得挡。
+  //
+  // 两条隔离位是 2026-10-22 补的，之前**没有**：`cwd` 缺省是仓库根，于是
+  // `looks_like_repo "$PWD"` 命中，脚本走"源码在手边"那一支，一路 `exec node cli.js`，
+  // 而 `HOME` 继承的是开发者真家目录——npm ci、tsc（重写 mcp-shell/dist）、swift build 与
+  // launchd 注册全部真的发生。一条会改机器状态的测试必须先自证它改的是沙箱。
+  const sandboxHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-nondarwin-home-'));
+  const emptyCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-nondarwin-cwd-'));
   const env = {
     ...process.env,
     PATH: `${stub}:${process.env.PATH}`,
+    HOME: sandboxHome,
     GLASSPANE_REPO: '',
     GLASSPANE_INSTALL_DIR: path.join(wouldClone, 'glasspane'),
   };
   try {
     const real = spawnSync('/bin/sh', [INSTALL_SH], {
-      env: { ...env, GLASSPANE_INSTALL_DRY_RUN: '0' }, encoding: 'utf8', timeout: 60_000, input: '',
+      env: { ...env, GLASSPANE_INSTALL_DRY_RUN: '0' }, encoding: 'utf8', timeout: 60_000, cwd: emptyCwd, input: '',
     });
     assert.equal(real.status, 1, `${real.stdout}\n${real.stderr}`);
     assert.match(real.stderr, /只支持 macOS（uname -s = Linux）/, real.stderr);
@@ -65,24 +73,31 @@ test('install.sh refuses a non-macOS host before the clone, and says so in a dry
     assert.deepEqual(fs.readdirSync(wouldClone), [], '被拒的那一趟不许在 clone 目录里留下任何东西');
 
     const dry = spawnSync('/bin/sh', [INSTALL_SH], {
-      env: { ...env, GLASSPANE_INSTALL_DRY_RUN: '1' }, encoding: 'utf8', timeout: 60_000, input: '',
+      env: { ...env, GLASSPANE_INSTALL_DRY_RUN: '1' }, encoding: 'utf8', timeout: 60_000, cwd: emptyCwd, input: '',
     });
     assert.equal(dry.status, 0, `${dry.stdout}\n${dry.stderr}`);
     assert.match(dry.stdout, /平台闸会在 clone 之前停/, dry.stdout);
     assert.match(dry.stdout, /\[dry-run\] 未定位到仓库，将执行: git clone/, `clone 计划行不许因为平台闸而消失：${dry.stdout}`);
+    // 沙箱家目录必须还是空的：这条测试从前跑到开发者真家目录里去过，那一次留下了
+    // 一个装好的 .app 与一个在跑的 daemon。"没有写任何东西"这句要由读者自己量出来。
+    assert.deepEqual(fs.readdirSync(sandboxHome), [], `真跑那一趟在沙箱 HOME 里留下了东西：${fs.readdirSync(sandboxHome).join(', ')}`);
+    assert.deepEqual(fs.readdirSync(emptyCwd), [], `被拒的那一趟在当前目录里留下了东西：${fs.readdirSync(emptyCwd).join(', ')}`);
   } finally {
     fs.rmSync(stub, { recursive: true, force: true });
     fs.rmSync(wouldClone, { recursive: true, force: true });
+    fs.rmSync(sandboxHome, { recursive: true, force: true });
+    fs.rmSync(emptyCwd, { recursive: true, force: true });
   }
   // 对照：一台 Darwin 主机上这一条必须放行到"clone 目标已存在"那一支，而不是被平台闸挡下——
   // 否则那扇闸只是永远拒绝。这里自己造一枚 Darwin 的 `uname`，不靠环境：同一份测试要能在
   // ubuntu 的 CI 上跑到同一支（那一格整格外层还套着 test/support/darwin-host.mjs 的桩）。
   const darwin = stubBin('uname', 'echo Darwin');
   const existing = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-darwin-ctl-'));
+  const ctlHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-darwin-ctl-home-'));
   try {
     const ok = spawnSync('/bin/sh', [INSTALL_SH], {
       env: {
-        ...process.env, PATH: `${darwin}:${process.env.PATH}`,
+        ...process.env, PATH: `${darwin}:${process.env.PATH}`, HOME: ctlHome,
         GLASSPANE_INSTALL_DRY_RUN: '0', GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: existing,
       },
       encoding: 'utf8', timeout: 60_000, cwd: os.tmpdir(), input: '',
@@ -93,6 +108,7 @@ test('install.sh refuses a non-macOS host before the clone, and says so in a dry
   } finally {
     fs.rmSync(darwin, { recursive: true, force: true });
     fs.rmSync(existing, { recursive: true, force: true });
+    fs.rmSync(ctlHome, { recursive: true, force: true });
   }
 });
 

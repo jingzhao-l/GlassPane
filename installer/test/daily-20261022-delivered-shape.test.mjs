@@ -1,0 +1,296 @@
+/**
+ * 2026-10-22 —— 交付形状必须由**真正发出去的那份 tarball** 判，不是由测试自己抄的目录判。
+ *
+ * WHY（这不是洁癖，是本仓已经付过的一次账）。`installer/test/failure-exit.test.mjs` 的第 (4) 层
+ * 把"npm 交付的形状"这样造出来：`for (const file of ['cli.js', 'package.json']) fs.copyFileSync(…)`
+ * 再手搭一条符号链接。那份目录**不是** npm 会交付的东西 —— 它绕过的正是交付形状唯一的真判据：
+ * `installer/package.json` 的 `files` 白名单与 `bin` 指向的那条路径之间的**一致性**。把 `cli.js`
+ * 从 `files` 里删掉，或把 `bin` 指到一个不在 `files` 里的路径，手抄的夹具照旧绿（它根本没读
+ * `files`），而发布的声明已经自相矛盾：`bin` 承诺的那条命令不在包自己声明的交付清单里，它只是
+ * 靠 npm"强行带上 bin 目标"这条实现细节才恰好还在档内（本机 npm 11.17.0 实测，见下面
+ * REVERSE MUTATION 那一条）—— 细节一变、或目标本身写错，装出来的就是一条**悬空的 bin 软链**：
+ * 装得上、`npm ls` 读得到版本号、跑起来退出 0 且一个字节都不出。那正是 CHANGELOG `[1.12.3]`
+ * 记下的形状 —— 这个包有 19 个版本对外等于一条不能用的命令，而真路径上的测试一路全绿。
+ * `mcp-shell/test/published-artifact.test.mjs` 给另一个包做了这件事（`npm pack` → 装进干净前缀 →
+ * 不带解释器直接 exec），这个包一直没做。本文件把那份闸补上。
+ *
+ * 跑的是真链路：`npm pack` → 把那份 .tgz 装进**临时前缀**（`--prefix`，不碰真实的 `~`、不碰真实
+ * 的全局 node_modules，也不共享 `~/.npm/_cacache`）→ 直接 exec 装出来的 `glasspane-install`
+ * （前面不放 `node`）→ 按文档断言退出码与**字节非空**。
+ *
+ * REVERSE MUTATION（每一条点自己的名，两条都在本机实测过）：
+ *  · 把 `bin` 指向一个不在 `files` 里的路径（如 ./nope.js）→ 本文件六条**全红**：静态那条
+ *    （目标不在 files 里）、pack 那条（档内没有它）、软链那条（它指向不存在的文件）、
+ *    三条 exec（命令根本跑不起来）。
+ *  · 只从 `installer/package.json` 的 `files` 里删掉 "cli.js" → 红的只有静态那条与
+ *    `failure-exit.test.mjs` 第 (4) 层的两条。**这是实测出来的边界，不是笔误**：本机
+ *    npm 11.17.0 的 `npm pack --dry-run` 在 `files` 与 `main` 都不含 cli.js 时仍把
+ *    package/cli.js 放进档里（npm 会强行带上 `bin` 点名的文件），所以 pack/exec 两层
+ *    抓不到这一种改动。把这条边界写在这里，正是为了让下一位读者不必再猜这道闸量的是什么：
+ *    `files` 与 `bin` 的一致性由静态那条负责，tarball 的真实内容与能否 exec 由其余几条负责。
+ *  · 把 `installer/cli.js` 入口守卫换回不比 realpath 的那版 → exec 那几条红（0 字节 / 退出 0）。
+ *  · 把 `--help` 那条退出改回 `process.exit(0)` 抢退 → "最后一行必须完整"那条红。
+ *  · `npm pack` 在这台机器上跑不起来时，npm 相关用例**具名跳过**并印出复现命令 —— 一条跳过的
+ *    交付形状闸正是本缺陷要防的那类东西，所以这里不放宽断言，只把"没测量"这件事喊出来。
+ */
+import { test, after } from 'node:test'
+import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const PKG = path.resolve(HERE, '..')
+const MANIFEST = path.join(PKG, 'package.json')
+
+const SCRATCH = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-delivered-shape-'))
+after(() => fs.rmSync(SCRATCH, { recursive: true, force: true }))
+
+/**
+ * 一份干净、且**与自己缓存绑定**的 npm 环境。两个坑都是这台机器实测到的，抄自
+ * `mcp-shell/test/published-artifact.test.mjs`：① 从父 `npm test` 继承下来的 `npm_config_*` /
+ * `npm_lifecycle_*` / `npm_execpath` 会让嵌套的 `npm pack` 走生命周期语义；② 共享的
+ * `~/.npm/_cacache` 里一个同键文件就能让 pack 退 243 —— 一条测试不该依赖"用户的全局缓存此刻
+ * 恰好干净"。HOME 也指进临时目录：这条链子不许读写真实的 `~`。
+ */
+const ENV = (() => {
+  const env = { ...process.env, HOME: path.join(SCRATCH, 'home') }
+  for (const key of Object.keys(env)) {
+    if (
+      /^npm_(config|lifecycle|package|init|user|loglevel)/.test(key)
+      || key === 'npm_execpath'
+      || key === 'npm_config'
+    ) delete env[key]
+  }
+  fs.mkdirSync(env.HOME, { recursive: true })
+  env.npm_config_cache = path.join(SCRATCH, 'npm-cache')
+  env.GLASSPANE_NO_COLOR = '1'
+  delete env.GLASSPANE_REPO
+  delete env.GIT_CONFIG_GLOBAL
+  return env
+})()
+
+function npmRun(args, cwd) {
+  const res = spawnSync('npm', args, {
+    cwd,
+    env: ENV,
+    encoding: 'utf8',
+    timeout: 900_000,
+    // npm 的进度写在 stderr；默认 1 MiB 截断后 spawnSync 会把 ENOBUFS 报成"安装失败"却一个字
+    // 不说 —— 那正是一条误导性的红的形状。
+    maxBuffer: 64 * 1024 * 1024,
+  })
+  return {
+    status: res.status,
+    stdout: res.stdout ?? '',
+    stderr: res.stderr ?? '',
+    error: res.error ? String(res.error) : null,
+  }
+}
+
+const manifest = JSON.parse(fs.readFileSync(MANIFEST, 'utf8'))
+/** `bin` 的两种写法（字符串＝单命令）都归一成 `{命令: 目标}`；目标按 `files` 的口径去掉 `./`。 */
+function binTargets(pkg) {
+  if (typeof pkg.bin === 'string') return { [pkg.name]: pkg.bin }
+  return Object.fromEntries(Object.entries(pkg.bin ?? {}))
+}
+/** `files` 里的一条（可能是目录，也可能是一个文件）是否覆盖到 rel 这条路。 */
+function fileCovers(entry, rel) {
+  const e = String(entry).replace(/^\.\//, '').replace(/\/+$/, '')
+  return e === rel || rel.startsWith(`${e}/`)
+}
+const bin = binTargets(manifest)
+
+/* ------------------------------------------------------ 静态不变量（不需要 npm） */
+
+test('交付形状的真源不变量：package.json 的每个 bin 目标都必须在 files 里被点名', () => {
+  const entries = Object.entries(bin)
+  assert.ok(entries.length > 0, `${manifest.name} 不再声明任何 bin —— 这个包对外还是一条命令吗？`)
+  assert.ok(Array.isArray(manifest.files) && manifest.files.length > 0,
+    `${manifest.name} 的 package.json 没有用 files 点名交付内容；那时 npm 发的是**整个目录**，`
+    + '这条不变量也就无处可查（files 与 bin 两份清单必须都在，且必须互相对得上）')
+  for (const [command, target] of entries) {
+    const rel = String(target).replace(/^\.\//, '')
+    // files 允许写目录（如 `dist`），也算命中——否则这道闸会在合法的目录形态上假红，
+    // 而假红的闸等于没有闸。
+    const covered = manifest.files.some((entry) => fileCovers(entry, rel))
+    assert.ok(covered,
+      `${manifest.name} 的 bin["${command}"] 指向 ${target}，而 files 是 ${JSON.stringify(manifest.files)} —— `
+      + '这条命令不在包自己声明的交付清单里。它此刻可能仍在 tarball 内，但那是 npm"强行带上 bin 目标"'
+      + '的实现细节，不是这个包的决定；细节一变（或目标写错），发出去的就是一条悬空软链：装得上、'
+      + 'npm ls 读得到版本号、跑起来退出 0 且零字节 —— CHANGELOG [1.12.3] 记下的那 19 个版本。')
+    assert.ok(fs.existsSync(path.join(PKG, rel)),
+      `bin 的目标 ${rel} 在仓库里就不存在（files 点没点名是另一问，先问它在不在树上）`)
+  }
+})
+
+/* ---------------------------------------------------------------- 真链路（要 npm） */
+
+let artifact = null
+let unavailable = null
+
+/** pack → 装进两个临时前缀（局部 `.bin/` 与全局 `bin/`）；一次做完，多条用例共用同一份产物。 */
+function delivered() {
+  if (unavailable !== null) return null
+  if (artifact !== null) return artifact
+  const which = npmRun(['--version'], SCRATCH)
+  if (which.status !== 0) {
+    unavailable = `npm --version 退 ${which.status}：${(which.stderr || which.stdout || which.error || '（无输出）').slice(0, 400)}`
+    return null
+  }
+  const packed = npmRun(['pack', '--no-audit', '--fund=false', '--pack-destination', SCRATCH], PKG)
+  if (packed.status !== 0) {
+    unavailable = `npm pack 退 ${packed.status}（${packed.error ?? '无 spawn 错误'}）：`
+      + `${(packed.stderr || packed.stdout || '（无输出）').slice(0, 600)}`
+    return null
+  }
+  const fileName = packed.stdout.trim().split('\n').filter(Boolean).pop()
+  const tarball = path.join(SCRATCH, fileName)
+  if (!fileName || !fs.existsSync(tarball)) {
+    unavailable = `npm pack 报了 ${JSON.stringify(fileName)}，那份文件却不在 ${SCRATCH} 里`
+    return null
+  }
+  // 文档里给的两条一键形态都装一遍：`npm i -g` 的 `<prefix>/bin/<命令>`，与本地 `--prefix`
+  // （npx 用的那一种）的 `<prefix>/node_modules/.bin/<命令>`。两条都是符号链接，层级不同，
+  // 交付形状上是两件事。
+  const localPrefix = path.join(SCRATCH, 'prefix-local')
+  const globalPrefix = path.join(SCRATCH, 'prefix-global')
+  fs.mkdirSync(localPrefix, { recursive: true })
+  fs.mkdirSync(globalPrefix, { recursive: true })
+  const local = npmRun(['i', '--prefix', localPrefix, '--no-audit', '--no-fund', '--prefer-offline', tarball], localPrefix)
+  if (local.status !== 0) {
+    unavailable = `npm i --prefix 装那份 tarball 退 ${local.status}（${local.error ?? '无 spawn 错误'}）：`
+      + `${(local.stderr || local.stdout || '（无输出）').slice(0, 600)}`
+    return null
+  }
+  const global = npmRun(['i', '-g', '--prefix', globalPrefix, '--no-audit', '--no-fund', '--prefer-offline', tarball], globalPrefix)
+  if (global.status !== 0) {
+    unavailable = `npm i -g --prefix 装那份 tarball 退 ${global.status}（${global.error ?? '无 spawn 错误'}）：`
+      + `${(global.stderr || global.stdout || '（无输出）').slice(0, 600)}`
+    return null
+  }
+  const packageRoot = path.join(localPrefix, 'node_modules', manifest.name)
+  if (!fs.existsSync(path.join(packageRoot, 'package.json'))) {
+    unavailable = `npm 报了安装成功，${packageRoot} 里却没有 package.json`
+    return null
+  }
+  // 全局前缀的落点在 `lib/node_modules/<name>`，与局部前缀的 `node_modules/<name>` 不是同一层——
+  // 两条软链各自必须解回**自己那一份**，用局部那份比全局那条会假红。
+  const globalRoot = path.join(globalPrefix, 'lib', 'node_modules', manifest.name)
+  if (!fs.existsSync(path.join(globalRoot, 'package.json'))) {
+    unavailable = `npm i -g 报了安装成功，${globalRoot} 里却没有 package.json`
+    return null
+  }
+  artifact = {
+    fileName,
+    tarball,
+    packageRoot,
+    localBin: path.join(localPrefix, 'node_modules', '.bin', manifest.name),
+    globalBin: path.join(globalPrefix, 'bin', manifest.name),
+    globalRoot,
+    shapes: [
+      ['npm i --prefix（npx 用的那一种）', path.join(localPrefix, 'node_modules', '.bin', manifest.name), packageRoot],
+      ['npm i -g --prefix', path.join(globalPrefix, 'bin', manifest.name), globalRoot],
+    ],
+  }
+  return artifact
+}
+
+/** 没能测量就具名跳过（不放宽断言）。返回 true 表示这一条该跳。 */
+function skipUnlessMeasured(t) {
+  if (artifact === null && unavailable === null) delivered()
+  if (artifact !== null) return false
+  t.skip(`这台机器没能测量交付形状：${unavailable}。`
+    + `复现命令：cd ${PKG} && npm pack --pack-destination /tmp && npm i --prefix /tmp/gp-p <那份 .tgz>`
+    + ` && /tmp/gp-p/node_modules/.bin/${manifest.name} --help —— 一条被跳过的交付形状闸正是本缺陷要防`
+    + '的那类东西：它不会红，哪怕发布出去的 bin 是悬空的。')
+  return true
+}
+
+/** 直接 exec 装出来的那条命令，前面不放 node —— 被测的正是这件事。 */
+function execInstalled(binPath, args) {
+  return spawnSync(binPath, args, {
+    encoding: 'utf8',
+    env: { ...ENV, PATH: `${path.dirname(process.execPath)}:${ENV.PATH}` },
+    timeout: 300_000,
+    maxBuffer: 64 * 1024 * 1024,
+  })
+}
+
+test('npm pack 的产物里必须带着它自己承诺的那条命令', (t) => {
+  if (skipUnlessMeasured(t)) return
+  const res = spawnSync('tar', ['-tzf', artifact.tarball], { encoding: 'utf8', env: ENV })
+  assert.equal(res.status, 0, res.stderr)
+  const entries = res.stdout.split('\n').filter((line) => line !== '')
+  assert.ok(entries.includes('package/package.json'), `tarball 里没有 package.json：${JSON.stringify(entries)}`)
+  for (const [command, target] of Object.entries(bin)) {
+    const rel = String(target).replace(/^\.\//, '')
+    assert.ok(entries.includes(`package/${rel}`),
+      `bin["${command}"] 指向 ${rel}，这份 .tgz 里却没有它（档内：${JSON.stringify(entries)}）——`
+      + '发出去的就是一条悬空软链。files 与 bin 必须在同一份清单上，而这份清单的唯一权威是 pack 的结果。')
+  }
+  // `files` 点名的每一项都得真的在档内：pack 会静默丢掉不存在的项，那也是一种"没人检查"。
+  for (const entry of manifest.files) {
+    const rel = String(entry).replace(/^\.\//, '').replace(/\/+$/, '')
+    assert.ok(entries.some((line) => line === `package/${rel}` || line.startsWith(`package/${rel}/`)),
+      `files 点名了 ${rel}，pack 却没带上它：${JSON.stringify(entries)}`)
+  }
+  // 装进前缀的那份入口，字节必须与仓库里这一份相同——否则"测的是交付物"这句话是空的。
+  const rel = String(bin[manifest.name]).replace(/^\.\//, '')
+  const inRepo = fs.readFileSync(path.join(PKG, rel))
+  for (const [label, root] of [['局部前缀', artifact.packageRoot], ['全局前缀', artifact.globalRoot]]) {
+    const shipped = fs.readFileSync(path.join(root, rel))
+    assert.ok(shipped.equals(inRepo),
+      `${label}里安装出来的 ${rel} 与仓库里那份不是同一批字节（${shipped.length} vs ${inRepo.length}）——pack 装的是别的东西`)
+  }
+})
+
+test('装出来的 bin 是指向包内文件的符号链接，且带 shebang 与可执行位', (t) => {
+  if (skipUnlessMeasured(t)) return
+  for (const [label, binPath, packageRoot] of artifact.shapes) {
+    assert.ok(fs.existsSync(binPath), `${label}：装完后 ${binPath} 不存在，PATH 上没有 ${manifest.name}`)
+    assert.ok(fs.lstatSync(binPath).isSymbolicLink(), `${label}：${binPath} 不是 npm 建的那条符号链接`)
+    const target = fs.realpathSync(binPath)
+    assert.ok(target.startsWith(fs.realpathSync(packageRoot)),
+      `${label}：软链解到了它自己那一份安装包之外：${target}（应在 ${fs.realpathSync(packageRoot)} 之下）`)
+    assert.match(fs.readFileSync(target, 'utf8').split('\n')[0], /^#!\/usr\/bin\/env node/,
+      `${target} 丢了 shebang，bin 就没法被直接 exec`)
+    // eslint-disable-next-line no-bitwise
+    assert.notEqual(fs.statSync(target).mode & 0o111, 0, `${target} 没有可执行位，exec 它会 EACCES`)
+  }
+})
+
+test('交付形状跑 --help：退出 0，usage 一个字节都不许少（前面不放 node）', (t) => {
+  if (skipUnlessMeasured(t)) return
+  const r = execInstalled(artifact.localBin, ['--help'])
+  assert.equal(r.error, undefined, `exec 装出来的命令本身失败了：${r.error}`)
+  assert.equal(r.status, 0, `--help 经交付形状退出 ${r.status}｜stdout=${r.stdout.length} 字节｜stderr=${r.stderr}`)
+  assert.ok(r.stdout.length > 1000,
+    `实到 ${r.stdout.length} 字节。0 字节 + 退出 0 就是"入口没跑"的签名（argv[1] 是链接路径，`
+    + 'import.meta.url 是被指向文件的 realpath），也正是那 19 个版本对外表现的样子。')
+  assert.match(r.stdout, /用法|USAGE/, r.stdout.slice(0, 200))
+  assert.ok(!r.stdout.includes('\x00'), '管道上截断的典型残迹是半个多字节序列')
+  assert.equal(r.stdout.slice(-1), '\n', '最后一行必须完整到达')
+})
+
+test('交付形状跑参数错误：仍是文档承诺的退出码 2，并说人话', (t) => {
+  if (skipUnlessMeasured(t)) return
+  const r = execInstalled(artifact.localBin, ['--definitely-not-an-option'])
+  assert.equal(r.error, undefined, String(r.error))
+  assert.equal(r.status, 2,
+    `参数错误必须退出 2；实得 ${r.status}（stdout=${r.stdout.length} 字节，stderr=${r.stderr.length} 字节）`
+    + '——0 字节 + 退出 0 是入口没跑的签名\nstderr: ' + r.stderr)
+  assert.match(r.stderr, /参数错误/, r.stderr)
+  assert.ok(r.stderr.length > 500, `参数错误后面该跟着整份 usage，实到 ${r.stderr.length} 字节`)
+  assert.equal(r.stderr.slice(-1), '\n', '最后一条必须完整')
+})
+
+test('交付形状在全局前缀（npm i -g 那一种）里同样跑得出字节', (t) => {
+  if (skipUnlessMeasured(t)) return
+  const r = execInstalled(artifact.globalBin, ['--help'])
+  assert.equal(r.error, undefined, String(r.error))
+  assert.equal(r.status, 0, `退出 ${r.status}｜${r.stderr}`)
+  assert.ok(r.stdout.length > 1000, `实到 ${r.stdout.length} 字节：全局前缀那条 bin 软链没被执行`)
+})

@@ -16,6 +16,10 @@
  * 从来不是文件存在性，是句子。
  *
  * 外部 http(s) 链接只统计数量，不请求（CI 网络抖动不该红掉文档检查）。
+ *
+ * (5) 是 2026-10-22 补的第五类：**形状禁令**——对外文档里以命令形状给出的安装行不许是
+ * `curl … | sh` 那条被实测证明会谎报成功的管道（判据与它的两个豁免面见 `pipedInstallCommands`）。
+ * 它和 (4) 一样是"句子对不对"而不是"文件在不在"，只是这一条没有真源可比，只有实测过的形状。
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -69,6 +73,20 @@ const MAIN_DOCS = [
   // schemaVersion 就是一条必然假红的步骤，而从前它不在任何闸的视野里。
   'engine/smoke.md',
   '.github/pull_request_template.md',
+  // 2026-10-22 登记：npm 包的三门面。`installer/package.json` 与 `mcp-shell/package.json` 的
+  // `files` 里就写着 `README.md`——它是 `npm view` 页面与 tarball 里唯一的那份说明，用户装之前
+  // 读的就是它。此前这三份既不在死链集合也不在残渣集合里，等于" front door 上的链接没人点过"，
+  // 与本文件 28-32 行写的登记原则正好相反。（`updater/README.md` 的包是 private、没有 `files`
+  // 清单，它随仓库树而不是 tarball 交付——登记它是因为它是 `node updater/cli.js` 那一面的门面，
+  // 不是因为它是发布物。）
+  //
+  // 双语对偶这一头不存在要求：`MIRROR_PAIRS` 是一份**显式**清单，成对判据只遍历它列出的那些对
+  // （见下面 `for (const [a, b] of MIRROR_PAIRS)`），把一份英文独有的文档加进 `MAIN_DOCS` 不会
+  // 给它变出一个 `.zh-CN.md` 的要求。这三份就是英文独有，`claimDrift` 的双语核对同理只在
+  // `MIRROR_PAIRS` 上做——加进 `MAIN_DOCS` 也仍然不参与。
+  'installer/README.md',
+  'mcp-shell/README.md',
+  'updater/README.md',
 ]
 
 export const DOCS = [...MAIN_DOCS, ...FORK_DOCS]
@@ -607,6 +625,8 @@ export function check({ rootDir = ROOT, docs = DOCS } = {}) {
   problems.push(...toolCountDrift({ rootDir }))
   // shell 残渣：本轮被同一形状中招两次（见 `shellResidue` 的注释），所以它进主检查而不只是测试。
   problems.push(...shellResidue({ rootDir, docs }))
+  // 安装渠道：对外给出的那条一键命令必须是拿得到退出码的那一种写法（判据见 `pipedInstallCommands`）。
+  problems.push(...pipedInstallCommands({ rootDir }))
   // 可复算主张：对真源核一遍，再对另一语言核一遍。缺了这一步，"双语成对完整"只意味着
   // 文件都在，不意味着两份话说的是同一件事。
   problems.push(...claimDrift({ rootDir }))
@@ -721,6 +741,51 @@ export function shellResidue({ rootDir = ROOT, docs = DOCS } = {}) {
         problems.push(`${doc}:${i + 1} 正文里出现裸露的 shell 命令行（${trimmed.slice(0, 60)}）——`
           + '要么放进 ``` 围栏，要么写成 `反引号`；作为正文它既不能执行也不能被读者当话')
       }
+    })
+  }
+  return problems
+}
+
+/**
+ * 安装渠道闸：对外文档不许把 `curl … | sh` 这条管道当安装命令给出。
+ *
+ * WHY（2026-10-20 实测，`installer/test/daily-20261020.test.mjs` 第一条用例钉的就是它）。
+ * 管道那一头的 `curl` 取不到脚本时（本机是 exit 7），`sh` 从 stdin 读到的是**空输入**，直接
+ * EOF 退 0：一次什么都没装的运行对外报的是成功。`installer/cli.js` 的 `--help` 里写着这件事和
+ * 分步写法，而**五份对外文档的正文里给的仍是那条管道**——读者不会去 `--help` 里找安装命令。
+ * 对产品来说后果是具体的：读 `$?` 的正是不在场的 agent 与 CI，它们拿到的是 0。
+ *
+ * 判据只认**命令形状**的行：去掉缩进与行首反引号后以 `curl` 起头，且同一行里有 `| sh`/`| bash`。
+ * 散文里提一句「`curl … | sh` 属于执行远端脚本」（SECURITY 两份就是这么写的）不是命令，不许红——
+ * 把 prose 判成缺陷的下场是 prose 被删掉而命令原样留着，与本仓 `check-workflows.mjs` 对
+ * `gh release view` 那条注释记的是同一件事。扫描集合是**发布安装命令的那五份**（`INSTALL_DOCS`），
+ * 不是全部文档：`CHANGELOG.md` 里那些 `curl | sh` 是历史读数，拿今天的规矩要求历史等于要求它
+ * 改写自己（`CLAIM_DOCS` 排除 CHANGELOG 是同一个理由）。
+ */
+const INSTALL_DOCS = [
+  'README.md',
+  'README.zh-CN.md',
+  'installer/README.md',
+  'mcp-shell/README.md',
+  'updater/README.md',
+]
+
+const PIPED_INSTALL = /^[ \t`]*curl\b[^\n]*\|\s*(?:ba)?sh\b/
+
+export function pipedInstallCommands({ rootDir = ROOT, docs = INSTALL_DOCS } = {}) {
+  const problems = []
+  for (const doc of docs) {
+    const abs = path.join(rootDir, doc)
+    if (!fs.existsSync(abs)) {
+      // 门面文件本身读不到不是"这一判据通过"：登记了却不在，问题要说出口。
+      problems.push(`${doc} 在 INSTALL_DOCS 里登记了却读不到——安装渠道的这道闸今天对它什么都没核（未观测，不是通过）`)
+      continue
+    }
+    fs.readFileSync(abs, 'utf8').split('\n').forEach((line, i) => {
+      if (!PIPED_INSTALL.test(line)) return
+      problems.push(`${doc}:${i + 1} 把管道当成安装命令给出（${line.trim().slice(0, 100)}）——`
+        + 'curl 自己失败时 `sh` 读到空输入直接 EOF 退 0，一次什么都没装的运行对外报成功。'
+        + '改成两步：`curl -fsSL <url> -o /tmp/gp-install.sh && sh /tmp/gp-install.sh`')
     })
   }
   return problems

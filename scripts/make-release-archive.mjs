@@ -56,7 +56,10 @@ export const REQUIRED_BUILD_OUTPUTS = ['mcp-shell/dist', 'mcp-shell/schemas']
  * Entries are matched by **path prefix**, so an item here may be a directory (`harness/`, with its trailing
  * slash) or a single tracked file at the repository root. `.iterate_decisions.md` is the second shape, and it
  * is a decision rather than tidiness: it is the developer's own iteration log — the real one at v1.7.0 carried
- * four occurrences of the author's absolute home path (`/Users/ethanlin`) and notes on `gh auth` token scopes.
+ * four occurrences of the author's absolute home path (a `/Users/<name>/…`-shaped path; the concrete one is
+ * deliberately not written here, because this file ships in the very archive whose rule is being stated — and
+ * `updater/test/release-archive.test.mjs` now refuses a username-shaped path in it) plus notes on `gh auth`
+ * token scopes.
  * The repository is public so the file's existence is not a secret; what matters is that this is the artifact
  * every updater downloads, and a release archive should not be the delivery mechanism for whoever built it.
  * Nothing on the update path reads it, which is exactly why dropping it costs nothing and why the

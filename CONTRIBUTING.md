@@ -36,9 +36,9 @@ Start from the repo root: `npm ci` → `npm run build` → `cd engine && swift b
 | [spike/](./spike/) | feasibility experiments and measured records | not gated |
 | [specs/](./specs/) | the Chinese implementation and acceptance specs (PRD, P0–P6, 5.6/5.7/5.8 reviews) = **design of record** | a doc change is itself the PR |
 
-## 3. Gates: nine CI lanes, run them locally first
+## 3. Gates: ten CI lanes, run them locally first
 
-[.github/workflows/ci.yml](./.github/workflows/ci.yml) has nine jobs; CI only repeats what you should already have measured.
+[.github/workflows/ci.yml](./.github/workflows/ci.yml) has ten jobs; CI only repeats what you should already have measured.
 
 | CI job | Runner | What it measures |
 |---|---|---|
@@ -46,6 +46,7 @@ Start from the repo root: `npm ci` → `npm run build` → `cd engine && swift b
 | `bridge` | ubuntu-latest, Python 3.11 | queue / truncation / sentinel / argv / socket loopback, lldb-free |
 | `mcp-shell` | ubuntu-latest | dispatch + tools + engine client, then the publish-shape guard (`npm run bundle`, `npm pack`, install the tarball in a clean directory, complete an MCP `initialize` handshake); a leaked `file:` dep or a missing schema file surfaces here |
 | `install-gate` | ubuntu-latest | the root layout that ships: `node scripts/check-kernel-corpus.mjs` (the mirrored kernel corpus must equal the pin the Swift C35 leg reads — the kernel check is a **step** here, not its own job), installer units, the mcp-shell build (the kernel is a published dependency), all workspace tests |
+| `macos-node-gate` | macos-latest | the two Node suites **where macOS exists**: `glasspane-update` and `glasspane-install` run again on a macOS runner, because inside them a dozen assertions self-skip on non-macOS (`process.platform !== 'darwin'`) — the launchd/plutil-shaped ones, the exported root bundle, the plist escaping. On ubuntu those lanes go green having never measured the only platform this product ships on |
 | `version-line` | ubuntu-latest | every version site against the root manifest |
 | `docs` | ubuntu-latest | public docs health: relative links resolve, in-page and cross-page anchors exist, and each bilingual document has both legs (`node scripts/check-doc-links.mjs`) |
 | `harness-rulers` | ubuntu-latest | the recorded `harness/` baselines: fork divergence, tool and product surfaces, branding, hook liveness at the pinned upstream tag, kernel provenance (`node harness/tools/*.mjs --check`). This lane reads `harness/**`, which the product release channel never ships |
@@ -58,6 +59,7 @@ The commands the iterate runtime accepts are the closed list in [iterate.config.
 npm run build
 npm test --workspaces --if-present
 node scripts/check-version.mjs
+node scripts/check-doc-links.mjs
 swift build --package-path engine
 swift test --package-path engine
 swift test --package-path engine/probe
@@ -74,7 +76,7 @@ and degraded forms included. "CI is green" is never a substitute for "verified o
 
 - Tests inject their own temp locations. **Never construct `ProjectRegistry()` with the default path** — it resolves
   `~/.glasspane/projects.json`, the developer's own registry. One `swift test` run replaced 71 real registrations with 2 synthetic
-  fixtures, unrecoverable: see the `live()` warning in [ProjectRegistry.swift](./engine/Sources/GlassPaneEngine/ProjectRegistry.swift) and the comment near `engine/Tests/GlassPaneEngineTests/EngineCoreTests.swift:1336`.
+  fixtures, unrecoverable: see the `live()` warning in [ProjectRegistry.swift](./engine/Sources/GlassPaneEngine/ProjectRegistry.swift) and the comment near `engine/Tests/GlassPaneEngineTests/EngineCoreTests.swift:1563`.
 - Pointing `HOME` at a sandbox does not help — the home lookup behind those defaults ignores `HOME`
   ([StateRoot.swift](./engine/Sources/GlassPaneEngine/StateRoot.swift)). Use an explicit argument: `TestSandbox.directory(…)`, `TestSandbox.projectRegistry(…)`, `TestSandbox.evidenceStore(at:)` from [TestSupport.swift](./engine/Tests/GlassPaneEngineTests/TestSupport.swift).
 - Two gates fail the suite rather than warn: [TestIsolationGateTests.swift](./engine/Tests/GlassPaneEngineTests/TestIsolationGateTests.swift)

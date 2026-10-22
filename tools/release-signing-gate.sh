@@ -52,8 +52,11 @@
 #       Proves the gate can go red, in the workflow's own shell path: a throwaway no-passphrase
 #       key in a throwaway 0700 /tmp keyring signs a fixture, then four arms run against it.
 #       Arm 1 pins the throwaway key itself -> must exit 0. Arm 2 pins the *shipped* anchor while
-#       the throwaway signed -> must exit non-zero AND name both fingerprints. Arm 3 is arm 2 in
-#       the production form (no --pinned; the gate imports the anchor) -> must exit non-zero.
+#       the throwaway signed -> must exit non-zero AND name both fingerprints **on the ::error::
+#       verdict lines**（不是"输出里某处"：`pinned-fingerprint:` 那句 note 在任何验证之前就打出来了，
+#       整段捕获找指纹会被它满足 —— 那正是这条臂从前量不到的地方）. Arm 3 is arm 2 in
+#       the production form (no --pinned; the gate imports the anchor) -> must exit non-zero, 同样
+#       按判定行点名 shipped 锚，另按 note 点名 pin-source 那一行。
 #       Arm 4 flips a byte in the payload under an untouched .asc -> must exit non-zero.
 #       --pinned exists only for the fixture arms and is refused unless the caller exports
 #       GLASSPANE_GATE_ALLOW_TEST_PIN=1, so the production call cannot carry a second anchor.
@@ -168,6 +171,23 @@ signer_of() {  # $1 = payload, $2 = gnupg home (empty string = the caller's defa
 keyring_primary_fpr() {  # $1 = gnupg home -> primary fingerprint of the first key in that ring
   gpg --homedir "$1" --batch --with-colons --list-keys 2>/dev/null \
     | awk -F: '$1=="fpr"{print $10; exit}'
+}
+
+# 只留下**判定行**（err() 写的 `::error::` 那些），供自测定点检查。
+# 为什么需要这一层：臂 2 / 臂 3 从前在整段捕获 `$out` 里找指纹，而 `note "pinned-fingerprint: …"`
+# 那句在任何验证之前无条件打出来 —— 于是"判据点名了两枚指纹"这半条断言，被一行 echo 满足了。
+# 真正会说"哪把 key 签的 vs 钉的是哪把"的只有 :263 那句 err；它要是停止点名，臂仍然是绿的。
+# 退出码那一半从来没坏，所以这道闸是被削弱而不是死了。这里把尺子挪回它该量的那一行。
+# 纯 bash 的循环，没有 `| grep`：`grep -q` 首命中就退、写侧死于 SIGPIPE，在 `set -euo pipefail`
+# 下能把一条通过的判定判成 141（本仓写过三次的那个坑，见 tools/gpg-signing.sh 的 has_text 注）。
+verdict_lines_of() {  # $1 = 捕获的输出 -> 置 VERDICT_LINES（只有 err() 那几条）
+  local line out=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      '::error::'*) out="$out$line"$'\n' ;;
+    esac
+  done <<< "$1"
+  VERDICT_LINES="${out%$'\n'}"
 }
 
 remedy_block() {  # the executable remedy, printed once per red verdict
@@ -339,27 +359,28 @@ cmd_selftest() {
     note "SELFTEST ARM1 pinned-key-matches exit=0 as it must"
   fi
 
-  # 臂 2 —— 由一次性 key 签、拿 shipped 锚去 pin：必须非 0，而且必须把两枚指纹都点名。
-  # 这一臂就是缺陷本体：签名有效、key 不对，旧链子在这里判绿。
+  # 臂 2 —— 由一次性 key 签、拿 shipped 锚去 pin：必须非 0，而且必须把两枚指纹都点名在**判定行**
+  # 上。这一臂就是缺陷本体：签名有效、key 不对，旧链子在这里判绿。
   rc=0
   out="$(GLASSPANE_GATE_ALLOW_TEST_PIN=1 bash "$0" check --pinned "$shipped" --gnupg-home "$home" \
             -- "$home/fixture.txt" 2>&1)" || rc="$?"
   printf '%s\n' "$out"
   miss=""
-  case "$out" in *"$shipped"*) ;; *) miss="$miss shipped-anchor";; esac
-  case "$out" in *"$fixture"*) ;; *) miss="$miss signer-fingerprint";; esac
+  verdict_lines_of "$out"
+  case "$VERDICT_LINES" in *"$shipped"*) ;; *) miss="$miss shipped-anchor-on-the-verdict-line";; esac
+  case "$VERDICT_LINES" in *"$fixture"*) ;; *) miss="$miss signer-fingerprint-on-the-verdict-line";; esac
   if [ "$rc" -eq 0 ]; then
     err "selftest 臂 2（另一把 key 签的）判绿了：这道闸存在的理由就是这一支必须红 —— 它绿着发布，每台机器的自动更新对这个版本就是死的。"
     fails=$((fails + 1))
   elif [ -n "$miss" ]; then
-    err "selftest 臂 2 以 exit ${rc} 判红了，却没有点名${miss}：红必须能被诊断，否则下一次真红的时候没人知道是哪两枚指纹不对。"
+    err "selftest 臂 2 以 exit ${rc} 判红了，却没有在 ::error:: 判定行里点名${miss}：红必须能被诊断，否则下一次真红的时候没人知道是哪两枚指纹不对。光靠那句 'pinned-fingerprint:' 的 note 不算 —— 它在任何验证之前就打了，验证不再点名它时这条臂必须转红，这正是本条尺子从「整段捕获」改成「判定行」的理由。"
     fails=$((fails + 1))
   else
-    note "SELFTEST ARM2 wrong-key-signed exit=${rc} non-zero, both fingerprints named"
+    note "SELFTEST ARM2 wrong-key-signed exit=${rc} non-zero, both fingerprints named on the ::error:: verdict line"
   fi
 
-  # 臂 3 —— 生产调用形态（不传 --pinned，闸自己去 import 锚）：也必须非 0，且点名 shipped 锚与
-  # 「pin 是从 signature.js import 的」那一句。release.yml 里用的就是这一支。
+  # 臂 3 —— 生产调用形态（不传 --pinned，闸自己去 import 锚）：也必须非 0，且判定行点名 shipped 锚、
+  # note 点名「pin 是从 signature.js import 的」那一句。release.yml 里用的就是这一支。
   rc=0
   out="$(bash "$0" check --gnupg-home "$home" -- "$home/fixture.txt" 2>&1)" || rc="$?"
   printf '%s\n' "$out"
@@ -369,12 +390,13 @@ cmd_selftest() {
   else
     miss=""
     case "$out" in *"pin-source: ${SIGNATURE_MODULE}"*) ;; *) miss="$miss pin-source-line";; esac
-    case "$out" in *"$shipped"*) ;; *) miss="$miss shipped-anchor";; esac
+    verdict_lines_of "$out"
+    case "$VERDICT_LINES" in *"$shipped"*) ;; *) miss="$miss shipped-anchor-on-the-verdict-line";; esac
     if [ -n "$miss" ]; then
       err "selftest 臂 3 以 exit ${rc} 判红，但输出里没有${miss} —— 判红的理由必须能被对上号，否则这条闸只能逼人重读脚本。"
       fails=$((fails + 1))
     else
-      note "SELFTEST ARM3 production-invocation exit=${rc} non-zero, pin imported from signature.js"
+      note "SELFTEST ARM3 production-invocation exit=${rc} non-zero, pin imported from signature.js, shipped anchor named on the ::error:: verdict line"
     fi
   fi
 
@@ -398,7 +420,7 @@ cmd_selftest() {
     err "release-signing-gate selftest FAILED：${fails} 条臂没有按它点名的理由回答。修闸，别放宽期望值 —— 这道闸唯一的用途就是在发版前挡住「签名有效但 key 不对」。"
     exit 1
   fi
-  note "GATE SELFTEST COMPLETE: 4 arms exercised — 1 绿（自家 key）/ 3 红（别的 key 签的、生产调用、字节被改），每条红都点名它点名的那一枚指纹。"
+  note "GATE SELFTEST COMPLETE: 4 arms exercised — 1 绿（自家 key）/ 3 红（别的 key 签的、生产调用、字节被改），每条红都在 ::error:: 判定行上点名它点名的那一枚指纹（那句先打的 'pinned-fingerprint:' note 不算数，见 verdict_lines_of）。"
 }
 
 case "${1:-}" in

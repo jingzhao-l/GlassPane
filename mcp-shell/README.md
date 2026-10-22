@@ -11,7 +11,9 @@ package alone does not give you a working verification engine.
 只装本包不会得到可用的验证引擎——先装引擎：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh | sh
+# Fetch install.sh, then run it — two steps on purpose: piped into `sh`, a curl that fails
+# leaves stdin empty and the pipeline exits 0 while nothing was installed.
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
 # 或：npx glasspane-install
 ```
 

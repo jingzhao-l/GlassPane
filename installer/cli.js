@@ -321,6 +321,25 @@ export function checkEnvironment({ nodePath = process.execPath } = {}) {
   }
 }
 
+/**
+ * 这台主机能不能装 GlassPane——判据是 node 向主机问来的 `process.platform`，不是 PATH 上
+ * 任何一个可以被换掉的程序。
+ *
+ * 为什么这一条必须住在 cli.js 里：`install.sh` 的 macOS 闸从前只挡"要 clone 的那一趟"，
+ * 源码在手边（指定仓库、当前目录、既有 clone）时根本不经过它，而它的注释写着"交给 installer
+ * 自己去说平台"——installer 里当时一个字都没有。实测代价（2026-10-22）：把 `uname` 桩成 Linux
+ * 再从仓库根跑真装，npm ci、tsc、swift build 与 launchd 注册全部真的发生，HOME 是开发者自己的。
+ * 一条依赖机器状态、且会**改**机器状态的"拒绝分支"不是护栏。
+ *
+ * 纯函数 + 可注入的 platform，为的是这条判据能被测试指到，而不是只在某台 runner 上碰巧走到。
+ */
+export function platformRefusal(platform = process.platform) {
+  if (platform === 'darwin') return null
+  return '这个产品只支持 macOS（本机 platform 不是 darwin）：Swift/XCTest、launchd 与 TCC 席位都在 macOS 这一侧。'
+    + '本轮没有跑 npm ci、没有 swift build、没有注册 launchd 作业，也没有写进任何应用目录。'
+    + '要在别的系统上用 GlassPane，等它把引擎搬到那一侧再说——现在这一步没有可绕的旗标。'
+}
+
 /** 汇总预检结果：缺项按严重程度排序返回可读描述（空数组 = 全部通过）。 */
 export function preflightIssues(env) {
   const issues = []
@@ -1996,7 +2015,10 @@ export function installGuard({ home = '', uid = null } = {}) {
         '当前是 uid 0（root / sudo）：GlassPane 是**用户级** launchd 代理与 TCC 授权，整棵安装会以 root 身份'
         + '落进 /var/root（产物、socket、plist 都不是你登录账号的那一份），辅助功能授权主体也永远对不上。'
         + '本安装不需要 sudo。补救：去掉 sudo 直接重跑同一条命令'
-        + '（curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh | sh，'
+        // 这条补救话里的 URL **必须是那个常量的插值**。写第二份字面量就是仓库改名/换 org 时
+        // 唯一不会被任何闸发现的复制品：`installer/test/install-sh.test.mjs` 按这条断言，
+        // 而它测的是这段拒绝文本真的带着 INSTALL_SH_URL。
+        + `（curl -fsSL ${INSTALL_SH_URL} | sh，`
         + '或 node installer/cli.js）。',
     }
   }
@@ -2731,7 +2753,16 @@ if (isMain) {
   // 从这里现形的（那台机器没有 swift，预检拒绝必然走到，而测试原本指望走到 install
   // 的拒绝分支——一条依赖机器状态的断言）。
   const { options, error } = parseArgs(process.argv.slice(2))
-  if (error) {
+  // 平台判据住在 cli.js 这一侧才是权威的：`uname` 是 PATH 上一个可以被换掉的程序（本轮实测：
+  // 桩一个 `uname` 说 Linux，install.sh 那一道只管挡"要 clone 的那一趟"，源码在手边时一路走到
+  // `exec node cli.js`，npm ci / tsc / swift build / launchd 注册全部真的发生），而
+  // `process.platform` 是 node 向主机问来的，桩不掉。放在 --help / 参数错误 / --restore-launchd
+  // 之后判：CI 的 install-gate 那一格跑在非 macOS 上，它读的正是 usage 与预检那几句。
+  const refusal = (error || options.help || options.restoreLaunchd) ? null : platformRefusal()
+  if (refusal) {
+    process.stderr.write(paint(`\n${refusal}\n`, 'red'))
+    process.exitCode = 1
+  } else if (error) {
     process.stderr.write(`\n${paint(`参数错误：${error}`, 'red')}\n\n`)
     process.stderr.write(usageText())
     process.exitCode = 2

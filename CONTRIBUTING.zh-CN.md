@@ -33,9 +33,9 @@ GlassPane 是 **macOS 上给 AI 编程代理用的 GUI 测试与验证层**：�
 | [spike/](./spike/) | 可行性实验与实测留档 | 不入门禁 |
 | [specs/](./specs/) | 中文实施规格与验收文档（PRD、P0–P6、5.6/5.7/5.8 项目综述）＝**设计真值** | 文档改动本身就是 PR |
 
-## 3. 门禁：九条 CI 通道，先在本地跑绿
+## 3. 门禁：十条 CI 通道，先在本地跑绿
 
-[.github/workflows/ci.yml](./.github/workflows/ci.yml) 共九条 job。CI 只是同一套东西的重复——先在本地把它们跑绿。
+[.github/workflows/ci.yml](./.github/workflows/ci.yml) 共十条 job。CI 只是同一套东西的重复——先在本地把它们跑绿。
 
 | CI job | Runner | 测什么 |
 |---|---|---|
@@ -43,6 +43,7 @@ GlassPane 是 **macOS 上给 AI 编程代理用的 GUI 测试与验证层**：�
 | `bridge` | ubuntu-latest，Python 3.11 | 队列 / 截断 / 哨兵 / argv / socket 回环，全程不依赖 lldb |
 | `mcp-shell` | ubuntu-latest | 分发 + 工具表 + engine 客户端，再加 publish-shape 守卫（`npm run bundle`、`npm pack`、在干净目录装上产物并完成 MCP `initialize` 握手）：`file:` 依赖泄漏、schemas 缺文件都在这一步现形 |
 | `install-gate` | ubuntu-latest | 发布形态所依据的根布局：`node scripts/check-kernel-corpus.mjs`（镜像的内核语料必须等于 Swift C35 腿所读的 pin——内核校验是这里的一个**步骤**，不是单独一条 job）、安装器单测、mcp-shell 构建（内核是已发布依赖）、全部 workspace 测试 |
+| `macos-node-gate` | macos-latest | **在 macOS 真的存在的那台机器上**再跑一遍两套 Node 套件：`glasspane-update` 与 `glasspane-install`。它们里面有十几条断言在非 macOS 上自跳（`process.platform !== 'darwin'`）——launchd/plutil 那几条形状、导出的根归档、plist 转义。只在 ubuntu 上跑，这些 lane 是"什么都没量到却绿了"，而这个产品只发 macOS |
 | `version-line` | ubuntu-latest | 每个版本位点与根 manifest 是否一致 |
 | `docs` | ubuntu-latest | 对外文档体检：相对链接可达、页内/跨页锚点存在、双语两侧都在位（`node scripts/check-doc-links.mjs`） |
 | `harness-rulers` | ubuntu-latest | `harness/` 那套已记录基线：fork 分歧度、工具面与产品面、品牌漂移、pinned 上游 tag 上的扩展点存活、内核出处（`node harness/tools/*.mjs --check`）。这一条读的是 `harness/**`，而发布归档里从不带它 |
@@ -55,6 +56,7 @@ GlassPane 是 **macOS 上给 AI 编程代理用的 GUI 测试与验证层**：�
 npm run build
 npm test --workspaces --if-present
 node scripts/check-version.mjs
+node scripts/check-doc-links.mjs
 swift build --package-path engine
 swift test --package-path engine
 swift test --package-path engine/probe
@@ -71,7 +73,7 @@ CI 等式。CI 同样跑不了所有依赖真实 GUI 会话、真实 TCC 席位�
 
 - 测试必须自备临时路径。**不要用缺省路径构造 `ProjectRegistry()`**——它解析到 `~/.glasspane/projects.json`，
   也就是开发者自己的注册表。曾有一次 `swift test` 把 71 条真实登记替换成 2 条 fixture，不可恢复：见
-  [ProjectRegistry.swift](./engine/Sources/GlassPaneEngine/ProjectRegistry.swift) 里对 `live()` 的警告，以及 `engine/Tests/GlassPaneEngineTests/EngineCoreTests.swift:1336` 附近的注释。
+  [ProjectRegistry.swift](./engine/Sources/GlassPaneEngine/ProjectRegistry.swift) 里对 `live()` 的警告，以及 `engine/Tests/GlassPaneEngineTests/EngineCoreTests.swift:1563` 附近的注释。
 - 把 `HOME` 指到沙箱没用：这些缺省背后的 home 查找**不读** `HOME`
   （[StateRoot.swift](./engine/Sources/GlassPaneEngine/StateRoot.swift)）。要显式传参——[TestSupport.swift](./engine/Tests/GlassPaneEngineTests/TestSupport.swift) 里的 `TestSandbox.directory(…)`、`TestSandbox.projectRegistry(…)`、`TestSandbox.evidenceStore(at:)`。
 - 两道闸是直接判失败而非告警：

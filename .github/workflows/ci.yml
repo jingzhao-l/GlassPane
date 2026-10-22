@@ -7,13 +7,13 @@ on:
     branches: [main]
 
 # 最小权限（与 release.yml、harness-contract.yml 同一口径）：这里不声明，每个 PR 触发的
-# job 就继承仓库默认权限（组织级常为 write）。逐 job 核过：下面每一条 job（swift、bridge、
-# mcp-shell、install-gate、docs、version-line、harness-rulers、publish-gate-selftest、
-# workflow-lint）用到的 action 只有 checkout、setup-python/setup-node 与那条钉死 SHA 的
-# setup-bun，全文没有 upload-artifact、没有 GITHUB_TOKEN、没有 `gh pr|api|release`、
-# 没有 git push/tag、没有评论或 release 写入。曾经写在这里的 `kernel` job 已随内核镜像
-# 退场（2026-10-18），计数也一并去掉——条数由 `node scripts/check-workflows.mjs` 数出来，
-# 一个抄在注释里的数字每删一条 job 就会漂一次。
+# job 就继承仓库默认权限（组织级常为 write）。逐 job 核过：下面每一条 job 用到的 action 只有
+# checkout、setup-python/setup-node 与那条钉死 SHA 的 setup-bun，全文没有 upload-artifact、
+# 没有 GITHUB_TOKEN、没有 `gh pr|api|release`、没有 git push/tag、没有评论或 release 写入。
+# 曾经写在这里的 `kernel` job 已随内核镜像退场（2026-10-18），计数也一并去掉——条数由
+# `node scripts/check-workflows.mjs` 数出来，job 名单与各自 runner 由
+# `node scripts/check-workflows.mjs --jobs` 数出来：抄在注释里的那一份名单每加一条 job 就漂一次
+# （新增 `macos-node-gate` 那一轮就是这样——原先这里点名九条 job 的括号已经过期了）。
 # harness-rulers 里的 `git clone` 拉的是公开的上游参照仓，匿名即可完成，不需要 token；
 # 其余步骤只读工作树、跑本地脚本。所以顶层一条 `contents: read` 覆盖全部 job。
 permissions:
@@ -153,6 +153,38 @@ jobs:
         run: npm run build
       - name: Test all workspaces (mcp-shell + installer + updater)
         run: npm run test --workspaces --if-present
+
+  # macOS 上的 Node 套件。这条 job 的存在理由是下面这个事实：`glasspane-update` 与
+  # `glasspane-install` 的测试里有一族断言在非 macOS 主机上当场 `t.skip`
+  # （`plutil is the reader being satisfied here` / `the control executes /bin/sh -c` 那一族，
+  # 见 `updater/test/launchd.test.mjs`）。它们守的是这份**只在 macOS 上交付**的产品本身——
+  # agent 拿到的是导出后的根 bundle、未转义的路径不能反过来改写 plist。上面那条 ubuntu
+  # lane 保留（它的 `assert-test-count` 腿与跨平台形状是真话，skip 掉的那半也是它自己报出来的），
+  # 但"这台机器上没有 launchd"不等于"这条断言通过了"。
+  #
+  # 写法上是**一整条 macOS job**，不是给 ubuntu job 加一步 `if: runner.os == 'macOS'`：
+  # OS-gated 的一步在它不匹配的主机上等于没跑（本文件 `publish-gate-selftest` 那段写的就是这条
+  # 规矩，fork 的 `installer-selftest` 同一处理）。在这张机器上这些用例是**测量**，不是跳过。
+  #
+  # 不跑 `npm run build`：这两个套件读的是源码与本仓已提交的产物，`install-gate` 里
+  # `npm test --workspace glasspane-install` 本来就排在 build 之前跑，同一棵树。
+  # 要跑的是 `npm ci`——根 lock 覆盖三个 workspace，与 `install-gate` 同一个 cache 口径。
+  macos-node-gate:
+    name: macOS node suites (updater + installer, the darwin-only assertions)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install workspace deps from root
+        run: npm ci
+      - name: Test glasspane-update where launchd and plutil actually exist
+        run: npm test --workspace glasspane-update
+      - name: Test glasspane-install where the macOS paths are real
+        run: npm test --workspace glasspane-install
 
   # 对外文档守卫：死链、失效锚点、双语成对（README/SECURITY/CONTRIBUTING 任一侧
   # 改名或漏翻译都在这里现形——面向陌生读者的文档，链接断了等于没交付）。

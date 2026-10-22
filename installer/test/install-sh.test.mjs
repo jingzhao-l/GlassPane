@@ -15,6 +15,7 @@ import {
   validateGitRef,
   validateGitRepoUrl,
   cloneFailureText,
+  safeGitCloneArgs,
   REPO_URL,
   INSTALL_SH_URL,
   RELEASE_VERSION,
@@ -42,13 +43,21 @@ function makeFakeRoot() {
  *  等于没删（undefined 会被 JSON 序列化丢掉，但为了让"未设置"这件事写在测试里而不是一行
  *  赋值里，这里显式 delete）。 */
 function runInstallSh({ cwd, env = {}, drop = [] } = {}) {
-  const childEnv = { ...process.env, GLASSPANE_REPO: '', GLASSPANE_INSTALL_DRY_RUN: '1', ...env }
-  for (const name of drop) delete childEnv[name]
-  return spawnSync('/bin/sh', [INSTALL_SH], {
-    cwd,
-    encoding: 'utf8',
-    env: childEnv,
-  })
+  // HOME 一律给一枚沙箱：dry-run 今天不写盘，但"今天不写"不是让子进程继承开发者家目录的理由
+  // ——2026-10-22 那一格就是从仓库根 + 真 HOME 跑出去，把 npm ci / tsc / swift build / launchd
+  // 全做了一遍。调用点自己给的 HOME 仍然优先（spread 顺序），`drop` 也照旧删得掉它。
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gp-ish-home-'));
+  try {
+    const childEnv = { ...process.env, HOME: home, GLASSPANE_REPO: '', GLASSPANE_INSTALL_DRY_RUN: '1', ...env }
+    for (const name of drop) delete childEnv[name]
+    return spawnSync('/bin/sh', [INSTALL_SH], {
+      cwd,
+      encoding: 'utf8',
+      env: childEnv,
+    })
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -475,4 +484,104 @@ test('install.sh: Node 预检排在 clone 之前——低于 18 时连 clone 计
   } finally {
     repo.cleanup()
   }
+})
+
+/* ===========================================================================
+ * DEFECT 5（2026-10-22）— install.sh 的两个地址是**没人对照的第二份抄本**
+ *
+ * `installer/cli.js` 把头两行写成"真源"（REPO_URL / INSTALL_SH_URL），而 install.sh:41 的
+ * 默认 clone 地址、install.sh 头里那条 curl、cli.js 里 root 补救句的第三份 curl 各写各的。
+ * 现有那些用例只测**覆盖位**那条路（`GLASSPANE_REPO_URL=https://example.invalid/…`），默认
+ * 值一次都没被对照过 —— 于是 org 改名之后：`npx glasspane-install` 仍然能装（它读常量），
+ * `curl | sh` 却在 clone 一份 404，而那句"去掉 sudo 就重跑这条命令"的补救指着一具死链。
+ * 三条用例一起把"两份必须相等而没人检查"这个类别钉住：静态抄本一条、动态默认一条、
+ * 头里的职责条数一条。REVERSE MUTATION：只改 cli.js 的常量 → 三条里对应那条红；只改
+ * install.sh 的默认值 → 静态与动态两条一起红；只改头里那句"只做 N 件事"或增删一条职责行 →
+ * 第四条红。
+ * ========================================================================= */
+
+const CLI_JS = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'cli.js')
+const INSTALL_SH_SRC = fs.readFileSync(INSTALL_SH, 'utf8')
+/** 头部注释区：到第一行 `set -eu` 为止（不是"前 40 行"那种抄本，改了脚本长度不用回来改这里）。 */
+const INSTALL_SH_HEADER = INSTALL_SH_SRC.slice(0, INSTALL_SH_SRC.indexOf('\nset -eu'))
+
+/** install.sh 那条默认值，从**赋值行本身**读出来（不是从输出猜）。 */
+function defaultRepoUrlFromSource(src) {
+  const m = /^REPO_URL="\$\{GLASSPANE_REPO_URL:-([^}]*)\}"/m.exec(src)
+  assert.ok(m, 'install.sh 里 `REPO_URL="${GLASSPANE_REPO_URL:-…}"` 这一行的形状变了——同步改这道闸，别让它空转')
+  return m[1]
+}
+
+/** install.sh 头里那条一键 curl 的 URL。 */
+function headerCurlUrlFromSource(src) {
+  const lines = src.split('\n').filter((line) => /^#\s+curl -fsSL (\S+) \| sh\s*$/.test(line))
+  assert.equal(lines.length, 1, `头里应当恰好有一行 \`#   curl -fsSL <url> | sh\`，实得 ${JSON.stringify(lines)}`)
+  return /^#\s+curl -fsSL (\S+) \| sh\s*$/.exec(lines[0])[1]
+}
+
+test('install.sh: 默认 clone 地址与头里的 curl 地址 = cli.js 的两个常量（抄本必须被对照过）', () => {
+  // 前提：这两个常量本来就是两个不同的地址。否则下面两条会互相顶包——一条改了，另一条
+  // 也能"相等"地绿过去。
+  assert.notEqual(REPO_URL, INSTALL_SH_URL, '前提：REPO_URL 与 INSTALL_SH_URL 是两个不同的东西')
+  assert.equal(defaultRepoUrlFromSource(INSTALL_SH_SRC), REPO_URL,
+    `install.sh 的默认 clone 地址不再是 cli.js 的 REPO_URL 那份：实为 ${defaultRepoUrlFromSource(INSTALL_SH_SRC)}`)
+  assert.equal(headerCurlUrlFromSource(INSTALL_SH_SRC), INSTALL_SH_URL,
+    `install.sh 头里那条 curl 不再是 cli.js 的 INSTALL_SH_URL 那份：实为 ${headerCurlUrlFromSource(INSTALL_SH_SRC)}`)
+  // 两条一键入口指的是同一处 clone：cli.js 的默认参数拼出来的 URL 与 install.sh 打印的那个
+  // 必须是同一个字符串（这条把"真源"那句从注释变成判据）。
+  const planned = safeGitCloneArgs({ targetDir: '/tmp/whatever' })
+  assert.ok(planned.args.includes(REPO_URL), `前提：installer 侧默认 clone 的就是 REPO_URL，实得 ${JSON.stringify(planned.args)}`)
+})
+
+test('install.sh: 不设覆盖位时，clone 计划行里的地址就是那个常量（默认路径从前从没被测过）', () => {
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'glasspane-default-url-'))
+  const cloneDir = path.join(bare, 'clone-target')
+  // drop 而不是设空：`GLASSPANE_REPO_URL=` 会被形状闸拒（那是另一条用例的判据），
+  // 这里要的是"这个覆盖位**没设**"那条默认路径。
+  const result = runInstallSh({
+    cwd: bare,
+    env: { GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: cloneDir },
+    drop: ['GLASSPANE_REPO_URL', 'GLASSPANE_REF'],
+  })
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  assert.match(result.stdout, PLANNED_CLONE, '这一条走的就是 clone 分支，否则下面的相等是空的')
+  assert.ok(result.stdout.includes(`-- ${REPO_URL} ${cloneDir}`),
+    `默认 clone 的必须是 cli.js 那份 REPO_URL（紧跟在选项分隔符 -- 之后、目标目录之前），实得：${result.stdout}`)
+  // 钉的是发布 tag，不是 main——同一条命令的两半都得对得上。
+  assert.ok(result.stdout.includes(`--branch v${RELEASE_VERSION}`), result.stdout)
+})
+
+test('cli.js: curl 地址的字面量只许出现在常量声明那一行，root 补救那句用插值', () => {
+  const src = fs.readFileSync(CLI_JS, 'utf8')
+  // 只数**含该 URL 值**的行：`${INSTALL_SH_URL}` 那种插值行里出现的是标识符，不是值，
+  // 所以这条计数量的正是"第二份抄本"。
+  const literalLines = src.split('\n').filter((line) => line.includes(INSTALL_SH_URL))
+  assert.equal(literalLines.length, 1,
+    `INSTALL_SH_URL 的字面量出现在 ${literalLines.length} 行里（应当只有常量声明那一行）：`
+    + `${JSON.stringify(literalLines.map((l) => l.trim()))}——多出来的那一行就是 org 改名时唯一不会被任何闸发现的复制品`)
+  assert.match(literalLines[0], /^\s*'https:\/\//, `那一行应当是常量声明本身，实得：${literalLines[0].trim()}`)
+
+  const guard = installGuard({ home: '/Users/someone', uid: 0 })
+  assert.equal(guard.ok, false, '前提：uid 0 走的就是拒绝分支')
+  assert.ok(guard.error.includes(`curl -fsSL ${INSTALL_SH_URL} | sh`),
+    `root 的补救必须把 INSTALL_SH_URL 交给读者（那是它唯一能照做的命令），实得：${guard.error}`)
+})
+
+test('install.sh: 头里声明的职责条数与实际列出的条目一一对得上（第五件事从前躲过了所有闸）', () => {
+  const stated = /只做 (\d+) 件事/.exec(INSTALL_SH_HEADER)
+  assert.ok(stated, '头里必须写成「本脚本只做 N 件事」——这道闸按那句数与下面的职责行比对')
+  const n = Number(stated[1])
+  const listed = [...INSTALL_SH_HEADER.matchAll(/^# 职责(\d+)：/gm)].map((m) => Number(m[1]))
+  assert.deepEqual(listed, Array.from({ length: n }, (_, i) => i + 1),
+    `头里说 ${n} 件事，实际列出的职责行是 ${JSON.stringify(listed)}——序号必须连续 1..N，`
+    + `加一条职责就把它写上并把数改对（v1.18.0 的 macOS 平台闸就是那么漏掉的）`)
+  const duties = [...INSTALL_SH_HEADER.matchAll(/^# 职责\d+：(.*)$/gm)].map((m) => m[1]).join('\n')
+  // 清单不能只是"条数对"，声明的每一条都得在脚本里真做。平台闸是本轮点名的那一条。
+  assert.match(duties, /平台闸/, '职责清单里必须写明平台闸（只 macOS）')
+  assert.match(INSTALL_SH_SRC, /\[ "\$\(uname -s\)" != "Darwin" \]/,
+    '头里说有平台闸，脚本里就必须真有那条判据——两边任一边先动都是红')
+  assert.match(duties, /Node 硬预检/, '职责清单里必须写明 Node 预检')
+  assert.match(INSTALL_SH_SRC, /-ge 18/, '头里说有 Node 预检，脚本里就必须真有那次比较')
+  assert.match(duties, /委托 installer/, '职责清单里必须写明委托 installer')
+  assert.match(INSTALL_SH_SRC, /^exec node "\$REPO\/installer\/cli\.js" "\$@"$/m, '委托那一行必须真在脚本末尾')
 })

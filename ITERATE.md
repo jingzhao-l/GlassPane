@@ -129,7 +129,8 @@ socket 的另一个入口，其信任边界写在 `SECURITY.md` §2.3。对外�
 - npm 上从来没有 `1.1.0` 这一档：`npm view glasspane-mcp@1.1.0` 与
   `npm view glasspane-install@1.1.0` 都回 404（本轮实测），已发布序列是
   `0.1.0 → 1.1.1 → 1.1.2 → 1.2.0 …`。当年那句"取决于 owner 是否已 `npm stage approve`"问的是
-  一个已经被版本线远远抛下的号，不再是一条待办——现在两个包的 `latest` 都是 `1.14.1`
-  （`npm view <pkg> dist-tags`，2026-10-14 实测）。
+  一个已经被版本线远远抛下的号，不再是一条待办——`latest` 随每条发布线推进，读它是
+  `npm view <pkg> dist-tags`；2026-10-14 那次读到的是 `1.14.1`，把这一格写成"现在也是"就注定被
+  下一条版本变成假话（2026-10-22 复测：两包的 `latest` 都已不等于这个数）。
 
 <!-- ITERATE:USER-OWNED:END -->

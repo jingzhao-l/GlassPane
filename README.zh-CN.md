@@ -114,7 +114,9 @@ GlassPane 给代理装上带账本的眼睛和手：
 **1. 安装**（macOS 14+；拉取钉住的发布 tag，因此可复现）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh | sh
+# 先取回脚本、再执行——刻意分两步。用管道给 `sh` 时，curl 自己失败会让 stdin 是空的，
+# `sh` 直接 EOF 退 0：一次什么都没装的运行对外报的是成功。
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
 ```
 
 **2. 授权**：面板打开后，为 **`GlassPane Daemon`** 勾选辅助功能、输入监控、屏幕录制。
@@ -161,8 +163,9 @@ macOS 禁止程序化授权，所以这是唯一的人工步骤；面板逐卡�
 所以同一天两次安装拿到同一份源码：
 
 ```bash
-# 1) 一行命令
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh | sh
+# 1) 先取回脚本再执行，分两步：`curl … | sh` 那条管道里，curl 自己失败时 `sh` 读到的是空输入，
+#    整条管道照样退 0——而读退出码的正是不在场的 agent 与 CI，它必须是真的那个。
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
 
 # 2) 经 npm（自己引导 clone 钉住的 tag）
 npx glasspane-install
@@ -408,7 +411,7 @@ GlassPane/
 ├── scripts/            set-version / check-version —— 单一版本线
 ├── specs/              实施规格与验收记录（PRD、P0–P6、审查记录）
 ├── ITERATE.md          本仓自己的 iterate onboarding 知识库
-└── .github/workflows/  ci.yml（9 条 lane；发布形态守卫是其中一条里的一个步骤）、release.yml
+└── .github/workflows/  ci.yml（10 条 lane；发布形态守卫是其中一条里的一个步骤）、release.yml
 ```
 
 ## 开发

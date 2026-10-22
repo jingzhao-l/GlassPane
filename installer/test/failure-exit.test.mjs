@@ -20,7 +20,9 @@
  *
  * REVERSE MUTATION：把入口任意一条改回 `process.exit(` → 第 (2) 层红；把 --help 那条的
  * `process.exitCode = 0` 换成 `process.exit(0)`，在会出现截断的平台上第 (3) 层的 usage
- * 完整性断言一起红；把入口守卫换回不比 realpath 的那版 → 只有第 (4) 层两条红。
+ * 完整性断言一起红；把入口守卫换回不比 realpath 的那版 → 只有第 (4) 层两条红；把
+ * `installer/package.json` 的 `files` 里那条 `"cli.js"` 删掉 → 第 (4) 层的夹具搭建直接红
+ * （2026-10-22 起它按 manifest 的交付清单搭目录，不再抄两个写死的文件名——见该层注释）。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -199,6 +201,15 @@ test('端到端 真安装失败：走到 install 的拒绝分支时步骤输出�
  * 夹具就得长成产品交付的样子：目录布局、相对链接写法、目标文件的可执行位、bin 路径从
  * package.json 读（改了声明这条闸会跟着走，不会钉死在旧文件名上）。
  *
+ * 2026-10-22 补的两件事（都不删旧断言）：从前这里抄的是**写死的两个文件名**
+ * （`['cli.js','package.json']`），于是 `files` 白名单从没被读过——把 `cli.js` 从 `files`
+ * 里删掉，这一层照旧绿，而真实发布的包会只剩一条悬空 bin 软链（CHANGELOG [1.12.3] 的那 19 个
+ * 版本）。现在交付清单从 manifest 读，并当场要求"每个 bin 目标都在 files 里"。
+ * 真正 `npm pack → 装进临时前缀 → exec` 的那道闸在
+ * `installer/test/daily-20261022-delivered-shape.test.mjs`：它跑的是发布物本体，不依赖这台机器
+ * 之外的东西也能跑（npm 不在时它具名跳过）。这一层保留下来是因为它**不需要 npm**，
+ * 入口守卫那一类红（不比 realpath 的守卫）在没有网络/没有 npm 的机器上照样能被发现。
+ *
  * REVERSE MUTATION：把入口守卫换回 `import.meta.url === pathToFileURL(process.argv[1]).href`
  * → 下面两条具名变红，而第 (3) 层那三条仍绿；这个反差正是这条闸存在的理由。
  */
@@ -206,14 +217,38 @@ function npmInstalledCli() {
   const root = tempRoot('npmprefix')
   const pkgSrc = path.dirname(CLI)
   const manifest = JSON.parse(fs.readFileSync(path.join(pkgSrc, 'package.json'), 'utf8'))
-  const binTarget = typeof manifest.bin === 'string' ? manifest.bin : manifest.bin[manifest.name]
-  assert.ok(binTarget, `package.json 没给 ${manifest.name} 声明 bin，这条闸就无处安放`)
+  const binPairs = typeof manifest.bin === 'string'
+    ? [[manifest.name, manifest.bin]]
+    : Object.entries(manifest.bin ?? {})
+  assert.ok(binPairs.length > 0, `package.json 没给 ${manifest.name} 声明 bin，这条闸就无处安放`)
+  // 交付集合 = manifest 自己点名的那份，不再是测试手抄的两个名字。
+  assert.ok(Array.isArray(manifest.files) && manifest.files.length > 0,
+    `${manifest.name} 的 package.json 没有 files 白名单：这一层就退化成"测试自己决定发什么"，`
+    + '而"谁交付哪些文件"必须是包自己说的那一份')
+  for (const [command, target] of binPairs) {
+    const rel = String(target).replace(/^\.\//, '')
+    const covered = manifest.files.some((entry) => {
+      const e = String(entry).replace(/^\.\//, '').replace(/\/+$/, '')
+      return e === rel || rel.startsWith(`${e}/`)
+    })
+    assert.ok(covered,
+      `bin["${command}"] 指向 ${target}，而 files 是 ${JSON.stringify(manifest.files)} —— 这条命令不在包自己`
+      + `声明的交付清单里（它此刻还在档内只是 npm 强行带上 bin 目标的实现细节）。这一层按 files 搭目录，`
+      + `所以清单与声明一脱钩它就红；真发出去的形态由 daily-20261022-delivered-shape.test.mjs 那份 pack 判。`)
+  }
+  const binTarget = binPairs.map(([, target]) => target)[0]
   const pkgDir = path.join(root, 'lib', 'node_modules', manifest.name)
   const binDir = path.join(root, 'bin')
   fs.mkdirSync(pkgDir, { recursive: true })
   fs.mkdirSync(binDir, { recursive: true })
-  for (const file of ['cli.js', 'package.json']) {
-    fs.copyFileSync(path.join(pkgSrc, file), path.join(pkgDir, file))
+  const ship = new Set(['package.json', ...manifest.files.map((entry) => String(entry).replace(/^\.\//, '').replace(/\/+$/, ''))])
+  for (const file of ship) {
+    const from = path.join(pkgSrc, file)
+    assert.ok(fs.existsSync(from), `files 点名了 ${file}，仓库里却没有它——pack 会静默跳过，这一层也必须红`)
+    const to = path.join(pkgDir, file)
+    fs.mkdirSync(path.dirname(to), { recursive: true })
+    if (fs.statSync(from).isDirectory()) fs.cpSync(from, to, { recursive: true })
+    else fs.copyFileSync(from, to)
   }
   fs.chmodSync(path.join(pkgDir, binTarget.replace(/^\.\//, '')), 0o755)
   const link = path.join(binDir, manifest.name)

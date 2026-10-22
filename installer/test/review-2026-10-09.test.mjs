@@ -452,7 +452,7 @@ test('finding3: install.sh 里 GLASSPANE_REPO_URL=ext::sh -c … 既不执行也
   const runSh = (env) => spawnSync('/bin/sh', [INSTALL_SH], {
     cwd: work,
     encoding: 'utf8',
-    env: { ...process.env, GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: cloneDir, GLASSPANE_INSTALL_DRY_RUN: '0', ...env },
+    env: { ...process.env, HOME: path.join(work, 'fake-home'), GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: cloneDir, GLASSPANE_INSTALL_DRY_RUN: '0', ...env },
   })
   try {
     const r = runSh({ GLASSPANE_REPO_URL: `ext::sh -c touch ${sentinel}` })
@@ -465,7 +465,7 @@ test('finding3: install.sh 里 GLASSPANE_REPO_URL=ext::sh -c … 既不执行也
     const dry = spawnSync('/bin/sh', [INSTALL_SH], {
       cwd: work,
       encoding: 'utf8',
-      env: { ...process.env, GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: cloneDir, GLASSPANE_INSTALL_DRY_RUN: '1', GLASSPANE_REPO_URL: 'ext::evil' },
+      env: { ...process.env, HOME: path.join(work, 'fake-home'), GLASSPANE_REPO: '', GLASSPANE_INSTALL_DIR: cloneDir, GLASSPANE_INSTALL_DRY_RUN: '1', GLASSPANE_REPO_URL: 'ext::evil' },
     })
     assert.notEqual(dry.status, 0, dry.stdout + dry.stderr)
     assert.match(dry.stderr, /GLASSPANE_REPO_URL/, dry.stderr)

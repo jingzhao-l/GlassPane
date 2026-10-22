@@ -139,7 +139,9 @@ all. GlassPane measures; it does not have taste. Use both for what they are good
 **1. Install** (macOS 14+; fetches the pinned release tag, so the build is reproducible):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh | sh
+# Fetch, then run — two steps on purpose. Piped into `sh`, a failed `curl` leaves stdin empty,
+# `sh` reaches EOF and exits 0: an install that did nothing reports success.
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
 ```
 
 **2. Grant permissions** when the panel opens — Accessibility, Input Monitoring, Screen Recording —
@@ -190,8 +192,10 @@ All three reach the same code. The two one-command channels clone the **same pin
 rather than a moving branch, so two installs on the same day get the same source:
 
 ```bash
-# 1) One-liner
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh | sh
+# 1) Fetch then run. Kept in two steps: with `curl … | sh`, a curl that fails leaves `sh` reading
+#    an empty stdin, and the pipeline exits 0 — the exit code is exactly what an absent-minded
+#    agent or CI reads, so it has to be the real one.
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
 
 # 2) Through npm (bootstraps its own clone of the pinned tag)
 npx glasspane-install
@@ -470,7 +474,7 @@ GlassPane/
 ├── scripts/            set-version / check-version — the single version line
 ├── specs/              implementation specs + acceptance records (PRD, P0–P6, audits)
 ├── ITERATE.md          this repo's own iterate onboarding knowledge base
-└── .github/workflows/  ci.yml (9 lanes; the publish-shape guard is a step in one of them), release.yml
+└── .github/workflows/  ci.yml (10 lanes; the publish-shape guard is a step in one of them), release.yml
 ```
 
 ## Development

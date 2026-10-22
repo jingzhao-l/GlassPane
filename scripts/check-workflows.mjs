@@ -17,10 +17,17 @@
  * This tool has no dependencies on purpose: it is the thing that verifies the
  * verifier, so it must not be the thing that can fail to install.
  *
+ * 用法：
+ *   node scripts/check-workflows.mjs              # 体检全部 workflow，有问题退 1
+ *   node scripts/check-workflows.mjs --self-test  # 每条规则各打一档变异，要求它按声明回答
+ *   node scripts/check-workflows.mjs --jobs       # 把 job 表（名字/行号/runs-on/run 正文）打成
+ *                                                 # JSON 退 0；一条 job 都没读到就退 2，不用空数组
+ *                                                 # 冒充"没有 job"
+ *
  * Exit codes: 0 clean, 1 a workflow is broken, 2 no workflows found (caliber
  * error — refusing to report success over an empty set).
  */
-import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync, writeSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -61,7 +68,7 @@ if (!targets.length) {
 }
 
 /**
- * Walk a workflow file line by line. We only need two structural facts, and we
+ * Walk a workflow file line by line. We only need the structural facts, and we
  * get them from indentation rather than a YAML parser so that duplicate keys
  * (which a parser collapses) stay visible.
  */
@@ -73,25 +80,49 @@ const RUN_SCRIPT = new RegExp(
   "g",
 )
 
-function inspect(target) {
-  const { dir, file } = target
-  const base = path.join(dir, file)
-  const text = readFileSync(base, "utf8")
+/**
+ * The single structural read of one workflow file, used by `inspect()` for every rule and by
+ * `--jobs` for the machine-readable answer.
+ *
+ * It was inlined in `inspect()` until a second reader appeared: `updater/test/daily-20261022-gates.test.mjs`
+ * has to ask "which job runs on macOS, and what does its `run:` body say" — the question that closes
+ * Defect 1's loop (a test file full of `process.platform !== 'darwin'` skips exists; does a job exist
+ * that actually runs it). Reading the same file with a *second* regex set would have made the test
+ * agree with itself rather than with CI, which is the shape this repository has been catching over and
+ * over. One walk, two consumers.
+ *
+ * Returns `{ lines, jobKeys, jobs, runRefs, shells, hasTopPermissions }`:
+ *   `jobKeys` — every 2-space key under `jobs:` with its line, duplicates included (a parser would
+ *               collapse them, and a collapsed duplicate is the defect rule 1 names);
+ *   `jobs`    — one record per job key: `{ name, line, runsOn, runs }`, where `runs` holds the
+ *               `run:` step bodies as this scanner sees them (block bodies arrive line by line);
+ *   `runRefs` — every `run:` line, flat, with its step's `working-directory`. A step written in
+ *               the shorthand (`- run: …`) is captured too; before this reader existed the scanner
+ *               only matched a line that *begins* with `run:`, so rules 2/2b/2c were blind to the
+ *               shorthand shape, and the answer to "does any job run this workspace's tests" came
+ *               out differently depending on how the author line-broke the YAML (that is the one
+ *               place this walk grew scope, and every workflow in this repo re-verified clean
+ *               against it on 2026-10-22);
+ *   `shells`  — whole `run:` bodies re-joined, because rule 2a judges a shell as one script.
+ */
+function walkWorkflow(text) {
   const lines = text.split("\n")
-  const problems = []
   const jobKeys = []
+  const jobs = []
+  let current = null
   let section = null // top-level key we are inside of
   let inRun = false
   let runIndent = 0
   const runRefs = []
-  // Whole `run:` bodies, assembled as the scanner goes. `runRefs` is per line on purpose —
-  // the script-existence rule reports line numbers — but a shell body has to be judged as one
-  // script, and comment/blank lines inside it are skipped by this loop, so re-joining those
-  // fragments by line number later cannot work.
   const shells = []
   let shellBlock = null
   let stepDir = "" // step-level working-directory, applied to that step's scripts
   let hasTopPermissions = false // a top-level `permissions:` block; see the check at the end
+
+  const addRun = (entry) => {
+    runRefs.push(entry)
+    if (current) current.runs.push(entry)
+  }
 
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i]
@@ -108,7 +139,7 @@ function inspect(target) {
     if (inRun) {
       const bodyIndent = raw.search(/\S/)
       if (bodyIndent > runIndent) {
-        runRefs.push({ text: raw.trim(), line: i + 1, dir: stepDir })
+        addRun({ text: raw.trim(), line: i + 1, dir: stepDir })
         if (shellBlock) shellBlock.lines.push(raw.trim())
         continue
       }
@@ -119,10 +150,18 @@ function inspect(target) {
     if (top) {
       section = line.split(":")[0]
       if (section === "permissions") hasTopPermissions = true
+      current = null
       continue
     }
     if (section === "jobs" && job && !nested) {
       jobKeys.push({ name: job[1], line: i + 1 })
+      current = { name: job[1], line: i + 1, runsOn: null, runs: [] }
+      jobs.push(current)
+      continue
+    }
+    const runsOn = /^ {4}runs-on:\s*(.+)$/.exec(line)
+    if (runsOn) {
+      if (current) current.runsOn = runsOn[1].trim().replace(/^["']|["']$/g, "")
       continue
     }
     const wd = /^\s*working-directory:\s*(\S+)\s*$/.exec(line)
@@ -130,10 +169,10 @@ function inspect(target) {
       stepDir = wd[1].replace(/^["']|["']$/g, "")
       continue
     }
-    const runMatch = /^(\s*)run:\s*(.*)$/.exec(line)
+    const runMatch = /^(\s*)(?:-\s+)?run:\s*(.*)$/.exec(line)
     if (runMatch) {
       const [, indent, inline] = runMatch
-      runRefs.push({ text: inline, line: i + 1, dir: stepDir })
+      addRun({ text: inline, line: i + 1, dir: stepDir })
       if (/[|>]/.test(inline)) {
         inRun = true
         runIndent = indent.length
@@ -145,6 +184,20 @@ function inspect(target) {
     }
   }
 
+  return { lines, jobKeys, jobs, runRefs, shells, hasTopPermissions }
+}
+
+/** The jobs of one workflow file, with `runs-on` and their `run:` bodies: what `--jobs` answers. */
+function jobsOfWorkflow(text) {
+  return walkWorkflow(text).jobs
+}
+
+function inspect(target) {
+  const { dir, file } = target
+  const base = path.join(dir, file)
+  const text = readFileSync(base, "utf8")
+  const { lines, jobKeys, runRefs, shells, hasTopPermissions } = walkWorkflow(text)
+  const problems = []
   // 1. duplicate job keys inside the jobs: section
   const seen = new Map()
   for (const j of jobKeys) seen.set(j.name, [...(seen.get(j.name) ?? []), j.line])
@@ -939,10 +992,43 @@ jobs:
   process.exit(0)
 }
 
-const unknown = process.argv.slice(2).filter((a) => a !== "--self-test")
+const unknown = process.argv.slice(2).filter((a) => a !== "--self-test" && a !== "--jobs")
 if (unknown.length) {
-  console.error(`check-workflows: unknown argument(s) ${unknown.join(", ")} — the only flag is --self-test`)
+  console.error(`check-workflows: unknown argument(s) ${unknown.join(", ")} — the flags are --self-test and --jobs`)
   process.exit(2)
+}
+
+// `--jobs` answers one question in machine-readable form: which job lives in which workflow, what
+// runner it asks for, and what its `run:` steps say. It is the SAME walk every rule above runs, so a
+// consumer that asks "does a macOS job run the updater suite" reads the file the way this verifier
+// does instead of with its own regex — two readers agreeing because they are one reader.
+// Exit 2 on an empty answer: `[]` printed for a broken scan is indistinguishable from "no jobs",
+// and a caller that treats that as a passing answer is the silent-green shape this file exists to
+// refuse.
+if (process.argv.includes("--jobs")) {
+  const rows = []
+  for (const target of targets) {
+    const text = readFileSync(path.join(target.dir, target.file), "utf8")
+    for (const job of jobsOfWorkflow(text)) {
+      rows.push({
+        workflow: target.label,
+        name: job.name,
+        line: job.line,
+        runsOn: job.runsOn,
+        runs: job.runs.map((r) => ({ line: r.line, text: r.text, dir: r.dir })),
+      })
+    }
+  }
+  if (!rows.length) {
+    console.error(`check-workflows --jobs: ${targets.length} workflow file(s) scanned, 0 jobs read — refusing to answer with an empty set`)
+    process.exit(2)
+  }
+  // 同步写 fd 1，不用 `console.log` + `process.exit()`：stdout 是管道时那一句 write 是异步的，
+  // 紧跟的 exit 会把它截在缓冲区里（本仓在 `install.sh` 的失败路径上记过同一形状，
+  // `installer/test/failure-exit.test.mjs` 就是那条的固定点测试）。这道闸的答案若被截成半行
+  // JSON，调用方读到的是 SyntaxError——那是"闸没运行"伪装成"闸报错"，比报错更难查。
+  writeSync(1, `${JSON.stringify(rows)}\n`)
+  process.exit(0)
 }
 
 let bad = 0

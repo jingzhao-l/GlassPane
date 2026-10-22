@@ -1,11 +1,23 @@
 #!/bin/sh
 # GlassPane 一键安装入口（P4 §35）：
 #   curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh | sh
-# 职责边界：本脚本只做四件事——Node 硬预检（installer 本身要求 Node >= 18）、
-# 源码定位（环境变量/cwd/已有 clone/自动 clone）、发布 ref 决策（钉 tag，不追分支）、
-# 委托 installer/cli.js 走完整安装流程（swift/npm 预检、构建、launchd、GUI 授权
-# 引导均在 installer 内）。**顺序要紧**：Node 预检排在 clone 之前，否则跑不动 installer
-# 的机器要先付一次深 1 clone 才知道装不了（2026-10-15 修）。
+# 职责边界：本脚本只做 5 件事，一条一行写在下面（行首 `# 职责N：`）。
+# **这个数与下面的行数由 installer/test/install-sh.test.mjs 逐条核对**：加一条职责而不改
+# 那句数（或改了数却没列出对应条目）就是红。头里的数与脚本实际做的事对不上，是本仓写过
+# 好几次的那类"注释不在任何闸里"（v1.18.0 加了 macOS 平台闸，头里仍旧写着"四件事"，
+# 而没有任何一道闸读过头——第五件事就这么躲过了所有检查）。
+# 职责1：Node 硬预检（installer 本身要求 Node >= 18）。
+# 职责2：平台闸——只 macOS，排在它要挡的那笔 clone 之前（v1.18.0 加的就是这一条）。
+# 职责3：源码定位（环境变量/cwd/已有 clone/自动 clone）。
+# 职责4：发布 ref 决策 + 两个覆盖位的形状闸（钉 tag，不追分支；GLASSPANE_REPO_URL 与
+#        GLASSPANE_REF 先进形状闸再进 git 的 argv）。
+# 职责5：委托 installer/cli.js 走完整安装流程（swift/npm 预检、构建、launchd、GUI 授权
+#        引导均在 installer 内）。
+# 另有一道不算职责的前置闸门：HOME 闸（下面的 0a）——它不是"做一件事"，而是保证后面每一条
+# 拼出来的路径都有家可归；dry-run 也不豁免它。
+# **顺序要紧**：Node 预检排在 clone 之前，否则跑不动 installer
+# 的机器要先付一次深 1 clone 才知道装不了（2026-10-15 修）；平台闸同样排在 clone 之前，
+# 因为它要挡的正是那笔 clone。
 # 零 bashism（POSIX sh，/bin/sh 直跑）；GLASSPANE_INSTALL_DRY_RUN=1 时只报告
 # 决策不执行（供 CI 语法/分支测试）——纯检查（Node 预检、两个覆盖位的形状闸）在
 # dry-run 里照跑，因为它们报的就是"这条命令会走到哪一步"。
@@ -269,6 +281,16 @@ fi
 if [ "$DRY_RUN" = "1" ]; then
   say "[dry-run] 将执行: node $REPO/installer/cli.js $*"
   exit 0
+fi
+# 平台闸的第二道：上面那一支只管"要 clone 的那一趟"，而源码已经在手边时（GLASSPANE_REPO 指的仓库、
+# 当前目录、既有 clone）这一趟从不经过它，注释里那句"交给 installer 自己去说平台"从来没成立过——
+# installer/cli.js 里没有任何平台判据（grep `process.platform` 命中 0）。实测形状：在一个 GlassPane
+#  checkout 里把 `uname` 桩成 Linux 跑真装，本脚本会一路走到 `exec node cli.js`，随后 npm ci、tsc、
+# swift build 与 launchd 注册全部真的发生（本轮就被这件事咬过一次：测试从仓库根跑，HOME 是真家目录）。
+# 所以这里在委托之前问一次：不是 Darwin 就停，且不写任何东西。dry-run 已经在上面 exit 了，
+# CI 的 install-gate 那一格读到的计划行不受影响。
+if [ "$(uname -s)" != "Darwin" ]; then
+  fail "本安装器只支持 macOS（uname -s = $(uname -s)）：Swift/XCTest、launchd 与 TCC 席位都在 macOS 这一侧。源码已经在手边（$REPO）这一趟不付 clone，但它同样不会 delegate 给 installer —— 没有 npm ci、没有 swift build、没有注册 launchd 作业。现在这一步没有可绕的旗标。"
 fi
 export GLASSPANE_REPO="$REPO"
 exec node "$REPO/installer/cli.js" "$@"

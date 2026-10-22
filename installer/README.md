@@ -10,8 +10,9 @@ macOS 14+.
 ## Channels / 安装渠道
 
 ```bash
-# 1) One-liner (推荐): fetches install.sh, which clones the pinned release tag
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh | sh
+# 1) Fetch, then run (recommended): install.sh clones the pinned release tag. Two steps on
+#    purpose — piped into `sh`, a curl that fails leaves stdin empty and the pipeline exits 0.
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/GlassPane/main/install.sh -o /tmp/gp-install.sh && sh /tmp/gp-install.sh
 
 # 2) This package via npx — also clones the pinned release tag when no local
 #    repo is found, then runs the same flow
