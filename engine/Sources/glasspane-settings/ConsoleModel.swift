@@ -152,6 +152,23 @@ final class ConsoleModel: ObservableObject {
     /// daemon 可执行文件路径：由面板在 hello 拿到 daemon 身份后回填。
     /// 没有它，清理/删除这类写入动作就没有可执行入口。
     @Published var daemonBinaryPath: String?
+    /// 这一侧**拒过**的那个自报路径（nil = 从没拒过）。
+    ///
+    /// 缺陷形状：`binaryPath` 不是面板测出来的，它是 daemon 在 `hello` 帧里自报的，而
+    /// engine.sock 的口径是"同用户即全权、无 peer 鉴权"（`PermissionStatus.swift:395-408`
+    /// 为提交那三条门记过这笔账）。护栏当时只装在 `SettingsModel` 的 launchd 提交点，
+    /// B 面——`runDaemonCLI` 那五条 exec——照旧把同一个字符串拿去起进程，其中
+    /// `--evidence-stats` 那条连一次点击都不需要（刷新/切页自动跑）。拒掉必须看得见：
+    /// 只让 `daemonBinaryPath` 悄悄停在 nil，屏幕上读到的是"没问过后台服务"，
+    /// 而事实是"有人报了一个不能信的路径、被这一侧拒了"。
+    @Published private(set) var refusedDaemonBinaryPath: String?
+    /// 拒掉那一条的原文。**措辞与提交那一条同源**（`SettingsModel:528-536` 说的是
+    /// 「它不是这个账号拥有的普通文件——<路径>」）：同一件事在两扇门上不许讲成两个故事。
+    var refusedDaemonBinaryPathCaption: String {
+        guard let refused = refusedDaemonBinaryPath else { return "" }
+        return "后台服务自报的程序路径不能被这个面板执行：它不是这个账号拥有的普通文件——"
+            + refused + "。这一趟没有起任何进程，面板手里那份路径也没有跟着它换。"
+    }
     /// 面板这一页读与写的状态根。
     ///
     /// 由来：`GLASSPANE_STATE_DIR` 是更新器那侧的口径，daemon 从不读它（它只认启动时的
@@ -252,7 +269,9 @@ final class ConsoleModel: ObservableObject {
     /// 从前这里只在 `daemonBinaryPath == nil` 时赋值一次，于是重装/重开之后
     /// `.onChange` 再也更新不动它——清理/删除/校验/统计一直在 exec 那份已经退役的
     /// 二进制，而页面上写的是新那一份。现在**每帧自报了就跟着换**（nil = 这一帧
-    /// 没自报，保持现状，因为"没读到路径"不等于"路径没了"）。
+    /// 没自报，保持现状，因为"没读到路径"不等于"路径没了"），而"跟着换"的前提是
+    /// 那个路径先过引擎侧那三条实测判据——自报的话不许直接换成一次 exec。
+    /// 拒掉的形状记在 `refusedDaemonBinaryPath`，页面上说得出拒了什么。
     /// - Parameter answered: 这一帧是不是真的拿到了 hello 回话。"注册表改动要重启
     ///   后台服务才生效"那句话只能在服务重新应门之后撤，点一下按钮不算重启成功。
     func adoptDaemonReport(binaryPath: String?, daemonStateRoot: String? = nil, answered: Bool) {
@@ -276,9 +295,24 @@ final class ConsoleModel: ObservableObject {
             stateRootSource = .daemonReportedEarlier
         }
         if let reported, !reported.isEmpty, reported != daemonBinaryPath {
-            daemonBinaryPath = reported
-            // 换的是"该问哪一个进程"，那一栏的旧结论（或从没结论）要跟着重测。
-            refreshDaemonStats()
+            // 这一道闸必须装在这里，而不是装在那五个调用点上：`reported` 是 peer 在
+            // `hello` 帧里自报的（`ConsoleRootView:107` 把 `settings.daemon.subject?.binaryPath`
+            // 交进来），而 engine.sock 无 peer 鉴权。少了这一句，任何能在候选 socket 名字
+            // （`GLASSPANE_ENGINE_SOCK` 还排在第一级）上回一帧的进程，都能把面板这个已登录
+            // 的 Aqua 会话变成"以该会话身份启动任意路径"的执行器——形状规则拦不住
+            // `/tmp/x/payload`，它绝对、无控制字符、看着完全合法。
+            // 拒掉时**保留上一个值**（没有就留 nil）："这一帧没自报"那套语义不许被改成
+            // "路径没了"，否则一次坏帧就把写入动作整个断掉；而 `refreshDaemonStats()` 的
+            // `guard let binary else { daemonStats = .notAsked }` 于是继续说实话——没问，
+            // 而不是拿一个别人的程序去量出一份假统计。
+            if PermissionReprobe.isSubmittableExecutable(reported) {
+                daemonBinaryPath = reported
+                refusedDaemonBinaryPath = nil
+                // 换的是"该问哪一个进程"，那一栏的旧结论（或从没结论）要跟着重测。
+                refreshDaemonStats()
+            } else {
+                refusedDaemonBinaryPath = reported
+            }
         }
         if rootChanged {
             // 换根之后这一页三个数都读错了对象：档案、注册表、台账全部重扫。
@@ -723,6 +757,30 @@ final class ConsoleModel: ObservableObject {
         lastActionMessage = nil
     }
 
+    /// `runDaemonCLI` 那道闸的第二条判据：允许**系统自带的 root 属主工具**。
+    ///
+    /// 第一条就是提交那三条门用的同一份判据（`PermissionStatus.swift:395-408` 记过它为什么
+    /// 必须存在）；这一支不是放宽安全边界，而是这一条通道**还**被 `SettingsModel` 那三条
+    /// launchd 腿复用（`Launchctl.path` 解出来的 `/bin/launchctl` 恒不属当前账号，只问第一条
+    /// 会把提交那条腿一起拦死）。豁免只放行"属主是 root、文件本身与所在目录都不对任何人
+    /// 写开放"的系统工具，而这一支放不进 peer 那份 payload：同一个账号写不出属主为 0 的
+    /// 文件（要写它就是 root，那时这一道闸本来也拦不住它），而它落在共享暂存目录里那份
+    /// 连第一条判据都过不了。剩下的暴露面只是"挑一个系统自带的程序"，argv 仍由面板写死。
+    nonisolated static func rootOwnedSystemTool(_ binary: String) -> Bool {
+        var info = stat()
+        guard lstat(binary, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_uid == 0,
+              info.st_mode & 0o022 == 0 else { return false }
+        let parent = (binary as NSString).deletingLastPathComponent
+        var parentInfo = stat()
+        // 与 `isSubmittableExecutable` 同一处不对称：父目录量的是 `stat`（跟着符号链接走），
+        // `/tmp` 那条链指的是 1777 的那一份，量链接本身会把共享落点放过去。
+        guard stat(parent, &parentInfo) == 0, parentInfo.st_uid == 0,
+              parentInfo.st_mode & 0o022 == 0 else { return false }
+        // 属主可执行那一位：一条不能执行的 root 属主文件（如 `/etc/hosts`）不是任何
+        // 调用点要起的那个程序。
+        return (info.st_mode & 0o100) != 0
+    }
+
     /// 跑一次 daemon 一次性 CLI，返回它的 stdout、stderr 与退出码；起不来/超时才回 nil。
     ///
     /// **非 0 退出也要把 JSON 交回去**：这些命令的报告体本身就是结论（部分修剪成功
@@ -739,6 +797,15 @@ final class ConsoleModel: ObservableObject {
         timeoutSeconds: TimeInterval = 20
     ) -> (output: String, errorOutput: String, status: Int32)? {
         guard let binary else { return nil }
+        // 第二道闸：判据在模型入口（`adoptDaemonReport`）已经跑过一次，这里再跑一次是
+        // 为了让**任何一个后来的调用点**都忘记不了它——那正是这份报告要的建议。
+        // 被拒时回 nil 在这一层是可以接受的，只因为入口那一道已经把拒掉的那句说实话
+        // （`refusedDaemonBinaryPath` + 「没问」那栏）；这一层的 nil 不许被折算成
+        // "后台服务不可达"之外的第二种含义，也不许由这里替用户编一句话。
+        if !PermissionReprobe.isSubmittableExecutable(binary),
+           !ConsoleModel.rootOwnedSystemTool(binary) {
+            return nil
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binary)
         process.arguments = arguments

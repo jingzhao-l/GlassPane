@@ -153,23 +153,43 @@ final class ReviewPanelTests: XCTestCase {
 
     /// 反向变异：**只在 `== nil` 时赋值**（发现的那处），重装/重开之后
     /// 清理/删除/校验/统计一直在 exec 那份已经退役的二进制。
-    func testEveryReportedPathReplacesTheRetiredOne() {
+    ///
+    /// 夹具改过一次：从前这里喂两个**不存在**的 `/opt/glasspane-*.app` 路径。面板现在在
+    /// 收下自报路径之前先问引擎侧那三条实测判据（`PermissionReprobe.isSubmittableExecutable`：
+    /// 普通文件、本账号拥有、父目录不对全体写开放），而 2026-10-22 那处 P0 就是"自报的路径
+    /// 被直接拿去 exec"。不存在的文件因此不该被采纳——把它们换成沙箱里真造的 Own-uid 文件，
+    /// 这条用例要证的"每帧自报就跟着换"一个字没变。
+    func testEveryReportedPathReplacesTheRetiredOne() throws {
         let console = makeConsole()
-        console.adoptDaemonReport(
-            binaryPath: "/opt/glasspane-1.app/Contents/MacOS/glasspaned", answered: true
-        )
-        XCTAssertEqual(console.daemonBinaryPath, "/opt/glasspane-1.app/Contents/MacOS/glasspaned")
-        console.adoptDaemonReport(
-            binaryPath: "/opt/glasspane-2.app/Contents/MacOS/glasspaned", answered: true
-        )
-        XCTAssertEqual(console.daemonBinaryPath, "/opt/glasspane-2.app/Contents/MacOS/glasspaned",
+        let root = TestSandbox.directory("review-retired-paths")
+        let first = root + "/glasspane-1.app/Contents/MacOS/glasspaned"
+        let second = root + "/glasspane-2.app/Contents/MacOS/glasspaned"
+        for path in [first, second] {
+            try FileManager.default.createDirectory(
+                atPath: (path as NSString).deletingLastPathComponent,
+                withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]
+            )
+            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: URL(fileURLWithPath: path))
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+        }
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: root) }
+
+        console.adoptDaemonReport(binaryPath: first, answered: true)
+        XCTAssertEqual(console.daemonBinaryPath, first)
+        console.adoptDaemonReport(binaryPath: second, answered: true)
+        XCTAssertEqual(console.daemonBinaryPath, second,
                        "第二次 hello 报的那个路径必须赢：页面写的与按钮 exec 的不能是两份程序")
         // 这一帧没自报（旧 daemon / 没连上）不等于路径没了：清空它会把写入动作整个断掉。
         console.adoptDaemonReport(binaryPath: nil, answered: false)
-        XCTAssertEqual(console.daemonBinaryPath, "/opt/glasspane-2.app/Contents/MacOS/glasspaned")
+        XCTAssertEqual(console.daemonBinaryPath, second)
         console.adoptDaemonReport(binaryPath: "   ", answered: false)
-        XCTAssertEqual(console.daemonBinaryPath, "/opt/glasspane-2.app/Contents/MacOS/glasspaned",
+        XCTAssertEqual(console.daemonBinaryPath, second,
                        "空白路径不是路径")
+        // 同一条采纳判据的另一侧：一个不属于这个账号的路径（这里用不存在的路径代表"过不了
+        // 那三条"）不许把好的那份换掉，也不许把已经换上的清空。
+        console.adoptDaemonReport(binaryPath: root + "/retired-by-upgrade", answered: true)
+        XCTAssertEqual(console.daemonBinaryPath, second,
+                       "过不了归属判据的自报路径不能换掉正在用的那一份")
     }
 
     /// 反向变异：**按下「重启后台服务」就把 `pruneNeedsRestart` 抹掉**——点一下

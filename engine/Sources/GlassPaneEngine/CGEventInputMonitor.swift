@@ -32,6 +32,13 @@ public protocol InputEventKindReporting: AnyObject {
 /// on those notifications (bounded, with the read-back checked rather than
 /// assumed), and every outcome is *published* through `isMonitoringInput` /
 /// `inputMonitoringFault` instead of being inferred from an empty stream.
+///
+/// The same rule covers the one loss this class causes by itself: the bounded FIFO
+/// evicting its oldest events. A tap that is alive but has already thrown away the
+/// start of the window delivers a `humanEvents == []` that reads exactly like
+/// "nobody touched the machine", so an eviction is published too — through
+/// `inputEventsDroppedSinceLastCheck()`, which `AttributionGuard` samples the same
+/// way it samples the liveness bit.
 public final class CGEventInputMonitor: InputEventSource, InputSourceMonitoring, InputEventKindReporting {
 
     // MARK: - What this tap actually subscribes to (single source of truth)
@@ -300,6 +307,16 @@ public final class CGEventInputMonitor: InputEventSource, InputSourceMonitoring,
         return tapAlive ? nil : lastFault
     }
 
+    /// 本轮持有窗口里缓冲区挤掉过事件吗（读后清零，交给守卫采样）。
+    ///
+    /// 报的是"位"而不是条数，形状与 `disabledSinceLastCheck()` 一致：一位读者问
+    /// "自上次以来发生过吗"，条数在累计观测面 `droppedEventCount` 上。条数在这里
+    /// 也换不到结论——挤掉的是**队首**，所以不知道的到底是哪几次按键，队列自己
+    /// 也说不出来。
+    public func inputEventsDroppedSinceLastCheck() -> Bool {
+        eventsDroppedSinceLastCheck()
+    }
+
     // MARK: - Liveness / diagnostics
 
     public var isTapAlive: Bool { isMonitoringInput }
@@ -331,6 +348,20 @@ public final class CGEventInputMonitor: InputEventSource, InputSourceMonitoring,
         stateLock.lock()
         defer { stateLock.unlock() }
         return reArmFailureCount
+    }
+
+    /// 累计被缓冲区容量挤掉的最老事件数（只读观测面，形状同 `tapDisableCount`）。
+    /// 探针侧的每种丢失都有公开计数（`droppedEvents` / `droppedWrites` /
+    /// `truncatedValues`），而输入缓冲区这一种从前溢出之后无人知晓——守卫却把剩下
+    /// 那段队列的头部当作"这段时间没人碰机器"的证据在读。
+    public var droppedEventCount: Int { eventsBuffer.droppedEventCount }
+
+    /// 自上次读取以来缓冲区是否挤掉过事件（读后清零，形状同
+    /// `disabledSinceLastCheck()`）。**读者只有一个**：`AttributionGuard` 的采样点
+    /// （`inputEventsDroppedSinceLastCheck()`）。别处要看丢失请读上面那个累计值，
+    /// 在别处调用这一条会把守卫还没看到的那一位吃掉。
+    public func eventsDroppedSinceLastCheck() -> Bool {
+        eventsBuffer.droppedSinceLastCheck()
     }
 
     /// 最近一次故障原因，**无论**当前存活与否（重装成功后仍想回看掉过几次）。
@@ -511,11 +542,21 @@ public final class CGEventInputMonitor: InputEventSource, InputSourceMonitoring,
 /// A tiny thread-safe FIFO for monitored input events. The CGEvent tap runs
 /// on its own event-tracking thread while the daemon polls from the main
 /// loop, so the buffer must be safe under concurrent access.
+///
+/// 有界不是无声的：每一条因容量被挤掉的事件都记在 `droppedEventCount` 上，并可由
+/// `droppedSinceLastCheck()` 读出"这一轮里掉过"。丢掉那批事件的是**队首**（最早的
+/// 那几个），所以丢不丢改变的是"空队列能不能算一次观测"这件事——不记下来的后果不是
+/// 少一个数字，而是 `AttributionGuard` 会把一个没测完的窗口发布成干净窗口。
 final class LockedEventBuffer {
     /// Bounded capacity: a long-unpolled stream never grows without limit,
-    /// the oldest events drop first.
+    /// the oldest events drop first — and every one of those drops is counted
+    /// (`droppedEventCount`), never merely performed.
     private let capacity: Int
     private var buffer: [InputEvent] = []
+    /// 累计被挤掉的事件条数（与 `disableCount` 同一条只读观测面）。
+    private var droppedCount = 0
+    /// 自上次读取以来是否挤掉过（与 `disablePendingReport` 同一条读清位）。
+    private var dropPendingReport = false
     private let lock = NSLock()
 
     init(capacity: Int = 4096) {
@@ -527,8 +568,29 @@ final class LockedEventBuffer {
         defer { lock.unlock() }
         buffer.append(event)
         if buffer.count > capacity {
-            buffer.removeFirst(buffer.count - capacity)
+            let evicted = buffer.count - capacity
+            buffer.removeFirst(evicted)
+            droppedCount += evicted
+            dropPendingReport = true
         }
+    }
+
+    /// 累计被容量挤掉的最老事件数（只读观测面）。
+    var droppedEventCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return droppedCount
+    }
+
+    /// 自上次读取以来是否挤掉过事件（读后清零）。形状照抄
+    /// `CGEventInputMonitor.disabledSinceLastCheck()`：一位读者问"这一轮里掉过吗"，
+    /// 条数走上面那条累计面。
+    func droppedSinceLastCheck() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let seen = dropPendingReport
+        dropPendingReport = false
+        return seen
     }
 
     func pop() -> InputEvent? {

@@ -251,6 +251,19 @@ struct ConsoleRootView: View {
                         .font(.caption2)
                         .foregroundStyle(.orange)
                 }
+                // 拒掉的那一条必须与"程序路径"那一行同屏说出来：`adoptDaemonReport` 拒了一个
+                // 不合规格的自报路径后，`daemonBinaryPath` 保持原值（常常是 nil），页面上
+                // 只剩"没问"——而事实是"有人报了一个不能信的路径、这一侧拒了"。两句都是
+                // 事实，只印前一句就是替后一句遮掉。措辞与提交那条腿同源（`SettingsModel`
+                // 的「不能被提交：它不是这个账号拥有的普通文件——<路径>」）。
+                if console.refusedDaemonBinaryPath != nil {
+                    Text(console.refusedDaemonBinaryPathCaption)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("gp-daemon-refused-binary")
+                }
             }
             Spacer()
             Button {

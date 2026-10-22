@@ -19,6 +19,23 @@ public protocol InputSourceMonitoring: AnyObject {
     var isMonitoringInput: Bool { get }
     /// 不在测的原因（在测时应为 nil）；只进日志/诊断，不改冻结的证据形状。
     var inputMonitoringFault: String? { get }
+    /// 这一轮里源有没有把自己的事件队列挤掉过投递（读后清零的观测位，形状同
+    /// `CGEventInputMonitor.disabledSinceLastCheck()`）。
+    ///
+    /// true ⇒ 队列的**头部**没了：守卫随后 drain 到的 `humanEvents == []` 只说明
+    /// "队尾没迟到者"，不说明"这段没人碰机器"。它和"通道断了"是同一级事实缺口，
+    /// 所以走同一条折叠（见 `noteDroppedEvents`）。
+    ///
+    /// 声明成协议成员**并在扩展里给默认实现**，而不是给 conformer 加一个必须实现
+    /// 的成员：没有事件队列的源（两个测试脚本源）逐字维持今天的行为——对它们来说
+    /// "没挤掉"就是真话，而要求它们各自写一遍 false 只会让下一个 conformer 忘了写。
+    func inputEventsDroppedSinceLastCheck() -> Bool
+}
+
+public extension InputSourceMonitoring {
+    /// 缺省答案：**没有投递被挤掉**。只在源自己没有队列时才是缺省值——有队列的
+    /// 源必须覆盖它，否则"缓冲区溢过"这件事又一次无人知晓。
+    func inputEventsDroppedSinceLastCheck() -> Bool { false }
 }
 
 /// 一次操作持有操作权后的污染裁决。
@@ -29,10 +46,12 @@ public struct OperationRightVerdict: Equatable {
     /// 持有的 `.human` 事件（进证据报告/日志，用于审计而非垄断 evidence）。
     /// 未监测时它如实为空——空集合是"没抓到事件"，不是"没发生"。
     public let humanEvents: [InputEvent]
-    /// 本次持有期间输入通道是否始终在监测。false ⇒ `contaminated` 是"未测量"
+    /// 本次持有期间输入通道是否**全程**在监测、且这一段观测没被截短（队列挤掉过
+    /// 投递就不算全程）。false ⇒ `contaminated` 是"未测量"
     /// 折算出的保守值，裁决不承载任何肯定结论。
     public let monitored: Bool
-    /// `monitored == false` 时源给出的原因串（CGEvent tap 停用/权限掉线…）。
+    /// `monitored == false` 时源给出的原因串（CGEvent tap 停用/权限掉线/缓冲区
+    /// 把这一轮最早的投递挤掉了…）。
     public let monitoringFault: String?
 
     public init(
@@ -61,6 +80,12 @@ public struct OperationRightVerdict: Equatable {
 /// 通道存活（R2-05）：源实现 `InputSourceMonitoring` 且自报"没在测"时，本窗口
 /// 判 `monitored: false` 并取保守的 `contaminated: true` —— 零投递不再是"没人碰
 /// 机器"的证据。未实现该协议的源（测试脚本源）视为在测，判定语义逐字不变。
+///
+/// 观测被截短（每日任务 2026-10-22）：同一个折叠也接住"源在测、但把这一轮最早
+/// 的那批投递挤掉了"（`inputEventsDroppedSinceLastCheck()`）。此时 `humanEvents`
+/// 照样为空，而那个空是残缺队列的尾部，不是一次测量——所以本窗口同样判
+/// `monitored: false` + `contaminated: true`，`monitoringFault` 具名写清不知道的是
+/// 哪一件事。默认实现回 false 的源逐字不变。
 public final class AttributionGuard {
 
     /// 默认输入空闲窗口：最近 500ms 内无真实输入视为可独占操作。
@@ -79,6 +104,7 @@ public final class AttributionGuard {
     /// 本次持有期间通道是否**一直**在监测（acquire 起每轮采样取与）。
     private var holdMonitored = true
     /// 第一次采样到"没在测"时原因串（后续故障不覆盖，留因果那一条）。
+    /// 缓冲区把这一轮的事件挤掉了也记在这里：那同样是"这一段没测完"的一条原因。
     private var holdMonitoringFault: String?
 
     /// 源是否自报存活。未实现 `InputSourceMonitoring` 的源视为在测。
@@ -86,6 +112,16 @@ public final class AttributionGuard {
         guard let source = inputSource as? InputSourceMonitoring else { return (true, nil) }
         return (source.isMonitoringInput, source.inputMonitoringFault)
     }
+
+    /// 观测被截短的那条具名原因：写清**不知道的是哪一件事实**，而不是只说"丢了
+    /// 几个事件"。挤掉的是队首，所以窗口最早的那批投递无从复原；不写条数是因为
+    /// 这一位读者手里只有"掉过/没掉过"，条数在源的累计观测面上
+    /// （`CGEventInputMonitor.droppedEventCount`）——编一个看不到的数字进来，
+    /// 就是本文件反复在拆的那类假精度。
+    private static let droppedEventsFault =
+        "input event buffer overflowed during this window: the oldest delivered events were evicted "
+        + "before the guard drained the queue, so what happened at the start of the window is unknown "
+        + "and an empty humanEvents here measures nothing"
 
     public init(
         inputSource: InputEventSource,
@@ -129,6 +165,10 @@ public final class AttributionGuard {
         let sample = currentMonitoring()
         holdMonitored = sample.monitored
         holdMonitoringFault = sample.monitored ? nil : sample.fault
+        // acquire 这一采也问一次截短：此刻位上若还挂着"上一段里溢过"，被挤掉的
+        // 那批正是上面 `peekAvailable()` 读过头部的队列，而本次持有的起点还可能
+        // 回拨到那段里（`degradeOnBusy`）——这段的开头同样没人知道，不是冤枉账。
+        noteDroppedEvents()
         return .acquired
     }
 
@@ -142,11 +182,30 @@ public final class AttributionGuard {
     /// 采样通道存活位：一旦掉过就固定在"未监测"，原因保留第一条。
     private func sampleMonitoring() {
         let sample = currentMonitoring()
-        guard !sample.monitored else { return }
-        if holdMonitoringFault == nil {
-            holdMonitoringFault = sample.fault
+        if !sample.monitored {
+            if holdMonitoringFault == nil {
+                holdMonitoringFault = sample.fault
+            }
+            holdMonitored = false
         }
+        // 存活位为真不等于这一轮**测全了**：队列还在投、但最早那几条已经被容量
+        // 挤掉，drain 出来的 `humanEvents` 照样为空。两次提问合起来才回答"这个
+        // 窗口有人看着吗"，缺一条都得把窗口折成未监测。
+        noteDroppedEvents()
+    }
+
+    /// 源这一轮挤掉过投递 ⇒ 把本窗口按监测故障折叠：`holdMonitored = false` +
+    /// 具名 `holdMonitoringFault`，于是裁决点（`contaminated: !monitored ||
+    /// !humanEvents.isEmpty`）不可能把这段发布成干净，归因停在 `.weak`，档案里
+    /// 的 `contaminationBasis` 带着"哪一段观测没了"这句话。
+    /// 未实现 `InputSourceMonitoring` 的源、以及落在默认实现上的源逐字不变。
+    private func noteDroppedEvents() {
+        guard let source = inputSource as? InputSourceMonitoring else { return }
+        guard source.inputEventsDroppedSinceLastCheck() else { return }
         holdMonitored = false
+        if holdMonitoringFault == nil {
+            holdMonitoringFault = Self.droppedEventsFault
+        }
     }
 
     /// 结束持有并裁决：排空剩余事件，统计持有起点之后到达的 `.human` 事件。
