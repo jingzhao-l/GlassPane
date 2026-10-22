@@ -573,22 +573,72 @@ public final class ProjectRegistry {
 }
 
 extension ProjectRegistry {
-    /// `glasspaned --project-prune` 在"写完却读不回来"时交给调用方的那份拒绝载荷
+    /// `--project-prune` 的**回读**读不开时该回哪一份载荷；回读成功返回 nil，调用方
+    /// 继续报它数出来的那些东西。
+    ///
+    /// 判据留在库里，是因为 `main.swift` 是 executable target 的顶层代码、谁也 import
+    /// 不了它，而这条分支从前在 CLI 里写的是 `verified.loadFailed && !dryRun`：只有真删
+    /// 会拒绝，`--dry-run`（面板用来预览的那一条）继续走到
+    /// `"loadFailed": false, "remaining": verified.all.count`。`all` 之所以是空的，正是
+    /// 因为这一次加载失败了——那一句等于同时说"这份表打不开"和"表里剩 0 条"，还对着
+    /// 一次失败的加载断言 `loadFailed: false`。预览不写盘，但它报的"剩下几条"同样要从
+    /// 这份表读出来：看不见就是看不见，与模式无关。
+    public static func pruneReadBackRefusal(
+        total: Int,
+        matched: Int,
+        dryRun: Bool,
+        registryPath: String,
+        readBackLoadFailed: Bool
+    ) -> [String: Any]? {
+        guard readBackLoadFailed else { return nil }
+        return pruneUnreadablePayload(
+            total: total, matched: matched, dryRun: dryRun, registryPath: registryPath
+        )
+    }
+
+    /// 回读拒绝的**非预览**拼法：`dryRun` 由签名说是 `false`，而不是靠调用方记得传。
+    /// 留着这个入口有两个理由：`DailyRound20261012Tests
+    /// .testPruneUnreadablePayloadStopsInventingTheCount` 钉的就是这份形状，而带模式的
+    /// 那条路（`pruneReadBackRefusal`／四参数版）才是 `--project-prune` 实际走的。
+    public static func pruneUnreadablePayload(total: Int, matched: Int, registryPath: String) -> [String: Any] {
+        pruneUnreadablePayload(total: total, matched: matched, dryRun: false, registryPath: registryPath)
+    }
+
+    /// `glasspaned --project-prune` 在"回读读不开"时交给调用方的那份拒绝载荷
     /// （纯函数，所以它有闸：这份载荷从前拼在 `main.swift` 里，谁也测不到它）。
     ///
     /// 关键在于**不写** `remaining` 与 `projects`：那条分支同时在说"我看不见这张表"
     /// 和"表里剩下 0 条"，而读者只会记住数字。`pruned: 0` 是真的（没有任何一条被
-    /// 确认删掉），`failed: matched` 也是真的（每一条都算没做成）。
-    public static func pruneUnreadablePayload(total: Int, matched: Int, registryPath: String) -> [String: Any] {
-        [
-            "command": "--project-prune", "dryRun": false, "loadFailed": true,
+    /// 确认删掉）。`dryRun` 由调用方说：这一支两种模式都会走，把它写死成 `false` 就是
+    /// 在预览的答复里否认那是预览；预览那一趟一次删除都没被派过，所以 `failed` 报 0、
+    /// `failures` 是空的、`requiresDaemonRestart` 是 false（同 CLI 正常答复里
+    /// `requiresDaemonRestart: pruned > 0` 的口径——一次没改过任何东西的跑不该凭空造
+    /// 一个"要重启"的待办），error 也不说"这次写把它弄坏了"。
+    public static func pruneUnreadablePayload(
+        total: Int, matched: Int, dryRun: Bool, registryPath: String
+    ) -> [String: Any] {
+        // 局部量先定型，再进 `[String: Any]` 字面量：这里的每一项都要在"预览/真删"两个
+        // 说法之间选一个，让它们各自有类型，别让整份字典去反向推断。
+        let failed = dryRun ? 0 : matched
+        let failures: [[String: String]] = dryRun
+            ? []
+            : [["projectId": "*", "reason": "the registry cannot be read back after the write"]]
+        let error = dryRun
+            ? "the preview could not read projects.json back, so this reply publishes no count of what the table holds: --dry-run wrote nothing, and a file nobody can open has no measurable entry count"
+            : "the write left projects.json unreadable; the daemon must not keep running on its in-memory copy"
+        let next = dryRun
+            ? "make the file readable again (`python3 -m json.tool \(RemedyCommand.quote(registryPath))`) and re-run the preview; this run deleted nothing, so there is nothing to recover"
+            : "restore the file from \(registryPath) backups and restart the daemon"
+        return [
+            "command": "--project-prune", "dryRun": dryRun, "loadFailed": true,
             "total": total, "matched": matched, "pruned": 0,
-            "prunedProjectIds": [String](), "failed": matched,
-            "failures": [["projectId": "*", "reason": "the registry cannot be read back after the write"]],
-            "requiresDaemonRestart": true,
+            "prunedProjectIds": [String](),
+            "failed": failed,
+            "failures": failures,
+            "requiresDaemonRestart": !dryRun,
             "registryPath": registryPath,
-            "error": "the write left projects.json unreadable; the daemon must not keep running on its in-memory copy",
-            "next": "restore the file from \(registryPath) backups and restart the daemon",
+            "error": error,
+            "next": next,
         ]
     }
 

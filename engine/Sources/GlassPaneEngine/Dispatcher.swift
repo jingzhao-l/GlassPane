@@ -63,6 +63,9 @@ public final class Dispatcher {
     }
 
     private func dispatch(_ request: ParsedRequest) throws -> [String: Any] {
+        // 白名单在 handler 之前跑：多余键必须在看不到任何副作用的位置被拒。`act` 带一个
+        // 拼错的键如果先执行再报错，手指已经落在用户的屏幕上了。
+        try Self.requireOnlyReadParamKeys(method: request.method, params: request.params)
         switch request.method {
         case .hello:
             return core.hello()
@@ -91,6 +94,46 @@ public final class Dispatcher {
         case .shutdown:
             return core.shutdown()
         }
+    }
+
+    // MARK: - Per-method params whitelist
+
+    /// 每个 handler **真正读到**的 `params` 键。这张表不是从发布面抄的：它是逐条 handler
+    /// 里的 `ParamValidation.*` 调用反查出来的（右注释就是出处），`mcp-shell/src/tools.ts`
+    /// 里那 11 个 `z.strictObject` 是它的**对照**面而不是来源——daemon 这边比发布面宽，
+    /// 就是"一份契约、两个判决"里执行的那一层失职。
+    ///
+    /// 为什么要闸：读不到的键从前被静默忽略，而"忽略"改变的是**答案**而不是细节——
+    /// `ParamValidation.optOperationId` 缺键回 nil，`diagnose`/`last_evidence` 于是回答
+    /// "最近那一个操作"，一次把 `operationId` 拼成 `operationid` 的调用方于是拿到**别的
+    /// 操作**的证据包与针对它的诊断，却被冠上它自己点名的那个 id。
+    ///
+    /// `hello` 与 `shutdown` 不在表里＝不检查：`core.hello()`/`core.shutdown()` 一个键
+    /// 都不读，被忽略的键里没有任何一个会改变它们回答的东西，而本轮的要求就是这两帧
+    /// 保持今天的形状——收紧它们是另一件事，做之前得先数出真的 caller。
+    /// `probe_status` **在**表里而接受集为空：`core.probeStatus()` 同样不读任何键，但它的
+    /// 发布面 `ProbeStatusArgs` 就是 `z.strictObject({})` —— 壳那边已经拒的键，
+    /// daemon 这边不许装作收下了。
+    static let acceptedParamKeys: [EngineMethod: [String]] = [
+        .attach: ["bundleId", "pid", "projectId"],              // optString/optInt/optString
+        .act: ["selector", "action", "degrade"],                // requireSelector/requireAction/optBool
+        .observe: ["maxDepth", "role"],                         // optInt/optString
+        .assertElement: ["selector", "property", "expected"],   // requireSelector/requireProperty/requireExpected
+        .diagnose: ["operationId"],                             // optOperationId
+        .lastEvidence: ["operationId"],                         // optOperationId
+        .snapshot: ["maxDepth"],                                // optInt
+        .restore: ["snapshotId", "steps", "mode"],              // requireSnapshotId/optSteps/optRestoreMode
+        .captureView: ["scale"],                                // optDouble
+        .auditUI: ["maxDepth", "minHitTargetPt"],               // optInt/optDouble
+        .probeStatus: [],                                       // 不读任何键
+    ]
+
+    /// 把表交给 `ParamValidation.requireOnlyKnownKeys`。表里没有的方法直接返回。
+    static func requireOnlyReadParamKeys(
+        method: EngineMethod, params: [String: Any]
+    ) throws {
+        guard let accepted = acceptedParamKeys[method] else { return }
+        try ParamValidation.requireOnlyKnownKeys(params, accepted: accepted, method: method.rawValue)
     }
 
     private func handleAttach(_ params: [String: Any]) throws -> [String: Any] {

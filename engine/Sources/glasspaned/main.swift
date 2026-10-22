@@ -1043,12 +1043,20 @@ private func runProjectPrune(options: Options) -> Never {
     let prunedIds = dryRun ? [] : hits.map(\.projectId).filter { !stillRegistered.contains($0) }
     let pruned = prunedIds.count
     let failedCount = dryRun ? failures.count : hits.count - pruned
-    if verified.loadFailed && !dryRun {
-        // 载荷本身在库里（`ProjectRegistry.pruneUnreadablePayload`），因为那份形状要有闸：
-        // 它不写 `remaining`/`projects` —— 这条分支说的是"看不见这张表"，不能同时报"表里剩 0 条"。
-        writeJSON(ProjectRegistry.pruneUnreadablePayload(
-            total: before.count, matched: hits.count, registryPath: registry.filePath
-        ), to: .standardError)
+    if let refusal = ProjectRegistry.pruneReadBackRefusal(
+        total: before.count,
+        matched: hits.count,
+        dryRun: dryRun,
+        registryPath: registry.filePath,
+        readBackLoadFailed: verified.loadFailed
+    ) {
+        // 判据与载荷本身都在库里（`ProjectRegistry.pruneReadBackRefusal`），因为那份形状
+        // 要有闸：它不写 `remaining`/`projects` —— 这条分支说的是"看不见这张表"，不能
+        // 同时报"表里剩 0 条"。条件从前是 `verified.loadFailed && !dryRun`，于是只有真删
+        // 会拒绝，而 `--dry-run` 恰恰是面板用来预览的那一条：预览继续走到下面，把
+        // `remaining: verified.all.count` 从一个第二次加载就失败的文件里数成 0，还对一次
+        // 失败的加载断言那次加载没失败。看不见与模式无关，两种模式同一条判据。
+        writeJSON(refusal, to: .standardError)
         exit(1)
     }
 

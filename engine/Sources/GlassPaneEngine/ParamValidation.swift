@@ -257,6 +257,51 @@ enum ParamValidation {
         return mode
     }
 
+    // MARK: - Per-method params whitelist (P0 §3.3)
+
+    /// 调用方给的键名回显进拒绝文本时的封顶。判据与 `RecipeLoader.errorEchoMaxLength`
+    /// 同一条：一句错误里的 4 KiB 键名会变成读者终端上的一屏，而这一整句还要进
+    /// `Dispatcher.encode` 的那一帧——超限兜底路径是为真正的大答复准备的，不该靠它。
+    static let paramEchoMaxLength = 120
+
+    /// 拒绝这个方法**不读**的每一个 `params` 键。
+    ///
+    /// 缺陷形状：`optOperationId` 对**缺键**回 nil，`diagnose`/`last_evidence` 于是
+    /// 回答"最近那一个操作"。把 `operationId` 拼成 `operationid` 的调用方拿到的是
+    /// **另一个操作**的证据包与针对它的诊断，却挂在自己点名的那个 id 下面；拼错的
+    /// `degrade`（busy 窗口照旧被拒）、`maxDepth`、`mode` 是同一类。一个表达意图的键
+    /// 被静默忽略不是宽容，是替调用方回答了它没问的问题——本仓对同一个形状早就写过
+    /// 判据（`RecipeLoader.stepKeys` 的 strictObject 拒绝），这里把它接到线上协议面。
+    ///
+    /// 接受集由调用方给（`Dispatcher.acceptedParamKeys`，那张表逐个 handler 反查自
+    /// `Dispatcher.swift` 里真实发生的 `ParamValidation.*` 读取）。这个函数只管形状：
+    /// 说出被拒的键，并说出这个方法读哪些键——读者不需要猜"是不是还有别的键也被吞了"。
+    static func requireOnlyKnownKeys(
+        _ params: [String: Any], accepted: [String], method: String
+    ) throws {
+        let rejected = params.keys.filter { !accepted.contains($0) }.sorted()
+        guard !rejected.isEmpty else { return }
+        let names = rejected.map { "'\(cappedParamKey($0))'" }.joined(separator: ", ")
+        let reads = accepted.isEmpty
+            ? "reads no `params` keys at all"
+            : "reads only these `params` keys: \(accepted.sorted().joined(separator: ", "))"
+        throw GPError(
+            code: .badParams,
+            message: "method '\(method)' does not read \(names); it \(reads)"
+                + " — the frame was refused before its handler ran, so nothing this frame asked for happened",
+            remedy: "spell the key exactly the way this method reads it (the list is case-sensitive: `operationId`, not `operationid`) and resend; do not simply drop the rejected key when it carried intent — an ignored `degrade`, `maxDepth` or `operationId` changes which answer the caller would have got, which is why the daemon refuses instead of ignoring"
+        )
+    }
+
+    /// 键名按**标量**截断（`RecipeLoader.capped` 的同一条理由：按码元截会留下半个星外
+    /// 字符），并且把截断本身说出来——一个看起来完整的截断值是同样的一句假话，只是字号小。
+    static func cappedParamKey(_ key: String) -> String {
+        let codePoints = key.unicodeScalars.count
+        guard codePoints > paramEchoMaxLength else { return key }
+        let kept = String(String.UnicodeScalarView(key.unicodeScalars.prefix(paramEchoMaxLength)))
+        return kept + "… (\(codePoints) code points total, first \(kept.unicodeScalars.count) shown)"
+    }
+
     /// Optional `steps` array of act-like steps for ffwd 重演 (§1.2).
     /// Returns nil when absent; otherwise validates 1–64 entries.
     static func optSteps(_ params: [String: Any], _ key: String = "steps") throws -> [(Selector, Action)]? {
