@@ -90,7 +90,7 @@ bridge。每条回代码复核后才动手；复核后不成立的一条写在�
 | 26 | `bridge` 交付 `-o "command script import %s"` | 未加引号，仓库路径含空格时（macOS 家目录常见）桥根本导不进来，而回话把原因写成"开发者工具权限" | 按 lldb 自己的分词加引号；无载荷时的归因分档，不再默认赖权限 |
 | 27 | `SECURITY.md` / `.zh-CN.md` 两处 | 把版本线与门禁计数写死在散文里（`1.18.x` 的一句叙述、"12 declared sites, 17 checked lines"）——`set-version` 只推进被门禁的那一格，散文会被留在原地继续宣称旧线 | 改为不含数字的叙述；被 `check-doc-links.mjs` 当"当前版本线"claim 的那一格表格行是真门禁行，随本版推进为 `1.19.x`（它不在 `version-sites.mjs` 的位点表里，由这条闸逼着改）；两处失效的行号引用指回真位置 |
 
-### 复核判为不是缺陷的一条（不计入上面 26 条）
+### 复核判为不是缺陷的一条（不计入上面 27 条）
 
 `EngineCore` 计划态 restore 仍回 `consistent: true`。审查提出"读侧可能当成实测一致"。回代码与规格复核：该字段是
 P5 §6.4 原文要求的，方法表冻结不能删；同一载荷里带着 `consistentBasis: "plan-only, state not re-measured"`；
