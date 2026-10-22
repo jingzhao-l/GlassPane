@@ -29,11 +29,12 @@
  * `the root lock's updater workspace entry is a version line site, and is compared` goes red.
  *
  * 2026-10-22 起这个文件还守第二件事：`SECURITY.md` / `SECURITY.zh-CN.md` 受影响版本表里那一格
- * `| 1.19.x |` 现在是一个声明过的位点（而且是按版本线的**段**比的那一种）。REVERSE MUTATION：
+ * `| X.Y.x |` 现在是一个声明过的位点（而且是按版本线的**段**比的那一种）。REVERSE MUTATION：
  * 从 `SITES` 删掉那两位 → `SECURITY 的受影响版本线两格是指向表格格的位点…` 红并点名文件；
  * 去掉 `line: true` → 同一条的红落在"没有 line 标记"上，而 `line 位点按版本线的段…` 会指出
  * 那样写会落进表格里的是 `1.20.3.x`；把 `drift()` 的段折算去掉 → `SECURITY 那两格漂了…` 红在
- * 期望值上（真源是 `1.19.0` 而那一格写的是 `1.19`，两边都恒红，所以这一条同时也证自己不是空转）。
+ * 期望值上（真源那一行是完整 semver，那一格是段，两边都恒红，所以这一条同时也证自己不是空转）。
+ * 位点表自己的条数红落在 `位点表的条数是一个要有意改的数字，不是散文`，不落在 SECURITY 那一节。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -134,23 +135,34 @@ test('link entries carry no version, so they are not lock sites (the finding tha
 
 const SECURITY_LINE_SITES = ['SECURITY.md', 'SECURITY.zh-CN.md'].map((file) => SITES.find((s) => s.file === file))
 
+test('位点表的条数是一个要有意改的数字，不是散文', () => {
+  // 这条从前住在本文件 SECURITY 那一节里，于是加一个位点（2026-10-22 的 CFBundleVersion）红的是
+  // "SECURITY 的受影响版本线两格…"——一条关于别人那件事的测试。计数本身是有意的闸门：它挡的是
+  // "顺手加一行正则、没人打算推它也没人打算核它"，所以数字要留着，但它得报对自己的那一格。
+  assert.equal(SITES.length, 15, `位点表是 ${SITES.length} 条；新增/删除位点要连这条与它的夹具一起改`)
+})
+
 test('SECURITY 的受影响版本线两格是指向表格格的位点，且各自恰好命中一次', () => {
   // 这一族位点原来的状态是：`check-doc-links.mjs` 的「当前版本线」主张读它，而 `SITES` 不知道它，
   // 于是 `set-version` 推不动、每次发版都要人改两份文件——红的原因是"忘了改"而不是"写错了"
   // （2026-10-21 那轮的 #27 记的就是这件事，当时留作手改）。现在是位点了。
-  assert.equal(SITES.length, 14, `位点表是 ${SITES.length} 条；新增/删除位点要连这条与它的夹具一起改`)
   for (const site of SECURITY_LINE_SITES) {
     assert.ok(site, 'SECURITY 那一位不在 SITES 里：那一格又回到没人推的状态')
     assert.equal(site.line, true, `${site.file} 的位点没有 line 标记：见下一条测试，那是它必须按段写的原因`)
     const hits = siteHitCount(site)
     assert.equal(hits, 1, `${site.file} 的位点正则命中 ${hits} 次：0 次是漏，>1 会改到别人的格子（位点表自己的口径）`)
   }
-  // 命中一次不等于命中在对的那一行：把命中的字符串本身钉住，才是"这一格"。
+  // 命中一次不等于命中在对的那一行：把命中的字符串本身钉住，才是"这一格"。期望值从真源那一行读
+  // （`truthVersion()` 吃的就是 `package.json`），不写死 `1.19`——写死的那个数字每发一次版就红一次，
+  // 而红的原因是测试自己过期，不是那一格漂了。
+  const line = lineOf(truthVersion())
+  assert.ok(line, `真源版本读不出段：${truthVersion()}`)
   for (const site of SECURITY_LINE_SITES) {
     const text = fs.readFileSync(path.join(REPO, site.file), 'utf8')
     const m = new RegExp(site.regex.source, site.regex.flags.includes('g') ? site.regex.flags : `${site.regex.flags}g`).exec(text)
-    assert.equal(m[2], '1.19', `${site.file} 的位点抓到的是 "${m[2]}"，不是受影响版本表里那一格`)
-    assert.match(m[0], /\|\s*1\.19\.x\s*\|/, `${site.file}：命中的整段必须就是那一格，实得 "${m[0]}"`)
+    assert.equal(m[2], line, `${site.file} 的位点抓到的是 "${m[2]}"，不是受影响版本表里跟着真源那一格`)
+    assert.match(m[0], new RegExp(`\\|\\s*${line.replace('.', '\\.')}\\.x\\s*\\|`),
+      `${site.file}：命中的整段必须就是那一格，实得 "${m[0]}"`)
   }
 })
 
