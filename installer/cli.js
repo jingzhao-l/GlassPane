@@ -309,6 +309,18 @@ export function commandAvailable(bin, {
   }
 }
 
+/**
+ * 预检**真的**去问主机的那些命令。这一行是文档侧那句数量主张的真源：
+ * `README.md` / `README.zh-CN.md` 的「它确实探测的这五项」由 `scripts/check-doc-links.mjs`
+ * 从这里的数组字面量算出来比对（从前那句写的是"四行"，而表里一共五行、代码探五项——
+ * 三个数字各说各话，没人核过；2026-10-22 那轮实测到 npm/swift/launchd 真的在开发者 HOME 上
+ * 跑起来之后才发现文档与代码已经漂了两个刻度）。
+ *
+ * 它同时是 `checkEnvironment()` 的探测面清单：新增一项却不加探测，由
+ * `installer/test/daily-20261022-preflight-claim.test.mjs` 的那张映射表抓红。
+ */
+export const PREFLIGHT_PROBED_COMMANDS = Object.freeze(['node', 'npm', 'swift', 'git', 'open'])
+
 /** 环境预检快照，返回每种依赖的可用状态（真实探测，不伪造）。 */
 export function checkEnvironment({ nodePath = process.execPath } = {}) {
   return {

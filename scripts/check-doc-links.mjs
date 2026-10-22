@@ -231,8 +231,32 @@ function installPinnedTag(rootDir = ROOT) {
   return hits.length === 1 ? hits[0][1] : null
 }
 
-/** 当前版本线（`major.minor`），真源 = 根 `package.json` 的 `version`。 */
-function currentLine(rootDir = ROOT) {
+/**
+ * 预检真的去问主机的那几个命令。真源 = `installer/cli.js` 里那个数组字面量的长度，
+ * 而不是文档里那句数量。
+ *
+ * 从前没有这一条读者，于是 `README.md` 写 "four of these rows"、`README.zh-CN.md` 写
+ * "只实测这张表里的四项"，而那张表一共五行、代码探的是五项命令：三个数字各说各话，
+ * 两份文档一起错也没人核（同一段里还紧跟着"这五项"，自相矛盾就在下一行）。
+ * 数组读不到就返回 null，`claimDrift` 会把"有文档在写它却读不到真源"报出来。
+ */
+export function preflightProbedCommands(rootDir = ROOT) {
+  const file = path.join(rootDir, 'installer', 'cli.js')
+  if (!fs.existsSync(file)) return null
+  const text = fs.readFileSync(file, 'utf8')
+  const m = /export const PREFLIGHT_PROBED_COMMANDS = Object\.freeze\(\[([^\]]*)\]\)/.exec(text)
+  if (!m) return null
+  return m[1]
+    .split(',')
+    .map((token) => token.trim().replace(/^['"`]|['"`]$/g, ''))
+    .filter(Boolean)
+}
+
+function preflightProbeCount(rootDir = ROOT) {
+  return preflightProbedCommands(rootDir)?.length ?? null
+}
+
+/** 当前版本线（`major.minor`），真源 = 根 `package.json` 的 `version`。 */function currentLine(rootDir = ROOT) {
   const file = path.join(rootDir, 'package.json')
   if (!fs.existsSync(file)) return null
   const version = JSON.parse(fs.readFileSync(file, 'utf8')).version
@@ -391,6 +415,16 @@ export const CLAIMS = [
     unit: '当前版本线',
     truth: currentLine,
     norm: (token) => token,
+  },
+  {
+    id: '预检实测的命令数',
+    // 认的是那一句里带粗体的数量；同一段落里还有一句"the commands it does probe"/"它确实探测的
+    // 这五个命令"没带粗体，那是同一个事实的散文复述，不该被当成第二个可复算主张去钉。
+    en: new RegExp(`\\bchecks \\*\\*(${NUMBER})\\s+commands?\\*\\*`, 'gi'),
+    zh: new RegExp(`一共实测\\*\\*(${NUMBER})\\s*个命令\\*\\*`, 'g'),
+    unit: '个预检命令',
+    truth: preflightProbeCount,
+    only: ['README.md', 'README.zh-CN.md'],
   },
   {
     id: '内核 pin 版本',

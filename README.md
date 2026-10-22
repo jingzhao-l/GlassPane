@@ -183,14 +183,17 @@ HTML/Markdown text in the session (it writes no file — only the panel's report
 | git | fetching the source | `git --version` |
 | Python 3.11 | LLDB bridge test suite only | `python3 --version` |
 
-The installer's preflight probes **four of these rows** for real and stops with a per-item report
-if one is missing: the Swift toolchain (`swift`), Node.js ≥ 18 (`node`), `npm`, and `git` (plus
-`open`, the launch-services helper the table does not list). The other two are not probed at
-install time and the table says how to check them yourself: the macOS major version is enforced
-when LaunchServices opens the bundle (`LSMinimumSystemVersion` = 14.0), and `python3` is needed
-only by the LLDB bridge test suite, so a missing one surfaces as that suite failing rather than as
-an install refusal. There is no "assume present" path **for the five it does check** — and no
-silent substitute for the other two: the row that is not probed says so.
+The installer's preflight probes the rows of this table that name something it can actually ask the
+host for — the Swift toolchain (`swift`), Node.js ≥ 18 (`node`) and `git` — plus `npm` and `open`,
+which the table does not list because they are not requirements a person chose to satisfy but parts
+of what those rows install. In total it checks **five commands**, and
+`installer/cli.js:PREFLIGHT_PROBED_COMMANDS` is where that count is read from; a missing one stops
+the install with a per-item report. The `macOS 14+` and `Python 3.11` rows are not probed at install
+time and the table says how to check them yourself: the macOS major version is enforced when
+LaunchServices opens the bundle (`LSMinimumSystemVersion` = 14.0), and `python3` is needed only by
+the LLDB bridge test suite, so a missing one surfaces as that suite failing rather than as an install
+refusal. For the commands it does probe there is no "assume present" path, and nothing silently
+stands in for the rows it does not probe — each of those says who checks it.
 
 ### Channels
 
