@@ -34,7 +34,6 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { spawnSync } from 'node:child_process'
 
 import {
   INSTALLER_MODULE,
@@ -460,13 +459,21 @@ test('authorshipNote: verified is silent, everything else keeps saying it', () =
 /* ------------------------------------------------------------------ the real one */
 
 test('the real gpg binary, when it exists: the absence path and a real refusal, never a skip', async (t) => {
-  const probe = spawnSync('gpg', ['--version'], { encoding: 'utf8', timeout: 15_000 })
-  if (probe.status !== 0) {
-    // This machine has no gpg, so *that* is the fact worth asserting through the
+  // Which arm runs is decided by **the resolver the code under test uses**, not by a
+  // bare `spawnSync('gpg')`. They are not the same question: `GPG_CANDIDATE_PATHS`
+  // exists precisely because a gate can run with a minimal PATH on a machine that has
+  // gnupg installed (launchd, Finder-launched .app, and every CI step that resets
+  // PATH). Answering "is gpg there?" with PATH alone while the runner answers it with
+  // the full search put that third machine shape into the absence arm and then asserted
+  // `defaultRunGpg` failed — a red that reports the test's own premise, not the code.
+  const resolved = resolveGpgBinary()
+  if (resolved.bin === null) {
+    // This machine has no gpg at all, so *that* is the fact worth asserting through the
     // real runner: the updater notices, and what it notices is the consent-gated
     // gap — not a crash, and not a pass.
     const real = defaultRunGpg(['--version'], { gnupgHome: null })
-    assert.notEqual(real.status, 0, 'spawnSync said gpg is missing, then the real runner answered as if it were there')
+    assert.notEqual(real.status, 0, 'resolveGpgBinary found no gpg, then the real runner answered as if it were there')
+    assert.deepEqual(real.tried, resolved.tried, 'the runner and the resolver reported different searches to the person')
     const v = await verifyReleaseSignature({
       version: VERSION,
       sumsName: SUMS_NAME,
