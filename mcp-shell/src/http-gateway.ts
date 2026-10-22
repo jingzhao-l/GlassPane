@@ -24,6 +24,7 @@ import {
   GP_E_PAYLOAD_TOO_LARGE,
   GP_E_PROJECT_LIMIT,
   GP_E_REGISTRY_DRIFT,
+  GP_E_STATE_ROOT_REFUSED,
   GP_E_UNKNOWN,
 } from "./errors.js";
 import { engineBody, validateDimension } from "./dimension.js";
