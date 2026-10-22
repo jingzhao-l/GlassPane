@@ -183,11 +183,37 @@ public enum ProbeWire {
                   let line = boundedInt32(dict["line"], in: 0...(Int32.max)) else {
                 return .malformed(reason: "handler requires file and line in 0…\(Int32.max)")
             }
+            // `durationNs` is this protocol's entry/duration discriminator, so its
+            // two questions have to be answered separately: *is the key there*
+            // (absence is what makes a frame an entry frame — the SDK omits the key
+            // on entry and adds it on the >1ms exit frame, `GlassPaneProbe.emitHandler`)
+            // and *is the value a duration this wire can carry* (a hard requirement,
+            // same read as `line` above).
+            //
+            // Reading it with `intValue` answered the second question with the first:
+            // `"durationNs": "800"` and any number past Int32 came back `nil`, and
+            // `nil` is exactly what an **entry** frame means — so a follow-up frame
+            // was counted as a second invocation of the same click and `hitCount` was
+            // inflated for the act that T4/T5/T7 branch on, while 4294967297 folded
+            // onto 1 (the `boundedInt32` comment calls that shape "two truncations
+            // posing as one check"). A frame that claims a duration and cannot state
+            // one is refused and named, never demoted to a different frame type.
+            let durationNs: Int?
+            if dict.keys.contains("durationNs") {
+                guard let reported = boundedInt32(dict["durationNs"], in: 0...(Int32.max)) else {
+                    return .malformed(
+                        reason: "handler durationNs must be an integer in 0…\(Int32.max)"
+                    )
+                }
+                durationNs = Int(reported)
+            } else {
+                durationNs = nil
+            }
             return .handler(
                 file: file,
                 line: Int(line),
                 ts: (scalar(dict["ts"]))?.doubleValue ?? 0,
-                durationNs: (scalar(dict["durationNs"]))?.intValue
+                durationNs: durationNs
             )
         case "state":
             guard let key = dict["key"] as? String,

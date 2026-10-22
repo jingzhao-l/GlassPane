@@ -411,6 +411,10 @@ final class P6ProbeInboxTests: XCTestCase {
         time.now = time.now.addingTimeInterval(0.4)
         inbox.ingest(pid: 4242, frame: .handler(file: "View.swift", line: 88, ts: 0, durationNs: nil))
         inbox.ingest(pid: 4242, frame: .handler(file: "View.swift", line: 88, ts: 0, durationNs: 3_000_000))
+        // 宽限期走完之后再读：2026-10-22 那条缺陷是" grace 没走完就把 0 当最终值认证"，
+        // 所以这一臂从前在 +0.4 s 读也照样绿——它读到的 1 是"到目前为止到了 1 个"，
+        // 不是"迟到 1 个"。把时钟推到宽限期之后，这条用例量的才是它声称在量的东西。
+        time.now = time.now.addingTimeInterval(ProbeInbox.lateGraceSeconds)
         XCTAssertEqual(inbox.lateCount(opId: "op_late_pair"), 1, "one late invocation, two late frames")
     }
 
@@ -1136,6 +1140,10 @@ final class P6EngineCoreProbeTests: XCTestCase {
         // Async continuation lands after the window closed.
         time.now = time.now.addingTimeInterval(0.5)
         inbox.ingest(pid: 4242, frame: .handler(file: "View.swift", line: 88, ts: 0, durationNs: nil))
+        // 诊断必须在宽限期走完之后跑：在那之前迟到数根本不可测，`diagnose` 现在会诚实地
+        // 把这一路写成"未测量"，T8 也就不会出来（这一条用例要证的正是"能读到的迟到数会被
+        // 刷新并进 T8"，所以它必须在可读的那一刻做）。
+        time.now = time.now.addingTimeInterval(ProbeInbox.lateGraceSeconds)
         let diagnosis = try core.diagnose(operationId: operationId)
         XCTAssertEqual(diagnosis["class"] as? String, "T8")
         let pack = try core.lastEvidence(operationId: operationId)

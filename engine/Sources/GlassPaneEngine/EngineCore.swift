@@ -26,11 +26,34 @@ public final class EngineCore {
 
     /// Label `diagnose` writes into `circuitBreaker.reason` when an archived
     /// pack's `handlerProbe.lateCount` can no longer be measured (defect 3,
-    /// 2026-10-19 review). Matched by `Qoder20261019ProbeHonestyTests` and by
+    /// 2026-10-19 review) — since defect 1 (2026-10-22) also when it cannot be
+    /// measured *yet*, because the grace period had not closed at read time; the
+    /// basis text names which of the two, and `removingLateArrivalsBasis` is what
+    /// takes the sentence back out once a later diagnose can measure. Matched by
+    /// `Qoder20261019ProbeHonestyTests` and by
     /// readers of the archive; same "label: detail" shape as the
     /// `input-contamination-*` and `pixel-capture-*` labels, which Classifier
     /// also pattern-matches rather than guesses.
     public static let lateArrivalsUnmeasuredLabel = "late-arrivals-unmeasured"
+
+    /// Drop **this label's own basis** out of a stacked `circuitBreaker.reason`,
+    /// leaving every other segment untouched (defect 1(d), 2026-10-22). Needed
+    /// because a later `diagnose` can turn the earlier refusal into a measurement:
+    /// the pack then still carries "this late count can never be verified", written
+    /// by a run that could not verify it, and a stale refusal reads to an agent as
+    /// "T8 is undecidable for this pack" when T8 just went red.
+    ///
+    /// `reason` is one segment per channel joined with `"; "` (see the `reasons`
+    /// array in `act`), and `diagnose` never writes that separator inside its own
+    /// basis, which is what makes this split-and-rejoin lossless rather than a
+    /// rewrite of someone else's sentence.
+    static func removingLateArrivalsBasis(from reason: String?) -> String? {
+        guard let reason, reason.contains(EngineCore.lateArrivalsUnmeasuredLabel) else { return reason }
+        let kept = reason
+            .components(separatedBy: "; ")
+            .filter { !$0.hasPrefix(EngineCore.lateArrivalsUnmeasuredLabel) }
+        return kept.isEmpty ? nil : kept.joined(separator: "; ")
+    }
 
     /// The one release-version literal in this target. `scripts/version-sites.mjs`
     /// keys its daemon site on exactly this line's shape, `hello` reads it, and
@@ -952,6 +975,10 @@ public final class EngineCore {
         // P6 §2.3: close the probe window after the post-captures (t1) and
         // pull the [t0, t1] handler/state signals out of the inbox.
         var probeSignals: (handlerProbe: HandlerProbeSignal?, stateDiff: StateDiffSignal?)?
+        // Defect 3 (2026-10-22): how many of this window's probe events the daemon
+        // had already dropped from its 512-event ring when the window closed. Read
+        // right after `endWindow`, before any later act can recycle the ring.
+        var probeRingEvictions: Int?
         if let inbox = probeInbox, let pid = probePid {
             let opEndDelivered = inbox.sendCommand("op_end", to: pid)
             if !opEndDelivered {
@@ -967,6 +994,7 @@ public final class EngineCore {
                 Thread.sleep(forTimeInterval: EngineCore.probeEndDrainSeconds)
             }
             probeSignals = inbox.endWindow(pid: pid, opId: operationId, includeMirrorDiff: probeBaselined)
+            probeRingEvictions = inbox.eventsEvictedDuringWindow(opId: operationId)
             // X-11: `changed == false` after an undelivered op_begin/op_end is
             // not "the state did not move", it is "the probe was never asked".
             // A diff that *did* report movement stays (those frames are their
@@ -1132,6 +1160,22 @@ public final class EngineCore {
                 // `stateDiff` from reading as "no state change".
                 level = .degraded
                 reasons.append("probe-window-command-not-delivered: \(probeCommandFailure)")
+            }
+            if let probeRingEvictions, probeRingEvictions > 0 {
+                // Defect 3 (2026-10-22): the daemon's own ring threw events away
+                // while this window was open, so `handlerProbe.hitCount` is a lower
+                // bound and its `handlers` list truncated — published until now as a
+                // complete measurement, with the loss itself uncounted and unsaid.
+                // Same channel that did not run, same home: this pack has no spare
+                // key (the evidence schema is `additionalProperties: false`), so the
+                // caveat rides `circuitBreaker.reason` next to the label above, and
+                // the per-pid figure reaches an agent through `probe_status`.
+                level = .degraded
+                reasons.append(
+                    "probe-events-evicted: \(probeRingEvictions) probe event(s) were dropped from the "
+                        + "daemon's \(ProbeInbox.eventRingCapacity)-event ring while this window was open, so "
+                        + "handlerProbe.hitCount and its handler list are a lower bound, not a complete measurement"
+                )
             }
         }
         let reason: String? = reasons.isEmpty ? nil : reasons.joined(separator: "; ")
@@ -1621,8 +1665,30 @@ public final class EngineCore {
             switch inbox.refreshLateCount(for: target) {
             case let .measured(refreshed):
                 target.signals.handlerProbe = refreshed
+                // Defect 1(d) (2026-10-22): `diagnose` may run on one pack twice,
+                // once inside the grace period (which writes the "this count is
+                // unmeasured" basis) and once after it. The second run has a real
+                // number, so the first run's sentence is now a false claim about
+                // this pack and has to go — only *this label's own* basis, every
+                // other channel's reason text (`pixel-capture-*`,
+                // `probe-events-evicted`, `degradation|`) stays exactly where it was.
+                target.circuitBreaker.reason = Self.removingLateArrivalsBasis(
+                    from: target.circuitBreaker.reason
+                )
                 replace(target)
-            case .confirmed, .notCarried:
+            case .confirmed:
+                // Same reason, the other final answer: the grace elapsed and the
+                // final count equals the stored one, which is a measurement of "no
+                // late arrivals" — not the missing measurement the stale basis still
+                // asserts. Without this arm the pack keeps saying "T8 is undecidable"
+                // about a count that just was decided.
+                if target.circuitBreaker.reason?.contains(Self.lateArrivalsUnmeasuredLabel) == true {
+                    target.circuitBreaker.reason = Self.removingLateArrivalsBasis(
+                        from: target.circuitBreaker.reason
+                    )
+                    replace(target)
+                }
+            case .notCarried:
                 break
             case let .unmeasurable(reason):
                 // Defect 3: the stored `lateCount` is the act-time default and no
@@ -1633,13 +1699,16 @@ public final class EngineCore {
                 // `lateCount` is required and `minimum: 0`), and the label keeps it
                 // matchable. Silently keeping the 0 is what made an archived pack
                 // claim "no late arrivals" for a channel nobody measured.
-                // Idempotent: `diagnose` may run on the same pack repeatedly, and a
-                // reason stacked twice reads as a defect in the stacker.
-                if target.circuitBreaker.reason?.contains(Self.lateArrivalsUnmeasuredLabel) != true {
-                    let basis = "\(Self.lateArrivalsUnmeasuredLabel): \(reason)"
-                    target.circuitBreaker.reason = target.circuitBreaker.reason.map {
-                        $0 + "; " + basis
-                    } ?? basis
+                // Idempotent, and refreshed rather than skipped (defect 1's two
+                // causes): a basis written while the grace was still open says
+                // "diagnose again after it closes", which is a dead end once the
+                // window has left the ring. One basis per pack, whichever cause
+                // speaks last, so repeated `diagnose` cannot stack it.
+                let basis = "\(Self.lateArrivalsUnmeasuredLabel): \(reason)"
+                let stripped = Self.removingLateArrivalsBasis(from: target.circuitBreaker.reason)
+                let stacked = stripped.map { $0 + "; " + basis } ?? basis
+                if stacked != target.circuitBreaker.reason {
+                    target.circuitBreaker.reason = stacked
                     replace(target)
                 }
             }
@@ -1693,6 +1762,12 @@ public final class EngineCore {
             // is the absence of the surface, and a measured zero needs something
             // that measures.
             payload["unmapableStateFrames"] = inbox.unmapableStateFrameCount
+            // Defect 3 (2026-10-22): the daemon-side half of the same figure — probe
+            // events this process evicted from its own 512-event rings. The per-pid
+            // tally rides the `probes` row as `ringEvictedEvents`; this total survives
+            // a probe disconnecting, and without a published number an agent reading
+            // `hitCount` has no way to learn that the channel discarded events.
+            payload["ringEvictedEventsTotal"] = inbox.ringEvictionCount
         }
         // R5-06, second half: T9 escalates the circuit breaker only when two
         // drivers trend together (`drivers.count >= 2`), a deliberate false-alarm

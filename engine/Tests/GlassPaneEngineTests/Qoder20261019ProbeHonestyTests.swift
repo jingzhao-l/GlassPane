@@ -243,6 +243,9 @@ final class Qoder20261019ProbeHonestyTests: XCTestCase {
         let operationId = try XCTUnwrap(actResult["operationId"] as? String)
         time.now = time.now.addingTimeInterval(0.1)
         inbox.ingest(pid: 4242, frame: .handler(file: "Async.swift", line: 4, ts: 0, durationNs: nil))
+        // 对照那一侧也得站在宽限期之后：这条用例要证的是"窗口还在环里 → 迟到数可测 → 不写
+        // 任何未测量句子"，而在 +0.1 s 诊断时，2026-10-22 之后的引擎会（正确地）说"还测不了"。
+        time.now = time.now.addingTimeInterval(ProbeInbox.lateGraceSeconds)
 
         _ = try core.diagnose(operationId: operationId)
         let pack = try core.lastEvidence(operationId: operationId)

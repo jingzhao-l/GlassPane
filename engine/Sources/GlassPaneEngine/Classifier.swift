@@ -82,10 +82,25 @@ public enum Classifier {
             let stateChanged = pack.signals.stateDiff.map { $0.changed }
 
             // T8: the window stayed silent but events landed late (async timing).
-            if handlerProbe.hitCount == 0 && (stateChanged ?? false) == false && handlerProbe.lateCount > 0 {
+            // 三态，和下面 T4 用的那条一样：`(stateChanged ?? false)` 会把一个**没有
+            // state 通道**的探针折成"state 没变"，于是 T8 的一条前提压根没被测量过，
+            // 判定是建立在假设上的——正是本文件上面谴责像素通道的那个形状。
+            if handlerProbe.hitCount == 0 && stateChanged == false && handlerProbe.lateCount > 0 {
                 return outcome(.t8, path: path, evidence: evidenceSummary,
                     anomaly: "async timing: no probe signal inside the act window but \(handlerProbe.lateCount) late handler arrival(s) followed",
                     next: "inspect the handler for async dispatch (\(handlerProbeSummary(handlerProbe))); shorten the settle interval or await the async continuation before asserting")
+            }
+            // The same gap T4/T5/T7 refuse to bridge, on the late-arrival side: the
+            // window was silent, something landed late, and the state channel never
+            // answered. Nothing later in this file catches `hitCount == 0` with
+            // `stateChanged == nil`, so without this arm the pack falls through to
+            // the black-box T3 ("dead click, binding lost") — a verdict that
+            // contradicts the probe's own late arrivals, which are evidence the
+            // handler *did* run. Do not guess, and do not file T8 on an assumption.
+            if handlerProbe.hitCount == 0 && handlerProbe.lateCount > 0 && stateChanged == nil {
+                return outcome(.inconclusive, path: path, evidence: evidenceSummary,
+                    anomaly: "async timing suspected (\(handlerProbe.lateCount) late handler arrival(s) after a silent window) but the probe has no state channel — T8's \"state did not change\" premise was never measured, and no-anomaly needs the other half",
+                    next: "register state observation in the probe (GP.registerMirrorRoot or GP.registerKVCObject), then re-run the act; do not conclude async dispatch while the state channel says nothing, and do not file a dead click against the probe's own late arrivals")
             }
             // T4 needs a decidable state channel; without stateDiff it is not
             // claimed (silence ≠ no-change for state-incapable probes). It needs a

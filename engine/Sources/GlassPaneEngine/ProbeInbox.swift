@@ -37,6 +37,15 @@ public final class ProbeInbox {
         /// `endWindow` answers the file's own honest-absence shape for a flagged
         /// window instead of counting the empty replacement ring as zero hits.
         var probeGone = false
+        /// Defect 3 (2026-10-22): the event ring is `eventRingCapacity` deep per
+        /// pid and `trimEvents` drops the overflow on the **daemon** side. The two
+        /// fields below say how much of *this* window that threw away:
+        /// `evictionsAtBegin` is the pid's eviction tally when the window opened,
+        /// `eventsEvicted` the difference at close. Without them a busy window
+        /// answers `hitCount: N` and a truncated `handlers` list as a complete
+        /// measurement, while `N` is really a lower bound.
+        var evictionsAtBegin: Int = 0
+        var eventsEvicted: Int = 0
     }
 
     /// One recorded probe drop-off (P6 §2.1/§5.4, R2-18): what *was* connected,
@@ -90,6 +99,15 @@ public final class ProbeInbox {
     /// `unmapableStateFrameCount`.
     private var unmappedStateSources: [Int32: Int] = [:]
     private var unmapableStateFrameTotal = 0
+    /// Defect 3 (2026-10-22): per-pid tally of probe events **this daemon** dropped
+    /// when a pid's ring overflowed `eventRingCapacity`, plus the monotonic total —
+    /// the same shape A-09's `unmappedStateSources` uses, because every probe-side
+    /// loss already had a published counter (`droppedEvents`, `droppedWrites`,
+    /// `truncatedValues`) while the daemon-side one left no trace at all. Published
+    /// per-pid on the live `probes` row as `ringEvictedEvents` and process-wide as
+    /// `ringEvictionCount`.
+    private var ringEvictions: [Int32: Int] = [:]
+    private var ringEvictionTotal = 0
     /// Per-command failure reasons. They are inbox state and sit behind `lock`
     /// with everything else: the dispatcher thread writes them while probe
     /// reader threads write the frames those errors explain, and plain storage
@@ -170,6 +188,10 @@ public final class ProbeInbox {
         // A fresh pid gets a fresh A-09 tally too; the re-hello branch above
         // deliberately keeps the old one, because it is the same process.
         unmappedStateSources[hello.pid] = 0
+        // Same rule for the defect-3 eviction tally: a new process starts with
+        // nothing evicted, and a window opened for it cannot inherit another
+        // process's baseline (that delta is what `eventsEvicted` reports).
+        ringEvictions[hello.pid] = 0
         return true
     }
 
@@ -193,6 +215,11 @@ public final class ProbeInbox {
         // history); `register` starts a fresh pid clean.
         events.removeValue(forKey: pid)
         unmappedStateSources.removeValue(forKey: pid)
+        // Defect 3: the eviction tally is that process's loss, so it goes with it.
+        // The monotonic `ringEvictionTotal` keeps the history, exactly like
+        // `unmapableStateFrameTotal` above — a re-registered pid must not be
+        // charged for events its predecessor overflowed.
+        ringEvictions.removeValue(forKey: pid)
         // Defect 1: a window that was open when the probe went away can never be
         // measured again — its event ring is what `endWindow` counts, and that
         // ring is gone with the process. Flag it so the close answers the honest
@@ -257,11 +284,11 @@ public final class ProbeInbox {
         switch frame {
         case .handler:
             events[pid, default: []].append(Event(receivedAt: now(), frame: frame))
-            trimEvents(&events[pid])
+            trimEvents(&events[pid], pid: pid)
             connections[pid]?.eventsSeen += 1
         case .state(_, _, _, let source, _):
             events[pid, default: []].append(Event(receivedAt: now(), frame: frame))
-            trimEvents(&events[pid])
+            trimEvents(&events[pid], pid: pid)
             connections[pid]?.eventsSeen += 1
             // A-09: a state frame whose `source` token the daemon cannot map is
             // still a real observation, and its loss must be attributable. Count
@@ -288,10 +315,19 @@ public final class ProbeInbox {
         }
     }
 
-    private func trimEvents(_ slot: inout [Event]?) {
+    /// Drop the oldest events past `eventRingCapacity` and **count what was
+    /// dropped** (defect 3, 2026-10-22). Before the counter existed this was the
+    /// one probe loss with no published number: an in-flight window silently lost
+    /// the events it would have counted, so `endWindow` answered a lower
+    /// `hitCount` and a truncated `handlers` list as a complete measurement, and
+    /// nothing anywhere said that events had been thrown away at all.
+    private func trimEvents(_ slot: inout [Event]?, pid: Int32) {
         guard slot != nil else { return }
         if slot!.count > ProbeInbox.eventRingCapacity {
-            slot!.removeFirst(slot!.count - ProbeInbox.eventRingCapacity)
+            let evicted = slot!.count - ProbeInbox.eventRingCapacity
+            ringEvictions[pid, default: 0] += evicted
+            ringEvictionTotal += evicted
+            slot!.removeFirst(evicted)
         }
     }
 
@@ -410,7 +446,11 @@ public final class ProbeInbox {
         guard let connection = connections[pid] else { return }
         windows.append(Window(
             opId: opId, pid: pid, t0: now(),
-            probeVersion: connection.hello.probeVersion
+            probeVersion: connection.hello.probeVersion,
+            // Defect 3: the pid's eviction tally at open. The difference against
+            // the tally at close is this window's own loss, which is what
+            // `eventsEvictedDuringWindow` hands to `EngineCore`.
+            evictionsAtBegin: ringEvictions[pid] ?? 0
         ))
         if windows.count > ProbeInbox.windowHistoryLimit {
             windows.removeFirst(windows.count - ProbeInbox.windowHistoryLimit)
@@ -486,6 +526,12 @@ public final class ProbeInbox {
                 }
             }
         }
+        // Defect 3 (2026-10-22): whatever this pid's ring lost between the window
+        // opening and closing is *this window's* loss — those events are exactly
+        // the ones the loop above would have counted. `hitCount` is then a lower
+        // bound and `handlers` a truncated list, so the number has to travel with
+        // the signal instead of silently looking like a complete measurement.
+        window.eventsEvicted = max(0, (ringEvictions[pid] ?? 0) - window.evictionsAtBegin)
         window.stateBefore = entries
         window.stateSource = source ?? window.stateSource
         windows[index] = window
@@ -547,21 +593,34 @@ public final class ProbeInbox {
         connections[pid]?.hello.capabilities ?? []
     }
 
-    /// Late arrivals for a closed window: handler events received in the
-    /// grace period after t1 (P6 §2.3 — "delayed reaction" is exactly a
-    /// handler firing shortly after the act, so no file:line preconditions;
-    /// acts are serialized by the dispatcher, keeping attribution unambiguous).
+    /// A closed window's late count, or which refusal applies when it has none.
     ///
-    /// nil is "this window's late count cannot be measured", which covers three
-    /// states: no record in the ring (evicted by `windowHistoryLimit`, or a
-    /// restarted daemon), a window never closed, and — defect 1's other half — a
-    /// window whose probe disconnected, because the ring it would be counted
-    /// from is gone and a recycled pid's fresh ring is not this window's data.
-    public func lateCount(opId: String) -> Int? {
+    /// Defect 1 (2026-10-22): `.graceOpen` is the refusal the count itself used to
+    /// hide. The counting loop below only sees events that have **already landed**,
+    /// so a read inside the grace period is not a count of late arrivals — it is a
+    /// count of arrivals so far. The normal flow is act, diagnose ~0.3 s later, and
+    /// `0 == stored.lateCount` (the act-time default) made `refreshLateCount` answer
+    /// `.confirmed` = "nothing to rewrite": the archived pack certified "no late
+    /// arrivals" for a window nobody had finished watching, and T8 could never go
+    /// red for it. `lateCount(opId:)`'s nil, and therefore this case, is the fix.
+    private enum LateReading {
+        case closed(Int)
+        case graceOpen(TimeInterval)
+        case unavailable
+    }
+
+    private func lateReading(opId: String) -> LateReading {
         lock.lock(); defer { lock.unlock() }
         guard let window = windows.first(where: { $0.opId == opId }), let t1 = window.t1,
               !window.probeGone else {
-            return nil
+            return .unavailable
+        }
+        // The grace window is `(t1, t1 + lateGraceSeconds]`, so the count is only
+        // final once the clock is strictly past it: an event can still arrive at
+        // the last instant inside the boundary.
+        let elapsed = now().timeIntervalSince(t1)
+        guard elapsed > ProbeInbox.lateGraceSeconds else {
+            return .graceOpen(ProbeInbox.lateGraceSeconds - max(0, elapsed))
         }
         var late = 0
         var seenKeys: Set<String> = []
@@ -579,6 +638,24 @@ public final class ProbeInbox {
                 seenKeys.insert("\(file):\(line)")
             }
         }
+        return .closed(late)
+    }
+
+    /// Late arrivals for a closed window: handler events received in the
+    /// grace period after t1 (P6 §2.3 — "delayed reaction" is exactly a
+    /// handler firing shortly after the act, so no file:line preconditions;
+    /// acts are serialized by the dispatcher, keeping attribution unambiguous).
+    ///
+    /// nil is "this window's late count cannot be measured", which covers four
+    /// states: no record in the ring (evicted by `windowHistoryLimit`, or a
+    /// restarted daemon), a window never closed, a window whose probe disconnected
+    /// — defect 1's other half, because the ring it would be counted from is gone
+    /// and a recycled pid's fresh ring is not this window's data — and, added by
+    /// defect 1 proper, **the grace period has not closed yet**: what had arrived
+    /// by read time is not the number of late arrivals, and a 0 read inside the
+    /// grace says only "nothing has landed so far".
+    public func lateCount(opId: String) -> Int? {
+        guard case let .closed(late) = lateReading(opId: opId) else { return nil }
         return late
     }
 
@@ -594,34 +671,57 @@ public final class ProbeInbox {
         /// The final count is known and differs from the stored one.
         case measured(HandlerProbeSignal)
         /// The final count is known and equals the stored one: nothing to rewrite.
+        /// Only reachable once the grace period has elapsed, which is what makes
+        /// it a measurement of "no late arrivals" rather than a silence about them.
         case confirmed
         /// This pack carries no handlerProbe signal, so there is no late count to
         /// claim either way (§3.1 absence).
         case notCarried
-        /// The window left the ring, so its stored `lateCount` is the act-time
-        /// default and nobody can verify it. `reason` is for the pack.
+        /// The count could not be established, for one of two stated causes: the
+        /// grace period had not closed at read time, or the window left the ring
+        /// and can never be read again. Both refuse the same claim, and `reason`
+        /// names which one and what the caller can still do about it.
         case unmeasurable(reason: String)
     }
 
     /// Refresh a stored handlerProbe with the final late count (diagnose time).
     public func refreshLateCount(for pack: EvidencePack) -> LateCountRefresh {
         guard let stored = pack.signals.handlerProbe else { return .notCarried }
-        guard let late = lateCount(opId: pack.operationId) else {
+        switch lateReading(opId: pack.operationId) {
+        case let .closed(late):
+            guard late != stored.lateCount else { return .confirmed }
+            return .measured(HandlerProbeSignal(
+                probeVersion: stored.probeVersion,
+                hitCount: stored.hitCount,
+                handlers: stored.handlers,
+                lateCount: late
+            ))
+        case let .graceOpen(remaining):
+            // Two refusals, two remedies. This one is fixable by waiting, and the
+            // sentence has to say *how long* and in which direction: the advice
+            // this file used to give — "diagnose within 2 s of the act" — is
+            // precisely the interval in which the count cannot be known, so it
+            // sent callers to the one window guaranteed to produce the fake zero.
+            let left = String(format: "%.2f", remaining)
+            return .unmeasurable(reason: """
+            the \(Int(ProbeInbox.lateGraceSeconds))s grace period after \(pack.operationId) closed is still \
+            open (\(left)s left at read time), so handlerProbe.lateCount=\(stored.lateCount) \
+            is only what had arrived by now — not a count of late arrivals, and a 0 here means nothing had \
+            landed YET (T8 is undecidable until the grace closes: diagnose only after the grace has elapsed, \
+            never within the grace window)
+            """)
+        case .unavailable:
+            // Kept verbatim in substance, with the advice half corrected: nothing
+            // can be counted for this window any more, so re-running is the only
+            // route — and the re-run's own count needs the grace closed too.
             return .unmeasurable(reason: """
             the act window for \(pack.operationId) is no longer in the probe inbox's \
             \(ProbeInbox.windowHistoryLimit)-window ring, so the grace period after its close \
-            can never be counted; handlerProbe.lateCount=\(stored.lateCount) is the value written \
+            can never be counted — handlerProbe.lateCount=\(stored.lateCount) is the value written \
             when the window closed, not a measurement of late arrivals (T8 is undecidable for this \
-            pack — re-run the act, then diagnose within \(Int(ProbeInbox.lateGraceSeconds))s of it)
+            pack — re-run the act and diagnose only after the grace has elapsed, never within \(Int(ProbeInbox.lateGraceSeconds))s of it)
             """)
         }
-        guard late != stored.lateCount else { return .confirmed }
-        return .measured(HandlerProbeSignal(
-            probeVersion: stored.probeVersion,
-            hitCount: stored.hitCount,
-            handlers: stored.handlers,
-            lateCount: late
-        ))
     }
 
     /// The signal-only view of `refreshLateCount`, kept for callers that have no
@@ -755,6 +855,14 @@ public final class ProbeInbox {
     /// which is what distinguishes "no state channel" from "state reported
     /// through a channel this daemon cannot read".
     ///
+    /// `ringEvictedEvents` is the same rule for defect 3's loss — events **this
+    /// daemon** dropped when that pid's ring overflowed `eventRingCapacity`. It is
+    /// a daemon-side measurement, so absence means "nothing was evicted for it",
+    /// and its presence is what lets a reader tell `hitCount: 512` from
+    /// "512 arrived": the count below is a lower bound exactly that far.
+    /// `EngineCore.probeStatus()` forwards the process-wide figure
+    /// (`ringEvictionCount`) as `ringEvictedEventsTotal`.
+    ///
     /// The probe's own drop counters (`droppedEvents`, `droppedWrites`,
     /// `rejectedKeys`, `droppedInboundFrames`, `droppedInboundLines`,
     /// `truncatedValues`) follow the
@@ -779,6 +887,14 @@ public final class ProbeInbox {
             if let bundleId = connection.hello.bundleId { entry["bundleId"] = bundleId }
             if let unmapped = unmappedStateSources[connection.hello.pid], unmapped > 0 {
                 entry["stateFramesUnmappedSource"] = unmapped
+            }
+            // Defect 3: the daemon's own ring loss, published with the same rule
+            // A-09's row key uses — present when that pid's overflow dropped at
+            // least one event, absent meaning the daemon threw nothing away for
+            // it. Never a `0` invented for a pid that is not (or is no longer) the
+            // one the events came from.
+            if let evicted = ringEvictions[connection.hello.pid], evicted > 0 {
+                entry["ringEvictedEvents"] = evicted
             }
             if let droppedEvents = connection.hello.droppedEvents {
                 entry["droppedEvents"] = droppedEvents
@@ -843,6 +959,26 @@ public final class ProbeInbox {
     public var unmapableStateFrameCount: Int {
         lock.lock(); defer { lock.unlock() }
         return unmapableStateFrameTotal
+    }
+
+    /// Probe events **this daemon** dropped from a pid's ring while `opId`'s window
+    /// was open (defect 3), or nil when the window is no longer in the
+    /// `windowHistoryLimit` ring — the same honest absence `lateCount` uses: no
+    /// record is not a measured zero. `EngineCore.act` reads this right after
+    /// `endWindow` and stamps the pack's `circuitBreaker.reason` with
+    /// `probe-events-evicted`, because a `hitCount` produced from a truncated ring
+    /// is a lower bound, not a complete measurement.
+    public func eventsEvictedDuringWindow(opId: String) -> Int? {
+        lock.lock(); defer { lock.unlock() }
+        return windows.first(where: { $0.opId == opId })?.eventsEvicted
+    }
+
+    /// Events evicted from every ring since the daemon started (monotonic), the
+    /// process-wide figure that survives a probe disconnecting — mirrors
+    /// `unmapableStateFrameCount`, and is published by `EngineCore.probeStatus()`.
+    public var ringEvictionCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return ringEvictionTotal
     }
 
     // MARK: - Timestamps
