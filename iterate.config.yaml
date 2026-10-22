@@ -169,6 +169,12 @@ onboarding:
   drift_check: true
   skill_version: 3.4.2
   completed_at: "2026-09-22T14:00:55Z"
-  fingerprints:
-    - path: package.json
-      sha256: 958fa1006d1266e22ba96225998616ea2c8d763ffbde754b87adc5fe8beff13d
+  fingerprints: []
+    # 这里从前钉着 `package.json` 的 sha256（2026-09-22 那次 onboarding 采集的）。
+    # 那个指纹**必然**是假的：`package.json` 是 `scripts/version-sites.mjs` 登记的版本线位点，
+    # 每发一版 `set-version` 都按设计重写它，于是 `drift_check: true` 每次要么报漂移、
+    # 要么被人当噪音忽略——一个只能被忽略的漂移检查，就是这仓反复写的那件"把'没人读的计数器'
+    # 当成有护栏"。指纹只能钉"不该悄悄变"的清单；会随发布合法变化的清单不是它的对象。
+    # 要重新采集：`iterate refresh`（CLI 通道；AI 通道按 SKILL.md §onboarding 重写本段）。
+    # 撤销本决定：把 `fingerprints` 恢复成 `- path: package.json` + 当前 sha256，
+    # 并让 `set-version` 之后必须跟一次 `iterate refresh`（那是发布链的一格， presently 没有）。

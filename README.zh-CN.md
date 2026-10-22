@@ -155,7 +155,11 @@ macOS 禁止程序化授权，所以这是唯一的人工步骤；面板逐卡�
 | git | 取源码 | `git --version` |
 | Python 3.11 | 仅 LLDB 桥测试套件 | `python3 --version` |
 
-安装器对每一项都做真实探测，缺哪项就逐条报哪项，没有"假设它存在"的路径。
+安装器的预检**只实测这张表里的四项**：Swift 工具链（`swift`）、Node.js ≥ 18（`node`）、`npm`、
+`git`（外加表里没列的 `open`），缺哪项就逐条报哪项。另外两行安装期不探测，表里给的是你自己核的命令：
+macOS 主版本由 LaunchServices 打开 bundle 时强制（`LSMinimumSystemVersion` = 14.0），
+`python3` 只有 LLDB 桥测试套件需要，缺它表现为那套测试失败而不是安装被拒。
+它确实探测的这五项没有"假设它存在"的路径；不探测的那两行也不假装探测——行里写清了谁去核。
 
 ### 安装渠道
 
@@ -174,7 +178,7 @@ npx glasspane-install
 #    每次发版由 `scripts/set-version.mjs` 改写）——要装未发布的树才去 `main`。下面那个 tag 不靠人眼
 #    核对：它是 `scripts/version-sites.mjs` 登记的派生位点，一旦与 install.sh 不一致，
 #    `scripts/check-doc-links.mjs` 就把这一页判红。
-git clone --branch v1.19.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
+git clone --branch v1.20.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
 
 `GLASSPANE_REF=<tag>` 指定其他发布版；`GLASSPANE_REF=main` 追主干（它不是固定产物）。

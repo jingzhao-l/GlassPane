@@ -3,7 +3,174 @@
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
 
-## [Unreleased]
+## [1.20.0] — 2026-10-22
+
+**版本判断：minor。** 对着本仓 1.6.2 那四项 patch 判据逐条实测，本版动了其中三项：
+
+1. **CLI/协议参数的接受条件**：daemon 从前静默忽略 handler 不读的 `params` 键，现在逐方法白名单，
+   多余的键在 handler 跑到之前就拒（`GP_E_BAD_PARAMS`，点名被拒的键并说出这个方法读哪些键）。
+   直接后果是`operationId` 拼错不再"回答最近那一个操作"。
+2. **退出码与拒绝档的触发条件**：`glasspaned --project-prune --dry-run` 在注册表读不开那一档从前退 0
+   并公布 `remaining: 0` + `loadFailed: false`，现在与真删那一档同样拒（退 1，载荷不给计数）。
+   `install.sh` / `installer/cli.js` 在**非 macOS 且源码已在手边**那一档从"一路装下去"改为拒（退 1）。
+3. **对外输出字段集合**：`probe_status` 新增两处 daemon 侧丢失读数（行级 `ringEvictedEvents`、
+   载荷级 `ringEvictedEventsTotal`）；HTTP 门 `GET /v1/hello` 新增 `routableTools`；壳侧新增错误码
+   `GP_E_STATE_ROOT_REFUSED`；面板新增一条拒绝读数（`gp-daemon-refused-binary`）；
+   证据包的 `handlerProbe.lateCount` 语义收紧（宽限期未满不再认证为最终值，改在
+   `circuitBreaker.reason` 里点名未测量）——字段本身一个没加没删（`additionalProperties: false`）。
+4. `bin` 声明没动：`glasspane-mcp`→`dist/index.js`+`dist/http-gateway-cli.js`、
+   `glasspane-install`→`./cli.js`，两处 `files` 也未变（实测与 1.19.0 逐字相同）。
+
+另两处必须点名的形状变化：两个 `.app` 的 `LSMinimumSystemVersion` 由 `13.0` 改为 `14.0`
+（与 README/CONTRIBUTING 一直写的"macOS 14+"对齐），`CFBundleVersion` 第一次成为版本线位点
+（从前恒写 `1`，而 CONTRIBUTING 的"一个号服务整个仓"里含 bundle 版本）。
+
+开工时 `[Unreleased]` 段**不空**：另一条线（场景② 产品侧收口）已经把面 A 的 `dimension` 槽落在
+main 上并写下"号留给下一版"。本版把它整段收进来了（原文照录在本条目末尾），不重述、不改写它的判据。
+开工基线是 `8e4dd6a1`，中途 `origin/main` 追加三笔（`1c402645`、`882c04e4`、`1f9f804e`），
+`git merge` 后只有 `mcp-shell/src/errors.ts` 一处冲突，两侧新增的错误码都留下并互相记名。
+
+### 本轮审出并修完的缺陷（发现 72 条，修复 72 条）
+
+审查面：`review-bugbot` 与 `review-security` 两套简报（本机没有 `bugbot`/`security-review` 这两种
+subagent 类型，`Agent` 只认 `Explore`/`Plan`/`general-purpose`，故按原简报逐字改用 `general-purpose`
+派发，这一点写在报告里）+ 主代理自查，共七条泳道；修复分两波 11 条泳道，每条回代码复核后才动手，
+每条自己的门禁复跑由主代理做。复核后不成立的列在后面那一节，不占 63 的名额。
+
+**引擎与探针（判定诚实性 / 协议）**
+
+| # | 位置 | 失效模式 | 修复与证据 |
+|---|---|---|---|
+| 1 | `ProbeInbox.lateCount` | 只看"哪些已到"不看"宽限期是否走完"；act+0.3 s 诊断得到 `late=0` == act 时默认值 → `.confirmed`，归档把"还没人来"写成"没有迟到"，T8 永不可判 | `LateReading.graceOpen` 独立拒绝并说剩余秒数；`.confirmed` 只在宽限期后可达；旧建议"diagnose **within** 2 s"改口 |
+| 2 | 同上一条的第二次诊断 | 宽限期内那次写下的"未测量"，在宽限期后真量到时仍留在包里说"T8 不可判" | `removingLateArrivalsBasis` 只摘自己这条 label 的 basis；`.measured` 与 `.confirmed` 两臂都摘 |
+| 3 | `Classifier` T8 | `(stateChanged ?? false) == false` 把"没有状态通道"折成"状态没变"，同文件 :75-81 明令禁止、T4 用的是三态 | 三态比较 + 给 `hitCount==0 && late>0 && stateChanged==nil` 补一条诚实缺口臂 |
+| 4 | `ProbeInbox.trimEvents` | daemon 侧环形溢出静默丢弃，探针侧每种丢失都有计数器；繁忙窗口把下界当完整测量 | 按 pid + 单调总量两处发布，窗口差值随 act 结论进 `circuitBreaker.reason` 并降到 degraded |
+| 5 | `EvidenceStore.write` 预检 | 挂在 `priorBytes != nil`：条目在而读不开时预检跳过，事后 `removeAfterRefusal` 把本来就存在的档案删掉 | 挂 `isDeletableEntry`；`undoPublishedRefusal` 三分支，读过而拿不到字节时**留着不动** |
+| 6 | `LocalArchive.evidenceCount` | `pathExtension == "json"` 比 daemon 的 `isDeletableEntry` 松两级，同一目录两个数 | 同一谓词；夹具从"24 字符不合法名"改为合规格名 |
+| 7 | `SocketDirectoryRule.enforce` | 先 `chmod(0700)` 再判是不是目录：别人的普通文件被改了模式才拒 | `lstat` 叶子判据提到 createDirectory/chmod 之前，"不是目录"只留一种拼法 |
+| 8 | `DebugCapabilityProbe.classify` | `spawn failed: Operation not permitted` 被短语扫描判成 `.denied`，面板把人送去勾 TCC | 认 spawn 前缀先回 `.spawnFailed`；起进程后说 not permitted 仍 `.denied` |
+| 9 | `ProbeWire` handler 帧 `durationNs` | 唯一不走 `boundedInt32` 的数值字段；`"800"` 解成 nil 即 entry 帧 → 同一次点击数两遍 | 键在就必须可解，否则 `.malformed` 点名该键 |
+| 10 | `EvidenceModels` summary 长度 | 数图素簇，内核 zod `max(2048)` 数 UTF-16 单位 | `utf16.count` + 报错同单位；`dimension` 实测其 pattern 排除星外字符，不动并记判据 |
+| 11 | `RecipeLoader:158-160` | 交叉引用过期（说 `ParamValidation`/`EvidenceModels.summary` 还是 `String.count`） | 按现状改口，并写清"这里量码点、那两处量 UTF-16"是留痕的决定 |
+| 12 | `Dispatcher`/`ParamValidation` | 未知 `params` 键被吞，拼错 id 变成回答**别的**操作 | 逐方法白名单（接受集从 handler 真实读取反查，与 `tools.ts` 的 strictObject 11/11 对齐），在 handler 之前拒 |
+| 13 | `glasspaned --project-prune --dry-run` | 读回失败只在真删那一档拒，预览公布 `remaining: 0` | 判据进库 `pruneReadBackRefusal`，两模式同一档；真机跑过 at-load 那一档的对照 |
+| 14 | `SCKCapturer.streamPixelScale` | 挑不到屏幕 `?? 2.0`：假设值产出的插值图被当测量归档 | 纯函数只在"恰好一块屏"给读数；调用点抛 `pixelCaptureDenied`；顶部那句坐标一致的旧注改口 |
+| 15 | `ProbeSocketServer` 日志 | peer 自报字符串原样进 launchd 重定向的日志 | `logSafePeerText` 五站点；干净 token 逐字节不变；真 socket 端到端断言"每帧只一行且无控制字符" |
+| 16 | `CGEventInputMonitor` 缓冲丢弃 | 满 4096 丢最老的无痕 → 归因读者把有人输入过的窗口报成干净 | 计数 + 读后清零；协议扩展加"这次持有期间丢过吗"（默认没丢，两个既有 conformer 不改），丢过按监控故障处理 |
+
+**信任边界（安全）**
+
+| # | 位置 | 攻击/失效模型 | 修复 |
+|---|---|---|---|
+| 17 | `ConsoleModel.runDaemonCLI`（P0） | 昨天给 launchd 提交那三条门装了归属判据，同一个 peer 自报路径走的另一条通道（五条 exec，`--evidence-stats` 无需点击）照旧起进程 | 入口 `adoptDaemonReport` 与读者 `runDaemonCLI` 各一道；拒绝看得见；root-owned 系统工具窄豁免（提交那条腿复用此通道，不豁免就是拦死） |
+| 18 | 面板拒绝的可见性 | 只让 `daemonBinaryPath` 停在 nil，屏幕读到"没问过"，事实是"有人报了不能信的路径被拒了" | `refusedDaemonBinaryPath` + 面板一行，措辞与提交那条腿同源 |
+| 19 | `daemonProjectsPath` | `hello.stateRoot` 未核就被拿去 join + `mkdir -p` + `chmod 0700`：peer 报 `/Users/<you>` 就让壳改主目录模式（daemon 自己拒 `--state-dir` 同一条判据） | 壳侧同一条归属判据，拒在读写之前，新增 `GP_E_STATE_ROOT_REFUSED`，不静默退回 home 默认根 |
+| 20 | 新码在 HTTP 那一面的归宿 | 没有臂就落 `default: 422`，把"服务报了个我们不能照做的根"答成调用方的错 | `httpStatusForEngineCode` 加臂答 503（与 `GP_E_REGISTRY_DRIFT` 同族） |
+| 21 | 三处 updater remedy | `ls -lO ${where}`、`stat -f '…' ${where}`、`export NODE_EXTRA_CA_CERTS="${…}"`、`--state-dir "${…}"`：路径来自 `--state-dir`/环境变量/面板直传的 daemon 自报根，双引号里 `$()` 照样展开 | `updater/lib/shell-quote.js` 单份实现，三处 import；扫描闸扩面到 `updater/lib/*.js` 与 `updater/*.js` |
+| 22 | `install.sh` + `installer/cli.js` 的平台闸 | 只管"要 clone 的那一趟"；源码在手边时不经过，而 cli.js 里一个字都没有——实测被 `uname` 桩绕过并真装了一次（npm ci/tsc/swift build/launchd） | install.sh 委托前第二道；cli.js 侧 `platformRefusal(process.platform)`（桩不掉的读数），`--help`/参数错误/`--restore-launchd` 之后判 |
+| 23 | `installer/test/daily-20261020.test.mjs` | 一条会改机器状态的测试：继承仓库根 + 真 HOME，把开发者的 `mcp-shell/dist`、`engine/.build` 与 launchd 作业动了一遍 | 该格与 Darwin 对照格都换沙箱 `cwd`/`HOME` 并断言沙箱为空；再加一条静态闸扫全套：非 dry-run 跑 install.sh 而不换 HOME/cwd 的一律红 |
+
+**MCP 壳（面 A）**
+
+| # | 位置 | 失效模式 | 修复 |
+|---|---|---|---|
+| 24 | `engine-client` 传输死亡臂 | 在途请求一律"…, then retry"，对已发出的 act/attach 就是第二次执行；同一缺陷客户端关闭臂上一轮已修 | 命令与尾话拆开（`daemonUnreachableRemedy` 字节不变），按 replay-unsafe/state-changing/可读三分，两扇门各自说这一面真有的路 |
+| 25 | `settleFromFrame` 空结果臂 | remedy 硬编码"Retry once"不看方法 | 同一套三分，保留"answered nothing" |
+| 26 | `engineError` | `??` 只防 null，`code:""`/`message:""` 原样透出，而 remedy 臂早已不允空 | 空/纯空白按缺席处理 |
+| 27 | `shellFaultRemedy` snapshot 臂 | 教人"`gp_snapshot` 列出已存 id"——它新建基线、可能挤掉这句话正保护的基线；全线无法枚举环 | 改口 + 一条按方法集合判的闸 |
+| 28 | `capture_view` 汇总 | 描述承诺给出请求值与实际 `appliedScale`，代码只 gate 两个字段，缺键被 `canonicalJson` 丢掉 | 缺席明写"这一版 daemon 没报"（沿用 NOT_MEASURED 那一族），不误拒老 daemon |
+| 29 | `GET /v1/hello` | 原样转述 capabilities，同一扇门 `capture_view` 404 | 不改测量值，新增派生 `routableTools` + 两扇门同一趟调用对账 |
+| 30 | `projectSet` 读—改—写 | 内容读完才取 `mtimeMs:size:ino`：并发写落在这两步之间被折进基线，旧表覆盖新表并报成功 | 基线=所读字节 sha256；`fileIdentity` 整条删除 |
+| 31 | `requireUsableRegistry` 逃生门 | `renameSync` 盲挪：并发写刚落好就被当"读不回的表"归档 | 挪之前重读比对，变了就拒并说清什么都没挪 |
+| 32 | `assertSingleIdentity` | 存量条目被第三方写坏成两半都在时，一个没提交这两个字段的调用方收到像指控它的 `GP_E_BAD_PARAMS` | 分开两种成因；存量损坏走 `GP_E_INTERNAL`（tools 侧那一码的 remedy 早写着"问题在这个文件不在你的参数"） |
+| 33 | `mapProjectError` | 按 `instanceof` 透传，模块实例不同时一句已点名的拒绝被降级成壳自己的 `GP_E_INTERNAL` | 按形状透传（`GP_E_*` 前缀），注释写清为什么不是类身份 |
+| 34 | `probe_status` 描述 | 新计数没进键清单，读者无从知道它存在 | 描述里点名两处丢失读数并说明"非零即下界" |
+
+**发布链 / 门禁 / 工具**
+
+| # | 位置 | 失效模式 | 修复 |
+|---|---|---|---|
+| 35 | CI 缺 macOS 腿 | 17 处 darwin/预检自跳断言（launchd 10、review-2026-10-09 4、cli-options 1、install-honesty 1、failure-exit 1）在任何 CI 跑里从不执行 | 新增 `macos-node-gate` 跑两套 workspace 测试；ubuntu 腿一条不删；`check-workflows` 共用同一 YAML 读法并新增 `--jobs` |
+| 36 | `scripts-test-suite-is-run` | 只证明 glob 可达，不证明断言跑过 | 逐文件清点被平台挡住的断言，并要求 ci.yml 有跑它所在 workspace 的 macOS job |
+| 37 | `installer/test/failure-exit.test.mjs` | 手抄文件清单造"装好的包"，`files` 从没被验——正是让 19 个版本回 0 字节的那一族 | `npm pack` → 干净前缀安装 → exec `--help`/坏参数；另钉 `bin` 目标必须列在 `files`；npm 会强制收 `bin` 目标这一实测写进文件头，不吹成两条都兜住 |
+| 38 | `tools/gpg-signing.sh` 11 处 `printf \| grep -q` | `pipefail` 下 `grep -q` 早退让管道状态变 141，判据随时间翻 | 全换 `case`/参数展开；`selftest` 17 条 ok（基线 8）；新增"活动代码里不许再有 `\| grep -q`"的源码闸 |
+| 39 | 同文件 `gh api … 2>/dev/null \|\| true` | gh 自己的失败（无 auth/404/scope/environment）一律念成"secret 不存在" | 分开"命令失败"与"结果为空"，引用 gh 原话，退 3；判据抽成 `secret-verdict` 可罐头驱动 |
+| 40 | `tools/release-signing-gate.sh` 臂 2/3 | 闸在任何验证前无条件 echo 一次 pin，判决行删掉指纹臂仍绿 | 只认 `::error::` 判决行；本机四臂实测复跑 |
+| 41 | `install.sh` 默认 clone URL | `installer/cli.js` 的"真源"之外第二份副本，闸只测覆盖路径 | 对账默认值 == `REPO_URL`；dry-run 走默认路径 |
+| 42 | `install.sh` 头部 curl 与职责清单 | 表头说"四件事"而第 197 行已加平台闸；curl 行没人核 | 职责数与真实职责两处对账 + 头部 URL == `INSTALL_SH_URL`（行为一字未改） |
+| 43 | `installer/cli.js:1999` | 第三条 curl URL 副本藏在 sudo remedy 里 | 内插 `${INSTALL_SH_URL}`，并钉"URL 字面量在 cli.js 只出现一次" |
+| 44 | `scripts/check-version.mjs` 打印 | 拿整条 semver 比 `line: true` 那两位点，判定绿、表上每行 `≠` | 用该位点自己的期望值比；不一致时把两个值都印出来 |
+| 45 | SECURITY 那格活版本号 | `| 1.19.x |` 不在位点表里，`set-version` 写不到、`check-doc-links` 每次发版判红，只能人手改两份 | 登记为位点（新的 `line: true` 位点种类），夹具与断言同批补齐 |
+| 46 | 包门面 README | `installer/`、`mcp-shell/`、`updater/` 三份随包交付的 README 不在文档闸里 | 进 `MAIN_DOCS`（29 → 32 份），英文单侧不逼出 zh 对偶的旋钮写清 |
+| 47 | README 的安装命令 | 公开文档写的是本仓实测会"curl 失败仍退 0"的那条管道 | 5 处 6 行改两步式，双语同批；新增形状禁令：对外文档里以命令形状给出的安装行不许是管道 |
+| 48 | `tools/gpg-signing.sh` TARGETS 默认值 | 字面的这台机器卷路径随签名归档出去 | 由 `REPO_ROOT` 反解，5 行实测与旧字面逐字节相同；`make-release-archive.mjs:59` 注释里的真 home 换占位形 |
+| 49 | `DEFAULT_BUNDLES` | 面板可执行名写成 `GlassPane Settings`，打包脚本装的是 `glasspane-settings`；今天没人读，第一个读者会找一个从未存在过的文件 | 名字回真源 + 从 `make-app.sh` 读出两个名字双向对账的新闸；5 份夹具同批 |
+| 50 | `agent-entry.js` 缺省根 | `os.homedir()` 读 `$HOME`（调用方可控），而 cli.js 故意读 passwd 记录且 `home.test.mjs` 会判红 CLI 侧 | 读 passwd 记录；无记录时给具名拒绝（与 CLI 同码）退 3，不把栈打进没人读的日志 |
+| 51 | `source.js` 的 4xx 拒绝 | 只回状态码，没有后果也没有下一步（面板原样打印） | 补同族那句"什么都没暂存"与只指真存子命令的下一步 |
+| 52 | `make-app.sh` 的解释器 | `#!/bin/bash` + `set -euo pipefail`，而计划更新器用 `/bin/sh` 调：非 bash 的 `/bin/sh` 在第 27 行死，每日更新永远 `staged-build-failed` | 审计整个文件的 bashism（唯一拦路是 `pipefail`，该文件无管道）；`/bin/sh` 与 `/bin/dash` 都跑通，`--help` 的行号字面量改成按注释块边界取；今天没有任何闸能抓到错解释器，新加的那条是第一副牙 |
+| 53 | `LSMinimumSystemVersion` | 两份 bundle 声明 13.0，而四份文档说 macOS 14+，且 13 那条像素通路本仓自记"从没在真机 13 上量过" | 单一 `MACOS_MIN_VERSION` 声明、两处渲染；`Package.swift` 不动的理由（编译下限 vs 打开下限）写在提交正文与 smoke.md |
+| 54 | `CFBundleVersion` | 恒写 `1` 且不是位点，而 CONTRIBUTING 说"一个号服务整个仓"含 bundle 版本；LaunchServices/TCC 缓存与任何按它比的读者分不清 1.18.0 与 1.19.0 | 成为版本线位点（15 处），夹具同时给两行（1.16.0 那次的教训写在注释里） |
+
+**bridge（Python LLDB 桥）**
+
+| # | 位置 | 失效模式 | 修复 |
+|---|---|---|---|
+| 55 | `_payload_from_process` 线程枚举 | 截断发生在 `assemble_result` 之前：65+ 线程目标丢行不吭声，`truncated`/`errors` 全空 | 枚举全部、由产出器封顶并宣告；`reconcile_watchpoint_stops` 在超限时明说台账保留 |
+| 56 | 交付那一半无覆盖 | `run_outer`/`_payload_from_process`/`cmd_*`/`_arm_watchpoint`/`_outcome_ok` 只作为文档字符串或 mock 目标出现，0/1/3 裁决与 watchpoint 循环没有任何闸跑过 | 默认套件按 SB 形状桩驱动（9 + 2 条），opt-in 真机腿一格不转默认 |
+| 57 | 双超时臂 | `kill()` 后把 `out/err` 清空：泄漏两枚管道 fd、不 reap、第二次 `communicate` 丢掉已缓冲字节，sentinel 成对丢失 | 保留两次异常里最宽的缓冲 + `finally` 关管道并 reap |
+| 58 | 停止原因表镜像 | `if name in measured and …`：未来 lldb 改名/删枚举时比较零行判绿 | 纯函数 `mirror_table_drift` 判缺失/多余/不等，报里点名 lldb 版本 |
+| 59 | `run_lldb` 的 except | 只 catch `OSError`，`TimeoutExpired` 是 `SubprocessError`：冷 debugserver 机器上报栈回溯 FAIL 而不是 NOT RUN | 与姊妹函数 `_import_output` 对齐 |
+| 60 | `_collect_locals`/`_collect_registers` 失败臂 | 回 `locals: []` + `localsTotal: 0`、`registers: {}` 无 errors 条目——把"读不到"发布成一个 0 的计数 | 按本文件 `queue` 那条规矩：`null` + `errors[]` 点名；帧 1..N 不再宣称 0 |
+| 61 | `no_payload_cause` 的 remedy | "在 -o 文本里给路径加引号"不可执行（`build_lldb_argv` 恒加引号），而旧测试把"space"/"quote"钉进断言护住这句 | 三条真能跑的动作；测试改成钉"每条都是命令"且旧句子缺席 |
+| 62 | `capture-sample.json` | 与产出器不再一致（`watchpoints` 是台账 dump、`truncated`/`framesTotal` 缺席、状态是裸数字），且没有任何测试读它 | 用产出器重新采样 + 5 条默认断言比键集合 |
+| 63 | 三条测不出的用例 | `render_json(x)==render_json(x)` 自己比自己；只 bounds 常量的 emit 预算；两张手抄整数表互比 | 反序重建比对；驱动 `emit` 读 `settimeout`；整数表合一（谁是权威只能由真 lldb 那条 opt-in 证，写在报告里不当作已验） |
+
+**探针 SDK 与文档主张**
+
+| # | 位置 | 失效模式 | 修复 |
+|---|---|---|---|
+| 64 | `endMetalCapture()` | 报一个从没验过存在的 `.gputrace` 路径（`stopCapture()` 不等、文档异步写） | 纯函数 `captureEndReport(capturedPath:documentExists:)`；begin 那一臂故意不查并写明理由 |
+| 65 | 探针默认 socket 名 | 只从 `NSHomeDirectory()` 派生，不吃 `--state-dir`：无参 `GP.start()` 要么一直离线缓存，要么连到真机的 `probe.sock` 而冒烟以为隔离 | 显式参数 > `GLASSPANE_PROBE_SOCK` > `GLASSPANE_STATE_DIR` > 家缺省，尾斜杠与 `StateRoot.canonical` 同折；如实记 `.p6_smoke.py` 对这条回归看不见 |
+| 66 | `GlassPaneProbe` 重连注释 | 同一文件里两处写"1s×3"、一处写 1 s/2 s/3 s 递增，而代码与 `ProbeRuntimeTests` 钉的是递增 | 改注释不改行为；spec 那句（`specs/…P6…:55`）留在记录里由本轮台账记 |
+| 67 | README 的安装器自述 | "对每一项都做真实探测，没有假设存在的路径"——表里五行只探四项，macOS 主版本与 python3 根本不探 | 写清探哪四项（+ `open`）、那两行由谁强制（bundle 的 `LSMinimumSystemVersion` / 只有桥测试需要），双语同批 |
+| 68 | `CONTRIBUTING` 那份"闭合清单" | 少抄一条（`node scripts/check-doc-links.mjs` 在 YAML 里，`ITERATE.md` 也列了），照 CONTRIBUTING 跑的 agent 不验文档 | 补上第 9 条（两份语言） |
+| 69 | `CONTRIBUTING.md:77` / `.zh-CN.md:75` 的行号指针 | 指到 `EngineCoreTests.swift:1336`（一处无关断言），那句话在 :1563 | 改指 :1563 |
+| 70 | `ITERATE.md` 的 npm 读数 | 用现在时写"两个包的 `latest` 都是 1.14.1"（那是 2026-10-14 的实测），今天两包都已推进 | 改成带日期的读数并给出复测命令；不再写现在时 |
+| 71 | `CHANGELOG.md:93` | "不计入上面 26 条"数错了自己那张 1→27 连续的表，而本版第 27 条正是"散文里写死计数会漂" | 订正为 27（纯计数，历史结论不动） |
+| 72 | `iterate.config.yaml` 的指纹 | `drift_check: true` 钉着 `package.json` 的 sha256，而它是版本线位点、每发一版按设计被重写 | 从 `fingerprints` 撤下并写清为什么（会合法变的清单不是漂移检查的对象），`iterate refresh` 作为采集入口留在注释里 |
+
+上面 72 行就是"发现 72 条、修复 72 条"的账（一条一行；两处是同一处 P0 的两半——#2 是 #17 的可见性、
+#20 是 #19 在另一扇门上的义务——它们各自需要自己的代码与自己的用例，因此各自占一行）。
+逐条对应实现见各提交正文（`git log --since=2026-10-22`），每条都点名"撤销哪一处 → 哪条具名用例变红"。
+
+### 复核判为不是缺陷的（附判据，不占上面名额）
+
+| 那条发现 | 判据 |
+|---|---|
+| `evidence-report.ts` 的 `diagnostics` 兜底没有生产者 | `specs/GlassPane_P1_实施规格_v1.3_evidence审查UX.md:266`「设计缺口补述 2」原文就写着两个审计工具传 nil——"没有生产者"是规格 |
+| CI 只读 lane 的 action 未按 SHA 钉死 | `release.yml:62-68` 把这条范围决策连同理由写在文件里（无 secret 的 lane + `check-workflows` 的 unresolvable/未钉两条） |
+| `spike/`、`specs/` 随归档出去 | `CONTRIBUTING.md:36`/`.zh-CN.md:33` 明写 `spike/` 是实测留档、不入门禁；`specs/**` 是验收台账且被链接图引用。本轮只处理了开发者机器路径字面量那一半（#48、#72） |
+| `bridge/**__pycache__**`、`engine/**__pycache__**` 会进发布物 | `.gitignore:6` 挡着，`git ls-files` 与 `git ls-tree -r HEAD` 都数到 0 条 |
+| `updater/lib/ca-bundle.js` 同属"remedy 里的未quote路径" | 该文件把客户端可控路径插进 remedy 的站点为 0（grep `remedy:.*${` 命中 0），`:196` 那句是占位示例 |
+| `hello`/`shutdown` 也该进白名单 | 两个 handler 一个 `params` 键都不读，而握手帧/面板/updater 可能带自己的东西；收紧不在本轮缺陷范围内，理由写在表旁并由一条用例钉住"它们仍不在表里" |
+| 面板有控件而 daemon 无命令 | 三条泳道逐条核：updater 子命令、prune/remove/stats/recipe-validate/permissions/approval-verify 全是一次性 CLI，`ApprovalGate` 是只读台账且面板明写"没有人工审批入口"——本轮没找到 P0 那一形 |
+
+### 本轮决定与回滚
+
+取号（minor→1.20.0）、把并行那条线的 `[Unreleased]` 收进本版、`bin` 声明不动、`Package.swift`
+编译下限不动、`LSMinimumSystemVersion` 抬到 14.0、`CFBundleVersion` 进位点表、新增
+`GP_E_STATE_ROOT_REFUSED` 与它的 503 归宿、面板 exec 门的 root-owned 豁免、`--record` 重记面 A
+（`mcp-shell/src` +586 行，fork 侧 LOC 一字未动）、`iterate.config.yaml` 撤指纹、README 安装命令
+改两步式而不是给安装器加探测、本轮不新增对外 `gp_*` 工具也不加功能（范围纪律）——
+每条的依据写在对应提交正文与上面表里，回滚命令汇总在收口报告。
+
+### 上一轮没收口的活
+
+`gp-harness-sc5-fork-20261020` 那三笔：字节判据见 `specs/GlassPane_每日审查_2026-10-22_记录.md` §1
+（fork 侧两份 `git hash-object` 与 main 同值，壳侧那份是 main 上较新的同名文件，分支无独有文件）。
+它属 harness 线（`gp-harness-*`），不由本线删。`gp-sc5-rebased`（本地 + 远端）与 main 同一枚 commit，
+但另一条会话今天还在这个 worktree 上活动，按"别人正在飞的"留着。
+### 收进来的一格：另一条线的面 A（原文照录，判据不改写）
 
 ### Added
 
@@ -36,6 +203,7 @@
 - 版本判断：**未取号**。按本仓 1.6.2 那四项 patch 判据实测，本版动了"输入参数的接受条件"（五个工具新增可选
   参数）与"输出内容项"（新增一行归属声明），够 minor；父仓发布链（Swift 构建、归档、签名、npm 三包）本轮不跑，
   号留给下一版。代码在 main，`[Unreleased]` 段就是它还没进发布物的凭据。
+
 ## [1.19.0] — 2026-10-21
 
 **版本判断：minor。** 对着本仓自己那四项 patch 判据（判据原文在 1.6.2 条目里）逐条实测，本版动了其中三项：

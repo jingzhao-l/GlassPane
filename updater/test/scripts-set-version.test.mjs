@@ -63,7 +63,7 @@ const SITE_TEMPLATES = {
   // 按**文件名**去核，看见这个文件有夹具就放行了。
   'engine/Sources/GlassPaneEngine/EngineCore.swift': (v) =>
     `public static let buildVersion = "${v}"\n    public let version = "${v}"\n`,
-  'engine/scripts/make-app.sh': (v) => `#!/bin/sh\ncat <<XML\n<key>CFBundleShortVersionString</key>\n        <string>${v}</string>\nXML\n`,
+  'engine/scripts/make-app.sh': (v) => `#!/bin/sh\ncat <<XML\n<key>CFBundleShortVersionString</key>\n        <string>${v}</string>\n<key>CFBundleVersion</key>\n        <string>${v}</string>\nXML\n`,
   'install.sh': (v) => `#!/bin/sh\nGLASSPANE_RELEASE="v${v}"\n`,
   'installer/cli.js': (v) => `export const RELEASE_VERSION = '${v}'\n`,
   // 文档里那条 clone 命令也是位点（1.15.0 起）：README 与 install.sh 各写一份 tag 时，

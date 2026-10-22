@@ -183,8 +183,14 @@ HTML/Markdown text in the session (it writes no file — only the panel's report
 | git | fetching the source | `git --version` |
 | Python 3.11 | LLDB bridge test suite only | `python3 --version` |
 
-The installer probes each one for real and stops with a per-item report if something is missing;
-there is no "assume present" path.
+The installer's preflight probes **four of these rows** for real and stops with a per-item report
+if one is missing: the Swift toolchain (`swift`), Node.js ≥ 18 (`node`), `npm`, and `git` (plus
+`open`, the launch-services helper the table does not list). The other two are not probed at
+install time and the table says how to check them yourself: the macOS major version is enforced
+when LaunchServices opens the bundle (`LSMinimumSystemVersion` = 14.0), and `python3` is needed
+only by the LLDB bridge test suite, so a missing one surfaces as that suite failing rather than as
+an install refusal. There is no "assume present" path **for the five it does check** — and no
+silent substitute for the other two: the row that is not probed says so.
 
 ### Channels
 
@@ -205,7 +211,7 @@ npx glasspane-install
 #    mean to install an unreleased tree. The tag below is not verified by eye: it is a derived site
 #    owned by `scripts/version-sites.mjs`, and `scripts/check-doc-links.mjs` reddens when it stops
 #    matching install.sh.
-git clone --branch v1.19.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
+git clone --branch v1.20.0 https://github.com/jingzhao-l/GlassPane.git && cd GlassPane && node installer/cli.js
 ```
 
 `GLASSPANE_REF=<tag>` selects another release; `GLASSPANE_REF=main` tracks the trunk, which is not a

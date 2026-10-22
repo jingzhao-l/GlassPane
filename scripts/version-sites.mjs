@@ -98,6 +98,15 @@ export const SITES = [
     hint: '.app bundle 版本（系统设置/关于框显示）',
   },
   {
+    id: 'CFBundleVersion',
+    file: 'engine/scripts/make-app.sh',
+    regex: /(<key>CFBundleVersion<\/key>\s*\n\s*<string>)([^<]+)(<\/string>)/,
+    hint: 'bundle 的构建号。从前恒写 1，而 CONTRIBUTING 的"一个号服务整个仓"里含 .app bundle 版本——'
+      + 'LaunchServices/TCC 的 bundle 缓存与任何按 CFBundleVersion 比的读者都无法区分 1.18.0 与 1.19.0，'
+      + '`updater/lib/version.js` 读的只有 ShortVersionString，所以这一格没有读者替它喊漂。'
+      + '现在它是位点：与营销版同号，随 `set-version` 一起推进。',
+  },
+  {
     id: 'install.sh 钉 ref',
     file: 'install.sh',
     regex: /(GLASSPANE_RELEASE="v)([^"]+)(")/,
