@@ -137,8 +137,33 @@ test('control: the same branch delegates on a darwin host, so the gate is not a 
  * `testPanelGuardsEverySubmitSite`）。顺序也要钉：`exec node` 之前的那道才是护栏，
  * 之后的那道只是事后说明。
  */
+/**
+ * 位置类判据要在**剥掉注释**的源码上算。同目录的先例是本仓 `CaptureChannelShapeTests.codeOnly`
+ * 与 `mcp-shell/test/http-gateway.test.mjs` 的 `gatewayCode()`，理由也一样：注释里出现被扫描的
+ * 那个名字，判据就会红在一句说明上——而第一反应是删掉那句说明换绿，教训跟着没了。
+ * 本文件 2026-10-22 那次红就是撞在这上面：`cli.js` 新增常量的文档注释里写着
+ * "它同时是 `checkEnvironment()` 的探测面清单"，于是 `indexOf('checkEnvironment()')` 指到了
+ * 注释上，"平台判据排在环境预检之前"这条判的是注释的位置。
+ * 剩下的已知边界：行尾的 `// …` 不剥（整行才剥），所以一句挂在代码行尾的注释仍可能被读成代码。
+ */
+function jsCode(text) {
+  let out = text
+  while (true) {
+    const open = out.indexOf('/*')
+    if (open < 0) break
+    const close = out.indexOf('*/', open + 2)
+    if (close < 0) break
+    out = out.slice(0, open) + out.slice(close + 2)
+  }
+  return out.split('\n').filter((line) => !line.trimStart().startsWith('//')).join('\n')
+}
+
+function shCode(text) {
+  return text.split('\n').filter((line) => !line.trimStart().startsWith('#')).join('\n')
+}
+
 test('both doors consult the platform verdict before anything can mutate the machine', () => {
-  const script = fs.readFileSync(INSTALL_SH, 'utf8');
+  const script = shCode(fs.readFileSync(INSTALL_SH, 'utf8'));
   const execAt = script.indexOf('exec node "$REPO/installer/cli.js"');
   assert.ok(execAt > 0, 'install.sh 的委托行形状变了，这条对照不作数');
   const gateBeforeExec = script.lastIndexOf('本安装器只支持 macOS', execAt);
@@ -147,7 +172,7 @@ test('both doors consult the platform verdict before anything can mutate the mac
   assert.ok(gateBeforeExec > script.indexOf('looks_like_repo "$PWD"'),
     '平台闸必须排在源码定位之后、委托之前——它挡的就是"已经找到源码"的那一趟');
 
-  const cli = fs.readFileSync(path.join(HERE, '..', 'cli.js'), 'utf8');
+  const cli = jsCode(fs.readFileSync(path.join(HERE, '..', 'cli.js'), 'utf8'));
   const refusalCall = cli.indexOf('platformRefusal()');
   assert.ok(refusalCall > 0, 'cli.js 没有调用它自己的平台判据');
   assert.ok(cli.indexOf('checkEnvironment()') > refusalCall,
