@@ -38,6 +38,10 @@
 发布与门禁层、信任边界安全、bridge/probe/文档、以及主代理自查（`tools/`、版本线、三处方法表）。
 每条回代码复核后才动手；复核后不成立的写在下面「复核判为不是缺陷」一节，不占修复名额。
 
+本轮共 **76 条发现、76 条修复**。其中 73–76 这四条不在任何泳道简报里，是**门禁复跑尾段自己撞出来的**：
+跑闸跑到红的那一处就是缺陷现场，而四处红全部是"对照自己红"（不是被测代码错）——这类红最"合理"的
+处置是改断言换绿，所以四条各自都另打了一次变异，证明判据在修后的形状上仍然能红。
+
 （发现与修复的逐条表在 `CHANGELOG.md` 的 `[1.20.0]` 条目里——那才是给人读的那一份。）
 
 ## 4. 复核判为不是缺陷的几条（附判据）
@@ -48,6 +52,10 @@
 | CI 只读 lane 的 action 没有按 SHA 钉死（只有 `environment: release` 那条钉了） | `.github/workflows/release.yml:62-68` 把这条范围决策连同**理由**写在文件里（读不道的 lane 手里没有 secret，可改写面在别处已被 `check-workflows.mjs` 的 unresolvable/未钉两条挡住）；它是一处留痕的取舍，不是一处漏 |
 | `spike/` 与 `specs/` 随发布归档出去 | `CONTRIBUTING.md:36`/`.zh-CN.md:33` 明写 `spike/` = 可行性实验与实测留档、不入门禁，`specs/**` 是验收台账且被 `check-doc-links.mjs` 的链接图引用；把它们从归档里剔掉是产品形状变更，不是缺陷处置。本轮只处理了"开发者机器路径字面量"那一半（见 CHANGELOG） |
 | `harness rulers` 那格红（见 §2） | 实测复跑 + `gh run rerun --failed` 复通，判据在 §2 |
+| `bridge/**`、`engine/**` 的 `__pycache__` 会随发布物出去 | `.gitignore:6` 挡着，`git ls-files` 与 `git ls-tree -r HEAD` 两条都数到 0（本机实测，不是推断） |
+| `updater/lib/ca-bundle.js` 也属"remedy 里插了未 quote 的路径"那一族 | 该文件把客户端可控路径插进 remedy 的站点为 0：`grep -n 'remedy:.*${' updater/lib/ca-bundle.js` 命中 0；`:196` 那句是占位示例，不是插值 |
+| `hello` / `shutdown` 也该进 `acceptedParamKeys` 白名单 | 两个 handler 一个 `params` 键都不读，而握手帧、面板与 updater 可能带自己的东西；收紧属产品契约变更，不在本轮缺陷范围。这条判断由一条用例钉住"它们仍然不在表里"，所以将来有人动表会被抓住 |
+| 面板上有控件而 daemon 没有对应命令（P0 那一形） | 三条泳道逐条核过：updater 子命令与 `--project-prune`/`--project-remove`/`--evidence-stats`/`--recipe-validate`/`--permissions`/`--approval-verify` 全是一次性 CLI 面，`ApprovalGate` 是只读台账且面板明写"没有人工审批入口"——本轮没找到这一形，不把它写成缺陷 |
 
 ## 5. 已知边界（物理边界，不是遗留）
 
@@ -61,4 +69,20 @@
 
 ## 6. 本轮我替你做的决定（依据与回滚）
 
-见汇报里同名那一节；每条决定的依据同时写进 `CHANGELOG.md` 的本版条目与相应提交正文。
+汇报里同名那一节是给人的这一份；这里留**可执行的回滚**，按 SHA 落地（`git log --oneline` 从旧到新）：
+
+| 决定 | 依据（写在哪儿） | 回滚 |
+|---|---|---|
+| 取号 **1.20.0**（minor，不是 patch） | 四条判据的实测读数记在 `CHANGELOG.md` 的本版条目开头；15 处位点由 `scripts/version-sites.mjs` 统一 | `git revert -n c98fce5e` 后 `node scripts/set-version.mjs 1.19.0`，再按本版条目里的"发布链"那节把 tag/Release/npm 三格如实标注为"号已占用但撤回"（npm 已发布版本不可撤回，只能发更高号——既有纪律） |
+| 把并行那条线的 `[Unreleased]` 整段收进本版（原文照录） | `CHANGELOG.md` 本版条目末尾那一格标着"原文照录，判据不改写" | 该段文本删回 `## [Unreleased]` 标题即可，代码一笔不动 |
+| `mcp-shell/src/errors.ts` 的合并冲突标记按"两侧都留"解决，随后补 `http-gateway.ts` 的 import | `315b9dc1` 正文（含我误读 `grep -c` 的那处自审） | `git revert 315b9dc1` 会把标记放回——**不要这样回滚**；正确的退路是把那两个码各自删掉并同步其消费方 |
+| 新增错误码 `GP_E_STATE_ROOT_REFUSED` 与它的 HTTP 503 归宿 | `066c2477`/`315b9dc1`；分区判据在 `mcp-shell/test/http-gateway.test.mjs` 的 `SHELL_REQUEST_REFUSAL_CODES` 那条 | `git revert 066c2477`（该码不进 request-refusal 名单，是有正面测试支撑的判断） |
+| 面板 exec 门加 root-owned 系统工具豁免 | `9402f52a` 正文与 `gp-daemon-refused-binary` 那条 AX 标识 | `git revert 9402f52a` 会同时撤掉那条徽标；豁免本身只放宽"root 所有的 /usr/bin 工具"一格 |
+| `LSMinimumSystemVersion` 抬到 14.0 而 `Package.swift` 编译下限不动 | `54` 号那一行 + `engine/scripts/make-app.sh` 的 `MACOS_MIN_VERSION` 注释 | `git revert` 相应笔并把 `MACOS_MIN_VERSION` 改回 `13.0`；两者是同一处声明的两半，回滚要一起 |
+| `CFBundleVersion` 进位点表（第 15 处） | `54` 号那一行、`fdcbbfac`；夹具两行的教训写在 `scripts/version-sites.mjs` 注释里 | 从 `SITES` 删那一位 + `updater/test/scripts-version-sites.test.mjs` 的条数改回 14 |
+| `--record` 重记面 A（10826 → 11422，+596） | `b88bf97e` 正文逐文件归因；`node harness/tools/tool-surface.mjs --check` 现为绿 | `git checkout b88bf97e^ -- harness/contracts/tool-surface.json`（金样是纯记录，回滚它不会让代码变错，只会让闸重新红） |
+| `iterate.config.yaml` 撤下 `package.json` 指纹 | `c98fce5e` 的 diff（`fingerprints:` 那三行 → `[]` 加理由注释）；理由是"每发一版按设计被重写的清单不是漂移检查对象" | 把 `fingerprints: []` 改回那一条目并重新采集 sha（`iterate refresh`） |
+| README 安装命令改两步式，而不是给安装器加"管道失败也报错"的探测 | `8f881f7a`（5 处 6 行与 `pipedInstallCommands()` 同批）；形状禁令由 `scripts/check-doc-links.mjs` 守着 | 还原 5 处 6 行；那条形状闸会立刻把管道写法判红（这是有意的） |
+| 本轮不新增对外 `gp_*` 工具、不加功能（范围纪律） | 面 A 棘轮与 `product-surface` 的读数即为此 | 无需回滚 |
+| CI 新增 `macos-node-gate`（darwin 断言终于有人在 mac 上跑） | `8f881f7a`；`node scripts/check-workflows.mjs --jobs` 现报 10 个 job | `git revert 8f881f7a` 同时撤掉两条 job 计数判据；推这一笔必须走 SSH remote（token 无 `workflow` scope） |
+| 尾段四条"对照自己红"的修法：改判据的读法，不放松判据 | `1e974171`/`ddad39e8`/`a598534e`/`080e69f3`，每条正文都附了一次真红 + 一次变异 | 逐笔 `git revert`；注意 74 号里"位点表条数"若回到 14 会与 `CFBundleVersion` 那一位冲突 |

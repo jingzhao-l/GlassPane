@@ -30,12 +30,14 @@ main 上并写下"号留给下一版"。本版把它整段收进来了（原文�
 开工基线是 `8e4dd6a1`，中途 `origin/main` 追加三笔（`1c402645`、`882c04e4`、`1f9f804e`），
 `git merge` 后只有 `mcp-shell/src/errors.ts` 一处冲突，两侧新增的错误码都留下并互相记名。
 
-### 本轮审出并修完的缺陷（发现 72 条，修复 72 条）
+### 本轮审出并修完的缺陷（发现 76 条，修复 76 条）
 
 审查面：`review-bugbot` 与 `review-security` 两套简报（本机没有 `bugbot`/`security-review` 这两种
 subagent 类型，`Agent` 只认 `Explore`/`Plan`/`general-purpose`，故按原简报逐字改用 `general-purpose`
 派发，这一点写在报告里）+ 主代理自查，共七条泳道；修复分两波 11 条泳道，每条回代码复核后才动手，
-每条自己的门禁复跑由主代理做。复核后不成立的列在后面那一节，不占 63 的名额。
+每条自己的门禁复跑由主代理做。复核后不成立的列在后面那一节，不占上面那 76 的名额。
+73–76 那四条不在泳道简报里：它们是**门禁复跑尾段自己撞出来的**（跑闸跑到红的地方就是缺陷现场），
+一并记账、一并修完，口径与前面 72 条一样。
 
 **引擎与探针（判定诚实性 / 协议）**
 
@@ -100,7 +102,7 @@ subagent 类型，`Agent` 只认 `Explore`/`Plan`/`general-purpose`，故按原�
 | 42 | `install.sh` 头部 curl 与职责清单 | 表头说"四件事"而第 197 行已加平台闸；curl 行没人核 | 职责数与真实职责两处对账 + 头部 URL == `INSTALL_SH_URL`（行为一字未改） |
 | 43 | `installer/cli.js:1999` | 第三条 curl URL 副本藏在 sudo remedy 里 | 内插 `${INSTALL_SH_URL}`，并钉"URL 字面量在 cli.js 只出现一次" |
 | 44 | `scripts/check-version.mjs` 打印 | 拿整条 semver 比 `line: true` 那两位点，判定绿、表上每行 `≠` | 用该位点自己的期望值比；不一致时把两个值都印出来 |
-| 45 | SECURITY 那格活版本号 | `| 1.19.x |` 不在位点表里，`set-version` 写不到、`check-doc-links` 每次发版判红，只能人手改两份 | 登记为位点（新的 `line: true` 位点种类），夹具与断言同批补齐 |
+| 45 | SECURITY 那格活版本号 | 受影响版本线那一格写的是段值 `1.19.x`，它不在位点表里：`set-version` 写不到、`check-doc-links` 每次发版判红，只能人手改两份 | 登记为位点（新的 `line: true` 位点种类），夹具与断言同批补齐 |
 | 46 | 包门面 README | `installer/`、`mcp-shell/`、`updater/` 三份随包交付的 README 不在文档闸里 | 进 `MAIN_DOCS`（29 → 32 份），英文单侧不逼出 zh 对偶的旋钮写清 |
 | 47 | README 的安装命令 | 公开文档写的是本仓实测会"curl 失败仍退 0"的那条管道 | 5 处 6 行改两步式，双语同批；新增形状禁令：对外文档里以命令形状给出的安装行不许是管道 |
 | 48 | `tools/gpg-signing.sh` TARGETS 默认值 | 字面的这台机器卷路径随签名归档出去 | 由 `REPO_ROOT` 反解，5 行实测与旧字面逐字节相同；`make-release-archive.mjs:59` 注释里的真 home 换占位形 |
@@ -132,15 +134,27 @@ subagent 类型，`Agent` 只认 `Explore`/`Plan`/`general-purpose`，故按原�
 | 64 | `endMetalCapture()` | 报一个从没验过存在的 `.gputrace` 路径（`stopCapture()` 不等、文档异步写） | 纯函数 `captureEndReport(capturedPath:documentExists:)`；begin 那一臂故意不查并写明理由 |
 | 65 | 探针默认 socket 名 | 只从 `NSHomeDirectory()` 派生，不吃 `--state-dir`：无参 `GP.start()` 要么一直离线缓存，要么连到真机的 `probe.sock` 而冒烟以为隔离 | 显式参数 > `GLASSPANE_PROBE_SOCK` > `GLASSPANE_STATE_DIR` > 家缺省，尾斜杠与 `StateRoot.canonical` 同折；如实记 `.p6_smoke.py` 对这条回归看不见 |
 | 66 | `GlassPaneProbe` 重连注释 | 同一文件里两处写"1s×3"、一处写 1 s/2 s/3 s 递增，而代码与 `ProbeRuntimeTests` 钉的是递增 | 改注释不改行为；spec 那句（`specs/…P6…:55`）留在记录里由本轮台账记 |
-| 67 | README 的安装器自述 | "对每一项都做真实探测，没有假设存在的路径"——表里五行只探四项，macOS 主版本与 python3 根本不探 | 写清探哪四项（+ `open`）、那两行由谁强制（bundle 的 `LSMinimumSystemVersion` / 只有桥测试需要），双语同批 |
+| 67 | README 的安装器自述 | "对每一项都做真实探测，没有假设存在的路径"——表里五行只探四项，macOS 主版本与 python3 根本不探 | 第一版只把散文改顺（写清探哪四项 + `open`、那两行由谁强制，双语同批），**那是半修**：句子里的数量仍与代码不等（两份 README 写"四行/四项"，那张表五行，`checkEnvironment` 探五个命令，同段下一句又写"这五项"），而且这句话没有读者。尾段补完：`installer/cli.js:PREFLIGHT_PROBED_COMMANDS` 成为那个数量的唯一真源，`check-doc-links` 登记第 11 条可复算主张从它算，两份文档改成"五行里探命令的那三行 + 表外两项 = 五个命令"并点名不被探测的那两行；`installer/test/daily-20261022-preflight-claim.test.mjs` 钉住数组里每一项真的有一条只报它的拒绝路径 |
 | 68 | `CONTRIBUTING` 那份"闭合清单" | 少抄一条（`node scripts/check-doc-links.mjs` 在 YAML 里，`ITERATE.md` 也列了），照 CONTRIBUTING 跑的 agent 不验文档 | 补上第 9 条（两份语言） |
 | 69 | `CONTRIBUTING.md:77` / `.zh-CN.md:75` 的行号指针 | 指到 `EngineCoreTests.swift:1336`（一处无关断言），那句话在 :1563 | 改指 :1563 |
 | 70 | `ITERATE.md` 的 npm 读数 | 用现在时写"两个包的 `latest` 都是 1.14.1"（那是 2026-10-14 的实测），今天两包都已推进 | 改成带日期的读数并给出复测命令；不再写现在时 |
 | 71 | `CHANGELOG.md:93` | "不计入上面 26 条"数错了自己那张 1→27 连续的表，而本版第 27 条正是"散文里写死计数会漂" | 订正为 27（纯计数，历史结论不动） |
 | 72 | `iterate.config.yaml` 的指纹 | `drift_check: true` 钉着 `package.json` 的 sha256，而它是版本线位点、每发一版按设计被重写 | 从 `fingerprints` 撤下并写清为什么（会合法变的清单不是漂移检查的对象），`iterate refresh` 作为采集入口留在注释里 |
 
-上面 72 行就是"发现 72 条、修复 72 条"的账（一条一行；两处是同一处 P0 的两半——#2 是 #17 的可见性、
+**门禁复跑尾段：对照自己红的那四处（73–76，各由一次真红发现）**
+
+| # | 位置 | 失效模式 | 修复与证据 |
+|---|---|---|---|
+| 73 | `updater/test/signature.test.mjs` 真 gpg 那条用例 | 用 `spawnSync('gpg')` 选臂，产品找 gpg 用的是 `resolveGpgBinary`（PATH 之外还探 `GPG_CANDIDATE_PATHS`）——"装了但不在本进程 PATH 上"那第三种机器形状恒走进缺席臂，再断言 runner 也该失败；本轮极简 PATH 实测红在 `actual: 0, expected: 0, notStrictEqual`，而 runner 那句是真的跑成功了 | 选臂改问产品自己的 resolver，两边共用同一判据；另加一条 `real.tried == resolved.tried`（报给读者的搜索必须与真用的那批是同一份）。本机现在走的是更强那一臂：真 gpg 进程、真把伪造 `.asc` 交给它、判回 `invalid`，诊断行留了原句 |
+| 74 | `updater/test/scripts-version-sites.test.mjs` | 位点表条数（`SITES.length`）钉在"SECURITY 的受影响版本线两格…"那条测试里，本轮第 54 条把 `CFBundleVersion` 登记成位点后，红的是一条讲别人那件事的测试；同一条又把期望值写死 `1.19`——那一格的真源是真源版本线的段，所以**每发一版红一次**，量的是日历不是代码 | 计数抽成独立具名用例（`位点表的条数是一个要有意改的数字，不是散文`，15）；期望值改从真源读（`lineOf(truthVersion())`）并按段现拼正则。反向：那一格改回 `1.19.x` → 三条红（含 `check-version` 报"1.19 ≠ 1.20"）；插一条没人推的位点 → 新那条具名用例红 |
+| 75 | `installer/test/daily-20261022-install-isolation.test.mjs` | 位置类判据在**含注释**的源码上算 `indexOf`：上一笔提交给新常量写的文档注释里有"它同时是 `checkEnvironment()` 的探测面清单"那一句，于是"平台判据排在环境预检之前"红在那句注释的位置。本仓已有两处先例（`CaptureChannelShapeTests.codeOnly`、`gatewayCode()`），这条新写的没吃 | 加同族 `jsCode()` / `shCode()`，install.sh 与 cli.js 两半都在剥注释的文本上算位置；注释原文一字未改（那是教训本身）。如实写下剩余边界：行尾 `// …` 不剥。反向：删掉平台判据调用 → 红"没有调用它自己的平台判据"；把那一行挪到 `checkEnvironment()` 之后 → 红"排在环境预检之后" |
+| 76 | `engine/Tests/…/DailyRound20261022CaptureScaleTests.swift`、`DailyRound20261022ProtocolTests.swift`、`EngineP6ProbeTests.swift` | 三种"对照不成立"：静态闸在原文上扫 `?? 2.0` 而那句教训正写在 `SCKCapturer.swift:811` 的注释里（同 75 号形状）；Protocol 那条把 daemon 自己的路径同时当 `executableURL` 与 `arguments[0]`，真二进制收到一个路径参数 → `unknown argument` 退 64，根本没跑到拒答路径；P6 那条把 `diagnosis["report"]` 当 `String` 读（它是 evidence/path/anomaly/next 四格结构体）→ `as? String` 恒 nil，恒红且红得看不出原因，而它的前提本身也不成立（探针无 state 通道，T8 的"状态没变"从未被测量） | 三处各修：剥注释后再扫、去掉重复参数、按结构体读 `anomaly` 与 `next` 并把结论改成 `INCONCLUSIVE`（"量到了状态安静"那一侧的 T8 由姊妹用例继续覆盖，判定没被削弱）。反向三发：`guard … else { throw }` 换回 `?? 2.0` 那一行 → 两条断言同红；`pixelScale` 的 `hits.count == 1` 松成"取第一块" → 歧义那条红（`XCTAssertNil failed: "2.0"`）；Classifier 的 `stateChanged == false` 改回 `!= true` → 三条红、class 报回 `T8` |
+
+上面 76 行就是"发现 76 条、修复 76 条"的账（一条一行；两处是同一处 P0 的两半——#2 是 #17 的可见性、
 #20 是 #19 在另一扇门上的义务——它们各自需要自己的代码与自己的用例，因此各自占一行）。
+73–76 那四条的共同点值得单独记：它们全是**对照自己红**，没有一条是被测代码错了；而这类红最"合理"的
+处置是改断言换绿，所以四条各自都补打了一次变异，证明判据在修后的形状上仍然能红（红的具体读数写在
+对应提交正文）。
 逐条对应实现见各提交正文（`git log --since=2026-10-22`），每条都点名"撤销哪一处 → 哪条具名用例变红"。
 
 ### 复核判为不是缺陷的（附判据，不占上面名额）
@@ -160,7 +174,11 @@ subagent 类型，`Agent` 只认 `Explore`/`Plan`/`general-purpose`，故按原�
 取号（minor→1.20.0）、把并行那条线的 `[Unreleased]` 收进本版、`bin` 声明不动、`Package.swift`
 编译下限不动、`LSMinimumSystemVersion` 抬到 14.0、`CFBundleVersion` 进位点表、新增
 `GP_E_STATE_ROOT_REFUSED` 与它的 503 归宿、面板 exec 门的 root-owned 豁免、`--record` 重记面 A
-（`mcp-shell/src` +586 行，fork 侧 LOC 一字未动）、`iterate.config.yaml` 撤指纹、README 安装命令
+（`mcp-shell/src` 10826 → 11422，**+596 行**，逐文件与 `git diff origin/main...HEAD --numstat` 相等：
+`project-registry.ts` +275、`engine-client.ts` +159、`http-gateway.ts` +74、`tools.ts` +64、
+`errors.ts` +24；分母 engine 28757 → 29584 也等于该范围内提交的净值 827；fork 侧 `byFile` 一格未动，
+只有随分母变的 `ratio` 20.09% → 19.53%。这一句从前写的是"+586"、又改成"+621"，两处都是我自己的数
+没跟着尺子复算——尺子读的是金样差值，读数是 596）、`iterate.config.yaml` 撤指纹、README 安装命令
 改两步式而不是给安装器加探测、本轮不新增对外 `gp_*` 工具也不加功能（范围纪律）——
 每条的依据写在对应提交正文与上面表里，回滚命令汇总在收口报告。
 
@@ -170,6 +188,7 @@ subagent 类型，`Agent` 只认 `Explore`/`Plan`/`general-purpose`，故按原�
 （fork 侧两份 `git hash-object` 与 main 同值，壳侧那份是 main 上较新的同名文件，分支无独有文件）。
 它属 harness 线（`gp-harness-*`），不由本线删。`gp-sc5-rebased`（本地 + 远端）与 main 同一枚 commit，
 但另一条会话今天还在这个 worktree 上活动，按"别人正在飞的"留着。
+
 ### 收进来的一格：另一条线的面 A（原文照录，判据不改写）
 
 ### Added
