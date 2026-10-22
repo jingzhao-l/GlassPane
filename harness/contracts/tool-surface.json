@@ -8,18 +8,18 @@
     "ratio": "surface / (engine + mcp-shell + fork)"
   },
   "observedAt": "2026-10-22",
-  "engineLoc": 28757,
+  "engineLoc": 29584,
   "engineFiles": 63,
   "surfaces": {
     "mcpShell": {
-      "loc": 10826,
+      "loc": 11422,
       "files": 16,
-      "ratio": 0.2186,
+      "ratio": 0.2242,
       "byFile": {
-        "mcp-shell/src/tools.ts": 2927,
-        "mcp-shell/src/engine-client.ts": 1665,
-        "mcp-shell/src/http-gateway.ts": 1350,
-        "mcp-shell/src/project-registry.ts": 1202,
+        "mcp-shell/src/tools.ts": 2991,
+        "mcp-shell/src/engine-client.ts": 1824,
+        "mcp-shell/src/project-registry.ts": 1477,
+        "mcp-shell/src/http-gateway.ts": 1424,
         "mcp-shell/src/update-state.ts": 625,
         "mcp-shell/src/providers.ts": 527,
         "mcp-shell/src/io.ts": 445,
@@ -28,7 +28,7 @@
         "mcp-shell/src/evidence-report.ts": 364,
         "mcp-shell/src/stdio-session.ts": 291,
         "mcp-shell/src/http-gateway-cli.ts": 268,
-        "mcp-shell/src/errors.ts": 148,
+        "mcp-shell/src/errors.ts": 172,
         "mcp-shell/src/dimension.ts": 109,
         "mcp-shell/src/index.ts": 44,
         "mcp-shell/src/canonical.ts": 34
@@ -1158,7 +1158,7 @@
           "lines": 0
         }
       ],
-      "ratio": 0.2009,
+      "ratio": 0.1953,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
@@ -1174,7 +1174,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 20776,
+  "totalToolSurfaceLoc": 21372,
   "note": null,
   "carried": null
 }
