@@ -50,9 +50,18 @@ import { ARCHIVE_FILE_NAME, extractInto, releaseTreeRoot, retireStaleGenerations
 /** §3.3: the daemon gets this long to answer before the swap is undone. */
 export const HANDSHAKE_BUDGET_MS = 15_000
 
-/** The two bundles this project installs, with the executables inside them. */
+/**
+ * The two bundles this project installs, with the executables inside them.
+ *
+ * The names are not this file's invention: `updater/test/bundle-names.test.mjs` reads them
+ * out of `engine/scripts/make-app.sh`, the script that actually assembles the bundles. The
+ * panel's executable used to be spelled `GlassPane Settings` here while the script installed
+ * `glasspane-settings` — nothing reads `.executable` today, so the wrong name could sit in
+ * the table forever, and the first reader that ever checks "is the executable inside this
+ * bundle there?" would have been looking for a file that has never existed on any machine.
+ */
 export const DEFAULT_BUNDLES = Object.freeze([
-  { name: 'GlassPane.app', executable: path.join('Contents', 'MacOS', 'GlassPane Settings') },
+  { name: 'GlassPane.app', executable: path.join('Contents', 'MacOS', 'glasspane-settings') },
   { name: 'GlassPane Daemon.app', executable: path.join('Contents', 'MacOS', 'glasspaned') },
 ])
 
