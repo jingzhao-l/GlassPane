@@ -10,8 +10,51 @@ contract does not).
 
 ## [Unreleased]
 
-（空。本批的账归入 `0.10.1`。）
+（空。本批的账归入 `0.10.2`。）
 
+## [0.10.2] - 2026-10-23
+
+判据：patch。四项 patch 判据（状态文件字段、退出码集合、CLI 参数、npm `bin` 声明）逐条未动，
+用户读得到的形状没变。取号的理由与 0.10.1 同一条：`release-artifact` 要求发布物 == 主干，而本轮
+主干落了新字节。
+
+### Added — 发布 lane 开始问产物本身的字节
+
+0.10.1 那笔把"主干这棵树的安装产物带没带 fork 补丁"变成了持续量，但那条闸看不见发布本身：
+构建作业在它自己的 runner 上装它自己的 `node_modules`。本版把同一个问题问到 **registry 交付的字节**上：
+
+- `script/patched-deps.mjs` 多两个模式：`--items --package <name>`（把"该问什么"从声明的补丁文件现推出来，
+  作为 JSON 交给消费者，判据因此只有一份实现）、`--artifact <file> --package <name>`（拿这份清单去问一个
+  文件的字节）。0/1/2 三码：0 全在、1 逐条点名缺哪一项并说明"bundle 是从未打补丁的源建的"、
+  2 问不成（文件读不到 / 包没声明 / 清单为空）。
+- `verify-published.ts` 在装好发布包之后以命令方式调用它，读 `realpath` 解析出的那份已安装二进制。
+  用命令而不是 import：`tsgo` 对越界 `.mjs` 的类型不站得住，而且这样测的正是发布 lane 实际走的路径。
+- 判据窄到只有**字符串字面量与新增方法名**两类，是三次误报筛出来的：新增的每一行会要求 `.d.ts`
+  的内容（运行时 bundle 里没有这些字节）；引入的每个标识符会要求打包器改名的局部绑定
+  （`isSessionRetry` / `requestSessionId` / `expiredSessionId`）与补丁只是调用的上游符号
+  （`isJSONRPCErrorResponse` / `determineScope`）；再加上调用名会要求被打包器抹掉的模块说明符
+  （`'../types.js'`）。留下的两类改名等于改行为，在已发布的 0.10.1 二进制（sha256 与 GitHub 为该
+  资产计算的 `digest` 逐字相等）上 **8/8 命中**。
+- 本仓 19 条声明里 **18 条产不出可查项**，只有 MCP SDK 那条有 8 项。所以 lane 点名问一个包而不是
+  扫全部声明：扫的话 18 条都走"问不出问题"那条分支，绿得与什么都没测一样。空清单必须拒答，
+  这条分支用真声明 `effect` 测。
+
+### Fixed — 两处自己的坏形状
+
+- 上一版的 `--check` 对 payload 读两遍（一次判决、一次报告读了多少字节），发布时那是 145 MB × 2。
+- 上一版留了一个**空的**目标文件白名单（"某些平台可能不带这个文件"），全树没有任何用例能走到它；
+  删掉，缺失目标一律红——未应用的补丁最常见的长相就是"文件不见了"。
+- `isMain` 判定按书写路径比：macOS 的 `tmpdir()` 给 `/var/folders/…`，Node 解析模块 URL 得到
+  `/private/var/folders/…`，于是被复制到临时目录里跑的那份脚本以为自己是被 import 的，
+  **静默什么都不做**，23 条断言同时红。现在两侧都比 realpath。
+
+### 覆盖
+
+`test/script/patched-artifact.test.ts` 6 条用例 / 24 断言，已点进 fork CI 的固定点名单（8 → 9 个文件）：
+名单是窄集合、带全部标记的负载过并报告读了多少字节、单条缺失具名红、空 payload 全条红、
+空清单拒答、三种问不成问题的入参各回 2。`verify-published-selftest.sh` 加"带标记 / 不带标记"两条
+（12 条 ok），`patched-deps-selftest.mjs` 28 条断言全绿。固定点 9 个文件 **178 pass / 0 fail /
+966 expect()**；`packages/opencode` typecheck rc 0、`error TS` 计 0。
 ## [0.10.1] - 2026-10-23
 
 判据：patch。四项 patch 判据（状态文件字段、退出码集合、CLI 参数、npm `bin` 声明）逐条未动，
