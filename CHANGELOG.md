@@ -3,6 +3,35 @@
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
 
+## [1.20.1] — 2026-10-23
+
+**版本判断：patch。** 对着本仓 1.6.2 那四项 patch 判据实测：状态文件的字段没动、退出码集合没动、
+CLI 参数没动、两个 npm 包的 `bin` 声明与 `files` 也没动（本版唯一的内容是一条测试对照的修法，
+`updater/test/source.test.mjs` + 它自己的夹具助手）。改版本的唯一入口 `node scripts/set-version.mjs 1.20.1`
+写出 15 个位点 + 2 份 lock，`node scripts/check-version.mjs 1.20.1` 自证通过。
+
+**为什么 1.20.0 已经发出去了还要再发一版。** `v1.20.0` 的三格都已落地并且核过：
+Release `isDraft=false`、`targetCommitish=015ce89a`、4 件资产（归档 + SHA256SUMS + 两份 `.asc`），
+两份签名用产品自己带的键在一次性键环里验过、`VALIDSIG` 就是 `updater/lib/signature.js`
+钉死的那枚 `0929EA31DF4F7429F63FC53189D88B1D043A1298`，归档的 sha256 与**被签名的**那行摘要逐字相等；
+registry 两包 `--prefer-online` 都读到 `1.20.0`。缺陷 84 是在那之后才发现的，而把它塞回 1.20.0
+只有"移动 tag 重发"一条路——npm 不接受同版本重发，移动 tag 会让 registry 上的字节与被 tag 的树
+**永久不对应**，那正是本仓记过名的事故形状。所以 1.20.0 保持原样，修复随 1.20.1 发出：
+发布的源码归档里从此带的是修好的那条对照。两个 npm 包的字节与 1.20.0 相同（包内只有
+`dist`/`schemas`/`LICENSE`/`README`，没有测试文件），这是实测 `files` 白名单得出的，不是推测。
+
+### 本轮审出并修完的缺陷（发现 1 条，修复 1 条；编号接 [1.20.0] 追加表往下排）
+
+| # | 位置 | 失效模式 | 修复与证据 |
+|---|---|---|---|
+| 84 | `updater/test/source.test.mjs` `the stall clock re-arms on every chunk` | 名义间隔 30ms、停摆预算 100ms——**前提**只剩 70ms 调度余量。本机整套件并发时红（309ms 就结束）、单独跑绿、CI 恒绿：一台忙的 mac 把 `setTimeout(30)` 拖过 100ms 是常态，而产品在那一刻按契约做的事是**对的**（100ms 真没收到字节＝停摆）。红的是这条对照自己：它的成立依赖赢一场调度比赛。同文件相邻那条滴流用例的注释记过同一个形状 | 改判据不是加超时：间隔取预算 1/5、预算抬到 1000ms（绝对余量 70ms → 800ms），主张一字未改（仍须跑过 stallMs、仍不许被杀、仍不许靠兜底计时放过）；`streamingResponse` 加 `onChunk` 记录每段**实际**间隔，并把"最坏间隔 < 预算一半"写成断言——将来再红，红话说的是"这台机器没给出慢但活着的形状"。反向破坏：摘掉 `source.js:561` 的逐段 `armStall()` → 这条在 1034ms 被停摆计时收掉、具名变红；自带备份 + sha256 核回 `f7c048a7a142`。复跑 `node --test test/source.test.mjs` 32/32 |
+
+同一轮里另有一条**没算进缺陷计数**的观察，写在这里免得被当成已修：
+`a successful apply retires the sibling generations the state no longer references` 在同一次
+负载下红过一次，单独复跑绿（49/49），且 CI 的 `macOS node suites` 与 `install-gate` 两格在同一 commit
+上都把它判绿——判据是"隔离复跑绿 + CI 绿"，按提示词那条口径它属于负载造成的假红，不改判据也不加超时；
+它与 84 的区别是可测的：84 在**零负载**下也能红（两条 pattern 同跑即红），它不能。
+
 ## [1.20.0] — 2026-10-22
 
 **版本判断：minor。** 对着本仓 1.6.2 那四项 patch 判据逐条实测，本版动了其中三项：

@@ -132,7 +132,34 @@ tag、GitHub Release、npm 两格一个都没发生（见上表那四行实测�
 5. **不动 `harness/`、不动 `kernel/` 契约**。依据：本轮 4 条缺陷都长在本仓产品面，没有一条需要改跨语言契约；
    `harness/` 有 10:30 那条独立线。面 A 棘轮本轮无需重记（`--check` 读的是 `mcp-shell/src` 与 fork，两处都没动）。
 
-## 5. 未观测项（只限物理边界）
+## 5. 发布链实测（两条通道都是本轮跑的）
+
+| 格 | 读数 |
+|---|---|
+| `origin/main` 收口 | 逐笔推送至 `015ce89a`（v1.20.0 的 target），其后为 1.20.1 的三笔 |
+| tag | `v1.20.0`（签名注解 tag，`git tag -v` 报"完好的签名，来自 jingzhao-l (sign-github)"，密钥 `0929EA31DF4F7429F63FC53189D88B1D043A1298`）与 `v1.20.1` |
+| CI | run `39936652909`（`015ce89a`）十格全绿——这是切 tag 前的判据（`release.yml` 的 github-release 作业自己要求同 commit 的 CI 绿） |
+| GitHub Release | `isDraft=false`、`targetCommitish=015ce89a…`、资产 4 件：`GlassPane-1.20.0.tar.gz`(3 887 748 B) / `.asc` / `SHA256SUMS-1.20.0.txt` / `.asc` |
+| 归档自证 | `node scripts/make-release-archive.mjs --verify` → `703 entries, 3887748 bytes, all 20 declared commands and schemas present, no entry under harness/ / .iterate_decisions.md`；`tar -tzf … \| grep -cE "(^|/)harness/"` = **0**；顶层目录唯一 `GlassPane-1.20.0/` |
+| 签名核（gate 8 那条路径本机走一遍） | 一次性键环导入 `installer/cli.js` 导出的那份键 → imported 含被钉指纹；两份 `.asc` 的 `VALIDSIG` 都是 `0929EA31…043A1298`，`--verify` 退 0；归档 sha256 `519c0d21286519cc…` 与**被签名的**那行摘要相等 |
+| npm | `--ref v1.20.0 -f mode=dry` 绿（run 39938892749）→ `--ref v1.20.0 -f mode=publish` 绿（run 39939277862）；`npm view glasspane-mcp version` = `1.20.0`、`glasspane-install version` = `1.20.0`，`@1.20.0 --prefer-online` 逐字同号，`npm stage list` = No staged packages |
+| 端到端（归档装成用户拿到的样子） | 归档解出 → `mcp-shell` 内 `npm pack`（自带 HOME + 自带 cache，本轮教训）得 320 565 B → `npm i -g --prefix` 干净前缀 → 两个 bin 都是符号链接 → **前面不放 node** 直接 exec + stdin 一帧 `initialize` → `{"serverInfo":{"name":"glasspane-mcp","version":"1.20.0"}}`；`installer` 那份同样装成 `glasspane-install`，`--help` 退 0、未知参数退 2 |
+| daemon 真机 | `engine/.build/debug/glasspaned --state-dir <临时根> --permissions` 退 0，回 `accessibility/screenRecording/inputMonitoring = granted`、`developerTools = unverifiable`（按设计恒未验证），`subject.binaryPath` 点名是那枚裸二进制；真 `~/.glasspane` 未被写 |
+| 面板真机 | `engine/.panel_refusal_smoke.py` 退 0（读数见 `engine/smoke.md` 本轮那一节） |
+
+1.20.1 只带缺陷 84（一条测试对照的修法）。为什么不把它塞回 1.20.0：那三格已经落地，
+唯一路径是移动 tag 重发，而 npm 不接受同版本重发——移动 tag 会让 registry 上的字节与被 tag
+的树永久不对应，那是本仓记过名的事故形状。两个 npm 包的字节与 1.20.0 相同（`files` 白名单里
+只有 `dist`/`schemas`/`LICENSE`/`README`，没有测试文件），这一点是实测白名单得出的。
+
+### 一条不算缺陷、但要写下来的观察
+
+`a successful apply retires the sibling generations…` 在同一次负载下红过一次，隔离复跑绿（49/49），
+且同一 commit 上 CI 的两格都判绿。按提示词的口径（负载造成的计时假红→隔离复跑，不改判据不加超时）
+它记为**负载红**，不占缺陷计数。它与 84 的区别是可测的：84 在零负载下也能红（两条 pattern 同跑即红），
+它不能——这条判据本身就是"能不能重复出现"，不是"看着像不像负载"。
+
+## 6. 未观测项（只限物理边界）
 
 - `npm stage approve`（需 owner 2FA）与 Apple 公证（需付费开发者账号）：见收口汇报的补救命令。公证仍是 owner 未启用决策，
   本轮不把它写成已完成。
