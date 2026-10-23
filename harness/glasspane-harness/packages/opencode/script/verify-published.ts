@@ -23,9 +23,10 @@
  * without touching the registry.
  */
 import { $ } from "bun"
-import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 import product from "../../../product.json"
 import { waitForRegistryVersion } from "./registry-readiness"
 
@@ -320,6 +321,51 @@ try {
       )
     }
     await reportProvenance()
+
+    // The tree that built this artifact and the artifact itself are different witnesses.
+    // `script/patched-deps.mjs --check` reads the *install* — it is what caught, on 2026-10-23, that
+    // `bun install` had silently dropped `@modelcontextprotocol/sdk`'s patchedDependencies entry while
+    // bumping 1.31.0→1.32.0, leaving the MCP client without 404 session recovery, request abort, or the
+    // per-item `callTool` overloads both harnesses' verdicts rest on. That gate cannot see the release:
+    // the build job installs on its own machine, from its own runner image. So the lane that already
+    // installs the published bytes asks the same question of them — and reuses the same implementation
+    // rather than writing a second criterion that could drift.
+    //
+    // The demand list is derived from the declared patch file, filtered to what a bundler provably
+    // cannot rename: added string literals and added method names. Measured on the published 0.10.1
+    // binary (sha256 equal to the asset digest GitHub computes), that is 8 of 8 present; the three
+    // wider rules — every added line, every introduced identifier, added lines plus call names — all
+    // had false misses (`.d.ts` content, renamed locals like `isSessionRetry`, erased module
+    // specifiers), so they are not the rule. One package is named rather than the declarations swept
+    // because 18 of this fork's 19 declared patches add no string literal or method name at all — for
+    // those the artifact can be asked nothing, and the gate that could ask something is the
+    // line-by-line one that reads the install.
+    const patchGate = fileURLToPath(new URL("../../../script/patched-deps.mjs", import.meta.url))
+    let artifactBytes = ""
+    try {
+      artifactBytes = realpathSync(bin)
+    } catch {
+      artifactBytes = ""
+    }
+    if (!artifactBytes || !existsSync(patchGate)) {
+      cannotObserve(
+        "the published bytes carry the fork's MCP SDK patch",
+        artifactBytes
+          ? `the patch gate is not at ${patchGate} — the criterion could not be run, which says nothing about the artifact`
+          : `the installed command ${bin} does not resolve to a file, so there were no bytes to read`,
+      )
+    } else {
+      const gate = await $`${process.execPath} ${patchGate} --artifact ${artifactBytes} --package @modelcontextprotocol/sdk`.nothrow()
+      const gateOutput = `${gate.stdout?.toString() ?? ""}${gate.stderr?.toString() ?? ""}`.trim().split("\n")
+      const rc = gate.exitCode ?? -1
+      if (rc === 0) check("the published bytes carry the fork's MCP SDK patch", true, gateOutput.at(-1) ?? "")
+      else if (rc === 1) check("the published bytes carry the fork's MCP SDK patch", false, gateOutput.slice(-3).join(" / "))
+      else
+        cannotObserve(
+          "the published bytes carry the fork's MCP SDK patch",
+          `the gate answered "cannot measure" (exit ${rc}): ${gateOutput.at(-1) ?? "(no output)"}`,
+        )
+    }
 
     // The embedded web app: the companion surface that only exists if the bundle
     // really travelled into the binary.

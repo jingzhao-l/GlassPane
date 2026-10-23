@@ -50,7 +50,7 @@ jobs:
 
       - name: Fixed-point tests (glasspane tool surface, ledger, compaction, rendering)
         working-directory: packages/opencode
-        run: bun test --timeout 30000 test/tool/glasspane-surface.test.ts test/tool/glasspane-kernel.test.ts test/plugin/glasspane-decision-log.test.ts test/plugin/glasspane-compaction.test.ts test/script/publish-shape.test.ts test/config/glasspane-project-plugin-trust.test.ts test/tool/glasspane-provider-registration.test.ts test/script/registry-readiness.test.ts
+        run: bun test --timeout 30000 test/tool/glasspane-surface.test.ts test/tool/glasspane-kernel.test.ts test/plugin/glasspane-decision-log.test.ts test/plugin/glasspane-compaction.test.ts test/script/publish-shape.test.ts test/config/glasspane-project-plugin-trust.test.ts test/tool/glasspane-provider-registration.test.ts test/script/registry-readiness.test.ts test/script/patched-artifact.test.ts
 
       # The rule that keeps this fork from publishing into someone else's npm scope lives in
       # `harness/tools/product-surface.mjs`, which is in the parent repository and therefore NOT

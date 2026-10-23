@@ -48,6 +48,18 @@ console.log(`OS_FIELD=${q(q(p.platform.os))}`)
 console.log(`CPU_FIELD=${q(q(p.platform.arch))}`)
 ' "$PRODUCT")"
 
+# The artifact-patch check's demand list is asked of the gate that owns the criterion, never
+# retyped here: a second copy of the rule in the test would keep passing after the rule changed.
+# An empty list stops this file, because a fake binary that carries nothing would satisfy a check
+# that has nothing to check.
+PATCH_GATE="$ROOT/harness/glasspane-harness/script/patched-deps.mjs"
+ITEMS_JSON="$(node "$PATCH_GATE" --items --package @modelcontextprotocol/sdk 2>/dev/null)"
+if [ -z "$ITEMS_JSON" ] || [ "$ITEMS_JSON" = "[]" ]; then
+  say FAIL "the patch's artifact-checkable items came back empty — the release gate was NOT exercised (exit 2: nothing to demand is not a pass)"
+  exit 2
+fi
+ITEMS="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).join("\n"))' "$ITEMS_JSON")"
+
 SHIM_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gp-vp-shim-XXXXXX")"
 cat > "$SHIM_DIR/fake-binary.js" <<'SHIM'
 // A stand-in for the installed product command: same argv, same "listening on" line, same
@@ -89,15 +101,22 @@ void fs
 SHIM
 
 make_prefix() {
-  # $1 = page mode; prints the prefix path, or nothing on failure
-  local p mode
+  # $1 = page mode; $2 = "yes" (default) to build a *patched* fake binary, "no" for one whose bytes
+  # lack everything the declared patch must show. Prints the prefix path, or nothing on failure.
+  local p mode markers
   mode="$1"
+  markers="${2:-yes}"
   p="$(mktemp -d "${TMPDIR:-/tmp}/gp-vp-prefix-$mode-XXXXXX")" || return 1
   mkdir -p "$p/bin" "$p/lib/node_modules/$NAME" || return 1
   printf '{"name":"%s","version":"%s","os":%s,"cpu":%s}\n' \
     "$NAME" "$VERSION" "$OS_FIELD" "$CPU_FIELD" > "$p/lib/node_modules/$NAME/package.json" || return 1
   for b in $BINS; do
     printf '#!/bin/sh\nGP_FAKE_VERSION="%s" exec node "$GP_FAKE_SHIM" "$@"\n' "$VERSION" > "$p/bin/$b" || return 1
+    if [ "$markers" = "yes" ]; then
+      # The published payload is a compiled binary whose bytes carry these strings; the stand-in
+      # carries them as a trailing comment so the check reads real bytes that really contain them.
+      printf '# patched-payload: %s\n' "$(printf '%s' "$ITEMS" | tr '\n' ' ')" >> "$p/bin/$b" || return 1
+    fi
     chmod +x "$p/bin/$b" || return 1
   done
   echo "$p"
@@ -105,12 +124,14 @@ make_prefix() {
 
 run_case() {
   # $1 = page mode, $2 = expected label, $3 = expected rc ("" = must not be 0, "0" = must be 0,
-  # "no-web-fail" = the web label must not appear as FAIL), $4 = version to ask for
-  local mode want_label want_rc ask_version out rc pfx matched
+  # "no-web-fail" = the web label must not appear as FAIL), $4 = version to ask for,
+  # $5 = "no" to install a binary that does NOT carry the patch's bytes
+  local mode want_label want_rc ask_version out rc pfx matched markers
   mode="$1"
   want_label="$2"
   want_rc="${3-}"
   ask_version="${4:-$VERSION}"
+  markers="${5:-yes}"
   # An empty expectation is not a passing expectation: `grep -qF ""` matches every line, and
   # that is how this file once reported three green checks while `$mode` was never assigned
   # and every case ran the same fake. Refuse the shape instead of being satisfied by it.
@@ -119,7 +140,7 @@ run_case() {
     fails=$((fails + 1))
     return
   fi
-  pfx="$(make_prefix "$mode")"
+  pfx="$(make_prefix "$mode" "$markers")"
   if [ -z "$pfx" ]; then
     say FAIL "$mode: could not build the fake prefix"
     fails=$((fails + 1))
@@ -190,6 +211,14 @@ run_case good "ok    the installed binary serves the embedded web app" no-web-fa
 # own words — a parser that dropped the positional argument would print the asked-for number
 # and quietly verify another one.
 run_case good "the version asked for was 9.9.9" "" "9.9.9"
+
+# The artifact-patch branch, both ways round. `good` above already installs a payload that carries
+# the patch's bytes, so asking for the ok line here proves the check runs and passes on real bytes;
+# the second case builds the same prefix with a payload that does NOT carry them and requires the
+# failure to be named. Without the pair, a check that always prints `ok` (the shape this release
+# lane had before) would look exactly as green here as one that measures.
+run_case good "ok    the published bytes carry the fork's MCP SDK patch" no-web-fail
+run_case good "FAIL  the published bytes carry the fork's MCP SDK patch" 1 "$VERSION" no
 
 rm -rf "$SHIM_DIR"
 if [ "$fails" -gt 0 ]; then

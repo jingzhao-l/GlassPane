@@ -27,6 +27,17 @@
  * Exit codes: 0 all declared patches are carried by the install, 1 one is not, 2 cannot measure
  * (no root manifest, no lockfile, no node_modules — a check that goes green when it read nothing
  * would be the same decoration this gate exists to replace).
+ *
+ * MODES
+ *   --check                                  the three-way comparison above, against this tree's
+ *                                            install.
+ *   --items --package <name>                 print the artifact-checkable demand list for one
+ *                                            declared patch as JSON, so a consumer derives the
+ *                                            question instead of restating it.
+ *   --artifact <file> --package <name>       ask that list of one file's bytes — used by the release
+ *                                            lane against the binary the registry served, because
+ *                                            `--check` can only ever see the install it runs in and
+ *                                            the build job installs on its own machine.
  */
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs"
 import path from "node:path"
@@ -77,6 +88,74 @@ function parsePatch(patchFile) {
     if (content) files.get(current).push(content)
   }
   return [...files.entries()].map(([file, added]) => [file, added])
+}
+
+/**
+ * What a published artifact must be able to show for one declared patch.
+ *
+ * `measure()` compares patch lines against the installed files, where each line lands in a known
+ * file. A released binary is one flat blob after the bundler has been through it, and three
+ * candidate rules were measured against the published 0.10.1 bytes before this function existed:
+ * every added line (fails — `.d.ts` lines are not in a runtime bundle at all), every identifier the
+ * patch introduces (fails — `isSessionRetry`, `requestSessionId`, `expiredSessionId` are local
+ * bindings, and bun renames those), and every added string plus every added call name (fails —
+ * `'../types.js'` is a module specifier, which the bundler erases, and `isJSONRPCErrorResponse` /
+ * `determineScope` are upstream symbols the patch merely calls). What survived all three passes,
+ * with 8 of 8 items present in the shipped bytes, is exactly two kinds:
+ *
+ *   * string literals the patch adds — a bundler cannot rename data without changing behaviour;
+ *   * method definitions the patch adds whose name appears on no removed line — these become
+ *     property keys reached through `this.`, which survive for the same reason.
+ *
+ * Only runtime ES modules count (`dist/esm/**\/*.js`): the `.cjs` pair is duplicated content, `.d.ts`
+ * ships no bytes, and a TUI-only package is not in this bundle. The list is derived from the patch
+ * file rather than hardcoded, so a re-keyed patch cannot quietly stop being checked — and if a patch
+ * ever adds no checkable item at all, `artifactVerdict` returns an empty list and the caller refuses
+ * (exit 2) instead of passing a question it never asked.
+ */
+const RUNTIME_TARGET = /^dist\/esm\/.*\.js$/
+const ADDED_STRING = /(?:"([^"\n]{8,})"|'([^'\n]{8,})')/g
+const ADDED_METHOD = /^\s*(?:async\s+)?([A-Za-z_$][A-Za-z0-9_$]{4,})\s*\(/
+const NOT_A_NAME = new Set(["if", "for", "while", "switch", "catch", "return", "function", "await", "new", "else", "try", "typeof"])
+const CODE_FRAGMENT = /[(){};=<>|/\\]|\.\.\/|\.js$/
+
+export function artifactItems(patchText) {
+  let current = null
+  const added = new Map()
+  const removedText = []
+  for (const line of patchText.split("\n")) {
+    if (line.startsWith("+++ b/")) {
+      const target = line.slice(6).trim()
+      current = target && target !== "/dev/null" && RUNTIME_TARGET.test(target) ? target : null
+      if (current && !added.has(current)) added.set(current, [])
+      continue
+    }
+    if (line.startsWith("+++") || line.startsWith("diff ") || line.startsWith("--- ") || line.startsWith("@@")) continue
+    if (!current) continue
+    if (line.startsWith("+")) added.get(current).push(line.slice(1))
+    else if (line.startsWith("-")) removedText.push(line.slice(1))
+  }
+  const removed = removedText.join("\n")
+  const items = new Set()
+  for (const lines of added.values()) {
+    for (const line of lines) {
+      for (const match of line.matchAll(ADDED_STRING)) {
+        const value = (match[1] ?? match[2] ?? "").trim()
+        if (value.length >= 8 && !CODE_FRAGMENT.test(value)) items.add(value)
+      }
+      const method = line.match(ADDED_METHOD)
+      if (method && !NOT_A_NAME.has(method[1]) && !new RegExp(`\\b${method[1]}\\b`).test(removed)) items.add(method[1])
+    }
+  }
+  return [...items].sort()
+}
+
+/** The same items, judged against the bytes of one artifact. `missing` empty plus `items` non-empty is the only pass. */
+export function artifactVerdict(patchText, bytes) {
+  const items = artifactItems(patchText)
+  const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)
+  const missing = items.filter((item) => !buffer.includes(item))
+  return { items, missing }
 }
 
 /** `@scope/name@1.2.3` -> `{ name: "@scope/name", version: "1.2.3" }`; unscoped likewise. */
@@ -169,12 +248,10 @@ function versionOf(dir) {
   return JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8")).version
 }
 
-// A patch may target a file the publisher only ships for some platform. That is not this fork
-// losing its work, so an absent target file is a `△` — but only for files listed here, with the
-// reason written next to it. An unlisted absent file is red: an unapplied patch usually looks like
-// a missing file, and a gate that shrugs at every missing file shrugs at the accident above.
-const ABSENT_TARGET_IS_OK = new Set()
-
+// There is deliberately no allow-list here. An earlier draft carried an empty one ("a patch may
+// target a file some platforms do not ship"), which no case could ever reach — a branch nobody can
+// make fire is the same decoration this file was written to replace. Every absent target is red:
+// an unapplied patch most often looks exactly like the file the patch edits simply not being there.
 export function measure() {
   const problems = []
   const notes = []
@@ -224,11 +301,7 @@ export function measure() {
       for (const [file, added] of targets) {
         const full = path.join(dir, file)
         if (!existsSync(full)) {
-          if (ABSENT_TARGET_IS_OK.has(`${entry.name}|${file}`)) {
-            notes.push(`△ ${entry.key}: ${file} is not part of this platform's artifact`)
-          } else {
-            problems.push(`${entry.key}: ${file} targeted by the patch is absent from ${dir}`)
-          }
+          problems.push(`${entry.key}: ${file} targeted by the patch is absent from ${dir}`)
           continue
         }
         const present = new Set(readFileSync(full, "utf8").split("\n").map(strip))
@@ -252,21 +325,87 @@ export function measure() {
   return { problems, notes, measured: declaredEntries.length, located }
 }
 
-const argv = process.argv.slice(2)
-if (argv[0] !== "--check" && argv[0] !== undefined) die(2, `unknown mode ${argv[0]} — expected --check`)
-if (!productRoot) die(2, "could not find the tree that holds product.json")
-const nodeModules = path.join(productRoot, "node_modules")
-if (!existsSync(nodeModules)) die(2, `no node_modules under ${productRoot} — run \`bun install\` before measuring`)
+/** The declared patch for one package name, whatever version it is keyed at. */
+function declaredFor(name) {
+  return declared().find((entry) => entry.name === name) ?? null
+}
 
-const { problems, notes, measured, located } = measure()
-// A tree where nothing could be located is not a clean tree. Without this, an empty or half-done
-// install answers "all declared patches are present" for the reason that no patch was looked at.
-if (measured > 0 && located === 0) {
-  die(2, `none of the ${measured} declared patch(es) is in this install — nothing was measured, so "no failures" would be a claim about bytes nobody read`)
+function runArtifact(argv) {
+  const artifact = argv[argv.indexOf("--artifact") + 1]
+  const at = argv.indexOf("--package")
+  const name = at === -1 ? undefined : argv[at + 1]
+  if (!artifact) die(2, "--artifact needs a file to read — the published bytes, not a directory")
+  if (!name) die(2, "--artifact needs --package <name> so the demand list comes from a declared patch")
+  if (!productRoot) die(2, "could not find the tree that holds product.json")
+  if (!existsSync(artifact)) die(2, `no artifact at ${artifact} — the published bytes could not be read, so nothing was observed`)
+  const entry = declaredFor(name)
+  if (!entry) die(2, `${name} has no patchedDependencies declaration — asking an artifact about an undeclared patch has no answer`)
+  const patchFile = path.join(productRoot, entry.patchPath)
+  if (!existsSync(patchFile)) die(2, `${entry.key}: ${entry.patchPath} is declared but not in the tree`)
+  // Read the payload once. This file is a 145 MB compiled binary at release time, and an earlier
+  // draft read it twice — once to judge, once to report how many bytes it had read.
+  const bytes = readFileSync(artifact)
+  const { items, missing } = artifactVerdict(readFileSync(patchFile, "utf8"), bytes)
+  if (items.length === 0) {
+    die(2, `${entry.key}: its patch adds nothing an artifact can be asked about — refusing to report a question never asked as a pass`)
+  }
+  if (missing.length > 0) {
+    for (const item of missing.slice(0, 10)) console.error(`FAIL ${entry.key}: ${JSON.stringify(item)} is added by the patch but absent from ${artifact}`)
+    die(1, `${missing.length}/${items.length} item(s) the patch of ${entry.key} must show in the published artifact are not in its bytes — the bundle was built from unpatched sources`)
+  }
+  console.log(`[patched-deps] ${entry.key}: all ${items.length} artifact-checkable item(s) present in ${path.basename(artifact)} (${bytes.length} bytes read)`)
 }
-for (const note of notes) console.log(note)
-if (problems.length > 0) {
-  for (const problem of problems) console.error(`FAIL ${problem}`)
-  die(1, `${problems.length} declared patch(es) of ${measured} are not carried by the install`)
+
+// Only run as a program. The release lane (`verify-published.ts`) calls this file as a command rather
+// than importing it, so the criterion lives in exactly one place; a top-level CLI body that ran on
+// import would either measure the wrong tree or exit silently and let an importing test run zero
+// cases. `import.meta.main` is deliberately not used: it is undefined under older Node, which would
+// make this gate inert exactly where it is wired in (the parent CI calls it with `node`).
+//
+// Both sides are realpaths, and that is not pedantry: the battery that proves this gate can go red
+// runs a copy of it from a temp directory, and on macOS `tmpdir()` hands out `/var/folders/…` while
+// Node resolves the module URL to `/private/var/folders/…`. Comparing the two as written made the
+// copy decide it had been imported, so every case expecting a red silently got exit 0 — 23 of them,
+// caught by the battery rather than by me.
+const invoked = process.argv[1] ? realpathSync(path.resolve(process.argv[1])) : ""
+const isMain = invoked !== "" && invoked === realpathSync(fileURLToPath(import.meta.url))
+
+/** Print the demand list for one declared patch as JSON, so a consumer derives it instead of restating it. */
+function runItems(argv) {
+  const at = argv.indexOf("--package")
+  const name = at === -1 ? undefined : argv[at + 1]
+  if (!name) die(2, "--items needs --package <name>")
+  if (!productRoot) die(2, "could not find the tree that holds product.json")
+  const entry = declaredFor(name)
+  if (!entry) die(2, `${name} has no patchedDependencies declaration`)
+  const patchFile = path.join(productRoot, entry.patchPath)
+  if (!existsSync(patchFile)) die(2, `${entry.key}: ${entry.patchPath} is declared but not in the tree`)
+  process.stdout.write(`${JSON.stringify(artifactItems(readFileSync(patchFile, "utf8")))}\n`)
 }
-console.log(`[patched-deps] ${located}/${measured} declared patch(es) checked against installed bytes, ${measured - located} not in this graph (see △ above)`)
+
+if (isMain) {
+  const argv = process.argv.slice(2)
+  if (argv.includes("--items")) {
+    runItems(argv)
+  } else if (argv.includes("--artifact")) {
+    runArtifact(argv)
+  } else {
+    if (argv[0] !== "--check" && argv[0] !== undefined) die(2, `unknown mode ${argv[0]} — expected --check (or --artifact <file> --package <name>)`)
+    if (!productRoot) die(2, "could not find the tree that holds product.json")
+    const nodeModules = path.join(productRoot, "node_modules")
+    if (!existsSync(nodeModules)) die(2, `no node_modules under ${productRoot} — run \`bun install\` before measuring`)
+
+    const { problems, notes, measured, located } = measure()
+    // A tree where nothing could be located is not a clean tree. Without this, an empty or half-done
+    // install answers "all declared patches are present" for the reason that no patch was looked at.
+    if (measured > 0 && located === 0) {
+      die(2, `none of the ${measured} declared patch(es) is in this install — nothing was measured, so "no failures" would be a claim about bytes nobody read`)
+    }
+    for (const note of notes) console.log(note)
+    if (problems.length > 0) {
+      for (const problem of problems) console.error(`FAIL ${problem}`)
+      die(1, `${problems.length} declared patch(es) of ${measured} are not carried by the install`)
+    }
+    console.log(`[patched-deps] ${located}/${measured} declared patch(es) checked against installed bytes, ${measured - located} not in this graph (see △ above)`)
+  }
+}
