@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
 
 import { waitForRegistryVersion } from "../../script/registry-readiness"
 
@@ -152,5 +153,42 @@ describe("what the readiness wait refuses to claim", () => {
     const stopped = await result
     expect(stopped.ok).toBe(false)
     expect(slept).toEqual([10_000, 10_000, 5_000])
+  })
+})
+
+/**
+ * The wait's *caller* is half of the fix, and it is the half a green log used to hide.
+ *
+ * 0.10.0's release lane passed the readiness gate on the first look, so the run printed
+ * `ok npm install of the published package` and nothing naming the registry observation — a
+ * reader could not tell "waited and it became readable" from "never asked". These legs read the
+ * gate script and pin that the success branch reports itself, under the same label the
+ * cannot-observe branch uses, with what it waited on and a comparison against the version this
+ * tag names. Source-text pins are deliberate: the wait is driven by real npm and a real registry
+ * replica, which no test here can stage, so what IS checkable is that the call exists and is not
+ * commented out.
+ */
+describe("the release lane says what it observed", () => {
+  const script = readFileSync(new URL("../../script/verify-published.ts", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("//"))
+    .join("\n")
+
+  test("both branches of the observation carry the same label", () => {
+    expect(script.includes('check(\n      "the registry can read this published version"')).toBe(true)
+    expect(script.includes('cannotObserve(\n        "the registry can read this published version"')).toBe(true)
+  })
+
+  test("the success line reports how many looks and how long, not a bare ok", () => {
+    const line = script.split("\n").find((l) => l.includes("answered after") && l.includes("readiness.attempts"))
+    expect(line).toBeDefined()
+    expect(line ?? "").toContain("readiness.waitedMs")
+  })
+
+  test("a registry answering with a different version is a failure, not a pass", () => {
+    // The equality is the check's predicate, so a lane can never print `ok` while the registry
+    // serves some other release — the shape of wrong this file has been amended for twice.
+    expect(script).toContain("readiness.seen === version")
   })
 })

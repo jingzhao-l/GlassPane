@@ -177,6 +177,17 @@ try {
       if (ownPrefix) rmSync(prefix, { recursive: true, force: true })
       process.exit(2)
     }
+    // The observation is named whether or not it had to wait. Printing only
+    // `ok npm install of the published package` left no record in a green log that the registry
+    // was read first at all — and "it installed" is a different claim from "this registry could
+    // serve this version", which is the whole reason the wait exists. `seen` is the version the
+    // registry answered with, so the line also fails loudly if a read replica ever answers with
+    // something other than the version this tag names.
+    check(
+      "the registry can read this published version",
+      readiness.seen === version,
+      `${product.name}@${readiness.seen} answered after ${readiness.attempts} look(s), ${Math.round(readiness.waitedMs / 1000)}s of waiting, from ${registry}`,
+    )
     // `-g --prefix`, not a bare `--prefix`: a local install creates **no** bin links,
     // so "is the command there?" would fail for a reason that has nothing to do with the
     // package. (The first run of this script failed exactly that way, which is the reason
