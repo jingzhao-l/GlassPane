@@ -140,7 +140,7 @@ tag、GitHub Release、npm 两格一个都没发生（见上表那四行实测�
 | tag | `v1.20.0`（签名注解 tag，`git tag -v` 报"完好的签名，来自 jingzhao-l (sign-github)"，密钥 `0929EA31DF4F7429F63FC53189D88B1D043A1298`）与 `v1.20.1` |
 | CI | run `39936652909`（`015ce89a`）十格全绿——这是切 tag 前的判据（`release.yml` 的 github-release 作业自己要求同 commit 的 CI 绿） |
 | GitHub Release | `isDraft=false`、`targetCommitish=015ce89a…`、资产 4 件：`GlassPane-1.20.0.tar.gz`(3 887 748 B) / `.asc` / `SHA256SUMS-1.20.0.txt` / `.asc` |
-| 归档自证 | `node scripts/make-release-archive.mjs --verify` → `703 entries, 3887748 bytes, all 20 declared commands and schemas present, no entry under harness/ / .iterate_decisions.md`；`tar -tzf … \| grep -cE "(^|/)harness/"` = **0**；顶层目录唯一 `GlassPane-1.20.0/` |
+| 归档自证 | `node scripts/make-release-archive.mjs --verify` → `703 entries, 3887748 bytes, all 20 declared commands and schemas present, no entry under harness/ / .iterate_decisions.md`；`tar -tzf … \| grep -cE "(^\|/)harness/"` = **0**；顶层目录唯一 `GlassPane-1.20.0/` |
 | 签名核（gate 8 那条路径本机走一遍） | 一次性键环导入 `installer/cli.js` 导出的那份键 → imported 含被钉指纹；两份 `.asc` 的 `VALIDSIG` 都是 `0929EA31…043A1298`，`--verify` 退 0；归档 sha256 `519c0d21286519cc…` 与**被签名的**那行摘要相等 |
 | npm | `--ref v1.20.0 -f mode=dry` 绿（run 39938892749）→ `--ref v1.20.0 -f mode=publish` 绿（run 39939277862）；`npm view glasspane-mcp version` = `1.20.0`、`glasspane-install version` = `1.20.0`，`@1.20.0 --prefer-online` 逐字同号，`npm stage list` = No staged packages |
 | 端到端（归档装成用户拿到的样子） | 归档解出 → `mcp-shell` 内 `npm pack`（自带 HOME + 自带 cache，本轮教训）得 320 565 B → `npm i -g --prefix` 干净前缀 → 两个 bin 都是符号链接 → **前面不放 node** 直接 exec + stdin 一帧 `initialize` → `{"serverInfo":{"name":"glasspane-mcp","version":"1.20.0"}}`；`installer` 那份同样装成 `glasspane-install`，`--help` 退 0、未知参数退 2 |
