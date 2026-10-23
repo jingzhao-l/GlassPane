@@ -49,9 +49,9 @@ tag、GitHub Release、npm 两格一个都没发生（见上表那四行实测�
 （本轮只做了形状扫描与两处定点读）、`mcp-shell/src/http-gateway.ts` 与 `engine-client.ts` 的逐行审、
 `updater/lib/apply.js`（2210 行）的逐行审、设置面板逐控件的"控件↔daemon 能力"对账（本轮只跑了拒绝路径那一条真机走查）。
 
-## 3. 发现与修复（4 条，全部已修 + 有测试 + 已进 main + 随 1.20.0 发出）
+## 3. 发现与修复（7 条，全部已修 + 有测试 + 已进 main + 随 1.20.0 发出）
 
-台账正文在 `CHANGELOG.md` 的 `[1.20.0]` →「2026-10-23 追加」表（编号 77–80，接上轮 76 条往下排）。此处只记本轮的判据与实测：
+台账正文在 `CHANGELOG.md` 的 `[1.20.0]` →「2026-10-23 追加」表（编号 77–81，接上轮 76 条往下排）。此处只记本轮的判据与实测：
 
 - **77**（`updater/test/release-archive.test.mjs` 共用用户全局 npm 缓存）：红是本机复跑闸时自己撞出来的
   （`exit=1`，`AssertionError: npm error code EACCES … _cacache/index-v5/19/4f … 243 !== 0`）。
@@ -67,8 +67,34 @@ tag、GitHub Release、npm 两格一个都没发生（见上表那四行实测�
   新用例把这一事实钉成对照（"不许让读者以为签名被判过"）。
 - **80**（真机冒烟草稿从未跑成）：五项缺陷逐条修，本机真机 **PASS**（面板拒掉自报路径、点名它、证据档案页仍停在
   「还没向后台服务问过」）。判据不再是抄来的名词，而是从渲染它的那一行 Swift 里读出来的。
+- **81**（上轮 `8f881f7a` 把平台闸提到预检之前，ubuntu 泳道因此红 7 条，而那 20 笔从没推上去、CI 从没看过一眼）：
+  这一条既不是泳道报的也不是读代码读出来的——是**本轮把 main 推上去之后 CI 自己红的**。判据是
+  `gh run view --log-failed` 里那 7 行 `not ok` 与同一句 stderr（`这个产品只支持 macOS（本机 platform 不是 darwin）…`）。
+  修法保持"两支各有一条会红的断言"，两支的分工写在 `installer/test/failure-exit.test.mjs` 与
+  `installer/test/review-2026-10-09.test.mjs` 的头注里；`finding4` 那条真正的安全主张（HOME 缺失不许把状态根
+  拼成 `./.glasspane`）提到分流之前先量，任何平台都不白过。
+  教训与提示词第 5 条同源：**发在本地 main 而没并进 origin 的活，等于没收口**——上一轮连"CI 会不会红"这一问都没发生过。
+- **82**（`install.sh` 在 macOS 的 UTF-8 locale 下死在全角括号前）：本机两条对照实测——`LC_ALL=C` 打印
+  完整那句拒绝，`LC_ALL=en_US.UTF-8` 只留下 `install.sh: line 228: CLONE_DIR\xef: unbound variable`。
+  既有端到端全部经 `spawnSync` 起脚本、而 runner 的 node 环境没有 `LANG`/`LC_ALL`＝C locale，那条
+  吸字节的代码路径从没被执行过；第一声红同样来自 CI（`macOS node suites`）。修法：交付面 shell 里
+  `$NAME` 紧跟非 ASCII 的一律加括号（install.sh 6 处、`engine/scripts/make-app.sh` 1 处、
+  `tools/gpg-signing.sh` 4 处），闸分静态（任何平台都能红、扫**所有**交付 shell）与行为
+  （把 `uname` 桩成 Darwin，ubuntu 也走得到；要求那句拒绝连后半句一起到达）。
+- **83**（Swift 那条"三臂同号"的第三臂读 `kernel/dist/…`，而 `git ls-files kernel/dist` 为空）：本机
+  `swift test` 全绿、CI 的 `engine (Swift)` 红——它量的是只存在于开发机上的旧副本，既不在检出里也不在
+  发布归档里。那条臂搬到 node 侧（读 `node_modules/iterate-kernel/dist/decision-log-entry.js`，CI 每个
+  泳道跑测试前都 `npm ci`），Swift 留两臂且两边都是 tracked 字节；三臂合起来一条没少。
 
-反向破坏（本轮 7 发，每发都点名变红、按自带备份 + sha256 逐字核回）：
+### 本轮由 CI（而不是本机）发现的那三条说明的事
+
+上轮那 20 笔从没推上去，所以"CI 会不会红"这一问从未发生。本轮一推，`root workspace gate`（ubuntu）、
+`macOS node suites`、`engine (Swift)` 三格各红一片，合计 12 条红。判据不在本机的缺陷有三族：
+非 mac 平台才走得到的分支（81）、UTF-8 locale 才会执行的代码路径（82）、只在检出里存在的字节 vs 只在
+开发机上存在的字节（83）。下一轮的审查面应当各留一条泳道盯一族，而不是等 CI 报——本轮的六条泳道
+全部因工具用量上限没交回结论（见 §2），这三族于是全靠"推上去让 CI 说"才现形。
+
+反向破坏（本轮 11 发，每发都点名变红、按自带备份 + sha256 逐字核回）：
 
 | 打在哪 | 具名变红的用例 | 核回 |
 |---|---|---|
@@ -79,9 +105,16 @@ tag、GitHub Release、npm 两格一个都没发生（见上表那四行实测�
 | `updater/lib/signature.js` 摘掉"没答话"那一档 | gpg 这一趟没跑完… / 接线：整条 gate… | `f15299998f2a` |
 | 同上，只认 `undefined` 不认 `null` | 同上两条 | 同上 |
 | 同上，detail 丢掉真跑出来的尾巴 | gpg 这一趟没跑完… | 同上 |
+| `install.sh` 把 `${CLONE_DIR}（` 改回 `$CLONE_DIR（` | 静态那条 + 行为"目标目录已存在那句必须完整到达" | `d5013cab59a4` |
+| `engine/scripts/make-app.sh` 塞进同一形状 | 静态那条（证明扫的面不止 install.sh） | `8d1f33f97a3a` |
+| 扫描器改成也吃 `$(…)` | 对照那条（合法写法不许天天判红）+ 静态那条 | `c09756e21bea` |
+| `kernel/schemas` 的 `maxLength` 改成 2049 | 内核验证器执行的上限，就是被钉语料里写的那个上限 | `0602f0bf0f2f` |
+| 发布副本那条指向一个不存在的文件 | 捆进发布物的那份 schema 也是同一个数 | `e2eeb858beb8` |
 
-第四条（`M4`）第一版**没有打红**：`checkEnvironment()` 在本机这台健康机器上真值就是 `[]`，写死 `[]` 与它等价。
-补了一条注入接缝（`probe`）的接线用例之后才成立——形状与上轮记过的"修复没有闸"是同一个，记在这里免得下一位再踩。
+其中两发第一版**没有打红**，都是"修复没有闸"的同一个形状，记在这里免得下一位再踩：
+①`checkEnvironment()` 那格——本机这台健康机器上真值就是 `[]`，写死 `[]` 与它等价，补了注入接缝
+（`probe`）的接线用例才成立；②`install.sh` 那句拒绝的后半句——在修好的树上删掉断言不红，改成在
+**产品文案**上动刀（删掉"（用 …重试）"那一子句）才把那条断言变成承重的。
 
 ## 4. 决定与依据（无人值守下由本轮代决）
 
