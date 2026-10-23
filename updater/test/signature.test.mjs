@@ -162,7 +162,7 @@ test('invalid: a signature that is well formed under somebody else’s key', () 
 
 /* ------------------------------------------------ 2026-10-23 缺陷 4：没答话 ≠ 答"不对" */
 
-test('真进程对照：被信号收掉的孩子报的是 status null 且没有 error（这就是判据依赖的那个事实）', () => {
+test('真进程对照：被信号收掉的孩子报的是 status null 且没有 error（这就是判据依赖的那个事实）', (t) => {
   // 分类器现在依赖一个外部事实：`gpg --verify` 超时/被杀时 spawnSync 报什么。它变了的话
   // 这条先红，而不是让 classifySignature 悄悄退化成"全部当没答话"。
   const killed = spawnSync('/bin/sh', ['-c', 'kill -TERM $$'], { encoding: 'utf8', timeout: 10_000 })
@@ -171,15 +171,20 @@ test('真进程对照：被信号收掉的孩子报的是 status null 且没有 
   const hung = spawnSync('/bin/sleep', ['3'], { encoding: 'utf8', timeout: 300 })
   assert.equal(hung.status, null)
   assert.equal(hung.error?.code, 'ETIMEDOUT', `超时报的应当是 ETIMEDOUT，实报 ${hung.error?.code}`)
-  // 真 gpg 在这一趟没跑完时长什么样：给它一个读不完的管道签名文件，让它在 60s 之前被我们收掉。
+  // 真 gpg 在这一趟没跑完时长什么样：给它一份空的"签名"和空的被签文件，让它只能答"不行"。
   const resolved = resolveGpgBinary()
   if (resolved.bin !== null) {
     const real = spawnSync(resolved.bin, ['--verify', '/dev/null', '/dev/null'], {
       encoding: 'utf8', timeout: 10_000, env: { ...process.env, GNUPGHOME: '/nonexistent-gp', LC_ALL: 'C' },
     })
-    // 这一条只是**观察**：真 gpg 对一份空 .asc 会退非 0（那是"答了"），不会报 null。
-    // 报成 null 就意味着这台机器的 gpg 起不来，缺陷 4 那一档于是由真实进程驱动，而不是桩。
-    assert.ok(real.status === null || typeof real.status === 'number', JSON.stringify(real.status))
+    // 两边都成立的断言：真 gpg 要么**答话**（非 0——它对 /dev/null 签不出任何东西），
+    // 要么这趟**没跑完**（null，正是本轮新增那一档的形状）。退 0 是个消息：那等于说空文件
+    // 是一份有效签名，这台机器的 gpg 不能再被当作判据来源。
+    t.diagnostic(`real gpg (${resolved.bin}, source=${resolved.source}) against /dev/null: exit=${real.status}`)
+    assert.ok(real.status === null || real.status !== 0,
+      `gpg 对一份空的 .asc 退了 0：${real.stdout}\n${real.stderr}`)
+  } else {
+    t.diagnostic(`这台机器没有可用的 gpg（试过 ${resolved.tried.join(', ')}），真进程那一半由上面两条 spawnSync 承担`)
   }
 })
 

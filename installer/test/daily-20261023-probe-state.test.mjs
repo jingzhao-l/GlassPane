@@ -115,6 +115,24 @@ test('ENOENT＝缺席，且 shim 那两条不碰 /usr/bin 的文件退化检查'
   assert.equal(commandProbe('open', { spawn: openOnly.spawn, access: ACCESS_FAIL }), PROBE_STATES.absent)
 })
 
+test('没有 Xcode 的那台机器（CI 的 install-gate 泳道）：swift 落缺席，不许落"未能确认"', () => {
+  // 本轮把三档判定加进预检之后，ubuntu 上那格必须仍然说"未找到 swift"——`swift --version` 与
+  // `xcode-select -p` 都是 ENOENT。写成 unverified 的话，那句"负载高就重跑一次"会把人支去
+  // 等一台永远不会变快的机器。这一条是从 CI 实测的红反向补出来的，不是假想形状。
+  const noXcode = scriptedSpawn({
+    'swift --version': [{ status: null, error: { code: 'ENOENT' } }],
+    'xcode-select -p': [{ status: null, error: { code: 'ENOENT' } }],
+  })
+  assert.equal(commandProbe('swift', { spawn: noXcode.spawn, access: ACCESS_FAIL }), PROBE_STATES.absent)
+  const env = checkEnvironment({ nodePath: process.execPath, probe: (bin) => (bin === 'swift' ? PROBE_STATES.absent : PROBE_STATES.available) })
+  assert.equal(env.swift, false)
+  assert.deepEqual(env.unverified, [], 'ENOENT 的缺席不许混进"未能确认"那一格')
+  const issues = preflightIssues(env)
+  assert.equal(issues.length, 1, JSON.stringify(issues))
+  assert.match(issues[0], /未找到 swift/, '缺席那句仍要给出装它的动作')
+  assert.match(issues[0], /xcode-select --install/, '而那句动作在真没有 Xcode 的机器上是对的')
+})
+
 test('预检对"未能确认"说的是另一句话，并给出下一条能跑的动作', () => {
   const env = {
     nodeMajor: 22, nodeOk: true, npm: true, swift: true, open: true,
@@ -134,16 +152,31 @@ test('预检对"未能确认"说的是另一句话，并给出下一条能跑的
   assert.match(absentIssues[0], /xcode-select --install/)
 })
 
-test('checkEnvironment 把没确认的项记进 unverified，全健康的这台机器上是空表', () => {
+test('checkEnvironment 把没确认的项记进 unverified，且"确认不了"与"没有"不混成一格', () => {
   const env = checkEnvironment({ nodePath: process.execPath })
   assert.ok(Array.isArray(env.unverified), `unverified 必须是一条读数（数组），不是没有这个字段：${JSON.stringify(env)}`)
   for (const name of env.unverified) {
     assert.equal(env[name], false, `${name} 在 unverified 里却又被报成可用：预检于是既不拒绝也不说明`)
   }
-  // 这台机器实测五项全齐（CI 的 macOS job 也走这一条）；空表是"确认过"的意思，不是"没探"。
-  assert.deepEqual(env.unverified, [], `本机实测应当全确认，实得：${JSON.stringify(env)}`)
-  assert.equal(env.git, true)
-  assert.equal(env.swift, true)
+  // 这一半在**任何**平台都成立，也是本轮真正要钉的那件事：一台跑完全部探测的机器，答案要么
+  // 是"有"、要么是"没有"，不该有第三格来自"它答了"。CI 的 `install-gate` 那格跑在 ubuntu 上，
+  // 那里 swift/open 是 ENOENT（缺席），不是超时——它们必须留在缺席那一档，不许被写进 unverified。
+  assert.deepEqual(env.unverified, [], `探测都答了话，却有项被记成"未能确认"：${JSON.stringify(env)}`)
+  if (process.platform === 'darwin') {
+    // darwin-only 的那半：这台 mac 五项都该确认成可用（Swift/XCTest、launchd 与 TCC 都在这一侧）。
+    // 它由 CI 的 `macOS node suites` 那一格实跑，写在平台判据里而不是删掉——上轮就是被
+    // "darwin-only 断言没人跑"咬过一次，这一轮换我把它们放在**有 mac 泳道**的地方跑。
+    assert.equal(env.swift, true, '这台 mac 上 swift 探不出可用——本轮的宽预算那一档也没能救回来')
+    assert.equal(env.git, true, '这台 mac 上 git 探不出可用')
+    assert.equal(env.open, true, '这台 mac 上没有 open？那就不该谈 GUI 面板')
+  } else {
+    // 非 mac：Xcode CLT 与 open 注定没有。这一格不许假绿成"有"——它是本轮那条误归因的镜像面：
+    // 缺席要说缺席，负载要说负载，两边都不许冒充对方。
+    for (const name of ['swift', 'open']) {
+      if (env[name]) continue
+      assert.ok(!env.unverified.includes(name), `${name} 在这台机器上是"没有"，不是"没答话"`)
+    }
+  }
 })
 
 test('接线：探测没走完那一项必须由 checkEnvironment 记进 unverified（不是只有函数会分档）', () => {
