@@ -14,7 +14,7 @@ import Foundation
 ///     调用，`hitCount`（T4/T5/T7 的分叉依据）被抬高；2^32+1 折成 1。
 ///  3. `DecisionLogEntry` 数 `summary` 用的是字素簇，而同一字段的已发布内核验证器数的是
 ///     **UTF-16 码元**（`kernel/schemas/decision-log-entry.schema.json` 的 `maxLength`，
-///     由 `kernel/dist/decision-log-entry.js` 的 `z.string().max(SUMMARY_MAX_LENGTH)` 执行，
+///     由发布内核 `iterate-kernel` 的 `z.string().max(SUMMARY_MAX_LENGTH)` 执行，
 ///     zod 读 `value.length`）：1025 个 emoji 是 1025 簇却也是 2050 码元，daemon 侧收下的
 ///     账本行会被契约另一侧拒掉。
 ///
@@ -325,17 +325,22 @@ final class DailyRound20261022VerdictTests: XCTestCase {
 
     /// 执行那份契约的验证器里，同一个上限是以**哪个常量**发布的（zod 的 `z.string().max()`
     /// 读 `value.length` ⇒ UTF-16 码元）。
-    private func kernelValidatorBound() throws -> Int {
-        let text = try String(
-            contentsOfFile: repoRoot + "/kernel/dist/decision-log-entry.js", encoding: .utf8
-        )
-        let regex = try NSRegularExpression(pattern: "export const SUMMARY_MAX_LENGTH = ([0-9]+);")
-        let match = try XCTUnwrap(
-            regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
-            "kernel/dist/decision-log-entry.js 里读不到 SUMMARY_MAX_LENGTH"
-        )
-        let cut = try XCTUnwrap(Range(match.range(at: 1), in: text))
-        return try XCTUnwrap(Int(text[cut]))
+    ///
+    /// 2026-10-23（缺陷 83）：这一臂**从前住在 Swift 里，而它在 Swift 那一格永远量不到**。
+    /// 它读的是 `kernel/dist/decision-log-entry.js`——那个路径没有被 git 追踪（`git ls-files
+    /// kernel/dist` 为空，是 2026-10-18 内核代码镜像退场后留在开发机上的旧副本），于是
+    /// 本机 `swift test` 全绿、CI 的 `engine (Swift)` 那一格红：检出的树里根本没有那些字节。
+    /// 更糟的是"量到了"这件事本身是假的——本机那份副本可以与装好的包不同号仍读出 2048。
+    ///
+    /// 这条量法现在搬到 `mcp-shell/test/kernel-validator-bound.test.mjs`：它读的是
+    /// `node_modules/iterate-kernel/dist/decision-log-entry.js`（`mcp-shell/package.json`
+    /// 用精确版本声明、`check-kernel-corpus.mjs` 的 shell 臂再核同号的那一份），
+    /// 而 CI 的每个泳道在跑测试前都 `npm ci`。Swift 这里留下**两侧都是 tracked 字节**的那两臂。
+    func testTheSummaryBoundIsTheSameOnTheTwoTrackedSides() throws {
+        let bound = try publishedSummaryBound()
+        XCTAssertEqual(DecisionLogEntry.summaryMaxLength, bound,
+            "引擎侧的 summary 上限与被钉语料里的 maxLength 不同号：一个账本行会在一侧收下、另一侧拒掉")
+        XCTAssertEqual(bound % 2, 0, "下面的 emoji 夹具假设一个 emoji = 2 个 UTF-16 码元")
     }
 
     private func decisionLogData(summary: String, dimension: String? = nil) throws -> Data {
@@ -346,16 +351,6 @@ final class DailyRound20261022VerdictTests: XCTestCase {
         object["summary"] = summary
         if let dimension { object["dimension"] = dimension }
         return try JSONSerialization.data(withJSONObject: object)
-    }
-
-    /// 三处必须是同一个数：schema 的 `maxLength`、内核验证器的 `SUMMARY_MAX_LENGTH`、
-    /// Swift 侧的 `summaryMaxLength`。这条不在 REVERSE 的红线里，它钉的是"单位之争不许
-    /// 靠改数字解决"——上限本身没动，动的只是数它的单位。
-    func testTheSummaryConstantIsTheSameNumberOnAllThreeSides() throws {
-        let bound = try publishedSummaryBound()
-        XCTAssertEqual(bound, try kernelValidatorBound())
-        XCTAssertEqual(DecisionLogEntry.summaryMaxLength, bound)
-        XCTAssertEqual(bound % 2, 0, "下面的 emoji 夹具假设一个 emoji = 2 个 UTF-16 码元")
     }
 
     /// REVERSE：把 `summary.utf16.count` 换回 `summary.count` → 超界那一条红（1025 个字素簇
