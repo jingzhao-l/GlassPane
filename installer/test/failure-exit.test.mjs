@@ -32,6 +32,8 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
+import { platformRefusal } from '../cli.js'
+
 const CLI = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'cli.js')
 
 function tempRoot(label) {
@@ -160,14 +162,19 @@ test('端到端 拒绝分支：PATH 抽干净后退出码 1，那一支的清单
     } else {
       // 非 mac：平台那一支必须**先**挡住。谁把顺序换回去（或把平台闸删掉），这里就红——
       // 它因此也是那条顺序的端到端守卫，不只是 `install-isolation` 里那条源码位置判据。
+      // 那句句子由 `platformRefusal()` 自己给（真源），不在测试里抄一遍：CI 实测我连着两次
+      // 抄错——先是 `length > 200`（那句实测 183 字节），再是我凭记忆写的"没有 npm ci"
+      // 而产品说的是"没有**跑** npm ci"。抄来的判据红了以后，说的是我的记忆而不是产品。
       assert.match(r.stderr, /只支持 macOS/, `非 darwin 上这一条应先撞平台闸，实到：${r.stderr}`)
       assert.doesNotMatch(r.stderr, /环境预检未通过/, '平台闸排在预检之前，非 mac 不该读到预检清单')
-      // 那句必须说清"什么都没做"。CI 实测教回来的：这里从前写的是 `stderr.length > 200`，
-      // 而 ubuntu 上走的是 clone 分支那一条（183 字节，"没有 clone、没有写入任何东西"），
-      // mac 上委托前那一条说的是"没有 npm ci、没有 swift build、没有注册 launchd 作业"——
-      // 两条都是完整的一句话，字节数不是判据，**它否认了什么**才是。
-      assert.match(r.stderr, /没有 clone、没有写入任何东西|没有 npm ci、没有 swift build/,
-        `平台那句要否认的是一整串副作用，实到：${r.stderr}`)
+      const refusal = platformRefusal()
+      assert.ok(typeof refusal === 'string' && refusal.length > 0,
+        '非 darwin 上 `platformRefusal()` 必须给出一句话——它是这一支的真源')
+      assert.ok(r.stderr.includes(refusal),
+        `stderr 里那句必须与 \`platformRefusal()\` 逐字同源，实到：${r.stderr}`)
+      // 它得否认一整串副作用，而不是只说"不支持"：读者要知道自己这台机器没被写过。
+      assert.ok((refusal.match(/没有/g) ?? []).length >= 3,
+        `这一句要逐条说出本轮没做的事，实得：${refusal}`)
     }
     assert.equal(r.stderr.slice(-1), '\n', '那句下一步必须完整到达')
   } finally {
