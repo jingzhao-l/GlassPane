@@ -142,15 +142,28 @@ test('端到端 参数错误：退出码 2，stderr 与 usage 都完整到达', 
   assert.equal(r.stderr.slice(-1), '\n', '最后一条必须完整')
 })
 
-test('端到端 环境预检拒绝：PATH 抽干净后退出码 1，预检清单一条都不许被截掉', () => {
+test('端到端 拒绝分支：PATH 抽干净后退出码 1，那一支的清单一条都不许被截掉', () => {
   const bin = barePathDir()
   try {
     const r = runCli([], { PATH: bin })
     assert.equal(r.status, 1, `stdout: ${r.stdout}\nstderr: ${r.stderr}`)
-    assert.match(r.stderr, /环境预检未通过/, 'PATH 里没有 swift/npm/git，必须走预检拒绝这一支')
-    const listed = (r.stderr.match(/^ {2}- /gm) ?? []).length
-    assert.ok(listed >= 1, `预检要把缺的东西逐条列出来，实到 ${listed} 条：${r.stderr}`)
-    assert.match(r.stderr, /修复后重新运行即可/, '拒绝的最后一句是给下一步的，不是收尾装饰')
+    // 2026-10-23：`8f881f7a` 把平台判据提到环境预检**之前**（对的：非 mac 不该先付五次探测，
+    // 更不该摸到安装路径），于是 GitHub 那台 ubuntu runner 在这条输入下看到的是平台拒绝，
+    // 永远看不到预检清单——这条上一轮就这么红了，而它没被 CI 看见过（那 20 笔从没推上去）。
+    // 改判据的方式只能是"按平台问哪一支该跑"，而不是把 darwin 那一支硬塞给 ubuntu（那是假红），
+    // 也不是放宽成"两种文案都算过"（那是没有闸）。两边各有一条会红的断言：
+    if (process.platform === 'darwin') {
+      assert.match(r.stderr, /环境预检未通过/, 'PATH 里没有 swift/npm/git，必须走预检拒绝这一支')
+      const listed = (r.stderr.match(/^ {2}- /gm) ?? []).length
+      assert.ok(listed >= 1, `预检要把缺的东西逐条列出来，实到 ${listed} 条：${r.stderr}`)
+      assert.match(r.stderr, /修复后重新运行即可/, '拒绝的最后一句是给下一步的，不是收尾装饰')
+    } else {
+      // 非 mac：平台那一支必须**先**挡住。谁把顺序换回去（或把平台闸删掉），这里就红——
+      // 它因此也是那条顺序的端到端守卫，不只是 `install-isolation` 里那条源码位置判据。
+      assert.match(r.stderr, /只支持 macOS/, `非 darwin 上这一条应先撞平台闸，实到：${r.stderr}`)
+      assert.doesNotMatch(r.stderr, /环境预检未通过/, '平台闸排在预检之前，非 mac 不该读到预检清单')
+      assert.ok(r.stderr.length > 200, `平台那句要把"没写任何东西"说完整，实到 ${r.stderr.length} 字节`)
+    }
     assert.equal(r.stderr.slice(-1), '\n', '那句下一步必须完整到达')
   } finally {
     removeRoot(bin)
@@ -170,11 +183,22 @@ test('端到端 真安装失败：走到 install 的拒绝分支时步骤输出�
     // `PATH 里有没有 swift` 当代理，GitHub 的 ubuntu runner 上它与 installer 的
     // `checkEnvironment()` 判得不一致，测试因此没跳、把预检拒绝误当成 install 拒绝打红。
     // 猜不得，就看它说什么：预检挡住就如实声明这一支本机不可达（原因带出来），
-    // 因为这一支的形状已经由上一条（把 PATH 抽干净**主动**逼出预检拒绝）覆盖了。
+    // 因为这一支的形状已经由上一条（把 PATH 抽干净**主动**逼出那一条拒绝）覆盖了。
     // 2026-10-23（缺陷 2）：这一档只认真缺席（"未找到"）。"未能确认"是探测没答话，
     // 拿它当"本机不可达"会把用例跳没——那正是本轮修掉的第二个后果。
     if (r.status === 1 && /环境预检未通过/.test(r.stderr) && /未找到/.test(r.stderr) && !/未能确认/.test(r.stderr)) {
       t.skip(`这台机器走不到 install 的拒绝分支，预检先挡了：${r.stderr.trim().slice(0, 160)}`)
+      return
+    }
+    // 2026-10-23（CI 实测的红）：`8f881f7a` 把平台判据提到预检之前，于是非 darwin 的 runner
+    // 在这条输入下**先**撞平台闸，install 的拒绝分支按构造走不到。仍是由产品的回话分流，
+    // 而且 skip 之前先把那一支该成立的三件事量了——不是"看见陌生文案就放过"。
+    if (/只支持 macOS/.test(r.stderr)) {
+      assert.equal(r.status, 1, `平台闸那一支必须退 1：stdout=${r.stdout}\nstderr=${r.stderr}`)
+      assert.ok(!/安装完成/.test(r.stdout), '平台闸之后不许有任何安装步骤发生')
+      assert.doesNotMatch(r.stderr, /安装失败|环境预检未通过/, '非 darwin 上排第一的必须是平台闸')
+      assert.equal(r.stderr.slice(-1), '\n', '那句拒绝必须完整到达')
+      t.skip(`这台机器不是 darwin，平台闸排在 install 之前，install 的拒绝分支本机不可达：${r.stderr.trim().slice(0, 120)}`)
       return
     }
     assert.equal(r.status, 1, `stdout: ${r.stdout}\nstderr: ${r.stderr}`)

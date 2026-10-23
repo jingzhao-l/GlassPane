@@ -189,17 +189,23 @@ function runCli(args, { env = {}, cwd } = {}) {
   }
 }
 
-/** 本机走不到安装分支时（没有 swift 的 runner）如实声明跳过，而不是把断言放宽成恒过。
+/** 走不到 install 的那些**合法**前置拒绝：预检的真缺席，以及 `8f881f7a` 提到预检之前的平台闸。
  *
- * 2026-10-23（缺陷 2）：这一档从前只要预检报了任何一句就跳过，而"预检报了"里混着一种**假**的挡——
- * 整套件并发时 `git --version` 5 秒没答话，旧实现把它写成"未找到 git"，于是这台明明能跑的 mac
- * 上，正向分支（退出码 0 / "安装完成" / "实测校验通过"）静默不跑。跳过不是无害的：一条会把自己
- * 跳没的闸等于没有闸。所以现在只认真缺席（"未找到"）那一句；"未能确认"是探测没走完，
- * 那是本轮要修的缺陷，必须红给下一位读者看。 */
-function preflightBlocked(result) {
+ * 2026-10-23：这一档从前只认「环境预检未通过」，两处错得同向——①`commandAvailable()` 把探测超时
+ * 说成"未找到"，于是一条真机用例在一台什么都能跑的 mac 上被跳没（本轮缺陷 2）；②那 20 笔从没推上去，
+ * 平台闸提上去之后 CI 的 ubuntu 泳道第一次跑到这几条就红了 7 条，上一轮根本没看见。
+ * 现在两支都认，但**先量完再跳**：退出码、那句拒绝完整到达、拒绝之后没有任何安装动作。
+ * "未能确认"（探测没答话）不在合法名单里——那是本轮修掉的缺陷，必须红给下一位读者。 */
+function refusedBeforeInstall(result) {
   const text = result.stderr ?? ''
-  if (result.status !== 1 || !/环境预检未通过/.test(text)) return false
-  return /未找到/.test(text) && !/未能确认/.test(text)
+  if (result.status !== 1) return null
+  if (/未能确认/.test(text)) return null
+  const kind = /只支持 macOS/.test(text) ? '平台闸'
+    : (/环境预检未通过/.test(text) && /未找到/.test(text) ? '环境预检（真缺席）' : null)
+  if (kind === null) return null
+  assert.equal(text.slice(-1), '\n', '前置拒绝那句必须完整到达')
+  assert.ok(!/安装完成|已安置：/.test(result.stdout ?? ''), `前置拒绝（${kind}）之后不许有任何安装动作：${result.stdout}`)
+  return kind
 }
 
 
@@ -239,7 +245,8 @@ test('finding1: 陈旧 daemon 占着 socket 时（hello 1.0.0 / 本轮产物 9.9
   const fx = installWithStaleDaemonFixture({ binaryVersion: '9.9.9', helloVersion: '1.0.0' })
   try {
     const r = fx.run()
-    if (preflightBlocked(r)) { t.skip(`这台机器预检先挡了：${r.stderr.trim().slice(0, 120)}`); return }
+    const blocked = refusedBeforeInstall(r)
+    if (blocked) { t.skip(`这台机器走不到 install（${blocked} 排在它之前）：${r.stderr.trim().slice(0, 120)}`); return }
     assert.notEqual(r.status, 0, `应答的不是本轮产物却退出 0：${r.stdout}\n${r.stderr}`)
     assert.match(r.stdout, /已在监听/, '前置：走的就是"跳过启动"那一支（正是旧代码报成功的场景）')
     assert.match(r.stdout, /自报 1\.0\.0/, '必须点名应答方自报的版本')
@@ -259,7 +266,8 @@ test('finding1: hello 与本轮产物版本一致时才报完成（退出码 0�
   const fx = installWithStaleDaemonFixture({ binaryVersion: '9.9.9', helloVersion: '9.9.9' })
   try {
     const r = fx.run()
-    if (preflightBlocked(r)) { t.skip(`这台机器预检先挡了：${r.stderr.trim().slice(0, 120)}`); return }
+    const blocked = refusedBeforeInstall(r)
+    if (blocked) { t.skip(`这台机器走不到 install（${blocked} 排在它之前）：${r.stderr.trim().slice(0, 120)}`); return }
     assert.equal(r.status, 0, `版本一致就该算通过：${r.stdout}\n${r.stderr}`)
     assert.match(r.stdout, /安装完成（退出码 0）/)
     assert.match(r.stdout, /实测校验通过/)
@@ -549,12 +557,18 @@ test('finding4: HOME 未设置时子进程拒绝，且当前目录里没长出 .
     const r = spawnSync(process.execPath, [CLI, '--repo', makeRepoRoot('v4-root2'), '--skip-build', '--no-app', '--no-gui', '--no-launchd', '--no-prompt'], {
       cwd, env: { ...env, GLASSPANE_REPO: '' }, encoding: 'utf8', timeout: 60_000,
     })
-    if (preflightBlocked(r)) { t.skip('这台机器预检先挡了，走不到 HOME 闸'); return }
     assert.equal(r.status, 1, `stdout:${r.stdout}\nstderr:${r.stderr}`)
-    assert.match(r.stderr, /HOME/, r.stderr)
+    // 这条用例真正的安全主张是"HOME 没了也不许把状态根拼成 ./.glasspane 落进当前目录"，
+    // 它在**任何**平台都可量——所以先量它，再谈那句文案在不在本机 reachable 的那一支里。
     assert.equal(fs.existsSync(path.join(cwd, '.glasspane')), false,
       'HOME 缺失时旧实现把状态根拼成 ./.glasspane，整棵安装落进当前目录')
     assert.ok(!/安装完成/.test(r.stdout), r.stdout)
+    const blocked = refusedBeforeInstall(r)
+    if (blocked) {
+      t.skip(`这台机器走不到 HOME 闸（${blocked} 排在它之前），上面的零写入已量过`)
+      return
+    }
+    assert.match(r.stderr, /HOME/, r.stderr)
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true })
   }
@@ -774,7 +788,13 @@ test('finding9: bootstrap 目标已存在时，cli.js 把 git 那句原话交出
     const r = spawnSync(process.execPath, [CLI, '--skip-build', '--no-app', '--no-gui', '--no-launchd', '--no-prompt'], {
       cwd, encoding: 'utf8', env: { ...process.env, HOME: home, GLASSPANE_REPO: '' }, timeout: 120_000,
     })
-    if (preflightBlocked(r)) { t.skip('这台机器预检先挡了，走不到 clone 分支'); return }
+    const blocked = refusedBeforeInstall(r)
+    if (blocked) {
+      // 文案本身由上面那条纯函数用例在所有平台量过；这一条端到端要的是"真 git 那句原话淌到
+      // stderr 上"，而那一步在本机被前置拒绝挡住，所以如实声明是谁挡的，不许静默通过。
+      t.skip(`这台机器走不到 clone 分支（${blocked} 排在它之前）`)
+      return
+    }
     assert.equal(r.status, 1, `stdout:${r.stdout}\nstderr:${r.stderr}`)
     assert.match(r.stderr, /already exists and is not an empty directory/, r.stderr)
     assert.match(r.stderr, /原因不是网络/, r.stderr)

@@ -524,6 +524,16 @@ test('真 install() 走完覆盖被跳过那一轮：不许打印"本轮构建�
   const declined = await runRealInstallOnce({ preexistingBundles: true })
   assert.notEqual(declined.code, 'TIMEOUT', declined.stdout + declined.stderr)
   const declinedText = `${declined.stdout}\n${declined.stderr}`
+  // 2026-10-23（CI 实测的红）：上面那道 in-process 预检**猜不到产品会走哪一支**——GitHub 那台
+  // ubuntu runner 五项探测全过（Swift 在镜像里、`/usr/bin/open` 由 postgresql-client 提供），
+  // 于是 blockers 是空的、这条没跳，而子进程第一件事就撞上 `8f881f7a` 提上去的平台闸。
+  // 按本仓自己的口径改：走到哪一支由产品的回话说，skip 之前先把那一支该成立的量了。
+  if (/只支持 macOS/.test(declinedText)) {
+    assert.equal(declined.code, 1, `平台闸那一支必须退 1：${declinedText}`)
+    assert.doesNotMatch(declinedText, /已安置|未覆盖（回答跳过）|安装完成/, '平台闸之后不许有任何安置动作')
+    t.skip(`这台机器不是 darwin，install 走不到 bundle 安置那一步：${declinedText.trim().slice(0, 120)}`)
+    return
+  }
   // 前提：这一跑**确实**走到了 bundle 安置那一步并真的被跳过（否则"没打印"是白过的）。
   assert.ok(declinedText.includes('未覆盖（回答跳过）'), `夹具没走到 declined 那一档：${declinedText}`)
   assert.equal(declined.code, 1, `本轮产物没装上盘就是安装未完成，退出码不许是 0：${declinedText}`)
