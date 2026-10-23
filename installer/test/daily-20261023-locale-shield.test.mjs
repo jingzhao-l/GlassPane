@@ -81,12 +81,10 @@ function utf8Env(extra) {
   return { ...env, ...extra }
 }
 
-function runInstall(args, { env, cwd }) {
-  const r = spawnSync('/bin/sh', [INSTALL_SH, ...args], {
-    cwd, env, encoding: 'utf8', timeout: 90_000, input: '', maxBuffer: 32 * 1024 * 1024,
-  })
-  return { status: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}`, stdout: r.stdout ?? '', stderr: r.stderr ?? '' }
-}
+// 注意：这一份文件里每一处真跑 spawn 都**就地**写 `HOME:` 与 `cwd:`，不抽成 helper。
+// `daily-20261022-install-isolation.test.mjs` 那条隔离闸是按 spawn 点附近的文本判的（它判的是
+// "非 dry-run 那一支换了家目录与工作目录没有"），把 spawn 包进函数会让它看不见——那条闸不是
+// 形式主义：上一轮就是被"测试继承了仓库根与真 HOME"咬过一次（真装进开发者机器）。
 
 test('静态：交付的 shell 里不许有 `$NAME` 紧跟非 ASCII 而未写成 `${NAME}`', () => {
   const found = []
@@ -121,8 +119,8 @@ test('行为：UTF-8 locale 下"目标目录已存在"那句必须完整到达�
   const target = path.join(parent, 'glasspane')
   fs.mkdirSync(target)
   try {
-    const r = runInstall([], {
-      cwd,
+    const raw = spawnSync('/bin/sh', [INSTALL_SH], {
+      cwd: cwd,
       env: utf8Env({
         PATH: `${stub}:${process.env.PATH}`,
         HOME: home,
@@ -131,7 +129,9 @@ test('行为：UTF-8 locale 下"目标目录已存在"那句必须完整到达�
         GLASSPANE_INSTALL_DIR: target,
         GLASSPANE_INSTALL_DRY_RUN: '0',
       }),
+      encoding: 'utf8', timeout: 90_000, input: '', maxBuffer: 32 * 1024 * 1024,
     })
+    const r = { status: raw.status, out: `${raw.stdout ?? ''}${raw.stderr ?? ''}` }
     assert.equal(r.status, 1, r.out)
     assert.ok(!/unbound variable/.test(r.out), `脚本死在展开那一行了，读者什么动作都拿不到：${r.out}`)
     assert.match(r.out, /目标目录已存在且不是 GlassPane 仓库/, r.out)
@@ -155,13 +155,15 @@ test('行为：UTF-8 locale 下"既有 clone"那两行与 clone 计划行都到�
   fs.writeFileSync(path.join(existing, 'mcp-shell', 'package.json'), '{}\n')
   try {
     // dry-run：打印计划就退出，绝不 exec installer（上一轮那条实测代价写在 cli.js 的头注里）。
-    const dry = runInstall([], {
-      cwd,
+    const rawDry = spawnSync('/bin/sh', [INSTALL_SH], {
+      cwd: cwd,
       env: utf8Env({
         PATH: `${stub}:${process.env.PATH}`, HOME: home, GLASSPANE_REPO: '',
         GLASSPANE_INSTALL_DIR: existing, GLASSPANE_INSTALL_DRY_RUN: '1',
       }),
+      encoding: 'utf8', timeout: 90_000, input: '', maxBuffer: 32 * 1024 * 1024,
     })
+    const dry = { status: rawDry.status, out: `${rawDry.stdout ?? ''}${rawDry.stderr ?? ''}` }
     assert.equal(dry.status, 0, dry.out)
     assert.ok(!/unbound variable/.test(dry.out), dry.out)
     assert.match(dry.out, /使用既有 clone: /, dry.out)
@@ -171,14 +173,16 @@ test('行为：UTF-8 locale 下"既有 clone"那两行与 clone 计划行都到�
     // 定位不到源码 ⇒ 真要 clone：那一行 `clone 源码到 $CLONE_DIR（ref: $REF）` 在展开里。
     // URL 是一条不存在的 file://，所以 git 只能快速失败，不碰网络也不写盘。
     const missing = path.join(home, 'nowhere-clone')
-    const real = runInstall([], {
-      cwd,
+    const rawReal = spawnSync('/bin/sh', [INSTALL_SH], {
+      cwd: cwd,
       env: utf8Env({
         PATH: `${stub}:${process.env.PATH}`, HOME: home, GLASSPANE_REPO: '',
         GLASSPANE_REPO_URL: 'file:///nonexistent-glasspane-probe',
         GLASSPANE_INSTALL_DIR: missing, GLASSPANE_INSTALL_DRY_RUN: '0',
       }),
+      encoding: 'utf8', timeout: 90_000, input: '', maxBuffer: 32 * 1024 * 1024,
     })
+    const real = { status: rawReal.status, out: `${rawReal.stdout ?? ''}${rawReal.stderr ?? ''}` }
     assert.equal(real.status, 1, real.out)
     assert.ok(!/unbound variable/.test(real.out), real.out)
     assert.match(real.out, /clone 源码到 .*（ref: v[0-9.]+）……/, '进度那行带着 ref 与全角括号，必须在同一句里到齐')

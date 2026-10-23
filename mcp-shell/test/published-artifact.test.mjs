@@ -350,6 +350,23 @@ test("the packed artifact carries the delivered entry, the schemas and no source
     assert.ok(entries.includes(needed), `${needed} is not in the packed artifact: ${entries.join(", ")}`);
   }
   assert.equal(entries.some((e) => e.startsWith("package/src/")), false, "source must not ship");
+
+  // 2026-10-23（缺陷 83 的第二半）：那份 schema 光"在档里"还不够——它对外声明的上限必须与
+  // **同一个包里执行的那份验证器**是同一个数。`kernel-validator-bound.test.mjs` 量的是
+  // tracked 语料 ↔ 装好的内核；这一条量的是发布 tarball 里的那一份，也就是用户机器上真被读到的
+  // 那份字节。两处不同号时，包对外声明一个上限、执行另一个，而没有任何一条闸会说这件事。
+  const schemaText = run("tar", ["-xzOf", tarball, "package/schemas/decision-log-entry.schema.json"], SCRATCH)
+  assert.equal(schemaText.status, 0, `tarball 里读不出那份 schema：${schemaText.stderr.slice(0, 300)}`)
+  const shippedBound = JSON.parse(schemaText.stdout)?.properties?.summary?.maxLength
+  assert.equal(typeof shippedBound, "number", "发出去的 schema 里没有 properties.summary.maxLength")
+  const kernelDir = fs.existsSync(path.join(WORKTREE, "node_modules", "iterate-kernel"))
+    ? path.join(WORKTREE, "node_modules", "iterate-kernel")
+    : path.join(WORKTREE, "mcp-shell", "node_modules", "iterate-kernel")
+  const validatorSrc = fs.readFileSync(path.join(kernelDir, "dist", "decision-log-entry.js"), "utf8")
+  const validatorBound = Number(/export const SUMMARY_MAX_LENGTH = ([0-9]+);/.exec(validatorSrc)?.[1])
+  assert.ok(Number.isFinite(validatorBound), "装好的内核里读不到 SUMMARY_MAX_LENGTH，这一条就没法核对")
+  assert.equal(shippedBound, validatorBound,
+    `发布包对外声明 summary.maxLength=${shippedBound}，而它捆进去的内核执行的是 ${validatorBound}`)
 });
 
 test("the installed bin is a symlink into the package and execs through its shebang", () => {

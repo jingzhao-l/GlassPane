@@ -162,7 +162,12 @@ test('端到端 拒绝分支：PATH 抽干净后退出码 1，那一支的清单
       // 它因此也是那条顺序的端到端守卫，不只是 `install-isolation` 里那条源码位置判据。
       assert.match(r.stderr, /只支持 macOS/, `非 darwin 上这一条应先撞平台闸，实到：${r.stderr}`)
       assert.doesNotMatch(r.stderr, /环境预检未通过/, '平台闸排在预检之前，非 mac 不该读到预检清单')
-      assert.ok(r.stderr.length > 200, `平台那句要把"没写任何东西"说完整，实到 ${r.stderr.length} 字节`)
+      // 那句必须说清"什么都没做"。CI 实测教回来的：这里从前写的是 `stderr.length > 200`，
+      // 而 ubuntu 上走的是 clone 分支那一条（183 字节，"没有 clone、没有写入任何东西"），
+      // mac 上委托前那一条说的是"没有 npm ci、没有 swift build、没有注册 launchd 作业"——
+      // 两条都是完整的一句话，字节数不是判据，**它否认了什么**才是。
+      assert.match(r.stderr, /没有 clone、没有写入任何东西|没有 npm ci、没有 swift build/,
+        `平台那句要否认的是一整串副作用，实到：${r.stderr}`)
     }
     assert.equal(r.stderr.slice(-1), '\n', '那句下一步必须完整到达')
   } finally {

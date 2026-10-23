@@ -85,12 +85,24 @@ test('内核验证器执行的上限，就是被钉语料里写的那个上限',
     + '——同一个字段两个上限，Swift 侧收的那一条与内核拒的那一条就不是同一件事')
 })
 
-test('捆进发布物的那份 schema 也是同一个数（用户机器上真正被读的是它）', () => {
-  const validator = readKernelValidatorConstant()
-  const bundled = schemaBound(path.join(REPO, 'mcp-shell', 'schemas', 'decision-log-entry.schema.json'))
-  assert.equal(bundled, validator,
-    `mcp-shell/schemas 的 maxLength=${bundled} 与内核验证器的 ${validator} 不等：`
-    + '发出去的包对外声明一个上限，执行的是另一个')
+test('发布副本那一臂住在 `published-artifact.test.mjs`，这里不留一条量不到的断言', () => {
+  // 本来这条闸还有一条"读 `mcp-shell/schemas/decision-log-entry.schema.json`"。搬走的原因是它
+  // 与缺陷 83 同族：`mcp-shell/schemas` 是 `npm run bundle` 里 `bundle-kernel-schemas.mjs` 写的
+  // **构建产物**，`git ls-files mcp-shell/schemas` 为空（本机实测），而 `npm test` 只跑
+  // `npm run build`（tsc）——在这条闸的常驻泳道里那个目录根本不存在。留下来就是"只在某台机器上
+  // 存在的字节被当成发布契约核对"，红与绿都不说明发布物。
+  // 现在由 `published-artifact.test.mjs` 的「the packed artifact carries…」在**真 tarball**里读它：
+  // 那条泳道跑过 `npm run bundle` + `npm pack`，量的是发出去的那份字节。这一条只钉住这个分工，
+  // 免得下一位把断言又搬回来、在另一个泳道里造出一条永远量不到的臂。
+  const bundled = path.join(REPO, 'mcp-shell', 'schemas', 'decision-log-entry.schema.json')
+  const coveredElsewhere = fs.readFileSync(path.join(HERE, 'published-artifact.test.mjs'), 'utf8')
+  assert.match(coveredElsewhere, /package\/schemas\/decision-log-entry\.schema\.json/,
+    '捆进发布物那份 schema 的 maxLength 必须有人核对——它不在这里，也不许没有别人管')
+  if (fs.existsSync(bundled)) {
+    // 本机跑过 bundle 时顺手核一次：同一份内容的两个视图不许互相矛盾。
+    assert.equal(schemaBound(bundled), readKernelValidatorConstant(),
+      `${bundled} 与装好的内核验证器不同号（本机这份构建产物是陈的就得在这里现形）`)
+  }
 })
 
 test('单位之争：zod 的 max 量 UTF-16 码元，所以内核那个数必须是偶数（Swift 的 emoji 夹具靠这条前提）', () => {
