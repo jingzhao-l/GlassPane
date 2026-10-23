@@ -71,11 +71,21 @@ test('数组里的每一项被单独拿掉时，预检都拒绝并且说得出�
 test('checkEnvironment 探的就是数组声明的那几项，一个不多一个不少', () => {
   const keys = Object.keys(checkEnvironment({ nodePath: process.execPath }))
   // node 这一项在快照里是 `nodeMajor`/`nodeOk` 两个读数，不是布尔 `node`。
-  const covered = keys.filter((k) => k !== 'nodeOk' && k !== 'nodeMajor')
+  // `unverified` 也不是命令，是同一批读数的第二种答案（探测没走完的那几项名字）——
+  // 2026-10-23 缺陷 2 加的，由 daily-20261023-probe-state.test.mjs 负责，不进这张命令面表。
+  const readings = ['nodeOk', 'nodeMajor', 'unverified']
+  const covered = keys.filter((k) => !readings.includes(k))
   assert.deepEqual([...covered, 'nodeMajor'].sort(), ['git', 'nodeMajor', 'npm', 'open', 'swift'],
     '探测面与本文件认的那批字段漂了：新增的探测没人核，删掉的探测文档还写着有')
   for (const command of PREFLIGHT_PROBED_COMMANDS) {
     assert.ok(keys.includes(PROBE_SURFACE[command].key), `${command} 在数组里，但 checkEnvironment() 不再读 ${PROBE_SURFACE[command].key}`)
+  }
+  // 那条读数只能点名**被探测的命令**：把没确认的东西记成一个不存在的命令名，
+  // 预检的文案就会去找一条根本不存在的拒绝句子。
+  const env = checkEnvironment({ nodePath: process.execPath })
+  assert.ok(Array.isArray(env.unverified), 'unverified 必须是一条读数（数组）')
+  for (const name of env.unverified) {
+    assert.ok(['npm', 'swift', 'git', 'open'].includes(name), `unverified 里冒出一个不是被探测命令的名字：${name}`)
   }
 })
 

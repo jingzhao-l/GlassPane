@@ -277,37 +277,80 @@ export const SHIM_PROBE_COMMANDS = {
   git: { cmd: 'git', args: ['--version'] },
 }
 
+/** 探测一次命令：返回三档判定，而不是把"没答话"和"不在"混成一件事。
+ *
+ *  2026-10-23（缺陷 2）实测到的形状：整套件并发跑时 `git --version` 在 5 秒内没回来，旧实现把
+ *  `status !== 0`（超时是 `null`）当成"未找到"，于是①对用户说"未找到 git（xcode-select --install）"
+ *  ——这台机器上 git 好好的；②`installer/test/review-2026-10-09.test.mjs` 那条按"预检挡了"跳过的
+ *  真机用例静默不跑，整条正向分支（退出码 0 + "安装完成" + "实测校验通过"）在本机一次也没被测过。
+ *  单独跑这条又恒过——所以红看不见、跳过也看不见。
+ *
+ *  三档：`available`（探测命令自己退 0）/ `absent`（ENOENT，或答了但退非 0：CLT shim 就是这一档，
+ *  此时"装它"这条建议仍然成立）/ `unverified`（探测没走完：超时或 spawn 起了但没结果——这一档
+ *  **不能**说成"未找到"）。 */
+export const PROBE_STATES = Object.freeze({ available: 'available', absent: 'absent', unverified: 'unverified' })
+
+/** 探测预算。第一次 5s；只有"没答话"才补一次宽的（这是区分"没答"与"答了不要"，不是给计时假红加超时）。 */
+export const PROBE_TIMEOUT_MS = 5000
+export const PROBE_RETRY_TIMEOUT_MS = 20000
+
+function probeOnce(spawn, cmd, args, timeoutMs) {
+  try {
+    return spawn(cmd, args, { stdio: 'ignore', timeout: timeoutMs })
+  } catch {
+    return { status: null, error: { code: 'EPARSE_SPAWN_THROW' } }
+  }
+}
+
+/** 一次判定的三档结果；`access` 只用于不支持 `--version` 的命令（open）。 */
+export function commandProbe(bin, {
+  spawn = spawnSync,
+  access = (file) => fs.accessSync(file, fs.constants.X_OK),
+  timeoutMs = PROBE_TIMEOUT_MS,
+  retryTimeoutMs = PROBE_RETRY_TIMEOUT_MS,
+} = {}) {
+  const judge = (cmd, args, budget) => {
+    const res = probeOnce(spawn, cmd, args, budget)
+    if (res.status === 0) return PROBE_STATES.available
+    const code = res.error && res.error.code
+    if (code === 'ENOENT') return PROBE_STATES.absent
+    // 夹具里注入的假 spawn 只给 {status}：非 0 退出＝它答过了，答案是"不行"。
+    if (code === undefined || code === null) return PROBE_STATES.absent
+    return PROBE_STATES.unverified
+  }
+  const first = judge(bin, ['--version'], timeoutMs)
+  if (first === PROBE_STATES.available) return first
+  const second = first === PROBE_STATES.unverified
+    ? judge(bin, ['--version'], retryTimeoutMs)
+    : first
+  if (second !== PROBE_STATES.absent) return second
+  const probe = SHIM_PROBE_COMMANDS[bin]
+  if (probe) {
+    // 到这一支为止：文件存在对 shim 易感工具不构成证据（见 SHIM_PROBE_COMMANDS 注释）。
+    const shim = judge(probe.cmd, probe.args, timeoutMs)
+    if (shim === PROBE_STATES.available) return shim
+    return shim === PROBE_STATES.unverified
+      ? judge(probe.cmd, probe.args, retryTimeoutMs)
+      : shim
+  }
+  try {
+    access(path.join('/usr/bin', bin))
+    return PROBE_STATES.available
+  } catch {
+    return PROBE_STATES.absent
+  }
+}
+
 /** 检查命令是否存在：优先 `<bin> --version`；shim 易感工具（swift/git）改由
  *  SHIM_PROBE_COMMANDS 里那条探测命令的退出码决定；其余（open 等不支持 --version）
  *  才退化到 /usr/bin 下的可执行文件。真实探测，不伪造。
  *  `spawn`/`access` 是测试接缝：这一条判据的正反两面都得由假探测跑出来，真机上
- *  "装了 Xcode 的机器"永远只能给出正面一半。 */
-export function commandAvailable(bin, {
-  spawn = spawnSync,
-  access = (file) => fs.accessSync(file, fs.constants.X_OK),
-} = {}) {
-  const succeeds = (cmd, args) => {
-    try {
-      return spawn(cmd, args, { stdio: 'ignore', timeout: 5000 }).status === 0
-    } catch {
-      return false
-    }
-  }
-  if (succeeds(bin, ['--version'])) {
-    return true
-  }
-  const probe = SHIM_PROBE_COMMANDS[bin]
-  if (probe) {
-    // 到这一支为止：文件存在对 shim 易感工具不构成证据（见 SHIM_PROBE_COMMANDS 注释）。
-    return succeeds(probe.cmd, probe.args)
-  }
-  try {
-    access(path.join('/usr/bin', bin))
-    return true
-  } catch {
-    return false
-  }
+ *  "装了 Xcode 的机器"永远只能给出正面一半。
+ *  布尔只是三档判定的"可用"那一格；预检的**文案**要区分"没有"与"没确认"，见 `checkEnvironment`。 */
+export function commandAvailable(bin, opts = {}) {
+  return commandProbe(bin, opts) === PROBE_STATES.available
 }
+
 
 /**
  * 预检**真的**去问主机的那些命令。这一行是文档侧那句数量主张的真源：
@@ -321,15 +364,28 @@ export function commandAvailable(bin, {
  */
 export const PREFLIGHT_PROBED_COMMANDS = Object.freeze(['node', 'npm', 'swift', 'git', 'open'])
 
-/** 环境预检快照，返回每种依赖的可用状态（真实探测，不伪造）。 */
-export function checkEnvironment({ nodePath = process.execPath } = {}) {
+/** 环境预检快照，返回每种依赖的可用状态（真实探测，不伪造）。
+ *
+ *  `unverified` 记的是"探测没走完"那几项命令名（见 `commandProbe` 的三档）。它不是一个新命令，
+ *  而是同一批读数的第二种答案：`git: false` 说的是"这次没确认成"，`unverified` 说得出**为什么**
+ *  不能写成"未找到"。预检的文案靠它分流，拒绝本身照旧发生——确认不了的依赖不假装齐。 */
+export function checkEnvironment({ nodePath = process.execPath, probe = commandProbe } = {}) {
+  const states = {
+    npm: probe('npm'),
+    swift: probe('swift'),
+    git: probe('git'),
+    open: probe('open'),
+  }
   return {
     nodeMajor: nodeMajorVersion(nodePath),
     nodeOk: nodeMajorVersion(nodePath) >= MIN_NODE_MAJOR,
-    npm: commandAvailable('npm'),
-    swift: commandAvailable('swift'),
-    git: commandAvailable('git'),
-    open: commandAvailable('open'),
+    npm: states.npm === PROBE_STATES.available,
+    swift: states.swift === PROBE_STATES.available,
+    git: states.git === PROBE_STATES.available,
+    open: states.open === PROBE_STATES.available,
+    unverified: Object.entries(states)
+      .filter(([, state]) => state === PROBE_STATES.unverified)
+      .map(([name]) => name),
   }
 }
 
@@ -362,20 +418,26 @@ export function preflightIssues(env) {
   } else if (!env.nodeOk) {
     issues.push(`Node.js 需要 >= ${MIN_NODE_MAJOR}，当前为 ${env.nodeMajor}：换够格的 Node 版本再重跑（brew upgrade node 或 nvm use 22）`)
   }
-  if (!env.npm) {
-    issues.push('未找到 npm（它随 Node 一起装：brew install node）')
+  // "没答话"不等于"没有"。这两句话给的动作不一样（一个是装它，一个是看它卡在哪），
+  // 写成一句就是把读者支去 `xcode-select --install` 而机器本来就是好的。
+  const absentLine = {
+    npm: '未找到 npm（它随 Node 一起装：brew install node）',
+    swift: '未找到 swift（需安装 Xcode Command Line Tools：xcode-select --install）',
+    git: '未找到 git（xcode-select --install 会带上它，或 brew install git）',
+    open: '未找到 open（本安装器面向 macOS：Linux/Windows 上没有可装的东西，请在 macOS 14+ 上重跑）',
   }
-  if (!env.swift) {
-    issues.push('未找到 swift（需安装 Xcode Command Line Tools：xcode-select --install）')
-  }
-  if (!env.git) {
-    issues.push('未找到 git（xcode-select --install 会带上它，或 brew install git）')
-  }
-  if (!env.open) {
-    issues.push('未找到 open（本安装器面向 macOS：Linux/Windows 上没有可装的东西，请在 macOS 14+ 上重跑）')
+  for (const name of ['npm', 'swift', 'git', 'open']) {
+    if (env[name]) continue
+    if (Array.isArray(env.unverified) && env.unverified.includes(name)) {
+      issues.push(`${name} 未能确认：探测命令（\`${name} --version\`）在 ${PROBE_TIMEOUT_MS / 1000}s、补一次的 ${PROBE_RETRY_TIMEOUT_MS / 1000}s 内都没有答话。`
+        + `这不是"未安装"——先手动跑 \`${name} --version\` 看它卡在哪；若只是本机负载高，重跑一次安装即可。`)
+      continue
+    }
+    issues.push(absentLine[name])
   }
   return issues
 }
+
 
 /** 探测 unix socket 是否已有 daemon 在监听；连接超时 800ms 视为不可达。 */
 export function socketReachable(socketPath) {
