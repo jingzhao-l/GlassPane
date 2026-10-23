@@ -3920,7 +3920,7 @@
     },
     {
       "file": "script/patched-deps.mjs",
-      "forkHash": "91fd4e531514f15ed7502e633c54925398121c79"
+      "forkHash": "a45487007fc07415f31e6ab8397af32e50358ecc"
     },
     {
       "file": "scripts/install.sh",
