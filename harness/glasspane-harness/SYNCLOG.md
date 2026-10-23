@@ -128,6 +128,74 @@
   不是"改完判据事后补一句"。
 - **3b**：本台账与父仓 `[Unreleased]` 落笔后重切一次搬运分支再推，不消耗版本。
 
+### 同轮续（同日）：产物级复核从一次人工动作变成每版自动量，取号 0.10.2
+
+上一段留了一句"仍没盖住的一环"：`patched-deps` 量的是**主干这棵树**的安装产物，而真正产出二进制的
+是构建机在自己 runner 上那次 `bun install`。这一截把它补上，并且顺带把父侧一把尺子的一个更坏的失效
+形态修了。
+
+1. **`script/patched-deps.mjs` 多两个模式**：`--items --package <name>`（把"该问什么"从声明的补丁文件
+   现推成 JSON 交出去，判据因此全树只有一份实现）、`--artifact <file> --package <name>`（拿这份清单去
+   问一个文件的字节）。`verify-published.ts` 以**命令**方式调用它读 `realpath` 解析出的已安装负载，
+   而不是 import：一是 `tsgo` 对越界 `.mjs` 的类型不站得住，二是这样测的正是发布 lane 实际走的路径。
+   0/1/2 分别映射 ok / 具名 FAIL / NOT OBSERVED。
+2. **判据窄到只剩"字符串字面量 + 新增方法名"，是三次误报筛出来的**，每一条都被已发布的 0.10.1 二进制
+   （sha256 与 GitHub 为该资产算的 `digest` 逐字相等）当场否掉：要新增的每一行 ⇒ `.d.ts` 的内容在运行时
+   bundle 里没有字节；要补丁引入的每个标识符 ⇒ `isSessionRetry` / `requestSessionId` / `expiredSessionId`
+   是局部绑定、打包器改名，`isJSONRPCErrorResponse` / `determineScope` 是补丁只是调用的上游符号；
+   再放宽到调用名 ⇒ `'../types.js'` 这类模块说明符会被抹掉。留下的两类改名等于改行为：**8/8 命中**。
+3. **一个数字决定了调用形状**：本仓 19 条声明里 **18 条产不出可查项**，只有 MCP SDK 那条有 8 项。
+   所以 lane 点名问一个包，不扫全部声明——扫的话 18 条都走"问不出问题"分支，绿得和什么都没测一样；
+   空清单必须拒答（exit 2），这条分支用真声明 `effect` 测，不是造夹具。
+4. **预跑胜过 live-fire**：新步骤的第一次执行不是等发包时才知道对不对——本地 `npm i -g --prefix` 装了一份
+   真 0.10.1 负载（145,543,778 B，npm 自己按 `dist.integrity` 校过），跑 `verify-published.ts 0.10.1 --prefix …`
+   ⇒ `ok the published bytes carry the fork's MCP SDK patch — all 8 artifact-checkable item(s) present`，
+   整条 lane rc 0。那一轮 `--prefix` 走的是"不重读 registry"的分支，所以 `the registry can read …` 那句
+   要等真发布（下面有它的读数）。
+5. **父侧一把尺子的坏形状**：`release-artifact` 的远端 fetch 今天从这台机器挂了**两次**，一次十分钟一个
+   字节不动。它本来有"取不到 ⇒ exit 2"的分支，但那条分支只在 fetch **失败**时到达——停滞时它不复返，
+   CI 上等它的是 runner 超时，那种失败形态连判决都不留。补两道网：`http.lowSpeedLimit/Time`（中止
+   "连接活着但字节不流"）与 300 s 墙钟（兜住一个字节都没开始的挂起），两条都汇回原来的 `null`，
+   也就是**没有新增判决，只是让"测不了"真的会到达**。缝用 env 收小给电池用（同仓
+   `GLASSPANE_VERIFY_LISTENING_POLLS` 是先例），亚秒值忽略而不是照做。三条新用例：桩端口接了连接不回话
+   ⇒ 1.2 s 内 exit 2 且点名 `could not be reached`；没人监听的端口 ⇒ 同一个具名答案（证明前者不是
+   "只是计时器到了"）；override 设 1 ms ⇒ 等树用例仍按出厂默认过。
+6. **顺手删掉自己写的两处坏形状**：`--check` 对 145 MB 负载读两遍；以及上一版留的**空**白名单分支
+   （"某些平台可能不带这个文件"），全树没有任何用例能走到它——删掉，缺失目标一律红，因为未应用的补丁
+   最常见的长相就是"文件不见了"。
+
+闸与读数（本机）：`patched-artifact.test.ts` 6 条 / 24 断言，点进 fork CI 固定点名单（8 → 9 个文件），
+split 仓 CI 在 `9eb13a93` 两格 success 里跑的就是这 9 个文件；名单总数 172/942 → **178 pass / 0 fail /
+966 expect()**。`verify-published-selftest.sh` 12 条 ok（新增带标记 / 不带标记两条，证明这条会红也会绿）。
+`release-artifact-selftest.mjs` 全绿含三条新的停滞用例。`patched-deps-selftest.mjs` 28 条断言全绿——
+这条要单独记：`isMain` 判定按**书写路径**比，macOS 的 `tmpdir()` 给 `/var/folders/…` 而 Node 解析模块
+URL 得 `/private/var/folders/…`，被复制到临时目录的那份于是以为自己是 import，**静默什么都不做**，
+23 条断言同时红。不是我把测试改严了，是它把我抓出来了；两侧改比 realpath。
+opencode typecheck rc 0、`error TS` 计 0；父仓 15 把除 `release-artifact` 外全绿，它此时如实回答
+`has no tag v0.10.2 … this version has never been released`。
+金样两次重记都逐文件对过：fork-diff 条目 384→385（新测试文件）、移动 11 条正好是这两笔碰过的路径；
+tool-surface 面 B 10233→10418 = `patched-deps.mjs` +139 与 `verify-published.ts` +46，
+`testsExcluded` 38 文件 / +115 行是新那份对照、按口径不进面，面 A 文件数仍 16。
+
+### 0.10.2 的三格（本轮实测）
+
+- **主干**：4 笔快进推上 `jingzhao-l/GlassPane` main → `44794289`（含 `.github/**`，走 SSH remote）。
+- **split**：`git subtree split` 得 `9eb13a93`，`split^{tree}` == 主干子树（`1062b185…`），相对远端
+  `f1af4167` 快进，加 2 笔（停滞保护与金样都在主干侧目录外，不进 split——正确）。
+  推完等该 sha 的 fork CI 两格 success（其中 `install, typecheck, fixed points` 跑的就是新的 9 文件名单），
+  **核过可达才打 tag**。
+- **tag / Release**：`v0.10.2` → `9eb13a93`，`isDraft=false`，6 件资产；两份 `.zip` 的 sha256 与 GitHub
+  为该资产计算的 `digest` 逐字相等（arm64 `634ba440…`、x64 `7de56e74…`），`SHA256SUMS.txt` 204 B
+  与资产记录同尺寸、声明恰好两条。
+- **npm**：`publish_npm=true -f confirm=true` 的 dispatch run `39981045639` 全绿；三包 registry 读到
+  `0.10.2`，且发布时 npm 打印的 shasum 与 registry `dist.shasum` 逐字相等
+  （wrapper `20db06fe…`、arm64 `33009d30…`、x64 `f7cdc725…`）。
+- **新 lane 步骤的第一次实跑**（就在上面那次的 `install the published bytes and run them` 里）：
+  `ok the published bytes carry the fork's MCP SDK patch — all 8 artifact-checkable item(s) present`；
+  同一眼 `#24` 那句报的是 `glasspane-harness@0.10.2 answered after 1 look(s), 1s of waiting`。
+  这两句摆在一起正是这条改动的全部意义：等过并且等到了，与首眼就问到了，是两种可以被区分的诚实读数；
+  而"产物里有没有那份补丁"从今天起不再依赖任何人记得去数。
+
 ### 没跑与不做的
 
 - `packages/desktop` 的运行时行为：它不构建也不发布（`product.json` 明写是需要签名/公证账号的第二批），

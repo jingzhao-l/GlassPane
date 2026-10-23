@@ -5,10 +5,11 @@
 
 ## [Unreleased]
 
-**未取号。** 本轮落进 main 的东西分两半，读法不同：用户真正拿到的变化在 **glasspane-harness 0.10.1**，
-它三格都已落地并各自核过——tag `v0.10.1` → `265005db`，Release `isDraft=false` + 6 件资产
-（两份 `.zip` 的 sha256 与 GitHub 为该资产计算的 `digest` 逐字相等，`SHA256SUMS.txt` 声明的两条也对得上），
-npm 三个包 `0.10.1` 且**发布时 npm 打印的 shasum 与 registry 现在的 `dist.shasum` 逐字相等**。
+**未取号。** 本轮落进 main 的东西分两半，读法不同：用户真正拿到的变化在 **glasspane-harness 0.10.2**
+（同号也覆盖了 0.10.1 那一批），两版三格各自核过——tag `v0.10.1` → `265005db`、`v0.10.2` → `9eb13a93`，
+两次 Release 都是 `isDraft=false` + 6 件资产（两份 `.zip` 的 sha256 与 GitHub 为该资产计算的 `digest`
+逐字相等，`SHA256SUMS.txt` 声明的两条也对得上），npm 三包两次都与**发布时 npm 打印的 shasum 逐字相等**
+（0.10.2：wrapper `20db06fe…`、arm64 `33009d30…`、x64 `f7cdc725…`）。
 父仓这一侧（`harness/glasspane-harness/` 的这份副本、`harness/tools/` 的新尺子、`ci.yml` 的两步、两份金样）
 要等下一次取号才进父仓发布物——父仓的归档明确**不含** `harness/`，所以这份账不是"漏发"，
 而是"父仓侧的副本落后一代"的凭据。
@@ -34,12 +35,17 @@ npm 三个包 `0.10.1` 且**发布时 npm 打印的 shasum 与 registry 现在�
   `bun.lock` 是否还带这个 key / 补丁新增的行是否逐行出现在安装产物里），0/1/2 三码，
   11 组夹具 28 条**具名**断言。本轮的读数：18/19 逐行核过，1 条 `△` 是上游留下的死声明
   （`@standard-community/standard-openapi` 在依赖图里零命中）。
-- 这条发现的终点不在树上而在产物上：已发布的 `glasspane-harness-darwin-arm64.zip`（sha256 与 GitHub
-  的资产 `digest` 逐字相等，所以不是被本机代理截断过的字节）里数得到
-  `_recoverSession` / `_sessionRecovery` / `isRequestActive` / `Request is no longer active`——
-  重钉的补丁确实进了用户装到的那个单文件可执行。**还留着的一环如实写**：那步闸量的是主干这棵树的安装
-  产物，fork CI 那次真正产出二进制的 `bun install` 没被它盖住；盖住它要在 fork 的 `ci.yml` 加一步，
-  而那会再要求一次取号，留给下一轮判断而不是悄悄跳过。
+- 那条发现的终点不在树上而在产物上，而且现在是每版自动量：`verify-published.ts` 装好发布包之后，
+  把已安装负载的字节交给同一个判据（`patched-deps.mjs --artifact`）去问，判据是补丁新增的
+  **字符串字面量与新增方法名**——只有这两类改名等于改行为。窄判据是三次误报筛出来的：要新增的每一行
+  会要求 `.d.ts` 的内容（运行时 bundle 里没有这些字节），要补丁引入的每个标识符会要求被打包器改名的
+  局部绑定与被抹掉的模块说明符。0.10.1 的人工复核给出 8/8 命中，0.10.2 起这条读数写进发布日志：
+  `all 8 artifact-checkable item(s) present`。本仓 19 条声明里 18 条产不出可查项，所以 lane 点名问
+  MCP SDK 一个包，空清单一律 exit 2 拒答，不用"没有问题"冒充"没有问题"。
+- `release-artifact` 的远端 fetch 今天从一台机器挂了两次（十分钟没有一个字节动过），而它只处理
+  "取失败"不处理"不复返"：CI 上等它的是 runner 超时，那种失败连判决都不留。现在停滞会落到它本来就有的
+  `cannot measure`（低速中止 + 300 s 墙钟，两个网兜不同的静默），电池用桩端口证明 1.2 s 内会具名回答
+  "could not be reached"，并证明这不是"只是计时器到了"。
 
 
 ## [1.20.1] — 2026-10-23
