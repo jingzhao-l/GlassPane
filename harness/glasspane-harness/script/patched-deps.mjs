@@ -128,20 +128,23 @@ function lockedKeys() {
 /**
  * Every place the install holds this package, de-duplicated by real path.
  *
- * Two levels plus the store: bun's isolated install links a workspace's *direct* dependencies into
- * `packages/opencode/node_modules/<name>` (package-level first, the order kernel-pin.mjs records and
- * for the reason it records), but a *transitive* dependency exists only under
- * `node_modules/.bun/<name-with-+>@<version>[+<peer-hash>]/node_modules/<name>`. Reading just the
- * two link levels would call seven of this fork's nineteen patches "not in the graph" — including
- * patches that are in fact applied to bytes the product loads — which is a false clearance of the
- * same shape as the accident this file was written about. The store is therefore part of the
- * measurement, not an optimization.
+ * Three sources, because the linker is not one thing. The isolated install puts every package under
+ * `node_modules/.bun/<name-with-+>@<version>[+<peer-hash>]/node_modules/<name>` and links each
+ * workspace's *direct* dependencies into that workspace's own `node_modules`; `setup-bun` switches to
+ * `--linker hoisted` on Windows, where there is no store directory at all. Reading only one of these
+ * would report a real, applied patch as "not in the graph" — the false clearance this file exists to
+ * prevent, and measured: the two link levels alone found 12 of 19 declarations, the store finds all
+ * 18 that are in the graph. Workspaces are enumerated rather than named, so a dependency reached from
+ * any of them is read, not just the one that happens to be the CLI.
  */
 function installCandidates(name) {
-  const levels = [
-    path.join(productRoot, "packages", "opencode", "node_modules", name),
-    path.join(productRoot, "node_modules", name),
-  ]
+  const levels = [path.join(productRoot, "node_modules", name)]
+  const packagesDir = path.join(productRoot, "packages")
+  if (existsSync(packagesDir)) {
+    for (const workspace of readdirSync(packagesDir)) {
+      levels.push(path.join(packagesDir, workspace, "node_modules", name))
+    }
+  }
   const store = path.join(productRoot, "node_modules", ".bun")
   const storeDirs = existsSync(store)
     ? readdirSync(store)
