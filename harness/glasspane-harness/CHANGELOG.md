@@ -10,7 +10,42 @@ contract does not).
 
 ## [Unreleased]
 
-（空。本批的账归入 `0.10.0`。）
+（空。本批的账归入 `0.10.1`。）
+
+## [0.10.1] - 2026-10-23
+
+判据：patch。四项 patch 判据（状态文件字段、退出码集合、CLI 参数、npm `bin` 声明）逐条未动，
+用户读得到的形状没变——变的是这版**装到的依赖**与发布 lane 的一句话。
+
+### Fixed — 依赖与发布 lane
+
+- **`@modelcontextprotocol/sdk` 1.31.0 → 1.32.0，并把那 32 KB 的 fork 补丁重钉到新版本**。
+  覆盖 1.31.0 的是 4 条 advisory（2 high：CVE-2026-111768 / CVE-2026-111767；2 medium），全部以
+  `< 1.32.0` 收口；1.32.0 的安全侧内容是"重定向只在端点同源内跟随"。直接升级会**静默丢补丁**：
+  bun 对版本对不上的 `patchedDependencies` 不报错，它把条目从锁里删掉、装一份没打补丁的产物，
+  而 `package.json` 的声明还留在原地——丢的是 404 会话恢复、`isRequestActive` 取消已死请求、
+  SSE 里把 JSON-RPC 错误也算作回了话，以及 `callTool` 的重载。补丁逐 hunk 重键（32→34 hunk、
+  12 个文件一个没少，新增行集与删除行集与旧补丁逐字相同），因果两边各自量过：漂回旧 key 重装后
+  `test/mcp/session-recovery.test.ts` 由绿转红，改回后 `package.json` 与 `bun.lock` 的 sha256
+  与变异前逐字相等、该用例复绿。
+- **`electron` 42.10.0 → 42.11.16**（`packages/desktop` 的 devDependency）。覆盖 42.10.0 的 7 条
+  advisory（4 medium + 3 low，无 high/critical）里要求最高的一条是 `< 42.11.9`。取 42.11.16 而不是
+  42.11.18，是因为本 workspace 的 `minimum-release-age: 259200` 秒实测挡住了 42.11.17/18。
+  如实说覆盖边界：`packages/desktop` 不构建也不发布（`product.json` 明写它是需要签名/公证账号的第二批），
+  CI 没有 lane 跑它的 typecheck，本轮补跑 `tsgo -b` ⇒ rc 0、`error TS` 计 0；新 Chromium 的运行时
+  行为没有验证手段。
+- **发布 lane 的成功分支现在说出它观察到了什么**：`verify-published.ts` 的 registry 就绪等待过去只在
+  失败时报读数，成功只留一句 `ok npm install of the published package`，于是一条绿日志分不出
+  "等过并且等到了"与"根本没问"。现在两分支同一标签，成功行带 `seen`/`attempts`/`waitedMs`/registry，
+  判据是与本版号相等——registry 回读到别的版本就是红。对照 3 条加进
+  `test/script/registry-readiness.test.ts`（该文件在 fork 的 fixed-point 名单里）。
+
+### Added — 一条新的尺子（父仓侧）
+
+- `script/patched-deps.mjs`（本仓）+ `harness/tools/patched-deps-selftest.mjs`（父仓）：每条
+  `patchedDependencies` 声明都按三方核对——key 的版本、`bun.lock` 是否还带着这个 key、补丁新增的行
+  是否逐行出现在安装产物里。11 组夹具 / 28 条具名断言，其中两条是**反过度反应**的用例（不在图里的
+  声明、被覆盖版本旁边的未覆盖版本，都必须绿且只打 `△`）。本仓读数 18/19 逐行核过。
 
 ## [0.10.0] - 2026-10-21
 
