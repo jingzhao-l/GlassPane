@@ -32,6 +32,7 @@
  */
 import { execFileSync } from "node:child_process"
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
@@ -86,9 +87,9 @@ const scratchCount = () => {
   }
 }
 
-const runTool = (args) => {
+const runTool = (args, env = {}) => {
   try {
-    return { rc: 0, text: execFileSync(process.execPath, [TOOL, ...args], { encoding: "utf8" }) }
+    return { rc: 0, text: execFileSync(process.execPath, [TOOL, ...args], { encoding: "utf8", env: { ...process.env, ...env } }) }
   } catch (e) {
     return { rc: e.status ?? 1, text: `${e.stdout ?? ""}${e.stderr ?? ""}` }
   }
@@ -282,6 +283,59 @@ expect("F unreachable remote refuses", fixture("dead-url", { trunkFiles: base, s
   const got = runTool(["--record", "--repo", dir])
   if (got.rc === 2 && got.text.includes("--record is not a mode")) ok("--record is refused with exit 2: a stale artifact cannot be baselined over")
   else bad(`--record answered exit ${got.rc} (expected 2 with a named refusal): ${got.text}`)
+}
+
+// J. A remote that goes silent must still be answered with exit 2, in bounded time. Measured twice
+// on 2026-10-23 from one machine: the two-ref `--depth 1` fetch of the published repository hung with
+// no bytes moving for over ten minutes, which on CI is not a red but a runner timeout — the one
+// failure mode that leaves no verdict at all. The stub below accepts the connection and never
+// answers, which is that shape reproduced locally; the guard is shrunk through the tool's own env
+// seam so the case costs seconds instead of the shipped 300 s.
+{
+  const stalledSockets = []
+  const stalled = createServer((socket) => {
+    socket.on("error", () => {})
+    // Deliberately no response, ever: the client is left waiting on a live connection.
+    stalledSockets.push(socket)
+  })
+  await new Promise((resolve) => stalled.listen(0, "127.0.0.1", resolve))
+  const stallPort = stalled.address().port
+  const dir = fixture("stalled-remote", {
+    trunkFiles: base,
+    splitFiles: base,
+    urlOverride: `http://127.0.0.1:${stallPort}/none.git`,
+  }).trunkDir
+  const started = Date.now()
+  const got = runTool(["--check", "--repo", dir], { GP_ARTIFACT_NET_TIMEOUT_MS: "2000", GP_ARTIFACT_NET_LOW_SPEED_TIME: "1000" })
+  const elapsed = Date.now() - started
+  if (got.rc !== 2) bad(`J stalled remote: exited ${got.rc}, expected 2 — silence must not buy a green\n${got.text}`)
+  else if (!got.text.includes("could not be reached")) bad(`J stalled remote: exit 2 but did not name the reason\n${got.text}`)
+  else if (elapsed > 60_000) bad(`J stalled remote: the guard took ${Math.round(elapsed / 1000)} s — a stall that outwaits its own timeout is still a hang`)
+  else ok(`J stalled remote: exit 2, named, in ${(elapsed / 1000).toFixed(1)} s`)
+  for (const socket of stalledSockets) socket.destroy()
+  await new Promise((resolve) => stalled.close(resolve))
+
+  // The same refusal with no bytes ever flowing: a port nobody listens on must reach the same
+  // answer, so case J's pass cannot be an artefact of the timeout alone.
+  const dead = createServer(() => {})
+  await new Promise((resolve) => dead.listen(0, "127.0.0.1", resolve))
+  const deadPort = dead.address().port
+  await new Promise((resolve) => dead.close(resolve))
+  const refused = fixture("refused-remote", {
+    trunkFiles: base,
+    splitFiles: base,
+    urlOverride: `http://127.0.0.1:${deadPort}/none.git`,
+  }).trunkDir
+  const refusedRun = runTool(["--check", "--repo", refused], { GP_ARTIFACT_NET_TIMEOUT_MS: "5000" })
+  if (refusedRun.rc === 2 && refusedRun.text.includes("could not be reached")) ok("J refused remote: exit 2 for the same named reason, without waiting on a timer")
+  else bad(`J refused remote: exited ${refusedRun.rc}\n${refusedRun.text}`)
+
+  // And the guard must not be a hair trigger: a sub-second override is refused rather than honoured,
+  // so nobody can turn this gate into a coin flip by setting an unusable number.
+  const hair = fixture("hair-trigger", { trunkFiles: base, splitFiles: base }).trunkDir
+  const hairRun = runTool(["--check", "--repo", hair], { GP_ARTIFACT_NET_TIMEOUT_MS: "1" })
+  if (hairRun.rc === 0) ok("J a 1 ms override is ignored: the equal-tree case still passes on the shipped default")
+  else bad(`J the floor did not hold: an unusably small override changed the answer (exit ${hairRun.rc})\n${hairRun.text}`)
 }
 
 rmSync(scratch, { recursive: true, force: true })

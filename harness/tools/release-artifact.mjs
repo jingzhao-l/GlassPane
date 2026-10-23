@@ -111,6 +111,43 @@ const gitIn = (dir, ...args) => {
   }
 }
 
+// Anything that crosses the network gets a stall guard, because a hung fetch is not an answer.
+// Measured twice on 2026-10-23 from one machine: the two-ref `--depth 1` fetch of the published
+// repository went silent for over ten minutes, so the tool never reached its own "cannot measure"
+// branch — a gate that neither passes nor fails is a gate nobody can use, and on CI it is a job
+// that hangs until the runner timeout. Two nets, because they catch different silences:
+// `http.lowSpeed*` aborts a transfer that stays under 1 KiB/s for 60 s (the stalled-mid-transfer
+// shape actually hit), and the wall clock catches a hang before any byte moves, such as a proxy
+// that accepts the connection and never answers. Both surface as `null`, which the callers already
+// turn into exit 2. 300 s of wall clock is far above a legitimate shallow fetch of two tips, so
+// this guards silence rather than slowness.
+// `GP_ARTIFACT_NET_TIMEOUT_MS` / `GP_ARTIFACT_NET_LOW_SPEED_TIME` shrink the two nets so the
+// selftest can prove a silent remote really does land in exit 2 without waiting five minutes —
+// the same seam `verify-published.ts` exposes as `GLASSPANE_VERIFY_LISTING_POLLS` for the same
+// reason. Defaults are what CI runs with; anything below a second is refused rather than honoured,
+// because a guard that fires before a byte could plausibly move is a coin flip, not a measurement.
+const netNumber = (raw, fallback) => {
+  const value = Number(raw)
+  return Number.isFinite(value) && value >= 1000 ? value : fallback
+}
+const NET_TIMEOUT_MS = netNumber(process.env.GP_ARTIFACT_NET_TIMEOUT_MS, 300_000)
+const NET_LOW_SPEED_TIME = Math.round(netNumber(process.env.GP_ARTIFACT_NET_LOW_SPEED_TIME, 60_000) / 1000)
+const NET_ARGS = ["-c", "http.lowSpeedLimit=1024", "-c", `http.lowSpeedTime=${NET_LOW_SPEED_TIME}`]
+const gitNet = (...args) => {
+  try {
+    return execFileSync("git", ["-C", repoRoot, ...NET_ARGS, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: NET_TIMEOUT_MS }).trim()
+  } catch {
+    return null
+  }
+}
+const gitInNet = (dir, ...args) => {
+  try {
+    return execFileSync("git", ["-C", dir, ...NET_ARGS, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: NET_TIMEOUT_MS }).trim()
+  } catch {
+    return null
+  }
+}
+
 const productPath = path.join(repoRoot, SUBTREE, "product.json")
 if (!existsSync(productPath)) cannot(`no ${SUBTREE}/product.json under ${repoRoot} — the version line and the split repository URL both come from it`)
 const product = JSON.parse(readFileSync(productPath, "utf8"))
@@ -133,7 +170,7 @@ if (trunkTree === null) cannot(`HEAD has no ${SUBTREE} tree in ${repoRoot}`)
 // One ls-remote answers both questions — can the remote be reached at all, and which of the two
 // refs it publishes. A remote that will not answer is "cannot measure"; a remote that answers
 // "no such tag" is a disagreement this tool has to say out loud.
-const listed = git("ls-remote", splitUrl, "refs/heads/main", `refs/tags/${tagName}`)
+const listed = gitNet("ls-remote", splitUrl, "refs/heads/main", `refs/tags/${tagName}`)
 if (listed === null) cannot(`git ls-remote ${splitUrl} failed — the published repository could not be reached, so neither the artifact nor the 搬运 branch was observed`)
 const shaOf = (ref) => {
   const line = listed.split("\n").find((l) => l.split("\t")[1] === ref)
@@ -166,7 +203,7 @@ const refspecs = []
 if (mainSha !== null) refspecs.push("refs/heads/main:refs/artifact/main")
 if (tagSha !== null) refspecs.push(`refs/tags/${tagName}:refs/artifact/tag`)
 if (refspecs.length > 0) {
-  if (gitIn(scratchRepo, "fetch", "-q", "--no-tags", "--depth", "1", splitUrl, ...refspecs) === null) {
+  if (gitInNet(scratchRepo, "fetch", "-q", "--no-tags", "--depth", "1", splitUrl, ...refspecs) === null) {
     cleanup()
     cannot(`fetching ${refspecs.map((r) => r.split(":")[0]).join(" and ")} from ${splitUrl} did not materialize — neither the 搬运 branch nor the released artifact was observed`)
   }
