@@ -86,3 +86,95 @@
 | 本轮不新增对外 `gp_*` 工具、不加功能（范围纪律） | 面 A 棘轮与 `product-surface` 的读数即为此 | 无需回滚 |
 | CI 新增 `macos-node-gate`（darwin 断言终于有人在 mac 上跑） | `8f881f7a`；`node scripts/check-workflows.mjs --jobs` 现报 10 个 job | `git revert 8f881f7a` 同时撤掉两条 job 计数判据；推这一笔必须走 SSH remote（token 无 `workflow` scope） |
 | 尾段四条"对照自己红"的修法：改判据的读法，不放松判据 | `1e974171`/`ddad39e8`/`a598534e`/`080e69f3`，每条正文都附了一次真红 + 一次变异 | 逐笔 `git revert`；注意 74 号里"位点表条数"若回到 14 会与 `CFBundleVersion` 那一位冲突 |
+
+## 7. 收口读数（2026-10-22 那一轮，跑到 10-23 傍晚的尾巴）
+
+### 7.1 尾段又是两条"对照自己红"
+
+- `engine/.p4i4_smoke.py` 把"这一趟没等到面板的 AX 树"打印成"面板改版，锚点需同步"并退 1。
+  修 + 两个出口各自实测可执行：`d10b8a90`。
+- 本轮自己写的 `DailyRound20261022VerdictTests.testTheSummaryConstantIsTheSameNumberOnAllThreeSides`
+  读的是 `kernel/dist/decision-log-entry.js`——**本机在、git 不在、干净检出不在**，于是本机 `swift test`
+  恒绿而 CI 的 `engine (Swift)` 恒红。自证三条：`git ls-files kernel/dist` 数出 0；本机那份是 924 字节、
+  日期 2026-10-14（10-18 内核代码镜像退场后留下的旧副本）；本会话那个干净检出的 `kernel/` 下只有
+  `README.md`、`fixtures`、`schemas`。这一条"量到了"比"量不到"更坏：本机那份副本与装好的包不同号也照样
+  读出 2048。修落在并发会话那一笔 `a8ec2488`（把这条臂搬到 `mcp-shell/test/kernel-validator-bound.test.mjs`，
+  读 `node_modules/iterate-kernel/dist/…`，CI 每格跑前都 `npm ci`），已进 main，`engine (Swift)` 随后转绿。
+  本会话不重复改同一处——两个人各修一遍同一个函数，main 上留下的是两套判据而不是一套。
+
+### 7.2 门禁逐字复跑（都在 `d10b8a90` 的干净检出里跑，绕开并发会话的脏树；日志 `/var/tmp/gp-daily-20261022/gates-isolated/`）
+
+| 命令 | 读数 |
+|---|---|
+| `npm run build` | rc 0（`tsc -p tsconfig.json`） |
+| `npm test --workspaces --if-present` | mcp-shell **616/616**、installer **206/206**、updater **618/618**；0 红、0 跳 |
+| `node scripts/check-version.mjs` | OK：版本线一致（1.20.0），15 处位点 + 两个 lockfile |
+| `node scripts/check-doc-links.mjs` | 文档 32 份 / 仓内链接 238 / 外链 30（不请求）/ 表格 413 张（扫 116 份 markdown），OK |
+| `node scripts/check-workflows.mjs --self-test` → 无参 | 两次 rc 0；`--jobs` 报 10 个 job |
+| `sh -n install.sh` | rc 0 |
+| `cd mcp-shell && npm run bundle && npm pack --dry-run` | rc 0：`dist/index.js` 246.3kB、`dist/http-gateway.js` 207.5kB、`schemas/` 8 份（`bundle-kernel-schemas` 从 `iterate-kernel@0.1.9` 取） |
+| `node harness/tools/tool-surface.mjs --check` | no growth past the recorded baseline（面 A 11422 / 分母 29584，`b88bf97e` 补记后的形状） |
+| surface-semantics / product-surface / release-artifact / fork-diff / brand-surface / check-kernel-corpus | 0 命中 23 文件 / 6505 agreements 0 problems / 1 ✓ 1 △ 0 ✗ / 4640 与 6730 中 4640 逐字节相同 / 血缘 9607 处 3315 文件 / 26 份语料与 pin 同号（`iterate-kernel@0.1.9`） |
+| `swift test --package-path engine`（主树，**树上压着并发会话未提交的 VerdictTests 改动**，所以这一条不能当 main 的读数） | 1361 XCTest + 33 Swift Testing，3 skip，**0 失败**；`node scripts/assert-test-count.mjs swift 1 <log>` ✓ 两种 runner 都出了声 |
+| `swift test --package-path engine/probe`、`python3 .signal_smoke.py` | **本会话未复跑**，如实记：probe 包要编 `swift-syntax`，跑它时盘余量掉到 3.4 GiB（低于本轮自己那条 ~4 GiB 地板），我把构建中断了。补它的两条命令：`swift test --package-path engine/probe`（CI 同名步骤已过：10-22 电池里 `09_probe_test.log` 绿）与 `cd engine && python3 .signal_smoke.py .build/debug/glasspaned`（同一电池 `SIGNAL SMOKE OK`）。两格的源码自电池以来未变——`git diff c98fce5e..HEAD -- engine/probe engine/Sources` 输出为空 |
+| `python3 -m pytest -q bridge` | **126 passed, 1 skipped, 4 subtests passed**（73.56s） |
+
+### 7.3 真机读数（本会话亲跑，命令照抄可复现）
+
+- `./engine/.build/debug/glasspaned --state-dir <隔离根> --permissions` → 退 0，一帧 JSON：
+  `accessibility=granted`、`inputMonitoring=granted`、`screenRecording=granted`、
+  `developerTools=unverifiable`，`subject.binaryPath` 指向那枚未打包裸二进制且
+  `hasBundleIdentity=false`。**那个隔离根里一个文件都没留下**——这条一次性 CLI 不建 socket，
+  所以"它把状态根写脏了"这一族在本机是可排除的。
+- `sh scripts/make-app.sh --settings-bin .build/debug/glasspane-settings --daemon-bin .build/debug/glasspaned --out <临时>`
+  → 两份 bundle 的 `Info.plist` 实测都是 `CFBundleShortVersionString=1.20.0`、
+  `CFBundleVersion=1.20.0`（第 15 处位点真的推得动）、`LSMinimumSystemVersion=14.0`；
+  `plutil -lint` OK，ad-hoc 签名自查通过，`CFBundleExecutable` 分别是 `glasspane-settings` / `glasspaned`
+  ——这正是 `DEFAULT_BUNDLES` 那条缺陷（49 号）要求的形状：面板名以打包脚本为真源。
+- 面板 AX 走查（`p4i4_helper texts <pid>`，隔离根 + 真产物）：页脚点名的是
+  `面板探的是 GLASSPANE_STATE_DIR 那个状态根下的 daemon.sock：…/root-b/daemon.sock；服务端自己报的根 …/root-b`，
+  同屏 `glasspaned 1.20.0`、`授权主体：glasspaned（未打包（系统设置列表内只显示文件名））`；
+  四卡徽标为三条「已授权」+ `developerTools`「未验证」（不假点亮）。
+  对照档也在同一次里读到：只设 env 而那个根上没有 daemon 时，页脚写「状态根未上报」、Socket 回落到
+  家目录默认根并明说"这一级是猜的"，连的是 launchd 那台 **1.6.2** 的在册 daemon。
+  上一轮记着「那一眼仍未在真机读到」——读到了，全文在 `engine/smoke.md` 2026-10-23 那一节 §3。
+
+### 7.4 发布链：本轮**没有** tag，这不是选择，是判据没过
+
+实测（本会话写这一节时）：`git ls-remote --tags origin` 里没有 `v1.20.0`；`gh release list` 最新是
+`v1.19.0`（2026-10-21）；`npm view glasspane-mcp version --prefer-online` 与 `glasspane-install` 均答
+`1.19.0`；仓内版本线是 `1.20.0` 且 `check-version` 自证一致。CI 在 `dfd3250a` 上仍有 4 格红：
+`macOS node suites`、`mcp-shell (TypeScript)`、`public docs`、`root workspace gate`（`engine (Swift)` 已绿）。
+`node scripts/assert-tag-ready.mjs 1.20.0` 要的是**该 sha 的 CI 全绿**，前提不成立。
+
+更决定性的那半：这四格对应的文件此刻在并发那条每日线（2026-10-23）手里，它 09:39Z 还在往 main 上提交
+（`ed77cef6`、`a8ec2488`、`dfd3250a`），而它自己的记录写着"上一轮把 20 笔留在本地就断了……本轮把它推完、发完，
+版本号不动，仍 1.20.0"。同一枚 tag 由两个会话各切一次、同两个裸名包各 `npm publish` 一次，后果是发布物与
+tag 不是同一棵树、registry 上留下一个没人能解释是谁发的版本——对外且不可逆。所以本会话把 main 上的活干完
+（`d10b8a90` 已在 main，`git rev-list --left-right --count` 为 0/0），**不抢这一刀**。
+
+CI 十格齐绿之后，按序补的就是这一串：
+
+```bash
+node scripts/assert-tag-ready.mjs 1.20.0
+git tag -s v1.20.0 -m "GlassPane 1.20.0" \
+  && git push git@github.com:jingzhao-l/GlassPane.git v1.20.0
+gh workflow run release.yml --ref v1.20.0 -f mode=dry      # 看它绿
+gh workflow run release.yml --ref v1.20.0 -f mode=publish  # 真发
+gh release view v1.20.0 --json isDraft,targetCommitish,assets
+node scripts/make-release-archive.mjs --verify <归档路径> 1.20.0
+tar -tzf <归档路径> | grep -cE "(^|/)harness/"            # 必须是 0
+npm view glasspane-mcp version --prefer-online            # 期望 1.20.0
+npm view glasspane-install version --prefer-online        # 期望 1.20.0
+```
+
+### 7.5 环境读数与本会话产物的回收
+
+- `/Volumes/Eng-Dev` 盘余量：开工 9.9 GiB → 本会话两个隔离 worktree + 一次 probe 构建后 **3.4 GiB**
+  （低于本轮自己那条 ~4 GiB 地板，probe 复跑因此被中断，见 §7.2）→ 回收本会话产物后 3.8–4.1 GiB。
+  这条不是装饰：它决定了一个门禁没跑完。
+- 本会话创建并已回收：worktree + 分支 `gp-p4i4-wait`（内容以 `d10b8a90` 落在 main，删前用
+  `git cherry origin/main gp-p4i4-wait` 判为空＝无独有补丁）、worktree `gp-gates-d10b8a`（detached，
+  含一次未完成的 probe 构建，`rm -rf` 并 kill 掉它留下的孤儿 `swift-frontend`）。
+- 留在盘上到报告之后才该清的：`/var/tmp/gp-daily-20261022/**`（开工整树快照 `snapshot/worktree-now.tgz`
+  与 `snapshot/head-8e4dd6a1.tar.gz`——那是这批未推送年代的唯一回滚点，还有全部逐字门禁日志）。
