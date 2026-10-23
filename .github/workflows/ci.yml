@@ -351,6 +351,16 @@ jobs:
       - name: The kernel dependency still matches its provenance manifest
         run: node harness/glasspane-harness/script/kernel-pin.mjs --check
 
+      # 声明的补丁必须真的落进安装产物。2026-10-23 实测：`bun install` 把 @modelcontextprotocol/sdk
+      # 1.31.0→1.32.0 的那条 patchedDependencies 从 bun.lock 里**静默删掉**——package.json 的声明还在，
+      # 装上的 dist 里 _recoverSession / isRequestActive 全缺席，404 会话恢复、取消死请求、callTool
+      # 重载（#20 逐 item 分类与场景①/⑤ 都踩在上面）整块没了，而类型检查读的是我们自己的 .d.ts、
+      # 套件驱动的是假 transport，没有任何一环会红。这条读的就是安装字节本身。上面那步
+      # `--ignore-scripts` 已实测**仍然**应用 patchedDependencies（删掉 store 重装后标记回来了），
+      # 所以这条在此刻测量得了；它若回答"测不了"，退出码 2 就被下面那道 `rc -ne 0` 判红。
+      - name: Every patch this fork declares is carried by the installed bytes
+        run: node harness/glasspane-harness/script/patched-deps.mjs --check
+
       # 哈希只证明装到的是那一份；这条证明那份的行为还是我们依赖的那些答案——10 条
       # fixture 对着 contracts/kernel-conformance.json 的摘要与 fixture 自带的期望跑。
       - name: Kernel behaviour answers as recorded (fixtures through the installed kernel)
@@ -398,6 +408,29 @@ jobs:
           # 所以上面那条退出码就是全部的闸。别的 lane 若给它加上 exit 2，这里同样是红——退出码
           # 非 0 已经把它接住了，不需要猜它会打印什么。
           echo "kernel-pin selftest 已测量：每条红都因为它点名的那个原因红"
+
+      # 上面那条补丁闸自己能不能红、且各条红的原因不同？它比的是三方：package.json 的声明、bun.lock
+      # 的 patchedDependencies、安装产物里补丁新增的行。三方任一侧单独动一下必须是不同的判决文本，
+      # 否则一次误诊就会把「补丁没应用」说成「包没装」，而这两种处置相反。这条自测用真 git diff 造
+      # 补丁（不是手抄一份来迎合自己的解析器），11 组夹具、28 条断言，含两条**反过度反应**的用例：
+      # 不在图里的声明、以及被覆盖版本旁边多出来的未覆盖版本，都必须绿并只打 `△`——把它们判红，这把
+      # 尺子一周内就会被放宽掉。
+      - name: "The patch-integrity gate can still go red, for each reason separately (patched-deps selftest)"
+        run: |
+          set -euo pipefail
+          rc=0
+          out="$(node harness/tools/patched-deps-selftest.mjs 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::patched-deps 的固定点测试以 exit $rc 失败。上面 FAIL 的那条点名的是哪个判决退化成了通用文本、或干脆不红。remedy：按它点名的那条修 harness/glasspane-harness/script/patched-deps.mjs 的分流，别改期望值——这条闸存在的唯一理由，就是「声明了却没装上」此前在这棵树里没有任何东西看得见。"
+            exit 1
+          fi
+          case "$out" in
+            *"assertion(s) FAILED"*)
+              echo "::error::patched-deps selftest 以 exit 0 回答了「有断言失败」——它把自己的失败吞成了绿。remedy：查它末尾的 process.exit 是否还跟着 failures 计数。"
+              exit 1 ;;
+          esac
+          echo "patched-deps selftest 已测量：每条红都因为它点名的那个原因红"
 
       # 上面那条锚闸自己能不能红？它比的是两个远端 ref 的 tree 哈希，而"取不到远端"和"取到了但
       # 不等"这两种回答必须不同——否则一次网络抖动就会把它变成常绿的装饰。这条自测用 file:// 上的
