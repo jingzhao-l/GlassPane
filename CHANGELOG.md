@@ -3,6 +3,45 @@
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
 
+## [Unreleased]
+
+**未取号。** 本轮落进 main 的东西分两半，读法不同：用户真正拿到的变化在 **glasspane-harness 0.10.1**，
+它三格都已落地并各自核过——tag `v0.10.1` → `265005db`，Release `isDraft=false` + 6 件资产
+（两份 `.zip` 的 sha256 与 GitHub 为该资产计算的 `digest` 逐字相等，`SHA256SUMS.txt` 声明的两条也对得上），
+npm 三个包 `0.10.1` 且**发布时 npm 打印的 shasum 与 registry 现在的 `dist.shasum` 逐字相等**。
+父仓这一侧（`harness/glasspane-harness/` 的这份副本、`harness/tools/` 的新尺子、`ci.yml` 的两步、两份金样）
+要等下一次取号才进父仓发布物——父仓的归档明确**不含** `harness/`，所以这份账不是"漏发"，
+而是"父仓侧的副本落后一代"的凭据。
+
+本版做了四件事，判据与失效模式各自记在 `harness/glasspane-harness/SYNCLOG.md`
+的「第十六次会话」，这里只写会被用户读到的那三条：
+
+1. **依赖升级不再静默摘掉 fork 补丁**。`@modelcontextprotocol/sdk` 1.31.0→1.32.0 覆盖 4 条 advisory
+   （2 high / 2 medium）。`bun install` 对版本对不上的 `patchedDependencies` 不报错——它删掉锁里的条目、
+   装一份没打补丁的产物，声明行留在原地，而类型检查与套件都不会红：丢的是 MCP 客户端的 404 会话恢复、
+   已死请求的取消、以及逐 item 回包的类型重载。补丁已按 1.32.0 逐 hunk 重钉（新增/删除行集与旧补丁
+   逐字相同），并用真客户端 × 真 HTTP 夹具证了行为侧的因果（漂回旧 key ⇒ 该用例红）。
+2. **`electron` 42.10.0→42.11.16**（只在 `packages/desktop`，devDependency）。覆盖 42.10.0 的 7 条
+   advisory（4 medium / 3 low）里最严的一条要求 `< 42.11.9`；没有取更新的 42.11.18 是被本仓
+   `minimum-release-age`（3 天）那条闸拦住的，按闸走而不是绕开。
+3. **发布 lane 的成功分支现在说出它观察到了什么**：registry 就绪等待过去只在失败时报读数，
+   成功只剩一句 `ok npm install …`，一条绿日志因此分不出"等过并且等到了"与"根本没问"。
+
+### Added — 一把新的尺子（父仓侧）
+
+- `harness/glasspane-harness/script/patched-deps.mjs` + `harness/tools/patched-deps-selftest.mjs`，
+  接进 `ci.yml` 的 `harness-rulers`：每条 `patchedDependencies` 声明都按三方核对（key 的版本 /
+  `bun.lock` 是否还带这个 key / 补丁新增的行是否逐行出现在安装产物里），0/1/2 三码，
+  11 组夹具 28 条**具名**断言。本轮的读数：18/19 逐行核过，1 条 `△` 是上游留下的死声明
+  （`@standard-community/standard-openapi` 在依赖图里零命中）。
+- 这条发现的终点不在树上而在产物上：已发布的 `glasspane-harness-darwin-arm64.zip`（sha256 与 GitHub
+  的资产 `digest` 逐字相等，所以不是被本机代理截断过的字节）里数得到
+  `_recoverSession` / `_sessionRecovery` / `isRequestActive` / `Request is no longer active`——
+  重钉的补丁确实进了用户装到的那个单文件可执行。**还留着的一环如实写**：那步闸量的是主干这棵树的安装
+  产物，fork CI 那次真正产出二进制的 `bun install` 没被它盖住；盖住它要在 fork 的 `ci.yml` 加一步，
+  而那会再要求一次取号，留给下一轮判断而不是悄悄跳过。
+
+
 ## [1.20.1] — 2026-10-23
 
 **版本判断：patch。** 对着本仓 1.6.2 那四项 patch 判据实测：状态文件的字段没动、退出码集合没动、

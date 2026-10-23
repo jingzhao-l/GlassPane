@@ -2,6 +2,152 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-23（第十六次会话）· 0.10.1：升级会静默摘掉 fork 补丁这件事，现在有一把能具名变红的尺子
+
+### 开工与隔离
+
+- 起点 trunk `d10b8a90`，工作树 `/Volumes/Eng-Dev/.worktrees/gp-deps`（分支 `gp-mcp-sdk`）。
+  本轮期间 origin/main 动了两次（`b0a8004e` 是并行线的 1.20.1 发布，`98bf0b71` 是它自己被 CI 抓到的
+  那格表格），每次都重新 fetch 再 rebase。第二次 rebase 顺带把 `check-doc-links` 那条红带没了——
+  所以**我没有**去替并行线改它的台账：那一格的修法是他们那笔 `docs(specs)` 做的，我去改就是两个人
+  改同一份记录。
+- 参照克隆换了形态。本轮先按旧做法把 `.external/opencode` 软链到主树那份，跑了一轮之后给这棵工作树
+  建了**自己的** v1.18.32 浅克隆（224 MB）。理由不是理论：两条 sweep 并发跑时，一条
+  `rulers-selftest` 往共享参照里插的那根探针被另一条看见了，`fork-diff` 当场拒绝测量
+  （"reference clone … is not clean"）。它拒绝得对；错的是我让两把尺子共用一份可写的上游参照。
+- 一条自己造的坑，记下来免得再犯：把卡住的 `release-artifact` 子进程 `kill` 掉之后，外层 sweep
+  **继续往下跑**了，于是同机并发两把全量 sweep——上面那根探针就是这么来的。杀 sweep 要杀进程组。
+
+### 本批落地的内容（trunk 侧 10 笔，其中 harness 内 6 笔进发布物）
+
+1. **发布 lane 学会报告它观察到了什么**：`verify-published.ts` 的 registry 就绪等待过去只在失败时报
+   读数，成功只剩一句 `ok npm install of the published package`。于是一条绿日志分不出"等过并且等到了"
+   与"根本没问"——而 0.10.0 那次恰好是首眼就过，所以这件事一直没人知道。现在成功与失败共用同一句
+   标签，判据是 `readiness.seen === version`（registry 回读到别的版本就是红，不是 ok），正文带
+   `attempts` / `waitedMs` / registry 地址；三条源码文本对照加进
+   `test/script/registry-readiness.test.ts`（该文件本就在 fork CI 的 fixed-point 名单里，不是住在没人跑
+   的目录）。本版发布就是它的第一次真机读者，读数写在下面。
+2. **MCP SDK 1.31.0→1.32.0，并把那 31,974 B 的 fork 补丁逐 hunk 重钉**。覆盖 1.31.0 的是 4 条 advisory
+   （2 high：CVE-2026-111768 / CVE-2026-111767；2 medium），全部以 `< 1.32.0` 收口。这条的重点不是
+   "升个版"而是：**`bun install` 对版本对不上的 `patchedDependencies` 不报错**——它把条目从锁里删掉、
+   装一份没打补丁的产物，而 `package.json` 那行声明还在原地。实测装上后 `streamableHttp.js` 里
+   `_recoverSession` 计数为 0，也就是 404 会话恢复、`isRequestActive` 取消已死请求、SSE 把 JSON-RPC
+   错误算作回了话、`callTool` 的重载（#20 逐 item 分类和场景①/⑤ 的判决回路都踩在上面）整块没了，
+   而类型检查读自己的 `.d.ts`、套件驱动假 transport，**一环都不红**。
+   重键后的补丁 32→34 个 hunk、12 个文件一个没少，且**新增行集与删除行集与旧补丁逐字相同**
+   （排序去空白后做差集，两边都空）；把成品补丁贴回一份干净的 1.32.0，再与构建它的那棵树 `diff -rq`
+   全等；安装产物与那棵树也逐字节相等（只差一个 `.bun-tag-*` 标记文件）。
+3. **electron 42.10.0→42.11.16**（`packages/desktop` 的 devDependency）。逐条把真版本号代入 GHSA 的
+   vulnerable range 算出覆盖 42.10.0 的是 **7 条（4 medium + 3 low，无 high/critical）**，其中要求最高的
+   一条是 `< 42.11.9`。没取最新的 42.11.18：workspace 配的 `minimum-release-age: 259200` 秒实测把
+   42.11.17/18 直接拒了（`blocked by minimum-release-age`），42.11.16 是这条闸允许的最新一行。
+   按闸走，不绕开它。
+4. **新尺子 `script/patched-deps.mjs`**：每条 `patchedDependencies` 声明按三方核对——key 里的版本是不是
+   装上的那个、`bun.lock` 是否还带这个 key、以及**补丁新增的每一行是否逐行出现在它要改的安装文件里**
+   （第三条才承重：前两条能在"包没被打补丁"这件事上一起说谎）。0/1/2 三码；"一个声明都定位不到"
+   判 2 而不是 0。它同时把这条闸自己的两处**过度反应**按死：不在依赖图里的声明（上游留下的死声明）
+   与被覆盖版本旁边多出来的未覆盖版本，都只打 `△` 不判红——都判红的话这把尺子一周内就会被放宽。
+   电池 `harness/tools/patched-deps-selftest.mjs` 11 组夹具 / 28 条具名断言，夹具的补丁由真 `git diff`
+   现造（不手抄一份来迎合自己的解析器）。电池当场抓出我一个真缺陷：初版把"补丁文件缺失"排在
+   "包装没装上"之前，那条红被 `nothing was measured` 的 exit 2 吞掉了。
+5. **接进父仓 `harness-rulers`**：闸一步 + 自测一步，排在 `bun install --frozen-lockfile --ignore-scripts`
+   之后。"`--ignore-scripts` 仍会应用 patchedDependencies"是删掉 store 目录重装实测的（标记回到 2），
+   所以这两步在这条 job 里测量得了；`check-workflows` 认得这两个新步。
+6. **取号 0.10.1**（判据 patch：四项 patch 判据逐条未动，用户读得到的形状没变）。版本位点 8 处 +
+   `bun.lock` 的 workspace 行全部同一笔，由脚本逐条计数替换并断言无残留（`LEFTOVER …: none`）。
+   切这一号的唯一理由是 `release-artifact` 那条等式：主干有了新字节，已发布的 v0.10.0 产物就再也不
+   等于主干——它要求的是"补一次切版"，不是"把闸放宽"。
+
+### 变异与因果（三条全部自带备份 + sha256 核回，没有用 `git checkout`/`git stash`）
+
+- **M1（真树·闸）**：把 key 漂回 `1.31.0` ⇒ 闸 rc=1，
+  `patch declares 1.31.0, the install carries only 1.32.0 … nothing loads these bytes`。
+- **M2（真树·行为）**：同一状态下让 bun 重新解析，装上的 dist `_recoverSession` 计 0，
+  `test/mcp/session-recovery.test.ts` 由绿转红（exit 1：那个真 `Bun.serve` 夹具第一次 `ping` 回 404，
+  没补丁的客户端把它抛出去而不是恢复会话）；改回 key 并重装后 `package.json` 与 `bun.lock` 的
+  sha256 与变异前逐字相等、用例复绿。**这条才是"重钉的不是字节而是行为"的凭据**——形状全对的补丁
+  可以装不出行为。
+- **M3（真树·PR 形状）**：把依赖行改成一个锁里没有的版本、锁不动，跑 CI 那条
+  `bun install --frozen-lockfile` ⇒ `error: lockfile had changes, but lockfile is frozen` 退 1。
+  dependabot 那条 PR（1.31.0→1.32.0，只改 manifest）正是这个形状，所以它不能直接并；main 推上去之后
+  dependabot 自己在 11:30:05Z 把那条 PR 关了。
+
+### 闸与读数（本机，逐个真取退出码——不看 `… | tail` 的 `$?`）
+
+- 父仓 15 把全绿：`fork-diff` / `tool-surface` / `surface-semantics` / `brand-surface` /
+  `product-surface` / `hook-liveness` / `rulers-selftest` / `ref-batch-selftest` / `kernel-pin-selftest` /
+  `release-artifact-selftest` / `patched-deps-selftest` / `check-version` / `check-doc-links` /
+  `check-workflows` / `release-artifact`。`release-artifact` 在取号落地后回到
+  `2 agreement(s) held, 0 tolerated lag(s), 0 problem(s)`：split main 与 v0.10.1 都等于主干的
+  `harness/glasspane-harness` 树（`56b75d8d…`）。
+- fork 侧 5 把全绿：`kernel-pin --check`、`patched-deps --check`（**18/19 逐行核过**；那条 `△` 是
+  `@standard-community/standard-openapi`——锁里零命中、无 manifest 依赖它，全树只剩这条声明和
+  `setup-bun` 里一句拿它当例子的上游注释，所以记账不判红）、`kernel-conformance`、
+  `installer-selftest`（**165 条 PASS 行**，它读的就是 install.sh 那条 pin）、5 个 dead-end publisher
+  全部按 2 拒。
+- fork 固定点 8 个文件 **172 pass / 0 fail / 942 expect()**，取号后又复跑一遍（13.5 s）。
+- 五包 typecheck（opencode/tui/sdk-js/plugin/desktop）rc 全 0、`error TS` 计数全 0。这里有一条要认：
+  我第一次用 `bun run typecheck | tail` 打印 `$?`，那拿的是 `tail` 的退出码而不是 `tsgo` 的，
+  所以那一轮"四个 exit=0"不作数，全部重跑过才算。
+- 一条负载噪声，按"只在负载下红的计时断言＝坏对照"记着而不是当成回归：`test/mcp/transport.test.ts`
+  在 4 个并发 `tsgo` 下超时判红，无负载两边复跑（本轮 636 ms、1.31.0 基线 149 ms）都过。本轮只做了
+  归因，没有去动别人那条用例的时间预算。
+- 两次金样重记都做了**逐文件**归因：第一次 fork-diff 动 8 条 forkHash + 一次补丁改名 + 一条新增，
+  tool-surface 面 B 9950→10233（新闸 272 行 + `verify-published.ts` 11 行，`testsExcluded` +38 是那条
+  对照、不计入面），面 A 文件数没动；第二次 fork-diff 动的正好是取号那 8 个位点文件，条目数不变。
+- `brand-surface` 中途红过一次，是我自己的新问题而不是"重记就能过"：`installCandidates` 初版把
+  workspace 目录名写死，文本里因此多写出上游名，`lineage-growth` 从 9607 涨到 9608。**没有**用重记金样
+  把自己的新增量洗成基线，而是改成按名字枚举 `packages/*`——顺带修掉一个真覆盖面问题（只读两个链接层
+  时 19 条声明只找得到 12 条，7 条其实装好了的补丁会被我说成"不在图里"，那正是这条闸要防的假清白，
+  只是方向相反）。改完血缘回到 9607。
+
+### 发布三格（本轮实测，写完台账后按 3b 再切一次搬运分支）
+
+- **主干**：10 笔推到 `jingzhao-l/GlassPane` main（`.github/**` 有改动，走 SSH remote）。
+- **split**：`git subtree split --prefix=harness/glasspane-harness` 得 `265005db`，
+  `split^{tree}` 与 `HEAD:harness/glasspane-harness` 逐字节相等（`56b75d8d…`），相对远端 `eed6dd94`
+  是**快进**（本轮只 rebase 了自己的笔，主干以下历史没动），加 6 笔。推 main 后该 sha 的 fork CI
+  两格 success（`install, typecheck, fixed points` + `install.sh fallback channel`），**核过可达才打 tag**。
+- **tag / Release**：`v0.10.1` → `265005db`（轻量 tag，按 `docs/release.md` 第 4 步）。release.yml
+  的 `tag, manifests and CI all agree on this commit` 绿；Release `isDraft=false`、
+  `targetCommitish=265005db…`、6 件资产（arm64 46,412,116 B / x64 48,591,969 B，各带 `.asc`，
+  `SHA256SUMS.txt` 204 B + `.asc`）。两份 `.asc` 的 gpg 验签本轮**没有**在本机走——那条通道今天
+  并行线已在父仓侧整走一遍，我不重复声称。
+- **资产核对走 API digest，不靠本机重下**：`SHA256SUMS.txt` 声明的两条 sha256 与 GitHub 每个资产的
+  `digest` 字段逐字相等，文件字节数 204 与资产记录的 size 相等。**记一笔我自己的假绿**：第一版
+  比对脚本用资产 API 的名字去匹配 sums 文件里的 `./name`，`name` 没剥前缀 ⇒ 匹配为空、
+  循环零次、`rc=0`；而且它抓 sums 那一步撞了一次 TLS handshake timeout、写下 0 字节文件，
+  那次"比对通过"是关于一份空文件的陈述。脚本现在要求 sums 非空 + 恰好两条声明 + 逐条按名字命中，
+  否则 FAIL。（这台机器上 release 资产的重下会被静默截断，是早就记过的事。）
+- **npm**：`workflow_dispatch --ref v0.10.1 -f publish_npm=true -f confirm=true`（run `39947944970`）
+  全绿。三包 registry 都读到 `0.10.1`，且**发布时 npm 打印的 shasum 与 registry 现在的 `dist.shasum`
+  逐字相等**：wrapper `cb8474fe…`、arm64 `f493ae65…`、x64 `16c5d4c3…`；integrity 前缀也对得上。
+- **#24 的第一次真机读数**（就在上面那次发布的末尾一步里）：
+  `ok the registry can read this published version — glasspane-harness@0.10.1 answered after 4 look(s), 62s of waiting, from https://registry.npmjs.org`。
+  这就是过去那条绿日志不告诉人的东西：这一次它等了 4 眼、62 秒。取号那一笔和这条读数在同一版里，
+  不是"改完判据事后补一句"。
+- **3b**：本台账与父仓 `[Unreleased]` 落笔后重切一次搬运分支再推，不消耗版本。
+
+### 没跑与不做的
+
+- `packages/desktop` 的运行时行为：它不构建也不发布（`product.json` 明写是需要签名/公证账号的第二批），
+  CI 没有 lane 跑它的 typecheck，本轮只补了 `tsgo -b`（rc 0、0 错）。electron 那 7 条因此本来就不在任何
+  发布物里；修它是为了开发者本机不跑带洞的 Chromium，也让告警别长期挂着。
+- **产物级复核（这一条才是本轮那个发现的终点）**：下载已发布的
+  `glasspane-harness-darwin-arm64.zip`，它的 sha256 与 GitHub 给该资产算的 `digest` **逐字相等**
+  （`9212efe2…`，所以这份字节不是被本机代理截断过的），包内就一个 145,543,778 B 的单文件可执行。
+  在其中按字符串数：`mcp-session-id` 1（正对照，证明这套传输码确实在产物里、grep 在这份二进制上工作）、
+  `_recoverSession` 1、`_sessionRecovery` 1、`isRequestActive` 1、`Request is no longer active` 1
+  ——**重钉的补丁在发布物里**，不只是在主干的安装产物里。同一次数里 `StreamableHTTPError` 为 0，
+  那是打包后的标识符形状，不作任何方向的证据，列出来只为了不让人以为我挑了个能过的串。
+- 还留着的一环，如实写：父仓那步闸量的是**主干这棵树**的安装产物，fork CI 那次
+  `bun install --frozen-lockfile`（真正产出上面这个二进制的安装）没有跑它。要盖住那一环得往 fork 的
+  `ci.yml` 加一步，而那是主干内文件、加了就再要求一次取号，所以留给下一轮判断——本轮的补救是
+  上面那次产物级复核，它证明的是"这一版"，不是"每一版"。
+- 1.32.0 的"重定向只在同源内跟随"在 loopback 端点上没有可观察差别，这是一条**没量过的假设**，
+  记在这里而不是当成结论。
+- 没动 `install.sh` 的签名/公证通道，也没替并行线取父仓的号。
+
 ## 2026-10-22（第十五次会话）· 0.10.0：provider 契约有了产品侧消费者，发布 lane 学会等 registry；场景① 的通道第二次"看着有、其实跑不到"
 
 ### 开工与隔离
