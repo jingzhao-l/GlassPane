@@ -1281,3 +1281,50 @@ exit=0
 - `.p4i4_smoke.py --skip-drag` 第四条 `developerTools` 那条 FAIL 本轮**未重跑**（本轮改的是安装器与更新器，
   没动面板那张卡；补它仍是上轮写下的那一条命令，且它要的是人先过一次这台机器的授权提示）。
 - 「面板页脚点名哪个隔离状态根」那一眼仍未在真机读到（上轮 §4 的口径本轮不变）。
+
+### 3. 上面那两条：同日 17:0x 的实测读数（本轮收口时补上，两条都已读到）
+
+两条都由 `.p4i4_smoke.py` / `p4i4_helper texts` 在本机读出，不是推断。
+
+**① `engine/.p4i4_smoke.py --skip-drag` → PASS，退 0。**
+
+```
+面板 AX 树就绪：71 个元素（等了 0s），横幅锚点在场。
+PASS guide-accessibility: 卡徽标实测「已授权」，按钮已是稳态跳转「在系统设置中查看」——如实，不是一次按下动作
+PASS guide-inputMonitoring: 卡徽标实测「已授权」，按钮已是稳态跳转「在系统设置中查看」——如实，不是一次按下动作
+PASS guide-screenRecording: 卡徽标实测「已授权」，按钮已是稳态跳转「在系统设置中查看」——如实，不是一次按下动作
+PASS guide-developerTools: kind 路由 + 面板跳转（badge=未验证）
+```
+
+第四条要的**不是人先过一次授权提示**——这一点要纠正上面那行的记载：`developerTools` 卡在这一台机器上的
+真读数就是徽标「未验证」，而冒烟要证的正是"它不假点亮"，所以它一直是可以机器化跑的。它先前跑不动的原因是
+那条冒烟自己的：读一次 AX 树读不到就判"面板改版"（时序失败被记成产品变更），已由
+`test(engine): 面板真机冒烟把"我没等到 AX 树"判成"面板改版"` 那一笔修掉，两个出口各自实测可执行
+（锚点换成一句本机不存在的话 → 退 1 并报"读到了 71 个元素…但没有它"；`--panel-pid 999999` → 退 0 的
+`SKIP：25s 内一次也没读到面板的 AX 树` + 三条补救命令）。
+
+**② 页脚点名隔离状态根：读到了，而且它把"自己猜的那一级"和"服务端自报的根"分成两句说。**
+
+跑法是隔离根 + 真产物，不碰 launchd 那台 1.6.2 的在册实例：
+
+```
+GLASSPANE_STATE_DIR=/var/tmp/gp-daily-20261022/root-b  ./\.build/debug/glasspaned --state-dir 同一根
+  → 该根里创建 daemon.sock 与 probe.sock（0600，srw-------）
+GLASSPANE_STATE_DIR=同一根  ./\.build/debug/glasspane-settings
+  → 页脚读数：
+    glasspaned 1.20.0
+    授权主体：glasspaned（未打包（系统设置列表内只显示文件名））
+    Socket  /var/tmp/gp-daily-20261022/root-b/daemon.sock
+    面板探的是 GLASSPANE_STATE_DIR 那个状态根下的 daemon.sock：…/root-b/daemon.sock；
+      服务端自己报的根 /var/tmp/gp-daily-20261022/root-b
+    程序  /Volumes/Eng-Dev/GlassPane/engine/.build/debug/glasspaned
+```
+
+对照读数（同一次走查里另一档，值得留着）：**只设 env 而没有 daemon 在那个根上**时，页脚不假装知道——
+它写「状态根未上报」，Socket 那行回落到 `/Users/ethanlin/.glasspane/engine.sock`，并明说
+「面板探的是 谁都没点名时家目录默认根的 engine.sock（这一级是猜的）：…（回落表里 2 个名字都没报回状态根）」，
+连的是 launchd 那台 `glasspaned 1.6.2`。所以"猜"与"报"两级在 UI 上是分开的，这一条现在是读到的，不是读档推的。
+
+**③ 顺带一条机器状态事实**（不是缺陷，但它决定了上面每个读数的适用范围）：这台机器在册的 launchd
+daemon 仍是 2026 年那台 **1.6.2** 的 bundle（PID 71433，`--socket-path /Users/ethanlin/.glasspane/engine.sock`），
+而仓库版本线是 1.20.0。任何"面板读数"若不指隔离根，量的就是那个旧 daemon。

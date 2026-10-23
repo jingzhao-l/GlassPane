@@ -21,6 +21,9 @@ P4 v4.0 §34 把 P4-I4 标为"拖拽无法自动化模拟，待 GUI 人工目视
 
 退出语义（与 .c33_smoke.py 同口径）：前置不满足 → SKIP exit 0（补救命令
 给到 agent 可执行级）；硬断言全过 → exit 0；任一失败 → exit 1。
+"一次也没读到面板的 AX 树"属于**前置**（没有可操作的对象），不是判据红；判据红只在
+树读到了而横幅锚点不在的时候发生。两种都报出等了多久、读到多少元素——从前这里读一次就
+判"面板改版"，把自己的时序失败记成了产品的 UI 变更。
 
 用法：python3 .p4i4_smoke.py [--panel-pid N] [--skip-drag]
 """
@@ -379,12 +382,38 @@ def main():
             spawned.terminate()
         return 0
 
-    elements = texts(helper, panel_pid)
+    # 读 AX 树必须等面板自己起完。从前这里是"起进程 → sleep 3 → 读一次"，读不到就把原因写在
+    # 面板头上（"面板改版，锚点需同步"）。本机实测（2026-10-23）：同一份 `.build/debug` 产物、
+    # 同一个 daemon，把等待拉到 6–7 s 那一行「拖拽引导」就在；3 s 那次交回的是空树。
+    # 一条对照把自己的时序失败记成产品的改版，下一位就会去找一个不存在的 UI 变更——
+    # 所以这里把三种事实分开：树一直空 = 没有可操作的对象（前置不满足，SKIP + 补救命令）；
+    # 树有内容而锚点不在 = 面板真改版（FAIL，判据仍然有牙）；两种都报出等了多久、读到多少元素。
+    banner_wait_seconds = 25
+    waited = 0.0
+    elements = []
+    while True:
+        elements = texts(helper, panel_pid)
+        if elements and find_first(elements, BANNER_NEEDLE) is not None:
+            break
+        if waited >= banner_wait_seconds:
+            break
+        time.sleep(1.0)
+        waited += 1.0
+    if not elements:
+        log(f"SKIP：{banner_wait_seconds}s 内一次也没读到面板的 AX 树（元素数恒 0）——"
+            "这不是判据红，是没有可操作的对象。补救：`swift build --package-path engine` 出产物；"
+            "宿主进程缺辅助功能席位时先授席位再重开；daemon 不可达时 "
+            "`node installer/cli.js --restore-launchd`。")
+        if spawned:
+            spawned.terminate()
+        return 0
     if find_first(elements, BANNER_NEEDLE) is None:
-        log("FAIL：面板窗口里找不到拖拽横幅锚点——面板改版，本冒烟锚点需同步。")
+        log(f"FAIL：读到了面板的 AX 树（{len(elements)} 个元素，等了 {waited:.0f}s），"
+            f"但里面没有「{BANNER_NEEDLE}」——这是面板真的改版了，本冒烟锚点需同步。")
         if spawned:
             spawned.terminate()
         return 1
+    log(f"面板 AX 树就绪：{len(elements)} 个元素（等了 {waited:.0f}s），横幅锚点在场。")
 
     failures = []
     report = []
