@@ -317,8 +317,9 @@ test('the URL shapes GitHub actually returns are accepted, and the widening stay
  * `declaredBytes` 让响应带上一个真 GitHub 资产都带的那个 `content-length`；`endless` 让它在
  * 声明的长度之后继续滴（那正是"封套说 89 字节却永远流不完"的形状）。
  */
-function streamingResponse(chunks, { gapMs = 0, hangAfter = null, signal = null, declaredBytes = null, endless = false } = {}) {
+function streamingResponse(chunks, { gapMs = 0, hangAfter = null, signal = null, declaredBytes = null, endless = false, onChunk = null } = {}) {
   let index = 0
+  let lastEmit = Date.now()
   const reader = {
     read: async () => {
       if (hangAfter !== null && index >= hangAfter) {
@@ -331,6 +332,13 @@ function streamingResponse(chunks, { gapMs = 0, hangAfter = null, signal = null,
       if (gapMs) await new Promise((resolve) => setTimeout(resolve, gapMs))
       // 真 fetch 在 abort 之后读一定失败；假的不失败的话，"计时器到了"这一路就只是空转。
       if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' })
+      // `onChunk` 量的是**实际**间隔（名义值由 gapMs 定），不是名义值：一条以"慢但活着"为前提的
+      // 用例，前提是量出来的，不是写出来的。
+      if (onChunk) {
+        const now = Date.now()
+        onChunk(now - lastEmit, index)
+        lastEmit = now
+      }
       if (index >= chunks.length) {
         if (!endless) return { done: true, value: undefined }
         const value = chunks[chunks.length - 1]
@@ -346,17 +354,38 @@ function streamingResponse(chunks, { gapMs = 0, hangAfter = null, signal = null,
 }
 
 test('a slow-but-alive download is not killed: the stall clock re-arms on every chunk', async () => {
+  // 2026-10-23（缺陷 84）：这一条从前是 gapMs 30 / stallMs 100——**前提**（"每段都按时到了"）
+  // 只有 70ms 的调度余量。本机整套件并发跑时它红（`elapsed` 没到 100 就先被 abort：
+  // 一个 30ms 的 setTimeout 在一台忙的 mac 上被拖过 100ms 是常态），单独跑又绿；CI（node 20、
+  // 负载不同）恒绿。产品在那个瞬间做的事**是对的**：100ms 真没收到字节就是停摆。红的是这条
+  // 对照自己——它的成立依赖赢一场调度比赛，而同仓相邻那条滴流用例的注释早就记过同一个形状。
+  //
+  // 修法不是放宽"不许被杀"这个主张，也不是给断言加超时：把**绝对余量**从 70ms 提到 800ms
+  // （gap = stallMs/5，stallMs 1000），总时长 1.2s 仍然跑过 stallMs；并把"每段的实际间隔"
+  // 记下来当成断言的一部分——将来若再红，红话说的是"这台机器连前提都没给出来"，而不是
+  // 让读者以为产品把活着的下载杀了。
+  const stallMs = 1000
+  const gapMs = stallMs / 5
   const chunk = new Uint8Array(64 * 1024).fill(7)
-  const fetchImpl = async (url, { signal } = {}) => streamingResponse(Array.from({ length: 6 }, () => chunk), { gapMs: 30, signal })
-  // 每段之间停 30ms（总共 180ms），停摆计时是 100ms：逐段重置才活得下来。
-  const fetchBytes = makeBytesFetcher(fetchImpl, { stallMs: 100, timeoutMs: 5_000 })
+  const gaps = []
+  const fetchImpl = async (url, { signal } = {}) => streamingResponse(
+    Array.from({ length: 6 }, () => chunk),
+    { gapMs, signal, onChunk: (actualMs) => gaps.push(actualMs) },
+  )
+  const fetchBytes = makeBytesFetcher(fetchImpl, { stallMs, timeoutMs: 30_000 })
   const started = Date.now()
   const got = await fetchBytes('https://github.com/x/y')
   const elapsed = Date.now() - started
   assert.equal(got.length, 6 * 64 * 1024, '六段都要拿到')
   assert.equal(got.every((byte) => byte === 7), true, '拼起来的字节要按顺序完整')
-  assert.ok(elapsed > 100, `这一趟必须跑过 stallMs（实到 ${elapsed}ms），否则它没有证明"逐段重置"这件事`)
-  assert.ok(elapsed < 5_000, '总时长没到，说明它不是被兜底计时放过的')
+  assert.ok(elapsed > stallMs, `这一趟必须跑过 stallMs（实到 ${elapsed}ms），否则它没有证明"逐段重置"这件事`)
+  assert.ok(elapsed < 30_000, '总时长没到，说明它不是被兜底计时放过的')
+  // 前提也要是量出来的：任何一段的真实间隔逼近 stallMs，这台机器就没给出"慢但活着"的形状，
+  // 那时红要指名这一点（而不是让读者以为产品误杀）。
+  const worstGap = gaps.length ? Math.max(...gaps) : 0
+  assert.ok(worstGap < stallMs / 2,
+    `夹具的调度余量不够：某一段真实间隔 ${worstGap}ms（预算 ${stallMs}ms）——这台机器当时太忙，`
+    + '这一条量到的不是"慢但活着"。实到的逐段间隔：' + JSON.stringify(gaps))
 })
 
 test('a stalled download is refused by the stall clock, naming how much arrived', async () => {
