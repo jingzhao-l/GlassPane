@@ -223,6 +223,31 @@ subagent 类型，`Agent` 只认 `Explore`/`Plan`/`general-purpose`，故按原�
   参数）与"输出内容项"（新增一行归属声明），够 minor；父仓发布链（Swift 构建、归档、签名、npm 三包）本轮不跑，
   号留给下一版。代码在 main，`[Unreleased]` 段就是它还没进发布物的凭据。
 
+### 2026-10-23 追加（同日第二轮收口：发现 4 条，修复 4 条；本版随本轮发出）
+
+这一格不另起版本号。判据是实测的：上一轮把 `release: 1.20.0`（`c98fce5e`）写进了**本地** main 就断了——
+`git rev-list --left-right --count origin/main...HEAD` = `0 20`（origin 侧 0 笔独有、本地 20 笔未推），
+`git ls-remote --tags origin` 里没有 `v1.20.0`，`gh release list` 最新仍是 1.19.0，
+`npm view glasspane-mcp version` 与 `glasspane-install version` 都还是 **1.19.0**。
+所以 1.20.0 从来没进过任何发布物，本轮的修复仍在同一版里，版本号不动（四处派生位点 + 两份 lock 实测都是 1.20.0，
+`node scripts/check-version.mjs` 绿）。本轮的 4 条修复没有动那四项 patch 判据里的任何一项
+（状态文件字段没动、退出码集合没动、CLI 参数没动、`bin` 声明没动），minor 的判断仍由上面那三条成立。
+
+审查面如实记录：本轮按子系统派了六条只读泳道（引擎核心 / 面板与探针 / MCP 壳 / 更新器与安装器 / 门禁与 CI 与桥），
+**六条全部在出结论之前撞上 subagent 工具用量上限**（`status=failed`，result 只有一句话），一条都没交回结果。
+所以这 4 条由主代理自查 + 已知缺陷形状扫描得出，覆盖面窄于上轮的七泳道——没覆盖到的面写在
+`specs/GlassPane_每日审查_2026-10-23_记录.md` 第 1 节，不冒充成"全仓已审"。
+
+| # | 位置 | 失效模式 | 修复与证据 |
+|---|---|---|---|
+| 77 | `updater/test/release-archive.test.mjs` | 那条"发布物装得上、命令跑得起来"的交付形状链子用 `process.env` 起 `npm pack` 与 `npm install -g`，于是共用**用户真实的 `~/.npm/_cacache`**。本机实测：整套件并发时 `install -g` 退 243（`EACCES mkdir …/_cacache/index-v5/19/4f`，那批 shard 里有 root 属主目录），单独跑这条却过——红不红取决于并发顺序。同一形状在 `installer/test/daily-20261022-delivered-shape.test.mjs` 与 `mcp-shell/test/published-artifact.test.mjs` 早就记过账（"共享的 `~/.npm/_cacache` 里一个同键文件就能让 pack 退 243"），第三处一直没跟上 | 与那两处同法的 hermetic 环境：`HOME` 指进临时目录、剥掉继承来的 `npm_config_*`/`npm_lifecycle_*`/`npm_execpath`、独立 `npm_config_cache`、`maxBuffer` 64 MiB（防 ENOBUFS 把成功报成失败）。判据一字未放宽。复跑：`npm test --workspaces --if-present` 三套件 616 / 205 / 618，**0 红 0 跳** |
+| 78 | `installer/cli.js` `commandAvailable()` | 唯一判据是 `spawn(...).status === 0`。本机实测 `spawnSync` 超时是 `status:null` + `error.code:'ETIMEDOUT'`（与被信号收掉的 `status:null` + 无 `error` 同格），于是"5 秒没答话"与"这台机器没有 git"都是 false。两层后果：①预检对着一台 git 好好的机器说"未找到 git（xcode-select --install 会带上它）"，把人支去重装已有的东西；②`installer/test/review-2026-10-09.test.mjs` 的 `preflightBlocked → t.skip` 把这条真机用例**跳没**——正向分支（退出码 0 +「安装完成」+「实测校验通过」）在这台 mac 上一次也没测过，而单跑恒过，所以既看不见红也看不见跳 | `commandProbe()` 三档：`available` / `absent`（ENOENT 或答了但退非 0——CLT shim 那一档仍说"装它"）/ `unverified`（探测没走完）。只有"没答话"补一次宽预算（5s→20s；非 0 退出一次都不补，这不是给计时假红加超时，是把"没答"与"答了不要"分开）。`checkEnvironment()` 新增 `unverified` 读数（不是第六条命令，是同一批读数的第二种答案），`preflightIssues` 据此分流文案：缺席仍给"未找到 + 装它"，没答话给"未能确认 + 手动跑那一条看卡在哪 + 负载高就重跑"；拒绝照旧发生，不假装依赖齐。两处"预检挡了就跳"的测试改为**只认真缺席**，误归因从此是红不是跳。新增 `installer/test/daily-20261023-probe-state.test.mjs` 8 条（含一条真进程对照、一条接线对照：把读数写成死 `[]` 必须红）；反向破坏 4 发逐一点名变红，按自带备份 + sha256 核回（`21d60bf468fb`） |
+| 79 | `updater/lib/signature.js` `classifySignature()` | gpg 被叫起来了、`--version` 那次答了，`--verify` 这一趟没跑完（超时被 SIGTERM、被系统杀、exec 失败 → `status:null`）时落到那张表的 `else` 臂，判成 **`invalid`**。`invalid` 的句子是"这份签名与本程序带的键不符……This release is refused outright"，而且它是**不可 consent** 的那一档——一台负载足够高的机器会永久停在一份也许完全正常的发布上，理由还是假的。根因在半路：安装器的 `classifyTagVerify({status:null})` 回 `invalid`（`git verify-tag 失败（退出码 null），签名无法确证`），这张表照抄了它的**词**，而"没确证"与"确证是坏的"本来就是一件事的两面 | `classifySignature` 在读 `run` 的结果之前先拦"这一趟没给出判定"那一档 → `signature-tool-missing`：自动运行照样停，停下时说的是"作者身份未知"，人可带 `--consent unsigned-release` 继续且这一格由 `authorshipNote` 一直跟着念；detail 里带上那次真跑出来的尾巴（含 `ETIMEDOUT`）与"重跑一次"。新增 3 条：判据表、经 `verifyReleaseSignature` 的接线（`fakeGpg` 补一条 `no-answer` 形状）、真进程对照（`kill -TERM $$` 的孩子报 `status:null` 且 `error` 为空——这条依赖的外部事实变了就先红）。反向破坏 3 发点名为红，sha256 核回（`f15299998f2a`） |
+| 80 | `engine/.panel_refusal_smoke.py`（上轮 9402f52a 那条安全修复的真机闸） | 这个文件在开工时的整树 `git status` 里是**唯一一条未跟踪项**，从未提交，也从未跑成过：①`subprocess.run([helper, "texts", panel.pid])` 把 int 直接放进 argv → 第一次读 AX 树就 `TypeError` 崩，而崩溃退出码是 1，与它自己约定的"断言失败"同一格，所以现场读起来像"测过、且产品没通过"；②判据写的是「没问」，而面板那句话是「还没向后台服务问过：…」（屏幕上根本不存在"没问"这两个字），恒红；③要看的那一栏在**证据档案**页，面板开在**权限**页，脚本从不按页签 → 那一栏根本不在 AX 树里；④hello 桩里写死 `version: "1.20.0"`——版本线位点表之外的字面量，升版本时没人跟着改它而这条仍然绿；⑤前置不满足（没有面板产物）时已经先 bind socket、先往 `/tmp` 写载荷、先编译辅助器，且 `finally` 里对 `None` 调 `peer.close()` 再崩一次 | 五项逐条修：argv 转 `str`；那句文案从渲染它的 `EvidenceStatsView.swift` 里用正则读出（措辞将来再改，红的是这条冒烟而不是沉默）；按「证据档案」页签后再读；版本取根 `package.json` 的 `version`；前置判据排在任何动盘之前 + `peer` 为 `None` 时不收 + 失败时把两页 AX 全文打出来。**本机真机实测通过**（72 + 44 个元素，拒绝行点名 `/tmp/gp-refusal-payload-<pid>`，证据页仍停在"还没向后台服务问过"），读数记进 `engine/smoke.md` 本轮那一节 |
+
+对照口径：上表编号接着 `[1.20.0]` 主表那 76 条往下排（77–80），"发现 4 条、修复 4 条"与它对齐；本轮没有"判定不修"那一格。
+
+
 ## [1.19.0] — 2026-10-21
 
 **版本判断：minor。** 对着本仓自己那四项 patch 判据（判据原文在 1.6.2 条目里）逐条实测，本版动了其中三项：
