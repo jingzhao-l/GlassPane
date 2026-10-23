@@ -21,7 +21,7 @@
  * the second one is the one that matters, because it reads the real tracked tree and the real artifact the
  * release job publishes.
  */
-import { test } from 'node:test'
+import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -49,6 +49,26 @@ import { VERSION_SITES } from '../lib/selfcheck.js'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.resolve(HERE, '..', '..')
 const SCRIPT = path.join(REPO, 'scripts', 'make-release-archive.mjs')
+
+/**
+ * 2026-10-23（缺陷 1）：这条链子从前用 `process.env` 起 npm，于是它读写**用户真实的 `~/.npm/_cacache`**。
+ * 本机实测：整套件并发跑时 `npm install -g` 退 243（EACCES mkdir `_cacache/index-v5/19/4f`），单独跑这条
+ * 却过——因为那个 shard 里躺着 root 属主的目录，命中与否取决于并发顺序。同一形状在
+ * `installer/test/daily-20261022-delivered-shape.test.mjs` 与 `mcp-shell/test/published-artifact.test.mjs`
+ * 里已经记过账（"共享的 ~/.npm/_cacache 里一个同键文件就能让 pack 退 243"），这份第三处一直没跟着改。
+ * 一条测试既不该依赖"用户的全局缓存此刻恰好干净"，也不该往里面写东西。
+ */
+const NPM_SCRATCH = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'gp-release-npm-'))
+const NPM_ENV = (() => {
+  const env = { ...process.env, HOME: path.join(NPM_SCRATCH, 'home') }
+  for (const key of Object.keys(env)) {
+    if (/^npm_(config|lifecycle|package|init|user|loglevel)/.test(key) || key === 'npm_execpath') delete env[key]
+  }
+  fs.mkdirSync(env.HOME, { recursive: true })
+  env.npm_config_cache = path.join(NPM_SCRATCH, 'npm-cache')
+  return env
+})()
+after(() => fs.rmSync(NPM_SCRATCH, { recursive: true, force: true }))
 
 /** A throwaway git tree with the two packages, their manifests, and (optionally) the build output. */
 function makeReleaseTree({ withDist = true, commitBuildOutputs = false } = {}) {
@@ -149,6 +169,8 @@ test('the archive carries the build output the npm package promises to run', () 
       const packed = spawnSync('npm', ['pack', '--ignore-scripts', '--pack-destination', dest], {
         cwd: path.join(dest, 'GlassPane-1.6.0', 'mcp-shell'),
         encoding: 'utf8',
+        env: NPM_ENV,
+        maxBuffer: 64 * 1024 * 1024,
       })
       assert.equal(packed.status, 0, packed.stderr)
       const tgz = String(packed.stdout).trim().split('\n').filter(Boolean).pop()
@@ -158,7 +180,8 @@ test('the archive carries the build output the npm package promises to run', () 
       const installed = spawnSync('npm', ['install', '-g', '--no-audit', '--no-fund', '--ignore-scripts', path.join(dest, tgz)], {
         cwd: dest,
         encoding: 'utf8',
-        env: { ...process.env, npm_config_prefix: prefix },
+        env: { ...NPM_ENV, npm_config_prefix: prefix },
+        maxBuffer: 64 * 1024 * 1024,
       })
       assert.equal(installed.status, 0, installed.stdout + installed.stderr)
       const command = path.join(prefix, 'bin', 'glasspane-mcp')
