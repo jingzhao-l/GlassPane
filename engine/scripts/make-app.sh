@@ -193,7 +193,7 @@ make_bundle() {
   local res_dir="$contents/Resources"
 
   if [ ! -x "$bin" ]; then
-    echo "make-app: 产物不存在或不可执行（$bin），先 swift build -c release" >&2
+    echo "make-app: 产物不存在或不可执行（${bin}），先 swift build -c release" >&2
     return 1
   fi
 

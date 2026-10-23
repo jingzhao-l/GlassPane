@@ -182,7 +182,7 @@ describe_ref() {
 # （macOS 这一条不在这里：它要挡的是那笔 clone，所以住在 clone 分支的开头，见下面的 --- 2。）
 command -v node >/dev/null 2>&1 || fail "未找到 Node.js（需 >= 18，https://nodejs.org 或 brew install node）：本轮没有 clone、没有写入任何东西。"
 NODE_MAJOR=$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)
-[ "$NODE_MAJOR" -ge 18 ] 2>/dev/null || fail "Node.js 需要 >= 18，当前主版本为 $NODE_MAJOR：先换够格的 Node（brew install node 或用 nvm 切一个）再重跑，本轮没有 clone、没有写入任何东西。"
+[ "$NODE_MAJOR" -ge 18 ] 2>/dev/null || fail "Node.js 需要 >= 18，当前主版本为 ${NODE_MAJOR}：先换够格的 Node（brew install node 或用 nvm 切一个）再重跑，本轮没有 clone、没有写入任何东西。"
 say "Node.js $NODE_MAJOR 预检通过"
 
 # --- 2) 源码定位：GLASSPANE_REPO → 当前目录 → 既有 clone → 自动 clone --------
@@ -195,8 +195,8 @@ elif looks_like_repo "$PWD"; then
   say "在当前目录定位到仓库: $REPO"
 elif looks_like_repo "$CLONE_DIR"; then
   REPO="$CLONE_DIR"
-  say "使用既有 clone: $REPO（该目录实际版本: $(describe_ref "$REPO")）"
-  say "  提示：既有 clone 不会被自动切到 $REF；要装发布版请清理该目录或指定 GLASSPANE_INSTALL_DIR。"
+  say "使用既有 clone: ${REPO}（该目录实际版本: $(describe_ref "$REPO")）"
+  say "  提示：既有 clone 不会被自动切到 ${REF}；要装发布版请清理该目录或指定 GLASSPANE_INSTALL_DIR。"
 fi
 
 if [ -z "$REPO" ]; then
@@ -225,9 +225,9 @@ if [ -z "$REPO" ]; then
   else
     command -v git >/dev/null 2>&1 || fail "未找到 git（安装 Xcode Command Line Tools: xcode-select --install）"
     if [ -e "$CLONE_DIR" ]; then
-      fail "目标目录已存在且不是 GlassPane 仓库: $CLONE_DIR（用 GLASSPANE_REPO 指定仓库或清理后重试）"
+      fail "目标目录已存在且不是 GlassPane 仓库: ${CLONE_DIR}（用 GLASSPANE_REPO 指定仓库或清理后重试）"
     fi
-    say "未定位到本地仓库，clone 源码到 $CLONE_DIR（ref: $REF）……"
+    say "未定位到本地仓库，clone 源码到 ${CLONE_DIR}（ref: ${REF}）……"
     # `--` 隔开选项与位置参数：REF/URL 已经过 assert_*，但这道分隔是把"下一个值不是选项"
     # 这件事也写给读代码的人。
     # stderr 先收进临时文件：git 的诊断与进度都写在 stderr，失败时要把它的**原话**贴进
@@ -290,7 +290,7 @@ fi
 # 所以这里在委托之前问一次：不是 Darwin 就停，且不写任何东西。dry-run 已经在上面 exit 了，
 # CI 的 install-gate 那一格读到的计划行不受影响。
 if [ "$(uname -s)" != "Darwin" ]; then
-  fail "本安装器只支持 macOS（uname -s = $(uname -s)）：Swift/XCTest、launchd 与 TCC 席位都在 macOS 这一侧。源码已经在手边（$REPO）这一趟不付 clone，但它同样不会 delegate 给 installer —— 没有 npm ci、没有 swift build、没有注册 launchd 作业。现在这一步没有可绕的旗标。"
+  fail "本安装器只支持 macOS（uname -s = $(uname -s)）：Swift/XCTest、launchd 与 TCC 席位都在 macOS 这一侧。源码已经在手边（${REPO}）这一趟不付 clone，但它同样不会 delegate 给 installer —— 没有 npm ci、没有 swift build、没有注册 launchd 作业。现在这一步没有可绕的旗标。"
 fi
 export GLASSPANE_REPO="$REPO"
 exec node "$REPO/installer/cli.js" "$@"

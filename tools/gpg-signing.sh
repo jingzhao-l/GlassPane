@@ -396,7 +396,7 @@ cmd_verify() {
     if [ -n "$env" ]; then
       read_scope_secrets "$repo" "$env"
       if [ "$GH_RC" -ne 0 ]; then
-        declared_failed="environment '$env' 那一层读不到（gh 退出 $GH_RC）"
+        declared_failed="environment '$env' 那一层读不到（gh 退出 ${GH_RC}）"
         read_rc="$GH_RC"; gh_err="$GH_ERR"
         gh_failed_times=$((gh_failed_times + 1))
         emit_secret_verdict "$repo" "$env" "$env 这一层的读取" failed "$GH_RC" "$GH_ERR"
@@ -409,7 +409,7 @@ cmd_verify() {
       if [ "$GH_RC" -ne 0 ]; then
         read_rc="$GH_RC"; gh_err="$GH_ERR"
         gh_failed_times=$((gh_failed_times + 1))
-        [ -n "$declared_failed" ] || declared_failed="repo 级那一层读不到（gh 退出 $GH_RC）"
+        [ -n "$declared_failed" ] || declared_failed="repo 级那一层读不到（gh 退出 ${GH_RC}）"
         emit_secret_verdict "$repo" "" "repo 级这一层的读取" failed "$GH_RC" "$GH_ERR"
       else
         names="$GH_OUT"; read_rc=0; gh_err=""
@@ -422,7 +422,7 @@ cmd_verify() {
       if [ -n "$declared_failed" ]; then
         # 工作流真正读的那一层没读回来 ⇒ 既不许说 missing，也不许说 ok。上面已经打过 gh 的
         # 原话和那两种可能，这里只把"这一格没被判过"钉在输出里，读者不用自己推断。
-        warn "$want —— 判定跳过：$declared_failed。这一格既没判成存在也没判成缺失。"
+        warn "$want —— 判定跳过：${declared_failed}。这一格既没判成存在也没判成缺失。"
         continue
       fi
       classify_secret_list "$read_rc" "$names" "$want"
@@ -627,7 +627,7 @@ cmd_audit() {
   commits verify and the others' do not.
 NOTE
   if [ "$unreadable" -gt 0 ]; then
-    say "error: audit 有 $unreadable 份工作流没能读到，退出码 $GH_FAIL_EXIT（读不到不等于没有，也不等于绿）。"
+    say "error: audit 有 $unreadable 份工作流没能读到，退出码 ${GH_FAIL_EXIT}（读不到不等于没有，也不等于绿）。"
     exit "$GH_FAIL_EXIT"
   fi
 }
