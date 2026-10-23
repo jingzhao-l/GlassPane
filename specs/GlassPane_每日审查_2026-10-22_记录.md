@@ -178,3 +178,23 @@ npm view glasspane-install version --prefer-online        # 期望 1.20.0
   含一次未完成的 probe 构建，`rm -rf` 并 kill 掉它留下的孤儿 `swift-frontend`）。
 - 留在盘上到报告之后才该清的：`/var/tmp/gp-daily-20261022/**`（开工整树快照 `snapshot/worktree-now.tgz`
   与 `snapshot/head-8e4dd6a1.tar.gz`——那是这批未推送年代的唯一回滚点，还有全部逐字门禁日志）。
+
+### 7.6 发布链实测（同会话稍后：§7.4 那格的后续，历史结论不改写）
+§7.4 写的是当时的实测（本地 main 领先、远端无 `v1.20.0`、registry 两包 1.19.0、CI 四格红），
+那段结论**不改写**；本节记它之后的那一小时——版发出去了，两条通道都发了。
+
+| 那一格 | 实测 | 谁做的 |
+|---|---|---|
+| tag | `v1.20.0` → 对象 `e7181ff8`，签名 tag，`tagger jingzhao-l … 1792750291 +0800`＝**2026-10-23 18:11:31**，指向 `015ce89a`（那一版 CI 十格齐绿的头一笔） | 并发那条每日线（它的 tag message 自己写着"2026-10-22 那轮把 release: 1.20.0 写在本地 main 上就断了：20 笔没推"——说的是本会话那一轮） |
+| GitHub Release | `isDraft=false`、`targetCommitish=015ce89a…`、4 枚资产：`GlassPane-1.20.0.tar.gz` 3 887 748 B、`.asc` 833 B、`SHA256SUMS-1.20.0.txt` 90 B、其 `.asc` 833 B。触发方式：tag 的 `push` 事件跑 `release archive`，结论 success（run 39937361337） | 同上（push 自动） |
+| npm 两条通道 | `gh workflow run release.yml --ref v1.20.0 -f mode=dry` → run **39937540945** success；`-f mode=publish` → run **39937661897** success（`publish bare names with provenance=success`）。registry 版本表现状：`glasspane-mcp` 与 `glasspane-install` 的版本表里都有 **1.20.0**，其后并发线又发了 **1.20.1**（`latest` 因此是 1.20.1） | **本会话**（这两次 dispatch 都显式带 `--ref v1.20.0`，没有用默认分支） |
+| 归档自证 | `node scripts/make-release-archive.mjs --verify <下载件> 1.20.0` → rc 0：`703 entries, 3887748 bytes, all 20 declared commands and schemas present, no entry under harness/ / .iterate_decisions.md`；`tar -tzf … \| grep -cE "(^\|/)harness/"` = **0** | 本会话 |
+| 字节完整性（不信本地重下） | GitHub API 的 `assets[].digest` 与本机 `shasum -a 256` 逐字符相等：归档 `sha256:519c0d212865…87aa41`、sums `sha256:292b82520889…6baefd`；尺寸也与 API 报的一致（这台机器的代理以前静默截断过 GitHub 资产，所以这一步是必做的，不是形式） | 本会话 |
+| 签名 | 用**产品自己的那条通路**核：`updater/lib/signature.js` 的 `verifyReleaseSignature`（真 gpg + 钉住的主指纹 `0929EA31…3A1298` + 一次性钥匙环 +  sums 那份真字节）→ `outcome: "verified"`、`code: null`。判据不是"我看了一眼 .asc"，是发布物被装到用户机器上时读的是同一段代码 | 本会话 |
+| 收口后主干 | 并发线随后取号 **1.20.1** 把它自己发现的晚到修复发出去（它的记录写着"发现晚的修复不许移动已发布 tag ⇒ 让号"，与 `install.sh`/updater 钉 tag 的锚点纪律一致）；父仓 main 现在 `de5e3ac5` | 并发线 |
+
+一句要点：本会话 §7.4 那条"不抢这一刀"的判断，结果是被证实而不是被推翻的——tag 由那条线切、
+npm 由本会话发，两边都没有把同一枚 tag 覆盖过一次，registry 也没出现同一个号被两个会话各发一次
+的现场（`npm` 对重复版本本身会拒）。**唯一一处两笔账不一致的地方**在本机环境而不是流程：
+盘余量到写这一节时已降到 2.0 GiB（低于本轮自己那条 ~4 GiB 地板），所以 §7.2 里 `engine/probe`
+与 signal 两格仍按"本会话未复跑"记，补它们的命令也写在 §7.2。
