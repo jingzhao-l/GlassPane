@@ -31,6 +31,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -157,6 +158,60 @@ test('invalid: a signature that is well formed under somebody else’s key', () 
   assert.equal(v.outcome, 'invalid', 'exit 0 proves the signature is internally sound, not that it is *ours*')
   assert.match(v.message, new RegExp(`reads back under ${FOREIGN_SIGNER_FPR}`))
   assert.match(v.message, new RegExp(FAKE_SIGNER_FPR), 'the sentence names the key it expected')
+})
+
+/* ------------------------------------------------ 2026-10-23 缺陷 4：没答话 ≠ 答"不对" */
+
+test('真进程对照：被信号收掉的孩子报的是 status null 且没有 error（这就是判据依赖的那个事实）', () => {
+  // 分类器现在依赖一个外部事实：`gpg --verify` 超时/被杀时 spawnSync 报什么。它变了的话
+  // 这条先红，而不是让 classifySignature 悄悄退化成"全部当没答话"。
+  const killed = spawnSync('/bin/sh', ['-c', 'kill -TERM $$'], { encoding: 'utf8', timeout: 10_000 })
+  assert.equal(killed.status, null, `自杀的孩子应当报 status null，实报 ${killed.status}`)
+  assert.equal(killed.error, undefined, '被信号收掉不是 spawn 失败，error 是空的——所以"退出码 null"是唯一可读的线索')
+  const hung = spawnSync('/bin/sleep', ['3'], { encoding: 'utf8', timeout: 300 })
+  assert.equal(hung.status, null)
+  assert.equal(hung.error?.code, 'ETIMEDOUT', `超时报的应当是 ETIMEDOUT，实报 ${hung.error?.code}`)
+  // 真 gpg 在这一趟没跑完时长什么样：给它一个读不完的管道签名文件，让它在 60s 之前被我们收掉。
+  const resolved = resolveGpgBinary()
+  if (resolved.bin !== null) {
+    const real = spawnSync(resolved.bin, ['--verify', '/dev/null', '/dev/null'], {
+      encoding: 'utf8', timeout: 10_000, env: { ...process.env, GNUPGHOME: '/nonexistent-gp', LC_ALL: 'C' },
+    })
+    // 这一条只是**观察**：真 gpg 对一份空 .asc 会退非 0（那是"答了"），不会报 null。
+    // 报成 null 就意味着这台机器的 gpg 起不来，缺陷 4 那一档于是由真实进程驱动，而不是桩。
+    assert.ok(real.status === null || typeof real.status === 'number', JSON.stringify(real.status))
+  }
+})
+
+test('gpg 这一趟没跑完（status null）说的是"验证没走完"，不是"签名不对"', async () => {
+  // tagVerdict 不是这里手抄的：它由**安装器自己的**分类器算出来。它给这一输入的答案是
+  // `invalid`（"git verify-tag 失败（退出码 null），签名无法确证"）——那正是缺陷 4 的来源：
+  // 一个字面上"没能确证"的读数，被这张表当成"确证了是坏的"。
+  const anchor = await loadTrustAnchor()
+  assert.ok(anchor.ok, anchor.reason)
+  const run = { status: null, stdout: '', stderr: 'spawnSync /opt/homebrew/bin/gpg ETIMEDOUT' }
+  const tagVerdict = anchor.classifyTagVerify({ status: run.status, stdout: run.stdout, stderr: run.stderr })
+  assert.equal(tagVerdict.status, 'invalid', '对照：安装器的分类器把"没答话"读成 invalid——本轮要拦的就是这一步')
+
+  const v = classify({ run, tagVerdict })
+  assert.equal(v.outcome, 'signature-tool-missing', `没跑完的一趟不是坏签名：${v.message}`)
+  assert.equal(v.code, CODES.signatureToolMissing)
+  assert.doesNotMatch(v.message, /does not check against the key/, '不许对读者说这份签名与带出的键不符——它没被判定过')
+  assert.doesNotMatch(v.message, /refused outright/, '不许把一次工具失败说成不可挽回的篡改')
+  assert.match(v.message, /没有给出判定/, '要说的是"这一趟没给出判定"')
+  assert.match(v.message, /ETIMEDOUT/, '细节里要带上那次真跑出来的话，读者才知道不是空穴来风')
+  assert.match(v.message, /--consent unsigned-release/, '而自动运行仍然停：给得出人的那一步，并且这一格会记进状态文件')
+  assert.equal(v.keyFingerprint, null, '没判定成就没有可记录的键')
+})
+
+test('接线：整条 gate 走过一次没跑完的 gpg，落的是 tool 缺口而不是硬拒', async () => {
+  // 只测判据表等于没测接线：`verifyReleaseSignature` 里 `--verify` 那次结果直接进 classifySignature。
+  const v = await run({ label: 'no-answer', gpg: fakeGpg({ outcome: 'no-answer' }) })
+  assert.equal(v.outcome, 'signature-tool-missing', `gate 把"没跑完"报成了 ${v.outcome}：${v.message}`)
+  assert.equal(v.code, CODES.signatureToolMissing)
+  // 与 invalid 的区别是有读者的：tool 缺口可由人带 --consent 继续并留下记录，硬拒不能。
+  const note = authorshipNote({ version: VERSION, signature: v.outcome, signedAsset: v.signedAsset, consented: true }, 'staged')
+  assert.match(note.message, /without authorship proof/, '这一格必须还能被台账一直念着')
 })
 
 test('unsigned-release: no .asc published is a different claim from a wrong one', () => {

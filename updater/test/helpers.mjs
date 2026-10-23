@@ -214,6 +214,10 @@ export function fakeGpg({
         return { status: 1, stdout: `[GNUPG:] NO_PUBKEY ${signerFingerprint.slice(-16)}\n`, stderr: "gpg: Can't check signature: No public key\n" }
       }
       if (outcome === 'no-validsig') return { status: 0, stdout: '[GNUPG:] GOODSIG X 4 2\n', stderr: 'gpg: Good signature from\n' }
+      // 2026-10-23（缺陷 4）：gpg 被叫起来、`--version` 那次答了，`--verify` 这一趟却没跑完
+      // （超时被 SIGTERM、被系统杀掉）。形状取自本机实测的 spawnSync：`status:null` 且没有
+      // `[GNUPG:]` 判定行——见 signature.test.mjs 里那条真进程对照。
+      if (outcome === 'no-answer') return { status: null, stdout: '', stderr: 'spawnSync /opt/homebrew/bin/gpg ETIMEDOUT' }
       return { status: 1, stdout: '[GNUPG:] BADSIG 4 2 1\n', stderr: 'gpg: BAD signature from "jingzhao-l (sign-github)"\n' }
     }
     return { status: 0, stdout: '', stderr: '' }

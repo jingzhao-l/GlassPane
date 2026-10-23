@@ -282,6 +282,22 @@ export function classifySignature({
     // and the same state of the world for a person reading either surface.
     return verdict('unsigned-release', { ...want, signedAsset: signatureAsset.name, detail: 'the published .asc carries no signature at all' })
   }
+  // `status === null` 是"gpg 这一趟没跑完"（超时被 SIGTERM、被系统杀掉、exec 失败），不是"它答了、答案是坏签名"。
+  // 2026-10-23（缺陷 4）：到这一行之前它落到下面那张表里被判成 `invalid`，于是读者看到的是
+  // "这份签名与本程序带的键不符……This release is refused outright"，而真相是这台机器上的验证没走完。
+  // 后果不只是文案难看：`invalid` 是不可 consent 的硬拒，一份也许完全正常的发布会在一台负载足够高的机器上
+  // 永久卡住，理由还是假的。`signature-tool-missing` 才是同一件事的诚实说法——自动运行照样停，只是停下时
+  // 说的是"作者身份未知"，并且这一格由 `authorshipNote` 一直跟着念。
+  if (run.status === null || run.status === undefined) {
+    const tail = text.trim().split('\n').filter((line) => line !== '').slice(-2).join(' / ')
+    return verdict('signature-tool-missing', {
+      ...want,
+      signedAsset: signatureAsset.name,
+      detail: `gpg 被叫起来了，但这一趟没有给出判定（退出码 ${run.status === undefined ? '缺失' : 'null'}`
+        + `${tail ? `：${tail}` : '，且没有任何输出'}）——它没答话不等于它答了"不对"，这台机器上的验证没走完。`
+        + `重跑一次即可；确认那只是负载之后，人可以按 "updater check --consent ${UNSIGNED_CONSENT_KIND}" 带着这一格记录继续。`,
+    })
+  }
   // The pin is asked about *before* anything gpg answered: a caller that hands in a
   // value which is not a fingerprint has not loosened this gate, it has broken it,
   // and "no pin" is deliberately not a state that can pass. An override nobody
