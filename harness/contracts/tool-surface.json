@@ -14,7 +14,7 @@
     "mcpShell": {
       "loc": 11422,
       "files": 16,
-      "ratio": 0.2221,
+      "ratio": 0.2216,
       "byFile": {
         "mcp-shell/src/tools.ts": 2991,
         "mcp-shell/src/engine-client.ts": 1824,
@@ -35,7 +35,7 @@
       }
     },
     "fork": {
-      "loc": 10418,
+      "loc": 10529,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -65,12 +65,12 @@
         {
           "file": "packages/opencode/script/registry-readiness.ts",
           "kind": "added",
-          "lines": 117
+          "lines": 161
         },
         {
           "file": "packages/opencode/script/verify-published.ts",
           "kind": "added",
-          "lines": 465
+          "lines": 532
         },
         {
           "file": "packages/opencode/src/plugin/glasspane-compaction.ts",
@@ -1163,14 +1163,14 @@
           "lines": 0
         }
       ],
-      "ratio": 0.2026,
+      "ratio": 0.2043,
       "vendorExcluded": {
         "files": 0,
         "lines": 0
       },
       "testsExcluded": {
         "files": 39,
-        "lines": 4413
+        "lines": 4575
       },
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {
@@ -1179,7 +1179,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 21840,
+  "totalToolSurfaceLoc": 21951,
   "note": null,
   "carried": null
 }
