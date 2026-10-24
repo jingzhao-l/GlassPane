@@ -54,6 +54,24 @@
   "锁只解析 3.4.17、两个 workspace 的链接都指向它、`.bun` 里不留 <= 3.4.16 的活副本"，不是"manifest 改了"。
 
 
+### Fixed — 一条写进台账却没人量过的假设，量出来半错
+
+- 0.10.1 那轮把 SDK 1.32.0 的安全变更写成一句话：「重定向只在端点同源内跟随，这对 loopback 端点没有
+  可观察的差别」。2026-10-24 把它量了，**半错**——同源不是规则的全部：302 即使在源内也被拒，因为跟随
+  它会把 POST 降级成 GET，而 SDK 不擅自改 MCP 请求的动词；默认策略自报 `redirectPolicy: 'same-origin'`。
+  已发布 SYNCLOG 里那句不改写（发布物的字节不动，发现晚的修复让号而不是追改），更正记在这里。
+- 新闸 `harness/tools/mcp-redirect-policy.mjs`：五条行为逐条具名，驱动的是 `packages/opencode` 真正解析到
+  的那份安装产物——三条根扫描加 realpath 去重（`node_modules`、`packages/*/node_modules`、`node_modules/.bun`），
+  并要求加载的版本等于声明的版本；说不出"产品加载的是哪一份"时它 exit 2 而不是猜。
+  `harness/tools/mcp-redirect-policy-selftest.mjs` 用 26 条断言证每条红都因它点名的原因红（五个变异 +
+  三种"测不到"），其中一条是**反过度反应**：软链与 store 里的字节是同一份拷贝，不得判成"两份"——
+  会在健康树上天天哭的闸一周内就会被删掉。两步都接进 `ci.yml` 的 `harness-rulers`，跑在 `bun install` 之后。
+- `product-surface` 的 `selftest-wired` 从手抄名单改成目录扫描。这条规则自己的漏洞是本轮被实测出来的：
+  `patched-deps-selftest.mjs` 在树里、在 lane 里跑，却从没被写进那份名单，所以"没人跑的自测不是闸"
+  这条闸对它根本不成立——删掉那条 step 会照样绿。名单现在只是"不得消失的名字"下限（8 个），真正决定
+  义务的是 `harness/tools/*-selftest.(mjs|sh)` 的扫描；`SCAN_SET_FLOORS.selftests` 那个写了却没人读的
+  数字也终于成了判据。
+
 ## [1.20.1] — 2026-10-23
 
 **版本判断：patch。** 对着本仓 1.6.2 那四项 patch 判据实测：状态文件的字段没动、退出码集合没动、

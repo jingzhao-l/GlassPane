@@ -432,6 +432,51 @@ jobs:
           esac
           echo "patched-deps selftest 已测量：每条红都因为它点名的那个原因红"
 
+      # 1.32.0 的安全变更是「重定向只在端点同源内跟随」。0.10.1 的 SYNCLOG 把它写成一句话，说这对
+      # loopback 端点没有可观察的差别——那是一条谁都没量过的假设。2026-10-24 量了，它半错：同源不是
+      # 规则的全部，302 即使在源内也被拒（跟随它会把 POST 降级成 GET，SDK 不擅自改 MCP 请求的动词），
+      # 默认策略自报 redirectPolicy: 'same-origin'。这条闸把五个行为逐条具名钉在**装上的那份包**上，
+      # 跑在上面那次 bun install 之后：驱动的是产品加载的 dist，不是 changelog 的转述。
+      # 退出码 2 = 测不到（没有安装/多份不同的拷贝/声明是范围而非钉死），在这条 job 里那就是缺陷。
+      - name: "The MCP transport's redirect rule is the one this fork was bumped for"
+        run: |
+          set -euo pipefail
+          rc=0
+          out="$(node harness/tools/mcp-redirect-policy.mjs 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::MCP 重定向闸以 exit $rc 失败。exit 1 = 装上的 SDK 改了我们依赖的重定向行为（上面 FAIL 点名五条里的哪一条），或加载的那份拷贝不是 packages/opencode 声明的版本；exit 2 = 它说不出产品加载的是哪一份，而上面刚跑过 bun install，所以此刻「测不了」就是缺陷。remedy：行为真变了就照 FAIL 那条重写这五句期望并在 SYNCLOG 记下为什么；读不到安装就修 harness/tools/mcp-redirect-policy.mjs 的定位三条根（node_modules、packages/*/node_modules、node_modules/.bun），别放宽判据。"
+            exit 1
+          fi
+          case "$out" in
+            *"all 5 behaviours hold"*) ;;
+            *)
+              echo "::error::MCP 重定向闸以 exit 0 退出却没给出它的通过句「all 5 behaviours hold」——它没跑那五条就回来了。remedy：查 harness/tools/mcp-redirect-policy.mjs 末尾的 cases 循环是否还被执行，别把这条 step 改成只看退出码。"
+              exit 1 ;;
+          esac
+          echo "MCP 重定向策略已测量：五条行为逐条对上，拒绝仍然自报 not followed"
+
+      # 上面那条闸自己能不能红、且每条红的原因不同？它把「期望」与「安装」两端都可能坏掉：期望翻过来
+      # 必须具名变红，产物变宽松必须具名变红，而三种「测不到」（没装、两份、范围声明）各要有一句各自的
+      # 话——把「说不清加载的是哪份」和「没安装」混成一条通用拒绝，处置就分不开了。还有一条**反过度
+      # 反应**：软链与 store 里的字节是同一份拷贝，不得判成「两份」，否则健康的树上它会天天哭。
+      - name: "The redirect gate can still go red, for each reason separately"
+        run: |
+          set -euo pipefail
+          rc=0
+          out="$(node harness/tools/mcp-redirect-policy-selftest.mjs 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::MCP 重定向闸的固定点测试以 exit $rc 失败（上面 FAIL 点名的是哪个变异没落地、或哪条判决退化成了通用文本）。remedy：按它点名的那条修 harness/tools/mcp-redirect-policy.mjs 的分支，别改期望值——这条闸唯一的价值就是说得出五条中哪一条断了。"
+            exit 1
+          fi
+          case "$out" in
+            *"assertion(s) FAILED"*|*"nothing was measured"*)
+              echo "::error::MCP 重定向闸的自测以 exit 0 回答了自己的失败——它把红吞成了绿。remedy：查它末尾的 process.exit 是否还跟着 failures 计数。"
+              exit 1 ;;
+          esac
+          echo "MCP 重定向闸自测已测量：每个变异都因它点名的那个原因变红"
+
       # 上面那条锚闸自己能不能红？它比的是两个远端 ref 的 tree 哈希，而"取不到远端"和"取到了但
       # 不等"这两种回答必须不同——否则一次网络抖动就会把它变成常绿的装饰。这条自测用 file:// 上的
       # 真仓库（真 commit、真 annotated tag）把两条规则分别打到绿/红，包括两个"一条绿一条红"的

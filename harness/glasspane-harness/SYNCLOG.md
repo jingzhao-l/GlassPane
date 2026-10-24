@@ -260,6 +260,36 @@ store 留下的孤儿，产品加载不到。分清"链接指哪"与"缓存里�
   记在这里而不是当成结论。
 - 没动 `install.sh` 的签名/公证通道，也没替并行线取父仓的号。
 
+### 同轮续三（10-24）：那条"没量过的假设"量了，半错
+
+- 「没跑与不做的」里那条被自己标成**没量过的假设**的话——1.32.0 的"重定向只在同源内跟随"在 loopback
+  端点上没有可观察差别——量了，半错。错在把规则读成只管源：`followWithinOrigin` 之外还有一道
+  "改动词就不跟"——实测五条（驱动 `packages/opencode` 解析到的那份安装产物，无自定义 `fetch`）：
+  1. 307/308 在同 host 同 port 内**被跟随**（POST 原样重发）；
+  2. 302 即使在源内**也被拒**，报 `Redirect to … not followed (redirectPolicy: 'same-origin')`——
+     跟随它会把 POST 降级成 GET，SDK 不擅自改 MCP 请求的动词；
+  3. 跨 port 的 307 **被拒**：127.0.0.1:51748 → 127.0.0.1:51749 就是跨源，"反正在 loopback"不是同源；
+  4. `redirectPolicy: 'follow'` 才退回"什么都跟"。
+  所以对 loopback 端点**有**可观察差别，而且差别的方向与那句写的相反：不是"更安全所以无所谓"，是
+  "该跟的（307/308 同 port）会跟，不该跟的（302）连源内都不跟"。这句话改写不了已发布的字节，
+  因此只在这里更正。
+- 新闸 `harness/tools/mcp-redirect-policy.mjs`（父仓侧，五条逐条具名）＋ `mcp-redirect-policy-selftest.mjs`
+  （26 条断言，本机 0 失败）。闸的定位是三条根扫描加 realpath 去重（`node_modules`、
+  `packages/*/node_modules`、`node_modules/.bun`），并要求加载的版本等于 `packages/opencode` 声明的那一个；
+  说不出"产品加载的是哪一份"时 exit 2 拒答而不是猜。电池里两条是**反过度反应**：软链与 store 里的字节
+  是同一份拷贝、不得判成"两份"；声明是范围时拒答而不是比较。闸的红也都验过：翻一条期望、让前置端点
+  直接答 initialize（"connected 却没碰过重定向目标"）、把重定向换成 500（拒绝必须自己说明是没跟随）、
+  以及把两条拒绝都改成宽松——四次各具名红。
+- 顺带抓到本仓自己的一条闸缺陷：`product-surface` 的 `selftest-wired` 靠一份**手抄名单**决定要检查哪些
+  自测，`patched-deps-selftest.mjs` 在树里、在 lane 里跑，却因为没被写进那份名单而完全不受这条规则约束
+  ——把它那条 step 删掉照样绿。名单改成 `harness/tools/*-selftest.(mjs|sh)` 的目录扫描，名单退成
+  "不得消失的名字"下限（8），而 `SCAN_SET_FLOORS.selftests` 那个一直写了没人读的数字第一次成了判据。
+- 本轮没有取号：新闸与自测都在 `harness/tools/`（父仓侧、subtree split 之外），fork 里只多了这段台账。
+  所以 `release-artifact` 的 `tag` 那格对此刻的读数应是 `△ artifact`（只多收口记录），
+  `split-main` 按 3b 再切一次搬运分支补平。本机这一小时 `objects.githubusercontent.com` 方向的
+  git 传输慢到触发低速中止（`curl 28`，两次，64 s 与 240 s 窗口各一次），`release-artifact` 因此
+  回答的是 exit 2「CANNOT MEASURE」而不是挂住——那正是 0.10.2 给它装的上限；CI 上没有这层代理，
+  终态以 CI 那格为准。
 ## 2026-10-22（第十五次会话）· 0.10.0：provider 契约有了产品侧消费者，发布 lane 学会等 registry；场景① 的通道第二次"看着有、其实跑不到"
 
 ### 开工与隔离
