@@ -223,6 +223,23 @@ store 留下的孤儿，产品加载不到。分清"链接指哪"与"缓存里�
 修的时候用"重复标题必须恰好 2 个"作前置断言整段替换，标题序列回到 0.10.3 / 0.10.2 / 0.10.1 / 0.10.0；
 下一次这个脚本要把正文一起参数化，而不是靠我读输出。**教训：脚本宣布自己做了什么，必须是被断言出来的。**
 
+### 0.10.3 的三格（本轮实测）
+
+- 主干 → `68a0d29d`；split `15233afa`，`split^{tree}` 与主干子树逐字节相等，相对 `f8d2ed1a` 快进；
+  该 sha 的 fork CI 两格 success 之后才打 tag（这次两格跑得很快地绿了，判据是 conclusion 而不是等待时长）。
+- tag `v0.10.3` → `15233afa`；Release `isDraft=false`、6 件资产，两份 `.zip` 的 sha256 与 GitHub 为该
+  资产计算的 `digest` 逐字相等（arm64 46,412,106 B／x64 48,597,078 B——与 0.10.2 的
+  46,412,463 / 48,591,969 不同，说明换掉的依赖确实进了产物字节）；`SHA256SUMS.txt` 204 B、声明恰好两条。
+- npm 三包 0.10.3，**每个 npm job 自己打印的 shasum 与 registry `dist.shasum` 逐字相等**：
+  wrapper `7d98b11c…`、arm64 `397695fa…`、x64 `d9169e7f…`。
+- 发布 lane 在同一眼里给了三条读数：`the registry can read this published version — …0.10.3 answered
+  after 1 look(s), 1s of waiting`；`the published bytes carry the fork's MCP SDK patch — all 8
+  artifact-checkable item(s) present`；`the installed binary serves the embedded web app —
+  content-type=text/html doctype=true assets=referenced`。第三条是这次真正要的那句：dompurify 就活在这个
+  页面里，它换了版本，页面仍然按"有 doctype、引用打包资产"的形状服务。
+- dependabot PR #24（只改两个 manifest 的那条）在 main 落下 3.4.17 的同一分钟自己关闭
+  （02:17:44Z），与前一条 #23 同一种收场——不需要有人替它判断"要不要并"。
+
 ### 没跑与不做的
 
 - `packages/desktop` 的运行时行为：它不构建也不发布（`product.json` 明写是需要签名/公证账号的第二批），
