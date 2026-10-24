@@ -274,6 +274,13 @@ jobs:
       - name: Neither surface started judging evidence semantics
         run: node harness/tools/surface-semantics.mjs --check
 
+      # 两个工具面对同一个 provider 契约说的话必须对得上（综述 §8.5 row 5）。两侧各自建注册表、
+      # 各自的测试只跟自己比，于是"重叠的那半是手抄两遍的"这件事一直没有读者：面 B 的
+      # `diagnose requires [...]` 与面 A 的同一行分开漂，CI 不会说任何东西。这条尺子跑的是两侧的
+      # 真代码（runner import 两个模块），不是文本；测不到就 exit 2 报 NOT OBSERVED，不 exit 0。
+      - name: The two surfaces' provider registrations reconcile
+        run: node harness/tools/provider-surface.mjs --check
+
       - name: No unrecorded brand drift
         run: node harness/tools/brand-surface.mjs --check
 

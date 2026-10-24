@@ -82,6 +82,32 @@
 - 本轮与 `iterate-skill` 分支 `it-bidi-20261024`（场景④）同批提出；两条分支互不重叠，
   合并次序不影响各自的闸。
 
+### 场景⑤ 的读者：`harness/tools/provider-surface.mjs`（同批接进 `harness-rulers`）
+
+审这条面时先把两侧的代码读了：两侧各自建注册表（`parseProviderRegistration` → `registerProvider`），
+各自的测试只跟自己比，而**重叠的那半是手抄两遍的**——面 B 的 `providers.ts` 与面 A 的
+`providers.ts` 各写一遍 `diagnose requires [ax-event, attribution, circuit-breaker]`、
+`capture requires [ax-tree]`、`last-evidence requires []`。一侧改了另一侧不动，CI 什么都不说。
+差集本身是**正当的**（面 B 还转发 `diagnose-pixel`/`diagnose-probed`，面 A 不转发；面 A 的注释
+还专门写了 `last-evidence` 为什么在 CAPABILITY_CLAIMS 里缺席），所以这条尺子不要求两边相等，
+它要求的是：同一个 provider 的同一方法在两处说的话一致，而"哪些方法是单边的"必须是一份被记下来的
+清单。
+
+- 量的是**跑出来的表**，不是文本：`provider-surface-runner.ts` 同时 import 两侧模块（bun 各自
+  解析自己那棵 `iterate-kernel`），`version` 一律传 `"probe"` 抹掉——两条产品版本号本来就不同，
+  比它每次发版都红，且毫无理由。
+- 三条规则各有名字：`provider-identity` / `overlap-agreement` / `asymmetry-ledger`。
+- **测不到不等于通过**：runner 起不来、任一侧 import 失败 → exit 2 报 `NOT OBSERVED`，
+  绝不 exit 0 说"没分歧"。
+- 金样 `harness/contracts/provider-surface.json` 实记：面 B 5 个方法 / 面 A 3 个 / 重叠 3 个 /
+  单边 2 个（`harness:glasspane-engine-ae/diagnose-pixel`、`harness:glasspane-engine-ae/diagnose-probed`）。
+- `--record` 拒绝在脏树上写（与 `fork-diff` 同一条纪律：并行 lane 的未提交行会被洗进别人的基线）。
+- 四发控制接进 `harness/tools/rulers-selftest.mjs`（编号 15–18），每发要求**具名**变红且不许串规则：
+  面 A 少一项前置 → `overlap-agreement` 且不许报 `provider-identity`；面 B 改 id → `provider-identity`；
+  金样里塞一条不存在的单边方法 → `asymmetry-ledger`；把 runner 的 import 名改掉让两侧读不出来 →
+  **exit 2 + `NOT OBSERVED`**，并断言它不许说"no divergence"。本地先各打一发验过（脚本
+  `/var/tmp/gp-provider-mutate.py`，三份文件按 sha256 核回），CI 里由 `rulers-selftest` 持续打。
+
 ## 2026-10-24（第十七次会话）· 0.10.4：一条高危只在 4.x 修，于是 zod、内核、面 A 走同一条线；"不是我改坏的"必须是量出来的
 
 ### 开工与隔离

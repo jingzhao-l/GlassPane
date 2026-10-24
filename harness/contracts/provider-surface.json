@@ -1,0 +1,96 @@
+{
+  "surfaces": {
+    "harness": {
+      "glasspane-engine-ae/diagnose": {
+        "providerId": "glasspane-engine-ae",
+        "kind": "ae-diagnosis",
+        "origin": "glasspane",
+        "method": "diagnose",
+        "requires": [
+          "attribution",
+          "ax-event",
+          "circuit-breaker"
+        ]
+      },
+      "glasspane-engine-ae/diagnose-pixel": {
+        "providerId": "glasspane-engine-ae",
+        "kind": "ae-diagnosis",
+        "origin": "glasspane",
+        "method": "diagnose-pixel",
+        "requires": [
+          "attribution",
+          "ax-event",
+          "circuit-breaker",
+          "pixel-diff"
+        ]
+      },
+      "glasspane-engine-ae/diagnose-probed": {
+        "providerId": "glasspane-engine-ae",
+        "kind": "ae-diagnosis",
+        "origin": "glasspane",
+        "method": "diagnose-probed",
+        "requires": [
+          "attribution",
+          "ax-event",
+          "handler-probe",
+          "state-diff"
+        ]
+      },
+      "glasspane-evidence/capture": {
+        "providerId": "glasspane-evidence",
+        "kind": "evidence-source",
+        "origin": "glasspane",
+        "method": "capture",
+        "requires": [
+          "ax-tree"
+        ]
+      },
+      "glasspane-evidence/last-evidence": {
+        "providerId": "glasspane-evidence",
+        "kind": "evidence-source",
+        "origin": "glasspane",
+        "method": "last-evidence",
+        "requires": []
+      }
+    },
+    "shell": {
+      "glasspane-engine-ae/diagnose": {
+        "providerId": "glasspane-engine-ae",
+        "kind": "ae-diagnosis",
+        "origin": "glasspane",
+        "method": "diagnose",
+        "requires": [
+          "attribution",
+          "ax-event",
+          "circuit-breaker"
+        ]
+      },
+      "glasspane-evidence/capture": {
+        "providerId": "glasspane-evidence",
+        "kind": "evidence-source",
+        "origin": "glasspane",
+        "method": "capture",
+        "requires": [
+          "ax-tree"
+        ]
+      },
+      "glasspane-evidence/last-evidence": {
+        "providerId": "glasspane-evidence",
+        "kind": "evidence-source",
+        "origin": "glasspane",
+        "method": "last-evidence",
+        "requires": []
+      }
+    }
+  },
+  "oneSided": [
+    "harness:glasspane-engine-ae/diagnose-pixel",
+    "harness:glasspane-engine-ae/diagnose-probed"
+  ],
+  "counts": {
+    "harnessMethods": 5,
+    "shellMethods": 3,
+    "overlap": 3
+  },
+  "note": "Golden for `harness/tools/provider-surface.mjs`. Emitted by running both surfaces' provider code, not by reading their text: see that file's header for the three rules and for why the version string is normalised away. oneSided is the deliberate asymmetry ledger."
+}
