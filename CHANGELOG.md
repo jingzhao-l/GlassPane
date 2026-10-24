@@ -46,6 +46,12 @@
   "取失败"不处理"不复返"：CI 上等它的是 runner 超时，那种失败连判决都不留。现在停滞会落到它本来就有的
   `cannot measure`（低速中止 + 300 s 墙钟，两个网兜不同的静默），电池用桩端口证明 1.2 s 内会具名回答
   "could not be reached"，并证明这不是"只是计时器到了"。
+- **`dompurify` 3.4.16 → 3.4.17（harness 0.10.3）**：三条覆盖里含一条 **critical**（GHSA-cg2g-xh64-v4q7
+  `>= 3.4.4, <= 3.4.16`）与一条 high，而它是 `packages/ui`/`session-ui` 的依赖——发布物里那个 embedded
+  web app 的字节。dependabot 那条 PR 只改两个 workspace 的 manifest，**漏了 `workspaces.catalog` 里钉的
+  3.3.1**：那条当下没有引用方，但下一个写 `"dompurify": "catalog:"` 的包会静默拿到同一族高危副本。
+  三处一起改到 3.4.17（registry 时间戳 11.5 天，过本仓那条 3 天发布-age）；验收判据是
+  "锁只解析 3.4.17、两个 workspace 的链接都指向它、`.bun` 里不留 <= 3.4.16 的活副本"，不是"manifest 改了"。
 
 
 ## [1.20.1] — 2026-10-23

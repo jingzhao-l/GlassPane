@@ -196,6 +196,33 @@ tool-surface 面 B 10233→10418 = `patched-deps.mjs` +139 与 `verify-published
   这两句摆在一起正是这条改动的全部意义：等过并且等到了，与首眼就问到了，是两种可以被区分的诚实读数；
   而"产物里有没有那份补丁"从今天起不再依赖任何人记得去数。
 
+### 同轮续二（跨到 10-24）：dompurify 的 critical 覆盖，以及"改了 manifest"与"字节过了线"的差
+
+在报"#24 那条 dependabot PR 由你们判断"之后回头把它量了一遍，结论反过来了：这条不是维护性升级。
+覆盖 `dompurify@3.4.16` 的是三条，其中 **GHSA-cg2g-xh64-v4q7 是 critical**（`>= 3.4.4, <= 3.4.16`）、
+GHSA-mrv2-3pqr-j5jr 是 high（`<= 3.4.16`），而 dompurify 是 `packages/ui`/`packages/session-ui` 的依赖
+——正是发布物里那个 embedded web app 的代码路径（每版都被 `the installed binary serves the embedded
+web app` 那一步跑着）。逐条把真版本号代入 GHSA 的 range 判，不抄汇总。
+
+PR 只提了两个 workspace 的 manifest。第三处在这个仓自己身上：`workspaces.catalog.dompurify` 钉的是
+**3.3.1**，也在 `<= 3.4.16` 里。它当下没有任何引用方（两处都写死版本），所以今天不构成暴露；但下一个
+写 `"dompurify": "catalog:"` 的包会静默拿到它——与本轮 MCP SDK 那件事同一族形状：危险不在声明本身，
+在"声明与解析之间没人看的那条路"。于是三处一起改，取 3.4.17（发布于 2026-10-12，11.5 天，过
+`minimum-release-age: 3 天`；不是"最新"而是"闸允许的最新"）。
+
+验收没写成"manifest 改了"，写成三条可判的事实：`bun.lock` 只解析 `dompurify@3.4.17`；两个 workspace 的
+`node_modules/dompurify` 链接都指向它；`--frozen-lockfile` 两次 "no changes"。中间这里自己判错了一次：
+`node_modules/.bun` 里还留着一条 `dompurify@3.4.16`，我的断言把它算成"高危副本还在装"——那是 bun 不回收
+store 留下的孤儿，产品加载不到。分清"链接指哪"与"缓存里剩什么"之后确认是孤儿并清掉，判据改成看链接。
+（同一族形状 `patched-deps` 早就防了：它对 store 里多出的未覆盖版本只打 `△` 不判红。）
+`ui`/`session-ui` 的 typecheck、各自测试与 web app 的 `bun run build` 全 rc 0；`patched-deps --check`
+仍 18/19；`product-surface` 报 0.10.3 一致。
+
+自己的取号脚本这次也咬到自己一口：它复用了上一版的段落文件当模板，只换了打印的号、没换正文里的标题号，
+于是 fork CHANGELOG 一度出现两个 `## [0.10.2]`，而脚本那句 "inserted above [0.10.2]" 是硬编码文案不是断言。
+修的时候用"重复标题必须恰好 2 个"作前置断言整段替换，标题序列回到 0.10.3 / 0.10.2 / 0.10.1 / 0.10.0；
+下一次这个脚本要把正文一起参数化，而不是靠我读输出。**教训：脚本宣布自己做了什么，必须是被断言出来的。**
+
 ### 没跑与不做的
 
 - `packages/desktop` 的运行时行为：它不构建也不发布（`product.json` 明写是需要签名/公证账号的第二批），
