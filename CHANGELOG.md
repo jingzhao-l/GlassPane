@@ -3,19 +3,22 @@
 本文件记录 GlassPane 的值得注意的变更。格式遵循 Keep a Changelog，版本号遵循 Semantic Versioning，条目按时间倒序。
 
 
-## [Unreleased]
+## [1.20.2] — 2026-10-24
 
-**未取号。** 本轮落进 main 的东西分两半，读法不同：用户真正拿到的变化在 **glasspane-harness 0.10.2**
-（同号也覆盖了 0.10.1 那一批），两版三格各自核过——tag `v0.10.1` → `265005db`、`v0.10.2` → `9eb13a93`，
-两次 Release 都是 `isDraft=false` + 6 件资产（两份 `.zip` 的 sha256 与 GitHub 为该资产计算的 `digest`
-逐字相等，`SHA256SUMS.txt` 声明的两条也对得上），npm 三包两次都与**发布时 npm 打印的 shasum 逐字相等**
-（0.10.2：wrapper `20db06fe…`、arm64 `33009d30…`、x64 `f7cdc725…`）。
-父仓这一侧（`harness/glasspane-harness/` 的这份副本、`harness/tools/` 的新尺子、`ci.yml` 的两步、两份金样）
-要等下一次取号才进父仓发布物——父仓的归档明确**不含** `harness/`，所以这份账不是"漏发"，
-而是"父仓侧的副本落后一代"的凭据。
+**本版取号 1.20.2（patch）。** 判据是量出来的，不是照抄上一版：`mcp-shell` 的 `bin`/`files` 白名单未动
+（`git diff v1.20.1..HEAD -- mcp-shell/package.json` 只有 `zod` 与 `iterate-kernel` 两行），面 A 的
+`src/` 业务逻辑一行没改（同一区间 diff 为空；取号那一笔只动版本字面量——`SERVER_INFO.version` 与
+engine 的 `buildVersion`，这正是"状态文件字段、退出码集合、CLI 参数"三项按构造未动的意思）。
+真正进用户手里的是**依赖版本**：`glasspane-mcp` 声明的 `zod` 从 3.25.76 变成 4.6.7
+（GHSA-mrhx-c7xc-m3w5，high——官方只在 4.6.6 修，3.x 不 backport），连同它开发依赖的
+`iterate-kernel@0.1.10`。1.20.1 那份发布物里的声明仍然带洞，所以"修好了"要靠这一号才到用户手上，
+不是靠 main 绿。
 
-本版做了四件事，判据与失效模式各自记在 `harness/glasspane-harness/SYNCLOG.md`
-的「第十六次会话」，这里只写会被用户读到的那三条：
+前面几段（编号那三条与其下的 `### Added`/`### Fixed`）合起来就是本版的全部内容：harness 线
+0.10.1→0.10.5 五版都在这一天里落地——依赖升级不再静默摘掉 fork 补丁、产物级补丁核对、
+`release-artifact` 的停滞上限、dompurify 的 critical、MCP 重定向策略的五条具名判决、zod 4 的三仓链，
+以及最后那条"发布闸此前问元数据、而安装要的是 tarball"。harness 侧的判据与读数记在
+`harness/glasspane-harness/SYNCLOG.md` 的「第十六次会话」「第十七次会话」；下面只写用户读到的部分：
 
 1. **依赖升级不再静默摘掉 fork 补丁**。`@modelcontextprotocol/sdk` 1.31.0→1.32.0 覆盖 4 条 advisory
    （2 high / 2 medium）。`bun install` 对版本对不上的 `patchedDependencies` 不报错——它删掉锁里的条目、

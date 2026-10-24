@@ -218,9 +218,9 @@ make_bundle() {
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.20.1</string>
+  <string>1.20.2</string>
   <key>CFBundleVersion</key>
-  <string>1.20.1</string>
+  <string>1.20.2</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>LSMinimumSystemVersion</key>
