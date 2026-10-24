@@ -641,6 +641,12 @@ describe("which anchors the cap drops (scenario 2, the compression half)", () =>
     expect(selection.shown.filter((anchor) => anchor.dimension === undefined).length).toBe(2)
     expect(selection.shown.filter((anchor) => anchor.dimension === "security").length).toBe(18)
     expect(selection.shown.some((anchor) => anchor.dimension === "stray")).toBe(false)
+    // The two ranks that survive have to be handed back in transcript order, not rank order: the
+    // unattributed pair here sits at indices 24 and 29, so a rank-ordered block would open with
+    // them and put the session's earliest planned calls at the end.
+    const indices = selection.shown.map((anchor) => Number(anchor.operationId.slice(-2)))
+    expect(indices).toEqual([...indices].sort((a, b) => a - b))
+    expect(indices.slice(0, 2)).toEqual([0, 1])
   })
 
   test("the block names the rule it used, and never claims recency when it did not", () => {

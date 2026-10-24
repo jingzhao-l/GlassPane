@@ -2,6 +2,86 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-25（第十八次会话）· 未取号：场景② 的两半边（计划交接 + 按维度丢弃），以及"另一条线在发布线上时我该做什么"
+
+### 开工与隔离
+
+- 起点 trunk `2b2d2353`（`release: 1.20.2`，含并行线的 zod 4.6.7 全链与 harness 0.10.5）。本轮在
+  隔离工作树 `/Volumes/Eng-Dev/.worktrees/gp-bidi-20261024`（分支 `gp-bidi-20261024`）改动与提交，
+  基线取 `origin/main` 而不是本地那棵落后 10 笔又压着 65 个未提交文件的主树。
+- `node_modules` 与参照检出 `.external/opencode` 用 APFS clonefile（`cp -Rc`）从主树复制；实测
+  `df` 只吃掉约 100 MB。**参照没有软链回主树**：两条 sweep 并发共享一份可写参照会让 `fork-diff`
+  拒测（0.10.1 那笔的教训）。
+- `bun install --frozen-lockfile` 第一次被本机 TLS 拦截挡住（`ghostty-web` 的 github tarball
+  `UNABLE_TO_VERIFY_LEAF_SIGNATURE`）。出路是把钥匙串根束喂给它而不是关校验：
+  `security find-certificate -a -p` 导 `SystemRootCertificates.keychain` + `System.keychain`
+  （后者含 SteamTools/BeyondDimension 那张自签根）合成 `/var/tmp/ca-with-proxy.pem`，
+  `--cafile=` 之后 131 包 65 s 装完，exit 0。**判据**：装完之后 kernel-pin 那条红才转绿——
+  此前那条红是 worktree 里装的内核与分支 pin 不同源，不是代码缺陷。
+- **不推主干、不取号、不发版**，并且理由不是"保守"：`harness/tools/release-artifact.mjs` 要求
+  "发布物 == 主干"，而那条线此刻正在版本线上跑。本轮产物是一条自洽的分支，落地由它决定。
+
+### 本批落地的内容
+
+1. **计划的第二个生产者**（`src/tool/glasspane/kernel.ts`）：`readRunPlan(env, projectDirectory)`。
+   显式交接仍优先（`source: "env"`），没有交接时读工程自己的 `.iterate/run-plan.json`
+   （`source: "project"`）——这正是 `iterate-harness/…/run_plan.py:plan_path` 的落点。目录取插件
+   实例的 `input.directory` 而非 `process.cwd()`，因为一个 harness 进程可以持有多个项目的 session。
+   不变的是那三条拒绝形状：不在 state root 里读、文件不在＝未计划（覆盖率行继续沉默）、
+   读不通/不合 schema 各自具名拒绝；且 remedy 不再让人去 unset 一个从没设过的变量（这条是新增的
+   断言，`a half-written project plan is refused, and the remedy does not blame a variable nobody set`）。
+2. **压缩开始按维度决定丢谁**（`src/plugin/glasspane-compaction.ts`）：`selectAnchors` 把
+   `slice(-MAX_ANCHORS)` 换成内核 `dimensionContext` 账目排的三档——unplanned 维度历史先丢、
+   无声明维度其次、计划内最后，档内按新旧；块里打印实际用的规则。没有计划或计划读不通退回
+   纯 recency，与改版前逐字一致（这条由 `the block names the rule it used, and never claims
+   recency when it did not` 双向钉住）。
+3. **一处诚实性收口**：删掉了插件头注里那句 "Wiring the plan … is open work"，换成对当前两条
+   通道与残留不对称的实测描述（能带维度锚点的调用仍只有出 `evidencePack` 的那一个方法）。
+   `MAX_ANCHORS` 改为 `export const`，测试引用同一个数而不是抄一个。
+
+### 闸与实跑（每条都在本轮亲跑，退出码取脚本自身，不接管道）
+
+- `fork-diff --record` 后 `--check` rc 0：`4640/6732 byte-identical · 285 edited · 100 added · 1707 deleted`。
+  复跑前 `--check` rc 1，逐文件点名**只有我这四个文件**"our own file moved"——没有我不认识的移动。
+- `tool-surface --record` 后 `--check` rc 0：面 B `10529 → 10667 LOC (+138)`，归因
+  `+93 glasspane-compaction.ts / +45 kernel.ts`（与我改的两个源文件逐字对上，测试文件不在计量面内）；
+  面 A `11422 LOC` 未动。两条 `!` 是历史已花的越线判定，棘轮仍在。
+- fork 固定点名单（父仓 CI 那条 `bun test` 的九个文件）**200 pass / 0 fail / 1044 expect**。
+  本轮新增 15 条用例：`selectAnchors` 7 条、`readRunPlan` 项目生产者 8 条。
+- 尺子层其余全绿：`surface-semantics` 0 命中（23 文件）、`brand-surface` 血缘 9607/3317 未变、
+  `product-surface` 6525 条一致 / 0 问题（`glasspane-harness@0.10.5`）、`hook-liveness` 21 钩子对
+  `anomalyco/opencode@v1.18.32` 无漂移、`kernel-pin --check` iterate-kernel@0.1.10 + 26 个契约文件、
+  `kernel-conformance` 16 份语料逐条与金样同答案（`recipe-config.ok-01` 也在其中，`[golden]`）、
+  `check-kernel-corpus` / `check-version`（1.20.2）/ `check-doc-links` / `check-workflows`（5 份）全 0。
+- 没跑的照实写：fork 全量 `bun test`（只跑了 CI 定点名单）、上游 13 条时序敏感全量用例（本机不可靠，
+  挂账未变）、`installer-selftest` 与整包 `bun run script/build.ts --single`（本批未动发布机构与
+  构建面，产物级判据仍由发布线跑）、Swift 侧零改动故未跑。
+
+### 反向验证（六发，每发都跑在真代码上，按自带备份 + sha256 逐字核回）
+
+备份 `2904354a…`（compaction）与 `35c00d25…`（kernel），每发跑完 `cp` 回原文件并复算 sha；脚本
+`/var/tmp/gp-mutate.sh`，日志 `/var/tmp/gp-mut-*.log`。有一发**第一版打不红**，那条现场一起记着，
+因为它说明的是"这条主张当时没有闸"，不是"这条主张不成立"。
+
+| 打在哪 | 结果 |
+|---|---|
+| `selectAnchors` 的比较器写成 `left.rank - right.index`（我先真写错过一次，两条用例同时红：`unplannedDropped` 5→4 与 6→4） | 修好后绿；这条表的第一行就是那次真错的现场 |
+| M1 unplanned 维度不再优先被丢（`rankOf` 恒返回计划内档） | 具名红 2 条：`history of a dimension this run never planned goes first…`、`unattributed history is dropped only after unrelated history` |
+| M2 项目没有计划文件时合成一个默认计划 | 具名红 1 条：`a project with no plan file is unplanned, not a refusal` |
+| M3 去掉 state root 守卫，root 里的项目候选也照读 | 具名红 1 条：`a project living inside the engine's state root is not read as a plan` |
+| M4 读不通的 remedy 统一改回"unset GLASSPANE_RUN_PLAN" | 具名红 1 条：`a project plan that cannot be read is a named read failure, not silence` |
+| M5 按维度丢弃却仍输出"showing the most recent" | 具名红 1 条：`the block names the rule it used, and never claims recency when it did not` |
+| M6 幸存锚点按档位顺序而非会话时间序输出 | **第一版零红** —— 当时只有"全同档"的数据在断言顺序，mixed-rank 那条没断言。补上 `unattributed history…` 里的时间序断言（`indices.slice(0,2) == [0,1]`）后同一发具名变红 |
+
+### 交下一轮
+
+- 场景② 在产品侧还剩的那条不对称**不是**本批能收的：能带 `dimension` 锚点的调用仍只来自
+  `last_evidence` 那一个会出 `evidencePack` 的方法（`Dispatcher.swift:156`），所以
+  `gp_act/gp_observe/gp_attach/gp_diagnose` 上声明的维度进不了锚点。要收它得动引擎侧的
+  证据发射面，属主仓产品线与 Swift 侧，不是 fork 定制面。
+- 本轮与 `iterate-skill` 分支 `it-bidi-20261024`（场景④）同批提出；两条分支互不重叠，
+  合并次序不影响各自的闸。
+
 ## 2026-10-24（第十七次会话）· 0.10.4：一条高危只在 4.x 修，于是 zod、内核、面 A 走同一条线；"不是我改坏的"必须是量出来的
 
 ### 开工与隔离

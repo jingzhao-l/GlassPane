@@ -10,7 +10,26 @@ contract does not).
 
 ## [Unreleased]
 
-（空。本批的账归入 `0.10.5`。）
+### Added — 场景②：计划交接落到生产路径上，压缩开始按维度决定丢谁
+
+- `readRunPlan(env, projectDirectory)` 有了第二个生产者。此前 fork 只认
+  `GLASSPANE_RUN_PLAN`，而全仓实测唯一设过它的地方是 operator 命令
+  `check_run_plan_channel.py`——本插件自己的注释就写着"as shipped, the production path reaches
+  this with no plan"。现在没有显式交接时读**本工程自己的** `.iterate/run-plan.json`（即
+  iterate-harness `write_run_plan` 的落点），目录取插件实例的 `input.directory`，不是
+  `process.cwd()`：一个 harness 进程可以同时开好几个项目的 session，从 cwd 猜会拿别的项目的计划
+  给本项目记账。`RunPlanRef.source` 记下来路（`env` / `project`）。这不是"默认计划"：文件不在
+  仍算未计划，覆盖率那行继续沉默；engine state root 里的候选一律不读；读不通/不合 schema 各自
+  具名拒绝，且 remedy 不再让人去 unset 一个他们从没设过的变量。
+- `selectAnchors`：超过 `MAX_ANCHORS` 时的丢弃不再永远是"最近 N 条"。按内核 `dimensionContext`
+  自己的账分三档——本 run 从没声明过的维度历史先丢（就是 §8.5 row 2 的"优先压缩无关维度历史"）、
+  无声明维度的锚点其次、计划内的最后；档内按新旧。块里**写出用的是哪条规则**：按计划排的情况下
+  再说"showing the most recent"就是假话。没有计划或计划读不通→退回纯按新旧，与改版前一致。
+- 未动的：内核仍是唯一算账的地方（本模块不自行声明维度词表、不判证据语义），`MAX_ANCHORS` 从
+  `const` 改为 `export const` 以便测试引用同一个数而不是抄一个。
+
+判据与实测在 `SYNCLOG.md` 的 2026-10-25 那一条。分支 `gp-bidi-20261024`，**未取号、未发版、未推
+主干**——版本线与发布归在飞的那条每日线。
 
 ## [0.10.5] - 2026-10-24
 
