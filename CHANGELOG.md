@@ -91,6 +91,14 @@
   `node_modules/.bun` 一处，改成三条根扫描 + realpath 去重，并要求加载的版本等于
   `packages/opencode` 声明的那一个——说不出"产品加载的是哪一份"就 exit 2 拒答。同轮的自测里
   有一条**反过度反应**用例：软链与 store 里的字节是同一份拷贝，不得判成"两份"。
+- **第二条解析路径才是那条告警真正的住处**：#64 报的 manifest 是 `mcp-shell/package-lock.json`——面 A
+  作为独立工程的那把锁。CI 的 `mcp-shell` job 拿它当 cache key，`scripts/set-version.mjs` 的
+  `LOCK_DIRS = ['.', 'mcp-shell']` 也认它，而我只改了根锁，所以那条告警不会自己关。按仓库既有的方式
+  重生成（cwd 在 `mcp-shell`，`npm install --package-lock-only --no-workspaces`——`--no-workspaces`
+  正是 set-version 为这把锁选的标志），现在它是 `zod 4.6.7` + `iterate-kernel 0.1.10`，与根锁同号。
+- 顺带纠正我自己写在前一笔提交信息里的一句判断：我说过"CI 的 mcp-shell lane 走的是那把旧锁"——**不对**。
+  实测 `npm prefix` 在 `mcp-shell/` 里返回仓根，npm 会向上找到 workspace 根，所以 `npm ci` 装的是根锁的
+  4.6.7。真正没被盖住的是 Dependabot 的那张独立图与"把面 A 当独立工程装"这条路；两处现在都过了。
 ## [1.20.1] — 2026-10-23
 
 **版本判断：patch。** 对着本仓 1.6.2 那四项 patch 判据实测：状态文件的字段没动、退出码集合没动、
