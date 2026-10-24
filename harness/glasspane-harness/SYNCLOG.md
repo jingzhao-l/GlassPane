@@ -108,6 +108,37 @@
   **exit 2 + `NOT OBSERVED`**，并断言它不许说"no divergence"。本地先各打一发验过（脚本
   `/var/tmp/gp-provider-mutate.py`，三份文件按 sha256 核回），CI 里由 `rulers-selftest` 持续打。
 
+### 端到端回显链：第一次用真发布物跑通（以及本机那份为什么不算）
+
+10-22 那条"回显链的端到端要等父仓下次发布把带槽的壳装上本机才算闭合"今天可以判闭——但要按对象判，
+不能拿"机器上装的"当对象：
+
+- 走查用的是 **registry 上的 `glasspane-mcp@1.20.2`**，`npm pack` 装进隔离前缀
+  `/var/tmp/gp-e2e`（不动 `/usr/local` 那份），连的是本机活着的 daemon（`~/.glasspane/engine.sock`，
+  Oct 24 23:30 起），读的是证据库里一个真实 `op_01M35PAM…`。脚本 `/var/tmp/gp-e2e-walk.py`。
+- 读数：`gp_last_evidence {operationId, dimension:"security"}` 回 **2 个 content item**
+  （daemon 帧 + `dimension: security | declared by this call; …`）；`relay_answer` 逐 item 分类得
+  `state=answered`、`echoed_dimension="security"`、`annotations=1`；`record_observed_echo` 写进见证
+  stash；`echo_contestation` 对同意的声明回 `None`，对矛盾的声明回
+  **`KERNEL_E_DIMENSION_CONTEST`** 并把两侧各自的措辞带出来。这是 ②/#24 那条链第一次端到端有读数。
+- 同一份脚本指到 `/usr/local/bin/glasspane-mcp`（**1.6.2**）作对照：回包 1 个 item，
+  `GP_E_BAD_PARAMS: … Unrecognized key(s) in object: 'dimension'`。所以那句话要说准——不是"旧壳不回显"，
+  是**旧壳根本不接受这个入参**，失败是响的、不是静默的。本机全局那份仍是 1.6.2；把它升上去是用户的决定
+  （另一条线可能正在用它做真机走查），补这条的命令：`npm i -g glasspane-mcp@1.20.2`。
+
+### 两处"注释替代码说话"的账（本轮当场收）
+
+- `mcp-shell/src/dimension.ts` 的头注声称 `test/dimension.test.mjs` 会把广告出去的_limits_ 跟
+  `kernel/schemas/*.schema.json` 比——实测当时没有。本轮**把注释变成真的**（而不是删掉它换绿）：新增
+  一条腿遍历镜像的全部 schema，凡 `dimension` 字段、`dimensions` 数组、以及 `$defs/*Dimension/properties/id`
+  （run-plan 用的是第三种，只按名字找会漏掉它）都必须与壳广告的 pattern/上限一致，并带防空的
+  `found.length >= 2` 下限。两发控制（run-plan 的 `maxLength` 64→65、decision-log-entry 的 pattern
+  放宽成大写）各自点名变红，语料按 sha256 核回，`kernel/` 一个字节没提交改动。
+  `node --test test/*.test.mjs` = 621 pass / 0 fail。
+- 本页末段原来写着"R40 还等内核的 API（invariant 评估在内）"。本轮把它换成逐行的实测状态表
+  （上面 ③④⑤ 三段就是它的证据来源），并保留每一行**还只是陈述、没被量到**的那半——
+  一张只写"已闭合"的表下一页就会开始撒谎。
+
 ## 2026-10-24（第十七次会话）· 0.10.4：一条高危只在 4.x 修，于是 zod、内核、面 A 走同一条线；"不是我改坏的"必须是量出来的
 
 ### 开工与隔离

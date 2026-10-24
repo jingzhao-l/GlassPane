@@ -243,10 +243,20 @@ point.
    replacement commands above. `mcp-shell` consumes the published package now, so the mirror
    lost its last consumer, and `kernel/` at the repository root holds only the pinned corpus
    (`fixtures/` + `schemas/`), whose 26 files hash-match `contracts/kernel-pin.json` exactly.
-3. **The API questions the R40 list still needs** (invariant evaluation among them) remain
-   kernel-side work, to be asked for as a **contract proposal with fixtures** rather than as a
-   private fork of the kernel. Distribution is no longer one of them.
+3. **The API questions the R40 list needed — closed as of 2026-10-25, measured per row.** This
+   page spent several revisions carrying the sentence "what the two-way scenarios still wait on
+   is the kernel's API". That is no longer what the tree says, and the honest version is a list,
+   because the five rows did not all close the same way:
 
-Until those close, the honest sentence is: *the harness consumes the shared kernel as a
-pinned dependency; what the two-way scenarios still wait on is the kernel's API, not the
-registry.*
+   | Row | What makes it real today | What is still stated rather than measured |
+   |---|---|---|
+   | ① invariant → re-verification | the loop's publish site sends through the host's awaited MCP transport (`reverify_trigger`), the request is the kernel's own frame, and `recipeSteps` now has a producer (see below) | the engine's answer for a recipe step is a stated deferral, never a re-run |
+   | ② dimension-aware compaction | 面 B reads the plan from `GLASSPANE_RUN_PLAN` **or** the project's own `.iterate/run-plan.json`; `selectAnchors` ranks the drop by the kernel's own `dimensionContext` accounting and the block names which rule it used | a dimension declared on a method that emits no evidence pack still reaches no anchor — `last_evidence` is the engine's only emitting method |
+   | ③ evidence → decision log | each harness now verifies the chain the *other* one wrote: same three drafts, byte-identical ledgers (sha256 `eaa9dc7d…`), pinned samples in both test suites, and `fix_proof` reading a foreign ledger through the kernel's verifier | the two default ledger paths are still different files; sharing one is an operator choice via `GLASSPANE_DECISION_LOG` |
+   | ④ repair → invariant re-check → re-verify | the recipe hand-off (`glasspane_recipe.py`) plus the gate that reads only measured things — the round's invariant verdict, a held recipe, a chain-verifiable ledger line — and refuses by name when any is missing | neither product has a recipe executor, so the gate answers "may the recipe proceed", not "which step is next"; a progress pointer would have to be written by whoever performs the fix |
+   | ⑤ provider contract | both surfaces register through the kernel and both consume their registry on the live path; `harness/tools/provider-surface.mjs` reconciles the two tables by *running* them (identity, overlap agreement, the asymmetry ledger) | the asymmetry (面 B forwards `diagnose-pixel`/`diagnose-probed`, 面 A does not) is deliberate and recorded, not eliminated |
+
+So the honest sentence is: *the harness consumes the shared kernel as a pinned dependency, and
+each of the five two-way rows now has a producer, a consumer and a guard that can go red.* What
+remains open is named row by row above, and none of it is "the kernel's API" any more.
+

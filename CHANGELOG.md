@@ -22,6 +22,17 @@
 - **场景③④ 的跨仓部分**在另一条分支上（`iterate-skill`），本段的账只记父仓/harness 这一侧；
   两侧的字节级互认证据（同一条链、两个 writer 逐字节相同）记在
   `harness/glasspane-harness/SYNCLOG.md` 的 2026-10-25 一条。
+- **维度回显链第一次端到端有读数**：拿 registry 上的 `glasspane-mcp@1.20.2`（隔离前缀安装，
+  不动 `/usr/local`）连本机活着的 daemon 调 `gp_last_evidence {operationId, dimension}`，回包是
+  2 个 content item，逐 item 分类拿到 `echoed_dimension="security"`，写进见证后对矛盾的声明
+  回 **`KERNEL_E_DIMENSION_CONTEST`**。同一份走查指到本机那份 1.6.2 时是
+  `GP_E_BAD_PARAMS: Unrecognized key(s) in object: 'dimension'`——旧壳不是"不回显"，是**不接受这个入参**，
+  失败是响的。把本机全局壳升上去属用户的决定（另一条线可能正在用它做真机走查）。
+- **`mcp-shell` 的一条测试腿补真**：`src/dimension.ts` 的头注一直说测试会把广告出去的 dimension
+  上限跟 `kernel/schemas/*.json` 比，实测没有比。改的是测试而不是注释：遍历镜像全部 schema，
+  覆盖 `dimension` / `dimensions` / `$defs/*Dimension/properties/id` 三种形状（run-plan 用的是第三种），
+  带防空下限；两发控制（`maxLength` 64→65、pattern 放宽大写）各自具名变红后按 sha 核回，
+  `kernel/` 无提交改动。`node --test test/*.test.mjs` 621 pass / 0 fail。
 
 
 ## [1.20.2] — 2026-10-24
