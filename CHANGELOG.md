@@ -72,6 +72,25 @@
   义务的是 `harness/tools/*-selftest.(mjs|sh)` 的扫描；`SCAN_SET_FLOORS.selftests` 那个写了却没人读的
   数字也终于成了判据。
 
+### Fixed — 两条高危的 `zod` 告警从锁里消失，方式是让内核与面 A 走同一条 4.x 线
+
+- `GHSA-mrhx-c7xc-m3w5`（zod 校验超限集合时耗尽内存，high）只在 **4.6.6** 修，3.x 线不 backport。
+  父仓那两条 Dependabot 告警都指根 `package-lock.json` 里的 `zod@3.25.76`：一条来自 `mcp-shell`
+  的直接依赖，一条来自 `iterate-kernel@0.1.9` 的传递依赖。
+- 现在 `node_modules/zod` 只剩 **4.6.7** 一份（`npm ls` 的判据不是"manifest 改了"而是锁里再没有
+  别的号）。做法是把 `mcp-shell` 的开发依赖 `iterate-kernel` 一起追到 `0.1.10`——那份传递的 3.25.76
+  是内核自己声明的，不抬内核就抬不动这条链；内核侧的迁移在 `iterate-skill` 里带自己的用例与金丝雀
+  （见该仓 `d14da4b2`）。
+- **面 A 一行代码没改**：它早就写成 v4 形状（`z.strictObject`），`z.ZodTypeAny` 在 4.x 的 compat 里
+  还在。唯一被量出来的行为差是**拒绝文案的措辞**：同一份 schema、同一个输入，`issues[].code` 与
+  `path` 逐字相同，`message` 四条全变（`Required` → `Invalid input: expected string, received undefined`，
+  `Unrecognized key(s) in object: 'nope'` → `Unrecognized key: "nope"`）。全仓 grep（面 A、fork 子树、
+  tools/specs/docs、iterate-skill 的 src 与 tools、iterate-plugin）对旧文案 **0 命中**——没有任何
+  消费者按那句话匹配，改的是代理读到的散文，不是协议。
+- 顺手抓到并修掉的**我自己那条**：`harness/tools/mcp-redirect-policy.mjs` 的定位原来只看
+  `node_modules/.bun` 一处，改成三条根扫描 + realpath 去重，并要求加载的版本等于
+  `packages/opencode` 声明的那一个——说不出"产品加载的是哪一份"就 exit 2 拒答。同轮的自测里
+  有一条**反过度反应**用例：软链与 store 里的字节是同一份拷贝，不得判成"两份"。
 ## [1.20.1] — 2026-10-23
 
 **版本判断：patch。** 对着本仓 1.6.2 那四项 patch 判据实测：状态文件的字段没动、退出码集合没动、

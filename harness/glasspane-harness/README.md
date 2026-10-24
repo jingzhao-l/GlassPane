@@ -109,7 +109,7 @@ npm install -g glasspane-harness
 bun add -g glasspane-harness
 
 # or one-click (npm first, GitHub release asset as fallback)
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.10.3/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.10.4/scripts/install.sh | bash
 ```
 
 Two commands are installed: **`glasspane-harness`** and the short alias **`gp-harness`**.

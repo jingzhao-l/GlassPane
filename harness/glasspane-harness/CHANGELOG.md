@@ -10,7 +10,40 @@ contract does not).
 
 ## [Unreleased]
 
-（空。本批的账归入 `0.10.3`。）
+（空。本批的账归入 `0.10.4`。）
+
+## [0.10.4] - 2026-10-24
+
+判据：patch（`release-artifact` 那条"发布物 == 主干"的等式要求这一号——本轮动的是依赖字节，
+不是主干上的一段账；理由与 0.10.1–0.10.3 同一条等式）。
+
+### Changed — zod 4.1.8 → 4.6.7，内核追到 `iterate-kernel@0.1.10`
+
+- **为什么必须走这一版**：`GHSA-mrhx-c7xc-m3w5`（zod 校验超限集合时耗尽内存，**high**）的官方修复
+  只在 **4.6.6**，3.x 线不 backport，而本 workspace 的 catalog 钉的 4.1.8 就在脆弱区间 `< 4.6.6` 内。
+  取的 4.6.7 发布于 2026-10-12（本机读数 12 天），是 `minimum-release-age: 3 天` 那条闸允许的最新的号。
+- **内核跟着走同一条线**：`kernel-pin.mjs --record` 的重钉读数里**只有四行动**——version、lockKey、
+  integrity、recordedAt；随包 **26 份契约文件的 sha256 一字未变**。两份发布物（0.1.9 / 0.1.10）逐目录
+  对比给出同一答案：`schemas/` 与 `fixtures/` 完全相同，只有 `dist/*.d.ts` 里 strict object 的
+  TypeScript 发射从 `"strict", z.ZodTypeAny, …` 变成 `z.core.$strict`，以及那一份刻意的运行时修复
+  （错误路径里出现符号时按 description 渲染，因为 `String(symbol)` 会抛）。换的是发光形状，不是判决。
+- **读数**（本机，逐步取退出码）：`bun install --frozen-lockfile` 与两份 manifest 一致；
+  四个包 typecheck 全 0 错（`packages/opencode`、`packages/tui`、`packages/sdk/js`、`packages/plugin`）；
+  9 个固定点文件、TUI 渲染快照、
+  `publish.ts --dry-run`、`kernel-pin --check`、`kernel-conformance` 全绿。
+  父仓那侧 `mcp-shell` 跟着走同一条线：620/620 通过，`check-kernel-corpus` 报
+  `26 corpus file(s) match the pin (iterate-kernel@0.1.10)`，两条腿（本机装的、面 A 捆的）同号。
+
+### 本版没盖住的（照实写）
+
+- 第三方自己的两份 zod 仍在脆弱区间：`@modelcontextprotocol/sdk` 解析到 4.4.3，
+  `gitlab-ai-provider` 钉死 3.25.76。它们不是本 workspace catalog 那一份，也不是我们 import 的那一份
+  （三条根扫描 + realpath 去重后，活链接只有 4.6.7）。把它们也抬到 4.6.7 需要 `overrides`——那是替
+  别人决定它没声明过的运行时形状，本轮不做，记在这里。
+- fork 的全量 `bun test` 里 6 个文件共 82 条具名失败（provider 16 / plugin.install 15 / session.prompt 36 /
+  project 8 / transform 4 / httpapi-provider 3）。同一组文件在**改前那棵树**（zod 4.1.8 + 内核 0.1.9）
+  与**改后这棵树**上逐文件同数、pass 数也同数，所以不是本轮带进来的；但 CI 只跑 9 个固定点文件，
+  这一族失败在 CI 里没有任何东西看得见——"套件写了而 lane 不跑"那条事故的同一种形状，留给下一轮。
 
 ## [0.10.3] - 2026-10-24
 

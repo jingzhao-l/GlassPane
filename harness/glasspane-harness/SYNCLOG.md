@@ -2,6 +2,96 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-24（第十七次会话）· 0.10.4：一条高危只在 4.x 修，于是 zod、内核、面 A 走同一条线；"不是我改坏的"必须是量出来的
+
+### 开工与隔离
+
+- 起点 trunk `ca38f493`（同一天上一批：MCP 重定向闸接进父仓 `harness-rulers`，CI run 314 十格绿），
+  工作树 `/Volumes/Eng-Dev/.worktrees/gp-deps`（分支 `gp-mcp-sdk`）。触发点是推主干时 GitHub 报的
+  两条 Dependabot 告警：`GHSA-mrhx-c7xc-m3w5`（zod 校验超限集合耗尽内存，high），两条都指根
+  `package-lock.json` 里的 `zod@3.25.76`——一条 `mcp-shell` 直接依赖，一条 `iterate-kernel@0.1.9` 传递。
+- 官方修复只在 **4.6.6**，3.x 不 backport。用户裁决"全修：清掉父仓两条告警"，所以这条链必须穿过
+  三个仓：内核（发 `iterate-kernel@0.1.10`）→ fork（catalog + pin）→ 面 A（直接依赖与锁）。
+- 归属实验另开一棵 **detached worktree** `gp-zod4-base`（`git worktree add --detach … HEAD`，装
+  4.1.8 + 0.1.9），不在正在迁移的树上动手——两棵树都装完再逐文件对，才知道红是谁带的。
+
+### 内核侧（iterate-skill `d14da4b2`，发 `iterate-kernel@0.1.10`）
+
+- 唯一真需要改的语义在一处：`SchemaErrorLike.path` 从 `(string | number)[]` 改成 `PropertyKey[]`，
+  配 `segmentText`。zod 4 把 issue path 标成 `PropertyKey[]`，而 `String(symbol)` 运行时**抛**——
+  schema 拒绝是这个包正常的"不行"，它不该在把"不行"说出口的那一刻崩。符号按 description 渲染，
+  无名符号写 `<symbol>` 而不是消失。新增 7 条用例驱动它（含把真 `ZodError` 递进渲染器那条）。
+- 金丝雀改成**对应关系**而不是钉死字符串：按声明的 major 选发射形状，并加一条 `doesNotMatch`——
+  一份 `.d.ts` 里同时出现两个 major 的发射，正是 resolver 与 package.json 不一致的形状，也是当初
+  schema 被静默类型成 `any` 的起点。三次变异各自具名红：渲染器退回 `String(segment)` ⇒
+  "a symbol in an issue path is rendered" 红；声明改 3.x 而发射仍是 4 ⇒ "matches neither the zod-3 emission"；
+  往声明里塞一份 3 的形状 ⇒ "emission from BOTH zod majors"。恢复一律用自带备份 + sha256 核回，
+  没有 `git checkout`/`git stash`。读数：234 → 241 条，全绿。
+
+### fork 侧（trunk，取号 0.10.4）
+
+- catalog `zod` 4.1.8 → **4.6.7**（4.6.7 发布于 2026-10-12，12 天，过 `minimum-release-age: 3 天`；
+  是闸允许的最新一行，不是随手取的最大号）；`packages/opencode` 的 `iterate-kernel` 0.1.9 → 0.1.10。
+- `kernel-pin.mjs --record` 的读数只有四行动（version / lockKey / integrity / recordedAt），
+  **26 份随包契约文件的 sha256 一字未变**。两份发布物逐目录对（`diff -rq` 0.1.9 vs 0.1.10 的 tarball）
+  同一答案：`schemas/`、`fixtures/` 完全相同，只有 `dist/*.d.ts` 的 strict-object 发射变成
+  `z.core.$strict`，加上 `dist/errors.js` 那一份刻意的运行时修复。换的是发光形状，不是判决。
+- `bun install --frozen-lockfile` 第一次在本机红在 `ghostty-web` 的 GitHub tarball
+  （`UNABLE_TO_VERIFY_LEAF_SIGNATURE`）——代理 MITM，老问题。按既定出路重导钥匙串 CA 束
+  （178 张）喂 `--cafile`，**没有**关校验。清空 `node_modules` 重装后：2901 包、`no changes`，
+  四个包 typecheck（opencode/tui/sdk-js/plugin）全 0 错，9 个固定点文件、TUI 快照、
+  `publish.ts --dry-run`、`kernel-pin --check`、`kernel-conformance` 全绿。
+  中途一次假红要说清：第一次 in-place 安装留下混合 store（zod 是 drizzle 的 peer，peer 哈希换了），
+  typecheck 报的是两份 `drizzle-orm` 的结构冲突——不是 zod 4 坏了，是树脏了；干净重装后同一批命令全绿。
+- 一条自己脚本的缺陷顺手修掉：replica 用步骤名当日志文件名，`sdk/js` 里的斜杠把输出指向一个不存在
+  的目录，那条 typecheck 其实**从没跑过**却回了 rc 1。改成把 `/` 换成 `_` 后单跑，rc 0。
+
+### 面 A（父仓根，`mcp-shell`）
+
+- 代码 **0 行改动**：它早就写成 v4 形状（`z.strictObject`），`z.ZodTypeAny` 在 4.x 的 compat 里还在。
+  把 devDependency `iterate-kernel` 一起追到 0.1.10 之后，`npm install` 报 `removed 1 package`，
+  锁里 `node_modules/zod` 只剩 **4.6.7** 一份——这才是那两条告警的终态判据，不是"manifest 改了"。
+- 读数：`tsc` 0 错，`node --test test/*.test.mjs` **620/620**，`npm run bundle` rc 0（8 份 schema
+  重捆），`scripts/check-kernel-corpus.mjs` 回 `26 corpus file(s) match the pin (iterate-kernel@0.1.10)`
+  且两条腿（本机装的 / 面 A 捆的）同号。
+- 唯一被量出来的行为差是**拒绝文案的措辞**：同一 schema、同一输入，`code` 与 `path` 逐字相同而
+  `message` 四条全变（`Required` → `Invalid input: expected string, received undefined`；
+  `Unrecognized key(s) in object: 'nope'` → `Unrecognized key: "nope"`）。全仓 grep（面 A / fork 子树 /
+  tools+specs+docs / iterate-skill 的 src+tools / iterate-plugin）对旧文案 **0 命中**——没有消费者按那句
+  话匹配，改的是代理读到的散文，不是协议。这条写在父仓 CHANGELOG 与这里，不写成"无影响"。
+
+### "82 条红不是我带的"——量出来的过程
+
+- 全量 `bun test`（packages/opencode）里 6 个文件共 82 条具名失败。两棵树同一组文件、隔离跑，
+  逐文件同数、pass 数也同数：
+  `transform 4/559`、`provider 16/94`、`plugin/install 15/6`、`session/prompt 36/40`、`project 8/32`、
+  `httpapi-provider 3/2`（BASE = 4.1.8+0.1.9，NEW = 4.6.7+0.1.10）。所以不是本轮带进来的。
+- 但形状要记：CI 只跑 9 个固定点文件，这 82 条**在 CI 里没有任何东西看得见**。这与本仓 2026-10-16
+  那次"测试写了而无人跑"是同一种缺陷，只是方向相反（跑得起、没人看）。留给下一轮判断，不冒充已修。
+
+### 本轮记在自己头上的那条事故
+
+- `git push … | tail` 的退出码是 `tail` 的。上一批就吃过一次，这次在同一个位置又吃：内核那笔
+  push 被 `pre-push` 闸拦下（`check: needs ruff==0.16.8 (found  on PATH, 0.16.3 in python3)`），
+  管道把 rc 洗成 0，于是 `&& npm publish` 照跑——**先发了 npm，主干还停在 0.1.9**，与
+  `docs/release.md` "先主干后发布"的顺序相反。
+- 补救按闸自己的 remedy 走，没有 `--no-verify`：`/usr/local/bin/python3 -m pip install --user ruff==0.16.8`
+  （pip 走 SOCKS 会 `Missing dependencies for SOCKS support`，用本仓 RELEASE.md 记的那条 `no_proxy`
+  覆盖索引主机绕过），再把 `~/Library/Python/3.11/bin` 放进 PATH，让 pre-push 用**它自己要求的版本**
+  跑通（`check: ruff 0.16.8 via 'ruff'` → All checks passed），push 成 `e24423ad..d14da4b2`。
+- 顺序颠倒的代价由产物级核对补平：下载已发布的 `iterate-kernel@0.1.10` tarball，
+  声明 `zod 4.6.7`、`z.core.$strict` 发射 72 处、v3 尾巴 `"strict", z.ZodTypeAny,` 0 处、
+  `segmentText` 在 `dist/errors.js` 的字节里，18 fixtures + 8 schemas 随包，54 份导出 schema 全部
+  拒得掉且路径可渲染（0 条渲染失败）——发布的字节与主干那笔提交要发的东西一致，且没跑过没跑过的东西。
+
+### 没跑与不做的
+
+- 第三方自己的两份 zod 仍在 `< 4.6.6` 里：`@modelcontextprotocol/sdk` 解析到 4.4.3、
+  `gitlab-ai-provider` 钉死 3.25.76。抬它们需要 `overrides`，那是替别人决定它没声明过的运行时形状，
+  本轮不做。
+- 父仓的这两条 Dependabot 告警要等 main 推上去后由 Dependabot 重扫才关；关没关按 API 读数说，不按"改了"说。
+- fork CI 的 `bun install` 那步依旧不在 tag 之前跑 `patched-deps`（产物级那条 lane 盖的是发布物）。
+- `engine`（Swift）与安装器这轮没动，因此没重跑；它们与本批无共享字节。
 ## 2026-10-23（第十六次会话）· 0.10.1：升级会静默摘掉 fork 补丁这件事，现在有一把能具名变红的尺子
 
 ### 开工与隔离
