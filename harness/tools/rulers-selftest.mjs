@@ -325,53 +325,11 @@ if (failures.length) {
   console.error(`rulers-selftest: ${failures.length} control(s) failed to behave as claimed`)
   process.exit(1)
 }
-// 15. provider-surface: the two tool surfaces describe ONE provider contract, and the duplicated
-// half of that description is two hand-typed files. Each control below moves exactly one claim on
-// one surface and requires the rule that owns that claim to name itself; control 18 is the one that
-// matters most, because a ruler that cannot read either surface has observed nothing and must not
-// answer "no divergence".
-const PS_TOOL = "harness/tools/provider-surface.mjs"
-
-mustGoRed(
-  "mcp-shell/src/providers.ts",
-  "provider-surface/overlap-agreement",
-  (text) => text.replace('{ name: "diagnose", requires: ["ax-event", "attribution", "circuit-breaker"] }', '{ name: "diagnose", requires: ["ax-event", "attribution"] }'),
-  PS_TOOL,
-  ["--check"],
-  1,
-  ["overlap-agreement: 'glasspane-engine-ae/diagnose'"],
-  ["provider-identity"],
-)
-
-mustGoRed(
-  "harness/glasspane-harness/packages/opencode/src/tool/glasspane/providers.ts",
-  "provider-surface/provider-identity",
-  (text) => text.replace('export const GLASSPANE_AE_PROVIDER_ID = "glasspane-engine-ae"', 'export const GLASSPANE_AE_PROVIDER_ID = "harness-engine-ae"'),
-  PS_TOOL,
-  ["--check"],
-  1,
-  ["provider-identity"],
-)
-
-mustGoRed(
-  "harness/contracts/provider-surface.json",
-  "provider-surface/asymmetry-ledger",
-  (text) => json(text, (golden) => golden.oneSided.push("shell:glasspane-evidence/selftest-ghost")),
-  PS_TOOL,
-  ["--check"],
-  1,
-  ["asymmetry-ledger"],
-)
-
-mustGoRed(
-  "harness/tools/provider-surface-runner.ts",
-  "provider-surface/cannot-measure-is-not-a-pass",
-  (text) => text.replace("shellProviderDrafts", "shellProviderDraftsRenamedBySelftest"),
-  PS_TOOL,
-  ["--check"],
-  2,
-  ["NOT OBSERVED"],
-  ["no divergence"],
-)
+// provider-surface's own controls live in `harness/tools/provider-surface-selftest.mjs`, a separate
+// step placed AFTER `bun install` in this job. They cannot live here: this battery runs with no fork
+// workspace installed, so a ruler that reads two resolved `providers.ts` files would answer exit 2
+// ("NOT OBSERVED") and the control would be reporting the absence of a dependency rather than the
+// presence of a guard — the ordering lesson `kernel-pin` and the redirect-policy selftest each
+// already carry a comment about.
 
 console.log("rulers-selftest: every guard named its own rule, every mutation was restored by sha256")

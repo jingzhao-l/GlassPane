@@ -274,13 +274,6 @@ jobs:
       - name: Neither surface started judging evidence semantics
         run: node harness/tools/surface-semantics.mjs --check
 
-      # 两个工具面对同一个 provider 契约说的话必须对得上（综述 §8.5 row 5）。两侧各自建注册表、
-      # 各自的测试只跟自己比，于是"重叠的那半是手抄两遍的"这件事一直没有读者：面 B 的
-      # `diagnose requires [...]` 与面 A 的同一行分开漂，CI 不会说任何东西。这条尺子跑的是两侧的
-      # 真代码（runner import 两个模块），不是文本；测不到就 exit 2 报 NOT OBSERVED，不 exit 0。
-      - name: The two surfaces' provider registrations reconcile
-        run: node harness/tools/provider-surface.mjs --check
-
       - name: No unrecorded brand drift
         run: node harness/tools/brand-surface.mjs --check
 
@@ -373,6 +366,25 @@ jobs:
       - name: Kernel behaviour answers as recorded (fixtures through the installed kernel)
         working-directory: harness/glasspane-harness
         run: bun script/kernel-conformance.mjs
+
+      # 两个工具面对同一个 provider 契约说的话必须对得上（综述 §8.5 row 5）。两侧各自建注册表、
+      # 各自的测试只跟自己比，于是"重叠的那半是手抄两遍的"这件事一直没有读者：面 B 的
+      # `diagnose requires [...]` 与面 A 的同一行分开漂，CI 不会说任何东西。这条尺子跑的是两侧的
+      # **真代码**（runner import 两个 providers.ts），不是文本。
+      # 它必须排在上面那次 `bun install` 之后：没有安装，runner 两个 import 都解析不到，尺子会
+      # 如实回答 exit 2「测不了」——那才是此刻正确的红（10-16 那条 kernel-pin 事故的反面写法）。
+      - name: The two surfaces' provider registrations reconcile
+        run: node harness/tools/provider-surface.mjs --check
+
+      - name: "The provider reconciliation gate can still go red, for each rule separately"
+        run: |
+          out="$(node harness/tools/provider-surface-selftest.mjs 2>&1)" || rc=$?
+          rc="${rc:-0}"
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::provider-surface 的自测以 exit $rc 失败。上面 FAIL 那行点名的是哪条规则退化成了通用文本、或干脆不红。remedy：修 harness/tools/provider-surface-selftest.mjs 与 harness/tools/provider-surface.mjs 的对应分支，别改期望值——四发控制里第三、第四条分别钉的是「金样说谎要红」与「测不了不许算过」，放宽任何一条都让这把尺子退回只能绿。"
+            exit "$rc"
+          fi
 
       # 下面两把尺子的**自测**：写好了却没有任何 lane 跑过它们（grep 全仓：既不在 workflow 里，
       # 也不在 package.json 的脚本里，第三把住在下面那条 macOS job）。这正是本条 lane 开篇记的那次

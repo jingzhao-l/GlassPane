@@ -102,11 +102,17 @@
 - 金样 `harness/contracts/provider-surface.json` 实记：面 B 5 个方法 / 面 A 3 个 / 重叠 3 个 /
   单边 2 个（`harness:glasspane-engine-ae/diagnose-pixel`、`harness:glasspane-engine-ae/diagnose-probed`）。
 - `--record` 拒绝在脏树上写（与 `fork-diff` 同一条纪律：并行 lane 的未提交行会被洗进别人的基线）。
-- 四发控制接进 `harness/tools/rulers-selftest.mjs`（编号 15–18），每发要求**具名**变红且不许串规则：
-  面 A 少一项前置 → `overlap-agreement` 且不许报 `provider-identity`；面 B 改 id → `provider-identity`；
-  金样里塞一条不存在的单边方法 → `asymmetry-ledger`；把 runner 的 import 名改掉让两侧读不出来 →
-  **exit 2 + `NOT OBSERVED`**，并断言它不许说"no divergence"。本地先各打一发验过（脚本
-  `/var/tmp/gp-provider-mutate.py`，三份文件按 sha256 核回），CI 里由 `rulers-selftest` 持续打。
+- 四发控制先接进 `rulers-selftest.mjs`（编号 15–18），**独立复核时才发现那个位置是错的**：那条 job
+  把这一步排在 `Install the pinned bun` 与 `Install the fork workspace` 之前，干净检出里两侧
+  `providers.ts` 的 import 都解析不出来，尺子会如实回答 exit 2「测不了」——控制拿到 2 而不是 1，
+  整条 lane 恒红。这正是 2026-10-16 那次 kernel-pin 事故的镜像（那次的修法正是把需要安装的门挪到
+  安装之后）。现在四发挪进独立的 `harness/tools/provider-surface-selftest.mjs`，与
+  `provider-surface --check` 一起排在 `bun install` 之后；`rulers-selftest.mjs` 里留一段注释写明
+  为什么它们不能待在那儿。每发仍要求**具名**变红且不许串规则：面 A 少一项前置 →
+  `overlap-agreement`（断言不许报 `provider-identity`/`asymmetry-ledger`）；面 B 改 id →
+  `provider-identity`；金样塞一条不存在的单边方法 → `asymmetry-ledger`；改坏 runner 的 import →
+  **exit 2 + `NOT OBSERVED`** 且不许说 "no divergence"。四发本地各打过一发（脚本
+  `/var/tmp/gp-provider-mutate.py`，三份文件按 sha256 核回）。
 
 ### 端到端回显链：第一次用真发布物跑通（以及本机那份为什么不算）
 
