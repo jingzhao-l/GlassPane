@@ -3742,7 +3742,7 @@
     },
     {
       "file": "docs/kernel-integration.md",
-      "forkHash": "61b89b63ededb30c7fc577a27eabfa2871e61c7a"
+      "forkHash": "0ee0d87e19268dd6798e17a0436027e13e903ac8"
     },
     {
       "file": "docs/migrate-from-opencode.md",
@@ -3938,7 +3938,7 @@
     },
     {
       "file": "SYNCLOG.md",
-      "forkHash": "d0bc20c4da11f633b90fd322dc4e0504f883d707"
+      "forkHash": "7018d42096515d37398bf8aa283fe37fcc11ad02"
     }
   ]
 }
