@@ -10,7 +10,31 @@ contract does not).
 
 ## [Unreleased]
 
-（空。本批的账归入 `0.10.2`。）
+（空。本批的账归入 `0.10.3`。）
+
+## [0.10.3] - 2026-10-24
+
+判据：patch（`release-artifact` 那条"发布物 == 主干"的等式要求这一号，理由与前两版同一条）。
+
+### Fixed — 产品发出去的字节里那条 critical 覆盖
+
+- **`dompurify` 3.4.16 → 3.4.17**（`packages/ui`、`packages/session-ui` 的依赖，也就是发布物里那个
+  embedded web app 的代码路径）。逐条把真版本号代入 GHSA 的 vulnerable range 算出覆盖 3.4.16 的是三条：
+  GHSA-cg2g-xh64-v4q7 **critical**（`>= 3.4.4, <= 3.4.16`）、GHSA-mrv2-3pqr-j5jr **high**（`<= 3.4.16`）、
+  GHSA-c6gr-qvv4-5v3f low（`<= 3.4.16`）。
+- **顺带拆掉 catalog 里的那颗雷**：`workspaces.catalog.dompurify` 钉的是 3.3.1，同样落在 `<= 3.4.16` 内。
+  它当下没有任何引用方（两个引用方都写死版本），但下一个写 `"dompurify": "catalog:"` 的包会静默拿到
+  一条高危副本——与本轮 MCP SDK 那件事同一族形状：问题不在声明，而在声明与解析之间那条没人看的路。
+  三个位点因此一起改到 3.4.17，而不是只改 dependabot 提到的两个。
+- 取 3.4.17 是这条 workspace 的 `minimum-release-age: 3 天` 闸允许的号（发布于 2026-10-12，11.5 天），
+  不是"最新"。
+
+验证判据落在"图里与装上的都过线"，不是"manifest 改了"：`bun.lock` 只解析 `dompurify@3.4.17`，
+两个 workspace 的 `node_modules/dompurify` 链接都指向 3.4.17，`--frozen-lockfile` 回 "no changes"。
+过程中被自己的断言挡下一次误判：`node_modules/.bun` 里还留着一条 `dompurify@3.4.16`——bun 不回收
+store；分清"产品加载得到的"（看链接）与"缓存里残留的"之后确认是孤儿并清掉，判据也改成看链接。
+`ui` 与 `session-ui` 的 typecheck、各自测试、以及 web app 的 `bun run build` 全部 rc 0；
+`patched-deps --check` 仍 18/19；`product-surface` / `tool-surface` / `check-workflows` 绿。
 
 ## [0.10.2] - 2026-10-23
 
