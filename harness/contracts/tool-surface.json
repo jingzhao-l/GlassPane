@@ -1170,7 +1170,7 @@
       },
       "testsExcluded": {
         "files": 39,
-        "lines": 4789
+        "lines": 4842
       },
       "kernelPin": "harness/glasspane-harness/contracts/kernel-pin.json",
       "kernel": {

@@ -6,7 +6,7 @@
   "counts": {
     "identical": 4640,
     "edited": 285,
-    "added": 100,
+    "added": 101,
     "deleted": 1707
   },
   "edited": [
@@ -378,6 +378,7 @@
     "packages/opencode/test/config/glasspane-project-plugin-trust.test.ts",
     "packages/opencode/test/config/project-config-dirs.test.ts",
     "packages/opencode/test/effect/glasspane-env-flag-resolution.test.ts",
+    "packages/opencode/test/fixtures/glasspane-chain-python-written.jsonl",
     "packages/opencode/test/installation/glasspane-registry-pin.test.ts",
     "packages/opencode/test/lib/kernel-contract.ts",
     "packages/opencode/test/plugin/glasspane-compaction.test.ts",
@@ -3852,6 +3853,10 @@
       "forkHash": "f5939f01e693356b976630dcd6515e8d3d9e722a"
     },
     {
+      "file": "packages/opencode/test/fixtures/glasspane-chain-python-written.jsonl",
+      "forkHash": "d484985d3f99a4bd034fce8bc25fce1e35438af2"
+    },
+    {
       "file": "packages/opencode/test/installation/glasspane-registry-pin.test.ts",
       "forkHash": "a65fdf5cafe8f21122d556c684a178dc80578651"
     },
@@ -3881,7 +3886,7 @@
     },
     {
       "file": "packages/opencode/test/tool/glasspane-kernel.test.ts",
-      "forkHash": "57b51fa15cfba7d7bf0549cdf814f41a69acab42"
+      "forkHash": "45a2faf2f33ad9d3db3ca073494fe991aa6d474f"
     },
     {
       "file": "packages/opencode/test/tool/glasspane-provider-registration.test.ts",
