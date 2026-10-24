@@ -380,6 +380,44 @@ store 留下的孤儿，产品加载不到。分清"链接指哪"与"缓存里�
   git 传输慢到触发低速中止（`curl 28`，两次，64 s 与 240 s 窗口各一次），`release-artifact` 因此
   回答的是 exit 2「CANNOT MEASURE」而不是挂住——那正是 0.10.2 给它装的上限；CI 上没有这层代理，
   终态以 CI 那格为准。
+### 0.10.4 的三格（本轮实测）
+
+- **主干与搬运**：`ca38f493..a1d76cb2` 推上 `jingzhao-l/GlassPane` main；`git subtree split` 得
+  `4e89855a`，`split^{tree}` = `c78896ce…` = `HEAD:harness/glasspane-harness`，相对远端 `af54a478`
+  是快进（1 笔）。该 sha 的 fork CI 两格 success，**核过可达才打 tag**。
+  打 tag 这步需要一个 `--no-sign`：这台机器的 profile 里 `tag.gpgSign=true`，裸 `git tag` 会去要注释
+  并在无 tty 下失败（`fatal: no tag message?`），而 `docs/release.md` 第 4 步要的是轻量 tag——
+  远端既有的 `v0.10.3` 指的也是 commit 而非 tag object。显式 `--no-sign` 而不是绕过钩子。
+- **Release**：`v0.10.4` → `4e89855a`，`isDraft=false`，6 件资产（arm64 46,449,817 B / x64 48,630,843 B，
+  各带 `.asc`，`SHA256SUMS.txt` 204 B + `.asc`）。`SHA256SUMS.txt` 声明的两条 sha256 与 GitHub 为该资产
+  算的 `digest` **逐字相等**（arm64 `adad5ce0…`、x64 `1019e459…`），且声明恰好两条。核对走 API 的
+  `digest` 与资产字节数，不靠本机重下（那条通道在本机代理下会被静默截断，2026-10 已记过）。
+- **npm**：dispatch run `40100191869`（`--ref v0.10.4 -f publish_npm=true -f confirm=true`；先试
+  `gh api …/dispatches` 带顶层 `-f` 被 422 拒——参数形状，不是权限）。三包发布成功，registry 的
+  `dist.shasum` 与发布时 npm 打印的 shasum 逐字相等：wrapper `dfa02149…`、arm64 `3de1d474…`、
+  x64 `152e42aa…`。
+
+### 同轮续（10-24）：那条 lane 连红两次，因为发布闸问的是元数据而安装要的是 tarball
+
+- 三格里最后一格（`install the published bytes and run them`）attempt 1 与 attempt 2 都红，报的是
+  `404 … /glasspane-harness-darwin-arm64-0.10.4.tgz`；attempt 3 通过。红期间我在这台机器上实测：
+  `npm view … darwin-arm64@0.10.4 version` 已经回 `0.10.4`（元数据可读），而同一个 tarball 的 URL
+  还是 404；等到 attempt 3 之前它回 200。也就是说第三次通过不是修好了什么，是那十五分钟过去了——
+  这正是 `registry-readiness` 这个文件当年被抽出来的同一个病，只是下沉了一层：
+  **元数据与 tarball 是两个对象。**
+- 修在闸上（`packages/opencode/script/`）：一次"问对了对象"的就绪判断＝元数据认识这个版本 →
+  元数据指向的 tarball URL → 那个 URL 真被服务；404 继续等，非 404 的失败仍算 `not-observed`
+  （exit 2），不把"这台机器问不成"说成"发布坏了"。要等的清单从**发布出去的 wrapper 的**
+  `optionalDependencies` 读回来，不拿 `product.json` 重算——要被服务的是安装器被告知去取的东西。
+  读不回清单或清单为空一律拒装（空清单不是"没有要等的东西"）。预算改成整套共享，因为每包各等
+  20 分钟会把 lane 拖到 runner 超时，而超时连判决都不留。
+- 因果都验过：`test/script/registry-readiness.test.ts` 11 → 19 条（注入时钟与 fetch，没有一条靠真等）。
+  三次变异各自具名红，恢复按 sha256 核回。最关键的那次——把 tarball 那几行删掉还原成改前行为——
+  4 条具名红，而"tarball 已被服务"那条**照绿**，这一对恰好证明那 4 条不是同一条红的四种化装；
+  我第一版电池把这条期望的符号写反了（把"应当照绿"写成"必须红"），当场按实测改回。
+- fork CI 的十步副本（frozen install、四个包 typecheck、9 个固定点、TUI 快照、publish dry-run、
+  kernel-pin、kernel-conformance）在这份改动后全 0；因此取号 **0.10.5**——又是那条等式：
+  动的是 `packages/opencode/script/` 里的字节，不是一行台账。
 ## 2026-10-22（第十五次会话）· 0.10.0：provider 契约有了产品侧消费者，发布 lane 学会等 registry；场景① 的通道第二次"看着有、其实跑不到"
 
 ### 开工与隔离

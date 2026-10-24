@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 
-import { waitForRegistryVersion } from "../../script/registry-readiness"
+import { servedProbe, waitForRegistryVersion } from "../../script/registry-readiness"
 
 /**
  * Fixed points for the registry-readiness wait in the publish lane.
@@ -176,8 +176,34 @@ describe("the release lane says what it observed", () => {
     .join("\n")
 
   test("both branches of the observation carry the same label", () => {
-    expect(script.includes('check(\n      "the registry can read this published version"')).toBe(true)
-    expect(script.includes('cannotObserve(\n        "the registry can read this published version"')).toBe(true)
+    // The labels are the contract: a green line and a "could not observe" line have to name the same
+    // subject, or a reader cannot tell which of the two the lane failed to say. The refuse path goes
+    // through `notServed(label, detail)`, which is what hands the label to `cannotObserve` — so the
+    // chain is pinned, not just the pair of strings.
+    for (const label of [
+      '"the registry can read this published version"',
+      '"the registry serves every platform package this install will pull"',
+    ]) {
+      // Match across the call's line break but not on column: the label reaching both branches is
+      // the claim; how far right the editor put it is not.
+      expect(new RegExp(`check\\(\\s*${label}`).test(script)).toBe(true)
+      expect(new RegExp(`notServed\\(\\s*${label}`).test(script)).toBe(true)
+    }
+    expect(script).toContain("cannotObserve(label, detail)")
+  })
+
+  test("the install waits on every package the wrapper declares, read back from the registry", () => {
+    // v0.10.4's lane died here: the wrapper's metadata was readable and the platform tarball was not.
+    // The list comes from the PUBLISHED wrapper's own optionalDependencies, not re-derived from
+    // product.json, because what must be served is what the installer was told to fetch.
+    expect(script).toContain("npm view ${product.name}@${version} optionalDependencies --json")
+    expect(script).toContain('servedProbe({')
+    expect(script).toContain('readTarballUrl: () => viewField(pkg, ver, "dist.tarball")')
+    // A declaration this gate cannot read is refused, not treated as "nothing to wait for".
+    expect(script).toContain("if (pulls.length === 0)")
+    // And the budget is shared across the set: one lagging CDN must not stretch the lane past a
+    // runner timeout, which is the failure that leaves no verdict at all.
+    expect(script).toContain("REGISTRY_READINESS_BUDGET_MS - (Date.now() - deadline)")
   })
 
   test("the success line reports how many looks and how long, not a bare ok", () => {
@@ -190,5 +216,141 @@ describe("the release lane says what it observed", () => {
     // The equality is the check's predicate, so a lane can never print `ok` while the registry
     // serves some other release — the shape of wrong this file has been amended for twice.
     expect(script).toContain("readiness.seen === version")
+  })
+})
+
+/**
+ * The probe the wait runs, driven with a fake registry and a fake CDN.
+ *
+ * These cases are the v0.10.4 incident: metadata and tarball are different objects on npm, and the
+ * tarball lagged the metadata by roughly fifteen minutes. A readiness gate that reads only metadata
+ * announces "installable" about bytes it never looked at. Everything here is driven — clock, sleeper,
+ * fetch status — because a wait that can only be exercised by spending real minutes is a wait nobody
+ * has seen terminate.
+ */
+describe("servedProbe: metadata is not the artifact", () => {
+  const url = `https://registry.npmjs.org/${pkg}/-/${pkg}-${version}.tgz`
+  const forbidden = async () => {
+    throw new Error("must not be asked")
+  }
+
+  test("a registry that does not know the version yet answers 'not yet' without touching the CDN", async () => {
+    let fetched = 0
+    const look = await servedProbe({
+      pkg,
+      version,
+      readVersion: async () => undefined,
+      readTarballUrl: forbidden,
+      fetchStatus: async () => {
+        fetched += 1
+        return 200
+      },
+    })()
+    expect(look).toBeUndefined()
+    expect(fetched).toBe(0)
+  })
+
+  test("metadata ready while the tarball still 404 is 'not yet', not a broken release", async () => {
+    const look = await servedProbe({
+      pkg,
+      version,
+      readVersion: async () => version,
+      readTarballUrl: async () => url,
+      fetchStatus: async () => 404,
+    })()
+    expect(look).toBeUndefined()
+  })
+
+  test("a served tarball answers with the version this tag names", async () => {
+    for (const status of [200, 206]) {
+      const look = await servedProbe({
+        pkg,
+        version,
+        readVersion: async () => version,
+        readTarballUrl: async () => url,
+        fetchStatus: async () => status,
+      })()
+      expect(look).toBe(version)
+    }
+  })
+
+  test("a 5xx is not an answer: it rejects, so the wait keeps it apart from 'not yet'", async () => {
+    await expect(
+      servedProbe({
+        pkg,
+        version,
+        readVersion: async () => version,
+        readTarballUrl: async () => url,
+        fetchStatus: async () => 503,
+      })(),
+    ).rejects.toThrow(/HTTP 503/)
+  })
+
+  test("a stale replica answering an older version is surfaced, not laundered", async () => {
+    // The caller's `seen === version` comparison is what turns this red, and it has to stay visible
+    // rather than being smoothed into "ready".
+    const look = await servedProbe({
+      pkg,
+      version,
+      readVersion: async () => "0.9.0",
+      readTarballUrl: forbidden,
+      fetchStatus: async () => 200,
+    })()
+    expect(look).toBe("0.9.0")
+  })
+
+  test("the wait waits for the TARBALL, not the metadata — the exact v0.10.4 shape", async () => {
+    let clock = 1_000
+    const slept: number[] = []
+    let looks = 0
+    const readiness = await waitForRegistryVersion({
+      pkg,
+      version,
+      registry,
+      probe: servedProbe({
+        pkg,
+        version,
+        readVersion: async () => version, // metadata answers on the first look
+        readTarballUrl: async () => url,
+        fetchStatus: async () => (++looks < 4 ? 404 : 200), // the CDN serves it on the fourth
+      }),
+      now: () => clock,
+      sleep: async (ms) => {
+        slept.push(ms)
+        clock += ms
+      },
+      budgetMs: 60_000,
+      pollMs: 10_000,
+    })
+    expect(readiness.ok).toBe(true)
+    if (readiness.ok) expect(readiness.attempts).toBe(4)
+    expect(slept.length).toBe(3)
+  })
+
+  test("a tarball that is never served stops as not-observed, naming how many looks it made", async () => {
+    let clock = 1_000
+    const notes: string[] = []
+    const readiness = await waitForRegistryVersion({
+      pkg,
+      version,
+      registry,
+      probe: servedProbe({
+        pkg,
+        version,
+        readVersion: async () => version,
+        readTarballUrl: async () => url,
+        fetchStatus: async () => 404,
+      }),
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms
+      },
+      budgetMs: 30_000,
+      pollMs: 10_000,
+      note: (line) => notes.push(line),
+    })
+    expect(readiness.ok).toBe(false)
+    if (!readiness.ok) expect(readiness.reason).toBe("not-observed")
+    expect(notes.some((line) => line.includes("not in") && line.includes("yet"))).toBe(true)
   })
 })

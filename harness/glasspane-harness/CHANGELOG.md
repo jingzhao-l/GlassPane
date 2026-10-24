@@ -10,8 +10,32 @@ contract does not).
 
 ## [Unreleased]
 
-（空。本批的账归入 `0.10.4`。）
+（空。本批的账归入 `0.10.5`。）
 
+## [0.10.5] - 2026-10-24
+
+判据：patch（发布闸自己的一条缺陷。`release-artifact` 那条"发布物 == 主干"的等式与前四版同一条；
+本版搬的是 `packages/opencode/script/` 里的字节）。
+
+### Fixed — 发布闸此前问的是元数据，而安装要的是 tarball
+
+- v0.10.4 的 `install the published bytes and run them` 连红两次，而 Release 与 npm 三包都是好的。
+  读数摆在那里：wrapper 的元数据在 21 s 后可读，这道闸就宣布"可以装"，随后 npm 死在
+  `404 … /glasspane-harness-darwin-arm64-0.10.4.tgz`。npm 写元数据与写 tarball 走的是不同的路，
+  CDN 上那份 tarball 比元数据晚了大约十五分钟——第三次 attempt 通过，不是因为它修好了什么，
+  而是因为这段时间过去了。
+- 一次"问对了对象"的就绪判断现在长这样：元数据认识这个版本 → 元数据指向哪个 tarball → 那个 URL
+  真的被服务。任一环回答"还没有"就继续等；不是 404 的失败（5xx、代理、DNS）**不算答案**，仍然走
+  `not-observed`（exit 2），因为"发布坏了"与"这台机器问不成"是两句话。
+- 等的清单从**发布出去的 wrapper 自己的** `optionalDependencies` 读回来，而不是拿 `product.json`
+  再算一遍：要被服务的是安装器被告知的东西，不是这棵树自认为声明过的东西。读不回清单、或清单是
+  空的，一律 exit 2 拒装——空清单不是"没有要等的东西"。
+- 预算改成一整套共享（wrapper + 每个平台包共用那 20 分钟），因为每包各等 20 分钟会把这条 lane 拖到
+  runner 超时，而超时的失败连判决都不留（同 `release-artifact` 那条停滞上限的理由）。
+- 判据与因果：`test/script/registry-readiness.test.ts` 11 → 19 条（注入时钟与 fetch，没有一条靠真等）。
+  三次变异各自具名变红，恢复按 sha256 核回——把 tarball 那几行删掉（=改前行为）⇒ 4 条红，而
+  "tarball 已被服务"那条**照绿**（证明那 4 条不是同一条红的四种化装）；把 404 当成已服务 ⇒ 具名红两条；
+  把 5xx 洗成"还没有" ⇒ 具名红一条。
 ## [0.10.4] - 2026-10-24
 
 判据：patch（`release-artifact` 那条"发布物 == 主干"的等式要求这一号——本轮动的是依赖字节，

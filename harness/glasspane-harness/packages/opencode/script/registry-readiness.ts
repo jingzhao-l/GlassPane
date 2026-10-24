@@ -115,3 +115,47 @@ export async function waitForRegistryVersion(input: ReadinessInput): Promise<Rea
     await input.sleep(Math.min(pollMs, budgetMs - elapsed))
   }
 }
+
+/**
+ * What "this registry can serve the version" has to mean before an install is attempted.
+ *
+ * Measured 2026-10-24 on v0.10.4: the wrapper's METADATA answered `0.10.4` after 21 s, this file's
+ * wait reported it ready, and the install still died on
+ * `404 … /glasspane-harness-darwin-arm64/-/glasspane-harness-darwin-arm64-0.10.4.tgz`. npm writes
+ * metadata and tarball through different paths and the CDN copy of the tarball lagged by about
+ * fifteen minutes (the same URL answered 200 before the job's third attempt). A wait that reads only
+ * the metadata announces "installable" about an object it never looked at — which is the exact
+ * failure this file was extracted to prevent, one layer down.
+ *
+ * So one look is three questions, in order: does the metadata know this version, does it name a
+ * tarball, and is that tarball served. Any "not yet" becomes `undefined` so the wait keeps waiting;
+ * anything that is not the registry's own 404 REJECTS, because a proxy or a 5xx is not an answer
+ * about the artifact — `not-observed` and "broken release" must stay two different sentences.
+ */
+export interface ServedProbeInput {
+  readonly pkg: string
+  readonly version: string
+  /** The version string the metadata reports for `pkg@version`; `undefined` when it does not know it yet. */
+  readonly readVersion: () => Promise<string | undefined>
+  /** The tarball URL that metadata points at; `undefined` when there is no metadata to read it from. */
+  readonly readTarballUrl: () => Promise<string | undefined>
+  /** Fetch status of that URL. 200/206 = served, 404 = not yet, anything else = not an answer. */
+  readonly fetchStatus: (url: string) => Promise<number>
+}
+
+export function servedProbe(input: ServedProbeInput): () => Promise<string | undefined> {
+  return async () => {
+    const seen = await input.readVersion()
+    if (seen === undefined) return undefined
+    // A metadata answer that is not the version asked for is surfaced, not swallowed: the caller
+    // compares it (`readiness.seen === version`) and a stale replica replying with an older version
+    // must not be laundered into "ready".
+    if (seen !== input.version) return seen
+    const url = await input.readTarballUrl()
+    if (url === undefined || url.trim() === "") return undefined
+    const status = await input.fetchStatus(url)
+    if (status === 404) return undefined
+    if (status === 200 || status === 206) return seen
+    throw new Error(`fetching ${input.pkg}@${input.version}'s tarball answered HTTP ${status} (${url})`)
+  }
+}

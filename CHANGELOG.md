@@ -99,6 +99,19 @@
 - 顺带纠正我自己写在前一笔提交信息里的一句判断：我说过"CI 的 mcp-shell lane 走的是那把旧锁"——**不对**。
   实测 `npm prefix` 在 `mcp-shell/` 里返回仓根，npm 会向上找到 workspace 根，所以 `npm ci` 装的是根锁的
   4.6.7。真正没被盖住的是 Dependabot 的那张独立图与"把面 A 当独立工程装"这条路；两处现在都过了。
+### Fixed — harness 0.10.5：发布闸此前问的是元数据，而安装要的是 tarball
+
+- 0.10.4 自己把这件事演了一遍：Release 与 npm 三包都正常，`install the published bytes and run them`
+  却连红两次——wrapper 的元数据 21 s 后可读，这道闸就宣布"可以装"，随后 npm 死在
+  `404 …/glasspane-harness-darwin-arm64-0.10.4.tgz`。第三次 attempt 通过不是修好了什么，是那十五分钟
+  过去了：npm 写元数据与写 tarball 走不同的路。
+- 现在一次就绪判断是三连问：元数据认识这个版本 → 元数据指向哪个 tarball → 那个 URL 真被服务。
+  要等的清单从**发布出去的 wrapper 的** `optionalDependencies` 读回来（不是拿 `product.json` 再算一遍），
+  读不回或为空一律 exit 2 拒装；非 404 的失败仍算"测不到"，不把"这台机器问不成"说成"发布坏了"；
+  预算改成整套共享，免得每包各等 20 分钟把 lane 拖成 runner 超时（超时连判决都不留）。
+- 判据：fork 侧 `test/script/registry-readiness.test.ts` 11 → 19 条，注入时钟与 fetch，没有一条靠真等；
+  三次变异各自具名红（还原成"只看元数据" ⇒ 4 条红，而"tarball 已被服务"那条照绿——这一对证明那 4 条
+  不是同一条红的四种化装），恢复按 sha256 核回。fork CI 那十步副本全 0。
 ## [1.20.1] — 2026-10-23
 
 **版本判断：patch。** 对着本仓 1.6.2 那四项 patch 判据实测：状态文件的字段没动、退出码集合没动、
