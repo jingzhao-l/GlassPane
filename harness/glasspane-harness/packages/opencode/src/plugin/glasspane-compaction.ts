@@ -32,20 +32,27 @@ export type PlanRead = { ok: true; plan: RunPlanRef | null } | { ok: false; erro
  *    dimension ids the caller was configured with and does the accounting; the
  *    vocabulary itself belongs to the iterate config (nine ids, locked across
  *    six sources by `test_dimension_lock.py`), so this module never declares an
- *    ontology of its own. As shipped, the production path reaches this with no plan
- *    (`GLASSPANE_RUN_PLAN` is unset by default), and the anchors it can carry a
- *    declared dimension on come only from calls that recorded a decision: the engine
+ *    ontology of its own. The plan arrives through two channels, both of them
+ *    real: `GLASSPANE_RUN_PLAN` for a run that hands its plan in explicitly, and
+ *    the project's own `.iterate/run-plan.json` under the instance directory
+ *    (`readRunPlan(env, projectDirectory)`) for a run configured by whoever wrote
+ *    it there — which is the file iterate-harness's `write_run_plan` produces.
+ *    Neither channel synthesises a plan: no file and no variable means no plan, and
+ *    the coverage line stays absent rather than rendering "0/9 verified" against a
+ *    plan nobody ran.
+ *    The remaining asymmetry is measured, not assumed: the anchors that can carry a
+ *    declared dimension come only from calls that recorded a decision, and the engine
  *    emits an `evidencePack` on one method, `last_evidence` (`Dispatcher.swift:156`),
  *    so a dimension declared on `gp_act`, `gp_observe`, `gp_attach` or `gp_diagnose`
  *    never reaches an anchor at all — those calls record no decision, and an anchor is
- *    where a declared dimension would have been transcribed. With nothing planned and
- *    nothing recorded `renderDimensionCoverage` returns `undefined` and the block
- *    simply omits the line. A session with a plan and zero
- *    decisions would get "0/N dimensions verified", which is the useful sentence; a session
- *    with no plan gets silence, because there is no coverage to state. Wiring the plan
- *    (the kernel's `run-plan` contract carries `dimensions`) is open work, and
- *    test/plugin/glasspane-compaction.test.ts pins the as-shipped shape so this paragraph
- *    cannot quietly drift back into a claim.
+ *    where a declared dimension would have been transcribed. A session with a plan and
+ *    zero decisions gets "0/N dimensions verified", which is the useful sentence; a
+ *    session with no plan gets silence, because there is no coverage to state.
+ *    `selectAnchors` is where the plan changes behaviour beyond reporting: with a plan
+ *    in force the cap drops unplanned-dimension history before planned-dimension
+ *    history (综述 §8.5 row 2's "优先压缩无关维度历史"), and the block says which rule
+ *    it used. test/plugin/glasspane-compaction.test.ts pins both the no-plan shape and
+ *    the ranked drop, so neither paragraph here can drift back into a claim.
  *  - It may not break compaction. A failed message pull appends a visible note
  *    and returns; it never throws into the host's compaction path, and it never
  *    replaces `output.prompt` (replacing it would silently discard the default
@@ -61,7 +68,7 @@ export type PlanRead = { ok: true; plan: RunPlanRef | null } | { ok: false; erro
 
 const GLASSPANE_TOOL_PREFIX = "gp_"
 /** Anchors are a pointer into the chain, not a copy of it; the ledger keeps the rest. */
-const MAX_ANCHORS = 20
+export const MAX_ANCHORS = 20
 
 /** One transcribed decision. Undefined fields were absent — never filled in by guessing. */
 export type EvidenceAnchor = {
@@ -176,6 +183,83 @@ export function collectEvidenceAnchors(messages: unknown): AnchorCollection {
 }
 
 /**
+ * How many decisions each declared dimension earned, straight off the anchors.
+ *
+ * Only an explicitly recorded dimension counts. Falling back to the method name would make
+ * "observe" a dimension, which is the guessing this module is not allowed to do; an anchor with no
+ * dimension contributes to no dimension, and the coverage line says so.
+ */
+function recordedCounts(collected: AnchorCollection): Record<string, { decisions: number }> {
+  const recorded: Record<string, { decisions: number }> = {}
+  for (const anchor of collected.anchors) {
+    if (!anchor.dimension) continue
+    const current = recorded[anchor.dimension]
+    recorded[anchor.dimension] = { decisions: (current?.decisions ?? 0) + 1 }
+  }
+  return recorded
+}
+
+export type AnchorSelection = {
+  readonly shown: EvidenceAnchor[]
+  readonly dropped: number
+  /** Which rule ordered the drop, so the block can say it instead of implying one. */
+  readonly rule: "all" | "recency" | "dimension"
+  readonly unplannedDropped: number
+}
+
+/**
+ * Which anchors survive {@link MAX_ANCHORS}, and which rule decided.
+ *
+ * This is ②'s other half: the scenario asks that a run mid-way through dimension N compress
+ * *unrelated* dimension history first, and the only thing in this file that can express that is
+ * the drop order — the host's summariser owns the messages, and this plugin may only append. So
+ * the rule is stated as three ranks, taken from the kernel's own accounting and nothing else:
+ *
+ *  1. anchors whose dimension the kernel reports as `unplanned` (recorded, never declared by this
+ *     run) are unrelated history and go first, oldest first;
+ *  2. anchors carrying no declared dimension go next — unattributed is not the same as unrelated,
+ *     and pretending otherwise would be this module judging a call it cannot place;
+ *  3. anchors belonging to a planned dimension are kept to the end, oldest first within the rank.
+ *
+ * With no plan, or a plan that could not be honoured, there is no "unrelated" to compute and the
+ * drop is pure recency — the behaviour this module had before the plan channel existed, kept
+ * rather than quietly replaced. `rule` is returned so the block can name which of the two happened;
+ * "showing the most recent N" would be false for the dimension-ranked case.
+ */
+export function selectAnchors(
+  collected: AnchorCollection,
+  plan: PlanRead = { ok: true, plan: null },
+): AnchorSelection {
+  const anchors = collected.anchors
+  if (anchors.length <= MAX_ANCHORS) return { shown: anchors, dropped: 0, rule: "all", unplannedDropped: 0 }
+  if (!plan.ok || !plan.plan || plan.plan.ids.length === 0) {
+    return { shown: anchors.slice(-MAX_ANCHORS), dropped: anchors.length - MAX_ANCHORS, rule: "recency", unplannedDropped: 0 }
+  }
+  const context = dimensionCoverage({
+    planned: plan.plan.ids.map((id) => ({ id })),
+    recorded: recordedCounts(collected),
+  })
+  const unplanned = new Set(context.unplanned.map((entry) => entry.id))
+  const rankOf = (anchor: EvidenceAnchor): number => {
+    if (!anchor.dimension) return 1
+    return unplanned.has(anchor.dimension) ? 0 : 2
+  }
+  const ordered = anchors
+    .map((anchor, index) => ({ anchor, index, rank: rankOf(anchor) }))
+    // Rank first, then recency inside the rank: within one kind of history the newest is the one
+    // a resumed session needs, and across kinds the plan decides which kind matters.
+    .sort((left, right) => (left.rank === right.rank ? left.index - right.index : left.rank - right.rank))
+  const dropCount = anchors.length - MAX_ANCHORS
+  const dropped = ordered.slice(0, dropCount)
+  const unplannedDropped = dropped.filter((entry) => entry.rank === 0).length
+  const shown = ordered
+    .slice(dropCount)
+    .sort((left, right) => left.index - right.index)
+    .map((entry) => entry.anchor)
+  return { shown, dropped: dropCount, rule: "dimension", unplannedDropped }
+}
+
+/**
  * The dimension coverage line, computed by the kernel and rendered verbatim.
  *
  * `undefined` only when the session was never given a plan AND recorded
@@ -198,16 +282,7 @@ export function renderDimensionCoverage(
   plan: PlanRead = { ok: true, plan: null },
 ): string | undefined {
   const planned = plan.ok && plan.plan ? [...plan.plan.ids] : (collected.plannedDimensions ?? [])
-  const recorded: Record<string, { decisions: number }> = {}
-  for (const anchor of collected.anchors) {
-    // Only an explicitly recorded dimension counts. Falling back to the method
-    // name would make "observe" a dimension, which is the guessing this module
-    // is not allowed to do; an anchor with no dimension simply contributes to no
-    // dimension, and the coverage line says so.
-    if (!anchor.dimension) continue
-    const current = recorded[anchor.dimension]
-    recorded[anchor.dimension] = { decisions: (current?.decisions ?? 0) + 1 }
-  }
+  const recorded = recordedCounts(collected)
   if (!plan.ok) {
     // The code travels with the sentence: a summary that only carries prose cannot be
     // grouped, counted, or matched against the refusal a later run hit.
@@ -232,8 +307,9 @@ export function renderDimensionCoverage(
 export function renderAnchorBlock(collected: AnchorCollection, plan: PlanRead = { ok: true, plan: null }): string | undefined {
   if (collected.calls === 0) return undefined
 
-  const shown = collected.anchors.slice(-MAX_ANCHORS)
-  const omitted = collected.anchors.length - shown.length
+  const selection = selectAnchors(collected, plan)
+  const shown = selection.shown
+  const omitted = selection.dropped
   const lines = [
     "## GlassPane evidence anchors (M4)",
     "",
@@ -258,7 +334,15 @@ export function renderAnchorBlock(collected: AnchorCollection, plan: PlanRead = 
     )
   }
   if (omitted > 0) {
-    lines.push(`- showing the most recent ${shown.length} anchors; ${omitted} older anchor(s) omitted — the ledger below has the full chain`)
+    // Which rule dropped is part of the record. "the most recent" is only true of the no-plan
+    // case; once a plan is in force the drop is ranked by the kernel's own dimension accounting,
+    // and a block that described that as recency would be selling the reader a guarantee it does
+    // not carry.
+    lines.push(
+      selection.rule === "dimension"
+        ? `- showing ${shown.length} of ${collected.anchors.length} anchors; ${omitted} dropped by review dimension (history of dimensions this run never planned goes first, then unattributed history, then planned dimensions oldest-first — ${selection.unplannedDropped} of those were unplanned) — the ledger below has the full chain`
+        : `- showing the most recent ${shown.length} anchors; ${omitted} older anchor(s) omitted — the ledger below has the full chain`,
+    )
   }
   for (const anchor of shown) {
     const bits = [
@@ -343,11 +427,20 @@ export async function injectEvidenceAnchors(
 export async function GlasspaneCompactionPlugin(input: PluginInput): Promise<Hooks> {
   return {
     "experimental.session.compacting": async (hookInput, output) => {
-      await injectEvidenceAnchors(hookInput.sessionID, output, async (sessionID) => {
-        const result = await input.client.session.messages({ path: { id: sessionID } })
-        if (result.error !== undefined) throw new Error(describeSdkError(result.error))
-        return result.data
-      })
+      await injectEvidenceAnchors(
+        hookInput.sessionID,
+        output,
+        async (sessionID) => {
+          const result = await input.client.session.messages({ path: { id: sessionID } })
+          if (result.error !== undefined) throw new Error(describeSdkError(result.error))
+          return result.data
+        },
+        // The instance directory, not `process.cwd()`: one harness process can hold sessions for
+        // several projects, and a plan read out of the wrong directory would render another
+        // project's coverage here. `input.directory` is the directory this plugin instance was
+        // created for, which is the same thing the run plan was written beside.
+        () => readRunPlan(process.env, input.directory),
+      )
     },
   }
 }

@@ -4,10 +4,12 @@ import path from "node:path"
 
 import {
   GlasspaneCompactionPlugin,
+  MAX_ANCHORS,
   collectEvidenceAnchors,
   injectEvidenceAnchors,
   renderAnchorBlock,
   renderDimensionCoverage,
+  selectAnchors,
 } from "../../src/plugin/glasspane-compaction"
 
 import { kernelFixturesDir } from "../lib/kernel-contract"
@@ -447,7 +449,7 @@ describe("dimension coverage, computed by the kernel (M4)", () => {
     // coverage line must follow it even when the host attached no dimensions.
     const line = renderDimensionCoverage(
       { calls: 2, anchors: anchors(["security"]), withoutDecision: 1 },
-      { ok: true, plan: { path: "/var/tmp/plan.json", digest: "rp_a".repeat(8).slice(0, 67), ids: ["security", "correctness"] } },
+      { ok: true, plan: { path: "/var/tmp/plan.json", digest: "rp_a".repeat(8).slice(0, 67), ids: ["security", "correctness"], source: "env" } },
     )
     expect(line).toContain("1/2 dimensions verified, 1 unverified (correctness), 1 decision")
     expect(line).toContain("[plan rp_")
@@ -556,6 +558,109 @@ describe("dimension coverage, computed by the kernel (M4)", () => {
     expect(new Set([pull.code, render.code])).toEqual(new Set(["GP_E_COMPACTION_MESSAGES", "GP_E_COMPACTION_RENDER"]))
   })
 
+})
+
+describe("which anchors the cap drops (scenario 2, the compression half)", () => {
+  /** `count` anchors whose declared dimensions come from `pattern` cyclically. */
+  function many(count: number, pattern: (string | undefined)[]) {
+    return Array.from({ length: count }, (_, index) => {
+      const dimension = pattern[index % pattern.length]
+      return {
+        method: "observe",
+        ...(dimension === undefined ? {} : { dimension }),
+        operationId: `op_${String(index).padStart(26, "0")}`,
+      }
+    })
+  }
+
+  const planFor = (ids: string[]) => ({
+    ok: true as const,
+    plan: { path: "/var/tmp/run-plan.json", digest: `rp_${"a".repeat(64)}`, ids, source: "project" as const },
+  })
+
+  test("nothing is dropped below the cap, and the rule says so", () => {
+    const collected = { calls: MAX_ANCHORS, anchors: many(MAX_ANCHORS, ["security"]), withoutDecision: 0 }
+    const selection = selectAnchors(collected, planFor(["security"]))
+    expect(selection.rule).toBe("all")
+    expect(selection.dropped).toBe(0)
+    expect(selection.shown).toEqual(collected.anchors)
+  })
+
+  test("with no plan the drop is pure recency — the behaviour that predates the plan channel", () => {
+    const collected = { calls: 30, anchors: many(30, ["security"]), withoutDecision: 0 }
+    const selection = selectAnchors(collected)
+    expect(selection.rule).toBe("recency")
+    expect(selection.shown).toEqual(collected.anchors.slice(-MAX_ANCHORS))
+    expect(selection.dropped).toBe(30 - MAX_ANCHORS)
+  })
+
+  test("an unreadable plan does not silently switch the rule to dimension ranking", () => {
+    // A refusal to read the plan is "no plan" for ordering purposes, and the block must say
+    // recency rather than claiming a ranking it could not compute.
+    const collected = { calls: 30, anchors: many(30, ["security"]), withoutDecision: 0 }
+    const broken = { ok: false as const, error: { code: "GP_E_RUN_PLAN_READ", message: "m", remedy: "r" } }
+    const selection = selectAnchors(collected, broken)
+    expect(selection.rule).toBe("recency")
+    expect(selection.shown).toEqual(collected.anchors.slice(-MAX_ANCHORS))
+  })
+
+  test("history of a dimension this run never planned goes first, even when it is the newest", () => {
+    // The load-bearing case: recency alone would keep the last MAX_ANCHORS anchors, which here
+    // are all `stray` (planned by nobody). Ranking must cost those five first and keep the older
+    // planned history instead — which is exactly "优先压缩无关维度历史", and nothing else in this
+    // file expresses it.
+    const collected = {
+      calls: MAX_ANCHORS + 5,
+      anchors: many(MAX_ANCHORS + 5, ["security", "security", "security", "security", "stray"]),
+      withoutDecision: 0,
+    }
+    const selection = selectAnchors(collected, planFor(["security"]))
+    expect(selection.rule).toBe("dimension")
+    expect(selection.dropped).toBe(5)
+    expect(selection.unplannedDropped).toBe(5)
+    expect(selection.shown.every((anchor) => anchor.dimension === "security")).toBe(true)
+    // Survivors stay in transcript order; a reordered block would read as a different session.
+    const indices = selection.shown.map((anchor) => Number(anchor.operationId.slice(-2)))
+    expect(indices).toEqual([...indices].sort((a, b) => a - b))
+  })
+
+  test("unattributed history is dropped only after unrelated history", () => {
+    // 30 anchors over 25 slots: 6 of a dimension nobody planned, 6 with no recorded dimension,
+    // 18 planned. Ten have to go, and the order is the scenario's: unplanned first, then
+    // unattributed, planned last. A flat recency rule would instead keep the newest six —
+    // which here are precisely the unplanned and unattributed ones.
+    const collected = {
+      calls: 30,
+      anchors: many(30, ["security", "security", "security", "stray", undefined]),
+      withoutDecision: 0,
+    }
+    const selection = selectAnchors(collected, planFor(["security"]))
+    expect(selection.rule).toBe("dimension")
+    expect(selection.dropped).toBe(10)
+    expect(selection.unplannedDropped).toBe(6)
+    expect(selection.shown.filter((anchor) => anchor.dimension === undefined).length).toBe(2)
+    expect(selection.shown.filter((anchor) => anchor.dimension === "security").length).toBe(18)
+    expect(selection.shown.some((anchor) => anchor.dimension === "stray")).toBe(false)
+  })
+
+  test("the block names the rule it used, and never claims recency when it did not", () => {
+    const stray = { calls: MAX_ANCHORS + 5, anchors: many(MAX_ANCHORS + 5, ["security", "stray"]), withoutDecision: 0 }
+    const ranked = renderAnchorBlock(stray, planFor(["security"])) ?? ""
+    expect(ranked).toContain("dropped by review dimension")
+    expect(ranked).not.toContain("showing the most recent")
+
+    const plain = renderAnchorBlock(stray) ?? ""
+    expect(plain).toContain("showing the most recent")
+    expect(plain).not.toContain("dropped by review dimension")
+  })
+
+  test("a plan that names no dimensions leaves the ranking on recency", () => {
+    // `ids: []` is a plan document the kernel accepts only as an empty set; either way there is
+    // no "unrelated" to compute, and inventing one would rank against nothing.
+    const collected = { calls: 30, anchors: many(30, ["security", "stray"]), withoutDecision: 0 }
+    const selection = selectAnchors(collected, planFor([]))
+    expect(selection.rule).toBe("recency")
+  })
 })
 
 
