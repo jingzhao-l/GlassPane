@@ -664,3 +664,56 @@ describe("the stamp the ledger records", () => {
     expect(new Date(b).getTime() - new Date(a).getTime()).toBe(333)
   })
 })
+
+describe("a chain written by iterate-harness (Python) verifies here (scenario 3)", () => {
+  // The bytes in `test/fixtures/glasspane-chain-python-written.jsonl` were appended by
+  // `kernel_decision_log.append_decision_log_entry` in the iterate-harness checkout, over drafts
+  // with fixed entryId/createdAt. The same three drafts run through the published kernel's
+  // `appendDecisionLogEntry` produce byte-identical output (measured 2026-10-25, sha256
+  // eaa9dc7dc9fabb076ca9a9cdecec10f94f50566351402cc6abb9d32f01c4dc06). That is the claim this
+  // block keeps alive: the two products do not merely share a schema, they write and read one
+  // chain. Until ④'s gate there was no reader on either side of the other's file, and "互通" was
+  // a statement about formats.
+  const fixture = path.join(import.meta.dir, "..", "fixtures", "glasspane-chain-python-written.jsonl")
+  const sha256 = (text: string) => createHash("sha256").update(text, "utf8").digest("hex")
+
+  test("the sample is still the bytes the Python writer produced", () => {
+    expect(sha256(readFileSync(fixture, "utf8"))).toBe(
+      "eaa9dc7dc9fabb076ca9a9cdecec10f94f50566351402cc6abb9d32f01c4dc06",
+    )
+  })
+
+  test("verifyLedger accepts it, and the optional fields stayed absent rather than null", () => {
+    const verified = verifyLedger(fixture)
+    expect(verified.ok).toBe(true)
+    expect(verified.entries).toBe(3)
+    const lines = readFileSync(fixture, "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0)
+    expect(lines[2]).not.toContain('"operationId":null')
+    expect(JSON.parse(lines[2]).outcome).toBe("blocked")
+  })
+
+  test("editing the first line breaks the hash the second line cites", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "gp-xchain-"))
+    const tampered = path.join(dir, "tampered.jsonl")
+    const lines = readFileSync(fixture, "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0)
+    const edited = lines.map((line, index) => (index === 0 ? line.replace('"outcome":"pass"', '"outcome":"fail"') : line))
+    writeFileSync(tampered, edited.join("\n") + "\n")
+    const verified = verifyLedger(tampered)
+    expect(verified.ok).toBe(false)
+    expect(verified.firstBrokenLine).toBe(2)
+  })
+
+  test("recomputing a link from the other side's entry gives the hash that line carries", () => {
+    // Not a fixture comparison: read the JSON, rebuild the entry object the kernel would hash,
+    // and require it to equal the `prevEntryHash` stored on the following line.
+    const lines = readFileSync(fixture, "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0)
+    const first = JSON.parse(lines[0])
+    expect(entryHashOf(first)).toBe(JSON.parse(lines[1]).prevEntryHash)
+  })
+})
