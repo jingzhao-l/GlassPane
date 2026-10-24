@@ -3709,7 +3709,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "7d5dc0d1c7210c53c67ae634f56be312192528da"
+      "forkHash": "923661e528b1572ad9fd7c81526bd50a1a7fec6f"
     },
     {
       "file": "contracts/engine-methods.json",
@@ -3809,7 +3809,7 @@
     },
     {
       "file": "packages/opencode/src/plugin/glasspane-compaction.ts",
-      "forkHash": "79737aee8d6a58563724880e2ba1835dacd3fbf2"
+      "forkHash": "30e5dcd254ca4b32513fe9f98ea94b75b96ea929"
     },
     {
       "file": "packages/opencode/src/plugin/glasspane-decision-log.ts",
@@ -3825,7 +3825,7 @@
     },
     {
       "file": "packages/opencode/src/tool/glasspane/kernel.ts",
-      "forkHash": "9d4a13cc1a455d2a92597ae47b136da358ca9ea0"
+      "forkHash": "f743d62cc4822982a62537ac090eeda5502f308f"
     },
     {
       "file": "packages/opencode/src/tool/glasspane/providers.ts",
@@ -3861,7 +3861,7 @@
     },
     {
       "file": "packages/opencode/test/plugin/glasspane-compaction.test.ts",
-      "forkHash": "386e47278b1f2f47d55b9ae7dfc5b43e8f7b45c7"
+      "forkHash": "83e01aa078277f95bb35d2fddcae3c04a8b728a2"
     },
     {
       "file": "packages/opencode/test/plugin/glasspane-decision-log.test.ts",
@@ -3881,7 +3881,7 @@
     },
     {
       "file": "packages/opencode/test/tool/glasspane-kernel.test.ts",
-      "forkHash": "4bf56d9e3b34b402f921196fdf27cb8260de1fe9"
+      "forkHash": "57b51fa15cfba7d7bf0549cdf814f41a69acab42"
     },
     {
       "file": "packages/opencode/test/tool/glasspane-provider-registration.test.ts",
@@ -3933,7 +3933,7 @@
     },
     {
       "file": "SYNCLOG.md",
-      "forkHash": "d588263f192adbe9435c61f65c6ffeb2d7add51c"
+      "forkHash": "4760ab87ac91293d51aa1b8d97d269d79c0f6e2d"
     }
   ]
 }
