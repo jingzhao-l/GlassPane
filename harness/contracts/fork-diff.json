@@ -2141,7 +2141,7 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "0a44905226a18b39af5b03a744a50d247085be78"
+      "forkHash": "d1ccbe8edeee5f81da00ccadfca104dd4d7e6123"
     },
     {
       "file": "bunfig.toml",
@@ -2161,7 +2161,7 @@
     {
       "file": "package.json",
       "upstreamHash": "a3f9544410da3e258778f7968641ed0bbbd6d442",
-      "forkHash": "36d7cd6365c53d420899fd08411f198e3efd92e1"
+      "forkHash": "ab9afe28de3d5fe48270485831625825c64a1cd2"
     },
     {
       "file": "packages/app/package.json",
@@ -2751,7 +2751,7 @@
     {
       "file": "packages/opencode/package.json",
       "upstreamHash": "3a44b8729b9f8eec7fbeffcd12fac65701327f5e",
-      "forkHash": "282c5b39d39de769ce7fae3f63069a2e55abd372"
+      "forkHash": "ac94cbd8c45420cde3de1ee640464a73e1865d74"
     },
     {
       "file": "packages/opencode/script/build.ts",
@@ -3511,7 +3511,7 @@
     {
       "file": "README.md",
       "upstreamHash": "b5a4c8ddd9794e8c20bd287603bfa0c336522796",
-      "forkHash": "f583f3da670fdf830971e37c783126cc005017a4"
+      "forkHash": "365b449796122fa57af9c2f1ebb564fa30e70730"
     },
     {
       "file": "script/publish.ts",
@@ -3709,7 +3709,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "0ec665745c4150814264246fb94c787da3b94b44"
+      "forkHash": "619fc947c2328175424911595ba8dee8c31650fb"
     },
     {
       "file": "contracts/engine-methods.json",
@@ -3721,7 +3721,7 @@
     },
     {
       "file": "contracts/kernel-pin.json",
-      "forkHash": "e2205ab119f64a993974c134836f2008b076e726"
+      "forkHash": "6101aca7729234ec23f67def1ec3308a2ef6ca85"
     },
     {
       "file": "contracts/models-catalog.json",
@@ -3737,7 +3737,7 @@
     },
     {
       "file": "docs/install.md",
-      "forkHash": "c19c2d9c7f76db275c417ea67c1355acab3a4f56"
+      "forkHash": "c0fc27ee4065c80a801b90a2a566ddfb7566dbf6"
     },
     {
       "file": "docs/kernel-integration.md",
@@ -3901,11 +3901,11 @@
     },
     {
       "file": "product.json",
-      "forkHash": "283faed128ff7c8c1cf9f6a32009d4c1fdef75e1"
+      "forkHash": "d51b6d8f606f12109157219818a0b484574935d4"
     },
     {
       "file": "README.zh-CN.md",
-      "forkHash": "7c911f8f9a2f25e944a93420944ed43b9703d38a"
+      "forkHash": "79d2e738d4ac3a0ea8799b3c0cefa9c1974dd564"
     },
     {
       "file": "script/assert-ci-green.mjs",
@@ -3929,11 +3929,11 @@
     },
     {
       "file": "scripts/install.sh",
-      "forkHash": "68589488b25b66c7b5993aa8a5d108c8d63c8b8b"
+      "forkHash": "974e2d8da4df2b0fbf057a15bccb294e5f0b567e"
     },
     {
       "file": "SYNCLOG.md",
-      "forkHash": "b7b5ff6aca9851ea24c49294ac9cac265f5b12eb"
+      "forkHash": "7917ccf2eb38aa2d8d527c1f7c82c6884c40d006"
     }
   ]
 }
