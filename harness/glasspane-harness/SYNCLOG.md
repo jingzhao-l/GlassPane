@@ -418,6 +418,25 @@ store 留下的孤儿，产品加载不到。分清"链接指哪"与"缓存里�
 - fork CI 的十步副本（frozen install、四个包 typecheck、9 个固定点、TUI 快照、publish dry-run、
   kernel-pin、kernel-conformance）在这份改动后全 0；因此取号 **0.10.5**——又是那条等式：
   动的是 `packages/opencode/script/` 里的字节，不是一行台账。
+### 0.10.5 的三格（本轮实测，含那条修好的 lane 的第一次真机读数）
+
+- **主干与搬运**：`a1d76cb2..0c2bafb3` 推上 main；`git subtree split` 得 `fae12a4b`，
+  `split^{tree}` 与 `HEAD:harness/glasspane-harness` 相等，相对远端 `4e89855a` 快进 1 笔；
+  该 sha 的 fork CI 两格 success，核过可达才打 tag（`v0.10.5` → `fae12a4b`，`--no-sign`，理由见上一段）。
+- **Release**：`isDraft=false`，6 件资产；`SHA256SUMS.txt` 204 B 声明恰好两条，且与 GitHub 为这两件
+  资产算的 `digest` 逐字相等（arm64 `0a8e98af…` / 46,452,175 B，x64 `52195b9e…` / 48,631,619 B）。
+- **npm**：dispatch run `40102615950`，**attempt 1 全部 job success**——包括 0.10.4 需要第三次 attempt
+  才过去的那条 `install the published bytes and run them`。三包 registry `dist.shasum` 与发布时 npm
+  打印的逐字相等：arm64 `b25ff4a8…`、x64 `82a59810…`、wrapper `52b61654…`。
+- **这次修好的那条 lane 自己说了什么**（它第一次在真机上按三连问回答，读数照抄）：
+  `the registry can read this published version — glasspane-harness@0.10.5 answered after 1 look(s), 1s`
+  与 `the registry serves every platform package this install will pull — 2 package(s):
+  glasspane-harness-darwin-x64@0.10.5 in 1 look(s), 0s; glasspane-harness-darwin-arm64@0.10.5 in
+  1 look(s), 1s`。同一份日志里产物级那条仍然说话：
+  `all 8 artifact-checkable item(s) present in glasspane-harness.exe (145,741,922 bytes read)`。
+  对照上一版：0.10.4 的两次红不是产物坏，是这道闸问错了对象——本版第一次让它问对，一次就过。
+- **3b**：这段台账在 fork 前缀内，所以搬运分支再切一次（不消耗版本号），`release-artifact` 的
+  `split-main` 那格才允许在新 tip 上绿；`tag` 那格对本版收口记录的差以 `△` 点名。
 ## 2026-10-22（第十五次会话）· 0.10.0：provider 契约有了产品侧消费者，发布 lane 学会等 registry；场景① 的通道第二次"看着有、其实跑不到"
 
 ### 开工与隔离
