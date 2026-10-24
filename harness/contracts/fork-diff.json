@@ -2,7 +2,7 @@
   "baseTag": "v1.18.32",
   "forkPath": "harness/glasspane-harness",
   "referenceClone": ".external/opencode",
-  "observedAt": "2026-10-23",
+  "observedAt": "2026-10-24",
   "counts": {
     "identical": 4640,
     "edited": 285,
@@ -2141,7 +2141,7 @@
     {
       "file": "bun.lock",
       "upstreamHash": "7b1f4b0e90c6b7c4269e9c2ff13b893ed2200f5c",
-      "forkHash": "cd6a5a2e7b180bbeaaebd9a58e1d311eb4d85df2"
+      "forkHash": "af5494eb0d5b7afde20c26164ecf3ea7659a2a8d"
     },
     {
       "file": "bunfig.toml",
@@ -2161,7 +2161,7 @@
     {
       "file": "package.json",
       "upstreamHash": "a3f9544410da3e258778f7968641ed0bbbd6d442",
-      "forkHash": "c608a79620e1adfde0481a90d5ac7596eec770b7"
+      "forkHash": "36d7cd6365c53d420899fd08411f198e3efd92e1"
     },
     {
       "file": "packages/app/package.json",
@@ -3216,7 +3216,7 @@
     {
       "file": "packages/session-ui/package.json",
       "upstreamHash": "2164064facf201bdfdff6f7d96eeb18b76876f4c",
-      "forkHash": "f551c06c9404c540018e3607b94112bd942d5665"
+      "forkHash": "52ef4e0f0bc06503f98e82a0e7966f7c3f2f232d"
     },
     {
       "file": "packages/tui/src/app.tsx",
@@ -3501,7 +3501,7 @@
     {
       "file": "packages/ui/package.json",
       "upstreamHash": "49d6d7d130f2d585beca209d24e665293c3785cc",
-      "forkHash": "296074aaed0a625222d8be9ab0dec213ca076b1e"
+      "forkHash": "04956b2cdef4582c1c648317a48cd0e08258bb16"
     },
     {
       "file": "packages/ui/script/publish.ts",
