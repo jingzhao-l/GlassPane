@@ -269,3 +269,131 @@ git -C /Volumes/Eng-Dev/GlassPane merge --no-ff gp-bidi-20261024   # = c4556a9b�
 
 `provider-surface` 那步 CI 根因的修复已由发布线落进 `5964aed6`，本会话那一行被更完整的版本取代，
 两边不留两份结论。
+
+## 第二十一次补记（同日，跨到 10-26 凌晨）· 挂起落成具名文件集；fork 那四处夸张改完并发布；CI 那一格的真实形状
+
+### 分支与发布状态（本会话末尾重量）
+
+| 仓 | 分支 / 提交 | 发布 |
+|---|---|---|
+| iterate-skill | `main` == `origin/main` == `ddcd2d87`（本会话在其上的笔：`3694472a`/`17d549cf`/`4d8e8969`/`f4b39ca8`/`ffe36c78`/`ddcd2d87`，全是 CI／判据／`pytest-timeout`／看门狗；并行线的 `1945f3fe`/`35950413` 等照旧不属于本会话） | **2.11.1 仍是 registry 上那一版**。独立仓 `jingzhao-l/iterate-harness` main == `0ab8fd73`，与主干 `harness/iterate-harness` 逐 blob 相等（626 条，`diff` 空）。**2.11.2 待取**：上一笔 `pyproject.toml` 的 dev 依赖进了 wheel 的 METADATA（实测 `Requires-Dist: pytest-timeout==2.4.0; extra == 'dev'`，7 条 extra 门控行），而 `.github/`／`scripts/`／`tests/` 实测不进 wheel（`unzip -l` 数到 0 条）⇒ 需要号的只有前者 |
+| GlassPane（含 harness） | `main` == `origin/main` == `5f405534`（`d5389ce0` 四处文档改正、`99acc6ce` 棘轮重记、`ebc5fe98` 取号 0.11.1、`32ce4a93` fork-diff 金样、`5ab756f7`/`5f405534` 那条"重切必然换 SHA"的收回） | **harness 0.11.1 已发**：发布仓 main == `f324afa0`（= 主干 fork 树，推前先量 `split^{tree} == HEAD:harness/glasspane-harness`，且 `e96d92c6` 是其祖先 ⇒ 真快进）、tag `v0.11.1` 指向 `f324afa0`、Release 资产与 npm 三包的读数见本节末尾 |
+
+### CI 那一格：现在能说的是"具名的挂起"，不能说的是"绿"
+
+主干 CI 的 `Python tests` 从一整步变成 `python-version × bucket` 的 12 条腿，每桶约 520 条
+（`scripts/split_suite.py` 按测试模块做 FFD，三道拒绝保证它是**精确划分**：pytest 自报的
+`N tests collected` 必须等于解析到的 node id 数；每桶跑前重新收集并 `--expect-total` 对上计划数；
+桶数多于模块数直接拒绝——空桶就是一条什么都不测的绿色 job）。本机等价性实测：单体
+`3113 passed, 6 skipped in 123.69s`，六桶合起来同样的 3,106→3,113 passed + 6 skipped，
+每桶 `--expect-total` rc=0。
+
+跑出来的是：**10 条腿绿，2 条挂**（`Python tests (3.10 / bucket 06)` 与 `(3.11 / bucket 06)`）。
+挂的那两条现在有三件确定的东西：
+
+1. **具名文件集**：bucket 06 = 31 个模块，含 `tests/test_services/test_cron_scheduler.py`、
+   `tests/test_swarm/test_subprocess_backend.py`、`tests/test_swarm/test_worktree.py`、
+   `tests/test_tools/test_remote_trigger_tool.py`、`tests/test_ui/test_react_backend.py`、
+   `tests/test_hooks/test_executor.py`、`tests/test_iterate/test_decision_log.py`、
+   `tests/test_iterate/test_cross_surface_ledger.py`。本机因缺 docker/node 把这些路径整体跳过 ⇒
+   **本机不可复现**。
+2. **它不是慢**：同 run 里十条腿各约一分钟（含 checkout、uv sync、收集），artifact 日志末尾写着
+   `520 passed in 9.86s` ⇒ "2 核共享 runner 上大概要 45 分钟"那句被直接证据推翻（本会话已收回）。
+3. **步骤内部结束不了它**，五种仪器全部实测不能：`timeout --kill-after=60 1200`；把 pytest 从
+   Actions 管道上摘下来（`> file`）；`setsid` 完全脱离 + 有界轮询 + `kill -9 -- -$pid` 打整个新会话组；
+   `gh run cancel`；以及 `pytest-timeout` 的 240 s 逐条表。最后那条是新信息——那张表覆盖
+   setup/call/teardown，**它从没响过**，所以等待不在任何一条用例里，而在最后一条之后
+   （session teardown 或解释器退出）。唯一能结束那两条腿的是 GitHub 的 job 超时，
+   而它不上传 artifact、日志端点持续 HTTP 404（实测：`timeout-minutes: 30` 的 job 起于 13:58:00、
+   cut 于 14:33:00 ＝ 30 分钟 + 约 5 分钟宽限；`artifacts.total_count` 恒 11）。
+   同一天又量到一条把"runner 死了没上传"改写掉的对照：**已完成**的 job 日志取到 31,956 字节，
+   进行中的腿回 HTTP 404 ⇒ **job 的日志只在 job 结束之后才存在**；一个永不结束的 step 意味着日志在
+   任何地方都不存在，与缓冲无关。第六把表（`faulthandler.dump_traceback_later(420, exit=True)`，
+   进程级、不绑用例、写在 conftest 里，带着自己 open 的 descriptor 与判据）已在 run 40209916121 上
+   弦：**它也没能让那两条腿结束。** 该 run 的最终读数是 14 个 job 绿（plan / quality / typecheck /
+   npm wrapper / 十条测试腿），2 个 cancelled（`bucket 06` 两条腿，约 16:29 由 GitHub 的 job 超时切掉，
+   `artifacts.total_count` 仍是 11）。六把表都不响，剩下的解释只有两种且站在外面分不开：进程已被杀死
+   而 runner 报不回这一步的结束；或者连 `SIGALRM` 都进不到那个等待里（主线程停在一段不返回 Python 的
+   C 调用中）。**这两种都不是工作流能修的**——所以这一格到此为止，不再往里加仪器：它被写成
+   品类 + 具名文件集 + 六次实测，不写成绿。
+
+四道上限现在是嵌套的，且由判据钉住次序：**一条用例 240 s < 进程看门狗 420 s < 步骤预算 600 s
+< job 上限 20 分钟**。这条次序本身就是量出来的教训：12 分钟那一档虽然"数字上大于 600 s"，
+但前面 3.5 分钟的 setup 把余量吃光了，于是上限抢在预算之前落地，一次本来能判定的运行变成一次
+不可判定的运行。
+
+**所以本会话不写"CI 绿"。** 写的是：12 条里 10 条绿（覆盖 2,600 条用例）、挂的那两条已落成 31 个
+具名模块、且已证明它不是慢、也不是任何步骤内机制能收的——这是一个 Linux 上的等待缺陷，
+留在 harness 线上，不进双向集成的判定，也不冒充成绿。
+
+### fork 树里那四处夸张：改完，并归号 0.11.1
+
+台账留的"归下一次 harness 取号"那一格做完了（判据统一成"哪一侧在生产里跑、另一侧靠哪条测试或
+哪条操作者命令背书"）：① "Behaviour parity: measured across two implementations" ⇒ 无人值守跑的是
+一个实现（实测 `bun script/kernel-conformance.mjs` 自报 `16 fixture(s) through 1 implementation(s)`，
+rc=0；Python 侧 `diff_kernel_implementations.py` 是操作者命令，本机实测 rc=2），并钉住
+`contracts/kernel-conformance.json` 的 `"version": "0.1.9"` 是出处戳记不是判据；② ③ 行"两侧都能整链
+验通对方那本"⇒ 生产读者只有回路这一侧，fork 的 `verifyLedger` 在 `src/` 零调用者；③ ④ 行补成
+两扇门都读得到、通过轮也落账、契约拒绝零字节；④ `index.ts` 注释里 `Dispatcher.swift:156` ⇒
+`:216`（`grep -rn evidencePack engine/Sources/` 今日唯一命中，在 `handleLastEvidence` 内）。
+取号 0.11.1（patch）不是为了内容而是为了那条等式：`release-artifact` 只宽容 `SYNCLOG.md`/
+`CHANGELOG.md` 落后，文档与注释不在那格子里，量到就是 `2 problem(s)`。
+
+### 本轮新增的通用失效形状（都出自我自己写的东西）
+
+1. **桩替我掩盖了一次真实失败。** `tests/test_ci_suite_step_program.py` 的 `ps` 桩把所有请求吞成
+   exit 0，于是 runner 上 `ps --ww` 报 `unknown gnu long option`、`set -e` 把十条已绿的腿打红这件事，
+   本机五条用例一条都没抓到。桩改成真转发（同样的 argv 交给 /bin/ps、同样的退出码还回去）之后，
+   BSD 的 ps 当场回 `illegal option -- -`——同一缺陷的两种说法，本机就能红。
+2. **仪器不能变成故障本身。** 那两处 `ps` 快照现在各带 `|| true`，且有判据（"必须两处、必须各自
+   `|| true`、不得含长选项"）与变异（`M-W`／`M-X`）各一条。
+3. **注释不能替代码说话（又一次）。** 探针判据第一版找的是 `"setsid "`，而这一步的注释与 echo 文案里
+   也写着 setsid ⇒ 把启动命令换成 `timeout` 管道它照样绿。改成行首锚定 + `_commands_of()`
+   （剥掉注释行再断言），变异 M-B 这才红。
+4. **双引号里的反引号是命令替换。** 我那句本该解释"为什么拒绝"的 `echo "…`kill -9 -- -PID`…"`
+   实测执行了 `kill`、`setsid`（无参，IndexError）与 `ps`。新增判据
+   `test_no_run_body_carries_a_backtick_that_is_not_a_comment`，`$(…)` 是步骤体里唯一允许的写法。
+5. **判据读的必须是值，不是值的打印形状。** 用 `re.search` 去 `str(dict)` 里匹配 `"600"` 匹配不到
+   （Python 打字典用单引号），当场具名红了一次；改成读 `env["PYTEST_HARD_STOP"]`。
+6. **测钩子要作用在钩子真的在作用域里的地方。** 看门狗的控制用例第一版把探针写在 tmp 目录，
+   仓库的 `tests/conftest.py` 根本不在那次 pytest 的作用域内 ⇒ 假绿。改成把真 conftest 逐字节复制到
+   探针旁边，测的才是那个钩子本身。
+7. **别把 tree 的 SHA 喂给 commit 的判据。** 我先用 `git merge-base --is-ancestor 962b1430… <split>`
+   失败就断言"重切不是快进"，而 `962b1430…` 是 `release-artifact` 打印的**发布仓 main 的 tree**；
+   `git cat-file -t` 一测即明。推送实测是真快进，lease 是空操作；这段收回写在
+   `harness/glasspane-harness/SYNCLOG.md` 与 `5f405534` 的消息里，不改写已经推出去的那笔。
+8. **一个数字在不等式里成立，不代表它在墙钟上成立**（见上面 12 分钟 vs 600 s 那条）。
+
+### 发布读数（0.11.1 五格与那条等式）
+
+- tag `v0.11.1` → `f324afa0`；发布仓 main == `f324afa0`。推之前先量
+  `test "$(git rev-parse <split>^{tree})" = "$(git rev-parse HEAD:harness/glasspane-harness)"`，
+  并确认上一Head `e96d92c6` 是其祖先 ⇒ **真快进**（`--force-with-lease` 在真快进上是空操作；
+  我一度把它当成必要，原因记在本节第 7 条失效形状里）。
+- GitHub Release `v0.11.1`：非 draft，**6 件资产** —— darwin-arm64.zip 46,453,170 B、
+  darwin-x64.zip 48,635,278 B、两份 `.asc` 各 833 B、`SHA256SUMS.txt` 204 B、其 `.asc` 833 B；
+  逐件带 API `digest`（比对用 API，不在本机重算：这台机器重下发布物会被静默截断）。
+- npm 三包 `glasspane-harness` / `-darwin-arm64` / `-darwin-x64`：`npm view … version` 各 = **0.11.1**
+  （发布 run 40211293095 success；父仓那次 push 触发的 Release run 40210116533 也 success）。
+- 等式的权威读数是 **CI 里那一步**：`harness rulers` lane（run 40212357161，sha `959bd423`）绿，
+  其中 `The released artifact and the split branch are trunk's bytes` 与
+  `The release-artifact anchor can still go red, for each reason separately` 各自 success。
+  同一天本机三次跑 `release-artifact --check` 全是 rc=2 `CANNOT MEASURE`
+  （`RPC failed; curl 28 … expected 'packfile'`）——"量不到"与"量到是绿的"是两种读数，都记在这儿。
+- `fork-diff` 在发布之后又具名红过一次：`SYNCLOG.md: our own file moved (abb46a8e → 42c5008b)`，
+  因为"收回重切必然换 SHA"那段是 tag 之后写的。按它自己的规矩在干净树上重记金样（`959bd423`）后 CI 转绿；
+  搬运分支不需要再切——金样在 `harness/contracts/` 里，不在 fork 树内（重切实测仍是 `f324afa0`，
+  `Everything up-to-date`）。
+
+### 剩下没闭合的三格，写清不藏
+
+1. **iterate-harness 主干 CI 的 `bucket 06`**：31 个具名模块在 ubuntu 上让 runner 结束不了那一步，
+   六把表实测无效。这不是双向集成的语义缺陷，是 harness 自身测试套件的一个 Linux 等待缺陷；
+   但它使"本版 CI 绿"不成立，所以那句话不写。下一步的可行路径只剩两条，都不在工作流里：
+   在 Linux 上复现（本机没有 docker，实测），或者按模块二分并配一条**能把日志送出去**的通道
+   （mid-step push，需要给 job 加 `contents: write`——那是一次新的权限面，本会话没有做）。
+2. **iterate-harness 2.11.2 待取**：`pyproject.toml` 的 dev 依赖进 wheel 的 METADATA（实测
+   `Requires-Dist: pytest-timeout==2.4.0; extra == 'dev'`），而已发布的 2.11.1 那份产物里没有它
+   ⇒ 发布物与主干不一致，需要一个 patch 号。不在第 1 格落地前取它：带着已知红 lane 取号比等一格更糟。
+3. **本机 daemon 仍是 1.6.2**（壳已 1.21.0）：能力对账会预告 `attach` 一类调用被 methodNotFound 答回；
+   换 daemon 要重启正在被另一个会话使用的进程，没动。
