@@ -404,6 +404,13 @@ daemon 权限模型与 5.5 一致。
 | GlassPane → iterate | GlassPane 修复完成 → 配方下一步挂接 iterate invariant 复核，通过后才进入重验 | 配方编排 + kernel 收敛规则 |
 | 双向 | AE 判定按 kernel provider 注册契约注册，两侧 harness 以同一契约消费 | kernel provider 注册契约 |
 
+**本表是 5.7 当时的产品级定义，不是现状。** 逐行现状（每一条的生产端/消费端/能红的闸，以及"还只是
+陈述、没被量到"的那半）记在 `specs/GlassPane_双向集成_2026-10-25_状态.md`，到 2026-10-25 五条全部
+接通，其中两处与当初设想的语义通道不同：**① ② 两侧不是"同进程库调用"**——两个 harness 是各自独立的
+进程与仓库，跨边界的东西一律写成可核验的记录（`.iterate/run-plan.json` / `GLASSPANE_RUN_PLAN` /
+`GLASSPANE_DECISION_LOG` / `.iterate/decision-log.jsonl`）由对面读；**③ 两本账不合并**，"互通"的含义
+是同一套哈希链格式加上双向各一个可验的读者，而不是一份共享数据库。
+
 **分阶段落地（门控）**：
 
 | 阶段 | 动作 | 门控 |

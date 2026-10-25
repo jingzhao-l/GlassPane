@@ -5,17 +5,20 @@
 > 于是"五场景全落"这类说法只能靠聊天记录支撑。判据规则：只认文件字节与自己跑的读数，不认提交信息。
 > 历史结论不改写（`specs/**` 是验收台账），本文件是新增的一份，日期即版本。
 
-## 分支与发布状态
+## 分支与发布状态（第二十次会话末尾重量，2026-10-25）
 
 | 仓 | 分支 / 提交 | 发布 |
 |---|---|---|
-| iterate-skill | **已并 main 并推送**：`origin/main` = `829fda39`（本会话 7 笔：④ 配方+闸、③ 链路与读者、终端那扇门、语料 pin 追到 0.1.10） | 未取号（harness 侧 Python 包随 iterate-skill 发布线走；2.10.0 由发布线在 10-24 取走） |
-| GlassPane（含 harness） | **已并 main，未推**：写入这一格时量到 main = `b1d5ac7e`、`origin/main` = `9acda519`、`ahead=18`；我的 7 笔是 `6e630b05`/`e4a312cc`/`7fb73921`/`b4c5b4cb`（分支内容）+ `c4556a9b`（合并）+ `4b44a33b`（金样）+ `e8a14300`（台账），其余 11 笔属发布线。读的时候先复量：`git -C /Volumes/Eng-Dev/GlassPane fetch origin && git -C /Volumes/Eng-Dev/GlassPane rev-list --count origin/main..main` | 未取号（harness 0.10.5 / 父仓 1.21.0 已由发布线落地，本批字节不在其中） |
+| iterate-skill | **已推**：`main` == `origin/main` == `fd8b1381`（本会话在其上的笔：`80126520` 验收脚本、`e39a33bd` README、`832171b4` **2.11.0 取号**、`161f352e`/`67f904c5` 发布账与仪表、`52c79227` 复审修复、`e97f11ec` **2.11.1 取号**、`92101c17` 操作者验收、`fd8b1381` 第三次仪表） | **2.11.1 三格齐**：独立仓 tag + GitHub Release（3 件资产、wheel 1,052,100 字节）+ PyPI + npm；三条通道的同一份 wheel 字节逐字相等（`cbfc86cc…`）。本机全局 `iterate-harness@2.11.1` |
+| GlassPane（含 harness） | **已推**：`main` == `origin/main` == `ad2e3306`（README 改写 `6894c8c9` + 台账 `3af5dd2b`/`ee5e1b67`/`f91d8d5e`/`ad2e3306`）；fork 树本会话**一个字节未动**（`git diff --stat -- harness/` 空） | harness **0.11.0**、父仓 **1.21.0** 均在 registry（`npm view glasspane-harness version` = 0.11.0、`glasspane-mcp` = 1.21.0）。`release-artifact --check` **rc=0**：`✓ split-main == 主干树（962b1430…）` + `△ artifact 仅落后 31 行 SYNCLOG（发布自己那一笔），非台账差异 0 处` |
 
-推不推的判据不是保守：**GlassPane 本地 main 领先 origin 的那些笔里，多数属并行那条发布线**（写入这格
-时是 11 比 7），替他们推出去等于代他们发布（`不可代推`是这条仓的既有纪律）。
-`release-artifact` 那条"发布物 == 主干"的等式此刻仍红（见下），修它的下一步是 re-split + 取 0.10.6，
-同样归发布线。
+推不推的判据不是保守，但**它的结论本会话变了**：先前那格写"本地领先 origin 的 18 笔里 11 笔属发布线，
+代推＝代发布"，而这次发布线自己已经把主干推平（`0 0`），我这边只剩自己的 README/台账笔。
+所以判据仍然是同一条——**先复量再决定**，别把上一次的读数当今天的：
+`git -C /Volumes/Eng-Dev/GlassPane fetch origin && git -C /Volumes/Eng-Dev/GlassPane rev-list --left-right --count origin/main...main`。
+`release-artifact` 那条等式此刻为 `0 problem(s)`；记一笔过程中的真实抖动：第一次跑因网络
+（`RPC failed; curl 28 … expected 'packfile'`）报 **CANNOT MEASURE**，复跑两次才拿到上面的 rc=0——
+"量不到"与"量到是绿的"是两种读数，别把前者当后者。
 
 ## 逐行现状
 
@@ -24,7 +27,7 @@
 | ① | invariant 失败 → 运行时重验 | **接通** | 触发点 `harness/iterate-harness/src/iterate_harness/tools/iterate_tools.py:503-504` 在拥有 session 的 loop 上 await；发送 `iterate/reverify_trigger.py`；逐 item 分类 `iterate/glasspane_reverification.py:relay_answer`；GP 侧就是既有 `gp_last_evidence`/`gp_diagnose`，无需新代码 | 重验=只读回看。引擎对"重跑配方步骤"永远回 `deferred`（这是它的既有纪律，不是本批修的） |
 | ② | 第 N 维审查 → 压缩感知维度 | **接通（不对称已改成读数）** | iterate 侧写计划 `iterate/run_plan.py:write_run_plan` → `tools/iterate_tools.py:381`；压缩排序 `services/compact/__init__.py:_order_by_dimension_verdict`；fork 侧读计划 `packages/opencode/src/tool/glasspane/kernel.ts:readRunPlan(env, projectDirectory)`（显式 `GLASSPANE_RUN_PLAN` 或工程自己的 `.iterate/run-plan.json`）+ 丢弃排序 `src/plugin/glasspane-compaction.ts:selectAnchors` + 残余不对称的读数 `collectEvidenceAnchors.declaredWithoutAnchor`（块里打印）；面 A 槽 `mcp-shell/src/dimension.ts` + `tools.ts`/`http-gateway.ts` 两道门 | 只有出 `evidencePack` 的方法（`last_evidence`）能把声明维度带进锚点；其余四个工具上声明的维度到不了压缩——**根在 Swift 侧证据发射面**，本行现在给的是它的宽度读数而不是解释 |
 | ③ | evidence 原生入决策日志、哈希链互通 | **接通（对面台账可被项目记为默认）** | 两侧 writer 对同一组 draft 输出**逐字节相同**（sha256 `eaa9dc7d…`）；样本双向钉住：`iterate-harness/tests/fixtures/glasspane_chain_ts_written.jsonl` ↔ `harness/…/packages/opencode/test/fixtures/glasspane-chain-python-written.jsonl`，各自被对方格式的读取器整链验通 + 篡改必红；跨账本读者 `iterate/glasspane_recipe.py:fix_proof`，路径由 `resolve_ledger`（`env` → `.iterate/glasspane-ledger.json` → 项目台账）给出，链接动作 `/iterate glasspane-ledger <绝对路径>` 或 `ih iterate glasspane-ledger`，钉 `genesisEntryId` ⇒ 被替换的链回 `LEDGER_LINK_E_STALE` | 默认路径仍是两个文件；链接把"读哪一本"变成一次项目动作而不是每次导出环境变量，但**一本都不合并**——合成本一本仍是产物线的设计决定 |
-| ④ | 修复完成 → 挂 invariant 复核 → 通过才进重验 | **接通（闸有读者，两扇门）** | 配方交接 + 判定闸 `iterate/glasspane_recipe.py`（`RECIPE_E_*` / `RECIPE_GATE_E_*` 六条码），发布点每条路径带 `recipeStepGate`，且闸随那一轮的账本行落盘；读者两条：session 内 `/iterate gate` 与终端 `ih iterate gate`（两面措辞同源、退出码各自——由 `test_the_terminal_surface_and_the_slash_surface_answer_the_same_thing` 钉住）；`recipeSteps` 被写成**禁令**（`reverification_targets` 无该参数，签名也被断言钉住）；配方文档按 `glasspane.recipe/0.1-draft` 校验，语料 `tests/kernel_fixtures/recipe-config.ok-01.json` | 契约只在复核**失败**时生成请求（两份实现一致），所以"带权限的重验请求"按构造不存在 → 闸是**报与拦**，进程内没有东西强迫驱动配方的人；且两侧都没有配方执行器，闸答"能否推进"，不答"下一步是哪步"（进度指针须由动手修的一侧写进账本） |
+| ④ | 修复完成 → 挂 invariant 复核 → 通过才进重验 | **接通（闸有读者，两扇门都读得到通过轮的答案）** | 配方交接 + 判定闸 `iterate/glasspane_recipe.py`（`RECIPE_E_*` / `RECIPE_GATE_E_*` 六条码），发布点每条路径带 `recipeStepGate`；**答案落账覆盖两支**——发出去的那一轮，与判定通过、因此什么都没发的轮次（2.11.1 的 `record_gate_without_send`，`kind: recipe-gate`），而契约拒绝一支照旧零字节（Requirement C）；读者两条：session 内 `/iterate gate` 与终端 `ih iterate gate`（两面措辞同源、退出码各自——由 `test_the_terminal_surface_and_the_slash_surface_answer_the_same_thing` 钉住），另有操作者验收 `scripts/check_gate_answer_reader.py` 在**装好的那份**上把两扇门各问一次；`recipeSteps` 被写成**禁令**（`reverification_targets` 无该参数，签名也被断言钉住）；配方文档按 `glasspane.recipe/0.1-draft` 校验，语料 `tests/kernel_fixtures/recipe-config.ok-01.json` | 契约只在复核**失败**时生成请求（两份实现一致），所以"带权限的重验请求"按构造不存在 → 闸是**报与拦**，进程内没有东西强迫驱动配方的人；且两侧都没有配方执行器，闸答"能否推进"，不答"下一步是哪步"（进度指针须由动手修的一侧写进账本） |
 | ⑤ | AE 判定按 provider 契约，两侧同一契约消费 | **接通** | 两侧注册 + 消费（fork `src/tool/glasspane/providers.ts`→`index.ts`；面 A `mcp-shell/src/providers.ts`→`tools.ts`/`http-gateway.ts`；Python `provider_registry.py`→`glasspane_reverification.py`）；跨侧对账 `harness/tools/provider-surface.mjs`（跑两侧真代码，三条规则 + 四发控制 `provider-surface-selftest.mjs`，已排在 `bun install` 之后） | 面 B 比面 A 多 `diagnose-pixel`/`diagnose-probed` 是正当不对称，但它是**记录**而非推导——新增单边方法时必须有人重记金样 |
 
 ## 这一轮把哪些"看起来完成"判成没完成
