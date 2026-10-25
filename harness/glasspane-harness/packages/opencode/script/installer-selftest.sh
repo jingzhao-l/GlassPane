@@ -354,7 +354,8 @@ assert_has "it says the manifest is not published" "$SCRATCH/no-sums.log" "no SH
 assert_has "and it names the opt-out instead of inventing one" "$SCRATCH/no-sums.log" "GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1"
 assert_not_has "nothing is installed on that path" "$SCRATCH/no-sums.log" "[OK]    installed via"
 SCENARIO_ALLOW_UNVERIFIED=1 run_install "$SCRATCH/no-sums-optout.log" --version 9.9.9
-assert_code "GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 does install" "$?" "0"
+assert_code "GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 does install, and says so with exit 3" "$?" "3"
+assert_has "the exit-3 line repeats the two states a reader needs to act on" "$SCRATCH/no-sums-optout.log" "exit 3: installed WITHOUT full verification"
 assert_has "and the state names the override as the reason" "$SCRATCH/no-sums-optout.log" "sha256: skipped by GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1"
 assert_has "and it still says the bytes were not fully verified" "$SCRATCH/no-sums-optout.log" "not fully verified"
 assert_not_has "the opt-out does not claim a checksum verification it did not do" "$SCRATCH/no-sums-optout.log" "sha256: verified"
@@ -412,7 +413,7 @@ if [ -n "$REMEDY_NOGPG" ]; then
   RUN_PATH="$STUB:/usr/bin:/bin:/usr/sbin:/sbin" run_printed "$SCRATCH/no-gpg-remedy.log" "$REMEDY_NOGPG"
   REMEDY_RC=$?
   RUN_PATH=""
-  assert_code "running the printed remedy does install (the override reaches bash, not curl)" "$REMEDY_RC" "0"
+  assert_code "running the printed remedy installs (the override reaches bash, not curl) — exit 3 names the unverified outcome" "$REMEDY_RC" "3"
   assert_has "and it records the override as the reason provenance was skipped" "$SCRATCH/no-gpg-remedy.log" "GPG: skipped by GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 (gpg is not installed)"
   assert_has "and it still says the bytes were not fully verified" "$SCRATCH/no-gpg-remedy.log" "not fully verified"
   assert_not_has "the override path never claims GPG was verified" "$SCRATCH/no-gpg-remedy.log" "GPG: verified"
@@ -420,7 +421,7 @@ fi
 SCENARIO_ALLOW_UNVERIFIED=1 RUN_PATH="$STUB:/usr/bin:/bin:/usr/sbin:/sbin" run_install "$SCRATCH/no-gpg-optout.log" --version 9.9.9
 OPTOUT_RC=$?
 RUN_PATH=""
-assert_code "the same machine with the override installs" "$OPTOUT_RC" "0"
+assert_code "the same machine with the override installs, at exit 3" "$OPTOUT_RC" "3"
 assert_has "with the same state string the printed remedy produced" "$SCRATCH/no-gpg-optout.log" "GPG: skipped by GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 (gpg is not installed)"
 mv "$SCRATCH/gpg.hold" "$STUB/gpg"
 
@@ -437,7 +438,7 @@ assert_not_has "it never prints the unconditional verified claim" "$SCRATCH/unve
 assert_has "it says which of the two is missing" "$SCRATCH/unverified.log" "no SHA256SUMS.txt is published"
 assert_not_has "nothing is installed on that path" "$SCRATCH/unverified.log" "[OK]    installed via"
 SCENARIO_ALLOW_UNVERIFIED=1 run_install "$SCRATCH/unverified-optout.log" --version 9.9.9
-assert_code "the override installs, and says so" "$?" "0"
+assert_code "the override installs, and says so — exit 3, not a silent 0" "$?" "3"
 assert_has "it prints both skipped states, each naming the override" "$SCRATCH/unverified-optout.log" "skipped by GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1"
 assert_not_has "and the override never prints the unconditional verified claim" "$SCRATCH/unverified-optout.log" "sha256 + GPG verified"
 mv "$SCRATCH/s.hold" "$FIX/SHA256SUMS.txt"
@@ -540,7 +541,7 @@ assert_code "a manifest the endpoint reports as unpublished is refused" "$?" "1"
 assert_has "and names it as unpublished" "$SCRATCH/sums-404.log" "no SHA256SUMS.txt is published for v9.9.9"
 assert_not_has "it does not claim a checksum verification it did not do" "$SCRATCH/sums-404.log" "sha256: verified"
 SCENARIO_SUMS_HTTP=404 SCENARIO_ALLOW_UNVERIFIED=1 run_install "$SCRATCH/sums-404-optout.log" --version 9.9.9
-assert_code "and the same 404 installs under the documented override" "$?" "0"
+assert_code "and the same 404 installs under the documented override, at exit 3" "$?" "3"
 mv "$SCRATCH/sums.real" "$FIX/SHA256SUMS.txt"
 
 # ---------------------------------------------------------------- 16: redirect discipline
@@ -615,7 +616,7 @@ if [ -n "$REMEDY_NOSUMS" ]; then
   pass "the no-manifest refusal prints one copy-pasteable remedy command"
   mv "$FIX/SHA256SUMS.txt" "$SCRATCH/sums.remedy-hold"
   run_printed "$SCRATCH/no-sums-remedy.log" "$REMEDY_NOSUMS"
-  assert_code "the printed no-manifest remedy installs when it is run as printed" "$?" "0"
+  assert_code "the printed no-manifest remedy installs when it is run as printed, at exit 3" "$?" "3"
   assert_has "and the override is named as the reason the checksum was skipped" "$SCRATCH/no-sums-remedy.log" "sha256: skipped by GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1"
   assert_has "and the run still says the bytes were not fully verified" "$SCRATCH/no-sums-remedy.log" "not fully verified"
   assert_not_has "the printed remedy never produced a skip that reads as a verification" "$SCRATCH/no-sums-remedy.log" "sha256: verified"
