@@ -2,6 +2,138 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-25（第二十次会话）· 取号 0.11.0：两条发布线的分叉并掉，上一轮三笔未收口的活带上主干
+
+### 开工与隔离
+
+- 开工 HEAD 是本地 `b387c2cc`，整树 `git status --porcelain` 为空，`df -k /Volumes/Eng-Dev` 可用
+  22,164,736 KB（约 21 GiB，够 `bun install` 与整包构建），`bun` 1.3.14，`.external/opencode`
+  `describe --tags` == `harness/upstream.json` 的 pin `v1.18.32`、`fsck` 无错、工作树干净；
+  preflight 认出本机那条拦截根证书并要求 `NODE_EXTRA_CA_CERTS=/var/tmp/glasspane-harness/ca-bundle.pem`
+  （163 张，实测数过），本轮所有构建/发布类命令都带着它。
+- **树没脏，但 `main` 与 `origin/main` 分叉了**：本地多 9 笔未推（07:30 那条线今天 08:57–09:58 的
+  主仓修复与 `release: 1.21.0`），远端多 19 笔（10-24 的 harness 0.10.3/0.10.4/0.10.5 三格与主仓
+  1.20.2），共同祖先 `61153ffd`。这就是 10-23 那起事故的同一形状（发布留在本地 ⇒ tag/Release/npm
+  一格没发生、CI 从没跑过那批），且它让本线的 fork 树落后整整三个版本。合并提交 `f928e2c6`
+  （二父 `b387c2cc` + `2b2d2353`）已推 origin；HTTPS 推被 `GH013` 拦（token 无 `workflow` scope，
+  而合并动了 `.github/workflows/ci.yml`），改 SSH remote 推成。
+- 15 处冲突逐类处置：版本字面量一类（四份 manifest + 两份 lock + `EngineCore.swift` 的
+  `buildVersion`/`version` + `make-app.sh` + `install.sh` 的 `GLASSPANE_RELEASE` + `dispatch.ts` 的
+  `SERVER_INFO.version` + 两份 README）取 **1.21.0**；安全字节复核 `zod 4.6.7` 在两份 lock 与
+  `mcp-shell/package.json` 里逐字仍在。**根 `CHANGELOG.md` 不接受自动合并的结果**——git 把 HEAD 那条
+  目尾部 33 行当成"与 1.20.2 重复"吞掉了（含整段引导句），这是"合并吃掉内容"不是"去重"；改按三块
+  精确并集，脚本核回三段逐行相等、重复条目 0、尾部 4,666 行相等。金样两把（`fork-diff`、
+  `tool-surface`）按它们自己给的出路：先提交、再 `--record`、折进同一笔（两把尺子都拒绝在未提交
+  状态上记录，这是 10-13 那道脏树闸在替并行线挡我）。
+- 合并后 `bun install` 重写 `harness/glasspane-harness/bun.lock` 的工作区版本字段（0.10.3 → 0.10.5），
+  这条改动本身把一类缺陷顶到眼前：那次 install 之后 `patched-deps --check` 报了一条真 FAIL，
+  见下面【本轮修掉的缺陷】第 1 条。
+
+### 上一轮没收口的活（判据用字节，不用分支名）
+
+1. **`gp-harness-orphan-20261010`**：本地与 `git ls-remote --heads origin` 都没有这条分支了；
+   它保的五个文件里最关键的那句自回显断言，现在 `verify-published.ts:295-330` 读的是
+   **已安装**包清单的 `os`/`cpu`/`version`（`installedManifest = <prefix>/lib/node_modules/<name>/package.json`），
+   当年由 `c3c98af5`（0.7.4）那批带进主干，SYNCLOG:1210/1353/1398 留有当年的逐行判据。判定：已落地。
+2. **`gp-harness-sc5-fork-20261020`**（tip `f32ef8dd`）：`providers.ts` / `index.ts` /
+   `registry-readiness.ts` / `glasspane-provider-registration.test.ts` 四个 blob 与本树
+   `git hash-object` 全等；它的 `test/script/registry-readiness.test.ts` 主干是**严格超集**
+   （多 38 行"发布 lane 说清它观察到了什么"）；`harness/README.md` 差的那一行是血缘计数的新旧措辞。
+   判定：已落地/已被取代 ⇒ 本轮收口清理里按 `git branch -d` + `git push origin --delete` 删。
+3. **`gp-bidi-20261024`**（上一轮 01:13 那 11 笔，未推未并）：本线自己的活，`ca00d5e9` 并进主干，
+   其压缩/内核两半与 `provider-surface` 新尺子上主干；该分支其后又被并行会话追加三笔
+   （② 的残余不对称读数等），由 `c4556a9b` 并入。分支里那两个未提交文件（`glasspane-compaction.ts`
+   与其测试 +173/−24）后来由并行线以 `6e630b05` 提交并合并，本轮没有替别人提交任何东西。
+4. **`gp-zod-bundle-land-20261025`**（并行线交出来的四笔，明确"不占 main"）：`5964aed6` 并进来——
+   `zod-bundle` 归因闸 + 它的电池 + 那条 CI `rc=0` 缺失的修复（本线那次 CI 红的根因）。
+
+### 本轮修掉的缺陷（发现即修完；每条有固定点用例，且都跑过"把被修点弄回去必须具名变红"）
+
+1. `patched-deps` 用磁盘判"在不在安装图里" ⇒ 同一棵提交树两个判决（本机 FAIL / CI `△`），
+   改成只问 `bun.lock` 的 `packages` 块；顺带堵掉"`patchedDependencies` 删空 = 绿"。电池 28→38 条。
+2. `brand-surface` 的金样记了 `rules` 而 `--check` 从不读回 ⇒ 删一条规则就是绿。补规则集相等断言。
+3. `product-surface` 的"某 lane 真跑了这个脚本"被 `includes(basename)` 满足 ⇒ 改成必须是
+   `node|bun run|bash|sh` 的操作数。
+4. `rulers-selftest` 控制 8 的 needle 只存在于有参照克隆那条 lane ⇒ 钉两条 lane 共有的串，
+   另加控制 8b 用 `upstream.json` 的 `referenceClone` 旋钮真驱动离线 lane。
+5. `tool-surface` 两处永不触发的"拒绝分支" ⇒ 删。
+6. `kernel-pin` 的 `--probe` 退出契约与"两份内核不一致"两条 refusal 落仓无输入 ⇒ 电池 23→36 条。
+7. 决策台账按 `gp_` 前缀收货（工程自己的工具可伪造哈希链条目）⇒ 改按 `DAEMON_ORIGIN` 判 provenance。
+8. `insideStateRoot` 词法比较 ⇒ 符号链接可把第二写者带进引擎状态根；改物理+词法双判。
+9. `present()` 的标题在负面 verdict 上说 "ok" ⇒ 改 "answered"。
+10. `postinstall` 只问 `--version` 退不退 0 ⇒ 改成比对声明的版本号，失败说出观察到什么。
+11. 发布 lanes 的 `npm publish` / `npm stage publish` 不点名 registry ⇒ 四处统一从 `product.json` 取。
+12. `install.sh` 未验全的安装退 0 ⇒ 改 exit 3，安装器自测五条期望跟上（166 PASS 全过）。
+13. TUI 权限高亮只看队列首项 ⇒ 抽 `awaitsPermission()` 按整条队列判，4 条用例。
+14. 三条按构造不会红的断言（`path.resolve` 比字符串、手写 ISO 串对 schema 正则、静态字面量
+    `toBeTruthy`）与 `defs.length > 0` ⇒ 换成产品行为与精确六个 id；remedy 扫描面补两个文件与形状。
+15. `ci.yml` 那条"本 lane 不装参照检出"的注释与实际步骤相反 ⇒ 改注释，步骤一字未动。
+
+### 本轮实测读数（每条都是当场跑出来的命令，不是搬上一轮）
+
+- `node harness/tools/fork-diff.mjs --record`：`4640/6736 byte-identical, 285 edited, 104 added, 1707 deleted`。
+- `tool-surface`：面 A `mcp-shell/src` **11,973 LOC / 22.35%**，面 B fork(ours) **10,945 LOC / 20.43%**
+  （两条都在文档上限 10% 之上，属长期存量、闸只挡进一步增长；本批次有意增长 +70/+138 行逐文件对得上，
+  与代码同批 `--record`）。
+- `brand-surface`：血缘 **9607 处 / 3320 文件**（基线 9607/3317，覆盖率上升只报不红）；产品面 26 文件 + 2 文档，1 命中（`first-party-gateway`，金样内）。
+- `surface-semantics`：0 命中 / 23 文件，三条正向控制 3/3 各自命中。
+- `product-surface`：**6530 条一致 / 0 问题**，`glasspane-harness@0.11.0`。
+- `provider-surface`：面 B 5 method / 面 A 3 / 重叠 3 / 单边 2。
+- `hook-liveness`：21 个钩子对齐 `anomalyco/opencode@v1.18.32`，无漂移。
+- `kernel-pin --check`：`iterate-kernel@0.1.10` 与 lock integrity 对得上、随包 **26** 个契约文件逐条 sha256。
+- `kernel-conformance`：16 条 fixture 全部按记录答话。
+- `patched-deps --check`：**18/19** 逐行核过，1 条 `△`（`@standard-community/standard-openapi`，
+  锁里没有这个包，磁盘上是 09-25 的残留）。
+- 固定点测试：`packages/opencode` `bun test test/tool/glasspane-*.test.ts test/plugin/glasspane-*.test.ts
+  test/script/*.test.ts` = **223 pass / 0 fail（11 个文件）**；`packages/tui` 快照套件
+  **36 pass / 0 fail**；`bash packages/opencode/script/installer-selftest.sh` = **166 PASS，all checks held**。
+- 四包 typecheck（opencode / tui / sdk-js / plugin）全 rc=0；`bun run script/publish.ts --dry-run`
+  报 `ok glasspane-harness@0.11.0 packs cleanly`。
+- 主仓公共闸：`check-workflows --self-test` 22 例各自验证会红、`check-workflows` 5 份 workflow clean、
+  `check-doc-links` 无死链/双语成对/表格格数一致。
+
+### 红过又修好的 / 仍然红着的
+
+- CI 在 `f928e2c6` 上三条 lane 红（`root workspace gate`、`mcp-shell`、`harness rulers`）。前两条是
+  三条**只在 CI 上红**的夹具（本机 `TMPDIR` 是 `/var/folders/…`，runner 上是 `/tmp`；
+  GNU `stat` 同名却不认 BSD 的 `-f %Lp`），`9acda519` 修完，复现方法是本机
+  `TMPDIR=/tmp node --test …`，反向控制见该提交正文。**"CI 绿"从来不是本机绿的同义词。**
+- 第三条 `harness rulers` 红在 `release-artifact --check`：要求"发布物 == 主干"，
+  而主干带着 fork 侧新代码时只有本线取号才能同时满足——这一版（0.11.0）就是那一次取号。
+- 并行线补的 `ci.yml:398` 那条 `rc=0` 缺失（provider-surface 自测步骤在 `set -euo pipefail` 下
+  被中断）随 `5964aed6` 一并落地，本线合并时冲突只有那一处，取的是加 `rc=0` 的一侧。
+
+### 未观测的边界（都不是"下一轮再看"，是这一版测不到的东西）
+
+- **真模型轮次**：本仓不供 API key，M2 决策日志的 `logged` 分支需要一次真轮次才能成包；
+  补法：`cd harness/glasspane-harness/packages/opencode && bun test test/plugin/glasspane-decision-log.test.ts`
+  在有真 provider 配置的机器上跑，或按 `docs/` 的 operator 命令走一次带模型的 session 再核台账。
+- **真 TUI 观感**：`glasspaneRowLook` 的四态（◈ / ✗ / ⊘ / ?）与这次新加的"队列里第二个也被挡住"
+  是纯函数级验证，没有在真终端里人眼比对；补法：`cd packages/tui && bun dev` 起一次真 session，
+  连 `glasspaned` 后触发一次 `gp_act` 拒绝与一次权限等待。
+- **musl / baseline 目标**：`product.json` 声明了而本线没有对应 CI lane 的目标，本轮**没有**为它新增
+  发布物或 lane（那是范围变更）；实测读数由 `zod-bundle`/`patched-deps` 只在 darwin-arm64 本机取得。
+- **darwin-x64 的端到端**：`verify-published.ts` 只在 `macos-14` 跑，Intel 那份二进制的**执行字节**
+  没被端到端装过（有 build 期 `--version` smoke 与元数据核对）。补法：在 `macos-15-intel` 上跑同一条
+  `bun run script/verify-published.ts 0.11.0`。
+- **`gp_*` 工具面的真机调用**需要 `glasspaned` 在跑且权限席位齐；本轮只跑了不依赖 daemon 的套件，
+  真机那一格在最终汇报里如实标"未观测"。
+
+### 本轮决定（依据与回滚）
+
+- **取号 0.11.0（minor）**：依据是本产品自己的 pre-1.0 口径——三处用户可见形状动了
+  （安装器新增 exit 3、`gp_*` 回包标题由 "ok" 改 "answered"、两条 remedy 换成可执行命令），
+  加上新尺子与压缩行为。回滚：`git revert b9dc830f` 后重跑 `--record`（金样在下一笔里）。
+- **并掉分叉而不是重做**：两侧都有别人要读的字节，合并而非 `--force`；回滚 `git reset --hard f928e2c6^`
+  之前必须确认 origin/main 未被别的线推进（本轮推之后 origin/main == `f928e2c6`，之后的都在主干上）。
+- **`patched-deps` 不回退成"存在性判据"**：宁可对读不懂的锁布局退回磁盘判据并出声，
+  也不把"我量不到"写成"没问题"。
+- **压缩那一侧不加 provenance 门**：它读的是落盘 transcript，符号过不去 JSON，加了只会让锚点全消失；
+  理由写进源码注释而不是省略。
+- **`zod`  bundle 里两份低于修复线的副本维持"有记账"而非强行统一大版本**：
+  那要替第三方 provider 决定运行时形状，而它自己的测试在本机网络红——维持 `zod-bundle` 的
+  "accounted for, not clean" 判定，实跑读数 3 份副本（4.6.7 / 3.25.76 / 4.4.3）。
+
 ## 2026-10-25（第十九次会话）· 未取号：② 的残余不对称变成一个被打印的数，外加两笔从 CI 回来的账
 
 ### 开工与隔离
