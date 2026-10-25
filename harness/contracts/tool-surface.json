@@ -35,7 +35,7 @@
       }
     },
     "fork": {
-      "loc": 10945,
+      "loc": 10946,
       "files": [
         {
           "file": "packages/opencode/script/glasspane-e7-ledger.ts",
@@ -90,7 +90,7 @@
         {
           "file": "packages/opencode/src/tool/glasspane/index.ts",
           "kind": "added",
-          "lines": 447
+          "lines": 448
         },
         {
           "file": "packages/opencode/src/tool/glasspane/kernel.ts",
@@ -1179,7 +1179,7 @@
       }
     }
   },
-  "totalToolSurfaceLoc": 22918,
+  "totalToolSurfaceLoc": 22919,
   "note": null,
   "carried": null
 }
