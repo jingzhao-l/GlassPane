@@ -5,6 +5,76 @@
 
 ## [Unreleased]
 
+（空。本轮收口后没有未归号的条目。）
+
+
+## [1.21.0] — 2026-10-24
+
+**版本判断：minor。** 判据是本仓自己在 1.6.2 条目里写下的那一条：patch 要求"状态文件的字段没动、
+退出码集合没动、CLI 参数没动、npm 包的 `bin` 声明没动"。本版**动了其中三项**：
+
+- CLI 参数面：一次性子命令形态现在会拒绝它不读的修饰旗（`glasspaned --state-dir R --list-projects
+  --older-than 7` 从前退 0、一个字不提示，实测改成 64 + 整块 usage 并点名那一枚旗）；
+- 退出码分配：`--request-permission`/`--project-remove`/`--older-than` 的**缺值**统一成 64
+  （从前两支回 2、其余回 64，同一失败类两套码），`--permissions` 开始按席位读数给 0/1；
+- `--permissions` 的输出形状：出键改用 `--request-permission` 吃的那套拼写
+  （`developer-tools` 而不是 `developerTools`），并新增 `verdict`/`verdictSeats`/`verdictExcludes`/
+  `seatsNotGranted`/`next`。`hello` 那一面的键拼写没动（那是协议面，读者是壳与面板）。
+
+`node scripts/set-version.mjs 1.21.0` 写出 **15 个位点 + 2 份 lock**，`node scripts/check-version.mjs
+1.21.0` 自证通过；两个 npm 包的 `bin` 声明与 `files` 白名单未动。
+
+**本版合并了未发布的账。** 开工时 `main` 落后 `origin/main` 20 笔（harness 线 0.10.1/0.10.2 那一批
+与其台账），先 `git merge --ff-only` 追平再动工；下面那段是上一轮留在 `[Unreleased]` 里的正文，
+按"旧条目只新增不删"原样归入本节——它当时写的是"未取号"，从本版起那句话不再成立，父仓这一侧的
+副本与两份金样随 1.21.0 一起进入发布物。
+
+### 本轮审出并修完的缺陷（发现 53 条，修复 53 条；另有 2 条新增的持续量闸）
+
+逐条的位置、失效模式与修法记在 `specs/GlassPane_每日审查_2026-10-24_记录.md` §2（那里有行号，
+本处只列会被用户读到的那部分）。测试面净增：**mcp-shell 620→651、installer 210→222、
+updater 618→674、engine XCTest 1361→1424（另 Swift Testing 33 条 / 3 suites）、probe 51、
+bridge pytest 126→152（+1 skipped）**，一轮里新增 210 条用例，一条没少。
+
+按失效面分组，最该被用户知道的六条：
+
+1. **`glasspane-install --restore-launchd` 会不问一句就卸掉正在服务的 daemon**（安装器交给 agent
+   的"daemon 不可达"补救命令）。`--restore-launchd` 调 bootstrap 时没传 `allowBootout`，默认允许
+   bootout；同一个动作在 `install()` 里是三道确认门之一。现在先只读问一次，需要卸才问人，拒绝时
+   磁盘与 launchd 都不动并给三条不同的下一步。
+2. **`GLASSPANE_PROJECTS_FILE` 这个壳自己的覆盖位绕过了它自己的路径闸**，而紧随的写会对它点名的
+   目录 `mkdir(0700)` + 改权限并把注册表（bundle id、pid、档案路径）写进去。现在 env 值也过同一组
+   判据，唯一放行的是 daemon 的默认根。
+3. **daemon 报了一个状态根、协议号却不合时，壳把那个根丢了**，project 工具随即改写家目录默认根，
+   回包还宣称"this daemon's hello reported no stateRoot"。改成与版本同一规格：先存后判。
+4. **面板会采纳 `hello` 里无鉴权可读的 `stateRoot` 当自己写入的根**（`engine.sock` 同用户即全权），
+   一条坏帧就能把注册表写到 `~/Library` 这类目录并 chmod 0700；TS 侧对同一个值早有闸，Swift 侧
+   判据也早就存在，只是两处采纳点没采纳。现在两处都先判、拒时保留上一个根并把这一拒写上屏幕。
+5. **发布链缺两环**：`assert-tag-ready` 问 CI 时不带 `head_sha=`/`event=push` 且把 workflow 名写死，
+   于是一句"在 <sha> 上绿了"可能引的是别的 commit 的记录；`npm-publish` 只问"树等于 tag"与"CI 绿"，
+   没有任何一环问这个 tag 的 GitHub Release 是否已对外——registry 有包而 `/releases/latest` 还在
+   服务上一版时，每台机器的 updater 会把"查不到更新"读成 up-to-date 并静默停摆。两处都补成机器判据。
+6. **LLDB 桥会把用户的应用冻住还说它已经放手**：超时那一支全仓没有一处 `SIGCONT`，非超时异常那一支
+   不 `killpg`，而报文断言"no longer held by this bridge"。现在补 SIGCONT 并用 `ps` 读回，读不回
+   就如实说读不回。
+
+### 依赖告警的判定（`npm audit` 两条 high）
+
+`zod <4.6.6`（GHSA-mrhx-c7xc-m3w5，`iterate-kernel` 经 zod 承一条）。该告警的前提是"一份**无上界**
+的数组 schema 收到大数组"。本版不升 zod 4——内核 0.1.9 的 `.d.ts` 是 zod 3 形状，升它是一次跨仓
+契约升级，不该为这条告警做。实测本仓对外只有一条 `z.array(...).min(1).max(64)`、被钉语料每个数组
+都声明 `maxItems`，所以这个前提在产品上不成立；把这句话变成持续量的是两条新闸
+（`mcp-shell/test/qoder-20261024-array-bounds.test.mjs`、`-contract-divergence.test.mjs`），
+两条都当场用探针变异证过红。语料对 `expected` 仍比两个执行层松，收紧它属内核发布物，本轮把它钉成
+一份**具名清单**——多一条红、少一条也红。
+
+### 本轮门禁逐字复跑的实际计数
+
+见本节末"最终那趟"（`specs/GlassPane_每日审查_2026-10-24_记录.md` §0 有开工基线对照）。
+
+
+### 上一轮留在 `[Unreleased]` 的正文（原文照录，未取号那句话自本节起失效）
+
 **未取号。** 本轮落进 main 的东西分两半，读法不同：用户真正拿到的变化在 **glasspane-harness 0.10.2**
 （同号也覆盖了 0.10.1 那一批），两版三格各自核过——tag `v0.10.1` → `265005db`、`v0.10.2` → `9eb13a93`，
 两次 Release 都是 `isDraft=false` + 6 件资产（两份 `.zip` 的 sha256 与 GitHub 为该资产计算的 `digest`
