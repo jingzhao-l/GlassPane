@@ -7,7 +7,7 @@ All channels are macOS-only (see [Platform support](index.md#platform-support)).
 ```bash
 npm install -g glasspane-harness     # recommended; installs the wrapper + your Mac's package
 bun add -g glasspane-harness
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.10.5/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.11.0/scripts/install.sh | bash
 ```
 
 Both commands are available afterwards: `glasspane-harness` and `gp-harness`.
@@ -89,7 +89,7 @@ unpublished release.
 Only you can decide to install anyway, and saying so is an explicit act:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.10.5/scripts/install.sh | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash
+curl -fsSL https://raw.githubusercontent.com/jingzhao-l/glasspane-harness/v0.11.0/scripts/install.sh | GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1 bash
 ```
 
 The override has to be set for the shell that reads the script, not for `curl`: a leading
@@ -100,7 +100,9 @@ escape. If you ran the installer from a file instead, the same override is a nor
 
 The install summary then names the override in the state it prints
 (`sha256: skipped by GLASSPANE_HARNESS_ALLOW_UNVERIFIED=1`), so the log of that run cannot be read
-later as a verified install. A machine with no `gpg` — which stock macOS is, since it ships no
+later as a verified install. The run also ends with **exit 3** rather than 0 — "installed, not
+verified" is a different outcome from "installed, verified", and an agent that scripts this channel
+branches on the exit code, not on a sentence. A machine with no `gpg` — which stock macOS is, since it ships no
 GnuPG — is refused the same way and is told how to fix it (`brew install gnupg`): a missing tool
 is installable, and the provenance check it makes impossible is the one check the other side
 cannot fake.

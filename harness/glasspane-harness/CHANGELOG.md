@@ -10,6 +10,60 @@ contract does not).
 
 ## [Unreleased]
 
+（空。本轮收口后没有未归号的条目。）
+
+
+## [0.11.0] — 2026-10-25
+
+**版本判断：minor。** 判据是本产品自己的 pre-1.0 口径——"产品面/CLI 形状变动 = minor，纯修复 = patch"。
+本版动了三处用户读得到的形状，所以不是 patch：
+
+1. **curl 安装通道的退出码**：`scripts/install.sh` 在"装上了但这一次什么都没验成"时从此回 **3**
+   （先前两条路径都回 0，脚本之外无人能从状态码分辨）。
+2. **`gp_*` 回包的标题**：`${tool}: ${method} ok` 改成 `… answered`——引擎说没落下的那一下
+   （`actConfirmed:false`）此前在 TUI 行与转录里读成一个已确认的操作。
+3. **两条 remedy 换成能执行的命令**（`daemon.ts` 的"打开面板按重启键"与能力门那句
+   "start or update the background service"），现在都点名 `launchctl kickstart -k
+   gui/$(id -u)/com.glasspane.daemon`；代理不再被人机动作卡住。
+
+下面 `### Fixed — 本轮审查批次` 之外，本条目并进了上一轮留在 `[Unreleased]` 的
+场景②/③/⑤ 全部内容——`provider-surface` 这把新尺子、压缩的维度账、跨仓账本互验都在里面。
+
+### Fixed — 本轮审查批次（发现即修完，每条有固定点用例与"把被修点弄回去必红"的变异）
+
+- **决策台账不再按工具名字收货。** `glasspane-decision-log.ts` 过去以 `gp_` 前缀判定"这是我们该记的"，
+  而 `tool/registry.ts` 会自动 import 工程自己的 `{tool,tools}/*.{js,ts}`：一个仓库里提交的、导出 id
+  带这个前缀的工具，只要回一份形状合法的 `{ok:true, result:{evidencePack}}`，就能往内核哈希链里写一条
+  "引擎判定过"的记录——形状校验看不见，因为伪造的包与引擎的包逐字同形。现在 `daemon.ts` 有一份
+  module-private 的 `DAEMON_ORIGIN`，只有 `present()`（`Daemon.call` 之后那一条路）打上，
+  台账要求 `fromDaemonSurface(metadata)` 才写。压缩那一侧**不加**这道门：它读的是已落盘的 transcript，
+  符号过不去 JSON，加了只会让锚点全消失——理由写进源码注释，不是省略。
+- **状态根守卫读物理路径，不再只读词法路径。** `kernel.ts` 的 `insideStateRoot` 此前用 `path.resolve`
+  归一（它不解析符号链接），`GLASSPANE_DECISION_LOG` 指一条 `link → 引擎状态根` 的路径即可通过，
+  随后 `mkdirSync/chmod/append` 就把第二个写者造在引擎的树里。新增 `physicalPath()`
+  （最近现存祖先 `realpathSync` + 词法余段），词法或物理任一落在根内都拒，四个调用点一并覆盖；
+  拒绝句仍按用户写下的路径说话。
+- **`postinstall` 从此比对它装上的版本号。** 它过去只问 `--version` 退不退 0，于是平台包里一份
+  旧的/贴错标签的二进制照样装成绿；`build.ts` 的 smoke 与 `install.sh` 的 verify 两步都比字符串，
+  这条用户机器每次都跑的通道反倒是唯一什么都不断言的一个。现在捕获 stdout 并与本 wrapper 的
+  `packageJson.version` 相等才算过，失败时把"这次观察到什么"随拒绝一起说出来。
+  固定点：`test/script/postinstall-binary-version.test.ts`（真子进程 × 真包装形状，4 条用例）。
+- **发布 lanes 的每条 npm 写操作都点名 registry**（`npm publish` / `npm stage publish` 此前只被
+  "--provenance 恰好拒绝非 npmjs host"这个巧合保护），并由
+  `test/script/release-registry-pin.test.ts` 钉住——该测试先断言这类命令确实存在（≥4 条），
+  再断言每条带 `--registry`，最后断言取值来自 `product.json` 而非硬写。
+- **TUI 里被权限卡住的行现在真的看得出来。** `glasspaneRow` 的高亮判定过去只看队列头一项
+  （`.at(0)`），两个 `gp_*` 调用同时在等时，第二行拿的是普通进行中样式。抽出
+  `awaitsPermission(entries, callID)` 按整条队列判，四条用例钉住队首/队尾/不该亮/无队列。
+- **三条按构造不可能红的断言换成产品行为**（`path.resolve` 比字符串、三段手写 ISO 串对 schema 自带
+  正则、`expect(x.methods).toBeTruthy()` 打在静态字面量上）；`defs.length > 0` 换成对
+  `index.ts` 核出来的精确六个工具 id。remedy 扫描器此前只读三个文件且只认
+  `const remedy =` 双引号/反引号形状（实测在 `index.ts` 里提出 0 条），扫描面与形状都补上，
+  并新增"GUI 动作 / 占位符路径 / 只说 start service 不给命令"三条规则。
+- **`verifyLedger` 不再把"链验证干净"和"链从没开始"答成同一个值**：返回形状加 `exists`，
+  缺失的台账回 `exists:false`（仍不算损坏，这是写侧翻转那轮定的），三处消费按名更新。
+
+
 ### Added — 场景②：计划交接落到生产路径上，压缩开始按维度决定丢谁
 
 - `readRunPlan(env, projectDirectory)` 有了第二个生产者。此前 fork 只认
