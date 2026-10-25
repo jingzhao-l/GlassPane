@@ -13,6 +13,41 @@ contract does not).
 （空。本轮收口后没有未归号的条目。）
 
 
+## [0.11.1] — 2026-10-25
+
+**版本判断：patch。** 本产品自己的 pre-1.0 口径是"产品面/CLI 形状变动 = minor，纯修复 = patch"；
+本版**一行代码语义都没动**，改的是四处比代码说得多的文档句与一条源码注释，所以是 patch。
+需要发版的原因不是内容，是那条等式：父仓的 `release-artifact` 尺子要求发布仓 `refs/heads/main`
+**任何时刻**等于主干的 `harness/glasspane-harness` 树，而它给 tag 的宽容只有一个具名格子
+（`△ artifact`，且只允许 `SYNCLOG.md`/`CHANGELOG.md` 在落后方向）。本轮改的是
+`docs/kernel-integration.md` 与 `packages/opencode/src/tool/glasspane/index.ts` —— 不在那个格子里，
+量到就是 `2 problem(s)`（实测读数：`trunk 46e2aea8… / split-main 962b1430…`，
+两条路径 "+6 remote-only / -16 trunk-only" 与 "+1 / -2"，外加 `⚠ RE-SPLIT RISK`）。
+
+### Fixed — 文档不再替运行者说话
+
+- **Behaviour parity**：原文 "measured across two implementations"。实测
+  `bun script/kernel-conformance.mjs` 不带 `--impl` 自己打的是
+  `16 fixture(s) through 1 implementation(s)`（2026-10-25，rc=0）；两实现对照要人工把 canonical
+  kernel checkout 喂进 `--impl`，CI 里没有这一步。同段并写明 `contracts/kernel-conformance.json`
+  头部 `"version": "0.1.9"` 与依赖 pin `0.1.10` 的关系是**出处戳记不是判据**（判据是逐条 digest）。
+- **③ 那一行**：原文 "each harness now verifies the chain the *other* one wrote"。生产里跑的读者只有
+  回路这一侧（`fix_proof` 先整链验通再引用）；fork 带同一个 `verifyLedger`，也有固定点用例证明回路
+  写出的链在那边验得过，但它自己的生产路径是写自己的台账。改成"两份 writer 逐字节相同
+  （sha256 `eaa9dc7d…`），两个方向里只有一个有生产读者"。
+- **④ 那一行**：原文只写 `/iterate gate` 读回。2.11.1 起通过轮（因此什么都没发）也落账，且读者是
+  两扇门（session 内 `/iterate gate`、终端 `ih iterate gate`），契约拒绝那一支照旧零字节。
+- **源码注释的行号**：`packages/opencode/src/tool/glasspane/index.ts` 把证据发射点写成
+  `Dispatcher.swift:156`；`grep -rn evidencePack engine/Sources/` 今天全仓唯一命中是 `:216`
+  （`handleLastEvidence` 里 `return ["evidencePack": object]`），`:156` 站着的是 `handleAct`。
+  改正并写明两者关系。
+
+闸与读数：`product-surface`／`fork-diff`／`tool-surface`／`brand-surface`／`surface-semantics`／
+`hook-liveness` 各 rc=0；`node scripts/check-doc-links.mjs` rc=0（32 份文档、243 条仓内链接、
+双语成对、可复算主张与真源一致）。`tool-surface` 那条 +1 LOC（注释）按它自己的规矩先提交源码再
+`--record`，金样 `harness/contracts/tool-surface.json` 与 `fork-diff.json` 同批跟上。
+
+
 ## [0.11.0] — 2026-10-25
 
 **版本判断：minor。** 判据是本产品自己的 pre-1.0 口径——"产品面/CLI 形状变动 = minor，纯修复 = patch"。

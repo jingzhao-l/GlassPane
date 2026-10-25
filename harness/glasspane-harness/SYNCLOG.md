@@ -2,6 +2,64 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-25（第二十一次会话）· 取号 0.11.1：把四处"两侧都量过／都能读"按实测降级，顺手把 release-artifact 拉回等式
+
+### 为什么这一笔要发版
+
+内容上是文档与注释；**动机是等式**。`harness/tools/release-artifact.mjs --check` 要求发布仓
+`refs/heads/main` 任何时刻等于主干的 `harness/glasspane-harness` 树，而它给 tag 的宽容只有一个具名格子
+（`△ artifact`，只允许 `SYNCLOG.md`／`CHANGELOG.md` 落后）。本轮改的两个路径不在那个格子里，量到就是
+`2 problem(s)`：`trunk 46e2aea8… / split-main 962b1430…`，`docs/kernel-integration.md`
+"+6 remote-only / -16 trunk-only"、`packages/opencode/src/tool/glasspane/index.ts` "+1 / -2"，
+并打出 `⚠ RE-SPLIT RISK`。不改内容、只把文案改回去是同一件事的另一半（父仓 README 与
+`iterate-harness` README 里对应的句子本轮早先已按实测口径改过），所以判据是"哪一侧在生产里跑、
+另一侧靠哪条测试或哪条操作者命令背书"。
+
+### 改了什么
+
+- `docs/kernel-integration.md`：① "Behaviour parity: measured across two implementations" ⇒ 按实测写成
+  "无人值守跑的是**一个**实现"，并给出量法（`bun script/kernel-conformance.mjs` 不带 `--impl` 自报
+  `16 fixture(s) through 1 implementation(s)`，rc=0）；Python 侧同形（`diff_kernel_implementations.py`
+  是操作者命令，本机实测 rc=2：找不到已构建的 kernel dist）。同段钉住
+  `contracts/kernel-conformance.json` 的 `"version": "0.1.9"` 是**出处戳记不是判据**（pin 是 0.1.10，
+  判据是逐条 digest）。② ③ 行 "each harness now verifies the chain the other one wrote" ⇒ 生产读者只有
+  回路这一侧（`fix_proof`），fork 的 `verifyLedger` 在 `src/` 零调用者、其形状由固定点用例证明；
+  两句写成"两份 writer 逐字节相同（sha256 `eaa9dc7d…`），两个方向里只有一个有生产读者"。③ ④ 行
+  只写 `/iterate gate` ⇒ 补成两扇门都读得到、且通过轮（什么都没发那一轮）也落账（iterate-harness
+  2.11.1），契约拒绝照旧零字节。
+- `packages/opencode/src/tool/glasspane/index.ts` 注释：证据发射点 `Dispatcher.swift:156` ⇒ `:216`
+  （`grep -rn evidencePack engine/Sources/` 今日全仓唯一命中，且那行在 `handleLastEvidence` 内；
+  `:156` 是 `handleAct`）。
+- 版本位点：`product.json` 0.11.0 → **0.11.1**（真源），`packages/opencode/package.json` 跟随；
+  `product.json` 的 `install.curl` 头一次必须与 tag 同轨（`[installer-curl-pinned]` 就是这条），
+  于是 README.md／README.zh-CN.md／docs/install.md（2 处）／`scripts/install.sh` 表头一起追上。
+
+### 跑了哪些闸、结果如何
+
+- `product-surface --check`：**6530 agreement(s) held, 0 problem(s)**（中途红过两次，都是真的：
+  先是 `install.curl` 未与 product.json 同轨，然后它点名 README/README.zh-CN/docs-install 三处
+  没逐字带着 pin 的那一行——修复是照实改文件而不是放宽判据）。
+- `check-doc-links.mjs`：32 份文档／243 条仓内链接／双语成对／可复算主张与真源一致，rc=0。
+- `fork-diff --check`：`4640/6736 byte-identical, 285 edited, 104 added, 1707 deleted`，
+  "divergence matches the recorded surface"。
+- `tool-surface --check`、`brand-surface --check`、`surface-semantics --check`、`hook-liveness --check`
+  各 rc=0（上一笔注释的 +1 LOC 已在同批金样里，本轮不再动表面）。
+- `release-artifact --check` 在提交前**如实拒绝**：`CANNOT MEASURE — has uncommitted changes`。
+  提交并重切之后才是它的判据读数，写在下面"发布后"一节。
+
+### 没跑的部分，照实写
+
+- 未跑 fork 的 `bun test`／`typecheck`：本轮改动是文档、注释与版本字面量，`src/` 语义未动；CI 的
+  `harness-rulers` 与 `mcp-shell` 两条 lane 会在推送后覆盖。
+- 未跑 `patched-deps`／`zod-bundle`：不在本轮改动面内，同由 CI 覆盖。
+
+### 发布后（3b 与五格）
+
+`git subtree split` 之后 `split-main` 必须等于 `46e2aea8…` 之后的新树；tag `v0.11.1` 走
+`release.yml` 的 `workflow_dispatch`（`--ref v0.11.1` 必须显式给），npm 三包装完回查 registry，
+`verify-published` 装进干净前缀再 `--version`，Release 资产的 sha256 与 API `digest` 逐字对。
+这些读数写在本文件末尾的"发布后"补记里，不在此处预言。
+
 ## 2026-10-25（第二十次会话）· 取号 0.11.0：两条发布线的分叉并掉，上一轮三笔未收口的活带上主干
 
 ### 开工与隔离
