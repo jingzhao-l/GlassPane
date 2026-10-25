@@ -1,8 +1,8 @@
 {
-  "observedAt": "2026-10-16",
+  "observedAt": "2026-10-24",
   "source": "engine/Sources/GlassPaneEngine/FrameCodec.swift",
   "note": "The engine's method table, as the published fork has to see it. The Swift file lives in the parent repository and is NOT in the subtree-split product tree, so a fixed-point test that read it directly can only ever pass on a maintainer machine — measured on 2026-10-15: the split repo's CI ran the suite and both method-table assertions died on the missing file. The contract travels; the drift check stays where the Swift is. `harness/tools/product-surface.mjs` rule engine-methods re-parses this same file and refuses if the list below is not exactly what the enum says, so this copy cannot go stale in the repository that owns the engine.",
-  "swiftBlob": "372e556de021709cd808e40ea94651919b59b0b4",
+  "swiftBlob": "ef48916061ad7c1b7160146872c062b8e747dea6",
   "methods": [
     "hello",
     "attach",
