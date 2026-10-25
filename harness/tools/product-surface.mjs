@@ -134,7 +134,7 @@ const SCAN_SET_FLOORS = {
   envDiscovery: 67, // those CLI files + the shipped launcher
   foreignPublishers: 4, // per-package publishers that must stay dead ends
   workflows: 7, // 3 root + 2 fork workflow files, plus the 2 package.json manifests the wiring corpus reads
-  selftests: 4, // selftests that must be wired to a runner
+  selftests: 8, // fixed-point tests under harness/tools the scan must keep reading (floor is READ since 2026-10-24; before that nothing consulted it)
   catalogProviders: 200, // providers in the committed model catalog
 }
 
@@ -929,12 +929,19 @@ check(
 // directory: measured 2026-10-16, `ref-batch-selftest.mjs`, `kernel-pin-selftest.mjs` and
 // `verify-published-selftest.sh` were referenced by no workflow and no package.json script — the
 // only greppable hits were README/SYNCLOG prose, which is how they came to be described as
-// passing in batch notes nobody re-ran. `probe-lane-selftest.sh` and `installer-selftest.sh` are
-// the two that ARE wired, and they are listed here too so the set does not quietly shrink.
+// passing in batch notes nobody re-ran. `probe-lane-selftest.sh` was the one that WAS wired, and it
+// stays named below so a rename cannot drop it out of the rule silently.
 //
 // The corpus is the runnable places ONLY (workflow steps and package.json scripts): prose in
 // harness/README.md mentioning a test must never satisfy this rule, because mentioning is not
 // running. Fixing a red here means adding a step to a lane, not adding a sentence to a doc.
+//
+// THE SET IS A DIRECTORY SCAN, NOT THIS LIST. The list is a floor of names — what must never
+// disappear — while the walk below is `harness/tools/*-selftest.(mjs|sh)`, so a selftest added to
+// the tree is an immediate wiring obligation. The hand-kept list was measured failing on
+// 2026-10-24: `patched-deps-selftest.mjs` was in the tree AND in a lane, but had never been added
+// here, so the rule whose subject is "a selftest nobody runs is not a control" could not see it and
+// would have stayed green if someone deleted that step.
 const SELFTESTS = [
   "harness/tools/ref-batch-selftest.mjs",
   "harness/tools/kernel-pin-selftest.mjs",
@@ -942,6 +949,8 @@ const SELFTESTS = [
   "harness/tools/probe-lane-selftest.sh",
   "harness/tools/release-artifact-selftest.mjs",
   "harness/tools/rulers-selftest.mjs",
+  "harness/tools/patched-deps-selftest.mjs",
+  "harness/tools/mcp-redirect-policy-selftest.mjs",
 ]
 {
   const wiringRoots = [path.join(repoRoot, ".github", "workflows"), path.join(forkRoot, ".github", "workflows")]
@@ -970,7 +979,28 @@ const SELFTESTS = [
   }
   const corpus = runnable.join("\n")
   check("scan-set", runnable.length >= SCAN_SET_FLOORS.workflows, `the selftest-wiring scan read ${runnable.length} runner file(s); floor is ${SCAN_SET_FLOORS.workflows} (root + fork workflows, root + fork package.json scripts) — a workflow directory that stops resolving turns every wiring assertion below into "not referenced" noise, so name the scan set first`)
+
+  // The walk that decides what must be wired: the tools directory itself, not the list above. A
+  // fixed-point test dropped into harness/tools is therefore an obligation the moment it exists,
+  // which is the hole the list had — `patched-deps-selftest.mjs` sat in the tree and in a lane while
+  // this rule looked only at names someone remembered to type here.
+  const toolsDir = path.join(repoRoot, "harness", "tools")
+  const scanned = existsSync(toolsDir)
+    ? readdirSync(toolsDir).sort().filter((f) => /-selftest\.(mjs|sh)$/.test(f)).map((f) => `harness/tools/${f}`)
+    : []
+  check(
+    "scan-set",
+    scanned.length >= SCAN_SET_FLOORS.selftests,
+    `the selftest scan read ${scanned.length} fixed-point test(s) in harness/tools; floor is ${SCAN_SET_FLOORS.selftests} — a tools directory that stops resolving would turn every wiring assertion below into "not referenced", so name the scan set before trusting its answer`,
+  )
   for (const rel of SELFTESTS) {
+    check(
+      "selftest-wired",
+      scanned.includes(rel),
+      `${rel} is no longer a fixed-point test this scan reads in harness/tools — a ruler's test that was deleted or renamed still has a lane believed to run it, so the floor names what may not disappear`,
+    )
+  }
+  for (const rel of scanned) {
     const abs = path.join(repoRoot, rel)
     check("selftest-wired", existsSync(abs), `${rel} is not in the tree — a ruler's fixed-point test that was deleted still has a lane that is believed to run it`)
     check(

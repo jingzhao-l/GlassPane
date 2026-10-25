@@ -118,6 +118,121 @@ bridge pytest 126→152（+1 skipped）**，一轮里新增 210 条用例，一�
   "could not be reached"，并证明这不是"只是计时器到了"。
 
 
+（合并记：本节末尾这段「上一轮留在 `[Unreleased]` 的正文」与下面 1.20.2 那条条目讲的是同一个 harness 窗口——那一半已在 2026-10-24 以 1.20.2 号发布，而 1.21.0 取号时本地还没看到那一笔。两条条目都按原文保留，不做删改，重复的那段文字是两条发布线各自记账的结果。）
+
+
+## [1.20.2] — 2026-10-24
+
+**本版取号 1.20.2（patch）。** 判据是量出来的，不是照抄上一版：`mcp-shell` 的 `bin`/`files` 白名单未动
+（`git diff v1.20.1..HEAD -- mcp-shell/package.json` 只有 `zod` 与 `iterate-kernel` 两行），面 A 的
+`src/` 业务逻辑一行没改（同一区间 diff 为空；取号那一笔只动版本字面量——`SERVER_INFO.version` 与
+engine 的 `buildVersion`，这正是"状态文件字段、退出码集合、CLI 参数"三项按构造未动的意思）。
+真正进用户手里的是**依赖版本**：`glasspane-mcp` 声明的 `zod` 从 3.25.76 变成 4.6.7
+（GHSA-mrhx-c7xc-m3w5，high——官方只在 4.6.6 修，3.x 不 backport），连同它开发依赖的
+`iterate-kernel@0.1.10`。1.20.1 那份发布物里的声明仍然带洞，所以"修好了"要靠这一号才到用户手上，
+不是靠 main 绿。
+
+前面几段（编号那三条与其下的 `### Added`/`### Fixed`）合起来就是本版的全部内容：harness 线
+0.10.1→0.10.5 五版都在这一天里落地——依赖升级不再静默摘掉 fork 补丁、产物级补丁核对、
+`release-artifact` 的停滞上限、dompurify 的 critical、MCP 重定向策略的五条具名判决、zod 4 的三仓链，
+以及最后那条"发布闸此前问元数据、而安装要的是 tarball"。harness 侧的判据与读数记在
+`harness/glasspane-harness/SYNCLOG.md` 的「第十六次会话」「第十七次会话」；下面只写用户读到的部分：
+
+1. **依赖升级不再静默摘掉 fork 补丁**。`@modelcontextprotocol/sdk` 1.31.0→1.32.0 覆盖 4 条 advisory
+   （2 high / 2 medium）。`bun install` 对版本对不上的 `patchedDependencies` 不报错——它删掉锁里的条目、
+   装一份没打补丁的产物，声明行留在原地，而类型检查与套件都不会红：丢的是 MCP 客户端的 404 会话恢复、
+   已死请求的取消、以及逐 item 回包的类型重载。补丁已按 1.32.0 逐 hunk 重钉（新增/删除行集与旧补丁
+   逐字相同），并用真客户端 × 真 HTTP 夹具证了行为侧的因果（漂回旧 key ⇒ 该用例红）。
+2. **`electron` 42.10.0→42.11.16**（只在 `packages/desktop`，devDependency）。覆盖 42.10.0 的 7 条
+   advisory（4 medium / 3 low）里最严的一条要求 `< 42.11.9`；没有取更新的 42.11.18 是被本仓
+   `minimum-release-age`（3 天）那条闸拦住的，按闸走而不是绕开。
+3. **发布 lane 的成功分支现在说出它观察到了什么**：registry 就绪等待过去只在失败时报读数，
+   成功只剩一句 `ok npm install …`，一条绿日志因此分不出"等过并且等到了"与"根本没问"。
+
+### Added — 一把新的尺子（父仓侧）
+
+- `harness/glasspane-harness/script/patched-deps.mjs` + `harness/tools/patched-deps-selftest.mjs`，
+  接进 `ci.yml` 的 `harness-rulers`：每条 `patchedDependencies` 声明都按三方核对（key 的版本 /
+  `bun.lock` 是否还带这个 key / 补丁新增的行是否逐行出现在安装产物里），0/1/2 三码，
+  11 组夹具 28 条**具名**断言。本轮的读数：18/19 逐行核过，1 条 `△` 是上游留下的死声明
+  （`@standard-community/standard-openapi` 在依赖图里零命中）。
+- 那条发现的终点不在树上而在产物上，而且现在是每版自动量：`verify-published.ts` 装好发布包之后，
+  把已安装负载的字节交给同一个判据（`patched-deps.mjs --artifact`）去问，判据是补丁新增的
+  **字符串字面量与新增方法名**——只有这两类改名等于改行为。窄判据是三次误报筛出来的：要新增的每一行
+  会要求 `.d.ts` 的内容（运行时 bundle 里没有这些字节），要补丁引入的每个标识符会要求被打包器改名的
+  局部绑定与被抹掉的模块说明符。0.10.1 的人工复核给出 8/8 命中，0.10.2 起这条读数写进发布日志：
+  `all 8 artifact-checkable item(s) present`。本仓 19 条声明里 18 条产不出可查项，所以 lane 点名问
+  MCP SDK 一个包，空清单一律 exit 2 拒答，不用"没有问题"冒充"没有问题"。
+- `release-artifact` 的远端 fetch 今天从一台机器挂了两次（十分钟没有一个字节动过），而它只处理
+  "取失败"不处理"不复返"：CI 上等它的是 runner 超时，那种失败连判决都不留。现在停滞会落到它本来就有的
+  `cannot measure`（低速中止 + 300 s 墙钟，两个网兜不同的静默），电池用桩端口证明 1.2 s 内会具名回答
+  "could not be reached"，并证明这不是"只是计时器到了"。
+- **`dompurify` 3.4.16 → 3.4.17（harness 0.10.3）**：三条覆盖里含一条 **critical**（GHSA-cg2g-xh64-v4q7
+  `>= 3.4.4, <= 3.4.16`）与一条 high，而它是 `packages/ui`/`session-ui` 的依赖——发布物里那个 embedded
+  web app 的字节。dependabot 那条 PR 只改两个 workspace 的 manifest，**漏了 `workspaces.catalog` 里钉的
+  3.3.1**：那条当下没有引用方，但下一个写 `"dompurify": "catalog:"` 的包会静默拿到同一族高危副本。
+  三处一起改到 3.4.17（registry 时间戳 11.5 天，过本仓那条 3 天发布-age）；验收判据是
+  "锁只解析 3.4.17、两个 workspace 的链接都指向它、`.bun` 里不留 <= 3.4.16 的活副本"，不是"manifest 改了"。
+
+
+### Fixed — 一条写进台账却没人量过的假设，量出来半错
+
+- 0.10.1 那轮把 SDK 1.32.0 的安全变更写成一句话：「重定向只在端点同源内跟随，这对 loopback 端点没有
+  可观察的差别」。2026-10-24 把它量了，**半错**——同源不是规则的全部：302 即使在源内也被拒，因为跟随
+  它会把 POST 降级成 GET，而 SDK 不擅自改 MCP 请求的动词；默认策略自报 `redirectPolicy: 'same-origin'`。
+  已发布 SYNCLOG 里那句不改写（发布物的字节不动，发现晚的修复让号而不是追改），更正记在这里。
+- 新闸 `harness/tools/mcp-redirect-policy.mjs`：五条行为逐条具名，驱动的是 `packages/opencode` 真正解析到
+  的那份安装产物——三条根扫描加 realpath 去重（`node_modules`、`packages/*/node_modules`、`node_modules/.bun`），
+  并要求加载的版本等于声明的版本；说不出"产品加载的是哪一份"时它 exit 2 而不是猜。
+  `harness/tools/mcp-redirect-policy-selftest.mjs` 用 26 条断言证每条红都因它点名的原因红（五个变异 +
+  三种"测不到"），其中一条是**反过度反应**：软链与 store 里的字节是同一份拷贝，不得判成"两份"——
+  会在健康树上天天哭的闸一周内就会被删掉。两步都接进 `ci.yml` 的 `harness-rulers`，跑在 `bun install` 之后。
+- `product-surface` 的 `selftest-wired` 从手抄名单改成目录扫描。这条规则自己的漏洞是本轮被实测出来的：
+  `patched-deps-selftest.mjs` 在树里、在 lane 里跑，却从没被写进那份名单，所以"没人跑的自测不是闸"
+  这条闸对它根本不成立——删掉那条 step 会照样绿。名单现在只是"不得消失的名字"下限（8 个），真正决定
+  义务的是 `harness/tools/*-selftest.(mjs|sh)` 的扫描；`SCAN_SET_FLOORS.selftests` 那个写了却没人读的
+  数字也终于成了判据。
+
+### Fixed — 两条高危的 `zod` 告警从锁里消失，方式是让内核与面 A 走同一条 4.x 线
+
+- `GHSA-mrhx-c7xc-m3w5`（zod 校验超限集合时耗尽内存，high）只在 **4.6.6** 修，3.x 线不 backport。
+  父仓那两条 Dependabot 告警都指根 `package-lock.json` 里的 `zod@3.25.76`：一条来自 `mcp-shell`
+  的直接依赖，一条来自 `iterate-kernel@0.1.9` 的传递依赖。
+- 现在 `node_modules/zod` 只剩 **4.6.7** 一份（`npm ls` 的判据不是"manifest 改了"而是锁里再没有
+  别的号）。做法是把 `mcp-shell` 的开发依赖 `iterate-kernel` 一起追到 `0.1.10`——那份传递的 3.25.76
+  是内核自己声明的，不抬内核就抬不动这条链；内核侧的迁移在 `iterate-skill` 里带自己的用例与金丝雀
+  （见该仓 `d14da4b2`）。
+- **面 A 一行代码没改**：它早就写成 v4 形状（`z.strictObject`），`z.ZodTypeAny` 在 4.x 的 compat 里
+  还在。唯一被量出来的行为差是**拒绝文案的措辞**：同一份 schema、同一个输入，`issues[].code` 与
+  `path` 逐字相同，`message` 四条全变（`Required` → `Invalid input: expected string, received undefined`，
+  `Unrecognized key(s) in object: 'nope'` → `Unrecognized key: "nope"`）。全仓 grep（面 A、fork 子树、
+  tools/specs/docs、iterate-skill 的 src 与 tools、iterate-plugin）对旧文案 **0 命中**——没有任何
+  消费者按那句话匹配，改的是代理读到的散文，不是协议。
+- 顺手抓到并修掉的**我自己那条**：`harness/tools/mcp-redirect-policy.mjs` 的定位原来只看
+  `node_modules/.bun` 一处，改成三条根扫描 + realpath 去重，并要求加载的版本等于
+  `packages/opencode` 声明的那一个——说不出"产品加载的是哪一份"就 exit 2 拒答。同轮的自测里
+  有一条**反过度反应**用例：软链与 store 里的字节是同一份拷贝，不得判成"两份"。
+- **第二条解析路径才是那条告警真正的住处**：#64 报的 manifest 是 `mcp-shell/package-lock.json`——面 A
+  作为独立工程的那把锁。CI 的 `mcp-shell` job 拿它当 cache key，`scripts/set-version.mjs` 的
+  `LOCK_DIRS = ['.', 'mcp-shell']` 也认它，而我只改了根锁，所以那条告警不会自己关。按仓库既有的方式
+  重生成（cwd 在 `mcp-shell`，`npm install --package-lock-only --no-workspaces`——`--no-workspaces`
+  正是 set-version 为这把锁选的标志），现在它是 `zod 4.6.7` + `iterate-kernel 0.1.10`，与根锁同号。
+- 顺带纠正我自己写在前一笔提交信息里的一句判断：我说过"CI 的 mcp-shell lane 走的是那把旧锁"——**不对**。
+  实测 `npm prefix` 在 `mcp-shell/` 里返回仓根，npm 会向上找到 workspace 根，所以 `npm ci` 装的是根锁的
+  4.6.7。真正没被盖住的是 Dependabot 的那张独立图与"把面 A 当独立工程装"这条路；两处现在都过了。
+### Fixed — harness 0.10.5：发布闸此前问的是元数据，而安装要的是 tarball
+
+- 0.10.4 自己把这件事演了一遍：Release 与 npm 三包都正常，`install the published bytes and run them`
+  却连红两次——wrapper 的元数据 21 s 后可读，这道闸就宣布"可以装"，随后 npm 死在
+  `404 …/glasspane-harness-darwin-arm64-0.10.4.tgz`。第三次 attempt 通过不是修好了什么，是那十五分钟
+  过去了：npm 写元数据与写 tarball 走不同的路。
+- 现在一次就绪判断是三连问：元数据认识这个版本 → 元数据指向哪个 tarball → 那个 URL 真被服务。
+  要等的清单从**发布出去的 wrapper 的** `optionalDependencies` 读回来（不是拿 `product.json` 再算一遍），
+  读不回或为空一律 exit 2 拒装；非 404 的失败仍算"测不到"，不把"这台机器问不成"说成"发布坏了"；
+  预算改成整套共享，免得每包各等 20 分钟把 lane 拖成 runner 超时（超时连判决都不留）。
+- 判据：fork 侧 `test/script/registry-readiness.test.ts` 11 → 19 条，注入时钟与 fetch，没有一条靠真等；
+  三次变异各自具名红（还原成"只看元数据" ⇒ 4 条红，而"tarball 已被服务"那条照绿——这一对证明那 4 条
+  不是同一条红的四种化装），恢复按 sha256 核回。fork CI 那十步副本全 0。
 ## [1.20.1] — 2026-10-23
 
 **版本判断：patch。** 对着本仓 1.6.2 那四项 patch 判据实测：状态文件的字段没动、退出码集合没动、

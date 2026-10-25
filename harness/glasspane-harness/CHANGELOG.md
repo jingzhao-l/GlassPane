@@ -10,7 +10,88 @@ contract does not).
 
 ## [Unreleased]
 
-（空。本批的账归入 `0.10.2`。）
+（空。本批的账归入 `0.10.5`。）
+
+## [0.10.5] - 2026-10-24
+
+判据：patch（发布闸自己的一条缺陷。`release-artifact` 那条"发布物 == 主干"的等式与前四版同一条；
+本版搬的是 `packages/opencode/script/` 里的字节）。
+
+### Fixed — 发布闸此前问的是元数据，而安装要的是 tarball
+
+- v0.10.4 的 `install the published bytes and run them` 连红两次，而 Release 与 npm 三包都是好的。
+  读数摆在那里：wrapper 的元数据在 21 s 后可读，这道闸就宣布"可以装"，随后 npm 死在
+  `404 … /glasspane-harness-darwin-arm64-0.10.4.tgz`。npm 写元数据与写 tarball 走的是不同的路，
+  CDN 上那份 tarball 比元数据晚了大约十五分钟——第三次 attempt 通过，不是因为它修好了什么，
+  而是因为这段时间过去了。
+- 一次"问对了对象"的就绪判断现在长这样：元数据认识这个版本 → 元数据指向哪个 tarball → 那个 URL
+  真的被服务。任一环回答"还没有"就继续等；不是 404 的失败（5xx、代理、DNS）**不算答案**，仍然走
+  `not-observed`（exit 2），因为"发布坏了"与"这台机器问不成"是两句话。
+- 等的清单从**发布出去的 wrapper 自己的** `optionalDependencies` 读回来，而不是拿 `product.json`
+  再算一遍：要被服务的是安装器被告知的东西，不是这棵树自认为声明过的东西。读不回清单、或清单是
+  空的，一律 exit 2 拒装——空清单不是"没有要等的东西"。
+- 预算改成一整套共享（wrapper + 每个平台包共用那 20 分钟），因为每包各等 20 分钟会把这条 lane 拖到
+  runner 超时，而超时的失败连判决都不留（同 `release-artifact` 那条停滞上限的理由）。
+- 判据与因果：`test/script/registry-readiness.test.ts` 11 → 19 条（注入时钟与 fetch，没有一条靠真等）。
+  三次变异各自具名变红，恢复按 sha256 核回——把 tarball 那几行删掉（=改前行为）⇒ 4 条红，而
+  "tarball 已被服务"那条**照绿**（证明那 4 条不是同一条红的四种化装）；把 404 当成已服务 ⇒ 具名红两条；
+  把 5xx 洗成"还没有" ⇒ 具名红一条。
+## [0.10.4] - 2026-10-24
+
+判据：patch（`release-artifact` 那条"发布物 == 主干"的等式要求这一号——本轮动的是依赖字节，
+不是主干上的一段账；理由与 0.10.1–0.10.3 同一条等式）。
+
+### Changed — zod 4.1.8 → 4.6.7，内核追到 `iterate-kernel@0.1.10`
+
+- **为什么必须走这一版**：`GHSA-mrhx-c7xc-m3w5`（zod 校验超限集合时耗尽内存，**high**）的官方修复
+  只在 **4.6.6**，3.x 线不 backport，而本 workspace 的 catalog 钉的 4.1.8 就在脆弱区间 `< 4.6.6` 内。
+  取的 4.6.7 发布于 2026-10-12（本机读数 12 天），是 `minimum-release-age: 3 天` 那条闸允许的最新的号。
+- **内核跟着走同一条线**：`kernel-pin.mjs --record` 的重钉读数里**只有四行动**——version、lockKey、
+  integrity、recordedAt；随包 **26 份契约文件的 sha256 一字未变**。两份发布物（0.1.9 / 0.1.10）逐目录
+  对比给出同一答案：`schemas/` 与 `fixtures/` 完全相同，只有 `dist/*.d.ts` 里 strict object 的
+  TypeScript 发射从 `"strict", z.ZodTypeAny, …` 变成 `z.core.$strict`，以及那一份刻意的运行时修复
+  （错误路径里出现符号时按 description 渲染，因为 `String(symbol)` 会抛）。换的是发光形状，不是判决。
+- **读数**（本机，逐步取退出码）：`bun install --frozen-lockfile` 与两份 manifest 一致；
+  四个包 typecheck 全 0 错（`packages/opencode`、`packages/tui`、`packages/sdk/js`、`packages/plugin`）；
+  9 个固定点文件、TUI 渲染快照、
+  `publish.ts --dry-run`、`kernel-pin --check`、`kernel-conformance` 全绿。
+  父仓那侧 `mcp-shell` 跟着走同一条线：620/620 通过，`check-kernel-corpus` 报
+  `26 corpus file(s) match the pin (iterate-kernel@0.1.10)`，两条腿（本机装的、面 A 捆的）同号。
+
+### 本版没盖住的（照实写）
+
+- 第三方自己的两份 zod 仍在脆弱区间：`@modelcontextprotocol/sdk` 解析到 4.4.3，
+  `gitlab-ai-provider` 钉死 3.25.76。它们不是本 workspace catalog 那一份，也不是我们 import 的那一份
+  （三条根扫描 + realpath 去重后，活链接只有 4.6.7）。把它们也抬到 4.6.7 需要 `overrides`——那是替
+  别人决定它没声明过的运行时形状，本轮不做，记在这里。
+- fork 的全量 `bun test` 里 6 个文件共 82 条具名失败（provider 16 / plugin.install 15 / session.prompt 36 /
+  project 8 / transform 4 / httpapi-provider 3）。同一组文件在**改前那棵树**（zod 4.1.8 + 内核 0.1.9）
+  与**改后这棵树**上逐文件同数、pass 数也同数，所以不是本轮带进来的；但 CI 只跑 9 个固定点文件，
+  这一族失败在 CI 里没有任何东西看得见——"套件写了而 lane 不跑"那条事故的同一种形状，留给下一轮。
+
+## [0.10.3] - 2026-10-24
+
+判据：patch（`release-artifact` 那条"发布物 == 主干"的等式要求这一号，理由与前两版同一条）。
+
+### Fixed — 产品发出去的字节里那条 critical 覆盖
+
+- **`dompurify` 3.4.16 → 3.4.17**（`packages/ui`、`packages/session-ui` 的依赖，也就是发布物里那个
+  embedded web app 的代码路径）。逐条把真版本号代入 GHSA 的 vulnerable range 算出覆盖 3.4.16 的是三条：
+  GHSA-cg2g-xh64-v4q7 **critical**（`>= 3.4.4, <= 3.4.16`）、GHSA-mrv2-3pqr-j5jr **high**（`<= 3.4.16`）、
+  GHSA-c6gr-qvv4-5v3f low（`<= 3.4.16`）。
+- **顺带拆掉 catalog 里的那颗雷**：`workspaces.catalog.dompurify` 钉的是 3.3.1，同样落在 `<= 3.4.16` 内。
+  它当下没有任何引用方（两个引用方都写死版本），但下一个写 `"dompurify": "catalog:"` 的包会静默拿到
+  一条高危副本——与本轮 MCP SDK 那件事同一族形状：问题不在声明，而在声明与解析之间那条没人看的路。
+  三个位点因此一起改到 3.4.17，而不是只改 dependabot 提到的两个。
+- 取 3.4.17 是这条 workspace 的 `minimum-release-age: 3 天` 闸允许的号（发布于 2026-10-12，11.5 天），
+  不是"最新"。
+
+验证判据落在"图里与装上的都过线"，不是"manifest 改了"：`bun.lock` 只解析 `dompurify@3.4.17`，
+两个 workspace 的 `node_modules/dompurify` 链接都指向 3.4.17，`--frozen-lockfile` 回 "no changes"。
+过程中被自己的断言挡下一次误判：`node_modules/.bun` 里还留着一条 `dompurify@3.4.16`——bun 不回收
+store；分清"产品加载得到的"（看链接）与"缓存里残留的"之后确认是孤儿并清掉，判据也改成看链接。
+`ui` 与 `session-ui` 的 typecheck、各自测试、以及 web app 的 `bun run build` 全部 rc 0；
+`patched-deps --check` 仍 18/19；`product-surface` / `tool-surface` / `check-workflows` 绿。
 
 ## [0.10.2] - 2026-10-23
 

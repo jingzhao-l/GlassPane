@@ -206,20 +206,41 @@ const LINEAGE_DOCS = new Set([
 // as lineage would make the one number this ratchet owns a function of how many third-party
 // providers exist, so a catalog refresh would read as brand regression in either direction.
 const LINEAGE_DATA = [path.join("contracts", "models-catalog.json")]
+const TEXT_FILE = /\.(ts|tsx|mjs|js|json|md|sh|ps1|yml|yaml|txt|toml|nix|lock)$/
 
-function forkTextFiles(dir = forkRoot, out = []) {
-  for (const entry of readdirSync(dir)) {
-    if (entry === "node_modules" || entry === "artifacts" || entry === ".git" || entry === "dist") continue
-    if (dir === forkRoot && LINEAGE_DOCS.has(entry)) continue
-    if (LINEAGE_DATA.includes(path.relative(forkRoot, path.join(dir, entry)))) continue
-    const abs = path.join(dir, entry)
-    const st = statSync(abs)
-    if (st.isDirectory()) {
-      if (path.join(dir, entry) === path.join(forkRoot, "packages", "opencode", "vendor")) continue
-      forkTextFiles(abs, out)
-      continue
-    }
-    if (/\.(ts|tsx|mjs|js|json|md|sh|ps1|yml|yaml|txt|toml|nix|lock)$/.test(entry)) out.push(abs)
+/**
+ * The corpus is TRACKED files, which is what this file's comment above has claimed all along
+ * ("Every tracked text file under the fork"). The code walked the filesystem instead, and that was
+ * measured failing on 2026-10-24: an installer run wrote two manifest files into the product's own
+ * project-config directory — the one whose self-ignoring ruleset keeps them out of git — and both
+ * landed in the lineage sum: 9607 → 9615 occurrences over 3317 → 3319 files, moved by two paths no
+ * commit will ever carry. A ratchet whose reading depends on whether someone ran an installer here
+ * is not a ratchet, and CI — which checks out tracked bytes and never runs that bootstrap — was
+ * already reading a different number than a local run of the same commit.
+ */
+function forkTextFiles() {
+  let listed
+  try {
+    listed = execFileSync("git", ["ls-files", "-z", "--", path.relative(repoRoot, forkRoot)], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    })
+  } catch (cause) {
+    console.error(`brand-surface: CANNOT MEASURE — git ls-files did not answer (${String(cause).split("\n")[0]})`)
+    console.error("  the lineage sum is defined over tracked files, so a tree git cannot enumerate has no number to compare")
+    process.exit(2)
+  }
+  const out = []
+  for (const rel0 of listed.split("\0").filter(Boolean)) {
+    const rel = path.relative(forkRoot, path.join(repoRoot, rel0))
+    const parts = rel.split(path.sep)
+    if (parts.some((part) => part === "node_modules" || part === "artifacts" || part === ".git" || part === "dist")) continue
+    if (parts.length === 1 && LINEAGE_DOCS.has(parts[0])) continue
+    if (LINEAGE_DATA.includes(rel)) continue
+    const vendor = path.join("packages", "opencode", "vendor")
+    if (rel === vendor || rel.startsWith(vendor + path.sep)) continue
+    if (!TEXT_FILE.test(parts[parts.length - 1])) continue
+    out.push(path.join(forkRoot, rel))
   }
   return out
 }
@@ -412,6 +433,16 @@ function scan() {
   // tell them apart from a rebrand that leaked — a tripwire that cannot be satisfied
   // honestly gets worked around, and then it protects nothing.
   const files = forkTextFiles()
+  const missingFromDisk = files.filter((abs) => !existsSync(abs))
+  if (missingFromDisk.length) {
+    // Tracked but absent is the shared-worktree shape this repository has been caught by before:
+    // a soft reset leaves HEAD's index naming files the older tree does not have. Summing over what
+    // happens to be on disk would report a CLEANER tree (fewer files, fewer occurrences) than the
+    // commit actually holds, and a ratchet reads that as progress.
+    for (const abs of missingFromDisk.slice(0, 10)) console.error(`  ✗ tracked, in the corpus, not on disk: ${path.relative(repoRoot, abs)}`)
+    console.error(`brand-surface: CANNOT MEASURE — ${missingFromDisk.length} tracked file(s) are missing from this worktree, so the lineage sum is over a tree no commit describes`)
+    process.exit(2)
+  }
   let occurrences = 0
   for (const abs of files) {
     const text = readFileSync(abs, "utf8")

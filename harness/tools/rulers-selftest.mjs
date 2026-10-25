@@ -22,7 +22,7 @@
  */
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { readFileSync, writeFileSync, rmSync, existsSync } from "node:fs"
+import { readFileSync, writeFileSync, rmSync, existsSync, mkdirSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -267,6 +267,52 @@ mustGoRed(
     } finally {
       rmSync(neuteredAbs, { force: true })
       if (existsSync(neuteredAbs)) bad(`11: the neutered copy was not removed (${neuteredFile})`)
+    }
+  }
+}
+
+// 14. brand-surface: the lineage corpus is TRACKED files, not whatever an installer left on disk.
+// Measured failing on 2026-10-24: an installer run dropped two manifest files into the product's own
+// project-config directory (git-ignored by the self-ignoring ruleset committed inside it), and the
+// filesystem walk summed them into the bloodline count — 9607 → 9615 — so a local run of a commit and
+// CI's run of the same commit reported different numbers, and the ratchet reddened on nobody's text.
+// The differential is the assertion: a git-ignored probe holding brand tokens must not move the
+// observed sum by even one. The probe path is assembled from parts so this file never names a path
+// that only exists while the control runs (the provenance rule in scripts/check-doc-links.mjs reads
+// path-shaped tokens as claims about the tree, and a transient file is not such a claim).
+{
+  const probeRel = ["harness", "glasspane-harness", "tmp", "rulers-selftest-lineage-probe.md"].join(path.sep)
+  const probe = path.join(repoRoot, probeRel)
+  const parse = (text) => Number((text.match(/lineage (\d+) occurrence\(s\)/) ?? [])[1])
+  const clean = run("harness/tools/brand-surface.mjs", ["--check"])
+  if (!Number.isFinite(parse(clean.text))) bad(`14: could not read the occurrence count from brand-surface — this control would prove nothing\n${clean.text.slice(0, 300)}`)
+  else {
+    mkdirSync(path.dirname(probe), { recursive: true })
+    writeFileSync(probe, "# rulers-selftest lineage probe\n\nopencode opencode opencode opencode\n")
+    try {
+      const ignored = (() => {
+        try {
+          execFileSync("git", ["check-ignore", "-q", "--", probeRel], { cwd: repoRoot })
+          return true
+        } catch {
+          return false
+        }
+      })()
+      if (!ignored) bad(`14: ${probeRel} is not git-ignored, so this control would compare the wrong class of file`)
+      else {
+        const withProbe = run("harness/tools/brand-surface.mjs", ["--check"])
+        const moved = parse(withProbe.text) - parse(clean.text)
+        if (!Number.isFinite(parse(withProbe.text))) bad(`14: brand-surface stopped reporting a count with the probe present\n${withProbe.text.slice(0, 300)}`)
+        else if (moved !== 0)
+          bad(`14: a git-ignored file moved the lineage sum by ${moved} — the corpus is tracked files, not the working directory (${parse(clean.text)} → ${parse(withProbe.text)})`)
+        else if (withProbe.rc !== clean.rc)
+          bad(`14: the ignored probe changed the exit code (${clean.rc} → ${withProbe.rc}) without naming a tracked change\n${withProbe.text.slice(0, 400)}`)
+        else ok(`14: brand-surface: a git-ignored file with four brand tokens moved the sum by 0 (both ${parse(clean.text)})`)
+      }
+    } finally {
+      rmSync(probe, { force: true })
+      if (existsSync(probe)) bad(`14: RESTORE FAILED — ${probeRel} is still on disk`)
+      else rmSync(path.dirname(probe), { recursive: true, force: true })
     }
   }
 }

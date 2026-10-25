@@ -2,6 +2,96 @@
 
 一次同步一条，倒序。每条必须给出：**改动面数字**（`fork-diff` 输出）、**跑了哪些闸、结果如何**、**没跑的部分照实写没跑**。
 
+## 2026-10-24（第十七次会话）· 0.10.4：一条高危只在 4.x 修，于是 zod、内核、面 A 走同一条线；"不是我改坏的"必须是量出来的
+
+### 开工与隔离
+
+- 起点 trunk `ca38f493`（同一天上一批：MCP 重定向闸接进父仓 `harness-rulers`，CI run 314 十格绿），
+  工作树 `/Volumes/Eng-Dev/.worktrees/gp-deps`（分支 `gp-mcp-sdk`）。触发点是推主干时 GitHub 报的
+  两条 Dependabot 告警：`GHSA-mrhx-c7xc-m3w5`（zod 校验超限集合耗尽内存，high），两条都指根
+  `package-lock.json` 里的 `zod@3.25.76`——一条 `mcp-shell` 直接依赖，一条 `iterate-kernel@0.1.9` 传递。
+- 官方修复只在 **4.6.6**，3.x 不 backport。用户裁决"全修：清掉父仓两条告警"，所以这条链必须穿过
+  三个仓：内核（发 `iterate-kernel@0.1.10`）→ fork（catalog + pin）→ 面 A（直接依赖与锁）。
+- 归属实验另开一棵 **detached worktree** `gp-zod4-base`（`git worktree add --detach … HEAD`，装
+  4.1.8 + 0.1.9），不在正在迁移的树上动手——两棵树都装完再逐文件对，才知道红是谁带的。
+
+### 内核侧（iterate-skill `d14da4b2`，发 `iterate-kernel@0.1.10`）
+
+- 唯一真需要改的语义在一处：`SchemaErrorLike.path` 从 `(string | number)[]` 改成 `PropertyKey[]`，
+  配 `segmentText`。zod 4 把 issue path 标成 `PropertyKey[]`，而 `String(symbol)` 运行时**抛**——
+  schema 拒绝是这个包正常的"不行"，它不该在把"不行"说出口的那一刻崩。符号按 description 渲染，
+  无名符号写 `<symbol>` 而不是消失。新增 7 条用例驱动它（含把真 `ZodError` 递进渲染器那条）。
+- 金丝雀改成**对应关系**而不是钉死字符串：按声明的 major 选发射形状，并加一条 `doesNotMatch`——
+  一份 `.d.ts` 里同时出现两个 major 的发射，正是 resolver 与 package.json 不一致的形状，也是当初
+  schema 被静默类型成 `any` 的起点。三次变异各自具名红：渲染器退回 `String(segment)` ⇒
+  "a symbol in an issue path is rendered" 红；声明改 3.x 而发射仍是 4 ⇒ "matches neither the zod-3 emission"；
+  往声明里塞一份 3 的形状 ⇒ "emission from BOTH zod majors"。恢复一律用自带备份 + sha256 核回，
+  没有 `git checkout`/`git stash`。读数：234 → 241 条，全绿。
+
+### fork 侧（trunk，取号 0.10.4）
+
+- catalog `zod` 4.1.8 → **4.6.7**（4.6.7 发布于 2026-10-12，12 天，过 `minimum-release-age: 3 天`；
+  是闸允许的最新一行，不是随手取的最大号）；`packages/opencode` 的 `iterate-kernel` 0.1.9 → 0.1.10。
+- `kernel-pin.mjs --record` 的读数只有四行动（version / lockKey / integrity / recordedAt），
+  **26 份随包契约文件的 sha256 一字未变**。两份发布物逐目录对（`diff -rq` 0.1.9 vs 0.1.10 的 tarball）
+  同一答案：`schemas/`、`fixtures/` 完全相同，只有 `dist/*.d.ts` 的 strict-object 发射变成
+  `z.core.$strict`，加上 `dist/errors.js` 那一份刻意的运行时修复。换的是发光形状，不是判决。
+- `bun install --frozen-lockfile` 第一次在本机红在 `ghostty-web` 的 GitHub tarball
+  （`UNABLE_TO_VERIFY_LEAF_SIGNATURE`）——代理 MITM，老问题。按既定出路重导钥匙串 CA 束
+  （178 张）喂 `--cafile`，**没有**关校验。清空 `node_modules` 重装后：2901 包、`no changes`，
+  四个包 typecheck（opencode/tui/sdk-js/plugin）全 0 错，9 个固定点文件、TUI 快照、
+  `publish.ts --dry-run`、`kernel-pin --check`、`kernel-conformance` 全绿。
+  中途一次假红要说清：第一次 in-place 安装留下混合 store（zod 是 drizzle 的 peer，peer 哈希换了），
+  typecheck 报的是两份 `drizzle-orm` 的结构冲突——不是 zod 4 坏了，是树脏了；干净重装后同一批命令全绿。
+- 一条自己脚本的缺陷顺手修掉：replica 用步骤名当日志文件名，`sdk/js` 里的斜杠把输出指向一个不存在
+  的目录，那条 typecheck 其实**从没跑过**却回了 rc 1。改成把 `/` 换成 `_` 后单跑，rc 0。
+
+### 面 A（父仓根，`mcp-shell`）
+
+- 代码 **0 行改动**：它早就写成 v4 形状（`z.strictObject`），`z.ZodTypeAny` 在 4.x 的 compat 里还在。
+  把 devDependency `iterate-kernel` 一起追到 0.1.10 之后，`npm install` 报 `removed 1 package`，
+  锁里 `node_modules/zod` 只剩 **4.6.7** 一份——这才是那两条告警的终态判据，不是"manifest 改了"。
+- 读数：`tsc` 0 错，`node --test test/*.test.mjs` **620/620**，`npm run bundle` rc 0（8 份 schema
+  重捆），`scripts/check-kernel-corpus.mjs` 回 `26 corpus file(s) match the pin (iterate-kernel@0.1.10)`
+  且两条腿（本机装的 / 面 A 捆的）同号。
+- 唯一被量出来的行为差是**拒绝文案的措辞**：同一 schema、同一输入，`code` 与 `path` 逐字相同而
+  `message` 四条全变（`Required` → `Invalid input: expected string, received undefined`；
+  `Unrecognized key(s) in object: 'nope'` → `Unrecognized key: "nope"`）。全仓 grep（面 A / fork 子树 /
+  tools+specs+docs / iterate-skill 的 src+tools / iterate-plugin）对旧文案 **0 命中**——没有消费者按那句
+  话匹配，改的是代理读到的散文，不是协议。这条写在父仓 CHANGELOG 与这里，不写成"无影响"。
+
+### "82 条红不是我带的"——量出来的过程
+
+- 全量 `bun test`（packages/opencode）里 6 个文件共 82 条具名失败。两棵树同一组文件、隔离跑，
+  逐文件同数、pass 数也同数：
+  `transform 4/559`、`provider 16/94`、`plugin/install 15/6`、`session/prompt 36/40`、`project 8/32`、
+  `httpapi-provider 3/2`（BASE = 4.1.8+0.1.9，NEW = 4.6.7+0.1.10）。所以不是本轮带进来的。
+- 但形状要记：CI 只跑 9 个固定点文件，这 82 条**在 CI 里没有任何东西看得见**。这与本仓 2026-10-16
+  那次"测试写了而无人跑"是同一种缺陷，只是方向相反（跑得起、没人看）。留给下一轮判断，不冒充已修。
+
+### 本轮记在自己头上的那条事故
+
+- `git push … | tail` 的退出码是 `tail` 的。上一批就吃过一次，这次在同一个位置又吃：内核那笔
+  push 被 `pre-push` 闸拦下（`check: needs ruff==0.16.8 (found  on PATH, 0.16.3 in python3)`），
+  管道把 rc 洗成 0，于是 `&& npm publish` 照跑——**先发了 npm，主干还停在 0.1.9**，与
+  `docs/release.md` "先主干后发布"的顺序相反。
+- 补救按闸自己的 remedy 走，没有 `--no-verify`：`/usr/local/bin/python3 -m pip install --user ruff==0.16.8`
+  （pip 走 SOCKS 会 `Missing dependencies for SOCKS support`，用本仓 RELEASE.md 记的那条 `no_proxy`
+  覆盖索引主机绕过），再把 `~/Library/Python/3.11/bin` 放进 PATH，让 pre-push 用**它自己要求的版本**
+  跑通（`check: ruff 0.16.8 via 'ruff'` → All checks passed），push 成 `e24423ad..d14da4b2`。
+- 顺序颠倒的代价由产物级核对补平：下载已发布的 `iterate-kernel@0.1.10` tarball，
+  声明 `zod 4.6.7`、`z.core.$strict` 发射 72 处、v3 尾巴 `"strict", z.ZodTypeAny,` 0 处、
+  `segmentText` 在 `dist/errors.js` 的字节里，18 fixtures + 8 schemas 随包，54 份导出 schema 全部
+  拒得掉且路径可渲染（0 条渲染失败）——发布的字节与主干那笔提交要发的东西一致，且没跑过没跑过的东西。
+
+### 没跑与不做的
+
+- 第三方自己的两份 zod 仍在 `< 4.6.6` 里：`@modelcontextprotocol/sdk` 解析到 4.4.3、
+  `gitlab-ai-provider` 钉死 3.25.76。抬它们需要 `overrides`，那是替别人决定它没声明过的运行时形状，
+  本轮不做。
+- 父仓的这两条 Dependabot 告警要等 main 推上去后由 Dependabot 重扫才关；关没关按 API 读数说，不按"改了"说。
+- fork CI 的 `bun install` 那步依旧不在 tag 之前跑 `patched-deps`（产物级那条 lane 盖的是发布物）。
+- `engine`（Swift）与安装器这轮没动，因此没重跑；它们与本批无共享字节。
 ## 2026-10-23（第十六次会话）· 0.10.1：升级会静默摘掉 fork 补丁这件事，现在有一把能具名变红的尺子
 
 ### 开工与隔离
@@ -196,6 +286,50 @@ tool-surface 面 B 10233→10418 = `patched-deps.mjs` +139 与 `verify-published
   这两句摆在一起正是这条改动的全部意义：等过并且等到了，与首眼就问到了，是两种可以被区分的诚实读数；
   而"产物里有没有那份补丁"从今天起不再依赖任何人记得去数。
 
+### 同轮续二（跨到 10-24）：dompurify 的 critical 覆盖，以及"改了 manifest"与"字节过了线"的差
+
+在报"#24 那条 dependabot PR 由你们判断"之后回头把它量了一遍，结论反过来了：这条不是维护性升级。
+覆盖 `dompurify@3.4.16` 的是三条，其中 **GHSA-cg2g-xh64-v4q7 是 critical**（`>= 3.4.4, <= 3.4.16`）、
+GHSA-mrv2-3pqr-j5jr 是 high（`<= 3.4.16`），而 dompurify 是 `packages/ui`/`packages/session-ui` 的依赖
+——正是发布物里那个 embedded web app 的代码路径（每版都被 `the installed binary serves the embedded
+web app` 那一步跑着）。逐条把真版本号代入 GHSA 的 range 判，不抄汇总。
+
+PR 只提了两个 workspace 的 manifest。第三处在这个仓自己身上：`workspaces.catalog.dompurify` 钉的是
+**3.3.1**，也在 `<= 3.4.16` 里。它当下没有任何引用方（两处都写死版本），所以今天不构成暴露；但下一个
+写 `"dompurify": "catalog:"` 的包会静默拿到它——与本轮 MCP SDK 那件事同一族形状：危险不在声明本身，
+在"声明与解析之间没人看的那条路"。于是三处一起改，取 3.4.17（发布于 2026-10-12，11.5 天，过
+`minimum-release-age: 3 天`；不是"最新"而是"闸允许的最新"）。
+
+验收没写成"manifest 改了"，写成三条可判的事实：`bun.lock` 只解析 `dompurify@3.4.17`；两个 workspace 的
+`node_modules/dompurify` 链接都指向它；`--frozen-lockfile` 两次 "no changes"。中间这里自己判错了一次：
+`node_modules/.bun` 里还留着一条 `dompurify@3.4.16`，我的断言把它算成"高危副本还在装"——那是 bun 不回收
+store 留下的孤儿，产品加载不到。分清"链接指哪"与"缓存里剩什么"之后确认是孤儿并清掉，判据改成看链接。
+（同一族形状 `patched-deps` 早就防了：它对 store 里多出的未覆盖版本只打 `△` 不判红。）
+`ui`/`session-ui` 的 typecheck、各自测试与 web app 的 `bun run build` 全 rc 0；`patched-deps --check`
+仍 18/19；`product-surface` 报 0.10.3 一致。
+
+自己的取号脚本这次也咬到自己一口：它复用了上一版的段落文件当模板，只换了打印的号、没换正文里的标题号，
+于是 fork CHANGELOG 一度出现两个 `## [0.10.2]`，而脚本那句 "inserted above [0.10.2]" 是硬编码文案不是断言。
+修的时候用"重复标题必须恰好 2 个"作前置断言整段替换，标题序列回到 0.10.3 / 0.10.2 / 0.10.1 / 0.10.0；
+下一次这个脚本要把正文一起参数化，而不是靠我读输出。**教训：脚本宣布自己做了什么，必须是被断言出来的。**
+
+### 0.10.3 的三格（本轮实测）
+
+- 主干 → `68a0d29d`；split `15233afa`，`split^{tree}` 与主干子树逐字节相等，相对 `f8d2ed1a` 快进；
+  该 sha 的 fork CI 两格 success 之后才打 tag（这次两格跑得很快地绿了，判据是 conclusion 而不是等待时长）。
+- tag `v0.10.3` → `15233afa`；Release `isDraft=false`、6 件资产，两份 `.zip` 的 sha256 与 GitHub 为该
+  资产计算的 `digest` 逐字相等（arm64 46,412,106 B／x64 48,597,078 B——与 0.10.2 的
+  46,412,463 / 48,591,969 不同，说明换掉的依赖确实进了产物字节）；`SHA256SUMS.txt` 204 B、声明恰好两条。
+- npm 三包 0.10.3，**每个 npm job 自己打印的 shasum 与 registry `dist.shasum` 逐字相等**：
+  wrapper `7d98b11c…`、arm64 `397695fa…`、x64 `d9169e7f…`。
+- 发布 lane 在同一眼里给了三条读数：`the registry can read this published version — …0.10.3 answered
+  after 1 look(s), 1s of waiting`；`the published bytes carry the fork's MCP SDK patch — all 8
+  artifact-checkable item(s) present`；`the installed binary serves the embedded web app —
+  content-type=text/html doctype=true assets=referenced`。第三条是这次真正要的那句：dompurify 就活在这个
+  页面里，它换了版本，页面仍然按"有 doctype、引用打包资产"的形状服务。
+- dependabot PR #24（只改两个 manifest 的那条）在 main 落下 3.4.17 的同一分钟自己关闭
+  （02:17:44Z），与前一条 #23 同一种收场——不需要有人替它判断"要不要并"。
+
 ### 没跑与不做的
 
 - `packages/desktop` 的运行时行为：它不构建也不发布（`product.json` 明写是需要签名/公证账号的第二批），
@@ -216,6 +350,93 @@ tool-surface 面 B 10233→10418 = `patched-deps.mjs` +139 与 `verify-published
   记在这里而不是当成结论。
 - 没动 `install.sh` 的签名/公证通道，也没替并行线取父仓的号。
 
+### 同轮续三（10-24）：那条"没量过的假设"量了，半错
+
+- 「没跑与不做的」里那条被自己标成**没量过的假设**的话——1.32.0 的"重定向只在同源内跟随"在 loopback
+  端点上没有可观察差别——量了，半错。错在把规则读成只管源：`followWithinOrigin` 之外还有一道
+  "改动词就不跟"——实测五条（驱动 `packages/opencode` 解析到的那份安装产物，无自定义 `fetch`）：
+  1. 307/308 在同 host 同 port 内**被跟随**（POST 原样重发）；
+  2. 302 即使在源内**也被拒**，报 `Redirect to … not followed (redirectPolicy: 'same-origin')`——
+     跟随它会把 POST 降级成 GET，SDK 不擅自改 MCP 请求的动词；
+  3. 跨 port 的 307 **被拒**：127.0.0.1:51748 → 127.0.0.1:51749 就是跨源，"反正在 loopback"不是同源；
+  4. `redirectPolicy: 'follow'` 才退回"什么都跟"。
+  所以对 loopback 端点**有**可观察差别，而且差别的方向与那句写的相反：不是"更安全所以无所谓"，是
+  "该跟的（307/308 同 port）会跟，不该跟的（302）连源内都不跟"。这句话改写不了已发布的字节，
+  因此只在这里更正。
+- 新闸 `harness/tools/mcp-redirect-policy.mjs`（父仓侧，五条逐条具名）＋ `mcp-redirect-policy-selftest.mjs`
+  （26 条断言，本机 0 失败）。闸的定位是三条根扫描加 realpath 去重（`node_modules`、
+  `packages/*/node_modules`、`node_modules/.bun`），并要求加载的版本等于 `packages/opencode` 声明的那一个；
+  说不出"产品加载的是哪一份"时 exit 2 拒答而不是猜。电池里两条是**反过度反应**：软链与 store 里的字节
+  是同一份拷贝、不得判成"两份"；声明是范围时拒答而不是比较。闸的红也都验过：翻一条期望、让前置端点
+  直接答 initialize（"connected 却没碰过重定向目标"）、把重定向换成 500（拒绝必须自己说明是没跟随）、
+  以及把两条拒绝都改成宽松——四次各具名红。
+- 顺带抓到本仓自己的一条闸缺陷：`product-surface` 的 `selftest-wired` 靠一份**手抄名单**决定要检查哪些
+  自测，`patched-deps-selftest.mjs` 在树里、在 lane 里跑，却因为没被写进那份名单而完全不受这条规则约束
+  ——把它那条 step 删掉照样绿。名单改成 `harness/tools/*-selftest.(mjs|sh)` 的目录扫描，名单退成
+  "不得消失的名字"下限（8），而 `SCAN_SET_FLOORS.selftests` 那个一直写了没人读的数字第一次成了判据。
+- 本轮没有取号：新闸与自测都在 `harness/tools/`（父仓侧、subtree split 之外），fork 里只多了这段台账。
+  所以 `release-artifact` 的 `tag` 那格对此刻的读数应是 `△ artifact`（只多收口记录），
+  `split-main` 按 3b 再切一次搬运分支补平。本机这一小时 `objects.githubusercontent.com` 方向的
+  git 传输慢到触发低速中止（`curl 28`，两次，64 s 与 240 s 窗口各一次），`release-artifact` 因此
+  回答的是 exit 2「CANNOT MEASURE」而不是挂住——那正是 0.10.2 给它装的上限；CI 上没有这层代理，
+  终态以 CI 那格为准。
+### 0.10.4 的三格（本轮实测）
+
+- **主干与搬运**：`ca38f493..a1d76cb2` 推上 `jingzhao-l/GlassPane` main；`git subtree split` 得
+  `4e89855a`，`split^{tree}` = `c78896ce…` = `HEAD:harness/glasspane-harness`，相对远端 `af54a478`
+  是快进（1 笔）。该 sha 的 fork CI 两格 success，**核过可达才打 tag**。
+  打 tag 这步需要一个 `--no-sign`：这台机器的 profile 里 `tag.gpgSign=true`，裸 `git tag` 会去要注释
+  并在无 tty 下失败（`fatal: no tag message?`），而 `docs/release.md` 第 4 步要的是轻量 tag——
+  远端既有的 `v0.10.3` 指的也是 commit 而非 tag object。显式 `--no-sign` 而不是绕过钩子。
+- **Release**：`v0.10.4` → `4e89855a`，`isDraft=false`，6 件资产（arm64 46,449,817 B / x64 48,630,843 B，
+  各带 `.asc`，`SHA256SUMS.txt` 204 B + `.asc`）。`SHA256SUMS.txt` 声明的两条 sha256 与 GitHub 为该资产
+  算的 `digest` **逐字相等**（arm64 `adad5ce0…`、x64 `1019e459…`），且声明恰好两条。核对走 API 的
+  `digest` 与资产字节数，不靠本机重下（那条通道在本机代理下会被静默截断，2026-10 已记过）。
+- **npm**：dispatch run `40100191869`（`--ref v0.10.4 -f publish_npm=true -f confirm=true`；先试
+  `gh api …/dispatches` 带顶层 `-f` 被 422 拒——参数形状，不是权限）。三包发布成功，registry 的
+  `dist.shasum` 与发布时 npm 打印的 shasum 逐字相等：wrapper `dfa02149…`、arm64 `3de1d474…`、
+  x64 `152e42aa…`。
+
+### 同轮续（10-24）：那条 lane 连红两次，因为发布闸问的是元数据而安装要的是 tarball
+
+- 三格里最后一格（`install the published bytes and run them`）attempt 1 与 attempt 2 都红，报的是
+  `404 … /glasspane-harness-darwin-arm64-0.10.4.tgz`；attempt 3 通过。红期间我在这台机器上实测：
+  `npm view … darwin-arm64@0.10.4 version` 已经回 `0.10.4`（元数据可读），而同一个 tarball 的 URL
+  还是 404；等到 attempt 3 之前它回 200。也就是说第三次通过不是修好了什么，是那十五分钟过去了——
+  这正是 `registry-readiness` 这个文件当年被抽出来的同一个病，只是下沉了一层：
+  **元数据与 tarball 是两个对象。**
+- 修在闸上（`packages/opencode/script/`）：一次"问对了对象"的就绪判断＝元数据认识这个版本 →
+  元数据指向的 tarball URL → 那个 URL 真被服务；404 继续等，非 404 的失败仍算 `not-observed`
+  （exit 2），不把"这台机器问不成"说成"发布坏了"。要等的清单从**发布出去的 wrapper 的**
+  `optionalDependencies` 读回来，不拿 `product.json` 重算——要被服务的是安装器被告知去取的东西。
+  读不回清单或清单为空一律拒装（空清单不是"没有要等的东西"）。预算改成整套共享，因为每包各等
+  20 分钟会把 lane 拖到 runner 超时，而超时连判决都不留。
+- 因果都验过：`test/script/registry-readiness.test.ts` 11 → 19 条（注入时钟与 fetch，没有一条靠真等）。
+  三次变异各自具名红，恢复按 sha256 核回。最关键的那次——把 tarball 那几行删掉还原成改前行为——
+  4 条具名红，而"tarball 已被服务"那条**照绿**，这一对恰好证明那 4 条不是同一条红的四种化装；
+  我第一版电池把这条期望的符号写反了（把"应当照绿"写成"必须红"），当场按实测改回。
+- fork CI 的十步副本（frozen install、四个包 typecheck、9 个固定点、TUI 快照、publish dry-run、
+  kernel-pin、kernel-conformance）在这份改动后全 0；因此取号 **0.10.5**——又是那条等式：
+  动的是 `packages/opencode/script/` 里的字节，不是一行台账。
+### 0.10.5 的三格（本轮实测，含那条修好的 lane 的第一次真机读数）
+
+- **主干与搬运**：`a1d76cb2..0c2bafb3` 推上 main；`git subtree split` 得 `fae12a4b`，
+  `split^{tree}` 与 `HEAD:harness/glasspane-harness` 相等，相对远端 `4e89855a` 快进 1 笔；
+  该 sha 的 fork CI 两格 success，核过可达才打 tag（`v0.10.5` → `fae12a4b`，`--no-sign`，理由见上一段）。
+- **Release**：`isDraft=false`，6 件资产；`SHA256SUMS.txt` 204 B 声明恰好两条，且与 GitHub 为这两件
+  资产算的 `digest` 逐字相等（arm64 `0a8e98af…` / 46,452,175 B，x64 `52195b9e…` / 48,631,619 B）。
+- **npm**：dispatch run `40102615950`，**attempt 1 全部 job success**——包括 0.10.4 需要第三次 attempt
+  才过去的那条 `install the published bytes and run them`。三包 registry `dist.shasum` 与发布时 npm
+  打印的逐字相等：arm64 `b25ff4a8…`、x64 `82a59810…`、wrapper `52b61654…`。
+- **这次修好的那条 lane 自己说了什么**（它第一次在真机上按三连问回答，读数照抄）：
+  `the registry can read this published version — glasspane-harness@0.10.5 answered after 1 look(s), 1s`
+  与 `the registry serves every platform package this install will pull — 2 package(s):
+  glasspane-harness-darwin-x64@0.10.5 in 1 look(s), 0s; glasspane-harness-darwin-arm64@0.10.5 in
+  1 look(s), 1s`。同一份日志里产物级那条仍然说话：
+  `all 8 artifact-checkable item(s) present in glasspane-harness.exe (145,741,922 bytes read)`。
+  对照上一版：0.10.4 的两次红不是产物坏，是这道闸问错了对象——本版第一次让它问对，一次就过。
+- **3b**：这段台账在 fork 前缀内，所以搬运分支再切一次（不消耗版本号），`release-artifact` 的
+  `split-main` 那格才允许在新 tip 上绿；`tag` 那格对本版收口记录的差以 `△` 点名。
 ## 2026-10-22（第十五次会话）· 0.10.0：provider 契约有了产品侧消费者，发布 lane 学会等 registry；场景① 的通道第二次"看着有、其实跑不到"
 
 ### 开工与隔离

@@ -28,7 +28,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import product from "../../../product.json"
-import { waitForRegistryVersion } from "./registry-readiness"
+import { REGISTRY_READINESS_BUDGET_MS, servedProbe, waitForRegistryVersion } from "./registry-readiness"
 
 // `--prefix` is a flag with a value, so it must not be read as the version. Everything
 // positional that is not the flag's argument is the version, and a second one is refused:
@@ -146,37 +146,60 @@ try {
     // processed and may take a few minutes to become available"; measured 12–20 min here). The
     // artifact was fine: that version installs today and its registry `dist.shasum` matches what CI
     // printed. "The previous job succeeded" is not the same claim as "this registry can serve it".
-    const readiness = await waitForRegistryVersion({
-      pkg: product.name,
-      version,
-      registry,
-      probe: async () => {
-        const look = await $`npm view ${product.name}@${version} version --registry ${registry}`
-          .nothrow()
-          .quiet(true)
-        const answer = npmAnswer(look.exitCode, look.stdout.toString(), look.stderr.toString())
-        if (answer.state === "answered") return answer.value
-        // `absent` is the registry saying "not yet" about a fresh publish; `unaskable` is this
-        // machine failing to ask, and the two must not be conflated — same split the file makes
-        // for a 404 versus a proxy.
-        if (answer.state === "absent") return undefined
-        throw new Error(answer.value)
-      },
-      now: () => Date.now(),
-      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-      note: (line) => console.log(`  waiting on the registry: ${line}`),
-    })
-    if (!readiness.ok) {
-      cannotObserve(
-        "the registry can read this published version",
-        `${product.name}@${version} never became readable from ${registry} within ${Math.round(readiness.waitedMs / 60000)} min across ${readiness.attempts} look(s)${readiness.lastTransportError ? `; the last one failed to ask: ${readiness.lastTransportError}` : "; the registry kept answering that the version is not there yet"}`,
-      )
+    // One look at one package, ordered by `servedProbe`: metadata knows the version → the metadata
+    // names a tarball → that tarball is actually served. The budget is shared across the whole set
+    // (a 20-minute wait per package would turn one lagging CDN into a job that ends in a runner
+    // timeout, and a timeout leaves no verdict at all — see harness/tools/release-artifact.mjs).
+    const viewField = async (pkg: string, ver: string, field: string): Promise<string | undefined> => {
+      const look = await $`npm view ${pkg}@${ver} ${field} --registry ${registry}`.nothrow().quiet(true)
+      const answer = npmAnswer(look.exitCode, look.stdout.toString(), look.stderr.toString())
+      // `absent` is the registry saying "not yet" about a fresh publish; `unaskable` is this machine
+      // failing to ask, and the two must not be conflated — same split the file makes for a 404
+      // versus a proxy.
+      if (answer.state === "answered") return answer.value
+      if (answer.state === "absent") return undefined
+      throw new Error(answer.value)
+    }
+    const headStatus = async (url: string): Promise<number> => {
+      const response = await fetch(url, { method: "HEAD" })
+      // A CDN that refuses HEAD still has to answer a one-byte ranged GET, which is the same object.
+      if (response.status === 405) return (await fetch(url, { headers: { range: "bytes=0-0" } })).status
+      return response.status
+    }
+    const deadline = Date.now()
+    const serveWait = (pkg: string, ver: string) =>
+      waitForRegistryVersion({
+        pkg,
+        version: ver,
+        registry,
+        probe: servedProbe({
+          pkg,
+          version: ver,
+          readVersion: () => viewField(pkg, ver, "version"),
+          readTarballUrl: () => viewField(pkg, ver, "dist.tarball"),
+          fetchStatus: headStatus,
+        }),
+        budgetMs: Math.max(60_000, REGISTRY_READINESS_BUDGET_MS - (Date.now() - deadline)),
+        now: () => Date.now(),
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        note: (line) => console.log(`  waiting on the registry: ${pkg} — ${line}`),
+      })
+    function notServed(label: string, detail: string): never {
+      cannotObserve(label, detail)
       console.error(
         `verify-published: ${unobserved.length} check(s) could not be observed — NOTHING is concluded about the artifact, and this is not a pass`,
       )
       console.error("  the install was NOT attempted, so no claim is made about the bytes; re-run once the registry catches up")
       if (ownPrefix) rmSync(prefix, { recursive: true, force: true })
       process.exit(2)
+    }
+
+    const readiness = await serveWait(product.name, version)
+    if (!readiness.ok) {
+      notServed(
+        "the registry can read this published version",
+        `${product.name}@${version} never became readable from ${registry} within ${Math.round(readiness.waitedMs / 60000)} min across ${readiness.attempts} look(s)${readiness.lastTransportError ? `; the last one failed to ask: ${readiness.lastTransportError}` : "; the registry kept answering that the version is not there yet"}`,
+      )
     }
     // The observation is named whether or not it had to wait. Printing only
     // `ok npm install of the published package` left no record in a green log that the registry
@@ -188,6 +211,50 @@ try {
       "the registry can read this published version",
       readiness.seen === version,
       `${product.name}@${readiness.seen} answered after ${readiness.attempts} look(s), ${Math.round(readiness.waitedMs / 1000)}s of waiting, from ${registry}`,
+    )
+
+    // …and the wrapper is NOT the install. `postinstall` resolves one of the wrapper's own
+    // optionalDependencies for this host, and on v0.10.4 the wrapper's metadata was readable after
+    // 21 s while npm still 404'd `glasspane-harness-darwin-arm64-0.10.4.tgz` — the job died on
+    // `npm install of the published package`, twice, and the third attempt passed only because the
+    // CDN had caught up in the meantime. The list is read back from the published wrapper rather
+    // than re-derived from `product.json`, because what has to be served is what the installer was
+    // told to fetch, not what this tree believes it declared.
+    const declared = await $`npm view ${product.name}@${version} optionalDependencies --json --registry ${registry}`
+      .nothrow()
+      .quiet(true)
+    let pulls: Array<[string, string]>
+    try {
+      const parsed: unknown = JSON.parse(declared.stdout.toString() || "null")
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object")
+      pulls = Object.entries(parsed as Record<string, unknown>).map(([name, range]) => [name, String(range)])
+    } catch (cause) {
+      notServed(
+        "the platform packages this install will pull",
+        `${product.name}@${version} optionalDependencies could not be read back from ${registry} (rc=${declared.exitCode}; ${String(cause).split("\n")[0]}) — refusing to install blind is the point: the release that died, died on one of these`,
+      )
+    }
+    if (pulls.length === 0) {
+      notServed(
+        "the platform packages this install will pull",
+        `the published ${product.name}@${version} declares NO optionalDependencies, so this gate cannot name the package the installer will fetch — an empty list is not "nothing to wait for"`,
+      )
+    }
+    const served: string[] = []
+    for (const [name, want] of pulls) {
+      const one = await serveWait(name, want)
+      if (!one.ok) {
+        notServed(
+          "the registry serves every platform package this install will pull",
+          `${name}@${want} was still not served by ${registry} after ${one.attempts} look(s), ${Math.round(one.waitedMs / 1000)}s (${served.join("; ") || "none of the others had to wait"})${one.lastTransportError ? `; the last look failed to ask: ${one.lastTransportError}` : ""} — the wrapper alone installing is not the artifact`,
+        )
+      }
+      served.push(`${name}@${one.seen} in ${one.attempts} look(s), ${Math.round(one.waitedMs / 1000)}s`)
+    }
+    check(
+      "the registry serves every platform package this install will pull",
+      pulls.length === served.length && served.every((line) => line.includes(`@${version}`)),
+      `${pulls.length} package(s): ${served.join("; ")}`,
     )
     // `-g --prefix`, not a bare `--prefix`: a local install creates **no** bin links,
     // so "is the command there?" would fail for a reason that has nothing to do with the
