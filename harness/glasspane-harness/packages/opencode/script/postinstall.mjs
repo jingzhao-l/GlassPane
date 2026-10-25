@@ -230,13 +230,28 @@ function copyBinary(source, target) {
   fs.chmodSync(target, 0o755)
 }
 
-function verifyBinary() {
+/**
+ * The install has to prove it got *this* build, not merely "a binary that runs".
+ *
+ * `--version` exiting 0 used to be the whole check, so a platform package holding an older or
+ * mislabelled binary installed green and every later claim about "the version you just installed"
+ * was about bytes nobody compared. Both other channels already do this: `script/build.ts`'s smoke
+ * test fails when the answer differs from the build's own version, and `scripts/install.sh` refuses
+ * when the installed command reports something other than the release it asked for. This was the
+ * one channel left asserting nothing — and it is the one that runs on every user's machine.
+ */
+function verifyBinary(expectedVersion) {
   const result = childProcess.spawnSync(targetBinary, ["--version"], {
     encoding: "utf8",
-    stdio: "ignore",
+    stdio: ["ignore", "pipe", "ignore"],
     windowsHide: true,
   })
-  return result.status === 0
+  if (result.status !== 0) return { ok: false, detail: `--version exited ${result.status}` }
+  const got = (result.stdout ?? "").trim().split("\n")[0].trim()
+  if (got !== expectedVersion) {
+    return { ok: false, detail: `--version answers ${JSON.stringify(got)}, this package declares ${JSON.stringify(expectedVersion)}` }
+  }
+  return { ok: true, detail: got }
 }
 
 function main() {
@@ -252,19 +267,31 @@ function main() {
     throw new Error(`glasspane-harness does not ship a build for your platform (${machineLabel()}). ${supported}`)
   }
 
+  const expected = packageJson.version
+  // What each candidate actually answered, kept so the final refusal can name the observation
+  // instead of blaming the package manager for something it may have delivered correctly.
+  const seen = []
   for (const name of names) {
     try {
       copyBinary(resolveBinary(name), targetBinary)
-      if (verifyBinary()) return
-    } catch {
-      if (installPackage(name) && verifyBinary()) return
+      const check = verifyBinary(expected)
+      if (check.ok) return
+      seen.push(`${name}: ${check.detail}`)
+    } catch (error) {
+      if (installPackage(name)) {
+        const check = verifyBinary(expected)
+        if (check.ok) return
+        seen.push(`${name}: ${check.detail}`)
+      } else {
+        seen.push(`${name}: not installable here (${error instanceof Error ? error.message : "unknown failure"})`)
+      }
     }
   }
 
   throw new Error(
     `It seems your package manager failed to install the right glasspane-harness CLI package. Try manually installing ${names
       .map((name) => JSON.stringify(name))
-      .join(" or ")}.`,
+      .join(" or ")}.${seen.length === 0 ? "" : `\nWhat this run observed: ${seen.join("; ")}`}`,
   )
 }
 
