@@ -609,6 +609,22 @@ if (golden.productFiles !== observed.productFiles) {
 if (!Array.isArray(golden.docFiles) || golden.docFiles.join("\u0000") !== DOC_FILES.join("\u0000")) {
   problems.push(`doc-file scan set moved: the golden records ${JSON.stringify(golden.docFiles)} and this run reads ${JSON.stringify(DOC_FILES)} — a README that leaves this list stops being judged line by line, and only the tree-wide bloodline count would notice, which is the backstop this file's own history says cannot replace the named rule`)
 }
+// The rule set is asserted, not only its hits — mirroring `surface-semantics.mjs:297-300`, which
+// compares the live RULES ids against the recorded ones. Without this, deleting an entry from the
+// RULES array above makes that rule's hits simply disappear from `observed.hits`, and the loop
+// below — which iterates OBSERVED hits — has nothing left to complain about: the gate prints
+// green over a ruler that lost a mark. Same shape as the `productFiles` reader this file was
+// fixed for on 2026-10-19.
+const ruleIds = observed.rules.map((rule) => rule.id).join(", ")
+const goldenIds = (golden.rules ?? []).map((rule) => rule.id).join(", ")
+if (!goldenIds) problems.push("the golden records no rules at all — an empty record clears every rule without checking one")
+else if (goldenIds !== ruleIds) problems.push(`the rule set no longer matches the record: golden [${goldenIds}] vs code [${ruleIds}]`)
+// The same failure seen from the golden's side, named per rule: a recorded rule that observed
+// this run did not scan under is zero-scan, and "zero scans" is the sound a deleted rule makes.
+for (const r of golden.rules ?? []) {
+  if (!observed.rules.some((o) => o.id === r.id))
+    problems.push(`rule ${r.id}: the golden records it, this run scanned zero files with it — a deleted or renamed rule must not read as a clean tree`)
+}
 for (const hit of observed.hits) {
   const prior = golden.hits?.find((h) => h.file === hit.file && h.rule === hit.rule)
   if (!prior) problems.push(`${hit.file}: ${hit.rule} ×${hit.count} is new (no baseline)`)

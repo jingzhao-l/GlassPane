@@ -175,7 +175,11 @@ mustGoRed(
 )
 
 // 8. fork-diff: the detail guards used to compare two fields of one object; prove they read the
-// golden now by emptying the golden's hash list and leaving its name list intact.
+// golden now by emptying the golden's hash list and leaving its name list intact. The needle is
+// the substring BOTH lane wordings share — clone-present prints "carries content hashes for only
+// N" (fork-diff:405) and the offline lane prints "carries content hashes for N" (fork-diff:208,
+// no "only"). Pinning the "only" form alone false-reds this battery on a machine without
+// `.external/opencode`, where control 8 legitimately drives the offline lane.
 mustGoRed(
   "harness/contracts/fork-diff.json",
   "fork-diff: a golden whose hash list was stripped is red",
@@ -183,8 +187,42 @@ mustGoRed(
   "harness/tools/fork-diff.mjs",
   ["--check"],
   1,
-  ["carries content hashes for only 0"],
+  ["edited file(s) but carries content hashes for"],
 )
+
+// 8b. the offline lane, driven legitimately rather than asserted from source text: fork-diff
+// reads its reference path from `harness/upstream.json` → fork.referenceClone (fork-diff:52),
+// so pointing that existing knob at a non-existent directory IS the no-clone condition on a
+// clone-present machine. With the golden's hash list also emptied, the offline detail guard
+// (fork-diff:207-208) must die with its OWN wording — "this lane has nothing meaningful to
+// check", a string that exists nowhere in the clone-present lane — which also proves the lane
+// that ran was the offline one.
+{
+  const knobRel = "harness/upstream.json"
+  const goldenRel = "harness/contracts/fork-diff.json"
+  const knobAbs = path.join(repoRoot, knobRel)
+  const goldenAbs = path.join(repoRoot, goldenRel)
+  const knobOriginal = readFileSync(knobAbs)
+  const goldenOriginal = readFileSync(goldenAbs)
+  const knobBefore = sha(knobOriginal)
+  const goldenBefore = sha(goldenOriginal)
+  const started = failures.length
+  try {
+    writeFileSync(knobAbs, json(knobOriginal.toString("utf8"), (u) => (u.fork.referenceClone = ".external/rulers-selftest-no-such-clone")))
+    writeFileSync(goldenAbs, json(goldenOriginal.toString("utf8"), (g) => (g.editedDetail = [])))
+    const got = run("harness/tools/fork-diff.mjs", ["--check"])
+    if (got.rc !== 1) bad(`8b: fork-diff's offline lane exited ${got.rc}, expected 1\n${got.text.slice(0, 800)}`)
+    for (const needle of ["reference clone absent", "edited file(s) but carries content hashes for", "this lane has nothing meaningful to check"]) {
+      if (!got.text.includes(needle)) bad(`8b: exited ${got.rc} but never named "${needle}" — the offline detail guard did not fire under its own name\n${got.text.slice(0, 800)}`)
+    }
+    if (failures.length === started) ok("8b: fork-diff: upstream.json's referenceClone knob reaches the offline lane and its detail guard goes red by name")
+  } finally {
+    writeFileSync(knobAbs, knobOriginal)
+    writeFileSync(goldenAbs, goldenOriginal)
+    if (sha(readFileSync(knobAbs)) !== knobBefore) bad(`8b: RESTORE FAILED — ${knobRel} is not the byte sequence this control found`)
+    if (sha(readFileSync(goldenAbs)) !== goldenBefore) bad(`8b: RESTORE FAILED — ${goldenRel} is not the byte sequence this control found`)
+  }
+}
 
 // 9-10. the reference clone is read as upstream's bytes; an edited or dirty clone must stop the
 // measurement, not silently attribute the local edit to upstream.
@@ -316,6 +354,42 @@ mustGoRed(
     }
   }
 }
+
+// 15. brand-surface: the RULES array itself must have a reader. Deleting an entry makes its hits
+// simply stop existing, and the hit loop in `--check` iterates OBSERVED hits against the golden —
+// a vanished rule is invisible to it, so the gate printed green over a ruler that lost a mark
+// (the same "recorded field no line of code reads back" shape as control 1, one layer up). The
+// rule-set comparison (mirrored from surface-semantics:297-300) plus the per-rule zero-scan
+// report must name the deletion.
+mustGoRed(
+  "harness/tools/brand-surface.mjs",
+  "brand-surface: a rule deleted from RULES is red",
+  (text) => {
+    const block = /\n  \{\n    id: "upstream-registry",\n    [\s\S]*?\n  \},/.exec(text)
+    return block ? text.replace(block[0], "") : text
+  },
+  "harness/tools/brand-surface.mjs",
+  ["--check"],
+  1,
+  ["the rule set no longer matches the record", "rule upstream-registry: the golden records it, this run scanned zero files with it"],
+  ["no unrecorded brand drift"],
+)
+
+// 16. product-surface's selftest-wired rule: a step that only NAMES a fixed-point test must not
+// count as wiring it. The rule used to be `corpus.includes(basename)` over whole step bodies, so
+// an `echo` or a remedy string holding the path satisfied "a selftest nobody runs is not a
+// control" — the wiring degraded to prose. This mutates ci.yml's kernel-pin step from `node …`
+// to `echo …`: the basename is still on the line, the invocation is gone, and the rule must say
+// so by name.
+mustGoRed(
+  ".github/workflows/ci.yml",
+  "product-surface: an echo-only step is not wiring",
+  (text) => text.replace("node harness/tools/kernel-pin-selftest.mjs", "echo harness/tools/kernel-pin-selftest.mjs"),
+  "harness/tools/product-surface.mjs",
+  ["--check"],
+  1,
+  ["[selftest-wired] harness/tools/kernel-pin-selftest.mjs is invoked by NO workflow step"],
+)
 
 if (git("status", "--porcelain").split("\n").filter((l) => l && !l.startsWith("??")).length > 0) {
   bad("closure: the battery left tracked files modified in the worktree:\n" + git("status", "--porcelain"))

@@ -437,8 +437,11 @@ function build(golden) {
   // (measured 2026-10-16: B 8,275 → 0 LOC pushed A from 21.66% to 26.63% at an unchanged
   // 9,609 LOC), so when a measured set comes back empty the ratio is reported as *not
   // measured* instead of as a number two runs can compare.
-  const unmeasured =
-    fork.files.length === 0 ? "surface B measured 0 file(s)" : surfaceAFiles.length === 0 ? "surface A measured 0 file(s)" : null
+  // Surface A's and the engine's emptiness are already refused at :110-111 (exit 2, before any
+  // ratio exists), and `surfaceAFiles` is a const that nothing reassigns — so the only empty
+  // set this can ever describe is surface B's. The previous middle branch ("surface A measured
+  // 0 file(s)") was unreachable code posing as a refusal.
+  const unmeasured = fork.files.length === 0 ? "surface B measured 0 file(s)" : null
   const ratio = (n) => (unmeasured ? null : Math.round((n / denom) * 10000) / 10000)
   return {
     limit: LIMIT,
@@ -503,10 +506,14 @@ if (golden && mode === "check") {
 
 const observed = build(golden)
 
-const percentageRefusal =
-  observed.surfaces.fork.files.length === 0
-    ? "surface B measured 0 file(s), so it contributes nothing to the denominator and surface A's share would move on its own code doing nothing"
-    : "surface A measured 0 file(s)"
+// The only measured set whose emptiness can reach a refusal here is surface B's: surface A and
+// the engine are refused at :110-111 (exit 2) before any ratio is built, and both readers of
+// this string (`show` and the not-comparable check below) only print it when a ratio is
+// non-finite, which `build()` makes equivalent to `fork.files.length === 0`. The old else-arm
+// — "surface A measured 0 file(s)" — was a refusal string no reachable run could print
+// truthfully; on every healthy run it evaluated to a statement that this lane had measured
+// nothing, sitting one code move away from being printed.
+const percentageRefusal = "surface B measured 0 file(s), so it contributes nothing to the denominator and surface A's share would move on its own code doing nothing"
 
 /**
  * How many files the surface actually measured, versus how many the record says it

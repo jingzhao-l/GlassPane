@@ -978,6 +978,16 @@ const SELFTESTS = [
     runnable.push(`${rel}=${JSON.stringify(scripts ?? {})}`)
   }
   const corpus = runnable.join("\n")
+  // A MENTION is not a wiring. `corpus.includes(path.basename(rel))` over whole step bodies was
+  // satisfied by an `echo` of the filename or a remedy string naming it — the same "mentioned ≠
+  // run" mistake this block strips YAML comments for. The basename must sit as an operand of an
+  // actual invocation: `node`/`bun run`/`bash`/`sh`, whitespace, then a path token ending in it.
+  const invocationRe = (name) => new RegExp(`\\b(?:node|bun run|bash|sh)\\s+\\S*${name.replace(/[.*+?^${}()|[\]\\\-]/g, "\\$&")}(?![\\w.\\-])`)
+  const corpusLines = corpus.split("\n")
+  const isInvoked = (rel) => {
+    const re = invocationRe(path.basename(rel))
+    return corpusLines.some((line) => re.test(line))
+  }
   check("scan-set", runnable.length >= SCAN_SET_FLOORS.workflows, `the selftest-wiring scan read ${runnable.length} runner file(s); floor is ${SCAN_SET_FLOORS.workflows} (root + fork workflows, root + fork package.json scripts) — a workflow directory that stops resolving turns every wiring assertion below into "not referenced" noise, so name the scan set first`)
 
   // The walk that decides what must be wired: the tools directory itself, not the list above. A
@@ -1005,8 +1015,8 @@ const SELFTESTS = [
     check("selftest-wired", existsSync(abs), `${rel} is not in the tree — a ruler's fixed-point test that was deleted still has a lane that is believed to run it`)
     check(
       "selftest-wired",
-      corpus.includes(path.basename(rel)),
-      `${rel} is referenced by NO workflow step and NO package.json script in this repository — a selftest nobody runs cannot go red, so it is not a control (see 闸自己被验过吗 in harness/README.md). Wire it: add a step to .github/workflows/ci.yml's \`harness-rulers\` job (or the fork's ci.yml for anything that must run inside the subtree), then this rule is satisfied by the running, not by a sentence in a doc.`,
+      isInvoked(rel),
+      `${rel} is invoked by NO workflow step and NO package.json script in this repository — a selftest nobody runs cannot go red, so it is not a control (see 闸自己被验过吗 in harness/README.md). A step that only names or echoes the file does not count: the basename must be an operand of node/bash/sh/bun run. Wire it: add a step to .github/workflows/ci.yml's \`harness-rulers\` job (or the fork's ci.yml for anything that must run inside the subtree), then this rule is satisfied by the running, not by a sentence in a doc.`,
     )
   }
 }

@@ -238,10 +238,12 @@ jobs:
   # 被人用。尺子必须和 fork 同仓（harness/README.md 开篇即此意），这条 lane 是
   # 「尺子丢了」这件事的报警器。
   #
-  # 不装上游参照检出（.external/opencode，223 MB）：fork-diff 与 tool-surface 在
-  # 没有参照时仍核我们这一侧，并如实打印「上游未在此观测」；hook-liveness 走
-  # --offline，只做金样自洽并声明未观测上游。整包构建 >10 分钟且需要一张本机才有的
-  # 拦截根证书，不进 CI——闸是按包的固定点测试 + 这几把尺子。
+  # 这条 lane 会装上游参照检出：下面 "Fetch the pinned upstream reference clone"
+  # 一步按 pinned tag `--depth 1` 克隆 .external/opencode，fork-diff 与 tool-surface
+  # 因此都在全量测量（逐文件 blob 比对 + 纯改名识别）而不是离线自证；hook-liveness
+  # 走 --check 观测上游。离线形态（fork-diff 只核我们这一侧、hook-liveness
+  # --offline）是无参照本地跑的诚实降级，不是这条 lane 的行为。整包构建 >10 分钟且
+  # 需要一张本机才有的拦截根证书，不进 CI——闸是按包的固定点测试 + 这几把尺子。
   harness-rulers:
     name: harness rulers (divergence, surfaces, branding, kernel provenance)
     runs-on: ubuntu-latest
