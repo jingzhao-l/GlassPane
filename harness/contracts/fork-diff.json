@@ -3710,7 +3710,7 @@
     },
     {
       "file": "CHANGELOG.md",
-      "forkHash": "5e6543f4582c530b8b0caf7e09c9c037cde6f592"
+      "forkHash": "7ac52a2c7666a487789af2987bb789668eb4edf0"
     },
     {
       "file": "contracts/engine-methods.json",
@@ -3742,7 +3742,7 @@
     },
     {
       "file": "docs/kernel-integration.md",
-      "forkHash": "0ee0d87e19268dd6798e17a0436027e13e903ac8"
+      "forkHash": "b454963ff682da6aaf79bb916d0aebab332a0617"
     },
     {
       "file": "docs/migrate-from-opencode.md",
@@ -3938,7 +3938,7 @@
     },
     {
       "file": "SYNCLOG.md",
-      "forkHash": "7018d42096515d37398bf8aa283fe37fcc11ad02"
+      "forkHash": "cb2654853e983fecdc1b1ceda7676886e3b19b7f"
     }
   ]
 }
